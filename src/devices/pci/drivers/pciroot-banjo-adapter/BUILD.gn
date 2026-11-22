@@ -56,7 +56,6 @@ fuchsia_driver_component("pciroot-banjo-adapter-component") {
     ":pciroot-banjo-adapter-bind",
     ":pciroot-banjo-adapter-driver",
   ]
-  info = "meta/pciroot-banjo-adapter-info.json"
 }
 
 group("component") {

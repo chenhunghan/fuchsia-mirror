@@ -37,8 +37,8 @@ fn make_request(peer_id: Option<PeerId>) -> AddressLookupLookupRequest {
 async fn get_address_of_peer() {
     // Create mock host dispatcher
     let hd = host_dispatcher::test::make_simple_test_dispatcher();
-    hd.on_device_updated(peer(PeerId(1), Address::Public([1, 2, 3, 4, 5, 6]))).await;
-    hd.on_device_updated(peer(PeerId(2), Address::Random([6, 5, 4, 3, 2, 1]))).await;
+    hd.on_device_updated(peer(PeerId(1), Address::Public([1, 2, 3, 4, 5, 6])));
+    hd.on_device_updated(peer(PeerId(2), Address::Random([6, 5, 4, 3, 2, 1])));
 
     let (client, stream) = endpoints::create_proxy_and_stream::<AddressLookupMarker>();
     let server_task = address_lookup::run(hd.clone(), stream);

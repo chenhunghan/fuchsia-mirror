@@ -13,6 +13,7 @@ fidl_library(
     enable_hlcpp = True,
     excluded_checks = ["string-bounds-not-specified"],
     visibility = [
+        "//src/lib/fostr/build/tests:__pkg__",
         "//src/lib/fostr/fidl/fuchsia.example.fostr:__pkg__",
         "//src/lib/fostr/test/fuchsia.example.fostr2:__pkg__",
     ],

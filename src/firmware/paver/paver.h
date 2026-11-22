@@ -84,7 +84,7 @@ class Paver : public fidl::WireServer<fuchsia_paver::Paver> {
 };
 
 // Common shared implementation for DataSink and DynamicDataSink. Necessary to work around lack of
-// "is-a" relationship in llcpp bindings.
+// "is-a" relationship in C++ wire bindings.
 class DataSinkImpl {
  public:
   DataSinkImpl(BlockDevices devices, std::unique_ptr<DevicePartitioner> partitioner)
@@ -100,7 +100,7 @@ class DataSinkImpl {
 
   zx::result<> WriteSparseVolume(fuchsia_mem::wire::Buffer payload);
 
-  // FIDL llcpp unions don't currently support memory ownership so we need to
+  // FIDL wire unions don't currently support memory ownership so we need to
   // return something that does own the underlying memory.
   //
   // Once unions do support owned memory we can just return

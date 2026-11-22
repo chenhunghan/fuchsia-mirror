@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
@@ -67,6 +68,11 @@ fx_component(
     compiled_manifest = ":manifest",
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "bt-peripheral-hub",
+    components = [":component"],
 )
 
 rustc_test(

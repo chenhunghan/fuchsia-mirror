@@ -39,7 +39,6 @@ _INPUT_ARGS: dict[str, Any] = {
         subtools_search_path=_SUBTOOLS_SEARCH_PATH,
         proxy_timeout_secs=_PROXY_TIMEOUT_SECS,
         ssh_keepalive_timeout=_SSH_KEEPALIVE_TIMEOUT,
-        emu_instance_dir=os.path.join(_LOGS_DIR, "emu"),
         ssh_private_keys=[],
         ssh_public_keys=[],
         ssh_auth_sock=None,
@@ -279,7 +278,6 @@ class FfxConfigTests(unittest.TestCase):
             subtools_search_path=_SUBTOOLS_SEARCH_PATH,
             proxy_timeout_secs=_PROXY_TIMEOUT_SECS,
             ssh_keepalive_timeout=_SSH_KEEPALIVE_TIMEOUT,
-            emu_instance_dir=None,
             ssh_private_keys=[],
             ssh_public_keys=[],
             ssh_auth_sock="/tmp/ssh_auth_sock",
@@ -303,6 +301,10 @@ class FfxConfigTests(unittest.TestCase):
                 "usb_driver_autostart": _USB_DRIVER_AUTOSTART,
             },
         }
+        self.assertEqual(
+            ffx_config_data.get_config_dict(),
+            expected_config_dict,
+        )
         self.assertEqual(
             ffx_config_data.get_config_args(),
             ["-c", json.dumps(expected_config_dict)],
@@ -415,114 +417,3 @@ class FfxConfigTests(unittest.TestCase):
         )
         config = ffx_config_obj.get_config()
         self.assertEqual(config.shared_data, _LOGS_DIR)
-
-    @mock.patch.dict(
-        "honeydew.transports.ffx.config.os.environ",
-        {"FUCHSIA_FFX_EMU_INSTANCE_DIR": "/env/emu/instances"},
-    )
-    def test_setup_emu_instance_dir_explicit(self) -> None:
-        """Test case for FfxConfig.setup(emu_instance_dir=...) explicit override"""
-        ffx_config_obj = ffx_config.FfxConfig()
-        ffx_config_obj.setup(
-            binary_path=_BINARY_PATH,
-            logs_dir=_LOGS_DIR,
-            logs_level=_LOGS_LEVEL,
-            enable_mdns=_MDNS_ENABLED,
-            enable_usb=_ENABLE_USB,
-            emu_instance_dir="/explicit/emu/instances",
-        )
-        config = ffx_config_obj.get_config()
-        self.assertEqual(config.emu_instance_dir, "/explicit/emu/instances")
-
-    @mock.patch.dict(
-        "honeydew.transports.ffx.config.os.environ",
-        {"FUCHSIA_FFX_EMU_INSTANCE_DIR": "/env/emu/instances"},
-    )
-    @mock.patch(
-        "honeydew.transports.ffx.config.os.path.exists",
-        return_value=True,
-        autospec=True,
-    )
-    def test_setup_emu_instance_dir_from_env(
-        self, unused_mock_exists: mock.Mock
-    ) -> None:
-        """Test case for FfxConfig.setup() reading FUCHSIA_FFX_EMU_INSTANCE_DIR from env"""
-        ffx_config_obj = ffx_config.FfxConfig()
-        ffx_config_obj.setup(
-            binary_path=_BINARY_PATH,
-            logs_dir=_LOGS_DIR,
-            logs_level=_LOGS_LEVEL,
-            enable_mdns=_MDNS_ENABLED,
-            enable_usb=_ENABLE_USB,
-        )
-        config = ffx_config_obj.get_config()
-        self.assertEqual(config.emu_instance_dir, "/env/emu/instances")
-
-    @mock.patch("honeydew.transports.ffx.config.os.environ", {}, autospec=False)
-    @mock.patch("honeydew.transports.ffx.config.os.path.exists", autospec=True)
-    def test_setup_emu_instance_dir_sibling_of_shared_data(
-        self, mock_exists: mock.Mock
-    ) -> None:
-        """Test case for FfxConfig.setup() resolving emu_instance_dir from sibling of shared_data"""
-        mock_exists.side_effect = lambda p: p == "/botanist/out/emu/instances"
-        ffx_config_obj = ffx_config.FfxConfig()
-        ffx_config_obj.setup(
-            binary_path=_BINARY_PATH,
-            logs_dir=_LOGS_DIR,
-            logs_level=_LOGS_LEVEL,
-            enable_mdns=_MDNS_ENABLED,
-            enable_usb=_ENABLE_USB,
-            shared_data="/botanist/out/shared",
-        )
-        config = ffx_config_obj.get_config()
-        self.assertEqual(config.emu_instance_dir, "/botanist/out/emu/instances")
-
-    @mock.patch(
-        "honeydew.transports.ffx.config.os.environ",
-        {"XDG_DATA_HOME": "/mock/data"},
-        autospec=False,
-    )
-    @mock.patch("honeydew.transports.ffx.config.os.path.exists", autospec=True)
-    def test_setup_emu_instance_dir_ambient(
-        self, mock_exists: mock.Mock
-    ) -> None:
-        """Test case for FfxConfig.setup() resolving emu_instance_dir from ambient host directory"""
-        mock_exists.side_effect = (
-            lambda p: p == "/mock/data/Fuchsia/ffx/emu/instances"
-        )
-        ffx_config_obj = ffx_config.FfxConfig()
-        ffx_config_obj.setup(
-            binary_path=_BINARY_PATH,
-            logs_dir=_LOGS_DIR,
-            logs_level=_LOGS_LEVEL,
-            enable_mdns=_MDNS_ENABLED,
-            enable_usb=_ENABLE_USB,
-            shared_data="/custom/shared",
-        )
-        config = ffx_config_obj.get_config()
-        self.assertEqual(
-            config.emu_instance_dir, "/mock/data/Fuchsia/ffx/emu/instances"
-        )
-
-    @mock.patch("honeydew.transports.ffx.config.os.environ", {}, autospec=False)
-    @mock.patch(
-        "honeydew.transports.ffx.config.os.path.exists",
-        return_value=False,
-        autospec=True,
-    )
-    def test_setup_emu_instance_dir_fallback(
-        self, unused_mock_exists: mock.Mock
-    ) -> None:
-        """Test case for FfxConfig.setup() falling back to logs_dir/emu when no candidate exists"""
-        ffx_config_obj = ffx_config.FfxConfig()
-        ffx_config_obj.setup(
-            binary_path=_BINARY_PATH,
-            logs_dir=_LOGS_DIR,
-            logs_level=_LOGS_LEVEL,
-            enable_mdns=_MDNS_ENABLED,
-            enable_usb=_ENABLE_USB,
-        )
-        config = ffx_config_obj.get_config()
-        self.assertEqual(
-            config.emu_instance_dir, os.path.join(_LOGS_DIR, "emu")
-        )

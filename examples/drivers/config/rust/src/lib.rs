@@ -34,5 +34,5 @@ impl Driver for ConfigRustDriver {
         Ok(Self { node })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }

@@ -6,7 +6,6 @@
 #include <lib/async/cpp/executor.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fdio/directory.h>
-#include <lib/fidl/cpp/binding_set.h>
 #include <lib/inspect/cpp/vmo/types.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>

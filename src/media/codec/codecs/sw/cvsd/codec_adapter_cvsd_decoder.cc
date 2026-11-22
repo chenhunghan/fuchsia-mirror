@@ -26,26 +26,26 @@ CodecAdapterCvsdDecoder::CodecAdapterCvsdDecoder(std::mutex& lock,
                                                  CodecAdapterEvents* codec_adapter_events)
     : CodecAdapterSWImpl(lock, codec_adapter_events) {}
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterCvsdDecoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterCvsdDecoder::OutputFormatDetails() {
   std::lock_guard<std::mutex> lock(lock_);
   ZX_DEBUG_ASSERT(codec_params_);
-  fuchsia::media::PcmFormat2 out;
-  out.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
-  out.set_bits_per_sample(kPcmBitsPerSample);
-  out.set_frames_per_second(kExpectedSamplingFreq);
+  fuchsia_media::PcmFormat2 out;
+  out.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
+  out.bits_per_sample() = kPcmBitsPerSample;
+  out.frames_per_second() = kExpectedSamplingFreq;
   // For CVSD, we assume MONO channel.
-  out.set_channel_map({fuchsia::media::AudioChannelId2::FL});
+  out.channel_map() = {fuchsia_media::AudioChannelId2::kFl};
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type(kPcmMimeType);
-  format_details.set_pcm_format(std::move(out));
+  fuchsia_media::FormatDetails format_details;
+  format_details.mime_type() = kPcmMimeType;
+  format_details.pcm_format() = std::move(out);
 
   return {std::move(format_details), kOutputFrameSize};
 }
 
 CodecAdapterCvsdDecoder::InputLoopStatus CodecAdapterCvsdDecoder::ProcessFormatDetails(
-    const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.has_mime_type() || format_details.mime_type() != kCvsdMimeType) {
+    const fuchsia_media::FormatDetails& format_details) {
+  if (!format_details.mime_type().has_value() || *format_details.mime_type() != kCvsdMimeType) {
     events_->onCoreCodecFailCodec(
         "CVSD Decoder received input that was not compressed cvsd audio.");
     return kShouldTerminate;
@@ -83,27 +83,26 @@ int CodecAdapterCvsdDecoder::ProcessInputChunkData(const uint8_t* input_data,
   return num_output_bytes_produced;
 }
 
-fuchsia::sysmem::BufferCollectionConstraints CodecAdapterCvsdDecoder::BufferCollectionConstraints(
+fuchsia_sysmem2::BufferCollectionConstraints CodecAdapterCvsdDecoder::BufferCollectionConstraints(
     CodecPort port) {
-  fuchsia::sysmem::BufferCollectionConstraints c;
-  c.min_buffer_count_for_camping = kMinBufferCountForCamping;
+  fuchsia_sysmem2::BufferCollectionConstraints c;
+  c.min_buffer_count_for_camping() = kMinBufferCountForCamping;
 
   // Actual minimum buffer size is 1 byte for input and 16 bytes for output since we're doing
   // 1:16 decompression for decoding. However, sysmem will basically allocate at least a
   // 4KiB page per buffer even if the client is also ok with less, so we default to
   // system page size for now.
+  auto& bmc = c.buffer_memory_constraints().emplace();
   if (port == kInputPort) {
-    c.buffer_memory_constraints.min_size_bytes =
-        std::max(zx_system_get_page_size(), kInputFrameSize);
-    c.buffer_memory_constraints.max_size_bytes = kInputPerPacketBufferBytesMax;
+    bmc.min_size_bytes() = std::max(zx_system_get_page_size(), kInputFrameSize);
+    bmc.max_size_bytes() = kInputPerPacketBufferBytesMax;
   } else {
     // TODO(dayeonglee): consider requiring a larger buffer, based on what
     // seems like a minimum reasonable time duration per buffer, to keep the
     // buffers per second <= ~120.
-    c.buffer_memory_constraints.min_size_bytes =
-        std::max(zx_system_get_page_size(), (uint32_t)MinOutputBufferSize());
+    bmc.min_size_bytes() = std::max(zx_system_get_page_size(), (uint32_t)MinOutputBufferSize());
     // Set to some arbitrary value.
-    c.buffer_memory_constraints.max_size_bytes = 0xFFFFFFFF;
+    bmc.max_size_bytes() = 0xFFFFFFFF;
   }
 
   return c;

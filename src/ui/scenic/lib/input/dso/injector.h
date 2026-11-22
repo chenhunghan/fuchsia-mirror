@@ -8,6 +8,8 @@
 #include <fidl/fuchsia.input/cpp/wire.h>
 #include <fidl/fuchsia.ui.pointerinjector.dso/cpp/driver/wire.h>
 #include <lib/async/cpp/task.h>
+#include <lib/fit/defer.h>
+#include <lib/fit/function.h>
 #include <lib/inspect/cpp/inspect.h>
 
 #include <deque>
@@ -95,6 +97,12 @@ class Injector : public fdf::WireServer<fuchsia_ui_pointerinjector_dso::Device> 
   // Sends an appropriate Cancel event.
   virtual void CancelStream(uint32_t pointer_id, StreamId stream_id,
                             const view_tree::Snapshot& snapshot) = 0;
+
+  // Begins a batch of event injections, deferring outbound client flushes until the returned guard
+  // goes out of scope. Default implementation is a no-op.
+  virtual fit::deferred_action<fit::closure> BeginBatch() {
+    return fit::defer<fit::closure>([] {});
+  }
 
   const InjectorSettings& settings() const { return settings_; }
   const Viewport& viewport() const { return viewport_; }

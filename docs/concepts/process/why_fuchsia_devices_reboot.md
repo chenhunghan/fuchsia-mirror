@@ -17,7 +17,7 @@ An ungraceful reboot is a reboot that is initiated by either the kernel in
 response to an error, such as a kernel panic, or performed by the hardware
 without software intervention, such as a hardware watchdog timeout.
 
-### Graceful reboot
+### Graceful reboot {#graceful-reboot}
 
 A graceful reboot is a reboot that is initiated by a userspace process. The
 process may initiate the reboot in response to an error, like when a device’s

@@ -38,9 +38,17 @@ fx_cc_library(
     ],
     deps = [
         "//src/connectivity/wlan/drivers/lib/macaddr",
-        "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/zx",
     ] + select({
+        # Drivers built with the Bazel SDK rules use the SDK copy of fbl.
+        "//build/bazel/platforms:is_fuchsia_with_sdk_rules": [
+            # @bazel2gn:skip
+            "@fuchsia_sdk//pkg/fbl_deprecated",
+        ],
+        "//conditions:default": [
+            "//zircon/system/ulib/fbl",
+        ],
+    }) + select({
         # In-tree platform builds (e.g. mcs_rate_lookup_tests and sim-env)
         # cannot use @fuchsia_sdk targets, which require an SDK API level.
         "//build/bazel/platforms:is_fuchsia_platform": [

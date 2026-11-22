@@ -48,28 +48,46 @@ pub struct ArrayMembers {
     pub nested_arrays2: [[[i8; 1]; 2]; 3],
 }
 
-#[repr(i32)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Immutable, IntoBytes, PartialEq, TryFromBytes)]
-pub enum Enum {
-    Zero = 0,
-    One = 1,
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, FromBytes, Hash, Immutable, IntoBytes, PartialEq)]
+pub struct Enum(i32);
 
 impl Enum {
-    pub fn from_raw(raw: i32) -> Option<Self> {
-        match raw {
-            0 => Some(Self::Zero),
+    pub const ZERO: Self = Self(0);
+    pub const ONE: Self = Self(1);
 
-            1 => Some(Self::One),
+    /// Constructs a value from its underlying integer.
+    pub const fn from_raw(raw: i32) -> Self {
+        Self(raw)
+    }
 
-            _ => None,
-        }
+    /// Returns the underlying integer.
+    pub const fn as_raw(self) -> i32 {
+        self.0
+    }
+}
+
+impl From<i32> for Enum {
+    fn from(raw: i32) -> Self {
+        Self(raw)
     }
 }
 
 impl From<Enum> for i32 {
     fn from(val: Enum) -> Self {
-        val as Self
+        val.0
+    }
+}
+
+impl core::fmt::Debug for Enum {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::ZERO => f.write_str("Enum::ZERO"),
+
+            Self::ONE => f.write_str("Enum::ONE"),
+
+            Self(raw) => f.debug_tuple("Enum").field(&raw).finish(),
+        }
     }
 }
 

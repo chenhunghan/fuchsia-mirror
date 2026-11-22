@@ -32,7 +32,7 @@ FlexibleFoo::FlexibleFoo(FlexibleFoo&& other) : tag_(other.tag_) {
     case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kI:
       i_ = std::move(other.i_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -53,7 +53,7 @@ FlexibleFoo& FlexibleFoo::operator=(FlexibleFoo&& other) {
       case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kI:
         i_ = std::move(other.i_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -85,10 +85,10 @@ void FlexibleFoo::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::std::string>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &s_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -97,21 +97,21 @@ void FlexibleFoo::Encode(::fidl::Encoder* encoder, size_t offset,
           &s_,
           encoder->Alloc(::fidl::EncodingInlineSize<::std::string, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kI: {
       if (::fidl::EncodingInlineSize<int32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &i_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -120,11 +120,11 @@ void FlexibleFoo::Encode(::fidl::Encoder* encoder, size_t offset,
           &i_,
           encoder->Alloc(::fidl::EncodingInlineSize<int32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kUnknown: {
@@ -138,18 +138,18 @@ void FlexibleFoo::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void FlexibleFoo::Decode(::fidl::Decoder* _decoder, FlexibleFoo* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kS: {
@@ -163,7 +163,7 @@ void FlexibleFoo::Decode(::fidl::Decoder* _decoder, FlexibleFoo* value, size_t o
       break;
     }
     default: {
-      auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+      auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
       break;
@@ -200,7 +200,7 @@ FlexibleFoo& FlexibleFoo::set_i(int32_t value) {
   i_ = std::move(value);
   return *this;
 }
-FlexibleFoo& FlexibleFoo::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+FlexibleFoo& FlexibleFoo::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -214,21 +214,21 @@ void FlexibleFoo::Destroy() {
     case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kI:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid);
 }
 
-void FlexibleFoo::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void FlexibleFoo::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::FlexibleFoo::Tag::Invalid):
         break;
       case ::test::requestflexibleenvelope::FlexibleFoo::Tag::kS:
         new (&s_)::std::string();
@@ -263,7 +263,7 @@ StrictFoo::StrictFoo(StrictFoo&& other) : tag_(other.tag_) {
     case ::test::requestflexibleenvelope::StrictFoo::Tag::kI:
       i_ = std::move(other.i_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
       break;
   }
 }
@@ -280,7 +280,7 @@ StrictFoo& StrictFoo::operator=(StrictFoo&& other) {
       case ::test::requestflexibleenvelope::StrictFoo::Tag::kI:
         i_ = std::move(other.i_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
         break;
     }
   }
@@ -308,10 +308,10 @@ void StrictFoo::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::std::string>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &s_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -320,21 +320,21 @@ void StrictFoo::Encode(::fidl::Encoder* encoder, size_t offset,
           &s_,
           encoder->Alloc(::fidl::EncodingInlineSize<::std::string, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::requestflexibleenvelope::StrictFoo::Tag::kI: {
       if (::fidl::EncodingInlineSize<int32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &i_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -343,11 +343,11 @@ void StrictFoo::Encode(::fidl::Encoder* encoder, size_t offset,
           &i_,
           encoder->Alloc(::fidl::EncodingInlineSize<int32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -356,18 +356,18 @@ void StrictFoo::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void StrictFoo::Decode(::fidl::Decoder* _decoder, StrictFoo* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::requestflexibleenvelope::StrictFoo::Tag::kS: {
@@ -425,15 +425,15 @@ void StrictFoo::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid);
 }
 
-void StrictFoo::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void StrictFoo::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::requestflexibleenvelope::StrictFoo::Tag::Invalid):
         break;
       case ::test::requestflexibleenvelope::StrictFoo::Tag::kS:
         new (&s_)::std::string();

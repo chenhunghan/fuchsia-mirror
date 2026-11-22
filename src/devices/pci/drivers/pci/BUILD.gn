@@ -106,7 +106,6 @@ fuchsia_cc_driver("bus-pci-driver") {
 fuchsia_driver_component("bus-pci") {
   component_name = "bus-pci"
   deps = [ ":bus-pci-driver" ]
-  info = "meta/bus-pci-info.json"
   dml_label = ":pci-dml"
 }
 

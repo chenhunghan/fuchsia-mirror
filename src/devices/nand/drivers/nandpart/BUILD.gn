@@ -43,9 +43,9 @@ source_set("common") {
     "//zircon/third_party/ulib/safemath",
   ]
   public_deps = [
-    "//sdk/banjo/fuchsia.hardware.badblock:fuchsia.hardware.badblock_banjo_cpp",
     "//sdk/banjo/fuchsia.hardware.nand:fuchsia.hardware.nand_banjo_cpp",
     "//sdk/fidl/fuchsia.boot.metadata:fuchsia.boot.metadata_cpp",
+    "//sdk/fidl/fuchsia.hardware.badblock:fuchsia.hardware.badblock_cpp",
     "//sdk/fidl/fuchsia.hardware.nand:fuchsia.hardware.nand_cpp",
     "//sdk/lib/driver/compat/cpp",
     "//sdk/lib/driver/component/cpp",
@@ -64,7 +64,6 @@ fuchsia_cc_driver("nandpart-driver") {
 }
 
 fuchsia_driver_component("nandpart") {
-  info = "meta/nandpart-info.json"
   component_name = "nandpart"
   dml_label = ":nandpart-dml"
   deps = [

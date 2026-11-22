@@ -26,11 +26,8 @@ use cm_config::{
 use cm_rust::*;
 use cm_rust_testing::*;
 use cm_types::Name;
-use fidl::endpoints::ProtocolMarker;
-use fidl_fuchsia_component as fcomponent;
-use fidl_fuchsia_component_runner as fcrunner;
-use fidl_fuchsia_data as fdata;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_data_common as fdata;
+use fidl_fuchsia_io_common as fio;
 use moniker::{ExtendedMoniker, Moniker};
 use routing::component_instance::ComponentInstanceInterface;
 use routing::debug_route_sandbox_path;
@@ -77,7 +74,7 @@ pub fn component_decl_with_exposed_binder() -> ComponentDecl {
         }),
         exposes: Box::from([ExposeBuilder::protocol()
             .source(ExposeSource::Framework)
-            .name(fcomponent::BinderMarker::DEBUG_NAME)
+            .name("fuchsia.component.Binder")
             .build()]),
         ..Default::default()
     }
@@ -3443,7 +3440,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );
@@ -3517,7 +3514,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );
@@ -3588,7 +3585,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );
@@ -3656,7 +3653,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );
@@ -3942,7 +3939,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );
@@ -4006,7 +4003,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );
@@ -4069,7 +4066,7 @@ impl<T: RoutingTestModelBuilder> CommonRoutingTest<T> {
                 assert_eq!(name, "elf");
                 assert_eq!(
                     source_path.expect("missing source path"),
-                    format!("/svc/{}", fcrunner::ComponentRunnerMarker::DEBUG_NAME)
+                    "/svc/fuchsia.component.runner.ComponentRunner"
                         .parse::<cm_types::Path>()
                         .unwrap()
                 );

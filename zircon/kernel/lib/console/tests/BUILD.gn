@@ -13,6 +13,7 @@ kernel_rust_mod("console_tests_rust") {
     "//sdk/rust/zx-status",
     "//src/lib/kalloc",
     "//src/lib/zr",
+    "//zircon/kernel/lib/libc:rust",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }

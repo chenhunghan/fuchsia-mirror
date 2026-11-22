@@ -41,8 +41,7 @@ fx_cc_test_binary(
     deps = [
         ":guest_config",
         "//src/lib/fxl/test:gtest_main",
-        # Bazel's gtest target bundles gmock; GN's :gmock publicly depends on :gtest.
-        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "@com_google_googletest//:gtest",
     ],
 )
 

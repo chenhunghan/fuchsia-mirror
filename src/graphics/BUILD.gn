@@ -16,16 +16,27 @@ group("tests") {
   deps = [
     ":bazel_tests",
     "bin/agis:agis-test",
-    "bin/vulkan_loader:tests",
     "display:tests",
     "drivers:tests",
     "lib/compute:tests",
     "magma:tests",
     "tests",
   ]
+
+  # Kept separate from `:bazel_tests` because `goldfish_benchmark` fails under
+  # KASan.
+  if (select_variant + [ "kasan" ] - [ "kasan" ] == select_variant) {
+    deps += [ ":non_kasan_bazel_tests" ]
+  }
 }
 
 bazel_test_suite("bazel_tests") {
   host_tests = [ "//src/graphics:host_tests" ]
   target_tests = [ "//src/graphics:target_tests" ]
+}
+
+if (select_variant + [ "kasan" ] - [ "kasan" ] == select_variant) {
+  bazel_test_suite("non_kasan_bazel_tests") {
+    target_tests = [ "//src/graphics:non_kasan_target_tests" ]
+  }
 }

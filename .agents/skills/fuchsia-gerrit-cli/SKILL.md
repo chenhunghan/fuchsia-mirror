@@ -4,9 +4,10 @@ description: >
   Guide for using the `fx gh` command-line interface to interact with Fuchsia
   Gerrit changes (CLs). Use when reading open changes, posting inline
   comments, replying to reviewer threads, managing draft comments, checking CI
-  status with `pr checks`, triggering presubmit, updating CQ labels, or
-  landing/merging CLs and patch stacks from the terminal. Do NOT use for
-  performing automated code reviews (use /review instead).
+  status with `pr checks`, triggering presubmit, updating CQ labels, managing
+  automated Gerrit Flows (`pr flow`), or landing/merging CLs and patch stacks
+  from the terminal. Do NOT use for performing automated code reviews (use
+  /review instead).
 ---
 
 # Fuchsia Gerrit CLI (fx gh)
@@ -28,12 +29,14 @@ While the interface is the same as `gh`, it interacts with Gerrit. Here are the
 key mappings and differences you need to know:
 
 ### 1. Pull Requests are Gerrit Changes (CLs)
+
 - In `fx gh`, a "Pull Request" (PR) corresponds to a Gerrit Change (commonly
   referred to as a CL in Fuchsia).
 - Commands like `fx gh pr list`, `fx gh pr view`, and `fx gh pr comment` work on
   Gerrit changes.
 
 ### 2. Identifying Changes
+
 - `fx gh` works with Gerrit change IDs.
 - You can use the numeric ID from the URL (e.g., `1569017` from
   `https://fuchsia-review.git.corp.google.com/c/fuchsia/+/1569017`).
@@ -46,6 +49,7 @@ key mappings and differences you need to know:
 ### 3. Command Specifics
 
 #### `pr list`
+
 - **Assignee vs Reviewer**: Gerrit does not have a direct equivalent to GitHub's
   "assignee". The `-a, --assignee` flag is mapped to filter by **reviewer** in
   Gerrit.
@@ -80,6 +84,7 @@ key mappings and differences you need to know:
     full control over the status filter.
 
 #### `pr comment`
+
 - **Threading and Replying to Comments**: When posting a comment with `--path`
   and `--line`, the tool automatically detects existing threads on that line and
   replies to the latest comment. You do **not** need to manage thread IDs
@@ -87,16 +92,21 @@ key mappings and differences you need to know:
 - If there are multiple independent threads on the same line, the tool replies
   to the one with the most recent activity.
 - **Example**: To reply to a review comment on line 42 of `src/foo.cc`:
+
   ```bash
   fx gh pr comment 1569017 --path src/foo.cc --line 42 -m "Done. Fixed as suggested." --resolved
   ```
+
 - **Draft Comments**: You can use the `--draft` flag to save a comment as a
   draft on Gerrit without immediately publishing it:
+
   ```bash
   fx gh pr comment 1569017 --path src/foo.cc --line 42 -m "WIP fix coming" --draft
   ```
+
   If you need to post multiple comments, you must use the `--draft` flag for
   each comment, and then publish them all at once.
+
 - **Draft Behavior & Accumulation**:
   - Gerrit treats each `fx gh pr comment ... --draft` invocation as creating a
     new draft comment entity. It does not overwrite previous drafts on that
@@ -113,6 +123,7 @@ key mappings and differences you need to know:
     Request`** because the thread exists on the earlier revision.
   - **Always pass `--patchset <N>`** matching the patchset where the reviewer's
     comment was posted when replying:
+
     ```bash
     fx gh pr comment 1822933 --patchset 16 --path src/tests/foo.py --line 97 -F /tmp/reply.txt --draft --resolved
     ```
@@ -129,6 +140,7 @@ key mappings and differences you need to know:
   explicitly requested.
 
 #### `pr edit` and `pr review`
+
 - **Approving a Change**: To add a `Code-Review+2` vote, use `fx gh pr review
   <id> --approve`.
 - **Triggering AI Review Agents**: To trigger an AI review agent or list
@@ -143,6 +155,8 @@ key mappings and differences you need to know:
   like `Commit-Queue+1`, `Commit-Queue+2`, or `Fuchsia-Auto-Submit+1`, use the
   `edit` subcommand with the `--add-label` flag.
   - **Example**: `fx gh pr edit <id> --add-label Commit-Queue+1`
+  - **Do NOT start `Commit-Queue+1` automatically on upload** unless explicitly
+    requested by the user.
   - **Patch Stacks (`Commit-Queue+1`)**: For a stack of dependent CLs, **only
     trigger `Commit-Queue+1` on the first and last CLs in the stack**, rather
     than on every intermediate CL. Because each commit in a stack includes its
@@ -156,19 +170,58 @@ key mappings and differences you need to know:
     user's account. In the rare event that a force submit is necessary, it
     **always** requires explicit user approval first.
 
+#### `pr flow` (Gerrit Flows)
+
+- Use Gerrit Flows to automate follow-up actions on a CL when a condition is met
+  (for example, adding reviewers or setting `Fuchsia-Auto-Submit+1` once
+  `label:Presubmit-Verified+1` passes). See the `gerrit-flows` skill for full
+  details, including `gob-curl` REST API usage for working outside a Fuchsia
+  checkout or creating sequential multi-stage pipelines.
+- **Do NOT start `Commit-Queue+1` on upload** when attaching flows unless the
+  user explicitly asks to start CQ.
+- **Inline flags on `pr create` and `pr edit`**:
+  - `--reviewer-on-presubmit <email[,email...]>` (`pr create`) /
+    `--add-reviewer-on-presubmit <email[,email...]>` (`pr edit`)
+    (comma-separated or repeatable): Adds reviewer(s) once
+    `label:Presubmit-Verified+1` is satisfied.
+  - `--autosubmit-on-presubmit`: Votes `Fuchsia-Auto-Submit+1` once
+    `label:Presubmit-Verified+1` is satisfied.
+  - `--autosubmit-on-submittable`: Votes `Fuchsia-Auto-Submit+1` once
+    `is:submittable` is satisfied.
+  - `--dryrun-at <time>`: Schedules a `Commit-Queue+1` dry run at the specified
+    time (for example, `--dryrun-at "Today at 20:00"`, defaulting to
+    `America/Los_Angeles` unless `in <timezone>` is specified).
+  - `--flow-when <cond>`, `--flow-add-reviewer <email[,email...]>`, `--flow-vote
+    <Label+Score[,Label+Score...]>` (comma-separated or repeatable): Configures
+    custom flow stages (`--flow-when` defaults to `label:Presubmit-Verified+1`
+    when omitted).
+- **Dedicated `pr flow` subcommands** (`fx gh pr flow create`, `list`, and
+  `delete`): Use the `gerrit-flows` skill, which is the canonical reference for
+  these subcommands and their options.
+
 #### `pr checks`
+
 - **Viewing Check Status**: To see the status of CI checks and failing bots for
   a Gerrit change, use `fx gh pr checks <id>`. This command provides the
   detailed logs and failure reasons needed to debug failing checks.
 
 #### `pr cherry-pick`
+
 - **Cherry-picking a CL**: To fetch and apply a Gerrit change to your current
   local Git branch, use `fx gh pr cherry-pick <id>`.
 
 ### 4. Uploading Changes
-- You do **not** need to use `fx gh` to upload or update CLs.
-- Use the normal `git push` commands to upload changes to Gerrit (e.g., `git
-  push origin HEAD:refs/for/main`).
+
+- In Cog workspaces, use `fx gh pr create --title "[title]"` (optionally with
+  `--reviewer-on-presubmit <email>` / `--autosubmit-on-presubmit`).
+- In standard Git checkouts, you can use `fx gh pr create` or normal `git push`
+  commands (`git push origin HEAD:refs/for/main`). `fx gh pr create` pushes to
+  `refs/for/<current branch>`, so run it from a detached `HEAD` (the default in
+  a Jiri checkout) or a branch named after the target branch (`main`). From a
+  local feature branch, use `git push origin HEAD:refs/for/main` instead.
+- With `--title`, `fx gh pr create` commits your uncommitted changes as a new
+  commit; without it, it uploads the current `HEAD` commit.
+- Do **not** set `Commit-Queue+1` automatically on upload unless requested.
 
 ## Usage Examples
 
@@ -177,5 +230,8 @@ key mappings and differences you need to know:
 - Comment on a specific line: `fx gh pr comment 1569017 --path src/foo.cc --line
   42 -m "Looks good"`
 - Mark a CL for CQ dry-run: `fx gh pr edit 1569017 --add-label Commit-Queue+1`
+- Add reviewer after presubmit passes and auto-submit once submittable: `fx gh
+  pr edit 1569017 --add-reviewer-on-presubmit user@google.com
+  --autosubmit-on-submittable`
 - Cherry-pick a change locally: `fx gh pr cherry-pick 1569017`
 - View check status: `fx gh pr checks 1569017`

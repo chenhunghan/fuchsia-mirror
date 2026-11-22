@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":unittests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+rustc_library(
+    name = "pdev",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
+        "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
+        "//sdk/lib/driver/component/rust",
+        "//sdk/lib/driver/metadata/rust",
+        "//sdk/lib/driver/mmio/rust:mmio",
+        "//sdk/rust/zx-status",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+rustc_test(
+    name = "pdev_test",
+    crate = ":pdev",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/driver/platform-device/rust/fidl:test.metadata_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+# Run with `fx test pdev-rust-unittests`
+fx_unittest_package(
+    name = "unittests",
+    package_name = "pdev-rust-unittests",
+    unit_tests = [":pdev_test"],
+)

@@ -10,7 +10,20 @@
 
 namespace fake_nvme {
 
-FakeRegisters::FakeRegisters() {
+FakeRegisters::FakeRegisters() { Reset(); }
+
+void FakeRegisters::Reset() {
+  vers_ = nvme::VersionReg{};
+  caps_ = nvme::CapabilityReg{};
+  interrupt_mask_set_ = nvme::InterruptReg{};
+  interrupt_mask_clear_ = nvme::InterruptReg{};
+  ccfg_ = nvme::ControllerConfigReg{};
+  csts_ = nvme::ControllerStatusReg{};
+  admin_queue_attrs_ = nvme::AdminQueueAttributesReg{};
+  admin_submission_queue_ = nvme::AdminQueueAddressReg{};
+  admin_completion_queue_ = nvme::AdminQueueAddressReg{};
+  admin_queue_addr_reads_.store(0);
+
   // Pretend to be version 1.4.0.
   vers_.set_major(1).set_minor(4).set_tertiary(0);
   // We emulate a very minimal set of capabilities.
@@ -34,9 +47,17 @@ FakeRegisters::FakeRegisters() {
       .set_contiguous_queues_required(true)
       .set_max_queue_entries_raw(65535);
   // Admin queue doorbells.
-  std::lock_guard<std::mutex> lock(doorbells_lock_);
-  completion_doorbells_.emplace(0, nvme::DoorbellReg{});
-  submission_doorbells_.emplace(0, nvme::DoorbellReg{});
+  {
+    std::lock_guard<std::mutex> lock(doorbells_lock_);
+    completion_doorbells_.clear();
+    submission_doorbells_.clear();
+    completion_doorbells_.emplace(0, nvme::DoorbellReg{});
+    submission_doorbells_.emplace(0, nvme::DoorbellReg{});
+  }
+  {
+    std::lock_guard<std::mutex> lock(events_lock_);
+    irq_ordering_events_.clear();
+  }
 }
 
 uint64_t FakeRegisters::Read64(zx_off_t offs) {
@@ -44,8 +65,10 @@ uint64_t FakeRegisters::Read64(zx_off_t offs) {
     case nvme::NVME_REG_CAP:
       return caps_.reg_value();
     case nvme::NVME_REG_ASQ:
+      admin_queue_addr_reads_.fetch_add(1);
       return admin_submission_queue_.reg_value();
     case nvme::NVME_REG_ACQ:
+      admin_queue_addr_reads_.fetch_add(1);
       return admin_completion_queue_.reg_value();
   }
   // Could be an unsupported register, or just a 32-bit one.
@@ -107,6 +130,11 @@ void FakeRegisters::Write32(uint32_t val, zx_off_t offs) {
       doorbell = &iter->second;
     }
     doorbell->set_reg_value(val);
+    if (is_completion && queue_id != 0) {
+      std::lock_guard<std::mutex> lock(events_lock_);
+      irq_ordering_events_.push_back(
+          IrqOrderingEvent{.type = IrqOrderingEventType::kIoCqDoorbell, .value = val});
+    }
     if (callbacks_) {
       callbacks_->doorbell_ring(!is_completion, queue_id, *doorbell);
     }
@@ -117,12 +145,22 @@ void FakeRegisters::Write32(uint32_t val, zx_off_t offs) {
       ZX_ASSERT_MSG(false, "VS register is read-only.");
     case nvme::NVME_REG_INTMS:
       interrupt_mask_set_.set_reg_value(val);
+      {
+        std::lock_guard<std::mutex> lock(events_lock_);
+        irq_ordering_events_.push_back(
+            IrqOrderingEvent{.type = IrqOrderingEventType::kMaskSet, .value = val});
+      }
       if (callbacks_) {
         callbacks_->interrupt_mask_update(false, interrupt_mask_set_);
       }
       return;
     case nvme::NVME_REG_INTMC:
       interrupt_mask_clear_.set_reg_value(val);
+      {
+        std::lock_guard<std::mutex> lock(events_lock_);
+        irq_ordering_events_.push_back(
+            IrqOrderingEvent{.type = IrqOrderingEventType::kMaskClear, .value = val});
+      }
       if (callbacks_) {
         callbacks_->interrupt_mask_update(true, interrupt_mask_clear_);
       }

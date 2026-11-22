@@ -20,10 +20,11 @@
 #include <ktl/optional.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
-#include <phys/address-space.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/zbitl.h>
 #include <phys/boot-zbi/fixed-address-boot-zbi.h>
-#include <phys/symbolize.h>
-#include <phys/zbitl-allocation.h>
+#include <phys/memory/init.h>
+#include <phys/runtime/symbolize.h>
 
 #include "ktl/iterator.h"
 #include "test-main.h"
@@ -198,7 +199,7 @@ void TurduckenTestBase::Boot() {
   printf("%s: Loaded kernel and data; data ZBI occupies %#zx of %#zx bytes.\n", test_name(),
          boot.DataZbi().size_bytes(), boot.DataZbi().storage().size());
 
-  boot.Log();
+  boot.Log(kTestName);
   boot.Boot();
 }
 

@@ -8,9 +8,9 @@ import("//build/python/python_action.gni")
 import("//build/python/python_binary.gni")
 import("//build/zbi/zbi.gni")
 import("//build/zbi/zbi_input.gni")
-import("//zircon/kernel/phys/boot-shim/devicetree.gni")
 import("//zircon/kernel/phys/devicetree_boot_test.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/linuxboot-runtime/devicetree.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 
 # Regfers to `testdata/$boot_config_filenames.txt` such that a test is generated
 # for each entry.
@@ -300,10 +300,7 @@ if (have_devicetree) {
         "boot-config-test.cc",
         "devicetree-linux-boot-config.cc",
       ]
-      deps = [
-        ":$test_case.ramdisk.cpp",
-        "//zircon/kernel/phys/boot-shim:devicetree",
-      ]
+      deps = [ ":$test_case.ramdisk.cpp" ]
     }
     tests += [ ":$test_target" ]
 

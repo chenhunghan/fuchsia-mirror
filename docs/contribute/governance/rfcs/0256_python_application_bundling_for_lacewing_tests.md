@@ -68,7 +68,7 @@ This proposal was socialized via a Google Doc with members from the FEC,
 Pigweed, Toolchain, SDK Experiences, and Tools team. The proposal was also
 discussed in a FEC meeting with support for formal RFC ratification.
 
-## Goals
+## Goals {:#goals}
 
 *   Eliminate Python runtime compatibility issues when Lacewing test binaries
 are run OOT
@@ -124,7 +124,7 @@ following summarizes the main tradeoffs between the approaches:
 A Lacewing Rust binary comprises of 3 logical sections: Lacewing artifacts
 embedding, artifacts extraction, and test execution.
 
-### Embedding
+### Embedding {:#embedding}
 
 All of the components required for running a Lacewing tests will be embedded
 into the Rust binary as a single archive.
@@ -139,7 +139,7 @@ The embedded archive contains the following:
 * Fuchsia controller shared libraries
 * FIDL IR files (currently required by Fuchsia Controller)
 
-#### Compression
+#### Compression {:#compression}
 
 For simplicity, all of the contents listed above are compressed into a single
 archive. The current implementation uses `ZIP` format which produces stripped
@@ -161,7 +161,7 @@ GN templates where the former provides the *test-specific* data resources as a
 Rust library while the latter contains the *test-agnostic* `main()` logic for
 [extraction and execution](#extraction-and-execution).
 
-### Extraction and execution
+### Extraction and execution {:#extraction-and-execution}
 
 When run, the Rust binary first unpacks its embedded resources in a temporary
 directory. Then it will build the command for running the Lacewing test by
@@ -204,7 +204,7 @@ binary into test-agnostic "stem" and test-specific Zip archive, we can
 distribute the large "stem" separate from the significantly smaller
 test-specific Zip archives. This allows us to save storage and network bandwidth
 for redundantly including the "stem" in each bundled Lacewing test. More info in
-[Executable size](#executable_size).
+[Executable size](#executable-size).
 
 ## Ergonomics
 
@@ -228,7 +228,7 @@ bundling approach to be ready for production use (e.g. CQ and SDK distribution).
 
 ## Risks & Resources
 
-### Executable size
+### Executable size {:#executable-size}
 
 Assuming a storage footprint of ~40MB per bundled Lacewing binary, this could
 cause concerns as we scale up the number of distributed tests to reasonable
@@ -256,7 +256,7 @@ Lacewing tests bundled.
         than FIDL IR files
 
 1.  Explore other compression formats and parameters as mentioned
-[above](#Compression).
+[above](#compression).
 
 ### Cross-platform feasibility
 
@@ -298,7 +298,7 @@ N/A
 
 N/A
 
-## Alternatives
+## Alternatives {:#alternatives}
 
 ### PyInstaller
 
@@ -306,7 +306,7 @@ This large section on PyInstaller is intentionally included for posterity. The
 findings below help inform our proposal today to opt for a custom Rust-based
 approach, and will help provide context for any future efforts.
 
-#### PyInstaller rejection rationale
+#### PyInstaller rejection rationale {:#pyinstaller-rejection-rationale}
 
 Due to PyInstaller's
 [licensing](https://pyinstaller.org/en/stable/license.html), it can only be used
@@ -367,7 +367,7 @@ of writing due to the [unsubmitted dependencies](#unsubmitted-dependencies) used
 in the prototype. Though we don't anticipate any challenges with infra-support
 once those dependencies are made available in Fuchsia source code.
 
-##### Unsubmitted dependencies
+##### Unsubmitted dependencies {:#unsubmitted-dependencies}
 
 * DL-CPython3: This is now built in
 [Chromium 3PP](https://chrome-infra-packages.appspot.com/p/infra/3pp/tools/cpython3_dyn/linux-amd64)
@@ -409,7 +409,7 @@ libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6
 To prevent hermeticity from eroding over time, a build-time check can be added
 to confirm the `ldd` output of a PyInstaller executable exists in an allowlist.
 
-##### Size
+##### Size {:#size}
 
 Without any considerations for size optimizations in the prototype, the
 soft-reboot Lacewing test packaged via PyInstaller comes out to around 43 MB
@@ -486,7 +486,7 @@ so we've shelved further explorations at this time.
 [Analysis TOC]: https://pyinstaller.org/en/stable/advanced-topics.html#table-of-contents-toc-lists
 [CTF]: /docs/reference/testing/what-tests-to-write.md#compatibility-tests
 [Fuchsia Controller]: /docs/contribute/governance/rfcs/0222_fuchsia_controller.md
-[Lacewing]: /docs/reference/testing/what-tests-to-write.md#host-driven_approach_to_spec_conformance_tests
+[Lacewing]: /docs/reference/testing/what-tests-to-write.md#host-driven-approach-to-spec-conformance-tests
 [OSRB policies]: https://g3doc.corp.google.com/company/thirdparty/fuchsia.md
 [PETS]: /docs/reference/testing/what-tests-to-write.md#platform-expectation-tests
 [Soak testing]: https://ci.chromium.org/ui/test/fuchsia/host_x64%2Fobj%2Fsrc%2Ftesting%2Fend_to_end%2Fexamples%2Ftest_soft_reboot%2Fsoft_reboot_test_fc.hermetic.sh

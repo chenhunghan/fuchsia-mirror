@@ -4,11 +4,8 @@
 
 #include "src/devices/usb/drivers/dwc2/dwc2.h"
 
-#include <fidl/fuchsia.driver.compat/cpp/test_base.h>
 #include <fidl/fuchsia.hardware.platform.device/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.dci/cpp/wire.h>
-#include <lib/ddk/metadata.h>
-#include <lib/driver/compat/cpp/compat.h>
 #include <lib/driver/fake-mmio-reg/cpp/fake-mmio-reg.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/testing/cpp/driver_test.h>

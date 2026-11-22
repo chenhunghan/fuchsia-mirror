@@ -5,6 +5,6 @@
 package(default_applicable_licenses = ["//:license"])
 
 # LINT.IfChange
-# All targets in BUILD.gn depend on fuchsia_structured_config_cpp_elf_lib or
-# fuchsia_structured_config_values, which have no in-tree Bazel rules yet.
+# All targets in BUILD.gn depend on fuchsia_structured_config_cpp_elf_lib,
+# which has no in-tree Bazel rule yet.
 # LINT.ThenChange(BUILD.gn)

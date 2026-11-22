@@ -15,18 +15,18 @@ pub struct Filter {
 
 impl Filter {
     pub fn matches(&self, device: &device::Device<'_>) -> bool {
-        if device.device.bus_id != self.bus {
+        if device.device.bdf.bus_id != self.bus {
             return false;
         }
 
         if let Some(dev) = &self.dev {
-            if device.device.device_id != *dev {
+            if device.device.bdf.device_id != *dev {
                 return false;
             }
         }
 
         if let Some(func) = &self.func {
-            if device.device.function_id != *func {
+            if device.device.bdf.function_id != *func {
                 return false;
             }
         }
@@ -43,11 +43,7 @@ impl std::fmt::Display for Filter {
         } else {
             write!(f, "**:")?;
         }
-        if let Some(func) = self.func {
-            write!(f, "{:1x}:", func)
-        } else {
-            write!(f, "*")
-        }
+        if let Some(func) = self.func { write!(f, "{:1x}:", func) } else { write!(f, "*") }
     }
 }
 

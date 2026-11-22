@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use anyhow::format_err;
-use fidl_fuchsia_hardware_audio::{self as audio, DaiFormat, PcmFormat};
+use fidl_fuchsia_hardware_audio::{self as audio, PcmFormat};
 use fidl_fuchsia_media as media;
 use fuchsia_audio_dai::{self as dai, DaiAudioDevice, DigitalAudioInterface};
 use fuchsia_bluetooth::types::{PeerId, peer_audio_stream_id};
@@ -102,26 +102,8 @@ impl DaiControl {
         } else {
             (HF_OUTPUT_UUID, &mut self.output)
         };
-        // TODO(b/358666067): make dai-device choose this format
-        // Use the first supported format for now.
-        let missing_err = format_err!("Couldn't find DAI frame format");
-        let Some(supported) = dev.dai_formats().first() else {
-            return Err(missing_err);
-        };
-        let Some(frame_format) = supported.frame_formats.first().cloned() else {
-            return Err(missing_err);
-        };
-        let dai_format = DaiFormat {
-            number_of_channels: 1,
-            channels_to_use_bitmask: 0x1,
-            sample_format: audio::DaiSampleFormat::PcmSigned,
-            frame_format,
-            frame_rate: pcm_format.frame_rate,
-            bits_per_slot: 16,
-            bits_per_sample: 16,
-        };
         let dev_id = peer_audio_stream_id(*peer_id, uuid);
-        dev.config(dai_format, pcm_format)?;
+        dev.config(pcm_format)?;
         dev.start(self.audio_core.clone(), "HFP Audio", dev_id, "Fuchsia", "Sapphire HFP Headset")
     }
 }

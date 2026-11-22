@@ -28,7 +28,6 @@ load(
 )
 load(
     "@fuchsia_rules_common//debug_symbols:debug_symbols.bzl",
-    "FUCHSIA_DEBUG_SYMBOLS_ATTRS",
     "merge_debug_symbol_infos",
 )
 load(
@@ -215,7 +214,7 @@ _fx_packaged_binary = rule(
             default = "//build/bazel/toolchains/rust:debug_symbols_source_search_root",
             allow_single_file = True,
         ),
-    } | FUCHSIA_DEBUG_SYMBOLS_ATTRS,
+    },
 )
 
 def _fx_packaged_binary_macro_impl(name, visibility, **kwargs):

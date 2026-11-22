@@ -1,0 +1,11 @@
+# Verify jset on a NullOr pointer against 0 is rejected.
+-- asm
+mov %r1, 8
+call 103
+jset %r0, 0, +3
+mov %r1, %r0
+call 104
+mov %r0, 0
+exit
+-- error
+non permitted comparison

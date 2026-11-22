@@ -10,6 +10,23 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        ":netstack3-sync-instrumented-package",
+        ":netstack3-sync-package",
+    ],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":netstack3-sync-instrumented_host_test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
 rustc_check_cfg_build_flags(
     name = "check_cfg_flags",
     cfgs = [
@@ -124,19 +141,16 @@ rustc_test(
 wrap_host_rust_test(
     name = "netstack3-sync-instrumented_host_test",
     binary_name = "netstack3-sync-instrumented_test",
-    visibility = ["//visibility:public"],
 )
 
 fx_unittest_package(
     name = "netstack3-sync-instrumented-package",
     package_name = "netstack3-sync-instrumented",
     unit_tests = [":netstack3-sync-instrumented_test"],
-    visibility = ["//visibility:public"],
 )
 
 fx_unittest_package(
     name = "netstack3-sync-package",
     package_name = "netstack3-sync",
     unit_tests = [":netstack3-sync_test"],
-    visibility = ["//visibility:public"],
 )

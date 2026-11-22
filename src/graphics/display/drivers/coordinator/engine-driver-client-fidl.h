@@ -65,6 +65,9 @@ class EngineDriverClientFidl : public EngineDriverClient {
   zx::result<> SetDisplayPowerMode(display::DisplayId display_id,
                                    display::PowerMode power_mode) override;
   zx::result<> SetMinimumRgb(uint8_t minimum_rgb) override;
+  void NotifyExpectedPresent(display::DisplayId display_id,
+                             zx::time_monotonic expected_present_time,
+                             zx::duration frame_interval) override;
 
  private:
   fdf::WireSyncClient<fuchsia_hardware_display_engine::Engine> fidl_engine_;

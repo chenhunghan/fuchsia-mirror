@@ -2,12 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_unittest_package("storage-xts-test") {
-  deps = [ ":storage_xts_test" ]
-}
-
 group("tests") {
   testonly = true
   deps = [
@@ -43,15 +37,21 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 rustc_library("storage_xts") {
   sources = [ "src/lib.rs" ]
+  if (is_debug) {
+    configs += []
+  } else {
+    configs += [
+      "//build/config:optimize_speed",
+      "//build/config/lto:lto-if-compatible",
+    ]
+  }
   edition = "2024"
-  test_deps = [ "//third_party/rust_crates:test-case" ]
   visibility = [
     ":*",
     "//src/storage/fvm:*",
     "//src/storage/fxfs/crypto:*",
     "//vendor/google/*",
   ]
-  with_unit_tests = true
   deps = [
     "//src/storage/lib/ptr_slice",
     "//third_party/rust_crates:cipher",
@@ -60,9 +60,33 @@ rustc_library("storage_xts") {
   ]
   if (!is_debug) {
     configs -= [ "//build/config:default_optimize" ]
+  }
+}
+
+rustc_test("storage_xts_test") {
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+  deps = [
+           "//src/storage/lib/ptr_slice",
+           "//third_party/rust_crates:cipher",
+           "//third_party/rust_crates:static_assertions",
+           "//third_party/rust_crates:zerocopy",
+         ] + [ "//third_party/rust_crates:test-case" ]
+  if (is_debug) {
+    configs += []
+  } else {
     configs += [
       "//build/config:optimize_speed",
       "//build/config/lto:lto-if-compatible",
     ]
   }
+  if (!is_debug) {
+    configs -= [ "//build/config:default_optimize" ]
+  }
+}
+
+fuchsia_unittest_package("storage-xts-test") {
+  package_name = "storage-xts-test-gn"
+  component_name = "storage-xts-test"
+  deps = [ ":storage_xts_test" ]
 }

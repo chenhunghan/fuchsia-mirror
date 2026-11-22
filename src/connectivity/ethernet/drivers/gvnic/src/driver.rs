@@ -15,7 +15,10 @@ use crate::abi::{
     REG_DRV_STATUS_OFFSET, REG_MAX_RX_QUEUES_OFFSET, REG_MAX_TX_QUEUES_OFFSET, RxFlags,
 };
 use crate::dma::{PageList, PageListId};
-use dma_buffer::ContiguousBuffer;
+use dma_buffer::{
+    CacheOptions, ContiguousBuffer, SharedContiguousBuffer, device_read_barrier,
+    device_write_barrier,
+};
 use fdf_component::{
     Driver, DriverContext, DriverError, Node, NodeBuilder, ServiceInstance, ServiceOffer,
 };
@@ -62,9 +65,20 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{Ordering, fence};
 use zerocopy::byteorder::network_endian::{U16, U32, U64};
 use zx::{BootDuration, BootInstant, Bti, Rights, Status, Vmar, VmarFlags, system_get_page_size};
+
+fn new_coherent_buffer(bti: &Bti, vmar: &Vmar, size: usize) -> Result<ContiguousBuffer, Status> {
+    ContiguousBuffer::new_with_options(bti, vmar, size, 0, CacheOptions::Coherent)
+}
+
+fn new_shared_coherent_buffer(
+    bti: &Bti,
+    vmar: &Vmar,
+    size: usize,
+) -> Result<SharedContiguousBuffer, Status> {
+    Ok(new_coherent_buffer(bti, vmar, size)?.into_shared())
+}
 
 const CHILD_NODE_NAME: &str = "gvnic";
 pub(crate) const PORT_ID: u8 = 0;
@@ -89,13 +103,13 @@ const POLL_INITIAL_BACKOFF: BootDuration = BootDuration::from_micros(1);
 const POLL_MAX_BACKOFF: BootDuration = BootDuration::from_millis(10);
 
 struct AdminQueue {
-    buf: ContiguousBuffer,
+    buf: SharedContiguousBuffer,
     next_idx: u32,
 }
 
 impl AdminQueue {
     fn new(vmar: &Vmar, bti: &Bti, page_size: usize) -> Result<Self, Status> {
-        Ok(Self { buf: ContiguousBuffer::new_with_vmar(bti, vmar, page_size)?, next_idx: 0 })
+        Ok(Self { buf: new_shared_coherent_buffer(bti, vmar, page_size)?, next_idx: 0 })
     }
 
     fn phys(&self) -> u64 {
@@ -128,13 +142,13 @@ impl AdminQueue {
     ) -> Result<(), Status> {
         let max_entries = self.buf.size() / size_of::<GvnicAdminqEntry>();
         let idx = (self.next_idx as usize) % max_entries;
-        self.buf.write_element(idx, &GvnicAdminqEntry::new_command(opcode, payload));
+        self.buf.write_at(idx, &GvnicAdminqEntry::new_command(opcode, payload))?;
         self.next_idx = self.next_idx.wrapping_add(1);
         let doorbell_target = self.next_idx;
 
         // Ensure the command descriptor writes to the admin queue DMA buffer are visible before the
         // MMIO doorbell write notifies the device.
-        fence(Ordering::Release);
+        device_write_barrier();
         reg_mmio.store(REG_ADMIN_QUEUE_DOORBELL_OFFSET, U32::new(doorbell_target));
 
         poll_until(|| {
@@ -143,9 +157,9 @@ impl AdminQueue {
         .await?;
         // Ensure the MMIO completion counter read is ordered before reading the completion status
         // that the device wrote to the admin queue DMA buffer.
-        fence(Ordering::Acquire);
+        device_read_barrier();
 
-        let completed: GvnicAdminqEntry = self.buf.read_element(idx);
+        let completed: GvnicAdminqEntry = self.buf.read_at(idx)?;
         if completed.status.get() != GVNIC_ADMINQ_STATUS_PASSED {
             error!(
                 "Admin queue command (0x{:x}) at index {idx} failed with status 0x{:x}",
@@ -160,7 +174,9 @@ impl AdminQueue {
 
 struct TxRingState {
     resources: ContiguousBuffer,
-    ring: ContiguousBuffer,
+    ring: SharedContiguousBuffer,
+    db_index: u32,
+    counter_index: usize,
     len: u16,
     buffer_size: u16,
     next_free: u16,
@@ -186,8 +202,10 @@ impl TxRingState {
 
 struct RxRingState {
     resources: ContiguousBuffer,
-    desc_ring: ContiguousBuffer,
+    desc_ring: SharedContiguousBuffer,
     data_ring: ContiguousBuffer,
+    db_index: u32,
+    counter_index: usize,
     doorbell: u32,
     counter_val: u32,
     pending_space: VecDeque<RxSpaceBuffer>,
@@ -212,8 +230,8 @@ impl RxRingState {
 
 struct GvnicDmaResources {
     admin_queue: AdminQueue,
-    counter_array: ContiguousBuffer,
-    irq_doorbell_idx_page: ContiguousBuffer,
+    counter_array: SharedContiguousBuffer,
+    irq_doorbell_idx_page: SharedContiguousBuffer,
     tx_page_list: PageList,
     rx_page_list: PageList,
     tx_ring: TxRingState,
@@ -322,7 +340,7 @@ impl Driver for GvnicDriver {
         Ok(Self { inner, _node: node, scope })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         self.scope.clone().cancel().await;
         if let Err(err) = self.reset_card().await {
             error!("Failed to reset card on stop: {err:?}");
@@ -429,19 +447,17 @@ impl GvnicInner {
         let offset = (index as usize) * size_of::<u32>();
         // Ensure packet payload and descriptor ring writes to DMA memory are visible before the
         // MMIO doorbell write notifies the device.
-        fence(Ordering::Release);
+        device_write_barrier();
         self.doorbell_mmio.store(offset, U32::new(value));
     }
 
-    fn read_counter(&self, index: usize) -> u32 {
-        let Some(dma) = &self.dma else {
-            return 0;
-        };
-        let val = dma.counter_array.read_element::<U32>(index).get();
+    fn read_counter(&self, index: usize) -> Option<u32> {
+        let dma = self.dma.as_ref()?;
+        let val = dma.counter_array.read_at::<U32>(index).ok()?.get();
         // Ensure reading the device-updated completion counter from DMA memory is ordered before
         // reading completed TX/RX descriptors and packet payloads from DMA memory.
-        fence(Ordering::Acquire);
-        val
+        device_read_barrier();
+        Some(val)
     }
 
     fn ack_irq_doorbell(&mut self, irq_index: u32) {
@@ -449,8 +465,13 @@ impl GvnicInner {
         let Some(dma) = &self.dma else {
             return;
         };
-        let irq_db_index = dma.irq_doorbell_idx_page.read_element::<U32>(idx_offset).get();
-        self.write_doorbell(irq_db_index, (IrqDoorbellFlags::ACK | IrqDoorbellFlags::EVENT).bits());
+        let Ok(irq_db_index) = dma.irq_doorbell_idx_page.read_at::<U32>(idx_offset) else {
+            return;
+        };
+        self.write_doorbell(
+            irq_db_index.get(),
+            (IrqDoorbellFlags::ACK | IrqDoorbellFlags::EVENT).bits(),
+        );
     }
 
     fn port_status(&self) -> PortStatus {
@@ -472,8 +493,8 @@ impl GvnicInner {
         if !self.netdev_started {
             return None;
         }
-        let res: GvnicQueueResources = self.dma.as_ref()?.tx_ring.resources.read_element(0);
-        let counter = self.read_counter(res.counter_index.get() as usize);
+        let counter_index = self.dma.as_ref()?.tx_ring.counter_index;
+        let counter = self.read_counter(counter_index)?;
         let dma = self.dma.as_mut()?;
         while dma.tx_ring.counter_val != counter {
             let Some(id) = dma.tx_ring.pending_space.pop_front() else {
@@ -489,8 +510,11 @@ impl GvnicInner {
         &mut self,
         rx_buffers: &mut Vec<RxBuffer>,
     ) -> Option<Client<NetworkDeviceIfc, DriverChannel>> {
-        let res: GvnicQueueResources = self.dma.as_ref()?.rx_ring.resources.read_element(0);
-        let counter = self.read_counter(res.counter_index.get() as usize);
+        let (counter_index, db_idx) = {
+            let rx = &self.dma.as_ref()?.rx_ring;
+            (rx.counter_index, rx.db_index)
+        };
+        let counter = self.read_counter(counter_index)?;
         let mut packets_processed: u32 = 0;
         let ring_len = usize::from(self.rx_ring_len);
         let rounded_mtu = usize::from(self.rounded_mtu);
@@ -502,7 +526,9 @@ impl GvnicInner {
             dma.rx_ring.counter_val = dma.rx_ring.counter_val.wrapping_add(1);
             packets_processed = packets_processed.wrapping_add(1);
 
-            let desc: GvnicRxDesc = dma.rx_ring.desc_ring.read_element(slot_idx);
+            let Ok(desc) = dma.rx_ring.desc_ring.read_at::<GvnicRxDesc>(slot_idx) else {
+                break;
+            };
             let flags = RxFlags::from_bits_truncate(desc.flags_seq.get());
             let raw_len = usize::from(desc.length.get());
             if flags.intersects(RxFlags::ERR | RxFlags::CONT)
@@ -557,7 +583,6 @@ impl GvnicInner {
 
         if packets_processed > 0 {
             dma.rx_ring.doorbell = dma.rx_ring.doorbell.wrapping_add(packets_processed);
-            let db_idx = res.db_index.get();
             let db_val = dma.rx_ring.doorbell;
             self.write_doorbell(db_idx, db_val);
         }
@@ -695,7 +720,7 @@ impl GvnicDriver {
 
         // Query device descriptor via Admin Queue using a temporary scratch page.
         let dev_descr: GvnicDeviceDescriptor = {
-            let scratch_page = ContiguousBuffer::new_with_vmar(&bti, &vmar, page_size)?;
+            let scratch_page = new_coherent_buffer(&bti, &vmar, page_size)?;
             let describe_cmd = GvnicAdminqDescribeDevice {
                 device_descriptor_addr: U64::new(scratch_page.phys() as u64),
                 device_descriptor_version: U32::new(GVNIC_DEVICE_DESCRIPTOR_VERSION),
@@ -708,7 +733,7 @@ impl GvnicDriver {
             // unpinning quarantines its PMT on the BTI until the next card reset and
             // `bti.release_quarantine()`.
             admin_queue.execute(&mut reg_mmio, &describe_cmd).await?;
-            let descr = scratch_page.read_element(0);
+            let descr = scratch_page.read_struct(0)?;
             // SAFETY: `DescribeDevice` has completed synchronously on the admin queue, so the
             // device will no longer access `scratch_page`.
             let _ = unsafe { scratch_page.unpin() };
@@ -725,8 +750,8 @@ impl GvnicDriver {
 
         let num_counters = usize::from(dev_descr.counters.get()).max(1);
         let counter_array =
-            ContiguousBuffer::new_with_vmar(&bti, &vmar, size_of::<U32>() * num_counters)?;
-        let irq_doorbell_idx_page = ContiguousBuffer::new_with_vmar(&bti, &vmar, page_size)?;
+            new_shared_coherent_buffer(&bti, &vmar, size_of::<U32>() * num_counters)?;
+        let irq_doorbell_idx_page = new_shared_coherent_buffer(&bti, &vmar, page_size)?;
 
         let tx_ring_len = dev_descr.tx_queue_entries.get();
         let rx_ring_len = dev_descr.rx_queue_entries.get();
@@ -748,50 +773,30 @@ impl GvnicDriver {
         let tx_page_list = PageList::new(&vmar, &bti, TX_PAGE_LIST_ID, tx_qpl_pages)?;
         let rx_page_list = PageList::new(&vmar, &bti, RX_PAGE_LIST_ID, rx_qpl_pages)?;
 
-        let tx_resources =
-            ContiguousBuffer::new_with_vmar(&bti, &vmar, size_of::<GvnicQueueResources>())?;
-        let tx_ring_buf = ContiguousBuffer::new_with_vmar(
+        let tx_resources = new_coherent_buffer(&bti, &vmar, size_of::<GvnicQueueResources>())?;
+        let tx_ring_buf = new_shared_coherent_buffer(
             &bti,
             &vmar,
             size_of::<GvnicTxPktDesc>() * usize::from(tx_ring_len),
         )?;
-        let tx_ring = TxRingState {
-            resources: tx_resources,
-            ring: tx_ring_buf,
-            len: tx_ring_len,
-            buffer_size: rounded_mtu,
-            next_free: 0,
-            doorbell: 0,
-            counter_val: 0,
-            pending_space: VecDeque::with_capacity(usize::from(tx_ring_len)),
-        };
 
-        let rx_resources =
-            ContiguousBuffer::new_with_vmar(&bti, &vmar, size_of::<GvnicQueueResources>())?;
-        let rx_desc_ring = ContiguousBuffer::new_with_vmar(
+        let rx_resources = new_coherent_buffer(&bti, &vmar, size_of::<GvnicQueueResources>())?;
+        let rx_desc_ring = new_shared_coherent_buffer(
             &bti,
             &vmar,
             size_of::<GvnicRxDesc>() * usize::from(rx_ring_len),
         )?;
-        let rx_data_ring = ContiguousBuffer::new_with_vmar(
+        let mut rx_data_ring = new_coherent_buffer(
             &bti,
             &vmar,
             size_of::<GvnicRxDataRingSlot>() * usize::from(rx_ring_len),
         )?;
         for i in 0..usize::from(rx_ring_len) {
-            rx_data_ring.write_element(
+            rx_data_ring.write_at(
                 i,
                 &GvnicRxDataRingSlot { qpl_offset: U64::new(u64::from(rounded_mtu) * (i as u64)) },
-            );
+            )?;
         }
-        let rx_ring = RxRingState {
-            resources: rx_resources,
-            desc_ring: rx_desc_ring,
-            data_ring: rx_data_ring,
-            doorbell: u32::from(rx_ring_len),
-            counter_val: 0,
-            pending_space: VecDeque::with_capacity(usize::from(rx_ring_len)),
-        };
 
         let max_tx_queues = reg_mmio.load::<U32>(REG_MAX_TX_QUEUES_OFFSET).get();
         let max_rx_queues = reg_mmio.load::<U32>(REG_MAX_RX_QUEUES_OFFSET).get();
@@ -837,8 +842,8 @@ impl GvnicDriver {
                 &GvnicAdminqCreateTxQueue {
                     queue_id: U32::ZERO,
                     reserved: U32::ZERO,
-                    queue_resources_addr: U64::new(tx_ring.resources.phys() as u64),
-                    tx_ring_addr: U64::new(tx_ring.ring.phys() as u64),
+                    queue_resources_addr: U64::new(tx_resources.phys() as u64),
+                    tx_ring_addr: U64::new(tx_ring_buf.phys() as u64),
                     queue_page_list_id: tx_page_list.id().into(),
                     ntfy_id: U32::new(TX_IRQ_INDEX),
                     tx_comp_ring_addr: U64::ZERO,
@@ -846,6 +851,19 @@ impl GvnicDriver {
                 },
             )
             .await?;
+        let tx_res: GvnicQueueResources = tx_resources.read_struct(0)?;
+        let tx_ring = TxRingState {
+            resources: tx_resources,
+            ring: tx_ring_buf,
+            db_index: tx_res.db_index.get(),
+            counter_index: tx_res.counter_index.get() as usize,
+            len: tx_ring_len,
+            buffer_size: rounded_mtu,
+            next_free: 0,
+            doorbell: 0,
+            counter_val: 0,
+            pending_space: VecDeque::with_capacity(usize::from(tx_ring_len)),
+        };
 
         admin_queue
             .execute(
@@ -855,15 +873,26 @@ impl GvnicDriver {
                     index: U32::ZERO,
                     reserved: U32::ZERO,
                     ntfy_id: U32::new(RX_IRQ_INDEX),
-                    queue_resources_addr: U64::new(rx_ring.resources.phys() as u64),
-                    rx_desc_ring_addr: U64::new(rx_ring.desc_ring.phys() as u64),
-                    rx_data_ring_addr: U64::new(rx_ring.data_ring.phys() as u64),
+                    queue_resources_addr: U64::new(rx_resources.phys() as u64),
+                    rx_desc_ring_addr: U64::new(rx_desc_ring.phys() as u64),
+                    rx_data_ring_addr: U64::new(rx_data_ring.phys() as u64),
                     queue_page_list_id: rx_page_list.id().into(),
                     rx_ring_size: dev_descr.rx_queue_entries,
                     packet_buffer_size: U16::new(rounded_mtu),
                 },
             )
             .await?;
+        let rx_res: GvnicQueueResources = rx_resources.read_struct(0)?;
+        let rx_ring = RxRingState {
+            resources: rx_resources,
+            desc_ring: rx_desc_ring,
+            data_ring: rx_data_ring,
+            db_index: rx_res.db_index.get(),
+            counter_index: rx_res.counter_index.get() as usize,
+            doorbell: u32::from(rx_ring_len),
+            counter_val: 0,
+            pending_space: VecDeque::with_capacity(usize::from(rx_ring_len)),
+        };
 
         let inner = Arc::new(Mutex::new(GvnicInner {
             reg_mmio,
@@ -994,9 +1023,7 @@ impl NetworkDeviceImplServerHandler<DriverChannel> for NetworkDeviceImplServer {
             if inner.netdev_started {
                 Err(Status::ALREADY_BOUND)
             } else if let Some(dma) = &inner.dma {
-                let res: GvnicQueueResources = dma.rx_ring.resources.read_element(0);
-                let db_idx = res.db_index.get();
-                let db_val = dma.rx_ring.doorbell;
+                let (db_idx, db_val) = (dma.rx_ring.db_index, dma.rx_ring.doorbell);
                 inner.netdev_started = true;
                 inner.write_doorbell(db_idx, db_val);
                 Ok(())
@@ -1126,7 +1153,10 @@ impl NetworkDeviceImplServerHandler<DriverChannel> for NetworkDeviceImplServer {
                             seg_len: len_u16,
                             seg_addr: U64::new(qpl_offset as u64),
                         };
-                        dma.tx_ring.ring.write_element(slot_idx, &pkt_desc);
+                        if let Err(status) = dma.tx_ring.ring.write_at(slot_idx, &pkt_desc) {
+                            self.tx_results.push(TxResult { id: tx_id, status: Err(status) });
+                            continue;
+                        }
 
                         dma.tx_ring.next_free = (dma.tx_ring.next_free + 1) % tx_ring_len;
                         dma.tx_ring.doorbell = dma.tx_ring.doorbell.wrapping_add(1);
@@ -1135,8 +1165,7 @@ impl NetworkDeviceImplServerHandler<DriverChannel> for NetworkDeviceImplServer {
                     }
 
                     if queued_any {
-                        let res: GvnicQueueResources = dma.tx_ring.resources.read_element(0);
-                        doorbell_write = Some((res.db_index.get(), dma.tx_ring.doorbell));
+                        doorbell_write = Some((dma.tx_ring.db_index, dma.tx_ring.doorbell));
                     }
                 }
 

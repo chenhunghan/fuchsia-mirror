@@ -40,7 +40,6 @@ fx_packaged_binary(
 
 fx_package(
     name = "virtual_audio_util",
-    package_name = "virtual_audio_util",
     package_repository_name = "fuchsia.com",
     resources = [":bin_packaged"],
     visibility = ["//bundles/assembly:__subpackages__"],

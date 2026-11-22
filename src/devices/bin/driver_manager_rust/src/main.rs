@@ -12,7 +12,7 @@ use driver_manager_shutdown::ShutdownManager;
 use driver_manager_utils::DictionaryUtil;
 use fidl::endpoints::{Proxy, create_endpoints};
 use fidl_fuchsia_component as fcomponent;
-use fidl_fuchsia_component_sandbox as fsandbox;
+use fidl_fuchsia_component_runtime as fruntime;
 use fidl_fuchsia_driver_index as fdi;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_ldsvc as fldsvc;
@@ -43,7 +43,7 @@ async fn main() -> Result<(), Error> {
     // Connect to required services.
     let realm = connect_to_protocol::<fcomponent::RealmMarker>()?;
     let introspector = connect_to_protocol::<fcomponent::IntrospectorMarker>()?;
-    let capability_store = connect_to_protocol::<fsandbox::CapabilityStoreMarker>()?;
+    let capabilities = connect_to_protocol::<fruntime::CapabilitiesMarker>()?;
     let driver_index = connect_to_protocol::<fdi::DriverIndexMarker>()?;
 
     let lib_dir = fuchsia_fs::directory::open_in_namespace(
@@ -81,7 +81,7 @@ async fn main() -> Result<(), Error> {
     let driver_runner = DriverRunner::new(
         realm,
         introspector,
-        DictionaryUtil::new(capability_store),
+        DictionaryUtil::new(capabilities),
         driver_index,
         loader_service_factory,
         config.enable_test_shutdown_delays,

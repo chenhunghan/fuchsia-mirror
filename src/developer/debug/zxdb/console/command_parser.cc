@@ -9,6 +9,7 @@
 
 #include <map>
 #include <set>
+#include <utility>
 
 #include "src/developer/debug/zxdb/common/err.h"
 #include "src/developer/debug/zxdb/console/command.h"
@@ -81,8 +82,12 @@ bool IsWildcardToken(std::string_view token) { return token == "*"; }
 
 class Parser {
  public:
-  Parser(const std::string& input, Command* command, const FillCommandContextCallback& fill_context)
-      : input_(input), fill_context_(fill_context), command_(command) {}
+  Parser(std::string input, Command* command, const FillCommandContextCallback& fill_context)
+      : input_(std::move(input)), fill_context_(fill_context), command_(command) {}
+
+  // Unit tests call SetVerbsForTest to supply synthetic verb definitions instead of using
+  // GetVerbs().
+  void SetVerbsForTest(const std::map<Verb, VerbRecord>* verbs) { custom_verbs_ = verbs; }
 
   const Err& Parse() {
     if (!Tokenize(input_)) {
@@ -135,15 +140,15 @@ class Parser {
 
  private:
   struct State {
-    bool (Parser::* advance)();
+    bool (Parser::*advance)();
 
     // Completer callback. The first argument is a prefix we expect all
     // completions to share. The second is a vector to which we should append
     // full single tokens which would be valid completions.
-    void (Parser::* complete)(const std::string&, std::vector<std::string>*);
+    void (Parser::*complete)(const std::string&, std::vector<std::string>*);
 
-    State(bool (Parser::* advance)(),
-          void (Parser::* complete)(const std::string&, std::vector<std::string>*))
+    State(bool (Parser::*advance)(),
+          void (Parser::*complete)(const std::string&, std::vector<std::string>*))
         : advance(advance), complete(complete) {}
   };
 
@@ -232,6 +237,9 @@ class Parser {
   // Used for completions. Optionally set to fill in the noun information for
   // a given command so the completion code can use them.
   const FillCommandContextCallback& fill_context_;
+
+  // Optional override for GetVerbs() set by SetVerbsForTest.
+  const std::map<Verb, VerbRecord>* custom_verbs_ = nullptr;
 
   Command* command_ = nullptr;
   const State* state_ = &kNounState;
@@ -337,7 +345,7 @@ bool Parser::DoNounIndexState() {
     return Fail("Invalid index \"" + token_str() + "\" for \"" + NounToString(noun_) + "\".");
   }
 
-  command_->SetNoun(noun_, noun_index);
+  command_->SetNoun(noun_, static_cast<int>(noun_index));
   return Consume(Parser::kNounState);
 }
 
@@ -414,6 +422,8 @@ bool Parser::DoSwitchState() {
 
   if (token_str().size() > 2) {
     sw_value_ = token_str().substr(2);
+  } else {
+    sw_value_ = std::nullopt;
   }
 
   return Consume(Parser::kSwitchArgState);
@@ -429,15 +439,23 @@ bool Parser::DoSwitchArgState() {
     return FailWithUsage(std::string("--") + sw_record_->name + " takes no argument.");
   }
 
+  std::string val;
   if (sw_value_) {
-    command_->SetSwitch(sw_record_->id, std::move(*sw_value_));
-    return GoTo(Parser::kSwitchesState);
+    val = std::move(*sw_value_);
+    sw_value_.reset();
   } else if (at_end()) {
     return FailWithUsage("Argument needed for \"" + sw_name_ + "\".");
   } else {
-    command_->SetSwitch(sw_record_->id, token_str());
-    return Consume(Parser::kSwitchesState);
+    val = token_str();
+    Consume();
   }
+
+  if (sw_record_->multi_value) {
+    command_->AddSwitch(sw_record_->id, std::move(val));
+  } else {
+    command_->SetSwitch(sw_record_->id, std::move(val));
+  }
+  return GoTo(Parser::kSwitchesState);
 }
 
 bool Parser::DoVerbState() {
@@ -446,11 +464,24 @@ bool Parser::DoVerbState() {
   }
 
   // Consume the verb.
-  const auto& verb_strings = GetStringVerbMap();
-  auto found_verb_str = verb_strings.find(token_str());
-  if (found_verb_str == verb_strings.end()) {
+  std::map<std::string, Verb> custom_verb_strings;
+  const std::map<std::string, Verb>* verb_strings = nullptr;
+  if (custom_verbs_) {
+    for (const auto& [verb, record] : *custom_verbs_) {
+      for (const auto& alias : record.aliases) {
+        custom_verb_strings[alias] = verb;
+      }
+    }
+    verb_strings = &custom_verb_strings;
+  } else {
+    verb_strings = &GetStringVerbMap();
+  }
+
+  auto found_verb_str = verb_strings->find(token_str());
+  if (found_verb_str == verb_strings->end()) {
     const auto& nouns_strings = GetStringNounMap();
-    std::optional<std::string> suggestion = DidYouMean(token_str(), nouns_strings, verb_strings, 5);
+    std::optional<std::string> suggestion =
+        DidYouMean(token_str(), nouns_strings, *verb_strings, 5);
     std::string msg = "The string \"" + token_str() + "\" is not a valid verb.";
     if (suggestion) {
       msg += " Did you mean \"" + *suggestion + "\"?";
@@ -461,7 +492,7 @@ bool Parser::DoVerbState() {
   command_->set_verb(found_verb_str->second);
 
   // Find the verb record.
-  const auto& verbs = GetVerbs();
+  const auto& verbs = custom_verbs_ ? *custom_verbs_ : GetVerbs();
   auto found_verb = verbs.find(command_->verb());
   FX_DCHECK(found_verb != verbs.end());  // Valid verb should always be found.
   verb_record_ = &found_verb->second;
@@ -599,6 +630,19 @@ Err ParseCommand(const std::string& input, Command* output) {
   *output = Command();
 
   Parser parser(input, output, FillCommandContextCallback());
+  parser.Parse();
+
+  FX_DCHECK(parser.err().has_error() || parser.at_end());
+
+  return parser.err();
+}
+
+Err ParseCommandForTest(const std::string& input, const std::map<Verb, VerbRecord>& verbs,
+                        Command* output) {
+  *output = Command();
+
+  Parser parser(input, output, FillCommandContextCallback());
+  parser.SetVerbsForTest(&verbs);
   parser.Parse();
 
   FX_DCHECK(parser.err().has_error() || parser.at_end());

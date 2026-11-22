@@ -47,7 +47,7 @@ class VirtualAudioDai final : public VirtualAudioDaiDeviceType,
   void GetBufferForVA(fit::callback<void(fit::result<ErrorT, CurrentBuffer>)> callback) override;
 
  protected:
-  // FIDL LLCPP method for fuchsia.hardware.audio.DaiConnector.
+  // FIDL wire method for fuchsia.hardware.audio.DaiConnector.
   void Connect(ConnectRequestView request, ConnectCompleter::Sync& completer) override {
     zxlogf(INFO, "VirtualAudioDai is connecting!     (%p)", this);
     dai_bindings_.AddBinding(dispatcher_, std::move(request->dai_protocol), this,

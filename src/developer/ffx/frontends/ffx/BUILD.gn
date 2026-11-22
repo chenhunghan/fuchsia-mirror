@@ -2,75 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/host.gni")
-import("//build/sdk/sdk_host_tool.gni")
+import("//build/bazel/bazel_host_tool.gni")
 import("//build/testing/host_test.gni")
 import("//build/testing/host_test_data.gni")
-import("//src/developer/ffx/build/ffx.gni")
-import("//src/developer/ffx/config.gni")
-
-visibility = [ "//src/developer/ffx/*" ]
 
 assert(is_host, "ffx is for use with the host toolchain only")
 
-# A note for developers interested in generating a Cargo.toml file for this
-# tool:
-# FFX generates a `ffx_bin_unversioned` rule, which is what should be used as the target for
-# cargo gen. The appropriate command is:
-# fx gen-cargo \
-#   '//src/developer/ffx/frontends/ffx:ffx_bin_unversioned(//build/toolchain:host_x64)'
-
-ffx("ffx") {
-  sdk_category = "not-yet-specified"
-  version = "0.1.0"
-  edition = "2024"
-  with_unit_tests = true
-
-  plugin_deps = required_ffx_plugins + included_ffx_plugins  # from config.gni
-
-  # If `ffx_build_dual_mode_plugins_as_subtools` config is set, we won't
-  # include any plugin that doesn't have to be included, and they will be
-  # built as independent subtools instead.
-  #
-  # If you're looking to reduce build times, set the above flag and it will
-  # make it so you won't have to re-link all of ffx to build a single plugin's
-  # code.
-  if (!ffx_build_dual_mode_plugins_as_subtools) {
-    large_ffx_binary_optimizations = true
-    plugin_deps += dual_mode_plugins  # from config.gni
-  }
-
-  deps = [
-    "//src/developer/ffx/lib/fho:lib",
-    "//third_party/rust_crates:anyhow",
+bazel_host_tool("ffx_bin_unversioned") {
+  visibility = [
+    "//src/developer/ffx/*",
+    "//tools/docsgen:*",
   ]
+  bazel_target = ":ffx_bin_unversioned"
+  bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/ffx_bin_unversioned"
+  output_name = "ffx_unversioned"
+}
 
-  ffx_deps = [
-    ":ffx_lib_args",
-    ":ffx_lib_sub_command",
-    ":ffx_lib_suite",
-    "//src/developer/ffx/command:lib",
-    "//src/developer/ffx/config:lib",
-    "//src/developer/ffx/lib/errors:lib",
-    "//src/developer/ffx/lib/fho:lib",
-    "//src/developer/ffx/lib/traceable_error:lib",
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:argh",
-    "//third_party/rust_crates:log",
-  ]
-
-  args_sources = [ "src/args.rs" ]
-  args_deps = [
-    "//src/developer/ffx/core:lib",
-    "//third_party/rust_crates:argh",
-  ]
-
-  sources = [
-    "src/lib.rs",
-    "src/main.rs",
-  ]
-
-  test_deps = [ "//src/lib/fuchsia" ]
+bazel_host_tool("ffx_bin") {
+  visibility = [ "//src/developer/ffx/*" ]
+  bazel_target = ":ffx"
+  bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/ffx"
+  output_name = "ffx"
 }
 
 _ffx_e2e_config = [
@@ -85,7 +37,10 @@ _ffx_e2e_config = [
 ]
 
 host_test("ffx-e2e-without-target") {
-  visibility += [ "//:*" ]
+  visibility = [
+    "//:*",
+    "//src/developer/ffx/*",
+  ]
   binary_path = "$root_out_dir/ffx"
   args = _ffx_e2e_config + [
            "self-test",
@@ -104,7 +59,10 @@ host_test("ffx-e2e-without-target") {
 }
 
 host_test("ffx-e2e-with-target") {
-  visibility += [ "//:*" ]
+  visibility = [
+    "//:*",
+    "//src/developer/ffx/*",
+  ]
   binary_path = "$root_out_dir/ffx"
   args = _ffx_e2e_config + [ "self-test" ]
 
@@ -126,12 +84,12 @@ host_test("ffx-e2e-with-target") {
   environments = [
     # XXX(https://fxbug.dev/42143551): support arm64 HTI tests
     # emu_env,
-    nuc7_env,
     nuc11_env,
   ]
 }
 
 host_test_data("ffx-e2e-test-data") {
+  visibility = [ "//src/developer/ffx/*" ]
   sources = [
     "$root_out_dir/ffx",
     "$root_out_dir/zxdb",
@@ -139,6 +97,8 @@ host_test_data("ffx-e2e-test-data") {
 }
 
 group("e2e_tests") {
+  visibility = [ "//src/developer/ffx/*" ]
+
   # These are end to end tests, which are different from host-tests since
   # e2e tests require devices and/or complete images or product bundles.
   testonly = true
@@ -151,15 +111,95 @@ group("e2e_tests") {
 }
 
 group("host_tests") {
+  visibility = [ "//src/developer/ffx/*" ]
   testonly = true
   deps = [ ":ffx-e2e-without-target" ]
 }
 
 group("tests") {
+  visibility = [ "//src/developer/ffx/*" ]
   testonly = true
   public_deps = [
+    ":ffx_bin_unversioned_test",
+
     # Most ffx plugin test suites are included downstream of the group defined
-    # by the ffx template above.
-    ":ffx_tests",
+    # by the ffx_plugin template below.
+    ":ffx_lib_tests",
   ]
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+ffx_plugin("ffx_lib") {
+  sources = [ "src/lib.rs" ]
+  args_deps = [
+    "//src/developer/ffx/core:lib",
+    "//third_party/rust_crates:argh",
+  ]
+  args_sources = [ "src/args.rs" ]
+  edition = "2024"
+  plugin_deps = [
+    "//src/connectivity/network/net-cli/ffx:ffx_net",
+    "//src/developer/ffx/plugins/completion:ffx_completion",
+    "//src/developer/ffx/plugins/config:ffx_config_plugin",
+    "//src/developer/ffx/plugins/devices:ffx_devices",
+    "//src/developer/ffx/plugins/doctor:ffx_doctor",
+    "//src/developer/ffx/plugins/platform:ffx_platform",
+    "//src/developer/ffx/plugins/sdk:ffx_sdk",
+    "//src/developer/ffx/plugins/target:ffx_target",
+    "//src/developer/ffx/plugins/version:ffx_version",
+  ]
+  sdk_category = "not-yet-specified"
+  version = "0.1.0"
+  visibility = [
+    ":*",
+    "//src/developer/ffx:*",
+  ]
+  deps = [
+    "//src/developer/ffx/lib/fho:lib",
+    "//third_party/rust_crates:anyhow",
+  ]
+}
+if (is_host) {
+  rustc_test("ffx_bin_unversioned_test") {
+    sources = [ "src/main.rs" ]
+    edition = "2024"
+    deps = [
+             ":ffx_lib_args",
+             ":ffx_lib_sub_command",
+             ":ffx_lib_suite",
+             "//src/developer/ffx/command:lib",
+             "//src/developer/ffx/config:lib",
+             "//src/developer/ffx/lib/errors:lib",
+             "//src/developer/ffx/lib/fho:lib",
+             "//src/developer/ffx/lib/traceable_error:lib",
+             "//src/lib/fuchsia-async",
+             "//third_party/rust_crates:argh",
+             "//third_party/rust_crates:log",
+           ] + [ "//src/lib/fuchsia" ]
+    source_root = "src/main.rs"
+  }
 }

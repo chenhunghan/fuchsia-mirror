@@ -197,8 +197,64 @@ func compiledActionStringAttrTransformer(attr string) transformer {
 //   - `deps` entries without `@bazel2gn:path_overwrite` map to `""` so
 //     `compiledActionArgToGN` can reject them with a descriptive error instead
 //     of treating the target label as a source file path.
-func compiledActionPaths(call *syntax.CallExpr) (map[string]string, error) {
+//
+// compiledActionOuts returns a map from each output label in `call`'s `outs`
+// attribute (both `out` and `:out`) to its GN path.
+func compiledActionOuts(call *syntax.CallExpr) (map[string]string, error) {
 	outs := map[string]string{}
+	for _, arg := range call.Args {
+		binaryExpr, ok := arg.(*syntax.BinaryExpr)
+		if !ok || binaryExpr.Op != syntax.EQ {
+			continue
+		}
+		shouldSkip, err := hasSkipAnnotation(binaryExpr)
+		if err != nil {
+			return nil, err
+		}
+		if shouldSkip {
+			continue
+		}
+		ident, ok := binaryExpr.X.(*syntax.Ident)
+		if !ok || ident.Name != "outs" {
+			continue
+		}
+		if _, ok := overwrittenRaw(binaryExpr); ok {
+			// The GN value is set by hand, so its paths aren't inferred here.
+			continue
+		}
+		list, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.ListExpr)
+		if !ok {
+			return nil, fmt.Errorf("compiled_action outs must be a list literal, got %T", binaryExpr.Y)
+		}
+		for _, elm := range list.List {
+			elmSkip, err := hasSkipAnnotation(elm)
+			if err != nil {
+				return nil, err
+			}
+			if elmSkip {
+				continue
+			}
+			lit, ok := unwrapParenExpr(elm).(*syntax.Literal)
+			if !ok {
+				return nil, fmt.Errorf("compiled_action outs must only contain string literals, got %T", elm)
+			}
+			path, err := compiledActionOutToGN(lit)
+			if err != nil {
+				return nil, err
+			}
+			bare := strings.TrimPrefix(lit.Value.(string), ":")
+			outs[bare] = path
+			outs[":"+bare] = path
+		}
+	}
+	return outs, nil
+}
+
+func compiledActionPaths(call *syntax.CallExpr) (map[string]string, error) {
+	outs, err := compiledActionOuts(call)
+	if err != nil {
+		return nil, err
+	}
 	srcOverwrites := map[string]string{}
 	unannotatedDeps := map[string]string{}
 	for _, arg := range call.Args {
@@ -222,31 +278,6 @@ func compiledActionPaths(call *syntax.CallExpr) (map[string]string, error) {
 			continue
 		}
 		switch ident.Name {
-		case "outs":
-			list, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.ListExpr)
-			if !ok {
-				return nil, fmt.Errorf("compiled_action outs must be a list literal, got %T", binaryExpr.Y)
-			}
-			for _, elm := range list.List {
-				elmSkip, err := hasSkipAnnotation(elm)
-				if err != nil {
-					return nil, err
-				}
-				if elmSkip {
-					continue
-				}
-				lit, ok := unwrapParenExpr(elm).(*syntax.Literal)
-				if !ok {
-					return nil, fmt.Errorf("compiled_action outs must only contain string literals, got %T", elm)
-				}
-				path, err := compiledActionOutToGN(lit)
-				if err != nil {
-					return nil, err
-				}
-				out := lit.Value.(string)
-				outs[out] = path
-				outs[":"+out] = path
-			}
 		case "depfile":
 			lit, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.Literal)
 			if !ok {

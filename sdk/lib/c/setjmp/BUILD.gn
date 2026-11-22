@@ -98,7 +98,6 @@ libc_test("longjmp-unwind-tests") {
     "..:asm-linkage",
     "//src/lib/captive-thread/testing",
     "//src/lib/unwinder",
-    "//third_party/googletest:gmock",
     "//zircon/kernel/lib/arch",
   ]
 }

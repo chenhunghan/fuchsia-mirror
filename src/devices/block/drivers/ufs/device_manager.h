@@ -29,9 +29,37 @@ enum class UfsPowerMode : uint8_t {
 
 constexpr uint8_t kLowestActiveIcclevel = 0x00;
 constexpr uint8_t kHighestActiveIcclevel = 0x0f;
+// JEDEC wManufacturerID (UFS 3.1/4.0 section 14.1.4.2) for Samsung UFS devices, which can fail
+// Hibern8 exit if peer PA_TActivate does not exceed host PA_TActivate or if local PA_Hibern8Time
+// lacks residency margin.
+constexpr uint16_t kSamsungManufacturerId = 0x01ce;
+
+// Per-device UniPro Hibern8 timing quirks selected from DeviceDescriptor::wManufacturerID.
+struct DeviceQuirks {
+  // Keep peer PA_TActivate (in microseconds) strictly above local PA_TActivate so the device
+  // M-PHY RX wakes before the host finishes transmitting the Hibern8 exit burst.
+  bool ensure_peer_pa_tactivate_gt_host = false;
+  // Add one unit (PA_Hibern8Time is in fixed 100 us units) to local PA_Hibern8Time (0x15A7) so
+  // the host holds the link in Hibern8 past the device's minimum residency time before exiting.
+  bool increment_host_pa_hibern8time = false;
+
+  static constexpr DeviceQuirks FromManufacturerId(uint16_t manufacturer_id) {
+    // Samsung UFS controllers require peer PA_TActivate > host PA_TActivate and +1 unit on local
+    // PA_Hibern8Time to avoid UIC Hibern8 exit errors.
+    if (manufacturer_id == kSamsungManufacturerId) {
+      return {.ensure_peer_pa_tactivate_gt_host = true, .increment_host_pa_hibern8time = true};
+    }
+    return {};
+  }
+
+  constexpr bool any() const {
+    return ensure_peer_pa_tactivate_gt_host || increment_host_pa_hibern8time;
+  }
+};
 
 // How long SuspendPower() waits for in-flight I/O to drain before giving up on the suspend.
-// Must exceed kCommandTimeout so an in-flight command is not outlived by the drain wait.
+// Exceeds kCommandTimeout so an active request has at least one full stall-log window before the
+// drain wait refuses suspend.
 constexpr zx::duration kSuspendIoDrainTimeout = kCommandTimeout + zx::sec(2);
 // Number of PHY/device power cycles attempted synchronously when resuming from PowerDown fails.
 // We cap synchronous retries at 3 because each attempt can take several seconds of UIC/UPIU
@@ -179,6 +207,9 @@ class DeviceManager {
 
   // for test
   DeviceDescriptor &GetDeviceDescriptor() { return device_descriptor_; }
+  void SetSuspendIoDrainTimeoutForTesting(zx::duration timeout) {
+    suspend_io_drain_timeout_ = timeout;
+  }
   UfsPowerMode GetCurrentPowerMode() TA_EXCL(power_lock_) {
     std::lock_guard<std::mutex> lock(power_lock_);
     return current_power_mode_;
@@ -195,11 +226,17 @@ class DeviceManager {
  private:
   friend class UfsTest;
 
+  DeviceQuirks GetDeviceQuirks() const {
+    return DeviceQuirks::FromManufacturerId(betoh16(device_descriptor_.wManufacturerID));
+  }
+  bool NeedsUniproTimingQuirks() const;
+
   zx::result<uint32_t> ReadAttribute(Attributes attribute, uint8_t index = 0);
   zx::result<> WriteAttribute(Attributes attribute, uint32_t value, uint8_t index = 0);
   zx::result<uint32_t> DmeGet(uint16_t mib_attribute);
   zx::result<uint32_t> DmePeerGet(uint16_t mib_attribute);
   zx::result<> DmeSet(uint16_t mib_attribute, uint32_t value);
+  zx::result<> DmePeerSet(uint16_t mib_attribute, uint32_t value);
 
   template <typename DescriptorReturnType>
   zx::result<DescriptorReturnType> ReadDescriptor(DescriptorType descriptor, uint8_t index = 0);
@@ -211,6 +248,8 @@ class DeviceManager {
   zx::result<> ConfigureReferenceClock();
   zx::result<> ConfigureUniproAttributes();
   zx::result<> ConfigureUicPowerMode();
+  void LogRejectedPowerMode(uint32_t tx_lanes, uint32_t rx_lanes, uint32_t gear,
+                            uint32_t adapt_type, uint32_t pwr_mode, const zx::result<> &status);
 
   zx::result<> SetPowerCondition(scsi::PowerCondition power_condition) TA_REQ(power_lock_);
 
@@ -245,8 +284,9 @@ class DeviceManager {
   TransferRequestProcessor &req_processor_;
   InspectProperties &properties_;
 
-  DeviceDescriptor device_descriptor_;
-  GeometryDescriptor geometry_descriptor_;
+  DeviceDescriptor device_descriptor_{};
+  GeometryDescriptor geometry_descriptor_{};
+  zx::duration suspend_io_drain_timeout_ = kSuspendIoDrainTimeout;
 
   uint8_t max_lun_count_;
 
@@ -268,11 +308,22 @@ class DeviceManager {
   WriteBoosterBufferType write_booster_buffer_type_;
   UserSpaceConfigurationOption user_space_configuration_option_;
 
-  // Static UniPro link capabilities, queried once so that PowerDown resume does not repeat the
-  // DME_GETs.
+  // Static UniPro link capabilities and baseline timing attributes, queried once during initial
+  // boot so PowerDown resume does not repeat the DME_GETs and PA_TActivate / PA_Hibern8Time are
+  // restored idempotently.
   std::optional<uint32_t> cached_avail_tx_lanes_;
   std::optional<uint32_t> cached_avail_rx_lanes_;
   std::optional<uint32_t> cached_max_rx_hs_gear_;
+  std::optional<uint32_t> cached_host_granularity_;
+  std::optional<uint32_t> cached_device_granularity_;
+  std::optional<uint32_t> cached_initial_host_t_activate_;
+  std::optional<uint32_t> cached_initial_host_hibern8_time_;
+  // Set after the first ConfigureUniproAttributes() so applied timing quirks are logged at info
+  // level on initial boot and at debug level on each PowerDown resume.
+  bool unipro_timing_configured_ = false;
+  // Set after the first successful ConfigureUicPowerMode() so the chosen gear and lanes are logged
+  // once at info level across initial bring-up and PowerDown resumes.
+  bool uic_power_mode_logged_ = false;
 
   // Power management.
   //

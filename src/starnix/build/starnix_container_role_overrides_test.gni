@@ -1,0 +1,80 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/dist/resource.gni")
+
+# Defines a Fuchsia test package that validates a Starnix container component's
+# `task_role_overrides` configuration against a JSON5 expectations file through
+# `SchedulerManager`.
+#
+# Parameters
+#
+#   container_component (required)
+#     The `fuchsia_component` label for the Starnix container whose compiled
+#     `.cm` manifest contains `program.task_role_overrides`.
+#     Type: label
+#
+#   expectations (required)
+#     Path to a JSON5 (or JSON) expectations file listing role-resolution test
+#     cases and their `expected_role` values.
+#     Type: path
+#
+#   package_name (optional)
+#     The name of the test package. Defaults to `target_name`.
+#     Type: string
+#
+#   test_specs (optional)
+#     Additional test specifications to forward to `fuchsia_test_package`.
+#     Type: scope
+#
+#   visibility (optional)
+template("starnix_container_role_overrides_test") {
+  assert(
+      defined(invoker.container_component),
+      "container_component must be defined for starnix_container_role_overrides_test($target_name)")
+  assert(
+      defined(invoker.expectations),
+      "expectations must be defined for starnix_container_role_overrides_test($target_name)")
+
+  if (current_toolchain == default_toolchain) {
+    _expectations_target = "${target_name}_expectations"
+    _component_target = "${target_name}_component"
+
+    resource(_expectations_target) {
+      testonly = true
+      sources = [ invoker.expectations ]
+      outputs = [ "data/role_overrides_expectations.json5" ]
+      visibility = [ ":*" ]
+    }
+
+    fuchsia_unittest_component(_component_target) {
+      component_name = "role_overrides_expectations_test"
+      deps =
+          [ "//src/starnix/kernel/runner:role_overrides_expectations_test_bin" ]
+      visibility = [ ":*" ]
+    }
+
+    fuchsia_test_package(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "package_name",
+                               "test_specs",
+                               "visibility",
+                             ])
+      test_components = [ ":${_component_target}" ]
+      deps = [
+        ":${_expectations_target}",
+        invoker.container_component,
+      ]
+    }
+  } else {
+    group(target_name) {
+      testonly = true
+      forward_variables_from(invoker, [ "visibility" ])
+      deps = [ ":${target_name}($default_toolchain)" ]
+    }
+    not_needed(invoker, "*")
+  }
+}

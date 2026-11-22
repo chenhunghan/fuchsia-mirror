@@ -6,6 +6,10 @@
 
 void BufferPool::AddBuffer(const CodecBuffer* buffer) {
   ZX_DEBUG_ASSERT(buffer);
+  {
+    std::lock_guard<std::mutex> lock(lock_);
+    has_buffers_configured_ = true;
+  }
   free_buffers_.Push(buffer);
 }
 
@@ -55,6 +59,7 @@ std::optional<BufferPool::Allocation> BufferPool::FindBufferByBase(uint8_t* base
 void BufferPool::Reset(bool keep_data) {
   if (!keep_data) {
     std::lock_guard<std::mutex> lock(lock_);
+    has_buffers_configured_ = false;
     buffers_in_use_.clear();
   }
   free_buffers_.Reset(keep_data);
@@ -65,4 +70,9 @@ void BufferPool::StopAllWaits() { free_buffers_.StopAllWaits(); }
 bool BufferPool::has_buffers_in_use() {
   std::lock_guard<std::mutex> lock(lock_);
   return !buffers_in_use_.empty();
+}
+
+bool BufferPool::has_buffers_configured() {
+  std::lock_guard<std::mutex> lock(lock_);
+  return has_buffers_configured_;
 }

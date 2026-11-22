@@ -21,6 +21,7 @@
 
 #include <memory>
 #include <numeric>
+#include <span>
 #include <string>
 #include <thread>
 #include <vector>
@@ -796,7 +797,7 @@ TEST(StreamTestCase, AppendWithMultipleThreads) {
 }
 
 TEST(StreamTestCase, ExtendFillsWithZeros) {
-  const size_t kPageCount = 6;
+  constexpr size_t kPageCount = 6;
   const size_t kVmoSize = zx_system_get_page_size() * kPageCount;
   zx::vmo vmo;
   ASSERT_OK(zx::vmo::create(kVmoSize, 0, &vmo));
@@ -806,12 +807,10 @@ TEST(StreamTestCase, ExtendFillsWithZeros) {
   zx::stream stream;
   ASSERT_OK(zx::stream::create(ZX_STREAM_MODE_WRITE, vmo, 0, &stream));
 
-  char scratch[zx_system_get_page_size()];
-  memset(scratch, 'x', sizeof(scratch));
+  const std::span kFillData = vmo_test::TestFillPages<kPageCount, 'x'>();
+  ASSERT_OK(vmo.write(kFillData.data(), 0, kFillData.size_bytes()));
 
-  for (size_t i = 0; i < kPageCount; ++i) {
-    ASSERT_OK(vmo.write(scratch, zx_system_get_page_size() * i, sizeof(scratch)));
-  }
+  std::vector<char> scratch(zx_system_get_page_size());
 
   char buffer[17] = "0123456789ABCDEF";
   zx_iovec_t vec = {
@@ -823,15 +822,15 @@ TEST(StreamTestCase, ExtendFillsWithZeros) {
   ASSERT_OK(stream.writev_at(0, zx_system_get_page_size() * 2 - 2, &vec, 1, &actual));
   ASSERT_EQ(4, actual);
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, 0, sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), 0, scratch.size()));
 
   for (size_t i = 0; i < zx_system_get_page_size(); ++i) {
     ASSERT_EQ(0, scratch[i], "The %zu byte should be zero.", i);
   }
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, zx_system_get_page_size(), sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), zx_system_get_page_size(), scratch.size()));
 
   for (size_t i = 0; i < zx_system_get_page_size() - 2; ++i) {
     ASSERT_EQ(0, scratch[i], "The %zu byte of the second page should be zero.", i);
@@ -840,8 +839,8 @@ TEST(StreamTestCase, ExtendFillsWithZeros) {
   ASSERT_EQ('0', scratch[zx_system_get_page_size() - 2]);
   ASSERT_EQ('1', scratch[zx_system_get_page_size() - 1]);
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, zx_system_get_page_size() * 2, sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), zx_system_get_page_size() * 2, scratch.size()));
 
   ASSERT_EQ('2', scratch[0]);
   ASSERT_EQ('3', scratch[1]);
@@ -854,23 +853,23 @@ TEST(StreamTestCase, ExtendFillsWithZeros) {
   ASSERT_OK(stream.writev(0, &vec, 1, &actual));
   ASSERT_EQ(4, actual);
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, zx_system_get_page_size() * 2, sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), zx_system_get_page_size() * 2, scratch.size()));
 
   ASSERT_EQ('2', scratch[0]);
   ASSERT_EQ('3', scratch[1]);
   ASSERT_EQ(0, scratch[2]);
   ASSERT_EQ(0, scratch[3]);
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, zx_system_get_page_size() * 3, sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), zx_system_get_page_size() * 3, scratch.size()));
 
   for (size_t i = 0; i < zx_system_get_page_size(); ++i) {
     ASSERT_EQ(0, scratch[i], "The %zu byte of the third page should be zero.", i);
   }
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, zx_system_get_page_size() * 4, sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), zx_system_get_page_size() * 4, scratch.size()));
 
   for (size_t i = 0; i < zx_system_get_page_size() - 2; ++i) {
     ASSERT_EQ(0, scratch[i], "The %zu byte of the fourth page should be zero.", i);
@@ -879,8 +878,8 @@ TEST(StreamTestCase, ExtendFillsWithZeros) {
   ASSERT_EQ('0', scratch[zx_system_get_page_size() - 2]);
   ASSERT_EQ('1', scratch[zx_system_get_page_size() - 1]);
 
-  memset(scratch, 'a', sizeof(scratch));
-  ASSERT_OK(vmo.read(scratch, zx_system_get_page_size() * 5, sizeof(scratch)));
+  memset(scratch.data(), 'a', scratch.size());
+  ASSERT_OK(vmo.read(scratch.data(), zx_system_get_page_size() * 5, scratch.size()));
 
   ASSERT_EQ('2', scratch[0]);
   ASSERT_EQ('3', scratch[1]);

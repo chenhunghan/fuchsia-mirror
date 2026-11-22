@@ -5,8 +5,8 @@
 import subprocess
 from typing import IO, Protocol, TypeVar
 
+from libs import errors
 from libs.proc.runner import CalledProcessError, Runner
-from mobly import signals
 
 
 class Command(Protocol):
@@ -28,7 +28,7 @@ def require(command: _C) -> _C:
     """Require a command to be available."""
     if command.available():
         return command
-    raise signals.TestError(f"Required command not found: {command.binary()}")
+    raise errors.TestError(f"Required command not found: {command.binary()}")
 
 
 def optional(command: _C) -> _C | None:

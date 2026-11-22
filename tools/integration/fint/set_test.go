@@ -434,6 +434,7 @@ func TestToGNValue(t *testing.T) {
 	t.Run("string", func(t *testing.T) {
 		assertEqual(t, toGNValue(""), `""`)
 		assertEqual(t, toGNValue("foo"), `"foo"`)
+		assertEqual(t, toGNValue(`a\b"c$d${e}`), `"a\\b\"c\$d\${e}"`)
 	})
 
 	t.Run("string containing GN scope", func(t *testing.T) {
@@ -645,11 +646,12 @@ func TestGenArgs(t *testing.T) {
 				ChangedFiles: []*fintpb.Context_ChangedFile{
 					{Path: "src/foo.cc"},
 					{Path: "src/bar.cc"},
+					{Path: "tools/templates/${variant_snake_case}/BUILD.gn.template"},
 				},
 				CollectCoverage: true,
 			},
 			expectedArgs: []string{
-				`profile_source_files=["//src/foo.cc","//src/bar.cc"]`,
+				`profile_source_files=["//src/foo.cc","//src/bar.cc","//tools/templates/\${variant_snake_case}/BUILD.gn.template"]`,
 			},
 		},
 		{

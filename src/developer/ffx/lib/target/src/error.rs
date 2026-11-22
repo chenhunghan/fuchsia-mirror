@@ -14,13 +14,13 @@ pub enum TargetResolutionError {
     #[error("Target does not connect via networking")]
     NonNetworkTarget,
 
-    #[error("Network connections are disabled in configuration")]
+    #[error("Network connections are disabled in configuration (connectivity.enable_network)")]
     NetworkDisabled,
 
-    #[error("USB connections are disabled in configuration")]
+    #[error("USB connections are disabled in configuration (connectivity.enable_usb)")]
     UsbDisabled,
 
-    #[error("VSOCK connections are disabled in configuration")]
+    #[error("VSOCK connections are disabled in configuration (connectivity.enable_vsock)")]
     VsockDisabled,
 
     #[error("Timeout after {timeout:?} identifying manual target {addr}")]
@@ -28,6 +28,25 @@ pub enum TargetResolutionError {
 
     #[error("Connection to target was terminated")]
     ConnectionTerminated,
+
+    #[error(
+        "Target identity mismatch for '{expected_query}' at {target_spec}: target reported nodename {}, serial {} (a cached or registered target address may be stale)",
+        format_identity_field(.actual_nodename),
+        format_identity_field(.actual_serial),
+    )]
+    IdentityMismatch {
+        expected_query: String,
+        target_spec: String,
+        actual_nodename: Option<String>,
+        actual_serial: Option<String>,
+    },
+}
+
+fn format_identity_field(value: &Option<String>) -> String {
+    match value {
+        Some(s) => format!("{s:?}"),
+        None => "none".to_string(),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,6 +120,12 @@ impl FfxTargetCrateError {
     pub fn into_command_error(self) -> ffx_command_error::Error {
         match self {
             Self::Target(err) => ffx_command_error::Error::User(anyhow::Error::new(err)),
+            Self::Resolution(
+                err @ (TargetResolutionError::IdentityMismatch { .. }
+                | TargetResolutionError::NetworkDisabled
+                | TargetResolutionError::UsbDisabled
+                | TargetResolutionError::VsockDisabled),
+            ) => ffx_command_error::Error::User(anyhow::Error::new(err)),
             Self::Knock(crate::KnockError::NonCritical(err)) => ffx_command_error::Error::User(
                 ffx_command_error::NonFatalError(anyhow::Error::new(Self::Knock(
                     crate::KnockError::NonCritical(err),
@@ -221,5 +246,32 @@ mod tests {
         let crate_err = FfxTargetCrateError::Resolution(TargetResolutionError::NonNetworkTarget);
         let cmd_err = crate_err.into_command_error();
         assert!(matches!(cmd_err, ffx_command_error::Error::Unexpected(_)));
+    }
+    #[test]
+    fn test_identity_mismatch_formatting() {
+        let err = TargetResolutionError::IdentityMismatch {
+            expected_query: "id:SER123".to_string(),
+            target_spec: "127.0.0.1:22".to_string(),
+            actual_nodename: Some("bad\x1b[31m-node".to_string()),
+            actual_serial: None,
+        };
+        let msg = err.to_string();
+        assert_eq!(
+            msg,
+            r#"Target identity mismatch for 'id:SER123' at 127.0.0.1:22: target reported nodename "bad\u{1b}[31m-node", serial none (a cached or registered target address may be stale)"#
+        );
+    }
+
+    #[test]
+    fn test_into_command_error_from_disabled_transport() {
+        for disabled in [
+            TargetResolutionError::NetworkDisabled,
+            TargetResolutionError::UsbDisabled,
+            TargetResolutionError::VsockDisabled,
+        ] {
+            let cmd_err = FfxTargetCrateError::Resolution(disabled).into_command_error();
+            assert!(matches!(cmd_err, ffx_command_error::Error::User(_)), "{cmd_err:?}");
+            assert!(cmd_err.to_string().contains("connectivity.enable_"), "{cmd_err}");
+        }
     }
 }

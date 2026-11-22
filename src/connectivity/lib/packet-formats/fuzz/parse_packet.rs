@@ -12,7 +12,6 @@ use net_types::ethernet::Mac;
 use net_types::ip::{Ipv4Addr, Ipv6Addr};
 use netsvc_proto::debuglog::DebugLogPacket;
 use netsvc_proto::netboot::NetbootPacket;
-use netsvc_proto::tftp::TftpPacket;
 use packet::{BufferView, NoOpParsingContext, ParsablePacket};
 use packet_formats::arp::ArpPacket;
 use packet_formats::ethernet::{EthernetFrame, EthernetFrameLengthCheck};
@@ -44,7 +43,6 @@ enum MdnsPacketType {
 enum NetsvcPacketType {
     DebugLogPacket,
     NetbootPacket,
-    TftpPacket,
 }
 
 /// Packet formats whose parsers are provided by the [`packet_formats`] crate.
@@ -174,9 +172,6 @@ fn fuzz_parse_packet(input: &[u8]) {
             }
             NetsvcPacketType::NetbootPacket => {
                 NetbootPacket::parse_and_ignore(&mut input, ());
-            }
-            NetsvcPacketType::TftpPacket => {
-                TftpPacket::parse_and_ignore(&mut input, ());
             }
         },
     }

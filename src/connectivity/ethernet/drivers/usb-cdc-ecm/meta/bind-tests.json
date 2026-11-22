@@ -1,9 +1,29 @@
 [
     {
-        "name": "All Match",
+        "name": "Interface Match",
         "expected": "match",
         "device": {
             "fuchsia.BIND_PROTOCOL": "fuchsia.usb.BIND_PROTOCOL.INTERFACE",
+            "fuchsia.BIND_USB_CLASS": "fuchsia.usb.BIND_USB_CLASS.COMM",
+            "fuchsia.BIND_USB_SUBCLASS": "fuchsia.usb.comm.BIND_USB_SUBCLASS.ETHERNET",
+            "fuchsia.BIND_USB_PROTOCOL": "0"
+        }
+    },
+    {
+        "name": "Interface Association Match",
+        "expected": "match",
+        "device": {
+            "fuchsia.BIND_PROTOCOL": "fuchsia.usb.BIND_PROTOCOL.INTERFACE_ASSOCIATION",
+            "fuchsia.BIND_USB_CLASS": "fuchsia.usb.BIND_USB_CLASS.COMM",
+            "fuchsia.BIND_USB_SUBCLASS": "fuchsia.usb.comm.BIND_USB_SUBCLASS.ETHERNET",
+            "fuchsia.BIND_USB_PROTOCOL": "0"
+        }
+    },
+    {
+        "name": "Wrong Protocol",
+        "expected": "abort",
+        "device": {
+            "fuchsia.BIND_PROTOCOL": "fuchsia.usb.BIND_PROTOCOL.DEVICE",
             "fuchsia.BIND_USB_CLASS": "fuchsia.usb.BIND_USB_CLASS.COMM",
             "fuchsia.BIND_USB_SUBCLASS": "fuchsia.usb.comm.BIND_USB_SUBCLASS.ETHERNET",
             "fuchsia.BIND_USB_PROTOCOL": "0"

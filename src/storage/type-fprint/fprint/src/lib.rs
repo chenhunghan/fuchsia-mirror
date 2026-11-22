@@ -79,7 +79,7 @@ macro_rules! impl_fprint_one_generic {
         $(
             impl<T: TypeFingerprint> TypeFingerprint for $($type)::*<T> {
                 fn fingerprint() -> String {
-                    "".to_owned() + stringify!($($type)::*) + "<" + &T::fingerprint() + ">"
+                    [$(stringify!($type)),*].join("::") + "<" + &T::fingerprint() + ">"
                 }
             }
         )*
@@ -93,7 +93,7 @@ macro_rules! impl_fprint_two_generic {
         $(
             impl<A: TypeFingerprint, B: TypeFingerprint> TypeFingerprint for $($type)::*<A,B> {
                 fn fingerprint() -> String {
-                    "".to_owned() + stringify!($($type)::*) +
+                    [$(stringify!($type)),*].join("::") +
                         "<" + &A::fingerprint() + "," + &B::fingerprint() + ">"
                 }
             }
@@ -107,7 +107,8 @@ macro_rules! impl_fprint_tuple {
     (($($type: ident,)*)) => {
         impl<$($type: TypeFingerprint),*> TypeFingerprint for ($($type,)*) {
             fn fingerprint() -> String {
-                "(".to_owned() + $(&$type::fingerprint() + "," +)* ")"
+                let parts: &[String] = &[$($type::fingerprint()),*];
+                format!("({})", parts.join(","))
             }
         }
     };
@@ -203,10 +204,17 @@ mod tests {
     }
 
     #[test]
+    fn test_bitvec() {
+        assert_eq!(bit_vec::BitVec::<u32>::fingerprint(), "bit_vec::BitVec<u32>");
+    }
+
+    #[test]
     fn test_hashmap_and_tuple() {
+        assert_eq!(<()>::fingerprint(), "()");
+        assert_eq!(<(u32,)>::fingerprint(), "(u32)");
         assert_eq!(
             std::collections::HashMap::<[u32; 3], (bool, [u64; 8])>::fingerprint(),
-            "HashMap<[u32;3],(bool,[u64;8],)>"
+            "HashMap<[u32;3],(bool,[u64;8])>"
         );
     }
 

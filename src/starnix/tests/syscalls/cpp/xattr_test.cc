@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/xattr.h>
 #include <unistd.h>
 
@@ -159,5 +160,78 @@ TEST_F(XattrTest, SecuritySelinuxRequiresCapSysAdminWhenSelinuxDisabled) {
   // With CAP_SYS_ADMIN, removing security.selinux succeeds.
   EXPECT_THAT(removexattr(path().c_str(), kSelinuxAttr), SyscallSucceeds());
 }
+
+void ExpectAllXattrOpsFailWithErrno(int fd, const std::string& path, const char* name,
+                                    int expected_errno) {
+  SCOPED_TRACE(name);
+  char buf[16];
+  EXPECT_THAT(getxattr(path.c_str(), name, buf, sizeof(buf)),
+              SyscallFailsWithErrno(expected_errno));
+  EXPECT_THAT(fgetxattr(fd, name, buf, sizeof(buf)), SyscallFailsWithErrno(expected_errno));
+  EXPECT_THAT(lgetxattr(path.c_str(), name, buf, sizeof(buf)),
+              SyscallFailsWithErrno(expected_errno));
+
+  EXPECT_THAT(setxattr(path.c_str(), name, "v", 1, 0), SyscallFailsWithErrno(expected_errno));
+  EXPECT_THAT(fsetxattr(fd, name, "v", 1, 0), SyscallFailsWithErrno(expected_errno));
+  EXPECT_THAT(lsetxattr(path.c_str(), name, "v", 1, 0), SyscallFailsWithErrno(expected_errno));
+
+  EXPECT_THAT(removexattr(path.c_str(), name), SyscallFailsWithErrno(expected_errno));
+  EXPECT_THAT(fremovexattr(fd, name), SyscallFailsWithErrno(expected_errno));
+  EXPECT_THAT(lremovexattr(path.c_str(), name), SyscallFailsWithErrno(expected_errno));
+}
+
+void DropXattrAccessCapabilities() {
+  for (int cap : {CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_SYS_ADMIN}) {
+    if (test_helper::HasCapabilityEffective(cap)) {
+      test_helper::UnsetCapabilityEffective(cap);
+    }
+  }
+}
+
+TEST_F(XattrTest, EmptyNameReturnsErangeBeforeAccess) {
+  ASSERT_THAT(fchmod(fd(), 0000), SyscallSucceeds());
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    DropXattrAccessCapabilities();
+    ExpectAllXattrOpsFailWithErrno(fd(), path(), "", ERANGE);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+struct XattrInvalidNameParam {
+  const char* test_name;
+  const char* name;
+  int permitted_errno;
+};
+
+class XattrInvalidNameAccessTest : public XattrTest,
+                                   public testing::WithParamInterface<XattrInvalidNameParam> {};
+
+TEST_P(XattrInvalidNameAccessTest, ChecksPermissionsBeforePrefix) {
+  const auto& param = GetParam();
+
+  ASSERT_THAT(fchmod(fd(), 0000), SyscallSucceeds());
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    DropXattrAccessCapabilities();
+    ExpectAllXattrOpsFailWithErrno(fd(), path(), param.name, EACCES);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  ASSERT_THAT(fchmod(fd(), 0600), SyscallSucceeds());
+  helper.RunInForkedProcess([&] {
+    DropXattrAccessCapabilities();
+    ExpectAllXattrOpsFailWithErrno(fd(), path(), param.name, param.permitted_errno);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    XattrInvalidNames, XattrInvalidNameAccessTest,
+    testing::Values(XattrInvalidNameParam{"UnknownPrefix", "unknown.attr", ENOTSUP},
+                    XattrInvalidNameParam{"EmptySuffixUnknownPrefix", "foo.", ENOTSUP},
+                    XattrInvalidNameParam{"NoDotPrefix", "noprefix", ENOTSUP},
+                    XattrInvalidNameParam{"EmptySuffixUserPrefix", "user.", EINVAL}),
+    [](const testing::TestParamInfo<XattrInvalidNameParam>& info) { return info.param.test_name; });
 
 }  // namespace

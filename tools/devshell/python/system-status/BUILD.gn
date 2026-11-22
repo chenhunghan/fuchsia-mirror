@@ -2,38 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/python/host.gni")
-import("//build/python/python_host_test.gni")
-import("//build/python/python_library.gni")
-
-common_deps = [
-  "//scripts/lib/ffx_cmd",
-  "//scripts/lib/statusinfo",
-  "//scripts/lib/termout",
-]
-
-python_binary("system-status") {
-  main_source = "main.py"
-  deps = common_deps
-}
+import("//build/bazel/bazel_py_host_tool.gni")
 
 if (is_host) {
-  python_host_test("system_status_test") {
-    main_source = "tests/test_system_status.py"
-    sources = [
-      "main.py",
-      "tests/test_system_status.py",
-    ]
-    deps = common_deps
+  bazel_py_host_tool("system-status") {
+    bazel_target = ":system-status"
+    host_tool_name = "system-status"
   }
 }
 
-install_python_tool("install") {
-  name = "system-status"
-  binary = ":system-status"
-}
-
-group("tests") {
-  testonly = true
-  deps = [ ":system_status_test($host_toolchain)" ]
+group("install") {
+  deps = [ ":system-status($host_toolchain)" ]
 }

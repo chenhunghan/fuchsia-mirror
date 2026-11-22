@@ -25,10 +25,7 @@ group("hermetic_tests") {
     "structured_config/client_integration/cpp_driver",
     "structured_config/client_integration/cpp_elf",
     "structured_config/client_integration/rust",
-    "structured_config/different_values:different_values_false",
-    "structured_config/different_values:different_values_true",
     "structured_config/parent_overrides:parent_overrides_integration_test",
-    "utc-time:tests",
   ]
 }
 

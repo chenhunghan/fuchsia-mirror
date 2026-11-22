@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/bazel/remote_services.gni")
 import("//build/toolchain/rbe.gni")
 import("//build/toolchain/rbe_modes.gni")
@@ -13,6 +14,8 @@ group("tests") {
   testonly = true
 
   deps = [
+    ":bazel_rbe_e2e_test($host_toolchain)",
+    ":bazel_tests",
     ":bbtool_test($host_toolchain)",
     ":build_summary_test($host_toolchain)",
     ":cas_test($host_toolchain)",
@@ -27,17 +30,26 @@ group("tests") {
     ":linker_test($host_toolchain)",
     ":output_leak_scanner_test($host_toolchain)",
     ":prebuilt_tool_remote_wrapper_test($host_toolchain)",
+    ":rbe_cli_test($host_toolchain)",
     ":rbe_diagnose_test($host_toolchain)",
     ":rbe_profile_test($host_toolchain)",
     ":rbe_settings_test($host_toolchain)",
+    ":reclient_e2e_test($host_toolchain)",
+    ":reclient_test($host_toolchain)",
     ":relativize_args_test($host_toolchain)",
     ":remote_action_test($host_toolchain)",
     ":remotetool_test($host_toolchain)",
+    ":reproxy_wrap_test($host_toolchain)",
     ":rustc_remote_wrapper_test($host_toolchain)",
     ":rustc_test($host_toolchain)",
     ":tablefmt_test($host_toolchain)",
     ":textpb_test($host_toolchain)",
+    ":type_checked_scripts($host_toolchain)",
   ]
+}
+
+bazel_test_suite("bazel_tests") {
+  host_tests = [ "//build/rbe:textpb_test" ]
 }
 
 if (is_host) {
@@ -103,10 +115,6 @@ if (is_host) {
     deps = [ ":tablefmt" ]
   }
 
-  python_library("textpb") {
-    sources = [ "textpb.py" ]
-  }
-
   python_build_time_tests("textpb_test") {
     tests = [ "textpb_test.py" ]
     deps = [ ":textpb" ]
@@ -114,11 +122,59 @@ if (is_host) {
 
   python_library("rbe_diagnose") {
     sources = [ "rbe_diagnose.py" ]
+    library_deps = [ "//build/auth:auth_env" ]
   }
 
   python_build_time_tests("rbe_diagnose_test") {
     tests = [ "rbe_diagnose_test.py" ]
     deps = [ ":rbe_diagnose" ]
+  }
+
+  python_library("reclient_e2e") {
+    sources = [ "reclient_e2e.py" ]
+    library_deps = [
+      ":casfs",
+      ":rbe_profile",
+      "//build/auth:auth_env",
+      "//build/scripts:python_subprocess_lib",
+    ]
+  }
+
+  python_build_time_tests("reclient_e2e_test") {
+    tests = [ "reclient_e2e_test.py" ]
+    deps = [ ":reclient_e2e" ]
+  }
+
+  python_library("bazel_rbe_e2e") {
+    sources = [ "bazel_rbe_e2e.py" ]
+    library_deps = [
+      ":rbe_profile",
+      "//build/auth:auth_env",
+      "//build/scripts:python_subprocess_lib",
+    ]
+  }
+
+  python_build_time_tests("bazel_rbe_e2e_test") {
+    tests = [ "bazel_rbe_e2e_test.py" ]
+    deps = [ ":bazel_rbe_e2e" ]
+  }
+
+  python_library("rbe_cli") {
+    sources = [ "rbe_cli.py" ]
+    library_deps = [
+      ":bazel_rbe_e2e",
+      ":fuchsia",
+      ":rbe_diagnose",
+      ":rbe_profile",
+      ":rbe_settings",
+      ":reclient_e2e",
+      "//build/auth:auth_env",
+    ]
+  }
+
+  python_build_time_tests("rbe_cli_test") {
+    tests = [ "rbe_cli_test.py" ]
+    deps = [ ":rbe_cli" ]
   }
 
   python_library("cas") {
@@ -170,12 +226,25 @@ if (is_host) {
     deps = [ ":build_summary" ]
   }
 
+  python_library("reclient") {
+    sources = [ "reclient.py" ]
+    library_deps = [ ":cl_utils" ]
+  }
+
+  python_build_time_tests("reclient_test") {
+    tests = [ "reclient_test.py" ]
+    inputs = [ "fuchsia-reproxy-gcertauth.cfg" ]
+    deps = [ ":reclient" ]
+  }
+
   python_library("remotetool") {
     sources = [ "remotetool.py" ]
     library_deps = [
       ":cl_utils",
       ":fuchsia",
       ":rbe_profile",
+      ":reclient",
+      "//build/auth:auth_env",
     ]
   }
 
@@ -206,8 +275,11 @@ if (is_host) {
       ":fuchsia",
       ":output_leak_scanner",
       ":rbe_profile",
+      ":reclient",
       ":remotetool",
+      ":reproxy_wrap",
       ":textpb",
+      "//build/scripts:lock_utils_lib",
     ]
   }
 
@@ -218,7 +290,12 @@ if (is_host) {
 
   python_library("dlwrap") {
     sources = [ "dlwrap.py" ]
-    library_deps = [ ":remote_action" ]
+    library_deps = [
+      ":cl_utils",
+      ":fuchsia",
+      ":remote_action",
+      ":remotetool",
+    ]
   }
 
   python_build_time_tests("dlwrap_test") {
@@ -240,7 +317,9 @@ if (is_host) {
     sources = [ "cxx_link_remote_wrapper.py" ]
     library_deps = [
       ":casfs",
+      ":cl_utils",
       ":cxx",
+      ":depfile",
       ":fuchsia",
       ":linker",
       ":remote_action",
@@ -258,6 +337,7 @@ if (is_host) {
       ":casfs",
       ":cl_utils",
       ":cxx",
+      ":depfile",
       ":fuchsia",
       ":remote_action",
     ]
@@ -283,6 +363,7 @@ if (is_host) {
     library_deps = [
       ":casfs",
       ":cl_utils",
+      ":depfile",
       ":fuchsia",
       ":linker",
       ":remote_action",
@@ -399,10 +480,6 @@ if (is_host) {
       "bb_fetch_rbe_cas_test.py",
       "pb_message_util.py",
       "pb_message_util_test.py",
-      "rbe_profile.py",
-      "rbe_profile_test.py",
-      "rbe_settings.py",
-      "rbe_settings_test.py",
       "reproxy_logs.py",
       "reproxy_logs_test.py",
       "rpl_tool.py",
@@ -411,5 +488,63 @@ if (is_host) {
       "upload_reproxy_logs.py",
       "upload_reproxy_logs_test.py",
     ]
+    library_deps = [
+      ":bbtool",
+      ":cl_utils",
+      ":fuchsia",
+      ":remotetool",
+      ":textpb",
+    ]
+  }
+
+  python_library("reproxy_wrap") {
+    sources = [ "reproxy_wrap.py" ]
+    library_deps = [
+      ":build_summary",
+      "//build/auth:auth_env",
+      "//build/scripts:python_subprocess_lib",
+      "//build/scripts:signal_utils_lib",
+    ]
+  }
+
+  python_build_time_tests("reproxy_wrap_test") {
+    tests = [ "reproxy_wrap_test.py" ]
+    deps = [ ":reproxy_wrap" ]
+  }
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+if (is_host) {
+  python_library("textpb") {
+    sources = [ "textpb.py" ]
+    visibility = [
+      ":*",
+      "//build/auth:*",
+    ]
+    enable_mypy = true
   }
 }

@@ -11,6 +11,14 @@
 
 namespace ufs {
 
+UicCommand::UicCommand(Ufs &ufs, UicCommandOpcode opcode, uint16_t mib_attribute,
+                       uint16_t gen_selector_index)
+    : controller_(ufs),
+      opcode_(opcode),
+      mib_attribute_(mib_attribute),
+      gen_selector_index_(gen_selector_index),
+      timeout_usec_(ufs.UicCommandTimeoutUsec()) {}
+
 zx::result<std::optional<uint32_t>> UicCommand::SendCommand() {
   // Every UIC command needs the link (and its clocks) up; attribute accesses additionally need
   // Auto-Hibern8 held off (ScopedAutoHibernateDisable implies ScopedLinkActive).

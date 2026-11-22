@@ -88,7 +88,7 @@ impl Driver for WlanVirtioHwsim {
         Ok(WlanVirtioHwsim { _node: node, _scope: scope })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         log::info!("Stopping {} driver", Self::NAME);
     }
 }

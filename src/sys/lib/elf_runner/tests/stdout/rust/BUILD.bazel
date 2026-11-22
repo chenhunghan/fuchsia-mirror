@@ -39,6 +39,7 @@ fx_component_manifest(
 fx_component(
     name = "logs-stdout-and-stderr-rust",
     compiled_manifest = ":logs-stdout-and-stderr-rust-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )
 
@@ -52,6 +53,7 @@ fx_component_manifest(
 fx_component(
     name = "logs-default-rust",
     compiled_manifest = ":logs-default-rust-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )
 
@@ -65,6 +67,7 @@ fx_component_manifest(
 fx_component(
     name = "logs-stdout-rust",
     compiled_manifest = ":logs-stdout-rust-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )
 
@@ -78,5 +81,6 @@ fx_component_manifest(
 fx_component(
     name = "logs-stderr-rust",
     compiled_manifest = ":logs-stderr-rust-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )

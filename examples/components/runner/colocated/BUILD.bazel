@@ -54,7 +54,7 @@ rustc_binary(
         "//src/lib/fuchsia-component",
         "//src/lib/fuchsia-runtime",
         "//src/lib/fuchsia-sync",
-        "//src/performance/memory/attribution/server",
+        "//src/memory/attribution/server",
         "//src/sys/lib/runner",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:async-lock",
@@ -93,7 +93,7 @@ fx_component_manifest(
 fx_component(
     name = "colocated-runner",
     compiled_manifest = ":colocated-runner_manifest",
-    visibility = ["//:__subpackages__"],
+    visibility = ["//examples/components/runner/colocated/integration_tests:__pkg__"],
     deps = [":bin_packaged"],
 )
 
@@ -119,7 +119,7 @@ fx_component_manifest(
 fx_component(
     name = "colocated-component",
     compiled_manifest = ":colocated-component_manifest",
-    visibility = ["//:__subpackages__"],
+    visibility = ["//examples/components/runner/colocated/integration_tests:__pkg__"],
 )
 
 fx_package(

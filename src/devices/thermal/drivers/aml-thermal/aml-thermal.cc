@@ -140,8 +140,6 @@ void AmlThermal::GetSensorName(GetSensorNameCompleter::Sync& completer) {
   completer.Reply(fidl::StringView::FromExternal(name_));
 }
 
-zx_status_t AmlThermal::ThermalConnect(zx::channel ch) { return ZX_ERR_NOT_SUPPORTED; }
-
 void AmlThermal::DdkRelease() { delete this; }
 
 static constexpr zx_driver_ops_t driver_ops = []() {

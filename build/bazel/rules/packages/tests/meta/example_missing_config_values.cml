@@ -1,0 +1,14 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// A component that declares structured config, packaged without its
+// configuration values to check that `fx_package()` rejects it.
+{
+    config: {
+        greeting: {
+            type: "string",
+            max_size: 64,
+        },
+    },
+}

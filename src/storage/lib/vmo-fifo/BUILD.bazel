@@ -36,12 +36,14 @@ rustc_library(
         "//src/lib/fuchsia-sync",
         "//src/storage/lib/buddy_allocator",
         "//src/storage/lib/ptr_slice",
+        "//src/storage/lib/units",
+        "//third_party/rust_crates/vendor:event-listener",
+        "//third_party/rust_crates/vendor:scopeguard",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
 )
 
 fx_unittest_package(
     name = "vmo-fifo-tests",
-    package_name = "vmo-fifo-tests",
     unit_tests = [":vmo-fifo_test"],
 )

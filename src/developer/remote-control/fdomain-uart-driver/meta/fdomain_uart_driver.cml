@@ -9,10 +9,7 @@
     },
     use: [
         {
-            protocol: [
-                "fuchsia.boot.Arguments",
-                "fuchsia.developer.remotecontrol.connector.Connector",
-            ],
+            protocol: [ "fuchsia.developer.remotecontrol.connector.Connector" ],
         },
         {
             // devfs exposes dev-class directories with r* rights (which include
@@ -22,6 +19,21 @@
             directory: "dev-class-serial",
             rights: [ "r*" ],
             path: "/dev/class/serial",
+        },
+        {
+            config: "fuchsia.dev.fdomain.uart",
+            key: "enabled",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
+        {
+            config: "fuchsia.dev.fdomain.uart.baud",
+            key: "baud_rate",
+            type: "string",
+            max_size: 32,
+            availability: "optional",
+            default: "",
         },
     ],
 }

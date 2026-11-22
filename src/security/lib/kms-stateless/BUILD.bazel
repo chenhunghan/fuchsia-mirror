@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "kms-stateless",
+    srcs = ["kms-stateless.cc"],
+    hdrs = ["kms-stateless.h"],
+    implementation_deps = [
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/fdio",
+        "//src/security/lib/keysafe",
+        "//src/security/lib/tee/tee-client-api:tee-client-api-import",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
+        "//src/storage/lib/ramdevice_client/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = [
+        "//src/recovery/factory_reset:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)

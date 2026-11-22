@@ -6,13 +6,11 @@ library fuchsia.net.policy.properties;
 
 using fuchsia.net;
 using fuchsia.net.name;
-using zx;
+using fuchsia.net.resources;
 
 /// The NetworkToken is an opaque token minted by this service that represents a
 /// logical network for the purpose of accessing network properties.
-type NetworkToken = resource struct {
-    value zx.Handle:EVENTPAIR;
-};
+alias NetworkToken = fuchsia.net.resources.NetworkToken;
 
 /// A set of properties that a client may be interested in.
 type PropertyInterest = flexible bits {

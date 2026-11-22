@@ -29,6 +29,5 @@ fx_packaged_binary(
 
 fx_package(
     name = "time",
-    package_name = "time",
     resources = [":bin_packaged"],
 )

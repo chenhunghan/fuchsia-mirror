@@ -16,6 +16,7 @@ fidl_library(
         "mode.fidl",
         "overview.fidl",
         "power-mode.fidl",
+        "vrr.fidl",
     ],
     api_area = "Graphics",
     contains_drivers = True,
@@ -25,5 +26,6 @@ fidl_library(
     deps = [
         "//sdk/fidl/fuchsia.images2",
         "//sdk/fidl/fuchsia.math",
+        "//zircon/vdso/zx",
     ],
 )

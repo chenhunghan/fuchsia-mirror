@@ -104,6 +104,7 @@ fx_cc_library(
         "//src/ui/scenic/lib/image-compression:__subpackages__",
         "//src/ui/testing/util:__pkg__",
         "//third_party/freetype2:__pkg__",
+        "@freetype2//:__pkg__",  # @bazel2gn:skip
     ],
     deps = ["//third_party/zlib"],
     alwayslink = True,

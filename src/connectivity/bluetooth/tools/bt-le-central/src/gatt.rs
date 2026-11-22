@@ -17,6 +17,7 @@ use bt_common::debug_command::{CommandRunner, CommandSet};
 use bt_gatt::client::{Client, PeerService, PeerServiceHandle};
 use bt_gatt::types::Characteristic;
 use bt_pacs::debug::{PacsCmd, PacsDebug};
+use bt_repl::CommandSet as _;
 use bt_vcs::debug::{VcsCmd, VcsDebug};
 
 use self::commands::Cmd;
@@ -356,7 +357,7 @@ async fn do_connect<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 2 {
-        println!("usage: {}", Cmd::Connect.cmd_help());
+        println!("usage: {}", Cmd::Connect.usage());
         return Ok(());
     }
 
@@ -405,7 +406,7 @@ async fn do_read_chr<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 1 {
-        println!("usage: {}", Cmd::ReadChr.cmd_help());
+        println!("usage: {}", Cmd::ReadChr.usage());
         return Ok(());
     }
 
@@ -431,7 +432,7 @@ async fn do_read_long_chr<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 3 {
-        println!("usage: {}", Cmd::ReadLongChr.cmd_help());
+        println!("usage: {}", Cmd::ReadLongChr.usage());
         return Ok(());
     }
 
@@ -472,7 +473,7 @@ async fn do_write_chr<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() < 2 {
-        println!("usage: {}", Cmd::WriteChr.cmd_help());
+        println!("usage: {}", Cmd::WriteChr.usage());
         return Ok(());
     }
 
@@ -513,7 +514,7 @@ async fn do_write_long_chr<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() < 3 {
-        println!("usage: {}", Cmd::WriteLongChr.cmd_help());
+        println!("usage: {}", Cmd::WriteLongChr.usage());
         return Ok(());
     }
 
@@ -562,7 +563,7 @@ async fn do_read_desc<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 1 {
-        println!("usage: {}", Cmd::ReadDesc.cmd_help());
+        println!("usage: {}", Cmd::ReadDesc.usage());
         return Ok(());
     }
 
@@ -588,7 +589,7 @@ async fn do_read_long_desc<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 3 {
-        println!("usage: {}", Cmd::ReadLongDesc.cmd_help());
+        println!("usage: {}", Cmd::ReadLongDesc.usage());
         return Ok(());
     }
 
@@ -630,7 +631,7 @@ async fn do_write_desc<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() < 2 {
-        println!("usage: {}", Cmd::WriteDesc.cmd_help());
+        println!("usage: {}", Cmd::WriteDesc.usage());
         return Ok(());
     }
 
@@ -664,7 +665,7 @@ async fn do_write_long_desc<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() < 3 {
-        println!("usage: {}", Cmd::WriteLongDesc.cmd_help());
+        println!("usage: {}", Cmd::WriteLongDesc.usage());
         return Ok(());
     }
 
@@ -706,7 +707,7 @@ async fn do_enable_notify<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 1 {
-        println!("usage: {}", Cmd::EnableNotify.cmd_help());
+        println!("usage: {}", Cmd::EnableNotify.usage());
         return Ok(());
     }
 
@@ -736,7 +737,7 @@ async fn do_disable_notify<'a, T: bt_gatt::GattTypes>(
     client: &'a GattClientPtr<T>,
 ) -> Result<(), Error> {
     if args.len() != 1 {
-        println!("usage: {}", Cmd::DisableNotify.cmd_help());
+        println!("usage: {}", Cmd::DisableNotify.usage());
         return Ok(());
     }
 

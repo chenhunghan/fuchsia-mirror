@@ -4,12 +4,7 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
-
-library_headers("headers") {
-  headers = [ "lib/stall.h" ]
-}
 
 kernel_rust_mod("stall_rs") {
   output_name = "stall"
@@ -28,11 +23,8 @@ kernel_rust_mod("stall_rs") {
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
-source_set("stall") {
-  public_deps = [ ":headers" ]
-
-  sources = [ "stall.cc" ]
-  deps = [ ":stall_rs" ]
+group("stall") {
+  public_deps = [ ":stall_rs" ]
 }
 
 group("tests") {

@@ -10,17 +10,18 @@ use super::{
     Auditable, FileSystem, FsNodeSidAndClass, NonPrivateDirEntry, NonPrivateFsNode,
     PermissionFlags, build_permission_check, check_permission, check_permissions,
     current_task_state, fs_node_effective_sid_and_class, fs_node_ensure_class,
-    has_fs_node_permissions, has_fs_node_permissions_dontaudit, permissions_from_flags,
-    set_cached_sid,
+    has_fs_node_permissions, has_fs_node_permissions_dontaudit, set_cached_sid,
 };
 use crate::task::CurrentTask;
-use crate::vfs::{DirEntry, FsStr, FsString, PathBuilder, UnlinkKind, ValueOrSize, XattrOp};
+use crate::vfs::{
+    DirEntry, FsNodeAttrFlags, FsStr, FsString, PathBuilder, UnlinkKind, ValueOrSize, XattrOp,
+};
 use fuchsia_rcu::RcuReadScope;
 use selinux::policy::{AccessVector, FsUseType};
 use selinux::{
-    ClassPermission, CommonFilePermission, CommonFsNodePermission, DirPermission, FileClass,
-    FileSystemLabel, FileSystemLabelingScheme, FileSystemPermission, ForClass, FsNodeClass,
-    InitialSid, PolicyCap, SecurityId, SecurityServer, TaskAttrs,
+    CommonFilePermission, CommonFsNodePermission, DirPermission, FileClass, FileSystemLabel,
+    FileSystemLabelingScheme, FileSystemPermission, ForClass, FsNodeClass, InitialSid, PolicyCap,
+    SecurityId, SecurityServer, TaskAttrs,
 };
 use starnix_logging::{CATEGORY_STARNIX_SECURITY, log_debug, log_warn, track_stub};
 use starnix_uapi::arc_key::WeakKey;
@@ -30,7 +31,6 @@ use starnix_uapi::errors::{ENODATA, EOPNOTSUPP, Errno};
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::inotify_mask::InotifyMask;
 use starnix_uapi::{XATTR_NAME_SELINUX, errno, error};
-use syncio::zxio_node_attr_has_t;
 
 /// Maximum supported size for the extended attribute value used to store SELinux security
 /// contexts in a filesystem node extended attributes.
@@ -932,7 +932,7 @@ pub(in crate::security) fn check_fs_node_read_link_access(
         current_task,
         current_sid,
         fs_node,
-        &[CommonFsNodePermission::Read],
+        CommonFsNodePermission::Read,
         current_task.into(),
     )
 }
@@ -963,7 +963,6 @@ pub(in crate::security) fn fs_node_permission(
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     let current_sid = current_task_state(current_task).current_sid;
-    let fs_node_class = fs_node_effective_sid_and_class(fs_node).class;
     let audit_context = [current_task.into(), audit_context];
 
     if permission_flags.contains(PermissionFlags::ACCESS) {
@@ -974,7 +973,7 @@ pub(in crate::security) fn fs_node_permission(
                 current_task,
                 current_sid,
                 fs_node,
-                &permissions_from_flags(permission_flags, fs_node_class),
+                permission_flags,
             );
         }
     }
@@ -984,7 +983,7 @@ pub(in crate::security) fn fs_node_permission(
         current_task,
         current_sid,
         fs_node,
-        &permissions_from_flags(permission_flags, fs_node_class),
+        permission_flags,
         (&audit_context).into(),
     )
 }
@@ -1000,7 +999,7 @@ pub(in crate::security) fn check_fs_node_getattr_access(
         current_task,
         current_sid,
         fs_node,
-        &[CommonFsNodePermission::GetAttr],
+        CommonFsNodePermission::GetAttr,
         current_task.into(),
     )
 }
@@ -1058,21 +1057,21 @@ pub(in crate::security) fn check_fs_node_setattr_access(
     security_server: &SecurityServer,
     current_task: &CurrentTask,
     fs_node: NonPrivateFsNode<'_>,
-    attributes: &zxio_node_attr_has_t,
+    attributes: FsNodeAttrFlags,
 ) -> Result<(), Errno> {
     let current_sid = current_task_state(current_task).current_sid;
 
-    let permissions = if attributes.mode
-        || attributes.uid
-        || attributes.gid
-        || attributes.access_time
-        || attributes.modification_time
-        || attributes.change_time
-        || attributes.casefold
-    {
-        [CommonFsNodePermission::SetAttr]
+    let permissions = if attributes.intersects(
+        FsNodeAttrFlags::MODE
+            | FsNodeAttrFlags::UID
+            | FsNodeAttrFlags::GID
+            | FsNodeAttrFlags::TIME_ACCESS
+            | FsNodeAttrFlags::TIME_MODIFY
+            | FsNodeAttrFlags::CASEFOLD,
+    ) {
+        CommonFsNodePermission::SetAttr
     } else {
-        [CommonFsNodePermission::Write]
+        CommonFsNodePermission::Write
     };
 
     has_fs_node_permissions(
@@ -1080,7 +1079,7 @@ pub(in crate::security) fn check_fs_node_setattr_access(
         current_task,
         current_sid,
         fs_node,
-        &permissions,
+        permissions,
         current_task.into(),
     )
 }
@@ -1109,7 +1108,7 @@ pub(in crate::security) fn check_fs_node_setxattr_access(
             current_task,
             current_sid,
             fs_node,
-            &[CommonFsNodePermission::SetAttr],
+            CommonFsNodePermission::SetAttr,
             current_task.into(),
         );
     }
@@ -1187,7 +1186,7 @@ pub(in crate::security) fn check_fs_node_getxattr_access(
         current_task,
         current_sid,
         fs_node,
-        &[CommonFsNodePermission::GetAttr],
+        CommonFsNodePermission::GetAttr,
         current_task.into(),
     )
 }
@@ -1203,7 +1202,7 @@ pub(in crate::security) fn check_fs_node_listxattr_access(
         current_task,
         current_sid,
         fs_node,
-        &[CommonFsNodePermission::GetAttr],
+        CommonFsNodePermission::GetAttr,
         current_task.into(),
     )
 }
@@ -1225,7 +1224,7 @@ pub(in crate::security) fn check_fs_node_removexattr_access(
         current_task,
         current_sid,
         fs_node,
-        &[CommonFsNodePermission::SetAttr],
+        CommonFsNodePermission::SetAttr,
         current_task.into(),
     )
 }
@@ -1548,7 +1547,7 @@ mod tests {
                     root_node,
                     current_task,
                     FileMode::IFREG,
-                    current_task.real_fscred(),
+                    current_task.current_fscred(),
                 )
                 .expect("create_tmpfile");
             let uninitialized_node = NonPrivateFsNode::new(&uninitialized_handle).unwrap();

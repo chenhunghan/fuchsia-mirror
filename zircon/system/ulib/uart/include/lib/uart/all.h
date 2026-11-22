@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef ZIRCON_SYSTEM_ULIB_UART_INCLUDE_LIB_UART_ALL_H_
-#define ZIRCON_SYSTEM_ULIB_UART_INCLUDE_LIB_UART_ALL_H_
+#ifndef LIB_UART_ALL_H_
+#define LIB_UART_ALL_H_
 
 #include <lib/fit/function.h>
 #include <lib/zbi-format/driver-config.h>
@@ -315,6 +315,14 @@ class KernelDriver {
     Visit([out](const auto& active) { active.Unparse(out); });
   }
 
+  // This is the FILE-compatible API: `FILE{&driver}`.  It dispatches to the
+  // active driver, so the FILE remains valid across reconfiguration.
+  int Write(std::string_view str) {
+    int result = 0;
+    Visit([&](auto& active) { result = active.Write(str); });
+    return result;
+  }
+
   // Apply f to selected driver.
   template <typename T, typename... Args>
   void Visit(T&& f, Args... args) {
@@ -410,4 +418,4 @@ class KernelDriver {
 }  // namespace all
 }  // namespace uart
 
-#endif  // ZIRCON_SYSTEM_ULIB_UART_INCLUDE_LIB_UART_ALL_H_
+#endif  // LIB_UART_ALL_H_

@@ -1488,12 +1488,14 @@ RAW = { "-- raw" ~ EOL ~
     #[test_case(ubpf_test_data!("stxw.data"))]
     #[test_case(ubpf_test_data!("subnet.data"))]
     #[test_case(local_test_data!("access_with_check.data"))]
+    #[test_case(local_test_data!("any_parameter_scalar.data"))]
     #[test_case(local_test_data!("ashr_fully_unknown_u64_stays_unbounded.data"))]
     #[test_case(local_test_data!("atomic_aligned.data"))]
     #[test_case(local_test_data!("bounded_loop_counter_access.data"))]
     #[test_case(local_test_data!("context_parameter.data"))]
     #[test_case(local_test_data!("datadep_call_oob.data"))]
     #[test_case(local_test_data!("datadep_store_oob.data"))]
+    #[test_case(local_test_data!("diamond_branching_pruned.data"))]
     #[test_case(local_test_data!("branch_ptr_gt_zero_prunes_live.data"))]
     #[test_case(local_test_data!("branch_ptr_jsgt_zero_keeps_live.data"))]
     #[test_case(local_test_data!("branch_zero_jgt_ptr_prunes_live.data"))]
@@ -1501,6 +1503,9 @@ RAW = { "-- raw" ~ EOL ~
     #[test_case(local_test_data!("cmpxchg_prune_point.data"))]
     #[test_case(local_test_data!("compare_with_r10.data"))]
     #[test_case(local_test_data!("div_by_range_with_zero.data"))]
+    #[test_case(local_test_data!("err_any_parameter_partial_uninitialized.data"))]
+    #[test_case(local_test_data!("err_any_parameter_ptr_leak.data"))]
+    #[test_case(local_test_data!("err_any_parameter_uninitialized.data"))]
     #[test_case(local_test_data!("err_any_parameter_use_after_free.data"))]
     #[test_case(local_test_data!("err_atomic_misaligned32.data"))]
     #[test_case(local_test_data!("err_atomic_misaligned64.data"))]
@@ -1517,6 +1522,8 @@ RAW = { "-- raw" ~ EOL ~
     #[test_case(local_test_data!("err_infinite_loop_counter.data"))]
     #[test_case(local_test_data!("err_infinite_loop_same_state.data"))]
     #[test_case(local_test_data!("err_lddw_punning.data"))]
+    #[test_case(local_test_data!("err_loop_jmp_seq_limit.data"))]
+    #[test_case(local_test_data!("err_loop_path_depth_limit.data"))]
     #[test_case(local_test_data!("err_map_ptr_jeq_zero_dce.data"))]
     #[test_case(local_test_data!("err_mem_load_u64_max_wraparound.data"))]
     #[test_case(local_test_data!("err_memory_id_collision.data"))]
@@ -1540,6 +1547,10 @@ RAW = { "-- raw" ~ EOL ~
     #[test_case(local_test_data!("err_prune_point_dependency_chain.data"))]
     #[test_case(local_test_data!("err_prune_stack_store_dst_reg.data"))]
     #[test_case(local_test_data!("err_prune_uninit_partial_stack_store.data"))]
+    #[test_case(local_test_data!("err_ptr_jset_null_or.data"))]
+    #[test_case(local_test_data!("err_ptr_jset_pkt_end.data"))]
+    #[test_case(local_test_data!("err_ptr_jset_same_region.data"))]
+    #[test_case(local_test_data!("err_ptr_jset_zero.data"))]
     #[test_case(local_test_data!("err_ptr_to_array_negative_offset.data"))]
     #[test_case(local_test_data!("err_ptr_wrap_jgt_dce.data"))]
     #[test_case(local_test_data!("err_read_only_helper.data"))]
@@ -1601,6 +1612,8 @@ RAW = { "-- raw" ~ EOL ~
             return;
         };
 
+        let mut jit_memory = test_case.memory.clone();
+
         let test_memory = TestBuffer::new(&mut test_case.memory);
         let args = vec![test_memory.get_value_type(), Type::from(test_memory.size as u64)];
         let packet_type = test_case.memory.is_some().then_some(test_memory.get_value_type());
@@ -1640,27 +1653,54 @@ RAW = { "-- raw" ~ EOL ~
 
         if let Some(value) = test_case.result {
             let verified_program = verified_program.expect("program must be loadable");
-            let maps = verified_program
-                .maps()
-                .iter()
-                .map(|schema| TestMap { schema: *schema })
-                .collect::<Vec<_>>();
-            let program = link_program_dynamic::<TestEbpfProgramContext>(&verified_program, maps)
-                .expect("failed to link a test program");
+            let make_maps = || {
+                verified_program
+                    .maps()
+                    .iter()
+                    .map(|schema| TestMap { schema: *schema })
+                    .collect::<Vec<_>>()
+            };
+            let run_program = |program: &crate::EbpfProgram<
+                TestEbpfProgramContext,
+                crate::DynamicTypeChecker,
+            >,
+                               buffer: TestBuffer| {
+                let data = if buffer.ptr.is_null() {
+                    std::ptr::NonNull::<u8>::dangling().as_ptr() as u64
+                } else {
+                    buffer.ptr as u64
+                };
+                let data_end = data.wrapping_add(buffer.size as u64);
+                let mut context = TestEbpfRunContext {
+                    buffer_size: buffer.size,
+                    map_value: Default::default(),
+                    test_struct: TestStruct { data, data_end, mutable_field: 0, _padding: 0 },
+                };
+                let result = program.run_with_2_arguments(&mut context, buffer, buffer.size);
+                (result, context.map_value, context.test_struct.mutable_field)
+            };
 
-            let data = if test_memory.ptr.is_null() {
-                std::ptr::NonNull::<u8>::dangling().as_ptr() as u64
-            } else {
-                test_memory.ptr as u64
-            };
-            let data_end = data.wrapping_add(test_memory.size as u64);
-            let mut context = TestEbpfRunContext {
-                buffer_size: test_memory.size,
-                map_value: Default::default(),
-                test_struct: TestStruct { data, data_end, mutable_field: 0, _padding: 0 },
-            };
-            let result = program.run_with_2_arguments(&mut context, test_memory, test_memory.size);
+            let program =
+                link_program_dynamic::<TestEbpfProgramContext>(&verified_program, make_maps())
+                    .expect("failed to link a test program");
+            let (result, map_value, mutable_field) = run_program(&program, test_memory);
             assert_eq!(result, value);
+
+            if crate::jit::IS_SUPPORTED {
+                let jit_test_memory = TestBuffer::new(&mut jit_memory);
+                let jit_program = crate::program::test::link_program_jit_for_test::<
+                    TestEbpfProgramContext,
+                    crate::DynamicTypeChecker,
+                >(&verified_program, make_maps())
+                .expect("failed to JIT-link test program");
+
+                let (jit_result, jit_map_value, jit_mutable_field) =
+                    run_program(&jit_program, jit_test_memory);
+                assert_eq!(jit_result, value);
+                assert_eq!(jit_map_value, map_value);
+                assert_eq!(jit_mutable_field, mutable_field);
+                assert_eq!(jit_memory, test_case.memory);
+            }
         } else {
             assert!(verified_program.is_err());
         }

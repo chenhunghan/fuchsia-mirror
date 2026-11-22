@@ -59,6 +59,11 @@ fuchsia_test_component("cobalt_testapp_no_network") {
   deps = [ "testapp:cobalt_testapp" ]
 }
 
+fuchsia_test_component("cobalt_key_rotation_test") {
+  manifest = "meta/cobalt_key_rotation_test.cml"
+  deps = [ "testapp:cobalt_key_rotation_test" ]
+}
+
 template("testapp_cobalt_components") {
   test_name = target_name
   if (defined(invoker.name)) {
@@ -108,6 +113,7 @@ resource("testapp_metrics_registry") {
 fuchsia_test_package("cobalt_tests") {
   test_components = [
     ":cobalt_app_unittests",
+    ":cobalt_key_rotation_test",
     ":cobalt_system_metrics_unittests",
     ":cobalt_utils_unittests",
     ":cobalt_testapp_no_network",
@@ -187,21 +193,11 @@ fuchsia_test_package("cobalt_tests_do_not_run_manually") {
     # whose output is inspected.
     environments = [
       {
-        dimensions = {
-          device_type = "Nelson"
-        }
+        dimensions = nelson_env.dimensions
         tags = [ "cobalt-prober" ]
       },
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "cobalt-prober" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "cobalt-prober" ]
       },
     ]

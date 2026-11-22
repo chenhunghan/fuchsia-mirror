@@ -22,6 +22,7 @@ idk_cc_source_library(
     visibility = [
         "//sdk/lib/driver/fake-bti/rust:__pkg__",
         "//sdk/lib/driver/fake-platform-device/cpp:__pkg__",
+        "//sdk/lib/driver/pci/cpp/tests:__pkg__",
         "//sdk/lib/driver/platform-device/cpp/tests:__pkg__",
         "//src/connectivity:__subpackages__",
         "//src/devices:__subpackages__",

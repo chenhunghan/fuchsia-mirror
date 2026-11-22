@@ -22,7 +22,6 @@ fuchsia_package("examples_fidl_${series_flat_case}_${variant_flat_case}_rust") {
   deps = [
     ":client",
     ":server",
-    "//examples/fidl/new/${series_snake_case}/${variant_snake_case}:client_config_values",
   ]
 }
 
@@ -40,7 +39,6 @@ fuchsia_test_package("examples_fidl_${series_flat_case}_${variant_flat_case}_rus
   deps = [
     ":client",
     ":server",
-    "//examples/fidl/new/${series_snake_case}/${variant_snake_case}:client_config_values",
     "//examples/fidl/new/${series_snake_case}/${variant_snake_case}/realm:realm",
   ]
   test_components = [ ":test" ]

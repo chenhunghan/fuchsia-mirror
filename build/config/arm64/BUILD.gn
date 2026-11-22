@@ -103,4 +103,7 @@ compiler_config("fix-cortex-a53-835769") {
   cflags = [ "-mfix-cortex-a53-835769" ]
   rust_target_features = [ "+fix-cortex-a53-835769" ]
 }
-# LINT.ThenChange(BUILD.bazel:arm64_configs)
+# LINT.ThenChange(
+#     BUILD.bazel:arm64_configs,
+#     //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:cpu_baseline,
+# )

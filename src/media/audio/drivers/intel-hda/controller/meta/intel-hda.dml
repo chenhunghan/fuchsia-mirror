@@ -10,6 +10,9 @@
         default_dispatcher_opts: [ "allow_sync_calls" ],
         allowed_scheduler_roles: [ "fuchsia.media.audio.drivers.intel-hda.controller" ],
     },
+    capabilities: [
+        { service: "fuchsia.hardware.intel.hda.CodecService" },
+    ],
     use: [
         {
             name: "pci",
@@ -38,6 +41,12 @@
             name: "acpi",
             availability: "optional",
             bind: { protocol: "fuchsia.acpi.BIND_PROTOCOL.DEVICE" },
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.intel.hda.CodecService",
+            from: "self",
         },
     ],
 }

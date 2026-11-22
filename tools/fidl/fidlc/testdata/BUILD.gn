@@ -4,6 +4,7 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 standalone_libraries = [
   "anonymous.test.fidl",
   "arrays.test.fidl",
@@ -104,3 +105,4 @@ action("verify_files_exist") {
   outputs = [ "$target_out_dir/files_in_standalone_libraries_exist.verified" ]
   args = [ rebase_path(outputs[0], root_build_dir) ]
 }
+# LINT.ThenChange(BUILD.bazel)

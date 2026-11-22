@@ -25,6 +25,7 @@
 #include "src/developer/debug/zxdb/symbols/symbol_context.h"
 #include "src/developer/debug/zxdb/symbols/symbol_test_parent_setter.h"
 #include "src/developer/debug/zxdb/symbols/template_parameter.h"
+#include "src/developer/debug/zxdb/symbols/test_symbol_module.h"
 #include "src/developer/debug/zxdb/symbols/type_test_support.h"
 #include "src/developer/debug/zxdb/symbols/variable_test_support.h"
 
@@ -32,6 +33,8 @@
 // both of our file's finding code as well as the decoding code.
 
 namespace zxdb {
+
+namespace {
 
 // This test declares the following structure. There are three levels of variables, each one has one
 // unique variable, and one labeled "value" for testing ambiguity.
@@ -865,5 +868,166 @@ TEST(FindName, BuiltinTypesSkipIndex) {
   EXPECT_FALSE(found.is_found());
   EXPECT_GT(module_symbols->index_lookups(), lookups_before);
 }
+
+TEST(FindName, FindInDebugNames) {
+  TestSymbolModule setup(TestSymbolModule::kBuilt);
+  ASSERT_TRUE(setup.Init().ok());
+
+  ModuleSymbolsImpl* module = setup.symbols();
+  ASSERT_TRUE(module);
+  ASSERT_TRUE(module->HasDebugNames());
+
+  SymbolContext symbol_context = SymbolContext::ForRelativeAddresses();
+  FindNameContext context(nullptr, symbol_context, nullptr, ExprLanguage::kC);
+  context.module_symbols = module;
+
+  // Unqualified function lookup queries the accelerator table.
+  FindNameOptions fn_opts(FindNameOptions::kNoKinds);
+  fn_opts.find_functions = true;
+
+  FoundName fn = FindName(context, fn_opts, ParsedIdentifier(TestSymbolModule::kMyFunctionName));
+  ASSERT_TRUE(fn.is_found());
+  EXPECT_EQ(FoundName::kFunction, fn.kind());
+  ASSERT_TRUE(fn.function());
+  EXPECT_EQ(TestSymbolModule::kMyFunctionName, fn.function()->GetAssignedName());
+
+  // Global variable lookup queries the accelerator table.
+  FindNameOptions var_opts(FindNameOptions::kNoKinds);
+  var_opts.find_vars = true;
+
+  // Relative search in all namespaces.
+  FindNameOptions all_ns_vars(var_opts);
+  all_ns_vars.search_mode = FindNameOptions::kAllNamespaces;
+  FoundName var = FindName(context, all_ns_vars, ParsedIdentifier("kGlobal"));
+  ASSERT_TRUE(var.is_found());
+  EXPECT_EQ(FoundName::kVariable, var.kind());
+  ASSERT_TRUE(var.variable());
+  EXPECT_EQ("kGlobal", var.variable()->GetAssignedName());
+
+  // Unqualified kAllNamespaces search does not match class-scoped static members, while
+  // class-qualified relative search in all namespaces does.
+  EXPECT_FALSE(FindName(context, all_ns_vars, ParsedIdentifier("kClassStatic")).is_found());
+  ParsedIdentifier class_static_rel;
+  ASSERT_TRUE(ExprParser::ParseIdentifier("MyClass::kClassStatic", &class_static_rel).ok());
+  FoundName class_static_found = FindName(context, all_ns_vars, class_static_rel);
+  ASSERT_TRUE(class_static_found.is_found());
+  EXPECT_EQ(FoundName::kVariable, class_static_found.kind());
+
+  // Function-local variables in .debug_names are never returned when context.block is null.
+  EXPECT_FALSE(FindName(context, all_ns_vars, ParsedIdentifier("my_class")).is_found());
+  EXPECT_FALSE(FindName(context, var_opts, ParsedIdentifier("my_class")).is_found());
+
+  // Global-only empty identifier returns not-found without crashing.
+  EXPECT_FALSE(
+      FindName(context, var_opts, ParsedIdentifier(IdentifierQualification::kGlobal)).is_found());
+
+  // Qualified lookup using ToParsedIdentifier.
+  FoundName qual_var =
+      FindName(context, var_opts,
+               ToParsedIdentifier(TestSymbolModule::SplitName(TestSymbolModule::kGlobalName)));
+  ASSERT_TRUE(qual_var.is_found());
+  EXPECT_EQ(FoundName::kVariable, qual_var.kind());
+
+  // Type definition lookup resolves concrete types for GetConcreteType.
+  auto type_def = FindTypeDefinition(
+      context, ToParsedIdentifier(TestSymbolModule::SplitName(TestSymbolModule::kMyClassName)));
+  ASSERT_TRUE(type_def);
+  EXPECT_EQ("MyClass", type_def->GetAssignedName());
+  EXPECT_FALSE(type_def->is_declaration());
+
+  // Namespace lookup succeeds through accelerator table.
+  FindNameOptions ns_opts(FindNameOptions::kNoKinds);
+  ns_opts.find_namespaces = true;
+  FoundName ns = FindName(context, ns_opts, ParsedIdentifier(TestSymbolModule::kMyNamespaceName));
+  ASSERT_TRUE(ns.is_found());
+  EXPECT_EQ(FoundName::kNamespace, ns.kind());
+  EXPECT_EQ(TestSymbolModule::kMyNamespaceName, ns.GetName().GetFullNameNoQual());
+
+  // Template specialization lookup via .debug_names.
+  ParsedIdentifier templ_ident;
+  Err parse_err = ExprParser::ParseIdentifier("MyTemplate<my_ns::Struct, 42>", &templ_ident);
+  ASSERT_TRUE(parse_err.ok());
+  FindNameOptions type_opts(FindNameOptions::kNoKinds);
+  type_opts.find_types = true;
+  FoundName templ_found = FindName(context, type_opts, templ_ident);
+  ASSERT_TRUE(templ_found.is_found());
+  EXPECT_EQ(FoundName::kType, templ_found.kind());
+
+  // Template specialization lookup without spaces after commas matches canonical DWARF names.
+  ParsedIdentifier templ_no_space;
+  ASSERT_TRUE(ExprParser::ParseIdentifier("MyTemplate<my_ns::Struct,42>", &templ_no_space).ok());
+  FoundName templ_no_space_found = FindName(context, type_opts, templ_no_space);
+  ASSERT_TRUE(templ_no_space_found.is_found());
+  EXPECT_EQ(FoundName::kType, templ_no_space_found.kind());
+
+  // Unspecialized template lookup finds template name and rejects non-template types.
+  FindNameOptions template_opts(FindNameOptions::kNoKinds);
+  template_opts.find_templates = true;
+  FoundName t_unspec = FindName(context, template_opts, ParsedIdentifier("MyTemplate"));
+  ASSERT_TRUE(t_unspec.is_found());
+  EXPECT_EQ(FoundName::kTemplate, t_unspec.kind());
+  EXPECT_FALSE(FindName(context, template_opts, ParsedIdentifier("MyClass")).is_found());
+
+  // Inner-scope shadowing: lexical scope search examines the current scope before outer scopes.
+  ParsedIdentifier my_class_scope =
+      ToParsedIdentifier(TestSymbolModule::SplitName(TestSymbolModule::kMyClassName));
+  std::vector<FoundName> shadow_results;
+  FindIndexedName(context, var_opts, my_class_scope, ParsedIdentifier("kClassStatic"), true,
+                  &shadow_results);
+  ASSERT_FALSE(shadow_results.empty());
+  EXPECT_EQ(FoundName::kVariable, shadow_results[0].kind());
+  ASSERT_TRUE(shadow_results[0].variable());
+  EXPECT_EQ(TestSymbolModule::kClassStaticName, shadow_results[0].variable()->GetFullName());
+
+  // Outer variable lookup from inner scope falls back to enclosing scope when not in inner scope.
+  // Also verifies that a kGlobal-qualified current_scope terminates cleanly when walking up scopes.
+  my_class_scope.set_qualification(IdentifierQualification::kGlobal);
+  std::vector<FoundName> outer_results;
+  FindIndexedName(context, var_opts, my_class_scope, ParsedIdentifier("kGlobal"), true,
+                  &outer_results);
+  ASSERT_FALSE(outer_results.empty());
+  EXPECT_EQ(FoundName::kVariable, outer_results[0].kind());
+  ASSERT_TRUE(outer_results[0].variable());
+  EXPECT_EQ(TestSymbolModule::kGlobalName, outer_results[0].variable()->GetFullName());
+
+  // Looking up a non-existent symbol from a kGlobal-qualified current_scope with
+  // search_containing = true terminates without looping at the root scope.
+  std::vector<FoundName> missing_results;
+  FindIndexedName(context, var_opts, my_class_scope, ParsedIdentifier("kDoesNotExist"), true,
+                  &missing_results);
+  EXPECT_TRUE(missing_results.empty());
+
+  // Prefix searches find matching symbols.
+  FindNameOptions prefix_opts(FindNameOptions::kNoKinds);
+  prefix_opts.find_functions = true;
+  prefix_opts.how = FindNameOptions::kPrefix;
+  std::vector<FoundName> prefix_results;
+  FindName(context, prefix_opts, ParsedIdentifier("My"), &prefix_results);
+  EXPECT_FALSE(prefix_results.empty());
+
+  // Anonymous-namespace identifiers produced by ToParsedIdentifier contain an empty
+  // component and must match both as a target and as current_scope.
+  FoundName anon_fn =
+      FindName(context, fn_opts, ParsedIdentifier(TestSymbolModule::kAnonNSFunctionName));
+  ASSERT_TRUE(anon_fn.is_found());
+  ASSERT_TRUE(anon_fn.function());
+  ParsedIdentifier anon_parsed = ToParsedIdentifier(anon_fn.function()->GetIdentifier());
+  FoundName anon_roundtrip = FindName(context, fn_opts, anon_parsed);
+  ASSERT_TRUE(anon_roundtrip.is_found());
+  EXPECT_EQ(FoundName::kFunction, anon_roundtrip.kind());
+
+  std::vector<FoundName> anon_scope_results;
+  FindIndexedName(context, fn_opts, anon_parsed.GetScope(),
+                  ParsedIdentifier(TestSymbolModule::kAnonNSFunctionName), true,
+                  &anon_scope_results);
+  EXPECT_FALSE(anon_scope_results.empty());
+
+  prefix_opts.max_results = 1;
+  std::vector<FoundName> truncated_results;
+  FindName(context, prefix_opts, ParsedIdentifier("My"), &truncated_results);
+  EXPECT_EQ(1u, truncated_results.size());
+}
+
+}  // namespace
 
 }  // namespace zxdb

@@ -15,7 +15,6 @@
 
 # shellcheck source=/dev/null
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/vars.sh || exit $?
-fx-config-read
 
 set -e
 
@@ -32,6 +31,15 @@ if [[ $# -gt 0 ]]; then
       ;;
   esac
 fi
+
+# Avoid writing Python bytecode during clean so that bytecode caches
+# are not created after gn clean or during config loading/fx gen.
+export PYTHONDONTWRITEBYTECODE=1
+
+# Validate build directory and args.gn directly with fx-build-dir-require
+# instead of calling fx-config-read, so that fx-build-config-load does not
+# run fx-gen (build/regenerator) prior to gn clean when fx.config is missing.
+fx-build-dir-require || exit $?
 
 (set -x; fx-gn clean "$FUCHSIA_BUILD_DIR")
 

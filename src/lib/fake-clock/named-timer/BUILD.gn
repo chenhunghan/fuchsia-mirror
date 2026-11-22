@@ -68,7 +68,7 @@ rustc_library("named-timer") {
 }
 
 source_set("named-timer-headers") {
-  sources = [ "named_timer.h" ]
+  public = [ "named_timer.h" ]
   visibility = [
     ":*",
     "//src/lib/fake-clock/lib:*",

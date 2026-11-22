@@ -483,11 +483,11 @@ class Expression {
   Expression(Expression&&) = default;
   Expression& operator=(Expression&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kValue = 1,                // 0x1
     kBinOp = 2,                // 0x2
     kFunctionApplication = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_anonymous::wire::Expression::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -540,7 +540,7 @@ class Expression {
   ::test_anonymous::wire::Expression::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kValue = 1,                // 0x1
     kBinOp = 2,                // 0x2
@@ -562,9 +562,9 @@ class UnionMember {
   UnionMember(UnionMember&&) = default;
   UnionMember& operator=(UnionMember&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kUnionData = 2,  // 0x2
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_anonymous::wire::UnionMember::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -583,7 +583,7 @@ class UnionMember {
   ::test_anonymous::wire::UnionMember::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kUnionData = 2,  // 0x2
   };
@@ -606,7 +606,7 @@ class SomeProtocolSomeMethodResult {
   SomeProtocolSomeMethodResult(SomeProtocolSomeMethodResult&&) = default;
   SomeProtocolSomeMethodResult& operator=(SomeProtocolSomeMethodResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -632,7 +632,7 @@ class SomeProtocolSomeMethodResult {
   ::test_anonymous::wire::SomeProtocolSomeMethodResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2

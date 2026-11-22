@@ -22,8 +22,9 @@ template("_preprocessed_dts") {
   toolchain_utils_action(target_name) {
     forward_variables_from(invoker,
                            [
-                             "sources",
                              "deps",
+                             "sources",
+                             "testonly",
                            ])
 
     assert([ sources[0] ] == sources, "Only one source file can be passed.")
@@ -173,7 +174,11 @@ template("dtb") {
   # statements in DTC. This generates a file containing paths to all of these
   # directory trees, which we use below when calling DTC.
   generated_file(dts_include_dirs_target) {
-    forward_variables_from(invoker, [ "deps" ])
+    forward_variables_from(invoker,
+                           [
+                             "deps",
+                             "testonly",
+                           ])
     data_keys = [ "devicetree_includes" ]
     outputs = [ "$target_gen_dir/$dts_include_dirs_filename" ]
     output_conversion = "list lines"
@@ -185,8 +190,9 @@ template("dtb") {
   _preprocessed_dts(processed_dts_target) {
     forward_variables_from(invoker,
                            [
-                             "sources",
                              "deps",
+                             "sources",
+                             "testonly",
                            ])
   }
 

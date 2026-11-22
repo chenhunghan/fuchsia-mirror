@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# [START imports]
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+# [END imports]
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":echo-cpp-unittests"],
+    visibility = ["//examples:__pkg__"],
+)
+
+# [START executable]
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":cpp-lib",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_cc_library(
+    name = "cpp-lib",
+    srcs = ["echo_component.cc"],
+    hdrs = ["echo_component.h"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    alwayslink = True,
+)
+
+# [END executable]
+
+# [START component]
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "echo_example_cpp",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "echo_cpp",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/echo.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//examples/components/echo:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+# [END component]
+
+# [START unittest]
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = ["echo_unittest.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":cpp-lib",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "echo-cpp-unittests",
+    unit_tests = [":unittests"],
+)
+# [END unittest]

@@ -37,20 +37,20 @@ Create a new component project at `examples/fidl/rust/client_sync`:
    }
    ```
 
-1. Declare a target for the client in `examples/fidl/rust/client_sync/BUILD.gn`:
+1. Declare a target for the client in `examples/fidl/rust/client_sync/BUILD.bazel`:
 
-   ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client_sync/BUILD.gn" region_tag="imports" %}
+   ```bazel
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client_sync/BUILD.bazel" region_tag="imports" %}
 
    # Declare an executable for the client.
-   rustc_binary("bin") {
-     name = "fidl_echo_rust_client_sync"
-     edition = "2024"
+   rustc_binary(
+       name = "bin",
+       binary_name = "fidl_echo_rust_client_sync",
+       srcs = ["src/main.rs"],
+       edition = "2024",
+   )
 
-     sources = [ "src/main.rs" ]
-   }
-
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client_sync/BUILD.gn" region_tag="rest" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client_sync/BUILD.bazel" region_tag="rest" %}
    ```
 
 1. Add a component manifest in `examples/fidl/rust/client_sync/meta/client.cml`:
@@ -79,8 +79,8 @@ Create a new component project at `examples/fidl/rust/client_sync`:
 
 1. Add the following dependencies to the `rustc_binary`:
 
-   ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client_sync/BUILD.gn" region_tag="deps" %}
+   ```bazel
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client_sync/BUILD.bazel" region_tag="deps" %}
    ```
 
 1. Then, import them in `main.rs`:

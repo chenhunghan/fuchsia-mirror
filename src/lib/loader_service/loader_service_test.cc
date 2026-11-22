@@ -292,6 +292,130 @@ TEST_F(LoaderServiceTest, InteropWithLdmsg_LoadObject) {
   EXPECT_NO_FATAL_FAILURE(LoadObjectLdmsg(client, "libnoexec.so", zx::error(ZX_ERR_ACCESS_DENIED)));
 }
 
+TEST_F(LoaderServiceTest, PipelinedLdmsgLoadObject) {
+  std::shared_ptr<LoaderService> loader;
+  std::vector<TestDirectoryEntry> config;
+  config.emplace_back("libfoo.so", "science", true);
+  config.emplace_back("libbar.so", "progress", true);
+  config.emplace_back("libnoexec.so", "rules", false);
+  config.emplace_back("asan/libfoo.so", "asan_science", true);
+  ASSERT_NO_FATAL_FAILURE(CreateTestLoader(config, &loader));
+
+  auto status = loader->Connect();
+  ASSERT_TRUE(status.is_ok());
+  auto client = std::move(status).value();
+
+  struct PipelinedRequest {
+    zx_txid_t txid;
+    const char* name;
+    zx_status_t expected_status;
+    const char* expected_contents;
+    bool received = false;
+  };
+
+  auto run_pipelined_batch = [&](std::vector<PipelinedRequest>& batch) {
+    // Write all LDMSG_OP_LOAD_OBJECT messages back-to-back before reading any reply.
+    for (const auto& item : batch) {
+      size_t req_len = 0;
+      ldmsg_req_t req = {};
+      ASSERT_OK(
+          ldmsg_req_encode(LDMSG_OP_LOAD_OBJECT, &req, &req_len, item.name, strlen(item.name)));
+      req.header.txid = item.txid;
+      ASSERT_OK(client.channel().write(0, &req, static_cast<uint32_t>(req_len), nullptr, 0));
+    }
+
+    // Read all replies and match by txid.
+    for (size_t i = 0; i < batch.size(); ++i) {
+      zx_signals_t pending = 0;
+      ASSERT_OK(client.channel().wait_one(ZX_CHANNEL_READABLE | ZX_CHANNEL_PEER_CLOSED,
+                                          zx::time::infinite(), &pending));
+      ASSERT_NE(pending & ZX_CHANNEL_READABLE, 0u);
+
+      ldmsg_rsp_t rsp = {};
+      zx::vmo vmo;
+      uint32_t actual_bytes = 0;
+      uint32_t actual_handles = 0;
+      ASSERT_OK(client.channel().read(0, &rsp, vmo.reset_and_get_address(), sizeof(rsp), 1,
+                                      &actual_bytes, &actual_handles));
+      ASSERT_EQ(actual_bytes, ldmsg_rsp_get_size(&rsp));
+      ASSERT_EQ(rsp.header.ordinal, LDMSG_OP_LOAD_OBJECT);
+
+      PipelinedRequest* matched = nullptr;
+      for (auto& item : batch) {
+        if (!item.received && item.txid == rsp.header.txid) {
+          matched = &item;
+          break;
+        }
+      }
+      ASSERT_NE(matched, nullptr) << "Unexpected or duplicate txid: " << rsp.header.txid;
+      matched->received = true;
+
+      EXPECT_EQ(rsp.rv, matched->expected_status) << "for " << matched->name;
+      if (matched->expected_status == ZX_OK) {
+        ASSERT_TRUE(vmo.is_valid()) << "for " << matched->name;
+        zx_info_handle_basic_t info = {};
+        ASSERT_OK(vmo.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr));
+        EXPECT_EQ(info.rights & ZX_RIGHT_EXECUTE, ZX_RIGHT_EXECUTE);
+
+        size_t expected_len = strlen(matched->expected_contents);
+        std::string buf(expected_len, '\0');
+        ASSERT_OK(vmo.read(buf.data(), 0, expected_len));
+        EXPECT_EQ(buf, matched->expected_contents);
+      } else {
+        EXPECT_FALSE(vmo.is_valid()) << "for " << matched->name;
+      }
+    }
+  };
+
+  std::vector<PipelinedRequest> batch1 = {
+      {.txid = 0x101,
+       .name = "libfoo.so",
+       .expected_status = ZX_OK,
+       .expected_contents = "science"},
+      {.txid = 0x102,
+       .name = "libmissing.so",
+       .expected_status = ZX_ERR_NOT_FOUND,
+       .expected_contents = nullptr},
+      {.txid = 0x103,
+       .name = "libbar.so",
+       .expected_status = ZX_OK,
+       .expected_contents = "progress"},
+      {.txid = 0x104,
+       .name = "libnoexec.so",
+       .expected_status = ZX_ERR_ACCESS_DENIED,
+       .expected_contents = nullptr},
+      {.txid = 0x105,
+       .name = "/",
+       .expected_status = ZX_ERR_INVALID_ARGS,
+       .expected_contents = nullptr},
+  };
+  ASSERT_NO_FATAL_FAILURE(run_pipelined_batch(batch1));
+
+  // Switch config to "asan" (non-exclusive) and verify pipelined subdir + fallback lookups.
+  {
+    fidl::UnownedClientEnd<fldsvc::Loader> unowned(client.channel().borrow());
+    auto cfg_res = fidl::WireCall(unowned)->Config("asan");
+    ASSERT_TRUE(cfg_res.ok());
+    ASSERT_OK(cfg_res->rv);
+  }
+
+  std::vector<PipelinedRequest> batch2 = {
+      {.txid = 0x201,
+       .name = "libfoo.so",
+       .expected_status = ZX_OK,
+       .expected_contents = "asan_science"},
+      {.txid = 0x202,
+       .name = "libbar.so",
+       .expected_status = ZX_OK,
+       .expected_contents = "progress"},
+      {.txid = 0x203,
+       .name = "..",
+       .expected_status = ZX_ERR_INVALID_ARGS,
+       .expected_contents = nullptr},
+  };
+  ASSERT_NO_FATAL_FAILURE(run_pipelined_batch(batch2));
+}
+
 }  // namespace
 }  // namespace test
 }  // namespace loader

@@ -4,7 +4,7 @@
 
 #include "decoder_fuzzer.h"
 
-#include <fuchsia/sysmem/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 #include <zircon/assert.h>
 
 #include <fuzzer/FuzzedDataProvider.h>
@@ -29,7 +29,7 @@ void FakeCodecAdapterEvents::onCoreCodecFailCodec(const char *format, ...) {
   cond_.notify_all();
 }
 
-void FakeCodecAdapterEvents::onCoreCodecFailStream(fuchsia::media::StreamError error) {
+void FakeCodecAdapterEvents::onCoreCodecFailStream(fuchsia_media::StreamError error) {
   printf("Got onCoreCodecFailStream %d\n", static_cast<int>(error));
   fflush(stdout);
   std::lock_guard<std::mutex> lock(lock_);
@@ -55,7 +55,7 @@ void FakeCodecAdapterEvents::onCoreCodecInputPacketDone(const CodecPacket *packe
 void FakeCodecAdapterEvents::onCoreCodecOutputPacket(CodecPacket *packet,
                                                      bool error_detected_before,
                                                      bool error_detected_during) {
-  auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
+  auto output_format = codec_adapter_->CoreCodecGetOutputFormat2(1u, 1u);
 }
 
 void FakeCodecAdapterEvents::onCoreCodecOutputTimestampHasNoOutput(uint64_t timestamp_ish) {}
@@ -97,19 +97,21 @@ void VaapiFuzzerTestFixture::SetUp() {
 }
 
 void VaapiFuzzerTestFixture::CodecAndStreamInit(std::string mime_type) {
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(1);
-  format_details.set_mime_type(mime_type);
-  decoder_->CoreCodecInit(format_details);
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal(1);
+  format_details.mime_type(mime_type);
+  decoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
 
-  auto input_constraints = decoder_->CoreCodecGetBufferCollectionConstraints2(
-      CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-      fuchsia::media::StreamBufferPartialSettings());
+  auto input_constraints_result =
+      decoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+  ZX_ASSERT(input_constraints_result.has_value());
+  auto &input_constraints = input_constraints_result->constraints;
   ZX_ASSERT(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
-  auto output_constraints = decoder_->CoreCodecGetBufferCollectionConstraints2(
-      CodecPort::kOutputPort, fuchsia::media::StreamBufferConstraints(),
-      fuchsia::media::StreamBufferPartialSettings());
+  auto output_constraints_result =
+      decoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kOutputPort);
+  ZX_ASSERT(output_constraints_result.has_value());
+  auto &output_constraints = output_constraints_result->constraints;
   ZX_ASSERT(*output_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
   // Set the codec output format to either linear or tiled depending on the fuzzer
@@ -142,7 +144,8 @@ void VaapiFuzzerTestFixture::CodecAndStreamInit(std::string mime_type) {
   decoder_->CoreCodecSetBufferCollectionInfo(CodecPort::kOutputPort, buffer_collection);
 
   decoder_->CoreCodecStartStream();
-  decoder_->CoreCodecQueueInputFormatDetails(format_details);
+  decoder_->CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
 }
 
 void VaapiFuzzerTestFixture::CodecStreamStop() {
@@ -215,9 +218,10 @@ void VaapiFuzzerTestFixture::onCoreCodecMidStreamOutputConstraintsChange(
   decoder_->CoreCodecEnsureBuffersNotConfigured(CodecPort::kOutputPort);
 
   // Test a representative value.
-  auto output_constraints = decoder_->CoreCodecGetBufferCollectionConstraints2(
-      CodecPort::kOutputPort, fuchsia::media::StreamBufferConstraints(),
-      fuchsia::media::StreamBufferPartialSettings());
+  auto output_constraints_result =
+      decoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kOutputPort);
+  ZX_ASSERT(output_constraints_result.has_value());
+  auto &output_constraints = output_constraints_result->constraints;
   ZX_ASSERT(*output_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
   ZX_ASSERT(output_constraints.image_format_constraints()->size() == 1u);

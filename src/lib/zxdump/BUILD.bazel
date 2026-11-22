@@ -6,14 +6,14 @@ load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load(
     "//build/bazel/rules/cc:fx_cc_library.bzl",
     "fx_cc_library",
-    cc_source_library_zx = "fx_cc_library",
+    fx_cc_source_library_zx = "fx_cc_library",
 )
 
 package(default_applicable_licenses = ["//:license"])
 
 # Test code can use private headers from sources.
 # @bazel2gn:raw_attribute:friend = [ ":*" ]
-cc_source_library_zx(
+fx_cc_source_library_zx(
     name = "zxdump",
     srcs = [
         "buffer-impl.cc",
@@ -76,7 +76,10 @@ cc_source_library_zx(
         "//conditions:default": [],
     }),
     includes = ["include"],
-    visibility = ["//src/performance/cpu_profiler:__pkg__"],
+    visibility = [
+        "//src/developer/debug/zxdb/client:__pkg__",
+        "//src/performance/cpu_profiler:__pkg__",
+    ],
     deps = [
         # <lib/zxdump/dump.h> has #include <lib/fit/function.h>.
         "//sdk/lib/fit",

@@ -132,6 +132,18 @@
       "short": null,
       "description": "use streaming fastboot flash if supported by the device",
       "hidden": false
+    },
+    {
+      "kind": {
+        "Option": {
+          "arg_name": "skip-partition"
+        }
+      },
+      "optionality": "repeating",
+      "long": "--skip-partition",
+      "short": null,
+      "description": "base name of a partition not to flash, without any slot suffix (e.g. `modem` skips `modem_a` and `modem_b`) - can be supplied multiple times. It's up to the caller to ensure the device already has compatible images in these partitions, or else the device may exhibit unexpected behavior or refuse to boot at all",
+      "hidden": false
     }
   ],
   "notes": [

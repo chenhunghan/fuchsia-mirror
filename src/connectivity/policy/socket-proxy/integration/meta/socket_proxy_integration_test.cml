@@ -10,4 +10,7 @@
     program: {
         binary: "bin/socket_proxy_integration_test",
     },
+    use: [
+        { protocol: "fuchsia.diagnostics.ArchiveAccessor" },
+    ],
 }

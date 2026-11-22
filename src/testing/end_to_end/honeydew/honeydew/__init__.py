@@ -5,7 +5,7 @@
 
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 from honeydew import affordances_capable, errors
@@ -16,6 +16,7 @@ from honeydew.device_classes import (
 )
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.ffx import ffx as ffx_transport
+from honeydew.transports.ffx import ffx_impl
 from honeydew.transports.ffx.config import FfxConfigData
 from honeydew.typing import custom_types
 
@@ -44,10 +45,12 @@ _REGISTERED_PRODUCT_TO_DEVICE_CLASS_DICT: dict[
 class _NoOpDeviceAddressChange(affordances_capable.FuchsiaDeviceAddressChange):
     """No-op FuchsiaDeviceAddressChange used for short-lived FFX queries prior to device creation."""
 
+    def resolve_device_address(self) -> None:
+        pass
+
     def register_for_on_device_address_change(
         self,
-        fn: Callable[[custom_types.TargetAddr], None]
-        | Callable[[custom_types.TargetAddr], Awaitable[None]],
+        fn: Callable[[custom_types.TargetAddr], None],
     ) -> None:
         pass
 
@@ -95,7 +98,7 @@ def create_device(
                     },
                     "affordances": {
                         "tracing": {
-                            "implementation": "fuchsia-controller",
+                            "implementation": "ffx",
                         },
                     },
                 }
@@ -109,7 +112,7 @@ def create_device(
     _LOGGER.debug("create_device has been called with: %s", locals())
 
     try:
-        if device_info.address:
+        if isinstance(device_info.address, custom_types.IpPort):
             _LOGGER.info(
                 "CAUTION: address='%s' argument has been passed. Please "
                 "make sure this value associated with the device is persistent "
@@ -171,7 +174,7 @@ def _get_device_class(
     Returns:
         Device class type.
     """
-    ffx_obj: ffx_transport.FFX = ffx_transport.FFX(
+    ffx_obj: ffx_transport.FFX = ffx_impl.FfxImpl(
         target_name=device_info.name,
         config_data=ffx_config_data,
         target_addr=device_info.address,

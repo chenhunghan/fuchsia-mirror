@@ -9,8 +9,7 @@ package(default_applicable_licenses = ["//:license"])
 
 # The unit tests of this library stay in BUILD.gn for now, because
 # test_extract_blobs_with_image depends on //bundles/assembly:platform
-# (PLATFORM_ARTIFACTS_DIR), //src/lib/assembly/image_assembly_config_builder,
-# and //src/storage/fxfs/fxfs_pbtool, which are not in Bazel yet.
+# (PLATFORM_ARTIFACTS_DIR), which is not wired into Bazel host tests yet.
 # LINT.IfChange(product_bundle)
 rustc_library(
     name = "product_bundle",

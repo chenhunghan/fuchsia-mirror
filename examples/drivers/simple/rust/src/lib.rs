@@ -47,7 +47,7 @@ impl Driver for SimpleRustDriver {
         Ok(Self { node, child_node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("SimpleRustDriver::stop() was invoked. Use this function to do any cleanup needed.");
     }
 }

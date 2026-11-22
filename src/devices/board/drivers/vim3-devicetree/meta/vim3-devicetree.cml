@@ -66,10 +66,6 @@
                 symbols: [ "__devicetree_visitor_registration__" ],
             },
             {
-                module_name: "lib/visitors/devicetree-visitors-power-element-visitor.so",
-                symbols: [ "__devicetree_visitor_registration__" ],
-            },
-            {
                 module_name: "lib/visitors/devicetree-visitors-pwm-init-visitor.so",
                 symbols: [ "__devicetree_visitor_registration__" ],
             },

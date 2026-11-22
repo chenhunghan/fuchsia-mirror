@@ -79,6 +79,7 @@
     ],
     expose: [
         {
+            // LINT.IfChange(exposed_protocols)
             protocol: [
                 "fuchsia.net.debug.Diagnostics",
                 "fuchsia.net.debug.Interfaces",
@@ -117,6 +118,8 @@
                 "fuchsia.posix.socket.raw.Provider",
                 "fuchsia.update.verify.ComponentOtaHealthCheck",
             ],
+
+            // LINT.ThenChange(//src/connectivity/network/testing/netemul/configurable-netstack/meta/configurable-netstack.cml:exposed_protocols)
             from: "self",
         },
         {

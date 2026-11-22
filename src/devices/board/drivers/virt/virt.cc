@@ -5,7 +5,6 @@
 #include "virt.h"
 
 #include <fidl/fuchsia.driver.framework/cpp/fidl.h>
-#include <fidl/fuchsia.hardware.pci/cpp/wire.h>
 #include <fidl/fuchsia.hardware.platform.bus/cpp/driver/fidl.h>
 #include <fidl/fuchsia.hardware.platform.bus/cpp/fidl.h>
 #include <fidl/fuchsia.kernel/cpp/fidl.h>
@@ -14,6 +13,9 @@
 #include <lib/fdf/cpp/arena.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
+
+#include <memory>
+#include <vector>
 
 #include <bind/fuchsia/pci/cpp/bind.h>
 #include <fbl/algorithm.h>
@@ -41,7 +43,7 @@ zx::result<zx::resource> GetResource(const fdf::Namespace& incoming) {
 }  // namespace
 
 void Virt::SysinfoInit() {
-  fdf::Arena arena('RISC');
+  fdf::Arena arena('VIRT');
   fpbus::BootloaderInfo bootloader_info;
   bootloader_info.vendor() = "<unknown>";
   {
@@ -70,13 +72,6 @@ zx::result<> Virt::PcirootInit(fdf::DriverContext& context, const std::string& n
   }
   mmio_resource_ = *std::move(mmio);
 
-  // Note: fuchsia.kernel.IoportResource is only routed on x86 platforms; on RISC-V (as on
-  // ARM/crosvm), ioport_resource_ remains an unbacked/invalid zx::resource handle.
-  zx::result<zx::resource> ioport = GetResource<fuchsia_kernel::IoportResource>(context.incoming());
-  if (ioport.is_ok()) {
-    ioport_resource_ = *std::move(ioport);
-  }
-
   zx::result<zx::resource> irq = GetResource<fuchsia_kernel::IrqResource>(context.incoming());
   if (irq.is_error()) {
     fdf::error("Couldn't obtain IRQ resource: {}", irq.status_string());
@@ -89,7 +84,7 @@ zx::result<> Virt::PcirootInit(fdf::DriverContext& context, const std::string& n
     return iommu.take_error();
   }
 
-  pci_root_host_.emplace(msi_resource_.borrow(), mmio_resource_.borrow(), ioport_resource_.borrow(),
+  pci_root_host_.emplace(msi_resource_.borrow(), mmio_resource_.borrow(), zx::unowned_resource(),
                          PCI_ADDRESS_SPACE_MEMORY);
 
   pci_root_host_->mcfgs().push_back(kVirtPcieMcfg);
@@ -101,11 +96,24 @@ zx::result<> Virt::PcirootInit(fdf::DriverContext& context, const std::string& n
     return zx::error(status);
   }
 
-  if (zx::result<> result = pci_root_host_->AddMmioRange(kVirtPcieMmio.base, kVirtPcieMmio.size);
+  if (zx::result<> result =
+          pci_root_host_->AddMmioRange(kVirtPcieMmio32.base, kVirtPcieMmio32.size);
       result.is_error()) {
-    fdf::error("Failed to add MMIO region {{ {:#x} - {:#x} }} to PCI root allocator: {}",
-               kVirtPcieMmio.base, kVirtPcieMmio.base + kVirtPcieMmio.size, result.status_string());
+    fdf::error("Failed to add MMIO32 region {{ {:#x} - {:#x} }} to PCI root allocator: {}",
+               kVirtPcieMmio32.base, kVirtPcieMmio32.base + kVirtPcieMmio32.size,
+               result.status_string());
     return result.take_error();
+  }
+
+  if (kVirtPcieMmio64.size > 0) {
+    if (zx::result<> result =
+            pci_root_host_->AddMmioRange(kVirtPcieMmio64.base, kVirtPcieMmio64.size);
+        result.is_error()) {
+      fdf::error("Failed to add MMIO64 region {{ {:#x} - {:#x} }} to PCI root allocator: {}",
+                 kVirtPcieMmio64.base, kVirtPcieMmio64.base + kVirtPcieMmio64.size,
+                 result.status_string());
+      return result.take_error();
+    }
   }
 
   zx::vmo ecam;
@@ -125,12 +133,12 @@ zx::result<> Virt::PcirootInit(fdf::DriverContext& context, const std::string& n
     return result.take_error();
   }
 
-  banjo_server_.emplace(bind_fuchsia_pci::BIND_PROTOCOL_ROOT, &*pciroot_,
-                        pciroot_->pciroot_protocol_ops());
+  compat::BanjoServer& banjo_server = banjo_server_.emplace(
+      bind_fuchsia_pci::BIND_PROTOCOL_ROOT, &*pciroot_, pciroot_->pciroot_protocol_ops());
   compat::DeviceServer::BanjoConfig banjo_config{
       .default_proto_id = bind_fuchsia_pci::BIND_PROTOCOL_ROOT,
   };
-  banjo_config.callbacks[bind_fuchsia_pci::BIND_PROTOCOL_ROOT] = banjo_server_->callback();
+  banjo_config.callbacks[bind_fuchsia_pci::BIND_PROTOCOL_ROOT] = banjo_server.callback();
 
   auto incoming = std::shared_ptr<fdf::Namespace>(context.take_incoming());
   zx::result<> result =
@@ -142,7 +150,7 @@ zx::result<> Virt::PcirootInit(fdf::DriverContext& context, const std::string& n
   }
 
   std::vector offers = compat_server_.CreateOffers2();
-  zx::result child = AddChild(kPcirootName, {{banjo_server_->property()}}, offers);
+  zx::result child = AddChild(kPcirootName, {{banjo_server.property()}}, offers);
   if (child.is_error()) {
     fdf::error("Failed to add PCI0 child: {}", child.status_string());
     return child.take_error();
@@ -175,7 +183,7 @@ zx::result<> Virt::Start(fdf::DriverContext context) {
     return result.take_error();
   }
 
-  fdf::info("QEMU RISC-V board driver initialized successfully");
+  fdf::info("QEMU virt board driver initialized successfully");
   return zx::ok();
 }
 

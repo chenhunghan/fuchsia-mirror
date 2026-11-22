@@ -427,7 +427,7 @@ built in fuchsia.git into the workstation.git repository’s out directory and t
 to create a bootable image. The end state will be when we can provision a device with
 an image that is assembled out-of-tree but built in tree.
 
-### Phase 3
+### Phase 3 {:#phase-3}
 
 The third phase of this transition is when we work towards bringing all of these
 pieces together to assemble the entire product. This includes setting up all of

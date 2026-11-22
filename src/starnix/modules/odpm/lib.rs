@@ -15,7 +15,8 @@ use fidl_fuchsia_hardware_google_odpm as fodpm;
 use fuchsia_async as fasync;
 use fuchsia_component::client::Service;
 use futures::{FutureExt, TryStreamExt};
-use starnix_core::fs::sysfs::get_sysfs;
+use starnix_core::device::kobject::Device;
+use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::task::{CurrentTask, Kernel};
 use starnix_core::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
 use starnix_core::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
@@ -413,10 +414,13 @@ async fn watch_odpm_rails(odpm_device: Arc<OdpmDevice>) {
     }
 }
 
-/// Discovers ODPM rails and registers the ODPM sysfs device.
-pub fn odpm_device_init(kernel: &Kernel) {
+/// Registers the ODPM sysfs device hierarchy and spawns the background rail watcher.
+///
+/// Returns an error (such as `EEXIST`), rolls back any partial sysfs entries, and does not spawn
+/// the background watcher if a conflicting device is already registered.
+pub fn odpm_device_init(kernel: &Kernel) -> Result<(), Errno> {
     let odpm_device = Arc::new(OdpmDevice::new());
-    register_odpm_device(kernel, Arc::clone(&odpm_device));
+    register_odpm_device(kernel, Arc::clone(&odpm_device))?;
 
     let odpm_device_clone = Arc::clone(&odpm_device);
     kernel.kthreads.spawn_future(
@@ -425,58 +429,81 @@ pub fn odpm_device_init(kernel: &Kernel) {
         },
         "odpm_device_watcher",
     );
+    Ok(())
 }
 
-/// Registers the ODPM device within sysfs at `/sys/devices/platform/cpm/cpm:ODPM/iio:device0`
-/// and creates the symlink at `/sys/bus/iio/devices/iio:device0`.
-pub fn register_odpm_device(kernel: &Kernel, odpm_device: Arc<OdpmDevice>) {
-    let fs = get_sysfs(kernel);
-    let root = SimpleDirectoryMutator::new(fs, kernel.device_registry.objects.root.clone());
+struct StagedDevices<'a> {
+    kernel: &'a Kernel,
+    devices: Vec<Device>,
+}
 
-    // 1. Create the canonical platform device hierarchy:
-    //    /sys/devices/platform/cpm/cpm:ODPM/iio:device0
-    root.subdir("devices", 0o755, |devices_dir| {
-        devices_dir.subdir("platform", 0o755, |platform_dir| {
-            platform_dir.subdir("cpm", 0o755, |cpm_dir| {
-                cpm_dir.subdir("cpm:ODPM", 0o755, |odpm_dir| {
-                    odpm_dir.subdir("iio:device0", 0o755, |iio_device_dir| {
-                        build_odpm_directory(iio_device_dir, odpm_device);
-                        iio_device_dir.entry(
-                            "uevent",
-                            BytesFile::new_node(
-                                b"DEVPATH=/devices/platform/cpm/cpm:ODPM/iio:device0\nSUBSYSTEM=iio\n".to_vec(),
-                            ),
-                            mode!(IFREG, 0o644),
-                        );
-                        iio_device_dir.symlink(
-                            "subsystem".into(),
-                            "../../../../../bus/iio".into(),
-                        );
-                    });
-                });
-            });
-        });
-    });
+impl Drop for StagedDevices<'_> {
+    fn drop(&mut self) {
+        for device in self.devices.drain(..).rev() {
+            self.kernel.device_registry.remove_device_with_kernel(self.kernel, device);
+        }
+    }
+}
 
-    // 2. Create the IIO bus symlink:
-    //    /sys/bus/iio/devices/iio:device0 -> ../../../devices/platform/cpm/cpm:ODPM/iio:device0
-    root.subdir("bus", 0o755, |bus_dir| {
-        bus_dir.subdir("iio", 0o755, |iio_dir| {
-            iio_dir.subdir("devices", 0o755, |devices_dir| {
-                devices_dir.symlink(
-                    "iio:device0".into(),
-                    "../../../devices/platform/cpm/cpm:ODPM/iio:device0".into(),
-                );
-            });
-        });
-    });
+/// Registers the `cpm` and `cpm:ODPM` platform bus devices and the `iio:device0` IIO bus device
+/// at `/sys/devices/platform/cpm/cpm:ODPM/iio:device0`.
+///
+/// Returns an error and rolls back any devices added by this call if a conflicting sysfs entry
+/// already exists.
+fn register_odpm_device(kernel: &Kernel, odpm_device: Arc<OdpmDevice>) -> Result<(), Errno> {
+    let registry = &kernel.device_registry;
+    let platform = registry.objects.platform_device();
+    let platform_bus = registry.objects.platform_bus();
+    let mut staged = StagedDevices { kernel, devices: Vec::with_capacity(2) };
+    let cpm = registry.add_bus_device(
+        "cpm".into(),
+        Some(platform),
+        platform_bus.clone(),
+        build_device_directory,
+    )?;
+    staged.devices.push(cpm.clone());
+    let odpm = registry.add_bus_device(
+        "cpm:ODPM".into(),
+        Some(cpm),
+        platform_bus,
+        build_device_directory,
+    )?;
+    staged.devices.push(odpm.clone());
+    let iio_bus = registry.objects.get_or_create_bus("iio".into());
+    registry.add_bus_device("iio:device0".into(), Some(odpm), iio_bus, |device, dir| {
+        build_device_directory(device, dir);
+        build_odpm_directory(dir, odpm_device);
+    })?;
+    staged.devices.clear();
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures::StreamExt;
+    use starnix_core::device::DeviceRegistry;
+    use starnix_core::device::kobject::{UEventAction, UEventContext};
+    use starnix_core::fs::sysfs::get_sysfs;
     use starnix_core::testing::spawn_kernel_and_run;
+    use starnix_core::vfs::buffers::VecOutputBuffer;
+    use starnix_core::vfs::{LookupContext, NamespaceNode, SymlinkTarget};
+    use starnix_sync::Mutex;
+    use starnix_uapi::errno;
+    use starnix_uapi::open_flags::OpenFlags;
+
+    fn record_device_events(
+        registry: &DeviceRegistry,
+    ) -> Arc<Mutex<Vec<(UEventAction, FsString)>>> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&events);
+        let _ = registry.register_listener(
+            move |action: UEventAction, device: Device, _context: UEventContext| {
+                recorded.lock().push((action, device.name().to_owned()));
+            },
+        );
+        events
+    }
 
     fn millis_to_nanos(millis: i64) -> i64 {
         millis * NANOS_PER_MILLI
@@ -687,12 +714,52 @@ mod tests {
     #[::fuchsia::test]
     async fn test_register_odpm_sysfs_device() {
         spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let events = record_device_events(&kernel.device_registry);
+
             let odpm_device = Arc::new(OdpmDevice::new_with_rails(vec![], None));
+            register_odpm_device(kernel, odpm_device).expect("register_odpm_device should succeed");
 
-            register_odpm_device(current_task.kernel(), odpm_device);
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    (UEventAction::Add, FsString::from("cpm")),
+                    (UEventAction::Add, FsString::from("cpm:ODPM")),
+                    (UEventAction::Add, FsString::from("iio:device0")),
+                ]
+            );
 
-            let root = &current_task.kernel().device_registry.objects.root;
-            assert!(root.lookup("bus/iio/devices/iio:device0".into()).is_some());
+            let root = &kernel.device_registry.objects.root;
+            let assert_symlink_target = |path: &str, expected: &str| {
+                let node =
+                    root.lookup(path.into()).unwrap_or_else(|| panic!("{path} should exist"));
+                match node.readlink(&current_task).expect("readlink should succeed") {
+                    SymlinkTarget::Path(target) => {
+                        assert_eq!(target, expected, "unexpected target for {path}");
+                    }
+                    other => panic!("expected SymlinkTarget::Path for {path}, got {other:?}"),
+                }
+            };
+
+            assert_symlink_target("bus/platform/devices/cpm", "../../../devices/platform/cpm");
+            assert_symlink_target(
+                "bus/platform/devices/cpm:ODPM",
+                "../../../devices/platform/cpm/cpm:ODPM",
+            );
+            assert_symlink_target(
+                "bus/iio/devices/iio:device0",
+                "../../../devices/platform/cpm/cpm:ODPM/iio:device0",
+            );
+            assert_symlink_target("devices/platform/cpm/subsystem", "../../../bus/platform");
+            assert_symlink_target(
+                "devices/platform/cpm/cpm:ODPM/subsystem",
+                "../../../../bus/platform",
+            );
+            assert_symlink_target(
+                "devices/platform/cpm/cpm:ODPM/iio:device0/subsystem",
+                "../../../../../bus/iio",
+            );
+
             assert!(root.lookup("devices/platform/cpm/cpm:ODPM/iio:device0/name".into()).is_some());
             assert!(
                 root.lookup("devices/platform/cpm/cpm:ODPM/iio:device0/enabled_rails".into())
@@ -702,12 +769,115 @@ mod tests {
                 root.lookup("devices/platform/cpm/cpm:ODPM/iio:device0/energy_value".into())
                     .is_some()
             );
-            assert!(
-                root.lookup("devices/platform/cpm/cpm:ODPM/iio:device0/uevent".into()).is_some()
+
+            let sysfs_root = NamespaceNode::new_anonymous(get_sysfs(kernel).root().clone());
+            for uevent_path in [
+                "devices/platform/cpm/uevent",
+                "devices/platform/cpm/cpm:ODPM/uevent",
+                "devices/platform/cpm/cpm:ODPM/iio:device0/uevent",
+            ] {
+                let node = current_task
+                    .lookup_path(
+                        &mut LookupContext::default(),
+                        sysfs_root.clone(),
+                        uevent_path.into(),
+                    )
+                    .unwrap_or_else(|e| panic!("lookup {uevent_path}: {e:?}"));
+                let file = node.open(&current_task, OpenFlags::RDONLY).expect("open uevent");
+                let mut buf = VecOutputBuffer::new(64);
+                let n = file.read(&current_task, &mut buf).expect("read uevent");
+                assert_eq!(n, 0, "expected empty uevent file at {uevent_path}");
+            }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_register_odpm_rolls_back_on_conflict() {
+        // Conflict on `cpm`: preserves the pre-existing `cpm` device without creating `bus/iio`.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let registry = &kernel.device_registry;
+            let platform = registry.objects.platform_device();
+            let platform_bus = registry.objects.platform_bus();
+            registry
+                .add_bus_device("cpm".into(), Some(platform), platform_bus, build_device_directory)
+                .expect("pre-register conflicting cpm");
+
+            let events = record_device_events(registry);
+
+            let odpm_device = Arc::new(OdpmDevice::new_with_rails(vec![], None));
+            assert_eq!(register_odpm_device(kernel, odpm_device), Err(errno!(EEXIST)));
+            assert_eq!(*events.lock(), vec![]);
+
+            let root = &registry.objects.root;
+            assert!(root.lookup("devices/platform/cpm".into()).is_some());
+            assert!(root.lookup("bus/platform/devices/cpm".into()).is_some());
+            assert!(root.lookup("devices/platform/cpm/cpm:ODPM".into()).is_none());
+            assert!(root.lookup("bus/iio".into()).is_none());
+        })
+        .await;
+
+        // Conflict on `cpm:ODPM`: rolls back `cpm` without creating `bus/iio` while preserving
+        // the pre-existing `cpm:ODPM` bus symlink.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let registry = &kernel.device_registry;
+            let platform_bus = registry.objects.platform_bus();
+            registry
+                .add_bus_device("cpm:ODPM".into(), None, platform_bus, build_device_directory)
+                .expect("pre-register conflicting cpm:ODPM");
+
+            let events = record_device_events(registry);
+
+            let odpm_device = Arc::new(OdpmDevice::new_with_rails(vec![], None));
+            assert_eq!(register_odpm_device(kernel, odpm_device), Err(errno!(EEXIST)));
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    (UEventAction::Add, FsString::from("cpm")),
+                    (UEventAction::Remove, FsString::from("cpm")),
+                ]
             );
-            assert!(
-                root.lookup("devices/platform/cpm/cpm:ODPM/iio:device0/subsystem".into()).is_some()
+
+            let root = &registry.objects.root;
+            assert!(root.lookup("devices/platform/cpm".into()).is_none());
+            assert!(root.lookup("bus/platform/devices/cpm".into()).is_none());
+            assert!(root.lookup("devices/cpm:ODPM".into()).is_some());
+            assert!(root.lookup("bus/platform/devices/cpm:ODPM".into()).is_some());
+            assert!(root.lookup("bus/iio".into()).is_none());
+        })
+        .await;
+
+        // Conflict on `iio:device0`: rolls back `cpm:ODPM` before `cpm` and preserves the
+        // pre-existing `iio:device0` device.
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let registry = &kernel.device_registry;
+            let iio_bus = registry.objects.get_or_create_bus("iio".into());
+            registry
+                .add_bus_device("iio:device0".into(), None, iio_bus, build_device_directory)
+                .expect("pre-register conflicting iio:device0");
+
+            let events = record_device_events(registry);
+
+            let odpm_device = Arc::new(OdpmDevice::new_with_rails(vec![], None));
+            assert_eq!(register_odpm_device(kernel, odpm_device), Err(errno!(EEXIST)));
+            assert_eq!(
+                *events.lock(),
+                vec![
+                    (UEventAction::Add, FsString::from("cpm")),
+                    (UEventAction::Add, FsString::from("cpm:ODPM")),
+                    (UEventAction::Remove, FsString::from("cpm:ODPM")),
+                    (UEventAction::Remove, FsString::from("cpm")),
+                ]
             );
+
+            let root = &registry.objects.root;
+            assert!(root.lookup("devices/platform/cpm".into()).is_none());
+            assert!(root.lookup("bus/platform/devices/cpm".into()).is_none());
+            assert!(root.lookup("bus/platform/devices/cpm:ODPM".into()).is_none());
+            assert!(root.lookup("bus/iio/devices/iio:device0".into()).is_some());
         })
         .await;
     }

@@ -30,13 +30,21 @@ class Nvme;
 class Namespace : public block_server::DriverInterface,
                   public fidl::Server<fuchsia_driver_token::NodeToken> {
  public:
-  explicit Namespace(Nvme* controller, uint32_t namespace_id)
-      : controller_(controller), namespace_id_(namespace_id) {}
+  Namespace(Nvme* controller, uint32_t namespace_id, const block_server::PartitionInfo& block_info,
+            uint32_t max_transfer_blocks)
+      : controller_(controller),
+        namespace_id_(namespace_id),
+        block_info_(block_info),
+        max_transfer_blocks_(max_transfer_blocks),
+        block_server_(block_info_, this) {}
   ~Namespace();
 
   // Create a namespace on |controller| with |namespace_id|.
   static zx::result<std::unique_ptr<Namespace>> Bind(Nvme* controller, uint32_t namespace_id);
-  fbl::String NamespaceName() const { return fbl::StringPrintf("namespace-%u", namespace_id_); }
+  static fbl::String NamespaceName(uint32_t namespace_id) {
+    return fbl::StringPrintf("namespace-%u", namespace_id);
+  }
+  fbl::String NamespaceName() const { return NamespaceName(namespace_id_); }
 
   void OnRequests(std::span<block_server::Request> requests) override;
   fdf::Logger& logger() const override;
@@ -59,21 +67,16 @@ class Namespace : public block_server::DriverInterface,
   // Invokes AddChild().
   zx_status_t AddNamespace();
 
-  // Main driver initialization.
-  zx_status_t Init();
-
   zx::result<std::reference_wrapper<IoCommand>> AllocateIoCommand() TA_REQ(lock_);
   void FreeIoCommand(IoCommand* io_cmd) TA_REQ(lock_);
 
   Nvme* const controller_;
   const uint32_t namespace_id_;
 
-  block_server::PartitionInfo block_info_ = {};
-  uint32_t max_transfer_blocks_;
+  const block_server::PartitionInfo block_info_;
+  const uint32_t max_transfer_blocks_;
 
   fidl::WireSyncClient<fuchsia_driver_framework::NodeController> node_controller_;
-
-  std::optional<block_server::BlockServer> block_server_ TA_GUARDED(lock_);
 
   static constexpr size_t kMaxRequests = 64;
   std::array<IoCommand, kMaxRequests> io_command_pool_;
@@ -81,6 +84,11 @@ class Namespace : public block_server::DriverInterface,
   fbl::Mutex lock_;
   fbl::ConditionVariable pool_cond_ TA_GUARDED(lock_);
   bool shutdown_ TA_GUARDED(lock_) = false;
+  bool block_server_stopped_ TA_GUARDED(lock_) = false;
+
+  // Must be declared last so ~BlockServer() runs and joins its threads before lock_, pool_cond_,
+  // and io_command_pool_ are destroyed.
+  block_server::BlockServer block_server_;
 };
 
 }  // namespace nvme

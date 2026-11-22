@@ -7,9 +7,11 @@ import json
 import pathlib
 import unittest
 
-# NB: These must be kept in sync with the values in BUILD.gn.
+# NB: These must be kept in sync with example.rs and BUILD.bazel.
 component_name = "bar"
 package_name = "for-test"
+packaged_config_component_name = "packaged_config_component"
+packaged_config_package_name = "package_for_scrutiny_testing"
 expected_value_in_policy = "check this string!"
 expected_value_for_dont_check = "don't check this string!"
 
@@ -37,7 +39,16 @@ def main() -> None:
         ],
         {
             "asserted_by_scrutiny_test": expected_value_in_policy,
-            "mutable_by_parent_config": expected_value_for_dont_check,
         },
         "configuration from system image did not match expectation",
+    )
+    test.assertEqual(
+        extracted_config[
+            f"fuchsia-pkg://fuchsia.com/{packaged_config_package_name}#meta/{packaged_config_component_name}.cm"
+        ],
+        {
+            "immutable_packaged_config": expected_value_in_policy,
+            "mutable_by_parent_config": expected_value_for_dont_check,
+        },
+        "packaged configuration from system image did not match expectation",
     )

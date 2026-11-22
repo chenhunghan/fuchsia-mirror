@@ -83,7 +83,7 @@ impl Driver for BtTransportUart {
         Ok(Self { _node: node, scope, serial })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("BtTransportUart (Rust)::stop() invoked");
         self.serial.cancel_all().await;
         self.serial.close();

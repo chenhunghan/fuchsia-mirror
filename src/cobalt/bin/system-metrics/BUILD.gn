@@ -83,7 +83,7 @@ cc_test_executable("cobalt_system_metrics_unittests") {
     "testing:fake_fetchers",
     "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_hlcpp",
     "//sdk/lib/inspect/testing/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/cobalt/bin/testing:fake_clock_lib",
     "//src/cobalt/bin/testing:log_metric_method",
     "//src/cobalt/bin/testing:stub_metric_event_logger_lib",

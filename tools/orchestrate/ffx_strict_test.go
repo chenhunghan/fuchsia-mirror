@@ -617,7 +617,7 @@ exit 0
 	}
 	defer client.Close()
 
-	err = client.Flash(ctx, "serial123", "path/to/product", "path/to/pubkey")
+	err = client.Flash(ctx, "id:serial123", "path/to/product", "path/to/pubkey")
 	if err != nil {
 		t.Fatalf("Flash failed: %v", err)
 	}
@@ -628,6 +628,9 @@ exit 0
 	}
 	args := string(data)
 
+	if !strings.Contains(args, "--target id:serial123") {
+		t.Errorf("Expected '--target id:serial123' in args, got: %s", args)
+	}
 	if !strings.Contains(args, "target flash") {
 		t.Errorf("Expected 'target flash' in args, got: %s", args)
 	}

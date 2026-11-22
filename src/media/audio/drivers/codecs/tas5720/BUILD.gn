@@ -48,7 +48,6 @@ fuchsia_cc_driver("tas5720-driver") {
 fuchsia_driver_component("tas5720") {
   component_name = "tas5720"
   deps = [ ":tas5720-driver" ]
-  info = "meta/tas5720-info.json"
   manifest = "meta/tas5720.cml"
 }
 

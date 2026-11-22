@@ -9,6 +9,10 @@
 //! Watchers are owned by the medium and live until their own channel closes.
 //!
 //! Every connection is served by its own task on the medium's scope.
+//!
+//! Every transmitted frame is delivered at once to every other attached node, whatever its channel,
+//! with `IDEAL_RSSI_DBM` and `IDEAL_LQI`, into a per-node receive queue of `MAX_RECEIVE_QUEUE`
+//! frames; there is no airtime, collision or channel-energy model yet.
 
 use fidl::endpoints::{RequestStream as _, Responder as _, ServerEnd};
 use fidl_test_lowpan_rfsim as rfsim;
@@ -17,6 +21,7 @@ use futures::StreamExt as _;
 use log::{error, info, warn};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque, btree_map};
+use std::num::NonZeroUsize;
 use std::rc::Rc;
 
 // The FIDL limits as `usize`. They are `uint32`, which always fits in `usize` on Fuchsia, and `as`
@@ -27,11 +32,32 @@ const MAX_TRANSMISSIONS_PER_BATCH: usize = rfsim::MAX_TRANSMISSIONS_PER_BATCH as
 
 /// Node events queued per `NodeEventWatcher` between its `Watch` calls. Beyond this the watcher is
 /// closed with `ZX_ERR_NO_RESOURCES`, since a lost event would leave its view of the medium wrong.
-pub const MAX_NODE_EVENT_QUEUE: usize = 4 * MAX_NODE_EVENTS_PER_BATCH;
+const MAX_NODE_EVENT_QUEUE: usize = 4 * MAX_NODE_EVENTS_PER_BATCH;
 
 /// Transmissions queued per `TransmissionWatcher` between its `Watch` calls. Beyond this the
 /// oldest are dropped and counted in the next reply.
-pub const MAX_TRANSMISSION_QUEUE: usize = 16 * MAX_TRANSMISSIONS_PER_BATCH;
+const MAX_TRANSMISSION_QUEUE: usize = 16 * MAX_TRANSMISSIONS_PER_BATCH;
+
+/// Frames queued per node between its `Radio.Receive` calls. Beyond this the oldest are dropped,
+/// like a radio whose receive FIFO overflows. Nodes are expected to keep a `Receive` pending at all
+/// times, so the queue only absorbs bursts while a node handles the previous frame. The value is
+/// not tuned: it is ample for the bursts today's tests produce.
+const MAX_RECEIVE_QUEUE: usize = 32;
+
+/// Received signal strength every node observes of every frame delivered to it, in dBm: the
+/// constant RSSI of the `Ideal` model in OTNS's `radiomodel` package, which every node in range
+/// hears at.
+const IDEAL_RSSI_DBM: i8 = -60;
+
+/// Lowest channel of the 2.4 GHz O-QPSK band (`test.lowpan.rfsim/Channel`).
+const MIN_CHANNEL: rfsim::Channel = 11;
+
+/// Highest channel of the 2.4 GHz O-QPSK band (`test.lowpan.rfsim/Channel`).
+const MAX_CHANNEL: rfsim::Channel = 26;
+
+/// Link quality indicator every node observes of every frame delivered to it: the top of the
+/// IEEE 802.15.4 LQI range, a perfect link, as in the `Ideal` model.
+const IDEAL_LQI: u8 = 255;
 
 /// The simulated medium. Should be created and used on a local executor.
 ///
@@ -77,12 +103,120 @@ struct Shared {
 #[derive(Default)]
 struct State {
     nodes: BTreeMap<rfsim::NodeId, Node>,
+    topology: Topology,
     node_event_watchers: Vec<Rc<RefCell<NodeEventWatcher>>>,
     transmission_watchers: Vec<Rc<RefCell<TransmissionWatcher>>>,
 }
 
+impl State {
+    /// The nodes that hear `node_id`.
+    fn neighbors(&self, node_id: rfsim::NodeId) -> impl Iterator<Item = rfsim::NodeId> + '_ {
+        let Self { nodes, topology, .. } = self;
+        nodes.keys().copied().filter(move |&id| topology.hears(id, node_id))
+    }
+
+    /// The nodes that hear `node_id`, with their state.
+    fn neighbors_mut(
+        &mut self,
+        node_id: rfsim::NodeId,
+    ) -> impl Iterator<Item = (rfsim::NodeId, &mut Node)> + '_ {
+        // Borrowed apart from `nodes`, so that they can be iterated mutably.
+        let Self { nodes, topology, .. } = self;
+        nodes
+            .iter_mut()
+            .filter(move |(id, _)| topology.hears(**id, node_id))
+            .map(|(&id, node)| (id, node))
+    }
+}
+
+/// Who hears whom on the medium.
+#[derive(Default)]
+struct Topology {}
+
+impl Topology {
+    /// Whether `listener` hears what `transmitter` sends.
+    fn hears(&self, listener: rfsim::NodeId, transmitter: rfsim::NodeId) -> bool {
+        // TODO(https://fxbug.dev/581467997): Thread network topology support. Every attached node
+        // hears every other one for now.
+        listener != transmitter
+    }
+}
+
 struct Node {
     attached_at: zx::MonotonicInstant,
+    /// Frames delivered while no `Radio.Receive` was pending, oldest first.
+    receive_queue: VecDeque<rfsim::ReceivedFrame>,
+    /// Frames dropped from `receive_queue` since the last reply to `Radio.Receive`, or `None` if
+    /// none were.
+    dropped: Option<NonZeroUsize>,
+    /// The outstanding `Radio.Receive`, if any.
+    pending_receive: Option<rfsim::RadioReceiveResponder>,
+}
+
+impl Node {
+    fn new(attached_at: zx::MonotonicInstant) -> Self {
+        Self { attached_at, receive_queue: VecDeque::new(), dropped: None, pending_receive: None }
+    }
+
+    /// Queues `frame`, and hands it to the pending `Receive` if any. `node_id` is this node's id.
+    fn deliver(&mut self, node_id: rfsim::NodeId, frame: rfsim::ReceivedFrame) {
+        if self.receive_queue.len() >= MAX_RECEIVE_QUEUE {
+            self.dropped = Some(match self.dropped {
+                None => {
+                    warn!(
+                        "Node {node_id} fell {MAX_RECEIVE_QUEUE} frames behind; dropping its \
+                         oldest frames"
+                    );
+                    NonZeroUsize::MIN
+                }
+                Some(dropped) => dropped.saturating_add(1),
+            });
+            let _: Option<rfsim::ReceivedFrame> = self.receive_queue.pop_front();
+        }
+        self.receive_queue.push_back(frame);
+        self.maybe_reply(node_id);
+    }
+
+    /// Replies with the oldest queued frame, or keeps `responder` until a frame is delivered.
+    /// `node_id` is this node's id.
+    ///
+    /// Fails with `ZX_ERR_BAD_STATE` if a `Receive` is already pending, leaving the radio open for
+    /// the caller to close.
+    fn receive(
+        &mut self,
+        node_id: rfsim::NodeId,
+        responder: rfsim::RadioReceiveResponder,
+    ) -> Result<(), zx::Status> {
+        if self.pending_receive.is_some() {
+            // Dropping the responder normally closes the channel, which would beat the caller's
+            // epitaph.
+            responder.drop_without_shutdown();
+            return Err(zx::Status::BAD_STATE);
+        }
+        self.pending_receive = Some(responder);
+        self.maybe_reply(node_id);
+        Ok(())
+    }
+
+    /// Replies to the pending `Receive` with the oldest queued frame, if both exist. The only place
+    /// that replies, so a `Receive` is never left pending while a frame is queued.
+    fn maybe_reply(&mut self, node_id: rfsim::NodeId) {
+        if self.receive_queue.is_empty() {
+            return;
+        }
+        let Some(responder) = self.pending_receive.take() else {
+            return;
+        };
+        let frame = self.receive_queue.pop_front().expect("queue is not empty");
+        if let Some(dropped) = self.dropped.take() {
+            warn!(
+                "Dropped {dropped} frame(s) queued for node {node_id} since its last Radio.Receive"
+            );
+        }
+        if let Err(e) = responder.send(&frame.frame, frame.rssi_dbm, frame.lqi) {
+            log_fidl_error(&format!("Failed to reply to Radio.Receive for node {node_id}"), e);
+        }
+    }
 }
 
 fn now() -> zx::MonotonicInstant {
@@ -95,6 +229,16 @@ fn now() -> zx::MonotonicInstant {
 fn log_fidl_error(context: &str, e: fidl::Error) {
     if !e.is_closed() {
         error!("{context}: {e:?}");
+    }
+}
+
+/// Fails with `ZX_ERR_INVALID_ARGS` if `channel` is outside the band the medium models.
+fn check_channel(node_id: rfsim::NodeId, channel: rfsim::Channel) -> Result<(), zx::Status> {
+    if (MIN_CHANNEL..=MAX_CHANNEL).contains(&channel) {
+        Ok(())
+    } else {
+        warn!("Node {node_id} used invalid channel {channel}");
+        Err(zx::Status::INVALID_ARGS)
     }
 }
 
@@ -116,7 +260,7 @@ impl Shared {
                 return Err(zx::Status::NO_RESOURCES);
             }
             let attached_at = now();
-            let _: &mut Node = entry.insert(Node { attached_at });
+            let _: &mut Node = entry.insert(Node::new(attached_at));
             attached_at
         };
         info!("Node {node_id} attached");
@@ -130,7 +274,8 @@ impl Shared {
     }
 
     fn detach(&self, node_id: rfsim::NodeId) {
-        // Only the node's own radio task detaches it, and only once.
+        // Drops the node's receive queue and pending `Receive`. Only the node's own radio task
+        // detaches it, and only once.
         let _: Node = self
             .state
             .borrow_mut()
@@ -151,13 +296,46 @@ impl Shared {
         }
     }
 
-    fn transmit(&self, node_id: rfsim::NodeId, frame: rfsim::Frame) {
-        // No destinations: the medium delivers to nobody yet.
-        let transmission =
-            rfsim::Transmission { node_id, frame, timestamp: now(), destinations: Vec::new() };
-        for watcher in &self.state.borrow().transmission_watchers {
+    /// Delivers `frame` to every other attached node, and records it.
+    fn transmit(&self, node_id: rfsim::NodeId, frame: rfsim::Frame) -> Result<(), zx::Status> {
+        check_channel(node_id, frame.channel)?;
+        let mut state = self.state.borrow_mut();
+        // Note that for now we deliver to all nodes regardless of what channel they listen on.
+        let mut destinations = Vec::new();
+        for (id, node) in state.neighbors_mut(node_id) {
+            destinations.push(rfsim::Destination {
+                node_id: id,
+                rssi_dbm: IDEAL_RSSI_DBM,
+                lqi: IDEAL_LQI,
+            });
+            node.deliver(
+                id,
+                rfsim::ReceivedFrame {
+                    frame: frame.clone(),
+                    rssi_dbm: IDEAL_RSSI_DBM,
+                    lqi: IDEAL_LQI,
+                },
+            );
+        }
+        let transmission = rfsim::Transmission { node_id, frame, timestamp: now(), destinations };
+        for watcher in &state.transmission_watchers {
             watcher.borrow_mut().push(transmission.clone());
         }
+        Ok(())
+    }
+
+    fn receive(
+        &self,
+        node_id: rfsim::NodeId,
+        responder: rfsim::RadioReceiveResponder,
+    ) -> Result<(), zx::Status> {
+        // Only `serve_radio` detaches the node, once it stops serving its radio.
+        let mut state = self.state.borrow_mut();
+        let node = state
+            .nodes
+            .get_mut(&node_id)
+            .unwrap_or_else(|| panic!("Radio.Receive from node {node_id}, which is not attached"));
+        node.receive(node_id, responder)
     }
 
     fn add_node_event_watcher(
@@ -191,11 +369,11 @@ impl Shared {
     }
 
     fn get_neighbors(&self, node_id: rfsim::NodeId) -> Result<Vec<rfsim::NodeId>, zx::Status> {
-        if !self.state.borrow().nodes.contains_key(&node_id) {
+        let state = self.state.borrow();
+        if !state.nodes.contains_key(&node_id) {
             return Err(zx::Status::NOT_FOUND);
         }
-        // TODO(https://fxbug.dev/581467997): Thread network topology support.
-        Err(zx::Status::NOT_SUPPORTED)
+        Ok(state.neighbors(node_id).collect())
     }
 }
 
@@ -221,25 +399,32 @@ async fn serve_radio(
     node_id: rfsim::NodeId,
     mut stream: rfsim::RadioRequestStream,
 ) {
-    // TODO(https://fxbug.dev/569784945): Deliver frames to the pending `Receive`.
-    let mut pending_receive: Option<rfsim::RadioReceiveResponder> = None;
     while let Some(request) = stream.next().await {
         match request {
             Ok(rfsim::RadioRequest::Transmit { channel, psdu, tx_power_dbm, responder }) => {
-                shared.transmit(node_id, rfsim::Frame { channel, psdu, tx_power_dbm });
-                // Replied as soon as the frame is taken.
-                if let Err(e) = responder.send() {
-                    log_fidl_error("Failed to reply to Radio.Transmit", e);
+                match shared.transmit(node_id, rfsim::Frame { channel, psdu, tx_power_dbm }) {
+                    Ok(()) => {
+                        // Replied as soon as the frame is taken.
+                        if let Err(e) = responder.send() {
+                            log_fidl_error("Failed to reply to Radio.Transmit", e);
+                        }
+                    }
+                    Err(status) => {
+                        warn!(
+                            "Radio.Transmit from node {node_id} failed: {status}; closing its radio"
+                        );
+                        responder.control_handle().shutdown_with_epitaph(status);
+                        break;
+                    }
                 }
             }
             Ok(rfsim::RadioRequest::Receive { responder }) => {
-                // Allow up to 1 outstanding `Receive` call from client.
-                if pending_receive.is_some() {
-                    warn!("Second outstanding Radio.Receive from node {node_id}; closing it");
-                    stream.control_handle().shutdown_with_epitaph(zx::Status::BAD_STATE);
+                let control_handle = responder.control_handle().clone();
+                if let Err(status) = shared.receive(node_id, responder) {
+                    warn!("Radio.Receive from node {node_id} failed: {status}; closing its radio");
+                    control_handle.shutdown_with_epitaph(status);
                     break;
                 }
-                pending_receive = Some(responder);
             }
             Err(e) => {
                 log_fidl_error(&format!("Radio request error for node {node_id}"), e);

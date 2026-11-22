@@ -141,7 +141,7 @@ where
 // must generally exercise hooks via public entrypoints.
 pub async fn spawn_kernel_with_selinux_and_run<F, R>(callback: F) -> R
 where
-    F: AsyncFnOnce(&mut CurrentTask, &Arc<SecurityServer>) -> R + Send + Sync + 'static,
+    F: AsyncFnOnce(&mut CurrentTask, &SecurityServer) -> R + Send + Sync + 'static,
     R: Send + Sync + 'static,
 {
     let security_server = SecurityServer::new_default();

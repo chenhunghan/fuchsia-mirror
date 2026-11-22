@@ -9,11 +9,20 @@
 use core::mem::{offset_of, size_of};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use super::x86::{
+use super::mp::{
     PERCPU_CPU_NUM_OFFSET, PERCPU_DEFAULT_TSS_OFFSET, PERCPU_DIRECT_OFFSET,
-    PERCPU_INTERRUPT_STACKS_NMI_OFFSET, PERCPU_KERNEL_SP_OFFSET, x86_lgdt, x86_ltr,
-    x86_read_gs_offset64, x86_write_gs_offset64,
+    PERCPU_INTERRUPT_STACKS_NMI_OFFSET, PERCPU_KERNEL_SP_OFFSET,
 };
+
+pub const TEMP_GDT_SIZE: usize = 0x38 + crate::kernel::mp::SMP_MAX_CPUS * 16;
+
+#[repr(transparent)]
+pub(super) struct TempGdt(pub core::cell::UnsafeCell<[u8; TEMP_GDT_SIZE]>);
+// SAFETY: Mutated only during early boot on CPU 0 before APs start (`init_percpu(0)`, `gdt_setup`),
+// or per-CPU disjoint TSS slots.
+unsafe impl Sync for TempGdt {}
+
+use super::x86::{x86_lgdt, x86_ltr, x86_read_gs_offset64, x86_write_gs_offset64};
 use crate::arch_rs::curr_cpu_num;
 use crate::kernel::mp;
 use crate::vm::arch_vm_aspace::{ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE};
@@ -31,16 +40,42 @@ const TSS_BITMAP_OFFSET: usize = offset_of!(Tss64, tss_bitmap);
 
 const INTERRUPT_STACK_SIZE: usize = 4096;
 
+/// Kernel 64-bit code segment selector (`CODE_64_SELECTOR` in `arch/x86/descriptor.h`).
+pub const CODE_64_SELECTOR: u16 = 0x10;
+/// Kernel data segment selector (`DATA_SELECTOR` in `arch/x86/descriptor.h`).
+pub const DATA_SELECTOR: u16 = 0x18;
+
+/// Returns the selector of the TSS of CPU `i` (`TSS_SELECTOR` in `arch/x86/descriptor.h`).
 #[inline]
-const fn tss_selector(i: u32) -> u16 {
+pub const fn tss_selector(i: u32) -> u16 {
     (0x38 + 16 * i) as u16
+}
+
+/// Extracts the privilege level (`RPL`, bits `0..2`) of a segment selector (`SELECTOR_PL`).
+#[inline(always)]
+pub const fn selector_pl(selector: u16) -> u8 {
+    (selector & 3) as u8
+}
+
+/// Disables the Local Descriptor Table (`LDT`) by loading a null selector into the
+/// `LDTR` (`arch::DisableLdt`).
+///
+/// # Safety
+///
+/// The caller must ensure that CPL is 0.
+#[inline(always)]
+pub unsafe fn disable_ldt() {
+    // SAFETY: `lldt` with a null selector (`0`) at CPL 0 disables the LDT.
+    unsafe {
+        core::arch::asm!("lldt {:x}", in(reg) 0u16, options(nostack, preserves_flags));
+    }
 }
 
 /// 64-bit Task State Segment (`tss_64_t` / `tss_t` in `arch/x86.h`).
 #[repr(C, packed)]
-struct Tss64 {
+pub struct Tss64 {
     rsvd0: u32,
-    rsp0: u64,
+    pub rsp0: u64,
     rsp1: u64,
     rsp2: u64,
     rsvd1: u32,
@@ -56,7 +91,33 @@ struct Tss64 {
     rsvd4: u32,
     rsvd5: u16,
     iomap_base: u16,
-    tss_bitmap: [u8; IO_BITMAP_BYTES + 1],
+    /// Per-CPU I/O permission bitmap plus trailing `0xff` guard byte.
+    pub(super) tss_bitmap: [u8; IO_BITMAP_BYTES + 1],
+}
+
+impl Tss64 {
+    pub const fn new() -> Self {
+        Self {
+            rsvd0: 0,
+            rsp0: 0,
+            rsp1: 0,
+            rsp2: 0,
+            rsvd1: 0,
+            rsvd2: 0,
+            ist1: 0,
+            ist2: 0,
+            ist3: 0,
+            ist4: 0,
+            ist5: 0,
+            ist6: 0,
+            ist7: 0,
+            rsvd3: 0,
+            rsvd4: 0,
+            rsvd5: 0,
+            iomap_base: 0,
+            tss_bitmap: [0; IO_BITMAP_BYTES + 1],
+        }
+    }
 }
 
 zr::static_assert!(TSS_BITMAP_OFFSET == 104);
@@ -74,12 +135,14 @@ struct TaskDesc {
 zr::static_assert!(size_of::<TaskDesc>() == 16);
 zr::static_assert!(core::mem::align_of::<TaskDesc>() == 1);
 
-/// Packed GDTR descriptor structure for the `lgdt` instruction.
+/// Packed GDTR descriptor structure for the `lgdt` and `sgdt` instructions.
 #[repr(C, packed)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Gdtr {
-    limit: u16,
-    address: usize,
+pub(super) struct Gdtr {
+    /// Byte limit (`size - 1`) of the GDT.
+    pub(super) limit: u16,
+    /// Virtual base address of the GDT.
+    pub(super) address: usize,
 }
 
 zr::static_assert!(size_of::<Gdtr>() == 10);
@@ -101,7 +164,9 @@ pub(super) fn gdt_get() -> usize {
     if val != 0 {
         val
     } else {
-        (&raw mut super::descriptor_ffi::TEMP_GDT).cast::<u8>().expose_provenance()
+        // SAFETY: `TEMP_GDT` is an extern static symbol representing an assembly data structure.
+        // It is safe to take its address (`.get()`) without racing.
+        unsafe { super::descriptor_ffi::TEMP_GDT.0.get().cast::<u8>().expose_provenance() }
     }
 }
 
@@ -237,7 +302,7 @@ pub unsafe fn with_curr_tss_bitmap_mut<R>(f: impl FnOnce(&mut [u8; IO_BITMAP_BYT
     f(tss_bitmap)
 }
 
-/// Sets the kernel stack pointer (`rsp0`) in the current CPU's TSS (`x86_set_tss_sp`).
+/// Sets the kernel stack pointer (`rsp0`) in the current CPU's TSS.
 ///
 /// # Safety
 ///
@@ -354,7 +419,7 @@ pub(super) unsafe fn gdt_setup() {
     let temp_gdt_start = (&raw const super::descriptor_ffi::TEMP_GDT).addr();
     let temp_gdt_end = (&raw const super::descriptor_ffi::TEMP_GDT_END).addr();
     let gdt_real_size = temp_gdt_end - temp_gdt_start;
-    assert!(gdt_real_size <= super::descriptor_ffi::TEMP_GDT_SIZE);
+    assert!(gdt_real_size <= TEMP_GDT_SIZE);
     const GDT_SIZE: usize = 0x10000;
 
     let vmo = VmObjectPaged::create(ALLOC_FLAG_ANY, VmObjectPaged::ALWAYS_PINNED, GDT_SIZE as u64)
@@ -365,7 +430,7 @@ pub(super) unsafe fn gdt_setup() {
     // `gdt_real_size <= TEMP_GDT_SIZE`, and no other CPU or thread is mutating `_temp_gdt`.
     let temp_gdt_slice = unsafe {
         core::slice::from_raw_parts(
-            (&raw const super::descriptor_ffi::TEMP_GDT).cast::<u8>(),
+            super::descriptor_ffi::TEMP_GDT.0.get().cast::<u8>(),
             gdt_real_size,
         )
     };
@@ -383,7 +448,7 @@ pub(super) unsafe fn gdt_setup() {
 
     // Create the read/write real gdt mapping.
     let mapping_result = vmar
-        .create_vm_mapping(
+        .create_vm_mapping_no_overwrite(
             0,
             gdt_real_map_size,
             page::SHIFT as u8,
@@ -391,7 +456,6 @@ pub(super) unsafe fn gdt_setup() {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            b"gdt-rw",
         )
         .expect("create_vm_mapping failed for gdt-rw");
 
@@ -400,7 +464,7 @@ pub(super) unsafe fn gdt_setup() {
     // Create the read-only mapping to the maximal GDT size.
     let gdt_ro_size = GDT_SIZE - gdt_real_map_size;
     let ro_mapping_result = vmar
-        .create_vm_mapping(
+        .create_vm_mapping_no_overwrite(
             gdt_real_map_size,
             gdt_ro_size,
             page::SHIFT as u8,
@@ -408,7 +472,6 @@ pub(super) unsafe fn gdt_setup() {
             VmObjectPaged::into_vm_object(vmo),
             gdt_real_map_size as u64,
             ARCH_MMU_FLAG_PERM_READ,
-            b"gdt-ro",
         )
         .expect("create_vm_mapping failed for gdt-ro");
 

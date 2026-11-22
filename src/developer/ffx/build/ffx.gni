@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/rust/rustc_binary.gni")
-import("//build/toolchain/concurrent_jobs.gni")
 import("//src/developer/ffx/lib/version/build/ffx_apply_version.gni")
 import("ffx_plugin.gni")
 
@@ -24,11 +23,6 @@ template("ffx") {
     ffx_name = invoker.name
   }
 
-  _large_binary_optimizations = false
-  if (defined(invoker.large_ffx_binary_optimizations)) {
-    _large_binary_optimizations = invoker.large_ffx_binary_optimizations
-  }
-
   suite_name = ffx_name + "_lib"
 
   _original_target_name = target_name
@@ -41,34 +35,6 @@ template("ffx") {
   rustc_binary(ffx_name + "_bin_unversioned") {
     output_name = ffx_name + "_unversioned"
     original_target_name = _original_target_name
-
-    if (_large_binary_optimizations) {
-      # ffx is known to be a massive, time/resource-consuming target.
-
-      # Remote execution requires machine with more memory.
-      _concurrent_jobs = concurrent_jobs.rust_highmem
-      configs += _concurrent_jobs.configs
-      forward_variables_from(_concurrent_jobs.vars, "*")
-
-      # Use up to 16 threads for codegen
-      configs += [ "//build/config/rust:codegen_units_16" ]
-
-      if (is_debug) {
-        # Disable lto for debug builds, as the additional codegen units imply
-        # the use of thin-local lto
-        configs += [ "//build/config/lto:no-lto" ]
-      } else {
-        # Use thin lto (instead of implied thin-local), to run (thin) lto across
-        # the entire set of dependency crates, to minimize final binary size
-        # without spending an undue amount of time (this is still faster than
-        # using codegen_units=1)
-        # Add thinlto config.
-        configs += [
-          "//build/config/lto:thinlto-if-compatible",
-          "//build/config/lto:lto-rust-linker-plugin",
-        ]
-      }
-    }
 
     deps = ffx_deps
     non_rust_deps = [ "//src/lib/chunked-compression" ]

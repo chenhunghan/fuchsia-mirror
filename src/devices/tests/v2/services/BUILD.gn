@@ -71,14 +71,12 @@ fuchsia_driver_component("v1_driver_component") {
   component_name = "v1_driver"
   dml_label = ":v1_driver-dml"
   deps = [ ":v1_driver" ]
-  info = "meta/v1-driver-info.json"
 }
 
 fuchsia_driver_component("root") {
   testonly = true
   manifest = "meta/root.cml"
   deps = [ ":root_driver" ]
-  info = "meta/root-info.json"
 }
 
 rustc_test("bin") {

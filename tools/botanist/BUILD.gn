@@ -64,7 +64,6 @@ if (is_host) {
       "//tools/lib/streams",
       "//tools/lib/subprocess",
       "//tools/net/netboot",
-      "//tools/net/tftp",
     ]
   }
 }
@@ -87,13 +86,16 @@ if (is_host) {
     sources = [
       "targets/auxiliary.go",
       "targets/device.go",
+      "targets/emu_net_allowlist.go",
       "targets/emu_net_proxy.go",
+      "targets/emu_net_proxy_log.go",
       "targets/emulator.go",
       "targets/errors.go",
       "targets/gce.go",
       "targets/ip.go",
       "targets/target.go",
     ]
+    embedsrcs = [ "targets/emu_net_allowlist/allowlist.txt" ]
     visibility = [ "//*" ]
     deps = [
       ":botanist_lib",
@@ -120,7 +122,6 @@ if (is_host) {
       "//tools/net/netboot",
       "//tools/net/netutil",
       "//tools/net/sshutil",
-      "//tools/net/tftp",
       "//tools/testing/testrunner:constants",
     ]
   }
@@ -163,6 +164,8 @@ if (is_host) {
     sources = [
       "targets/auxiliary_test.go",
       "targets/device_test.go",
+      "targets/emu_net_proxy_adversarial_test.go",
+      "targets/emu_net_proxy_fuzz_test.go",
       "targets/emu_net_proxy_test.go",
       "targets/emulator_test.go",
       "targets/gce_test.go",

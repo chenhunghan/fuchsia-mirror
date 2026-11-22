@@ -2,99 +2,60 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/rust/rustc_library.gni")
+import("//build/sdk/sdk_atom.gni")
+import("//build/testing/host_test_data.gni")
 import("//src/developer/ffx/build/ffx_tool.gni")
 
 assert(is_host, "ffx_inspect is intended for the host toolchain only.")
 
-rustc_library("ffx_inspect_args") {
-  version = "0.1.0"
-  edition = "2024"
-  sources = [ "src/args.rs" ]
-  source_root = "src/args.rs"
-
-  deps = [
-    "//src/diagnostics/iquery:lib_fdomain",
-    "//third_party/rust_crates:argh",
-  ]
-}
-
-rustc_library("ffx_inspect") {
-  version = "0.1.0"
-  edition = "2024"
-  with_unit_tests = true
-
-  sources = [
-    "src/accessor_provider.rs",
-    "src/apply_selectors/filter.rs",
-    "src/apply_selectors/mod.rs",
-    "src/apply_selectors/screen.rs",
-    "src/apply_selectors/terminal.rs",
-    "src/apply_selectors/test_utils.rs",
-    "src/lib.rs",
-    "src/tests/list.rs",
-    "src/tests/list_accessors.rs",
-    "src/tests/mod.rs",
-    "src/tests/selectors.rs",
-    "src/tests/show.rs",
-    "src/tests/utils.rs",
-  ]
-
-  deps = [
-    ":ffx_inspect_args",
-    "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
-    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_fdomain",
-    "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust_fdomain",
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
-    "//src/developer/ffx/lib/errors:lib",
-    "//src/developer/ffx/lib/fho:lib",
-    "//src/developer/ffx/lib/rcs:lib",
-    "//src/developer/ffx/lib/target/holders:lib",
-    "//src/developer/ffx/lib/writer:lib",
-    "//src/diagnostics/iquery:lib_fdomain",
-    "//src/lib/diagnostics/data/rust",
-    "//src/lib/diagnostics/hierarchy/rust",
-    "//src/lib/diagnostics/selectors",
-    "//src/lib/fdomain/client",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:difference",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:schemars",
-    "//third_party/rust_crates:serde",
-    "//third_party/rust_crates:serde_json",
-    "//third_party/rust_crates:termion",
-  ]
-
-  test_deps = [
-    "//src/developer/ffx/lib/testing:lib",
-    "//src/developer/ffx/lib/writer:lib",
-    "//src/lib/fdomain/local",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:pretty_assertions",
-    "//third_party/rust_crates:tempfile",
-    "//third_party/rust_crates:test-case",
-  ]
-}
-
-ffx_tool("ffx_inspect_tool") {
-  # Needed for Honeydew's SDK inclusion
-  #
-  # TODO(b/330934833): Remove when IDK allows for `testonly` targets in dep
-  # tree or when we can separate the concept of data_dep from host_test_data.
-  testonly = false
-
-  edition = "2024"
+# LINT.IfChange
+bazel_ffx_tool("ffx_inspect_tool") {
   output_name = "ffx-inspect"
-  deps = [
-    ":ffx_inspect",
-    "//src/developer/ffx/lib/fho:lib",
-    "//src/lib/fuchsia-async",
-  ]
-  sources = [ "src/main.rs" ]
-
-  sdk_target_name = "sdk"
   sdk_category = "partner"
+}
+
+# LINT.ThenChange(BUILD.bazel)
+
+# Needed for Honeydew's SDK inclusion
+#
+# TODO(b/330934833): Remove when IDK allows for `testonly` targets in dep
+# tree or when we can separate the concept of data_dep from host_test_data.
+host_test_data("ffx_inspect_tool_test_data") {
+  testonly = false
+  data_deps = [ ":ffx_inspect_tool_host_tool" ]
+  sources = [
+    "${host_tools_dir}/ffx-inspect",
+    "${host_tools_dir}/ffx-inspect.json",
+  ]
+}
+
+# TODO(https://fxbug.dev/438572714): Remove once the IDK uses the Bazel atom.
+_idk_path = "tools/$current_cpu/ffx_tools/ffx-inspect"
+
+sdk_atom("sdk") {
+  category = "partner"
+  sdk_area = "Developer"
+  id = "sdk://$_idk_path"
+  idk_name = "ffx-inspect"
+  meta = {
+    dest = "$_idk_path-meta.json"
+    type = "ffx_tool"
+    source_prebuild_info = {
+      arch = current_cpu
+      file_base = "tools"
+    }
+  }
+  files = [
+    {
+      source = "$root_out_dir/ffx-inspect"
+      dest = _idk_path
+    },
+    {
+      source = "$root_out_dir/ffx-inspect.json"
+      dest = "$_idk_path.json"
+    },
+  ]
+  non_sdk_deps = [ ":ffx_inspect_tool_versioned" ]
 }
 
 group("inspect") {
@@ -106,9 +67,4 @@ group("inspect") {
 
 group("bin") {
   public_deps = [ ":ffx_inspect_tool_versioned" ]
-}
-
-group("tests") {
-  testonly = true
-  deps = [ ":ffx_inspect_test" ]
 }

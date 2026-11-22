@@ -544,7 +544,6 @@ async fn handle_touchscreen_request_stream(
                 assert_ne!(move_event_count, 0);
                 let duration_nanos = payload.duration.unwrap_or(0);
                 let delay_nanos = duration_nanos / ((move_event_count as i64) + 1);
-                let delay = fasync::MonotonicDuration::from_nanos(delay_nanos);
 
                 let start_x_f = start_location.x as f64;
                 let start_y_f = start_location.y as f64;
@@ -554,6 +553,7 @@ async fn handle_touchscreen_request_stream(
                 let step_size_x = (end_x_f - start_x_f) / move_event_count_f;
                 let step_size_y = (end_y_f - start_y_f) / move_event_count_f;
 
+                let start_time = fasync::MonotonicInstant::now();
                 // Generate an event at `start_location`, followed by `move_event_count - 1`
                 // evenly-spaced events, followed by an event at `end_location`.
                 for i in 0..move_event_count + 1 {
@@ -573,7 +573,11 @@ async fn handle_touchscreen_request_stream(
                             ))
                             .expect("Failed to send tap input report");
                     }
-                    fasync::Timer::new(delay).await;
+                    let next_deadline = start_time
+                        + fasync::MonotonicDuration::from_nanos(
+                            delay_nanos.saturating_mul((i as i64) + 1),
+                        );
+                    fasync::Timer::new(next_deadline).await;
                 }
 
                 // Send a report with an empty set of touch contacts, so that input

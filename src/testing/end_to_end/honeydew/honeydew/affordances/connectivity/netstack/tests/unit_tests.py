@@ -19,7 +19,7 @@ import fuchsia_controller_py as fc
 from fuchsia_controller_py import Channel, ZxStatus
 from honeydew import affordances_capable
 from honeydew import errors as honeydew_errors
-from honeydew.affordances.connectivity import netstack
+from honeydew.affordances.connectivity.netstack import netstack
 from honeydew.affordances.connectivity.netstack.errors import (
     HoneydewNetstackError,
 )
@@ -343,9 +343,134 @@ class NetstackFCTests(unittest.IsolatedAsyncioTestCase):
         )
 
         addr_v6 = await self.netstack_obj.wait_for_ipv6_addr(
-            interface_id=_TEST_INTERFACE_ID
+            interface_id=_TEST_INTERFACE_ID,
+            include_link_local=True,
         )
         self.assertEqual(addr_v6, IPv6Address("fe80::2"))
+
+    @mock.patch("asyncio.sleep", return_value=None)
+    async def test_wait_for_ipv6_addr_ignores_link_local_by_default(
+        self, mock_sleep: mock.Mock
+    ) -> None:
+        """Test if wait_for_ipv6_addr ignores fe80::2 and waits for ULA fd00::1 when include_link_local=False."""
+        self.netstack_obj._state_proxy = mock.MagicMock(
+            spec=f_net_interfaces.StateClient
+        )
+
+        is_first_call = True
+
+        def get_watcher(
+            # pylint: disable-next=unused-argument
+            options: f_net_interfaces.WatcherOptions,
+            watcher: int,
+        ) -> None:
+            nonlocal is_first_call
+            if is_first_call:
+                is_first_call = False
+                items = [
+                    InterfaceProperties(
+                        _TEST_INTERFACE_ID,
+                        "wlan1",
+                        mac=_TEST_MAC,
+                        ipv4_addresses=[],
+                        ipv6_addresses=[IPv6Address("fe80::2")],
+                        port_class=PortClass.WLAN_CLIENT,
+                    )
+                ]
+            else:
+                items = [
+                    InterfaceProperties(
+                        _TEST_INTERFACE_ID,
+                        "wlan1",
+                        mac=_TEST_MAC,
+                        ipv4_addresses=[],
+                        ipv6_addresses=[
+                            IPv6Address("fe80::2"),
+                            IPv6Address("fd00::1"),
+                        ],
+                        port_class=PortClass.WLAN_CLIENT,
+                    )
+                ]
+
+            server = TestWatcherImpl(Channel(watcher), items=items)
+            self.watcher = asyncio.create_task(server.serve())
+
+        self.netstack_obj._state_proxy.get_watcher = mock.Mock(
+            wraps=get_watcher,
+        )
+
+        self.netstack_obj._interfaces_proxy = mock.MagicMock(
+            spec=f_net_root.InterfacesClient
+        )
+        mac_result = f_net_root.InterfacesGetMacResult(
+            response=f_net_root.InterfacesGetMacResponse(
+                mac=f_net.MacAddress(octets=list(bytes(_TEST_MAC))),
+            )
+        )
+        self.netstack_obj._interfaces_proxy.get_mac.side_effect = (
+            lambda *args, **kwargs: _async_response(mac_result)
+        )
+
+        addr_v6 = await self.netstack_obj.wait_for_ipv6_addr(
+            interface_id=_TEST_INTERFACE_ID
+        )
+        self.assertEqual(addr_v6, IPv6Address("fd00::1"))
+
+    @mock.patch("asyncio.sleep", return_value=None)
+    @mock.patch("time.time")
+    async def test_wait_for_ipv6_addr_link_local_only_timeout(
+        self, mock_time: mock.Mock, mock_sleep: mock.Mock
+    ) -> None:
+        """Test if wait_for_ipv6_addr times out when only fe80::2 is present and include_link_local=False."""
+        mock_time.side_effect = [0.0, 1.0, 3.0]
+
+        self.netstack_obj._state_proxy = mock.MagicMock(
+            spec=f_net_interfaces.StateClient
+        )
+
+        def get_watcher(
+            # pylint: disable-next=unused-argument
+            options: f_net_interfaces.WatcherOptions,
+            watcher: int,
+        ) -> None:
+            items = [
+                InterfaceProperties(
+                    _TEST_INTERFACE_ID,
+                    "wlan1",
+                    mac=_TEST_MAC,
+                    ipv4_addresses=[],
+                    ipv6_addresses=[IPv6Address("fe80::2")],
+                    port_class=PortClass.WLAN_CLIENT,
+                )
+            ]
+            server = TestWatcherImpl(Channel(watcher), items=items)
+            self.watcher = asyncio.create_task(server.serve())
+
+        self.netstack_obj._state_proxy.get_watcher = mock.Mock(
+            wraps=get_watcher,
+        )
+
+        self.netstack_obj._interfaces_proxy = mock.MagicMock(
+            spec=f_net_root.InterfacesClient
+        )
+        mac_result = f_net_root.InterfacesGetMacResult(
+            response=f_net_root.InterfacesGetMacResponse(
+                mac=f_net.MacAddress(octets=list(bytes(_TEST_MAC))),
+            )
+        )
+        self.netstack_obj._interfaces_proxy.get_mac.side_effect = (
+            lambda *args, **kwargs: _async_response(mac_result)
+        )
+
+        with self.assertRaises(HoneydewNetstackError) as context:
+            await self.netstack_obj.wait_for_ipv6_addr(
+                interface_id=_TEST_INTERFACE_ID, timeout=timedelta(seconds=2)
+            )
+
+        self.assertIn(
+            "Timed out after 2 seconds waiting for a routable (non-link-local) IPv6 address",
+            str(context.exception),
+        )
 
     @mock.patch("asyncio.sleep", return_value=None)
     @mock.patch("time.time")

@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Conditionally compile OpenThread platform code based on the commit used.
+# GN's `if (openthread_upstream_version == "")` / `OPENTHREAD_251001=1` block
+# is an unused soft-transition leftover and is omitted in Bazel.
+fx_cc_library(
+    name = "platform",
+    srcs = [
+        "bootstrap_fidl_impl.cc",
+        "entropy.cc",
+        "infra_if.cc",
+        "logging.cc",
+        "main.cc",
+        "memory.cc",
+        "misc.cc",
+        "radio.cc",
+        "radio_url.cc",
+        "settings.cc",
+        "spinel_fidl_interface.cc",
+        "spinel_manager.cc",
+        "system.cc",
+        "thread_config_manager.cc",
+        "url.cc",
+    ],
+    hdrs = [
+        "alarm.h",
+        "bootstrap_fidl_impl.h",
+        "infra_if.h",
+        "logger.h",
+        "misc.h",
+        "openthread-system.h",
+        "radio.h",
+        "radio_url.h",
+        "spinel_driver_getter.h",
+        "spinel_fidl_interface.h",
+        "spinel_manager.h",
+        "thread_config_manager.h",
+        "url.h",
+    ],
+    # bootstrap_fidl_impl.h and bootstrap_fidl_impl.cc use angled workspace-root
+    # `#include <src/...>` (//build/config:default_include_dirs is empty in Bazel),
+    # and radio_url.h requires -Wno-extra-semi (propagated in GN via
+    # //third_party/openthread:openthread_config).
+    # @bazel2gn:skip
+    copts = [
+        "-I.",
+        "-Wno-extra-semi",
+    ],
+    visibility = [
+        "//src/connectivity/lowpan:__subpackages__",
+        "//src/connectivity/openthread:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.lowpan.bootstrap:fuchsia.lowpan.bootstrap_cpp",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_hlcpp",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_hlcpp",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//src/connectivity/openthread/lib/ot-stack:ot-stack-callback",
+        "//src/lib/files",
+        "//src/lib/fsl",
+        "//src/lib/json_parser",
+        "//third_party/github.com/simdutf/simdutf",
+        "//third_party/openthread:lib-ot-core",
+        "//zircon/system/ulib/svc",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

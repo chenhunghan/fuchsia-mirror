@@ -79,7 +79,6 @@ rustc_binary(
         "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
         "//sdk/fidl/fuchsia.stash:fuchsia.stash_rust",
         "//sdk/rust/zx",
-        "//src/connectivity/bluetooth/lib/async-helpers",
         "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
         "//src/lib/async-utils",
         "//src/lib/diagnostics/inspect/contrib/rust",
@@ -142,6 +141,7 @@ rustc_test(
     crate = ":bin",
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
+        "//src/connectivity/bluetooth/lib/async-helpers",
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
         "//src/lib/test_util",
         "//third_party/rust_crates/vendor:assert_matches",

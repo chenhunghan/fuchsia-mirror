@@ -97,7 +97,7 @@ interface Science {
 
 ## Design
 
-### Hash
+### Hash {:#hash}
 
 The hashed ordinal is derived by a
 [SHA-256](https://en.wikipedia.org/wiki/SHA-2){:.external} hash of:
@@ -295,7 +295,7 @@ We intend to implement this in distinct phases:
 6. Remove support for manually-specified ordinals.
 
 The above is a
-[soft transition](/docs/development/source_code/working_across_petals.md#soft-transitions-preferred);
+[soft transition](/docs/development/source_code/working_across_petals.md#soft-transitions);
 changing `fidlc` to use the hashed ordinals (step 4b) should not break the
 rollers, since rollers build from a single version of the entire tree.
 

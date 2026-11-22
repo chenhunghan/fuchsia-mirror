@@ -98,8 +98,10 @@ source "${platform_sh}" || exit $?
 
 readonly _all_prebuilt_paths="${PREBUILT_ALL_PATHS}"
 if [[ "${FX_INJECT_PREBUILT_PATHS:-1}" == "0" ]]; then
+  _py3_dir_var="PREBUILT_""PYTHON3_DIR"
+  _py3_bin="${!_py3_dir_var}/bin"
   if [[ "${FUCHSIA_HERMETIC_TOOLS}" == "y" ]]; then
-    readonly newpath="${FUCHSIA_DIR}/tools/system"
+    readonly newpath="${_py3_bin}:${FUCHSIA_DIR}/tools/system"
   else
     _wrapped_prebuilt=":${_all_prebuilt_paths}:"
     IFS=':' read -r -a _in_parts <<< "${PATH}"
@@ -111,9 +113,15 @@ if [[ "${FX_INJECT_PREBUILT_PATHS:-1}" == "0" ]]; then
       fi
       _kept_parts+=("${_p}")
     done
-    readonly newpath="$(IFS=':'; printf '%s' "${_kept_parts[*]}")"
-    unset _wrapped_prebuilt _in_parts _kept_parts _p
+    _filtered_path="$(IFS=':'; printf '%s' "${_kept_parts[*]}")"
+    if [[ -n "${_filtered_path}" ]]; then
+      readonly newpath="${_py3_bin}:${_filtered_path}"
+    else
+      readonly newpath="${_py3_bin}"
+    fi
+    unset _wrapped_prebuilt _in_parts _kept_parts _p _filtered_path
   fi
+  unset _py3_dir_var _py3_bin
 elif [[ "${PATH#"${_all_prebuilt_paths}"}" == "${PATH}" ]]; then
   # Prebuilts have not been added to the path
   if [[ "${FUCHSIA_HERMETIC_TOOLS}" == "y" ]]; then
@@ -190,6 +198,7 @@ exec /usr/bin/env -i \
   ${FX_NO_BUILD_HOST_TOOL+"FX_NO_BUILD_HOST_TOOL=${FX_NO_BUILD_HOST_TOOL}"} \
   ${FX_FORCE_BUILD_HOST_TOOL+"FX_FORCE_BUILD_HOST_TOOL=${FX_FORCE_BUILD_HOST_TOOL}"} \
   ${FX_OUTPUT_REGISTRY_ACTIONS+"FX_OUTPUT_REGISTRY_ACTIONS=${FX_OUTPUT_REGISTRY_ACTIONS}"} \
+  ${FX_PYTHON_CLI+"FX_PYTHON_CLI=${FX_PYTHON_CLI}"} \
   ${FX_RUNTIME_TOOLS_DIR+"FX_RUNTIME_TOOLS_DIR=${FX_RUNTIME_TOOLS_DIR}"} \
   ${RUNFILES_DIR+"RUNFILES_DIR=${RUNFILES_DIR}"} \
   ${RUNFILES_MANIFEST_FILE+"RUNFILES_MANIFEST_FILE=${RUNFILES_MANIFEST_FILE}"} \
@@ -202,6 +211,7 @@ exec /usr/bin/env -i \
   ${FUCHSIA_DEBUG_BAZEL_SANDBOX+"FUCHSIA_DEBUG_BAZEL_SANDBOX=${FUCHSIA_DEBUG_BAZEL_SANDBOX}"} \
   ${FX_BUILD_RBE_STATS+"FX_BUILD_RBE_STATS=${FX_BUILD_RBE_STATS}"} \
   ${FX_RA_EXPERIMENTS_ENABLED+"FX_RA_EXPERIMENTS_ENABLED=${FX_RA_EXPERIMENTS_ENABLED}"} \
+  ${MAKEFLAGS+"MAKEFLAGS=${MAKEFLAGS}"} \
   ${NINJA_STATUS+"NINJA_STATUS=${NINJA_STATUS}"} \
   ${NINJA_STATUS_MAX_COMMANDS+"NINJA_STATUS_MAX_COMMANDS=${NINJA_STATUS_MAX_COMMANDS}"} \
   ${NINJA_STATUS_REFRESH_MILLIS+"NINJA_STATUS_REFRESH_MILLIS=${NINJA_STATUS_REFRESH_MILLIS}"} \

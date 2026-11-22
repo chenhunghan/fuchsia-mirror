@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
       "data": "test.structdefaultvalueenumlibraryreference",
       "start_offset": 8,
       "end_offset": 51
@@ -14,7 +14,7 @@
       "library_name": "test.dependent",
       "referenced_at": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
         "data": "test.dependent",
         "start_offset": 60,
         "end_offset": 74
@@ -26,7 +26,7 @@
       "library_name": "test.dependent",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/dependent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/dependent.test.fidl",
         "data": "test.dependent",
         "start_offset": 8,
         "end_offset": 22
@@ -38,7 +38,7 @@
       "identifier": "test.dependent/MyEnum",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/dependent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/dependent.test.fidl",
         "data": "MyEnum",
         "start_offset": 30,
         "end_offset": 36
@@ -48,7 +48,7 @@
       "identifier": "test.dependent/MyEnum.A",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/dependent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/dependent.test.fidl",
         "data": "A",
         "start_offset": 65,
         "end_offset": 66
@@ -65,7 +65,7 @@
       "identifier": "test.structdefaultvalueenumlibraryreference/Foo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
         "data": "Foo",
         "start_offset": 82,
         "end_offset": 85
@@ -75,7 +75,7 @@
           "name": "field",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
             "data": "field",
             "start_offset": 139,
             "end_offset": 144
@@ -86,7 +86,7 @@
             "type_identifier": "test.dependent/MyEnum",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference/example.test.fidl",
               "data": "test.dependent.MyEnum",
               "start_offset": 145,
               "end_offset": 166

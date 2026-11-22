@@ -70,6 +70,8 @@ class SimInterface : public fidl::WireServer<fuchsia_wlan_fullmac::WlanFullmacIm
     std::list<wlan_fullmac_wire::WlanFullmacChannelSwitchInfo> csa_indications;
     std::list<fuchsia_wlan_fullmac::WlanFullmacImplIfcStartConfRequest> start_confirmations;
     std::list<fuchsia_wlan_fullmac::WlanFullmacImplIfcStopConfRequest> stop_confirmations;
+    std::list<fuchsia_wlan_fullmac::WlanFullmacImplIfcOnMichaelMicFailureRequest>
+        mic_failure_indications;
   };
 
   // Default scan options
@@ -123,6 +125,8 @@ class SimInterface : public fidl::WireServer<fuchsia_wlan_fullmac::WlanFullmacIm
   void EapolConf(EapolConfRequestView request, EapolConfCompleter::Sync& completer) override;
   void OnChannelSwitch(OnChannelSwitchRequestView request,
                        OnChannelSwitchCompleter::Sync& completer) override;
+  void OnMichaelMicFailure(OnMichaelMicFailureRequestView request,
+                           OnMichaelMicFailureCompleter::Sync& completer) override;
   void SignalReport(SignalReportRequestView request,
                     SignalReportCompleter::Sync& completer) override;
   void EapolInd(EapolIndRequestView request, EapolIndCompleter::Sync& completer) override;

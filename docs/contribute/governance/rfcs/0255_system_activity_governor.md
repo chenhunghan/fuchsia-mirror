@@ -162,7 +162,7 @@ To accommodate this concept, we make the following assumptions:
   uninterrupted execution in order to perform critical tasks (e.g. receive data
   from a network or peripheral) to account for hardware platform suspension by
   directly or indirectly interacting with power framework in one of the methods
-  described in [Preventing Suspend](#preventing_suspend).
+  described in [Preventing suspend](#preventing-suspend).
 - The hardware platform **MUST NOT** suspend while a waking interrupt is
   pending. This is important for all drivers since it gives them a chance to
   service their interrupt regardless of their interaction with the power
@@ -223,7 +223,7 @@ tends towards its lowest power level. This naturally leads to a *governing*
 action on the execution state of the hardware platform when no dependent power
 elements are active.
 
-#### Execution State
+#### Execution State {:#execution-state}
 
 This power element maps as closely as possible to the hardware platform's
 ability to execute code. It supports 3 power levels:
@@ -236,25 +236,25 @@ When the hardware platform is running normally, this element is expected to be
 at the `Active` power level. While at the `Inactive` power level, the hardware
 platform is expected to be either in a suspend state or actively attempting to
 transition to a suspend state. Only parts of the device that are not power-aware
-or are power-agnostic should be running at this time. See [Constraining a Device
-by Execution State](#constraining_a_device_by_execution_state) for more info on
-this design pattern. See [Suspend/Resume](#suspendresume) for more info on when
+or are power-agnostic should be running at this time. See [Constraining a device
+by Execution State](#constraining-a-device-by-execution-state) for more info on
+this design pattern. See [Suspend/resume](#suspend-resume) for more info on when
 and how suspend is triggered.
 
 The `Suspending` power level sits between the `Inactive` and `Active` power
 levels. This power level exists to separate power dependencies that are *only*
 allowed to run when the hardware platform is running and those that *may* need
 to run when the hardware platform is transitioning between a suspend state and a
-running state (in either direction). See the [Storage example](#storage_example)
+running state (in either direction). See the [Storage example](#storage-example)
 below for a scenario where this distinction is useful.
 
-### Design Patterns
+### Design patterns {:#design-patterns}
 
-#### Preventing Suspend
+#### Preventing suspend {:#preventing-suspend}
 
 To prevent the hardware platform from suspending, a component can construct a
 power element that has an [assertive
-dependency](0250_power_topology.md#dependency_types) on `Execution State`.
+dependency](0250_power_topology.md#dependency-types) on `Execution State`.
 
 Consider a product that has a media player feature. The product owner wants
 media playback to prevent the hardware platform from suspending in order to
@@ -262,7 +262,7 @@ support continuous music playback. To support this feature, the component that
 manages the playback state could create an assertive dependency on `Execution
 State` to prevent SAG from triggering a suspend transition.
 
-Note: An [opportunistic dependency](0250_power_topology.md#dependency_types)
+Note: An [opportunistic dependency](0250_power_topology.md#dependency-types)
 would also work if and only if another power element has *already* raised
 `Execution State` to the `Active` power level.
 
@@ -277,7 +277,7 @@ in order to prevent the hardware platform from suspending. After the lease is
 satisfied, the Media Player component can run the media playback logic without
 needing to worry about the hardware platform suspending unexpectedly.
 
-#### Constraining a Device by Execution State
+#### Constraining a device by Execution State {:#constraining-a-device-by-execution-state}
 
 One powerful pattern that a product can employ is constraining a device's power
 level by the hardware platform's execution state. This can be used to tie
@@ -287,12 +287,12 @@ or change its configuration. This setup may be useful for products that want to
 power down specific features or subsystems when the hardware platform suspends
 to reduce power consumption.
 
-###### Audio Example
+###### Audio example {:#audio-example}
 
 Consider a product with power-intensive audio hardware. The product owner only
 wants to activate the audio hardware when the hardware platform is awake. The
 product owner could represent this configuration with a power topology with an
-[opportunistic dependency](0250_power_topology.md#dependency_types) on
+[opportunistic dependency](0250_power_topology.md#dependency-types) on
 `Execution State`.
 
 ![Constraining a Device by Execution State
@@ -338,10 +338,10 @@ While an interrupt is being handled, SAG can run at any time since the kernel
 resumes the tasks that were suspended when the hardware platform transitioned to
 suspend.
 
-##### Storage Example
+##### Storage example {:#storage-example}
 
-Consider the [audio example](#audio_example) from [Constraining a Device by
-Execution State ](#constraining_a_device_by_execution_state). While storage
+Consider the [audio example](#audio-example) from [Constraining a device by
+Execution State ](#constraining-a-device-by-execution-state). While storage
 hardware could follow a similar pattern to audio where it is normally turned off
 when the hardware platform is suspended, it would also be off while the hardware
 platform is transitioning to suspend or resuming to service a waking interrupt.
@@ -388,7 +388,7 @@ FIDL service hosted by SAG must be notified that boot has completed. This
 service is expected to be used when higher layers of the system can express
 their power needs, e.g. by the session when user interaction is possible.
 
-#### Suspend/Resume
+#### Suspend/resume {:#suspend-resume}
 
 Suspend transitions will be requested while the `Execution State` power level is
 `Inactive`, the lowest power level. Before starting a suspend transition, SAG
@@ -413,7 +413,7 @@ When the hardware platform resumes execution, SAG will receive a response from
 the `Suspender` device indicating the result of the suspend request. SAG will
 then notify registered listeners of the result of the suspend request. At that
 time, listeners can request a lease that blocks hardware platform suspension.
-See [Preventing Suspend](#preventing_suspend) for more info.
+See [Preventing suspend](#preventing-suspend) for more info.
 
 It is also possible for a suspend request to fail before a transition occurs.
 This may be caused by a pending interrupt that will immediately wake the
@@ -534,7 +534,7 @@ configuration (including expectations from product owners), API patterns, and
 test support libraries. The documentation should include examples and best
 practices for manipulating SAG power elements and using its API appropriately.
 Examples should include step-by-step guides for scenarios listed in the [Design
-Patterns](#design_patterns) section above.
+patterns](#design-patterns) section above.
 
 This documentation should be part of a larger set of documentation for the power
 framework and its concepts.
@@ -577,4 +577,4 @@ be codified in follow-up RFCs as needed.
 
 [RFC-0230: Suspend-To-Idle in Fuchsia]: 0230_suspend_to_idle.md
 [RFC-0250: Power Topology]: 0250_power_topology.md
-[`Execution State`]: #execution_state
+[`Execution State`]: #execution-state

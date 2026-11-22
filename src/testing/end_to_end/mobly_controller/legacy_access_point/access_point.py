@@ -11,6 +11,9 @@ import time
 from dataclasses import dataclass
 from typing import Any, FrozenSet, Protocol
 
+from honeydew.auxiliary_devices.power_switch import (
+    power_switch as honeydew_power_switch,
+)
 from honeydew.typing.custom_types import MacAddress
 from legacy_access_point.ap_lib import hostapd_constants
 from legacy_access_point.ap_lib.ap_get_interface import ApInterfaces
@@ -45,7 +48,6 @@ from libs.commands.tcpdump import LinuxTcpdumpCommand
 from libs.ip_utils import AddrType as AddrType
 from libs.proc.runner import CalledProcessError
 from libs.ssh import connection, settings
-from libs.ssh.provider import SSHConfig, SSHProvider
 from libs.types import ControllerConfig, Json
 from libs.validation import MapValidator
 from mobly import logger
@@ -59,13 +61,13 @@ class Error(Exception):
 
 
 class PowerSwitch(Protocol):
-    """Protocol for a power switch capable of toggling power on an outlet."""
+    """Protocol for a power switch capable of toggling power to the device."""
 
-    def power_off(self, outlet: int | None = None) -> None:
-        """Turns off power at the specified outlet."""
+    def power_off(self) -> None:
+        """Turns off power to the device."""
 
-    def power_on(self, outlet: int | None = None) -> None:
-        """Turns on power at the specified outlet."""
+    def power_on(self) -> None:
+        """Turns on power to the device."""
 
 
 @dataclass
@@ -143,8 +145,11 @@ class AccessPoint:
         )
         self.config: ControllerConfig = config
         self.nodename: str | None = c.get(str, "nodename", None)
-        self._power_switch: PowerSwitch | None = None
-        self._power_switch_outlet: int | None = None
+        self._power_switch: PowerSwitch | None = (
+            honeydew_power_switch.PowerSwitch.from_config(
+                device_config=config,
+            )
+        )
         self.identifier = self.ssh_settings.hostname
 
         subnet = MapValidator(c.get(dict, "ap_subnet", {}))
@@ -163,19 +168,7 @@ class AccessPoint:
         )
 
         self.ssh = connection.SshConnection(self.ssh_settings)
-
-        # TODO(https://fxbug.dev/567167756): Merge self.ssh (SshConnection) and
-        # self.ssh_provider (SSHProvider) into a single SSH library.
-        self.ssh_provider = SSHProvider(
-            SSHConfig(
-                self.ssh_settings.username,
-                self.ssh_settings.hostname,
-                self.ssh_settings.identity_file,
-                port=self.ssh_settings.port,
-                ssh_binary=self.ssh_settings.executable,
-                connect_timeout=90,
-            )
-        )
+        self.ssh.wait_until_reachable(timeout_sec=90)
 
         # Singleton utilities for running various commands.
         self._ip_cmd = command.require(ip.LinuxIpCommand(self.ssh))
@@ -205,11 +198,11 @@ class AccessPoint:
         self._initial_ap()
 
         # Allow use of tcpdump
-        self.tcpdump = LinuxTcpdumpCommand(self.ssh_provider)
+        self.tcpdump = LinuxTcpdumpCommand(self.ssh)
 
         # Access points are not given internet access, so their system time needs to be
         # manually set to be accurate.
-        LinuxDateCommand(self.ssh_provider).sync()
+        LinuxDateCommand(self.ssh).sync()
 
     def _initial_ap(self) -> None:
         """Initial AP interfaces.
@@ -741,14 +734,23 @@ class AccessPoint:
             self.ssh, interface, addr_type=addr_type, timeout_sec=timeout_sec
         )
 
+    @property
+    def power_switch(self) -> PowerSwitch | None:
+        """Power switch controlling this access point, if one has been set."""
+        return self._power_switch
+
     def set_power_switch(
         self,
         power_switch: PowerSwitch,
-        outlet: int | None = None,
     ) -> None:
-        """Sets the power switch used for hard power cycling this access point."""
+        """Sets the power switch used for hard power cycling this access point.
+
+        Note: This is normally populated automatically during `__init__()` via
+        `PowerSwitch.from_config()` and does not need to be called manually.
+        Call this only to override the auto-configured implementation or inject a
+        custom/test instance at runtime.
+        """
         self._power_switch = power_switch
-        self._power_switch_outlet = outlet
 
     def hard_power_cycle(self) -> None:
         """Kills, then restores power to AccessPoint, verifying it goes down and
@@ -760,7 +762,7 @@ class AccessPoint:
         """
         if self._power_switch is None:
             raise Error(
-                "No power switch (power_switch_hw/power_switch_impl or DMC nodename) provided in AccessPoint config."
+                "No power switch (auxiliary_devices.power_switch or DMC nodename) provided in AccessPoint config."
             )
 
         self._journalctl_cmd.save_and_reset()
@@ -768,19 +770,19 @@ class AccessPoint:
         self.log.info("Power cycling")
 
         self.log.info("Killing power")
-        self._power_switch.power_off(self._power_switch_outlet)
+        self._power_switch.power_off()
         try:
             self.log.info("Verifying AccessPoint is unreachable.")
-            self.ssh_provider.wait_until_unreachable()
+            self.ssh.wait_until_unreachable()
             self.log.info("AccessPoint is unreachable as expected.")
 
             self._aps.clear()
         finally:
             self.log.info("Restoring power")
-            self._power_switch.power_on(self._power_switch_outlet)
+            self._power_switch.power_on()
 
         self.log.info("Waiting for AccessPoint to become available via SSH.")
-        self.ssh_provider.wait_until_reachable()
+        self.ssh.wait_until_reachable(timeout_sec=90)
         self.log.info("AccessPoint responded to SSH.")
 
         # Allow 5 seconds for OS to finish getting set up

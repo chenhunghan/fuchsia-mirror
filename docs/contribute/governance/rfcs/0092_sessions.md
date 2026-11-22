@@ -185,7 +185,7 @@ explaining its purpose.
 The relationship between the session and `core` could be reversed, such that
 `core` is a child of the session. This would give the product full control over
 how the system is configured at the cost of a stable platform foundation.
-### Session manager configuration
+### Session manager configuration {:#session-manager-configuration}
 
 The `session_manager` configuration currently only toggles which session
 component to instantiate during boot. There is no variance in

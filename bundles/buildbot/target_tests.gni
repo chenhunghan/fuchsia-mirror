@@ -11,6 +11,7 @@
 fxfs_required_target_tests = [
   "//src/connectivity/network/tests/benchmarks/socket-loopback:starnix_tests",
   "//src/starnix:tests",
+  "//src/storage:bazel_fxfs_required_tests",
   "//src/storage/io_stress:tests",
   "//src/tests/microbenchmarks:starnix_tests",
   "//src/ui/tests/integration_input_tests/starnix-input:tests",
@@ -114,10 +115,4 @@ terminal_target_tests = [
   "//src/tests/end_to_end/perf:test",
   "//src/tests/end_to_end/sl4f:test",
   "//src/tests/end_to_end/time_sync:test",
-
-  # Doesn't have any tests that are included in bundles.
-  "//products/terminal/terminal_session",
-
-  # General end to end dependencies.
-  "//src/tests/end_to_end/bundles:end_to_end_deps",
 ]

@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/packages:resources.bzl", "resource")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":starnix_ebpf_loader_tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
 
 rustc_library(
     name = "ebpf_loader",
@@ -39,4 +47,17 @@ rustc_library(
         "//third_party/rust_crates/vendor:thiserror",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
+)
+
+resource(
+    name = "ebpf_test_progs",
+    testonly = True,
+    src = "test_data/loader_test_prog.o",
+    dest = "data/loader_test_prog.o",
+)
+
+fx_unittest_package(
+    name = "starnix_ebpf_loader_tests",
+    resources = [":ebpf_test_progs"],
+    unit_tests = [":ebpf_loader_test"],
 )

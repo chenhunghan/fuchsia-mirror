@@ -11,7 +11,7 @@
 
 use crate::commands::{LibraryCommand, ReadResponse};
 use crate::compat::FcTransportStatus;
-use crate::env_context::EnvContext;
+use crate::env_context::{EnvContext, EnvMode};
 use crate::ext_buffer::ExtBuffer;
 use crate::lib_context::LibContext;
 use std::ffi::CStr;
@@ -50,6 +50,7 @@ pub unsafe extern "C" fn create_ffx_env_context(
     lib_ctx: *const LibContext,
     config_json: *const i8,
     isolate_dir: *const i8,
+    strict: bool,
 ) -> FcTransportStatus {
     if env_ctx.is_null() || lib_ctx.is_null() {
         return FcTransportStatus::INVALID_ARGS;
@@ -76,13 +77,22 @@ pub unsafe extern "C" fn create_ffx_env_context(
         },
         None => None,
     };
+    let mode = match (strict, isolate_dir) {
+        (true, Some(_)) => {
+            lib.write_err(calling_thread, "A strict context can't use an isolate directory");
+            return FcTransportStatus::INVALID_ARGS;
+        }
+        (true, None) => EnvMode::Strict,
+        (false, Some(dir)) => EnvMode::Isolated(dir),
+        (false, None) => EnvMode::Detect,
+    };
     let (responder, rx) = mpsc::sync_channel(1);
     lib.run(LibraryCommand::CreateEnvContext {
         lib: lib.clone(),
         calling_thread,
         responder,
         config_json,
-        isolate_dir,
+        mode,
     });
     match rx.recv() {
         Ok(r) => match r {
@@ -717,7 +727,13 @@ mod test {
         // `testing_lib_context`, `config` is null (0 entries), and `isolate_dir_cstr` is a valid
         // NUL-terminated C string that remains live for the duration of the call.
         let status = unsafe {
-            create_ffx_env_context(&mut env, lib_ctx, std::ptr::null(), isolate_dir_cstr.as_ptr())
+            create_ffx_env_context(
+                &mut env,
+                lib_ctx,
+                std::ptr::null(),
+                isolate_dir_cstr.as_ptr(),
+                false,
+            )
         };
         assert_eq!(status, FcTransportStatus::OK);
         assert!(!env.is_null());
@@ -840,6 +856,7 @@ mod test {
                 lib_ctx,
                 invalid_utf8.as_ptr() as *const i8,
                 std::ptr::null(),
+                false,
             )
         };
         assert_eq!(status, FcTransportStatus::INVALID_ARGS);
@@ -851,10 +868,63 @@ mod test {
                 lib_ctx,
                 std::ptr::null(),
                 invalid_utf8.as_ptr() as *const i8,
+                false,
             )
         };
         assert_eq!(status, FcTransportStatus::INVALID_ARGS);
         assert!(env.is_null());
+        unsafe { destroy_ffx_lib_context(lib_ctx) };
+    }
+
+    #[test]
+    fn create_env_context_strict() {
+        let lib_ctx = testing_lib_context();
+        let shared_data = tempdir().expect("create test shared_data dir");
+        let config_json = serde_json::json!({
+            "shared_data": shared_data.path().to_str().expect("utf8 path"),
+            "ssh.priv": ["/keys/fuchsia_ed25519"],
+        })
+        .to_string();
+        let config_cstr = CString::new(config_json).unwrap();
+        let mut env: *const EnvContext = std::ptr::null_mut();
+        // SAFETY: `env` is a valid out-pointer, `lib_ctx` is a valid context pointer allocated by
+        // `testing_lib_context`, `config_cstr` is a valid NUL-terminated C string that remains
+        // live for the duration of the call, and `isolate_dir` is null.
+        let status = unsafe {
+            create_ffx_env_context(&mut env, lib_ctx, config_cstr.as_ptr(), std::ptr::null(), true)
+        };
+        assert_eq!(status, FcTransportStatus::OK);
+        assert!(!env.is_null());
+        // SAFETY: `env` was allocated by `create_ffx_env_context` and `lib_ctx` by
+        // `testing_lib_context`; neither is used after destruction.
+        unsafe {
+            destroy_ffx_env_context(env);
+            destroy_ffx_lib_context(lib_ctx);
+        }
+    }
+
+    #[test]
+    fn create_env_context_strict_rejects_isolate_dir() {
+        let lib_ctx = testing_lib_context();
+        let isolate_dir = tempdir().expect("create test isolate dir");
+        let isolate_dir_cstr =
+            CString::new(isolate_dir.path().to_str().expect("utf8 path")).unwrap();
+        let mut env: *const EnvContext = std::ptr::null_mut();
+        // SAFETY: `env` is a valid out-pointer, `lib_ctx` is a valid context pointer allocated by
+        // `testing_lib_context`, `config_json` is null, and `isolate_dir_cstr` is a valid
+        // NUL-terminated C string that remains live for the duration of the call.
+        let status = unsafe {
+            create_ffx_env_context(
+                &mut env,
+                lib_ctx,
+                std::ptr::null(),
+                isolate_dir_cstr.as_ptr(),
+                true,
+            )
+        };
+        assert_eq!(status, FcTransportStatus::INVALID_ARGS);
+        assert!(env.is_null());
+        // SAFETY: `lib_ctx` was allocated by `testing_lib_context` and is not used after this.
         unsafe { destroy_ffx_lib_context(lib_ctx) };
     }
 

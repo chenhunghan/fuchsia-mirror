@@ -210,23 +210,23 @@ type TableUnionWithVectorStructSandwichStruct = resource struct {
     table TableUnionWithVectorStructSandwich;
 };
 
-type XUnionWithStruct = flexible union {
+type UnionWithStruct = flexible union {
     1: s StructSize3Align1;
 };
 
-type XUnionWithStructStruct = struct {
-    xu XUnionWithStruct;
+type UnionWithStructStruct = struct {
+    xu UnionWithStruct;
 };
 
-type XUnionWithXUnion = flexible union {
-    1: xu XUnionWithStruct;
+type FlexibleUnionWithFlexibleUnion = flexible union {
+    1: xu UnionWithStruct;
 };
 
-type XUnionWithXUnionStruct = struct {
-    xu XUnionWithXUnion;
+type FlexibleUnionWithFlexibleUnionStruct = struct {
+    xu FlexibleUnionWithFlexibleUnion;
 };
 
-type XUnionWithUnions = flexible union {
+type FlexibleUnionWithUnions = flexible union {
     1: u1 UnionSize8Align4;
     2: u2 UnionSize12Align4;
 };
@@ -367,29 +367,29 @@ type UnionAtTheBottom = strict union {
     3: tiny uint8;
 };
 
-type XUnionOfUnion = flexible union {
+type FlexibleUnionOfUnion = flexible union {
     1: variant UnionAtTheBottom; // 0x5F67105B
 };
 
-type TableOfXUnionThenUnion = table {
-    2: member XUnionOfUnion;
+type TableOfFlexibleUnionThenUnion = table {
+    2: member FlexibleUnionOfUnion;
 };
 
-type XUnionOfTableThenXUnionThenUnion = flexible union {
-    1: variant TableOfXUnionThenUnion; //0x5B15934E
+type FlexibleUnionOfTableThenFlexibleUnionThenUnion = flexible union {
+    1: variant TableOfFlexibleUnionThenUnion; //0x5B15934E
 };
 
-type UnionOfXUnionThenTableThenXUnionThenUnion = strict union {
+type UnionOfFlexibleUnionThenTableThenFlexibleUnionThenUnion = strict union {
     1: unused1 uint8; // avoid tag 0
-    3: variant XUnionOfTableThenXUnionThenUnion; // tag = 1
+    3: variant FlexibleUnionOfTableThenFlexibleUnionThenUnion; // tag = 1
 };
 
-type TableOfUnionThenXUnionThenTableThenXUnionThenUnion = table {
-    3: member UnionOfXUnionThenTableThenXUnionThenUnion;
+type TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion = table {
+    3: member UnionOfFlexibleUnionThenTableThenFlexibleUnionThenUnion;
 };
 
-type Regression7TableUnionXUnion = struct {
-    value TableOfUnionThenXUnionThenTableThenXUnionThenUnion;
+type Regression7TableUnionFlexibleUnion = struct {
+    value TableOfUnionThenFlexibleUnionThenTableThenFlexibleUnionThenUnion;
 };
 
 type Regression8OptUnionSize12Align4 = struct {
@@ -554,7 +554,7 @@ type StructOfUnionOfTable = struct {
     u UnionOfTable;
 };
 
-type CompatXUnion = flexible union {
+type CompatFlexibleUnion = flexible union {
     1: s string; // hashed ordinal 0x5af8efa8
     2: b bool;
 };
@@ -563,7 +563,7 @@ type CompatTableValue = table {
     1: union_member CompatUnion;
     2: array_member array<uint32, 3>;
     3: table_member CompatTableString;
-    4: xunion_member CompatXUnion;
+    4: flexible_union_member CompatFlexibleUnion;
 };
 
 type CompatTable = struct {
@@ -585,12 +585,12 @@ type MixedFieldsMessage = struct {
     body MixedFieldsBody;
 };
 
-type TableWithXUnion = table {
-    1: member CompatXUnion;
+type TableWithUnion = table {
+    1: member CompatFlexibleUnion;
 };
 
-type StructOfTableWithXUnion = struct {
-    value TableWithXUnion;
+type StructOfTableWithUnion = struct {
+    value TableWithUnion;
 };
 
 type TableWithReservedFieldThenUnion = table {

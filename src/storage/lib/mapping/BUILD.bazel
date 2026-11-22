@@ -38,6 +38,8 @@ rustc_library(
         "//src/storage/lib/profile",
         "//src/storage/lib/ptr_slice",
         "//src/storage/lib/storage_device",
+        "//src/storage/lib/trace",
+        "//src/storage/lib/units",
         "//src/storage/lib/vmo-fifo",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:bincode",

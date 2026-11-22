@@ -13,14 +13,14 @@ and has not achieved ABI stability yet.)
 The driver framework comprises the following entities for running drivers in a
 Fuchsia system:
 
-*   [Driver manager](#driver_manager)
-*   [Driver host](#driver_host)
-*   [Driver index](#driver_index)
-*   [Driver runtime](#driver_runtime)
-*   [FIDL interface](#fidl_interface)
+*   [Driver manager](#driver-manager)
+*   [Driver host](#driver-host)
+*   [Driver index](#driver-index)
+*   [Driver runtime](#driver-runtime)
+*   [FIDL interface](#fidl-interface)
 
 
-## Driver manager
+## Driver manager {:#driver-manager}
 
 Fuchsia's driver manager, which runs as a Fuchsia
 component (`driver_manager.cm`), is one of the initial processes to start
@@ -30,14 +30,14 @@ a Fuchsia system and routes FIDL capabilities for the  drivers.
 The driver manager maintains the topology of all known devices
 (or [nodes][nodes]) in a Fuchsia system. When the driver manager sees a node
 that represents a new device in the system, it asks the
-[driver index](#driver_index) (a Fuchsia component) to find the correct driver
+[driver index](#driver-index) (a Fuchsia component) to find the correct driver
 to [bind][driver-binding] to that node. When a driver is matched to the node,
-the driver manager then creates a new [driver host](#driver_host) (or reuses an
+the driver manager then creates a new [driver host](#driver-host) (or reuses an
 existing driver host), which also runs as a component. The driver host starts an
 instance of the driver and begins providing the device’s services to other
 Fuchsia components in the system.
 
-## Driver host
+## Driver host {:#driver-host}
 
 Every driver lives in a driver host, which runs as a Fuchsia component
 (`driver_host.cm`). Driver hosts provide isolation between drivers in
@@ -60,7 +60,7 @@ they share the same address space.
 
 **Diagram 1**. Driver hosts representing USB devices connected to the PCI bus.
 
-## Driver index
+## Driver index {:#driver-index}
 
 The driver index, which runs as a Fuchsia component (`driver-index.cm`), is
 responsible for the following tasks:
@@ -96,7 +96,7 @@ the driver manager. But if there is no match, the driver index responds with
 a `Not Found` error code. (For more information on the bind rules and binding
 process, see [Driver binding][driver-binding].)
 
-## Driver runtime
+## Driver runtime {:#driver-runtime}
 
 At a high level, a driver communicates with the following three groups in a
 Fuchsia system: the driver framework, other drivers, and non-driver components.
@@ -110,7 +110,7 @@ driver runtime provides primitives similar to the Zircon channel and port, and
 a new FIDL transport is built on top of this runtime. (For more details, see the
 [RFC][rfc-driver-runtime] on the driver runtime.)
 
-## FIDL interface
+## FIDL interface {:#fidl-interface}
 
 The FIDL interface in the driver framework refers to the following two FIDL
 protocols:
@@ -138,8 +138,8 @@ developer.
 [driver-binding]: driver_binding.md
 [driver-host]: driver_framework.md#driver_host
 [service-discovery]: driver_communication.md#service_discovery
-[node-properties]: drivers_and_nodes.md#node_attributes
-[node-topology]: drivers_and_nodes.md#node_topology
+[node-properties]: drivers_and_nodes.md#node-attributes
+[node-topology]: drivers_and_nodes.md#node-topology
 [rfc-driver-runtime]: /docs/contribute/governance/rfcs/0126_driver_runtime.md
 [fidl-node]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.driver.framework/topology.fidl;l=107
 [fidl-nodecontroller]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.driver.framework/topology.fidl;l=73

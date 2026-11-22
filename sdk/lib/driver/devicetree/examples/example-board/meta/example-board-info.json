@@ -1,9 +1,0 @@
-{
-    "short_description": "Example devicetree board driver",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Board"
-    ]
-}

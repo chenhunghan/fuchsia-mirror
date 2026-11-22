@@ -182,6 +182,16 @@ mod tests {
                 TreeRequest::OpenChild { child_name, tree, .. } => {
                     spawn_tree_server(child_name, Arc::clone(&vmos), tree.into_stream())
                 }
+                // TODO(https://fxbug.dev/582765053): Validator tests do not create blobs yet,
+                // but will in a follow-up CL once blob fetching is added to LazyNodeFetcher.
+                #[cfg(fuchsia_api_level_at_least = "HEAD")]
+                TreeRequest::ListBlobChildNames { .. } => {
+                    todo!("https://fxbug.dev/582765053: Support ListBlobChildNames in validator")
+                }
+                #[cfg(fuchsia_api_level_at_least = "HEAD")]
+                TreeRequest::OpenBlobChild { .. } => {
+                    todo!("https://fxbug.dev/582765053: Support OpenBlobChild in validator")
+                }
                 TreeRequest::_UnknownMethod { ordinal, method_type, .. } => {
                     warn!(ordinal, method_type:?; "Unknown request");
                 }

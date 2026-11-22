@@ -2,41 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/rust/rustc_library.gni")
+import("//build/sdk/sdk_atom.gni")
+import("//build/testing/host_test_data.gni")
 import("//src/developer/ffx/build/ffx_tool.gni")
 
-_subtools = [
-  "create_old",
-  "download",
-  "extract_blobs",
-  "get_artifacts",
-  "get_image_path",
-  "get_repository",
-  "get_version",
-  "list",
-  "lookup",
-  "show",
-]
-
 if (is_host) {
-  rustc_library("lib") {
-    name = "ffx_product_tool_lib"
-    version = "0.1.0"
-    edition = "2024"
-
-    deps = [
-      "//src/developer/ffx/lib/fho:lib",
-      "//third_party/rust_crates:argh",
-    ]
-    foreach(subtool, _subtools) {
-      deps += [ "$subtool:lib" ]
-    }
-    sources = [
-      "src/args.rs",
-      "src/lib.rs",
-    ]
-  }
-
   # When used in the build, this separate subtool version is used to avoid
   # its build steps depending on all of ffx. In order to use it with ffx_action,
   # you need to tell it to use the versioned executable target as follows:
@@ -44,26 +14,53 @@ if (is_host) {
   #   ffx_tool =
   #       "//src/developer/ffx/plugins/product:ffx_product_tool"
   #   ffx_tool_output_name = "ffx-product"
-  ffx_tool("ffx_product_tool") {
-    edition = "2024"
+  # LINT.IfChange
+  bazel_ffx_tool("ffx_product_tool") {
     output_name = "ffx-product"
-    deps = [
-      ":lib",
-      "//src/developer/ffx/lib/fho:lib",
-      "//src/lib/fuchsia-async",
-    ]
-    sources = [ "src/main.rs" ]
-
-    sdk_target_name = "sdk"
     sdk_category = "partner"
+  }
 
-    # Avoid instrumenting this target as it has a large negative impact on
-    # performance.
-    exclude_toolchain_tags = [
-      "asan",
-      "coverage",
-      "profile",
+  # LINT.ThenChange(BUILD.bazel)
+
+  host_test_data("ffx_product_tool_test_data") {
+    visibility = [
+      "//src/sys/pkg/tests/system-tests:*",
+      "//src/testing/end_to_end/honeydew:*",
     ]
+    data_deps = [ ":ffx_product_tool_host_tool" ]
+    sources = [
+      "${host_tools_dir}/ffx-product",
+      "${host_tools_dir}/ffx-product.json",
+    ]
+  }
+
+  # TODO(https://fxbug.dev/438572714): Remove once the IDK uses the Bazel atom.
+  _idk_path = "tools/$current_cpu/ffx_tools/ffx-product"
+
+  sdk_atom("sdk") {
+    category = "partner"
+    sdk_area = "Developer"
+    id = "sdk://$_idk_path"
+    idk_name = "ffx-product"
+    meta = {
+      dest = "$_idk_path-meta.json"
+      type = "ffx_tool"
+      source_prebuild_info = {
+        arch = current_cpu
+        file_base = "tools"
+      }
+    }
+    files = [
+      {
+        source = "$root_out_dir/ffx-product"
+        dest = _idk_path
+      },
+      {
+        source = "$root_out_dir/ffx-product.json"
+        dest = "$_idk_path.json"
+      },
+    ]
+    non_sdk_deps = [ ":ffx_product_tool_versioned" ]
   }
 
   group("product") {
@@ -75,16 +72,5 @@ if (is_host) {
 
   group("bin") {
     public_deps = [ ":ffx_product_tool_versioned" ]
-  }
-}
-
-group("tests") {
-  testonly = true
-  deps = [ "common:tests($host_toolchain)" ]
-
-  # create_old:lib_test uses Bazel host_test_data and is wired into
-  # //src/developer/ffx:tests.
-  foreach(subtool, _subtools - [ "create_old" ]) {
-    deps += [ "$subtool:lib_test($host_toolchain)" ]
   }
 }

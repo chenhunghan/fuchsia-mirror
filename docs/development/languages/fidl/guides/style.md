@@ -7,7 +7,7 @@ See also the [FIDL API Rubric](/docs/development/api/fidl.md).
 
 [TOC]
 
-## Names
+## Names {#names}
 
 
 > The Naming of Cats is a difficult matter,<br>
@@ -61,7 +61,7 @@ identifiers.  Our style is as follows:
     * Capitalize the first letter of each word and join all words together for
       _upper camel case_ (`NonNullHttpClient`).
 
-#### Usage
+#### Usage {#usage}
 
 The following table maps the case usage to the element:
 
@@ -327,7 +327,7 @@ defaults. That is, always prefer `flexible bits ...` to just `bits ...`.
   one blank line (two consecutive newline characters).
 * End files with exactly one newline character.
 
-### Comments
+### Comments {#comments}
 
 Comments use `///` (three forward slashes). Comments in a library will also
 appear in the generated code to ease development when coding against the

@@ -1,0 +1,151 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":part_3_integration_test",
+        ":part_3_unittest",
+    ],
+    visibility = ["//examples/diagnostics/inspect/codelab/rust:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/reverser.rs",
+    ],
+    # Preserves GN name = "inspect_rust_codelab_part_3" through bazel2gn.
+    crate_name = "inspect_rust_codelab_part_3",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//examples/diagnostics/inspect/codelab/fidl:fuchsia.examples.inspect_rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves GN with_unit_tests output_name through bazel2gn.
+    crate_name = "inspect_rust_codelab_part_3_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fidl/rust/fidl"],
+)
+
+fx_unittest_package(
+    name = "part_3_unittest",
+    unit_tests = [":bin_test"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "inspect_rust_codelab_part_3",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "part_3",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/part_3.cml",
+)
+
+fx_component(
+    name = "part_3",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "integration_test",
+    srcs = ["tests/integration_test.rs"],
+    # Preserves GN name = "inspect_rust_codelab_part_3_integration_test" through bazel2gn.
+    crate_name = "inspect_rust_codelab_part_3_integration_test",
+    crate_root = "tests/integration_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/diagnostics/inspect/codelab/rust/testing:inspect-rust-codelab-testing",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_packaged",
+    testonly = True,
+    binary = ":integration_test",
+    binary_name = "inspect_rust_codelab_part_3_integration_test",
+)
+
+fx_component_manifest(
+    name = "integration_test_manifest",
+    testonly = True,
+    component_name = "part_3_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_test.cml",
+)
+
+fx_test_component(
+    name = "part_3_integration_test_component",
+    compiled_manifest = ":integration_test_manifest",
+    deps = [":integration_test_packaged"],
+)
+
+fx_package(
+    name = "part_3_integration_test_pkg",
+    testonly = True,
+    components = [
+        ":part_3",
+        "//examples/diagnostics/inspect/codelab/rust/fizzbuzz",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":part_3_integration_test_component"],
+)
+
+fx_test(
+    name = "part_3_integration_test",
+    max_log_severity = "ERROR",
+    package = ":part_3_integration_test_pkg",
+)

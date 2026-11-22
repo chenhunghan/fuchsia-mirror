@@ -27,6 +27,7 @@ class PowerSwitchUsingSynaccessTests(unittest.TestCase):
         self.pdu_obj: power_switch_using_synaccess.PowerSwitchUsingSynaccess = (
             power_switch_using_synaccess.PowerSwitchUsingSynaccess(
                 host=_MOCK_PDU_HOST,
+                outlet=1,
             )
         )
 
@@ -36,6 +37,10 @@ class PowerSwitchUsingSynaccessTests(unittest.TestCase):
 
     def test_status_power_on_and_power_off(self) -> None:
         """Test case for status(), power_on(), and power_off() HTTP commands."""
+        pdu_outlet_2 = power_switch_using_synaccess.PowerSwitchUsingSynaccess(
+            host=_MOCK_PDU_HOST,
+            outlet=2,
+        )
         with mock.patch.object(
             http_utils,
             "send_http_request",
@@ -49,9 +54,12 @@ class PowerSwitchUsingSynaccessTests(unittest.TestCase):
             ],
             autospec=True,
         ) as mock_send_http_request:
-            self.assertEqual(self.pdu_obj.status(), {"1": False, "2": True})
-            self.pdu_obj.power_on(outlet=1)
-            self.pdu_obj.power_off(outlet=2)
+            self.assertEqual(
+                self.pdu_obj._status(),  # pylint: disable=protected-access
+                {"1": False, "2": True},
+            )
+            self.pdu_obj.power_on()
+            pdu_outlet_2.power_off()
 
             mock_send_http_request.assert_any_call(
                 f"http://{_MOCK_PDU_HOST}/cmd.cgi?%24A5",
@@ -69,31 +77,43 @@ class PowerSwitchUsingSynaccessTests(unittest.TestCase):
                 parse_json=False,
             )
 
-    def test_power_on_off_no_outlet_failure(self) -> None:
-        """Test case to ensure failure when outlet is None."""
-        with self.assertRaisesRegex(
-            power_switch_using_synaccess.PowerSwitchSynaccessError,
-            "Outlet number must be specified",
-        ):
-            self.pdu_obj.power_off(outlet=None)
-
-        with self.assertRaisesRegex(
-            power_switch_using_synaccess.PowerSwitchSynaccessError,
-            "Outlet number must be specified",
-        ):
-            self.pdu_obj.power_on(outlet=None)
+    def test_from_config_missing_outlet_raises_power_switch_error(self) -> None:
+        """Test PowerSwitch.from_config() raises PowerSwitchError when outlet is missing."""
+        with self.assertRaises(power_switch.PowerSwitchError):
+            power_switch.PowerSwitch.from_config(
+                device_config={
+                    "auxiliary_devices": {
+                        "power_switch": {
+                            "hardware": {"host": _MOCK_PDU_HOST},
+                            "implementation": {
+                                "module": (
+                                    "honeydew.auxiliary_devices.power_switch."
+                                    "power_switch_using_synaccess"
+                                ),
+                                "class": "PowerSwitchUsingSynaccess",
+                            },
+                        },
+                    },
+                }
+            )
 
     def test_invalid_port_and_error_response(self) -> None:
         """Test case to ensure invalid ports and error responses raise PowerSwitchSynaccessError."""
         with self.assertRaises(
             power_switch_using_synaccess.PowerSwitchSynaccessError
         ):
-            self.pdu_obj.power_on(outlet=0)
+            power_switch_using_synaccess.PowerSwitchUsingSynaccess(
+                host=_MOCK_PDU_HOST,
+                outlet=0,
+            )
 
         with self.assertRaises(
             power_switch_using_synaccess.PowerSwitchSynaccessError
         ):
-            self.pdu_obj.power_on(outlet=3)
+            power_switch_using_synaccess.PowerSwitchUsingSynaccess(
+                host=_MOCK_PDU_HOST,
+                outlet=3,
+            )
 
         with mock.patch.object(
             http_utils,
@@ -104,7 +124,7 @@ class PowerSwitchUsingSynaccessTests(unittest.TestCase):
             with self.assertRaises(
                 power_switch_using_synaccess.PowerSwitchSynaccessError
             ):
-                self.pdu_obj.power_on(outlet=1)
+                self.pdu_obj.power_on()
 
         with mock.patch.object(
             http_utils,
@@ -115,7 +135,7 @@ class PowerSwitchUsingSynaccessTests(unittest.TestCase):
             with self.assertRaises(
                 power_switch_using_synaccess.PowerSwitchSynaccessError
             ):
-                self.pdu_obj.power_on(outlet=1)
+                self.pdu_obj.power_off()
 
 
 if __name__ == "__main__":

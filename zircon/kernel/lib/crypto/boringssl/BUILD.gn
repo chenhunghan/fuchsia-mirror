@@ -22,7 +22,10 @@ source_set("boringssl") {
   # This gets the main source's include_dirs and cflags for warnings.
   configs += [ "//third_party/boringssl:boringssl_config" ]
 
-  deps = [ "//zircon/kernel/lib/libc" ]
+  deps = [
+    "//zircon/kernel/lib/libc",
+    "//zircon/system/ulib/explicit-memory",
+  ]
 }
 
 config("config") {

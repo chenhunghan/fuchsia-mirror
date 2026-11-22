@@ -272,7 +272,7 @@ Compatibility tooling is the motivating priority behind this enhancement to FIDL
 syntax. However, this richer information about the Fuchsia System Interface may
 prove useful elsewhere.
 
-#### FIDL Bindings
+#### FIDL bindings {:#fidl-bindings}
 The FIDL bindings generators could become aware of whether they're building
 bindings that target platform components or external components and adjust the
 code they generate to encourage developers to only implement clients and servers
@@ -304,7 +304,7 @@ owners aren't inadvertently building products that make compatibility guarantees
 that the Fuchsia isn't offering, and help platform developers to avoid exposing
 capabilities in ways that they don't intend to support.
 
-#### Security
+#### Security {:#security}
 
 Knowing which end of protocol capabilities are routed across the external /
 platform boundary may be useful for evaluating the security properties of the
@@ -402,4 +402,4 @@ n/a
 [fidl-protocols]: /docs/reference/fidl/language/language.md#protocols
 [fidl-rubric]: /docs/development/api/fidl.md
 [fuchsia-system-interface]: /docs/concepts/kernel/system.md
-[processargs]: /docs/concepts/process/program_loading.md#the_processargs_protocol
+[processargs]: /docs/concepts/process/program_loading.md#the-processargs-protocol

@@ -1,0 +1,164 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":openthread-rust-tests"],
+    visibility = ["//src/connectivity/lowpan:__pkg__"],
+)
+
+# lib-ot-core is C++, so GN targets linking it with rustc need
+# //build/config/fuchsia:dynamic_cpp_standard_library; Bazel's C++ toolchain
+# links libc++ automatically via link_deps.
+# @bazel2gn:raw_attribute:configs += [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_library(
+    name = "openthread",
+    srcs = [
+        "src/bindings.rs",
+        "src/lib.rs",
+        "src/ot/backbone_router.rs",
+        "src/ot/border_agent.rs",
+        "src/ot/border_router.rs",
+        "src/ot/cli.rs",
+        "src/ot/dataset.rs",
+        "src/ot/dns_upstream.rs",
+        "src/ot/dnssd.rs",
+        "src/ot/error.rs",
+        "src/ot/history_tracker.rs",
+        "src/ot/infra_if.rs",
+        "src/ot/ip6.rs",
+        "src/ot/joiner.rs",
+        "src/ot/link.rs",
+        "src/ot/link_metrics.rs",
+        "src/ot/message.rs",
+        "src/ot/mod.rs",
+        "src/ot/multi_radio_neighbor_info.rs",
+        "src/ot/nat64.rs",
+        "src/ot/net_data.rs",
+        "src/ot/otbox.rs",
+        "src/ot/platform.rs",
+        "src/ot/radio.rs",
+        "src/ot/reset.rs",
+        "src/ot/singleton/backing.rs",
+        "src/ot/singleton/instance.rs",
+        "src/ot/singleton/mod.rs",
+        "src/ot/srp.rs",
+        "src/ot/state.rs",
+        "src/ot/tasklets.rs",
+        "src/ot/thread.rs",
+        "src/ot/trel.rs",
+        "src/ot/types/backbone_router_multicast_listener_event.rs",
+        "src/ot/types/backbone_router_multicast_listener_info.rs",
+        "src/ot/types/border_router_config.rs",
+        "src/ot/types/border_routing_counters.rs",
+        "src/ot/types/border_routing_peer.rs",
+        "src/ot/types/border_routing_rdnss.rs",
+        "src/ot/types/border_routing_router.rs",
+        "src/ot/types/cache_entry_info.rs",
+        "src/ot/types/castable.rs",
+        "src/ot/types/channel_mask.rs",
+        "src/ot/types/commissioning_dataset.rs",
+        "src/ot/types/device_role.rs",
+        "src/ot/types/dnssd_counters.rs",
+        "src/ot/types/ext_address.rs",
+        "src/ot/types/extended_pan_id.rs",
+        "src/ot/types/external_route_config.rs",
+        "src/ot/types/history_tracker.rs",
+        "src/ot/types/ip_counters.rs",
+        "src/ot/types/ipv6.rs",
+        "src/ot/types/leader_data.rs",
+        "src/ot/types/link_metrics.rs",
+        "src/ot/types/link_mode.rs",
+        "src/ot/types/log_region.rs",
+        "src/ot/types/lowpan_context_info.rs",
+        "src/ot/types/mac_counters.rs",
+        "src/ot/types/message_queue_info.rs",
+        "src/ot/types/mle_counters.rs",
+        "src/ot/types/mod.rs",
+        "src/ot/types/multi_radio_neighbor_info.rs",
+        "src/ot/types/nat64.rs",
+        "src/ot/types/neighbor_info.rs",
+        "src/ot/types/network_key.rs",
+        "src/ot/types/network_name.rs",
+        "src/ot/types/operational_dataset.rs",
+        "src/ot/types/packets_and_bytes.rs",
+        "src/ot/types/radio_coex_metrics.rs",
+        "src/ot/types/radio_region.rs",
+        "src/ot/types/resolver.rs",
+        "src/ot/types/route_preference.rs",
+        "src/ot/types/router_info.rs",
+        "src/ot/types/scan_results.rs",
+        "src/ot/types/security_policy.rs",
+        "src/ot/types/server_config.rs",
+        "src/ot/types/service_config.rs",
+        "src/ot/types/srp_server_lease_info.rs",
+        "src/ot/types/srp_server_response_counters.rs",
+        "src/ot/types/steering_data.rs",
+        "src/ot/types/timestamp.rs",
+        "src/ot/types/tlv.rs",
+        "src/ot/types/trel.rs",
+        "src/ot/udp.rs",
+        "src/ot/uptime.rs",
+        "src/otfuchsia.rs",
+    ],
+    edition = "2024",
+    link_deps = ["//third_party/openthread:lib-ot-core"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:num-derive"],
+    visibility = [
+        "//src/connectivity/lowpan/drivers/lowpan-ot-driver:__pkg__",
+        "//src/connectivity/lowpan/lib:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.lowpan.thread:fuchsia.lowpan.thread_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/rust/zx",
+        "//sdk/rust/zx-status",
+        "//src/connectivity/lowpan/lib/openthread_sys",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitflags",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+alias(
+    name = "openthread_rust",
+    actual = ":openthread",
+    visibility = [
+        "//src/connectivity/lowpan/drivers/lowpan-ot-driver:__pkg__",
+        "//src/connectivity/lowpan/lib:__subpackages__",
+    ],
+)
+
+# lib-ot-core is C++, so GN targets linking it with rustc need
+# //build/config/fuchsia:dynamic_cpp_standard_library; Bazel's C++ toolchain
+# links libc++ automatically via link_deps.
+# @bazel2gn:raw_attribute:configs += [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_test(
+    name = "openthread_test",
+    crate = ":openthread",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:assert_matches"],
+)
+
+fx_unittest_package(
+    name = "openthread-rust-tests",
+    unit_tests = [":openthread_test"],
+)

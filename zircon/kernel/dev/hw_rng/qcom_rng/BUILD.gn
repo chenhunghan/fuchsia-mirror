@@ -29,11 +29,9 @@ kernel_rust_mod("qcom_rng-rs") {
 }
 
 source_set("qcom_rng") {
-  sources = [ "qcom-rng.cc" ]
   public_deps = [ ":headers" ]
   deps = [
     ":qcom_rng-rs",
     "//zircon/kernel/dev/hw_rng",
-    "//zircon/system/ulib/explicit-memory",
   ]
 }

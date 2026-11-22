@@ -25,21 +25,21 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "cas: failed to call UploadIfMissing"
   log_types: ["swarmingOutputType"]
-  infra_failure: true
+  category: "infra"
   only_on_states: ["BOT_DIED"]
 
 # Error for CAS upload failures.
 - kind: "string_in_log"
   string: "cas: failed to create cas client"
   log_types: ["swarmingOutputType"]
-  infra_failure: true
+  category: "infra"
   only_on_states: ["BOT_DIED"]
 
 # Error for CAS download failures.
 - kind: "string_in_log"
   string: "failed to create casclient"
   log_types: ["swarmingOutputType"]
-  infra_failure: true
+  category: "infra"
   only_on_states: ["BOT_DIED"]
 
 # ==============================================================================
@@ -53,6 +53,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "Trace size: streamed 400 MB"
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_passed_test: true
   attribute_to_test: true
 
@@ -60,6 +61,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "too large for partition"
   log_types: ["serialLogType"]
+  category: "system_or_test"
 
 # For https://fxbug.dev/42135406.
 # Hardware watchdog tripped, should not happen.
@@ -71,14 +73,17 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "reboot_mode=watchdog_reboot"
   log_types: ["serialLogType"]
+  category: "system_or_test"
 - kind: "string_in_log"
   string: "reboot_mode:watchdog_reboot"
   log_types: ["serialLogType"]
+  category: "system_or_test"
 
 # For https://fxbug.dev/42133287
 - kind: "string_in_log"
   string: " in fx_logger::GetSeverity() "
   log_types: ["swarmingOutputType"]
+  category: "system_or_test"
 
 # For https://fxbug.dev/459462291.
 # This indicates an internal failure between Archivist and Forensics.
@@ -143,6 +148,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "received kernel OOM signal"
   log_types: ["serialLogType"]
+  category: "system_or_test"
 
 # For https://fxbug.dev/318087737.
 # LINT.IfChange(blob_header_timeout)
@@ -164,6 +170,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "STARNIX KERNEL PANIC"
   log_types: ["syslogType"]
+  category: "system_or_test"
 # LINT.ThenChange(//src/starnix/kernel/main.rs:starnix_panic_tefmo)
 
 # For https://fxbug.dev/506229076.
@@ -171,6 +178,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "Restricted mode exception caused core dump"
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
   emit_synthetic_test_case: true
 # LINT.ThenChange(//src/starnix/kernel/core/signals/signal_handling.rs:restricted_mode_core_dump_tefmo)
@@ -179,6 +187,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "failed to write blob"
   log_types: ["serialLogType"]
+  category: "system_or_test"
 # LINT.ThenChange(/src/storage/fxfs/platform/src/fuchsia/fxblob/writer.rs:blob_write_failure)
 
 # For https://fxbug.dev/343550891.
@@ -186,6 +195,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "has not completed after 30s"
   log_types: ["swarmingOutputType"]
+  category: "system_or_test"
   skip_passed_test: true
   ignore_flakes: true
   attribute_to_test: true
@@ -196,6 +206,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "wait_signaled_sync: not signaled yet."
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
 # LINT.ThenChange(//src/starnix/kernel/core/time/hr_timer_manager.rs:hrtimer_wait_signaled_sync_tefmo)
 
@@ -203,11 +214,13 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "QBG-D: Exit QBG"
   log_types: ["syslogType"]
+  category: "system_or_test"
 
 # For https://fxbug.dev/504722922
 - kind: "string_in_log"
   string: "CRASH: process driver-host-#battery"
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
   emit_synthetic_test_case: true
 
@@ -233,6 +246,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "driver host crashed. Rebooting system."
   log_types: ["serialLogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
 # LINT.ThenChange(//src/devices/bin/driver_manager/node.cc:driver_host_crashed_reboot)
 
@@ -241,6 +255,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "No response to AfterResume  from SuspendBlocker 'schg-wake'"
   log_types: ["serialLogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
   emit_synthetic_test_case: true
 
@@ -248,11 +263,13 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "No response to AfterResume"
   log_types: ["serialLogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
   emit_synthetic_test_case: true
 - kind: "string_in_log"
   string: "No response to BeforeSuspend"
   log_types: ["serialLogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
   emit_synthetic_test_case: true
 # LINT.ThenChange(//src/power/system-activity-governor/src/system_activity_governor.rs:no_response_tefmo)
@@ -261,12 +278,14 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "<== BACKTRACE REQUEST: process system_server"
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
 
 # TODO(https://fxbug.dev/447188730): Remove once cause of driver crash is resolved.
 - kind: "string_in_log"
   string: "cc != ((void*)0)"
   log_types: ["serialLogType"]
+  category: "system_or_test"
   always_flake: true
 
 # For https://fxbug.dev/438538574
@@ -280,7 +299,7 @@ failure_mode_checks:
   string: "Boot-test-successful!"
   log_types: ["serialLogType"]
   # This failure mode is likely to be infra-related.
-  infra_failure: true
+  category: "infra"
   skip_all_passed_tests: true
   always_flake: true
 
@@ -288,6 +307,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "BACKTRACE REQUEST: process android.hardware.contexthub-ser"
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
   emit_synthetic_test_case: true
 
@@ -295,6 +315,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "Detected threads locked up for more than 2 minutes"
   log_types: ["serialLogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
 # LINT.ThenChange(//src/starnix/kernel/lockup_detector.rs:starnix_lockup_detector)
 
@@ -302,10 +323,12 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "Timed out loading dynamic linker from fuchsia.ldsvc.Loader"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
 
 - kind: "string_in_log"
   string: "ERROR: AddressSanitizer"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   emit_synthetic_test_case: true
   except_blocks:
@@ -315,6 +338,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "ERROR: LeakSanitizer"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   except_blocks:
   # startString and endString should match string in //zircon/system/ulib/c/test/sanitizer/lsan-test.cc.
@@ -331,11 +355,13 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "WARNING: ThreadSanitizer"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
 
 - kind: "string_in_log"
   string: "SUMMARY: UndefinedBehaviorSanitizer"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   except_blocks:
   - start_string: "[===UBSAN EXCEPT BLOCK START===]"
@@ -345,6 +371,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "DRIVER OOPS"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   except_blocks:
   # Forced PCIe driver restarts (e.g. via killall) intentionally trigger DMA quarantine OOPS warnings.
@@ -378,6 +405,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "lockup_detector: no heartbeat from"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   except_blocks:
   # Forced PCIe driver restarts (e.g. via killall) intentionally trigger DMA quarantine OOPS warnings.
@@ -411,6 +439,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "ZIRCON KERNEL OOPS"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   except_blocks:
   # Forced PCIe driver restarts (e.g. via killall) intentionally trigger DMA quarantine OOPS warnings.
@@ -446,12 +475,14 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "state.start_time < state.finish_time"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
 # LINT.ThenChange(//zircon/kernel/kernel/scheduler.rs:scheduler_start_finish_time)
 
 - kind: "string_in_log"
   string: "ZIRCON KERNEL PANIC"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
   except_blocks:
   # These tests intentionally trigger kernel panics.
@@ -483,11 +514,13 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "double fault, halting"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
 
 # This string can show up in some boot tests.
 - kind: "string_in_log"
   string: "entering panic shell loop"
   log_types: ["serialLogType", "swarmingOutputType", "syslogType"]
+  category: "system_or_test"
   except_strings: ["Boot-test-successful!"]
 
 # LINT.IfChange(seriallistener_timed_out)
@@ -504,6 +537,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: " ASSERT FAILED"
   log_types: ["serialLogType", "syslogType"]
+  category: "system_or_test"
   except_blocks:
   # These tests deliberately trigger asserts in order to verify that they properly terminate
   # the program.
@@ -529,6 +563,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "DEVICE SUSPEND TIMED OUT"
   log_types: ["serialLogType", "syslogType"]
+  category: "system_or_test"
 
 - kind: "string_in_log"
   string: "PURE_BLACK_SCREENSHOT_DETECTED: detected a pure black screenshot."
@@ -563,11 +598,6 @@ failure_mode_checks:
   string: "/dev/net/tun (qemu): Device or resource busy"
   log_types: ["swarmingOutputType"]
 
-# testrunner logs this when the serial socket goes away unexpectedly.
-- kind: "string_in_log"
-  string: ".sock: write: broken pipe"
-  log_types: ["swarmingOutputType"]
-
 # For https://fxbug.dev/42166512.
 - kind: "string_in_log"
   string: "connect: no route to host"
@@ -599,33 +629,23 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "botanist ERROR: [package server] failed to serve"
   log_types: ["swarmingOutputType"]
-  infra_failure: true
+  category: "infra"
 
 # For failures to resolve packages.
 # LINT.IfChange(tuf_error)
 - kind: "string_in_log"
   string: "rust tuf error"
   log_types: ["swarmingOutputType"]
-  skip_passed_task: true
+  skip_passed_test: true
+  ignore_flakes: true
+  attribute_to_test: true
+  add_tag: true
 # LINT.ThenChange(/src/sys/pkg/bin/pkg-resolver/src/error.rs:tuf_error)
 
 # For https://fxbug.dev/42143746.
 - kind: "string_in_log"
   string: "botanist ERROR: error reading serial log line"
   log_types: ["swarmingOutputType"]
-
-# For https://fxbug.dev/42147800.
-- kind: "string_in_log"
-  string: "failed to copy image from GCS"
-  log_types: ["swarmingOutputType"]
-
-# Error is being logged at https://fuchsia.googlesource.com/fuchsia/+/559948a1a4cbd995d765e26c32923ed862589a61/src/firmware/paver/paver.cc#175
-- kind: "string_in_log"
-  string: "Failed to stream partitions to FVM"
-  log_types: ["swarmingOutputType"]
-  # This error may be emitted, but since we retry paving, this may not be
-  # fatal.
-  skip_passed_task: true
 
 # For https://fxbug.dev/42170540.
 - kind: "string_in_log"
@@ -652,7 +672,7 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "error writing the image"
   log_types: ["swarmingOutputType"]
-  infra_failure: true
+  category: "infra"
   skip_passed_task: true
 
 # For https://fxbug.dev/42178156.
@@ -699,9 +719,22 @@ failure_mode_checks:
   skip_passed_task: true
 
 - kind: "string_in_log"
+  string: "Failed to boot: Failed to validate zbi/vbmeta"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+
+- kind: "string_in_log"
   string: "When running in strict mode, this tool does not support Targets in Product mode."
   log_types: ["swarmingOutputType"]
   skip_passed_task: true
+
+# Emulators sometimes fail to start with this error message.
+# LINT.IfChange(tuntap_in_use)
+- kind: "string_in_log"
+  string: "The Tun/Tap interface 'qemu' exists, but it's in use by another process"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
+# LINT.ThenChange(/src/developer/ffx/plugins/emulator/common/src/tuntap.rs:tuntap_in_use)
 
 # For https://fxbug.dev/42130478.
 - kind: "string_in_log"
@@ -722,6 +755,21 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "botanist ERROR: cannot connect to address"
   log_types: ["swarmingOutputType"]
+
+# For https://fxbug.dev/549755758 and https://fxbug.dev/527997914.
+# LINT.IfChange(gce_init_failed)
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to create GCE instance"
+  log_types: ["swarmingOutputType"]
+
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to create and connect to GCE instance"
+  log_types: ["swarmingOutputType"]
+
+- kind: "string_in_log"
+  string: "botanist ERROR: failed to connect to GCE instance"
+  log_types: ["swarmingOutputType"]
+# LINT.ThenChange(//tools/botanist/targets/gce.go:gce_init_failed)
 
 # For https://fxbug.dev/42139705.
 - kind: "string_in_log"
@@ -771,7 +819,7 @@ failure_mode_checks:
   add_tag: true
 # LINT.ThenChange(
 #     //src/developer/ffx/lib/target/src/lib.rs:timeout_reaching_target,
-#     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx.py:timeout_reaching_target,
+#     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx_impl.py:timeout_reaching_target,
 #     //tools/lib/ffxutil/constants/constants.go:timeout_reaching_target
 # )
 
@@ -839,12 +887,14 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "launching monocle_wm#meta/escher_screensaver.cm"
   log_types: ["syslogType"]
+  category: "system_or_test"
   skip_all_passed_tests: true
 
 # For https://fxbug.dev/427942765
 - kind: "string_in_log"
   string: "Failed to setup PSY and IIO path"
   log_types: ["syslogType"]
+  category: "system_or_test"
   attribute_to_test: true
 
 # For https://fxbug.dev/439064347
@@ -865,14 +915,6 @@ failure_mode_checks:
   log_types: ["swarmingOutputType"]
   skip_all_passed_tests: true
 
-# Emulators sometimes fail to start with this error message.
-# LINT.IfChange(tuntap_in_use)
-- kind: "string_in_log"
-  string: "The Tun/Tap interface 'qemu' exists, but it's in use by another process"
-  log_types: ["swarmingOutputType"]
-  skip_passed_task: true
-# LINT.ThenChange(/src/developer/ffx/plugins/emulator/common/src/tuntap.rs:tuntap_in_use)
-
 # For https://fxbug.dev/491197177
 - kind: "string_in_log"
   string: "Found conflicting adb server process"
@@ -891,12 +933,14 @@ failure_mode_checks:
 - kind: "string_in_log"
   string: "CRASH: process fxfs.cm"
   log_types: ["serialLogType"]
+  category: "system_or_test"
   emit_synthetic_test_case: true
 
 # For b/532222717
 - kind: "string_in_log"
   string: "mobly.signals.TestFailure: Details=Conne[57 chars]code=92, is_credential_rejected=False, is_reconnect=False)) != Conne[57 chars]code=<StatusCode.SUCCESS: 0>, is_credential_re[29 chars]lse)), Extras=None"
   log_types: ["swarmingOutputType"]
+  category: "system_or_test"
 
 # For https://fxbug.dev/565930479.
 # Keep near the end of Category 3 so more specific device, test, and timeout
@@ -967,6 +1011,15 @@ failure_mode_checks:
   skip_passed_task: true
   attribute_to_test: true
   add_tag: true
+
+# testrunner logs this when the serial socket goes away unexpectedly.
+# testrunner can reconnect and retry after a broken pipe, so skip passing tasks
+# and keep at the end of Category 3 so more specific checks take precedence if
+# a shard recovers and later fails.
+- kind: "string_in_log"
+  string: ".sock: write: broken pipe"
+  log_types: ["swarmingOutputType"]
+  skip_passed_task: true
 
 # ==============================================================================
 # CATEGORY 4: Catch-all Botanist Execution Failure

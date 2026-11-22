@@ -16,6 +16,7 @@
 #include <zircon/status.h>
 #include <zircon/types.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -414,6 +415,21 @@ void UsbHidbus::FindDescriptors(usb::Interface interface, const usb_hid_descript
   }
 }
 
+bool UsbHidbus::IsFidoAllianceReportDescriptor(cpp20::span<const uint8_t> report_desc) {
+  // Per USB HID 1.11 section 6.2.2.2 / 6.2.2.7 and FIDO U2F / CTAPHID specifications, FIDO
+  // Alliance HID report descriptors begin with Global item Usage Page (0xF1D0), encoded either as
+  // a 2-byte short item (0x06, 0xD0, 0xF1) or a 4-byte short item (0x07, 0xD0, 0xF1, 0x00, 0x00).
+  if (report_desc.size() >= 3 && report_desc[0] == 0x06 && report_desc[1] == 0xd0 &&
+      report_desc[2] == 0xf1) {
+    return true;
+  }
+  if (report_desc.size() >= 5 && report_desc[0] == 0x07 && report_desc[1] == 0xd0 &&
+      report_desc[2] == 0xf1 && report_desc[3] == 0x00 && report_desc[4] == 0x00) {
+    return true;
+  }
+  return false;
+}
+
 zx::result<> UsbHidbus::Start(fdf::DriverContext context) {
   auto incoming_ptr = std::shared_ptr<fdf::Namespace>(context.take_incoming());
   zx::result usb_banjo = compat::ConnectBanjo<ddk::UsbProtocolClient>(incoming_ptr);
@@ -486,6 +502,30 @@ zx::result<> UsbHidbus::Start(fdf::DriverContext context) {
     return zx::error(status);
   }
   hid_desc_ = hid_desc;
+  interface_ = interface.descriptor()->b_interface_number;
+  for (int i = 0; i < hid_desc_->bNumDescriptors; i++) {
+    if (hid_desc_->descriptors[i].bDescriptorType ==
+        static_cast<uint16_t>(fhidbus::wire::HidDescriptorType::kReport)) {
+      size_t desc_len = le16toh(hid_desc_->descriptors[i].wDescriptorLength);
+      if (desc_len == 0) {
+        break;
+      }
+      std::vector<uint8_t> desc(desc_len);
+      size_t actual_len = 0;
+      zx_status_t desc_status = UsbHidControlIn(
+          kStandardInterfaceIn, fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor),
+          usb_descriptor_w_value(static_cast<uint8_t>(fhidbus::wire::HidDescriptorType::kReport)),
+          interface_, desc.data(), desc_len, &actual_len);
+      // Leave FIDO security keys unclaimed so Starnix usbfs can claim their interrupt endpoints
+      // directly.
+      if (desc_status == ZX_OK && IsFidoAllianceReportDescriptor(cpp20::span<const uint8_t>(
+                                      desc.data(), std::min(actual_len, desc.size())))) {
+        fdf::info("Skipping usb-hid bind for FIDO Alliance HID interface {}", interface_);
+        return zx::error(ZX_ERR_NOT_SUPPORTED);
+      }
+      break;
+    }
+  }
   status =
       ep_in_.Init(endptin->b_endpoint_address, usb_fidl.value(), dispatcher_loop_.dispatcher());
   if (status != ZX_OK) {
@@ -536,7 +576,6 @@ zx::result<> UsbHidbus::Start(fdf::DriverContext context) {
     }
   }
 
-  interface_ = interface.descriptor()->b_interface_number;
   info_builder.dev_num(interface_);
   if (interface.descriptor()->b_interface_protocol == fdescriptor::HidProtocol::kKbd) {
     info_builder.boot_protocol(fhidbus::wire::HidBootProtocol::kKbd);

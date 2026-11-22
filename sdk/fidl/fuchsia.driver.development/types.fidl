@@ -51,6 +51,11 @@ type NodeInfo = table {
     /// Whether the driver bound to this node has completed starting and is currently running.
     @available(added=HEAD)
     13: is_running bool;
+
+    /// Deterministic, stable hash of the node's primary-parent ancestry, used to disambiguate
+    /// nodes whose monikers collide.
+    @available(added=HEAD)
+    14: disambiguator string:16;
 };
 
 /// Information about a node binding to either a driver or a composite.

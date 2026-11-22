@@ -26,7 +26,7 @@ type Generator struct {
 func NewGenerator(formatter fidlgen.Formatter) *Generator {
 	gen := fidlgen.NewGenerator("LegacySyscallCDeclTemplates", templates, formatter, template.FuncMap{
 		"LegacySyscallCDecl": func(syscall zither.Syscall) string {
-			return kernel.SyscallCDecl(syscall, kernel.PointerViewUserspace, func(zither.Syscall) string { return "_ZX_SYSCALL_DECL" })
+			return kernel.SyscallCDecl(syscall, func(zither.Syscall) string { return "_ZX_SYSCALL_DECL" })
 		},
 	})
 	return &Generator{*gen}

@@ -16,6 +16,9 @@
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/sync/cpp/completion.h>
 
+#include <algorithm>
+#include <cctype>
+
 #include <bind/fuchsia/platform/cpp/bind.h>
 
 #include "src/devices/bin/driver_manager/driver_host.h"
@@ -105,7 +108,25 @@ class FakeDriverHost : public driver_manager::DriverHost {
   zx::result<uint64_t> GetProcessKoid() const override { return zx::error(ZX_ERR_NOT_SUPPORTED); }
 
   void GetProcessKoidAsync(fit::callback<void(zx::result<uint64_t>)> cb) const override {
+    if (defer_process_koid_async_) {
+      pending_process_koid_callbacks_.push_back(std::move(cb));
+      return;
+    }
     cb(zx::error(ZX_ERR_NOT_SUPPORTED));
+  }
+
+  void set_defer_process_koid_async(bool defer) { defer_process_koid_async_ = defer; }
+
+  size_t pending_process_koid_callbacks_count() const {
+    return pending_process_koid_callbacks_.size();
+  }
+
+  void CompletePendingProcessKoid(zx::result<uint64_t> result) {
+    auto callbacks = std::move(pending_process_koid_callbacks_);
+    pending_process_koid_callbacks_.clear();
+    for (auto& cb : callbacks) {
+      cb(result);
+    }
   }
 
   void CloseDriver(std::string node_name, zx_status_t status = ZX_OK) {
@@ -124,6 +145,8 @@ class FakeDriverHost : public driver_manager::DriverHost {
   }
 
  private:
+  bool defer_process_koid_async_ = false;
+  mutable std::vector<fit::callback<void(zx::result<uint64_t>)>> pending_process_koid_callbacks_;
   std::unordered_map<std::string, fidl::ServerEnd<fuchsia_driver_host::Driver>> drivers_;
   std::unordered_map<std::string, fidl::ClientEnd<fuchsia_driver_framework::Node>> clients_;
 };
@@ -159,59 +182,43 @@ class FakeDictionaryUtil : public driver_manager::DictionaryUtil {
  public:
   FakeDictionaryUtil(async_dispatcher_t* dispatcher)
       : driver_manager::DictionaryUtil(
-            fidl::Endpoints<fuchsia_component_sandbox::CapabilityStore>::Create().client,
-            dispatcher) {}
+            fidl::Endpoints<fuchsia_component_runtime::Capabilities>::Create().client, dispatcher) {
+  }
 
   void DictionaryDirConnectorOpen(
-      fuchsia_component_sandbox::CapabilityId dictionary, std::string_view key,
+      const zx::eventpair& dictionary, std::string_view key,
       fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback) override {
+    if (dir_connector_open_status_ != ZX_OK) {
+      callback(zx::error(dir_connector_open_status_));
+      return;
+    }
     auto [client, server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
     callback(zx::ok(std::move(client)));
   }
 
   void CreateDictionaryWith(
-      std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
+      std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
           receivers,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)> callback) override {
+      fit::callback<void(zx::result<zx::eventpair>)> callback) override {
     receivers_ = std::move(receivers);
     if (defer_create_dictionary_) {
       pending_create_dictionary_ = std::move(callback);
       return;
     }
-    callback(zx::ok(1234));
+    zx::eventpair ep1, ep2;
+    ZX_ASSERT(zx::eventpair::create(0, &ep1, &ep2) == ZX_OK);
+    callback(zx::ok(std::move(ep1)));
   }
 
-  void ImportDictionary(fuchsia_component_sandbox::DictionaryRef dictionary,
-                        fit::callback<void(zx::result<fuchsia_component_sandbox::NewCapabilityId>)>
-                            callback) override {
-    if (defer_import_) {
-      pending_import_ = std::move(callback);
+  void CopyDictionary(const zx::eventpair& dictionary,
+                      fit::callback<void(zx::result<zx::eventpair>)> callback) override {
+    if (defer_copy_) {
+      pending_copy_ = std::move(callback);
       return;
     }
-    callback(zx::ok(1234));
-  }
-
-  // When true, ImportDictionary stashes the continuation instead of invoking it
-  // synchronously, modelling the in-flight CapabilityStore.Import IPC window
-  // that exists in production (see DictionaryUtil::ImportDictionaryWire).
-  bool defer_import_ = false;
-  fit::callback<void(zx::result<fuchsia_component_sandbox::NewCapabilityId>)> pending_import_;
-
-  void ImportDictionaryWire(
-      fuchsia_component_sandbox::wire::DictionaryRef dictionary,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::wire::NewCapabilityId>)> callback)
-      override {
-    callback(zx::ok(1234));
-  }
-
-  void CopyExportDictionary(
-      fuchsia_component_sandbox::CapabilityId dictionary,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> callback) override {
-    if (defer_copy_export_) {
-      pending_copy_export_ = std::move(callback);
-      return;
-    }
-    callback(zx::ok(fuchsia_component_sandbox::DictionaryRef(zx::eventpair{})));
+    zx::eventpair ep1, ep2;
+    ZX_ASSERT(zx::eventpair::create(0, &ep1, &ep2) == ZX_OK);
+    callback(zx::ok(std::move(ep1)));
   }
 
   // Defer invoking the create-dictionary callback instead of invoking it immediately in
@@ -219,17 +226,19 @@ class FakeDictionaryUtil : public driver_manager::DictionaryUtil {
   bool defer_create_dictionary_ = false;
 
   // Stores the deferred create-dictionary callback. See `defer_create_dictionary_`.
-  fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)>
-      pending_create_dictionary_;
+  fit::callback<void(zx::result<zx::eventpair>)> pending_create_dictionary_;
 
-  // Defer invoking the copy-export callback instead of invoking it immediately in
-  // `CopyExportDictionary()`. Set to true by tests.
-  bool defer_copy_export_ = false;
+  // Defer invoking the copy callback instead of invoking it immediately in `CopyDictionary()`.
+  // Set to true by tests.
+  bool defer_copy_ = false;
 
-  // Stores the deferred copy-export callback. See `defer_copy_export_`.
-  fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> pending_copy_export_;
+  // Stores the deferred copy callback. See `defer_copy_`.
+  fit::callback<void(zx::result<zx::eventpair>)> pending_copy_;
 
-  std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
+  // When not ZX_OK, `DictionaryDirConnectorOpen()` fails with this status. Set by tests.
+  zx_status_t dir_connector_open_status_ = ZX_OK;
+
+  std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
       receivers_;
 };
 
@@ -1253,7 +1262,11 @@ TEST_F(Dfv2NodeTest, PrepareDictionaryComposite) {
           fuchsia_component_decl::Offer::WithService(service_decl_1));
 
   args_p1.offers2(std::vector{std::move(offer_1_fidl)});
-  args_p1.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    args_p1.offers_dictionary(std::move(ep1));
+  }
 
   std::shared_ptr<driver_manager::Node> parent_node_1;
   node->AddChild(
@@ -1289,7 +1302,11 @@ TEST_F(Dfv2NodeTest, PrepareDictionaryComposite) {
           fuchsia_component_decl::Offer::WithService(service_decl_2));
 
   args_p2.offers2(std::vector{std::move(offer_2_fidl)});
-  args_p2.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    args_p2.offers_dictionary(std::move(ep1));
+  }
 
   std::shared_ptr<driver_manager::Node> parent_node_2;
   node->AddChild(
@@ -1333,9 +1350,9 @@ TEST_F(Dfv2NodeTest, PrepareDictionaryComposite) {
   ASSERT_TRUE(fake_util.receivers_.count("service_2"));
 }
 
-// Verify that if a parent node is freed before the asynchronous dictionary import
-// for its child completes, it fails gracefully and does not cause a use-after-free.
-TEST_F(Dfv2NodeTest, AddChildOffersDictionaryParentFreedBeforeImportReply) {
+// Verify that if a parent node is freed before the asynchronous dictionary setup for its child
+// completes, it fails gracefully and does not cause a use-after-free.
+TEST_F(Dfv2NodeTest, AddChildOffersDictionaryParentFreedBeforeCreateDictionaryReply) {
   bool destroyed = false;
   std::shared_ptr<driver_manager::Node> parent(
       new driver_manager::Node("P", root(), GetNodeManager(), dispatcher()),
@@ -1348,7 +1365,7 @@ TEST_F(Dfv2NodeTest, AddChildOffersDictionaryParentFreedBeforeImportReply) {
   std::weak_ptr<driver_manager::Node> weak_parent = parent;
 
   auto& fake_util = static_cast<FakeDictionaryUtil&>(node_manager->dictionary_util());
-  fake_util.defer_import_ = true;
+  fake_util.defer_create_dictionary_ = true;
 
   // NodeAddArgs with a DictionaryOffer + offers_dictionary token, and no
   // fdf::Node server end so that child creation takes the Bind path.
@@ -1362,7 +1379,11 @@ TEST_F(Dfv2NodeTest, AddChildOffersDictionaryParentFreedBeforeImportReply) {
   svc.source_instance_filter(std::vector<std::string>{"default"});
   args.offers2(std::vector{fuchsia_driver_framework::Offer::WithDictionaryOffer(
       fuchsia_component_decl::Offer::WithService(svc))});
-  args.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    args.offers_dictionary(std::move(ep1));
+  }
 
   bool result_seen = false;
   parent->AddChild(
@@ -1372,9 +1393,9 @@ TEST_F(Dfv2NodeTest, AddChildOffersDictionaryParentFreedBeforeImportReply) {
       });
   RunLoopUntilIdle();
 
-  // ImportDictionary was deferred, so child creation is still pending.
+  // CreateDictionaryWith was deferred, so child creation is still pending.
   ASSERT_FALSE(result_seen);
-  ASSERT_TRUE(static_cast<bool>(fake_util.pending_import_));
+  ASSERT_TRUE(static_cast<bool>(fake_util.pending_create_dictionary_));
 
   // Free the parent.
   parent.reset();
@@ -1382,10 +1403,53 @@ TEST_F(Dfv2NodeTest, AddChildOffersDictionaryParentFreedBeforeImportReply) {
   ASSERT_TRUE(weak_parent.expired());
   ASSERT_TRUE(destroyed);
 
-  // Invoke the deferred continuation.
-  auto cb = std::move(fake_util.pending_import_);
-  cb(zx::error(ZX_ERR_INTERNAL));
+  // Complete the dictionary creation. Finishing the child must notice that the parent is gone.
+  auto cb = std::move(fake_util.pending_create_dictionary_);
+  zx::eventpair dictionary, dictionary_peer;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &dictionary, &dictionary_peer));
+  cb(zx::ok(std::move(dictionary)));
   RunLoopUntilIdle();
+  EXPECT_TRUE(result_seen);
+}
+
+// Verify that AddChild fails if a dictionary offer can't be opened, rather than adding a node whose
+// dictionary offers are broken.
+TEST_F(Dfv2NodeTest, AddChildFailsIfDictionaryOfferCannotBeOpened) {
+  auto node = CreateNode("test");
+
+  auto& fake_util = static_cast<FakeDictionaryUtil&>(node_manager->dictionary_util());
+  fake_util.dir_connector_open_status_ = ZX_ERR_UNAVAILABLE;
+
+  fuchsia_driver_framework::NodeAddArgs args;
+  args.name("child");
+  fuchsia_component_decl::OfferService svc;
+  svc.source_name("svc");
+  svc.target_name("svc");
+  svc.renamed_instances(std::vector<fuchsia_component_decl::NameMapping>{
+      fuchsia_component_decl::NameMapping("default", "default")});
+  svc.source_instance_filter(std::vector<std::string>{"default"});
+  args.offers2(std::vector{fuchsia_driver_framework::Offer::WithDictionaryOffer(
+      fuchsia_component_decl::Offer::WithService(svc))});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    args.offers_dictionary(std::move(ep1));
+  }
+
+  std::optional<
+      fit::result<fuchsia_driver_framework::NodeError, std::shared_ptr<driver_manager::Node>>>
+      result;
+  node->AddChild(
+      std::move(args), /*controller=*/{}, /*node=*/{},
+      [&](fit::result<fuchsia_driver_framework::NodeError, std::shared_ptr<driver_manager::Node>>
+              add_result) { result = std::move(add_result); });
+  RunLoopUntilIdle();
+
+  ASSERT_TRUE(result.has_value());
+  ASSERT_TRUE(result->is_error());
+  EXPECT_EQ(result->error_value(), fuchsia_driver_framework::NodeError::kInternal);
+  EXPECT_TRUE(node->children().empty());
+  EXPECT_TRUE(fake_util.receivers_.empty());
 }
 
 TEST_F(Dfv2NodeTest, ProvideAndRemoveResource) {
@@ -1593,7 +1657,7 @@ TEST_F(Dfv2NodeTest, CompositeNodeResourceDependents) {
 
 // Verify that if a node is freed before the asynchronous dictionary preparation completes
 // (non-composite path), it fails gracefully and does not cause a use-after-free.
-TEST_F(Dfv2NodeTest, PrepDictNonCompFreeBeforeExportReply) {
+TEST_F(Dfv2NodeTest, PrepDictNonCompFreeBeforeCopyReply) {
   bool destroyed = false;
   std::shared_ptr<driver_manager::Node> node(
       new driver_manager::Node("N", root(), GetNodeManager(), dispatcher()),
@@ -1605,33 +1669,36 @@ TEST_F(Dfv2NodeTest, PrepDictNonCompFreeBeforeExportReply) {
   node->devfs_device().publish();
   std::weak_ptr<driver_manager::Node> weak_node = node;
 
-  // Prevent the copy-export callback that references `node` from being invoked immediately.
+  // Prevent the copy callback that references `node` from being invoked immediately.
   auto& fake_util = static_cast<FakeDictionaryUtil&>(node_manager->dictionary_util());
-  fake_util.defer_copy_export_ = true;
+  fake_util.defer_copy_ = true;
 
-  // Set dictionary_ref_ to trigger CopyExportDictionary which will invoke the copy-export callback
-  // that references `node`.
+  // Set the subtree dictionary to trigger CopyDictionary which will invoke the copy callback that
+  // references `node`.
   node->set_collection(driver_manager::Collection::kNone);
-  node->SetSubtreeDictionaryRef(fuchsia_component_sandbox::CapabilityId{1234});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    node->SetSubtreeDictionaryRef(std::move(ep1));
+  }
 
-  // Prepare the dictionary, resulting in a copy-export callback being created.
+  // Prepare the dictionary, resulting in a copy callback being created.
   bool result_seen = false;
   node->PrepareDictionary([&](zx::result<> result) { result_seen = true; });
   RunLoopUntilIdle();
 
-  // Verify that the preparation has not completed because we deferred invoking the copy-export
-  // callback.
+  // Verify that the preparation has not completed because we deferred invoking the copy callback.
   ASSERT_FALSE(result_seen);
-  ASSERT_TRUE(static_cast<bool>(fake_util.pending_copy_export_));
+  ASSERT_TRUE(static_cast<bool>(fake_util.pending_copy_));
 
-  // Free the node before the copy-export callback is called.
+  // Free the node before the copy callback is called.
   node.reset();
   RunLoopUntilIdle();
   ASSERT_TRUE(weak_node.expired());
   ASSERT_TRUE(destroyed);
 
-  // Call the copy-export callback. This will panic if it tries to reference the freed `node`.
-  auto cb = std::move(fake_util.pending_copy_export_);
+  // Call the copy callback. This will panic if it tries to reference the freed `node`.
+  auto cb = std::move(fake_util.pending_copy_);
   cb(zx::error(ZX_ERR_INTERNAL));
   RunLoopUntilIdle();
 }
@@ -1665,7 +1732,11 @@ TEST_F(Dfv2NodeTest, PrepDictCompFreeBeforeCreateDictReply) {
           fuchsia_component_decl::Offer::WithService(service_decl_1));
 
   args_p1.offers2(std::vector{std::move(offer_1_fidl)});
-  args_p1.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    args_p1.offers_dictionary(std::move(ep1));
+  }
 
   std::shared_ptr<driver_manager::Node> parent_node_1;
   node->AddChild(
@@ -1697,7 +1768,11 @@ TEST_F(Dfv2NodeTest, PrepDictCompFreeBeforeCreateDictReply) {
           fuchsia_component_decl::Offer::WithService(service_decl_2));
 
   args_p2.offers2(std::vector{std::move(offer_2_fidl)});
-  args_p2.offers_dictionary(fuchsia_component_sandbox::DictionaryRef{zx::eventpair{}});
+  {
+    zx::eventpair ep1, ep2;
+    ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &ep1, &ep2));
+    args_p2.offers_dictionary(std::move(ep1));
+  }
 
   std::shared_ptr<driver_manager::Node> parent_node_2;
   node->AddChild(
@@ -3196,4 +3271,141 @@ TEST_F(Dfv2NodeTest, IsHermeticPowerTestCompositeAndDiamondAncestors) {
                                        nullptr, nullptr),
             ZX_OK);
   EXPECT_EQ(dep_info.koid, expected_info.koid);
+}
+
+TEST_F(Dfv2NodeTest, MakeDisambiguatorDeterministicAndDistinct) {
+  auto is_lowercase_hex16 = [](const std::string& s) {
+    return s.size() == 16 && std::all_of(s.begin(), s.end(), [](unsigned char c) {
+             return std::isxdigit(c) && !std::isupper(c);
+           });
+  };
+
+  auto root = CreateNode("root");
+
+  // 1. Deterministic and 16 lowercase hex chars.
+  auto dev_a = CreateNode("dev_a", root);
+  std::string disamb_a1 = dev_a->MakeDisambiguator();
+  std::string disamb_a2 = dev_a->MakeDisambiguator();
+  EXPECT_TRUE(is_lowercase_hex16(disamb_a1)) << disamb_a1;
+  EXPECT_EQ(disamb_a1, disamb_a2);
+
+  // 2. Moniker-normalization collision ("dev:0" vs "dev.0" both normalize to "dev_0").
+  auto colon_node = CreateNode("dev:0", root);
+  auto dot_node = CreateNode("dev.0", root);
+  EXPECT_EQ(colon_node->MakeComponentMoniker(), dot_node->MakeComponentMoniker());
+  EXPECT_NE(colon_node->MakeDisambiguator(), dot_node->MakeDisambiguator());
+
+  // 3. Repeated-name/ancestry collision ("bus" -> "dev" vs "bus" -> "bus" -> "dev").
+  auto bus1 = CreateNode("bus", root);
+  auto dev_under_bus1 = CreateNode("dev", bus1);
+  auto bus2_outer = CreateNode("bus", root);
+  auto bus2_inner = CreateNode("bus", bus2_outer);
+  auto dev_under_bus2 = CreateNode("dev", bus2_inner);
+  EXPECT_NE(dev_under_bus1->MakeDisambiguator(), dev_under_bus2->MakeDisambiguator());
+
+  // 4. Length-prefix boundary collision ("ab" -> "c" vs "a" -> "bc").
+  auto ab = CreateNode("ab", root);
+  auto ab_c = CreateNode("c", ab);
+  auto a = CreateNode("a", root);
+  auto a_bc = CreateNode("bc", a);
+  EXPECT_NE(ab_c->MakeDisambiguator(), a_bc->MakeDisambiguator());
+}
+
+TEST_F(Dfv2NodeTest, OnBindRegistersMemoryAttributionAsynchronously) {
+  node_manager->driver_host().set_defer_process_koid_async(true);
+
+  auto [provider_client, provider_server] =
+      fidl::Endpoints<fuchsia_memory_attribution::Provider>::Create();
+  fidl::BindServer(dispatcher(), std::move(provider_server), &node_manager->memory_attributor());
+  fidl::Client<fuchsia_memory_attribution::Provider> provider(std::move(provider_client),
+                                                              dispatcher());
+
+  auto node = CreateNode("async_koid_node");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("async_koid_node");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  // Node::OnBind must finish binding immediately without blocking on GetProcessInfo().
+  ASSERT_TRUE(node->is_bound());
+  ASSERT_TRUE(node->is_running());
+  ASSERT_EQ(1u, node_manager->driver_host().pending_process_koid_callbacks_count());
+  const auto expected_koid = node->token_koid();
+  ASSERT_TRUE(expected_koid.has_value());
+
+  std::optional<std::vector<fuchsia_memory_attribution::AttributionUpdate>> updates;
+  provider->Get().Then([&updates](auto& result) {
+    ASSERT_TRUE(result.is_ok());
+    updates = std::move(result->attributions());
+  });
+  RunLoopUntilIdle();
+  EXPECT_FALSE(updates.has_value());
+
+  constexpr uint64_t kFakeProcessKoid = 4242;
+  node_manager->driver_host().CompletePendingProcessKoid(zx::ok(kFakeProcessKoid));
+  RunLoopUntilIdle();
+
+  ASSERT_TRUE(updates.has_value());
+  ASSERT_EQ(2u, updates->size());
+  ASSERT_EQ(fuchsia_memory_attribution::AttributionUpdate::Tag::kAdd, (*updates)[0].Which());
+  EXPECT_EQ(*expected_koid, (*updates)[0].add()->identifier());
+  ASSERT_EQ(fuchsia_memory_attribution::AttributionUpdate::Tag::kUpdate, (*updates)[1].Which());
+  EXPECT_EQ(*expected_koid, (*updates)[1].update()->identifier());
+  ASSERT_EQ(1u, (*updates)[1].update()->resources()->data()->resources().size());
+  EXPECT_EQ(kFakeProcessKoid,
+            (*updates)[1].update()->resources()->data()->resources()[0].kernel_object().value());
+
+  updates.reset();
+  provider->Get().Then([&updates](auto& result) {
+    ASSERT_TRUE(result.is_ok());
+    updates = std::move(result->attributions());
+  });
+
+  node->Remove(driver_manager::RemovalSet::kAll, nullptr);
+  RunLoopUntilIdle();
+  ASSERT_EQ(driver_manager::NodeState::kDestroyed, node->GetNodeState());
+
+  ASSERT_TRUE(updates.has_value());
+  ASSERT_EQ(1u, updates->size());
+  ASSERT_EQ(fuchsia_memory_attribution::AttributionUpdate::Tag::kRemove, (*updates)[0].Which());
+  EXPECT_EQ(*expected_koid, (*updates)[0].remove().value());
+}
+
+TEST_F(Dfv2NodeTest, OnBindSkipsLateMemoryAttributionAfterShutdown) {
+  node_manager->driver_host().set_defer_process_koid_async(true);
+
+  auto [provider_client, provider_server] =
+      fidl::Endpoints<fuchsia_memory_attribution::Provider>::Create();
+  fidl::BindServer(dispatcher(), std::move(provider_server), &node_manager->memory_attributor());
+  fidl::Client<fuchsia_memory_attribution::Provider> provider(std::move(provider_client),
+                                                              dispatcher());
+
+  auto node = CreateNode("shutdown_before_koid_node");
+  StartTestDriver(node);
+  auto [driver_server_end, node_client_end] =
+      node_manager->driver_host().TakeDriver("shutdown_before_koid_node");
+  FakeDriver fake_driver(dispatcher(), std::move(driver_server_end), std::move(node_client_end));
+
+  ASSERT_TRUE(node->is_bound());
+  ASSERT_EQ(1u, node_manager->driver_host().pending_process_koid_callbacks_count());
+
+  bool got_updates = false;
+  provider->Get().Then([&got_updates](auto& result) {
+    if (result.is_ok()) {
+      got_updates = true;
+    }
+  });
+  RunLoopUntilIdle();
+  EXPECT_FALSE(got_updates);
+
+  // Shut down the node before GetProcessKoidAsync resolves: neither an unmatched RemoveDriver
+  // during FinishShutdown nor a late AddDriver after shutdown may be emitted.
+  node->Remove(driver_manager::RemovalSet::kAll, nullptr);
+  RunLoopUntilIdle();
+  ASSERT_EQ(driver_manager::NodeState::kDestroyed, node->GetNodeState());
+  EXPECT_FALSE(got_updates);
+
+  node_manager->driver_host().CompletePendingProcessKoid(zx::ok(4242));
+  RunLoopUntilIdle();
+  EXPECT_FALSE(got_updates);
 }

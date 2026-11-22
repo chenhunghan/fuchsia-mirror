@@ -28,7 +28,7 @@ rustc_test(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-component",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-runtime",
         "//third_party/rust_crates/vendor:futures",
     ],

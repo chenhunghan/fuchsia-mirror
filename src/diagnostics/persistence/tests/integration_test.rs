@@ -14,12 +14,30 @@ use fidl_fuchsia_logger as flogger;
 use fidl_fuchsia_power_battery as fbattery;
 use fidl_fuchsia_sys2 as fsys2;
 use fidl_fuchsia_update as fupdate;
+use flate2::read::ZlibDecoder;
 use fuchsia_component_test::{Capability, ChildOptions, RealmBuilder, RealmInstance, Ref, Route};
 use futures::channel::mpsc;
 use futures::{FutureExt, SinkExt, StreamExt, TryStreamExt};
+use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Decompresses a snapshot stored as an RFC 1950 zlib stream.
+fn inflate(bytes: &[u8]) -> Option<String> {
+    let mut content = String::new();
+    ZlibDecoder::new(bytes).read_to_string(&mut content).ok()?;
+    Some(content)
+}
+
+/// The only options that Persistence serves.
+fn supported_options() -> fdiagnostics_persistence::PreviousBootDataProviderOptions {
+    fdiagnostics_persistence::PreviousBootDataProviderOptions {
+        format: Some(fdiagnostics_persistence::InspectFormat::Json),
+        compression: Some(fdiagnostics_persistence::Compression::ZlibRfc1950),
+        ..Default::default()
+    }
+}
 
 fn extract_token(content: &str) -> Option<u64> {
     let data_vec: Vec<InspectData> = serde_json::from_str(content).ok()?;
@@ -470,14 +488,15 @@ async fn wait_for_active_token(temp_dir: &tempfile::TempDir, expected: u64) -> R
                     entries.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
 
                 if file_names.len() == 2
-                    && file_names.iter().any(|f| f == "active.json")
+                    && file_names.iter().any(|f| f == "active.json.zlib")
                     && file_names.iter().any(|f| f == "metadata.json")
                 {
-                    let active_path = active_dir.join("active.json");
+                    let active_path = active_dir.join("active.json.zlib");
                     let meta_path = active_dir.join("metadata.json");
-                    if let (Ok(content), Ok(meta_content)) =
-                        (std::fs::read_to_string(&active_path), std::fs::read_to_string(&meta_path))
-                    {
+                    if let (Some(content), Ok(meta_content)) = (
+                        std::fs::read(&active_path).ok().and_then(|bytes| inflate(&bytes)),
+                        std::fs::read_to_string(&meta_path),
+                    ) {
                         if !meta_content.is_empty()
                             && serde_json::from_str::<serde_json::Value>(&meta_content).is_ok()
                         {
@@ -518,11 +537,7 @@ async fn wait_for_snapshot(
     loop {
         let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
             instance.root.connect_to_protocol_at_exposed_dir()?;
-        let data = provider
-            .watch_previous_boot_data(
-                &fdiagnostics_persistence::PreviousBootDataProviderOptions::default(),
-            )
-            .await?;
+        let data = provider.watch_previous_boot_data(&supported_options()).await?;
         if data.inspect.is_some() {
             return Ok(data);
         }
@@ -543,9 +558,13 @@ impl TestRealm {
 
 async fn read_snapshot_token(instance: &RealmInstance) -> Result<u64, Error> {
     let data = wait_for_snapshot(instance).await?;
+    assert_eq!(data.format, Some(fdiagnostics_persistence::InspectFormat::Json));
+    assert_eq!(data.compression, Some(fdiagnostics_persistence::Compression::ZlibRfc1950));
     let inspect_file = data.inspect.expect("Expected inspect file in PreviousBootData");
     let file_proxy = inspect_file.into_proxy();
-    let content = fuchsia_fs::file::read_to_string(&file_proxy).await?;
+    let bytes = fuchsia_fs::file::read(&file_proxy).await?;
+    let content =
+        inflate(&bytes).ok_or_else(|| anyhow::anyhow!("Snapshot is not a valid zlib stream"))?;
     extract_token(&content)
         .ok_or_else(|| anyhow::anyhow!("Failed to extract token from JSON:\n{content}"))
 }
@@ -558,7 +577,7 @@ async fn test_persistence_rotation() -> Result<(), Error> {
     // Boot 1 Check: Connect to PreviousBootDataProvider, verify data.inspect is None
     let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
         realm.instance.root.connect_to_protocol_at_exposed_dir()?;
-    let data = provider.watch_previous_boot_data(&Default::default()).await?;
+    let data = provider.watch_previous_boot_data(&supported_options()).await?;
     assert!(data.inspect.is_none(), "Expected no previous boot data on initial boot");
 
     // Set Token 1 and wait until Persistence captures it in active snapshot on disk
@@ -597,7 +616,7 @@ async fn test_low_battery_trigger() -> Result<(), Error> {
     // Boot 1 Check: Connect to PreviousBootDataProvider, verify data.inspect is None
     let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
         realm.instance.root.connect_to_protocol_at_exposed_dir()?;
-    let data = provider.watch_previous_boot_data(&Default::default()).await?;
+    let data = provider.watch_previous_boot_data(&supported_options()).await?;
     assert!(data.inspect.is_none(), "Expected no previous boot data on initial boot");
 
     // Set distinctive low-battery token
@@ -644,7 +663,7 @@ async fn test_shutdown_watcher_trigger() -> Result<(), Error> {
     // Boot 1 Check: Connect to PreviousBootDataProvider, verify data.inspect is None
     let provider: fdiagnostics_persistence::PreviousBootDataProviderProxy =
         realm.instance.root.connect_to_protocol_at_exposed_dir()?;
-    let data = provider.watch_previous_boot_data(&Default::default()).await?;
+    let data = provider.watch_previous_boot_data(&supported_options()).await?;
     assert!(data.inspect.is_none(), "Expected no previous boot data on initial boot");
 
     // Set distinctive shutdown token
@@ -699,7 +718,7 @@ async fn test_update_check_gating() -> Result<(), Error> {
     // Signal that the post-boot update check is complete
     notifier_proxy.notify()?;
 
-    let data = provider.watch_previous_boot_data(&Default::default()).await?;
+    let data = provider.watch_previous_boot_data(&supported_options()).await?;
     assert!(data.inspect.is_none(), "Expected no previous boot data on initial boot");
 
     // Wait deterministically for persistence to collect an active snapshot with UPDATE_TOKEN on disk

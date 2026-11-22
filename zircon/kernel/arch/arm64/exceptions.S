@@ -14,7 +14,6 @@
 #include <lib/arch/asm.h>
 #include <lib/syscalls/zx-syscall-numbers.h>
 #include <lib/userabi/vdso-arm64.h>
-#include <zircon/compiler.h>
 
 #include "smccc.h"
 
@@ -174,9 +173,7 @@
 
 .macro .cfi.iframe.exc.start.el1
   // The previous SP is what it was on entry, which is now the CFA.
-#ifndef __clang__ // TODO(https://fxbug.dev/323770291): missing .cfi_* support
   .cfi_val_offset sp, 0
-#endif
 .endm
 
 // Set up the iframe when coming from EL1, and restore kernel invariants.
@@ -284,12 +281,6 @@
   speculation_postfence
 .endm
 
-#if __has_feature(shadow_call_stack)
-#define RESTORE_SCSP 1
-#else
-#define RESTORE_SCSP 0
-#endif
-
 // All normal C code in the kernel expects the invariants that the fixed
 // registers assigned to the percpu_ptr and the shadow-call-stack pointer have
 // the correct values for the current CPU and kernel thread.  When an exception
@@ -301,7 +292,7 @@
 // arch_thread accessible via TPIDR_EL1 before reaching any C functions.
 .macro restore_fixed_regs tp_tmp:req, restore_scsp:req
   mrs \tp_tmp, tpidr_el1
-  .if (\restore_scsp & RESTORE_SCSP)
+  .if \restore_scsp
 #if CURRENT_SCSP_OFFSET != CURRENT_PERCPU_PTR_OFFSET + 8
 # error "shadow_call_sp must follow current_percpu_ptr in struct arch_thread"
 #endif
@@ -706,9 +697,7 @@ iframe.smccc10_workaround.el0 serror_lower_a32, 0
   // the base, since returning to EL0 should be the base of the call stack) so
   // that the next kernel entry reloads that instead of whatever was current
   // last time this thread switched out.
-#if __has_feature(shadow_call_stack)
   str shadow_call_sp, [x9, #CURRENT_SCSP_OFFSET]
-#endif
 
   // Put the iframe's USP value into SP_EL0, where it will become the SP after
   // ERET resumes in EL0.  Don't update CFI for SP because there's no DWARF
@@ -916,7 +905,7 @@ iframe.smccc10_workaround.el0 serror_lower_a32, 0
   .balign 16
   .Lsyscall_table:
 
-// One of these macros is invoked by kernel.inc for each syscall.
+// One of these macros is invoked by syscalls.inc for each syscall.
 
 // These don't have kernel entry points.
 #define VDSO_SYSCALL(...)
@@ -927,7 +916,7 @@ iframe.smccc10_workaround.el0 serror_lower_a32, 0
 #define INTERNAL_SYSCALL(...) KERNEL_SYSCALL(__VA_ARGS__)
 #define BLOCKING_SYSCALL(...) KERNEL_SYSCALL(__VA_ARGS__)
 
-#include <lib/syscalls/kernel.inc>
+#include <lib/syscalls/syscalls.inc>
 
 #undef VDSO_SYSCALL
 #undef KERNEL_SYSCALL

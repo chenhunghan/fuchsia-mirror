@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":svc-tests-latest"],
+    visibility = ["//sdk:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "svc-unittests",
+    srcs = ["dir_unittest.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-loop-testing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/svc",
+        "//sdk/lib/vfs/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "svc-tests-component",
+    binary = ":svc-unittests",
+    component_name = "svc-tests",
+)
+
+ctf_fx_package(
+    name = "svc-tests",
+    testonly = True,
+    test_components = [":svc-tests-component"],
+)
+
+fx_component_manifest(
+    name = "svc-tests-root_manifest",
+    testonly = True,
+    component_name = "svc-tests-root",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/svc-tests-root.cml",
+)
+
+fx_test_component(
+    name = "svc-tests-root",
+    compiled_manifest = ":svc-tests-root_manifest",
+    test_type = "ctf",
+)
+
+fx_package(
+    name = "svc-tests-latest.package",
+    package_name = "svc-tests-latest",
+    testonly = True,
+    subpackages = [":svc-tests"],
+    test_components = [":svc-tests-root"],
+)
+
+fx_test(
+    name = "svc-tests-latest",
+    package = ":svc-tests-latest.package",
+)

@@ -58,6 +58,9 @@ fx_component(
     name = "fake_lutex_controller",
     testonly = True,
     compiled_manifest = ":fake_lutex_controller_manifest",
-    visibility = ["//src/starnix/fakes:__pkg__"],
+    visibility = [
+        "//src/starnix/fakes:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
     deps = [":fake_lutex_controller_packaged_bin"],
 )

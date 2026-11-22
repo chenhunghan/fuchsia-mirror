@@ -104,6 +104,8 @@ python_mobly_test("firmware_power_modes_test") {
     "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_pm_mode_performance.txt",
     "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_pm_mode_ultra_low_power.txt",
   ]
+
+  produces_perf_results = true
 }
 
 python_mobly_test("phy_existence_test") {
@@ -164,8 +166,8 @@ python_mobly_test("sar_setting_test") {
   ]
 }
 
-python_mobly_test("wlan_scan_test") {
-  main_source = "WlanScanTest.py"
+python_mobly_test("scan_test") {
+  main_source = "ScanTest.py"
   libraries = [
     "//src/connectivity/wlan/tests/common",
     "//src/connectivity/wlan/tests/utils:wlan_test_utils",
@@ -178,15 +180,22 @@ python_mobly_test("wlan_scan_test") {
   ]
   data_package_name = "test_data"
   data_sources = [ "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_scan_while_connected.txt" ]
+
+  produces_perf_results = true
 }
 
-python_mobly_test("wlan_driver_restart_test") {
-  main_source = "WlanDriverRestartTest.py"
+python_mobly_test("driver_restart_test") {
+  main_source = "DriverRestartTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
     "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_host_test_data",
   ]
 }
+
+_throughput_odpm_data_sources = [
+  "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_wpa2_channel_1_20mhz.txt",
+  "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_wpa2_channel_36_80mhz.txt",
+]
 
 python_mobly_test("throughput_test") {
   main_source = "ThroughputTest.py"
@@ -203,14 +212,39 @@ python_mobly_test("throughput_test") {
     "//sdk/fidl/fuchsia.wlan.stats:fuchsia.wlan.stats_host_test_data",
   ]
   data_package_name = "test_data"
-  data_sources = [
-    "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_wpa2_channel_1_20mhz.txt",
-    "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_wpa2_channel_36_80mhz.txt",
+  data_sources = _throughput_odpm_data_sources
+
+  produces_perf_results = true
+}
+
+# A subset of throughput test cases to run with ODPM capturing, to be in a
+# performance builder.
+python_mobly_test("throughput_odpm_test") {
+  main_source = "ThroughputTest.py"
+  package_deps = [ "//third_party/iperf:iperf3_pkg" ]
+  libraries = [
+    "//src/connectivity/wlan/tests/utils:wlan_test_utils",
+    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
+    "//src/testing/end_to_end/mobly_controller/iperf",
+    "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_host_test_data",
+    "//sdk/fidl/fuchsia.wlan.internal:fuchsia.wlan.internal_host_test_data",
+    "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_host_test_data",
+    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_host_test_data",
+    "//sdk/fidl/fuchsia.wlan.sme:fuchsia.wlan.sme_host_test_data",
+    "//sdk/fidl/fuchsia.wlan.stats:fuchsia.wlan.stats_host_test_data",
   ]
+  test_cases = [
+    "test_wpa2_channel_1_20mhz",
+    "test_wpa2_channel_36_80mhz",
+  ]
+  data_package_name = "test_data"
+  data_sources = _throughput_odpm_data_sources
+
+  produces_perf_results = true
 }
 
 python_mobly_test("phy_compliance_ac_test") {
-  main_source = "WlanPhyCompliance11ACTest.py"
+  main_source = "PhyCompliance11ACTest.py"
   libraries = [
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_host_test_data",
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_python",
@@ -225,7 +259,7 @@ python_mobly_test("phy_compliance_ac_test") {
 }
 
 python_mobly_test("phy_compliance_n_test") {
-  main_source = "WlanPhyCompliance11NTest.py"
+  main_source = "PhyCompliance11NTest.py"
   libraries = [
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_host_test_data",
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_python",
@@ -240,7 +274,7 @@ python_mobly_test("phy_compliance_n_test") {
 }
 
 python_mobly_test("phy_compliance_abg_test") {
-  main_source = "WlanPhyComplianceABGTest.py"
+  main_source = "PhyComplianceABGTest.py"
   libraries = [
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_host_test_data",
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_python",
@@ -255,7 +289,7 @@ python_mobly_test("phy_compliance_abg_test") {
 }
 
 python_mobly_test("rvr_test_2g_tx") {
-  main_source = "WlanRvrTest.py"
+  main_source = "RvrTest.py"
   params_source = "rvr_settings.yaml"
   test_cases = [ "test_rvr_11n_2g_20mhz_wpa2_tx_ipv4" ]
   package_deps = [ "//third_party/iperf:iperf3_pkg" ]
@@ -275,7 +309,7 @@ python_mobly_test("rvr_test_2g_tx") {
 }
 
 python_mobly_test("rvr_test_2g_rx") {
-  main_source = "WlanRvrTest.py"
+  main_source = "RvrTest.py"
   params_source = "rvr_settings.yaml"
   test_cases = [ "test_rvr_11n_2g_20mhz_wpa2_rx_ipv4" ]
   package_deps = [ "//third_party/iperf:iperf3_pkg" ]
@@ -295,7 +329,7 @@ python_mobly_test("rvr_test_2g_rx") {
 }
 
 python_mobly_test("rvr_test_5g_tx") {
-  main_source = "WlanRvrTest.py"
+  main_source = "RvrTest.py"
   params_source = "rvr_settings.yaml"
   test_cases = [ "test_rvr_11ac_5g_80mhz_wpa2_tx_ipv4" ]
   package_deps = [ "//third_party/iperf:iperf3_pkg" ]
@@ -315,7 +349,7 @@ python_mobly_test("rvr_test_5g_tx") {
 }
 
 python_mobly_test("rvr_test_5g_rx") {
-  main_source = "WlanRvrTest.py"
+  main_source = "RvrTest.py"
   params_source = "rvr_settings.yaml"
   test_cases = [ "test_rvr_11ac_5g_80mhz_wpa2_rx_ipv4" ]
   package_deps = [ "//third_party/iperf:iperf3_pkg" ]
@@ -348,6 +382,7 @@ group("tests_host") {
     ":tests_for_fyi_iperf",
     ":tests_for_fyi_iperf_attenuator",
     ":tests_for_fyi_long",
+    ":tests_for_fyi_performance",
     ":tests_for_postsubmit",
     ":tests_for_presubmit",
     ":tests_for_presubmit_no_shield_box",
@@ -388,6 +423,11 @@ group("tests_for_fyi_iperf") {
 group("tests_for_fyi_iperf_attenuator") {
   testonly = true
   public_deps = core_tests_for_fyi_iperf_attenuator  # Edit in test_lists.gni
+}
+
+group("tests_for_fyi_performance") {
+  testonly = true
+  public_deps = core_tests_for_fyi_performance  # Edit in test_lists.gni
 }
 
 group("tests_for_fyi_long") {

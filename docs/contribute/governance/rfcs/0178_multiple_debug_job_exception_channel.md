@@ -158,6 +158,6 @@ The problems are
   have to talk with the debug_agent, which will expose a large and unstable
   interface.
 
-[exception_channel_types]: ../../../concepts/kernel/exceptions.md#exception_channel_types
+[exception_channel_types]: ../../../concepts/kernel/exceptions.md#exception-channel-types
 [exception_handling]: ../../../concepts/kernel/exceptions.md
 [task_create_exception_channel]: /reference/syscalls/task_create_exception_channel.md

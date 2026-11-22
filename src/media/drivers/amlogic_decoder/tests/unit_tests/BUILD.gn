@@ -10,6 +10,8 @@ cc_test_executable("amlogic-decoder-unittest-bin") {
   output_name = "amlogic-decoder-unittest"
   deps = [
     "../..:sources",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+    "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/async_patterns/testing/cpp",
     "//sdk/lib/component/outgoing/cpp",

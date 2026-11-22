@@ -72,4 +72,5 @@ fx_package(
     name = "enumeration-test-adapter",
     testonly = True,
     components = [":enumeration-test-adapter-component"],
+    visibility = ["//src/microfuchsia/tee/testing/enumeration_test_adapter/tests:__pkg__"],
 )

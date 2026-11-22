@@ -4,6 +4,8 @@
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/idk:idk_host_tool.bzl", "idk_go_binary_host_tool")
+load("//tools/fidl/fidlc/testdata:info.bzl", "fidl_testdata_info")
+load(":golden_tests.bzl", "fidlgen_cpp_golden_tests")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -22,3 +24,34 @@ idk_go_binary_host_tool(
         "//tools/fidl/lib/fidlgen_cpp",
     ],
 )
+
+fidlgen_cpp_golden_tests(
+    name = "fidlgen_cpp_golden_tests",
+    visibility = [
+        "//build/bazel/rules/tests:__pkg__",
+        "//tools/fidl:__subpackages__",
+    ],
+)
+
+# LINT.IfChange(goldens)
+filegroup(
+    name = "goldens",
+    testonly = True,
+    srcs = select({
+        "@platforms//os:fuchsia": [
+            "%s_cpp" % info["target"]
+            for info in fidl_testdata_info
+            if "fidlgen_cpp" not in info["device_build_denylist"]
+        ],
+        "//conditions:default": [
+            "%s_cpp" % info["target"]
+            for info in fidl_testdata_info
+            if "fidlgen_cpp" not in info["host_build_denylist"]
+        ],
+    }),
+    visibility = [
+        "//build/bazel/rules/tests:__pkg__",
+        "//tools/fidl:__subpackages__",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:goldens)

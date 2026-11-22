@@ -8,11 +8,9 @@
 #ifndef ZIRCON_KERNEL_VM_INCLUDE_VM_PMM_H_
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_PMM_H_
 
-#include <lib/memalloc/range.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
-#include <ktl/span.h>
 #include <vm/page.h>
 #include <vm/pmm_arena.h>
 #include <vm/pmm_node.h>
@@ -23,16 +21,6 @@ __BEGIN_CDECLS
 // Returns the global PmmNode. See Pmm::Node(). The returned PmmNode is not constructed until the
 // Rust `pmm_node_init` LK init hook has run at LK_INIT_LEVEL_PLATFORM_EARLY - 1.
 PmmNode* rust_pmm_node();
-
-// See pmm_init().
-zx_status_t rust_pmm_init(const memalloc::Range* ranges, size_t count);
-
-// Ends the PMM's role within the context of phys handoff: it frees all physical
-// memory temporarily used for the hand-off from physboot. Since this memory
-// includes that backing the hand-off struct itself (accessible via
-// gPhysHandoff), this call is intended to be the last thing done in the process
-// of ending the hand-off.
-void pmm_end_handoff();
 
 // Returns the number of arenas.
 size_t pmm_num_arenas();
@@ -67,17 +55,15 @@ zx_status_t pmm_alloc_contiguous(size_t count, uint32_t alloc_flags, uint8_t ali
 // Unwires a page and sets it in the ALLOC state.
 void pmm_unwire_page(vm_page_t* page) __NONNULL((1));
 
-// Should be called after the kernel command line has been parsed.
-//
-// Must only be called during early boot, before the kernel console can access the PMM checker.
-void rust_pmm_checker_init_from_cmdline();
-
 // Synchronously walk the PMM's free list and poison (via kASAN) each page. This is an
 // incredibly expensive operation and should be used with care.
 //
 // Only defined in kASAN builds. This is not guarded by __has_feature(address_sanitizer) since the
 // caller in the kASAN runtime is itself compiled without ASan instrumentation.
 void pmm_asan_poison_all_free_pages();
+
+// virtual to physical for kernel addresses.
+paddr_t vaddr_to_paddr(const void* va);
 
 __END_CDECLS
 
@@ -89,13 +75,6 @@ class Pmm {
   // has run, which happens just before platform_early_init().
   static PmmNode& Node() { return *rust_pmm_node(); }
 };
-
-// Initializes the PMM with the provided normalized memory ranges. This in
-// particular initializes its arenas and wires any previously allocated special
-// subranges or holes.
-inline zx_status_t pmm_init(ktl::span<const memalloc::Range> ranges) {
-  return rust_pmm_init(ranges.data(), ranges.size());
-}
 
 // Allocate a single page of physical memory.
 zx_status_t pmm_alloc_page(uint alloc_flags, vm_page** p) __NONNULL((2));
@@ -116,9 +95,6 @@ void pmm_free_page(vm_page_t* page, PmmOptDelayReuse delay_reuse = PmmOptDelayRe
 
 // Return the PageQueues.
 inline PageQueues* pmm_page_queues() { return Pmm::Node().GetPageQueues(); }
-
-// virtual to physical for kernel addresses.
-paddr_t vaddr_to_paddr(const void* va);
 
 // paddr to vm_page_t
 inline vm_page_t* paddr_to_vm_page(paddr_t addr) { return Pmm::Node().PaddrToPage(addr); }

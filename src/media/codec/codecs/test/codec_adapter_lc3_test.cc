@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_impl.h>
 
 #include <algorithm>
@@ -53,14 +53,14 @@ class TestCodecAdapterLc3Encoder : public CodecAdapterLc3Encoder {
   using CodecAdapterLc3Encoder::ProcessInputChunkData;
 };
 
-fuchsia::media::FormatDetails MakeLc3FormatDetails(std::vector<uint8_t> oob_bytes) {
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type(kLc3MimeType);
-  format_details.set_oob_bytes(std::move(oob_bytes));
+fuchsia_media::FormatDetails MakeLc3FormatDetails(std::vector<uint8_t> oob_bytes) {
+  fuchsia_media::FormatDetails format_details;
+  format_details.mime_type() = kLc3MimeType;
+  format_details.oob_bytes() = std::move(oob_bytes);
   return format_details;
 }
 
-fuchsia::media::FormatDetails MakeValidLc3DecoderFormatDetails() {
+fuchsia_media::FormatDetails MakeValidLc3DecoderFormatDetails() {
   // Valid 16-byte LTV configuration:
   // Sampling_Frequency: 48 kHz (0x08)
   // Frame_Duration: 10 ms (0x01)
@@ -75,23 +75,21 @@ fuchsia::media::FormatDetails MakeValidLc3DecoderFormatDetails() {
   return MakeLc3FormatDetails(std::move(oob_bytes));
 }
 
-fuchsia::media::FormatDetails MakeValidLc3EncoderFormatDetails() {
-  fuchsia::media::PcmFormat2 pcm;
-  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
-  pcm.set_bits_per_sample(16);
-  pcm.set_frames_per_second(48000);
-  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL});
+fuchsia_media::FormatDetails MakeValidLc3EncoderFormatDetails() {
+  fuchsia_media::PcmFormat2 pcm;
+  pcm.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
+  pcm.bits_per_sample() = 16;
+  pcm.frames_per_second() = 48000;
+  pcm.channel_map() = {fuchsia_media::AudioChannelId2::kFl};
 
-  fuchsia::media::Lc3EncoderSettings lc3_settings;
-  lc3_settings.set_nbytes(40);
-  lc3_settings.set_frame_duration(fuchsia::media::Lc3FrameDuration::D10_MS);
+  fuchsia_media::Lc3EncoderSettings lc3_settings;
+  lc3_settings.nbytes() = 40;
+  lc3_settings.frame_duration() = fuchsia_media::Lc3FrameDuration::kD10Ms;
 
-  fuchsia::media::EncoderSettings encoder_settings;
-  encoder_settings.set_lc3(std::move(lc3_settings));
-
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_pcm_format(std::move(pcm));
-  format_details.set_encoder_settings(std::move(encoder_settings));
+  fuchsia_media::FormatDetails format_details;
+  format_details.pcm_format() = std::move(pcm);
+  format_details.encoder_settings() =
+      fuchsia_media::EncoderSettings::WithLc3(std::move(lc3_settings));
   return format_details;
 }
 
@@ -112,15 +110,15 @@ TEST(CodecAdapterLc3DecoderTest, MissingMimeTypeOrOobBytesRejected) {
   FakeCodecAdapterEvents events;
   TestCodecAdapterLc3Decoder decoder(lock, &events);
 
-  fuchsia::media::FormatDetails missing_mime;
-  missing_mime.set_oob_bytes(std::vector<uint8_t>(16, 0));
+  fuchsia_media::FormatDetails missing_mime;
+  missing_mime.oob_bytes() = std::vector<uint8_t>(16, 0);
   EXPECT_EQ(decoder.ProcessFormatDetails(missing_mime),
             TestCodecAdapterLc3Decoder::kShouldTerminate);
   EXPECT_EQ(events.fail_codec_count(), 1u);
 
-  fuchsia::media::FormatDetails short_oob;
-  short_oob.set_mime_type(kLc3MimeType);
-  short_oob.set_oob_bytes(std::vector<uint8_t>(15, 0));
+  fuchsia_media::FormatDetails short_oob;
+  short_oob.mime_type() = kLc3MimeType;
+  short_oob.oob_bytes() = std::vector<uint8_t>(15, 0);
   EXPECT_EQ(decoder.ProcessFormatDetails(short_oob), TestCodecAdapterLc3Decoder::kShouldTerminate);
   EXPECT_EQ(events.fail_codec_count(), 2u);
 }
@@ -412,17 +410,73 @@ TEST(CodecAdapterLc3EncoderTest, MissingPcmFormatOrEncoderSettingsRejected) {
   FakeCodecAdapterEvents events;
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
-  fuchsia::media::FormatDetails missing_pcm_format = MakeValidLc3EncoderFormatDetails();
-  missing_pcm_format.clear_pcm_format();
+  fuchsia_media::FormatDetails missing_pcm_format = MakeValidLc3EncoderFormatDetails();
+  missing_pcm_format.pcm_format().reset();
   EXPECT_EQ(encoder.ProcessFormatDetails(missing_pcm_format),
             TestCodecAdapterLc3Encoder::kShouldTerminate);
   EXPECT_EQ(events.fail_codec_count(), 1u);
 
-  fuchsia::media::FormatDetails missing_settings = MakeValidLc3EncoderFormatDetails();
-  missing_settings.clear_encoder_settings();
+  fuchsia_media::FormatDetails missing_settings = MakeValidLc3EncoderFormatDetails();
+  missing_settings.encoder_settings().reset();
   EXPECT_EQ(encoder.ProcessFormatDetails(missing_settings),
             TestCodecAdapterLc3Encoder::kShouldTerminate);
   EXPECT_EQ(events.fail_codec_count(), 2u);
+}
+
+TEST(CodecAdapterLc3EncoderTest, MissingAndUnsupportedPcmModeRejected) {
+  constexpr char kExpectedMessage[] = "Unsupported PCM mode for LC3 Encoder.";
+  {
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    TestCodecAdapterLc3Encoder encoder(lock, &events);
+
+    auto format_details = MakeValidLc3EncoderFormatDetails();
+    format_details.pcm_format()->pcm_mode().reset();
+    EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
+              TestCodecAdapterLc3Encoder::kShouldTerminate);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(), kExpectedMessage);
+  }
+  {
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    TestCodecAdapterLc3Encoder encoder(lock, &events);
+
+    auto format_details = MakeValidLc3EncoderFormatDetails();
+    format_details.pcm_format()->pcm_mode() = fuchsia_media::AudioPcmMode2::kFloat;
+    EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
+              TestCodecAdapterLc3Encoder::kShouldTerminate);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(), kExpectedMessage);
+  }
+}
+
+TEST(CodecAdapterLc3EncoderTest, MissingAndUnsupportedBitsPerSampleRejected) {
+  constexpr char kExpectedMessage[] = "Unsupported bits per sample LC3 Encoder.";
+  {
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    TestCodecAdapterLc3Encoder encoder(lock, &events);
+
+    auto format_details = MakeValidLc3EncoderFormatDetails();
+    format_details.pcm_format()->bits_per_sample().reset();
+    EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
+              TestCodecAdapterLc3Encoder::kShouldTerminate);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(), kExpectedMessage);
+  }
+  {
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    TestCodecAdapterLc3Encoder encoder(lock, &events);
+
+    auto format_details = MakeValidLc3EncoderFormatDetails();
+    format_details.pcm_format()->bits_per_sample() = 8;
+    EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
+              TestCodecAdapterLc3Encoder::kShouldTerminate);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(), kExpectedMessage);
+  }
 }
 
 TEST(CodecAdapterLc3EncoderTest, OutOfRangeEncoderNbytesRejected) {
@@ -431,7 +485,7 @@ TEST(CodecAdapterLc3EncoderTest, OutOfRangeEncoderNbytesRejected) {
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_encoder_settings()->lc3().set_nbytes(401);
+  format_details.encoder_settings()->lc3()->nbytes() = 401;
 
   auto status = encoder.ProcessFormatDetails(format_details);
   EXPECT_EQ(status, TestCodecAdapterLc3Encoder::kShouldTerminate);
@@ -446,7 +500,7 @@ TEST(CodecAdapterLc3EncoderTest, EmptyChannelMapRejected) {
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_pcm_format()->mutable_channel_map()->clear();
+  format_details.pcm_format()->channel_map()->clear();
 
   auto status = encoder.ProcessFormatDetails(format_details);
   EXPECT_EQ(status, TestCodecAdapterLc3Encoder::kShouldTerminate);
@@ -461,8 +515,8 @@ TEST(CodecAdapterLc3EncoderTest, ExcessiveChannelMapRejected) {
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_pcm_format()->mutable_channel_map()->assign(
-      kMaxChannelCount + 1, fuchsia::media::AudioChannelId2::FL);
+  format_details.pcm_format()->channel_map()->assign(kMaxChannelCount + 1,
+                                                     fuchsia_media::AudioChannelId2::kFl);
 
   auto status = encoder.ProcessFormatDetails(format_details);
   EXPECT_EQ(status, TestCodecAdapterLc3Encoder::kShouldTerminate);
@@ -477,7 +531,7 @@ TEST(CodecAdapterLc3EncoderTest, MissingNbytesRejected) {
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_encoder_settings()->lc3().clear_nbytes();
+  format_details.encoder_settings()->lc3()->nbytes().reset();
 
   auto status = encoder.ProcessFormatDetails(format_details);
   EXPECT_EQ(status, TestCodecAdapterLc3Encoder::kShouldTerminate);
@@ -492,7 +546,7 @@ TEST(CodecAdapterLc3EncoderTest, MissingFrameDurationRejected) {
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_encoder_settings()->lc3().clear_frame_duration();
+  format_details.encoder_settings()->lc3()->frame_duration().reset();
 
   auto status = encoder.ProcessFormatDetails(format_details);
   EXPECT_EQ(status, TestCodecAdapterLc3Encoder::kShouldTerminate);
@@ -507,8 +561,7 @@ TEST(CodecAdapterLc3EncoderTest, InvalidFrameDurationRejected) {
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_encoder_settings()->lc3().set_frame_duration(
-      static_cast<fuchsia::media::Lc3FrameDuration>(99));
+  format_details.encoder_settings()->lc3()->frame_duration() = fuchsia_media::Lc3FrameDuration(99);
 
   auto status = encoder.ProcessFormatDetails(format_details);
   EXPECT_EQ(status, TestCodecAdapterLc3Encoder::kShouldTerminate);
@@ -539,8 +592,8 @@ TEST(CodecAdapterLc3EncoderTest, ProcessInputChunkDataValidationAndUnalignedInpu
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_pcm_format()->set_bits_per_sample(24);
-  format_details.mutable_pcm_format()->set_bytes_per_sample(4);
+  format_details.pcm_format()->bits_per_sample() = 24;
+  format_details.pcm_format()->bytes_per_sample() = 4;
   ASSERT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
 
   const size_t input_size = encoder.InputChunkSize();
@@ -586,7 +639,7 @@ TEST(CodecAdapterLc3DecoderTest, SamplingFrequency44100HzPreservedInOutputFormat
   EXPECT_EQ(decoder.MinOutputBufferSize(), 960u);
   // Output format details must report the actual PCM sample rate (44100 Hz), not coerced 48000 Hz.
   auto [out_format, min_size] = decoder.OutputFormatDetails();
-  EXPECT_EQ(out_format.pcm_format().frames_per_second(), 44100u);
+  EXPECT_EQ(*out_format.pcm_format()->frames_per_second(), 44100u);
 }
 
 TEST(CodecAdapterLc3EncoderTest, TimestampExtrapolatorUsesTrueSampleRateFor44100Hz) {
@@ -595,8 +648,8 @@ TEST(CodecAdapterLc3EncoderTest, TimestampExtrapolatorUsesTrueSampleRateFor44100
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_pcm_format()->set_frames_per_second(44100);
-  format_details.set_timebase(1'000'000'000ull);  // 1 second in ns
+  format_details.pcm_format()->frames_per_second() = 44100;
+  format_details.timebase() = 1'000'000'000ull;  // 1 second in ns
   ASSERT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
 
   // For 44.1 kHz 10ms nominal frame, liblc3 encodes 480 samples per frame (InputChunkSize = 960 B).
@@ -617,9 +670,9 @@ TEST(CodecAdapterLc3EncoderTest, TimestampExtrapolatorUsesFourBytesPerSampleFor2
   TestCodecAdapterLc3Encoder encoder(lock, &events);
 
   auto format_details = MakeValidLc3EncoderFormatDetails();
-  format_details.mutable_pcm_format()->set_bits_per_sample(24);
-  format_details.mutable_pcm_format()->set_bytes_per_sample(4);
-  format_details.set_timebase(1'000'000'000ull);  // 1 second in ns
+  format_details.pcm_format()->bits_per_sample() = 24;
+  format_details.pcm_format()->bytes_per_sample() = 4;
+  format_details.timebase() = 1'000'000'000ull;  // 1 second in ns
   ASSERT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
 
   // For 48 kHz 10ms frame, liblc3 encodes 480 samples per frame. Since 24-bit PCM
@@ -645,8 +698,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(24);
-    format_details.set_timebase(1'000'000'000ull);
+    format_details.pcm_format()->bits_per_sample() = 24;
+    format_details.timebase() = 1'000'000'000ull;
     ASSERT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
     EXPECT_EQ(events.fail_codec_count(), 0u);
     EXPECT_EQ(encoder.InputChunkSize(), 1440u);
@@ -665,8 +718,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(24);
-    format_details.mutable_pcm_format()->set_bytes_per_sample(3);
+    format_details.pcm_format()->bits_per_sample() = 24;
+    format_details.pcm_format()->bytes_per_sample() = 3;
     EXPECT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
     EXPECT_EQ(events.fail_codec_count(), 0u);
     EXPECT_EQ(encoder.InputChunkSize(), 1440u);
@@ -679,8 +732,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(24);
-    format_details.mutable_pcm_format()->set_bytes_per_sample(2);
+    format_details.pcm_format()->bits_per_sample() = 24;
+    format_details.pcm_format()->bytes_per_sample() = 2;
     EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
               TestCodecAdapterLc3Encoder::kShouldTerminate);
     EXPECT_EQ(events.fail_codec_count(), 1u);
@@ -695,8 +748,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(24);
-    format_details.mutable_pcm_format()->set_bytes_per_sample(8);
+    format_details.pcm_format()->bits_per_sample() = 24;
+    format_details.pcm_format()->bytes_per_sample() = 8;
     EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
               TestCodecAdapterLc3Encoder::kShouldTerminate);
     EXPECT_EQ(events.fail_codec_count(), 1u);
@@ -711,8 +764,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(16);
-    format_details.mutable_pcm_format()->set_bytes_per_sample(4);
+    format_details.pcm_format()->bits_per_sample() = 16;
+    format_details.pcm_format()->bytes_per_sample() = 4;
     EXPECT_EQ(encoder.ProcessFormatDetails(format_details),
               TestCodecAdapterLc3Encoder::kShouldTerminate);
     EXPECT_EQ(events.fail_codec_count(), 1u);
@@ -727,8 +780,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(24);
-    format_details.mutable_pcm_format()->set_bytes_per_sample(4);
+    format_details.pcm_format()->bits_per_sample() = 24;
+    format_details.pcm_format()->bytes_per_sample() = 4;
     EXPECT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
     EXPECT_EQ(events.fail_codec_count(), 0u);
     EXPECT_EQ(encoder.InputChunkSize(), 1920u);
@@ -741,8 +794,8 @@ TEST(CodecAdapterLc3EncoderTest, BytesPerSampleValidation) {
     TestCodecAdapterLc3Encoder encoder(lock, &events);
 
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(16);
-    format_details.mutable_pcm_format()->set_bytes_per_sample(2);
+    format_details.pcm_format()->bits_per_sample() = 16;
+    format_details.pcm_format()->bytes_per_sample() = 2;
     EXPECT_EQ(encoder.ProcessFormatDetails(format_details), TestCodecAdapterLc3Encoder::kOk);
     EXPECT_EQ(events.fail_codec_count(), 0u);
     EXPECT_EQ(encoder.InputChunkSize(), 960u);
@@ -758,13 +811,12 @@ TEST(CodecAdapterLc3DecoderTest, OutputBufferConstraintsAvailableAfterCleanUpAft
             TestCodecAdapterLc3Decoder::kOk);
 
   // Stop/clean up the stream (which resets codec_params_ and chunk_input_stream_) and verify
-  // CoreCodecGetBufferCollectionConstraints2(kOutputPort) still succeeds using cached size.
+  // CoreCodecGetBufferCollectionConstraints3(kOutputPort) still succeeds using cached size.
   decoder.CleanUpAfterStream();
 
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = decoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  auto constraints_result = decoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 960u);
 }
@@ -779,10 +831,9 @@ TEST(CodecAdapterLc3EncoderTest, OutputBufferConstraintsAvailableAfterCleanUpAft
 
   encoder.CleanUpAfterStream();
 
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = encoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  auto constraints_result = encoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 40u);
 }
@@ -793,9 +844,9 @@ TEST(CodecAdapterLc3DecoderTest, EmptyStreamEndOfStreamAndStaleChunkInputStreamC
   TestCodecAdapterLc3Decoder decoder(lock, &events);
 
   auto format_details = MakeValidLc3DecoderFormatDetails();
-  format_details.set_format_details_version_ordinal(0);
+  format_details.format_details_version_ordinal() = 0;
 
-  decoder.CoreCodecInit(format_details);
+  decoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   // Stream 1: Queue EndOfStream immediately without any FormatDetails or Packet.
@@ -809,7 +860,8 @@ TEST(CodecAdapterLc3DecoderTest, EmptyStreamEndOfStreamAndStaleChunkInputStreamC
   // Stream 2: Queue FormatDetails and a partial input packet (10 bytes < 40-byte frame size)
   // so chunk_input_stream_ buffers partial bytes in scratch_block_, then stop stream without EOS.
   decoder.CoreCodecStartStream();
-  decoder.CoreCodecQueueInputFormatDetails(format_details);
+  decoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   decoder.CoreCodecMidStreamOutputBufferReConfigFinish();
 
@@ -824,11 +876,10 @@ TEST(CodecAdapterLc3DecoderTest, EmptyStreamEndOfStreamAndStaleChunkInputStreamC
   EXPECT_EQ(events.fail_codec_count(), 0u);
   decoder.CoreCodecStopStream();
 
-  // Between streams: CoreCodecGetBufferCollectionConstraints2(kOutputPort) must succeed.
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = decoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  // Between streams: CoreCodecGetBufferCollectionConstraints3(kOutputPort) must succeed.
+  auto constraints_result = decoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 960u);
 
@@ -862,20 +913,20 @@ TEST(CodecAdapterLc3EncoderTest, S16And24In32HighOrderAnd24PackedProduceIdentica
 
   auto make_stereo_format = [](uint32_t bits_per_sample, std::optional<uint32_t> bytes_per_sample) {
     auto format_details = MakeValidLc3EncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bits_per_sample(bits_per_sample);
+    format_details.pcm_format()->bits_per_sample() = bits_per_sample;
     if (bytes_per_sample.has_value()) {
-      format_details.mutable_pcm_format()->set_bytes_per_sample(*bytes_per_sample);
+      format_details.pcm_format()->bytes_per_sample() = *bytes_per_sample;
     } else {
-      format_details.mutable_pcm_format()->clear_bytes_per_sample();
+      format_details.pcm_format()->bytes_per_sample().reset();
     }
-    format_details.mutable_pcm_format()->set_channel_map({
-        fuchsia::media::AudioChannelId2::FL,
-        fuchsia::media::AudioChannelId2::FR,
-    });
+    format_details.pcm_format()->channel_map() = {
+        fuchsia_media::AudioChannelId2::kFl,
+        fuchsia_media::AudioChannelId2::kFr,
+    };
     return format_details;
   };
 
-  auto encode_all_chunks = [](const fuchsia::media::FormatDetails& format_details,
+  auto encode_all_chunks = [](const fuchsia_media::FormatDetails& format_details,
                               const std::vector<uint8_t>& raw_pcm) {
     std::mutex lock;
     FakeCodecAdapterEvents events;
@@ -951,9 +1002,9 @@ TEST(CodecAdapterLc3EncoderTest, NearFullScale24In32EncodesAndDecodesWithoutOver
   TestCodecAdapterLc3Encoder encoder(enc_lock, &enc_events);
 
   auto enc_format = MakeValidLc3EncoderFormatDetails();
-  enc_format.mutable_pcm_format()->set_bits_per_sample(24);
-  enc_format.mutable_pcm_format()->set_bytes_per_sample(4);
-  enc_format.mutable_encoder_settings()->lc3().set_nbytes(kNbytes);
+  enc_format.pcm_format()->bits_per_sample() = 24;
+  enc_format.pcm_format()->bytes_per_sample() = 4;
+  enc_format.encoder_settings()->lc3()->nbytes() = kNbytes;
   ASSERT_EQ(encoder.ProcessFormatDetails(enc_format), TestCodecAdapterLc3Encoder::kOk);
 
   std::mutex dec_lock;
@@ -1031,7 +1082,7 @@ TEST(CodecAdapterLc3EncoderTest, LegacyDomain24BitInputUsesHighOrderBits) {
     s16_samples[i] = static_cast<int16_t>(std::lround(v * 32767.0));
   }
 
-  auto encode_mono_chunks = [](const fuchsia::media::FormatDetails& format_details,
+  auto encode_mono_chunks = [](const fuchsia_media::FormatDetails& format_details,
                                const std::vector<uint8_t>& raw_pcm) {
     std::mutex lock;
     FakeCodecAdapterEvents events;
@@ -1065,19 +1116,21 @@ TEST(CodecAdapterLc3EncoderTest, LegacyDomain24BitInputUsesHighOrderBits) {
   // `encoder_settings`, then normalize via `CodecImpl` just as `CodecImpl` does on input
   // `FormatDetails` before calling the adapter.
   auto legacy_format = MakeValidLc3EncoderFormatDetails();
-  legacy_format.clear_pcm_format();
-  fuchsia::media::PcmFormat pcm_v1;
-  pcm_v1.pcm_mode = fuchsia::media::AudioPcmMode::LINEAR;
-  pcm_v1.bits_per_sample = 24;
-  pcm_v1.frames_per_second = 48000;
-  pcm_v1.channel_map = {fuchsia::media::AudioChannelId::LF};
-  legacy_format.mutable_domain()->audio().uncompressed().set_pcm(std::move(pcm_v1));
+  legacy_format.pcm_format().reset();
+  fuchsia_media::PcmFormat pcm_v1;
+  pcm_v1.pcm_mode() = fuchsia_media::AudioPcmMode::kLinear;
+  pcm_v1.bits_per_sample() = 24;
+  pcm_v1.frames_per_second() = 48000;
+  pcm_v1.channel_map() = {fuchsia_media::AudioChannelId::kLf};
+  legacy_format.domain() =
+      fuchsia_media::DomainFormat::WithAudio(fuchsia_media::AudioFormat::WithUncompressed(
+          fuchsia_media::AudioUncompressedFormat::WithPcm(std::move(pcm_v1))));
 
   CodecImpl::EnsureInputFormatDetailsNormalizedForTesting(&legacy_format);
-  ASSERT_TRUE(legacy_format.has_pcm_format());
-  EXPECT_EQ(legacy_format.pcm_format().bits_per_sample(), 24u);
-  ASSERT_TRUE(legacy_format.pcm_format().has_bytes_per_sample());
-  EXPECT_EQ(legacy_format.pcm_format().bytes_per_sample(), 4u);
+  ASSERT_TRUE(legacy_format.pcm_format().has_value());
+  EXPECT_EQ(*legacy_format.pcm_format()->bits_per_sample(), 24u);
+  ASSERT_TRUE(legacy_format.pcm_format()->bytes_per_sample().has_value());
+  EXPECT_EQ(*legacy_format.pcm_format()->bytes_per_sample(), 4u);
 
   // Left-justified 24-in-32 (`s16 << 16` in bits `31..8`, non-zero padding in bits `7..0`) must
   // encode identically to 16-bit `PcmFormat2`.

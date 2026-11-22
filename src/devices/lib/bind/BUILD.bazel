@@ -56,12 +56,17 @@ rustc_library(
         "src/parser/bind_rules.rs",
         "src/parser/common.rs",
         "src/parser/mod.rs",
-        "src/test.rs",
-    ],
-    compile_data = [
-        "composite_tests_schema.json",
-        "tests_schema.json",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": ["src/test.rs"],
+    }),
+    compile_data = select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": [
+            "composite_tests_schema.json",
+            "tests_schema.json",
+        ],
+    }),
     crate_name = "bind",
     edition = "2024",
     proc_macro_deps = ["//third_party/rust_crates/vendor:num-derive"],
@@ -70,6 +75,7 @@ rustc_library(
         "//src/devices/bin/driver_tools:__pkg__",
         "//src/devices/bind:__pkg__",
         "//src/devices/lib/driver-static-checks:__pkg__",
+        "//src/sys/component_manager:__pkg__",
         "//tools/bindc:__pkg__",
     ],
     deps = [
@@ -80,10 +86,14 @@ rustc_library(
         "//third_party/rust_crates/vendor:num-traits",
         "//third_party/rust_crates/vendor:regex-lite",
         "//third_party/rust_crates/vendor:serde",
-        "//third_party/rust_crates/vendor:serde_json",
         "//third_party/rust_crates/vendor:thiserror",
-        "//third_party/rust_crates/vendor:valico",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": [
+            "//third_party/rust_crates/vendor:serde_json",
+            "//third_party/rust_crates/vendor:valico",
+        ],
+    }),
 )
 
 rustc_test(

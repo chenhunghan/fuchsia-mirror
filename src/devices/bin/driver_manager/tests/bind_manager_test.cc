@@ -2,6 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/driver/component/cpp/composite_node_spec.h>
+#include <lib/driver/component/cpp/node_add_args.h>
+
+#include <bind/fuchsia/cpp/bind.h>
+
 #include "src/devices/bin/driver_manager/tests/bind_manager_test_base.h"
 
 class BindManagerTest : public BindManagerTestBase {};
@@ -257,4 +262,168 @@ TEST_F(BindManagerTest, AddNodesThenSpec) {
 
   VerifyOrphanedNodes({});
   VerifyNoOngoingBind();
+}
+
+TEST_F(BindManagerTest, TryBindForParentSpecsSkipsNonMatchingOrphans) {
+  AddAndOrphanNode("node-a");
+  AddAndOrphanNode("node-b");
+  AddAndOrphanNode("node-c");
+  VerifyNoOngoingBind();
+  ASSERT_EQ(0u, CurrentBindManagerData().driver_index_request_count);
+
+  // Build parent specs that can only match node-b's instance ID.
+  uint32_t node_b_id = instance_ids()["node-b"];
+  std::vector<fuchsia_driver_framework::ParentSpec2> matching_specs = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules = {fdf::MakeAcceptBindRule(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID,
+                                                 node_b_id)},
+          .properties = {fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID, node_b_id)},
+      }},
+  };
+
+  bind_manager()->TryBindForParentSpecs(matching_specs);
+  RunLoopUntilIdle();
+
+  // Only node-b should have triggered a MatchDriver request; node-a and node-c must be skipped.
+  EXPECT_EQ(1u, CurrentBindManagerData().driver_index_request_count);
+  VerifyBindOngoingWithRequests({{"node-a", 0}, {"node-b", 1}, {"node-c", 0}});
+
+  // While node-b's bind is ongoing, queue a spec whose parent rules match no existing node.
+  std::vector<fuchsia_driver_framework::ParentSpec2> non_matching_specs = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules = {fdf::MakeAcceptBindRule(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID, 99999u)},
+          .properties = {fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID, 99999u)},
+      }},
+  };
+  bind_manager()->TryBindForParentSpecs(non_matching_specs);
+
+  DriverIndexReplyWithDriver("node-b");
+  EXPECT_EQ(0u, CurrentBindManagerData().driver_index_request_count);
+  VerifyOrphanedNodes({"node-a", "node-c"});
+  VerifyNoOngoingBind();
+}
+
+TEST_F(BindManagerTest, TryBindForParentSpecsEvaluatesAcceptFalseRejectAndDuplicateProtocol) {
+  constexpr const char* kFlagProp = "test.optional_flag";
+  constexpr const char* kRoleProp = "test.role";
+
+  // node-missing-flag omits kFlagProp, so an Accept rule including BoolValue(false) must match it.
+  AddAndOrphanNode("node-missing-flag", /*enable_multibind=*/false, nullptr,
+                   {fdf::MakeProperty2(kRoleProp, std::string("target"))});
+
+  // node-rejected has kRoleProp == "excluded", so a Reject rule for "excluded" must skip it.
+  AddAndOrphanNode("node-rejected", /*enable_multibind=*/false, nullptr,
+                   {fdf::MakeProperty2(kRoleProp, std::string("excluded"))});
+
+  // node-dup-proto has two fuchsia.BIND_PROTOCOL entries; driver-index overwrites duplicate
+  // BIND_PROTOCOL keys with the last entry, so matching must check the second value (20u), not 10u.
+  AddAndOrphanNode("node-dup-proto", /*enable_multibind=*/false, nullptr,
+                   {
+                       fdf::MakeProperty2(bind_fuchsia::PROTOCOL, 10u),
+                       fdf::MakeProperty2(bind_fuchsia::PROTOCOL, 20u),
+                   });
+  VerifyNoOngoingBind();
+
+  // 1. Accept {false} on missing property + Reject {"excluded"} matches only node-missing-flag.
+  std::vector<fuchsia_driver_framework::ParentSpec2> flag_and_reject_specs = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules =
+              {
+                  fdf::MakeAcceptBindRule(kFlagProp, false),
+                  fdf::MakeRejectBindRule(kRoleProp, std::string("excluded")),
+                  fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, 999u),
+              },
+          .properties = {fdf::MakeProperty2(kFlagProp, false)},
+      }},
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules =
+              {
+                  fdf::MakeAcceptBindRule(kFlagProp, false),
+                  fdf::MakeRejectBindRule(kRoleProp, std::string("excluded")),
+                  fdf::MakeAcceptBindRule(kRoleProp, std::string("target")),
+              },
+          .properties = {fdf::MakeProperty2(kFlagProp, false)},
+      }},
+  };
+
+  bind_manager()->TryBindForParentSpecs(flag_and_reject_specs);
+  RunLoopUntilIdle();
+  VerifyBindOngoingWithRequests(
+      {{"node-missing-flag", 1}, {"node-rejected", 0}, {"node-dup-proto", 0}});
+  DriverIndexReplyWithNoMatch("node-missing-flag");
+  VerifyNoOngoingBind();
+
+  // 2. Matching BIND_PROTOCOL == 10u (the overwritten first entry) must skip node-dup-proto,
+  // whereas matching BIND_PROTOCOL == 20u (the last entry) must match it.
+  std::vector<fuchsia_driver_framework::ParentSpec2> stale_proto_specs = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules = {fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, 10u)},
+          .properties = {fdf::MakeProperty2(bind_fuchsia::PROTOCOL, 10u)},
+      }},
+  };
+  bind_manager()->TryBindForParentSpecs(stale_proto_specs);
+  RunLoopUntilIdle();
+  VerifyNoOngoingBind();
+  EXPECT_EQ(0u, CurrentBindManagerData().driver_index_request_count);
+
+  std::vector<fuchsia_driver_framework::ParentSpec2> latest_proto_specs = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules = {fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, 20u)},
+          .properties = {fdf::MakeProperty2(bind_fuchsia::PROTOCOL, 20u)},
+      }},
+  };
+  bind_manager()->TryBindForParentSpecs(latest_proto_specs);
+  RunLoopUntilIdle();
+  VerifyBindOngoingWithRequests(
+      {{"node-missing-flag", 0}, {"node-rejected", 0}, {"node-dup-proto", 1}});
+  DriverIndexReplyWithDriver("node-dup-proto");
+  VerifyNoOngoingBind();
+  VerifyOrphanedNodes({"node-missing-flag", "node-rejected"});
+}
+
+TEST_F(BindManagerTest, TryBindForParentSpecsCoalescesDuringOngoingBindAndYieldsToBindAll) {
+  AddAndOrphanNode("node-a");
+  AddAndOrphanNode("node-b");
+  AddAndOrphanNode("node-c");
+  AddAndBindNode_EXPECT_BIND_START("node-d");
+
+  // Queue two filtered spec requests while node-d's bind wave is ongoing; they should coalesce
+  // into a single follow-up wave matching only node-a and node-c once node-d finishes.
+  uint32_t node_a_id = instance_ids()["node-a"];
+  uint32_t node_c_id = instance_ids()["node-c"];
+  std::vector<fuchsia_driver_framework::ParentSpec2> spec_a = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules = {fdf::MakeAcceptBindRule(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID,
+                                                 node_a_id)},
+          .properties = {fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID, node_a_id)},
+      }},
+  };
+  std::vector<fuchsia_driver_framework::ParentSpec2> spec_c = {
+      fuchsia_driver_framework::ParentSpec2{{
+          .bind_rules = {fdf::MakeAcceptBindRule(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID,
+                                                 node_c_id)},
+          .properties = {fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_INSTANCE_ID, node_c_id)},
+      }},
+  };
+  bind_manager()->TryBindForParentSpecs(spec_a);
+  bind_manager()->TryBindForParentSpecs(spec_c);
+
+  DriverIndexReplyWithDriver("node-d");
+  VerifyBindOngoingWithRequests({{"node-a", 1}, {"node-b", 0}, {"node-c", 1}});
+
+  // Now queue both another filtered spec and a full TryBindAllAvailable() while this wave runs:
+  // TryBindAllAvailable() must supersede pending_spec_bind_filters_ without duplicate MatchDriver
+  // requests.
+  bind_manager()->TryBindForParentSpecs(spec_a);
+  InvokeTryBindAllAvailable_EXPECT_QUEUED();
+
+  DriverIndexReplyWithNoMatch("node-a");
+  DriverIndexReplyWithDriver("node-c");
+
+  // Only the remaining orphans (node-a and node-b) should receive one MatchDriver request each.
+  VerifyBindOngoingWithRequests({{"node-a", 1}, {"node-b", 1}});
+  DriverIndexReplyWithDriver("node-a");
+  DriverIndexReplyWithDriver("node-b");
+  VerifyNoOngoingBind();
+  VerifyOrphanedNodes({});
 }

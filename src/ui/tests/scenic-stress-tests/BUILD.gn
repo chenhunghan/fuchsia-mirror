@@ -76,9 +76,7 @@ fuchsia_unittest_package("scenic-stress-test-flatland") {
     }
     environments = [
       {
-        dimensions = {
-          device_type = "AEMU"
-        }
+        dimensions = aemu_env.dimensions
         tags = [ "stress-tests" ]
       },
     ]
@@ -100,13 +98,7 @@ fuchsia_unittest_package("scenic-stress-test-flatland-short") {
     log_settings = {
       max_severity = "ERROR"
     }
-    environments = [
-      {
-        dimensions = {
-          device_type = "AEMU"
-        }
-      },
-    ]
+    environments = [ aemu_env ]
   }
   test_type = "vulkan"
 }

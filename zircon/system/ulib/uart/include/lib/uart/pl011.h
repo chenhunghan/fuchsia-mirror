@@ -210,9 +210,19 @@ struct Driver : public DriverBase<Driver, ZBI_KERNEL_DRIVER_PL011_UART, zbi_dcfg
 
   template <typename IoProvider, typename IrqProvider>
   void InitInterrupt(IoProvider& io, IrqProvider& irq) {
-    // Clear any pending interrupts.
+    // Clear any pending interrupts, then drain any characters already in the
+    // RX FIFO before enabling reception. QEMU's PL011 accepts input while
+    // CR.RXE is 0 and only asserts INT_RX when the FIFO count transitions from
+    // 0 to 1, so leaving pre-existing bytes in the FIFO after clearing ICR
+    // suppresses future RX interrupts. Bound the drain loop so a device or VMM
+    // that leaves RXFE cleared cannot hang boot.
     auto icr = InterruptClearRegister::Get().FromValue(0x3ff);
     icr.WriteTo(io.io());
+    static constexpr size_t kMaxRxFifoDrain = 1024;
+    for (size_t i = 0;
+         i < kMaxRxFifoDrain && !FlagRegister::Get().ReadFrom(io.io()).rx_fifo_empty(); ++i) {
+      DataRegister::Get().ReadFrom(io.io());
+    }
 
     // Set the FIFO trigger levels to fastest trigger (1/8 capacity).
     auto fifo = InterruptFifoLevelSelectRegister::Get().FromValue(0);

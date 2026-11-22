@@ -91,6 +91,10 @@ sdk_source_set("trace-engine-headersonly") {
 trace_engine_library("trace-engine") {
   sdk = "shared"
   sdk_publishable = "partner"
+
+  # In the toolchain that matches Bazel's build configuration, use the
+  # Bazel-built library. See //build/bazel/bazel_shared_library.gni.
+  bazel_target = ":trace-engine_gn_outputs"
 }
 
 # 2) Static library

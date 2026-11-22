@@ -40,7 +40,7 @@ include /path/to/another/OWNERS
 per-file main.c = validuser3@example.com
 ```
 
-## Best practices
+## Best practices {:#best-practices}
 
 * It's important to have at least two individuals in an `OWNERS` file. Having
   areas of Fuchsia with a single owner leads to single points of failure. Having

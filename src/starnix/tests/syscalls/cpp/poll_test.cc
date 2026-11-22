@@ -141,11 +141,7 @@ TEST(PollTest, ReportsEintrWhenHandlerRuns) {
 
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([&] {
-    struct sigaction sa = {};
-    sa.sa_handler = [](int) {};
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    SAFE_SYSCALL(sigaction(SIGALRM, &sa, nullptr));
+    test_helper::ScopedSigAction sa(SIGALRM, [](int) {}, SA_RESTART);
 
     // Arming the timer just before the call keeps the signal from arriving too early.
     struct itimerval timer = {};

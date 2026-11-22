@@ -63,7 +63,7 @@ Reviewing third-party code can be a lot of work for everyone involved. It's
 important to follow the process for requesting and performing third-party
 reviews to keep the amount of overhead and repeated work to a minimum.
 
-### Adding or updating an external crate
+### Adding or updating an external crate {#adding-or-updating-an-external-crate}
 
 When you're adding or updating an external crate and need your changes reviewed
 by someone else:
@@ -87,7 +87,7 @@ by someone else:
         to batch the transitive updates into one or more batches to reduce the
         CL size. To reduce review overhead, dependencies that aren't used on our
         supported platforms can be
-        [replaced](/docs/development/languages/rust/external_crates.md#importing_a_subset_of_files_in_a_crate)
+        [replaced](/docs/development/languages/rust/external_crates.md#importing-a-subset-of-files-in-a-crate)
         with an empty crate using cargo's manifest patching feature.
 4.  Add reviewers to the CL. Anyone (including you!) can review as long as they
     understand this section and the guidelines below.
@@ -126,7 +126,7 @@ When someone else has requested a review from you, make sure to:
     *   Closing the CL and looking for alternatives.
     *   If the offending code is in a dependency that isn't used on
         Fuchsia's supported platforms, we can
-        [replace the crate](/docs/development/languages/rust/external_crates.md#importing_a_subset_of_files_in_a_crate)
+        [replace the crate](/docs/development/languages/rust/external_crates.md#importing-a-subset-of-files-in-a-crate)
         with an empty one using cargo's manifest patching feature.
 
 ### Approving an external addition or update (OWNERS)

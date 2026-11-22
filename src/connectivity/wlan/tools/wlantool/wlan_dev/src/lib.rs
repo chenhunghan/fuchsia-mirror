@@ -645,9 +645,21 @@ async fn do_ap(cmd: opts::ApCmd, monitor_proxy: DeviceMonitor) -> Result<(), Err
     match cmd {
         opts::ApCmd::Start { iface_id, ssid, password, channel, band } => {
             let sme = get_ap_sme(monitor_proxy, iface_id).await?;
+            let authentication = match password {
+                None => fidl_internal::Authentication {
+                    protocol: fidl_internal::Protocol::Open,
+                    credentials: None,
+                },
+                Some(password) => fidl_internal::Authentication {
+                    protocol: fidl_internal::Protocol::Wpa2Personal,
+                    credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                        fidl_internal::WpaCredentials::Passphrase(password.into_bytes()),
+                    ))),
+                },
+            };
             let config = fidl_sme::ApConfig {
                 ssid: ssid.as_bytes().to_vec(),
-                password: password.map_or(vec![], |p| p.as_bytes().to_vec()),
+                authentication,
                 radio_cfg: fidl_sme::RadioConfig {
                     phy: PhyArg::Ht.into(),
                     primary: fidl_ieee80211::ChannelNumber { band: band.into(), number: channel },
@@ -754,7 +766,7 @@ async fn handle_connect_transaction(
         .context("failed to receive connect result before the channel was closed")?
     {
         match evt {
-            ConnectTransactionEvent::OnConnectResult { result } => {
+            ConnectTransactionEvent::OnConnectResult { result, .. } => {
                 match (result.code, result.is_credential_rejected) {
                     (fidl_ieee80211::StatusCode::Success, _) => println!("Connected successfully"),
                     (fidl_ieee80211::StatusCode::Canceled, _) => {

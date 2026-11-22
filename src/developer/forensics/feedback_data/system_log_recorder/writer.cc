@@ -11,21 +11,48 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <deque>
+#include <optional>
 #include <string>
 
 #include "src/developer/forensics/feedback_data/system_log_recorder/reader.h"
+#include "src/developer/forensics/utils/numbered_entries.h"
 #include "src/developer/forensics/utils/vmo.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/path.h"
-#include "src/lib/fxl/strings/string_number_conversions.h"
 
 namespace forensics {
 namespace feedback_data {
 namespace system_log_recorder {
+namespace {
 
-SystemLogWriter::SystemLogWriter(const std::string& logs_dir, size_t max_num_files,
-                                 StorageSize total_log_size, std::unique_ptr<Decoder> decoder)
+// Returns the paths of the log files in the numbered boot directories of |previous_logs_dir|,
+// ordered from the oldest boot to the newest boot and from the oldest file to the newest file
+// within each boot.
+std::deque<std::string> GetPreviousBootFiles(const std::optional<std::string>& previous_logs_dir) {
+  if (!previous_logs_dir.has_value()) {
+    return {};
+  }
+
+  std::deque<std::string> paths;
+  for (const uint64_t seq : GetNumberedEntries(*previous_logs_dir, EntryType::kDirectory)) {
+    const std::string boot_dir = files::JoinPath(*previous_logs_dir, std::to_string(seq));
+    for (const uint64_t file_num : GetNumberedEntries(boot_dir, EntryType::kFile)) {
+      paths.push_back(files::JoinPath(boot_dir, std::to_string(file_num)));
+    }
+  }
+
+  return paths;
+}
+
+}  // namespace
+
+SystemLogWriter::SystemLogWriter(const std::string& logs_dir, const size_t max_num_files,
+                                 StorageSize total_log_size, std::unique_ptr<Decoder> decoder,
+                                 const std::optional<std::string>& previous_logs_dir)
     : logs_dir_(logs_dir),
+      previous_logs_dir_(previous_logs_dir),
       max_num_files_(max_num_files),
       total_log_size_(total_log_size),
       decoder_(std::move(decoder)),
@@ -37,20 +64,13 @@ SystemLogWriter::SystemLogWriter(const std::string& logs_dir, size_t max_num_fil
     return;
   }
 
-  std::vector<std::string> current_log_files;
-  files::ReadDirContents(logs_dir_, &current_log_files);
+  previous_boot_file_queue_ = GetPreviousBootFiles(previous_logs_dir_);
 
-  // Get the numbers the previous writer assigned to the files – there should only be previous
-  // files in case of a component restart.
-  for (const std::string& fname : current_log_files) {
-    size_t file_num = 0;
-    if (fxl::StringToNumberWithError(fname, &file_num)) {
-      file_queue_.push_back(file_num);
-    }
+  // Get the numbers the previous writer assigned to the files, sorted such that the oldest files
+  // will be deleted first. There should only be previous files in case of a component restart.
+  for (const uint64_t file_num : GetNumberedEntries(logs_dir_, EntryType::kFile)) {
+    file_queue_.push_back(file_num);
   }
-
-  // Sort the files such that the oldest files will be deleted first.
-  std::sort(file_queue_.begin(), file_queue_.end());
 
   StartNewFile();
 }
@@ -59,6 +79,7 @@ bool SystemLogWriter::RecreateDirectoryIfCachePurged() {
   if (!files::IsDirectory(logs_dir_)) {
     recovering_from_purge_ = true;
     file_queue_.clear();
+    previous_boot_file_queue_ = GetPreviousBootFiles(previous_logs_dir_);
 
     // Invalidate the current file descriptor. The current in-flight write will be discarded because
     // it was encoded against a pre-purge dictionary. A new file will be started at the end of
@@ -92,10 +113,16 @@ void SystemLogWriter::StartNewFile() {
   }
 
   const size_t next_file_num = (file_queue_.empty()) ? 0u : file_queue_.back() + 1;
-  if (file_queue_.size() >= max_num_files_) {
+  while (previous_boot_file_queue_.size() + file_queue_.size() >= max_num_files_) {
     TRACE_DURATION("feedback:io", "SystemLogWriter::RemoveFile");
-    remove(Path(file_queue_.front()).c_str());
-    file_queue_.pop_front();
+    if (!previous_boot_file_queue_.empty()) {
+      // Feedback may have already deleted the file, e.g., when its boot expired.
+      std::remove(previous_boot_file_queue_.front().c_str());
+      previous_boot_file_queue_.pop_front();
+    } else {
+      std::remove(Path(file_queue_.front()).c_str());
+      file_queue_.pop_front();
+    }
   }
 
   file_queue_.push_back(next_file_num);

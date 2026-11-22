@@ -7,6 +7,7 @@
 
 #include <fidl/fuchsia.component.runner/cpp/natural_types.h>
 #include <fidl/fuchsia.process/cpp/wire_types.h>
+#include <lib/zx/eventpair.h>
 #include <lib/zx/result.h>
 
 namespace driver_manager {
@@ -38,9 +39,7 @@ class ComponentOwner {
 
   virtual bool SkipInjectedOffers() const { return false; }
 
-  virtual std::optional<fuchsia_component_sandbox::DictionaryRef> TakeDictionary() {
-    return std::nullopt;
-  }
+  virtual std::optional<zx::eventpair> TakeDictionary() { return std::nullopt; }
 };
 
 }  // namespace driver_manager

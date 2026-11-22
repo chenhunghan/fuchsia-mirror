@@ -23,7 +23,19 @@
 #include <usb/usb.h>
 
 namespace usb_cdc_acm_serial {
-namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
+constexpr int32_t kReadRequestCount = 8;
+constexpr int32_t kWriteRequestCount = 8;
+
+constexpr uint32_t kDefaultBaudRate = 115200;
+constexpr uint32_t kDefaultConfig = fuchsia_hardware_serialimpl::wire::kSerialDataBits8 |
+                                    fuchsia_hardware_serialimpl::wire::kSerialStopBits1 |
+                                    fuchsia_hardware_serialimpl::wire::kSerialParityNone;
+
+constexpr uint32_t kUsbBufferSize = 2048;
+
+constexpr uint32_t kUsbCdcAcmSetLineCoding = 0x20;
+constexpr uint32_t kUsbCdcAcmGetLineCoding = 0x21;
 
 class UsbCdcAcmDevice : public fdf::DriverBase2,
                         public fdf::WireServer<fuchsia_hardware_serialimpl::Device> {

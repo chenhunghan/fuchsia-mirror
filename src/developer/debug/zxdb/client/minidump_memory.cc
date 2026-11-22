@@ -106,7 +106,7 @@ std::vector<debug_ipc::MemoryBlock> MinidumpMemory::ReadMemoryBlocks(uint64_t ad
     if (address < region_start) {
       auto& block = res.emplace_back();
       block.address = address;
-      block.size = std::min(end, region_start) - address;
+      block.size = static_cast<uint32_t>(std::min(end, region_start) - address);
       block.valid = false;
       if (end <= region_start) {
         address = end;
@@ -118,7 +118,7 @@ std::vector<debug_ipc::MemoryBlock> MinidumpMemory::ReadMemoryBlocks(uint64_t ad
     if (address < region_end) {
       auto& block = res.emplace_back();
       block.address = address;
-      block.size = std::min(end, region_end) - address;
+      block.size = static_cast<uint32_t>(std::min(end, region_end) - address);
       block.data.resize(block.size);
       block.valid = region_memory->ReadBytes(address, block.size, block.data.data()).ok();
       if (!block.valid) {
@@ -135,7 +135,7 @@ std::vector<debug_ipc::MemoryBlock> MinidumpMemory::ReadMemoryBlocks(uint64_t ad
   if (address < end) {
     auto& block = res.emplace_back();
     block.address = address;
-    block.size = end - address;
+    block.size = static_cast<uint32_t>(end - address);
     block.valid = false;
   }
   return res;

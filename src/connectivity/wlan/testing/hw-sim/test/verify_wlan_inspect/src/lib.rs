@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use anyhow::{Error, format_err};
-use diagnostics_assertions::{AnyProperty, assert_data_tree};
-use diagnostics_hierarchy::DiagnosticsHierarchy;
+use diagnostics_assertions::{AnyProperty, PropertyAssertion, assert_data_tree};
+use diagnostics_hierarchy::{DiagnosticsHierarchy, Property};
 use diagnostics_reader::{ArchiveReader, ComponentSelector};
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_policy as fidl_policy;
@@ -18,6 +18,44 @@ use wlan_hw_sim::event::{Handler, action};
 use wlan_hw_sim::*;
 
 static BSSID: LazyLock<Bssid> = LazyLock::new(|| Bssid::from([0x62, 0x73, 0x73, 0x66, 0x6f, 0x6f]));
+
+/// Matches a network identifier as recorded by a component with redaction enabled.
+///
+/// wlandevicemonitor redacts network identifiers by default and this realm does not route
+/// `fuchsia.connectivity.RedactNetworkIdentifiers`, so it tells the SME (in the driver host) to
+/// redact too, and the SME's Inspect records the redacted forms: the BSSID keeps its OUI, the SSID
+/// is replaced by a fixed-length digest, and both end in the `*` redaction marker. The remaining
+/// bytes are zeros (masked) or a salted hash depending on whether
+/// `fuchsia.diagnostics.SaltProvider` is reachable, so only the shape is checked.
+struct Redacted {
+    prefix: &'static str,
+    len: usize,
+}
+
+impl PropertyAssertion for Redacted {
+    fn run(&self, actual: &Property) -> Result<(), Error> {
+        match actual {
+            Property::String(_, v)
+                if v.len() == self.len && v.starts_with(self.prefix) && v.ends_with('*') =>
+            {
+                Ok(())
+            }
+            Property::String(_, v) => Err(format_err!(
+                "expected a redacted identifier of length {} starting with {:?} and ending in '*', \
+                 found {:?}",
+                self.len,
+                self.prefix,
+                v
+            )),
+            _ => Err(format_err!("expected String, found {}", actual.discriminant_name())),
+        }
+    }
+}
+
+/// `62:73:73:xx:xx:xx*`
+const REDACTED_BSSID: Redacted = Redacted { prefix: "62:73:73:", len: 18 };
+/// `<ssid-xxxxxxxxxxxxxxxx>*`
+const REDACTED_SSID: Redacted = Redacted { prefix: "<ssid-", len: 24 };
 
 #[rustfmt::skip]
 const WSC_IE_BODY: &'static [u8] = &[
@@ -157,8 +195,8 @@ async fn verify_wlan_inspect() {
                         status: contains {
                             status_str: "connected",
                             connected_to: contains {
-                                bssid: BSSID.to_string(),
-                                ssid: AP_SSID.to_string(),
+                                bssid: REDACTED_BSSID,
+                                ssid: REDACTED_SSID,
                                 wsc: {
                                     manufacturer: "ASUSTek Computer Inc.",
                                     model_name: "RT-AC58U",
@@ -219,8 +257,8 @@ async fn verify_wlan_inspect() {
                         status: contains {
                             status_str: "idle",
                             prev_connected_to: contains {
-                                bssid: BSSID.to_string(),
-                                ssid: AP_SSID.to_string(),
+                                bssid: REDACTED_BSSID,
+                                ssid: REDACTED_SSID,
                                 wsc: {
                                     manufacturer: "ASUSTek Computer Inc.",
                                     model_name: "RT-AC58U",

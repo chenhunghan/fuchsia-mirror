@@ -5,17 +5,19 @@
 import("//build/components.gni")
 
 # `fuchsia-pkg-testing-tests` stays in GN because it uses
-# `//src/connectivity/network/dns:component`,
+# `//src/connectivity/network/dns:package`,
 # `//src/connectivity/network/netstack3:package-for-tests`, and
 # `//src/storage/tools/blobfs-compression`, which have no Bazel build yet.
 fuchsia_unittest_package("fuchsia-pkg-testing-tests") {
   manifest = "meta/fuchsia-pkg-testing-tests.cml"
   deps = [
     ":fuchsia-pkg-testing_test",
-    "//src/connectivity/network/dns:component",
     "//src/storage/tools/blobfs-compression",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+  ]
 }
 
 group("tests") {
@@ -197,6 +199,7 @@ rustc_test("fuchsia-pkg-testing_test") {
          [
            "//src/lib/fuchsia",
            "//third_party/rust_crates:assert_matches",
+           "//third_party/rust_crates:test-case",
          ]
   output_name = "fuchsia_pkg_testing_lib_test"
   lint_config = "//build/config/rust/lints:clippy_warn_all"

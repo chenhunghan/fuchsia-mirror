@@ -60,7 +60,7 @@ pub(in crate::security) fn spawn_kernel_with_selinux_hooks_test_policy_and_run<F
     callback: F,
 ) -> impl Future<Output = ()>
 where
-    F: FnOnce(&mut CurrentTask, &Arc<SecurityServer>) + Send + Sync + 'static,
+    F: FnOnce(&mut CurrentTask, &SecurityServer) + Send + Sync + 'static,
 {
     spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
         let policy_bytes = HOOKS_TESTS_BINARY_POLICY.to_vec();

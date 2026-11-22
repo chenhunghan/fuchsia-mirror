@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/host:defs.bzl", "cc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":catapult_converter_unittest"],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+fx_cc_library(
+    name = "converter",
+    srcs = ["converter.cc"],
+    hdrs = ["converter.h"],
+    # converter.cc uses angled workspace-root `#include <src/...>`.
+    copts = ["-I."],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+    ],
+    deps = ["//third_party/rapidjson"],
+    alwayslink = True,
+)
+
+cc_binary_host_tool(
+    name = "converter_bin",
+    srcs = ["main.cc"],
+    visibility = [
+        "//src/performance/lib/perf_publish:__pkg__",
+        "//src/performance/lib/perf_publish/tests:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        ":converter",
+        "//third_party/rapidjson",
+    ],
+)
+
+host_cc_test(
+    name = "catapult_converter_unittest",
+    srcs = ["converter_unittest.cc"],
+    deps = [
+        ":converter",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//third_party/rapidjson",
+        "@com_google_googletest//:gtest",
+    ],
+)

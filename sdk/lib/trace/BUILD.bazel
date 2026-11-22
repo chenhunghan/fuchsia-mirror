@@ -16,6 +16,8 @@ exports_files(
         "//bundles/assembly:__subpackages__",
         "//sdk/lib/vulkan:__pkg__",
         "//src/connectivity/policy/http-client:__pkg__",
+        "//src/media/audio/services/ffxdaemon:__pkg__",
+        "//src/power/testing/fake-powersensor:__pkg__",
         "//src/starnix/modules/usbfs:__pkg__",
     ],
 )
@@ -23,12 +25,18 @@ exports_files(
 cml_shard(
     name = "offer.shard",
     shard = "offer.shard.cml",
+    visibility = ["//src/sys/component_manager:__pkg__"],
 )
 
 cml_shard(
     name = "use.shard",
     shard = "use.shard.cml",
-    visibility = ["//src/virtualization/bin/vmm/device:__subpackages__"],
+    visibility = [
+        "//src/ui/examples/simplest-app-flatland:__pkg__",
+        "//src/ui/lib/input_pipeline:__pkg__",
+        "//src/ui/testing/input_helper:__pkg__",
+        "//src/virtualization/bin/vmm/device:__subpackages__",
+    ],
 )
 
 cml_shard(
@@ -40,6 +48,29 @@ cml_shard(
     shard = "client.shard.cml",
     visibility = [
         "//examples:__subpackages__",
+        "//src/camera/bin/device_watcher:__pkg__",
+        "//src/connectivity:__subpackages__",
+        "//src/devices/testing:__pkg__",
+        "//src/fonts:__pkg__",
+        "//src/lib/trace/rust/bench:__pkg__",
+        "//src/lib/vulkan:__pkg__",
+        "//src/media:__pkg__",
+        "//src/memory/pressure_signaler:__pkg__",
+        "//src/power/broker:__pkg__",
+        "//src/power/system-activity-governor-controller:__pkg__",
+        "//src/power/testing/topology-test-daemon:__pkg__",
+        "//src/power/testing/topology-test-daemon/power-element-runner:__pkg__",
+        "//src/storage/erofs/component:__pkg__",
+        "//src/storage/fvm:__pkg__",
+        "//src/storage/fxfs:__pkg__",
+        "//src/storage/gpt/component:__pkg__",
+        "//src/storage/io_stress:__pkg__",
+        "//src/sys/test_runners/elf:__pkg__",
+        "//src/sys/test_runners/gtest:__pkg__",
+        "//src/sys/test_runners/gunit:__pkg__",
+        "//src/sys/test_runners/rust:__pkg__",
+        "//src/sys/testing:__pkg__",
+        "//src/sys/time/testing/wake-alarms:__pkg__",
         "//src/sys/time/timekeeper:__pkg__",
     ],
 )

@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Subpackages that every package of tests using the fixture
+# (//src/connectivity/lowpan/tests/thread-integration-tests/common) must
+# contain: the fixture launches their components in netemul realms by subpackage
+# URL.
+thread_test_subpackages = [
+  # Creates the hermetic realms.
+  "//src/connectivity/network/testing/netemul/service:package",
+
+  # Per-node components.
+  "//src/connectivity/lowpan/drivers/lowpan-ot-driver",
+  "//src/connectivity/lowpan/service:lowpanservice",
+  "//src/connectivity/network/mdns/service:mdns",
+  "//src/connectivity/network/netstack3:package-debug",
+  "//src/connectivity/openthread/tests/ot-rcp-fuchsia",
+
+  # The simulated medium, one per test.
+  "//src/connectivity/openthread/tests/rf_medium_dispatcher:rf-medium-dispatcher",
+]

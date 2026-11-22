@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/fidl/fidlc/testdata:fidl_golden_library.bzl", "fidl_golden_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fidl_golden_library(
+    name = "test.transitivedependencies",
+    srcs = ["top.test.fidl"],
+    excluded_checks = ["invalid-copyright-for-platform-source-library"],
+    experimental_flags = ["output_index_json"],
+    deps = [
+        ":test.bottom",
+        ":test.middle",
+    ],
+)
+
+fidl_golden_library(
+    name = "test.middle",
+    srcs = ["middle.test.fidl"],
+    excluded_checks = ["invalid-copyright-for-platform-source-library"],
+    deps = [":test.bottom"],
+)
+
+fidl_golden_library(
+    name = "test.bottom",
+    srcs = ["bottom.test.fidl"],
+    excluded_checks = ["invalid-copyright-for-platform-source-library"],
+)
+# LINT.ThenChange(BUILD.gn)

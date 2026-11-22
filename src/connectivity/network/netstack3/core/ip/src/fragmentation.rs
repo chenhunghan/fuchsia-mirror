@@ -656,7 +656,7 @@ mod tests {
     use packet_formats::ipv6::{Ipv6Header, Ipv6Packet, Ipv6PacketBuilder};
     use test_case::test_case;
 
-    const TEST_MTU: Mtu = Ipv6::MINIMUM_LINK_MTU;
+    const TEST_MTU: Mtu = Ipv6::MINIMUM_LINK_MTU.get();
 
     fn gen_body(len: usize) -> Vec<u8> {
         // Cycle bytes until 251 which is the largest prime that can fit in a

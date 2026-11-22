@@ -9,10 +9,7 @@
 use core::arch::asm;
 use zx_types::{zx_paddr_t, zx_vaddr_t};
 
-/// Write back memory type, as reported in `X86_MSR_IA32_VMX_BASIC` and used in the EPTP.
-///
-/// Must match `VMX_MEMORY_TYPE_WRITE_BACK` in `vmx_cpu_state_priv.h`.
-const VMX_MEMORY_TYPE_WRITE_BACK: u64 = 0x06;
+use super::vmx_cpu_state::VMX_MEMORY_TYPE_WRITE_BACK;
 
 /// INVVPID invalidation types.
 ///
@@ -33,9 +30,6 @@ const VMX_MEMORY_TYPE_WRITE_BACK: u64 = 0x06;
 ///   VPID specified in the INVVPID descriptor except global translations. In
 ///   some cases, it may invalidate global translations (and mappings with other
 ///   VPIDs) as well.
-///
-/// Must match the C++ `InvVpid` in `<arch/x86/hypervisor/invalidate.h>`, as it is passed across
-/// FFI.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvVpid {
@@ -84,9 +78,6 @@ pub fn invvpid(invalidation: InvVpid, vpid: u16, address: zx_vaddr_t) {
 ///   mappings as well.
 /// * Global invalidation. If the INVEPT type is 2, the logical processor
 ///   invalidates mappings associated with all EPTPs.
-///
-/// Must match the C++ `InvEpt` in `<arch/x86/hypervisor/invalidate.h>`, as it is passed across
-/// FFI.
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvEpt {

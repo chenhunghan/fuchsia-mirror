@@ -9,12 +9,21 @@ Each check is implemented as a small module in this directory that subclasses
    subclassing `BazelCheck` from `framework` (see
    [`BazelCheck` Attributes](#bazelcheck-attributes) below) and decorating it
    with `@register_check`.
-   * Optionally, add implementation documentation, explanations, design
-     rationale, or caveats in `scripts/shac/bazel_lint/checks/<check_name>.md`
-     (the same base name as the check module) and reference it from the
-     docstring at the top of `<check_name>.py`. (User-facing style guidelines
-     belong in `//docs/development/languages/bazel/style/`, whereas
-     `<check_name>.md` is for check-specific implementation documentation.)
+   * **High-level overview**: When a check enforces multiple lint conditions,
+     performs multi-pass analysis (such as in `check_module()`), or exceeds
+     ~100 lines, include a high-level overview in the module docstring at the
+     top of `<check_name>.py` (or in
+     `scripts/shac/bazel_lint/checks/<check_name>.md` referenced from the
+     module docstring) summarizing each condition enforced and the analysis
+     passes/data flow. For simpler checks, adding `<check_name>.md` for
+     implementation documentation, design rationale, or caveats is optional.
+     (User-facing style guidelines belong in
+     `//docs/development/languages/bazel/style/`, whereas `<check_name>.md` is
+     for check-specific implementation documentation.)
+   * **Pass and branch comments**: For multi-pass or non-trivial checks, add
+     brief inline comments before each pass and before non-trivial `if`,
+     `elif`, and `else` blocks explaining what invariant, AST pattern, or
+     exemption the branch checks and why.
 2. **Import the module** in [`__init__.py`](./__init__.py) so the check is
    registered when `bazel_lint` loads.
 3. **Register the `shac` check** in
@@ -139,7 +148,7 @@ Each check is implemented as a small module in this directory that subclasses
   (`allowlists/<name>.json`).
 * `file_kinds: frozenset[FileKind]` - The file kinds this check applies to
   (`FileKind.BUILD`, `FileKind.BZL`, `FileKind.MODULE`, `FileKind.WORKSPACE`,
-  `FileKind.PYTHON`). **Important**: Files matching each declared `FileKind`
+  `FileKind.REPO`, `FileKind.PYTHON`). **Important**: Files matching each declared `FileKind`
   must be included in the globs passed to
   `_make_bazel_lint_check(..., applies_to_globs=...)` when registering the check
   in `bazel.star`. If a glob is omitted in `bazel.star`, `shac` will never pass
@@ -380,10 +389,12 @@ traversal helpers:
 
 * `fc.path: str` - Repository-relative path of the file being linted.
 * `fc.kind: FileKind` - Classified `FileKind` (`BUILD`, `BZL`, `MODULE`,
-  `WORKSPACE`, or `PYTHON`).
+  `WORKSPACE`, `REPO`, or `PYTHON`).
 * `fc.tree: ast.Module` - Parsed Python/Starlark root AST node.
 * `fc.lines: list[str]` - File contents split into lines without trailing
   newlines (1-indexed line numbers correspond to `fc.lines[lineno - 1]`).
+* `fc.root: pathlib.Path` - The workspace root directory (defaults to
+  `Path.cwd()`).
 * `fc.loaded_symbols: dict[str, tuple[str, str]]` - Mapping from local symbol
   name to `(module_label, exported_symbol_name)` for all symbols imported via
   `load()`, where `module_label` is normalized via `normalize_repo_prefix()`

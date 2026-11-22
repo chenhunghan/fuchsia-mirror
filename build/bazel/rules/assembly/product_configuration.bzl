@@ -5,16 +5,16 @@
 load("@fuchsia_rules_common//assembly:json_utils.bzl", "extract_labels")
 load(
     "@fuchsia_rules_common//assembly:product_configuration.bzl",
-    "COMMON_PRODUCT_ASSEMBLY_ATTRIBUTES",
-    "common_product_configuration_impl",
+    "PRODUCT_CONFIGURATION_COMMON_ATTRS",
+    "product_configuration_common_impl",
 )
 load("@fuchsia_rules_common//assembly:providers.bzl", "FuchsiaProductConfigInfo")
 load("@fuchsia_rules_common//packages:providers.bzl", "FuchsiaPackageInfo")
 
 def _product_configuration_impl(ctx):
-    assembly_config_binary = ctx.attr._assembly_config[DefaultInfo].files.to_list()[0]
+    assembly_config_binary = ctx.executable._assembly_config
 
-    return common_product_configuration_impl(
+    return product_configuration_common_impl(
         ctx,
         assembly_config_binary,
         bootfs_files_package = ctx.attr.bootfs_files_package,
@@ -24,9 +24,9 @@ _product_configuration = rule(
     doc = """Generates a product configuration file for Fuchsia platform testing (in-tree) only.""",
     implementation = _product_configuration_impl,
     provides = [FuchsiaProductConfigInfo],
-    # Use the common attributes for product assembly, but add the following in-tree-only attributes
-    # and the file for the assembly_config binary from the GN portion of the build.
-    attrs = COMMON_PRODUCT_ASSEMBLY_ATTRIBUTES | {
+    # Use the common attributes for product assembly, plus the in-tree-only
+    # attributes and the Bazel-built `assembly_config` host tool.
+    attrs = PRODUCT_CONFIGURATION_COMMON_ATTRS | {
         "bootfs_files_package": attr.label(
             doc = "A package of files to include in the bootfs of the zbi.",
             providers = [FuchsiaPackageInfo],
@@ -37,7 +37,9 @@ _product_configuration = rule(
             default = False,
         ),
         "_assembly_config": attr.label(
-            default = "@gn_targets//toolchain_host_x64/build/assembly/tools/assembly_config:assembly_config",
+            default = "//build/assembly/tools/assembly_config",
+            executable = True,
+            cfg = "exec",
         ),
     },
 )

@@ -44,6 +44,10 @@ enum WaitReturn {
 /// The Zircon role name that is applied to proxy threads.
 const PROXY_ROLE_NAME: &str = "fuchsia.starnix.runner.proxy";
 
+/// Maximum number of messages to drain from a channel in a single signal wakeup before yielding
+/// back to the outer `select!` loop so the opposite channel direction is not starved.
+const MAX_BATCH_MESSAGES: usize = 16;
+
 /// Starts a thread that listens for new proxies and runs `start_proxy` on each.
 pub fn run_proxy_thread(
     new_proxies: async_channel::Receiver<(
@@ -174,12 +178,11 @@ async fn start_proxy(
     }
 }
 
-/// Forwards any pending messages on `read_channel` to `write_channel`, if the `wait_item.pending`
-/// contains `CHANNEL_READABLE`.
+/// Forwards up to `MAX_BATCH_MESSAGES` pending messages on `read_channel` to `write_channel` when
+/// `signals` contains `CHANNEL_READABLE`.
 ///
-/// If `message_counter` is `Some`, it will be incremented by one when writing the message to the
-/// write_channel.
-
+/// If `message_counter` is `Some`, it is incremented before writing each message to
+/// `write_channel` and rolled back if the write fails.
 fn forward_message(
     signals: &zx::Signals,
     read_channel: &zx::Channel,
@@ -191,25 +194,41 @@ fn forward_message(
 ) -> Result<(), Error> {
     trace_duration("starnix_runner:forward_message", name);
 
+    let mut drained_all = true;
     if signals.contains(zx::Signals::CHANNEL_READABLE) {
-        let (actual_bytes, actual_handles) = {
-            match read_channel.read_uninit(bytes, handles) {
+        let mut batch_count = 0;
+        while batch_count < MAX_BATCH_MESSAGES {
+            let (actual_bytes, actual_handles) = match read_channel.read_uninit(bytes, handles) {
                 zx::ChannelReadResult::Ok(r) => r,
+                zx::ChannelReadResult::Err(zx::Status::SHOULD_WAIT) if batch_count > 0 => break,
                 _ => return Err(anyhow!("Failed to read from channel")),
+            };
+
+            // Increment `message_counter` before `write_channel.write` makes the message visible:
+            // the container runs concurrently and may read the message and decrement
+            // `message_counter` before `forward_message` resumes, which would transiently drop the
+            // counter to zero (or negative) if incremented afterward. Roll back the increment if
+            // the write fails.
+            if let Some(counter) = message_counter {
+                counter.add(1).expect("Failed to add to the proxy's message counter");
+                trace_instant("starnix_runner:forward_message:counter_incremented", name);
             }
-        };
 
-        if let Some(counter) = message_counter {
-            counter.add(1).expect("Failed to add to the proxy's message counter");
-            trace_instant("starnix_runner:forward_message:counter_incremented", name);
+            if let Err(err) = write_channel.write(actual_bytes, actual_handles) {
+                if let Some(counter) = message_counter {
+                    counter.add(-1).expect("Failed to roll back the proxy's message counter");
+                }
+                return Err(err.into());
+            }
+            batch_count += 1;
         }
-
-        write_channel.write(actual_bytes, actual_handles)?;
+        if batch_count == MAX_BATCH_MESSAGES {
+            drained_all = false;
+        }
     }
 
-    // It is important to check for peer closed after readable, in order to flush any
-    // remaining messages in the proxied channel.
-    if signals.contains(zx::Signals::CHANNEL_PEER_CLOSED) {
+    // Check for peer closed only once all readable messages have been flushed from the channel.
+    if drained_all && signals.contains(zx::Signals::CHANNEL_PEER_CLOSED) {
         Err(anyhow!("Proxy peer was closed"))
     } else {
         Ok(())
@@ -345,5 +364,68 @@ mod test {
             .await
             .unwrap();
         assert_eq!(local_message_counter.read().expect("Failed to read counter"), 3);
+    }
+
+    #[fuchsia::test]
+    async fn test_counter_batched_messages() {
+        let (local_client, local_server) = zx::Channel::create();
+        let (remote_client, remote_server) = zx::Channel::create();
+        let message_counter = zx::Counter::create();
+        let local_message_counter = message_counter
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .expect("Failed to duplicate counter");
+
+        let channel_proxy = ChannelProxy {
+            container_channel: local_server,
+            remote_channel: remote_client,
+            message_counter,
+            name: "test".to_string(),
+        };
+        let _task = run_proxy_for_test(channel_proxy);
+
+        const TOTAL_MESSAGES: usize = super::MAX_BATCH_MESSAGES * 2 + 5;
+        for i in 0..TOTAL_MESSAGES {
+            assert!(remote_server.write(&[i as u8], &mut []).is_ok());
+        }
+        std::mem::drop(remote_server);
+
+        let mut buf = zx::MessageBufEtc::new();
+        for i in 0..TOTAL_MESSAGES {
+            fasync::OnSignals::new(&local_client, zx::Signals::CHANNEL_READABLE).await.unwrap();
+            local_client.read_etc(&mut buf).expect("Failed to read forwarded message");
+            assert_eq!(buf.bytes(), &[i as u8]);
+        }
+
+        fasync::OnSignals::new(&local_client, zx::Signals::CHANNEL_PEER_CLOSED).await.unwrap();
+        assert_eq!(
+            local_message_counter.read().expect("Failed to read counter"),
+            TOTAL_MESSAGES as i64
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_counter_rollback_on_write_failure() {
+        let (local_client, local_server) = zx::Channel::create();
+        let (remote_client, remote_server) = zx::Channel::create();
+        let message_counter = zx::Counter::create();
+
+        remote_server.write(&[0x42], &mut []).expect("write to remote");
+        std::mem::drop(local_client);
+
+        let mut bytes = [MaybeUninit::uninit(); zx::sys::ZX_CHANNEL_MAX_MSG_BYTES as usize];
+        let mut handles =
+            [const { MaybeUninit::uninit() }; zx::sys::ZX_CHANNEL_MAX_MSG_HANDLES as usize];
+
+        let res = super::forward_message(
+            &zx::Signals::CHANNEL_READABLE,
+            &remote_client,
+            &local_server,
+            Some(&message_counter),
+            &mut bytes,
+            &mut handles,
+            "test",
+        );
+        assert!(res.is_err());
+        assert_eq!(message_counter.read().expect("Failed to read counter"), 0);
     }
 }

@@ -6,6 +6,7 @@
 #define SRC_DEVELOPER_DEBUG_ZXDB_DEBUG_ADAPTER_SERVER_H_
 
 #include <thread>
+#include <vector>
 
 #include "src/developer/debug/shared/buffered_fd.h"
 #include "src/developer/debug/zxdb/console/console.h"
@@ -45,7 +46,9 @@ class DebugAdapterServer {
   Console* console_;
   uint16_t port_;
 
-  fbl::unique_fd server_socket_;
+  // Loopback listening sockets for incoming client connections, with one socket
+  // per supported address family across IPv6 and IPv4.
+  std::vector<fbl::unique_fd> server_sockets_;
   debug::MessageLoop* main_loop_ = nullptr;
 
   std::unique_ptr<std::thread> background_thread_;

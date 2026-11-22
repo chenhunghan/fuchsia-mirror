@@ -49,6 +49,7 @@ constexpr uint32_t kTxHsAdaptType = 3;
 constexpr uint32_t kPWRMode = 0x11;
 
 constexpr uint32_t kUniproVersion = 5;
+constexpr uint32_t kHibern8Time = 1;
 constexpr uint32_t kTActivate = 2;
 constexpr uint32_t kGranularity = 6;
 constexpr uint32_t kMaxDeviceBufferSize = 64 * 1024;

@@ -48,6 +48,7 @@ cc_library(
         ":shared",
         "@com_google_googletest//:gtest",
     ],
+    alwayslink = True,
 )
 
 cc_library(
@@ -130,6 +131,9 @@ cc_library(
             "message_loop_poll.h",
         ],
     }),
+    # event_pair_watcher.h uses an angled workspace-root #include <src/...>.
+    # @bazel2gn:skip
+    copts = ["-I."],
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/lib/fit-promise",
@@ -137,7 +141,7 @@ cc_library(
         "//src/developer/debug/shared/logging",
         "//src/lib/containers/cpp",
         "//src/lib/fxl",
-        "@re2",
+        "//third_party/re2",
     ] + select({
         "@platforms//os:fuchsia": [
             "//sdk/lib/async:async-cpp",

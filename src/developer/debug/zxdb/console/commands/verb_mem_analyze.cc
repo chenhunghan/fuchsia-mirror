@@ -98,7 +98,7 @@ void RunVerbMemAnalyze(const Command& cmd, fxl::RefPtr<CommandContext> cmd_conte
         if (input_size)
           opts.bytes_to_read = *input_size;
         else if (object_size)
-          opts.bytes_to_read = *object_size;
+          opts.bytes_to_read = static_cast<uint32_t>(*object_size);
         else
           opts.bytes_to_read = kDefaultAnalyzeByteSize;
 

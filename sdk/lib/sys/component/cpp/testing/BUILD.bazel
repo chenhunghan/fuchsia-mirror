@@ -2,9 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
 
 package(default_applicable_licenses = ["//:license"])
+
+# GN's group("cpp") above the bazel2gn sentinel also pulls in
+# realm_builder_server_component transitively. In Bazel, `aspect_hints` enforces
+# the manifest shard and requires dependent `fx_package()` targets to list
+# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`
+# in `components`.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "cpp",
+    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [":cpp_library"],
+)
 
 idk_cc_source_library(
     name = "cpp_library",
@@ -32,25 +47,31 @@ idk_cc_source_library(
         "internal/realm.h",
     ],
     idk_name = "sys_component_cpp_testing",
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp_hlcpp_conversion",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_cpp_hlcpp_conversion",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_hlcpp_conversion",
+    ],
     include_base = "//sdk",
     public_configs = ["//sdk/config"],
     stable = True,
     target_compatible_with = ["@platforms//os:fuchsia"],
-    visibility = [
-        "//sdk/lib/driver/devicetree/testing:__pkg__",
-        "//sdk/lib/driver_test_realm/realm_builder/cpp:__pkg__",
-        "//src/media/audio/drivers/tests:__pkg__",
-        "//src/ui/scenic/lib/flatland/testing:__pkg__",
-    ],
+    visibility = ["//:__subpackages__"],
     deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_hlcpp",
         "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
         "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_cpp",
+        "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_cpp",
         "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_hlcpp",
+        "//sdk/fidl/fuchsia.data:fuchsia.data_cpp",
         "//sdk/fidl/fuchsia.data:fuchsia.data_hlcpp",
         "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
         "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
         "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
+        "//sdk/lib/component/incoming/cpp",
         "//sdk/lib/component/outgoing/cpp",
         "//sdk/lib/fdio",
         "//sdk/lib/fidl/cpp/wire",

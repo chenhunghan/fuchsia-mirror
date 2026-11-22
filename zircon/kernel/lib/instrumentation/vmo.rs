@@ -21,10 +21,8 @@ use crate::vm::vm_object_paged::VmObjectPaged;
 
 use super::InstrumentationDataVmo;
 use super::memory_profile::memory_profile_vmo;
-use super::vmo_ffi::{
-    InstrumentationDataVmoFfi, cpp_llvm_profdata_vmo, cpp_sancov_get_counts_vmo,
-    cpp_sancov_get_pc_vmo,
-};
+use super::profile::llvm_profdata_vmo;
+use super::vmo_ffi::{InstrumentationDataVmoFfi, cpp_sancov_get_counts_vmo, cpp_sancov_get_pc_vmo};
 
 impl InstrumentationDataVmo {
     /// Converts an FFI descriptor returned by a C++ instrumentation VMO getter into a safe Rust
@@ -48,20 +46,6 @@ impl InstrumentationDataVmo {
             scale: ffi.scale,
             handle: ffi.handle,
         }
-    }
-}
-
-/// # Safety
-///
-/// Must be called at most once, after the VM system is initialized, because `LlvmProfdataVmo`
-/// initializes `gProfdataLiveData` and switches live coverage data to the mapped VMO.
-unsafe fn llvm_profdata_vmo() -> InstrumentationDataVmo {
-    let mut ffi = MaybeUninit::<InstrumentationDataVmoFfi>::uninit();
-    // SAFETY: Caller upholds the single-call/VM-initialized requirement; `cpp_llvm_profdata_vmo`
-    // fully initializes `ffi` with `'static` string views and an owned `Handle*` (or null).
-    unsafe {
-        cpp_llvm_profdata_vmo(&mut ffi);
-        InstrumentationDataVmo::from_ffi(ffi.assume_init())
     }
 }
 
@@ -106,9 +90,9 @@ impl OutputStream for StdoutStream {
     }
 }
 
-// This object facilitates doing fprintf directly into the VMO representing
-// the symbolizer markup data file.  This gets the symbolizer context for the
-// kernel and then a dumpfile element for each VMO published.
+/// This object facilitates doing fprintf directly into the VMO representing
+/// the symbolizer markup data file. This gets the symbolizer context for the
+/// kernel and then a dumpfile element for each VMO published.
 struct SymbolizerFile {
     vmo: RefPtr<VmObjectPaged>,
     pos: usize,
@@ -135,7 +119,7 @@ impl SymbolizerFile {
         str.len() as i32
     }
 
-    // Move the VMO into a handle and return it.
+    /// Move the VMO into a handle and return it.
     fn finish(self) -> Option<HandleOwner> {
         // Pass `self.pos` directly as the initial `stream_size` to `VmObjectDispatcher::create`
         // (rather than initializing the stream size to `0` and calling `set_stream_size(self.pos)`,

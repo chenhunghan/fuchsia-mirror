@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
       "data": "test.handlesintypes",
       "start_offset": 8,
       "end_offset": 27
@@ -19,7 +19,7 @@
       "identifier": "test.handlesintypes/obj_type",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "obj_type",
         "start_offset": 202,
         "end_offset": 210
@@ -29,7 +29,7 @@
           "name": "NONE",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "NONE",
             "start_offset": 240,
             "end_offset": 244
@@ -42,7 +42,7 @@
           "name": "VMO",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "VMO",
             "start_offset": 254,
             "end_offset": 257
@@ -60,7 +60,7 @@
       "identifier": "test.handlesintypes/EmptyResourceUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "EmptyResourceUnion",
         "start_offset": 890,
         "end_offset": 908
@@ -72,7 +72,7 @@
       "identifier": "test.handlesintypes/UnionWithHandle",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "UnionWithHandle",
         "start_offset": 429,
         "end_offset": 444
@@ -83,7 +83,7 @@
           "name": "h",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "h",
             "start_offset": 480,
             "end_offset": 481
@@ -101,7 +101,7 @@
       "identifier": "test.handlesintypes/EmptyResourceTable",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "EmptyResourceTable",
         "start_offset": 844,
         "end_offset": 862
@@ -113,7 +113,7 @@
       "identifier": "test.handlesintypes/TableWithHandle",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "TableWithHandle",
         "start_offset": 364,
         "end_offset": 379
@@ -124,7 +124,7 @@
           "name": "h",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "h",
             "start_offset": 406,
             "end_offset": 407
@@ -142,7 +142,7 @@
       "identifier": "test.handlesintypes/EmptyResourceStruct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "EmptyResourceStruct",
         "start_offset": 797,
         "end_offset": 816
@@ -154,7 +154,7 @@
       "identifier": "test.handlesintypes/HandlesInTypes",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
         "data": "HandlesInTypes",
         "start_offset": 503,
         "end_offset": 517
@@ -164,7 +164,7 @@
           "name": "normal_handle",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "normal_handle",
             "start_offset": 542,
             "end_offset": 555
@@ -177,7 +177,7 @@
           "name": "handle_in_vec",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "handle_in_vec",
             "start_offset": 573,
             "end_offset": 586
@@ -190,7 +190,7 @@
           "name": "handle_in_array",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "handle_in_array",
             "start_offset": 611,
             "end_offset": 626
@@ -203,7 +203,7 @@
           "name": "handle_in_mixed_vec_array",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "handle_in_mixed_vec_array",
             "start_offset": 653,
             "end_offset": 678
@@ -216,7 +216,7 @@
           "name": "table_with_handle",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "table_with_handle",
             "start_offset": 714,
             "end_offset": 731
@@ -227,7 +227,7 @@
             "type_identifier": "test.handlesintypes/TableWithHandle",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
               "data": "TableWithHandle",
               "start_offset": 732,
               "end_offset": 747
@@ -238,7 +238,7 @@
           "name": "union_with_handle",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
             "data": "union_with_handle",
             "start_offset": 753,
             "end_offset": 770
@@ -249,7 +249,7 @@
             "type_identifier": "test.handlesintypes/UnionWithHandle",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/handles_in_types.test.fidl",
               "data": "UnionWithHandle",
               "start_offset": 771,
               "end_offset": 786

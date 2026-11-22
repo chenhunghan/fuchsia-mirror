@@ -4,6 +4,7 @@
 
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -17,8 +18,6 @@ fx_cc_library_headers(
     visibility = ["//visibility:private"],
 )
 
-# `shared_library("tee-client-api-experimental")` remains above the bazel2gn
-# sentinel in BUILD.gn because bazel2gn does not translate shared_library().
 fx_cc_library(
     name = "tee-client-api-experimental-static",
     srcs = ["tee-client-api-experimental.cc"],
@@ -28,12 +27,24 @@ fx_cc_library(
         "//sdk/lib/component/incoming/cpp",
         "//sdk/lib/fdio",
         "//sdk/lib/fidl",
-        # Directly #included by tee-client-api-experimental.cc (and listed on
-        # shared_library("tee-client-api-experimental") in BUILD.gn).
+        # Directly #included by tee-client-api-experimental.cc.
         "//sdk/lib/fit",
         "//src/lib/fxl",
         "//zircon/system/ulib/zx",
     ],
     visibility = ["//visibility:private"],
     deps = [":tee-client-api-headers"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "tee-client-api-experimental",
+    # GN dependents include the headers through their dependency on the
+    # shared library.
+    gn_public_deps = [":tee-client-api-headers"],
+    visibility = [
+        "//src/tee/tee-client-api-experimental:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+    deps = [":tee-client-api-experimental-static"],
 )

@@ -51,7 +51,6 @@ fuchsia_cc_driver("ddk-firmware-test") {
 fuchsia_driver_component("ddk-firmware-test-driver") {
   testonly = true
   deps = [ ":ddk-firmware-test" ]
-  info = "meta/ddk-firmware-test-driver-info.json"
   manifest = "meta/ddk-firmware-test-driver.cml"
 }
 

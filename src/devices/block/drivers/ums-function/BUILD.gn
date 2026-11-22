@@ -55,7 +55,6 @@ fuchsia_driver_component("ums-function") {
   component_name = "ums-function"
   dml_label = ":ums-function-dml"
   deps = [ ":ums-function-driver" ]
-  info = "meta/ums-function-info.json"
 }
 
 fuchsia_driver_package("package") {

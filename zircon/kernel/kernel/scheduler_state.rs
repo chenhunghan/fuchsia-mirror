@@ -9,11 +9,7 @@
 use crate::kernel::scheduler::{BaseProfile, SchedDeadlineParams, SchedDuration};
 use crate::kernel::types::{cpu_mask_t, cpu_num_t};
 use crate::platform_rs::timer::{DurationMono, InstantMono};
-use core::mem::{align_of, size_of};
 use object_constants_rs as object_constants;
-use wait_queue_bindings as bindings;
-use zr::OpaqueFacade;
-use zx_types::zx_instant_mono_t;
 
 /// The scheduling state of a thread matching C++ `enum thread_state : uint8_t`.
 // LINT.IfChange(ThreadStateKind)
@@ -38,70 +34,125 @@ pub enum ThreadStateKind {
     Death = 7,
 }
 
-// LINT.ThenChange(//zircon/kernel/kernel/thread_ffi.cc:thread_state)
-
 zr::static_assert!(core::mem::size_of::<ThreadStateKind>() == 1);
 zr::static_assert!(core::mem::align_of::<ThreadStateKind>() == 1);
+
+impl TryFrom<u8> for ThreadStateKind {
+    type Error = u8;
+
+    #[inline]
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Initial),
+            1 => Ok(Self::Ready),
+            2 => Ok(Self::Running),
+            3 => Ok(Self::Blocked),
+            4 => Ok(Self::BlockedReadLock),
+            5 => Ok(Self::Sleeping),
+            6 => Ok(Self::Suspended),
+            7 => Ok(Self::Death),
+            other => Err(other),
+        }
+    }
+}
+
+// LINT.ThenChange(//zircon/kernel/kernel/thread_ffi.cc:thread_state)
 
 /// Facade for the C++ `SchedulerState` class.
 ///
 /// # Safety Invariant
 ///
-/// Any `&SchedulerState` or `&mut SchedulerState` reference must point to a valid, initialized
-/// C++ `SchedulerState` instance guarded by its owning [`Thread`](crate::kernel::thread::Thread)'s
-/// lock.
-#[repr(C)]
+/// Only shared references to `SchedulerState` are formed, and any `&SchedulerState` must point to
+/// a valid, initialized C++ `SchedulerState` instance and be formed in one of two ways:
+/// - With the owning [`Thread`](crate::kernel::thread::Thread)'s lock held for the lifetime of the
+///   reference. Every accessor may be used on such a reference (subject to its own `# Safety`).
+/// - For a thread blocked in a wait queue, with that wait queue's lock held for the lifetime of
+///   the reference (the WAVL tree hooks of the queue's collection). A blocked thread's
+///   `effective_profile` is only written with both locks held, so this excludes writers of
+///   `effective_profile` but not of the other fields: such a reference may only be used with the
+///   `effective_profile_*` accessors and must not reach code that uses any other accessor.
+///
+/// [`Self::curr_cpu`], [`Self::last_cpu`], and [`Self::hard_affinity`] are safe functions that rely
+/// on the first form. The restriction on the second form is upheld by the code that forms such
+/// references (callers of `Thread::scheduler_state_unchecked`), not by the type system.
+#[repr(transparent)]
 pub struct SchedulerState {
-    // Safety invariant: `_facade` is zero-sized and private so safe code cannot construct a
-    // `SchedulerState` by value; any reference points to a live, initialized `SchedulerState`
-    // guarded by its owning `Thread`'s lock, and `OpaqueFacade` marks `SchedulerState` as
-    // `!Freeze` and `!Unpin` for FFI mutation.
-    _facade: OpaqueFacade,
+    // Safety invariant: `_storage` is private so safe code cannot construct a `SchedulerState` by
+    // value; any reference points to a live, initialized `SchedulerState` and is formed as the
+    // type's safety invariant describes. Spanning the whole mirrored struct gives a
+    // `&SchedulerState` provenance over every field the accessors below read, and `Opaque` marks
+    // `SchedulerState` as `!Freeze` and `!Unpin`, since the scheduler mutates the fields under its
+    // own locks.
+    _storage: zr::Opaque<crate::kernel::scheduler::SchedulerState>,
 }
 
-zr::static_assert!(core::mem::size_of::<SchedulerState>() == 0);
-
 impl SchedulerState {
+    /// Raw pointer to the mirrored `crate::kernel::scheduler::SchedulerState` this facade stands
+    /// for.
+    ///
+    /// Never dereferenced into a reference to the whole struct: its fields are guarded by
+    /// different locks (see `Thread::scheduler_state`), so each accessor below projects only the
+    /// field it reads.
+    #[inline]
+    fn raw(&self) -> *const crate::kernel::scheduler::SchedulerState {
+        self._storage.get().cast_const()
+    }
+
     /// Returns the CPU the thread is currently assigned to, or `INVALID_CPU` if it is not
     /// currently assigned to a CPU.
+    ///
+    /// Requires a reference formed with the owning thread's lock held (see the type's safety
+    /// invariant).
     #[inline]
     pub fn curr_cpu(&self) -> cpu_num_t {
-        // SAFETY: `self` is a valid `SchedulerState` reference.
-        unsafe { cpp_scheduler_state_curr_cpu(self) }
+        // SAFETY: `self.raw()` points to the underlying `SchedulerState` that `self` spans, and
+        // `&raw const` projects the `curr_cpu` field place without forming a reference to the
+        // whole struct. By `SchedulerState`'s safety invariant, a reference used with this
+        // accessor was formed with the owning thread's lock held, and `curr_cpu` is only written
+        // with that lock held exclusively, so the read does not race with a write.
+        unsafe { (&raw const (*self.raw()).curr_cpu).read() }
     }
 
     /// Returns the CPU the thread last ran on, or `INVALID_CPU` if it has never run.
+    ///
+    /// Requires a reference formed with the owning thread's lock held (see the type's safety
+    /// invariant).
     #[inline]
     pub fn last_cpu(&self) -> cpu_num_t {
-        // SAFETY: `self` is a valid `SchedulerState` reference.
-        unsafe { cpp_scheduler_state_last_cpu(self) }
+        // SAFETY: As in `curr_cpu`; `last_cpu` is likewise only written with the owning thread's
+        // lock held exclusively.
+        unsafe { (&raw const (*self.raw()).last_cpu).read() }
     }
 
     /// Returns the hard CPU affinity mask of the thread.
+    ///
+    /// Requires a reference formed with the owning thread's lock held (see the type's safety
+    /// invariant).
     #[inline]
     pub fn hard_affinity(&self) -> cpu_mask_t {
-        // SAFETY: `self` is a valid `SchedulerState` reference.
-        unsafe { cpp_scheduler_state_hard_affinity(self) }
+        // SAFETY: By `SchedulerState`'s safety invariant, a reference used with this accessor was
+        // formed with the owning thread's lock held, which guards `hard_affinity`, and only that
+        // field place is projected.
+        unsafe { (&raw const (*self.raw()).hard_affinity).read() }
     }
 
     /// Raw place of the `effective_profile` field of this scheduler state without forming a
     /// reference to the whole `crate::kernel::scheduler::SchedulerState`.
     #[inline]
     fn effective_profile_ptr(&self) -> *const crate::kernel::scheduler::EffectiveProfile {
-        let state = core::ptr::from_ref(self).cast::<crate::kernel::scheduler::SchedulerState>();
-        // SAFETY: `self` has the same address as the underlying `SchedulerState`, and `&raw const`
-        // projects the `effective_profile` field place without forming a reference to the whole
-        // struct.
-        unsafe { &raw const (*state).effective_profile }
+        // SAFETY: `self.raw()` points to the underlying `SchedulerState` that `self` spans, and
+        // `&raw const` projects the `effective_profile` field place without forming a reference
+        // to the whole struct.
+        unsafe { &raw const (*self.raw()).effective_profile }
     }
 
     /// Returns whether the effective profile is a deadline profile
     /// (`effective_profile().IsDeadline()`).
     #[inline]
     pub fn effective_profile_is_deadline(&self) -> bool {
-        // SAFETY: By `SchedulerState`'s safety invariant, the caller excludes concurrent mutation
-        // of `effective_profile` (by holding the owning thread's lock or the wait queue lock of
-        // the queue the thread is blocked in), and only the `effective_profile` field is
+        // SAFETY: Either form of reference in `SchedulerState`'s safety invariant excludes
+        // concurrent mutation of `effective_profile` (the owning thread's lock, or the lock of the
+        // wait queue the thread is blocked in), and only the `effective_profile` field is
         // referenced.
         unsafe { (*self.effective_profile_ptr()).is_deadline() }
     }
@@ -122,10 +173,19 @@ impl SchedulerState {
     }
 
     /// Returns the virtual finish time of the thread (`finish_time()`).
+    ///
+    /// # Safety
+    ///
+    /// `self` must have been formed with the owning thread's lock held (see the type's safety
+    /// invariant), and the thread must not be in a scheduler run queue, or the caller must also
+    /// hold that scheduler's `queue_lock_`: while the thread is enqueued, `finish_time` is written
+    /// under `queue_lock_` rather than the thread's lock.
     #[inline]
-    pub fn finish_time(&self) -> InstantMono {
-        // SAFETY: `self` is a valid `SchedulerState` reference.
-        InstantMono(unsafe { cpp_scheduler_state_finish_time(self) })
+    pub unsafe fn finish_time(&self) -> InstantMono {
+        // SAFETY: The thread's lock is held, and the thread is not in a run queue or its
+        // scheduler's `queue_lock_` is held (caller's contract), so nothing writes `finish_time`
+        // concurrently; only that field place is projected.
+        InstantMono(unsafe { (&raw const (*self.raw()).finish_time).read() }.raw_value())
     }
 }
 
@@ -139,11 +199,14 @@ zr::static_assert_size_and_align!(
     object_constants::kSchedulerStateBaseProfileAlign,
 );
 
-unsafe extern "C" {
-    fn cpp_scheduler_state_curr_cpu(state: *const SchedulerState) -> cpu_num_t;
-    fn cpp_scheduler_state_last_cpu(state: *const SchedulerState) -> cpu_num_t;
-    fn cpp_scheduler_state_hard_affinity(state: *const SchedulerState) -> cpu_mask_t;
-    fn cpp_scheduler_state_finish_time(state: *const SchedulerState) -> zx_instant_mono_t;
+impl core::ops::Deref for SchedulerStateBaseProfile {
+    type Target = BaseProfile;
+
+    /// Returns the wrapped [`BaseProfile`].
+    #[inline]
+    fn deref(&self) -> &BaseProfile {
+        &self.0
+    }
 }
 
 // thread priority
@@ -205,18 +268,3 @@ impl SchedulerStateBaseProfile {
         ))
     }
 }
-
-/// An opaque type representing the C++ `SchedulerState::EffectiveProfile` struct.
-#[repr(C)]
-pub struct SchedulerStateEffectiveProfile {
-    raw: zr::Opaque<bindings::SchedulerState_EffectiveProfile>,
-}
-
-zr::static_assert!(
-    size_of::<SchedulerStateEffectiveProfile>()
-        == size_of::<bindings::SchedulerState_EffectiveProfile>()
-);
-zr::static_assert!(
-    align_of::<SchedulerStateEffectiveProfile>()
-        == align_of::<bindings::SchedulerState_EffectiveProfile>()
-);

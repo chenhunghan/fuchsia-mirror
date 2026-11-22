@@ -2,54 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-# Retained in GN because `elf_runner_tests` packages
-# `//examples/hello_world/rust:hello-world-rust-component`, which remains in GN
-# to preserve fuchsia.dev doc snippet regions in
-# `examples/hello_world/rust/BUILD.gn`.
-fuchsia_test_component("elf_runner_tests_cmp") {
-  deps = [ ":elf_runner_test" ]
-  component_name = "elf_runner_tests"
-  manifest = "meta/elf_runner_tests.cml"
-  test_type = "system"
-}
-
-fuchsia_test_component("elf_runner_next_vdso_tests_cmp") {
-  deps = [ ":elf_runner_next_vdso_tests" ]
-  component_name = "elf_runner_next_vdso_tests"
-  manifest = "meta/elf_runner_next_vdso_tests.cml"
-}
-
-fuchsia_test_package("elf_runner_tests") {
-  # One test case causes an error log
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
-  test_components = [
-    ":elf_runner_tests_cmp",
-    ":elf_runner_next_vdso_tests_cmp",
-  ]
-  deps = [
-    ":elf_runner_tests_cmp",
-    "tests/lifecycle:immediate_escrow_component",
-    "tests/lifecycle:run-indefinitely",
-    "//examples/hello_world/rust:hello-world-rust-component",
-    "//src/sys/component_manager/testing/lifecycle",
-    "//src/sys/component_manager/tests/crash_introspect:panic_on_start",
-    "//src/sys/component_manager/tests/exit_code:exit_with_code",
-    "//src/sys/component_manager/tests/exit_code:exit_with_code_from_env",
-  ]
-}
-
 group("tests") {
   testonly = true
 
   deps = [
-    ":elf_runner_tests",
-    "tests",
+    ":elf_runner_next_vdso_tests",
+    ":elf_runner_test",
   ]
 }
 
@@ -123,7 +81,7 @@ rustc_library("elf_runner") {
     "//src/lib/fuchsia-sync",
     "//src/lib/process_builder",
     "//src/lib/trace/rust:trace",
-    "//src/performance/memory/attribution/server",
+    "//src/memory/attribution/server",
     "//src/storage/lib/pseudo_fs",
     "//src/storage/lib/vfs/rust:vfs",
     "//src/sys/lib/cm_types",
@@ -183,7 +141,7 @@ rustc_test("elf_runner_test") {
         "//src/lib/fuchsia-sync",
         "//src/lib/process_builder",
         "//src/lib/trace/rust:trace",
-        "//src/performance/memory/attribution/server",
+        "//src/memory/attribution/server",
         "//src/storage/lib/pseudo_fs",
         "//src/storage/lib/vfs/rust:vfs",
         "//src/sys/lib/cm_types",

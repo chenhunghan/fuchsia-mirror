@@ -6,6 +6,7 @@
 #define SRC_UI_SCENIC_LIB_INPUT_TOUCH_SOURCE_BASE_H_
 
 #include <fidl/fuchsia.ui.pointer/cpp/fidl.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <zircon/status.h>
@@ -38,6 +39,13 @@ class TouchSourceBase : public GestureContender {
 
   // |GestureContender|
   void EndContest(StreamId stream_id, bool awarded_win) override;
+
+  // |GestureContender|
+  void SetBatchMode(bool in_batch) override;
+
+  void SetBeginBatchCallback(fit::function<fit::deferred_action<fit::closure>()> begin_batch) {
+    begin_batch_ = std::move(begin_batch);
+  }
 
   zx_koid_t channel_koid() const override { return channel_koid_; }
 
@@ -84,6 +92,12 @@ class TouchSourceBase : public GestureContender {
   // Pushes an event to be sent to the client. Default implementation queues the event for V1
   // hanging-get Watch() calls. Subclasses can override this to implement other delivery mechanisms.
   virtual void PushEvent(StreamId stream_id, AugmentedTouchEvent event);
+
+  // Flushes pending events to the client. Default implementation sends pending V1 hanging-get
+  // events if a Watch() callback is waiting. Subclasses can override this for push protocols.
+  virtual void FlushPendingEvents();
+
+  bool in_batch() const { return in_batch_; }
 
   // TODO(https://fxbug.dev/42159133): Implement ANR.
 
@@ -134,6 +148,7 @@ class TouchSourceBase : public GestureContender {
       const std::unordered_map<StreamId, StreamData>& ongoing_streams);
 
   bool is_first_event_ = true;
+  bool in_batch_ = false;
   Viewport current_viewport_;
   view_tree::BoundingBox current_view_bounds_;
 
@@ -159,6 +174,7 @@ class TouchSourceBase : public GestureContender {
   std::unordered_set<StreamId> won_streams_awaiting_first_message_;
 
   fit::function<void(std::vector<AugmentedTouchEvent>)> pending_callback_ = nullptr;
+  fit::function<fit::deferred_action<fit::closure>()> begin_batch_ = nullptr;
 };
 
 }  // namespace scenic_impl::input

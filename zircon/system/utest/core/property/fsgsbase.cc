@@ -549,14 +549,21 @@ void TestOtherThread(const WhichRegister& reg) {
   // Start another thread that will block on the lock until we release it.
   std::mutex lock;
   std::unique_lock main_locked(lock);
+  zx::thread other_thread;
   std::thread other([&lock]() { std::lock_guard other_locked(lock); });
-  auto cleanup_thread = fit::defer([main_locked = std::move(main_locked), &other]() mutable {
-    main_locked.unlock();
-    other.join();
-  });
+  auto cleanup_thread =
+      fit::defer([main_locked = std::move(main_locked), &other, &other_thread] mutable {
+        main_locked.unlock();
+        other.join();
+        if (other_thread.is_valid()) {
+          EXPECT_OK(other_thread.wait_one(ZX_THREAD_TERMINATED, zx::time::infinite(), nullptr));
+        }
+      });
 
-  // That thread is alive, so its handle is valid.
+  // That thread is alive, so its handle is valid. Duplicate the handle before
+  // unlocking so cleanup waits for kernel thread termination after join().
   zx::unowned_thread thread_handle{native_thread_get_zx_handle(other.native_handle())};
+  ASSERT_OK(thread_handle->duplicate(ZX_RIGHT_SAME_RIGHTS, &other_thread));
 
   uint64_t x = 0xfeedfacedeadbeef;
   EXPECT_EQ(ZX_ERR_ACCESS_DENIED, thread_handle->get_property(reg.property, &x, sizeof(x)));

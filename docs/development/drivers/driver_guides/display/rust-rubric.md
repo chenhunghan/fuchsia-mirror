@@ -133,7 +133,7 @@ struct DisplayDriver {
 }
 
 impl Driver for DisplayDriver {
-    async fn stop(&self) {
+    async fn stop(self) {
         // Intentionally ignoring failure during device shutdown. There's
         // nothing we can do at this point.
         let _ = fallible_function_that_logs();

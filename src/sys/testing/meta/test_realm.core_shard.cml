@@ -57,7 +57,6 @@
         // Needed for IO compliance tests for CM capabiltiies.
         {
             protocol: [
-                "fuchsia.boot.Arguments",
                 "fuchsia.boot.FactoryItems",
                 "fuchsia.boot.Items",
                 "fuchsia.sys2.CrashIntrospect",
@@ -717,9 +716,8 @@
         // Required by ctf tests
         {
             protocol: "fuchsia.process.Resolver",
-            from: "#process_resolver",
+            from: "parent",
             to: "#testing",
-            source_availability: "unknown",
         },
         {
             protocol: [

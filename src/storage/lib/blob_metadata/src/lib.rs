@@ -6,17 +6,8 @@ pub mod zerocopy_serialization;
 
 use delivery_blob::compression::{ChunkedArchiveError, CompressionAlgorithm, CompressionInfo};
 use fprint::TypeFingerprint;
-use fuchsia_merkle::{Hash, MerkleVerifier};
 use fxfs_macros::{Migrate, migrate_nodefault};
 use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, TypeFingerprint)]
-pub struct BlobMetadataUnversioned {
-    pub hashes: Vec<[u8; 32]>,
-    pub chunk_size: u64,
-    pub compressed_offsets: Vec<u64>,
-    pub uncompressed_size: u64,
-}
 
 pub type BlobMetadata = BlobMetadataV64;
 pub type BlobFormat = BlobFormatV64;
@@ -36,32 +27,6 @@ impl BlobMetadata {
 
     pub fn is_empty(&self) -> bool {
         *self == Self::empty()
-    }
-
-    pub fn into_merkle_verifier(self, root: Hash) -> Result<MerkleVerifier, anyhow::Error> {
-        let hashes = if self.merkle_leaves.is_empty() {
-            Box::new([root])
-        } else {
-            self.merkle_leaves.into_iter().map(Into::into).collect::<Box<[Hash]>>()
-        };
-        Ok(MerkleVerifier::new(root, hashes)?)
-    }
-}
-
-impl From<BlobMetadataUnversioned> for BlobMetadata {
-    fn from(old: BlobMetadataUnversioned) -> Self {
-        if old.compressed_offsets.is_empty() {
-            Self { merkle_leaves: old.hashes, format: BlobFormat::Uncompressed }
-        } else {
-            Self {
-                merkle_leaves: old.hashes,
-                format: BlobFormat::ChunkedZstd {
-                    uncompressed_size: old.uncompressed_size,
-                    chunk_size: old.chunk_size,
-                    compressed_offsets: old.compressed_offsets,
-                },
-            }
-        }
     }
 }
 

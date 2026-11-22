@@ -117,7 +117,5 @@ expect_includes("includes") {
   visibility = [
     ":*",
     "//sdk/lib/sys/component/cpp/testing:*",
-    "//src/lib/fidl/rust/fidl-contrib:*",
-    "//src/sys/component_manager/*",
   ]
 }

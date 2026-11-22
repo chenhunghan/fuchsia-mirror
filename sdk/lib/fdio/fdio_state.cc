@@ -25,9 +25,7 @@ fdio_state_t& fdio_global_state() {
   // it's difficult to control its ordering with respect to other finalization routines; instead we
   // explicitly invoke the destructor in `__libc_extensions_fini` which happens safely after all
   // other finalization code.
-  [[clang::no_destroy]] static constinit fdio_state_t state{
-      .cwd_path = fdio_internal::PathBuffer('/'),
-  };
+  [[clang::no_destroy]] static constinit fdio_state_t state{};
   return state;
 }
 

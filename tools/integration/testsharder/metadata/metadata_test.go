@@ -70,11 +70,14 @@ func TestGetMetadata(t *testing.T) {
 
 		expected := map[string]TestMetadata{
 			"fuchsia-pkg://fuchsia.com/sparky-sparky-boom-test#meta/sparky-sparky-boom-test.cm": {
-				Owners: []string{"testgoogler@google.com", "carverforbes@google.com"},
+				Owners: []string{"testgoogler@google.com"},
 			},
 		}
 
-		metadataMap, _ := GetMetadata(getFakeTestSpecs(), checkoutDir)
+		metadataMap, err := GetMetadata(getFakeTestSpecs(), checkoutDir)
+		if err != nil {
+			t.Fatalf("GetMetadata() unexpected error: %v", err)
+		}
 		if diff := cmp.Diff(expected, metadataMap); diff != "" {
 			t.Errorf("GetMetadata() failed: (-want +got): \n%s", diff)
 		}
@@ -96,9 +99,6 @@ func TestGetMetadata(t *testing.T) {
 				Owners: []string{
 					"leaf@google.com",
 					"leaf2@google.com",
-					"subsystem@google.com",
-					"umbrella1@google.com",
-					"umbrella2@google.com",
 				},
 			},
 		}
@@ -111,6 +111,114 @@ func TestGetMetadata(t *testing.T) {
 			t.Errorf("GetMetadata() failed: (-want +got): \n%s", diff)
 		}
 	})
+}
+
+func TestGetMetadata_IncludeOnlyAndBazelLabels(t *testing.T) {
+	checkoutDir := t.TempDir()
+	writeFile(t, filepath.Join(checkoutDir, "OWNERS"), "global@google.com\n")
+	writeFile(t, filepath.Join(checkoutDir, "METADATA.textproto"), "trackers: { issue_tracker: { component_id: 77 } }\n")
+	writeFile(t, filepath.Join(checkoutDir, "src", "team", "OWNERS"), "team1@google.com # inline comment\nteam2@google.com\n")
+	writeFile(t, filepath.Join(checkoutDir, "src", "sys", "OWNERS"), "file: /src/team/OWNERS\n")
+
+	specs := []build.TestSpec{
+		{Test: build.Test{Name: "file_directive_test", SourceLabel: "//src/sys:foo_test(//build/toolchain/fuchsia:x64)"}},
+		{Test: build.Test{Name: "whitespace_padded_label_test", SourceLabel: "  //src/sys:spaced_test (//build/toolchain/fuchsia:x64)  "}},
+		{Test: build.Test{Name: "short_gn_label_test", SourceLabel: "//src/sys"}},
+		{Test: build.Test{Name: "bazel_main_repo_test", SourceLabel: "@@//src/sys:bar_test"}},
+		{Test: build.Test{Name: "root_label_test", SourceLabel: "//:root_test"}},
+		{Test: build.Test{Name: "external_repo_test", SourceLabel: "@ext_repo//pkg:ext_test"}},
+	}
+	got, err := GetMetadata(specs, checkoutDir)
+	if err != nil {
+		t.Fatalf("GetMetadata() unexpected error: %v", err)
+	}
+	want := map[string]TestMetadata{
+		"file_directive_test":          {Owners: []string{"team1@google.com", "team2@google.com"}, ComponentID: 77},
+		"whitespace_padded_label_test": {Owners: []string{"team1@google.com", "team2@google.com"}, ComponentID: 77},
+		"short_gn_label_test":          {Owners: []string{"team1@google.com", "team2@google.com"}, ComponentID: 77},
+		"bazel_main_repo_test":         {Owners: []string{"team1@google.com", "team2@google.com"}, ComponentID: 77},
+		"root_label_test":              {ComponentID: 77},
+		"external_repo_test":           {},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("GetMetadata() diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestGetMetadata_EmptySpecs(t *testing.T) {
+	got, err := GetMetadata(nil, "")
+	if err != nil {
+		t.Fatalf("GetMetadata(nil, \"\") unexpected error: %v", err)
+	}
+	if diff := cmp.Diff(map[string]TestMetadata{}, got); diff != "" {
+		t.Errorf("GetMetadata(nil, \"\") diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestGetMetadata_Errors(t *testing.T) {
+	checkoutDir := t.TempDir()
+	tests := []struct {
+		name        string
+		specs       []build.TestSpec
+		checkoutDir string
+	}{
+		{
+			name:  "empty_checkout_dir",
+			specs: getFakeTestSpecs(),
+		},
+		{
+			name:        "missing_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "whitespace_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "   "}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "toolchain_only_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "(//build/toolchain/fuchsia:x64)"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "unrooted_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: ":foo_test"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "empty_target_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "//src/sys:"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "missing_package_and_target_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "//"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "bare_at_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "@@"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "triple_at_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "@@@//src/sys:foo_test"}}},
+			checkoutDir: checkoutDir,
+		},
+		{
+			name:        "escaping_source_label",
+			specs:       []build.TestSpec{{Test: build.Test{Name: "t", SourceLabel: "//../outside:foo_test"}}},
+			checkoutDir: checkoutDir,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := GetMetadata(tc.specs, tc.checkoutDir); err == nil {
+				t.Errorf("GetMetadata(%v, %q) = nil error, want error", tc.specs, tc.checkoutDir)
+			}
+		})
+	}
 }
 
 func getFakeTestSpecs() []build.TestSpec {

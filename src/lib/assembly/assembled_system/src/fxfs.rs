@@ -167,6 +167,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let base_package =
             construct_base_package(&mut assembled_system, dir, "system_image", &product_config)

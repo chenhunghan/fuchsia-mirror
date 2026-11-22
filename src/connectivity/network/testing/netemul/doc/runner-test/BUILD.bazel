@@ -7,6 +7,15 @@ load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "meta/client.cml",
+        "meta/runner-test.cml",
+        "meta/server.cml",
+    ],
+    visibility = ["//src/connectivity/network/testing/netemul/doc:__pkg__"],
+)
+
 rustc_test(
     name = "client",
     srcs = ["src/client.rs"],
@@ -14,6 +23,8 @@ rustc_test(
     crate_name = "netemul_runner_test_driver",
     crate_root = "src/client.rs",
     edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = ["//src/connectivity/network/testing/netemul/doc:__pkg__"],
     deps = [
         "//src/connectivity/network/testing/netemul/sync-manager/rust:lib",
@@ -29,6 +40,7 @@ rustc_binary(
     crate_name = "netemul_runner_test_server",
     crate_root = "src/server.rs",
     edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = ["//src/connectivity/network/testing/netemul/doc:__pkg__"],
     deps = [
         "//src/connectivity/network/testing/netemul/sync-manager/rust:lib",

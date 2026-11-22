@@ -38,7 +38,7 @@ the set of i18n data is empty.
     * {C++}
 
       ```gn
-      {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/intl/tz_version_parrot/cpp/BUILD.gn" region_tag="icudata_library" adjust_indentation="auto" %}
+      {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/intl/tz_version_parrot/cpp/BUILD.bazel" region_tag="icudata_library" adjust_indentation="auto" %}
       ```
 
       Note: You can find the C++ library source at

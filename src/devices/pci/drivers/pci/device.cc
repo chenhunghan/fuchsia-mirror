@@ -226,6 +226,16 @@ zx_status_t Device::InitLocked() {
     }
   }
 
+  disable.cancel();
+  return ZX_OK;
+}
+
+zx_status_t Device::Publish() {
+  fbl::AutoLock dev_lock(&dev_lock_);
+  if (disabled_) {
+    return ZX_OK;
+  }
+
   auto pci_bind_topo = static_cast<uint32_t>(BIND_PCI_TOPO_PACK(bus_id(), dev_id(), func_id()));
 
   const std::vector<fuchsia_driver_framework::NodeProperty2> pci_device_props = {
@@ -266,24 +276,27 @@ zx_status_t Device::InitLocked() {
         .subclass = subclass(),
         .program_interface = prog_if(),
         .revision_id = rev_id(),
+        .segment_group = segment_group(),
         .bus_id = bus_id(),
         .dev_id = dev_id(),
         .func_id = func_id(),
         .has_acpi = has_acpi(),
     };
 
-    composite_spec = CreateCompositeNodeSpec(node_name(), pci_info);
+    composite_spec = CreateCompositeNodeSpec(pci_info);
   }
 
   zx::result node_res = bdi()->AddDeviceNode(node_name(), std::move(handler), pci_device_props,
                                              bus_info, std::move(composite_spec));
   if (node_res.is_error()) {
     fdf::error("[{}] Failed to add device node: {}", config()->addr(), node_res);
+    // Release dev_lock_ so virtual Bridge::Disable() can disable downstream devices.
+    dev_lock.release();
+    Disable();
     return node_res.status_value();
   }
   node_controller_ = std::move(*node_res);
 
-  disable.cancel();
   return ZX_OK;
 }
 

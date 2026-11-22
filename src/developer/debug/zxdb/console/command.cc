@@ -64,12 +64,21 @@ bool Command::HasSwitch(int id) const { return switches_.find(id) != switches_.e
 
 std::string Command::GetSwitchValue(int id) const {
   auto found = switches_.find(id);
-  if (found == switches_.end())
+  if (found == switches_.end() || found->second.empty())
     return std::string();
+  return found->second.back();
+}
+
+std::span<const std::string> Command::GetSwitchValues(int id) const {
+  auto found = switches_.find(id);
+  if (found == switches_.end())
+    return {};
   return found->second;
 }
 
-void Command::SetSwitch(int id, std::string str) { switches_[id] = std::move(str); }
+void Command::SetSwitch(int id, std::string str) { switches_[id] = {std::move(str)}; }
+
+void Command::AddSwitch(int id, std::string str) { switches_[id].push_back(std::move(str)); }
 
 CommandReport Command::BuildReport() const {
   CommandReport report;
@@ -137,11 +146,13 @@ void Command::AddSwitchesToCommandReport(CommandReport& report) const {
     valid_switches = &GetNounSwitches();
   }
 
-  for (const auto& [id, value] : switches_) {
+  for (const auto& [id, values] : switches_) {
     record = GetSwitchRecordFrom(id, *valid_switches);
     if (record) {
-      std::string switch_value = record->has_value ? GetSwitchValue(record->id) : "";
-      report.switches.emplace_back(record->id, record->name, switch_value);
+      for (const auto& val : values) {
+        std::string switch_value = record->has_value ? val : "";
+        report.switches.emplace_back(record->id, record->name, switch_value);
+      }
     }
   }
 }

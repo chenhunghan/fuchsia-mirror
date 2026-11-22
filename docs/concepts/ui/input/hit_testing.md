@@ -29,9 +29,16 @@ page for more information.
 
 ## High level overview of algorithm
 
-Given a hit at point (x,y), the View containing the geographically top-most
-(topologically *last*) semantically-compatible hit region which intersects (x,y)
-receives the hit. Let’s break down the requirements into its component parts.
+Given a hit at point (x, y), Scenic checks hit regions that contain (x, y) from
+front to back (from topologically *last* to *first*):
+
+* For a **regular hit test** (such as touch or mouse input), the front-most
+  View with a hit region containing (x, y) receives the hit.
+* For a **semantic (accessibility) hit test**, Scenic skips semantically
+  invisible hit regions and keeps looking behind them, but only within that
+  same View and any Views embedded inside it.
+
+Let's break down these rules into their component parts.
 
 #### Top most
 
@@ -43,7 +50,29 @@ AddChild() is topologically after its sibling.
 
 #### Semantic compatibility
 
-Semantic hit tests do not interact with semantically invisible hit regions.
+Scenic runs two kinds of hit tests: **regular hit tests** (for touch and mouse
+input) and **semantic hit tests** (used by accessibility features such as the
+Screen Reader to find what UI element is under the user's finger).
+
+* **Semantically visible (`DEFAULT`)** hit regions interact with **both**
+  regular and semantic hit tests.
+* **Semantically invisible (`SEMANTICALLY_INVISIBLE`)** hit regions interact
+  with **regular** hit tests, but are **skipped** by semantic hit tests.
+
+When a semantic hit test skips a semantically invisible hit region on a View,
+it continues searching behind that region only within **that same View** and
+any **Views embedded inside it**. It never passes through to a parent or
+sibling View behind it:
+
+* **Parent shield over an embedded child View:** If a parent View places a
+  transparent, semantically invisible "input shield" in front of an embedded
+  child View, regular touches hit the parent's shield while the Screen Reader
+  looks through the shield and reads the child View underneath.
+* **Child or sibling View over a View behind it:** If the front-most View at
+  (x, y) is a child or sibling View that has a semantically invisible hit
+  region and nothing semantically visible inside it, semantic hit testing stops
+  there and returns no hit rather than exposing the parent or sibling View
+  behind it.
 
 See the [semantic visibility](/docs/concepts/ui/input/semantic_visibility.md)
 page for more information.

@@ -31,8 +31,15 @@ Use when nothing GN-only has to stay in the package (e.g. a pure `fuchsia_packag
   and report the unresolved finding(s) in `CoderReport.disputed_findings` and `summary` asking the
   reviewer which aggregation `test_suite()` (or where a new one, with a matching
   `bazel_test_suite()` in `BUILD.gn`, should be added if none exists) the package's
-  `test_suite()`(s) should be added to (suggesting asking the Build team if they do not know).
+  `test_suite()`(s) should be added to (suggesting asking a member of
+  //build/bazel/BAZEL_OWNERS if they do not know).
 - For assembly packages bridged via `//bundles/assembly/bazel_inputs/<dir>`, switch
   `//bundles/assembly/BUILD.bazel` to `//<dir>:<pkg>`, remove the entry from
   `//bundles/assembly/bazel_inputs/BUILD.gn`, and delete
   `//bundles/assembly/bazel_inputs/<dir>/BUILD.*`.
+- Cutting an assembly package over is a two-phase cutover: follow "Package cutover (two phases)"
+  in the coder prompt (stop after phase 1 with `cutover_phase: "parallel"`, then report one
+  `cutover_dispositions` entry per `cutover_diff_*` finding: `fixed`, `expected` or
+  `unexplained`). The uploader approves those findings one by one in the cutover review, which is
+  separate from the acknowledgment of disputes; the reviewer sees them as inline comments on the
+  `BUILD.bazel` targets.

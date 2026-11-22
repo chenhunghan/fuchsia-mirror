@@ -24,7 +24,7 @@ std::optional<int> MatchTemplateParams(const std::vector<std::string>& glob,
     if (glob[i] == "*") {
       if (i == glob.size() - 1) {
         // Last glob "*" matches all remaining type parameters.
-        last_score = static_cast<int>(type.size()) - i;
+        last_score = static_cast<int>(type.size() - i);
         break;
       } else {
         last_score = 1;

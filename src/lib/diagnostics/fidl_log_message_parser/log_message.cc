@@ -5,8 +5,6 @@
 #include "src/lib/diagnostics/fidl_log_message_parser/log_message.h"
 
 #include <assert.h>
-#include <lib/async/default.h>
-#include <lib/async/task.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/stream.h>
 #include <lib/zx/vmo.h>
@@ -19,7 +17,7 @@
 
 #include "src/lib/diagnostics/log/message/rust/cpp-log-decoder/log_decoder_api.h"
 
-using fuchsia::diagnostics::FormattedContent;
+using fuchsia_diagnostics::FormattedContent;
 
 namespace diagnostics::fidl_log_message_parser {
 
@@ -27,7 +25,7 @@ namespace {
 
 fpromise::result<void, std::string> ConvertFormattedFxtToLogMessagesInternal(
     std::span<const uint8_t> data, bool expect_extended_attribution, MessageParser* parser,
-    std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>& output) {
+    std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>& output) {
   auto log_messages = fuchsia_decode_log_messages_to_struct(data.data(), data.size(),
                                                             expect_extended_attribution, parser);
   if (log_messages.error_str) {
@@ -48,15 +46,15 @@ fpromise::result<void, std::string> ConvertFormattedFxtToLogMessagesInternal(
 
 fpromise::result<void, std::string> ConvertFormattedContentToLogMessagesInternal(
     FormattedContent content, MessageParser* parser,
-    std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>& output) {
-  if (content.is_fxt()) {
+    std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>& output) {
+  if (content.fxt().has_value()) {
     uint64_t size = 0;
-    zx_status_t status = content.fxt().get_prop_content_size(&size);
+    zx_status_t status = content.fxt()->get_prop_content_size(&size);
     if (status != ZX_OK) {
       return fpromise::error("Failed to get content size from FXT VMO: " + std::to_string(status));
     }
     std::unique_ptr<unsigned char[]> data = std::make_unique<unsigned char[]>(size);
-    status = content.fxt().read(data.get(), 0, size);
+    status = content.fxt()->read(data.get(), 0, size);
     if (status != ZX_OK) {
       return fpromise::error("Failed to read from FXT VMO: " + std::to_string(status));
     }
@@ -69,13 +67,13 @@ fpromise::result<void, std::string> ConvertFormattedContentToLogMessagesInternal
   return fpromise::error("Expected FXT content");
 }
 
-MessageParser* CreateMessageParserForFormat(fuchsia::diagnostics::Format format) {
+MessageParser* CreateMessageParserForFormat(fuchsia_diagnostics::Format format) {
   switch (format) {
-    case fuchsia::diagnostics::Format::JSON:
-    case fuchsia::diagnostics::Format::TEXT:
-    case fuchsia::diagnostics::Format::CBOR:
+    case fuchsia_diagnostics::Format::kJson:
+    case fuchsia_diagnostics::Format::kText:
+    case fuchsia_diagnostics::Format::kCbor:
       return nullptr;
-    case fuchsia::diagnostics::Format::FXT:
+    case fuchsia_diagnostics::Format::kFxt:
       return fuchsia_new_message_parser();
   }
 }
@@ -87,35 +85,52 @@ void MessageParserDeleter::operator()(MessageParser* parser) const {
   }
 }
 
-LogBatchIterator::LogBatchIterator(fuchsia::diagnostics::BatchIteratorPtr iterator,
-                                   fuchsia::diagnostics::Format format)
-    : iterator_(std::move(iterator)), parser_(CreateMessageParserForFormat(format)) {}
-
-void LogBatchIterator::GetNext(GetNextCallback callback) {
-  iterator_->GetNext([this, callback = std::move(callback)](auto result) mutable {
-    if (result.is_err()) {
-      callback(fpromise::error("BatchIterator error: " +
-                               std::to_string(static_cast<int32_t>(result.err()))));
-      return;
-    }
-
-    std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>> all_messages;
-    for (auto& content : result.response().batch) {
-      auto formatted = ConvertFormattedContentToLogMessagesInternal(std::move(content),
-                                                                    parser_.get(), all_messages);
-      if (formatted.is_error()) {
-        callback(fpromise::error(formatted.error()));
-        return;
-      }
-    }
-    callback(fpromise::ok(std::move(all_messages)));
-  });
+LogBatchIterator::LogBatchIterator(
+    fidl::ClientEnd<fuchsia_diagnostics::BatchIterator> iterator,
+    fuchsia_diagnostics::Format format, async_dispatcher_t* dispatcher,
+    fidl::AsyncEventHandler<fuchsia_diagnostics::BatchIterator>* event_handler)
+    : parser_(CreateMessageParserForFormat(format)) {
+  if (iterator.is_valid()) {
+    iterator_.Bind(std::move(iterator), dispatcher, event_handler);
+  }
 }
 
-fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+void LogBatchIterator::GetNext(GetNextCallback callback) {
+  if (!iterator_.is_valid()) {
+    return;
+  }
+
+  iterator_->GetNext().Then(
+      [this, callback = std::move(callback)](
+          fidl::Result<fuchsia_diagnostics::BatchIterator::GetNext>& result) mutable {
+        if (result.is_error()) {
+          // Terminal framework errors are reported to the event handler, if any. kUnknownMethod
+          // leaves the client bound, so it is reported to the caller instead.
+          if (result.error_value().is_framework_error() &&
+              result.error_value().framework_error().reason() != fidl::Reason::kUnknownMethod) {
+            return;
+          }
+          callback(fpromise::error(result.error_value().FormatDescription()));
+          return;
+        }
+
+        std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>> all_messages;
+        for (auto& content : result->batch()) {
+          auto formatted = ConvertFormattedContentToLogMessagesInternal(
+              std::move(content), parser_.get(), all_messages);
+          if (formatted.is_error()) {
+            callback(fpromise::error(formatted.error()));
+            return;
+          }
+        }
+        callback(fpromise::ok(std::move(all_messages)));
+      });
+}
+
+fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                  std::string>
 ConvertFormattedFxtToLogMessages(std::span<const uint8_t> data, bool expect_extended_attribution) {
-  std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>> messages;
+  std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>> messages;
   auto ret = ConvertFormattedFxtToLogMessagesInternal(data, expect_extended_attribution, nullptr,
                                                       messages);
   if (ret.is_error()) {
@@ -124,7 +139,7 @@ ConvertFormattedFxtToLogMessages(std::span<const uint8_t> data, bool expect_exte
   return fpromise::ok(std::move(messages));
 }
 
-fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                  std::string>
 ConvertFormattedContentToLogMessages(FormattedContent content, MessageParser* parser) {
   std::unique_ptr<MessageParser, MessageParserDeleter> owned_parser;
@@ -132,7 +147,7 @@ ConvertFormattedContentToLogMessages(FormattedContent content, MessageParser* pa
     owned_parser.reset(fuchsia_new_message_parser());
     parser = owned_parser.get();
   }
-  std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>> messages;
+  std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>> messages;
   auto ret = ConvertFormattedContentToLogMessagesInternal(std::move(content), parser, messages);
   if (ret.is_error()) {
     return fpromise::error(ret.take_error());

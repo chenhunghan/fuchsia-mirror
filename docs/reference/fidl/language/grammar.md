@@ -182,7 +182,7 @@ ordinal = NUMERIC-LITERAL ;
 literal = STRING-LITERAL | NUMERIC-LITERAL | "true" | "false" ;
 ```
 
-### `STRING-LITERAL`
+### STRING-LITERAL {#string-literal}
 
 The grammar for `STRING-LITERAL` is as follows:
 

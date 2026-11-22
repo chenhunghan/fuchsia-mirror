@@ -1,9 +1,0 @@
-{
-    "short_description": "QEMU virt board driver",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Board"
-    ]
-}

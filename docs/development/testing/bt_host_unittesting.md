@@ -39,7 +39,7 @@ tests.
 ### Resources
 
 `bt-host` is written in C++, and Fuchsia uses the
-[gUnit](/docs/development/languages/c-cpp/library_restrictions.md#third_partygoogletest)
+[gUnit](/docs/development/languages/c-cpp/library_restrictions.md#third-party-googletest)
 [Googletest](https://github.com/google/googletest) library for C++ tests.
 
 To work with `bt-host` unit tests, you need a solid understanding of the
@@ -60,8 +60,8 @@ be referenced as needed:
 
 Most `bt-host` tests are written in the following pattern:
 
-  1. Create a [test fixture](#test_fixtures) to store
-     [test doubles](#test_doubles) and the Layer Under Test (LUT).
+  1. Create a [test fixture](#test-fixtures) to store
+     [test doubles](#test-doubles) and the Layer Under Test (LUT).
 
   1. Construct the LUT within that test fixture, using test doubles in place of
      the LUT's depenencies.
@@ -75,13 +75,13 @@ Most `bt-host` tests are written in the following pattern:
 
   1. Validate that the higher-level command results in an expected behavior.
 
-### Test fixtures
+### Test fixtures {#test-fixtures}
 
 GTest test fixtures are reusable environments that often store test
 dependencies and provide convenience methods for writing unit tests. The test
 fixture used in this example is the [`SMP_Phase1Test` class](#smp-phase1-test).
 
-### Test doubles
+### Test doubles {#test-doubles}
 
 Test doubles are objects used to substitute for real objects in test code. There
 are many different types of test doubles. The two example test doubles used in
@@ -140,7 +140,7 @@ For `NewPhase1`, the configurable aspects are:
   + A struct that holds the rest of the Phase1 arguments, which makes it
     easier to change only one of the "default" arguments:
 
-##### `Phase1Args` struct
+##### Phase1Args struct {#phase1args-struct}
 
 ```C++
 struct Phase1Args {
@@ -177,7 +177,7 @@ The `CreateFakeChannel` method is available because `SMP_Phase1Test` inherits
 from
 [`FakeChannelTest`](https://fuchsia.googlesource.com/fuchsia/+/2ee647a648d93300d49328db8ef4bb0426e36c53/src/connectivity/bluetooth/core/bt-host/l2cap/fake_channel_test.h).[^2]
 
-### FakeListener
+### FakeListener {#fakelistener}
 
 In real code, `PairingPhase` uses `PairingPhase::Listener` to communicate with
 the higher-level `SecurityManager` class. `FakeListener` provides a mock of this
@@ -260,7 +260,7 @@ feature, in this case the Secure Connections (SC) feature, the `PairingFeatures`
 returned by `Phase1`'s complete callback correctly reports this.
 
 The default `NewPhase1` parameters
-[don't support Secure Connections](#phase1args_struct), so the code sets just
+[don't support Secure Connections](#phase1args-struct), so the code sets just
 the SC field of `Phase1Args` and leaves the rest defaulted for `NewPhase1`:
 
 ```C++

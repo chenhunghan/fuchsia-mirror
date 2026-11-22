@@ -43,7 +43,9 @@
 #include <zircon/syscalls/object.h>
 #include <zircon/time.h>
 
+#include <atomic>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include <fbl/ref_ptr.h>
@@ -172,6 +174,280 @@ TEST_F(PowerLibTest, AddElementNoDep) {
   ASSERT_TRUE(call_result.is_ok());
 
   RunLoopUntil([&fake_element_control] { return fake_element_control != nullptr; });
+}
+
+TEST_F(PowerLibTest, AddElementWithInitialLeaseToken) {
+  fdf_power::PowerLevel one = {.level = 0, .name = "one", .transitions{}};
+  fdf_power::PowerLevel two = {.level = 1, .name = "two", .transitions{}};
+  fdf_power::PowerLevel three = {.level = 2, .name = "three", .transitions{}};
+
+  fdf_power::PowerElement pe = {
+      .name = "the_element",
+      .levels = {one, two, three},
+  };
+
+  fdf_power::PowerElementConfiguration df_config{.element = pe, .dependencies = {}};
+  std::unordered_map<fdf_power::ParentElement, zx::event> tokens;
+
+  // Make the eventpair for the initial lease
+  fuchsia_power_broker::LeaseToken lease_token, lease_token_broker;
+  ASSERT_EQ(fuchsia_power_broker::LeaseToken::create(0, &lease_token, &lease_token_broker), ZX_OK);
+
+  // Make the fake power broker
+  fdf_power::testing::ScopedBackgroundLoop loop;
+  fidl::Endpoints<fuchsia_power_broker::Topology> endpoints =
+      fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+  FakeTopology fake_power_broker(loop.dispatcher(), std::move(endpoints.server));
+  std::unique_ptr<FakeElementControl> fake_element_control(nullptr);
+  std::optional<fuchsia_power_broker::ElementSchema> received_schema;
+  std::atomic<bool> schema_received = false;
+
+  zx_info_handle_basic_t info;
+  ASSERT_EQ(
+      lease_token_broker.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr),
+      ZX_OK);
+  zx_koid_t sent_koid = info.koid;
+
+  loop.executor().schedule_task(fake_power_broker.TakeElementSchemaPromise().then(
+      [&loop, &fake_element_control, &received_schema,
+       &schema_received](fpromise::result<fuchsia_power_broker::ElementSchema, void>& result) {
+        if (result.is_ok()) {
+          std::optional<fidl::ServerEnd<ElementControl>>& ec = result.value().element_control();
+          if (ec.has_value()) {
+            fake_element_control =
+                std::make_unique<FakeElementControl>(loop.dispatcher(), std::move(ec.value()));
+          }
+          received_schema = std::move(result.value());
+        }
+        schema_received.store(true, std::memory_order_release);
+      }));
+
+  // Call add element
+  fidl::Endpoints<fuchsia_power_broker::ElementControl> element_control =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  zx::event invalid1;
+  auto call_result = fdf_power::AddElement(
+      endpoints.client, df_config, std::move(tokens), invalid1.borrow(), std::nullopt,
+      std::move(element_control.server), element_control.client.borrow(), std::nullopt,
+      std::move(lease_token_broker), static_cast<uint8_t>(1));
+  ASSERT_TRUE(call_result.is_ok());
+
+  RunLoopUntil([&schema_received] { return schema_received.load(std::memory_order_acquire); });
+  ASSERT_TRUE(received_schema.has_value());
+  ASSERT_TRUE(received_schema->initial_lease_token().has_value());
+  EXPECT_EQ(received_schema->initial_current_level(), static_cast<uint8_t>(1));
+
+  zx_info_handle_basic_t rcvd_info;
+  ASSERT_EQ(received_schema->initial_lease_token()->get_info(ZX_INFO_HANDLE_BASIC, &rcvd_info,
+                                                             sizeof(rcvd_info), nullptr, nullptr),
+            ZX_OK);
+  EXPECT_EQ(sent_koid, rcvd_info.koid);
+}
+
+TEST_F(PowerLibTest, AddElementWithInitialLeaseTokenInvalidLevel) {
+  fdf_power::PowerLevel one = {.level = 0, .name = "one", .transitions{}};
+  fdf_power::PowerLevel two = {.level = 1, .name = "two", .transitions{}};
+  fdf_power::PowerElement pe = {
+      .name = "the_element",
+      .levels = {one, two},
+  };
+  fdf_power::PowerElementConfiguration df_config{.element = pe, .dependencies = {}};
+
+  fidl::Endpoints<fuchsia_power_broker::Topology> endpoints =
+      fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+  endpoints.server.reset();
+  zx::event invalid1;
+
+  for (std::optional<uint8_t> invalid_level :
+       {std::optional<uint8_t>(std::nullopt), std::optional<uint8_t>(0),
+        std::optional<uint8_t>(99)}) {
+    SCOPED_TRACE(invalid_level.has_value() ? std::to_string(*invalid_level) : "nullopt");
+    fuchsia_power_broker::LeaseToken lease_token, lease_token_broker;
+    ASSERT_EQ(fuchsia_power_broker::LeaseToken::create(0, &lease_token, &lease_token_broker),
+              ZX_OK);
+    fidl::Endpoints<fuchsia_power_broker::ElementControl> element_control =
+        fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+    std::unordered_map<fdf_power::ParentElement, zx::event> tokens;
+
+    auto call_result = fdf_power::AddElement(
+        endpoints.client, df_config, std::move(tokens), invalid1.borrow(), std::nullopt,
+        std::move(element_control.server), element_control.client.borrow(), std::nullopt,
+        std::move(lease_token_broker), invalid_level);
+    ASSERT_TRUE(call_result.is_error());
+    EXPECT_EQ(call_result.error_value(), fdf_power::Error::INVALID_ARGS);
+  }
+
+  // Also reject an invalid (default-constructed) LeaseToken handle even when level is valid.
+  fidl::Endpoints<fuchsia_power_broker::ElementControl> element_control =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  auto invalid_token_result = fdf_power::AddElement(
+      endpoints.client, df_config, {}, invalid1.borrow(), std::nullopt,
+      std::move(element_control.server), element_control.client.borrow(), std::nullopt,
+      fuchsia_power_broker::LeaseToken{}, static_cast<uint8_t>(1));
+  ASSERT_TRUE(invalid_token_result.is_error());
+  EXPECT_EQ(invalid_token_result.error_value(), fdf_power::Error::INVALID_ARGS);
+}
+
+TEST_F(PowerLibTest, AddElementDescWithInitialLevel) {
+  fdf_power::PowerLevel zero = {.level = 0, .name = "zero", .transitions{}};
+  fdf_power::PowerLevel two = {.level = 2, .name = "two", .transitions{}};
+  fdf_power::PowerElementConfiguration df_config{
+      .element = {.name = "the_element", .levels = {zero, two}},
+      .dependencies = {},
+      .initial_level = 2,
+  };
+  fdf_power::ElementDesc desc = fdf_power::ElementDescBuilder(df_config, {}).Build();
+  ASSERT_TRUE(desc.initial_lease_token_client.has_value());
+  ASSERT_TRUE(desc.initial_lease_token_broker.has_value());
+
+  fdf_power::testing::ScopedBackgroundLoop loop;
+  fidl::Endpoints<fuchsia_power_broker::Topology> endpoints =
+      fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+  FakeTopology fake_power_broker(loop.dispatcher(), std::move(endpoints.server));
+  std::unique_ptr<FakeElementControl> fake_element_control;
+  std::optional<fuchsia_power_broker::ElementSchema> received_schema;
+  std::atomic<bool> schema_received = false;
+  loop.executor().schedule_task(fake_power_broker.TakeElementSchemaPromise().then(
+      [&loop, &fake_element_control, &received_schema,
+       &schema_received](fpromise::result<fuchsia_power_broker::ElementSchema, void>& result) {
+        if (result.is_ok()) {
+          if (result.value().element_control().has_value()) {
+            fake_element_control = std::make_unique<FakeElementControl>(
+                loop.dispatcher(), std::move(result.value().element_control().value()));
+          }
+          received_schema = std::move(result.value());
+        }
+        schema_received.store(true, std::memory_order_release);
+      }));
+
+  ASSERT_TRUE(fdf_power::AddElement(endpoints.client, desc).is_ok());
+  EXPECT_FALSE(desc.initial_lease_token_broker.has_value());
+
+  RunLoopUntil([&schema_received] { return schema_received.load(std::memory_order_acquire); });
+  ASSERT_TRUE(received_schema.has_value());
+  EXPECT_EQ(received_schema->initial_current_level(), static_cast<uint8_t>(2));
+  ASSERT_TRUE(received_schema->initial_lease_token().has_value());
+  ASSERT_TRUE(desc.initial_lease_token_client->is_valid());
+
+  zx_info_handle_basic_t client_info, broker_info;
+  ASSERT_EQ(desc.initial_lease_token_client->get_info(ZX_INFO_HANDLE_BASIC, &client_info,
+                                                      sizeof(client_info), nullptr, nullptr),
+            ZX_OK);
+  ASSERT_EQ(received_schema->initial_lease_token()->get_info(ZX_INFO_HANDLE_BASIC, &broker_info,
+                                                             sizeof(broker_info), nullptr, nullptr),
+            ZX_OK);
+  EXPECT_EQ(client_info.related_koid, broker_info.koid);
+}
+
+TEST_F(PowerLibTest, AddElementDescWithInitialLeaseTokenInvalidLevel) {
+  fdf_power::PowerLevel zero = {.level = 0, .name = "zero", .transitions{}};
+  fdf_power::PowerLevel one = {.level = 1, .name = "one", .transitions{}};
+  fidl::Endpoints<fuchsia_power_broker::Topology> endpoints =
+      fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+  endpoints.server.reset();
+
+  for (std::optional<uint8_t> invalid_level :
+       {std::optional<uint8_t>(std::nullopt), std::optional<uint8_t>(0)}) {
+    SCOPED_TRACE(invalid_level.has_value() ? std::to_string(*invalid_level) : "nullopt");
+    fdf_power::PowerElementConfiguration df_config{
+        .element = {.name = "the_element", .levels = {zero, one}},
+        .dependencies = {},
+        .initial_level = invalid_level,
+    };
+    fuchsia_power_broker::LeaseToken lease_token, lease_token_broker;
+    ASSERT_EQ(fuchsia_power_broker::LeaseToken::create(0, &lease_token, &lease_token_broker),
+              ZX_OK);
+    fdf_power::ElementDesc desc = fdf_power::ElementDescBuilder(df_config, {})
+                                      .SetInitialLeaseToken(std::move(lease_token_broker))
+                                      .Build();
+    auto call_result = fdf_power::AddElement(endpoints.client, desc);
+    ASSERT_TRUE(call_result.is_error());
+    EXPECT_EQ(call_result.error_value(), fdf_power::Error::INVALID_ARGS);
+  }
+}
+
+TEST_F(PowerLibTest, AddElementWithInitialCurrentLevelNoLease) {
+  fdf_power::PowerLevel zero = {.level = 0, .name = "zero", .transitions{}};
+  fdf_power::PowerLevel two = {.level = 2, .name = "two", .transitions{}};
+  fdf_power::PowerElementConfiguration df_config{
+      .element = {.name = "the_element", .levels = {zero, two}},
+      .dependencies = {},
+  };
+
+  fdf_power::testing::ScopedBackgroundLoop loop;
+  fidl::Endpoints<fuchsia_power_broker::Topology> endpoints =
+      fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+  FakeTopology fake_power_broker(loop.dispatcher(), std::move(endpoints.server));
+  std::unique_ptr<FakeElementControl> fake_element_control;
+  std::optional<fuchsia_power_broker::ElementSchema> received_schema;
+  std::atomic<bool> schema_received = false;
+  loop.executor().schedule_task(fake_power_broker.TakeElementSchemaPromise().then(
+      [&loop, &fake_element_control, &received_schema,
+       &schema_received](fpromise::result<fuchsia_power_broker::ElementSchema, void>& result) {
+        if (result.is_ok()) {
+          if (result.value().element_control().has_value()) {
+            fake_element_control = std::make_unique<FakeElementControl>(
+                loop.dispatcher(), std::move(result.value().element_control().value()));
+          }
+          received_schema = std::move(result.value());
+        }
+        schema_received.store(true, std::memory_order_release);
+      }));
+
+  fidl::Endpoints<fuchsia_power_broker::ElementControl> element_control =
+      fidl::Endpoints<fuchsia_power_broker::ElementControl>::Create();
+  zx::event invalid1;
+  auto call_result =
+      fdf_power::AddElement(endpoints.client, df_config, {}, invalid1.borrow(), std::nullopt,
+                            std::move(element_control.server), element_control.client.borrow(),
+                            std::nullopt, std::nullopt, static_cast<uint8_t>(2));
+  ASSERT_TRUE(call_result.is_ok());
+
+  RunLoopUntil([&schema_received] { return schema_received.load(std::memory_order_acquire); });
+  ASSERT_TRUE(received_schema.has_value());
+  EXPECT_EQ(received_schema->initial_current_level(), static_cast<uint8_t>(2));
+  EXPECT_FALSE(received_schema->initial_lease_token().has_value());
+}
+
+TEST_F(PowerLibTest, AddElementBrokerDomainError) {
+  class ErrorTopology
+      : public fdf_power::testing::FidlTestBaseDefault<fuchsia_power_broker::Topology> {
+   public:
+    explicit ErrorTopology(fuchsia_power_broker::AddElementError err) : err_(err) {}
+    void AddElement(fuchsia_power_broker::ElementSchema& schema,
+                    AddElementCompleter::Sync& completer) override {
+      completer.Reply(fit::error(err_));
+    }
+
+   private:
+    fuchsia_power_broker::AddElementError err_;
+  };
+
+  fdf_power::PowerLevel zero = {.level = 0, .name = "zero", .transitions{}};
+  fdf_power::PowerLevel one = {.level = 1, .name = "one", .transitions{}};
+  fdf_power::PowerElementConfiguration df_config{
+      .element = {.name = "the_element", .levels = {zero, one}},
+      .dependencies = {},
+  };
+
+  for (auto [broker_err, expected_err] :
+       std::vector<std::pair<fuchsia_power_broker::AddElementError, fdf_power::Error>>{
+           {fuchsia_power_broker::AddElementError::kInvalid, fdf_power::Error::INVALID_ARGS},
+           {fuchsia_power_broker::AddElementError::kNotAuthorized,
+            fdf_power::Error::NOT_AUTHORIZED},
+       }) {
+    SCOPED_TRACE(fdf_power::AddElementErrorToString(broker_err));
+    fdf_power::testing::ScopedBackgroundLoop loop;
+    fidl::Endpoints<fuchsia_power_broker::Topology> endpoints =
+        fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+    FidlBoundServer<ErrorTopology> server(loop.dispatcher(), std::move(endpoints.server),
+                                          broker_err);
+
+    fdf_power::ElementDesc desc = fdf_power::ElementDescBuilder(df_config, {}).Build();
+    auto call_result = fdf_power::AddElement(endpoints.client, desc);
+    ASSERT_TRUE(call_result.is_error());
+    EXPECT_EQ(call_result.error_value(), expected_err);
+  }
 }
 
 /// Add an element which has a has multiple level dependencies on a single

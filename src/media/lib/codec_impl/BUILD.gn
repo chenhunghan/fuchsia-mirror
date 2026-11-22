@@ -62,13 +62,21 @@ _codec_impl_internal_public = [
 
 _codec_impl_internal_public_deps = [
   ":fourcc",
+  "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
   "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+  "//sdk/fidl/fuchsia.media.drm:fuchsia.media.drm_cpp",
+  "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp",
+  "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+
+  # Temporary soft-transition HLCPP deps until all out-of-repo consumers
+  # migrate to natural FIDL.
+  "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
   "//sdk/fidl/fuchsia.media.drm:fuchsia.media.drm_hlcpp",
   "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_hlcpp",
-  "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
   "//sdk/lib/async:async-cpp",
   "//sdk/lib/async-loop:async-loop-cpp",
   "//sdk/lib/async-loop:async-loop-default",
+  "//sdk/lib/fidl/cpp:hlcpp_conversion",
   "//sdk/lib/fit",
   "//sdk/lib/inspect/component/cpp",
   "//src/lib/ddk",
@@ -87,13 +95,12 @@ _codec_impl_internal_public_deps = [
 ]
 
 _codec_impl_internal_deps = [
-  "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp_hlcpp_conversion",
-  "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
-  "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp_hlcpp_conversion",
+  # Temporary soft-transition HLCPP conversion deps.
+  "//sdk/fidl/fuchsia.media:fuchsia.media_cpp_hlcpp_conversion",
+  "//sdk/fidl/fuchsia.media.drm:fuchsia.media.drm_cpp_hlcpp_conversion",
+  "//sdk/fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp_hlcpp_conversion",
   "//sdk/lib/memory_barriers",
-  "//sdk/lib/sys/cpp",
   "//sdk/lib/syslog/cpp",
-  "//sdk/lib/vfs/cpp",
   "//src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cpp",
   "//zircon/system/ulib/sync:sync-cpp",
 ]

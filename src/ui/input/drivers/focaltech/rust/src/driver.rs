@@ -20,7 +20,7 @@ impl Driver for FocaltechDriver {
         Ok(Self { _node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("FocaltechDriver (Rust Skeleton) stopped!");
     }
 }

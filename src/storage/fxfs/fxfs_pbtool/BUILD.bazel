@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary_host_tool(
+    name = "fxfs_pbtool",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    visibility = ["//build/bazel/rules/assembly:__pkg__"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/storage/fxfs/make-blob-image",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)

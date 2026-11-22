@@ -5,6 +5,7 @@
 use crate::fs::fuchsia::update_info_from_attrs;
 use crate::mm::memory::MemoryObject;
 use crate::mm::{ProtectionFlags, VMEX_RESOURCE};
+use crate::task::container_namespace::NamespaceNodePurpose;
 use crate::task::{CurrentTask, EventHandler, Kernel, WaitCanceler, Waiter};
 use crate::vfs::fs_args::MountParams;
 use crate::vfs::{
@@ -31,7 +32,7 @@ use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::mount_flags::FileSystemFlags;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::vfs::FdEvents;
-use starnix_uapi::{errno, error, from_status_like_fdio, off_t, statfs};
+use starnix_uapi::{XATTR_NAME_CAPS, errno, error, from_status_like_fdio, off_t, statfs};
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -58,8 +59,12 @@ impl RemoteBundle {
         let kernel = current_task.kernel();
         let requested_path = std::str::from_utf8(&options.source)
             .map_err(|_| errno!(EINVAL, "source path is not utf8"))?;
-        let (root_proxy, subdir) =
-            kernel.open_ns_dir(requested_path, fio::Flags::PROTOCOL_DIRECTORY)?;
+        let (root_proxy, subdir) = kernel.open_ns_dir(
+            current_task,
+            requested_path,
+            fio::Flags::PROTOCOL_DIRECTORY,
+            NamespaceNodePurpose::DirectoryMount { read_only: true },
+        )?;
         options.source = subdir.into();
         Self::new_fs_in_base(
             current_task.kernel(),
@@ -166,6 +171,9 @@ impl FileSystemOps for RemoteBundle {
     }
     fn name(&self) -> &'static FsStr {
         "remote_bundle".into()
+    }
+    fn is_storage_backed(&self) -> bool {
+        true
     }
     fn reconfigure(
         &self,
@@ -493,7 +501,7 @@ impl FsNodeOps for DirectoryObject {
                         server_end.into_channel(),
                     )
                     .map_err(|_| errno!(EIO))?;
-                Ok(fs.create_node(
+                let node = fs.create_node(
                     ino,
                     File {
                         inner: Inner::NeedsVmo(file).into(),
@@ -501,7 +509,11 @@ impl FsNodeOps for DirectoryObject {
                         info_refreshed: LockGuarded::new(AtomicBool::new(false)),
                     },
                     info,
-                ))
+                );
+                if metadata_node.extended_attributes.get(XATTR_NAME_CAPS.to_bytes()).is_none() {
+                    node.set_has_no_privileges_if_not_suid_or_sgid();
+                }
+                Ok(node)
             }
         }
     }

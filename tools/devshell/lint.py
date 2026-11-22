@@ -41,6 +41,15 @@ def _parse_args(
         help="Run checks across all tracked files in the repository.",
     )
     parser.add_argument(
+        "--all-repositories",
+        dest="all_repos",
+        action="store_true",
+        help=(
+            "Run in every active repository in the checkout, not only the"
+            " one enclosing the current directory."
+        ),
+    )
+    parser.add_argument(
         "--only",
         action="append",
         default=[],
@@ -115,6 +124,7 @@ def main(argv: Sequence[str]) -> None:
         build_dir,
         cwd,
         all_files=args.all,
+        all_repos=args.all_repos,
         only_checks=only_checks,
         skip_checks=skip_checks,
         explicit_files=explicit_files,

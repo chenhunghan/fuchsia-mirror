@@ -4,8 +4,8 @@
 
 #include "src/developer/forensics/feedback_data/log_source.h"
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/fit/defer.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/syslog/cpp/macros.h>
@@ -23,40 +23,57 @@ LogSource::LogSource(async_dispatcher_t* dispatcher,
   FX_CHECK(dispatcher_ != nullptr);
   FX_CHECK(services_ != nullptr);
   FX_CHECK(sink_ != nullptr);
+}
 
-  archive_accessor_.set_error_handler([this](const zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to " << kLogsArchiveAccessorName;
+void LogSource::on_fidl_error(const fidl::UnbindInfo error) {
+  FX_LOGS(WARNING) << "Lost connection to diagnostics: " << error;
 
-    // The batch iterator and archive accessor connections are not expected to close. Ensure both
-    // are unbound at the same time.
-    if (batch_iterator_) {
-      batch_iterator_->Unbind();
-    }
-  });
+  // The batch iterator and archive accessor connections are not expected to close. Ensure both
+  // are unbound at the same time.
+  archive_accessor_ = {};
+  if (batch_iterator_) {
+    batch_iterator_->Unbind();
+  }
+}
+
+void LogSource::handle_unknown_event(
+    const fidl::UnknownEventMetadata<fuchsia_diagnostics::ArchiveAccessor> metadata) {
+  FX_LOGS(WARNING) << "Unexpected event ordinal: " << metadata.event_ordinal;
+}
+
+void LogSource::handle_unknown_event(
+    const fidl::UnknownEventMetadata<fuchsia_diagnostics::BatchIterator> metadata) {
+  FX_LOGS(WARNING) << "Unexpected event ordinal: " << metadata.event_ordinal;
 }
 
 void LogSource::Start() {
-  services_->Connect(archive_accessor_.NewRequest(dispatcher_), kLogsArchiveAccessorName);
+  auto [archive_client, archive_server] =
+      fidl::Endpoints<fuchsia_diagnostics::ArchiveAccessor>::Create();
+  services_->Connect(kLogsArchiveAccessorName, archive_server.TakeChannel());
+  archive_accessor_.Bind(std::move(archive_client), dispatcher_, this);
 
-  auto format = fuchsia::diagnostics::Format::FXT;
-  fuchsia::diagnostics::StreamParameters params;
-  params.set_data_type(fuchsia::diagnostics::DataType::LOGS)
-      .set_format(format)
-      .set_stream_mode(fuchsia::diagnostics::StreamMode::SNAPSHOT_THEN_SUBSCRIBE)
-      .set_client_selector_configuration(
-          fuchsia::diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
+  constexpr auto kFormat = fuchsia_diagnostics::Format::kFxt;
+  fuchsia_diagnostics::StreamParameters params;
+  params.data_type(fuchsia_diagnostics::DataType::kLogs)
+      .format(kFormat)
+      .stream_mode(fuchsia_diagnostics::StreamMode::kSnapshotThenSubscribe)
+      .client_selector_configuration(
+          fuchsia_diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
 
-  fuchsia::diagnostics::BatchIteratorPtr batch_iterator;
-  archive_accessor_->StreamDiagnostics(std::move(params), batch_iterator.NewRequest(dispatcher_));
+  auto [iterator_client, iterator_server] =
+      fidl::Endpoints<fuchsia_diagnostics::BatchIterator>::Create();
+  if (const fit::result result = archive_accessor_->StreamDiagnostics({{
+          .stream_parameters = std::move(params),
+          .result_stream = std::move(iterator_server),
+      }});
+      result.is_error()) {
+    FX_LOGS(WARNING) << "Failed to call StreamDiagnostics: " << result.error_value();
+    archive_accessor_ = {};
+    return;
+  }
+
   batch_iterator_ = std::make_unique<diagnostics::fidl_log_message_parser::LogBatchIterator>(
-      std::move(batch_iterator), format);
-  batch_iterator_->set_error_handler([this](const zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to fuchsia.diagnostics.BatchIterator";
-
-    // The batch iterator and archive accessor connections are not expected to close. Ensure both
-    // are unbound at the same time.
-    archive_accessor_.Unbind();
-  });
+      std::move(iterator_client), kFormat, dispatcher_, this);
   GetNext();
 }
 
@@ -67,7 +84,7 @@ void LogSource::GetNext() {
       return;
     }
 
-    for (fpromise::result<fuchsia::logger::LogMessage, std::string>& formatted : result.value()) {
+    for (fpromise::result<fuchsia_logger::LogMessage, std::string>& formatted : result.value()) {
       if (formatted.is_error()) {
         sink_->Add(::fpromise::error(std::move(formatted.error())));
         continue;

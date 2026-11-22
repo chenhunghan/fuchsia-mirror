@@ -168,6 +168,14 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
         crate_info_dict["rustc_output"] = clippy_diagnostics_file
         crate_info = rust_common.create_crate_info(**crate_info_dict)
 
+    # Place lint_config flags (or the conservative `-Dwarnings` default) in
+    # construct_arguments's `rust_flags` slot so target response files
+    # (`rustc_flags_files`) and target `rustc_flags` override lint_config
+    # defaults consistently with rustc compilation actions, while keeping fallback
+    # `-Dwarnings` ordered after `default_rustc_flags_files` and
+    # `extra_rustc_flags` when lint_config is unset.
+    base_clippy_rust_flags = clippy_flags if (clippy_flags or lint_files or extra_clippy_flags) else ["-Dwarnings"]
+
     args, env = construct_arguments(
         ctx = ctx,
         attr = ctx.rule.attr,
@@ -181,7 +189,7 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
         linkstamp_outs = linkstamp_outs,
         ambiguous_libs = ambiguous_libs,
         output_hash = determine_output_hash(crate_info.root, ctx.label),
-        rust_flags = [],
+        rust_flags = base_clippy_rust_flags,
         out_dir = out_dir,
         build_env_files = build_env_files,
         build_flags_files = build_flags_files,
@@ -194,10 +202,6 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
     if crate_info.is_test:
         args.rustc_flags.add("--test")
 
-    # Then append the clippy flags specified from the command line, so they override what is
-    # specified on the library.
-    clippy_flags += extra_clippy_flags
-
     outputs = []
 
     if output != None:
@@ -208,15 +212,10 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
         args.process_wrapper_flags.add("--touch-file", success_marker)
         outputs.append(success_marker)
 
-    if clippy_flags or lint_files:
-        args.rustc_flags.add_all(clippy_flags)
-    else:
-        # The user didn't provide any clippy flags explicitly so we apply conservative defaults.
-
-        # Turn any warnings from clippy or rustc into an error, as otherwise
-        # Bazel will consider the execution result of the aspect to be "success",
-        # and Clippy won't be re-triggered unless the source file is modified.
-        args.rustc_flags.add("-Dwarnings")
+    # Append command-line clippy flags after target flags so CLI flags override
+    # target lint settings.
+    if extra_clippy_flags:
+        args.rustc_flags.add_all(extra_clippy_flags)
 
     if cap_at_warnings:
         # If we are capturing the output, we want the build system to be able to keep going

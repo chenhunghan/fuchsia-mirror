@@ -6,6 +6,7 @@ use crate::device::kobject::Device;
 use crate::task::waiter::WaitQueue;
 use crate::task::{CurrentTask, Kernel};
 use crate::vfs::{FsStr, FsString};
+use starnix_logging::log_warn;
 use starnix_sync::{LockDepMutex, NetstackDevicesLock};
 use std::collections::BTreeMap;
 use std::num::NonZeroU64;
@@ -31,8 +32,14 @@ pub struct NetstackDevices {
 impl NetstackDevices {
     pub fn add_device(&self, kernel: &Kernel, name: &FsStr, interface_id: NonZeroU64) {
         let mut devices = self.devices.lock();
-        let device = kernel.device_registry.add_net_device(name);
-        devices.insert(name.into(), NetstackDevice { device, interface_id });
+        match kernel.device_registry.add_net_device(name) {
+            Ok(device) => {
+                devices.insert(name.into(), NetstackDevice { device, interface_id });
+            }
+            Err(err) => {
+                log_warn!("Failed to add network device {name}: {err:?}");
+            }
+        }
     }
 
     pub fn remove_device(&self, current_task: &CurrentTask, name: &FsStr) {

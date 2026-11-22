@@ -108,7 +108,8 @@ group("bind") {
 }
 
 rustc_library("lib") {
-  sources = [
+  sources = []
+  sources += [
     "src/bytecode_constants.rs",
     "src/bytecode_encoder/bytecode_checker.rs",
     "src/bytecode_encoder/debug_encoder.rs",
@@ -144,12 +145,20 @@ rustc_library("lib") {
     "src/parser/bind_rules.rs",
     "src/parser/common.rs",
     "src/parser/mod.rs",
-    "src/test.rs",
   ]
-  inputs = [
-    "composite_tests_schema.json",
-    "tests_schema.json",
-  ]
+  if (is_fuchsia) {
+    sources += []
+  } else {
+    sources += [ "src/test.rs" ]
+  }
+  if (is_fuchsia) {
+    inputs = []
+  } else {
+    inputs = [
+      "composite_tests_schema.json",
+      "tests_schema.json",
+    ]
+  }
   crate_name = "bind"
   edition = "2024"
   proc_macro_deps = [ "//third_party/rust_crates:num-derive" ]
@@ -159,9 +168,11 @@ rustc_library("lib") {
     "//src/devices/bin/driver_tools:*",
     "//src/devices/bind:*",
     "//src/devices/lib/driver-static-checks:*",
+    "//src/sys/component_manager:*",
     "//tools/bindc:*",
   ]
-  deps = [
+  deps = []
+  deps += [
     "//third_party/rust_crates:bitfield",
     "//third_party/rust_crates:byteorder",
     "//third_party/rust_crates:nom",
@@ -169,14 +180,21 @@ rustc_library("lib") {
     "//third_party/rust_crates:num-traits",
     "//third_party/rust_crates:regex-lite",
     "//third_party/rust_crates:serde",
-    "//third_party/rust_crates:serde_json",
     "//third_party/rust_crates:thiserror",
-    "//third_party/rust_crates:valico",
   ]
+  if (is_fuchsia) {
+    deps += []
+  } else {
+    deps += [
+      "//third_party/rust_crates:serde_json",
+      "//third_party/rust_crates:valico",
+    ]
+  }
 }
 
 rustc_test("lib_test") {
-  sources = [
+  sources = []
+  sources += [
     "src/bytecode_constants.rs",
     "src/bytecode_encoder/bytecode_checker.rs",
     "src/bytecode_encoder/debug_encoder.rs",
@@ -212,26 +230,42 @@ rustc_test("lib_test") {
     "src/parser/bind_rules.rs",
     "src/parser/common.rs",
     "src/parser/mod.rs",
-    "src/test.rs",
   ]
-  inputs = [
-    "composite_tests_schema.json",
-    "tests_schema.json",
-  ]
+  if (is_fuchsia) {
+    sources += []
+  } else {
+    sources += [ "src/test.rs" ]
+  }
+  if (is_fuchsia) {
+    inputs = []
+  } else {
+    inputs = [
+      "composite_tests_schema.json",
+      "tests_schema.json",
+    ]
+  }
   edition = "2024"
   proc_macro_deps = [ "//third_party/rust_crates:num-derive" ]
-  deps = [
-           "//third_party/rust_crates:bitfield",
-           "//third_party/rust_crates:byteorder",
-           "//third_party/rust_crates:nom",
-           "//third_party/rust_crates:nom_locate",
-           "//third_party/rust_crates:num-traits",
-           "//third_party/rust_crates:regex-lite",
-           "//third_party/rust_crates:serde",
-           "//third_party/rust_crates:serde_json",
-           "//third_party/rust_crates:thiserror",
-           "//third_party/rust_crates:valico",
-         ] + [ "//third_party/rust_crates:assert_matches" ]
+  deps = []
+  deps += [
+    "//third_party/rust_crates:bitfield",
+    "//third_party/rust_crates:byteorder",
+    "//third_party/rust_crates:nom",
+    "//third_party/rust_crates:nom_locate",
+    "//third_party/rust_crates:num-traits",
+    "//third_party/rust_crates:regex-lite",
+    "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:thiserror",
+  ]
+  if (is_fuchsia) {
+    deps += []
+  } else {
+    deps += [
+      "//third_party/rust_crates:serde_json",
+      "//third_party/rust_crates:valico",
+    ]
+  }
+  deps += [ "//third_party/rust_crates:assert_matches" ]
   output_name = "bind_lib_test"
 }
 

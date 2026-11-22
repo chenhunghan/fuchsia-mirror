@@ -25,8 +25,8 @@ library_headers("headers") {
     # <phys/boot-zbi/boot-zbi.h> has #include <lib/zbitl/view.h>
     "//src/lib/zbitl:headers",
 
-    # <phys/boot-zbi/boot-zbi.h> has #include <phys/allocation.h>
-    "//zircon/kernel/phys:allocation",
+    # <phys/boot-zbi/boot-zbi.h> has #include <phys/allocation/allocation.h>
+    "//zircon/kernel/phys/allocation:headers",
   ]
 }
 
@@ -38,8 +38,7 @@ source_set("boot-zbi") {
     "boot-zbi.cc",
   ]
   deps = [
-    "..:stdio",
-    "../runtime:headers",
+    "../allocation",
     "//sdk/lib/fit",
     "//sdk/lib/zbi-format",
     "//src/lib/zbitl",
@@ -55,7 +54,7 @@ source_set("boot-zbi") {
   if (!is_efi_toolchain) {
     sources += [ "fixed-address-boot-zbi.cc" ]
     deps += [
-      "..:address-space",
+      "../address-space",
       "//zircon/kernel/phys/lib/memalloc",
       "//zircon/system/ulib/fbl",
     ]

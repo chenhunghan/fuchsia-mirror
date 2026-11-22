@@ -32,7 +32,6 @@ fidl("fuchsia.ui.test.context") {
   sources = [ "context.fidl" ]
   sdk_area = "UI"
   sdk_category = "compat_test"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

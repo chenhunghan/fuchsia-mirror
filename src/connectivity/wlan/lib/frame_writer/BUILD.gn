@@ -2,28 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
-
-# The library is defined in BUILD.bazel. The unit tests stay in GN: they depend
-# on //src/devices/bin/driver_runtime, which is not built by Bazel yet.
-rustc_test("wlan-frame-writer_test") {
-  output_name = "wlan_frame_writer_lib_test"
-  edition = "2024"
-  deps = [
-    "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
-    "//sdk/lib/driver/runtime/rust",
-    "//src/connectivity/wlan/lib/common/rust:wlan-common",
-    "//src/connectivity/wlan/lib/frame_writer/macro:wlan-frame-writer-macro",
-    "//src/connectivity/wlan/lib/ieee80211",
-    "//src/devices/bin/driver_runtime",
-    "//third_party/rust_crates:zerocopy",
-  ]
-  sources = [ "src/lib.rs" ]
-}
-
-fuchsia_unittest_package("wlan-frame-writer-tests") {
-  deps = [ ":wlan-frame-writer_test" ]
+group("tests") {
+  testonly = true
+  deps = [ ":wlan-frame-writer-tests" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -67,4 +48,30 @@ rustc_library("wlan-frame-writer") {
     "//src/connectivity/wlan/lib/common/rust:wlan-common",
     "//third_party/rust_crates:zerocopy",
   ]
+}
+if (is_fuchsia) {
+  rustc_test("wlan-frame-writer_test") {
+    sources = [ "src/lib.rs" ]
+    edition = "2024"
+    proc_macro_deps = [
+      "//src/connectivity/wlan/lib/frame_writer/macro:wlan-frame-writer-macro",
+    ]
+    deps = [
+             "//sdk/lib/driver/runtime/rust",
+             "//src/connectivity/wlan/lib/common/rust:wlan-common",
+             "//third_party/rust_crates:zerocopy",
+           ] +
+           [
+             "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_rust",
+             "//src/connectivity/wlan/lib/ieee80211",
+           ]
+    output_name = "wlan_frame_writer_lib_test"
+    link_deps = [ "//src/devices/bin/driver_runtime" ]
+  }
+}
+
+fuchsia_unittest_package("wlan-frame-writer-tests") {
+  package_name = "wlan-frame-writer-tests-gn"
+  component_name = "wlan-frame-writer-tests"
+  deps = [ ":wlan-frame-writer_test" ]
 }

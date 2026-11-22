@@ -6,6 +6,8 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/signalfd.h>
 #include <sys/syscall.h>
 #include <sys/timerfd.h>
@@ -26,8 +28,6 @@ namespace {
 #ifndef SYS_memfd_secret
 #define SYS_memfd_secret 447
 #endif
-
-int g_before_policy_userfaultfd = -1;
 
 TEST(AnonInodeTest, EventFdIsUnlabeled) {
   fbl::unique_fd fd(eventfd(0, 0));
@@ -166,12 +166,6 @@ TEST(AnonInodeTest, PerfEventFdIsUnlabeled) {
   EXPECT_THAT(GetLabel(fd.get()), SyscallResultIsErrno(ENOTSUP));
 }
 
-TEST(AnonInodeTest, EventFdBeforePolicy) {
-  // userfaultfd() created before policy load should have been labeled based on the "kernel" SID.
-  EXPECT_THAT(GetLabel(g_before_policy_userfaultfd),
-              SyscallResultIsOk("unlabeled_u:unlabeled_r:unlabeled_t:s0"));
-}
-
 // See https://fxbug.dev/398698182: Starnix doesn't support `memfd_secret(2)`. Must pass if/when
 // implemented.
 TEST(AnonInodeTest, MemfdSecretNotSupported) {
@@ -181,13 +175,31 @@ TEST(AnonInodeTest, MemfdSecretNotSupported) {
   EXPECT_THAT(syscall(SYS_memfd_secret, /* flags = */ 0), SyscallFailsWithErrno(ENOSYS));
 }
 
+// See https://fxbug.dev/398707804: Starnix doesn't support `userfaultfd(2)` without
+// `UFFD_FEATURE_SIGBUS` (i.e. event/read mode). Must pass if/when implemented.
+TEST(AnonInodeTest, UserfaultFdEventModeNotSupported) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "userfaultfd(2) event mode is supported on Linux";
+  }
+
+  fbl::unique_fd uffd(static_cast<int>(syscall(SYS_userfaultfd, O_CLOEXEC)));
+  ASSERT_TRUE(uffd.is_valid()) << strerror(errno);
+
+  uffdio_api api = {.api = UFFD_API, .features = 0, .ioctls = 0};
+  ASSERT_THAT(ioctl(uffd.get(), UFFDIO_API, &api), SyscallSucceeds());
+
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, page_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+
+  uffdio_register reg = {
+      .range = {.start = reinterpret_cast<uintptr_t>(mapping.mapping()), .len = page_size},
+      .mode = UFFDIO_REGISTER_MODE_MISSING,
+      .ioctls = 0,
+  };
+  EXPECT_THAT(ioctl(uffd.get(), UFFDIO_REGISTER, &reg), SyscallFailsWithErrno(ENOTSUP));
+}
+
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
-  g_before_policy_userfaultfd = static_cast<int>(syscall(SYS_userfaultfd, O_CLOEXEC));
-  EXPECT_NE(g_before_policy_userfaultfd, -1)
-      << "Failed pre-policy userfaultfd: " << strerror(errno);
-  EXPECT_THAT(GetLabel(g_before_policy_userfaultfd), SyscallResultIsErrno(ENOTSUP));
-
-  return "anon_inode_policy";
-}
+extern std::string GetTestPolicyName() { return "anon_inode_policy"; }

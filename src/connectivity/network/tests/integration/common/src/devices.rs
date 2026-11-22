@@ -55,6 +55,7 @@ pub async fn create_tun_port_with(
     rx_frame_types: impl IntoIterator<Item = fhardware_network::FrameType>,
     tx_frame_types: impl IntoIterator<Item = fhardware_network::FrameType>,
     mac: Option<fnet::MacAddress>,
+    power_dependency_token: Option<zx::Event>,
 ) -> (fnet_tun::PortProxy, fhardware_network::PortProxy) {
     let (port, server_end) = fidl::endpoints::create_proxy::<fnet_tun::PortMarker>();
     let rx_types = rx_frame_types.into_iter().collect();
@@ -77,6 +78,7 @@ pub async fn create_tun_port_with(
                     ..Default::default()
                 }),
                 mac,
+                power_dependency_token,
                 ..Default::default()
             },
             server_end,
@@ -98,7 +100,7 @@ pub async fn create_ip_tun_port(
 ) -> (fnet_tun::PortProxy, fhardware_network::PortProxy) {
     const IP_FRAME_TYPES: [fhardware_network::FrameType; 2] =
         [fhardware_network::FrameType::Ipv4, fhardware_network::FrameType::Ipv6];
-    create_tun_port_with(tun_device, id, IP_FRAME_TYPES, IP_FRAME_TYPES, None).await
+    create_tun_port_with(tun_device, id, IP_FRAME_TYPES, IP_FRAME_TYPES, None, None).await
 }
 
 /// Add a pure IP interface to the given device/port, returning the created
@@ -136,7 +138,7 @@ pub async fn create_eth_tun_port(
 ) -> (fnet_tun::PortProxy, fhardware_network::PortProxy) {
     const ETH_FRAME_TYPES: [fhardware_network::FrameType; 1] =
         [fhardware_network::FrameType::Ethernet];
-    create_tun_port_with(tun_device, id, ETH_FRAME_TYPES, ETH_FRAME_TYPES, Some(mac)).await
+    create_tun_port_with(tun_device, id, ETH_FRAME_TYPES, ETH_FRAME_TYPES, Some(mac), None).await
 }
 
 /// Default port ID when creating a tun device pair.

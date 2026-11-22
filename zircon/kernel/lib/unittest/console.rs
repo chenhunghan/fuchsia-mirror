@@ -5,11 +5,16 @@
 // https://opensource.org/licenses/MIT
 
 use core::ffi::{c_int, c_void};
+use core::mem::DropGuard;
+use core::pin::Pin;
 use core::slice;
 
 use debug::kernel_oops;
 use kalloc::Box;
 use kprint::{kprint, kprintln};
+use ksync::KMutex;
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use unittest::{TestCaseRegistration, TestSuiteRegistration};
 
 use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
@@ -19,21 +24,41 @@ use crate::kernel::thread;
 use crate::platform_rs::timer::{InstantMono, current_mono_time};
 use crate::vm::vm_aspace::{Type as AspaceType, VmAspace};
 
-crate::ksync_kernel::declare_singleton_mutex!(UnittestLock);
+#[ksync::guarded]
+struct UnittestLock {
+    #[mutex]
+    lock: KMutex<crate::ksync_kernel::TrackedMutex>,
+}
+
+static UNITTEST_LOCK: LazyInit<UnittestLock, NoCheck> = LazyInit::uninit();
+
+fn unittest_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before `run_unittests` can
+    // be invoked.
+    unsafe {
+        let _ = Pin::static_ref(&UNITTEST_LOCK)
+            .init_pin(pin_init!(UnittestLock { lock <- KMutex::init() }));
+    }
+}
+init::lk_init_hook!(unittest_lock, unittest_lock_init, init::LK_INIT_LEVEL_EARLIEST);
 
 unsafe extern "C" {
     static __start_unittest_testcases: TestSuiteRegistration;
     static __stop_unittest_testcases: TestSuiteRegistration;
 }
 
-fn get_testcases() -> &'static [TestSuiteRegistration] {
+fn get_testcases() -> Option<Box<[TestSuiteRegistration]>> {
     let start = &raw const __start_unittest_testcases;
     let stop = &raw const __stop_unittest_testcases;
     // Safety: both symbols bound the same linker-defined section.
     let count = unsafe { stop.offset_from(start) };
     debug_assert!(count >= 0);
     // Safety: the section holds `count` contiguous registrations.
-    unsafe { slice::from_raw_parts(start, count as usize) }
+    let registrations = unsafe { slice::from_raw_parts(start, count as usize) };
+
+    let mut sorted = Box::try_from(registrations).ok()?;
+    sorted.sort_unstable_by(|a, b| a.name().cmp(b.name()));
+    Some(sorted)
 }
 
 /// Returns the length of the longest of the given names, used as the column
@@ -66,7 +91,10 @@ fn usage(progname: &str) {
 }
 
 fn list_cases() {
-    let testcases = get_testcases();
+    let Some(testcases) = get_testcases() else {
+        kprintln!("failed to allocate memory for test cases");
+        return;
+    };
 
     let name_width = max_namelen(testcases.iter().map(TestSuiteRegistration::name));
 
@@ -75,14 +103,14 @@ fn list_cases() {
     let plurality = if count == 1 { "" } else { "s" };
     kprintln!("There {:s} {} test case{:s} available...", is_are, count, plurality);
 
-    for testcase in testcases {
+    for testcase in testcases.iter() {
         kprint!("  ");
         print_padded(testcase.name(), name_width);
         kprintln!(" : {:s}", testcase.desc().unwrap_or("<no description>"));
     }
 }
 
-fn run_unittest(testcase: &'static TestSuiteRegistration, repeat: usize) -> bool {
+fn run_unittest(testcase: &TestSuiteRegistration, repeat: usize) -> bool {
     let tests = testcase.cases();
 
     let name_width = max_namelen(tests.iter().map(TestCaseRegistration::name));
@@ -152,17 +180,17 @@ fn run_unittest(testcase: &'static TestSuiteRegistration, repeat: usize) -> bool
 }
 
 struct ThreadContext {
-    testcase: &'static TestSuiteRegistration,
+    testcase: TestSuiteRegistration,
     repeat: usize,
 }
 
 extern "C" fn run_unittest_thread_entry(arg: *mut c_void) -> i32 {
     // SAFETY: `arg` is the `ThreadContext` supplied at thread creation.
     let ctx = unsafe { &*(arg as *const ThreadContext) };
-    run_unittest(ctx.testcase, ctx.repeat) as i32
+    run_unittest(&ctx.testcase, ctx.repeat) as i32
 }
 
-fn run_testcase_in_thread(testcase: &'static TestSuiteRegistration, repeat: usize) -> bool {
+fn run_testcase_in_thread(testcase: &TestSuiteRegistration, repeat: usize) -> bool {
     let aspace = match VmAspace::create(AspaceType::User, b"unittest") {
         Some(a) => a,
         None => {
@@ -170,12 +198,12 @@ fn run_testcase_in_thread(testcase: &'static TestSuiteRegistration, repeat: usiz
             return false;
         }
     };
-    let _destroy_aspace = zr::defer(|| {
+    let aspace = DropGuard::new(aspace, |aspace| {
         let destroy_status = aspace.destroy();
         debug_assert!(destroy_status.is_ok());
     });
 
-    let ctx = ThreadContext { testcase, repeat };
+    let ctx = ThreadContext { testcase: *testcase, repeat };
     // Safety: `ctx` outlives the thread, as every path below joins before
     // returning.
     let thread = match unsafe {
@@ -192,7 +220,10 @@ fn run_testcase_in_thread(testcase: &'static TestSuiteRegistration, repeat: usiz
         }
     };
 
-    aspace.attach_to_thread(thread);
+    // SAFETY: `thread` points to a live `Thread` that has not started running, no chain lock
+    // transaction is active on this CPU, and a reference to `aspace` is held elsewhere while it
+    // is assigned to the thread.
+    unsafe { VmAspace::attach_to_thread(VmAspace::as_non_null(&aspace), thread) };
     unsafe { thread.resume() };
 
     match unsafe { thread.join(InstantMono::INFINITE) } {
@@ -206,7 +237,9 @@ fn run_testcase_in_thread(testcase: &'static TestSuiteRegistration, repeat: usiz
 
 unsafe extern "C" fn run_unittests(argc: c_int, argv: *const CmdArgs, _flags: u32) -> c_int {
     // Ensures unittests are not run concurrently.
-    ksync::lock!(let _guard = UnittestLock::Get().lock());
+    // SAFETY: `UNITTEST_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before `run_unittests`
+    // can be invoked.
+    ksync::lock!(let _guard = unsafe { UNITTEST_LOCK.get_unchecked() }.lock_lock());
 
     // SAFETY: the console passes `argc` arguments.
     let args = unsafe { slice::from_raw_parts(argv, argc as usize) };
@@ -233,7 +266,10 @@ unsafe extern "C" fn run_unittests(argc: c_int, argv: *const CmdArgs, _flags: u3
     }
 
     let run_all = casename == "all";
-    let testcases = get_testcases();
+    let Some(testcases) = get_testcases() else {
+        kprintln!("failed to allocate memory for test cases");
+        return -1;
+    };
     let num_tests = if run_all { testcases.len() } else { 1 };
     let mut failed: Box<[usize]> = match Box::try_new_zeroed_slice(num_tests) {
         Ok(b) => b,

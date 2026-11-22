@@ -232,7 +232,6 @@ local_font_bundle(
 
 local_font_bundle(
     name = "test-fonts-downstream-local",
-    testonly = True,
     asset_names = [
         "Roboto-Regular.ttf",
         "Roboto-Light.ttf",
@@ -246,7 +245,6 @@ local_font_bundle(
 # to use a fixed set of fonts.
 font_collection(
     name = "downstream-test-fonts-collection",
-    testonly = True,
     local_font_bundles = [":test-fonts-downstream-local"],
     manifest_prefix = "downstream_test_fonts",
     product_config_path = "downstream-test-fonts-collection.fontcfg.json5",

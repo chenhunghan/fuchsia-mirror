@@ -9,9 +9,6 @@
                 // TODO(https://fxbug.dev/42080092): This test causes the test suite to fail on NUC.
                 "RestartRead.ReadFromPipeRestarts",
 
-                // TODO(https://fxbug.dev/493672905): Bug in Starnix invalidation handling.
-                "FuseServerTest.InvalidateMountDir",
-
                 // TODO(https://fxbug.dev/391599171): Some features of userfaultfd that Starnix
                 // can't support with its current implementation. Enable as support is extended.
                 "UffdTest.PopulateFromAnotherUffd",
@@ -43,7 +40,8 @@
                 "SignalHandling.SignalDeliveryWakesOnlyOneFutex",
 
                 // TODO(https://fxbug.dev/297440106)
-                // TODO(https://fxbug.dev/365540067)
+                // TODO(https://fxbug.dev/365540067): WaitUntilZombie races against exited thread-group
+                // leader removal from /proc/<pid>/task/<pid>.
                 "PidFdTest.PidFdOpenAfterZombification",
                 "ZombieProcTest.*",
 
@@ -60,13 +58,12 @@
                 // TODO(https://fxbug.dev/351037863)
                 "AshmemTest.SetNameOverflow",
 
-                // TODO(https://fxbug.dev/527579086): Starnix VFS casefold dentry cache coherence & flag inheritance.
+                // TODO(https://fxbug.dev/568844233): Support renameat2 RENAME_EXCHANGE on RemoteFs.
                 "FsCasefold/FsCasefoldTest.RenameExchangeSwapsEntriesAcrossCaseVariants/fxfs",
 
-                // TODO(https://fxbug.dev/544902575): Non-UTF-8 and Unicode normalization support.
+                // TODO(https://fxbug.dev/544902575): Non-UTF-8 filename support in RemoteFs.
                 "FsCasefold/FsCasefoldTest.NonUtf8NameMatchesExactOpaqueBytes/fxfs",
                 "FsCasefold/FsCasefoldTest.NonUtf8BytesSuppressCasefoldingForName/fxfs",
-                "FsCasefold/FsCasefoldTest.UnicodeLookupGivenNameExceedingNameMaxMatchesNormalizedName/*",
 
                 // TODO(https://fxbug.dev/507966123): Check fd access mode in BPF_MAP_* subcommands.
                 "BpfMapTest.CannotUpdatePinnedMapWithReadOnlyFd",
@@ -78,8 +75,8 @@
                 // TODO(https://g-issues.fuchsia.dev/issues/318701791)
                 "MemfdFaultTest/FaultFileTest.ReadV/0",
                 "TmpfsFaultTest/FaultFileTest.ReadV/0",
-                "SocketFault/SocketFault.ReadV/2",
-                "SocketFault/SocketFault.WriteV/2",
+                "SocketFault/SocketFault.ReadVIntoInvalidAddressFails/2",
+                "SocketFault/SocketFault.WriteVFromInvalidAddressFails/2",
 
                 // TODO(https://fxbug.dev/307595538)
                 "SndRcvBufSockOpt/SndRcvBufSockOpt.DoubledOnGet/*",
@@ -95,7 +92,6 @@
 
                 // TODO(https://fxbug.dev/419882465): Need a more granular API to report these values correctly
                 "MMapProcTest.SmapsRssSplitMappingsStrict",
-                "MlockProcTest.MlockOnePageIncreasesVmLck",
 
                 // TODO(https://fxbug.dev/423010702)
                 "Task.KillZombieEPERM",
@@ -110,9 +106,6 @@
                 "PtraceThreadTracerTest.SiblingThreadCannotIssuePtraceCommands",
                 "PtraceThreadTracerTest.TraceeDetachesWhenTracerThreadExits",
                 "PtraceThreadTracerTest.TraceeKilledWhenTracerThreadExitsWithExitKill",
-
-                // SIGCONT should not resume a tracee from a ptrace event stop.
-                "PtraceTest.SigcontDoesNotWakePtraceEventStop",
 
                 // TODO(https://fxbug.dev/445790710): Implement ptrace poke across 2 mappings.
                 "PtraceTest.PokeAcrossMappings",

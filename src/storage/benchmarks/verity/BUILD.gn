@@ -178,8 +178,12 @@ fuchsia_component_perf_test("verity-benchmarks-perf") {
       "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.verity.txt"
 
   # We don't enable this test on Astro because of the potential for it to cause
-  # extra flash wear on that device type.
-  environments = performance_testing_environments - [ astro_env ]
+  # extra flash wear on that device type. Iris does not yet support finding or
+  # creating a test partition in the system GPT (b/579569526).
+  environments = performance_testing_environments - [
+                   astro_env,
+                   iris_env,
+                 ]
 }
 
 group("benchmarks") {

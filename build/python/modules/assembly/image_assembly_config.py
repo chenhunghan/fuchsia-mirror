@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 
 import serialization
 
-__all__ = ["ImageAssemblyConfig", "KernelInfo"]
+__all__ = ["DriverBoardInfo", "ImageAssemblyConfig", "KernelInfo", "PlatformId"]
 
 from .common import FileEntry, FilePath
 
@@ -51,10 +51,18 @@ class KernelInfo:
 
 
 @dataclass
-class BoardDriverArguments:
+class PlatformId:
+    """Payload content for a `ZBI_TYPE_PLATFORM_ID` ZBI item."""
+
     vendor_id: int
     product_id: int
     name: str
+
+
+@dataclass
+class DriverBoardInfo:
+    """Payload content for a `ZBI_TYPE_DRV_BOARD_INFO` ZBI item."""
+
     revision: int
 
 
@@ -77,7 +85,8 @@ class ImageAssemblyConfig:
     boot_args: set[str] = field(default_factory=set)
     bootfs_files: set[FileEntry] = field(default_factory=set)
     bootfs_packages: set[FilePath] = field(default_factory=set)
-    board_driver_arguments: BoardDriverArguments | None = None
+    platform_id: PlatformId | None = None
+    driver_board_info: DriverBoardInfo | None = None
     zbi_extra_items: FilePath | None = None
     devicetree: FilePath | None = None
     devicetree_overlay: FilePath | None = None
@@ -87,6 +96,7 @@ class ImageAssemblyConfig:
     system_release_info: SystemReleaseInfo | None = None
     partitions_config: FilePath | None = None
     build_type: str | None = None
+    delivery_blob_type: int | None = None
 
     # TODO:  Flesh out the images_config with the actual types, if it's needed.
     images_config: dict[str, list[str]] = field(default_factory=dict)

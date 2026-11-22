@@ -63,7 +63,7 @@ void FormatTableT(const std::vector<ColSpec>& spec, const std::vector<std::vecto
   // Max widths of headings.
   bool has_head = false;
   for (const auto& col : spec) {
-    max.push_back(UnicodeCharWidth(col.head));
+    max.push_back(static_cast<int>(UnicodeCharWidth(col.head)));
     has_head |= !col.head.empty();
   }
 

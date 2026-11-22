@@ -13,6 +13,7 @@ rustc_library("battery_manager_test_harness") {
   sources = [
     "src/fake_charger.rs",
     "src/fake_sag.rs",
+    "src/fake_wake_alarms.rs",
     "src/lib.rs",
     "src/realm.rs",
     "src/wait.rs",
@@ -25,6 +26,7 @@ rustc_library("battery_manager_test_harness") {
     "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
     "//sdk/fidl/fuchsia.power.battery.test:fuchsia.power.battery.test_rust",
     "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+    "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
     "//sdk/lib/driver_test_realm/realm_builder/rust",
     "//sdk/rust/zx",
     "//src/devices/bind/fuchsia.platform:fuchsia.platform_rust",

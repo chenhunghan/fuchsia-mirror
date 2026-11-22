@@ -15,14 +15,22 @@
 #[cfg(console_enabled)]
 pub mod console;
 #[cfg(not(console_enabled))]
-use debug as _;
+use {debug as _, fbl as _, kprint as _, zx_types as _};
 mod power_ffi;
 
+use boot_options::BootOptions;
 use core::sync::atomic::Ordering;
 #[cfg(ktest)]
 use unittest as _;
 use zr::AtomicConstPtr;
 use zx_status::Status;
+
+// Re-exported for architecture-specific platform power drivers (e.g., arm64 iris and moonflower).
+#[cfg_attr(not(target_arch = "aarch64"), allow(unused_imports))]
+pub use crate::power_management::{
+    ActivePowerLevelConfig, ControlInterface, IdlePowerModel, IdlePowerStateConfig, IdleStateFlags,
+    PowerDomainConfig,
+};
 
 /// Flags passed to `power_reboot` specifying the reason/target for reboot.
 #[repr(C)]
@@ -105,31 +113,9 @@ zr::static_assert!(core::mem::align_of::<PowerCpuState>() == 4);
 zr::static_assert!(core::mem::size_of::<PdevPowerOps>() == 72);
 zr::static_assert!(core::mem::align_of::<PdevPowerOps>() == 8);
 
-/// Power level options flag: entity power level is independent of other CPUs in the domain.
-pub const K_POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT: u32 = 1;
-
-/// Control interface identifier for ARM WFI (Wait-For-Interrupt) transitions.
-pub const CONTROL_INTERFACE_ARM_WFI: u32 = 0;
-
-/// Control interface identifier for CPU power driver transitions.
-pub const CONTROL_INTERFACE_CPU_DRIVER: u32 = 1;
-
-pub use crate::power_management::{PowerDomainConfigFfi, ProcessorPowerLevelFfi};
-use boot_options::BootOptions;
-
 /// Registers the provided power domain configurations and energy models with the kernel scheduler.
-///
-/// # Safety
-///
-/// For every `PowerDomainConfigFfi` in `domains`, if `level_count > 0`, `levels` must point to a
-/// valid array of `level_count` initialized `ProcessorPowerLevelFfi` structs, and each non-null
-/// `diagnostic_name` must point to a valid NUL-terminated C string.
-pub unsafe fn power_management_register_domains(
-    domains: &[PowerDomainConfigFfi],
-) -> Result<(), Status> {
-    // SAFETY: Caller guarantees every `PowerDomainConfigFfi` in `domains` has valid `levels` and
-    // NUL-terminated `diagnostic_name` pointers.
-    unsafe { crate::power_management::register_domains(domains) }
+pub fn power_management_register_domains(domains: &[PowerDomainConfig<'_>]) -> Result<(), Status> {
+    crate::power_management::register_domains(domains)
 }
 
 /// Sets processing rate limits (min and max) for the CPU cores identified by `cpu_mask`.
@@ -296,7 +282,6 @@ pub fn power_system_resume() -> Result<(), Status> {
 #[cfg(ktest)]
 #[unittest::suite(name = "pdev_power")]
 mod tests {
-    use crate::pdev_power::power_ffi::rust_power_get_cpu_state;
     use crate::pdev_power::{
         PdevPowerOps, PowerCpuState, PowerRebootFlags, pdev_swap_power_for_test, power_cpu_off,
         power_cpu_on, power_get_cpu_state, power_management_register_domains,
@@ -477,23 +462,10 @@ mod tests {
         assert_eq!(TEST_SYSTEM_RESUME_CALLED.load(Ordering::Relaxed), 1);
     }
 
-    /// Tests null pointer handling for FFI power operations.
-    #[test]
-    fn test_null_pointer_arguments() {
-        let _guard = TestOpsGuard::new(&TEST_OPS);
-
-        // SAFETY: Testing null pointer validation behavior.
-        assert_err!(
-            unsafe { rust_power_get_cpu_state(1, core::ptr::null_mut()) },
-            Status::INVALID_ARGS
-        );
-    }
-
     /// Tests registering an empty domain slice with power_management_register_domains.
     #[test]
     fn test_power_management_register_domains_empty() {
-        // SAFETY: An empty slice contains no raw pointers to dereference.
-        let status = unsafe { power_management_register_domains(&[]) };
+        let status = power_management_register_domains(&[]);
         assert_ok!(status);
     }
 

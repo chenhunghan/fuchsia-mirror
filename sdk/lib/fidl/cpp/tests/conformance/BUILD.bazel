@@ -30,12 +30,8 @@ fx_cc_library(
     alwayslink = True,
 )
 
-# LINT.IfChange
-
-# @bazel2gn:skip
 _GIDL_OUTPUT_PREFIX = "conformance_suite__"
 
-# @bazel2gn:skip
 _GIDL_DEPS = [
     ":%s%s" % (
         _GIDL_OUTPUT_PREFIX,
@@ -44,7 +40,6 @@ _GIDL_DEPS = [
     for gidl_file in CONFORMANCE_SUITE_GIDL_FILES
 ]
 
-# @bazel2gn:skip
 [
     gidl_cpp_conformance(
         name = "%s%s" % (
@@ -62,7 +57,6 @@ _GIDL_DEPS = [
     for gidl_file in CONFORMANCE_SUITE_GIDL_FILES
 ]
 
-# @bazel2gn:skip
 fx_cc_binary(
     name = "fidl_cpp_conformance_tests_device_bin",
     testonly = True,
@@ -72,18 +66,14 @@ fx_cc_binary(
     ] + _GIDL_DEPS,
 )
 
-# @bazel2gn:skip
 fx_unittest_package(
     name = "fidl_cpp_conformance_tests",
     unit_tests = [":fidl_cpp_conformance_tests_device_bin"],
-    visibility = ["//sdk/lib/fidl/cpp/tests:__pkg__"],
+    visibility = ["//sdk/lib:__pkg__"],
 )
 
-# @bazel2gn:skip
 host_cc_test(
     name = "fidl_cpp_conformance_tests_bin",
-    visibility = ["//sdk/lib/fidl/cpp/tests:__pkg__"],
+    visibility = ["//sdk/lib:__pkg__"],
     deps = ["//src/tests/fidl/conformance_suite:conformance_fidl_cpp"] + _GIDL_DEPS,
 )
-
-# LINT.ThenChange(BUILD.gn)

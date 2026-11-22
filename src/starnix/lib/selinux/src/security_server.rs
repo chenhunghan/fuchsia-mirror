@@ -16,9 +16,9 @@ use crate::policy::{
 use crate::sid_table::{PortableSidTable, SidTable};
 use crate::sync::{LockDepMutex, SeLinuxSecurityServerStateLock, SeLinuxStatusLock};
 use crate::{
-    ClassPermission, FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions,
-    FileSystemMountSids, HashStats, InitialSid, KernelClass, KernelPermission, NullessByteStr,
-    ObjectClass, PerThreadCache, PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
+    FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions, FileSystemMountSids,
+    HashStats, InitialSid, KernelClass, KernelPermission, NullessByteStr, ObjectClass,
+    PerThreadCache, PolicyCap, SeLinuxStatus, SeLinuxStatusPublisher, SecurityId,
 };
 use anyhow::Context as _;
 use fuchsia_rcu::{RcuDroppable, RcuOptionArc, RcuReadScope};
@@ -548,6 +548,14 @@ impl SecurityServer {
         Ok(label)
     }
 
+    /// Returns whether a policy is loaded and defines any `genfscon` statements for `fs_type`.
+    pub fn has_genfscon_for_fs(&self, fs_type: NullessByteStr<'_>) -> bool {
+        let scope = RcuReadScope::new();
+        self.active_policy
+            .as_ref(&scope)
+            .is_some_and(|policy| policy.parsed.has_genfscon_for_fs(fs_type))
+    }
+
     /// Returns the [`SecurityId`] with which to label an [`FsNode`] in a filesystem of `fs_type`,
     /// at the specified filesystem-relative `node_path`. Callers are responsible for ensuring that
     /// this API is never called prior to a policy first being loaded, or for a filesystem that is
@@ -569,10 +577,7 @@ impl SecurityServer {
         })
     }
 
-    /// Returns true if the `bounded_sid` is bounded by the `parent_sid`.
-    /// Bounds relationships are mostly enforced by policy tooling, so this only requires validating
-    /// that the policy entry for the `TypeId` of `bounded_sid` has the `TypeId` of `parent_sid`
-    /// specified in its `bounds`.
+    /// Returns true if `bounded_sid` is bounded by `parent_sid`, directly or transitively.
     pub fn is_bounded_by(&self, bounded_sid: SecurityId, parent_sid: SecurityId) -> bool {
         let scope = RcuReadScope::new();
         let active_policy = self.expect_active_policy(&scope);

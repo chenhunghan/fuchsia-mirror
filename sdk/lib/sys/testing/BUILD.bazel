@@ -11,6 +11,7 @@ exports_files(
     [
         "coverage.shard.cml",
         "elf_test_runner.shard.cml",
+        "gunit_runner.shard.cml",
     ],
     visibility = [
         "//build/bazel/rules/components:__pkg__",
@@ -36,11 +37,19 @@ exports_files(
 cml_shard(
     name = "gtest_runner.shard",
     shard = "gtest_runner.shard.cml",
-    visibility = ["//src/devices/block/tests/rpmb-integration-test:__pkg__"],
+    visibility = [
+        "//src/devices/block/tests/rpmb-integration-test:__pkg__",
+        "//src/memory/thrasher:__pkg__",
+    ],
 )
 
 cml_shard(
     name = "rust_test_runner.shard",
     shard = "rust_test_runner.shard.cml",
-    visibility = ["//src/media/haptics:__pkg__"],
+    visibility = [
+        "//src/devices/usb/usb-policy:__pkg__",
+        "//src/media/haptics:__pkg__",
+        "//src/sys/runners/dso:__pkg__",
+        "//src/sys/runners/dso/tests:__pkg__",
+    ],
 )

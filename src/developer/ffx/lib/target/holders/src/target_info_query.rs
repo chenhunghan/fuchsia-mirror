@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 use discovery::query::TargetInfoQuery;
 
-use fho::{FhoEnvironment, TryFromEnv};
+use fho::{FhoEnvironment, TargetNeed, TryFromEnv};
 use std::ops::Deref;
 
 #[derive(Clone, Debug)]
@@ -24,6 +24,7 @@ impl From<discovery::query::TargetInfoQuery> for TargetInfoQueryHolder {
 }
 
 impl TryFromEnv for TargetInfoQueryHolder {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let env_context = env.environment_context();

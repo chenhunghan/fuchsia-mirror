@@ -22,6 +22,8 @@
 
 namespace flatland {
 
+class ImportedImage;
+
 class LayerHandle {
  public:
   using InstanceId = scheduling::SessionId;
@@ -137,6 +139,11 @@ struct ResolvedLayer {
     allocation::GlobalImageId image_id = allocation::kInvalidImageId;
     uint32_t width = 0;   // full image width
     uint32_t height = 0;  // full image height
+    // Borrowed from the frame's `UberStruct` snapshot, which outlives the
+    // frame; null when the image came through the legacy
+    // `BufferCollectionImporter` path or the layer is the render target
+    // (image_import/DESIGN.md#ownership).
+    ImportedImage* image = nullptr;
     bool operator==(const ImageContent&) const = default;
   };
 
@@ -182,8 +189,10 @@ namespace std {
 template <>
 struct hash<flatland::LayerHandle> {
   size_t operator()(const flatland::LayerHandle& h) const noexcept {
-    return hash<flatland::LayerHandle::InstanceId>{}(h.instance_id_) ^
-           hash<uint64_t>{}(h.layer_id_);
+    // Qualify `std::hash` so `clang-format` keeps the `hash<...>{}` spelling
+    // without inserting a space before `{}`.
+    return std::hash<flatland::LayerHandle::InstanceId>{}(h.instance_id_) ^
+           std::hash<uint64_t>{}(h.layer_id_);
   }
 };
 

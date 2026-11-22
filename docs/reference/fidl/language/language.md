@@ -221,12 +221,12 @@ the C++ bindings generator places declarations for the FIDL library `fuchsia.ui`
 within the C++ namespace `fuchsia_ui`. Similarly, the Rust bindings generator
 would generate a crate named `fidl_fuchsia_ui`.
 
-## Types and type declarations
+## Types and type declarations {#types-and-type-declarations}
 
 FIDL supports a number of builtin types as well as declarations of new types
 (e.g. structs, unions, type aliases) and protocols.
 
-### Primitives
+### Primitives {#primitives}
 
 *   Simple value types.
 *   Cannot be optional.
@@ -314,7 +314,7 @@ Note that _N_ appears as a layout parameter, which means that it affects the ABI
 of the type. In other words, changing the parameter `_N_` is an
 [ABI-breaking][compat] change.
 
-### Strings
+### Strings {#strings}
 
 *   Variable-length sequence of bytes representing text in UTF-8 encoding.
 *   Can be optional; absent strings and empty strings are distinct.
@@ -344,12 +344,13 @@ parameter `_N_` is not an [ABI-breaking][compat] change.
 
 > Strings should not be used to pass arbitrary binary data since bindings enforce
 > valid UTF-8. Instead, consider `bytes` for small data or
-> [`fuchsia.mem.Buffer`](/docs/development/api/fidl.md#consider-using-fuchsia_mem_buffer)
+> [`fuchsia.mem.Buffer`](/docs/development/api/fidl.md#consider-using-virtual-memory-objects-vmos)
 > for blobs. See
-> [Should I use string or vector?](/docs/development/api/fidl.md#should-i-use-string-or-vector)
+> [Should I use string or
+> vector?](/docs/development/api/fidl.md#should-i-use-string-or-vector-byte)
 > for details.
 
-### Vectors
+### Vectors {#vectors}
 
 *   Variable-length sequence of homogeneous elements.
 *   Can be optional; absent vectors and empty vectors are distinct.
@@ -980,10 +981,10 @@ obtain a different reserved name:
 [fidl-overview]: /docs/concepts/fidl/overview.md
 [fidl-grammar]: /docs/reference/fidl/language/grammar.md
 [doc-attribute]: /docs/reference/fidl/language/attributes.md#Doc
-[naming-style]: /docs/development/languages/fidl/guides/style.md#Names
+[naming-style]: /docs/development/languages/fidl/guides/style.md#names
 [compat]: /docs/development/languages/fidl/guides/compatibility/README.md
-[union-compat]: /docs/development/languages/fidl/guides/compatibility/README.md#union
-[resource-compat]: /docs/development/languages/fidl/guides/compatibility/README.md#modifiers
+[union-compat]: /docs/development/languages/fidl/guides/compatibility/README.md
+[resource-compat]: /docs/development/languages/fidl/guides/compatibility/README.md
 [bindings-reference]: /docs/reference/fidl/bindings/overview.md
 [lexicon-validate]: /docs/reference/fidl/language/lexicon.md#validate
 [wire-format]: /docs/reference/fidl/language/wire-format/README.md

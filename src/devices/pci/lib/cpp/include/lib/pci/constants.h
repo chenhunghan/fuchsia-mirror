@@ -56,6 +56,7 @@ inline constexpr uint32_t kPcieExtCapPtrMaxValid    = kExtendedConfigSize - kCap
 inline constexpr uint8_t kCapabilityPtrMask         = static_cast<uint8_t>(~(kCapabilityAlignment - 1u));
 inline constexpr uint16_t kExtCapabilityPtrMask     = static_cast<uint16_t>(~(kCapabilityAlignment - 1u) & (kExtendedConfigSize - 1u));
 inline constexpr size_t kMaxStdCapabilities         = (kBaseConfigSize - kConfigHeaderSize) / kCapabilityAlignment;
+inline constexpr size_t kMaxExtCapabilities         = (kExtendedConfigSize - kBaseConfigSize) / kCapabilityAlignment;
 inline constexpr uint16_t kInvalidExtCapabilityId   = 0xFFFF;
 
 // clang-format on

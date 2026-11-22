@@ -20,7 +20,6 @@
 #include <arch/vm.h>
 #include <ktl/span.h>
 #include <vm/arch_vm_aspace.h>
-#include <vm/vm_ffi.h>
 
 #ifndef VM_TRACING_LEVEL
 #define VM_TRACING_LEVEL 0
@@ -68,54 +67,27 @@
 #define VM_KTRACE_INSTANT(level, string, args...) \
   KTRACE_INSTANT_ENABLE(VM_KTRACE_LEVEL_ENABLED(level), "kernel:vm", string, ##args)
 
-class VmAspace;
-
 // kernel address space
 static_assert(KERNEL_ASPACE_BASE + (KERNEL_ASPACE_SIZE - 1) > KERNEL_ASPACE_BASE, "");
 
 // user address space, defaults to below kernel space with a 16MB guard gap on either side
 static_assert(USER_ASPACE_BASE + (USER_ASPACE_SIZE - 1) > USER_ASPACE_BASE, "");
 
-// linker script provided variables for various virtual kernel addresses
+// linker script provided start of the kernel virtual image
 extern const char __executable_start[];
-extern const char __code_start[];
-extern const char __code_end[];
-extern const char __rodata_start[];
-extern const char __rodata_end[];
-extern const char __relro_start[];
-extern const char __relro_end[];
-extern char __data_start[];
-extern char __data_end[];
-extern char __bss_start[];
-extern char _end[];
 
-extern paddr_t zero_page_paddr;
-extern vm_page_t* zero_page;
-
-// Ends the VM's role within the context of phys handoff: it destroys the VMAR
-// containing the mappings backing temporary hand-off data.
-void vm_end_handoff();
+__BEGIN_CDECLS
 
 // return a pointer to the zero page
-static inline vm_page_t* vm_get_zero_page(void) { return zero_page; }
-
-// return the physical address of the zero page
-static inline paddr_t vm_get_zero_page_paddr(void) { return zero_page_paddr; }
+__CONST vm_page_t* vm_get_zero_page();
 
 // Whether the virtual heap is enabled.
-bool vm_using_virtual_heap();
+__CONST bool vm_using_virtual_heap();
 
 // Request the heap dimensions.
-vaddr_t vm_get_kernel_heap_base();
-size_t vm_get_kernel_heap_size();
+__CONST vaddr_t vm_get_kernel_heap_base();
+__CONST size_t vm_get_kernel_heap_size();
 
-// internal kernel routines below, do not call directly
-
-// internal routine by the scheduler to swap mmu contexts
-void vmm_context_switch(VmAspace* oldspace, VmAspace* newaspace);
-
-// set the current user aspace as active on the current thread.
-// NULL is a valid argument, which unmaps the current user address space
-void vmm_set_active_aspace(VmAspace* aspace);
+__END_CDECLS
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_H_

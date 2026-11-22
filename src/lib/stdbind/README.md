@@ -19,7 +19,7 @@ rustc_bindgen_crate("my-bindings") {
     # Uses <lib/stdbind/optional.h>
     headers = ["my-header.h"]
 
-    type_blocklist = [ "stdbind::optional" ]
+    type_blocklist = [ "stdbind::optional(_.*)?" ]
     raw_lines = [ "use stdbind::Optional as stdbind_optional;" ]
     deps = [ "//src/lib/stdbind:stdbind-rs" ]
 }

@@ -6,7 +6,6 @@
 
 #include <debug.h>
 #include <lib/counters.h>
-#include <lib/crashlog.h>
 #include <lib/thread-stack/abi.h>
 #include <platform.h>
 #include <stdio.h>
@@ -15,7 +14,6 @@
 #include <arch/arch_ops.h>
 #include <arch/regs.h>
 #include <arch/riscv64.h>
-#include <arch/thread.h>
 #include <kernel/ffi.h>
 #include <kernel/thread.h>
 #include <pretty/hexdump.h>
@@ -28,13 +26,6 @@ extern "C" {
                                                    int64_t cause);
 void rust_riscv64_print_frame(void (*write_cb)(void*, const char*, size_t), void* ctx,
                               const iframe_t* iframe);
-
-// C++ kernel runtime bridge hooks called from Rust.
-void cpp_set_crashlog_regs(const iframe_t* iframe, int64_t cause, uint64_t tval) {
-  g_crashlog.regs.iframe = const_cast<iframe_t*>(iframe);
-  g_crashlog.regs.cause = cause;
-  g_crashlog.regs.tval = tval;
-}
 
 }  // extern "C"
 

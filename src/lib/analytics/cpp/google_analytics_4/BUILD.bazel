@@ -2,11 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":unittests_host_test",
+    ],
+    visibility = ["//src/lib/analytics:__pkg__"],
+)
+
+fx_cc_library(
     name = "google_analytics_4",
     srcs = [
         "batch.cc",
@@ -31,4 +43,26 @@ cc_library(
         "//src/lib/fxl",
         "//third_party/rapidjson",
     ],
+)
+
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = [
+        "batch_unittest.cc",
+        "client_unittest.cc",
+    ],
+    gn_output_name = "analytics_cpp_google_analytics_4_unittests",
+    deps = [
+        ":google_analytics_4",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//third_party/rapidjson",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+host_test(
+    name = "unittests_host_test",
+    binary = ":unittests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )

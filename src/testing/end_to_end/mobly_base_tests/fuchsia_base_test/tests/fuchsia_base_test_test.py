@@ -93,6 +93,8 @@ class FuchsiaBaseTestTests(unittest.IsolatedAsyncioTestCase):
     ) -> tuple[mock.Mock, mock.Mock]:
         """Makes all devices use the same mocked power switch and USB power
         hub, and returns them."""
+        switch = mock.create_autospec(power_switch.PowerSwitch, instance=True)
+        hub = mock.create_autospec(usb_power_hub.UsbPowerHub, instance=True)
         for device in self.devices:
             # No active tracing session to stop in teardown_class().
             device.tracing = mock.MagicMock()
@@ -102,18 +104,8 @@ class FuchsiaBaseTestTests(unittest.IsolatedAsyncioTestCase):
             device.ffx.check_connection.side_effect = errors.HoneydewError(
                 "unreachable"
             )
-        switch = mock.create_autospec(power_switch.PowerSwitch, instance=True)
-        hub = mock.create_autospec(usb_power_hub.UsbPowerHub, instance=True)
-        self.enterContext(
-            mock.patch.object(
-                self.test_obj, "_lookup_power_switch", return_value=(switch, 1)
-            )
-        )
-        self.enterContext(
-            mock.patch.object(
-                self.test_obj, "_lookup_usb_power_hub", return_value=(hub, 2)
-            )
-        )
+            device.power_switch = switch
+            device.usb.power_hub = hub
         return switch, hub
 
     async def test_teardown_class_ignores_power_on_failures(self) -> None:
@@ -139,7 +131,7 @@ class FuchsiaBaseTestTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(signals.TestAbortAll):
             await self.test_obj.teardown_class()
 
-        switch.power_on.assert_called_once_with(outlet=1)
+        switch.power_on.assert_called_once_with()
         hub.power_on.assert_not_called()
 
     async def test_teardown_class_propagates_unexpected_exceptions_from_usb_power_hub(
@@ -153,8 +145,8 @@ class FuchsiaBaseTestTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(signals.TestAbortAll):
             await self.test_obj.teardown_class()
 
-        switch.power_on.assert_called_once_with(outlet=1)
-        hub.power_on.assert_called_once_with(port=2)
+        switch.power_on.assert_called_once_with()
+        hub.power_on.assert_called_once_with()
 
 
 if __name__ == "__main__":

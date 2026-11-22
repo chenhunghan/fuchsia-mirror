@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/test.gni")
+import("//build/testing/host_test.gni")
+import("//build/testing/host_test_data.gni")
 
 # This test binary is always built in the linux_arm-shared toolchain. linux_arm
 # is the only toolchain that will produce 32 bit binaries with the ARM Exception
@@ -15,49 +15,13 @@ if (is_host) {
     outputs =
         [ "$root_out_dir/test_data/unwinder/{{source_name_part}}.targetso" ]
   }
-} else {
-  resource("test_so") {
-    sources = [ "test_data/libunwind_info_test_data.targetso" ]
 
-    outputs = [ "testdata/{{source_name_part}}.targetso" ]
-  }
-}
-
-test("unwinder_tests_bin") {
-  output_name = "unwinder_tests"
-  sources = [
-    "arm_ehabi_module_unittest.cc",
-    "arm_ehabi_parser_unittest.cc",
-    "dwarf_expr_unittest.cc",
-    "elf_module_cache_unittest.cc",
-    "loaded_elf_module_unittest.cc",
-    "memory_unittest.cc",
-    "unwinder_base_unittest.cc",
-  ]
-
-  deps = [
-    ":internal_headers",
-    ":unwinder",
-    "testing",
-    "tests",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-  ]
-
-  if (is_host) {
+  host_test("unwinder_tests_host_test") {
+    binary_path = "$root_out_dir/unwinder_tests"
+    target = get_label_info(":unwinder_tests_bin", "label_with_toolchain")
+    deps = [ ":unwinder_tests_bin" ]
     data_deps = [ ":test_so" ]
   }
-
-  ldflags = [ "-Wl,-z,stack-size=0x1000000" ]
-}
-
-fuchsia_unittest_package("unwinder_tests") {
-  deps = [ ":unwinder_tests_bin" ]
-
-  # This is a prebuilt test binary that we control ourselves. There won't be a
-  # corresponding unstripped binary for it.
-  disable_elf_binaries_checks = true
-  data_deps = [ ":test_so" ]
 }
 
 group("tests") {
@@ -65,7 +29,7 @@ group("tests") {
 
   deps = [
     ":unwinder_tests",
-    ":unwinder_tests_bin($host_toolchain)",
+    ":unwinder_tests_host_test($host_toolchain)",
   ]
 }
 
@@ -171,4 +135,47 @@ static_library("unwinder") {
     "//third_party/googletest:gtest_prod",
     "//zircon/third_party/ulib/safemath",
   ]
+}
+if (is_fuchsia) {
+  resource("test_so") {
+    sources =
+        [ "//src/lib/unwinder/test_data/libunwind_info_test_data.targetso" ]
+    outputs = [ "testdata/libunwind_info_test_data.targetso" ]
+  }
+}
+
+cc_test_executable("unwinder_tests_bin") {
+  sources = [
+    "arm_ehabi_module_unittest.cc",
+    "arm_ehabi_parser_unittest.cc",
+    "dwarf_expr_unittest.cc",
+    "elf_module_cache_unittest.cc",
+    "loaded_elf_module_unittest.cc",
+    "memory_unittest.cc",
+    "unwinder_base_unittest.cc",
+  ]
+  output_name = "unwinder_tests"
+  ldflags = [ "-Wl,-z,stack-size=0x1000000" ]
+  deps = [
+    ":internal_headers",
+    ":unwinder",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/unwinder/testing",
+    "//src/lib/unwinder/tests",
+    "//third_party/googletest:gtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_component("unwinder_tests_component") {
+  deps = [ ":unwinder_tests_bin" ]
+  component_name = "unwinder_tests"
+}
+
+fuchsia_test_package("unwinder_tests") {
+  package_name = "unwinder_tests-gn"
+  test_components = [ ":unwinder_tests_component" ]
+  deps = [ ":test_so" ]
+  disable_elf_binaries_checks = true
 }

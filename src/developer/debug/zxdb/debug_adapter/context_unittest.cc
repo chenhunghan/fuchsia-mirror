@@ -48,8 +48,6 @@ class ContextTest : public DebugAdapterContextTest {
   FakeRemoteAPI* remote_api_;
 };
 
-}  // namespace
-
 TEST_F(ContextTest, InitializeRequest) {
   SetUpConnectedContext();
 
@@ -359,7 +357,7 @@ TEST_F(ContextTest, StoppedEventUnspecifiedAllLevelBreakpoint) {
 TEST_F(ContextTest, DisconnectRequest) {
   bool request_received = false;
 
-  context().set_destroy_connection_callback([&request_received]() { request_received = true; });
+  context().set_destroy_connection_callback([&request_received] { request_received = true; });
 
   InitializeDebugging();
 
@@ -405,8 +403,6 @@ TEST_F(ContextTest, ExitedEvent) {
   EXPECT_TRUE(event_received);
 }
 
-namespace {
-
 class ProcessDetachRemoteAPI : public MockRemoteAPI {
  public:
   void Detach(const debug_ipc::DetachRequest& request,
@@ -430,8 +426,6 @@ class ProcessDetachTest : public DebugAdapterContextTest {
  private:
   ProcessDetachRemoteAPI* remote_api_;
 };
-
-}  // namespace
 
 TEST_F(ProcessDetachTest, TerminatedEvent) {
   bool event_received = false;
@@ -613,4 +607,5 @@ TEST_F(ContextTest, ThreadStartRunningDoesNotSendStoppedEvent) {
   EXPECT_FALSE(HasPendingClientCalls());
 }
 
+}  // namespace
 }  // namespace zxdb

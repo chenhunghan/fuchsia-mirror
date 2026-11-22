@@ -142,20 +142,8 @@ library_headers("inception") {
   ]
 }
 
-library_headers("udp_socket_private") {
-  public = [ "include/lib/zxio/cpp/udp_socket_private.h" ]
-  include_dir = "include"
-  visibility = [
-    ":*",
-    "//sdk/lib/zxio/*",
-    "//src/connectivity/network/lib/udp_serde:*",
-  ]
-  public_deps = [ "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp" ]
-}
-
 source_set("zxio_private_headers") {
   public = [
-    "dgram_cache.h",
     "private.h",
     "socket_address.h",
   ]
@@ -169,7 +157,6 @@ source_set("zxio") {
   sources = [
     "create.cc",
     "debuglog.cc",
-    "dgram_cache.cc",
     "fault_catcher.cc",
     "get_vmo.cc",
     "handle_holder.cc",
@@ -200,7 +187,6 @@ source_set("zxio") {
   configs += [ "//build/config:Wno-vla-cxx-extension" ]
   deps = [
     ":inception",
-    ":udp_socket_private",
     ":zxio_private_headers",
     "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
     "//sdk/fidl/fuchsia.hardware.pty:fuchsia.hardware.pty_cpp",
@@ -211,7 +197,6 @@ source_set("zxio") {
     "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_cpp",
     "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_cpp",
     "//sdk/lib/stdcompat",
-    "//src/connectivity/network/lib/udp_serde",
     "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/zx",
     "//zircon/third_party/ulib/safemath",

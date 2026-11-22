@@ -106,6 +106,7 @@ struct TocEntryChecker<'a> {
     docs_folder: &'a Path,
     project: &'a str,
     allow_fuchsia_src_links: bool,
+    reference_folder: &'a Path,
     /// Line 1 of the `_toc.yaml` being checked; its `file_name` is the file reported on.
     doc_line: &'a DocLine,
 }
@@ -129,6 +130,7 @@ impl TocEntryChecker<'_> {
                     self.project,
                     &path_to_check,
                     self.allow_fuchsia_src_links,
+                    self.reference_folder,
                     LinkContext::Navigation,
                 ) {
                     errors.push(e);
@@ -212,6 +214,7 @@ pub(crate) fn check_toc(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
 ) -> Option<Vec<DocCheckError>> {
     let doc_line = &DocLine { line_num: 1, file_name: filename.to_path_buf() };
     let result = serde_yaml::from_value::<Toc>(yaml_value.clone());
@@ -225,8 +228,15 @@ pub(crate) fn check_toc(
                     &format!("The toc element cannot be empty: {:?}", &yaml_value),
                 ));
             }
-            TocEntryChecker { root_dir, docs_folder, project, allow_fuchsia_src_links, doc_line }
-                .check_entries(&toc.toc, &mut errors);
+            TocEntryChecker {
+                root_dir,
+                docs_folder,
+                project,
+                allow_fuchsia_src_links,
+                reference_folder,
+                doc_line,
+            }
+            .check_entries(&toc.toc, &mut errors);
             if !errors.is_empty() { Some(errors) } else { None }
         }
         Err(e) => Some(vec![DocCheckError::new_error(
@@ -240,6 +250,7 @@ pub(crate) fn check_toc(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::DEFAULT_REFERENCE_FOLDER;
 
     #[test]
     fn test_empty_toc() -> Result<()> {
@@ -258,6 +269,7 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         ) {
             assert_eq!(result.len(), 1);
             if let Some(err) = result.get(0) {
@@ -306,6 +318,7 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         ) {
             if let Some(err) = result.get(0) {
                 panic!("Unexpected error: {:?}", err)
@@ -349,6 +362,7 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         ) {
             assert_eq!(result.len(), 1);
             if let Some(err) = result.get(0) {
@@ -418,6 +432,7 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         ) {
             panic!("Expected no errors, but got {:?}", result);
         }
@@ -604,6 +619,7 @@ mod test {
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         ) {
             let expected_result = [
                 DocCheckError::new_error(
@@ -671,6 +687,7 @@ toc:
             &PathBuf::from("_toc.yaml"),
             &yaml_value,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         )
         .expect("nested entries must be validated");
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
@@ -680,6 +697,35 @@ toc:
             "in-tree link to /src/main.cc must be in '/docs' or '/reference' directory"
         );
         assert!(messages[1].starts_with("Invalid status bogus."), "{}", messages[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_toc_custom_reference_folder() -> Result<()> {
+        let yaml_value: Value = serde_yaml::from_str(
+            r#"
+toc:
+- title: "Custom API ref"
+  path: /api_docs/generated/content.md
+- title: "Unconfigured default ref"
+  path: /reference/generated/content.md
+"#,
+        )?;
+        let errors = check_toc(
+            Path::new("/some/root/dir"),
+            Path::new("docs"),
+            "some_test_project",
+            Path::new("_toc.yaml"),
+            &yaml_value,
+            false,
+            Path::new("/api_docs"),
+        )
+        .expect("unconfigured reference path must be rejected");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].message,
+            "in-tree link to /reference/generated/content.md must be in '/docs' or '/api_docs' directory"
+        );
         Ok(())
     }
 }

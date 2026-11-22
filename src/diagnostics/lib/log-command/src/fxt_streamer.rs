@@ -434,4 +434,58 @@ mod tests {
 
         assert!(stream.next().await.is_none());
     }
+
+    // Validates https://fxbug.dev/586102325 (parent https://fxbug.dev/306199648):
+    // LogsDataBuilder::build() currently calls payload.sort() using name_partial_cmp
+    // (lexicographical, or numeric when both keys parse as u64) rather than preserving
+    // FXT insertion order. Update this expectation when insertion-order preservation
+    // is implemented in diagnostics_data / log-command.
+    #[fuchsia::test]
+    async fn test_fxt_streamer_kvp_ordering() {
+        let (sender, receiver) = zx::Socket::create_stream();
+        let streamer = FxtStreamer::new(flex_client::socket_to_async(receiver));
+        let mut stream = std::pin::pin!(streamer.stream());
+
+        let manifest_bytes = fn_encode(
+            Record {
+                timestamp: zx::BootInstant::from_nanos(0),
+                severity: 0x30,
+                arguments: vec![
+                    Argument::other(MONIKER, "core/foo"),
+                    Argument::other(URL, "fuchsia-pkg://foo"),
+                ],
+            },
+            1 | LOG_CONTROL_BIT,
+        );
+
+        let log_bytes = fn_encode(
+            Record {
+                timestamp: zx::BootInstant::from_nanos(123),
+                severity: 0x30,
+                arguments: vec![
+                    Argument::message("ordered fxt"),
+                    Argument::new("zebra", "last"),
+                    Argument::new("alpha", -42i64),
+                    Argument::new("middle", 7u64),
+                    Argument::new("beta", true),
+                    Argument::new("10", "ten"),
+                    Argument::new("2", "two"),
+                ],
+            },
+            1,
+        );
+
+        sender.write(&manifest_bytes).unwrap();
+        sender.write(&log_bytes).unwrap();
+        drop(sender);
+
+        let item = stream.next().await.unwrap().unwrap();
+        assert_eq!(item.msg().unwrap(), "ordered fxt");
+        let kvps: Vec<String> = item.payload_keys_strings().collect();
+        assert_eq!(
+            kvps,
+            vec!["2=two", "10=ten", "alpha=-42", "beta=true", "middle=7", "zebra=last"]
+        );
+        assert!(stream.next().await.is_none());
+    }
 }

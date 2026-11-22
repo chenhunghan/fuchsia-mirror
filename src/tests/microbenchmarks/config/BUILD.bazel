@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/packages:fx_bootfs_files_package.bzl",
+    "fx_bootfs_files_package",
+)
+load(
+    "//build/bazel/rules/packages:resources.bzl",
+    "resource",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_bootfs_files_package(
+    name = "bootfs",
+    package_name = "testing_support.bootfs_files_package",
+    resources = [":microbenchmarks_profiles"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+# Named `microbenchmarks_profiles` rather than `microbenchmarks.profiles` to
+# avoid colliding with the `microbenchmarks.profiles` source file in this
+# package.
+resource(
+    name = "microbenchmarks_profiles",
+    src = "microbenchmarks.profiles",
+    dest = "config/profiles/microbenchmarks.profiles",
+)

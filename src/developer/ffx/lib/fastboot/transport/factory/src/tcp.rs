@@ -148,6 +148,10 @@ impl InterfaceFactoryBase<TcpNetworkInterface<netext::MultithreadedTokioAsyncWra
         .or_else_analytics(|e| PointOfFailure::FactoryRediscoveryError("tcp".into(), e).into())
         .await
     }
+
+    fn supports_gbl_async_tasks(&self) -> bool {
+        true
+    }
 }
 
 impl InterfaceFactory<TcpNetworkInterface<netext::MultithreadedTokioAsyncWrapper<TcpStream>>>

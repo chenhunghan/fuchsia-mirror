@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["meta/sandbox-test.cml"],
+    visibility = ["//src/connectivity/network/testing/netemul/doc:__pkg__"],
+)
+
+rustc_test(
+    name = "sandbox-test",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/connectivity/network/testing/netemul/doc:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures-util",
+    ],
+)

@@ -353,7 +353,7 @@ zx::result<bool> ButtonsDevice::MatrixScan(uint32_t row, uint32_t col, zx_durati
     if (!result.ok()) {
       fdf::error("Failed to send SetBufferMode request to gpio {}: {}", col,
                  result.status_string());
-      return zx::error(read_result.status());
+      return zx::error(result.status());
     }
     if (result->is_error()) {
       fdf::error("Failed to configuire gpio {} to output: {}", col,
@@ -381,11 +381,6 @@ zx::result<ButtonsDevice::ButtonsInputReport> ButtonsDevice::GetInputReportInter
       fdf::error("Button {} missing gpio A index", i);
       return zx::error(ZX_ERR_BAD_STATE);
     }
-    const std::optional<uint8_t>& gpio_delay = button.gpio_a_index();
-    if (!gpio_delay.has_value()) {
-      fdf::error("Button {} missing gpio delay", i);
-      return zx::error(ZX_ERR_BAD_STATE);
-    }
     switch (button_type.value().Which()) {
       case fuchsia_buttons::GpioButtonType::Tag::kMatrix: {
         const fuchsia_buttons::MatrixGpioButton& matrix = button_type.value().matrix().value();
@@ -396,7 +391,7 @@ zx::result<ButtonsDevice::ButtonsInputReport> ButtonsDevice::GetInputReportInter
         }
 
         zx::result scan_result =
-            MatrixScan(gpio_a_index.value(), gpio_b_index.value(), gpio_delay.value());
+            MatrixScan(gpio_a_index.value(), gpio_b_index.value(), button.gpio_delay().value_or(0));
         if (!scan_result.is_ok()) {
           return zx::error(scan_result.error_value());
         }

@@ -22,7 +22,7 @@ namespace my_ns {
 //
 //   (Unlike MyClass::kClassStatic, this variable shared the declaration and
 //   storage.)
-int kGlobal = 19;
+EXPORT int kGlobal = 19;
 
 // DW_TAG_class_type
 //   DW_AT_name = "MyClass"
@@ -36,7 +36,7 @@ class MyClass {
     //   DW_AT_linkage_name = "_ZN5my_ns7MyClass11MyMemberOneEv"
     //   DW_AT_declaration = true (indicates implementation is elsewhere).
     //   DW_AT_type = <ref to DIE declaring "int">
-    NOINLINE static int MyMemberTwo();
+    EXPORT NOINLINE static int MyMemberTwo();
   };
 
   // DW_TAG_member
@@ -46,7 +46,7 @@ class MyClass {
   //   DW_AT_decl_line = ...
   //   DW_AT_external = true
   //   DW_AT_declaration = true
-  static int kClassStatic;
+  EXPORT static int kClassStatic;
 
   // DW_TAG_subprogram
   //   DW_AT_name = "MyMemberOne"
@@ -57,7 +57,7 @@ class MyClass {
   //   DW_TAG_formal_parameter
   //     DW_AT_artificial = true ("this" is the implicit parameter).
   //     DW_AT_type = <reference to "MyClass*" type>
-  NOINLINE int MyMemberOne() { return 42; }
+  EXPORT __attribute__((used)) NOINLINE int MyMemberOne() { return 42; }
 };
 
 // DW_TAG_variable

@@ -153,6 +153,27 @@ class FakeAudioCore final : public fidl::Server<fuchsia_media::AudioCore> {
     return true;
   }
 
+  bool FailGetDbFromVolume(const fuchsia_media::Usage2& expected_usage, float expected_volume,
+                           zx_status_t epitaph = ZX_ERR_INTERNAL) {
+    EXPECT_TRUE(get_db_from_volume_artifact_);
+    if (!get_db_from_volume_artifact_) {
+      return false;
+    }
+
+    EXPECT_EQ(expected_usage, get_db_from_volume_artifact_->usage);
+    EXPECT_EQ(expected_volume, get_db_from_volume_artifact_->volume);
+    if (expected_usage != get_db_from_volume_artifact_->usage ||
+        expected_volume != get_db_from_volume_artifact_->volume) {
+      get_db_from_volume_artifact_.reset();
+      return false;
+    }
+
+    get_db_from_volume_artifact_->completer.Close(epitaph);
+
+    get_db_from_volume_artifact_.reset();
+    return true;
+  }
+
   // Returns a unique pointer to the previously-created audio renderer, if one was created, a null
   // unique pointer otherwise. Note that the caller is responsible for the lifetime of the fake
   // returned fake audio renderer after this call.

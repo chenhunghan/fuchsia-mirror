@@ -19,20 +19,29 @@ bool WriteFile(const std::string& path, std::string_view data);
 bool WriteFile(const std::string& path, const char* data, ssize_t size);
 bool WriteFileAt(int dirfd, const std::string& path, const char* data, ssize_t size);
 
-// Atomically creates |filename| under |dirfd| with |data|.
+// Atomically creates or overwrites |filename| under |dirfd| with |data|.
 //
-// This is done by writing |data| to a temporary file named "<filename>.tmp" in
-// |dirfd|, syncing the temporary file, renaming it to |filename|, and syncing
-// |dirfd|. |dirfd| must be a valid open directory file descriptor (not
-// AT_FDCWD), and |filename| must be a valid single-component filename (no '/').
-// Returns true if the file was successfully written, otherwise returns false.
+// When supported by the underlying filesystem, |data| is written and synced to
+// an unnamed temporary file in |dirfd| before replacing |filename| (via
+// FLAG_CREATE_AS_UNNAMED_TEMPORARY and LinkInto with REPLACE_EXISTING on
+// Fuchsia, or O_TMPFILE followed by linking to "<filename>.tmp" and renaming on
+// Linux), and |dirfd| is synced.
 //
-// Note that power failure after the temporary file is created, but before it is
-// renamed, will result in "<filename>.tmp" existing in |dirfd|. A subsequent
-// call for the same |filename| will overwrite and clean up the temporary file,
-// but if this function is never called again for |filename|, the temporary file
-// will remain. Callers must not invoke this concurrently with the same |dirfd|
-// and |filename|.
+// If the filesystem does not support unnamed temporary files or direct linking,
+// this falls back to creating and writing "<filename>.tmp" directly before
+// syncing and renaming it to |filename|, and syncing |dirfd|.
+//
+// |dirfd| must be a valid open directory file descriptor (not AT_FDCWD), and
+// |filename| must be a valid single-component filename (no '/'). Returns true
+// if the file was successfully written, otherwise returns false.
+//
+// Note that when using the fallback path (or on Linux), power failure after the
+// temporary file is created or linked, but before it is renamed, will result in
+// "<filename>.tmp" existing in |dirfd|. A subsequent call for the same
+// |filename| will clean up or overwrite the temporary file, but if this
+// function is never called again for |filename|, the temporary file will
+// remain. Callers must not invoke this concurrently with the same |dirfd| and
+// |filename|.
 bool WriteFileInTwoPhases(int dirfd, const std::string& filename, std::string_view data);
 
 // Reads the contents of the file at the given path or file descriptor and

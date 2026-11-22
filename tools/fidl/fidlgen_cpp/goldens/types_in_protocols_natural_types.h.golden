@@ -160,9 +160,9 @@ class Union {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   Union(Union&& other) noexcept;
@@ -276,9 +276,9 @@ class ResourceUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   ResourceUnion(ResourceUnion&& other) noexcept;
@@ -1726,7 +1726,7 @@ class ProtocolErrorBasicResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1779,7 +1779,7 @@ class ProtocolErrorCompoundResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1832,7 +1832,7 @@ class ProtocolErrorArrayBasicResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1885,7 +1885,7 @@ class ProtocolErrorArrayCompoundResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1938,7 +1938,7 @@ class ProtocolErrorVectorBasicResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -1991,7 +1991,7 @@ class ProtocolErrorVectorCompoundResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -2044,7 +2044,7 @@ class ProtocolErrorVectorOptionalResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -2097,7 +2097,7 @@ class ProtocolErrorArrayVectorNestedResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -2152,7 +2152,7 @@ class ProtocolErrorResourceResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };

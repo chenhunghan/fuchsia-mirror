@@ -41,11 +41,11 @@ constexpr char kMinidumpUploadKey[] = "uploadFileMinidump";
 constexpr char kSnapshotUuidFilename[] = "snapshot_uuid.txt";
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-// UTC-monotonic difference
+// UTC-boot difference
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// TODO(https://fxbug.dev/360946313): change to current_utc_boot_difference.txt.
-constexpr char kUtcBootDifferenceFile[] = "current_utc_monotonic_difference.txt";
+constexpr char kCurrentUtcBootDifferencePath[] = "/cache/current_utc_boot_difference.txt";
+constexpr char kPreviousUtcBootDifferencePath[] = "/tmp/current_utc_boot_difference.txt";
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Logs from current boot.
@@ -77,6 +77,16 @@ constexpr char kArchiveAccessorName[] = "fuchsia.diagnostics.ArchiveAccessor.fee
 
 // The name of the protocol to use to read system logs from the Archive.
 constexpr char kLogsArchiveAccessorName[] = "fuchsia.diagnostics.ArchiveAccessor.logs";
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+// Legacy files
+///////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Feedback no longer writes this file, but older versions may have left it behind.
+// TODO(https://fxbug.dev/587514053): Stop falling back to this path once it's guaranteed it no
+// longer exists.
+constexpr char kLegacyCurrentUtcBootDifferencePath[] =
+    "/cache/current_utc_monotonic_difference.txt";
 
 }  // namespace feedback_data
 }  // namespace forensics

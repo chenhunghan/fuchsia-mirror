@@ -100,7 +100,7 @@
   sd a0, (2 * 8)(sp)
   .cfi_offset sp, 2 * 8
 
-#if __has_feature(shadow_call_Stack)
+#if __has_feature(shadow_call_stack)
   // Reset the shadow call stack to the one reserved for phys exceptions.
   lla shadow_call_sp, phys_exception_shadow_call_stack  // Grows up.
 #endif
@@ -158,9 +158,8 @@
   // Reload the interrupted PC (as modified) into sepc.
   ld a0, (sp)
   csrw sepc, a0
-#ifndef __clang__  // TODO(https://fxbug.dev/42073127)
-  .cfi_register 64, sepc
-#endif
+  // TODO(https://fxbug.dev/42073127): Clang does not accept `.cfi_register 64,
+  // sepc` here, so the CFI does not describe the PC as restored.
 
   .macro ld_cfa n
     ld x\n, (\n * 8)(sp)

@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -10,6 +10,7 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/graphics/bin/vulkan_loader/test:tests",
         "//src/graphics/display/bin/display-tweak:display-tweak-tests",
         "//src/graphics/display/lib/rust/display-mocks:display-mocks-test",
         "//src/graphics/display/lib/rust/display-utils:display-utils-test",
@@ -19,8 +20,18 @@ test_suite(
     ],
 )
 
+# Kept separate from `target_tests` because `goldfish_benchmark` fails under
+# KASan and Bazel does not yet expose kernel-only variant selection.
+test_suite(
+    name = "non_kasan_target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/graphics/tests/goldfish_benchmark:tests",
+    ],
+)
+
 test_suite(
     name = "host_tests",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [],
 )

@@ -135,6 +135,7 @@ impl DataSink {
 
         client.write_vmo(target_vmo, 0, 0, size).await.context("failed to write partition VMO")?;
         let _ = client.trim_tail(size).await;
+        client.flush().await.context("failed to flush partition")?;
         Ok(())
     }
 
@@ -560,6 +561,7 @@ mod tests {
         .expect("write zircon_a");
 
         let disk_bytes = zircon_a.bytes();
+        assert_eq!(zircon_a.flushes(), 1);
         assert_eq!(&disk_bytes[..600], &payload_data[..]);
         assert_eq!(&disk_bytes[600..1024], &[0xaau8; 424]);
         assert_eq!(&disk_bytes[1024..], &[0xabu8; TEST_PARTITION_SIZE - 1024]);

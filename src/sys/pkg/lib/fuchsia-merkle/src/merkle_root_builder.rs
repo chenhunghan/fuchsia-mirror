@@ -2,22 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::util::{HASHES_PER_BLOCK, hash_block, make_hash_hasher, update_with_zeros};
+use crate::util::BoringSslSha256;
 use crate::{BLOCK_SIZE, Hash};
-use bssl_crypto::digest::Sha256;
-use fuchsia_hash::HASH_SIZE;
 
-const EMPTY_MERKLE_TREE_ROOT: Hash = Hash::from_array([
-    0x15, 0xec, 0x7b, 0xf0, 0xb5, 0x07, 0x32, 0xb4, 0x9f, 0x82, 0x28, 0xe0, 0x7d, 0x24, 0x36, 0x53,
-    0x38, 0xf9, 0xe3, 0xab, 0x99, 0x4b, 0x00, 0xaf, 0x08, 0xe5, 0xa3, 0xbf, 0xfe, 0x55, 0xfd, 0x8b,
-]);
+struct CollectorBridge<T>(T);
 
-const INTERNAL_BYTES_PER_HASH: u32 = (HASHES_PER_BLOCK * HASH_SIZE) as u32;
-
-/// Hashes blocks of hashes.
-struct LevelHasher {
-    hasher: Sha256,
-    offset: u64,
+impl<T: LeafHashCollector> fuchsia_merkle_core::LeafCollector for CollectorBridge<T> {
+    #[inline]
+    fn add_leaf_hash(&mut self, hash: fuchsia_merkle_core::Hash) {
+        self.0.add_leaf_hash(Hash::from_array(hash.0));
+    }
 }
 
 /// Calculates the merkle root for a given set of data. The leaf hashes of the merkle tree can
@@ -27,120 +21,42 @@ struct LevelHasher {
 /// avoids buffering data internally. If complete blocks of data can't be guaranteed then
 /// [`BufferedMerkleRootBuilder`] should be used instead.
 pub struct MerkleRootBuilder<T> {
-    levels: Vec<LevelHasher>,
-    offset: u64,
-    leaf_hash_collector: T,
-
-    /// Holds the root of the tree when the offset of every level of the tree is a multiple of
-    /// [`BLOCK_SIZE`]. This only happens when [`offset`] is equal to `8192 * 256 ^ N` for every
-    /// `N > 0`.
-    ///
-    /// If [`Self::push_hash()`] immediately turned the root into a new level then
-    /// [`Self::complete`] wouldn't be able to recover the root if no more data was added.
-    root: Option<Hash>,
+    inner: fuchsia_merkle_core::MerkleRootBuilder<BoringSslSha256, CollectorBridge<T>>,
 }
 
 impl<T: LeafHashCollector> MerkleRootBuilder<T> {
     /// Creates a new `MerkleRootBuilder` with a `LeafHashCollector`.
     ///
     /// Use `MerkleRootBuilder::default()` if a `LeafHashCollector` isn't needed.
+    #[inline]
     pub fn new(leaf_hash_collector: T) -> Self {
-        Self { levels: Vec::new(), offset: 0, root: None, leaf_hash_collector }
+        Self {
+            inner: fuchsia_merkle_core::MerkleRootBuilder::new(CollectorBridge(
+                leaf_hash_collector,
+            )),
+        }
     }
 
     /// Appends a full block of data to the merkle tree.
     ///
     /// `MerkleRootBuilder` doesn't buffer any data so only full blocks can be added until
     /// [`Self::complete`] is called. Use [`BufferedMerkleRootBuilder`] if buffering is required.
+    #[inline]
     pub fn add_block(&mut self, data: &[u8; BLOCK_SIZE]) {
-        self.push_hash(hash_block(&data[..], self.offset));
+        self.inner.add_block(&data[..]);
     }
 
     /// Appends a final amount of data to the merkle tree and returns the merkle root.
-    pub fn complete(mut self, data: &[u8]) -> T::Output {
-        // Add all of the complete blocks from `data`.
-        let remaining = self.add_blocks(data);
-
-        // Handle the last partial block when `data` isn't a block multiple.
-        if !remaining.is_empty() {
-            self.push_hash(hash_block(remaining, self.offset));
-        }
-
-        // Special case for the merkle tree of no data.
-        if self.offset == 0 {
-            self.leaf_hash_collector.add_leaf_hash(EMPTY_MERKLE_TREE_ROOT);
-            return self.leaf_hash_collector.complete(EMPTY_MERKLE_TREE_ROOT);
-        }
-
-        // Special case for when every level of the tree is already complete.
-        if let Some(root) = self.root {
-            return self.leaf_hash_collector.complete(root);
-        }
-
-        // Each row of the tree is padded with zeros to fill the last block and the resulting hash
-        // is bubbled up to the next level. Since `root` wasn't set, there's at least 1 level that
-        // needs padding so `bubbling_digest` is guaranteed to be set by the end of the loop.
-        let mut bubbling_digest: Option<[u8; HASH_SIZE]> = None;
-        for mut level_hasher in self.levels {
-            if level_hasher.offset.is_multiple_of(BLOCK_SIZE as u64) && bubbling_digest.is_none() {
-                continue;
-            }
-            if let Some(digest) = bubbling_digest.take() {
-                level_hasher.hasher.update(&digest);
-                level_hasher.offset += HASH_SIZE as u64;
-            }
-            let rem = (level_hasher.offset % (BLOCK_SIZE as u64)) as usize;
-            if rem != 0 {
-                update_with_zeros(&mut level_hasher.hasher, BLOCK_SIZE - rem);
-            }
-            bubbling_digest = Some(level_hasher.hasher.digest());
-        }
-        self.leaf_hash_collector.complete(Hash::from(bubbling_digest.unwrap()))
+    #[inline]
+    pub fn complete(self, data: &[u8]) -> T::Output {
+        let (root, CollectorBridge(collector)) = self.inner.complete(data);
+        collector.complete(Hash::from_array(root.0))
     }
 
     /// Adds a hash of a single block of data to the merkle tree.
-    pub(crate) fn push_hash(&mut self, mut digest: Hash) {
-        self.offset = self
-            .offset
-            .checked_add(BLOCK_SIZE as u64)
-            .expect("Merkle tree data size overflowed u64");
-        self.leaf_hash_collector.add_leaf_hash(digest);
-
-        if let Some(root) = self.root.take() {
-            // The root was set but more data has now been added. Create a new level containing the
-            // root.
-            let mut hasher =
-                make_hash_hasher(INTERNAL_BYTES_PER_HASH, (self.levels.len() + 1) as u64, 0);
-            hasher.update(root.as_bytes());
-            self.levels.push(LevelHasher { hasher, offset: HASH_SIZE as u64 });
-        }
-
-        for (level, level_hasher) in self.levels.iter_mut().enumerate() {
-            level_hasher.hasher.update(digest.as_bytes());
-            level_hasher.offset += HASH_SIZE as u64;
-
-            // Only bubble the hash up to the next level when this level completes a block.
-            if !level_hasher.offset.is_multiple_of(BLOCK_SIZE as u64) {
-                return;
-            }
-            // Initialize a new hasher for this level and bubble the old hasher up to the next
-            // level.
-            let new_hasher =
-                make_hash_hasher(INTERNAL_BYTES_PER_HASH, (level + 1) as u64, level_hasher.offset);
-            let old_hasher = std::mem::replace(&mut level_hasher.hasher, new_hasher);
-            digest = Hash::from_array(old_hasher.digest());
-        }
-
-        self.root = Some(digest);
-    }
-
-    /// Adds all of the whole blocks from `data` and returns the remaining bytes.
-    fn add_blocks<'a>(&mut self, mut data: &'a [u8]) -> &'a [u8] {
-        while let Some((block, remainder)) = data.split_first_chunk::<BLOCK_SIZE>() {
-            data = remainder;
-            self.add_block(block);
-        }
-        data
+    #[cfg(test)]
+    pub(crate) fn push_hash(&mut self, digest: Hash) {
+        self.inner.push_hash(fuchsia_merkle_core::Hash(digest.into()));
     }
 }
 
@@ -160,52 +76,33 @@ impl Default for MerkleRootBuilder<NoopLeafHashCollector> {
 /// should be used instead as it avoids buffering the tail end of the data if it's not a complete
 /// block.
 pub struct BufferedMerkleRootBuilder<T> {
-    buffer: Vec<u8>,
-    builder: MerkleRootBuilder<T>,
+    inner: fuchsia_merkle_core::BufferedMerkleRootBuilder<BoringSslSha256, CollectorBridge<T>>,
 }
 
 impl<T: LeafHashCollector> BufferedMerkleRootBuilder<T> {
     /// Creates a new `BufferedMerkleRootBuilder` with a `LeafHashCollector`.
     ///
     /// Use `BufferedMerkleRootBuilder::default()` if a `LeafHashCollector` isn't needed.
+    #[inline]
     pub fn new(leaf_hash_collector: T) -> Self {
-        Self { buffer: Vec::new(), builder: MerkleRootBuilder::new(leaf_hash_collector) }
+        Self {
+            inner: fuchsia_merkle_core::BufferedMerkleRootBuilder::new(CollectorBridge(
+                leaf_hash_collector,
+            )),
+        }
     }
 
     /// Appends data to the merkle tree.
-    pub fn write(&mut self, mut data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-        if self.buffer.len().saturating_add(data.len()) < BLOCK_SIZE {
-            // The current buffer and the new data won't complete a block. Buffer the data and
-            // return.
-            self.buffer.extend_from_slice(data);
-            return;
-        }
-
-        if !self.buffer.is_empty() {
-            // If the buffered data isn't empty then take bytes from the start of the new data to
-            // complete a block. The above case handles when a block wouldn't be completed so this
-            // is guaranteed to complete a block.
-            let (head, tail) = data.split_at(BLOCK_SIZE - self.buffer.len());
-            self.buffer.extend_from_slice(head);
-            self.builder.add_block(self.buffer.as_slice().try_into().unwrap());
-            self.buffer.clear();
-            data = tail;
-        }
-
-        // Add all remaining whole blocks.
-        data = self.builder.add_blocks(data);
-        if !data.is_empty() {
-            // Buffer any remaining data.
-            self.buffer.extend_from_slice(data);
-        }
+    #[inline]
+    pub fn write(&mut self, data: &[u8]) {
+        self.inner.write(data);
     }
 
     /// Finishes building the merkle tree and returns the merkle root.
+    #[inline]
     pub fn complete(self) -> T::Output {
-        self.builder.complete(&self.buffer)
+        let (root, CollectorBridge(collector)) = self.inner.complete();
+        collector.complete(Hash::from_array(root.0))
     }
 }
 
@@ -270,9 +167,19 @@ impl LeafHashCollector for Vec<Hash> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HASH_SIZE;
+    use crate::util::hash_block;
+    use fuchsia_merkle_core::{
+        EMPTY_MERKLE_TREE_ROOT, HASHES_PER_BLOCK, Sha256State, make_hash_hasher, update_with_zeros,
+    };
     use test_case::test_case;
 
     const AB_BLOCK: [u8; BLOCK_SIZE] = [0xAB; BLOCK_SIZE];
+
+    #[test]
+    fn test_empty_merkle_tree_root_constant() {
+        assert_eq!(Hash::from_array(EMPTY_MERKLE_TREE_ROOT.0), hash_block(&[], 0));
+    }
 
     fn add_blocks<T: LeafHashCollector>(block_count: usize, builder: &mut MerkleRootBuilder<T>) {
         for _ in 0..block_count {
@@ -368,9 +275,9 @@ mod tests {
     fn test_merkle_tree_structure(size: usize, expected_offsets: &[u64], is_root_set: bool) {
         let mut builder = MerkleRootBuilder::default();
         add_blocks(size / BLOCK_SIZE, &mut builder);
-        let actual_offsets = builder.levels.iter().map(|level| level.offset).collect::<Vec<_>>();
+        let actual_offsets = builder.inner.level_offsets();
         assert_eq!(&actual_offsets, expected_offsets);
-        assert_eq!(builder.root.is_some(), is_root_set);
+        assert_eq!(builder.inner.has_root(), is_root_set);
     }
 
     #[test_case(0; "0")]
@@ -455,6 +362,7 @@ mod tests {
     #[test_case(HASHES_PER_BLOCK * (HASHES_PER_BLOCK - 1) + 1; "65281_leaves")]
     #[test_case(HASHES_PER_BLOCK * HASHES_PER_BLOCK - 1; "65535_leaves")]
     fn test_complete_carry_completes_upper_level_without_extra_padding(leaf_count: usize) {
+        const INTERNAL_BYTES_PER_HASH: u32 = (HASHES_PER_BLOCK * HASH_SIZE) as u32;
         let leaf = hash_block(&AB_BLOCK, 0);
 
         let mut builder = MerkleRootBuilder::default();
@@ -467,15 +375,18 @@ mod tests {
         // zero-padded level-1 block containing the remaining `leaf_count - 65280` leaves.
         let mut level_1_hashes = Vec::with_capacity(HASHES_PER_BLOCK);
         for block_idx in 0..(HASHES_PER_BLOCK - 1) {
-            let mut h1 =
-                make_hash_hasher(INTERNAL_BYTES_PER_HASH, 1, (block_idx * BLOCK_SIZE) as u64);
+            let mut h1 = make_hash_hasher::<BoringSslSha256>(
+                INTERNAL_BYTES_PER_HASH,
+                1,
+                (block_idx * BLOCK_SIZE) as u64,
+            );
             for _ in 0..HASHES_PER_BLOCK {
                 h1.update(leaf.as_bytes());
             }
-            level_1_hashes.push(Hash::from_array(h1.digest()));
+            level_1_hashes.push(Hash::from_array(h1.finalize().0));
         }
         let tail_leaves = leaf_count - (HASHES_PER_BLOCK - 1) * HASHES_PER_BLOCK;
-        let mut h1_last = make_hash_hasher(
+        let mut h1_last = make_hash_hasher::<BoringSslSha256>(
             INTERNAL_BYTES_PER_HASH,
             1,
             ((HASHES_PER_BLOCK - 1) * BLOCK_SIZE) as u64,
@@ -484,15 +395,15 @@ mod tests {
             h1_last.update(leaf.as_bytes());
         }
         update_with_zeros(&mut h1_last, (HASHES_PER_BLOCK - tail_leaves) * HASH_SIZE);
-        level_1_hashes.push(Hash::from_array(h1_last.digest()));
+        level_1_hashes.push(Hash::from_array(h1_last.finalize().0));
         assert_eq!(level_1_hashes.len(), HASHES_PER_BLOCK);
 
         // Level 2 has exactly 256 hashes (8,192 bytes) and must NOT receive 8,192 extra zero bytes.
-        let mut h2 = make_hash_hasher(INTERNAL_BYTES_PER_HASH, 2, 0);
+        let mut h2 = make_hash_hasher::<BoringSslSha256>(INTERNAL_BYTES_PER_HASH, 2, 0);
         for h in &level_1_hashes {
             h2.update(h.as_bytes());
         }
-        let expected_root = Hash::from_array(h2.digest());
+        let expected_root = Hash::from_array(h2.finalize().0);
 
         assert_eq!(actual_root, expected_root);
     }

@@ -107,6 +107,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "bluetooth-crate-tests",
-    package_name = "bluetooth-crate-tests",
     unit_tests = [":fuchsia-bluetooth_test"],
 )

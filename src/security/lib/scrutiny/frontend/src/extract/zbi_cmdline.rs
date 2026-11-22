@@ -21,7 +21,7 @@ impl ZbiExtractCmdlineController {
         let zbi_sections = reader.parse()?;
 
         for section in zbi_sections.iter() {
-            if section.section_type == zbi::Type::Cmdline {
+            if section.section_type == zbi::Type::CMDLINE {
                 // The cmdline.blk contains a trailing 0.
                 let mut cmdline_buffer = section.buffer.clone();
                 cmdline_buffer.truncate(cmdline_buffer.len() - 1);

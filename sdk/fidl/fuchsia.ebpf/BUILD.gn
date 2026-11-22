@@ -29,7 +29,10 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.ebpf") {
   sources = [ "ebpf.fidl" ]
+  sdk_area = "Netstack"
+  sdk_category = "partner"
   enable_hlcpp = true
+  stable = false
   visibility = [ "*" ]
   public_deps = [ "//zircon/vdso/zx" ]
 }

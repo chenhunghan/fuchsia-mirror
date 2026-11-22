@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 
 #include <cstdint>
 #include <cstring>
@@ -25,7 +25,7 @@ constexpr size_t kScoPaddedMsbcFrameBytes = 58;
 constexpr size_t kMsbcPcmBatchBytes = 240;  // 15 blocks * 8 subbands * 2 bytes/sample
 constexpr uint8_t kMsbcSyncword = 0xAD;
 
-fuchsia::media::FormatDetails MakeValidSbcDecoderFormatDetails() {
+fuchsia_media::FormatDetails MakeValidSbcDecoderFormatDetails() {
   SbcCodecInfo codec_info = {
       .sampling_frequency = kSbcSamplingFrequency44100Hz,
       .channel_mode = kSbcChannelModeJointStereo,
@@ -38,14 +38,14 @@ fuchsia::media::FormatDetails MakeValidSbcDecoderFormatDetails() {
   std::vector<uint8_t> oob_bytes(sizeof(SbcCodecInfo));
   std::memcpy(oob_bytes.data(), &codec_info, sizeof(SbcCodecInfo));
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(0);
-  format_details.set_mime_type("audio/sbc");
-  format_details.set_oob_bytes(std::move(oob_bytes));
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal() = 0;
+  format_details.mime_type() = "audio/sbc";
+  format_details.oob_bytes() = std::move(oob_bytes);
   return format_details;
 }
 
-fuchsia::media::FormatDetails MakeValidMsbcDecoderFormatDetails() {
+fuchsia_media::FormatDetails MakeValidMsbcDecoderFormatDetails() {
   // Matches bt-hfp CodecId::MSBC::oob_bytes(): 16 kHz, Mono, 16 blocks, 8 subbands, Loudness,
   // bitpool 26.
   SbcCodecInfo codec_info = {
@@ -60,27 +60,25 @@ fuchsia::media::FormatDetails MakeValidMsbcDecoderFormatDetails() {
   std::vector<uint8_t> oob_bytes(sizeof(SbcCodecInfo));
   std::memcpy(oob_bytes.data(), &codec_info, sizeof(SbcCodecInfo));
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(0);
-  format_details.set_mime_type("audio/msbc");
-  format_details.set_oob_bytes(std::move(oob_bytes));
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal() = 0;
+  format_details.mime_type() = "audio/msbc";
+  format_details.oob_bytes() = std::move(oob_bytes);
   return format_details;
 }
 
-fuchsia::media::FormatDetails MakeValidMsbcEncoderFormatDetails() {
-  fuchsia::media::PcmFormat2 pcm;
-  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
-  pcm.set_bits_per_sample(16);
-  pcm.set_frames_per_second(16000);
-  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL});
+fuchsia_media::FormatDetails MakeValidMsbcEncoderFormatDetails() {
+  fuchsia_media::PcmFormat2 pcm;
+  pcm.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
+  pcm.bits_per_sample() = 16;
+  pcm.frames_per_second() = 16000;
+  pcm.channel_map() = {fuchsia_media::AudioChannelId2::kFl};
 
-  fuchsia::media::EncoderSettings encoder_settings;
-  encoder_settings.set_msbc(fuchsia::media::MSbcEncoderSettings{});
-
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(0);
-  format_details.set_pcm_format(std::move(pcm));
-  format_details.set_encoder_settings(std::move(encoder_settings));
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal() = 0;
+  format_details.pcm_format() = std::move(pcm);
+  format_details.encoder_settings() =
+      fuchsia_media::EncoderSettings::WithMsbc(fuchsia_media::MSbcEncoderSettings{});
   return format_details;
 }
 
@@ -92,7 +90,7 @@ std::vector<uint8_t> EncodeSingleMsbcFrame() {
   CodecAdapterSbcEncoder encoder(lock, &events);
 
   auto format_details = MakeValidMsbcEncoderFormatDetails();
-  encoder.CoreCodecInit(format_details);
+  encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ZX_ASSERT(events.fail_codec_count() == 0u);
 
   auto output_buffers = Buffers({512});
@@ -102,7 +100,8 @@ std::vector<uint8_t> EncodeSingleMsbcFrame() {
   encoder.CoreCodecRecycleOutputPacket(output_packets.ptr(0));
 
   encoder.CoreCodecStartStream();
-  encoder.CoreCodecQueueInputFormatDetails(format_details);
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   encoder.CoreCodecMidStreamOutputBufferReConfigFinish();
 
@@ -128,27 +127,24 @@ std::vector<uint8_t> EncodeSingleMsbcFrame() {
   return msbc_frame;
 }
 
-fuchsia::media::FormatDetails MakeValidSbcEncoderFormatDetails() {
-  fuchsia::media::PcmFormat2 pcm;
-  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
-  pcm.set_bits_per_sample(16);
-  pcm.set_frames_per_second(44100);
-  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL, fuchsia::media::AudioChannelId2::FR});
+fuchsia_media::FormatDetails MakeValidSbcEncoderFormatDetails() {
+  fuchsia_media::PcmFormat2 pcm;
+  pcm.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
+  pcm.bits_per_sample() = 16;
+  pcm.frames_per_second() = 44100;
+  pcm.channel_map() = {fuchsia_media::AudioChannelId2::kFl, fuchsia_media::AudioChannelId2::kFr};
 
-  fuchsia::media::SbcEncoderSettings sbc_settings;
-  sbc_settings.sub_bands = static_cast<fuchsia::media::SbcSubBands>(SUB_BANDS_8);
-  sbc_settings.block_count = fuchsia::media::SbcBlockCount::BLOCK_COUNT_16;
-  sbc_settings.allocation = fuchsia::media::SbcAllocation::ALLOC_LOUDNESS;
-  sbc_settings.channel_mode = fuchsia::media::SbcChannelMode::JOINT_STEREO;
-  sbc_settings.bit_pool = 53;
+  fuchsia_media::SbcEncoderSettings sbc_settings;
+  sbc_settings.sub_bands() = fuchsia_media::SbcSubBands::kSubBands8;
+  sbc_settings.block_count() = fuchsia_media::SbcBlockCount::kBlockCount16;
+  sbc_settings.allocation() = fuchsia_media::SbcAllocation::kAllocLoudness;
+  sbc_settings.channel_mode() = fuchsia_media::SbcChannelMode::kJointStereo;
+  sbc_settings.bit_pool() = 53;
 
-  fuchsia::media::EncoderSettings encoder_settings;
-  encoder_settings.set_sbc(sbc_settings);
-
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(0);
-  format_details.set_pcm_format(std::move(pcm));
-  format_details.set_encoder_settings(std::move(encoder_settings));
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal() = 0;
+  format_details.pcm_format() = std::move(pcm);
+  format_details.encoder_settings() = fuchsia_media::EncoderSettings::WithSbc(sbc_settings);
   return format_details;
 }
 
@@ -158,7 +154,7 @@ TEST(CodecAdapterSbcDecoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   CodecAdapterSbcDecoder decoder(lock, &events);
 
   auto format_details = MakeValidSbcDecoderFormatDetails();
-  decoder.CoreCodecInit(format_details);
+  decoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   // Stream 1: Queue EndOfStream immediately without any FormatDetails or Packet.
@@ -172,18 +168,18 @@ TEST(CodecAdapterSbcDecoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   // Stream 2: Queue FormatDetails so CreateContext caches min_output_buffer_size_, then stop
   // stream (which resets context_ in CleanUpAfterStream()).
   decoder.CoreCodecStartStream();
-  decoder.CoreCodecQueueInputFormatDetails(format_details);
+  decoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   decoder.CoreCodecMidStreamOutputBufferReConfigFinish();
   EXPECT_EQ(events.fail_codec_count(), 0u);
   decoder.CoreCodecStopStream();
 
-  // Between streams: CoreCodecGetBufferCollectionConstraints2(kOutputPort) must succeed even
+  // Between streams: CoreCodecGetBufferCollectionConstraints3(kOutputPort) must succeed even
   // though context_ was reset by CleanUpAfterStream().
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = decoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  auto constraints_result = decoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   // (16 bits / 8) * SBC_MAX_SAMPLES_PER_FRAME (128) * SBC_MAX_CHANNELS (2) = 512 bytes.
   EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 512u);
@@ -208,7 +204,7 @@ TEST(CodecAdapterSbcDecoderTest, MsbcEmptyStreamEndOfStreamDecodeAndPostStopOutp
   CodecAdapterSbcDecoder decoder(lock, &events);
 
   auto format_details = MakeValidMsbcDecoderFormatDetails();
-  decoder.CoreCodecInit(format_details);
+  decoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   // Stream 1: Queue EndOfStream immediately without any FormatDetails or Packet.
@@ -229,7 +225,8 @@ TEST(CodecAdapterSbcDecoderTest, MsbcEmptyStreamEndOfStreamDecodeAndPostStopOutp
   decoder.CoreCodecRecycleOutputPacket(output_packets.ptr(0));
 
   decoder.CoreCodecStartStream();
-  decoder.CoreCodecQueueInputFormatDetails(format_details);
+  decoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   decoder.CoreCodecMidStreamOutputBufferReConfigFinish();
   EXPECT_EQ(events.fail_codec_count(), 0u);
@@ -254,12 +251,11 @@ TEST(CodecAdapterSbcDecoderTest, MsbcEmptyStreamEndOfStreamDecodeAndPostStopOutp
   decoder.CoreCodecRecycleOutputPacket(output_packets.ptr(0));
   decoder.CoreCodecStopStream();
 
-  // Between streams: CoreCodecGetBufferCollectionConstraints2(kOutputPort) must succeed even
+  // Between streams: CoreCodecGetBufferCollectionConstraints3(kOutputPort) must succeed even
   // though context_ was reset by CleanUpAfterStream().
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = decoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  auto constraints_result = decoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   // (16 bits / 8) * SBC_MAX_SAMPLES_PER_FRAME (128) * SBC_MAX_CHANNELS (2) = 512 bytes.
   EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 512u);
@@ -284,7 +280,7 @@ TEST(CodecAdapterSbcDecoderTest, MsbcDecodeKeepsBytesLeftInSyncAcrossPaddedAndUn
   CodecAdapterSbcDecoder decoder(lock, &events);
 
   auto format_details = MakeValidMsbcDecoderFormatDetails();
-  decoder.CoreCodecInit(format_details);
+  decoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   auto output_buffers = Buffers({512, 512, 512});
@@ -296,7 +292,8 @@ TEST(CodecAdapterSbcDecoderTest, MsbcDecodeKeepsBytesLeftInSyncAcrossPaddedAndUn
   }
 
   decoder.CoreCodecStartStream();
-  decoder.CoreCodecQueueInputFormatDetails(format_details);
+  decoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   decoder.CoreCodecMidStreamOutputBufferReConfigFinish();
   EXPECT_EQ(events.fail_codec_count(), 0u);
@@ -396,20 +393,21 @@ TEST(CodecAdapterSbcDecoderTest, InvalidSamplingFrequencyInOobBytesFailsCodecCle
   for (const auto& test_case : kInvalidCases) {
     ASSERT_EQ(test_case.oob_bytes.size(), sizeof(SbcCodecInfo));
 
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(0);
-    format_details.set_mime_type(test_case.mime_type);
-    format_details.set_oob_bytes(test_case.oob_bytes);
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal() = 0;
+    format_details.mime_type() = test_case.mime_type;
+    format_details.oob_bytes() = test_case.oob_bytes;
 
     std::mutex lock;
     FakeCodecAdapterEvents events;
     CodecAdapterSbcDecoder decoder(lock, &events);
 
-    decoder.CoreCodecInit(format_details);
+    decoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     ASSERT_EQ(events.fail_codec_count(), 0u);
 
     decoder.CoreCodecStartStream();
-    decoder.CoreCodecQueueInputFormatDetails(format_details);
+    decoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     // WaitForOutputConstraintsChangeCount unblocks as soon as fail_codec_count() > 0.
     events.WaitForOutputConstraintsChangeCount(1);
 
@@ -429,7 +427,7 @@ TEST(CodecAdapterSbcEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   CodecAdapterSbcEncoder encoder(lock, &events);
 
   auto format_details = MakeValidSbcEncoderFormatDetails();
-  encoder.CoreCodecInit(format_details);
+  encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   // Stream 1: Queue EndOfStream immediately without any FormatDetails or Packet.
@@ -443,7 +441,8 @@ TEST(CodecAdapterSbcEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   // Stream 2: Queue FormatDetails and a partial input packet (16 bytes < 512-byte PCM batch size)
   // so chunk_input_stream_ buffers partial bytes in scratch_block_, then stop stream without EOS.
   encoder.CoreCodecStartStream();
-  encoder.CoreCodecQueueInputFormatDetails(format_details);
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   encoder.CoreCodecMidStreamOutputBufferReConfigFinish();
 
@@ -458,12 +457,11 @@ TEST(CodecAdapterSbcEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   EXPECT_EQ(events.fail_codec_count(), 0u);
   encoder.CoreCodecStopStream();
 
-  // Between streams: CoreCodecGetBufferCollectionConstraints2(kOutputPort) must succeed using
+  // Between streams: CoreCodecGetBufferCollectionConstraints3(kOutputPort) must succeed using
   // cached min_output_buffer_size_.
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = encoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  auto constraints_result = encoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   // For 8 subbands, 16 blocks, JOINT_STEREO, bitpool 53: 4 + (8 * 2 / 2) + ceil((8 + 16 * 53) / 8)
   // = 12 + 107 = 119 bytes.
@@ -480,23 +478,34 @@ TEST(CodecAdapterSbcEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   encoder.CoreCodecStopStream();
 }
 
+constexpr char kSbcIncompletePcmFormatMessage[] = "SBC Encoder received incomplete PcmFormat2.";
+constexpr char kSbcUnsupportedSampleFormatMessage[] =
+    "SBC Encoder only encodes audio with signed 16 bit little endian linear samples.";
+
+void ExpectSbcEncoderFormatRejected(const fuchsia_media::FormatDetails& format_details,
+                                    const std::string& expected_message) {
+  std::mutex lock;
+  FakeCodecAdapterEvents events;
+  CodecAdapterSbcEncoder encoder(lock, &events);
+
+  encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+  ASSERT_EQ(events.fail_codec_count(), 0u);
+
+  encoder.CoreCodecStartStream();
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+  events.WaitForOutputConstraintsChangeCount(1);
+  EXPECT_EQ(events.fail_codec_count(), 1u);
+  EXPECT_EQ(events.last_fail_message(), expected_message);
+  encoder.CoreCodecStopStream();
+}
+
 TEST(CodecAdapterSbcEncoderTest, BytesPerSampleValidation) {
   {
     // Padded 4-byte container for 16-bit PCM is rejected.
-    std::mutex lock;
-    FakeCodecAdapterEvents events;
-    CodecAdapterSbcEncoder encoder(lock, &events);
-
     auto format_details = MakeValidSbcEncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bytes_per_sample(4);
-    encoder.CoreCodecInit(format_details);
-    ASSERT_EQ(events.fail_codec_count(), 0u);
-
-    encoder.CoreCodecStartStream();
-    encoder.CoreCodecQueueInputFormatDetails(format_details);
-    events.WaitForOutputConstraintsChangeCount(1);
-    EXPECT_EQ(events.fail_codec_count(), 1u);
-    encoder.CoreCodecStopStream();
+    format_details.pcm_format()->bytes_per_sample() = 4;
+    ExpectSbcEncoderFormatRejected(format_details, kSbcUnsupportedSampleFormatMessage);
   }
 
   {
@@ -506,16 +515,53 @@ TEST(CodecAdapterSbcEncoderTest, BytesPerSampleValidation) {
     CodecAdapterSbcEncoder encoder(lock, &events);
 
     auto format_details = MakeValidSbcEncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bytes_per_sample(2);
-    encoder.CoreCodecInit(format_details);
+    format_details.pcm_format()->bytes_per_sample() = 2;
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     ASSERT_EQ(events.fail_codec_count(), 0u);
 
     encoder.CoreCodecStartStream();
-    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events.WaitForOutputConstraintsChangeCount(1);
     encoder.CoreCodecMidStreamOutputBufferReConfigFinish();
     EXPECT_EQ(events.fail_codec_count(), 0u);
     encoder.CoreCodecStopStream();
+  }
+}
+
+TEST(CodecAdapterSbcEncoderTest, IncompletePcmFormatRejected) {
+  {
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.pcm_format()->pcm_mode().reset();
+    ExpectSbcEncoderFormatRejected(format_details, kSbcIncompletePcmFormatMessage);
+  }
+  {
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.pcm_format()->bits_per_sample().reset();
+    ExpectSbcEncoderFormatRejected(format_details, kSbcIncompletePcmFormatMessage);
+  }
+  {
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.pcm_format()->frames_per_second().reset();
+    ExpectSbcEncoderFormatRejected(format_details, kSbcIncompletePcmFormatMessage);
+  }
+  {
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.pcm_format()->channel_map().reset();
+    ExpectSbcEncoderFormatRejected(format_details, kSbcIncompletePcmFormatMessage);
+  }
+}
+
+TEST(CodecAdapterSbcEncoderTest, UnsupportedSampleFormatRejected) {
+  {
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.pcm_format()->bits_per_sample() = 24;
+    ExpectSbcEncoderFormatRejected(format_details, kSbcUnsupportedSampleFormatMessage);
+  }
+  {
+    auto format_details = MakeValidSbcEncoderFormatDetails();
+    format_details.pcm_format()->pcm_mode() = fuchsia_media::AudioPcmMode2::kFloat;
+    ExpectSbcEncoderFormatRejected(format_details, kSbcUnsupportedSampleFormatMessage);
   }
 }
 

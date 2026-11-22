@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
 
@@ -12,7 +12,7 @@ package(default_applicable_licenses = ["//:license"])
 go_binary_host_tool(
     name = "check-licenses",
     embed = ["//tools/check-licenses/cmd:main"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//visibility:public"],
 )
 
@@ -23,7 +23,7 @@ go_library(
         "pipeline/orchestrator.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/pipeline",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         "//tools/check-licenses/metrics",
@@ -38,7 +38,7 @@ go_library(
         "stages/discover/discover.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/discover",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":pipeline",
@@ -52,7 +52,7 @@ go_library(
         "stages/prune/prune.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/prune",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":pipeline",
@@ -76,7 +76,7 @@ go_library(
         "stages/report/target_verifier.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/report",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":config",
@@ -95,7 +95,7 @@ go_library(
         "stages/validate/validate.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/validate",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":pipeline",
@@ -118,7 +118,7 @@ go_library(
         "readme/validate.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/readme",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":pipeline",
@@ -137,7 +137,7 @@ go_library(
         "config/types.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/config",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":readme",
@@ -155,7 +155,7 @@ go_library(
         "stages/boundary/config.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/boundary",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":pipeline",
@@ -171,7 +171,7 @@ go_library(
         "stages/classify/notice.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/stages/classify",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
     deps = [
         ":pipeline",
@@ -187,7 +187,7 @@ host_go_test(
         "config/builder_test.go",
     ],
     embed = [":config"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
 host_go_test(
@@ -198,7 +198,7 @@ host_go_test(
         "pipeline/orchestrator_test.go",
     ],
     embed = [":pipeline"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":config",
         ":stages_boundary",
@@ -227,7 +227,7 @@ host_go_test(
         "stages/report/target_verifier_test.go",
     ],
     embed = [":stages_report"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":pipeline",
         "//tools/readme_fuchsia:readme_fuchsia_lib",
@@ -247,7 +247,7 @@ host_go_test(
         "readme/update_test.go",
     ],
     embed = [":readme"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
 host_go_test(
@@ -257,7 +257,7 @@ host_go_test(
         "stages/validate/validate_test.go",
     ],
     embed = [":stages_validate"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":config",
         ":pipeline",
@@ -271,7 +271,7 @@ host_go_test(
         "stages/prune/prune_test.go",
     ],
     embed = [":stages_prune"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":pipeline",
         "//tools/check-licenses/metrics",
@@ -285,7 +285,7 @@ host_go_test(
         "stages/boundary/boundary_test.go",
     ],
     embed = [":stages_boundary"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":pipeline",
     ],
@@ -299,7 +299,7 @@ host_go_test(
         "stages/classify/notice_test.go",
     ],
     embed = [":stages_classify"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":pipeline",
     ],
@@ -312,7 +312,7 @@ host_go_test(
         "stages/discover/discover_test.go",
     ],
     embed = [":stages_discover"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//tools/check-licenses/metrics",
         "//tools/readme_fuchsia:readme_fuchsia_lib",
@@ -321,7 +321,7 @@ host_go_test(
 
 test_suite(
     name = "tests",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         ":config_test",
         ":pipeline_test",

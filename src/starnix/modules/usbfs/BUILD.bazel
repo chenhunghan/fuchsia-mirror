@@ -11,13 +11,14 @@ package(default_applicable_licenses = ["//:license"])
 # TODO(https://fxbug.dev/42059075): Re-enable starnix in these environments.
 # @bazel2gn:raw_attribute:with_unit_tests = true
 # @bazel2gn:raw_attribute:exclude_toolchain_tags = [ "asan", "hwasan" ]
-# @bazel2gn:raw_attribute:test_deps = [ "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust", "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_rust", "//sdk/fidl/fuchsia.hardware.usb.virtual.bus:fuchsia.hardware.usb.virtual.bus_rust", "//sdk/lib/device-watcher/rust", "//sdk/lib/driver_test_realm/realm_builder/rust", "//src/devices/usb/drivers/usb-virtual-bus/tests:fuchsia.hardware.usb.virtualbustest_rust", "//src/lib/fuchsia", "//src/lib/fuchsia-async", "//src/lib/fuchsia-component-test" ]
+# @bazel2gn:raw_attribute:test_deps = [ "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust", "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_rust", "//sdk/fidl/fuchsia.hardware.usb.virtual.bus:fuchsia.hardware.usb.virtual.bus_rust", "//sdk/lib/device-watcher/rust", "//sdk/lib/driver_test_realm/realm_builder/rust", "//src/devices/usb/drivers/usb-virtual-bus/tests:fuchsia.hardware.usb.virtualbustest_rust", "//src/lib/fuchsia", "//src/lib/fuchsia-async", "//src/lib/fuchsia-component-test", "//src/starnix/modules/usbfs/testing:usbfs_trace_schema", "//third_party/rust_crates:serde_json", "//third_party/rust_crates:test-case" ]
 rustc_library(
     name = "usbfs",
     srcs = [
         "device.rs",
         "lib.rs",
         "sysfs.rs",
+        "testing/starnix_replayer.rs",
     ],
     crate_name = "starnix_modules_usbfs",
     crate_root = "lib.rs",

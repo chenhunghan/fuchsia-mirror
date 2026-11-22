@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
 
 package(default_applicable_licenses = ["//:license"])
@@ -11,6 +11,7 @@ fx_cc_library_headers(
     name = "headers",
     hdrs = [
         "include/lib/zircon-internal/align.h",
+        "include/lib/zircon-internal/debug.h",
         "include/lib/zircon-internal/default_stack_size.h",
         "include/lib/zircon-internal/device/cpu-trace/goldmont-pm-events.inc",
         "include/lib/zircon-internal/device/cpu-trace/intel-pm.h",
@@ -30,9 +31,9 @@ fx_cc_library_headers(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
+fx_cc_library(
     name = "zircon-internal",
-    visibility = ["//visibility:public"],
+    visibility = ["//:__subpackages__"],
     deps = [":headers"],
     alwayslink = True,
 )

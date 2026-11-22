@@ -21,6 +21,7 @@ constexpr std::string kEventCmd = "watch_event";
 constexpr std::string kDeviceDelimiter = "SET_DEVICE";
 constexpr std::string kTouchDev = "touch";
 constexpr std::string kMouseDev = "mouse";
+constexpr std::string kDirectInputDev = "direct_input";
 
 // The formatted event string will be sent across systems, so verify that the
 // size of a `long` is the same on both sides. Similarly for `unsigned short`.
@@ -48,6 +49,13 @@ constexpr size_t kMoveNumPackets = 4;
 constexpr size_t kUpNumPackets = 4;
 
 constexpr size_t kDownUpNumPackets = kDownNumPackets + kUpNumPackets;
+
+// In direct input mode, `SimulateTap` sets `contact_width` and `contact_height`
+// on touch down, which additionally emits `ABS_MT_TOUCH_MAJOR` and
+// `ABS_MT_TOUCH_MINOR`.
+constexpr size_t kDirectInputDownNumPackets = kDownNumPackets + 2;
+constexpr size_t kDirectInputDownUpNumPackets = kDirectInputDownNumPackets + kUpNumPackets;
+constexpr size_t kMaxBatchPackets = kDirectInputDownUpNumPackets * 2;
 
 // Mouse wheel scroll is expressed in two `uapi::input_event`s: REL_WHEEL and EV_SYN.
 constexpr size_t kScrollNumPackets = 2;

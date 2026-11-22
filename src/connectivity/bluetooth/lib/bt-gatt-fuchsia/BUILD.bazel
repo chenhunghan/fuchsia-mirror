@@ -58,6 +58,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "bt-gatt-fuchsia-tests",
-    package_name = "bt-gatt-fuchsia-tests",
     unit_tests = [":bt-gatt-fuchsia_test"],
 )

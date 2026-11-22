@@ -1,6 +1,6 @@
 ## Scenic Views, view focus, and focus chain
 
-## View focus
+## View focus {:#view-focus}
 
 When a user starts interacting with a region of the UI, Fuchsia's input system
 treats it as a statement of intent. To reflect that intent, Scenic defines a
@@ -82,14 +82,14 @@ A focus chain holds sensitive information, since it embeds ViewRefs and encodes
 hierarchical information about the view tree. Hence, access to the focus chain
 must be restricted to trusted entities, such as Accessibility Manager.
 
-### Race between view focus event and focus chain
+### Race between view focus event and focus chain {:#race-between-view-focus-event-and-focus-chain}
 
 We note that the view focus event, dispatched to UI clients, and the focus
 chain, dispatched to manager programs, can race. There is no global ordering
 between these events. Fuchsia components are typically exposed to this
 distributed system complexity as part of manipulating discrete FIDL protocols.
 
-## Transfer of view focus: policy
+## Transfer of view focus: policy {:#transfer-of-view-focus-policy}
 
 Transfer of view focus can be thought of as a combination of three operations,
 described below. We talk about a focus chain `F`, with ViewRefs `[v0, v1, ...,

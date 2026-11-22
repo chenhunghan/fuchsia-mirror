@@ -12,18 +12,6 @@ library_headers("headers") {
   public_deps = [ "//sdk/lib/zbi-format" ]
 }
 
-source_set("ffi") {
-  sources = [ "generic32_ffi.cc" ]
-  public_deps = [ ":headers" ]
-  deps = [
-    "//zircon/kernel/lib/arch",
-    "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/lib/console",
-    "//zircon/kernel/lib/init",
-    "//zircon/kernel/vm:headers",
-  ]
-}
-
 kernel_rust_mod("generic32-rs") {
   output_name = "generic32"
   source_root = "generic32.rs"
@@ -36,6 +24,7 @@ kernel_rust_mod("generic32-rs") {
     "//src/lib/regio",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/debug",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
@@ -44,9 +33,7 @@ kernel_rust_mod("generic32-rs") {
 source_set("generic32") {
   public_deps = [ ":headers" ]
   deps = [
-    ":ffi",
     ":generic32-rs",
     "//zircon/kernel/dev/pdev/hw_watchdog",
-    "//zircon/kernel/lib/boot-options",
   ]
 }

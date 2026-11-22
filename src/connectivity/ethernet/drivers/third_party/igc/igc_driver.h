@@ -19,13 +19,13 @@
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <zircon/types.h>
 
 #include <mutex>
 
 #include "igc_api.h"
 #include "src/connectivity/network/drivers/network-device/device/public/locks.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace ethernet {
 namespace igc {

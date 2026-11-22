@@ -259,6 +259,19 @@ TEST_F(ControllerWithFakeSysmemTest, SysmemRequirements) {
   EXPECT_TRUE(collection->HasConstraints());
 }
 
+TEST_F(ControllerWithFakeSysmemTest, IntelGpuCorePciMmioBarBounds) {
+  uint8_t* addr = nullptr;
+  uint64_t size = 0;
+  EXPECT_STATUS(display_.IntelGpuCoreMapPciMmio(pci::kMaxBarCount, &addr, &size),
+                ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(display_.IntelGpuCoreMapPciMmio(pci::kMaxBarCount + 1, &addr, &size),
+                ZX_ERR_INVALID_ARGS);
+
+  EXPECT_OK(display_.IntelGpuCoreUnmapPciMmio(pci::kMaxBarCount - 1));
+  EXPECT_STATUS(display_.IntelGpuCoreUnmapPciMmio(pci::kMaxBarCount), ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(display_.IntelGpuCoreUnmapPciMmio(pci::kMaxBarCount + 1), ZX_ERR_INVALID_ARGS);
+}
+
 }  // namespace
 
 }  // namespace intel_display

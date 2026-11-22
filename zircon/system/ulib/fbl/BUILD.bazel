@@ -2,14 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Build a fbl library so we can move fbl library off SDK
-
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library_zx")
 
 package(default_applicable_licenses = ["//:license"])
 
+# Kept in sync with BUILD.gn via LINT.IfChange instead of bazel2gn because
+# BUILD.gn has kernel-only conditions.
+# TODO(https://fxbug.dev/456186319): Use bazel2gn once kernel builds are supported.
 # LINT.IfChange
-cc_library(
+# fbl is in the IDK only so in-tree targets built with the Bazel SDK rules
+# (e.g. drivers) can use it at HEAD. It must never be stabilized or used
+# outside the Fuchsia tree, hence the `idk_name`.
+# TODO(https://fxbug.dev/444521390): Remove fbl from the IDK.
+idk_cc_source_library_zx(
     name = "fbl",
     srcs = [
         "alloc_checker.cc",
@@ -41,6 +46,7 @@ cc_library(
         "include/fbl/mutex.h",
         "include/fbl/no_destructor.h",
         "include/fbl/null_lock.h",
+        "include/fbl/packed_pointer.h",
         "include/fbl/recycler.h",
         "include/fbl/ref_counted.h",
         "include/fbl/ref_counted_internal.h",
@@ -58,22 +64,18 @@ cc_library(
         "include/fbl/unaligned.h",
         "include/fbl/unique_fd.h",
         "include/fbl/vector.h",
+        "include/fbl/wavl_tree_augmented_invariant_observer.h",
         "include/fbl/wavl_tree_best_node_observer.h",
     ],
-    includes = [
-        "include",
-    ],
+    api_area = "Kernel",
+    category = "partner",
+    idk_name = "fbl_deprecated",
+    stable = False,  # Never set to True. See above.
     visibility = ["//visibility:public"],
-    deps = select({
-        "@platforms//os:fuchsia": [
-            "@fuchsia_sdk//pkg/fit",
-            "@fuchsia_sdk//pkg/stdcompat",
-        ],
-        "//conditions:default": [
-            "//sdk/lib/fit",
-            "//sdk/lib/stdcompat",
-            "//sdk/lib/zircon-assert",
-        ],
-    }),
+    deps = [
+        "//sdk/lib/fit",
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/zircon-assert",
+    ],
 )
 # LINT.ThenChange(BUILD.gn)

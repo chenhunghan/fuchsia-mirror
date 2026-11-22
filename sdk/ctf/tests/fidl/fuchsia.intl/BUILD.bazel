@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The test root component and the test package that runs it stay in GN
+# (above the sentinel in BUILD.gn), because the test package subpackages
+# //sdk/ctf/tests/fidl/fuchsia.intl/testing/realm-factory, which depends on
+# GN-only targets (such as //src/settings/service:setui_service_v2).
+
+rustc_test(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "fuchsia_intl_test",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/ctf/tests/fidl/fuchsia.intl/testing/fidl:fuchsia.intl.test_rust",
+        "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/testing/realm_client/rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fuchsia_intl_test",
+)
+
+fx_component_manifest(
+    name = "fuchsia-intl-test-component_manifest",
+    testonly = True,
+    component_name = "fuchsia-intl-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+        "//src/testing/realm_client:meta/realm_client.shard.cml",
+    ],
+    manifest = "meta/fuchsia-intl-test.cml",
+)
+
+fx_component(
+    name = "fuchsia-intl-test-component",
+    testonly = True,
+    compiled_manifest = ":fuchsia-intl-test-component_manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+ctf_fx_package(
+    name = "fuchsia-intl-tests",
+    testonly = True,
+    components = [":fuchsia-intl-test-component"],
+)

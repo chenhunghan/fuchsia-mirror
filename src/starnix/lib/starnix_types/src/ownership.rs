@@ -32,7 +32,9 @@
 
 use core::hash::Hasher;
 
+use std::cell::UnsafeCell;
 use std::hash::Hash;
+use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicUsize, Ordering, fence};
 use std::sync::{Arc, Weak};
@@ -139,7 +141,7 @@ impl<T> OwnedRef<T> {
     ///
     /// See `Arc::as_ptr`
     pub fn as_ptr(this: &Self) -> *const T {
-        &Self::inner(this).value.value as *const T
+        Self::value(this) as *const T
     }
 
     /// Returns true if the two objects point to the same allocation
@@ -162,6 +164,11 @@ impl<T> OwnedRef<T> {
         this.inner.as_ref().unwrap_or_else(|| {
             panic!("OwnedRef<{}> has been released.", std::any::type_name::<T>())
         })
+    }
+
+    fn value(this: &Self) -> &T {
+        // SAFETY: `this` is an unreleased `OwnedRef`, so `owned_refs_count > 0`.
+        unsafe { Self::inner(this).value() }
     }
 
     fn re_own(inner: Arc<RefInner<T>>) -> Option<Self> {
@@ -197,7 +204,12 @@ impl<T: Releasable> OwnedRef<T> {
         });
         let previous_count = inner.owned_refs_count.fetch_sub(1, Ordering::Release);
         if previous_count == 1 {
-            fence(Ordering::Acquire);
+            // Ensure that decrementing `owned_refs_count` to 0 cannot be reordered after loading
+            // `temp_refs_count` in `wait_and_take_value`. Paired with the `SeqCst` fence in
+            // `WeakRef::upgrade`, this guarantees that if `wait_and_take_value` observes
+            // `temp_refs_count == 0`, any concurrent `WeakRef::upgrade` will observe
+            // `owned_refs_count == 0`.
+            fence(Ordering::SeqCst);
             Some(Self::wait_and_take_value(inner))
         } else {
             None
@@ -207,22 +219,30 @@ impl<T: Releasable> OwnedRef<T> {
     /// Wait for this `OwnedRef` to be the only left reference to the data. This should only be
     /// called on once the last `OwnedRef` has been released. This will wait for all existing
     /// `TempRef >]` to be dropped before returning.
-    fn wait_and_take_value(mut inner: Arc<RefInner<T>>) -> ReleaseGuard<T> {
+    fn wait_and_take_value(inner: Arc<RefInner<T>>) -> ReleaseGuard<T> {
         loop {
             // Ensure no more `OwnedRef` exists.
             debug_assert_eq!(inner.owned_refs_count.load(Ordering::Acquire), 0);
-            match Arc::try_unwrap(inner) {
-                Ok(value) => return value.value,
-                Err(value) => inner = value,
+            let current_value = inner.temp_refs_count.load(Ordering::Acquire);
+            if current_value == 0 {
+                // SAFETY: `owned_refs_count` is 0 and `temp_refs_count` is 0, and once
+                // `owned_refs_count` reaches 0 no new `OwnedRef` or `TempRef` can be acquired.
+                return unsafe { inner.take_value() };
             }
-            inner.wait_for_no_ref_once();
+            // Wait on the futex that will be woken up when the number of `TempRef` drops to 0.
+            let result =
+                inner.temp_refs_count.wait(current_value, None, zx::MonotonicInstant::INFINITE);
+            debug_assert!(
+                result == Ok(()) || result == Err(zx::Status::BAD_STATE),
+                "Unexpected result: {result:?}"
+            );
         }
     }
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for OwnedRef<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        Self::inner(self).value.fmt(f)
+        Self::value(self).fmt(f)
     }
 }
 
@@ -257,7 +277,7 @@ impl<T> std::ops::Deref for OwnedRef<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &Self::inner(self).deref().value
+        Self::value(self)
     }
 }
 
@@ -342,6 +362,11 @@ impl<T> WeakRef<T> {
             // As soon as the Arc has been upgraded, creates a `TempRef` to ensure the futex is woken
             // up in case `upgrade` and `release` are racing.
             let temp_ref = TempRef::new(value);
+            // Ensure that incrementing `temp_refs_count` in `TempRef::new` cannot be reordered
+            // after loading `owned_refs_count` below. Paired with the `SeqCst` fence in
+            // `OwnedRef::take`, this guarantees that if `owned_refs_count > 0` is observed here,
+            // `wait_and_take_value` will observe `temp_refs_count > 0`.
+            fence(Ordering::SeqCst);
             // Only returns a valid `TempRef` if there are still some un-released `OwnedRef`. As
             // soon as `release` is called, no more `TempRef` can be acquire.
             if temp_ref.0.owned_refs_count.load(Ordering::Acquire) > 0 {
@@ -367,7 +392,7 @@ impl<T> WeakRef<T> {
         }
         let base = self.0.as_ptr();
         let value = memoffset::raw_field!(base, RefInner<T>, value);
-        memoffset::raw_field!(value, ReleaseGuard<T>, value)
+        memoffset::raw_field!(value, ReleaseGuard<UnsafeCell<ManuallyDrop<T>>>, value) as *const T
     }
 
     /// Returns true if the two objects point to the same allocation
@@ -479,11 +504,16 @@ impl<'a, T> TempRef<'a, T> {
         Self(inner, Default::default())
     }
 
+    fn value(this: &Self) -> &T {
+        // SAFETY: `this` is a valid `TempRef` acquired while `owned_refs_count > 0`.
+        unsafe { this.0.value() }
+    }
+
     /// Provides a raw pointer to the data.
     ///
     /// See `Arc::as_ptr`
     pub fn as_ptr(this: &Self) -> *const T {
-        &this.0.value.value as *const T
+        Self::value(this) as *const T
     }
 
     /// Returns true if the two objects point to the same allocation
@@ -523,19 +553,19 @@ impl<'a, T> std::ops::Deref for TempRef<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0.deref().value
+        Self::value(self)
     }
 }
 
 impl<'a, T> std::borrow::Borrow<T> for TempRef<'a, T> {
     fn borrow(&self) -> &T {
-        &self.0.deref().value
+        self.deref()
     }
 }
 
 impl<'a, T> std::convert::AsRef<T> for TempRef<'a, T> {
     fn as_ref(&self) -> &T {
-        &self.0.deref().value
+        self.deref()
     }
 }
 
@@ -746,33 +776,61 @@ pub fn debug_assert_no_local_temp_ref() {
 
 /// The internal data of `OwnedRef`/`WeakRef`/`TempRef`.
 ///
-/// To ensure that `wait_for_no_ref_once` is correct, the following constraints must apply:
+/// To ensure that `OwnedRef::wait_and_take_value` is correct, the following constraints must
+/// apply:
 /// - Once `owned_refs_count` reaches 0, it must never increase again.
-/// - The strong count of `Arc<Self>` must always be incremented before `temp_refs_count` is
-///   incremented.
-/// - Whenever a the strong count of `Arc<Self>` is incremented, `temp_ref_count` must be
-///   increased.
-/// This ensures that `wait_for_no_ref_once` will always be notified when it is waiting on the
-/// `temp_refs_count` futex and the number of `TempRef` reaches 0.
+/// - When upgrading a `WeakRef`, `temp_refs_count` must be incremented (followed by a `SeqCst`
+///   fence) before checking that `owned_refs_count > 0`.
+/// - When releasing the last `OwnedRef`, `owned_refs_count` must be decremented to 0 (followed by
+///   a `SeqCst` fence) before `wait_and_take_value` loads `temp_refs_count`.
+/// This ensures that `wait_and_take_value` will always observe `temp_refs_count > 0` for any valid
+/// `TempRef` and be notified via the `temp_refs_count` futex when the number of `TempRef` reaches
+/// 0.
 struct RefInner<T> {
-    /// The underlying value.
-    value: ReleaseGuard<T>,
+    /// The underlying value, wrapped in `ReleaseGuard<UnsafeCell<ManuallyDrop<...>>>` so
+    /// `wait_and_take_value` can extract it once `owned_refs_count == 0` and
+    /// `temp_refs_count == 0` without waiting for all `Arc<Self>` instances to finish dropping.
+    value: ReleaseGuard<UnsafeCell<ManuallyDrop<T>>>,
     /// The number of `OwnedRef` sharing this data.
     owned_refs_count: AtomicUsize,
     /// The number of `TempRef` sharing this data.
-    // This is close to a duplicate of the Arc strong_count, and could be replaced by it if this
-    // module reimplemented all of Arc/Weak. This can be changed without changing the API if this
-    // becomes a performance issue.
     temp_refs_count: zx::Futex,
 }
+
+// SAFETY: `RefInner<T>::value` is only accessed shared via `&T` while `owned_refs_count > 0` or
+// `temp_refs_count > 0`, and is only taken exclusively in `wait_and_take_value` once both
+// `owned_refs_count == 0` and `temp_refs_count == 0`.
+unsafe impl<T: Sync> Sync for RefInner<T> {}
 
 impl<T> RefInner<T> {
     fn new(value: T) -> Self {
         Self {
-            value: value.into(),
+            value: UnsafeCell::new(ManuallyDrop::new(value)).into(),
             owned_refs_count: AtomicUsize::new(1),
             temp_refs_count: zx::Futex::new(0),
         }
+    }
+
+    /// Returns a shared reference to the underlying `T`.
+    ///
+    /// # Safety
+    /// The caller must hold an unreleased `OwnedRef` (`owned_refs_count > 0`) or a valid `TempRef`
+    /// (`temp_refs_count > 0` acquired before `owned_refs_count` reached 0), ensuring that
+    /// `wait_and_take_value` has not taken and is not concurrently taking `self.value`.
+    unsafe fn value(&self) -> &T {
+        // SAFETY: Upheld by caller.
+        unsafe { &*self.value.value.get() }
+    }
+
+    /// Takes the underlying value wrapped in a `ReleaseGuard<T>`.
+    ///
+    /// # Safety
+    /// Must be called at most once, only after both `owned_refs_count` and `temp_refs_count` have
+    /// reached 0 so no references to `self.value` exist or can be created.
+    unsafe fn take_value(&self) -> ReleaseGuard<T> {
+        self.value.drop_guard.disarm();
+        // SAFETY: Upheld by caller.
+        unsafe { ManuallyDrop::take(&mut *self.value.value.get()) }.into()
     }
 
     /// Increase `temp_refs_count`. Must be called each time a new `TempRef` is built.
@@ -801,23 +859,6 @@ impl<T> RefInner<T> {
                 *count.borrow_mut() -= 1;
             });
         }
-    }
-
-    /// Wait for `temp_refs_count` to reach 0 once using the futex.
-    fn wait_for_no_ref_once(self: &Arc<Self>) {
-        // Compute the current number of temp refs, and wait for it to drop to 0.
-        let current_value = self.temp_refs_count.load(Ordering::Acquire);
-        if current_value == 0 {
-            // It is already 0, return.
-            return;
-        }
-        // Otherwise, wait on the futex that will be waken up when the number of temp_ref drops
-        // to 0.
-        let result = self.temp_refs_count.wait(current_value, None, zx::MonotonicInstant::INFINITE);
-        debug_assert!(
-            result == Ok(()) || result == Err(zx::Status::BAD_STATE),
-            "Unexpected result: {result:?}"
-        );
     }
 }
 
@@ -1140,5 +1181,25 @@ mod test {
         let owned = OwnedRef::new(Data::default());
         let value = release_after!(owned, (), async || { 0 });
         assert_eq!(value, 0);
+    }
+
+    #[::fuchsia::test]
+    fn test_wait_and_take_value_no_busy_loop() {
+        let value = OwnedRef::new(Data {});
+        let weak = WeakRef::from(&value);
+        let mut temp = ManuallyDrop::new(weak.upgrade().unwrap());
+
+        // Simulate `TempRef::drop` being preempted by a deadline thread right after
+        // `dec_temp_ref()` wakes the futex, before the inner `Arc` of `TempRef` is dropped.
+        temp.0.dec_temp_ref();
+
+        // Releasing on the same thread (equivalent to a deadline thread preempting the
+        // dropping thread on the same CPU) must complete immediately without busy-looping,
+        // even while `temp.0` still holds a strong `Arc` reference.
+        value.release(());
+
+        // SAFETY: `temp` is wrapped in `ManuallyDrop` and `dec_temp_ref()` was already called
+        // above, so only the inner `Arc` needs to be dropped.
+        unsafe { std::ptr::drop_in_place(&mut temp.0) };
     }
 }

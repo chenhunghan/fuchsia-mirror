@@ -17,7 +17,7 @@ fx_cc_library(
     srcs = ["snapshotter.cc"],
     hdrs = ["snapshotter.h"],
     implementation_deps = [
-        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
         "//zircon/system/ulib/zx",
     ],
     visibility = ["//src/developer/forensics/snapshot/tests:__pkg__"],

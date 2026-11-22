@@ -1,0 +1,85 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Synthetic reproduction of one Deadline thread that keeps a CPU to itself.
+// Needs at least 5 CPUs: the workers use CPUs 3 and 4.
+//
+// "dl-spinner" has a budget equal to its period and never blocks, so on CPU 3
+// nothing takes the CPU away from it except other Deadline threads. This
+// stands in for a Deadline thread that busy-waits on a Fair thread it can keep
+// off the CPU.
+//
+// "victim-pinned" is a Fair thread with affinity for the same CPU. Its
+// completed loops and wake-to-run latency show how long it is kept off the CPU.
+//
+// "dl-periodic-same-cpu" is a small periodic Deadline thread on the same CPU.
+// Its wake-to-run latency shows what any time given to Fair threads on that
+// CPU costs Deadline work there.
+//
+// "control-other-cpu" is the same Fair victim with affinity for CPU 4, which
+// carries no Deadline load, for comparison.
+{
+  "name": "One Deadline thread at 100% of CPU 3 with a pinned Fair victim",
+  "config": {
+    "priority": 31,
+    "interval": "30s"
+  },
+  "objects": {
+    "dl_periodic_timer": { "type": "timer" },
+    "victim_timer": { "type": "timer" },
+    "control_timer": { "type": "timer" }
+  },
+  "workers": [
+    {
+      "name": "dl-spinner",
+      "group": "deadline_spinner",
+      "priority": {
+        "capacity": "10ms",
+        "deadline": "10ms",
+        "period": "10ms",
+        "affinity": [3]
+      },
+      "actions": [
+        { "action": "spin", "duration": "10ms" }
+      ]
+    },
+    {
+      "name": "dl-periodic-same-cpu",
+      "group": "deadline_periodic_same_cpu",
+      "priority": {
+        "capacity": "250us",
+        "deadline": "2ms",
+        "period": "2ms",
+        "affinity": [3]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_periodic_timer", "deadline": "2ms" },
+        { "action": "spin", "duration": "100us" },
+        { "action": "wait_one", "object": "dl_periodic_timer", "signals": 8 }
+      ]
+    },
+    {
+      "name": "victim-pinned",
+      "group": "fair_victim_pinned",
+      "priority": 16,
+      "affinity": [3],
+      "actions": [
+        { "action": "timer_set", "timer": "victim_timer", "deadline": "10ms" },
+        { "action": "wait_one", "object": "victim_timer", "signals": 8 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+    {
+      "name": "control-other-cpu",
+      "group": "fair_control_other_cpu",
+      "priority": 16,
+      "affinity": [4],
+      "actions": [
+        { "action": "timer_set", "timer": "control_timer", "deadline": "10ms" },
+        { "action": "wait_one", "object": "control_timer", "signals": 8 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    }
+  ]
+}

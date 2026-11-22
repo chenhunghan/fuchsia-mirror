@@ -19,8 +19,6 @@
 
 #include "src/devices/misc/drivers/compat/device.h"
 
-extern std::mutex kDriverGlobalsLock;
-
 namespace compat {
 
 // Driver is the compatibility driver that loads DFv1 drivers.
@@ -138,7 +136,6 @@ class Driver : public fdf::DriverBase2 {
   // The next unique device id for devices. Starts at 1 because `device_` has id zero.
   uint32_t next_device_id_ = 1;
 
-  void* library_ = nullptr;
   zx_driver_rec_t* record_ = nullptr;
   void* context_ = nullptr;
 

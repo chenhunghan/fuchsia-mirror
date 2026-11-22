@@ -5,27 +5,40 @@
 //! Fake UFS host controller and device for unit and integration tests.
 
 use crate::UfsError;
-use crate::constants::{GEOMETRY_SIZE_UNIT, MIN_LOGICAL_BLOCK_SIZE, UTRD_OCS_MASK};
+use crate::constants::{GEOMETRY_SIZE_UNIT, MIN_LOGICAL_BLOCK_SIZE, OCS_OFFSET, UTRD_OCS_MASK};
 use crate::descriptors::{DescriptorType, DeviceDescriptor, GeometryDescriptor};
 use crate::registers::{
-    HostControllerEnableReg, HostControllerStatusReg, InterruptStatusReg, PowerModeStatus,
-    UicCommandArgument2Reg, UicCommandArgument3Reg, UicCommandReg, UtrListDoorBellReg,
+    HostControllerEnableReg, HostControllerStatusReg, HostUicErrorCodeDataLinkLayerReg,
+    HostUicErrorCodeDmeReg, HostUicErrorCodeNetworkLayerReg, HostUicErrorCodePhyAdapterLayerReg,
+    HostUicErrorCodeTransportLayerReg, InterruptStatusReg, PowerModeStatus, UicCommandArgument2Reg,
+    UicCommandArgument3Reg, UicCommandReg, UtrListClearReg, UtrListDoorBellReg,
 };
 use crate::request_list::{DataDirection, TransferRequestDescriptor};
 use crate::scsi::{InquiryData, ReadCapacity10Data, ScsiOpcode};
 use crate::transfer_request_processor::TransferRequestProcessor;
+use fuchsia_sync::Mutex;
 use mmio::region::MmioRegion;
 use mmio::vmo::{VmoMapping, VmoMemory};
 use mmio::{Mmio, MmioError, ReadableRegister, Register, WritableRegister};
 use std::mem::size_of;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 use zerocopy::byteorder::big_endian::{U16, U32, U64};
 use zerocopy::{FromBytes, IntoBytes};
 
 /// `HCS.DP`: a device is attached to the link.
 pub const HCS_DEVICE_PRESENT: u32 = 1 << 0;
+/// `HCS.UTRLRDY`: the controller accepts UTP Transfer Request List commands.
+pub const HCS_UTRL_READY: u32 = 1 << 1;
+/// `HCS.UTMRLRDY`: the controller accepts UTP Task Management Request List commands.
+pub const HCS_UTMRL_READY: u32 = 1 << 2;
 /// `HCS.UCRDY`: the controller accepts a UIC command.
 pub const HCS_UIC_COMMAND_READY: u32 = 1 << 3;
+/// `HCS` bits set while the link and transfer lists are active (`DP | UTRLRDY | UTMRLRDY | UCRDY`).
+pub const HCS_ACTIVE_LINK: u32 =
+    HCS_DEVICE_PRESENT | HCS_UTRL_READY | HCS_UTMRL_READY | HCS_UIC_COMMAND_READY;
 /// `CAP.AUTOH8`: the controller supports auto-hibernate.
 pub const CAP_AUTO_HIBERNATE_SUPPORT: u32 = 1 << 23;
 
@@ -119,24 +132,77 @@ impl FakeUfs {
     }
 }
 
+/// Serializes read-modify-write updates of `IS` and `UTRLDBR`, which both the driver (through
+/// [`FakeMmio`]) and the fake hardware (through [`FakeUtp`] and [`complete_uic_command`]) change.
+/// Real hardware applies these updates atomically. Without the lock, a store from one side can
+/// drop a bit that the other side set between its load and store. One process-wide lock is
+/// enough because each critical section is a single load and store.
+static SHARED_REGISTER_LOCK: Mutex<()> = Mutex::new(());
+
 /// Driver-side MMIO backed by a plain VMO that emulates the register semantics the driver relies
-/// on: `IS` is write-1-to-clear and `UTRLDBR` is write-1-to-set. Other registers are plain memory;
-/// the fake hardware updates them through [`FakeUtp::regs`] or its own VMO mapping.
+/// on: `IS` is write-1-to-clear, `UTRLDBR` is write-1-to-set, `UTRLCLR` clears `0` bits in
+/// `UTRLDBR`, and `UECPA..UECDME` clear on read. Other registers are plain memory; the fake
+/// hardware updates them through [`FakeUtp::regs`] or its own VMO mapping.
 pub struct FakeMmio {
     inner: MmioRegion<VmoMemory>,
+    clear_inner: Mutex<MmioRegion<VmoMemory>>,
+    power_domain: Option<Arc<AtomicBool>>,
+    unpowered_accesses: AtomicU32,
     hce_stuck: bool,
+    utrlclr_writes: AtomicU32,
+    uic_error_reads: AtomicU32,
 }
 
 impl FakeMmio {
     /// Maps `size` bytes of `vmo`.
     pub fn new(vmo: &zx::Vmo, size: usize) -> Self {
-        let vmo = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
-        Self { inner: VmoMapping::map(0, size, vmo).unwrap(), hce_stuck: false }
+        let mapped_vmo = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let clear_vmo = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        Self {
+            inner: VmoMapping::map(0, size, mapped_vmo).unwrap(),
+            clear_inner: Mutex::new(VmoMapping::map(0, size, clear_vmo).unwrap()),
+            power_domain: None,
+            unpowered_accesses: AtomicU32::new(0),
+            hce_stuck: false,
+            utrlclr_writes: AtomicU32::new(0),
+            uic_error_reads: AtomicU32::new(0),
+        }
+    }
+
+    /// Tracks 32-bit MMIO reads/writes issued while `powered` is `false`.
+    pub fn with_power_domain(mut self, powered: Arc<AtomicBool>) -> Self {
+        self.power_domain = Some(powered);
+        self
+    }
+
+    /// Number of 32-bit MMIO accesses issued while the attached power domain was off.
+    pub fn unpowered_accesses(&self) -> u32 {
+        self.unpowered_accesses.load(Ordering::Acquire)
+    }
+
+    fn check_powered(&self) {
+        if let Some(ref powered) = self.power_domain
+            && !powered.load(Ordering::Acquire)
+        {
+            self.unpowered_accesses.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// When `stuck` is `true`, ignores writes that clear `HCE` (`bit 0 == 0`).
     pub fn set_hce_stuck(&mut self, stuck: bool) {
         self.hce_stuck = stuck;
+    }
+
+    /// Number of driver writes to `UTRLCLR`.
+    pub fn utrlclr_writes(&self) -> u32 {
+        // ORDERING: Standalone test counter tracking `UTRLCLR` writes.
+        self.utrlclr_writes.load(Ordering::Relaxed)
+    }
+
+    /// Number of driver reads across `UECPA..UECDME`.
+    pub fn uic_error_reads(&self) -> u32 {
+        // ORDERING: Standalone test counter tracking read-to-clear UIC register accesses.
+        self.uic_error_reads.load(Ordering::Relaxed)
     }
 }
 
@@ -158,7 +224,23 @@ impl Mmio for FakeMmio {
     }
 
     fn try_load32(&self, offset: usize) -> Result<u32, MmioError> {
-        self.inner.try_load32(offset)
+        self.check_powered();
+        let val = self.inner.try_load32(offset)?;
+        if matches!(
+            offset,
+            HostUicErrorCodePhyAdapterLayerReg::OFFSET
+                | HostUicErrorCodeDataLinkLayerReg::OFFSET
+                | HostUicErrorCodeNetworkLayerReg::OFFSET
+                | HostUicErrorCodeTransportLayerReg::OFFSET
+                | HostUicErrorCodeDmeReg::OFFSET
+        ) {
+            // ORDERING: Standalone test counter tracking read-to-clear UIC register accesses.
+            self.uic_error_reads.fetch_add(1, Ordering::Relaxed);
+            if val != 0 {
+                self.clear_inner.lock().store32(offset, 0);
+            }
+        }
+        Ok(val)
     }
 
     fn try_load64(&self, offset: usize) -> Result<u64, MmioError> {
@@ -174,12 +256,20 @@ impl Mmio for FakeMmio {
     }
 
     fn try_store32(&mut self, offset: usize, value: u32) -> Result<(), MmioError> {
+        self.check_powered();
+        let _guard = SHARED_REGISTER_LOCK.lock();
         let value = match offset {
             HostControllerEnableReg::OFFSET if self.hce_stuck && (value & 1) == 0 => {
                 return Ok(());
             }
             InterruptStatusReg::OFFSET => self.inner.try_load32(offset)? & !value,
             UtrListDoorBellReg::OFFSET => self.inner.try_load32(offset)? | value,
+            UtrListClearReg::OFFSET => {
+                // ORDERING: Standalone test counter tracking `UTRLCLR` writes.
+                self.utrlclr_writes.fetch_add(1, Ordering::Relaxed);
+                let doorbell = self.inner.try_load32(UtrListDoorBellReg::OFFSET)?;
+                return self.inner.try_store32(UtrListDoorBellReg::OFFSET, doorbell & value);
+            }
             _ => value,
         };
         self.inner.try_store32(offset, value)
@@ -199,25 +289,28 @@ impl Mmio for FakeMmio {
 }
 
 /// Upper bound on any fake-hardware wait, so a driver regression fails instead of hanging.
-pub const FAKE_HW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+pub const FAKE_HW_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Polls `condition` every 100 us until it holds or [`FAKE_HW_TIMEOUT`] passes.
 pub fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
     while !condition() {
         if start.elapsed() > FAKE_HW_TIMEOUT {
             return false;
         }
-        std::thread::sleep(std::time::Duration::from_micros(100));
+        thread::sleep(Duration::from_micros(100));
     }
     true
 }
 
 /// Controller-side view of a transfer request processor: registers, UTRL and UCDs.
 pub struct FakeUtp {
-    /// Raw register mapping (no W1C/W1S emulation).
+    /// Raw register mapping (no W1C/W1S emulation). Read-modify-write updates of `IS` or
+    /// `UTRLDBR` must hold `SHARED_REGISTER_LOCK`.
     pub regs: MmioRegion<VmoMemory>,
+    /// Mapped UTP Transfer Request List (`UTRL`) DMA buffer.
     utrl: MmioRegion<VmoMemory>,
+    /// Mapped per-slot UTP Command Descriptor (`UCD`) DMA buffers.
     ucds: Vec<MmioRegion<VmoMemory>>,
     /// Delivers a transfer completion interrupt to the processor, as the IRQ thread would.
     on_interrupt: Box<dyn Fn() + Send + Sync>,
@@ -257,12 +350,12 @@ impl FakeUtp {
                 processor.service_interrupt();
             }
         });
-        let list = processor.request_list.lock();
+        let list = processor.request_list().lock();
         Self {
             regs: map_vmo(mmio_vmo, mmio_size),
-            utrl: map_vmo(list.io_buffer.vmo(), list.io_buffer.size()),
+            utrl: map_vmo(list.io_buffer().vmo(), list.io_buffer().size()),
             ucds: list
-                .request_slots
+                .request_slots()
                 .iter()
                 .map(|slot| {
                     map_vmo(slot.command_descriptor_io.vmo(), slot.command_descriptor_io.size())
@@ -284,19 +377,19 @@ impl FakeUtp {
 
     /// Clears `slot`'s doorbell bit, as the controller does on completion. Raises no interrupt.
     pub fn clear_doorbell(&mut self, slot: u8) {
+        let _guard = SHARED_REGISTER_LOCK.lock();
         let doorbell = self.doorbell() & !(1 << slot);
         self.regs.store32(UtrListDoorBellReg::OFFSET, doorbell);
     }
 
     /// Returns `slot`'s UTRD.
     pub fn utrd(&self, slot: u8) -> TransferRequestDescriptor {
-        load_struct(&self.utrl, slot as usize * std::mem::size_of::<TransferRequestDescriptor>())
+        load_struct(&self.utrl, slot as usize * size_of::<TransferRequestDescriptor>())
     }
 
     /// Writes `ocs` into `slot`'s UTRD. Raises no interrupt.
     pub fn set_ocs(&mut self, slot: u8, ocs: u8) {
-        let offset = slot as usize * std::mem::size_of::<TransferRequestDescriptor>()
-            + TransferRequestDescriptor::OCS_OFFSET;
+        let offset = slot as usize * size_of::<TransferRequestDescriptor>() + OCS_OFFSET;
         let dword2 = self.utrl.load32(offset);
         self.utrl.store32(offset, (dword2 & !UTRD_OCS_MASK) | ocs as u32);
     }
@@ -315,15 +408,18 @@ impl FakeUtp {
 
     /// Reads the request UPIU of `slot` as a `T`.
     pub fn request<T: FromBytes>(&self, slot: u8) -> T {
-        T::read_from_bytes(&self.read_ucd(slot, 0, std::mem::size_of::<T>())).unwrap()
+        T::read_from_bytes(&self.read_ucd(slot, 0, size_of::<T>())).unwrap()
     }
 
     /// Sets `IS.UTRCS` and delivers the interrupt to the processor, as the controller and IRQ
     /// thread do once a doorbell bit has been cleared.
     pub fn raise_completion_interrupt(&mut self) {
-        let mut is = InterruptStatusReg::read(&self.regs);
-        is.set_utp_transfer_request_completion_status(true);
-        is.write(&mut self.regs);
+        {
+            let _guard = SHARED_REGISTER_LOCK.lock();
+            let mut is = InterruptStatusReg::read(&self.regs);
+            is.set_utp_transfer_request_completion_status(true);
+            is.write(&mut self.regs);
+        }
         (self.on_interrupt)();
     }
 
@@ -363,6 +459,7 @@ pub fn complete_uic_command(
     arg2.write(regs);
     UicCommandArgument3Reg::from_raw(value).write(regs);
     UicCommandReg::from_raw(0).write(regs);
+    let _guard = SHARED_REGISTER_LOCK.lock();
     let mut is = InterruptStatusReg::read(regs);
     is.set_uic_command_completion_status(true);
     extra_status(&mut is);

@@ -6,6 +6,7 @@
 #define SRC_LIB_ELFLDLTL_INCLUDE_LIB_ELFLDLTL_LOAD_H_
 
 #include <cassert>
+#include <concepts>
 #include <functional>
 #include <optional>
 #include <type_traits>
@@ -33,8 +34,10 @@ concept FileApiForLoad = ElfApi<Elf> &&  //
 //
 // The first template parameter gives the elfldltl::Elf<...> layout to use,
 // i.e. usually elfldltl::Elf<> for native loading.  The rest are deduced.  If
-// the optional final argument is passed, it can be std::nullopt to accept any
+// the optional machine argument is passed, it can be std::nullopt to accept any
 // machine or another ElfMachine value to match rather than the native machine.
+// If check_loadable is false, Ehdr::Valid is checked rather than Ehdr::Loadable
+// (accepting non-ET_DYN files such as ET_REL or ET_CORE).
 //
 // This returns the return value of calling file.ReadFromFile<Ehdr>,
 // i.e. some type std::optional<E> where `const Ehdr& ehdr = <E object>;`
@@ -42,7 +45,8 @@ concept FileApiForLoad = ElfApi<Elf> &&  //
 template <ElfApi Elf, class Diagnostics>
 constexpr auto LoadEhdrFromFile(Diagnostics& diagnostics,
                                 CanReadFromFile<typename Elf::Ehdr, decltype(0)> auto& file,
-                                std::optional<ElfMachine> machine = ElfMachine::kNative)
+                                std::optional<ElfMachine> machine = ElfMachine::kNative,
+                                bool check_loadable = true)
     -> decltype(file.template ReadFromFile<typename Elf::Ehdr>(0)) {
   using namespace std::literals::string_view_literals;
 
@@ -50,7 +54,8 @@ constexpr auto LoadEhdrFromFile(Diagnostics& diagnostics,
 
   if (auto read_ehdr = file.template ReadFromFile<Ehdr>(0)) [[likely]] {
     const Ehdr& ehdr = *read_ehdr;
-    if (ehdr.Loadable(diagnostics, machine)) [[likely]] {
+    if (check_loadable ? ehdr.Loadable(diagnostics, machine) : ehdr.Valid(diagnostics, machine))
+        [[likely]] {
       return read_ehdr;
     }
   } else {
@@ -108,7 +113,15 @@ constexpr auto LoadHeadersFromFile(Diagnostics& diagnostics, File& file,
 // to permit callbacks with either data format (byte order) as well as either
 // class.  The final optional argument gives the machine architecture to match,
 // and likewise can be std::nullopt to accept any machine.
-template <class Diagnostics, class File, class MetaAllocator, typename Callback>
+//
+// The explicit template parameters allow reuse for other header tables such as
+// Shdr (see shdr.h); callers loading Phdrs leave them at their defaults.
+template <template <class> typename HdrFromElf = PhdrFromElf,
+          auto ReadHeaderArray = ReadPhdrsFromFile,
+          auto Validate = [](const auto& ehdr, auto& diag, auto machine) -> bool {
+            return ehdr.Loadable(diag, machine);
+          },
+          class Diagnostics, class File, class MetaAllocator, typename Callback>
 constexpr bool WithLoadHeadersFromFile(Diagnostics& diagnostics, File& file,
                                        MetaAllocator&& meta_allocator, Callback&& callback,
                                        std::optional<ElfData> expected_data = ElfData::kNative,
@@ -119,22 +132,21 @@ constexpr bool WithLoadHeadersFromFile(Diagnostics& diagnostics, File& file,
   using Ehdr64Msb = Elf64<ElfData::k2Msb>::Ehdr;
 
   // Below we'll call this with Elf<...>::Ehdr depending on the format.
-  auto load_headers = [&](const auto& ehdr) -> bool {
-    using Ehdr = std::decay_t<decltype(ehdr)>;
+  auto load_headers = [&]<class Ehdr>(const Ehdr& ehdr) -> bool {
     using Elf = Ehdr::ElfLayout;
-    using Phdr = Elf::Phdr;
-    if (!ehdr.Loadable(diagnostics, machine)) [[unlikely]] {
+    using Hdr = HdrFromElf<Elf>;
+    if (!Validate(ehdr, diagnostics, machine)) [[unlikely]] {
       return false;
     }
-    auto phdr_allocator = [&meta_allocator](size_t size) {
-      return meta_allocator.template operator()<Phdr>(size);
+    auto hdrs_allocator = [&meta_allocator](size_t size) {
+      return meta_allocator.template operator()<Hdr>(size);
     };
-    auto read_phdrs = ReadPhdrsFromFile(diagnostics, file, phdr_allocator, ehdr);
-    if (!read_phdrs) [[unlikely]] {
+    auto read_hdrs = ReadHeaderArray(diagnostics, file, hdrs_allocator, ehdr);
+    if (!read_hdrs) [[unlikely]] {
       return false;
     }
-    std::span<const Phdr> phdrs = *read_phdrs;
-    return std::invoke(std::forward<Callback>(callback), ehdr, phdrs);
+    std::span<const Hdr> hdrs = *read_hdrs;
+    return std::invoke(std::forward<Callback>(callback), ehdr, hdrs);
   };
 
   // Below we'll call this with Elf64<...>::Ehdr depending on the byte order.
@@ -555,7 +567,7 @@ class LoadInfo {
   template <class OtherVariant, class OtherSegment, size_t I>
   struct SegmentTypeFromOtherHelper {
     using TryOther = std::variant_alternative_t<I, OtherVariant>;
-    static constexpr bool kMatch = std::is_same_v<TryOther, OtherSegment>;
+    static constexpr bool kMatch = std::same_as<TryOther, OtherSegment>;
 
     using This = std::variant_alternative_t<I, Segment>;
     using Next = SegmentTypeFromOtherHelper<OtherVariant, OtherSegment, I + 1>;
@@ -632,11 +644,11 @@ class LoadInfo {
     auto memsz = segment.memsz() - relro_size;
     auto filesz = segment.filesz() - relro_size;
 
-    if (std::is_same_v<SegmentType, DataSegment>) {
+    if (std::same_as<SegmentType, DataSegment>) {
       return {std::move(relro_segment), DataSegment{offset, vaddr, memsz, filesz}};
     }
 
-    assert((std::is_same_v<SegmentType, DataWithZeroFillSegment>));
+    assert((std::same_as<SegmentType, DataWithZeroFillSegment>));
     if (segment.filesz() - relro_size == 0) {
       return {std::move(relro_segment), ZeroFillSegment{vaddr, memsz}};
     }
@@ -716,13 +728,13 @@ class LoadInfo {
 // writable() method ever returns true.
 template <class SegmentType>
 inline constexpr bool kSegmentWritable =
-    !std::is_same_v<decltype(std::declval<SegmentType>().writable()), std::false_type>;
+    !std::same_as<decltype(std::declval<SegmentType>().writable()), std::false_type>;
 
 // Given some `LoadInfo::...Segment` type, this is true if and only if its
 // filesz() can ever return nonzero.
 template <class SegmentType>
 inline constexpr bool kSegmentHasFilesz =
-    std::is_same_v<decltype(std::declval<SegmentType>().filesz()), typename SegmentType::size_type>;
+    std::same_as<decltype(std::declval<SegmentType>().filesz()), typename SegmentType::size_type>;
 
 }  // namespace elfldltl
 

@@ -4,52 +4,18 @@
 
 #include "src/performance/trace2json/convert.h"
 
+#include <filesystem>
+
 #include <gtest/gtest.h>
 #include <rapidjson/document.h>
 #include <rapidjson/istreamwrapper.h>
 #include <src/lib/files/file.h>
 
-#if defined(__APPLE__)
-#include <mach-o/dyld.h>
-#endif
-
-#include <filesystem>
-
 namespace {
 
 using ::testing::Test;
 
-std::string GetSelfPath() {
-  std::string result;
-#if defined(__APPLE__)
-  // Executable path can have relative references ("..") depending on how the
-  // app was launched.
-  uint32_t length = 0;
-  _NSGetExecutablePath(nullptr, &length);
-  result.resize(length);
-  _NSGetExecutablePath(&result[0], &length);
-  result.resize(length - 1);  // Length included terminator.
-#elif defined(__linux__)
-  // The realpath() call below will resolve the symbolic link.
-  result.assign("/proc/self/exe");
-#else
-#error Write this for your platform.
-#endif
-
-  char fullpath[PATH_MAX];
-  return std::string(realpath(result.c_str(), fullpath));
-}
-
-std::string GetTestDataPath() {
-  std::string path = GetSelfPath();
-  size_t last_slash = path.rfind('/');
-  if (last_slash == std::string::npos) {
-    path = "./";
-  } else {
-    path.resize(last_slash + 1);
-  }
-  return path + "test_data/trace2json/";
-}
+std::string GetTestDataPath() { return "test_data/trace2json/"; }
 
 void ConvertAndCompare(const ConvertSettings& settings, const std::string& expected_output_file) {
   ASSERT_TRUE(ConvertTrace(settings));

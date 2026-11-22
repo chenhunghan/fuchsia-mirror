@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":async_patterns_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "bin",
+    srcs = [
+        "dispatcher_bound_test.cc",
+        "receiver_test.cc",
+        "sendable_test.cc",
+        "task_queue_test.cc",
+        "task_scope_test.cc",
+    ],
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    # task_queue_test.cc includes the private header
+    # <sdk/lib/async_patterns/cpp/internal/task_queue.h> relative to the
+    # source root, which GN puts on the include path by default.
+    copts = ["-I."],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop-testing/cpp",
+        "//sdk/lib/async-testing",
+        "//sdk/lib/async_patterns/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "async_patterns_tests",
+    unit_tests = [":bin"],
+)

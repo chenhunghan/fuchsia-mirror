@@ -4,22 +4,28 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-mod arch;
+pub mod arch;
 mod asid_allocator;
 pub mod cache;
+#[cfg(console_enabled)]
+mod coresight;
 pub mod crashlog;
+pub mod dap;
 pub mod debugger;
-mod exceptions;
+pub mod exceptions;
 mod feature;
 mod fpu;
 mod mmu;
 mod mmu_ffi;
 pub mod mp;
+#[cfg(ktest)]
+mod outline_atomics;
 mod periphmap;
 mod registers;
 pub mod restricted;
+mod secondary;
 pub mod smccc;
-pub(crate) mod spinlock;
+mod spinlock;
 #[cfg(console_enabled)]
 mod sysreg;
 mod thread;
@@ -34,14 +40,30 @@ pub const MAX_CACHE_LINE: usize = 64;
 #[repr(align(64))]
 pub struct CpuAlignMarker;
 
+pub use arch::{arm64_allow_pct_in_el0, arm64_get_boot_el};
 pub use cache::clean_dcache_range;
+pub use debugger::{arch_get_instruction_pointer, arch_set_return_instruction_pointer};
+pub use exceptions::{
+    ArchExceptionContext, arch_dispatch_user_policy_exception, arch_install_exception_context,
+    arch_remove_exception_context,
+};
+pub use feature::{MPIDR_EL1_RAW, arm64_print_midr_cpu_name};
 pub use libarch::arm64::{device_memory_barrier, isb, thread_memory_barrier, wfi, r#yield};
 pub(crate) use mmu::arch_address_tagging_features;
+pub use mmu::{arm64_mmu_early_init, arm64_mmu_translate};
 /// Translates a CPU number back to the MPIDR of that CPU.
 pub use mp::arch_cpu_num_to_mpidr as cpu_num_to_mpidr;
-pub use mp::arch_quirks_needs_arm_erratum_858921_mitigation;
+pub use mp::{
+    arch_get_restricted_flag, arch_max_num_cpus, arch_mp_cpu_unplug, arch_mp_prep_cpu_unplug,
+    arch_mp_send_ipi, arch_quirks_needs_arm_erratum_858921_mitigation, arch_register_mpid,
+    arch_set_num_cpus, arm64_mpid,
+};
 pub use periphmap::{periph_paddr_to_vaddr, periph_vaddr_to_paddr};
 pub(crate) use registers::{arm64_hw_breakpoint_count, arm64_hw_watchpoint_count};
+pub use secondary::{
+    arm64_create_secondary_stack, arm64_free_secondary_stack, arm64_secondary_resume_start_paddr,
+    arm64_secondary_start_paddr,
+};
 pub use user_copy::{
     arch_copy_from_user, arch_copy_from_user_capture_faults, arch_copy_to_user,
     arch_copy_to_user_capture_faults,
@@ -77,17 +99,61 @@ fn arm64_feature_test(feature: u32) -> bool {
     unsafe { (feature::arm64_isa_features & feature) != 0 }
 }
 
-/// Returns whether FEAT_PAN (Privileged Access Never) is enabled on this system.
+/// Returns whether FEAT_PAN (Privileged Access Never) is supported by the CPU.
+///
+/// Returns `false` if called before the boot CPU's `arm64_feature_init` completes in
+/// `arch_early_init`.
+///
+/// # Safety-usable invariant
+///
+/// If this function returns `true`, `arm64_feature_init` has completed and `FEAT_PAN` is supported
+/// on every online CPU (`arm64_cpu_early_init` enables `PSTATE.PAN` on each CPU before it comes
+/// online).
+#[inline]
+pub fn arm64_mmu_features_pan() -> bool {
+    // SAFETY: `arm64_mmu_features` is statically initialized with `pan: false` and is only ever
+    // written once by value on the boot CPU in `arm64_feature_init` with interrupts disabled and
+    // before any secondary CPU starts, so no write can race with or alias this read.
+    unsafe { feature::arm64_mmu_features.pan }
+}
+
+/// Reads the architectural `PAN` (`S3_0_C4_C2_3`) system register.
 ///
 /// # Safety
 ///
-/// Must only be called after the boot CPU's `arm64_feature_init` has completed in
-/// `arch_early_init`.
+/// The caller must ensure `FEAT_PAN` is implemented on the calling CPU
+/// (`arm64_mmu_features_pan()`) and the CPU is executing at EL1 or higher
+/// (`CurrentEL.EL >= 1`), as reading `S3_0_C4_C2_3` (`PAN`) is UNDEFINED otherwise.
 #[inline]
-pub(crate) unsafe fn arm64_mmu_features_pan() -> bool {
-    // SAFETY: Caller guarantees `arm64_feature_init` on the boot CPU has completed, and
-    // `arm64_mmu_features` is read-only thereafter.
-    unsafe { feature::arm64_mmu_features.pan }
+pub unsafe fn arm64_read_pan() -> u64 {
+    let pan: u64;
+    // SAFETY: The caller guarantees `FEAT_PAN` is implemented and the CPU is at EL1 or higher, so
+    // reading `S3_0_C4_C2_3` (`PAN`) is defined and has no memory or flag side effects.
+    unsafe {
+        core::arch::asm!(
+            "mrs {}, s3_0_c4_c2_3",
+            out(reg) pan,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    pan
+}
+
+/// Returns whether FEAT_VHE (Virtualization Host Extensions) is supported by the CPU.
+///
+/// Returns `false` if called before the boot CPU's `arm64_feature_init` completes in
+/// `arch_early_init`.
+///
+/// # Safety-usable invariant
+///
+/// If this function returns `true`, `arm64_feature_init` has completed and `FEAT_VHE` is supported
+/// by the CPU.
+#[inline]
+pub fn arm64_mmu_features_vhe() -> bool {
+    // SAFETY: `arm64_mmu_features` is statically initialized with `vhe: false` and is only ever
+    // written once by value on the boot CPU in `arm64_feature_init` with interrupts disabled and
+    // before any secondary CPU starts, so no write can race with or alias this read.
+    unsafe { feature::arm64_mmu_features.vhe }
 }
 
 /// Architectural interrupt frame for aarch64 user space entry/exit.
@@ -162,6 +228,10 @@ pub use restricted::{
     redirect_restricted_exception_to_normal, save_restricted_exception_state,
     save_restricted_iframe_state, save_restricted_syscall_state, save_state_pre_restricted_entry,
     validate_state_pre_restricted_entry,
+};
+pub use spinlock::{
+    arch_spin_lock_non_instrumented, arch_spin_lock_trace_instrumented, arch_spin_trylock,
+    arch_spin_unlock,
 };
 pub use thread::{
     arch_context_switch, arch_dump_thread, arch_reset_suspended_general_regs,

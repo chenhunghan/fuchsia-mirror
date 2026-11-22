@@ -1,0 +1,19 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tools used by the platform Bazel package rules."""
+
+load("@rules_python//python:defs.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Runs the ELF and structured config validations of `build_fuchsia_package()`.
+py_binary(
+    name = "validate_package",
+    srcs = ["validate_package.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/bazel/rules/packages:__subpackages__"],
+    deps = ["//build/python/modules/elf"],
+)

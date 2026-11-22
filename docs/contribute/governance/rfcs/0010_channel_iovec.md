@@ -257,7 +257,7 @@ or include them alongside bytes in the existing `zx_channel_iovec_t`. However,
 the benefits are more limited for handles because the handle array tends to be
 small. For simplicity, handles remain in a dedicated array.
 
-### Support for multiple messages in single write
+### Support for multiple messages in single write {:#support-for-multiple-messages-in-single-write}
 
 A previous version of this RFC included a proposal for support for multiple
 messages in a single `zx_channel_write` call.

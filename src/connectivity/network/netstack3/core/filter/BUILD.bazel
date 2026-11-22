@@ -11,6 +11,20 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [":netstack3-filter-test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":netstack3-filter-host-test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
 rustc_check_cfg_build_flags(
     name = "check_cfg_flags",
     cfgs = ["test"],

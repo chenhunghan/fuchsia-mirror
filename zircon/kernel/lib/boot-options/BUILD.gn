@@ -101,7 +101,7 @@ kernel_bindgen_crate("boot-options-bindings") {
   type_allowlist = [ "BootOptions" ]
   type_blocklist = [
     "BootOptions_WordResult",  # Not needed.
-    "stdbind::optional",  # Ready-made bindings swapped in instead
+    "stdbind::optional(_.*)?",  # Ready-made bindings swapped in instead
     "AutoOr",  # Aliased in raw_lines.
   ]
 

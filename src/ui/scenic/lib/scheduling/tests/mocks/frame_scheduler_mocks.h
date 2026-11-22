@@ -26,6 +26,10 @@ class MockFrameScheduler : public FrameScheduler {
                                 bool squashable, bool schedule_asap) override;
 
   // |FrameScheduler|
+  void NotifyExpectedPresent(SessionId session_id, zx::time expected_present_time,
+                             zx::duration frame_interval, bool schedule_asap) override;
+
+  // |FrameScheduler|
   std::vector<scheduling::FuturePresentationInfo> GetFuturePresentationInfos(
       zx::duration requested_prediction_span) override;
 
@@ -36,6 +40,8 @@ class MockFrameScheduler : public FrameScheduler {
   using OnSetRenderContinuouslyCallback = std::function<void(bool)>;
   using OnScheduleUpdateForSessionCallback =
       std::function<void(zx::time, SchedulingIdPair, bool, bool)>;
+  using OnNotifyExpectedPresentCallback =
+      std::function<void(SessionId, zx::time, zx::duration, bool)>;
   using OnGetFuturePresentationInfosCallback =
       std::function<std::vector<scheduling::FuturePresentationInfo>(zx::duration)>;
   using RemoveSessionCallback = std::function<void(SessionId session_id)>;
@@ -48,6 +54,11 @@ class MockFrameScheduler : public FrameScheduler {
   // Testing only. Sets mock method callback.
   void set_schedule_update_for_session_callback(OnScheduleUpdateForSessionCallback callback) {
     schedule_update_for_session_callback_ = std::move(callback);
+  }
+
+  // Testing only. Sets mock method callback.
+  void set_notify_expected_present_callback(OnNotifyExpectedPresentCallback callback) {
+    notify_expected_present_callback_ = std::move(callback);
   }
 
   // Testing only. Sets mock method callback.
@@ -66,6 +77,7 @@ class MockFrameScheduler : public FrameScheduler {
   // Testing only. Mock method callbacks.
   OnSetRenderContinuouslyCallback set_render_continuously_callback_;
   OnScheduleUpdateForSessionCallback schedule_update_for_session_callback_;
+  OnNotifyExpectedPresentCallback notify_expected_present_callback_;
   OnGetFuturePresentationInfosCallback get_future_presentation_infos_callback_;
   RemoveSessionCallback remove_session_callback_;
 

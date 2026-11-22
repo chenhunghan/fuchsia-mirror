@@ -27,6 +27,19 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_bus {
 
+namespace {
+
+// Delay between retry attempts during UsbDevice::Init(). By the time Init() runs, port reset has
+// already completed and the HCI driver has already read the device descriptor during address
+// assignment; post-attach debounce (tATTDB >= 100 ms, USB 2.0 section 7.1.7.3) and post-reset
+// recovery (tRSTRCY = 10 ms, USB 2.0 section 7.1.7.5) belong to the hub/port layer prior to
+// enumeration. This shorter 10 ms pause (on the scale of tRSTRCY) gives slow USB 1.x peripherals
+// and High-Speed hub Transaction Translators a brief recovery window between back-to-back EP0
+// control transfers when an initial request transiently STALLs or returns incomplete data.
+constexpr zx::duration kInitRetryDelay = zx::msec(10);
+
+}  // namespace
+
 class UsbWaiterImpl : public UsbWaiterInterface {
  public:
   zx_status_t Wait(sync_completion_t* completion, zx_duration_t duration) {
@@ -1131,12 +1144,40 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
   parent_req_size_ = hci_.GetRequestSize();
 
   // read device descriptor
+  auto get_descriptor_with_retry = [&](fdescriptor::DescriptorType type, uint8_t index, void* data,
+                                       size_t length, size_t* out_actual) -> zx_status_t {
+    zx_status_t desc_status = ZX_ERR_INTERNAL;
+    for (size_t attempt = 0; attempt < kGetDescriptorMaxAttempts; ++attempt) {
+      *out_actual = 0;
+      desc_status = GetDescriptor(type, index, 0, data, length, out_actual);
+      if (desc_status == ZX_OK && *out_actual == length &&
+          static_cast<uint8_t*>(data)[1] == fidl::ToUnderlying(type)) {
+        return ZX_OK;
+      }
+      // Retry only short reads, replies carrying the wrong descriptor type, and STALLs. Control()
+      // resets EP0 after a STALL, but other transfer errors can leave EP0 halted, and a request
+      // queued to it never completes.
+      if (desc_status == ZX_OK) {
+        desc_status = ZX_ERR_IO;
+      } else if (desc_status != ZX_ERR_IO_REFUSED) {
+        return desc_status;
+      }
+      if (attempt + 1 < kGetDescriptorMaxAttempts) {
+        zxlogf(WARNING,
+               "%s: GetDescriptor(type=0x%02x, index=%u, len=%zu) failed (%s, actual=%zu, "
+               "bDescriptorType=0x%02x) on attempt %zu/%zu; retrying",
+               __func__, fidl::ToUnderlying(type), index, length, zx_status_get_string(desc_status),
+               *out_actual, *out_actual > 1 ? static_cast<uint8_t*>(data)[1] : 0, attempt + 1,
+               kGetDescriptorMaxAttempts);
+        zx::nanosleep(zx::deadline_after(kInitRetryDelay));
+      }
+    }
+    return desc_status;
+  };
+
   size_t actual;
-  auto status = GetDescriptor(fdescriptor::DescriptorType::kDevice, 0, 0, &device_desc_,
-                              sizeof(device_desc_), &actual);
-  if (status == ZX_OK && actual != sizeof(device_desc_)) {
-    status = ZX_ERR_IO;
-  }
+  auto status = get_descriptor_with_retry(fdescriptor::DescriptorType::kDevice, 0, &device_desc_,
+                                          sizeof(device_desc_), &actual);
   if (status != ZX_OK) {
     zxlogf(ERROR, "%s: GetDescriptor(kDevice) failed", __func__);
     return status;
@@ -1155,11 +1196,8 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
     // read configuration descriptor header to determine size
     usb_configuration_descriptor_t config_desc_header;
     size_t actual;
-    status = GetDescriptor(fdescriptor::DescriptorType::kConfiguration, config, 0,
-                           &config_desc_header, sizeof(config_desc_header), &actual);
-    if (status == ZX_OK && actual != sizeof(config_desc_header)) {
-      status = ZX_ERR_IO;
-    }
+    status = get_descriptor_with_retry(fdescriptor::DescriptorType::kConfiguration, config,
+                                       &config_desc_header, sizeof(config_desc_header), &actual);
     if (status != ZX_OK) {
       zxlogf(ERROR, "%s: GetDescriptor(kConfiguration) failed", __func__);
       return status;
@@ -1179,8 +1217,8 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
     config_descs_[config].reset(config_desc, config_desc_size);
 
     // read full configuration descriptor
-    status = GetDescriptor(fdescriptor::DescriptorType::kConfiguration, config, 0, config_desc,
-                           config_desc_size, &actual);
+    status = get_descriptor_with_retry(fdescriptor::DescriptorType::kConfiguration, config,
+                                       config_desc, config_desc_size, &actual);
     if (status != ZX_OK) {
       zxlogf(ERROR, "%s: GetDescriptor(kConfiguration) failed", __func__);
       return status;
@@ -1235,6 +1273,9 @@ zx_status_t UsbDevice::Init(async_dispatcher_t* dispatcher) {
   // set configuration
   auto* config_desc = reinterpret_cast<usb_configuration_descriptor_t*>(
       config_descs_[current_config_index_].data());
+  // Unlike the descriptor reads above, SET_CONFIGURATION is not retried. By this point the device
+  // has answered several EP0 requests, so a STALL here is the device rejecting the configuration
+  // value rather than a transient post-reset failure.
   status = UsbControlOut(kStandardDeviceOut,
                          fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration),
                          config_desc->b_configuration_value, 0, ZX_TIME_INFINITE, nullptr, 0);

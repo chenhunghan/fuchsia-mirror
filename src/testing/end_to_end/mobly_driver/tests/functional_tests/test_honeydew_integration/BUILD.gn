@@ -16,12 +16,6 @@ if (is_host) {
     ]
 
     # Used for infra Swarming bot allocation.
-    environments = [
-      {
-        dimensions = {
-          device_type = "AEMU"
-        }
-      },
-    ]
+    environments = [ aemu_env ]
   }
 }

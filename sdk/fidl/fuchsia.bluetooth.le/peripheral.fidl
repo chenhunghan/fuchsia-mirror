@@ -173,8 +173,7 @@ closed protocol Peripheral {
     /// advertising will be stopped. If the handle is closed before the request
     /// is fulfilled, advertising may be briefly enabled before it is
     /// terminated. AdvertisedPeripheral lifetime is bounded by the lifetime of
-    /// the Peripheral protocol, but this may be changed in the future
-    /// (https://fxbug.dev/42157682).
+    /// the Peripheral protocol.
     ///
     /// + request `parameters` Parameters used while configuring the advertising
     ///   instance.

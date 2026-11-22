@@ -9,9 +9,9 @@ namespace {
 TEST_F(DeviceEnumerationTest, GceArm64Test) {
 #ifdef __aarch64__
   static const char* kNodeMonikers[] = {
-      "qemu-bus",
+      "board",
       "pl031",
-      "pci0.pci-root.bus.00_00_0",
+      "PCI0.pci-root.bus.00_00_0",
   };
 
   VerifyNodes(kNodeMonikers);

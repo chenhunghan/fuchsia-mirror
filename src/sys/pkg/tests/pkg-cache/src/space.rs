@@ -4,9 +4,10 @@
 
 use crate::{
     EMPTY_REPO_PATH, MockPkgAuthority, TestEnv, WriteErrorExt as _, blob_written,
-    compress_and_write_blob, get_missing_blobs,
+    compress_and_write_blob, compress_and_write_blob_with_type, get_missing_blobs,
 };
 use assert_matches::assert_matches;
+use delivery_blob::DeliveryBlobType;
 use diagnostics_assertions::{assert_data_tree, tree_assertion};
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_paver as fpaver;
@@ -20,6 +21,7 @@ use mock_paver::{MockPaverServiceBuilder, PaverEvent, hooks as mphooks};
 use rand::prelude::*;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use test_case::test_case;
 use zx::{self as zx, Status};
 
 #[fuchsia::test]
@@ -136,7 +138,15 @@ async fn gc_unowned_blob() {
     assert!(!env.blobfs.list_blobs().unwrap().contains(&unowned_hash));
 }
 
-async fn gc_frees_space_so_write_can_succeed(blob_implementation: blobfs_ramdisk::Implementation) {
+#[test_case(blobfs_ramdisk::Implementation::CppBlobfs, DeliveryBlobType::Type1; "cpp_blobfs_type1")]
+#[test_case(blobfs_ramdisk::Implementation::CppBlobfs, DeliveryBlobType::Type2; "cpp_blobfs_type2")]
+#[test_case(blobfs_ramdisk::Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+#[test_case(blobfs_ramdisk::Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
+#[fuchsia::test]
+async fn gc_frees_space_so_write_can_succeed(
+    blob_implementation: blobfs_ramdisk::Implementation,
+    delivery_blob_type: DeliveryBlobType,
+) {
     // Create a 7 MB blobfs (14,336 blocks * 512 bytes / block).
     let small_blobfs = blobfs_ramdisk::Ramdisk::builder()
         .block_count(14336)
@@ -152,7 +162,10 @@ async fn gc_frees_space_so_write_can_succeed(blob_implementation: blobfs_ramdisk
     let mut orphan_data = vec![0; 4 * 1024 * 1024];
     StdRng::from_seed([0u8; 32]).fill(&mut orphan_data[..]);
     let orphan_hash = fuchsia_merkle::root_from_slice(&orphan_data);
-    let () = small_blobfs.add_blob_from(orphan_hash, &orphan_data[..]).await.unwrap();
+    let () = small_blobfs
+        .write_blob_with_delivery_type(orphan_hash, &orphan_data, delivery_blob_type)
+        .await
+        .unwrap();
     assert!(small_blobfs.list_blobs().unwrap().contains(&orphan_hash));
 
     // Create a TestEnv using this blobfs.
@@ -189,7 +202,7 @@ async fn gc_frees_space_so_write_can_succeed(blob_implementation: blobfs_ramdisk
     // Writing the meta.far should fail with NO_SPACE.
     let (meta_far, _contents) = pkg.contents();
     let meta_blob = needed_blobs.open_meta_blob().await.unwrap().unwrap().unwrap().into_proxy();
-    let () = compress_and_write_blob(&meta_far.contents, meta_blob)
+    let () = compress_and_write_blob_with_type(delivery_blob_type, &meta_far.contents, meta_blob)
         .await
         .unwrap_err()
         .assert_out_of_space();
@@ -198,7 +211,9 @@ async fn gc_frees_space_so_write_can_succeed(blob_implementation: blobfs_ramdisk
     let () = env.proxies.space_manager.gc().await.unwrap().unwrap();
     assert!(!env.blobfs.list_blobs().unwrap().contains(&orphan_hash));
     let meta_blob = needed_blobs.open_meta_blob().await.unwrap().unwrap().unwrap().into_proxy();
-    let () = compress_and_write_blob(&meta_far.contents, meta_blob).await.unwrap();
+    let () = compress_and_write_blob_with_type(delivery_blob_type, &meta_far.contents, meta_blob)
+        .await
+        .unwrap();
     let () = blob_written(&needed_blobs, meta_far.merkle).await;
     let (_, blob_iterator_server_end) =
         fidl::endpoints::create_proxy::<fpkg::BlobInfoIteratorMarker>();
@@ -206,16 +221,6 @@ async fn gc_frees_space_so_write_can_succeed(blob_implementation: blobfs_ramdisk
 
     let () = get_fut.await.unwrap().unwrap();
     let () = pkg.verify_contents(&dir).await.unwrap();
-}
-
-#[fuchsia::test]
-async fn gc_frees_space_so_write_can_succeed_cpp_blobfs() {
-    let () = gc_frees_space_so_write_can_succeed(blobfs_ramdisk::Implementation::CppBlobfs).await;
-}
-
-#[fuchsia::test]
-async fn gc_frees_space_so_write_can_succeed_fxblob() {
-    let () = gc_frees_space_so_write_can_succeed(blobfs_ramdisk::Implementation::Fxblob).await;
 }
 
 async fn blobs_protected_from_gc_during_get(gc_protection: fpkg::GcProtection) {

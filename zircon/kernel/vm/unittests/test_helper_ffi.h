@@ -12,8 +12,6 @@
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
-#include <vm/attribution.h>
-
 #include "vm/vm_object.h"
 #include "vm/vm_object_paged.h"
 

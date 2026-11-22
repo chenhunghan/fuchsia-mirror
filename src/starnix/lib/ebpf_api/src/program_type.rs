@@ -5,7 +5,7 @@
 use ebpf::{
     CallingContext, CbpfConfig, CbpfLenInstruction, FieldDescriptor, FieldType,
     FunctionSignatureBuilder, HelperDefinition, MapSchema, MapTypeFilter, MemoryId,
-    MemoryParameterSize, PointerOrigin, StructDescriptor, Type, new_memory_id,
+    MemoryParameterSize, PointerOrigin, ProgramArgument, StructDescriptor, Type, new_memory_id,
 };
 use fidl_fuchsia_ebpf as febpf;
 use linux_uapi::{
@@ -1295,23 +1295,29 @@ pub static BPF_SOCK_ADDR_INET6_ARGS: LazyLock<Vec<Type>> =
     LazyLock::new(|| vec![BPF_SOCK_ADDR_INET6_TYPE.clone()]);
 
 #[repr(C)]
-#[derive(Copy, Clone, IntoBytes, Immutable, KnownLayout, FromBytes)]
-struct TraceEntry {
-    type_: u16,
-    flags: u8,
-    preemp_count: u8,
-    pid: u32,
+#[derive(Copy, Clone, Default, IntoBytes, Immutable, KnownLayout, FromBytes)]
+pub struct TraceEntry {
+    pub type_: u16,
+    pub flags: u8,
+    pub preemp_count: u8,
+    pub pid: u32,
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, IntoBytes, Immutable, KnownLayout, FromBytes)]
-struct TraceEvent {
-    trace_entry: TraceEntry,
-    id: u64,
+#[derive(Copy, Clone, Default, IntoBytes, Immutable, KnownLayout, FromBytes)]
+pub struct TraceEvent {
+    pub trace_entry: TraceEntry,
+    pub id: u64,
     // This is defined a being big enough for all expected tracepoint. It is not clear how the
     // verifier can know which tracepoint is targeted when the program is loaded. Instead, this
     // array will be big enough, and will be filled with 0 when running a given program.
-    args: [u64; 16],
+    pub args: [u64; 16],
+}
+
+impl ProgramArgument for &'_ TraceEvent {
+    fn get_type() -> &'static Type {
+        &*BPF_TRACEPOINT_TYPE
+    }
 }
 
 #[repr(C)]
@@ -1324,8 +1330,10 @@ struct RawTraceEvent {
 }
 
 static BPF_TRACEPOINT_ID: LazyLock<MemoryId> = LazyLock::new(new_memory_id);
+pub static BPF_TRACEPOINT_TYPE: LazyLock<Type> =
+    LazyLock::new(|| ptr_to_mem_type::<TraceEvent>(BPF_TRACEPOINT_ID.clone()));
 static BPF_TRACEPOINT_ARGS: LazyLock<Vec<Type>> =
-    LazyLock::new(|| vec![ptr_to_mem_type::<TraceEvent>(BPF_TRACEPOINT_ID.clone())]);
+    LazyLock::new(|| vec![BPF_TRACEPOINT_TYPE.clone()]);
 
 static BPF_RAW_TRACEPOINT_ID: LazyLock<MemoryId> = LazyLock::new(new_memory_id);
 static BPF_RAW_TRACEPOINT_ARGS: LazyLock<Vec<Type>> =

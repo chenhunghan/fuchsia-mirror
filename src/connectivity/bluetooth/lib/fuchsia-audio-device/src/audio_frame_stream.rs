@@ -389,4 +389,52 @@ mod tests {
         let res = exec.run_until_stalled(&mut frame_fut);
         assert!(matches!(res, Poll::Ready(Some(Ok(AudioStreamItem::Data(_))))));
     }
+
+    #[fixture(with_audio_frame_stream)]
+    #[fuchsia::test]
+    fn soft_audio_out_active_channels_reactivated_before_watch(
+        mut exec: fasync::TestExecutor,
+        stream_config: StreamConfigProxy,
+        mut frame_stream: AudioFrameStream,
+    ) {
+        let (ring_buffer, server) = fidl::endpoints::create_proxy::<RingBufferMarker>();
+        let format = Format {
+            pcm_format: Some(fidl_fuchsia_hardware_audio::PcmFormat {
+                number_of_channels: 2u8,
+                sample_format: SampleFormat::PcmSigned,
+                bytes_per_sample: 2u8,
+                valid_bits_per_sample: 16u8,
+                frame_rate: 44100,
+            }),
+            ..Default::default()
+        };
+
+        // Poll the frame stream to start processing StreamConfig requests.
+        exec.run_until_stalled(&mut frame_stream.next()).expect_pending("no frames yet");
+
+        stream_config.create_ring_buffer(&format, server).expect("ring buffer error");
+        assert!(exec.run_until_stalled(&mut ring_buffer.get_vmo(88200, 0)).is_ready());
+
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(42));
+        let _ = exec.wake_expired_timers();
+        assert!(exec.run_until_stalled(&mut ring_buffer.start()).is_ready());
+
+        // Initial watch_active_channels resolves to true (active_channels_notified = Some(true)).
+        let mut active_fut = Box::pin(frame_stream.watch_active_channels());
+        assert_eq!(exec.run_until_stalled(&mut active_fut), Poll::Ready(true));
+
+        // Channels are disabled while streaming; the frame stream receives AudioDisabled without
+        // polling watch_active_channels.
+        assert!(exec.run_until_stalled(&mut ring_buffer.set_active_channels(0)).is_ready());
+        let mut frame_fut = frame_stream.next();
+        let res = exec.run_until_stalled(&mut frame_fut);
+        assert!(matches!(res, Poll::Ready(Some(Ok(AudioStreamItem::AudioDisabled)))));
+
+        // Channels reactivate before watch_active_channels is polled again.
+        assert!(exec.run_until_stalled(&mut ring_buffer.set_active_channels(3)).is_ready());
+
+        // watch_active_channels must resolve to true rather than deadlocking in Poll::Pending.
+        let mut active_fut = Box::pin(frame_stream.watch_active_channels());
+        assert_eq!(exec.run_until_stalled(&mut active_fut), Poll::Ready(true));
+    }
 }

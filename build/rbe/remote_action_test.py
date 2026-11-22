@@ -24,7 +24,8 @@ import output_leak_scanner
 import remote_action
 import remotetool
 import textpb
-from build.rbe import casfs, rbe_profile
+from build.rbe import casfs, rbe_profile, reclient
+from build.scripts import lock_utils
 
 _temp_dir = None
 _orig_cwd = None
@@ -311,7 +312,7 @@ class DownloadFromStubPathTests(unittest.TestCase):
             tdp = Path(td)
             normal_file = tdp / "normal.txt"
             normal_file.write_text("not a stub\n")
-            with mock.patch.object(cl_utils, "BlockingFileLock") as mock_lock:
+            with mock.patch.object(lock_utils, "BlockingFileLock") as mock_lock:
                 subprocess_result = remote_action.download_from_stub_path(
                     normal_file,
                     downloader=_FAKE_DOWNLOADER,
@@ -863,33 +864,6 @@ class TransformFileByLines(unittest.TestCase):
             self.assertEqual(s1, s2)
 
 
-class ReclientCanonicalWorkingDirTests(unittest.TestCase):
-    def test_empty(self) -> None:
-        self.assertEqual(
-            remote_action.reclient_canonical_working_dir(Path("")), Path("")
-        )
-
-    def test_one_level(self) -> None:
-        self.assertEqual(
-            remote_action.reclient_canonical_working_dir(Path("build-here")),
-            Path("set_by_reclient"),
-        )
-
-    def test_two_levels(self) -> None:
-        self.assertEqual(
-            remote_action.reclient_canonical_working_dir(Path("build/there")),
-            Path("set_by_reclient/a"),
-        )
-
-    def test_three_levels(self) -> None:
-        self.assertEqual(
-            remote_action.reclient_canonical_working_dir(
-                Path("build/inside/there")
-            ),
-            Path("set_by_reclient/a/a"),
-        )
-
-
 class RewriteDepfileTests(unittest.TestCase):
     def test_depfile_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1071,7 +1045,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         main_args, other = p.parse_known_args([f"--cfg={cfg}", "--", "echo"])
         self.assertEqual(main_args.cfg, cfg)
         self.assertEqual(other, [])
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         self.assertEqual(action.config, cfg)
         self.assertEqual(action.local_only_command, ["echo"])
         self.assertEqual(action.options, ["--cfg", str(cfg)])
@@ -1093,6 +1067,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
             self.assertEqual(main_args.platform, platform_value)
             action = remote_action.remote_action_from_args(
                 main_args=main_args,
+                env={},
                 remote_options=remote_options,
             )
             self.assertEqual(action.config, cfg)
@@ -1109,20 +1084,16 @@ class RemoteActionMainParserTests(unittest.TestCase):
                     ]
                 ),
             ) as mock_read_cfg:
-                with mock.patch.object(
-                    remote_action, "_rewrapper_platform_env", return_value=None
-                ) as mock_env:
-                    self.assertEqual(
-                        action.options,
-                        [
-                            "--cfg",
-                            str(cfg),
-                            "--platform=alice=bob,baz=quux,foo=zoo",
-                        ],
-                    )
+                self.assertEqual(
+                    action.options,
+                    [
+                        "--cfg",
+                        str(cfg),
+                        "--platform=alice=bob,baz=quux,foo=zoo",
+                    ],
+                )
 
             mock_read_cfg.assert_called_once_with()
-            mock_env.assert_called_once_with()
 
     def test_platform_merge_env_no_flag(self) -> None:
         p = self._make_main_parser()
@@ -1135,6 +1106,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         self.assertEqual(main_args.cfg, cfg)
         action = remote_action.remote_action_from_args(
             main_args=main_args,
+            env={"RBE_platform": platform_env},
             remote_options=remote_options,
         )
         self.assertEqual(action.config, cfg)
@@ -1150,30 +1122,24 @@ class RemoteActionMainParserTests(unittest.TestCase):
                 ]
             ),
         ) as mock_read_cfg:
-            with mock.patch.object(
-                remote_action,
-                "_rewrapper_platform_env",
-                return_value=platform_env,
-            ) as mock_env:
-                self.assertEqual(
-                    action.options,
-                    [
-                        "--cfg",
-                        str(cfg),
-                        # no need to rewrite --platform flag
-                    ],
-                )
-                self.assertEqual(
-                    action.merged_platform,
-                    # did not use cfg's platform values
-                    {
-                        "alice": "joe",
-                        "foo": "notfoo",
-                    },
-                )
+            self.assertEqual(
+                action.options,
+                [
+                    "--cfg",
+                    str(cfg),
+                    # no need to rewrite --platform flag
+                ],
+            )
+            self.assertEqual(
+                action.merged_platform,
+                # did not use cfg's platform values
+                {
+                    "alice": "joe",
+                    "foo": "notfoo",
+                },
+            )
 
         mock_read_cfg.assert_not_called()  # used env, not cfg
-        mock_env.assert_called_once_with()
 
     def test_platform_merge_override_with_env(self) -> None:
         p = self._make_main_parser()
@@ -1192,6 +1158,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
             self.assertEqual(main_args.platform, platform_value)
             action = remote_action.remote_action_from_args(
                 main_args=main_args,
+                env={"RBE_platform": "foo=env_foo,baz=env_baz"},
                 remote_options=remote_options,
             )
             self.assertEqual(action.config, cfg)
@@ -1208,22 +1175,16 @@ class RemoteActionMainParserTests(unittest.TestCase):
                     ]
                 ),
             ) as mock_read_cfg:
-                with mock.patch.object(
-                    remote_action,
-                    "_rewrapper_platform_env",
-                    return_value="foo=env_foo,baz=env_baz",
-                ) as mock_env:
-                    self.assertEqual(
-                        action.options,
-                        [
-                            "--cfg",
-                            str(cfg),
-                            "--platform=alice=bob,baz=env_baz,foo=zoo",
-                        ],
-                    )
+                self.assertEqual(
+                    action.options,
+                    [
+                        "--cfg",
+                        str(cfg),
+                        "--platform=alice=bob,baz=env_baz,foo=zoo",
+                    ],
+                )
 
             mock_read_cfg.assert_not_called()  # because env was used
-            mock_env.assert_called_once_with()
 
     def test_bindir(self) -> None:
         p = self._make_main_parser()
@@ -1232,14 +1193,14 @@ class RemoteActionMainParserTests(unittest.TestCase):
             ["--bindir", str(bindir), "--", "echo"]
         )
         self.assertEqual(main_args.bindir, bindir)
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         self.assertEqual(action.local_only_command, ["echo"])
 
     def test_local_command_with_env(self) -> None:
         local_command = ["FOO=BAR", "echo"]
         p = self._make_main_parser()
         main_args, other = p.parse_known_args(["--"] + local_command)
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         self.assertEqual(
             action.local_only_command, [cl_utils._ENV] + local_command
         )
@@ -1256,19 +1217,18 @@ class RemoteActionMainParserTests(unittest.TestCase):
         p = self._make_main_parser()
         main_args, other = p.parse_known_args(["--dry-run", "--", "echo"])
         self.assertTrue(main_args.dry_run)
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         with mock.patch.object(remote_action.RemoteAction, "run") as mock_run:
             exit_code = action.run_with_main_args(main_args)
         self.assertEqual(exit_code, 0)
         mock_run.assert_not_called()
 
-    @mock.patch.object(fuchsia, "REPROXY_WRAP", "/path/to/reproxy-wrap.sh")
     def test_auto_reproxy(self) -> None:
         # --auto-reproxy is now obsolete, and will be removed in the future
         p = self._make_main_parser()
         main_args, other = p.parse_known_args(["--auto-reproxy", "--", "echo"])
         self.assertTrue(main_args.auto_reproxy)
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         self.assertEqual(action.local_only_command, ["echo"])
         rewrapper_prefix, _, remote_command = cl_utils.partition_sequence(
             action.launch_command, "--"
@@ -1280,7 +1240,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         p = self._make_main_parser()
         main_args, other = p.parse_known_args(["--save-temps", "--", "echo"])
         self.assertTrue(main_args.save_temps)
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         self.assertEqual(action.local_only_command, ["echo"])
         self.assertTrue(action.save_temps)
 
@@ -1297,7 +1257,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
             ["--diagnose-nonzero", "--", "echo"]
         )
         self.assertTrue(main_args.diagnose_nonzero)
-        action = remote_action.remote_action_from_args(main_args)
+        action = remote_action.remote_action_from_args(main_args, env={})
         self.assertTrue(action.diagnose_nonzero)
 
     def test_input_list_paths(self) -> None:
@@ -1326,6 +1286,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
             )
             action = remote_action.remote_action_from_args(
                 main_args,
+                env={},
                 exec_root=exec_root,
                 working_dir=working_dir,
             )
@@ -1350,6 +1311,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             inputs=[input],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1391,6 +1353,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         main_args, other = p.parse_known_args(["--log", "--"] + command)
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1436,6 +1399,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1486,6 +1450,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         self.assertEqual(main_args.fsatrace_path, Path(""))
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1530,6 +1495,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1577,6 +1543,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1641,6 +1608,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1672,6 +1640,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1687,6 +1656,7 @@ class RemoteActionMainParserTests(unittest.TestCase):
         action = remote_action.RemoteAction(
             rewrapper=Path("/test-build/rewrapper"),
             command=["sleep", "1h"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             options=["--canonicalize_working_dir=true"],
             exec_root=exec_root,
@@ -1722,6 +1692,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         action = remote_action.RemoteAction(
             rewrapper=Path("/test-build/rewrapper"),
             command=["sleep", "1h"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             options=["--canonicalize_working_dir=true"],
             exec_root=exec_root,
@@ -1757,6 +1728,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         action = remote_action.RemoteAction(
             rewrapper=Path("/test-build/rewrapper"),
             command=["sleep", "1h"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             options=["--canonicalize_working_dir=true"],
             exec_root=exec_root,
@@ -1791,6 +1763,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         action = remote_action.RemoteAction(
             rewrapper=Path("/test-build/rewrapper"),
             command=["sleep", "1h"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             options=["--canonicalize_working_dir=true"],
             exec_root=exec_root,
@@ -1832,6 +1805,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1886,6 +1860,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -1945,6 +1920,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2009,6 +1985,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             inputs=[input],
             output_files=[output],
             exec_root=exec_root,
@@ -2103,6 +2080,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2178,6 +2156,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2232,6 +2211,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             output_files=[output],
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2284,6 +2264,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2319,6 +2300,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2351,6 +2333,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2379,6 +2362,7 @@ w|{remote_root}/set_by_reclient/a/a/obj/input.o
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -2552,6 +2536,7 @@ class RemoteActionConstructionTests(unittest.TestCase):
         return remote_action.RemoteAction(
             rewrapper=rewrapper or self._rewrapper,
             command=command,  # type: ignore[arg-type]
+            env=kwargs.pop("env", {}),
             rbe_profile=rbe_profile or _FAKE_PROFILE,
             exec_root=exec_root or self._PROJECT_ROOT,
             working_dir=working_dir or self._WORKING_DIR,
@@ -2593,6 +2578,7 @@ class RemoteActionConstructionTests(unittest.TestCase):
                 action = remote_action.RemoteAction(
                     rewrapper=self._rewrapper,
                     command=command,
+                    env={},
                     rbe_profile=_FAKE_PROFILE,
                 )
                 self.assertEqual(action.exec_root, fake_root)
@@ -2608,6 +2594,7 @@ class RemoteActionConstructionTests(unittest.TestCase):
             action = remote_action.RemoteAction(
                 rewrapper=self._rewrapper,
                 command=command,
+                env={},
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=fake_root,
             )
@@ -2623,6 +2610,7 @@ class RemoteActionConstructionTests(unittest.TestCase):
         action = remote_action.RemoteAction(
             rewrapper=self._rewrapper,
             command=command,
+            env={},
             rbe_profile=_FAKE_PROFILE,
             exec_root=fake_root,
             working_dir=fake_cwd,
@@ -2647,6 +2635,7 @@ class RemoteActionConstructionTests(unittest.TestCase):
             rewrapper=self._rewrapper,
             options=["--canonicalize_working_dir=true"],
             command=command,
+            env={},
             rbe_profile=_FAKE_PROFILE,
             exec_root=fake_root,
             working_dir=fake_cwd,
@@ -2822,6 +2811,270 @@ class RemoteActionConstructionTests(unittest.TestCase):
             ),
             "jen/project/include/foo.h",
         )
+        self.assertEqual(
+            action._relativize_remote_deps(
+                str(action.remote_exec_root / "project" / "include" / "foo.h")
+            ),
+            "../../project/include/foo.h",
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                action._relativize_remote_deps("/usr/include/stdio.h"),
+                "/usr/include/stdio.h",
+            )
+
+    def test_relativize_reclient_canonical_paths(self) -> None:
+        exec_root = Path("/exec/root")
+        working_dir = exec_root / "out" / "default"
+        action = self._make_remote_action(
+            command=["cat"],
+            options=["--canonicalize_working_dir=true"],
+            exec_root=exec_root,
+            working_dir=working_dir,
+        )
+        # Dynamic sandbox prefix before set_by_reclient.
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "/worker/sandbox/123/set_by_reclient/a/gen/foo.h"
+            ),
+            "gen/foo.h",
+        )
+        self.assertEqual(
+            action._relativize_remote_deps(
+                "/worker/sandbox/123/set_by_reclient/a/gen/foo.h"
+            ),
+            "gen/foo.h",
+        )
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "/worker/sandbox/set_by_reclient/a/../../tools/fidl/askama.toml"
+            ),
+            "../../tools/fidl/askama.toml",
+        )
+        # Nested set_by_reclient uses the canonical working dir from the left.
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "/worker/set_by_reclient/nested/set_by_reclient/a/gen/foo.h"
+            ),
+            "gen/foo.h",
+        )
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "/worker/sandbox/123/set_by_reclient/a/obj/set_by_reclient/foo.h"
+            ),
+            "obj/set_by_reclient/foo.h",
+        )
+        # Literal set_by_reclient directory in the workspace falls back to
+        # remote_exec_root relativization.
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                f"{action.remote_exec_root}/src/set_by_reclient/foo.h"
+            ),
+            "../../src/set_by_reclient/foo.h",
+        )
+        # Relative paths anchored at set_by_reclient.
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "set_by_reclient/a/gen/foo.h"
+            ),
+            "gen/foo.h",
+        )
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "../../set_by_reclient/a/gen/foo.h"
+            ),
+            "gen/foo.h",
+        )
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "set_by_reclient/a/obj/set_by_reclient/foo.h"
+            ),
+            "obj/set_by_reclient/foo.h",
+        )
+        # Literal subdirectory named set_by_reclient under working_dir is untouched.
+        self.assertEqual(
+            action._relativize_remote_or_local_deps("set_by_reclient/foo.h"),
+            "set_by_reclient/foo.h",
+        )
+        self.assertEqual(
+            action._relativize_remote_or_local_deps(
+                "obj/set_by_reclient/a/foo.h"
+            ),
+            "obj/set_by_reclient/a/foo.h",
+        )
+        # Paths escaping above the remote exec root via '..' are not rewritten,
+        # even when lexically prefixed by remote_exec_root.
+        for escaping in (
+            "/worker/sandbox/set_by_reclient/a/../../../usr/include/stdio.h",
+            f"{action.remote_exec_root}/set_by_reclient/a/../../../usr/include/stdio.h",
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    action._relativize_remote_or_local_deps(escaping),
+                    escaping,
+                )
+                self.assertEqual(
+                    action._relativize_remote_deps(escaping),
+                    escaping,
+                )
+        # Disabled when --canonicalize_working_dir=false.
+        non_canonical_action = self._make_remote_action(
+            command=["cat"],
+            options=["--canonicalize_working_dir=false"],
+            exec_root=exec_root,
+            working_dir=working_dir,
+        )
+        self.assertEqual(
+            non_canonical_action._relativize_remote_or_local_deps(
+                "set_by_reclient/a/gen/foo.h"
+            ),
+            "set_by_reclient/a/gen/foo.h",
+        )
+
+    def test_relativize_remote_deps_root_slash(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            exec_root = Path(td)
+            (exec_root / "tools" / "fidl").mkdir(parents=True)
+            (exec_root / "src").mkdir(parents=True)
+            # Simulate an untracked 'usr' directory in the local checkout root;
+            # container '/usr/...' system paths must still be excluded.
+            (exec_root / "usr" / "include").mkdir(parents=True)
+            working_dir = exec_root / "out" / "default"
+
+            slash_profile = rbe_profile.fake(remote_exec_root="/")
+            action = self._make_remote_action(
+                command=["rustc"],
+                rbe_profile=slash_profile,
+                options=["--canonicalize_working_dir=true"],
+                exec_root=exec_root,
+                working_dir=working_dir,
+            )
+            self.assertEqual(
+                action._relativize_remote_or_local_deps(
+                    "/tools/fidl/fidlgen_rust_next/askama.toml"
+                ),
+                "../../tools/fidl/fidlgen_rust_next/askama.toml",
+            )
+            self.assertEqual(
+                action._relativize_remote_or_local_deps(
+                    str(
+                        Path("/")
+                        / reclient.canonical_working_dir(action.build_subdir)
+                        / "fidling/gen/foo.rs"
+                    )
+                ),
+                "fidling/gen/foo.rs",
+            )
+            # Local paths under exec_root still relativize properly.
+            self.assertEqual(
+                action._relativize_remote_or_local_deps(
+                    str(exec_root / "src" / "lib.rs")
+                ),
+                "../../src/lib.rs",
+            )
+            # System paths and unknown container top-level dirs are not rewritten.
+            for non_workspace_path in (
+                "/usr/include/stdio.h",
+                "/lib/x86_64-linux-gnu/libc.so.6",
+                "/etc/ld.so.cache",
+                "/container_only_dir/data.bin",
+            ):
+                with self.subTest(path=non_workspace_path):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertEqual(
+                            action._relativize_remote_or_local_deps(
+                                non_workspace_path
+                            ),
+                            non_workspace_path,
+                        )
+
+            # When os.listdir(exec_root) fails with OSError, fail closed rather
+            # than rewriting arbitrary container root paths.
+            unreadable_action = self._make_remote_action(
+                command=["rustc"],
+                rbe_profile=slash_profile,
+                options=["--canonicalize_working_dir=true"],
+                exec_root=exec_root,
+                working_dir=working_dir,
+            )
+            with mock.patch.object(
+                os, "listdir", side_effect=OSError("permission denied")
+            ):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        unreadable_action._relativize_remote_or_local_deps(
+                            "/tools/fidl/fidlgen_rust_next/askama.toml"
+                        ),
+                        "/tools/fidl/fidlgen_rust_next/askama.toml",
+                    )
+
+    def test_relativize_remote_deps_wildcard_exec_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            exec_root = Path(td)
+            (exec_root / "tools").mkdir()
+            (exec_root / "src").mkdir()
+            working_dir = exec_root / "out" / "default"
+
+            glob_profile = rbe_profile.fake(remote_exec_root="/tmp/buildbox-*")
+            action = self._make_remote_action(
+                command=["rustc"],
+                rbe_profile=glob_profile,
+                options=["--canonicalize_working_dir=true"],
+                exec_root=exec_root,
+                working_dir=working_dir,
+            )
+            self.assertEqual(
+                action._relativize_remote_or_local_deps(
+                    "/tmp/buildbox-9f8a7b/tools/fidl/askama.toml"
+                ),
+                "../../tools/fidl/askama.toml",
+            )
+            self.assertEqual(
+                action._relativize_remote_or_local_deps(
+                    str(
+                        Path("/tmp/buildbox-9f8a7b")
+                        / reclient.canonical_working_dir(action.build_subdir)
+                        / "obj/foo.o"
+                    )
+                ),
+                "obj/foo.o",
+            )
+            self.assertEqual(
+                action._relativize_remote_deps(
+                    "/tmp/buildbox-9f8a7b/src/bar.rs"
+                ),
+                "../../src/bar.rs",
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    action._relativize_remote_or_local_deps(
+                        "/tmp/other-sandbox/tools/fidl/askama.toml"
+                    ),
+                    "/tmp/other-sandbox/tools/fidl/askama.toml",
+                )
+
+            # Bare leading wildcard ('/*/*') must not match '/usr/lib/src/foo.h'.
+            two_seg_profile = rbe_profile.fake(remote_exec_root="/*/*")
+            two_seg_action = self._make_remote_action(
+                command=["clang++"],
+                rbe_profile=two_seg_profile,
+                options=["--canonicalize_working_dir=true"],
+                exec_root=exec_root,
+                working_dir=working_dir,
+            )
+            self.assertEqual(
+                two_seg_action._relativize_remote_or_local_deps(
+                    "/worker/sandbox-1/src/foo.h"
+                ),
+                "../../src/foo.h",
+            )
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(
+                    two_seg_action._relativize_remote_or_local_deps(
+                        "/usr/lib/src/foo.h"
+                    ),
+                    "/usr/lib/src/foo.h",
+                )
 
     def test_remote_fail_no_retry(self) -> None:
         command = ["echo", "hello"]
@@ -3451,6 +3704,7 @@ remote_metadata: {{
         main_args, other = p.parse_known_args(["--"] + command)
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3495,6 +3749,7 @@ remote_metadata: {{
         main_args, other = p.parse_known_args([download_option, "--"] + command)
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3559,6 +3814,7 @@ remote_metadata: {{
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3624,6 +3880,7 @@ remote_metadata: {{
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3669,6 +3926,7 @@ remote_metadata: {{
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3730,6 +3988,7 @@ remote_metadata: {{
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3790,6 +4049,7 @@ remote_metadata: {{
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -3852,6 +4112,7 @@ remote_metadata: {{
         )
         action = remote_action.remote_action_from_args(
             main_args,
+            env={},
             remote_options=other,
             exec_root=exec_root,
             working_dir=self.working_dir,
@@ -4088,6 +4349,7 @@ class RbeDiagnosticsTests(unittest.TestCase):
         return remote_action.RemoteAction(
             rewrapper=Path("/path/to/rewrapper"),
             command=command,
+            env=kwargs.pop("env", {}),
             rbe_profile=_FAKE_PROFILE,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -4223,6 +4485,7 @@ class RbeDiagnosticsTests(unittest.TestCase):
                         ) as mock_diagnose_line:
                             remote_action.analyze_rbe_logs(
                                 rewrapper_pid=pid,
+                                env={},
                                 action_log=action_log,
                             )
         mock_glob.assert_called_once()
@@ -4369,7 +4632,7 @@ class MainTests(unittest.TestCase):
                 sys, "exit", side_effect=ImmediateExit
             ) as mock_exit:
                 with self.assertRaises(ImmediateExit):
-                    remote_action.main(["--help"])
+                    remote_action.main(["--help"], {})
         mock_exit.assert_called_with(0)
 
     def test_auto_relaunch_with_reproxy_not_needed_for_local(self) -> None:
@@ -4380,11 +4643,11 @@ class MainTests(unittest.TestCase):
             "run_with_main_args",
             return_value=exit_code,
         ):
-            self.assertEqual(remote_action.main(command), exit_code)
+            self.assertEqual(remote_action.main(command, {}), exit_code)
 
     def test_auto_relaunch_with_reproxy_not_needed_for_dry_run(self) -> None:
         command = ["--dry-run", "--", "echo", "hello"]
-        self.assertEqual(remote_action.main(command), 0)
+        self.assertEqual(remote_action.main(command, {}), 0)
 
     def test_auto_relaunch_with_reproxy_not_needed_with_env(self) -> None:
         command = ["--", "echo", "hello"]
@@ -4396,13 +4659,12 @@ class MainTests(unittest.TestCase):
             "RBE_proxy_log_dir": "/fake/proxy/log/dir",
             "RBE_log_dir": "/fake/log/dir",
         }
-        with mock.patch.dict(os.environ, mock_env):
-            with mock.patch.object(
-                remote_action.RemoteAction,
-                "run_with_main_args",
-                return_value=exit_code,
-            ) as mock_run:
-                self.assertEqual(remote_action.main(command), exit_code)
+        with mock.patch.object(
+            remote_action.RemoteAction,
+            "run_with_main_args",
+            return_value=exit_code,
+        ) as mock_run:
+            self.assertEqual(remote_action.main(command, mock_env), exit_code)
         mock_run.assert_called_once()
 
     def test_auto_relaunch_with_reproxy_needed(self) -> None:
@@ -4410,23 +4672,23 @@ class MainTests(unittest.TestCase):
         # Expect to relaunch because the necessary env variables
         # are absent.
         with mock.patch.object(
-            os.environ, "get", return_value=None
-        ) as mock_env:
-            with mock.patch.object(
-                cl_utils, "exec_relaunch", side_effect=ImmediateExit
-            ) as mock_relaunch:
-                with self.assertRaises(ImmediateExit):
-                    remote_action.main(command)
+            cl_utils, "exec_relaunch", side_effect=ImmediateExit
+        ) as mock_relaunch:
+            with self.assertRaises(ImmediateExit):
+                remote_action.main(command, {})
         mock_relaunch.assert_called_once()
         args, kwargs = mock_relaunch.call_args_list[0]
         relaunch_cmd = args[0]
-        self.assertEqual(relaunch_cmd[0], str(fuchsia.REPROXY_WRAP))
-        cmd_slices = cl_utils.split_into_subsequences(relaunch_cmd[1:], "--")
-        reproxy_args, self_script, wrapped_command = cmd_slices
-        self.assertEqual(reproxy_args, ["-v"])
+        self.assertIn("python", relaunch_cmd[0])
+        self.assertEqual(relaunch_cmd[1], "-S")
+        self.assertTrue(relaunch_cmd[2].endswith("reproxy_wrap.py"))
+        cmd_slices = cl_utils.split_into_subsequences(relaunch_cmd, "--")
+        reproxy_prefix, self_script, wrapped_command = cmd_slices
+        self.assertIn("-v", reproxy_prefix)
         self.assertIn("python", self_script[0])
         self.assertTrue(self_script[-1].endswith("remote_action.py"))
         self.assertEqual(wrapped_command, command[1:])
+        self.assertIn("PYTHONPATH", kwargs["env"])
 
     def test_main_args_remote_inputs(self) -> None:
         command = ["--inputs", "src/in.txt", "--", "echo", "hello"]
@@ -4436,7 +4698,7 @@ class MainTests(unittest.TestCase):
             with mock.patch.object(
                 remote_action.RemoteAction, "run_with_main_args", return_value=0
             ) as mock_run:
-                self.assertEqual(remote_action.main(command), 0)
+                self.assertEqual(remote_action.main(command, {}), 0)
         mock_relaunch.assert_called_once()
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args_list[0]
@@ -4458,7 +4720,7 @@ class MainTests(unittest.TestCase):
             with mock.patch.object(
                 remote_action.RemoteAction, "run_with_main_args", return_value=0
             ) as mock_run:
-                self.assertEqual(remote_action.main(command), 0)
+                self.assertEqual(remote_action.main(command, {}), 0)
         mock_relaunch.assert_called_once()
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args_list[0]
@@ -4473,7 +4735,7 @@ class MainTests(unittest.TestCase):
             with mock.patch.object(
                 remote_action.RemoteAction, "run_with_main_args", return_value=0
             ) as mock_run:
-                self.assertEqual(remote_action.main(command), 0)
+                self.assertEqual(remote_action.main(command, {}), 0)
         mock_relaunch.assert_called_once()
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args_list[0]
@@ -4488,7 +4750,7 @@ class MainTests(unittest.TestCase):
             with mock.patch.object(
                 remote_action.RemoteAction, "run_with_main_args", return_value=0
             ) as mock_run:
-                self.assertEqual(remote_action.main(command), 0)
+                self.assertEqual(remote_action.main(command, {}), 0)
         mock_relaunch.assert_called_once()
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args_list[0]
@@ -4503,7 +4765,7 @@ class MainTests(unittest.TestCase):
             with mock.patch.object(
                 remote_action.RemoteAction, "run_with_main_args", return_value=0
             ) as mock_run:
-                self.assertEqual(remote_action.main(command), 0)
+                self.assertEqual(remote_action.main(command, {}), 0)
         mock_relaunch.assert_called_once()
         mock_run.assert_called_once()
         args, kwargs = mock_run.call_args_list[0]
@@ -4558,6 +4820,7 @@ class WriteOutputFileHashXattrsTests(unittest.TestCase):
             action = remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["echo"],
+                env={},
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=tdp,
                 working_dir=tdp,
@@ -4604,6 +4867,7 @@ class WriteOutputFileHashXattrsTests(unittest.TestCase):
             action = remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["echo"],
+                env={},
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=tdp,
                 working_dir=tdp,
@@ -4648,6 +4912,7 @@ class WriteOutputFileHashXattrsTests(unittest.TestCase):
             action = remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["echo"],
+                env={},
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=tdp,
                 working_dir=tdp,
@@ -4683,6 +4948,7 @@ class CasfsVirtualizationTests(unittest.TestCase):
         action = remote_action.RemoteAction(
             rewrapper=Path("/path/to/rewrapper"),
             command=["clang++", "-c", "foo.cc", "-o", "foo.o"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -4707,6 +4973,7 @@ class CasfsVirtualizationTests(unittest.TestCase):
         ):
             action = remote_action.remote_action_from_args(
                 main_args,
+                env={},
                 remote_options=other,
                 exec_root=exec_root,
                 working_dir=working_dir,
@@ -4730,6 +4997,7 @@ class CasfsVirtualizationTests(unittest.TestCase):
             action = remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["rustc", "foo.rs"],
+                env={},
                 download_outputs=True,
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=tdp,
@@ -4822,6 +5090,7 @@ class CasfsVirtualizationTests(unittest.TestCase):
             remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["clang++", "-c", "foo.cc", "-o", "foo.o"],
+                env={},
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=exec_root,
                 working_dir=working_dir,
@@ -4837,6 +5106,7 @@ class CasfsVirtualizationTests(unittest.TestCase):
             action = remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["clang++", "-c", "foo.cc", "-o", "foo.o"],
+                env={},
                 download_regex="-.*\\.o$",
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=exec_root,
@@ -4913,6 +5183,7 @@ remote_metadata: {{
             action = remote_action.RemoteAction(
                 rewrapper=Path("/path/to/rewrapper"),
                 command=["echo"],
+                env={},
                 options=["--preserve_unchanged_output_mtime"],
                 rbe_profile=_FAKE_PROFILE,
                 exec_root=tdp,
@@ -4991,6 +5262,7 @@ remote_metadata: {{
         action = remote_action.RemoteAction(
             rewrapper=Path("/path/to/rewrapper"),
             command=["echo"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -5015,6 +5287,7 @@ remote_metadata: {{
         action = remote_action.RemoteAction(
             rewrapper=Path("/path/to/rewrapper"),
             command=["echo"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             exec_root=exec_root,
             working_dir=working_dir,
@@ -5042,6 +5315,7 @@ remote_metadata: {{
         action = remote_action.RemoteAction(
             rewrapper=Path("/path/to/rewrapper"),
             command=["echo"],
+            env={},
             rbe_profile=_FAKE_PROFILE,
             exec_root=exec_root,
             working_dir=working_dir,

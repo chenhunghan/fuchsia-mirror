@@ -241,7 +241,7 @@ fidl::internal::WireCompleterBase<::test_inheritance::Super::Foo>::WireCompleter
 
 ::fidl::internal::TransactionalRequest<::test_inheritance::Super::Foo>::TransactionalRequest(::fidl::StringView s)
     : body(::test_inheritance::wire::SuperFooRequest{s}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritance::ksuper_foo_Ordinal, ::test_inheritance::ksuper_foo_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritance::ksuper_foo_Ordinal, ::test_inheritance::ksuper_foo_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -267,7 +267,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_inheritance::Super::Foo>::TransactionalResponse(int64_t y)
     : body(::fidl::WireResponse<::test_inheritance::Super::Foo>(y)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritance::ksuper_foo_Ordinal, ::test_inheritance::ksuper_foo_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritance::ksuper_foo_Ordinal, ::test_inheritance::ksuper_foo_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_inheritance::Super::Foo>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_inheritance::ksuper_foo_Ordinal, ::test_inheritance::ksuper_foo_DynamicFlags);
@@ -557,7 +557,7 @@ fidl::internal::WireCompleterBase<::test_inheritance::Sub::Foo>::WireCompleterBa
 
 ::fidl::internal::TransactionalRequest<::test_inheritance::Sub::Foo>::TransactionalRequest(::fidl::StringView s)
     : body(::test_inheritance::wire::SuperFooRequest{s}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritance::ksub_foo_Ordinal, ::test_inheritance::ksub_foo_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritance::ksub_foo_Ordinal, ::test_inheritance::ksub_foo_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -583,7 +583,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_inheritance::Sub::Foo>::TransactionalResponse(int64_t y)
     : body(::fidl::WireResponse<::test_inheritance::Sub::Foo>(y)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritance::ksub_foo_Ordinal, ::test_inheritance::ksub_foo_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritance::ksub_foo_Ordinal, ::test_inheritance::ksub_foo_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_inheritance::Sub::Foo>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_inheritance::ksub_foo_Ordinal, ::test_inheritance::ksub_foo_DynamicFlags);

@@ -21,7 +21,7 @@ contexts:
       scope: storage.type.basic.fidl
     - match: \b(handle|array|map|vector|request)\b
       scope: storage.type.compound.fidl
-    - match: \b(struct|union|xunion|table)\b\s*({{identifier}})\b
+    - match: \b(struct|union|table)\b\s*({{identifier}})\b
       captures:
         1: storage.type.fidl
         2: entity.name.type.fidl

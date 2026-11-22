@@ -16,10 +16,6 @@ load(
     "with_feature_set",
 )
 load(
-    "//common:toolchains/clang/cc_features.bzl",
-    "action_names",
-)
-load(
     "//common:toolchains/clang/feature_flag.bzl",
     "feature_flag",
 )
@@ -30,6 +26,14 @@ load(
 def _get_clang_sanitizer_feature(use_default_build_flags = False):
     """Define the common clang_sanitizer feature implied by all sanitizer features."""
 
+    if use_default_build_flags:
+        # In-tree, optimization (-O1) is derived dynamically from
+        # //build/config:default_optimize, and frame pointers are added strictly
+        # to asan and lsan (matching //build/config/sanitizers/BUILD.gn).
+        return feature(
+            name = "clang_sanitizer",
+        )
+
     # Frame pointers are required for sanitizers to capture stack traces on
     # allocations and errors (matching //build/config:frame_pointers).
     frame_pointer_flags = [
@@ -37,18 +41,11 @@ def _get_clang_sanitizer_feature(use_default_build_flags = False):
         "-momit-leaf-frame-pointer",
     ]
 
-    # NOTE: //build/config:default_optimize (-O1) is not ported to
-    # @fuchsia_build_info//default_build_flags yet, so -O1 must still be
-    # passed here in both modes. //build/config:default_debuginfo (-g3) is
-    # already in @fuchsia_build_info//default_build_flags, so -g3 is only
-    # passed in OOT mode.
-    in_tree_remaining_compile_flags = [
+    compile_flags = frame_pointer_flags + [
         "-O1",
-    ]
-    oot_only_compile_flags = [] if use_default_build_flags else [
         "-g3",
     ]
-    in_tree_remaining_link_flags = [
+    link_flags = frame_pointer_flags + [
         "-O1",
     ]
 
@@ -59,7 +56,7 @@ def _get_clang_sanitizer_feature(use_default_build_flags = False):
                 actions = ALL_CC_COMPILE_ACTION_NAMES,
                 flag_groups = [
                     flag_group(
-                        flags = frame_pointer_flags + in_tree_remaining_compile_flags + oot_only_compile_flags,
+                        flags = compile_flags,
                     ),
                 ],
             ),
@@ -67,7 +64,7 @@ def _get_clang_sanitizer_feature(use_default_build_flags = False):
                 actions = ALL_CC_LINK_ACTION_NAMES,
                 flag_groups = [
                     flag_group(
-                        flags = frame_pointer_flags + in_tree_remaining_link_flags,
+                        flags = link_flags,
                     ),
                 ],
             ),
@@ -157,6 +154,11 @@ def get_sanitizer_features(
     """
     is_fuchsia = target_os == "fuchsia"
 
+    frame_pointer_flags = [
+        "-fno-omit-frame-pointer",
+        "-momit-leaf-frame-pointer",
+    ]
+
     clang_sanitizer_feature = _get_clang_sanitizer_feature(use_default_build_flags)
 
     # Dynamic-linker path configuration per variant:
@@ -200,7 +202,8 @@ def get_sanitizer_features(
             "-asan-use-private-alias=1",
             "-mllvm",
             "-asan-instrument-assume-dereferenceable=1",
-        ],
+        ] + (frame_pointer_flags if use_default_build_flags else []),
+        extra_link_flags = frame_pointer_flags if use_default_build_flags else [],
         extra_flag_sets = asan_flag_sets,
         enabled = "asan" in enabled_features,
     )
@@ -248,20 +251,33 @@ def get_sanitizer_features(
     # respective runtime (e.g. libclang_rt.asan.so) does implement the
     # required support.
     # LINT.IfChange(lsan)
-    lsan_feature = feature(
-        name = "lsan",
-        enabled = "lsan" in enabled_features,
-        flag_sets = [
+    lsan_flag_sets = [
+        flag_set(
+            actions = ALL_CC_LINK_ACTION_NAMES,
+            flag_groups = [flag_group(flags = ["-fsanitize=leak"] + (frame_pointer_flags if use_default_build_flags else []))],
+            with_features = [
+                with_feature_set(
+                    not_features = ["asan", "hwasan"],
+                ),
+            ],
+        ),
+    ]
+    if use_default_build_flags:
+        lsan_flag_sets.append(
             flag_set(
-                actions = ALL_CC_LINK_ACTION_NAMES,
-                flag_groups = [flag_group(flags = ["-fsanitize=leak"])],
+                actions = ALL_CC_COMPILE_ACTION_NAMES,
+                flag_groups = [flag_group(flags = frame_pointer_flags)],
                 with_features = [
                     with_feature_set(
                         not_features = ["asan", "hwasan"],
                     ),
                 ],
             ),
-        ],
+        )
+    lsan_feature = feature(
+        name = "lsan",
+        enabled = "lsan" in enabled_features,
+        flag_sets = lsan_flag_sets,
         implies = ["clang_sanitizer"],
     )
     # LINT.ThenChange(//build/config/sanitizers/BUILD.gn:lsan)
@@ -304,32 +320,13 @@ def get_sanitizer_features(
             ),
         ])
 
-    if is_fuchsia and use_default_build_flags:
-        # In-tree (when use_default_build_flags is True), UBSan's vptr check
-        # requires RTTI (matching _ubsan_remove_common_configs removing
-        # //build/config:no_rtti in //build/config/BUILDCONFIG.gn).
-        #
-        # Out-of-tree (when use_default_build_flags is False), prebuilt C++
-        # libraries in @fuchsia_sdk are compiled with -fno-rtti, so enabling
-        # -frtti in ubsan could cause undefined typeinfo symbol errors at link
-        # time when deriving from polymorphic SDK classes.
-        ubsan_flag_sets.append(
-            flag_set(
-                actions = action_names.all_cpp_compile_actions + ALL_CC_LINK_ACTION_NAMES,
-                flag_groups = [flag_group(flags = ["-frtti"])],
-            ),
-        )
-
     ubsan_feature = feature(
         name = "ubsan",
         enabled = "ubsan" in enabled_features,
         flag_sets = ubsan_flag_sets,
         implies = ["clang_sanitizer"],
     )
-    # LINT.ThenChange(
-    #   //build/config/BUILDCONFIG.gn:ubsan,
-    #   //build/config/sanitizers/BUILD.gn:ubsan,
-    # )
+    # LINT.ThenChange(//build/config/sanitizers/BUILD.gn:ubsan)
 
     # LINT.IfChange(sancov)
     sancov_feature = feature(

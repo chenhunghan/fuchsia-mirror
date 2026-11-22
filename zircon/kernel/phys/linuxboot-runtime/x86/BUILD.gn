@@ -1,0 +1,92 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/toolchain/toolchain_environment.gni")
+import("//zircon/system/ulib/hwreg/hwreg_asm_header.gni")
+
+if (toolchain_environment == "kernel.phys") {
+  # Included via //zircon/kernel/phys/linuxboot-runtime to make a
+  # phys_executable() in the kernel.phys environment a Linux/x86 (bzImage)
+  # compatible kernel image (16-bit, 32-bit, and 64-bit boot protocols).
+  source_set("x86") {
+    visibility = [ "..:*" ]
+
+    sources = [ "linuxboot-header.S" ]
+    configs += [ ":ikconfig.config" ]
+    libs = [ "./linuxboot.ld" ]
+    public_deps = [ "..:headers.x86" ]
+    deps = [
+      ":linuxboot-asm",
+      ":linuxboot-init",
+      "//zircon/kernel/lib/arch",
+    ]
+  }
+
+  config("ikconfig.config") {
+    visibility = [ ":*" ]
+
+    # This input is a gzipped linux in-kernel config.
+    # To update this file, edit ikconfig.txt in this directory and run:
+    #   gzip --no-name --stdout zircon/kernel/phys/linuxboot-runtime/x86/ikconfig.txt \
+    #        > zircon/kernel/phys/linuxboot-runtime/x86/ikconfig.gz
+    inputs = [ "ikconfig.gz" ]
+    ikconfig_file = rebase_path("ikconfig.gz", root_build_dir)
+    defines = [ "IKCONFIG_FILE=\"$ikconfig_file\"" ]
+  }
+
+  # This is a little library instead of a source_set() so it can be included
+  # implicitly by phys_executable() without adding bloat to the tiny tests
+  # that don't use it.
+  static_library("linuxboot-init") {
+    visibility = [ ":*" ]
+
+    complete_static_lib = true
+
+    sources = [
+      "legacy-boot.cc",
+      "linuxboot-init.cc",
+    ]
+    deps = [
+      ":linuxboot.h",
+      "..:headers.x86",
+      "//sdk/lib/zbi-format",
+      "//src/lib/zbitl",
+      "//zircon/kernel/lib/acpi_lite",
+      "//zircon/kernel/lib/arch",
+      "//zircon/kernel/lib/ktl",
+      "//zircon/kernel/lib/libc",
+      "//zircon/kernel/phys/address-space",
+      "//zircon/kernel/phys/allocation",
+      "//zircon/kernel/phys/lib/boot-shim",
+      "//zircon/kernel/phys/lib/memalloc",
+      "//zircon/kernel/phys/memory",
+      "//zircon/kernel/phys/output",
+      "//zircon/kernel/phys/runtime",
+      "//zircon/system/ulib/fbl",
+      "//zircon/system/ulib/hwreg",
+      "//zircon/system/ulib/pretty",
+      "//zircon/system/ulib/uart",
+      "//zircon/system/ulib/zircon-internal",
+      "//zircon/system/ulib/zx",
+    ]
+  }
+}
+
+source_set("linuxboot.h") {
+  visibility = [ ":*" ]
+  public = [ "linuxboot.h" ]
+  public_deps = [
+    # linuxboot.h has #include <lib/zircon-internal/e820.h>
+    "//zircon/system/ulib/zircon-internal:headers",
+  ]
+}
+
+hwreg_asm_header("linuxboot-asm") {
+  visibility = [ ":*" ]
+  output_name = "linuxboot-asm.h"
+  sources = [ "linuxboot-asm-gen.cc" ]
+  deps = [ ":linuxboot.h" ]
+}

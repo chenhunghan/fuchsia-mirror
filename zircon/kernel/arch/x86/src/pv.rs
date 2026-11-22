@@ -10,7 +10,7 @@
 use super::feature::{
     X86_FEATURE_KVM_PV_CLOCK_STABLE, X86VendorList, x86_feature_test, x86_get_vendor,
 };
-use super::platform_access::{MsrAccess, RealMsrAccess};
+use super::platform_access::MsrAccess;
 use super::registers::{X86_MSR_KVM_PV_EOI_EN, X86_MSR_KVM_PV_EOI_EN_ENABLE};
 use crate::arch_rs as arch;
 use crate::vm::{page_state, physmap, pmm, vm};
@@ -21,14 +21,20 @@ use lazy_init::LazyInit;
 use zx_status::Status;
 use zx_types::zx_status_t;
 
-const KVM_SYSTEM_TIME_MSR_OLD: u32 = 0x12;
-const KVM_SYSTEM_TIME_MSR: u32 = 0x4b56_4d01;
+/// Legacy KVM system time MSR.
+pub const KVM_SYSTEM_TIME_MSR_OLD: u32 = 0x12;
+/// KVM system time MSR.
+pub const KVM_SYSTEM_TIME_MSR: u32 = 0x4b56_4d01;
 
-const KVM_BOOT_TIME_OLD: u32 = 0x11;
-const KVM_BOOT_TIME: u32 = 0x4b56_4d00;
+/// Legacy KVM boot time (wall clock) MSR.
+pub const KVM_BOOT_TIME_OLD: u32 = 0x11;
+/// KVM boot time (wall clock) MSR.
+pub const KVM_BOOT_TIME: u32 = 0x4b56_4d00;
 
-const KVM_FEATURE_CLOCK_SOURCE_OLD: u32 = 1 << 0;
-const KVM_FEATURE_CLOCK_SOURCE: u32 = 1 << 3;
+/// KVM feature bit for the legacy clock source MSRs.
+pub const KVM_FEATURE_CLOCK_SOURCE_OLD: u32 = 1 << 0;
+/// KVM feature bit for the clock source MSRs.
+pub const KVM_FEATURE_CLOCK_SOURCE: u32 = 1 << 3;
 
 /// `pv_clock_system_time::flags` bit indicating that the clock is stable.
 pub const KVM_SYSTEM_TIME_STABLE: u8 = 1 << 0;
@@ -436,12 +442,6 @@ pub extern "C" fn pv_ipi(mask_low: u64, mask_high: u64, start_id: u64, icr: u64)
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_pv_clock_init() -> zx_status_t {
     Status::result_into_raw(pv_clock_init())
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_pveoi_enable_real_msr() {
-    let mut msr_access = RealMsrAccess {};
-    PvEoi::get().enable(&mut msr_access);
 }
 
 #[unsafe(no_mangle)]

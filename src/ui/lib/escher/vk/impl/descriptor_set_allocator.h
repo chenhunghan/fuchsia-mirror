@@ -5,8 +5,10 @@
 #ifndef SRC_UI_LIB_ESCHER_VK_IMPL_DESCRIPTOR_SET_ALLOCATOR_H_
 #define SRC_UI_LIB_ESCHER_VK_IMPL_DESCRIPTOR_SET_ALLOCATOR_H_
 
+#include <cstdint>
 #include <map>
 
+#include "src/ui/lib/escher/forward_declarations.h"
 #include "src/ui/lib/escher/third_party/granite/vk/descriptor_set_layout.h"
 #include "src/ui/lib/escher/util/hash_cache.h"
 #include "src/ui/lib/escher/vk/sampler.h"
@@ -16,23 +18,35 @@
 namespace escher {
 namespace impl {
 
-// DescriptorSetAllocator wraps HashCache to provide a frame-based cache for
-// Vulkan descriptor sets.  The eviction semantics are the same as a HashCache
-// with FramesUntilEviction == 2.
+// `DescriptorSetAllocator` wraps `HashCache` to provide a frame-based cache for
+// Vulkan descriptor sets.  The eviction semantics are the same as a `HashCache`
+// with `FramesUntilEviction == 4`, gated on GPU completion of the referencing
+// command buffer sequence number.
 class DescriptorSetAllocator {
  public:
-  DescriptorSetAllocator(vk::Device device, DescriptorSetLayout layout,
+  // Maximum number of `ObjectPool` blocks (64 + 128 + 256 + 512 = 960 sets) to
+  // allocate while unretired descriptor sets from >4 frames ago are still in
+  // flight on the GPU before waiting on the oldest pending command buffer.
+  static constexpr size_t kMaxPoolBlocksBeforeWait = 4;
+
+  DescriptorSetAllocator(vk::Device device, DescriptorSetLayout layout, EscherWeakPtr escher,
                          const SamplerPtr& immutable_sampler = nullptr);
 
-  void BeginFrame() { cache_.BeginFrame(); }
+  void BeginFrame(uint64_t last_finished_sequence_number) {
+    cache_.BeginFrame(last_finished_sequence_number);
+  }
+  // Immediately frees every descriptor set, including sets still referenced by
+  // in-flight command buffers, so callers must ensure that GPU work using them
+  // has completed first.
   void Clear() { cache_.Clear(); }
 
-  // Get the descriptor set corresponding to the hashed value.  The second
-  // element of the pair is true if the descriptor set already contains valid
-  // data, and false if new descriptor values must be written.
-  std::pair<vk::DescriptorSet, bool> Get(Hash hash) {
+  // Get the descriptor set corresponding to the hashed value, recording that
+  // it is referenced by `sequence_number`.  The second element of the pair is
+  // true if the descriptor set already contains valid data, and false if new
+  // descriptor values must be written.
+  std::pair<vk::DescriptorSet, bool> Get(Hash hash, uint64_t sequence_number) {
     // TODO(https://fxbug.dev/42151047): track cache hit/miss rates.
-    auto pair = cache_.Obtain(hash);
+    auto pair = cache_.Obtain(hash, sequence_number, [this] { ReclaimUnretiredSets(); });
     return std::make_pair(pair.first->set, pair.second);
   }
 
@@ -42,9 +56,12 @@ class DescriptorSetAllocator {
 
   size_t cache_hits() const { return cache_.cache_hits(); }
   size_t cache_misses() const { return cache_.cache_misses(); }
+  size_t num_pool_blocks() const { return cache_.object_pool().num_blocks(); }
 
  private:
-  // Items stored in |cache_|.
+  void ReclaimUnretiredSets();
+
+  // Items stored in `cache_`.
   struct CacheItem : public HashCacheItem<CacheItem> {
     vk::DescriptorSet set;
   };
@@ -86,6 +103,7 @@ class DescriptorSetAllocator {
   // If this template is changed to have a non-default FramesUntilEviction
   // value, be sure to change all other HashCaches used by the Frame class.
   HashCache<CacheItem, PoolPolicy> cache_;
+  EscherWeakPtr escher_;
 };
 
 typedef std::shared_ptr<DescriptorSetAllocator> DescriptorSetAllocatorPtr;

@@ -1,9 +1,0 @@
-{
-    "short_description": "ARM Mali IV010 GDC driver",
-    "manufacturer": "ARM",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Camera"
-    ]
-}

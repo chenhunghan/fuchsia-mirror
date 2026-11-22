@@ -7,7 +7,6 @@
 
 use lock_order::lock::LockLevelFor;
 use lock_order::relation::LockBefore;
-use lock_order::wrap::{LockedWrapperApi, LockedWrapperUnlockedApi};
 use netstack3_base::{CounterContext, ResourceCounterContext, WeakDeviceIdentifier};
 use netstack3_device::WeakDeviceId;
 use netstack3_ip::raw::{
@@ -15,6 +14,8 @@ use netstack3_ip::raw::{
     RawIpSocketMapContext, RawIpSocketState, RawIpSocketStateContext,
 };
 
+use crate::context::WrapLockLevel;
+use crate::context::prelude::*;
 use crate::marker::IpExt;
 use crate::{BindingsContext, BindingsTypes, CoreCtx, lock_ordering};
 
@@ -22,7 +23,7 @@ use crate::{BindingsContext, BindingsTypes, CoreCtx, lock_ordering};
 impl<I: IpExt, BC: BindingsContext, L: LockBefore<lock_ordering::RawIpSocketState<I>>>
     RawIpSocketStateContext<I, BC> for CoreCtx<'_, BC, L>
 {
-    type SocketHandler<'a> = CoreCtx<'a, BC, lock_ordering::RawIpSocketState<I>>;
+    type SocketHandler<'a> = CoreCtx<'a, BC, WrapLockLevel<lock_ordering::RawIpSocketState<I>>>;
 
     fn with_locked_state<O, F: FnOnce(&RawIpSocketLockedState<I, Self::WeakDeviceId>) -> O>(
         &mut self,
@@ -66,7 +67,7 @@ impl<I: IpExt, BC: BindingsContext, L: LockBefore<lock_ordering::RawIpSocketStat
 impl<I: IpExt, BC: BindingsContext, L: LockBefore<lock_ordering::AllRawIpSockets<I>>>
     RawIpSocketMapContext<I, BC> for CoreCtx<'_, BC, L>
 {
-    type StateCtx<'a> = CoreCtx<'a, BC, lock_ordering::AllRawIpSockets<I>>;
+    type StateCtx<'a> = CoreCtx<'a, BC, WrapLockLevel<lock_ordering::AllRawIpSockets<I>>>;
 
     fn with_socket_map_and_state_ctx<
         O,

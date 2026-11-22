@@ -1,0 +1,279 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+load("//src/lib/dso:fuchsia_dso.bzl", "fuchsia_rust_dso")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":scene_manager_tests_test"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/color_transform_manager.rs",
+        "src/device_listener_registry_server.rs",
+        "src/entry.rs",
+        "src/factory_reset_countdown_server.rs",
+        "src/factory_reset_device_server.rs",
+        "src/input_device_registry_server.rs",
+        "src/input_pipeline.rs",
+        "src/light_sensor_server.rs",
+        "src/media_buttons_listener_registry_server.rs",
+        "src/top.rs",
+    ],
+    binary_name = "scene_manager",
+    crate_root = "src/entry.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":scene_manager_structured_config",
+        "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_rust",
+        "//sdk/fidl/fuchsia.accessibility.scene:fuchsia.accessibility.scene_rust",
+        "//sdk/fidl/fuchsia.element:fuchsia.element_rust",
+        "//sdk/fidl/fuchsia.factory:fuchsia.factory_rust",
+        "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_rust",
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.lightsensor:fuchsia.lightsensor_rust",
+        "//sdk/fidl/fuchsia.recovery.policy:fuchsia.recovery.policy_rust",
+        "//sdk/fidl/fuchsia.recovery.ui:fuchsia.recovery.ui_rust",
+        "//sdk/fidl/fuchsia.session.scene:fuchsia.session.scene_rust",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_rust",
+        "//sdk/fidl/fuchsia.ui.brightness:fuchsia.ui.brightness_rust",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_rust",
+        "//sdk/fidl/fuchsia.ui.display.color:fuchsia.ui.display.color_rust",
+        "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_rust",
+        "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_rust",
+        "//sdk/fidl/fuchsia.ui.pointerinjector.configuration:fuchsia.ui.pointerinjector.configuration_rust",
+        "//sdk/fidl/fuchsia.ui.policy:fuchsia.ui.policy_rust",
+        "//sdk/lib/scheduler/rust",
+        "//sdk/rust/zx",
+        "//src/lib/collections/sorted-vec-map",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace-provider",
+        # GN depends on the :lib_with_includes group; in Bazel, //src/ui/lib/input_pipeline already propagates the client shard expect_includes.
+        "//src/ui/lib/focus_chain_provider:lib",  # @bazel2gn:path_overwrite://src/ui/lib/focus_chain_provider:lib_with_includes
+        "//src/ui/lib/input_pipeline",
+        "//src/ui/lib/scene_management",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+fuchsia_rust_dso(
+    name = "dso",
+    srcs = [
+        "src/color_transform_manager.rs",
+        "src/device_listener_registry_server.rs",
+        "src/entry_dso.rs",
+        "src/factory_reset_countdown_server.rs",
+        "src/factory_reset_device_server.rs",
+        "src/input_device_registry_server.rs",
+        "src/input_pipeline.rs",
+        "src/light_sensor_server.rs",
+        "src/media_buttons_listener_registry_server.rs",
+        "src/top.rs",
+    ],
+    crate_features = ["dso"],
+    crate_root = "src/entry_dso.rs",
+    edition = "2024",
+    output_name = "scene_manager",
+    # :bin provides unit tests.
+    deps = [
+        ":scene_manager_structured_config",
+        "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_rust",
+        "//sdk/fidl/fuchsia.accessibility.scene:fuchsia.accessibility.scene_rust",
+        "//sdk/fidl/fuchsia.element:fuchsia.element_rust",
+        "//sdk/fidl/fuchsia.factory:fuchsia.factory_rust",
+        "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_rust",
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.lightsensor:fuchsia.lightsensor_rust",
+        "//sdk/fidl/fuchsia.recovery.policy:fuchsia.recovery.policy_rust",
+        "//sdk/fidl/fuchsia.recovery.ui:fuchsia.recovery.ui_rust",
+        "//sdk/fidl/fuchsia.session.scene:fuchsia.session.scene_rust",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_rust",
+        "//sdk/fidl/fuchsia.ui.brightness:fuchsia.ui.brightness_rust",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_rust",
+        "//sdk/fidl/fuchsia.ui.display.color:fuchsia.ui.display.color_rust",
+        "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_rust",
+        "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_rust",
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+        "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_rust",
+        "//sdk/fidl/fuchsia.ui.pointerinjector.configuration:fuchsia.ui.pointerinjector.configuration_rust",
+        "//sdk/fidl/fuchsia.ui.policy:fuchsia.ui.policy_rust",
+        "//sdk/lib/driver/component/rust",
+        "//sdk/lib/scheduler/rust",
+        "//sdk/rust/zx",
+        "//src/lib/collections/sorted-vec-map",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/dso/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace-provider",
+        # GN depends on the :lib_with_includes group; in Bazel, //src/ui/lib/input_pipeline:dso already propagates the client shard expect_includes.
+        "//src/ui/lib/focus_chain_provider:lib",  # @bazel2gn:path_overwrite://src/ui/lib/focus_chain_provider:lib_with_includes
+        "//src/ui/lib/input_pipeline:dso",
+        "//src/ui/lib/scene_management:dso",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "scene_manager",
+)
+
+fx_packaged_binary(
+    name = "dso_packaged",
+    binary = ":dso",
+    binary_name = "libscene_manager.so",
+    install_root = "lib/",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "scene_manager",
+    includes = [
+        "meta/config.shard.cml",
+        "meta/scene_manager-impl.shard.cml",
+        "//src/ui/lib/input_pipeline:meta/client.shard",
+    ],
+    manifest = "meta/scene_manager.bin.cml",
+)
+
+# Excluded from :all via manual because it shares the meta/scene_manager.cm output path with :manifest.
+fx_component_manifest(
+    name = "manifest_dso",
+    component_name = "scene_manager",
+    includes = [
+        "meta/config.shard.cml",
+        "meta/scene_manager-impl.shard.cml",
+        "//src/ui/lib/input_pipeline:meta/client.shard",
+    ],
+    manifest = "meta/scene_manager.dso.cml",
+    tags = ["manual"],
+)
+
+# Excluded from :all via manual because it shares the meta/scene_manager.cm output path with :manifest.
+fx_component_manifest(
+    name = "manifest_for_test",
+    component_name = "scene_manager",
+    includes = [
+        "meta/scene_manager-impl.shard.cml",
+        "meta/test_config.shard.cml",
+        "//src/ui/lib/input_pipeline:meta/client.shard",
+    ],
+    manifest = "meta/scene_manager.test.cml",
+    tags = ["manual"],
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+# Excluded from :all via manual because :manifest_dso shares meta/scene_manager.cm with :manifest.
+fx_component(
+    name = "component_dso",
+    compiled_manifest = ":manifest_dso",
+    tags = ["manual"],
+    deps = [":dso_packaged"],
+)
+
+# Stand-in for `:component` with transitional default configuration values for
+# hermetic integration tests.
+# Excluded from :all via manual because :manifest_for_test shares meta/scene_manager.cm with :manifest.
+fx_component(
+    name = "scene_manager_component_for_test",
+    compiled_manifest = ":manifest_for_test",
+    tags = ["manual"],
+    visibility = [
+        "//src/ui/testing/ui_test_realm:__pkg__",
+        "//src/ui/tests/integration_input_tests/factory-reset-handler:__pkg__",
+    ],
+    deps = [":bin_packaged"],
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "scene_manager_structured_config",
+    cm_label = ":manifest",
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN `rustc_binary(output_name = "scene_manager", with_unit_tests = true)` test binary name.
+    crate_name = "scene_manager_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/ui/fuchsia-scenic",
+        "//src/ui/lib/scene_management:scene_management_mocks",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_component(
+    name = "scene_manager_tests_component",
+    binary = ":bin_test",
+    component_name = "scene_manager_tests",
+)
+
+fx_package(
+    name = "scene_manager_tests",
+    test_components = [":scene_manager_tests_component"],
+)
+
+fx_test(
+    name = "scene_manager_tests_test",
+    max_log_severity = "ERROR",
+    package = ":scene_manager_tests",
+    test_type = "system",
+)

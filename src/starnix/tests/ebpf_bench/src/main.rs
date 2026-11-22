@@ -3,12 +3,17 @@
 // found in the LICENSE file.
 
 use clap::Parser;
-use criterion::Criterion;
-use ebpf::{EbpfBufferPtr, EbpfProgramContext, FieldMapping, ProgramArgument};
+use criterion::measurement::WallTime;
+use criterion::{BenchmarkGroup, BenchmarkId, Criterion};
+use ebpf::{
+    ArgumentTypeChecker, EbpfBufferPtr, EbpfError, EbpfProgram, EbpfProgramContext, FieldMapping,
+    MapReference, ProgramArgument, StaticTypeChecker, VerifiedEbpfProgram,
+};
 use ebpf_api::{
     __sk_buff, AttachType, CGROUP_SKB_SK_BUF_TYPE, LoadBytesBase, Map, MapValueRef,
     PacketWithLoadBytes, PinnedMap, ProgramType, SocketFilterProgramContext, SocketRef, uid_t,
 };
+use fidl_fuchsia_kernel as fkernel;
 use fuchsia_criterion::FuchsiaCriterion;
 use std::time::Duration;
 
@@ -83,6 +88,7 @@ impl<'a> SocketRef for &'a SkBuff<'a> {
 #[derive(Default)]
 struct TestEbpfRunContext<'a> {
     map_refs: Vec<MapValueRef<'a>>,
+    ringbuf_reservations: ebpf_api::RingBufferReservations<'a>,
 }
 
 impl<'a> ebpf_api::MapsContext<'a> for TestEbpfRunContext<'a> {
@@ -90,6 +96,10 @@ impl<'a> ebpf_api::MapsContext<'a> for TestEbpfRunContext<'a> {
 
     fn add_value_ref(&mut self, map_ref: MapValueRef<'a>) {
         self.map_refs.push(map_ref)
+    }
+
+    fn ringbuf_reservations(&mut self) -> &mut ebpf_api::RingBufferReservations<'a> {
+        &mut self.ringbuf_reservations
     }
 }
 
@@ -157,6 +167,16 @@ fn main() {
         std::process::exit(1);
     }
 
+    let vmex_resource = ebpf::jit::IS_SUPPORTED.then(|| {
+        let vmex =
+            fuchsia_component::client::connect_to_protocol_sync::<fkernel::VmexResourceMarker>()
+                .unwrap_or_else(|e| {
+                    exit_on_error(format!("Failed to connect to VmexResource: {}", e))
+                });
+        vmex.get(zx::MonotonicInstant::INFINITE)
+            .unwrap_or_else(|e| exit_on_error(format!("Failed to get VmexResource: {}", e)))
+    });
+
     let elf_file = ebpf_loader::ElfFile::new(&config.file).unwrap_or_else(|e| {
         exit_on_error(format!("Failed to load ELF file {}: {}", config.file, e))
     });
@@ -171,7 +191,7 @@ fn main() {
             ebpf::verify_program(prog.code, calling_context, &mut ebpf::NullVerifierLogger)
                 .unwrap_or_else(|e| exit_on_error(format!("Failed to verify {}: {}", name, e)));
 
-        let maps: Vec<_> = prog
+        let maps: Vec<PinnedMap> = prog
             .maps
             .iter()
             .map(|def| {
@@ -180,34 +200,73 @@ fn main() {
             })
             .collect();
 
-        let prog = ebpf::link_program::<TestEbpfContext>(&verified, maps)
+        let interpreted_prog = ebpf::link_program::<TestEbpfContext>(&verified, maps.clone())
             .unwrap_or_else(|e| exit_on_error(format!("Failed to link program {}: {}", name, e)));
-
-        let mut group = c.benchmark_group("fuchsia.ebpf");
-        let _ = group.bench_function(name, move |b| {
-            let skb = SkBuff {
-                sk_buff: __sk_buff {
-                    len: TEST_PACKET.len() as u32,
-                    protocol: 0xDD86, // hton(ETH_P_IPV6)
-                    ifindex: 2,
-                    ..__sk_buff::default()
-                },
-
-                data_ptr: TEST_PACKET.as_ptr(),
-
-                // SAFETY: adding array size to the array base pointer.
-                data_end_ptr: unsafe { TEST_PACKET.as_ptr().add(TEST_PACKET.len()) },
-
-                uid: 52342,
-                socket_cookie: 0x21ab3,
-                data: &TEST_PACKET,
-            };
-
-            b.iter(|| {
-                let mut ctx = TestEbpfRunContext::default();
-                let _r = prog.run_with_1_argument(&mut ctx, &skb);
+        let jit_prog = vmex_resource.as_ref().map(|vmex_resource| {
+            link_program_jit(&verified, maps, vmex_resource).unwrap_or_else(|e| {
+                exit_on_error(format!("Failed to JIT-compile program {}: {}", name, e))
             })
         });
+
+        let mut group = c.benchmark_group("fuchsia.ebpf");
+        bench_program(&mut group, BenchmarkId::new(name, "interpreter"), interpreted_prog);
+        if let Some(jit_prog) = jit_prog {
+            bench_program(&mut group, BenchmarkId::new(name, "jit"), jit_prog);
+        }
         group.finish();
     }
+}
+
+fn link_program_jit(
+    program: &VerifiedEbpfProgram,
+    maps: Vec<PinnedMap>,
+    vmex_resource: &zx::Resource,
+) -> Result<EbpfProgram<TestEbpfContext>, EbpfError> {
+    let _ = <StaticTypeChecker as ArgumentTypeChecker<TestEbpfContext>>::link(program)?;
+    let linkage = ebpf::collect_program_linkage::<TestEbpfContext>(&maps);
+    let code = ebpf::link_instructions(program, &linkage)?;
+    for (i, (map, expected_schema)) in maps.iter().zip(program.maps().iter()).enumerate() {
+        if map.schema() != expected_schema {
+            return Err(EbpfError::ProgramLinkError(format!(
+                "Map schema mismatch at index {i}: expected {expected_schema:?}, got {:?}",
+                map.schema()
+            )));
+        }
+    }
+
+    let vmo = ebpf::jit::compile_jit_vmo(&code, &linkage, vmex_resource)?;
+    // SAFETY: `vmo` was compiled from verified `program` linked against `TestEbpfContext` and
+    // `maps`, whose argument types and map schemas were validated above.
+    unsafe { EbpfProgram::from_compiled_vmo(vmo, maps) }
+}
+
+fn bench_program(
+    group: &mut BenchmarkGroup<'_, WallTime>,
+    id: BenchmarkId,
+    prog: EbpfProgram<TestEbpfContext>,
+) {
+    let _ = group.bench_function(id, move |b| {
+        let skb = SkBuff {
+            sk_buff: __sk_buff {
+                len: TEST_PACKET.len() as u32,
+                protocol: 0xDD86, // hton(ETH_P_IPV6)
+                ifindex: 2,
+                ..__sk_buff::default()
+            },
+
+            data_ptr: TEST_PACKET.as_ptr(),
+
+            // SAFETY: adding array size to the array base pointer.
+            data_end_ptr: unsafe { TEST_PACKET.as_ptr().add(TEST_PACKET.len()) },
+
+            uid: 52342,
+            socket_cookie: 0x21ab3,
+            data: &TEST_PACKET,
+        };
+
+        b.iter(|| {
+            let mut ctx = TestEbpfRunContext::default();
+            let _r = prog.run_with_1_argument(&mut ctx, &skb);
+        })
+    });
 }

@@ -12,6 +12,7 @@
 #include <lib/fidl/cpp/client.h>
 #include <lib/fpromise/promise.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/eventpair.h>
 
 #include <memory>
 #include <string>
@@ -27,22 +28,14 @@ namespace forensics::exceptions {
 namespace {
 
 using ::fidl::ClientEnd;
-using ::fidl::Endpoints;
-using ::fidl::ServerEnd;
 using ::fidl::SyncClient;
 using ::forensics::exceptions::handler::WakeLease;
-using ::fuchsia_power_broker::ElementControl;
 using ::fuchsia_power_broker::ElementInfoProvider;
 using ::fuchsia_power_broker::ElementInfoProviderGetStatusEndpointsResponse;
 using ::fuchsia_power_broker::ElementInfoProviderService;
-using ::fuchsia_power_broker::ElementRunner;
-using ::fuchsia_power_broker::ElementRunnerSetLevelRequest;
-using ::fuchsia_power_broker::ElementSchema;
 using ::fuchsia_power_broker::ElementStatusEndpoint;
-using ::fuchsia_power_broker::LeaseControl;
-using ::fuchsia_power_broker::Lessor;
-using ::fuchsia_power_broker::LessorLeaseResponse;
-using ::fuchsia_power_broker::LevelDependency;
+using ::fuchsia_power_broker::LeaseDependency;
+using ::fuchsia_power_broker::LeaseSchema;
 using ::fuchsia_power_broker::Status;
 using ::fuchsia_power_broker::StatusWatchPowerLevelResponse;
 using ::fuchsia_power_broker::Topology;
@@ -114,67 +107,30 @@ std::unique_ptr<WakeLease> CreateWakeLease(async_dispatcher_t* dispatcher) {
                                      std::move(sag_client_end).value());
 }
 
-ElementSchema BuildAssertiveApplicationActivitySchema(
-    zx::event requires_token, ServerEnd<ElementControl> element_control_server_end,
-    ServerEnd<Lessor> lessor_server_end, ClientEnd<ElementRunner> element_runner_client_end,
-    const std::string& element_name) {
-  LevelDependency dependency{{
-      .dependent_level = kPowerLevelActive,
-      .requires_token = std::move(requires_token),
-      .requires_level_by_preference =
-          std::vector<uint8_t>(1, ToUint(ApplicationActivityLevel::kActive)),
-  }};
-
-  ElementSchema schema{{
-      .element_name = element_name,
-      .initial_current_level = kPowerLevelActive,
-      .valid_levels = std::vector<uint8_t>({kPowerLevelInactive, kPowerLevelActive}),
-      .lessor_channel = std::move(lessor_server_end),
-      .element_control = std::move(element_control_server_end),
-      .element_runner = std::move(element_runner_client_end),
-  }};
-
-  std::optional<std::vector<LevelDependency>>& dependencies = schema.dependencies();
-  dependencies.emplace().push_back(std::move(dependency));
-
-  return schema;
-}
-
-struct ElementWithLease {
-  ClientEnd<ElementControl> element_control;
-  ClientEnd<LeaseControl> lease_control;
-  ServerEnd<ElementRunner> element_runner;
-};
-
-// Adds an element with an assertive dependency on ApplicationActivity and takes a lease on that
-// element.
-ElementWithLease RaiseApplicationActivity() {
+// Acquires a direct lease on ApplicationActivity at kActive.
+zx::eventpair AcquireApplicationActivityLease() {
   ASSIGN_OR_CHECK(PowerElements power_elements, Connect<ActivityGovernor>()->GetPowerElements());
   FX_CHECK(power_elements.application_activity().has_value());
-  FX_CHECK(power_elements.application_activity()->assertive_dependency_token().has_value());
+  auto& application_activity = power_elements.application_activity().value();
+  FX_CHECK(application_activity.assertive_dependency_token().has_value());
 
-  zx::event aa_token =
-      std::move(power_elements.application_activity()->assertive_dependency_token()).value();
+  zx::event aa_token = std::move(application_activity.assertive_dependency_token()).value();
 
-  Endpoints<ElementControl> element_control_endpoints = Endpoints<ElementControl>::Create();
-  Endpoints<Lessor> lessor_endpoints = Endpoints<Lessor>::Create();
-  SyncClient<Lessor> lessor_client(std::move(lessor_endpoints.client));
-  Endpoints<ElementRunner> element_runner = Endpoints<ElementRunner>::Create();
+  zx::eventpair lease_client;
+  zx::eventpair lease_server;
+  FX_CHECK(zx::eventpair::create(0, &lease_client, &lease_server) == ZX_OK);
 
-  ElementSchema schema = BuildAssertiveApplicationActivitySchema(
-      std::move(aa_token), std::move(element_control_endpoints.server),
-      std::move(lessor_endpoints.server), std::move(element_runner.client),
-      /*element_name=*/kBootCompleteIndicator);
+  LeaseSchema schema;
+  schema.lease_token(std::move(lease_server));
+  schema.lease_name(kBootCompleteIndicator);
+  schema.dependencies().emplace().push_back(LeaseDependency{{
+      .requires_token = std::move(aa_token),
+      .requires_level = ToUint(ApplicationActivityLevel::kActive),
+  }});
 
-  CHECK_RESULT(Connect<Topology>()->AddElement(std::move(schema)));
+  CHECK_RESULT(Connect<Topology>()->Lease(std::move(schema)));
 
-  ASSIGN_OR_CHECK(LessorLeaseResponse aa_lease, lessor_client->Lease(kPowerLevelActive));
-
-  return ElementWithLease{
-      .element_control = std::move(element_control_endpoints.client),
-      .lease_control = std::move(aa_lease.lease_control()),
-      .element_runner = std::move(element_runner.server),
-  };
+  return lease_client;
 }
 
 std::vector<ElementStatusEndpoint> GetStatusEndpoints() {
@@ -215,28 +171,12 @@ uint8_t GetCurrentLevel(const SyncClient<Status>& status_client) {
 
 using WakeLeaseIntegrationTest = gtest::RealLoopFixture;
 
-class FakeElementRunner : public fidl::Server<ElementRunner> {
- public:
-  FakeElementRunner() = default;
-
-  void handle_unknown_method(fidl::UnknownMethodMetadata<ElementRunner> metadata,
-                             fidl::UnknownMethodCompleter::Sync& completer) override {
-    FAIL() << "Unknown method called";
-  }
-
-  void SetLevel(ElementRunnerSetLevelRequest& request,
-                SetLevelCompleter::Sync& completer) override {
-    // Return to acknowledge the new level.
-    completer.Reply();
-  }
-};
-
 TEST_F(WakeLeaseIntegrationTest, AcquiresLease) {
   // Take an assertive dependency on ApplicationActivity to indicate boot complete, allowing SAG to
   // suspend if it deems appropriate. After we've acquired our wake lease using the WakeLease class,
   // we'll drop the lease on ApplicationActivity and check that ExecutionState was held at the
   // kSuspending level (the level that WakeLease has an assertive dependency on).
-  ElementWithLease aa_element = RaiseApplicationActivity();
+  zx::eventpair aa_lease = AcquireApplicationActivityLease();
   ASSERT_TRUE(SetBootComplete());
   ASSERT_EQ(GetCurrentLevel(kApplicationActivity), ToUint(ApplicationActivityLevel::kActive));
 
@@ -268,28 +208,18 @@ TEST_F(WakeLeaseIntegrationTest, AcquiresLease) {
               [&lease](LeaseToken& acquired_lease) mutable { lease = std::move(acquired_lease); });
 
   async::Executor executor(dispatcher());
-  FakeElementRunner element_runner;
-  fidl::BindServer(executor.dispatcher(), std::move(aa_element.element_runner), &element_runner);
-
   executor.schedule_task(std::move(lease_promise));
   RunLoopWithTimeoutOrUntil([&lease]() { return lease.has_value(); },
                             kWakeLeaseAcquisitionTimeout + zx::sec(1));
 
-  // |aa_element| is still valid, so ApplicationActivity should still be holding ExecutionState at
+  // |aa_lease| is still valid, so ApplicationActivity should still be holding ExecutionState at
   // kActive.
   ASSERT_TRUE(lease.has_value());
   EXPECT_TRUE(lease->is_valid());
   ASSERT_EQ(GetCurrentLevel(kExecutionState), ToUint(ExecutionStateLevel::kActive));
 
-  // Drop the AA lease but leave |lease| intact.
-  //
-  // Power Broker won't consider a lease dropped until the power element's power level is set to the
-  // necessary level (here, 0) via the CurrentLevel protocol. For testing simplicity, we'll just
-  // remove the element from the topology by resetting |element_control|.
-  aa_element.lease_control.reset();
-  ASSERT_FALSE(aa_element.lease_control.is_valid());
-  aa_element.element_control.reset();
-  ASSERT_FALSE(aa_element.element_control.is_valid());
+  // Drop the ApplicationActivity lease while leaving |lease| intact.
+  aa_lease.reset();
 
   RunLoopUntilIdle();
   ASSERT_EQ(GetCurrentLevel(es_status_client), ToUint(ExecutionStateLevel::kSuspending));

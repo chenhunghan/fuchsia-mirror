@@ -167,23 +167,42 @@ class HttpUtilsTests(unittest.TestCase):
         self.assertEqual(result, "$A0,01")
         mock_urlopen.assert_called_once()
 
-    @mock.patch.object(
-        urllib.request,
-        "urlopen",
-        side_effect=RemoteDisconnected,
-        autospec=True,
+    @parameterized.expand(
+        [
+            (
+                {
+                    "label": "remote_disconnected",
+                    "exception": RemoteDisconnected,
+                },
+            ),
+            (
+                {
+                    "label": "timeout_error",
+                    "exception": TimeoutError,
+                },
+            ),
+        ],
+        name_func=_custom_test_name_func,
     )
+    @mock.patch.object(time, "sleep", autospec=True)
+    @mock.patch.object(urllib.request, "urlopen", autospec=True)
     def test_send_http_request_with_exceptions_to_skip(
-        self, mock_urlopen: mock.Mock
+        self,
+        parameterized_dict: dict[str, Any],
+        mock_urlopen: mock.Mock,
+        mock_sleep: mock.Mock,
     ) -> None:
         """Testcase to make sure http_utils.send_http_request() do not
         fail when it receives an exception that is part of exceptions_to_skip
         input arg"""
+        exception = parameterized_dict["exception"]
+        mock_urlopen.side_effect = exception
         response: dict[str, Any] = http_utils.send_http_request(
-            url=_PARAMS["url"], exceptions_to_skip=[RemoteDisconnected]
+            url=_PARAMS["url"], exceptions_to_skip=(exception,)
         )
         self.assertEqual(response, {})
         mock_urlopen.assert_called_once()
+        mock_sleep.assert_not_called()
 
     @mock.patch.object(time, "sleep", autospec=True)
     @mock.patch.object(
@@ -207,26 +226,98 @@ class HttpUtilsTests(unittest.TestCase):
         self.assertEqual(mock_urlopen.call_count, _PARAMS["attempts"])
         self.assertEqual(mock_sleep.call_count, _PARAMS["attempts"] - 1)
 
-    @mock.patch.object(time, "sleep", autospec=True)
-    @mock.patch.object(
-        urllib.request,
-        "urlopen",
-        side_effect=urllib.error.URLError(TimeoutError()),
-        autospec=True,
+    @parameterized.expand(
+        [
+            (
+                {
+                    "label": "urlerror_timeout",
+                    "side_effect": urllib.error.URLError(TimeoutError()),
+                },
+            ),
+            (
+                {
+                    "label": "read_timeout",
+                    "side_effect": TimeoutError("The read operation timed out"),
+                },
+            ),
+        ],
+        name_func=_custom_test_name_func,
     )
+    @mock.patch.object(time, "sleep", autospec=True)
+    @mock.patch.object(urllib.request, "urlopen", autospec=True)
     def test_timeout_error(
-        self, mock_urlopen: mock.Mock, mock_sleep: mock.Mock
+        self,
+        parameterized_dict: dict[str, Any],
+        mock_urlopen: mock.Mock,
+        mock_sleep: mock.Mock,
     ) -> None:
-        """Verify http_utils.send_http_request() can raise TimeoutError."""
-        with self.assertRaises(TimeoutError):
+        """Verify send_http_request() retries and raises HttpTimeoutError."""
+        timeout_err = parameterized_dict["side_effect"]
+        mock_urlopen.side_effect = timeout_err
+
+        with self.assertRaises(errors.HttpTimeoutError) as ctx:
             http_utils.send_http_request(
                 url=_PARAMS["url"],
+                timeout=_PARAMS["timeout"],
                 interval=_PARAMS["interval"],
                 attempts=_PARAMS["attempts"],
             )
 
+        self.assertIs(ctx.exception.__cause__, timeout_err)
         self.assertEqual(mock_urlopen.call_count, _PARAMS["attempts"])
         self.assertEqual(mock_sleep.call_count, _PARAMS["attempts"] - 1)
+
+    @mock.patch.object(time, "sleep", autospec=True)
+    @mock.patch.object(urllib.request, "urlopen", autospec=True)
+    def test_response_read_timeout_error(
+        self, mock_urlopen: mock.Mock, mock_sleep: mock.Mock
+    ) -> None:
+        """Verify send_http_request() retries response.read() timeouts."""
+        timeout_err = TimeoutError("The read operation timed out")
+        urlopen_return_value = mock.MagicMock()
+        urlopen_return_value.read.side_effect = timeout_err
+        urlopen_return_value.__enter__.return_value = urlopen_return_value
+        mock_urlopen.return_value = urlopen_return_value
+
+        with self.assertRaises(errors.HttpTimeoutError) as ctx:
+            http_utils.send_http_request(
+                url=_PARAMS["url"],
+                timeout=_PARAMS["timeout"],
+                interval=_PARAMS["interval"],
+                attempts=_PARAMS["attempts"],
+            )
+
+        self.assertIs(ctx.exception.__cause__, timeout_err)
+        self.assertEqual(mock_urlopen.call_count, _PARAMS["attempts"])
+        self.assertEqual(mock_sleep.call_count, _PARAMS["attempts"] - 1)
+
+    @mock.patch.object(time, "sleep", autospec=True)
+    @mock.patch.object(urllib.request, "urlopen", autospec=True)
+    def test_retry_after_timeout_error(
+        self, mock_urlopen: mock.Mock, mock_sleep: mock.Mock
+    ) -> None:
+        """Verify send_http_request() succeeds after a transient TimeoutError."""
+        urlopen_return_value = mock.MagicMock()
+        urlopen_return_value.read.return_value = _MOCK_ARGS["urlopen_resp"]
+        urlopen_return_value.__enter__.return_value = urlopen_return_value
+        mock_urlopen.side_effect = [
+            TimeoutError("The read operation timed out"),
+            urlopen_return_value,
+        ]
+
+        response = http_utils.send_http_request(
+            url=_PARAMS["url"],
+            timeout=_PARAMS["timeout"],
+            interval=_PARAMS["interval"],
+            attempts=_PARAMS["attempts"],
+        )
+
+        expected_response = json.loads(
+            _MOCK_ARGS["urlopen_resp"].decode("utf-8")
+        )
+        self.assertEqual(response, expected_response)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(_PARAMS["interval"])
 
 
 if __name__ == "__main__":

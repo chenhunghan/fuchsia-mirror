@@ -3,9 +3,11 @@
 // found in the LICENSE file.
 
 use crate::input_device::InputDevice;
-use fidl::endpoints::Proxy;
+use crate::input_event_relay::INPUT_RELAY_ROLE_NAME;
+use fidl::endpoints::{ClientEnd, Proxy};
 use fidl_fuchsia_input_report as fir;
 use fidl_fuchsia_ui_input_internal as fuii;
+use fidl_fuchsia_ui_views as fuiviews;
 use fuchsia_async::{self as fasync, TimeoutExt as _};
 use futures::future::{AbortHandle, BoxFuture, abortable};
 use futures::{FutureExt as _, StreamExt as _};
@@ -125,6 +127,59 @@ struct DirectInputState {
     watcher_abort_handles: HashMap<u32, AbortHandle>,
 }
 
+#[derive(Clone)]
+enum TaskSpawner {
+    Scope(fasync::ScopeHandle),
+    Channel(futures::channel::mpsc::UnboundedSender<BoxFuture<'static, ()>>),
+}
+
+impl TaskSpawner {
+    fn spawn(&self, future: impl Future<Output = ()> + Send + 'static) {
+        match self {
+            Self::Scope(scope) => {
+                scope.spawn(future);
+            }
+            Self::Channel(tx) => {
+                let _ = tx.unbounded_send(Box::pin(future));
+            }
+        }
+    }
+
+    async fn compute<T: Send + 'static>(
+        &self,
+        future: impl Future<Output = Result<T, Errno>> + Send + 'static,
+    ) -> Result<T, Errno> {
+        match self {
+            Self::Scope(scope) => scope.compute(future).await,
+            Self::Channel(tx) => {
+                let (result_tx, result_rx) = futures::channel::oneshot::channel();
+                let (abortable_fut, abort_handle) = abortable(async move {
+                    let _ = result_tx.send(future.await);
+                });
+                struct AbortOnDrop(AbortHandle);
+                impl Drop for AbortOnDrop {
+                    fn drop(&mut self) {
+                        self.0.abort();
+                    }
+                }
+                let _guard = AbortOnDrop(abort_handle);
+                if tx.unbounded_send(Box::pin(abortable_fut.map(|_| ()))).is_err() {
+                    return Err(errno!(ECANCELED));
+                }
+                result_rx.await.unwrap_or_else(|_| Err(errno!(ECANCELED)))
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn as_scope(&self) -> Option<&fasync::ScopeHandle> {
+        match self {
+            Self::Scope(scope) => Some(scope),
+            Self::Channel(_) => None,
+        }
+    }
+}
+
 /// Manages direct hardware input report reading, device lifecycle, shortcut detection,
 /// and runtime ownership negotiation via `fuchsia.ui.input.internal.InputOwnership`.
 pub struct DirectInputManager {
@@ -136,7 +191,10 @@ pub struct DirectInputManager {
     next_device_id: AtomicU32,
     state: LockDepMutex<DirectInputState, DirectInputStateLock>,
     reserved_minors: LockDepMutex<HashSet<u32>, DirectInputReservedMinorsLock>,
-    scope: fasync::Scope,
+    spawner: TaskSpawner,
+    executor_thread: std::thread::ThreadId,
+    _scope_guard: Option<fasync::Scope>,
+    _shutdown_tx: Option<futures::channel::oneshot::Sender<()>>,
 }
 
 impl std::fmt::Debug for DirectInputManager {
@@ -157,8 +215,10 @@ impl Drop for DirectInputManager {
         for (_, handle) in state.watcher_abort_handles.drain() {
             handle.abort();
         }
+        // Drain devices unconditionally before `_shutdown_tx` drops so every `InputDeviceProxy`
+        // (whose `RWHandle` may be bound to the kthread executor) drops prior to executor teardown.
+        let devices = std::mem::take(&mut state.devices);
         if let Some(kernel) = self.kernel.upgrade() {
-            let devices = std::mem::take(&mut state.devices);
             for (_, device) in devices {
                 unregister_device(&kernel, device.starnix_device);
             }
@@ -178,6 +238,42 @@ impl DirectInputManager {
         ownership_event: Option<zx::Event>,
     ) -> Arc<Self> {
         Self::new_with_channel(kernel, shortcut_handler, ownership_event, None)
+    }
+
+    fn new_inner(
+        kernel: Weak<Kernel>,
+        shortcut_handler: Option<Arc<dyn ButtonShortcutProcessor>>,
+        ownership_event: OnceLock<zx::Event>,
+        initial_active: bool,
+        spawner: TaskSpawner,
+        executor_thread: std::thread::ThreadId,
+        scope_guard: Option<fasync::Scope>,
+        shutdown_tx: Option<futures::channel::oneshot::Sender<()>>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            kernel,
+            shortcut_handler,
+            ownership_event,
+            ownership_active: Arc::new(AtomicBool::new(initial_active)),
+            resume_generation: AtomicU64::new(if initial_active { 1 } else { 0 }),
+            next_device_id: AtomicU32::new(1),
+            state: LockDepMutex::new(DirectInputState {
+                is_paused: !initial_active,
+                devices: HashMap::new(),
+                abort_handles: HashMap::new(),
+                watcher_abort_handles: HashMap::new(),
+            }),
+            reserved_minors: LockDepMutex::new(HashSet::new()),
+            spawner,
+            executor_thread,
+            _scope_guard: scope_guard,
+            _shutdown_tx: shutdown_tx,
+        })
+    }
+
+    #[cfg(test)]
+    fn scope(&self) -> &fasync::ScopeHandle {
+        self.spawner.as_scope().expect("scope() is only available for Scope-backed managers")
     }
 
     /// Creates a new `DirectInputManager` optionally monitoring an `ownership_channel` for
@@ -205,26 +301,22 @@ impl DirectInputManager {
             }
         }
 
-        let manager = Arc::new(Self {
+        let scope = fasync::Scope::new();
+        let spawner = TaskSpawner::Scope(scope.to_handle());
+        let manager = Self::new_inner(
             kernel,
             shortcut_handler,
-            ownership_event: ownership_event_lock,
-            ownership_active: Arc::new(AtomicBool::new(initial_active)),
-            resume_generation: AtomicU64::new(if initial_active { 1 } else { 0 }),
-            next_device_id: AtomicU32::new(1),
-            state: LockDepMutex::new(DirectInputState {
-                is_paused: !initial_active,
-                devices: HashMap::new(),
-                abort_handles: HashMap::new(),
-                watcher_abort_handles: HashMap::new(),
-            }),
-            reserved_minors: LockDepMutex::new(HashSet::new()),
-            scope: fasync::Scope::new(),
-        });
+            ownership_event_lock,
+            initial_active,
+            spawner,
+            std::thread::current().id(),
+            Some(scope),
+            None,
+        );
 
         if let Some(event) = ownership_event {
             let this = Arc::downgrade(&manager);
-            manager.scope.spawn(async move {
+            manager.spawner.spawn(async move {
                 Self::run_ownership_listener(event, ownership_channel, this).await;
             });
         }
@@ -233,95 +325,180 @@ impl DirectInputManager {
     }
 
     /// Creates a new `DirectInputManager` and initializes ownership monitoring using the provided
-    /// `ownership_proxy`.
+    /// `ownership_proxy` and Starnix container `view_ref`.
     ///
-    /// If `ownership_proxy` is `Some`, calls `GetEvent(InputOwnershipTarget::Platform(Platform {}))`,
+    /// If `ownership_proxy` and `view_ref` are `Some`, calls `GetEvent(InputOwnershipTarget::ViewRef(view_ref))`,
     /// duplicates and stores the event handle for `sync_ownership()`, and spawns an asynchronous
     /// listener task on the manager's scope. When direct input ownership is acquired, direct reading
     /// resumes and `ownership_active` is asserted (suppressing app-protocol relays); when ownership
     /// is lost, direct reading pauses and `ownership_active` is cleared (falling back to the legacy
     /// app protocol).
     ///
-    /// If `ownership_proxy` is `None` or fails to retrieve the ownership event, ownership defaults to
-    /// inactive, falling back to the legacy app protocol.
+    /// If `ownership_proxy` or `view_ref` is `None` or fails to retrieve the ownership event, ownership
+    /// defaults to inactive, falling back to the legacy app protocol.
     pub fn new_with_ownership_proxy(
         kernel: Weak<Kernel>,
         shortcut_handler: Option<Arc<dyn ButtonShortcutProcessor>>,
         ownership_proxy: Option<fuii::InputOwnershipProxy>,
+        view_ref: Option<fuiviews::ViewRef>,
     ) -> Arc<Self> {
-        let manager = Arc::new(Self {
+        let scope = fasync::Scope::new();
+        let spawner = TaskSpawner::Scope(scope.to_handle());
+        let manager = Self::new_inner(
             kernel,
             shortcut_handler,
-            ownership_event: OnceLock::new(),
-            ownership_active: Arc::new(AtomicBool::new(false)),
-            resume_generation: AtomicU64::new(0),
-            next_device_id: AtomicU32::new(1),
-            state: LockDepMutex::new(DirectInputState {
-                is_paused: true,
-                devices: HashMap::new(),
-                abort_handles: HashMap::new(),
-                watcher_abort_handles: HashMap::new(),
-            }),
-            reserved_minors: LockDepMutex::new(HashSet::new()),
-            scope: fasync::Scope::new(),
-        });
+            OnceLock::new(),
+            false,
+            spawner,
+            std::thread::current().id(),
+            Some(scope),
+            None,
+        );
 
-        if let Some(proxy) = ownership_proxy {
-            let this = Arc::downgrade(&manager);
-            manager.scope.spawn(async move {
-                match query_ownership_event(
-                    &proxy,
-                    fuii::InputOwnershipTarget::Platform(fuii::Platform {}),
-                )
-                .await
-                {
-                    Ok(event) => {
-                        if let Ok(dup) = event.duplicate_handle(zx::Rights::SAME_RIGHTS) {
-                            if let Some(m) = this.upgrade() {
-                                let _ = m.ownership_event.set(dup);
-                            }
-                        }
-                        let ownership_channel =
-                            proxy.into_channel().ok().map(|c| c.into_zx_channel());
-                        Self::run_ownership_listener(event, ownership_channel, this).await;
-                    }
-                    Err(e) => {
-                        log_debug!(
-                            "Failed to query ownership event from InputOwnership: {:?}; falling back to app protocol",
-                            e
-                        );
-                    }
-                }
-            });
+        if let (Some(proxy), Some(view_ref)) = (ownership_proxy, view_ref) {
+            manager.spawn_ownership_task(proxy, view_ref);
         }
 
         manager
     }
 
+    fn spawn_ownership_task(
+        self: &Arc<Self>,
+        ownership_proxy: fuii::InputOwnershipProxy,
+        view_ref: fuiviews::ViewRef,
+    ) {
+        let this = Arc::downgrade(self);
+        self.spawner.spawn(async move {
+            match query_ownership_event(
+                &ownership_proxy,
+                fuii::InputOwnershipTarget::ViewRef(view_ref),
+            )
+            .await
+            {
+                Ok(event) => {
+                    if let Ok(dup) = event.duplicate_handle(zx::Rights::SAME_RIGHTS) {
+                        if let Some(m) = this.upgrade() {
+                            let _ = m.ownership_event.set(dup);
+                        }
+                    }
+                    let ownership_channel =
+                        ownership_proxy.into_channel().ok().map(|c| c.into_zx_channel());
+                    Self::run_ownership_listener(event, ownership_channel, this).await;
+                }
+                Err(e) => {
+                    log_debug!(
+                        "Failed to query ownership event from InputOwnership: {:?}; falling back to app protocol",
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    fn start_on_kthread<F>(
+        kernel: Weak<Kernel>,
+        shortcut_handler: Option<Arc<dyn ButtonShortcutProcessor>>,
+        view_ref: Option<fuiviews::ViewRef>,
+        connect_ownership: F,
+    ) -> Arc<Self>
+    where
+        F: FnOnce() -> Option<fuii::InputOwnershipProxy> + Send + 'static,
+    {
+        let Some(kernel_arc) = kernel.upgrade() else {
+            return Self::new_with_ownership_proxy(kernel, shortcut_handler, None, None);
+        };
+
+        let (task_tx, mut task_rx) = futures::channel::mpsc::unbounded::<BoxFuture<'static, ()>>();
+        let (thread_tx, thread_rx) = std::sync::mpsc::sync_channel(1);
+        let (shutdown_tx, shutdown_rx) = futures::channel::oneshot::channel::<()>();
+
+        let req = SpawnRequestBuilder::new()
+            .with_debug_name("direct-input")
+            .with_role(INPUT_RELAY_ROLE_NAME)
+            .with_async_closure(async move |_| {
+                // Drive all spawned futures directly inside this `with_async_closure` future so
+                // `WrappedSpawnedFuture` flushes `DelayedReleaser` and `ThreadLockupDetector`
+                // tracks every poll on this kthread's `LocalExecutor`.
+                if thread_tx.send(std::thread::current().id()).is_err() {
+                    return;
+                }
+                let mut tasks = futures::stream::FuturesUnordered::<BoxFuture<'static, ()>>::new();
+                let mut shutdown_rx = shutdown_rx.fuse();
+                loop {
+                    futures::select! {
+                        task = task_rx.next() => match task {
+                            Some(task) => tasks.push(task),
+                            None => break,
+                        },
+                        () = tasks.select_next_some() => {}
+                        _ = shutdown_rx => break,
+                    }
+                }
+            })
+            .build();
+
+        kernel_arc.kthreads.spawner().spawn_from_request(req);
+
+        let executor_thread = thread_rx.recv().expect("direct-input kthread failed to initialize");
+        let manager = Self::new_inner(
+            kernel,
+            shortcut_handler,
+            OnceLock::new(),
+            false,
+            TaskSpawner::Channel(task_tx),
+            executor_thread,
+            None,
+            Some(shutdown_tx),
+        );
+        if let Some(view_ref) = view_ref {
+            let this = Arc::downgrade(&manager);
+            manager.spawner.spawn(async move {
+                if let (Some(this), Some(proxy)) = (this.upgrade(), connect_ownership()) {
+                    this.spawn_ownership_task(proxy, view_ref);
+                }
+            });
+        }
+        manager
+    }
+
     /// Connects to `fuchsia.ui.input.internal.InputOwnership` from the incoming namespace and creates
-    /// a `DirectInputManager`. Also starts watching driver instances via `start_service_watcher`.
+    /// a `DirectInputManager` on a dedicated profiled kernel thread. Also starts watching driver
+    /// instances via `start_service_watcher`.
     ///
     /// Direct input devices are registered as they are discovered, even while paused, so that
     /// device nodes are enumerated ahead of time. Their reader loops remain paused until direct
     /// input ownership is acquired.
     ///
-    /// If connecting to `InputOwnership` fails or is unavailable, ownership remains inactive, falling
-    /// back to the legacy app protocol.
+    /// If connecting to `InputOwnership` fails or `view_ref` is `None`, ownership remains inactive,
+    /// falling back to the legacy app protocol.
     pub fn connect_and_start(
         kernel: Weak<Kernel>,
         shortcut_handler: Option<Arc<dyn ButtonShortcutProcessor>>,
+        view_ref: Option<fuiviews::ViewRef>,
     ) -> Arc<Self> {
-        let ownership_proxy =
-            fuchsia_component::client::connect_to_protocol::<fuii::InputOwnershipMarker>().ok();
-        let manager = Self::new_with_ownership_proxy(kernel, shortcut_handler, ownership_proxy);
+        let manager = Self::start_on_kthread(kernel, shortcut_handler, view_ref, || {
+            fuchsia_component::client::connect_to_protocol::<fuii::InputOwnershipMarker>().ok()
+        });
         manager.spawn_service_watcher();
         manager
     }
 
-    /// Spawns the driver service watcher on the manager's scope.
+    #[cfg(test)]
+    pub(crate) fn connect_and_start_with_client_end(
+        kernel: Weak<Kernel>,
+        shortcut_handler: Option<Arc<dyn ButtonShortcutProcessor>>,
+        ownership_client_end: Option<ClientEnd<fuii::InputOwnershipMarker>>,
+        view_ref: Option<fuiviews::ViewRef>,
+    ) -> Arc<Self> {
+        Self::start_on_kthread(kernel, shortcut_handler, view_ref, move || {
+            ownership_client_end.map(ClientEnd::into_proxy)
+        })
+    }
+
+    /// Spawns the driver service watcher on the manager's spawner.
     pub fn spawn_service_watcher(self: &Arc<Self>) {
         let this = Arc::downgrade(self);
-        self.scope.spawn(async move {
+        self.spawner.spawn(async move {
             if let Some(this) = this.upgrade() {
                 if let Err(e) = this.start_service_watcher().await {
                     log_debug!("Direct input service watcher stopped: {:?}", e);
@@ -470,8 +647,8 @@ impl DirectInputManager {
             return;
         }
         state.is_paused = false;
-        self.ownership_active.store(true, Ordering::SeqCst);
         self.resume_generation.fetch_add(1, Ordering::SeqCst);
+        self.ownership_active.store(true, Ordering::SeqCst);
 
         for device in state.devices.values() {
             let mut conv = device.converter.lock();
@@ -521,6 +698,29 @@ impl DirectInputManager {
             let active = evaluate_ownership(current_signals(event));
             self.update_ownership_active(active);
         }
+    }
+
+    /// Registers an input driver `ClientEnd` on the manager's executor so that its
+    /// `InputDeviceProxy` and reader task bind to the manager's executor rather than the caller's.
+    pub async fn add_device_client_end(
+        self: &Arc<Self>,
+        device_client_end: ClientEnd<fir::InputDeviceMarker>,
+        instance_name: Option<String>,
+    ) -> Result<u32, Errno> {
+        if std::thread::current().id() == self.executor_thread {
+            return self.add_device(device_client_end.into_proxy(), instance_name).await;
+        }
+        let this = Arc::downgrade(self);
+        self.spawner
+            .compute(async move {
+                match this.upgrade() {
+                    Some(this) => {
+                        this.add_device(device_client_end.into_proxy(), instance_name).await
+                    }
+                    None => Err(errno!(ENODEV)),
+                }
+            })
+            .await
     }
 
     /// Registers a discovered input driver instance, parses its descriptor (with 5s timeout),
@@ -577,14 +777,16 @@ impl DirectInputManager {
         let input_device =
             InputDevice::from_device_descriptor(&descriptor, None, &name, &inspect_node);
 
+        let mut tried_minors = HashSet::new();
         let (starnix_device, minor, _minor_guard) = loop {
-            let candidate_minor = {
+            let (candidate_minor, guard) = {
                 let mut reserved = self.reserved_minors.lock();
                 let state = self.state.lock();
                 let mut used_minors: HashSet<u32> =
                     state.devices.values().map(|d| d.minor).collect();
                 drop(state);
                 used_minors.extend(reserved.iter().copied());
+                used_minors.extend(tried_minors.iter().copied());
                 let devt_start = starnix_uapi::device_id::DeviceId::new(
                     starnix_uapi::device_id::INPUT_MAJOR,
                     crate::DIRECT_INPUT_MINOR_RANGE.start,
@@ -604,20 +806,17 @@ impl DirectInputManager {
                     .find(|m| !used_minors.contains(m))
                     .ok_or_else(|| errno!(ENOSPC))?;
                 reserved.insert(cand);
-                cand
+                let guard =
+                    ReservedMinorGuard { reserved_minors: &self.reserved_minors, minor: cand };
+                (cand, guard)
             };
 
             match input_device.clone().register(&kernel, candidate_minor) {
-                Ok(dev) => {
-                    let guard = ReservedMinorGuard {
-                        reserved_minors: &self.reserved_minors,
-                        minor: candidate_minor,
-                    };
-                    break (dev, candidate_minor, guard);
-                }
+                Ok(dev) => break (dev, candidate_minor, guard),
                 Err(e) => {
-                    self.reserved_minors.lock().remove(&candidate_minor);
-                    if e == errno!(EEXIST) {
+                    drop(guard);
+                    if e == errno!(EEXIST) || e == errno!(EBUSY) {
+                        tried_minors.insert(candidate_minor);
                         continue;
                     }
                     return Err(e);
@@ -660,7 +859,7 @@ impl DirectInputManager {
             }
         }
 
-        self.scope.spawn(async move {
+        self.spawner.spawn(async move {
             let _ = watcher_task.await;
         });
 
@@ -678,7 +877,7 @@ impl DirectInputManager {
         let this_weak = Arc::downgrade(self);
         let ownership_active = self.ownership_active.clone();
         let shortcut_handler = self.shortcut_handler.clone();
-        let scope_handle = self.scope.to_handle();
+        let spawner = self.spawner.clone();
 
         let (abortable_task, abort_handle) = abortable(async move {
             let (v2_client, v2_server) =
@@ -699,7 +898,7 @@ impl DirectInputManager {
                         converter,
                         ownership_active,
                         shortcut_handler,
-                        scope_handle,
+                        spawner,
                         ack_threshold,
                     )
                     .await;
@@ -719,7 +918,7 @@ impl DirectInputManager {
             }
         });
 
-        self.scope.spawn(async move {
+        self.spawner.spawn(async move {
             let _ = abortable_task.await;
         });
 
@@ -733,7 +932,7 @@ impl DirectInputManager {
         converter: Arc<LockDepMutex<InputReportConverter, DirectInputConverterLock>>,
         ownership_active: Arc<AtomicBool>,
         shortcut_handler: Option<Arc<dyn ButtonShortcutProcessor>>,
-        scope: fasync::ScopeHandle,
+        spawner: TaskSpawner,
         ack_threshold: u64,
     ) {
         let mut event_stream = reader_proxy.take_event_stream();
@@ -756,7 +955,7 @@ impl DirectInputManager {
                                 &converter,
                                 &input_device,
                                 shortcut_handler.as_ref(),
-                                &scope,
+                                &spawner,
                             );
                         }
                     }
@@ -824,7 +1023,7 @@ impl DirectInputManager {
         })?;
 
         let weak_manager = Arc::downgrade(self);
-        self.scope.spawn(async move {
+        self.spawner.spawn(async move {
             while let Some(instance_res) = watcher.next().await {
                 let Some(this) = weak_manager.upgrade() else {
                     break;
@@ -835,7 +1034,7 @@ impl DirectInputManager {
                         match instance.connect_to_input_device() {
                             Ok(device_proxy) => {
                                 let weak_for_task = Arc::downgrade(&this);
-                                this.scope.spawn(async move {
+                                this.spawner.spawn(async move {
                                     let Some(this) = weak_for_task.upgrade() else {
                                         return;
                                     };
@@ -872,7 +1071,7 @@ impl DirectInputManager {
         S: futures::Stream<Item = fir::InputDeviceProxy> + Send + Unpin + 'static,
     {
         let weak_manager = Arc::downgrade(self);
-        self.scope.spawn(async move {
+        self.spawner.spawn(async move {
             while let Some(device_proxy) = stream.next().await {
                 let Some(this) = weak_manager.upgrade() else {
                     break;
@@ -890,7 +1089,7 @@ fn process_input_report(
     converter: &LockDepMutex<InputReportConverter, DirectInputConverterLock>,
     input_device: &InputDevice,
     shortcut_handler: Option<&Arc<dyn ButtonShortcutProcessor>>,
-    scope: &fasync::ScopeHandle,
+    spawner: &TaskSpawner,
 ) {
     // Forward ConsumerControl button state to ButtonShortcutProcessor.
     if let Some(ref consumer_control) = report.consumer_control {
@@ -901,7 +1100,7 @@ fn process_input_report(
             if let Some(handler) = shortcut_handler {
                 if handler.process_button_state(volume_up, volume_down, power) {
                     let h = handler.clone();
-                    scope.spawn(async move {
+                    spawner.spawn(async move {
                         h.trigger_action().await;
                     });
                 }
@@ -961,7 +1160,8 @@ pub(crate) fn spawn_fake_input_ownership(
         while let Some(Ok(request)) = stream.next().await {
             match request {
                 fuii::InputOwnershipRequest::GetEvent { target, responder } => match target {
-                    fuii::InputOwnershipTarget::Platform(_) => {
+                    fuii::InputOwnershipTarget::ViewRef(view_ref) => {
+                        assert!(!view_ref.reference.is_invalid());
                         let ev = server_event
                             .duplicate_handle(
                                 zx::Rights::TRANSFER
@@ -990,10 +1190,13 @@ pub(crate) fn spawn_fake_input_ownership(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::InputDeviceRegistry;
     use fidl::endpoints::{self, ServerEnd};
+    use starnix_core::task::{EventHandler, Waiter};
     use starnix_core::testing::spawn_kernel_and_run;
     use starnix_core::vfs::{FileHandle, VecOutputBuffer};
     use starnix_uapi::errors::EAGAIN;
+    use starnix_uapi::vfs::FdEvents;
     use zerocopy::FromBytes;
 
     const INPUT_EVENT_SIZE: usize = std::mem::size_of::<starnix_uapi::input_event>();
@@ -2075,39 +2278,43 @@ mod tests {
             endpoints::create_proxy_and_stream::<fuii::InputOwnershipMarker>();
 
         let task = fasync::Task::local(async move {
-            if let Some(Ok(fuii::InputOwnershipRequest::GetEvent { responder, .. })) =
+            if let Some(Ok(fuii::InputOwnershipRequest::GetEvent { target, responder })) =
                 stream.next().await
             {
+                assert_matches::assert_matches!(target, fuii::InputOwnershipTarget::ViewRef(_));
                 let ev = zx::Event::create();
                 responder.send(Ok(ev)).unwrap();
             }
-            if let Some(Ok(fuii::InputOwnershipRequest::GetEvent { responder, .. })) =
+            if let Some(Ok(fuii::InputOwnershipRequest::GetEvent { target, responder })) =
                 stream.next().await
             {
+                assert_matches::assert_matches!(target, fuii::InputOwnershipTarget::ViewRef(_));
                 responder.send(Err(fuii::InputOwnershipError::AccessDenied)).unwrap();
             }
         });
 
+        let view_ref_pair = fuchsia_scenic::ViewRefPair::new().expect("create ViewRefPair");
+        let vr1 = fuchsia_scenic::duplicate_view_ref(&view_ref_pair.view_ref).unwrap();
+        let vr2 = fuchsia_scenic::duplicate_view_ref(&view_ref_pair.view_ref).unwrap();
+
         // 1. Success path
-        let ev =
-            query_ownership_event(&proxy, fuii::InputOwnershipTarget::Platform(fuii::Platform {}))
-                .await
-                .expect("query succeeds");
+        let ev = query_ownership_event(&proxy, fuii::InputOwnershipTarget::ViewRef(vr1))
+            .await
+            .expect("query succeeds");
         assert!(ev.duplicate_handle(zx::Rights::SAME_RIGHTS).is_ok());
 
         // 2. Application error path (ACCESS_DENIED -> EACCES)
-        let err =
-            query_ownership_event(&proxy, fuii::InputOwnershipTarget::Platform(fuii::Platform {}))
-                .await
-                .expect_err("query returns access denied");
+        let err = query_ownership_event(&proxy, fuii::InputOwnershipTarget::ViewRef(vr2))
+            .await
+            .expect_err("query returns access denied");
         assert_eq!(err, errno!(EACCES));
 
         drop(task);
         // 3. Transport error path (closed -> EIO)
-        let err2 =
-            query_ownership_event(&proxy, fuii::InputOwnershipTarget::Platform(fuii::Platform {}))
-                .await
-                .expect_err("query returns EIO when channel closed");
+        let vr3 = fuchsia_scenic::duplicate_view_ref(&view_ref_pair.view_ref).unwrap();
+        let err2 = query_ownership_event(&proxy, fuii::InputOwnershipTarget::ViewRef(vr3))
+            .await
+            .expect_err("query returns EIO when channel closed");
         assert_eq!(err2, errno!(EIO));
     }
 
@@ -2430,10 +2637,12 @@ mod tests {
 
             let (proxy, get_event_rx, _server_task) = spawn_fake_input_ownership(&event);
 
+            let view_ref_pair = fuchsia_scenic::ViewRefPair::new().expect("create ViewRefPair");
             let manager = DirectInputManager::new_with_ownership_proxy(
                 Arc::downgrade(&kernel),
                 None,
                 Some(proxy),
+                Some(view_ref_pair.view_ref),
             );
 
             // Wait for fake server to handle GetEvent
@@ -2579,23 +2788,44 @@ mod tests {
             let kernel = current_task.kernel().clone();
 
             // Case 1: ownership_proxy is None
-            let manager1 =
-                DirectInputManager::new_with_ownership_proxy(Arc::downgrade(&kernel), None, None);
+            let manager1 = DirectInputManager::new_with_ownership_proxy(
+                Arc::downgrade(&kernel),
+                None,
+                None,
+                None,
+            );
             assert!(!manager1.is_ownership_active());
 
-            // Case 2: ownership_proxy is connected to a closed server endpoint
+            // Case 2: ownership_proxy is Some, but view_ref is None (fallback to app protocol)
+            let (proxy_no_vr, _server_no_vr) =
+                endpoints::create_proxy::<fuii::InputOwnershipMarker>();
+            let manager_no_vr = DirectInputManager::new_with_ownership_proxy(
+                Arc::downgrade(&kernel),
+                None,
+                Some(proxy_no_vr),
+                None,
+            );
+            fasync::Timer::new(fasync::MonotonicInstant::after(
+                zx::MonotonicDuration::from_millis(10),
+            ))
+            .await;
+            assert!(!manager_no_vr.is_ownership_active());
+
+            // Case 3: ownership_proxy is connected to a closed server endpoint
             let (proxy, server_end) = endpoints::create_proxy::<fuii::InputOwnershipMarker>();
             drop(server_end);
 
+            let view_ref_pair2 = fuchsia_scenic::ViewRefPair::new().expect("create ViewRefPair");
             let manager2 = DirectInputManager::new_with_ownership_proxy(
                 Arc::downgrade(&kernel),
                 None,
                 Some(proxy),
+                Some(view_ref_pair2.view_ref),
             );
-            manager2.scope.on_no_tasks().await;
+            manager2.scope().on_no_tasks().await;
             assert!(!manager2.is_ownership_active());
 
-            // Case 3: ownership_proxy returns an error (e.g. AccessDenied)
+            // Case 4: ownership_proxy returns an error (e.g. AccessDenied)
             let (proxy3, mut stream3) =
                 endpoints::create_proxy_and_stream::<fuii::InputOwnershipMarker>();
             let (case3_tx, case3_rx) = futures::channel::oneshot::channel();
@@ -2611,13 +2841,15 @@ mod tests {
                 }
             });
 
+            let view_ref_pair3 = fuchsia_scenic::ViewRefPair::new().expect("create ViewRefPair");
             let manager3 = DirectInputManager::new_with_ownership_proxy(
                 Arc::downgrade(&kernel),
                 None,
                 Some(proxy3),
+                Some(view_ref_pair3.view_ref),
             );
             case3_rx.await.expect("GetEvent handled by fake server");
-            manager3.scope.on_no_tasks().await;
+            manager3.scope().on_no_tasks().await;
             assert!(!manager3.is_ownership_active());
         })
         .await;
@@ -2639,10 +2871,12 @@ mod tests {
 
             let (proxy, _get_event_rx, _server_task) = spawn_fake_input_ownership(&event);
 
+            let view_ref_pair = fuchsia_scenic::ViewRefPair::new().expect("create ViewRefPair");
             let manager = DirectInputManager::new_with_ownership_proxy(
                 Arc::downgrade(&kernel),
                 None,
                 Some(proxy),
+                Some(view_ref_pair.view_ref),
             );
 
             // Ownership should transition to active because the event was already INPUT_CLIENT_OWNED.
@@ -2672,8 +2906,12 @@ mod tests {
                 )
                 .expect("duplicate event without wait rights");
 
-            let manager =
-                DirectInputManager::new_with_ownership_proxy(Arc::downgrade(&kernel), None, None);
+            let manager = DirectInputManager::new_with_ownership_proxy(
+                Arc::downgrade(&kernel),
+                None,
+                None,
+                None,
+            );
 
             // Make ownership active initially
             manager.set_ownership_active(true);
@@ -2684,12 +2922,12 @@ mod tests {
             // ZX_RIGHT_WAIT, returns `Signals::NONE`, evaluates ownership as inactive,
             // and pauses the manager.
             let this = Arc::downgrade(&manager);
-            manager.scope.spawn(async move {
+            manager.spawner.spawn(async move {
                 DirectInputManager::run_ownership_listener(event_without_wait, None, this).await;
             });
 
             wait_for_ownership(&manager, false).await;
-            manager.scope.on_no_tasks().await;
+            manager.scope().on_no_tasks().await;
             assert!(!manager.is_ownership_active());
         })
         .await;
@@ -2709,6 +2947,315 @@ mod tests {
                 .add_device_with_descriptor(device_proxy, Some("sensor0".to_string()), descriptor)
                 .await;
             assert_eq!(result.unwrap_err(), errno!(ENOTSUP));
+            assert_eq!(manager.num_devices(), 0);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_add_device_skips_conflicting_minor() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let first_minor = crate::DIRECT_INPUT_MINOR_RANGE.start;
+
+            // Occupy `input{first_minor}` in sysfs without registering `(INPUT_MAJOR, first_minor)`
+            // in char_devices so `list_minor_devices` does not report `first_minor`.
+            let input_class = kernel.device_registry.objects.input_class();
+            let _conflicting_device = kernel
+                .device_registry
+                .add_numberless_device(
+                    format!("input{first_minor}").as_str().into(),
+                    None,
+                    input_class,
+                    starnix_core::fs::sysfs::build_device_directory,
+                )
+                .expect("register conflicting input device");
+
+            let manager = DirectInputManager::new(Arc::downgrade(&kernel), None, None);
+            let (device_proxy, _server_end) = endpoints::create_proxy::<fir::InputDeviceMarker>();
+
+            let device_id = manager
+                .add_device_with_descriptor(
+                    device_proxy,
+                    Some("touch0".to_string()),
+                    make_test_descriptor(),
+                )
+                .await
+                .expect("add_device_with_descriptor skips conflicting minor");
+            let dev = manager.device(device_id).expect("registered device");
+            assert_eq!(dev.minor, first_minor + 1);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_direct_input_runs_off_caller_thread_and_survives_caller_block() {
+        spawn_kernel_and_run(async move |current_task| {
+            let caller_thread_id = std::thread::current().id();
+            let kernel = current_task.kernel().clone();
+
+            struct ThreadRecordingShortcutProcessor {
+                thread_tx: std::sync::mpsc::SyncSender<std::thread::ThreadId>,
+            }
+            impl ButtonShortcutProcessor for ThreadRecordingShortcutProcessor {
+                fn process_button_state(
+                    &self,
+                    _volume_up: bool,
+                    _volume_down: bool,
+                    _power: bool,
+                ) -> bool {
+                    let _ = self.thread_tx.try_send(std::thread::current().id());
+                    false
+                }
+                fn trigger_action(self: Arc<Self>) -> BoxFuture<'static, bool> {
+                    Box::pin(async { false })
+                }
+            }
+
+            let (thread_tx, thread_rx) = std::sync::mpsc::sync_channel(1);
+            let shortcut_handler = Arc::new(ThreadRecordingShortcutProcessor { thread_tx });
+
+            let manager = DirectInputManager::connect_and_start(
+                Arc::downgrade(&kernel),
+                Some(shortcut_handler),
+                None,
+            );
+            manager.set_ownership_active(true);
+            let registry = InputDeviceRegistry::new(manager.clone());
+
+            let (device_client, device_server) =
+                endpoints::create_endpoints::<fir::InputDeviceMarker>();
+            let (reader_tx, reader_rx) =
+                futures::channel::oneshot::channel::<ServerEnd<fir::InputReportsReaderV2Marker>>();
+            let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+
+            // Host the mock InputDevice server on an independent thread so blocking the
+            // caller thread's LocalExecutor does not block the mock driver.
+            let driver_thread = std::thread::spawn(move || {
+                let mut exec = fasync::LocalExecutor::default();
+                exec.run_singlethreaded(async move {
+                    let mut stream = device_server.into_stream();
+                    let mut reader_tx = Some(reader_tx);
+                    let mut stop_rx = stop_rx.fuse();
+                    loop {
+                        futures::select! {
+                            req = stream.next() => {
+                                match req {
+                                    Some(Ok(fir::InputDeviceRequest::GetDescriptor { responder })) => {
+                                        responder.send(&make_test_descriptor()).unwrap();
+                                    }
+                                    Some(Ok(fir::InputDeviceRequest::GetInputReportsReaderV2 {
+                                        reader,
+                                        responder,
+                                        ..
+                                    })) => {
+                                        if let Some(tx) = reader_tx.take() {
+                                            let _ = tx.send(reader);
+                                        }
+                                        responder.send(16).unwrap();
+                                    }
+                                    Some(Ok(_)) => {}
+                                    _ => break,
+                                }
+                            }
+                            _ = stop_rx => break,
+                        }
+                    }
+                });
+            });
+
+            let device_id = registry.register_device(device_client).await.unwrap();
+            let file_handle = manager
+                .device(device_id)
+                .expect("device added")
+                .input_device
+                .open_test(&current_task)
+                .expect("open input device");
+
+            let waiter = Waiter::new();
+            file_handle.wait_async(&current_task, &waiter, FdEvents::POLLIN, EventHandler::None);
+
+            let reader_server = reader_rx.await.unwrap();
+            let (_, reader_control) = reader_server.into_stream_and_control_handle();
+
+            let report = fir::InputReport {
+                event_time: Some(100_000_000),
+                touch: Some(fir::TouchInputReport {
+                    contacts: Some(vec![fir::ContactInputReport {
+                        contact_id: Some(1),
+                        position_x: Some(321),
+                        position_y: Some(654),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }),
+                consumer_control: Some(fir::ConsumerControlInputReport {
+                    pressed_buttons: Some(vec![]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            reader_control.send_on_input_reports(vec![report], 1).expect("send report");
+
+            // Synchronously block the caller thread's LocalExecutor without awaiting.
+            // If DirectInputManager runs on the caller thread, this starves report delivery
+            // and times out.
+            waiter
+                .wait_until(
+                    &current_task,
+                    zx::MonotonicInstant::after(zx::MonotonicDuration::from_seconds(2)),
+                )
+                .expect("DirectInputManager kthread must process report while caller is blocked");
+
+            let processor_thread_id = thread_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("process_input_report must run on kthread");
+            assert_ne!(
+                processor_thread_id, caller_thread_id,
+                "DirectInputManager report processing must run off the caller thread"
+            );
+
+            let received_events = read_uapi_events(&file_handle, &current_task);
+            assert!(received_events.iter().any(|e| {
+                e.type_ == starnix_uapi::EV_ABS as u16
+                    && e.code == starnix_uapi::ABS_MT_POSITION_X as u16
+                    && e.value == 321
+            }));
+            assert!(received_events.iter().any(|e| {
+                e.type_ == starnix_uapi::EV_ABS as u16
+                    && e.code == starnix_uapi::ABS_MT_POSITION_Y as u16
+                    && e.value == 654
+            }));
+
+            drop(reader_control);
+            drop(registry);
+            drop(manager);
+            let _ = stop_tx.send(());
+            driver_thread.join().expect("join driver thread");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_direct_input_ownership_runs_on_kthread_while_caller_blocked() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let event = zx::Event::create();
+            event
+                .signal(
+                    zx::Signals::NONE,
+                    DISPLAY_PLATFORM_OWNED_SIGNAL | INPUT_CLIENT_OWNED_SIGNAL,
+                )
+                .unwrap();
+            let server_event = event.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+
+            let (ownership_client, ownership_server) =
+                endpoints::create_endpoints::<fuii::InputOwnershipMarker>();
+            let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+            let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+
+            let ownership_thread = std::thread::spawn(move || {
+                let mut exec = fasync::LocalExecutor::default();
+                exec.run_singlethreaded(async move {
+                    let mut stream = ownership_server.into_stream();
+                    let mut stop_rx = stop_rx.fuse();
+                    loop {
+                        futures::select! {
+                            req = stream.next() => {
+                                match req {
+                                    Some(Ok(fuii::InputOwnershipRequest::GetEvent {
+                                        responder,
+                                        ..
+                                    })) => {
+                                        let ev = server_event
+                                            .duplicate_handle(
+                                                zx::Rights::TRANSFER
+                                                    | zx::Rights::DUPLICATE
+                                                    | zx::Rights::WAIT
+                                                    | zx::Rights::INSPECT,
+                                            )
+                                            .expect("duplicate event");
+                                        responder.send(Ok(ev)).expect("send GetEvent response");
+                                        let _ = done_tx.send(());
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            _ = stop_rx => break,
+                        }
+                    }
+                });
+            });
+
+            let view_ref_pair = fuchsia_scenic::ViewRefPair::new().expect("create ViewRefPair");
+            let manager = DirectInputManager::connect_and_start_with_client_end(
+                Arc::downgrade(&kernel),
+                None,
+                Some(ownership_client),
+                Some(view_ref_pair.view_ref),
+            );
+
+            // Synchronously block the caller thread's LocalExecutor; ownership activation must
+            // complete on the kthread without polling the caller's executor.
+            done_rx.recv_timeout(std::time::Duration::from_secs(2)).expect("GetEvent handled");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !manager.is_ownership_active() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "DirectInputManager ownership listener did not activate off caller thread"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(manager.resume_generation(), 1);
+
+            drop(manager);
+            let _ = stop_tx.send(());
+            ownership_thread.join().expect("join ownership thread");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_add_device_client_end_cancels_on_drop() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel().clone();
+            let manager =
+                DirectInputManager::connect_and_start(Arc::downgrade(&kernel), None, None);
+
+            let (device_client, device_server) =
+                endpoints::create_endpoints::<fir::InputDeviceMarker>();
+            let (desc_req_tx, desc_req_rx) = futures::channel::oneshot::channel::<()>();
+            let (closed_tx, closed_rx) = futures::channel::oneshot::channel::<()>();
+
+            let _server_task = fasync::Task::local(async move {
+                let mut stream = device_server.into_stream();
+                let mut desc_req_tx = Some(desc_req_tx);
+                let mut _held_responder = None;
+                while let Some(req) = stream.next().await {
+                    if let Ok(fir::InputDeviceRequest::GetDescriptor { responder }) = req {
+                        // Hold the responder so `add_device` stays suspended in `get_descriptor`.
+                        _held_responder = Some(responder);
+                        if let Some(tx) = desc_req_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
+                let _ = closed_tx.send(());
+            });
+
+            {
+                let add_fut = manager.add_device_client_end(device_client, None).fuse();
+                let mut add_fut = std::pin::pin!(add_fut);
+                let mut desc_req_rx = desc_req_rx.fuse();
+                futures::select! {
+                    res = add_fut => {
+                        panic!("add_device_client_end unexpectedly resolved: {:?}", res);
+                    }
+                    _ = desc_req_rx => {}
+                }
+            }
+
+            closed_rx.await.expect("server must observe peer closed after future drop");
             assert_eq!(manager.num_devices(), 0);
         })
         .await;

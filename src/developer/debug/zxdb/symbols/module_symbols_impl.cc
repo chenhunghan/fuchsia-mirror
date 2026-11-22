@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #include <algorithm>
+#include <cctype>
 #include <memory>
 #include <set>
 
@@ -20,6 +21,7 @@
 #include "src/developer/debug/zxdb/common/file_util.h"
 #include "src/developer/debug/zxdb/symbols/compile_unit.h"
 #include "src/developer/debug/zxdb/symbols/dwarf_binary_impl.h"
+#include "src/developer/debug/zxdb/symbols/dwarf_debug_names.h"
 #include "src/developer/debug/zxdb/symbols/dwarf_die_ref.h"
 #include "src/developer/debug/zxdb/symbols/dwarf_expr_eval.h"
 #include "src/developer/debug/zxdb/symbols/dwarf_symbol_factory.h"
@@ -147,6 +149,83 @@ bool HasOnlySupportedSpecialIdentifierTypes(const Identifier& ident) {
   return true;
 }
 
+bool IsAnonymousComponent(const IdentifierComponent& comp) {
+  return comp.special() == SpecialIdentifier::kAnon ||
+         (comp.special() == SpecialIdentifier::kNone && comp.name().empty());
+}
+
+// Returns true when sym_id matches target, allowing unnamed anonymous-namespace components in
+// sym_id to be skipped or matched against $anon or an empty component. All outer components of
+// sym_id beyond target must be unnamed anonymous namespaces.
+bool IdentifierMatchesSymbol(const Identifier& target, const Identifier& sym_id) {
+  int sym_idx = static_cast<int>(sym_id.components().size()) - 1;
+  int target_idx = static_cast<int>(target.components().size()) - 1;
+
+  while (target_idx >= 0 && sym_idx >= 0) {
+    const auto& target_comp = target.components()[target_idx];
+    const auto& sym_comp = sym_id.components()[sym_idx];
+
+    if (IsAnonymousComponent(target_comp)) {
+      if (IsAnonymousComponent(sym_comp)) {
+        --target_idx;
+        --sym_idx;
+      } else {
+        return false;
+      }
+    } else if (IsAnonymousComponent(sym_comp)) {
+      --sym_idx;
+    } else if (target_comp == sym_comp) {
+      --target_idx;
+      --sym_idx;
+    } else {
+      return false;
+    }
+  }
+
+  if (target_idx >= 0) {
+    return false;
+  }
+
+  while (sym_idx >= 0) {
+    if (!IsAnonymousComponent(sym_id.components()[sym_idx])) {
+      return false;
+    }
+    --sym_idx;
+  }
+  return true;
+}
+
+std::string_view StripTemplateArgs(std::string_view leaf) {
+  size_t search_start = 0;
+  constexpr std::string_view kOperator = "operator";
+  if (leaf.starts_with(kOperator) &&
+      (leaf.size() == kOperator.size() ||
+       (!std::isalnum(static_cast<unsigned char>(leaf[kOperator.size()])) &&
+        leaf[kOperator.size()] != '_'))) {
+    size_t pos = kOperator.size();
+    while (pos < leaf.size() && leaf[pos] == ' ') {
+      ++pos;
+    }
+    if (leaf.substr(pos, 3) == "<=>" || leaf.substr(pos, 3) == "<<=") {
+      pos += 3;
+    } else if (leaf.substr(pos, 2) == "<=" || leaf.substr(pos, 2) == "<<") {
+      pos += 2;
+    } else if (pos < leaf.size() && leaf[pos] == '<') {
+      pos += 1;
+    }
+    search_start = pos;
+  }
+  size_t template_pos = leaf.find('<', search_start);
+  if (template_pos == std::string_view::npos) {
+    return {};
+  }
+  std::string_view base = leaf.substr(0, template_pos);
+  while (!base.empty() && base.back() == ' ') {
+    base.remove_suffix(1);
+  }
+  return base;
+}
+
 }  // namespace
 
 ModuleSymbolsImpl::ModuleSymbolsImpl(std::unique_ptr<DwarfBinaryImpl> binary,
@@ -182,7 +261,14 @@ ModuleSymbolStatus ModuleSymbolsImpl::GetStatus() const {
   status.build_id = binary_->GetBuildID();
   status.base = 0;               // We don't know this, only ProcessSymbols does.
   status.symbols_loaded = true;  // Since this instance exists at all.
-  status.functions_indexed = index_->CountSymbolsIndexed();
+  if (const llvm::DWARFDebugNames* debug_names = GetDebugNames()) {
+    status.functions_indexed = 0;
+    for (const auto& name_index : *debug_names) {
+      status.functions_indexed += name_index.getNameCount();
+    }
+  } else {
+    status.functions_indexed = index_->CountSymbolsIndexed();
+  }
   status.files_indexed = index_->files_indexed();
   status.symbol_file = binary_->GetName();
   return status;
@@ -351,6 +437,32 @@ std::vector<std::string> ModuleSymbolsImpl::FindFileMatches(std::string_view nam
 }
 
 std::vector<fxl::RefPtr<Function>> ModuleSymbolsImpl::GetMainFunctions() const {
+  if (HasDebugNames()) {
+    std::vector<fxl::RefPtr<Function>> result;
+    auto entries = FindDebugNamesEntries("main");
+    for (const auto& entry : entries) {
+      if (entry.tag != llvm::dwarf::DW_TAG_subprogram) {
+        continue;
+      }
+      llvm::DWARFDie die = binary_->GetLLVMDieAtOffset(entry.die_ref);
+      if (!die.isValid() ||
+          llvm::dwarf::toUnsigned(die.find(llvm::dwarf::DW_AT_main_subprogram), 0) == 0) {
+        continue;
+      }
+      LazySymbol lazy_symbol = GetSymbolFactory()->MakeLazy(entry.die_ref);
+      const Symbol* symbol = lazy_symbol.Get();
+      if (!symbol) {
+        continue;
+      }
+      if (const Function* func = symbol->As<Function>()) {
+        result.emplace_back(RefPtrTo(func));
+      }
+    }
+    if (!result.empty()) {
+      return result;
+    }
+  }
+
   std::vector<fxl::RefPtr<Function>> result;
   for (const auto& ref : index_->main_functions()) {
     auto symbol_ref = IndexSymbolRefToSymbol(ref);
@@ -362,6 +474,36 @@ std::vector<fxl::RefPtr<Function>> ModuleSymbolsImpl::GetMainFunctions() const {
 }
 
 const Index& ModuleSymbolsImpl::GetIndex() const { return *index_; }
+
+bool ModuleSymbolsImpl::HasDebugNames() const { return GetDebugNames() != nullptr; }
+
+const llvm::DWARFDebugNames* ModuleSymbolsImpl::GetDebugNames() const {
+  return force_slow_index_ ? nullptr : binary_->GetDebugNames();
+}
+
+void ModuleSymbolsImpl::SetForceSlowIndex(bool force) {
+  force_slow_index_ = force;
+  if (force && !full_index_built_ && binary_->GetDebugNames()) {
+    CreateIndex();
+  }
+}
+
+bool ModuleSymbolsImpl::force_slow_index() const { return force_slow_index_; }
+
+std::vector<DebugNamesEntry> ModuleSymbolsImpl::FindDebugNamesEntries(std::string_view name) const {
+  if (!HasDebugNames()) {
+    return {};
+  }
+  return zxdb::FindDebugNamesEntries(*GetDebugNames(), name);
+}
+
+std::vector<DebugNamesEntry> ModuleSymbolsImpl::FindDebugNamesPrefixEntries(
+    std::string_view prefix) const {
+  if (!HasDebugNames()) {
+    return {};
+  }
+  return zxdb::FindDebugNamesPrefixEntries(*GetDebugNames(), *binary_, prefix);
+}
 
 LazySymbol ModuleSymbolsImpl::IndexSymbolRefToSymbol(const IndexNode::SymbolRef& ref) const {
   // TODO(bug 53091) in the future we may want to add ELF symbol support here.
@@ -460,8 +602,9 @@ std::vector<Location> ModuleSymbolsImpl::ResolveSymbolInputLocation(
   if (ReferencesMainFunction(input_location)) {
     auto main_functions = GetMainFunctions();
     if (!main_functions.empty()) {
-      for (const auto& func : GetMainFunctions())
+      for (const auto& func : main_functions) {
         AppendLocationForFunction(symbol_context, options, func.get(), &result);
+      }
       return result;
     } else {
       // Nothing explicitly marked as the main function, fall back on anything in the toplevel
@@ -470,6 +613,12 @@ std::vector<Location> ModuleSymbolsImpl::ResolveSymbolInputLocation(
 
       // Fall through to symbol finding on the new name.
     }
+  }
+
+  // When the accelerator table is available, query the table directly using the leaf name.
+  // This avoids scanning the zxdb index tree.
+  if (HasDebugNames()) {
+    return ResolveDebugNamesSymbolInputLocation(symbol_context, symbol_to_find, options);
   }
 
   // TODO(bug 37654) it would be nice if this could be deleted and all code go through
@@ -492,6 +641,47 @@ std::vector<Location> ModuleSymbolsImpl::ResolveSymbolInputLocation(
     }
   }
 
+  return result;
+}
+
+std::vector<Location> ModuleSymbolsImpl::ResolveDebugNamesSymbolInputLocation(
+    const SymbolContext& symbol_context, const Identifier& symbol_to_find,
+    const ResolveOptions& options) const {
+  if (symbol_to_find.components().empty()) {
+    return {};
+  }
+
+  std::string_view leaf = symbol_to_find.components().back().name();
+  if (leaf.empty()) {
+    return {};
+  }
+  auto entries = FindDebugNamesEntries(leaf);
+  if (entries.empty()) {
+    std::string_view base = StripTemplateArgs(leaf);
+    if (!base.empty()) {
+      entries = FindDebugNamesEntries(base);
+    }
+  }
+
+  std::vector<Location> result;
+  for (const auto& entry : entries) {
+    if (entry.tag != llvm::dwarf::DW_TAG_subprogram &&
+        entry.tag != llvm::dwarf::DW_TAG_inlined_subroutine &&
+        entry.tag != llvm::dwarf::DW_TAG_variable) {
+      continue;
+    }
+    LazySymbol lazy_symbol = GetSymbolFactory()->MakeLazy(entry.die_ref);
+    const Symbol* symbol = lazy_symbol.Get();
+    if (!symbol || !IdentifierMatchesSymbol(symbol_to_find, symbol->GetIdentifier())) {
+      continue;
+    }
+
+    if (const Function* function = symbol->As<Function>()) {
+      AppendLocationForFunction(symbol_context, options, function, &result);
+    } else if (const Variable* variable = symbol->As<Variable>()) {
+      result.push_back(LocationForVariable(symbol_context, RefPtrTo(variable)));
+    }
+  }
   return result;
 }
 
@@ -744,7 +934,8 @@ Location ModuleSymbolsImpl::LocationForVariable(const SymbolContext& symbol_cont
   // TODO(brettw) in all of the return cases we could in the future fill in the file/line of the
   // definition of the variable. Currently Variables don't provide that (even though it's usually in
   // the DWARF symbols).
-  return Location(result.unsigned_value(), FileLine(), 0, symbol_context, std::move(variable));
+  return Location(static_cast<uint64_t>(result.unsigned_value()), FileLine(), 0, symbol_context,
+                  std::move(variable));
 }
 
 std::vector<Location> ModuleSymbolsImpl::ResolvePltName(const SymbolContext& symbol_context,
@@ -1007,6 +1198,13 @@ Location ModuleSymbolsImpl::MakeElfSymbolLocation(const SymbolContext& symbol_co
 }
 
 void ModuleSymbolsImpl::CreateIndex() {
+  if (HasDebugNames()) {
+    index_ = std::make_unique<Index>();
+    index_->IndexSourceFiles(*binary_);
+    binary_->ClearLLVMCache();
+    return;
+  }
+
   // Create the index for the main binary.
   //
   // We could consider creating a new binary/object file just for indexing. The indexing will page
@@ -1018,6 +1216,7 @@ void ModuleSymbolsImpl::CreateIndex() {
   ModuleIndexerResult result = IndexModule(GetWeakPtr(), *binary_, build_dir_);
   index_ = std::move(result.index);
   dwos_ = std::move(result.dwo_info);
+  full_index_built_ = true;
 
   // Index the DWOs array by skeleton die offset.
   dwo_skeleton_offset_to_index_.reserve(dwos_.size());

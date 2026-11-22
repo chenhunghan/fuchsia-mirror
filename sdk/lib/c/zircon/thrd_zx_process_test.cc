@@ -7,7 +7,7 @@
 #include <zircon/process.h>
 #include <zircon/threads.h>
 
-#include <zxtest/zxtest.h>
+#include "../test/unittest.h"
 
 TEST(ThrdSetZxProcessTest, SetBasic) {
   EXPECT_EQ(zx_process_self(), thrd_get_zx_process());

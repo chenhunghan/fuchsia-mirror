@@ -43,10 +43,10 @@ std::optional<zx::time_boot> LogBuffer::LastTimestamp() const {
   return messages_.empty() ? std::nullopt : std::make_optional(messages_.back().timestamp);
 }
 
-void LogBuffer::Add(::fpromise::result<fuchsia::logger::LogMessage, std::string> message) {
+void LogBuffer::Add(::fpromise::result<fuchsia_logger::LogMessage, std::string> message) {
   if (message.is_ok()) {
-    redactor_->Redact(message.value().msg);
-    for (std::string& tag : message.value().tags) {
+    redactor_->Redact(message.value().msg());
+    for (std::string& tag : message.value().tags()) {
       redactor_->Redact(tag);
     }
   } else {
@@ -56,9 +56,9 @@ void LogBuffer::Add(::fpromise::result<fuchsia::logger::LogMessage, std::string>
   // Assume timestamp 0 if no messages have been added yet.
   const zx::time_boot last_timestamp =
       (messages_.empty()) ? zx::time_boot(0) : messages_.back().timestamp;
-  const std::string& msg = (message.is_ok()) ? message.value().msg : message.error();
-  const int32_t& severity = (message.is_ok()) ? message.value().severity : kDefaultLogSeverity;
-  const std::vector<std::string>& tags = (message.is_ok()) ? message.value().tags : kDefaultTags;
+  const std::string& msg = (message.is_ok()) ? message.value().msg() : message.error();
+  const int32_t& severity = (message.is_ok()) ? message.value().severity() : kDefaultLogSeverity;
+  const std::vector<std::string>& tags = (message.is_ok()) ? message.value().tags() : kDefaultTags;
 
   // Adds a new message to |messages_| and updates internal accounting.
   auto AddNew = [this, &message, &msg, &severity, &tags, last_timestamp] {
@@ -165,9 +165,9 @@ void LogBuffer::ResetLastMessage() {
 }
 
 LogBuffer::Message::Message(
-    const ::fpromise::result<fuchsia::logger::LogMessage, std::string>& message,
+    const ::fpromise::result<fuchsia_logger::LogMessage, std::string>& message,
     zx::time_boot default_timestamp)
-    : timestamp(message.is_ok() ? message.value().time : default_timestamp),
+    : timestamp(message.is_ok() ? message.value().time() : default_timestamp),
       msg(message.is_ok() ? Format(message.value())
                           : fxl::StringPrintf("!!! Failed to format chunk: %s !!!\n",
                                               message.error().c_str())) {}

@@ -12,7 +12,7 @@ Some HTML to test
     <figcaption>A 256 icon image for Fuchsia.</figcaption>
 </figure>
 
-Missing alt text for an image ![image](/docs/images/fuchsia_icon_256x256.png)
+One-word alt text is allowed ![image](/docs/images/fuchsia_icon_256x256.png)
 
     <img src="/docs/images/fuchsia_icon_256x256.png">
 

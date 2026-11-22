@@ -11,9 +11,10 @@
 #include <string>
 #include <string_view>
 
+#include <safemath/checked_math.h>
+
 #include "src/developer/debug/shared/arch.h"
 #include "src/developer/debug/zxdb/client/breakpoint_settings.h"
-#include "src/developer/debug/zxdb/common/checked_math.h"
 #include "src/developer/debug/zxdb/common/err_or.h"
 #include "src/developer/debug/zxdb/expr/expr_value.h"
 #include "src/lib/fxl/strings/split_string.h"
@@ -47,7 +48,7 @@ ErrOr<DataId> DataId::FromExprValue(debug::Arch arch, uint64_t process_koid, std
   }
 
   uint64_t address = source.address();
-  if (!CheckedAdd(address, static_cast<uint64_t>(size)).has_value()) {
+  if (!safemath::CheckAdd(address, size).IsValid()) {
     return Err("Address range overflows 64-bit address space.");
   }
 
@@ -83,7 +84,7 @@ ErrOr<DataId> DataId::Parse(std::string_view data_id) {
     return format_err();
   }
 
-  if (!CheckedAdd(address, static_cast<uint64_t>(byte_size)).has_value()) {
+  if (!safemath::CheckAdd(address, byte_size).IsValid()) {
     return format_err();
   }
 

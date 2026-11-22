@@ -20,6 +20,8 @@
 #include <lib/fidl/cpp/wire/string_view.h>
 #include <lib/stdcompat/array.h>
 #include <lib/stdcompat/span.h>
+#include <lib/vfs/cpp/pseudo_dir.h>
+#include <lib/vfs/cpp/vmo_file.h>
 #include <lib/zbi-format/internal/debugdata.h>
 #include <lib/zbitl/item.h>
 #include <lib/zx/channel.h>
@@ -37,8 +39,6 @@
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
-#include <sdk/lib/vfs/cpp/pseudo_dir.h>
-#include <sdk/lib/vfs/cpp/vmo_file.h>
 
 namespace early_boot_instrumentation {
 namespace {

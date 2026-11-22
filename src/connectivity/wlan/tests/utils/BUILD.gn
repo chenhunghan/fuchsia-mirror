@@ -6,12 +6,22 @@ import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
 
 if (is_host) {
-  python_library("wlan_test_utils") {
+  python_library("architecture_check") {
     testonly = true
+    library_name = "wlan_architecture_check"
     sources = [
       "__init__.py",
-      "odpm_utils.py",
-      "throughput_utils.py",
+      "architecture_check.py",
+    ]
+  }
+
+  python_library("wlan_test_utils") {
+    testonly = true
+    imports = [ "." ]
+    sources = [
+      "wlan_test_utils/__init__.py",
+      "wlan_test_utils/odpm_utils.py",
+      "wlan_test_utils/throughput_utils.py",
     ]
     library_deps = [
       "//src/performance/lib/perf_publish",

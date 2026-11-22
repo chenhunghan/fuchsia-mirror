@@ -132,14 +132,14 @@ fn expect_rfcomm_connect(
     exec: &mut fasync::TestExecutor,
     test_profile_server: &mut TestProfileServer,
 ) -> Channel {
-    let expect_connect_fut =
-        test_profile_server.expect_connect(Some(ConnectChannel::RfcommChannel(1)));
+    let expect_connect_fut = test_profile_server.expect_connect_request();
     let mut expect_connect_fut = pin!(expect_connect_fut);
 
-    let near =
-        exec.run_until_stalled(&mut expect_connect_fut).expect("Pending while expecting connect");
-
-    near
+    exec.run_until_stalled(&mut expect_connect_fut)
+        .expect("Pending while expecting connect")
+        .assert_peer(PEER_ID)
+        .assert_channel(ConnectChannel::RfcommChannel(1))
+        .accept()
 }
 
 fn expect_sco_connect(

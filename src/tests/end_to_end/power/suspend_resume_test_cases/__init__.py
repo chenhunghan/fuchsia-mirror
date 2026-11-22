@@ -46,18 +46,16 @@ class _ManualUsbPowerHub(usb_power_hub.UsbPowerHub):
         super().__init__()
         self._device_name = device_name
 
-    def power_off(self, port: int | None = None) -> None:
+    def power_off(self) -> None:
         """Logs instructions for the user to unplug the USB cable."""
-        del port
         _LOGGER.info(
             "[ACTION REQUIRED] Please UNPLUG the USB cable from %s now so the "
             "device can suspend (waiting for device to go offline)...",
             self._device_name,
         )
 
-    def power_on(self, port: int | None = None) -> None:
+    def power_on(self) -> None:
         """Logs instructions for the user to replug the USB cable."""
-        del port
         _LOGGER.info(
             "[ACTION REQUIRED] Please PLUG the USB cable back into %s now to "
             "resume the device (waiting for device to come back online)...",
@@ -169,7 +167,7 @@ class SuspendResumeTestCases(fuchsia_base_test.FuchsiaTestCases):
         # manual USB suspend/resume flows into SystemPowerStateController
         # implementations so this test can uniformly call
         # `self.dut.system_power_state_controller`.
-        if self.dut.usb_power_hub is None:
+        if self.dut.usb.power_hub is None:
             try:
                 controller = self.dut.system_power_state_controller
             except errors.NotSupportedError:
@@ -179,7 +177,7 @@ class SuspendResumeTestCases(fuchsia_base_test.FuchsiaTestCases):
                     "unplug/replug.",
                     self.dut.device_name,
                 )
-                self.dut.set_usb_power_hub(
+                self.dut.usb.set_power_hub(
                     _ManualUsbPowerHub(self.dut.device_name)
                 )
             else:
@@ -197,7 +195,7 @@ class SuspendResumeTestCases(fuchsia_base_test.FuchsiaTestCases):
                 )
                 return
 
-        is_manual_usb = isinstance(self.dut.usb_power_hub, _ManualUsbPowerHub)
+        is_manual_usb = isinstance(self.dut.usb.power_hub, _ManualUsbPowerHub)
         timeout = (
             self._manual_suspend_resume_timeout
             if is_manual_usb

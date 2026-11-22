@@ -97,7 +97,6 @@ fuchsia_driver_component("aml-sdmmc") {
     ":aml-sdmmc-bind",
     ":aml-sdmmc-driver",
   ]
-  info = "meta/aml-sdmmc-info.json"
 }
 
 fuchsia_structured_config_cpp_elf_lib("aml-sdmmc-config") {

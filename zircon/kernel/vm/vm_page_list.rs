@@ -8,6 +8,7 @@ use super::pmm::{self, node as pmm_node};
 use crate::kernel::types::PAddr;
 use core::ops::Deref;
 use core::pin::Pin;
+use core::ptr::NonNull;
 use debug::{ltracef, ltracef_level};
 use pin_init::pin_data;
 use vm_constants_rs::{
@@ -120,8 +121,18 @@ struct ZeroRange {
     value: u32,
 }
 
+// Every dirty state must fit in the dirty state bits.
+zr::static_assert!((ZeroRangeDirtyState::Dirty as u32) < (1 << ZeroRange::DIRTY_STATE_BITS));
+// The awaiting clean length must not overlap with the dirty state bits.
+zr::static_assert!(
+    ZeroRange::AWAITING_CLEAN_LENGTH_SHIFT
+        >= ZeroRange::DIRTY_STATE_SHIFT + ZeroRange::DIRTY_STATE_BITS
+);
+zr::static_assert!(ZeroRange::AWAITING_CLEAN_LENGTH_SHIFT <= ZeroRange::PAGE_SHIFT);
+
 impl ZeroRange {
-    // This is the same as kIntervalBits in C++.
+    // This is the same as `VmPageOrMarker::INTERVAL_BITS`. Equality is asserted where that is
+    // defined.
     const ALIGN_BITS: u32 = kVmPageListIntervalBits;
     const ALIGN_MASK: u32 = (1 << Self::ALIGN_BITS) - 1;
     // Bound to VM_PAGE_OBJECT_DIRTY_STATE_BITS in C++.
@@ -259,6 +270,7 @@ impl VmPageOrMarker {
     /// Creates an empty `VmPageOrMarker`.
     ///
     /// A `PAGE_TYPE` that otherwise holds a null pointer is considered to be Empty.
+    #[inline]
     pub fn empty() -> Self {
         Self { raw: Self::PAGE_TYPE }
     }
@@ -325,36 +337,43 @@ impl VmPageOrMarker {
     /// Returns true if this is empty.
     ///
     /// A `PAGE_TYPE` that otherwise holds a null pointer is considered to be Empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.raw == Self::PAGE_TYPE
     }
 
     /// Returns true if this is a page.
+    #[inline]
     pub fn is_page(&self) -> bool {
         !self.is_empty() && (self.get_type() == Self::PAGE_TYPE)
     }
 
     /// Returns true if this is a reference.
+    #[inline]
     pub fn is_reference(&self) -> bool {
         self.get_type() == Self::REFERENCE_TYPE
     }
 
     /// Returns true if this is a page or a reference.
+    #[inline]
     pub fn is_page_or_ref(&self) -> bool {
         self.is_page() || self.is_reference()
     }
 
     /// Returns true if this is a marker.
+    #[inline]
     pub fn is_marker(&self) -> bool {
         self.get_type() == Self::ZERO_MARKER_TYPE
     }
 
     /// Returns true if this is parent content.
+    #[inline]
     pub fn is_parent_content(&self) -> bool {
         self.get_type() == Self::PARENT_CONTENT_TYPE
     }
 
     /// Returns the marker share count.
+    #[inline]
     pub fn marker_share_count(&self) -> u32 {
         debug_assert!(self.is_marker());
         self.raw >> Self::TYPE_BITS
@@ -382,14 +401,21 @@ impl VmPageOrMarker {
     }
 
     /// Returns true if this is an interval.
+    #[inline]
     pub fn is_interval(&self) -> bool {
         self.get_type() == Self::INTERVAL_TYPE
     }
 
+    /// Returns the raw interval sentinel bits.
+    #[inline]
+    fn raw_interval_sentinel(&self) -> u32 {
+        (self.raw >> Self::INTERVAL_SENTINEL_SHIFT) & Self::INTERVAL_SENTINEL_MASK
+    }
+
     /// Returns the interval sentinel type.
+    #[inline]
     fn interval_sentinel(&self) -> SentinelType {
-        let bits = (self.raw >> Self::INTERVAL_SENTINEL_SHIFT) & Self::INTERVAL_SENTINEL_MASK;
-        match bits {
+        match self.raw_interval_sentinel() {
             0 => SentinelType::Slot,
             1 => SentinelType::Start,
             2 => SentinelType::End,
@@ -398,6 +424,7 @@ impl VmPageOrMarker {
     }
 
     /// Sets the interval sentinel type.
+    #[inline]
     fn set_interval_sentinel(&mut self, sentinel: SentinelType) {
         // Clear the old sentinel type.
         self.raw &= !(Self::INTERVAL_SENTINEL_MASK << Self::INTERVAL_SENTINEL_SHIFT);
@@ -405,35 +432,36 @@ impl VmPageOrMarker {
         self.raw |= (sentinel as u32) << Self::INTERVAL_SENTINEL_SHIFT;
     }
 
-    /// Returns the interval type.
-    fn interval_type(&self) -> IntervalType {
-        let bits = (self.raw >> Self::INTERVAL_TYPE_SHIFT) & Self::INTERVAL_TYPE_MASK;
-        match bits {
-            0 => IntervalType::Zero,
-            _ => panic!("invalid interval type"),
-        }
+    /// Returns the raw interval type bits.
+    #[inline]
+    fn raw_interval_type(&self) -> u32 {
+        (self.raw >> Self::INTERVAL_TYPE_SHIFT) & Self::INTERVAL_TYPE_MASK
     }
 
     // Getters and setters for the interval type.
 
     /// Returns true if this is the start of an interval.
+    #[inline]
     pub fn is_interval_start(&self) -> bool {
-        self.is_interval() && self.interval_sentinel() == SentinelType::Start
+        self.is_interval() && self.raw_interval_sentinel() == SentinelType::Start as u32
     }
 
     /// Returns true if this is the end of an interval.
+    #[inline]
     pub fn is_interval_end(&self) -> bool {
-        self.is_interval() && self.interval_sentinel() == SentinelType::End
+        self.is_interval() && self.raw_interval_sentinel() == SentinelType::End as u32
     }
 
     /// Returns true if this is an interval slot.
+    #[inline]
     pub fn is_interval_slot(&self) -> bool {
-        self.is_interval() && self.interval_sentinel() == SentinelType::Slot
+        self.is_interval() && self.raw_interval_sentinel() == SentinelType::Slot as u32
     }
 
     /// Returns true if this is a zero interval.
+    #[inline]
     pub fn is_interval_zero(&self) -> bool {
-        self.is_interval() && self.interval_type() == IntervalType::Zero
+        self.is_interval() && self.raw_interval_type() == IntervalType::Zero as u32
     }
 
     // Getters and setter for the zero interval type.
@@ -508,6 +536,7 @@ impl VmPageOrMarker {
     /// Returns the underlying page. Is only valid to call if `is_page` is true.
     ///
     /// Do not need to mask any bits out of raw, since PAGE_TYPE has 0's for the type anyway.
+    #[inline]
     pub fn page(&self) -> VmPagePtr {
         debug_assert!(self.is_page());
         // SAFETY: `self.raw` is guaranteed to be a valid page index when `self` is a page.
@@ -517,6 +546,7 @@ impl VmPageOrMarker {
     /// Returns the physical address of the page. Is only valid to call if `is_page` is true.
     ///
     /// Can be more efficient than performing `page().paddr()` as it saves a memory de-reference.
+    #[inline]
     pub fn page_as_paddr(&self) -> PAddr {
         debug_assert!(self.is_page());
         // SAFETY: `self.raw` is guaranteed to be a valid page index when `self` is a page.
@@ -524,6 +554,7 @@ impl VmPageOrMarker {
     }
 
     /// Returns the underlying reference.
+    #[inline]
     pub fn reference(&self) -> ReferenceValue {
         debug_assert!(self.is_reference());
         ReferenceValue::new(self.raw & !ReferenceValue::ALIGN_MASK)
@@ -779,11 +810,11 @@ impl VmPageListNode {
     }
 
     /// For every page or marker in the node call the passed in function.
-    pub fn for_every_page<F>(&self, base: u64, func: F) -> Status
+    pub fn for_every_page<F>(&self, base: u64, mut func: F) -> Status
     where
         F: FnMut(&VmPageOrMarker, u64) -> Status,
     {
-        self.for_every_page_in_range(base, base, Self::end_offset(base), func)
+        self.for_every_page_in_range(base, base, Self::end_offset(base), &mut func)
     }
 
     /// For every page or marker in the node call the passed in function.
@@ -796,12 +827,17 @@ impl VmPageListNode {
 
     /// For every page or marker in the node in the range call the passed in function. The range
     /// is assumed to be within the node's object range.
+    ///
+    /// `func` is taken as `&mut F`, rather than a by-value `F` that a list traversal would have
+    /// to instantiate with `&mut F`, so that the per-slot call below is a direct call to `F` and
+    /// can be inlined into the slot loop.
+    #[inline]
     pub fn for_every_page_in_range<F>(
         &self,
         base: u64,
         start_offset: u64,
         end_offset: u64,
-        mut func: F,
+        func: &mut F,
     ) -> Status
     where
         F: FnMut(&VmPageOrMarker, u64) -> Status,
@@ -810,7 +846,10 @@ impl VmPageListNode {
         debug_assert!(start_offset >= base);
         debug_assert!(end_offset <= Self::end_offset(base));
         let start = ((start_offset - base) / (page::SIZE as u64)) as usize;
-        let end = ((end_offset - base) / (page::SIZE as u64)) as usize;
+        let end = core::cmp::min(
+            ((end_offset - base) / (page::SIZE as u64)) as usize,
+            Self::PAGE_FAN_OUT,
+        );
         #[allow(clippy::needless_range_loop)]
         for i in start..end {
             if !self.pages[i].is_empty() {
@@ -852,18 +891,67 @@ impl VmPageListNode {
     where
         F: FnMut(&mut VmPageOrMarker, u64) -> Status,
     {
+        // SAFETY: `self` is a live node that is exclusively borrowed for the traversal, the range
+        // is within the node as callers of this function are required to pass, and the reference
+        // handed to `func` is only used for the duration of that call.
+        unsafe {
+            Self::for_every_page_in_range_ptr(
+                self,
+                base,
+                start_offset,
+                end_offset,
+                &mut |mut slot, offset| func(slot.as_mut(), offset),
+            )
+        }
+    }
+
+    /// For every page or marker in the node in the range call the passed in function with a raw
+    /// pointer to the slot. The range is assumed to be within the node's object range.
+    ///
+    /// Each pointer is derived with `slot_ptr`, so no reference to the node is created, and a
+    /// slot is only read before it is handed to `func`.
+    ///
+    /// # Safety
+    ///
+    /// * `node` must be non-null, properly aligned, and point to a live `VmPageListNode`.
+    /// * The range must lie within the node: `base <= start_offset <= end_offset <=
+    ///   Self::end_offset(base)`.
+    /// * Each slot in the range must be readable when it is visited: `func` must not free the
+    ///   node, and must not keep a `&mut` to a slot that has not been visited yet.
+    #[inline(always)]
+    unsafe fn for_every_page_in_range_ptr<F>(
+        node: *mut Self,
+        base: u64,
+        start_offset: u64,
+        end_offset: u64,
+        func: &mut F,
+    ) -> Status
+    where
+        F: FnMut(NonNull<VmPageOrMarker>, u64) -> Status,
+    {
         debug_assert!(end_offset >= start_offset);
         debug_assert!(start_offset >= base);
         debug_assert!(end_offset <= Self::end_offset(base));
+        debug_assert!(node.is_aligned());
+        // SAFETY: The caller guarantees `node` points to a live `VmPageListNode`, which is always
+        // properly aligned. Stating this once here lets the compiler drop the alignment check that
+        // debug builds would otherwise perform on every slot dereference below.
+        unsafe { core::hint::assert_unchecked(node.is_aligned()) };
         let start = ((start_offset - base) / (page::SIZE as u64)) as usize;
         let end = ((end_offset - base) / (page::SIZE as u64)) as usize;
-        #[allow(clippy::needless_range_loop)]
         for i in start..end {
-            if !self.pages[i].is_empty() {
-                let status = func(&mut self.pages[i], base + (i as u64) * (page::SIZE as u64));
-                if status != Status::NEXT {
-                    return status;
-                }
+            // SAFETY: The caller guarantees `node` points to a live node and that the range lies
+            // within it, so `i < PAGE_FAN_OUT`.
+            let slot = unsafe { Self::slot_ptr(node, i) };
+            // SAFETY: `slot` is valid for reads, and `func` has not been handed this slot yet.
+            if unsafe { (*slot).is_empty() } {
+                continue;
+            }
+            // SAFETY: `slot` is derived from the non-null `node`.
+            let slot = unsafe { NonNull::new_unchecked(slot) };
+            let status = func(slot, base + (i as u64) * (page::SIZE as u64));
+            if status != Status::NEXT {
+                return status;
             }
         }
         Status::NEXT
@@ -1098,8 +1186,8 @@ impl<'a> Iterator for NodeIterMut<'a> {
 }
 
 /// Cursor that can be used for iterating over contiguous blocks of entries in a page list. The
-/// underlying page list must not have any entries removed while using this cursor, as the cursor
-/// retains iterators into the page list. It is, however, safe to insert new entries.
+/// underlying page list must not have any nodes inserted or removed while using this cursor, as
+/// the cursor retains a B-tree iterator into the page list.
 ///
 /// The cursor can be used to iterate over empty contiguous slots, however iteration will always
 /// cease if entries are not contiguous.
@@ -1114,6 +1202,7 @@ pub struct VmPageListCursor<'a> {
 
 impl Default for VmPageListCursor<'_> {
     /// Constructs a cursor that is already exhausted, i.e. `current` will return `None`.
+    #[inline]
     fn default() -> Self {
         let cursor = Opaque::uninit();
         // SAFETY: `cursor.get()` is a valid pointer to be initialized to a default invalid
@@ -1128,8 +1217,21 @@ impl<'a> VmPageListCursor<'a> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure `cursor` is an initialized iterator that points at a node of a
-    /// `VmPageList` that is mutably borrowed for `'a`.
+    /// `cursor` must be an initialized iterator that points at a node of a `VmPageList`. The
+    /// lifetime `'a` is chosen by the caller, and for as long as the returned cursor, or a pointer
+    /// returned by its `current_ptr()`, is used:
+    ///
+    /// * The list must remain valid, and no node may be inserted into or removed from it: the
+    ///   cursor holds a B-tree iterator, which either operation makes stale, and a pointer into a
+    ///   removed node dangles.
+    /// * Nothing else may write to a node while a reference returned by `current()` is live or
+    ///   while `for_every_contiguous()` or `VmPageList::for_every_page_in_cursor_range()` reads it
+    ///   (they hold a shared reference to the whole node). A write through a pointer returned by
+    ///   `current_ptr()` is such a write.
+    ///
+    /// A `VmPageList` that is mutably borrowed for `'a` satisfies all of these, for a pointer
+    /// returned by `current_ptr()` as long as it is not used after `'a`.
+    #[inline]
     unsafe fn new(cursor: Opaque<bindings::VmPageListBtreeCursor>, index: usize) -> Self {
         debug_assert!(index < VmPageListNode::PAGE_FAN_OUT);
         Self { cursor, index, _phantom: core::marker::PhantomData }
@@ -1140,6 +1242,7 @@ impl<'a> VmPageListCursor<'a> {
     ///
     /// Note that it is up to the caller to know the offset, which it can track by remembering how
     /// many `step`s it has done.
+    #[inline]
     pub fn current(&self) -> Option<&VmPageOrMarker> {
         if !self.valid() {
             return None;
@@ -1151,20 +1254,32 @@ impl<'a> VmPageListCursor<'a> {
         Some(node.lookup(self.index))
     }
 
-    /// See `current`. Returns a `VmPageOrMarkerRef` that allows for limited mutation of the slot.
-    pub fn current_ref(&mut self) -> Option<VmPageOrMarkerRef<'_>> {
+    /// See `current`. Returns a raw pointer to the slot, derived from the slot's node without
+    /// creating a reference to the node (see `VmPageListNode::slot_ptr`), for callers that hold
+    /// on to the slot across later lookups in the same node.
+    ///
+    /// The pointer is valid for as long as the conditions that this cursor was constructed under
+    /// hold (see `new`): until a node is inserted into or removed from the list, or the list is no
+    /// longer valid, for example because the lock that guards it has been released.
+    #[inline]
+    pub fn current_ptr(&self) -> Option<NonNull<VmPageOrMarker>> {
         if !self.valid() {
             return None;
         }
         let entry = self.get();
-        // SAFETY: the cursor is valid, so `entry.node` is non-null and points at a live node that
-        // outlives the borrow of `self`. The cursor holds the only mutable borrow of the list.
-        let node = unsafe { entry.node.cast::<VmPageListNode>().as_mut_unchecked() };
-        Some(VmPageOrMarkerRef::new(node.lookup_mut(self.index)))
+        // SAFETY: the cursor is valid, so `entry.node` is non-null and points at a live node, and
+        // `self.index` is less than `PAGE_FAN_OUT`, so the slot pointer is in bounds and non-null.
+        Some(unsafe {
+            NonNull::new_unchecked(VmPageListNode::slot_ptr(
+                entry.node.cast::<VmPageListNode>(),
+                self.index,
+            ))
+        })
     }
 
     /// Move the cursor to the next entry. The next entry can then be retrieved by calling
     /// `current`, and if there is no next entry then `current` will return `None`.
+    #[inline]
     pub fn step(&mut self) {
         if self.valid() {
             self.index += 1;
@@ -1180,6 +1295,7 @@ impl<'a> VmPageListCursor<'a> {
     ///
     /// The callback can return `Status::NEXT` to continue, `Status::STOP` to cease iteration
     /// gracefully, or any other status to terminate with that status code.
+    #[inline]
     pub fn for_every_contiguous<F>(&mut self, mut func: F) -> Result<(), Status>
     where
         F: FnMut(&VmPageOrMarker) -> Status,
@@ -1195,6 +1311,7 @@ impl<'a> VmPageListCursor<'a> {
                     if status == Status::STOP {
                         return Ok(());
                     }
+                    core::hint::cold_path();
                     return Err(status);
                 }
                 self.index += 1;
@@ -1208,6 +1325,7 @@ impl<'a> VmPageListCursor<'a> {
 
     /// Returns the offset of the `current` position of the cursor. This is invalid to call if
     /// `current` is returning `None`.
+    #[inline]
     pub fn offset(&self) -> u64 {
         debug_assert!(self.valid());
         self.get().offset + (self.index as u64) * (page::SIZE as u64)
@@ -1215,6 +1333,7 @@ impl<'a> VmPageListCursor<'a> {
 
     /// Helper to increment the underlying node, testing for contiguity. Returns whether the cursor
     /// is still valid after the increment.
+    #[inline]
     fn inc_node(&mut self) -> bool {
         // Should only be incrementing if index is at the end, as otherwise we're not being
         // contiguous.
@@ -1239,12 +1358,14 @@ impl<'a> VmPageListCursor<'a> {
     }
 
     /// Helper to check if the node is valid or not by checking index for its sentinel value.
+    #[inline]
     fn valid(&self) -> bool {
         self.index < VmPageListNode::PAGE_FAN_OUT
     }
 
     /// Returns the entry that the underlying iterator points at. This must only be called while the
     /// cursor is `valid()`, which guarantees that the iterator points at a node.
+    #[inline]
     fn get(&self) -> VmPageListBtreeNodeEntry {
         // SAFETY: `self.cursor.get()` is a valid initialized cursor pointer.
         let entry = unsafe { btree_cursor_get(self.cursor.get()) };
@@ -1420,6 +1541,14 @@ enum PageOrGapMut<'a> {
     Gap(u64, u64),
 }
 
+/// An entry visited by `VmPageList::for_every_page_and_gap_in_range_internal_ptr`.
+enum PageOrGapPtr {
+    /// A pointer to a page/ref/marker or interval sentinel, and its offset.
+    Page(NonNull<VmPageOrMarker>, u64),
+    /// A gap (unpopulated range), as `(gap_start, gap_end)`.
+    Gap(u64, u64),
+}
+
 impl VmPageList {
     /// Allow the implementation to use a one-past-the-end for VmPageListNode offsets.
     pub const MAX_SIZE: u64 = round_down(u64::MAX, VmPageListNode::NODE_SPAN_BYTES);
@@ -1499,6 +1628,7 @@ impl VmPageList {
     ///
     /// Lookup may return None if there is no slot allocated for the given offset. If Some is
     /// returned it may still be the case that `is_empty` on the returned `VmPageOrMarker` is true.
+    #[inline]
     pub fn lookup(&self, offset: u64) -> Option<&VmPageOrMarker> {
         let node_offset = VmPageListNode::node_offset(offset);
         // SAFETY: `self.list.get()` is valid and `cpp_vm_page_list_btree_find_const` returns a
@@ -1516,6 +1646,7 @@ impl VmPageList {
 
     /// Similar to `lookup` but returns a `VmPageOrMarkerRef` that allows for limited mutation of
     /// the slot. General mutation requires calling `lookup_or_allocate`.
+    #[inline]
     pub fn lookup_mut(&mut self, offset: u64) -> Option<VmPageOrMarkerRef<'_>> {
         let slot_ptr = self.lookup_slot(offset);
         if slot_ptr.is_null() {
@@ -1528,13 +1659,36 @@ impl VmPageList {
 
     /// Similar to `lookup_mut` but returns a `VmPageListCursor` that allows for iterating over any
     /// contiguous slots from the provided offset.
+    #[inline]
     pub fn lookup_mut_cursor(&mut self, offset: u64) -> VmPageListCursor<'_> {
+        // SAFETY: `self` is a valid exclusive borrow of the `VmPageList`.
+        unsafe { Self::lookup_mut_cursor_raw(self, offset) }
+    }
+
+    /// Raw-pointer variant of `lookup_mut_cursor` that avoids materializing an intermediate
+    /// `&mut VmPageList` reference when constructing the cursor.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid `VmPageList`, and the conditions of
+    /// [`VmPageListCursor::new`] must hold for that list for as long as the returned cursor,
+    /// whose lifetime `'a` is chosen by the caller, is used.
+    #[inline]
+    pub(super) unsafe fn lookup_mut_cursor_raw<'a>(
+        this: *mut Self,
+        offset: u64,
+    ) -> VmPageListCursor<'a> {
         // Lookup the tree node that holds this offset.
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
-        // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
+        // Project to the `list` field without materializing a reference to `*this`. `Opaque` is a
+        // transparent wrapper, so a pointer to it is a pointer to the wrapped `VmPageListBtree`.
+        // SAFETY: `this` is valid per caller precondition, so the field projection is in bounds.
+        let list = unsafe { &raw mut (*this).list }.cast();
+        // SAFETY: `list` is a valid initialized `VmPageListBtree` per caller precondition, and
+        // `cursor.get()` is a valid pointer.
         let node_ptr = unsafe {
             bindings::cpp_vm_page_list_btree_find(
-                self.list.get(),
+                list,
                 VmPageListNode::node_offset(offset),
                 cursor.get(),
             )
@@ -1542,26 +1696,47 @@ impl VmPageList {
         if node_ptr.is_null() {
             return VmPageListCursor::default();
         }
-        // SAFETY: the node was found, so `cursor` was initialized to point at it. The returned
-        // cursor mutably borrows `self`, which owns the node.
+        // SAFETY: the node was found, so `cursor` was initialized to point at it.
         unsafe { VmPageListCursor::new(cursor, VmPageListNode::node_index(offset)) }
     }
 
     /// Similar to `lookup_mut_cursor` but does a lower bound search instead of a find, returning
     /// the first slot >= `offset`, if any exists.
+    #[inline]
     pub fn lookup_nearest_mut_cursor(&mut self, offset: u64) -> VmPageListCursor<'_> {
+        // SAFETY: `self` is a valid exclusive borrow of the `VmPageList`.
+        unsafe { Self::lookup_nearest_mut_cursor_raw(self, offset) }
+    }
+
+    /// Raw-pointer variant of `lookup_nearest_mut_cursor` that avoids materializing an intermediate
+    /// `&mut VmPageList` reference when constructing the cursor.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid `VmPageList`, and the conditions of
+    /// [`VmPageListCursor::new`] must hold for that list for as long as the returned cursor,
+    /// whose lifetime `'a` is chosen by the caller, is used.
+    #[inline]
+    pub(super) unsafe fn lookup_nearest_mut_cursor_raw<'a>(
+        this: *mut Self,
+        offset: u64,
+    ) -> VmPageListCursor<'a> {
         // Lookup the tree node that holds this offset or a larger one.
         let node_offset = VmPageListNode::node_offset(offset);
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
-        // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
-        let entry = unsafe { btree_lower_bound(self.list.get(), node_offset, cursor.get()) };
+        // Project to the `list` field without materializing a reference to `*this`. `Opaque` is a
+        // transparent wrapper, so a pointer to it is a pointer to the wrapped `VmPageListBtree`.
+        // SAFETY: `this` is valid per caller precondition, so the field projection is in bounds.
+        let list = unsafe { &raw mut (*this).list }.cast();
+        // SAFETY: `list` is a valid initialized `VmPageListBtree` per caller precondition, and
+        // `cursor.get()` is a valid pointer.
+        let entry = unsafe { btree_lower_bound(list, node_offset, cursor.get()) };
         if entry.node.is_null() {
             return VmPageListCursor::default();
         }
         let index =
             if entry.offset == node_offset { VmPageListNode::node_index(offset) } else { 0 };
-        // SAFETY: a node was found, so `cursor` points at it. The returned cursor mutably borrows
-        // `self`, which owns the node.
+        // SAFETY: a node was found, so `cursor` points at it.
         unsafe { VmPageListCursor::new(cursor, index) }
     }
 
@@ -1595,12 +1770,28 @@ impl VmPageList {
         offset: u64,
         interval_handling: IntervalHandling,
     ) -> (Option<&mut VmPageOrMarker>, bool) {
+        let (slot, is_in_interval) = self.lookup_or_allocate_ptr(offset, interval_handling);
+        // SAFETY: `lookup_or_allocate_ptr` returns either `None` or a pointer to a live slot in
+        // `self.list`, valid for the lifetime of `&mut self`, and no other reference to the slot
+        // is held by `self`.
+        (slot.map(|mut slot| unsafe { slot.as_mut() }), is_in_interval)
+    }
+
+    /// Like [`Self::lookup_or_allocate`], but returns the slot as a raw pointer derived directly
+    /// from the node rather than through a `&mut VmPageOrMarker`, so that a caller which keeps
+    /// the slot pointer across later non-mutating lookups in `self` (such as
+    /// `VmCowPages::AddPageTransaction`) does not have its pointer invalidated by them.
+    ///
+    /// The returned pointer is valid until the next page-list operation that may free or move the
+    /// node holding the slot (such as `return_empty_slot` or `remove_pages`).
+    pub fn lookup_or_allocate_ptr(
+        &mut self,
+        offset: u64,
+        interval_handling: IntervalHandling,
+    ) -> (Option<NonNull<VmPageOrMarker>>, bool) {
         match interval_handling {
             IntervalHandling::NoIntervals => {
-                let slot = self.lookup_or_allocate_internal(offset);
-                // SAFETY: `lookup_or_allocate_internal` returns either null or a pointer to a live
-                // slot in `self.list`, valid for the lifetime of `&mut self`.
-                (unsafe { slot.as_mut() }, false)
+                (NonNull::new(self.lookup_or_allocate_internal(offset)), false)
             }
             IntervalHandling::CheckForInterval => {
                 self.lookup_or_allocate_check_for_interval(offset, false)
@@ -1689,7 +1880,7 @@ impl VmPageList {
         &mut self,
         offset: u64,
         split_interval: bool,
-    ) -> (Option<&mut VmPageOrMarker>, bool) {
+    ) -> (Option<NonNull<VmPageOrMarker>>, bool) {
         // Find the node that would contain this offset.
         let node_offset = VmPageListNode::node_offset(offset);
         let node_index = VmPageListNode::node_index(offset);
@@ -1781,8 +1972,8 @@ impl VmPageList {
         if !is_in_interval || unsafe { (*slot).is_interval_slot() } {
             // We currently only support zero intervals.
             debug_assert!(!is_in_interval || unsafe { (*slot).is_interval_zero() });
-            // SAFETY: `slot` is non-null and valid for the lifetime of `&mut self`.
-            return (Some(unsafe { &mut *slot }), is_in_interval);
+            // SAFETY: `slot` is non-null (checked above).
+            return (Some(unsafe { NonNull::new_unchecked(slot) }), is_in_interval);
         }
 
         // If we reached here, we know that we are in an interval and we need to split it in order
@@ -1968,7 +2159,7 @@ impl VmPageList {
             // to find the relevant start to update. So the awaiting_clean_length can be larger
             // than the length of the resultant interval; the caller will take that into account
             // and carry over larger awaiting_clean_lengths across multiple intervals if they
-            // exist. (See related comment in VmCowPages::WritebackEndLocked.)
+            // exist. (See related comment in `VmCowPages::writeback_end_locked`.)
             if slot_ref.is_interval_start() {
                 let awaiting_clean_len = slot_ref.zero_interval_awaiting_clean_length();
                 if awaiting_clean_len > page::SIZE as u64 {
@@ -1984,7 +2175,10 @@ impl VmPageList {
             slot_ref.change_interval_sentinel(SentinelType::Slot);
         }
 
-        (Some(slot_ref), true)
+        // Return the node-derived `slot` pointer rather than `slot_ref` so the caller's pointer
+        // is not invalidated by later shared reads of the node.
+        // SAFETY: `slot` is non-null (checked above).
+        (Some(unsafe { NonNull::new_unchecked(slot) }), true)
     }
 
     /// Returns a slot that was empty after `lookup_or_allocate`, and that the caller did not end up
@@ -2551,12 +2745,13 @@ impl VmPageList {
         // interval should be returned to its original state before the call.
         let (start_slot, is_start_in_interval) =
             self.lookup_or_allocate_check_for_interval(start_offset, true);
-        if start_slot.is_none() {
+        let Some(start_slot) = start_slot else {
             return Err(Status::NO_MEMORY);
-        }
+        };
         debug_assert!(is_start_in_interval);
         let start_dirty_state = {
-            let start_slot_ref = start_slot.unwrap();
+            // SAFETY: `start_slot` was just returned as a live slot in `self.list`.
+            let start_slot_ref = unsafe { start_slot.as_ref() };
             debug_assert!(start_slot_ref.is_interval_slot());
             start_slot_ref.zero_interval_dirty_state()
         };
@@ -2567,14 +2762,15 @@ impl VmPageList {
 
         let (end_slot, is_end_in_interval) =
             self.lookup_or_allocate_check_for_interval(end_offset, true);
-        if end_slot.is_none() {
+        let Some(end_slot) = end_slot else {
             // Return the start slot before returning.
             self.return_interval_slot(start_offset);
             return Err(Status::NO_MEMORY);
-        }
+        };
         debug_assert!(is_end_in_interval);
         {
-            let end_slot_ref = end_slot.unwrap();
+            // SAFETY: `end_slot` was just returned as a live slot in `self.list`.
+            let end_slot_ref = unsafe { end_slot.as_ref() };
             debug_assert!(end_slot_ref.is_interval_slot());
             // We only support zero intervals and the start and end dirty state should match.
             debug_assert!(start_dirty_state == end_slot_ref.zero_interval_dirty_state());
@@ -3210,6 +3406,7 @@ impl VmPageList {
     /// Internal helper for immutable range traversals.
     ///
     /// Calls the provided callback for every page in the given range.
+    #[inline]
     fn for_every_page_in_range_internal<F>(
         cursor: &Opaque<bindings::VmPageListBtreeCursor>,
         start_offset: u64,
@@ -3243,6 +3440,7 @@ impl VmPageList {
     }
 
     /// Walk the page tree, calling the passed in function on every tree node in the given range.
+    #[inline]
     pub fn for_every_page_in_range<F>(
         &self,
         start_offset: u64,
@@ -3272,12 +3470,14 @@ impl VmPageList {
             if status == Status::STOP {
                 return Ok(());
             }
+            core::hint::cold_path();
             return Err(status);
         }
         Ok(())
     }
 
     /// Similar to `for_every_page_in_range` but uses a valid `cursor` as the starting point.
+    #[inline]
     pub fn for_every_page_in_cursor_range<F>(
         cursor: VmPageListCursor<'_>,
         end_offset: u64,
@@ -3300,6 +3500,7 @@ impl VmPageList {
             if status == Status::STOP {
                 return Ok(());
             }
+            core::hint::cold_path();
             return Err(status);
         }
         Ok(())
@@ -3310,6 +3511,7 @@ impl VmPageList {
     /// `per_page_func` is called for every page/ref/marker or interval sentinel in the range with
     /// `(&VmPageOrMarker, offset)`.
     /// `per_gap_func` is called for every gap (unpopulated range) with `(gap_start, gap_end)`.
+    #[inline]
     pub fn for_every_page_and_gap_in_range<PageFunc, GapFunc>(
         &self,
         start_offset: u64,
@@ -3321,16 +3523,22 @@ impl VmPageList {
         PageFunc: FnMut(&VmPageOrMarker, u64) -> Status,
         GapFunc: FnMut(u64, u64) -> Status,
     {
-        self.for_every_page_and_gap_in_range_internal(start_offset, end_offset, |e| match e {
-            PageOrGap::Page(p, off) => per_page_func(p, off),
-            PageOrGap::Gap(gap_start, gap_end) => per_gap_func(gap_start, gap_end),
-        })
+        self.for_every_page_and_gap_in_range_internal(
+            start_offset,
+            end_offset,
+            #[inline(always)]
+            |e| match e {
+                PageOrGap::Page(p, off) => per_page_func(p, off),
+                PageOrGap::Gap(gap_start, gap_end) => per_gap_func(gap_start, gap_end),
+            },
+        )
     }
 
     /// Internal version of `for_every_page_and_gap_in_range` that calls a single `func` for both
     /// pages and gaps, in the same order that `for_every_page_and_gap_in_range` calls
     /// `per_page_func` and `per_gap_func`. This allows a caller to track state across both pages
     /// and gaps in a single closure.
+    #[inline]
     fn for_every_page_and_gap_in_range_internal<F>(
         &self,
         start_offset: u64,
@@ -3340,7 +3548,6 @@ impl VmPageList {
     where
         F: FnMut(PageOrGap<'_>) -> Status,
     {
-        let page_size = page::SIZE as u64;
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
         // Position cursor at lower bound.
         // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
@@ -3356,8 +3563,12 @@ impl VmPageList {
         // Set to true when we encounter an interval start but haven't yet encountered the end.
         let mut in_interval = false;
 
-        let status =
-            Self::for_every_page_in_range_internal(&cursor, start_offset, end_offset, |p, off| {
+        let status = Self::for_every_page_in_range_internal(
+            &cursor,
+            start_offset,
+            end_offset,
+            #[inline(always)]
+            |p, off| {
                 // Update our interval tracking first. Should the callbacks later request an early
                 // exit then this work is wasted, but doing it first, and unconditionally, lets the
                 // compiler perform better common expression elimination with the per_gap_func check
@@ -3387,17 +3598,19 @@ impl VmPageList {
                 if expected_next_off != off && !p.is_interval_end() {
                     status = func(PageOrGap::Gap(expected_next_off, off));
                 }
-                expected_next_off = off + page_size;
+                expected_next_off = off + page::SIZE as u64;
                 if status == Status::NEXT {
                     status = func(PageOrGap::Page(p, off));
                 }
                 status
-            });
+            },
+        );
 
         if status != Status::NEXT {
             if status == Status::STOP {
                 return Ok(());
             }
+            core::hint::cold_path();
             return Err(status);
         }
 
@@ -3475,56 +3688,127 @@ impl VmPageList {
     where
         F: FnMut(PageOrGapMut<'_>) -> Status,
     {
+        let adapter = |e| match e {
+            PageOrGapPtr::Page(mut slot, off) => {
+                // SAFETY: `slot` points to a live slot in a node of `self`, and the
+                // `&mut VmPageOrMarker` is only live for the duration of `func`.
+                func(PageOrGapMut::Page(unsafe { slot.as_mut() }, off))
+            }
+            PageOrGapPtr::Gap(gap_start, gap_end) => func(PageOrGapMut::Gap(gap_start, gap_end)),
+        };
+        // SAFETY: `self` is exclusively borrowed for the duration of the traversal, so it is valid
+        // and nothing else accesses the list. `func` only mutates slots in place without inserting
+        // or erasing B-tree nodes, and `adapter` does not keep `slot` after `func` returns.
+        unsafe {
+            Self::for_every_page_and_gap_in_range_internal_ptr::<N, _>(
+                self,
+                start_offset,
+                end_offset,
+                adapter,
+            )
+        }
+    }
+
+    /// Raw-pointer version of `for_every_page_and_gap_in_range_internal_mut`, which calls `func`
+    /// with a `PageOrGapPtr::Page(NonNull<VmPageOrMarker>, offset)` for every page and
+    /// `PageOrGapPtr::Gap(gap_start, gap_end)` for every gap without holding `&mut Self` or
+    /// `&mut VmPageOrMarker` across `func`.
+    ///
+    /// If `N::CLEANUP_EMPTY` is true, then it is assumed `func` may remove pages and page nodes
+    /// will be checked to see if they are empty and can be cleaned up.
+    ///
+    /// # Safety
+    ///
+    /// * `this` must point to a valid `VmPageList`, and for the whole call no other thread may
+    ///   access that list, and no reference to the list, to one of its nodes, or to one of its
+    ///   slots (other than one from which `this` was derived) may be live across the call. The
+    ///   traversal reads the list and its nodes through `this` between calls to `func`, and when
+    ///   `N::CLEANUP_EMPTY` it erases empty nodes.
+    /// * If `func` does not access `*this` outside passed slot pointers, `this` may be derived
+    ///   from `&mut VmPageList`. If `func` accesses `*this` outside passed slot pointers (for
+    ///   example read-only lookups via an enclosing `KCell`/`UnsafeCell`), `this` must carry raw
+    ///   `UnsafeCell` provenance (not derived from `&mut VmPageList`), and `func` must not
+    ///   materialize `&mut VmPageList` or `&mut VmPageListNode` to the current node.
+    /// * `func` must not insert or erase B-tree nodes in `*this` (modifying passed slots in place
+    ///   and performing read-only lookups of already-allocated slots are permitted), and must not
+    ///   create conflicting accesses to the current node while it is being traversed.
+    /// * When `N::CLEANUP_EMPTY`, a slot pointer passed to `func` must not be used after that call
+    ///   to `func` returns: once the traversal has visited the slots of a node, it erases the node,
+    ///   which frees it, if it is then empty.
+    #[inline(always)]
+    unsafe fn for_every_page_and_gap_in_range_internal_ptr<N: NodeCheck, F>(
+        this: *mut Self,
+        start_offset: u64,
+        end_offset: u64,
+        mut func: F,
+    ) -> Result<(), Status>
+    where
+        F: FnMut(PageOrGapPtr) -> Status,
+    {
+        if start_offset >= end_offset {
+            return Ok(());
+        }
         let page_size = page::SIZE as u64;
         let mut expected_next_off = start_offset;
         // Set to true when we encounter an interval start but haven't yet encountered the end.
         let mut in_interval = false;
 
-        let status = self.for_every_page_in_range_internal_mut::<N, _>(
-            start_offset,
-            end_offset,
-            |p, off| {
-                // Update our interval tracking first. Should the callbacks later request an early
-                // exit then this work is wasted, but doing it first, and unconditionally, lets the
-                // compiler perform better common expression elimination with the per_gap_func check
-                // next.
-                if p.is_interval_start() {
-                    // We should not already have been tracking an interval.
-                    debug_assert!(!in_interval);
-                    // Start and end sentinel interval types should match. Since we only support
-                    // zero intervals currently, we can simply check for that.
-                    debug_assert!(p.is_interval_zero());
-                    in_interval = true;
-                } else if p.is_interval_end() {
-                    // If this is not the first populated slot we encountered, we should have been
-                    // tracking a valid interval.
-                    debug_assert!(in_interval || expected_next_off == start_offset);
-                    // Start and end sentinel interval types should match. Since we only support
-                    // zero intervals currently, we can simply check for that.
-                    debug_assert!(p.is_interval_zero());
-                    // Reset interval tracking.
-                    in_interval = false;
-                }
+        let per_page = |p: NonNull<VmPageOrMarker>, off: u64| {
+            // SAFETY: `p` points to a live slot in the current node before `func` runs.
+            let (is_interval_start, is_interval_end, is_interval_zero) = unsafe {
+                let slot = p.as_ref();
+                (slot.is_interval_start(), slot.is_interval_end(), slot.is_interval_zero())
+            };
+            // Update our interval tracking first. Should the callbacks later request an early exit
+            // then this work is wasted, but doing it first, and unconditionally, lets the compiler
+            // perform better common expression elimination with the per_gap_func check next.
+            if is_interval_start {
+                // We should not already have been tracking an interval.
+                debug_assert!(!in_interval);
+                // Start and end sentinel interval types should match. Since we only support
+                // zero intervals currently, we can simply check for that.
+                debug_assert!(is_interval_zero);
+                in_interval = true;
+            } else if is_interval_end {
+                // If this is not the first populated slot we encountered, we should have
+                // been tracking a valid interval.
+                debug_assert!(in_interval || expected_next_off == start_offset);
+                // Start and end sentinel interval types should match. Since we only support
+                // zero intervals currently, we can simply check for that.
+                debug_assert!(is_interval_zero);
+                // Reset interval tracking.
+                in_interval = false;
+            }
 
-                let mut status = Status::NEXT;
-                // We can move ahead of expected_next_off in the case of an interval too, which
-                // represents a run of pages. Make sure this is not an interval before calling the
-                // gap callback.
-                if expected_next_off != off && !p.is_interval_end() {
-                    status = func(PageOrGapMut::Gap(expected_next_off, off));
-                }
-                expected_next_off = off + page_size;
-                if status == Status::NEXT {
-                    status = func(PageOrGapMut::Page(p, off));
-                }
-                status
-            },
-        );
+            let mut status = Status::NEXT;
+            // We can move ahead of expected_next_off in the case of an interval too, which
+            // represents a run of pages. Make sure this is not an interval before calling
+            // the gap callback.
+            if expected_next_off != off && !is_interval_end {
+                status = func(PageOrGapPtr::Gap(expected_next_off, off));
+            }
+            expected_next_off = off + page_size;
+            if status == Status::NEXT {
+                status = func(PageOrGapPtr::Page(p, off));
+            }
+            status
+        };
+        // SAFETY: Per `# Safety`, `this` and `func` meet the same clauses of the callee, and
+        // `per_page` does not use `p` after `func` returns.
+        let status = unsafe {
+            Self::for_every_page_in_range_internal_ptr::<N, _>(
+                this,
+                start_offset,
+                end_offset,
+                per_page,
+            )
+        };
 
         if status != Status::NEXT {
             if status == Status::STOP {
                 return Ok(());
             }
+            core::hint::cold_path();
             return Err(status);
         }
 
@@ -3538,7 +3822,7 @@ impl VmPageList {
         // could not be in an interval without in_interval being true because we would have seen the
         // interval start.
         //
-        // `for_every_page_in_range_internal_mut` does not expose the node the traversal started
+        // `for_every_page_in_range_internal_ptr` does not expose the node the traversal started
         // from, so is_offset_in_interval() performs its own lookup. It is only reached if no
         // callback ran, in which case the page list is unchanged since the traversal started.
         if expected_next_off != end_offset {
@@ -3547,10 +3831,14 @@ impl VmPageList {
             // case all offsets in the range [start_offset, end_offset) would lie in the same
             // interval, so we can just check one of them).
             let ended_in_interval = in_interval
-                || (expected_next_off == start_offset && self.is_offset_in_interval(start_offset));
+                || (expected_next_off == start_offset
+                    // SAFETY: `this` is valid and `expected_next_off == start_offset` means `func`
+                    // was not called during the traversal above.
+                    && unsafe { (*this).is_offset_in_interval(start_offset) });
             if !ended_in_interval {
-                let status = func(PageOrGapMut::Gap(expected_next_off, end_offset));
+                let status = func(PageOrGapPtr::Gap(expected_next_off, end_offset));
                 if status != Status::NEXT && status != Status::STOP {
+                    core::hint::cold_path();
                     return Err(status);
                 }
             }
@@ -3898,6 +4186,46 @@ impl VmPageList {
         Ok(())
     }
 
+    /// Similar to `for_every_page_in_range_ref`, but the `per_page_func` gets called with a raw
+    /// pointer to each slot instead of a reference.
+    ///
+    /// Each pointer is derived from the slot's node without creating a reference to the node (see
+    /// `VmPageListNode::slot_ptr`), and the traversal only reads a slot before handing it to
+    /// `per_page_func`. A caller that has to hold on to a slot across later callbacks (such as
+    /// `VmCowPages::writeback_begin_locked`, which updates an interval's start sentinel once it
+    /// reaches the end) can therefore keep the pointer: it stays valid for reads and writes until
+    /// the next page list operation that may free or move the node holding the slot.
+    pub fn for_every_page_in_range_ptr<F>(
+        &mut self,
+        start_offset: u64,
+        end_offset: u64,
+        per_page_func: F,
+    ) -> Result<(), Status>
+    where
+        F: FnMut(NonNull<VmPageOrMarker>, u64) -> Status,
+    {
+        // SAFETY: `self` is a valid `VmPageList` and is exclusively borrowed for the traversal, so
+        // nothing else accesses the list, and `per_page_func` cannot reach it, or a slot it has not
+        // been handed, without `unsafe` code of its own: it cannot insert or erase a node or make a
+        // conflicting access to the current node. `SkipNodeCheck` does not clean up, so the last
+        // clause does not apply.
+        let status = unsafe {
+            Self::for_every_page_in_range_internal_ptr::<SkipNodeCheck, _>(
+                self,
+                start_offset,
+                end_offset,
+                per_page_func,
+            )
+        };
+        if status != Status::NEXT {
+            if status == Status::STOP {
+                return Ok(());
+            }
+            return Err(status);
+        }
+        Ok(())
+    }
+
     /// Internal helper for mutable range traversals with optional empty-node cleanup.
     ///
     /// Calls the provided callback for every page in the given range. If `N::CLEANUP_EMPTY` is
@@ -3915,40 +4243,102 @@ impl VmPageList {
     where
         F: FnMut(&mut VmPageOrMarker, u64) -> Status,
     {
+        let func = |mut slot: NonNull<VmPageOrMarker>, offset| {
+            // SAFETY: `slot` points to a live slot in a node of `self`, and the
+            // `&mut VmPageOrMarker` is only live for the duration of `per_page_func`.
+            per_page_func(unsafe { slot.as_mut() }, offset)
+        };
+        // SAFETY: `self` is exclusively borrowed for the traversal, so it is valid and nothing else
+        // accesses the list. `func` only mutates slots in place without inserting or erasing B-tree
+        // nodes, and does not keep `slot` after `per_page_func` returns.
+        unsafe {
+            Self::for_every_page_in_range_internal_ptr::<N, _>(self, start_offset, end_offset, func)
+        }
+    }
+
+    /// Internal helper that `for_every_page_in_range_internal_mut` and
+    /// `for_every_page_in_range_ptr` are built on.
+    ///
+    /// Behaves as the former, but the `per_page_func` gets called with a raw pointer to each slot,
+    /// derived from the slot's node without creating a reference to the node (see
+    /// `VmPageListNode::slot_ptr`).
+    ///
+    /// # Safety
+    ///
+    /// * `this` must point to a valid `VmPageList`, and for the whole call no other thread may
+    ///   access that list, and no reference to the list, to one of its nodes, or to one of its
+    ///   slots (other than one from which `this` was derived) may be live across the call. The
+    ///   traversal reads the list and its nodes through `this` between calls to `per_page_func`,
+    ///   and when `N::CLEANUP_EMPTY` it erases empty nodes.
+    /// * If `per_page_func` does not access `*this` outside passed slot pointers, `this` may be
+    ///   derived from `&mut VmPageList`. If `per_page_func` accesses `*this` outside passed slot
+    ///   pointers (for example read-only lookups via an enclosing `KCell`/`UnsafeCell`), `this`
+    ///   must carry raw `UnsafeCell` provenance (not derived from `&mut VmPageList`), and
+    ///   `per_page_func` must not materialize `&mut VmPageList` or `&mut VmPageListNode` to the
+    ///   current node.
+    /// * `per_page_func` must not insert or erase B-tree nodes in `*this` (modifying passed slots
+    ///   in place and performing read-only lookups of already-allocated slots are permitted), and
+    ///   must not create conflicting accesses to the current node while it is being traversed.
+    /// * When `N::CLEANUP_EMPTY`, a slot pointer passed to `per_page_func` must not be used after
+    ///   that call to `per_page_func` returns: once the traversal has visited the slots of a node,
+    ///   it erases the node, which frees it, if it is then empty.
+    #[inline(always)]
+    unsafe fn for_every_page_in_range_internal_ptr<N: NodeCheck, F>(
+        this: *mut Self,
+        start_offset: u64,
+        end_offset: u64,
+        mut per_page_func: F,
+    ) -> Status
+    where
+        F: FnMut(NonNull<VmPageOrMarker>, u64) -> Status,
+    {
         debug_assert!(start_offset.is_multiple_of(page::SIZE as u64));
         debug_assert!(end_offset.is_multiple_of(page::SIZE as u64));
+        if start_offset >= end_offset {
+            return Status::NEXT;
+        }
 
+        // Project to the `list` field without materializing a reference to `*this`. `Opaque` is a
+        // transparent wrapper, so a pointer to it is a pointer to the wrapped `VmPageListBtree`.
+        // SAFETY: `this` is valid per caller precondition, so the field projection is in bounds.
+        let list: *mut bindings::VmPageListBtree = unsafe { &raw mut (*this).list }.cast();
         let cursor = Opaque::<bindings::VmPageListBtreeCursor>::uninit();
-        // SAFETY: `self.list.get()` and `cursor.get()` are valid pointers.
+        // SAFETY: `list` and `cursor.get()` are valid pointers.
         let mut entry = unsafe {
-            btree_lower_bound(
-                self.list.get(),
-                VmPageListNode::node_offset(start_offset),
-                cursor.get(),
-            )
+            btree_lower_bound(list, VmPageListNode::node_offset(start_offset), cursor.get())
         };
         while !entry.node.is_null() {
             if entry.offset >= end_offset {
                 break;
             }
-            // SAFETY: `entry.node` is non-null and valid for the node's scope.
-            let node = unsafe { entry.node.cast::<VmPageListNode>().as_mut_unchecked() };
+            let node = entry.node.cast::<VmPageListNode>();
             let start = core::cmp::max(start_offset, entry.offset);
             let end = core::cmp::min(VmPageListNode::end_offset(entry.offset), end_offset);
-            let status =
-                node.for_every_page_in_range_mut(entry.offset, start, end, &mut per_page_func);
-            let is_empty = node.is_empty();
-            if N::CLEANUP_EMPTY {
-                if is_empty {
-                    // SAFETY: `cursor` is positioned at this valid node.
-                    // `cpp_vm_page_list_btree_erase_at` erases the node and updates `cursor`
-                    // to point to the next node in the tree.
-                    unsafe {
-                        bindings::cpp_vm_page_list_btree_erase_at(self.list.get(), cursor.get());
-                    }
-                } else {
-                    // SAFETY: `cursor.get()` is a valid pointer.
-                    let _ = unsafe { btree_cursor_next(cursor.get()) };
+            // SAFETY: `node` is non-null, aligned, and points to a live node of `*this`: `cursor`
+            // is positioned at it, and per `# Safety` nothing but this traversal erases nodes.
+            // `start` and `end` are clamped to the node's range by the `max` and `min` above. Per
+            // `# Safety` `per_page_func` does not erase a node, so it does not free this one, and
+            // makes no conflicting access to it, which rules out keeping a `&mut` to a slot that
+            // has not been visited yet. This traversal itself erases a node only below, after this
+            // call has returned.
+            let status = unsafe {
+                VmPageListNode::for_every_page_in_range_ptr(
+                    node,
+                    entry.offset,
+                    start,
+                    end,
+                    &mut per_page_func,
+                )
+            };
+            // SAFETY: `node` is non-null and points to a live node. The node is only read, and
+            // only when `N::CLEANUP_EMPTY`, so that slot pointers handed out when not cleaning up
+            // are not affected.
+            if N::CLEANUP_EMPTY && unsafe { node.as_ref_unchecked() }.is_empty() {
+                // SAFETY: `cursor` is positioned at this valid node.
+                // `cpp_vm_page_list_btree_erase_at` erases the node and updates `cursor`
+                // to point to the next node in the tree.
+                unsafe {
+                    bindings::cpp_vm_page_list_btree_erase_at(list, cursor.get());
                 }
             } else {
                 // SAFETY: `cursor.get()` is a valid pointer.
@@ -4007,10 +4397,63 @@ impl VmPageList {
         PageFunc: FnMut(&mut VmPageOrMarker, u64) -> Status,
         GapFunc: FnMut(u64, u64) -> Status,
     {
-        self.remove_pages_and_iterate_gaps_internal(start_offset, end_offset, |e| match e {
-            PageOrGapMut::Page(slot, off) => per_page_fn(slot, off),
-            PageOrGapMut::Gap(gap_start, gap_end) => per_gap_fn(gap_start, gap_end),
-        })
+        self.remove_pages_and_iterate_gaps_internal(
+            start_offset,
+            end_offset,
+            #[inline(always)]
+            |e| match e {
+                PageOrGapMut::Page(slot, off) => per_page_fn(slot, off),
+                PageOrGapMut::Gap(gap_start, gap_end) => per_gap_fn(gap_start, gap_end),
+            },
+        )
+    }
+
+    /// Raw-pointer variant of [`Self::remove_pages_and_iterate_gaps`] that avoids holding
+    /// `&mut VmPageList` or `&mut VmPageOrMarker` across `per_page_fn` and `per_gap_fn`.
+    ///
+    /// # Safety
+    ///
+    /// * `this` must point to a valid `VmPageList`, and for the whole call no other thread may
+    ///   access that list, and no reference to the list, to one of its nodes, or to one of its
+    ///   slots (other than one from which `this` was derived) may be live across the call. The
+    ///   traversal reads the list and its nodes through `this` between calls to the callbacks, and
+    ///   erases empty nodes.
+    /// * If the callbacks do not access `*this` outside passed slot pointers, `this` may be
+    ///   derived from `&mut VmPageList`. If either callback accesses `*this` outside passed slot
+    ///   pointers (for example read-only lookups via an enclosing `KCell`/`UnsafeCell`), `this`
+    ///   must carry raw `UnsafeCell` provenance (not derived from `&mut VmPageList`), and neither
+    ///   callback may materialize `&mut VmPageList` or `&mut VmPageListNode` to the current node.
+    /// * Neither callback may insert or erase B-tree nodes in `*this` (modifying passed slots in
+    ///   place and performing read-only lookups of already-allocated slots are permitted), and
+    ///   neither may create conflicting accesses to the current node while it is being traversed.
+    /// * A slot pointer passed to `per_page_fn` must not be used after that call to `per_page_fn`
+    ///   returns: once the traversal has visited the slots of a node, it erases the node, which
+    ///   frees it, if it is then empty.
+    #[inline(always)]
+    pub unsafe fn remove_pages_and_iterate_gaps_ptr<PageFunc, GapFunc>(
+        this: *mut Self,
+        start_offset: u64,
+        end_offset: u64,
+        mut per_page_fn: PageFunc,
+        mut per_gap_fn: GapFunc,
+    ) -> Result<(), Status>
+    where
+        PageFunc: FnMut(NonNull<VmPageOrMarker>, u64) -> Status,
+        GapFunc: FnMut(u64, u64) -> Status,
+    {
+        // SAFETY: Caller upholds the `for_every_page_and_gap_in_range_internal_ptr` preconditions.
+        unsafe {
+            Self::for_every_page_and_gap_in_range_internal_ptr::<CleanupEmptyNodeCheck, _>(
+                this,
+                start_offset,
+                end_offset,
+                #[inline(always)]
+                |e| match e {
+                    PageOrGapPtr::Page(slot, off) => per_page_fn(slot, off),
+                    PageOrGapPtr::Gap(gap_start, gap_end) => per_gap_fn(gap_start, gap_end),
+                },
+            )
+        }
     }
 
     /// Internal version of `remove_pages_and_iterate_gaps` that calls a single `func` for both
@@ -4696,24 +5139,6 @@ extern "C" fn rust_vm_page_list_populate_slots_in_interval(
     list.populate_slots_in_interval(start_offset, end_offset)
 }
 
-#[unsafe(no_mangle)]
-extern "C" fn rust_vm_page_list_clip_interval_start(
-    list: &mut VmPageList,
-    interval_start: u64,
-    len: u64,
-) -> Result<(), Status> {
-    list.clip_interval_start(interval_start, len)
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn rust_vm_page_list_clip_interval_end(
-    list: &mut VmPageList,
-    interval_end: u64,
-    len: u64,
-) -> Result<(), Status> {
-    list.clip_interval_end(interval_end, len)
-}
-
 #[repr(C)]
 struct VmPageOrMarkerSlotAndBool {
     slot: *mut VmPageOrMarker,
@@ -4742,7 +5167,7 @@ extern "C" fn rust_vm_page_list_lookup_or_allocate_check_for_interval(
 ) -> VmPageOrMarkerSlotAndBool {
     let (slot, is_interval) = list.lookup_or_allocate_check_for_interval(offset, split_interval);
     VmPageOrMarkerSlotAndBool {
-        slot: slot.map_or(core::ptr::null_mut(), core::ptr::from_mut),
+        slot: slot.map_or(core::ptr::null_mut(), NonNull::as_ptr),
         is_interval,
     }
 }
@@ -4763,59 +5188,6 @@ extern "C" fn rust_vm_page_list_find_interval_end_for_start(
 ) -> VmPageOrMarkerConstSlotAndOffset {
     let (slot, offset) = list.find_interval_end_for_start(start_offset);
     VmPageOrMarkerConstSlotAndOffset { slot: core::ptr::from_ref(slot), offset }
-}
-
-// The three trampolines below take the dirty state as a plain `u32` rather than as a
-// `ZeroRangeDirtyState`, so that an out of range discriminant from C++ is a panic rather than
-// undefined behavior.
-
-#[unsafe(no_mangle)]
-extern "C" fn rust_vm_page_list_add_zero_interval_internal(
-    list: &mut VmPageList,
-    start_offset: u64,
-    end_offset: u64,
-    dirty_state: u32,
-    awaiting_clean_len: u64,
-    replace_existing_slot: bool,
-) -> Result<(), Status> {
-    list.add_zero_interval_internal(
-        start_offset,
-        end_offset,
-        ZeroRangeDirtyState::from_raw(dirty_state),
-        awaiting_clean_len,
-        replace_existing_slot,
-    )
-}
-
-#[unsafe(no_mangle)]
-extern "C" fn rust_vm_page_list_replace_page_with_zero_interval(
-    list: &mut VmPageList,
-    offset: u64,
-    dirty_state: u32,
-) -> VmPagePtr {
-    list.replace_page_with_zero_interval(offset, ZeroRangeDirtyState::from_raw(dirty_state))
-}
-
-/// `old_start_offset` and `old_end_offset` use the C++ `UINT64_MAX` sentinel to mean "not
-/// specified"; it is translated to `None` here.
-#[unsafe(no_mangle)]
-extern "C" fn rust_vm_page_list_overwrite_zero_interval(
-    list: &mut VmPageList,
-    old_start_offset: u64,
-    old_end_offset: u64,
-    new_start_offset: u64,
-    new_end_offset: u64,
-    new_dirty_state: u32,
-) -> Result<(), Status> {
-    let old_start = (old_start_offset != u64::MAX).then_some(old_start_offset);
-    let old_end = (old_end_offset != u64::MAX).then_some(old_end_offset);
-    list.overwrite_zero_interval(
-        old_start,
-        old_end,
-        new_start_offset,
-        new_end_offset,
-        ZeroRangeDirtyState::from_raw(new_dirty_state),
-    )
 }
 
 /// The C++ `VmPageList::BatchInserter` has the same layout as the Rust `BatchInserter`, so, as for

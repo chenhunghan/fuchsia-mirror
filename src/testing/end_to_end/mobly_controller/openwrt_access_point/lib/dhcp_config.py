@@ -5,6 +5,12 @@
 
 import dataclasses
 
+from openwrt_access_point.lib.uci_dhcp_options import (
+    UciDhcpOptions,
+    UciDnsmasqOptions,
+    UciSection,
+)
+
 
 @dataclasses.dataclass
 class Lan:
@@ -15,16 +21,16 @@ class Lan:
         lease_time: The lease time for IP addresses (e.g., '12h', '30m').
         start: The start offset for the DHCP pool.
         limit: The number of addresses in the DHCP pool.
-        broadcast: Always broadcast DHCP responses (--dhcp-broadcast).
-        dhcp_options_force: Unconditional DHCP options (uci dhcp_option_force).
+        custom_uci_options: Escape hatch for `dhcp.lan` UCI options.
     """
 
     dynamic_dhcp: bool = True
     lease_time: str = "12h"
     start: int | None = None
     limit: int | None = None
-    broadcast: bool = False
-    dhcp_options_force: list[str] = dataclasses.field(default_factory=list)
+    custom_uci_options: UciDhcpOptions = dataclasses.field(
+        default_factory=lambda: UciDhcpOptions()
+    )
 
 
 @dataclasses.dataclass
@@ -32,10 +38,12 @@ class Dnsmasq:
     """UCI dhcp.dnsmasq configuration.
 
     Attributes:
-        noping: Disable ping check before assigning IP.
+        custom_uci_options: Escape hatch for `dhcp.@dnsmasq[0]` UCI options.
     """
 
-    noping: bool = False
+    custom_uci_options: UciDnsmasqOptions = dataclasses.field(
+        default_factory=lambda: UciDnsmasqOptions()
+    )
 
 
 @dataclasses.dataclass
@@ -45,7 +53,12 @@ class DhcpConfig:
     Attributes:
         lan: The LAN interface DHCP configuration.
         dnsmasq: The dnsmasq DHCP configuration.
+        custom_uci_sections: Escape hatch for additional named UCI sections in
+            `/etc/config/dhcp`, mapping section name to `UciSection`.
     """
 
     lan: Lan = dataclasses.field(default_factory=Lan)
     dnsmasq: Dnsmasq = dataclasses.field(default_factory=Dnsmasq)
+    custom_uci_sections: dict[str, UciSection] = dataclasses.field(
+        default_factory=dict
+    )

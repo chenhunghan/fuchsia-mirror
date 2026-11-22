@@ -37,8 +37,8 @@ const INTERFACE2_MAC_ADDRESS: fnet::MacAddress = fidl_mac!("06:07:08:09:10:11");
 const INTERFACE1_NAME: &'static str = "iface1";
 const INTERFACE2_NAME: &'static str = "iface2";
 const EXPECTED_INTERFACE_NAME: &'static str = "added-interface";
-const IPV4_STUB_URL: &'static str = "#meta/unreliable-echo-v4.cm";
-const IPV6_STUB_URL: &'static str = "#meta/unreliable-echo-v6.cm";
+const IPV4_STUB_URL: &'static str = "unreliable-echo#meta/unreliable-echo-v4.cm";
+const IPV6_STUB_URL: &'static str = "unreliable-echo#meta/unreliable-echo-v6.cm";
 const TEST_STUB_MONIKER_REGEX: &'static str = ".*/stubs:test-stub$";
 
 const DEFAULT_IPV4_TARGET_SUBNET: fnet::Subnet = fidl_subnet!("192.168.255.1/16");
@@ -212,10 +212,7 @@ async fn add_interface_to_netstack<'a>(
         )
         .await
         .expect("failed to create endpoint");
-    realm
-        .add_virtual_device(&endpoint, netemul::devfs_device_path(name).as_path())
-        .await
-        .expect("failed to add virtual device");
+    realm.add_virtual_device(&endpoint, name).await.expect("failed to add virtual device");
     // Note that calling `install_endpoint` also enables the interface.
     realm
         .install_endpoint(
@@ -285,10 +282,7 @@ async fn join_network_with_hermetic_netstack<'a>(
         .await
         .expect("join_network failed");
     realm
-        .add_virtual_device(
-            interface.endpoint(),
-            netemul::devfs_device_path(interface_name).as_path(),
-        )
+        .add_virtual_device(interface.endpoint(), interface_name)
         .await
         .expect("failed to add the device");
 
@@ -1123,10 +1117,7 @@ async fn ping(
         .expect("join_network failed for base realm");
     system_ep.apply_nud_flake_workaround().await.expect("nud flake workaround");
     realm
-        .add_virtual_device(
-            system_ep.endpoint(),
-            netemul::devfs_device_path(INTERFACE1_NAME).as_path(),
-        )
+        .add_virtual_device(system_ep.endpoint(), INTERFACE1_NAME)
         .await
         .expect("failed to add virtual device");
 

@@ -38,23 +38,43 @@ pub(super) async fn update_servers(
     trace!("updating DNS servers obtained from {:?} to {:?}", source, servers);
 
     let servers_before = dns_servers.consolidated();
+    let dns_servers_before = dns_servers.consolidated_dns_servers();
     dns_servers.set_servers_from_source(source, servers);
     let servers = dns_servers.consolidated();
-    if servers_before == servers {
+    let consolidated_dns_servers = dns_servers.consolidated_dns_servers();
+    if servers_before == servers && dns_servers_before == consolidated_dns_servers {
         trace!("Update skipped because dns server list has not changed");
         return;
     }
-    trace!("updating LookupAdmin with DNS servers = {:?}", servers);
 
-    match lookup_admin.set_dns_servers(&servers).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => warn!("error setting DNS servers: {:?}", zx::Status::err_from_raw(e)),
-        Err(e) => warn!("error sending set DNS servers request: {:?}", e),
+    if servers_before != servers {
+        trace!("updating LookupAdmin with DNS servers = {:?}", servers);
+
+        match lookup_admin.set_dns_servers(&servers).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("error setting DNS servers: {:?}", zx::Status::err_from_raw(e)),
+            Err(e) => warn!("error sending set DNS servers request: {:?}", e),
+        }
     }
 
-    dns_server_watch_responders.send(dns_servers.consolidated_dns_servers());
-
-    networks_service.update(network::NetworkRegistryUpdate::dns(dns_servers)).await;
+    if dns_servers_before != consolidated_dns_servers {
+        match source {
+            DnsServersUpdateSource::Delegated => {
+                // Delegated updates originate from RegisteredNetworks, which has already
+                // updated per-network DNS servers and notified PropertyWatchers.
+                dns_server_watch_responders.send(consolidated_dns_servers);
+            }
+            DnsServersUpdateSource::Default
+            | DnsServersUpdateSource::Dhcpv4 { .. }
+            | DnsServersUpdateSource::Dhcpv6 { .. }
+            | DnsServersUpdateSource::Ndp { .. } => {
+                dns_server_watch_responders.send(consolidated_dns_servers.clone());
+                networks_service
+                    .update(network::NetworkRegistryUpdate::dns(consolidated_dns_servers))
+                    .await;
+            }
+        }
+    }
 }
 
 /// Creates a stream of RDNSS DNS updates.

@@ -14,6 +14,7 @@ test_suite(
         "//build/bazel/rules/host_tests/tests/go:host_tests",
         "//build/bazel/rules/host_tests/tests/host_test_data:host_tests",
         "//build/bazel/rules/host_tests/tests/py:host_tests",
+        "//build/bazel/rules/host_tests/tests/python_mobly_test:host_tests",
         "//build/bazel/rules/host_tests/tests/rust:host_tests",
     ],
     visibility = ["//build/bazel/rules/tests:__subpackages__"],

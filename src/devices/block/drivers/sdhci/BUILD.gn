@@ -93,7 +93,6 @@ fuchsia_driver_component("sdhci") {
     ":sdhci-bind",
     ":sdhci-driver",
   ]
-  info = "meta/sdhci-info.json"
 }
 
 fuchsia_driver_package("package") {

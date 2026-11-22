@@ -3,26 +3,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import argparse
-import json
 import os
 import subprocess
+import unittest
 
 import python.runfiles.runfiles as runfiles
 
-parser = argparse.ArgumentParser()
-parser.add_argument("binary", help="Rlocation of python binary to invoke.")
-args = parser.parse_args()
-
-r = runfiles.Create()
-assert r, "Cannot find runfiles"
-test_location = r.Rlocation(args.binary)
-assert test_location, "Cannot find test in runfiles"
-test_env = os.environ.copy()
-test_env.update(r.EnvVars())
-
-print(
-    f"Found test at {test_location}\nEnvironment: {json.dumps(r.EnvVars(), indent=2)}\ncwd = {os.getcwd()}\n"
+# The py_binary to invoke, which must be listed in the test's `test_data`.
+_BINARY_RLOCATION = (
+    "_main/build/bazel/rules/host_tests/tests/py/test_with_py_library_bin"
 )
-subprocess.check_call([test_location], env=test_env)
-print("Test ran successfully!")
+
+
+class TestWithPyBinary(unittest.TestCase):
+    def test_run_py_binary(self) -> None:
+        r = runfiles.Create()
+        self.assertIsNotNone(r, "Cannot find runfiles")
+        binary = r.Rlocation(_BINARY_RLOCATION)
+        self.assertTrue(
+            binary is not None and os.path.exists(binary),
+            f"Cannot find {_BINARY_RLOCATION} in runfiles",
+        )
+        subprocess.check_call([binary], env=os.environ | r.EnvVars())

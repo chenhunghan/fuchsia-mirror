@@ -446,6 +446,40 @@ class FindTestsAffectedByChangedFilesTest(unittest.TestCase):
         self.assertSetEqual(result.affected_tests, set())
         self.assertTrue(result.build_not_affected)
 
+    def test_jiri_manifest_change_affects_build(self) -> None:
+        # Jiri manifest and lockfile changes are not tracked in the Ninja
+        # build graph, so build_not_affected must be False to avoid skipping
+        # all tests.
+        for path in (
+            "manifests/jiri.lock",
+            "vendor/google/manifests/starnix_packages",
+            "vendor/google/manifests/jiri.lock",
+        ):
+            with self.subTest(path=path):
+                result = affected_tests.find_tests_affected_by_changed_files(
+                    [path],
+                    self.root,
+                    MockNinjaRunner(self.build_dir, ""),
+                    MockBazelLauncher.new_with_empty_outputs(),
+                )
+                self.assertSetEqual(result.affected_tests, set())
+                self.assertFalse(result.build_not_affected)
+
+    def test_jiri_manifest_and_source_change_returns_empty_affected_tests(
+        self,
+    ) -> None:
+        # Mixed CLs touching both a manifest and a source file that affects a
+        # test must return empty affected_tests so testsharder does not skip
+        # other tests.
+        result = affected_tests.find_tests_affected_by_changed_files(
+            ["vendor/google/manifests/starnix_packages", "src/foo/bar.cc"],
+            self.root,
+            MockNinjaRunner(self.build_dir, "obj/gn/target1\n"),
+            MockBazelLauncher.new_with_empty_outputs(),
+        )
+        self.assertSetEqual(result.affected_tests, set())
+        self.assertFalse(result.build_not_affected)
+
     def test_unbuilt_target_does_not_affect_build(self) -> None:
         # A file change affects obj/some/unbuilt.out in build.ninja, but that
         # target was not built by this builder (not in last_build_artifacts).

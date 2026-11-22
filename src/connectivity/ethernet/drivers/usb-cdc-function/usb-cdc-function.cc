@@ -339,6 +339,8 @@ void UsbCdcFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> com
   if (completions.empty()) {
     return;
   }
+  auto update_rx_pending = fit::defer(
+      [&]() { bulk_out_inspect_.UpdateRxPendingProcessing(rx_completion_queue_.size()); });
   fdf::Arena arena(kArenaTag);
   const size_t count = completions.size();
 
@@ -612,7 +614,7 @@ struct UsbCdcFunction::SetConfiguredSharedState
             if (self_shared->self->set_configured_state_ == self_shared) {
               self_shared->self->set_configured_state_.reset();
             }
-            completer.Reply(zx::ok());
+            completer.Reply(zx::make_result(status));
           });
     } else {
       // Host-initiated soft reset (true -> true):
@@ -929,7 +931,9 @@ struct UsbCdcFunction::SetInterfaceSharedState
                   fdf::error("Failed to disable endpoint {}: {}", ep_addr,
                              result.error_value().FormatDescription());
                   if (disable_state->status == ZX_OK) {
-                    disable_state->status = ZX_ERR_INTERNAL;
+                    disable_state->status = result.error_value().is_framework_error()
+                                                ? result.error_value().framework_error().status()
+                                                : result.error_value().domain_error();
                   }
                 }
               }
@@ -1456,6 +1460,7 @@ void UsbCdcFunction::DrainRxCompletionQueue() {
     }
   }
   rx_completion_queue_.clear();
+  bulk_out_inspect_.UpdateRxPendingProcessing(0);
 }
 
 void UsbCdcFunction::Stop(fdf::StopCompleter completer) {
@@ -1847,7 +1852,10 @@ void UsbCdcFunction::QueueRxSpace(fnetdev::wire::NetworkDeviceImplQueueRxSpaceRe
   }
   // Take over all pending completions and process them. We'll re-queue if
   // not enough space available.
-  ProcessRxCompletions(std::move(rx_completion_queue_));
+  auto pending = std::move(rx_completion_queue_);
+  rx_completion_queue_.clear();
+  bulk_out_inspect_.UpdateRxPendingProcessing(0);
+  ProcessRxCompletions(std::move(pending));
 }
 
 void UsbCdcFunction::PrepareVmo(fnetdev::wire::NetworkDeviceImplPrepareVmoRequest *request,
@@ -1979,7 +1987,9 @@ void UsbCdcFunction::DisableAllEndpoints(fit::callback<void(zx_status_t)> callba
               fdf::error("Failed to disable endpoint {}: {}", ep_addr,
                          result.error_value().FormatDescription());
               if (state->status == ZX_OK) {
-                state->status = ZX_ERR_INTERNAL;
+                state->status = result.error_value().is_framework_error()
+                                    ? result.error_value().framework_error().status()
+                                    : result.error_value().domain_error();
               }
             }
           }

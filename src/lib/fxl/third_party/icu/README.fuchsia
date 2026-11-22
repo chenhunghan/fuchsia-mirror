@@ -3,8 +3,8 @@ URL: https://github.com/unicode-org/icu
 Revision: 7708a760c001c5e0d546430ad18007620aea04e7
 Security Critical: yes
 
-License: MIT
-License File: ../../../../../third_party/icu/default/LICENSE
+License: ICU
+License File: LICENSE
 
 Description:
   This file has the relevant components from ICU copied to handle basic

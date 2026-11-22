@@ -8,6 +8,17 @@
 
 namespace dwc3 {
 
+namespace {
+
+void WaitForEp0State(fdf_testing::BackgroundDriverTest<Config>& dut, Dwc3TestHelper::State state) {
+  dut.runtime().RunUntil([&dut, state] {
+    return dut.RunInDriverContext<bool>(
+        [state](Dwc3& drv) { return Dwc3TestHelper::GetEp0State(drv) == state; });
+  });
+}
+
+}  // namespace
+
 TEST_F(UnmanagedTestFixture, Ep0Lifecycle) {
   SetUpAndPowerOnDriver();
 
@@ -810,8 +821,9 @@ TEST_F(UnmanagedTestFixture, WaitZlpInTransferCompleteMismatch) {
     // Mismatch: Send Transfer Complete on EP0 OUT instead of IN
     Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 0);  // 0 is EP0 OUT
 
-    // Expectation: Stall and reset to Setup
-    EXPECT_TRUE(Dwc3TestHelper::IsEp0InStalled(drv));
+    // Expectation: Stall physical EP0 (ep0_.out) and reset to Setup
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
 
@@ -870,8 +882,9 @@ TEST_F(UnmanagedTestFixture, WaitZlpInTransferNotReadyMismatch) {
     Dwc3TestHelper::HandleEp0TransferNotReadyEvent(
         drv, 0, DEPEVT_XFER_NOT_READY_STAGE_DATA);  // 0 is EP0 OUT
 
-    // Expectation: Stall and reset to Setup
-    EXPECT_TRUE(Dwc3TestHelper::IsEp0InStalled(drv));
+    // Expectation: Stall physical EP0 (ep0_.out) and reset to Setup
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
   });
 
@@ -1983,6 +1996,8 @@ TEST_F(UnmanagedTestFixture, ControlWriteMaxPacketMultipleDataOut) {
     EXPECT_EQ(byte, 0x5A);
   }
 
+  WaitForEp0State(dut_, Dwc3TestHelper::State::WaitHost);
+
   dut_.RunInDriverContext([&](Dwc3& drv) {
     Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
@@ -2045,6 +2060,8 @@ TEST_F(UnmanagedTestFixture, ControlWriteHighSpeedMaxPacketMultipleDataOut) {
   for (uint8_t byte : *received_data) {
     EXPECT_EQ(byte, 0x3C);
   }
+
+  WaitForEp0State(dut_, Dwc3TestHelper::State::WaitHost);
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
@@ -2110,6 +2127,8 @@ TEST_F(UnmanagedTestFixture, ControlWriteUnalignedWLengthRoundsUpToMaxPacketSize
     EXPECT_EQ(byte, 0xA5);
   }
 
+  WaitForEp0State(dut_, Dwc3TestHelper::State::WaitHost);
+
   dut_.RunInDriverContext([&](Dwc3& drv) {
     Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
     EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
@@ -2173,6 +2192,8 @@ TEST_F(UnmanagedTestFixture, ControlWriteHighSpeedUnalignedMultiPacketRoundsUp) 
   for (uint8_t byte : *received_data) {
     EXPECT_EQ(byte, 0x7E);
   }
+
+  WaitForEp0State(dut_, Dwc3TestHelper::State::WaitHost);
 
   dut_.RunInDriverContext([&](Dwc3& drv) {
     Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
@@ -3120,4 +3141,681 @@ TEST_F(UnmanagedTestFixture, ConfigureEndpointIsoch) {
 
   TearDownAndPowerOffDriver();
 }
+
+// Verifies that EP0 protocol stalls always issue DEPCMD::DEPSSTALL on physical EP0 (ep0_.out,
+// ep_num = 0) even when aborting DataIn or WaitZlpIn, never set ep0_.in.stalled, and clear
+// ep0_.out.stalled on the next Setup packet without issuing DEPCMD::DEPCSTALL.
+TEST_F(UnmanagedTestFixture, Ep0ProtocolStallsPhysicalEp0AndClearsOnNextSetup) {
+  SetUpAndPowerOnDriver();
+
+  auto ep0_out_stall_cmd_count = std::make_shared<std::atomic<uint32_t>>(0);
+  auto ep0_in_stall_cmd_count = std::make_shared<std::atomic<uint32_t>>(0);
+  auto ep0_clear_stall_cmd_count = std::make_shared<std::atomic<uint32_t>>(0);
+  auto cleanup_depcmd0 = DeferClearDepcmdCallbacks(0);
+  auto cleanup_depcmd1 = DeferClearDepcmdCallbacks(1);
+  dut_.RunInEnvironmentTypeContext([ep0_out_stall_cmd_count, ep0_in_stall_cmd_count,
+                                    ep0_clear_stall_cmd_count](Environment& env) {
+    env.reg_region()[DEPCMD::Get(0).addr()].SetWriteCallback(
+        [ep0_out_stall_cmd_count, ep0_clear_stall_cmd_count](uint64_t val_raw) {
+          const uint32_t cmd_type =
+              DEPCMD::Get(0).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP();
+          if (cmd_type == DEPCMD::DEPSSTALL) {
+            ep0_out_stall_cmd_count->fetch_add(1);
+          } else if (cmd_type == DEPCMD::DEPCSTALL) {
+            ep0_clear_stall_cmd_count->fetch_add(1);
+          }
+        });
+    env.reg_region()[DEPCMD::Get(1).addr()].SetWriteCallback(
+        [ep0_in_stall_cmd_count, ep0_clear_stall_cmd_count](uint64_t val_raw) {
+          const uint32_t cmd_type =
+              DEPCMD::Get(1).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP();
+          if (cmd_type == DEPCMD::DEPSSTALL) {
+            ep0_in_stall_cmd_count->fetch_add(1);
+          } else if (cmd_type == DEPCMD::DEPCSTALL) {
+            ep0_clear_stall_cmd_count->fetch_add(1);
+          }
+        });
+  });
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    // 1. Trigger an opposite-direction XferNotReady(Data) on EP0 OUT (ep_num = 0) while in
+    // Ep0::State::DataIn, causing Ep0EndAndStall() to stall physical EP0 (ep0_.out).
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::DataIn);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 0, DEPEVT_XFER_NOT_READY_STAGE_DATA);
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
+    EXPECT_EQ(ep0_out_stall_cmd_count->load(), 1u);
+    EXPECT_EQ(ep0_in_stall_cmd_count->load(), 0u);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+
+    // 2. Deliver a new Setup packet (which causes hardware to clear physical EP0 stall state) and
+    // verify that software clears ep0_.out.stalled without issuing DEPCSTALL.
+    auto setup = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 5, 0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
+    EXPECT_EQ(ep0_clear_stall_cmd_count->load(), 0u);
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+
+    // 3. Trigger a WaitZlpIn directional error and verify DEPCMD::DEPSSTALL is issued again on
+    // physical EP0 (ep0_.out).
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::WaitZlpIn);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 0, DEPEVT_XFER_NOT_READY_STAGE_DATA);
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
+    EXPECT_EQ(ep0_out_stall_cmd_count->load(), 2u);
+    EXPECT_EQ(ep0_in_stall_cmd_count->load(), 0u);
+    EXPECT_EQ(ep0_clear_stall_cmd_count->load(), 0u);
+  });
+
+  TearDownAndPowerOffDriver();
+}
+
+// Verifies that when a USB reset arrives while physical EP0 (ep0_.out) is stalled (before the next
+// Setup packet), Ep0Reset() -> EpReset() clears ep0_.out.stalled in software without issuing
+// DEPCMD::DEPCSTALL to control endpoints, whereas clearing a stall on a non-control endpoint
+// (ep_num > kEp0In) still issues DEPCMD::DEPCSTALL.
+TEST_F(UnmanagedTestFixture, Ep0ResetClearsStallInSoftwareWithoutIssuingClearStallCommand) {
+  SetUpAndPowerOnDriver();
+
+  auto ep0_out_stall_cmd_count = std::make_shared<std::atomic<uint32_t>>(0);
+  auto ep0_clear_stall_cmd_count = std::make_shared<std::atomic<uint32_t>>(0);
+  auto ep2_clear_stall_cmd_count = std::make_shared<std::atomic<uint32_t>>(0);
+  auto cleanup_depcmd0 = DeferClearDepcmdCallbacks(0);
+  auto cleanup_depcmd1 = DeferClearDepcmdCallbacks(1);
+  auto cleanup_depcmd2 = DeferClearDepcmdCallbacks(2);
+  dut_.RunInEnvironmentTypeContext([ep0_out_stall_cmd_count, ep0_clear_stall_cmd_count,
+                                    ep2_clear_stall_cmd_count](Environment& env) {
+    env.reg_region()[DEPCMD::Get(0).addr()].SetWriteCallback(
+        [ep0_out_stall_cmd_count, ep0_clear_stall_cmd_count](uint64_t val_raw) {
+          const uint32_t cmd_type =
+              DEPCMD::Get(0).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP();
+          if (cmd_type == DEPCMD::DEPSSTALL) {
+            ep0_out_stall_cmd_count->fetch_add(1);
+          } else if (cmd_type == DEPCMD::DEPCSTALL) {
+            ep0_clear_stall_cmd_count->fetch_add(1);
+          }
+        });
+    env.reg_region()[DEPCMD::Get(1).addr()].SetWriteCallback([ep0_clear_stall_cmd_count](
+                                                                 uint64_t val_raw) {
+      const uint32_t cmd_type = DEPCMD::Get(1).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP();
+      if (cmd_type == DEPCMD::DEPCSTALL) {
+        ep0_clear_stall_cmd_count->fetch_add(1);
+      }
+    });
+    env.reg_region()[DEPCMD::Get(2).addr()].SetWriteCallback([ep2_clear_stall_cmd_count](
+                                                                 uint64_t val_raw) {
+      const uint32_t cmd_type = DEPCMD::Get(2).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP();
+      if (cmd_type == DEPCMD::DEPCSTALL) {
+        ep2_clear_stall_cmd_count->fetch_add(1);
+      }
+    });
+  });
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+
+    // 1. Stall physical EP0 (ep0_.out).
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::DataIn);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 0, DEPEVT_XFER_NOT_READY_STAGE_DATA);
+    ASSERT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(ep0_out_stall_cmd_count->load(), 1u);
+
+    // 2. Trigger Ep0Reset() before the next Setup packet arrives; ep0_.out.stalled must clear to
+    // false in software without issuing DEPCSTALL on EP0 OUT or EP0 IN.
+    Dwc3TestHelper::Ep0Reset(drv);
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_FALSE(Dwc3TestHelper::IsEp0InStalled(drv));
+    EXPECT_EQ(ep0_clear_stall_cmd_count->load(), 0u);
+
+    // 3. Re-enable EP0 and verify a subsequent stall still issues DEPSSTALL on physical EP0.
+    Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+    Dwc3TestHelper::SetEp0InEnabled(drv, true);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::DataIn);
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 0, DEPEVT_XFER_NOT_READY_STAGE_DATA);
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(ep0_out_stall_cmd_count->load(), 2u);
+
+    // 4. Verify non-control endpoints (ep_num > kEp0In) still issue DEPCSTALL when clearing stall.
+    auto* uep = Dwc3TestHelper::GetUserEndpoint(drv, 2);
+    ASSERT_NE(uep, nullptr);
+    Dwc3TestHelper::EpEnable(drv, uep->ep, true);
+    EXPECT_EQ(Dwc3TestHelper::EpSetStall(drv, uep->ep, true), ZX_OK);
+    EXPECT_TRUE(uep->ep.stalled);
+    EXPECT_EQ(Dwc3TestHelper::EpSetStall(drv, uep->ep, false), ZX_OK);
+    EXPECT_FALSE(uep->ep.stalled);
+    EXPECT_EQ(ep2_clear_stall_cmd_count->load(), 1u);
+    EXPECT_EQ(ep0_clear_stall_cmd_count->load(), 0u);
+  });
+
+  TearDownAndPowerOffDriver();
+}
+
+namespace {
+
+class ControlWriteStatusInterlockTest : public UnmanagedTestFixture {
+ public:
+  void SetUp() override {
+    UnmanagedTestFixture::SetUp();
+    SetUpAndPowerOnDriver();
+    ASSERT_FALSE(HasFatalFailure());
+    driver_started_ = true;
+
+    dut_.RunInEnvironmentTypeContext([this](Environment& env) {
+      env.reg_region()[DEPCMD::Get(0).addr()].SetWriteCallback([this](uint64_t val_raw) {
+        if (DEPCMD::Get(0).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP() ==
+            DEPCMD::DEPSSTALL) {
+          ep0_out_stall_count_.fetch_add(1);
+        }
+      });
+      env.reg_region()[DEPCMD::Get(1).addr()].SetWriteCallback([this](uint64_t val_raw) {
+        if (DEPCMD::Get(1).FromValue(static_cast<uint32_t>(val_raw)).CMDTYP() ==
+            DEPCMD::DEPSTRTXFER) {
+          ep0_in_start_xfer_count_.fetch_add(1);
+        }
+      });
+    });
+
+    binding_ = BindDciInterface(&fake_dci_);
+    dut_.RunInDriverContext([this](Dwc3& drv) {
+      Dwc3TestHelper::SetEp0OutEnabled(drv, true);
+      Dwc3TestHelper::SetEp0InEnabled(drv, true);
+      Dwc3TestHelper::SetControllerStarted(drv, true);
+      Dwc3TestHelper::Ep0QueueSetup(drv);
+      gen_after_setup_ = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+    });
+  }
+
+  void TearDown() override {
+    if (driver_started_) {
+      dut_.RunInDriverContext([this](Dwc3&) {
+        fake_dci_.SetDeferControl(false, nullptr);
+        while (fake_dci_.has_deferred_control()) {
+          fake_dci_.CompleteDeferredControl(ZX_ERR_NOT_SUPPORTED);
+        }
+      });
+      if (binding_.has_value()) {
+        binding_->Unbind();
+        binding_.reset();
+        dut_.runtime().RunUntilIdle();
+      }
+      dut_.RunInEnvironmentTypeContext([](Environment& env) {
+        env.reg_region()[DEPCMD::Get(0).addr()].SetWriteCallback([](uint64_t) {});
+        env.reg_region()[DEPCMD::Get(1).addr()].SetWriteCallback([](uint64_t) {});
+      });
+      TearDownAndPowerOffDriver();
+      driver_started_ = false;
+    }
+    UnmanagedTestFixture::TearDown();
+  }
+
+ protected:
+  // Drives an 8-byte vendor three-stage control-write into WaitNrdyIn with Control() deferred.
+  void StartDeferredVendorControlWrite(uint8_t request = 0x5b) {
+    control_deferred_.Reset();
+    dut_.RunInDriverContext([this, request](Dwc3& drv) {
+      fake_dci_.SetDeferControl(true, &control_deferred_);
+      gen_after_setup_ = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+
+      auto setup =
+          MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                              fdescriptor::RequestRecipient::kDevice,
+                          request, 0, 0, 8);
+      Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+      EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+
+      const uint8_t payload[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+      Dwc3TestHelper::WriteEp0Buffer(drv, payload, 0, sizeof(payload));
+      Dwc3TestHelper::SimulateDataOutPhase(drv, sizeof(payload));
+      EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitNrdyIn);
+    });
+
+    control_deferred_.Wait();
+    ep0_out_stall_count_.store(0);
+    ep0_in_start_xfer_count_.store(0);
+  }
+
+  libsync::Completion control_deferred_;
+  FakeUsbDciInterface fake_dci_;
+  std::optional<fidl::ServerBindingRef<fuchsia_hardware_usb_dci::UsbDciInterface>> binding_;
+  std::atomic<uint32_t> ep0_out_stall_count_{0};
+  std::atomic<uint32_t> ep0_in_start_xfer_count_{0};
+  uint64_t gen_after_setup_ = 0;
+  bool driver_started_ = false;
+};
+
+TEST_F(ControlWriteStatusInterlockTest, WaitsForFidlCompletionWhenHostNotReadyArrivesFirst) {
+  ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite());
+
+  // Host polls for Status while Control() is pending; EP0 enters WaitFidl without starting Status.
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    ASSERT_TRUE(fake_dci_.has_deferred_control());
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+
+    // Duplicate XferNotReady(Status) in WaitFidl remains a no-op.
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // Completing Control() starts TRB_TRBCTL_STATUS_3 and enters Status.
+  dut_.RunInDriverContext([this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_OK); });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::Status);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 1u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_);
+    dwc3_trb_t* status_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(status_trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(status_trb->control), static_cast<uint32_t>(TRB_TRBCTL_STATUS_3));
+
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+}
+
+TEST_F(ControlWriteStatusInterlockTest, TwoStageWaitsForFidlCompletionAndStartsStatus2) {
+  control_deferred_.Reset();
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    fake_dci_.SetDeferControl(true, &control_deferred_);
+    gen_after_setup_ = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+
+    auto setup =
+        MakeSetupPacket(fdescriptor::EndpointDirection::kOut | fdescriptor::RequestType::kVendor |
+                            fdescriptor::RequestRecipient::kDevice,
+                        0x5c, 0, 0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::TwoStage);
+  });
+
+  control_deferred_.Wait();
+  ep0_out_stall_count_.store(0);
+  ep0_in_start_xfer_count_.store(0);
+
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    ASSERT_TRUE(fake_dci_.has_deferred_control());
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // Completing a zero-length Control() in WaitFidl starts TRB_TRBCTL_STATUS_2 via Ep0StartStatusIn.
+  dut_.RunInDriverContext([this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_OK); });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::Status);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 1u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_);
+    dwc3_trb_t* status_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(status_trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(status_trb->control), static_cast<uint32_t>(TRB_TRBCTL_STATUS_2));
+
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+}
+
+TEST_F(ControlWriteStatusInterlockTest,
+       SetConfigurationEntersWaitFidlWhileWaitingForUserEndpointsIdle) {
+  auto cleanup_depcmd2 = DeferClearDepcmdCallbacks(2);
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    env.reg_region()[DEPCMD::Get(2).addr()].SetReadCallback([] { return 0; });
+  });
+
+  control_deferred_.Reset();
+  ep0_out_stall_count_.store(0);
+  ep0_in_start_xfer_count_.store(0);
+
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    fake_dci_.SetDeferControl(true, &control_deferred_);
+    gen_after_setup_ = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+
+    ASSERT_TRUE(Dwc3TestHelper::InitFifo(drv, 2).is_ok());
+    auto* uep = Dwc3TestHelper::GetUserEndpoint(drv, 2);
+    ASSERT_NE(uep, nullptr);
+    Dwc3TestHelper::EpEnable(drv, uep->ep, true);
+    Dwc3TestHelper::SetEpRsrcId(drv, 2, 1);
+    Dwc3TestHelper::SetEpTransferState(drv, 2, Dwc3TestHelper::TransferState::kActiveSingle);
+
+    auto set_cfg = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration), 1,
+        0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_cfg);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::TwoStage);
+    EXPECT_EQ(Dwc3TestHelper::GetEpTransferState(drv, 2),
+              Dwc3TestHelper::TransferState::kCanceling);
+    EXPECT_FALSE(fake_dci_.control_called());
+
+    // Host polls for Status while WaitForAllUserEndpointsIdle is still draining user endpoint 2.
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    EXPECT_FALSE(fake_dci_.control_called());
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // Finishing the endpoint cancellation releases the idle barrier and dispatches Control().
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    Dwc3TestHelper::HandleEpTransferEndedEvent(drv, 2);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+  });
+  control_deferred_.Wait();
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // Completing Control(ZX_OK) starts TRB_TRBCTL_STATUS_2 and enters kConfigured.
+  dut_.RunInDriverContext([this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_OK); });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::Status);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 1u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kConfigured);
+    dwc3_trb_t* status_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(status_trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(status_trb->control), static_cast<uint32_t>(TRB_TRBCTL_STATUS_2));
+
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+}
+
+TEST_F(ControlWriteStatusInterlockTest, WaitsForHostNotReadyWhenFidlRepliesFirst) {
+  ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite());
+
+  // Completing Control() first enters WaitHost without starting the Status TRB.
+  dut_.RunInDriverContext([this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_OK); });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::WaitHost);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_TRUE(Dwc3TestHelper::IsSharedFifoEmpty(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_);
+
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Status);
+    dwc3_trb_t* status_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(status_trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(status_trb->control), static_cast<uint32_t>(TRB_TRBCTL_STATUS_3));
+
+    Dwc3TestHelper::HandleEp0TransferCompleteEvent(drv, 1);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 1u);
+}
+
+TEST_F(ControlWriteStatusInterlockTest, StallsWhenFidlFailsAfterHostNotReady) {
+  ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite());
+
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // Rejecting Control() stalls EP0 OUT and re-arms Setup without starting TRB_TRBCTL_STATUS_3.
+  dut_.RunInDriverContext(
+      [this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_ERR_NOT_SUPPORTED); });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::Setup);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+}
+
+TEST_F(ControlWriteStatusInterlockTest, StallsWhenFidlFrameworkErrorOccursInWaitFidl) {
+  ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite());
+
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // Closing the DCI channel while in WaitFidl triggers a FIDL framework error (!result.ok()),
+  // stalling EP0 OUT and re-arming Setup without starting a Status TRB.
+  dut_.RunInDriverContext([this](Dwc3&) {
+    ASSERT_TRUE(binding_.has_value());
+    binding_->Close(ZX_ERR_PEER_CLOSED);
+    binding_.reset();
+  });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::Setup);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+}
+
+TEST_F(ControlWriteStatusInterlockTest, IgnoresLateControlCompletionAfterResetInWaitFidl) {
+  ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite());
+
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  // A USB bus reset calls Ep0Reset() and re-arms Setup with a bumped setup_generation; a late
+  // Control(ZX_OK) completion from the pre-reset transfer must be ignored.
+  uint64_t gen_after_reset = 0;
+  dut_.RunInDriverContext([&gen_after_reset](Dwc3& drv) {
+    Dwc3TestHelper::HandleResetEvent(drv);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    gen_after_reset = Dwc3TestHelper::GetEp0SetupGeneration(drv);
+  });
+  EXPECT_GT(gen_after_reset, gen_after_setup_);
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+  dut_.RunInDriverContext([this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_OK); });
+  dut_.runtime().RunUntilIdle();
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(ep0_out_stall_count_.load(), 0u);
+  dut_.RunInDriverContext([gen_after_reset](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_reset);
+  });
+}
+
+TEST_F(ControlWriteStatusInterlockTest, StallsWhenFidlFailsBeforeHostNotReady) {
+  ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite());
+
+  dut_.RunInDriverContext(
+      [this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_ERR_NOT_SUPPORTED); });
+  WaitForEp0State(dut_, Dwc3TestHelper::State::Setup);
+
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  dut_.RunInDriverContext([this](Dwc3& drv) {
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+
+    dwc3_trb_t* rearmed_setup_trb = Dwc3TestHelper::GetCurrentReadTrb(drv);
+    ASSERT_NE(rearmed_setup_trb, nullptr);
+    EXPECT_EQ(TRB_TRBCTL(rearmed_setup_trb->control), static_cast<uint32_t>(TRB_TRBCTL_SETUP));
+    EXPECT_NE(rearmed_setup_trb->control & TRB_HWO, 0u);
+
+    // Trailing XferNotReady(Status) keeps the newly armed Setup TRB intact.
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetCurrentReadTrb(drv), rearmed_setup_trb);
+    EXPECT_NE(rearmed_setup_trb->control & TRB_HWO, 0u);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+  });
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+}
+
+TEST_F(ControlWriteStatusInterlockTest,
+       StallsOnUnexpectedStageDataOrWrongDirectionStatusInWaitNrdyInAndWaitFidl) {
+  struct Case {
+    bool enter_wait_fidl_first;
+    uint8_t ep_num;
+    uint32_t stage;
+  };
+  constexpr Case kCases[] = {
+      {.enter_wait_fidl_first = false, .ep_num = 1, .stage = DEPEVT_XFER_NOT_READY_STAGE_DATA},
+      {.enter_wait_fidl_first = false, .ep_num = 0, .stage = DEPEVT_XFER_NOT_READY_STAGE_STATUS},
+      {.enter_wait_fidl_first = true, .ep_num = 1, .stage = DEPEVT_XFER_NOT_READY_STAGE_DATA},
+      {.enter_wait_fidl_first = true, .ep_num = 0, .stage = DEPEVT_XFER_NOT_READY_STAGE_STATUS},
+  };
+
+  for (size_t i = 0; i < std::size(kCases); ++i) {
+    SCOPED_TRACE(i);
+    const Case& tc = kCases[i];
+    ASSERT_NO_FATAL_FAILURE(StartDeferredVendorControlWrite(static_cast<uint8_t>(0x60 + i)));
+
+    dut_.RunInDriverContext([this, &tc](Dwc3& drv) {
+      if (tc.enter_wait_fidl_first) {
+        Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+        ASSERT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitFidl);
+      }
+
+      Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, tc.ep_num, tc.stage);
+      EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+      EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+      EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+    });
+    EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+    EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+
+    // Late Control() completion from the aborted transfer does not start a Status TRB.
+    dut_.RunInDriverContext([this](Dwc3&) { fake_dci_.CompleteDeferredControl(ZX_OK); });
+    dut_.runtime().RunUntilIdle();
+    dut_.RunInDriverContext([this](Dwc3& drv) {
+      EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+      EXPECT_EQ(Dwc3TestHelper::GetEp0SetupGeneration(drv), gen_after_setup_ + 1);
+    });
+    EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  }
+}
+
+TEST_F(ControlWriteStatusInterlockTest, SetConfigurationAndSetAddressRejectMalformedFields) {
+  std::atomic<uint32_t> dcfg_write_count{0};
+  auto cleanup_dcfg = fit::defer([this] {
+    dut_.RunInEnvironmentTypeContext([](Environment& env) {
+      env.reg_region()[DCFG::Get().addr()].SetWriteCallback([](uint64_t) {});
+    });
+  });
+  dut_.RunInEnvironmentTypeContext([&dcfg_write_count](Environment& env) {
+    env.reg_region()[DCFG::Get().addr()].SetWriteCallback(
+        [&dcfg_write_count](uint64_t) { dcfg_write_count.fetch_add(1); });
+  });
+
+  // Malformed SET_CONFIGURATION with wLength > 0 stalls EP0 OUT and re-arms Setup.
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    auto set_cfg = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration), 1,
+        0, 8);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_cfg);
+    ASSERT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+
+    const uint8_t payload[8] = {};
+    Dwc3TestHelper::WriteEp0Buffer(drv, payload, 0, sizeof(payload));
+    Dwc3TestHelper::SimulateDataOutPhase(drv, sizeof(payload));
+
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kPowered);
+
+    Dwc3TestHelper::HandleEp0TransferNotReadyEvent(drv, 1, DEPEVT_XFER_NOT_READY_STAGE_STATUS);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+  });
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_FALSE(fake_dci_.control_called());
+
+  // Malformed SET_ADDRESS with wLength > 0 stalls EP0 OUT without mutating the device address.
+  ep0_out_stall_count_.store(0);
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    auto set_addr = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 7, 0, 8);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_addr);
+    ASSERT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::DataOut);
+
+    const uint8_t payload[8] = {};
+    Dwc3TestHelper::WriteEp0Buffer(drv, payload, 0, sizeof(payload));
+    Dwc3TestHelper::SimulateDataOutPhase(drv, sizeof(payload));
+
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kPowered);
+  });
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(dcfg_write_count.load(), 0u);
+
+  // Malformed SET_ADDRESS with wValue > 127 stalls EP0 OUT without triggering the 7-bit DEVADDR
+  // assertion or writing DCFG.
+  ep0_out_stall_count_.store(0);
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    auto set_addr_high =
+        MakeSetupPacket(kStandardDeviceOut,
+                        fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 128, 0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_addr_high);
+
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kPowered);
+  });
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(dcfg_write_count.load(), 0u);
+
+  // Malformed SET_ADDRESS with non-zero wIndex stalls EP0 OUT without writing DCFG.
+  ep0_out_stall_count_.store(0);
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    auto set_addr_idx = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 7, 1, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_addr_idx);
+
+    EXPECT_TRUE(Dwc3TestHelper::IsEp0OutStalled(drv));
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kPowered);
+  });
+  EXPECT_EQ(ep0_out_stall_count_.load(), 1u);
+  EXPECT_EQ(ep0_in_start_xfer_count_.load(), 0u);
+  EXPECT_EQ(dcfg_write_count.load(), 0u);
+
+  // Subsequent valid two-stage SET_ADDRESS succeeds cleanly.
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    auto valid_set_addr = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 7, 0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, valid_set_addr);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::WaitHost);
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+    EXPECT_EQ(Dwc3TestHelper::GetEp0State(drv), Dwc3TestHelper::State::Setup);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kAddress);
+  });
+  EXPECT_EQ(dcfg_write_count.load(), 1u);
+}
+
+}  // namespace
 }  // namespace dwc3

@@ -6,7 +6,6 @@ group("fidl") {
   public_deps = [
     ":fidl-lint",
     ":fidlfmt",
-    "compat_audit($host_toolchain)",
     "fidlc:host",
     "fidlgen_cpp($host_toolchain)",
     "fidlgen_hlcpp($host_toolchain)",
@@ -14,7 +13,6 @@ group("fidl") {
     "lib:lib($host_toolchain)",
     "//tools/fidl/fidl_api_diff($host_toolchain)",
     "//tools/fidl/fidl_api_summarize($host_toolchain)",
-    "//tools/fidl/fidlcparsequality($host_toolchain)",
     "//tools/fidl/fidldoc($host_toolchain)",
     "//tools/fidl/fidlgen_python($host_toolchain)",
     "//tools/fidl/fidlgen_rust($host_toolchain)",
@@ -55,6 +53,5 @@ group("tests") {
     "fidlgen_syzkaller:tests",
     "gidl:tests",
     "lib:tests",
-    "measure-tape:tests",
   ]
 }

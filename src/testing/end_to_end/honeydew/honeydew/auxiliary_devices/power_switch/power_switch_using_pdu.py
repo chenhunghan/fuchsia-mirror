@@ -42,6 +42,7 @@ class PowerSwitchUsingPdu(power_switch.PowerSwitch):
         pdu_host: The IP address or hostname of the PDU.
         pdu_username: The username for SSH connection to the PDU.
         priv_key_path: The absolute path to the SSH private key file.
+        outlet: The outlet number on the PDU (0-indexed).
     """
 
     def __init__(
@@ -49,10 +50,12 @@ class PowerSwitchUsingPdu(power_switch.PowerSwitch):
         pdu_host: str,
         pdu_username: str,
         priv_key_path: str,
+        outlet: int,
     ) -> None:
         self._host: str = pdu_host
         self._username: str = pdu_username
         self._priv_key_path: str = priv_key_path
+        self._outlet: int = outlet
 
         if not os.path.exists(self._priv_key_path):
             raise PowerSwitchPduError(
@@ -60,75 +63,61 @@ class PowerSwitchUsingPdu(power_switch.PowerSwitch):
             )
 
         _LOGGER.info(
-            "Initialized PowerSwitchUsingPdu for host %s with user %s and key %s",
+            "Initialized PowerSwitchUsingPdu for host %s outlet %d with user %s and key %s",
             self._host,
+            self._outlet,
             self._username,
             self._priv_key_path,
         )
 
-    def power_off(self, outlet: int | None = None) -> None:
-        """Turns off the power at the specified outlet on the PDU.
-
-        Args:
-            outlet: The outlet number on the PDU. Must not be None.
+    def power_off(self) -> None:
+        """Turns off the power at the configured outlet on the PDU.
 
         Raises:
-            PowerSwitchError: If outlet is None or the SSH command fails.
+            PowerSwitchError: If the SSH command fails.
         """
-        if outlet is None:
-            raise PowerSwitchPduError(
-                "Outlet number must be specified for PDU operation."
-            )
-
         _LOGGER.info(
-            "PDU is powering off outlet %d on %s...", outlet, self._host
+            "PDU is powering off outlet %d on %s...", self._outlet, self._host
         )
 
-        command = self._generate_pdu_ssh_cmd(
-            outlet=outlet, power_state=PowerStatePdu.OFF
-        )
-        self.run(command=command)
+        command = self._generate_pdu_ssh_cmd(power_state=PowerStatePdu.OFF)
+        self._run(command=command)
         _LOGGER.info(
-            "Successfully powered off outlet %d on %s.", outlet, self._host
+            "Successfully powered off outlet %d on %s.",
+            self._outlet,
+            self._host,
         )
 
-    def power_on(self, outlet: int | None = None) -> None:
-        """Turns on the power at the specified outlet on the PDU.
-
-        Args:
-            outlet: The outlet number on the PDU. Must not be None.
+    def power_on(self) -> None:
+        """Turns on the power at the configured outlet on the PDU.
 
         Raises:
-            PowerSwitchError: If outlet is None or the SSH command fails.
+            PowerSwitchError: If the SSH command fails.
         """
-        if outlet is None:
-            raise PowerSwitchPduError(
-                "Outlet number must be specified for PDU operation."
-            )
-
         _LOGGER.info(
-            "PDU is powering on outlet %d on %s...", outlet, self._host
+            "PDU is powering on outlet %d on %s...", self._outlet, self._host
         )
 
-        command = self._generate_pdu_ssh_cmd(
-            outlet=outlet, power_state=PowerStatePdu.ON
-        )
-        self.run(command=command)
+        command = self._generate_pdu_ssh_cmd(power_state=PowerStatePdu.ON)
+        self._run(command=command)
         _LOGGER.info(
-            "Successfully powered on outlet %d on %s.", outlet, self._host
+            "Successfully powered on outlet %d on %s.",
+            self._outlet,
+            self._host,
         )
 
-    def _generate_pdu_ssh_cmd(self, outlet: int, power_state: str) -> list[str]:
+    def _generate_pdu_ssh_cmd(self, power_state: str) -> list[str]:
         """Helper method that generates the SSH command to control the PDU outlet.
 
         Args:
-            outlet: The outlet number to control.
             power_state: 'true' (ON) or 'false' (OFF) for the PDU command.
 
         Returns:
             SSH command split into a list format for host_shell.run().
         """
-        remote_command = f"uom set relay/outlets/{outlet}/state {power_state}"
+        remote_command = (
+            f"uom set relay/outlets/{self._outlet}/state {power_state}"
+        )
 
         ssh_command = (
             f"ssh -i {self._priv_key_path} {self._username}@{self._host} "
@@ -139,7 +128,7 @@ class PowerSwitchUsingPdu(power_switch.PowerSwitch):
 
         return shlex.split(ssh_command)
 
-    def run(self, command: list[str]) -> None:
+    def _run(self, command: list[str]) -> None:
         """Helper method to run a command and returns the output using host_shell.run.
 
         Args:

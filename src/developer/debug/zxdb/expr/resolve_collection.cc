@@ -324,7 +324,8 @@ void ResolveInherited(const fxl::RefPtr<EvalContext>& context, const ExprValue& 
         uint32_t size = concrete->byte_size();
         if (base_ptr.value() >= object_ptr &&
             (base_ptr.value() - object_ptr + size <= value.data().size())) {
-          return cb(ExtractSubType(context, value, final_type, base_ptr.value() - object_ptr));
+          return cb(ExtractSubType(context, value, final_type,
+                                   static_cast<uint32_t>(base_ptr.value() - object_ptr)));
         }
 
         // The resulting pointer isn't inside the derived class. While the DWARF spec never
@@ -404,12 +405,12 @@ ErrOrValue ResolveInherited(const fxl::RefPtr<EvalContext>& context, const ExprV
   if (!from_type)
     return GetErrorForInvalidMemberOf(value);
 
-  return ExtractSubType(context, value, RefPtrTo(from_type), from->offset());
+  return ExtractSubType(context, value, RefPtrTo(from_type), static_cast<uint32_t>(from->offset()));
 }
 
 ErrOrValue ResolveInherited(const fxl::RefPtr<EvalContext>& context, const ExprValue& value,
                             fxl::RefPtr<Type> base_type, uint64_t offset) {
-  return ExtractSubType(context, value, std::move(base_type), offset);
+  return ExtractSubType(context, value, std::move(base_type), static_cast<uint32_t>(offset));
 }
 
 Err GetConcretePointedToCollection(const fxl::RefPtr<EvalContext>& eval_context, const Type* input,

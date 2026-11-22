@@ -2,11 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/fidl/fidl.gni")
 import("//build/fuzz.gni")
 import("//build/rust/rustc_fuzzer.gni")
-import("//build/rust/rustc_library.gni")
 
 group("tests") {
   testonly = true
@@ -15,15 +12,6 @@ group("tests") {
     ":diagnostics-log-encoding-fuzzers",
     ":diagnostics-log-encoding-tests",
   ]
-}
-
-fuchsia_unittest_package("diagnostics-log-encoding-tests") {
-  deps = [ ":rust_test" ]
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
 }
 
 rustc_fuzzer("parse_record_fuzzer") {
@@ -81,7 +69,6 @@ rustc_library("rust") {
   crate_name = "diagnostics_log_encoding"
   edition = "2024"
   lint_config = "//build/config/rust/lints:clippy_warn_all"
-  test_deps = [ "//src/lib/fuchsia" ]
   visibility = [
     ":*",
     "//src/developer/ffx/plugins/log/*",
@@ -93,7 +80,6 @@ rustc_library("rust") {
     "//src/lib/diagnostics/log/*",
     "//src/starnix/kernel/*",
   ]
-  with_unit_tests = true
   deps = []
   deps += [
     "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
@@ -107,5 +93,44 @@ rustc_library("rust") {
     deps += []
   } else {
     deps += [ "//sdk/rust/zx" ]
+  }
+}
+if (is_fuchsia) {
+  rustc_test("rust_test") {
+    sources = [
+      "src/constants.rs",
+      "src/encode.rs",
+      "src/lib.rs",
+      "src/parse.rs",
+    ]
+    edition = "2024"
+    deps = []
+    deps += [
+      "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+      "//src/lib/diagnostics/log/types",
+      "//third_party/rust_crates:bitfield",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:thiserror",
+      "//third_party/rust_crates:zerocopy",
+    ]
+    if (is_host) {
+      deps += []
+    } else {
+      deps += [ "//sdk/rust/zx" ]
+    }
+    deps += [ "//src/lib/fuchsia" ]
+    output_name = "diagnostics_log_encoding_lib_test"
+    lint_config = "//build/config/rust/lints:clippy_warn_all"
+  }
+}
+
+fuchsia_unittest_package("diagnostics-log-encoding-tests") {
+  package_name = "diagnostics-log-encoding-tests-gn"
+  component_name = "diagnostics-log-encoding-tests"
+  deps = [ ":rust_test" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
   }
 }

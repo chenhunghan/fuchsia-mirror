@@ -983,7 +983,6 @@ func init() {
 		"import",
 		"NULL",
 		"offsetof",
-		"xunion",
 	}
 
 	// Reserve names that are universally reserved:

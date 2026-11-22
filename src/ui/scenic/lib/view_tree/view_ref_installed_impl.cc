@@ -57,6 +57,11 @@ void ViewRefInstalledImpl::Watch(WatchRequestView request, WatchCompleter::Sync&
     return;
   }
 
+  // Sync `installed_views_` if a snapshot was published before the input-thread task ran.
+  if (snapshot_holder_) {
+    OnNewViewTreeSnapshot();
+  }
+
   // Check if already installed.
   const zx_koid_t view_ref_koid = utils::ExtractKoid(request->view_ref);
   if (installed_views_.contains(view_ref_koid)) {

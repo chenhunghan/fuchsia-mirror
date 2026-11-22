@@ -11,9 +11,9 @@ pub mod testing;
 
 pub use extents::{DeviceExtent, Extent, Extents, ExtentsIterator};
 pub use file::{
-    DEFAULT_VERIFICATION_ALIGNMENT, DecodedBlobMetadata, DeliveryHandler, File, Files,
-    NoopDeliveryHandler, PagerThread, TARGET_READ_AHEAD_SIZE, Transform, process_mapping_command,
-    read_blob_metadata,
+    BlobRegistration, DEFAULT_VERIFICATION_ALIGNMENT, DecodedBlobMetadata, DeliveryHandler, File,
+    Files, NoopDeliveryHandler, PagerThread, TARGET_READ_AHEAD_SIZE, Transform,
+    process_mapping_command, read_blob_metadata,
 };
 pub use fxfs_crypto::Cipher;
 pub use page_request::{NullPageRequest, PagePrecommit, PageRequest};

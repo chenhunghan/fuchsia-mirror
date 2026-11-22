@@ -43,6 +43,9 @@ the tool.
 5.  `Index.Scan` ([`scan.go`](./scan.go)) classifies each reference as an
     exemption, cleanup, or blocker, checks test wiring
     ([`testwiring.go`](./testwiring.go)), and picks the unsync `Mode`.
+    `Index.EmptyGroups` ([`emptygroups.go`](./emptygroups.go)) separately finds
+    hand-written empty `IsTestGroup` targets outside `RegionBelow` and their
+    static/dynamic callers.
 6.  `PlanUnsync` / `Apply` / `UnsyncWaves` ([`unsync.go`](./unsync.go)) edit
     `BUILD.gn` and `BUILD.bazel` files.
 
@@ -73,9 +76,11 @@ the tool.
     tests of still-GN-built code synced, per
     `//docs/development/build/bazel_concepts/tests.md#tests-in-both-build-systems`.
     "Under test" covers a hand-written library above the sentinel in the same
-    directory, plus synced or hand-written targets in an ancestor/sibling
-    directory, skipped for directories with their own synced (non-private)
-    library; widen it only with data.
+    directory, plus synced or hand-written targets (including behind an
+    above-sentinel forwarding `group` or file-scope dependency variable) in an
+    ancestor, sibling, or `zircon/system/ulib/<name>` directory, skipped for
+    directories with their own synced (non-private) library; widen it only with
+    data.
 -   **Suffix strings** (`Literal.Suffix`): a string appended to an existing
     value (right-hand side of `+=`, or a non-leftmost `+` operand) can't start
     a label. `//build/test.gni`'s `_output_file += "." + ext` used to block

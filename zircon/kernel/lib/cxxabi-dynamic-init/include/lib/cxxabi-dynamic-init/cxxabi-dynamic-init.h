@@ -24,7 +24,7 @@ namespace internal {
 // Returns true iff global constructors have completed.
 //
 // This function must be implemented by the kernel or by tests.
-bool ConstructorsCalled();
+extern "C" bool ConstructorsCalled();
 
 // Itanium C++ ABI for initialization guard variables says:
 //

@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Helpers for Bazel labels, e.g. ones passed on the command line.
+py_library(
+    name = "bazel_labels",
+    srcs = [
+        "__init__.py",
+        "bazel_labels.py",
+    ],
+    imports = [".."],
+    visibility = [
+        "//build/bazel/scripts:__pkg__",
+        "//scripts/fxtest/python:__pkg__",
+    ],
+)

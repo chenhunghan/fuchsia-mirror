@@ -2,9 +2,81 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/developer-console.toolbox_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "launcher_bin",
+    srcs = [
+        "src/error.rs",
+        "src/io.rs",
+        "src/main.rs",
+        "src/namespace.rs",
+        "src/process.rs",
+        "src/program.rs",
+        "src/util.rs",
+    ],
+    binary_name = "developer-console",
+    build_flags = [
+        "//build/config/rust:bootfs",
+        "//build/config/rust/lints:deny_unused_results",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_rust",
+        "//sdk/fidl/fuchsia.developer.console:fuchsia.developer.console_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.hardware.pty:fuchsia.hardware.pty_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/lib/library_loader",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "launcher_bin_packaged",
+    binary = ":launcher_bin",
+    binary_name = "developer-console",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "developer-console",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/developer-console.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/developer/console/test:__pkg__"],
+    deps = [":launcher_bin_packaged"],
 )

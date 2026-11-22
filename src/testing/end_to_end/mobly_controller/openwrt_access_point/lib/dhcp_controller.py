@@ -5,6 +5,10 @@ import logging
 
 from libs.ssh import connection
 from openwrt_access_point.lib.dhcp_config import DhcpConfig
+from openwrt_access_point.lib.uci_commands import (
+    build_custom_uci_commands,
+    format_uci_value,
+)
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -22,26 +26,34 @@ class DhcpController:
             config = DhcpConfig()
         _LOGGER.info("Starting DHCP server on OpenWrt")
         self.reset_dhcp_config()
-        self.ssh.run(
-            f"uci set dhcp.lan.dynamicdhcp='{int(config.lan.dynamic_dhcp)}'"
-        )
-        self.ssh.run(f"uci set dhcp.lan.leasetime='{config.lan.lease_time}'")
+        commands: list[str] = [
+            f"uci set dhcp.lan.dynamicdhcp='{format_uci_value(config.lan.dynamic_dhcp)}'",
+            f"uci set dhcp.lan.leasetime='{config.lan.lease_time}'",
+        ]
         if config.lan.start is not None:
-            self.ssh.run(f"uci set dhcp.lan.start='{config.lan.start}'")
+            commands.append(f"uci set dhcp.lan.start='{config.lan.start}'")
         if config.lan.limit is not None:
-            self.ssh.run(f"uci set dhcp.lan.limit='{config.lan.limit}'")
-        for opt in config.lan.dhcp_options_force:
-            self.ssh.run(f"uci add_list dhcp.lan.dhcp_option_force='{opt}'")
-        if config.lan.broadcast:
-            self.ssh.run("uci set dhcp.broadcast_all=mac")
-            self.ssh.run(
-                "uci set dhcp.broadcast_all.networkid='needs-broadcast'"
+            commands.append(f"uci set dhcp.lan.limit='{config.lan.limit}'")
+        commands.extend(
+            build_custom_uci_commands(
+                "dhcp", "lan", config.lan.custom_uci_options
             )
-            self.ssh.run("uci set dhcp.broadcast_all.mac='*:*:*:*:*:*'")
-        if config.dnsmasq.noping:
-            self.ssh.run("uci set dhcp.@dnsmasq[0].noping='1'")
-        self.ssh.run("uci commit dhcp")
-        self.ssh.run("/etc/init.d/dnsmasq restart")
+        )
+        commands.extend(
+            build_custom_uci_commands(
+                "dhcp", "@dnsmasq[0]", config.dnsmasq.custom_uci_options
+            )
+        )
+        for section_name, section in config.custom_uci_sections.items():
+            commands.append(
+                f"uci set dhcp.{section_name}='{section.section_type}'"
+            )
+            commands.extend(
+                build_custom_uci_commands("dhcp", section_name, section.options)
+            )
+        commands.append("uci commit dhcp")
+        commands.append("/etc/init.d/dnsmasq restart")
+        self.ssh.run(" && ".join(commands))
         self.mark_test_start()
 
     def stop_dhcp(self) -> None:

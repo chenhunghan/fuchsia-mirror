@@ -13,8 +13,9 @@ use crate::{artifacts, diagnostics};
 use diagnostics_data::Severity;
 use flex_fuchsia_test_manager::{
     self as ftest_manager, LaunchError, SuiteArtifactGeneratedEventDetails,
-    SuiteStoppedEventDetails, TestCaseArtifactGeneratedEventDetails, TestCaseFinishedEventDetails,
-    TestCaseFoundEventDetails, TestCaseStartedEventDetails, TestCaseStoppedEventDetails,
+    SuiteStartedEventDetails, SuiteStoppedEventDetails, TestCaseArtifactGeneratedEventDetails,
+    TestCaseFinishedEventDetails, TestCaseFoundEventDetails, TestCaseStartedEventDetails,
+    TestCaseStoppedEventDetails,
 };
 use fuchsia_async as fasync;
 use futures::StreamExt;
@@ -240,21 +241,25 @@ pub(crate) async fn run_suite_and_collect_logs<F: Future<Output = ()> + Unpin>(
                             .await?;
                             suite_state.artifact_tasks.push(fasync::Task::spawn(artifact_fut));
                         }
-                        ftest_manager::EventDetails::SuiteStarted(_) => {
-                            match &suite_state.lifecycle {
-                                Lifecycle::Found => {
-                                    suite_state.reporter.started(timestamp)?;
-                                    suite_state.lifecycle = Lifecycle::Started;
+                        ftest_manager::EventDetails::SuiteStarted(SuiteStartedEventDetails {
+                            runner,
+                            ..
+                        }) => match &suite_state.lifecycle {
+                            Lifecycle::Found => {
+                                if let Some(runner) = runner {
+                                    suite_state.reporter.set_runner(runner);
                                 }
-                                other => {
-                                    return Err(UnexpectedEventError::InvalidEvent {
-                                        last_state: *other,
-                                        next_state: Lifecycle::Started,
-                                    }
-                                    .into());
-                                }
+                                suite_state.reporter.started(timestamp)?;
+                                suite_state.lifecycle = Lifecycle::Started;
                             }
-                        }
+                            other => {
+                                return Err(UnexpectedEventError::InvalidEvent {
+                                    last_state: *other,
+                                    next_state: Lifecycle::Started,
+                                }
+                                .into());
+                            }
+                        },
                         ftest_manager::EventDetails::SuiteStopped(SuiteStoppedEventDetails {
                             result: Some(result),
                             ..
@@ -919,6 +924,59 @@ mod test {
             assert!(suite.report.is_finished);
             assert!(suite.report.artifacts.is_empty());
             assert!(suite.report.directories.is_empty());
+            assert_eq!(suite.report.runner, None);
+        };
+
+        futures::future::join(serve_all_events(stream, all_events), test_fut).await;
+    }
+
+    #[fuchsia::test]
+    async fn collect_events_records_runner() {
+        let all_events = vec![
+            event_from_details(
+                0,
+                ftest_manager::EventDetails::SuiteStarted(
+                    ftest_manager::SuiteStartedEventDetails {
+                        runner: Some("gtest_runner".to_string()),
+                        ..Default::default()
+                    },
+                ),
+            ),
+            case_found_event(100, 0, "MySuite.MyCase"),
+            case_started_event(200, 0),
+            case_stopped_event(300, 0, ftest_manager::TestCaseResult::Passed),
+            case_finished_event(400, 0),
+            suite_stopped_event(500, ftest_manager::SuiteResult::Finished),
+        ];
+
+        let (proxy, stream) = create_proxy_and_stream::<ftest_manager::SuiteControllerMarker>();
+        let test_fut = async move {
+            let reporter = output::InMemoryReporter::new();
+            let run_reporter = output::RunReporter::new(reporter.clone());
+            let suite_reporter = run_reporter.new_suite("test-url").expect("create new suite");
+
+            let suite = RunningSuite::wait_for_start(WaitForStartArgs {
+                proxy,
+                max_severity_logs: None,
+                timeout: None,
+                timeout_grace: std::time::Duration::ZERO,
+                max_pipelined: None,
+                no_cases_equals_success: None,
+            })
+            .await;
+            run_suite_and_collect_logs(
+                suite,
+                &suite_reporter,
+                diagnostics::LogDisplayConfiguration::default(),
+                futures::future::pending(),
+            )
+            .await
+            .expect("collect results");
+            suite_reporter.finished().expect("Reporter finished");
+
+            let reports = reporter.get_reports();
+            let suite = reports.iter().find(|report| report.id == EntityId::Suite).unwrap();
+            assert_eq!(suite.report.runner.as_deref(), Some("gtest_runner"));
         };
 
         futures::future::join(serve_all_events(stream, all_events), test_fut).await;

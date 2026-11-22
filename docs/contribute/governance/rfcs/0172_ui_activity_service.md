@@ -311,7 +311,7 @@ Activity Service.
 We can monitor pre-existing performance tests, such as input latency tests, to
 discern whether changes regress performance.
 
-## Security considerations
+## Security considerations {:#security-considerations}
 
 The primary abuse vector for the UI Activity Service is to keep the system awake
 by spuriously reporting activity using
@@ -333,7 +333,7 @@ platform only grants ability to report activity to Input Pipeline and
 potentially A11y Manager at the platform level, and that products can further
 route to trusted components.
 
-## Privacy considerations
+## Privacy considerations {:#privacy-considerations}
 
 While the UI Activity Service does not expose any information about the nature
 of user activity, it does share whether activity has occurred recently within a

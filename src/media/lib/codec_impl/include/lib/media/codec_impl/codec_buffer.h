@@ -6,11 +6,11 @@
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_BUFFER_H_
 
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
-#include <fuchsia/media/cpp/fidl.h>
 #include <lib/async/cpp/wait.h>
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/codec_port.h>
 #include <lib/media/codec_impl/codec_vmo_range.h>
+#include <lib/zx/pmt.h>
 #include <zircon/assert.h>
 #include <zircon/compiler.h>
 

@@ -223,11 +223,11 @@ component's manifest is shipped as a blob in this package, usually in `meta/`.
 [borgmon]: https://cloud.google.com/blog/products/devops-sre/welcome-to-the-museum-of-modern-borgmon-art
 [cmc]: /tools/cmc
 [component-manifest]: /docs/concepts/components/v2/component_manifests.md
-[component-manifest-include]: /docs/concepts/components/v2/component_manifests.md#include
+[component-manifest-include]: /docs/concepts/components/v2/component_manifests.md
 [component-resolvers]: /docs/concepts/components/v2/capabilities/resolver.md
 [ComponentDecl]: /sdk/fidl/fuchsia.component.decl/component.fidl
 [DSL]: https://en.wikipedia.org/wiki/Domain-specific_language
-[elf]: /docs/concepts/process/program_loading.md#elf_and_the_system_abi
+[elf]: /docs/concepts/process/program_loading.md#elf-and-the-system-abi
 [elf-runner]: /docs/concepts/components/v2/elf_runner.md
 [FIDL]: /docs/development/languages/fidl/README.md
 [fidl-envelope]: /docs/reference/fidl/language/wire-format/README.md#envelopes

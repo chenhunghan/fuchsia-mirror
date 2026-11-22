@@ -1081,7 +1081,8 @@ mod tests {
                 fland::FlatlandRequest::CreateTransform { .. } => created_transforms += 1,
                 fland::FlatlandRequest::SetRootTransform { .. }
                 | fland::FlatlandRequest::AddChild { .. }
-                | fland::FlatlandRequest::SetTransformContent { .. } => {}
+                | fland::FlatlandRequest::SetTransformContent { .. }
+                | fland::FlatlandRequest::NotifyExpectedPresent { .. } => {}
                 other => panic!("Unexpected Flatland request: {:?}", other),
             }
         }

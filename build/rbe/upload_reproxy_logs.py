@@ -19,10 +19,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import pb_message_util
 import rbe_metrics_pb2
-import reproxy_logs
 from api.stats import stats_pb2
+from build.rbe import pb_message_util, reproxy_logs
 
 _SCRIPT_BASENAME = os.path.basename(__file__)
 # This script lives at _PROJECT_ROOT/build/rbe/{__file__}.

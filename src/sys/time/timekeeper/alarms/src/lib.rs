@@ -35,6 +35,7 @@ use fidl::encoding::ProxyChannelBox;
 use fidl::endpoints::RequestStream;
 use fidl_fuchsia_driver_token as fdt;
 use fidl_fuchsia_hardware_hrtimer as ffhh;
+use fidl_fuchsia_power_system as fps;
 use fidl_fuchsia_time_alarms as fta;
 use fuchsia_async as fasync;
 use fuchsia_component::client::Service;
@@ -43,7 +44,7 @@ use fuchsia_inspect::{IntProperty, NumericProperty, Property};
 use fuchsia_runtime as fxr;
 use fuchsia_trace as trace;
 use futures::StreamExt;
-use futures::channel::mpsc;
+use futures::channel::{mpsc, oneshot};
 use futures::sink::SinkExt;
 use log::{debug, error, warn};
 use scopeguard::defer;
@@ -75,6 +76,33 @@ const LONG_DELAY_NANOS: i64 = 2000 * MSEC_IN_NANOS;
 
 const TIMEOUT_SECONDS: i64 = 40;
 
+/// Minimum lead time before suspend to allow system suspend to proceed.
+///
+/// Coarse wake timers (such as a 1 Hz RTC) round deadlines up to the next tick,
+/// so an alarm within this window can fire while the system enters suspend and
+/// fail to wake it, or already be overdue in software while its rounded tick is
+/// still pending. Hold a wake lease until any alarm in this window expires and
+/// the next alarm is programmed.
+const SUSPEND_GUARD: zx::BootDuration = zx::BootDuration::from_seconds(2);
+
+const WAKE_LEASE_NAME: &str = "timekeeper-alarms";
+
+async fn acquire_wake_lease(
+    governor: Option<&fps::ActivityGovernorProxy>,
+) -> Option<zx::EventPair> {
+    match governor?.acquire_wake_lease(WAKE_LEASE_NAME).await {
+        Ok(Ok(token)) => Some(token),
+        Ok(Err(e)) => {
+            error!("acquire_wake_lease failed: {e:?}");
+            None
+        }
+        Err(e) => {
+            debug!("acquire_wake_lease FIDL error: {e:?}");
+            None
+        }
+    }
+}
+
 async fn request_stack_trace() {
     if let Some(ev) = DEBUG_STACK_TRACE_TOKEN.get() {
         log::warn!("*** DRIVER STACK TRACE REQUESTED: expect a driver stack trace below.");
@@ -96,7 +124,7 @@ async fn request_stack_trace() {
 }
 
 /// Waits on a future, but if the future takes longer than `TIMEOUT_SECONDS`, we log a warning and
-/// a stack trace. A stack trace is requested at most once once for each call.
+/// request a driver stack trace. A stack trace is requested at most once for each call.
 macro_rules! log_long_op {
     ($fut:expr) => {{
         use futures::FutureExt;
@@ -118,8 +146,6 @@ macro_rules! log_long_op {
                     log::warn!("unexpected blocking: long-running async op at {}:{}. Report to `componentId:1408151`",
                         file!(), line!());
                     if !logged {
-                        #[cfg(all(target_os = "fuchsia", not(doc)))]
-                        ::debug::backtrace_request_all_threads();
                         fasync::Task::local(request_stack_trace()).detach();
                     }
                     logged = true;
@@ -413,6 +439,14 @@ enum Cmd {
         // The new boot-to-utc clock transformation.
         transform: fxr::UtcClockTransform,
     },
+    /// Reconcile pending alarms before system suspend so overdue or imminent
+    /// alarms cannot block later wake alarms or race suspend entry.
+    BeforeSuspend {
+        done: oneshot::Sender<()>,
+    },
+    /// Triggered by `ImminentGuard` when a guarded deadline arrives so the
+    /// alarm expires under the guard wake lease and the next alarm is armed.
+    ExpireOverdue,
 }
 
 impl std::fmt::Display for Cmd {
@@ -449,6 +483,12 @@ impl std::fmt::Display for Cmd {
             }
             Cmd::UtcUpdated { transform } => {
                 write!(f, "UtcUpdated[timerId={transform:?}]")
+            }
+            Cmd::BeforeSuspend { .. } => {
+                write!(f, "BeforeSuspend")
+            }
+            Cmd::ExpireOverdue => {
+                write!(f, "ExpireOverdue")
             }
         }
     }
@@ -653,6 +693,8 @@ impl Loop {
     /// - `device_proxy`: A `ffhh::DeviceProxy` for communicating with the hardware timer.
     /// - `inspect`: A `finspect::Node` for recording diagnostics.
     /// - `utc_clock`: A `fxr::UtcClock` for tracking UTC time.
+    /// - `activity_governor`: Optional proxy for acquiring wake leases when
+    ///   flushing overdue or imminent alarms across suspend transitions.
     ///
     /// # Returns
     /// A new instance of `Loop`.
@@ -661,9 +703,10 @@ impl Loop {
         device_proxy: ffhh::DeviceProxy,
         inspect: finspect::Node,
         utc_clock: fxr::UtcClock,
+        activity_governor: Option<fps::ActivityGovernorProxy>,
     ) -> Self {
         let hw_device_timer_ops = HardwareTimerOps::new(device_proxy);
-        Loop::new_internal(scope, hw_device_timer_ops, inspect, utc_clock)
+        Loop::new_internal(scope, hw_device_timer_ops, inspect, utc_clock, activity_governor)
     }
 
     /// Creates a new instance of `Loop` with emulated wake alarms.
@@ -685,7 +728,7 @@ impl Loop {
         utc_clock: fxr::UtcClock,
     ) -> Self {
         let timer_ops = Box::new(EmulationTimerOps::new());
-        Loop::new_internal(scope, timer_ops, inspect, utc_clock)
+        Loop::new_internal(scope, timer_ops, inspect, utc_clock, None)
     }
 
     fn new_internal(
@@ -693,6 +736,7 @@ impl Loop {
         timer_ops: Box<dyn TimerOps>,
         inspect: finspect::Node,
         utc_clock: fxr::UtcClock,
+        activity_governor: Option<fps::ActivityGovernorProxy>,
     ) -> Self {
         let utc_transform = Rc::new(RefCell::new(
             utc_clock.get_details().expect("has UTC clock READ capability").reference_to_synthetic,
@@ -708,9 +752,22 @@ impl Loop {
             timer_ops,
             inspect,
             utc_transform,
+            activity_governor,
         ));
         scope.spawn_local(monitor_utc_clock_changes(utc_clock, snd.clone()));
         Self { snd }
+    }
+
+    /// Prepares pending alarms for system suspend so overdue or imminent alarms
+    /// do not block later wake alarms or race suspend entry.
+    pub async fn before_suspend(&self) {
+        let (done_tx, done_rx) = oneshot::channel();
+        let mut cmd = self.get_sender();
+        if let Err(e) = log_long_op!(cmd.send(Cmd::BeforeSuspend { done: done_tx })) {
+            warn!("before_suspend: failed to send command: {e:?}");
+            return;
+        }
+        let _ = log_long_op!(done_rx);
     }
 
     /// Gets a copy of a channel through which async commands may be sent to
@@ -1055,9 +1112,38 @@ async fn get_timer_properties(hrtimer: &Box<dyn TimerOps>) -> TimerConfig {
 /// The state of a single hardware timer that we must bookkeep.
 struct TimerState {
     // The task waiting for the proximate timer to expire.
-    task: fasync::Task<()>,
+    _task: fasync::Task<()>,
     // The deadline that the above task is waiting for.
     deadline: fasync::BootInstant,
+}
+
+/// Holds a system wake lease until an imminent alarm reaches its deadline so
+/// the system does not enter suspend while the alarm is about to fire.
+///
+/// The lease is owned by `ImminentGuard` rather than the timer task so the
+/// guard can be retargeted to an earlier imminent alarm without dropping and
+/// re-acquiring the lease while another suspend blocker is still running.
+struct ImminentGuard {
+    deadline: fasync::BootInstant,
+    keep_alive: zx::EventPair,
+    _task: fasync::Task<()>,
+}
+
+impl ImminentGuard {
+    fn new(
+        scope: &fasync::ScopeHandle,
+        mut snd: mpsc::Sender<Cmd>,
+        deadline: fasync::BootInstant,
+        keep_alive: zx::EventPair,
+    ) -> Self {
+        let _task = scope
+            .spawn_local(async move {
+                fasync::Timer::new(deadline).await;
+                let _ = snd.send(Cmd::ExpireOverdue).await;
+            })
+            .into();
+        Self { deadline, keep_alive, _task }
+    }
 }
 
 /// The command loop for timer interaction.  All changes to the wake alarm device programming
@@ -1075,6 +1161,7 @@ async fn wake_timer_loop(
     timer_proxy: Box<dyn TimerOps>,
     inspect: finspect::Node,
     utc_transform: Rc<RefCell<fxr::UtcClockTransform>>,
+    activity_governor: Option<fps::ActivityGovernorProxy>,
 ) {
     debug!("wake_timer_loop: started");
 
@@ -1085,6 +1172,7 @@ async fn wake_timer_loop(
     // keeps the timer task active.
     #[allow(clippy::collection_is_never_read)]
     let mut hrtimer_status: Option<TimerState> = None;
+    let mut imminent_guard: Option<ImminentGuard> = None;
 
     // Initialize inspect properties. This must be done only once.
     //
@@ -1148,6 +1236,17 @@ async fn wake_timer_loop(
     let loop_count = debug_node.create_int("loop_count", 0);
 
     let hrtimer_node = debug_node.create_child("hrtimer");
+    let rescheduler = Rescheduler {
+        scope: &scope,
+        timer_proxy: &timer_proxy,
+        snd: &snd,
+        timer_config: &timer_config,
+        schedule_delay_prop: &schedule_delay_prop,
+        slack_histogram_prop: &slack_histogram_prop,
+        hrtimer_node: &hrtimer_node,
+        stop_hrtimer_count: &stop_hrtimer_count,
+        schedule_hrtimer_count: &schedule_hrtimer_count,
+    };
 
     const LRU_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(100).unwrap();
     let mut error_cache = lru::LruCache::new(LRU_CACHE_CAPACITY);
@@ -1240,6 +1339,12 @@ async fn wake_timer_loop(
                     let was_empty = timers.is_empty();
 
                     let deadline_before = timers.peek_deadline_as_boot();
+                    // On coarse hardware timers (e.g. 1 Hz RTC), an earlier head can already be
+                    // overdue in software while its rounded hardware tick has not fired yet.
+                    // Adding a later alarm leaves `deadline_after == deadline_before`, so flush
+                    // the overdue head and program the next alarm immediately.
+                    let head_expired =
+                        deadline_before.is_some_and(|d| timers::Heap::expired(now, d));
                     let node = match deadline {
                         timers::Deadline::Boot(_) => {
                             timers.new_node_boot(deadline_boot, alarm_id, conn_id, responder)
@@ -1252,31 +1357,34 @@ async fn wake_timer_loop(
                     let deadline_after = timers.peek_deadline_as_boot();
 
                     let deadline_changed = is_deadline_changed(deadline_before, deadline_after);
-                    let needs_cancel = !was_empty && deadline_changed;
-                    let needs_reschedule = was_empty || deadline_changed;
+                    let needs_cancel = !was_empty && (deadline_changed || head_expired);
+                    let needs_reschedule = was_empty || deadline_changed || head_expired;
 
                     if needs_reschedule {
-                        if needs_cancel {
-                            log_long_op!(stop_hrtimer(&timer_proxy, &timer_config));
-                        }
+                        let acquired_lease = if head_expired
+                            && !matches!(mode, Some(fta::SetMode::KeepAlive(_)))
+                            && imminent_guard.is_none()
+                        {
+                            acquire_wake_lease(activity_governor.as_ref()).await
+                        } else {
+                            None
+                        };
                         let (_dummy_lease, peer) = zx::EventPair::create();
                         let lease_prototype = match &mode {
                             Some(fta::SetMode::KeepAlive(lease)) => lease,
-                            _ => &peer,
+                            _ => acquired_lease
+                                .as_ref()
+                                .or_else(|| imminent_guard.as_ref().map(|g| &g.keep_alive))
+                                .unwrap_or(&peer),
                         };
-                        hrtimer_status = reschedule_proximate_hrtimer(
-                            scope.clone(),
-                            &timer_proxy,
-                            &mut timers,
-                            snd.clone(),
-                            &timer_config,
-                            lease_prototype,
-                            false,
-                            &schedule_delay_prop,
-                            &slack_histogram_prop,
-                            &hrtimer_node,
-                        )
-                        .await;
+                        rescheduler
+                            .stop_and_reschedule(
+                                &mut hrtimer_status,
+                                needs_cancel,
+                                &mut timers,
+                                lease_prototype,
+                            )
+                            .await;
                     }
                 }
             }
@@ -1308,39 +1416,22 @@ async fn wake_timer_loop(
                         }
                     }
                     if is_deadline_changed(deadline_before, deadline_after) {
-                        let _i = ScopedInc::new(&stop_hrtimer_count);
-                        log_long_op!(stop_hrtimer(&timer_proxy, &timer_config));
-                        // We do not hold a wake lease during StopById, so any catch-up
-                        // alarms that expire immediately will receive a dummy lease.
+                        // Reuse the active guard wake lease when present; otherwise we do not hold
+                        // a wake lease during StopById, so any catch-up alarms that expire
+                        // immediately receive a placeholder lease.
                         let (_dummy_lease, peer) = zx::EventPair::create();
-                        // Reschedule the hardware timer if the removed timer is the earliest one,
-                        // and another one exists.
-                        if let Some(new_timer_state) = reschedule_proximate_hrtimer(
-                            scope.clone(),
-                            &timer_proxy,
-                            &mut timers,
-                            snd.clone(),
-                            &timer_config,
-                            &peer,
-                            false,
-                            &schedule_delay_prop,
-                            &slack_histogram_prop,
-                            &hrtimer_node,
-                        )
-                        .await
-                        {
-                            let _i = ScopedInc::new(&schedule_hrtimer_count);
-                            let old_hrtimer_status = hrtimer_status.replace(new_timer_state);
-                            if let Some(task) = old_hrtimer_status.map(|ev| ev.task) {
-                                // Allow the task to complete. Since this task should have been
-                                // canceled or completed already, this call should not block for
-                                // a long time.
-                                log_long_op!(task);
-                            }
-                        } else {
-                            // No next timer, clean up the hrtimer status.
-                            hrtimer_status = None;
-                        }
+                        let lease_prototype =
+                            imminent_guard.as_ref().map(|g| &g.keep_alive).unwrap_or(&peer);
+                        // Cancel the prior wait task and hardware timer, then reschedule if
+                        // another alarm remains.
+                        rescheduler
+                            .stop_and_reschedule(
+                                &mut hrtimer_status,
+                                true,
+                                &mut timers,
+                                lease_prototype,
+                            )
+                            .await;
                     }
                 } else {
                     // Imminent: the soonest to trigger, based on its timeline.
@@ -1498,25 +1589,117 @@ async fn wake_timer_loop(
                 // Reschedule the hardware timer with the now-current deadline if there is an
                 // active timer.
                 if hrtimer_status.is_some() {
-                    log_long_op!(stop_hrtimer(&timer_proxy, &timer_config));
-                    // We do not hold a wake lease during UtcUpdated, so any catch-up
-                    // alarms that expire immediately will receive a dummy lease.
+                    // Reuse the active guard wake lease when present; otherwise we do not hold a
+                    // wake lease during UtcUpdated, so any catch-up alarms that expire immediately
+                    // receive a placeholder lease.
                     // Should we request a wake lock here?
                     let (_dummy_lease, peer) = zx::EventPair::create();
-                    hrtimer_status = reschedule_proximate_hrtimer(
-                        scope.clone(),
-                        &timer_proxy,
-                        &mut timers,
-                        snd.clone(),
-                        &timer_config,
-                        &peer,
-                        false,
-                        &schedule_delay_prop,
-                        &slack_histogram_prop,
-                        &hrtimer_node,
-                    )
-                    .await;
+                    let lease_prototype =
+                        imminent_guard.as_ref().map(|g| &g.keep_alive).unwrap_or(&peer);
+                    rescheduler
+                        .stop_and_reschedule(
+                            &mut hrtimer_status,
+                            true,
+                            &mut timers,
+                            lease_prototype,
+                        )
+                        .await;
                 }
+            }
+            Cmd::BeforeSuspend { done } => {
+                trace::duration!("alarms", "Cmd::BeforeSuspend");
+                defer! {
+                    let _ = done.send(());
+                }
+
+                if let Some(head) = timers.peek_deadline_as_boot() {
+                    let head_expired = timers::Heap::expired(now, head);
+                    let hw_unscheduled = hrtimer_status.as_ref().map(|s| s.deadline) != Some(head);
+                    let need_guard = head < now + SUSPEND_GUARD
+                        && imminent_guard.as_ref().map(|g| g.deadline) != Some(head);
+
+                    let mut real_lease = if head_expired || hw_unscheduled || need_guard {
+                        acquire_wake_lease(activity_governor.as_ref()).await
+                    } else {
+                        None
+                    };
+
+                    if head_expired || hw_unscheduled {
+                        debug!(
+                            "wake_timer_loop: BeforeSuspend flush head={} now={} exp={} unsched={}",
+                            format_timer(head.into()),
+                            format_timer(now.into()),
+                            head_expired,
+                            hw_unscheduled,
+                        );
+                        let (_dummy_lease, peer) = zx::EventPair::create();
+                        let lease_ref = real_lease.as_ref().unwrap_or(&peer);
+                        let cancel = hrtimer_status.is_some();
+                        rescheduler
+                            .stop_and_reschedule(
+                                &mut hrtimer_status,
+                                cancel,
+                                &mut timers,
+                                lease_ref,
+                            )
+                            .await;
+                    }
+
+                    let now_after = fasync::BootInstant::now();
+                    if let Some(next_head) = timers.peek_deadline_as_boot()
+                        && next_head < now_after + SUSPEND_GUARD
+                        && imminent_guard.as_ref().map(|g| g.deadline) != Some(next_head)
+                    {
+                        if real_lease.is_none() {
+                            real_lease = acquire_wake_lease(activity_governor.as_ref()).await;
+                        }
+                        if let Some(keep_alive) = real_lease {
+                            debug!(
+                                "wake_timer_loop: BeforeSuspend holding wake lease until {}",
+                                format_timer(next_head.into()),
+                            );
+                            imminent_guard = Some(ImminentGuard::new(
+                                &scope,
+                                snd.clone(),
+                                next_head,
+                                keep_alive,
+                            ));
+                        }
+                    }
+                }
+            }
+            Cmd::ExpireOverdue => {
+                trace::duration!("alarms", "Cmd::ExpireOverdue");
+                if let Some(guard) = imminent_guard.as_ref()
+                    && timers.peek_deadline_as_boot().is_some_and(|d| timers::Heap::expired(now, d))
+                {
+                    let cancel = hrtimer_status.is_some();
+                    rescheduler
+                        .stop_and_reschedule(
+                            &mut hrtimer_status,
+                            cancel,
+                            &mut timers,
+                            &guard.keep_alive,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        // Keep the active guard lease alive if a command moved the head to another imminent alarm
+        // (e.g., `Cmd::Start` inserting an earlier < 2 s alarm while another suspend blocker is
+        // still inside `BeforeSuspend`), retargeting the timer without closing `keep_alive`.
+        if let Some(guard) = imminent_guard.take() {
+            let now_after = fasync::BootInstant::now();
+            match timers.peek_deadline_as_boot() {
+                Some(head) if head == guard.deadline => {
+                    imminent_guard = Some(guard);
+                }
+                Some(head) if head < guard.deadline || head < now_after + SUSPEND_GUARD => {
+                    imminent_guard =
+                        Some(ImminentGuard::new(&scope, snd.clone(), head, guard.keep_alive));
+                }
+                _ => {}
             }
         }
 
@@ -1566,12 +1749,57 @@ async fn wake_timer_loop(
     log::info!("wake_timer_loop: exiting. This is only correct in test code.");
 }
 
+struct Rescheduler<'a> {
+    scope: &'a fasync::ScopeHandle,
+    timer_proxy: &'a Box<dyn TimerOps>,
+    snd: &'a mpsc::Sender<Cmd>,
+    timer_config: &'a TimerConfig,
+    schedule_delay_prop: &'a finspect::IntExponentialHistogramProperty,
+    slack_histogram_prop: &'a finspect::IntExponentialHistogramProperty,
+    hrtimer_node: &'a finspect::Node,
+    stop_hrtimer_count: &'a IntProperty,
+    schedule_hrtimer_count: &'a IntProperty,
+}
+
+impl<'a> Rescheduler<'a> {
+    async fn stop_and_reschedule(
+        &self,
+        hrtimer_status: &mut Option<TimerState>,
+        cancel: bool,
+        timers: &mut timers::Heap,
+        lease_prototype: &zx::EventPair,
+    ) {
+        if cancel {
+            let _i = ScopedInc::new(self.stop_hrtimer_count);
+            // Cancel the prior wait task before stopping hardware so a stale
+            // cancellation reply cannot race the new schedule.
+            drop(hrtimer_status.take());
+            log_long_op!(stop_hrtimer(self.timer_proxy, self.timer_config));
+        }
+        let _i = ScopedInc::new(self.schedule_hrtimer_count);
+        *hrtimer_status = reschedule_proximate_hrtimer(
+            self.scope.clone(),
+            self.timer_proxy,
+            timers,
+            self.snd.clone(),
+            self.timer_config,
+            lease_prototype,
+            false,
+            self.schedule_delay_prop,
+            self.slack_histogram_prop,
+            self.hrtimer_node,
+        )
+        .await;
+    }
+}
+
 /// Schedules the earliest timer in `timers`, expiring any timers whose deadline
 /// has passed either before or during hardware timer setup.
 ///
 /// Note: When called from contexts that do not hold a real wake lease (such as
-/// `StopById` or `UtcUpdated`), `lease_prototype` is a dummy lease that closes
-/// when the caller's loop iteration ends, matching immediate expiry in `Start`.
+/// `StopById` or `UtcUpdated` without an active `imminent_guard`),
+/// `lease_prototype` is a placeholder lease that closes when the caller's loop
+/// iteration ends, matching immediate expiry in `Start`.
 async fn reschedule_proximate_hrtimer(
     scope: fasync::ScopeHandle,
     timer_proxy: &Box<dyn TimerOps>,
@@ -1767,7 +1995,7 @@ async fn schedule_hrtimer(
     // TODO: b/444236931: re-enable.
     //schedule_delay_histogram.insert(duration_until_scheduled.into_nanos());
     debug!("schedule_hrtimer: hrtimer wake alarm has been scheduled.");
-    TimerState { task: hrtimer_task, deadline }
+    TimerState { _task: hrtimer_task, deadline }
 }
 
 /// Notify all `timers` that `reference_instant` has been reached.
@@ -2364,6 +2592,9 @@ mod tests {
 
     struct TestContext {
         wake_proxy: fta::WakeAlarmsProxy,
+        alarms: Rc<Loop>,
+        scheduled_calls: Rc<RefCell<Vec<(i64, u64)>>>,
+        wake_lease_server_tokens: Rc<RefCell<Vec<zx::EventPair>>>,
         _scope: fasync::Scope,
         _cmd_tx: mpsc::Sender<FakeCmd>,
         // Use to manipulate the UTC clock from the test.
@@ -2373,6 +2604,20 @@ mod tests {
 
     impl TestContext {
         async fn new() -> Self {
+            Self::new_with_config(vec![zx::BootDuration::from_nanos(1)], 100, "test", false).await
+        }
+
+        async fn new_coarse_with_governor(node_name: &str) -> Self {
+            Self::new_with_config(vec![zx::BootDuration::from_seconds(1)], 1000, node_name, true)
+                .await
+        }
+
+        async fn new_with_config(
+            resolutions: Vec<zx::BootDuration>,
+            max_ticks: i64,
+            node_name: &str,
+            with_governor: bool,
+        ) -> Self {
             TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(0)).await;
 
             let scope = fasync::Scope::new();
@@ -2380,33 +2625,58 @@ mod tests {
             let utc_clock =
                 fxr::UtcClock::create(zx::ClockOpts::empty(), Some(utc_backstop)).unwrap();
             let utc_clone = clone_utc_clock(&utc_clock);
-            let (mut cmd_tx, wake_proxy) = {
+            let wake_lease_server_tokens = Rc::new(RefCell::new(Vec::new()));
+            let activity_governor = if with_governor {
+                let (governor_proxy, mut governor_stream) =
+                    fidl::endpoints::create_proxy_and_stream::<fps::ActivityGovernorMarker>();
+                let tokens = wake_lease_server_tokens.clone();
+                scope.spawn_local(async move {
+                    while let Some(Ok(req)) = governor_stream.next().await {
+                        match req {
+                            fps::ActivityGovernorRequest::AcquireWakeLease {
+                                responder, ..
+                            } => {
+                                let (server_token, client_token) = zx::EventPair::create();
+                                tokens.borrow_mut().push(server_token);
+                                responder.send(Ok(client_token)).unwrap();
+                            }
+                            other => panic!("unexpected ActivityGovernor request: {other:?}"),
+                        }
+                    }
+                });
+                Some(governor_proxy)
+            } else {
+                None
+            };
+            let (mut cmd_tx, wake_proxy, alarms, scheduled_calls) = {
                 let (tx, rx) = mpsc::channel::<FakeCmd>(0);
-                let (hrtimer_proxy, _scheduled_calls) =
+                let (hrtimer_proxy, scheduled_calls) =
                     fake_hrtimer_connection(scope.to_handle(), rx);
 
                 let inspector = finspect::component::inspector();
                 let alarms = Rc::new(Loop::new(
                     scope.to_handle(),
                     hrtimer_proxy,
-                    inspector.root().create_child("test"),
+                    inspector.root().create_child(node_name),
                     utc_clone,
+                    activity_governor,
                 ));
 
                 let (proxy, stream) =
                     fidl::endpoints::create_proxy_and_stream::<fta::WakeAlarmsMarker>();
+                let alarms_for_serve = alarms.clone();
                 scope.spawn_local(async move {
-                    serve(alarms, stream).await;
+                    serve(alarms_for_serve, stream).await;
                 });
-                (tx, proxy)
+                (tx, proxy, alarms, scheduled_calls)
             };
 
             let (_wake_lease, peer) = zx::EventPair::create();
             let done = zx::Event::create();
             cmd_tx
                 .start_send(FakeCmd::SetProperties {
-                    resolutions: vec![zx::Duration::from_nanos(1)],
-                    max_ticks: 100,
+                    resolutions,
+                    max_ticks,
                     keep_alive: peer,
                     done: done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
                 })
@@ -2415,7 +2685,16 @@ mod tests {
             // Wait until hrtimer configuration has completed.
             assert_matches!(fasync::OnSignals::new(done, zx::Signals::EVENT_SIGNALED).await, Ok(_));
 
-            Self { wake_proxy, _scope: scope, _cmd_tx: cmd_tx, utc_clock, utc_backstop }
+            Self {
+                wake_proxy,
+                alarms,
+                scheduled_calls,
+                wake_lease_server_tokens,
+                _scope: scope,
+                _cmd_tx: cmd_tx,
+                utc_clock,
+                utc_backstop,
+            }
         }
     }
 
@@ -3109,78 +3388,393 @@ mod tests {
         );
     }
 
+    impl TestContext {
+        async fn schedule_boot_alarm(
+            &self,
+            nanos: i64,
+            id: &str,
+        ) -> fidl::client::QueryResponseFut<Result<zx::EventPair, fta::WakeAlarmsError>> {
+            let setup_done = zx::Event::create();
+            let mut alarm = self.wake_proxy.set_and_wait(
+                zx::BootInstant::from_nanos(nanos).into(),
+                fta::SetMode::NotifySetupDone(
+                    setup_done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                ),
+                id.into(),
+            );
+            assert_matches!(TestExecutor::poll_until_stalled(&mut alarm).await, Poll::Pending);
+            let mut setup_task =
+                pin!(fasync::OnSignals::new(setup_done, zx::Signals::EVENT_SIGNALED));
+            assert_matches!(
+                TestExecutor::poll_until_stalled(&mut setup_task).await,
+                Poll::Ready(Ok(_))
+            );
+            alarm
+        }
+
+        fn is_wake_lease_closed(&self, index: usize) -> bool {
+            matches!(
+                self.wake_lease_server_tokens.borrow()[index].wait_one(
+                    zx::Signals::EVENTPAIR_PEER_CLOSED,
+                    zx::MonotonicInstant::INFINITE_PAST,
+                ),
+                zx::WaitResult::Ok(_)
+            )
+        }
+    }
+
     // Verify that a single-resolution coarse timer schedules `q + 1` ticks (`2s`) for an inexact
     // `1.35s` deadline rather than waking early at `1s` and then arming a second `1s` tick.
     #[fuchsia::test(allow_stalls = false)]
     async fn test_single_resolution_coarse_timer_no_early_double_wake() {
-        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(0)).await;
+        let ctx = TestContext::new_with_config(
+            vec![zx::BootDuration::from_seconds(1)],
+            1000,
+            "coarse_single_res_test",
+            false,
+        )
+        .await;
 
-        let scope = fasync::Scope::new();
-        let utc_backstop = fxr::UtcInstant::from_nanos(1000);
-        let utc_clock = fxr::UtcClock::create(zx::ClockOpts::empty(), Some(utc_backstop)).unwrap();
-        let (mut cmd_tx, wake_proxy, scheduled_calls) = {
-            let (tx, rx) = mpsc::channel::<FakeCmd>(0);
-            let (hrtimer_proxy, scheduled_calls) = fake_hrtimer_connection(scope.to_handle(), rx);
-
-            let inspector = finspect::component::inspector();
-            let alarms = Rc::new(Loop::new(
-                scope.to_handle(),
-                hrtimer_proxy,
-                inspector.root().create_child("coarse_single_res_test"),
-                clone_utc_clock(&utc_clock),
-            ));
-
-            let (proxy, stream) =
-                fidl::endpoints::create_proxy_and_stream::<fta::WakeAlarmsMarker>();
-            scope.spawn_local(async move {
-                serve(alarms, stream).await;
-            });
-            (tx, proxy, scheduled_calls)
-        };
-
-        let (_wake_lease, peer) = zx::EventPair::create();
-        let done = zx::Event::create();
-        cmd_tx
-            .start_send(FakeCmd::SetProperties {
-                resolutions: vec![zx::BootDuration::from_seconds(1)],
-                max_ticks: 1000,
-                keep_alive: peer,
-                done: done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            })
-            .unwrap();
-        assert_matches!(fasync::OnSignals::new(done, zx::Signals::EVENT_SIGNALED).await, Ok(_));
-
-        let ctx =
-            TestContext { wake_proxy, _scope: scope, _cmd_tx: cmd_tx, utc_clock, utc_backstop };
-
-        let deadline = zx::BootInstant::from_nanos(1_350_000_000);
-        let setup_done = zx::Event::create();
-        let mut set_task = ctx.wake_proxy.set_and_wait(
-            deadline.into(),
-            fta::SetMode::NotifySetupDone(
-                setup_done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            ),
-            "coarse_alarm".into(),
-        );
-        assert_matches!(TestExecutor::poll_until_stalled(&mut set_task).await, Poll::Pending);
-
-        let mut setup_done_task =
-            pin!(fasync::OnSignals::new(setup_done, zx::Signals::EVENT_SIGNALED));
-        assert_matches!(
-            TestExecutor::poll_until_stalled(&mut setup_done_task).await,
-            Poll::Ready(Ok(_))
-        );
+        let mut set_task = ctx.schedule_boot_alarm(1_350_000_000, "coarse_alarm").await;
 
         // No early wake at 1s; the hardware timer must be programmed directly once for 2 x 1s.
-        assert_eq!(*scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
         TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_000_000_000)).await;
         assert_matches!(TestExecutor::poll_until_stalled(&mut set_task).await, Poll::Pending);
-        assert_eq!(*scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
         TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(2_000_000_000)).await;
         assert_matches!(
             TestExecutor::poll_until_stalled(&mut set_task).await,
             Poll::Ready(Ok(Ok(_)))
         );
-        assert_eq!(*scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_before_suspend_overdue_head_programs_next_alarm() {
+        let ctx = TestContext::new_coarse_with_governor("before_suspend_overdue").await;
+
+        // 1 Hz hrtimer rounds 1.2s up to 2 ticks, leaving a sub-tick window where
+        // alarm_1 is overdue in software before hardware fires.
+        let mut alarm_1 = ctx.schedule_boot_alarm(1_200_000_000, "alarm_1").await;
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+
+        // Queue alarm_2 while alarm_1 is still in the future so `Cmd::Start` does not
+        // flush alarm_1 early, isolating the `before_suspend` path.
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(500_000_000)).await;
+        let mut alarm_2 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_2").await;
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+
+        // At t = 1.5s, alarm_1 (1.2s) is overdue while the rounded 2.0s tick is pending.
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_500_000_000)).await;
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_1).await, Poll::Pending);
+
+        ctx.alarms.before_suspend().await;
+        let client_lease = match TestExecutor::poll_until_stalled(&mut alarm_1).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected alarm_1 to expire in before_suspend, got {other:?}"),
+        };
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2), (1_000_000_000, 14)]);
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+        drop(client_lease);
+        assert!(ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(15_500_000_000)).await;
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut alarm_2).await,
+            Poll::Ready(Ok(Ok(_)))
+        );
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_before_suspend_imminent_head_holds_wake_lease_until_expiry() {
+        let ctx = TestContext::new_coarse_with_governor("before_suspend_imminent").await;
+
+        let mut alarm_1 = ctx.schedule_boot_alarm(1_200_000_000, "alarm_1").await;
+        let mut alarm_2 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_2").await;
+
+        // At t = 0.5s, alarm_1 (1.2s) falls inside `SUSPEND_GUARD` (2s) so suspend
+        // must stay blocked until alarm_1 expires and alarm_2 is programmed.
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(500_000_000)).await;
+        ctx.alarms.before_suspend().await;
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_1).await, Poll::Pending);
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_200_000_000)).await;
+        let client_lease = match TestExecutor::poll_until_stalled(&mut alarm_1).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected alarm_1 to expire at 1.2s, got {other:?}"),
+        };
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_2).await, Poll::Pending);
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2), (1_000_000_000, 14)]);
+        drop(client_lease);
+        assert!(ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(15_200_000_000)).await;
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut alarm_2).await,
+            Poll::Ready(Ok(Ok(_)))
+        );
+    }
+
+    // Retargeting `imminent_guard` to an earlier imminent alarm must keep `keep_alive`
+    // open so SAG does not see a lease gap while other suspend blockers finish.
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_start_earlier_imminent_alarm_preserves_guard_wake_lease() {
+        let ctx = TestContext::new_coarse_with_governor("start_earlier_imminent").await;
+
+        let mut alarm_1 = ctx.schedule_boot_alarm(1_800_000_000, "alarm_1").await;
+        let mut alarm_2 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_2").await;
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(500_000_000)).await;
+        ctx.alarms.before_suspend().await;
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        // Simulate an earlier imminent alarm arriving while another suspend blocker
+        // may still be running `BeforeSuspend`.
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(600_000_000)).await;
+        let mut alarm_0 = ctx.schedule_boot_alarm(1_000_000_000, "alarm_0").await;
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        // Even after alarm_0 drops its handle, alarm_1 (1.8s) is still within
+        // `SUSPEND_GUARD` (1.0s + 2.0s), so the guard must keep the lease open.
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_000_000_000)).await;
+        let client_lease_0 = match TestExecutor::poll_until_stalled(&mut alarm_0).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected alarm_0 to expire at 1.0s, got {other:?}"),
+        };
+        drop(client_lease_0);
+        assert!(!ctx.is_wake_lease_closed(0));
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_1).await, Poll::Pending);
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_800_000_000)).await;
+        let client_lease_1 = match TestExecutor::poll_until_stalled(&mut alarm_1).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected alarm_1 to expire at 1.8s, got {other:?}"),
+        };
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_2).await, Poll::Pending);
+        assert_eq!(
+            *ctx.scheduled_calls.borrow(),
+            vec![(1_000_000_000, 2), (1_000_000_000, 1), (1_000_000_000, 1), (1_000_000_000, 14)]
+        );
+        assert!(!ctx.is_wake_lease_closed(0));
+        drop(client_lease_1);
+        assert!(ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(15_800_000_000)).await;
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut alarm_2).await,
+            Poll::Ready(Ok(Ok(_)))
+        );
+    }
+
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_start_behind_overdue_head_programs_next_alarm() {
+        let ctx = TestContext::new_coarse_with_governor("start_behind_overdue").await;
+
+        let mut alarm_1 = ctx.schedule_boot_alarm(1_200_000_000, "alarm_1").await;
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2)]);
+
+        // At t = 1.5s, alarm_1 (1.2s) is overdue while its rounded 2.0s tick is pending.
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_500_000_000)).await;
+        let mut alarm_2 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_2").await;
+
+        let client_lease = match TestExecutor::poll_until_stalled(&mut alarm_1).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected overdue alarm_1 to expire on Start, got {other:?}"),
+        };
+        assert_eq!(*ctx.scheduled_calls.borrow(), vec![(1_000_000_000, 2), (1_000_000_000, 14)]);
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        drop(client_lease);
+        assert!(ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(15_500_000_000)).await;
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut alarm_2).await,
+            Poll::Ready(Ok(Ok(_)))
+        );
+    }
+
+    // When `imminent_guard` is active and a UTC clock jump expires a UTC alarm
+    // inside `Cmd::UtcUpdated`, the client must receive a duplicate of the
+    // live guard wake lease rather than a closed placeholder lease.
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_utc_updated_during_imminent_guard_preserves_wake_lease() {
+        let ctx = TestContext::new_coarse_with_governor("utc_updated_guard").await;
+
+        let now_boot = fasync::BootInstant::now();
+        ctx.utc_clock
+            .update(
+                zx::ClockUpdate::builder()
+                    .absolute_value(now_boot.into(), ctx.utc_backstop)
+                    .build(),
+            )
+            .unwrap();
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut std::future::pending::<()>()).await,
+            Poll::Pending
+        );
+
+        let setup_done = zx::Event::create();
+        let utc_deadline = ctx.utc_backstop + fxr::UtcDuration::from_nanos(1_500_000_000);
+        let mut utc_alarm = ctx.wake_proxy.set_and_wait_utc(
+            &fta::InstantUtc { timestamp_utc: utc_deadline.into_nanos() },
+            fta::SetMode::NotifySetupDone(
+                setup_done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            ),
+            "utc_alarm",
+        );
+        assert_matches!(TestExecutor::poll_until_stalled(&mut utc_alarm).await, Poll::Pending);
+        let mut setup_task = pin!(fasync::OnSignals::new(setup_done, zx::Signals::EVENT_SIGNALED));
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut setup_task).await,
+            Poll::Ready(Ok(_))
+        );
+        // Queue a distant alarm so `imminent_guard` drops once `utc_alarm` expires.
+        let mut alarm_2 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_2").await;
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(500_000_000)).await;
+        ctx.alarms.before_suspend().await;
+        assert_matches!(TestExecutor::poll_until_stalled(&mut utc_alarm).await, Poll::Pending);
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        // Jump UTC forward so `utc_alarm` expires inside `Cmd::UtcUpdated`.
+        ctx.utc_clock
+            .update(
+                zx::ClockUpdate::builder()
+                    .absolute_value(
+                        fasync::BootInstant::now().into(),
+                        ctx.utc_backstop + fxr::UtcDuration::from_seconds(3),
+                    )
+                    .build(),
+            )
+            .unwrap();
+
+        let client_lease = match TestExecutor::poll_until_stalled(&mut utc_alarm).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected utc_alarm to expire on UtcUpdated, got {other:?}"),
+        };
+        // Let `wake_timer_loop` finish rescheduling `alarm_2` and drop `imminent_guard`.
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_2).await, Poll::Pending);
+        assert_matches!(
+            client_lease
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
+            zx::WaitResult::TimedOut(_)
+        );
+        assert!(!ctx.is_wake_lease_closed(0));
+        drop(client_lease);
+        assert!(ctx.is_wake_lease_closed(0));
+    }
+
+    // When `imminent_guard` is active and canceling the head alarm causes the
+    // next alarm to expire inside `Cmd::StopById`, the client must receive a
+    // duplicate of the live guard wake lease rather than a closed placeholder lease.
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_stop_by_id_during_imminent_guard_preserves_wake_lease() {
+        let mut ctx = TestContext::new_coarse_with_governor("stop_by_id_guard").await;
+
+        let mut alarm_1 = ctx.schedule_boot_alarm(1_200_000_000, "alarm_1").await;
+        let mut alarm_2 = ctx.schedule_boot_alarm(1_300_000_000, "alarm_2").await;
+        // Queue a distant alarm so `imminent_guard` drops once `alarm_2` expires.
+        let mut alarm_3 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_3").await;
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(500_000_000)).await;
+        ctx.alarms.before_suspend().await;
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        // Delay hardware timer setup so `alarm_2` (1.3s) expires during
+        // `Cmd::StopById`'s reschedule after canceling `alarm_1` at t = 1.15s.
+        let done = zx::Event::create();
+        ctx._cmd_tx
+            .start_send(FakeCmd::SetScheduleDelay {
+                delay: zx::BootDuration::from_millis(200),
+                done: done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            })
+            .unwrap();
+        assert_matches!(fasync::OnSignals::new(done, zx::Signals::EVENT_SIGNALED).await, Ok(_));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_150_000_000)).await;
+        ctx.wake_proxy.cancel("alarm_1").unwrap();
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut alarm_1).await,
+            Poll::Ready(Ok(Err(fta::WakeAlarmsError::Dropped)))
+        );
+        // Wait for `Cmd::StopById` to submit `alarm_2` with the 200 ms setup delay
+        // before resetting the delay for the subsequent `alarm_3` reschedule.
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_2).await, Poll::Pending);
+
+        let done = zx::Event::create();
+        ctx._cmd_tx
+            .start_send(FakeCmd::SetScheduleDelay {
+                delay: zx::BootDuration::ZERO,
+                done: done.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            })
+            .unwrap();
+        assert_matches!(fasync::OnSignals::new(done, zx::Signals::EVENT_SIGNALED).await, Ok(_));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_350_000_000)).await;
+        let client_lease = match TestExecutor::poll_until_stalled(&mut alarm_2).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected alarm_2 to expire during StopById, got {other:?}"),
+        };
+        // Let `wake_timer_loop` finish rescheduling `alarm_3` and drop `imminent_guard`.
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_3).await, Poll::Pending);
+        assert_matches!(
+            client_lease
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
+            zx::WaitResult::TimedOut(_)
+        );
+        assert!(!ctx.is_wake_lease_closed(0));
+        drop(client_lease);
+        assert!(ctx.is_wake_lease_closed(0));
+    }
+
+    // When `imminent_guard` is active and canceling the head alarm moves the
+    // head to another imminent alarm, `Cmd::StopById` must cancel the prior
+    // hardware wait before stopping the timer and retarget `imminent_guard` so
+    // the next alarm still receives the live guard wake lease when it expires.
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_stop_by_id_retargets_imminent_guard_preserves_wake_lease() {
+        let ctx = TestContext::new_coarse_with_governor("stop_by_id_retarget_guard").await;
+
+        let mut alarm_1 = ctx.schedule_boot_alarm(1_200_000_000, "alarm_1").await;
+        let mut alarm_2 = ctx.schedule_boot_alarm(1_300_000_000, "alarm_2").await;
+        // Queue a distant alarm so `imminent_guard` drops once `alarm_2` expires.
+        let mut alarm_3 = ctx.schedule_boot_alarm(15_000_000_000, "alarm_3").await;
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(500_000_000)).await;
+        ctx.alarms.before_suspend().await;
+        assert_eq!(ctx.wake_lease_server_tokens.borrow().len(), 1);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_150_000_000)).await;
+        ctx.wake_proxy.cancel("alarm_1").unwrap();
+        assert_matches!(
+            TestExecutor::poll_until_stalled(&mut alarm_1).await,
+            Poll::Ready(Ok(Err(fta::WakeAlarmsError::Dropped)))
+        );
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_2).await, Poll::Pending);
+        assert!(!ctx.is_wake_lease_closed(0));
+
+        TestExecutor::advance_to(fasync::MonotonicInstant::from_nanos(1_300_000_000)).await;
+        let client_lease = match TestExecutor::poll_until_stalled(&mut alarm_2).await {
+            Poll::Ready(Ok(Ok(lease))) => lease,
+            other => panic!("expected alarm_2 to expire at 1.3s, got {other:?}"),
+        };
+        assert_matches!(TestExecutor::poll_until_stalled(&mut alarm_3).await, Poll::Pending);
+        assert_matches!(
+            client_lease
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
+            zx::WaitResult::TimedOut(_)
+        );
+        assert!(!ctx.is_wake_lease_closed(0));
+        drop(client_lease);
+        assert!(ctx.is_wake_lease_closed(0));
     }
 }

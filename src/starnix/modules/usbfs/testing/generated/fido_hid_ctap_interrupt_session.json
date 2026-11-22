@@ -1,0 +1,1596 @@
+{
+    "name": "fido_hid_ctap_interrupt_session",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 3,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd_ro",
+                "mode": "rdonly"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd_ro"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read",
+                "fd": "fd_ro",
+                "size": 64
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_read": 50,
+                    "data": [
+                        18,
+                        1,
+                        0,
+                        2,
+                        0,
+                        0,
+                        0,
+                        64,
+                        52,
+                        18,
+                        120,
+                        86,
+                        67,
+                        5,
+                        1,
+                        2,
+                        3,
+                        1,
+                        9,
+                        2,
+                        32,
+                        0,
+                        1,
+                        1,
+                        0,
+                        128,
+                        50,
+                        9,
+                        4,
+                        0,
+                        0,
+                        2,
+                        3,
+                        0,
+                        0,
+                        0,
+                        7,
+                        5,
+                        129,
+                        3,
+                        64,
+                        0,
+                        5,
+                        7,
+                        5,
+                        2,
+                        3,
+                        64,
+                        0,
+                        5
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd_ro",
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EPERM"
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd_ro"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd1",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "null"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EFAULT"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": 99,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": -1,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": 0,
+                "ioctl_code": 4660,
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENOTTY"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": -1,
+                "ioctl_code": 1074025983,
+                "arg_ptr": "valid",
+                "data_ptr": "null"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EFAULT"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": 0,
+                "ioctl_code": 1074025983,
+                "arg_ptr": "valid",
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4
+                ]
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENOTTY"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": 0,
+                "ioctl_code": 2147767807,
+                "arg_ptr": "valid",
+                "data_ptr": "null"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENOTTY"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENODATA"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_script_control",
+                "b_request": 10,
+                "action": {
+                    "reply": []
+                }
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ok": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "control",
+                "fd": "fd1",
+                "bm_request_type": 33,
+                "b_request": 10,
+                "w_value": 0,
+                "w_index": 0,
+                "w_length": 0,
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_transferred": 0,
+                    "canary_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_init_in",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 4097
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_init_in"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_init_out",
+                "urb_type": "interrupt",
+                "ep": 2,
+                "buffer_len": 64,
+                "data": [
+                    255,
+                    255,
+                    255,
+                    255,
+                    134,
+                    0,
+                    8,
+                    161,
+                    178,
+                    195,
+                    212,
+                    229,
+                    246,
+                    7,
+                    24,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ],
+                "usercontext": 4098
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_init_out"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_pop_out",
+                "ep": 2,
+                "timeout_ms": 1500
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 2,
+                    "bytes_popped": 64,
+                    "data": [
+                        255,
+                        255,
+                        255,
+                        255,
+                        134,
+                        0,
+                        8,
+                        161,
+                        178,
+                        195,
+                        212,
+                        229,
+                        246,
+                        7,
+                        24,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "poll",
+                "fd": "fd1",
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ready": 1,
+                    "revents": [
+                        "POLLOUT",
+                        "POLLWRNORM"
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb_ndelay",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_init_out",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 4098
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    255,
+                    255,
+                    255,
+                    255,
+                    134,
+                    0,
+                    17,
+                    161,
+                    178,
+                    195,
+                    212,
+                    229,
+                    246,
+                    7,
+                    24,
+                    1,
+                    2,
+                    3,
+                    4,
+                    2,
+                    1,
+                    0,
+                    4,
+                    5,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 64
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "poll",
+                "fd": "fd1",
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ready": 1,
+                    "revents": [
+                        "POLLOUT",
+                        "POLLWRNORM"
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb_ndelay",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_init_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 4097
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_init_in"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_init_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "error_count": 0,
+                    "usercontext": 4097,
+                    "data": [
+                        255,
+                        255,
+                        255,
+                        255,
+                        134,
+                        0,
+                        17,
+                        161,
+                        178,
+                        195,
+                        212,
+                        229,
+                        246,
+                        7,
+                        24,
+                        1,
+                        2,
+                        3,
+                        4,
+                        2,
+                        1,
+                        0,
+                        4,
+                        5,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_cbor_out0",
+                "urb_type": "interrupt",
+                "ep": 2,
+                "buffer_len": 64,
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    144,
+                    0,
+                    90,
+                    2,
+                    3,
+                    10,
+                    17,
+                    24,
+                    31,
+                    38,
+                    45,
+                    52,
+                    59,
+                    66,
+                    73,
+                    80,
+                    87,
+                    94,
+                    101,
+                    108,
+                    115,
+                    122,
+                    129,
+                    136,
+                    143,
+                    150,
+                    157,
+                    164,
+                    171,
+                    178,
+                    185,
+                    192,
+                    199,
+                    206,
+                    213,
+                    220,
+                    227,
+                    234,
+                    241,
+                    248,
+                    255,
+                    6,
+                    13,
+                    20,
+                    27,
+                    34,
+                    41,
+                    48,
+                    55,
+                    62,
+                    69,
+                    76,
+                    83,
+                    90,
+                    97,
+                    104,
+                    111,
+                    118,
+                    125,
+                    132
+                ],
+                "usercontext": 8193
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_out0"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_pop_out",
+                "ep": 2,
+                "timeout_ms": 1500
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 2,
+                    "bytes_popped": 64,
+                    "data": [
+                        1,
+                        2,
+                        3,
+                        4,
+                        144,
+                        0,
+                        90,
+                        2,
+                        3,
+                        10,
+                        17,
+                        24,
+                        31,
+                        38,
+                        45,
+                        52,
+                        59,
+                        66,
+                        73,
+                        80,
+                        87,
+                        94,
+                        101,
+                        108,
+                        115,
+                        122,
+                        129,
+                        136,
+                        143,
+                        150,
+                        157,
+                        164,
+                        171,
+                        178,
+                        185,
+                        192,
+                        199,
+                        206,
+                        213,
+                        220,
+                        227,
+                        234,
+                        241,
+                        248,
+                        255,
+                        6,
+                        13,
+                        20,
+                        27,
+                        34,
+                        41,
+                        48,
+                        55,
+                        62,
+                        69,
+                        76,
+                        83,
+                        90,
+                        97,
+                        104,
+                        111,
+                        118,
+                        125,
+                        132
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_out0",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 8193
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_cbor_out1",
+                "urb_type": "interrupt",
+                "ep": 2,
+                "buffer_len": 64,
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    0,
+                    5,
+                    16,
+                    27,
+                    38,
+                    49,
+                    60,
+                    71,
+                    82,
+                    93,
+                    104,
+                    115,
+                    126,
+                    137,
+                    148,
+                    159,
+                    170,
+                    181,
+                    192,
+                    203,
+                    214,
+                    225,
+                    236,
+                    247,
+                    2,
+                    13,
+                    24,
+                    35,
+                    46,
+                    57,
+                    68,
+                    79,
+                    90,
+                    101,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ],
+                "usercontext": 8194
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_out1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_pop_out",
+                "ep": 2,
+                "timeout_ms": 1500
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 2,
+                    "bytes_popped": 64,
+                    "data": [
+                        1,
+                        2,
+                        3,
+                        4,
+                        0,
+                        5,
+                        16,
+                        27,
+                        38,
+                        49,
+                        60,
+                        71,
+                        82,
+                        93,
+                        104,
+                        115,
+                        126,
+                        137,
+                        148,
+                        159,
+                        170,
+                        181,
+                        192,
+                        203,
+                        214,
+                        225,
+                        236,
+                        247,
+                        2,
+                        13,
+                        24,
+                        35,
+                        46,
+                        57,
+                        68,
+                        79,
+                        90,
+                        101,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_out1",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 8194
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    187,
+                    0,
+                    1,
+                    2,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 64
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4,
+                    144,
+                    0,
+                    16,
+                    0,
+                    90,
+                    91,
+                    92,
+                    93,
+                    94,
+                    95,
+                    96,
+                    97,
+                    98,
+                    99,
+                    100,
+                    101,
+                    102,
+                    103,
+                    104,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 64
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_keepalive_in",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 8195
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_keepalive_in"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_keepalive_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 8195
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_keepalive_in"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_keepalive_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "error_count": 0,
+                    "usercontext": 8195,
+                    "data": [
+                        1,
+                        2,
+                        3,
+                        4,
+                        187,
+                        0,
+                        1,
+                        2,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "urb": "u_cbor_in",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 8196
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_in"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 8196
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_cbor_in"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_cbor_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "error_count": 0,
+                    "usercontext": 8196,
+                    "data": [
+                        1,
+                        2,
+                        3,
+                        4,
+                        144,
+                        0,
+                        16,
+                        0,
+                        90,
+                        91,
+                        92,
+                        93,
+                        94,
+                        95,
+                        96,
+                        97,
+                        98,
+                        99,
+                        100,
+                        101,
+                        102,
+                        103,
+                        104,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd2",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd2"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd2",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EBUSY"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd2",
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ifno": 0,
+                    "retval": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd2",
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENODATA"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd2",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd2",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "released": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd2",
+                "ifno": 0,
+                "sub_ioctl": "connect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ifno": 0,
+                    "retval": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd2"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

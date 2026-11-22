@@ -8,10 +8,15 @@ load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":hlcpp-tests-package"],
+    visibility = ["//tools:__pkg__"],
+)
+
 fx_cc_test_binary(
     name = "hlcpp-tests",
     srcs = ["hlcpp_test.cc"],
-    visibility = ["//tools/fidl/measure-tape:__pkg__"],
     deps = [
         ":measure_tape_for_toplevelunion",
         "//src/lib/fxl/test:gtest_main",
@@ -31,8 +36,6 @@ measure_tape(
     ],
 )
 
-# //tools/fidl/measure-tape:integration-tests packages the GN cc_test_executable.
-# @bazel2gn:skip
 fx_unittest_package(
     name = "hlcpp-tests-package",
     unit_tests = [":hlcpp-tests"],

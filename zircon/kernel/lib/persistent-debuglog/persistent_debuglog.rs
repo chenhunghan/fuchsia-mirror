@@ -8,12 +8,16 @@ use core::cell::UnsafeCell;
 #[cfg(console_enabled)]
 use core::ffi::c_int;
 use core::ffi::{c_char, c_void};
+use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ksync_kernel::IrqSavePolicy;
+use crate::vm::heap::HEAP_MAX_ALLOC_SIZE;
 #[cfg(console_enabled)]
-use kprint::{kprint, kprintln};
+use kprint::kprint;
+use kprint::kprintln;
 #[cfg(console_enabled)]
 use zx_status::Status;
 
@@ -21,19 +25,19 @@ unsafe extern "C" {
     fn arch_clean_cache_range(start: usize, len: usize);
 }
 
-// Persistent RAM allocation granularity configured for the kernel build.
-const PERSISTENT_RAM_ALLOCATION_GRANULARITY: usize =
+/// Persistent RAM allocation granularity configured for the kernel build.
+pub const PERSISTENT_RAM_ALLOCATION_GRANULARITY: usize =
     zr::parse_usize(env!("PERSISTENT_RAM_ALLOCATION_GRANULARITY"))
         .expect("PERSISTENT_RAM_ALLOCATION_GRANULARITY invalid");
+// The allocation granularity of persistent RAM must be a power of two greater than 0.
 zr::static_assert!(PERSISTENT_RAM_ALLOCATION_GRANULARITY.is_power_of_two());
 
-// Verify that the persistent debuglog minimum size is a multiple of the
-// persistent RAM allocation granularity, and fits within u32::MAX.
-const TARGET_PERSISTENT_DEBUGLOG_SIZE: usize =
+/// The amount of persistent RAM that persistent debug logging would like to have.
+pub const TARGET_PERSISTENT_DEBUGLOG_SIZE: usize =
     zr::parse_usize(env!("TARGET_PERSISTENT_DEBUGLOG_SIZE"))
         .expect("TARGET_PERSISTENT_DEBUGLOG_SIZE invalid");
-// Minimum reserved crashlog size must be a multiple of the persistent RAM allocation
-// granularity
+// The persistent debuglog target size must be a multiple of the persistent RAM allocation
+// granularity, and fit within u32::MAX.
 zr::static_assert!(
     TARGET_PERSISTENT_DEBUGLOG_SIZE.is_multiple_of(PERSISTENT_RAM_ALLOCATION_GRANULARITY)
 );
@@ -84,6 +88,14 @@ impl LogHeader {
     #[inline]
     fn is_magic_valid(&self) -> bool {
         self.magic == Self::MAGIC
+    }
+
+    /// Returns true if this header has a valid magic value and an in-bounds `rd_ptr` for a
+    /// `payload_size`-byte buffer.
+    #[inline]
+    fn is_recoverable(&self, payload_size: u32) -> bool {
+        let rd_ptr = self.rd_ptr;
+        self.is_magic_valid() && rd_ptr < payload_size
     }
 
     #[inline]
@@ -215,8 +227,9 @@ zr::static_assert!(
         && core::mem::align_of::<RecoveredPersistentLog>() == 8
 );
 
-// SAFETY: `RecoveredPersistentLog` points to statically allocated recovery storage
-// populated during single-core early boot (or under test control) and read-only thereafter.
+// SAFETY: `RecoveredPersistentLog` points to recovery storage (a static buffer or a leaked heap
+// allocation) populated during single-core early boot (or under test control) and read-only
+// thereafter.
 unsafe impl Send for RecoveredPersistentLog {}
 // SAFETY: After single-core early boot initialization, `RecoveredPersistentLog` is accessed
 // in a read-only fashion.
@@ -251,7 +264,7 @@ impl RecoveredPersistentLog {
     ///
     /// # Safety
     /// If `self.data` is `Some(ptr)` and `self.capacity > 0`, `ptr` must point to a writable
-    /// allocation of at least `self.capacity` bytes.
+    /// (possibly uninitialized) allocation of at least `self.capacity` bytes.
     unsafe fn recover_from(&mut self, payload: &[u8], rd_ptr: u32) {
         self.size = 0;
         let Some(destination_ptr) = self.data else {
@@ -261,7 +274,7 @@ impl RecoveredPersistentLog {
             return;
         }
 
-        // Save as much as we can in our static buffer, discarding the oldest data first if we
+        // Save as much as we can in our recovery buffer, discarding the oldest data first if we
         // cannot fit it all.
         // C++ DEBUG_ASSERTs capacity <= u32::MAX here; capacity is a u32 so this holds by
         // construction.
@@ -275,9 +288,13 @@ impl RecoveredPersistentLog {
         let mut write_offset: usize = 0;
 
         // SAFETY: Caller guarantees `destination_ptr` points to at least `self.capacity`
-        // writable bytes.
-        let destination =
-            unsafe { core::slice::from_raw_parts_mut(destination_ptr.as_ptr(), capacity) };
+        // writable (possibly uninitialized) bytes.
+        let destination = unsafe {
+            core::slice::from_raw_parts_mut(
+                destination_ptr.as_ptr().cast::<MaybeUninit<u8>>(),
+                capacity,
+            )
+        };
 
         for _ in 0..bytes_to_process {
             let byte = payload[read_offset];
@@ -291,8 +308,9 @@ impl RecoveredPersistentLog {
                 continue;
             }
 
-            destination[write_offset] =
-                if byte.is_ascii_graphic() || byte == b' ' || byte == b'\n' { byte } else { b'?' };
+            destination[write_offset].write(
+                if byte.is_ascii_graphic() || byte == b' ' || byte == b'\n' { byte } else { b'?' },
+            );
             write_offset += 1;
         }
         self.size = write_offset as u32;
@@ -391,11 +409,9 @@ impl PersistentDebugLog {
         // do, recover the log into our recovery buffer so that it can be picked up
         // later on and sent up to usermode in the crashlog.
         //
-        // Note: we are at a point in boot where the heap has not been brought up yet,
-        // which is why the recovery buffer needs to be statically allocated.  If this
-        // becomes an issue some day, we can shift to a strategy where we remember
-        // where the persistent log is, but don't actually start to use it until we
-        // get a chance to save it off into a dynamically allocated buffer.
+        // Recovery resets the active log immediately after copying it out, so the recovery
+        // buffer must already be allocated. Early ZBI handoff uses a static buffer, while
+        // deferred recovery at `LK_INIT_LEVEL_HEAP` uses a heap buffer.
         let header_ptr = virt_ptr.cast::<LogHeader>();
         let payload_size = core::cmp::min(u32::MAX as usize, len - header_size) as u32;
         // SAFETY: Caller guarantees `virt` points to a valid persistent RAM buffer of `len`
@@ -405,10 +421,10 @@ impl PersistentDebugLog {
 
         let header = active_log.header();
         let initial_rd_ptr = header.rd_ptr;
-        if header.is_magic_valid() && initial_rd_ptr < payload_size {
+        if header.is_recoverable(payload_size) {
             // This looks as good as it is going to.  Our magic number is valid, and our
             // read pointer lies within the available payload size.  Save as much as we
-            // can in our static buffer, discarding the oldest data first if we cannot
+            // can in our recovery buffer, discarding the oldest data first if we cannot
             // fit it all.
             let payload = active_log.payload();
             // SAFETY: We hold `persistent_log_lock` exclusively during early boot (or after
@@ -498,6 +514,19 @@ impl PersistentDebugLog {
         }
     }
 
+    /// Replaces the buffer that `set_location` recovers the previous boot's log into.
+    ///
+    /// # Safety
+    /// Must be called before `set_location`, while still running on a single core. If `data` is
+    /// `Some(ptr)`, `ptr` must point to a writable (possibly uninitialized) allocation of at least
+    /// `capacity` bytes that remains valid for the life of `self`.
+    unsafe fn set_recovery_buffer(&self, data: Option<NonNull<u8>>, capacity: u32) {
+        // SAFETY: The caller guarantees single-core early boot, so nothing else accesses the
+        // recovered log concurrently.
+        let recovered_log = unsafe { &mut *self.recovered_persistent_log.get() };
+        *recovered_log = RecoveredPersistentLog::new(data, capacity);
+    }
+
     /// Used only by testing to reset a log to its "pre SetLocation'ed" state.
     #[cfg(ktest)]
     fn force_reset(&self) {
@@ -512,21 +541,33 @@ impl PersistentDebugLog {
     }
 }
 
-/// Global persistent debuglog state and static recovery buffer parameterized by
-/// `STORAGE_SIZE`. When `STORAGE_SIZE == 0`, all operations are no-ops and
-/// `cmd` returns `-1`.
+/// Global persistent debuglog state and static recovery buffer of `STORAGE_SIZE` bytes.
+///
+/// If the persistent RAM payload fits in `STORAGE_SIZE`, `set_location` recovers the previous
+/// boot's log into the static buffer and activates logging immediately.
+///
+/// If the payload exceeds `STORAGE_SIZE` (for example, when `STORAGE_SIZE == 0` and
+/// `kernel.persistent-dlog.target-size` enables logging at runtime), `set_location` cannot recover
+/// the log during ZBI handoff because the kernel heap is not yet initialized. Instead,
+/// `set_location` saves the persistent RAM range without modifying it, and `init_heap` allocates a
+/// heap recovery buffer and activates logging at `LK_INIT_LEVEL_HEAP`. Until `init_heap` runs,
+/// `write` is a lock-free no-op: early boot logs are not persisted, and a reset before heap
+/// initialization preserves the prior boot's log in persistent RAM.
 struct PersistentDebuglogGlobals<const STORAGE_SIZE: usize> {
     instance: lazy_init::LazyInit<PersistentDebugLog, lazy_init::NoCheck>,
     storage: UnsafeCell<[u8; STORAGE_SIZE]>,
+    deferred_location: UnsafeCell<Option<(NonNull<u8>, usize)>>,
+    /// Fast-path gate so `write` avoids taking the spinlock when no persistent log is active.
+    active: AtomicBool,
 }
 
 // SAFETY: `PersistentDebuglogGlobals` synchronizes active log mutations via
-// `PersistentDebugLog`'s spinlock (`IrqSavePolicy`) and only mutates `storage`
-// during single-core early boot initialization before read-only access.
+// `PersistentDebugLog`'s spinlock (`IrqSavePolicy`) and only mutates `storage` and
+// `deferred_location` during single-core early boot initialization before read-only access.
 unsafe impl<const STORAGE_SIZE: usize> Send for PersistentDebuglogGlobals<STORAGE_SIZE> {}
 // SAFETY: Shared references to `PersistentDebuglogGlobals` synchronize active log
 // mutations via `PersistentDebugLog`'s spinlock (`IrqSavePolicy`) and only read
-// `storage` after single-core early boot recovery.
+// `storage` and `deferred_location` after single-core early boot recovery.
 unsafe impl<const STORAGE_SIZE: usize> Sync for PersistentDebuglogGlobals<STORAGE_SIZE> {}
 
 impl<const STORAGE_SIZE: usize> PersistentDebuglogGlobals<STORAGE_SIZE> {
@@ -539,21 +580,46 @@ impl<const STORAGE_SIZE: usize> PersistentDebuglogGlobals<STORAGE_SIZE> {
         Self {
             instance: lazy_init::LazyInit::uninit(),
             storage: UnsafeCell::new([0; STORAGE_SIZE]),
+            deferred_location: UnsafeCell::new(None),
+            active: AtomicBool::new(false),
         }
     }
 
-    /// Called once from lib/debuglog during _very_ early init.
-    fn init_early(&'static self) {
-        if STORAGE_SIZE == 0 {
-            return;
+    #[inline]
+    fn instance(&self) -> &PersistentDebugLog {
+        // SAFETY: `init_early` must be called before any other method on `self`, so `instance`
+        // is initialized.
+        unsafe { self.instance.get_unchecked() }
+    }
+
+    /// Fast-path gate for `write` and `invalidate` so they avoid taking the spinlock before a
+    /// location is active.
+    #[inline]
+    fn active_instance(&self) -> Option<&PersistentDebugLog> {
+        if !self.active.load(Ordering::Acquire) {
+            return None;
         }
-        let storage_ptr = NonNull::new(self.storage.get().cast::<u8>());
-        // SAFETY: `init_early` is called once from `lib/debuglog` during single-core early boot
-        // before any other access to `self.instance`, and `self.storage` is valid for
-        // `STORAGE_SIZE` bytes for the `'static` lifetime of `self`.
+        Some(self.instance())
+    }
+
+    /// Initializes `instance`, using `storage` as its recovery buffer.
+    ///
+    /// # Safety
+    /// - Must be called exactly once.
+    /// - Must be called on a single CPU, before any other method on `self`.
+    unsafe fn init_early(&'static self) {
+        let (storage_ptr, storage_size) = if STORAGE_SIZE == 0 {
+            (None, 0)
+        } else {
+            (NonNull::new(self.storage.get().cast::<u8>()), STORAGE_SIZE as u32)
+        };
+        // SAFETY: `init_pin` requires initialization to be serialized with all other access to
+        // `instance`. The caller guarantees that this runs once, on a single CPU, before any
+        // other method on `self`. `self.storage` is valid for `STORAGE_SIZE` bytes for the
+        // `'static` lifetime of `self`.
         let _ = unsafe {
             Pin::static_ref(&self.instance)
-                .init_pin(PersistentDebugLog::init(storage_ptr, STORAGE_SIZE as u32))
+                .init_pin(PersistentDebugLog::init(storage_ptr, storage_size))
         };
     }
 
@@ -562,47 +628,139 @@ impl<const STORAGE_SIZE: usize> PersistentDebuglogGlobals<STORAGE_SIZE> {
     /// processing, before we start up the secondary CPUs.
     ///
     /// # Safety
-    /// `init_early` must have been called before calling this method (guaranteed by
-    /// `lib/debuglog`). If `STORAGE_SIZE > 0`, `vaddr` is non-null, and
-    /// `len > size_of::<LogHeader>()`, `vaddr` must point to a valid, readable and
-    /// writable persistent RAM mapping of `len` bytes that remains valid while this
-    /// log is active.
+    /// - Must be called on a single CPU, before `init_heap`, because it writes
+    ///   `deferred_location` without synchronization.
+    /// - If `vaddr` is non-null and `len > size_of::<LogHeader>()`, `vaddr` must point to a
+    ///   persistent RAM mapping that is valid for reads and writes of `len` bytes for the rest
+    ///   of the kernel's lifetime.
     unsafe fn set_location(&self, vaddr: *mut u8, len: usize) {
-        if STORAGE_SIZE == 0 {
+        let instance = self.instance();
+        let header_size = core::mem::size_of::<LogHeader>();
+        if STORAGE_SIZE != 0 && len.saturating_sub(header_size) <= STORAGE_SIZE {
+            // SAFETY: `PersistentDebugLog::set_location` requires `vaddr` to be valid for `len`
+            // bytes while the log is active, which our caller guarantees for the rest of the
+            // kernel's lifetime.
+            unsafe {
+                instance.set_location(vaddr, len);
+            }
+            self.active.store(true, Ordering::Release);
             return;
         }
-        // SAFETY: Caller guarantees `init_early` has been called before `set_location` and
-        // upholds the memory validity contract for `vaddr` and `len`.
-        unsafe {
-            self.instance.get_unchecked().set_location(vaddr, len);
+
+        // The static recovery buffer (if any) is too small for this log, so don't touch the
+        // previous boot's log until `init_heap` can allocate one.
+        let Some(vaddr) = NonNull::new(vaddr) else {
+            return;
+        };
+        if len <= header_size {
+            return;
+        }
+        // SAFETY: Our caller guarantees that we are on a single CPU before `init_heap`, so
+        // nothing else accesses `deferred_location` concurrently.
+        let deferred_location = unsafe { &mut *self.deferred_location.get() };
+        if deferred_location.is_none() && !self.active.load(Ordering::Relaxed) {
+            *deferred_location = Some((vaddr, len));
         }
     }
 
-    /// Safe wrapper around [`PersistentDebuglogGlobals::set_location`] taking a static mutable
-    /// byte slice.
-    fn set_location_slice(&self, buffer: &'static mut [u8]) {
-        if STORAGE_SIZE == 0 {
-            return;
-        }
-        // SAFETY: `init_early` is guaranteed by `lib/debuglog` to run during very early boot
-        // before platform ZBI handoff calls `set_location_slice`, and `buffer` is a live,
-        // uniquely borrowed `'static` byte slice of `buffer.len()` bytes that remains valid for
-        // the lifetime of the kernel.
+    /// Wrapper around [`PersistentDebuglogGlobals::set_location`] taking a static mutable byte
+    /// slice.
+    ///
+    /// # Safety
+    /// Must be called on a single CPU, before `init_heap`.
+    unsafe fn set_location_slice(&self, buffer: &'static mut [u8]) {
+        // SAFETY: `set_location` requires a single CPU before `init_heap`, which our caller
+        // guarantees. It also requires `vaddr` to be valid for reads and writes of `len` bytes
+        // for the rest of the kernel's lifetime, which holds because `buffer` is a
+        // `&'static mut [u8]` of `buffer.len()` bytes.
         unsafe {
             self.set_location(buffer.as_mut_ptr(), buffer.len());
         }
     }
 
+    /// Activates a location deferred by `set_location`, recovering the previous boot's log (if
+    /// any) into a heap buffer capped at `HEAP_MAX_ALLOC_SIZE` first.
+    ///
+    /// # Safety
+    /// - Must be called after the heap is available.
+    /// - Must be called on a single CPU, because it accesses `deferred_location` and the
+    ///   recovery buffer without synchronization.
+    unsafe fn init_heap(&self) {
+        // SAFETY: Our caller upholds the same preconditions.
+        unsafe { self.init_heap_with_limit(HEAP_MAX_ALLOC_SIZE) };
+    }
+
+    /// Helper for [`Self::init_heap`] parameterized by `max_recovery_bytes`.
+    ///
+    /// # Safety
+    /// - Must be called after the heap is available.
+    /// - Must be called on a single CPU, because it accesses `deferred_location` and the
+    ///   recovery buffer without synchronization.
+    unsafe fn init_heap_with_limit(&self, max_recovery_bytes: usize) {
+        let instance = self.instance();
+        // SAFETY: Our caller guarantees that we are on a single CPU, so nothing else accesses
+        // `deferred_location` concurrently.
+        let Some((vaddr, len)) = (unsafe { (*self.deferred_location.get()).take() }) else {
+            return;
+        };
+
+        // Only allocate a recovery buffer if there is something to recover, so that cold boots
+        // and clean reboots cost no heap.
+        let header_size = core::mem::size_of::<LogHeader>();
+        let payload_size = core::cmp::min(u32::MAX as usize, len - header_size) as u32;
+        // SAFETY: `set_location` only stores `(vaddr, len)` in `deferred_location` when its
+        // caller guarantees that `vaddr` is valid for `len > size_of::<LogHeader>()` bytes for
+        // the rest of the kernel's lifetime, and `LogHeader` has alignment 1.
+        let header = unsafe { vaddr.cast::<LogHeader>().read() };
+        if header.is_recoverable(payload_size) {
+            let max_bytes = core::cmp::min(max_recovery_bytes, HEAP_MAX_ALLOC_SIZE);
+            let recovery_capacity = core::cmp::min(payload_size as usize, max_bytes);
+            if recovery_capacity == 0 {
+                // SAFETY: `set_recovery_buffer` requires a single CPU before `set_location`, which
+                // our caller guarantees and the call order below ensures.
+                unsafe {
+                    instance.set_recovery_buffer(None, 0);
+                }
+            } else {
+                let Ok(buffer) = kalloc::Box::<[u8]>::try_new_uninit_slice(recovery_capacity)
+                else {
+                    // Activating the log resets the persistent RAM header and would erase the
+                    // previous boot's log. Leave persistent RAM untouched so a later boot can
+                    // recover it.
+                    kprintln!(
+                        "pdlog: no memory to recover {} byte persistent debug log, not enabling it",
+                        payload_size
+                    );
+                    return;
+                };
+                let buffer = kalloc::Box::into_raw(buffer);
+                // SAFETY: `set_recovery_buffer` requires a single CPU before `set_location`, which
+                // our caller guarantees and the call order below ensures. `buffer` is a leaked
+                // heap allocation of `recovery_capacity` writable bytes that is never freed, so it
+                // outlives `instance`.
+                unsafe {
+                    instance.set_recovery_buffer(
+                        NonNull::new(buffer.cast::<u8>()),
+                        recovery_capacity as u32,
+                    );
+                }
+            }
+        }
+
+        // SAFETY: `PersistentDebugLog::set_location` requires `vaddr` to be valid for `len`
+        // bytes while the log is active. `deferred_location` only holds ranges for which
+        // `set_location`'s caller guaranteed that for the rest of the kernel's lifetime.
+        unsafe {
+            instance.set_location(vaddr.as_ptr(), len);
+        }
+        self.active.store(true, Ordering::Release);
+    }
+
     /// Writes a string to the persistent dlog, if enabled.  Otherwise, this is a
     /// no-op.
     fn write(&self, bytes: &[u8]) {
-        if STORAGE_SIZE == 0 {
-            return;
-        }
-        // SAFETY: `init_early` is called during very early boot in `lib/debuglog` before any
-        // debuglog or console writes occur.
-        unsafe {
-            self.instance.get_unchecked().write(bytes);
+        if let Some(instance) = self.active_instance() {
+            instance.write(bytes);
         }
     }
 
@@ -610,25 +768,15 @@ impl<const STORAGE_SIZE: usize> PersistentDebuglogGlobals<STORAGE_SIZE> {
     /// gracefully reboot, so that we don't end up recovering a dlog after reboot and
     /// end up producing an unnecessary crashlog.
     fn invalidate(&self) {
-        if STORAGE_SIZE == 0 {
-            return;
-        }
-        // SAFETY: `init_early` is called during very early boot before any reboot/shutdown
-        // path calls `invalidate`.
-        unsafe {
-            self.instance.get_unchecked().invalidate();
+        if let Some(instance) = self.active_instance() {
+            instance.invalidate();
         }
     }
 
     /// Fetch a string view which references the recovered crashlog (if any).
     #[inline]
     fn recovered_log(&self) -> Option<&[u8]> {
-        if STORAGE_SIZE == 0 {
-            return None;
-        }
-        // SAFETY: `init_early` is called during very early boot before any crashlog recovery
-        // queries `recovered_log`.
-        unsafe { self.instance.get_unchecked().recovered_log() }
+        self.instance().recovered_log()
     }
 
     /// Executes the `"pdlog"` kernel console command.
@@ -643,10 +791,6 @@ impl<const STORAGE_SIZE: usize> PersistentDebuglogGlobals<STORAGE_SIZE> {
         argument_vector: *const crate::console::CmdArgs,
         _flags: u32,
     ) -> c_int {
-        if STORAGE_SIZE == 0 {
-            return -1;
-        }
-
         let argument_count = usize::try_from(argument_count).unwrap_or(0);
         // SAFETY: Caller guarantees `argument_vector` points to `argument_count` initialized
         // `CmdArgs` elements whenever `argument_count > 0`; a zero or negative count yields `&[]`.
@@ -688,16 +832,35 @@ static GLOBAL_PERSISTENT_DEBUGLOG: PersistentDebuglogGlobals<TARGET_PERSISTENT_D
     PersistentDebuglogGlobals::new();
 
 /// Called once from lib/debuglog during _very_ early init.
-pub fn persistent_dlog_init_early() {
-    GLOBAL_PERSISTENT_DEBUGLOG.init_early();
+///
+/// # Safety
+/// - Must be called exactly once.
+/// - Must be called on a single CPU, before any other `persistent_dlog_*` function.
+pub unsafe fn persistent_dlog_init_early() {
+    // SAFETY: `init_early` requires a single call on a single CPU before any other method,
+    // which our caller guarantees. All other methods are only reached through the other
+    // `persistent_dlog_*` functions.
+    unsafe { GLOBAL_PERSISTENT_DEBUGLOG.init_early() };
 }
 
 /// Sets where the persistent debuglog lives, assuming that we have one.  This
 /// needs to happen early in boot, usually during ZBI header processing, before
 /// we start up the secondary CPUs.  The persistent debuglog keeps using
 /// `buffer` for the life of the kernel.
-pub fn persistent_dlog_set_location(buffer: &'static mut [u8]) {
-    GLOBAL_PERSISTENT_DEBUGLOG.set_location_slice(buffer);
+///
+/// # Safety
+/// Must be called on a single CPU, before `LK_INIT_LEVEL_HEAP`.
+pub unsafe fn persistent_dlog_set_location(buffer: &'static mut [u8]) {
+    // SAFETY: `set_location_slice` requires a single CPU before `init_heap`. Our caller
+    // guarantees a single CPU before `LK_INIT_LEVEL_HEAP`, and `init_heap` only runs from the
+    // `LK_INIT_LEVEL_HEAP` hook.
+    unsafe { GLOBAL_PERSISTENT_DEBUGLOG.set_location_slice(buffer) };
+}
+
+/// Returns true if the persistent debuglog is currently active.
+#[inline]
+pub fn persistent_dlog_enabled() -> bool {
+    GLOBAL_PERSISTENT_DEBUGLOG.active_instance().is_some()
 }
 
 /// Writes `bytes` to the persistent debuglog, if enabled.  Otherwise, this is a
@@ -719,38 +882,30 @@ pub fn persistent_dlog_get_recovered_log() -> Option<&'static [u8]> {
 }
 
 /// FFI entry point for C++ `persistent_dlog_init_early()`.
+///
+/// # Safety
+/// Same as [`persistent_dlog_init_early`].
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_persistent_dlog_init_early() {
-    persistent_dlog_init_early();
+pub unsafe extern "C" fn rust_persistent_dlog_init_early() {
+    // SAFETY: Our caller upholds the same preconditions.
+    unsafe { persistent_dlog_init_early() };
 }
 
 /// FFI entry point for C++ `persistent_dlog_set_location(void* vaddr, size_t len)`.
 ///
 /// # Safety
-/// `persistent_dlog_init_early` must have been called before calling this function.
-/// If `vaddr` is non-null and `len > size_of::<LogHeader>()`, `vaddr` must point to a valid,
-/// readable and writable persistent RAM mapping of `len` bytes that remains valid for the
-/// lifetime of the kernel.
+/// - Must be called on a single CPU, before `LK_INIT_LEVEL_HEAP`.
+/// - If `vaddr` is non-null and `len > size_of::<LogHeader>()`, `vaddr` must point to a
+///   persistent RAM mapping that is valid for reads and writes of `len` bytes for the rest of
+///   the kernel's lifetime.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_persistent_dlog_set_location(vaddr: *mut c_void, len: usize) {
-    // SAFETY: Caller upholds the early-init ordering and persistent RAM mapping validity
-    // contract for `vaddr` and `len`.
+    // SAFETY: `set_location` requires a single CPU before `init_heap`. Our caller guarantees a
+    // single CPU before `LK_INIT_LEVEL_HEAP`, and `init_heap` only runs from the
+    // `LK_INIT_LEVEL_HEAP` hook. Our caller also guarantees the `vaddr` and `len` requirement.
     unsafe {
         GLOBAL_PERSISTENT_DEBUGLOG.set_location(vaddr.cast::<u8>(), len);
     }
-}
-
-/// FFI entry point for C++ `persistent_dlog_write(ktl::string_view str)`.
-///
-/// # Safety
-/// If `len > 0`, `ptr` must be non-null and point to at least `len` initialized, readable
-/// bytes that are not mutated for the duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_persistent_dlog_write(ptr: *const c_char, len: usize) {
-    // SAFETY: Caller guarantees `ptr` is valid for `len` bytes whenever `len > 0`; the helper
-    // yields an empty slice when `len == 0` regardless of `ptr`.
-    let bytes = unsafe { zr::slice_from_raw_parts(ptr.cast::<u8>(), len) };
-    persistent_dlog_write(bytes);
 }
 
 /// FFI entry point for C++ `persistent_dlog_invalidate()`.
@@ -758,6 +913,18 @@ pub unsafe extern "C" fn rust_persistent_dlog_write(ptr: *const c_char, len: usi
 pub extern "C" fn rust_persistent_dlog_invalidate() {
     persistent_dlog_invalidate();
 }
+
+/// Recovers and activates any persistent debuglog whose size exceeded the static recovery buffer
+/// during ZBI handoff. Runs at `LK_INIT_LEVEL_HEAP`, before secondary CPUs start.
+fn persistent_dlog_init_heap(_level: init::LkInitLevel) {
+    // SAFETY: `init_heap` requires the heap and a single CPU. `LK_INIT_LEVEL_HEAP` hooks run
+    // once the heap is available, on the boot CPU before secondary CPUs start.
+    unsafe {
+        GLOBAL_PERSISTENT_DEBUGLOG.init_heap();
+    }
+}
+
+init::lk_init_hook!(persistent_dlog_heap, persistent_dlog_init_heap, init::LK_INIT_LEVEL_HEAP);
 
 /// FFI entry point for C++ `persistent_dlog_get_recovered_log()`.
 ///
@@ -805,23 +972,22 @@ unsafe extern "C" fn cmd_pdlog(
     unsafe { GLOBAL_PERSISTENT_DEBUGLOG.cmd(argument_count, argument_vector, flags) }
 }
 
-// C++ compiled this command out with #if TARGET_PERSISTENT_DEBUGLOG_SIZE > 0. We cannot
-// #[cfg] on an env!() value, so register it with an empty availability mask instead, which
-// makes it unreachable from both normal and panic consoles.
+// Always register `pdlog` because `kernel.persistent-dlog.target-size` can enable the persistent
+// debuglog at runtime even when `TARGET_PERSISTENT_DEBUGLOG_SIZE == 0`.
 #[cfg(console_enabled)]
 crate::console::static_command!(
     CMD_PDLOG,
     c"pdlog".as_ptr(),
     c"pdlog".as_ptr(),
     cmd_pdlog,
-    if TARGET_PERSISTENT_DEBUGLOG_SIZE != 0 { crate::console::CMD_AVAIL_ALWAYS } else { 0 }
+    crate::console::CMD_AVAIL_ALWAYS
 );
 
 /// Persistent Debuglog Tests
 #[cfg(ktest)]
 #[unittest::suite(name = "pdlog_rust")]
 mod tests {
-    use super::{LogHeader, PersistentDebugLog};
+    use super::{LogHeader, PersistentDebugLog, PersistentDebuglogGlobals};
     use core::ptr::NonNull;
     use unittest::{assert_eq, assert_false, assert_ge, assert_true, unwrap_some};
 
@@ -1054,5 +1220,169 @@ mod tests {
         // Now attempt to recover the log, and verify that we get nothing.
         env.set_location();
         assert_true!(check_recovered_log_is_empty(&env.log));
+    }
+
+    /// Heap-allocated `PersistentDebuglogGlobals<N>` test fixture freed on drop. Use `N == 0` to
+    /// simulate a kernel built with `TARGET_PERSISTENT_DEBUGLOG_SIZE == 0`.
+    struct RuntimeGlobals<const N: usize>(NonNull<PersistentDebuglogGlobals<N>>);
+
+    impl<const N: usize> RuntimeGlobals<N> {
+        fn setup() -> Option<Self> {
+            let globals = kalloc::Box::try_new(PersistentDebuglogGlobals::<N>::new()).ok()?;
+            // Keep the pointer returned by `into_raw` (rather than one derived from a shared
+            // reference) so that `drop` can hand it back to `Box::from_raw` with its original
+            // provenance.
+            let globals = Self(NonNull::new(kalloc::Box::into_raw(globals))?);
+            // SAFETY: `globals` was just allocated and is not shared with any other thread, so
+            // this is its only `init_early` call and runs before any other method on it.
+            unsafe { globals.get().init_early() };
+            Some(globals)
+        }
+
+        /// Returns the globals. The reference must not be used after `self` is dropped.
+        fn get(&self) -> &'static PersistentDebuglogGlobals<N> {
+            // SAFETY: `self.0` points to a live allocation that is only freed in `drop`, and
+            // the tests below do not use a returned reference after dropping `self`.
+            unsafe { self.0.as_ref() }
+        }
+    }
+
+    impl<const N: usize> Drop for RuntimeGlobals<N> {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is the pointer returned by `kalloc::Box::into_raw` in `setup`,
+            // and no reference from `get` is used after this. The leaked recovery buffer (if
+            // any) is intentionally not freed.
+            drop(unsafe { kalloc::Box::from_raw(self.0.as_ptr()) });
+        }
+    }
+
+    /// Tests that runtime-enabled pdlog leaves NVRAM intact until heap init recovers it.
+    #[test]
+    fn pdlog_deferred_heap_recovery_test() {
+        let mut log_buffer = unwrap_some!(Buffer::setup(128));
+        let log_ptr = log_buffer.storage.as_mut_ptr();
+        let log_len = log_buffer.capacity as usize;
+        let hdr = log_ptr.cast::<LogHeader>();
+        // SAFETY: `hdr` points to the start of `log_buffer`, which outlives all uses below, and
+        // `LogHeader` has alignment 1.
+        let read_hdr = || unsafe { hdr.read() };
+
+        // First "boot": nothing is written to the location before the heap hook.
+        {
+            let runtime = unwrap_some!(RuntimeGlobals::<0>::setup());
+            let globals = runtime.get();
+            // SAFETY: `log_buffer` is valid for `log_len` bytes and outlives `globals`.
+            unsafe { globals.set_location(log_ptr, log_len) };
+            globals.write(b"dropped before the heap\n");
+            assert_false!(read_hdr().is_magic_valid());
+            assert_true!(globals.recovered_log().is_none());
+
+            // SAFETY: Single-threaded test.
+            unsafe { globals.init_heap() };
+            assert_true!(read_hdr().is_magic_valid());
+            assert_eq!(0u32, read_hdr().rd_ptr);
+            assert_true!(globals.recovered_log().is_none());
+
+            globals.write(b"Test pattern 1\n");
+            globals.write(b"Foo Bar Baz\n");
+        }
+
+        // Second "boot": the previous log survives `set_location` and is recovered on the heap.
+        let rd_ptr_before = read_hdr().rd_ptr;
+        {
+            let runtime = unwrap_some!(RuntimeGlobals::<0>::setup());
+            let globals = runtime.get();
+            // SAFETY: log_buffer is valid for log_len bytes and outlives globals.
+            unsafe { globals.set_location(log_ptr, log_len) };
+            assert_true!(read_hdr().is_magic_valid());
+            assert_eq!(rd_ptr_before, read_hdr().rd_ptr);
+
+            // SAFETY: Single-threaded test.
+            unsafe { globals.init_heap() };
+            let recovered = unwrap_some!(globals.recovered_log());
+            assert_true!(recovered == b"Test pattern 1\nFoo Bar Baz\n");
+            assert_eq!(0u32, read_hdr().rd_ptr);
+
+            // A graceful reboot invalidates the log.
+            globals.invalidate();
+            assert_false!(read_hdr().is_magic_valid());
+        }
+
+        // Third "boot": nothing to recover after the graceful reboot.
+        {
+            let runtime = unwrap_some!(RuntimeGlobals::<0>::setup());
+            let globals = runtime.get();
+            // SAFETY: log_buffer is valid for log_len bytes and outlives globals.
+            unsafe { globals.set_location(log_ptr, log_len) };
+            // SAFETY: Single-threaded test.
+            unsafe { globals.init_heap() };
+            assert_true!(globals.recovered_log().is_none());
+        }
+    }
+
+    /// Tests that a runtime log larger than the static recovery buffer is deferred to the heap.
+    #[test]
+    fn pdlog_oversized_runtime_log_deferred_test() {
+        let mut log_buffer = unwrap_some!(Buffer::setup(128));
+        let log_ptr = log_buffer.storage.as_mut_ptr();
+        let log_len = log_buffer.capacity as usize;
+        let hdr = log_ptr.cast::<LogHeader>();
+        // SAFETY: `hdr` points to the start of `log_buffer`, which outlives all uses below, and
+        // `LogHeader` has alignment 1.
+        let read_hdr = || unsafe { hdr.read() };
+        // SAFETY: As above; nothing else accesses `log_buffer` while this runs.
+        unsafe {
+            hdr.write(LogHeader { magic: LogHeader::MAGIC, rd_ptr: 15 });
+            core::ptr::copy_nonoverlapping(b"Test pattern 1\n".as_ptr(), log_ptr.add(8), 15);
+        }
+
+        // A 16 byte static buffer cannot hold the 120 byte payload.
+        let runtime = unwrap_some!(RuntimeGlobals::<16>::setup());
+        let globals = runtime.get();
+        // SAFETY: `log_buffer` is valid for `log_len` bytes and outlives `globals`.
+        unsafe { globals.set_location(log_ptr, log_len) };
+        assert_eq!(15u32, read_hdr().rd_ptr);
+        assert_true!(globals.recovered_log().is_none());
+
+        // SAFETY: Single-threaded test.
+        unsafe { globals.init_heap() };
+        let recovered = unwrap_some!(globals.recovered_log());
+        assert_true!(recovered == b"Test pattern 1\n");
+        assert_eq!(0u32, read_hdr().rd_ptr);
+    }
+
+    // Verify clamped heap recovery strips embedded nulls and keeps the newest trailing bytes up to
+    // the allocation limit, including across a ring wrap.
+    /// Tests clamped heap recovery in `init_heap_with_limit`.
+    #[test]
+    fn pdlog_clamped_heap_recovery_window_test() {
+        let mut log_buffer = unwrap_some!(Buffer::setup(64));
+        let log_ptr = log_buffer.storage.as_mut_ptr();
+        let log_len = log_buffer.capacity as usize;
+
+        // First boot: write a message with embedded nulls and wrap across the 56-byte payload.
+        {
+            let runtime = unwrap_some!(RuntimeGlobals::<0>::setup());
+            let globals = runtime.get();
+            // SAFETY: `log_buffer` is valid for `log_len` bytes and outlives `globals`.
+            unsafe { globals.set_location(log_ptr, log_len) };
+            // SAFETY: Single-threaded test.
+            unsafe { globals.init_heap() };
+            globals.write(b"0123456789abcdef0123456789abcdef0123456789\n");
+            globals.write(b"Tail\0kept!\n");
+        }
+
+        // Second boot: clamp the recovery buffer to 15 bytes (`"789\nTail\0kept!\n"`), verifying
+        // that `init_heap_with_limit` recovers the 14 non-zero trailing bytes across the ring wrap.
+        {
+            let runtime = unwrap_some!(RuntimeGlobals::<0>::setup());
+            let globals = runtime.get();
+            // SAFETY: `log_buffer` is valid for `log_len` bytes and outlives `globals`.
+            unsafe { globals.set_location(log_ptr, log_len) };
+            // SAFETY: Single-threaded test.
+            unsafe { globals.init_heap_with_limit(15) };
+            let recovered = unwrap_some!(globals.recovered_log());
+            assert_true!(recovered == b"789\nTailkept!\n");
+        }
     }
 }

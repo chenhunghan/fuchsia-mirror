@@ -46,6 +46,9 @@ class Config {
     return perform_host_name_probe_.has_value() ? perform_host_name_probe_.value() : true;
   }
 
+  // Gets the network media on which the service operates.
+  Media media() const { return media_.value_or(Media::kBoth); }
+
   // Gets the publications.
   const std::vector<Publication>& publications() const { return publications_; }
 
@@ -73,8 +76,12 @@ class Config {
   // Sets the value indicating whether a host name probe is required.
   void SetPerformHostNameProbe(bool perform_host_name_probe);
 
+  // Sets the network media on which the service operates.
+  void SetMedia(Media media);
+
   json::JSONParser parser_;
   std::optional<bool> perform_host_name_probe_;
+  std::optional<Media> media_;
   std::vector<Publication> publications_;
   std::vector<DnsName> alt_services_;
 

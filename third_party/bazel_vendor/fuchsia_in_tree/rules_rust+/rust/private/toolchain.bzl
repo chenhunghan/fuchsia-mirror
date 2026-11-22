@@ -630,8 +630,10 @@ def _rust_toolchain_impl(ctx):
         staticlib_ext = ctx.attr.staticlib_ext,
         stdlib_linkflags = stdlib_linkflags_cc_info,
         extra_rustc_flags = expanded_extra_rustc_flags,
+        extra_rustc_flags_feature = ctx.attr.extra_rustc_flags_feature,
         extra_rustc_flags_for_crate_types = ctx.attr.extra_rustc_flags_for_crate_types,
         extra_exec_rustc_flags = expanded_extra_exec_rustc_flags,
+        extra_exec_rustc_flags_for_crate_types = ctx.attr.extra_exec_rustc_flags_for_crate_types,
         per_crate_rustc_flags = ctx.attr.per_crate_rustc_flags,
         sysroot = sysroot_path,
         sysroot_anchor = sysroot.sysroot_anchor,
@@ -748,8 +750,14 @@ rust_toolchain = rule(
         "extra_exec_rustc_flags": attr.string_list(
             doc = "Extra flags to pass to rustc in exec configuration. Subject to location expansion with respect to the srcs of the `rust_std` attribute. Subject to Make variable expansion with respect to RUST_SYSROOT, RUST_SYSROOT_SHORT, RUSTC, etc.",
         ),
+        "extra_exec_rustc_flags_for_crate_types": attr.string_list_dict(
+            doc = "Extra flags to pass to rustc in exec configuration based on crate type",
+        ),
         "extra_rustc_flags": attr.string_list(
             doc = "Extra flags to pass to rustc in non-exec configuration. Subject to location expansion with respect to the srcs of the `rust_std` attribute. Subject to Make variable expansion with respect to RUST_SYSROOT, RUST_SYSROOT_SHORT, RUSTC, etc.",
+        ),
+        "extra_rustc_flags_feature": attr.string(
+            doc = "Optional feature name that, when disabled on a target (e.g. `features = [\"-<name>\"]`), omits toolchain `extra_rustc_flags`, `extra_exec_rustc_flags`, `extra_rustc_flags_for_crate_types`, `extra_exec_rustc_flags_for_crate_types`, and `env`.",
         ),
         "extra_rustc_flags_for_crate_types": attr.string_list_dict(
             doc = "Extra flags to pass to rustc based on crate type",

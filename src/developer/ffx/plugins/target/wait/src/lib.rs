@@ -36,6 +36,7 @@ pub trait DeviceWaiter {
 pub struct DeviceWaiterImpl;
 
 impl fho::TryFromEnv for DeviceWaiterImpl {
+    const TARGET_NEED: fho::TargetNeed = fho::TargetNeed::Required;
     type Error = std::convert::Infallible;
     async fn try_from_env(_env: &fho::FhoEnvironment) -> Result<Self, Self::Error> {
         Ok(DeviceWaiterImpl)

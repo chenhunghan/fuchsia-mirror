@@ -18,8 +18,8 @@
 #include "src/developer/forensics/feedback/attachments/inspect.h"
 #include "src/developer/forensics/feedback/attachments/kernel_log.h"
 #include "src/developer/forensics/feedback/attachments/previous_boot_inspect.h"
-#include "src/developer/forensics/feedback/attachments/previous_boot_log.h"
 #include "src/developer/forensics/feedback/attachments/process_tree.h"
+#include "src/developer/forensics/feedback/previous_boot_logs/single_previous_boot_logs.h"
 #include "src/developer/forensics/feedback_data/inspect_data_budget.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
 #include "src/developer/forensics/utils/redact/redactor.h"
@@ -48,7 +48,7 @@ class AttachmentProviders {
   DiskBackedSystemLog system_log_;
   Inspect inspect_;
   PreviousBootInspect previous_boot_inspect_;
-  PreviousBootLog previous_boot_log_;
+  SinglePreviousBootLogs previous_boot_log_;
   FileBackedProvider previous_boot_kernel_log_;
   FileBackedProvider kernel_boot_options_;
   ProcessTree process_tree_;

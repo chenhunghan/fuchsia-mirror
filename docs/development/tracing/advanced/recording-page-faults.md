@@ -24,14 +24,15 @@ ffx trace start --categories "#default,kernel:vm"
 
 ## Understand a page fault event
 
-![page_fault.png](page_fault.png)
+![page_fault slice on a thread track in Perfetto.](page_fault.png)
 
 Page faults appear as slices in Perfetto.
 
 The details of the event are shown in the bottom panel of Perfetto when you click
 on the slice:
 
-![page_fault_details.png](page_fault_details.png)
+![Details panel for the page_fault slice: duration breakdown and the vaddr
+and flags arguments.](page_fault_details.png)
 
 The left part of the details displays the standard properties of any slice.
 On the right side, there are arguments included in the page fault event.
@@ -43,8 +44,8 @@ On the right side, there are arguments included in the page fault event.
 |----------|----|----|-------|
 | **R**ead/**W**rite | **U**ser/**G**uest/**S**ystem | **I**nstruction/**D**ata | **N**ot Present/ **P**resent
 
-See the source code for [fault.h][fault-h]
+See the source code for [fault.rs][fault-rs]
 
 [fuchsia-tracing]: /docs/development/tracing/README.md
 [ffx-trace]: /reference/tools/sdk/ffx.md#ffx_trace
-[fault-h]: /zircon/kernel/vm/include/vm/fault.h
+[fault-rs]: /zircon/kernel/vm/fault.rs

@@ -359,7 +359,13 @@ fn default_tcp_settings() -> TcpSettings {
     let send_buffer =
         BufferSizeSettings::new(SNDBUF_MIN, *ZIRCON_SOCKET_BUFFER_SIZE, MAX_BUFFER_SIZE).unwrap();
 
-    TcpSettings { receive_buffer, send_buffer }
+    TcpSettings {
+        receive_buffer,
+        send_buffer,
+        // TODO(https://fxbug.dev/565891068): Make GSO configurable and enable
+        // it by default.
+        gso_enabled: false,
+    }
 }
 
 fn default_dgram_rcvbuf_sizes() -> BufferSizeSettings<NonZeroUsize> {

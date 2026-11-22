@@ -2,21 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/tools/bazel2gn/bazel_migration.gni")
-
 config("zxtest_enable_streamable_assertions") {
   defines = [ "ZXTEST_USE_STREAMABLE_MACROS" ]
 }
 
 config("prod_config") {
   include_dirs = [ "include" ]
-}
-
-# Dependency for "production" callers who use zxtest_prod header, (see that file
-# for more).
-source_set("prod") {
-  public = [ "include/zxtest/cpp/zxtest_prod.h" ]
-  public_configs = [ ":prod_config" ]
 }
 
 group("tests") {
@@ -112,9 +103,9 @@ not_needed([ "_ZXTEST_HDRS" ])
 _ZXTEST_DEPS = []
 _ZXTEST_DEPS += [
   "//sdk/lib/fit",
+  "//sdk/lib/zircon-assert",
   "//src/zircon/lib/zircon",
   "//third_party/rapidjson",
-  "//zircon/system/ulib/fbl",
 ]
 if (is_fuchsia) {
   _ZXTEST_DEPS += [ "//zircon/system/ulib/zx" ]
@@ -124,6 +115,12 @@ if (is_fuchsia) {
 # It's possible this variable is only used in if conditions (e.g. is_host).
 not_needed([ "_ZXTEST_DEPS" ])
 
+source_set("prod") {
+  public = [ "include/zxtest/cpp/zxtest_prod.h" ]
+  public_configs = [ ":prod_config" ]
+  visibility = [ "./*" ]
+}
+
 static_library("zxtest") {
   sources = _ZXTEST_SRCS
   public = _ZXTEST_HDRS
@@ -132,11 +129,7 @@ static_library("zxtest") {
   } else {
     deps = []
   }
-  configs += [ "//build/config:Wno-vla-cxx-extension" ]
-  public_configs = [
-    ":prod_config",
-    "//build/config:Wno-vla-cxx-extension",
-  ]
+  public_configs = [ ":prod_config" ]
   visibility = [ "//*" ]
   public_deps = _ZXTEST_DEPS
 }
@@ -149,12 +142,10 @@ static_library("zxtest-streams") {
   } else {
     deps = []
   }
-  configs += [ "//build/config:Wno-vla-cxx-extension" ]
   defines = [ "ZXTEST_USE_STREAMABLE_MACROS" ]
   public_configs = [
     ":prod_config",
     ":zxtest_enable_streamable_assertions",
-    "//build/config:Wno-vla-cxx-extension",
   ]
   visibility = [ "//*" ]
   public_deps = _ZXTEST_DEPS

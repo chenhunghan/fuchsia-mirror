@@ -961,7 +961,9 @@ impl IfaceManagerService {
     ) -> LocalBoxFuture<'static, Result<(), Error>> {
         if let Some(removal_index) =
             self.aps.iter().position(|ap_container| match ap_container.config.as_ref() {
-                Some(config) => config.id.ssid == ssid && config.credential == credential,
+                Some(config) => {
+                    config.id.ssid == ssid && config.credential.clone().into_bytes() == credential
+                }
                 None => false,
             })
         {
@@ -1861,7 +1863,7 @@ mod tests {
                 ssid: ssid.clone(),
                 security_type: ap_types::SecurityType::None,
             },
-            credential: password.as_bytes().to_vec(),
+            credential: ap_types::Credential::from_bytes(password.as_bytes()),
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -2044,7 +2046,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
 
         // Run the state machine future again so that it acks the oneshot.
@@ -4998,7 +5000,7 @@ mod tests {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fake_successful_connect_result())
+            .send_on_connect_result(&fake_successful_connect_result(), None)
             .expect("failed to send connection completion");
 
         // Verify that the state machine future is still alive.

@@ -13,7 +13,7 @@ import tempfile
 import typing
 
 from daemon_manager import DaemonManager
-from portpicker import portpicker
+import portpicker
 
 from event import EventRecorder
 import test_list_file

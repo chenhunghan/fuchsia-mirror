@@ -38,7 +38,10 @@ GpuMemSlab::~GpuMemSlab() {
     if (mapped_ptr()) {
       device_.unmapMemory(base());
     }
-    device_.freeMemory(base());
+    {
+      TRACE_DURATION("gfx", "vkFreeMemory");
+      device_.freeMemory(base());
+    }
   }
   if (allocator_) {
     allocator_->OnSlabDestroyed(size());

@@ -197,6 +197,7 @@ template("dart_test") {
                              "environments",
                              "isolated",
                              "package_deps",
+                             "produces_perf_results",
                              "timeout_secs",
                            ])
 

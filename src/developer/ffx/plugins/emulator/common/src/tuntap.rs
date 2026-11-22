@@ -39,7 +39,7 @@ pub(crate) mod tap {
 
             #[cfg(not(test))]
             {
-                eprintln!(
+                log::info!(
                     "Skipping Tun/Tap test for '{}' since it's not supported on Mac.",
                     interface.interface_name,
                 );
@@ -147,7 +147,7 @@ fn tap_inner(tap: &QemuTunTap, check_for_ready: bool) -> Result<()> {
     if tap.interface_is_in_use(&interface) {
         return_user_error!(
             // LINT.IfChange(tuntap_in_use)
-            "The Tun/Tap interface '{TAP_INTERFACE_NAME}' exists, but it's in use by another process."
+            "The Tun/Tap interface '{TAP_INTERFACE_NAME}' exists, but it's in use by another process.",
             // LINT.ThenChange(/tools/testing/tefmocheck/string_in_log_check.go:tuntap_in_use)
         )
     }

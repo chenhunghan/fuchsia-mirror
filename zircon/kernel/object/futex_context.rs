@@ -980,7 +980,9 @@ impl FutexContext {
                     drop(irqd);
                     futex_owner_guard.release();
                     if let Some(fault) = copy_err.fault_info {
-                        soft_fault(fault.pf_va, fault.pf_flags)?;
+                        // SAFETY: Called in user thread context after releasing all locks and
+                        // re-enabling interrupts.
+                        unsafe { soft_fault(fault.pf_va, fault.pf_flags) }?;
                         continue;
                     }
                     return Err(copy_err.status);
@@ -1435,7 +1437,9 @@ impl FutexContext {
                 requeue_owner_guard.release();
                 eager_resched_disabler.enable();
                 if let Some(fault) = copy_err.fault_info {
-                    soft_fault(fault.pf_va, fault.pf_flags)?;
+                    // SAFETY: Called in user thread context after releasing all locks and
+                    // re-enabling eager rescheduling.
+                    unsafe { soft_fault(fault.pf_va, fault.pf_flags) }?;
                     continue;
                 }
                 return Err(copy_err.status);

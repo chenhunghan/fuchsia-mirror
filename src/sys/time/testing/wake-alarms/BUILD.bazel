@@ -2,6 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
 package(default_applicable_licenses = ["//:license"])
@@ -15,7 +24,7 @@ rustc_binary(
         "//sdk/fidl/fuchsia.time.alarms:fuchsia.time.alarms_rust",
         "//sdk/rust/zx",
         "//src/lib/diagnostics/inspect/runtime/rust",
-        "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
+        "//src/lib/diagnostics/inspect/rust",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
@@ -26,4 +35,30 @@ rustc_binary(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "bin",
+)
+
+fx_component_manifest(
+    name = "default-manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/default.cml",
+)
+
+fx_component(
+    name = "default",
+    testonly = True,
+    compiled_manifest = ":default-manifest",
+    deps = [":bin_packaged_bin"],
 )

@@ -46,7 +46,6 @@ fuchsia_rust_driver("goldfish-rtc-driver") {
 
 fuchsia_driver_component("goldfish-rtc") {
   dml_label = ":goldfish-rtc-dml"
-  info = "meta/goldfish-rtc-info.json"
   component_name = "goldfish-rtc"
   deps = [
     ":goldfish-rtc-driver",

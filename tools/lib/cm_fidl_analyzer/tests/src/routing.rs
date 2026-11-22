@@ -22,12 +22,10 @@ use cm_fidl_analyzer::route::{TargetDecl, VerifyRouteResult};
 use cm_rust::*;
 use cm_rust_testing::*;
 use cm_types::{IterablePath, RelativePath, Url};
-use fidl::prelude::*;
-use fidl_fuchsia_component as fcomponent;
-use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_internal as component_internal;
-use fidl_fuchsia_component_runtime::RouteRequest;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_internal_common as component_internal;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
+use fidl_fuchsia_io_common as fio;
 use futures::FutureExt;
 use moniker::Moniker;
 use router_error::Explain;
@@ -319,8 +317,7 @@ impl RoutingTestForAnalyzer {
                     .iter()
                     .find_map(|u| match u {
                         UseDecl::Protocol(d)
-                            if d.source_name.to_string()
-                                == fcomponent::StorageAdminMarker::PROTOCOL_NAME =>
+                            if d.source_name.to_string() == "fuchsia.component.StorageAdmin" =>
                         {
                             Some(u.clone())
                         }
@@ -436,8 +433,7 @@ impl RoutingTestModel for RoutingTestForAnalyzer {
             CheckUse::StorageAdmin { expected_res, .. } => {
                 let maybe_use = target.decl_for_testing().uses.iter().find_map(|u| match u {
                     UseDecl::Protocol(d)
-                        if d.source_name.to_string()
-                            == fcomponent::StorageAdminMarker::PROTOCOL_NAME =>
+                        if d.source_name.to_string() == "fuchsia.component.StorageAdmin" =>
                     {
                         Some(d.clone())
                     }

@@ -23,6 +23,7 @@
 #include <lib/fzl/pinned-vmo.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <lib/stdcompat/span.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zx/profile.h>
 #include <lib/zx/result.h>
 
@@ -31,8 +32,6 @@
 #include <variant>
 
 #include <fbl/array.h>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace spi {
 

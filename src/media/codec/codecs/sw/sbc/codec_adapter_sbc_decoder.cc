@@ -4,6 +4,7 @@
 
 #include "codec_adapter_sbc_decoder.h"
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_buffer.h>
 #include <lib/trace/event.h>
 #include <zircon/assert.h>
@@ -13,7 +14,6 @@
 #include <optional>
 #include <utility>
 
-#include "fuchsia/media/cpp/fidl.h"
 #include "lib/media/codec_impl/codec_port.h"
 #include "oi_codec_sbc.h"
 
@@ -25,21 +25,9 @@ constexpr char kPcmMimeType[] = "audio/pcm";
 constexpr uint8_t kPcmBitsPerSample = 16;
 constexpr size_t kMaxInputFrames = 64;
 
-bool FormatDetailsAreEqualForOutputBuffers(const fuchsia::media::FormatDetails& lhs,
-                                           const fuchsia::media::FormatDetails& rhs) {
-  if (lhs.has_mime_type() != rhs.has_mime_type()) {
-    return false;
-  }
-  if (lhs.has_mime_type() && lhs.mime_type() != rhs.mime_type()) {
-    return false;
-  }
-  if (lhs.has_oob_bytes() != rhs.has_oob_bytes()) {
-    return false;
-  }
-  if (lhs.has_oob_bytes() && lhs.oob_bytes() != rhs.oob_bytes()) {
-    return false;
-  }
-  return true;
+bool FormatDetailsAreEqualForOutputBuffers(const fuchsia_media::FormatDetails& lhs,
+                                           const fuchsia_media::FormatDetails& rhs) {
+  return lhs.mime_type() == rhs.mime_type() && lhs.oob_bytes() == rhs.oob_bytes();
 }
 
 }  // namespace
@@ -61,13 +49,7 @@ void CodecAdapterSbcDecoder::ProcessInputLoop() {
       }
     });
 
-    bool is_active = [this, &input_item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
-      std::unique_lock<std::mutex> lock(lock_);
-      while (output_reconfig_pending_ && !input_item.is_format_details()) {
-        reconfig_cond_.wait(lock);
-      }
-      return stream_active_;
-    }();
+    const bool is_active = WaitForOutputReconfigToComplete();
     if (!is_active) {
       return;
     }
@@ -80,13 +62,13 @@ void CodecAdapterSbcDecoder::ProcessInputLoop() {
       bool format_changed = true;
       if (last_format_details_) {
         format_changed = !FormatDetailsAreEqualForOutputBuffers(*last_format_details_,
-                                                                input_item.format_details());
+                                                                input_item.format_details2());
         // TODO(b/534928661): Ideally we wouldn't need to re-allocate output buffers if they're
         // already suitable, but currently sbc_decode_stream_switching_without_close requires
         // format_changed = true here.
         format_changed = true;
       }
-      last_format_details_ = fidl::Clone(input_item.format_details());
+      last_format_details_ = input_item.format_details_ptr();
 
       if (CreateContext(*last_format_details_) != kOk) {
         // Creation failed; a failure was reported through `events_`.
@@ -96,7 +78,10 @@ void CodecAdapterSbcDecoder::ProcessInputLoop() {
       if (format_changed) {
         {
           std::lock_guard<std::mutex> lock(lock_);
-          output_reconfig_pending_ = true;
+          if (!IsStreamActiveLocked()) {
+            return;
+          }
+          SetOutputReconfigPendingLocked();
         }
         events_->onCoreCodecMidStreamOutputConstraintsChange(
             /*output_re_config_required=*/true);
@@ -131,34 +116,28 @@ void CodecAdapterSbcDecoder::CleanUpAfterStream() {
   }
 }
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterSbcDecoder::OutputFormatDetails() {
-  fuchsia::media::PcmFormat2 output_format;
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterSbcDecoder::OutputFormatDetails() {
+  fuchsia_media::PcmFormat2 output_format;
   size_t max_pcm_chunk_size = 0;
   {
     std::lock_guard<std::mutex> lock(lock_);
     FX_DCHECK(context_);
-    output_format = fidl::Clone(context_->output_format);
+    output_format = context_->output_format;
     max_pcm_chunk_size = context_->max_pcm_chunk_size();
   }
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type(kPcmMimeType);
-  format_details.set_pcm_format(std::move(output_format));
+  fuchsia_media::FormatDetails format_details;
+  format_details.mime_type() = kPcmMimeType;
+  format_details.pcm_format() = std::move(output_format);
 
   return {std::move(format_details), max_pcm_chunk_size};
 }
 
-fuchsia_sysmem2::BufferCollectionConstraints
-CodecAdapterSbcDecoder::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+CodecAdapterSbcDecoder::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
   std::lock_guard<std::mutex> lock(lock_);
 
   fuchsia_sysmem2::BufferCollectionConstraints result;
-
-  // The CodecImpl won't hand us the sysmem token, so we shouldn't expect to
-  // have the token here.
-  ZX_DEBUG_ASSERT(!partial_settings.has_sysmem_token());
 
   // TODO(https://fxbug.dev/42084949): plumb/permit range of buffer count from further down,
   // instead of single number frame_count, and set this to the actual
@@ -207,12 +186,14 @@ CodecAdapterSbcDecoder::CoreCodecGetBufferCollectionConstraints2(
   // We don't have to fill out usage - CodecImpl takes care of that.
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
-  return result;
+  return CoreCodecGetBufferCollectionConstraints3Result{
+      .constraints = std::move(result),
+  };
 }
 
-std::optional<fuchsia::media::PcmFormat2> CodecAdapterSbcDecoder::DecodeCodecInfo(
+std::optional<fuchsia_media::PcmFormat2> CodecAdapterSbcDecoder::DecodeCodecInfo(
     const std::vector<uint8_t>& oob_bytes) {
-  fuchsia::media::PcmFormat2 out;
+  fuchsia_media::PcmFormat2 out;
   SbcCodecInfo codec_info;
 
   FX_DCHECK(oob_bytes.size() == sizeof(SbcCodecInfo));
@@ -220,31 +201,31 @@ std::optional<fuchsia::media::PcmFormat2> CodecAdapterSbcDecoder::DecodeCodecInf
   // SBC codec info assumed to be msbf order
   memcpy(&codec_info, oob_bytes.data(), sizeof(SbcCodecInfo));
 
-  out.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
-  out.set_bits_per_sample(kPcmBitsPerSample);
+  out.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
+  out.bits_per_sample() = kPcmBitsPerSample;
 
   switch (codec_info.channel_mode) {
     case kSbcChannelModeMono:
-      out.set_channel_map({fuchsia::media::AudioChannelId2::FL});
+      out.channel_map() = {fuchsia_media::AudioChannelId2::kFl};
       break;
     default:
-      out.set_channel_map(
-          {fuchsia::media::AudioChannelId2::FL, fuchsia::media::AudioChannelId2::FR});
+      out.channel_map() = {fuchsia_media::AudioChannelId2::kFl,
+                           fuchsia_media::AudioChannelId2::kFr};
       break;
   }
 
   switch (codec_info.sampling_frequency) {
     case kSbcSamplingFrequency16000Hz:
-      out.set_frames_per_second(16000);
+      out.frames_per_second() = 16000;
       break;
     case kSbcSamplingFrequency32000Hz:
-      out.set_frames_per_second(32000);
+      out.frames_per_second() = 32000;
       break;
     case kSbcSamplingFrequency44100Hz:
-      out.set_frames_per_second(44100);
+      out.frames_per_second() = 44100;
       break;
     case kSbcSamplingFrequency48000Hz:
-      out.set_frames_per_second(48000);
+      out.frames_per_second() = 48000;
       break;
     default:
       return std::nullopt;
@@ -254,26 +235,26 @@ std::optional<fuchsia::media::PcmFormat2> CodecAdapterSbcDecoder::DecodeCodecInf
 }
 
 CodecAdapterSbcDecoder::InputLoopStatus CodecAdapterSbcDecoder::CreateContext(
-    const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.has_mime_type() ||
-      (format_details.mime_type() != kSbcMimeType && format_details.mime_type() != kMsbcMimeType)) {
+    const fuchsia_media::FormatDetails& format_details) {
+  if (!format_details.mime_type().has_value() || (*format_details.mime_type() != kSbcMimeType &&
+                                                  *format_details.mime_type() != kMsbcMimeType)) {
     events_->onCoreCodecFailCodec("SBC Decoder received mime type that was not sbc or msbc audio.");
     return kShouldTerminate;
   }
-  if (!format_details.has_oob_bytes() ||
-      format_details.oob_bytes().size() != sizeof(SbcCodecInfo)) {
+  if (!format_details.oob_bytes().has_value() ||
+      format_details.oob_bytes()->size() != sizeof(SbcCodecInfo)) {
     events_->onCoreCodecFailCodec(
         "SBC Decoder received oob info input that was not for sbc audio.");
     return kShouldTerminate;
   }
 
-  auto output_pcm_format = DecodeCodecInfo(format_details.oob_bytes());
+  auto output_pcm_format = DecodeCodecInfo(*format_details.oob_bytes());
   if (!output_pcm_format.has_value()) {
     events_->onCoreCodecFailCodec("SBC Decoder received invalid sampling_frequency in oob_bytes.");
     return kShouldTerminate;
   }
 
-  uint8_t channels = static_cast<uint8_t>(output_pcm_format->channel_map().size());
+  uint8_t channels = static_cast<uint8_t>(output_pcm_format->channel_map()->size());
   const char* fail_message = nullptr;
   {
     std::lock_guard<std::mutex> lock(lock_);
@@ -286,7 +267,7 @@ CodecAdapterSbcDecoder::InputLoopStatus CodecAdapterSbcDecoder::CreateContext(
     if (!OI_SUCCESS(status)) {
       context_ = std::nullopt;
       fail_message = "Failed to reset SBC decoder";
-    } else if (format_details.mime_type() == kMsbcMimeType) {
+    } else if (*format_details.mime_type() == kMsbcMimeType) {
       status = OI_CODEC_SBC_DecoderConfigureMSbc(&context_->context);
       if (!OI_SUCCESS(status)) {
         context_ = std::nullopt;

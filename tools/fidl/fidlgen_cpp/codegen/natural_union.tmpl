@@ -26,12 +26,12 @@ class {{ .Name }} {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class {{ .TagEnum.Self }} : fidl_xunion_tag_t {
+  enum class {{ .TagEnum.Self }} : fidl_union_tag_t {
   {{- range .Members }}
     {{ .TagName.Self }} = {{ .Ordinal }},  // {{ .Ordinal | printf "%#x" }}
   {{- end }}
   {{- if .IsFlexible }}
-    {{ .TagUnknown.Self }} = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    {{ .TagUnknown.Self }} = ::std::numeric_limits<uint32_t>::max(),
   {{- end }}
   };
 

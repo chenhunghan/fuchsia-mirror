@@ -1,0 +1,72 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Components included in `deps` because they're used by CoreRealm and/or
+# HostRealm
+# TODO(https://fxbug.dev/570694755): Move component/package dependencies to
+# test packages once `:test-bt-init` and
+# `//src/connectivity/bluetooth/hci/virtual` are migrated to Bazel.
+# @bazel2gn:raw_attribute:deps += [ ":test-bt-init", "//src/connectivity/bluetooth/core/bt-gap:test-stash-secure", "//src/connectivity/bluetooth/hci/virtual" ]
+rustc_library(
+    name = "bt-test-harness",
+    testonly = True,
+    srcs = [
+        "src/access.rs",
+        "src/bootstrap.rs",
+        "src/core_realm.rs",
+        "src/emulator.rs",
+        "src/host.rs",
+        "src/host_realm.rs",
+        "src/host_watcher.rs",
+        "src/inspect.rs",
+        "src/lib.rs",
+        "src/low_energy_central.rs",
+        "src/low_energy_peripheral.rs",
+        "src/profile.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//:__pkg__",
+        "//src/connectivity/bluetooth:__subpackages__",
+    ],
+    # These are the library and code dependencies of the bt-test-harness library.
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.gatt:fuchsia.bluetooth.gatt_rust",
+        "//sdk/fidl/fuchsia.bluetooth.host:fuchsia.bluetooth.host_rust",
+        "//sdk/fidl/fuchsia.bluetooth.le:fuchsia.bluetooth.le_rust",
+        "//sdk/fidl/fuchsia.bluetooth.snoop:fuchsia.bluetooth.snoop_rust",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/fidl/fuchsia.stash:fuchsia.stash_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/testing/hci-emulator-client",
+        "//src/connectivity/bluetooth/testing/realmbuilder-mock-helpers",
+        "//src/connectivity/bluetooth/testing/test-harness",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_types",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

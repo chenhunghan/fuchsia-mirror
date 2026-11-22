@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Provides a C++ utility function GetCoordinator() which connects to and
+# interacts with the fuchsia.hardware.display.Service service, found within
+# the component's environment.
+# TODO: Verify whether client should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_library(
+    name = "client",
+    srcs = ["client.cc"],
+    hdrs = ["client.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/zx",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/ui/scenic/bin:__pkg__",
+        "//src/ui/scenic/lib/flatland/engine/tests/pixeltests:__pkg__",
+        "//src/ui/scenic/lib/flatland/engine/tests/smoketests:__pkg__",
+        "//src/ui/scenic/lib/flatland/renderer/tests:__pkg__",
+        "//src/ui/scenic/lib/screen_capture/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+        "//sdk/lib/fit-promise",
+    ],
+    alwayslink = True,
+)

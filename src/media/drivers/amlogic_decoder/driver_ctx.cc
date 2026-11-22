@@ -4,6 +4,7 @@
 
 #include "driver_ctx.h"
 
+#include <fidl/fuchsia.io/cpp/wire.h>
 #include <lib/fdio/directory.h>
 #include <lib/media/codec_impl/codec_metrics.h>
 #include <lib/sync/cpp/completion.h>
@@ -149,25 +150,37 @@ void DriverCtx::PostToSharedFidl(fit::closure to_run_on_shared_fidl_sequence) {
 }
 
 void DriverCtx::SetAuxServiceDirectory(
-    fidl::InterfaceHandle<fuchsia::io::Directory> aux_service_directory) {
-  if (aux_service_directory_) {
+    fidl::ClientEnd<fuchsia_io::Directory> new_aux_service_directory) {
+  if (!new_aux_service_directory.is_valid()) {
+    return;
+  }
+
+  if (aux_service_directory_.is_valid()) {
     // Check if old aux_service_directory_ is PEER_CLOSED / broken.
-    fidl::InterfaceHandle<fuchsia::io::Directory> tmp_directory;
-    zx_status_t status = aux_service_directory_->CloneChannel(tmp_directory.NewRequest());
-    if (status == ZX_OK) {
+    zx_status_t status = aux_service_directory_.channel().wait_one(
+        ZX_CHANNEL_PEER_CLOSED, zx::time::infinite_past(), nullptr);
+    if (status == ZX_ERR_TIMED_OUT) {
       // Keep the service directory we already had, and that seems to not be PEER_CLOSED.  This path
       // is to avoid switching to a temporary service directory when running tests that spawn their
       // own separate instance of codec_factory.
       return;
     }
     // Toss the PEER_CLOSED / broken service directory.
-    aux_service_directory_ = nullptr;
+    aux_service_directory_.reset();
   }
-  ZX_DEBUG_ASSERT(!aux_service_directory_);
-  aux_service_directory_ =
-      std::make_shared<sys::ServiceDirectory>(std::move(aux_service_directory));
-  ZX_DEBUG_ASSERT(aux_service_directory_);
-  metrics_->SetServiceDirectory(aux_service_directory_);
+  ZX_DEBUG_ASSERT(!aux_service_directory_.is_valid());
+  auto [clone_client, clone_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  fidl::Status clone_status =
+      fidl::WireCall(new_aux_service_directory)
+          ->Clone(fidl::ServerEnd<fuchsia_unknown::Cloneable>(clone_server.TakeChannel()));
+  if (!clone_status.ok()) {
+    DECODE_ERROR("Failed to clone aux service directory: %s",
+                 clone_status.FormatDescription().c_str());
+    return;
+  }
+  aux_service_directory_ = std::move(new_aux_service_directory);
+  ZX_DEBUG_ASSERT(aux_service_directory_.is_valid());
+  metrics_->SetServiceDirectory(std::move(clone_client));
 }
 
 CodecMetrics& DriverCtx::metrics() { return *metrics_; }

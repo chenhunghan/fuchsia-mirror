@@ -127,7 +127,6 @@ rustc_library(
     lint_config = "//src/starnix/build:kernel_library_config",
     proc_macro_deps = [
         "//src/starnix/lib/selinux/src/policy/derive_macros",
-        "//third_party/rust_crates/vendor:paste",
         "//third_party/rust_crates/vendor:strum_macros",
     ],
     visibility = [

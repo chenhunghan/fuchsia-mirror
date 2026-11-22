@@ -7,6 +7,8 @@ use log::error;
 
 /// Inspect Bytes Property data type.
 ///
+/// The content of this property type is opaque to the diagnostics and forensics systems.
+///
 /// NOTE: do not rely on PartialEq implementation for true comparison.
 /// Instead leverage the reader.
 ///

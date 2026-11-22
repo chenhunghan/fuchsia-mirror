@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "element-manager-test-bin",
+    srcs = ["element_manager_test.cc"],
+    gn_output_name = "element-manager-test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/ctf/tests/fidl/fuchsia.element/testing/fidl:fuchsia.element.test_hlcpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_hlcpp",
+        "//sdk/fidl/fuchsia.element:fuchsia.element_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/testing/fidl:fidl_test_hlcpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "element-manager-test-bin_packaged",
+    testonly = True,
+    binary = ":element-manager-test-bin",
+    binary_name = "element-manager-test",
+)
+
+fx_component_manifest(
+    name = "default_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+        "//src/testing/realm_client:meta/realm_client.shard.cml",
+    ],
+    manifest = "meta/default.cml",
+)
+
+fx_component(
+    name = "default",
+    testonly = True,
+    compiled_manifest = ":default_manifest",
+    deps = [":element-manager-test-bin_packaged"],
+)
+
+ctf_fx_package(
+    name = "fuchsia-element-tests",
+    testonly = True,
+    components = [":default"],
+)

@@ -7,9 +7,11 @@ import pathlib
 import subprocess
 import unittest
 
-# NB: These must be kept in sync with the values in BUILD.gn.
+# NB: These must be kept in sync with example.rs and BUILD.bazel.
 component_name = "bar"
 package_name = "for-test"
+packaged_config_component_name = "packaged_config_component"
+packaged_config_package_name = "package_for_scrutiny_testing"
 expected_value_in_policy = "check this string!"
 
 
@@ -89,7 +91,9 @@ def main() -> None:
     stderr = output.stderr.decode("UTF-8")
     expected_error = f"""
 └── fuchsia-pkg://fuchsia.com/{package_name}#meta/{component_name}.cm
-      └── `asserted_by_scrutiny_test` has a different value ("{expected_value_in_policy}") than expected ("not the string that was packaged").
+      └── `asserted_by_scrutiny_test` has a different value ("{expected_value_in_policy}") than expected ("not the string that was configured").
+└── fuchsia-pkg://fuchsia.com/{packaged_config_package_name}#meta/{packaged_config_component_name}.cm
+      └── `immutable_packaged_config` has a different value ("{expected_value_in_policy}") than expected ("not the string that was packaged").
       └── `mutable_by_parent_config` has an expected value in the policy which could be overridden at runtime by ConfigMutability(PARENT)."""
     test.assertIn(
         expected_error, stderr, "error message must contain expected failures"

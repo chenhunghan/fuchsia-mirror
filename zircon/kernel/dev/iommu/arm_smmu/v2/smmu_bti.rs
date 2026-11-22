@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! ARM SMMUv2 Bus Transaction Initiator (`SmmuBti`) implementation.
+//! ARM SMMUv2 Bus Transaction Initiator (`SmmuV2Bti`) implementation.
 
 use core::pin::Pin;
 use debug::dprintf;
@@ -17,29 +17,17 @@ use pin_init::{pin_data, pinned_drop};
 use zx_status::Status;
 
 use crate::arm_smmu::common::{
-    ALL_PERM_FLAGS, Allocation, ArmSmmuMode, BtiPageLeakReason, DEFAULT_MAX_PAGE_CACHE_ENTRIES,
-    DeviceAspace, EscapedName, PAGE_SHIFT, PAGE_SIZE, PinnedVmoSource, RequireContiguousMapping,
-    SmmuEnv, SmmuPinnedVmo, SmmuRawMutex, SmmuRawSpinLock, TlbInvalidator, ZX_MAX_NAME_LEN,
-    is_page_rounded,
+    ALL_PERM_FLAGS, ArmSmmuMode, BtiPageLeakReason, DEFAULT_MAX_PAGE_CACHE_ENTRIES,
+    DEFAULT_TTBR0_ADDR_SPACE_SZ, DeviceAspace, EscapedName, MappedPin, MappingAllocation,
+    PAGE_SIZE, PinnedVmoSource, RequireContiguousMapping, SmmuEnv, SmmuPinnedVmo, SmmuRawMutex,
+    SmmuRawSpinLock, TlbInvalidator, ZX_MAX_NAME_LEN, is_page_rounded,
 };
-use crate::arm_smmu::v2::context_bank::{ContextBank, DEFAULT_TTBR0_ADDR_SPACE_SZ};
-use crate::arm_smmu::v2::registers::gr0::{
-    S2cr, S2crBypass, S2crFault, S2crTranslation, S2crType, Smr,
-};
-use crate::arm_smmu::v2::registers::gr1::{
-    Cba2r, Cbar, CbarS1TS2Bypass, CbarS1TS2Fault, CbarS1TS2Translate, CbarS2Translation, CbarType,
-};
-use crate::arm_smmu::v2::registers::s1cbr::{
-    Sctlr, Tcr, Tcr2, Tcr32Bit, Tcr64Bit, TcrExt32Bit, Ttbr0_32Bit, Ttbr0_64Bit, Ttbr0Ext32Bit,
-    Ttbr1_32Bit, Ttbr1_64Bit, Ttbr1Ext32Bit,
-};
-use crate::arm_smmu::v2::smmu::{Smmu, SmmuLockGuard, dump_reg};
-use crate::arm_smmu::v2::smmu_pmt::{SmmuPmt, SmmuPmtState};
+use crate::arm_smmu::v2::context_bank::ContextBank;
+use crate::arm_smmu::v2::registers::gr0::S2crType;
+use crate::arm_smmu::v2::smmu::{SmmuV2, SmmuV2LockGuard};
+use crate::arm_smmu::v2::smmu_pmt::{SmmuPmtState, SmmuV2Pmt};
 use crate::arm_smmu::v2::stream_match_reg::StreamMatchRegGroup;
-use crate::arm_smmu::v2::utils::{
-    AddrMode, BtiMode, SmrValue, addr_mode_to_string, arm_cbar_type_to_string,
-    arm_s2cr_type_to_string, bti_mode_to_string,
-};
+use crate::arm_smmu::v2::utils::{BtiMode, SmrValue};
 
 /// Bus Transaction Initiator (BTI) backed by an ARM SMMUv2 instance.
 ///
@@ -47,17 +35,17 @@ use crate::arm_smmu::v2::utils::{
 ///
 /// ### BTI and PMT Reference Cycles and Lifecycles
 ///
-/// An `SmmuBti` is initially held by:
-/// 1) Its parent `Smmu`'s `bti_list` (`RefPtr<SmmuBti>`),
-/// 2) The user-facing `BusTransactionInitiatorDispatcher` (`RefPtr<SmmuBti>`), and
-/// 3) Each child `SmmuPmt` (`SmmuPmt::owner: RefPtr<SmmuBti>`), plus any context-bank IRQ vector
-///    associated with the BTI while active (`ContextIrqVector::bti`).
+/// An `SmmuV2Bti` is initially held by:
+/// 1) Its parent `SmmuV2`'s `bti_list` (`RefPtr<SmmuV2Bti>`),
+/// 2) The user-facing `BusTransactionInitiatorDispatcher` (`RefPtr<SmmuV2Bti>`), and
+/// 3) Each child `SmmuV2Pmt` (`SmmuV2Pmt::owner: RefPtr<SmmuV2Bti>`), plus any context-bank IRQ
+///    vector associated with the BTI while active (`ContextIrqVector::bti`).
 ///
-/// Each active `SmmuPmt` is held by:
-/// 1) `SmmuBti::active_pmt_list` (`RefPtr<SmmuPmt>`), and
-/// 2) The user-facing `PinnedMemoryTokenDispatcher` (`RefPtr<SmmuPmt>`).
+/// Each active `SmmuV2Pmt` is held by:
+/// 1) `SmmuV2Bti::active_pmt_list` (`RefPtr<SmmuV2Pmt>`), and
+/// 2) The user-facing `PinnedMemoryTokenDispatcher` (`RefPtr<SmmuV2Pmt>`).
 ///
-/// Unlike `StubBti`, an `SmmuBti` does not retain `RefPtr<SmmuPmt>` references to quarantined
+/// Unlike `StubBti`, an `SmmuV2Bti` does not retain `RefPtr<SmmuV2Pmt>` references to quarantined
 /// PMTs: when a PMT's final dispatcher handle is closed without first calling `zx_pmt_unpin`
 /// (`on_pmt_zero_handles`), the BTI revokes hardware access (either unmapping the PMT's PTEs in
 /// `Enforced` mode or placing the context bank into `Fault` mode in `Passthru` mode), removes the
@@ -75,26 +63,27 @@ use crate::arm_smmu::v2::utils::{
 /// - **End of Life (`Shutdown`)**: Reached either in `on_dispatcher_zero_handles` when not
 ///   orphaned, or in `on_pmt_zero_handles` when an orphaned BTI's last active PMT is released (and
 ///   either `quarantined_pmt_count == 0` or the SMMU is in `Enforced` mode). `on_end_of_life`
-///   calls `Smmu::shutdown_bti` (which synchronizes and disables the context-bank IRQ, shuts down
-///   the BTI's SMRGs, context bank, and `DeviceAspace`, and unlinks the BTI from `Smmu::bti_list`)
-///   and clears `self.smmu` so the `SmmuBti` destructs once the last `RefPtr` drops.
+///   calls `SmmuV2::shutdown_bti` (which synchronizes and disables the context-bank IRQ, shuts
+///   down the BTI's SMRGs, context bank, and `DeviceAspace`, and unlinks the BTI from
+///   `SmmuV2::bti_list`) and clears `self.smmu` so the `SmmuV2Bti` destructs once the last
+///   `RefPtr` drops.
 ///
 /// ### Lock Hierarchy
 ///
 /// Locks must be acquired from outermost to innermost in the following order:
-/// 1. `Smmu::lock` (`KMutex`)
-/// 2. `SmmuBti::pmt_lock` (`KMutex`, shared with child `SmmuPmt` instances via
-///    `SmmuBtiPmtLockClass`)
-/// 3. `SmmuBti::lock` (`KMutex<SmmuRawSpinLock>`, IRQ-saving spinlock)
-/// 4. `Smmu::irq_lock` (`KMutex<SmmuRawSpinLock>`, IRQ-saving spinlock)
+/// 1. `SmmuV2::lock` (`KMutex`)
+/// 2. `SmmuV2Bti::pmt_lock` (`KMutex`, shared with child `SmmuV2Pmt` instances via
+///    `SmmuV2BtiPmtLockClass`)
+/// 3. `SmmuV2Bti::lock` (`KMutex<SmmuRawSpinLock>`, IRQ-saving spinlock)
+/// 4. `SmmuV2::irq_lock` (`KMutex<SmmuRawSpinLock>`, IRQ-saving spinlock)
 #[ksync::guarded]
 #[fbl::ref_counted]
 #[pin_data(PinnedDrop)]
 #[derive(Recyclable)]
 #[repr(C)]
-pub struct SmmuBti {
+pub struct SmmuV2Bti {
     #[pin]
-    pub(crate) list_node: DoublyLinkedListNode<SmmuBti>,
+    pub(crate) list_node: DoublyLinkedListNode<SmmuV2Bti>,
     bti_id: u64,
 
     /// Separate PMT lock class to prevent lock ordering inversions between PMT and BTI locks.
@@ -105,7 +94,7 @@ pub struct SmmuBti {
     pub(crate) pmt_lock: KMutex<SmmuRawMutex>,
     #[pin]
     #[guarded_by(pmt_lock)]
-    pub(crate) active_pmt_list: DoublyLinkedList<RefPtr<SmmuPmt>, DefaultObjectTag, TrackingSize>,
+    pub(crate) active_pmt_list: DoublyLinkedList<RefPtr<SmmuV2Pmt>, DefaultObjectTag, TrackingSize>,
     /// Note: We don't need to actually hold references to "quarantined" PMTs. If a user leaks a PMT
     /// without unpinning it, we simply enter the fault state and lock down this BTI so that the
     /// actual initiator hardware cannot access any memory anymore, after which we can return all
@@ -115,21 +104,26 @@ pub struct SmmuBti {
     pub(crate) quarantined_pmt_count: u64,
     #[guarded_by(pmt_lock)]
     pub(crate) quarantined_page_count: u64,
-    /// A flag indicating that the final user-mode handle to this BTI was closed, but it still had
-    /// PMTs (either active or quarantined) under its control.
+    /// Set when the final user-mode handle to this BTI is closed while it still has active PMTs
+    /// (or quarantined PMTs in `Passthru` mode), and cleared once `on_pmt_zero_handles` claims
+    /// end of life.
     #[guarded_by(pmt_lock)]
     pub(crate) orphaned: bool,
+    /// Set once [`Self::on_dispatcher_zero_handles`] has run so repeated calls cannot shut down
+    /// this BTI twice.
+    #[guarded_by(pmt_lock)]
+    pub(crate) zero_handles: bool,
     /// Protected by `pmt_lock` and its own internal page-table/page-cache state.
     #[guarded_by(pmt_lock)]
     pub(crate) aspace: Option<kalloc::Box<DeviceAspace>>,
 
     #[mutex]
     pub(crate) lock: KMutex<SmmuRawSpinLock>,
-    /// Reference to the parent `Smmu`. Guarded by `lock` as an `Option<RefPtr<Smmu>>` so
+    /// Reference to the parent `SmmuV2`. Guarded by `lock` as an `Option<RefPtr<SmmuV2>>` so
     /// `on_end_of_life` can soundly clear the parent reference without `const_cast` or interior
     /// mutability outside the lock.
     #[guarded_by(lock)]
-    pub(crate) smmu: Option<RefPtr<Smmu>>,
+    pub(crate) smmu: Option<RefPtr<SmmuV2>>,
     #[guarded_by(lock)]
     pub(crate) mode: BtiMode,
     #[pin]
@@ -144,21 +138,21 @@ pub struct SmmuBti {
 
 // Manual implementation because `#[pin_data]` copies field attributes onto its internal
 // projection struct literal, where derive helper attributes like `#[dll_node]` are rejected.
-impl DoublyLinkedListContainable<Self> for SmmuBti {
+impl DoublyLinkedListContainable<Self> for SmmuV2Bti {
     #[inline]
     fn get_node(&self) -> &DoublyLinkedListNode<Self> {
         &self.list_node
     }
 }
 
-// SAFETY: All mutable fields of `SmmuBti` are synchronized by `pmt_lock`, `lock`, or the enclosing
-// `Smmu::lock` (for `list_node`).
-unsafe impl Send for SmmuBti {}
-// SAFETY: Shared references to `SmmuBti` only mutate state under `pmt_lock` or `lock`.
-unsafe impl Sync for SmmuBti {}
+// SAFETY: All mutable fields of `SmmuV2Bti` are synchronized by `pmt_lock`, `lock`, or the
+// enclosing `SmmuV2::lock` (for `list_node`).
+unsafe impl Send for SmmuV2Bti {}
+// SAFETY: Shared references to `SmmuV2Bti` only mutate state under `pmt_lock` or `lock`.
+unsafe impl Sync for SmmuV2Bti {}
 
 struct BtiTlbInvalidator<'a> {
-    bti: &'a SmmuBti,
+    bti: &'a SmmuV2Bti,
 }
 
 impl TlbInvalidator for BtiTlbInvalidator<'_> {
@@ -176,7 +170,7 @@ impl TlbInvalidator for NoOpTlbInvalidator {
 }
 
 #[pinned_drop]
-impl PinnedDrop for SmmuBti {
+impl PinnedDrop for SmmuV2Bti {
     fn drop(self: Pin<&mut Self>) {
         // By the time we destruct, we should have been shut down already and all of
         // our resources explicitly released.
@@ -201,7 +195,7 @@ impl PinnedDrop for SmmuBti {
     }
 }
 
-impl SmmuBti {
+impl SmmuV2Bti {
     /// Returns the bus transaction ID for this BTI.
     #[inline]
     pub fn bti_id(&self) -> u64 {
@@ -210,7 +204,7 @@ impl SmmuBti {
 
     /// Returns `true` if this BTI is currently linked in `smmu.bti_list`.
     #[inline]
-    pub fn in_container(&self) -> bool {
+    pub(crate) fn in_container(&self) -> bool {
         self.list_node.in_container()
     }
 
@@ -250,42 +244,11 @@ impl SmmuBti {
         DeviceAspace::create(LOWER_ASPACE_BOUND, DEV_ASPACE_SIZE, DEFAULT_MAX_PAGE_CACHE_ENTRIES)
     }
 
-    /// Creates and initializes a new `SmmuBti` instance, taking control of `smrg` and (optional)
+    /// Creates and initializes a new `SmmuV2Bti` instance, taking control of `smrg` and (optional)
     /// `context_bank`.
     ///
     /// On success, the supplied resources (`smrg` and `context_bank`) are marked as unavailable in
-    /// the owning `Smmu`'s bookkeeping.
-    ///
-    /// Temporary porting note: the C++ `SmmuBti::Create` marked the SMRG and context bank as in
-    /// use in the SMMU's bookkeeping *before* its fallible steps. If creating the address space
-    /// then failed, it returned without undoing that, permanently leaking one SMRG and one context
-    /// bank, and destroyed objects which had not been shut down (tripping their destructors' debug
-    /// asserts). The ordering below avoids both.
-    ///
-    /// On success the register accesses, and their order, are the same as the C++. On the two
-    /// failure paths (no memory for the address space or for the BTI) the C++ wrote no registers
-    /// at all, and this does:
-    ///
-    /// 1) The SMRG is disabled: SMR read and write with VALID, MASK and ID zero, S2CR read and
-    ///    write with TYPE = Fault, then a barrier. From `Smmu::create_bti` this repeats what
-    ///    `create_and_lockdown` just wrote, so no register changes value. From
-    ///    `Smmu::adopt_smrg` (`initial_mode` is `Adopted`, and only the BTI allocation can fail)
-    ///    it turns off a stream match which the bootloader had enabled; the consequences are the
-    ///    three listed in the porting note in `adopt_smrg`, and the same evaluation applies.
-    /// 2) A context bank which is not adopted goes through `set_mode(Shutdown)`: a second
-    ///    `disable_regs` (TCR EPD0/EPD1 set, barrier, SCTLR, CBAR, TTBR0, TTBR1, TLBIASID and
-    ///    sync), then a read and write each of CBA2R and TCR, which the C++ never touched on this
-    ///    path. This is exactly the sequence both implementations run whenever a BTI is shut
-    ///    down, so the context bank ends in the state every released context bank is in:
-    ///    faulting, with table walks disabled. The SMRG is disabled throughout, so no stream can
-    ///    reach the context bank while it is rewritten. An adopted context bank is not touched
-    ///    here, as with the C++; `Smmu::lockdown` disables it afterwards in both, as it is still
-    ///    marked available.
-    ///
-    /// This is at least as good as the C++: every register ends in a faulting state the C++ also
-    /// produces, the only cost is some redundant accesses on a path which needs an allocation to
-    /// fail, and the SMRG and context bank remain available for a later BTI instead of being lost
-    /// until reboot. The one exception is consequence 3) in `adopt_smrg`.
+    /// the owning `SmmuV2`'s bookkeeping.
     ///
     /// Note: Fallible allocations (`Self::create_aspace()` and `pin_make_ref_counted!`) are
     /// performed upfront before clearing `available_cbs` / `available_smrgs` or linking hardware
@@ -293,9 +256,29 @@ impl SmmuBti {
     /// with the heap/PMM and guarantees that if allocation fails, `available_cbs` and
     /// `available_smrgs` remain untouched while `smrg` and `context_bank` are cleanly disabled and
     /// dropped.
+    ///
+    /// On those two failure paths (no memory for the address space or for the BTI), what is
+    /// written to the hardware before the resources are dropped is:
+    ///
+    /// 1) The SMRG is disabled: SMR read and write with VALID, MASK and ID zero, S2CR read and
+    ///    write with TYPE = Fault, then a barrier. From `SmmuV2::create_bti` this repeats what
+    ///    `create_and_lockdown` just wrote, so no register changes value. From
+    ///    `SmmuV2::adopt_smrg` (`initial_mode` is `Adopted`, and only the BTI allocation can
+    ///    fail) it turns off a stream match which the bootloader had enabled; what follows from
+    ///    that is listed in the comment on the context bank failure in `adopt_smrg`.
+    /// 2) A context bank which is not adopted goes through `set_mode(Shutdown)`, the sequence
+    ///    run whenever a BTI is shut down: `disable_regs` (TCR EPD0/EPD1 set, barrier, SCTLR,
+    ///    CBAR, TTBR0, TTBR1, TLBIASID and sync), then a read and write each of CBA2R and TCR.
+    ///    It ends in the state every released context bank is in: faulting, with table walks
+    ///    disabled. The SMRG is disabled throughout, so no stream can reach the context bank
+    ///    while it is rewritten. An adopted context bank is given up without a register being
+    ///    touched (`abandon_adoption`); it is still marked available, so `SmmuV2::lockdown`
+    ///    disables it afterwards.
+    ///
+    /// Both resources stay available for a later BTI.
     pub(crate) fn create(
-        smmu: &Smmu,
-        smmu_guard: &mut Pin<&mut SmmuLockGuard<'_>>,
+        smmu: &SmmuV2,
+        smmu_guard: &mut Pin<&mut SmmuV2LockGuard<'_>>,
         mut smrg: UniquePtr<StreamMatchRegGroup>,
         mut context_bank: Option<UniquePtr<ContextBank>>,
         initial_mode: BtiMode,
@@ -323,9 +306,8 @@ impl SmmuBti {
                         status.into_raw()
                     );
                     smrg.disable();
-                    if let Some(ref mut cb) = context_bank
-                        && cb.mode() != BtiMode::Adopted
-                    {
+                    if let Some(ref mut cb) = context_bank {
+                        debug_assert_ne!(cb.mode(), BtiMode::Adopted);
                         cb.set_mode(smmu.name(), BtiMode::Shutdown);
                     }
                     return Err(status);
@@ -335,7 +317,7 @@ impl SmmuBti {
             None
         };
 
-        let bti = match pin_make_ref_counted!(SmmuBti {
+        let bti = match pin_make_ref_counted!(SmmuV2Bti {
             list_node: DoublyLinkedListNode::new(),
             bti_id,
             pmt_lock <- KMutex::init(),
@@ -343,6 +325,7 @@ impl SmmuBti {
             quarantined_pmt_count: KCell::new(0),
             quarantined_page_count: KCell::new(0),
             orphaned: KCell::new(false),
+            zero_handles: KCell::new(false),
             aspace: KCell::new(None),
             lock <- KMutex::init(),
             smmu: KCell::new(Some(RefPtr::from_ref(smmu))),
@@ -357,10 +340,14 @@ impl SmmuBti {
                     aspace.free_translation_tables(&mut NoOpTlbInvalidator);
                 }
                 smrg.disable();
-                if let Some(ref mut cb) = context_bank
-                    && cb.mode() != BtiMode::Adopted
-                {
-                    cb.set_mode(smmu.name(), BtiMode::Shutdown);
+                // An adopted bank is left exactly as the bootloader had it: there is no state
+                // of ours to undo, only the object to put into the state its destructor expects.
+                if let Some(ref mut cb) = context_bank {
+                    if cb.mode() == BtiMode::Adopted {
+                        cb.abandon_adoption();
+                    } else {
+                        cb.set_mode(smmu.name(), BtiMode::Shutdown);
+                    }
                 }
                 return Err(Status::NO_MEMORY);
             }
@@ -417,13 +404,13 @@ impl SmmuBti {
         Ok(bti)
     }
 
-    /// Maps a pinned VMO into this BTI and returns the resulting `SmmuPmt`.
+    /// Maps a pinned VMO into this BTI and returns the resulting `SmmuV2Pmt`.
     pub fn map(
         &self,
         pinned_vmo: SmmuPinnedVmo,
         perms: u32,
         req_contig: RequireContiguousMapping,
-    ) -> Result<RefPtr<SmmuPmt>, Status> {
+    ) -> Result<RefPtr<SmmuV2Pmt>, Status> {
         let vmo_offset = pinned_vmo.offset();
         let vmo_size = pinned_vmo.size();
 
@@ -459,17 +446,6 @@ impl SmmuBti {
         // write-without-read requests (`(perms & PERM_READ) == 0 && (perms & PERM_WRITE) != 0`)
         // would return `Err(Status::INVALID_ARGS)`.
 
-        // If there has been a request for a contiguous mapping, then check to see if
-        // our pinned VMO is (in fact) contiguous before attempting to obtain our
-        // lock. Once we are holding our lock, we can safely check to see if we are
-        // operating in Bypass mode, where we will need to fail the operation if the
-        // user desires a contiguous mapping, but the pinned VMO is not contiguous.
-        let contiguous_vmo_status = if req_contig == RequireContiguousMapping::No {
-            Ok(())
-        } else {
-            pinned_vmo.lookup_contiguous(vmo_offset, vmo_size).map(|_| ())
-        };
-
         // Hold our spinlock while we check to make sure we are in a state where
         // mapping is possible. IOW - we should be in either Bypass or Translation
         // mode. If we are in something like fault mode, adopted mode, or shutdown mode,
@@ -477,30 +453,26 @@ impl SmmuBti {
         // worth it to make a quick check to be sure that there is a chance that this
         // request can succeed before going further.
         //
-        // After that, speculatively allocate an `SmmuPmt` object with our spinlock
-        // dropped (we can't hold a spinlock and touch the heap).
-        //
-        // After this, however, we need to re-enter our lock and re-validate our mode.
-        // It is possible that while we were off fetching memory from the heap, we
-        // took a context interrupt and entered the fault state. In a situation like
-        // this, we need to deny the map request as we are required to do when a BTI
-        // is faulted.
+        // After that, we drop `self.lock` (a spinlock, under which the heap cannot be
+        // used) while performing VMO contiguity checks (when needed in `Bypass` mode),
+        // page-table updates, and `SmmuV2Pmt` heap allocation, and then re-enter
+        // `self.lock` to re-validate our mode in case a context fault raced with us.
         let observed_mode = {
             ksync::lock!(let guard = self.lock_lock());
             let mode = *guard.mode();
             if mode != BtiMode::Bypass && mode != BtiMode::Translation {
                 return Err(Status::BAD_STATE);
             }
-
-            // If we are not in translation mode, and the user both wants a contiguous
-            // mapping but the underlying pinned VMO is not contiguous (computed in
-            // `contiguous_vmo_status`, above) then we need to bail out here.
-            if mode != BtiMode::Translation {
-                contiguous_vmo_status?;
-            }
-
             mode
         };
+
+        // In `Bypass` mode, a `RequireContiguousMapping::Yes` request can only succeed if
+        // the underlying pinned VMO range is physically contiguous. Skip this walk in
+        // `Translation` mode, where the SMMU maps arbitrary physical pages contiguously in
+        // IOVA space.
+        if observed_mode != BtiMode::Translation && req_contig == RequireContiguousMapping::Yes {
+            pinned_vmo.lookup_contiguous(vmo_offset, vmo_size)?;
+        }
 
         // Perform our mapping if we are in translation mode. Then, create our
         // PMT, giving it ownership of any new mapping we just created.
@@ -526,7 +498,7 @@ impl SmmuBti {
             // `release_mapping_locked` method.
             // SAFETY: `pmt_guard` holds `self.pmt_lock`.
             let pmt = unsafe {
-                SmmuPmt::create(self, &mut pmt_guard, pinned_vmo, observed_mode, mapped_location)
+                SmmuV2Pmt::create(self, &mut pmt_guard, pinned_vmo, observed_mode, mapped_location)
             }
             .ok_or(Status::NO_MEMORY)?;
 
@@ -565,14 +537,20 @@ impl SmmuBti {
             if mode_changed {
                 // The PMT never became active, so it still owns the mapping we just made. Give
                 // the mapping back now, while we hold `pmt_lock` (and after the spinlock above
-                // has been dropped, as TLB invalidation takes it). `SmmuPmt::drop` takes no
+                // has been dropped, as TLB invalidation takes it). `SmmuV2Pmt::drop` takes no
                 // locks, so it cannot do this for us.
                 // SAFETY: `pmt` was created above with `self` as its owner, and `pmt_guard` holds
                 // `self.pmt_lock`.
-                let mapping = unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }
-                    .map_location_mut()
+                let pin = unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }
+                    .pin_mut()
                     .take();
-                self.release_mapping_locked(&mut pmt_guard, mapping);
+                let unmapped =
+                    pin.unmap(|mapping| self.release_mapping_locked(&mut pmt_guard, Some(mapping)));
+                // The PMT keeps the pin, now without a mapping, and unpins it when it is dropped.
+                // SAFETY: `pmt` was created above with `self` as its owner, and `pmt_guard` holds
+                // `self.pmt_lock`.
+                *unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }.pin_mut() =
+                    MappedPin::new(unmapped.into_vmo(), None);
             }
             (pmt, mode_changed)
         };
@@ -585,11 +563,11 @@ impl SmmuBti {
         Ok(pmt)
     }
 
-    /// Unmaps a previously mapped `Allocation` under `pmt_lock`.
+    /// Unmaps a previously mapped [`MappingAllocation`] under `pmt_lock`.
     pub(crate) fn release_mapping_locked(
         &self,
-        pmt_guard: &mut Pin<&mut SmmuBtiPmtLockGuard<'_>>,
-        mapping: Option<Allocation>,
+        pmt_guard: &mut Pin<&mut SmmuV2BtiPmtLockGuard<'_>>,
+        mapping: Option<MappingAllocation>,
     ) {
         if let Some(alloc) = mapping {
             // Give the mapping back to our `DeviceAspace`, which will manage the process
@@ -632,51 +610,77 @@ impl SmmuBti {
 
     /// Releases all quarantined PMTs on this BTI and restores operational mode if faulted.
     pub fn release_quarantine(&self) {
-        let smmu = {
-            ksync::lock!(let mut pmt_guard = self.lock_pmt_lock());
-            ksync::lock!(let mut guard = self.lock_lock());
+        ksync::lock!(let mut pmt_guard = self.lock_pmt_lock());
+        ksync::lock!(let mut guard = self.lock_lock());
 
-            let smmu = guard.smmu().as_ref().expect("active BTI must have SMMU").clone();
-            let op_mode = smmu.op_mode();
-            // The mode we will want to return to depends on the mode our SMMU is operating in.
-            let target_mode = match op_mode {
-                ArmSmmuMode::Passthru => BtiMode::Bypass,
-                ArmSmmuMode::Enforced => BtiMode::Translation,
-                ArmSmmuMode::Disabled => {
-                    panic!("release_quarantine called when SMMU is Disabled");
-                }
-            };
-
-            // No one should be calling `release_quarantine` on us unless we are in one of
-            // the 3 operational states: Fault, Bypass, or Translation.
-            let mode = *guard.mode();
-            debug_assert!(
-                mode == BtiMode::Fault || mode == BtiMode::Bypass || mode == BtiMode::Translation
-            );
-
-            // `release_quarantine` should be idempotent. If we are already operating in
-            // Bypass or Translation, there is nothing to do.
-            if mode == BtiMode::Fault {
-                // Reset our "quarantine" bookkeeping.
-                *pmt_guard.as_mut().quarantined_pmt_count_mut() = 0;
-                *pmt_guard.as_mut().quarantined_page_count_mut() = 0;
-
-                let res = self.set_mode_locked(&mut guard, target_mode);
-                debug_assert!(res.is_ok());
+        // A BTI which has reached the end of its life has nothing left to release. While
+        // `BusTransactionInitiatorDispatcher` gates `zx_bti_release_quarantine` on
+        // `zero_handles`, keep this public driver method self-contained for direct callers.
+        let Some(smmu) = guard.smmu().clone() else {
+            return;
+        };
+        // Nor does one whose last handle has gone but which still has PMTs. For any direct
+        // call arriving after `on_dispatcher_zero_handles`, treat it as if it had never been
+        // made: an orphaned BTI's end of life is decided as its PMTs go, from the quarantine
+        // counts as they were when it was orphaned. Clearing them here could leave a BTI with
+        // no handles, no PMTs and nothing left to end its life.
+        if *pmt_guard.orphaned() {
+            return;
+        }
+        let op_mode = smmu.op_mode();
+        // The mode we will want to return to depends on the mode our SMMU is operating in.
+        let target_mode = match op_mode {
+            ArmSmmuMode::Passthru => BtiMode::Bypass,
+            ArmSmmuMode::Enforced => BtiMode::Translation,
+            ArmSmmuMode::Disabled => {
+                panic!("release_quarantine called when SMMU is Disabled");
             }
-
-            smmu
         };
 
-        // Re-enable our context bank interrupt if needed.
-        smmu.reenable_context_bank_irq(self);
+        // `on_end_of_life` shuts the BTI down before clearing `self.smmu`, so a direct call in
+        // that window can still see `Some(smmu)` with `BtiMode::Shutdown`.
+        let mode = *guard.mode();
+        if mode == BtiMode::Shutdown {
+            return;
+        }
+
+        // No one should be calling `release_quarantine` on us unless we are in one of
+        // the 3 operational states: Fault, Bypass, or Translation.
+        debug_assert!(
+            mode == BtiMode::Fault || mode == BtiMode::Bypass || mode == BtiMode::Translation
+        );
+
+        // `release_quarantine` should be idempotent. If we are already operating in
+        // Bypass or Translation, there is nothing to do: in particular nothing to do to
+        // our context bank's fault interrupt, or to whatever fault the bank has recorded
+        // that the interrupt handler has not yet serviced under our lock.
+        if mode == BtiMode::Fault {
+            // Reset our "quarantine" bookkeeping.
+            *pmt_guard.as_mut().quarantined_pmt_count_mut() = 0;
+            *pmt_guard.as_mut().quarantined_page_count_mut() = 0;
+
+            let res = self.set_mode_locked(&mut guard, target_mode);
+            debug_assert!(res.is_ok());
+
+            // Re-enable our context bank's fault interrupt, discarding what the bank
+            // recorded while we were in our fault state, under the same hold of our lock
+            // as the change of mode.
+            smmu.reenable_context_bank_irq_locked(self, &guard);
+        }
+
+        // The debug console can invalidate our stream match registers (`smmuv2 isids`), which
+        // takes our streams away without changing our mode. Releasing the quarantine is how
+        // user mode says it is in control of its hardware again, so give them back.
+        for smrg in guard.smrg_list().iter() {
+            smrg.revalidate();
+        }
     }
 
     /// Handles the owning `BusTransactionInitiatorDispatcher` reaching zero handles.
     pub fn on_dispatcher_zero_handles(&self) {
-        // Start by checking to see if we still have any PMTs, either active or
-        // quarantined. If we do, we cannot actually fully shut down yet. Instead,
-        // we have become "orphaned".
+        // Start by checking to see if we still have any PMTs keeping us alive (active PMTs, or
+        // quarantined PMTs in passthru mode). If we do, we cannot actually fully shut down yet.
+        // Instead, we have become "orphaned".
         //
         // If we still have active PMTs (nothing quarantined) we have to stick around,
         // allowing our HW to access the memory it has pinned until it formally unpins
@@ -712,7 +716,9 @@ impl SmmuBti {
         let (was_orphaned, quarantined_page_count, quarantined_pmt_count) = {
             ksync::lock!(let mut pmt_guard = self.lock_pmt_lock());
             ksync::lock!(let guard = self.lock_lock());
+            assert!(!*pmt_guard.zero_handles());
             debug_assert!(!*pmt_guard.orphaned());
+            *pmt_guard.as_mut().zero_handles_mut() = true;
 
             let q_pmt = *pmt_guard.quarantined_pmt_count();
             let q_page = *pmt_guard.quarantined_page_count();
@@ -736,30 +742,36 @@ impl SmmuBti {
             (orphaned, q_page, q_pmt)
         };
 
-        if !was_orphaned {
-            // If we were not orphaned, then we have no active PMTs and no quarantined
-            // PMTs, and user-mode no longer has any handles to us. We can now safely
-            // shut down and remove ourselves from our parent SMMU instance.
-            self.on_end_of_life();
-        } else {
-            // If we are now orphaned because we have quarantined PMTs, we need to log a
-            // DRIVER OOPS warning.
+        // If the last handle is gone while PMTs are still quarantined, user mode can no longer
+        // release the quarantine: log it. This is independent of whether we are orphaned. A BTI
+        // closed while it merely has pinned PMTs has leaked nothing (yet), and in Enforced mode a
+        // BTI with only quarantined PMTs is not orphaned but has still leaked them.
+        if quarantined_pmt_count != 0 {
             self.print_quarantine_warning(
                 BtiPageLeakReason::BtiOrphanedWithQuarantinedPmts,
                 quarantined_page_count,
                 quarantined_pmt_count as usize,
             );
         }
+
+        if !was_orphaned {
+            // If we were not orphaned, then nothing keeps us alive: we have no active PMTs, any
+            // quarantined ones do not need us (Enforced mode), and user-mode no longer has any
+            // handles to us. We can now safely shut down and remove ourselves from our parent
+            // SMMU instance.
+            self.on_end_of_life();
+        }
     }
 
     /// Conducts final cleanup when this BTI reaches the end of its life.
     ///
     /// There are two possible ways to get here:
-    /// 1) The final user-mode handle to the BTI is closed, and the BTI does not have any active or
-    ///    quarantined PMTs (`on_dispatcher_zero_handles`).
-    /// 2) The BTI is orphaned (its final handle was closed while it still held PMTs), however the
-    ///    final PMT has now been unpinned and its final handle closed, and there are no
-    ///    quarantined PMTs (`on_pmt_zero_handles`).
+    /// 1) The final user-mode handle to the BTI is closed (or its dispatcher could not be
+    ///    created), the BTI has no active PMTs, and either it has no quarantined PMTs or the SMMU
+    ///    is in `Enforced` mode (`on_dispatcher_zero_handles`).
+    /// 2) An orphaned BTI loses its last active PMT (whether already unpinned or leaked when its
+    ///    final handle closes), and either it has no quarantined PMTs or the SMMU is in `Enforced`
+    ///    mode (`on_pmt_zero_handles`).
     pub(crate) fn on_end_of_life(&self) {
         // We should never be calling `on_end_of_life` twice.
         let smmu = {
@@ -793,10 +805,17 @@ impl SmmuBti {
     }
 
     /// Returns the minimum contiguity guaranteed by this BTI.
+    ///
+    /// This and the other queries below can be called for a BTI which has reached the end of its
+    /// life: the dispatcher does not hold off `zx_object_get_info` while another thread closes
+    /// the last handle. Such a BTI guarantees nothing and maps nothing.
     pub fn minimum_contiguity(&self) -> u64 {
         let op_mode = {
             ksync::lock!(let guard = self.lock_lock());
-            guard.smmu().as_ref().expect("BTI must have SMMU").op_mode()
+            let Some(ref smmu) = *guard.smmu() else {
+                return PAGE_SIZE;
+            };
+            smmu.op_mode()
         };
         match op_mode {
             // If we are operating in passthru mode, then we are not actually doing any
@@ -811,8 +830,8 @@ impl SmmuBti {
 
             // It should be impossible for our SMMU to be in Disabled mode. If the
             // bootloaders configured the SMMUs to operate in Disabled mode, then we
-            // should never have created an `Smmu` instance, and therefore should not
-            // have been able to create any `SmmuBti` instances either (we should have
+            // should never have created an `SmmuV2` instance, and therefore should not
+            // have been able to create any `SmmuV2Bti` instances either (we should have
             // created a `StubIommu` instance instead).
             ArmSmmuMode::Disabled => {
                 debug_assert!(false);
@@ -825,7 +844,6 @@ impl SmmuBti {
     pub fn aspace_size(&self) -> u64 {
         ksync::lock!(let guard = self.lock_lock());
         let Some(ref smmu) = *guard.smmu() else {
-            debug_assert!(false);
             return 0;
         };
         match smmu.op_mode() {
@@ -836,9 +854,8 @@ impl SmmuBti {
 
             // If we are operating in fully-enforced mode, then the address space that
             // initiator HW sees depends on this BTI's context bank's configuration.
-            ArmSmmuMode::Enforced => {
-                guard.context_bank().as_ref().expect("Enforced BTI must have CB").aspace_size()
-            }
+            // The context bank goes before the SMMU reference does as a BTI is shut down.
+            ArmSmmuMode::Enforced => guard.context_bank().as_ref().map_or(0, |cb| cb.aspace_size()),
 
             // See above, it should be impossible to get here.
             ArmSmmuMode::Disabled => {
@@ -863,10 +880,14 @@ impl SmmuBti {
     /// Returns whether this BTI is currently in `BtiMode::Fault`.
     pub fn in_fault_state(&self) -> bool {
         ksync::lock!(let guard = self.lock_lock());
-        // It should not be possible to get here unless we are in an operational state.
+        // It should not be possible to get here unless we are in an operational state, or have
+        // reached the end of our life.
         let mode = *guard.mode();
         debug_assert!(
-            mode == BtiMode::Fault || mode == BtiMode::Bypass || mode == BtiMode::Translation
+            mode == BtiMode::Fault
+                || mode == BtiMode::Bypass
+                || mode == BtiMode::Translation
+                || mode == BtiMode::Shutdown
         );
         mode == BtiMode::Fault
     }
@@ -888,7 +909,7 @@ impl SmmuBti {
     }
 
     /// Shuts down this BTI's hardware resources and returns its SMRGs and ContextBank to the SMMU.
-    pub(crate) fn shutdown(&self, smmu_guard: &mut Pin<&mut SmmuLockGuard<'_>>) {
+    pub(crate) fn shutdown(&self, smmu_guard: &mut Pin<&mut SmmuV2LockGuard<'_>>) {
         pin_init::stack_pin_init!(
             let local_smrgs = DoublyLinkedList::<
                 UniquePtr<StreamMatchRegGroup>,
@@ -922,15 +943,27 @@ impl SmmuBti {
                     // At this point in time, we should be certain that we no longer have any
                     // registered context bank IRQs, and that there are not any context bank
                     // interrupts in flight targeting this BTI. This was taken care of for us by
-                    // our SMMU instance during `Smmu::shutdown_bti`.
+                    // our SMMU instance during `SmmuV2::shutdown_bti`.
                     debug_assert!(!smmu_guard.available_cbs().test_bit(cb.cb_ndx()));
                     smmu_guard.as_mut().available_cbs_mut().set_bit(cb.cb_ndx());
                 }
 
-                // If we are shutting down, we should not have any active or quarantined PMTs left.
+                // If we are shutting down, we should not have any active PMTs left. Nor any
+                // quarantined ones, except in Enforced mode: there a quarantined PMT's mapping
+                // is already gone, it does not keep us alive, and the last handle can be closed
+                // with the quarantine never released.
                 debug_assert!(pmt_guard.active_pmt_list().is_empty());
-                debug_assert_eq!(*pmt_guard.quarantined_pmt_count(), 0);
-                debug_assert_eq!(*pmt_guard.quarantined_page_count(), 0);
+                debug_assert!(
+                    *pmt_guard.quarantined_pmt_count() == 0
+                        || guard
+                            .smmu()
+                            .as_ref()
+                            .is_some_and(|smmu| smmu.op_mode() == ArmSmmuMode::Enforced)
+                );
+                debug_assert_eq!(
+                    *pmt_guard.quarantined_pmt_count() == 0,
+                    *pmt_guard.quarantined_page_count() == 0
+                );
 
                 // Move our resources outside of our spinlock's scope so that they can
                 // return to the heap after the lock has been dropped.
@@ -984,7 +1017,7 @@ impl SmmuBti {
     /// Adds a `StreamMatchRegGroup` to this BTI under `smmu_guard`.
     pub(crate) fn add_smrg(
         &self,
-        smmu_guard: &mut Pin<&mut SmmuLockGuard<'_>>,
+        smmu_guard: &mut Pin<&mut SmmuV2LockGuard<'_>>,
         smrg: UniquePtr<StreamMatchRegGroup>,
     ) {
         ksync::lock!(let mut guard = self.lock_lock());
@@ -994,8 +1027,8 @@ impl SmmuBti {
     /// Adds a `StreamMatchRegGroup` to this BTI under both `smmu_guard` and `guard`.
     pub(crate) fn add_smrg_locked(
         &self,
-        smmu_guard: &mut Pin<&mut SmmuLockGuard<'_>>,
-        guard: &mut Pin<&mut SmmuBtiLockGuard<'_>>,
+        smmu_guard: &mut Pin<&mut SmmuV2LockGuard<'_>>,
+        guard: &mut Pin<&mut SmmuV2BtiLockGuard<'_>>,
         smrg: UniquePtr<StreamMatchRegGroup>,
     ) {
         // Currently, there are only three places that we ever add an SMRG to a BTI:
@@ -1045,7 +1078,7 @@ impl SmmuBti {
     /// Sets the operating mode of this BTI and its owned hardware blocks.
     pub(crate) fn set_mode_locked(
         &self,
-        guard: &mut Pin<&mut SmmuBtiLockGuard<'_>>,
+        guard: &mut Pin<&mut SmmuV2BtiLockGuard<'_>>,
         target_mode: BtiMode,
     ) -> Result<(), Status> {
         // Are we already there?
@@ -1107,7 +1140,7 @@ impl SmmuBti {
     }
 
     /// Handles a context bank fault interrupt under `guard`.
-    pub(crate) fn handle_fault_locked(&self, guard: &mut Pin<&mut SmmuBtiLockGuard<'_>>) {
+    pub(crate) fn handle_fault_locked(&self, guard: &mut Pin<&mut SmmuV2BtiLockGuard<'_>>) {
         // TODO(johngro): Currently, the only thing for us to do here is to enter
         // "Fault" mode. Some day, we'd like to define a signal that we can raise on
         // our BTI object so that user-mode is aware that this has happened. See the
@@ -1128,7 +1161,8 @@ impl SmmuBti {
                 let smmu_name = guard.smmu().as_ref().expect("checked above").name();
                 dprintf!(
                     INFO,
-                    "{}: WARNING - Context fault received, but BTI has no associated context bank.\n",
+                    "{}: WARNING - Context fault received, but BTI has no associated context \
+                     bank.\n",
                     smmu_name
                 );
             }
@@ -1140,7 +1174,8 @@ impl SmmuBti {
             if let Err(err) = res {
                 dprintf!(
                     INFO,
-                    "{}: WARNING - Failed to place BTI controlling StreamID(s) [{}] into fault mode (err {}).\n",
+                    "{}: WARNING - Failed to place BTI controlling StreamID(s) [{}] into fault \
+                     mode (err {}).\n",
                     smmu_name,
                     sid_str,
                     err.into_raw()
@@ -1158,7 +1193,7 @@ impl SmmuBti {
 
     /// Returns the context bank index under `guard` (or `u32::MAX` if none).
     #[inline]
-    pub(crate) fn cb_ndx_locked(guard: &SmmuBtiLockGuard<'_>) -> u32 {
+    pub(crate) fn cb_ndx_locked(guard: &SmmuV2BtiLockGuard<'_>) -> u32 {
         guard.context_bank().as_ref().map_or(u32::MAX, |cb| cb.cb_ndx())
     }
 
@@ -1169,7 +1204,7 @@ impl SmmuBti {
         Self::cb_ndx_locked(&guard)
     }
 
-    /// Invalidates all SMRGs on this BTI (used by debug console `smmu isids`).
+    /// Invalidates all SMRGs on this BTI (used by debug console `smmuv2 isids`).
     pub(crate) fn invalidate_sids(&self) -> Result<(), Status> {
         ksync::lock!(let guard = self.lock_lock());
         // Adopted and Shutdown BTIs can never invalidate their Stream IDs.
@@ -1184,17 +1219,16 @@ impl SmmuBti {
 
     /// Renders the space-separated list of 16-bit Stream IDs matched by this BTI into `buffer`.
     pub(crate) fn render_sid_list_locked<'a>(
-        guard: &SmmuBtiLockGuard<'_>,
+        guard: &SmmuV2BtiLockGuard<'_>,
         buffer: &'a mut [u8],
     ) -> &'a str {
         // Stop accumulating characters and automatically truncate the string if we run out of room
         // in `buffer`.
         //
-        // Temporary porting note: the C++ `RenderSidList` printed into a `StringFile`, which cut
-        // the text off mid-entry once the buffer was full, and it kept iterating over every
-        // remaining Stream ID (up to 32768 of them for a fully wildcarded mask, with the BTI
-        // spinlock held, at interrupt time when called from the fault handler). Here the list
-        // ends with the last whole entry which fits, and the loops stop there.
+        // The list ends with the last whole entry which fits, and the loops stop there. A fully
+        // wildcarded mask matches up to 32768 Stream IDs, and we can be called from the fault
+        // handler, at interrupt time with the BTI spinlock held, so we do not iterate over
+        // entries which cannot be shown.
         let mut pos = 0usize;
         let mut first = true;
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -1222,13 +1256,13 @@ impl SmmuBti {
         core::str::from_utf8(&buffer[..pos]).unwrap_or("")
     }
 
-    /// Handles explicit `SmmuPmt::unpin` (`ReleasePinnedMemory`) of a child PMT.
+    /// Handles explicit `SmmuV2Pmt::unpin` of a child PMT.
     ///
     /// # Safety
     ///
     /// `pmt` must be owned by `self`.
-    pub(crate) unsafe fn on_pmt_unpin(&self, pmt: &SmmuPmt) {
-        let mut removed_pmt: Option<RefPtr<SmmuPmt>> = None;
+    pub(crate) unsafe fn on_pmt_unpin(&self, pmt: &SmmuV2Pmt) {
+        let mut removed_pmt: Option<RefPtr<SmmuV2Pmt>> = None;
 
         // If there is still a PMO to unpin, move it outside of the scope of the lock
         // before doing so.
@@ -1237,11 +1271,13 @@ impl SmmuBti {
             // the device's address space (as would be the case if this BTI is operating
             // in passthru mode), then this will be a no-op.
             ksync::lock!(let mut pmt_guard = self.lock_pmt_lock());
-            let mapping =
-                // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
-                // `self.pmt_lock`.
-                unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }.map_location_mut().take();
-            self.release_mapping_locked(&mut pmt_guard, mapping);
+            // The mapping goes first. Only what comes back from `unmap` can be released.
+            // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
+            // `self.pmt_lock`.
+            let pin =
+                unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }.pin_mut().take();
+            let unmapped =
+                pin.unmap(|mapping| self.release_mapping_locked(&mut pmt_guard, Some(mapping)));
 
             ksync::lock!(let _guard = self.lock_lock());
             // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
@@ -1258,21 +1294,13 @@ impl SmmuBti {
                     SmmuPmtState::Released;
             } else {
                 debug_assert!(!pmt.in_container());
-                // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
-                // `self.pmt_lock`.
-                debug_assert!(
-                    !unsafe { pmt.guard_pmt_lock(pmt_guard.token()) }.pinned_vmo().has_vmo()
-                );
+                debug_assert!(!unmapped.has_vmo());
             }
 
-            // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
-            // `self.pmt_lock`.
-            unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }
-                .pinned_vmo_mut()
-                .take()
+            unmapped.into_vmo()
         };
 
-        // Drop the list's `RefPtr<SmmuPmt>` outside `pmt_lock` and `lock` so that if it was the
+        // Drop the list's `RefPtr<SmmuV2Pmt>` outside `pmt_lock` and `lock` so that if it was the
         // last reference to `pmt`, we do not interact with the heap while a spinlock is held.
         drop(removed_pmt);
 
@@ -1281,31 +1309,30 @@ impl SmmuBti {
         released_vmo.reset();
     }
 
-    /// Handles `SmmuPmt::on_zero_handles` (`OnDispatcherZeroHandles`) when a PMT's dispatcher
-    /// reaches zero user handles.
+    /// Handles `SmmuV2Pmt::on_zero_handles` when a PMT's dispatcher reaches zero user handles.
     ///
     /// # Safety
     ///
     /// `pmt` must be owned by `self`.
-    pub(crate) unsafe fn on_pmt_zero_handles(&self, pmt: &SmmuPmt) {
-        let mut quarantined_page_count: u64 = 0;
-        let mut quarantined_pmt_count: u64 = 0;
-        let has_active_pmts: bool;
+    pub(crate) unsafe fn on_pmt_zero_handles(&self, pmt: &SmmuV2Pmt) {
+        let quarantined_page_count: u64;
+        let quarantined_pmt_count: u64;
         let was_orphaned: bool;
-        // `None` once this BTI has reached end of life (see below).
-        let op_mode: Option<ArmSmmuMode>;
-        let mut removed_pmt: Option<RefPtr<SmmuPmt>> = None;
+        let reached_end_of_life: bool;
+        let mut removed_pmt: Option<RefPtr<SmmuV2Pmt>> = None;
 
         // If there is still a PMO to unpin, move it outside of the scope of the lock
         // before doing so.
         let mut quarantined_vmo = {
             // Release the mapping for this PMT, if any.
             ksync::lock!(let mut pmt_guard = self.lock_pmt_lock());
-            let mapping =
-                // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
-                // `self.pmt_lock`.
-                unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }.map_location_mut().take();
-            self.release_mapping_locked(&mut pmt_guard, mapping);
+            // The mapping goes first. Only what comes back from `unmap` can be released.
+            // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
+            // `self.pmt_lock`.
+            let pin =
+                unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }.pin_mut().take();
+            let unmapped =
+                pin.unmap(|mapping| self.release_mapping_locked(&mut pmt_guard, Some(mapping)));
 
             ksync::lock!(let mut guard = self.lock_lock());
             // Our SMMU reference is cleared by `on_end_of_life`. A PMT which was explicitly
@@ -1313,7 +1340,8 @@ impl SmmuBti {
             // point: `zx_pmt_unpin` unpins first and only then drops the handle, and the last BTI
             // handle can be closed in between. So do not demand an SMMU here; the operating mode
             // is only consulted below when deciding whether an orphaned BTI can shut down.
-            op_mode = guard.smmu().as_ref().map(|smmu| smmu.op_mode());
+            // `None` once this BTI has reached end of life.
+            let op_mode = guard.smmu().as_ref().map(|smmu| smmu.op_mode());
 
             // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
             // `self.pmt_lock`.
@@ -1342,27 +1370,33 @@ impl SmmuBti {
                 let pmt_pages = pmt.pages(pmt_guard.token());
                 *pmt_guard.as_mut().quarantined_page_count_mut() += pmt_pages;
                 *pmt_guard.as_mut().quarantined_pmt_count_mut() += 1;
-                quarantined_page_count = *pmt_guard.quarantined_page_count();
-                quarantined_pmt_count = *pmt_guard.quarantined_pmt_count();
             } else {
                 // If this PMT was not active, then it should be in the Released state and
                 // not on the active list.
                 debug_assert_eq!(state, SmmuPmtState::Released);
                 debug_assert!(!pmt.in_container());
-                // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
-                // `self.pmt_lock`.
-                debug_assert!(
-                    !unsafe { pmt.guard_pmt_lock(pmt_guard.token()) }.pinned_vmo().has_vmo()
-                );
+                debug_assert!(!unmapped.has_vmo());
             }
 
-            has_active_pmts = !pmt_guard.active_pmt_list().is_empty();
+            // The BTI's totals, whichever state this PMT was in: PMTs quarantined earlier
+            // count towards the decision below even when this one was properly unpinned.
+            quarantined_page_count = *pmt_guard.quarantined_page_count();
+            quarantined_pmt_count = *pmt_guard.quarantined_pmt_count();
+            debug_assert_eq!(quarantined_page_count == 0, quarantined_pmt_count == 0);
+
+            // If we were orphaned, and this was the last active PMT, and we either have no
+            // quarantined PMTs or are operating in Enforced mode, then we have reached end of
+            // life. Decide it here, under the lock, and stop being orphaned as we do: other PMTs
+            // of ours (already unpinned) may have their last handles closed concurrently or
+            // later, and must not decide it a second time.
             was_orphaned = *pmt_guard.orphaned();
-            // SAFETY: The caller promises that `self` owns `pmt`, and `pmt_guard` holds
-            // `self.pmt_lock`.
-            unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) }
-                .pinned_vmo_mut()
-                .take()
+            reached_end_of_life = was_orphaned
+                && pmt_guard.active_pmt_list().is_empty()
+                && (quarantined_pmt_count == 0 || op_mode == Some(ArmSmmuMode::Enforced));
+            if reached_end_of_life {
+                *pmt_guard.as_mut().orphaned_mut() = false;
+            }
+            unmapped.into_vmo()
         };
 
         drop(removed_pmt);
@@ -1371,9 +1405,7 @@ impl SmmuBti {
         // tasks:
         //
         // 1) If this PMT was leaked, we need to log a warning.
-        // 2) If we were orphaned, and this was the last active PMT, and we either
-        //    have no quarantined PMTs, or are operating in Enforced mode, then we
-        //    have reached end of life and can clean up now.
+        // 2) If we reached end of life (decided above), we can clean up now.
         // 3) If we quarantined a pinned memory object, we can now return its pages to
         //    the PMM. We don't need to actually keep it around, since we have either
         //    revoked access to that specific region of memory (if we are in enforced
@@ -1395,532 +1427,11 @@ impl SmmuBti {
         }
 
         // #2 : Shutdown if it is time.
-        debug_assert_eq!(quarantined_page_count == 0, quarantined_pmt_count == 0);
-        if was_orphaned
-            && !has_active_pmts
-            && (quarantined_pmt_count == 0 || op_mode == Some(ArmSmmuMode::Enforced))
-        {
+        if reached_end_of_life {
             self.on_end_of_life();
         }
 
         // #3 : Release our VMO (if any).
         quarantined_vmo.reset();
-    }
-}
-
-impl SmmuBti {
-    /// Prints diagnostic details of this BTI for `smmu show`.
-    pub(crate) fn cmd_show(&self, ilvl: usize, show_pmts: bool, verbose: bool) {
-        ksync::lock!(let pmt_guard = self.lock_pmt_lock());
-        ksync::lock!(let guard = self.lock_lock());
-
-        let indent0 = ilvl * 2;
-        let indent1 = (ilvl + 1) * 2;
-        let indent2 = (ilvl + 2) * 2;
-
-        dprintf!(
-            INFO,
-            "{:indent0$}Mode              : {}{}\n",
-            "",
-            bti_mode_to_string(*guard.mode()),
-            if *pmt_guard.orphaned() { " (orphaned)" } else { "" },
-            indent0 = indent0
-        );
-        let bti_name = Self::name_display(guard.name());
-        dprintf!(INFO, "{:indent0$}Name              : {}\n", "", bti_name, indent0 = indent0);
-
-        let mut sid_buf = [0u8; 128];
-        let sid_str = Self::render_sid_list_locked(&guard, &mut sid_buf);
-        dprintf!(INFO, "{:indent0$}StreamIDs         : {}\n", "", sid_str, indent0 = indent0);
-        dprintf!(
-            INFO,
-            "{:indent0$}Active PMTs       : {}\n",
-            "",
-            pmt_guard.active_pmt_list().len(),
-            indent0 = indent0
-        );
-        dprintf!(
-            INFO,
-            "{:indent0$}Quarantined PMTs  : {}\n",
-            "",
-            *pmt_guard.quarantined_pmt_count(),
-            indent0 = indent0
-        );
-        dprintf!(
-            INFO,
-            "{:indent0$}Quarantined Pages : {}\n",
-            "",
-            *pmt_guard.quarantined_page_count(),
-            indent0 = indent0
-        );
-        if let Some(ref aspace) = *pmt_guard.aspace() {
-            dprintf!(
-                INFO,
-                "{:indent0$}TLB Pages         : {}\n",
-                "",
-                aspace.page_cache().in_flight_pages(),
-                indent0 = indent0
-            );
-            dprintf!(
-                INFO,
-                "{:indent0$}Cached TLB Pages  : {}\n",
-                "",
-                aspace.page_cache().cache_entries(),
-                indent0 = indent0
-            );
-        }
-
-        if show_pmts && *guard.mode() == BtiMode::Translation {
-            let mut page_total = 0u64;
-            let token = pmt_guard.token();
-
-            for (ndx, pmt) in pmt_guard.active_pmt_list().iter().enumerate() {
-                // SAFETY: `pmt` is on this BTI's active list, so `self` owns it, and `pmt_guard`
-                // holds `self.pmt_lock`.
-                if let Some(ref loc) = *unsafe { pmt.guard_pmt_lock(token) }.map_location() {
-                    let base = loc.base();
-                    let size = loc.size();
-                    let page_size = size >> PAGE_SHIFT;
-                    dprintf!(
-                        INFO,
-                        "{:indent1$}PMT[{:3}] : [{:#x}, {:#x}] ({} Page{})\n",
-                        "",
-                        ndx,
-                        base,
-                        base + size - 1,
-                        page_size,
-                        if page_size == 1 { "" } else { "s" },
-                        indent1 = indent1
-                    );
-                    page_total += page_size;
-                } else {
-                    // If we have an active PMT in a BTI operating in translation mode, we
-                    // may not have our `map_location` any more because someone used the debug
-                    // console to force-drop our mapping with the `lock` command.
-                    dprintf!(INFO, "{:indent1$}PMT[{:3}] : ???\n", "", ndx, indent1 = indent1);
-                }
-            }
-            dprintf!(
-                INFO,
-                "{:indent1$}Counted {} mapped page{}.\n",
-                "",
-                page_total,
-                if page_total == 1 { "" } else { "s" },
-                indent1 = indent1
-            );
-        }
-
-        let smrg_count = guard.smrg_list().len();
-        let mut smrg_num = 0u32;
-        for smrg in guard.smrg_list().iter() {
-            smrg_num += 1;
-            dprintf!(
-                INFO,
-                "\n{:indent0$}SMRG {}/{} (index {})\n",
-                "",
-                smrg_num,
-                smrg_count,
-                smrg.smrg_ndx(),
-                indent0 = indent0
-            );
-            dprintf!(
-                INFO,
-                "{:indent1$}Mode  : {}\n",
-                "",
-                arm_s2cr_type_to_string(smrg.mode()),
-                indent1 = indent1
-            );
-            dprintf!(
-                INFO,
-                "{:indent1$}Mask  : {:#06x}\n",
-                "",
-                smrg.stream_ids().mask(),
-                indent1 = indent1
-            );
-            dprintf!(
-                INFO,
-                "{:indent1$}ID    : {:#06x}\n",
-                "",
-                smrg.stream_ids().id(),
-                indent1 = indent1
-            );
-            dprintf!(INFO, "{:indent1$}CBNdx : {:#06x}\n", "", smrg.cb_ndx(), indent1 = indent1);
-
-            if verbose {
-                let gr0_base = smrg.gr0_base();
-                let ndx = smrg.smrg_ndx();
-                let smr_reg = Smr::read_at(&gr0_base, ndx);
-                dump_reg(
-                    "SMR",
-                    smr_reg.reg_value() as u64,
-                    4,
-                    Smr::offset(ndx),
-                    Smr::FIELDS,
-                    &gr0_base,
-                    ilvl + 2,
-                );
-                let s2cr_reg = S2cr::read_at(&gr0_base, ndx);
-                // Format `"S2CR (<mode>)"` using `arm_s2cr_type_to_string(smrg.mode())`
-                // (`"Translation"`, `"Bypass"`, `"Fault"`, `"Invalid"`).
-                let (s2cr_tag, fields) = match smrg.mode() {
-                    S2crType::Translation => ("S2CR (Translation)", S2crTranslation::FIELDS),
-                    S2crType::Bypass => ("S2CR (Bypass)", S2crBypass::FIELDS),
-                    S2crType::Fault => ("S2CR (Fault)", S2crFault::FIELDS),
-                    S2crType::Invalid => ("S2CR (Invalid)", S2cr::FIELDS),
-                };
-                dump_reg(
-                    s2cr_tag,
-                    s2cr_reg.reg_value() as u64,
-                    4,
-                    S2cr::offset(ndx),
-                    fields,
-                    &gr0_base,
-                    ilvl + 2,
-                );
-            }
-        }
-
-        if let Some(ref cb) = *guard.context_bank() {
-            let gr1_base = cb.gr1_base();
-            let cb_base = cb.cb_base();
-            let cb_ndx = cb.cb_ndx();
-            let cbar = Cbar::read_at(&gr1_base, cb_ndx);
-            let sctlr = Sctlr::read_from(&cb_base);
-            let irq_num =
-                guard.smmu().as_ref().and_then(|s| s.get_context_irq(cb_ndx)).map_or(0, |d| d.num);
-
-            dprintf!(INFO, "\n{:indent0$}Context Bank (index {})\n", "", cb_ndx, indent0 = indent0);
-            dprintf!(
-                INFO,
-                "{:indent1$}Mode      : {}\n",
-                "",
-                bti_mode_to_string(cb.mode()),
-                indent1 = indent1
-            );
-            dprintf!(INFO, "{:indent1$}IRQ       : {}\n", "", irq_num, indent1 = indent1);
-            dprintf!(
-                INFO,
-                "{:indent1$}AddrMode  : {}\n",
-                "",
-                addr_mode_to_string(cb.addr_mode()),
-                indent1 = indent1
-            );
-            dprintf!(
-                INFO,
-                "{:indent1$}CBAR Type : {}\n",
-                "",
-                arm_cbar_type_to_string(cbar.cbar_type()),
-                indent1 = indent1
-            );
-            dprintf!(
-                INFO,
-                "{:indent1$}MMU State : {}\n",
-                "",
-                if sctlr.m() != 0 { "Enabled" } else { "Disabled" },
-                indent1 = indent1
-            );
-
-            for (i, ttbr) in cb.ttbrs().iter().enumerate() {
-                dprintf!(
-                    INFO,
-                    "{:indent1$}TTBR[{}]   : {}\n",
-                    "",
-                    i,
-                    if ttbr.enabled { "Enabled" } else { "Disabled" },
-                    indent1 = indent1
-                );
-                if ttbr.enabled {
-                    dprintf!(
-                        INFO,
-                        "{:indent2$}Granule Size : {}\n",
-                        "",
-                        ttbr.granule_size_bits,
-                        indent2 = indent2
-                    );
-                    dprintf!(
-                        INFO,
-                        "{:indent2$}First Valid  : {:#018x}\n",
-                        "",
-                        ttbr.first_valid_addr,
-                        indent2 = indent2
-                    );
-                    dprintf!(
-                        INFO,
-                        "{:indent2$}Last Valid   : {:#018x}\n",
-                        "",
-                        ttbr.last_valid_addr,
-                        indent2 = indent2
-                    );
-                    dprintf!(
-                        INFO,
-                        "{:indent2$}Phys Addr    : {:#018x}\n",
-                        "",
-                        ttbr.ttbr_paddr,
-                        indent2 = indent2
-                    );
-                }
-
-                // TODO(johngro): If we are in translation mode, walk the translation table
-                // and print the active mappings.
-            }
-
-            if verbose {
-                let (cbar_tag, cbar_fields) = match cbar.cbar_type() {
-                    CbarType::S2Translation => ("CBAR (S2Translate)", CbarS2Translation::FIELDS),
-                    CbarType::S1TS2Bypass => ("CBAR (S1TS2Bypass)", CbarS1TS2Bypass::FIELDS),
-                    CbarType::S1TS2Fault => ("CBAR (S1TS2Fault)", CbarS1TS2Fault::FIELDS),
-                    CbarType::S1TS2Translate => {
-                        ("CBAR (S1TS2Translate)", CbarS1TS2Translate::FIELDS)
-                    }
-                };
-                dump_reg(
-                    cbar_tag,
-                    cbar.reg_value() as u64,
-                    4,
-                    Cbar::offset(cb_ndx),
-                    cbar_fields,
-                    &gr1_base,
-                    ilvl + 2,
-                );
-                let cba2r = Cba2r::read_at(&gr1_base, cb_ndx);
-                dump_reg(
-                    "CBA2R",
-                    cba2r.reg_value() as u64,
-                    4,
-                    Cba2r::offset(cb_ndx),
-                    Cba2r::FIELDS,
-                    &gr1_base,
-                    ilvl + 2,
-                );
-                dump_reg(
-                    "SCTLR",
-                    sctlr.reg_value() as u64,
-                    4,
-                    Sctlr::OFFSET,
-                    Sctlr::FIELDS,
-                    &cb_base,
-                    ilvl + 2,
-                );
-                match cb.addr_mode() {
-                    AddrMode::Mode32Bit => {
-                        dump_reg(
-                            "TTBR0 (32)",
-                            Ttbr0_32Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Ttbr0_32Bit::OFFSET,
-                            Ttbr0_32Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                        dump_reg(
-                            "TTBR1 (32)",
-                            Ttbr1_32Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Ttbr1_32Bit::OFFSET,
-                            Ttbr1_32Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                        dump_reg(
-                            "TCR (32)",
-                            Tcr32Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Tcr32Bit::OFFSET,
-                            Tcr32Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                    }
-                    AddrMode::Ext32Bit => {
-                        dump_reg(
-                            "TTBR0 (E32)",
-                            Ttbr0Ext32Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr0Ext32Bit::OFFSET,
-                            Ttbr0Ext32Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                        dump_reg(
-                            "TTBR1 (E32)",
-                            Ttbr1Ext32Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr1Ext32Bit::OFFSET,
-                            Ttbr1Ext32Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                        dump_reg(
-                            "TCR (E32)",
-                            TcrExt32Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            TcrExt32Bit::OFFSET,
-                            TcrExt32Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                    }
-                    AddrMode::Mode64Bit => {
-                        dump_reg(
-                            "TTBR0 (64)",
-                            Ttbr0_64Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr0_64Bit::OFFSET,
-                            Ttbr0_64Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                        dump_reg(
-                            "TTBR1 (64)",
-                            Ttbr1_64Bit::read_from(&cb_base).reg_value(),
-                            8,
-                            Ttbr1_64Bit::OFFSET,
-                            Ttbr1_64Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                        dump_reg(
-                            "TCR (64)",
-                            Tcr64Bit::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Tcr64Bit::OFFSET,
-                            Tcr64Bit::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                    }
-                    AddrMode::Invalid => {
-                        dump_reg(
-                            "TCR",
-                            Tcr::read_from(&cb_base).reg_value() as u64,
-                            4,
-                            Tcr::OFFSET,
-                            Tcr::FIELDS,
-                            &cb_base,
-                            ilvl + 2,
-                        );
-                    }
-                }
-                dump_reg(
-                    "TCR2",
-                    Tcr2::read_from(&cb_base).reg_value() as u64,
-                    4,
-                    Tcr2::OFFSET,
-                    Tcr2::FIELDS,
-                    &cb_base,
-                    ilvl + 2,
-                );
-            }
-        }
-    }
-
-    /// Locks down this BTI for the debug console `smmu lock` command.
-    pub(crate) fn cmd_lock(&self, ndx: u32) {
-        let (bti_name_buf, smmu) = {
-            ksync::lock!(let guard = self.lock_lock());
-            (*guard.name(), guard.smmu().as_ref().expect("BTI must have SMMU").clone())
-        };
-        let bti_name = Self::name_display(&bti_name_buf);
-
-        // We are going to do one of two things, depending on whether we are in
-        // Enforced mode, or in Passthru mode. If we are in enforced mode, we are
-        // going to simply go through our list of active PMTs, and remove all of
-        // their mappings from the page tables. This does not actually "lock" the
-        // BTI, it just makes existing pinned memory inaccessible (assuming that
-        // there is any).
-        //
-        // When we are in passthru mode, we just force the BTI (and its associated
-        // context bank) into Fault mode, meaning that the MMU will be enabled, but
-        // the TTBRs will be disabled, causing every translation request to fail
-        // instead of passing through.
-        if smmu.op_mode() == ArmSmmuMode::Enforced {
-            ksync::lock!(let mut pmt_guard = self.lock_pmt_lock());
-            // Go through this BTI's PMTs and release any mappings back to the BTI's
-            // address space. Don't actually release the pinned memory yet; we are
-            // only trying to force some faults.
-            let mut released = 0usize;
-            let mut maybe_pmt_ptr: Option<*const SmmuPmt> =
-                pmt_guard.active_pmt_list().front().map(|p| p as *const SmmuPmt);
-            while let Some(pmt_ptr) = maybe_pmt_ptr {
-                // In general, we should be able to assert that all active PMTs have a
-                // mapping during normal operation. However, it is possible that someone
-                // has run this command twice and the mappings were already released. To
-                // keep our reporting consistent, make sure to only count mappings we
-                // actually released.
-                let (maybe_mapping, next_ptr) = {
-                    // SAFETY: `pmt_ptr` points to an active PMT in `active_pmt_list`, and
-                    // `pmt_lock` is held across the dereference (and `release_mapping_locked`
-                    // does not unlink nodes from `active_pmt_list`).
-                    let pmt = unsafe { &*pmt_ptr };
-                    let next_ptr = {
-                        // SAFETY: `active_pmt_list` is not moved, and `pmt` is an element of
-                        // `active_pmt_list`.
-                        let mut cursor =
-                            unsafe { pmt_guard.as_mut().active_pmt_list_mut().cursor_at(pmt) };
-                        cursor.move_next();
-                        cursor.get().map(|next| next as *const SmmuPmt)
-                    };
-                    let token = pmt_guard.as_mut().token_mut();
-                    // SAFETY: `pmt` is on this BTI's active list, so `self` owns it, and
-                    // `pmt_guard` holds `self.pmt_lock`.
-                    let maybe_mapping =
-                        unsafe { pmt.guard_pmt_lock_mut(token) }.map_location_mut().take();
-                    (maybe_mapping, next_ptr)
-                };
-                if let Some(mapping) = maybe_mapping {
-                    self.release_mapping_locked(&mut pmt_guard, Some(mapping));
-                    released += 1;
-                }
-                maybe_pmt_ptr = next_ptr;
-            }
-            dprintf!(
-                INFO,
-                "{}: BTI index #{} (\"{}\") released {} active mapping{}.\n",
-                smmu.name(),
-                ndx,
-                bti_name,
-                released,
-                if released == 1 { "" } else { "s" }
-            );
-        } else {
-            ksync::lock!(let mut guard = self.lock_lock());
-            // If the SMMU is not operating in Enforced mode, it must be in passthru
-            // mode (if it was in disabled mode, there would be no constructed `SmmuBti`
-            // objects).
-            debug_assert_eq!(smmu.op_mode(), ArmSmmuMode::Passthru);
-
-            // Force the BTI into fault mode. This will lock things down if we
-            // are in passthru mode, and prevent new PMTs from being created moving
-            // forward.
-            let res = self.set_mode_locked(&mut guard, BtiMode::Fault);
-            match res {
-                Ok(()) => {
-                    // We are forcing our BTI into fault mode from the debug console as opposed
-                    // to in reaction to an interrupt. Re-enable the context fault interrupt,
-                    // so that the console user can see a fault exception during the next access
-                    // in response to the lockdown command issued from the console.
-                    if let Some(ref mut cb) = *guard.as_mut().context_bank_mut() {
-                        cb.enable_fault_interrupt();
-                    }
-                    dprintf!(
-                        INFO,
-                        "{}: BTI index #{} (\"{}\") set to mode FAULT.\n",
-                        smmu.name(),
-                        ndx,
-                        bti_name
-                    );
-                }
-                Err(status) => {
-                    dprintf!(
-                        INFO,
-                        "{}: Failed to set BTI index #{} (\"{}\") to mode FAULT (err {}).\n",
-                        smmu.name(),
-                        ndx,
-                        bti_name,
-                        status.into_raw()
-                    );
-                }
-            }
-        }
     }
 }

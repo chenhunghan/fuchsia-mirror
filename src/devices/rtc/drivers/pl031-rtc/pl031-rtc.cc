@@ -10,7 +10,7 @@
 #include <lib/zx/result.h>
 #include <zircon/status.h>
 
-#include "src/devices/rtc/lib/rtc/include/librtc_llcpp.h"
+#include "src/devices/rtc/lib/rtc/include/librtc_wire.h"
 
 namespace rtc {
 

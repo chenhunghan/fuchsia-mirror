@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <phys/boot-shim/devicetree.h>
+#include <phys/linuxboot-runtime/devicetree.h>
 
 #include "linux-boot-config.h"
 

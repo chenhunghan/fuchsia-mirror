@@ -6,6 +6,7 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/cpp:hlcpp_visibility.bzl", "get_hlcpp_visibility")
 
 visibility("private")
 
@@ -388,8 +389,7 @@ def fidl_cpp_family(
             testonly = testonly,
         )
 
-        # TODO(https://fxbug.dev/454977301): Implement `hlcpp_visibility`.
-        hlcpp_visibility = visibility
+        hlcpp_target_visibility = get_hlcpp_visibility(visibility, testonly)
 
         _fidl_cc_library(
             name = hlcpp_lib_name,
@@ -400,14 +400,22 @@ def fidl_cpp_family(
             srcs = [":%s" % hlcpp_sources_name],
             additional_deps = additional_deps,
             testonly = testonly,
-            visibility = hlcpp_visibility,
+            visibility = hlcpp_target_visibility,
         )
 
         if define_idk_atom_aliases:
+            if Label("//visibility:public") in hlcpp_target_visibility:
+                idk_alias_visibility = hlcpp_target_visibility
+            else:
+                idk_alias_visibility = [v for v in hlcpp_target_visibility if v != Label("//visibility:private")] + [Label("//build/bazel/rules/idk:__subpackages__")]
+
             native.alias(
                 name = hlcpp_lib_name + "_idk",
                 actual = name + "_idk",
-                visibility = hlcpp_visibility,
+                # Allow `idk_atom()` targets created by the `idk_*` symbolic macros
+                # in `//build/bazel/rules/idk/...` to depend on `<name>_hlcpp_idk`
+                # when a package in `hlcpp_target_visibility` invokes `idk_*`.
+                visibility = idk_alias_visibility,
             )
 
 def _fidl_cc_library(

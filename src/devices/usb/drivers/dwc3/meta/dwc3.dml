@@ -14,6 +14,24 @@
         { service: "fuchsia.boot.metadata.MacAddressMetadata" },
         { service: "fuchsia.boot.metadata.SerialNumberMetadata" },
         { service: "fuchsia.hardware.usb.policy.Service" },
+        {
+            driver_config: "fuchsia.hardware.usb.dwc3.Config",
+            properties: {
+                interrupt_moderation_us: {
+                    type: "uint32",
+                    description: "Device interrupt moderation interval in microseconds.",
+                    max_inclusive: 16383,
+                },
+                quirk_frame_length_adjustment: {
+                    type: "uint32",
+                    description: "GFLADJ frame length adjustment value; masked to 6 bits.",
+                },
+                gfladj_refclk_lpm_sel_quirk: {
+                    type: "bool",
+                    description: "Sets GFLADJ_REFCLK_LPM_SEL.",
+                },
+            },
+        },
     ],
     use: [
         {

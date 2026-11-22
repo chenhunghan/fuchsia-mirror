@@ -4,16 +4,10 @@
 
 group("mdns") {
   testonly = true
-  deps = [
-    "service",
-    "util",
-  ]
+  deps = [ "service" ]
 }
 
 group("tests") {
   testonly = true
-  deps = [
-    "service:tests",
-    "util:tests",
-  ]
+  deps = [ "service:tests" ]
 }

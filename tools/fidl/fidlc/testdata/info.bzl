@@ -1,0 +1,540 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Information about FIDL test libraries for golden testing."""
+
+visibility([
+    "//src/devices/tools/fidlgen_banjo/...",
+    "//tools/fidl/...",
+])
+
+# LINT.IfChange
+# List of information about FIDL test libraries. Each item has:
+#
+#   name
+#     Unique name to use in golden filenames.
+#
+#   target
+#     Label of a FIDL target. Its target_name must be unique among all items,
+#     and identical to the FIDL library name.
+#
+#   denylist
+#     List of tools that should not generate golden files.
+#     Allowed items: fidldoc, fidlgen_banjo,
+#       fidlgen_hlcpp, fidlgen_cpp, fidlgen_rust, fidlgen_syzkaller.
+#     To exclude a library from fidlc goldens, simply comment the whole item.
+#
+#   build_denylist
+#     List of tools that should not compile golden bindings.
+#     Allowed items: fidlgen_hlcpp, fidlgen_cpp, fidlgen_rust.
+#     Tools from `denylist` are implicitly included.
+#
+#   host_build_denylist
+#     List of tools that should not compile golden bindings for host.
+#     Allowed items: fidlgen_hlcpp, fidlgen_cpp, fidlgen_rust.
+#     Tools from `build_denylist` are implicitly included.
+#
+#   device_build_denylist
+#     List of tools that should not compile golden bindings for device.
+#     Allowed items: fidlgen_hlcpp, fidlgen_cpp, fidlgen_rust.
+#     Tools from `build_denylist` are implicitly included.
+#
+#   target_name (computed)
+#     Name portion of the target.
+#
+#   library (computed)
+#     Name of the FIDL library (same as `target_name`).
+#
+# Please keep sorted by name.
+_RAW_FIDL_TESTDATA_INFO = [
+    {
+        "name": "aliases",
+        "target": "//tools/fidl/fidlc/testdata/aliases:test.aliases",
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "anonymous",
+        "target": "//tools/fidl/fidlc/testdata:test.anonymous",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "arrays",
+        "target": "//tools/fidl/fidlc/testdata:test.arrays",
+    },
+    {
+        "name": "bindings_denylist",
+        "target": "//tools/fidl/fidlc/testdata/bindings_denylist:test.bindingsdenylist",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "bits",
+        "target": "//tools/fidl/fidlc/testdata:test.bits",
+    },
+    {
+        "name": "byte_and_bytes",
+        "target": "//tools/fidl/fidlc/testdata:test.byteandbytes",
+    },
+    {
+        "name": "consts",
+        "target": "//tools/fidl/fidlc/testdata:test.consts",
+        "build_denylist": [
+            # TODO(https://fxbug.dev/42140924): Insert enum/bits <-> primitive conversions.
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+        ],
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "constants",
+        "target": "//tools/fidl/fidlc/testdata:test.constants",
+        "denylist": [
+            # TODO(https://fxbug.dev/42121484): Implement const expressions in fidlgen.
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "bits_constants",
+        "target": "//tools/fidl/fidlc/testdata:test.bitsconstants",
+    },
+    {
+        "name": "doc_comments",
+        "target": "//tools/fidl/fidlc/testdata:test.doccomments",
+        "build_denylist": [
+            # TODO(https://fxbug.dev/42140927): Make protocol named "Interface" compile.
+            "fidlgen_cpp",
+        ],
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "driver_handle",
+        "target": "//tools/fidl/fidlc/testdata:test.driverhandle",
+        "host_build_denylist": [
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "driver_one_way",
+        "target": "//tools/fidl/fidlc/testdata:test.driveroneway",
+        "host_build_denylist": ["fidlgen_cpp"],
+    },
+    {
+        "name": "driver_service",
+        "target": "//tools/fidl/fidlc/testdata:test.driverservice",
+        "build_denylist": [
+            # TODO(https://fxbug.dev/42057119): These bindings don't support driver protocols in
+            # services.
+            "fidlgen_hlcpp",
+            "fidlgen_syzkaller",
+        ],
+        "host_build_denylist": [
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "driver_two_way",
+        "target": "//tools/fidl/fidlc/testdata:test.drivertwoway",
+        "host_build_denylist": ["fidlgen_cpp"],
+    },
+    {
+        "name": "empty_struct",
+        "target": "//tools/fidl/fidlc/testdata:test.emptystruct",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "encapsulated_structs",
+        "target": "//tools/fidl/fidlc/testdata:test.encapsulatedstructs",
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "enum",
+        "target": "//tools/fidl/fidlc/testdata:test.enum",
+    },
+
+    # TODO(https://fxbug.dev/42143655): Remove, use only error_syntax example.
+    {
+        "name": "error",
+        "target": "//tools/fidl/fidlc/testdata:test.error",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "error_syntax",
+        "target": "//tools/fidl/fidlc/testdata/error_syntax:test.errorsyntax",
+    },
+    {
+        "name": "escaping",
+        "target": "//tools/fidl/fidlc/testdata:test.escaping",
+    },
+    {
+        "name": "experimental_maybe_from_alias",
+        "target": "//tools/fidl/fidlc/testdata:test.experimentalmaybefromalias",
+        "denylist": [
+            # TODO(https://fxbug.dev/42140938): Fix many issues.
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+        ],
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "foreign_type_in_response_used_through_compose",
+        "target": "//tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose:test.foreigntypeinresponseusedthroughcompose",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "handles",
+        "target": "//tools/fidl/fidlc/testdata:test.handles",
+        "host_build_denylist": [
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "handles_in_types",
+        "target": "//tools/fidl/fidlc/testdata:test.handlesintypes",
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "imported_const_values",
+        "target": "//tools/fidl/fidlc/testdata/imported_const_values:test.importedconstvalues",
+    },
+    {
+        "name": "inheritance",
+        "target": "//tools/fidl/fidlc/testdata:test.inheritance",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "inheritance_with_recursive_decl",
+        "target": "//tools/fidl/fidlc/testdata:test.inheritancewithrecursivedecl",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "new_type",
+        "target": "//tools/fidl/fidlc/testdata:test.newtype",
+        "denylist": [
+            # TODO(https://fxbug.dev/42158155): Handle the IR changes for each language binding and other tools
+            "fidldoc",
+            "fidlgen_banjo",
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+            "fidlgen_rust",
+            "fidlgen_syzkaller",
+
+            # TODO(https://fxbug.dev/362963403): fidlgen_rust_next doesn't support newtypes yet.
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "nonzero",
+        "target": "//tools/fidl/fidlc/testdata:test.nonzero",
+    },
+    {
+        "name": "nullable",
+        "target": "//tools/fidl/fidlc/testdata:test.nullable",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "padding",
+        "target": "//tools/fidl/fidlc/testdata:test.padding",
+    },
+    {
+        "name": "placement_of_attributes",
+        "target": "//tools/fidl/fidlc/testdata/placement_of_attributes:test.placementofattributes",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "protocol_layouts",
+        "target": "//tools/fidl/fidlc/testdata/protocol_layouts:test.protocollayouts",
+        "denylist": [
+            # TODO(https://fxbug.dev/42178414): Possibly add backend support for syzkaller.
+            "fidlgen_syzkaller",
+        ],
+    },
+    {
+        "name": "protocol_layouts_same_library",
+        "target": "//tools/fidl/fidlc/testdata/protocol_layouts_same_library:test.protocollayoutssamelibrary",
+        "denylist": [
+            # TODO(https://fxbug.dev/42178414): Possibly add backend support for syzkaller.
+            "fidlgen_syzkaller",
+        ],
+    },
+    {
+        "name": "protocol_payloads",
+        "target": "//tools/fidl/fidlc/testdata/protocol_payloads:test.protocolpayloads",
+    },
+    {
+        "name": "protocol_request",
+        "target": "//tools/fidl/fidlc/testdata:test.protocolrequest",
+        "build_denylist": [
+            # TODO(https://fxbug.dev/42140937): Fix many issues.
+            "fidlgen_cpp",
+        ],
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "protocols",
+        "target": "//tools/fidl/fidlc/testdata:test.protocols",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "request_flexible_envelope",
+        "target": "//tools/fidl/fidlc/testdata:test.requestflexibleenvelope",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "service",
+        "target": "//tools/fidl/fidlc/testdata:test.service",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "sensitive",
+        "target": "//tools/fidl/fidlc/testdata:test.sensitive",
+    },
+    {
+        "name": "struct",
+        "target": "//tools/fidl/fidlc/testdata:test.struct",
+    },
+    {
+        "name": "struct_default_value_enum_library_reference",
+        "target": "//tools/fidl/fidlc/testdata/struct_default_value_enum_library_reference:test.structdefaultvalueenumlibraryreference",
+        "denylist": [
+            # TODO(https://fxbug.dev/42121485): Syzkaller does not support enum member references
+            # in struct defaults.
+            "fidlgen_syzkaller",
+        ],
+    },
+    {
+        "name": "table",
+        "target": "//tools/fidl/fidlc/testdata:test.table",
+    },
+    {
+        "name": "time",
+        "target": "//tools/fidl/fidlc/testdata:test.time",
+    },
+    {
+        "name": "transitive_dependencies",
+        "target": "//tools/fidl/fidlc/testdata/transitive_dependencies:test.transitivedependencies",
+    },
+    {
+        "name": "transitive_dependencies_compose",
+        "target": "//tools/fidl/fidlc/testdata/transitive_dependencies_compose:test.transitivedependenciescompose",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "types_in_protocols",
+        "target": "//tools/fidl/fidlc/testdata:test.typesinprotocols",
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "union",
+        "target": "//tools/fidl/fidlc/testdata:test.union",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "union_sandwich",
+        "target": "//tools/fidl/fidlc/testdata:test.unionsandwich",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+        ],
+    },
+    {
+        "name": "unknown_interactions",
+        "target": "//tools/fidl/fidlc/testdata:test.unknowninteractions",
+        "host_build_denylist": ["fidlgen_cpp"],
+    },
+    {
+        "name": "vectors",
+        "target": "//tools/fidl/fidlc/testdata:test.vectors",
+    },
+    {
+        "name": "serializable",
+        "target": "//tools/fidl/fidlc/testdata:test.serializable",
+    },
+    {
+        "name": "versions",
+        "target": "//tools/fidl/fidlc/testdata:test.versions",
+        "host_build_denylist": [
+            # TODO(https://fxbug.dev/42140981): Add ifdefs so that protocols compile on host.
+            "fidlgen_cpp",
+
+            # Host-side FIDL doesn't support handles
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "zx_types",
+        "target": "//tools/fidl/fidlc/testdata:test.zxtypes",
+        "host_build_denylist": [
+            # Host-side FIDL doesn't support zx.Status
+            "fidlgen_rust_next",
+        ],
+    },
+    {
+        "name": "experimental_zx_c_types",
+        "target": "//tools/fidl/fidlc/testdata:test.experimentalzxctypes",
+        "denylist": [
+            "fidldoc",
+            "fidlgen_banjo",
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+            "fidlgen_python",
+            "fidlgen_rust",
+            "fidlgen_rust_next",
+            "fidlgen_syzkaller",
+        ],
+    },
+    {
+        "name": "string_arrays",
+        "target": "//tools/fidl/fidlc/testdata:test.stringarrays",
+        "denylist": [
+            "fidldoc",
+            "fidlgen_banjo",
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+            "fidlgen_python",
+            "fidlgen_rust",
+            "fidlgen_rust_next",
+            "fidlgen_syzkaller",
+        ],
+    },
+    {
+        "name": "overlay",
+        "target": "//tools/fidl/fidlc/testdata:test.overlay",
+        "denylist": [
+            "fidldoc",
+            "fidlgen_banjo",
+            "fidlgen_hlcpp",
+            "fidlgen_cpp",
+            "fidlgen_python",
+            "fidlgen_rust",
+            "fidlgen_rust_next",
+            "fidlgen_syzkaller",
+        ],
+    },
+]
+
+def _compute_fidl_testdata_info():
+    result = []
+    for raw_info in _RAW_FIDL_TESTDATA_INFO:
+        info = dict(raw_info)
+        target_dir, _, target_name = info["target"].partition(":")
+        info["target_name"] = target_name
+        info["library"] = target_name
+
+        # Enforce consistent naming. This also ensures that subdirectories are only
+        # used for wiring up dependencies, not for categorization (see README.md).
+        desired_target_name = "test." + info["name"].replace("_", "")
+        if target_name != desired_target_name:
+            fail("Expected %s to have name %s" % (info["target"], desired_target_name))
+        dir_name = target_dir.rpartition("/")[2]
+        if dir_name != "testdata" and dir_name != info["name"]:
+            fail("Expected %s to be in testdata/ or testdata/%s/" % (info["target"], info["name"]))
+
+        denylist = list(info.get("denylist", []))
+        build_denylist = list(info.get("build_denylist", [])) + denylist
+        host_build_denylist = list(info.get("host_build_denylist", [])) + build_denylist
+        device_build_denylist = list(info.get("device_build_denylist", [])) + build_denylist
+
+        info["denylist"] = denylist
+        info["build_denylist"] = build_denylist
+        info["host_build_denylist"] = host_build_denylist
+        info["device_build_denylist"] = device_build_denylist
+
+        result.append(info)
+    return result
+
+fidl_testdata_info = _compute_fidl_testdata_info()
+# LINT.ThenChange(info.gni)

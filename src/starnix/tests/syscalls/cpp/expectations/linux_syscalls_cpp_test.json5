@@ -12,14 +12,9 @@
                 // TODO(https://fxbug.dev/437153843): Flaking, albeit very infrequently.
                 "FuseTest.Stats",
 
-                // TODO(https://fxbug.dev/493672905): Flaking on Machina, failing on Starnix.
-                "FuseServerTest.InvalidateMountDir",
-
                 // TODO(https://fxbug.dev/437167254)
                 "IoctlTest.SIOCSIFADDR_Success",
                 "IoctlTest.SIOCSIFNETMASK_Success",
-                "IoctlTest.SIOCGIFNETMASK_Success",
-                "IoctlTest.SIOCGIFADDR_Success",
                 "IoctlTest.SIOCSIFADDR_WithMultipleAddressesOnInterface",
                 "IoctlTest.SIOCSIFNETMASK_WithMultipleAddressesOnInterface",
 
@@ -31,7 +26,6 @@
                 "PerfEventOpenTest.MmapFirstRecordPageIsValid",
                 "PerfEventOpenTest.MmapMetadataPageIsValid",
                 "PerfEventOpenTest.InvalidDataTailIgnoredByKernel",
-                "PerfEventOpenTest.ThreadSamplingResolvesLinuxPidTid",
 
                 // TODO(https://fxbug.dev/436914153): This is flakey.
                 "Pty.EchoFlags",
@@ -56,10 +50,6 @@
                 "SysfsPowerTest.SuspendStateFileWriteFailsEpollDelete",
                 "SysfsPowerTest.SuspendStateFileWriteInvalidFails",
                 "SysfsPowerTest.WakeLockBlocksSuspend",
-
-                // TODO(https://fxbug.dev/342416456): Not Machina-specific. Rework the test to take
-                // into account logs from the system. Skipped since it's flakey.
-                "SyslogTest.ProcKmsgPoll",
 
                 // TODO(https://fxbug.dev/500700818): De-flake and re-enable.
                 "SysctlTest.DisableIpv6",
@@ -97,9 +87,6 @@
                 "FsTest.CreateExistingFileInReadonlyFilesystemReturnsEEXIST",
                 "FsTest.DevZeroAndNullQuirks",
 
-                // TODO(https://fxbug.dev/527579086): Machina Linux guest kernel does not support tmpfs casefolding.
-                "FsCasefold/FsCasefoldTest.*/tmpfs",
-
                 // TODO(https://fxbug.dev/437164575): Test needs to be reworked.
                 "InputTest.DevicePropertiesMatchKeyboardProperties",
                 "InputTest.DevicePropertiesMatchTouchProperties",
@@ -128,6 +115,14 @@
                 "NetlinkSocket.RecvMsg",
                 "NetlinkSocket.NlctrlFamily",
 
+                // TODO(https://fxbug.dev/584299369): Linux prepares/cleans `workdir/work` before
+                // checking layer overlap (returning ELOOP instead of EINVAL for `lowerdir` inside
+                // `workdir`), falls back to mounting read-only on busy `workdir/work` cleanup, and
+                // leaves `workdir/work` behind on failed setup without CAP_DAC_OVERRIDE.
+                "OverlayFsAccessTest.LowerAndWorkdirOverlapRejected",
+                "OverlayFsAccessTest.PrepareWorkdirRequiresDacOverride",
+                "OverlayFsAccessTest.SubmountInWorkdirRejected",
+
                 // TODO(https://fxbug.dev/437191224)
                 "PerfEventOpenTest.WhenDisabledEventCountShouldBeZero",
                 "PerfEventOpenTest.ValidInputsSucceed",
@@ -136,6 +131,9 @@
                 "PerfEventOpenTest.WhenResetAndDisabledEventCountShouldBeZero",
                 "PerfEventOpenTest.SettingIoctlEnabledCallWorks",
                 "PerfEventOpenTest.ReadEventWithBufferTooSmallFails",
+
+                // TODO(https://fxbug.dev/479282469)
+                "PerfEventOpenTest.ThreadSamplingResolvesLinuxPidTid",
 
                 // TODO(https://fxbug.dev/460206055): Machina currently uses a different binary name than Starnix.
                 "PrctlTest.Argv0SniffingIsUndetectableInUserspace",
@@ -147,11 +145,11 @@
                 "ProcTaskDirTest.SelfEnvironIsNotEmpty",
 
                 // TODO(https://fxbug.dev/437162553)
-                "SocketFault/SocketFault.Read/1",
-                "SocketFault/SocketFault.WriteV/1",
+                "SocketFault/SocketFault.ReadIntoInvalidAddressFails/1",
+                "SocketFault/SocketFault.WriteVFromInvalidAddressFails/1",
                 "SocketFault/SocketFault.SendmsgENOBUFS/1",
-                "SocketFault/SocketFault.ReadV/1",
-                "SocketFault/SocketFault.Write/1",
+                "SocketFault/SocketFault.ReadVIntoInvalidAddressFails/1",
+                "SocketFault/SocketFault.WriteFromInvalidAddressFails/1",
 
                 // TODO(https://fxbug.dev/478981256): These expectations don't match the Machina system.
                 "SysfsPowerTest.PowerDirectoryContainsExpectedContents",

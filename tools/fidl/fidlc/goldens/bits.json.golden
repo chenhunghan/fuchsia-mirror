@@ -20,7 +20,7 @@
         "EmptyBits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
         "line": 22,
         "column": 6,
         "length": 9
@@ -49,7 +49,7 @@
         "FlexibleBits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
         "line": 17,
         "column": 6,
         "length": 12
@@ -73,7 +73,7 @@
         {
           "name": "SMALLEST",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 18,
             "column": 5,
             "length": 8
@@ -93,7 +93,7 @@
         {
           "name": "BIGGEST",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 19,
             "column": 5,
             "length": 7
@@ -119,7 +119,7 @@
         "MyBits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
         "line": 4,
         "column": 6,
         "length": 6
@@ -143,7 +143,7 @@
         {
           "name": "MY_FIRST_BIT",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 5,
             "column": 5,
             "length": 12
@@ -163,7 +163,7 @@
         {
           "name": "MY_OTHER_BIT",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 6,
             "column": 5,
             "length": 12
@@ -183,7 +183,7 @@
         {
           "name": "MASK",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 8,
             "column": 5,
             "length": 4
@@ -209,7 +209,7 @@
         "StrictBits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
         "line": 12,
         "column": 6,
         "length": 10
@@ -233,7 +233,7 @@
         {
           "name": "SMALLEST",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 13,
             "column": 5,
             "length": 8
@@ -253,7 +253,7 @@
         {
           "name": "BIGGEST",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/bits.test.fidl",
             "line": 14,
             "column": 5,
             "length": 7

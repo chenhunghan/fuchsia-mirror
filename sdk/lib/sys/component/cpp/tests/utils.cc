@@ -10,7 +10,6 @@
 namespace component {
 namespace tests {
 
-namespace fctest = fuchsia::component::test;
 namespace fcdecl = fuchsia::component::decl;
 namespace fio = fuchsia::io;
 
@@ -86,91 +85,86 @@ std::shared_ptr<fcdecl::Offer> CreateFidlStorageOfferDecl(std::string_view sourc
   return std::make_shared<fcdecl::Offer>(fcdecl::Offer::WithStorage(std::move(offer)));
 }
 
-std::shared_ptr<fctest::ChildOptions> CreateFidlChildOptions(
-    fcdecl::StartupMode startup_mode, std::string_view environment,
-    std::vector<std::pair<std::string, fcdecl::ConfigValue>> config_overrides) {
-  fctest::ChildOptions options;
-  options.set_environment(std::string(environment));
-  options.set_startup(startup_mode);
-  for (auto& config_override : config_overrides) {
-    options.mutable_config_overrides()->emplace_back();
-    options.mutable_config_overrides()->back().set_key(config_override.first);
-    options.mutable_config_overrides()->back().set_value(std::move(config_override.second));
+std::shared_ptr<fuchsia_component_test::ChildOptions> CreateFidlChildOptions(
+    fuchsia_component_decl::StartupMode startup_mode, std::string_view environment,
+    std::vector<std::pair<std::string, fuchsia_component_decl::ConfigValue>> config_overrides) {
+  fuchsia_component_test::ChildOptions options;
+  if (!environment.empty()) {
+    options.environment(std::string(environment));
+  }
+  options.startup(startup_mode);
+  if (!config_overrides.empty()) {
+    std::vector<fuchsia_component_decl::ConfigOverride> overrides;
+    for (auto& config_override : config_overrides) {
+      overrides.push_back(fuchsia_component_decl::ConfigOverride{{
+          .key = std::move(config_override.first),
+          .value = std::move(config_override.second),
+      }});
+    }
+    options.config_overrides(std::move(overrides));
   }
 
-  return std::make_shared<fctest::ChildOptions>(std::move(options));
+  return std::make_shared<fuchsia_component_test::ChildOptions>(std::move(options));
 }
 
-std::shared_ptr<fctest::Capability> CreateFidlProtocolCapability(
+std::shared_ptr<fuchsia_component_test::Capability> CreateFidlProtocolCapability(
     std::string_view name, std::optional<std::string_view> as,
-    std::optional<fcdecl::DependencyType> type, std::optional<std::string_view> path) {
-  fctest::Protocol capability;
-  capability.set_name(std::string(name));
+    std::optional<fuchsia_component_decl::DependencyType> type,
+    std::optional<std::string_view> path) {
+  fuchsia_component_test::Protocol capability;
+  capability.name(std::string(name));
   if (as.has_value()) {
-    capability.set_as(std::string(*as));
+    capability.as(std::string(*as));
   }
   if (type.has_value()) {
-    capability.set_type(*type);
+    capability.type(*type);
   }
   if (path.has_value()) {
-    capability.set_path(std::string(*path));
+    capability.path(std::string(*path));
   }
-  return std::make_shared<fctest::Capability>(
-      fctest::Capability::WithProtocol(std::move(capability)));
+  return std::make_shared<fuchsia_component_test::Capability>(
+      fuchsia_component_test::Capability::WithProtocol(std::move(capability)));
 }
 
-std::shared_ptr<fctest::Capability> CreateFidlServiceCapability(
+std::shared_ptr<fuchsia_component_test::Capability> CreateFidlServiceCapability(
     std::string_view name, std::optional<std::string_view> as,
     std::optional<std::string_view> path) {
-  fctest::Service capability;
-  capability.set_name(std::string(name));
+  fuchsia_component_test::Service capability;
+  capability.name(std::string(name));
   if (as.has_value()) {
-    capability.set_as(std::string(*as));
+    capability.as(std::string(*as));
   }
   if (path.has_value()) {
-    capability.set_path(std::string(*path));
+    capability.path(std::string(*path));
   }
-  return std::make_shared<fctest::Capability>(
-      fctest::Capability::WithService(std::move(capability)));
+  return std::make_shared<fuchsia_component_test::Capability>(
+      fuchsia_component_test::Capability::WithService(std::move(capability)));
 }
 
-std::shared_ptr<fctest::Capability> CreateFidlServiceCapability(std::string_view name) {
-  fctest::Service capability;
-  capability.set_name(std::string(name));
-  return std::make_shared<fctest::Capability>(
-      fctest::Capability::WithService(std::move(capability)));
-}
-
-std::shared_ptr<fctest::Capability> CreateFidlDirectoryCapability(
+std::shared_ptr<fuchsia_component_test::Capability> CreateFidlDirectoryCapability(
     std::string_view name, std::optional<std::string_view> as,
-    std::optional<fcdecl::DependencyType> type, std::optional<std::string_view> subdir,
-    std::optional<fio::Operations> rights, std::optional<std::string_view> path) {
-  fctest::Directory capability;
-  capability.set_name(std::string(name));
+    std::optional<fuchsia_component_decl::DependencyType> type,
+    std::optional<std::string_view> subdir, std::optional<fuchsia_io::Operations> rights,
+    std::optional<std::string_view> path) {
+  fuchsia_component_test::Directory capability;
+  capability.name(std::string(name));
   if (as.has_value()) {
-    capability.set_as(std::string(*as));
+    capability.as(std::string(*as));
   }
   if (type.has_value()) {
-    capability.set_type(*type);
+    capability.type(*type);
   }
   if (subdir.has_value()) {
-    capability.set_subdir(std::string(*subdir));
+    capability.subdir(std::string(*subdir));
   }
   if (rights.has_value()) {
-    capability.set_rights(*rights);
+    capability.rights(*rights);
   }
   if (path.has_value()) {
-    capability.set_path(std::string(*path));
+    capability.path(std::string(*path));
   }
-  return std::make_shared<fctest::Capability>(
-      fctest::Capability::WithDirectory(std::move(capability)));
-}
-
-std::shared_ptr<fctest::Capability> CreateFidlDirectoryCapability(std::string_view name) {
-  fctest::Directory capability;
-  capability.set_name(std::string(name));
-  return std::make_shared<fctest::Capability>(
-      fctest::Capability::WithDirectory(std::move(capability)));
+  return std::make_shared<fuchsia_component_test::Capability>(
+      fuchsia_component_test::Capability::WithDirectory(std::move(capability)));
 }
 
 }  // namespace tests

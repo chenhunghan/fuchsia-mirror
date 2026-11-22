@@ -29,7 +29,9 @@ load(
 # See https://bazel.build/docs/user-manual#running-executables.
 _DEFAULT_SOURCE_SEARCH_ROOT = "BUILD_WORKSPACE_DIRECTORY"
 
-FUCHSIA_DEBUG_SYMBOLS_ATTRS = {
+# Attributes required by `strip_resources()`. Calling rules must also declare
+# `@bazel_tools//tools/cpp:toolchain_type` in `toolchains`.
+STRIP_RESOURCES_ATTRS = {
     "_elf_strip_tool": attr.label(
         default = "@fuchsia_rules_common//debug_symbols/tools:elf_strip",
         executable = True,
@@ -56,8 +58,11 @@ def strip_resources(ctx, resources, build_id_path = None, source_search_root = _
     ".stamp", which will contain the full names of all of the debug symbols that were
     generated.
 
+    Calling rules must include `STRIP_RESOURCES_ATTRS` in `attrs` and declare
+    `@bazel_tools//tools/cpp:toolchain_type` in `toolchains`.
+
     Args:
-      ctx: Rule context.
+      ctx: Rule context for a rule with `STRIP_RESOURCES_ATTRS`.
       resources: A list of unstripped input resource_struct() values.
       build_id_path: (optional) A string that will be used when declaring
         the build ID directory. Defaults to `ctx.label.name + "/.build-id"`.
@@ -457,7 +462,7 @@ find_and_process_unstripped_binaries = rule(
             mandatory = True,
             aspects = [_fuchsia_collect_unstripped_binaries_aspect],
         ),
-    } | FUCHSIA_DEBUG_SYMBOLS_ATTRS,
+    } | STRIP_RESOURCES_ATTRS,
 )
 
 # Debug Symbols Collection aspect & helpers

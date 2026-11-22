@@ -7,6 +7,8 @@
 #![allow(clippy::let_unit_value)]
 #![deny(missing_docs)]
 
+pub use delivery_blob::DeliveryBlobType;
+
 mod package;
 pub use crate::package::{BlobContents, Package, PackageBuilder, PackageDir, VerificationError};
 

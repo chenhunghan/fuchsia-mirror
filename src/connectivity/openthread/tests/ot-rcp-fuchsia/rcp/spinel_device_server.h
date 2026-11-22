@@ -32,9 +32,12 @@ class SpinelDeviceServer : public fidl::Server<fuchsia_lowpan_spinel::DeviceSetu
     uint32_t radiobound_credit_inc = 2;
   };
 
-  // `node_id` selects the RCP's EUI-64 and log tag.
-  SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id);
-  SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id, FlowControl flow_control);
+  // `node_id` selects the RCP's EUI-64 and log tag. `radio_medium` carries the radio's
+  // transmissions and receptions.
+  SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id,
+                     std::unique_ptr<RadioMedium> radio_medium);
+  SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id, FlowControl flow_control,
+                     std::unique_ptr<RadioMedium> radio_medium);
   ~SpinelDeviceServer() override;
 
   const FlowControl& flow_control() const { return flow_control_; }

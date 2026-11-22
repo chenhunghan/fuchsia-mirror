@@ -2,10 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-fs-tests_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 _COMMON_SRCS = [
     "src/directory.rs",
@@ -88,4 +103,62 @@ fidl_library(
     name = "fidl.test.schema",
     testonly = True,
     srcs = ["data/schema.test.fidl"],
+)
+
+resource(
+    name = "file_resource",
+    src = "data/file",
+    dest = "data/file",
+)
+
+resource(
+    name = "fidl_file_resource",
+    src = "data/fidl_file",
+    dest = "data/fidl_file",
+)
+
+resource(
+    name = "subdir_file_resource",
+    src = "data/file",
+    dest = "data/subdir/subdir-file",
+)
+
+fx_packaged_binary(
+    name = "fuchsia-fs_test_packaged_bin",
+    testonly = True,
+    binary = ":fuchsia-fs_test",
+    binary_name = "fuchsia_fs_lib_test",
+)
+
+fx_component_manifest(
+    name = "fuchsia-fs-tests_manifest",
+    testonly = True,
+    component_name = "fuchsia-fs-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/fuchsia_fs_tests.cml",
+)
+
+fx_test_component(
+    name = "fuchsia-fs-tests_component",
+    compiled_manifest = ":fuchsia-fs-tests_manifest",
+    deps = [":fuchsia-fs_test_packaged_bin"],
+)
+
+fx_package(
+    name = "fuchsia-fs-tests",
+    resources = [
+        ":fidl_file_resource",
+        ":file_resource",
+        ":subdir_file_resource",
+    ],
+    test_components = [":fuchsia-fs-tests_component"],
+)
+
+fx_test(
+    name = "fuchsia-fs-tests_test",
+    package = ":fuchsia-fs-tests",
 )

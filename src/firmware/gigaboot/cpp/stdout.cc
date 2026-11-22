@@ -21,6 +21,9 @@ namespace {
 
 constexpr size_t kLineBufferSize = 256;
 
+FILE gConOut, gSerial;
+MultiFile<2> gStdoutMux;
+
 // The Write(Protocol*, ktl::span<char16_t>) function is passed a nonempty
 // character sequence returns the number of characters written.  If that is
 // zero, this is treated as an error.  If it is fewer than the number passed,
@@ -108,17 +111,15 @@ int EfiStdoutWrite(void* protocol, const char* str_data, size_t str_len) {
   return wrote;
 }
 
-FILE gConOut, gSerial;
-MultiFile<2> gMux;
-
 }  // namespace
 
-void SetEfiStdout(efi_system_table* sys) {
-  *stdout = gMux;
+// This is the stdout of <stdio.h>.
+constinit FILE gStdout{&gStdoutMux};
 
+void SetEfiStdout(efi_system_table* sys) {
   if (sys->ConOut) {
     gConOut = FILE{EfiStdoutWrite<efi_simple_text_output_protocol>, sys->ConOut};
-    gMux.files()[0] = &gConOut;
+    gStdoutMux.files()[0] = &gConOut;
 
     // TODO(mcgrathr): in headless qemu/ovmf, ConOut is also the serial console
     // so enabling both double-prints everything.  Need a way to figure out if
@@ -130,7 +131,7 @@ void SetEfiStdout(efi_system_table* sys) {
   efi_status status = sys->BootServices->LocateProtocol(&SerialIoProtocol, nullptr, &serial_ptr);
   if (status == EFI_SUCCESS) {
     gSerial = FILE{EfiStdoutWrite<efi_serial_io_protocol>, serial_ptr};
-    gMux.files()[1] = &gSerial;
+    gStdoutMux.files()[1] = &gSerial;
   } else {
     printf("EFI: no serial console found: %#zx\n", status);
   }

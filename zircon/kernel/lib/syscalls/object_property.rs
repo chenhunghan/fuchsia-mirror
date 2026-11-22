@@ -158,9 +158,6 @@ pub fn sys_object_get_property(
             copy_scalar_to_user(value, size, val as usize)
         }
         ZX_PROP_STREAM_MODE_APPEND => {
-            if size < core::mem::size_of::<u8>() {
-                return Err(Status::BUFFER_TOO_SMALL);
-            }
             let stream = dispatcher.downcast::<StreamDispatcher>().ok_or(Status::WRONG_TYPE)?;
             copy_scalar_to_user(value, size, u8::from(stream.is_in_append_mode()))
         }
@@ -249,9 +246,6 @@ pub fn sys_object_set_property(
             Ok(())
         }
         ZX_PROP_EXCEPTION_STATE => {
-            if size < core::mem::size_of::<u32>() {
-                return Err(Status::BUFFER_TOO_SMALL);
-            }
             let exception =
                 dispatcher.downcast::<ExceptionDispatcher>().ok_or(Status::WRONG_TYPE)?;
             let val = copy_scalar_from_user::<u32>(value, size)?;
@@ -266,9 +260,6 @@ pub fn sys_object_set_property(
             }
         }
         ZX_PROP_EXCEPTION_STRATEGY => {
-            if size < core::mem::size_of::<u32>() {
-                return Err(Status::BUFFER_TOO_SMALL);
-            }
             let exception =
                 dispatcher.downcast::<ExceptionDispatcher>().ok_or(Status::WRONG_TYPE)?;
             let info = exception.thread().get_info_for_userspace();
@@ -290,9 +281,6 @@ pub fn sys_object_set_property(
             }
         }
         ZX_PROP_STREAM_MODE_APPEND => {
-            if size < core::mem::size_of::<u8>() {
-                return Err(Status::BUFFER_TOO_SMALL);
-            }
             let stream = dispatcher.downcast::<StreamDispatcher>().ok_or(Status::WRONG_TYPE)?;
             let val = copy_scalar_from_user::<u8>(value, size)?;
             stream.set_append_mode(val != 0);

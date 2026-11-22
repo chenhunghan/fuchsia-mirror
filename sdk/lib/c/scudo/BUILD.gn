@@ -70,14 +70,14 @@ libc_source_set("scudo-allocator") {
   # test code must be compiled with `-D__scudo_default_options=<some other
   # name>` to make the test code safe.
   #
-  # TODO(https://fxbug.dev/42142757): The second reason is similar but more subtle and it
-  # affects much of the code, both the Scudo code proper and the gwp_asan code
-  # it incorporates.  These both use thread-local state that is directly
-  # located in the thread structure when the code is built into libc, because
-  # normal `thread_local` C++ variables are not available inside libc itself
-  # (due to implementation constraints in the dynamic linker).  If the test
-  # code is built the same way, then it will clobber the thread-local state of
-  # the libc Scudo/gwp_asan code, which the test should not do.
+  # TODO(https://fxbug.dev/349433421): The second reason is similar but more
+  # subtle and it affects much of the code, both the Scudo code proper and the
+  # gwp_asan code it incorporates.  These both use thread-local state that is
+  # directly located in the thread structure when the code is built into libc,
+  # because normal `thread_local` C++ variables are not available inside libc
+  # itself (due to implementation constraints in the dynamic linker).  If the
+  # test code is built the same way, then it will clobber the thread-local state
+  # of the libc Scudo/gwp_asan code, which the test should not do.
   non_test_deps = [
     ":gwp_asan",
     ":libc",
@@ -316,7 +316,7 @@ libc_test("unittests.gwp_asan") {
     "tests/harness.h",
     "tests/iterate.cpp",
 
-    # TODO(https://fxbug.dev/42144233): flaky due to TLS pollution
+    # Disabled: flaky due to TLS pollution.
     #"tests/late_init.cpp",
     "tests/mutex_test.cpp",
     "tests/never_allocated.cpp",

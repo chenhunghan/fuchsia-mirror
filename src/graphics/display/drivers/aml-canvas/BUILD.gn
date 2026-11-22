@@ -12,6 +12,10 @@ fuchsia_driver_dml("aml-canvas-dml") {
   driver_name = "aml-canvas"
 }
 
+fuchsia_driver_dml_cpp_parser("aml-canvas-metadata") {
+  dml_label = ":aml-canvas-dml"
+}
+
 driver_bind_rules("aml_canvas_bind") {
   dml_label = ":aml-canvas-dml"
   bind_output = "aml-canvas.bindbc"
@@ -35,7 +39,9 @@ source_set("common_srcs") {
     "dmc-regs.h",
   ]
   public_deps = [
+    ":aml-canvas-metadata",
     ":aml_canvas_bind",
+    "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.amlogiccanvas:fuchsia.hardware.amlogiccanvas_cpp",
     "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_cpp",
     "//sdk/lib/component/outgoing/cpp",
@@ -43,6 +49,7 @@ source_set("common_srcs") {
     "//sdk/lib/driver/compat/cpp:logging",
     "//sdk/lib/driver/component/cpp",
     "//sdk/lib/driver/mmio/cpp",
+    "//sdk/lib/driver/platform-device/cpp",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/devices/lib/driver:driver_runtime",
     "//zircon/system/ulib/fbl",
@@ -64,7 +71,6 @@ fuchsia_cc_driver("aml-canvas-driver") {
 fuchsia_driver_component("aml-canvas") {
   component_name = "aml-canvas"
   deps = [ ":aml-canvas-driver" ]
-  info = "meta/aml-canvas-info.json"
   dml_label = ":aml-canvas-dml"
 }
 

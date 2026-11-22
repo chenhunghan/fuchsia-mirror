@@ -1,0 +1,14 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.maxim.platform",
+    src = "fuchsia.maxim.platform.bind",
+    category = "partner",
+    visibility = ["//src/media/audio/drivers/codecs/max98373:__pkg__"],
+)

@@ -32,52 +32,15 @@ use core::mem::{align_of, offset_of, size_of};
 use core::ops::Deref;
 use core::pin::Pin;
 use core::ptr::NonNull;
-use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode};
+use fbl::{DoublyLinkedListContainable, DoublyLinkedListNode};
 use ksync::KCell;
-use owned_wait_queue_bindings as bindings;
 use pin_init::{PinInit, pin_data, pinned_drop};
 use zr::static_assert;
 use zx_status::Status;
-use zx_types::{ZX_ERR_INTERNAL_INTR_KILLED, zx_status_t};
+use zx_types::ZX_ERR_INTERNAL_INTR_KILLED;
 
 /// Magic value identifying an [`OwnedWaitQueue`].
 pub const OWNED_MAGIC: u32 = fbl::magic(b"ownq");
-static_assert!(OWNED_MAGIC == bindings::OwnedWaitQueue_kOwnedMagic);
-
-static_assert!(ResourceOwnership::Normal as i32 == bindings::ResourceOwnership::Normal as i32);
-static_assert!(ResourceOwnership::Reader as i32 == bindings::ResourceOwnership::Reader as i32);
-static_assert!(size_of::<ResourceOwnership>() == size_of::<bindings::ResourceOwnership>());
-static_assert!(align_of::<ResourceOwnership>() == align_of::<bindings::ResourceOwnership>());
-
-static_assert!(Interruptible::No as u8 == bindings::Interruptible::No as u8);
-static_assert!(Interruptible::Yes as u8 == bindings::Interruptible::Yes as u8);
-static_assert!(size_of::<Interruptible>() == size_of::<bindings::Interruptible>());
-static_assert!(align_of::<Interruptible>() == align_of::<bindings::Interruptible>());
-
-static_assert!(ForceInheritance::No as u8 == bindings::ForceInheritance::No as u8);
-static_assert!(ForceInheritance::Yes as u8 == bindings::ForceInheritance::Yes as u8);
-static_assert!(size_of::<ForceInheritance>() == size_of::<bindings::ForceInheritance>());
-static_assert!(align_of::<ForceInheritance>() == align_of::<bindings::ForceInheritance>());
-
-// `ChainLockResult` crosses the FFI boundary as the `int32_t` value of the C++
-// `ChainLock::Result` enumerator, which is checked by matching `static_assert`s in
-// `owned_wait_queue.h`.
-static_assert!(ChainLockResult::Ok as i32 == 0);
-static_assert!(ChainLockResult::Retry as i32 == 1);
-static_assert!(ChainLockResult::Backoff as i32 == 2);
-static_assert!(ChainLockResult::Cycle as i32 == 3);
-
-static_assert!(
-    size_of::<EffectiveProfile>() == size_of::<bindings::SchedulerState_EffectiveProfile>()
-);
-static_assert!(
-    align_of::<EffectiveProfile>() == align_of::<bindings::SchedulerState_EffectiveProfile>()
-);
-
-// `Thread::owned_wait_queues_` is a `fbl::DoublyLinkedList<OwnedWaitQueue*>`, which consists of a
-// single head pointer.
-static_assert!(size_of::<DoublyLinkedList<*mut OwnedWaitQueue>>() == size_of::<*mut c_void>());
-static_assert!(align_of::<DoublyLinkedList<*mut OwnedWaitQueue>>() == align_of::<*mut c_void>());
 
 // Notes on the defined kernel counters.
 //
@@ -142,12 +105,6 @@ struct ChainLengthTracker<const OPTIONS: u32 = DEFAULT_CHAIN_LENGTH_TRACKER_OPT>
     nodes_visited: u32,
 }
 
-#[cold]
-#[inline(never)]
-fn panic_chain_length_exceeded(visited: u32) -> ! {
-    panic!("visited {}", visited);
-}
-
 impl<const OPTIONS: u32> ChainLengthTracker<OPTIONS> {
     #[inline(always)]
     fn new() -> Self {
@@ -162,9 +119,7 @@ impl<const OPTIONS: u32> ChainLengthTracker<OPTIONS> {
 
         if (OPTIONS & ChainLengthTrackerOpt::ENFORCE_LENGTH_GUARD) != ChainLengthTrackerOpt::NONE {
             const MAX_CHAIN_LEN: u32 = 2048;
-            if self.nodes_visited > MAX_CHAIN_LEN {
-                panic_chain_length_exceeded(self.nodes_visited);
-            }
+            assert!(self.nodes_visited <= MAX_CHAIN_LEN, "visited {}", self.nodes_visited);
         }
     }
 }
@@ -209,14 +164,24 @@ pub(crate) trait PropagateOpTag: Copy {
     /// Informs the scheduler of the PI change between `upstream` and `downstream`, and updates
     /// the PI kcounters.
     ///
+    /// # Panics
+    ///
+    /// Panics if `upstream` or `downstream` is an [`OwnedWaitQueue`] whose
+    /// `inherited_scheduler_state_storage` is `None`.
+    ///
     /// # Safety
     ///
-    /// The caller must ensure that the locks of `upstream`, `downstream`, and every node in the
-    /// PI chain downstream of `downstream` are held by the active transaction.
+    /// - `upstream` and `downstream` must be distinct nodes whose locks, along with every lock in
+    ///   the PI chain downstream of `downstream` (including any wait queue `downstream` is blocked
+    ///   in), are held by the active `ChainLockTransaction`.
+    /// - Interrupts and preemption must be disabled, and no scheduler `queue_lock_` may be held on
+    ///   the current CPU.
+    /// - No conflicting `ChainLockProof` or live borrow of `upstream`'s or `downstream`'s
+    ///   `SchedulerState`, `inherited_scheduler_state_storage` `KCell`, or pointed-to
+    ///   `WaitQueueInheritedSchedulerState` may exist across the call.
     unsafe fn propagate<U: PiNode, D: PiNode>(
         upstream: &U,
         downstream: &D,
-        force_inheritance: ForceInheritance,
         old_target_ep: Option<&EffectiveProfile>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -249,7 +214,6 @@ impl PropagateOpTag for AddSingleEdgeTag {
     unsafe fn propagate<U: PiNode, D: PiNode>(
         upstream: &U,
         downstream: &D,
-        force_inheritance: ForceInheritance,
         _old_target_ep: Option<&EffectiveProfile>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -257,7 +221,7 @@ impl PropagateOpTag for AddSingleEdgeTag {
         preempt_disabled_token.assert_held();
         // SAFETY: Forwarded from the caller.
         unsafe {
-            scheduler::join_node_to_pi_graph(upstream, downstream, force_inheritance, clt_token);
+            scheduler::join_node_to_pi_graph(upstream, downstream, clt_token);
         }
         if D::IS_THREAD {
             PI_PROMOTIONS.add(1);
@@ -275,7 +239,6 @@ impl PropagateOpTag for RemoveSingleEdgeTag {
     unsafe fn propagate<U: PiNode, D: PiNode>(
         upstream: &U,
         downstream: &D,
-        _force_inheritance: ForceInheritance,
         old_target_ep: Option<&EffectiveProfile>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -301,7 +264,6 @@ impl PropagateOpTag for BaseProfileChangedTag {
     unsafe fn propagate<U: PiNode, D: PiNode>(
         upstream: &U,
         downstream: &D,
-        _force_inheritance: ForceInheritance,
         _old_target_ep: Option<&EffectiveProfile>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -508,8 +470,14 @@ pub trait IWakeRequeueHook {
     ///
     /// `allow` may be called multiple times for the same thread during a locking operation if the
     /// code needs to back off and attempt to lock the set of threads to be woken multiple times.
+    ///
+    /// # Safety
+    ///
+    /// `t` must currently be blocked in a wait queue whose lock is held by the active
+    /// `ChainLockTransaction` (providing synchronized read-only access to `t`'s wait-queue state,
+    /// equivalent to C++ `TA_REQ_SHARED(t.get_lock())`).
     #[inline]
-    fn allow(&mut self, _t: &Thread) -> bool {
+    unsafe fn allow(&mut self, _t: &Thread) -> bool {
         true
     }
 
@@ -527,55 +495,6 @@ pub(crate) struct DefaultWakeHooks;
 
 impl IWakeRequeueHook for DefaultWakeHooks {}
 
-/// Adapts a C++ `OwnedWaitQueue::IWakeRequeueHook` for use as an [`IWakeRequeueHook`].
-struct CppWakeRequeueHook {
-    // Safety invariant: Points to a live C++ `OwnedWaitQueue::IWakeRequeueHook` for the lifetime
-    // of `self`.
-    hook: NonNull<bindings::OwnedWaitQueue_IWakeRequeueHook>,
-}
-
-impl CppWakeRequeueHook {
-    /// Wraps the C++ `OwnedWaitQueue::IWakeRequeueHook` pointed to by `hook`.
-    ///
-    /// # Safety
-    ///
-    /// `hook` must point to a live C++ `OwnedWaitQueue::IWakeRequeueHook` which outlives the
-    /// returned value.
-    #[inline]
-    unsafe fn new(hook: *mut bindings::OwnedWaitQueue_IWakeRequeueHook) -> Self {
-        debug_assert!(!hook.is_null());
-        // SAFETY: The caller guarantees `hook` points to a live hook, so it is non-null.
-        Self { hook: unsafe { NonNull::new_unchecked(hook) } }
-    }
-}
-
-impl IWakeRequeueHook for CppWakeRequeueHook {
-    #[inline]
-    fn allow(&mut self, t: &Thread) -> bool {
-        // SAFETY: `self.hook` points to a live C++ hook (type invariant), and `allow` is only
-        // called while `t` is a member of a wait queue whose lock is held, providing read-only
-        // access to `t`.
-        unsafe {
-            bindings::cpp_owned_wait_queue_wake_requeue_hook_allow(
-                self.hook.as_ptr(),
-                t.as_raw().cast(),
-            )
-        }
-    }
-
-    #[inline]
-    fn on_wake_or_requeue(&mut self, t: &mut ChainLockProof<'_, Thread>) {
-        // SAFETY: `self.hook` points to a live C++ hook (type invariant), and `t` proves that
-        // `t.owner().lock()` is held.
-        unsafe {
-            bindings::cpp_owned_wait_queue_wake_requeue_hook_on_wake_or_requeue(
-                self.hook.as_ptr(),
-                t.owner().as_raw().cast(),
-            );
-        }
-    }
-}
-
 /// A small struct which contains details about the locking used in order to prepare for a
 /// [`OwnedWaitQueue::block_and_assign_owner`] operation. See
 /// [`OwnedWaitQueue::lock_for_baao_operation_or_backoff`] for details.
@@ -589,21 +508,6 @@ pub struct BAAOLockingDetails {
     /// and never dereferenced.
     stop_point: *const c_void,
 }
-
-static_assert!(
-    size_of::<BAAOLockingDetails>() == size_of::<bindings::OwnedWaitQueue_BAAOLockingDetails>()
-);
-static_assert!(
-    align_of::<BAAOLockingDetails>() == align_of::<bindings::OwnedWaitQueue_BAAOLockingDetails>()
-);
-static_assert!(
-    offset_of!(BAAOLockingDetails, new_owner)
-        == offset_of!(bindings::OwnedWaitQueue_BAAOLockingDetails, new_owner)
-);
-static_assert!(
-    offset_of!(BAAOLockingDetails, stop_point)
-        == offset_of!(bindings::OwnedWaitQueue_BAAOLockingDetails, stop_point)
-);
 
 impl BAAOLockingDetails {
     /// Creates a new `BAAOLockingDetails` with the given `initial_new_owner`.
@@ -704,25 +608,6 @@ pub struct WakeThreadsResult {
     pub owner: Option<ThreadPtr>,
 }
 
-static_assert!(
-    size_of::<WakeThreadsResult>() == size_of::<bindings::OwnedWaitQueue_WakeThreadsResult>()
-);
-static_assert!(
-    align_of::<WakeThreadsResult>() == align_of::<bindings::OwnedWaitQueue_WakeThreadsResult>()
-);
-static_assert!(
-    offset_of!(WakeThreadsResult, woken)
-        == offset_of!(bindings::OwnedWaitQueue_WakeThreadsResult, woken)
-);
-static_assert!(
-    offset_of!(WakeThreadsResult, still_waiting)
-        == offset_of!(bindings::OwnedWaitQueue_WakeThreadsResult, still_waiting)
-);
-static_assert!(
-    offset_of!(WakeThreadsResult, owner)
-        == offset_of!(bindings::OwnedWaitQueue_WakeThreadsResult, owner)
-);
-
 impl Default for WakeThreadsResult {
     #[inline]
     fn default() -> Self {
@@ -738,39 +623,25 @@ pub enum WakeOption {
     AssignOwner,
 }
 
-static_assert!(WakeOption::None as i32 == bindings::OwnedWaitQueue_WakeOption::None as i32);
-static_assert!(
-    WakeOption::AssignOwner as i32 == bindings::OwnedWaitQueue_WakeOption::AssignOwner as i32
-);
-static_assert!(size_of::<WakeOption>() == size_of::<bindings::OwnedWaitQueue_WakeOption>());
-static_assert!(align_of::<WakeOption>() == align_of::<bindings::OwnedWaitQueue_WakeOption>());
-
-/// Pinned opaque wrapper around C++ `Thread::UnblockList`.
+/// Pinned wrapper around [`UnblockList`] (`DoublyLinkedList<NonNull<Thread>, UnblockListTag>`).
 ///
-/// C++ `Thread::UnblockList` (`fbl::DoublyLinkedListCustomTraits<Thread*, ...>`) is
-/// self-referential: its end sentinel encodes the address of the list object itself
-/// (`(uintptr_t)this | 1`). Moving it by value in Rust (`memcpy`) without running the C++ move
-/// constructor would invalidate its sentinel. Consequently, `ThreadUnblockList` is pinned in place
-/// via [`ThreadUnblockList::init`].
-///
-/// `raw` is structurally pinned so that `ThreadUnblockList` is `!Unpin`. Otherwise
-/// `&mut ThreadUnblockList` would be `noalias`, and LLVM could assume that the C++ list's head is
-/// not modified through pointers recovered from its (self-referential) sentinel, caching stale
-/// list state across FFI calls that inline the C++ list operations.
+/// [`UnblockList`] (and C++ `Thread::UnblockList`, which shares its single-word sentinel-encoded
+/// head pointer layout over `Thread::unblock_list_node`) is self-referential: its end sentinel
+/// encodes the address of the list object itself (`(uintptr_t)this | 1`). Consequently,
+/// `ThreadUnblockList` is pinned in place via [`ThreadUnblockList::init`] and structurally pins
+/// `list` so it remains `!Unpin`.
 #[repr(C)]
-#[pin_data(PinnedDrop)]
+#[pin_data]
 pub struct ThreadUnblockList {
+    // Safety invariant: Every linked `NonNull<Thread>` is a valid, live `Thread` (relied upon by
+    // `ThreadPtr::from_raw` in `front_ptr` and `pop_front`) that may have concurrent shared
+    // `&Thread` references.
     #[pin]
-    raw: zr::Opaque<bindings::Thread_UnblockList>,
+    list: UnblockList,
 }
 
-static_assert!(size_of::<ThreadUnblockList>() == size_of::<bindings::Thread_UnblockList>());
-static_assert!(align_of::<ThreadUnblockList>() == align_of::<bindings::Thread_UnblockList>());
-// `Thread::UnblockList` and the Rust `UnblockList` are two views of one list: both are a single
-// sentinel-encoded head pointer over the same `unblock_list_node` of `Thread` (whose offset is
-// asserted in `thread.rs`), which is what lets `as_list` reinterpret the storage.
-static_assert!(size_of::<UnblockList>() == size_of::<bindings::Thread_UnblockList>());
-static_assert!(align_of::<UnblockList>() == align_of::<bindings::Thread_UnblockList>());
+static_assert!(size_of::<ThreadUnblockList>() == size_of::<UnblockList>());
+static_assert!(align_of::<ThreadUnblockList>() == align_of::<UnblockList>());
 static_assert!(size_of::<UnblockList>() == size_of::<*mut Thread>());
 static_assert!(align_of::<UnblockList>() == align_of::<*mut Thread>());
 
@@ -778,37 +649,43 @@ impl ThreadUnblockList {
     /// Returns an in-place pinned initializer for a new, empty `ThreadUnblockList`.
     #[inline]
     pub fn init() -> impl PinInit<Self, Infallible> {
-        // SAFETY: `bindings::cpp_thread_unblock_list_init` placement-new initializes a valid,
-        // empty `Thread::UnblockList` in-place in the provided slot.
-        zr::pin_init_ffi!(bindings::cpp_thread_unblock_list_init)
+        pin_init::pin_init!(Self { list <- UnblockList::new() })
     }
 
-    /// Domain-specific conversion: returns raw pointer for `ThreadUnblockList`.
+    /// Views the list as the underlying [`UnblockList`].
+    ///
+    /// # Safety
+    ///
+    /// - Any element inserted through the returned [`UnblockList`] must point to a valid, live
+    ///   [`Thread`] that is not currently in any unblock list and remains alive while linked in
+    ///   this list.
+    /// - Because linked [`Thread`]s may have concurrent shared `&Thread` references (for example,
+    ///   threads pushed via [`Self::push_back`]), the caller must not invoke mutable element
+    ///   accessors (such as `front_mut`, `back_mut`, `iter_mut`, `forward_iter_mut`,
+    ///   `reverse_iter_mut`, or `CursorMut::get_mut`) on the returned [`UnblockList`] unless
+    ///   exclusive access to the accessed [`Thread`] is independently guaranteed for the lifetime
+    ///   of the `Pin<&mut Thread>` borrow (and the [`Thread`] satisfies [`Pin`]'s drop guarantee).
     #[inline]
-    pub fn as_raw(&self) -> *mut bindings::Thread_UnblockList {
-        self.raw.get()
+    pub(crate) unsafe fn as_list(self: Pin<&mut Self>) -> Pin<&mut UnblockList> {
+        self.project().list
     }
 
-    /// Views the list as the Rust [`UnblockList`] over the same storage.
-    #[inline]
-    pub fn as_list(self: Pin<&mut Self>) -> Pin<&mut UnblockList> {
-        // SAFETY: `Self::init` constructed a valid `Thread::UnblockList` in `raw`, which shares
-        // its layout and sentinel encoding with `UnblockList` (asserted above); the projection
-        // keeps the list pinned and the `&mut` borrow of `self` makes it unique.
-        unsafe { self.map_unchecked_mut(|list| &mut *list.raw.get().cast::<UnblockList>()) }
-    }
-
-    /// Views the list as the Rust [`UnblockList`] over the same storage, shared.
+    /// Views the list as the underlying [`UnblockList`], shared.
     #[inline]
     pub fn as_list_ref(&self) -> &UnblockList {
-        // SAFETY: As in `as_list`; only shared access is handed out.
-        unsafe { &*self.raw.get().cast::<UnblockList>() }
+        &self.list
     }
 
     /// Returns whether the list is empty.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.as_list_ref().is_empty()
+        self.list.is_empty()
+    }
+
+    /// Removes all [`Thread`]s from the list.
+    #[inline]
+    pub fn clear(self: Pin<&mut Self>) {
+        self.project().list.clear();
     }
 
     /// Returns the [`Thread`] at the front of the list, if any, without materializing a `&Thread`
@@ -818,9 +695,13 @@ impl ThreadUnblockList {
         if self.is_empty() {
             None
         } else {
-            // SAFETY: `UnblockList` is `repr(C)` with a single `head: *mut Thread` field (asserted
-            // above), and every member of a non-empty unblock list is a live `Thread`.
-            let head = unsafe { *self.raw.get().cast::<*mut Thread>() };
+            // SAFETY: `fbl::DoublyLinkedList` (`UnblockList`) is defined `#[repr(C)]` with
+            // `head: *mut Thread` at offset 0 followed only by zero-sized fields (whose overall
+            // pointer size and alignment are asserted above), and `self` is non-empty so `head`
+            // holds a raw element pointer rather than the sentinel.
+            let head = unsafe { *core::ptr::from_ref(&self.list).cast::<*mut Thread>() };
+            // SAFETY: By the `list` safety invariant, every linked element is a valid, live
+            // `Thread`.
             unsafe { ThreadPtr::from_raw(head) }
         }
     }
@@ -833,8 +714,11 @@ impl ThreadUnblockList {
     /// that it remains alive while it is a member of this list.
     #[inline]
     pub unsafe fn push_back(self: Pin<&mut Self>, thread: &Thread) {
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.as_list().push_back_raw(NonNull::from(thread)) }
+        // SAFETY: Forwarded from the caller (`thread` is a live `Thread` not in any unblock list
+        // that remains alive while in `self.list`, preserving the `list` safety invariant; mutable
+        // element accessors on `UnblockList` are gated behind `Self::as_list`'s `# Safety`
+        // contract).
+        unsafe { self.project().list.push_back_raw(NonNull::from(thread)) }
     }
 
     /// Adds the [`Thread`] pointed to by `thread` to the back of the list.
@@ -850,33 +734,24 @@ impl ThreadUnblockList {
     pub unsafe fn push_back_ptr(self: Pin<&mut Self>, thread: ThreadPtr) {
         // SAFETY: A `ThreadPtr` wraps a `NonNull<Thread>`, so `thread.as_raw()` is non-null.
         let thread = unsafe { NonNull::new_unchecked(thread.as_raw()) };
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.as_list().push_back_raw(thread) }
+        // SAFETY: Forwarded from the caller (`thread` points to a live `Thread` not in any unblock
+        // list that remains alive while in `self.list`, preserving the `list` safety invariant;
+        // mutable element accessors on `UnblockList` are gated behind `Self::as_list`'s `# Safety`
+        // contract).
+        unsafe { self.project().list.push_back_raw(thread) }
     }
 
     /// Removes and returns the [`Thread`] at the front of the list, if any.
     #[inline]
     pub fn pop_front(self: Pin<&mut Self>) -> Option<ThreadPtr> {
-        // SAFETY: Every member of the list is a live `Thread`.
-        self.as_list().pop_front().and_then(|p| unsafe { ThreadPtr::from_raw(p.as_ptr()) })
+        // SAFETY: By the `list` safety invariant, every linked element is a valid, live `Thread`.
+        self.project().list.pop_front().and_then(|p| unsafe { ThreadPtr::from_raw(p.as_ptr()) })
     }
 
     /// Returns an iterator over the [`Thread`]s in the list.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = ThreadPtr> + '_ {
-        self.as_list_ref().iter().map(ThreadPtr::from)
-    }
-}
-
-#[pinned_drop]
-impl PinnedDrop for ThreadUnblockList {
-    #[inline]
-    fn drop(self: Pin<&mut Self>) {
-        // SAFETY: `self.as_raw()` points to a valid `Thread::UnblockList` initialized in-place by
-        // `Self::init`.
-        unsafe {
-            bindings::cpp_thread_unblock_list_destroy(self.as_raw());
-        }
+        self.list.iter().map(ThreadPtr::from)
     }
 }
 
@@ -1025,18 +900,9 @@ pub struct OwnedWaitQueue {
         KCell<Option<NonNull<WaitQueueInheritedSchedulerState>>, WaitQueueLockClass>,
 }
 
-// Compile-time layout assertions against the C++ OwnedWaitQueue type via bindgen.
-static_assert!(size_of::<OwnedWaitQueue>() == size_of::<bindings::OwnedWaitQueue>());
-static_assert!(align_of::<OwnedWaitQueue>() == align_of::<bindings::OwnedWaitQueue>());
-static_assert!(offset_of!(OwnedWaitQueue, base) == offset_of!(bindings::OwnedWaitQueue, _base));
-static_assert!(
-    offset_of!(OwnedWaitQueue, dll_node) == offset_of!(bindings::OwnedWaitQueue, _base_1)
-);
-static_assert!(offset_of!(OwnedWaitQueue, owner) == offset_of!(bindings::OwnedWaitQueue, owner_));
-static_assert!(
-    offset_of!(OwnedWaitQueue, inherited_scheduler_state_storage)
-        == offset_of!(bindings::OwnedWaitQueue, inherited_scheduler_state_storage_)
-);
+// `WaitQueueBase` downcasts to `OwnedWaitQueue` via pointer cast when `magic == OWNED_MAGIC`,
+// relying on `base` residing at offset 0.
+static_assert!(offset_of!(OwnedWaitQueue, base) == 0);
 
 // SAFETY: `OwnedWaitQueue` has no thread-local ownership invariants: its `ThreadPtr` and `NonNull`
 // fields refer to kernel-global objects which are not tied to the creating CPU or thread, so
@@ -1114,11 +980,13 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     /// before this queue's lock is released, after the transient states which that invariant
     /// permits).
     #[inline(always)]
-    pub(crate) unsafe fn collection_mut(&mut self) -> &mut WaitQueueCollection {
+    pub(crate) unsafe fn collection_mut(&mut self) -> Pin<&mut WaitQueueCollection> {
         let (queue, token) = self.split_mut();
         // SAFETY: As in `collection`; the unique borrow of `self` ensures no other reference to
-        // `base.collection` is live.
-        unsafe { queue.base.collection.get_mut(token) }
+        // `base.collection` is live. `base.collection` is a `#[pin]` field of the `!Unpin`
+        // `WaitQueueBase`, which is only ever constructed in place (`init_with_magic`) and never
+        // moved, so the collection stays pinned.
+        unsafe { queue.base.collection.get_pinned_mut_locked(token) }
     }
 
     /// Returns the current owner of this queue, if any.
@@ -1404,16 +1272,10 @@ impl OwnedWaitQueue {
         })
     }
 
-    /// Domain-specific conversion: returns raw pointer for `OwnedWaitQueue`.
-    #[inline]
-    pub fn as_raw(&self) -> *mut bindings::OwnedWaitQueue {
-        core::ptr::from_ref(self).cast_mut().cast()
-    }
-
-    /// Returns a raw mutable pointer to the underlying C++ `OwnedWaitQueue`.
+    /// Returns a raw mutable pointer to this `OwnedWaitQueue` as `*mut c_void`.
     #[inline]
     pub fn as_ptr(&self) -> *mut c_void {
-        self.as_raw().cast()
+        core::ptr::from_ref(self).cast_mut().cast()
     }
 
     /// Returns a default no-op [`DefaultWakeHooks`] instance.
@@ -1736,13 +1598,6 @@ impl OwnedWaitQueue {
         iss.ipvs.assert_consistency();
     }
 
-    #[cold]
-    #[inline(never)]
-    #[track_caller]
-    fn panic_missing_owq_iss() -> ! {
-        panic!("OwnedWaitQueue has inherited scheduler state storage");
-    }
-
     /// Begin a propagation operation starting from an upstream thread, and going
     /// through a downstream owned wait queue.  Only for use during edge add/remove
     /// operations. Base profile changes call `finish_propagate` directly when
@@ -1754,12 +1609,26 @@ impl OwnedWaitQueue {
     /// calling this. No locks are released by this operation; the caller unlocks the chain
     /// afterwards.
     ///
+    /// # Panics
+    ///
+    /// Panics if `downstream_node` (when pressure is non-zero) or any visited downstream
+    /// [`OwnedWaitQueue`] has `None` `inherited_scheduler_state_storage`.
+    ///
     /// # Safety
     ///
-    /// The caller must ensure that the locks of every node in the PI chain downstream of
-    /// `downstream_node` are held by the active transaction, and that no proofs or guards for
-    /// those nodes are used during the call. (The locks of `upstream_node` and `downstream_node`
-    /// themselves are proven held by their proofs.)
+    /// The caller must ensure that:
+    /// - The locks of every node in the PI chain downstream of `downstream_node` (including any
+    ///   wait queue a downstream thread is blocked in) are held by the active
+    ///   `ChainLockTransaction`, and that PI chain is acyclic and does not contain
+    ///   `upstream_node.owner()`. (The locks of `upstream_node` and `downstream_node` themselves
+    ///   are proven held by their `ChainLockProof`s.)
+    /// - Interrupts and preemption are disabled, and no scheduler `queue_lock_` is held on the
+    ///   current CPU.
+    /// - Other than `upstream_node` and `downstream_node` (which are mutably borrowed for this
+    ///   call), no conflicting `ChainLockProof`, `OwnerGuard`, or live borrow of `SchedulerState`,
+    ///   `inherited_scheduler_state_storage` `KCell`, or pointed-to
+    ///   `WaitQueueInheritedSchedulerState` exists across the call for `upstream_node.owner()`,
+    ///   `downstream_node.owner()`, or any node in the PI chain downstream of `downstream_node`.
     #[inline(always)]
     pub(crate) unsafe fn begin_propagate_thread_owq<Op: PropagateOpTag>(
         upstream_node: &mut ChainLockProof<'_, Thread>,
@@ -1792,9 +1661,9 @@ impl OwnedWaitQueue {
             if Op::OP == PropagateOp::AddSingleEdge {
                 debug_assert!(downstream_node.count() > 0);
             }
-            let Some(owq_iss_nn) = downstream_node.inherited_scheduler_state_storage() else {
-                Self::panic_missing_owq_iss();
-            };
+            let owq_iss_nn = downstream_node
+                .inherited_scheduler_state_storage()
+                .expect("OwnedWaitQueue has inherited scheduler state storage");
             let owq_iss = owq_iss_nn.as_ptr();
             let min_deadline = downstream_node.collection().min_inheritable_relative_deadline();
             // SAFETY: `owq_iss` is `downstream_node`'s storage, guarded by `downstream_node`'s
@@ -1824,16 +1693,17 @@ impl OwnedWaitQueue {
         let upstream_node: &Thread = upstream_node.owner();
         let downstream_node: &OwnedWaitQueue = downstream_node.owner();
         // SAFETY: The locks of `upstream_node` and `downstream_node` are held (proven by the
-        // proofs borrowed above), the caller guarantees the rest of the downstream chain is
-        // locked by the active transaction, and no proofs or guards for those nodes are used
-        // during the call.
+        // proofs mutably borrowed above and unused across this call), `ipv_snapshot` is a stack
+        // copy, and the caller guarantees that the downstream PI chain is locked and acyclic
+        // (without `upstream_node`), that interrupts and preemption are disabled with no scheduler
+        // `queue_lock_` held on the current CPU, and that no conflicting proofs, guards, or
+        // scheduler/storage borrows exist across the call.
         unsafe {
             Self::begin_propagate_thread_owq_slow(
                 upstream_node,
                 downstream_node,
                 &ipv_snapshot,
                 op,
-                force_inheritance,
                 old_target_ep,
                 clt_token,
                 preempt_disabled_token,
@@ -1847,14 +1717,12 @@ impl OwnedWaitQueue {
     /// # Safety
     ///
     /// Same as [`Self::finish_propagate`] for `upstream_node` and `downstream_node`.
-    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     unsafe fn begin_propagate_thread_owq_slow<Op: PropagateOpTag>(
         upstream_node: &Thread,
         downstream_node: &OwnedWaitQueue,
         ipv_snapshot: &InheritedProfileValues,
         op: Op,
-        force_inheritance: ForceInheritance,
         old_target_ep: Option<&EffectiveProfile>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -1868,7 +1736,6 @@ impl OwnedWaitQueue {
                     None,
                     Some(ipv_snapshot),
                     op,
-                    force_inheritance,
                     old_target_ep,
                     clt_token,
                     preempt_disabled_token,
@@ -1880,7 +1747,6 @@ impl OwnedWaitQueue {
                     Some(ipv_snapshot),
                     None,
                     op,
-                    force_inheritance,
                     old_target_ep,
                     clt_token,
                     preempt_disabled_token,
@@ -1900,14 +1766,27 @@ impl OwnedWaitQueue {
     /// calling this. No locks are released by this operation; the caller unlocks the chain
     /// afterwards.
     ///
+    /// # Panics
+    ///
+    /// Panics if `upstream_proof` is non-empty and its `inherited_scheduler_state_storage` (or
+    /// that of any visited downstream [`OwnedWaitQueue`]) is `None`.
+    ///
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// - The locks of `downstream_node` and every node in the PI chain downstream of it are held
-    ///   by the active transaction, and no proofs or guards for those nodes are used during the
-    ///   call. (The lock of the upstream queue is proven held by `upstream_proof`.) The
-    ///   transaction need not be finalized: the `assign_owner` paths propagate before finalizing,
-    ///   as in C++.
+    /// - The locks of `downstream_node` and every node in the PI chain downstream of it (including
+    ///   any wait queue a downstream thread is blocked in) are held by the active
+    ///   `ChainLockTransaction`, and that PI chain is acyclic and does not contain
+    ///   `upstream_proof.owner()`. (The lock of the upstream queue is proven held by
+    ///   `upstream_proof`.) The transaction need not be finalized: the `assign_owner` paths
+    ///   propagate before finalizing, as in C++.
+    /// - Interrupts and preemption are disabled, and no scheduler `queue_lock_` is held on the
+    ///   current CPU.
+    /// - Other than `upstream_proof` (which is mutably borrowed for this call), no conflicting
+    ///   `ChainLockProof`, `OwnerGuard`, or live borrow of `SchedulerState`,
+    ///   `inherited_scheduler_state_storage` `KCell`, or pointed-to
+    ///   `WaitQueueInheritedSchedulerState` exists across the call for `upstream_proof.owner()`,
+    ///   `downstream_node`, or any node in the PI chain downstream of `downstream_node`.
     /// - For `RemoveSingleEdge`, `downstream_node` is the queue's current owner, and for
     ///   `AddSingleEdge`, the queue currently has no owner.
     unsafe fn begin_propagate_owq_thread<Op: PropagateOpTag>(
@@ -1944,28 +1823,27 @@ impl OwnedWaitQueue {
             .inherited_scheduler_state_storage()
             .expect("non-empty OwnedWaitQueue has inherited scheduler state storage");
         // SAFETY: `iss_ptr` is `upstream_node`'s storage, guarded by its lock (proven held by
-        // `upstream_proof`). Propagation from `upstream_node` never applies deltas to
-        // `upstream_node` itself, so `ipvs` is not mutated while this reference is live. Only
-        // `ipvs` is borrowed: during the call, the scheduler (`SplitNodeFromPiGraph`) may write
-        // the sibling dynamic scheduling parameter fields of this same storage, which are
-        // disjoint.
-        let ipvs: &InheritedProfileValues = unsafe { &(*iss_ptr.as_ptr()).ipvs };
+        // `upstream_proof`). Copy `ipvs` by value so no borrow of the storage remains live while
+        // the scheduler (`split_node_from_pi_graph`) updates its dynamic scheduling parameters.
+        let ipvs: InheritedProfileValues = unsafe { (*iss_ptr.as_ptr()).ipvs };
         ipvs.assert_consistency();
 
         let upstream_node: &OwnedWaitQueue = upstream_proof.owner();
         // SAFETY: `upstream_node`'s lock is held (proven by `upstream_proof`, which is mutably
-        // borrowed and unused during the call), and the caller guarantees that `downstream_node`
-        // and the rest of the chain downstream of it are locked by the active transaction with no
-        // proofs or guards for those nodes in use.
+        // borrowed and unused during the call), `ipvs` was copied by value onto the stack so no
+        // borrow of `*iss_ptr` remains live, and the caller guarantees that `downstream_node` and
+        // the acyclic PI chain downstream of it (not containing `upstream_node`) are locked by the
+        // active transaction, that interrupts and preemption are disabled with no scheduler
+        // `queue_lock_` held on the current CPU, and that no conflicting proofs, guards, or
+        // scheduler/storage borrows exist across the call.
         unsafe {
             if Op::OP == PropagateOp::RemoveSingleEdge {
                 Self::finish_propagate(
                     upstream_node,
                     downstream_node,
                     None,
-                    Some(ipvs),
+                    Some(&ipvs),
                     op,
-                    ForceInheritance::No,
                     None,
                     clt_token,
                     preempt_disabled_token,
@@ -1974,10 +1852,9 @@ impl OwnedWaitQueue {
                 Self::finish_propagate(
                     upstream_node,
                     downstream_node,
-                    Some(ipvs),
+                    Some(&ipvs),
                     None,
                     op,
-                    ForceInheritance::No,
                     None,
                     clt_token,
                     preempt_disabled_token,
@@ -1991,11 +1868,26 @@ impl OwnedWaitQueue {
     /// propagating IPV deltas, and calls into the scheduler to finish the
     /// operation once the end of the chain is reached.
     ///
+    /// # Panics
+    ///
+    /// Panics if a consequence-bearing propagation visits an [`OwnedWaitQueue`] (including
+    /// `upstream_node`) whose `inherited_scheduler_state_storage` is `None`.
+    ///
     /// # Safety
     ///
-    /// The caller must ensure that the locks of `upstream_node`, `downstream_node`, and every node
-    /// in the PI chain downstream of `downstream_node` are held by the active transaction, and
-    /// that no proofs or guards for those nodes are used during the call.
+    /// The caller must ensure that:
+    /// - The locks of `upstream_node`, `downstream_node`, and every node in the PI chain
+    ///   downstream of `downstream_node` (including any wait queue a downstream thread is blocked
+    ///   in) are held by the active `ChainLockTransaction`, and the chain starting at
+    ///   `upstream_node` through `downstream_node` is acyclic (so `upstream_node` is distinct from
+    ///   `downstream_node` and from every node downstream of `downstream_node`).
+    /// - Interrupts and preemption are disabled, and no scheduler `queue_lock_` is held on the
+    ///   current CPU.
+    /// - No conflicting `ChainLockProof`, `OwnerGuard`, or live borrow of `SchedulerState`,
+    ///   `inherited_scheduler_state_storage` `KCell`, or pointed-to
+    ///   `WaitQueueInheritedSchedulerState` (including via `added_ipv` or `lost_ipv`) exists
+    ///   across the call for `upstream_node`, `downstream_node`, or any node in the PI chain
+    ///   downstream of `downstream_node`.
     #[allow(clippy::too_many_arguments)]
     unsafe fn finish_propagate<Op: PropagateOpTag, U: PiNode, D: PiNode>(
         upstream_node: &U,
@@ -2003,7 +1895,6 @@ impl OwnedWaitQueue {
         added_ipv: Option<&InheritedProfileValues>,
         lost_ipv: Option<&InheritedProfileValues>,
         _op: Op,
-        force_inheritance: ForceInheritance,
         old_target_ep: Option<&EffectiveProfile>,
         clt_token: &ChainLockTransactionToken,
         preempt_disabled_token: &PreemptDisabledToken,
@@ -2183,12 +2074,21 @@ impl OwnedWaitQueue {
                         }
                     } else if utilization_after == SchedUtilization::from_raw(0) {
                         // Last deadline thread just left, propagate before resetting.
-                        // SAFETY: Forwarded from the caller.
+                        // SAFETY:
+                        // - `upstream_node` and `owq_iter` are distinct nodes in the acyclic
+                        //   locked PI chain (disjoint types when `U = Thread`; strictly downstream
+                        //   of `downstream_node` after `skip_phase1` when `U = OwnedWaitQueue`),
+                        //   and their locks plus every lock downstream of `owq_iter` are held by
+                        //   the active transaction.
+                        // - Interrupts and preemption are disabled and no scheduler `queue_lock_`
+                        //   is held on the current CPU (per caller).
+                        // - No external conflicting proof or scheduler/storage borrow exists (per
+                        //   caller), and all local `owq_proof` and `*owq_iss` borrows above have
+                        //   ended (`old_owq_ep` is a local value copy).
                         unsafe {
                             Op::propagate(
                                 upstream_node,
                                 owq_iter,
-                                force_inheritance,
                                 old_owq_ep.as_ref(),
                                 clt_token,
                                 preempt_disabled_token,
@@ -2200,12 +2100,21 @@ impl OwnedWaitQueue {
                         // The overall utilization has changed, but there was deadline
                         // pressure both before and after.  We need to recompute the dynamic
                         // scheduler parameters.
-                        // SAFETY: Forwarded from the caller.
+                        // SAFETY:
+                        // - `upstream_node` and `owq_iter` are distinct nodes in the acyclic
+                        //   locked PI chain (disjoint types when `U = Thread`; strictly downstream
+                        //   of `downstream_node` after `skip_phase1` when `U = OwnedWaitQueue`),
+                        //   and their locks plus every lock downstream of `owq_iter` are held by
+                        //   the active transaction.
+                        // - Interrupts and preemption are disabled and no scheduler `queue_lock_`
+                        //   is held on the current CPU (per caller).
+                        // - No external conflicting proof or scheduler/storage borrow exists (per
+                        //   caller), and all local `owq_proof` and `*owq_iss` borrows above have
+                        //   ended (`old_owq_ep` is a local value copy).
                         unsafe {
                             Op::propagate(
                                 upstream_node,
                                 owq_iter,
-                                force_inheritance,
                                 old_owq_ep.as_ref(),
                                 clt_token,
                                 preempt_disabled_token,
@@ -2241,12 +2150,21 @@ impl OwnedWaitQueue {
                 thread_iter.lock().assert_held(clt_token);
                 // SAFETY: `thread_iter`'s lock (and the rest of the PI chain) is held.
                 unsafe { Self::apply_ipv_delta_to_thread(lost_ipv, added_ipv, thread_iter) };
-                // SAFETY: Forwarded from the caller.
+                // SAFETY:
+                // - `upstream_node` and `thread_iter` are distinct nodes in the acyclic locked PI
+                //   chain (disjoint types when `U = OwnedWaitQueue`; strictly downstream via
+                //   `owq_iter.owner_thread()` when `U = Thread`), and their locks plus every lock
+                //   downstream of `thread_iter` (including any wait queue it is blocked in) are
+                //   held by the active transaction.
+                // - Interrupts and preemption are disabled and no scheduler `queue_lock_` is held
+                //   on the current CPU (per caller).
+                // - No external conflicting proof or scheduler/storage borrow exists (per caller),
+                //   and all local `owq_proof`, `*owq_iss`, and `apply_ipv_delta_to_thread` borrows
+                //   above have ended.
                 unsafe {
                     Op::propagate(
                         upstream_node,
                         thread_iter,
-                        force_inheritance,
                         None,
                         clt_token,
                         preempt_disabled_token,
@@ -2623,7 +2541,7 @@ impl OwnedWaitQueue {
     /// transaction, that no proofs or guards for those nodes are used during or after the call,
     /// and that if `start` is a wait queue whose magic is [`OWNED_MAGIC`], its pointer meets the
     /// requirements of [`Self::downcast_ptr`].
-    unsafe fn unlock_pi_chain_from_node(
+    pub(crate) unsafe fn unlock_pi_chain_from_node(
         start: PiChainNodeRef<'_>,
         stop_point: *const c_void,
         clt_token: &ChainLockTransactionToken,
@@ -2836,8 +2754,12 @@ impl OwnedWaitQueue {
                 owq.lock().assert_held(token);
                 let new_ipvs =
                     Self::snapshot_thread_ipv(&thread_guard.proof(), ForceInheritance::No);
-                // SAFETY: The entire PI chain starting from `thread` is locked, and no proofs or
-                // guards for its nodes are used during the call.
+                // SAFETY: The entire acyclic PI chain starting from `thread` was locked by
+                // `lock_pi_chain_from_thread`, interrupts and preemption are disabled by
+                // `EAGER_RESCHED_DISABLE_AND_IRQ_SAVE_OPTION` with no scheduler `queue_lock_` held
+                // (`assert_no_transaction_active` at entry), `new_ipvs` and `old_ipvs` are stack
+                // copies, and no conflicting proofs, guards, or scheduler/storage borrows exist
+                // across the call.
                 unsafe {
                     Self::finish_propagate(
                         thread,
@@ -2845,7 +2767,6 @@ impl OwnedWaitQueue {
                         Some(&new_ipvs),
                         Some(&old_ipvs),
                         BASE_PROFILE_CHANGED_OP,
-                        ForceInheritance::No,
                         None,
                         token,
                         &preempt_disabled,
@@ -3486,7 +3407,8 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
             // also holding that lock. `t_proof` is only used for those reads.
             let t_proof = unsafe { assume_synchronized_read_only(t) };
             assert_in_wait_queue(&t_proof, &self.as_base());
-            hooks.allow(t)
+            // SAFETY: `t` is blocked in `self`, whose lock is held by the active transaction.
+            unsafe { hooks.allow(t) }
         };
         if !allow {
             return LockOneWaiterResult::NoneToWake;
@@ -3723,7 +3645,8 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
                 // without also holding that lock. `t_proof` is only used for those reads.
                 let t_proof = unsafe { assume_synchronized_read_only(t) };
                 assert_in_wait_queue(&t_proof, &self.as_base());
-                !hooks.allow(t)
+                // SAFETY: `t` is blocked in `self`, whose lock is held by the active transaction.
+                !unsafe { hooks.allow(t) }
             };
 
             if stop {
@@ -3793,10 +3716,16 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the transaction is not finalized, that no locks in the PI
-    /// chains of this queue's owner or `new_owner` are held (other than `new_owner`'s own lock if
-    /// `new_owner_is_locked`), and that no proofs or guards for `new_owner` are used during the
-    /// call.
+    /// The caller must ensure that:
+    /// - The transaction is not finalized, and no locks in the PI chains of this queue's owner or
+    ///   `new_owner` are held (other than `new_owner`'s own lock if `new_owner_is_locked`, in
+    ///   which case `new_owner`'s downstream PI chain is acyclic without `self.owner()`).
+    /// - Interrupts and preemption are disabled, and no scheduler `queue_lock_` is held on the
+    ///   current CPU.
+    /// - Other than `self`, no conflicting `ChainLockProof`, `OwnerGuard`, or live borrow of
+    ///   `SchedulerState`, `inherited_scheduler_state_storage` `KCell`, or
+    ///   `WaitQueueInheritedSchedulerState` exists across the call for `self.owner()` or any node
+    ///   in the PI chains of this queue's owner or `new_owner`.
     unsafe fn assign_owner_common(
         &mut self,
         new_owner: Option<&Thread>,
@@ -3892,9 +3821,15 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the locks of the PI chains starting from this queue and from
-    /// `new_owner` are held by the active (finalized) transaction, and that no proofs or guards
-    /// for those nodes (other than `self`) are used during the call.
+    /// The caller must ensure that:
+    /// - The locks of the acyclic PI chains starting from this queue and from `new_owner` (neither
+    ///   containing `self.owner()` downstream) are held by the active (finalized) transaction.
+    /// - Interrupts and preemption are disabled, and no scheduler `queue_lock_` is held on the
+    ///   current CPU.
+    /// - Other than `self`, no conflicting `ChainLockProof`, `OwnerGuard`, or live borrow of
+    ///   `SchedulerState`, `inherited_scheduler_state_storage` `KCell`, or
+    ///   `WaitQueueInheritedSchedulerState` exists across the call for `self.owner()` or any node
+    ///   in those PI chains.
     unsafe fn assign_owner_internal(
         &mut self,
         new_owner: Option<&Thread>,
@@ -3951,11 +3886,13 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that the transaction is finalized, that the PI chain starting from
-    /// `self.owner_thread()` (if `Some`) is locked by the active transaction, and that no
-    /// [`ChainLockProof`] or [`OwnerGuard`] for any node in `self`'s downstream PI chain (other
-    /// than `self`) is live or used during or after the call (as required by
-    /// [`Self::assign_owner_internal`] and [`OwnedWaitQueue::unlock_pi_chain_common`]).
+    /// The caller must ensure that the transaction is finalized, that interrupts and preemption
+    /// are disabled with no scheduler `queue_lock_` held on the current CPU, that the acyclic PI
+    /// chain starting from `self.owner_thread()` (if `Some`) is locked by the active transaction,
+    /// and that no [`ChainLockProof`], [`OwnerGuard`], or scheduler/storage borrow for
+    /// `self.owner()` or any node in `self`'s downstream PI chain (other than `self`) is live or
+    /// used during or after the call (as required by [`Self::assign_owner_internal`] and
+    /// [`OwnedWaitQueue::unlock_pi_chain_common`]).
     #[inline(always)]
     unsafe fn clear_and_unlock_owner_locked(
         &mut self,
@@ -3981,8 +3918,9 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     /// # Safety
     ///
     /// The caller must ensure that `t` is live, locked by the finalized transaction `clt_token`
-    /// with no other proof or guard for `t` live, and blocked in `self.owner()`, and that
-    /// `self.owner_thread()` is `None`.
+    /// with no other proof, guard, or scheduler/storage borrow for `t` or `self.owner()` live, and
+    /// blocked in `self.owner()`, that `self.owner_thread()` is `None`, and that interrupts and
+    /// preemption are disabled with no scheduler `queue_lock_` held on the current CPU.
     #[inline(always)]
     unsafe fn dequeue_waiter_and_update_pi_locked<H: IWakeRequeueHook + ?Sized>(
         &mut self,
@@ -4083,10 +4021,18 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
     ///   [`Self::lock_for_wake_operation_locked`] on `self.owner()` in the current transaction
     ///   (or, for its wake list, by `OwnedWaitQueue::lock_for_requeue_operation_or_backoff`), with
     ///   no intervening modifications to `self.owner()`, `threads`, or the acquired locks.
-    /// - No [`ChainLockProof<'_, Thread>`] or [`OwnerGuard<'_, Thread>`] for any thread in
-    ///   `threads` is live across this call.
+    /// - For every thread in `threads`, no `&mut Thread`, [`ChainLockProof<'_, Thread>`], or
+    ///   [`OwnerGuard<'_, Thread>`] is live across this call, and no `&Thread` is live across this
+    ///   call unless the caller otherwise keeps that thread alive.
+    /// - No [`ThreadPtr`] to a woken thread (including [`WakeThreadsResult::owner`] when
+    ///   `option == WakeOption::AssignOwner`) is dereferenced after this call unless the caller
+    ///   otherwise keeps that thread alive.
     /// - The active transaction has been finalized via
-    ///   [`ChainLockTransaction::finalize`](crate::kconcurrent::ChainLockTransaction::finalize).
+    ///   [`ChainLockTransaction::finalize`](crate::kconcurrent::ChainLockTransaction::finalize),
+    ///   interrupts and preemption are disabled, no scheduler `queue_lock_` is held on the current
+    ///   CPU, and no conflicting borrow of `SchedulerState`, `inherited_scheduler_state_storage`
+    ///   `KCell`, or `WaitQueueInheritedSchedulerState` exists across the call for `self.owner()`,
+    ///   its downstream PI chain, or `threads`.
     /// - If `option == WakeOption::AssignOwner`, `threads` contains at most one thread.
     pub(crate) unsafe fn wake_threads_locked<H: IWakeRequeueHook + ?Sized>(
         &mut self,
@@ -4110,17 +4056,17 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
 
         // Now wake all of the threads we had selected
         while let Some(t) = threads.as_mut().pop_front() {
-            // SAFETY: Every thread in `threads` is live and locked (per the caller).
-            let t: &Thread = unsafe { t.as_ref() };
             // SAFETY: `t` is live, locked by the finalized transaction, and blocked in
             // `self.owner()` with no other proof or guard for it live (per the caller).
             // `self.owner_thread()` is `None`: `clear_and_unlock_owner_locked` cleared it above,
             // and it stays `None` on every iteration, since `dequeue_waiter_and_update_pi_locked`
             // only assigns an owner when `option == WakeOption::AssignOwner`, in which case
             // `threads` contains at most one thread (per the caller, and debug-asserted above).
+            // The temporary `&Thread` ends when `dequeue_waiter_and_update_pi_locked` returns,
+            // before `scheduler::unblock` releases `t`'s lock below.
             unsafe {
                 self.dequeue_waiter_and_update_pi_locked(
-                    t,
+                    t.as_ref(),
                     wake_hooks,
                     option,
                     force_inheritance,
@@ -4130,11 +4076,13 @@ impl ChainLockProof<'_, OwnedWaitQueue> {
             }
 
             // Finally, unblock the thread, drop its lock in the process.
-            // SAFETY: `t`'s lock is held (per the caller), and no other proof or guard for it is
-            // live.
-            let t_guard = unsafe { OwnerGuard::adopt_unchecked(t, clt_token) };
-            // SAFETY: `t` was dequeued from this queue and the active transaction is finalized.
-            unsafe { scheduler::unblock(t_guard, clt_token) };
+            // SAFETY: `t` is non-idle (it was blocked in this queue) and was dequeued above with
+            // its lock held by the active, finalized transaction `clt_token` and no conflicting
+            // reference, guard, or proof live (per the caller); interrupts are disabled by the
+            // active transaction `clt_token` and local preemption is disabled by
+            // `preempt_disabled_token`; and `t` is not dereferenced after this call (unless
+            // independently kept alive by the caller).
+            unsafe { scheduler::unblock(t, clt_token) };
             woken += 1;
         }
 
@@ -4289,10 +4237,15 @@ impl OwnedWaitQueue {
     ///   it is live, locked by the active transaction, and blocked in the queue, and the PI chain
     ///   downstream of the queue is locked by the active transaction).
     /// - No [`ChainLockProof`] or [`OwnerGuard`] for the queue, for any node in its downstream PI
-    ///   chain, or for `thread` is live across this call.
+    ///   chain, or for `thread` is live across this call, and if `thread` is `Some`, no
+    ///   `&mut Thread` for it is live across this call.
     /// - If `thread` is `Some(t)`, the caller must subsequently unblock `t` via
     ///   [`scheduler::unblock`] before ending the transaction.
-    /// - The active transaction has been finalized via [`ChainLockTransaction::finalize`].
+    /// - The active transaction has been finalized via [`ChainLockTransaction::finalize`],
+    ///   interrupts and preemption are disabled, no scheduler `queue_lock_` is held on the current
+    ///   CPU, and no borrow of `SchedulerState`, `inherited_scheduler_state_storage` `KCell`, or
+    ///   `WaitQueueInheritedSchedulerState` for the queue, its downstream PI chain, or `thread` is
+    ///   live across this call.
     #[inline]
     pub(crate) unsafe fn dequeue_one_and_release_locked<H: IWakeRequeueHook + ?Sized>(
         guard: WakeOneGuard<'_>,
@@ -4381,8 +4334,17 @@ impl OwnedWaitQueue {
     ///   it is live, locked by the active transaction, and blocked in the queue, and the PI chain
     ///   downstream of the queue is locked by the active transaction).
     /// - No [`ChainLockProof`] or [`OwnerGuard`] for the queue, for any node in its downstream PI
-    ///   chain, or for `thread` is live across this call.
-    /// - The active transaction has been finalized via [`ChainLockTransaction::finalize`].
+    ///   chain, or for `thread` is live across this call, and if `thread` is `Some`, no
+    ///   `&mut Thread` for it is live across this call and no `&Thread` for it is live across this
+    ///   call unless the caller otherwise keeps the thread alive.
+    /// - Neither `thread` nor [`WakeThreadsResult::owner`] (when
+    ///   `option == WakeOption::AssignOwner`) is dereferenced after this call unless the caller
+    ///   otherwise keeps the thread alive.
+    /// - The active transaction has been finalized via [`ChainLockTransaction::finalize`],
+    ///   interrupts and preemption are disabled, no scheduler `queue_lock_` is held on the current
+    ///   CPU, and no borrow of `SchedulerState`, `inherited_scheduler_state_storage` `KCell`, or
+    ///   `WaitQueueInheritedSchedulerState` for the queue, its downstream PI chain, or `thread` is
+    ///   live across this call.
     #[inline]
     unsafe fn wake_one_and_release_locked<H: IWakeRequeueHook + ?Sized>(
         guard: WakeOneGuard<'_>,
@@ -4407,13 +4369,13 @@ impl OwnedWaitQueue {
         };
 
         if let Some(t_ptr) = thread {
-            // SAFETY: `t_ptr`'s ChainLock is still held by the active transaction `clt_token`, so
-            // the thread is live and cannot exit until `scheduler::unblock` releases its lock
-            // below, and no other proof or guard for it is live (per the caller).
-            let t_guard = unsafe { OwnerGuard::adopt_unchecked(t_ptr.as_ref(), clt_token) };
-            // SAFETY: `t` was dequeued from the wait queue above and the active transaction is
-            // finalized.
-            unsafe { scheduler::unblock(t_guard, clt_token) };
+            // SAFETY: `t_ptr` is non-idle (it was blocked in the wait queue) and was dequeued
+            // above with its lock held by the active, finalized transaction `clt_token` and no
+            // conflicting reference, guard, or proof live (per the caller); interrupts are
+            // disabled by the active transaction `clt_token` and local preemption is disabled by
+            // `preempt_disabled_token`; and `t_ptr` is not dereferenced after this call (unless
+            // independently kept alive by the caller).
+            unsafe { scheduler::unblock(t_ptr, clt_token) };
         }
 
         res
@@ -4815,7 +4777,11 @@ impl OwnedWaitQueue {
     /// # Safety
     ///
     /// The caller must ensure that:
-    /// - The active transaction has not yet been finalized, and `self.lock()` is not held by it.
+    /// - The active transaction has not yet been finalized, `self.lock()` is not held by it,
+    ///   interrupts and preemption are disabled, no scheduler `queue_lock_` is held on the current
+    ///   CPU, and no conflicting proof, guard, or scheduler/storage borrow exists across the call
+    ///   for `self`, its owner's PI chain, or `new_owner.owner()`'s PI chain (other than
+    ///   `new_owner`).
     /// - `new_owner.owner()` has been started (`state != Initial`, so that
     ///   [`ChainLockProof::can_own_wait_queues`] is valid).
     /// - `new_owner.owner()`'s downstream PI chain is either empty (not blocked in any wait queue)
@@ -4983,7 +4949,10 @@ impl OwnedWaitQueue {
     ///
     /// The caller must ensure that:
     /// - `current_thread.owner()` is the valid, currently executing [`Thread`] in a valid state to
-    ///   block (not holding any spinlocks).
+    ///   block (not holding any spinlocks, including any scheduler `queue_lock_`), with interrupts
+    ///   and preemption disabled and no conflicting proof, guard, or scheduler/storage borrow live
+    ///   across the call for `guard.owner()`, `current_thread.owner()`, or the locked PI chains
+    ///   (other than `guard` and `current_thread`).
     /// - `guard.owner()` remains alive and valid at its pinned address for the entire duration
     ///   that `current_thread.owner()` remains blocked in `guard.owner()`, and remains allocated
     ///   until this call returns (even if it is no longer valid as a wait queue once
@@ -5563,7 +5532,10 @@ impl OwnedWaitQueue {
     ///
     /// The caller must ensure that `details`, `guard`, and `requeue_target_guard` were produced by
     /// a preceding successful call to [`Self::lock_for_requeue_operation_or_backoff`] in the
-    /// current transaction, with no intervening mutations, and that the transaction is finalized.
+    /// current transaction, with no intervening mutations, that the transaction is finalized with
+    /// interrupts and preemption disabled and no scheduler `queue_lock_` held on the current CPU,
+    /// and that no conflicting proof, guard, or scheduler/storage borrow exists across the call
+    /// for the queues, locked threads, or locked PI chains.
     #[allow(clippy::too_many_arguments)]
     unsafe fn wake_and_requeue_internal<
         WH: IWakeRequeueHook + ?Sized,
@@ -5818,572 +5790,6 @@ impl OwnedWaitQueue {
     }
 }
 
-/// C++ FFI entry point for `OwnedWaitQueue::LockPiChain(Thread&)`.
-///
-/// # Safety
-///
-/// `start` must point to a live [`Thread`] whose lock is held by the active, unfinalized
-/// transaction, and the preconditions of [`OwnedWaitQueue::lock_pi_chain_from_thread`] must hold.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_lock_pi_chain_thread(
-    start: *mut bindings::Thread,
-) -> i32 {
-    debug_assert!(!start.is_null());
-    // SAFETY: C++ passes a non-null reference (`Thread& start`) to a live `Thread`.
-    let thread: &Thread = unsafe { &*start.cast::<Thread>() };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token, ...)`, so a transaction
-    // is active on this CPU.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // SAFETY: The C++ declaration is `TA_REQ(start.get_lock())`, and no other Rust proof or guard
-    // for `thread` exists.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(thread) };
-    // SAFETY: The caller upholds the preconditions of `lock_pi_chain_from_thread` (the
-    // transaction is not finalized and no downstream locks are held).
-    let res = unsafe { OwnedWaitQueue::lock_pi_chain_from_thread(&mut proof, &token) };
-    res as i32
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::LockPiChain(WaitQueueBase&)`.
-///
-/// # Safety
-///
-/// `start` must point to a live [`WaitQueueBase`] whose lock is held by the active, unfinalized
-/// transaction, and the preconditions of [`OwnedWaitQueue::lock_pi_chain_from_wait_queue`] must
-/// hold.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_lock_pi_chain_wait_queue(
-    start: *mut bindings::WaitQueueBase,
-) -> i32 {
-    debug_assert!(!start.is_null());
-    // SAFETY: C++ passes a non-null reference (`WaitQueueBase& start`) to a live wait queue; the
-    // raw pointer carries provenance over the full (possibly `OwnedWaitQueue`) object.
-    let wq = unsafe { NonNull::new_unchecked(start.cast::<WaitQueueBase>()) };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token, ...)`, so a transaction
-    // is active on this CPU.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // Downcast the raw pointer before forming any reference, so that an `OwnedWaitQueue` is
-    // accessed with provenance over the whole object.
-    // SAFETY: `wq` points to a live wait queue, with provenance over the enclosing object.
-    let res = if let Some(owq) = unsafe { OwnedWaitQueue::downcast_ptr(wq) } {
-        // SAFETY: `owq` points to the live `OwnedWaitQueue` which encloses `wq`.
-        let owq: &OwnedWaitQueue = unsafe { owq.as_ref() };
-        // SAFETY: The C++ declaration is `TA_REQ(start.get_lock())`, and no other Rust proof or
-        // guard for `owq` exists.
-        let mut proof = unsafe { ChainLockProof::assume_held_unchecked(owq) };
-        // SAFETY: The caller upholds the preconditions of `lock_pi_chain` (the transaction is not
-        // finalized and no downstream locks are held).
-        unsafe { OwnedWaitQueue::lock_pi_chain(&mut proof, &token) }
-    } else {
-        // SAFETY: `wq` points to a live wait queue.
-        let wq: &WaitQueueBase = unsafe { wq.as_ref() };
-        // SAFETY: The C++ declaration is `TA_REQ(start.get_lock())`, and no other Rust proof or
-        // guard for `wq` exists.
-        let mut proof = unsafe { ChainLockProof::assume_held_unchecked(wq) };
-        // SAFETY: The caller upholds the preconditions of `lock_pi_chain_from_wait_queue` (the
-        // transaction is not finalized and no downstream locks are held), and `wq` is not an
-        // `OwnedWaitQueue`.
-        unsafe { OwnedWaitQueue::lock_pi_chain_from_wait_queue(&mut proof, &token) }
-    };
-    res as i32
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::AssertNotOwned()`.
-///
-/// # Safety
-///
-/// `wait_queue` must point to a live [`OwnedWaitQueue`] which satisfies the preconditions of
-/// [`OwnedWaitQueue::assert_not_owned`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_assert_not_owned(
-    wait_queue: *const bindings::OwnedWaitQueue,
-) {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: The C++ caller (`TA_NO_THREAD_SAFETY_ANALYSIS`) guarantees that `owner_` cannot be
-    // concurrently mutated (the lock is held, or the queue is quiescent).
-    unsafe { owq.assert_not_owned() };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::AssertSafeForPooling()`.
-///
-/// # Safety
-///
-/// `wait_queue` must point to a live [`OwnedWaitQueue`] which satisfies the preconditions of
-/// [`OwnedWaitQueue::assert_safe_for_pooling`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_assert_safe_for_pooling(
-    wait_queue: *const bindings::OwnedWaitQueue,
-) {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: The C++ caller (`TA_NO_THREAD_SAFETY_ANALYSIS`) guarantees that the queue cannot be
-    // concurrently mutated (it is quiescent while being returned to the pool).
-    unsafe { owq.assert_safe_for_pooling() };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::~OwnedWaitQueue()`.
-///
-/// # Safety
-///
-/// `wait_queue` must point to a live [`OwnedWaitQueue`] which is being destroyed with no
-/// concurrent accesses.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_destroy(wait_queue: *mut bindings::OwnedWaitQueue) {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: C++ passes `this` from the destructor, a non-null pointer to a live
-    // `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: An object being destroyed by C++ is not concurrently accessed.
-    unsafe { owq.teardown() };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::DisownAllQueues()`.
-///
-/// # Safety
-///
-/// `t` must point to a live [`Thread`] satisfying the preconditions of
-/// [`OwnedWaitQueue::disown_all_queues`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_disown_all_queues(t: *mut bindings::Thread) {
-    debug_assert!(!t.is_null());
-    // SAFETY: C++ passes a non-null pointer to a live `Thread`.
-    let thread: &Thread = unsafe { &*t.cast::<Thread>() };
-    // SAFETY: The C++ declaration is `TA_EXCL(chainlock_transaction_token, t->get_lock())`, and
-    // the caller (the exiting thread) upholds the remaining preconditions of
-    // `disown_all_queues`.
-    unsafe { OwnedWaitQueue::disown_all_queues(thread) };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::GetEffectiveProfile()`.
-///
-/// # Safety
-///
-/// `wait_queue` must point to a live [`OwnedWaitQueue`] whose lock is held by the active
-/// transaction, and `out_profile` must be valid for writes of an `EffectiveProfile`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_get_effective_profile(
-    wait_queue: *const bindings::OwnedWaitQueue,
-    out_profile: *mut bindings::SchedulerState_EffectiveProfile,
-) {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!out_profile.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: The C++ declaration is `TA_REQ(get_lock())`, and the proof is only used for reads.
-    let proof = unsafe { ChainLockProof::assume_held_unchecked(owq) };
-    // SAFETY: `out_profile` points to a C++ `SchedulerState::EffectiveProfile` in the caller's
-    // frame, which has the same layout as `EffectiveProfile`.
-    unsafe { out_profile.cast::<EffectiveProfile>().write(proof.get_effective_profile()) };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::SetThreadBaseProfileAndPropagate()`.
-///
-/// # Safety
-///
-/// `thread` and `profile` must point to a live [`Thread`] and [`BaseProfile`], and no
-/// [`ChainLockTransaction`] may be active on the current CPU.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_set_thread_base_profile_and_propagate(
-    thread: *mut bindings::Thread,
-    profile: *const bindings::SchedulerState_BaseProfile,
-) {
-    debug_assert!(!thread.is_null());
-    debug_assert!(!profile.is_null());
-    // SAFETY: C++ passes a non-null reference (`Thread& thread`) to a live `Thread`.
-    let thread: &Thread = unsafe { &*thread.cast::<Thread>() };
-    // SAFETY: C++ passes a non-null reference to a live `SchedulerState::BaseProfile`, which has
-    // the same layout as `BaseProfile`.
-    let profile: &BaseProfile = unsafe { &*profile.cast::<BaseProfile>() };
-    // `set_thread_base_profile_and_propagate` is safe; it asserts that no transaction is active
-    // (`TA_EXCL(chainlock_transaction_token, thread.get_lock())` in C++).
-    OwnedWaitQueue::set_thread_base_profile_and_propagate(thread, profile);
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::ResetOwnerIfNoWaiters()`.
-///
-/// # Safety
-///
-/// `wait_queue` must point to a live [`OwnedWaitQueue`], and no [`ChainLockTransaction`] may be
-/// active on the current CPU.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_reset_owner_if_no_waiters(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-) {
-    debug_assert!(!wait_queue.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // `reset_owner_if_no_waiters` is safe; it asserts that no transaction is active (`TA_EXCL` in
-    // C++).
-    owq.reset_owner_if_no_waiters();
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::BlockAndAssignOwner()`.
-///
-/// # Safety
-///
-/// `wait_queue` and `deadline` must point to a live [`OwnedWaitQueue`] and [`Deadline`],
-/// `new_owner` must be null or point to a live [`Thread`], preemption must be disabled, and the
-/// preconditions of [`OwnedWaitQueue::block_and_assign_owner`] must hold.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_block_and_assign_owner(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    deadline: *const bindings::Deadline,
-    new_owner: *mut bindings::Thread,
-    resource_ownership: ResourceOwnership,
-    interruptible: Interruptible,
-) -> zx_status_t {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!deadline.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: C++ passes a non-null reference (`const Deadline&`) to a live `Deadline`.
-    let deadline: &Deadline = unsafe { &*deadline.cast::<Deadline>() };
-    // SAFETY: C++ passes null or a pointer to a live `Thread`.
-    let new_owner: Option<&Thread> = unsafe { new_owner.cast::<Thread>().as_ref() };
-    // SAFETY: The C++ declaration is `TA_REQ(preempt_disabled_token)`.
-    let preempt_disabled = unsafe { PreemptDisabledToken::new() };
-    // SAFETY: The C++ declaration is `TA_EXCL(chainlock_transaction_token)`, and the caller (the
-    // current thread) upholds the remaining blocking preconditions.
-    let res = unsafe {
-        owq.block_and_assign_owner(
-            deadline,
-            new_owner,
-            resource_ownership,
-            interruptible,
-            &preempt_disabled,
-        )
-    };
-    Status::result_into_raw(res)
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::BlockAndAssignOwnerLocked()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `current_thread`, `deadline`, and `details` must point to a live
-/// [`OwnedWaitQueue`], [`Thread`], [`Deadline`], and [`BAAOLockingDetails`], an active finalized
-/// transaction must be in progress with preemption disabled, and the preconditions of
-/// [`OwnedWaitQueue::block_and_assign_owner_locked`] must hold (`wait_queue`'s lock is released
-/// by this call).
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_block_and_assign_owner_locked(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    current_thread: *mut bindings::Thread,
-    deadline: *const bindings::Deadline,
-    details: *const BAAOLockingDetails,
-    resource_ownership: ResourceOwnership,
-    interruptible: Interruptible,
-    force_inheritance: ForceInheritance,
-) -> zx_status_t {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!current_thread.is_null());
-    debug_assert!(!deadline.is_null());
-    debug_assert!(!details.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: C++ passes a non-null pointer to the live, currently running `Thread`.
-    let thread: &Thread = unsafe { &*current_thread.cast::<Thread>() };
-    // SAFETY: C++ passes a non-null reference (`const Deadline&`) to a live `Deadline`.
-    let deadline: &Deadline = unsafe { &*deadline.cast::<Deadline>() };
-    // SAFETY: C++ passes a non-null reference to a live `BAAOLockingDetails` in the caller's
-    // frame, which has the same layout as the C++ type.
-    let details: &BAAOLockingDetails = unsafe { &*details };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token, ...)`.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // SAFETY: The C++ declaration is `TA_REQ(preempt_disabled_token)`.
-    let preempt_disabled = unsafe { PreemptDisabledToken::new() };
-    // SAFETY: The C++ declaration is `TA_REL(get_lock())`: the queue lock is held on entry and
-    // released by this call, so ownership of it is transferred to the guard.
-    let guard = unsafe { OwnerGuard::adopt_unchecked(owq, &token) };
-    // SAFETY: The C++ declaration is `TA_REQ(current_thread->get_lock())`, and no other Rust proof
-    // or guard for `thread` exists.
-    let mut t_proof = unsafe { ChainLockProof::assume_held_unchecked(thread) };
-    // SAFETY: The caller upholds the remaining preconditions of `block_and_assign_owner_locked`
-    // (`details` came from a successful BAAO lock operation in this finalized transaction).
-    let res = unsafe {
-        OwnedWaitQueue::block_and_assign_owner_locked(
-            guard,
-            &mut t_proof,
-            deadline,
-            details,
-            resource_ownership,
-            interruptible,
-            force_inheritance,
-            &token,
-            &preempt_disabled,
-        )
-    };
-    Status::result_into_raw(res)
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::TryLockForBAAOOperationLocked()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `current_thread`, and `details_out` must point to a live [`OwnedWaitQueue`]
-/// (whose lock is held by the active transaction), [`Thread`], and writable
-/// [`BAAOLockingDetails`], `new_owner` must be null or point to a live [`Thread`], and the
-/// preconditions of [`ChainLockProof::try_lock_for_baao_operation_locked`] must hold. On success,
-/// the caller takes responsibility for the acquired locks.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_try_lock_for_baao_operation_locked(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    current_thread: *mut bindings::Thread,
-    new_owner: *mut bindings::Thread,
-    details_out: *mut BAAOLockingDetails,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!current_thread.is_null());
-    debug_assert!(!details_out.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: C++ passes a non-null pointer to the live, currently running `Thread`.
-    let thread: &Thread = unsafe { &*current_thread.cast::<Thread>() };
-    // SAFETY: C++ passes null or a pointer to a live `Thread`.
-    let new_owner: Option<&Thread> = unsafe { new_owner.cast::<Thread>().as_ref() };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token, ...)`.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // SAFETY: The C++ declaration is `TA_REQ(get_lock())`, and no other Rust proof or guard for
-    // `owq` exists.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(owq) };
-    // SAFETY: The caller upholds the preconditions of `try_lock_for_baao_operation_locked` (the
-    // transaction is not finalized and the current thread's and PI-chain locks are not held).
-    let locked = unsafe { proof.try_lock_for_baao_operation_locked(thread, new_owner, &token) };
-    let Some((details, thread_guard)) = locked else {
-        return false;
-    };
-    // Ownership of the acquired locks passes to the C++ caller (`TA_TRY_ACQ(true,
-    // current_thread->get_lock())`).
-    let _ = thread_guard.into_unguarded();
-    // SAFETY: `details_out` points to a writable `BAAOLockingDetails` in the caller's frame.
-    unsafe { details_out.write(details) };
-    true
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::WakeThreads()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `wake_hooks`, and `out_result` must point to a live [`OwnedWaitQueue`], a live
-/// C++ `OwnedWaitQueue::IWakeRequeueHook`, and a writable [`WakeThreadsResult`], and no
-/// [`ChainLockTransaction`] may be active on the current CPU.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_wake_threads(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    wake_count: u32,
-    wake_hooks: *mut bindings::OwnedWaitQueue_IWakeRequeueHook,
-    out_result: *mut WakeThreadsResult,
-) {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!out_result.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: C++ passes a reference (`IWakeRequeueHook&`) to a live hook which outlives the call.
-    let mut wake_hooks = unsafe { CppWakeRequeueHook::new(wake_hooks) };
-    // `wake_threads` is safe; it asserts that no transaction is active (`TA_EXCL` in C++).
-    let result = owq.wake_threads(wake_count, &mut wake_hooks);
-    // SAFETY: `out_result` points to a writable `WakeThreadsResult` in the caller's frame.
-    unsafe { out_result.write(result) };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::WakeThreadAndAssignOwner()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `wake_hooks`, and `out_result` must point to a live [`OwnedWaitQueue`], a live
-/// C++ `OwnedWaitQueue::IWakeRequeueHook`, and a writable [`WakeThreadsResult`], and no
-/// [`ChainLockTransaction`] may be active on the current CPU.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_wake_thread_and_assign_owner(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    wake_hooks: *mut bindings::OwnedWaitQueue_IWakeRequeueHook,
-    out_result: *mut WakeThreadsResult,
-) {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!out_result.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: C++ passes a reference (`IWakeRequeueHook&`) to a live hook which outlives the call.
-    let mut wake_hooks = unsafe { CppWakeRequeueHook::new(wake_hooks) };
-    // `wake_thread_and_assign_owner` is safe; it asserts that no transaction is active
-    // (`TA_EXCL` in C++).
-    let result = owq.wake_thread_and_assign_owner(&mut wake_hooks);
-    // SAFETY: `out_result` points to a writable `WakeThreadsResult` in the caller's frame.
-    unsafe { out_result.write(result) };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::WakeThreadsLocked()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `threads`, `wake_hooks`, and `out_result` must point to a live
-/// [`OwnedWaitQueue`] (whose lock is held by the active, finalized transaction with preemption
-/// disabled), a live `Thread::UnblockList`, a live C++ `OwnedWaitQueue::IWakeRequeueHook`, and a
-/// writable [`WakeThreadsResult`], and the preconditions of
-/// [`ChainLockProof::wake_threads_locked`] must hold.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_wake_threads_locked(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    threads: *mut bindings::Thread_UnblockList,
-    wake_hooks: *mut bindings::OwnedWaitQueue_IWakeRequeueHook,
-    option: WakeOption,
-    force_inheritance: ForceInheritance,
-    out_result: *mut WakeThreadsResult,
-) {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!threads.is_null());
-    debug_assert!(!out_result.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: The C++ `Thread::UnblockList` (the by-value parameter of `WakeThreadsLocked`)
-    // lives in the caller's frame and is not moved for the duration of the call, no other
-    // reference to it exists, and the C++ caller runs `~UnblockList` (the equivalent of
-    // `ThreadUnblockList`'s `PinnedDrop`) before its storage is reused.
-    let threads = unsafe { Pin::new_unchecked(&mut *threads.cast::<ThreadUnblockList>()) };
-    // SAFETY: C++ passes a reference (`IWakeRequeueHook&`) to a live hook which outlives the call.
-    let mut wake_hooks = unsafe { CppWakeRequeueHook::new(wake_hooks) };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token, ...)`.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // SAFETY: The C++ declaration is `TA_REQ(preempt_disabled_token)`.
-    let preempt_disabled = unsafe { PreemptDisabledToken::new() };
-    // SAFETY: The C++ declaration is `TA_REQ(get_lock())`, and no other Rust proof or guard for
-    // `owq` exists.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(owq) };
-    // SAFETY: The caller upholds the preconditions of `wake_threads_locked` (`threads` came from
-    // a successful lock-for-wake operation in this transaction, which has been finalized).
-    let result = unsafe {
-        proof.wake_threads_locked(
-            threads,
-            &mut wake_hooks,
-            option,
-            force_inheritance,
-            &token,
-            &preempt_disabled,
-        )
-    };
-    // SAFETY: `out_result` points to a writable `WakeThreadsResult` in the caller's frame.
-    unsafe { out_result.write(result) };
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::LockForWakeOperationOrBackoff()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `wake_hooks`, and `unblock_list_out` must point to a live [`OwnedWaitQueue`], a
-/// live C++ `OwnedWaitQueue::IWakeRequeueHook`, and a live empty `Thread::UnblockList`, and the
-/// preconditions of [`OwnedWaitQueue::lock_for_wake_operation_or_backoff`] must hold. On success,
-/// the caller takes responsibility for `wait_queue`'s lock.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_lock_for_wake_operation_or_backoff(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    max_wake: u32,
-    wake_hooks: *mut bindings::OwnedWaitQueue_IWakeRequeueHook,
-    unblock_list_out: *mut bindings::Thread_UnblockList,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!unblock_list_out.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: The C++ `Thread::UnblockList` (the `unblock_list_out` reference parameter) lives in
-    // the caller's frame and is not moved for the duration of the call, no other reference to it
-    // exists, and the C++ caller runs `~UnblockList` (the equivalent of `ThreadUnblockList`'s
-    // `PinnedDrop`) before its storage is reused.
-    let unblock_list =
-        unsafe { Pin::new_unchecked(&mut *unblock_list_out.cast::<ThreadUnblockList>()) };
-    // SAFETY: C++ passes a reference (`IWakeRequeueHook&`) to a live hook which outlives the call.
-    let mut wake_hooks = unsafe { CppWakeRequeueHook::new(wake_hooks) };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token)`.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // SAFETY: The caller upholds the preconditions of `lock_for_wake_operation_or_backoff` (the
-    // transaction is not finalized, no locks are held, no Rust proof or guard for any node in
-    // `owq`'s downstream PI chain or any waiter thread in `owq` is live, and `unblock_list` is
-    // empty).
-    let locked = unsafe {
-        owq.lock_for_wake_operation_or_backoff(max_wake, &mut wake_hooks, unblock_list, &token)
-    };
-    let Some(guard) = locked else {
-        return false;
-    };
-    // Ownership of the queue lock passes to the C++ caller (`TA_TRY_ACQ(true, get_lock())`).
-    let _ = guard.into_unguarded();
-    true
-}
-
-/// C++ FFI entry point for `OwnedWaitQueue::LockForWakeOperationLocked()`.
-///
-/// # Safety
-///
-/// `wait_queue`, `wake_hooks`, and `unblock_list_out` must point to a live [`OwnedWaitQueue`]
-/// (whose lock is held by the active transaction), a live C++
-/// `OwnedWaitQueue::IWakeRequeueHook`, and a live empty `Thread::UnblockList`, and the
-/// preconditions of [`ChainLockProof::lock_for_wake_operation_locked`] must hold.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_lock_for_wake_operation_locked(
-    wait_queue: *mut bindings::OwnedWaitQueue,
-    max_wake: u32,
-    wake_hooks: *mut bindings::OwnedWaitQueue_IWakeRequeueHook,
-    unblock_list_out: *mut bindings::Thread_UnblockList,
-) -> bool {
-    debug_assert!(!wait_queue.is_null());
-    debug_assert!(!unblock_list_out.is_null());
-    // SAFETY: C++ passes `this`, a non-null pointer to a live `OwnedWaitQueue`.
-    let owq: &OwnedWaitQueue = unsafe { &*wait_queue.cast::<OwnedWaitQueue>() };
-    // SAFETY: The C++ `Thread::UnblockList` (a local in the C++ caller's frame) is not moved for
-    // the duration of the call, no other reference to it exists, and the C++ caller runs
-    // `~UnblockList` (the equivalent of `ThreadUnblockList`'s `PinnedDrop`) before its storage is
-    // reused.
-    let unblock_list =
-        unsafe { Pin::new_unchecked(&mut *unblock_list_out.cast::<ThreadUnblockList>()) };
-    // SAFETY: C++ passes a reference (`IWakeRequeueHook&`) to a live hook which outlives the call.
-    let mut hooks = unsafe { CppWakeRequeueHook::new(wake_hooks) };
-    // SAFETY: The C++ declaration is `TA_REQ(chainlock_transaction_token, ...)`.
-    let token = unsafe { ChainLockTransaction::mark_active() };
-    // SAFETY: The C++ declaration is `TA_REQ(get_lock())`, and no other Rust proof or guard for
-    // `owq` exists.
-    let mut proof = unsafe { ChainLockProof::assume_held_unchecked(owq) };
-    // SAFETY: The caller upholds the preconditions of `lock_for_wake_operation_locked` (the
-    // transaction is not finalized, no downstream locks are held, no Rust proof or guard for any
-    // node in `owq`'s downstream PI chain or any waiter thread in `owq` is live, and
-    // `unblock_list` is empty).
-    unsafe { proof.lock_for_wake_operation_locked(max_wake, &mut hooks, unblock_list, &token) }
-}
-
 /// Unit tests for the Rust `OwnedWaitQueue` implementation.
 #[cfg(ktest)]
 #[unittest::suite(name = "owned_wait_queue_rust")]
@@ -6417,7 +5823,10 @@ mod tests {
     }
 
     impl IWakeRequeueHook for CountHook {
-        fn allow(&mut self, _thread: &Thread) -> bool {
+        /// # Safety
+        ///
+        /// See [`IWakeRequeueHook::allow`].
+        unsafe fn allow(&mut self, _thread: &Thread) -> bool {
             self.allow_count += 1;
             !self.deny
         }
@@ -6442,7 +5851,10 @@ mod tests {
     }
 
     impl IWakeRequeueHook for RejectFirstHook {
-        fn allow(&mut self, thread: &Thread) -> bool {
+        /// # Safety
+        ///
+        /// See [`IWakeRequeueHook::allow`].
+        unsafe fn allow(&mut self, thread: &Thread) -> bool {
             let thread = Some(ThreadPtr::from(thread));
             if self.rejected.is_none() {
                 self.rejected = thread;
@@ -6515,8 +5927,9 @@ mod tests {
                 };
                 ChainLockTransaction::finalize(token);
                 // SAFETY: `(guard, waiter)` was produced by `lock_for_wake_one_or_backoff` in this
-                // transaction, which is finalized, no proof or guard for `owq`, its downstream PI
-                // chain, or `waiter` is live, and `waiter` (if any) is unblocked below.
+                // transaction, which is finalized, no `&mut Thread`, proof, or guard for `owq`,
+                // its downstream PI chain, or `waiter` is live, and `waiter` (if any) is unblocked
+                // below.
                 obs.res = unsafe {
                     OwnedWaitQueue::dequeue_one_and_release_locked(
                         guard,
@@ -6532,13 +5945,16 @@ mod tests {
                 obs.waiter = waiter;
                 if let Some(t_ptr) = waiter {
                     // SAFETY: `t_ptr`'s lock is still held by the active transaction, so it is
-                    // live, and no other proof or guard for it is live.
-                    let t: &Thread = unsafe { t_ptr.as_ref() };
-                    obs.waiter_held_until_unblock = t.lock().is_held(token);
-                    // SAFETY: As above.
-                    let t_guard = unsafe { OwnerGuard::adopt_unchecked(t, token) };
-                    // SAFETY: `t` was dequeued from `owq` above and the transaction is finalized.
-                    unsafe { scheduler::unblock(t_guard, token) };
+                    // live, and no other proof or guard for it is live. The temporary `&Thread`
+                    // ends before `scheduler::unblock` below.
+                    obs.waiter_held_until_unblock = unsafe { t_ptr.as_ref() }.lock().is_held(token);
+                    // SAFETY: `t_ptr` is non-idle (it was blocked in `owq`) and was dequeued from
+                    // `owq` above with its lock held as the sole lock in the active, finalized
+                    // transaction `token` and no conflicting reference, guard, or proof live;
+                    // interrupts and local preemption are disabled by
+                    // `PREEMPT_DISABLE_AND_IRQ_SAVE_OPTION`; and `t_ptr` is not dereferenced after
+                    // this call (and the test threads remain alive until joined).
+                    unsafe { scheduler::unblock(t_ptr, token) };
                 }
                 DONE.into()
             },

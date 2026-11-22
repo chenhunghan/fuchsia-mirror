@@ -51,7 +51,7 @@ source_set("unittest_support") {
     "//sdk/lib/async-testing",
     "//sdk/lib/fidl/cpp",
     "//sdk/lib/fit",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/lib/testing/loop_fixture",
     "//src/media/audio/audio_core:audio_core_lib",
     "//src/media/audio/audio_core/mixer",

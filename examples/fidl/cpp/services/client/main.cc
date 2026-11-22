@@ -14,7 +14,7 @@
 using fuchsia_examples::Echo;
 using fuchsia_examples::EchoService;
 
-zx::result<> llcpp_example(fidl::UnownedClientEnd<fuchsia_io::Directory> svc) {
+zx::result<> wire_example(fidl::UnownedClientEnd<fuchsia_io::Directory> svc) {
   zx::result<EchoService::ServiceClient> open_result =
       component::OpenServiceAt<EchoService>(std::move(svc));
   if (open_result.is_error()) {
@@ -62,12 +62,12 @@ int main(int argc, const char** argv) {
   auto svc = component::OpenServiceRoot();
   ZX_ASSERT(svc.is_ok());
 
-  // Convert the typed handle to LLCPP types.
-  auto llsvc = fidl::ClientEnd<fuchsia_io::Directory>(svc->TakeChannel());
+  // Convert the typed handle to C++ wire types.
+  auto wire_svc = fidl::ClientEnd<fuchsia_io::Directory>(svc->TakeChannel());
 
-  zx::result<> result = llcpp_example(llsvc);
+  zx::result<> result = wire_example(wire_svc);
   if (result.is_error()) {
-    std::cerr << "llcpp_example failed with status: " << result.status_string() << std::endl;
+    std::cerr << "wire_example failed with status: " << result.status_string() << std::endl;
     return 1;
   }
   return 0;

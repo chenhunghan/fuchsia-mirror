@@ -62,15 +62,26 @@ _ZXTEST_HDRS = [
 # @bazel2gn:transformer=deps
 _ZXTEST_DEPS = [
     "//sdk/lib/fit",
+    "//sdk/lib/zircon-assert",
     "//src/zircon/lib/zircon",
     "//third_party/rapidjson",
-    "//zircon/system/ulib/fbl",
 ] + select({
     "@platforms//os:fuchsia": [
         "//zircon/system/ulib/zx",
     ],
     "//conditions:default": [],
 })
+
+# Dependency for "production" callers who use zxtest_prod header, (see that file
+# for more).
+fx_cc_library(
+    name = "prod",
+    hdrs = ["include/zxtest/cpp/zxtest_prod.h"],
+    includes = ["include"],
+    public_configs = [":prod_config"],
+    visibility = [":__subpackages__"],
+    alwayslink = True,
+)
 
 fx_cc_library(
     name = "zxtest",
@@ -80,15 +91,8 @@ fx_cc_library(
         "@platforms//os:fuchsia": ["//src/sys/test_runners/gtest:zxtest"],
         "//conditions:default": [],
     }),
-    # TODO(https://fxbug.dev/42085293): zxtest uses VLAs. GN suppresses the
-    # warning for every dependent through a public config, but Bazel copts
-    # don't propagate, so dependents that use the zxtest macros need this too.
-    copts = ["-Wno-vla-cxx-extension"],
     includes = ["include"],
-    public_configs = [
-        ":prod_config",
-        "//build/config:Wno-vla-cxx-extension",
-    ],
+    public_configs = [":prod_config"],
     # Used by tests across the tree.
     visibility = ["//:__subpackages__"],
     deps = _ZXTEST_DEPS,
@@ -102,13 +106,11 @@ fx_cc_library(
         "@platforms//os:fuchsia": ["//src/sys/test_runners/gtest:zxtest"],
         "//conditions:default": [],
     }),
-    copts = ["-Wno-vla-cxx-extension"],
     defines = ["ZXTEST_USE_STREAMABLE_MACROS"],
     includes = ["include"],
     public_configs = [
         ":prod_config",
         ":zxtest_enable_streamable_assertions",
-        "//build/config:Wno-vla-cxx-extension",
     ],
     # Used by tests across the tree.
     visibility = ["//:__subpackages__"],

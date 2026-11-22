@@ -29,7 +29,6 @@ exports_files(
 
 fx_package(
     name = "google_fastrpc",
-    package_name = "google_fastrpc",
     components = [
         ":google_fastrpc_component",
     ],

@@ -135,7 +135,6 @@ rustc_staticlib("driver_lab_c") {
 
   source_root = "src/c_api.rs"
   sources = [ "src/c_api.rs" ]
-  public = [ "cpp/include/lib/driver_lab/driver_lab_c.h" ]
   deps = [
     ":core",
     ":driver_lab_rust_no_fdf",
@@ -209,7 +208,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/lab_proxy_info.json"
 }
 
 fuchsia_driver_package("pkg") {

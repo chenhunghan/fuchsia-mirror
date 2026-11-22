@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":service-examples-cpp_test",
+        ":service-examples-rust_test",
+    ],
+    visibility = ["//examples:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "service-examples-component_manifest",
+    testonly = True,
+    component_name = "default",
+    manifest = "meta/services.cml",
+)
+
+fx_test_component(
+    name = "service-examples-component",
+    compiled_manifest = ":service-examples-component_manifest",
+)
+
+# Run with `ffx test run
+# fuchsia-pkg://fuchsia.com/service-examples-cpp#meta/default.cm`
+fx_package(
+    name = "service-examples-rust",
+    testonly = True,
+    subpackages = [
+        "//examples/components/services/rust:branch",
+        "//examples/components/services/rust:provider-a",
+        "//examples/components/services/rust:provider-b",
+    ],
+    test_components = [":service-examples-component"],
+)
+
+fx_test(
+    name = "service-examples-rust_test",
+    package = ":service-examples-rust",
+)
+
+# Run with `ffx test run
+# fuchsia-pkg://fuchsia.com/service-examples-rust#meta/default.cm`
+fx_package(
+    name = "service-examples-cpp",
+    testonly = True,
+    subpackages = [
+        "//examples/components/services/cpp:branch",
+        "//examples/components/services/cpp:provider-a",
+        "//examples/components/services/cpp:provider-b",
+    ],
+    test_components = [":service-examples-component"],
+)
+
+fx_test(
+    name = "service-examples-cpp_test",
+    package = ":service-examples-cpp",
+)

@@ -6,7 +6,6 @@ group("bin") {
   public_deps = [
     "camera-gym",
     "device",
-    "device_watcher",
     "factory",
     "factory_cli",
     "usb_device",
@@ -18,8 +17,6 @@ group("tests") {
   deps = [
     "camera-gym:tests",
     "device:tests",
-    "device_watcher:tests",
     "usb_device:tests",
-    "virtual_camera:tests",
   ]
 }

@@ -25,7 +25,10 @@
             protocol: [ "fuchsia.diagnostics.ArchiveAccessor" ],
         },
         {
-            protocol: [ "fuchsia.power.cpu.manager.Boost" ],
+            protocol: [
+                "fuchsia.power.cpu.manager.Boost",
+                "fuchsia.scheduler.RoleManager",
+            ],
             availability: "optional",
         },
         {
@@ -58,6 +61,14 @@
         {
             storage: "custom_artifacts",
             path: "/custom_artifacts",
+        },
+    ],
+    offer: [
+        {
+            protocol: "fuchsia.scheduler.RoleManager",
+            from: "parent",
+            to: "#fs-collection",
+            availability: "optional",
         },
     ],
 }

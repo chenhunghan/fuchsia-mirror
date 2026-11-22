@@ -124,12 +124,8 @@ pub fn serve_file_at_tagged(
     // The TRUNC flag needs to be stripped as otherwise the VFS library will try and truncate
     // the file when it creates the connection.
     let fidl_flags: fio::OpenFlags = (file.flags() & !OpenFlags::TRUNC).into_fidl();
-    let starnix_file = StarnixNodeConnection::new(
-        &kernel,
-        file.weak_handle.upgrade().unwrap(),
-        credentials,
-        stats.clone(),
-    );
+    let starnix_file =
+        StarnixNodeConnection::new(&kernel, file.to_file_handle(), credentials, stats.clone());
     let scope = execution_scope::ExecutionScope::new();
     kernel.kthreads.spawn_future(
         {

@@ -7,13 +7,13 @@ use crate::bindings::util::IntoCore;
 use ebpf::{
     BpfProgramContext, BpfValue, CbpfConfig, DataWidth, EbpfBufferPtr, EbpfInstruction,
     EbpfProgram, EbpfProgramContext, FieldMapping, FromBpfValue, MapReference, MapSchema, Packet,
-    ProgramArgument, Type, VerifiedEbpfProgram,
+    ProgramArgument, Type,
 };
 use ebpf_api::{
     __sk_buff, BpfSockContext, CGROUP_SKB_SK_BUF_TYPE, Map, MapError, MapValueRef,
     PacketWithLoadBytes, PinnedMap, SKF_AD_OFF, SKF_AD_PKTTYPE, SKF_AD_PROTOCOL, SKF_LL_OFF,
-    SKF_NET_OFF, SOCKET_FILTER_ARGS, SOCKET_FILTER_CBPF_CONFIG, SOCKET_FILTER_SK_BUF_TYPE,
-    SocketRef, bpf_sock, uaddr, uid_t,
+    SKF_NET_OFF, SOCKET_FILTER_CBPF_CONFIG, SOCKET_FILTER_SK_BUF_TYPE, SocketRef, bpf_sock, uaddr,
+    uid_t,
 };
 use fidl_fuchsia_ebpf as febpf;
 use fidl_fuchsia_net as fnet;
@@ -403,6 +403,7 @@ impl<C: SkBuffContext> ProgramArgument for &'_ SkBuff<'_, C> {
 #[derive(Default)]
 pub struct EbpfRunContext<'a> {
     map_refs: Vec<MapValueRef<'a>>,
+    ringbuf_reservations: ebpf_api::RingBufferReservations<'a>,
 }
 
 impl<'a> ebpf_api::MapsContext<'a> for EbpfRunContext<'a> {
@@ -414,6 +415,10 @@ impl<'a> ebpf_api::MapsContext<'a> for EbpfRunContext<'a> {
 
     fn add_value_ref(&mut self, map_ref: MapValueRef<'a>) {
         self.map_refs.push(map_ref)
+    }
+
+    fn ringbuf_reservations(&mut self) -> &mut ebpf_api::RingBufferReservations<'a> {
+        &mut self.ringbuf_reservations
     }
 }
 
@@ -464,22 +469,6 @@ impl SocketFilterProgram {
         // verification.
         let program = parse_verified_program_fidl::<Self>(program, map_cache).await?;
 
-        Ok(Self { program })
-    }
-
-    // TODO(https://fxbug.dev/477940321): Update AttachBpfFilterUnsafe to pass VerifiedProgram
-    // and remove this function.
-    pub(crate) fn new_from_bytecode(code: Vec<u64>) -> Result<Self, EbpfError> {
-        let program = VerifiedEbpfProgram::from_verified_code(
-            code_from_vec(code),
-            SOCKET_FILTER_ARGS.clone(),
-            vec![],
-            vec![],
-        );
-        let program = ebpf::link_program(&program, vec![]).map_err(|e| {
-            error!("Failed to link socket filter bytecode: {:?}", e);
-            EbpfError::LinkFailed
-        })?;
         Ok(Self { program })
     }
 
@@ -633,9 +622,8 @@ pub(crate) struct ValidVerifiedProgram {
     pub maps: Vec<febpf::Map>,
 }
 
-/// Translate FIDL representation of a verified eBPF program to
-/// `VerifiedEbpfProgram` and link it. Initializes all included eBPF maps and adds them
-/// to the `map_cache`.
+/// Initializes all included eBPF maps, adds them to `map_cache`, and links the
+/// verified eBPF program into an `EbpfProgram`.
 async fn parse_verified_program_fidl<
     C: EbpfProgramContext<Map = CachedMapRef> + ebpf::StaticHelperSet,
 >(
@@ -666,11 +654,13 @@ async fn parse_verified_program_fidl<
         })?;
 
     match linked_program {
-        febpf::LinkedProgram::CompiledProgram(_compiled_vmo) => {
-            // TODO(https://fxbug.dev/578040355): Map the compiled JIT VMO and create an
-            // `EbpfProgram` instance once JIT compilation is implemented.
-            error!("JIT eBPF programs are not supported yet");
-            Err(EbpfError::LinkFailed)
+        febpf::LinkedProgram::CompiledProgram(compiled_vmo) => {
+            // SAFETY: `compiled_vmo` was linked and compiled by `ProgramLinker` for context `C`
+            // and `maps`.
+            unsafe { EbpfProgram::<C>::from_compiled_vmo(compiled_vmo, maps) }.map_err(|e| {
+                error!("Failed to initialize JIT eBPF program: {:?}", e);
+                EbpfError::LinkFailed
+            })
         }
         febpf::LinkedProgram::Bytecode(febpf::Bytecode { instructions }) => {
             if instructions.is_empty() {
@@ -680,11 +670,7 @@ async fn parse_verified_program_fidl<
 
             // SAFETY: `instructions` were verified and linked by `ProgramLinker` for context `C`
             // and `maps`.
-            unsafe { EbpfProgram::from_linked_instructions(code_from_vec(instructions), maps) }
-                .map_err(|e| {
-                    error!("Failed to prepare eBPF program: {:?}", e);
-                    EbpfError::LinkFailed
-                })
+            Ok(unsafe { EbpfProgram::from_linked_instructions(code_from_vec(instructions), maps) })
         }
         febpf::LinkedProgramUnknown!() => {
             error!("Unknown LinkedProgram variant");
@@ -1449,9 +1435,105 @@ mod tests {
             });
         });
 
-        let result =
-            CgroupSkbProgram::new(fidl_program.try_into().unwrap(), manager.maps_cache()).await;
-        assert!(result.is_ok());
+        let _: CgroupSkbProgram =
+            CgroupSkbProgram::new(fidl_program.try_into().unwrap(), manager.maps_cache())
+                .await
+                .expect("create CgroupSkbProgram");
         server_thread.join().expect("server thread");
+    }
+
+    #[fuchsia::test(logging = false)]
+    async fn program_linker_compiled_program_rejects_invalid_vmo() {
+        let manager = EbpfManager::default();
+
+        let exec_path = std::fs::read_dir("/pkg/bin")
+            .expect("read /pkg/bin")
+            .map(|entry| entry.expect("read /pkg/bin entry").path())
+            .find(|path| path.is_file())
+            .expect("find executable in /pkg/bin");
+        let exec_file = fdio::open_fd(
+            exec_path.to_str().expect("utf8 path"),
+            fidl_fuchsia_io::PERM_READABLE | fidl_fuchsia_io::PERM_EXECUTABLE,
+        )
+        .expect("open executable in /pkg/bin");
+        let exec_vmo = fdio::get_vmo_exec_from_file(&exec_file).expect("get exec VMO");
+
+        // 1. Zero-sized executable VMO satisfies `COMPILED_PROGRAM_RIGHTS` over FIDL, then fails
+        //    `EbpfProgram::from_compiled_vmo` (`ExecutableMemory::from_vmo`) -> `LinkFailed`.
+        {
+            let zero_exec_vmo = exec_vmo
+                .create_child(zx::VmoChildOptions::SLICE, 0, 0)
+                .expect("create zero-sized exec slice VMO");
+            let (client_end, server_end) =
+                fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+            let program = ValidVerifiedProgram { linker: client_end, maps: Vec::new() };
+
+            let server_thread = std::thread::spawn(move || {
+                let mut executor = fuchsia_async::LocalExecutor::default();
+                executor.run_singlethreaded(async move {
+                    let mut stream = server_end.into_stream();
+                    let febpf::ProgramLinkerRequest::Link { responder, .. } =
+                        stream.next().await.expect("stream item").expect("fidl request");
+                    responder
+                        .send(Ok(febpf::LinkedProgram::CompiledProgram(zero_exec_vmo)))
+                        .expect("send response");
+                });
+            });
+
+            let res = CgroupSkbProgram::new(program, manager.maps_cache()).await;
+            assert_eq!(res.err(), Some(EbpfError::LinkFailed));
+            server_thread.join().expect("server thread");
+        }
+
+        // 2. Non-executable VMO sent over the raw Zircon channel (bypassing sender-side
+        //    `zx_channel_write_etc` rights reduction) is rejected by client-side FIDL handle
+        //    rights validation (`COMPILED_PROGRAM_RIGHTS` requires `EXECUTE`) -> `LinkFailed`.
+        {
+            let non_exec_vmo = zx::Vmo::create(4096).expect("create non-executable VMO");
+            let (client_end, server_end) =
+                fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+            let program = ValidVerifiedProgram { linker: client_end, maps: Vec::new() };
+
+            let server_thread = std::thread::spawn(move || {
+                let mut executor = fuchsia_async::LocalExecutor::default();
+                executor.run_singlethreaded(async move {
+                    let server_chan = server_end.into_channel();
+                    let _signals =
+                        fuchsia_async::OnSignals::new(&server_chan, zx::Signals::CHANNEL_READABLE)
+                            .await
+                            .expect("wait readable");
+
+                    let (relay_client, relay_server) =
+                        fidl::endpoints::create_endpoints::<febpf::ProgramLinkerMarker>();
+                    let relay_chan = relay_client.into_channel();
+
+                    let mut req_bytes = Vec::new();
+                    let mut req_handles = Vec::new();
+                    server_chan.read_split(&mut req_bytes, &mut req_handles).expect("read request");
+                    relay_chan.write(&req_bytes, &mut req_handles).expect("forward request");
+
+                    let mut stream = relay_server.into_stream();
+                    let febpf::ProgramLinkerRequest::Link { responder, .. } =
+                        stream.next().await.expect("stream item").expect("fidl request");
+                    responder
+                        .send(Ok(febpf::LinkedProgram::CompiledProgram(exec_vmo)))
+                        .expect("encode response");
+
+                    let mut resp_bytes = Vec::new();
+                    let mut resp_handles = Vec::new();
+                    relay_chan
+                        .read_split(&mut resp_bytes, &mut resp_handles)
+                        .expect("read encoded response");
+                    assert_eq!(resp_handles.len(), 1);
+                    server_chan
+                        .write(&resp_bytes, &mut [non_exec_vmo.into()])
+                        .expect("send non-executable VMO response");
+                });
+            });
+
+            let res = CgroupSkbProgram::new(program, manager.maps_cache()).await;
+            assert_eq!(res.err(), Some(EbpfError::LinkFailed));
+            server_thread.join().expect("server thread");
+        }
     }
 }

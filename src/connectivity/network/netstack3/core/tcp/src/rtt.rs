@@ -221,8 +221,14 @@ impl<I: Instant> MeasuredSampler<I> {
                 *self = Self::Tracking { range: start..range.end, timestamp: now }
             }
             Self::Tracking { range: tracking, timestamp: _ } => {
-                // We need to discard this tracking segment if we retransmit
-                // anything prior to the right edge of the tracked segment.
+                // Per Karn's algorithm (RFC 6298 Section 3), RTT measurements
+                // MUST NOT be made using segments that were retransmitted.
+                // Discard this tracking segment if we retransmit anything prior
+                // to the right edge of the tracked segment. Note that if
+                // `range` also extends past `snd_max` (e.g. a segment or GSO
+                // burst straddling `snd_max`), we also skip starting a new
+                // sample on `snd_max..range.end` for this send rather than
+                // timing a burst that contains retransmitted data.
                 if range.start.before(tracking.end) {
                     *self = Self::NotTracking;
                 }

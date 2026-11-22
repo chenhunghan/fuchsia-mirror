@@ -2,17 +2,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 load("//build/rust:fidl_rust_next.bzl", "fidl_rust_next_allowlist")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fidl_next_internal_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 rustc_library(
     name = "fidl_next_internal",
     srcs = ["src/lib.rs"],
     crate_name = "fidl_next",
     edition = "2024",
-    with_unit_tests = True,
+    visibility = ["//:__subpackages__"],
     deps = [
         "//src/lib/fidl/rust_next/fidl_next_bind",
         "//src/lib/fidl/rust_next/fidl_next_codec",
@@ -25,4 +36,19 @@ alias(
     name = "fidl_next",
     actual = ":fidl_next_internal",
     visibility = fidl_rust_next_allowlist,
+)
+
+rustc_test(
+    name = "fidl_next_internal_test",
+    crate = ":fidl_next_internal",
+)
+
+wrap_host_rust_test(
+    name = "fidl_next_internal_host_test",
+    binary_name = "fidl_next_internal_test",
+)
+
+fx_unittest_package(
+    name = "fidl_next_test_package",
+    unit_tests = [":fidl_next_internal_test"],
 )

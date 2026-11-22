@@ -8,14 +8,9 @@
 
 #include <lib/object-constants.h>
 
-#include <fbl/ref_ptr.h>
-#include <object/bus_transaction_initiator_dispatcher.h>
-
-PinnedMemoryTokenDispatcher::PinnedMemoryTokenDispatcher(
-    fbl::RefPtr<BusTransactionInitiatorDispatcher> bti)
-    : Dispatcher(0u) {
+PinnedMemoryTokenDispatcher::PinnedMemoryTokenDispatcher(const void* bti) : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(PinnedMemoryTokenDispatcher, kPinnedMemoryTokenDispatcherStateOffset);
-  rust_pinned_memory_token_dispatcher_state_init(&opaque_storage_, this, fbl::ExportToRawPtr(&bti));
+  rust_pinned_memory_token_dispatcher_state_init(&opaque_storage_, this, bti);
 }
 
 IMPLEMENT_DISPATCHER_RUST_STATE(PinnedMemoryTokenDispatcher,

@@ -4,17 +4,20 @@
 
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include <map>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <linux/netlink.h>
 
 #include "src/lib/files/file.h"
 #include "src/lib/fxl/strings/split_string.h"
+#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 namespace {
@@ -190,14 +193,49 @@ TEST(UdevTest, AddInput) {
 
   ASSERT_TRUE(!params.contains("ACTION"));
   ASSERT_TRUE(!params.contains("SEQNUM"));
-  ASSERT_EQ(params["DEVPATH"], devpath);
-  ASSERT_EQ(params["SUBSYSTEM"], "input");
-  ASSERT_EQ(params["SYNTH_UUID"], "0");
+  ASSERT_TRUE(!params.contains("DEVPATH"));
+  ASSERT_TRUE(!params.contains("SUBSYSTEM"));
+  ASSERT_TRUE(!params.contains("SYNTH_UUID"));
   ASSERT_EQ(params["MAJOR"], "13");
   ASSERT_EQ(params["MINOR"], minor_str);
   ASSERT_EQ(params["DEVNAME"], ("input/" + event_node));
 
   write_fd.reset();
+}
+
+TEST(UdevTest, UeventPreadPastEof) {
+  fbl::unique_fd uevent_fd(open("/sys/devices/virtual/mem/null/uevent", O_RDONLY));
+  ASSERT_TRUE(uevent_fd.is_valid()) << strerror(errno);
+
+  char buf[256] = {};
+  ssize_t initial = pread(uevent_fd.get(), buf, sizeof(buf), 0);
+  ASSERT_THAT(initial, SyscallSucceeds());
+  ASSERT_GT(initial, 1);
+  ASSERT_LT(static_cast<size_t>(initial), sizeof(buf));
+
+  std::map<std::string, std::string> params;
+  for (const auto& line : fxl::SplitString(std::string_view(buf, initial), "\n",
+                                           fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty)) {
+    auto param = ParseUeventParam(line);
+    ASSERT_FALSE(param.first.empty()) << line;
+    params.insert(param);
+  }
+  EXPECT_FALSE(params.contains("ACTION"));
+  EXPECT_FALSE(params.contains("SEQNUM"));
+  EXPECT_FALSE(params.contains("DEVPATH"));
+  EXPECT_FALSE(params.contains("SUBSYSTEM"));
+  EXPECT_FALSE(params.contains("SYNTH_UUID"));
+  EXPECT_EQ(params["MAJOR"], "1");
+  EXPECT_EQ(params["MINOR"], "3");
+  EXPECT_EQ(params["DEVNAME"], "null");
+
+  char tail_buf[256] = {};
+  ASSERT_THAT(pread(uevent_fd.get(), tail_buf, sizeof(tail_buf), 1),
+              SyscallSucceedsWithValue(initial - 1));
+  EXPECT_EQ(std::string_view(tail_buf, initial - 1), std::string_view(buf + 1, initial - 1));
+
+  EXPECT_THAT(pread(uevent_fd.get(), buf, sizeof(buf), initial), SyscallSucceedsWithValue(0));
+  EXPECT_THAT(pread(uevent_fd.get(), buf, sizeof(buf), initial + 1), SyscallSucceedsWithValue(0));
 }
 
 }  // namespace

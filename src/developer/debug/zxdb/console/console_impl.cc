@@ -331,7 +331,7 @@ void ConsoleImpl::EnableInput() {
 
     // Note that we need to handle EINTR when using this low-level syscall.
     char ch = 0;
-    int bytes_read = 0;
+    ssize_t bytes_read = 0;
     do {
       bytes_read = read(STDIN_FILENO, &ch, 1);
     } while (bytes_read == -1 && errno == EINTR);

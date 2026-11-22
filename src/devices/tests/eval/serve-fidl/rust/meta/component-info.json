@@ -1,9 +1,0 @@
-{
-    "short_description": "Driver to serve FIDL for testing",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "DriverFramework"
-    ]
-}

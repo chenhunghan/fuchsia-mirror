@@ -9,7 +9,8 @@
 #include <lib/zx/event.h>
 
 #include <gtest/gtest.h>
-#include <src/lib/fidl/llcpp/tests/types_test_utils.h>
+
+#include "src/lib/fidl/llcpp/tests/types_test_utils.h"
 
 // Tests the allocation of a uint32 vector which fits inside the initial buffer.
 TEST(Arena, Uint32VectorConstructed) {

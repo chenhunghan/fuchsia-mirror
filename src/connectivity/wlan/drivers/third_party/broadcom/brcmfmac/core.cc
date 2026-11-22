@@ -822,16 +822,19 @@ zx_status_t brcmf_bus_started(brcmf_pub* drvr, bool drvr_restarting) {
 
 fail:
   BRCMF_ERR("bus started failed: (%d)", ret);
-  if (drvr->config) {
-    brcmf_cfg80211_detach(drvr->config);
-    drvr->config = NULL;
-  }
-  brcmf_net_detach(ifp->ndev, false);
+  brcmf_bus_change_state(bus_if, BRCMF_BUS_DOWN);
+  if (!drvr_restarting) {
+    if (drvr->config) {
+      brcmf_cfg80211_detach(drvr->config);
+      drvr->config = NULL;
+    }
+    brcmf_net_detach(ifp->ndev, false);
 
-  drvr->iflist[0] = NULL;
-  drvr->iflist[1] = NULL;
-  if (drvr->settings->ignore_probe_fail) {
-    ret = ZX_OK;
+    drvr->iflist[0] = NULL;
+    drvr->iflist[1] = NULL;
+    if (drvr->settings->ignore_probe_fail) {
+      ret = ZX_OK;
+    }
   }
 
   return ret;

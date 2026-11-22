@@ -5,9 +5,11 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <ftw.h>
+#include <lib/fit/defer.h>
 #include <lib/stdcompat/string_view.h>
 #include <mntent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/socket.h>
@@ -832,51 +834,81 @@ TEST_F(MountTest, UmountWithMntAttachIsRecursive) {
 }
 
 TEST_F(MountTest, BasicRemotefsMount) {
-  // Basic remotefs mounting of the container's /data namespace
+  // Basic remotefs mounting of a `/data/basic` container namespace subdirectory.
   if (!test_helper::IsStarnix()) {
     GTEST_SKIP() << "MountTest.BasicRemotefsMount cannot be run on Linux, skipping.";
   }
 
-  // In order to validate that the /data directory is actually correctly
-  // mounted and being serviced, we'll mount two target directories to it.
-  // We can then create a file in one of the mounted directories, and confirm
-  // that the file shows up in the second mounted directory. This is a
-  // roundabout way to validate, since we do not have access to the container's
-  // backing /data directory directly to validate file existence.
+  // Validate that `/data/basic` is correctly mounted and serviced by creating a file through one
+  // mount and opening it via a second mount of the same subdirectory.
   ASSERT_SUCCESS(MakeDir("first_target"));
   auto first_target_dir = TestPath("first_target");
-  ASSERT_THAT(mount("/data", first_target_dir.c_str(), "remotefs", MS_SYNCHRONOUS, nullptr),
-              SyscallSucceeds());
+  auto first_mount = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMount::Mount(
+      "/data/basic", first_target_dir, "remotefs", MS_SYNCHRONOUS, nullptr));
 
   ASSERT_SUCCESS(MakeDir("second_target"));
   auto second_target_dir = TestPath("second_target");
-  ASSERT_THAT(mount("/data", second_target_dir.c_str(), "remotefs", MS_SYNCHRONOUS, nullptr),
-              SyscallSucceeds());
+  auto second_mount = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMount::Mount(
+      "/data/basic", second_target_dir, "remotefs", MS_SYNCHRONOUS, nullptr));
 
   // Create a file in the first mounted directory.
   auto new_file = first_target_dir + "/foo.txt";
-  auto new_fd = fbl::unique_fd(open(new_file.c_str(), O_CREAT | O_RDWR, S_IRUSR | S_IWUSR, 0777));
+  unlink(new_file.c_str());
+  auto cleanup_file = fit::defer([&] { unlink(new_file.c_str()); });
+  auto new_fd =
+      fbl::unique_fd(open(new_file.c_str(), O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR));
   ASSERT_TRUE(new_fd.is_valid());
   new_fd.reset();
 
   // Confirm that we can find and open the file within the second directory.
-  // In doing so, we can be reasonably assured that the common mount point (/data)
-  // was correctly mounted and serviced by the system.
   auto previously_created_file = second_target_dir + "/foo.txt";
   auto previously_created_fd = fbl::unique_fd(open(previously_created_file.c_str(), O_RDONLY));
   ASSERT_TRUE(previously_created_fd.is_valid());
+  previously_created_fd.reset();
+
+  cleanup_file.cancel();
+  ASSERT_THAT(unlink(new_file.c_str()), SyscallSucceeds());
+  first_mount.Unmount();
+  second_mount.Unmount();
+  EXPECT_FALSE(test_helper::ReadMountInfoLine(first_target_dir).has_value());
+  EXPECT_FALSE(test_helper::ReadMountInfoLine(second_target_dir).has_value());
 }
 
 TEST_F(MountTest, RemotefsSubdirMount) {
   // Requested mounts of a nested path (e.g. /data/foo) with a valid namespace
-  // in the ancestor path (e.g. /data) will be mounted. The kernel should
-  // transparently create the subdir nodes in the remotefs mount call.
+  // in the ancestor path (e.g. /data) will be mounted. A read-write remotefs
+  // mount transparently creates missing subdir nodes, while a read-only mount
+  // requires the subdir to exist.
   if (!test_helper::IsStarnix()) {
     GTEST_SKIP() << "MountTest.RemotefsSubdirMount cannot be run on Linux, skipping.";
   }
   ASSERT_SUCCESS(MakeDir("a"));
   auto dir = TestPath("a");
-  ASSERT_THAT(mount("/data/foo", dir.c_str(), "remotefs", MS_RDONLY, nullptr), SyscallSucceeds());
+  auto cleanup_subdir = fit::defer([&] {
+    auto cleanup_parent =
+        test_helper::ScopedMount::Mount("/data/subdir_test", dir, "remotefs", 0, nullptr);
+    if (cleanup_parent.is_ok()) {
+      rmdir((dir + "/foo").c_str());
+    }
+  });
+  {
+    auto setup_parent =
+        test_helper::ScopedMount::Mount("/data/subdir_test", dir, "remotefs", 0, nullptr);
+    if (setup_parent.is_ok()) {
+      rmdir((dir + "/foo").c_str());
+    }
+  }
+  EXPECT_THAT(
+      test_helper::ScopedMount::Mount("/data/subdir_test/foo", dir, "remotefs", MS_RDONLY, nullptr),
+      SyscallResultIsErrno(ENOENT));
+  auto rw_mount = ASSERT_RESULT_SUCCESS_AND_RETURN(
+      test_helper::ScopedMount::Mount("/data/subdir_test/foo", dir, "remotefs", 0, nullptr));
+  rw_mount.Unmount();
+  ASSERT_FALSE(test_helper::ReadMountInfoLine(dir).has_value());
+  auto ro_mount = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMount::Mount(
+      "/data/subdir_test/foo", dir, "remotefs", MS_RDONLY, nullptr));
+  ro_mount.Unmount();
+  EXPECT_FALSE(test_helper::ReadMountInfoLine(dir).has_value());
 }
 
 TEST_F(MountTest, RemotefsInvalidPath) {
@@ -900,6 +932,171 @@ TEST_F(MountTest, RemotefsRelativePath) {
   ASSERT_THAT(mount(".", dir.c_str(), "remotefs", MS_RDONLY, nullptr), SyscallFailsWithErrno(2));
   ASSERT_THAT(mount("/", dir.c_str(), "remotefs", MS_RDONLY, nullptr), SyscallFailsWithErrno(2));
   ASSERT_THAT(mount("", dir.c_str(), "remotefs", MS_RDONLY, nullptr), SyscallFailsWithErrno(2));
+  ASSERT_THAT(mount("/data/", dir.c_str(), "remotefs", MS_RDONLY, nullptr),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("//data", dir.c_str(), "remotefs", MS_RDONLY, nullptr),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("/data/.", dir.c_str(), "remotefs", MS_RDONLY, nullptr),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("/data/..", dir.c_str(), "remotefs", MS_RDONLY, nullptr),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("/data/../pkg", dir.c_str(), "remotefs", MS_RDONLY, nullptr),
+              SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(MountTest, RemotefsRestrictedNamespacePaths) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "MountTest.RemotefsRestrictedNamespacePaths cannot be run on Linux, skipping.";
+  }
+  ASSERT_SUCCESS(MakeDir("a"));
+  auto dir = TestPath("a");
+
+  for (const char *fs_type : {"remotefs", "remote_bundle"}) {
+    // Service and lifecycle capabilities cannot be mounted as directory trees.
+    ASSERT_THAT(mount("/svc", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(ENOENT));
+    ASSERT_THAT(mount("/svc/fuchsia.logger.LogSink", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(ENOENT));
+    ASSERT_THAT(mount("/tmp_lifecycle", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(ENOENT));
+    ASSERT_THAT(mount("/tmp_lifecycle/sub", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(ENOENT));
+
+    // Package paths outside read-only `/pkg/data/<subdir>` mounts are denied.
+    ASSERT_THAT(mount("/pkg", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(EACCES));
+    ASSERT_THAT(mount("/pkg/data", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(EACCES));
+    ASSERT_THAT(mount("/pkg/meta", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallFailsWithErrno(EACCES));
+    ASSERT_THAT(mount("/pkg/data/system", dir.c_str(), fs_type, MS_RDONLY, nullptr),
+                SyscallSucceeds());
+    ASSERT_THAT(umount(dir.c_str()), SyscallSucceeds());
+  }
+  ASSERT_THAT(mount("/pkg/data/system", dir.c_str(), "remotefs", 0, nullptr),
+              SyscallFailsWithErrno(EACCES));
+
+  // `remotevol` `keylocation=` rejects non-canonical, disallowed, and `/pkg` paths (including
+  // `/pkg/data/<subdir>`, which is only valid for read-only directory mounts).
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/svc"),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/svc/fuchsia.logger.LogSink"),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/tmp_lifecycle"),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/tmp_lifecycle/sub"),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/data/../pkg"),
+              SyscallFailsWithErrno(ENOENT));
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/pkg"),
+              SyscallFailsWithErrno(EACCES));
+  ASSERT_THAT(mount("none", dir.c_str(), "remotevol", 0, "keylocation=/pkg/data/foo"),
+              SyscallFailsWithErrno(EACCES));
+}
+
+TEST_F(MountTest, RemotevolCasefoldDisabledByDefault) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "MountTest.RemotevolCasefoldDisabledByDefault is Starnix-specific.";
+  }
+  const char *mutable_storage = getenv("MUTABLE_STORAGE");
+  if (mutable_storage == nullptr) {
+    GTEST_SKIP() << "MUTABLE_STORAGE environment variable is not set.";
+  }
+  auto mount_info = test_helper::ReadMountInfoLine(mutable_storage);
+  if (!mount_info.has_value() || mount_info->fs_type != "remotevol") {
+    GTEST_SKIP() << mutable_storage << " is not a remotevol mount.";
+  }
+  test_helper::ScopedTempDir data_temp_dir(mutable_storage);
+  ASSERT_FALSE(data_temp_dir.path().empty());
+  EXPECT_THAT(test_helper::SetCasefold(data_temp_dir.path(), /* enable = */ true),
+              SyscallResultIsErrno(EOPNOTSUPP));
+}
+
+TEST_F(MountTest, RemotefsCasefoldInvalidMountOptions) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "MountTest.RemotefsCasefoldInvalidMountOptions is Starnix-specific.";
+  }
+  auto mount_dir = TestPath("casefold_opt_mount");
+  ASSERT_SUCCESS(MakeDir("casefold_opt_mount"));
+
+  // Invalid `casefold=<value>` and `casefold` on non-Fxfs `/pkg` mounts fail with `EINVAL`.
+  EXPECT_THAT(test_helper::ScopedMount::Mount("/data", mount_dir, "remotefs", 0, "casefold=1"),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(test_helper::ScopedMount::Mount("/pkg/data/system", mount_dir, "remotefs", MS_RDONLY,
+                                              "casefold"),
+              SyscallResultIsErrno(EINVAL));
+}
+
+TEST_F(MountTest, RemotefsCasefoldDisabledByDefault) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP() << "MountTest.RemotefsCasefoldDisabledByDefault is Starnix-specific.";
+  }
+  auto mount_dir = TestPath("casefold_opt_mount");
+  auto default_mount =
+      test_helper::ScopedMount::CreateDirAndMount("/data", mount_dir, "remotefs", 0, nullptr);
+  ASSERT_THAT(default_mount, SyscallResultIsOk());
+  test_helper::ScopedTempDir subdir(mount_dir);
+  ASSERT_FALSE(subdir.path().empty());
+  EXPECT_THAT(test_helper::SetCasefold(subdir.path(), /* enable = */ true),
+              SyscallResultIsErrno(EOPNOTSUPP));
+}
+
+TEST_F(MountTest, RemotefsWithoutCasefoldRejectsPreexistingCasefoldDirectory) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP()
+        << "MountTest.RemotefsWithoutCasefoldRejectsPreexistingCasefoldDirectory is Starnix-specific.";
+  }
+
+  auto mount_dir = TestPath("preexisting_mount");
+  ASSERT_SUCCESS(MakeDir("preexisting_mount"));
+  std::string work_dirname;
+
+  // Unwinds only after inner `ScopedMount` blocks unmount `mount_dir`, so `/data` is never
+  // mounted concurrently under multiple writable `remotefs` mounts.
+  auto cleanup = fit::defer([&] {
+    if (work_dirname.empty()) {
+      return;
+    }
+    auto cf_mount = test_helper::ScopedMount::Mount("/data", mount_dir, "remotefs", 0, "casefold");
+    if (cf_mount.is_ok()) {
+      files::DeletePath(mount_dir + "/" + work_dirname, /* recursive = */ true);
+    }
+  });
+
+  // Populate a `+F` directory and a normal directory via a `casefold`-enabled mount.
+  {
+    auto cf_mount = test_helper::ScopedMount::Mount("/data", mount_dir, "remotefs", 0, "casefold");
+    ASSERT_THAT(cf_mount, SyscallResultIsOk());
+    std::string work_path = mount_dir + "/casefold_preexisting_XXXXXX";
+    ASSERT_NE(mkdtemp(work_path.data()), nullptr) << strerror(errno);
+    work_dirname = files::GetBaseName(work_path);
+    ASSERT_THAT(mkdir((work_path + "/cf_dir").c_str(), 0755), SyscallSucceeds());
+    ASSERT_THAT(test_helper::SetCasefold(work_path + "/cf_dir", /* enable = */ true),
+                SyscallResultIsOk());
+    ASSERT_TRUE(files::WriteFile(work_path + "/cf_dir/file.txt", "hello"));
+    ASSERT_THAT(mkdir((work_path + "/normal_dir").c_str(), 0755), SyscallSucceeds());
+  }
+
+  std::string remote_work_dir = "/data/" + work_dirname;
+
+  // Mounting the `+F` directory directly as root without `casefold` fails with `EUCLEAN`.
+  EXPECT_THAT(test_helper::ScopedMount::Mount(remote_work_dir + "/cf_dir", mount_dir, "remotefs", 0,
+                                              nullptr),
+              SyscallResultIsErrno(EUCLEAN));
+
+  // Mounting the parent without `casefold` succeeds for normal directories, while looking up or
+  // traversing through the `+F` subdirectory fails with `EUCLEAN`.
+  {
+    auto default_mount =
+        test_helper::ScopedMount::Mount(remote_work_dir, mount_dir, "remotefs", 0, nullptr);
+    ASSERT_THAT(default_mount, SyscallResultIsOk());
+    EXPECT_THAT(access((mount_dir + "/normal_dir").c_str(), F_OK), SyscallSucceeds());
+    EXPECT_THAT(access((mount_dir + "/cf_dir").c_str(), F_OK), SyscallFailsWithErrno(EUCLEAN));
+    EXPECT_THAT(access((mount_dir + "/cf_dir/file.txt").c_str(), F_OK),
+                SyscallFailsWithErrno(EUCLEAN));
+    EXPECT_THAT(access((mount_dir + "/cf_dir/FILE.TXT").c_str(), F_OK),
+                SyscallFailsWithErrno(EUCLEAN));
+  }
 }
 
 // Verifies that permissions changed via `chmod` on a special file (like a socket) in a remote
@@ -912,48 +1109,53 @@ TEST_F(MountTest, RemotefsSocketPermissionsPersist) {
 
   ASSERT_SUCCESS(MakeDir("remotefs_mount"));
   auto mount_dir = TestPath("remotefs_mount");
-  ASSERT_THAT(mount("/data", mount_dir.c_str(), "remotefs", MS_SYNCHRONOUS, nullptr),
-              SyscallSucceeds());
-
   std::string socket_path = mount_dir + "/test_socket";
 
-  // Create a UNIX domain socket.
-  fbl::unique_fd sock(socket(AF_UNIX, SOCK_STREAM, 0));
-  ASSERT_TRUE(sock.is_valid());
+  {
+    auto first_mount = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMount::Mount(
+        "/data/socket_persist", mount_dir, "remotefs", MS_SYNCHRONOUS, nullptr));
+    unlink(socket_path.c_str());
+    auto cleanup_socket = fit::defer([&] { unlink(socket_path.c_str()); });
 
-  struct sockaddr_un addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
+    // Create a UNIX domain socket.
+    fbl::unique_fd sock(socket(AF_UNIX, SOCK_STREAM, 0));
+    ASSERT_TRUE(sock.is_valid());
 
-  ASSERT_THAT(bind(sock.get(), (struct sockaddr *)&addr, sizeof(addr)), SyscallSucceeds());
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, socket_path.c_str(), sizeof(addr.sun_path) - 1);
 
-  // Verify file exists and is a socket.
+    ASSERT_THAT(bind(sock.get(), (struct sockaddr *)&addr, sizeof(addr)), SyscallSucceeds());
+
+    // Verify file exists and is a socket.
+    struct stat st;
+    ASSERT_THAT(stat(socket_path.c_str(), &st), SyscallSucceeds());
+    ASSERT_TRUE(S_ISSOCK(st.st_mode));
+
+    // Change permissions to 0777.
+    ASSERT_THAT(chmod(socket_path.c_str(), 0777), SyscallSucceeds());
+
+    // Verify permissions in-memory.
+    ASSERT_THAT(stat(socket_path.c_str(), &st), SyscallSucceeds());
+    EXPECT_EQ(static_cast<int>(st.st_mode & 0777), 0777);
+    cleanup_socket.cancel();
+  }
+  ASSERT_FALSE(test_helper::ReadMountInfoLine(mount_dir).has_value());
+
+  // Mount again and verify permissions persist after re-fetch from remote filesystem.
+  auto second_mount = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMount::Mount(
+      "/data/socket_persist", mount_dir, "remotefs", MS_SYNCHRONOUS, nullptr));
+  auto cleanup_socket = fit::defer([&] { unlink(socket_path.c_str()); });
+
   struct stat st;
   ASSERT_THAT(stat(socket_path.c_str(), &st), SyscallSucceeds());
-  ASSERT_TRUE(S_ISSOCK(st.st_mode));
-
-  // Change permissions to 0777.
-  ASSERT_THAT(chmod(socket_path.c_str(), 0777), SyscallSucceeds());
-
-  // Verify permissions in-memory.
-  ASSERT_THAT(stat(socket_path.c_str(), &st), SyscallSucceeds());
   EXPECT_EQ(static_cast<int>(st.st_mode & 0777), 0777);
 
-  // Unmount to clear cache.
-  ASSERT_THAT(umount(mount_dir.c_str()), SyscallSucceeds());
-
-  // Mount again.
-  ASSERT_THAT(mount("/data", mount_dir.c_str(), "remotefs", MS_SYNCHRONOUS, nullptr),
-              SyscallSucceeds());
-
-  // Verify permissions again after re-fetch from remote filesystem.
-  ASSERT_THAT(stat(socket_path.c_str(), &st), SyscallSucceeds());
-  EXPECT_EQ(static_cast<int>(st.st_mode & 0777), 0777);
-
-  // Clean up.
-  unlink(socket_path.c_str());
-  ASSERT_THAT(umount(mount_dir.c_str()), SyscallSucceeds());
+  cleanup_socket.cancel();
+  ASSERT_THAT(unlink(socket_path.c_str()), SyscallSucceeds());
+  second_mount.Unmount();
+  EXPECT_FALSE(test_helper::ReadMountInfoLine(mount_dir).has_value());
 }
 
 class ProcMountsTest : public ProcTestBase {

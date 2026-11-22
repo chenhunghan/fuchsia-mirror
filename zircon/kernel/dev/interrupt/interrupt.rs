@@ -10,6 +10,9 @@ pub const MAX_INTERRUPTS: usize = 1024;
 /// The maximum number of MSI IRQs.
 pub const MAX_MSI_IRQS: usize = 32;
 
+/// Flag for [`is_valid_interrupt`] indicating a kernel-internal registration (e.g. IPIs).
+pub const INTERRUPT_VALID_KERNEL: u32 = 1 << 0;
+
 /// Represents an interrupt vector number.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

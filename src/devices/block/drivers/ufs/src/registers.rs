@@ -110,7 +110,7 @@ register! {
     }
 
     #[register(offset = 0x30, mode = RO)]
-    /// UFSHCI 3.0/4.0 section 5.3.3: HCS - Host Controller Status.
+    /// UFSHCI 3.0 section 5.3.3 / UFSHCI 4.0 section 5.3.4: HCS - Host Controller Status.
     pub struct HostControllerStatusReg(u32) {
         pub target_lun_of_utp_error, _: 31, 24;
         pub task_tag_of_utp_error, _: 23, 16;
@@ -123,42 +123,46 @@ register! {
     }
 
     #[register(offset = 0x34, mode = RW)]
-    /// UFSHCI 3.0/4.0 section 5.3.4: HCE - Host Controller Enable.
+    /// UFSHCI 3.0 section 5.3.4 / UFSHCI 4.0 section 5.3.5: HCE - Host Controller Enable.
     pub struct HostControllerEnableReg(u32) {
         pub crypto_general_enable, set_crypto_general_enable: 1;
         pub host_controller_enable, set_host_controller_enable: 0;
     }
 
     #[register(offset = 0x38, mode = RO)]
-    /// UFSHCI 3.0/4.0 section 5.3.5: UECPA - Host UIC Error Code PHY Adapter Layer.
+    /// UFSHCI 3.0 section 5.3.5 / UFSHCI 4.0 section 5.3.6: UECPA - Host UIC Error Code PHY
+    /// Adapter Layer.
     pub struct HostUicErrorCodePhyAdapterLayerReg(u32) {
         pub uic_phy_adapter_layer_error, _: 31;
         pub uic_phy_adapter_layer_error_code, _: 4, 0;
     }
 
     #[register(offset = 0x3C, mode = RO)]
-    /// UFSHCI 3.0/4.0 section 5.3.6: UECDL - Host UIC Error Code Data Link Layer.
+    /// UFSHCI 3.0 section 5.3.6 / UFSHCI 4.0 section 5.3.7: UECDL - Host UIC Error Code Data
+    /// Link Layer.
     pub struct HostUicErrorCodeDataLinkLayerReg(u32) {
         pub uic_data_link_layer_error, _: 31;
         pub uic_data_link_layer_error_code, _: 15, 0;
     }
 
     #[register(offset = 0x40, mode = RO)]
-    /// UFSHCI 3.0/4.0 section 5.3.7: UECN - Host UIC Error Code Network Layer.
+    /// UFSHCI 3.0 section 5.3.7 / UFSHCI 4.0 section 5.3.8: UECN - Host UIC Error Code Network
+    /// Layer.
     pub struct HostUicErrorCodeNetworkLayerReg(u32) {
         pub uic_network_layer_error, _: 31;
         pub uic_network_layer_error_code, _: 2, 0;
     }
 
     #[register(offset = 0x44, mode = RO)]
-    /// UFSHCI 3.0/4.0 section 5.3.8: UECT - Host UIC Error Code Transport Layer.
+    /// UFSHCI 3.0 section 5.3.8 / UFSHCI 4.0 section 5.3.9: UECT - Host UIC Error Code
+    /// Transport Layer.
     pub struct HostUicErrorCodeTransportLayerReg(u32) {
         pub uic_transport_layer_error, _: 31;
         pub uic_transport_layer_error_code, _: 6, 0;
     }
 
     #[register(offset = 0x48, mode = RO)]
-    /// UFSHCI 3.0/4.0 section 5.3.9: UECDME - Host UIC Error Code DME.
+    /// UFSHCI 3.0 section 5.3.9 / UFSHCI 4.0 section 5.3.10: UECDME - Host UIC Error Code DME.
     pub struct HostUicErrorCodeDmeReg(u32) {
         pub uic_dme_error, _: 31;
         pub uic_dme_error_code, _: 3, 0;
@@ -230,7 +234,7 @@ register! {
     }
 
     #[register(offset = 0x300, mode = RW)]
-    /// UFSHCI 4.0 section 5.2.8: CONFIG - Global Configuration.
+    /// UFSHCI 4.0 section 5.9.1: CONFIG - Global Configuration.
     pub struct GlobalConfigReg(u32) {
         pub event_specific_interrupt_enable, set_event_specific_interrupt_enable: 1;
         // Queue Type: 0 = legacy single doorbell, 1 = MCQ.
@@ -238,7 +242,7 @@ register! {
     }
 
     #[register(offset = 0x380, mode = RW)]
-    /// UFSHCI 4.0 section 5.2.9: MCQCONFIG - MCQ Configuration.
+    /// UFSHCI 4.0 section 5.9.2: MCQCONFIG - MCQ Configuration.
     pub struct McqConfigReg(u32) {
         // Maximum Active Commands, 0-based.
         pub max_active_commands, set_max_active_commands: 16, 8;
@@ -276,7 +280,7 @@ impl CapabilityReg {
     }
 }
 
-/// Host Controller Status UTP Error Code (UFSHCI 3.0/4.0 section 5.3.3).
+/// Host Controller Status UTP Error Code (UFSHCI 3.0 section 5.3.3 / UFSHCI 4.0 section 5.3.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum UtpErrorCode {
@@ -290,7 +294,8 @@ pub enum UtpErrorCode {
     TmrUpiuHasInvalidTaskTagOrLun = 3,
 }
 
-/// Host Controller Status UIC Power Mode Change Request Status (UFSHCI 3.0/4.0 section 5.3.3).
+/// Host Controller Status UIC Power Mode Change Request Status (UFSHCI 3.0 section 5.3.3 /
+/// UFSHCI 4.0 section 5.3.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PowerModeStatus {
@@ -306,6 +311,13 @@ pub enum PowerModeStatus {
     PowerErrorCap = 4,
     /// Fatal error during power mode change (`PWR_FATAL_ERROR`).
     PowerFatalError = 5,
+}
+
+impl PowerModeStatus {
+    /// Returns whether the power mode change completed without error.
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::PowerOk | Self::PowerLocal | Self::PowerRemote)
+    }
 }
 
 impl HostControllerStatusReg {

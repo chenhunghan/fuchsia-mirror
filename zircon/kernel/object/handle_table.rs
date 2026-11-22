@@ -12,7 +12,7 @@ use super::handle::{
 };
 use super::process_dispatcher::ProcessDispatcher;
 use crate::kernel::thread::AutoExpiringPreemptDisabler;
-use crate::ksync_kernel::RawBrwLockPi;
+use crate::ksync_kernel::TrackedBrwLockPi;
 use core::convert::Infallible;
 use core::ffi::c_void;
 use core::marker::PhantomPinned;
@@ -231,7 +231,7 @@ pub struct HandleTable {
     // Right now, this is required when a process closes the last handle to
     // another process, during the destruction of the handle table.
     #[brwlock(flags = lockdep::LOCK_FLAGS_MULTI_ACQUIRE)]
-    lock: BrwLockPi<RawBrwLockPi>,
+    lock: BrwLockPi<TrackedBrwLockPi>,
 
     // The koid of this handle table. Used to check whether or not a handle belongs to this handle
     // table (and thus that it belongs to a process associated with this handle table).
@@ -271,17 +271,9 @@ unsafe impl Send for HandleTable {}
 unsafe impl Sync for HandleTable {}
 
 fn generate_random_handle_mixer() -> u32 {
-    unsafe extern "C" {
-        fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
-    }
-    let mut secret: u32 = 0;
-    // SAFETY: `secret` buffer is valid and appropriately sized for random draw.
-    unsafe {
-        cpp_global_prng_draw(
-            core::ptr::from_mut(&mut secret).cast::<u8>(),
-            core::mem::size_of::<u32>(),
-        );
-    }
+    let mut secret = [0u8; core::mem::size_of::<u32>()];
+    crate::crypto::global_prng::draw(&mut secret);
+    let secret = u32::from_ne_bytes(secret);
     // Handle values must always have the low HANDLE_RESERVED_BITS set.  Do not
     // ever attempt to toggle these bits using the random_value xor mask.
     secret << HANDLE_RESERVED_BITS

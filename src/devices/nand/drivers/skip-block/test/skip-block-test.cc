@@ -4,8 +4,8 @@
 
 #include "skip-block.h"
 
+#include <fidl/fuchsia.hardware.badblock/cpp/wire.h>
 #include <fidl/fuchsia.hardware.skipblock/cpp/wire.h>
-#include <fuchsia/hardware/badblock/cpp/banjo.h>
 #include <fuchsia/hardware/nand/cpp/banjo.h>
 #include <lib/ddk/metadata.h>
 #include <lib/driver/compat/cpp/banjo_server.h>
@@ -159,40 +159,48 @@ class FakeNand : public ddk::NandProtocol<FakeNand> {
 };
 
 // Fake for the bad block protocol.
-class FakeBadBlock : public ddk::BadBlockProtocol<FakeBadBlock> {
+class FakeBadBlock : public fidl::WireServer<fuchsia_hardware_badblock::BadBlock> {
  public:
   FakeBadBlock() = default;
 
-  bad_block_protocol_ops_t* proto_ops() { return &bad_block_protocol_ops_; }
-
   void set_result(zx_status_t result) { result_ = result; }
 
-  // Bad Block protocol:
-  zx_status_t BadBlockGetBadBlockList(uint32_t* bad_block_list, size_t bad_block_list_len,
-                                      size_t* bad_block_count) {
-    *bad_block_count = grown_bad_blocks_.size();
-    if (bad_block_list_len < *bad_block_count) {
-      return bad_block_list == nullptr ? ZX_OK : ZX_ERR_BUFFER_TOO_SMALL;
+  void GetBadBlockList(GetBadBlockListCompleter::Sync& completer) override {
+    if (result_ != ZX_OK) {
+      completer.ReplyError(result_);
+      return;
     }
-    memcpy(bad_block_list, grown_bad_blocks_.data(), grown_bad_blocks_.size() * sizeof(uint32_t));
-    return result_;
+    completer.ReplySuccess(fidl::VectorView<uint32_t>::FromExternal(grown_bad_blocks_.data(),
+                                                                    grown_bad_blocks_.size()));
   }
 
-  zx_status_t BadBlockMarkBlockBad(uint32_t block) {
+  void MarkBlockBad(MarkBlockBadRequestView request,
+                    MarkBlockBadCompleter::Sync& completer) override {
     if (result_ == ZX_OK) {
-      grown_bad_blocks_.push_back(block);
+      grown_bad_blocks_.push_back(request->block);
+      completer.ReplySuccess();
+    } else {
+      completer.ReplyError(result_);
     }
-    return result_;
+  }
+
+  void handle_unknown_method(
+      fidl::UnknownMethodMetadata<fuchsia_hardware_badblock::BadBlock> metadata,
+      fidl::UnknownMethodCompleter::Sync& completer) override {}
+
+  fuchsia_hardware_badblock::Service::InstanceHandler CreateHandler(
+      async_dispatcher_t* dispatcher) {
+    return fuchsia_hardware_badblock::Service::InstanceHandler({
+        .bad_block = bindings_.CreateHandler(this, dispatcher, fidl::kIgnoreBindingClosure),
+    });
   }
 
   const fbl::Vector<uint32_t>& grown_bad_blocks() { return grown_bad_blocks_; }
-  compat::BanjoServer& banjo_server() { return banjo_server_; }
 
  private:
+  fidl::ServerBindingGroup<fuchsia_hardware_badblock::BadBlock> bindings_;
   fbl::Vector<uint32_t> grown_bad_blocks_;
   zx_status_t result_ = ZX_OK;
-
-  compat::BanjoServer banjo_server_{ZX_PROTOCOL_BAD_BLOCK, this, &bad_block_protocol_ops_};
 };
 
 class SkipBlockTestEnvironment : public fdf_testing::Environment {
@@ -202,7 +210,6 @@ class SkipBlockTestEnvironment : public fdf_testing::Environment {
 
     compat::DeviceServer::BanjoConfig config{.default_proto_id = ZX_PROTOCOL_NAND};
     config.callbacks[ZX_PROTOCOL_NAND] = nand_.banjo_server().callback();
-    config.callbacks[ZX_PROTOCOL_BAD_BLOCK] = bad_block_.banjo_server().callback();
     device_server_.Initialize("default", std::nullopt, std::move(config));
     device_server_.AddMetadata(DEVICE_METADATA_PRIVATE, &count, sizeof(count));
   }
@@ -210,6 +217,8 @@ class SkipBlockTestEnvironment : public fdf_testing::Environment {
   zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override {
     async_dispatcher_t* dispatcher = fdf::Dispatcher::GetCurrent()->async_dispatcher();
     EXPECT_OK(device_server_.Serve(dispatcher, &to_driver_vfs));
+    EXPECT_OK(to_driver_vfs.AddService<fuchsia_hardware_badblock::Service>(
+        bad_block_.CreateHandler(dispatcher)));
 
     return zx::ok();
   }

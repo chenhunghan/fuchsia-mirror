@@ -231,7 +231,7 @@ class TA_SCOPED_CAP SingleChainLockGuard {
   // guard, matching the order that constructors are executed in. Likewise, the guard needs to be
   // released before completing the transaction and the transaction needs to be completed before
   // restoring state, matching the order that the destructors are executed in.
-  ChainLockTransaction::StateSaver<option> state_saver_;
+  [[maybe_unused]] ChainLockTransaction::StateSaver<option> state_saver_;
   ChainLockTransaction transaction_;
   ChainLockGuard guard_;
 };

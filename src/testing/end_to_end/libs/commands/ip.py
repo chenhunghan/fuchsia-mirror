@@ -3,13 +3,16 @@
 # found in the LICENSE file.
 
 import ipaddress
+import logging
 import re
 import subprocess
 from typing import Iterator
 
+from libs import errors
 from libs.commands.command import LinuxCommand
 from libs.proc.runner import Runner
-from mobly import signals
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class LinuxIpCommand(LinuxCommand):
@@ -154,13 +157,13 @@ class LinuxIpCommand(LinuxCommand):
                         a for a, _ in self.get_ipv4_addresses(net_interface)
                     ]
                     if address not in addresses:
-                        self._runner.log.warning(
+                        _LOGGER.warning(
                             "Unable to remove address %s. The address was "
                             "removed by another process.",
                             address,
                         )
                     else:
-                        raise signals.TestError(
+                        raise errors.TestError(
                             f"Unable to remove address {address}. The address is still "
                             f"registered to {net_interface}, despite call for removal.",
                             extras={
@@ -169,7 +172,7 @@ class LinuxIpCommand(LinuxCommand):
                                 "returncode": e.returncode,
                             },
                         )
-                raise signals.TestError(
+                raise errors.TestError(
                     f"Unable to remove address {address}: {e.stderr.decode('utf-8', errors='replace')}",
                     extras={
                         "stdout": e.stdout,

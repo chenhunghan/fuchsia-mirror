@@ -7,6 +7,9 @@
 //! x86_64 spinlock implementation.
 //!
 //! Stores the current CPU number + 1 so that 0 represents an unheld lock.
+//!
+//! The `arch_spin_*` functions below are the architecture half of `SpinLockBase` in
+//! `crate::kernel::spinlock`, which holds the lock word and calls them with interrupts disabled.
 
 // TODO(https://fxbug.dev/581987928): Remove `#![coverage(off)]` once compiler options can control
 // atomic coverage counter updates.
@@ -14,23 +17,10 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::x86::{
-    PERCPU_CPU_NUM_OFFSET, PERCPU_NUM_SPINLOCKS_OFFSET, x86_add_gs_offset32, x86_read_gs_offset32,
-};
+use super::mp::PERCPU_NUM_SPINLOCKS_OFFSET;
+use super::x86::x86_add_gs_offset32;
 use crate::kernel::spin_tracing::{EncodedLockId, FinishType, Tracer};
-
-/// Returns the spinlock value for the calling CPU (`cpu_num + 1`).
-///
-/// # Safety
-///
-/// The caller must ensure that `%gs.base` points to the current CPU's `x86_percpu` structure and
-/// interrupts are disabled on the calling CPU.
-#[inline(always)]
-unsafe fn current_cpu_spinlock_value() -> u32 {
-    // SAFETY: Caller guarantees `%gs.base` is initialized for the current CPU, and
-    // `PERCPU_CPU_NUM_OFFSET` is the valid offset of `cpu_num` in `x86_percpu`.
-    unsafe { x86_read_gs_offset32::<PERCPU_CPU_NUM_OFFSET>() }.wrapping_add(1)
-}
+use crate::kernel::types::cpu_num_t;
 
 #[inline(always)]
 fn arch_spin_lock_core(lock: &AtomicU32, val: u32) {
@@ -61,14 +51,14 @@ fn arch_spin_lock_core_contended(lock: &AtomicU32, val: u32) {
 ///
 /// # Safety
 ///
-/// The caller must ensure that `%gs.base` points to the current CPU's `x86_percpu` structure and
-/// interrupts are disabled on the calling CPU.
+/// Interrupts are disabled on the calling CPU, and `cpu` equals `curr_cpu_num()`.
 #[inline(always)]
-pub(crate) unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32) {
-    // SAFETY: Caller guarantees `%gs.base` is initialized and interrupts are disabled.
-    let val = unsafe { current_cpu_spinlock_value() };
+pub unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32, cpu: cpu_num_t) {
+    let val = cpu.wrapping_add(1);
     arch_spin_lock_core(lock, val);
-    // SAFETY: Caller guarantees `%gs.base` is initialized and interrupts are disabled.
+    // SAFETY: `%gs.base` points at the calling CPU's `x86_percpu` from before any C++ or Rust code
+    // runs on that CPU (see `super::mp::arch_curr_cpu_num`), and the caller has disabled
+    // interrupts.
     unsafe { x86_add_gs_offset32::<PERCPU_NUM_SPINLOCKS_OFFSET, 1>() };
 }
 
@@ -76,15 +66,14 @@ pub(crate) unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32) {
 ///
 /// # Safety
 ///
-/// The caller must ensure that `%gs.base` points to the current CPU's `x86_percpu` structure and
-/// interrupts are disabled on the calling CPU.
+/// Interrupts are disabled on the calling CPU, and `cpu` equals `curr_cpu_num()`.
 #[inline(always)]
-pub(crate) unsafe fn arch_spin_lock_trace_instrumented(
+pub unsafe fn arch_spin_lock_trace_instrumented(
     lock: &AtomicU32,
+    cpu: cpu_num_t,
     encoded_lock_id: EncodedLockId,
 ) {
-    // SAFETY: Caller guarantees `%gs.base` is initialized and interrupts are disabled.
-    let val = unsafe { current_cpu_spinlock_value() };
+    let val = cpu.wrapping_add(1);
 
     // If this lock acquisition is trace instrumented, try to obtain the lock once
     // before we decide that we need to spin and produce spin trace events.
@@ -92,7 +81,9 @@ pub(crate) unsafe fn arch_spin_lock_trace_instrumented(
         arch_spin_lock_trace_instrumented_contended(lock, val, encoded_lock_id);
     }
 
-    // SAFETY: Caller guarantees `%gs.base` is initialized and interrupts are disabled.
+    // SAFETY: `%gs.base` points at the calling CPU's `x86_percpu` from before any C++ or Rust code
+    // runs on that CPU (see `super::mp::arch_curr_cpu_num`), and the caller has disabled
+    // interrupts.
     unsafe { x86_add_gs_offset32::<PERCPU_NUM_SPINLOCKS_OFFSET, 1>() };
 }
 
@@ -112,21 +103,25 @@ fn arch_spin_lock_trace_instrumented_contended(
 
 /// Attempts to acquire `lock` without spinning.
 ///
-/// Returns `false` if the lock was acquired, or `true` if it was already held (matching
-/// `TA_TRY_ACQ(false, lock)` in `include/arch/spinlock.h`).
+/// Returns `false` if the lock was acquired, or `true` if it was already held.
+///
+/// Note: trylock operations are not permitted to fail spuriously, even on
+/// architectures with weak memory ordering.  If a trylock operation fails, it
+/// must be because the lock was actually observed to be held by another thread
+/// during the attempt.
 ///
 /// # Safety
 ///
-/// The caller must ensure that `%gs.base` points to the current CPU's `x86_percpu` structure and
-/// interrupts are disabled on the calling CPU.
+/// Interrupts are disabled on the calling CPU, and `cpu` equals `curr_cpu_num()`.
 #[inline(always)]
-pub(crate) unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
-    // SAFETY: Caller guarantees `%gs.base` is initialized and interrupts are disabled.
-    let val = unsafe { current_cpu_spinlock_value() };
+pub unsafe fn arch_spin_trylock(lock: &AtomicU32, cpu: cpu_num_t) -> bool {
+    let val = cpu.wrapping_add(1);
 
     let failed = lock.compare_exchange(0, val, Ordering::Acquire, Ordering::Relaxed).is_err();
     if !failed {
-        // SAFETY: Caller guarantees `%gs.base` is initialized and interrupts are disabled.
+        // SAFETY: `%gs.base` points at the calling CPU's `x86_percpu` from before any C++ or Rust
+        // code runs on that CPU (see `super::mp::arch_curr_cpu_num`), and the caller has disabled
+        // interrupts.
         unsafe { x86_add_gs_offset32::<PERCPU_NUM_SPINLOCKS_OFFSET, 1>() };
     }
     failed
@@ -140,16 +135,23 @@ pub(crate) unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
 ///
 /// # Safety
 ///
-/// The caller must ensure that `lock` points to a live, properly aligned `AtomicU32` currently
-/// held by the calling CPU, `%gs.base` points to the current CPU's `x86_percpu` structure, and
+/// `lock` points to a live, properly aligned `AtomicU32` that the calling CPU holds, and
 /// interrupts are disabled on the calling CPU.
 #[inline(always)]
-pub(crate) unsafe fn arch_spin_unlock(lock: *const AtomicU32) {
-    // SAFETY: Caller guarantees `%gs.base` is initialized, interrupts are disabled, and the
-    // current CPU holds the live `lock`.
+pub unsafe fn arch_spin_unlock(lock: *const AtomicU32) {
+    // SAFETY: `%gs.base` points at the calling CPU's `x86_percpu` from before any C++ or Rust code
+    // runs on that CPU (see `super::mp::arch_curr_cpu_num`), and the caller guarantees interrupts
+    // are disabled and `lock` is live, 4-byte aligned, and held by this CPU until the release
+    // store below. Under x86_64 TSO an aligned 32-bit `mov` has release ordering (with `asm!`
+    // acting as a compiler barrier), avoiding `&AtomicU32` across the release store and avoiding
+    // `ub_checks` branches on the raw pointer in debug-assertion builds.
     unsafe {
         x86_add_gs_offset32::<PERCPU_NUM_SPINLOCKS_OFFSET, -1>();
-        (*lock).store(0, Ordering::Release);
+        core::arch::asm!(
+            "mov dword ptr [{lock}], 0",
+            lock = in(reg) lock,
+            options(nostack, preserves_flags),
+        );
     }
 }
 

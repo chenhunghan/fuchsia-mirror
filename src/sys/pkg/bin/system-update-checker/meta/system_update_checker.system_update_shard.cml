@@ -6,7 +6,6 @@
         {
             name: "system-update-checker",
             url: "fuchsia-pkg://fuchsia.com/system-update-checker#meta/system-update-checker.cm",
-            startup: "eager",
             on_terminate: "reboot",
         },
     ],

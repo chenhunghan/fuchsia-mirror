@@ -9,10 +9,12 @@ from unittest import mock
 import fidl_fuchsia_hardware_power_battery as f_battery
 from fidl import GlobalHandleWaker
 from honeydew import affordances_capable, errors
-from honeydew.affordances.drivers.battery_manager import Battery, BatteryStatus
-from honeydew.affordances.drivers.battery_manager.utils.errors import (
-    BatteryDeviceNotFoundError,
-    BatteryRequestError,
+from honeydew.affordances.drivers.battery_manager import battery_manager
+from honeydew.affordances.drivers.battery_manager.utils import (
+    errors as battery_errors,
+)
+from honeydew.affordances.drivers.battery_manager.utils import (
+    types as battery_types,
 )
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.fuchsia_controller import errors as fc_errors
@@ -45,7 +47,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             autospec=True,
         )
 
-        self.battery = Battery(
+        self.battery = battery_manager.Battery(
             device_name="fuchsia-test-device",
             ffx=self.ffx_obj,
             fuchsia_controller=self.fc_transport_obj,
@@ -57,7 +59,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         """Test verify_supported raises NotSupportedError when capability missing."""
         self.ffx_obj.run.return_value = ""
         with self.assertRaises(errors.NotSupportedError):
-            Battery(
+            battery_manager.Battery(
                 device_name="fuchsia-test-device",
                 ffx=self.ffx_obj,
                 fuchsia_controller=self.fc_transport_obj,
@@ -72,7 +74,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
             fc_errors.FuchsiaControllerError("error")
         )
 
-        with self.assertRaises(BatteryDeviceNotFoundError):
+        with self.assertRaises(battery_errors.BatteryDeviceNotFoundError):
             await self.battery.make_ready()
 
     async def test_make_ready_propagates_unexpected_exceptions(self) -> None:
@@ -136,7 +138,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.battery._proxy = mock_proxy
         self.battery._ready = True
 
-        with self.assertRaises(BatteryRequestError):
+        with self.assertRaises(battery_errors.BatteryRequestError):
             await self.battery.get_status()
 
     async def test_configure_watch_success(self) -> None:
@@ -155,7 +157,7 @@ class BatteryTests(unittest.IsolatedAsyncioTestCase):
         self.battery._ready = True
 
         options = await self.battery.configure_watch(
-            interest=BatteryStatus(level_percent=0.0)
+            interest=battery_types.BatteryStatus(level_percent=0.0)
         )
         self.assertIsNotNone(options.interest)
         mock_proxy.configure_watch.assert_awaited_once()

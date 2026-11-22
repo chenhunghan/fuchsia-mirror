@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![cfg(any(feature = "c_interface", test))]
+
 use super::{Operation, RequestId, TraceFlowId};
 use crate::{IntoOrchestrator, callback_interface};
 use fidl::endpoints::RequestStream;

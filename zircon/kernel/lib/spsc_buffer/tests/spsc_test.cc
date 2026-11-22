@@ -527,6 +527,55 @@ class SpscBufferTests {
     END_TEST;
   }
 
+  // Test that reading zero bytes from a non-empty buffer returns zero without invoking copy_fn or
+  // advancing the read pointer.
+  static bool TestReadZeroLength() {
+    BEGIN_TEST;
+
+    constexpr uint32_t kStorageSize = 64;
+    constexpr uint32_t kWriteSize = kStorageSize / 2;
+    ktl::array<uint8_t, kWriteSize> src;
+    for (size_t i = 0; i < src.size(); i++) {
+      src[i] = static_cast<uint8_t>(i);
+    }
+
+    SpscBuffer<HeapAllocator> spsc;
+    ASSERT_OK(spsc.Init(kStorageSize));
+
+    zx::result<SpscBuffer<HeapAllocator>::Reservation> reservation = spsc.Reserve(kWriteSize);
+    ASSERT_OK(reservation.status_value());
+    reservation->Write(ktl::as_bytes(ktl::span(src)));
+    reservation->Commit();
+    ASSERT_EQ(kWriteSize, spsc.AvailableData(spsc.LoadPointers()));
+
+    bool copy_fn_called = false;
+    auto copy_fn = [&copy_fn_called](uint32_t, ktl::span<ktl::byte>) {
+      copy_fn_called = true;
+      return ZX_ERR_BAD_STATE;
+    };
+
+    const zx::result<uint32_t> zero_read = spsc.Read(copy_fn, 0);
+    ASSERT_OK(zero_read.status_value());
+    ASSERT_EQ(0u, zero_read.value());
+    ASSERT_FALSE(copy_fn_called);
+    ASSERT_EQ(kWriteSize, spsc.AvailableData(spsc.LoadPointers()));
+
+    // Verify all written data remains intact for a subsequent non-zero read.
+    ktl::array<uint8_t, kWriteSize> dst{};
+    auto read_out_fn = [&dst](uint32_t offset, ktl::span<ktl::byte> data) {
+      ASSERT((offset + data.size()) <= dst.size());
+      memcpy(dst.data() + offset, data.data(), data.size());
+      return ZX_OK;
+    };
+    const zx::result<uint32_t> full_read = spsc.Read(read_out_fn, kWriteSize);
+    ASSERT_OK(full_read.status_value());
+    ASSERT_EQ(kWriteSize, full_read.value());
+    ASSERT_EQ(0u, spsc.AvailableData(spsc.LoadPointers()));
+    ASSERT_BYTES_EQ(src.data(), dst.data(), dst.size());
+
+    END_TEST;
+  }
+
   // Test that draining the buffer works.
   static bool TestDrain() {
     BEGIN_TEST;
@@ -587,6 +636,7 @@ UNITTEST("advance_read_pointer", SpscBufferTests::TestAdvanceReadPointer)
 UNITTEST("advance_write_pointer", SpscBufferTests::TestAdvanceWritePointer)
 UNITTEST("init", SpscBufferTests::TestInit)
 UNITTEST("read_write_single_threaded", SpscBufferTests::TestReadWriteSingleThreaded)
+UNITTEST("read_zero_length", SpscBufferTests::TestReadZeroLength)
 UNITTEST("drain", SpscBufferTests::TestDrain)
 UNITTEST_END_TESTCASE(spsc_buffer_tests, "spsc_buffer",
                       "Test the single-producer, single-consumer ring buffer implementation.")

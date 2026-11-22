@@ -27,6 +27,7 @@ constexpr char TYPE_FILE[] = "cgroup.type";
 constexpr char PROCS_FILE[] = "cgroup.procs";
 constexpr char FREEZE_FILE[] = "cgroup.freeze";
 constexpr char EVENTS_FILE[] = "cgroup.events";
+constexpr char STAT_LOCAL_FILE[] = "cgroup.stat.local";
 constexpr char KILL_FILE[] = "cgroup.kill";
 constexpr char EVENTS_POPULATED[] = "populated 1";
 constexpr char EVENTS_NOT_POPULATED[] = "populated 0";
@@ -61,11 +62,22 @@ class CgroupTest : public ::testing::Test {
       return;
     }
 
+    if (restore_self_to_root_procs_) {
+      std::string root_procs_path = root_path() + "/" + PROCS_FILE;
+      std::string pid_string = std::to_string(getpid());
+      fbl::unique_fd procs_fd(open(root_procs_path.c_str(), O_WRONLY));
+      EXPECT_TRUE(procs_fd.is_valid());
+      if (procs_fd.is_valid()) {
+        EXPECT_THAT(write(procs_fd.get(), pid_string.c_str(), pid_string.length()),
+                    SyscallSucceeds());
+      }
+    }
+
     // Remove paths created by the test in reverse creation order.
     // cgroup2 filesystem persists on the system after umounting, and lingering subdirectories can
     // cause subsequent tests to fail.
     for (auto path = cgroup_paths_.rbegin(); path != cgroup_paths_.rend(); path++) {
-      ASSERT_THAT(rmdir(path->c_str()), SyscallSucceeds()) << "Could not delete " << *path << "";
+      EXPECT_THAT(rmdir(path->c_str()), SyscallSucceeds()) << "Could not delete " << *path << "";
     }
 
     for (auto mountpoint = cgroup_mountpoints_.rbegin(); mountpoint != cgroup_mountpoints_.rend();
@@ -92,6 +104,7 @@ class CgroupTest : public ::testing::Test {
     std::string procs_path = path + "/" + PROCS_FILE;
     std::string freeze_path = path + "/" + FREEZE_FILE;
     std::string events_path = path + "/" + EVENTS_FILE;
+    std::string stat_local_path = path + "/" + STAT_LOCAL_FILE;
 
     struct stat buffer;
     ASSERT_THAT(stat(controllers_path.c_str(), &buffer), SyscallSucceeds());
@@ -100,10 +113,14 @@ class CgroupTest : public ::testing::Test {
     if (is_root) {
       ASSERT_THAT(stat(freeze_path.c_str(), &buffer), SyscallFailsWithErrno(ENOENT));
       ASSERT_THAT(stat(events_path.c_str(), &buffer), SyscallFailsWithErrno(ENOENT));
+      ASSERT_THAT(stat(stat_local_path.c_str(), &buffer), SyscallFailsWithErrno(ENOENT));
       ASSERT_THAT(stat(type_path.c_str(), &buffer), SyscallFailsWithErrno(ENOENT));
     } else {
       ASSERT_THAT(stat(freeze_path.c_str(), &buffer), SyscallSucceeds());
       ASSERT_THAT(stat(events_path.c_str(), &buffer), SyscallSucceeds());
+      if (test_helper::IsStarnix() || test_helper::IsKernelVersionAtLeast(6, 18)) {
+        ASSERT_THAT(stat(stat_local_path.c_str(), &buffer), SyscallSucceeds());
+      }
       ASSERT_THAT(stat(type_path.c_str(), &buffer), SyscallSucceeds());
     }
   }
@@ -175,9 +192,44 @@ class CgroupTest : public ::testing::Test {
     cgroup_paths_.erase(it);
   }
 
+  static std::string ReadFile(const std::string& path) {
+    std::ifstream file(path);
+    EXPECT_TRUE(file.is_open()) << "Unable to open " << path;
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+  }
+
+  static bool FileContainsToken(const std::string& path, const std::string& token) {
+    std::istringstream iss(ReadFile(path));
+    std::string word;
+    while (iss >> word) {
+      if (word == token) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void EnableRootController(const std::string& controller) {
+    std::string root_subtree_path = root_path() + "/" + SUBTREE_CONTROL_FILE;
+    if (FileContainsToken(root_subtree_path, controller)) {
+      return;
+    }
+    std::string cmd = "+" + controller;
+    fbl::unique_fd fd(open(root_subtree_path.c_str(), O_WRONLY));
+    ASSERT_TRUE(fd.is_valid());
+    ASSERT_THAT(write(fd.get(), cmd.c_str(), cmd.size()), SyscallSucceeds());
+  }
+
+  void RestoreSelfToRootOnTearDown() { restore_self_to_root_procs_ = true; }
+
  private:
   // Paths to be removed after a test has completed.
   std::vector<std::string> cgroup_paths_;
+
+  // Whether `TearDown` should move `getpid()` back to the root cgroup before removing sub-cgroups.
+  bool restore_self_to_root_procs_ = false;
 
   // Mountpoints to be unmounted after a test has completed.
   std::vector<test_helper::ScopedTempDir> cgroup_mountpoints_;
@@ -690,6 +742,142 @@ TEST_F(CgroupTest, MkdirWithPermissions) {
   ASSERT_THAT(stat(child_path.c_str(), &st), SyscallSucceeds());
   EXPECT_TRUE(S_ISDIR(st.st_mode));
   EXPECT_EQ(st.st_mode & 0777, 0700u);
+}
+
+TEST_F(CgroupTest, SubtreeControlPropagation) {
+  std::string root_controllers_path = root_path() + "/" + CONTROLLERS_FILE;
+  std::string root_subtree_path = root_path() + "/" + SUBTREE_CONTROL_FILE;
+  ASSERT_TRUE(FileContainsToken(root_controllers_path, "memory"));
+
+  ASSERT_NO_FATAL_FAILURE(EnableRootController("memory"));
+  EXPECT_TRUE(FileContainsToken(root_subtree_path, "memory"));
+
+  std::string child_path = root_path() + "/child";
+  std::string child_controllers_path = child_path + "/" + CONTROLLERS_FILE;
+  std::string child_subtree_path = child_path + "/" + SUBTREE_CONTROL_FILE;
+  std::string grandchild_path = child_path + "/grandchild";
+  std::string grandchild_controllers_path = grandchild_path + "/" + CONTROLLERS_FILE;
+
+  CreateCgroup(child_path);
+  CreateCgroup(grandchild_path);
+
+  EXPECT_TRUE(FileContainsToken(child_controllers_path, "memory"));
+  EXPECT_EQ(ReadFile(child_subtree_path), "");
+  EXPECT_EQ(ReadFile(grandchild_controllers_path), "");
+
+  fbl::unique_fd fd(open(child_subtree_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(fd.is_valid());
+
+  // If a controller appears more than once in a write, the last operation wins.
+  ASSERT_THAT(write(fd.get(), "+memory -memory", 15), SyscallSucceeds());
+  EXPECT_EQ(ReadFile(child_subtree_path), "");
+  EXPECT_EQ(ReadFile(grandchild_controllers_path), "");
+
+  ASSERT_THAT(write(fd.get(), "-memory +memory", 15), SyscallSucceeds());
+  EXPECT_EQ(ReadFile(child_subtree_path), "memory\n");
+  EXPECT_EQ(ReadFile(grandchild_controllers_path), "memory\n");
+
+  // Newly created child cgroups also inherit the parent's enabled subtree_control controllers.
+  std::string grandchild2_path = child_path + "/grandchild2";
+  std::string grandchild2_controllers_path = grandchild2_path + "/" + CONTROLLERS_FILE;
+  CreateCgroup(grandchild2_path);
+  EXPECT_EQ(ReadFile(grandchild2_controllers_path), "memory\n");
+
+  ASSERT_THAT(write(fd.get(), "-memory +memory", 15), SyscallSucceeds());
+  EXPECT_EQ(ReadFile(child_subtree_path), "memory\n");
+  EXPECT_EQ(ReadFile(grandchild_controllers_path), "memory\n");
+  EXPECT_EQ(ReadFile(grandchild2_controllers_path), "memory\n");
+
+  ASSERT_THAT(write(fd.get(), "+memory -memory", 15), SyscallSucceeds());
+  EXPECT_EQ(ReadFile(child_subtree_path), "");
+  EXPECT_EQ(ReadFile(grandchild_controllers_path), "");
+  EXPECT_EQ(ReadFile(grandchild2_controllers_path), "");
+}
+
+TEST_F(CgroupTest, SubtreeControlErrors) {
+  ASSERT_NO_FATAL_FAILURE(EnableRootController("memory"));
+
+  std::string child_path = root_path() + "/child";
+  std::string child_subtree_path = child_path + "/" + SUBTREE_CONTROL_FILE;
+  std::string grandchild_path = child_path + "/grandchild";
+  std::string grandchild_subtree_path = grandchild_path + "/" + SUBTREE_CONTROL_FILE;
+
+  CreateCgroup(child_path);
+  CreateCgroup(grandchild_path);
+
+  fbl::unique_fd child_fd(open(child_subtree_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(child_fd.is_valid());
+
+  // Tokens without '+' or '-' prefix or naming an unknown controller fail with EINVAL.
+  EXPECT_THAT(write(child_fd.get(), "memory", 6), SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(write(child_fd.get(), "+nonexistent", 12), SyscallFailsWithErrno(EINVAL));
+
+  // Enabling a controller in grandchild before it is enabled in child fails with ENOENT, while
+  // disabling an already-disabled (and unavailable) controller is a no-op.
+  fbl::unique_fd grandchild_fd(open(grandchild_subtree_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(grandchild_fd.is_valid());
+  EXPECT_THAT(write(grandchild_fd.get(), "+memory", 7), SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(write(grandchild_fd.get(), "-memory", 7), SyscallSucceeds());
+
+  // Enable memory on both child and grandchild.
+  ASSERT_THAT(write(child_fd.get(), "+memory", 7), SyscallSucceeds());
+  ASSERT_THAT(write(grandchild_fd.get(), "+memory", 7), SyscallSucceeds());
+
+  // Disabling memory on child while grandchild still has it enabled fails with EBUSY.
+  EXPECT_THAT(write(child_fd.get(), "-memory", 7), SyscallFailsWithErrno(EBUSY));
+  EXPECT_EQ(ReadFile(child_subtree_path), "memory\n");
+
+  // Once disabled on grandchild, disabling on child succeeds.
+  ASSERT_THAT(write(grandchild_fd.get(), "-memory", 7), SyscallSucceeds());
+  ASSERT_THAT(write(child_fd.get(), "-memory", 7), SyscallSucceeds());
+}
+
+TEST_F(CgroupTest, SubtreeControlNoInternalProcessConstraint) {
+  std::string root_procs_path = root_path() + "/" + PROCS_FILE;
+  std::string pid_string = std::to_string(getpid());
+
+  RestoreSelfToRootOnTearDown();
+  ASSERT_NO_FATAL_FAILURE(EnableRootController("memory"));
+
+  std::string child_path = root_path() + "/child";
+  std::string child_procs_path = child_path + "/" + PROCS_FILE;
+  std::string child_subtree_path = child_path + "/" + SUBTREE_CONTROL_FILE;
+  std::string grandchild_path = child_path + "/grandchild";
+  std::string grandchild_procs_path = grandchild_path + "/" + PROCS_FILE;
+
+  CreateCgroup(child_path);
+  CreateCgroup(grandchild_path);
+
+  // Move current process into child.
+  fbl::unique_fd child_procs_fd(open(child_procs_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(child_procs_fd.is_valid());
+  ASSERT_THAT(write(child_procs_fd.get(), pid_string.c_str(), pid_string.length()),
+              SyscallSucceeds());
+
+  // Enabling subtree_control on a non-root cgroup with processes fails with EBUSY.
+  fbl::unique_fd child_subtree_fd(open(child_subtree_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(child_subtree_fd.is_valid());
+  EXPECT_THAT(write(child_subtree_fd.get(), "+memory", 7), SyscallFailsWithErrno(EBUSY));
+
+  // Move current process back to root, then enable +memory on child.
+  fbl::unique_fd root_procs_fd(open(root_procs_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(root_procs_fd.is_valid());
+  ASSERT_THAT(write(root_procs_fd.get(), pid_string.c_str(), pid_string.length()),
+              SyscallSucceeds());
+  ASSERT_THAT(write(child_subtree_fd.get(), "+memory", 7), SyscallSucceeds());
+
+  // Moving a process into a non-root cgroup with active subtree_control fails with EBUSY.
+  EXPECT_THAT(write(child_procs_fd.get(), pid_string.c_str(), pid_string.length()),
+              SyscallFailsWithErrno(EBUSY));
+
+  // Moving the process into the leaf grandchild cgroup succeeds.
+  fbl::unique_fd grandchild_procs_fd(open(grandchild_procs_path.c_str(), O_WRONLY));
+  ASSERT_TRUE(grandchild_procs_fd.is_valid());
+  ASSERT_THAT(write(grandchild_procs_fd.get(), pid_string.c_str(), pid_string.length()),
+              SyscallSucceeds());
+
+  ASSERT_THAT(write(root_procs_fd.get(), pid_string.c_str(), pid_string.length()),
+              SyscallSucceeds());
 }
 
 class CgroupV1Test : public ::testing::Test {

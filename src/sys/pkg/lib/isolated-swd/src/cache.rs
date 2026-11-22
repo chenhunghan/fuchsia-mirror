@@ -40,8 +40,6 @@ impl Cache {
 pub(crate) mod for_tests {
     use super::*;
     use blobfs_ramdisk::BlobfsRamdisk;
-    use fidl::endpoints::{ServerEnd, SynchronousProxy};
-    use fidl_fuchsia_fxfs as ffxfs;
     use fidl_fuchsia_io as fio;
     use fidl_fuchsia_metrics as fmetrics;
     use fuchsia_async as fasync;
@@ -69,56 +67,18 @@ pub(crate) mod for_tests {
                     "pkg_cache_service_reflector",
                     move |handles| {
                         let mut fs = fuchsia_component::server::ServiceFs::new();
-                        let (creator_dir, server_end) =
-                            fidl::endpoints::create_sync_proxy::<fio::DirectoryMarker>();
-                        svc_dir
-                            .open(
-                                ".",
-                                fio::PERM_READABLE,
-                                &fio::Options::default(),
-                                server_end.into_channel(),
-                            )
-                            .unwrap();
-                        let (reader_dir, server_end) =
-                            fidl::endpoints::create_sync_proxy::<fio::DirectoryMarker>();
-                        svc_dir
-                            .open(
-                                ".",
-                                fio::PERM_READABLE,
-                                &fio::Options::default(),
-                                server_end.into_channel(),
-                            )
-                            .unwrap();
                         // Not necessary for updates, but prevents spam of irrelevant error logs.
-                        fs.dir("svc")
-                            .add_fidl_service(move |stream| {
-                                fasync::Task::spawn(
-                                    Arc::new(mock_metrics::MockMetricEventLoggerFactory::new())
-                                        .run_logger_factory(stream),
-                                )
-                                .detach()
-                            })
-                            .add_service_connector(
-                                move |server_end: ServerEnd<ffxfs::BlobCreatorMarker>| {
-                                    fdio::service_connect_at(
-                                        creator_dir.as_channel(),
-                                        "fuchsia.fxfs.BlobCreator",
-                                        server_end.into_channel(),
-                                    )
-                                    .unwrap();
-                                },
+                        fs.dir("svc").add_fidl_service(move |stream| {
+                            fasync::Task::spawn(
+                                Arc::new(mock_metrics::MockMetricEventLoggerFactory::new())
+                                    .run_logger_factory(stream),
                             )
-                            .add_service_connector(
-                                move |server_end: ServerEnd<ffxfs::BlobReaderMarker>| {
-                                    fdio::service_connect_at(
-                                        reader_dir.as_channel(),
-                                        "fuchsia.fxfs.BlobReader",
-                                        server_end.into_channel(),
-                                    )
-                                    .unwrap();
-                                },
-                            );
+                            .detach()
+                        });
                         fs.add_remote("blob", Clone::clone(&blobfs_proxy));
+                        // Expose `blobfs.svc_dir()` at `/blob-svc` so we can route `BlobCreator`,
+                        // `BlobReader`, `Mapper`, and `MappingProvider` directly from it.
+                        fs.add_remote("blob-svc", Clone::clone(&svc_dir));
                         async move {
                             fs.serve_connection(handles.outgoing_dir).unwrap();
                             let () = fs.collect().await;
@@ -144,6 +104,10 @@ pub(crate) mod for_tests {
                 ("fuchsia.pkgcache.AllPackagesExecutable", false.into()),
                 ("fuchsia.pkgcache.RequireSystemImage", false.into()),
                 ("fuchsia.pkgcache.EnableUpgradablePackages", false.into()),
+                (
+                    "fuchsia.pkgcache.UseDriverBlobPaging",
+                    (blobfs.implementation() == blobfs_ramdisk::Implementation::Fxblob).into(),
+                ),
             ] {
                 realm_builder
                     .add_capability(
@@ -178,9 +142,6 @@ pub(crate) mod for_tests {
                         ))
                         .capability(Capability::configuration(
                             "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
-                        ))
-                        .capability(Capability::configuration(
-                            "fuchsia.pkgcache.UseDriverBlobPaging",
                         ))
                         .capability(Capability::configuration(
                             "fuchsia.fshost.StartupProfilingSeconds",
@@ -223,16 +184,25 @@ pub(crate) mod for_tests {
                 .await
                 .unwrap();
 
-            realm_builder
-                .add_route(
-                    Route::new()
-                        .capability(Capability::protocol_by_name("fuchsia.fxfs.BlobCreator"))
-                        .capability(Capability::protocol_by_name("fuchsia.fxfs.BlobReader"))
-                        .from(&local_mocks)
-                        .to(&pkg_cache),
-                )
-                .await
-                .unwrap();
+            for protocol in [
+                "fuchsia.fxfs.BlobCreator",
+                "fuchsia.fxfs.BlobReader",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
+            ] {
+                realm_builder
+                    .add_route(
+                        Route::new()
+                            .capability(
+                                Capability::protocol_by_name(protocol)
+                                    .path(format!("/blob-svc/{protocol}")),
+                            )
+                            .from(&local_mocks)
+                            .to(&pkg_cache),
+                    )
+                    .await
+                    .unwrap();
+            }
 
             realm_builder
                 .add_route(

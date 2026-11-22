@@ -34,7 +34,7 @@ with tests in [//tools/fidl/fidlc/tests][fidlc-compiler-tests].
 Target | Codegen | Runtime Libraries | Tests
 -------|---------|-------------------|-------
 HLCPP (Old) | [/tools/fidl/fidlgen_hlcpp] | [/sdk/lib/fidl/hlcpp] | *(located alongside runtime libraries)*
-New C++ | [/tools/fidl/fidlgen_cpp] | [/sdk/lib/fidl/cpp] | [/src/lib/fidl/llcpp] and [/sdk/lib/fidl/cpp]
+New C++ | [/tools/fidl/fidlgen_cpp] | [/sdk/lib/fidl/cpp] | *(located alongside runtime libraries)*
 Rust | [/tools/fidl/fidlgen_rust] | [/src/lib/fidl/rust] | *(located alongside runtime libraries)*
 
 Note: The tests column refers to hand-written tests that exercise both the
@@ -411,7 +411,7 @@ The bindings tests can then be run with fidldev:
 
 ```sh
 fidldev test --no-regen hlcpp
-fidldev test --no-regen llcpp
+fidldev test --no-regen cpp_wire
 fidldev test --no-regen c
 fidldev test --no-regen rust
 ```
@@ -481,7 +481,7 @@ useful for debugging issues that prevent boot of the device.
 | walker, misc             | `fx test fidl-walker-tests`         |  //sdk/lib/fidl_base
 | walker tests w/ handle closing checks | `fx test fidl-handle-closing-tests` | //sdk/lib/fidl_base
 | hlcpp bindings tests including conformance tests     | `fx test fidl_hlcpp_unit_test_package fidl_hlcpp_conformance_test_package`         | //sdk/lib/fidl                                                             |
-| New C++ wire tests       | `fx test //src/lib/fidl/llcpp`      | //sdk/lib/fidl/cpp/wire
+| New C++ wire tests       | `fx test //sdk/lib/fidl/cpp/wire/tests` | //sdk/lib/fidl/cpp/wire
 | New C++ tests            | `fx test //sdk/lib/fidl/cpp`        | //sdk/lib/fidl/cpp
 | rust bindings tests      | `fx test //src/lib/fidl/rust`           | //src/lib/fidl/rust |
 
@@ -492,7 +492,7 @@ useful for debugging issues that prevent boot of the device.
 | walker, misc             | `fx test --host fidl-walker-host-tests`         | //sdk/lib/fidl_base
 | hlcpp unittests          | `fx test --host fidl_hlcpp_unit_tests`          | //sdk/lib/fidl
 | hlcpp conformance tests  | `fx test --host fidl_hlcpp_conformance_tests`   | //sdk/lib/fidl
-| C++ wire types conformance tests  | `fx test --host fidl_llcpp_conformance_tests`    | //sdk/lib/fidl/cpp/wire
+| C++ wire types conformance tests  | `fx test --host fidl_cpp_wire_conformance_tests_bin` | //sdk/lib/fidl/cpp/wire
 | C++ natural types conformance tests  | `fx test --host fidl_cpp_conformance_tests`   | //sdk/lib/fidl/cpp
 | rust conformance tests   | `fx test --host fidl_rust_conformance_tests`    | //src/lib/fidl/rust
 | rust fidl lib tests      | `fx test --host fidl_rust_lib_tests`            | //src/lib/fidl/rust
@@ -542,7 +542,7 @@ Available benchmarks:
 | Name | Benchmark Command | Notes |
 |------|-------------------|-------|
 | Rust Benchmarks | `fx shell /bin/rust_fidl_microbenchmarks /tmp/myresultsfile` | Results can be viewed with `fx shell cat /tmp/myresultsfile/` |
-| C++ wire types benchmarks |  `fx shell /bin/llcpp_fidl_microbenchmarks` | |
+| C++ wire types benchmarks |  `fx shell /bin/cpp_wire_fidl_microbenchmarks` | |
 | lib/fidl Benchmarks | `fx shell /bin/lib_fidl_microbenchmarks` | |
 | Roundtrip Benchmarks | `fx shell /bin/roundtrip_fidl_benchmarks` | |
 
@@ -708,7 +708,6 @@ fidl fmt --library my_library.fidl -i
 [/sdk/lib/fidl_base]: /sdk/lib/fidl_base
 [/src/lib/fidl/c]: /src/lib/fidl/c
 [/sdk/lib/fidl/cpp]: /sdk/lib/fidl/cpp
-[/src/lib/fidl/llcpp]: /src/lib/fidl/llcpp
 [/tools/fidl/lib/fidlgen]: /tools/fidl/lib/fidlgen
 
 [/tools/fidl/gidl]: /tools/fidl/gidl

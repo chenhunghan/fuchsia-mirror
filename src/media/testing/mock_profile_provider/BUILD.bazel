@@ -47,4 +47,5 @@ fx_component(
 fx_package(
     name = "mock_profile_provider",
     components = [":mock_profile_provider_component"],
+    visibility = ["//vendor/google:__subpackages__"],
 )

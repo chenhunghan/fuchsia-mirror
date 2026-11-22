@@ -31,7 +31,7 @@ See below for the quick start guide in your language of choice:
   **Add the Inspect library dependencies to your `BUILD.gn` file:**
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/cpp/BUILD.gn" region_tag="inspect_libs" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/cpp/BUILD.bazel" region_tag="inspect_libs" adjust_indentation="auto" %}
   ```
 
   **Add the following includes:**
@@ -106,7 +106,7 @@ See below for the quick start guide in your language of choice:
   **Add the Inspect library dependencies to your `BUILD.gn` file:**
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/rust/BUILD.gn" region_tag="inspect_libs" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/rust/BUILD.bazel" region_tag="inspect_libs" adjust_indentation="auto" %}
   ```
 
   **Add the following code to initialize Inspect:**
@@ -386,7 +386,8 @@ a value. The callback function is invoked when the property value is read.
 
 * {Rust}
 
-  Refer to [C++ Dynamic Value Support](#c++), as similar concepts apply in Rust.
+  Refer to [C++ Dynamic Value Support](#dynamic-values), as similar concepts
+  apply in Rust.
 
   Example:
 

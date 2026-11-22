@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 use crate::Resolution;
-use crate::target_connector::{
+use crate::transport_connector::{
     BUFFER_SIZE, FDomainConnection, OvernetConnection, TargetConnection, TargetConnectionError,
-    TargetConnector,
+    TransportConnector,
 };
 use anyhow::Result;
 use ffx_config::{EnvironmentContext, TryFromEnvContext};
@@ -173,7 +173,7 @@ impl TryFromEnvContext for VSockConnector {
     }
 }
 
-impl TargetConnector for VSockConnector {
+impl TransportConnector for VSockConnector {
     const CONNECTION_TYPE: &'static str = "VSOCK";
 
     async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {

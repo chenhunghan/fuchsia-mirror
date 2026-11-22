@@ -56,11 +56,11 @@ rustc_library(
         "//tools/lib/cm_fidl_analyzer:__subpackages__",
     ],
     deps = [
-        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
-        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust_common",
+        "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust_common",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
         "//sdk/rust/zx-status",
         "//src/lib/directed_graph",
         "//src/lib/error/clonable_error",
@@ -81,6 +81,7 @@ rustc_library(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:itertools",
         "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:smallbox",
         "//third_party/rust_crates/vendor:thiserror",
         "//third_party/rust_crates/vendor:url",
     ] + select({
@@ -90,6 +91,8 @@ rustc_library(
         "//conditions:default": [],
     }) + select({
         "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
+            "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
             "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
             "//src/lib/trace/rust:trace",
             "//src/storage/lib/vfs/rust:vfs",

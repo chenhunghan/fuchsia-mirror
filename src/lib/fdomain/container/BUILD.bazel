@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fdomain-container-tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 rustc_library(
     name = "container",
@@ -16,9 +24,6 @@ rustc_library(
     ],
     crate_name = "fdomain_container",
     edition = "2024",
-    test_deps = [
-        "//src/lib/fuchsia",
-    ],
     visibility = [
         "//src/developer/remote-control:__pkg__",
         "//src/lib/fdomain/client:__pkg__",
@@ -26,7 +31,6 @@ rustc_library(
         "//src/lib/fdomain/example_next:__pkg__",
         "//src/lib/fdomain/local:__pkg__",
     ],
-    with_unit_tests = True,
     deps = [
         "//sdk/fidl/fuchsia.fdomain:fuchsia.fdomain_rust",
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
@@ -43,4 +47,21 @@ rustc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+rustc_test(
+    name = "container_test",
+    crate = ":container",
+    # Sets the GN `output_name` to avoid colliding with other `container_test` binaries.
+    crate_name = "fdomain_container_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+    ],
+)
+
+fx_unittest_package(
+    name = "fdomain-container-tests",
+    unit_tests = [":container_test"],
 )

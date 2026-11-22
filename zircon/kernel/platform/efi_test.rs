@@ -12,7 +12,7 @@ mod tests {
     use crate::platform_rs::efi::{
         EfiServicesActivation, for_each_memory_attribute_entry_safe, try_activate_efi_services,
     };
-    use crate::platform_rs::efi_ffi::is_efi_expected;
+    use crate::platform_rs::platform_is_efi_expected;
     use core::mem::size_of;
     use core::ptr;
     use efi::{
@@ -33,8 +33,8 @@ mod tests {
         // This test aims to prevent EFI support from being silently dropped.
 
         // Grab our current aspace.
-        // SAFETY: The reference is only compared by address below, after the guard restores it.
-        let old_aspace = unsafe { thread::current_active_aspace() };
+        // SAFETY: The calling CPU has a valid, initialized current thread.
+        let old_aspace = unsafe { thread::current_active_aspace_ptr() };
 
         // Attempt to fetch EFI services.
         // SAFETY: `services` is scoped to this stack frame (strictly LIFO), the thread's previous
@@ -43,8 +43,7 @@ mod tests {
         let mut services = unsafe { try_activate_efi_services() };
 
         // Ensure we got back a valid result if EFI meant to be present.
-        // SAFETY: Takes no arguments and reads platform state set up during boot.
-        if unsafe { is_efi_expected() } {
+        if platform_is_efi_expected() {
             expect_true!(services.valid());
             // This should switch back to the old aspace.
             // SAFETY: No inner `EfiServicesActivation` guard is active, and `services` is not
@@ -52,11 +51,8 @@ mod tests {
             unsafe { services.reset() };
 
             // Make sure it actually did.
-            // SAFETY: The reference is only compared by address.
-            expect_eq!(
-                old_aspace.map_or(ptr::null(), ptr::from_ref),
-                unsafe { thread::current_active_aspace() }.map_or(ptr::null(), ptr::from_ref)
-            );
+            // SAFETY: The calling CPU has a valid, initialized current thread.
+            expect_true!(old_aspace == unsafe { thread::current_active_aspace_ptr() });
         } else {
             kprint!("Unknown if EFI is expected to be supported on platform. Skipping test.\n");
         }

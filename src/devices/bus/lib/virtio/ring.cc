@@ -165,7 +165,7 @@ void Ring::SubmitChain(uint16_t desc_index) {
   avail->ring[avail->idx & ring_.num_mask] = desc_index;
   // Write memory barrier before updating avail->idx; updates to the descriptor ring must be
   // visible before an updated avail->idx.
-  hw_wmb();
+  WriteDataMemoryBarrier();
   avail->idx++;
 }
 
@@ -173,7 +173,7 @@ void Ring::Kick() {
   zxlogf(TRACE, "%s: entry", __func__);
   // Write memory barrier before notifying the device. Updates to avail->idx must be visible
   // before the device sees the wakeup notification (so it processes the latest descriptors).
-  hw_mb();
+  DataMemoryBarrier();
 
   device_->RingKick(index_);
 }

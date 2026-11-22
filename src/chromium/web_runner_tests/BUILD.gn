@@ -49,7 +49,7 @@ cc_test_executable("web_runner_integration_tests_bin") {
     "//sdk/lib/fit",
     "//sdk/lib/sys/component/cpp/testing:cpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl",
     "//src/lib/fxl/test:gtest_main",

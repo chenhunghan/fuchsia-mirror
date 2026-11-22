@@ -4,15 +4,15 @@
 
 #include "src/developer/debug/zxdb/symbols/dwarf_location.h"
 
+#include <limits>
 #include <span>
 
-#include <limits>
+#include <safemath/checked_math.h>
 
 #include "llvm/DebugInfo/DWARF/DWARFContext.h"
 #include "llvm/DebugInfo/DWARF/DWARFDebugLoc.h"
 #include "llvm/DebugInfo/DWARF/DWARFSection.h"
 #include "llvm/DebugInfo/DWARF/DWARFUnit.h"
-#include "src/developer/debug/zxdb/common/checked_math.h"
 #include "src/developer/debug/zxdb/common/data_extractor.h"
 
 namespace zxdb {
@@ -129,7 +129,7 @@ VariableLocation DecodeDwarf5LocationReference(llvm::DWARFUnit* unit,
       // .debug_loclists section of the unit's location list table. The getLoclistOffset() call
       // combines the list_index and the unit's table offset, and reads the resulting offset to get
       // the the byte offset of the location list we want relative to the .debug_loclists section.
-      auto list_offset_or = unit->getLoclistOffset(list_index);
+      auto list_offset_or = unit->getLoclistOffset(static_cast<uint32_t>(list_index));
       if (!list_offset_or)
         return VariableLocation();
 
@@ -150,7 +150,7 @@ VariableLocation DecodeDwarf5LocationReference(llvm::DWARFUnit* unit,
   // Callback that converts an index into the .debug_addr table into the corresponding address.
   fit::function<std::optional<TargetPointer>(uint64_t)> index_to_addr =
       [unit](uint64_t index) -> std::optional<TargetPointer> {
-    auto sectioned_addr_or = unit->getAddrOffsetSectionItem(index);
+    auto sectioned_addr_or = unit->getAddrOffsetSectionItem(static_cast<uint32_t>(index));
     if (!sectioned_addr_or)
       return std::nullopt;
 
@@ -236,13 +236,14 @@ VariableLocation DecodeDwarf4LocationList(TargetPointer unit_base_addr,
     if (!ext.ReadBytes(*expression_len, expression.data()))
       return VariableLocation();
 
-    std::optional<uint64_t> abs_begin = CheckedAdd(base_address, *begin);
-    std::optional<uint64_t> abs_end = CheckedAdd(base_address, *end);
-    if (!abs_begin || !abs_end || *abs_begin >= *abs_end)
+    uint64_t abs_begin = 0;
+    uint64_t abs_end = 0;
+    if (!safemath::CheckAdd(base_address, *begin).AssignIfValid(&abs_begin) ||
+        !safemath::CheckAdd(base_address, *end).AssignIfValid(&abs_end) || abs_begin >= abs_end)
       continue;  // Invalid, empty, or overflowed range.
 
     VariableLocation::Entry& dest = entries.emplace_back();
-    dest.range = AddressRange(*abs_begin, *abs_end);
+    dest.range = AddressRange(abs_begin, abs_end);
     dest.expression = DwarfExpr(std::move(expression), source);
   }
 

@@ -168,7 +168,6 @@ fuchsia_structured_config_rust_lib(
 rustc_library(
     name = "ota_lib",
     srcs = [
-        "src/config.rs",
         "src/ota.rs",
         "src/ota_lib.rs",
         "src/setup.rs",
@@ -182,7 +181,6 @@ rustc_library(
     visibility = ["//src/recovery/lib/recovery-util:__pkg__"],
     deps = [
         ":fdr_lib",
-        "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
         "//sdk/fidl/fuchsia.buildinfo:fuchsia.buildinfo_rust",
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
         "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
@@ -224,10 +222,7 @@ rustc_test(
         "//src/sys/pkg/lib/fuchsia-pkg-testing",
         "//src/sys/pkg/lib/fuchsia-repo",
         "//src/sys/pkg/testing/blobfs-ramdisk",
-        "//src/sys/pkg/testing/mock-boot-arguments:lib",
         "//third_party/rust_crates/vendor:assert_matches",
-        "//third_party/rust_crates/vendor:maplit",
-        "//third_party/rust_crates/vendor:pretty_assertions",
         "//third_party/rust_crates/vendor:url",
     ],
 )

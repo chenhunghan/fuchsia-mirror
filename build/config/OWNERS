@@ -8,3 +8,8 @@ mcgrathr@google.com
 paulkirth@google.com
 phosek@google.com
 prabhukr@google.com
+
+# Do not inherit ownership of Bazel files.
+# This is mainly to ensure more targeted review during the Bazel migration.
+per-file **.bazel,**.bzl = set noparent
+per-file **.bazel,**.bzl = file:/build/bazel/BAZEL_OWNERS

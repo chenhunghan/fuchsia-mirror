@@ -42,7 +42,7 @@ Briefly summarized:
 [rfc-0002]: /docs/contribute/governance/rfcs/0002_platform_versioning.md
 [rfc-0083]: /docs/contribute/governance/rfcs/0083_fidl_versioning.md
 [milestone]: /docs/concepts/versioning/release.md#milestone
-[release]: /docs/concepts/versioning/README.md#releases
+[release]: /docs/concepts/versioning/release.md
 
 ## Motivation
 
@@ -282,9 +282,9 @@ End-developers may target `HEAD` or `NEXT`, but doing so voids the
 compatibility guarantees. See the sections describing those guarantees for more
 about the implications of targeting `NEXT` or `HEAD` from out-of-tree.
 
-[rfc-0083-head]: /docs/contribute/governance/rfcs/0083_fidl_versioning.md#purpose_of_head
+[rfc-0083-head]: /docs/contribute/governance/rfcs/0083_fidl_versioning.md#purpose-of-head
 
-## Policy changes
+## Policy changes {#policy-changes}
 
 This section lists the specific policy changes proposed by this RFC.
 
@@ -316,7 +316,7 @@ This RFC makes the following changes to the platform versioning model:
   soon as none of our partners want to run any binaries targeting it on new
   Fuchsia releases, and no sooner.
 
-### API compatibility guarantee
+### API compatibility guarantee {#api-compatibility-guarantee}
 
 Fuchsia now makes the following API (that is, build-time) compatibility
 guarantee for numbered API levels (subject to [caveats below](#caveats)):
@@ -342,7 +342,7 @@ Fuchsia team, and we will avoid breaking the builds of end-developers that
 target `NEXT` on a "best effort" basis. We will make little-to-no effort to
 avoid breaking the builds of end-developers targeting `HEAD`.
 
-### ABI compatibility guarantee
+### ABI compatibility guarantee {#abi-compatibility-guarantee}
 
 Fuchsia now makes the following ABI (that is, run-time) compatibility guarantee
 for numbered API levels (subject to [caveats below](#caveats)):
@@ -465,7 +465,7 @@ components targeting different API levels without further information.
 We may develop different strategies for supporting multiple API levels, but
 that's an area for future work.
 
-## Caveats
+## Caveats {#caveats}
 
 Both the API and ABI compatibility guarantees are subject to a few caveats.
 
@@ -477,7 +477,7 @@ compatibility according to the terms above, we consider that a bug. We will
 take responsibility for remedying the situation internally, without requiring
 any action from the end-developer, beyond reporting the bug.
 
-### Voiding the guarantee
+### Voiding the guarantee {#voiding-the-guarantee}
 
 The API and ABI guarantees do not apply if end-developers are "doing something
 weird." This includes, but is not limited to:

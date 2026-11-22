@@ -2,11 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fidl_fuchsia_component_sandbox::DirConnector;
+use fidl_fuchsia_component_decl as fdecl;
+use fidl_fuchsia_driver_framework as fdf;
+use fuchsia_component::runtime::DirConnector;
 use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
-use {fidl_fuchsia_component_decl as fdecl, fidl_fuchsia_driver_framework as fdf};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 #[repr(u8)]

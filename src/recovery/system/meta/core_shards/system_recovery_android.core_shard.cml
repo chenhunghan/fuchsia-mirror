@@ -20,10 +20,7 @@
             to: "#system_recovery",
         },
         {
-            protocol: [
-                "fuchsia.boot.Arguments",
-                "fuchsia.hardware.power.statecontrol.Admin",
-            ],
+            protocol: "fuchsia.hardware.power.statecontrol.Admin",
             from: "parent",
             to: "#system_recovery",
         },
@@ -53,6 +50,7 @@
         },
         {
             config: [
+                "fuchsia.pkgcache.UseDriverBlobPaging",
                 "fuchsia.recovery.android.TopMargin",
                 "fuchsia.recovery.android.TouchScreenEnabled",
                 "fuchsia.recovery.DisplayRotation",

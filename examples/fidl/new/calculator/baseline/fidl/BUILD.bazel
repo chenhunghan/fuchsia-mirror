@@ -19,4 +19,5 @@ fidl_library(
     srcs = ["calculator.test.fidl"],
     # TODO(https://fxbug.dev/381096879): Fix lint warnings and remove.
     excluded_checks = ["wrong-prefix-for-platform-source-library"],
+    visibility = ["//examples/fidl/new:__subpackages__"],
 )

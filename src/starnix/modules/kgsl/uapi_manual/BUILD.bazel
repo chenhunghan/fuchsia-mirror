@@ -2,20 +2,46 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":check_golden"],
+    visibility = ["//src/starnix:__pkg__"],
+)
+
 rustc_binary(
     name = "kgsl_codegen",
+    testonly = True,
     srcs = ["main.rs"],
     crate_root = "main.rs",
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:syn",
     ],
+)
+
+genrule(
+    name = "do_codegen",
+    testonly = True,
+    srcs = ["//src/starnix/lib/linux_uapi:src/arm64.rs"],
+    outs = ["arm_manual_kgsl.rs"],
+    cmd = "$(location :kgsl_codegen) $(location //src/starnix/lib/linux_uapi:src/arm64.rs) $@",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tools = [":kgsl_codegen"],
+)
+
+golden_test(
+    name = "check_golden",
+    goldens = {
+        "//src/starnix/lib/linux_uapi:src/arm_manual_kgsl.rs": ":do_codegen",
+    },
 )

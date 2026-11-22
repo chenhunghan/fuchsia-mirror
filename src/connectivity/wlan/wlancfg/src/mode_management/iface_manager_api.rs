@@ -387,7 +387,7 @@ async fn wait_for_connect_result(
             .await
             .map_err(|e| format_err!("Failed to receive connect result from sme: {:?}", e))?
         {
-            Some(fidl_sme::ConnectTransactionEvent::OnConnectResult { result }) => {
+            Some(fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. }) => {
                 return Ok(result);
             }
             Some(other) => {
@@ -1269,7 +1269,7 @@ mod tests {
                 ssid: Ssid::try_from("foo").unwrap(),
                 security_type: types::SecurityType::None,
             },
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config: RadioConfig::new(
                 fidl_fuchsia_wlan_ieee80211::WlanPhyType::Ht,
                 Bandwidth::Cbw20,
@@ -1771,11 +1771,14 @@ mod tests {
                 let (_stream, ctrl) = txn.expect("connect txn unused")
                     .into_stream_and_control_handle();
                 ctrl
-                    .send_on_connect_result(&fidl_sme::ConnectResult {
-                        code: fidl_ieee80211::StatusCode::Success,
-                        is_credential_rejected: false,
-                        is_reconnect: false,
-                    })
+                    .send_on_connect_result(
+                        &fidl_sme::ConnectResult {
+                            code: fidl_ieee80211::StatusCode::Success,
+                            is_credential_rejected: false,
+                            is_reconnect: false,
+                        },
+                        None,
+                    )
                     .expect("failed to send connection completion");
             }
         );
@@ -1830,11 +1833,14 @@ mod tests {
                 let (_stream, ctrl) = txn.expect("connect txn unused")
                     .into_stream_and_control_handle();
                 ctrl
-                    .send_on_connect_result(&fidl_sme::ConnectResult {
-                        code: fidl_ieee80211::StatusCode::RefusedReasonUnspecified,
-                        is_credential_rejected: false,
-                        is_reconnect: false,
-                    })
+                    .send_on_connect_result(
+                        &fidl_sme::ConnectResult {
+                            code: fidl_ieee80211::StatusCode::RefusedReasonUnspecified,
+                            is_credential_rejected: false,
+                            is_reconnect: false,
+                        },
+                        None,
+                    )
                     .expect("failed to send connection completion");
             }
         );
@@ -1962,7 +1968,7 @@ mod tests {
             is_credential_rejected: false,
             is_reconnect: false,
         };
-        request_handle.send_on_connect_result(&sme_result).unwrap();
+        request_handle.send_on_connect_result(&sme_result, None).unwrap();
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Ok(response)) => {
             assert_eq!(sme_result, response);
         });
@@ -1990,7 +1996,8 @@ mod tests {
         let sme = SmeForApStateMachine::new(proxy, iface_id, defect_sender);
 
         // Start the AP and run the future until it stalls.
-        let config = fidl_sme::ApConfig::from(create_ap_config());
+        let config =
+            fidl_sme::ApConfig::try_from(create_ap_config()).expect("failed to convert AP config");
         let fut = sme.start(&config);
         let mut fut = pin!(fut);
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
@@ -2023,7 +2030,8 @@ mod tests {
         let sme = SmeForApStateMachine::new(proxy, iface_id, defect_sender);
 
         // Start the AP and observe an immediate failure.
-        let config = fidl_sme::ApConfig::from(create_ap_config());
+        let config =
+            fidl_sme::ApConfig::try_from(create_ap_config()).expect("failed to convert AP config");
         let fut = sme.start(&config);
         let mut fut = pin!(fut);
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(Err(_)));
@@ -2041,7 +2049,8 @@ mod tests {
         let sme = SmeForApStateMachine::new(proxy, iface_id, defect_sender);
 
         // Start the AP and run the future until it stalls.
-        let config = fidl_sme::ApConfig::from(create_ap_config());
+        let config =
+            fidl_sme::ApConfig::try_from(create_ap_config()).expect("failed to convert AP config");
         let fut = sme.start(&config);
         let mut fut = pin!(fut);
         assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);

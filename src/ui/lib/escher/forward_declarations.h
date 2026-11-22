@@ -10,7 +10,6 @@
 
 namespace escher {
 
-class BatchGpuDownloader;
 class BatchGpuUploader;
 class BlockAllocator;
 class Buffer;
@@ -28,7 +27,6 @@ class Image;
 class ImageFactory;
 class ImageLayoutUpdater;
 class ImageView;
-struct MeshSpec;
 class PipelineBuilder;
 // TODO(https://fxbug.dev/42151125): move to vk/impl.  Cannot do this yet because there is already
 // a PipelineLayout in impl/vk.

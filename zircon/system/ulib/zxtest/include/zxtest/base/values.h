@@ -75,6 +75,10 @@ namespace internal {
 // if the user wants to pass in a tuple parameter, that must be handled like a regular value and not
 // be concatenated using `std::tuple_cat`. The combination of `Combine` and `internal::Combine`
 // functions handle this distinction.
+//
+// Each `Combine` copies its element of `a` before calling `b`'s accessor, because both accessors
+// can return a reference to the same static storage.  For example, `Range(0, 2)` and
+// `Range(10, 12)` have the same lambda type and thus share one static local variable.
 
 // Internal combine handler.
 // See above for a note about why there are internal handlers.
@@ -88,7 +92,8 @@ auto Combine(::zxtest::internal::ValueProvider<std::tuple<A...>> a,
     size_t b_index = index % b.size();
 
     static ParamType storage;
-    storage = std::tuple_cat(a[a_index], std::tuple(b[b_index]));
+    std::tuple<A...> a_value = a[a_index];
+    storage = std::tuple_cat(std::move(a_value), std::tuple(b[b_index]));
     return storage;
   };
   return ::zxtest::internal::ValueProvider<ParamType>(
@@ -108,7 +113,8 @@ auto Combine(::zxtest::internal::ValueProvider<std::tuple<A...>> a,
     size_t b_index = index % b.size();
 
     static ParamType storage;
-    storage = std::tuple_cat(a[a_index], std::make_tuple(b[b_index]));
+    std::tuple<A...> a_value = a[a_index];
+    storage = std::tuple_cat(std::move(a_value), std::make_tuple(b[b_index]));
     return storage;
   };
   return ::zxtest::internal::ValueProvider<ParamType>(
@@ -136,7 +142,8 @@ auto Combine(::zxtest::internal::ValueProvider<A> a, ::zxtest::internal::ValuePr
     size_t b_index = index % b.size();
 
     static ParamType storage;
-    storage = std::tuple(a[a_index], b[b_index]);
+    A a_value = a[a_index];
+    storage = ParamType(std::move(a_value), b[b_index]);
     return storage;
   };
   return ::zxtest::internal::ValueProvider<ParamType>(

@@ -21,11 +21,11 @@ class PinnedMemoryTokenDispatcher;
 
 extern "C" {
 zx_status_t cpp_pinned_memory_token_dispatcher_create(
-    BusTransactionInitiatorDispatcher* bti,
-    ffi::Uninitialized<KernelHandle<PinnedMemoryTokenDispatcher>>* handle_out);
+    const void* bti, ffi::Uninitialized<KernelHandle<PinnedMemoryTokenDispatcher>>* handle_out);
 
-void rust_pinned_memory_token_dispatcher_state_init(void* state, void* disp,
-                                                    BusTransactionInitiatorDispatcher* bti);
+void rust_pinned_memory_token_dispatcher_state_init(void* state,
+                                                    const PinnedMemoryTokenDispatcher* disp,
+                                                    const void* bti);
 void rust_pinned_memory_token_dispatcher_state_destroy(void* state);
 Lock<CriticalMutex>* rust_pinned_memory_token_dispatcher_state_get_lock(const void* state);
 void rust_pinned_memory_token_dispatcher_on_zero_handles(const PinnedMemoryTokenDispatcher* disp);
@@ -53,10 +53,9 @@ class PinnedMemoryTokenDispatcher final : public Dispatcher {
 
  private:
   friend zx_status_t cpp_pinned_memory_token_dispatcher_create(
-      BusTransactionInitiatorDispatcher* bti,
-      ffi::Uninitialized<KernelHandle<PinnedMemoryTokenDispatcher>>* handle_out);
+      const void* bti, ffi::Uninitialized<KernelHandle<PinnedMemoryTokenDispatcher>>* handle_out);
 
-  explicit PinnedMemoryTokenDispatcher(fbl::RefPtr<BusTransactionInitiatorDispatcher> bti);
+  explicit PinnedMemoryTokenDispatcher(const void* bti);
   DISALLOW_COPY_ASSIGN_AND_MOVE(PinnedMemoryTokenDispatcher);
 
   OpaqueStorage<kPinnedMemoryTokenDispatcherStateSize, kPinnedMemoryTokenDispatcherStateAlign>

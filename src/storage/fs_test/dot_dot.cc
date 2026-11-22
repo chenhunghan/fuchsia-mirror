@@ -133,7 +133,7 @@ TEST_P(DotDotTest, RawOpenDotDirectoryCreateIfAbsent) {
   ASSERT_EQ(result.status(), ZX_OK);
 
   const fidl::WireResult close_result = fidl::WireCall(client)->Close();
-  // Can't get an epitaph with LLCPP bindings, so this will do for now.
+  // Can't get an epitaph with C++ wire bindings, so this will do for now.
   ASSERT_EQ(close_result.status(), ZX_ERR_PEER_CLOSED);
 }
 

@@ -4,7 +4,8 @@
 
 from typing import Any, ClassVar, Final, Literal
 
-from shared.protocol.base import BaseRequest
+from pydantic import Field
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "watch"
 
@@ -34,7 +35,9 @@ class WatchRequest(BaseRequest[dict[str, Any]]):
 
     command: Literal["watch"] = COMMAND_NAME
     name: str = ""
-    thread_id: int | None = None
+    thread_id: int | None = Field(
+        default=None, validation_alias=THREAD_ID_ALIAS
+    )
     frame_index: int = 0
     access_type: WatchAccessType | None = None
     condition: str | None = None

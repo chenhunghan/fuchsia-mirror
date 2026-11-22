@@ -16,7 +16,7 @@ dependents).
 However, build graph _actions_ are not verified to fulfill the promise that
 outputs are newer than inputs, which can lead to convergence issues.
 
-## Common root causes
+## Common root causes {:#common-root-causes}
 
 There are infinitely many ways to create Ninja convergence issues. That said,
 prior experience taught us that there are common root causes for these problems.

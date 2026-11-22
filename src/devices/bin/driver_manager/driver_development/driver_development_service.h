@@ -53,6 +53,8 @@ class DriverDevelopmentService : public fidl::WireServer<fuchsia_driver_developm
                                   RebindCompositesWithDriverCompleter::Sync& completer) override;
   void RunHealthCheck(RunHealthCheckRequestView request,
                       RunHealthCheckCompleter::Sync& completer) override;
+  void StartSuspendSession(StartSuspendSessionRequestView request,
+                           StartSuspendSessionCompleter::Sync& completer) override;
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_driver_development::Manager> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override;

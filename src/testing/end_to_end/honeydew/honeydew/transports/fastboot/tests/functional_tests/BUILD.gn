@@ -43,7 +43,7 @@ if (is_host) {
 
     # TODO(https://fxbug.dev/486840780): Delays caused by hardware errors in fastboot
     # can cause this test to run for much longer than expected.
-    timeout_secs = 900
+    timeout_secs = 600
   }
 }
 

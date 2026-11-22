@@ -41,7 +41,7 @@ pub fn mmcblk_stub_device_init(kernel: &Kernel) -> Result<(), Errno> {
         /* parent = */ None,
         objects.get_or_create_class("mmc_host".into()),
         build_device_directory,
-    );
+    )?;
     let mmc_card = registry.add_bus_device(
         "mmc0:0001".into(),
         Some(mmc0),
@@ -56,7 +56,7 @@ pub fn mmcblk_stub_device_init(kernel: &Kernel) -> Result<(), Errno> {
                 );
             }
         },
-    );
+    )?;
 
     let name = FsString::from("mmcblk0");
     let device = Arc::new(MmcBlockDevice);
@@ -79,7 +79,7 @@ pub fn mmcblk_stub_device_init(kernel: &Kernel) -> Result<(), Errno> {
             track_stub!(TODO("https://fxbug.dev/488067251"), "mmcblk open device");
             Err(errno!(ENOTSUP))
         },
-    );
+    )?;
     Ok(())
 }
 

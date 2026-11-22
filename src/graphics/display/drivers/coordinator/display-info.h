@@ -5,6 +5,7 @@
 #ifndef SRC_GRAPHICS_DISPLAY_DRIVERS_COORDINATOR_DISPLAY_INFO_H_
 #define SRC_GRAPHICS_DISPLAY_DRIVERS_COORDINATOR_DISPLAY_INFO_H_
 
+#include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/zx/result.h>
 
@@ -13,7 +14,6 @@
 #include <queue>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <fbl/vector.h>
 
@@ -36,9 +36,10 @@ class DisplayInfo : public IdMappable<std::unique_ptr<DisplayInfo>, display::Dis
   static zx::result<std::unique_ptr<DisplayInfo>> Create(AddedDisplayInfo added_display_info);
 
   // Exposed for testing. Prefer obtaining instances from the `Create()` factory method.
-  explicit DisplayInfo(display::DisplayId display_id,
-                       fbl::Vector<display::PixelFormat> pixel_formats,
-                       fbl::Vector<display::ModeAndId> preferred_modes);
+  explicit DisplayInfo(
+      display::DisplayId display_id, fbl::Vector<display::PixelFormat> pixel_formats,
+      fbl::Vector<display::ModeAndId> preferred_modes,
+      fbl::Vector<fuchsia_hardware_display_types::VrrConfig> mode_vrr_configs = {});
 
   DisplayInfo(const DisplayInfo&) = delete;
   DisplayInfo(DisplayInfo&&) = delete;
@@ -68,11 +69,16 @@ class DisplayInfo : public IdMappable<std::unique_ptr<DisplayInfo>, display::Dis
   // Returns an empty string if the information is not available.
   std::string GetMonitorSerial() const;
 
+  // Returns the Vsync interval implied by `mode_id`, preferring an explicit
+  // `VrrConfig.vsync_period` when present.
+  std::optional<zx::duration> GetModeVsyncInterval(display::ModeId mode_id) const;
+
   // Returns the Vsync interval implied by `committed_mode_id`, or std::nullopt
   // if no mode has been committed or the mode's refresh rate is invalid.
   std::optional<zx::duration> GetCommittedModeVsyncInterval() const;
 
   fbl::Vector<display::ModeAndId> preferred_modes;
+  fbl::Vector<fuchsia_hardware_display_types::VrrConfig> mode_vrr_configs;
 
   // The ID of the mode in the configuration most recently committed to the
   // display engine. If valid, the ID is listed in `preferred_modes`.

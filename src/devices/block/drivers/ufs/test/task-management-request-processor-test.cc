@@ -138,8 +138,8 @@ TEST_F(TaskManagementRequestProcessorTest, SendAbortTaskManagementRequest) {
   ASSERT_EQ(response->GetHeader().data_segment_length, 0);
   ASSERT_EQ(response->GetHeader().flags, 0);
 
-  ASSERT_EQ(response->GetData<TaskManagementResponseUpiuData>()->output_param1,
-            static_cast<uint32_t>(TaskManagementServiceResponse::kTaskManagementFunctionFailed));
+  ASSERT_EQ(response->GetServiceResponse(),
+            TaskManagementServiceResponse::kTaskManagementFunctionFailed);
 }
 
 TEST_F(TaskManagementRequestProcessorTest, SendQueryTaskManagementRequest) {
@@ -178,8 +178,8 @@ TEST_F(TaskManagementRequestProcessorTest, SendQueryTaskManagementRequest) {
   ASSERT_EQ(response->GetHeader().data_segment_length, 0);
   ASSERT_EQ(response->GetHeader().flags, 0);
 
-  ASSERT_EQ(response->GetData<TaskManagementResponseUpiuData>()->output_param1,
-            static_cast<uint32_t>(TaskManagementServiceResponse::kTaskManagementFunctionComplete));
+  ASSERT_EQ(response->GetServiceResponse(),
+            TaskManagementServiceResponse::kTaskManagementFunctionComplete);
 }
 
 TEST_F(TaskManagementRequestProcessorTest, SendLogicalUnitResetTaskManagementRequest) {
@@ -218,8 +218,34 @@ TEST_F(TaskManagementRequestProcessorTest, SendLogicalUnitResetTaskManagementReq
   ASSERT_EQ(response->GetHeader().data_segment_length, 0);
   ASSERT_EQ(response->GetHeader().flags, 0);
 
-  ASSERT_EQ(response->GetData<TaskManagementResponseUpiuData>()->output_param1,
-            static_cast<uint32_t>(TaskManagementServiceResponse::kTaskManagementFunctionComplete));
+  ASSERT_EQ(response->GetServiceResponse(),
+            TaskManagementServiceResponse::kTaskManagementFunctionComplete);
+}
+
+TEST_F(TaskManagementRequestProcessorTest, BigEndianInputAndOutputParameters) {
+  constexpr uint8_t kTestLun = 1;
+  constexpr uint8_t kTestTaskTag = 17;
+  ASSERT_OK(mock_device_.AddLun(kTestLun));
+  mock_device_.GetTransferRequestProcessor().GetPendingSlots().set(kTestTaskTag);
+
+  TaskManagementRequestUpiu request(TaskManagementFunction::kQueryTask, kTestLun, kTestTaskTag);
+  EXPECT_EQ(request.GetData<TaskManagementRequestUpiuData>()->input_param1, htobe32(kTestLun));
+  EXPECT_EQ(request.GetData<TaskManagementRequestUpiuData>()->input_param2, htobe32(kTestTaskTag));
+
+  auto raw_response = dut_->GetTaskManagementRequestProcessor().SendTaskManagementRequest(request);
+  ASSERT_OK(raw_response);
+  EXPECT_EQ(raw_response->GetData<TaskManagementResponseUpiuData>()->output_param1,
+            htobe32(static_cast<uint32_t>(
+                TaskManagementServiceResponse::kTaskManagementFunctionSucceeded)));
+  EXPECT_EQ(raw_response->GetServiceResponse(),
+            TaskManagementServiceResponse::kTaskManagementFunctionSucceeded);
+
+  zx::result<TaskManagementServiceResponse> abort_response =
+      dut_->GetTaskManagementRequestProcessor().GetTaskManagementServiceResponse(
+          TaskManagementFunction::kAbortTask, kTestLun, kTestTaskTag);
+  ASSERT_OK(abort_response);
+  EXPECT_EQ(abort_response.value(), TaskManagementServiceResponse::kTaskManagementFunctionComplete);
+  EXPECT_FALSE(mock_device_.GetTransferRequestProcessor().GetPendingSlots().test(kTestTaskTag));
 }
 
 TEST_F(TaskManagementRequestProcessorTest, SendTaskManagementRequestException) {

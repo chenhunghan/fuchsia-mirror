@@ -207,6 +207,8 @@ pub struct LocalExecutor;
 pub struct HttpClientBuilder<T> {
     tcp_options: Option<TcpOptions>,
     socket_options: Option<SocketOptions>,
+    #[cfg(target_os = "fuchsia")]
+    socket_provider: Option<fposix_socket::ProviderProxy>,
     tls: Option<rustls::ClientConfig>,
     phantom: PhantomData<T>,
 }
@@ -216,6 +218,8 @@ impl<T> Default for HttpClientBuilder<T> {
         Self {
             tcp_options: Default::default(),
             socket_options: Default::default(),
+            #[cfg(target_os = "fuchsia")]
+            socket_provider: Default::default(),
             tls: Default::default(),
             phantom: Default::default(),
         }
@@ -256,12 +260,38 @@ where
     }
 }
 
+/// Returns true if `socket_options` sets `bind_device`, which is ignored when a
+/// socket provider is set.
+#[cfg(target_os = "fuchsia")]
+fn check_conflicting_socket_options(socket_options: &SocketOptions) -> bool {
+    let Some(bind_device) = socket_options.bind_device.as_deref() else {
+        return false;
+    };
+    log::warn!(
+        "SocketOptions::bind_device ({bind_device:?}) and a configured socket provider \
+        are both set on HttpClientBuilder; ignoring bind_device because combining \
+        SO_BINDTODEVICE with a configured socket provider is unsupported"
+    );
+    true
+}
+
 impl<T> HttpClientBuilder<T> {
     fn connector(&mut self) -> HyperConnector {
-        HyperConnector::from((
-            self.tcp_options.take().unwrap_or_default(),
-            self.socket_options.take().unwrap_or_default(),
-        ))
+        let tcp_options = self.tcp_options.take().unwrap_or_default();
+        let socket_options = self.socket_options.take().unwrap_or_default();
+        #[cfg(target_os = "fuchsia")]
+        if let Some(socket_provider) = self.socket_provider.take() {
+            let mut socket_options = socket_options;
+            if check_conflicting_socket_options(&socket_options) {
+                socket_options.bind_device = None;
+            }
+            return HyperConnector::from_options_and_provider(
+                tcp_options,
+                socket_options,
+                socket_provider,
+            );
+        }
+        HyperConnector::from((tcp_options, socket_options))
     }
 
     /// Sets the TCP options for the underlying HyperConnector
@@ -272,6 +302,14 @@ impl<T> HttpClientBuilder<T> {
     /// Sets the SocketOptions for the underlying HyperConnector
     pub fn socket_options(self, socket_options: SocketOptions) -> Self {
         Self { socket_options: Some(socket_options), ..self }
+    }
+
+    /// Sets a custom socket provider for all connections instead of the default
+    /// namespace provider. Ignores bind_device when set. Host names are still
+    /// resolved using the default network.
+    #[cfg(target_os = "fuchsia")]
+    pub fn socket_provider(self, socket_provider: fposix_socket::ProviderProxy) -> Self {
+        Self { socket_provider: Some(socket_provider), ..self }
     }
 }
 
@@ -378,25 +416,24 @@ where
 }
 
 #[cfg(target_os = "fuchsia")]
-pub(crate) fn connect_and_bind_device<D: AsRef<[u8]>, T: ProviderConnector>(
-    provider: &T,
+pub(crate) async fn connect_and_bind_device<D: AsRef<[u8]>>(
+    provider: fposix_socket::ProviderProxy,
     addr: SocketAddr,
     bind_device: Option<D>,
-) -> io::Result<net::TcpConnector> {
-    // TODO(https://fxbug.dev/477371935): Specify a network to use to
-    // route the socket traffic using marks rather than bind_to_device.
+) -> io::Result<net::TcpStream> {
     let socket = stream_socket(
-        provider,
+        &provider,
         match addr {
             SocketAddr::V4(_) => fposix_socket::Domain::Ipv4,
             SocketAddr::V6(_) => fposix_socket::Domain::Ipv6,
         },
         fposix_socket::StreamSocketProtocol::Tcp,
-    )?;
+    )
+    .await?;
     if let Some(bind_device) = bind_device {
         socket.bind_device(Some(bind_device.as_ref()))?;
     }
-    net::TcpStream::connect_from_raw(socket, addr)
+    net::TcpStream::connect_from_raw(socket, addr)?.await
 }
 
 #[cfg(test)]

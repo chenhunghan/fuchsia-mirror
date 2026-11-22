@@ -70,9 +70,16 @@ bazel_build_action("verify_fuchsia_sdk_repository") {
 }
 
 # Run the Bazel SDK test suite against the content of the @fuchsia_sdk
-# repository (in-tree SDK).
+# repository (in-tree SDK) using the in-tree Bazel version.
 run_fuchsia_bazel_sdk_tests("bazel_sdk_tests") {
   target_cpus = [ target_cpu ]
+}
+
+# Run the Bazel SDK test suite against the content of the @fuchsia_sdk
+# repository (in-tree SDK) using the pinned out-of-tree Bazel version.
+run_fuchsia_bazel_sdk_tests("bazel_sdk_oot_tests") {
+  target_cpus = [ target_cpu ]
+  use_oot_bazel = true
 }
 
 group("tests") {

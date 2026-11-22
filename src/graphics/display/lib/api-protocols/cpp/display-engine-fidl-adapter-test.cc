@@ -826,6 +826,29 @@ TEST_F(DisplayEngineFidlAdapterTest, SetMinimumRgbEngineError) {
   EXPECT_STATUS(zx::error(ZX_ERR_IO_REFUSED), fidl_domain_result);
 }
 
+TEST_F(DisplayEngineFidlAdapterTest, NotifyExpectedPresentSuccess) {
+  static constexpr display::DisplayId kDisplayId(42);
+  static constexpr zx::time_monotonic kExpectedPresentTime(123'456'789);
+  static constexpr zx::duration kFrameInterval(8'333'333);
+
+  libsync::Completion notify_expected_present_called;
+  mock_.ExpectNotifyExpectedPresent([&](display::DisplayId display_id,
+                                        zx::time_monotonic expected_present_time,
+                                        zx::duration frame_interval) {
+    EXPECT_EQ(kDisplayId, display_id);
+    EXPECT_EQ(kExpectedPresentTime, expected_present_time);
+    EXPECT_EQ(kFrameInterval, frame_interval);
+    notify_expected_present_called.Signal();
+  });
+
+  fdf::Arena arena('TEST');
+  fidl::OneWayStatus fidl_transport_status = fidl_client_.buffer(arena)->NotifyExpectedPresent(
+      kDisplayId.ToFidl(), kExpectedPresentTime, kFrameInterval.get());
+  ASSERT_TRUE(fidl_transport_status.ok()) << fidl_transport_status.FormatDescription();
+
+  notify_expected_present_called.Wait();
+}
+
 }  // namespace
 
 }  // namespace display

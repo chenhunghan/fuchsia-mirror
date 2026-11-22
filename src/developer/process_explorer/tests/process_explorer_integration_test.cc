@@ -3,11 +3,10 @@
 // found in the LICENSE file.
 
 #include <assert.h>
-#include <fuchsia/kernel/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
-#include <fuchsia/process/explorer/cpp/fidl.h>
+#include <fidl/fuchsia.kernel/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
+#include <fidl/fuchsia.process.explorer/cpp/fidl.h>
 #include <lib/fdio/spawn.h>
-#include <lib/fidl/cpp/binding_set.h>
 #include <lib/sys/component/cpp/testing/realm_builder.h>
 #include <lib/syslog/cpp/macros.h>
 #include <sys/socket.h>
@@ -25,7 +24,7 @@ namespace process_explorer {
 namespace {
 
 using component_testing::ChildRef;
-using component_testing::LocalComponentImpl;
+using component_testing::LocalCppComponent;
 using component_testing::ParentRef;
 using component_testing::Protocol;
 using component_testing::RealmBuilder;
@@ -42,20 +41,20 @@ zx::job CreateJob() {
 
 class RealmBuilderTest : public gtest::RealLoopFixture {};
 
-class LocalRootJobImpl : public fuchsia::kernel::RootJob, public LocalComponentImpl {
+class LocalRootJobImpl : public fidl::Server<fuchsia_kernel::RootJob>, public LocalCppComponent {
  public:
   explicit LocalRootJobImpl(fit::closure quit_loop, async_dispatcher_t* dispatcher)
       : quit_loop_(std::move(quit_loop)), dispatcher_(dispatcher), called_(false) {}
 
   // Override `Get` from `RootJob` protocol.
-  void Get(GetCallback callback) override {
+  void Get(GetCompleter::Sync& completer) override {
     // job_ acts as the root job
     // job_ has two child processes
     job_ = CreateJob();
     LaunchProcess(job_, "MockProcess1", {"/pkg/bin/mock_process"});
     LaunchProcess(job_, "MockProcess2", {"/pkg/bin/mock_process"});
 
-    callback(std::move(job_));
+    completer.Reply({{.job = std::move(job_)}});
     called_ = true;
     quit_loop_();
   }
@@ -87,7 +86,9 @@ class LocalRootJobImpl : public fuchsia::kernel::RootJob, public LocalComponentI
   }
 
   void OnStart() override {
-    EXPECT_EQ(outgoing()->AddPublicService(bindings_.GetHandler(this, dispatcher_)), ZX_OK);
+    zx::result<> result = outgoing()->AddUnmanagedProtocol<fuchsia_kernel::RootJob>(
+        bindings_.CreateHandler(this, dispatcher_, fidl::kIgnoreBindingClosure));
+    EXPECT_TRUE(result.is_ok()) << result.status_string();
   }
 
   bool WasCalled() const { return called_; }
@@ -172,7 +173,7 @@ class LocalRootJobImpl : public fuchsia::kernel::RootJob, public LocalComponentI
   std::vector<Process> processes_;
   fit::closure quit_loop_;
   async_dispatcher_t* dispatcher_;
-  fidl::BindingSet<fuchsia::kernel::RootJob> bindings_;
+  fidl::ServerBindingGroup<fuchsia_kernel::RootJob> bindings_;
   bool called_;
 };
 
@@ -188,17 +189,18 @@ TEST_F(RealmBuilderTest, RouteServiceToComponent) {
   });
 
   builder.AddRoute(Route{
-      .capabilities = {Protocol{.name = fuchsia::kernel::RootJob::Name_}},
+      .capabilities = {Protocol{.name = fidl::DiscoverableProtocolName<fuchsia_kernel::RootJob>}},
       .source = ChildRef{"root_job"},
       .targets = {ChildRef{"process_explorer"}},
   });
   builder.AddRoute(Route{
-      .capabilities = {Protocol{.name = fuchsia::logger::LogSink::Name_}},
+      .capabilities = {Protocol{.name = fidl::DiscoverableProtocolName<fuchsia_logger::LogSink>}},
       .source = ParentRef(),
       .targets = {ChildRef{"process_explorer"}},
   });
   builder.AddRoute(Route{
-      .capabilities = {Protocol{.name = fuchsia::process::explorer::Query::Name_}},
+      .capabilities = {Protocol{
+          .name = fidl::DiscoverableProtocolName<fuchsia_process_explorer::Query>}},
       .source = ChildRef{"process_explorer"},
       .targets = {ParentRef()},
   });
@@ -206,14 +208,17 @@ TEST_F(RealmBuilderTest, RouteServiceToComponent) {
   auto realm = builder.Build(dispatcher());
   auto cleanup = fit::defer([&] {
     bool complete = false;
-    realm.Teardown([&](fit::result<fuchsia::component::Error> result) { complete = true; });
+    realm.Teardown([&](auto result) { complete = true; });
     RunLoopUntil([&] { return complete; });
   });
-  fuchsia::process::explorer::QueryPtr explorer;
-  ASSERT_EQ(realm.component().Connect(explorer.NewRequest()), ZX_OK);
+  zx::result client_end = realm.component().Connect<fuchsia_process_explorer::Query>();
+  ASSERT_TRUE(client_end.is_ok()) << client_end.status_string();
+  fidl::Client explorer(std::move(*client_end), dispatcher());
   zx::socket socket[2];
   ASSERT_EQ(zx::socket::create(0u, &socket[0], &socket[1]), ZX_OK);
-  explorer->WriteJsonProcessesData(std::move(socket[0]));
+  fit::result<fidl::OneWayError> result =
+      explorer->WriteJsonProcessesData({{.socket = std::move(socket[0])}});
+  ASSERT_TRUE(result.is_ok()) << result.error_value();
   RunLoop();
 
   std::string s;

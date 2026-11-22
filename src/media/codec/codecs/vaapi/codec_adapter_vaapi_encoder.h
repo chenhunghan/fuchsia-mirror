@@ -71,7 +71,8 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
 
   bool IsCoreCodecHwBased(CodecPort port) override { return false; }
 
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override;
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override;
 
   void CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) override {
     if (port != kOutputPort) {
@@ -114,9 +115,9 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
     TRACE_INSTANT("codec_runner", "Media:Start", TRACE_SCOPE_THREAD);
   }
 
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override {
-    input_queue_.Push(CodecInputItem::FormatDetails(per_stream_override_format_details));
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override {
+    input_queue_.Push(CodecInputItem::FormatDetails(std::move(per_stream_override_format_details)));
   }
 
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override {
@@ -206,39 +207,20 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
 
   void CoreCodecMidStreamOutputBufferReConfigFinish() override { LoadStagedOutputBuffers(); }
 
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override {
-    auto config = std::make_unique<fuchsia::media::StreamOutputConstraints>();
-
-    config->set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-
-    // For the moment, there will be only one StreamOutputConstraints, and it'll
-    // need output buffers configured for it.
-    ZX_DEBUG_ASSERT(buffer_constraints_action_required);
-    config->set_buffer_constraints_action_required(buffer_constraints_action_required);
-    auto* constraints = config->mutable_buffer_constraints();
-    constraints->set_buffer_constraints_version_ordinal(
-        new_output_buffer_constraints_version_ordinal);
-
-    return config;
-  }
-
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override {
-    fuchsia::media::StreamOutputFormat result;
-    result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-    result.mutable_format_details()->set_format_details_version_ordinal(
-        new_output_format_details_version_ordinal);
-
-    result.mutable_format_details()->set_mime_type("video/h264");
+    fuchsia_media::StreamOutputFormat result;
+    result.stream_lifetime_ordinal(stream_lifetime_ordinal);
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(new_output_format_details_version_ordinal);
+    format_details.mime_type("video/h264");
+    result.format_details(std::move(format_details));
     return result;
   }
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override {
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override {
     fuchsia_sysmem2::BufferCollectionConstraints constraints;
     auto& bmc = constraints.buffer_memory_constraints().emplace();
 
@@ -300,7 +282,7 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
       // input format is changed.
     }
 
-    return constraints;
+    return CoreCodecGetBufferCollectionConstraints3Result{.constraints = std::move(constraints)};
   }
 
   void CoreCodecSetBufferCollectionInfo(
@@ -339,7 +321,7 @@ class CodecAdapterVaApiEncoder : public CodecAdapter {
     std::unique_lock<std::mutex> lock(lock_);
     stream_stopped_condition.wait(lock, [&stream_stopped] { return stream_stopped; });
   }
-  bool HandleInputFormatChange(const fuchsia::media::FormatDetails& input_format_details,
+  bool HandleInputFormatChange(const fuchsia_media::FormatDetails& input_format_details,
                                bool initial);
 
   // We don't give the codec any buffers in its output pool until

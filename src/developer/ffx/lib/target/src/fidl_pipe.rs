@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use crate::fdomain_transport::FDomainTransport;
-use crate::target_connector::{
-    ConnectionStreamError, TargetConnection, TargetConnectionError, TargetConnector,
+use crate::transport_connector::{
+    ConnectionStreamError, TargetConnection, TargetConnectionError, TransportConnector,
 };
 use crate::{ConnectionError, FDomainConnection};
 use anyhow::Result;
@@ -88,7 +88,7 @@ impl FidlPipe {
         TargetConnectionError,
     >
     where
-        C: TargetConnector + 'static,
+        C: TransportConnector + 'static,
     {
         let (overnet_connection, fdomain_connection) = match connector
             .connect()
@@ -236,7 +236,7 @@ impl Drop for FidlPipe {
 mod test {
     use super::*;
 
-    use crate::target_connector::{FDomainConnection, TargetConnection};
+    use crate::transport_connector::{FDomainConnection, TargetConnection};
     use std::fmt::Debug;
     use tokio::io::BufReader;
 
@@ -245,7 +245,7 @@ mod test {
         should_succeed: bool,
     }
 
-    impl TargetConnector for FailOnceThenSucceedConnector {
+    impl TransportConnector for FailOnceThenSucceedConnector {
         const CONNECTION_TYPE: &'static str = "fake";
 
         async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
@@ -272,7 +272,7 @@ mod test {
     #[derive(Debug)]
     struct AutoFailConnector;
 
-    impl TargetConnector for AutoFailConnector {
+    impl TransportConnector for AutoFailConnector {
         const CONNECTION_TYPE: &'static str = "fake";
         async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
             let (sock1, sock2) = fidl::Socket::create_stream();
@@ -297,7 +297,7 @@ mod test {
     #[derive(Debug)]
     struct DoNothingConnector;
 
-    impl TargetConnector for DoNothingConnector {
+    impl TransportConnector for DoNothingConnector {
         const CONNECTION_TYPE: &'static str = "fake";
         async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
             let (sock1, sock2) = fidl::Socket::create_stream();

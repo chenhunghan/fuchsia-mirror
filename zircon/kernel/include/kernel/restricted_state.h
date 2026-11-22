@@ -7,16 +7,6 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_RESTRICTED_STATE_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_RESTRICTED_STATE_H_
 
-#include <assert.h>
-#include <lib/user_copy/user_ptr.h>
-#include <lib/zx/result.h>
-#include <stddef.h>
-#include <stdint.h>
-#include <zircon/syscalls-next.h>
-
-#include <arch/exception.h>
-#include <arch/regs.h>
-#include <ktl/type_traits.h>
 #include <ktl/unique_ptr.h>
 
 // Encapsulates a thread's restricted mode state.
@@ -28,22 +18,10 @@
 // handled via `RestrictedStatePtr` (`ktl::unique_ptr<RestrictedState, RestrictedStateDeleter>`),
 // which dispatches to `rust_restricted_state_destroy` upon destruction.
 struct RestrictedState;
-struct Thread;
 
 extern "C" {
 
-RestrictedState* cpp_thread_current_restricted_state();
-void cpp_thread_current_set_restricted_state(RestrictedState* raw_rs);
-bool cpp_thread_current_check_for_restricted_kick();
-bool cpp_thread_in_restricted(Thread* thread);
-
 void rust_restricted_state_destroy(RestrictedState* ptr);
-bool rust_restricted_state_in_restricted(const RestrictedState* state);
-
-[[noreturn]] void rust_restricted_leave_iframe(const iframe_t* iframe,
-                                               zx_restricted_reason_t reason);
-[[noreturn]] void rust_restricted_leave_syscall(const syscall_regs_t* regs,
-                                                zx_restricted_reason_t reason);
 
 }  // extern "C"
 

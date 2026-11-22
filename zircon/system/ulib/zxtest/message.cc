@@ -2,12 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <stdint.h>
-#include <stdio.h>
+#include <zircon/assert.h>
 
-#include <cinttypes>
+#include <cstdarg>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <format>
+#include <span>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/message.h>
 
 namespace zxtest {
@@ -29,25 +32,19 @@ std::string ToHex(const void* ptr, size_t size) {
     return "<nullptr>";
   }
 
-  // 2 char for 2 4 bit pairs in each byte.
-  // 1 char for each space after a byte, except for the last byte.
-  const size_t expected_size = 3 * size - 1;
-  char buffer[expected_size];
-  static constexpr char kHexTable[] = {'0', '1', '2', '3', '4', '5', '6', '7',
-                                       '8', '9', 'A', 'B', 'C', 'D', 'E', 'F'};
-  const uint8_t* cur = static_cast<const uint8_t*>(ptr);
-  const uint8_t* end = static_cast<const uint8_t*>(ptr) + size;
-  size_t index = 0;
-  while (cur != end) {
-    buffer[index++] = kHexTable[*cur >> 4];
-    buffer[index++] = kHexTable[*cur & 0xF];
-    if (end - cur > 1) {
-      buffer[index++] = ' ';
-    }
-    ++cur;
+  constexpr std::string_view kHexDigits = "0123456789ABCDEF";
+  std::span bytes{static_cast<const uint8_t*>(ptr), size};
+  std::string result;
+  result.reserve((bytes.size() * 3) - 1);
+  for (uint8_t byte : bytes.subspan(0, bytes.size() - 1)) {
+    result += kHexDigits[(byte >> 4) & 0xf];
+    result += kHexDigits[(byte >> 0) & 0xf];
+    result += ' ';
   }
+  result += kHexDigits[(bytes.back() >> 4) & 0xf];
+  result += kHexDigits[(bytes.back() >> 0) & 0xf];
 
-  return std::string(buffer, index);
+  return result;
 }
 
 std::string_view PrintVolatile(volatile const void* ptr, size_t size) {
@@ -62,19 +59,68 @@ std::string_view PrintVolatile(volatile const void* ptr, size_t size) {
   return "<ptr>";
 }
 
+std::string PrintAsTuple(std::span<const std::string> tuple) {
+  if (tuple.empty()) {
+    return "{ }";
+  }
+
+  size_t total_size = 4 + ((tuple.size() - 1) * 2);
+  for (const std::string& elem : tuple) {
+    total_size += elem.size();
+  }
+
+  std::string result;
+  result.reserve(total_size);
+  result += "{ ";
+  for (const std::string& elem : tuple.subspan(0, tuple.size() - 1)) {
+    result += elem;
+    result += ", ";
+  }
+  result += tuple.back();
+  result += " }";
+  return result;
+}
+
+std::string FormatDescriptionV(std::string_view desc, const char* fmt, va_list args) {
+  if (fmt[0] == ' ' && fmt[1] == '\0') {
+    std::string result;
+    result.reserve(desc.size() + 1);
+    result.append(desc);
+    result.push_back(' ');
+    return result;
+  }
+  char* malloc_str = nullptr;
+  int len = vasprintf(&malloc_str, fmt, args);
+  ZX_ASSERT(len >= 0 && malloc_str != nullptr);
+  std::string result;
+  result.reserve(desc.size() + static_cast<size_t>(len));
+  result.append(desc);
+  result.append(malloc_str, static_cast<size_t>(len));
+  free(malloc_str);
+  return result;
+}
+
+std::string FormatDescription(std::string_view desc, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  std::string result = FormatDescriptionV(desc, fmt, args);
+  va_end(args);
+  return result;
+}
+
 }  // namespace internal
 
-std::string PrintValue(uint32_t value) { return std::string{fbl::StringPrintf("%" PRIu32, value)}; }
+std::string PrintValue(int32_t value) { return std::to_string(value); }
 
-std::string PrintValue(int32_t value) { return std::string{fbl::StringPrintf("%" PRIi32, value)}; }
+std::string PrintValue(uint32_t value) { return std::to_string(value); }
 
-std::string PrintValue(int64_t value) { return std::string{fbl::StringPrintf("%" PRIi64, value)}; }
+std::string PrintValue(int64_t value) { return std::to_string(value); }
 
-std::string PrintValue(uint64_t value) { return std::string{fbl::StringPrintf("%" PRIu64, value)}; }
+std::string PrintValue(uint64_t value) { return std::to_string(value); }
 
-std::string PrintValue(float value) { return std::string{fbl::StringPrintf("%f", value)}; }
+std::string PrintValue(float value) { return std::to_string(value); }
 
-std::string PrintValue(double value) { return std::string{fbl::StringPrintf("%f", value)}; }
+std::string PrintValue(double value) { return std::to_string(value); }
 
 std::string PrintValue(const char* value) {
   if (value == nullptr) {
@@ -83,9 +129,16 @@ std::string PrintValue(const char* value) {
   return std::string{value};
 }
 
+std::string PrintValue(const void* value) {
+  if (value == nullptr) {
+    return "<nullptr>";
+  }
+  return std::format("{}", value);
+}
+
 std::string PrintStatus(zx_status_t status) {
 #ifdef __Fuchsia__
-  return std::string{fbl::StringPrintf("%s(%d)", zx_status_get_string(status), status)};
+  return std::format("{}({})", zx_status_get_string(status), status);
 #else
   return std::to_string(status);
 #endif

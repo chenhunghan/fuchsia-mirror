@@ -3,6 +3,9 @@
 // found in the LICENSE file.
 
 use crate::{MlmeEventStream, MlmeSink, MlmeStream, ap as ap_sme};
+use fidl_fuchsia_wlan_common as fidl_common;
+use fidl_fuchsia_wlan_mlme as fidl_mlme;
+use fidl_fuchsia_wlan_sme as fidl_sme;
 use fuchsia_sync::Mutex;
 use futures::channel::mpsc;
 use futures::prelude::*;
@@ -12,10 +15,6 @@ use log::error;
 use std::pin::pin;
 use std::sync::Arc;
 use wlan_common::RadioConfig;
-use {
-    fidl_fuchsia_wlan_common as fidl_common, fidl_fuchsia_wlan_mlme as fidl_mlme,
-    fidl_fuchsia_wlan_sme as fidl_sme,
-};
 
 pub type Endpoint = fidl::endpoints::ServerEnd<fidl_sme::ApSmeMarker>;
 type Sme = ap_sme::ApSme;
@@ -75,7 +74,7 @@ async fn start(sme: &Mutex<Sme>, config: fidl_sme::ApConfig) -> fidl_sme::StartA
 
     let sme_config = ap_sme::Config {
         ssid: Ssid::from_bytes_unchecked(config.ssid),
-        password: config.password,
+        authentication: config.authentication,
         radio_cfg,
     };
 

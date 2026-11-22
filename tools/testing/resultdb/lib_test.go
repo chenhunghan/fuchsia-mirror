@@ -641,6 +641,68 @@ func TestTestCaseProperties(t *testing.T) {
 	}
 }
 
+func TestTestCaseProperties_DoesNotInheritSuiteExonerationTags(t *testing.T) {
+	detail := &runtests.TestDetails{
+		Name:        "foo",
+		GNLabel:     "//src/foo:foo_test(//build/toolchain:x64)",
+		SourceLabel: "//src/foo:foo_test",
+		Tags: []build.TestTag{
+			{Key: "scope", Value: "hermetic"},
+			{Key: "luci_exoneration_v2_dry_run", Value: "false"},
+		},
+	}
+
+	// 1. A failing case with its own exoneration tags should only have its
+	// case-level exoneration tags, not the suite's "false" tag.
+	failedCaseTags := []build.TestTag{
+		{Key: "luci_exoneration_v2_dry_run", Value: "true"},
+		{Key: "luci_exoneration_v2_flake_rate", Value: "true"},
+	}
+	gotProps, gotTags := testCaseProperties("Rust", failedCaseTags, detail, nil)
+	wantProps := mustParseProperties(t, `{
+		"gn_label": "//src/foo:foo_test(//build/toolchain:x64)",
+		"source_label": "//src/foo:foo_test",
+		"affected": false,
+		"format": "Rust",
+		"tags": {
+			"scope": "hermetic",
+			"luci_exoneration_v2_dry_run": "true",
+			"luci_exoneration_v2_flake_rate": "true"
+		}
+	}`)
+	if diff := cmp.Diff(wantProps, gotProps, protocmp.Transform()); diff != "" {
+		t.Errorf("Failed case properties differ (-want +got):\n%s", diff)
+	}
+	var dryRunTagValues []string
+	for _, tag := range gotTags {
+		if tag.Key == "luci_exoneration_v2_dry_run" {
+			dryRunTagValues = append(dryRunTagValues, tag.Value)
+		}
+	}
+	if diff := cmp.Diff([]string{"true"}, dryRunTagValues); diff != "" {
+		t.Errorf("Failed case luci_exoneration_v2_dry_run tags differ (-want +got):\n%s", diff)
+	}
+
+	// 2. A passing/skipped case with no case-level exoneration tags should not
+	// inherit any luci_exoneration_v2_* tags from the suite.
+	gotPassProps, gotPassTags := testCaseProperties("Rust", nil, detail, nil)
+	wantPassProps := mustParseProperties(t, `{
+		"gn_label": "//src/foo:foo_test(//build/toolchain:x64)",
+		"source_label": "//src/foo:foo_test",
+		"affected": false,
+		"format": "Rust",
+		"tags": {"scope": "hermetic"}
+	}`)
+	if diff := cmp.Diff(wantPassProps, gotPassProps, protocmp.Transform()); diff != "" {
+		t.Errorf("Passing case properties differ (-want +got):\n%s", diff)
+	}
+	for _, tag := range gotPassTags {
+		if strings.HasPrefix(tag.Key, "luci_exoneration_v2_") {
+			t.Errorf("Passing case unexpectedly inherited suite exoneration tag: %+v", tag)
+		}
+	}
+}
+
 func TestPropertiesFreeFormTags(t *testing.T) {
 	// Tags are reported as a repeated list, so the same key may appear more
 	// than once, and keys may be empty.
@@ -1245,6 +1307,11 @@ func TestForEachSummaryTest(t *testing.T) {
 			wantNames: nil,
 		},
 		{
+			name:      "ignores failure_mode object alongside tests",
+			jsonInput: `{"failure_mode":{"category":"infra","result":"FAIL","infra":{"domain":"tools"},"failures":[{"name":"task_state/BOT_DIED","result":"FAIL","category":"infra"}]},"tests":[{"name":"t1"},{"name":"t2"}],"outputs":{"a":"b"}}`,
+			wantNames: []string{"t1", "t2"},
+		},
+		{
 			name:      "top-level array instead of object",
 			jsonInput: `[{"name":"t1"}]`,
 			wantErr:   true,
@@ -1693,6 +1760,89 @@ func TestTestCaseToResultSink_StructuredTestID_TargetTest(t *testing.T) {
 	}
 	if wantID := "fuchsia-pkg://fuchsia.com/my-package#meta/my-test.cm/FrobnicatedSuite:VerifyOutput"; res.TestId != wantID {
 		t.Errorf("TestId diff: got %q, want %q", res.TestId, wantID)
+	}
+}
+
+// The legacy test_id keeps its pre-split form.
+func TestTestCaseToResultSink_StructuredTestID_RunnerDerived(t *testing.T) {
+	for _, tc := range []struct {
+		runner       string
+		caseName     string
+		wantFineName string
+		wantCaseName string
+		wantScheme   string
+		wantLegacyID string
+	}{
+		{
+			runner:       "gtest_runner",
+			caseName:     "Inst/FrobnicatedSuite.VerifyOutput/0",
+			wantFineName: "Inst/FrobnicatedSuite",
+			wantCaseName: "VerifyOutput/0",
+			wantScheme:   "gtest",
+			wantLegacyID: "fuchsia-pkg://fuchsia.com/my-package#meta/my-test.cm/:Inst/FrobnicatedSuite.VerifyOutput/0",
+		},
+		{
+			runner:       "rust_test_runner",
+			caseName:     "tests::verify_output",
+			wantFineName: "tests",
+			wantCaseName: "verify_output",
+			wantScheme:   "rust",
+			wantLegacyID: "fuchsia-pkg://fuchsia.com/my-package#meta/my-test.cm/:tests::verify_output",
+		},
+		{
+			runner:       "rust_test_runner",
+			caseName:     "verify_output",
+			wantFineName: "crate",
+			wantCaseName: "verify_output",
+			wantScheme:   "rust",
+			wantLegacyID: "fuchsia-pkg://fuchsia.com/my-package#meta/my-test.cm/:verify_output",
+		},
+		{
+			runner:       "elf_test_runner",
+			caseName:     "main",
+			wantFineName: "",
+			wantCaseName: "main",
+			wantScheme:   "flat",
+			wantLegacyID: "fuchsia-pkg://fuchsia.com/my-package#meta/my-test.cm/:main",
+		},
+	} {
+		t.Run(tc.runner+"/"+tc.caseName, func(t *testing.T) {
+			format, suiteNames, caseNames := runtests.CaseNamesForRunner(tc.runner, []string{tc.caseName})
+			detail := &runtests.TestDetails{
+				Name:      "fuchsia-pkg://fuchsia.com/my-package#meta/my-test.cm",
+				Status:    runtests.TestSuccess,
+				StartTime: time.Now(),
+				TestResult: runtests.TestResult{
+					Runner: tc.runner,
+					Cases: []runtests.TestCaseResult{
+						{
+							DisplayName: tc.caseName,
+							SuiteName:   suiteNames[0],
+							CaseName:    caseNames[0],
+							Status:      runtests.TestSuccess,
+							Format:      format,
+						},
+					},
+				},
+			}
+			if got := DetermineScheme(detail); got != tc.wantScheme {
+				t.Errorf("DetermineScheme() = %q, want %q", got, tc.wantScheme)
+			}
+			results, _, _ := testCaseToResultSink(detail.Cases, []*resultpb.StringPair{}, detail, t.TempDir())
+			if len(results) != 1 {
+				t.Fatalf("expected 1 result, got %d", len(results))
+			}
+			want := &sinkpb.TestIdentifier{
+				FineName:           tc.wantFineName,
+				CaseNameComponents: []string{tc.wantCaseName},
+			}
+			if !proto.Equal(results[0].TestIdStructured, want) {
+				t.Errorf("TestIdStructured diff: got %+v, want %+v", results[0].TestIdStructured, want)
+			}
+			if results[0].TestId != tc.wantLegacyID {
+				t.Errorf("TestId diff: got %q, want %q", results[0].TestId, tc.wantLegacyID)
+			}
+		})
 	}
 }
 
@@ -2596,5 +2746,120 @@ func TestCasePropertyCacheWithTags(t *testing.T) {
 	}
 	if results[18].Properties == results[8].Properties {
 		t.Errorf("case 18 should not hit cache after maxCachedPropsEntries overflow at case 8")
+	}
+}
+
+func TestResultDBStatus(t *testing.T) {
+	testCases := []struct {
+		status         runtests.TestStatus
+		wantStatus     resultpb.TestResult_Status
+		wantReasonKind resultpb.FailureReason_Kind
+		wantErr        bool
+	}{
+		{runtests.TestSuccess, resultpb.TestResult_PASSED, resultpb.FailureReason_KIND_UNSPECIFIED, false},
+		{runtests.TestFailure, resultpb.TestResult_FAILED, resultpb.FailureReason_ORDINARY, false},
+		{runtests.TestSkipped, resultpb.TestResult_SKIPPED, resultpb.FailureReason_KIND_UNSPECIFIED, false},
+		{runtests.TestAborted, resultpb.TestResult_FAILED, resultpb.FailureReason_TIMEOUT, false},
+		{runtests.TestInfraFailure, resultpb.TestResult_FAILED, resultpb.FailureReason_CRASH, false},
+		{runtests.TestExonerated, resultpb.TestResult_FAILED, resultpb.FailureReason_ORDINARY, false},
+		{runtests.TestPrecluded, resultpb.TestResult_PRECLUDED, resultpb.FailureReason_KIND_UNSPECIFIED, false},
+		{runtests.TestStatus("UNKNOWN"), resultpb.TestResult_STATUS_UNSPECIFIED, resultpb.FailureReason_KIND_UNSPECIFIED, true},
+	}
+	for _, tc := range testCases {
+		t.Run(string(tc.status), func(t *testing.T) {
+			gotStatus, gotReasonKind, err := resultDBStatus(tc.status)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("resultDBStatus(%q) err = %v, wantErr %v", tc.status, err, tc.wantErr)
+			}
+			if gotStatus != tc.wantStatus {
+				t.Errorf("resultDBStatus(%q) status = %v, want %v", tc.status, gotStatus, tc.wantStatus)
+			}
+			if gotReasonKind != tc.wantReasonKind {
+				t.Errorf("resultDBStatus(%q) reasonKind = %v, want %v", tc.status, gotReasonKind, tc.wantReasonKind)
+			}
+		})
+	}
+}
+
+func TestPrecludedResults(t *testing.T) {
+	const wantSummary = "<p>Precluded: not run due to a higher-level failure.</p>"
+	testCases := []struct {
+		name            string
+		summary         *runtests.TestSummary
+		wantTestID      string
+		wantStatus      resultpb.TestResult_Status
+		wantSummaryHTML string
+	}{
+		{
+			name: "precluded test target",
+			summary: &runtests.TestSummary{
+				Tests: []runtests.TestDetails{
+					{
+						Name:   "fuchsia-pkg://fuchsia.com/my-test#meta/my-test.cm",
+						Status: runtests.TestPrecluded,
+					},
+				},
+			},
+			wantTestID:      "fuchsia-pkg://fuchsia.com/my-test#meta/my-test.cm",
+			wantStatus:      resultpb.TestResult_PRECLUDED,
+			wantSummaryHTML: wantSummary,
+		},
+		{
+			name: "precluded test case within passing suite preserves PRECLUDED status",
+			summary: &runtests.TestSummary{
+				Tests: []runtests.TestDetails{
+					{
+						Name:   "fuchsia-pkg://fuchsia.com/my-test#meta/my-test.cm",
+						Status: runtests.TestSuccess,
+						TestResult: runtests.TestResult{
+							Cases: []runtests.TestCaseResult{
+								{
+									SuiteName: "MySuite",
+									CaseName:  "TestPrecludedCase",
+									Status:    runtests.TestPrecluded,
+									Format:    "gtest",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantTestID:      "fuchsia-pkg://fuchsia.com/my-test#meta/my-test.cm/MySuite:TestPrecludedCase",
+			wantStatus:      resultpb.TestResult_PRECLUDED,
+			wantSummaryHTML: wantSummary,
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			results, _, _ := SummaryToResultSink(tc.summary, nil, t.TempDir())
+			for _, r := range results {
+				if r.TestId == tc.wantTestID {
+					if r.StatusV2 != tc.wantStatus {
+						t.Errorf("result %q StatusV2 = %v, want %v", r.TestId, r.StatusV2, tc.wantStatus)
+					}
+					if r.SummaryHtml != tc.wantSummaryHTML {
+						t.Errorf("result %q SummaryHtml = %q, want %q", r.TestId, r.SummaryHtml, tc.wantSummaryHTML)
+					}
+					return
+				}
+			}
+			t.Fatalf("did not find result for %q in mapped results", tc.wantTestID)
+		})
+	}
+}
+
+func TestLegacyTestCaseIDForCase(t *testing.T) {
+	testCase := &runtests.TestCaseResult{DisplayName: "Suite.Case", SuiteName: "Suite", CaseName: "Case"}
+	for _, tc := range []struct {
+		runner string
+		want   string
+	}{
+		{"gtest_runner", "pkg.cm/:Suite.Case"},
+		{"", "pkg.cm/Suite:Case"},
+	} {
+		detail := &runtests.TestDetails{Name: "pkg.cm", TestResult: runtests.TestResult{Runner: tc.runner}}
+		if got := LegacyTestCaseIDForCase(detail, testCase); got != tc.want {
+			t.Errorf("LegacyTestCaseIDForCase(runner=%q) = %q, want %q", tc.runner, got, tc.want)
+		}
 	}
 }

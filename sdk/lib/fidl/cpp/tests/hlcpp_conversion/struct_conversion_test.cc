@@ -90,51 +90,51 @@ TEST(StructConversion, EmptyToHLCPP) {
 TEST(StructConversion, StrictUnionInArrayToNatural) {
   ::test::types::CopyableStruct cs;
   cs.x = 23;
-  std::array<test::types::TestStrictXUnion, 10> arr{
-      test::types::TestStrictXUnion::WithCopyable(std::move(cs)),
-      test::types::TestStrictXUnion::WithPrimitive(1),
-      test::types::TestStrictXUnion::WithPrimitive(2),
-      test::types::TestStrictXUnion::WithPrimitive(3),
-      test::types::TestStrictXUnion::WithPrimitive(4),
-      test::types::TestStrictXUnion::WithPrimitive(5),
-      test::types::TestStrictXUnion::WithPrimitive(6),
-      test::types::TestStrictXUnion::WithPrimitive(7),
-      test::types::TestStrictXUnion::WithPrimitive(8),
-      test::types::TestStrictXUnion::WithPrimitive(9),
+  std::array<test::types::TestStrictUnion, 10> arr{
+      test::types::TestStrictUnion::WithCopyable(std::move(cs)),
+      test::types::TestStrictUnion::WithPrimitive(1),
+      test::types::TestStrictUnion::WithPrimitive(2),
+      test::types::TestStrictUnion::WithPrimitive(3),
+      test::types::TestStrictUnion::WithPrimitive(4),
+      test::types::TestStrictUnion::WithPrimitive(5),
+      test::types::TestStrictUnion::WithPrimitive(6),
+      test::types::TestStrictUnion::WithPrimitive(7),
+      test::types::TestStrictUnion::WithPrimitive(8),
+      test::types::TestStrictUnion::WithPrimitive(9),
   };
-  test::types::TestStrictXUnionInArrayInStruct hlcpp;
+  test::types::TestStrictUnionInArrayInStruct hlcpp;
   hlcpp.arr = std::move(arr);
   auto natural = fidl::HLCPPToNatural(hlcpp);
-  static_assert(std::is_same_v<decltype(natural), test_types::TestStrictXUnionInArrayInStruct>);
-  ASSERT_EQ(natural.arr()[0].Which(), test_types::TestStrictXUnion::Tag::kCopyable);
+  static_assert(std::is_same_v<decltype(natural), test_types::TestStrictUnionInArrayInStruct>);
+  ASSERT_EQ(natural.arr()[0].Which(), test_types::TestStrictUnion::Tag::kCopyable);
   EXPECT_EQ(natural.arr()[0].copyable().value().x(), 23);
   for (size_t i = 1; i < natural.arr().size(); i++) {
-    ASSERT_EQ(natural.arr()[i].Which(), test_types::TestStrictXUnion::Tag::kPrimitive);
+    ASSERT_EQ(natural.arr()[i].Which(), test_types::TestStrictUnion::Tag::kPrimitive);
     EXPECT_EQ(natural.arr()[i].primitive().value(), (int)i);
   }
 }
 
 TEST(StructConversion, StrictUnionInArrayToHLCPP) {
   ::test_types::CopyableStruct cs{{.x = 23}};
-  std::array<test_types::TestStrictXUnion, 10> arr{
-      test_types::TestStrictXUnion::WithCopyable(std::move(cs)),
-      test_types::TestStrictXUnion::WithPrimitive(1),
-      test_types::TestStrictXUnion::WithPrimitive(2),
-      test_types::TestStrictXUnion::WithPrimitive(3),
-      test_types::TestStrictXUnion::WithPrimitive(4),
-      test_types::TestStrictXUnion::WithPrimitive(5),
-      test_types::TestStrictXUnion::WithPrimitive(6),
-      test_types::TestStrictXUnion::WithPrimitive(7),
-      test_types::TestStrictXUnion::WithPrimitive(8),
-      test_types::TestStrictXUnion::WithPrimitive(9),
+  std::array<test_types::TestStrictUnion, 10> arr{
+      test_types::TestStrictUnion::WithCopyable(std::move(cs)),
+      test_types::TestStrictUnion::WithPrimitive(1),
+      test_types::TestStrictUnion::WithPrimitive(2),
+      test_types::TestStrictUnion::WithPrimitive(3),
+      test_types::TestStrictUnion::WithPrimitive(4),
+      test_types::TestStrictUnion::WithPrimitive(5),
+      test_types::TestStrictUnion::WithPrimitive(6),
+      test_types::TestStrictUnion::WithPrimitive(7),
+      test_types::TestStrictUnion::WithPrimitive(8),
+      test_types::TestStrictUnion::WithPrimitive(9),
   };
-  test_types::TestStrictXUnionInArrayInStruct natural{{.arr = arr}};
+  test_types::TestStrictUnionInArrayInStruct natural{{.arr = arr}};
   auto hlcpp = fidl::NaturalToHLCPP(natural);
-  static_assert(std::is_same_v<decltype(hlcpp), test::types::TestStrictXUnionInArrayInStruct>);
-  ASSERT_EQ(hlcpp.arr[0].Which(), test::types::TestStrictXUnion::Tag::kCopyable);
+  static_assert(std::is_same_v<decltype(hlcpp), test::types::TestStrictUnionInArrayInStruct>);
+  ASSERT_EQ(hlcpp.arr[0].Which(), test::types::TestStrictUnion::Tag::kCopyable);
   EXPECT_EQ(hlcpp.arr[0].copyable().x, 23);
   for (size_t i = 1; i < hlcpp.arr.size(); i++) {
-    ASSERT_EQ(hlcpp.arr[i].Which(), test::types::TestStrictXUnion::Tag::kPrimitive);
+    ASSERT_EQ(hlcpp.arr[i].Which(), test::types::TestStrictUnion::Tag::kPrimitive);
     EXPECT_EQ(hlcpp.arr[i].primitive(), (int)i);
   }
 }

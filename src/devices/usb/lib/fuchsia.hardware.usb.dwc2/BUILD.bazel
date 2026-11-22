@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@rules_fuchsia//fuchsia:defs.bzl",
+    "fuchsia_fidl_library",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fuchsia_fidl_library(
+    name = "fuchsia.hardware.usb.dwc2",
+    srcs = [
+        "dwc2.fidl",
+    ],
+    cc_bindings = [
+        "cpp",
+        "cpp_wire",
+    ],
+    library = "fuchsia.hardware.usb.dwc2",
+    visibility = ["//src/devices/usb/drivers/dwc2:__pkg__"],
+)

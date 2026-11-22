@@ -77,7 +77,7 @@ _PYTHON_FILES = [
 _BUILD_AND_BZL_FILES = _BUILD_FILES + _BZL_FILES
 
 # Matches all Bazel files (handled by FileKind.BUILD, FileKind.BZL,
-# FileKind.WORKSPACE, and FileKind.MODULE).
+# FileKind.WORKSPACE, FileKind.MODULE, and FileKind.REPO).
 _ALL_BAZEL_FILES = [
     "*.bazel",
     "*.bzl",
@@ -489,6 +489,14 @@ _bazel_load_visibility = _make_bazel_lint_check(
     applies_to_globs = _BZL_FILES,
 )
 
+# Requires //build/bazel/BAZEL_OWNERS review of `# @bazel2gn:*_overwrite` comment annotations.
+# TODO(https://fxbug.dev/584376026): Switch to "all" once rolled out.
+_bazel_migration_bazel2gn_overwrites = _make_bazel_lint_check(
+    "bazel_migration_bazel2gn_overwrites",
+    applies_to_globs = _BUILD_AND_BZL_FILES,
+    enforcement = "unchanged_lines_warning_only",
+)
+
 # Reports an error when default_visibility in package() uses broad visibility
 # and a warning when it uses narrower visibility.
 _bazel_package_default_visibility = _make_bazel_lint_check(
@@ -509,6 +517,12 @@ _bazel_repository_paths = _make_bazel_lint_check(
 # exempted directories.
 _bazel_target_visibility = _make_bazel_lint_check(
     "bazel_target_visibility",
+    applies_to_globs = _BUILD_AND_BZL_FILES,
+)
+
+# Reports an error when a `test_suite()` sets `target_compatible_with`.
+_bazel_test_suite_target_compatible_with = _make_bazel_lint_check(
+    "bazel_test_suite_target_compatible_with",
     applies_to_globs = _BUILD_AND_BZL_FILES,
 )
 
@@ -541,9 +555,11 @@ def register_bazel_checks():
     shac.register_check(_bazel_fuchsia_wrappers)
     shac.register_check(_bazel_host_constraints)
     shac.register_check(_bazel_load_visibility)
+    shac.register_check(_bazel_migration_bazel2gn_overwrites)
     shac.register_check(_bazel_package_default_visibility)
     shac.register_check(_bazel_repository_paths)
     shac.register_check(_bazel_target_visibility)
+    shac.register_check(_bazel_test_suite_target_compatible_with)
     shac.register_check(_bazel_vendor_paths)
     shac.register_check(_bazel_visibility_for_public_by_default_types)
     # LINT.ThenChange(//scripts/shac/bazel_lint/checks/__init__.py:all_checks)

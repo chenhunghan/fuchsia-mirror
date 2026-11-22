@@ -67,6 +67,10 @@ class FrameScheduler {
                                         SchedulingIdPair id_pair, bool squashable,
                                         bool schedule_asap) = 0;
 
+  // Forwards an advisory presentation timing and frame interval hint for `session_id`.
+  virtual void NotifyExpectedPresent(SessionId session_id, zx::time expected_present_time,
+                                     zx::duration frame_interval, bool schedule_asap) = 0;
+
   // Gets the predicted latch points and presentation times for the frames at or before the next
   // |requested_prediction_span| time span. Uses the FramePredictor to do so.
   virtual std::vector<FuturePresentationInfo> GetFuturePresentationInfos(

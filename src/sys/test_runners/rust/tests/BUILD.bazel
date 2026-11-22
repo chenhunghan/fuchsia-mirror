@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The test components and `rust-runner-integration-test` package stay
+# hand-written in BUILD.gn: the package subpackages GN-only
+# `//src/sys/test_manager:pkg` and `../test_data:rust-test-runner-example`,
+# and bazel2gn only converts `fx_test_component()` targets listed in a
+# converted `fx_package()`.
+
+rustc_test(
+    name = "tests_bin",
+    srcs = [
+        "helpers.rs",
+        "main.rs",
+    ],
+    crate_name = "rust_runner_integration_test",
+    crate_root = "main.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+        "//src/lib/fuchsia",
+        "//src/sys/test_manager:test_lib",
+        "//src/sys/test_runners:test_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+    ],
+)
+
+rustc_test(
+    name = "stress_tests_bin",
+    srcs = [
+        "helpers.rs",
+        "stress_main.rs",
+    ],
+    crate_name = "rust_runner_stress_test",
+    crate_root = "stress_main.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+        "//src/lib/fuchsia",
+        "//src/sys/test_manager:test_lib",
+        "//src/sys/test_runners:test_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)

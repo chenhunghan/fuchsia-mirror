@@ -2,11 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::process::BinderProcess;
+use crate::process::{BinderProcess, BinderProcessGuard};
 use crate::shared_memory::TransactionBuffers;
-use crate::thread::{BinderThread, Command};
+use crate::thread::{BinderThread, Command, QueuedCommand};
 use bitflags::bitflags;
-use itertools::Itertools;
 use starnix_core::task::Pid;
 use starnix_core::vfs::FdNumber;
 use starnix_logging::{log_error, log_trace, track_stub};
@@ -169,9 +168,15 @@ impl BinderObjectRef {
     }
 }
 
-/// A collection of `BinderObject`s whose reference counts may have changed. Releasing it
-/// deduplicates the collected objects, enqueues all corresponding refcount commands, and removes
-/// any freed objects from their owner processes.
+/// Batch of [`BinderObject`]s with pending deferred reference-count updates.
+///
+/// Callers record affected objects into `RefCountActions` while holding process or handle-table
+/// locks, then call [`Releasable::release`] once all [`BinderProcess`] locks have been dropped.
+/// Releasing groups objects by owner process, applies deferred transitions, removes freed objects
+/// from their owners' object tables, and dispatches the resulting refcount commands per owner.
+///
+/// Must be explicitly released via [`Releasable::release`]; dropping an unreleased instance panics
+/// via `drop_guard`.
 #[derive(Default)]
 pub struct RefCountActions {
     objects: smallvec::SmallVec<[ArcKey<BinderObject>; 2]>,
@@ -196,9 +201,25 @@ impl Releasable for RefCountActions {
     type Context<'a> = ();
 
     fn release<'a>(mut self, _context: ()) {
-        self.objects.sort_unstable();
-        for object in self.objects.into_iter().dedup() {
-            object.apply_deferred_refcounts();
+        // Sort by raw owner pointer first and object pointer second so `dedup` removes duplicate
+        // entries for the same `BinderObject` and `chunk_by` groups all objects belonging to the
+        // same owner `BinderProcess` into a single contiguous slice without upgrading `WeakRef`s.
+        self.objects.sort_unstable_by_key(|obj| {
+            (obj.owner.as_ptr() as usize, Arc::as_ptr(&obj.0) as usize)
+        });
+        self.objects.dedup();
+        for group in self.objects.chunk_by(|a, b| WeakRef::ptr_eq(&a.owner, &b.owner)) {
+            let Some(process) = group[0].owner.upgrade() else {
+                continue;
+            };
+            // Apply every object's deferred transitions under a single owner lock acquisition and
+            // dispatch the combined non-terminal commands to at most one worker thread.
+            let mut commands = smallvec::SmallVec::<[QueuedCommand; 4]>::new();
+            let mut process_state = process.lock();
+            for object in group {
+                object.apply_deferred_refcounts_locked(&mut process_state, &mut commands);
+            }
+            process_state.enqueue_non_terminal_commands(commands);
         }
         self.drop_guard.disarm();
     }
@@ -635,57 +656,56 @@ impl BinderObject {
         Ok(())
     }
 
-    pub fn apply_deferred_refcounts(self: &Arc<Self>) {
-        let Some(process) = self.owner.upgrade() else {
-            return;
-        };
+    fn apply_deferred_refcounts_locked(
+        self: &Arc<Self>,
+        process_state: &mut BinderProcessGuard<'_>,
+        commands: &mut smallvec::SmallVec<[QueuedCommand; 4]>,
+    ) {
+        debug_assert!(WeakRef::ptr_eq(&self.owner, &process_state.base.weak_self));
+        let mut object_state = self.lock();
 
-        let mut commands = Vec::new();
-
+        // Enqueue increase actions.
+        assert!(
+            !object_state.strong_count.apply_deferred_inc(),
+            "The strong refcount is never incremented deferredly"
+        );
+        if object_state.weak_count.apply_deferred_inc() {
+            commands.push(Command::IncRef(self.local).into());
+        }
+        // No decrease actions are enqueued while waiting for any acknowledgement.
+        let mut did_decrease = false;
+        if !object_state.strong_count.is_waiting_ack() && !object_state.weak_count.is_waiting_ack()
         {
-            let mut process_state = process.lock();
-            let mut object_state = self.lock();
+            if object_state.strong_count.apply_deferred_dec() {
+                commands.push(Command::ReleaseRef(self.local).into());
+                did_decrease = true;
+            }
+            if object_state.weak_count.apply_deferred_dec() {
+                commands.push(Command::DecRef(self.local).into());
+                did_decrease = true;
+            }
+        }
 
-            // Enqueue increase actions.
-            assert!(
-                !object_state.strong_count.apply_deferred_inc(),
-                "The strong refcount is never incremented deferredly"
+        // Forget this object if we have just removed the last reference to it.
+        if did_decrease
+            && !object_state.strong_count.has_ref()
+            && !object_state.weak_count.has_ref()
+        {
+            let removed = process_state.objects.remove(&self.local.weak_ref_addr);
+            assert_eq!(
+                removed.as_ref().map(Arc::as_ptr),
+                Some(Arc::as_ptr(self)),
+                "Did not remove the expected BinderObject"
             );
-            if object_state.weak_count.apply_deferred_inc() {
-                commands.push(Command::IncRef(self.local));
-            }
-            // No decrease actions are enqueued while waiting for any acknowledgement.
-            let mut did_decrease = false;
-            if !object_state.strong_count.is_waiting_ack()
-                && !object_state.weak_count.is_waiting_ack()
-            {
-                if object_state.strong_count.apply_deferred_dec() {
-                    commands.push(Command::ReleaseRef(self.local));
-                    did_decrease = true;
-                }
-                if object_state.weak_count.apply_deferred_dec() {
-                    commands.push(Command::DecRef(self.local));
-                    did_decrease = true;
-                }
-            }
-
-            // Forget this object if we have just removed the last reference to it.
-            if did_decrease
-                && !object_state.strong_count.has_ref()
-                && !object_state.weak_count.has_ref()
-            {
-                let removed = process_state.objects.remove(&self.local.weak_ref_addr);
-                assert_eq!(
-                    removed.as_ref().map(Arc::as_ptr),
-                    Some(Arc::as_ptr(self)),
-                    "Did not remove the expected BinderObject"
-                );
-            }
         }
+    }
 
-        for command in commands {
-            process.enqueue_command(command.into());
-        }
+    /// Convenience helper for tests to flush deferred refcount actions for a single object.
+    #[cfg(test)]
+    pub fn apply_deferred_refcounts(self: &Arc<Self>) {
+        let mut actions = RefCountActions::default();
+        actions.insert(ArcKey(self.clone()));
+        actions.release(());
     }
 }
 

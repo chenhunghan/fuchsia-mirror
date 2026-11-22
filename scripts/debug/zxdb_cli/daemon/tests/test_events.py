@@ -41,6 +41,72 @@ class TestDaemonEvents(DaemonTestCase):
         self.assertEqual(daemon.all_events[1]["seq"], 1)
         self.assertEqual(daemon.all_events[2]["seq"], 2)
 
+    async def test_event_thread_id_normalized_at_response_boundary(
+        self,
+    ) -> None:
+        daemon = Daemon(port=None)
+        await daemon.event_queue.put(
+            {
+                "event": "stopped",
+                "body": {"threadId": 2, "reason": "breakpoint"},
+            }
+        )
+        await daemon.event_queue.put(
+            {
+                "event": "thread",
+                "body": {
+                    "reason": "started",
+                    "threadId": 2,
+                    "processId": 1234,
+                    "isStopped": True,
+                },
+            }
+        )
+        await daemon.event_queue.put(
+            {
+                "event": "zxdb.Tracepoint",
+                "body": {
+                    "tracepointId": 1,
+                    "threadKoid": 34567,
+                    "hitCount": 1,
+                },
+            }
+        )
+        await daemon.event_queue.put({"type": READER_STOPPED_EVENT})
+
+        await daemon._process_events()
+
+        # Daemon internal state retains raw DAP threadId keys.
+        self.assertEqual(
+            daemon.all_events[1]["body"],
+            {"threadId": 2, "reason": "breakpoint"},
+        )
+        self.assertEqual(daemon.all_events[2]["body"]["threadId"], 2)
+
+        # Response protocol boundary normalizes threadId -> thread_id without
+        # mutating daemon.all_events or renaming Zircon threadKoid.
+        resp = await daemon.registry.handle(
+            "wait-for-event", WaitForEventRequest(last_seen_seq=0)
+        )
+        self.assertTrue(resp.success)
+        assert resp.events is not None
+        self.assertEqual(
+            resp.events[0]["body"],
+            {"thread_id": 2, "reason": "breakpoint"},
+        )
+        self.assertEqual(
+            resp.events[1]["body"],
+            {
+                "reason": "started",
+                "thread_id": 2,
+                "processId": 1234,
+                "isStopped": True,
+            },
+        )
+        self.assertEqual(resp.events[2]["body"]["threadKoid"], 34567)
+        self.assertNotIn("thread_id", resp.events[2]["body"])
+        self.assertEqual(daemon.all_events[1]["body"]["threadId"], 2)
+
     async def test_wait_for_event_immediate(self) -> None:
         daemon = Daemon(port=None)
 

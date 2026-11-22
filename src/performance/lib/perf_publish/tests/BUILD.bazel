@@ -1,0 +1,64 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_map")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":metrics_allowlist_test",
+        ":perf_publish_test",
+        ":runtime_deps_test",
+        ":summarize_test",
+    ],
+    visibility = ["//src/performance:__pkg__"],
+)
+
+# `perf_publish/publish.py` unconditionally calls `f.chmod(... | stat.S_IEXEC)`
+# on the staged `catapult_converter` runfile, which raises `EROFS` inside
+# `linux-sandbox` (see //build/bazel/rules/python:py_data_package.bzl).
+# TODO(https://fxbug.dev/570694755): Guard `chmod` with `os.access(f, os.X_OK)`
+# in `publish.py` and drop `no-sandbox`.
+host_py_test(
+    name = "perf_publish_test",
+    testonly = True,
+    srcs = ["perf_publish_test.py"],
+    tags = ["no-sandbox"],
+    test_data = [":runtime_deps"],
+    deps = ["//src/performance/lib/perf_publish"],
+)
+
+host_py_test(
+    name = "metrics_allowlist_test",
+    testonly = True,
+    srcs = ["metrics_allowlist_test.py"],
+    deps = ["//src/performance/lib/perf_publish"],
+)
+
+host_py_test(
+    name = "summarize_test",
+    testonly = True,
+    srcs = ["summarize_test.py"],
+    deps = ["//src/performance/lib/perf_publish"],
+)
+
+host_py_test(
+    name = "runtime_deps_test",
+    testonly = True,
+    srcs = ["runtime_deps_test.py"],
+    deps = ["//src/performance/lib/perf_publish"],
+)
+
+host_test_data_map(
+    name = "runtime_deps",
+    testonly = True,
+    files_map = {
+        "runtime_deps/catapult_converter": "//src/testing/catapult_converter:converter_bin",
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

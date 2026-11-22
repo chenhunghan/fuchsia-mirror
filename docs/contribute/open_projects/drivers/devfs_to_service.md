@@ -50,7 +50,7 @@ To migrate a devfs class:
 
  1. [Verify that devfs is automatically advertising services for your class](#step1)
  2. [Convert clients to use services](#migrate-clients)
- 3. [Convert drivers to advertise a service](#migrate-drivers)
+ 3. [Convert drivers to advertise a service](#migrate-servers)
  4. [Remove the service and class name from devfs](#cleanup)
 
 ## Verify devfs is automatically advertising services for your class {:#step1 .numbered}
@@ -540,7 +540,7 @@ reference:
   - [Migrating DFv2 Driver][cpu-ctl-dfv2-driver-cl]{:.external}
   - [Migrating Dfv1 Driver (uses more boilerplate than current method)][cpu-ctl-dfv1-driver-cl]{:.external}
 
-## Debugging
+## Debugging {:#debugging}
 
 The most common issue with migrating to services is not connecting all the capabilities
 up correctly. Look for errors in your logs similar to:
@@ -578,7 +578,7 @@ Reach out for questions or for status updates:
 <!-- Other Docs -->
 [identifying-service-instances]: /docs/contribute/open_projects/drivers/identifying_service_instances.md
 [connect-components]: /docs/development/components/connect.md
-[troubleshoot-routes]: /docs/development/components/connect.md#troubleshooting-troubleshooting
+[troubleshoot-routes]: /docs/development/components/connect.md#troubleshooting
 <!-- Code links -->
 [class-names]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/bin/driver_manager/devfs/class_names.h;l=48
 [servicememberwatcher]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/component/incoming/cpp/service_member_watcher.h

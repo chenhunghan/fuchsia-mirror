@@ -4,7 +4,10 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 fidl_golden_library("test.protocollayoutssamelibrary") {
   sources = [ "example.test.fidl" ]
   experimental_flags = [ "output_index_json" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
+# LINT.ThenChange(BUILD.bazel)

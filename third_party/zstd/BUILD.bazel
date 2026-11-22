@@ -7,6 +7,7 @@
 # Keep these files manually synchronized.
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -131,3 +132,53 @@ cc_library(
 )
 
 # LINT.ThenChange(BUILD.gn)
+
+# Standalone decompression-only variant matching static_library("zstd-decompress-standalone")
+# in BUILD.gn (no malloc/free dependency).
+fx_cc_library(
+    name = "zstd-decompress-standalone",
+    srcs = ZSTD_COMMON_SOURCES + ZSTD_DECOMPRESS_SOURCES,
+    hdrs = [
+        "include/zstd/zstd.h",
+        "include/zstd/zstd_errors.h",
+        "src/lib/zdict.h",
+        "src/lib/zstd.h",
+        "src/lib/zstd_errors.h",
+    ],
+    copts = [
+        "-Wno-conversion",
+        "-Wno-unused-but-set-variable",
+        "-Wno-bitwise-instead-of-logical",
+        "-Wno-implicit-fallthrough",
+        "-Isrc/lib",
+        "-Isrc/lib/common",
+        "-Isrc/lib/compress",
+        "-Isrc/lib/dictBuilder",
+    ],
+    includes = [
+        "include",
+    ],
+    local_defines = [
+        "XXH_NAMESPACE=ZSTD_",
+        "ZDICTLIB_VISIBILITY=",
+        "ZSTDERRORLIB_VISIBILITY=",
+        "ZSTDLIB_HIDDEN=",
+        "ZSTDLIB_VISIBILITY=",
+        "ZSTDLIB_VISIBLE=",
+        "HUF_FORCE_DECOMPRESS_X2",
+        "ZSTD_DEPS_MALLOC",
+        "ZSTD_malloc(s)=((void)(s),NULL)",
+        "ZSTD_calloc(n,s)=((void)((n)*(s)),NULL)",
+        "ZSTD_free(p)=(void)(p)",
+        "ZSTD_NO_TRACE",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "PLATFORM_POSIX_VERSION=200112L",
+            "ZSTD_SETPRIORITY_SUPPORT=0",
+        ],
+        "//conditions:default": [
+            "ZSTD_MULTITHREAD",
+        ],
+    }),
+    visibility = ["//src/lib/zbitl:__subpackages__"],
+)

@@ -2282,23 +2282,6 @@ mod tests {
         list.as_mut().clear();
     }
 
-    // Compile-time check that `T` does NOT implement `Trait`. If `T` implemented `Trait`, the
-    // `<T as AmbiguousIfImpl<_>>` path below would be ambiguous between the two impls and fail to
-    // compile.
-    macro_rules! assert_not_impl {
-        ($t:ty: $($trait:tt)+) => {
-            const _: fn() = || {
-                trait AmbiguousIfImpl<A> {
-                    fn some_item() {}
-                }
-                impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
-                enum Invalid {}
-                impl<T: ?Sized + $($trait)+> AmbiguousIfImpl<Invalid> for T {}
-                let _ = <$t as AmbiguousIfImpl<_>>::some_item;
-            };
-        };
-    }
-
     // Linked elements must not be movable through safe `Pin` APIs.
     assert_not_impl!(DoublyLinkedListNode<TestObject>: Unpin);
     assert_not_impl!(TestObject: Unpin);

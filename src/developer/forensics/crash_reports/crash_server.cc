@@ -4,15 +4,14 @@
 
 #include "src/developer/forensics/crash_reports/crash_server.h"
 
-#include <fuchsia/net/http/cpp/fidl.h>
+#include <fidl/fuchsia.net.http/cpp/fidl.h>
+#include <fidl/fuchsia.net.http/cpp/natural_ostream.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
 #include <memory>
 #include <string_view>
 #include <variant>
-
-#include <src/lib/fostr/fidl/fuchsia/net/http/formatting.h>
 
 #include "src/developer/forensics/crash_reports/sized_data_reader.h"
 #include "src/developer/forensics/feedback/annotations/annotation_manager.h"
@@ -112,22 +111,22 @@ cobalt::ReportUploadStatus ToCobaltReportUploadStatus(const CrashServer::UploadS
   }
 }
 
-// Builds a fuchsia::net::http::Request.
-std::optional<fuchsia::net::http::Request> BuildRequest(const std::string_view method,
-                                                        const std::string_view url,
-                                                        const zx::duration timeout,
-                                                        const crashpad::HTTPHeaders& headers,
-                                                        crashpad::HTTPBodyStream& body) {
-  using fuchsia::net::http::Body;
-  using fuchsia::net::http::Header;
-  using fuchsia::net::http::Request;
+// Builds a fuchsia_net_http::Request.
+std::optional<fuchsia_net_http::Request> BuildRequest(const std::string_view method,
+                                                      const std::string_view url,
+                                                      const zx::duration timeout,
+                                                      const crashpad::HTTPHeaders& headers,
+                                                      crashpad::HTTPBodyStream& body) {
+  using fuchsia_net_http::Body;
+  using fuchsia_net_http::Header;
+  using fuchsia_net_http::Request;
 
   std::vector<Header> http_headers;
   for (const auto& [name, value] : headers) {
-    http_headers.push_back(Header{
+    http_headers.push_back(Header({
         .name = std::vector<uint8_t>(name.begin(), name.end()),
         .value = std::vector<uint8_t>(value.begin(), value.end()),
-    });
+    }));
   }
 
   // Create the request body as a single VMO.
@@ -156,11 +155,11 @@ std::optional<fuchsia::net::http::Request> BuildRequest(const std::string_view m
   }
 
   Request request;
-  request.set_method(std::string(method))
-      .set_url(std::string(url))
-      .set_deadline(zx::deadline_after(timeout).get())
-      .set_headers(std::move(http_headers))
-      .set_body(Body::WithBuffer(std::move(body_vmo).ToTransport()));
+  request.method(std::string(method))
+      .url(std::string(url))
+      .deadline(zx::deadline_after(timeout).get())
+      .headers(std::move(http_headers))
+      .body(Body::WithBuffer(std::move(body_vmo).ToNaturalTransport()));
 
   return request;
 }
@@ -177,10 +176,19 @@ CrashServer::CrashServer(async_dispatcher_t* dispatcher,
       tags_(tags),
       annotation_manager_(annotation_manager),
       clock_(clock) {
-  services_->Connect(loader_.NewRequest(dispatcher_));
-  loader_.set_error_handler([](const zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to fuchsia.net.http.Loader";
-  });
+  Connect();
+}
+
+void CrashServer::on_fidl_error(const fidl::UnbindInfo error) {
+  loader_ = fidl::Client<fuchsia_net_http::Loader>();
+  FX_PLOGS(WARNING, error.status()) << "Lost connection to fuchsia.net.http.Loader";
+}
+
+void CrashServer::Connect() {
+  auto [client, server] = fidl::Endpoints<fuchsia_net_http::Loader>::Create();
+  services_->Connect(fidl::DiscoverableProtocolName<fuchsia_net_http::Loader>,
+                     server.TakeChannel());
+  loader_ = fidl::Client<fuchsia_net_http::Loader>(std::move(client), dispatcher_, this);
 }
 
 void CrashServer::MakeRequest(const Report& report, const Snapshot& snapshot,
@@ -244,7 +252,7 @@ void CrashServer::MakeRequest(const Report& report, const Snapshot& snapshot,
   crashpad::HTTPHeaders headers;
   http_multipart_builder.PopulateContentHeaders(&headers);
 
-  std::optional<::fuchsia::net::http::Request> request =
+  std::optional<fuchsia_net_http::Request> request =
       BuildRequest("POST", url, zx::min(3), headers, *http_multipart_builder.GetBodyStream());
 
   auto complete = [&cobalt, callback = std::move(callback)](
@@ -266,81 +274,89 @@ void CrashServer::MakeRequest(const Report& report, const Snapshot& snapshot,
   }
 
   uint64_t upload_size = 0;
-  if (request->has_body() && request->body().is_buffer()) {
-    upload_size = request->body().buffer().size;
+  if (request->body().has_value() && request->body()->buffer().has_value()) {
+    upload_size = request->body()->buffer()->size();
   }
 
-  if (!loader_) {
-    services_->Connect(loader_.NewRequest(dispatcher_));
+  if (!loader_.is_valid()) {
+    Connect();
   }
 
   const zx::time_boot start_time = clock_->BootNow();
   const std::string tags = tags_->Get(report.Id());
 
-  loader_->Fetch(std::move(request.value()), [this, tags, upload_size, start_time,
-                                              complete = std::move(complete)](
-                                                 fuchsia::net::http::Response response) mutable {
-    pending_request_ = false;
+  loader_->Fetch(std::move(*request))
+      .Then([this, tags, upload_size, start_time, complete = std::move(complete)](
+                fidl::Result<fuchsia_net_http::Loader::Fetch>& result) mutable {
+        pending_request_ = false;
 
-    auto complete_error = [&](CrashServer::UploadStatus status) {
-      complete(status, upload_size, /*server_report_id=*/"", clock_->BootNow() - start_time);
-    };
+        auto complete_error = [&](CrashServer::UploadStatus status) {
+          complete(status, upload_size, /*server_report_id=*/"", clock_->BootNow() - start_time);
+        };
 
-    auto complete_ok = [&](std::string server_report_id) {
-      complete(CrashServer::UploadStatus::kSuccess, upload_size, std::move(server_report_id),
-               clock_->BootNow() - start_time);
-    };
+        auto complete_ok = [&](std::string server_report_id) {
+          complete(CrashServer::UploadStatus::kSuccess, upload_size, std::move(server_report_id),
+                   clock_->BootNow() - start_time);
+        };
 
-    if (response.has_error()) {
-      FX_LOGST(WARNING, tags.c_str()) << "Experienced network error: " << response.error();
-      if (response.error() == fuchsia::net::http::Error::DEADLINE_EXCEEDED) {
-        complete_error(CrashServer::UploadStatus::kTimedOut);
-      } else {
-        complete_error(CrashServer::UploadStatus::kFailure);
-      }
-      return;
-    }
+        if (result.is_error()) {
+          FX_LOGST(WARNING, tags.c_str())
+              << "Experienced FIDL error: " << result.error_value().FormatDescription();
+          complete_error(CrashServer::UploadStatus::kFailure);
+          return;
+        }
 
-    std::string response_body;
-    if (response.has_body()) {
-      if (!fsl::BlockingDrainFrom(std::move(*response.mutable_body()),
-                                  [&response_body](const void* data, uint32_t len) {
-                                    const char* begin = static_cast<const char*>(data);
-                                    response_body.insert(response_body.end(), begin, begin + len);
-                                    return len;
-                                  })) {
-        FX_LOGST(WARNING, tags.c_str()) << "Failed to read http body";
-        response_body.clear();
-      }
-    } else {
-      FX_LOGST(WARNING, tags.c_str()) << "Http response is missing body";
-    }
+        fuchsia_net_http::Response& response = result->response();
+        if (response.error().has_value()) {
+          FX_LOGST(WARNING, tags.c_str()) << "Experienced network error: " << *response.error();
+          if (*response.error() == fuchsia_net_http::Error::kDeadlineExceeded) {
+            complete_error(CrashServer::UploadStatus::kTimedOut);
+          } else {
+            complete_error(CrashServer::UploadStatus::kFailure);
+          }
+          return;
+        }
 
-    if (!response.has_status_code()) {
-      FX_LOGST(ERROR, tags.c_str()) << "No status code received: " << response_body;
-      complete_error(CrashServer::UploadStatus::kFailure);
-      return;
-    }
+        std::string response_body;
+        if (response.body().has_value()) {
+          if (!fsl::BlockingDrainFrom(
+                  std::move(*response.body()), [&response_body](const void* data, uint32_t len) {
+                    const char* begin = static_cast<const char*>(data);
+                    response_body.insert(response_body.end(), begin, begin + len);
+                    return len;
+                  })) {
+            FX_LOGST(WARNING, tags.c_str()) << "Failed to read http body";
+            response_body.clear();
+          }
+        } else {
+          FX_LOGST(WARNING, tags.c_str()) << "Http response is missing body";
+        }
 
-    if (response.status_code() == 429) {
-      FX_LOGST(WARNING, tags.c_str()) << "Upload throttled by server: " << response_body;
-      complete_error(CrashServer::UploadStatus::kThrottled);
-      return;
-    }
+        if (!response.status_code().has_value()) {
+          FX_LOGST(ERROR, tags.c_str()) << "No status code received: " << response_body;
+          complete_error(CrashServer::UploadStatus::kFailure);
+          return;
+        }
 
-    if (response.status_code() < 200 || response.status_code() >= 204) {
-      FX_LOGST(WARNING, tags.c_str()) << "Failed to upload report, received HTTP status code "
-                                      << response.status_code() << ": " << response_body;
-      complete_error(CrashServer::UploadStatus::kFailure);
-      return;
-    }
+        if (*response.status_code() == 429) {
+          FX_LOGST(WARNING, tags.c_str()) << "Upload throttled by server: " << response_body;
+          complete_error(CrashServer::UploadStatus::kThrottled);
+          return;
+        }
 
-    if (response_body.empty()) {
-      complete_error(CrashServer::UploadStatus::kFailure);
-    } else {
-      complete_ok(std::move(response_body));
-    }
-  });
+        if (*response.status_code() < 200 || *response.status_code() >= 204) {
+          FX_LOGST(WARNING, tags.c_str()) << "Failed to upload report, received HTTP status code "
+                                          << *response.status_code() << ": " << response_body;
+          complete_error(CrashServer::UploadStatus::kFailure);
+          return;
+        }
+
+        if (response_body.empty()) {
+          complete_error(CrashServer::UploadStatus::kFailure);
+        } else {
+          complete_ok(std::move(response_body));
+        }
+      });
 
   pending_request_ = true;
 }

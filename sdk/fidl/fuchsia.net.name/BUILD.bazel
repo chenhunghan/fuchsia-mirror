@@ -16,7 +16,6 @@ fidl_library(
     ],
     api_area = "Netstack",
     category = "prebuilt",
-    enable_hlcpp = True,
     stable = True,
     visibility = ["//visibility:public"],
     deps = [

@@ -7,7 +7,7 @@ import unittest
 from collections.abc import Sequence
 from pathlib import Path
 
-import depfile
+from build.rbe import depfile
 
 
 class LexLineTests(unittest.TestCase):

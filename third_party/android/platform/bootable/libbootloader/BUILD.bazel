@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = [":license"])
+
+# @bazel2gn:skip
+license(
+    name = "license",
+    package_name = "libbootloader",
+    license_kinds = [
+        "@rules_license//licenses/spdx:Apache-2.0",
+    ],
+    license_text = "src/LICENSES/Apache-2.0.txt",
+)
+
+# Android provides BUILD files in src/, which we ignore via --deleted_packages
+# in template.bazelrc so Fuchsia's Bazel rules can build libabr directly.
+rustc_library(
+    name = "libabr",
+    srcs = [
+        "src/gbl/libabr/src/lib.rs",
+    ],
+    build_flags = [
+        "//build/config/rust:bootfs",
+    ],
+    crate_name = "abr",
+    edition = "2021",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/firmware/paver/rust:__subpackages__",
+    ],
+)

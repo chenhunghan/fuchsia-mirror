@@ -196,7 +196,7 @@ platform interfaces are observed and respected.
 [cfv2-migration]: /docs/contribute/open_projects/components/migration.md
 [cfv2-sys-migration]: /docs/development/components/v2/migration/README.md
 [cfv2-sys-migration-build-info]: /docs/development/components/v2/migration/features.md#build-info
-[component-data]: /docs/development/components/data.md#hermetic_data_files_with_resource
+[component-data]: /docs/development/components/data.md#hermetic-data-files-with-resource
 [component-manifest]: /docs/concepts/components/v2/component_manifests.md
 [cts]: /docs/development/testing/ctf/overview.md
 [decentralized-product-integration]: /docs/contribute/roadmap/2021/decentralized_product_integration.md
@@ -209,9 +209,9 @@ platform interfaces are observed and respected.
 [fidl-reference]: https://fuchsia.dev/reference/fidl/
 [fidl-versioning]: /docs/reference/fidl/language/versioning.md
 [font-provider-fidl]: https://fuchsia.dev/reference/fidl/fuchsia.fonts#Provider
-[fsi-abi-surface]: /docs/concepts/kernel/system.md#abi_surfaces
-[fsi-job-policy]: /docs/concepts/kernel/system.md#job_policy
-[fsi-package-conventions]: /docs/concepts/kernel/system.md#package_conventions
+[fsi-abi-surface]: /docs/concepts/kernel/system.md#abi-surfaces
+[fsi-job-policy]: /docs/concepts/kernel/system.md#job-policy
+[fsi-package-conventions]: /docs/concepts/kernel/system.md#package-conventions
 [fssh]: /docs/reference/tools/sdk/fssh.md
 [fx-mem]: https://fuchsia.dev/reference/tools/fx/cmd/mem
 [fx-snapshot]: https://fuchsia.dev/reference/tools/fx/cmd/snapshot
@@ -237,7 +237,7 @@ platform interfaces are observed and respected.
 [package-url]: /docs/concepts/packages/package_url.md
 [procargs]: /docs/concepts/process/program_loading.md#the_processargs_protocol
 [process]: /docs/reference/kernel_objects/process.md
-[process-launcher]: /docs/concepts/process/process_creation.md#fuchsiaprocesslauncher
+[process-launcher]: /docs/concepts/process/process_creation.md#fuchsia-process-launcher
 [process-launcher-fidl]: https://fuchsia.dev/reference/fidl/fuchsia.process#Launcher
 [program-loading]: /docs/concepts/process/program_loading.md
 [rfc-0002]: /docs/contribute/governance/rfcs/0002_platform_versioning.md
@@ -248,7 +248,7 @@ platform interfaces are observed and respected.
 [rfc-0076]: /docs/contribute/governance/rfcs/0076_fidl_api_summaries.md
 [rfc-0097]: /docs/contribute/governance/rfcs/0097_fidl_toolchain.md
 [roadmap-netstack3]: /docs/contribute/roadmap/2021/netstack3.md
-[sandbox]: /docs/concepts/components/v2/introduction.md#what_is_sandboxing
+[sandbox]: /docs/concepts/components/v2/introduction.md#what-is-sandboxing
 [sdk-tools]: /docs/reference/tools/sdk/README.md
 [selectors]: /docs/reference/diagnostics/selectors.md
 [sl4a]: https://android.googlesource.com/platform/external/sl4a/
@@ -256,8 +256,8 @@ platform interfaces are observed and respected.
 [stable-driver-runtime]: /docs/contribute/roadmap/2021/stable_driver_runtime.md
 [structured-config]: /docs/contribute/roadmap/2021/structured_configuration.md
 [syscall-life]: /docs/concepts/kernel/life_of_a_syscall.md
-[syscalls]: /docs/concepts/kernel/concepts.md#system_calls
-[test-double]: /docs/contribute/testing/principles.md#test_doubles_stubs_mocks_fakes
+[syscalls]: /docs/concepts/kernel/concepts.md#system-calls
+[test-double]: /docs/contribute/testing/principles.md
 [topology]: /docs/concepts/components/v2/topology.md
 [tracing]: /docs/concepts/kernel/tracing-system.md
 [trf]: /docs/development/testing/components/test_runner_framework.md

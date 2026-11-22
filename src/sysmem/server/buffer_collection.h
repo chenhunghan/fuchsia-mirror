@@ -31,9 +31,8 @@ class BufferCollection : public Node {
   using ServerEndV2 = fidl::ServerEnd<typename fuchsia_sysmem2::BufferCollection>;
   using ServerEnd = std::variant<ServerEndV1, ServerEndV2>;
 
-  // Use EmplaceInTree() instead of Create() (until we switch to llcpp when we can have a new
-  // Create() that does what EmplaceInTree() currently does).  The returned reference is valid while
-  // this Node is in the tree under root_.
+  // Use EmplaceInTree() instead of Create().  The returned reference is valid while this Node is in
+  // the tree under root_.
   static BufferCollection& EmplaceInTree(
       fbl::RefPtr<LogicalBufferCollection> logical_buffer_collection, BufferCollectionToken* token,
       const CollectionServerEnd& server_end);

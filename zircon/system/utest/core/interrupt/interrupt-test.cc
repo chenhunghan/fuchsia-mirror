@@ -700,4 +700,132 @@ TEST_F(InterruptTest, PacketFollowsUnbindToWait) {
   EXPECT_EQ(expected_trigger_time.get(), actual_trigger_time.get());
 }
 
+#if defined(__aarch64__)
+
+// Tests that vectors 0 through 7 (reserved for ARM kernel IPIs) cannot be
+// allocated or created as user-space physical interrupts.
+TEST_F(InterruptTest, PhysicalKernelIpiVectorsRejected) {
+  // INTIDs 0-7 are reserved for kernel inter-processor interrupts (IPIs)
+  // on ARM architectures. User space must never be permitted to create
+  // an interrupt dispatcher for these vectors, regardless of trigger mode
+  // or resource authority.
+  for (uint32_t vec = 0; vec < 8; ++vec) {
+    zx::resource child_rsrc;
+    EXPECT_EQ(
+        zx::resource::create(*irq_resource(), ZX_RSRC_KIND_IRQ, vec, 1, nullptr, 0, &child_rsrc),
+        ZX_ERR_NOT_FOUND, "Vector %u should be below platform IRQ resource base", vec);
+
+    zx::interrupt irq;
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_DEFAULT, &irq),
+              ZX_ERR_INVALID_ARGS, "Vector %u should be rejected with DEFAULT mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_EDGE_HIGH, &irq),
+              ZX_ERR_INVALID_ARGS, "Vector %u should be rejected with EDGE_HIGH mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_LEVEL_HIGH, &irq),
+              ZX_ERR_INVALID_ARGS, "Vector %u should be rejected with LEVEL_HIGH mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_EDGE_LOW, &irq),
+              ZX_ERR_INVALID_ARGS, "Vector %u should be rejected with EDGE_LOW mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_LEVEL_LOW, &irq),
+              ZX_ERR_INVALID_ARGS, "Vector %u should be rejected with LEVEL_LOW mode", vec);
+  }
+}
+
+// Tests that unreserved ARM SGIs (8 through 12, and 14 through 15) are strictly
+// rejected with ZX_ERR_INVALID_ARGS at the dispatcher layer.
+TEST_F(InterruptTest, PhysicalUnreservedSgisRejected) {
+  // INTIDs 8-15 are ARM SGIs. Under the SGI vector reservation policy,
+  // only SGI 13 is reserved for platform/hardware doorbells. All other
+  // SGIs (8..12 and 14..15) must be strictly rejected at the syscall / dispatcher
+  // layer with ZX_ERR_INVALID_ARGS.
+  constexpr uint32_t kUnreservedSgis[] = {8, 9, 10, 11, 12, 14, 15};
+  for (uint32_t vec : kUnreservedSgis) {
+    zx::interrupt irq;
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_DEFAULT, &irq),
+              ZX_ERR_INVALID_ARGS, "Unreserved SGI %u should be rejected with DEFAULT mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_EDGE_HIGH, &irq),
+              ZX_ERR_INVALID_ARGS, "Unreserved SGI %u should be rejected with EDGE_HIGH mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_LEVEL_HIGH, &irq),
+              ZX_ERR_INVALID_ARGS, "Unreserved SGI %u should be rejected with LEVEL_HIGH mode",
+              vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_EDGE_LOW, &irq),
+              ZX_ERR_INVALID_ARGS, "Unreserved SGI %u should be rejected with EDGE_LOW mode", vec);
+    EXPECT_EQ(zx::interrupt::create(*irq_resource(), vec, ZX_INTERRUPT_MODE_LEVEL_LOW, &irq),
+              ZX_ERR_INVALID_ARGS, "Unreserved SGI %u should be rejected with LEVEL_LOW mode", vec);
+  }
+}
+
+// Tests creation, binding constraints, and lifecycle of reserved SGI 13 on
+// ARM64 platforms supporting GICv3.
+TEST_F(InterruptTest, PhysicalSgi13ReservedCreation) {
+  // Attempt to create physical interrupt for reserved SGI 13.
+  zx::interrupt irq;
+  zx_status_t status =
+      zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_EDGE_HIGH, &irq);
+
+  // Platform capability and environment triage:
+  // 1. On non-GICv3 platforms (e.g. GICv2), SGI delegation is not supported and
+  //    vectors < 16 are rejected with ZX_ERR_INVALID_ARGS in Gicv2::is_valid.
+  if (status == ZX_ERR_INVALID_ARGS) {
+    ZXTEST_SKIP("SGI 13 delegation not supported on this platform");
+  }
+  // 2. In an environment where a platform driver is already running and bound
+  //    to SGI 13, creation returns ZX_ERR_ALREADY_BOUND.
+  if (status == ZX_ERR_ALREADY_BOUND) {
+    ZXTEST_SKIP("SGI 13 already bound by platform driver");
+  }
+
+  // On GICv3 in standalone core-tests, creation must succeed.
+  ASSERT_OK(status);
+  EXPECT_TRUE(irq.is_valid());
+
+  // 1. Duplicate binding: Attempting to create a second interrupt handle on SGI 13
+  //    while the first is still active must fail with ZX_ERR_ALREADY_BOUND.
+  zx::interrupt duplicate_irq;
+  EXPECT_EQ(zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_EDGE_HIGH, &duplicate_irq),
+            ZX_ERR_ALREADY_BOUND);
+
+  // 2. Trigger restriction: Physical interrupts cannot be triggered by user space via
+  //    zx_interrupt_trigger; must return ZX_ERR_BAD_STATE.
+  EXPECT_EQ(irq.trigger(0, zx::time()), ZX_ERR_BAD_STATE);
+
+  // 3. Lifecycle / Release: Closing the handle releases the vector binding in the kernel.
+  irq.reset();
+
+  // 4. Scoped child IRQ resource: On GICv3 (base_vector == 8), minting a single-vector
+  //    child ZX_RSRC_KIND_IRQ resource for [13, 14) and creating SGI 13 from it must succeed.
+  zx::resource sgi13_rsrc;
+  ASSERT_OK(
+      zx::resource::create(*irq_resource(), ZX_RSRC_KIND_IRQ, 13, 1, nullptr, 0, &sgi13_rsrc));
+  EXPECT_OK(zx::interrupt::create(sgi13_rsrc, 13, ZX_INTERRUPT_MODE_EDGE_HIGH, &irq));
+  irq.reset();
+
+  // 5. Re-creation: SGI 13 can also be created again via the root IRQ resource.
+  EXPECT_OK(zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_EDGE_HIGH, &irq));
+
+  // 6. Default mode: SGI 13 also succeeds with ZX_INTERRUPT_MODE_DEFAULT because GICv3
+  //    defaults SGIs to EDGE + HIGH.
+  irq.reset();
+  EXPECT_OK(zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_DEFAULT, &irq));
+  irq.reset();
+
+  // 7. Invalid trigger modes / polarity: In ARM GICv3 hardware, SGIs are fixed edge-triggered
+  //    and active-high. Requesting level-triggered or active-low modes must return
+  //    ZX_ERR_NOT_SUPPORTED.
+  zx::interrupt invalid_irq;
+  EXPECT_EQ(zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_LEVEL_HIGH, &invalid_irq),
+            ZX_ERR_NOT_SUPPORTED);
+  EXPECT_EQ(zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_EDGE_LOW, &invalid_irq),
+            ZX_ERR_NOT_SUPPORTED);
+  EXPECT_EQ(zx::interrupt::create(*irq_resource(), 13, ZX_INTERRUPT_MODE_LEVEL_LOW, &invalid_irq),
+            ZX_ERR_NOT_SUPPORTED);
+
+  // 8. Resource authorization: Attempting creation without the root IRQ resource must fail
+  //    with ZX_ERR_BAD_HANDLE.
+  const zx::resource invalid_handle{};
+  zx::interrupt unauth_irq;
+  EXPECT_EQ(zx::interrupt::create(invalid_handle, 13, ZX_INTERRUPT_MODE_EDGE_HIGH, &unauth_irq),
+            ZX_ERR_BAD_HANDLE);
+}
+
+#endif  // defined(__aarch64__)
+
 }  // namespace

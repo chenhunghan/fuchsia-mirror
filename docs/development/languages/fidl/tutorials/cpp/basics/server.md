@@ -28,7 +28,7 @@ For more on FIDL methods and messaging models, refer to the
 This document covers how to complete the following tasks:
 
 * [Implement the FIDL protocol](#protocol).
-* [Publish the protocol implementation](#serve).
+* [Publish the protocol implementation](#server).
 * [Run the server](#run).
 
 ## Structure of the server example
@@ -39,13 +39,13 @@ component and its containing package. For more information about building
 components, see [Build components][build-components].
 
 To get the server component up and running, there are three targets that are
-defined in `//examples/fidl/cpp/server/BUILD.gn`:
+defined in `//examples/fidl/cpp/server/BUILD.bazel`:
 
 1. The raw executable file for the server. This produces a binary with the
    specified output name that can run on Fuchsia:
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.gn" region_tag="bin" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.bazel" region_tag="bin" %}
     ```
 
 1. A component that is set up to run the server executable.
@@ -54,14 +54,14 @@ defined in `//examples/fidl/cpp/server/BUILD.gn`:
    configures `echo-server` as an executable component which runs
    `fidl_echo_cpp_server` in `:bin`.
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.gn" region_tag="component" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.bazel" region_tag="component" %}
     ```
 
     The server component manifest is located at
     `//examples/fidl/cpp/server/meta/server.cml`. The binary name in the
     manifest must match the output name of the `executable` defined in
-    `BUILD.gn`.
+    `BUILD.bazel`.
 
     ```json5
     {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/meta/server.cml" region_tag="example_snippet" %}
@@ -71,8 +71,8 @@ defined in `//examples/fidl/cpp/server/BUILD.gn`:
    distribution on Fuchsia. In this case, the package just contains a
    single component.
 
-    ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.gn" region_tag="package" %}
+    ```bazel
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.bazel" region_tag="package" %}
     ```
 
 ### Building the server {#build}
@@ -145,8 +145,8 @@ to perform the heavy lifting.
 
 To depend on the component runtime library:
 
-```gn
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.gn" region_tag="bin" highlight="12" %}
+```bazel
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/server/BUILD.bazel" region_tag="bin" highlight="12" %}
 ```
 
 Import the library at the top of `examples/fidl/cpp/server/main.cc`:
@@ -278,7 +278,7 @@ at [`//examples/fidl/cpp/server/wire`][cpp-wire-server-src].
 [domain-objects]: /docs/development/languages/fidl/tutorials/cpp/basics/domain-objects.md
 [build-components]: /docs/development/components/build.md
 [products]: /docs/development/build/software_assembly/build_configuration.md
-[protocol-open]: /docs/concepts/components/v2/capabilities/life_of_a_protocol_open.md#binding_to_a_component_and_sending_a_protocol_channel
+[protocol-open]: /docs/concepts/components/v2/capabilities/life_of_a_protocol_open.md#binding-to-a-component-and-sending-a-protocol-channel
 [compiling-fidl]: /docs/development/languages/fidl/tutorials/fidl.md
 [async-loop]: /sdk/lib/async-loop/include/lib/async-loop/cpp/loop.h
 [overview]: /docs/development/languages/fidl/tutorials/overview.md

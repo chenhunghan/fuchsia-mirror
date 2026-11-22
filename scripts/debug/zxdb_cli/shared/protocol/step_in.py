@@ -4,8 +4,9 @@
 
 from typing import Any, ClassVar, Final, Literal
 
+from pydantic import Field
 from pydap.dap_types import SteppingGranularity
-from shared.protocol.base import BaseRequest
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "step-in"
 
@@ -14,7 +15,7 @@ class StepInRequest(BaseRequest[dict[str, Any]]):
     """Request to step into a function call."""
 
     command: Literal["step-in"] = COMMAND_NAME
-    thread_id: int
+    thread_id: int = Field(validation_alias=THREAD_ID_ALIAS)
     single_thread: bool | None = None
     target_id: int | None = None
     granularity: SteppingGranularity | None = None

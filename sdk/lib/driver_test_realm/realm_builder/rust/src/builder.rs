@@ -651,6 +651,7 @@ impl DriverTestRealmBuilder for RealmBuilder {
                     "fuchsia.driver.framework.CompositeNodeManager",
                 ))
                 .capability(Capability::protocol_by_name("fuchsia.driver.framework.NodeManager"))
+                .capability(Capability::protocol_by_name("fuchsia.driver.token.NodeBusTopology"))
                 .capability(Capability::protocol_by_name("fuchsia.system.state.Administrator"))
                 .from(&realm)
                 .to(Ref::parent()),

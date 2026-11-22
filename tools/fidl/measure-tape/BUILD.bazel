@@ -3,3 +3,11 @@
 # found in the LICENSE file.
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        "//tools/fidl/measure-tape/rust-tests:fidl_rust_measure_tape_tests",
+    ],
+    visibility = ["//tools:__pkg__"],
+)

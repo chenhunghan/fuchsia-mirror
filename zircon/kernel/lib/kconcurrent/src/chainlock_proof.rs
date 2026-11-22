@@ -139,34 +139,6 @@ impl<Class> ClassedChainLock<Class> {
     }
 }
 
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_proof_wrong_lock() -> ! {
-    panic!("ChainLockProof::new: guard is for another lock");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_proof_guard_not_held() -> ! {
-    panic!("ChainLockProof::new: guard does not hold its lock");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_proof_not_held(msg: &'static str) -> ! {
-    panic!("{msg}");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_retag_different_lock() -> ! {
-    panic!("ChainLockProof::retag: owners do not share a lock");
-}
-
 impl<Class> Default for ClassedChainLock<Class> {
     #[inline]
     fn default() -> Self {
@@ -238,15 +210,12 @@ impl<'p, O: ChainLocked> ChainLockProof<'p, O> {
         token: &'p ChainLockTransactionToken,
     ) -> Self {
         let lock = owner.lock().raw();
-        if !core::ptr::eq(guard.lock(), lock) {
-            panic_proof_wrong_lock();
-        }
-        if !guard.is_held() {
-            panic_proof_guard_not_held();
-        }
-        if !lock.is_held(token) {
-            panic_proof_not_held("ChainLockProof::new: lock is not held by this transaction");
-        }
+        assert!(
+            core::ptr::eq(guard.lock(), lock),
+            "ChainLockProof::new: guard is for another lock"
+        );
+        assert!(guard.is_held(), "ChainLockProof::new: guard does not hold its lock");
+        assert!(lock.is_held(token), "ChainLockProof::new: lock is not held by this transaction");
         // SAFETY: Held: asserted above. Lifetime: `'p` is bounded by `token` and the unique borrow
         // of `guard`. Uniqueness and no release behind the proof: the caller's contract.
         let token = unsafe { LockToken::new() };
@@ -267,11 +236,10 @@ impl<'p, O: ChainLocked> ChainLockProof<'p, O> {
     #[inline(always)]
     #[track_caller]
     pub unsafe fn assume_held(owner: &'p O, token: &'p ChainLockTransactionToken) -> Self {
-        if !owner.lock().is_held(token) {
-            panic_proof_not_held(
-                "ChainLockProof::assume_held: lock is not held by this transaction",
-            );
-        }
+        assert!(
+            owner.lock().is_held(token),
+            "ChainLockProof::assume_held: lock is not held by this transaction"
+        );
         // SAFETY: Held: asserted above. Lifetime: `'p` is bounded by `owner` and `token`. Held for
         // `'p`, uniqueness, and no release behind the proof: the caller's contract.
         let token = unsafe { LockToken::new() };
@@ -387,9 +355,10 @@ impl<'p, O: ChainLocked> ChainLockProof<'p, O> {
     #[inline(always)]
     #[track_caller]
     pub fn retag<'s, P: ChainLocked>(&'s mut self, other: &'s P) -> ChainLockProof<'s, P> {
-        if !core::ptr::eq(self.owner.lock().raw(), other.lock().raw()) {
-            panic_retag_different_lock();
-        }
+        assert!(
+            core::ptr::eq(self.owner.lock().raw(), other.lock().raw()),
+            "ChainLockProof::retag: owners do not share a lock"
+        );
         // SAFETY: Held: `other.lock()` is the lock `self` proves held (asserted above), for `'s`
         // because `self` is borrowed for `'s`. Uniqueness: that borrow is unique.
         let token = unsafe { LockToken::new() };
@@ -442,9 +411,10 @@ impl<'a, O: ChainLocked> OwnerGuard<'a, O> {
     #[inline(always)]
     #[track_caller]
     pub unsafe fn adopt(owner: &'a O, token: &'a ChainLockTransactionToken) -> Self {
-        if !owner.lock().is_held(token) {
-            panic_proof_not_held("OwnerGuard::adopt: lock is not held by this transaction");
-        }
+        assert!(
+            owner.lock().is_held(token),
+            "OwnerGuard::adopt: lock is not held by this transaction"
+        );
         Self { guard: ChainLockGuard::adopt(owner.lock().raw(), token), owner }
     }
 
@@ -458,11 +428,10 @@ impl<'a, O: ChainLocked> OwnerGuard<'a, O> {
     #[inline(always)]
     #[track_caller]
     pub unsafe fn adopt_unchecked(owner: &'a O, token: &'a ChainLockTransactionToken) -> Self {
-        if cfg!(debug_assertions) && !owner.lock().is_held(token) {
-            panic_proof_not_held(
-                "OwnerGuard::adopt_unchecked: lock is not held by this transaction",
-            );
-        }
+        debug_assert!(
+            owner.lock().is_held(token),
+            "OwnerGuard::adopt_unchecked: lock is not held by this transaction"
+        );
         Self { guard: ChainLockGuard::adopt(owner.lock().raw(), token), owner }
     }
 

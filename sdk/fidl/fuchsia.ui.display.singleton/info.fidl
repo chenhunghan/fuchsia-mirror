@@ -4,6 +4,50 @@
 library fuchsia.ui.display.singleton;
 
 using fuchsia.math;
+using zx;
+
+/// Maps to [`fuchsia.hardware.display.types/MAX_COUNT_FRAME_INTERVAL_POWER_HINTS`].
+@available(added=HEAD)
+const MAX_COUNT_FRAME_INTERVAL_POWER_HINTS uint32 = 32;
+
+/// Maps a target presentation cadence to the physical panel's average refresh
+/// period when panel self-refresh or frame insertion causes extra panel scans.
+///
+/// Maps to [`fuchsia.hardware.display.types/FrameIntervalPowerHint`].
+@available(added=HEAD)
+type FrameIntervalPowerHint = struct {
+    /// Maps to [`fuchsia.hardware.display.types/FrameIntervalPowerHint.frame_interval`].
+    frame_interval zx.DurationMono;
+    /// Maps to [`fuchsia.hardware.display.types/FrameIntervalPowerHint.average_refresh_period`].
+    average_refresh_period zx.DurationMono;
+};
+
+/// Advance-notice parameters for waking or retiming a variable-refresh-rate
+/// display after idle periods or cadence transitions.
+///
+/// Maps to [`fuchsia.hardware.display.types/NotifyExpectedPresentConfig`].
+@available(added=HEAD)
+type NotifyExpectedPresentConfig = struct {
+    /// Maps to [`fuchsia.hardware.display.types/NotifyExpectedPresentConfig.heads_up`].
+    heads_up zx.DurationMono;
+    /// Maps to [`fuchsia.hardware.display.types/NotifyExpectedPresentConfig.timeout`].
+    timeout zx.DurationMono;
+};
+
+/// Variable-refresh-rate capabilities for Scenic's primary display.
+///
+/// Maps to [`fuchsia.hardware.display.types/VrrConfig`], with `vsync_period`
+/// surfaced on [`Metrics.vsync_period`] for both fixed and variable modes.
+@available(added=HEAD)
+type VrrConfig = table {
+    /// Maps to [`fuchsia.hardware.display.types/VrrConfig.min_frame_interval`].
+    1: min_frame_interval zx.DurationMono;
+    /// Maps to [`fuchsia.hardware.display.types/VrrConfig.frame_interval_power_hints`].
+    2: frame_interval_power_hints
+            vector<FrameIntervalPowerHint>:MAX_COUNT_FRAME_INTERVAL_POWER_HINTS;
+    /// Maps to [`fuchsia.hardware.display.types/VrrConfig.notify_expected_present_config`].
+    3: notify_expected_present_config NotifyExpectedPresentConfig;
+};
 
 /// Describes the physical display, and how to map between physical and logical pixels.
 type Metrics = table {
@@ -23,6 +67,20 @@ type Metrics = table {
     /// This is the display's maximum vertical refresh rate, in millihertz (0.001 Hz).
     @available(added=16)
     4: maximum_refresh_rate_in_millihertz uint32;
+    /// Nominal hardware VSync scheduling grid period for the active display mode.
+    ///
+    /// Maps to [`fuchsia.hardware.display.types/VrrConfig.vsync_period`], or
+    /// the reciprocal of [`fuchsia.hardware.display.types/Mode.refresh_rate_millihertz`]
+    /// (`(1e12 / refresh_rate_millihertz)` nanoseconds) when omitted or on
+    /// fixed-refresh modes.
+    @available(added=HEAD)
+    5: vsync_period zx.DurationMono;
+    /// Present iff the active display mode has
+    /// [`fuchsia.hardware.display.types/ModeFlags.VARIABLE_REFRESH_RATE`].
+    ///
+    /// Maps to [`fuchsia.hardware.display.types/VrrConfig`].
+    @available(added=HEAD)
+    6: vrr_config VrrConfig;
 };
 
 /// Get information about Scenic's primary display.

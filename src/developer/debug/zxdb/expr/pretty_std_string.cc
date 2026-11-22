@@ -324,8 +324,9 @@ PrettyStdString::EvalArrayFunction PrettyStdString::GetArrayAccess() const {
               return cb(Err::OptimizedOut());
 
             // Inline array starts from the beginning of the string.
-            return cb(ExprValue(GetStdStringCharType(), {string_data.bytes()[index]},
-                                value.value().source().GetOffsetInto(index)));
+            return cb(
+                ExprValue(GetStdStringCharType(), {string_data.bytes()[index]},
+                          value.value().source().GetOffsetInto(static_cast<uint32_t>(index))));
           } else {
             uint64_t ptr = 0;
             if (Err err = GetStringPtr(value.value(), &ptr); err.has_error())

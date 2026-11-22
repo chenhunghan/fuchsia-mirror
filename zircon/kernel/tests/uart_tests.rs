@@ -7,16 +7,17 @@
 //! UART blocking and non-blocking transmit console test command.
 
 use core::ffi::c_int;
+use core::pin::Pin;
 use kprint::{kformat, kprintln};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use rand::rngs::SmallRng;
 use rand::{RngExt, SeedableRng};
 
 use crate::console::CmdArgs;
-use crate::debuglog_rs::{dlog_serial_write, serial_write};
-
-unsafe extern "C" {
-    fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
-}
+use crate::crypto::global_prng;
+use crate::debuglog_rs::dlog_serial_write;
+use crate::io::serial_write;
 
 /// Shared scratch buffer for formatting UART test lines.
 ///
@@ -34,16 +35,30 @@ struct UartTestBuffer {
 }
 
 /// Static UART test line buffer, guarded by `UartTestBuffer::lock` to keep the 1,048-byte buffer
-/// off the kernel stack while preventing concurrent `static mut` aliasing.
-static BUF: UartTestBuffer = UartTestBuffer {
-    lock: ksync::KMutex::new(crate::ksync_kernel::TrackedMutex::const_init(
-        <UartTestBufferLockClass as ksync::LockClass>::ID,
-    )),
-    buf: ksync::KCell::new([0u8; 1048]),
-};
+/// off the kernel stack while preventing concurrent `static mut` aliasing. Constructed by the
+/// `uart_tests_buf` init hook, as its mutex cannot be constructed in a `const` context.
+static BUF: LazyInit<UartTestBuffer, NoCheck> = LazyInit::uninit();
+
+fn uart_tests_buf_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run exactly once, on the boot CPU before secondary CPUs are started,
+    // and so before the `uart_tests` console command can use `BUF`.
+    let Ok(()) = unsafe {
+        Pin::static_ref(&BUF).init_pin(pin_init!(UartTestBuffer {
+            lock <- ksync::KMutex::init(),
+            buf: ksync::KCell::new([0u8; 1048]),
+        }))
+    };
+}
+init::lk_init_hook!(uart_tests_buf, uart_tests_buf_init, init::LK_INIT_LEVEL_EARLIEST);
+
+fn buf() -> &'static UartTestBuffer {
+    // SAFETY: `BUF` is initialized by `uart_tests_buf_init` at `LK_INIT_LEVEL_EARLIEST`, before the
+    // `uart_tests` console command can run.
+    unsafe { BUF.get_unchecked() }
+}
 
 fn uart_blocking_print_test() {
-    ksync::lock!(let mut guard = BUF.lock_lock());
+    ksync::lock!(let mut guard = buf().lock_lock());
     let buf = guard.as_mut().buf_mut();
     for count in 0..5 {
         let line = kformat!(
@@ -58,7 +73,7 @@ fn uart_blocking_print_test() {
 }
 
 fn uart_nonblocking_print_test() {
-    ksync::lock!(let mut guard = BUF.lock_lock());
+    ksync::lock!(let mut guard = buf().lock_lock());
     let buf = guard.as_mut().buf_mut();
     for count in 0..5 {
         let line = kformat!(
@@ -78,13 +93,10 @@ fn uart_print_lots_of_lines(block: bool) {
     const MIN_SINGLE_LINE_LEN: i32 = 80;
 
     let mut seed = [0u8; 32];
-    // SAFETY: `cpp_global_prng_draw` writes `seed.len()` bytes into `seed`.
-    unsafe {
-        cpp_global_prng_draw(seed.as_mut_ptr(), seed.len());
-    }
+    global_prng::draw(&mut seed);
     let mut rng = SmallRng::from_seed(seed);
 
-    ksync::lock!(let mut guard = BUF.lock_lock());
+    ksync::lock!(let mut guard = buf().lock_lock());
     let buf = guard.as_mut().buf_mut();
     for count in 0..TOTAL_LINES {
         let len = if block {

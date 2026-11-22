@@ -548,7 +548,7 @@ TEST_F(EvalContextImplTest, FloatRegisterByName) {
   provider()->AddRegisterValue(debug::RegisterID::kARMv8_d0, false, double_data);
 
   // Same for the "s1" register.
-  constexpr float kFloatValue = 2.99;
+  constexpr float kFloatValue = 2.99f;
   std::vector<uint8_t> float_data(sizeof(float));
   memcpy(float_data.data(), &kFloatValue, sizeof(float));
   provider()->AddRegisterValue(debug::RegisterID::kARMv8_s1, false, float_data);

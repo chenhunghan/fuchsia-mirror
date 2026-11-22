@@ -123,16 +123,6 @@ void Node::AddSmc(const fuchsia_hardware_platform_bus::Smc& smc) {
   add_platform_device_ = true;
 }
 
-void Node::AddPowerConfig(const fuchsia_hardware_power::PowerElementConfiguration& power_config,
-                          std::optional<std::string> fidl_text) {
-  if (!pbus_node_.power_config()) {
-    pbus_node_.power_config() = std::vector<fuchsia_hardware_power::PowerElementConfiguration>();
-  }
-  pbus_node_.power_config()->emplace_back(power_config);
-  power_config_text_.emplace_back(std::move(fidl_text));
-  add_platform_device_ = true;
-}
-
 uint32_t Node::GetPublishIndex() const { return manager_->GetPublishIndex(id()); }
 
 zx::result<> Node::ChangePublishOrder(uint32_t new_index) {
@@ -180,7 +170,7 @@ zx::result<> Node::Publish(PublisherInterface& publisher) {
       }
     }
 
-    zx::result<> result = publisher.AddPbusNode(pbus_node_, metadata_text_, power_config_text_);
+    zx::result<> result = publisher.AddPbusNode(pbus_node_, metadata_text_);
     if (result.is_error()) {
       return result.take_error();
     }

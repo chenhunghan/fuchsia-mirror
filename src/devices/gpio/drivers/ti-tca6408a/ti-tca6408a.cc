@@ -155,7 +155,8 @@ void TiTca6408a::ReleaseInterrupt(ReleaseInterruptRequest& request,
 }
 
 void TiTca6408a::Configure(ConfigureRequest& request, ConfigureCompleter::Sync& completer) {
-  if (request.config().function() || request.config().drive_strength_ua()) {
+  if (request.config().function() || request.config().drive_strength_ua() ||
+      request.config().input_buffer_enabled()) {
     return completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
   }
   if (request.config().pull() && *request.config().pull() != fuchsia_hardware_pin::Pull::kNone) {

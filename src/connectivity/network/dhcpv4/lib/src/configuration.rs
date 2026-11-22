@@ -10,7 +10,6 @@ use anyhow::Context;
 
 use net_types::ip::{IpAddress as _, Ipv4, PrefixLength};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::io;
 use std::net::Ipv4Addr;
 use std::num::TryFromIntError;
@@ -26,12 +25,6 @@ pub struct ServerParameters {
     /// The IPv4 addresses which the server is responsible for managing and leasing to
     /// clients.
     pub managed_addrs: ManagedAddresses,
-    /// A list of MAC addresses which are permitted to request a lease. If empty, any MAC address
-    /// may request a lease.
-    pub permitted_macs: PermittedMacs,
-    /// A collection of static address assignments. Any client whose MAC address has a static
-    /// assignment will be offered the assigned IP address.
-    pub static_assignments: StaticAssignments,
     /// Enables server behavior where the server ARPs an IP address prior to issuing
     /// it in a lease.
     pub arp_probe: bool,
@@ -49,8 +42,6 @@ impl ServerParameters {
             lease_length: crate::configuration::LeaseLength { default_seconds, max_seconds },
             managed_addrs:
                 crate::configuration::ManagedAddresses { mask: _, pool_range_start, pool_range_stop },
-            permitted_macs: _,
-            static_assignments: _,
             arp_probe: _,
             bound_device_names: _,
         } = self;
@@ -201,74 +192,6 @@ impl FidlCompatible<fidl_fuchsia_net_dhcp::AddressPool> for ManagedAddresses {
             range_stop: Some(pool_range_stop.into_fidl()),
             ..Default::default()
         })
-    }
-}
-
-/// A list of MAC addresses which are permitted to request a lease.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PermittedMacs(pub Vec<fidl_fuchsia_net_ext::MacAddress>);
-
-#[cfg(target_os = "fuchsia")]
-impl FidlCompatible<Vec<fidl_fuchsia_net::MacAddress>> for PermittedMacs {
-    type FromError = !;
-    type IntoError = !;
-
-    fn try_from_fidl(fidl: Vec<fidl_fuchsia_net::MacAddress>) -> Result<Self, Self::FromError> {
-        Ok(PermittedMacs(fidl.into_iter().map(|mac| mac.into()).collect()))
-    }
-
-    fn try_into_fidl(self) -> Result<Vec<fidl_fuchsia_net::MacAddress>, Self::IntoError> {
-        Ok(self.0.into_iter().map(|mac| mac.into()).collect())
-    }
-}
-
-/// A collection of static address assignments. Any client whose MAC address has a static
-/// assignment will be offered the assigned IP address.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct StaticAssignments(pub HashMap<fidl_fuchsia_net_ext::MacAddress, Ipv4Addr>);
-
-#[cfg(target_os = "fuchsia")]
-impl FidlCompatible<Vec<fidl_fuchsia_net_dhcp::StaticAssignment>> for StaticAssignments {
-    type FromError = anyhow::Error;
-    type IntoError = !;
-
-    fn try_from_fidl(
-        fidl: Vec<fidl_fuchsia_net_dhcp::StaticAssignment>,
-    ) -> Result<Self, Self::FromError> {
-        match fidl.into_iter().try_fold(HashMap::new(), |mut acc, assignment| {
-            if let (Some(host), Some(assigned_addr)) = (assignment.host, assignment.assigned_addr) {
-                let mac = fidl_fuchsia_net_ext::MacAddress::from(host);
-                match acc.insert(mac, Ipv4Addr::from_fidl(assigned_addr)) {
-                    Some(_ip) => Err(anyhow::format_err!(
-                        "fuchsia.net.dhcp.StaticAssignment contained multiple entries for {}",
-                        mac
-                    )),
-                    None => Ok(acc),
-                }
-            } else {
-                Err(anyhow::format_err!(
-                    "fuchsia.net.dhcp.StaticAssignment contained entry with missing fields: {:?}",
-                    assignment
-                ))
-            }
-        }) {
-            Ok(static_assignments) => Ok(StaticAssignments(static_assignments)),
-            Err(e) => Err(e),
-        }
-    }
-
-    fn try_into_fidl(
-        self,
-    ) -> Result<Vec<fidl_fuchsia_net_dhcp::StaticAssignment>, Self::IntoError> {
-        Ok(self
-            .0
-            .into_iter()
-            .map(|(host, assigned_addr)| fidl_fuchsia_net_dhcp::StaticAssignment {
-                host: Some(host.into()),
-                assigned_addr: Some(assigned_addr.into_fidl()),
-                ..Default::default()
-            })
-            .collect())
     }
 }
 
@@ -428,7 +351,6 @@ impl From<SubnetMask> for PrefixLength<Ipv4> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::tests::{random_ipv4_generator, random_mac_generator};
     use net_declare::{fidl_ip_v4, net_prefix_length_v4, std_ip_v4};
 
     /// Asserts that the supplied Result is an err whose error string contains `substr`.
@@ -573,44 +495,5 @@ mod tests {
             ManagedAddresses::try_from_fidl(mask_range_too_small_pool),
             "cannot fit address pool"
         );
-    }
-
-    #[test]
-    fn static_assignments_try_from_fidl() {
-        use std::iter::FromIterator;
-
-        let mac = random_mac_generator().bytes();
-        let ip = random_ipv4_generator();
-        let fields_present = vec![fidl_fuchsia_net_dhcp::StaticAssignment {
-            host: Some(fidl_fuchsia_net::MacAddress { octets: mac.clone() }),
-            assigned_addr: Some(ip.into_fidl()),
-            ..Default::default()
-        }];
-        let multiple_entries = vec![
-            fidl_fuchsia_net_dhcp::StaticAssignment {
-                host: Some(fidl_fuchsia_net::MacAddress { octets: mac.clone() }),
-                assigned_addr: Some(ip.into_fidl()),
-                ..Default::default()
-            },
-            fidl_fuchsia_net_dhcp::StaticAssignment {
-                host: Some(fidl_fuchsia_net::MacAddress { octets: mac.clone() }),
-                assigned_addr: Some(random_ipv4_generator().into_fidl()),
-                ..Default::default()
-            },
-        ];
-        let fields_missing = vec![fidl_fuchsia_net_dhcp::StaticAssignment {
-            host: None,
-            assigned_addr: None,
-            ..Default::default()
-        }];
-
-        assert_eq!(
-            StaticAssignments::try_from_fidl(fields_present).unwrap(),
-            StaticAssignments(HashMap::from_iter(
-                vec![(fidl_fuchsia_net_ext::MacAddress { octets: mac }, ip)].into_iter()
-            ))
-        );
-        assert!(StaticAssignments::try_from_fidl(multiple_entries).is_err());
-        assert!(StaticAssignments::try_from_fidl(fields_missing).is_err());
     }
 }

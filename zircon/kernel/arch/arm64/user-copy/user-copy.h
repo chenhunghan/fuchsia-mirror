@@ -4,7 +4,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <zircon/errors.h>
 #include <zircon/types.h>
 
 #ifndef ZIRCON_KERNEL_ARCH_ARM64_USER_COPY_USER_COPY_H_

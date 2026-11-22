@@ -336,7 +336,6 @@ build_api_module("generated_docs") {
     ":invoke_fidldoc",
     ":invoke_helpdoc",
     "//build/bazel/bazel_sdk/docs",
-    "//bundles/drivers:create_all_drivers_doc",
   ]
 }
 
@@ -402,7 +401,6 @@ if (current_toolchain == default_toolchain) {
       ":invoke_fidldoc",
       ":invoke_helpdoc",
       "//build/bazel/bazel_sdk/docs",
-      "//bundles/drivers:create_all_drivers_doc",
       "//tools/doc_checker:doc_checker_bin($host_toolchain)",
     ]
     _manifests = get_target_outputs(":generated_docs")
@@ -415,7 +413,6 @@ if (current_toolchain == default_toolchain) {
       "$target_out_dir/clidoc_out.tar.gz",
       "${target_out_dir}/cmldoc_out/index.md",
       "${root_build_dir}/gen/build/bazel/bazel_sdk/docs/docs.zip",
-      "${root_build_dir}/gen/bundles/drivers/_all_drivers_doc.yaml",
       "$root_build_dir/host-tools/doc-checker",
     ]
     outputs = [ "${target_out_dir}/all_docs.zip" ]

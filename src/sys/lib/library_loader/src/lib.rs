@@ -7,8 +7,9 @@ use fidl::prelude::*;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_ldsvc::{LoaderRequest, LoaderRequestStream};
 use fuchsia_async as fasync;
-use futures::{TryFutureExt, TryStreamExt};
+use futures::TryStreamExt;
 use log::*;
+use std::sync::Arc;
 
 /// Helper function to load `object_name` from `search_dirs`.
 /// This function looks in the given directories, and returns the
@@ -45,9 +46,10 @@ pub fn start(lib_proxy: fio::DirectoryProxy, chan: zx::Channel) {
 /// Each library directory must have been opened with at minimum OPEN_RIGHT_READABLE and
 /// OPEN_RIGHT_EXECUTABLE rights.
 pub fn start_with_multiple_dirs(lib_dirs: Vec<fio::DirectoryProxy>, chan: zx::Channel) {
-    fasync::Task::spawn(
-        async move {
-            let mut search_dirs = lib_dirs.clone();
+    fasync::Scope::global().spawn(async move {
+        let mut search_dirs = Arc::new(lib_dirs.clone());
+        let scope = fasync::Scope::new();
+        let res: Result<(), Error> = async {
             // Wait for requests
             let mut stream = LoaderRequestStream::from_channel(fasync::Channel::from_channel(chan));
             while let Some(req) = stream.try_next().await? {
@@ -56,18 +58,26 @@ pub fn start_with_multiple_dirs(lib_dirs: Vec<fio::DirectoryProxy>, chan: zx::Ch
                         control_handle.shutdown();
                     }
                     LoaderRequest::LoadObject { object_name, responder } => {
-                        match load_object(&search_dirs, &object_name).await {
-                            Ok(vmo) => responder.send(zx::sys::ZX_OK, Some(vmo))?,
-                            Err(e) => {
-                                warn!("failed to load object: {:?}", e);
-                                responder.send(zx::sys::ZX_ERR_NOT_FOUND, None)?;
+                        let search_dirs = Arc::clone(&search_dirs);
+                        scope.spawn(async move {
+                            let send_res = match load_object(&search_dirs, &object_name).await {
+                                Ok(vmo) => responder.send(zx::sys::ZX_OK, Some(vmo)),
+                                Err(e) => {
+                                    warn!("failed to load object: {:?}", e);
+                                    responder.send(zx::sys::ZX_ERR_NOT_FOUND, None)
+                                }
+                            };
+                            if let Err(e) = send_res
+                                && !e.is_closed()
+                            {
+                                warn!("failed to send LoadObject response: {}", e);
                             }
-                        }
+                        });
                     }
                     LoaderRequest::Config { config, responder } => {
                         match parse_config_string(&lib_dirs, &config) {
                             Ok(new_search_path) => {
-                                search_dirs = new_search_path;
+                                search_dirs = Arc::new(new_search_path);
                                 responder.send(zx::sys::ZX_OK)?;
                             }
                             Err(e) => {
@@ -84,9 +94,12 @@ pub fn start_with_multiple_dirs(lib_dirs: Vec<fio::DirectoryProxy>, chan: zx::Ch
             }
             Ok(())
         }
-        .unwrap_or_else(|e: Error| warn!("couldn't run library loader service: {}", e)),
-    )
-    .detach();
+        .await;
+        scope.join().await;
+        if let Err(e) = res {
+            warn!("couldn't run library loader service: {}", e);
+        }
+    });
 }
 
 /// load_vmo will attempt to open the provided name in `dir` and return an executable VMO
@@ -149,6 +162,24 @@ pub fn parse_config_string(
 mod tests {
     use super::*;
     use fidl_fuchsia_ldsvc::LoaderMarker;
+    use futures::{FutureExt, StreamExt};
+
+    async fn serve_vmo(object: zx::Channel, content: &[u8]) {
+        let mut stream = fidl::endpoints::ServerEnd::<fio::FileMarker>::new(object).into_stream();
+        let Some(Ok(fio::FileRequest::GetBackingMemory { responder, .. })) = stream.next().await
+        else {
+            panic!("expected GetBackingMemory");
+        };
+        let vmo = zx::Vmo::create(content.len() as u64).unwrap();
+        vmo.write(content, 0).unwrap();
+        responder.send(Ok(vmo)).unwrap();
+    }
+
+    fn assert_loaded((rv, vmo): (i32, Option<zx::Vmo>), expected: &[u8]) {
+        assert_eq!(rv, zx::sys::ZX_OK);
+        let bytes = vmo.expect("missing vmo").read_to_vec::<u8>(0, expected.len() as u64).unwrap();
+        assert_eq!(bytes, expected);
+    }
 
     #[fuchsia::test]
     async fn load_objects_test() -> Result<(), Error> {
@@ -299,6 +330,82 @@ mod tests {
                 assert!(o_vmo.is_none());
             }
         }
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn concurrent_load_objects_test() -> Result<(), Error> {
+        let pkg_lib_1 = fuchsia_fs::directory::open_in_namespace(
+            "/pkg/lib/config_test/",
+            fuchsia_fs::PERM_READABLE | fuchsia_fs::PERM_EXECUTABLE,
+        )?;
+        let pkg_lib_2 = fuchsia_fs::directory::open_in_namespace(
+            "/pkg/lib/config_test/bar",
+            fuchsia_fs::PERM_READABLE | fuchsia_fs::PERM_EXECUTABLE,
+        )?;
+
+        let (loader_proxy, loader_service) = fidl::endpoints::create_proxy::<LoaderMarker>();
+        start_with_multiple_dirs(vec![pkg_lib_1, pkg_lib_2], loader_service.into_channel());
+
+        let queries = vec![
+            ("foo", Some("hippos")),
+            ("baz", Some("rule")),
+            ("bar", None),
+            ("missing", None),
+            ("foo", Some("hippos")),
+            ("baz", Some("rule")),
+        ];
+        let futs = queries.iter().map(|(name, _)| loader_proxy.load_object(name));
+        let results = futures::future::try_join_all(futs).await?;
+
+        for ((name, expected), (res, o_vmo)) in queries.into_iter().zip(results) {
+            if let Some(expected_contents) = expected {
+                assert_eq!(zx::sys::ZX_OK, res, "loading {name} did not succeed");
+                let vmo = o_vmo.ok_or_else(|| format_err!("missing vmo for {name}"))?;
+                let mut buf = vec![0; expected_contents.len()];
+                vmo.read(&mut buf, 0)?;
+                assert_eq!(expected_contents.as_bytes(), buf.as_slice());
+            } else {
+                assert_ne!(zx::sys::ZX_OK, res, "loading {name} did not fail");
+                assert!(o_vmo.is_none());
+            }
+        }
+
+        // Also verify out-of-order completion when an earlier request stalls in GetBackingMemory:
+        // request 2 ("fast.so") must be able to arrive and complete while request 1 ("slow.so")
+        // is still waiting on the backing directory/file server.
+        let (dir_proxy, mut dir_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fio::DirectoryMarker>();
+        let (mock_loader, mock_loader_server) = fidl::endpoints::create_proxy::<LoaderMarker>();
+        start(dir_proxy, mock_loader_server.into_channel());
+
+        let mut slow_fut = mock_loader.load_object("slow.so");
+        let fast_fut = mock_loader.load_object("fast.so");
+
+        // First Open request must be "slow.so"; hold its GetBackingMemory pending.
+        let Some(Ok(fio::DirectoryRequest::Open { path: slow_path, object: slow_obj, .. })) =
+            dir_stream.next().await
+        else {
+            panic!("expected first Open request for slow.so");
+        };
+        assert_eq!(slow_path, "slow.so");
+
+        // Second Open request ("fast.so") must arrive concurrently before slow.so finishes.
+        let Some(Ok(fio::DirectoryRequest::Open { path: fast_path, object: fast_obj, .. })) =
+            dir_stream.next().await
+        else {
+            panic!("expected concurrent second Open request for fast.so");
+        };
+        assert_eq!(fast_path, "fast.so");
+
+        serve_vmo(fast_obj, b"fast").await;
+        assert_loaded(fast_fut.await?, b"fast");
+        assert!((&mut slow_fut).now_or_never().is_none());
+
+        // Now answer slow.so and verify it completes cleanly too.
+        serve_vmo(slow_obj, b"slow").await;
+        assert_loaded(slow_fut.await?, b"slow");
+
         Ok(())
     }
 }

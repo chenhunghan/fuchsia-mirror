@@ -1,0 +1,281 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":protocol_test",
+        ":schema_golden_check",
+        ":session_test",
+        ":test_attach_detach_schemas",
+        ":test_breakpoint_schemas",
+        ":test_evaluate_and_console_schemas",
+        ":test_event_and_state_schemas",
+        ":test_execution_schemas",
+        ":test_lifecycle_schemas",
+        ":test_process_inspection_schemas",
+        ":test_stack_schemas",
+        ":test_tracepoint_schemas",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# Enable mypy for the dual-built GN target so GN consumers (cli_lib,
+# daemon_lib, daemon_manager, and GN host tests) that run mypy still receive
+# type information.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "protocol_lib",
+    srcs = [
+        "__init__.py",
+        "protocol/__init__.py",
+        "protocol/aspace.py",
+        "protocol/async_backtrace.py",
+        "protocol/attach.py",
+        "protocol/base.py",
+        "protocol/break_request.py",
+        "protocol/console.py",
+        "protocol/continue_request.py",
+        "protocol/detach.py",
+        "protocol/diagnose_hang.py",
+        "protocol/driver_list.py",
+        "protocol/evaluate.py",
+        "protocol/finish.py",
+        "protocol/get_state.py",
+        "protocol/handles.py",
+        "protocol/hello.py",
+        "protocol/mem_read.py",
+        "protocol/modules.py",
+        "protocol/next_request.py",
+        "protocol/pause.py",
+        "protocol/stack_trace.py",
+        "protocol/start.py",
+        "protocol/step_in.py",
+        "protocol/stop.py",
+        "protocol/threads.py",
+        "protocol/tracepoint.py",
+        "protocol/variables.py",
+        "protocol/wait_for_event.py",
+        "protocol/watch_request.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/debug/zxdb_cli/cli:__pkg__",
+        "//scripts/debug/zxdb_cli/daemon:__pkg__",
+        "//scripts/debug/zxdb_cli/daemon_manager:__pkg__",
+    ],
+    deps = [
+        "//src/lib/debug/dap/python:lib",
+        "//src/lib/debug/dap/python/zxdb:zxdb_dap",
+        "//third_party/pylibs/pydantic",
+    ],
+)
+
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "session_lib",
+    srcs = [
+        "__init__.py",
+        "session.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/debug/zxdb_cli/cli:__pkg__",
+        "//scripts/debug/zxdb_cli/daemon:__pkg__",
+        "//scripts/debug/zxdb_cli/daemon_manager:__pkg__",
+        "//scripts/debug/zxdb_cli/tests:__pkg__",
+    ],
+)
+
+py_library(
+    name = "test_helpers",
+    testonly = True,
+    srcs = [
+        "tests/__init__.py",
+        "tests/helpers.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":protocol_lib"],
+)
+
+# In Bazel, unlike GN, Python binaries are not zipped, so pydantic_core's
+# DSO stays in runfiles via //third_party/pylibs/pydantic without a
+# separate test_data target. Original GN comment:
+# Explicitly depend on pydantic-core's test_data. This is to ensure that the
+# module's DSO is bundled together with our test so the top-level pydantic
+# module loads correctly.
+host_py_test(
+    name = "protocol_test",
+    testonly = True,
+    srcs = ["tests/test_protocol.py"],
+    main = "tests/test_protocol.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "session_test",
+    testonly = True,
+    srcs = ["tests/test_session.py"],
+    main = "tests/test_session.py",
+    deps = [":session_lib"],
+)
+
+host_py_test(
+    name = "test_attach_detach_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_attach_detach_schemas.py"],
+    main = "protocol/tests/test_attach_detach_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_breakpoint_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_breakpoint_schemas.py"],
+    main = "protocol/tests/test_breakpoint_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_evaluate_and_console_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_evaluate_and_console_schemas.py"],
+    main = "protocol/tests/test_evaluate_and_console_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_event_and_state_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_event_and_state_schemas.py"],
+    main = "protocol/tests/test_event_and_state_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_execution_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_execution_schemas.py"],
+    main = "protocol/tests/test_execution_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_lifecycle_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_lifecycle_schemas.py"],
+    main = "protocol/tests/test_lifecycle_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_process_inspection_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_process_inspection_schemas.py"],
+    main = "protocol/tests/test_process_inspection_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_stack_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_stack_schemas.py"],
+    main = "protocol/tests/test_stack_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_tracepoint_schemas",
+    testonly = True,
+    srcs = ["protocol/tests/test_tracepoint_schemas.py"],
+    main = "protocol/tests/test_tracepoint_schemas.py",
+    deps = [
+        ":protocol_lib",
+        ":test_helpers",
+    ],
+)
+
+# Bazel-only entrypoint wrapper: generate_schema.py defines main() without an
+# `if __name__ == "__main__"` block (GN python_binary invokes main_callable).
+# @bazel2gn:skip
+write_file(
+    name = "generate_schema_main",
+    out = "generate_schema_main.py",
+    content = [
+        "import sys",
+        "from shared.generate_schema import main",
+        "sys.exit(main())",
+    ],
+)
+
+# Bazel-only helper binary for :generate_schema; uses py_binary instead of
+# py_zipapp_binary because pydantic_core requires its native DSO in runfiles.
+# @bazel2gn:skip
+py_binary(
+    name = "generate_schema_bin",
+    srcs = [
+        "generate_schema.py",
+        ":generate_schema_main",
+    ],
+    main = "generate_schema_main.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":protocol_lib"],
+)
+
+# @bazel2gn:skip
+genrule(
+    name = "generate_schema",
+    outs = ["schema.json"],
+    cmd = "$(execpath :generate_schema_bin) --output $@",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tools = [":generate_schema_bin"],
+)
+
+# @bazel2gn:skip
+golden_test(
+    name = "schema_golden_check",
+    goldens = {
+        "//scripts:debug/zxdb_cli/schema.json": ":generate_schema",
+    },
+)

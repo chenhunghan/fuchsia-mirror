@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fdf-resource-vote-rust-unittests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+rustc_library(
+    name = "rust",
+    srcs = [
+        "src/lib.rs",
+    ],
+    crate_name = "fdf_resource_vote",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "fdf_resource_vote_test",
+    crate = ":rust",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+    ],
+)
+
+fx_unittest_package(
+    name = "fdf-resource-vote-rust-unittests",
+    unit_tests = [":fdf_resource_vote_test"],
+)

@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        ":echo-service-rust-next",
+        "//examples/fidl/rust_next/client:echo-client",
+        "//examples/fidl/rust_next/request_pipelining:all",
+        "//examples/fidl/rust_next/server:echo-server",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)
+
+# //docs/development/languages/fidl/tutorials/rust/topics/services.md
+fx_package(
+    name = "echo-service-rust-next",
+    components = [
+        "//examples/fidl/echo-realm:echo_realm",
+        "//examples/fidl/rust_next/services/client:echo-client",
+        "//examples/fidl/rust_next/services/server:echo-server",
+    ],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        "//examples/fidl/rust_next/services/server:echo-server-rust-next-unittests",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)

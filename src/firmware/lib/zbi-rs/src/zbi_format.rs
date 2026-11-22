@@ -235,7 +235,7 @@ pub const ZBI_KERNEL_DRIVER_RISCV_GENERIC_TIMER: zbi_kernel_driver_t = 129665134
 pub const ZBI_KERNEL_DRIVER_PXA_UART: zbi_kernel_driver_t = 1347961173;
 pub const ZBI_KERNEL_DRIVER_EXYNOS_USI_UART: zbi_kernel_driver_t = 1163417941;
 pub const ZBI_KERNEL_DRIVER_QCOM_RNG: zbi_kernel_driver_t = 1196315217;
-pub const ZBI_KERNEL_DRIVER_ARM_SMMU: zbi_kernel_driver_t = 1431129425;
+pub const ZBI_KERNEL_DRIVER_ARM_SMMU_V2: zbi_kernel_driver_t = 1431129425;
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, PartialEq, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct zbi_dcfg_simple_t {

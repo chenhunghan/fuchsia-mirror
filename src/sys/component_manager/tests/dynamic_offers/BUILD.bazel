@@ -15,7 +15,6 @@ package(default_applicable_licenses = ["//:license"])
 rustc_test(
     name = "dynamic_offers_bin",
     srcs = ["integration_test.rs"],
-    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
     crate_name = "dynamic_offers",
     crate_root = "integration_test.rs",
     edition = "2024",
@@ -28,7 +27,7 @@ rustc_test(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/sys/lib/cm_rust",
         "//src/sys/lib/cm_types",

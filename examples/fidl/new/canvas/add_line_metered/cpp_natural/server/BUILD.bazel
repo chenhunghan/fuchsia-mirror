@@ -6,11 +6,6 @@ load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 
 package(default_applicable_licenses = ["//:license"])
 
-# GN puts the binary in a per-target directory so the `server_bin` outputs
-# of the sibling canvas examples do not collide.
-# TODO(https://fxbug.dev/570694755): fx_cc_binary does not have an
-# output_dir attribute.
-# @bazel2gn:raw_attribute:output_dir = target_out_dir + "/cpp_natural"
 fx_cc_binary(
     name = "bin",
     srcs = ["main.cc"],
@@ -19,7 +14,6 @@ fx_cc_binary(
     # Bazel defaults to `-iquote .`.
     # TODO(https://fxbug.dev/570694755): Replace angled `src/lib/fxl` includes
     # in `main.cc` with quoted includes in a source cleanup CL.
-    # @bazel2gn:skip
     copts = ["-I."],
     gn_output_name = "server_bin",
     visibility = ["//examples/fidl/new/canvas/add_line_metered/cpp_natural:__pkg__"],

@@ -179,6 +179,7 @@ if (is_fuchsia) {
              "//third_party/rust_crates:thiserror",
            ] + [
              "//src/connectivity/bluetooth/lib/async-helpers:async-test-helpers",
+             "//src/connectivity/bluetooth/lib/profile-client:test-profile-server",
              "//src/connectivity/bluetooth/testing/bt-channel-test-support",
              "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
              "//third_party/rust_crates:assert_matches",

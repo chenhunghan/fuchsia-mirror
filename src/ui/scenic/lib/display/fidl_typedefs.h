@@ -21,6 +21,7 @@ using WireDisplayId = fuchsia_hardware_display_types::wire::DisplayId;
 using WireDisplayInfo = fuchsia_hardware_display::wire::Info;
 using WireDisplayMode = fuchsia_hardware_display_types::wire::Mode;
 using WireEventId = fuchsia_hardware_display::wire::EventId;
+using WireImageBufferUsage = fuchsia_hardware_display_types::wire::ImageBufferUsage;
 using WireImageId = fuchsia_hardware_display::wire::ImageId;
 using WireImageMetadata = fuchsia_hardware_display_types::wire::ImageMetadata;
 using WireLayerId = fuchsia_hardware_display::wire::LayerId;

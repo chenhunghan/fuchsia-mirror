@@ -1,0 +1,142 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":tun-socket-benchmarks-tests-netstack3_test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_binary(
+    name = "tun_socket_benchmarks",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
+        "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_rust",
+        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+        "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_rust",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_net_routes_ext",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/performance/lib/fuchsiaperf",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:socket2",
+    ],
+)
+
+fx_packaged_binary(
+    name = "tun_socket_benchmarks_packaged",
+    testonly = True,
+    binary = ":tun_socket_benchmarks",
+    binary_name = "tun_socket_benchmarks",
+)
+
+cml_shard(
+    name = "meta/common.shard",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/connectivity/network/tests/integration/common:client.shard",
+        "//src/connectivity/network/tun/network-tun:meta/network-tun-test.shard",
+    ],
+    shard = "meta/common.shard.cml",
+)
+
+cml_shard(
+    name = "meta/tracing.shard",
+    includes = [
+        ":meta/common.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    shard = "meta/tracing.shard.cml",
+)
+
+fx_component_manifest(
+    name = "tun-socket-benchmarks-netstack3_manifest",
+    testonly = True,
+    component_name = "tun-socket-benchmarks-netstack3",
+    includes = [":meta/common.shard"],
+    manifest = "meta/tun-socket-benchmarks-ns3.cml",
+)
+
+fx_test_component(
+    name = "tun-socket-benchmarks-netstack3",
+    compiled_manifest = ":tun-socket-benchmarks-netstack3_manifest",
+    deps = [
+        ":tun_socket_benchmarks_packaged",
+        "//src/sys/stash:stash_secure_v2",
+    ],
+)
+
+fx_component_manifest(
+    name = "tun-socket-benchmarks-netstack3-with-tracing_manifest",
+    testonly = True,
+    component_name = "tun-socket-benchmarks-netstack3-with-tracing",
+    includes = [":meta/tracing.shard"],
+    manifest = "meta/tun-socket-benchmarks-ns3-with-tracing.cml",
+)
+
+fx_test_component(
+    name = "tun-socket-benchmarks-netstack3-with-tracing",
+    compiled_manifest = ":tun-socket-benchmarks-netstack3-with-tracing_manifest",
+    test_type = "system",
+    deps = [
+        ":tun_socket_benchmarks_packaged",
+        "//src/sys/stash:stash_secure_v2",
+    ],
+)
+
+# LINT.IfChange
+fx_package(
+    name = "tun-socket-benchmarks-tests-netstack3",
+    testonly = True,
+    subpackages = [
+        "//src/connectivity/network/netstack3:package-for-tests",
+        "//src/connectivity/network/testing/netemul/service:package",
+        "//src/connectivity/network/tun/network-tun",
+    ],
+    test_components = [
+        ":tun-socket-benchmarks-netstack3",
+        ":tun-socket-benchmarks-netstack3-with-tracing",
+    ],
+)
+
+# LINT.ThenChange(BUILD.gn)
+
+fx_test(
+    name = "tun-socket-benchmarks-tests-netstack3_test",
+    package = ":tun-socket-benchmarks-tests-netstack3",
+)

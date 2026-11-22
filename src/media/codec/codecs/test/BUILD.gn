@@ -10,6 +10,7 @@ group("test") {
   deps = [
     ":chunk_input_stream_tests",
     ":codec_adapter_aac_test",
+    ":codec_adapter_cvsd_test",
     ":codec_adapter_lc3_test",
     ":codec_adapter_sbc_test",
     ":codec_adapter_sw_test",
@@ -33,6 +34,23 @@ cc_test_executable("codec_adapter_aac_test_bin") {
 
 fuchsia_unittest_package("codec_adapter_aac_test") {
   deps = [ ":codec_adapter_aac_test_bin" ]
+}
+
+cc_test_executable("codec_adapter_cvsd_test_bin") {
+  output_name = "codec_adapter_cvsd_test"
+  testonly = true
+
+  sources = [ "codec_adapter_cvsd_test.cc" ]
+
+  deps = [
+    ":test_fake_codec_adapter_events",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/media/codec/codecs/sw/cvsd:codec_adapter_cvsd",
+  ]
+}
+
+fuchsia_unittest_package("codec_adapter_cvsd_test") {
+  deps = [ ":codec_adapter_cvsd_test_bin" ]
 }
 
 cc_test_executable("codec_adapter_lc3_test_bin") {
@@ -103,7 +121,7 @@ source_set("test_fake_codec_adapter_events") {
   testonly = true
   public = [ "test_fake_codec_adapter_events.h" ]
   public_deps = [
-    "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
     "//src/media/lib/codec_impl",
   ]
 }

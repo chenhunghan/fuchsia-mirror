@@ -22,6 +22,11 @@ class OobDoubler {
   void Query(nand_info_t* info_out, size_t* nand_op_size_out);
   void Queue(nand_operation_t* operation, nand_queue_callback completion_cb, void* cookie);
 
+  // Returns true if pages are being doubled, which means that every page read or written through
+  // this object results in two pages being read or written on the parent device. Only meaningful
+  // after calling Query().
+  bool active() const { return active_; }
+
  private:
   ddk::NandProtocolClient parent_;
   bool active_ = false;

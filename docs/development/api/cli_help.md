@@ -147,7 +147,7 @@ Arguments are enclosed in angle brackets (<>) to differentiate them from
 explicit text. In the example `Usage: copy <from> <destination>`, both `<from>`
 and `<destination>` are arguments. If an argument is optional, it will be
 enclosed in brackets (`[]`) such as: `Usage: copy <from> [<destination>]`. See
-also [Option Delimiter](./cli.md#option_delimiter).
+also [Option Delimiter](./cli.md).
 
 ##### Mutually exclusive option syntax
 

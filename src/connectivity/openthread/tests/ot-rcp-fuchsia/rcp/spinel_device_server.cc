@@ -62,15 +62,19 @@ class SpinelDeviceServer::DeviceConnection : public fidl::Server<fspinel::Device
   fidl::ServerBinding<fspinel::Device> binding_;
 };
 
-SpinelDeviceServer::SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id)
-    : SpinelDeviceServer(dispatcher, node_id, FlowControl{}) {}
+SpinelDeviceServer::SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id,
+                                       std::unique_ptr<RadioMedium> radio_medium)
+    : SpinelDeviceServer(dispatcher, node_id, FlowControl{}, std::move(radio_medium)) {}
 
 SpinelDeviceServer::SpinelDeviceServer(async_dispatcher_t* dispatcher, uint32_t node_id,
-                                       FlowControl flow_control)
+                                       FlowControl flow_control,
+                                       std::unique_ptr<RadioMedium> radio_medium)
     : dispatcher_(dispatcher),
       flow_control_(flow_control),
-      rcp_(dispatcher, node_id,
-           [this](const uint8_t* frame, uint16_t length) { return RcpToHost(frame, length); }) {
+      rcp_(
+          dispatcher, node_id,
+          [this](const uint8_t* frame, uint16_t length) { return RcpToHost(frame, length); },
+          std::move(radio_medium)) {
   ZX_ASSERT_MSG(flow_control_.radiobound_credit_inc > 0, "radiobound_credit_inc must be non-zero");
 }
 

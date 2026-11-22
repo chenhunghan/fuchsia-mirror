@@ -22,16 +22,22 @@
 #[unittest::suite]
 /// Tests for Rust ksync bindings
 mod ksync_tests {
+    use crate::kernel::brwlock::{BrwLock, BrwLockEnablePi};
     use crate::kernel::mutex::Mutex;
+    use crate::kernel::spin_tracing::{
+        IdStringRef, LockNameStorageOps, MUTEX_NAME_TRACING_ENABLED, MutexNameStorage,
+        RWLOCK_NAME_TRACING_ENABLED, RwLockNameStorage,
+    };
     use crate::kernel::spinlock::{MonitoredSpinLock, SpinLock};
     use crate::ksync_kernel::{
         CriticalMutexOrderedPolicy, CriticalMutexPolicy, IrqSavePolicy, MutexSpinMaxDurationPolicy,
-        NoIrqSavePolicy, RawBrwLockNoPi, RawBrwLockPi, TrackedCriticalMutex,
+        NoIrqSavePolicy, TrackedBrwLockNoPi, TrackedBrwLockPi, TrackedCriticalMutex,
         TrackedMonitoredSpinlock, TrackedMutex, TrackedSpinlock, TryAcquireResult,
-        declare_singleton_critical_mutex, declare_singleton_monitored_spinlock,
-        declare_singleton_mutex, declare_singleton_spinlock,
+        declare_singleton_monitored_spinlock, declare_singleton_spinlock,
     };
+    use core::pin::Pin;
     use kprint::kprintln;
+    use lazy_init::{LazyInit, NoCheck};
     use pin_init::{pin_data, pin_init, stack_pin_init};
     use unittest::{assert_true, expect_eq, expect_true};
 
@@ -122,7 +128,7 @@ mod ksync_tests {
     #[ksync::guarded]
     struct GuardedBrwLockObj {
         #[brwlock]
-        lock: ksync::BrwLockPi<RawBrwLockPi>,
+        lock: ksync::BrwLockPi<TrackedBrwLockPi>,
         #[guarded_by(lock)]
         value: u32,
     }
@@ -130,7 +136,7 @@ mod ksync_tests {
     #[ksync::guarded]
     struct GuardedBrwLockNoPiObj {
         #[brwlock]
-        lock: ksync::BrwLockPi<RawBrwLockNoPi>,
+        lock: ksync::BrwLockPi<TrackedBrwLockNoPi>,
         #[guarded_by(lock)]
         value: u32,
     }
@@ -138,7 +144,7 @@ mod ksync_tests {
     #[ksync::guarded]
     struct GuardedBrwLockMultiAcquireObj {
         #[brwlock(flags = lockdep::LOCK_FLAGS_MULTI_ACQUIRE)]
-        lock: ksync::BrwLockPi<RawBrwLockPi>,
+        lock: ksync::BrwLockPi<TrackedBrwLockPi>,
         #[guarded_by(lock)]
         value: u32,
     }
@@ -196,14 +202,6 @@ mod ksync_tests {
             lock: *const core::ffi::c_void,
             expected_id: *const core::ffi::c_void,
         ) -> bool;
-        fn cpp_verify_brwlock_id(
-            lock: *const core::ffi::c_void,
-            expected_id: *const core::ffi::c_void,
-        ) -> bool;
-        fn cpp_verify_brwlock_no_pi_id(
-            lock: *const core::ffi::c_void,
-            expected_id: *const core::ffi::c_void,
-        ) -> bool;
 
         fn cpp_get_test_singleton_mutex_size() -> usize;
         fn cpp_get_test_singleton_mutex_raw_lock_ptr() -> *const core::ffi::c_void;
@@ -244,14 +242,37 @@ mod ksync_tests {
 
         unsafe fn reacquire(lock: &TrackedCriticalMutex, state: &mut Self::GuardState) {
             // Reset `state` after the preceding `release` so that it satisfies `acquire`'s
-            // precondition of a freshly `Default`-initialized `GuardState` on the same pinned
+            // precondition of a freshly `Default`-initialized `GuardState` in the same pinned
             // slot. Deliberately reacquiring at order 0 instead of `state.order` is what this
             // policy tests; it only affects lockdep validation, not mutual exclusion.
             *state = Self::GuardState::default();
-            // SAFETY: `state` is freshly `Default`-initialized and remains pinned on the stack
-            // until the matching `release` call per `LockPolicy::reacquire`'s contract.
+            // SAFETY: `state` is freshly `Default`-initialized and remains pinned in place until
+            // the matching `release` (or `move_state`) call per `LockPolicy::reacquire`'s contract.
             unsafe {
                 <CriticalMutexOrderedPolicy as ksync::LockPolicy<_>>::acquire(lock, state, 0);
+            }
+        }
+
+        unsafe fn untrack(lock: &TrackedCriticalMutex, state: &mut Self::GuardState) {
+            // SAFETY: Caller upholds `LockPolicy::untrack`'s contract.
+            unsafe {
+                <CriticalMutexOrderedPolicy as ksync::LockPolicy<_>>::untrack(lock, state);
+            }
+        }
+
+        unsafe fn retrack(lock: &TrackedCriticalMutex, state: &mut Self::GuardState) {
+            // SAFETY: Caller upholds `LockPolicy::retrack`'s contract.
+            unsafe {
+                <CriticalMutexOrderedPolicy as ksync::LockPolicy<_>>::retrack(lock, state);
+            }
+        }
+
+        unsafe fn move_state(src: &mut Self::GuardState, dst: &mut Self::GuardState) {
+            // SAFETY: Caller upholds `LockPolicy::move_state`'s contract.
+            unsafe {
+                <CriticalMutexOrderedPolicy as ksync::LockPolicy<TrackedCriticalMutex>>::move_state(
+                    src, dst,
+                );
             }
         }
 
@@ -260,6 +281,18 @@ mod ksync_tests {
             // policy's `acquire`/`reacquire`, which produce `CriticalMutexOrderedPolicy` state.
             unsafe {
                 <CriticalMutexOrderedPolicy as ksync::LockPolicy<_>>::release(lock, state);
+            }
+        }
+
+        unsafe fn release_raw(
+            lock: core::ptr::NonNull<TrackedCriticalMutex>,
+            state: &mut Self::GuardState,
+        ) {
+            // SAFETY: The caller upholds `LockPolicy::release_raw`'s contract as documented by
+            // `CriticalMutexOrderedPolicy`; `state` is as for `release`. Forwarding by pointer
+            // keeps this wrapper from borrowing the lock across the release.
+            unsafe {
+                <CriticalMutexOrderedPolicy as ksync::LockPolicy<_>>::release_raw(lock, state);
             }
         }
     }
@@ -276,6 +309,7 @@ mod ksync_tests {
             value: 0.into(),
         })
         .unwrap();
+        expect_true!(verify_mutex_name::<GuardedMutexObjMuClass>(obj.mu.raw_mutex()));
         // SAFETY: `obj.mu` is an initialized `KMutex`.
         unsafe {
             assert_true!(cpp_verify_mutex_id(
@@ -292,6 +326,7 @@ mod ksync_tests {
             mu <- ksync::KMutex::init(),
             value: 0.into(),
         }));
+        expect_true!(verify_mutex_name::<GuardedCriticalMutexObjMuClass>(obj.mu.raw_mutex()));
         // SAFETY: `obj.mu` is an initialized `KMutex<_, TrackedCriticalMutex>`.
         unsafe {
             assert_true!(cpp_verify_critical_mutex_id(
@@ -508,32 +543,61 @@ mod ksync_tests {
         }
     }
 
-    /// test Rust BrwLockPi and RawBrwLockNoPi IDs
+    /// Returns the lock class name that lock tracing records for a lock of the class `C` using
+    /// `S`.
+    fn expected_class_name_ref<C: ksync::LockClass, S: LockNameStorageOps + Default>() -> IdStringRef
+    {
+        let mut name_storage = S::default();
+        // SAFETY: `C::ID` is either null or a valid static `LockClassId` (`*const LockClassState`),
+        // whose `#[repr(C)]` first field at offset 0 is a null or `'static InternedString` pointer
+        // in `__fxt_interned_string_table`, and all `rust_lock_classes` constructors have run
+        // before any test executes.
+        unsafe { name_storage.set_lock_class::<C>() };
+        name_storage.class_name_ref()
+    }
+
+    /// Returns whether `lock` was initialized with the lockdep lock class ID of `C` (when lock
+    /// class metadata is compiled in).
+    fn verify_brwlock_id<C: ksync::LockClass, P: BrwLockEnablePi>(
+        lock: &ksync::LockdepTracked<BrwLock<P>>,
+    ) -> bool {
+        lock.class_id().is_none_or(|class_id| class_id == C::ID)
+    }
+
+    /// Returns whether `lock` was assigned a lock ID and the lock class name of `C` for lock
+    /// tracing (when enabled).
+    fn verify_brwlock_name<C: ksync::LockClass, P: BrwLockEnablePi>(lock: &BrwLock<P>) -> bool {
+        lock.class_name_ref() == expected_class_name_ref::<C, RwLockNameStorage>()
+            && (!RWLOCK_NAME_TRACING_ENABLED || lock.encoded_lock_id().id() != 0)
+    }
+
+    /// Returns whether `lock` was assigned a lock ID and the lock class name of `C` for lock
+    /// tracing (when enabled).
+    fn verify_mutex_name<C: ksync::LockClass>(lock: &Mutex) -> bool {
+        lock.class_name_ref() == expected_class_name_ref::<C, MutexNameStorage>()
+            && (!MUTEX_NAME_TRACING_ENABLED || lock.encoded_lock_id().id() != 0)
+    }
+
+    /// test Rust BrwLockPi with TrackedBrwLockPi and TrackedBrwLockNoPi IDs
     #[test]
     fn brwlock_id() {
         stack_pin_init!(let obj = pin_init!(GuardedBrwLockObj {
             lock <- ksync::BrwLockPi::init(),
             value: 0.into(),
         }));
-        // SAFETY: `obj.lock` is an initialized `BrwLockPi`.
-        unsafe {
-            assert_true!(cpp_verify_brwlock_id(
-                (&raw const obj.lock).cast::<core::ffi::c_void>(),
-                <GuardedBrwLockObjLockClass as ksync::LockClass>::ID,
-            ));
-        }
+        expect_true!(verify_brwlock_id::<GuardedBrwLockObjLockClass, _>(obj.lock.raw_lock()));
+        expect_true!(verify_brwlock_name::<GuardedBrwLockObjLockClass, _>(&**obj.lock.raw_lock()));
 
         stack_pin_init!(let no_pi_obj = pin_init!(GuardedBrwLockNoPiObj {
             lock <- ksync::BrwLockPi::init(),
             value: 0.into(),
         }));
-        // SAFETY: `no_pi_obj.lock` is an initialized `BrwLockPi<_, RawBrwLockNoPi>`.
-        unsafe {
-            assert_true!(cpp_verify_brwlock_no_pi_id(
-                (&raw const no_pi_obj.lock).cast::<core::ffi::c_void>(),
-                <GuardedBrwLockNoPiObjLockClass as ksync::LockClass>::ID,
-            ));
-        }
+        expect_true!(verify_brwlock_id::<GuardedBrwLockNoPiObjLockClass, _>(
+            no_pi_obj.lock.raw_lock()
+        ));
+        expect_true!(verify_brwlock_name::<GuardedBrwLockNoPiObjLockClass, _>(
+            &**no_pi_obj.lock.raw_lock()
+        ));
     }
 
     /// test Rust KSpinlock
@@ -1000,7 +1064,7 @@ mod ksync_tests {
         }
     }
 
-    /// test Rust BrwLockPi with RawBrwLockPi and RawBrwLockNoPi
+    /// test Rust BrwLockPi with TrackedBrwLockPi and TrackedBrwLockNoPi
     #[test]
     fn brwlock() {
         stack_pin_init!(let obj = pin_init!(GuardedBrwLockObj {
@@ -1140,27 +1204,68 @@ mod ksync_tests {
         expect_eq!(*guard.seek(), 4096);
     }
 
-    declare_singleton_mutex!(TestKernelSingletonMutex);
-    declare_singleton_critical_mutex!(TestKernelSingletonCriticalMutex);
+    #[ksync::guarded]
+    struct TestKernelSingletonMutex {
+        #[mutex]
+        lock: ksync::KMutex<TrackedMutex>,
+    }
+
+    #[ksync::guarded]
+    struct TestKernelSingletonCriticalMutex {
+        #[mutex]
+        lock: ksync::KMutex<TrackedCriticalMutex>,
+    }
+
+    static TEST_KERNEL_SINGLETON_MUTEX: LazyInit<TestKernelSingletonMutex, NoCheck> =
+        LazyInit::uninit();
+    static TEST_KERNEL_SINGLETON_CRITICAL_MUTEX: LazyInit<
+        TestKernelSingletonCriticalMutex,
+        NoCheck,
+    > = LazyInit::uninit();
     declare_singleton_spinlock!(TestKernelSingletonSpinlock);
 
-    /// test Rust declare_singleton_mutex and declare_singleton_critical_mutex
+    fn ksync_tests_singleton_init(_level: init::LkInitLevel) {
+        // SAFETY: lk init hooks run once during single-threaded early boot before any test runs.
+        unsafe {
+            let Ok(()) = Pin::static_ref(&TEST_KERNEL_SINGLETON_MUTEX)
+                .init_pin(pin_init!(TestKernelSingletonMutex { lock <- ksync::KMutex::init() }));
+            let Ok(()) = Pin::static_ref(&TEST_KERNEL_SINGLETON_CRITICAL_MUTEX).init_pin(
+                pin_init!(TestKernelSingletonCriticalMutex { lock <- ksync::KMutex::init() }),
+            );
+        }
+    }
+    init::lk_init_hook!(
+        ksync_tests_singleton,
+        ksync_tests_singleton_init,
+        init::LK_INIT_LEVEL_EARLIEST
+    );
+
+    /// test Rust singleton mutex and critical mutex
     #[test]
     fn singleton_mutex() {
-        let lock1 = TestKernelSingletonMutex::Get();
-        let lock2 = TestKernelSingletonMutex::get();
-        expect_true!(core::ptr::eq(lock1, lock2));
+        // SAFETY: Initialized by `ksync_tests_singleton_init` at `LK_INIT_LEVEL_EARLIEST`.
+        let singleton_mutex = unsafe { TEST_KERNEL_SINGLETON_MUTEX.get_unchecked() };
+        // SAFETY: Initialized by `ksync_tests_singleton_init` at `LK_INIT_LEVEL_EARLIEST`.
+        let singleton_critical_mutex =
+            unsafe { TEST_KERNEL_SINGLETON_CRITICAL_MUTEX.get_unchecked() };
+
+        expect_true!(verify_mutex_name::<TestKernelSingletonMutexLockClass>(
+            singleton_mutex.lock.raw_mutex(),
+        ));
+        expect_true!(verify_mutex_name::<TestKernelSingletonCriticalMutexLockClass>(
+            singleton_critical_mutex.lock.raw_mutex(),
+        ));
 
         // SAFETY: All singleton locks and C++ test helper pointers/sizes are valid static objects.
         // The singleton locks are not acquired or released while their raw storage is compared.
         unsafe {
             expect_true!(cpp_verify_mutex_id(
-                (&raw const *lock1).cast::<core::ffi::c_void>(),
-                <TestKernelSingletonMutex as ksync::LockClass>::ID,
+                (&raw const singleton_mutex.lock).cast::<core::ffi::c_void>(),
+                <TestKernelSingletonMutexLockClass as ksync::LockClass>::ID,
             ));
             expect_true!(cpp_verify_critical_mutex_id(
-                (&raw const *TestKernelSingletonCriticalMutex::Get()).cast::<core::ffi::c_void>(),
-                <TestKernelSingletonCriticalMutex as ksync::LockClass>::ID,
+                (&raw const singleton_critical_mutex.lock).cast::<core::ffi::c_void>(),
+                <TestKernelSingletonCriticalMutexLockClass as ksync::LockClass>::ID,
             ));
             expect_true!(cpp_verify_spinlock_id(
                 (&raw const *TestKernelSingletonSpinlock::Get()).cast::<core::ffi::c_void>(),
@@ -1168,22 +1273,24 @@ mod ksync_tests {
             ));
 
             // Compare total sizes of Rust-declared singletons vs C++-declared singletons.
-            let rust_mutex_size = core::mem::size_of_val(lock1);
+            let rust_mutex_size = core::mem::size_of_val(&singleton_mutex.lock);
             let cpp_mutex_size = cpp_get_test_singleton_mutex_size();
             expect_eq!(rust_mutex_size, cpp_mutex_size);
 
-            let rust_critical_size =
-                core::mem::size_of_val(TestKernelSingletonCriticalMutex::Get());
+            let rust_critical_size = core::mem::size_of_val(&singleton_critical_mutex.lock);
             let cpp_critical_size = cpp_get_test_singleton_critical_mutex_size();
             expect_eq!(rust_critical_size, cpp_critical_size);
 
-            // Compare raw mutex storage byte-by-byte between Rust and C++.
+            // Compare raw mutex storage byte-by-byte between Rust and C++ (excluding
+            // `MutexNameStorage` at the start of `Mutex`, which holds a per-instance lock ID and
+            // class name ID when `MUTEX_NAME_TRACING_ENABLED` is enabled).
+            let name_storage_size = core::mem::size_of::<MutexNameStorage>();
             let cpp_raw_ptr = cpp_get_test_singleton_mutex_raw_lock_ptr();
             let cpp_raw_size = cpp_get_test_singleton_mutex_raw_lock_size();
             let cpp_raw_bytes = core::slice::from_raw_parts(cpp_raw_ptr as *const u8, cpp_raw_size);
 
-            let rust_raw_bytes = lock1.raw_mutex().raw_storage_slice();
-            expect_true!(rust_raw_bytes == cpp_raw_bytes);
+            let rust_raw_bytes = singleton_mutex.lock.raw_mutex().raw_storage_slice();
+            expect_true!(rust_raw_bytes[name_storage_size..] == cpp_raw_bytes[name_storage_size..]);
 
             // Compare CriticalMutex raw storage byte-by-byte between Rust and C++.
             let cpp_critical_raw_ptr = cpp_get_test_singleton_critical_mutex_raw_lock_ptr();
@@ -1194,20 +1301,23 @@ mod ksync_tests {
             );
 
             let rust_critical_raw_bytes =
-                TestKernelSingletonCriticalMutex::Get().raw_mutex().raw_storage_slice();
-            expect_true!(rust_critical_raw_bytes == cpp_critical_raw_bytes);
+                singleton_critical_mutex.lock.raw_mutex().raw_storage_slice();
+            expect_true!(
+                rust_critical_raw_bytes[name_storage_size..]
+                    == cpp_critical_raw_bytes[name_storage_size..]
+            );
         }
 
         {
-            ksync::lock!(let _guard = TestKernelSingletonMutex::Get().lock());
+            ksync::lock!(let _guard = singleton_mutex.lock.lock());
         }
 
         {
-            ksync::lock!(TestKernelSingletonMutex::lock());
+            ksync::lock!(singleton_mutex.lock_lock());
         }
 
         {
-            ksync::lock!(let _guard = TestKernelSingletonCriticalMutex::Get().lock());
+            ksync::lock!(let _guard = singleton_critical_mutex.lock_lock());
         }
 
         // Verify that a singleton spinlock registers LOCK_FLAGS_IRQ_SAFE so it can be acquired
@@ -1258,9 +1368,13 @@ mod ksync_tests {
     /// test KOnceCell lazy initialization and access
     #[test]
     fn konce_cell_test() {
-        static TEST_CELL: ksync::KOnceCell<u64, TestKernelSingletonMutex> = ksync::KOnceCell::new();
-        ksync::lock!(let mut guard = TestKernelSingletonMutex::lock());
-        // SAFETY: `guard` holds the singleton lock `TestKernelSingletonMutex` guarding `TEST_CELL`.
+        static TEST_CELL: ksync::KOnceCell<u64, TestKernelSingletonMutexLockClass> =
+            ksync::KOnceCell::new();
+        // SAFETY: Initialized by `ksync_tests_singleton_init` at `LK_INIT_LEVEL_EARLIEST`.
+        let singleton_mutex = unsafe { TEST_KERNEL_SINGLETON_MUTEX.get_unchecked() };
+        ksync::lock!(let mut guard = singleton_mutex.lock_lock());
+        // SAFETY: `guard` holds the singleton lock `TEST_KERNEL_SINGLETON_MUTEX` guarding
+        // `TEST_CELL`.
         unsafe {
             let token = guard.token();
             expect_true!(!TEST_CELL.is_initialized(token));
@@ -1541,6 +1655,239 @@ mod ksync_tests {
             expect_eq!(*g.value(), 40);
             *g.as_mut().value_mut() = 41;
             expect_eq!(*g.value(), 41);
+        }
+    }
+
+    /// test pinned Adoptable and KMutexGuard adoption and move
+    #[test]
+    fn adoptable_guard_test() {
+        type MutexAdoptable<'a> = ksync::Adoptable<'a, GuardedMutexObjMuClass, TrackedMutex>;
+        type MutexGuard<'a> = ksync::KMutexGuard<'a, GuardedMutexObjMuClass, TrackedMutex>;
+        expect_eq!(
+            core::mem::size_of::<MutexAdoptable<'_>>(),
+            core::mem::size_of::<MutexGuard<'_>>()
+        );
+        expect_eq!(
+            core::mem::align_of::<MutexAdoptable<'_>>(),
+            core::mem::align_of::<MutexGuard<'_>>()
+        );
+
+        let Ok(obj) = fbl::pin_make_ref_counted!(GuardedMutexObj {
+            mu <- ksync::KMutex::init(),
+            value: 5.into(),
+        }) else {
+            assert_true!(false);
+            return false;
+        };
+
+        fn adopt_and_increment(
+            obj: &GuardedMutexObj,
+            adoptable: core::pin::Pin<&mut MutexAdoptable<'_>>,
+        ) -> (bool, bool, u32) {
+            ksync::lock!(let mut guard = obj.mu.adopt(adoptable));
+            let is_locked = guard.is_locked_by(&obj.mu);
+            let ptr_eq = guard.mutex().is_some_and(|m| core::ptr::eq(m, &obj.mu));
+            let mut tg = obj.guard_mu_mut_from_guard(guard.as_mut());
+            let prev = *tg.value();
+            *tg.reborrow().value_mut() = 6;
+
+            guard.as_mut().call_untracked(|token| {
+                // SAFETY: `token` witnesses exclusive access to `obj.mu` on `obj`.
+                *unsafe { obj.guard_mu_mut(token) }.value_mut() = 7;
+            });
+            (is_locked, ptr_eq, prev)
+        }
+
+        {
+            ksync::lock!(let mut a1 = obj.mu.lock_adoptable());
+            expect_true!(a1.is_locked_by(&obj.mu));
+            ksync::lock!(let mut a2 = ksync::Adoptable::empty());
+            expect_true!(a2.is_none());
+            a2.as_mut().move_from(a1.as_mut());
+            expect_true!(a1.is_none());
+            expect_true!(a2.is_locked_by(&obj.mu));
+
+            let (is_locked, ptr_eq, prev) = adopt_and_increment(&obj, a2.as_mut());
+            expect_true!(is_locked);
+            expect_true!(ptr_eq);
+            expect_eq!(prev, 5);
+            expect_true!(a2.is_none());
+            expect_true!(!obj.mu.raw_mutex().is_held());
+        }
+
+        // Exercise `lock_adoptable_with`, `KMutexGuard::take`, `Adoptable::take_from`,
+        // `KMutexGuard::adopt_from`, `KMutexGuard::move_from`, and `MutexSpinMaxDurationPolicy`
+        // (`call_unlocked`).
+        {
+            ksync::lock!(let guard_with = obj.mu.lock_adoptable_with(()));
+            expect_true!(guard_with.mutex().is_some_and(|m| core::ptr::eq(m, &obj.mu)));
+        }
+        {
+            ksync::lock!(let mut g1 = obj.mu.lock());
+            ksync::lock!(let mut taken = g1.as_mut().take());
+            expect_true!(g1.is_none());
+            expect_true!(taken.is_locked_by(&obj.mu));
+
+            ksync::lock!(let mut g2 = ksync::KMutexGuard::adopt(taken.as_mut()));
+            expect_true!(taken.is_none());
+            expect_true!(g2.is_locked_by(&obj.mu));
+
+            g1.as_mut().move_from(g2.as_mut());
+            expect_true!(g2.is_none());
+            expect_true!(g1.is_locked_by(&obj.mu));
+
+            taken.as_mut().take_from(g1.as_mut());
+            expect_true!(g1.is_none());
+            expect_true!(taken.is_locked_by(&obj.mu));
+
+            g2.as_mut().adopt_from(taken.as_mut());
+            expect_true!(taken.is_none());
+            expect_true!(g2.is_locked_by(&obj.mu));
+        }
+        {
+            ksync::lock!(
+                let mut spin_guard =
+                    obj.mu.lock_adoptable_policy_with::<MutexSpinMaxDurationPolicy>(10_000)
+            );
+            expect_true!(spin_guard.is_locked_by(&obj.mu));
+            let held = spin_guard.as_mut().call_unlocked(|| obj.mu.raw_mutex().is_held());
+            expect_true!(!held);
+            expect_true!(obj.mu.raw_mutex().is_held());
+            // SAFETY: `spin_guard.token()` witnesses `obj.mu` on `obj`.
+            expect_eq!(*unsafe { obj.guard_mu(spin_guard.token()) }.value(), 7);
+        }
+
+        // Exercise `NoIrqSavePolicy` on `TrackedMonitoredSpinlock` (IRQ-safe per-CPU
+        // `ThreadLockState` entry relocation and `SourceTag` `GuardState` preservation across
+        // `move_from` and `call_unlocked`).
+        stack_pin_init!(let outer_irq = pin_init!(GuardedSpinlockObj {
+            mu <- ksync::KMutex::init(),
+            value: 0.into(),
+        }));
+        stack_pin_init!(let mon_spin = pin_init!(GuardedMonitoredSpinlockObj {
+            mu <- ksync::KMutex::init(),
+            value: 50.into(),
+        }));
+        {
+            ksync::lock!(let _irq_guard = outer_irq.lock_mu());
+            ksync::lock!(
+                let mut sa1 = mon_spin
+                    .mu
+                    .lock_adoptable_policy_with::<NoIrqSavePolicy>(ksync::source_tag!())
+            );
+            ksync::lock!(let mut sa2 = ksync::Adoptable::empty());
+            sa2.as_mut().move_from(sa1.as_mut());
+            expect_true!(sa1.is_none());
+            expect_true!(sa2.is_locked_by(&mon_spin.mu));
+            sa2.as_mut().call_unlocked(|| {});
+            ksync::lock!(let mut sg = mon_spin.mu.adopt(sa2.as_mut()));
+            expect_true!(sa2.is_none());
+            let mut tg = mon_spin.guard_mu_mut_from_guard(sg.as_mut());
+            expect_eq!(*tg.value(), 50);
+            *tg.reborrow().value_mut() = 55;
+        }
+
+        // Exercise `TrackedCriticalMutex` and `lock_adoptable_policy::<CriticalMutexPolicy>()`.
+        stack_pin_init!(let crit = pin_init!(GuardedCriticalMutexObj {
+            mu <- ksync::KMutex::init(),
+            value: 11.into(),
+        }));
+        {
+            ksync::lock!(let mut crit_guard = crit.mu.lock_adoptable());
+            let held = crit_guard.as_mut().call_unlocked(|| false);
+            expect_true!(!held);
+            crit_guard.as_mut().call_untracked(|token| {
+                // SAFETY: `token` witnesses exclusive access to `crit.mu` on `crit`.
+                *unsafe { crit.guard_mu_mut(token) }.value_mut() = 12;
+            });
+        }
+        {
+            ksync::lock!(let cg = crit.lock_mu());
+            expect_eq!(*cg.value(), 12);
+        }
+
+        stack_pin_init!(let untracked = pin_init!(GuardedUntrackedMutexObj {
+            mu <- ksync::KMutex::init(),
+            value: 1.into(),
+        }));
+        {
+            ksync::lock!(
+                let mut uguard = untracked.mu.lock_adoptable_policy::<CriticalMutexPolicy>()
+            );
+            expect_true!(uguard.is_locked_by(&untracked.mu));
+            // SAFETY: `uguard.token_mut()` witnesses exclusive access to `untracked.mu`.
+            *unsafe { untracked.guard_mu_mut(uguard.as_mut().token_mut()) }.value_mut() = 2;
+        }
+
+        stack_pin_init!(let a = pin_init!(GuardedNestableCriticalMutexObj {
+            mu <- ksync::KMutex::init(),
+            value: 10.into(),
+        }));
+        stack_pin_init!(let b = pin_init!(GuardedNestableCriticalMutexObj {
+            mu <- ksync::KMutex::init(),
+            value: 20.into(),
+        }));
+
+        {
+            ksync::lock!(
+                let mut ga = a.mu.lock_adoptable_policy_with::<CriticalMutexOrderedPolicy>(0)
+            );
+            ksync::lock!(
+                let mut gb = b.mu.lock_adoptable_policy_with::<CriticalMutexOrderedPolicy>(1)
+            );
+            ksync::lock!(let mut moved_gb = ksync::Adoptable::from_adoptable(gb.as_mut()));
+            expect_true!(gb.is_none());
+            moved_gb.as_mut().call_unlocked(|| {});
+            // SAFETY: The tokens witness `a.mu` on `a` and `b.mu` on `b` respectively.
+            let sum =
+                unsafe { *a.guard_mu(ga.token()).value() + *b.guard_mu(moved_gb.token()).value() };
+            // SAFETY: As above, with exclusive access.
+            *unsafe { b.guard_mu_mut(moved_gb.as_mut().token_mut()) }.value_mut() = sum;
+        }
+
+        {
+            ksync::lock!(let gb = b.lock_mu());
+            expect_eq!(*gb.value(), 30);
+        }
+        // SAFETY: FFI call to query the thread-local lockdep test result.
+        if unsafe { cpp_ksync_test_lock_validation_enabled() } {
+            // SAFETY: FFI call to query the thread-local lockdep test result.
+            expect_eq!(unsafe { cpp_ksync_test_lockdep_last_result() }, LOCKDEP_RESULT_SUCCESS);
+
+            struct LockdepExceptBlockGuard;
+            impl Drop for LockdepExceptBlockGuard {
+                fn drop(&mut self) {
+                    kprintln!("[===KSYNC LOCKDEP EXCEPT BLOCK END===]");
+                }
+            }
+            kprintln!("[===KSYNC LOCKDEP EXCEPT BLOCK START===]");
+            let _except_block = LockdepExceptBlockGuard;
+
+            stack_pin_init!(let na = pin_init!(GuardedNonFatalNestableCriticalMutexObj {
+                mu <- ksync::KMutex::init(),
+                value: 0.into(),
+            }));
+            stack_pin_init!(let nb = pin_init!(GuardedNonFatalNestableCriticalMutexObj {
+                mu <- ksync::KMutex::init(),
+                value: 0.into(),
+            }));
+
+            // Verify descending orders (`na` at 1, then `nb` at 0) are caught for `Adoptable`
+            // even after moving the first guard into a new pinned slot before acquiring the
+            // second.
+            {
+                ksync::lock!(
+                    let mut a_na =
+                        na.mu.lock_adoptable_policy_with::<CriticalMutexOrderedPolicy>(1)
+                );
+                ksync::lock!(let _moved_na = ksync::Adoptable::from_adoptable(a_na.as_mut()));
+                ksync::lock!(
+                    let _nb = nb.mu.lock_adoptable_policy_with::<CriticalMutexOrderedPolicy>(0)
+                );
+                // SAFETY: FFI call to query the thread-local lockdep test result.
+                let res = unsafe { cpp_ksync_test_lockdep_last_result() };
+                expect_eq!(res, LOCKDEP_RESULT_INVALID_NESTING);
+            }
         }
     }
 }

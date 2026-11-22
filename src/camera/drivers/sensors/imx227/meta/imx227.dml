@@ -37,9 +37,8 @@
         },
         {
             name: "mipicsi",
-            banjo: "fuchsia.camera.BIND_PROTOCOL.MIPICSI",
+            service: "fuchsia.hardware.mipicsi.Service",
             primary: true,
-            bind: { protocol: "fuchsia.camera.BIND_PROTOCOL.MIPICSI" },
         },
         {
             name: "gpio-vana",

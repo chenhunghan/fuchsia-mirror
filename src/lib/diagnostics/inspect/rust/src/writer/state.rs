@@ -1942,8 +1942,7 @@ mod tests {
         }
 
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -1997,8 +1996,7 @@ mod tests {
         }
 
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2054,8 +2052,7 @@ mod tests {
         }
 
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2104,8 +2101,7 @@ mod tests {
         }
 
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2282,8 +2278,7 @@ mod tests {
             assert!(state.free_string_or_bytes_buffer_property(block_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2329,8 +2324,7 @@ mod tests {
         }
 
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2503,8 +2497,7 @@ mod tests {
             assert!(state.free_string_or_bytes_buffer_property(block_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2543,8 +2536,7 @@ mod tests {
             assert!(state.free_value(block_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2591,8 +2583,7 @@ mod tests {
             assert!(state.free_value(block_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2715,8 +2706,7 @@ mod tests {
             assert!(state.free_string_or_bytes_buffer_property(block_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2838,8 +2828,7 @@ mod tests {
             assert!(state.free_value(child_block_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -2942,8 +2931,7 @@ mod tests {
             assert!(state_guard.callbacks().get("link-name-0").is_none());
         }
         let snapshot = Snapshot::try_from(state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
 
         // Verify adding another link generates a different ID regardless of the params.
         let mut state_guard = state.try_lock().expect("lock state");
@@ -3116,8 +3104,7 @@ mod tests {
             assert!(state.free_string_or_bytes_buffer_property(block2_index).is_ok());
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free(blocks.into_iter().skip(1));
+        assert_all_free(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]
@@ -3168,8 +3155,7 @@ mod tests {
             assert_matches!(state.free_string_or_bytes_buffer_property(block_index), Ok(()));
         }
         let snapshot = Snapshot::try_from(core_state.copy_vmo_bytes().unwrap()).unwrap();
-        let blocks: Vec<ScannedBlock<'_, Unknown>> = snapshot.scan().collect();
-        assert_all_free_or_reserved(blocks.into_iter().skip(1));
+        assert_all_free_or_reserved(snapshot.scan().skip(1));
     }
 
     #[fuchsia::test]

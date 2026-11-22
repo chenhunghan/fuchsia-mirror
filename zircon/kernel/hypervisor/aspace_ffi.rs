@@ -57,19 +57,10 @@ pub extern "C" fn rust_guest_physical_aspace_root_vmar(gpa: &GuestPhysicalAspace
     RefPtr::into_raw(gpa.root_vmar()).cast_mut().cast()
 }
 
-/// FFI entry point for `hypervisor::GuestPhysicalAspace::IsMapped`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_guest_physical_aspace_is_mapped(
-    gpa: &GuestPhysicalAspace,
-    guest_paddr: zx_gpaddr_t,
-) -> bool {
-    gpa.is_mapped(guest_paddr)
-}
-
 /// FFI entry point for `hypervisor::GuestPhysicalAspace::MapInterruptController`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_guest_physical_aspace_map_interrupt_controller(
-    gpa: &mut GuestPhysicalAspace,
+    gpa: &GuestPhysicalAspace,
     guest_paddr: zx_gpaddr_t,
     host_paddr: zx_paddr_t,
     len: usize,
@@ -80,7 +71,7 @@ pub extern "C" fn rust_guest_physical_aspace_map_interrupt_controller(
 /// FFI entry point for `hypervisor::GuestPhysicalAspace::UnmapRange`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_guest_physical_aspace_unmap_range(
-    gpa: &mut GuestPhysicalAspace,
+    gpa: &GuestPhysicalAspace,
     guest_paddr: zx_gpaddr_t,
     len: usize,
 ) -> Result<(), Status> {
@@ -90,7 +81,7 @@ pub extern "C" fn rust_guest_physical_aspace_unmap_range(
 /// FFI entry point for `hypervisor::GuestPhysicalAspace::PageFault`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_guest_physical_aspace_page_fault(
-    gpa: &mut GuestPhysicalAspace,
+    gpa: &GuestPhysicalAspace,
     guest_paddr: zx_gpaddr_t,
 ) -> Result<(), Status> {
     gpa.page_fault(guest_paddr)

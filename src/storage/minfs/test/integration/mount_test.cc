@@ -96,8 +96,6 @@ class MountTestTemplate : public testing::Test {
   void TearDown() final { Unmount(); }
 
  protected:
-  ramdisk_client_t* ramdisk() const { return ramdisk_.client(); }
-
   const char* ramdisk_path() const { return ramdisk_path_.c_str(); }
 
   std::unique_ptr<minfs::Bcache> bcache() { return std::move(bcache_); }

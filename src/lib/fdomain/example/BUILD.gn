@@ -2,22 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-# Kept in GN because `fdomain-example-bin` depends on
-# `//src/storage/lib/vfs/rust:vfs` (`rustc_dylib("vfs_dylib")`), which places
-# two copies of `libvfs-<hash>.so` in Bazel `default_runfiles` and causes
-# `fx_packaged_binary` + `fx_package` to fail with duplicate `lib/libvfs-*.so`.
-fuchsia_test_component("fdomain-example-component") {
-  deps = [ ":fdomain-example-bin" ]
-  component_name = "fdomain-example"
-  manifest = "meta/fdomain-example.cml"
-}
-
-fuchsia_test_package("fdomain-example") {
-  test_components = [ ":fdomain-example-component" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -63,5 +47,25 @@ rustc_test("fdomain-example-bin") {
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
+  ]
+}
+
+fuchsia_component_manifest("fdomain-example-manifest") {
+  testonly = true
+  component_name = "fdomain-example"
+  manifest = "meta/fdomain-example.cml"
+}
+
+fuchsia_test_component("fdomain-example-component") {
+  cm_label = ":fdomain-example-manifest"
+  deps = [ ":fdomain-example-bin" ]
+}
+
+fuchsia_test_package("fdomain-example") {
+  package_name = "fdomain-example-gn"
+  test_components = [ ":fdomain-example-component" ]
+  visibility = [
+    ":*",
+    "//src/lib/fdomain:*",
   ]
 }

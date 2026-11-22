@@ -9,6 +9,7 @@ test_suite(
     tests = [
         "//src/session/bin/element_launcher:tests",
         "//src/session/examples/hello-world-session:tests",
+        "//src/session/lib/realm_management:tests",
         "//src/session/tools/session_control:tests",
     ],
 )

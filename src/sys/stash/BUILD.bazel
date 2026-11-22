@@ -17,8 +17,6 @@ load("//tools/fidl/measure-tape:measure_tape.bzl", "measure_tape")
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: the `stash2_v2` component and the `pkg` package targets remain in
-# BUILD.gn above the sentinel.
 rustc_binary(
     name = "bin",
     srcs = [
@@ -66,6 +64,27 @@ fx_packaged_binary(
     name = "stash_packaged_bin",
     binary = ":bin",
     binary_name = "stash",
+)
+
+fx_component_manifest(
+    name = "stash2_v2-manifest",
+    component_name = "stash2",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/stash2.cml",
+)
+
+fx_component(
+    name = "stash2_v2",
+    compiled_manifest = ":stash2_v2-manifest",
+    visibility = [
+        "//src/sys/pkg/bin/omaha-client:__pkg__",
+        "//src/sys/pkg/lib/omaha-client-fuchsia:__pkg__",
+        "//src/sys/pkg/tests/omaha-client:__pkg__",
+    ],
+    deps = [":stash_packaged_bin"],
 )
 
 fx_component_manifest(

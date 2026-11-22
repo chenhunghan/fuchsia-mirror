@@ -122,8 +122,10 @@
             // Allow launching shell tools from the console,
             // including from universe packages.
             protocol: [ "fuchsia.process.Resolver" ],
-            from: "parent",
+            from: "#process_resolver",
             to: "#console-launcher",
+            availability: "optional",
+            source_availability: "unknown",
         },
         {
             // Allow the console to run `snapshot`.

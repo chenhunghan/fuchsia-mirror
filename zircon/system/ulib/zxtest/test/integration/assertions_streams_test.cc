@@ -622,6 +622,24 @@ TEST(ZxTestAssertionStreamTest, AssertNoFatalFailureWithFailure) {
   TEST_CHECKPOINT();
 }
 
+void HelperFnSkip() { ZXTEST_SKIP("Skipped in helper."); }
+
+TEST(ZxTestAssertionStreamTest, AssertNoFatalFailureWithSkip) {
+  TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, NO_ERRORS | SKIPPED,
+                   "Failed to end test execution without a failure on helper skip.");
+  ASSERT_NO_FATAL_FAILURE(HelperFnSkip());
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionStreamTest, ExpectNoFatalFailureWithSkip) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS | SKIPPED, "Helper skip was a failure.");
+  EXPECT_NO_FATAL_FAILURE(HelperFnSkip());
+  ZX_ASSERT_MSG(!CURRENT_TEST_HAS_FATAL_FAILURE(), "Helper skip was a fatal failure.");
+  EXPECT_NO_FATAL_FAILURE(HelperFnSkip());
+  EXPECT_NO_FAILURES(HelperFnSkip());
+  TEST_CHECKPOINT();
+}
+
 TEST(ZxTestAssertionStreamTest, AssertTrueCoerceTypeToBoolFailure) {
   TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, HAS_ERRORS, "Failed to identify false.");
   int a = 0;
@@ -833,6 +851,7 @@ TEST(ZxTestAssertionStreamTest, CoerceTypeToBoolExplicitNonMoveable) {
 }
 
 TEST(ZxTestAssertionStreamTest, PromoteLiteralIntegersOnComp) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Failed to compare mixed integer types.");
   int32_t a = -1;
   int64_t b = 2;
   int16_t c = -1;
@@ -844,11 +863,11 @@ TEST(ZxTestAssertionStreamTest, PromoteLiteralIntegersOnComp) {
   uint16_t h = 1;
 
   // Signed to wider ints.
-  ASSERT_EQ(a, b);
+  ASSERT_NE(a, b);
   ASSERT_GE(b, a);
   ASSERT_LE(a, b);
   ASSERT_GT(b, c);
-  ASSERT_LT(b, a);
+  ASSERT_LT(a, b);
   ASSERT_GT(b, d);
 
   // Signed comparison with literals.
@@ -871,6 +890,7 @@ TEST(ZxTestAssertionStreamTest, PromoteLiteralIntegersOnComp) {
   ASSERT_LE(f, 2);
   ASSERT_GT(g, 2);
   ASSERT_GE(g, 3);
+  TEST_CHECKPOINT();
 }
 
 TEST(ZxTestAssertionStreamTest, PrintfLikeDescs) {
@@ -996,7 +1016,10 @@ TEST(ZxTestAssertionStreamTest, AssertNoDeathWithCrashingStatement) {
 TEST(ZxTestAssertionStreamTest, AssertBytesEqVla) {
   TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Failed to check buffer eq.");
   volatile int len = 2;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wvla-cxx-extension"
   char a[len];
+#pragma GCC diagnostic pop
   const char* b = reinterpret_cast<const char*>(a);
 
   memset(a, 0, len);
@@ -1270,6 +1293,16 @@ TEST(ZxTestAssertionStreamTest, AssertContainedInUnbracedBranches) {
     EXPECT_TRUE(false, "Expected Assert");
   else
     ASSERT_FALSE(true, "UnexpectedAssert");
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestAssertionStreamTest, CapturelessLambdaConstexprScalar) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Captureless lambda stream failed.");
+  constexpr ptrdiff_t kTlsBias = -16;
+  auto fn = [](size_t tp_offset) {
+    ASSERT_LT(tp_offset + kTlsBias, 64u) << " tp_offset " << tp_offset << " + bias " << kTlsBias;
+  };
+  fn(32);
   TEST_CHECKPOINT();
 }
 

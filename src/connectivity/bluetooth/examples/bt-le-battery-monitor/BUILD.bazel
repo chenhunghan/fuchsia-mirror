@@ -70,7 +70,6 @@ fx_component(
 
 fx_package(
     name = "bt-le-battery-monitor",
-    package_name = "bt-le-battery-monitor",
     components = [":component"],
 )
 

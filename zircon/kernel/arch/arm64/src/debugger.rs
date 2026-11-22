@@ -6,9 +6,8 @@
 
 //! Debugger access to the saved user registers, single step and hardware debug state of a thread.
 //!
-//! The thread accessors take `thread` as the `Thread*` that `<arch/debugger.h>` declares, and
-//! require of their callers what it does: the thread is in an exception or is suspended, and stays
-//! so.
+//! The thread accessors take `thread` as `*mut Thread` and require of their callers that the
+//! thread is in an exception or is suspended, and stays so.
 
 use core::ffi::c_void;
 use core::mem::{align_of, offset_of, size_of};
@@ -30,12 +29,13 @@ use super::registers::{
     arm64_set_debug_state_for_thread, arm64_validate_debug_state,
 };
 use super::thread::locked_thread_arch;
+use super::vm::is_valid_user_pc;
 use super::{
     ARM_NCZV_FLAGS, ARM_USER_RESTRICTED_VISIBLE_FLAGS, ARM64_USER_VISIBLE_FLAGS, GeneralRegsSource,
     Iframe, arm64_feature_test,
 };
 use crate::clt_tag;
-use crate::kernel::thread::{Thread, ThreadLockGuard};
+use crate::kernel::thread::{Thread, ThreadLockGuard, thread_lock_guard};
 
 // The layouts that `zircon/kernel/tests/abi_type_validator.cc` checks for the C types.
 zr::static_assert!(size_of::<zx_arm64_thread_state_vector_regs_t>() == 520);
@@ -89,18 +89,19 @@ pub unsafe extern "C" fn arch_get_general_regs(
     thread: *mut Thread,
     out: *mut zx_thread_state_general_regs_t,
 ) -> Result<(), Status> {
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_get_general_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_get_general_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     let (suspended_general_regs, tpidr_el0) = unsafe {
-        let arch = locked_thread_arch(&thread_guard);
+        let arch = locked_thread_arch(thread_guard);
         ((*arch).suspended_general_regs, (*arch).tpidr_el0)
     };
 
@@ -138,6 +139,11 @@ pub unsafe extern "C" fn arch_get_general_regs(
 /// The caller is responsible for making sure the thread is in an exception or is suspended, and
 /// stays so.
 ///
+/// # Errors
+///
+/// Returns `Status::NOT_SUPPORTED` if general registers are unavailable for `thread`, or
+/// `Status::INVALID_ARGS` if `in_.pc` is not a valid userspace PC.
+///
 /// # Safety
 ///
 /// `thread` points to a live `Thread` that is in an exception or suspended, so its user state is
@@ -150,15 +156,16 @@ pub unsafe extern "C" fn arch_set_general_regs(
     thread: *mut Thread,
     in_: *const zx_thread_state_general_regs_t,
 ) -> Result<(), Status> {
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_set_general_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_set_general_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
-    let arch = locked_thread_arch(&thread_guard);
+    let arch = locked_thread_arch(thread_guard);
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     let suspended_general_regs = unsafe { (*arch).suspended_general_regs };
@@ -169,20 +176,29 @@ pub unsafe extern "C" fn arch_set_general_regs(
         return Err(Status::NOT_SUPPORTED);
     }
 
+    // SAFETY: The caller guarantees `in_`.
+    let in_ = unsafe { &*in_ };
+
+    // Disallow setting PC to a non-userspace address; `arch_enter_uspace` asserts that the entry
+    // PC is valid for userspace, and there is no use case for setting PC to a kernel address.
+    if !is_valid_user_pc(in_.pc as usize) {
+        return Err(Status::INVALID_ARGS);
+    }
+
     let out = suspended_general_regs.cast::<Iframe>();
     debug_assert!(!out.is_null());
     // SAFETY: `out` is the `iframe_t` that `arch_set_suspended_general_regs` recorded, which stays
     // live, and is not otherwise accessed, while the thread's user state stays saved. mod.rs pins
     // `Iframe`'s size and every field offset to the values regs.h asserts for `iframe_t`.
     let out = unsafe { &mut *out };
-    // SAFETY: The caller guarantees `in_`.
-    let in_ = unsafe { &*in_ };
 
     out.r = in_.r;
     out.lr = in_.lr;
     out.usp = in_.sp;
     out.elr = in_.pc;
-    if arch_get_restricted_flag() {
+    // SAFETY: Running on a CPU after early per-CPU init with `thread_guard` held (interrupts
+    // disabled).
+    if unsafe { arch_get_restricted_flag() } {
         // Preserve all flags outside of NCZV (the directly user visible set) when
         // in restricted mode.  This allows continuity in 32-bit or 64-bit without
         // allowing direct access to mode changes.
@@ -214,18 +230,19 @@ pub unsafe extern "C" fn arch_get_single_step(
     thread: *mut Thread,
     out: *mut zx_thread_state_single_step_t,
 ) -> Result<(), Status> {
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_get_single_step")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_get_single_step")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     let (suspended_general_regs, mdscr_el1) = unsafe {
-        let arch = locked_thread_arch(&thread_guard);
+        let arch = locked_thread_arch(thread_guard);
         ((*arch).suspended_general_regs, (*arch).mdscr_el1)
     };
 
@@ -268,15 +285,16 @@ pub unsafe extern "C" fn arch_set_single_step(
         return Err(Status::INVALID_ARGS);
     }
 
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_set_single_step")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_set_single_step")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
-    let arch = locked_thread_arch(&thread_guard);
+    let arch = locked_thread_arch(thread_guard);
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     let suspended_general_regs = unsafe { (*arch).suspended_general_regs };
@@ -337,18 +355,19 @@ pub unsafe extern "C" fn arch_get_vector_regs(
     thread: *mut Thread,
     out: *mut zx_arm64_thread_state_vector_regs_t,
 ) -> Result<(), Status> {
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_get_vector_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_get_vector_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     // The reference covers only `fpstate`.
-    let in_ = unsafe { &(*locked_thread_arch(&thread_guard)).fpstate };
+    let in_ = unsafe { &(*locked_thread_arch(thread_guard)).fpstate };
     // SAFETY: The caller guarantees `out`. Each field is written through the raw pointer, so `out`
     // need not be initialized; `fpcr`, `fpsr` and the 32 `v` entries cover the whole struct.
     unsafe {
@@ -377,18 +396,19 @@ pub unsafe extern "C" fn arch_set_vector_regs(
     thread: *mut Thread,
     in_: *const zx_arm64_thread_state_vector_regs_t,
 ) -> Result<(), Status> {
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_set_vector_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_set_vector_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     // The reference covers only `fpstate`.
-    let out = unsafe { &mut (*locked_thread_arch(&thread_guard)).fpstate };
+    let out = unsafe { &mut (*locked_thread_arch(thread_guard)).fpstate };
     // SAFETY: The caller guarantees `in_`.
     let in_ = unsafe { &*in_ };
     out.fpcr = in_.fpcr;
@@ -426,18 +446,19 @@ pub unsafe extern "C" fn arch_get_arm64_sve(
         return Err(Status::NOT_SUPPORTED);
     }
 
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_get_arm64_sve")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_get_arm64_sve")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     // The reference covers only `fpstate`.
-    let in_ = unsafe { &(*locked_thread_arch(&thread_guard)).fpstate };
+    let in_ = unsafe { &(*locked_thread_arch(thread_guard)).fpstate };
     // Canonicalize FFR to its contiguous prefix of 1s from bit 0 so that even if a user thread
     // executed WRFFR with a non-monotonic predicate (producing an UNKNOWN architectural FFR
     // value), reading state and writing it back unchanged never fails with ZX_ERR_INVALID_ARGS.
@@ -480,18 +501,19 @@ pub unsafe extern "C" fn arch_set_arm64_sve(
         return Err(Status::INVALID_ARGS);
     }
 
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_set_arm64_sve")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_set_arm64_sve")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     // The reference covers only `fpstate`.
-    let out = unsafe { &mut (*locked_thread_arch(&thread_guard)).fpstate };
+    let out = unsafe { &mut (*locked_thread_arch(thread_guard)).fpstate };
     out.p_regs = in_.p;
     out.ffr = in_.ffr;
 
@@ -521,11 +543,12 @@ pub unsafe extern "C" fn arch_get_debug_regs(
     out.hw_bps_count = arm64_hw_breakpoint_count();
     out.hw_wps_count = arm64_hw_watchpoint_count();
 
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_get_debug_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_get_debug_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
@@ -534,7 +557,7 @@ pub unsafe extern "C" fn arch_get_debug_regs(
     // SAFETY: The caller keeps the thread's user state saved, as the `debug_assert!` above checks,
     // so it makes no lock-free `arch_thread` write, and `thread_guard` keeps out the locked ones.
     // The reference covers only `debug_state`.
-    let debug_state = unsafe { &(*locked_thread_arch(&thread_guard)).debug_state };
+    let debug_state = unsafe { &(*locked_thread_arch(thread_guard)).debug_state };
 
     // HW breakpoints.
     let hw_bps_count = usize::from(out.hw_bps_count);
@@ -595,15 +618,16 @@ pub unsafe extern "C" fn arch_set_debug_regs(
         return Err(Status::INVALID_ARGS);
     };
 
-    // SAFETY: The caller guarantees `thread` and that this CPU is in no chain lock transaction. The
-    // guard is a pinned local dropped before this function returns, with nothing in between that
-    // blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread, clt_tag!("arch_set_debug_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: The caller guarantees `thread` stays live past this scope and that this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread, clt_tag!("arch_set_debug_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
-    let arch = locked_thread_arch(&thread_guard);
+    let arch = locked_thread_arch(thread_guard);
 
     // If the suspended registers are not there, we cannot save the MDSCR values for this thread,
     // meaning that the debug HW state will be cleared almost immediately.
@@ -637,10 +661,9 @@ pub unsafe extern "C" fn arch_set_debug_regs(
 ///
 /// `source` is `GeneralRegsSource::Iframe`, the only representation arm64 saves, and `gregs`
 /// points to a live `iframe_t` that nothing writes during the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_get_instruction_pointer(
+pub unsafe fn arch_get_instruction_pointer(
     source: GeneralRegsSource,
-    gregs: *mut c_void,
+    gregs: *const c_void,
 ) -> usize {
     debug_assert!(source == GeneralRegsSource::Iframe, "invalid source {}\n", source as u32);
     // SAFETY: The caller guarantees that `gregs` points at a live `iframe_t` that nothing writes.
@@ -656,8 +679,7 @@ pub unsafe extern "C" fn arch_get_instruction_pointer(
 ///
 /// `source` is `GeneralRegsSource::Iframe`, the only representation arm64 saves, and `gregs`
 /// points to a live `iframe_t` that nothing else accesses during the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_set_return_instruction_pointer(
+pub unsafe fn arch_set_return_instruction_pointer(
     source: GeneralRegsSource,
     gregs: *mut c_void,
     ip: usize,

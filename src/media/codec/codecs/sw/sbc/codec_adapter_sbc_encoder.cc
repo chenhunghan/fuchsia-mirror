@@ -4,13 +4,13 @@
 
 #include "codec_adapter_sbc_encoder.h"
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_buffer.h>
 #include <lib/trace/event.h>
 
 #include <limits>
 
 #include "codec_adapter_sw.h"
-#include "fuchsia/media/cpp/fidl.h"
 #include "lib/media/codec_impl/codec_port.h"
 
 namespace {
@@ -59,14 +59,7 @@ void CodecAdapterSbcEncoder::ProcessInputLoop() {
       }
     });
 
-    bool is_active = [this, &input_item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
-      std::unique_lock<std::mutex> lock(lock_);
-      while (output_reconfig_pending_ && !input_item.is_format_details()) {
-        reconfig_cond_.wait(lock);
-      }
-      return stream_active_;
-    }();
-
+    const bool is_active = WaitForOutputReconfigToComplete();
     if (!is_active) {
       return;
     }
@@ -77,14 +70,17 @@ void CodecAdapterSbcEncoder::ProcessInputLoop() {
         return;
       }
 
-      if (CreateContext(std::move(input_item.format_details())) != kOk) {
+      if (CreateContext(input_item.format_details2()) != kOk) {
         // Creation failed; a failure was reported through `events_`.
         return;
       }
 
       {
         std::lock_guard<std::mutex> lock(lock_);
-        output_reconfig_pending_ = true;
+        if (!IsStreamActiveLocked()) {
+          return;
+        }
+        SetOutputReconfigPendingLocked();
       }
 
       events_->onCoreCodecMidStreamOutputConstraintsChange(
@@ -131,31 +127,25 @@ void CodecAdapterSbcEncoder::CleanUpAfterStream() {
   SBC_Encoder_Init(&dummy_params);
 }
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterSbcEncoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterSbcEncoder::OutputFormatDetails() {
   std::lock_guard<std::mutex> lock(lock_);
   FX_DCHECK(context_);
 
-  fuchsia::media::FormatDetails format_details;
+  fuchsia_media::FormatDetails format_details;
   if (context_->is_msbc) {
-    format_details.set_mime_type(kMsbcMimeType);
+    format_details.mime_type() = kMsbcMimeType;
   } else {
-    format_details.set_mime_type(kSbcMimeType);
+    format_details.mime_type() = kSbcMimeType;
   }
 
   return {std::move(format_details), context_->sbc_frame_length()};
 }
 
-fuchsia_sysmem2::BufferCollectionConstraints
-CodecAdapterSbcEncoder::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+CodecAdapterSbcEncoder::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
   std::lock_guard<std::mutex> lock(lock_);
 
   fuchsia_sysmem2::BufferCollectionConstraints result;
-
-  // The CodecImpl won't hand us the sysmem token, so we shouldn't expect to
-  // have the token here.
-  ZX_DEBUG_ASSERT(!partial_settings.has_sysmem_token());
 
   // TODO(https://fxbug.dev/42084949): plumb/permit range of buffer count from further down,
   // instead of single number frame_count, and set this to the actual
@@ -204,41 +194,49 @@ CodecAdapterSbcEncoder::CoreCodecGetBufferCollectionConstraints2(
   // We don't have to fill out usage - CodecImpl takes care of that.
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
-  return result;
+  return CoreCodecGetBufferCollectionConstraints3Result{
+      .constraints = std::move(result),
+  };
 }
 
 CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
-    const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.has_pcm_format()) {
+    const fuchsia_media::FormatDetails& format_details) {
+  if (!format_details.pcm_format().has_value()) {
     events_->onCoreCodecFailCodec(
         "SBC Encoder received input that was not uncompressed pcm audio.");
     return kShouldTerminate;
   }
-  const auto& input_format = format_details.pcm_format();
+  const auto& input_format = *format_details.pcm_format();
 
-  if (!input_format.has_bits_per_sample() || input_format.bits_per_sample() != 16 ||
-      (input_format.has_bytes_per_sample() && input_format.bytes_per_sample() != sizeof(int16_t)) ||
-      !input_format.has_frames_per_second() || !input_format.has_channel_map() ||
-      !input_format.has_pcm_mode() ||
-      input_format.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR) {
+  if (!input_format.pcm_mode().has_value() || !input_format.bits_per_sample().has_value() ||
+      !input_format.frames_per_second().has_value() || !input_format.channel_map().has_value()) {
+    events_->onCoreCodecFailCodec("SBC Encoder received incomplete PcmFormat2.");
+    return kShouldTerminate;
+  }
+
+  if (*input_format.bits_per_sample() != 16 ||
+      (input_format.bytes_per_sample().has_value() &&
+       *input_format.bytes_per_sample() != sizeof(int16_t)) ||
+      *input_format.pcm_mode() != fuchsia_media::AudioPcmMode2::kLinear) {
     events_->onCoreCodecFailCodec(
         "SBC Encoder only encodes audio with signed 16 bit little endian "
         "linear samples.");
     return kShouldTerminate;
   }
 
-  if (!format_details.has_encoder_settings() || (!format_details.encoder_settings().is_sbc() &&
-                                                 !format_details.encoder_settings().is_msbc())) {
+  if (!format_details.encoder_settings().has_value() ||
+      (format_details.encoder_settings()->Which() != fuchsia_media::EncoderSettings::Tag::kSbc &&
+       format_details.encoder_settings()->Which() != fuchsia_media::EncoderSettings::Tag::kMsbc)) {
     events_->onCoreCodecFailCodec("SBC Encoder received input without encoder settings.");
     return kShouldTerminate;
   }
 
-  fuchsia::media::SbcChannelMode channel_mode;
+  fuchsia_media::SbcChannelMode channel_mode;
   SBC_ENC_PARAMS params = {};
   bool is_msbc = false;
 
-  if (format_details.encoder_settings().is_msbc()) {
-    if (input_format.frames_per_second() != kMsbcFramesPerSecond) {
+  if (format_details.encoder_settings()->Which() == fuchsia_media::EncoderSettings::Tag::kMsbc) {
+    if (*input_format.frames_per_second() != kMsbcFramesPerSecond) {
       events_->onCoreCodecFailCodec(
           "SBC Encoder received mSBC request with unsupported frequency (requires 16000 Hz).");
       return kShouldTerminate;
@@ -246,10 +244,10 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
     is_msbc = true;
     params = kMsbcEncodingParams;
     // mSBC specification mandates mono audio.
-    channel_mode = fuchsia::media::SbcChannelMode::MONO;
+    channel_mode = fuchsia_media::SbcChannelMode::kMono;
   } else {
     int16_t sampling_freq;
-    switch (input_format.frames_per_second()) {
+    switch (*input_format.frames_per_second()) {
       case 48000:
         sampling_freq = SBC_sf48000;
         break;
@@ -267,20 +265,21 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
         return kShouldTerminate;
     }
 
-    const fuchsia::media::SbcEncoderSettings& settings = format_details.encoder_settings().sbc();
-    if (settings.bit_pool > 255) {
+    const fuchsia_media::SbcEncoderSettings& settings =
+        format_details.encoder_settings()->sbc().value();
+    if (settings.bit_pool() > 255) {
       events_->onCoreCodecFailCodec("SBC Encoder received invalid bit_pool (must be <= 255).");
       return kShouldTerminate;
     }
 
-    channel_mode = settings.channel_mode;
+    channel_mode = settings.channel_mode();
 
     params.s16SamplingFreq = sampling_freq;
-    params.s16ChannelMode = static_cast<int16_t>(settings.channel_mode);
-    params.s16NumOfSubBands = static_cast<int16_t>(settings.sub_bands);
-    params.s16NumOfBlocks = static_cast<int16_t>(settings.block_count);
-    params.s16AllocationMethod = static_cast<int16_t>(settings.allocation);
-    params.s16BitPool = static_cast<int16_t>(settings.bit_pool);
+    params.s16ChannelMode = static_cast<int16_t>(settings.channel_mode());
+    params.s16NumOfSubBands = static_cast<int16_t>(settings.sub_bands());
+    params.s16NumOfBlocks = static_cast<int16_t>(settings.block_count());
+    params.s16AllocationMethod = static_cast<int16_t>(settings.allocation());
+    params.s16BitPool = static_cast<int16_t>(settings.bit_pool());
   }
 
   // SBC_Encoder_Init resets internal filter state (EncMaxShiftCounter, ShiftCounter,
@@ -293,16 +292,16 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
   SBC_Encoder_Init(&params);
   params.s16BitPool = target_bit_pool;
 
-  if (channel_mode == fuchsia::media::SbcChannelMode::MONO &&
-      input_format.channel_map().size() != 1) {
+  if (channel_mode == fuchsia_media::SbcChannelMode::kMono &&
+      input_format.channel_map()->size() != 1) {
     events_->onCoreCodecFailCodec(
         "SBC Encoder received request for MONO encoding, but input does "
         "not have exactly 1 channel.");
     return kShouldTerminate;
   }
 
-  if (channel_mode != fuchsia::media::SbcChannelMode::MONO &&
-      input_format.channel_map().size() != 2) {
+  if (channel_mode != fuchsia_media::SbcChannelMode::kMono &&
+      input_format.channel_map()->size() != 2) {
     events_->onCoreCodecFailCodec(
         "SBC Encoder received request for DUAL, STEREO, or JOINT_STEREO "
         "encoding, but input does not have exactly 2 channels.");
@@ -310,12 +309,12 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
   }
 
   const uint64_t bytes_per_second =
-      input_format.frames_per_second() * sizeof(uint16_t) * input_format.channel_map().size();
+      *input_format.frames_per_second() * sizeof(uint16_t) * input_format.channel_map()->size();
   const size_t sbc_frame_length = Context::ComputeSbcFrameLength(channel_mode, params);
   ZX_ASSERT(sbc_frame_length <= std::numeric_limits<uint32_t>::max());
   Context context{
       .channel_mode = channel_mode,
-      .input_format = fidl::Clone(input_format),
+      .bits_per_sample = *input_format.bits_per_sample(),
       .is_msbc = is_msbc,
       .params = params,
       .precomputed_sbc_frame_length = sbc_frame_length,
@@ -327,8 +326,8 @@ CodecAdapterSbcEncoder::InputLoopStatus CodecAdapterSbcEncoder::CreateContext(
   }
   chunk_input_stream_.emplace(
       context_->pcm_batch_size(),
-      format_details.has_timebase()
-          ? TimestampExtrapolator(format_details.timebase(), bytes_per_second)
+      format_details.timebase().has_value()
+          ? TimestampExtrapolator(*format_details.timebase(), bytes_per_second)
           : TimestampExtrapolator(),
       [this](const ChunkInputStream::InputBlock input_block) {
         if (input_block.non_padding_len == 0) {

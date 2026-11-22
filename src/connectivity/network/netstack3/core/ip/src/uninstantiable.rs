@@ -4,6 +4,7 @@
 
 use explicit::UnreachableExt as _;
 use net_types::SpecifiedAddr;
+use net_types::ip::Ip;
 use netstack3_base::{
     AnyDevice, DeviceIdContext, IpExt, Mms, TxMetadataBindingsTypes, Uninstantiable,
     UninstantiableWrapper,
@@ -12,6 +13,7 @@ use netstack3_filter::{FilterIpExt, Tuple};
 
 use crate::internal::base::{BaseTransportIpContext, HopLimits, IpLayerIpExt};
 use crate::internal::device::Ipv6LinkLayerAddr;
+use crate::internal::path_mtu::{PmtuDstAddr, PmtuHandler, PmtuSrcAddr};
 use crate::internal::socket::{
     DeviceIpSocketHandler, IpSock, IpSockCreationError, IpSockSendError, IpSocketArgs,
     IpSocketHandler, MmsError, RouteResolutionOptions, TransportGsoInfo,
@@ -65,6 +67,18 @@ impl<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes, P: DeviceIdContext<Any
         _socket: &IpSock<I, Self::WeakDeviceId>,
         _options: &O,
     ) {
+        self.uninstantiable_unreachable()
+    }
+}
+
+impl<I: Ip, BC, P> PmtuHandler<I, BC> for UninstantiableWrapper<P> {
+    fn update_pmtu_if_less(
+        &mut self,
+        _bindings_ctx: &mut BC,
+        _src_ip: PmtuSrcAddr<I::Addr>,
+        _dst_ip: PmtuDstAddr<I::Addr>,
+        _new_mtu: I::Mtu,
+    ) -> I::Mtu {
         self.uninstantiable_unreachable()
     }
 }

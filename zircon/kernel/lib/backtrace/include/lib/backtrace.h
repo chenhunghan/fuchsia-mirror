@@ -7,11 +7,9 @@
 #ifndef ZIRCON_KERNEL_LIB_BACKTRACE_INCLUDE_LIB_BACKTRACE_H_
 #define ZIRCON_KERNEL_LIB_BACKTRACE_INCLUDE_LIB_BACKTRACE_H_
 
-#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <sys/types.h>
-#include <zircon/types.h>
-
-#include <cstddef>
 
 // Contains an array of return address values representing a thread's backtrace.
 //
@@ -30,38 +28,54 @@ class Backtrace {
   const vaddr_t* data() const { return addr_; }
 
   // Resets the size to 0.
-  void reset() { size_ = 0; }
+  void reset();
 
   // Adds one element to the array.  See also |set_first_frame_type|.
-  void push_back(vaddr_t addr) {
-    if (size_ < kMaxSize) {
-      addr_[size_++] = addr;
-    }
-  }
+  void push_back(vaddr_t addr);
 
   // With the possible exception of the first frame, each address in the backtrace is a return
   // address.  The first frame may be either a return address or a precise location (think PC).  See
   // the "Presentation elements" section of //docs/reference/kernel/symbolizer_markup.md for
   // details.  Unless specified, the first frame is assumed to be a return address.
-  enum FrameType { ReturnAddress, PreciseLocation };
-  void set_first_frame_type(FrameType type) { first_frame_type_ = type; }
+  enum FrameType : uint32_t { ReturnAddress = 0, PreciseLocation = 1 };
+  void set_first_frame_type(FrameType type);
 
   // Pretty-prints this backtrace to |file|.
-  void Print(FILE* = stdout) const;
-  void PrintWithoutVersion(FILE* = stdout) const;
+  void Print(FILE* file = stdout) const;
+  void PrintWithoutVersion(FILE* file = stdout) const;
 
  private:
+  friend struct BacktraceLayoutCheck;
+
   vaddr_t addr_[kMaxSize]{};
   size_t size_{};
-  FrameType first_frame_type_{ReturnAddress};
+  [[maybe_unused]] FrameType first_frame_type_{ReturnAddress};
 };
 
 extern "C" {
-void cpp_backtrace_print(const Backtrace* bt);
-void cpp_backtrace_print_without_version(const Backtrace* bt, FILE* file);
-const vaddr_t* cpp_backtrace_data(const Backtrace* bt);
-size_t cpp_backtrace_size(const Backtrace* bt);
-void cpp_backtrace_reset(Backtrace* bt);
+
+// TODO(https://fxbug.dev/507423574): Remove once all C++ callers of Backtrace are ported to Rust.
+// Defined in Rust: //zircon/kernel/lib/backtrace/src/backtrace_ffi.rs.
+void rust_backtrace_reset(Backtrace* bt);
+void rust_backtrace_push_back(Backtrace* bt, vaddr_t addr);
+void rust_backtrace_set_first_frame_type(Backtrace* bt, uint32_t type);
+void rust_backtrace_print(const Backtrace* bt, FILE* file);
+void rust_backtrace_print_without_version(const Backtrace* bt, FILE* file);
+
+}  // extern "C"
+
+inline void Backtrace::reset() { rust_backtrace_reset(this); }
+
+inline void Backtrace::push_back(vaddr_t addr) { rust_backtrace_push_back(this, addr); }
+
+inline void Backtrace::set_first_frame_type(FrameType type) {
+  rust_backtrace_set_first_frame_type(this, static_cast<uint32_t>(type));
+}
+
+inline void Backtrace::Print(FILE* file) const { rust_backtrace_print(this, file); }
+
+inline void Backtrace::PrintWithoutVersion(FILE* file) const {
+  rust_backtrace_print_without_version(this, file);
 }
 
 #endif  // ZIRCON_KERNEL_LIB_BACKTRACE_INCLUDE_LIB_BACKTRACE_H_

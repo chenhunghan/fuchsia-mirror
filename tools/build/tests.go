@@ -101,6 +101,12 @@ type Test struct {
 	// Isolated specifies whether the test should run in its own shard.
 	Isolated bool `json:"isolated,omitempty"`
 
+	// ProducesPerfResults specifies whether the test produces performance
+	// results (*.fuchsiaperf.json files) that are consumed by the Fuchsia
+	// performance infrastructure. This includes correctness tests that also
+	// publish performance results.
+	ProducesPerfResults bool `json:"produces_perf_results,omitempty"`
+
 	// TimeoutSecs is the timeout for the test.
 	TimeoutSecs int `json:"timeout_secs,omitempty"`
 

@@ -99,7 +99,6 @@ fuchsia_driver_component("parent-driver") {
   dml_label = ":parent-driver-dml"
   component_name = "bindlib-codegen-parent"
   deps = [ ":parent-driver-driver" ]
-  info = "meta/parent-driver-info.json"
 }
 
 driver_bind_rules("child-driver-bind") {
@@ -129,7 +128,6 @@ fuchsia_cc_driver("child-driver-driver") {
 fuchsia_driver_component("child-driver") {
   component_name = "bindlib-codegen-child"
   deps = [ ":child-driver-driver" ]
-  info = "meta/child-driver-info.json"
   manifest = "meta/child-driver.cml"
 }
 

@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Generated using `fx fuzz update fuchsia-fatfs-fuzzer/fat-fuzzer`.
+resource(
+    name = "corpus",
+    srcs = [
+        "fat.img",
+        "invalid_cluster_number.img",
+        "large_sectors_per_fat_and_bytes_per_sector.img",
+        "many_sectors_per_fat.img",
+        "utf16_unpaired_surrogates.img",
+    ],
+    outputs = ["data/src/storage/fuchsia-fatfs/corpus/{{source_file_part}}"],
+    visibility = ["//src/storage/fuchsia-fatfs:__pkg__"],
+)

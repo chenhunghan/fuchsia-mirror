@@ -10,6 +10,7 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/security/bin/kms:tests",
         "//src/security/lib/fake-keymint:fake-keymint-tests",
     ],
 )

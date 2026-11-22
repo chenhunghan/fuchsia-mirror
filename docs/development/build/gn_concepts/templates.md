@@ -287,10 +287,10 @@ template("a_test_template") {
 
 GN users expect to be able to set `visibility` on any target.
 
-This advice is similar to [always forward testonly](#heading=h.fk6w1as9tkpx), except that
-it only applies to the main target (the target named `target_name`). Other targets should
-have their `visibility` restricted, so that your users can’t depend on your inner targets
-that are not part of your contract.
+This advice is similar to [always forward testonly](#always-forward-testonly),
+except that it only applies to the main target (the target named `target_name`).
+Other targets should have their `visibility` restricted, so that your users
+can’t depend on your inner targets that are not part of your contract.
 
 ```gn
 template("my_template") {

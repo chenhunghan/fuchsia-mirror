@@ -24,8 +24,8 @@ type IfaceId = u32;
 /// Events to be reported to the wlanix main loop, for netlink serialization.
 #[derive(Debug)]
 pub(crate) enum ScheduledScanEvent {
-    ResultsAvailable { iface_id: IfaceId, _wake_lease: Option<WakeLease> },
-    Stopped { iface_id: IfaceId },
+    ResultsAvailable { iface_id: IfaceId, wake_lease: Option<WakeLease> },
+    Stopped { iface_id: IfaceId, wake_lease: Option<WakeLease> },
 }
 
 use std::collections::HashMap;
@@ -96,19 +96,24 @@ impl ScheduledScanController {
         iface: Arc<dyn ClientIface>,
     ) -> Result<(), Error> {
         // Clean up existing scheduled scan for this interface, if applicable.
-        {
+        let replaced_existing = {
             let mut states = self.states.lock();
-            if let Some(_old_state) = states.remove(&iface_id) {
-                warn!(
-                    "Received scheduled scan request for iface {} while one is already enabled. Stopping previous.",
-                    iface_id
-                );
-                self.telemetry_sender.send(TelemetryEvent::PnoScanDisabled {
-                    reason: wlan_telemetry::PnoScanDisabledReason::Internal,
-                });
-                let _ = self.event_sender.unbounded_send(ScheduledScanEvent::Stopped { iface_id });
-            }
+            let replaced = states.remove(&iface_id).is_some();
             states.insert(iface_id, ScheduledScanState::Starting);
+            replaced
+        };
+        if replaced_existing {
+            warn!(
+                "Received scheduled scan request for iface {} while one is already enabled. Stopping previous.",
+                iface_id
+            );
+            self.telemetry_sender.send(TelemetryEvent::PnoScanDisabled {
+                reason: wlan_telemetry::PnoScanDisabledReason::Internal,
+            });
+            let wake_lease = self.power_manager.take_wake_lease("wlanix-sched-scan-stopped").await;
+            let _ = self
+                .event_sender
+                .unbounded_send(ScheduledScanEvent::Stopped { iface_id, wake_lease });
         }
 
         // Attempt to start firmware scheduled scan.
@@ -177,7 +182,7 @@ impl ScheduledScanController {
                         let event_sender = self.event_sender.clone();
                         let power_manager = Arc::clone(&self.power_manager);
                         let task = fasync::Task::spawn(async move {
-                            software_scheduled_scan_loop(
+                            let wake_lease = software_scheduled_scan_loop(
                                 telemetry_sender,
                                 event_sender,
                                 power_manager,
@@ -188,7 +193,7 @@ impl ScheduledScanController {
                             )
                             .await;
                             if let Some(controller) = controller_weak.upgrade() {
-                                controller.on_software_scan_ended(iface_id).await;
+                                controller.on_software_scan_ended(iface_id, wake_lease).await;
                             }
                         });
                         // Update state to active
@@ -223,14 +228,26 @@ impl ScheduledScanController {
         self.telemetry_sender.send(TelemetryEvent::PnoScanDisabled {
             reason: wlan_telemetry::PnoScanDisabledReason::ApiRequest,
         });
-        let mut states = self.states.lock();
-        if states.remove(&iface_id).is_some() {
-            let _ = self.event_sender.unbounded_send(ScheduledScanEvent::Stopped { iface_id });
+        // Dropping the state drops the channel to the SME for this scheduled scan, causing it to be
+        // stopped.
+        let stopped = self.states.lock().remove(&iface_id).is_some();
+        if stopped {
+            let wake_lease = self.power_manager.take_wake_lease("wlanix-sched-scan-stopped").await;
+            let _ = self
+                .event_sender
+                .unbounded_send(ScheduledScanEvent::Stopped { iface_id, wake_lease });
         }
     }
 
     /// Updates state when firmware scheduled scanning is stopped by the driver or firmware
     async fn on_firmware_scan_ended(&self, iface_id: u32, res: Result<(), Error>) {
+        if !matches!(
+            self.states.lock().get(&iface_id),
+            Some(ScheduledScanState::FirmwareScansActive { .. })
+        ) {
+            return;
+        }
+        let wake_lease = self.power_manager.take_wake_lease("wlanix-sched-scan-stopped").await;
         let mut states = self.states.lock();
         if let Some(ScheduledScanState::FirmwareScansActive { .. }) = states.get(&iface_id) {
             match res {
@@ -248,16 +265,20 @@ impl ScheduledScanController {
                     self.telemetry_sender.send(TelemetryEvent::PnoScanFailure);
                 }
             }
-            let _ = self.event_sender.unbounded_send(ScheduledScanEvent::Stopped { iface_id });
+            let _ = self
+                .event_sender
+                .unbounded_send(ScheduledScanEvent::Stopped { iface_id, wake_lease });
             states.remove(&iface_id);
         }
     }
 
     /// Updates state when software scheduled scanning terminates.
-    async fn on_software_scan_ended(&self, iface_id: u32) {
+    async fn on_software_scan_ended(&self, iface_id: u32, wake_lease: Option<WakeLease>) {
         let mut states = self.states.lock();
         if let Some(ScheduledScanState::SoftwareScansActive { .. }) = states.remove(&iface_id) {
-            let _ = self.event_sender.unbounded_send(ScheduledScanEvent::Stopped { iface_id });
+            let _ = self
+                .event_sender
+                .unbounded_send(ScheduledScanEvent::Stopped { iface_id, wake_lease });
         }
     }
 
@@ -296,7 +317,7 @@ impl ScheduledScanController {
                         let event_sender = self.event_sender.clone();
                         let power_manager = Arc::clone(&self.power_manager);
                         let new_task = fasync::Task::spawn(async move {
-                            software_scheduled_scan_loop(
+                            let wake_lease = software_scheduled_scan_loop(
                                 telemetry_sender,
                                 event_sender,
                                 power_manager,
@@ -307,7 +328,7 @@ impl ScheduledScanController {
                             )
                             .await;
                             if let Some(controller) = controller_weak.upgrade() {
-                                controller.on_software_scan_ended(iface_id).await;
+                                controller.on_software_scan_ended(iface_id, wake_lease).await;
                             }
                         });
                         ScheduledScanState::SoftwareScansActive { request, iface, task: new_task }
@@ -335,12 +356,14 @@ async fn software_scheduled_scan_loop(
     iface: Arc<dyn ClientIface>,
     scan_primary_channels: Vec<u8>,
     match_sets: Option<Vec<fidl_common::ScheduledScanMatchSet>>,
-) {
+) -> Option<WakeLease> {
     info!("Starting software scheduled scan loop for iface {}", iface_id);
 
     loop {
         // Trigger scan
         info!("Triggering software scheduled scan for iface {}", iface_id);
+        // It's safe to take and hold this lease indefinitely because we only run this software
+        // scan while charging.
         let wake_lease = power_manager.take_wake_lease("wlanix-software-sched-scan").await;
         match iface.trigger_scan(None, scan_primary_channels.clone()).await {
             Ok(ifaces::ScanEnd::Complete) => {
@@ -357,7 +380,7 @@ async fn software_scheduled_scan_loop(
                     telemetry_sender.send(TelemetryEvent::PnoScanResultsReceived);
                     let _ = event_sender.unbounded_send(ScheduledScanEvent::ResultsAvailable {
                         iface_id,
-                        _wake_lease: wake_lease,
+                        wake_lease,
                     });
                 }
             }
@@ -373,7 +396,7 @@ async fn software_scheduled_scan_loop(
                 telemetry_sender.send(TelemetryEvent::ScanResult {
                     result: wlan_telemetry::ScanResult::Failed,
                 });
-                return;
+                return wake_lease;
             }
         }
 
@@ -394,6 +417,7 @@ async fn handle_scheduled_scan_transactions(
         match event {
             Ok(fidl_sme::ScheduledScanTransactionEvent::OnScheduledScanMatchesAvailable {
                 scan_results,
+                ..
             }) => {
                 let wake_lease = power_manager.take_wake_lease("wlanix-process-sched-scan").await;
                 info!("Received scheduled scan results from SME for iface {}", iface_id);
@@ -411,10 +435,8 @@ async fn handle_scheduled_scan_transactions(
                 iface.update_last_scan_results(results);
 
                 telemetry_sender.send(TelemetryEvent::PnoScanResultsReceived);
-                let _ = event_sender.unbounded_send(ScheduledScanEvent::ResultsAvailable {
-                    iface_id,
-                    _wake_lease: wake_lease,
-                });
+                let _ = event_sender
+                    .unbounded_send(ScheduledScanEvent::ResultsAvailable { iface_id, wake_lease });
             }
             Err(fidl::Error::ClientChannelClosed { .. }) => {
                 info!("Scheduled scan transaction channel closed by SME for iface {}", iface_id);
@@ -871,7 +893,7 @@ mod test {
         let event = event_receiver.try_recv().unwrap();
         let (iface_id, wake_lease) = assert_matches!(
             event,
-            ScheduledScanEvent::ResultsAvailable { iface_id, _wake_lease } => (iface_id, _wake_lease)
+            ScheduledScanEvent::ResultsAvailable { iface_id, wake_lease } => (iface_id, wake_lease)
         );
         assert_eq!(iface_id, 1);
         assert!(wake_lease.is_some());
@@ -914,7 +936,9 @@ mod test {
 
         // Send scheduled scan matches from SME
         let vmo = wlan_common::scan::write_vmo(vec![fake_scan_result()]).unwrap();
-        control_handle.send_on_scheduled_scan_matches_available(vmo).expect("failed to send event");
+        control_handle
+            .send_on_scheduled_scan_matches_available(vmo, None)
+            .expect("failed to send event");
 
         assert_matches!(exec.run_until_stalled(&mut txn_fut), Poll::Pending);
 
@@ -922,7 +946,7 @@ mod test {
         let event = event_receiver.try_recv().unwrap();
         let (iface_id, wake_lease) = assert_matches!(
             event,
-            ScheduledScanEvent::ResultsAvailable { iface_id, _wake_lease } => (iface_id, _wake_lease)
+            ScheduledScanEvent::ResultsAvailable { iface_id, wake_lease } => (iface_id, wake_lease)
         );
         assert_eq!(iface_id, 1);
         assert!(wake_lease.is_some());
@@ -936,5 +960,167 @@ mod test {
         // Dropping the wake lease releases it.
         drop(wake_lease);
         assert!(power_manager.is_lease_dropped("wlanix-process-sched-scan"));
+    }
+
+    // Verifies that when a firmware-offloaded scheduled scan is stopped by the driver/firmware
+    // (closing the SME `ScheduledScanTransaction` stream), `on_firmware_scan_ended` acquires a
+    // `"wlanix-sched-scan-stopped"` wake lease and attaches it to `ScheduledScanEvent::Stopped`.
+    #[fuchsia::test]
+    fn test_firmware_scan_ended_wake_lease() {
+        let mut exec = fasync::TestExecutor::new();
+        let (telemetry_sender, _telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
+        let telemetry_sender = TelemetrySender::new(telemetry_sender);
+        let (event_sender, mut event_receiver) = mpsc::unbounded();
+        let power_manager = Arc::new(TestPowerManager::new());
+        let controller = Arc::new(ScheduledScanController::new(
+            telemetry_sender,
+            event_sender,
+            power_manager.clone(),
+        ));
+        let iface = Arc::new(TestClientIface::new());
+
+        let request = fidl_common::ScheduledScanRequest {
+            ssids: Some(vec![b"TestSSID".to_vec()]),
+            scan_plans: Some(vec![fidl_common::ScheduledScanPlan { interval: 40, iterations: 0 }]),
+            ..Default::default()
+        };
+
+        // Start a firmware scheduled scan so the transaction handler task is spawned.
+        let mut start_fut = pin!(controller.on_start_sched_scan(request, 1, iface.clone()));
+        assert_matches!(exec.run_until_stalled(&mut start_fut), Poll::Ready(Ok(())));
+
+        // Simulate firmware/driver stopping the scheduled scan by closing the SME transaction stream,
+        // then drive the executor so the spawned task runs `on_firmware_scan_ended`.
+        drop(iface.pno_transaction_handle.lock().take());
+        let _ = exec.run_until_stalled(&mut std::future::pending::<()>());
+
+        // Verify that `ScheduledScanEvent::Stopped` is emitted with a wake lease.
+        let event = event_receiver.try_recv().expect("Expected ScheduledScanEvent::Stopped");
+        let (iface_id, wake_lease) = assert_matches!(
+            event,
+            ScheduledScanEvent::Stopped { iface_id, wake_lease } => (iface_id, wake_lease)
+        );
+        assert_eq!(iface_id, 1);
+        assert!(wake_lease.is_some());
+
+        // Verify that the `"wlanix-sched-scan-stopped"` lease was taken and remains active until
+        // the event's `wake_lease` is dropped.
+        let calls = power_manager.calls.lock();
+        assert!(calls.contains(&"wlanix-sched-scan-stopped".to_string()));
+        drop(calls);
+        assert!(!power_manager.is_lease_dropped("wlanix-sched-scan-stopped"));
+
+        drop(wake_lease);
+        assert!(power_manager.is_lease_dropped("wlanix-sched-scan-stopped"));
+    }
+
+    // Verifies that when a software fallback scheduled scan terminates on error, the active
+    // `"wlanix-software-sched-scan"` wake lease is forwarded on `ScheduledScanEvent::Stopped`.
+    #[fuchsia::test]
+    fn test_software_scan_ended_forwards_wake_lease() {
+        let mut exec = fasync::TestExecutor::new();
+        let (telemetry_sender, _telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
+        let telemetry_sender = TelemetrySender::new(telemetry_sender);
+        let (event_sender, mut event_receiver) = mpsc::unbounded();
+        let power_manager = Arc::new(TestPowerManager::new());
+        let controller = Arc::new(ScheduledScanController::new(
+            telemetry_sender,
+            event_sender,
+            power_manager.clone(),
+        ));
+        let iface = Arc::new(TestClientIface::new());
+
+        // Seed the controller with an active software scheduled scan state for iface 1.
+        controller.states.lock().insert(
+            1,
+            ScheduledScanState::SoftwareScansActive {
+                request: fidl_common::ScheduledScanRequest::default(),
+                iface: iface as Arc<dyn ClientIface>,
+                task: fasync::Task::spawn(async {}),
+            },
+        );
+
+        // Pass a `"wlanix-software-sched-scan"` wake lease into `on_software_scan_ended` (as
+        // returned when `software_scheduled_scan_loop` exits on a `trigger_scan` error).
+        let lease =
+            exec.run_singlethreaded(power_manager.take_wake_lease("wlanix-software-sched-scan"));
+        let mut ended_fut = pin!(controller.on_software_scan_ended(1, lease));
+        assert_matches!(exec.run_until_stalled(&mut ended_fut), Poll::Ready(()));
+
+        // Verify that `ScheduledScanEvent::Stopped` carries the wake lease and keeps it alive
+        // until dropped.
+        let event = event_receiver.try_recv().expect("Expected ScheduledScanEvent::Stopped");
+        let (iface_id, wake_lease) = assert_matches!(
+            event,
+            ScheduledScanEvent::Stopped { iface_id, wake_lease } => (iface_id, wake_lease)
+        );
+        assert_eq!(iface_id, 1);
+        assert!(wake_lease.is_some());
+        assert!(!power_manager.is_lease_dropped("wlanix-software-sched-scan"));
+
+        drop(wake_lease);
+        assert!(power_manager.is_lease_dropped("wlanix-software-sched-scan"));
+    }
+
+    // Verifies that stopping an active scheduled scan via `on_stop_sched_scan` or replacing an
+    // existing scheduled scan via `on_start_sched_scan` acquires a `"wlanix-sched-scan-stopped"`
+    // wake lease and attaches it to `ScheduledScanEvent::Stopped`.
+    #[fuchsia::test]
+    fn test_client_stop_and_replace_sched_scan_wake_lease() {
+        let mut exec = fasync::TestExecutor::new();
+        let (telemetry_sender, _telemetry_receiver) = mpsc::channel::<TelemetryEvent>(100);
+        let telemetry_sender = TelemetrySender::new(telemetry_sender);
+        let (event_sender, mut event_receiver) = mpsc::unbounded();
+        let power_manager = Arc::new(TestPowerManager::new());
+        let controller = Arc::new(ScheduledScanController::new(
+            telemetry_sender,
+            event_sender,
+            power_manager.clone(),
+        ));
+        let iface = Arc::new(TestClientIface::new());
+
+        let request = fidl_common::ScheduledScanRequest {
+            ssids: Some(vec![b"TestSSID".to_vec()]),
+            scan_plans: Some(vec![fidl_common::ScheduledScanPlan { interval: 40, iterations: 0 }]),
+            ..Default::default()
+        };
+
+        // 1. Start an initial firmware scheduled scan.
+        let mut start_fut_1 =
+            pin!(controller.on_start_sched_scan(request.clone(), 1, iface.clone()));
+        assert_matches!(exec.run_until_stalled(&mut start_fut_1), Poll::Ready(Ok(())));
+        assert!(event_receiver.try_recv().is_err());
+
+        // 2. Starting another scheduled scan on the same interface stops the previous one and
+        //    emits `ScheduledScanEvent::Stopped` with a wake lease.
+        let mut start_fut_2 = pin!(controller.on_start_sched_scan(request, 1, iface));
+        assert_matches!(exec.run_until_stalled(&mut start_fut_2), Poll::Ready(Ok(())));
+
+        let event = event_receiver.try_recv().expect("Expected Stopped event on replacement");
+        let (iface_id, wake_lease) = assert_matches!(
+            event,
+            ScheduledScanEvent::Stopped { iface_id, wake_lease } => (iface_id, wake_lease)
+        );
+        assert_eq!(iface_id, 1);
+        assert!(wake_lease.is_some());
+        assert!(!power_manager.is_lease_dropped("wlanix-sched-scan-stopped"));
+        drop(wake_lease);
+        assert!(power_manager.is_lease_dropped("wlanix-sched-scan-stopped"));
+
+        // 3. Explicitly stopping the active scan via `on_stop_sched_scan` also emits
+        //    `ScheduledScanEvent::Stopped` with a wake lease.
+        let mut stop_fut = pin!(controller.on_stop_sched_scan(1));
+        assert_matches!(exec.run_until_stalled(&mut stop_fut), Poll::Ready(()));
+
+        let event = event_receiver.try_recv().expect("Expected Stopped event on stop request");
+        let (iface_id, wake_lease) = assert_matches!(
+            event,
+            ScheduledScanEvent::Stopped { iface_id, wake_lease } => (iface_id, wake_lease)
+        );
+        assert_eq!(iface_id, 1);
+        assert!(wake_lease.is_some());
+        assert!(!power_manager.is_lease_dropped("wlanix-sched-scan-stopped"));
+        drop(wake_lease);
+        assert!(power_manager.is_lease_dropped("wlanix-sched-scan-stopped"));
     }
 }

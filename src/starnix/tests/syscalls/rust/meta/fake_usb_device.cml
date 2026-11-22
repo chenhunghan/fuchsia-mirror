@@ -10,6 +10,11 @@
     capabilities: [
         { service: "fuchsia.hardware.usb.UsbService" },
     ],
+    use: [
+        {
+            protocol: [ "fuchsia.posix.socket.Provider" ],
+        },
+    ],
     expose: [
         {
             service: "fuchsia.hardware.usb.UsbService",

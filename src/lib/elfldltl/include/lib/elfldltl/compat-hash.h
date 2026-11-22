@@ -121,7 +121,7 @@ class CompatHash {
 
     // Index zero is never a real symbol, so it's used as the end() iterator
     // state.  If a bogus index came out of the table, reset to end() state.
-    constexpr uint32_t ChainIndex(uint32_t symndx) {
+    constexpr uint32_t ChainIndex(uint32_t symndx) const {
       if (symndx < chain_.size()) [[likely]] {
         return symndx;
       }

@@ -390,6 +390,9 @@ impl ToResolveError for FetchError {
                 pkg::ResolveError::Io
             }
             DownloadBlob(fpkg_http::ClientDownloadBlobError::Other) => pkg::ResolveError::Io,
+            DownloadBlob(fpkg_http::ClientDownloadBlobError::Canceled) => {
+                pkg::ResolveError::Internal
+            }
         }
     }
 }
@@ -693,6 +696,7 @@ async fn download_blob(
             blob_fetch_params.header_network_timeout().into_nanos(),
             blob_fetch_params.body_network_timeout().into_nanos(),
             blob_fetch_params.download_resumption_attempts_limit(),
+            None,
         )
         .await
         .map_err(FetchError::DownloadBlobFidl)?
@@ -737,7 +741,8 @@ impl FetchError {
                 fpkg_http::ClientDownloadBlobError::Network => FetchErrorKind::Network,
                 fpkg_http::ClientDownloadBlobError::NotFound => FetchErrorKind::NotFound,
                 fpkg_http::ClientDownloadBlobError::NoSpace
-                | fpkg_http::ClientDownloadBlobError::Other => FetchErrorKind::Other,
+                | fpkg_http::ClientDownloadBlobError::Other
+                | fpkg_http::ClientDownloadBlobError::Canceled => FetchErrorKind::Other,
             },
             CreateBlob { .. }
             | BlobWritten { .. }

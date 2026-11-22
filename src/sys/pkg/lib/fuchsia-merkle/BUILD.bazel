@@ -2,12 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:skip
+exports_files(
+    [
+        "core/src/lib.rs",
+    ],
+    visibility = ["//src/sys/pkg/lib/fuchsia-merkle/verification:__pkg__"],
+)
+
+rustc_library(
+    name = "fuchsia-merkle-core",
+    srcs = [
+        "core/src/lib.rs",
+    ],
+    crate_root = "core/src/lib.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//visibility:private"],
+)
 
 rustc_library(
     name = "fuchsia-merkle",
@@ -30,6 +50,7 @@ rustc_library(
         "//tools/lib:__subpackages__",
     ],
     deps = [
+        ":fuchsia-merkle-core",
         "//sdk/rust/zx-status",
         "//src/storage/lib/ptr_slice",
         "//src/sys/pkg/lib/fuchsia-hash",
@@ -54,6 +75,17 @@ rustc_test(
 wrap_host_rust_test(
     name = "fuchsia-merkle_host_test",
     binary_name = "fuchsia-merkle_test",
+)
+
+# @bazel2gn:skip
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":fuchsia-merkle_host_test",
+        "//src/sys/pkg/lib/fuchsia-merkle/verification:fuchsia_merkle_verification_test",
+    ],
+    visibility = ["//src/sys/pkg:__pkg__"],
 )
 
 # @bazel2gn:skip

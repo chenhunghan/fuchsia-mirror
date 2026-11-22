@@ -104,7 +104,7 @@ idk_cc_source_library(
         # These can be removed when the tests stop using the
         # fdf_env_register_driver_entry/exit calls.
         "//src/tests/benchmarks/fidl/driver_cpp:__pkg__",
-        "//src/tests/benchmarks/fidl/driver_llcpp:__pkg__",
+        "//src/tests/benchmarks/fidl/driver_cpp_wire:__pkg__",
     ],
     deps = [
         ":driver_runtime",
@@ -127,7 +127,7 @@ idk_cc_source_library(
         "//src/connectivity:__subpackages__",
         "//src/devices:__subpackages__",
         "//src/tests/benchmarks/fidl/driver_cpp:__pkg__",
-        "//src/tests/benchmarks/fidl/driver_llcpp:__pkg__",
+        "//src/tests/benchmarks/fidl/driver_cpp_wire:__pkg__",
         "//src/virtualization:__subpackages__",
     ],
     deps = [
@@ -151,7 +151,7 @@ idk_cc_source_library(
         "//sdk/lib/driver/testing:__subpackages__",
         "//src/devices/bin/driver_runtime:__subpackages__",
         "//src/tests/benchmarks/fidl/driver_cpp:__subpackages__",
-        "//src/tests/benchmarks/fidl/driver_llcpp:__subpackages__",
+        "//src/tests/benchmarks/fidl/driver_cpp_wire:__subpackages__",
     ],
     deps = [
         ":driver_runtime",

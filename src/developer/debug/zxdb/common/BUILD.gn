@@ -33,6 +33,10 @@ source_set("test_support") {
     "scoped_test_env.h",
     "test_with_loop.h",
   ]
+  visibility = [
+    ":*",
+    "//src/developer/debug/*",
+  ]
   public_deps = [
     ":common",
     "//src/developer/debug/shared:test_support",
@@ -45,7 +49,6 @@ source_set("tests") {
     "adapters_unittest.cc",
     "address_ranges_unittest.cc",
     "cache_dir_unittest.cc",
-    "checked_math_unittest.cc",
     "curl_unittest.cc",
     "data_extractor_unittest.cc",
     "err_or_unittest.cc",
@@ -63,16 +66,6 @@ source_set("tests") {
     "//third_party/googletest:gtest",
     "//zircon/system/ulib/fbl",
   ]
-}
-
-source_set("perf_test") {
-  testonly = true
-  sources = [
-    "perf_test.cc",
-    "perf_test.h",
-  ]
-  deps = [ "//src/lib/fxl" ]
-  public_deps = [ "//third_party/googletest:gtest" ]
 }
 
 source_set("common") {
@@ -100,7 +93,6 @@ source_set("common") {
     "address_ranges.h",
     "async_util.h",
     "cache_dir.h",
-    "checked_math.h",
     "curl.h",
     "data_extractor.h",
     "err.h",

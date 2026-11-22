@@ -146,11 +146,11 @@ class DenyEachBinding_OnlyDenyDart_Result final {
   static DenyEachBinding_OnlyDenyDart_Result WithResponse(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Response&&);
   static DenyEachBinding_OnlyDenyDart_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<DenyEachBinding_OnlyDenyDart_Result> New();
@@ -196,7 +196,7 @@ class DenyEachBinding_OnlyDenyDart_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -225,9 +225,9 @@ class DenyEachBinding_OnlyDenyDart_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid);
   union {
     ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Response response_;
     uint32_t err_;
@@ -305,11 +305,11 @@ class DenyEachBinding_OnlyDenyPython_Result final {
   static DenyEachBinding_OnlyDenyPython_Result WithResponse(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Response&&);
   static DenyEachBinding_OnlyDenyPython_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<DenyEachBinding_OnlyDenyPython_Result> New();
@@ -355,7 +355,7 @@ class DenyEachBinding_OnlyDenyPython_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -384,9 +384,9 @@ class DenyEachBinding_OnlyDenyPython_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid);
   union {
     ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Response response_;
     uint32_t err_;
@@ -464,11 +464,11 @@ class DenyEachBinding_OnlyDenyRust_Result final {
   static DenyEachBinding_OnlyDenyRust_Result WithResponse(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Response&&);
   static DenyEachBinding_OnlyDenyRust_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<DenyEachBinding_OnlyDenyRust_Result> New();
@@ -514,7 +514,7 @@ class DenyEachBinding_OnlyDenyRust_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -543,9 +543,9 @@ class DenyEachBinding_OnlyDenyRust_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid);
   union {
     ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Response response_;
     uint32_t err_;
@@ -623,11 +623,11 @@ class DenyEachBinding_OnlyDenySyzkaller_Result final {
   static DenyEachBinding_OnlyDenySyzkaller_Result WithResponse(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Response&&);
   static DenyEachBinding_OnlyDenySyzkaller_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<DenyEachBinding_OnlyDenySyzkaller_Result> New();
@@ -673,7 +673,7 @@ class DenyEachBinding_OnlyDenySyzkaller_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -702,9 +702,9 @@ class DenyEachBinding_OnlyDenySyzkaller_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid);
   union {
     ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Response response_;
     uint32_t err_;
@@ -916,7 +916,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Response>
   }
 };
 template <>
-struct IsFidlXUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result> : public std::true_type {};
+struct IsFidlUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result>
@@ -928,9 +928,9 @@ struct CodingTraits<std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_On
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -960,7 +960,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
         return true;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -1017,7 +1017,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Respons
   }
 };
 template <>
-struct IsFidlXUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result> : public std::true_type {};
+struct IsFidlUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result>
@@ -1029,9 +1029,9 @@ struct CodingTraits<std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_On
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -1061,7 +1061,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result>
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
         return true;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -1118,7 +1118,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Response>
   }
 };
 template <>
-struct IsFidlXUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result> : public std::true_type {};
+struct IsFidlUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result>
@@ -1130,9 +1130,9 @@ struct CodingTraits<std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_On
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -1162,7 +1162,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
         return true;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -1219,7 +1219,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Resp
   }
 };
 template <>
-struct IsFidlXUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result> : public std::true_type {};
+struct IsFidlUnion<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result>
@@ -1231,9 +1231,9 @@ struct CodingTraits<std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_On
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -1263,7 +1263,7 @@ struct Equality<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Resu
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
         return true;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);

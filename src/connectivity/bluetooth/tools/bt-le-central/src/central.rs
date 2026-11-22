@@ -4,14 +4,13 @@
 
 use anyhow::{Error, format_err};
 use fuchsia_sync::Mutex;
-use futures::future::FutureExt;
-use futures::{StreamExt, pin_mut};
+use futures::StreamExt;
 use std::sync::Arc;
 
 use bt_common::{PeerId, Uuid};
 use bt_gatt::central::Central;
 
-use crate::gatt::repl::start_gatt_loop;
+use crate::gatt::repl::{WatchDisconnect, start_gatt_loop};
 
 pub type CentralStatePtr<T> = Arc<Mutex<CentralState<T>>>;
 
@@ -64,7 +63,7 @@ pub async fn watch_scan_results<T: bt_gatt::GattTypes>(
     result_stream: T::ScanResultStream,
 ) -> Result<(), Error>
 where
-    <T as bt_gatt::GattTypes>::Client: Clone,
+    <T as bt_gatt::GattTypes>::Client: Clone + WatchDisconnect,
 {
     eprintln!("Starting Scan");
     let mut pinned_stream = Box::pin(result_stream);
@@ -107,13 +106,11 @@ pub async fn connect<T: bt_gatt::GattTypes>(
     service_uuid: Option<Uuid>,
 ) -> Result<(), Error>
 where
-    <T as bt_gatt::GattTypes>::Client: Clone,
+    <T as bt_gatt::GattTypes>::Client: Clone + WatchDisconnect,
 {
     let client = central.connect(peer_id).await?;
 
     println!("Connecting to {}..", peer_id);
 
-    let gatt_loop_fut = start_gatt_loop::<T>(client, service_uuid).fuse();
-    pin_mut!(gatt_loop_fut);
-    gatt_loop_fut.await
+    start_gatt_loop::<T>(client, service_uuid).await
 }

@@ -7,26 +7,42 @@
 import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
-static_library("backtrace") {
+group("backtrace") {
   public_deps = [ ":headers" ]
+  deps = [ ":backtrace-rs" ]
+}
 
-  complete_static_lib = true
-
-  sources = [ "backtrace.cc" ]
+source_set("ffi") {
+  visibility = [ ":*" ]
+  sources = [ "backtrace_ffi.cc" ]
   deps = [
+    ":headers",
     "//zircon/kernel/lib/object-constants:headers",
-    "//zircon/kernel/phys/handoff",
   ]
 }
 
 kernel_rust_mod("backtrace-rs") {
-  sources = [ "backtrace.rs" ]
+  sources = [
+    "src/backtrace_ffi.rs",
+    "src/mod.rs",
+    "src/tests.rs",
+  ]
   deps = [
-    ":backtrace",
+    ":ffi",
     "//src/lib/zr",
+
+    # Provides crate `libc`, for libc::stdio::{FILE, fprintf, stdout}.
     "//zircon/kernel/lib/libc:rust",
     "//zircon/kernel/lib/object-constants:object-constants-rs",
   ]
+  if (current_cpu == "x64") {
+    sources += [ "src/cpu_context_exchange.rs" ]
+    deps += [
+      "//sdk/rust/zx-status",
+      "//sdk/rust/zx-types",
+    ]
+  }
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
 library_headers("headers") {

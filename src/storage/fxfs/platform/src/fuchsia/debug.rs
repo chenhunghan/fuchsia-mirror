@@ -2,13 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::component::map_to_raw_status;
 use crate::directory::FxDirectory;
 use crate::fuchsia::errors::map_to_status;
 use crate::volume::FxVolume;
 use crate::volumes_directory::VolumesDirectory;
 use anyhow::{Context, Error};
-use fidl_fuchsia_fxfs::DebugRequest;
 use fidl_fuchsia_io as fio;
 use fxfs::filesystem::FxFilesystem;
 use fxfs::lsm_tree::Query;
@@ -631,22 +629,6 @@ impl pseudo_fs::ToPseudoDirectory for FxfsDebugInfo {
     }
 }
 
-pub async fn handle_debug_request(
-    fs: Arc<FxFilesystem>,
-    volumes: Arc<VolumesDirectory>,
-    request: DebugRequest,
-) -> Result<(), fidl::Error> {
-    match request {
-        DebugRequest::Compact { responder } => {
-            responder.send(fs.journal().force_compact().await.map_err(map_to_raw_status))
-        }
-        DebugRequest::ClearCaches { responder } => {
-            volumes.clear_caches().await;
-            responder.send(Ok(()))
-        }
-    }
-}
-
 /// Creates fxfs' debug directory.
 pub fn create_debug_directory(
     fs: &Arc<FxFilesystem>,
@@ -737,7 +719,6 @@ mod tests {
     use fidl_fuchsia_fs_startup::CreateOptions;
     use fidl_fuchsia_io as fio;
     use fuchsia_fs::directory::{read_file, readdir};
-    use futures::StreamExt;
     use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
     use vfs::ToObjectRequest;
     use vfs::directory::entry::OpenRequest;
@@ -1172,30 +1153,6 @@ mod tests {
                 .unwrap();
             let data = file_proxy.read(64).await.unwrap().unwrap();
             assert_eq!(data.len(), 64);
-        }
-        fixture.close().await;
-    }
-
-    #[fuchsia::test]
-    async fn test_handle_debug_request() {
-        let fixture = TestFixture::new().await;
-        {
-            let (proxy, mut stream) =
-                fidl::endpoints::create_proxy_and_stream::<fidl_fuchsia_fxfs::DebugMarker>();
-            let fs = fixture.fs().clone();
-            let volumes = fixture.volumes_directory().clone();
-
-            let server_task = fuchsia_async::Task::spawn(async move {
-                while let Some(Ok(req)) = stream.next().await {
-                    handle_debug_request(fs.clone(), volumes.clone(), req).await.unwrap();
-                }
-            });
-
-            proxy.compact().await.unwrap().unwrap();
-            proxy.clear_caches().await.unwrap().unwrap();
-
-            drop(proxy);
-            server_task.await;
         }
         fixture.close().await;
     }

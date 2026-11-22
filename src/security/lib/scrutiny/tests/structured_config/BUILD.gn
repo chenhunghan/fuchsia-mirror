@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/bazel/assembly/bazel_product_bundle.gni")
+import("//build/bazel/bazel_inputs.gni")
 import("//build/components.gni")
 import("//build/info/info.gni")
 import("//build/python/python_binary.gni")
@@ -10,11 +11,53 @@ import("//build/security/verifier/verify_structured_config.gni")
 import("//build/testing/host_test.gni")
 import("//src/developer/ffx/config.gni")
 import("//src/storage/fshost/generated_fshost_config.gni")
+import("//tools/configc/build/config.gni")
 import("//zircon/kernel/phys/qemu.gni")
 
 if (is_fuchsia) {
+  # Generate the packaged `.cvf` in GN and export it via `bazel_input_file`
+  # until an in-tree platform `fuchsia_structured_config_values` Bazel rule is
+  # available under `//build/bazel/rules/components` (https://fxbug.dev/543568916).
+  fuchsia_component_manifest("packaged_config_component_manifest") {
+    testonly = true
+    component_name = "packaged_config_component"
+    manifest = "meta/packaged_config_component.cml"
+  }
+
+  generated_file("packaged_config_values_json") {
+    testonly = true
+    output_conversion = "json"
+    contents = {
+      immutable_packaged_config = "check this string!"
+      mutable_by_parent_config = "don't check this string!"
+    }
+    outputs = [ "$target_gen_dir/packaged_config_values.json" ]
+  }
+
+  _packaged_config_cm =
+      get_target_outputs(":packaged_config_component_manifest")
+
+  cvf("packaged_config_cvf") {
+    testonly = true
+    cm = _packaged_config_cm[0]
+    value_file = "$target_gen_dir/packaged_config_values.json"
+    deps = [
+      ":packaged_config_component_manifest",
+      ":packaged_config_values_json",
+    ]
+  }
+
+  bazel_input_file("packaged_config_cvf.bazel_input") {
+    testonly = true
+    generator = ":packaged_config_cvf"
+    outputs = get_target_outputs(":packaged_config_cvf")
+    gn_targets_name = "packaged_config_cvf"
+  }
+
   bazel_product_bundle("product_bundle") {
     testonly = true
+    generate_image_metadata = false
+    generate_size_report = false
     product_bundle_name = "scrutiny-structured-config-test"
     bazel_product_bundle_target = ":product_bundle"
     bazel_product_image_target = ":main_image"
@@ -24,7 +67,7 @@ if (is_fuchsia) {
     image_has_fvm = false
     image_use_vbmeta = false
     image_has_recovery = false
-    bazel_inputs_from_gn = []
+    bazel_inputs_from_gn = [ ":packaged_config_cvf.bazel_input" ]
   }
 
   extract_assembled_structured_config("extractor") {

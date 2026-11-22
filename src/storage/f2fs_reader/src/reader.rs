@@ -13,6 +13,8 @@ use crate::superblock::{
 };
 use anyhow::{Error, anyhow, bail, ensure};
 use async_trait::async_trait;
+use fscrypt::MAX_SYMLINK_LEN;
+use fscrypt::proxy_filename::ProxyFilename;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use storage_device::Device;
@@ -416,36 +418,48 @@ impl F2fsReader {
         Inode::try_load(self, ino).await
     }
 
-    /// Takes an inode for a symlink and the link as a set of bytes, decrypted if possible.
-    pub fn read_symlink(&self, inode: &Inode) -> Result<Box<[u8]>, Error> {
-        if let Some(inline_data) = inode.inline_data.as_deref() {
-            let mut filename = inline_data.to_vec();
-            if inode.header.advise_flags.contains(inode::AdviseFlags::Encrypted) {
-                // Encrypted symlinks have a 2-byte length prefix.
-                ensure!(filename.len() >= 2, "invalid encrypted symlink");
-                let symlink_len = u16::read_from_bytes(&filename[..2]).unwrap();
-                filename.drain(..2);
-                filename.truncate(symlink_len as usize);
-                ensure!(symlink_len == filename.len() as u16, "invalid encrypted symlink");
-                if let Some(decryptor) = self.get_decryptor_for_inode(inode) {
-                    decryptor.decrypt_filename_data(inode.footer.ino, &mut filename);
-                } else {
-                    // Symlinks don't have a hash code, so we just use 0.
-                    let proxy_filename: String =
-                        fscrypt::proxy_filename::ProxyFilename::new_with_hash_code(0, &filename)
-                            .into();
-                    filename = proxy_filename.as_bytes().to_vec();
-                }
-                // Unfortunately, it seems we still have to remove trailing nulls.
-                // fscrypt + f2fs publishes a file size equal to padded symlink length + 2 bytes.
-                while let Some(0) = filename.last() {
-                    filename.pop();
-                }
-            }
-            Ok(filename.into_boxed_slice())
+    /// Returns the symlink target as stored on disk. For encrypted symlinks, this is the ciphertext
+    /// without its 2-byte length prefix.
+    pub async fn read_raw_symlink(&self, inode: &Inode) -> Result<Vec<u8>, Error> {
+        ensure!(inode.header.mode.is_symlink(), "Not a symlink");
+        let mut filename = if let Some(inline_data) = inode.inline_data.as_deref() {
+            inline_data.to_vec()
         } else {
-            bail!("Not a valid symlink");
+            // Targets too large to be inlined are stored in the first data block.
+            ensure!(inode.header.size < BLOCK_SIZE as u64, "invalid symlink size");
+            let block_addr = inode.data_block_addr(0);
+            ensure!(block_addr != NULL_ADDR && block_addr != NEW_ADDR, "missing symlink block");
+            self.read_raw_block(block_addr).await?.subslice(..inode.header.size as usize).to_vec()
+        };
+        if inode.header.advise_flags.contains(inode::AdviseFlags::Encrypted) {
+            // Encrypted symlinks have a 2-byte length prefix.
+            ensure!(filename.len() >= 2, "invalid encrypted symlink");
+            let symlink_len = u16::read_from_bytes(&filename[..2]).unwrap();
+            filename.drain(..2);
+            filename.truncate(symlink_len as usize);
+            ensure!(symlink_len == filename.len() as u16, "invalid encrypted symlink");
         }
+        ensure!(!filename.is_empty(), "empty symlink");
+        Ok(filename)
+    }
+
+    /// Takes an inode for a symlink and the link as a set of bytes, decrypted if possible.
+    pub async fn read_symlink(&self, inode: &Inode) -> Result<Box<[u8]>, Error> {
+        let mut filename = self.read_raw_symlink(inode).await?;
+        if inode.header.advise_flags.contains(inode::AdviseFlags::Encrypted) {
+            if let Some(decryptor) = self.get_decryptor_for_inode(inode) {
+                decryptor.decrypt_filename_data(
+                    inode.footer.ino,
+                    &mut filename,
+                    MAX_SYMLINK_LEN,
+                )?;
+            } else {
+                // Symlinks don't have a hash code, so we just use 0.
+                let proxy_filename: String = ProxyFilename::new_with_hash_code(0, &filename).into();
+                filename = proxy_filename.into_bytes();
+            }
+        }
+        Ok(filename.into_boxed_slice())
     }
 
     /// Reads and returns a data block of a file.
@@ -614,12 +628,23 @@ mod test {
         let symlink_ino =
             resolve_inode_path(&f2fs, "/a/b/c/symlink").await.expect("resolve symlink");
         let inode = Inode::try_load(&f2fs, symlink_ino).await.expect("load inode");
-        assert_eq!(f2fs.read_symlink(&inode).expect("read_symlink").as_ref(), b"regular");
+        assert_eq!(f2fs.read_symlink(&inode).await.expect("read_symlink").as_ref(), b"regular");
+
+        let noinline_symlink_ino = resolve_inode_path(&f2fs, "/a/b/c/noinline_symlink")
+            .await
+            .expect("resolve noinline_symlink");
+        let inode = Inode::try_load(&f2fs, noinline_symlink_ino).await.expect("load inode");
+        assert!(inode.inline_data.is_none());
+        assert_eq!(f2fs.read_symlink(&inode).await.expect("read_symlink").as_ref(), b"regular");
 
         let long_symlink_ino =
             resolve_inode_path(&f2fs, "/a/b/c/long_symlink").await.expect("resolve long_symlink");
         let inode = Inode::try_load(&f2fs, long_symlink_ino).await.expect("load inode");
-        assert_eq!(f2fs.read_symlink(&inode).expect("read_symlink").as_ref(), &[b'x'; 300]);
+        assert!(inode.inline_data.is_none());
+        assert_eq!(
+            f2fs.read_symlink(&inode).await.expect("read_symlink").as_ref(),
+            &[b'x'; MAX_SYMLINK_LEN]
+        );
 
         let hardlink_ino =
             resolve_inode_path(&f2fs, "/a/b/c/hardlink").await.expect("resolve hardlink");
@@ -760,24 +785,24 @@ mod test {
         //   $ ls /mnt/fscrypt -lR
 
         // /fscrypt/<a>/<b>/<symlink>
-        let str_a = "IdmyUwAAAAAOl9HVqpdKN-_ywDMHOSfZ";
-        let str_b = "6R9bhwAAAACuLmcnL6xBt0P_vJJWp6YQ";
-        let str_symlink = "dF7k0gAAAABvEtw674aBPXfc_rHCsbV3";
-        let bytes_symlink_content = b"AAAAAAAAAACM6IekII-E3vHJzm33J1eL";
-        let str_long_symlink = "HnM4mwAAAABB7HRvWKIya-FksqTgbolc";
-        let bytes_long_symlink_content = b"AAAAAAAAAABIogZHvapivztsoT9mN6MBAf9URUlS264FcBSgrLnakF1jGg4gDK50pBlSOsQm5Vun-EkR6Ze8uBYtsFYRY3z8sGiEGafUvLup33UsEYST44YRH70m-TXq6XnDRb2L5UOlNqn1Uvdsl9l_ntXyhVWvvUL4mJKkkPRjup9hxK4WrnjMvPqbDplThe5cIFvbZmXfKdPGajdlejOzm6eLxuEuFq_8YHF0yYhZSNXchwH5_wbvW6uV";
+        let str_a = "AHX-BgAAAAAiAepTbau770kVtZZSkTqJ";
+        let str_b = "oWyiJQAAAACw5k3rI32dxW_l-wz1nu_W";
+        let str_symlink = "YsyRRAAAAADXrhVBHLAGL1shtqsjROTj";
+        let bytes_symlink_content = b"AAAAAAAAAAAFjogCzA3_Y0YRK3TV3Nla";
+        let str_long_symlink = "8HdlFQAAAAD1TvcdNZAM79jF9O_6QEXo";
+        let bytes_long_symlink_content = b"AAAAAAAAAAC7KmUQzA5Bv_mxEMcqA9bR-dqwWaKSmHIYCHK_p4N4l4ZRy8KJ3a1t8RVGK44Ll3flih6u6kH9sIhoO4If8dBWGlX6WovAQ_b2arcBu4xfKZio7l9_FkYHgXE3Yn5kNrRQGdBNEBKtAp-KuqaFx223MiO-o9fA_EvClaviE4biaYo3Zg__az5xykMdormHw8wfyt9IWPDG1YcAGVMqq4EUk4g32TQ85Si6Fzm2Eh4R8AZWPpf5";
 
         let mut expected: HashSet<_> = [
             // files in fscrypt/ dir.
-            "2eIT3gAAAAB4VWj2e6Ttqy351BEKgjWh6VMD0Du2PIcAmw64p-Jl4e0N8GO-qpkZ6yylR1gJ1b3cFiSwDKC-5inhP7pSKDQhb8Izgn0gtuBi0OkUPKqpbWz1JV-SSSNoX3M2jSZz1oQIFABDnIcWvcOZEbVGWhqIWtp1JBeEu6eKMgq5WgkfedreuB1yEWDiItOtTK2MO78Rxj9t23IV9mH5W3zsy8_IEVPuSJhe23Nm3LzhRKgVfnl9NvLi",
-            "5H-TUQAAAAA_ZP9GIVB-Yh07PbvrA8jZ",
-            "_9AbYAAAAACSHvhXF6DHRDaTDBqVfxi5",
-            "GGC5dQAAAACoZpLjiq0H1YuOypnN-WfU",
-            "IdmyUwAAAAAOl9HVqpdKN-_ywDMHOSfZ",
-            "pSNicgAAAAAKFA6NB4I2BvU2Du-8yEuN",
-            "t_E37gAAAABmG6LbvEwWbUj0bLD9Xr-O",
-            "wN4ItwAAAAALP7zB9V1lT6R-8lZHva6s",
-            "yq8v_gAAAABSE8ierS0NjTfx6x6U-XeC",
+            "3l37HwAAAAAg4XZfXcwPQpmp0DRZ-vsw",
+            "4TUzbgAAAAByjbOSD8TBbwLtA9YU_RuA",
+            "AHX-BgAAAAAiAepTbau770kVtZZSkTqJ",
+            "DZ4abQAAAACOyg96t6gSdIYOkxPWBacQ",
+            "lMsQ5QAAAABRqnJrkFFh82pYUr8IlUHmniZMvx4haWlrV8cyvbNMe-fbx8Rt0vDo1NqO7YJpebS-2W-Grg9oljTGjtkGU75780pbAapx9S7Olj26KexHwNEtDh9Dq2nmzqCoqwpTwo66xh0nbXEiT1BEyjSSz5IAxCUp1W-uC2D4hoBd3--XfDyvmGHyry6GYVah1qU17t3glSmG5jzakBm5WqhnEcKi0iRs6ZI8zZdNEV4Y7ejGgHpF2ZA4",
+            "NPkRRAAAAAAp3FfHErBolCpxdJ7vnwHB",
+            "rrzrnQAAAADsDv3oNUW9Q68rF0j7fXIW",
+            "XEhTwQAAAACsuC0dDmDYf6USvVdq9Ncc",
+            "Zws_zQAAAADDMEc89QBfN_hsCbJSQNNA",
         ]
         .into_iter()
         .collect();
@@ -812,7 +837,7 @@ mod test {
         let symlink_inode =
             Inode::try_load(&f2fs, enc_symlink_ino).await.expect("load symlink inode");
         assert_eq!(
-            &*f2fs.read_symlink(&symlink_inode).expect("read_symlink"),
+            &*f2fs.read_symlink(&symlink_inode).await.expect("read_symlink"),
             bytes_symlink_content
         );
         let enc_long_symlink_ino =
@@ -821,8 +846,9 @@ mod test {
                 .expect("resolve encrypted long_symlink");
         let long_symlink_inode =
             Inode::try_load(&f2fs, enc_long_symlink_ino).await.expect("load long_symlink inode");
+        assert!(long_symlink_inode.inline_data.is_none());
         assert_eq!(
-            &*f2fs.read_symlink(&long_symlink_inode).expect("read_symlink"),
+            &*f2fs.read_symlink(&long_symlink_inode).await.expect("read_symlink"),
             bytes_long_symlink_content
         );
 
@@ -847,7 +873,7 @@ mod test {
         assert_eq!(symlink_ino, enc_symlink_ino);
 
         let symlink_inode = Inode::try_load(&f2fs, symlink_ino).await.expect("load symlink inode");
-        let symlink = f2fs.read_symlink(&symlink_inode).expect("read_symlink");
+        let symlink = f2fs.read_symlink(&symlink_inode).await.expect("read_symlink");
         assert_eq!(*symlink, *b"inlined");
 
         let long_symlink_ino = resolve_inode_path(&f2fs, "/fscrypt/a/b/long_symlink")
@@ -857,8 +883,8 @@ mod test {
 
         let long_symlink_inode =
             Inode::try_load(&f2fs, long_symlink_ino).await.expect("load long_symlink inode");
-        let long_symlink = f2fs.read_symlink(&long_symlink_inode).expect("read_symlink");
-        assert_eq!(&*long_symlink, &[b'x'; 300]);
+        let long_symlink = f2fs.read_symlink(&long_symlink_inode).await.expect("read_symlink");
+        assert_eq!(&*long_symlink, &[b'x'; MAX_SYMLINK_LEN]);
     }
 
     #[fuchsia::test]

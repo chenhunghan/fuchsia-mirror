@@ -4,6 +4,12 @@
   "profiles": {
     // Fuchsia platform profiles.
     "fuchsia.scenic.input": { "capacity": "450us", "period": "4ms" },
+    // Per-period CPU slices preventing background Vulkan image imports and coordinator replies
+    // from starving main; imports exceeding capacity span multiple periods.
+    // TODO(https://fxbug.dev/584016954): Size these capacities from traces of thread CPU time, not
+    // wall time; imports spend much of their wall time blocked in synchronous sysmem calls.
+    "fuchsia.scenic.image-import": { "capacity": "1ms", "period": "8ms" },
+    "fuchsia.scenic.display-reply": { "capacity": "500us", "period": "8ms" },
     "fuchsia.scenic.main": { "capacity": "16ms", "period": "16ms" },
     "fuchsia.media.audio.core.dispatch": { "priority": 24 },
     "fuchsia.media.audio.core.mixer": { "capacity": "4400us", "period": "10ms" },

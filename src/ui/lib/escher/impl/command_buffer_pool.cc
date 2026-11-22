@@ -154,5 +154,20 @@ bool CommandBufferPool::Cleanup() {
   return true;
 }
 
+uint64_t CommandBufferPool::OldestPendingSequenceNumber() const {
+  return pending_buffers_.empty() ? 0 : pending_buffers_.front()->sequence_number();
+}
+
+bool CommandBufferPool::WaitOnOldestPendingCommandBuffer(uint64_t timeout_nanoseconds) {
+  if (cleaning_up_ || pending_buffers_.empty()) {
+    return false;
+  }
+  CommandBuffer* oldest = pending_buffers_.front().get();
+  if (oldest->is_active_ && !oldest->is_submitted_) {
+    return false;
+  }
+  return oldest->Wait(timeout_nanoseconds) == vk::Result::eSuccess;
+}
+
 }  // namespace impl
 }  // namespace escher

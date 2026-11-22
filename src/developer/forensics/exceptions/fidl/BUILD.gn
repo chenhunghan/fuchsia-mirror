@@ -13,5 +13,4 @@ fidl("fuchsia.exception.internal") {
     "//sdk/fidl/fuchsia.component",
     "//zircon/vdso/zx",
   ]
-  enable_hlcpp = true
 }

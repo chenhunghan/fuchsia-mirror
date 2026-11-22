@@ -2,6 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//src/starnix/containers:linux_resource.bzl", "linux_resource")
@@ -21,12 +28,38 @@ rustc_test(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-component",
-        # GN depends on the fuchsia-component-test group; Bazel depends on the library directly.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-runtime",
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "starnix_fp_stack_glue_test",
+)
+
+fx_component_manifest(
+    name = "integration_test_manifest",
+    testonly = True,
+    component_name = "integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_test.cml",
+)
+
+fx_test_component(
+    name = "integration_test",
+    compiled_manifest = ":integration_test_manifest",
+    test_type = "starnix",
+    deps = [":bin_packaged"],
 )
 
 rustc_binary(
@@ -48,4 +81,35 @@ linux_resource(
     testonly = True,
     src = ":print_uname_bin_bin",
     dest = "data/tests/print_uname_bin",
+)
+
+fx_component_manifest(
+    name = "print_uname_manifest",
+    testonly = True,
+    component_name = "print_uname",
+    manifest = "meta/print_uname.cml",
+)
+
+fx_component(
+    name = "print_uname",
+    testonly = True,
+    compiled_manifest = ":print_uname_manifest",
+    deps = [":print_uname_bin"],
+)
+
+fx_component_manifest(
+    name = "realm_manifest",
+    testonly = True,
+    component_name = "realm",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/realm.cml",
+)
+
+fx_component(
+    name = "realm",
+    testonly = True,
+    compiled_manifest = ":realm_manifest",
 )

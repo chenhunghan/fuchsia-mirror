@@ -423,7 +423,6 @@ inline std::string StringifyFidl<fuchsia_driver_framework::BusInfo>(
 
 inline void StringifyPbusNode(const fuchsia_hardware_platform_bus::Node& node,
                               const std::vector<std::optional<std::string>>& metadata_text,
-                              const std::vector<std::optional<std::string>>& power_config_text,
                               std::ostream& os) {
   std::string name = node.name() ? *node.name() : "unnamed";
   os << "  \"" << name << "\" {\n";
@@ -525,18 +524,6 @@ inline void StringifyPbusNode(const fuchsia_hardware_platform_bus::Node& node,
         os << "      data = [ <binary> size: " << md.data()->size() << " bytes ]\n";
       } else {
         os << "      data = [ <binary> ]\n";
-      }
-      os << "    }\n";
-    }
-  }
-
-  if (node.power_config() && !node.power_config()->empty()) {
-    for (size_t i = 0; i < node.power_config()->size(); ++i) {
-      os << "    power_config {\n";
-      if (i < power_config_text.size() && power_config_text[i]) {
-        os << "      " << *power_config_text[i] << "\n";
-      } else {
-        os << "      <binary>\n";
       }
       os << "    }\n";
     }

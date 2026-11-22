@@ -2,16 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# `system-update-checker-integration-test` and
-# `system-update-checker-integration-tests` stay in BUILD.gn above the
-# bazel2gn sentinel because `:driver` depends on
-# `//src/lib/fuchsia-component-test`, which bundles the GN-only
-# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`
-# needed at runtime by `sys/component/realm_builder.shard.cml`.
+test_suite(
+    name = "tests",
+    tests = [":system-update-checker-integration-tests"],
+    visibility = ["//src/sys/pkg:__pkg__"],
+)
+
 rustc_test(
     name = "driver",
     srcs = ["src/lib.rs"],
@@ -33,9 +44,7 @@ rustc_test(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN depends on the `//src/lib/fuchsia-component-test` group; Bazel
-        # depends on the library directly.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/lib/fuchsia-sync",
         "//src/sys/lib/cm_rust",
@@ -54,4 +63,50 @@ rustc_test(
         "//third_party/rust_crates/vendor:pretty_assertions",
         "//third_party/rust_crates/vendor:tempfile",
     ],
+)
+
+fx_packaged_binary(
+    name = "driver_packaged_bin",
+    testonly = True,
+    binary = ":driver",
+    binary_name = "system_update_checker_integration_test",
+)
+
+fx_component_manifest(
+    name = "system-update-checker-integration-test-manifest",
+    testonly = True,
+    component_name = "system-update-checker-integration-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/storage/lib/fs_management:client.shard.cml",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/system-update-checker-integration-test.cml",
+)
+
+fx_test_component(
+    name = "system-update-checker-integration-test",
+    compiled_manifest = ":system-update-checker-integration-test-manifest",
+    deps = [":driver_packaged_bin"],
+)
+
+fx_package(
+    name = "system-update-checker-integration-tests-package",
+    package_name = "system-update-checker-integration-tests",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/pkg/bin/system-update-checker:component",
+        "//src/sys/pkg/bin/system-update-committer:component",
+    ],
+    test_components = [":system-update-checker-integration-test"],
+)
+
+fx_test(
+    name = "system-update-checker-integration-tests",
+    max_log_severity = "ERROR",
+    package = ":system-update-checker-integration-tests-package",
 )

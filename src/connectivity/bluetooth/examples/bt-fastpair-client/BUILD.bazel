@@ -68,7 +68,6 @@ fx_component(
 
 fx_package(
     name = "bt-fastpair-client",
-    package_name = "bt-fastpair-client",
     components = [":component"],
 )
 

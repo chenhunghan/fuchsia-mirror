@@ -44,7 +44,7 @@ class MemberOnlyAppearsInImportingLibrary;
 
 class OnlyAppearsInImportingLibrary;
 
-class OnlyLlcpp;
+class OnlyCpp;
 
 class DenyEachBindingOnlyDenyDartResult;
 
@@ -56,7 +56,7 @@ class DenyEachBindingOnlyDenySyzkallerResult;
 
 constexpr uint32_t kAllBindings = 0u;
 
-class OnlyLlcpp {
+class OnlyCpp {
  private:
   using Storage_ =
       std::variant<
@@ -64,40 +64,40 @@ class OnlyLlcpp {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kX = 1,  // 0x1
   };
 
-  OnlyLlcpp(OnlyLlcpp&& other) noexcept;
-  OnlyLlcpp& operator=(OnlyLlcpp&& other) noexcept;
-  OnlyLlcpp(const OnlyLlcpp& other) noexcept;
-  OnlyLlcpp& operator=(const OnlyLlcpp& other) noexcept;
-  bool operator==(const OnlyLlcpp& other) const noexcept;
-  bool operator!=(const OnlyLlcpp& other) const noexcept;
+  OnlyCpp(OnlyCpp&& other) noexcept;
+  OnlyCpp& operator=(OnlyCpp&& other) noexcept;
+  OnlyCpp(const OnlyCpp& other) noexcept;
+  OnlyCpp& operator=(const OnlyCpp& other) noexcept;
+  bool operator==(const OnlyCpp& other) const noexcept;
+  bool operator!=(const OnlyCpp& other) const noexcept;
 
-  ::test_bindingsdenylist::OnlyLlcpp::Tag Which() const;
-  static OnlyLlcpp WithX(uint32_t val);
+  ::test_bindingsdenylist::OnlyCpp::Tag Which() const;
+  static OnlyCpp WithX(uint32_t val);
   const ::fidl::internal::UnionMemberView<1, Storage_> x() const;
   ::fidl::internal::UnionMemberView<1, Storage_> x();
 
   // Sets the union to hold the x member.
   //
 
-  OnlyLlcpp& x(uint32_t value);
+  OnlyCpp& x(uint32_t value);
 
-  OnlyLlcpp(::fidl::internal::DefaultConstructPossiblyInvalidObjectTag);
+  OnlyCpp(::fidl::internal::DefaultConstructPossiblyInvalidObjectTag);
 
  private:
   std::shared_ptr<Storage_> storage_;
   std::shared_ptr<Storage_> CloneStorage_() const;
-  friend struct ::fidl::internal::NaturalUnionCodingTraits<::test_bindingsdenylist::OnlyLlcpp>;
+  friend struct ::fidl::internal::NaturalUnionCodingTraits<::test_bindingsdenylist::OnlyCpp>;
   static constexpr auto kMembers = std::make_tuple(
       ::fidl::internal::NaturalUnionMember<::fidl::internal::NaturalCodingConstraintEmpty>(), ::fidl::internal::NaturalUnionMember<fidl::internal::NaturalCodingConstraintEmpty>());
 
-  explicit OnlyLlcpp(std::shared_ptr<Storage_> storage);
+  explicit OnlyCpp(std::shared_ptr<Storage_> storage);
 
-  static size_t TagToIndex(::fidl::internal::NaturalDecoder* decoder, ::test_bindingsdenylist::OnlyLlcpp::Tag tag);
-  static std::optional<::test_bindingsdenylist::OnlyLlcpp::Tag> IndexToTag(size_t index);
+  static size_t TagToIndex(::fidl::internal::NaturalDecoder* decoder, ::test_bindingsdenylist::OnlyCpp::Tag tag);
+  static std::optional<::test_bindingsdenylist::OnlyCpp::Tag> IndexToTag(size_t index);
 };
 
 class DenyEachBindingOnlyDenyDartRequest {
@@ -206,7 +206,7 @@ class DenyEachBindingOnlyDenyDartResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -357,7 +357,7 @@ class DenyEachBindingOnlyDenyPythonResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -508,7 +508,7 @@ class DenyEachBindingOnlyDenyRustResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -659,7 +659,7 @@ class DenyEachBindingOnlyDenySyzkallerResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -987,10 +987,10 @@ struct internal::NaturalCodingTraits<::test_bindingsdenylist::OnlyAppearsInImpor
     : public ::fidl::internal::NaturalStructCodingTraits<::test_bindingsdenylist::OnlyAppearsInImportingLibrary, 1> {};
 
 template <>
-struct IsFidlType<::test_bindingsdenylist::OnlyLlcpp> : public std::true_type {};
+struct IsFidlType<::test_bindingsdenylist::OnlyCpp> : public std::true_type {};
 
 template <>
-struct TypeTraits<::test_bindingsdenylist::OnlyLlcpp> {
+struct TypeTraits<::test_bindingsdenylist::OnlyCpp> {
   static constexpr uint32_t kMaxNumHandles = 0;
   static constexpr uint32_t kMaxDepth = 1;
   static constexpr uint32_t kPrimarySize = 16;
@@ -999,11 +999,11 @@ struct TypeTraits<::test_bindingsdenylist::OnlyLlcpp> {
 };
 
 template <>
-struct IsUnion<::test_bindingsdenylist::OnlyLlcpp> : public std::true_type {};
+struct IsUnion<::test_bindingsdenylist::OnlyCpp> : public std::true_type {};
 
 template <>
-struct internal::NaturalCodingTraits<::test_bindingsdenylist::OnlyLlcpp, ::fidl::internal::NaturalCodingConstraintEmpty> final
-    : public ::fidl::internal::NaturalUnionCodingTraits<::test_bindingsdenylist::OnlyLlcpp> {};
+struct internal::NaturalCodingTraits<::test_bindingsdenylist::OnlyCpp, ::fidl::internal::NaturalCodingConstraintEmpty> final
+    : public ::fidl::internal::NaturalUnionCodingTraits<::test_bindingsdenylist::OnlyCpp> {};
 template <>
 struct IsFidlType<::test_bindingsdenylist::DenyEachBindingOnlyDenyDartResult> : public std::true_type {};
 

@@ -5,6 +5,7 @@
 all_ffx_libraries = [
   # keep-sorted start
   "addr",
+  "agent",
   "arg_parsing",
   "auth",
   "buildid",
@@ -59,6 +60,7 @@ all_ffx_libraries = [
 
 tests_migrated_ffx_libraries = [
   # keep-sorted start
+  "agent",
   "arg_parsing",
   "buildid",
   "compat_info",
@@ -73,6 +75,7 @@ tests_migrated_ffx_libraries = [
   "process",
   "safe_string",
   "ssh",
+  "symbol-index",
   "target_errors",
   "termio",
   "trace",

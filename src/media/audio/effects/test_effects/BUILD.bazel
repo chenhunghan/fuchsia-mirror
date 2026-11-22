@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+stamp_group(
+    name = "test_effects",
+    stamp = "test_effects.stamp",
+    visibility = ["//src/media/audio/effects:__pkg__"],
+    deps = [
+        ":test_effects_v1",
+        ":test_effects_v2",
+    ],
+)
+
+fx_cc_library(
+    name = "test_effects_v1_headers",
+    hdrs = ["test_effects_v1.h"],
+    # Uses Fuchsia-only Zircon headers (<zircon/compiler.h>, <zircon/types.h>).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/media/audio/lib/effects_loader/testing:__pkg__",
+    ],
+    deps = ["//sdk/lib/media/audio/effects"],
+)
+
+fx_cc_binary(
+    name = "test_effects_v1",
+    srcs = [
+        "test_effects_v1.cc",
+        "test_effects_v1.h",
+    ],
+    linkshared = True,
+    # Uses Fuchsia-only Zircon headers (<zircon/compiler.h>, <zircon/types.h>).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/media/audio/audio_core:__pkg__",
+        "//src/media/audio/lib/effects_loader:__pkg__",
+    ],
+    deps = ["//sdk/lib/media/audio/effects"],
+)
+
+fx_cc_library(
+    name = "test_effects_v2",
+    srcs = ["test_effects_v2.cc"],
+    hdrs = ["test_effects_v2.h"],
+    # Uses Fuchsia-only FIDL, Zircon VMO, and //zircon/system/ulib/fzl headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/media/audio/audio_core:__subpackages__",
+        "//src/media/audio/lib/effects_loader:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.audio.effects:fuchsia.audio.effects_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fzl",
+    ],
+    alwayslink = True,
+)

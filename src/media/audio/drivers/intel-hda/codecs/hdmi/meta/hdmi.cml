@@ -14,4 +14,7 @@
         compat: "driver/hdmi-audio-codec.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
     },
+    use: [
+        { service: "fuchsia.hardware.intel.hda.CodecService" },
+    ],
 }

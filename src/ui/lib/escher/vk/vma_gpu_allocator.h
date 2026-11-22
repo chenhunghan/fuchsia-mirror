@@ -20,6 +20,8 @@ namespace escher {
 class VmaGpuAllocator : public GpuAllocator {
  public:
   VmaGpuAllocator(const VulkanContext& context);
+  // Aborts via `FX_CHECK` if any memory, buffer, or image allocated by this allocator is still
+  // alive.
   ~VmaGpuAllocator();
 
   // |GpuAllocator|

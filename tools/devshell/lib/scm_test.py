@@ -38,7 +38,7 @@ class ScmTest(unittest.TestCase):
         arm_repo.mkdir(parents=True)
         (arm_repo / ".git").mkdir(parents=True)
 
-        groups = scm.get_repo_groups(self.root, self.root)
+        groups = scm.get_repo_groups(self.root, self.root, all_repos=True)
         self.assertSequenceEqual(
             [group.repo_root for group in groups],
             [self.root, arm_repo, self.vendor_repo],
@@ -48,7 +48,9 @@ class ScmTest(unittest.TestCase):
         no_vendor_dir = self.enterContext(tempfile.TemporaryDirectory())
         no_vendor_root = pathlib.Path(no_vendor_dir).resolve()
         (no_vendor_root / ".git").mkdir()
-        groups = scm.get_repo_groups(no_vendor_root, no_vendor_root)
+        groups = scm.get_repo_groups(
+            no_vendor_root, no_vendor_root, all_repos=True
+        )
         self.assertSequenceEqual(
             [group.repo_root for group in groups], [no_vendor_root]
         )
@@ -68,7 +70,9 @@ class ScmTest(unittest.TestCase):
 
         groups_by_root = {
             group.repo_root: group
-            for group in scm.get_repo_groups(self.root, self.root)
+            for group in scm.get_repo_groups(
+                self.root, self.root, all_repos=True
+            )
         }
         self.assertTrue(groups_by_root[self.root].has_shac)
         self.assertTrue(groups_by_root[self.vendor_repo].has_shac)
@@ -158,21 +162,69 @@ class ScmTest(unittest.TestCase):
 
     def test_get_repo_groups_default_mode(self) -> None:
         groups = scm.get_repo_groups(self.root, self.root)
+        self.assertSequenceEqual(
+            groups,
+            (
+                scm.RepoGroup(
+                    repo_root=self.root,
+                    has_shac=True,
+                    files=(),
+                ),
+            ),
+        )
+
+    def test_get_repo_groups_default_mode_scopes_to_cwd_subrepo(self) -> None:
+        vendor_subdir = self.vendor_repo / "subdir"
+        vendor_subdir.mkdir(parents=True)
+
+        groups = scm.get_repo_groups(self.root, cwd=vendor_subdir)
+        self.assertSequenceEqual(
+            groups,
+            (
+                scm.RepoGroup(
+                    repo_root=self.vendor_repo,
+                    has_shac=True,
+                    files=(),
+                ),
+            ),
+        )
+
+        subrepo = self.root / "integration"
+        subrepo.mkdir(parents=True)
+        (subrepo / ".git").mkdir()
+        (subrepo / "shac.textproto").touch()
+
+        subrepo_groups = scm.get_repo_groups(self.root, cwd=subrepo)
+        self.assertSequenceEqual(
+            subrepo_groups,
+            (
+                scm.RepoGroup(
+                    repo_root=subrepo,
+                    has_shac=True,
+                    files=(),
+                ),
+            ),
+        )
+
+    def test_get_repo_groups_all_repos_mode(self) -> None:
+        groups = scm.get_repo_groups(
+            self.root, cwd=self.vendor_repo, all_repos=True
+        )
         self.assertEqual(len(groups), 2)
-        # Verify root repo is first
+        # Verify root repo is first even when cwd is in vendor/google
         self.assertEqual(groups[0].repo_root, self.root)
         self.assertEqual(groups[1].repo_root, self.vendor_repo)
         for group in groups:
             self.assertTrue(group.has_shac)
             self.assertSequenceEqual(group.files, ())
 
-    def test_get_repo_groups_default_mode_includes_cwd_subrepo(self) -> None:
+    def test_get_repo_groups_all_repos_mode_includes_cwd_subrepo(self) -> None:
         subrepo = self.root / "integration"
         subrepo.mkdir(parents=True)
         (subrepo / ".git").mkdir()
         (subrepo / "shac.textproto").touch()
 
-        groups = scm.get_repo_groups(self.root, cwd=subrepo)
+        groups = scm.get_repo_groups(self.root, cwd=subrepo, all_repos=True)
         self.assertEqual(len(groups), 3)
         self.assertEqual(groups[0].repo_root, self.root)
         self.assertEqual(groups[1].repo_root, subrepo)

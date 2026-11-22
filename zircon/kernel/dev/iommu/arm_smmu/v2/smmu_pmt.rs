@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! ARM SMMUv2 Pinned Memory Token (`SmmuPmt`) implementation.
+//! ARM SMMUv2 Pinned Memory Token (`SmmuV2Pmt`) implementation.
 
 use core::pin::Pin;
 
@@ -16,16 +16,16 @@ use pin_init::{pin_data, pinned_drop};
 use zx_status::Status;
 
 use crate::arm_smmu::common::{
-    Allocation, INVALID_PADDR, PAGE_SHIFT, PAGE_SIZE, PinnedVmoSource, QueryAddressResult,
-    SmmuPinnedVmo, is_page_rounded, round_up_page_size,
+    INVALID_PADDR, MappedPin, MappingAllocation, PAGE_SHIFT, PAGE_SIZE, PinnedVmoSource,
+    QueryAddressResult, SmmuPinnedVmo, is_page_rounded, round_up_page_size,
 };
-use crate::arm_smmu::v2::BtiMode;
-use crate::arm_smmu::v2::smmu_bti::{SmmuBti, SmmuBtiPmtLockClass, SmmuBtiPmtLockGuard};
+use crate::arm_smmu::v2::smmu_bti::{SmmuV2Bti, SmmuV2BtiPmtLockClass, SmmuV2BtiPmtLockGuard};
+use crate::arm_smmu::v2::utils::BtiMode;
 
-/// Lifecycle state of an [`SmmuPmt`] instance.
+/// Lifecycle state of an [`SmmuV2Pmt`] instance.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SmmuPmtState {
+pub(crate) enum SmmuPmtState {
     /// PMT has been created, but not successfully mapped and added to its owner BTI.
     Initial = 0,
     /// PMT has been created, mapped (or is in the process of mapping), and added to its owner BTI.
@@ -44,20 +44,21 @@ pub enum SmmuPmtState {
 
 /// An SMMUv2 Pinned Memory Token representing a pinned VMO region mapped into a BTI.
 ///
-/// The lifecycle of an [`SmmuPmt`] can be complicated due to the requirement to support the
+/// The lifecycle of an [`SmmuV2Pmt`] can be complicated due to the requirement to support the
 /// pattern where a user obtains a handle to a PMT via a `zx_bti_pin` syscall, and then destroys
 /// the last handle to the PMT without first deliberately unpinning the memory in the PMT via a
 /// call to `zx_pmt_unpin`.
 ///
-/// Refer to the comments in [`SmmuBti`] (`v2/smmu_bti.rs`) for a detailed lifecycle state diagram.
+/// Refer to the comments in [`SmmuV2Bti`] (`v2/smmu_bti.rs`) for a detailed lifecycle state
+/// diagram.
 ///
-/// ## External Lock Projection (`SmmuBti::pmt_lock`)
+/// ## External Lock Projection (`SmmuV2Bti::pmt_lock`)
 ///
-/// Mutable state (`pinned_vmo`, `state`, `map_location`) is protected by the owning `SmmuBti`'s
-/// `pmt_lock` (`SmmuBtiPmtLockClass`). Because `#[ksync::guarded]` requires a `#[mutex(...)]`
+/// Mutable state (`pin`, `state`) is protected by the owning `SmmuV2Bti`'s
+/// `pmt_lock` (`SmmuV2BtiPmtLockClass`). Because `#[ksync::guarded]` requires a `#[mutex(...)]`
 /// field on the struct to generate token-checked field projections (`guard_pmt_lock` /
 /// `guard_pmt_lock_mut`), `pmt_lock` is a zero-sized `KMutex<PhantomMutex>` tagged with the shared
-/// `SmmuBtiPmtLockClass`. Callers lock `owner.lock_pmt_lock()` and pass its `LockToken` into
+/// `SmmuV2BtiPmtLockClass`. Callers lock `owner.lock_pmt_lock()` and pass its `LockToken` into
 /// `pmt.guard_pmt_lock(token)` / `pmt.guard_pmt_lock_mut(token)`. The token proves that a
 /// `pmt_lock` is held, but not which BTI's: a zero-sized lock cannot be checked against its
 /// guard, so these calls are `unsafe`, and each caller states why the token is of the PMT's own
@@ -67,55 +68,54 @@ pub enum SmmuPmtState {
 #[pin_data(PinnedDrop)]
 #[derive(Recyclable)]
 #[repr(C)]
-pub struct SmmuPmt {
+pub struct SmmuV2Pmt {
     #[pin]
-    pub(crate) list_node: DoublyLinkedListNode<SmmuPmt>,
-    owner: RefPtr<SmmuBti>,
+    pub(crate) list_node: DoublyLinkedListNode<SmmuV2Pmt>,
+    owner: RefPtr<SmmuV2Bti>,
     bti_mode: BtiMode,
     size: u64,
-    #[mutex(SmmuBtiPmtLockClass)]
+    #[mutex(SmmuV2BtiPmtLockClass)]
     pub(crate) pmt_lock: KMutex<PhantomMutex>,
+    /// The pinned memory and, when a translation-mode mapping is active (or about to be released
+    /// on an aborted `map`), the mapping through which the device reaches it. Kept as one value
+    /// so that the pin cannot be released while the mapping is still in place; see [`MappedPin`].
     #[guarded_by(pmt_lock)]
-    pub(crate) pinned_vmo: SmmuPinnedVmo,
+    pub(crate) pin: MappedPin,
     #[guarded_by(pmt_lock)]
     pub(crate) state: SmmuPmtState,
-    /// Optional device address space allocation. While `SmmuPmt` instances always have this field,
-    /// it is only `Some` when a translation-mode mapping is active (or about to be released on
-    /// an aborted `SmmuBti::map`).
-    #[guarded_by(pmt_lock)]
-    pub(crate) map_location: Option<Allocation>,
 }
 
 // Manual implementation because `#[pin_data]` copies field attributes onto its internal
 // projection struct literal, where derive helper attributes like `#[dll_node]` are rejected.
-impl DoublyLinkedListContainable<Self> for SmmuPmt {
+impl DoublyLinkedListContainable<Self> for SmmuV2Pmt {
     #[inline]
     fn get_node(&self) -> &DoublyLinkedListNode<Self> {
         &self.list_node
     }
 }
 
-// SAFETY: `SmmuPmt` state is synchronized via `SmmuBti::pmt_lock` and atomic `RefCounted`.
-unsafe impl Send for SmmuPmt {}
-// SAFETY: `SmmuPmt` state is synchronized via `SmmuBti::pmt_lock` and atomic `RefCounted`.
-unsafe impl Sync for SmmuPmt {}
+// SAFETY: `SmmuV2Pmt` state is synchronized via `SmmuV2Bti::pmt_lock` and atomic `RefCounted`.
+unsafe impl Send for SmmuV2Pmt {}
+// SAFETY: `SmmuV2Pmt` state is synchronized via `SmmuV2Bti::pmt_lock` and atomic `RefCounted`.
+unsafe impl Sync for SmmuV2Pmt {}
 
-impl SmmuPmt {
-    /// Creates a new [`SmmuPmt`] in the [`SmmuPmtState::Initial`] state while holding
+impl SmmuV2Pmt {
+    /// Creates a new [`SmmuV2Pmt`] in the [`SmmuPmtState::Initial`] state while holding
     /// `owner.pmt_lock`.
     ///
-    /// If allocation of the [`SmmuPmt`] fails, any `map_location` is immediately unmapped via
-    /// `owner.release_mapping_locked(pmt_guard, map_location)` before returning `None`.
+    /// If allocation of the [`SmmuV2Pmt`] fails, any `map_location` is immediately unmapped via
+    /// [`MappedPin::unmap`] (calling `owner.release_mapping_locked`) and `pinned_vmo` is dropped
+    /// afterwards before returning `None`.
     ///
     /// # Safety
     ///
     /// `pmt_guard` must hold `owner.pmt_lock`.
     pub(crate) unsafe fn create(
-        owner: &SmmuBti,
-        pmt_guard: &mut Pin<&mut SmmuBtiPmtLockGuard<'_>>,
+        owner: &SmmuV2Bti,
+        pmt_guard: &mut Pin<&mut SmmuV2BtiPmtLockGuard<'_>>,
         pinned_vmo: SmmuPinnedVmo,
         bti_mode: BtiMode,
-        map_location: Option<Allocation>,
+        map_location: Option<MappingAllocation>,
     ) -> Option<RefPtr<Self>> {
         debug_assert!(bti_mode == BtiMode::Bypass || bti_mode == BtiMode::Translation);
         debug_assert!((bti_mode == BtiMode::Translation) == map_location.is_some());
@@ -128,9 +128,8 @@ impl SmmuPmt {
             bti_mode,
             size,
             pmt_lock: KMutex::new(PhantomMutex),
-            pinned_vmo: KCell::new(SmmuPinnedVmo::empty()),
+            pin: KCell::new(MappedPin::empty()),
             state: KCell::new(SmmuPmtState::Initial),
-            map_location: KCell::new(None),
         });
 
         match res {
@@ -140,15 +139,18 @@ impl SmmuPmt {
                     // promises that `pmt_guard` holds `owner.pmt_lock`.
                     let mut inner =
                         unsafe { pmt.guard_pmt_lock_mut(pmt_guard.as_mut().token_mut()) };
-                    *inner.pinned_vmo_mut() = pinned_vmo;
-                    *inner.map_location_mut() = map_location;
+                    *inner.pin_mut() = MappedPin::new(pinned_vmo, map_location);
                 }
                 Some(pmt)
             }
             Err(_) => {
-                // Failed to allocate the SmmuPmt instance. Tell our owning BTI to release any
-                // mapping we may have failed to transfer to the new SmmuPmt instance.
-                owner.release_mapping_locked(pmt_guard, map_location);
+                // Failed to allocate the SmmuV2Pmt instance. Tell our owning BTI to release any
+                // mapping we may have failed to transfer to the new SmmuV2Pmt instance.
+                // The pin is dropped, and its memory unpinned, only once the mapping is gone.
+                drop(
+                    MappedPin::new(pinned_vmo, map_location)
+                        .unmap(|mapping| owner.release_mapping_locked(pmt_guard, Some(mapping))),
+                );
                 None
             }
         }
@@ -168,8 +170,8 @@ impl SmmuPmt {
 
         // Grab our owner's PMT lock and check to be sure we are in the proper state to be querying
         // addresses. It is important that we check to make sure that we are in the `Active` state
-        // as well as checking that our `pinned_vmo` state holds a valid VMO, because it is our
-        // guarantee that our `map_location` is valid when we are operating in `Translation` mode.
+        // as well as checking that our `pin` holds a valid VMO, because it is our guarantee that
+        // our `pin.mapping()` is valid when we are operating in `Translation` mode.
         //
         // If (someday) a fault happens which causes the underlying VMO to become un-pinned (it
         // would need to be deferred to a thread, as we cannot unpin at interrupt time), the worst
@@ -178,7 +180,7 @@ impl SmmuPmt {
         ksync::lock!(let owner_guard = self.owner.lock_pmt_lock());
         // SAFETY: `owner_guard` holds `self.owner.pmt_lock`, which is the lock guarding `self`.
         let inner = unsafe { self.guard_pmt_lock(owner_guard.token()) };
-        if *inner.state() != SmmuPmtState::Active || !inner.pinned_vmo().has_vmo() {
+        if *inner.state() != SmmuPmtState::Active || !inner.pin().has_vmo() {
             return Err(Status::BAD_STATE);
         }
 
@@ -187,7 +189,7 @@ impl SmmuPmt {
         // the device's perspective. All we need to do is bounds check the request and offset our
         // request by our mapped location's base address.
         if self.bti_mode == BtiMode::Translation {
-            let Some(loc) = inner.map_location().as_ref() else {
+            let Some(loc) = inner.pin().mapping() else {
                 return Err(Status::BAD_STATE);
             };
             // Make sure the query fits inside of the mapping in our device's address space.
@@ -207,8 +209,8 @@ impl SmmuPmt {
         // The `SmmuPinnedVmo` demands that we ask it only about regions which have been properly
         // bound to the original pin location, and which are page aligned in both offset and size.
         // Since `query_offset` is relative to our pin aperture, we need to offset it by the
-        // `pinned_vmo`'s offset into the underlying VMO. We have already checked to be sure that
-        // `query_offset` is page aligned, and we know that `pinned_vmo.offset()` must be as well,
+        // `pin.vmo()`'s offset into the underlying VMO. We have already checked to be sure that
+        // `query_offset` is page aligned, and we know that `pin.vmo().offset()` must be as well,
         // so the sum must be too.
         //
         // Make sure that we have rounded `query_size` up to the nearest page boundary as well so
@@ -217,19 +219,28 @@ impl SmmuPmt {
         // that the entire region is contiguous (following the pattern in the `Bti::pin` syscall
         // handling for `ZX_BTI_CONTIGUOUS` requests), or they might be iterating a scatter-gather
         // list a page at a time, and they are simply passing the remaining length of their query
-        // (`PinnedMemoryTokenDispatcher::EncodeAddrs`).
+        // (`PinnedMemoryTokenDispatcher`).
         //
         // Unfortunately, `SmmuPinnedVmo::lookup_contiguous` is only going to return to us a single
         // page address if the full region from `[offset, offset + size)` is contiguous. Otherwise
         // it will return `Status::NOT_FOUND` when it hits the first discontinuity. In that case,
         // retry the operation for a single page so that we return the physical address of the
         // first page of the range to satisfy the user's request.
+        //
+        // The query is relative to what this PMT pinned, which may be a sub-range of the VMO.
+        // `lookup_contiguous` checks against the whole VMO, so the bounds of the pin are checked
+        // here, before the offset is rebased or the size rounded: otherwise a query could reach
+        // pages of the VMO this PMT never pinned, or wrap around.
         debug_assert_eq!(self.bti_mode, BtiMode::Bypass);
-        let query_offset = query_offset.wrapping_add(inner.pinned_vmo().offset());
+        let pinned_size = inner.pin().vmo().size();
+        if query_offset >= pinned_size || (query_size as u64) > (pinned_size - query_offset) {
+            return Err(Status::OUT_OF_RANGE);
+        }
+        let query_offset = query_offset + inner.pin().vmo().offset();
         let mut query_size_u64 = round_up_page_size(query_size as u64);
 
         for attempt in 0..2 {
-            match inner.pinned_vmo().lookup_contiguous(query_offset, query_size_u64) {
+            match inner.pin().vmo().lookup_contiguous(query_offset, query_size_u64) {
                 Ok(paddr) => {
                     debug_assert_ne!(paddr, INVALID_PADDR);
                     return Ok(QueryAddressResult {
@@ -274,15 +285,15 @@ impl SmmuPmt {
         unsafe { self.owner.on_pmt_zero_handles(self) };
     }
 
-    /// Returns a reference to the owning [`SmmuBti`].
+    /// Returns a reference to the owning [`SmmuV2Bti`].
     #[inline]
-    pub fn owner(&self) -> &RefPtr<SmmuBti> {
+    pub fn owner(&self) -> &RefPtr<SmmuV2Bti> {
         &self.owner
     }
 
     /// Returns `true` if this PMT is currently linked in `owner.active_pmt_list`.
     #[inline]
-    pub fn in_container(&self) -> bool {
+    pub(crate) fn in_container(&self) -> bool {
         self.list_node.in_container()
     }
 
@@ -294,31 +305,20 @@ impl SmmuPmt {
 
     /// Returns the number of pinned pages while holding `owner.pmt_lock`.
     #[inline]
-    pub(crate) fn pages(&self, _token: &LockToken<'_, SmmuBtiPmtLockClass>) -> u64 {
+    pub(crate) fn pages(&self, _token: &LockToken<'_, SmmuV2BtiPmtLockClass>) -> u64 {
         self.size >> PAGE_SHIFT
-    }
-
-    /// Returns the current [`SmmuPmtState`] while holding `owner.pmt_lock`.
-    ///
-    /// # Safety
-    ///
-    /// `token` must be of the owning BTI's `pmt_lock`.
-    #[inline]
-    pub(crate) unsafe fn state(&self, token: &LockToken<'_, SmmuBtiPmtLockClass>) -> SmmuPmtState {
-        // SAFETY: The caller promises that `token` is of `self.owner.pmt_lock`.
-        *unsafe { self.guard_pmt_lock(token) }.state()
     }
 }
 
 #[pinned_drop]
-impl PinnedDrop for SmmuPmt {
+impl PinnedDrop for SmmuV2Pmt {
     fn drop(self: Pin<&mut Self>) {
         // By the time that our PMT destructs, it must not be in any container (e.g. our owner's
         // `active_pmt_list`), and its state must be one of `Initial`, `Released`, or `Quarantined`
         // (we should never destruct while `Active`).
         //
         // The only legitimate reason for us to still be holding a pinned VMO is because we took
-        // ownership of it while in the `Initial` state during `SmmuBti::map`, but our BTI entered
+        // ownership of it while in the `Initial` state during `SmmuV2Bti::map`, but our BTI entered
         // the fault state before the PMT could be added to `active_pmt_list`. It is okay if this
         // happens: we have never been exposed to any users, and the pinned memory will be returned
         // as our `SmmuPinnedVmo` drops.
@@ -326,7 +326,7 @@ impl PinnedDrop for SmmuPmt {
         // Otherwise, we made it into the `active_pmt_list`, and the only way out of the list
         // (aside from shutting down the entire SMMU in tests) is via `on_pmt_unpin` or
         // `on_pmt_zero_handles`, which will put us into the `Released` or `Quarantined` state
-        // (respectively) and take `pinned_vmo` and `map_location`.
+        // (respectively) and take the `pin`, mapping first.
         //
         // No locks are taken here. `drop` may run wherever the last reference happens to be
         // released (including with our owner's `pmt_lock` held), and it has exclusive access to
@@ -343,21 +343,18 @@ impl PinnedDrop for SmmuPmt {
                 || state == SmmuPmtState::Quarantined
         );
 
-        // Temporary porting note: the C++ `~SmmuPmt` asserted `vmo == nullptr || state !=
-        // kInitial`, the opposite of what its own comment (and this one) describes, and the
-        // `iommu::Pmt` base destructor asserted that the VMO was gone. Both fired in debug builds
-        // when a BTI faulted while a pin was in progress.
-        debug_assert!(!this.pinned_vmo.get_inner_mut().has_vmo() || state == SmmuPmtState::Initial);
+        // As described above: still holding a pinned VMO is only legitimate in the `Initial`
+        // state.
+        debug_assert!(!this.pin.get_inner_mut().has_vmo() || state == SmmuPmtState::Initial);
 
-        // Temporary porting note: the C++ `~SmmuPmt` released a mapping which was still attached,
-        // relying on its only caller (the abort path of `SmmuBti::Map`) to be holding `pmt_lock_`.
-        // Here that path releases the mapping itself before dropping the PMT, so a mapping must
-        // never reach this point. Returning it would need `pmt_lock`, and letting it drop would
-        // free the address range while leaving the device able to reach memory which is about to
-        // be unpinned, so treat it as fatal.
+        // A mapping must never reach this point: `on_pmt_unpin` and `on_pmt_zero_handles` unmap
+        // before they release the pin, and the abort path of `SmmuV2Bti::map` unmaps before
+        // dropping the PMT. Returning the mapping here would need `pmt_lock`, and letting it
+        // drop would free the address range while leaving the device able to reach memory
+        // which is about to be unpinned, so treat it as fatal.
         assert!(
-            this.map_location.get_inner_mut().is_none(),
-            "SmmuPmt dropped with a mapping still attached (state {state:?})"
+            !this.pin.get_inner_mut().has_mapping(),
+            "SmmuV2Pmt dropped with a mapping still attached (state {state:?})"
         );
     }
 }

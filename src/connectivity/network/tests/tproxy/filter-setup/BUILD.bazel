@@ -7,6 +7,7 @@ load(
     "fx_component",
     "fx_component_manifest",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
@@ -57,6 +58,12 @@ fx_component(
     name = "filter-setup",
     testonly = True,
     compiled_manifest = ":filter-setup-manifest",
-    visibility = ["//src/connectivity/network/tests/tproxy:__pkg__"],
     deps = [":filter_setup_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "filter-setup",
+    testonly = True,
+    components = [":filter-setup"],
 )

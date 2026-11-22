@@ -4,25 +4,16 @@
 """Async Fuchsia base test class."""
 
 import enum
-import importlib
 import logging
 import os
 import pathlib
-import typing
-from collections.abc import Mapping
-from typing import Any, Dict, ParamSpec, TypeVar, Union
+from typing import Any, Dict, ParamSpec, TypeVar
 
 import fuchsia_async_extension
 import mobly_logger_extension
 from honeydew import errors
-from honeydew.auxiliary_devices.power_switch import (
-    power_switch,
-    power_switch_using_dmc,
-)
-from honeydew.auxiliary_devices.usb_power_hub import (
-    usb_power_hub,
-    usb_power_hub_using_dmc,
-)
+from honeydew.auxiliary_devices.power_switch import power_switch
+from honeydew.auxiliary_devices.usb_power_hub import usb_power_hub
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.typing import custom_types
 from mobly import config_parser as mobly_config_parser
@@ -190,14 +181,6 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
         )
         self.dut = self.fuchsia_devices[0]
 
-        for device in self.fuchsia_devices:
-            switch, outlet = self._lookup_power_switch(device)
-            if switch is not None:
-                device.set_power_switch(power_switch=switch, outlet=outlet)
-
-            hub, port = self._lookup_usb_power_hub(device)
-            if hub is not None:
-                device.set_usb_power_hub(usb_power_hub=hub, port=port)
         if (
             self.tracing_on == TracingOn.TEARDOWN_CLASS
             or self.tracing_on == TracingOn.TEARDOWN_CLASS_ON_FAIL
@@ -339,8 +322,8 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
         Args:
             device: FuchsiaDevice object.
         """
-        switch, outlet = self._lookup_power_switch(device)
-        hub, port = self._lookup_usb_power_hub(device)
+        switch = device.power_switch
+        hub = device.usb.power_hub
         if switch is None and hub is None:
             return
 
@@ -361,7 +344,7 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
 
         if switch is not None:
             try:
-                switch.power_on(outlet=outlet)
+                switch.power_on()
             except (power_switch.PowerSwitchError, errors.HoneydewError) as err:
                 # `HoneydewError` covers e.g. `HoneydewTimeoutError` from
                 # `host_shell.run()`, which implementations do not wrap.
@@ -372,7 +355,7 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
                 )
         if hub is not None:
             try:
-                hub.power_on(port=port)
+                hub.power_on()
             except (
                 usb_power_hub.UsbPowerHubError,
                 errors.HoneydewError,
@@ -567,111 +550,6 @@ class FuchsiaBaseTest(fuchsia_async_extension.AsyncBaseTestClass):
             raise errors.FatalDeviceError(
                 f"{fx_device.device_name} is unhealthy and failed to recover it"
             ) from err
-
-    def _lookup_power_switch(
-        self, fx_device: fuchsia_device.FuchsiaDevice
-    ) -> tuple[power_switch.PowerSwitch | None, int | None]:
-        """Returns the power switch and outlet to use for the given device."""
-        device_config: dict[str, object] = self._get_device_config(
-            controller_type="FuchsiaDevice",
-            identifier_key="name",
-            identifier_value=fx_device.device_name,
-        )
-        return self._lookup_power_switch_from_config(
-            device_config=device_config,
-            device_name=fx_device.device_name,
-        )
-
-    def _lookup_power_switch_from_config(
-        self,
-        device_config: Mapping[str, object],
-        device_name: str | None,
-    ) -> tuple[power_switch.PowerSwitch | None, int | None]:
-        """Returns the power switch and outlet to use for a device config.
-
-        Selected in this order:
-          1. The switch described by `power_switch_hw` + `power_switch_impl`
-             in the local testbed config, when both are present.
-          2. DMC (`PowerSwitchUsingDmc`), for devices power cycled in Fuchsia
-             infra (when `DMC_PATH` is set in the environment and `device_name`
-             is provided).
-
-        Returns:
-            The power switch and its outlet, or `(None, None)` if none apply.
-        """
-        power_switch_hw = typing.cast(
-            dict[str, str], device_config.get("power_switch_hw", {})
-        )
-        power_switch_impl = typing.cast(
-            dict[str, str], device_config.get("power_switch_impl", {})
-        )
-        power_switch_outlet = typing.cast(
-            Union[int, None], device_config.get("power_switch_outlet", None)
-        )
-        if power_switch_hw and power_switch_impl:
-            power_switch_class: type[power_switch.PowerSwitch] = getattr(
-                importlib.import_module(power_switch_impl["module"]),
-                power_switch_impl["class"],
-            )
-            return (
-                power_switch_class(**power_switch_hw),
-                power_switch_outlet,
-            )
-        elif power_switch_using_dmc.DMC_PATH_KEY in os.environ and device_name:
-            return (
-                power_switch_using_dmc.PowerSwitchUsingDmc(
-                    device_name=device_name,
-                ),
-                None,
-            )
-        else:
-            return (None, None)
-
-    def _lookup_usb_power_hub(
-        self, fx_device: fuchsia_device.FuchsiaDevice
-    ) -> tuple[usb_power_hub.UsbPowerHub | None, int | None]:
-        """Returns the USB power hub and port to use for the given device.
-
-        Selected in this order:
-          1. The hub described by `usb_power_hub_hw` + `usb_power_hub_impl`
-             in the testbed config, when both are present.
-          2. DMC, for devices power cycled in infra.
-
-        Returns:
-            The USB power hub and its port, or `(None, None)` if none apply.
-        """
-        device_config: dict[str, object] = self._get_device_config(
-            controller_type="FuchsiaDevice",
-            identifier_key="name",
-            identifier_value=fx_device.device_name,
-        )
-        usb_power_hub_hw = typing.cast(
-            dict[str, str], device_config.get("usb_power_hub_hw", {})
-        )
-        usb_power_hub_impl = typing.cast(
-            dict[str, str], device_config.get("usb_power_hub_impl", {})
-        )
-        usb_power_hub_port = typing.cast(
-            Union[int, None], device_config.get("usb_power_hub_port", None)
-        )
-        if usb_power_hub_hw and usb_power_hub_impl:
-            usb_power_hub_class: type[usb_power_hub.UsbPowerHub] = getattr(
-                importlib.import_module(usb_power_hub_impl["module"]),
-                usb_power_hub_impl["class"],
-            )
-            return (
-                usb_power_hub_class(**usb_power_hub_hw),
-                usb_power_hub_port,
-            )
-        elif usb_power_hub_using_dmc.DMC_PATH_KEY in os.environ:
-            return (
-                usb_power_hub_using_dmc.UsbPowerHubUsingDmc(
-                    device_name=fx_device.device_name,
-                ),
-                None,
-            )
-        else:
-            return (None, None)
 
     async def _log_message_to_devices(
         self, message: str, level: custom_types.LEVEL

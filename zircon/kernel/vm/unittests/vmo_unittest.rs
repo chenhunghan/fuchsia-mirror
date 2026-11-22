@@ -45,8 +45,9 @@ mod vmo_rs {
         make_uncommitted_pager_vmo, supply_pager_vmo_pages, test_region, test_region_user,
         verify_continuous_attribution_bytes,
     };
+    use core::cell::Cell;
     use core::ffi::c_void;
-    use core::mem::MaybeUninit;
+    use core::mem::{DropGuard, MaybeUninit};
     use core::num::NonZeroI64;
     use core::{ptr, slice};
     use debug::dprintf;
@@ -317,6 +318,25 @@ mod vmo_rs {
         // Unpin for physical VMOs does not currently do anything, but still call it to be API correct.
         vmo.unpin(0, PAGE_SIZE);
 
+        drop(vmo);
+        // SAFETY: vm_page was allocated via alloc_page above and is no longer referenced by vmo.
+        unsafe { pmm::free_page(vm_page) };
+    }
+
+    /// Tests deferred deletion of a deep chain of physical VMO slices.
+    #[test]
+    fn vmo_physical_slice_deferred_delete_test() {
+        let (vm_page, pa) = unwrap_ok!(pmm::alloc_page(0));
+
+        let mut vmo = VmObjectPhysical::into_vm_object(unwrap_ok!(VmObjectPhysical::create(
+            pa,
+            PAGE_SIZE_USIZE,
+        )));
+        for _ in 0..512 {
+            vmo = unwrap_ok!(vmo.create_child_slice(0, PAGE_SIZE, false));
+        }
+
+        // Dropping the leaf slice triggers deferred deletion of the entire ancestor chain.
         drop(vmo);
         // SAFETY: vm_page was allocated via alloc_page above and is no longer referenced by vmo.
         unsafe { pmm::free_page(vm_page) };
@@ -683,9 +703,9 @@ mod vmo_rs {
         let (ptr, result) = fill_and_test(ptr);
         expect_true!(result);
 
-        // SAFETY: `ptr.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let err = unsafe { ka.free_region(ptr.as_ptr() as usize) };
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let err = unsafe { ka.free_region(ptr.as_ptr().addr()) };
         expect_ok!(err, "unmapping object");
     }
 
@@ -726,9 +746,9 @@ mod vmo_rs {
         let (ptr, result) = fill_and_test(ptr);
         expect_true!(result);
 
-        // SAFETY: `ptr.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let err = unsafe { ka.free_region(ptr.as_ptr() as usize) };
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let err = unsafe { ka.free_region(ptr.as_ptr().addr()) };
         expect_ok!(err, "unmapping object");
 
         // map it again
@@ -756,9 +776,9 @@ mod vmo_rs {
         let result = test_region(fill_seed, ptr);
         expect_true!(result, "testing region for corruption");
 
-        // SAFETY: `ptr.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let err = unsafe { ka.free_region(ptr.as_ptr() as usize) };
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let err = unsafe { ka.free_region(ptr.as_ptr().addr()) };
         expect_ok!(err, "unmapping object");
     }
 
@@ -851,19 +871,19 @@ mod vmo_rs {
             "testing region for corruption"
         );
 
-        // SAFETY: `ptr3.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let ret = unsafe { ka.free_region(ptr3.as_ptr() as usize) };
+        // SAFETY: `ptr3` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let ret = unsafe { ka.free_region(ptr3.as_ptr().addr()) };
         expect_ok!(ret, "unmapping object third time");
 
-        // SAFETY: `ptr2.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let ret = unsafe { ka.free_region(ptr2.as_ptr() as usize) };
+        // SAFETY: `ptr2` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let ret = unsafe { ka.free_region(ptr2.as_ptr().addr()) };
         expect_ok!(ret, "unmapping object second time");
 
-        // SAFETY: `ptr.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let ret = unsafe { ka.free_region(ptr.as_ptr() as usize) };
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let ret = unsafe { ka.free_region(ptr.as_ptr().addr()) };
         expect_ok!(ret, "unmapping object");
     }
 
@@ -952,9 +972,9 @@ mod vmo_rs {
         expect_true!(result, "writing to object");
 
         // unmap it
-        // SAFETY: `ptr.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        expect_ok!(unsafe { ka.free_region(ptr.as_ptr() as usize) });
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        expect_ok!(unsafe { ka.free_region(ptr.as_ptr().addr()) });
 
         // test that we can read from it
         let mut b = Vector::<MaybeUninit<u8>>::new();
@@ -1069,9 +1089,9 @@ mod vmo_rs {
                 Status::BAD_STATE.into_raw(),
                 "set flags while mapped"
             );
-            // SAFETY: `ptr as usize` is a valid virtual address previously returned by
-            // `map_object_internal` in `ka` that has not yet been freed.
-            expect_ok!(unsafe { ka.free_region(ptr as usize) }, "unmap vmo");
+            // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a
+            // pin this code owns, and nothing uses that mapping any more.
+            expect_ok!(unsafe { ka.free_region(ptr.addr()) }, "unmap vmo");
             // SAFETY: `cache_policy` is appropriate for future mappings of `vmo`.
             expect_ok!(
                 unsafe { vmo.set_mapping_cache_policy(cache_policy) },
@@ -1092,9 +1112,9 @@ mod vmo_rs {
                     "map vmo again"
                 )
             };
-            // SAFETY: `ptr as usize` is a valid virtual address previously returned by
-            // `map_object_internal` in `ka` that has not yet been freed.
-            expect_ok!(unsafe { ka.free_region(ptr as usize) }, "unmap vmo");
+            // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a
+            // pin this code owns, and nothing uses that mapping any more.
+            expect_ok!(unsafe { ka.free_region(ptr.addr()) }, "unmap vmo");
         }
 
         // SAFETY: `vm_page` is a valid allocated PMM page from `pmm::alloc_page` that has not been
@@ -1344,9 +1364,9 @@ mod vmo_rs {
         let (ptr, result) = fill_and_test(ptr);
         expect_true!(result);
 
-        // SAFETY: `ptr.as_ptr() as usize` is a valid virtual address previously returned by
-        // `map_object_internal` in `ka` that has not yet been freed.
-        let err = unsafe { ka.free_region(ptr.as_ptr() as usize) };
+        // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin
+        // this code owns, and nothing uses that mapping any more.
+        let err = unsafe { ka.free_region(ptr.as_ptr().addr()) };
         expect_ok!(err, "unmapping object");
     }
 
@@ -3051,15 +3071,12 @@ mod vmo_rs {
                 )
             });
 
-            struct DeferCleanupMapping(*mut c_void);
-            impl Drop for DeferCleanupMapping {
-                fn drop(&mut self) {
-                    // SAFETY: self.0 was allocated via map_object_internal and is not yet freed.
-                    let res = unsafe { VmAspace::kernel_aspace().free_region(self.0 as usize) };
-                    assert!(res.is_ok());
-                }
-            }
-            let _defer_cleanup_mapping = DeferCleanupMapping(ptr);
+            let _defer_cleanup_mapping = DropGuard::new(ptr, |ptr| {
+                // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned
+                // by a pin this code owns, and nothing uses that mapping any more.
+                let res = unsafe { VmAspace::kernel_aspace().free_region(ptr.addr()) };
+                assert!(res.is_ok());
+            });
             let base: *mut u8 = ptr.cast();
             // SAFETY: `base` points to a committed mapping of `alloc_size` bytes.
             let base = unsafe { slice::from_raw_parts_mut(base, alloc_size as usize) };
@@ -3126,7 +3143,7 @@ mod vmo_rs {
             // SAFETY: Test owns the VMO and the page request, meeting all underlying safety
             // obligations.
             let status =
-                unsafe { vmo.get_page(0, fault::flag::SW_FAULT, Some(page_request.as_mut())) };
+                unsafe { vmo.get_page(0, fault::flag::SW_FAULT, Some(page_request.as_ref())) };
             assert_err!(status.map(|_| ()), Status::SHOULD_WAIT);
             // Dropping the VMO runs the dead transition (detach + close of the page source) and
             // frees the VmCowPages, while the PageSource/PhysicalPageProvider stay alive via
@@ -3135,7 +3152,7 @@ mod vmo_rs {
         }
         // Cancelling (and then dropping) page_request releases the last PageSource reference and
         // runs ~PhysicalPageProvider after ~VmCowPages.
-        page_request.cancel_requests();
+        page_request.as_ref().cancel_requests();
     }
 
     /// Tests eviction hints on a VMO.
@@ -3762,15 +3779,12 @@ mod vmo_rs {
                     ARCH_RW_FLAGS,
                 )
             });
-            struct DeferCleanupMapping(*mut c_void);
-            impl Drop for DeferCleanupMapping {
-                fn drop(&mut self) {
-                    // SAFETY: self.0 was allocated via map_object_internal and is not yet freed.
-                    let res = unsafe { VmAspace::kernel_aspace().free_region(self.0 as usize) };
-                    assert!(res.is_ok());
-                }
-            }
-            let _cleanup_mapping = DeferCleanupMapping(ptr);
+            let _cleanup_mapping = DropGuard::new(ptr, |ptr| {
+                // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned
+                // by a pin this code owns, and nothing uses that mapping any more.
+                let res = unsafe { VmAspace::kernel_aspace().free_region(ptr.addr()) };
+                assert!(res.is_ok());
+            });
 
             expect_ok!(vmo.zero_range(0, 2 * PAGE_SIZE));
         });
@@ -4488,15 +4502,12 @@ mod vmo_rs {
                 ARCH_RW_FLAGS,
             )
         });
-        struct DeferCleanupMapping(usize);
-        impl Drop for DeferCleanupMapping {
-            fn drop(&mut self) {
-                // SAFETY: self.0 was allocated via map_object_internal and is not yet freed.
-                let status = unsafe { VmAspace::kernel_aspace().free_region(self.0) };
-                assert!(status.is_ok());
-            }
-        }
-        let _cleanup_mapping = DeferCleanupMapping(ptr as usize);
+        let _cleanup_mapping = DropGuard::new(ptr, |ptr| {
+            // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a
+            // pin this code owns, and nothing uses that mapping any more.
+            let status = unsafe { VmAspace::kernel_aspace().free_region(ptr.addr()) };
+            assert!(status.is_ok());
+        });
 
         // Show that this is indeed a unidirectional clone, and that the kernel mapping will be
         // subject to the attempted unmap.
@@ -4557,17 +4568,13 @@ mod vmo_rs {
 
         // Lookup readable on the VMO should find all 4 pages.
         let mut pages_seen = 0;
-        let lookup_fn = |_offset: u64, _pa: PAddr, pages_seen: &mut u64| {
-            *pages_seen += 1;
+        let lookup_fn = |_offset: u64, _pa: PAddr| {
+            pages_seen += 1;
             Status::NEXT
         };
 
         let vmo_cow = vmo.debug_get_cow_pages().expect("vmo has cow pages");
-        let status = vmo_cow.debug_lookup_readable(
-            VmCowRange::new(0, alloc_size),
-            &mut pages_seen,
-            lookup_fn,
-        );
+        let status = vmo_cow.debug_lookup_readable(VmCowRange::new(0, alloc_size), lookup_fn);
         expect_ok!(status);
         expect_eq!(page_count, pages_seen);
     }
@@ -4610,17 +4617,13 @@ mod vmo_rs {
 
         // Lookup readable on the clone VMO should find all 4 pages.
         let mut pages_seen = 0;
-        let lookup_fn = |_offset: u64, _pa: PAddr, pages_seen: &mut u64| {
-            *pages_seen += 1;
+        let lookup_fn = |_offset: u64, _pa: PAddr| {
+            pages_seen += 1;
             Status::NEXT
         };
 
         let clone_cow = clone.debug_get_cow_pages().unwrap();
-        let status = clone_cow.debug_lookup_readable(
-            VmCowRange::new(0, alloc_size),
-            &mut pages_seen,
-            lookup_fn,
-        );
+        let status = clone_cow.debug_lookup_readable(VmCowRange::new(0, alloc_size), lookup_fn);
         expect_ok!(status);
         expect_eq!(page_count, pages_seen);
     }
@@ -4647,10 +4650,10 @@ mod vmo_rs {
             // SAFETY: Test owns the VMO and page request, meeting all underlying safety
             // obligations.
             let status =
-                unsafe { vmo.get_page(i, fault::flag::FAULT_MASK, Some(page_request.as_mut())) };
+                unsafe { vmo.get_page(i, fault::flag::FAULT_MASK, Some(page_request.as_ref())) };
             if status == Err(Status::SHOULD_WAIT) {
                 // The stub page provider does not support waiting.
-                page_request.cancel_requests();
+                page_request.as_ref().cancel_requests();
             } else {
                 expect_ok!(status.map(|_| ()));
             }
@@ -5007,18 +5010,19 @@ mod vmo_rs {
         let aspace =
             unwrap_some!(VmAspace::create(Type::User, b"test aspace"), "VmAspace::Create pointer");
 
-        // SAFETY: Active aspace reference is not invalidated during test.
-        let old_aspace = unsafe { thread::current_active_aspace() };
-        let _cleanup_aspace = zr::defer(|| {
+        // SAFETY: Running on an initialized thread.
+        let old_aspace = unsafe { thread::current_active_aspace_ptr() };
+        let destroy_ok = Cell::new(false);
+        let aspace = DropGuard::new(aspace, |aspace| {
             // SAFETY: It is sound to restore the previous address space.
             unsafe { vmm::set_active_aspace(old_aspace) };
-            assert!(aspace.destroy().is_ok());
+            destroy_ok.set(aspace.destroy().is_ok());
         });
         // SAFETY: `aspace` remains valid while active.
-        unsafe { vmm::set_active_aspace(Some(&aspace)) };
+        unsafe { vmm::set_active_aspace(Some(VmAspace::as_non_null(&aspace))) };
 
         let mapping_result = unwrap_ok!(
-            aspace.root_vmar().unwrap().create_vm_mapping(
+            aspace.root_vmar().unwrap().create_vm_mapping_no_overwrite(
                 0,
                 alloc_size,
                 0,
@@ -5026,7 +5030,6 @@ mod vmo_rs {
                 VmObjectPaged::into_vm_object(vmo),
                 0,
                 ARCH_RW_USER_FLAGS,
-                b"test",
             ),
             "mapping object"
         );
@@ -5036,7 +5039,9 @@ mod vmo_rs {
         // fill with known pattern and test
         expect_true!(fill_and_test_user(uptr, alloc_size));
 
-        // cleanup_aspace destroys the whole space now.
+        // Dropping `aspace` restores the old address space and destroys this one now.
+        drop(aspace);
+        expect_true!(destroy_ok.get());
     }
 
     /// Tests creating and destroying clones of VMOs with compressed pages.
@@ -5179,18 +5184,18 @@ mod vmo_rs {
 
         // Pin and map the clone into the kernel aspace.
         let _pinned_vmo = unwrap_ok!(PinnedVmObject::create(clone.clone(), 0, PAGE_SIZE, true));
-        let result = unwrap_ok!(VmAspace::kernel_aspace().root_vmar().unwrap().create_vm_mapping(
-            0,
-            PAGE_SIZE_USIZE,
-            0,
-            vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
-            clone,
-            0,
-            ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            b"pin clone map",
-        ));
-        let mapping = result.mapping;
-        let _cleanup = zr::defer(|| {
+        let result = unwrap_ok!(
+            VmAspace::kernel_aspace().root_vmar().unwrap().create_vm_mapping_no_overwrite(
+                0,
+                PAGE_SIZE_USIZE,
+                0,
+                vmar::flag::CAN_MAP_READ | vmar::flag::CAN_MAP_WRITE,
+                clone,
+                0,
+                ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
+            )
+        );
+        let mapping = DropGuard::new(result.mapping, |mapping| {
             let _ = mapping.destroy();
         });
         assert_ok!(mapping.map_range(0, PAGE_SIZE_USIZE, true, false));
@@ -5502,29 +5507,30 @@ mod vmo_rs {
         // Create a test user aspace to map the vmo.
         let aspace = unwrap_some!(VmAspace::create(Type::User, b"test aspace"));
 
-        // SAFETY: Active aspace reference is not invalidated during test.
-        let old_aspace = unsafe { thread::current_active_aspace() };
-        let _cleanup_aspace = zr::defer(|| {
+        // SAFETY: Running on an initialized thread.
+        let old_aspace = unsafe { thread::current_active_aspace_ptr() };
+        let destroy_ok = Cell::new(false);
+        let aspace = DropGuard::new(aspace, |aspace| {
             // SAFETY: It is sound to restore the previous address space.
             unsafe { vmm::set_active_aspace(old_aspace) };
-            assert!(aspace.destroy().is_ok());
+            destroy_ok.set(aspace.destroy().is_ok());
         });
         // SAFETY: `aspace` remains valid while active.
-        unsafe { vmm::set_active_aspace(Some(&aspace)) };
+        unsafe { vmm::set_active_aspace(Some(VmAspace::as_non_null(&aspace))) };
 
         // Map the vmo.
         let map_size = 3 * PAGE_SIZE;
         let map_size_usize = 3 * PAGE_SIZE_USIZE;
-        let mapping_result = unwrap_ok!(aspace.root_vmar().unwrap().create_vm_mapping(
-            0,
-            map_size_usize,
-            0,
-            0,
-            VmObjectPaged::into_vm_object(vmo.clone()),
-            size - map_size,
-            ARCH_RW_USER_FLAGS,
-            b"test",
-        ));
+        let mapping_result =
+            unwrap_ok!(aspace.root_vmar().unwrap().create_vm_mapping_no_overwrite(
+                0,
+                map_size_usize,
+                0,
+                0,
+                VmObjectPaged::into_vm_object(vmo.clone()),
+                size - map_size,
+                ARCH_RW_USER_FLAGS,
+            ));
 
         // Fill with a known pattern through the mapping, and verify the contents.
         let mut uptr = UserInOutPtr::new(ptr::with_exposed_provenance_mut(mapping_result.base));
@@ -5577,16 +5583,16 @@ mod vmo_rs {
         expect_true!(verify_continuous_attribution_bytes(&vmo, 0));
 
         // Creating a mapping succeeds.
-        let mapping2_result = unwrap_ok!(aspace.root_vmar().unwrap().create_vm_mapping(
-            0,
-            map_size_usize,
-            0,
-            0,
-            VmObjectPaged::into_vm_object(vmo.clone()),
-            size - map_size,
-            ARCH_RW_USER_FLAGS,
-            b"test2",
-        ));
+        let mapping2_result =
+            unwrap_ok!(aspace.root_vmar().unwrap().create_vm_mapping_no_overwrite(
+                0,
+                map_size_usize,
+                0,
+                0,
+                VmObjectPaged::into_vm_object(vmo.clone()),
+                size - map_size,
+                ARCH_RW_USER_FLAGS,
+            ));
         expect_true!(AttributionCounts::zero() == vmo.get_attributed_memory());
         expect_true!(verify_continuous_attribution_bytes(&vmo, 0));
 
@@ -5620,6 +5626,9 @@ mod vmo_rs {
         // The unmapped pages should still be intact after the Write() above.
         let buf_init = unwrap_ok!(vmo.read(0, &mut buf[..size_usize - map_size_usize]));
         expect_true!(fill_init[..size_usize - map_size_usize] == *buf_init);
+
+        drop(aspace);
+        expect_true!(destroy_ok.get());
     }
 
     /// Tests looking up compressed pages with different fault flags.

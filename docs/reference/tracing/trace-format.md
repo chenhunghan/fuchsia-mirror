@@ -95,7 +95,7 @@ All records include a header word that contains the following basic
 information:
 
 - **Record type**: A 4-bit field that identifies the type of the record
-  and the information it contains. See [Record Types](#record_types).
+  and the information it contains. See [Record types](#record-types).
 - **Record size**: Typically, a 12-bit field that indicates the number of words
   (multiples of 8 byte units) within the record _including the record
   header itself_.  The maximum possible size of a record is 4095 words
@@ -236,7 +236,7 @@ private extensions.
   information can be detected by examining the record's size and payload).
 - Defining new argument types.
 
-## Record Types
+## Record types {#record-types}
 
 There are the following record types:
 
@@ -652,7 +652,8 @@ correlation id.
 
 ##### Format
 
-![drawing](images/trace-format/event567.png)
+![Diagram showing format of an async begin/instant/end event
+record.](images/trace-format/event567.png)
 
 _async correlation word_
 
@@ -997,7 +998,8 @@ context switch. By definition, the new state of the incoming thread is
 "running" since it was just resumed.
 
 ##### Format
-![drawing](images/trace-format/context.png)
+![Diagram showing format of a legacy context switch
+record.](images/trace-format/context.png)
 
 - `[0 .. 3]`: record type (8)
 - `[4 .. 15]`: record size (inclusive of this word) as a multiple of 8 bytes
@@ -1049,7 +1051,7 @@ Describes a message written to the log at a particular moment in time.
 
 ##### Format
 
-![drawing](images/trace-format/log.png)
+![Diagram showing format of a log record.](images/trace-format/log.png)
 
 _header word_
 
@@ -1278,7 +1280,8 @@ included in the record.
 
 ##### Format
 
-![drawing](images/trace-format/largeblob.png)
+![Diagram showing format of a large BLOB record
+header.](images/trace-format/largeblob.png)
 
 _header word_
 
@@ -1299,7 +1302,8 @@ within the blob.
 
 ##### Format
 
-![drawing](images/trace-format/largeblob0.png)
+![Diagram showing format of an in-band large blob record with
+metadata.](images/trace-format/largeblob0.png)
 
 _header word_
 
@@ -1360,7 +1364,8 @@ within the blob.
 
 ##### Format
 
-![drawing](images/trace-format/largeblob1.png)
+![Diagram showing format of an in-band large blob record without
+metadata.](images/trace-format/largeblob1.png)
 
 _header word_
 
@@ -1425,7 +1430,8 @@ argument type.
 
 ##### Format
 
-![drawing](images/trace-format/argument.png)
+![Diagram showing format of an argument
+header.](images/trace-format/argument.png)
 
 _argument header word_
 
@@ -1444,7 +1450,7 @@ Represents an argument that appears in name only, without a value.
 
 ##### Format
 
-![drawing](images/trace-format/argument0.png)
+![Diagram showing format of a null argument.](images/trace-format/argument0.png)
 
 _argument header word_
 
@@ -1463,7 +1469,8 @@ Represents a 32-bit signed integer.
 
 ##### Format
 
-![drawing](images/trace-format/argument1.png)
+![Diagram showing format of a 32-bit signed integer
+argument.](images/trace-format/argument1.png)
 
 _argument header word_
 
@@ -1482,7 +1489,8 @@ Represents a 32-bit unsigned integer.
 
 ##### Format
 
-![drawing](images/trace-format/argument2.png)
+![Diagram showing format of a 32-bit unsigned integer
+argument.](images/trace-format/argument2.png)
 
 _argument header word_
 
@@ -1502,7 +1510,8 @@ use the **32-bit signed integer argument** type instead.
 
 ##### Format
 
-![drawing](images/trace-format/argument3.png)
+![Diagram showing format of a 64-bit signed integer
+argument.](images/trace-format/argument3.png)
 
 _argument header word_
 
@@ -1526,7 +1535,8 @@ use the **32-bit unsigned integer argument** type instead.
 
 ##### Format
 
-![drawing](images/trace-format/argument4.png)
+![Diagram showing format of a 64-bit unsigned integer
+argument.](images/trace-format/argument4.png)
 
 _argument header word_
 
@@ -1549,7 +1559,8 @@ Represents a double-precision floating point number.
 
 ##### Format
 
-![drawing](images/trace-format/argument5.png)
+![Diagram showing format of a double-precision floating point
+argument.](images/trace-format/argument5.png)
 
 _argument header word_
 
@@ -1572,7 +1583,8 @@ Represents a string value.
 
 ##### Format
 
-![drawing](images/trace-format/argument6.png)
+![Diagram showing format of a string
+argument.](images/trace-format/argument6.png)
 
 _argument header word_
 
@@ -1597,7 +1609,8 @@ be provided by a **userspace object record** associated with the same pointer.
 
 ##### Format
 
-![drawing](images/trace-format/argument7.png)
+![Diagram showing format of a pointer
+argument.](images/trace-format/argument7.png)
 
 _argument header word_
 
@@ -1614,7 +1627,7 @@ _argument value word_
 
 - `[0 .. 63]`: the pointer value
 
-### Kernel object id argument (argument type = 8) {#kernerl-object-id-argument}
+### Kernel object id argument (argument type = 8) {#kernel-object-id-argument}
 
 Represents a koid (kernel object id). Additional information about the
 referent can be provided by a **kernel object record** associated with the
@@ -1622,7 +1635,8 @@ same koid.
 
 ##### Format
 
-![drawing](images/trace-format/argument8.png)
+![Diagram showing format of a kernel object id
+argument.](images/trace-format/argument8.png)
 
 _argument header word_
 
@@ -1645,7 +1659,8 @@ Represents a boolean.
 
 ##### Format
 
-![drawing](images/trace-format/argument9.png)
+![Diagram showing format of a boolean
+argument.](images/trace-format/argument9.png)
 
 _argument header word_
 
@@ -1664,7 +1679,8 @@ Represents opaque binary data. The maximum size is slightly smaller than 32k.
 
 ##### Format
 
-![drawing](images/trace-format/argument10.png)
+![Diagram showing format of a blob
+argument.](images/trace-format/argument10.png)
 
 _argument header word_
 

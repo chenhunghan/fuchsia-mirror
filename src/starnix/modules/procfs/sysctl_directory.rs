@@ -6,8 +6,8 @@ use starnix_core::security::{self, Auditable, PermissionFlags};
 use starnix_core::task::CurrentTask;
 use starnix_core::vfs::pseudo::simple_directory::{SimpleDirectory, SimpleDirectoryMutator};
 use starnix_core::vfs::{
-    AppendLockWriteGuard, CheckAccessReason, FileOps, FileSystemHandle, FsNode, FsNodeHandle,
-    FsNodeInfo, FsNodeOps, fs_node_impl_not_dir,
+    AppendLockWriteGuard, CheckAccessReason, FileObject, FileOps, FileSystemHandle, FsNode,
+    FsNodeHandle, FsNodeInfo, FsNodeOps, fs_node_impl_not_dir,
 };
 use starnix_sync::DynamicLockDepRwLock;
 use starnix_uapi::auth::Capabilities;
@@ -53,9 +53,10 @@ impl<T: FsNodeOps, const ADMIN_CAP: u32> FsNodeOps for SysctlFsNodeOps<T, ADMIN_
         guard: &AppendLockWriteGuard<'_>,
         node: &FsNode,
         current_task: &CurrentTask,
+        file: Option<&FileObject>,
         length: u64,
     ) -> Result<(), Errno> {
-        self.inner.truncate(guard, node, current_task, length)
+        self.inner.truncate(guard, node, current_task, file, length)
     }
 
     fn check_access(
@@ -91,11 +92,13 @@ fn check_sysctl_access(
     node_mode: FileMode,
     admin_capability: Capabilities,
 ) -> Result<(), Errno> {
-    let (fsuid, is_in_group) = {
+    // Unlike other files, sysctl files are checked against the effective user and group IDs, not
+    // the filesystem IDs.
+    let (euid, is_in_group) = {
         let current_creds = current_task.current_creds();
-        (current_creds.fsuid, current_creds.is_in_group(node_gid))
+        (current_creds.euid, current_creds.is_in_group(node_gid))
     };
-    let granted = if fsuid == node_uid {
+    let granted = if euid == node_uid {
         node_mode.user_access()
     } else if is_in_group {
         node_mode.group_access()
@@ -142,6 +145,12 @@ impl<const ADMIN_CAP: u32> SysctlDirectory<ADMIN_CAP> {
 
     pub fn into_node(self, fs: &FileSystemHandle, mode: u32) -> FsNodeHandle {
         self.directory.into_node(fs, mode)
+    }
+
+    /// Extracts the underlying [`SimpleDirectory`] so callers can wrap the directory node in
+    /// custom [`FsNodeOps`] while keeping [`SysctlFsNodeOps`] `ADMIN_CAP` checks on leaf entries.
+    pub fn into_inner(self) -> Arc<SimpleDirectory> {
+        self.directory
     }
 }
 

@@ -599,7 +599,10 @@ func toGNValue(x any) string {
 		if strings.HasPrefix(val, "{") && strings.HasSuffix(val, "}") {
 			return val
 		}
-		return fmt.Sprintf(`"%s"`, val)
+		// Escape GN string special characters (such as "${...}" in
+		// file paths) so GN does not treat them as string interpolations.
+		gnStringEscaper := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "$", `\$`)
+		return fmt.Sprintf(`"%s"`, gnStringEscaper.Replace(val))
 	case []string:
 		var values []string
 		for _, element := range val {

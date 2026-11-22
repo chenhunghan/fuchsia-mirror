@@ -4,8 +4,9 @@ Revision: 66da97b9420113c1cab4ca567b4f4d6f2aa2178c
 Upstream Revision: https://boringssl.googlesource.com/boringssl/+/66da97b9420113c1cab4ca567b4f4d6f2aa2178c/
 Security Critical: yes
 
+License: Apache-2.0, BSD-3-Clause, ISC
 License File: src/LICENSE
-  License: BSD-3-Clause, Copyright, ISC, MIT, Misc, OpenSSL
+Generated Notice File: NOTICE.fuchsia
 
 Description:
   A fork of OpenSSL, as described at https://www.imperialviolet.org/2014/06/20/boringssl.html
@@ -17,6 +18,12 @@ Description:
   go run $FUCHSIA_DIR/third_party/boringssl/roll_boringssl.go
   ```
   1. Test according to instructions given by the previous step.
+  1. If the roll requires changes to defines or compiler flags in `BUILD.gn`,
+     make the same changes in `BUILD.bazel` (see the matching `LINT.IfChange`
+     blocks). On Fuchsia, the `libcrypto.so` used by GN in the default
+     `-shared` toolchain is built by Bazel
+     (`//third_party/boringssl:_crypto_shared_lib`), so changes made only in
+     `BUILD.gn` do not apply to it.
   1. Commit, review, and submit the changes to this repository. Remind the reviewer in the commit message to independently verify the upstream URL, execute the roll and compare the roll outputs.
      A reviewer can sync to the same revision using
      ```

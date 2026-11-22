@@ -136,7 +136,7 @@ However, if you want to run Fuchsia on a hardware device, see
 
 <!-- Reference links -->
 
-[get-fuchsia-source]:/docs/get-started/get_fuchsia_source.md
+[get-fuchsia-source]: /docs/get-started/get_fuchsia_source.md
 [build-workbench]: /docs/development/build/build_workbench.md
 [fx-set-reference]: https://fuchsia.dev/reference/tools/fx/cmd/set
 [fx-build-reference]: https://fuchsia.dev/reference/tools/fx/cmd/build

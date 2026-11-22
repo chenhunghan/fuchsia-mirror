@@ -145,6 +145,32 @@ zx::unowned_resource GetProfileResource() {
   return zx::unowned_resource{profile_resource.get()};
 }
 
+zx::unowned_profile GetProfile(zx_cpu_set_t affinity) {
+  static std::map<zx_cpu_set_t, zx::profile> profiles;
+  static std::mutex mutex;
+
+  std::lock_guard<std::mutex> guard{mutex};
+
+  auto search = profiles.find(affinity);
+  if (search != profiles.end()) {
+    return zx::unowned_profile{search->second.get()};
+  }
+
+  auto profile_resource = GetProfileResource();
+  zx_profile_info_t info = {
+      .flags = ZX_PROFILE_INFO_FLAG_CPU_MASK,
+      .cpu_affinity_mask = affinity,
+  };
+  zx::profile profile;
+  zx_status_t status = zx::profile::create(*profile_resource, 0u, &info, &profile);
+  FX_CHECK(status == ZX_OK);
+
+  auto [iter, okay] = profiles.emplace(affinity, std::move(profile));
+  FX_CHECK(okay);
+
+  return zx::unowned_profile{iter->second.get()};
+}
+
 // Returns an unowned handle to a profile for the specified priority. Maintains
 // an internal map of already requested profiles and returns the same handle for
 // multiple requests for the same priority.
@@ -164,12 +190,17 @@ zx::unowned_profile GetProfile(int priority, std::optional<zx_cpu_set_t> affinit
     return zx::unowned_profile{search->second.get()};
   }
 
-  // Create a priority profile.
+  // Create a priority profile, honoring any configured CPU affinity mask so
+  // asymmetric cluster placement can be modeled faithfully.
   auto profile_resource = GetProfileResource();
   zx_profile_info_t info = {
       .flags = ZX_PROFILE_INFO_FLAG_PRIORITY,
       .priority = priority,
   };
+  if (affinity.has_value()) {
+    info.flags |= ZX_PROFILE_INFO_FLAG_CPU_MASK;
+    info.cpu_affinity_mask = affinity.value();
+  }
   zx::profile profile;
   zx_status_t status = zx::profile::create(*profile_resource, 0u, &info, &profile);
   FX_CHECK(status == ZX_OK);
@@ -185,9 +216,10 @@ zx::unowned_profile GetProfile(int priority, std::optional<zx_cpu_set_t> affinit
 // Maintains an internal map of already requested profiles and returns the same
 // handle for multiple request for the same deadline parameters.
 zx::unowned_profile GetProfile(zx::duration capacity, zx::duration deadline, zx::duration period,
-                               std::optional<zx_cpu_set_t> affinity) {
-  using Key = std::tuple<zx_duration_t, zx_duration_t, zx_duration_t, std::optional<zx_cpu_set_t>>;
-  const Key key{capacity.get(), deadline.get(), period.get(), affinity};
+                               std::optional<zx_cpu_set_t> affinity, bool critical) {
+  using Key =
+      std::tuple<zx_duration_t, zx_duration_t, zx_duration_t, std::optional<zx_cpu_set_t>, bool>;
+  const Key key{capacity.get(), deadline.get(), period.get(), affinity, critical};
 
   // Maintains a map of profiles for each previously requested deadline/affinity.
   static std::map<Key, zx::profile> profiles;
@@ -201,7 +233,9 @@ zx::unowned_profile GetProfile(zx::duration capacity, zx::duration deadline, zx:
     return zx::unowned_profile{search->second.get()};
   }
 
-  // Create a deadline profile.
+  // Create a deadline profile, applying CPU affinity and critical flags when
+  // requested so board profile sets (such as medium-cluster deadline roles) can
+  // be reproduced directly in synthetic workloads.
   auto profile_resource = GetProfileResource();
   zx_profile_info_t info = {
       .flags = ZX_PROFILE_INFO_FLAG_DEADLINE,
@@ -212,6 +246,13 @@ zx::unowned_profile GetProfile(zx::duration capacity, zx::duration deadline, zx:
               .period = period.get(),
           },
   };
+  if (critical) {
+    info.flags |= ZX_PROFILE_INFO_FLAG_CRITICAL;
+  }
+  if (affinity.has_value()) {
+    info.flags |= ZX_PROFILE_INFO_FLAG_CPU_MASK;
+    info.cpu_affinity_mask = affinity.value();
+  }
   zx::profile profile;
   zx_status_t status = zx::profile::create(*profile_resource, 0u, &info, &profile);
   FX_CHECK(status == ZX_OK);

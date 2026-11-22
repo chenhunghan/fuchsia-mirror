@@ -6,10 +6,14 @@
 
 #include <fidl/fuchsia.hardware.tpmimpl/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/async/cpp/task.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
+#include <lib/sync/completion.h>
 #include <lib/sync/condition.h>
 
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 
 #include <ddktl/device.h>
 #include <zxtest/zxtest.h>
@@ -54,16 +58,28 @@ class TpmTest : public zxtest::Test, public fidl::WireServer<fuchsia_hardware_tp
 
     exec_thread_ = std::thread(&TpmTest::ExecThread, this);
 
-    fidl::ClientEnd<fuchsia_hardware_tpmimpl::TpmImpl> client_end;
-    auto server = fidl::CreateEndpoints(&client_end);
-    ASSERT_TRUE(server.is_ok());
-    fidl::BindServer(loop_.dispatcher(), std::move(server.value()), this);
-    fidl::WireSyncClient client{std::move(client_end)};
+    sync_completion_t served;
+    auto endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    ASSERT_OK(async::PostTask(
+        loop_.dispatcher(), [this, &served, server = std::move(endpoints.server)]() mutable {
+          outgoing_.emplace(loop_.dispatcher());
+          fuchsia_hardware_tpmimpl::Service::InstanceHandler handler({
+              .device =
+                  [this](fidl::ServerEnd<fuchsia_hardware_tpmimpl::TpmImpl> server_end) {
+                    fidl::BindServer(loop_.dispatcher(), std::move(server_end), this);
+                  },
+          });
+          EXPECT_OK(outgoing_->AddService<fuchsia_hardware_tpmimpl::Service>(std::move(handler))
+                        .status_value());
+          EXPECT_OK(outgoing_->Serve(std::move(server)).status_value());
+          sync_completion_signal(&served);
+        }));
+    sync_completion_wait(&served, ZX_TIME_INFINITE);
 
-    ASSERT_TRUE(client.client_end().is_valid());
-    auto device = std::make_unique<tpm::TpmDevice>(fake_root_.get(), std::move(client));
-    ASSERT_OK(device->DdkAdd(ddk::DeviceAddArgs("tpm")));
-    device.release();
+    fake_root_->AddFidlService(fuchsia_hardware_tpmimpl::Service::Name,
+                               std::move(endpoints.client));
+
+    ASSERT_OK(tpm::TpmDevice::Create(nullptr, fake_root_.get()));
   }
 
   void TearDown() override {
@@ -79,6 +95,17 @@ class TpmTest : public zxtest::Test, public fidl::WireServer<fuchsia_hardware_tp
     if (exec_thread_.joinable()) {
       exec_thread_.join();
     }
+
+    if (outgoing_.has_value()) {
+      sync_completion_t outgoing_reset;
+      if (async::PostTask(loop_.dispatcher(), [this, &outgoing_reset]() {
+            outgoing_.reset();
+            sync_completion_signal(&outgoing_reset);
+          }) == ZX_OK) {
+        sync_completion_wait(&outgoing_reset, ZX_TIME_INFINITE);
+      }
+    }
+    loop_.Shutdown();
   }
 
   void Read(ReadRequestView request, ReadCompleter::Sync& completer) override {
@@ -252,6 +279,8 @@ class TpmTest : public zxtest::Test, public fidl::WireServer<fuchsia_hardware_tp
 
   // When true, the mock TPM will return more bytes than requested in `Read()` calls.
   bool inject_overflow_ = false;
+
+  std::optional<component::OutgoingDirectory> outgoing_;
 };
 
 TEST_F(TpmTest, TestDdkInit) {

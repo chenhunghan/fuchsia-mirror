@@ -58,7 +58,19 @@ impl<C: ComponentInstanceInterface + 'static> From<WeakExtendedInstanceInterface
     for Arc<WeakInstanceToken>
 {
     fn from(instance: WeakExtendedInstanceInterface<C>) -> Self {
-        Arc::new(WeakInstanceToken { inner: Box::new(instance) })
+        const {
+            assert!(
+                std::mem::size_of::<smallbox::space::S2>()
+                    >= std::mem::size_of::<WeakExtendedInstanceInterface<C>>(),
+                "smallbox::space::S2 is too small to hold WeakExtendedInstanceInterface<C>"
+            );
+            assert!(
+                std::mem::align_of::<smallbox::space::S2>()
+                    >= std::mem::align_of::<WeakExtendedInstanceInterface<C>>(),
+                "smallbox::space::S2 alignment is insufficient for WeakExtendedInstanceInterface<C>"
+            );
+        }
+        WeakInstanceToken::new(instance)
     }
 }
 

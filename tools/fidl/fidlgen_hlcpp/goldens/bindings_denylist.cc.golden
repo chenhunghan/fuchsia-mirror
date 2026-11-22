@@ -90,7 +90,7 @@ DenyEachBinding_OnlyDenyDart_Result::DenyEachBinding_OnlyDenyDart_Result(DenyEac
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
       break;
   }
 }
@@ -107,7 +107,7 @@ DenyEachBinding_OnlyDenyDart_Result& DenyEachBinding_OnlyDenyDart_Result::operat
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
         break;
     }
   }
@@ -135,10 +135,10 @@ void DenyEachBinding_OnlyDenyDart_Result::Encode(::fidl::Encoder* encoder, size_
       if (::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -147,21 +147,21 @@ void DenyEachBinding_OnlyDenyDart_Result::Encode(::fidl::Encoder* encoder, size_
           &response_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -170,11 +170,11 @@ void DenyEachBinding_OnlyDenyDart_Result::Encode(::fidl::Encoder* encoder, size_
           &err_,
           encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -183,18 +183,18 @@ void DenyEachBinding_OnlyDenyDart_Result::Encode(::fidl::Encoder* encoder, size_
 }
 
 void DenyEachBinding_OnlyDenyDart_Result::Decode(::fidl::Decoder* _decoder, DenyEachBinding_OnlyDenyDart_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::kResponse: {
@@ -252,15 +252,15 @@ void DenyEachBinding_OnlyDenyDart_Result::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid);
 }
 
-void DenyEachBinding_OnlyDenyDart_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void DenyEachBinding_OnlyDenyDart_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::Invalid):
         break;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Result::Tag::kResponse:
         new (&response_)::test::bindingsdenylist::DenyEachBinding_OnlyDenyDart_Response();
@@ -352,7 +352,7 @@ DenyEachBinding_OnlyDenyPython_Result::DenyEachBinding_OnlyDenyPython_Result(Den
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
       break;
   }
 }
@@ -369,7 +369,7 @@ DenyEachBinding_OnlyDenyPython_Result& DenyEachBinding_OnlyDenyPython_Result::op
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
         break;
     }
   }
@@ -397,10 +397,10 @@ void DenyEachBinding_OnlyDenyPython_Result::Encode(::fidl::Encoder* encoder, siz
       if (::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -409,21 +409,21 @@ void DenyEachBinding_OnlyDenyPython_Result::Encode(::fidl::Encoder* encoder, siz
           &response_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -432,11 +432,11 @@ void DenyEachBinding_OnlyDenyPython_Result::Encode(::fidl::Encoder* encoder, siz
           &err_,
           encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -445,18 +445,18 @@ void DenyEachBinding_OnlyDenyPython_Result::Encode(::fidl::Encoder* encoder, siz
 }
 
 void DenyEachBinding_OnlyDenyPython_Result::Decode(::fidl::Decoder* _decoder, DenyEachBinding_OnlyDenyPython_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::kResponse: {
@@ -514,15 +514,15 @@ void DenyEachBinding_OnlyDenyPython_Result::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid);
 }
 
-void DenyEachBinding_OnlyDenyPython_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void DenyEachBinding_OnlyDenyPython_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::Invalid):
         break;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Result::Tag::kResponse:
         new (&response_)::test::bindingsdenylist::DenyEachBinding_OnlyDenyPython_Response();
@@ -614,7 +614,7 @@ DenyEachBinding_OnlyDenyRust_Result::DenyEachBinding_OnlyDenyRust_Result(DenyEac
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
       break;
   }
 }
@@ -631,7 +631,7 @@ DenyEachBinding_OnlyDenyRust_Result& DenyEachBinding_OnlyDenyRust_Result::operat
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
         break;
     }
   }
@@ -659,10 +659,10 @@ void DenyEachBinding_OnlyDenyRust_Result::Encode(::fidl::Encoder* encoder, size_
       if (::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -671,21 +671,21 @@ void DenyEachBinding_OnlyDenyRust_Result::Encode(::fidl::Encoder* encoder, size_
           &response_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -694,11 +694,11 @@ void DenyEachBinding_OnlyDenyRust_Result::Encode(::fidl::Encoder* encoder, size_
           &err_,
           encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -707,18 +707,18 @@ void DenyEachBinding_OnlyDenyRust_Result::Encode(::fidl::Encoder* encoder, size_
 }
 
 void DenyEachBinding_OnlyDenyRust_Result::Decode(::fidl::Decoder* _decoder, DenyEachBinding_OnlyDenyRust_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::kResponse: {
@@ -776,15 +776,15 @@ void DenyEachBinding_OnlyDenyRust_Result::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid);
 }
 
-void DenyEachBinding_OnlyDenyRust_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void DenyEachBinding_OnlyDenyRust_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::Invalid):
         break;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Result::Tag::kResponse:
         new (&response_)::test::bindingsdenylist::DenyEachBinding_OnlyDenyRust_Response();
@@ -876,7 +876,7 @@ DenyEachBinding_OnlyDenySyzkaller_Result::DenyEachBinding_OnlyDenySyzkaller_Resu
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
       break;
   }
 }
@@ -893,7 +893,7 @@ DenyEachBinding_OnlyDenySyzkaller_Result& DenyEachBinding_OnlyDenySyzkaller_Resu
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
         break;
     }
   }
@@ -921,10 +921,10 @@ void DenyEachBinding_OnlyDenySyzkaller_Result::Encode(::fidl::Encoder* encoder, 
       if (::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -933,21 +933,21 @@ void DenyEachBinding_OnlyDenySyzkaller_Result::Encode(::fidl::Encoder* encoder, 
           &response_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -956,11 +956,11 @@ void DenyEachBinding_OnlyDenySyzkaller_Result::Encode(::fidl::Encoder* encoder, 
           &err_,
           encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -969,18 +969,18 @@ void DenyEachBinding_OnlyDenySyzkaller_Result::Encode(::fidl::Encoder* encoder, 
 }
 
 void DenyEachBinding_OnlyDenySyzkaller_Result::Decode(::fidl::Decoder* _decoder, DenyEachBinding_OnlyDenySyzkaller_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::kResponse: {
@@ -1038,15 +1038,15 @@ void DenyEachBinding_OnlyDenySyzkaller_Result::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid);
 }
 
-void DenyEachBinding_OnlyDenySyzkaller_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void DenyEachBinding_OnlyDenySyzkaller_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::Invalid):
         break;
       case ::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Result::Tag::kResponse:
         new (&response_)::test::bindingsdenylist::DenyEachBinding_OnlyDenySyzkaller_Response();

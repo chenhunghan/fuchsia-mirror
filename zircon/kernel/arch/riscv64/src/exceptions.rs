@@ -9,6 +9,7 @@
 use super::arch::{
     RISCV64_CSR_SSTATUS_SPIE, RISCV64_CSR_SSTATUS_SPP, RISCV64_CSR_STVAL, riscv64_csr_read,
 };
+use super::crashlog::CrashlogRegs;
 use super::restricted::Iframe;
 use super::thread::GeneralRegsSource;
 use super::user_copy::{RISCV_CAPTURE_USER_COPY_FAULTS_BIT, arch_copy_from_user};
@@ -202,11 +203,20 @@ pub unsafe extern "C" fn rust_riscv64_print_frame(
 
 // C++ kernel runtime hooks called from Rust exception handlers.
 unsafe extern "C" {
-    fn cpp_set_crashlog_regs(iframe: *const Iframe, cause: i64, tval: u64);
-    fn cpp_vmm_page_fault_handler(tval: u64, flags: u32) -> Result<(), Status>;
     // Defined in exceptions.S and already `extern "C"`; no shim needed.
     fn riscv64_syscall_dispatcher(frame: *mut Iframe) -> SyscallResult;
-    fn cpp_cpu_stats_inc_page_faults();
+}
+
+/// Records the faulting register state for the crashlog.
+///
+/// # Safety
+///
+/// The caller must ensure that `iframe` is either null or aligned and pointing to a valid,
+/// initialized trap [`Iframe`] on the stack of a non-returning panic handler that remains live and
+/// unmutated for the remainder of the kernel's execution.
+unsafe fn set_crashlog_regs(iframe: *const Iframe, cause: i64, tval: u64) {
+    // SAFETY: Discharged by this function's `# Safety` contract.
+    unsafe { crate::crashlog::set_crashlog_regs(CrashlogRegs { iframe, cause, tval }) };
 }
 
 /// Print panic details, dump frame & stack, fill crashlog, and halt.
@@ -228,12 +238,9 @@ unsafe fn exception_die(iframe: *mut Iframe, cause: i64, tval: u64, msg: &str) -
     // SAFETY: The caller guarantees this CPU's first thread has been constructed, and a running
     // thread's stack is not concurrently initialized or torn down.
     unsafe { crate::kernel::thread::dump_current_stack() };
-    // SAFETY: records the faulting register state for the crashlog. A null
-    // `iframe` is expected and handled on the C++ side, which renders
-    // "missing" instead of dereferencing it.
-    unsafe {
-        cpp_set_crashlog_regs(iframe, cause, tval);
-    }
+    // SAFETY: A non-null `iframe` stays live and unmutated on the stack of this non-returning
+    // panic handler.
+    unsafe { set_crashlog_regs(iframe, cause, tval) };
     crate::platform_rs::power::platform_halt(
         crate::platform_rs::power::PlatformHaltAction::Halt,
         crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -282,12 +289,9 @@ unsafe fn fatal_exception(cause: i64, tval: u64, frame: *mut Iframe) -> ! {
     // SAFETY: The caller guarantees this CPU's first thread has been constructed, and a running
     // thread's stack is not concurrently initialized or torn down.
     unsafe { crate::kernel::thread::dump_current_stack() };
-    // SAFETY: records the faulting register state for the crashlog. A null
-    // `frame` is expected and handled on the C++ side, which renders
-    // "missing" instead of dereferencing it.
-    unsafe {
-        cpp_set_crashlog_regs(frame, cause, tval);
-    }
+    // SAFETY: A non-null `frame` stays live and unmutated on the stack of this non-returning
+    // panic handler.
+    unsafe { set_crashlog_regs(frame, cause, tval) };
     crate::platform_rs::power::platform_halt(
         crate::platform_rs::power::PlatformHaltAction::Halt,
         crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -298,9 +302,11 @@ unsafe fn fatal_exception(cause: i64, tval: u64, frame: *mut Iframe) -> ! {
 ///
 /// # Safety
 ///
-/// If `frame` is non-null, it must point to a valid, initialized, writable trap `Iframe` on the
-/// current thread's kernel stack that outlives this call without conflicting Rust references, and
-/// no thread lock, spinlock, or active `ChainLockTransaction` may be held.
+/// The caller must ensure that the calling CPU is in S-mode with a constructed `THREAD_RUNNING`
+/// current `Thread`, blocking is permitted once interrupts are enabled, no thread lock, dispatcher
+/// lock, spinlock, lockdep-tracked lock, or active `ChainLockTransaction` is held, and if `frame`
+/// is non-null, it is aligned and points to a valid, initialized, writable trap [`Iframe`] on the
+/// current thread's kernel stack that outlives this call without conflicting Rust references.
 unsafe fn try_dispatch_user_exception(
     exception_type: u32,
     cause: i64,
@@ -321,18 +327,28 @@ unsafe fn try_dispatch_user_exception(
 
     super::arch::arch_enable_ints();
     // SAFETY: `context` lives on this stack frame for the duration of the call;
-    // `dispatch_user_exception` temporarily stores `&raw const context` in `ExceptionDispatcher`
-    // and installs `context.frame` into the thread's `suspended_general_regs` across blocking
-    // handler delivery, clearing both pointers before returning. The caller guarantees `frame` (if
-    // non-null) points to a valid, writable trap `Iframe` without conflicting references and that
-    // no thread lock, spinlock, or active `ChainLockTransaction` is held.
-    let status =
-        unsafe { crate::object::dispatch_user_exception(exception_type, &raw const context) };
+    // `dispatch_user_exception` temporarily stores `core::ptr::from_ref(context)` in
+    // `ExceptionDispatcher` and installs `context.frame` into the thread's `suspended_general_regs`
+    // across blocking handler delivery, clearing both pointers before returning. The caller
+    // guarantees `frame` (if non-null) points to a valid, writable trap `Iframe` without
+    // conflicting references and that no thread lock, spinlock, or active `ChainLockTransaction` is
+    // held.
+    let status = unsafe { crate::object::dispatch_user_exception(exception_type, &context) };
     super::arch::arch_disable_ints();
     status
 }
 
 /// Page fault handler for instruction and data aborts.
+///
+/// # Safety
+///
+/// The caller must ensure that the calling CPU is in S-mode with interrupts disabled and
+/// `ConstructFirstThread` completed (`THREAD_RUNNING` current thread, with an attached user
+/// `VmAspace` for user addresses), `frame` is null (only on fatal kernel faults) or points to a
+/// valid, writable, unaliased [`Iframe`] on the current stack, and whenever `user` or non-capturing
+/// `data_fault_resume` holds, blocking is permitted once interrupts are enabled with no spinlocks,
+/// thread/dispatcher/lockdep-tracked locks, conflicting VM locks, or active `ChainLockTransaction`
+/// held.
 unsafe fn riscv64_page_fault_handler(cause: i64, tval: u64, frame: *mut Iframe, user: bool) {
     let mut pf_flags = VMM_PF_FLAG_NOT_PRESENT;
     if cause == RISCV64_EXCEPTION_STORE_PAGE_FAULT {
@@ -383,12 +399,9 @@ unsafe fn riscv64_page_fault_handler(cause: i64, tval: u64, frame: *mut Iframe, 
         // SAFETY: `current_get()` returns this CPU's running thread (as above), and its stack is
         // not concurrently initialized or torn down.
         unsafe { crate::kernel::thread::dump_current_stack() };
-        // SAFETY: records the faulting register state for the crashlog. A null
-        // `frame` is expected and handled on the C++ side, which renders
-        // "missing" instead of dereferencing it.
-        unsafe {
-            cpp_set_crashlog_regs(frame, cause, tval);
-        }
+        // SAFETY: A non-null `frame` stays live and unmutated on the stack of this non-returning
+        // panic handler.
+        unsafe { set_crashlog_regs(frame, cause, tval) };
         crate::platform_rs::power::platform_halt(
             crate::platform_rs::power::PlatformHaltAction::Halt,
             crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -418,10 +431,11 @@ unsafe fn riscv64_page_fault_handler(cause: i64, tval: u64, frame: *mut Iframe, 
 
     debug_assert!(super::mp::num_spinlocks_held() == 0);
     super::arch::arch_enable_ints();
-    // SAFETY: takes no arguments; bumps this CPU's page-fault counter.
-    unsafe { cpp_cpu_stats_inc_page_faults() };
-    // SAFETY: both arguments are plain integers describing the fault.
-    let pf_status = unsafe { cpp_vmm_page_fault_handler(tval, pf_flags) };
+    crate::kernel::stats::inc_page_faults();
+    // SAFETY: The current CPU has a running `Thread` (with an attached user `VmAspace` for user
+    // addresses), interrupts are enabled, blocking is permitted, and no spinlocks, lockdep-tracked
+    // locks, conflicting VM locks, or active `ChainLockTransaction` are held.
+    let pf_status = unsafe { crate::vm::page_fault_handler(tval as usize, pf_flags) };
     super::arch::arch_disable_ints();
     let Err(pf_status) = pf_status else {
         return;
@@ -482,12 +496,9 @@ unsafe fn riscv64_page_fault_handler(cause: i64, tval: u64, frame: *mut Iframe, 
     // SAFETY: `current_get()` returns this CPU's running thread (as above), and its stack is
     // not concurrently initialized or torn down.
     unsafe { crate::kernel::thread::dump_current_stack() };
-    // SAFETY: records the faulting register state for the crashlog. A null
-    // `frame` is expected and handled on the C++ side, which renders
-    // "missing" instead of dereferencing it.
-    unsafe {
-        cpp_set_crashlog_regs(frame, cause, tval);
-    }
+    // SAFETY: A non-null `frame` stays live and unmutated on the stack of this non-returning
+    // panic handler.
+    unsafe { set_crashlog_regs(frame, cause, tval) };
     crate::platform_rs::power::platform_halt(
         crate::platform_rs::power::PlatformHaltAction::Halt,
         crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -512,12 +523,9 @@ unsafe fn riscv64_misaligned_fault_handler(cause: i64, tval: u64, frame: *mut If
         // SAFETY: `current_get()` returns this CPU's running thread, which is constructed by the
         // time faults are handled, and its stack is not concurrently initialized or torn down.
         unsafe { crate::kernel::thread::dump_current_stack() };
-        // SAFETY: records the faulting register state for the crashlog. A null
-        // `frame` is expected and handled on the C++ side, which renders
-        // "missing" instead of dereferencing it.
-        unsafe {
-            cpp_set_crashlog_regs(frame, cause, tval);
-        }
+        // SAFETY: A non-null `frame` stays live and unmutated on the stack of this non-returning
+        // panic handler.
+        unsafe { set_crashlog_regs(frame, cause, tval) };
         crate::platform_rs::power::platform_halt(
             crate::platform_rs::power::PlatformHaltAction::Halt,
             crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -552,12 +560,9 @@ unsafe fn riscv64_illegal_instruction_handler(
         // SAFETY: `current_get()` returns this CPU's running thread, which is constructed by the
         // time faults are handled, and its stack is not concurrently initialized or torn down.
         unsafe { crate::kernel::thread::dump_current_stack() };
-        // SAFETY: records the faulting register state for the crashlog. A null
-        // `frame` is expected and handled on the C++ side, which renders
-        // "missing" instead of dereferencing it.
-        unsafe {
-            cpp_set_crashlog_regs(frame, cause, tval);
-        }
+        // SAFETY: A non-null `frame` stays live and unmutated on the stack of this non-returning
+        // panic handler.
+        unsafe { set_crashlog_regs(frame, cause, tval) };
         crate::platform_rs::power::platform_halt(
             crate::platform_rs::power::PlatformHaltAction::Halt,
             crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -589,12 +594,9 @@ unsafe fn riscv64_breakpoint_handler(cause: i64, tval: u64, frame: *mut Iframe, 
         // SAFETY: `current_get()` returns this CPU's running thread, which is constructed by the
         // time faults are handled, and its stack is not concurrently initialized or torn down.
         unsafe { crate::kernel::thread::dump_current_stack() };
-        // SAFETY: records the faulting register state for the crashlog. A null
-        // `frame` is expected and handled on the C++ side, which renders
-        // "missing" instead of dereferencing it.
-        unsafe {
-            cpp_set_crashlog_regs(frame, cause, tval);
-        }
+        // SAFETY: A non-null `frame` stays live and unmutated on the stack of this non-returning
+        // panic handler.
+        unsafe { set_crashlog_regs(frame, cause, tval) };
         crate::platform_rs::power::platform_halt(
             crate::platform_rs::power::PlatformHaltAction::Halt,
             crate::platform_rs::power::ZirconCrashReason::Panic,
@@ -607,6 +609,13 @@ unsafe fn riscv64_breakpoint_handler(cause: i64, tval: u64, frame: *mut Iframe, 
 }
 
 /// System call trap handler.
+///
+/// # Safety
+///
+/// The caller must ensure that the calling CPU is in S-mode with interrupts disabled and
+/// `ConstructFirstThread` completed (`THREAD_RUNNING` user thread), `frame` points to a valid,
+/// aligned, writable, unaliased user [`Iframe`] on the current stack, blocking is permitted, and no
+/// spinlocks, thread/dispatcher/lockdep-tracked locks, or active `ChainLockTransaction` are held.
 unsafe fn riscv64_syscall_handler(frame: *mut Iframe) {
     // Advance PC over the ECALL instruction (32-bit).
     // SAFETY: the syscall path is only entered from the trap stub, which passes a
@@ -623,14 +632,25 @@ unsafe fn riscv64_syscall_handler(frame: *mut Iframe) {
         (*frame).regs.a0 = ret.status;
     }
     if ret.is_signaled != 0 {
-        // SAFETY: frame is a valid pointer to current thread iframe.
+        core::hint::cold_path();
+        // SAFETY: Discharged by this function's `# Safety` contract.
         unsafe {
-            crate::kernel::thread::process_pending_signals(frame as *mut core::ffi::c_void);
+            crate::kernel::thread::process_pending_signals(GeneralRegsSource::Iframe, frame.cast());
         }
     }
 }
 
 /// Main trap and exception dispatcher for RISC-V 64.
+///
+/// # Safety
+///
+/// The caller must ensure that the calling CPU is in S-mode with interrupts disabled and per-CPU
+/// state initialized, `frame` points to a valid, aligned, writable, unaliased [`Iframe`] matching
+/// `pc` and `status` on the current stack, and whenever `status` indicates a U-mode trap or
+/// kernel user-copy fault (or rescheduling/pending-signal handling runs on exit),
+/// `ConstructFirstThread` has completed (`THREAD_RUNNING` thread with an attached user `VmAspace`
+/// for user addresses), blocking is permitted, and no spinlocks, thread/dispatcher/lockdep-tracked
+/// locks, conflicting VM locks, or active `ChainLockTransaction` are held.
 unsafe fn riscv64_exception_handler(frame: *mut Iframe, pc: u64, status: u64, cause: i64) {
     // SAFETY: the trap stub passes the frame it just built along with copies of pc
     // and status taken from the same trap; these assertions check they agree.
@@ -643,7 +663,9 @@ unsafe fn riscv64_exception_handler(frame: *mut Iframe, pc: u64, status: u64, ca
 
     if cause < 0 {
         let mut state = IntHandlerSavedState::default();
-        int_handler_start(&mut state);
+        // SAFETY: This is an interrupt trap, handled on the current thread with interrupts
+        // disabled, and `int_handler_finish` is called below with the same `state`.
+        unsafe { int_handler_start(&mut state) };
 
         match cause & i64::MAX {
             RISCV64_INTERRUPT_SSWI => {
@@ -667,7 +689,9 @@ unsafe fn riscv64_exception_handler(frame: *mut Iframe, pc: u64, status: u64, ca
             _ => unsafe { fatal_exception(cause, 0, frame) },
         }
 
-        do_preempt = int_handler_finish(&mut state);
+        // SAFETY: Pairs with the `int_handler_start` above; interrupts are still disabled, and no
+        // `PreemptDisabledToken` outlives the handler.
+        do_preempt = unsafe { int_handler_finish(&mut state) };
     } else {
         // SAFETY: reading `stval` has no side effects; it holds the faulting
         // address or instruction for the trap being handled.
@@ -729,13 +753,16 @@ unsafe fn riscv64_exception_handler(frame: *mut Iframe, pc: u64, status: u64, ca
     if user {
         // SAFETY: `frame` is the live trap frame; signal processing may rewrite the
         // saved user registers in it before the return to userspace.
-        unsafe { arch_iframe_process_pending_signals(frame) };
+        unsafe { iframe_process_pending_signals(frame) };
     }
 }
 
 /// Entry point called from `stvec.S` on user-mode exception.
+///
 /// # Safety
-/// Entry point called from assembly stvec.S on user trap.
+///
+/// The caller (`stvec.S`) must ensure all preconditions of [`riscv64_exception_handler`] for a
+/// U-mode trap frame.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riscv64UserException(
     iframe: *mut Iframe,
@@ -746,14 +773,16 @@ pub unsafe extern "C" fn Riscv64UserException(
     debug_assert!(
         (status & RISCV64_CSR_SSTATUS_SPP) == 0 || (status & RISCV64_CSR_SSTATUS_SPIE) == 0
     );
-    // SAFETY: called straight from the trap stub in stvec.S, which passes the frame
-    // it just built on the current stack along with the trap`s pc, status and cause.
+    // SAFETY: Discharged by this function's `# Safety` contract.
     unsafe { riscv64_exception_handler(iframe, pc, status, cause) };
 }
 
 /// Entry point called from `stvec.S` on kernel-mode exception.
+///
 /// # Safety
-/// Entry point called from assembly stvec.S on kernel trap.
+///
+/// The caller (`stvec.S`) must ensure all preconditions of [`riscv64_exception_handler`] for an
+/// S-mode trap frame.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn Riscv64KernelException(
     iframe: *mut Iframe,
@@ -762,8 +791,7 @@ pub unsafe extern "C" fn Riscv64KernelException(
     cause: i64,
 ) {
     debug_assert!((status & RISCV64_CSR_SSTATUS_SPP) != 0);
-    // SAFETY: called straight from the trap stub in stvec.S, which passes the frame
-    // it just built on the current stack along with the trap`s pc, status and cause.
+    // SAFETY: Discharged by this function's `# Safety` contract.
     unsafe { riscv64_exception_handler(iframe, pc, status, cause) };
 }
 
@@ -792,41 +820,56 @@ pub unsafe extern "C" fn rust_riscv64_emergency_exception(
 }
 
 /// Process pending signals for the current thread from an interrupt frame.
+///
 /// # Safety
-/// Caller guarantees valid iframe pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_iframe_process_pending_signals(iframe: *mut Iframe) {
+///
+/// The caller must ensure all preconditions of [`crate::kernel::thread::process_pending_signals`]
+/// for [`GeneralRegsSource::Iframe`] and `iframe`.
+#[inline(always)]
+unsafe fn iframe_process_pending_signals(iframe: *mut Iframe) {
     debug_assert!(!iframe.is_null());
-    // SAFETY: Caller guarantees valid iframe pointer.
+    // SAFETY: Discharged by this function's `# Safety` contract.
     unsafe {
-        crate::kernel::thread::process_pending_signals(iframe as *mut core::ffi::c_void);
+        crate::kernel::thread::process_pending_signals(GeneralRegsSource::Iframe, iframe.cast());
     }
 }
 
-/// Dump the architectural exception context and user stack bottom.
+/// Process pending signals for the current thread from an interrupt frame.
+///
 /// # Safety
-/// Caller guarantees valid pointer or null.
+///
+/// Same preconditions as [`iframe_process_pending_signals`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_dump_exception_context(context: *const ArchExceptionContext) {
-    if context.is_null() {
-        return;
-    }
-    // SAFETY: the caller guarantees `context` points at a live exception context.
-    let ctx = unsafe { &*context };
-    // SAFETY: same pointer, passed straight through; the callee only reads it.
-    unsafe { crate::object::dump_common_exception_context(context) };
+pub unsafe extern "C" fn arch_iframe_process_pending_signals(iframe: *mut Iframe) {
+    // SAFETY: Discharged by this function's `# Safety` contract.
+    unsafe { iframe_process_pending_signals(iframe) };
+}
 
-    if ctx.frame.is_null() {
+/// Dumps the architectural exception context and user stack bottom.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling CPU is executing in S-mode with `ConstructFirstThread` completed.
+/// - If `context.frame` is non-null, it is aligned and points to a valid, initialized [`Iframe`]
+///   with no conflicting mutable references, and when `is_user_accessible(frame.regs.sp)` holds,
+///   blocking is permitted with no spinlocks or lockdep-tracked locks held.
+#[cold]
+#[inline(never)]
+pub unsafe fn arch_dump_exception_context(context: &ArchExceptionContext) {
+    crate::object::dump_common_exception_context(context);
+
+    if context.frame.is_null() {
         dprintf!(0, "no frame to dump\n");
         return;
     }
 
     // SAFETY: null was ruled out immediately above, and the context's frame points
     // at the trap frame captured for this exception.
-    let frame = unsafe { &*ctx.frame };
+    let frame = unsafe { &*context.frame };
     print_frame(frame);
-    dprintf!(0, "cause  {:18} {}\n", ctx.cause, cause_to_string(ctx.cause));
-    dprintf!(0, "tval   {:#18x}\n", ctx.tval);
+    dprintf!(0, "cause  {:18} {}\n", context.cause, cause_to_string(context.cause));
+    dprintf!(0, "tval   {:#18x}\n", context.tval);
 
     let usp = frame.regs.sp as usize;
     if is_user_accessible(usp) {
@@ -836,47 +879,47 @@ pub unsafe extern "C" fn arch_dump_exception_context(context: *const ArchExcepti
         // it is reported rather than trapping.
         if unsafe {
             arch_copy_from_user(
-                buf.as_mut_ptr() as *mut core::ffi::c_void,
-                usp as *const core::ffi::c_void,
+                buf.as_mut_ptr().cast::<core::ffi::c_void>(),
+                core::ptr::with_exposed_provenance::<core::ffi::c_void>(usp),
                 buf.len(),
             )
         }
         .is_ok()
         {
             dprintf!(0, "bottom of user stack at {:#x}:\n", usp);
-            let mut writer = debug::ltrace::KernelConsoleWriter;
+            let mut writer = debug::dprintf::KernelConsoleWriter;
             let _ = pretty::hexdump_very_ex_rs(&mut writer, &buf, usp as u64);
         }
     }
 }
 
-/// Fill in a userspace exception report context from architectural state.
+/// Fills in a userspace exception report context from architectural state.
+///
 /// # Safety
-/// Caller guarantees valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_fill_in_exception_context(
-    arch_context: *const ArchExceptionContext,
-    report: *mut zx_exception_report_t,
+///
+/// Unused on RISC-V; marked `unsafe` to match [`crate::arch_rs::arch_fill_in_exception_context`].
+pub unsafe fn arch_fill_in_exception_context(
+    arch_context: &ArchExceptionContext,
+    report: &mut zx_exception_report_t,
 ) {
-    if arch_context.is_null() || report.is_null() {
-        return;
-    }
-    // SAFETY: the caller guarantees `arch_context` points at a live context.
-    let ctx = unsafe { &*arch_context };
-    // SAFETY: the caller guarantees `report` points at a live report that nothing
-    // else is borrowing for the duration of the call.
-    let report = unsafe { &mut *report };
-    report.context.synth_code = ctx.user_synth_code;
-    report.context.synth_data = ctx.user_synth_data;
+    report.context.synth_code = arch_context.user_synth_code;
+    report.context.synth_data = arch_context.user_synth_data;
     let mut riscv_64 = zx_riscv64_exc_data_t::default();
-    riscv_64.cause = ctx.cause as u64;
-    riscv_64.tval = ctx.tval;
+    riscv_64.cause = arch_context.cause as u64;
+    riscv_64.tval = arch_context.tval;
     report.context.arch = zx_exception_header_arch_t { riscv_64 };
 }
 
 /// Dispatch a user policy error exception.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_dispatch_user_policy_exception(
+///
+/// # Safety
+///
+/// The caller must ensure that the calling CPU is executing in S-mode with per-CPU state
+/// initialized and `ConstructFirstThread` completed (`THREAD_RUNNING` current thread), interrupts
+/// enabled, blocking permitted, and no spinlocks, thread lock, dispatcher locks, lockdep-tracked
+/// locks, or active `ChainLockTransaction` held. Any pre-installed `suspended_general_regs` on the
+/// current thread must point to a valid, writable, unaliased general-register frame.
+pub unsafe fn arch_dispatch_user_policy_exception(
     policy_exception_code: u32,
     policy_exception_data: u32,
 ) -> Result<(), Status> {
@@ -887,61 +930,47 @@ pub extern "C" fn arch_dispatch_user_policy_exception(
         user_synth_code: policy_exception_code,
         user_synth_data: policy_exception_data,
     };
-    // SAFETY: `context` lives on this stack frame with a null `frame` pointer;
-    // `dispatch_user_exception` temporarily stores `&raw const context` in `ExceptionDispatcher`
-    // across blocking handler delivery and clears the pointer before returning, and policy
-    // exceptions are raised in normal thread context with no thread lock, spinlock, or active
-    // `ChainLockTransaction` held.
-    unsafe { crate::object::dispatch_user_exception(ZX_EXCP_POLICY_ERROR, &raw const context) }
+    // SAFETY: `context` is a live local with a null `frame`, and the caller upholds all thread,
+    // interrupt, blocking, and lock preconditions of `dispatch_user_exception`.
+    unsafe { crate::object::dispatch_user_exception(ZX_EXCP_POLICY_ERROR, &context) }
 }
 
 /// Install suspended register context on a thread.
+///
 /// # Safety
-/// Caller guarantees valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_install_exception_context(
+///
+/// The caller must ensure that `thread` points to a valid, live `Thread` with exclusive access to
+/// its `suspended_general_regs` state, and that any non-null `context.frame` points to a valid,
+/// writable [`Iframe`] that outlives the installed context until [`arch_remove_exception_context`].
+#[must_use]
+pub unsafe fn arch_install_exception_context(
     thread: *mut core::ffi::c_void,
-    context: *const ArchExceptionContext,
+    context: &ArchExceptionContext,
 ) -> bool {
-    if context.is_null() {
-        return false;
-    }
-    // SAFETY: the caller guarantees `context` points at a live exception context.
-    let ctx = unsafe { &*context };
-    if ctx.frame.is_null() {
+    if context.frame.is_null() {
         return false;
     }
     // SAFETY: `thread` comes from the caller under this function's contract, and
-    // `ctx.frame` was null-checked above.
+    // `context.frame` was null-checked above.
     unsafe {
         super::thread::arch_set_suspended_general_regs(
             thread,
             GeneralRegsSource::Iframe,
-            ctx.frame as *mut core::ffi::c_void,
+            context.frame.cast(),
         );
     }
     true
 }
 
 /// Remove suspended register context from a thread.
+///
 /// # Safety
-/// Caller guarantees valid thread pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_remove_exception_context(thread: *mut core::ffi::c_void) {
+///
+/// The caller must ensure that `thread` points to a valid, live `Thread` with exclusive access to
+/// its `suspended_general_regs` state.
+pub unsafe fn arch_remove_exception_context(thread: *mut core::ffi::c_void) {
     // SAFETY: `thread` comes from the caller under this function`s contract.
     unsafe { super::thread::arch_reset_suspended_general_regs(thread) };
-}
-
-/// # Safety
-/// Caller guarantees valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn PrintFrame(frame: *const Iframe) {
-    if frame.is_null() {
-        return;
-    }
-    // SAFETY: the caller guarantees `frame` points at a live trap frame.
-    let frame = unsafe { &*frame };
-    print_frame(frame);
 }
 
 #[cfg(ktest)]
@@ -953,6 +982,7 @@ mod tests {
         format_iframe,
     };
     use unittest::{assert_eq, assert_true};
+    use zerocopy::FromZeros;
     use zx_types::zx_exception_report_t;
 
     struct TestBuffer {
@@ -1000,10 +1030,8 @@ mod tests {
             user_synth_code: 42,
             user_synth_data: 99,
         };
-        // SAFETY: `zx_exception_report_t` is a plain C struct of integers and unions,
-        // so an all-zero bit pattern is a valid value for it.
-        let mut report = unsafe { core::mem::zeroed::<zx_exception_report_t>() };
-        // SAFETY: both arguments are live locals, uniquely borrowed here.
+        let mut report = zx_exception_report_t::new_zeroed();
+        // SAFETY: `ctx.frame` is null.
         unsafe { arch_fill_in_exception_context(&ctx, &mut report) };
         assert_eq!(report.context.synth_code, 42);
         assert_eq!(report.context.synth_data, 99);

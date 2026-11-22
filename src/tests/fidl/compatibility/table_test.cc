@@ -13,10 +13,10 @@
 using fidl::test::compatibility::AllTypesTable;
 using fidl::test::compatibility::Echo_EchoTableWithError_Result;
 using fidl::test::compatibility::RespondWith;
+using fidl::test::compatibility::this_is_a_flexible_union;
 using fidl::test::compatibility::this_is_a_struct;
 using fidl::test::compatibility::this_is_a_table;
 using fidl::test::compatibility::this_is_a_union;
-using fidl::test::compatibility::this_is_a_xunion;
 
 using fidl_test_compatibility_helpers::DataGenerator;
 using fidl_test_compatibility_helpers::ExtractShortName;
@@ -65,7 +65,7 @@ void InitializeAllTypesTable(AllTypesTable* value, DataGenerator& gen) {
   value->set_vector_member(vector);
 
   value->set_table_member(gen.next<this_is_a_table>());
-  value->set_xunion_member(gen.next<this_is_a_xunion>());
+  value->set_flexible_union_member(gen.next<this_is_a_flexible_union>());
 }
 
 void ExpectAllTypesTableEq(const AllTypesTable& a, const AllTypesTable& b) {
@@ -89,7 +89,7 @@ void ExpectAllTypesTableEq(const AllTypesTable& a, const AllTypesTable& b) {
   EXPECT_TRUE(fidl::Equals(a.array_member(), b.array_member()));
   EXPECT_TRUE(fidl::Equals(a.vector_member(), b.vector_member()));
   EXPECT_TRUE(fidl::Equals(a.table_member(), b.table_member()));
-  EXPECT_TRUE(fidl::Equals(a.xunion_member(), b.xunion_member()));
+  EXPECT_TRUE(fidl::Equals(a.flexible_union_member(), b.flexible_union_member()));
 }
 
 class CompatibilityTest : public ::testing::TestWithParam<std::tuple<std::string, std::string>> {

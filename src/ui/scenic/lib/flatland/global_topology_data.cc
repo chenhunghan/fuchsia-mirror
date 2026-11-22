@@ -8,7 +8,9 @@
 #include <lib/syslog/cpp/macros.h>
 #include <lib/trace/event.h>
 
+#include <algorithm>
 #include <optional>
+#include <utility>
 
 #include "src/ui/scenic/lib/flatland/flatland_types.h"
 #include "src/ui/scenic/lib/utils/helpers.h"
@@ -135,7 +137,7 @@ bool HitRegionContainsPoint(const flatland::HitRegion& region, float x, float y)
   return region.region().Contains({.x = x, .y = y});
 }
 
-// Easier-to-read input data to HitTest() below.
+// Easier-to-read input data to `HitTest()` below.
 struct HitTestingData {
   const GlobalTopologyData::TopologyVector transforms;
   const GlobalTopologyData::ParentIndexVector parent_indices;
@@ -144,6 +146,25 @@ struct HitTestingData {
   const flatland::HitRegions hit_regions;
   const std::vector<flatland::TransformClipRegion> global_clip_regions;
 };
+
+// Returns the index in `transforms` of the local root (`root_transforms[index]`) of the View
+// owning `transforms[index]`. Callers guarantee that this local root lies in `[min_index, index]`,
+// which holds because every View's subtree forms a contiguous depth-first range starting at its
+// local root.
+size_t GetViewStartIndex(size_t index, size_t min_index,
+                         const GlobalTopologyData::TopologyVector& transforms,
+                         const GlobalTopologyData::ParentIndexVector& parent_indices,
+                         const std::vector<TransformHandle>& root_transforms) {
+  const TransformHandle& root_transform = root_transforms[index];
+  size_t cur = index;
+  while (cur > min_index && transforms[cur] != root_transform) {
+    FX_DCHECK(parent_indices[cur] < cur);
+    cur = parent_indices[cur];
+  }
+  FX_DCHECK(cur >= min_index);
+  FX_DCHECK(transforms[cur] == root_transform);
+  return cur;
+}
 
 view_tree::SubtreeHitTestResult HitTest(const HitTestingData& data, zx_koid_t start_node,
                                         glm::vec2 world_point, bool is_semantic_hit_test) {
@@ -171,42 +192,57 @@ view_tree::SubtreeHitTestResult HitTest(const HitTestingData& data, zx_koid_t st
   std::vector<zx_koid_t> hits = {};
   hits.reserve(end - start);
 
-  for (size_t i = start; i < end; ++i) {
-    const auto& transform = transforms[i];
+  // Traverse front-to-back so hits are collected in front-most-first order and any semantically
+  // invisible hit can restrict the remaining search to the owning View's subtree.
+  size_t scope_start = start;
+  for (size_t i = end; i-- > scope_start;) {
+    const auto hit_region_vec = hit_regions.find(transforms[i]);
+    if (hit_region_vec == hit_regions.end() || hit_region_vec->second.empty()) {
+      continue;
+    }
+
+    // Skip anonymous and implicitly anonymous views, which `GenerateViewTreeSnapshot()` leaves out
+    // of `view_refs` or maps to `nullptr`, so they receive neither regular nor semantic hits.
     const auto& root_transform = root_transforms[i];
+    const auto local_root = view_refs.find(root_transform);
+    if (local_root == view_refs.end() || local_root->second == nullptr) {
+      continue;
+    }
 
     const auto clip_region = types::RectangleF::From(global_clip_regions[i]);
+    if (!clip_region.Contains({.x = x, .y = y})) {
+      continue;
+    }
 
-    // Skip anonymous views.
-    if (const auto local_root = view_refs.find(root_transform);
-        local_root != view_refs.end() && local_root->second != nullptr) {
-      const auto& view_ref_koid = local_root->second->koid();
-      // Skip views without hit regions.
-      if (const auto hit_region_vec = hit_regions.find(transform);
-          hit_region_vec != hit_regions.end()) {
-        for (const auto& region : hit_region_vec->second) {
-          const bool semantically_invisible =
-              region.interaction() ==
-              fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible;
-
-          // Deliver a hit in all cases except for when it is a semantic hit test and the region
-          // is semantically invisible.
-          if (is_semantic_hit_test && semantically_invisible) {
-            continue;
-          }
-
-          // Instead of clipping the hit region with the clip region, simply check if the hit
-          // point is in both.
-          if (HitRegionContainsPoint(region, x, y) && clip_region.Contains({.x = x, .y = y})) {
-            hits.push_back(view_ref_koid);
-            break;
-          }
-        }
+    bool added_hit = false;
+    bool skipped_semantically_invisible = false;
+    for (const auto& region : hit_region_vec->second) {
+      if (!HitRegionContainsPoint(region, x, y)) {
+        continue;
       }
+      if (is_semantic_hit_test &&
+          region.interaction() ==
+              fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible) {
+        // Keep scanning in case an overlapping `kDefault` region on this transform takes
+        // precedence.
+        skipped_semantically_invisible = true;
+        continue;
+      }
+      added_hit = true;
+      hits.push_back(local_root->second->koid());
+      break;
+    }
+
+    // A semantically invisible hit passes through only within the owning View's subtree so a child
+    // or sibling View cannot expose an ancestor or earlier sibling View to semantic hit tests while
+    // intercepting regular input. Checking `transforms[scope_start] != root_transform` avoids
+    // re-walking `parent_indices` when `scope_start` is already at this View's root.
+    if (!added_hit && skipped_semantically_invisible && transforms[scope_start] != root_transform) {
+      scope_start = std::max(scope_start, GetViewStartIndex(i, scope_start, transforms,
+                                                            parent_indices, root_transforms));
     }
   }
 
-  std::reverse(hits.begin(), hits.end());
   return view_tree::SubtreeHitTestResult{.hits = std::move(hits)};
 }
 

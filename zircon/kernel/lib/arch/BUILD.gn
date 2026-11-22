@@ -168,12 +168,14 @@ rustc_library("arch-rs") {
     "src/arm64/memory.rs",
     "src/arm64/mod.rs",
     "src/arm64/system.rs",
+    "src/arm64/ticks.rs",
     "src/lib.rs",
     "src/riscv64/feature.rs",
     "src/riscv64/intrin.rs",
     "src/riscv64/mod.rs",
     "src/riscv64/paging.rs",
     "src/riscv64/system.rs",
+    "src/riscv64/ticks.rs",
     "src/x86/apic_id.rs",
     "src/x86/bug.rs",
     "src/x86/cache.rs",
@@ -182,8 +184,10 @@ rustc_library("arch-rs") {
     "src/x86/feature.rs",
     "src/x86/intrin.rs",
     "src/x86/mod.rs",
+    "src/x86/power.rs",
     "src/x86/speculation.rs",
     "src/x86/system.rs",
+    "src/x86/ticks.rs",
   ]
 
   deps = [

@@ -113,9 +113,9 @@ impl FfxMain for ShowTool {
     type Error = ::fho::Error;
 
     async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
-        let manifest_bytes = std::fs::read(&self.cmd.manifest)
+        let manifest_bytes = product_bundle::load_ota_manifest(&self.cmd.manifest)
             .with_context(|| format!("Reading manifest file: {}", self.cmd.manifest))
-            .map_err(|e| Error::User(e))?;
+            .map_err(Error::User)?;
 
         let raw_manifest = update_package::signed_manifest::parse_raw(&manifest_bytes)
             .with_context(|| "Parsing signed manifest")
@@ -216,6 +216,8 @@ mod tests {
     use tempfile::NamedTempFile;
     use update_package::SystemVersion;
     use update_package::manifest::OtaManifest;
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
 
     fn make_ota_manifest() -> OtaManifest {
         OtaManifest {
@@ -331,6 +333,29 @@ mod tests {
             ]
         });
         assert_eq!(out_json, expected_json);
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let bundle = json!({
+            "version": "2", "product_name": "t", "product_version": "1", "sdk_version": "1",
+            "partitions": {"hardware_revision": "b"},
+            "repositories": [{"name": "f", "metadata_path": "r", "blobs_path": "b", "ota_manifest_path": "r/m"}],
+        });
+        let zip_path = camino::Utf8Path::from_path(temp_dir.path()).unwrap().join("pb.zip");
+        let mut archive = ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        archive.start_file("pb/product_bundle.json", options).unwrap();
+        archive.write_all(&serde_json::to_vec(&bundle).unwrap()).unwrap();
+        archive.start_file("pb/r/m", options).unwrap();
+        archive.write_all(&bytes).unwrap();
+        archive.finish().unwrap();
+
+        let zip_buffers = TestBuffers::default();
+        let zip_writer = <ShowTool as FfxMain>::Writer::new_test(Some(Format::Json), &zip_buffers);
+        let zip_cmd = ShowCommand { manifest: zip_path, public_key: None, print_blobs: false };
+        ShowTool { cmd: zip_cmd }.main(zip_writer).await.unwrap();
+        let (zip_out, zip_err) = zip_buffers.into_strings();
+        assert_eq!(zip_err, "");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&zip_out).unwrap(), expected_json);
     }
 
     #[fuchsia::test]

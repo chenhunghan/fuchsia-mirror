@@ -25,6 +25,7 @@ executable("bin") {
   sources = [ "main.cc" ]
 
   deps = [
+    ":fastboot_usb_config",
     "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
     "//sdk/fidl/fuchsia.hardware.fastboot:fuchsia.hardware.fastboot_cpp",
     "//sdk/lib/async-default",
@@ -36,9 +37,17 @@ executable("bin") {
   ]
 }
 
-fuchsia_component("component") {
+fuchsia_component_manifest("manifest") {
   component_name = "fastboot-usb"
   manifest = "meta/fastboot_usb.cml"
+}
+
+fuchsia_structured_config_cpp_elf_lib("fastboot_usb_config") {
+  cm_label = ":manifest"
+}
+
+fuchsia_component("component") {
+  cm_label = ":manifest"
   deps = [ ":bin" ]
 }
 

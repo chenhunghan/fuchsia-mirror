@@ -167,7 +167,7 @@ def _main(
 
 def main(argv: Sequence[str]) -> int:
     cfg = _PROJECT_ROOT_REL / remote_action._REPROXY_CFG
-    downloader = remotetool.configure_remotetool(cfg)
+    downloader = remotetool.configure(cfg, env=os.environ)
     return _main(
         argv,
         downloader=downloader,

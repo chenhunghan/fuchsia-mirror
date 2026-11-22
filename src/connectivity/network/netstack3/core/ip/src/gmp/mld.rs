@@ -1010,7 +1010,7 @@ mod tests {
 
     impl IpDeviceMtuContext<Ipv6> for &mut FakeCoreCtxImpl {
         fn get_mtu(&mut self, _device: &FakeDeviceId) -> Mtu {
-            Ipv6::MINIMUM_LINK_MTU
+            Ipv6::MINIMUM_LINK_MTU.get()
         }
     }
 

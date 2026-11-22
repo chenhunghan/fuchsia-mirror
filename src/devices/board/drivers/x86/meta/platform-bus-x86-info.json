@@ -1,9 +1,0 @@
-{
-    "short_description": "x86-64 platform bus board driver",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Board"
-    ]
-}

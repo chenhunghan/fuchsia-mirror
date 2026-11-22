@@ -6,16 +6,20 @@ import("//build/bazel/bazel_inputs.gni")
 import("//build/bind/bind.gni")
 import("//build/compiled_action.gni")
 import("//build/components.gni")
-import("//build/devicetree/devicetree.gni")
 import("//build/drivers.gni")
+import("//build/drivers/dml.gni")
 import("//build/testing/environments.gni")
 
 group("tests") {
   testonly = true
   deps = [
+    ":component",
     ":vim3-dml-bind_test",
+    ":vim3-dml-parsed",
     ":vim3-dml-test-package",
-    "//src/devices/tools/dmlc($host_toolchain)",
+    ":vim3-dml-unittests",
+    "//src/devices/board/lib/dml-config:tests",
+    "//src/devices/tools/dmlc:tests",
   ]
 }
 
@@ -57,6 +61,27 @@ fuchsia_board_dml("gen-board-config") {
   ]
 }
 
+dml_parsed("vim3-dml-parsed") {
+  dml_label = ":gen-board-config"
+  golden = "meta/vim3.dml.parsed"
+  source_root = "src/dump_parsed.rs"
+  sources = [
+    "src/driver_specific_data.rs",
+    "src/dump_parsed.rs",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
+    "//sdk/fidl/fuchsia.hardware.amlogic.metadata:fuchsia.hardware.amlogic.metadata_rust",
+    "//sdk/fidl/fuchsia.hardware.clockimpl:fuchsia.hardware.clockimpl_rust",
+    "//sdk/fidl/fuchsia.hardware.sdmmc:fuchsia.hardware.sdmmc_rust",
+    "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
+    "//src/devices/lib/broadcom/fuchsia.wlan.broadcom:fuchsia.wlan.broadcom_rust",
+    "//src/devices/usb/lib/fuchsia.hardware.usb.dwc2:fuchsia.hardware.usb.dwc2_rust",
+    "//src/lib/fidl/rust/fidl",
+    "//third_party/rust_crates:phf",
+  ]
+}
+
 driver_bind_rules("vim3-dml-bind") {
   dml_label = ":gen-board-config"
   bind_output = "vim3-dml.bindbc"
@@ -74,9 +99,13 @@ resource("board-config") {
 }
 
 fuchsia_rust_driver("vim3-dml-driver") {
+  with_unit_tests = true
   output_name = "vim3-dml"
   edition = "2024"
   source_root = "src/lib.rs"
+
+  configs += [ "//build/config/rust:bootfs" ]
+
   sources = [
     "src/driver_specific_data.rs",
     "src/lib.rs",
@@ -84,12 +113,9 @@ fuchsia_rust_driver("vim3-dml-driver") {
   deps = [
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
-    "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl_rust",
     "//sdk/fidl/fuchsia.hardware.amlogic.metadata:fuchsia.hardware.amlogic.metadata_rust",
     "//sdk/fidl/fuchsia.hardware.clockimpl:fuchsia.hardware.clockimpl_rust",
-    "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_rust",
     "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
-    "//sdk/fidl/fuchsia.hardware.pwm:fuchsia.hardware.pwm_rust",
     "//sdk/fidl/fuchsia.hardware.sdmmc:fuchsia.hardware.sdmmc_rust",
     "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
@@ -110,14 +136,24 @@ fuchsia_rust_driver("vim3-dml-driver") {
   ]
 }
 
+fuchsia_unittest_package("vim3-dml-unittests") {
+  deps = [
+    ":board-config",
+    ":vim3-dml-driver_test",
+  ]
+  test_specs = {
+    environments = basic_envs + [ vim3_env ]
+  }
+}
+
 fuchsia_driver_component("component") {
   component_name = "vim3-dml"
   cm_label = ":gen-board-config_manifest"
-  info = "meta/vim3-dml-info.json"
   deps = [
     ":board-config",
     ":vim3-dml-bind",
     ":vim3-dml-driver",
+    ":vim3-dml-parsed",
   ]
 }
 
@@ -155,7 +191,7 @@ fuchsia_unittest_component("vim3-dml-test-component") {
 fuchsia_test_package("vim3-dml-test-package") {
   package_name = "vim3-dml-test"
   test_specs = {
-    environments = [ vim3_env ]
+    environments = basic_envs + [ vim3_env ]
   }
   deps = [
     ":component",  # Include the driver component we are testing

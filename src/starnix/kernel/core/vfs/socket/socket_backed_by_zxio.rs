@@ -3,8 +3,9 @@
 // found in the LICENSE file.
 
 use crate::bpf::attachments::{SockAddrOp, SockAddrProgramResult, SockOp, SockProgramResult};
+use crate::bpf::fs::get_bpf_object;
 use crate::fs::fuchsia::zxio::{zxio_query_events, zxio_wait_async};
-use crate::mm::MemoryAccessorExt;
+use crate::mm::{MemoryAccessorExt, PAGE_SIZE};
 use crate::security;
 use crate::task::syscalls::SockFProgPtr;
 use crate::task::{CurrentTask, EventHandler, Kernel, Task, WaitCanceler, Waiter};
@@ -13,11 +14,12 @@ use crate::vfs::socket::{
     SockOptValue, Socket, SocketAddress, SocketDomain, SocketHandle, SocketMessageFlags, SocketOps,
     SocketPeer, SocketProtocol, SocketShutdownFlags, SocketType,
 };
-use crate::vfs::{AncillaryData, FileObject, InputBuffer, MessageReadInfo, OutputBuffer};
+use crate::vfs::{AncillaryData, FdNumber, FileObject, InputBuffer, MessageReadInfo, OutputBuffer};
 use byteorder::ByteOrder;
 use ebpf::convert_and_verify_cbpf;
-use ebpf_api::SOCKET_FILTER_CBPF_CONFIG;
+use ebpf_api::{ProgramType, SOCKET_FILTER_CBPF_CONFIG};
 use fidl::endpoints::DiscoverableProtocolMarker as _;
+use fidl_fuchsia_ebpf as febpf;
 use fidl_fuchsia_net_resources as fnet_resources;
 use fidl_fuchsia_posix_socket as fposix_socket;
 use fidl_fuchsia_posix_socket_packet as fposix_socket_packet;
@@ -30,7 +32,7 @@ use starnix_uapi::errors::{ENOTSUP, Errno, ErrnoCode};
 use starnix_uapi::user_address::{UserAddress, UserRef};
 use starnix_uapi::vfs::FdEvents;
 use starnix_uapi::{
-    AF_PACKET, BPF_MAXINSNS, FIONREAD, MSG_DONTWAIT, MSG_WAITALL, SO_ATTACH_FILTER,
+    AF_PACKET, BPF_MAXINSNS, FIONREAD, MSG_DONTWAIT, MSG_WAITALL, SO_ATTACH_BPF, SO_ATTACH_FILTER,
     SO_BINDTODEVICE, SO_BINDTOIFINDEX, SO_COOKIE, c_int, errno, errno_from_zxio_code, error,
     from_status_like_fdio, sock_filter, uapi, ucred, uid_t,
 };
@@ -221,9 +223,44 @@ impl ZxioBackedSocket {
             None => vec![],
         };
 
+        // Pre-validate maximum message payload sizes before running eBPF hooks
+        // or copying user memory into zxio/kernel buffers.
+        const IPV4_HEADER_LEN: usize = 20;
+        const UDP_HEADER_LEN: usize = 8;
+        let max_payload_len = match (socket.domain, socket.socket_type, socket.protocol) {
+            // Standard IPv4 UDP payloads cannot exceed 65535 - 20 (IPv4) - 8
+            // (UDP) = 65507 bytes. Starnix/Netstack3 do not support UDP GSO.
+            (SocketDomain::Inet, SocketType::Datagram, SocketProtocol::UDP) => {
+                Some(u16::MAX as usize - IPV4_HEADER_LEN - UDP_HEADER_LEN)
+            }
+            // Standard IPv6 UDP payloads cannot exceed 65535 - 8 (UDP) = 65527
+            // bytes (IPv6 Payload Length excludes the 40-byte IPv6 header).
+            // Starnix/Netstack3 do not support RFC 2675 jumbograms or UDP GSO.
+            (SocketDomain::Inet6, SocketType::Datagram, SocketProtocol::UDP) => {
+                Some(u16::MAX as usize - UDP_HEADER_LEN)
+            }
+            // ICMP ping and raw IP sockets reject payloads exceeding `u16::MAX`
+            // (which also cannot fit in FIDL `SendMsg` over a Zircon channel).
+            (
+                SocketDomain::Inet | SocketDomain::Inet6,
+                SocketType::Datagram | SocketType::Raw,
+                _,
+            ) => Some(u16::MAX as usize),
+            // Packet sockets send frames inline via FIDL `SendMsg` over a
+            // Zircon channel, so payloads >= `ZX_CHANNEL_MAX_MSG_BYTES` always
+            // fail with `ZX_ERR_OUT_OF_RANGE` (`EMSGSIZE`).
+            (SocketDomain::Packet, _, _) => Some((zx::sys::ZX_CHANNEL_MAX_MSG_BYTES as usize) - 1),
+            _ => None,
+        };
+        if let Some(max_len) = max_payload_len {
+            if data.available() > max_len {
+                return error!(EMSGSIZE);
+            }
+        }
+
         // Run `CGROUP_UDP[46]_SENDMSG` eBPF programs for `sendto()` and
-        // `sendmsg()` on UDP sockets. Not necessary for `send()` (i.e. when
-        // `addr` is empty).
+        // `sendmsg()` on IPv4/IPv6 datagram sockets. Not necessary for `send()`
+        // (i.e. when `addr` is empty).
         if matches!(
             (socket.domain, socket.socket_type),
             (SocketDomain::Inet | SocketDomain::Inet6, SocketType::Datagram)
@@ -326,8 +363,7 @@ impl ZxioBackedSocket {
         Ok(info)
     }
 
-    fn attach_cbpf_filter(&self, _task: &Task, code: Vec<sock_filter>) -> Result<(), Errno> {
-        // SO_ATTACH_FILTER is supported only for packet sockets.
+    fn check_packet_socket(&self) -> Result<(), Errno> {
         let domain = self
             .zxio
             .getsockopt(SOL_SOCKET, SO_DOMAIN, size_of::<u32>() as u32)
@@ -337,7 +373,30 @@ impl ZxioBackedSocket {
         if domain != u32::from(AF_PACKET) {
             return error!(ENOTSUP);
         }
+        Ok(())
+    }
 
+    fn attach_bpf_program_to_packet_socket(
+        &self,
+        program: febpf::VerifiedProgram,
+    ) -> Result<(), Errno> {
+        self.check_packet_socket()?;
+
+        // TODO(https://fxbug.dev/377332291) Use `zxio_borrow()` to avoid cloning the handle.
+        let packet_socket = fidl::endpoints::ClientEnd::<fposix_socket_packet::SocketMarker>::new(
+            self.zxio.clone_handle().map_err(|_| errno!(EIO))?.into(),
+        )
+        .into_sync_proxy();
+        let result = packet_socket.attach_bpf_filter(program, zx::MonotonicInstant::INFINITE);
+        result.map_err(|_: fidl::Error| errno!(EIO))?.map_err(|e| {
+            Errno::with_context(
+                ErrnoCode::from_error_code(e.into_primitive() as i16),
+                "AttachBpfFilter",
+            )
+        })
+    }
+
+    fn attach_cbpf_filter(&self, _task: &Task, code: Vec<sock_filter>) -> Result<(), Errno> {
         let program = convert_and_verify_cbpf(
             &code,
             ebpf_api::SOCKET_FILTER_SK_BUF_TYPE.clone(),
@@ -345,19 +404,20 @@ impl ZxioBackedSocket {
         )
         .map_err(|_| errno!(EINVAL))?;
 
-        // TODO(https://fxbug.dev/377332291) Use `zxio_borrow()` to avoid cloning the handle.
-        let packet_socket = fidl::endpoints::ClientEnd::<fposix_socket_packet::SocketMarker>::new(
-            self.zxio.clone_handle().map_err(|_| errno!(EIO))?.into(),
-        )
-        .into_sync_proxy();
-        let code: Vec<u64> = program.code().iter().map(ebpf::EbpfInstruction::get).collect();
-        let result = packet_socket.attach_bpf_filter_unsafe(&code, zx::MonotonicInstant::INFINITE);
-        result.map_err(|_: fidl::Error| errno!(EIO))?.map_err(|e| {
-            Errno::with_context(
-                ErrnoCode::from_error_code(e.into_primitive() as i16),
-                "AttachBfpFilterUnsafe",
-            )
-        })
+        let program =
+            crate::bpf::program::new_verified_program_fidl(_task.kernel(), Arc::new(program));
+        self.attach_bpf_program_to_packet_socket(program)
+    }
+
+    fn attach_ebpf_filter(&self, current_task: &CurrentTask, fd: FdNumber) -> Result<(), Errno> {
+        let object = get_bpf_object(current_task, fd)?;
+        let program = object.as_program()?;
+        let program: &crate::bpf::program::Program = program;
+        if program.info.program_type != ProgramType::SocketFilter {
+            return error!(EINVAL);
+        }
+        let fidl_program = febpf::VerifiedProgram::try_from(program)?;
+        self.attach_bpf_program_to_packet_socket(fidl_program)
     }
 
     fn run_sockaddr_ebpf(
@@ -716,6 +776,10 @@ impl SocketOps for ZxioBackedSocket {
                     .read_multi_arch_objects_to_vec(fprog.filter, fprog.len as usize)?;
                 return self.attach_cbpf_filter(current_task, code);
             }
+            (SOL_SOCKET, SO_ATTACH_BPF) => {
+                let fd: FdNumber = optval.read(current_task)?;
+                return self.attach_ebpf_filter(current_task, fd);
+            }
             (SOL_IP, IP_RECVERR) => {
                 track_stub!(TODO("https://fxbug.dev/333060595"), "SOL_IP.IP_RECVERR");
                 return Ok(());
@@ -772,7 +836,8 @@ impl SocketOps for ZxioBackedSocket {
             _ => {}
         }
 
-        let optval = optval.to_vec(current_task)?;
+        // Cap the read to a single page; all options handled by zxio fit within a few dozen bytes.
+        let optval = optval.read_bytes(current_task, *PAGE_SIZE as usize)?;
 
         let access_token = match (level, optname) {
             (SOL_SOCKET, SO_REUSEPORT) => Some(self.token_resolver.get_sharing_domain_token()),

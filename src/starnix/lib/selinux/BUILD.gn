@@ -134,7 +134,6 @@ rustc_library("selinux") {
   lint_config = "//src/starnix/build:kernel_library_config"
   proc_macro_deps = [
     "//src/starnix/lib/selinux/src/policy/derive_macros",
-    "//third_party/rust_crates:paste",
     "//third_party/rust_crates:strum_macros",
   ]
   visibility = [
@@ -260,7 +259,6 @@ rustc_test("selinux_lib_test") {
   edition = "2024"
   proc_macro_deps = [
     "//src/starnix/lib/selinux/src/policy/derive_macros",
-    "//third_party/rust_crates:paste",
     "//third_party/rust_crates:strum_macros",
   ]
   deps = []

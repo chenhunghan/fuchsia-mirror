@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN's explicit library_name = "perf" matches the python_library default
+# (target_name) and is matched here by name = "perf" and imports = [".."].
+# TODO(https://fxbug.dev/570694755): Verify whether perf should use target_compatible_with (was not gated by if (is_host) in GN).
+# Enable mypy on the generated python_library until a Bazel target built in
+# presubmit depends on perf.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "perf",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "action_timer.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/tests/end_to_end:__subpackages__"],
+)

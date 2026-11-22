@@ -1,0 +1,163 @@
+# Copyright 2021 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Common implementation for `fuchsia_*_component()` macros. Shared by platform and the Bazel SDK."""
+
+load(
+    "@fuchsia_rules_common//:utils.bzl",
+    "make_resource_struct",
+)
+load(
+    "@fuchsia_rules_common//debug_symbols:debug_symbols.bzl",
+    "merge_debug_symbol_infos",
+)
+load(
+    "@fuchsia_rules_common//debug_symbols:providers.bzl",
+    "FuchsiaUnstrippedBinariesInfo",
+    "FuchsiaUnstrippedBinaryInfo",
+)
+load(
+    "@fuchsia_rules_common//packages:providers.bzl",
+    "FuchsiaPackageResourcesInfo",
+)
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "COMPILED_BINARY_PROVIDERS",
+)
+load(
+    ":providers.bzl",
+    "FuchsiaComponentInfo",
+    "FuchsiaComponentManifestInfo",
+)
+
+def _make_fuchsia_component_providers(*, component_name, manifest, resources, is_driver, is_test, moniker, run_tag, test_realm):
+    return [
+        FuchsiaComponentInfo(
+            name = component_name,
+            manifest = manifest,
+            resources = resources,
+            is_driver = is_driver,
+            is_test = is_test,
+            moniker = moniker,
+            run_tag = run_tag,
+            test_realm = test_realm,
+        ),
+        FuchsiaPackageResourcesInfo(resources = [
+            make_resource_struct(
+                src = manifest,
+                dest = "meta/{}".format(manifest.basename),
+            ),
+        ]),
+    ]
+
+def _component_common_impl(ctx):
+    # TODO(http://b/525461025): Also check for session components per the doc string.
+    if ctx.attr.moniker and (ctx.attr.is_driver or ctx.attr.is_test):
+        fail("`moniker` should not be set for driver or test components.")
+    if ctx.attr.test_realm and not ctx.attr.is_test:
+        fail("`test_realm` can only be set for test components (`is_test = True`).")
+
+    component_name = ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].component_name
+    manifest = ctx.attr.compiled_manifest[FuchsiaComponentManifestInfo].compiled_manifest
+
+    resources = []
+    for dep in ctx.attr.deps:
+        if (
+            FuchsiaUnstrippedBinariesInfo not in dep and
+            FuchsiaUnstrippedBinaryInfo not in dep and
+            any([p in dep for p in COMPILED_BINARY_PROVIDERS])
+        ):
+            fail(
+                "Component '{}' cannot depend directly on unwrapped binary or library target '{}' in `deps` because it would not be stripped or have its runtime dependencies packaged. Wrap executable binaries in `fx_packaged_binary()` instead.".format(
+                    ctx.label,
+                    dep.label,
+                ),
+            )
+        if FuchsiaPackageResourcesInfo in dep:
+            resources += dep[FuchsiaPackageResourcesInfo].resources
+        else:
+            for mapping in dep[DefaultInfo].default_runfiles.root_symlinks.to_list():
+                resources.append(make_resource_struct(src = mapping.target_file, dest = mapping.path))
+
+            for f in dep.files.to_list():
+                resources.append(make_resource_struct(src = f, dest = f.short_path))
+
+    return _make_fuchsia_component_providers(
+        component_name = component_name,
+        manifest = manifest,
+        resources = resources,
+        is_driver = ctx.attr.is_driver,
+        is_test = ctx.attr.is_test,
+        moniker = ctx.attr.moniker.format(COMPONENT_NAME = component_name),
+        run_tag = ctx.label.name,
+        test_realm = ctx.attr.test_realm or None,
+    ) + [
+        merge_debug_symbol_infos(ctx.attr.deps),
+    ]
+
+component_common = rule(
+    doc = """Creates a Fuchsia component which can be added to a package
+
+This rule will take a component manifest and compile it into a form that
+is suitable to be included in a package. The component can include any
+number of dependencies which will be included in the final package.
+""",
+    implementation = _component_common_impl,
+    # Prefer mandatory attributes to ensure wrapping macros intentionally set them.
+    attrs = {
+        "deps": attr.label_list(
+            doc = """A list of targets that this component depends on.
+
+            The necessary files for each target will be included in the final package.
+            """,
+            mandatory = False,
+        ),
+        "moniker": attr.string(
+            doc = """The moniker to run the component under.
+
+            Instances of `{COMPONENT_NAME}` are replaced with the component name.
+
+            Use only for non-test, non-driver, and non-session components.
+            """,
+            # Cannot be mandatory because it is a string.
+            mandatory = False,
+        ),
+        "compiled_manifest": attr.label(
+            doc = "The `fuchsia_component_manifest` target.",
+            providers = [FuchsiaComponentManifestInfo],
+            mandatory = True,
+        ),
+        "is_driver": attr.bool(
+            doc = """True if this is a driver component.
+
+            Controls how the SDK runs the component.
+            """,
+            mandatory = True,
+        ),
+        "is_test": attr.bool(
+            doc = """True if this is a test component.
+
+            Packages require test components to be listed in their
+            `test_components` attribute and all other components in
+            `components`. The SDK also uses this to control how the component
+            is run, and the platform build's `fx_test()` uses it to find the
+            test components in its package.
+            This is independent of the `testonly` attribute.
+            """,
+            mandatory = True,
+        ),
+        "test_realm": attr.string(
+            doc = """The non-hermetic realm moniker to run the test component in.
+
+            Use only when `is_test` is True. If empty, the test runs in the
+            default hermetic test realm.
+
+            Only used for platform test components. The SDK does not use test
+            realms.
+            """,
+            # Cannot be mandatory because it is a string.
+            mandatory = False,
+        ),
+    },
+)

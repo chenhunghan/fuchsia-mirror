@@ -26,7 +26,7 @@ velocity and proper stakeholder communication and approval processes.
 
 ## Design
 
-### Changes which require an RFC
+### Changes which require an RFC {:#changes-which-require-an-rfc}
 
 *   **Changes to the system update flow which add restrictions or gates, or new
     error conditions to the OTA process.** For example, adding additional checks

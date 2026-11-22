@@ -204,7 +204,7 @@ class EventRing {
   // Interrupt management register
   IMAN iman_reg_;
   uint8_t segment_index_ __TA_GUARDED(segment_mutex_) = 0;
-  UsbXhci* hci_;
+  UsbXhci* hci_ = nullptr;
   uint8_t cap_length_;
   HCSPARAMS1 hcs_params_1_;
   CommandRing* command_ring_;

@@ -195,7 +195,7 @@ async fn watch_power_service(
 /// Registers GPU devfreq (`/sys/class/devfreq/<device_name>` and
 /// `/sys/devices/platform/<device_name>/devfreq/<device_name>`) and genpd runtime PM
 /// (`/sys/devices/<genpd_device_name>/power/control`) sysfs nodes.
-pub(crate) fn register_gpu_devices(kernel: &Kernel, config: GpuDeviceConfig) {
+pub(crate) fn register_gpu_devices(kernel: &Kernel, config: GpuDeviceConfig) -> Result<(), Errno> {
     let device_name = config.device_name.clone();
     let genpd_device_name = config.genpd_device_name.clone();
     let domain = Arc::new(GpuPowerDomain::new(config));
@@ -212,7 +212,7 @@ pub(crate) fn register_gpu_devices(kernel: &Kernel, config: GpuDeviceConfig) {
             build_device_directory(device, dir);
             build_gpu_power_directory(dir, &domain_for_genpd);
         },
-    );
+    )?;
 
     // 2. `/sys/devices/platform/<device_name>` + `/sys/class/devfreq/<device_name>` (`GPUMinFreq`)
     let domain_for_platform = domain.clone();
@@ -224,7 +224,7 @@ pub(crate) fn register_gpu_devices(kernel: &Kernel, config: GpuDeviceConfig) {
             build_device_directory(device, dir);
             build_gpu_power_directory(dir, &domain_for_platform);
         },
-    );
+    )?;
 
     let devfreq_class = objects.get_or_create_class("devfreq".into());
     registry.add_numberless_device(
@@ -235,7 +235,8 @@ pub(crate) fn register_gpu_devices(kernel: &Kernel, config: GpuDeviceConfig) {
             build_device_directory(device, dir);
             build_gpu_devfreq_directory(dir, &domain);
         },
-    );
+    )?;
+    Ok(())
 }
 
 fn build_gpu_power_directory(dir: &SimpleDirectoryMutator, domain: &Arc<GpuPowerDomain>) {
@@ -977,7 +978,8 @@ mod tests {
     async fn sysfs_registers_gpu_devfreq_and_genpd_nodes() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            register_gpu_devices(kernel, GpuDeviceConfig::default());
+            register_gpu_devices(kernel, GpuDeviceConfig::default())
+                .expect("register_gpu_devices");
             let root = &kernel.device_registry.objects.root;
 
             assert!(root.lookup("devices/genpd:0:34f00000.gpu0/power/control".into()).is_some());

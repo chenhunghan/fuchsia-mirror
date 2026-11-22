@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bind/bind.gni")
+import("//build/components.gni")
+import("//build/drivers.gni")
+
+driver_bind_rules("fake-usb-peripheral-bind") {
+  rules = "meta/fake-usb-peripheral.bind"
+  bind_output = "fake-usb-peripheral.bindbc"
+  deps = [ "//src/devices/bind/fuchsia.test" ]
+}
+
+fuchsia_component_manifest("fake-usb-peripheral-manifest") {
+  component_name = "fake-usb-peripheral"
+  manifest = "meta/fake-usb-peripheral.cml"
+}
+
+fuchsia_structured_config_cpp_elf_lib("fake-usb-peripheral-config") {
+  cm_label = ":fake-usb-peripheral-manifest"
+}
+
+fuchsia_cc_driver("fake-usb-peripheral-driver") {
+  output_name = "fake-usb-peripheral"
+  sources = [ "fake-usb-peripheral.cc" ]
+  deps = [
+    ":fake-usb-peripheral-bind",
+    ":fake-usb-peripheral-config",
+    "//sdk/fidl/fuchsia.hardware.usb.function:fuchsia.hardware.usb.function_cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//src/devices/bind/fuchsia:fuchsia_cpp",
+    "//src/devices/bind/fuchsia.usb:fuchsia.usb_cpp",
+    "//src/devices/lib/driver:driver_runtime",
+  ]
+}
+
+fuchsia_driver_component("fake-usb-peripheral") {
+  testonly = true
+  cm_label = ":fake-usb-peripheral-manifest"
+  deps = [ ":fake-usb-peripheral-driver" ]
+}

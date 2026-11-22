@@ -52,7 +52,9 @@ InputSystem::InputSystem(async_dispatcher_t *input_dispatcher,
           [&mouse_system = mouse_system_](StreamId stream_id) {
             mouse_system.CancelMouseStream(stream_id);
           },
-          inspect_node.CreateChild("PointerinjectorRegistry"))
+          inspect_node.CreateChild("PointerinjectorRegistry"),
+          /*begin_touch_batch=*/
+          [&touch_system = touch_system_] { return touch_system.ScopedTouchBatch(); })
 #else
       pointerinjector_registry_(
           input_dispatcher, snapshot_holder,
@@ -66,7 +68,9 @@ InputSystem::InputSystem(async_dispatcher_t *input_dispatcher,
                                           const view_tree::Snapshot &snapshot) {
             touch_system.InjectTouchEventHitTested(std::move(event), stream_id, snapshot);
           },
-          inspect_node.CreateChild("PointerinjectorRegistry"))
+          inspect_node.CreateChild("PointerinjectorRegistry"),
+          /*begin_touch_batch=*/
+          [&touch_system = touch_system_] { return touch_system.ScopedTouchBatch(); })
 #endif
 {
 }

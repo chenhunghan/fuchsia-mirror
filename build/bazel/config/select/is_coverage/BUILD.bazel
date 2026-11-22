@@ -2,23 +2,36 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@bazel_skylib//lib:selects.bzl", "selects")
+
 package(default_applicable_licenses = ["//:license"])
 
-config_setting(
+selects.config_setting_group(
     name = "true",
-    flag_values = {
-        "//build/bazel/config/variables:is_coverage": "True",
-    },
+    match_any = [
+        "//build/bazel/config/variant_features/coverage:true",
+        "//build/bazel/config/variant_features/coverage-rust:true",
+        "//build/bazel/config/variant_features/coverage-cts:true",
+        # Mirrors `is_coverage` (`is_fuchsia_coverage`) in //build/config/BUILDCONFIG.gn,
+        # which matches both `"coverage"` and `"profile"` toolchain tags.
+        "//build/bazel/config/select/is_profile:true",
+    ],
+    visibility = ["//:__subpackages__"],
 )
 
-config_setting(
+selects.config_setting_group(
     name = "false",
-    flag_values = {
-        "//build/bazel/config/variables:is_coverage": "False",
-    },
+    match_all = [
+        "//build/bazel/config/variant_features/coverage:false",
+        "//build/bazel/config/variant_features/coverage-rust:false",
+        "//build/bazel/config/variant_features/coverage-cts:false",
+        "//build/bazel/config/select/is_profile:false",
+    ],
+    visibility = ["//:__subpackages__"],
 )
 
 alias(
     name = "is_coverage",
     actual = ":true",
+    visibility = ["//:__subpackages__"],
 )

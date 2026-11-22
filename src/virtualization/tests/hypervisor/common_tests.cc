@@ -35,6 +35,18 @@ TEST(Guest, VcpuEnter) {
   ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
 }
 
+// Verifies that a VCPU keeps its guest alive after the guest's handles are closed, so that the
+// VCPU can be destroyed safely afterwards.
+TEST(Guest, VcpuOutlivesGuestHandle) {
+  TestCase test;
+  ASSERT_NO_FATAL_FAILURE(SetupGuest(&test, vcpu_enter_start, vcpu_enter_end));
+  ASSERT_NO_FATAL_FAILURE(EnterAndCleanExit(&test));
+
+  test.guest.reset();
+  test.vmar.reset();
+  test.vcpu.reset();
+}
+
 TEST(Guest, VcpuKick) {
   TestCase test;
   std::promise<void> barrier;

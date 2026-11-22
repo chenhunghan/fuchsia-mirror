@@ -27,8 +27,8 @@ pub struct KernelAspaceAllocator;
 
 impl KernelAspaceAllocator {
     /// Allocates and maps a pinned region of `size` bytes (rounded up to a page multiple) in the
-    /// kernel address space named `buffer_name`.
-    pub fn allocate(size: u32, buffer_name: &[u8]) -> Option<NonNull<u8>> {
+    /// kernel address space.
+    pub fn allocate(size: u32) -> Option<NonNull<u8>> {
         let rounded_size = page::round_up(size as usize);
         if size == 0 {
             return None;
@@ -46,7 +46,7 @@ impl KernelAspaceAllocator {
         let Ok(r) = kaspace
             .root_vmar()
             .expect("kernel aspace root VMAR must be initialized")
-            .create_vm_mapping(
+            .create_vm_mapping_no_overwrite(
                 0,
                 rounded_size,
                 0,
@@ -54,7 +54,6 @@ impl KernelAspaceAllocator {
                 VmObjectPaged::into_vm_object(vmo.clone()),
                 0,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-                buffer_name,
             )
         else {
             vmo.unpin(0, rounded_size as u64);
@@ -72,13 +71,13 @@ impl KernelAspaceAllocator {
     ///
     /// # Safety
     ///
-    /// If `ptr` is `Some`, it must be the base address of a live region allocated by
-    /// [`Self::allocate`] in the kernel address space that is no longer in use.
+    /// If `ptr` is `Some`, it is the base address of a region allocated by [`Self::allocate`] in
+    /// the kernel address space and not freed since, and nothing uses that region any more.
     pub unsafe fn free(ptr: Option<NonNull<u8>>) {
         if let Some(ptr) = ptr {
             let kaspace = VmAspace::kernel_aspace();
-            // SAFETY: The caller guarantees `ptr` is the base address of a live region in the
-            // kernel address space that is no longer in use.
+            // SAFETY: `ptr` is in a mapping of the root VMAR whose whole VMO range is pinned by a
+            // pin this code owns, and nothing uses that mapping any more.
             let _ = unsafe { kaspace.free_region(ptr.addr().get()) };
         }
     }

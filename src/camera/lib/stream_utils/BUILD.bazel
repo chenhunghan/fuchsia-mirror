@@ -1,0 +1,112 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":image_io_util_unittest_test"],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["image_io_util.cc"],
+    hdrs = ["image_io_util.h"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//zircon/system/ulib/fzl",
+    ],
+    visibility = ["//src/camera/lib:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+        "//sdk/lib/fit-promise",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "stream_configs",
+    srcs = ["stream_constraints.cc"],
+    hdrs = ["stream_constraints.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp_hlcpp_conversion",
+        "//src/camera/lib/format_conversion",
+        "//zircon/system/ulib/affine",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/image-format",
+    ],
+    visibility = [
+        "//src/camera/bin/virtual_camera:__pkg__",
+        "//src/camera/drivers/controller/sherlock:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.camera2:fuchsia.camera2_hlcpp",
+        "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_hlcpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_hlcpp_conversion",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "image_io_util_unittest_bin",
+    srcs = ["image_io_util_unittest.cc"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_hlcpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_packaged_binary(
+    name = "image_io_util_unittest_packaged_bin",
+    testonly = True,
+    binary = ":image_io_util_unittest_bin",
+    binary_name = "image_io_util_unittest_bin",
+)
+
+fx_component_manifest(
+    name = "image_io_util_unittest_manifest",
+    testonly = True,
+    component_name = "image_io_util_unittest",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/image_io_util_unittest.cml",
+)
+
+fx_test_component(
+    name = "image_io_util_unittest_component",
+    compiled_manifest = ":image_io_util_unittest_manifest",
+    deps = [":image_io_util_unittest_packaged_bin"],
+)
+
+fx_package(
+    name = "image_io_util_unittest",
+    testonly = True,
+    test_components = [":image_io_util_unittest_component"],
+)
+
+fx_test(
+    name = "image_io_util_unittest_test",
+    package = ":image_io_util_unittest",
+)

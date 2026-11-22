@@ -111,7 +111,7 @@ Note on --physical-disconnect:
   Requires a hardware USB power hub. The default setup uses 'dmc' (a
   Fuchsia infra tool) which abstracts the power hub hardware, typically a
   Cambrionix in infra labs. For local runs with different hardware you must
-  configure 'usb_power_hub_hw' and 'usb_power_hub_impl' in Mobly.
+  configure 'auxiliary_devices.usb_power_hub' ('hardware' and 'implementation') in Mobly.
 EOF
 }
 

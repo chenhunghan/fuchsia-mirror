@@ -14,7 +14,7 @@
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "inotify_policy"; }
+extern std::string GetTestPolicyName() { return "inotify_policy"; }
 
 namespace {
 

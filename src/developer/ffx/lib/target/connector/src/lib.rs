@@ -3,12 +3,10 @@
 // found in the LICENSE file.
 
 use ffx_command_error::{Error, Result};
-use fho::{FhoEnvironment, TryFromEnv};
+use ffx_target::{TargetConnectError, TargetConnector, TargetResolutionError};
+use fho::{FhoEnvironment, TargetNeed, TryFromEnv};
 use std::time::Duration;
-use target_behavior::{
-    DirectConnectError, DirectConnector, FhoTargetEnvironment, TargetResolutionError,
-    target_interface,
-};
+use target_holders::{FhoTargetEnvironment, target_interface};
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(50);
 const MAX_RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -50,20 +48,20 @@ impl<T> Connector<T>
 where
     T: TryFromEnv<Error = ffx_command_error::Error>,
 {
-    /// Try to get a `T` from the environment. Will wait for the target to
-    /// appear if it is non-responsive. If that occurs, `log_target_wait` will
-    /// be called prior to waiting.
+    /// Try to get a `T` from the environment using the configured discovery timeout.
+    ///
+    /// If the target is non-responsive or temporarily unreachable after an initial resolution,
+    /// `log_target_wait` is called with the resolved target spec (if known) and the non-fatal
+    /// error before waiting to retry. Returns `Err` if initial target resolution fails, if a
+    /// fatal connection error occurs, or if `log_target_wait` returns an error.
     pub async fn try_connect(
         &self,
         mut log_target_wait: impl FnMut(&Option<String>, &Option<Error>) -> Result<()>,
     ) -> Result<T> {
-        // TODO(b/540442481): Clean up naming (e.g. "Direct", "DirectConnector") in a follow-up CL
-        // now that direct connection is the only mechanism.
-        let connector =
-            self.target_env.init_connection_behavior(self.env.environment_context()).await?;
-        direct_connector_try_connect::<T>(
+        let connector = self.target_env.init(self.env.environment_context());
+        target_connector_try_connect::<T>(
             &self.env,
-            &connector,
+            connector,
             &mut log_target_wait,
             DiscoveryRetryMode::FailOnInitialMiss,
         )
@@ -71,16 +69,19 @@ where
     }
 
     /// Try to get a `T` from the environment with an indefinite discovery timeout.
-    /// Will wait indefinitely for the target to appear.
+    ///
+    /// Retries `TargetNotFound` resolution errors and non-fatal connection errors indefinitely,
+    /// invoking `log_target_wait` with the resolved target spec (if known) and the retryable
+    /// error before each wait. Returns `Err` if a fatal resolution or connection error occurs
+    /// or if `log_target_wait` returns an error.
     pub async fn try_connect_indefinitely(
         &self,
         mut log_target_wait: impl FnMut(&Option<String>, &Option<Error>) -> Result<()>,
     ) -> Result<T> {
-        let connector =
-            self.target_env.init_connection_behavior_indef(self.env.environment_context()).await?;
-        direct_connector_try_connect::<T>(
+        let connector = self.target_env.init_with_timeout(self.env.environment_context(), None);
+        target_connector_try_connect::<T>(
             &self.env,
-            &connector,
+            connector,
             &mut log_target_wait,
             DiscoveryRetryMode::RetryIndefinitely,
         )
@@ -92,6 +93,7 @@ impl<T> TryFromEnv for Connector<T>
 where
     T: TryFromEnv<Error = ffx_command_error::Error>,
 {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> Result<Self, Self::Error> {
         let target_env = target_interface(env);
@@ -114,7 +116,7 @@ fn check_connection_retry(
 /// and should be retried, or `Err` with the error if the command should fail.
 async fn check_resolution_retry(
     err: TargetResolutionError,
-    connector: &DirectConnector,
+    connector: &TargetConnector,
     retry_mode: DiscoveryRetryMode,
 ) -> Result<(Option<String>, ffx_command_error::Error)> {
     let err = err.into_command_error();
@@ -131,7 +133,7 @@ async fn check_resolution_retry(
 /// Repeatedly resolves and connects to the target until `T::try_from_env` succeeds or a fatal
 /// error occurs.
 ///
-/// Each attempt calls [`DirectConnector::connect`], which resolves from `$SHARED_DATA/targets.json`
+/// Each attempt calls [`TargetConnector::connect`], which resolves from `$SHARED_DATA/targets.json`
 /// (in strict mode) or the discovery cache / live discovery (in non-strict mode) and re-resolves
 /// whenever a previous `Resolution` was invalidated by a failed or timed-out connection attempt.
 ///
@@ -139,9 +141,9 @@ async fn check_resolution_retry(
 /// failures are retried only on `TargetNotFound`, and only when `retry_mode` is
 /// `DiscoveryRetryMode::RetryIndefinitely` or when `connector.has_resolved_target()` is `true`
 /// (meaning a target was previously resolved and may be temporarily offline across a reboot).
-async fn direct_connector_try_connect<T>(
+async fn target_connector_try_connect<T>(
     env: &FhoEnvironment,
-    connector: &DirectConnector,
+    connector: &TargetConnector,
     log_target_wait: &mut impl FnMut(&Option<String>, &Option<Error>) -> Result<()>,
     retry_mode: DiscoveryRetryMode,
 ) -> Result<T>
@@ -155,10 +157,10 @@ where
                 Ok(val) => return Ok(val),
                 Err(err) => check_connection_retry(resolution.target_spec(), err)?,
             },
-            Err(DirectConnectError::Connection { target_spec, err }) => {
+            Err(TargetConnectError::Connection { target_spec, err }) => {
                 check_connection_retry(target_spec, (*err).into_command_error())?
             }
-            Err(DirectConnectError::Resolution(err)) => {
+            Err(TargetConnectError::Resolution(err)) => {
                 check_resolution_retry(err, connector, retry_mode).await?
             }
         };
@@ -173,6 +175,7 @@ where
 mod tests {
     use super::*;
     use ffx_config::environment::ExecutableKind;
+    use ffx_config::keys::{NETWORK_ENABLED, USB_ENABLED};
     use ffx_config::test_env;
     use std::cell::RefCell;
     use std::str::FromStr;
@@ -189,7 +192,7 @@ mod tests {
 
     #[derive(Debug)]
     struct PlaceholderConnector;
-    impl ffx_target::TargetConnector for PlaceholderConnector {
+    impl ffx_target::TransportConnector for PlaceholderConnector {
         const CONNECTION_TYPE: &'static str = "placeholder";
         async fn connect(
             &mut self,
@@ -201,18 +204,18 @@ mod tests {
 
     // Tests that `Connector<T>` can successfully connect via `try_connect` (using default
     // discovery timeout) and `try_connect_indefinitely` (using indefinite discovery timeout)
-    // without errors when a valid direct connection behavior and target environment are configured.
+    // without errors when a valid target connector and target environment are configured.
     #[fuchsia::test]
     async fn test_connector_try_connect_and_try_connect_indefinitely() {
         let env = test_env().build().unwrap();
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
+        let target_env = target_interface(&fho_env);
 
         let resolution = ffx_target::Resolution::mock(|| unreachable!());
         let conn = ffx_target::Connection::new(PlaceholderConnector).await.unwrap();
         resolution.set_connection_for_test(Some(conn)).await;
-        let connector = DirectConnector::from_resolution_for_test(resolution);
-        target_env.set_behavior_for_test(connector);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
+        target_env.set_connector_for_test(connector);
 
         let connector =
             Connector::<DummyHolder>::try_from_env(&fho_env).await.expect("create connector");
@@ -227,8 +230,8 @@ mod tests {
     #[fuchsia::test]
     async fn test_connector_try_connect_target_not_found_fails_immediately() {
         let env_failure = test_env()
-            .user_config("connectivity.enable_network", serde_json::json!(false))
-            .user_config("connectivity.enable_usb", serde_json::json!(false))
+            .user_config(NETWORK_ENABLED, serde_json::json!(false))
+            .user_config(USB_ENABLED, serde_json::json!(false))
             .user_config("discovery.mdns.enabled", serde_json::json!(false))
             .build()
             .unwrap();
@@ -275,7 +278,7 @@ mod tests {
     async fn test_connector_try_connect_mock_connection_fatal_error_fails_immediately() {
         let env = test_env().build().unwrap();
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
+        let target_env = target_interface(&fho_env);
 
         let resolution = ffx_target::Resolution::mock(|| {
             Err(target_errors::FfxTargetError::OpenTargetError {
@@ -286,8 +289,8 @@ mod tests {
             }
             .into())
         });
-        let connector = DirectConnector::from_resolution_for_test(resolution);
-        target_env.set_behavior_for_test(connector);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
+        target_env.set_connector_for_test(connector);
 
         let connector = Connector::<DummyHolder>::try_from_env(&fho_env).await.unwrap();
         let log_target_wait_called = RefCell::new(false);
@@ -310,7 +313,7 @@ mod tests {
     {
         let env = test_env().build().unwrap();
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
+        let target_env = target_interface(&fho_env);
 
         let resolution = ffx_target::Resolution::mock(|| {
             Err(target_errors::FfxTargetError::OpenTargetError {
@@ -321,8 +324,8 @@ mod tests {
             }
             .into())
         });
-        let connector = DirectConnector::from_resolution_for_test(resolution);
-        target_env.set_behavior_for_test(connector);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
+        target_env.set_connector_for_test(connector);
 
         let connector = Connector::<DummyHolder>::try_from_env(&fho_env).await.unwrap();
         let log_target_wait_called = RefCell::new(false);
@@ -370,7 +373,7 @@ mod tests {
             FhoEnvironment::new_with_args(&env_success.context, &["some", "test"]);
 
         let target_env = target_interface(&fho_env_success);
-        let connector = target_env.init_connection_behavior(&env_success.context).await.unwrap();
+        let connector = target_env.init(&env_success.context);
         let resolution = connector.resolution().await.unwrap();
 
         let conn = ffx_target::Connection::new(PlaceholderConnector).await.unwrap();

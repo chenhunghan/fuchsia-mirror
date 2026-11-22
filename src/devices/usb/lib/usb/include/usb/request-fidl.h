@@ -20,21 +20,37 @@ using FidlRequestPool = internal::FidlRequestPool<FidlRequest>;
 
 // Template specialization for internal::FidlRequest<io_buffer::PhysIter>.
 template <>
-inline io_buffer::PhysIter FidlRequest::phys_iter(size_t idx, size_t max_length) const {
-  ZX_ASSERT(request_.data()->at(idx).size());
-  ZX_ASSERT(pinned_vmos_.find(idx) != pinned_vmos_.end());
-  auto length = request_.data()->at(idx).size().value();
+inline zx::result<io_buffer::PhysIter> FidlRequest::phys_iter(size_t idx, size_t max_length) const {
+  if (!request_.data().has_value() || idx >= request_.data()->size()) {
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
+  }
+  const auto& region = request_.data()->at(idx);
+  if (!region.size().has_value() || *region.size() == 0) {
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  const auto pinned_it = pinned_vmos_.find(idx);
+  if (pinned_it == pinned_vmos_.end()) {
+    return zx::error(ZX_ERR_NOT_FOUND);
+  }
+  const auto& pinned = pinned_it->second;
+  if (pinned.page_list == nullptr || pinned.phys_count == 0) {
+    return zx::error(ZX_ERR_BAD_STATE);
+  }
+  const uint64_t length = *region.size();
+  const uint64_t offset = region.offset().value_or(0);
   // phys_iter is only called for Buffer::Tag::kData via PhysMap pinned_vmos_.
-  // PhysMap pins the sub-range and already offsets phys_list[0] by any sub-page offset,
-  // so vmo_offset must be 0 to avoid double-offsetting.
-  constexpr uint64_t vmo_offset = 0;
-  phys_iter_buffer_t buf = {.phys = pinned_vmos_.at(idx).phys_list,
-                            .phys_count = pinned_vmos_.at(idx).phys_count,
-                            .length = length,
-                            .vmo_offset = vmo_offset,
+  // PhysMap pins page-aligned physical pages for [0, pinned.mapped.size) within a single page
+  // (kMaxTransferSize < kPageSize); enforce bounds before applying the sub-page vmo_offset.
+  if (offset >= kPageSize || offset > pinned.mapped.size || length > pinned.mapped.size - offset) {
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
+  }
+  phys_iter_buffer_t buf = {.phys = pinned.page_list,
+                            .phys_count = pinned.phys_count,
+                            .length = static_cast<size_t>(length),
+                            .vmo_offset = offset,
                             .sg_list = nullptr,
                             .sg_count = 0};
-  return io_buffer::PhysIter(buf, max_length);
+  return zx::ok(io_buffer::PhysIter(buf, max_length));
 }
 
 }  // namespace usb

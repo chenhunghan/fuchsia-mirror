@@ -11,8 +11,9 @@ use super::feature;
 use super::restricted::Iframe;
 use super::thread::{GeneralRegsSource, locked_thread_arch, locked_thread_arch_mut};
 use super::vector::riscv64_vlmax;
+use super::vm::is_valid_user_pc;
 use crate::clt_tag;
-use crate::kernel::thread::ThreadLockGuard;
+use crate::kernel::thread::{ThreadLockGuard, thread_lock_guard};
 use core::ffi::c_void;
 use debug::ltracef;
 use libarch::riscv64::VectorType;
@@ -42,8 +43,7 @@ pub struct zx_thread_state_debug_regs_t {
 /// `gregs` must point to a live `Iframe` that outlives the call. riscv64 only
 /// ever saves general registers into an iframe, so `source` must be
 /// `GeneralRegsSource::Iframe`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_get_instruction_pointer(
+pub unsafe fn arch_get_instruction_pointer(
     source: GeneralRegsSource,
     gregs: *const core::ffi::c_void,
 ) -> usize {
@@ -59,8 +59,7 @@ pub unsafe extern "C" fn arch_get_instruction_pointer(
 /// # Safety
 /// `gregs` must point to a live, uniquely borrowed `Iframe` that outlives the
 /// call, and `source` must be `GeneralRegsSource::Iframe`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_set_return_instruction_pointer(
+pub unsafe fn arch_set_return_instruction_pointer(
     source: GeneralRegsSource,
     gregs: *mut core::ffi::c_void,
     ip: usize,
@@ -152,16 +151,17 @@ pub unsafe extern "C" fn arch_get_general_regs(
 ) -> Result<(), Status> {
     ltracef!("thread {:p} out {:p}\n", thread, out);
 
-    // SAFETY: the caller guarantees `thread` is a live `Thread`. This CPU is in no chain lock
-    // transaction, and the guard is a pinned local dropped before this function returns, with
-    // nothing in between that blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread.cast(), clt_tag!("arch_get_general_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: the caller guarantees `thread` is a live `Thread` past this scope, this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread.cast(), clt_tag!("arch_get_general_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: this function's caller keeps the thread suspended or in an exception.
-    let arch = unsafe { locked_thread_arch(&thread_guard) };
+    let arch = unsafe { locked_thread_arch(thread_guard) };
 
     // Punt if registers aren't available. E.g.,
     // TODO(https://fxbug.dev/42105394): Registers aren't available in synthetic exceptions.
@@ -183,6 +183,10 @@ pub unsafe extern "C" fn arch_get_general_regs(
 /// The caller is responsible for making sure the thread is in an exception or is suspended, and
 /// stays so.
 ///
+/// # Errors
+/// Returns `Status::NOT_SUPPORTED` if general registers are unavailable for `thread`, or
+/// `Status::INVALID_ARGS` if `in_.pc` is not a valid userspace PC.
+///
 /// # Safety
 /// `thread` must point to a live `Thread`, and `in_` to a readable
 /// `zx_thread_state_general_regs_t`.
@@ -193,16 +197,17 @@ pub unsafe extern "C" fn arch_set_general_regs(
 ) -> Result<(), Status> {
     ltracef!("thread {:p} in {:p}\n", thread, in_);
 
-    // SAFETY: the caller guarantees `thread` is a live `Thread`. This CPU is in no chain lock
-    // transaction, and the guard is a pinned local dropped before this function returns, with
-    // nothing in between that blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread.cast(), clt_tag!("arch_set_general_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: the caller guarantees `thread` is a live `Thread` past this scope, this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread.cast(), clt_tag!("arch_set_general_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: this function's caller keeps the thread suspended or in an exception.
-    let arch = unsafe { locked_thread_arch(&thread_guard) };
+    let arch = unsafe { locked_thread_arch(thread_guard) };
 
     // Punt if registers aren't available. E.g.,
     // TODO(https://fxbug.dev/42105394): Registers aren't available in synthetic exceptions.
@@ -210,10 +215,19 @@ pub unsafe extern "C" fn arch_set_general_regs(
         return Err(Status::NOT_SUPPORTED);
     }
 
+    // SAFETY: the caller guarantees `in_`.
+    let in_ = unsafe { &*in_ };
+
+    // Disallow setting PC to a non-userspace address; `arch_enter_uspace` asserts that the entry
+    // PC is in userspace, and there is no use case for setting PC to a kernel address.
+    if !is_valid_user_pc(in_.pc as usize) {
+        return Err(Status::INVALID_ARGS);
+    }
+
     let out = arch.suspended_general_regs;
     debug_assert!(!out.is_null());
 
-    // SAFETY: `out` is the suspended thread's saved iframe, and the caller guarantees `in_`.
+    // SAFETY: `out` is the suspended thread's saved iframe.
     unsafe { (*out).regs = *in_ };
 
     Ok(())
@@ -230,11 +244,12 @@ pub unsafe extern "C" fn arch_get_fp_regs(
 ) -> Result<(), Status> {
     ltracef!("thread {:p} out {:p}\n", thread, out);
 
-    // SAFETY: the caller guarantees `thread` is a live `Thread`. This CPU is in no chain lock
-    // transaction, and the guard is a pinned local dropped before this function returns, with
-    // nothing in between that blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread.cast(), clt_tag!("arch_get_fp_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: the caller guarantees `thread` is a live `Thread` past this scope, this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread.cast(), clt_tag!("arch_get_fp_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
@@ -243,7 +258,7 @@ pub unsafe extern "C" fn arch_get_fp_regs(
     *out = Default::default();
 
     // SAFETY: this function's caller keeps the thread suspended or in an exception.
-    let in_ = unsafe { &locked_thread_arch(&thread_guard).fpu_state };
+    let in_ = unsafe { &locked_thread_arch(thread_guard).fpu_state };
     for (q, f) in out.q.iter_mut().zip(in_.f.iter()) {
         q.low = *f;
         q.high = u64::MAX;
@@ -272,16 +287,17 @@ pub unsafe extern "C" fn arch_set_fp_regs(
         return Err(Status::INVALID_ARGS);
     }
 
-    // SAFETY: the caller guarantees `thread` is a live `Thread`. This CPU is in no chain lock
-    // transaction, and the guard is a pinned local dropped before this function returns, with
-    // nothing in between that blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread.cast(), clt_tag!("arch_set_fp_regs")) };
-    ksync::lock!(let mut thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: the caller guarantees `thread` is a live `Thread` past this scope, this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread.cast(), clt_tag!("arch_set_fp_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: this function's caller keeps the thread suspended or in an exception.
-    let arch = unsafe { locked_thread_arch_mut(thread_guard.as_mut()) };
+    let arch = unsafe { locked_thread_arch_mut(thread_guard) };
     let out = &mut arch.fpu_state;
     for (f, q) in out.f.iter_mut().zip(in_.q.iter()) {
         *f = q.low;
@@ -311,16 +327,17 @@ pub unsafe extern "C" fn arch_get_vector_regs(
         return Err(Status::NOT_SUPPORTED);
     }
 
-    // SAFETY: the caller guarantees `thread` is a live `Thread`. This CPU is in no chain lock
-    // transaction, and the guard is a pinned local dropped before this function returns, with
-    // nothing in between that blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread.cast(), clt_tag!("arch_get_vector_regs")) };
-    ksync::lock!(let thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: the caller guarantees `thread` is a live `Thread` past this scope, this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread.cast(), clt_tag!("arch_get_vector_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
     // SAFETY: this function's caller keeps the thread suspended or in an exception, and
     // guarantees `out`.
-    unsafe { *out = locked_thread_arch(&thread_guard).vector_state };
+    unsafe { *out = locked_thread_arch(thread_guard).vector_state };
     Ok(())
 }
 
@@ -379,16 +396,17 @@ pub unsafe extern "C" fn arch_set_vector_regs(
         return Err(Status::INVALID_ARGS);
     }
 
-    // SAFETY: the caller guarantees `thread` is a live `Thread`. This CPU is in no chain lock
-    // transaction, and the guard is a pinned local dropped before this function returns, with
-    // nothing in between that blocks.
-    let lock = unsafe { ThreadLockGuard::lock(thread.cast(), clt_tag!("arch_set_vector_regs")) };
-    ksync::lock!(let mut thread_guard = lock);
+    thread_lock_guard!(
+        thread_guard,
+        // SAFETY: the caller guarantees `thread` is a live `Thread` past this scope, this CPU is in
+        // no chain lock transaction, and we do not block.
+        unsafe { ThreadLockGuard::target(thread.cast(), clt_tag!("arch_set_vector_regs")) }
+    );
 
     debug_assert!(thread_guard.is_user_state_saved_locked());
 
     // SAFETY: this function's caller keeps the thread suspended or in an exception.
-    let arch = unsafe { locked_thread_arch_mut(thread_guard.as_mut()) };
+    let arch = unsafe { locked_thread_arch_mut(thread_guard) };
     arch.vector_state = *in_;
 
     // Mark the state as dirty in case it hadn't already been touched. This will

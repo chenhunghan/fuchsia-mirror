@@ -22,6 +22,7 @@ TEST(LogTailTest, KeepsWarningsAndStorageComponents) {
   tail.Add(4 * kSec, "bootstrap/fshost/fxfs", "INFO", "flushed");
   tail.Add(5 * kSec, "bootstrap/boot-drivers:ufs-3c400000", "INFO", "link up");
   tail.Add(6 * kSec, "core/starnix_runner", "INFO", "suspending container");
+  tail.Add(8 * kSec, "bootstrap/pkg-cache", "INFO", "opened blob");
   // The Starnix kernel isn't a storage component, even though it lives under starnix_runner.
   tail.Add(7 * kSec, "core/starnix_runner/kernels:abc", "INFO", "android noise");
   EXPECT_EQ(tail.Lines(), (std::vector<std::string>{
@@ -30,6 +31,7 @@ TEST(LogTailTest, KeepsWarningsAndStorageComponents) {
                               "[00004.000][fxfs][I] flushed",
                               "[00005.000][boot-drivers:ufs-3c400000][I] link up",
                               "[00006.000][starnix_runner][I] suspending container",
+                              "[00008.000][pkg-cache][I] opened blob",
                           }));
 }
 
@@ -161,11 +163,87 @@ TEST(BudgetTest, NewestWithinBudget) {
       std::string(60, 'c'),
   };
   EXPECT_EQ(DebuglogCost(lines), 3 * (60 + kDebuglogRecordHeader));
+  EXPECT_EQ(DebuglogCost("alpha\nbeta\n"), 11 + (2 * kDebuglogRecordHeader));
   EXPECT_EQ(NewestWithinBudget(lines, 1000).size(), 3u);
   auto newest = NewestWithinBudget(lines, (2 * (60 + kDebuglogRecordHeader)) + 10);
   ASSERT_EQ(newest.size(), 2u);
   EXPECT_EQ(newest[0], lines[1]);
   EXPECT_EQ(NewestWithinBudget(lines, 10).size(), 0u);
+}
+
+TEST(BudgetTest, FirstWithinBudget) {
+  // Two stacks of three lines each, then one of a single line.
+  const std::string stack = "threads\nbt0\nbt1\n";
+  const std::vector<std::string> texts = {stack, stack, "threads\n"};
+  const size_t stack_cost = stack.size() + (3 * kDebuglogRecordHeader);
+  EXPECT_EQ(FirstWithinBudget(texts, 1000).size(), 3u);
+  EXPECT_EQ(FirstWithinBudget(texts, 2 * stack_cost).size(), 2u);
+  // A text is dropped whole, and so is everything after it, even if a later one would fit.
+  EXPECT_EQ(FirstWithinBudget(texts, (2 * stack_cost) - 1).size(), 1u);
+  EXPECT_EQ(FirstWithinBudget(texts, stack_cost - 1).size(), 0u);
+  EXPECT_EQ(FirstWithinBudget(texts, 0).size(), 0u);
+}
+
+TEST(LogTailTest, KeepsStorageAndBusDependencyDriverInfoLogs) {
+  LogTail tail(100, 50, 100'000);
+  tail.Add(1 * kSec, "bootstrap/boot-drivers:ufs-phy-3c590000", "INFO", "phy calibrated");
+  tail.Add(2 * kSec, "bootstrap/base-drivers:interconnect-5360000", "INFO", "bandwidth set");
+  tail.Add(3 * kSec, "bootstrap/boot-drivers:i2c-0", "INFO", "unrelated bus");
+  EXPECT_EQ(tail.Lines(), (std::vector<std::string>{
+                              "[00001.000][boot-drivers:ufs-phy-3c590000][I] phy calibrated",
+                              "[00002.000][base-drivers:interconnect-5360000][I] bandwidth set",
+                          }));
+}
+
+TEST(InspectTest, FormatsStorageAndBusDependencyDriversAheadOfPowerBroker) {
+  const std::vector<std::string> batches = {
+      R"([{"moniker": "bootstrap/power-broker", "payload": {"root": {"broker": {"leases": {}}}}},
+          {"moniker": "bootstrap/boot-drivers:interconnect-5360000",
+           "payload": {"root": {"votes": 2}}},
+          {"moniker": "bootstrap/boot-drivers:ufs-phy-3c590000",
+           "payload": {"root": {"calibrated": true}}}])",
+  };
+  std::vector<std::string> lines = InspectLines(batches, 10'000, 10'000);
+  ASSERT_EQ(lines.size(), 3u);
+  EXPECT_EQ(lines[0],
+            R"(inspect bootstrap/boot-drivers:interconnect-5360000: {"root":{"votes":2}})");
+  EXPECT_EQ(lines[1],
+            R"(inspect bootstrap/boot-drivers:ufs-phy-3c590000: {"root":{"calibrated":true}})");
+  EXPECT_EQ(lines[2], R"(inspect bootstrap/power-broker: {"leases":{},"elements":[]})");
+}
+
+TEST(TaskRuntimeDeltaTest, FormatsPositiveDeltasAndSkipsIdleOrNegative) {
+  const TaskRuntimeSample base = {
+      .cpu_ns = 10'000'000,
+      .queue_ns = 20'000'000,
+      .page_fault_ns = 30'000'000,
+      .lock_contention_ns = 40'000'000,
+  };
+  EXPECT_EQ(FormatTaskRuntimeDelta(base, base), "");
+  EXPECT_EQ(FormatTaskRuntimeDelta(base,
+                                   TaskRuntimeSample{
+                                       .cpu_ns = 9'000'000,
+                                       .queue_ns = 20'000'000,
+                                       .page_fault_ns = 30'000'000,
+                                       .lock_contention_ns = 40'000'000,
+                                   }),
+            "");
+  EXPECT_EQ(FormatTaskRuntimeDelta(base,
+                                   TaskRuntimeSample{
+                                       .cpu_ns = 10'000'400,
+                                       .queue_ns = 20'042'400,
+                                       .page_fault_ns = 30'000'000,
+                                       .lock_contention_ns = 40'000'000,
+                                   }),
+            "cpu=+1us queue=+42us");
+  EXPECT_EQ(FormatTaskRuntimeDelta(base,
+                                   TaskRuntimeSample{
+                                       .cpu_ns = 11'250'000,
+                                       .queue_ns = 268'500'000,
+                                       .page_fault_ns = 280'000'000,
+                                       .lock_contention_ns = 40'300'000,
+                                   }),
+            "cpu=+1.2ms queue=+248.5ms page_fault=+250.0ms lock_contention=+0.3ms");
 }
 
 }  // namespace

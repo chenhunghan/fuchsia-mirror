@@ -91,7 +91,7 @@ Lastly, we would want to document this feature.
 A good place would be to discuss this under "Good Design Patterns" in the
 [API Rubric][fidl-api].
 
-### Specifics on Placement of Deprecation In Target Languages
+### Specifics on placement of deprecation in target languages {:#specifics-on-placement-of-deprecation-in-target-languages}
 
 In FIDL                                | In Target Language
 ---------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------
@@ -101,7 +101,7 @@ Message (e.g. struct, union, table)    | Annotation on the top-level type (class
 Field (e.g. struct field, table field) | On the field of the type representing the specific FIDL field, and/or on all accessor methods for this field (e.g. ClearXxx, SetXxx, etc.)
 Method, Event, or Interface            | Place on client facing objects/function (e.g. proxy) but not on service client facing objects/functions (e.g. not on stub); see [note below](#note).
 
-#### Note
+#### Note {:#note}
 
 We could introduce `[DeprecatedForClients]` and `[DeprecatedForServices]`
 attributes to control which side is deprecated, but uses show deprecation is
@@ -220,7 +220,7 @@ for this field anymore, code should stop using this data."
 [donotuse1]: https://fuchsia.googlesource.com/fuchsia/+/caa3f20aa7b64240f4265ede5e6deddf0f2d0cf7/garnet/public/fidl/fuchsia.media/audio_renderer.fidl#7
 [donotuse2]: https://fuchsia.googlesource.com/fuchsia/+/ce931e090d0c54030a80397bd24f217132983794/peridot/public/fidl/fuchsia.modular/module/module_context.fidl#79
 [three-recommended-forms]: https://github.com/golang/go/issues/10909#issuecomment-136492606
-[fidl-api]: /docs/development/api/fidl.md#Good-Design-Patterns
+[fidl-api]: /docs/development/api/fidl.md#good-design-patterns
 [rust-deprecated]: https://doc.rust-lang.org/reference/attributes.html#deprecation
 [rust-deny-warnings]: https://doc.rust-lang.org/reference/attributes.html#lint-check-attributes
 [rust-allow-deprecated]: https://doc.rust-lang.org/reference/attributes.html#lint-check-attributes

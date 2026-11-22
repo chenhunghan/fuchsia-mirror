@@ -310,6 +310,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_b = AssembledSystem {
             images: vec![
@@ -323,6 +324,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_r = AssembledSystem {
             images: vec![
@@ -335,6 +337,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         mapper.map_images_to_slot(&images_a.images, Slot::A).unwrap();
@@ -413,6 +416,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_b = AssembledSystem {
             images: vec![
@@ -428,6 +432,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_r = AssembledSystem {
             images: vec![
@@ -442,6 +447,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         mapper.map_images_to_slot(&images_a.images, Slot::A).unwrap();
@@ -504,6 +510,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         mapper.map_images_to_slot(&images_a.images, Slot::A).unwrap();
@@ -533,6 +540,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_b = AssembledSystem {
             images: vec![
@@ -546,6 +554,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_r = AssembledSystem {
             images: vec![
@@ -558,6 +567,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         mapper.map_images_to_slot(&images_a.images, Slot::A).unwrap();
@@ -614,6 +624,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_r = AssembledSystem {
             images: vec![
@@ -626,6 +637,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         mapper.map_images_to_slot(&images_a.images, Slot::A).unwrap();
@@ -681,6 +693,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_two = AssembledSystem {
             images: vec![Image::Dtbo(dtbo_two)],
@@ -688,6 +701,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_three = AssembledSystem {
             images: vec![Image::Dtbo(dtbo_three)],
@@ -695,6 +709,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         assert!(mapper.map_images_to_slot(&images_one.images, Slot::A).is_ok());
@@ -736,6 +751,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         mapper.map_images_to_slot(&images_a.images, Slot::A).unwrap();
@@ -783,6 +799,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_r = AssembledSystem {
             images: vec![
@@ -793,6 +810,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let mut mapper = PartitionImageMapper::new(partitions).unwrap();
         assert_eq!(RecoveryStyle::AB, mapper.recovery_style);

@@ -778,7 +778,7 @@ constexpr size_t kUser1Uid = 65533;
 struct GetRobustListTestCase {
   bool same_user;
   bool has_cap;
-  int expected_errno;
+  fit::result<int> expected_result;
 };
 
 class GetRobustListTest : public ::testing::TestWithParam<GetRobustListTestCase> {};
@@ -827,11 +827,7 @@ TEST_P(GetRobustListTest, DifferentUserRequiresCapSysPtrace) {
     size_t read_len = 0;
     long ret = syscall(SYS_get_robust_list, tracee_pid, &read_head, &read_len);
 
-    if (params.expected_errno == 0) {
-      EXPECT_THAT(ret, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(ret, SyscallFailsWithErrno(params.expected_errno));
-    }
+    EXPECT_THAT(ret, SyscallMatchesResult(params.expected_result));
 
     // Teardown the tracee.
     SAFE_SYSCALL(kill(tracee_pid, SIGKILL));
@@ -1600,8 +1596,9 @@ TEST(FutexTest, LockPiRealtimeWaiterBoostsOwnerPriorityInProcStat) {
 INSTANTIATE_TEST_SUITE_P(
     GetRobustListTest, GetRobustListTest,
     ::testing::Values(
-        GetRobustListTestCase{.same_user = true, .has_cap = false, .expected_errno = 0},
-        GetRobustListTestCase{.same_user = false, .has_cap = true, .expected_errno = 0},
-        GetRobustListTestCase{.same_user = false, .has_cap = false, .expected_errno = EPERM}));
+        GetRobustListTestCase{.same_user = true, .has_cap = false, .expected_result = fit::ok()},
+        GetRobustListTestCase{.same_user = false, .has_cap = true, .expected_result = fit::ok()},
+        GetRobustListTestCase{
+            .same_user = false, .has_cap = false, .expected_result = fit::error(EPERM)}));
 
 }  // anonymous namespace

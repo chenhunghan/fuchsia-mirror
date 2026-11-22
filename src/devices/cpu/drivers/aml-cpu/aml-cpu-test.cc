@@ -148,6 +148,10 @@ class TestPowerDevice : public fidl::WireServer<fuchsia_hardware_power::Device> 
 
   void RegisterPowerDomain(RegisterPowerDomainRequestView request,
                            RegisterPowerDomainCompleter::Sync& completer) override {
+    if (close_on_register_) {
+      completer.Close(ZX_ERR_PEER_CLOSED);
+      return;
+    }
     min_needed_voltage_ = request->min_needed_voltage;
     max_supported_voltage_ = request->max_supported_voltage;
     completer.ReplySuccess();
@@ -195,12 +199,14 @@ class TestPowerDevice : public fidl::WireServer<fuchsia_hardware_power::Device> 
   void SetVoltage(uint32_t voltage) { voltage_ = voltage; }
   void SetFaultVoltage(uint32_t voltage) { fault_voltage_ = voltage; }
   void ResetFaultVoltage() { fault_voltage_ = std::nullopt; }
+  void SetCloseOnRegisterPowerDomain(bool close) { close_on_register_ = close; }
 
   uint32_t voltage() const { return voltage_; }
   uint32_t min_needed_voltage() const { return min_needed_voltage_; }
   uint32_t max_supported_voltage() const { return max_supported_voltage_; }
 
  private:
+  bool close_on_register_ = false;
   std::optional<uint32_t> fault_voltage_ = std::nullopt;
   uint32_t voltage_ = 0;
   uint32_t min_voltage_ = 0;
@@ -565,6 +571,19 @@ TEST_F(AmlCpuTest, TestVregRaiseFail) {
     ASSERT_TRUE(new_rate.has_value());
     EXPECT_EQ(initial_rate, new_rate.value());
   });
+}
+
+// Start fails with the transport error when RegisterPowerDomain closes the power channel.
+TEST_F(AmlCpuTest, RegisterPowerDomainTransportError) {
+  driver_test().RunInEnvironmentTypeContext([](AmlCpuEnvironment& env) {
+    env.power_server_.SetSupportedVoltageRange(kTestOperatingPoints.back().volt_uv(),
+                                               kTestOperatingPoints.front().volt_uv());
+    env.power_server_.SetCloseOnRegisterPowerDomain(true);
+    env.pdev_server_.AddFidlMetadata(
+        fuchsia_hardware_amlogic_metadata::CpuMetadata::kSerializableName, kTestMetadata);
+  });
+
+  EXPECT_EQ(driver_test().StartDriver().status_value(), ZX_ERR_PEER_CLOSED);
 }
 
 }  // namespace amlogic_cpu

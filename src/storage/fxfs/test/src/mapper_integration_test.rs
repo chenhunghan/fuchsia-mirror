@@ -9,7 +9,7 @@ use block_client::BlockClient as _;
 use delivery_blob::{CompressionMode, Type1Blob, Type3Blob};
 use fidl::endpoints::{DiscoverableProtocolMarker as _, create_proxy};
 use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions, VolumesMarker};
-use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobReaderMarker};
+use fidl_fuchsia_fxfs::BlobCreatorMarker;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_mapping::MappingProviderMarker;
@@ -28,7 +28,6 @@ use std::hint::black_box;
 use std::slice::from_raw_parts;
 use std::sync::Arc;
 use storage_profile::{BlobMessage, Message as _};
-use test_case::test_case;
 use test_vmo_backed_block_server::{
     InitialContents, VmoBackedServer, VmoBackedServerConnector, VmoBackedServerOptions,
 };
@@ -64,7 +63,6 @@ struct TestPartitionEnv {
     serving: fs_management::filesystem::ServingMultiVolumeFilesystem,
     volume: fs_management::filesystem::ServingVolume,
     blob_creator: fidl_fuchsia_fxfs::BlobCreatorProxy,
-    blob_reader: fidl_fuchsia_fxfs::BlobReaderProxy,
     mapping_provider: fidl_fuchsia_storage_mapping::MappingProviderProxy,
     mapper_proxy: fblock::MapperProxy,
     _gpt: Option<fs_management::filesystem::ServingMultiVolumeFilesystem>,
@@ -72,10 +70,6 @@ struct TestPartitionEnv {
 
 impl TestPartitionEnv {
     async fn new() -> Result<Self, Error> {
-        Self::new_with_options(true).await
-    }
-
-    async fn new_with_options(use_driver_blob_paging: bool) -> Result<Self, Error> {
         log::info!("Connecting to partition service...");
         let (partition_service, partitions_manager, _gpt) = match (
             Service::open(fpartitions::PartitionServiceMarker),
@@ -170,7 +164,7 @@ impl TestPartitionEnv {
                 CreateOptions::default(),
                 MountOptions {
                     as_blob: Some(true),
-                    use_driver_blob_paging: Some(use_driver_blob_paging),
+                    use_driver_blob_paging: Some(true),
                     ..Default::default()
                 },
             )
@@ -180,30 +174,27 @@ impl TestPartitionEnv {
         let blob_creator =
             connect_to_protocol_at_dir_svc::<BlobCreatorMarker>(volume.exposed_dir())
                 .context("Failed to connect to BlobCreator")?;
-        let blob_reader = connect_to_protocol_at_dir_svc::<BlobReaderMarker>(volume.exposed_dir())
-            .context("Failed to connect to BlobReader")?;
         let mapping_provider =
             connect_to_protocol_at_dir_svc::<MappingProviderMarker>(volume.exposed_dir())
                 .context("Failed to connect to MappingProvider")?;
 
         let mapper_proxy = partition.connect_to_mapper()?;
 
-        Ok(Self {
-            partition,
-            serving,
-            volume,
-            blob_creator,
-            blob_reader,
-            mapping_provider,
-            mapper_proxy,
-            _gpt,
-        })
+        Ok(Self { partition, serving, volume, blob_creator, mapping_provider, mapper_proxy, _gpt })
     }
 
     async fn write_blob(&self, blob: &TestBlob) -> Result<(), Error> {
+        self.write_blob_with_options(blob, false).await
+    }
+
+    async fn write_blob_with_options(
+        &self,
+        blob: &TestBlob,
+        allow_existing: bool,
+    ) -> Result<(), Error> {
         let writer_client_end = self
             .blob_creator
-            .create(&blob.hash.into(), false)
+            .create(&blob.hash.into(), allow_existing)
             .await
             .context("FIDL error on BlobCreator.Create")?
             .map_err(|e| anyhow!("CreateBlob error: {e:?}"))
@@ -214,6 +205,58 @@ impl TestPartitionEnv {
             .context("Failed to create BlobWriter")?;
         blob_writer.write(&blob.delivery_data).await.context("Failed to write blob data")?;
         Ok(())
+    }
+
+    /// Queries the single contiguous physical device extent `(block_offset, byte_len)` for `hash`
+    /// by opening a short-lived `MappingSession` and inspecting the `Mappings` command.
+    async fn get_blob_device_extent(&self, hash: &Hash) -> Result<(u64, u64), Error> {
+        let (session_proxy, session_server) = fidl::endpoints::create_proxy();
+        let mapping_vmo = self
+            .mapping_provider
+            .open_session(session_server)
+            .await
+            .context("FIDL error on open_session")?
+            .map_err(zx::Status::err_from_raw)
+            .context("Failed to open mapping session")?;
+        let mut receiver = vmo_fifo::Receiver::<mapping::RawMappingCommand>::new(
+            mapping_vmo,
+            mapping::PENDING_COMMANDS_CAPACITY,
+        )
+        .context("Failed to create mapping receiver")?;
+        let key = 9999;
+        session_proxy
+            .open(key, hash.as_bytes())
+            .await
+            .context("FIDL error on MappingSession.Open")?
+            .map_err(zx::Status::err_from_raw)
+            .context("Failed to open blob in mapping session")?;
+        let msg = receiver.peek().context("Failed to peek Mappings command")?;
+        let cmd = mapping::MappingCommand::try_from(*msg).context("Invalid MappingCommand")?;
+        let (offset, extent_count) = match cmd {
+            mapping::MappingCommand::Mappings { offset, extent_count, .. } => {
+                (offset, extent_count)
+            }
+            other => bail!("Expected Mappings command, got {other:?}"),
+        };
+        ensure!(extent_count == 1, "Expected 1 contiguous data extent, got {extent_count}");
+        let extents =
+            mapping::Extents::from_encoded(msg.payload_slice(offset, 8).iter_as::<u64>(), 0)
+                .ok_or_else(|| anyhow!("Failed to decode data extents"))?;
+        let mut iter = extents.iter_extents(0);
+        let first_extent = iter.next().ok_or_else(|| anyhow!("Expected 1 decoded data extent"))?;
+        ensure!(iter.next().is_none(), "Expected a single decoded data extent");
+        let device_offset = first_extent
+            .device_offset()
+            .ok_or_else(|| anyhow!("Expected non-sparse data extent"))?;
+        let extent_len = first_extent.len();
+        msg.pop().context("Failed to pop Mappings command")?;
+        session_proxy
+            .close(key)
+            .await
+            .context("FIDL error on MappingSession.Close")?
+            .map_err(zx::Status::err_from_raw)
+            .context("Failed to close blob in mapping session")?;
+        Ok((device_offset / mapping::BLOCK_SIZE, extent_len))
     }
 
     async fn shutdown(self) -> Result<(), Error> {
@@ -482,52 +525,25 @@ async fn test_mapper_with_verification_corrupted_block_on_gpt_partition() -> Res
     Ok(())
 }
 
-#[derive(Copy, Clone, Debug)]
-enum PagingBackend {
-    FxBlob,
-    DriverBlobPager,
-}
-
 // Verifies that unlinking an open blob does not deallocate its extents while held open in a mapping
-// session or BlobReader.
-#[test_case(PagingBackend::FxBlob; "fxblob")]
-#[test_case(PagingBackend::DriverBlobPager; "driver_blob_pager")]
+// session.
 #[fuchsia::test(threads = 4)]
-async fn test_unlink_open_blob(backend: PagingBackend) -> Result<(), Error> {
-    let env = TestPartitionEnv::new_with_options(matches!(backend, PagingBackend::DriverBlobPager))
-        .await?;
+async fn test_unlink_open_blob() -> Result<(), Error> {
+    let env = TestPartitionEnv::new().await?;
 
-    let blob_pager = match backend {
-        PagingBackend::DriverBlobPager => {
-            log::info!("Initialising BlobPagerAndVerifier...");
-            Some(
-                BlobPagerAndVerifier::new(&env.mapping_provider, &env.mapper_proxy)
-                    .await
-                    .context("Failed to create BlobPagerAndVerifier")?,
-            )
-        }
-        PagingBackend::FxBlob => None,
-    };
+    log::info!("Initialising BlobPagerAndVerifier...");
+    let blob_pager = BlobPagerAndVerifier::new(&env.mapping_provider, &env.mapper_proxy)
+        .await
+        .context("Failed to create BlobPagerAndVerifier")?;
 
     let blob_a = TestBlob::new_uncompressed(vec![0xAAu8; 65536]);
     env.write_blob(&blob_a).await?;
 
-    log::info!(backend:?; "Opening Blob A...");
-    let paged_vmo = match backend {
-        PagingBackend::FxBlob => env
-            .blob_reader
-            .get_vmo(&blob_a.hash.into())
-            .await
-            .context("FIDL error on BlobReader.GetVmo")?
-            .map_err(zx::Status::err_from_raw)
-            .context("Failed to get VMO from BlobReader")?,
-        PagingBackend::DriverBlobPager => blob_pager
-            .as_ref()
-            .unwrap()
-            .create_vmo(&blob_a.hash.into())
-            .await
-            .context("Failed to create paged VMO in BlobPagerAndVerifier")?,
-    };
+    log::info!("Opening Blob A...");
+    let paged_vmo = blob_pager
+        .create_vmo(&blob_a.hash.into())
+        .await
+        .context("Failed to create paged VMO in BlobPagerAndVerifier")?;
 
     log::info!("Unlinking Blob A while its VMO is held open...");
     let unlink_res = env
@@ -567,7 +583,6 @@ async fn test_unlink_open_blob(backend: PagingBackend) -> Result<(), Error> {
     drop(blob_pager);
     env.shutdown().await?;
     log::info!(
-        backend:?;
         "Successfully verified unlinked blob remained valid and readable if blob remains opened"
     );
     Ok(())
@@ -783,5 +798,97 @@ async fn test_mapper_close_during_read_on_fvm() -> Result<(), Error> {
         .map_err(zx::Status::err_from_raw)
         .context("Failed to destroy FVM volume")?;
 
+    Ok(())
+}
+
+/// Tests overwriting an open pager-backed blob (e.g., migrating an uncompressed or Type 1 blob to
+/// Type 3 while the blob's VMO is open and actively serving page faults).
+#[fuchsia::test(threads = 4)]
+async fn test_overwrite_open_blob() -> Result<(), Error> {
+    let env = TestPartitionEnv::new().await?;
+    let blob_pager = BlobPagerAndVerifier::new(&env.mapping_provider, &env.mapper_proxy)
+        .await
+        .context("Failed to create BlobPagerAndVerifier")?;
+
+    // Create a 256 KiB payload with distinct contents in each 4 KiB page.
+    let mut raw_data = vec![0u8; 256 * 1024];
+    for (page_idx, chunk) in raw_data.chunks_mut(4096).enumerate() {
+        chunk.fill((page_idx as u8).wrapping_mul(17).wrapping_add(3));
+    }
+
+    let initial_blob = TestBlob::new_uncompressed(raw_data.clone());
+    let overwritten_blob = TestBlob::new_type3_compressed(raw_data.clone());
+    assert_eq!(initial_blob.hash, overwritten_blob.hash);
+
+    log::info!("Writing initial uncompressed blob...");
+    env.write_blob(&initial_blob).await?;
+    let (initial_device_block, initial_extent_len) =
+        env.get_blob_device_extent(&initial_blob.hash).await?;
+    assert!(
+        initial_extent_len >= raw_data.len() as u64,
+        "Expected initial extent ({initial_extent_len}) to cover full payload ({})",
+        raw_data.len()
+    );
+
+    let root_hash = <[u8; 32]>::from(initial_blob.hash);
+    let paged_vmo = blob_pager
+        .create_vmo(&root_hash)
+        .await
+        .context("Failed to create paged VMO via BlobPagerAndVerifier")?;
+
+    // Fault in only the first 64 KiB before overwriting the blob.
+    let first_half_len = 64 * 1024;
+    let vmo_reader = paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+    let first_read = std::thread::spawn(move || {
+        let mut buf = vec![0u8; first_half_len];
+        vmo_reader.read(&mut buf, 0).expect("paged vmo read of first 64 KiB failed");
+        buf
+    })
+    .join()
+    .expect("first_read thread panicked");
+    assert_eq!(&first_read[..], &raw_data[..first_half_len]);
+
+    // Overwrite the blob in place with a Type 3 compressed delivery blob while `paged_vmo` is
+    // still open and registered with the pager/mapper session.
+    log::info!("Overwriting open blob with Type 3 compressed blob...");
+    env.write_blob_with_options(&overwritten_blob, true).await?;
+    let (overwritten_device_block, _) = env.get_blob_device_extent(&overwritten_blob.hash).await?;
+    assert_ne!(
+        overwritten_device_block, initial_device_block,
+        "Overwritten blob should be allocated at new physical device blocks"
+    );
+
+    // Overwrite the old uncompressed blob's physical blocks with garbage to prove that subsequent
+    // page faults read from the new compressed blob's extents rather than stale old blocks.
+    let block_proxy = env.partition.connect_block()?.into_proxy();
+    let block_client = block_client::RemoteBlockClient::new(block_proxy)
+        .await
+        .context("Failed to create RemoteBlockClient")?;
+    let garbage = vec![0xDEu8; raw_data.len()];
+    block_client
+        .write_at(
+            block_client::BufferSlice::Memory(&garbage),
+            initial_device_block * mapping::BLOCK_SIZE,
+        )
+        .await
+        .context("Failed to overwrite old blob blocks with garbage")?;
+    block_client.flush().await.context("Failed to flush overwritten old blocks")?;
+
+    // Now fault in the remaining 192 KiB of the original `paged_vmo` (which was NOT paged in
+    // before the overwrite) and verify the entire 256 KiB matches `raw_data`.
+    let total_len = raw_data.len();
+    let vmo_reader2 = paged_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?;
+    let full_read = std::thread::spawn(move || {
+        let mut buf = vec![0u8; total_len];
+        vmo_reader2.read(&mut buf, 0).expect("paged vmo read after overwrite failed");
+        buf
+    })
+    .join()
+    .expect("full_read thread panicked");
+    assert_eq!(&full_read[..], &raw_data[..]);
+
+    drop(paged_vmo);
+    drop(blob_pager);
+    env.shutdown().await?;
     Ok(())
 }

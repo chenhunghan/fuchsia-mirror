@@ -10,8 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import build_summary
-import textpb
+from build.rbe import build_summary, textpb
 
 
 class LabelsToDictTests(unittest.TestCase):
@@ -1158,7 +1157,7 @@ class PrintBuildSummaryTest(BuildSummaryTestBase):
             [
                 line.strip()
                 for line in build_summary.build_summary_lines(
-                    rbe_data, "reproxy_logdir"
+                    rbe_data, Path("reproxy_logdir")
                 )
             ][1:],
             [line.strip() for line in EXPECTED_BUILD_SUMMARY.splitlines()][1:],

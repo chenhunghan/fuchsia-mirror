@@ -8,6 +8,7 @@
 #define ZIRCON_KERNEL_DEV_POWER_MOONFLOWER_INCLUDE_DEV_POWER_MOONFLOWER_MOONFLOWER_FFI_H_
 
 #include <stdint.h>
+#include <sys/types.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 

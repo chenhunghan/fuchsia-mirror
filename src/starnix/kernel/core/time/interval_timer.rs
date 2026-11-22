@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 use crate::power::OnWakeOps;
-use crate::signals::{SignalDetail, SignalEvent, SignalEventNotify, SignalInfo, send_signal};
+use crate::signals::{
+    SignalDetail, SignalEvent, SignalEventNotify, SignalEventValue, SignalInfo, send_signal,
+};
 use crate::task::{CurrentTask, Kernel, ThreadGroup};
 use crate::time::utc::{estimate_boot_deadline_from_utc, utc_now};
 use crate::time::{
@@ -19,6 +21,7 @@ use starnix_logging::{log_debug, log_error, log_trace, log_warn, track_stub};
 use starnix_sync::{IntervalTimerState, LockDepMutex};
 use starnix_types::time::{duration_from_timespec, timespec_from_duration};
 use starnix_uapi::errors::Errno;
+use starnix_uapi::signals::SIGALRM;
 use starnix_uapi::{SI_TIMER, itimerspec};
 use std::fmt::Debug;
 use std::pin::pin;
@@ -44,6 +47,10 @@ impl From<TimerRemaining> for itimerspec {
 #[derive(Debug)]
 pub struct IntervalTimer {
     pub timer_id: TimerId,
+
+    /// Whether this timer implements `ITIMER_REAL` (`setitimer` / `alarm`), which dispatches
+    /// `SI_KERNEL` `SIGALRM` signals rather than POSIX `SI_TIMER` signals.
+    is_itimer_real: bool,
 
     /// HrTimer to trigger wakeup
     hr_timer: Option<HrTimerHandle>,
@@ -172,17 +179,21 @@ impl UtcWaiter {
 struct IntervalTimerMutableState {
     /// Handle to abort the running timer task.
     abort_handle: Option<AbortHandle>,
-    /// If the timer is armed (started).
+    /// True if the timer is currently armed.
     armed: bool,
     /// Time of the next expiration on the requested timeline.
     target_time: TargetTime,
     /// Interval for periodic timer.
     interval: zx::SyntheticDuration,
-    /// Number of timer expirations that have occurred since the last time a signal was sent.
+    /// Monotonically increasing generation incremented whenever timer settings change.
+    generation: u64,
+    /// Number of timer expirations accumulated for the currently queued signal.
     ///
-    /// Timer expiration is not counted as overrun under `SignalEventNotify::None`.
-    overrun_cur: i32,
-    /// Number of timer expirations that was on last delivered signal.
+    /// 0 indicates no signal is queued (or settings were reset since queueing).
+    /// 1 indicates a queued signal with 0 overruns.
+    /// Values > 1 indicate a queued signal with `expiry_count - 1` overruns.
+    expiry_count: u32,
+    /// Overrun count latched when the most recent timer signal was dequeued.
     overrun_last: i32,
 }
 
@@ -196,7 +207,8 @@ impl IntervalTimerMutableState {
     }
 
     fn on_setting_changed(&mut self) {
-        self.overrun_cur = 0;
+        self.generation = self.generation.wrapping_add(1);
+        self.expiry_count = 0;
         self.overrun_last = 0;
     }
 }
@@ -216,30 +228,51 @@ impl IntervalTimer {
         };
         Ok(Arc::new(Self {
             timer_id,
+            is_itimer_real: false,
             hr_timer,
             timeline,
             signal_event,
             state: IntervalTimerMutableState {
+                abort_handle: None,
+                armed: false,
                 target_time: timeline.zero_time(),
-                abort_handle: Default::default(),
-                armed: Default::default(),
-                interval: Default::default(),
-                overrun_cur: Default::default(),
-                overrun_last: Default::default(),
+                interval: zx::SyntheticDuration::default(),
+                generation: 0,
+                expiry_count: 0,
+                overrun_last: 0,
             }
             .into(),
         }))
     }
 
-    fn signal_info(self: &IntervalTimerHandle) -> Option<SignalInfo> {
-        let signal_detail = SignalDetail::Timer { timer: self.clone() };
-        Some(SignalInfo::with_detail(self.signal_event.signo?, SI_TIMER, signal_detail))
+    pub fn new_itimer_real() -> IntervalTimerHandle {
+        let signal_event =
+            SignalEvent::new(SignalEventValue(0), SIGALRM, SignalEventNotify::Signal);
+        let mut timer = Self::new(0, Timeline::Monotonic, TimerWakeup::Regular, signal_event)
+            .expect("Failed to create itimer_real");
+        Arc::get_mut(&mut timer).expect("unique IntervalTimerHandle").is_itimer_real = true;
+        timer
+    }
+
+    fn signal_info(
+        self: &IntervalTimerHandle,
+        generation: u64,
+        expirations: u32,
+    ) -> Option<SignalInfo> {
+        let signo = self.signal_event.signo?;
+        if self.is_itimer_real {
+            return Some(SignalInfo::kernel(signo));
+        }
+        let signal_detail =
+            SignalDetail::Timer { timer: self.clone(), generation, expirations, overrun: None };
+        Some(SignalInfo::with_detail(signo, SI_TIMER, signal_detail))
     }
 
     async fn start_timer_loop(
         self: &IntervalTimerHandle,
         kernel: &Kernel,
         timer_thread_group: Weak<ThreadGroup>,
+        generation: u64,
     ) {
         loop {
             let overtime = loop {
@@ -247,7 +280,13 @@ impl IntervalTimer {
                 // updated while we are sleeping or if our estimation of the target time
                 // relative to the monotonic clock is off. Drop the guard before blocking so
                 // that the target time can be updated.
-                let target_time = { self.state.lock().target_time };
+                let target_time = {
+                    let guard = self.state.lock();
+                    if !guard.armed || guard.generation != generation {
+                        return;
+                    }
+                    guard.target_time
+                };
                 let now = self.timeline.now();
                 if now >= target_time {
                     break now
@@ -278,30 +317,26 @@ impl IntervalTimer {
                     TargetTime::RealTime(t) => utc_waiter.wait(t, utc_signal).await,
                 }
             };
-            if !self.state.lock().armed {
-                return;
-            }
-
-            // Timer expirations are counted as overruns except SIGEV_NONE.
-            if self.signal_event.notify != SignalEventNotify::None {
-                let mut guard = self.state.lock();
-                // If the `interval` is zero, the timer expires just once, at the time
-                // specified by `target_time`.
+            let expirations = {
+                let guard = self.state.lock();
+                if !guard.armed || guard.generation != generation {
+                    return;
+                }
                 if guard.interval == zx::SyntheticDuration::ZERO {
-                    guard.overrun_cur = 1;
+                    1
                 } else {
-                    let exp =
-                        i32::try_from(overtime.into_nanos() / guard.interval.into_nanos() + 1)
-                            .unwrap_or(i32::MAX);
-                    guard.overrun_cur = guard.overrun_cur.saturating_add(exp);
-                };
-            }
+                    u32::try_from(
+                        (overtime.into_nanos() / guard.interval.into_nanos()).saturating_add(1),
+                    )
+                    .unwrap_or(u32::MAX)
+                }
+            };
 
             // Check on notify enum to determine the signal target.
             if let Some(timer_thread_group) = timer_thread_group.upgrade() {
                 match self.signal_event.notify {
                     SignalEventNotify::Signal => {
-                        if let Some(signal_info) = self.signal_info() {
+                        if let Some(signal_info) = self.signal_info(generation, expirations) {
                             log_trace!(
                                 signal = signal_info.signal.number(),
                                 pid = timer_thread_group.leader.id;
@@ -319,7 +354,7 @@ impl IntervalTimer {
                         // `SIGKILL` delivery acquires `ThreadGroupMutableStateLock` for write.
                         let target = timer_thread_group.read().get_task(tid);
                         if let Some(target) = target {
-                            if let Some(signal_info) = self.signal_info() {
+                            if let Some(signal_info) = self.signal_info(generation, expirations) {
                                 log_trace!(
                                     signal = signal_info.signal.number(),
                                     tid;
@@ -337,6 +372,9 @@ impl IntervalTimer {
             // If the `interval` is zero, the timer expires just once, at the time
             // specified by `target_time`.
             let mut guard = self.state.lock();
+            if !guard.armed || guard.generation != generation {
+                return;
+            }
             if guard.interval != zx::SyntheticDuration::default() {
                 guard.target_time = self.timeline.now() + GenericDuration::from(guard.interval);
             } else {
@@ -346,10 +384,43 @@ impl IntervalTimer {
         }
     }
 
-    pub fn on_signal_delivered(self: &IntervalTimerHandle) {
+    /// Returns whether a queued timer signal generated under `generation` is still valid.
+    pub(crate) fn is_signal_valid(&self, generation: u64) -> bool {
+        self.state.lock().generation == generation
+    }
+
+    /// Records `expirations` for a timer signal generated under `generation`, returning `false`
+    /// if the timer's settings have changed since generation.
+    pub(crate) fn on_signal_queued(&self, generation: u64, expirations: u32) -> bool {
         let mut guard = self.state.lock();
-        guard.overrun_last = guard.overrun_cur;
-        guard.overrun_cur = 0;
+        if guard.generation != generation {
+            return false;
+        }
+        guard.expiry_count = guard.expiry_count.saturating_add(expirations);
+        true
+    }
+
+    /// Latches and returns the overrun count when a queued timer signal of `generation` is
+    /// dequeued, resetting the pending expiry counter. Returns `None` if `generation` is no
+    /// longer current, indicating the signal is stale and must not be delivered.
+    pub(crate) fn on_signal_delivered(&self, generation: u64) -> Option<i32> {
+        let mut guard = self.state.lock();
+        if guard.generation != generation {
+            return None;
+        }
+        let overrun = i32::try_from(guard.expiry_count.saturating_sub(1)).unwrap_or(i32::MAX);
+        guard.overrun_last = overrun;
+        guard.expiry_count = 0;
+        Some(overrun)
+    }
+
+    /// Resets the pending expiry counter if a queued timer signal of `generation` is discarded
+    /// without delivery while `generation` is still current.
+    pub(crate) fn on_signal_discarded(&self, generation: u64) {
+        let mut guard = self.state.lock();
+        if guard.generation == generation {
+            guard.expiry_count = 0;
+        }
     }
 
     pub fn arm(
@@ -368,11 +439,12 @@ impl IntervalTimer {
                     new_value.it_value,
                 )?)
         };
-
-        // Stop the current running task.
-        guard.disarm();
-
         let interval = duration_from_timespec(new_value.it_interval)?;
+
+        // Stop the current running task and reset overrun state for the new setting.
+        guard.disarm();
+        guard.on_setting_changed();
+
         guard.interval = interval;
         if let Some(hr_timer) = &self.hr_timer {
             // It is important for power management that the hrtimer is marked as interval, as
@@ -387,7 +459,7 @@ impl IntervalTimer {
 
         guard.armed = true;
         guard.target_time = target_time;
-        guard.on_setting_changed();
+        let generation = guard.generation;
 
         let kernel_ref = current_task.kernel().clone();
         let self_ref = self.clone();
@@ -400,12 +472,12 @@ impl IntervalTimer {
                     // Unfortunately, std::mem::drop is not working correctly on this:
                     // (https://github.com/rust-lang/rust/issues/57478).
                     let mut guard = self_ref.state.lock();
-                    if !guard.armed {
+                    if !guard.armed || guard.generation != generation {
                         return;
                     }
 
                     let (abortable_future, abort_handle) = futures::future::abortable(
-                        self_ref.start_timer_loop(&kernel_ref, thread_group),
+                        self_ref.start_timer_loop(&kernel_ref, thread_group, generation),
                     );
                     guard.abort_handle = Some(abort_handle);
                     abortable_future
@@ -443,9 +515,6 @@ impl IntervalTimer {
         }
     }
 
-    pub fn overrun_cur(&self) -> i32 {
-        self.state.lock().overrun_cur
-    }
     pub fn overrun_last(&self) -> i32 {
         self.state.lock().overrun_last
     }
@@ -453,7 +522,7 @@ impl IntervalTimer {
 
 impl PartialEq for IntervalTimer {
     fn eq(&self, other: &Self) -> bool {
-        std::ptr::addr_of!(self) == std::ptr::addr_of!(other)
+        std::ptr::eq(self, other)
     }
 }
 impl Eq for IntervalTimer {}

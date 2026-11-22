@@ -159,16 +159,16 @@ impl From<Extent> for Range<u64> {
     }
 }
 
-impl<T: storage_units::BlockSizeSpec> storage_units::IsAligned<T> for &Extent {
+impl<T: storage_units::AnyBlockSizeTag> storage_units::IsAligned<T> for &Extent {
     #[inline(always)]
-    fn is_aligned(self, block_size: storage_units::GenericBlockSize<T>) -> bool {
+    fn is_aligned(self, block_size: storage_units::BlockSize<T>) -> bool {
         block_size.is_aligned(&self.0)
     }
 }
 
-impl<T: storage_units::BlockSizeSpec> storage_units::IsAligned<T> for Extent {
+impl<T: storage_units::AnyBlockSizeTag> storage_units::IsAligned<T> for Extent {
     #[inline(always)]
-    fn is_aligned(self, block_size: storage_units::GenericBlockSize<T>) -> bool {
+    fn is_aligned(self, block_size: storage_units::BlockSize<T>) -> bool {
         block_size.is_aligned(&self.0)
     }
 }

@@ -179,7 +179,7 @@ class SensitiveUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kField = 1,  // 0x1
   };
 
@@ -417,7 +417,7 @@ class NonSensitiveUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSensitiveField = 1,        // 0x1
     kSensitiveStructField = 2,  // 0x2
   };

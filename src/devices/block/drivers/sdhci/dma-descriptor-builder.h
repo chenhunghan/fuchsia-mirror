@@ -9,6 +9,7 @@
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/fzl/pinned-vmo.h>
 #include <lib/sdmmc/hw.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
@@ -23,8 +24,6 @@
 #include <fbl/algorithm.h>
 #include <hwreg/bitfields.h>
 #include <sdk/lib/driver/logging/cpp/logger.h>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace sdhci {
 

@@ -144,14 +144,14 @@ your particular configuration, e.g.
 #include <lib/uart/xyz.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <phys/output/stdout.h>
+#include <phys/output/uart.h>
 #include <phys/runtime/main.h>
-#include <phys/uart/driver.h>
 
 void PhysMain(void* ptr, arch::EarlyTicks ticks) {
-  ApplyRelocations();
-
   constexpr dcfg_simple_t kXyzConfig = {.mmio_phys=0x1234000};
-  SetUartConsole(uart::Config<MyDriver>{kXyzConfig});
+  UartDriver& uart = SetUartDriver(uart::Config<MyDriver>{kXyzConfig});
+  gPhysStdout.set_console(FILE{&uart});
 
   printf("hello world!\n");
 

@@ -5,6 +5,9 @@
 #ifndef LIB_DRIVER_DEVICETREE_VISITORS_DRIVERS_INTERRUPT_CONTROLLERS_ARM_GIC_ARM_GICV2_H_
 #define LIB_DRIVER_DEVICETREE_VISITORS_DRIVERS_INTERRUPT_CONTROLLERS_ARM_GIC_ARM_GICV2_H_
 
+// By convention in ARM GIC devicetree bindings, 0 is SPI, 1 is PPI, 2 is ESPI,
+// and 3 is EPPI. 8 is selected for SGIs outside the typical range.
+#define GIC_SGI 8
 #define GIC_PPI 1
 #define GIC_SPI 0
 

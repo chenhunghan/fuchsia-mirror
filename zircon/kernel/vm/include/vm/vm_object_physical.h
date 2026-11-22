@@ -25,7 +25,7 @@
 #include <vm/vm_object.h>
 
 // VMO representing a physical range of memory
-class VmObjectPhysical final : public VmObject, public VmDeferredDeleter<VmObjectPhysical> {
+class VmObjectPhysical final : public VmObject {
  public:
   static zx_status_t Create(paddr_t base, uint64_t size, fbl::RefPtr<VmObjectPhysical>* vmo);
 
@@ -77,8 +77,6 @@ class VmObjectPhysical final : public VmObject, public VmDeferredDeleter<VmObjec
   }
 
   zx_status_t SetMappingCachePolicy(arch_mmu_flags_t cache_policy) override;
-
-  void MaybeDeadTransition() {}
 
   // Helper functions for FFI access
   const void* state() const { return &opaque_storage_; }

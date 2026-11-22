@@ -8,6 +8,7 @@ mod page_cache_ffi;
 
 use crate::arch_rs::{CpuAlignMarker, MAX_CACHE_LINE, curr_cpu_num};
 use crate::counters::define_kcounter;
+use crate::crypto::global_prng;
 use crate::kernel::percpu::PerCpu;
 use crate::kernel::thread::{AutoPreemptDisabler, current_memory_allocation_state_is_enabled};
 use crate::ksync_kernel::TrackedMutex;
@@ -19,7 +20,7 @@ use core::ffi::c_int;
 use core::ops::Deref;
 use core::pin::Pin;
 use ksync::{KCell, KMutex};
-use page_cache_ffi::{cpp_global_prng_draw, rand_r};
+use page_cache_ffi::rand_r;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop, stack_pin_init};
 use zx_status::Status;
 
@@ -219,12 +220,10 @@ impl PageCache {
         assert!(!per_cpu_caches.is_empty());
         for entry in per_cpu_caches.iter() {
             ksync::lock!(let mut guard = entry.lock_cache_lock());
-            let mut seed: usize = 0;
-            // SAFETY: `seed` is a valid stack variable of `size_of::<usize>()` bytes.
-            unsafe {
-                cpp_global_prng_draw((&raw mut seed).cast::<u8>(), core::mem::size_of::<usize>());
-            }
-            *guard.as_mut().fields_mut().random_should_wait_state = Some(seed);
+            let mut seed = [0u8; size_of::<usize>()];
+            global_prng::draw(&mut seed);
+            *guard.as_mut().fields_mut().random_should_wait_state =
+                Some(usize::from_ne_bytes(seed));
         }
     }
 

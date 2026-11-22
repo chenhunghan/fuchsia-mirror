@@ -6,6 +6,7 @@
 
 #include "src/ui/lib/escher/defaults/default_shader_program_factory.h"
 #include "src/ui/lib/escher/flatland/flatland_static_config.h"
+#include "src/ui/lib/escher/geometry/types.h"
 #include "src/ui/lib/escher/impl/vulkan_utils.h"
 // TODO(https://fxbug.dev/42152212): We are keeping paper_renderer_static_config.h and its
 // associated GLSL/spirv shaders around specifically for testing ShaderVariantArgs. This is
@@ -14,7 +15,6 @@
 // use the same files but different args). These should be removed if/when Flatland has them.
 #include "src/ui/lib/escher/paper/paper_renderer_static_config.h"
 #include "src/ui/lib/escher/renderer/batch_gpu_uploader.h"
-#include "src/ui/lib/escher/shape/mesh_spec.h"
 #include "src/ui/lib/escher/test/common/gtest_escher.h"
 #include "src/ui/lib/escher/test/vk/vulkan_tester.h"
 #include "src/ui/lib/escher/third_party/granite/vk/render_pass.h"
@@ -46,8 +46,12 @@ using namespace escher;
 // TODO(https://fxbug.dev/42098792): This number needs to be queried via sysmem or vulkan.
 const uint32_t kYuvSize = 64;
 
-constexpr MeshSpec kMeshSpec2D{MeshAttribute::kPosition2D | MeshAttribute::kUV};
-constexpr MeshSpec kMeshSpec3D{MeshAttribute::kPosition3D | MeshAttribute::kUV};
+// Vertex layouts used to exercise pipeline caching: an interleaved position followed by UV
+// coordinates, with either a 2D or 3D position.
+constexpr uint32_t kUvOffset2D = sizeof(vec2);
+constexpr uint32_t kStride2D = sizeof(vec2) + sizeof(vec2);
+constexpr uint32_t kUvOffset3D = sizeof(vec3);
+constexpr uint32_t kStride3D = sizeof(vec3) + sizeof(vec2);
 
 class ShaderProgramTest : public ::testing::Test, public VulkanTester {
  protected:
@@ -314,22 +318,10 @@ impl::RenderPassPtr CreateRenderPassForTest() {
 // in tests.  It doesn't really matter what vertex format is used, so we just use the standard one
 // used by PaperShapeCache.
 void SetupVertexAttributeBindingsForTest(CommandBufferPipelineState* cbps) {
-  MeshSpec mesh_spec{MeshAttribute::kPosition2D | MeshAttribute::kUV};
-  const uint32_t total_attribute_count = mesh_spec.total_attribute_count();
-  BlockAllocator allocator(512);
-  static constexpr MeshAttributeBindingLocations kMeshAttributeBindingLocations = {
-      .position_2d = 0,
-      .position_3d = 0,
-      .position_offset = 1,
-      .uv = 2,
-      .perimeter_pos = 3,
-      .blend_weight1 = 4};
-  RenderFuncs::VertexAttributeBinding* attribute_bindings = RenderFuncs::NewVertexAttributeBindings(
-      kMeshAttributeBindingLocations, &allocator, mesh_spec, total_attribute_count);
-
-  for (uint32_t i = 0; i < total_attribute_count; ++i) {
-    attribute_bindings[i].Bind(cbps);
-  }
+  cbps->SetVertexAttributes(/*binding=*/0, /*attrib=*/0, vk::Format::eR32G32Sfloat,
+                            /*offset=*/0);
+  cbps->SetVertexAttributes(/*binding=*/0, /*attrib=*/2, vk::Format::eR32G32Sfloat,
+                            /*offset=*/sizeof(vec2));
 }
 
 // This tests the most direct form of pipeline generation, without all of the laziness and caching
@@ -346,7 +338,7 @@ void SetupVertexAttributeBindingsForTest(CommandBufferPipelineState* cbps) {
 // - a ShaderProgram, in particular:
 //   - the set of vk::ShaderModules that it encapsulates
 //   - the PipelineLayout* obtained by inspection of the shader modules' SPIR-V code
-// - a MeshSpec, which defines the pipeline's vertex attribute bindings
+// - the vertex attribute bindings set up by `SetupVertexAttributeBindingsForTest()`
 // - a CommandBufferPipelineState, responsible for:
 //   - representing all static state required to build a pipeline, i.e. everything except
 //   - building the pipeline based on that state.
@@ -833,11 +825,9 @@ VK_TEST_F(ShaderProgramTest, GeneratePipelines) {
 
   cb->BindIndices(buffer, 0, vk::IndexType::eUint32);
 
-  cb->BindVertices(0, buffer, 0, kMeshSpec2D.stride(0));
-  cb->SetVertexAttributes(0, 0, vk::Format::eR32G32Sfloat,
-                          kMeshSpec2D.attribute_offset(0, MeshAttribute::kPosition2D));
-  cb->SetVertexAttributes(0, 2, vk::Format::eR32G32Sfloat,
-                          kMeshSpec2D.attribute_offset(0, MeshAttribute::kUV));
+  cb->BindVertices(0, buffer, 0, kStride2D);
+  cb->SetVertexAttributes(0, 0, vk::Format::eR32G32Sfloat, /*offset=*/0);
+  cb->SetVertexAttributes(0, 2, vk::Format::eR32G32Sfloat, kUvOffset2D);
 
   // Set the command buffer to a known default state, and obtain a pipeline.
   cb->SetToDefaultState(CommandBuffer::DefaultState::kOpaque);
@@ -862,27 +852,23 @@ VK_TEST_F(ShaderProgramTest, GeneratePipelines) {
   // Changing to a different mesh with the same layout doesn't change the
   // obtained pipeline.
 
-  // Using the same MeshSpec again, as if binding the same mesh structure
+  // Using the same vertex layout again, as if binding the same mesh structure
   cb->BindIndices(buffer, 0, vk::IndexType::eUint32);
 
-  cb->BindVertices(0, buffer, 0, kMeshSpec2D.stride(0));
+  cb->BindVertices(0, buffer, 0, kStride2D);
 
-  cb->SetVertexAttributes(0, 0, vk::Format::eR32G32Sfloat,
-                          kMeshSpec2D.attribute_offset(0, MeshAttribute::kPosition2D));
-  cb->SetVertexAttributes(0, 2, vk::Format::eR32G32Sfloat,
-                          kMeshSpec2D.attribute_offset(0, MeshAttribute::kUV));
+  cb->SetVertexAttributes(0, 0, vk::Format::eR32G32Sfloat, /*offset=*/0);
+  cb->SetVertexAttributes(0, 2, vk::Format::eR32G32Sfloat, kUvOffset2D);
 
   EXPECT_EQ(depth_readonly_pipeline, ObtainGraphicsPipeline(cb));
 
   // Changing to a mesh with a different layout results in a different pipeline.
   cb->BindIndices(buffer, 0, vk::IndexType::eUint32);
 
-  cb->BindVertices(0, buffer, 0, kMeshSpec3D.stride(0));
+  cb->BindVertices(0, buffer, 0, kStride3D);
 
-  cb->SetVertexAttributes(0, 0, vk::Format::eR32G32B32Sfloat,
-                          kMeshSpec3D.attribute_offset(0, MeshAttribute::kPosition3D));
-  cb->SetVertexAttributes(2, 0, vk::Format::eR32G32Sfloat,
-                          kMeshSpec3D.attribute_offset(0, MeshAttribute::kUV));
+  cb->SetVertexAttributes(0, 0, vk::Format::eR32G32B32Sfloat, /*offset=*/0);
+  cb->SetVertexAttributes(2, 0, vk::Format::eR32G32Sfloat, kUvOffset3D);
 
   EXPECT_NE(depth_readonly_pipeline, ObtainGraphicsPipeline(cb));
   EXPECT_NE(vk::Pipeline(), ObtainGraphicsPipeline(cb));

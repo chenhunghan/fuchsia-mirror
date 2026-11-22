@@ -103,7 +103,7 @@ impl Driver for DriverTransportParent {
         Ok(Self { node, scope })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!(
             "DriverTransportParent::stop() was invoked. Use this function to do any cleanup needed."
         );

@@ -17,6 +17,18 @@
 
 namespace {
 
+constexpr auto kReturnsInt = [](int) -> int { return 0; };
+constexpr auto kReturnsVoid = [](int) {};
+static_assert(elfldltl::InvocableAs<decltype(kReturnsInt), void(int)>);
+static_assert(elfldltl::InvocableAs<decltype(kReturnsVoid), int(int)>);
+static_assert(!elfldltl::InvocableAs<decltype(kReturnsInt), void(int*)>);
+static_assert(elfldltl::InvocableAsR<decltype(kReturnsInt), long(int)>);
+static_assert(!elfldltl::InvocableAsR<decltype(kReturnsInt), void(int)>);
+static_assert(elfldltl::InvocableAsR<decltype(kReturnsVoid), void(int)>);
+static_assert(!elfldltl::InvocableAsR<decltype(kReturnsVoid), int(int)>);
+static_assert(!elfldltl::InvocableAsR<decltype(kReturnsInt), int*(int)>);
+static_assert(!elfldltl::InvocableAsR<decltype(kReturnsInt), int(int*)>);
+
 using NativeInfo = elfldltl::InitFiniInfo<elfldltl::Elf<>>;
 
 template <class Elf>

@@ -16,7 +16,6 @@ __BEGIN_CDECLS
 
 vm_page_t* rust_pmm_node_paddr_to_page(PmmNode* node, paddr_t addr);
 vm_page_t* rust_pmm_node_index_to_page(PmmNode* node, uint32_t index);
-paddr_t rust_pmm_node_index_to_paddr(PmmNode* node, uint32_t index);
 PageQueues* rust_pmm_node_get_page_queues(PmmNode* node);
 VmCompression* rust_pmm_node_get_page_compression(PmmNode* node);
 zx_status_t rust_pmm_node_alloc_page(PmmNode* node, uint32_t alloc_flags, vm_page_t** out_page);

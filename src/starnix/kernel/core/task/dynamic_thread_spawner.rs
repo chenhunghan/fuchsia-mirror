@@ -483,6 +483,7 @@ impl Drop for RunningThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::task::TaskStateCode;
     use crate::testing::spawn_kernel_and_run;
 
     #[fuchsia::test]
@@ -494,6 +495,38 @@ mod tests {
             let closure = move |_: &CurrentTask| {};
             let req = SpawnRequestBuilder::new().with_sync_closure(closure).build();
             spawner.spawn_from_request(req);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn blocked_kernel_thread_reports_sleeping() {
+        spawn_kernel_and_run(async |current_task| {
+            let spawner = DynamicThreadSpawner::new(1, current_task.weak_task(), "kthreadd");
+            let (task_sender, task_receiver) = std::sync::mpsc::channel();
+            let (release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+            let closure = move |current_task: &CurrentTask| {
+                assert_eq!(current_task.state_code(), TaskStateCode::Running);
+                task_sender.send(current_task.weak_task()).unwrap();
+                // Blocks on a Zircon futex, not on a Starnix waiter.
+                let _ = release_receiver.recv();
+            };
+            spawner
+                .spawn_from_request(SpawnRequestBuilder::new().with_sync_closure(closure).build());
+            let task = task_receiver.recv().unwrap().upgrade().expect("kernel thread is alive");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut observed_state = task.state_code();
+            while observed_state != TaskStateCode::Sleeping && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                observed_state = task.state_code();
+            }
+            release_sender.send(()).unwrap();
+            assert_eq!(
+                observed_state,
+                TaskStateCode::Sleeping,
+                "blocked kernel thread should report Sleeping while waiting on channel"
+            );
         })
         .await;
     }

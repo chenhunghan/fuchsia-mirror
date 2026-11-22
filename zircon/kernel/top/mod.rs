@@ -7,5 +7,7 @@
 pub mod boot_constants;
 pub mod debug;
 mod debug_ffi;
+pub mod handoff;
 pub mod init;
+pub mod main;
 pub mod version;

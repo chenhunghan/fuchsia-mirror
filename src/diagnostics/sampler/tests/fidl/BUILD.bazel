@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fuchsia.samplertestcontroller",
+    testonly = True,
+    srcs = ["sampler_test_controller.test.fidl"],
+    visibility = [
+        "//src/diagnostics/sampler/testing/realm-factory:__pkg__",
+        "//src/diagnostics/sampler/tests:__subpackages__",
+    ],
+)
+
+fidl_library(
+    name = "fuchsia.mockrebootcontroller",
+    testonly = True,
+    srcs = ["mock_reboot_controller.test.fidl"],
+    visibility = [
+        "//src/diagnostics/sampler/testing/realm-factory:__pkg__",
+        "//src/diagnostics/sampler/tests:__pkg__",
+    ],
+)

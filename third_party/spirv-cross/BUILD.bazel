@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "spirv_cross_sources",
+    srcs = [
+        "src/spirv_cfg.cpp",
+        "src/spirv_cross.cpp",
+        "src/spirv_cross_parsed_ir.cpp",
+        "src/spirv_cross_util.cpp",
+        "src/spirv_glsl.cpp",
+        "src/spirv_hlsl.cpp",
+        "src/spirv_msl.cpp",
+        "src/spirv_parser.cpp",
+        "src/spirv_reflect.cpp",
+    ],
+    hdrs = [
+        "src/GLSL.std.450.h",
+        "src/NonSemanticShaderDebugInfo100.h",
+        "src/spirv.hpp",
+        "src/spirv_cfg.hpp",
+        "src/spirv_common.hpp",
+        "src/spirv_cross.hpp",
+        "src/spirv_cross_containers.hpp",
+        "src/spirv_cross_error_handling.hpp",
+        "src/spirv_cross_parsed_ir.hpp",
+        "src/spirv_cross_util.hpp",
+        "src/spirv_glsl.hpp",
+        "src/spirv_hlsl.hpp",
+        "src/spirv_msl.hpp",
+        "src/spirv_parser.hpp",
+        "src/spirv_reflect.hpp",
+    ],
+    copts = [
+        "-fno-exceptions",
+        "-Wno-extra-semi",
+        "-Wno-ignored-qualifiers",
+        "-Wno-implicit-fallthrough",
+        "-Wno-inconsistent-missing-override",
+        "-Wno-missing-field-initializers",
+        "-Wno-newline-eof",
+        "-Wno-sign-compare",
+        "-Wno-unused-variable",
+    ],
+    defines = ["SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS"],
+    includes = ["src"],
+    visibility = ["//:__subpackages__"],
+    alwayslink = True,
+)

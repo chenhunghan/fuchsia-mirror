@@ -15,7 +15,8 @@ from wlanix_testing.nl80211 import (
     build_nla,
 )
 
-DEFAULT_SCHED_SCAN_INTERVAL_MS = 5000
+# Drivers may reject scheduled scan intervals shorter than 10 s.
+DEFAULT_SCHED_SCAN_INTERVAL_MS = 10000
 
 
 def build_match_set(

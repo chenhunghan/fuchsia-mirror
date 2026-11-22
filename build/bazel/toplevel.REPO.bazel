@@ -1,0 +1,68 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""REPO.bazel file for the main Fuchsia workspace.
+
+It is symlinked to the top of the generated Bazel workspace by
+//build/bazel/scripts/workspace_utils.py.
+"""
+
+# Directories that Bazel should never treat as packages of the main
+# repository. This keeps wildcard patterns such as //... from loading
+# BUILD files that were never written for this workspace, and that fail
+# to load in it.
+#
+# Each entry must be either unused by Bazel, or only used as the root
+# of a separate Bazel repository or workspace. Ignored directories still
+# work as external repositories (e.g. through local_path_override() in
+# toplevel.MODULE.bazel), but any //<path>/... label under them fails
+# with "Package is considered deleted due to --deleted_packages".
+#
+# Use this for whole trees that the main repository never references.
+# To hide individual packages whose files main repository targets still
+# need, use --deleted_packages in templates/template.bazelrc instead.
+#
+# Don't add top-level directories here. Bazel leaves ignored top-level
+# directories out of the execroot, which breaks actions that read files
+# from them by path.
+ignore_directories([
+    # Not used by the Bazel build at all.
+    "third_party/github.com/google/experimental-emboss-rust",
+    "third_party/grpc",
+    "third_party/pigweed",
+    "third_party/tink-cc",
+
+    # Only used through external repositories.
+    "fuchsia_build_generated/abseil-cpp",
+    "third_party/abseil-cpp",
+    "third_party/github.com/google/emboss/src",
+    "third_party/protobuf",
+
+    # Upstream packages in trees that Fuchsia otherwise uses, which need
+    # repositories or files that don't exist in this workspace.
+    "third_party/boringssl/src/third_party/benchmark",
+    "third_party/fmtlib/src/support/bazel",
+    "third_party/gfxstream/src/common/etc",
+    "third_party/gfxstream/src/host/gl",
+    "third_party/gfxstream/src/third-party",
+    "third_party/icu/default/source/tools/gennorm2",
+    "third_party/icu/latest/source/tools/gennorm2",
+    "third_party/perfetto/python",
+    "third_party/re2/src/app",
+    "third_party/re2/src/python",
+
+    # Separate Bazel modules.
+    "build/bazel/update-rustc-third-party",
+    "build/bazel_sdk",
+
+    # Gitignored staging area that build/rbe/proto/refresh.sh fills with
+    # upstream BUILD files. They only exist in checkouts that ran the
+    # script, and they load repositories this workspace doesn't define.
+    "build/rbe/proto",
+
+    # Embedded tools that ship with the Bazel binary. Matched by name
+    # rather than path so that symlinks into //prebuilt (e.g. in
+    # vendor/google) are covered too.
+    "**/install_base",
+])

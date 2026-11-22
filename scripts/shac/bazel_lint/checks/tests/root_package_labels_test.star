@@ -10,7 +10,11 @@ load(
 )
 load("./base_test.star", "run_lint_test")
 
-_DOCS_SUFFIX = "See https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/common#prohibited-label-patterns."
+_MESSAGE_SUFFIX = (
+    "If a third-party directory outside the Git repository (that cannot easily be edited) " +
+    "has no `BUILD.bazel` file, this may be a valid case for an exception. " +
+    "See https://fuchsia.dev/fuchsia-src/development/languages/bazel/style/common#prohibited-label-patterns."
+)
 
 def _run_root_package_labels_test(files):
     return run_lint_test(
@@ -37,7 +41,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:foo/bar.bzl`. " +
                 "Use `//foo:bar.bzl` instead, and add a `BUILD.bazel` file to `//foo` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 2,
@@ -49,7 +53,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:bar/baz`. " +
                 "Use `//bar:baz` instead, and add a `BUILD.bazel` file to `//bar` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 3,
@@ -61,7 +65,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:baz/qux`. " +
                 "Use `//baz:qux` instead, and add a `BUILD.bazel` file to `//baz` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 4,
@@ -73,7 +77,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:tools/helper`. " +
                 "Use `//tools:helper` instead, and add a `BUILD.bazel` file to `//tools` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 5,
@@ -85,7 +89,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:extra/target`. " +
                 "Use `//extra:target` instead, and add a `BUILD.bazel` file to `//extra` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 6,
@@ -97,7 +101,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:foo/bar:baz`. " +
                 "Use `//foo/bar:baz` instead, and add a `BUILD.bazel` file to `//foo/bar` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 7,
@@ -109,7 +113,7 @@ slash_label = "//:foo/bar/baz"
             message = (
                 "Disallowed workspace root package label: `//:foo/bar/baz`. " +
                 "Use `//foo/bar:baz` instead, and add a `BUILD.bazel` file to `//foo/bar` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "foo/BUILD.bazel",
             line = 8,
@@ -164,7 +168,7 @@ def test_disallowed_external_repo_label_in_regular_build_file():
             message = (
                 "Disallowed workspace root package label: `//:bin/clang`. " +
                 "Use `//bin:clang` instead, and add a `BUILD.bazel` file to `//bin` if needed. " +
-                _DOCS_SUFFIX
+                _MESSAGE_SUFFIX
             ),
             filepath = "src/BUILD.bazel",
             line = 1,

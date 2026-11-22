@@ -419,7 +419,8 @@ code review:
     review label definitions see, [Gerrit Code Review - Review Labels](https://gerrit-review.googlesource.com/Documentation/config-labels.html){:.external}.
 *   Can specific portions of the Fuchsia source code have different requirements?
     * Yes. For example, API changes have special requirements as described in
-     the [Fuchsia API Council Charter](/docs/contribute/governance/api_council.md#api_review).
+     the [Fuchsia API Council
+     Charter](/docs/contribute/governance/api_council.md#api-review).
 *   Do I need **API-Review +1**?
     * Changes affecting the Fuchsia API surface require **API-Review +1**, and the
     code review tool will only show the API-Review flag when it is needed.

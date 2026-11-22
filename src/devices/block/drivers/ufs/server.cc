@@ -391,10 +391,8 @@ void UfsServer::ReadBuffer(ReadBufferRequestView request, ReadBufferCompleter::S
 
 void UfsServer::WriteBuffer(WriteBufferRequestView request, WriteBufferCompleter::Sync& completer) {
   // External clients are only permitted to use standard data buffer modes.
-  // Microcode/firmware download (FFU) and vendor-specific modes are rejected.
-  // TODO(https://fxbug.dev/555277260): If Field Firmware Update (FFU) support is
-  // needed from Fuchsia, expose it via a separate privileged capability rather
-  // than the general SCSI protocol, or perform it in the bootloader instead.
+  // Microcode/firmware download (FFU) and vendor-specific modes are rejected; UFS firmware updates
+  // are applied by the bootloader.
   switch (request->mode) {
     case fuchsia_hardware_scsi::wire::WriteBufferMode::kData:
       break;

@@ -592,11 +592,13 @@ mod tests {
                 Ok(SuiteFacets {
                     collection: HERMETIC_TESTS_COLLECTION,
                     deprecated_allowed_packages: None,
+                    runner: None,
                 })
             } else {
                 Ok(SuiteFacets {
                     collection: crate::constants::SYSTEM_TESTS_COLLECTION,
                     deprecated_allowed_packages: None,
+                    runner: None,
                 })
             }
         };

@@ -121,12 +121,19 @@ mod riscv64_tests {
 pub use arch::{
     arch_early_init, arch_enter_idle_state, arch_init, arch_late_init_percpu, arch_prevm_init,
 };
-pub use mp::{arch_curr_cpu_num, arch_flush_state_and_halt, arch_mp_cpu_hotplug};
+pub use debugger::{arch_get_instruction_pointer, arch_set_return_instruction_pointer};
+pub use mp::{
+    arch_curr_cpu_num, arch_flush_state_and_halt, arch_get_restricted_flag, arch_mp_cpu_hotplug,
+};
 pub use restricted::{
     ArchSavedNormalState, Iframe, SyscallRegs, boot_hart_id, curr_hart_id, dump, enter_full,
     enter_restricted, redirect_restricted_exception_to_normal, save_restricted_exception_state,
     save_restricted_iframe_state, save_restricted_syscall_state, save_state_pre_restricted_entry,
     validate_state_pre_restricted_entry,
+};
+pub use spinlock::{
+    arch_spin_lock_non_instrumented, arch_spin_lock_trace_instrumented, arch_spin_trylock,
+    arch_spin_unlock,
 };
 pub use thread::{
     arch_context_switch, arch_dump_thread, arch_enter_uspace, arch_prepare_uspace,

@@ -30,8 +30,8 @@ func (b *mockBuild) Prepare() error {
 	b.paths = map[string]string{
 		"zbitool": "/path/to/zbi",
 	}
-	for _, k := range []string{"blk", "fvm", "zbi", "blk", "kernel", "ffx",
-		"symbolize", "llvm-symbolizer", "fuzzers.json", "tests.json"} {
+	for _, k := range []string{"blk", "fvm", "simg2img", "zbi", "kernel", "ffx",
+		"symbolizer", "tests.json"} {
 		b.paths[k] = fmt.Sprintf("/path/to/%s", k)
 	}
 	// Note: qemu is a special case because it needs to be a real tempfile,

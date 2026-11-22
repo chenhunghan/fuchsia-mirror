@@ -62,6 +62,7 @@ impl FsNodeOps for KmsgNode {
         _guard: &AppendLockWriteGuard<'_>,
         _node: &FsNode,
         _current_task: &CurrentTask,
+        _file: Option<&FileObject>,
         _length: u64,
     ) -> Result<(), Errno> {
         // O_TRUNC succeeds on /proc/kmsg but does nothing.

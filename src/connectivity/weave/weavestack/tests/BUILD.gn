@@ -26,7 +26,7 @@ cc_test_executable("unittests") {
   deps = [
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//src/connectivity/weave/weavestack:lib.static",
     "//src/lib/fxl/test:gtest_main",

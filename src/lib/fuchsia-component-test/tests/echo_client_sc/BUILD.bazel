@@ -39,13 +39,9 @@ fx_packaged_binary(
     binary_name = "echo_client_sc",
 )
 
-# The GN build uses the `fuchsia_component_manifest("manifest")` target defined
-# above the bazel2gn sentinel in BUILD.gn instead, because
-# `fuchsia_structured_config_values("config_values")` calls
-# `get_target_outputs(":manifest")`.
-# TODO(https://fxbug.dev/543568916): Remove `@bazel2gn:skip` once
-# `fuchsia_structured_config_values` has an in-tree platform Bazel rule.
-# @bazel2gn:skip
+# The Bazel build defines an equivalent `fx_component_manifest("manifest")`
+# target, so that `:config_lib` and `:component` refer to the same label in
+# both builds.
 fx_component_manifest(
     name = "manifest",
     component_name = "echo_client_sc",

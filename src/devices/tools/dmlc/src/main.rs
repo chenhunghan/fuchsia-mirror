@@ -51,10 +51,6 @@ pub struct CompileBoardArgs {
     #[argh(option)]
     /// path to output bind file
     pub bind_output: Option<String>,
-
-    #[argh(option)]
-    /// driver DML files to load metadata schemas from
-    pub driver_dml: Vec<String>,
 }
 
 #[derive(FromArgs, Clone)]

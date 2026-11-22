@@ -42,5 +42,6 @@ if (is_host) {
       "//tools/integration/fint:*",
     ]
     deps = [ "//prebuilt/third_party/protobuf-py3" ]
+    enable_mypy = false
   }
 }

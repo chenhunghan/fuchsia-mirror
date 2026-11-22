@@ -6,12 +6,8 @@
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <lib/async-loop/cpp/loop.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/async/dispatcher.h>
-#include <lib/fidl/cpp/interface_handle.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/defer.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/inspect/cpp/vmo/types.h>
@@ -27,7 +23,6 @@
 #include "src/developer/forensics/feedback/feedback_data.h"
 #include "src/developer/forensics/feedback/last_reboot.h"
 #include "src/developer/forensics/feedback/network_watcher.h"
-#include "src/developer/forensics/feedback/system_time_tracker.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
 #include "src/developer/forensics/utils/inspect_node_manager.h"
 #include "src/developer/forensics/utils/instrumented_binding_set.h"
@@ -41,8 +36,6 @@ class MainService {
   struct Options {
     std::optional<std::string> local_device_id_path;
     std::string graceful_shutdown_info_write_path;
-    std::string current_system_time_write_path;
-    bool enable_periodic_system_time_writes;
     LastReboot::Options last_reboot_options;
     CrashReports::Options crash_reports_options;
     FeedbackData::Options feedback_data_options;
@@ -53,8 +46,6 @@ class MainService {
               const Annotations& startup_annotations,
               fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle> lifecycle_channel,
               std::unique_ptr<RedactorBase> redactor, Options options);
-
-  ~MainService();
 
   template <typename Protocol>
     requires(fidl::IsProtocolV<Protocol>)
@@ -77,8 +68,6 @@ class MainService {
   FeedbackData feedback_data_;
   CrashReports crash_reports_;
   LastReboot last_reboot_;
-  async::Loop system_time_tracker_loop_;
-  SystemTimeTracker system_time_tracker_;
 
   InstrumentedBindingSet<fuchsia_feedback::ComponentDataRegister> component_data_register_bindings_;
   InstrumentedBindingSet<fuchsia_feedback::CrashReporter> crash_reporter_bindings_;

@@ -84,54 +84,8 @@ async fn driver_blob_paging_enabled() {
 }
 
 #[fuchsia::test]
-async fn driver_blob_paging_mapper_failure_falls_back_to_blob_reader() {
-    let (disconnected_mapper, _) =
-        fidl::endpoints::create_proxy::<fidl_fuchsia_storage_block::MapperMarker>();
-    let env = TestEnv::builder()
-        .fxblob()
-        .use_driver_blob_paging(true)
-        .mapper(disconnected_mapper)
-        .build()
-        .await;
-    env.block_until_started().await;
-
-    // When the driver's Mapper::OpenSession fails, pkg-cache falls back to the standard Fxfs
-    // BlobReader.
-    let hierarchy = env.inspect_hierarchy().await;
-    assert_data_tree!(
-        hierarchy,
-        root: contains {
-            "driver_blob_paging_status": "fallback",
-            "structured_config": contains {
-                "use_driver_blob_paging": true,
-            }
-        }
-    );
-
-    let content = "hello world".as_bytes();
-    let blob_hash = fuchsia_merkle::root_from_slice(content);
-    let () = env.blobfs.add_blob_from(blob_hash, content).await.unwrap();
-
-    // Verify that pkg-cache's exposed BlobReader forwards the channel to Fxfs in fallback mode.
-    let reader_vmo = env
-        .proxies
-        .blob_reader
-        .get_vmo(&blob_hash.into())
-        .await
-        .expect("get_vmo fidl failed")
-        .map_err(zx::Status::err_from_raw)
-        .expect("get_vmo failed");
-    assert_eq!(
-        reader_vmo.read_to_vec::<u8>(0, content.len() as u64).expect("read_to_vec failed"),
-        content
-    );
-
-    env.stop().await;
-}
-
-#[fuchsia::test]
 async fn blob_reader_forwarding() {
-    let env = TestEnv::builder().fxblob().use_driver_blob_paging(false).build().await;
+    let env = TestEnv::builder().cpp_blobfs().use_driver_blob_paging(false).build().await;
     env.block_until_started().await;
 
     let content = "hello from blob reader forwarding".as_bytes();

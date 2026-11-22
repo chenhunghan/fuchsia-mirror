@@ -90,6 +90,7 @@ if (is_host) {
       "//src/developer/ffx/lib/logging:lib",
       "//src/developer/ffx/lib/sdk:lib",
       "//src/developer/ffx/lib/version:lib",
+      "//src/lib/agents:lib",
       "//src/lib/analytics/rust:lib",
       "//src/lib/fuchsia-lockfile:lib",
       "//third_party/rust_crates:anyhow",

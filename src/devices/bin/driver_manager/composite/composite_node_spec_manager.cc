@@ -39,11 +39,12 @@ void CompositeNodeSpecManager::AddSpec(
       return;
     }
 
+    const auto& parent_specs = spec_impl->parent_specs();
     specs_[name] = std::move(spec_impl);
 
-    // Now that there is a new composite node spec, we can tell the bridge to attempt binds
-    // again.
-    bridge_->BindNodesForCompositeNodeSpec();
+    // Now that there is a new composite node spec, attempt binds only for resources whose
+    // properties can match at least one parent spec of the newly added composite node spec.
+    bridge_->BindNodesForCompositeNodeSpec(parent_specs);
     callback(fit::ok());
   };
 

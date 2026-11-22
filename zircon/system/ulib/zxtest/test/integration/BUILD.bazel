@@ -4,14 +4,38 @@
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
 load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
 test_suite(
+    name = "tests",
+    tests = [
+        ":zxtest-integration-stream-test",
+        ":zxtest-integration-test",
+    ],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    tests = [],
+    tests = [
+        ":zxtest-context_host_test",
+        ":zxtest-integration-streams_host_test",
+        ":zxtest-integration_host_test",
+    ],
     visibility = ["//zircon/system/ulib:__pkg__"],
 )
 
@@ -60,7 +84,6 @@ fx_cc_test_binary(
     gn_output_name = "zxtest-integration-test",
     visibility = ["//visibility:private"],
     deps = [
-        "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/zxtest",
     ] + _COMMON_DEPS,
 )
@@ -69,6 +92,44 @@ host_test(
     name = "zxtest-integration_host_test",
     binary = ":zxtest-integration",
     target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_packaged_binary(
+    name = "zxtest-integration-test_packaged_bin",
+    testonly = True,
+    binary = ":zxtest-integration",
+    binary_name = "zxtest-integration-test",
+)
+
+fx_component_manifest(
+    name = "zxtest-integration-test-manifest",
+    testonly = True,
+    component_name = "zxtest-integration-test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:use.shard",
+    ],
+    manifest = "meta/zxtest-integration-test.cml",
+)
+
+fx_test_component(
+    name = "zxtest-integration-test-component",
+    compiled_manifest = ":zxtest-integration-test-manifest",
+    deps = [":zxtest-integration-test_packaged_bin"],
+)
+
+# Because this is testing lower-level zx test assertions, do not run as a
+# normal zxtest with the gtest runner.
+fx_package(
+    name = "zxtest-integration-test-pkg",
+    package_name = "zxtest-integration-test",
+    testonly = True,
+    test_components = [":zxtest-integration-test-component"],
+)
+
+fx_test(
+    name = "zxtest-integration-test",
+    package = ":zxtest-integration-test-pkg",
 )
 
 fx_cc_test_binary(
@@ -86,7 +147,6 @@ fx_cc_test_binary(
     gn_output_name = "zxtest-integration-streams-test",
     visibility = ["//visibility:private"],
     deps = [
-        "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/zxtest:zxtest-streams",
     ] + _COMMON_DEPS,
 )
@@ -95,4 +155,42 @@ host_test(
     name = "zxtest-integration-streams_host_test",
     binary = ":zxtest-integration-streams",
     target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_packaged_binary(
+    name = "zxtest-integration-stream-test_packaged_bin",
+    testonly = True,
+    binary = ":zxtest-integration-streams",
+    binary_name = "zxtest-integration-streams-test",
+)
+
+fx_component_manifest(
+    name = "zxtest-integration-stream-test-manifest",
+    testonly = True,
+    component_name = "zxtest-integration-stream-test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:use.shard",
+    ],
+    manifest = "meta/zxtest-integration-stream-test.cml",
+)
+
+fx_test_component(
+    name = "zxtest-integration-stream-test-component",
+    compiled_manifest = ":zxtest-integration-stream-test-manifest",
+    deps = [":zxtest-integration-stream-test_packaged_bin"],
+)
+
+# Because this is testing lower-level zx test assertions, do not run as a
+# normal zxtest with the gtest runner.
+fx_package(
+    name = "zxtest-integration-stream-test-pkg",
+    package_name = "zxtest-integration-stream-test",
+    testonly = True,
+    test_components = [":zxtest-integration-stream-test-component"],
+)
+
+fx_test(
+    name = "zxtest-integration-stream-test",
+    package = ":zxtest-integration-stream-test-pkg",
 )

@@ -84,40 +84,86 @@ impl From<Error> for fidl_avrcp::BrowseControllerError {
 
 pub type PacketResult<T> = result::Result<T, Error>;
 
-decodable_enum! {
-    /// Common charset IDs from the MIB Enum we may see in AVRCP. See:
-    /// https://www.iana.org/assignments/character-sets/character-sets.xhtml
-    /// TODO(https://fxbug.dev/42052955): we ideally would not want to return OutOfRange error
-    /// but instead return a default value (i.e. 0 => Unknown).
-    pub enum CharsetId<u16, Error, OutOfRange> {
-        Ascii = 3,
-        Iso8859_1 = 4,
-        Utf8 = 106,
-        Ucs2 = 1000,
-        Utf16be = 1013,
-        Utf16le = 1014,
-        Utf16 = 1015,
-    }
+/// Placeholder used when decoding an attribute or setting value with a non-UTF-8 charset.
+pub(crate) const UNKNOWN_VALUE_PLACEHOLDER: &str = "Unknown Value";
+
+/// Common charset IDs from the MIB Enum we may see in AVRCP. See:
+/// https://www.iana.org/assignments/character-sets/character-sets.xhtml
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum CharsetId {
+    Ascii,
+    Iso8859_1,
+    Utf8,
+    Ucs2,
+    Utf16be,
+    Utf16le,
+    Utf16,
+    Unknown(u16),
 }
 
 impl CharsetId {
-    pub fn is_utf8(&self) -> bool {
-        match &self {
-            Self::Utf8 | Self::Ascii => true,
-            _ => false,
-        }
+    const ASCII: u16 = 3;
+    const ISO_8859_1: u16 = 4;
+    const UTF8: u16 = 106;
+    const UCS2: u16 = 1000;
+    const UTF16BE: u16 = 1013;
+    const UTF16LE: u16 = 1014;
+    const UTF16: u16 = 1015;
+
+    /// Parses a 2-byte big-endian MIBenum value into a `CharsetId`.
+    pub fn from_be_bytes(bytes: [u8; 2]) -> Self {
+        Self::from(u16::from_be_bytes(bytes))
     }
 
-    /// TODO(https://fxbug.dev/42052955): once we change CharsetId to be infalliable we can
-    /// change or remove this method.
-    pub(crate) fn is_utf8_charset_id(id_buf: &[u8; 2]) -> bool {
-        let raw_val = u16::from_be_bytes(*id_buf);
-        match Self::try_from(raw_val) {
-            Ok(id) => id.is_utf8(),
-            Err(_) => {
-                warn!("Unsupported charset ID {:?}", raw_val,);
-                false
-            }
+    /// Encodes this `CharsetId` as a 2-byte big-endian MIBenum value.
+    pub fn to_be_bytes(self) -> [u8; 2] {
+        u16::from(self).to_be_bytes()
+    }
+
+    /// Returns true if bytes in this character set are valid UTF-8 (UTF-8 or ASCII).
+    pub fn is_utf8(self) -> bool {
+        matches!(self, Self::Utf8 | Self::Ascii)
+    }
+
+    /// Decodes `bytes` lossily as UTF-8 if this charset is UTF-8 compatible, or returns
+    /// `placeholder` otherwise.
+    // TODO(https://fxbug.dev/587409028): Convert non-UTF-8 charsets to UTF-8.
+    pub(crate) fn decode_str(self, bytes: &[u8], placeholder: &str) -> String {
+        if self.is_utf8() {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            debug!("Unsupported charset ID {self:?}; using placeholder {placeholder:?}");
+            placeholder.to_owned()
+        }
+    }
+}
+
+impl From<u16> for CharsetId {
+    fn from(value: u16) -> Self {
+        match value {
+            Self::ASCII => Self::Ascii,
+            Self::ISO_8859_1 => Self::Iso8859_1,
+            Self::UTF8 => Self::Utf8,
+            Self::UCS2 => Self::Ucs2,
+            Self::UTF16BE => Self::Utf16be,
+            Self::UTF16LE => Self::Utf16le,
+            Self::UTF16 => Self::Utf16,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+impl From<CharsetId> for u16 {
+    fn from(value: CharsetId) -> Self {
+        match value {
+            CharsetId::Ascii => CharsetId::ASCII,
+            CharsetId::Iso8859_1 => CharsetId::ISO_8859_1,
+            CharsetId::Utf8 => CharsetId::UTF8,
+            CharsetId::Ucs2 => CharsetId::UCS2,
+            CharsetId::Utf16be => CharsetId::UTF16BE,
+            CharsetId::Utf16le => CharsetId::UTF16LE,
+            CharsetId::Utf16 => CharsetId::UTF16,
+            CharsetId::Unknown(other) => other,
         }
     }
 }
@@ -597,7 +643,6 @@ impl MediaAttributeEntries {
     const VALUE_LENGTH_LEN: usize = 2;
     const ATTRIBUTE_HEADER_LEN: usize =
         ATTRIBUTE_ID_LEN + Self::CHARSET_ID_LEN + Self::VALUE_LENGTH_LEN;
-    const UNKNOWN_VALUE_PLACEHOLDER: &'static str = "Unknown Value";
 
     fn all_fields(&self) -> Vec<(MediaAttributeId, &Option<String>)> {
         vec![
@@ -657,8 +702,7 @@ impl MediaAttributeEntries {
 
         let attr_id = u8::from(&attribute_id) as u32;
         buf[0..4].copy_from_slice(&attr_id.to_be_bytes());
-        let charset_id = u16::from(&CharsetId::Utf8);
-        buf[4..6].copy_from_slice(&charset_id.to_be_bytes());
+        buf[4..6].copy_from_slice(&CharsetId::Utf8.to_be_bytes());
         if value_len > u16::MAX.into() {
             return Err(Error::ParameterEncodingError);
         }
@@ -723,10 +767,8 @@ impl AdvancedDecodable for MediaAttributeEntries {
             let attribute_id_or = MediaAttributeId::try_from(attr_id);
             next_idx += 4;
 
-            // TODO(fxdev.bug/100467): add support to appropriately convert non-utf8
-            // charset ID value to utf8.
-            let is_utf8 =
-                CharsetId::is_utf8_charset_id(&buf[next_idx..next_idx + 2].try_into().unwrap());
+            let charset_id =
+                CharsetId::from_be_bytes(buf[next_idx..next_idx + 2].try_into().unwrap());
             next_idx += 2;
 
             let mut val_len =
@@ -747,14 +789,8 @@ impl AdvancedDecodable for MediaAttributeEntries {
                 next_idx = buf.len();
                 break;
             }
-            // TODO(fxdev.bug/100467): add support to appropriately convert non-utf8
-            // charset ID folder names to utf8 names.
-            let value = if is_utf8 {
-                String::from_utf8(buf[next_idx..next_idx + val_len].to_vec())
-                    .or(Err(Error::ParameterEncodingError))?
-            } else {
-                Self::UNKNOWN_VALUE_PLACEHOLDER.to_string()
-            };
+            let value = charset_id
+                .decode_str(&buf[next_idx..next_idx + val_len], UNKNOWN_VALUE_PLACEHOLDER);
             if let Ok(attribute_id) = attribute_id_or {
                 attributes.add_attribute(attribute_id, value);
             } else {
@@ -801,6 +837,49 @@ impl From<fidl_avrcp::MediaAttributes> for MediaAttributeEntries {
 mod tests {
     use super::*;
     use fidl_fuchsia_bluetooth_avrcp as fidl;
+
+    #[fuchsia::test]
+    // Tests round-trip conversions between u16 / big-endian bytes and CharsetId.
+    fn charset_id_conversions() {
+        for (raw, expected) in [
+            (3, CharsetId::Ascii),
+            (4, CharsetId::Iso8859_1),
+            (106, CharsetId::Utf8),
+            (1000, CharsetId::Ucs2),
+            (1013, CharsetId::Utf16be),
+            (1014, CharsetId::Utf16le),
+            (1015, CharsetId::Utf16),
+            (0x1234, CharsetId::Unknown(0x1234)),
+            (0xFFFF, CharsetId::Unknown(0xFFFF)),
+        ] {
+            assert_eq!(CharsetId::from(raw), expected);
+            assert_eq!(CharsetId::from_be_bytes(raw.to_be_bytes()), expected);
+            assert_eq!(u16::from(expected), raw);
+            assert_eq!(expected.to_be_bytes(), raw.to_be_bytes());
+        }
+    }
+
+    #[fuchsia::test]
+    // Tests which CharsetId variants are considered UTF-8 compatible.
+    fn charset_id_is_utf8() {
+        assert!(CharsetId::Utf8.is_utf8());
+        assert!(CharsetId::Ascii.is_utf8());
+        assert!(!CharsetId::Iso8859_1.is_utf8());
+        assert!(!CharsetId::Ucs2.is_utf8());
+        assert!(!CharsetId::Utf16.is_utf8());
+        assert!(!CharsetId::Unknown(0xFFFF).is_utf8());
+    }
+
+    #[fuchsia::test]
+    // Tests lossy UTF-8 decoding and placeholder substitution for non-UTF-8 charsets.
+    fn charset_id_decode_str() {
+        assert_eq!(CharsetId::Utf8.decode_str(b"hello", "fallback"), "hello");
+        assert_eq!(CharsetId::Ascii.decode_str(b"hello", "fallback"), "hello");
+        assert_eq!(CharsetId::Utf8.decode_str(&[0xFF, 0xFE], "fallback"), "\u{FFFD}\u{FFFD}");
+        assert_eq!(CharsetId::Ascii.decode_str(&[0x41, 0xFF], "fallback"), "A\u{FFFD}");
+        assert_eq!(CharsetId::Iso8859_1.decode_str(b"hello", "fallback"), "fallback");
+        assert_eq!(CharsetId::Unknown(0xFFFF).decode_str(&[0xFF, 0xFE], "fallback"), "fallback");
+    }
 
     #[fuchsia::test]
     fn playback_status_to_fidl() {
@@ -862,10 +941,11 @@ mod tests {
         assert_eq!(buf.len(), decoded_len);
         assert_eq!(MediaAttributeEntries::default(), a);
 
-        // Multiple entries with utf-8 and non utf-8 values.
+        // Multiple entries with utf-8, invalid utf-8, and non utf-8 values.
         let buf = vec![
-            0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x6A, 0x00, 0x04, 't' as u8, 'e' as u8, 's' as u8,
-            't' as u8, 0x00, 0x00, 0x00, 0x02, 0x00, 0x88, 0x00, 0x03, 0x00, 0x01, 0x02,
+            0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x6A, 0x00, 0x04, 't' as u8, 'e' as u8, 's' as u8,
+            't' as u8, 0x00, 0x00, 0x00, 0x02, 0x00, 0x88, 0x00, 0x03, 0x00, 0x01, 0x02, 0x00,
+            0x00, 0x00, 0x03, 0x00, 0x6A, 0x00, 0x02, 0xFF, 0xFE,
         ];
         let (a, decoded_len) =
             MediaAttributeEntries::try_decode(&buf[..], false).expect("should succeed");
@@ -873,7 +953,8 @@ mod tests {
         assert_eq!(
             MediaAttributeEntries {
                 title: Some("test".to_string()),
-                artist_name: Some(MediaAttributeEntries::UNKNOWN_VALUE_PLACEHOLDER.to_string()),
+                artist_name: Some(UNKNOWN_VALUE_PLACEHOLDER.to_string()),
+                album_name: Some("\u{FFFD}\u{FFFD}".to_string()),
                 ..Default::default()
             },
             a

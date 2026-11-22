@@ -10,7 +10,7 @@ Read more about:
 *   [Font provider service](provider.md)
 *   [Common font maintenance tasks](tasks.md)
 
-## Glossary
+## Glossary {:#glossary}
 
 <a name="gloss-character">character</a>
 :   A symbol used in writing, as an abstract concept. For example, this refers

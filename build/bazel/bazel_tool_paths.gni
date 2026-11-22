@@ -6,8 +6,12 @@ import("//build/bazel/bazel_host_tool.gni")
 
 # Builds and copies Bazel-built host test or tool executables into
 # `${root_out_dir}/<name>` (`host_<cpu>/<name>`) and emits `tool_paths` metadata
-# entries for `//:tool_paths` (`out/<dir>/tool_paths.json`). Must be invoked in
-# a host toolchain (`is_host`).
+# entries for `//:tool_paths` (`out/<dir>/tool_paths.json`). When
+# `select_variant` redirects host executables to a variant toolchain (including
+# `-novariant`), the executables are also copied to, and reported from,
+# `${bazel_host_tool_root_out_dir}/<name>` (e.g. `host_<cpu>-asan/<name>` or
+# `host_<cpu>-novariant/<name>`); see //build/bazel/bazel_host_tool.gni. Must be
+# invoked in a host toolchain (`is_host`).
 #
 # Parameters:
 #   tools (required): Non-empty list of scopes describing Bazel host executables

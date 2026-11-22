@@ -1,0 +1,122 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN keeps its hand-written group("tests") above the sentinel.
+test_suite(
+    name = "tests",
+    tests = [":dhcpv4-test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/configuration.rs",
+        "src/lib.rs",
+        "src/server.rs",
+    ] + select({
+        "@platforms//os:fuchsia": ["src/stash.rs"],
+        "//conditions:default": [],
+    }),
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "dhcpv4",
+    edition = "2024",
+    visibility = [
+        "//src/connectivity/network/dhcpv4/client/core:__pkg__",
+        "//src/connectivity/network/dhcpv4/server:__pkg__",
+        "//src/connectivity/network/tests/integration/common:__pkg__",
+        "//src/connectivity/network/tests/integration/dhcp:__pkg__",
+        "//src/connectivity/policy/netcfg:__pkg__",
+        "//src/connectivity/policy/tests/integration/management:__pkg__",
+    ],
+    deps = [
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/network/dhcpv4/protocol",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+            "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+            "//sdk/fidl/fuchsia.stash:fuchsia.stash_rust",
+            "//sdk/rust/zx",
+            "//src/lib/fidl/rust/fidl",
+            "//src/lib/fuchsia-component",
+            "//third_party/rust_crates/vendor:futures",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+rustc_test(
+    name = "lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":lib",
+    # Match the dhcpv4_test.cml program.binary name.
+    crate_name = "dhcpv4_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lib_test_packaged_bin",
+    testonly = True,
+    binary = ":lib_test",
+    binary_name = "dhcpv4_lib_test",
+)
+
+fx_component_manifest(
+    name = "dhcpv4_test_manifest",
+    testonly = True,
+    component_name = "dhcpv4_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/dhcpv4_test.cml",
+)
+
+fx_test_component(
+    name = "dhcpv4_test",
+    compiled_manifest = ":dhcpv4_test_manifest",
+    deps = [":lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "dhcpv4-test-package",
+    package_name = "dhcpv4-test",
+    testonly = True,
+    components = ["//src/sys/stash:stash_secure_v2"],
+    test_components = [":dhcpv4_test"],
+)
+
+fx_test(
+    name = "dhcpv4-test",
+    package = ":dhcpv4-test-package",
+)

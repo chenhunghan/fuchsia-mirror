@@ -94,9 +94,9 @@ TEST(Traits, ContainsHandle) {
   static_assert(fidl::ContainsHandle<test::wire::MoveOnlyStruct>::value);
   static_assert(!fidl::ContainsHandle<test::wire::TestResourceTable>::value);
   static_assert(fidl::ContainsHandle<test::wire::TestHandleTable>::value);
-  static_assert(fidl::ContainsHandle<test::wire::TestXUnion>::value);
+  static_assert(fidl::ContainsHandle<test::wire::TestFlexibleUnion>::value);
   static_assert(fidl::ContainsHandle<test::wire::TestUnion>::value);
-  static_assert(!fidl::ContainsHandle<test::wire::TestStrictXUnion>::value);
+  static_assert(!fidl::ContainsHandle<test::wire::TestStrictUnion>::value);
 
 #ifdef __Fuchsia__
   static_assert(fidl::ContainsHandle<zx::handle>::value);
@@ -112,9 +112,9 @@ TEST(Traits, IsResource) {
   static_assert(fidl::IsResource<test::wire::MoveOnlyStruct>::value);
   static_assert(fidl::IsResource<test::wire::TestResourceTable>::value);
   static_assert(fidl::IsResource<test::wire::TestHandleTable>::value);
-  static_assert(fidl::IsResource<test::wire::TestXUnion>::value);
+  static_assert(fidl::IsResource<test::wire::TestFlexibleUnion>::value);
   static_assert(fidl::IsResource<test::wire::TestUnion>::value);
-  static_assert(!fidl::IsResource<test::wire::TestStrictXUnion>::value);
+  static_assert(!fidl::IsResource<test::wire::TestStrictUnion>::value);
 
 #ifdef __Fuchsia__
   static_assert(fidl::IsResource<zx::handle>::value);

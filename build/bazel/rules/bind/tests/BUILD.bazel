@@ -1,0 +1,172 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tests of `bind_library()`, `driver_bind_bytecode()`, and `driver_bind_bytecode_test()`."""
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+load("//build/bazel/rules/bind:driver_bind_bytecode.bzl", "driver_bind_bytecode")
+load("//build/bazel/rules/bind:driver_bind_bytecode_test.bzl", "driver_bind_bytecode_test")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(":bind_library_test.bzl", "bind_library_info_test")
+load(":driver_bind_bytecode_test.bzl", "driver_bind_bytecode_info_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "test.bindlib.parent",
+    testonly = True,
+    src = "test.bindlib.parent.bind",
+)
+
+# Depends on another library to test that `deps` propagate to the
+# bindings and to `FuchsiaBindLibraryInfo`.
+bind_library(
+    name = "test.bindlib.child",
+    testonly = True,
+    src = "test.bindlib.child.bind",
+    deps = [":test.bindlib.parent"],
+)
+
+# Check the include path, crate name and values of the bindings.
+fx_cc_test_binary(
+    name = "bind_cpp_test",
+    srcs = ["bind_test.cc"],
+    deps = [":test.bindlib.child_cpp"],
+)
+
+host_test(
+    name = "bind_cpp_host_test",
+    binary = ":bind_cpp_test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rustc_test(
+    name = "bind_rust_test",
+    srcs = ["bind_test.rs"],
+    edition = "2024",
+    deps = [
+        ":test.bindlib.child_rust",
+        ":test.bindlib.parent_rust",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "bind_rust_host_test",
+    binary_name = "bind_rust_test",
+)
+
+# Check the `FuchsiaBindLibraryInfo` that bind rules use to find the sources
+# of the libraries that their bind rules include.
+bind_library_info_test(
+    name = "parent_info_test",
+    expected_name = "test.bindlib.parent",
+    expected_transitive_sources = ["test.bindlib.parent.bind"],
+    target_under_test = ":test.bindlib.parent",
+)
+
+bind_library_info_test(
+    name = "child_info_test",
+    expected_name = "test.bindlib.child",
+    expected_transitive_sources = [
+        "test.bindlib.child.bind",
+        "test.bindlib.parent.bind",
+    ],
+    target_under_test = ":test.bindlib.child",
+)
+
+driver_bind_bytecode(
+    name = "test_driver_bind",
+    testonly = True,
+    src = "test-driver.bind",
+    bind_output = "test_driver.bindbc",
+    deps = [":test.bindlib.parent"],
+)
+
+driver_bind_bytecode(
+    name = "autobind_disabled_bind_without_src",
+    testonly = True,
+    disable_autobind = True,
+)
+
+driver_bind_bytecode(
+    name = "autobind_disabled_bind_with_src",
+    testonly = True,
+    src = "test-driver.bind",
+    disable_autobind = True,
+    deps = [":test.bindlib.parent"],
+)
+
+# Runs `bindc test` on the rules of `:test_driver_bind`.
+driver_bind_bytecode_test(
+    name = "test_driver_bind_host_test",
+    bytecode = ":test_driver_bind",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_specification = "test_driver_bind_tests.json",
+)
+
+driver_bind_bytecode_info_test(
+    name = "test_driver_bind_info_test",
+    expected_bind_output_file_name = "test_driver.bindbc",
+    expected_src_file_name = "test-driver.bind",
+    target_under_test = ":test_driver_bind",
+)
+
+driver_bind_bytecode_info_test(
+    name = "autobind_disabled_bind_without_src_info_test",
+    expected_bind_output_file_name = "autobind_disabled_bind_without_src.bindbc",
+    expected_src_file_name = "",
+    target_under_test = ":autobind_disabled_bind_without_src",
+)
+
+driver_bind_bytecode_info_test(
+    name = "autobind_disabled_bind_with_src_info_test",
+    expected_bind_output_file_name = "autobind_disabled_bind_with_src.bindbc",
+    expected_src_file_name = "test-driver.bind",
+    target_under_test = ":autobind_disabled_bind_with_src",
+)
+
+# Although this will output errors when built with `bazel build`, it will not
+# fail the build. It must be run with `bazel test` in order for test failures to
+# cause Bazel to fail. See https://fxbug.dev/580033745.
+test_suite(
+    name = "analysis_tests",
+    tests = [
+        ":autobind_disabled_bind_with_src_info_test",
+        ":autobind_disabled_bind_without_src_info_test",
+        ":child_info_test",
+        ":parent_info_test",
+        ":test_driver_bind_info_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Run in the host configuration by //build/bazel/rules/tests:host_tests.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":bind_cpp_host_test",
+        ":bind_rust_host_test",
+        ":test_driver_bind_host_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Builds the test binaries and bytecode targets for Fuchsia.
+filegroup(
+    name = "build_only_tests",
+    testonly = True,
+    srcs = [
+        ":autobind_disabled_bind_with_src",
+        ":autobind_disabled_bind_without_src",
+        ":bind_cpp_test",
+        ":bind_rust_test",
+        ":test_driver_bind",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

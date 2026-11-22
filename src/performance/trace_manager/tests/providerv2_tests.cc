@@ -123,8 +123,8 @@ TEST_F(TraceManagerTest, V2ProviderLifecycle) {
   EXPECT_EQ(provider1->terminate_count(), 1);
 }
 
-// Test that OnSaveBuffer received while a V2 provider is in kStarting state is serviced
-// and does not strand the provider for subsequent sessions.
+// Test that OnSaveBuffer received while a V2 provider is in kStarting state is serviced once the
+// session has started and does not strand the provider for subsequent sessions.
 TEST_F(TraceManagerTest, V2ProviderSaveBufferWhileStarting) {
   ConnectToProvisionerService();
 
@@ -148,11 +148,14 @@ TEST_F(TraceManagerTest, V2ProviderSaveBufferWhileStarting) {
   provider1->SendOnSaveBuffer(/*wrapped_count=*/0, /*durable_data_end=*/16);
   RunLoopUntilIdle();
 
-  EXPECT_EQ(provider1->notify_buffer_saved_count(), 1);
+  // The save is deferred until the StartTracing reply has been sent.
+  EXPECT_EQ(provider1->notify_buffer_saved_count(), 0);
   EXPECT_EQ(provider1->terminate_count(), 0);
   EXPECT_EQ(provider1->state(), FakeProviderV2::State::kStarting);
 
   ASSERT_TRUE(FinishStartSession());
+  EXPECT_EQ(provider1->notify_buffer_saved_count(), 1);
+  EXPECT_EQ(provider1->terminate_count(), 0);
   EXPECT_EQ(provider1->state(), FakeProviderV2::State::kStarted);
   EXPECT_EQ(provider1->start_count(), 1);
 

@@ -30,6 +30,12 @@
             to: "#critical-services",
         },
         {
+            config: "fuchsia.diagnostics.StorageStallWatchdogSimulateStallSecs",
+            from: "void",
+            to: "#critical-services",
+            availability: "optional",
+        },
+        {
             config: [ "fuchsia.power.SuspendEnabled" ],
             from: "parent",
             to: "#shutdown_shim",
@@ -97,13 +103,6 @@
             ],
             from: "parent",
             to: [ "#critical-services" ],
-        },
-
-        // For critical-services' storage stall watchdog, which only runs on boards that opt in.
-        {
-            protocol: "fuchsia.boot.Arguments",
-            from: "parent",
-            to: "#critical-services",
         },
         {
             // Weak, so that Archivist's shutdown doesn't wait for critical-services.
@@ -213,7 +212,6 @@
             protocol: [
                 "fuchsia.diagnostics.ArchiveAccessor.logs",
                 "fuchsia.diagnostics.LogSettings",
-                "fuchsia.diagnostics.LogStream",
                 "fuchsia.diagnostics.system.SerialLogControl",
                 "fuchsia.logger.Log",
                 "fuchsia.logger.LogSink",

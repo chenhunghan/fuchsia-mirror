@@ -16,14 +16,6 @@
 // in a backwards incompatible way. In other words, the change breaks ABI
 // compatibility.
 
-#if defined(__aarch64__)
-#include <lib/zircon-internal/device/cpu-trace/arm64-pm.h>
-#elif defined(__x86_64__)
-#include <lib/zircon-internal/device/cpu-trace/intel-pm.h>
-#else
-#include <lib/zircon-internal/device/cpu-trace/common-pm.h>
-#endif
-
 #include <lib/zbi-format/driver-config.h>
 #include <zircon/syscalls/clock.h>
 #include <zircon/syscalls/debug.h>
@@ -60,53 +52,6 @@
 
 // TODO(maniscalco): Expand the set of types validated. Validate all the ABI types, not just those
 // with implicit padding that are copied out to usermode.
-
-#if defined(__aarch64__)
-VALIDATE_TYPE_SIZE_ALIGNMENT(perfmon::Arm64PmuConfig, 104, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, timebase_event, 0, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, fixed_events, 2, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, programmable_events, 4, 12);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, fixed_initial_value, 16, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, programmable_initial_value, 24, 24);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, fixed_flags, 48, 4);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, programmable_flags, 52, 24);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuConfig, programmable_hw_events, 76, 24);
-#elif defined(__x86_64__)
-VALIDATE_TYPE_SIZE_ALIGNMENT(perfmon::X86PmuConfig, 344, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, global_ctrl, 0, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, fixed_ctrl, 8, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, debug_ctrl, 16, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, timebase_event, 24, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, fixed_events, 26, 6);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, programmable_events, 32, 16);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, misc_events, 48, 32);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, fixed_initial_value, 80, 24);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, programmable_initial_value, 104, 64);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, fixed_flags, 168, 12);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, programmable_flags, 180, 32);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, misc_flags, 212, 64);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuConfig, programmable_hw_events, 280, 64);
-#endif
-
-VALIDATE_TYPE_SIZE_ALIGNMENT(perfmon::PmuCommonProperties, 14, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, pm_version, 0, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, pm_version, 0, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, max_num_fixed_events, 2, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, max_fixed_counter_width, 4, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, max_num_programmable_events, 6, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, max_programmable_counter_width, 8, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, max_num_misc_events, 10, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::PmuCommonProperties, max_misc_counter_width, 12, 2);
-
-#if defined(__aarch64__)
-VALIDATE_TYPE_SIZE_ALIGNMENT(perfmon::Arm64PmuProperties, 14, 2);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::Arm64PmuProperties, common, 0, 14);
-#elif defined(__x86_64__)
-VALIDATE_TYPE_SIZE_ALIGNMENT(perfmon::X86PmuProperties, 32, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuProperties, common, 0, 14);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuProperties, perf_capabilities, 16, 8);
-VALIDATE_FIELD_OFFSET_SIZE(perfmon::X86PmuProperties, lbr_stack_size, 24, 4);
-#endif
 
 VALIDATE_TYPE_SIZE_ALIGNMENT(zx_clock_rate_t, 8, 4);
 VALIDATE_FIELD_OFFSET_SIZE(zx_clock_rate_t, synthetic_ticks, 0, 4);

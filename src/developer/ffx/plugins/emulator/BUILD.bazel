@@ -20,5 +20,8 @@ gn_ffx_test_data(
         "ffx-emu",
         "ffx-emu.json",
     ],
-    visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+    visibility = [
+        "//build/bazel/rules/host_tests:__pkg__",
+        "//src/developer/ffx/build/tests:__pkg__",
+    ],
 )

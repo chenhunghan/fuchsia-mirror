@@ -202,7 +202,7 @@ mod tests {
 
     use assert_matches::assert_matches;
     use async_utils::PollExt;
-    use bt_avctp::{AvcCommand, AvcPeer, AvcResponseType, AvctpPeer};
+    use bt_avctp::{AvcCommand, AvcPeer, AvcResponseType};
     use bt_channel_test_support::{Transport, create_test_channels};
     use fidl::endpoints::{create_endpoints, create_proxy, create_proxy_and_stream};
     use fidl_fuchsia_bluetooth_bredr::{ProfileMarker, ProfileProxy, ProfileRequestStream};
@@ -243,8 +243,7 @@ mod tests {
                 let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
 
                 let (local_browse, remote_browse) = create_test_channels(transport);
-                let browse_channel = AvctpPeer::new(local_browse);
-                peer.set_browse_connection(browse_channel);
+                peer.set_browse_connection(local_browse);
 
                 let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
 
@@ -919,9 +918,7 @@ mod tests {
                         let response = GetPlayerApplicationSettingAttributeTextResponse::new(vec![
                             AttributeInfo::new(
                                 player_application_settings::PlayerApplicationSettingAttributeId::Equalizer,
-                                CharsetId::Utf8,
-                                1,
-                                vec![0x62],
+                                "b",
                             ),
                         ])
                         .encode_packet()
@@ -947,7 +944,7 @@ mod tests {
                                 "GetPlayerApplicationSettingValueText: unable to packet body",
                             );
                         let response = GetPlayerApplicationSettingValueTextResponse::new(vec![
-                            ValueInfo::new(1, CharsetId::Utf8, 1, vec![0x63]),
+                            ValueInfo::new(1, "c"),
                         ])
                         .encode_packet()
                         .expect("Unable to encode response");

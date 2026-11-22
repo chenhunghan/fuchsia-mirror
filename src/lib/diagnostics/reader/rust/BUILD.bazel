@@ -27,6 +27,7 @@ rustc_library(
     visibility = [
         "//src/devices/usb/bin/usb-cli:__pkg__",
         "//src/sys/component_manager/tests/boot:__pkg__",
+        "//tools/fidl/example-tester:__pkg__",
     ],
     deps = [
         "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",

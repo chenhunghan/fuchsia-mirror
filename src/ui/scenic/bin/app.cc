@@ -139,7 +139,8 @@ display::CoordinatorProxy::CheckConfigHeuristics GetCheckConfigHeuristics(
 }
 
 // Logs Scenic's structured config values.
-void LogConfig(const scenic_structured_config::Config& values) {
+void LogConfig(const scenic_structured_config::Config& values,
+               const flatland::ImageImporterImpl::Config& image_importer_config) {
   FX_LOGS(INFO) << "Scenic renderer: " << ToString(GetRendererType(values))
                 << " min_predicted_frame_duration(us): "
                 << values.frame_scheduler_min_predicted_frame_duration_in_us()
@@ -157,7 +158,20 @@ void LogConfig(const scenic_structured_config::Config& values) {
                 << " display_rotation: " << GetDisplayRotation(values)
                 << " visual_debugging_level: " << static_cast<int>(values.visual_debugging_level())
                 << " enable_frame_counter_overlay: " << values.enable_frame_counter_overlay()
-                << " use_separate_input_thread: " << values.use_separate_input_thread();
+                << " use_separate_input_thread: " << values.use_separate_input_thread()
+                << " image_import_workers: " << static_cast<int>(values.image_import_workers())
+                << " image_import_policy: '" << values.image_import_policy()
+                << "' (effective: " << flatland::FormatImageImportPolicy(image_importer_config)
+                << ")";
+}
+
+flatland::ImageImporterImpl::Config BuildImageImporterConfig(
+    const scenic_structured_config::Config& values) {
+  flatland::ImageImporterImpl::Config config;
+  config.enable_direct_to_display = values.display_composition();
+  config.worker_pool_size = values.image_import_workers();
+  flatland::ParseImageImportPolicy(values.image_import_policy(), config);
+  return config;
 }
 
 // Interval at which we log that Scenic is waiting for Vulkan or display.
@@ -216,6 +230,7 @@ App::App(async_dispatcher_t* flatland_dispatcher, async_dispatcher_t* input_disp
               zx::usec(config_values_.frame_prediction_margin_in_us())),
           inspect_node_.CreateChild("FrameScheduler"), &metrics_logger_),
       renderer_type_(GetRendererType(config_values_)),
+      image_importer_config_(BuildImageImporterConfig(config_values_)),
       uber_struct_system_(std::make_shared<flatland::UberStructSystem>()),
       link_system_(
           std::make_shared<flatland::LinkSystem>(uber_struct_system_->GetNextInstanceId())),
@@ -234,8 +249,11 @@ App::App(async_dispatcher_t* flatland_dispatcher, async_dispatcher_t* input_disp
             return flatland_compositor_->SetMinimumRgb(minimum_rgb);
           })),
       input_manager_(input_dispatcher_),
-      health_inspector_(display_manager_, display_power_manager_, root_node) {
-  LogConfig(config_values_);
+      // TODO(https://fxbug.dev/580156981): Pass `DisplayCompositor`'s `OmittedLayerTracker` once
+      // exposed.
+      health_inspector_(display_manager_, display_power_manager_, root_node,
+                        /*get_omitted_layer_tracker=*/{}) {
+  LogConfig(config_values_, image_importer_config_);
   pkg_dir_.Bind(std::move(pkg_dir));
   fpromise::bridge<escher::EscherUniquePtr> escher_bridge;
   fpromise::bridge<std::shared_ptr<display::Display>> display_bridge;
@@ -858,6 +876,22 @@ void App::InitializeHeartbeat(display::Display& display) {
             frame_number, presentation_time,
             flatland_manager_->GetPrimaryFlatlandDisplayForRendering().get(),
             std::move(frame_presented_callback));
+      },
+      /*notify_expected_present*/
+      [this](zx::time expected_present_time, zx::duration frame_interval) {
+        TRACE_DURATION("gfx", "App notify_expected_present");
+        if (!display_manager_) {
+          return;
+        }
+        const display::Display* default_display = display_manager_->default_display();
+        const auto& coordinator_proxy = display_manager_->coordinator_proxy();
+        if (!default_display || !coordinator_proxy ||
+            (flatland_compositor_ &&
+             flatland_compositor_->IsDisplayDark(default_display->display_id()))) {
+          return;
+        }
+        coordinator_proxy->NotifyExpectedPresent(default_display->display_id(),
+                                                 expected_present_time, frame_interval);
       });
 }
 

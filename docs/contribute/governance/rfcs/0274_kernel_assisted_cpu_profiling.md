@@ -91,7 +91,7 @@ separated out as possible later date add ons.
 * The ability to configure which tasks (threads, processes, or jobs) are
   profiled.
 
-See [Future Work](#future_work) for a further breakdown.
+See [Future work](#future-work) for a further breakdown.
 
 ## Design
 
@@ -203,7 +203,7 @@ For this RFC, we plan to implement samplers with a single global singleton
 sampler, and only allow a single sampler to be created at a time.
 `zx_sampler_create` will return `ZX_ERR_ALREADY_EXISTS` if the global session is
 in use and will do so until the existing handle is closed. See [Multiple
-Sessions](#multiple_sessions) in [Future Work](#future_work).
+sessions](#multiple-sessions) in [Future work](#future-work).
 
 #### **`zx_sampler_[start|stop]`**
 
@@ -283,7 +283,7 @@ we only take one stack sample per trip. We improve upon the experimental sampler
 by immediately emitting a partial record with timestamps and other auxiliary
 data, then later emitting a continuation record with the stack trace. One or
 more partial records may refer to the same stack trace continuation record (See
-[Data Format](#data_format)). Format for details). As the partial record does
+[Data format](#data-format)). Format for details). As the partial record does
 not read user memory and the buffer it writes to is mapped and pinned, it is
 safe to emit during interrupt context.
 
@@ -313,7 +313,7 @@ Frame pointers are used rather than other methods because the provide provide
 both good cross platform use and limit the amount of memory copied. We do intend
 to explore and implement other options in the future.
 
-### Symbolization
+### Symbolization {:#symbolization}
 In order for a user program to symbolize the call stack of instruction pointers
 it receives, it requires additional information about the target program. It
 needs to know which libraries and executables are mapped where. Userspace is
@@ -371,7 +371,7 @@ buffer is full, any new records that we attempt to write to the buffer will be
 dropped, matching the supported behaviour of the existing kernel FXT writing
 libraries.
 
-### Data Format
+### Data format {:#data-format}
 
 Data is written as [FXT blob records][FuchsiaTraceFormat] to per-CPU mapped and
 pinned buffers that implement the same approach as kernel tracing. Because the
@@ -754,13 +754,13 @@ approach of using `ZX_INFO_PROCESS_MAPS` to get the base address and
 `zx_process_read_memory` to get the build id in userspace is not sufficiently
 performant.
 
-### Future Work
+### Future work {:#future-work}
 
 There are many possible features one would want. This section collects the
 various features mentioned or not in this document that influence a future
 ideal.
 
-#### Multiple Sessions
+#### Multiple sessions {:#multiple-sessions}
 
 Multiple sessions is a desired feature, it allows e.g. profiling a fidl client
 and server at the same time without needing to do system wide profiling.

@@ -1,0 +1,24 @@
+// Copyright 2018 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+@available(added=HEAD)
+library fuchsia.hardware.badblock;
+
+using zx;
+
+open protocol BadBlock {
+    /// Returns a list of bad blocks for this device or partition.
+    /// The order of blocks is undefined.
+    flexible GetBadBlockList() -> (struct {
+        bad_block_list vector<uint32>:MAX;
+    }) error zx.Status;
+
+    /// Sets `block` as bad. If block is already marked bad, it has no effect.
+    flexible MarkBlockBad(struct {
+        block uint32;
+    }) -> () error zx.Status;
+};
+
+service Service {
+    bad_block client_end:BadBlock;
+};

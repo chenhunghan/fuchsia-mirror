@@ -5,7 +5,7 @@
 #include "src/graphics/display/drivers/intel-display/interrupts.h"
 
 #include <lib/async/cpp/task.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fdf/cpp/dispatcher.h>
 #include <lib/sync/cpp/completion.h>
 #include <lib/zx/result.h>
@@ -40,10 +40,10 @@ HotplugDetectionResult DetectHotplugSkylake(fdf::MmioBuffer* mmio_space) {
   HotplugDetectionResult result;
 
   auto sde_int_identity =
-      registers::SdeInterruptBase::Get(registers ::SdeInterruptBase::kSdeIntIdentity)
+      registers::SdeInterruptBase::Get(registers::SdeInterruptBase::kSdeIntIdentity)
           .ReadFrom(mmio_space);
-  auto hp_ctrl1 = registers::SouthHotplugCtrl ::Get(DdiId::DDI_A).ReadFrom(mmio_space);
-  auto hp_ctrl2 = registers::SouthHotplugCtrl ::Get(DdiId::DDI_E).ReadFrom(mmio_space);
+  auto hp_ctrl1 = registers::SouthHotplugCtrl::Get(DdiId::DDI_A).ReadFrom(mmio_space);
+  auto hp_ctrl2 = registers::SouthHotplugCtrl::Get(DdiId::DDI_E).ReadFrom(mmio_space);
   for (auto ddi : DdiIds<registers::Platform::kKabyLake>()) {
     auto hp_ctrl = ddi < DdiId::DDI_E ? hp_ctrl1 : hp_ctrl2;
     result.detected[ddi] =
@@ -63,7 +63,7 @@ HotplugDetectionResult DetectHotplugTigerLake(fdf::MmioBuffer* mmio_space) {
   HotplugDetectionResult result;
 
   auto sde_int_identity =
-      registers::SdeInterruptBase::Get(registers ::SdeInterruptBase::kSdeIntIdentity)
+      registers::SdeInterruptBase::Get(registers::SdeInterruptBase::kSdeIntIdentity)
           .ReadFrom(mmio_space);
   auto hpd_int_identity =
       registers::HpdInterruptBase::Get(registers::HpdInterruptBase::kHpdIntIdentity)

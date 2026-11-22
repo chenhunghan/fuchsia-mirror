@@ -8,26 +8,36 @@
 
 use crate::arch_rs::riscv64::timer::{DcfgRiscvGenericTimerDriver, riscv_generic_timer_init_early};
 use crate::plic::{DcfgRiscvPlicDriver, plic_init_early, plic_init_late, plic_init_post_vm};
+use handoff::{
+    ArchPhysHandoff, zbi_dcfg_riscv_generic_timer_driver_t, zbi_dcfg_riscv_plic_driver_t,
+};
 
-/// Early driver initialization from the handoff: the PLIC and the generic
-/// timer, each only if physboot handed off a driver configuration for it.
+fn to_plic_config(cfg: zbi_dcfg_riscv_plic_driver_t) -> DcfgRiscvPlicDriver {
+    DcfgRiscvPlicDriver {
+        mmio_phys: cfg.mmio_phys,
+        size_bytes: cfg.size_bytes,
+        num_irqs: cfg.num_irqs,
+    }
+}
+
+fn to_timer_config(cfg: zbi_dcfg_riscv_generic_timer_driver_t) -> DcfgRiscvGenericTimerDriver {
+    DcfgRiscvGenericTimerDriver { freq_hz: cfg.freq_hz, reserved: cfg.reserved }
+}
+
+/// Early driver initialization from the handoff: the PLIC and the generic timer, each only if
+/// physboot handed off a driver configuration for it.
 ///
 /// # Safety
 ///
-/// Each configuration that is `Some` must be a live driver configuration from
-/// the physboot handoff.  Must be called once, on the boot CPU with interrupts
-/// disabled, before secondary CPUs are started.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_driver_handoff_early(
-    plic_driver: Option<&DcfgRiscvPlicDriver>,
-    timer_driver: Option<&DcfgRiscvGenericTimerDriver>,
-) {
-    if let Some(plic) = plic_driver {
-        plic_init_early(plic);
+/// Must be called once, on the boot CPU with interrupts disabled, before secondary CPUs are
+/// started, with the valid physboot `arch_handoff`.
+pub unsafe fn platform_driver_handoff_early(arch_handoff: &ArchPhysHandoff) {
+    if let Some(plic) = Option::from(arch_handoff.plic_driver).map(to_plic_config) {
+        plic_init_early(&plic);
     }
-    if let Some(timer) = timer_driver {
-        // SAFETY: the caller upholds the one-time, boot-CPU contract above.
-        unsafe { riscv_generic_timer_init_early(timer) };
+    if let Some(timer) = Option::from(arch_handoff.generic_timer_driver).map(to_timer_config) {
+        // SAFETY: The caller upholds the one-time, boot-CPU contract above.
+        unsafe { riscv_generic_timer_init_early(&timer) };
     }
 }
 
@@ -35,14 +45,11 @@ pub unsafe extern "C" fn rust_platform_driver_handoff_early(
 ///
 /// # Safety
 ///
-/// A `Some` configuration must be a live driver configuration from the
-/// physboot handoff.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_driver_handoff_post_vm(
-    plic_driver: Option<&DcfgRiscvPlicDriver>,
-) {
-    if let Some(plic) = plic_driver {
-        plic_init_post_vm(plic);
+/// Must be called once during post-VM boot, on the boot CPU before secondary CPUs are started,
+/// with the valid physboot `arch_handoff`.
+pub unsafe fn platform_driver_handoff_post_vm(arch_handoff: &ArchPhysHandoff) {
+    if let Some(plic) = Option::from(arch_handoff.plic_driver).map(to_plic_config) {
+        plic_init_post_vm(&plic);
     }
 }
 
@@ -50,13 +57,10 @@ pub unsafe extern "C" fn rust_platform_driver_handoff_post_vm(
 ///
 /// # Safety
 ///
-/// A `Some` configuration must be a live driver configuration from the
-/// physboot handoff.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_driver_handoff_late(
-    plic_driver: Option<&DcfgRiscvPlicDriver>,
-) {
-    if let Some(plic) = plic_driver {
-        plic_init_late(plic);
+/// Must be called once during late boot, after post-VM handoff and resource-filter
+/// initialization, with the valid physboot `arch_handoff`.
+pub unsafe fn platform_driver_handoff_late(arch_handoff: &ArchPhysHandoff) {
+    if let Some(plic) = Option::from(arch_handoff.plic_driver).map(to_plic_config) {
+        plic_init_late(&plic);
     }
 }

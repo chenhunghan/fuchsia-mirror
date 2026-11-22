@@ -35,7 +35,6 @@ fidl("fuchsia.legacymetrics") {
   ]
   sdk_area = "Metrics"
   sdk_category = "partner"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [ "//zircon/vdso/zx" ]

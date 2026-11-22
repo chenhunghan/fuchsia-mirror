@@ -13,7 +13,6 @@ fidl_library(
     ],
     api_area = "UI",
     category = "partner",
-    enable_hlcpp = True,
     # TODO(https://fxbug.dev/42111344): Remove lint exclusions by fixing known FIDL lint violations in this target
     excluded_checks = [
         "invalid-case-for-decl-name",

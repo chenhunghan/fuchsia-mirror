@@ -34,6 +34,7 @@ library_headers("headers.common") {
 
   public_deps = [
     "..",
+    "//sdk/lib/fit",
     "//zircon/system/ulib/fbl",
   ]
 }

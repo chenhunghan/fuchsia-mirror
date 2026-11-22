@@ -25,7 +25,7 @@ Currently, use [the **latest version** of `rust-analyzer`][rust-analyzer-latest]
 To setup `rust-analyzer` on VS Code, see the VS Code guide
 [Additional Vs Code extensions for Fuchsia][vscode-extension-guide].
 
-## Vim
+## Vim {#vim}
 
 Install [`rust-lang/rust.vim`](https://github.com/rust-lang/rust.vim), which also integrates with:
 

@@ -7,6 +7,8 @@ import("//build/dist/generated_resource.gni")
 import(
     "//src/lib/testing/expectation/fuchsia_test_component_with_expectations.gni")
 
+# LINT.IfChange
+
 # This is very ugly, but GN only has `foreach` loops over arrays. It doesn't
 # support looping over a range from 0 to n.
 # Because of this, we instead pre-declare an array that we can `foreach` loop
@@ -249,3 +251,7 @@ template("fuchsia_sharded_test_package") {
     }
   }
 }
+# LINT.ThenChange(
+#   //src/lib/testing/sharding/rules/fx_sharded_test_package.bzl,
+#   //src/lib/testing/sharding/rules/shard_config.bzl
+# )

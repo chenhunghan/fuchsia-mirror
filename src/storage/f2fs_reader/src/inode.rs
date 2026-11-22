@@ -38,6 +38,13 @@ bitflags! {
     }
 }
 
+impl Mode {
+    pub fn is_symlink(self) -> bool {
+        // The file type is a 4-bit field (S_IFMT), not independent flags.
+        self.bits() & 0o170000 == 0o120000
+    }
+}
+
 #[derive(Copy, Clone, Debug, Immutable, FromBytes, IntoBytes)]
 pub struct AdviseFlags(u8);
 bitflags! {

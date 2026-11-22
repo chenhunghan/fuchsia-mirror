@@ -67,8 +67,11 @@ std::ostream& operator<<(std::ostream& str, const flatland::ResolvedLayer& rl) {
         << solid.color[2] << "," << solid.color[3] << ")";
   } else {
     const auto& image = std::get<flatland::ResolvedLayer::ImageContent>(rl.content);
-    str << " content:Image(id:" << image.image_id << " size:" << image.width << "x" << image.height
-        << ")";
+    str << " content:Image(id:" << image.image_id << " size:" << image.width << "x" << image.height;
+    if (image.image != nullptr) {
+      str << " image:" << static_cast<const void*>(image.image);
+    }
+    str << ")";
   }
   str << " topology_index:" << rl.topology_index << "]";
   return str;

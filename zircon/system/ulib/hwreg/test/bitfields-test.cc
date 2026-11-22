@@ -25,12 +25,18 @@
 
 class CompilationTestReg32 : public hwreg::RegisterBase<CompilationTestReg32, uint32_t> {
  public:
-  static hwreg::RegisterAddr<CompilationTestReg32> Get() { return {0}; }
+  enum class MyEnum : uint8_t {
+    kZero = 0,
+    kOne = 1,
+    kTwo = 2,
+  };
 
-  DEF_FIELD(30, 12, field1);
+  static constexpr hwreg::RegisterAddr<CompilationTestReg32> Get() { return {0}; }
+
+  DEF_UNSHIFTED_FIELD(30, 12, field1);
   DEF_BIT(11, field2);
   DEF_RSVDZ_FIELD(10, 5);
-  DEF_FIELD(4, 3, field3);
+  DEF_ENUM_FIELD(MyEnum, 4, 3, field3);
   DEF_RSVDZ_BIT(2);
   DEF_RSVDZ_BIT(1);
   DEF_FIELD(0, 0, field4);
@@ -39,13 +45,32 @@ class CompilationTestReg32 : public hwreg::RegisterBase<CompilationTestReg32, ui
 // This function exists so that the resulting code can be inspected easily in the
 // object file.
 void compilation_test() {
+  // Checks that CompilationTestReg32 is constexpr-friendly, being
+  // constructible and usable in a constexpr context.
+  static_assert(CompilationTestReg32{}
+                    .set_field1(0xabc000)
+                    .set_field2(true)
+                    .set_field3(CompilationTestReg32::MyEnum::kOne)
+                    .reg_value() == 0xabc808u);
+  static_assert(CompilationTestReg32::Get().addr() == 0u);
+  {
+    constexpr auto kReg = CompilationTestReg32::Get().FromValue(0xabc808);
+    static_assert(kReg.reg_addr() == 0u);
+    static_assert(kReg.field1() == 0xabc000u);
+    static_assert(kReg.field2() == 1u);
+    static_assert(kReg.field3() == CompilationTestReg32::MyEnum::kOne);
+    static_assert(kReg.field4() == 0u);
+    static_assert(kReg.fields_mask() == 0x7fffffffu);
+    static_assert(kReg.rsvdz_mask() == 0x7e6u);
+  }
+
   volatile uint32_t fake_reg = 1ul << 31;
   hwreg::RegisterMmio mmio(&fake_reg);
 
   auto reg = CompilationTestReg32::Get().ReadFrom(&mmio);
-  reg.set_field1(0x31234);
+  reg.set_field1(0x3123000);
   reg.set_field2(1);
-  reg.set_field3(2);
+  reg.set_field3(CompilationTestReg32::MyEnum::kTwo);
   reg.set_field4(0);
   reg.WriteTo(&mmio);
 }
@@ -973,33 +998,33 @@ TEST(RegisterTestCase, ConditionalFields) {
   // 14 -> false
   // 12 -> true
   {
-    volatile uint16_t fake_reg = 0;
+    volatile uint32_t fake_reg = 0;
     hwreg::RegisterMmio mmio(&fake_reg);
     auto reg = RegisterWithConditional<14>::Get().FromValue(0);
     reg.set_xmit(1).WriteTo(&mmio);
-    EXPECT_NE(fake_reg & (1 << 14), 0u);
+    EXPECT_NE(fake_reg & (1u << 14), 0u);
   }
 
   {
-    volatile uint16_t fake_reg = 0;
+    volatile uint32_t fake_reg = 0;
     hwreg::RegisterMmio mmio(&fake_reg);
     auto reg = RegisterWithConditional<13>::Get().FromValue(0);
     reg.set_xmit(1).WriteTo(&mmio);
-    EXPECT_NE(fake_reg & (1 << 13), 0u);
+    EXPECT_NE(fake_reg & (1u << 13), 0u);
   }
   {
-    volatile uint16_t fake_reg = 0;
+    volatile uint32_t fake_reg = 0;
     hwreg::RegisterMmio mmio(&fake_reg);
     auto reg = RegisterWithConditional<12>::Get().FromValue(0);
     reg.set_xmit(1).WriteTo(&mmio);
-    EXPECT_NE(fake_reg & (1 << 12), 0u);
+    EXPECT_NE(fake_reg & (1u << 12), 0u);
   }
   {
-    volatile uint16_t fake_reg = 0;
+    volatile uint32_t fake_reg = 0;
     hwreg::RegisterMmio mmio(&fake_reg);
     auto reg = RegisterWithConditional<11>::Get().FromValue(0);
     reg.set_xmit(1).WriteTo(&mmio);
-    EXPECT_NE(fake_reg & (1 << 11), 0u);
+    EXPECT_NE(fake_reg & (1u << 11), 0u);
   }
 }
 

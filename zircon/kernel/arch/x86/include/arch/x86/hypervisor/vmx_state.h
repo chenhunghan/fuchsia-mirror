@@ -34,7 +34,7 @@
 #ifndef __ASSEMBLER__
 
 #include <bits.h>
-#include <lib/zx/result.h>
+#include <zircon/types.h>
 
 // Holds the register state used to restore a host.
 struct HostState {
@@ -117,19 +117,17 @@ static_assert(__offsetof(VmxState, guest_state.r14) == GS_R14);
 static_assert(__offsetof(VmxState, guest_state.r15) == GS_R15);
 static_assert(__offsetof(VmxState, guest_state.cr2) == GS_CR2);
 
-// Launch/resume the guest, and return when the guest next exits.
-//
-// If we return ZX_OK, the guest was successfully launched and has now
-// exited again. Otherwise, we failed to launch the guest.
-zx::result<> vmx_enter(VmxState* vmx_state);
+// Implemented in Rust in arch/x86/hypervisor/vmx_cpu_state.rs; exported from vmx_cpu_state_ffi.rs.
+extern "C" bool rust_vmx_ept_supports_large_pages();
 
-bool vmx_ept_supports_large_pages();
+inline bool vmx_ept_supports_large_pages() { return rust_vmx_ept_supports_large_pages(); }
 
 // Implemented in assembly.
 extern "C" {
 
 // Low-level functionality to save register and restore register state
-// before/after entering a guest. Should only be called by vmx_enter.
+// before/after entering a guest. Should only be called by vmx_enter (in
+// arch/x86/hypervisor/vcpu.rs).
 zx_status_t vmx_enter_asm(VmxState* vmx_state);
 
 // The location where we jump to when a guest exits. An internal implementation

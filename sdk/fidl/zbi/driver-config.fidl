@@ -87,7 +87,7 @@ type KernelDriver = enum : uint32 {
     QcomRng = 0x474E5251;
 
     /// 'SMMU'
-    ArmSmmu = 0x554D4D51;
+    ArmSmmuV2 = 0x554D4D51;
 
     /// 'CPEM'
     CpuEnergyModel = 0x4d455043;
@@ -376,7 +376,7 @@ type DcfgArmSmmuIrq = struct {
     flags ArmSmmuIrqFlags;
 };
 
-type DcfgArmSmmuDriver = struct {
+type DcfgArmSmmuV2Driver = struct {
     /// Base physical address of the SMMU address space.  This is also the start of
     /// Global Register Space 0 in the SMMU.  The effective size of these registers
     /// will be determined at runtime from the ID registers present in this first
@@ -442,6 +442,10 @@ type CpuEnergyModelOpp = struct {
 
     /// Operating voltage in millivolts (mV).
     voltage_mv uint32;
+
+    /// Static leakage power while clock-gated at this OPP, in microwatts (uW).
+    /// Zero when uncharacterized.
+    static_power_uw uint32;
 };
 
 /// Performance / Power Domain definition for CPU Energy Model.

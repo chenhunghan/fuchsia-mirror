@@ -8,7 +8,7 @@ use example_tester::{Client, Server, TestKind, assert_filtered_logs_eq_to_golden
 use fidl::prelude::*;
 use fidl_examples_canvas_clientrequesteddraw::InstanceMarker;
 
-use fuchsia_component_test::{ChildRef, RealmBuilder};
+use fuchsia_component_test::{Capability, ChildRef, RealmBuilder, Ref, Route};
 
 #[fuchsia::test]
 async fn test_draw_success() -> Result<(), Error> {
@@ -31,12 +31,10 @@ async fn test_draw_success() -> Result<(), Error> {
         InstanceMarker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
             builder
-                .set_config_value(
-                    &client,
-                    "script",
-                    vec![
+                .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                    name: "fuchsia.examples.canvas.clientrequesteddraw.Script".parse()?,
+                    value: vec![
                         "-5,0:0,0",
                         "-2,2:5,6",
                         "PUSH",
@@ -48,6 +46,16 @@ async fn test_draw_success() -> Result<(), Error> {
                         "WAIT",
                     ]
                     .into(),
+                }))
+                .await?;
+            builder
+                .add_route(
+                    Route::new()
+                        .capability(Capability::configuration(
+                            "fuchsia.examples.canvas.clientrequesteddraw.Script",
+                        ))
+                        .from(Ref::self_())
+                        .to(&client),
                 )
                 .await?;
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))

@@ -42,6 +42,5 @@ fuchsia_cc_driver("fake-device-driver") {
 fuchsia_driver_component("fake-device-component") {
   component_name = "fake-device"
   dml_label = ":fake-device-dml"
-  info = "fake-device-info.json"
   deps = [ ":fake-device-driver" ]
 }

@@ -25,7 +25,7 @@
 namespace LIBC_NAMESPACE_DECL {
 namespace {
 
-// TODO(https://fxbug.dev/42175677): ThreadSuspender synchronizes using
+// TODO(https://fxbug.dev/349433421): ThreadSuspender synchronizes using
 // _dl_wrlock.  If a vDSO entry point used during the snapshot code is
 // interpoosed by a version that calls dlsym, this can deadlock since dlsym
 // takes the write lock too for its own arcane reasons.  The known interposer

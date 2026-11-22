@@ -23,7 +23,9 @@ void leaker(uint8_t num) {
 
   // Note: In addition to allocating, we must also write to the memory to ensure
   // it is committed
-  memset(malloc(kLeakSize), 42, kLeakSize);
+  void *ptr = malloc(kLeakSize);
+  memset(ptr, 42, kLeakSize);
+  asm volatile("" : : "r"(ptr) : "memory");
   printf("Leaked %zu bytes\n", kLeakSize);
 
   // RssThread in libFuzzer only checks RSS once per second, so let's not go

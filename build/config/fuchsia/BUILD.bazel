@@ -2,11 +2,19 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@fuchsia_build_info//:args.bzl", "scudo_default_options")
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load(
+    "@fuchsia_build_info//:args.bzl",
+    "build_id_format",
+    "experimental_elf_page_size",
+    "scudo_default_options",
+    "use_ccache",
+)
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
 load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
 load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/config/sanitizers:sanitizer_default_options.bzl", "sanitizer_default_options")
 
 package(default_applicable_licenses = ["//:license"])
@@ -32,6 +40,112 @@ build_flags(
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(BUILD.gn:large_rust_stack)
+
+# LINT.IfChange(ccache)
+build_flags(
+    name = "ccache",
+    cflags = [
+        "-Wno-error",
+        "-Qunused-arguments",
+        "-Wno-parentheses-equality",
+        "-Wno-self-assign",
+        "-Wno-tautological-compare",
+        "-Wno-unused-command-line-argument",
+    ],
+    # NOTE: asmflags is not supported. Bazel passes cflags to assembly actions.
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:ccache)
+
+# LINT.IfChange(compiler_sysroot)
+# In Bazel, sysroot is provided by the cc_toolchain sysroot attribute and
+# rust_toolchain sysroot, not via explicit response files.
+build_flags(
+    name = "compiler_sysroot",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:compiler_sysroot)
+
+# LINT.IfChange(compiler_target)
+# In Bazel, compiler target is passed by the cc_toolchain target_triple and
+# rust_toolchain target_triple.
+build_flags(
+    name = "compiler_target",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:compiler_target)
+
+# LINT.IfChange(compiler_fuchsia_api_level)
+# NOTE: This assumes is_gcc == false && is_fuchsia == true in Bazel.
+# In Bazel, API level is configured by the cc_toolchain fuchsia_api_level
+# feature and Fuchsia SDK transitions.
+build_flags(
+    name = "compiler_fuchsia_api_level",
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:compiler_fuchsia_api_level)
+
+# LINT.IfChange(max-page-size)
+# NOTE: This assumes is_gcc == false in Bazel.
+compiler_build_flags(
+    name = "max-page-size",
+    linker_flags = ["-zmax-page-size={}".format(experimental_elf_page_size)] if int(experimental_elf_page_size) != 4096 else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:max-page-size)
+
+# LINT.IfChange(compiler)
+# NOTE: This assumes is_pecoff == false in Bazel.
+#
+# In Bazel, @rules_rust emits cc_toolchain link flags (which set
+# `-Wl,-dynamic-linker=<variant>/ld.so.1` when a variant with a custom
+# libprefix is active) before rust_common_infos. Because ld.lld uses last-wins
+# semantics for `-dynamic-linker`, only emit the default `-dynamic-linker=ld.so.1`
+# when no custom-libprefix variant feature is active.
+selects.config_setting_group(
+    name = "variant_overrides_dynamic_linker",
+    match_any = [
+        "//build/bazel/config/variant_features/asan:true",
+        "//build/bazel/config/variant_features/coverage:true",
+        "//build/bazel/config/variant_features/coverage-cts:true",
+        "//build/bazel/config/variant_features/coverage-rust:true",
+        "//build/bazel/config/variant_features/heapdump:true",
+        "//build/bazel/config/variant_features/hwasan:true",
+        "//build/bazel/config/variant_features/profile:true",
+        "//build/bazel/config/variant_features/profile-rust:true",
+        "//build/bazel/config/variant_features/profile-use:true",
+        "//build/bazel/config/variant_features/profile-use-rust:true",
+        "//build/bazel/config/variant_features/tsan:true",
+        "//build/bazel/config/variant_features/ubsan:true",
+    ],
+)
+
+compiler_build_flags(
+    name = "compiler",
+    linker_flags = ["--build-id={}".format(build_id_format)] if build_id_format else [],
+    rust_linker_flags = select({
+        ":variant_overrides_dynamic_linker": [
+            "--pack-dyn-relocs=relr",
+            "-zrel",
+        ],
+        "//conditions:default": [
+            "--pack-dyn-relocs=relr",
+            "-dynamic-linker=ld.so.1",
+            "-zrel",
+        ],
+    }),
+    subflags = [
+        ":compiler_sysroot",
+        ":compiler_target",
+        ":compiler_fuchsia_api_level",
+        ":max-page-size",
+        "//build/config:cpu_baseline",
+    ] + ([":ccache"] if use_ccache else []) + (
+        ["//build/config/rust:one_codegen_unit"] if is_release else ["//build/config/rust:codegen_units_16"]
+    ),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:compiler)
 
 # NOTE: In Bazel, -fPIC vs -fPIE is controlled by the C++ toolchain's `pic`
 # feature rather than response files so that a single fx_cc_library() target
@@ -93,7 +207,7 @@ build_flags(
 #
 # Like all `ldflags`, these only apply to targets that link, i.e. binaries and
 # shared libraries, such as the `cc_shared_library()` created by
-# `cc_shared_library_zx()`. They have no effect on `cc_library()` targets.
+# `fx_cc_shared_library()`. They have no effect on `cc_library()` targets.
 #
 # The `static_cpp_standard_library` C++ toolchain feature provides a subset of
 # these flags. Use this target where the equivalent GN config is needed, e.g.
@@ -158,3 +272,29 @@ extra_linker_flags(
     visibility = ["//:__subpackages__"],
 )
 # LINT.ThenChange(BUILD.gn:scudo_default_options)
+
+# LINT.IfChange(uses-outline-atomics-fxbug98632)
+# TODO(https://fxbug.dev/42180987): This works around a toolchain issue in LTO
+# builds where code generation results in a dependency on a Zircon vDSO call
+# but doesn't link -lzircon to supply it at link time. This is added to deps of
+# the few targets where this has caused link failures to just explicitly link
+# it in. As soon as the toolchain issues are resolved, this and the deps on it
+# will all be removed.
+fx_cc_library(
+    name = "uses-outline-atomics-fxbug98632",
+    visibility = [
+        "//src/developer/debug/debug_agent/test_data:__pkg__",
+        "//src/developer/debug/e2e_tests/inferiors:__pkg__",
+        "//src/graphics/examples/vkproto:__pkg__",
+        "//src/graphics/examples/vkproto/cmd-buf-benchmark:__pkg__",
+        "//third_party/boringssl:__pkg__",
+        "//third_party/ffmpeg:__pkg__",
+        "//third_party/icu/default:__pkg__",
+        "//third_party/icu/latest:__pkg__",
+    ],
+    deps = select({
+        "//build/bazel/platforms:is_fuchsia_arm64": ["//src/zircon/lib/zircon"],
+        "//conditions:default": [],
+    }),
+)
+# LINT.ThenChange(BUILD.gn:uses-outline-atomics-fxbug98632)

@@ -140,7 +140,7 @@ Decomposes the critical path of Android/Starnix application launches into
 contiguous chronological phase segments, intra-segment sub-operations, per-segment
 kernel thread states, and Fuchsia subsystem bottlenecks.
 
-The plugin executes 5 diagnostic sections in order:
+The plugin executes several diagnostic sections in order:
 1. **Critical Path Phase Breakdown (Sequential Segments)**: Reports
    `total_launch_ms` (the `launchingActivity` slice) and `displayed_ms` (from
    ActivityTaskManager's START to the launch end, which matches logcat
@@ -180,12 +180,26 @@ The plugin executes 5 diagnostic sections in order:
    storage page-ins (`page_in_chunk`), time sysmem was busy (`sysmem_busy_ms`,
    not necessarily on the app's critical path), and Starnix SELinux hook
    overhead in the app process.
+6. **Critical Path Process & Thread Breakdown**: Expands every sleep along the
+   launch's piecewise thread spine via `sched.thread_executing_span`
+   (`critical_path.py`) to rank exact critical-path milliseconds
+   (`critical_path_ms`, `pct_of_total`, `running_ms`, `runnable_ms`,
+   `waking_ms`, `unattributed_sleep_ms`, `unknown_ms`) across the app,
+   `system_server`, `zygote`, `sysmem`, `fxfs`, and GPU drivers.
+7. **Critical Path Top Blocking Slices**: Ranks the innermost active slices
+   (self time, or `<uninstrumented>` when executing without trace slices) along
+   each launch's critical path.
+8. **Critical Path Chronological Span Timeline**: Lists coalesced chronological
+   spans along each launch's critical path, annotating `handoff_from` whenever
+   execution shifts between threads via wakeup or blocked wait.
 
 #### Plugin-Specific Arguments
 
 *   **`--package <str>`**: Optional substring filter for package or process name.
-*   **`--limit <int>`**: Maximum number of rows returned per section (default:
-    `20`).
+*   **`--limit <int>`**: Maximum rows returned in sections 1-5 (default: `20`);
+    in critical-path sections 6-8, caps analyzed launches to `limit` and returns
+    up to `limit` threads/slices and `max(limit * 3, 50)` timeline spans per
+    launch.
 *   **`--scaling <raw|proportional>`**: Report CUJ sub-stage durations as raw
     milliseconds (`raw`, default) or as each sub-stage's share of the attributed
     work, scaled to `total_launch_ms` (`proportional`).
@@ -197,6 +211,105 @@ fx perf-analyze --format markdown analyze \
   --trace out/e2e-testout/trace.fxt \
   --plugin app-launch \
   --package settings
+```
+
+---
+
+### `critical-path` (Thread-Execution Critical Path Analyzer)
+
+Computes the scheduler wakeup and trace flow critical path between any two
+thread-bound points in a trace using Perfetto's `sched.thread_executing_span`
+and `intervals.intersect` standard library modules.
+
+#### Valid Start and End Trace Elements
+
+Because scheduler wakeup chains (`thread_state` / `sched_slice`) are anchored to
+OS threads (`utid`), **both `--start-*` and `--end-*` selectors must resolve to
+a thread-bound `(utid, ts)` point**:
+
+1.  **Thread-track slice by ID** (`--start-slice-id <id>`, `--end-slice-id <id>`):
+    Selects a specific row in `slice` whose track is a `thread_track`.
+2.  **Thread-track slice by glob** (`--start-slice <glob>`, `--end-slice <glob>`):
+    Matches `slice.name GLOB <glob>` on `thread_track`, optionally narrowed with
+    `--*-process <glob>`, `--*-thread <glob>`, `--*-index <N>` (`0` for first,
+    `-1` for last), and `--*-edge <start|end>` (defaults: `start` for the start
+    point, `end` for the end point).
+3.  **Explicit timestamp + thread** (`--start-ts <ns>` with `--start-tid <tid>`
+    or `--start-utid <utid>`, and matching `--end-*` flags).
+
+Process-scoped or async-track slices (for example `launchingActivity#<id>` on
+`process_track`, where `utid IS NULL`) are explicitly rejected with an error
+explaining how to anchor on a thread-track slice (such as `Start proc:*` or the
+instant `launchingActivity#<id>:completed*:*` slice) or pass `--*-ts` +
+`--*-tid`.
+
+When the start and end points lie on different threads, `critical-path`
+discovers a contiguous thread spine across `[start_ts, end_ts]` by walking
+deterministic scheduler wakeups (`COALESCE(waker_id, prev_id)`) first, falling
+back to bounded `flow` + wakeup graph reachability when handoffs cross
+already-running event-loop threads.
+
+The plugin outputs 3 sections:
+1.  **Critical Path Process & Thread Summary**: Ranks processes and threads by
+    `critical_path_ms` (`pct_of_total`, `running_ms`, `runnable_ms`,
+    `waking_ms`, `unattributed_sleep_ms`, `unknown_ms`, `spans`).
+2.  **Critical Path Top Blocking Slices**: Ranks the innermost active slices
+    (self time, or `<uninstrumented>` when executing without trace slices) along
+    the critical path.
+3.  **Critical Path Chronological Span Timeline**: Lists chronological spans
+    along the critical path (`rel_start_ms`, `ts`, `dur_ms`, `process_name`,
+    `thread_name`, `tid`, `state`, `cpu`, `slice_name`, `handoff_from`),
+    coalescing adjacent spans with identical thread/state/slice by default.
+
+#### Plugin-Specific Arguments
+
+*   **`--start-slice-id <int>`** / **`--end-slice-id <int>`**: Slice ID on a
+    `thread_track`.
+*   **`--start-slice <glob>`** / **`--end-slice <glob>`**: Glob pattern matching
+    a `thread_track` slice name.
+*   **`--start-process <glob>`** / **`--end-process <glob>`**: Optional process
+    name glob filter for slice or `tid` resolution.
+*   **`--start-thread <glob>`** / **`--end-thread <glob>`**: Optional thread
+    name glob filter for slice or `tid` resolution.
+*   **`--start-index <int>`** / **`--end-index <int>`**: 0-based (or negative)
+    match index when multiple slices match `--*-slice`.
+*   **`--start-edge <start|end>`** / **`--end-edge <start|end>`**: Slice
+    boundary to anchor on (`start` default for start point; `end` default for
+    end point).
+*   **`--start-ts <int>`** / **`--end-ts <int>`**: Explicit timestamp in
+    nanoseconds (requires `--*-tid` or `--*-utid`).
+*   **`--start-tid <int>`** / **`--end-tid <int>`**: OS thread ID (`tid`) for
+    `--*-ts`.
+*   **`--start-utid <int>`** / **`--end-utid <int>`**: Perfetto unique thread ID
+    (`utid`) for `--*-ts`.
+*   **`--limit <int>`**: Maximum summary/slice rows to return (default: `20`).
+*   **`--timeline-limit <int>`**: Maximum timeline spans to return (default:
+    `max(limit * 5, 100)`).
+*   **`--no-coalesce`**: Disable coalescing of adjacent timeline spans with
+    identical thread, state, and slice.
+
+#### Examples
+
+Analyze the cross-thread critical path between `Start proc` and launch
+completion:
+
+```shell
+fx perf-analyze --format markdown analyze \
+  --trace out/e2e-testout/trace.fxt \
+  --plugin critical-path \
+  --start-slice 'Start proc:*calculator*' \
+  --end-slice 'launchingActivity#*:completed*:*calculator*' \
+  --limit 15
+```
+
+Analyze the critical path between two explicit timestamps and thread IDs:
+
+```shell
+fx perf-analyze --format markdown analyze \
+  --trace out/e2e-testout/trace.fxt \
+  --plugin critical-path \
+  --start-ts 54120000000 --start-tid 1842 \
+  --end-ts 54680000000 --end-tid 2109
 ```
 
 ---
@@ -294,5 +407,5 @@ Unit tests are written using standard Python `unittest`. To build and run all
 unit tests, execute:
 
 ```shell
-fx test perf_analyze_test app_launch_test binder_test result_formatter_test cpu_test plugins_test
+fx test perf_analyze_test app_launch_test critical_path_test binder_test result_formatter_test cpu_test plugins_test
 ```

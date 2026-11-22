@@ -58,7 +58,7 @@ nuc,vim3:go/magma-tps#S1
 nuc,vim3:go/magma-tps#C0
 nuc,vim3:go/magma-tps#P0
 
-### L0
+### L0 {:#l0}
 
 1. Build Fuchsia:
 
@@ -73,7 +73,7 @@ nuc,vim3:go/magma-tps#P0
   ./src/graphics/lib/magma/scripts/test.sh
   ```
 
-### L1
+### L1 {:#l1}
 
 If you have an attached display, execute the spinning
 [vkcube](/src/graphics/examples/vkcube). This test uses an imagepipe swapchain
@@ -103,9 +103,9 @@ before submitting. See [Conformance](#conformance).
 ### P0
 
 For some changes, it's appropriate to run benchmarks to validate performance
-metrics. See [Benchmarking](#benchmarking).
+metrics.
 
-## Conformance
+## Conformance {:#conformance}
 
 For details on the Vulkan conformance test suite, see:
 

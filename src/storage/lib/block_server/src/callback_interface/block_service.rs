@@ -10,6 +10,7 @@ use std::borrow::Borrow;
 use std::sync::{Arc, Weak};
 use storage_device::buffer::OwnedBuffer;
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_units::page_size;
 
 const DEFAULT_BUFFER_POOL_CAPACITY: usize = MAX_READ_BUFFER_SIZE * 16;
 
@@ -48,7 +49,7 @@ impl<I: Interface + ?Sized> DefaultCallbackBlockService<I> {
             .unwrap_or(MAX_READ_BUFFER_SIZE);
         let source = BufferSource::new(pool_capacity);
         let allocator = Arc::new(BufferAllocator::new(
-            std::cmp::max(block_size as usize, zx::system_get_page_size() as usize),
+            std::cmp::max(block_size as usize, page_size().get() as usize),
             source,
         ));
         Self {
@@ -101,6 +102,12 @@ impl<I: Interface + ?Sized> BlockService for DefaultCallbackBlockService<I> {
         let vmo_offset = dest_buffer.range().start as u64;
         let vmo = self.allocator.buffer_source().vmo().clone();
 
+        let guard = scopeguard::guard((dest_buffer, on_complete), |(dest_buffer, on_complete)| {
+            drop(dest_buffer);
+            on_complete(Err(
+                anyhow::Error::from(zx::Status::CANCELED).context("Block read cancelled")
+            ));
+        });
         sm.submit_internal_request(
             |request_id: RequestId| Request {
                 request_id,
@@ -115,10 +122,13 @@ impl<I: Interface + ?Sized> BlockService for DefaultCallbackBlockService<I> {
                 vmo: Some(vmo),
             },
             Box::new(move |status| {
-                if status.is_ok() {
-                    on_complete(Ok(dest_buffer));
-                } else {
-                    on_complete(Err(anyhow::anyhow!("Block read failed: {:?}", status)));
+                let (dest_buffer, on_complete) = scopeguard::ScopeGuard::into_inner(guard);
+                match status {
+                    Ok(()) => on_complete(Ok(dest_buffer)),
+                    Err(status) => {
+                        drop(dest_buffer);
+                        on_complete(Err(anyhow::Error::from(status).context("Block read failed")));
+                    }
                 }
             }),
         );
@@ -312,5 +322,39 @@ mod tests {
 
         let buf = service.allocate_buffer(64 * 1024);
         assert_eq!(buf.len(), 8192);
+    }
+
+    #[test]
+    fn test_dropped_internal_read_callback_completes_with_canceled() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let interface = Arc::new(MockInterface::new(tx));
+        let session_manager = Arc::new(SessionManager::new(interface, BLOCK_SIZE));
+        let service = DefaultCallbackBlockService::<MockInterface>::new_with_pool_capacity(
+            &session_manager,
+            4096,
+        );
+
+        let buf = service.allocate_buffer(4096);
+        assert!(service.allocator().try_allocate_buffer(4096).is_err());
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        service
+            .read_blocks(
+                0,
+                buf,
+                Box::new(move |res| {
+                    let _ = done_tx.send(res);
+                }),
+            )
+            .unwrap();
+        let _req = rx.recv().unwrap();
+
+        // Dropping `session_manager` without completing `_req` drops the stored internal callback,
+        // which must free the `OwnedBuffer` and invoke `on_complete` with `zx::Status::CANCELED`.
+        drop(session_manager);
+
+        let err = done_rx.recv().unwrap().expect_err("Expected CANCELED error");
+        assert_eq!(err.root_cause().downcast_ref::<zx::Status>(), Some(&zx::Status::CANCELED));
+        assert!(service.allocator().try_allocate_buffer(4096).is_ok());
     }
 }

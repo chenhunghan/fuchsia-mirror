@@ -43,6 +43,7 @@
 #include <linux/uinput.h>
 
 #include "src/lib/files/file.h"
+#include "src/lib/files/file_descriptor.h"
 #include "src/lib/fxl/strings/split_string.h"
 #include "src/lib/fxl/strings/string_number_conversions.h"
 #include "src/lib/fxl/strings/string_printf.h"
@@ -50,17 +51,6 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
 namespace test_helper {
-
-namespace {
-
-int lambda_wrapper(void *func_ptr) {
-  auto func = static_cast<std::function<void()> *>(func_ptr);
-  (*func)();
-  _exit(testing::Test::HasFailure());
-  return 0;
-}
-
-}  // namespace
 
 ForkResult ForkHelper::GenerateForkResult(pid_t pid, int wstatus, int expected_exit_status,
                                           int death_signum) {
@@ -138,11 +128,11 @@ std::vector<ForkResult> ForkHelper::WaitForChildrenInternal(bool no_hang) {
 
     if (WIFSTOPPED(wstatus)) {
       // A ptraced child reports stops to waitpid(..., 0) even without WUNTRACED. If
-      // KillChildrenOnDestroy is enabled, leave the still-living child in child_pids_ so
-      // ~ForkHelper() can kill and reap it; otherwise remove it so ~ForkHelper() does not block
-      // waiting for it again.
+      // KillChildrenOnDestroy is enabled or a non-blocking reap is running before killing
+      // children, leave the still-living child in child_pids_ so it can be killed and reaped;
+      // otherwise remove it so ~ForkHelper() does not block waiting for it again.
       if (it != child_pids_.end()) {
-        if (kill_children_on_destroy_) {
+        if (kill_children_on_destroy_ || no_hang) {
           ++it;
         } else {
           it = child_pids_.erase(it);
@@ -171,15 +161,30 @@ ForkHelper::ForkHelper() {
 }
 
 ForkHelper::~ForkHelper() {
-  auto reap_and_check = [this](bool no_hang) {
+  if (kill_children_on_destroy_) {
+    EXPECT_TRUE(KillChildren());
+  } else {
+    EXPECT_TRUE(WaitForChildren());
+  }
+}
+
+void ForkHelper::OnlyWaitForForkedChildren() { wait_for_all_children_ = false; }
+
+void ForkHelper::KillChildrenOnDestroy() { kill_children_on_destroy_ = true; }
+
+testing::AssertionResult ForkHelper::KillChildren() {
+  testing::AssertionResult final_result = testing::AssertionSuccess();
+  auto reap_and_check = [this, &final_result](bool no_hang) {
     for (const auto &result : WaitForChildrenInternal(no_hang)) {
-      // EXPECT_TRUE on the result directly will implicitly print failure details.
-      EXPECT_TRUE(result.determined_result);
+      if (result.determined_result != testing::AssertionSuccess()) {
+        final_result = result.determined_result;
+      }
     }
     return child_pids_.empty();
   };
 
-  if (kill_children_on_destroy_ && !reap_and_check(/*no_hang=*/true)) {
+  int previous_death_signum = death_signum_;
+  if (!reap_and_check(/*no_hang=*/true)) {
     for (pid_t pid : child_pids_) {
       EXPECT_THAT(kill(pid, SIGKILL), AnyOf(SyscallSucceeds(), SyscallFailsWithErrno(ESRCH)));
     }
@@ -188,11 +193,9 @@ ForkHelper::~ForkHelper() {
 
   // Wait for all remaining children, and ensure none failed.
   reap_and_check(/*no_hang=*/false);
+  ExpectSignal(previous_death_signum);
+  return final_result;
 }
-
-void ForkHelper::OnlyWaitForForkedChildren() { wait_for_all_children_ = false; }
-
-void ForkHelper::KillChildrenOnDestroy() { kill_children_on_destroy_ = true; }
 
 void ForkHelper::ExpectSignal(int signum) { death_signum_ = signum; }
 
@@ -237,7 +240,13 @@ std::vector<ForkResult> ForkHelper::WaitForChildrenWithResults() {
 pid_t ForkHelper::RunInForkedProcess(fit::function<void()> action) {
   // Flush parent buffers before forking to prevent the child from double-flushing them.
   fflush(nullptr);
-  pid_t pid = SAFE_SYSCALL(fork());
+  pid_t pid = fork();
+  if (pid < 0) {
+    int err = errno;
+    ADD_FAILURE() << "fork() failed: " << strerror(err) << " (" << err << ")";
+    errno = err;
+    return -1;
+  }
   if (pid != 0) {
     child_pids_.push_back(pid);
     return pid;
@@ -250,29 +259,75 @@ pid_t ForkHelper::RunInForkedProcess(fit::function<void()> action) {
   _exit(testing::Test::HasFailure());
 }
 
+int CloneHelper::LambdaWrapper(void *action_ptr) {
+  auto *cloned = static_cast<ClonedAction *>(action_ptr);
+  cloned->action();
+  if (cloned->flush_stdio) {
+    fflush(nullptr);
+  }
+  return testing::Test::HasFailure();
+}
+
 CloneHelper::CloneHelper() {
   // Stack setup
   this->_childStack =
       static_cast<uint8_t *>(mmap(nullptr, CloneHelper::_childStackSize, PROT_WRITE | PROT_READ,
                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
   if (this->_childStack == MAP_FAILED) {
-    std::cerr << "CloneHelper mmap failed, errno was set to '" << strerror(errno) << "' (" << errno
-              << ").\n";
-    assert(false);
+    int err = errno;
+    ADD_FAILURE() << "CloneHelper mmap failed: " << strerror(err) << " (" << err << ")";
+    errno = err;
+    this->_childStackBegin = nullptr;
+    return;
   }
   this->_childStackBegin = this->_childStack + CloneHelper::_childStackSize;
 }
 
-CloneHelper::~CloneHelper() { munmap(this->_childStack, CloneHelper::_childStackSize); }
+CloneHelper::~CloneHelper() {
+  if (this->_childStack != MAP_FAILED) {
+    munmap(this->_childStack, CloneHelper::_childStackSize);
+  }
+}
 
 int CloneHelper::runInClonedChild(unsigned int cloneFlags, int (*childFunction)(void *)) {
-  int childPid = clone(childFunction, this->_childStackBegin, cloneFlags, nullptr);
-  assert(childPid != -1);
-  return childPid;
+  if (this->_childStackBegin == nullptr) {
+    ADD_FAILURE() << "CloneHelper stack allocation failed";
+    errno = ENOMEM;
+    return -1;
+  }
+  if (!(cloneFlags & CLONE_VM)) {
+    fflush(nullptr);
+  }
+  int pid = clone(childFunction, this->_childStackBegin, cloneFlags, nullptr);
+  int err = errno;
+  EXPECT_THAT(pid, SyscallSucceeds());
+  if (pid < 0) {
+    errno = err;
+  }
+  return pid;
 }
 
 int CloneHelper::runInClonedChild(unsigned int cloneFlags, std::function<void()> action) {
-  return SAFE_SYSCALL(clone(lambda_wrapper, this->_childStackBegin, cloneFlags, &action));
+  if (this->_childStackBegin == nullptr) {
+    ADD_FAILURE() << "CloneHelper stack allocation failed";
+    errno = ENOMEM;
+    return -1;
+  }
+  const bool flush_stdio = !(cloneFlags & CLONE_VM);
+  if (flush_stdio) {
+    fflush(nullptr);
+  }
+  actions_.push_back(std::make_unique<ClonedAction>(ClonedAction{
+      .action = std::move(action),
+      .flush_stdio = flush_stdio,
+  }));
+  int pid = clone(LambdaWrapper, this->_childStackBegin, cloneFlags, actions_.back().get());
+  int err = errno;
+  EXPECT_THAT(pid, SyscallSucceeds());
+  if (pid < 0) {
+    errno = err;
+  }
+  return pid;
 }
 
 int CloneHelper::sleep_1sec(void *) {
@@ -285,34 +340,56 @@ int CloneHelper::sleep_1sec(void *) {
 
 int CloneHelper::doNothing(void *) { return 0; }
 
+SignalMaskHelper::SignalMaskHelper() { sigemptyset(&this->_sigmaskCopy); }
+
+SignalMaskHelper::~SignalMaskHelper() { restoreSigmask(); }
+
 void SignalMaskHelper::blockSignal(int signal) {
-  sigemptyset(&this->_sigset);
-  sigaddset(&this->_sigset, signal);
-  sigprocmask(SIG_BLOCK, &this->_sigset, &this->_sigmaskCopy);
+  sigset_t set;
+  sigemptyset(&set);
+  sigaddset(&set, signal);
+  if (int res = sigprocmask(SIG_BLOCK, &set, sigmask_saved_ ? nullptr : &this->_sigmaskCopy);
+      res == 0) {
+    sigmask_saved_ = true;
+  } else {
+    int err = errno;
+    ADD_FAILURE() << "sigprocmask(SIG_BLOCK) failed: " << strerror(err) << " (" << err << ")";
+    errno = err;
+  }
 }
 
 void SignalMaskHelper::waitForSignal(int signal) {
+  sigset_t wait_set;
+  sigemptyset(&wait_set);
+  sigaddset(&wait_set, signal);
   int sig;
-  int result = static_cast<int>(TEMP_FAILURE_RETRY(sigwait(&this->_sigset, &sig)));
+  int result = static_cast<int>(TEMP_FAILURE_RETRY(sigwait(&wait_set, &sig)));
   ASSERT_EQ(result, 0);
   ASSERT_EQ(sig, signal);
 }
 
 int SignalMaskHelper::timedWaitForSignal(int signal, time_t msec, siginfo_t *siginfo) {
+  sigset_t wait_set;
+  sigemptyset(&wait_set);
+  sigaddset(&wait_set, signal);
   siginfo_t local_siginfo;
   struct timespec ts = {
       .tv_sec = msec / 1000,
       .tv_nsec = (msec % 1000) * 1000000,
   };
   siginfo_t *target_info = siginfo ? siginfo : &local_siginfo;
-  return static_cast<int>(TEMP_FAILURE_RETRY(sigtimedwait(&this->_sigset, target_info, &ts)));
+  return static_cast<int>(TEMP_FAILURE_RETRY(sigtimedwait(&wait_set, target_info, &ts)));
 }
 
-void SignalMaskHelper::restoreSigmask() { sigprocmask(SIG_SETMASK, &this->_sigmaskCopy, nullptr); }
+void SignalMaskHelper::restoreSigmask() {
+  if (sigmask_saved_) {
+    SAFE_SYSCALL(sigprocmask(SIG_SETMASK, &this->_sigmaskCopy, nullptr));
+    sigmask_saved_ = false;
+  }
+}
 
-ScopedTempFD::ScopedTempFD() : name_("/tmp/proc_test_file_XXXXXX") {
-  char *mut_name = const_cast<char *>(name_.c_str());
-  fd_ = fbl::unique_fd(mkstemp(mut_name));
+ScopedTempFD::ScopedTempFD() : name_(get_tmp_path() + "/proc_test_file_XXXXXX") {
+  fd_ = fbl::unique_fd(mkstemp(name_.data()));
 }
 
 ScopedTempFD::ScopedTempFD(ScopedTempFD &&other) noexcept
@@ -340,7 +417,7 @@ ScopedTempDir::~ScopedTempDir() {
 }
 
 ScopedTempSymlink::ScopedTempSymlink(const char *target_path) {
-  std::string prefix = "/tmp/syscall_test_symlink_";
+  std::string prefix = get_tmp_path() + "/syscall_test_symlink_";
   size_t retries = 100;
   while (retries--) {
     std::string path = prefix + RandomHexString(6);
@@ -358,16 +435,134 @@ ScopedTempSymlink::~ScopedTempSymlink() {
   }
 }
 
-ScopedPerfEventParanoid::ScopedPerfEventParanoid(int value) {
-  restore_ = files::ReadFileToString(kPerfEventParanoidPath, &previous_value_);
-  EXPECT_TRUE(restore_) << strerror(errno);
-  EXPECT_TRUE(files::WriteFile(kPerfEventParanoidPath, std::to_string(value))) << strerror(errno);
+namespace {
+
+fit::result<int, std::string> ReadSysctl(const std::string &path) {
+  fbl::unique_fd fd(HANDLE_EINTR(open(path.c_str(), O_RDONLY)));
+  if (!fd.is_valid()) {
+    return fit::error(errno);
+  }
+  std::string content;
+  if (!files::ReadFileDescriptorToString(fd.get(), &content)) {
+    return fit::error(errno);
+  }
+  return fit::ok(std::move(content));
 }
 
-ScopedPerfEventParanoid::~ScopedPerfEventParanoid() {
-  if (restore_) {
-    EXPECT_TRUE(files::WriteFile(kPerfEventParanoidPath, previous_value_)) << strerror(errno);
+fit::result<int> WriteSysctl(const std::string &path, std::string_view value) {
+  fbl::unique_fd fd(HANDLE_EINTR(open(path.c_str(), O_WRONLY | O_TRUNC)));
+  if (!fd.is_valid() || !fxl::WriteFileDescriptor(fd.get(), value.data(), value.size())) {
+    return fit::error(errno);
   }
+  return fit::ok();
+}
+
+}  // namespace
+
+fit::result<int, ScopedSysctl> ScopedSysctl::Create(std::string path) {
+  auto prev = ReadSysctl(path);
+  if (prev.is_error()) {
+    return prev.take_error();
+  }
+  ScopedSysctl sysctl;
+  sysctl.path_ = std::move(path);
+  sysctl.previous_value_ = std::move(prev.value());
+  sysctl.restore_ = true;
+  return fit::ok(std::move(sysctl));
+}
+
+fit::result<int, ScopedSysctl> ScopedSysctl::Create(std::string path, std::string_view value) {
+  auto sysctl = Create(std::move(path));
+  if (sysctl.is_error()) {
+    return sysctl.take_error();
+  }
+  if (auto res = WriteSysctl(sysctl.value().path_, value); res.is_error()) {
+    sysctl.value().restore_ = false;
+    return res.take_error();
+  }
+  return sysctl;
+}
+
+ScopedSysctl::ScopedSysctl(ScopedSysctl &&other) noexcept
+    : path_(std::move(other.path_)),
+      previous_value_(std::move(other.previous_value_)),
+      restore_(other.restore_) {
+  other.restore_ = false;
+}
+
+ScopedSysctl &ScopedSysctl::operator=(ScopedSysctl &&other) noexcept {
+  if (this != &other) {
+    Restore();
+    path_ = std::move(other.path_);
+    previous_value_ = std::move(other.previous_value_);
+    restore_ = other.restore_;
+    other.restore_ = false;
+  }
+  return *this;
+}
+
+ScopedSysctl::~ScopedSysctl() { Restore(); }
+
+void ScopedSysctl::Restore() {
+  if (restore_) {
+    if (auto res = WriteSysctl(path_, previous_value_); res.is_error()) {
+      ADD_FAILURE() << path_ << ": " << strerror(res.error_value());
+    }
+    restore_ = false;
+  }
+}
+
+fit::result<int, ScopedSysctl> ScopedSysctl::PerfEventParanoid(int value) {
+  return Create(kPerfEventParanoidPath, std::to_string(value));
+}
+
+ScopedSigAction::ScopedSigAction(int signum, const struct sigaction &act) : signum_(signum) {
+  int res = sigaction(signum_, &act, &oldact_);
+  EXPECT_THAT(res, SyscallSucceeds());
+  if (res == 0) {
+    active_ = true;
+  }
+}
+
+ScopedSigAction::ScopedSigAction(int signum, sighandler_t handler, int flags)
+    : ScopedSigAction(signum, [handler, flags] {
+        struct sigaction act = {};
+        act.sa_handler = handler;
+        act.sa_flags = flags;
+        sigemptyset(&act.sa_mask);
+        return act;
+      }()) {}
+
+ScopedSigAction::ScopedSigAction(int signum, void (*sigaction_handler)(int, siginfo_t *, void *),
+                                 int flags)
+    : ScopedSigAction(signum, [sigaction_handler, flags] {
+        struct sigaction act = {};
+        act.sa_sigaction = sigaction_handler;
+        act.sa_flags = flags | SA_SIGINFO;
+        sigemptyset(&act.sa_mask);
+        return act;
+      }()) {}
+
+ScopedSigAction::~ScopedSigAction() {
+  if (active_) {
+    EXPECT_THAT(sigaction(signum_, &oldact_, nullptr), SyscallSucceeds());
+  }
+}
+
+ScopedSocketPair::ScopedSocketPair(int type) {
+  auto result = Create(AF_UNIX, type, 0);
+  EXPECT_THAT(result, SyscallResultIsOk());
+  if (result.is_ok()) {
+    *this = std::move(result.value());
+  }
+}
+
+fit::result<int, ScopedSocketPair> ScopedSocketPair::Create(int domain, int type, int protocol) {
+  int raw_fds[2] = {-1, -1};
+  if (socketpair(domain, type, protocol, raw_fds) != 0) {
+    return fit::error(errno);
+  }
+  return fit::ok(ScopedSocketPair(fbl::unique_fd(raw_fds[0]), fbl::unique_fd(raw_fds[1])));
 }
 
 void waitForChildSucceeds(unsigned int waitFlag, int cloneFlags, int (*childRunFunction)(void *),
@@ -493,7 +688,6 @@ std::optional<MemoryMapping> parse_mapping_entry(std::string_view line) {
       .pathname = pathname,
   };
 }
-}  // namespace
 
 std::optional<size_t> parse_field_in_kb(std::string_view value) {
   const std::string_view suffix = " kB";
@@ -507,6 +701,28 @@ std::optional<size_t> parse_field_in_kb(std::string_view value) {
     return std::nullopt;
   }
   return result;
+}
+}  // namespace
+
+std::optional<size_t> GetStatusFieldInKb(const std::string &status_path,
+                                         std::string_view field_name) {
+  std::string status;
+  if (!files::ReadFileToString(status_path, &status)) {
+    return std::nullopt;
+  }
+
+  for (const auto &line :
+       fxl::SplitString(status, "\n", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty)) {
+    std::vector<std::string_view> fields =
+        fxl::SplitString(line, ":", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty);
+    if (!fields.empty() && fields[0] == field_name) {
+      if (fields.size() != 2) {
+        return std::nullopt;
+      }
+      return parse_field_in_kb(fields[1]);
+    }
+  }
+  return std::nullopt;
 }
 
 std::optional<MemoryMapping> find_memory_mapping(fit::function<bool(const MemoryMapping &)> match,
@@ -559,6 +775,20 @@ std::optional<MemoryMappingExt> find_memory_mapping_ext(
         return std::nullopt;
       }
     }
+    if (fields[0] == "Pss") {
+      if (std::optional<size_t> pss = parse_field_in_kb(fields[1])) {
+        current_mapping->pss = *pss;
+      } else {
+        return std::nullopt;
+      }
+    }
+    if (fields[0] == "Locked") {
+      if (std::optional<size_t> locked = parse_field_in_kb(fields[1])) {
+        current_mapping->locked = *locked;
+      } else {
+        return std::nullopt;
+      }
+    }
     if (fields[0] == "VmFlags") {
       current_mapping->vm_flags =
           fxl::SplitStringCopy(fields[1], " ", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty);
@@ -587,6 +817,8 @@ std::ostream &operator<<(std::ostream &os, const MemoryMappingExt &mapping) {
   os << "\tinode:\t" << mapping.inode << "\n";
   os << "\tpath:\t" << mapping.pathname << "\n";
   os << "\trss:\t" << mapping.rss << "\n";
+  os << "\tpss:\t" << mapping.pss << "\n";
+  os << "\tlocked:\t" << mapping.locked << "\n";
   os << "\tflags:\t";
   for (auto &vm_flag : mapping.vm_flags) {
     os << vm_flag << " ";
@@ -736,7 +968,8 @@ std::optional<std::string_view> GetTaskState(std::string_view stat) {
 
 testing::AssertionResult WaitForTaskState(pid_t pid, pid_t tid,
                                           fit::function<bool(std::string_view)> predicate) {
-  std::string stat_path = fxl::StringPrintf("/proc/%d/task/%d/stat", pid, tid);
+  std::string stat_path = (pid == tid) ? fxl::StringPrintf("/proc/%d/stat", pid)
+                                       : fxl::StringPrintf("/proc/%d/task/%d/stat", pid, tid);
   std::string stat_buf;
   for (int i = 0; i < 100000; i++) {
     if (!files::ReadFileToString(stat_path, &stat_buf)) {
@@ -758,16 +991,13 @@ static volatile void *expected_fault_address;
 testing::AssertionResult TestThatAccessSegfaults(void *test_address, AccessType type) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([test_address, type] {
-    struct sigaction action;
-    action.sa_sigaction = [](int signo, siginfo_t *info, void *ucontext) {
+    ScopedSigAction scoped_sigsegv(SIGSEGV, [](int signo, siginfo_t *info, void *ucontext) {
       if (signo == SIGSEGV && info->si_addr == expected_fault_address) {
         _exit(EXIT_SUCCESS);
       } else {
         _exit(EXIT_FAILURE);
       }
-    };
-    action.sa_flags = SA_SIGINFO;
-    SAFE_SYSCALL(sigaction(SIGSEGV, &action, nullptr));
+    });
     expected_fault_address = test_address;
     if (type == AccessType::Read) {
       *static_cast<volatile std::byte *>(test_address);
@@ -849,15 +1079,18 @@ fit::result<int, ScopedMount> ScopedMount::CreateDirAndMount(const std::string &
 }
 
 ScopedMount &ScopedMount::operator=(ScopedMount &&other) noexcept {
-  Unmount();
-  is_mounted_ = other.is_mounted_;
-  target_path_ = other.target_path_;
-  other.is_mounted_ = false;
+  if (this != &other) {
+    Unmount();
+    is_mounted_ = other.is_mounted_;
+    target_path_ = std::move(other.target_path_);
+    other.is_mounted_ = false;
+  }
   return *this;
 }
 
-ScopedMount::ScopedMount(ScopedMount &&other) noexcept : ScopedMount("") {
-  *this = std::move(other);
+ScopedMount::ScopedMount(ScopedMount &&other) noexcept
+    : target_path_(std::move(other.target_path_)), is_mounted_(other.is_mounted_) {
+  other.is_mounted_ = false;
 }
 
 ScopedMount::~ScopedMount() { Unmount(); }

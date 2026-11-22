@@ -1,7 +1,7 @@
 # Fuchsia Dynamic Linker
 
-**TODO(https://fxbug.dev/42072830):** This is a work in progress. When finished, it
-will be included in the SDK as a prebuilt ld.so binary but not as source.
+**TODO(https://fxbug.dev/492249787):** Rollout to the Fuchsia SDK as a prebuilt
+`ld.so.1` binary (not as source) is in progress.
 
 This is the implementation of the core of the Fuchsia Dynamic Linker, but that
 means three different things:
@@ -70,7 +70,9 @@ to maintain the toolkit code with the `//sdk/lib/ld` code in mind.
 
 ### Passive ABI Support Library
 
-**TODO(https://fxbug.dev/42072830):** doesn't exist yet
+**TODO(https://fxbug.dev/326312148):** Document the passive ABI consumer
+helpers in [`<lib/ld/abi.h>`](include/lib/ld/abi.h) and
+[`<lib/ld/module.h>`](include/lib/ld/module.h).
 
 ### C++ namespace
 
@@ -89,8 +91,10 @@ shared library ABI.
 
 ### Remoting Support
 
-**TODO(https://fxbug.dev/42072830):** This will be implemented as part of the
-out-of-process dynamic linking support, but doesn't exist it.
+**TODO(https://fxbug.dev/326452412):** Document the out-of-process dynamic
+linking support in
+[`<lib/ld/remote-dynamic-linker.h>`](include/lib/ld/remote-dynamic-linker.h)
+and [`<lib/ld/remote-abi.h>`](include/lib/ld/remote-abi.h).
 
 ## Startup Dynamic Linker
 

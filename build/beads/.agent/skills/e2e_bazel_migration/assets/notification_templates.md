@@ -46,11 +46,18 @@ In the templates below:
     | `REVIEW_CQ_PASSED_NOT_ASSIGNED` | `reviewer: not assigned, CQ passed but no reviewer was assigned before the deadline` |
     | `REVIEW_TIMEOUT` | `reviewer: not assigned, CQ did not finish before the deadline` |
     | `REVIEW_STRANDED` | `reviewer: not assigned (runner crashed; task paused: planter resume <task-id> to continue)` |
-    | `REVIEW_SKIPPED_WIP` | `reviewer: not assigned, awaiting planter ack` |
+    | `REVIEW_SKIPPED_WIP` | `reviewer: not assigned, <hold>` |
 
-  * If the result of the task is `UPLOADED_WIP`, append ` (WIP: run planter ack
-    <task-id>; the ready upload needs a runner: planter workbox start or
-    planter fleet --gerrit)`.
+    `<hold>` is the reason the `REVIEW` line gives without the task ID:
+    `awaiting planter ack` (disputes), `awaiting cutover review` (the separate
+    package cutover review), `awaiting planter ack and cutover review`, or
+    `awaiting planter ack or cutover review` (planter did not say which).
+
+  * If the result of the task is `UPLOADED_WIP` and its reason starts with
+    `awaiting`, append ` (WIP: <hold>: run planter ack <task-id>, which asks
+    about disputes and package cutover items in one session; the ready upload
+    needs a runner: planter workbox start or planter fleet --gerrit)`, with
+    `<hold>` from the result's reason as above.
 * `<reviewer_swaps>`: One line for each reviewer swapped by
   [Reviewer Availability](../references/reviewer_availability.md), in the form
   `<CL number>: <OOO reviewer> (OOO until <date>) -> <replacement>`.

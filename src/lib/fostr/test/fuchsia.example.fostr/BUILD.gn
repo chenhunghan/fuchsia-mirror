@@ -34,6 +34,7 @@ fidl("fuchsia.example.fostr") {
   excluded_checks = [ "string-bounds-not-specified" ]
   visibility = [
     ":*",
+    "//src/lib/fostr/build/tests:*",
     "//src/lib/fostr/fidl/fuchsia.example.fostr:*",
     "//src/lib/fostr/test/fuchsia.example.fostr2:*",
   ]

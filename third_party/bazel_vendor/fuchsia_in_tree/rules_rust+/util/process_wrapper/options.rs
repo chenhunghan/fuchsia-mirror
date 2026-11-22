@@ -3,6 +3,7 @@ use std::env;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
+use std::iter::Peekable;
 use std::process::exit;
 
 use crate::flags::{FlagParseError, Flags, ParseOutcome};
@@ -20,6 +21,23 @@ impl fmt::Display for OptionError {
         match self {
             Self::FlagError(e) => write!(f, "error parsing flags: {e}"),
             Self::Generic(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct TempFiles(Vec<String>);
+
+impl TempFiles {
+    fn push(&mut self, path: String) {
+        self.0.push(path);
+    }
+}
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -49,6 +67,8 @@ pub(crate) struct Options {
     pub(crate) rustc_quit_on_rmeta: bool,
     // This controls the output format of rustc messages.
     pub(crate) rustc_output_format: Option<rustc::ErrorFormat>,
+    // Temporary expanded parameter files removed when dropped before exit.
+    pub(crate) temp_files: TempFiles,
 }
 
 pub(crate) fn options() -> Result<Options, OptionError> {
@@ -276,10 +296,13 @@ pub(crate) fn options() -> Result<Options, OptionError> {
 
     // Append all the arguments fetched from files to those provided via command line.
     child_args.append(&mut file_arguments);
-    let child_args = prepare_args(
+    let expansion_tag = format!("pid{}", std::process::id());
+    let mut temp_files = TempFiles::default();
+    let child_args = prepare_args_internal(
         child_args,
         &subst_mappings,
         require_explicit_unstable_features,
+        Some((&expansion_tag, &mut temp_files)),
         None,
         None,
     )?;
@@ -301,6 +324,7 @@ pub(crate) fn options() -> Result<Options, OptionError> {
         output_file,
         rustc_quit_on_rmeta,
         rustc_output_format,
+        temp_files,
     })
 }
 
@@ -336,6 +360,45 @@ fn is_allow_features_flag(arg: &str) -> bool {
     arg.starts_with("-Zallow-features=") || arg.starts_with("allow-features=")
 }
 
+fn is_rustdoc_executable(exec_path: &str) -> bool {
+    std::path::Path::new(exec_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .is_some_and(|stem| stem == "rustdoc")
+}
+
+// When invoking `rustdoc`, strip both `--remap-path-scope` and
+// `--remap-path-prefix`. Stable `rustdoc` rejects `--remap-path-scope` without
+// `-Zunstable-options` (which `-Zallow-features=` blocks), and stripping
+// `--remap-path-scope` alone causes build-dir-relative prefixes meant to be
+// scoped away from diagnostics (e.g. `--remap-path-scope=macro,debuginfo,coverage,object`
+// paired with `--remap-path-prefix==../..`) to apply unscoped in `rustdoc`
+// diagnostics and `rustdoc --test` names (`../../<pkg>/...`). `-Zremap-cwd-prefix=.`
+// remains preserved for working-directory reproducibility, matching `rustdoc.bzl`
+// passing `remap_path_prefix = None`.
+fn is_remap_flag_with_eq(arg: &str) -> bool {
+    arg.starts_with("--remap-path-scope=") || arg.starts_with("--remap-path-prefix=")
+}
+
+fn is_remap_flag_separate(arg: &str) -> bool {
+    arg == "--remap-path-scope" || arg == "--remap-path-prefix"
+}
+
+/// Consumes the optional value argument following `--remap-path-scope` or
+/// `--remap-path-prefix`, leaving adjacent `@param_file` or `--` tokens intact
+/// so a malformed trailing flag cannot swallow them.
+fn skip_remap_flag_value<I>(iter: &mut Peekable<I>, subst_mappings: &[(String, String)])
+where
+    I: Iterator<Item = String>,
+{
+    if iter.peek().is_some_and(|next_arg| {
+        let next_prepared = prepare_arg(next_arg.clone(), subst_mappings);
+        next_prepared != "--" && !next_prepared.starts_with('@')
+    }) {
+        iter.next();
+    }
+}
+
 fn prepare_arg(mut arg: String, subst_mappings: &[(String, String)]) -> String {
     for (f, replace_with) in subst_mappings {
         let from = format!("${{{f}}}");
@@ -348,38 +411,90 @@ fn prepare_arg(mut arg: String, subst_mappings: &[(String, String)]) -> String {
 fn prepare_param_file(
     filename: &str,
     subst_mappings: &[(String, String)],
+    filter_rustdoc_remap: bool,
+    after_double_dash: &mut bool,
     read_file: &mut impl FnMut(&str) -> Result<Vec<String>, OptionError>,
     write_to_file: &mut impl FnMut(&str) -> Result<(), OptionError>,
 ) -> Result<bool, OptionError> {
     fn process_file(
         filename: &str,
         subst_mappings: &[(String, String)],
+        filter_rustdoc_remap: bool,
+        after_double_dash: &mut bool,
         read_file: &mut impl FnMut(&str) -> Result<Vec<String>, OptionError>,
         write_to_file: &mut impl FnMut(&str) -> Result<(), OptionError>,
     ) -> Result<bool, OptionError> {
         let mut has_allow_features_flag = false;
-        for arg in read_file(filename)? {
-            let arg = prepare_arg(arg, subst_mappings);
+        let mut iter = read_file(filename)?.into_iter().peekable();
+        while let Some(raw_arg) = iter.next() {
+            let arg = prepare_arg(raw_arg, subst_mappings);
+            if arg == "--" {
+                *after_double_dash = true;
+                write_to_file(&arg)?;
+                continue;
+            }
+            if filter_rustdoc_remap && !*after_double_dash {
+                if is_remap_flag_with_eq(&arg) {
+                    continue;
+                }
+                if is_remap_flag_separate(&arg) {
+                    skip_remap_flag_value(&mut iter, subst_mappings);
+                    continue;
+                }
+            }
             has_allow_features_flag |= is_allow_features_flag(&arg);
             if let Some(arg_file) = arg.strip_prefix('@') {
-                has_allow_features_flag |=
-                    process_file(arg_file, subst_mappings, read_file, write_to_file)?;
+                has_allow_features_flag |= process_file(
+                    arg_file,
+                    subst_mappings,
+                    filter_rustdoc_remap,
+                    after_double_dash,
+                    read_file,
+                    write_to_file,
+                )?;
             } else {
                 write_to_file(&arg)?;
             }
         }
         Ok(has_allow_features_flag)
     }
-    let has_allow_features_flag = process_file(filename, subst_mappings, read_file, write_to_file)?;
+    let has_allow_features_flag = process_file(
+        filename,
+        subst_mappings,
+        filter_rustdoc_remap,
+        after_double_dash,
+        read_file,
+        write_to_file,
+    )?;
     Ok(has_allow_features_flag)
 }
 
 /// Apply substitutions to the provided arguments, recursing into param files.
+#[cfg(test)]
 #[allow(clippy::type_complexity)]
 fn prepare_args(
     args: Vec<String>,
     subst_mappings: &[(String, String)],
     require_explicit_unstable_features: bool,
+    read_file: Option<&mut dyn FnMut(&str) -> Result<Vec<String>, OptionError>>,
+    write_file: Option<&mut dyn FnMut(&str, &str) -> Result<(), OptionError>>,
+) -> Result<Vec<String>, OptionError> {
+    prepare_args_internal(
+        args,
+        subst_mappings,
+        require_explicit_unstable_features,
+        None,
+        read_file,
+        write_file,
+    )
+}
+
+#[allow(clippy::type_complexity)]
+fn prepare_args_internal(
+    args: Vec<String>,
+    subst_mappings: &[(String, String)],
+    require_explicit_unstable_features: bool,
+    mut expansion_context: Option<(&str, &mut TempFiles)>,
     read_file: Option<&mut dyn FnMut(&str) -> Result<Vec<String>, OptionError>>,
     mut write_file: Option<&mut dyn FnMut(&str, &str) -> Result<(), OptionError>>,
 ) -> Result<Vec<String>, OptionError> {
@@ -389,10 +504,47 @@ fn prepare_args(
     let mut read_file_wrapper = |s: &str| read_file_to_array(s).map_err(OptionError::Generic);
     let mut read_file = read_file.unwrap_or(&mut read_file_wrapper);
 
-    for arg in args.into_iter() {
-        let arg = prepare_arg(arg, subst_mappings);
+    let filter_rustdoc_remap = args
+        .first()
+        .is_some_and(|exec| is_rustdoc_executable(&prepare_arg(exec.clone(), subst_mappings)));
+    let mut is_exec_arg = true;
+    let mut after_double_dash = false;
+    let mut param_file_index: usize = 0;
+    let mut iter = args.into_iter().peekable();
+
+    while let Some(raw_arg) = iter.next() {
+        let arg = prepare_arg(raw_arg, subst_mappings);
+        if is_exec_arg {
+            is_exec_arg = false;
+            processed_args.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            after_double_dash = true;
+            processed_args.push(arg);
+            continue;
+        }
+        if filter_rustdoc_remap && !after_double_dash {
+            if is_remap_flag_with_eq(&arg) {
+                continue;
+            }
+            if is_remap_flag_separate(&arg) {
+                skip_remap_flag_value(&mut iter, subst_mappings);
+                continue;
+            }
+        }
         if let Some(param_file) = arg.strip_prefix('@') {
-            let expanded_file = format!("{param_file}.expanded");
+            let current_index = param_file_index;
+            param_file_index += 1;
+            let expansion_tag = expansion_context.as_ref().map(|(tag, _)| *tag);
+            let expanded_file = match (expansion_tag, filter_rustdoc_remap) {
+                (Some(tag), true) => {
+                    format!("{param_file}.rustdoc.{tag}.{current_index}.expanded")
+                }
+                (Some(tag), false) => format!("{param_file}.{tag}.{current_index}.expanded"),
+                (None, true) => format!("{param_file}.rustdoc.expanded"),
+                (None, false) => format!("{param_file}.expanded"),
+            };
             let format_err = |err: io::Error| {
                 OptionError::Generic(format!(
                     "{} writing path: {:?}, current directory: {:?}",
@@ -408,9 +560,13 @@ fn prepare_args(
             }
             let mut out = match write_file {
                 Some(ref mut f) => Writer::Function(f),
-                None => Writer::BufWriter(io::BufWriter::new(
-                    File::create(&expanded_file).map_err(format_err)?,
-                )),
+                None => {
+                    let file = File::create(&expanded_file).map_err(format_err)?;
+                    if let Some((_, ref mut temp_files)) = expansion_context {
+                        temp_files.push(expanded_file.clone());
+                    }
+                    Writer::BufWriter(io::BufWriter::new(file))
+                }
             };
             let mut write_to_file = |s: &str| -> Result<(), OptionError> {
                 match out {
@@ -423,10 +579,15 @@ fn prepare_args(
             let (file, allowed) = prepare_param_file(
                 param_file,
                 subst_mappings,
+                filter_rustdoc_remap,
+                &mut after_double_dash,
                 &mut read_file,
                 &mut write_to_file,
             )
             .map(|af| (format!("@{expanded_file}"), af))?;
+            if let Writer::BufWriter(ref mut bw) = out {
+                bw.flush().map_err(format_err)?;
+            }
             allowed_features |= allowed;
             processed_args.push(file);
         } else {
@@ -472,6 +633,8 @@ fn environment_block(
 
 #[cfg(test)]
 mod test {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -548,6 +711,340 @@ mod test {
                 "rustc_params.expanded".to_string(),
                 "-Zallow-features=whitespace_instead_of_curly_braces".to_string()
             )])
+        );
+    }
+
+    #[test]
+    fn test_rustdoc_filters_remap_path_flags_on_cli_and_param_files() {
+        let mut read_files = HashMap::<String, Vec<String>>::new();
+        read_files.insert(
+            "rustc_params".to_string(),
+            vec![
+                "--remap-path-scope=coverage".to_string(),
+                "--remap-path-prefix".to_string(),
+                "external/=external/".to_string(),
+                "--edition=2021".to_string(),
+            ],
+        );
+
+        let mut rustdoc_written = HashMap::<String, Vec<String>>::new();
+        let mut read_file = |filename: &str| -> Result<Vec<String>, OptionError> {
+            read_files
+                .get(filename)
+                .cloned()
+                .ok_or_else(|| OptionError::Generic(format!("file not found: {filename}")))
+        };
+        let mut write_rustdoc = |filename: &str, content: &str| -> Result<(), OptionError> {
+            rustdoc_written
+                .entry(filename.to_owned())
+                .or_default()
+                .push(content.to_owned());
+            Ok(())
+        };
+
+        let rustdoc_args = prepare_args(
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "--remap-path-scope=macro,debuginfo".to_string(),
+                "--remap-path-scope".to_string(),
+                "object".to_string(),
+                "--remap-path-prefix==../..".to_string(),
+                "--remap-path-prefix".to_string(),
+                ".=.".to_string(),
+                "-Zremap-cwd-prefix=.".to_string(),
+                "@rustc_params".to_string(),
+            ],
+            &[],
+            true,
+            Some(&mut read_file),
+            Some(&mut write_rustdoc),
+        )
+        .unwrap();
+
+        assert_eq!(
+            rustdoc_args,
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "-Zremap-cwd-prefix=.".to_string(),
+                "@rustc_params.rustdoc.expanded".to_string(),
+                "-Zallow-features=".to_string(),
+            ]
+        );
+        assert_eq!(
+            rustdoc_written,
+            HashMap::from([(
+                "rustc_params.rustdoc.expanded".to_string(),
+                vec!["--edition=2021".to_string()],
+            )])
+        );
+
+        let mut rustc_written = HashMap::<String, Vec<String>>::new();
+        let mut write_rustc = |filename: &str, content: &str| -> Result<(), OptionError> {
+            rustc_written
+                .entry(filename.to_owned())
+                .or_default()
+                .push(content.to_owned());
+            Ok(())
+        };
+
+        let rustc_args = prepare_args(
+            vec![
+                "/path/to/rustc".to_string(),
+                "--remap-path-scope=macro,debuginfo".to_string(),
+                "@rustc_params".to_string(),
+            ],
+            &[],
+            true,
+            Some(&mut read_file),
+            Some(&mut write_rustc),
+        )
+        .unwrap();
+
+        assert_eq!(
+            rustc_args,
+            vec![
+                "/path/to/rustc".to_string(),
+                "--remap-path-scope=macro,debuginfo".to_string(),
+                "@rustc_params.expanded".to_string(),
+                "-Zallow-features=".to_string(),
+            ]
+        );
+        assert_eq!(
+            rustc_written,
+            HashMap::from([(
+                "rustc_params.expanded".to_string(),
+                vec![
+                    "--remap-path-scope=coverage".to_string(),
+                    "--remap-path-prefix".to_string(),
+                    "external/=external/".to_string(),
+                    "--edition=2021".to_string(),
+                ],
+            )])
+        );
+    }
+
+    #[test]
+    fn test_rustdoc_all_filtered_param_file_creates_empty_file_and_cleans_up() {
+        let param_path = std::env::temp_dir().join(format!(
+            "process_wrapper_all_filtered_{}.params",
+            std::process::id()
+        ));
+        let param_path_str = param_path.to_str().unwrap().to_owned();
+        std::fs::write(
+            &param_path,
+            "--remap-path-scope=coverage\n--remap-path-prefix\n.=..\n",
+        )
+        .unwrap();
+
+        let mut input_guard = TempFiles::default();
+        input_guard.push(param_path_str.clone());
+
+        let mut temp_files = TempFiles::default();
+        let args = prepare_args_internal(
+            vec!["/path/to/rustdoc".to_string(), format!("@{param_path_str}")],
+            &[],
+            false,
+            Some(("pid4242", &mut temp_files)),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let expected_expanded = format!("{param_path_str}.rustdoc.pid4242.0.expanded");
+        assert_eq!(
+            args,
+            vec![
+                "/path/to/rustdoc".to_string(),
+                format!("@{expected_expanded}"),
+            ]
+        );
+        assert!(Path::new(&expected_expanded).exists());
+        assert_eq!(std::fs::read_to_string(&expected_expanded).unwrap(), "");
+
+        drop(temp_files);
+        assert!(!Path::new(&expected_expanded).exists());
+        drop(input_guard);
+    }
+
+    #[test]
+    fn test_rustdoc_remap_filtering_stops_at_double_dash_and_preserves_adjacent_param_file() {
+        let mut read_files = HashMap::<String, Vec<String>>::new();
+        read_files.insert(
+            "rustc_params".to_string(),
+            vec![
+                "--remap-path-scope=coverage".to_string(),
+                "--edition=2021".to_string(),
+            ],
+        );
+        read_files.insert(
+            "params_with_double_dash".to_string(),
+            vec![
+                "--remap-path-scope=before".to_string(),
+                "--".to_string(),
+                "--remap-path-scope=keep".to_string(),
+                "--remap-path-prefix".to_string(),
+                "a=b".to_string(),
+            ],
+        );
+
+        let mut read_file = |filename: &str| -> Result<Vec<String>, OptionError> {
+            read_files
+                .get(filename)
+                .cloned()
+                .ok_or_else(|| OptionError::Generic(format!("file not found: {filename}")))
+        };
+        let mut written = HashMap::<String, Vec<String>>::new();
+        let mut write_file = |filename: &str, content: &str| -> Result<(), OptionError> {
+            written
+                .entry(filename.to_owned())
+                .or_default()
+                .push(content.to_owned());
+            Ok(())
+        };
+
+        let cli_args = prepare_args(
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "--remap-path-scope".to_string(),
+                "@rustc_params".to_string(),
+                "--remap-path-prefix".to_string(),
+                "--".to_string(),
+                "--remap-path-scope=keep".to_string(),
+                "--remap-path-prefix".to_string(),
+                "a=b".to_string(),
+            ],
+            &[],
+            false,
+            Some(&mut read_file),
+            Some(&mut write_file),
+        )
+        .unwrap();
+
+        assert_eq!(
+            cli_args,
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "@rustc_params.rustdoc.expanded".to_string(),
+                "--".to_string(),
+                "--remap-path-scope=keep".to_string(),
+                "--remap-path-prefix".to_string(),
+                "a=b".to_string(),
+            ]
+        );
+        assert_eq!(
+            written,
+            HashMap::from([(
+                "rustc_params.rustdoc.expanded".to_string(),
+                vec!["--edition=2021".to_string()],
+            )])
+        );
+
+        let mut file_written = HashMap::<String, Vec<String>>::new();
+        let mut write_file_double_dash = |filename: &str, content: &str| -> Result<(), OptionError> {
+            file_written
+                .entry(filename.to_owned())
+                .or_default()
+                .push(content.to_owned());
+            Ok(())
+        };
+        let file_double_dash_args = prepare_args(
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "@params_with_double_dash".to_string(),
+            ],
+            &[],
+            false,
+            Some(&mut read_file),
+            Some(&mut write_file_double_dash),
+        )
+        .unwrap();
+        assert_eq!(
+            file_double_dash_args,
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "@params_with_double_dash.rustdoc.expanded".to_string(),
+            ]
+        );
+        assert_eq!(
+            file_written,
+            HashMap::from([(
+                "params_with_double_dash.rustdoc.expanded".to_string(),
+                vec![
+                    "--".to_string(),
+                    "--remap-path-scope=keep".to_string(),
+                    "--remap-path-prefix".to_string(),
+                    "a=b".to_string(),
+                ],
+            )])
+        );
+    }
+
+    #[test]
+    fn test_per_process_expansion_tag_disambiguates_concurrent_and_repeated_param_files() {
+        let mut read_files = HashMap::<String, Vec<String>>::new();
+        read_files.insert("rustc_params".to_string(), vec!["--edition=2021".to_string()]);
+        let mut read_file = |filename: &str| -> Result<Vec<String>, OptionError> {
+            read_files
+                .get(filename)
+                .cloned()
+                .ok_or_else(|| OptionError::Generic(format!("file not found: {filename}")))
+        };
+
+        let mut written1 = HashMap::<String, Vec<String>>::new();
+        let mut write1 = |filename: &str, content: &str| -> Result<(), OptionError> {
+            written1
+                .entry(filename.to_owned())
+                .or_default()
+                .push(content.to_owned());
+            Ok(())
+        };
+        let mut tf1 = TempFiles::default();
+        let args1 = prepare_args_internal(
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "@rustc_params".to_string(),
+                "@rustc_params".to_string(),
+            ],
+            &[],
+            false,
+            Some(("pid100", &mut tf1)),
+            Some(&mut read_file),
+            Some(&mut write1),
+        )
+        .unwrap();
+        assert_eq!(
+            args1,
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "@rustc_params.rustdoc.pid100.0.expanded".to_string(),
+                "@rustc_params.rustdoc.pid100.1.expanded".to_string(),
+            ]
+        );
+
+        let mut written2 = HashMap::<String, Vec<String>>::new();
+        let mut write2 = |filename: &str, content: &str| -> Result<(), OptionError> {
+            written2
+                .entry(filename.to_owned())
+                .or_default()
+                .push(content.to_owned());
+            Ok(())
+        };
+        let mut tf2 = TempFiles::default();
+        let args2 = prepare_args_internal(
+            vec!["/path/to/rustdoc".to_string(), "@rustc_params".to_string()],
+            &[],
+            false,
+            Some(("pid101", &mut tf2)),
+            Some(&mut read_file),
+            Some(&mut write2),
+        )
+        .unwrap();
+        assert_eq!(
+            args2,
+            vec![
+                "/path/to/rustdoc".to_string(),
+                "@rustc_params.rustdoc.pid101.0.expanded".to_string(),
+            ]
         );
     }
 }

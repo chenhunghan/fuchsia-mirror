@@ -5,7 +5,7 @@
 use thiserror::Error;
 
 use crate::frame::FrameParseError;
-use crate::{Role, DLCI};
+use crate::{DLCI, Role};
 
 /// Errors that occur during the usage of the RFCOMM library.
 #[derive(Error, Debug)]
@@ -16,8 +16,8 @@ pub enum Error {
     InvalidDLCI(DLCI),
     #[error("Invalid role: {:?}", .0)]
     InvalidRole(Role),
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
+    #[error("Server channel out of range: {0}")]
+    ServerChannelOutOfRange(u8),
 }
 
 impl From<FrameParseError> for Error {

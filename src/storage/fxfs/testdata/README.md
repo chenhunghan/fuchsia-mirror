@@ -10,13 +10,15 @@ The images themselves are generated with `fx fxfs create_golden` by developers
 whenever the on-disk Fxfs version is changed. A unit test ensures this step is
 not forgotten and provides instructions if it is.
 
-## images.gni
+## images.gni and images.bzl
 
-This is an auto-generated file. It is rewritten by `fx fxfs create_golden` and includes
-all images found in the output directory.
+These are auto-generated files. Both are rewritten by `fx fxfs create_golden`
+and include all images found in the output directory: `images.gni` for GN and
+`images.bzl` for Bazel.
 
-It is required because our build system (GN) doesn't support wildcard dependencies but
-we need a way to ensure all images are included in tests run on CQ.
+They are required because neither build system lets us use wildcard
+dependencies here, but we need a way to ensure all images are included in tests
+run on CQ. If you remove old images by hand, update both files.
 
 ## House keeping
 

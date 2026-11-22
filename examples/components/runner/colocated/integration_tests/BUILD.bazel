@@ -1,0 +1,108 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":colocated-runner-integration-test"],
+    visibility = ["//examples:__pkg__"],
+)
+
+rustc_test(
+    name = "colocated_runner_integration_test_bin",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/runner/colocated/fidl:colocated_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.memory.attribution:fuchsia.memory.attribution_rust",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component-test",
+        "//src/lib/fuchsia-runtime",
+        "//src/memory/attribution/testing",
+        "//third_party/rust_crates/vendor:async-channel",
+        "//third_party/rust_crates/vendor:futures-util",
+    ],
+)
+
+fx_packaged_binary(
+    name = "colocated_runner_integration_test_bin_packaged",
+    testonly = True,
+    binary = ":colocated_runner_integration_test_bin",
+    binary_name = "colocated_runner_integration_test_bin",
+)
+
+fx_component_manifest(
+    name = "colocated_runner_integration_test_manifest",
+    testonly = True,
+    component_name = "colocated_runner_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/colocated_runner_integration_test.cml",
+)
+
+fx_test_component(
+    name = "colocated_runner_integration_test",
+    compiled_manifest = ":colocated_runner_integration_test_manifest",
+    deps = [":colocated_runner_integration_test_bin_packaged"],
+)
+
+fx_component_manifest(
+    name = "test_realm_manifest",
+    testonly = True,
+    component_name = "test_realm",
+    includes = ["//sdk/lib/syslog:offer.shard"],
+    manifest = "meta/test_realm.cml",
+)
+
+fx_component(
+    name = "test_realm",
+    testonly = True,
+    compiled_manifest = ":test_realm_manifest",
+)
+
+fx_package(
+    name = "colocated-runner-integration-test-package",
+    package_name = "colocated-runner-integration-test",
+    testonly = True,
+    components = [
+        ":test_realm",
+        "//examples/components/runner/colocated:colocated-component",
+        "//examples/components/runner/colocated:colocated-runner",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+        "//src/sys/component_manager:elf_runner",
+    ],
+    test_components = [":colocated_runner_integration_test"],
+)
+
+fx_test(
+    name = "colocated-runner-integration-test",
+    package = ":colocated-runner-integration-test-package",
+)

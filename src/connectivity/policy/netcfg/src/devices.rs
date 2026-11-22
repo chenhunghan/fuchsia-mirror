@@ -52,7 +52,7 @@ impl errors::ContextExt for AddDeviceError {
 pub(super) struct DeviceInfo {
     pub(super) port_class: fhwnet::PortClass,
     pub(super) mac: Option<fidl_fuchsia_net_ext::MacAddress>,
-    pub(super) topological_path: String,
+    pub(super) bus_info: Vec<fidl_fuchsia_driver_framework::BusInfo>,
 }
 
 /// An instance of a network device.
@@ -60,17 +60,13 @@ pub(super) struct NetworkDeviceInstance {
     port: fhwnet::PortProxy,
     port_id: fhwnet::PortId,
     device_control: fidl_fuchsia_net_interfaces_admin::DeviceControlProxy,
-    topological_path: String,
+    bus_info: Vec<fidl_fuchsia_driver_framework::BusInfo>,
 }
 
 impl std::fmt::Debug for NetworkDeviceInstance {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let NetworkDeviceInstance { port: _, port_id, device_control: _, topological_path } = self;
-        write!(
-            f,
-            "NetworkDeviceInstance{{topological_path={}, port={:?}}}",
-            topological_path, port_id
-        )
+        let NetworkDeviceInstance { port: _, port_id, device_control: _, bus_info } = self;
+        write!(f, "NetworkDeviceInstance{{bus_info={:?}, port={:?}}}", bus_info, port_id)
     }
 }
 
@@ -84,20 +80,29 @@ impl NetworkDeviceInstance {
             .connect_to_device()
             .context("cannot connect to device")
             .map_err(errors::Error::NonFatal)?;
-        // TODO(https://fxbug.dev/501161302): Use
-        // `fuchsia.driver.token.NodeBusTopology`.
-        let device_topology = service
-            .connect_to_device_topology()
-            .context("cannot connect to device_topology")
-            .map_err(errors::Error::NonFatal)?;
-
-        let topological_path = device_topology
-            .get_topological_path()
+        let node_token = service
+            .connect_to_token()
+            .context("cannot connect to token")
+            .map_err(errors::Error::NonFatal)?
+            .get()
             .await
-            .context("error sending get topological path request")
+            .context("error sending get token request")
             .map_err(errors::Error::NonFatal)?
             .map_err(zx::Status::err_from_raw)
-            .context("error getting topological path")
+            .context("error getting node token")
+            .map_err(errors::Error::NonFatal)?;
+        let bus_topology = fuchsia_component::client::connect_to_protocol::<
+            fidl_fuchsia_driver_token::NodeBusTopologyMarker,
+        >()
+        .context("cannot connect to fuchsia.driver.token.NodeBusTopology")
+        .map_err(errors::Error::NonFatal)?;
+        let bus_info = bus_topology
+            .get(node_token)
+            .await
+            .context("error sending NodeBusTopology.Get request")
+            .map_err(errors::Error::NonFatal)?
+            .map_err(zx::Status::err_from_raw)
+            .context("error getting bus topology")
             .map_err(errors::Error::NonFatal)?;
 
         let (port_watcher, port_watcher_server_end) =
@@ -124,8 +129,8 @@ impl NetworkDeviceInstance {
             .unwrap_or_else(|err| exit_with_fidl_error(err));
 
         Ok(futures::stream::try_unfold(
-            (port_watcher, device_control, device, topological_path),
-            |(port_watcher, device_control, device, topological_path)| async move {
+            (port_watcher, device_control, device, bus_info),
+            |(port_watcher, device_control, device, bus_info)| async move {
                 loop {
                     let port_event = match port_watcher.watch().await {
                         Ok(port_event) => port_event,
@@ -156,9 +161,9 @@ impl NetworkDeviceInstance {
                                     port,
                                     port_id,
                                     device_control: device_control.clone(),
-                                    topological_path: topological_path.clone(),
+                                    bus_info: bus_info.clone(),
                                 },
-                                (port_watcher, device_control, device, topological_path),
+                                (port_watcher, device_control, device, bus_info),
                             )));
                         }
                     }
@@ -168,7 +173,7 @@ impl NetworkDeviceInstance {
     }
 
     pub async fn get_device_info(&self) -> Result<DeviceInfo, errors::Error> {
-        let NetworkDeviceInstance { port, port_id: _, device_control: _, topological_path } = self;
+        let NetworkDeviceInstance { port, port_id: _, device_control: _, bus_info } = self;
         let fhwnet::PortInfo { id: _, base_info, .. } = port
             .get_info()
             .await
@@ -195,11 +200,7 @@ impl NetworkDeviceInstance {
                 if fidl_err.is_closed() { Ok(None) } else { Err(anyhow::Error::from(fidl_err)) }
             })
             .map_err(errors::Error::NonFatal)?;
-        Ok(DeviceInfo {
-            port_class,
-            mac: mac.map(Into::into),
-            topological_path: topological_path.clone(),
-        })
+        Ok(DeviceInfo { port_class, mac: mac.map(Into::into), bus_info: bus_info.clone() })
     }
 
     pub async fn add_to_stack(
@@ -207,7 +208,7 @@ impl NetworkDeviceInstance {
         _netcfg: &super::NetCfg<'_>,
         config: crate::InterfaceConfig,
     ) -> Result<(u64, fidl_fuchsia_net_interfaces_ext::admin::Control), AddDeviceError> {
-        let NetworkDeviceInstance { port: _, port_id, device_control, topological_path: _ } = self;
+        let NetworkDeviceInstance { port: _, port_id, device_control, bus_info: _ } = self;
         let crate::InterfaceConfig { name, metric, netstack_managed_routes_designation } = config;
 
         let (control, control_server_end) =

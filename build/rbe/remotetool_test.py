@@ -11,9 +11,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import cl_utils
-import remotetool
-from build.rbe import rbe_profile
+from build.auth import auth_env
+from build.rbe import cl_utils, rbe_profile, reclient, remotetool
 
 
 class DictionaryDiffTests(unittest.TestCase):
@@ -245,7 +244,7 @@ class ConfigureRemotetoolTests(unittest.TestCase):
                 "read_text",
                 return_value="service=test-service:443\n",
             ) as mock_read:
-                tool = remotetool.configure_remotetool(Path("r.cfg"))
+                tool = remotetool.configure(Path("r.cfg"), env={})
         self.assertEqual(
             tool.config,
             {
@@ -256,6 +255,14 @@ class ConfigureRemotetoolTests(unittest.TestCase):
 
 
 class RemotetoolRunTests(unittest.TestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self._resolve_auth_patcher = mock.patch.object(
+            auth_env, "resolve_build_auth_type", return_value="oauth"
+        )
+        self.mock_resolve_auth = self._resolve_auth_patcher.start()
+        self.addCleanup(self._resolve_auth_patcher.stop)
+
     @property
     def tool(self) -> remotetool.RemoteTool:
         return remotetool.RemoteTool(reproxy_cfg=_TEST_CFG)
@@ -263,25 +270,75 @@ class RemotetoolRunTests(unittest.TestCase):
     def test_missing_params(self) -> None:
         tool = remotetool.RemoteTool(reproxy_cfg={})
         with self.assertRaises(KeyError):
-            tool.run(args=[])
+            tool.run(args=[], env={})
 
     def test_run_success(self) -> None:
         exit_code = 0
-        with mock.patch.object(
-            cl_utils,
-            "subprocess_call",
-            return_value=cl_utils.SubprocessResult(exit_code),
-        ) as mock_call:
+        with (
+            mock.patch.object(
+                reclient,
+                "adc_auth_flags",
+                return_value=["--fake_adc_flag"],
+            ) as mock_adc_flags,
+            mock.patch.object(
+                cl_utils,
+                "subprocess_call",
+                return_value=cl_utils.SubprocessResult(exit_code),
+            ) as mock_call,
+        ):
             result = self.tool.run(
                 args=[
                     "--operation",
                     "show_action",
                     "--digest",
                     "198273aaabbef87/323",
-                ]
+                ],
+                env={},
             )
         self.assertEqual(result.returncode, exit_code)
+        mock_adc_flags.assert_called_once_with()
         mock_call.assert_called_once()
+        cmd = mock_call.call_args.args[0]
+        self.assertIn("--fake_adc_flag", cmd)
+
+    def test_run_loas_uses_credential_helper(self) -> None:
+        self.mock_resolve_auth.return_value = "loas"
+        with (
+            mock.patch.object(
+                reclient,
+                "gcert_auth_flags",
+                return_value=["--fake_gcert_flag_1", "--fake_gcert_flag_2"],
+            ) as mock_gcert_flags,
+            mock.patch.object(
+                cl_utils,
+                "subprocess_call",
+                return_value=cl_utils.SubprocessResult(0),
+            ) as mock_call,
+        ):
+            self.tool.run(args=["--operation", "show_action"], env={})
+        mock_gcert_flags.assert_called_once_with()
+        cmd = mock_call.call_args.args[0]
+        self.assertIn("--fake_gcert_flag_1", cmd)
+        self.assertIn("--fake_gcert_flag_2", cmd)
+
+    def test_run_machine_uses_gce_credentials(self) -> None:
+        self.mock_resolve_auth.return_value = "machine"
+        with (
+            mock.patch.object(
+                reclient,
+                "gce_auth_flags",
+                return_value=["--fake_gce_flag"],
+            ) as mock_gce_flags,
+            mock.patch.object(
+                cl_utils,
+                "subprocess_call",
+                return_value=cl_utils.SubprocessResult(0),
+            ) as mock_call,
+        ):
+            self.tool.run(args=["--operation", "show_action"], env={})
+        mock_gce_flags.assert_called_once_with()
+        cmd = mock_call.call_args.args[0]
+        self.assertIn("--fake_gce_flag", cmd)
 
     def test_run_failure(self) -> None:
         exit_code = 1
@@ -295,7 +352,8 @@ class RemotetoolRunTests(unittest.TestCase):
                     args=[
                         "--operation",
                         "show_action",  # missing '--digest'
-                    ]
+                    ],
+                    env={},
                 )
         mock_call.assert_called_once()
 
@@ -387,6 +445,38 @@ class RemotetoolRunTests(unittest.TestCase):
             )
         mock_call.assert_called_once()
         self.assertEqual(result.returncode, exit_code)
+
+
+class MainTests(unittest.TestCase):
+    def test_main_success(self) -> None:
+        fake_tool = mock.create_autospec(remotetool.RemoteTool, instance=True)
+        fake_tool.run.return_value = cl_utils.SubprocessResult(0)
+        env = {"FOO": "bar"}
+        argv = ["--operation", "show_action", "--digest", "abc/123"]
+        with mock.patch.object(
+            remotetool,
+            "configure",
+            return_value=fake_tool,
+        ) as mock_configure:
+            rc = remotetool.main(argv, env=env)
+        self.assertEqual(rc, 0)
+        mock_configure.assert_called_once_with(remotetool._REPROXY_CFG, env=env)
+        fake_tool.run.assert_called_once_with(
+            argv, env=env, show_command=True, quiet=False
+        )
+
+    def test_main_called_process_error(self) -> None:
+        fake_tool = mock.create_autospec(remotetool.RemoteTool, instance=True)
+        fake_tool.run.side_effect = subprocess.CalledProcessError(
+            42, ["remotetool"]
+        )
+        with mock.patch.object(
+            remotetool,
+            "configure",
+            return_value=fake_tool,
+        ):
+            rc = remotetool.main(["--operation", "show_action"], env={})
+        self.assertEqual(rc, 42)
 
 
 if __name__ == "__main__":

@@ -120,12 +120,12 @@ impl TaskStatusReceiver for PartitionServer {
 }
 
 struct CqhciDriver {
-    _node: Arc<Node>,
+    _node: Node,
     // This scope handles incoming FIDL requests.  Tasks in this scope may retain strong references
     // to [`Self::command_queue`].
-    scope: Mutex<Option<Scope>>,
+    scope: Scope,
     partitions: Arc<Mutex<BTreeMap<String, Arc<PartitionServer>>>>,
-    command_queue: Mutex<Option<Arc<CommandQueue>>>,
+    command_queue: Arc<CommandQueue>,
     resume_handle: Mutex<Option<ResumeHandle>>,
     suspend_enabled: bool,
 }
@@ -303,115 +303,109 @@ impl Driver for CqhciDriver {
 
         context.serve_outgoing(&mut fs)?;
 
-        let node = Arc::new(context.take_node()?);
+        let node = context.take_node()?;
         let node_token = context.take_node_token().map(Arc::new);
         let inline_crypto_clone = inline_crypto.clone();
         let driver = CqhciDriver {
             _node: node,
-            scope: Mutex::new(Some(scope)),
+            scope,
             partitions,
-            command_queue: Mutex::new(Some(command_queue)),
+            command_queue,
             resume_handle: Mutex::default(),
             suspend_enabled,
         };
-        if let Some(scope) = driver.scope.lock().as_ref() {
-            scope.spawn(async move {
-                fs.for_each_concurrent(None, move |(request, partition_name)| {
-                    let partitions_clone = partitions_clone.clone();
-                    let node_token = node_token.clone();
-                    let inline_crypto_clone = inline_crypto_clone.clone();
-                    async move {
-                        match request {
-                            fvolume::ServiceRequest::Volume(requests) => {
-                                let partition =
-                                    partitions_clone.lock().get(&partition_name).cloned();
-                                if let Some(partition_server) = partition {
-                                    if let Err(error) =
-                                        partition_server.server.handle_requests(requests).await
-                                    {
-                                        error!(
-                                            error:?;
-                                            "Failed to handle requests for part {partition_name}"
-                                        );
-                                    }
-                                } else {
-                                    error!("Invalid partition {partition_name}");
-                                }
-                            }
-                            fvolume::ServiceRequest::Mapper(requests) => {
-                                let partition =
-                                    partitions_clone.lock().get(&partition_name).cloned();
-                                if let Some(partition_server) = partition {
-                                    if let Err(error) = partition_server
-                                        .server
-                                        .handle_mapper_requests(requests)
-                                        .await
-                                    {
-                                        error!(
-                                            error:?;
-                                            "Failed to handle mapper requests \
-                                             for part {partition_name}"
-                                        );
-                                    }
-                                } else {
-                                    error!("Invalid partition {partition_name}");
-                                }
-                            }
-                            fvolume::ServiceRequest::InlineEncryption(requests) => {
-                                let partition =
-                                    partitions_clone.lock().get(&partition_name).cloned();
-                                if let (Some(inline_crypto), Some(partition_server)) =
-                                    (inline_crypto_clone.clone(), partition)
+        driver.scope.spawn(async move {
+            fs.for_each_concurrent(None, move |(request, partition_name)| {
+                let partitions_clone = partitions_clone.clone();
+                let node_token = node_token.clone();
+                let inline_crypto_clone = inline_crypto_clone.clone();
+                async move {
+                    match request {
+                        fvolume::ServiceRequest::Volume(requests) => {
+                            let partition = partitions_clone.lock().get(&partition_name).cloned();
+                            if let Some(partition_server) = partition {
+                                if let Err(error) =
+                                    partition_server.server.handle_requests(requests).await
                                 {
-                                    if let Err(error) = handle_inline_encryption_requests(
-                                        inline_crypto,
-                                        partition_server,
-                                        requests,
-                                    )
-                                    .await
-                                    {
-                                        error!(
-                                            error:?;
-                                            "Failed to handle inline encryption requests \
-                                             for part {partition_name}"
-                                        );
-                                    }
-                                } else {
-                                    error!("Inline encryption not supported by underlying device.");
+                                    error!(
+                                        error:?;
+                                        "Failed to handle requests for part {partition_name}"
+                                    );
                                 }
+                            } else {
+                                error!("Invalid partition {partition_name}");
                             }
-                            fvolume::ServiceRequest::Token(stream) => {
-                                if let Some(token) = node_token {
-                                    if let Err(error) = handle_token_requests(token, stream).await {
-                                        error!(
-                                            error:?;
-                                            "Failed to handle token requests \
-                                                for part {partition_name}"
-                                        );
-                                    }
-                                } else {
-                                    error!("Node token wasn't provided by framework");
+                        }
+                        fvolume::ServiceRequest::Mapper(requests) => {
+                            let partition = partitions_clone.lock().get(&partition_name).cloned();
+                            if let Some(partition_server) = partition {
+                                if let Err(error) =
+                                    partition_server.server.handle_mapper_requests(requests).await
+                                {
+                                    error!(
+                                        error:?;
+                                        "Failed to handle mapper requests \
+                                         for part {partition_name}"
+                                    );
                                 }
+                            } else {
+                                error!("Invalid partition {partition_name}");
+                            }
+                        }
+                        fvolume::ServiceRequest::InlineEncryption(requests) => {
+                            let partition = partitions_clone.lock().get(&partition_name).cloned();
+                            if let (Some(inline_crypto), Some(partition_server)) =
+                                (inline_crypto_clone.clone(), partition)
+                            {
+                                if let Err(error) = handle_inline_encryption_requests(
+                                    inline_crypto,
+                                    partition_server,
+                                    requests,
+                                )
+                                .await
+                                {
+                                    error!(
+                                        error:?;
+                                        "Failed to handle inline encryption requests \
+                                         for part {partition_name}"
+                                    );
+                                }
+                            } else {
+                                error!("Inline encryption not supported by underlying device.");
+                            }
+                        }
+                        fvolume::ServiceRequest::Token(stream) => {
+                            if let Some(token) = node_token {
+                                if let Err(error) = handle_token_requests(token, stream).await {
+                                    error!(
+                                        error:?;
+                                        "Failed to handle token requests \
+                                            for part {partition_name}"
+                                    );
+                                }
+                            } else {
+                                error!("Node token wasn't provided by framework");
                             }
                         }
                     }
-                })
-                .await;
-            });
-        }
+                }
+            })
+            .await;
+        });
 
         info!("cqhci driver started");
         Ok(driver)
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("cqhci driver stopping");
         #[cfg(test)]
         SHUTTING_DOWN_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
 
-        let Some(command_queue) = self.command_queue.lock().take() else { unreachable!() };
+        let Self { _node, scope, partitions, command_queue, resume_handle, suspend_enabled: _ } =
+            self;
         // This will resume if currently suspended.
-        let resume_handle = self.resume_handle.lock().take();
+        let resume_handle = resume_handle.lock().take();
         if let Some(resume_handle) = resume_handle {
             let _ = resume_handle.resume().await;
         }
@@ -419,7 +413,7 @@ impl Driver for CqhciDriver {
         debug!("cqhci shut down");
 
         {
-            let partitions = std::mem::take(&mut *self.partitions.lock());
+            let partitions = std::mem::take(&mut *partitions.lock());
             for (_, partition_server) in partitions {
                 fasync::unblock(move || {
                     partition_server.shutdown();
@@ -428,10 +422,7 @@ impl Driver for CqhciDriver {
             }
         }
         debug!("sessions closed");
-        let scope = self.scope.lock().take();
-        if let Some(scope) = scope {
-            scope.cancel().await;
-        }
+        scope.cancel().await;
         debug!("scope cancelled");
         debug_assert!(Arc::strong_count(&command_queue) == 1);
         command_queue.unpin_buffers();
@@ -441,8 +432,7 @@ impl Driver for CqhciDriver {
 
 impl SuspendableDriver for CqhciDriver {
     async fn suspend(&self) {
-        let Some(cq) = self.command_queue.lock().as_ref().cloned() else { return };
-        match cq.suspend().await {
+        match self.command_queue.suspend().await {
             Ok(resume_handle) => {
                 let _ = self.resume_handle.lock().replace(resume_handle);
             }

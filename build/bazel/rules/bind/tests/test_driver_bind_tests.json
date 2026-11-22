@@ -1,0 +1,16 @@
+[
+    {
+        "device": {
+            "test.bindlib.parent.Flavor": "test.bindlib.parent.Flavor.VANILLA"
+        },
+        "expected": "match",
+        "name": "Vanilla"
+    },
+    {
+        "device": {
+            "test.bindlib.parent.Flavor": "\"chocolate\""
+        },
+        "expected": "abort",
+        "name": "Chocolate"
+    }
+]

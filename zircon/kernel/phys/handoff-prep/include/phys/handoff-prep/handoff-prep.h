@@ -24,15 +24,15 @@
 #include <ktl/span.h>
 #include <ktl/tuple.h>
 #include <ktl/utility.h>
-#include <phys/address-space.h>
-#include <phys/elf-image.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/new.h>
+#include <phys/allocation/zbitl.h>
+#include <phys/elf/image.h>
 #include <phys/handoff/handoff.h>
 #include <phys/handoff/ptr.h>
 #include <phys/handoff/zircon-abi-spec.h>
 #include <phys/kernel-package/kernel-package.h>
-#include <phys/new.h>
-#include <phys/uart/driver.h>
-#include <phys/zbitl-allocation.h>
+#include <phys/output/uart.h>
 
 struct ArchPatchInfo;
 struct BootOptions;

@@ -41,7 +41,7 @@ impl Driver for ZirconChildDriver {
         Ok(Self { node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("ZirconChildDriver::stop() was invoked. Use this function to do any cleanup needed.");
     }
 }

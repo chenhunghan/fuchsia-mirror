@@ -156,7 +156,7 @@ fidl::WireServer<::test_placementofattributes::ExampleProtocol>::Handler fidl::W
 
 ::fidl::internal::TransactionalRequest<::test_placementofattributes::ExampleProtocol::Method>::TransactionalRequest(const ::test_exampleusing::wire::Empty& arg)
     : body(::test_placementofattributes::wire::ExampleProtocolMethodRequest{arg}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_placementofattributes::kExampleProtocol_Method_Ordinal, ::test_placementofattributes::kExampleProtocol_Method_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_placementofattributes::kExampleProtocol_Method_Ordinal, ::test_placementofattributes::kExampleProtocol_Method_DynamicFlags);
 }
 
 template <bool IsRecursive>

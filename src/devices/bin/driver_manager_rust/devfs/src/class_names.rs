@@ -43,16 +43,6 @@ pub static CLASS_NAME_TO_SERVICE: phf::Map<&'static str, ServiceEntry> = phf_map
         service_name: "fuchsia.power.battery.InfoService",
         member_name: "device",
     },
-    "bt-emulator" => ServiceEntry {
-        state: State::DevfsAndService,
-        service_name: "fuchsia.hardware.bluetooth.EmulatorService",
-        member_name: "device",
-    },
-    "bt-hci" => ServiceEntry {
-        state: State::DevfsAndService,
-        service_name: "fuchsia.hardware.bluetooth.Service",
-        member_name: "vendor",
-    },
     "clock-impl" => ServiceEntry {
         state: State::DevfsAndService,
         service_name: "fuchsia.hardware.clock.measure.Service",
@@ -152,11 +142,6 @@ pub static CLASS_NAME_TO_SERVICE: phf::Map<&'static str, ServiceEntry> = phf_map
         state: State::DevfsAndService,
         service_name: "fuchsia.hardware.midi.Service",
         member_name: "controller",
-    },
-    "network" => ServiceEntry {
-        state: State::DevfsAndService,
-        service_name: "fuchsia.hardware.network.Service",
-        member_name: "device",
     },
     "ot-radio" => ServiceEntry {
         state: State::DevfsAndService,
@@ -269,6 +254,5 @@ pub static CLASSES_THAT_ASSUME_ORDERING: phf::Set<&'static str> = phf_set! {
 
 pub static CLASSES_THAT_ALLOW_TOPOLOGICAL_PATH: phf::Set<&'static str> = phf_set! {
     "devfs_service_test",
-    "network",
 };
 // LINT.ThenChange(//src/devices/bin/driver_manager/devfs/class_names.h)

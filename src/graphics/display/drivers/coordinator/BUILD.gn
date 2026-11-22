@@ -51,7 +51,6 @@ fuchsia_driver_component("coordinator") {
   ]
   cm_label = ":coordinator-manifest"
   deps = [ ":coordinator-driver" ]
-  info = "meta/coordinator-info.json"
 }
 
 fuchsia_driver_package("package") {

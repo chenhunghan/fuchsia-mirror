@@ -7,7 +7,6 @@ import("//build/rust/rustc_binary.gni")
 
 rustc_binary("bin") {
   edition = "2024"
-  testonly = true
   name = "netemul_runner"
   with_unit_tests = true
   deps = [
@@ -50,18 +49,13 @@ rustc_binary("bin") {
 }
 
 fuchsia_component("component") {
-  testonly = true
   component_name = "netemul-test-runner"
   manifest = "meta/netemul-test-runner.cml"
-  deps = [
-    ":bin",
-    "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-  ]
+  deps = [ ":bin" ]
   visibility = [ ":*" ]
 }
 
 fuchsia_package("package") {
-  testonly = true
   visibility = [
     ":*",
     "//bundles/assembly/*",
@@ -70,13 +64,12 @@ fuchsia_package("package") {
   ]
   package_name = "netemul-test-runner"
   deps = [ ":component" ]
+  subpackages = [ "//src/connectivity/network/testing/netemul/service:package" ]
 }
 
 fuchsia_unittest_package("netemul-runner-unit-tests") {
-  deps = [
-    ":bin_test",
-    "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-  ]
+  deps = [ ":bin_test" ]
+  subpackages = [ "//src/connectivity/network/testing/netemul/service:package" ]
 }
 
 group("tests") {

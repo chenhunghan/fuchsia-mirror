@@ -126,5 +126,26 @@ class PrepareNinjaInvocationTest(unittest.TestCase):
         self.assertIn("Unable to determine ResultStore URL", str(cm.exception))
 
 
+class MainTest(unittest.TestCase):
+    @mock.patch.object(rsninja, "os", autospec=True, spec_set=True)
+    def test_main_execs_ninja_wrapper(self, mock_os: mock.MagicMock) -> None:
+        rsninja.main(
+            [
+                "--wrapper=/path/to/rs-ninja.sh",
+                "--ninja-bin=/path/to/ninja",
+                "--",
+                "-C",
+                "out/default",
+                "target",
+            ],
+            {"RS_results_url": "http://go/fake-rs"},
+        )
+        mock_os.execvpe.assert_called_once()
+        cmd = mock_os.execvpe.call_args[0][1]
+        self.assertSequenceEqual(
+            cmd[:2], ["/path/to/rs-ninja.sh", "/path/to/ninja"]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

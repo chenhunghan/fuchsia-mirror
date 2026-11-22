@@ -2,8 +2,8 @@
     "allowed_licenses": {
         "CC-BY-4.0": [
             {
-                "bug": "https://fxbug.dev/42084124",
-                "description": "",
+                "bug": "b/42084124",
+                "description": "gfxstream includes Khronos Vulkan documentation assets licensed under CC-BY-4.0.",
                 "paths": [
                     "third_party/gfxstream"
                 ]

@@ -10,7 +10,7 @@
 
 #include <iostream>
 
-// An implementation of the Echo protocol. Protocols are implemented in LLCPP by
+// An implementation of the Echo protocol. Protocols are implemented in C++ wire bindings by
 // creating a subclass of the ::Interface class for the protocol.
 class EchoImpl final : public fidl::WireServer<fuchsia_examples::Echo> {
  public:

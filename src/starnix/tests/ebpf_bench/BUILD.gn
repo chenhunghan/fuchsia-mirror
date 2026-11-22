@@ -35,6 +35,7 @@ fuchsia_package("ebpf_bench") {
 fuchsia_component_perf_test("ebpf_benchmark") {
   package = ":ebpf_bench"
   component_name = "ebpf_bench"
+  test_type = "system"
   expected_metric_names_filepath =
       "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.ebpf.txt"
 }
@@ -71,7 +72,10 @@ rustc_binary("bin") {
   edition = "2024"
   lint_config = "//src/starnix/build:kernel_library_config"
   deps = [
+    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+    "//sdk/rust/zx",
     "//src/developer/fuchsia-criterion",
+    "//src/lib/fuchsia-component",
     "//src/starnix/lib/ebpf",
     "//src/starnix/lib/ebpf_api",
     "//src/starnix/lib/ebpf_loader",

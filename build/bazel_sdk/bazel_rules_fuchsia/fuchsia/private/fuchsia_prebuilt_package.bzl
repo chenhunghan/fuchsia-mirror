@@ -7,7 +7,7 @@
 load("@bazel_skylib//rules:select_file.bzl", "select_file")
 load("@fuchsia_rules_common//:local_actions.bzl", "LOCAL_ONLY_ACTION_KWARGS")
 load("@fuchsia_rules_common//debug_symbols:providers.bzl", "FuchsiaDebugSymbolInfo")
-load("@fuchsia_rules_common//packages:prebuilt_package.bzl", "unpack_prebuilt_package_impl")
+load("@fuchsia_rules_common//packages:prebuilt_package.bzl", "unpack_prebuilt_package_common_impl")
 load("@fuchsia_rules_common//packages:providers.bzl", "FuchsiaPackageInfo")
 load("//fuchsia/constraints:target_compatibility.bzl", "COMPATIBILITY")
 load("//fuchsia/private:fuchsia_toolchains.bzl", "FUCHSIA_TOOLCHAIN_DEFINITION", "get_fuchsia_sdk_toolchain")
@@ -56,7 +56,7 @@ def _make_component_info(ctx):
 def _unpack_prebuilt_package_impl(ctx):
     sdk = get_fuchsia_sdk_toolchain(ctx)
 
-    return unpack_prebuilt_package_impl(
+    return unpack_prebuilt_package_common_impl(
         ctx,
         package_tool = sdk.ffx_package,
         package_tool_is_ffx = True,

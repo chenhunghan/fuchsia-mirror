@@ -13,11 +13,26 @@ package(default_applicable_licenses = ["//:license"])
 # //zircon/kernel/lib/arch is the full static_library.
 fx_cc_library(
     name = "arch",
-    hdrs = select({
-        "@platforms//cpu:arm": ["arm/include/lib/arch/intrin.h"],
-        "@platforms//cpu:arm64": ["arm64/include/lib/arch/intrin.h"],
-        "@platforms//cpu:riscv64": ["riscv64/include/lib/arch/intrin.h"],
-        "@platforms//cpu:x86_64": ["x86/include/lib/arch/intrin.h"],
+    hdrs = [
+        "include/lib/arch/asm.h",
+        "include/lib/arch/internal/asm.h",
+    ] + select({
+        "@platforms//cpu:arm": [
+            "arm/include/lib/arch/asm.h",
+            "arm/include/lib/arch/intrin.h",
+        ],
+        "@platforms//cpu:arm64": [
+            "arm64/include/lib/arch/asm.h",
+            "arm64/include/lib/arch/intrin.h",
+        ],
+        "@platforms//cpu:riscv64": [
+            "riscv64/include/lib/arch/asm.h",
+            "riscv64/include/lib/arch/intrin.h",
+        ],
+        "@platforms//cpu:x86_64": [
+            "x86/include/lib/arch/asm.h",
+            "x86/include/lib/arch/intrin.h",
+        ],
         "//conditions:default": [],
     }),
     includes = select({
@@ -26,18 +41,58 @@ fx_cc_library(
         "@platforms//cpu:riscv64": ["riscv64/include"],
         "@platforms//cpu:x86_64": ["x86/include"],
         "//conditions:default": [],
-    }),
+    }) + ["include"],
     visibility = [
         "//sdk/lib/c:__subpackages__",
         "//sdk/lib/ld:__subpackages__",
         "//src/bringup:__subpackages__",
         "//src/firmware/paver/test:__pkg__",
-        "//src/performance/memory/stacktrack/instrumentation:__pkg__",
+        "//src/memory/stacktrack/instrumentation:__pkg__",
         "//src/virtualization/tests/hypervisor:__pkg__",
         "//src/zircon:__subpackages__",
         "//zircon/kernel:__subpackages__",
         "//zircon/system:__subpackages__",
         "//zircon/third_party:__subpackages__",
+    ],
+    deps = select({
+        "@platforms//cpu:arm": [],
+        "@platforms//cpu:arm64": [],
+        "@platforms//cpu:riscv64": [],
+        "@platforms//cpu:x86_64": [],
+        "//conditions:default": ["//zircon/kernel/lib/arch/host"],
+    }),
+)
+
+# Partial, Bazel-only headers target providing <lib/arch/asm.h> for Bazel
+# consumers such as //src/lib/zbitl:headers. Per-CPU include directories come
+# before common "include" so <cpu>/include/lib/arch/asm.h takes precedence and
+# can #include_next <lib/arch/asm.h>.
+fx_cc_library(
+    name = "headers",
+    hdrs = [
+        "include/lib/arch/asm.h",
+        "include/lib/arch/internal/asm.h",
+    ] + select({
+        "@platforms//cpu:arm": ["arm/include/lib/arch/asm.h"],
+        "@platforms//cpu:arm64": ["arm64/include/lib/arch/asm.h"],
+        "@platforms//cpu:riscv64": ["riscv64/include/lib/arch/asm.h"],
+        "@platforms//cpu:x86_64": ["x86/include/lib/arch/asm.h"],
+        "//conditions:default": [],
+    }),
+    includes = select({
+        "@platforms//cpu:arm": ["arm/include"],
+        "@platforms//cpu:arm64": ["arm64/include"],
+        "@platforms//cpu:riscv64": ["riscv64/include"],
+        "@platforms//cpu:x86_64": ["x86/include"],
+        "//conditions:default": [],
+    }) + ["include"],
+    visibility = [
+        "//sdk/lib/c:__subpackages__",
+        "//sdk/lib/ld:__subpackages__",
+        "//src/devices/block/drivers/ufs:__pkg__",
+        "//src/lib/zbitl:__subpackages__",
+        "//zircon/kernel:__subpackages__",
+        "//zircon/system/ulib/uart:__pkg__",
     ],
     deps = select({
         "@platforms//cpu:arm": [],

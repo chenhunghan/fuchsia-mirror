@@ -34,7 +34,6 @@ fidl("fuchsia.audio.mixer") {
     "sampler_options.fidl",
     "synthetic_clock.fidl",
   ]
-  enable_hlcpp = true
   visibility = [ "*" ]
   public_deps = [
     "//sdk/fidl/fuchsia.audio",

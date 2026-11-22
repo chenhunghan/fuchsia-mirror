@@ -19,18 +19,17 @@
 
 #include <stddef.h>
 
-#include <atomic>
 #include <deque>
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 
 #if 0
 #include "adb_unique_fd.h"
 #include "fdevent/fdevent.h"
 #endif
 
+#include <lib/async/cpp/wait.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/socket.h>
 
@@ -50,7 +49,7 @@ struct asocket {
   /* flag: set when the socket's peer has closed
    * but packets are still queued for delivery
    */
-  int closing = 0;
+  bool closing = false;
 
   // flag: set when the socket failed to write, so the socket will not wait to
   // write packets and close directly.
@@ -102,8 +101,18 @@ struct asocket {
   // fdevent* fde = nullptr;
   // int fd = -1;
   zx::socket zx_socket;
+  void OnIncomingSocketWritable(async_dispatcher_t* dispatcher, async::WaitBase* wait,
+                                zx_status_t status, const zx_packet_signal_t* signal);
+  void OnOutgoingSocketReadable(async_dispatcher_t* dispatcher, async::WaitBase* wait,
+                                zx_status_t status, const zx_packet_signal_t* signal);
+  async::WaitMethod<asocket, &asocket::OnIncomingSocketWritable> incoming_wait{
+      this, ZX_HANDLE_INVALID,
+      ZX_SOCKET_WRITABLE | ZX_SOCKET_WRITE_DISABLED | ZX_SOCKET_PEER_CLOSED};
+  async::WaitMethod<asocket, &asocket::OnOutgoingSocketReadable> outgoing_wait{
+      this, ZX_HANDLE_INVALID,
+      ZX_SOCKET_READABLE | ZX_SOCKET_PEER_WRITE_DISABLED | ZX_SOCKET_PEER_CLOSED};
 
-  void* adb;
+  void* adb = nullptr;
 
   // Queue of data that we've received from our peer, and are waiting to write into fd.
   // IOVector packet_queue;
@@ -117,8 +126,6 @@ struct asocket {
   // A temporary buffer used to hold a partially-read service string for smartsockets.
   std::string smart_socket_data;
 
-  std::thread outgoing_thrd;
-  std::atomic<bool> destroy_outgoing = true;
   std::string name;
 };
 

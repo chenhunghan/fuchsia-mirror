@@ -111,7 +111,7 @@ class StrictUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kField = 1,  // 0x1
   };
 
@@ -161,9 +161,9 @@ class FlexibleUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   FlexibleUnion(FlexibleUnion&& other) noexcept;

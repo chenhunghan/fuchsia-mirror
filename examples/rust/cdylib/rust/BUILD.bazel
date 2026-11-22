@@ -3,22 +3,18 @@
 # found in the LICENSE file.
 
 load("@rules_rust//rust:rust_shared_library.bzl", "rust_shared_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/rust:common.bzl", "with_fuchsia_rust_stdlib_link_deps")
 
 package(default_applicable_licenses = ["//:license"])
 
-exports_files(
-    ["crust.h"],
-    visibility = ["//examples/rust/cdylib:__pkg__"],
-)
-
+# C/C++ consumers use the header through `:crust_headers`.
 rust_shared_library(
     name = "crust-shared",
     srcs = ["src/lib.rs"],
     crate_name = "crust_shared_rust",
     edition = "2024",
     link_deps = with_fuchsia_rust_stdlib_link_deps([]),
-    visibility = ["//examples/rust/cdylib:__pkg__"],
 )
 
 rust_shared_library(
@@ -28,4 +24,11 @@ rust_shared_library(
     edition = "2024",
     link_deps = with_fuchsia_rust_stdlib_link_deps([]),
     visibility = ["//examples/rust/cdylib:__pkg__"],
+)
+
+fx_cc_library(
+    name = "crust_headers",
+    hdrs = ["crust.h"],
+    visibility = ["//examples/rust/cdylib:__pkg__"],
+    deps = [":crust-shared"],
 )

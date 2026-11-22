@@ -6,7 +6,6 @@ group("location") {
   testonly = true
   deps = [
     "emergency",
-    "gnss:gnss_service",
     "regulatory_region",
   ]
 }

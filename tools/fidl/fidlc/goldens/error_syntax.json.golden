@@ -69,7 +69,7 @@
     {
       "name": "test.errorsyntax/ExampleUseOfErrorSyntax",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
         "line": 9,
         "column": 17,
         "length": 23
@@ -80,7 +80,7 @@
         {
           "name": "test.errorsyntax.parent/ParentUsesErrorSyntax",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "line": 10,
             "column": 13,
             "length": 45
@@ -95,7 +95,7 @@
           "name": "ComposedCallWhichMayFail",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
             "line": 8,
             "column": 12,
             "length": 24
@@ -167,7 +167,7 @@
           "name": "CallWhichMayFail",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "line": 11,
             "column": 12,
             "length": 16
@@ -246,7 +246,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
         "line": 11,
         "column": 29,
         "length": 32
@@ -269,7 +269,7 @@
           },
           "name": "s",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "line": 12,
             "column": 9,
             "length": 1
@@ -302,7 +302,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
         "line": 13,
         "column": 12,
         "length": 35
@@ -325,7 +325,7 @@
           },
           "name": "value",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "line": 14,
             "column": 9,
             "length": 5
@@ -359,7 +359,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "line": 8,
         "column": 37,
         "length": 32
@@ -382,7 +382,7 @@
           },
           "name": "s",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
             "line": 9,
             "column": 9,
             "length": 1
@@ -415,7 +415,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "line": 10,
         "column": 12,
         "length": 35
@@ -438,7 +438,7 @@
           },
           "name": "value",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
             "line": 11,
             "column": 9,
             "length": 5
@@ -473,7 +473,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
         "line": 13,
         "column": 11,
         "length": 37

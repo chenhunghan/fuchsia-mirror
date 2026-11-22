@@ -53,8 +53,8 @@ class FlatlandView : public fidl::AsyncEventHandler<fuchsia_ui_composition::Flat
   void OnFlatlandError(fuchsia_ui_composition::FlatlandError error);
   void Present();
 
-  fidl::SharedClient<fuchsia_ui_composition::Flatland> flatland_;
-  fidl::SharedClient<fuchsia_ui_composition::ParentViewportWatcher> parent_viewport_watcher_;
+  fidl::Client<fuchsia_ui_composition::Flatland> flatland_;
+  fidl::Client<fuchsia_ui_composition::ParentViewportWatcher> parent_viewport_watcher_;
 
   fuchsia_ui_views::ViewportCreationToken viewport_creation_token_;
   fuchsia_ui_views::ViewCreationToken child_view_creation_token_;

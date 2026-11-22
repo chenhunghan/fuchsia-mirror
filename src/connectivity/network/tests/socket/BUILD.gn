@@ -91,7 +91,6 @@ test("netstack_${dgramsocket_label}_test") {
     deps += [
       "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp",
       "//sdk/lib/fdio",
-      "//src/connectivity/network/lib/udp_serde",
     ]
   }
 }
@@ -264,9 +263,6 @@ socket_tests = [
 test_component_names = []
 
 socket_test_package_deps = [
-  # dns_resolver is under test.
-  "//src/connectivity/network/dns:component",
-
   # cat is used to test FD passing in :fuchsia_test.
   "//third_party/sbase:cat_bin",
 

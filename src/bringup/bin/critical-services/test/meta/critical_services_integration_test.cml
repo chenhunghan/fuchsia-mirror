@@ -12,10 +12,6 @@
     },
     children: [
         {
-            name: "config",
-            url: "#meta/critical-services_config.cm",
-        },
-        {
             name: "critical-services",
             url: "#meta/critical-services.cm",
             startup: "eager",
@@ -26,6 +22,21 @@
         },
     ],
     capabilities: [
+        {
+            config: "fuchsia.diagnostics.ExceptionHandlerAvailable",
+            type: "bool",
+            value: false,
+        },
+        {
+            config: "fuchsia.diagnostics.StorageStallWatchdogEnabled",
+            type: "bool",
+            value: false,
+        },
+        {
+            config: "fuchsia.diagnostics.StorageStallWatchdogSimulateStallSecs",
+            type: "uint64",
+            value: 0,
+        },
         {
             directory: "input",
             rights: [ "r*" ],
@@ -43,8 +54,9 @@
             config: [
                 "fuchsia.diagnostics.ExceptionHandlerAvailable",
                 "fuchsia.diagnostics.StorageStallWatchdogEnabled",
+                "fuchsia.diagnostics.StorageStallWatchdogSimulateStallSecs",
             ],
-            from: "#config",
+            from: "self",
             to: "#critical-services",
         },
         {

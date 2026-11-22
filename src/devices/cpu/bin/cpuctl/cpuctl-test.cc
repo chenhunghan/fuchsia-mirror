@@ -32,6 +32,8 @@ constexpr uint64_t kLogicalCoreIds[kNumLogicalCores] = {1, 2, 3, 4};
 class FakeCpuDevice : public fidl::testing::WireTestBase<cpuctrl::Device> {
  public:
   unsigned int OppSetCount() const { return opp_set_count_; }
+  unsigned int CoreIdQueryCount() const { return core_id_query_count_; }
+  void ReplyPlaceholderCoreIds() { reply_placeholder_core_ids_ = true; }
 
   void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
     ADD_FAILURE("unexpected call to %s", name.c_str());
@@ -54,6 +56,9 @@ class FakeCpuDevice : public fidl::testing::WireTestBase<cpuctrl::Device> {
 
   uint32_t current_opp_ = kInitialOperatingPoint;
   unsigned int opp_set_count_ = 0;
+  unsigned int core_id_query_count_ = 0;
+  // When set, GetLogicalCoreId() replies 0 for every index.
+  bool reply_placeholder_core_ids_ = false;
 };
 
 void FakeCpuDevice::GetOperatingPointInfo(GetOperatingPointInfoRequestView request,
@@ -75,8 +80,15 @@ void FakeCpuDevice::GetNumLogicalCores(GetNumLogicalCoresCompleter::Sync& comple
 
 void FakeCpuDevice::GetLogicalCoreId(GetLogicalCoreIdRequestView request,
                                      GetLogicalCoreIdCompleter::Sync& completer) {
+  core_id_query_count_++;
+  // Mimic a driver that doesn't report real core IDs.
+  if (reply_placeholder_core_ids_) {
+    completer.Reply(0);
+    return;
+  }
   if (request->index >= std::size(kLogicalCoreIds)) {
     completer.Reply(UINT64_MAX);
+    return;
   }
   completer.Reply(kLogicalCoreIds[request->index]);
 }
@@ -144,6 +156,38 @@ TEST_F(PerformanceDomainTest, TestNumLogicalCores) {
 
   EXPECT_OK(core_count_status);
   EXPECT_EQ(core_count, kNumLogicalCores);
+}
+
+TEST_F(PerformanceDomainTest, TestGetLogicalCoreIds) {
+  // The first call asks the device for every core.
+  {
+    const auto [status, ids] = pd().GetLogicalCoreIds();
+    EXPECT_OK(status);
+    ASSERT_EQ(ids.size(), kNumLogicalCores);
+    for (size_t i = 0; i < kNumLogicalCores; i++) {
+      EXPECT_EQ(ids[i], kLogicalCoreIds[i]);
+    }
+  }
+  EXPECT_EQ(cpu().CoreIdQueryCount(), kNumLogicalCores);
+
+  // The second call returns the cached IDs without asking again.
+  {
+    const auto [status, ids] = pd().GetLogicalCoreIds();
+    EXPECT_OK(status);
+    ASSERT_EQ(ids.size(), kNumLogicalCores);
+    for (size_t i = 0; i < kNumLogicalCores; i++) {
+      EXPECT_EQ(ids[i], kLogicalCoreIds[i]);
+    }
+  }
+  EXPECT_EQ(cpu().CoreIdQueryCount(), kNumLogicalCores);
+}
+
+// A driver that replies the same ID for every core doesn't report real IDs.
+TEST_F(PerformanceDomainTest, TestGetLogicalCoreIdsPlaceholder) {
+  cpu().ReplyPlaceholderCoreIds();
+  const auto [status, ids] = pd().GetLogicalCoreIds();
+  EXPECT_STATUS(status, ZX_ERR_NOT_SUPPORTED);
+  EXPECT_TRUE(ids.empty());
 }
 
 TEST_F(PerformanceDomainTest, TestGetCurrentOperatingPoint) {

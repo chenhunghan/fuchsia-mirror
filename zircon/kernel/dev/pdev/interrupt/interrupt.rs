@@ -29,8 +29,8 @@ use zx_status::Status;
 // Rust, so it has no C++ ABI.
 
 pub use crate::dev_interrupt::{
-    InterruptHandler, InterruptPolarity, InterruptTriggerMode, InterruptVector, MAX_INTERRUPTS,
-    MsiBlock,
+    INTERRUPT_VALID_KERNEL, InterruptHandler, InterruptPolarity, InterruptTriggerMode,
+    InterruptVector, MAX_INTERRUPTS, MsiBlock,
 };
 
 pub struct IntHandlerStruct {
@@ -80,18 +80,14 @@ static PDEV_INTERRUPTS: LazyInit<PdevInterruptManager> = LazyInit::uninit();
 /// Implemented by the platform's interrupt controller driver and installed with
 /// [`register_interrupt_controller`].
 pub trait InterruptControllerOps: Sync + 'static {
-    /// Disables (masks) the interrupt specified by `vector`. In the case of interrupts which
-    /// target a specific CPU but share an interrupt vector number (for example, SGIs and PPIs in
-    /// ARM's GIC interrupt controller designs), this affects the masked/unmasked state of the
-    /// interrupt vector for the caller's CPU only. It does not mask the specified vector for any
-    /// of the other CPUs.
+    /// Disables (masks) the interrupt specified by `vector`. For per-CPU interrupts such as PPIs
+    /// and kernel IPIs, this affects the caller's CPU only. For reserved non-kernel SGIs (platform
+    /// doorbells), this masks the vector across all active CPUs.
     fn mask(&self, vector: InterruptVector) -> Result<(), Status>;
 
-    /// Enables (unmasks) the interrupt specified by `vector`. In the case of interrupts which
-    /// target a specific CPU but share an interrupt vector number (for example, SGIs and PPIs in
-    /// ARM's GIC interrupt controller designs), this affects the masked/unmasked state of the
-    /// interrupt vector for the caller's CPU only. It does not unmask the specified vector for
-    /// any of the other CPUs.
+    /// Enables (unmasks) the interrupt specified by `vector`. For per-CPU interrupts such as PPIs
+    /// and kernel IPIs, this affects the caller's CPU only. For reserved non-kernel SGIs (platform
+    /// doorbells), this unmasks the vector across all active CPUs.
     fn unmask(&self, vector: InterruptVector) -> Result<(), Status>;
 
     /// Deactivates the interrupt specified by `vector`.
@@ -378,7 +374,8 @@ unsafe fn register_int_handler_common(
     handler: InterruptHandler,
     permanent: bool,
 ) -> Result<(), Status> {
-    if !get_driver().is_valid(vector, 0) {
+    let flags = if permanent { INTERRUPT_VALID_KERNEL } else { 0 };
+    if !get_driver().is_valid(vector, flags) {
         return Err(Status::INVALID_ARGS);
     }
 

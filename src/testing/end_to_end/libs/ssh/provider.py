@@ -14,6 +14,7 @@ import time
 from dataclasses import dataclass
 from typing import IO, Mapping
 
+from libs import errors
 from libs.net import wait_for_port
 from libs.proc.runner import (
     CalledProcessError,
@@ -22,10 +23,11 @@ from libs.proc.runner import (
 )
 from libs.types import Json
 from libs.validation import MapValidator
-from mobly import logger, signals
 
 # TODO(https://fxbug.dev/567167756): Merge SSHProvider and SshConnection into a
 # single SSH library.
+
+_LOGGER = logging.getLogger(__name__)
 
 DEFAULT_SSH_PORT: int = 22
 DEFAULT_SSH_TIMEOUT_SEC: float = 60.0
@@ -95,7 +97,7 @@ class SSHResult:
         return self._exit_status
 
 
-class SSHError(signals.TestError):
+class SSHError(errors.TestError):
     """A SSH command returned with a non-zero status code."""
 
     def __init__(
@@ -210,25 +212,16 @@ class SSHProvider(Runner):
         Args:
             config: SSH client config
         """
-        logger_tag = f"ssh | {config.host_name}"
+        # Host tag used in log messages.
+        self._host_tag = config.host_name
         if config.port != DEFAULT_SSH_PORT:
-            logger_tag += f":{config.port}"
-
-        # Escape IPv6 interface identifier if present.
-        logger_tag = logger_tag.replace("%", "%%")
-
-        self.log = logger.PrefixLoggerAdapter(
-            logging.getLogger(),
-            {
-                logger.PrefixLoggerAdapter.EXTRA_KEY_LOG_PREFIX: f"[{logger_tag}]",
-            },
-        )
+            self._host_tag += f":{config.port}"
 
         self.config = config
 
         try:
             self.wait_until_reachable()
-            self.log.info("sshd is reachable")
+            _LOGGER.info("[ssh | %s] sshd is reachable", self._host_tag)
         except Exception as e:
             raise TimeoutError("sshd is unreachable") from e
 
@@ -348,7 +341,9 @@ class SSHProvider(Runner):
                 return self._run(command, stdin, timeout_sec, log_output)
             except CalledProcessTransportError as e:
                 err = e
-                self.log.warning("Connect failed: %s", e)
+                _LOGGER.warning(
+                    "[ssh | %s] Connect failed: %s", self._host_tag, e
+                )
         raise err
 
     def _run(
@@ -376,8 +371,10 @@ class SSHProvider(Runner):
             exit_code = process.poll()
 
             if log_output:
-                self.log.debug(
-                    "Command %s exited with %d after %.2fs\nstdout: %s\nstderr: %s",
+                _LOGGER.debug(
+                    "[ssh | %s] Command %s exited with %d after %.2fs\n"
+                    "stdout: %s\nstderr: %s",
+                    self._host_tag,
                     " ".join(command),
                     exit_code,
                     elapsed,
@@ -385,8 +382,9 @@ class SSHProvider(Runner):
                     stderr.decode("utf-8", errors="replace"),
                 )
             else:
-                self.log.debug(
-                    "Command %s exited with %d after %.2fs",
+                _LOGGER.debug(
+                    "[ssh | %s] Command %s exited with %d after %.2fs",
+                    self._host_tag,
                     " ".join(command),
                     exit_code,
                     elapsed,
@@ -447,8 +445,11 @@ class SSHProvider(Runner):
         stderr: IO[bytes] | int = subprocess.PIPE,
     ) -> subprocess.Popen[bytes]:
         full_command = self.config.full_command(command)
-        self.log.debug(
-            f"Starting: {' '.join(command)}\nFull command: {' '.join(full_command)}"
+        _LOGGER.debug(
+            "[ssh | %s] Starting: %s\nFull command: %s",
+            self._host_tag,
+            " ".join(command),
+            " ".join(full_command),
         )
         return subprocess.Popen(
             full_command,

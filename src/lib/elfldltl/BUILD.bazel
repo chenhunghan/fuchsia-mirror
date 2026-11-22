@@ -63,6 +63,7 @@ fx_cc_library_headers(
         "include/lib/elfldltl/relro.h",
         "include/lib/elfldltl/resolve.h",
         "include/lib/elfldltl/self.h",
+        "include/lib/elfldltl/shdr.h",
         "include/lib/elfldltl/soname.h",
         "include/lib/elfldltl/static-pie.h",
         "include/lib/elfldltl/static-pie-with-vdso.h",

@@ -102,7 +102,6 @@ fuchsia_cc_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
-  info = "meta/component-info.json"
   component_name = "chromiumos-ec-core"
   deps = [ ":driver" ]
   manifest = "meta/chromiumos-ec-core.cml"

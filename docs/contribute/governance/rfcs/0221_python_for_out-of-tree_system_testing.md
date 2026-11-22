@@ -68,7 +68,7 @@ conducted on a complete assembled system to validate that the system meets
 certain requirements. For a comprehensive definition, see
 [What are system tests?][system test def].
 
-## Product requirements
+## Product requirements {:#product-requirements}
 
 Summary of the product motivation and requirements to support next generation
 OOT system testing for Fuchsia.
@@ -170,7 +170,7 @@ solution**
             *   Ease of enabling automated static analysis tooling (e.g. linter,
             coverage, etc...).
 
-## Languages in consideration
+## Languages in consideration {:#languages-in-consideration}
 
 This section goes over several languages that are being considered for OOT
 system testing and provides evidence for/against each evaluation metric. To make
@@ -546,7 +546,7 @@ N/A
 [Go cloud testing]: https://pkg.go.dev/google.golang.org/api@v0.122.0/testing/v1
 [Go SL4F]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/testing/host-target-testing/sl4f/client.go;drc=c609c53aca0f8c4d926c23049cdd3bc0f4bfb1eb
 [Python SL4F]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/testing/end_to_end/honeydew/transports/sl4f.py;drc=33a1caf51d58ac3a413522fc210ad5b526f3fc18
-[system test def]: /docs/contribute/roadmap/2021/oot_system_testing.md#what_are_system_tests
+[system test def]: /docs/contribute/roadmap/2021/oot_system_testing.md#what-are-system-tests
 [FPLP]: /docs/contribute/governance/policy/programming_languages.md
 [RFC-0129]: /docs/contribute/governance/rfcs/0129_python_in_fuchsia.md
 [RFC-0176]: /docs/contribute/governance/rfcs/0176_disallow_new_dart_programs.md

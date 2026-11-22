@@ -46,3 +46,13 @@ type RecursiveOptionalWithInlineUnion = struct {
     inner box<RecursiveOptionalWithInlineUnion>;
     u InlineUint32Union:optional;
 };
+
+type RecursiveOptionalWithFlexibleUnion = struct {
+    inner box<RecursiveOptionalWithFlexibleUnion>;
+    u SampleUnion:optional;
+};
+
+type RecursiveOptionalWithEmptyTable = struct {
+    inner box<RecursiveOptionalWithEmptyTable>;
+    t TableFieldUnknown;
+};

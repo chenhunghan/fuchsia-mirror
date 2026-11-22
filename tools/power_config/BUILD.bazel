@@ -12,6 +12,7 @@ rustc_binary_host_tool(
     srcs = ["src/main.rs"],
     edition = "2024",
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools/power_config/tests:__pkg__"],
     deps = [
         "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust",
         "//src/lib/fidl/rust/fidl",

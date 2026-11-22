@@ -41,9 +41,6 @@ rustc_test(
     ],
 )
 
-# bazel2gn can't translate resource() or packages with resources, so the GN copy
-# of this test is packaged by hand in BUILD.gn.
-# @bazel2gn:skip
 resource(
     name = "testdata",
     testonly = True,
@@ -51,7 +48,6 @@ resource(
     dest = "data/key_bag.json",
 )
 
-# @bazel2gn:skip
 fx_unittest_package(
     name = "key-bag-tests",
     resources = [":testdata"],

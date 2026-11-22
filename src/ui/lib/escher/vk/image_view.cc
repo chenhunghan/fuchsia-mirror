@@ -49,10 +49,16 @@ ImageView::ImageView(ResourceRecycler* resource_recycler, ImagePtr image,
   view_info.subresourceRange.aspectMask = aspect_mask;
   view_info.format = image_->format();
   view_info.image = image_->vk();
-  image_view_ = ESCHER_CHECKED_VK_RESULT(vk_device().createImageView(view_info));
+  {
+    TRACE_DURATION("gfx", "vkCreateImageView");
+    image_view_ = ESCHER_CHECKED_VK_RESULT(vk_device().createImageView(view_info));
+  }
 }
 
-ImageView::~ImageView() { vk_device().destroyImageView(image_view_); }
+ImageView::~ImageView() {
+  TRACE_DURATION("gfx", "vkDestroyImageView");
+  vk_device().destroyImageView(image_view_);
+}
 
 ImageViewPtr ImageView::New(ImagePtr image, vk::ImageAspectFlags aspect_mask, SamplerPtr sampler) {
   FX_CHECK(image && image->escher());

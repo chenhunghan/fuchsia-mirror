@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/utils/log_format.h"
 
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/fit/function.h>
 #include <lib/syslog/cpp/log_level.h>
 #include <lib/syslog/cpp/macros.h>
@@ -47,29 +47,31 @@ std::string SeverityToString(const int32_t severity) {
 }
 
 fit::function<std::string(int32_t, const std::string&)> FormatFn(
-    const fuchsia::logger::LogMessage& message) {
+    const fuchsia_logger::LogMessage& message) {
   return [&message](int32_t severity, const std::string& msg) {
     return fxl::StringPrintf("[%05d.%03d][%05" PRIu64 "][%05" PRIu64 "][%s] %s: %s\n",
-                             static_cast<int>(message.time.get() / 1000000000ULL),
-                             static_cast<int>((message.time.get() / 1000000ULL) % 1000ULL),
-                             message.pid, message.tid, fxl::JoinStrings(message.tags, ", ").c_str(),
+                             static_cast<int>(message.time().get() / 1000000000ULL),
+                             static_cast<int>((message.time().get() / 1000000ULL) % 1000ULL),
+                             message.pid(), message.tid(),
+                             fxl::JoinStrings(message.tags(), ", ").c_str(),
                              SeverityToString(severity).c_str(), msg.c_str());
   };
 }
 
 }  // namespace
 
-std::string Format(const fuchsia::logger::LogMessage& message) {
+std::string Format(const fuchsia_logger::LogMessage& message) {
   fit::function<std::string(int32_t, const std::string&)> format = FormatFn(message);
 
   std::string log;
-  if (message.dropped_logs == 1) {
+  if (message.dropped_logs() == 1) {
     log += format(FUCHSIA_LOG_WARNING, kDroppedOnceFormatStr);
-  } else if (message.dropped_logs > 1) {
-    log += format(FUCHSIA_LOG_WARNING, fxl::StringPrintf(kDroppedFormatStr, message.dropped_logs));
+  } else if (message.dropped_logs() > 1) {
+    log +=
+        format(FUCHSIA_LOG_WARNING, fxl::StringPrintf(kDroppedFormatStr, message.dropped_logs()));
   }
 
-  log += format(message.severity, message.msg);
+  log += format(message.severity(), message.msg());
 
   return log;
 }

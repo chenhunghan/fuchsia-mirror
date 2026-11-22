@@ -15,6 +15,7 @@ use ffx_config::EnvironmentContext;
 use ffx_emulator_common::config;
 use ffx_emulator_config::{BoxFuture, EmulatorEngine, EngineConsoleType, ShowDetail};
 use fho::{Result, bug, return_bug};
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -36,12 +37,6 @@ impl FemuEngine {
 
     fn validate_configuration(&self) -> Result<()> {
         let emulator_configuration = self.data.get_emulator_configuration();
-        if !emulator_configuration.runtime.headless && self.context.env_var("DISPLAY").is_err() {
-            eprintln!(
-                "DISPLAY not set in the local environment, try running with --headless if you \
-                encounter failures related to display or Qt.",
-            );
-        }
         self.validate_network_flags(emulator_configuration)
             .and_then(|()| self.check_required_files(&emulator_configuration.guest))
     }
@@ -79,12 +74,25 @@ impl EmulatorEngine for FemuEngine {
         &'a mut self,
         context: &'a EnvironmentContext,
         emulator_cmd: Command,
-    ) -> BoxFuture<'a, Result<i32>> {
-        Box::pin(async move { self.run(context, emulator_cmd).await })
+        out: &'a mut dyn Write,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { self.run(context, emulator_cmd, out).await })
     }
 
     fn show(&self, details: Vec<ShowDetail>) -> Vec<ShowDetail> {
         <Self as QemuBasedEngine>::show(self, details)
+    }
+
+    fn configuration_warnings(&self) -> Vec<String> {
+        let mut warnings = vec![];
+        if !self.emu_config().runtime.headless && self.context.env_var("DISPLAY").is_err() {
+            warnings.push(
+                "DISPLAY not set in the local environment, try running with --headless if you \
+                encounter failures related to display or Qt."
+                    .to_string(),
+            );
+        }
+        warnings
     }
 
     fn stop(&mut self) -> BoxFuture<'_, Result<()>> {
@@ -93,9 +101,6 @@ impl EmulatorEngine for FemuEngine {
 
     fn configure(&mut self) -> Result<()> {
         let result = if self.emu_config().runtime.config_override {
-            let message = "Custom configuration provided; bypassing validation.";
-            eprintln!("{message}");
-            log::info!("{message}");
             Ok(())
         } else {
             self.validate_configuration()

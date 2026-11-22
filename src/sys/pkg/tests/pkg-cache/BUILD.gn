@@ -29,15 +29,17 @@ fuchsia_test_package("pkg-cache-integration-tests") {
   test_components = [ ":pkg-cache-integration-test" ]
   deps = [
     ":ca.cert-resource",
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/sys/pkg/bin/pkg-cache:component",
     "//src/sys/pkg/bin/system-update-committer:component",
 
     # TODO(https://fxbug.dev/540501441): Serve the blobs without the rest of the TUF repo.
     "//src/sys/pkg/tests/pkg-resolver:empty-repo",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
 }
 
 group("hermetic_tests") {
@@ -105,7 +107,6 @@ rustc_test("driver") {
   edition = "2024"
   lint_config = "//build/config/rust/lints:clippy_warn_all"
   deps = [
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
     "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
@@ -158,7 +159,6 @@ rustc_test("driver") {
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:http",
-    "//third_party/rust_crates:log",
     "//third_party/rust_crates:rand",
     "//third_party/rust_crates:test-case",
   ]

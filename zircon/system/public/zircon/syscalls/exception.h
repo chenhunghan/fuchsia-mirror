@@ -85,6 +85,9 @@ __BEGIN_CDECLS
 #define ZX_EXCP_POLICY_CODE_HANDLE_LEAK             20u
 #define ZX_EXCP_POLICY_CODE_NEW_IOB                 21u
 #define ZX_EXCP_POLICY_CODE_NEW_SAMPLER             22u
+// The kernel detected that the thread kept a CPU busy for a long time while
+// other runnable threads on that CPU did not run. synth_data is the CPU number.
+#define ZX_EXCP_POLICY_CODE_SPIN_DETECTION          23u
 
 // A process is starting.
 // This exception is sent to job debuggers only

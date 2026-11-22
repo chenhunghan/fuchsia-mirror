@@ -2,11 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [":lock-order-test-package"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":lock-order_host_test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
 
 rustc_library(
     name = "lock-order",
@@ -32,12 +47,10 @@ rustc_test(
 wrap_host_rust_test(
     name = "lock-order_host_test",
     binary_name = "lock-order_test",
-    visibility = ["//visibility:public"],
 )
 
 fx_unittest_package(
     name = "lock-order-test-package",
     package_name = "lock-order-test",
     unit_tests = [":lock-order_test"],
-    visibility = ["//visibility:public"],
 )

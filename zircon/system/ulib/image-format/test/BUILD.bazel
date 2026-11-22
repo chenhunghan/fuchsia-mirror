@@ -1,0 +1,84 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":image-format-test_test"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "image-format-test",
+    srcs = [
+        "image-format-coverage-golden-color-spaces.inc",
+        "image-format-coverage-golden-constraints.inc",
+        "image-format-coverage-golden-image-layout.inc",
+        "image-format-coverage-golden-pixel-format-properties.inc",
+        "image-format-coverage-golden-zbi.inc",
+        "image-format-coverage-test.cc",
+        "image-format-test.cc",
+        "intel-image-formats.cc",
+    ],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/zbi-format",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/image-format",
+        "//zircon/system/ulib/sysmem-version",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "image-format-test-packaged",
+    testonly = True,
+    binary = ":image-format-test",
+    binary_name = "image-format-test",
+)
+
+# The coverage tests write per-case dumps and replacement goldens (on mismatch)
+# to /custom_artifacts (see update-coverage-goldens.py), so the manifest uses
+# that storage capability.
+fx_component_manifest(
+    name = "image-format-test-manifest",
+    testonly = True,
+    component_name = "image-format-test",
+    includes = [
+        "//sdk/lib/syslog:use.shard",
+        "//src/sys/test_runners/gtest:zxtest.shard.cml",
+    ],
+    manifest = "meta/image-format-test.cml",
+)
+
+fx_test_component(
+    name = "image-format-test-component",
+    compiled_manifest = ":image-format-test-manifest",
+    deps = [":image-format-test-packaged"],
+)
+
+fx_package(
+    name = "image-format-test-package",
+    package_name = "image-format-test",
+    test_components = [":image-format-test-component"],
+)
+
+fx_test(
+    name = "image-format-test_test",
+    package = ":image-format-test-package",
+)

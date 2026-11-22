@@ -30,7 +30,8 @@ Agreement, see [Contributing to Fuchsia](/CONTRIBUTING.md#contributor_license_ag
 The [Fuchsia Eng Council](/docs/contribute/governance/eng_council.md)
 is a small group of senior technical leaders responsible for providing a
 coherent technical vision for Fuchsia. Members of the
-Fuchsia Eng Council are listed in the [Fuchsia Eng Council Charter](/docs/contribute/governance/eng_council.md#current_members).
+Fuchsia Eng Council are listed in the [Fuchsia Eng Council
+Charter](/docs/contribute/governance/eng_council.md#current-members).
 
 The Eng Council is responsible for maintaining the platform roadmap and approving
 or rejecting Fuchsia Requests for Comments (RFCs) using the [Fuchsia RFC Process](/docs/contribute/governance/rfcs/README.md).

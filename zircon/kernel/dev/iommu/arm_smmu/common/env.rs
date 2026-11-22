@@ -9,17 +9,9 @@
 //! across production kernel builds (`cfg(is_kernel)`) and host tests (`cfg(not(is_kernel))`).
 
 use core::ffi::c_void;
-#[cfg(not(is_kernel))]
-use core::marker::PhantomData;
-#[cfg(not(is_kernel))]
-use core::ptr::NonNull;
 #[cfg(is_kernel)]
 use fbl::DoublyLinkedListContainable;
-#[cfg(not(is_kernel))]
-use fbl::DoublyLinkedListNode;
 use zx_status::Status;
-#[cfg(not(is_kernel))]
-use zx_status::sys::zx_status_t;
 
 use super::constants::{ArmSmmuMode, BtiPageLeakReason, InterruptPolarity, InterruptTriggerMode};
 use super::smmu_mode::get_smmu_mode_bytes;
@@ -29,194 +21,17 @@ use super::smmu_mode::get_smmu_mode_bytes;
 #[cfg(is_kernel)]
 pub type SmmuRawSpinLock = crate::ksync_kernel::TrackedSpinlock;
 
-/// Raw spinlock type alias for host tests (`ksync::RawMutex`).
-#[cfg(not(is_kernel))]
-pub type SmmuRawSpinLock = ksync::RawMutex;
-
 /// Raw mutex type alias: uses the kernel's `TrackedMutex` in the kernel and `ksync::RawMutex` in
 /// host tests. Generic code (such as `region_alloc`) is parameterized over this type.
 #[cfg(is_kernel)]
 pub type SmmuRawMutex = crate::ksync_kernel::TrackedMutex;
-
-/// Raw mutex type alias for host tests (`ksync::RawMutex`).
-#[cfg(not(is_kernel))]
-pub type SmmuRawMutex = ksync::RawMutex;
 
 /// Lock policy for acquiring an [`SmmuRawSpinLock`] from an interrupt handler where interrupts are
 /// already disabled (`NoIrqSavePolicy` in kernel, default mutex policy on host).
 #[cfg(is_kernel)]
 pub type SmmuNoIrqSavePolicy = crate::ksync_kernel::NoIrqSavePolicy;
 
-/// Lock policy for acquiring an [`SmmuRawSpinLock`] in host tests.
-#[cfg(not(is_kernel))]
-pub type SmmuNoIrqSavePolicy = <ksync::RawMutex as ksync::RawLock>::DefaultPolicy;
-
 pub use debug::DRIVER_OOPS_BANNER;
-
-// Host test environment bindings (`cpp_arm_smmu_*`).
-#[cfg(not(is_kernel))]
-unsafe extern "C" {
-    /// Sleeps the calling thread for `delay_ns` nanoseconds (relative).
-    fn cpp_arm_smmu_sleep_relative(delay_ns: i64) -> zx_status_t;
-
-    /// Converts peripheral physical address `paddr` to its mapped virtual address (`0` if
-    /// unmapped).
-    fn cpp_arm_smmu_periph_paddr_to_vaddr(paddr: u64) -> usize;
-
-    /// Converts peripheral virtual address `vaddr` back to its physical address (`0` if unmapped).
-    fn cpp_arm_smmu_periph_vaddr_to_paddr(vaddr: usize) -> u64;
-
-    /// Cleans CPU data cache lines covering `[start, start + len)` in host test builds.
-    fn cpp_arm_smmu_clean_dcache_range(start: usize, len: usize);
-
-    /// Records a pending write of `new_val` at `level` into the 64-bit PTE at `slot`.
-    /// `slot` is borrowed only for the duration of the call and must point to a valid PTE slot.
-    fn cpp_arm_smmu_on_pte_write(slot: *const u64, new_val: u64, level: u32);
-
-    /// Records a pending zero-fill of `len` bytes of translation table memory at `table_vaddr`.
-    fn cpp_arm_smmu_on_table_zero(table_vaddr: usize, len: usize);
-
-    /// Allocates a single physical page from the host `PmmMock` and writes the non-null
-    /// `vm_page_t*` to `*out_page` on `ZX_OK`. Ownership of the allocated page is transferred to
-    /// the caller until returned via [`cpp_arm_smmu_pmm_free_page`].
-    fn cpp_arm_smmu_pmm_alloc_page(alloc_flags: u32, out_page: *mut *mut c_void) -> zx_status_t;
-
-    /// Transfers ownership of an unlinked `vm_page_t*` (`page`) back to the host `PmmMock`.
-    fn cpp_arm_smmu_pmm_free_page(page: *mut c_void);
-
-    /// Returns a borrowed `vm_page_t*` for physical address `pa` from the host `PmmMock` (or null
-    /// if `pa` is not managed). Ownership remains with the PMM arena.
-    fn cpp_arm_smmu_paddr_to_vm_page(pa: u64) -> *mut c_void;
-
-    /// Returns the physical address of `page`. `page` is borrowed for the duration of the call and
-    /// must point to a valid `vm_page_t`.
-    fn cpp_arm_smmu_vm_page_paddr(page: *const c_void) -> u64;
-
-    /// Converts physical address `pa` to its host mock physmap virtual address.
-    fn cpp_arm_smmu_paddr_to_physmap(pa: u64) -> usize;
-
-    /// Converts host mock physmap virtual address `vaddr` back to its physical address.
-    fn cpp_arm_smmu_physmap_to_paddr(vaddr: usize) -> u64;
-
-    /// Returns the byte offset of `pinned_vmo`. `pinned_vmo` is borrowed for the duration of the
-    /// call and must point to a valid, initialized `PinnedVmObject`.
-    fn cpp_arm_smmu_pinned_vmo_offset(pinned_vmo: *const c_void) -> u64;
-
-    /// Returns the byte size of `pinned_vmo`. `pinned_vmo` is borrowed for the duration of the
-    /// call and must point to a valid, initialized `PinnedVmObject`.
-    fn cpp_arm_smmu_pinned_vmo_size(pinned_vmo: *const c_void) -> u64;
-
-    /// Looks up a contiguous physical range `[offset, offset + size)` in `pinned_vmo` and writes
-    /// the base physical address to `*out_paddr`. Both `pinned_vmo` and `out_paddr` are borrowed
-    /// for the duration of the call and must be valid non-null pointers.
-    fn cpp_arm_smmu_pinned_vmo_lookup_contiguous(
-        pinned_vmo: *const c_void,
-        offset: u64,
-        size: usize,
-        out_paddr: *mut u64,
-    ) -> zx_status_t;
-
-    /// Resets `pinned_vmo` in place, unpinning its pages and dropping its `VmObject` reference.
-    /// `pinned_vmo` must point to a valid `PinnedVmObject` owned by the caller.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pinned_vmo_reset(pinned_vmo: *mut c_void);
-
-    /// Move-constructs a `PinnedVmObject` at `dst` from `src`, transferring ownership of the
-    /// pinned range to `dst` and leaving `*src` empty. `dst` must point to 24-byte, 8-byte aligned
-    /// uninitialized storage and `src` must point to a valid initialized `PinnedVmObject`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pinned_vmo_move_construct(dst: *mut c_void, src: *mut c_void);
-
-    /// Copies `BootOptions::Get()->arm_smmu_mode` into `out_buf[..out_cap]` and returns the number
-    /// of bytes written. `out_buf` is borrowed for the duration of the call and must be valid for
-    /// writes of `out_cap` bytes.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_get_boot_option_mode(out_buf: *mut u8, out_cap: usize) -> usize;
-
-    /// Adds `[base, base + size)` of resource `kind` to the root resource filter deny list.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_root_resource_filter_add_deny_region(base: u64, size: usize, kind: u32);
-
-    /// Configures interrupt `vector` with `trigger_mode` and `polarity`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_configure_interrupt(
-        vector: u32,
-        trigger_mode: u32,
-        polarity: u32,
-    ) -> zx_status_t;
-
-    /// Masks interrupt `vector`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_mask_interrupt(vector: u32) -> zx_status_t;
-
-    /// Unmasks interrupt `vector`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_unmask_interrupt(vector: u32) -> zx_status_t;
-
-    /// Registers `handler(cookie)` for interrupt `vector`. `cookie` is not dereferenced by the
-    /// interrupt manager directly but is passed back to `handler` on each interrupt; the caller
-    /// must ensure `cookie` remains valid until [`cpp_arm_smmu_unregister_int_handler`] completes.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_register_int_handler(
-        vector: u32,
-        cookie: *mut c_void,
-        handler: Option<extern "C" fn(*mut c_void)>,
-    ) -> zx_status_t;
-
-    /// Unregisters the interrupt handler for `vector`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_unregister_int_handler(vector: u32) -> zx_status_t;
-
-    /// Reads a 32-bit MMIO register at `base + offset` via the host `FakeSmmuMmioRouter` or raw
-    /// memory fallback. `base + offset` must either belong to a registered router region or point
-    /// to a valid 32-bit aligned host memory location.
-    fn cpp_arm_smmu_mmio_read32(base: usize, offset: u32) -> u32;
-    /// Writes `val` to a 32-bit MMIO register at `base + offset` via the host `FakeSmmuMmioRouter`
-    /// or raw memory fallback. `base + offset` must either belong to a registered router region or
-    /// point to a valid 32-bit aligned writable host memory location.
-    fn cpp_arm_smmu_mmio_write32(base: usize, offset: u32, val: u32);
-    /// Reads a 64-bit MMIO register at `base + offset` via the host `FakeSmmuMmioRouter` or raw
-    /// memory fallback. `base + offset` must either belong to a registered router region or point
-    /// to a valid 64-bit aligned host memory location.
-    fn cpp_arm_smmu_mmio_read64(base: usize, offset: u32) -> u64;
-    /// Writes `val` to a 64-bit MMIO register at `base + offset` via the host `FakeSmmuMmioRouter`
-    /// or raw memory fallback. `base + offset` must either belong to a registered router region or
-    /// point to a valid 64-bit aligned writable host memory location.
-    fn cpp_arm_smmu_mmio_write64(base: usize, offset: u32, val: u64);
-    /// Returns the number of physical pages currently allocated from the singleton host `PmmMock`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pmm_allocated_page_count() -> usize;
-    /// Sets the maximum number of physical pages that the singleton host `PmmMock` may allocate.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pmm_set_allocation_limit(limit: u64);
-    /// Clears any physical page allocation limit on the singleton host `PmmMock`.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pmm_clear_allocation_limit();
-    /// Reads a 64-bit word at physical address `pa` from the singleton host `PmmMock` PoC DRAM
-    /// view into `*out_val`, returning `true` if `pa` belongs to an allocated mock page. `out_val`
-    /// is borrowed for the duration of the call and must be a valid, non-null writable pointer.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pmm_read_poc_dram64(pa: u64, out_val: *mut u64) -> bool;
-    /// Reads a 64-bit word at physical address `pa` from the singleton host `PmmMock` CPU L1/L2
-    /// cache view into `*out_val`, returning `true` if `pa` belongs to an allocated mock page.
-    /// `out_val` is borrowed for the duration of the call and must be a valid, non-null writable
-    /// pointer.
-    #[cfg(not(is_kernel))]
-    fn cpp_arm_smmu_pmm_read_cpu_cache64(pa: u64, out_val: *mut u64) -> bool;
-}
-
-/// Opaque representation of a host `vm_page_t` whose leading field at offset 0 is its intrusive
-/// doubly-linked list node (`queue_node`).
-#[cfg(not(is_kernel))]
-#[repr(C)]
-pub struct HostVmPage {
-    queue_node: DoublyLinkedListNode<HostVmPage>,
-}
-
-#[cfg(not(is_kernel))]
-zr::static_assert!(core::mem::size_of::<HostVmPage>() == 16);
-#[cfg(not(is_kernel))]
-zr::static_assert!(core::mem::align_of::<HostVmPage>() == 8);
 
 /// Non-null handle to a physical page descriptor (`VmPage` in kernel, mock `vm_page_t` on host).
 #[cfg_attr(is_kernel, repr(transparent))]
@@ -224,10 +39,6 @@ zr::static_assert!(core::mem::align_of::<HostVmPage>() == 8);
 pub struct SmmuPage {
     #[cfg(is_kernel)]
     ptr: crate::vm::page::VmPagePtr,
-    #[cfg(not(is_kernel))]
-    ptr: NonNull<HostVmPage>,
-    #[cfg(not(is_kernel))]
-    pa: u64,
 }
 
 impl SmmuPage {
@@ -243,16 +54,6 @@ impl SmmuPage {
             // SAFETY: Caller guarantees `ptr` is null or a valid `VmPage` pointer.
             unsafe { crate::vm::page::VmPagePtr::from_raw(ptr.cast()).map(|ptr| Self { ptr }) }
         }
-        #[cfg(not(is_kernel))]
-        {
-            NonNull::new(ptr.cast::<HostVmPage>()).map(|ptr| {
-                // SAFETY: Caller guarantees non-null `ptr` points to a valid live host mock
-                // `vm_page_t`. Caching its physical address inline avoids dereferencing `ptr` in
-                // `SmmuPage::paddr`.
-                let pa = unsafe { cpp_arm_smmu_vm_page_paddr(ptr.as_ptr().cast()) };
-                Self { ptr, pa }
-            })
-        }
     }
 
     /// Returns the raw `vm_page_t` pointer.
@@ -261,10 +62,6 @@ impl SmmuPage {
         #[cfg(is_kernel)]
         {
             self.ptr.as_raw().cast()
-        }
-        #[cfg(not(is_kernel))]
-        {
-            self.ptr.as_ptr().cast()
         }
     }
 
@@ -278,10 +75,6 @@ impl SmmuPage {
             // mutated thereafter. Reading `paddr()` through `self.ptr` therefore cannot race or
             // dereference freed memory.
             unsafe { u64::from(self.ptr.as_non_null().as_ref().paddr()) }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            self.pa
         }
     }
 
@@ -304,15 +97,6 @@ impl SmmuPage {
                 crate::vm::page::VmPagePtr::from_raw(*node.next.get()).map(|ptr| Self { ptr })
             }
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `self.ptr` is a valid live `HostVmPage`, any non-null `next` pointer points
-            // to a live `HostVmPage`, and caller owns the containing list.
-            unsafe {
-                let node = &self.ptr.as_ref().queue_node;
-                Self::from_raw((*node.next.get()).cast())
-            }
-        }
     }
 
     /// Sets the `next` pointer stored in this page's intrusive `queue_node`.
@@ -330,14 +114,6 @@ impl SmmuPage {
             unsafe {
                 let node = self.ptr.as_non_null().as_ref().get_node();
                 *node.next.get() = next.map_or(core::ptr::null_mut(), |p| p.ptr.as_raw());
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `self.ptr` is a valid live `HostVmPage` and caller owns the containing list.
-            unsafe {
-                let node = &self.ptr.as_ref().queue_node;
-                *node.next.get() = next.map_or(core::ptr::null_mut(), |p| p.ptr.as_ptr());
             }
         }
     }
@@ -360,15 +136,6 @@ impl SmmuPage {
                 crate::vm::page::VmPagePtr::from_raw(*node.prev.get()).map(|ptr| Self { ptr })
             }
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `self.ptr` is a valid live `HostVmPage`, any non-null `prev` pointer points
-            // to a live `HostVmPage`, and caller owns the containing list.
-            unsafe {
-                let node = &self.ptr.as_ref().queue_node;
-                Self::from_raw((*node.prev.get()).cast())
-            }
-        }
     }
 
     /// Sets the `prev` pointer stored in this page's intrusive `queue_node`.
@@ -386,14 +153,6 @@ impl SmmuPage {
             unsafe {
                 let node = self.ptr.as_non_null().as_ref().get_node();
                 *node.prev.get() = prev.map_or(core::ptr::null_mut(), |p| p.ptr.as_raw());
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `self.ptr` is a valid live `HostVmPage` and caller owns the containing list.
-            unsafe {
-                let node = &self.ptr.as_ref().queue_node;
-                *node.prev.get() = prev.map_or(core::ptr::null_mut(), |p| p.ptr.as_ptr());
             }
         }
     }
@@ -431,15 +190,6 @@ impl SmmuEnv {
             let (ptr, _pa) = crate::vm::pmm::alloc_page(alloc_flags)?;
             Ok(SmmuPage { ptr })
         }
-        #[cfg(not(is_kernel))]
-        {
-            let mut raw_page: *mut c_void = core::ptr::null_mut();
-            // SAFETY: `raw_page` is a valid stack out-pointer.
-            let status = unsafe { cpp_arm_smmu_pmm_alloc_page(alloc_flags, &raw mut raw_page) };
-            Status::ok(status)?;
-            // SAFETY: `cpp_arm_smmu_pmm_alloc_page` succeeded and populated `raw_page`.
-            unsafe { SmmuPage::from_raw(raw_page).ok_or(Status::NO_MEMORY) }
-        }
     }
 
     /// Returns a single unlinked physical page to the PMM.
@@ -454,13 +204,6 @@ impl SmmuEnv {
             // SAFETY: Caller guarantees `page` is unlinked and uniquely owned for reclamation.
             unsafe {
                 crate::vm::pmm::free_page(page.ptr);
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Caller guarantees `page` is unlinked and uniquely owned for reclamation.
-            unsafe {
-                cpp_arm_smmu_pmm_free_page(page.as_raw());
             }
         }
     }
@@ -499,20 +242,6 @@ impl SmmuEnv {
                 crate::vm::pmm::free_list(list);
             }
         }
-        #[cfg(not(is_kernel))]
-        {
-            let mut cur = Some(first);
-            while let Some(page) = cur {
-                // SAFETY: Caller guarantees the chain is valid and uniquely owned. Each page is
-                // fully unlinked before being handed back to the host `PmmMock`.
-                unsafe {
-                    cur = page.get_next();
-                    page.set_next(None);
-                    page.set_prev(None);
-                    cpp_arm_smmu_pmm_free_page(page.as_raw());
-                }
-            }
-        }
     }
 
     /// Looks up the [`SmmuPage`] corresponding to physical address `pa`.
@@ -523,12 +252,6 @@ impl SmmuEnv {
             crate::vm::pmm::paddr_to_vm_page(crate::kernel::types::PAddr(pa as usize))
                 .map(|ptr| SmmuPage { ptr })
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Foreign call into `paddr_to_vm_page` on host mock PMM; result is null or a
-            // valid `vm_page_t*`.
-            unsafe { SmmuPage::from_raw(cpp_arm_smmu_paddr_to_vm_page(pa)) }
-        }
     }
 
     /// Converts physical address `pa` to its virtual address in the kernel/mock physmap.
@@ -537,11 +260,6 @@ impl SmmuEnv {
         #[cfg(is_kernel)]
         {
             crate::vm::physmap::paddr_to_physmap(crate::kernel::types::PAddr(pa as usize)).0
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Pure address conversion in host mock physmap.
-            unsafe { cpp_arm_smmu_paddr_to_physmap(pa) }
         }
     }
 
@@ -552,14 +270,14 @@ impl SmmuEnv {
         {
             u64::from(crate::vm::physmap::physmap_to_paddr(crate::kernel::types::VAddr(vaddr)))
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Pure address conversion in host mock physmap.
-            unsafe { cpp_arm_smmu_physmap_to_paddr(vaddr) }
-        }
     }
 
     /// Cleans CPU data cache lines covering `[start, start + len)` to the Point of Coherency.
+    ///
+    /// On arm64 this ends with a `dsb sy` (`CleanDataCacheRange`), so it returns only once the
+    /// cleaned stores are in memory. Callers rely on that where a later store, with no barrier
+    /// of its own in between, makes the cleaned memory reachable by the SMMU; each such call
+    /// site says so. An implementation without the barrier would need one added at those sites.
     ///
     /// # Safety
     /// `[start, start + len)` must be a mapped kernel virtual address range (in practice, the
@@ -571,13 +289,6 @@ impl SmmuEnv {
             // SAFETY: Guaranteed by the caller.
             unsafe {
                 crate::arch_rs::clean_dcache_range(start, len);
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `cpp_arm_smmu_clean_dcache_range` records the cache clean in `PmmMock`.
-            unsafe {
-                cpp_arm_smmu_clean_dcache_range(start, len);
             }
         }
     }
@@ -604,24 +315,6 @@ impl SmmuEnv {
         {
             let _ = (vaddr, write);
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Guaranteed by the caller.
-            unsafe {
-                match write {
-                    HwVisibleWrite::Descriptor { level, new_val } => {
-                        cpp_arm_smmu_on_pte_write(
-                            core::ptr::with_exposed_provenance::<u64>(vaddr),
-                            new_val,
-                            level,
-                        );
-                    }
-                    HwVisibleWrite::TableZeroFill { len } => {
-                        cpp_arm_smmu_on_table_zero(vaddr, len);
-                    }
-                }
-            }
-        }
     }
 
     /// Converts a peripheral physical address `paddr` to its mapped virtual address (`0` if
@@ -630,13 +323,8 @@ impl SmmuEnv {
     pub fn periph_paddr_to_vaddr(paddr: u64) -> usize {
         #[cfg(is_kernel)]
         {
-            crate::arch_rs::periph_paddr_to_vaddr(crate::kernel::types::PAddr(paddr as usize))
+            crate::arch_rs::periph_paddr_to_vaddr(crate::kernel::types::PAddr::from(paddr))
                 .map_or(0, |v| v.0)
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Pure address lookup in the host mock peripheral map.
-            unsafe { cpp_arm_smmu_periph_paddr_to_vaddr(paddr) }
         }
     }
 
@@ -648,11 +336,6 @@ impl SmmuEnv {
         {
             crate::arch_rs::periph_vaddr_to_paddr(crate::kernel::types::VAddr(vaddr))
                 .map_or(0, u64::from)
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Pure address lookup in the host mock peripheral map.
-            unsafe { cpp_arm_smmu_periph_vaddr_to_paddr(vaddr) }
         }
     }
 
@@ -676,94 +359,6 @@ impl SmmuEnv {
         {
             crate::arch_rs::r#yield();
         }
-        #[cfg(not(is_kernel))]
-        {
-            libarch::r#yield();
-        }
-    }
-
-    /// Reads a 32-bit register at `base + offset` in host test builds via `FakeSmmuMmioRouter`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_mmio_read32(base: usize, offset: u32) -> u32 {
-        // SAFETY: Routes through `FakeSmmuMmioRouter` or valid host test register buffer.
-        unsafe { cpp_arm_smmu_mmio_read32(base, offset) }
-    }
-
-    /// Writes a 32-bit register at `base + offset` in host test builds via `FakeSmmuMmioRouter`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_mmio_write32(base: usize, offset: u32, val: u32) {
-        // SAFETY: Routes through `FakeSmmuMmioRouter` or valid host test register buffer.
-        unsafe {
-            cpp_arm_smmu_mmio_write32(base, offset, val);
-        }
-    }
-
-    /// Reads a 64-bit register at `base + offset` in host test builds via `FakeSmmuMmioRouter`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_mmio_read64(base: usize, offset: u32) -> u64 {
-        // SAFETY: Routes through `FakeSmmuMmioRouter` or valid host test register buffer.
-        unsafe { cpp_arm_smmu_mmio_read64(base, offset) }
-    }
-
-    /// Writes a 64-bit register at `base + offset` in host test builds via `FakeSmmuMmioRouter`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_mmio_write64(base: usize, offset: u32, val: u64) {
-        // SAFETY: Routes through `FakeSmmuMmioRouter` or valid host test register buffer.
-        unsafe {
-            cpp_arm_smmu_mmio_write64(base, offset, val);
-        }
-    }
-
-    /// Returns the number of physical pages currently allocated from the host `PmmMock`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_pmm_allocated_page_count() -> usize {
-        // SAFETY: Queries the singleton `PmmMock` allocated page counter.
-        unsafe { cpp_arm_smmu_pmm_allocated_page_count() }
-    }
-
-    /// Sets the maximum number of allocated physical pages allowed by the host `PmmMock`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_pmm_set_allocation_limit(limit: u64) {
-        // SAFETY: Configures the singleton `PmmMock` allocation limit.
-        unsafe {
-            cpp_arm_smmu_pmm_set_allocation_limit(limit);
-        }
-    }
-
-    /// Clears any physical page allocation limit on the host `PmmMock`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_pmm_clear_allocation_limit() {
-        // SAFETY: Clears the singleton `PmmMock` allocation limit.
-        unsafe {
-            cpp_arm_smmu_pmm_clear_allocation_limit();
-        }
-    }
-
-    /// Reads a 64-bit word from the host `PmmMock` PoC DRAM view at physical address `pa`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_pmm_read_poc_dram64(pa: u64) -> Option<u64> {
-        let mut val = 0u64;
-        // SAFETY: `val` is a valid stack out-pointer.
-        let ok = unsafe { cpp_arm_smmu_pmm_read_poc_dram64(pa, &raw mut val) };
-        if ok { Some(val) } else { None }
-    }
-
-    /// Reads a 64-bit word from the host `PmmMock` CPU L1/L2 cache view at physical address `pa`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub fn host_pmm_read_cpu_cache64(pa: u64) -> Option<u64> {
-        let mut val = 0u64;
-        // SAFETY: `val` is a valid stack out-pointer.
-        let ok = unsafe { cpp_arm_smmu_pmm_read_cpu_cache64(pa, &raw mut val) };
-        if ok { Some(val) } else { None }
     }
 
     /// Sleeps the calling thread for `delay_ns` nanoseconds (relative).
@@ -772,12 +367,6 @@ impl SmmuEnv {
         #[cfg(is_kernel)]
         {
             crate::kernel::thread::sleep_relative(crate::platform_rs::timer::DurationMono(delay_ns))
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `cpp_arm_smmu_sleep_relative` sleeps the current thread for `delay_ns`.
-            let status = unsafe { cpp_arm_smmu_sleep_relative(delay_ns) };
-            Status::ok(status)
         }
     }
 
@@ -796,13 +385,6 @@ impl SmmuEnv {
             get_smmu_mode_bytes(&boot_options::BootOptions::get().arm_smmu_mode, base_addr)
                 .unwrap_or(ArmSmmuMode::Disabled)
         }
-        #[cfg(not(is_kernel))]
-        {
-            let mut buf = [0u8; 256];
-            // SAFETY: `buf` is a valid stack buffer of length `buf.len()`.
-            let len = unsafe { cpp_arm_smmu_get_boot_option_mode(buf.as_mut_ptr(), buf.len()) };
-            get_smmu_mode_bytes(&buf[..len], base_addr).unwrap_or(ArmSmmuMode::Disabled)
-        }
     }
 
     /// Adds `[base, base + size)` of resource `kind` to the root resource filter deny list.
@@ -815,13 +397,6 @@ impl SmmuEnv {
                 size,
                 kind,
             );
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Registers a physical address range with the mock root resource filter.
-            unsafe {
-                cpp_arm_smmu_root_resource_filter_add_deny_region(base, size, kind);
-            }
         }
     }
 
@@ -844,14 +419,6 @@ impl SmmuEnv {
                 )
             }
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Calls into host mock `configure_interrupt`.
-            let status = unsafe {
-                cpp_arm_smmu_configure_interrupt(vector, trigger_mode as u32, polarity as u32)
-            };
-            Status::ok(status)
-        }
     }
 
     /// Masks interrupt `vector`.
@@ -866,12 +433,6 @@ impl SmmuEnv {
             unsafe {
                 crate::pdev_interrupt::mask_interrupt(crate::dev_interrupt::InterruptVector(vector))
             }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Calls into host mock `mask_interrupt`.
-            let status = unsafe { cpp_arm_smmu_mask_interrupt(vector) };
-            Status::ok(status)
         }
     }
 
@@ -889,12 +450,6 @@ impl SmmuEnv {
                     vector,
                 ))
             }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Calls into host mock `unmask_interrupt`.
-            let status = unsafe { cpp_arm_smmu_unmask_interrupt(vector) };
-            Status::ok(status)
         }
     }
 
@@ -919,13 +474,6 @@ impl SmmuEnv {
                 )
             }
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Caller guarantees `cookie` remains valid while registered.
-            let status =
-                unsafe { cpp_arm_smmu_register_int_handler(vector, cookie, Some(handler)) };
-            Status::ok(status)
-        }
     }
 
     /// Unregisters the interrupt handler for `vector`.
@@ -944,12 +492,6 @@ impl SmmuEnv {
                 )
             }
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: Unregisters the handler for `vector` in host mock.
-            let status = unsafe { cpp_arm_smmu_unregister_int_handler(vector) };
-            Status::ok(status)
-        }
     }
 
     /// Emits a fully rendered `DRIVER OOPS` `report` with a single console write in kernel builds,
@@ -967,10 +509,6 @@ impl SmmuEnv {
         {
             use core::fmt::Write as _;
             let _ = debug::dprintf::KernelConsoleWriter.write_str(report);
-        }
-        #[cfg(not(is_kernel))]
-        {
-            let _ = report;
         }
     }
 
@@ -993,15 +531,11 @@ impl SmmuEnv {
                 total_leaked_vmos,
             );
         }
-        #[cfg(not(is_kernel))]
-        {
-            let _ = (bti_id, bti_name, reason, total_leaked_pages, total_leaked_vmos);
-        }
     }
 }
 
-/// Owned `PinnedVmObject` wrapper used by [`super::super::v2::SmmuBti`] and
-/// [`super::super::v2::SmmuPmt`].
+/// Owned `PinnedVmObject` wrapper used by [`super::super::v2::SmmuV2Bti`] and
+/// [`super::super::v2::SmmuV2Pmt`].
 ///
 /// In kernel builds (`cfg(is_kernel)`), this wraps [`crate::vm::pinned_vm_object::PinnedVmObject`]
 /// directly without any C++ FFI round-trip. In standalone host test builds (`cfg(not(is_kernel))`),
@@ -1010,8 +544,6 @@ impl SmmuEnv {
 pub struct SmmuPinnedVmo {
     #[cfg(is_kernel)]
     inner: crate::vm::pinned_vm_object::PinnedVmObject,
-    #[cfg(not(is_kernel))]
-    storage: [usize; 3],
 }
 
 zr::static_assert!(core::mem::size_of::<SmmuPinnedVmo>() == 24);
@@ -1019,20 +551,18 @@ zr::static_assert!(core::mem::align_of::<SmmuPinnedVmo>() == 8);
 
 impl SmmuPinnedVmo {
     /// Creates an empty (unpinned) `SmmuPinnedVmo`.
+    #[must_use]
     #[inline]
     pub const fn empty() -> Self {
         #[cfg(is_kernel)]
         {
             Self { inner: crate::vm::pinned_vm_object::PinnedVmObject::new() }
         }
-        #[cfg(not(is_kernel))]
-        {
-            Self { storage: [0; 3] }
-        }
     }
 
     /// Wraps a kernel [`crate::vm::pinned_vm_object::PinnedVmObject`] directly.
     #[cfg(is_kernel)]
+    #[must_use]
     #[inline]
     pub const fn from_kernel_pinned_vmo(
         pinned_vmo: crate::vm::pinned_vm_object::PinnedVmObject,
@@ -1040,35 +570,13 @@ impl SmmuPinnedVmo {
         Self { inner: pinned_vmo }
     }
 
-    /// Move-constructs an `SmmuPinnedVmo` from a raw pointer to a C++ `PinnedVmObject`, leaving
-    /// the source `PinnedVmObject` empty.
-    ///
-    /// # Safety
-    /// `src` must point to a valid, initialized C++ `PinnedVmObject`.
-    #[cfg(not(is_kernel))]
-    #[inline]
-    pub unsafe fn from_raw_move(src: *mut c_void) -> Self {
-        let mut out = Self::empty();
-        if !src.is_null() {
-            // SAFETY: `out.storage` has the exact size and alignment of `PinnedVmObject`, and
-            // caller guarantees `src` points to a valid `PinnedVmObject`.
-            unsafe {
-                cpp_arm_smmu_pinned_vmo_move_construct((&raw mut out.storage).cast(), src);
-            }
-        }
-        out
-    }
-
     /// Returns `true` if this `SmmuPinnedVmo` holds a non-null `VmObject`.
+    #[must_use]
     #[inline]
     pub fn has_vmo(&self) -> bool {
         #[cfg(is_kernel)]
         {
             self.inner.vmo().is_some()
-        }
-        #[cfg(not(is_kernel))]
-        {
-            self.storage[0] != 0
         }
     }
 
@@ -1079,18 +587,10 @@ impl SmmuPinnedVmo {
         {
             self.inner = crate::vm::pinned_vm_object::PinnedVmObject::new();
         }
-        #[cfg(not(is_kernel))]
-        {
-            if self.has_vmo() {
-                // SAFETY: `self.storage` holds a valid `PinnedVmObject`.
-                unsafe {
-                    cpp_arm_smmu_pinned_vmo_reset((&raw mut self.storage).cast());
-                }
-            }
-        }
     }
 
     /// Takes ownership of the underlying `PinnedVmObject`, leaving `self` empty.
+    #[must_use]
     #[inline]
     pub fn take(&mut self) -> Self {
         core::mem::take(self)
@@ -1104,25 +604,12 @@ impl Default for SmmuPinnedVmo {
     }
 }
 
-#[cfg(not(is_kernel))]
-impl Drop for SmmuPinnedVmo {
-    #[inline]
-    fn drop(&mut self) {
-        self.reset();
-    }
-}
-
 impl PinnedVmoSource for SmmuPinnedVmo {
     #[inline]
     fn offset(&self) -> u64 {
         #[cfg(is_kernel)]
         {
             self.inner.offset()
-        }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `self.storage` is a valid C++ `PinnedVmObject`.
-            unsafe { cpp_arm_smmu_pinned_vmo_offset((&raw const self.storage).cast()) }
         }
     }
 
@@ -1132,11 +619,6 @@ impl PinnedVmoSource for SmmuPinnedVmo {
         {
             self.inner.size()
         }
-        #[cfg(not(is_kernel))]
-        {
-            // SAFETY: `self.storage` is a valid C++ `PinnedVmObject`.
-            unsafe { cpp_arm_smmu_pinned_vmo_size((&raw const self.storage).cast()) }
-        }
     }
 
     #[inline]
@@ -1144,21 +626,6 @@ impl PinnedVmoSource for SmmuPinnedVmo {
         #[cfg(is_kernel)]
         {
             PinnedVmoSource::lookup_contiguous(&self.inner, offset, size)
-        }
-        #[cfg(not(is_kernel))]
-        {
-            let mut pa = 0u64;
-            // SAFETY: `self.storage` is a valid C++ `PinnedVmObject` and `pa` is a valid out-pointer.
-            let status = unsafe {
-                cpp_arm_smmu_pinned_vmo_lookup_contiguous(
-                    (&raw const self.storage).cast(),
-                    offset,
-                    size as usize,
-                    &raw mut pa,
-                )
-            };
-            Status::ok(status)?;
-            Ok(pa)
         }
     }
 }
@@ -1192,57 +659,5 @@ impl PinnedVmoSource for crate::vm::pinned_vm_object::PinnedVmObject {
         let vmo = self.vmo().ok_or(Status::INVALID_ARGS)?;
         let pa = vmo.lookup_contiguous(offset, size)?;
         Ok(u64::from(pa))
-    }
-}
-
-/// Borrowed reference wrapper around a C++ `PinnedVmObject` pointer for host test FFI callers.
-#[cfg(not(is_kernel))]
-#[repr(transparent)]
-#[derive(Clone, Copy)]
-pub struct CppPinnedVmObjectRef<'a> {
-    raw: NonNull<c_void>,
-    _marker: PhantomData<&'a c_void>,
-}
-
-#[cfg(not(is_kernel))]
-impl<'a> CppPinnedVmObjectRef<'a> {
-    /// Wraps a non-null pointer to a C++ `PinnedVmObject` for lifetime `'a`.
-    ///
-    /// # Safety
-    /// `ptr` must point to a valid, initialized C++ `PinnedVmObject` that remains valid for `'a`.
-    #[inline]
-    pub unsafe fn from_raw(ptr: *const c_void) -> Option<Self> {
-        NonNull::new(ptr.cast_mut()).map(|raw| Self { raw, _marker: PhantomData })
-    }
-}
-
-#[cfg(not(is_kernel))]
-impl PinnedVmoSource for CppPinnedVmObjectRef<'_> {
-    #[inline]
-    fn offset(&self) -> u64 {
-        // SAFETY: `self.raw` points to a valid C++ `PinnedVmObject`.
-        unsafe { cpp_arm_smmu_pinned_vmo_offset(self.raw.as_ptr()) }
-    }
-
-    #[inline]
-    fn size(&self) -> u64 {
-        // SAFETY: `self.raw` points to a valid C++ `PinnedVmObject`.
-        unsafe { cpp_arm_smmu_pinned_vmo_size(self.raw.as_ptr()) }
-    }
-
-    #[inline]
-    fn lookup_contiguous(&self, offset: u64, size: u64) -> Result<u64, Status> {
-        let mut pa = 0u64;
-        // SAFETY: `self.raw` points to a valid C++ `PinnedVmObject` and `pa` is a valid out-param.
-        let status = unsafe {
-            cpp_arm_smmu_pinned_vmo_lookup_contiguous(
-                self.raw.as_ptr(),
-                offset,
-                size as usize,
-                &raw mut pa,
-            )
-        };
-        Status::ok(status)?;
-        Ok(pa)
     }
 }

@@ -43,7 +43,7 @@ is a more abstract object type. For example, functions with the noun `object`
 operate on most kernel objects and functions with the noun `task` operate on
 jobs, processes, and threads.
 
-## Types
+## Types {#types}
 
 Use `zx_status_t` to represent success and failure.
 

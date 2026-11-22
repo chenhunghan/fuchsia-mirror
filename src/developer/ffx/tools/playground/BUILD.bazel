@@ -1,0 +1,88 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":ffx_tool_playground_lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/analytics.rs",
+        "src/cf_fs.rs",
+        "src/host_fs.rs",
+        "src/lib.rs",
+        "src/presentation.rs",
+        "src/repl.rs",
+        "src/strict_mutex.rs",
+        "src/term_util.rs",
+        "src/toolbox_fs.rs",
+    ],
+    crate_name = "ffx_tool_playground",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-status-ext",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/futures:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/playground",
+        "//src/lib/analytics/rust:lib",
+        "//src/lib/buf-read-ext",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl_codec/rust:fidl_codec_fdomain",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-fs:fuchsia-fs_fdomain",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:async-fs",
+        "//third_party/rust_crates/vendor:crossterm",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:unicode-width",
+        "//third_party/rust_crates/vendor:vte",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_playground",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-playground",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_tool_playground_lib_test",
+    crate = ":lib",
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

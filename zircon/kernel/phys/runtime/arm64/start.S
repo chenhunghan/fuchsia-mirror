@@ -108,11 +108,20 @@
   adr_global shadow_call_sp, boot_shadow_call_stack
 #endif
 
-  // Now the full C++ ABI is available.  This could theoretically be a tail
-  // call since it's obliged never to return, but it's nice to have the
-  // caller in a backtrace.
-  mov x0, bootloader_data
-  bl PhysMain
+  // Now the full C++ ABI is available. Apply our own relocations before
+  // anything that might depend on them, making sure to save the arguments to
+  // PhysMain.
+  mov x19, bootloader_data
+  mov x20, x1
+  mov x21, x2
+  bl ApplyRelocationsToSelf
+
+  // This could theoretically be a tail call since it's obliged never to
+  // return, but it's nice to have the caller in a backtrace.
+  mov x0, x19
+  mov x1, x20
+  mov x2, x21
+  bl CppPhysMain
 
   // Trap forever just in case it does return.
 0:

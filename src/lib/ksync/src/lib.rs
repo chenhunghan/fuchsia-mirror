@@ -114,7 +114,7 @@ impl<T> GuardSlot<T> {
 }
 
 impl<T> Drop for GuardSlot<T> {
-    #[inline]
+    #[inline(always)]
     fn drop(&mut self) {
         if self.is_init {
             // SAFETY: As we are being dropped, we only call this once. And since `self.is_init` is
@@ -122,6 +122,18 @@ impl<T> Drop for GuardSlot<T> {
             unsafe { self.value.assume_init_drop() };
         }
     }
+}
+
+/// Attempts to lock a mutex without blocking, binding `guard` to `Result<Pin<&mut Guard>, ()>`.
+#[macro_export]
+macro_rules! try_lock {
+    (let mut $guard:ident = $lock_init:expr) => {
+        $crate::pin_init::stack_try_pin_init!(let $guard = $lock_init);
+        let mut $guard = $guard;
+    };
+    (let $guard:ident = $lock_init:expr) => {
+        $crate::pin_init::stack_try_pin_init!(let $guard = $lock_init);
+    };
 }
 
 /// A static C-string tag identifying the source location (`"file:line"`) where a lock is acquired.
@@ -208,8 +220,8 @@ mod raw_userspace_brwlock;
 pub use brwlock::{BrwLockPi, BrwLockPiReadGuard, BrwLockPiWriteGuard};
 pub use kcell::{KCell, KCellInit, kcell_init};
 pub use kmutex::{
-    AliasedLock, KMutex, KMutexAliasedGuard, KMutexGuard, KMutexGuardMultiple, aliased_lock,
-    aliased_lock_policy, aliased_lock_policy_with, aliased_lock_with, guard_multiple,
+    Adoptable, AliasedLock, KMutex, KMutexAliasedGuard, KMutexGuard, KMutexGuardMultiple,
+    aliased_lock, aliased_lock_policy, aliased_lock_policy_with, aliased_lock_with, guard_multiple,
     guard_multiple_policy, guard_multiple_policy_with, guard_multiple_with,
 };
 pub use konce_cell::{KOnceCell, KOnceCellGuard};
@@ -224,14 +236,14 @@ pub use lockdep_tracked::{
 };
 pub use phantom_mutex::PhantomMutex;
 pub use raw_lock::{
-    ConstRawLock, ExclusiveLockPolicy, LockPolicy, RawAssertHeldLock, RawLock, RawSharedLock,
-    RawUntrackedIrqLock, RawUntrackedLock,
+    AdoptableLockPolicy, ConstRawLock, ExclusiveLockPolicy, LockPolicy, RawAssertHeldLock, RawLock,
+    RawSharedLock, RawUntrackedIrqLock, RawUntrackedLock, RawUntrackedStatefulLock, TryLockPolicy,
 };
 pub use singleton::SingletonMutex;
 
 // The kernel's raw lock implementations (`TrackedMutex`, `TrackedCriticalMutex`,
-// `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `RawBrwLockPi`, and `RawBrwLockNoPi`) are not
-// part of this crate: they live in the kernel crate itself, and are re-exported from its
+// `TrackedSpinlock`, `TrackedMonitoredSpinlock`, `TrackedBrwLockPi`, and `TrackedBrwLockNoPi`) are
+// not part of this crate: they live in the kernel crate itself, and are re-exported from its
 // `crate::ksync_kernel` (see `//zircon/kernel/lib/ksync`). Generic code using
 // `ksync` must therefore be parameterized over its `RawLock` type, with the kernel supplying the
 // concrete raw lock. Only userspace implementations are provided here, for host builds and tests.

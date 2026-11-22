@@ -7,7 +7,6 @@ use fidl_fidl_examples_echo as fecho;
 use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use futures::{StreamExt, TryStreamExt};
-use std::sync::Arc;
 
 enum IncomingRequest {
     EchoService(fecho::EchoServiceRequest),
@@ -25,7 +24,7 @@ async fn handle_echo_stream(mut stream: fecho::EchoRequestStream) {
 
 struct DtEvalDriver {
     _node: Node,
-    _scope: Arc<fasync::Scope>,
+    _scope: fasync::Scope,
 }
 
 driver_register!(DtEvalDriver);
@@ -36,7 +35,7 @@ impl Driver for DtEvalDriver {
     async fn start(mut context: DriverContext) -> Result<Self, DriverError> {
         let node = context.take_node()?;
 
-        let scope = Arc::new(fasync::Scope::new_with_name("dt-eval-driver"));
+        let scope = fasync::Scope::new_with_name("dt-eval-driver");
         let mut fs = ServiceFs::new();
 
         fs.dir("svc").add_fidl_service_instance("default", IncomingRequest::EchoService);
@@ -44,10 +43,10 @@ impl Driver for DtEvalDriver {
         context.serve_outgoing(&mut fs)?;
 
         scope.spawn_local({
-            let scope = Arc::clone(&scope);
+            let scope = scope.to_handle();
             async move {
                 fs.for_each_concurrent(None, |request| {
-                    let scope = Arc::clone(&scope);
+                    let scope = scope.clone();
                     async move {
                         match request {
                             IncomingRequest::EchoService(fecho::EchoServiceRequest::Echo(
@@ -65,5 +64,5 @@ impl Driver for DtEvalDriver {
         Ok(DtEvalDriver { _node: node, _scope: scope })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }

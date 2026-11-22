@@ -15,7 +15,6 @@ package(default_applicable_licenses = ["//:license"])
 
 fx_package(
     name = "root_ssl_certificates",
-    package_name = "root_ssl_certificates",
     resources = [":root_ssl_certificates_pem"],
     visibility = [
         "//build/images/guest:__subpackages__",

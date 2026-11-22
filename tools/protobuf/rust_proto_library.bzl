@@ -12,8 +12,10 @@ template.
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
 
 visibility([
+    "//src/memory/lib/pprof/...",
     "//src/starnix/modules/perfetto_consumer/lib/perfetto/...",
     "//src/sys/pkg/lib/update-package/...",
+    "//vendor/...",
 ])
 
 def _include_dir_to_exec_path(include_dir):

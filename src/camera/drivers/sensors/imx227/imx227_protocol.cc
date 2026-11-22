@@ -38,7 +38,11 @@ zx_status_t Imx227Device::CameraSensor2Init() {
 
 zx_status_t Imx227Device::CameraSensor2DeInit() {
   std::lock_guard guard(lock_);
-  mipi_.DeInit();
+  if (auto result = mipi_->DeInit(); !result.ok()) {
+    zxlogf(ERROR, "Failed to send DeInit to mipicsi: %s", result.status_string());
+  } else if (result->is_error()) {
+    zxlogf(ERROR, "DeInit failed on mipicsi: %s", zx_status_get_string(result->error_value()));
+  }
   zx_status_t status = HwDeInit();
   if (status != ZX_OK) {
     zxlogf(ERROR, "Failed to deinit hardware: %s", zx_status_get_string(status));

@@ -66,6 +66,22 @@ group("tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
+action("gen_agent_environments") {
+  sources = [ "//tools/devshell/lib/agents.txt" ]
+  outputs = [ "$target_gen_dir/agent_environments.inc" ]
+  script = "gen_environment_variable_list.sh"
+  args = [] + rebase_path(outputs, root_build_dir) + [] +
+         rebase_path(sources, root_build_dir) + []
+}
+
+action("gen_agent_session_id_environments") {
+  sources = [ "//tools/devshell/lib/agent_session_ids.txt" ]
+  outputs = [ "$target_gen_dir/agent_session_id_environments.inc" ]
+  script = "gen_environment_variable_list.sh"
+  args = [] + rebase_path(outputs, root_build_dir) + [] +
+         rebase_path(sources, root_build_dir) + []
+}
+
 source_set("testable_internals") {
   sources = [
     "environment_status.cc",
@@ -76,9 +92,12 @@ source_set("testable_internals") {
     "persistent_status.h",
   ]
   public_deps = [
-    "//sdk/lib/syslog/cpp",
     "//src/lib/analytics/cpp/metric_properties",
     "//src/lib/uuid",
+  ]
+  deps = [
+    ":gen_agent_environments",
+    ":gen_agent_session_id_environments",
   ]
 }
 
@@ -109,6 +128,7 @@ static_library("core_dev_tools") {
   visibility = [
     ":*",
     "//src/developer/debug/zxdb/client:*",
+    "//src/developer/debug/zxdb/console:*",
     "//tools/fidlcat:*",
     "//tools/fidlcat/lib:*",
     "//tools/symbolizer:*",

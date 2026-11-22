@@ -18,7 +18,6 @@ if (is_host) {
     ]
     environments = [
       emu_env,
-      nuc7_env,
       nuc11_env,
     ]
   }
@@ -33,7 +32,6 @@ if (is_host) {
     test_data_deps = [ ":strict_example_files" ]
     environments = [
       emu_env,
-      nuc7_env,
       nuc11_env,
     ]
   }
@@ -55,7 +53,6 @@ if (is_host) {
     ]
     environments = [
       emu_env,
-      nuc7_env,
       nuc11_env,
     ]
   }
@@ -74,7 +71,6 @@ if (is_host) {
         [ "//src/developer/ffx/tools/speedtest:ffx_speedtest_tool_test_data" ]
     environments = [
       emu_env,
-      nuc7_env,
       nuc11_env,
     ]
   }
@@ -84,7 +80,7 @@ if (is_host) {
 
     testonly = true
     library_name = "ffxtestcase"
-    source_root = "//src/developer/ffx/tests/e2e/python"
+    source_root = "ffxtestcase"
     sources = [ "__init__.py" ]
     library_deps = [
       "//src/testing/end_to_end/honeydew",

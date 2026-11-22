@@ -45,6 +45,10 @@ sdk_shared_library("vfs_internal") {
 
   public_configs = [ ":include" ]
 
+  # In the toolchain that matches Bazel's build configuration, use the
+  # Bazel-built library. See //build/bazel/bazel_shared_library.gni.
+  bazel_target = ":vfs_internal_gn_outputs"
+
   #  ________  _________  ________  ________
   # |\   ____\|\___   ___\\   __  \|\   __  \
   # \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \

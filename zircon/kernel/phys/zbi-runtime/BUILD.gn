@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+import("//build/toolchain/toolchain_environment.gni")
+
+library_headers("headers") {
+  headers = [ "phys/zbi-runtime/main.h" ]
+  public_deps = [
+    # <phys/zbi-runtime/main.h> has #include <phys/runtime/early-boot.h>.
+    "../runtime:headers",
+
+    # <phys/zbi-runtime/main.h> has #include <lib/arch/ticks.h>.
+    "//zircon/kernel/lib/arch:headers",
+  ]
+}
+
+source_set("zbi-runtime") {
+  public_deps = [ ":headers" ]
+  sources = [
+    "phys-main.cc",
+    "zbi-header.S",
+  ]
+  deps = [
+    ":zbi-memory",
+    "..:boot-options",
+    "../output",
+    "../runtime",
+    "//src/lib/zbitl",
+    "//zircon/kernel/lib/boot-options",
+    "//zircon/kernel/lib/ktl",
+  ]
+}
+
+# This is a little library instead of a source_set() so it can be included
+# implicitly by zbi_executable() without adding bloat to the tiny tests that
+# don't use it.
+static_library("zbi-memory") {
+  complete_static_lib = true
+  visibility = [ ":*" ]
+  sources = [ "zbi-memory.cc" ]
+  deps = [
+    "../memory",
+    "../runtime:headers",
+    "//sdk/lib/zbi-format",
+    "//src/lib/zbitl",
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/kernel/phys/lib/memalloc",
+  ]
+}

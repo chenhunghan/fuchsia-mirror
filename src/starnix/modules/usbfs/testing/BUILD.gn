@@ -1,0 +1,108 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/rust/rustc_binary.gni")
+import("//build/rust/rustc_library.gni")
+import("//src/starnix/kernel/starnix.gni")
+
+# Generate `scenarios.rs` embedding all golden trace files listed in
+# `scenarios_list.json` along with `divergences.json`.
+action("generate_scenarios_rs") {
+  script = "trace_generator.py"
+  outputs = [ "$target_gen_dir/scenarios.rs" ]
+
+  scenarios = read_file("scenarios_list.json", "json")
+
+  inputs = [
+    "divergences.json",
+    "scenarios_list.json",
+    "trace_generator.py",
+  ]
+  foreach(scenario, scenarios) {
+    inputs += [ "generated/${scenario}.json" ]
+  }
+
+  args = [
+           "--generate-rs",
+           "--output",
+           rebase_path(outputs[0], root_build_dir),
+           "--trace-dir",
+           rebase_path("generated", root_build_dir),
+           "--divergences",
+           rebase_path("divergences.json", root_build_dir),
+           "--names",
+         ] + scenarios
+}
+
+copy("copy_schema_sources") {
+  visibility = [ ":*" ]
+  sources = [ "schema.rs" ]
+  outputs = [ "$target_gen_dir/{{source_file_part}}" ]
+}
+
+rustc_library("usbfs_trace_schema") {
+  testonly = true
+  edition = "2024"
+  with_unit_tests = "host"
+  source_root = "$target_gen_dir/schema.rs"
+  sources = [
+    "$target_gen_dir/scenarios.rs",
+    "$target_gen_dir/schema.rs",
+  ]
+  deps = [
+    ":copy_schema_sources",
+    ":generate_scenarios_rs",
+    "//third_party/rust_crates:serde",
+    "//third_party/rust_crates:serde_json",
+  ]
+  visibility = [
+    "//src/starnix/modules/usbfs/*",
+    "//src/starnix/tests/syscalls/rust/*",
+  ]
+}
+
+if (is_linux) {
+  rustc_library("usbfs_linux_trace_exec") {
+    testonly = true
+    edition = "2024"
+    source_root = "linux_exec.rs"
+    sources = [
+      "linux_exec.rs",
+      "linux_ffs_daemon.rs",
+    ]
+    deps = [
+      ":usbfs_trace_schema",
+      "//src/starnix/lib/linux_uapi",
+      "//third_party/rust_crates:libc",
+      "//third_party/rust_crates:serde_json",
+      "//third_party/rust_crates:zerocopy",
+    ]
+    visibility = [
+      "//src/starnix/modules/usbfs/*",
+      "//src/starnix/tests/syscalls/rust/*",
+    ]
+  }
+
+  rustc_binary("usbfs_trace_recorder") {
+    testonly = true
+    edition = "2024"
+    output_name = "usbfs_trace_recorder"
+    source_root = "recorder_main.rs"
+    sources = [ "recorder_main.rs" ]
+    deps = [
+      ":usbfs_linux_trace_exec",
+      ":usbfs_trace_schema",
+      "//third_party/rust_crates:serde_json",
+    ]
+  }
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":usbfs_trace_recorder($target_linux_toolchain)",
+    ":usbfs_trace_schema",
+    ":usbfs_trace_schema_test($host_toolchain)",
+  ]
+}

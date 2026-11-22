@@ -147,7 +147,7 @@ class TimePoint:
         return self._ticks
 
     def to_epoch_delta(self) -> TimeDelta:
-        return TimeDelta.from_nanoseconds(self._ticks)
+        return TimeDelta(self._ticks)
 
     def __add__(self, time_delta: TimeDelta) -> TimePoint:
         return TimePoint(self._ticks + time_delta.to_nanoseconds())
@@ -162,7 +162,7 @@ class TimePoint:
 
     def __sub__(self, other: Any) -> TimeDelta | TimePoint:
         if isinstance(other, TimePoint):
-            return TimeDelta.from_nanoseconds(self._ticks - other._ticks)
+            return TimeDelta(self._ticks - other._ticks)
         if isinstance(other, TimeDelta):
             return self + (-other)
         return NotImplemented

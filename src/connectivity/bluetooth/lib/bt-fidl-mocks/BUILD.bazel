@@ -63,6 +63,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "bt-fidl-mocks-tests",
-    package_name = "bt-fidl-mocks-tests",
     unit_tests = [":bt-fidl-mocks_test"],
 )

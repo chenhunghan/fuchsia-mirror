@@ -5,25 +5,21 @@
 #ifndef ZXTEST_CPP_SCOPED_TRACE_H_
 #define ZXTEST_CPP_SCOPED_TRACE_H_
 
-#include <string>
+#include <string_view>
 
-#include <zxtest/base/runner.h>
 #include <zxtest/base/types.h>
 
 namespace zxtest {
+
 class ScopedTrace final {
  public:
   ScopedTrace() = delete;
-  ScopedTrace(const zxtest::SourceLocation location, const std::string& message)
-      : trace_(zxtest::Message(message, location)) {
-    zxtest::Runner::GetInstance()->PushTrace(&trace_);
-  }
-
-  ~ScopedTrace() { zxtest::Runner::GetInstance()->PopTrace(); }
-
- private:
-  zxtest::Message trace_;
+  ScopedTrace(SourceLocation location, std::string_view message);
+  ScopedTrace(const ScopedTrace&) = delete;
+  ScopedTrace& operator=(const ScopedTrace&) = delete;
+  ~ScopedTrace();
 };
+
 }  // namespace zxtest
 
 #endif  // ZXTEST_CPP_SCOPED_TRACE_H_

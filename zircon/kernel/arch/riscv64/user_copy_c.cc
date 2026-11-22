@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <arch/ops.h>
 #include <arch/riscv64/user_copy.h>
 #include <arch/user_copy.h>
 
@@ -12,6 +13,7 @@
 // barrier.
 UserCopyCaptureFaultsResult arch_copy_from_user_capture_faults(void* dst, const void* src,
                                                                size_t len, CopyContext context) {
+  DEBUG_ASSERT(arch_num_spinlocks_held() == 0 || context == CopyContext::kBlockingNotAllowed);
   Riscv64UserCopyRet ret = rust_arch_copy_from_user_capture_faults(dst, src, len);
   if (ret.status == ZX_OK) {
     return UserCopyCaptureFaultsResult{ZX_OK};
@@ -28,6 +30,7 @@ UserCopyCaptureFaultsResult arch_copy_from_user_capture_faults(void* dst, const 
 
 UserCopyCaptureFaultsResult arch_copy_to_user_capture_faults(void* dst, const void* src, size_t len,
                                                              CopyContext context) {
+  DEBUG_ASSERT(arch_num_spinlocks_held() == 0 || context == CopyContext::kBlockingNotAllowed);
   Riscv64UserCopyRet ret = rust_arch_copy_to_user_capture_faults(dst, src, len);
   if (ret.status == ZX_OK) {
     return UserCopyCaptureFaultsResult{ZX_OK};

@@ -8,8 +8,11 @@
 #include <lib/syslog/cpp/macros.h>
 #include <stdint.h>
 
+#include <cstddef>
+#include <functional>
 #include <optional>
 #include <ostream>
+#include <utility>
 
 namespace zxdb {
 
@@ -73,5 +76,18 @@ inline std::ostream& operator<<(std::ostream& out, const DwarfDieRef& ref) {
 }
 
 }  // namespace zxdb
+
+template <>
+struct std::hash<zxdb::DwarfDieRef> {
+  size_t operator()(const zxdb::DwarfDieRef& ref) const noexcept {
+    if (!ref.is_valid()) {
+      return 0;
+    }
+    // Mix the section tag with a non-zero constant so offset 0 doesn't collide with invalid refs.
+    size_t h = std::hash<uint64_t>{}(ref.offset());
+    size_t tag = static_cast<size_t>(std::to_underlying(ref.section())) + 1U;
+    return h ^ ((tag * static_cast<size_t>(0x9e3779b97f4a7c15ULL)) + (h << 6U) + (h >> 2U));
+  }
+};
 
 #endif  // SRC_DEVELOPER_DEBUG_ZXDB_SYMBOLS_DWARF_DIE_REF_H_

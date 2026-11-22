@@ -5,7 +5,6 @@
 #include "src/devices/tpm/drivers/tpm/tpm.h"
 
 #include <fidl/fuchsia.hardware.tpmimpl/cpp/wire.h>
-#include <fuchsia/hardware/tpmimpl/cpp/banjo.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/fit/defer.h>
@@ -39,20 +38,14 @@ using fuchsia_hardware_tpmimpl::wire::kTpmMaxDataTransfer;
 using fuchsia_hardware_tpmimpl::wire::RegisterAddress;
 
 zx_status_t TpmDevice::Create(void *ctx, zx_device_t *parent) {
-  ddk::TpmImplProtocolClient tpm(parent);
-  if (!tpm.is_valid()) {
-    zxlogf(ERROR, "Failed to get TPM impl!");
-    return ZX_ERR_NOT_SUPPORTED;
+  zx::result client_end =
+      ddk::Device<void>::DdkConnectFidlProtocol<fuchsia_hardware_tpmimpl::Service::Device>(parent);
+  if (client_end.is_error()) {
+    zxlogf(ERROR, "Failed to connect to TPM impl service: %s", client_end.status_string());
+    return client_end.status_value();
   }
 
-  auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_tpmimpl::TpmImpl>();
-  if (endpoints.is_error()) {
-    return endpoints.error_value();
-  }
-
-  tpm.ConnectServer(endpoints->server.TakeChannel());
-
-  fidl::WireSyncClient<fuchsia_hardware_tpmimpl::TpmImpl> client(std::move(endpoints->client));
+  fidl::WireSyncClient<fuchsia_hardware_tpmimpl::TpmImpl> client(std::move(client_end.value()));
 
   auto device = std::make_unique<TpmDevice>(parent, std::move(client));
   zx_status_t status = device->DdkAdd(ddk::DeviceAddArgs("tpm")

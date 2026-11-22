@@ -6,7 +6,7 @@ use super::ArchCapabilitiesMsr;
 use super::cpuid::{EXTENDED_AMD_FEATURES_B, EXTENDED_FEATURES_D};
 use bitrs::layout;
 use regio::RwSafe;
-use regio::traits::ReadReg;
+use regio::traits::{ReadReg, RwSafeReg};
 use regio::x86::{Cpuid, Msr};
 
 /// Speculation control.
@@ -71,6 +71,20 @@ impl VirtualSpeculationControlMsr {
     }
 }
 
+/// Whether the Indirect Branch Prediction Barrier (IBPB) is supported.
+///
+/// https://software.intel.com/security-software-guidance/deep-dives/deep-dive-indirect-branch-predictor-barrier.
+pub fn has_ibpb(cpuid: &impl Cpuid) -> bool {
+    // The Intel way.
+    if cpuid.supports(EXTENDED_FEATURES_D) && cpuid.read(EXTENDED_FEATURES_D).ibrs_ibpb() {
+        return true;
+    }
+
+    // [amd/ibc]: PRESENCE.
+    // The AMD way.
+    cpuid.supports(EXTENDED_AMD_FEATURES_B) && cpuid.read(EXTENDED_AMD_FEATURES_B).ibpb()
+}
+
 /// Whether Indirect Branch Restricted Speculation (IBRS) is supported. The
 /// "always on" mode refers to an optimization in which IBRS need only be
 /// enabled once; IBRS in this mode are also referred to as "enhanced".
@@ -99,6 +113,12 @@ pub fn has_ibrs(
     false
 }
 
+/// Enables IBRS, which requires the feature to be supported.
+pub fn enable_ibrs(cpuid: &impl Cpuid, msr: &impl RwSafeReg<SpeculationControlMsr>) {
+    debug_assert!(SpeculationControlMsr::is_supported(cpuid));
+    msr.modify(|val| *val.set_ibrs(true));
+}
+
 /// Whether Single Thread Indirect Branch Predictors (STIBP) are supported. The
 /// "always on" mode refers to an optimization in which STIBP need only be
 /// enabled once.
@@ -120,4 +140,58 @@ pub fn has_stibp(cpuid: &impl Cpuid, always_on_mode: bool) -> bool {
         }
     }
     false
+}
+
+/// Enables STIBP, which requires the feature to be supported.
+pub fn enable_stibp(cpuid: &impl Cpuid, msr: &impl RwSafeReg<SpeculationControlMsr>) {
+    debug_assert!(SpeculationControlMsr::is_supported(cpuid));
+    msr.modify(|val| *val.set_stibp(true));
+}
+
+#[cfg(test)]
+mod tests {
+    use regio::testing::ExpectationReg;
+    use regio::testing::x86::FakeCpuid;
+
+    use super::*;
+    use crate::x86::cpuid::{
+        ExtendedAmdFeaturesB, ExtendedFeatureFlagsD, MAX_EXTENDED_LEAF, MAX_LEAF,
+    };
+
+    #[test]
+    fn ibpb_and_spec_ctrl_enablers() {
+        let mut cpuid = FakeCpuid::new();
+        assert!(!has_ibpb(&cpuid));
+
+        // Leaf 7 supported, but IBRS_IBPB bit clear.
+        cpuid.set(MAX_LEAF, 7).set(EXTENDED_FEATURES_D, ExtendedFeatureFlagsD::from(0));
+        assert!(!has_ibpb(&cpuid));
+
+        // Intel IBRS_IBPB bit in leaf 7 EDX.
+        let mut ext_d = ExtendedFeatureFlagsD::from(0);
+        ext_d.set_ibrs_ibpb(true).set_stibp(true);
+        cpuid.set(EXTENDED_FEATURES_D, ext_d);
+        assert!(has_ibpb(&cpuid));
+
+        let mut msr = ExpectationReg::new();
+        msr.expect_read(SpeculationControlMsr::from(0))
+            .expect_write(SpeculationControlMsr::from(0b01))
+            .expect_read(SpeculationControlMsr::from(0b01))
+            .expect_write(SpeculationControlMsr::from(0b11));
+        enable_ibrs(&cpuid, &msr);
+        enable_stibp(&cpuid, &msr);
+
+        // AMD leaf 0x8000_0008 supported, but IBPB bit clear.
+        let mut amd_cpuid = FakeCpuid::new();
+        amd_cpuid
+            .set(MAX_EXTENDED_LEAF, 0x8000_0008)
+            .set(EXTENDED_AMD_FEATURES_B, ExtendedAmdFeaturesB::from(0));
+        assert!(!has_ibpb(&amd_cpuid));
+
+        // AMD IBPB bit in leaf 0x8000_0008 EBX.
+        let mut amd_b = ExtendedAmdFeaturesB::from(0);
+        amd_b.set_ibpb(true);
+        amd_cpuid.set(EXTENDED_AMD_FEATURES_B, amd_b);
+        assert!(has_ibpb(&amd_cpuid));
+    }
 }

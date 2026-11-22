@@ -24,7 +24,6 @@ fuchsia_cc_driver("test-parent-sys_driver") {
 
 fuchsia_driver_component("test-parent-sys") {
   deps = [ ":test-parent-sys_driver" ]
-  info = "meta/test-parent-sys-info.json"
   manifest = "meta/test-parent-sys.cml"
 }
 

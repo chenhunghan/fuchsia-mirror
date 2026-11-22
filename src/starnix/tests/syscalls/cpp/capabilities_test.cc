@@ -9,6 +9,7 @@
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/fsuid.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
@@ -25,7 +26,6 @@
 #include <vector>
 
 #include <fbl/unique_fd.h>
-#include <gtest/gtest-spi.h>
 #include <gtest/gtest.h>
 #include <linux/capability.h>
 #include <linux/prctl.h>
@@ -58,12 +58,7 @@ constexpr uid_t kUser2Uid = 65531;
 constexpr gid_t kUser2Gid = 65532;
 
 void SwitchToUser1(bool keep_caps = false) {
-  ASSERT_THAT(setresgid(kUser1Gid, kUser1Gid, kUser1Gid), SyscallSucceeds());
-  ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
-  if (keep_caps) {
-    ASSERT_THAT(prctl(PR_SET_SECUREBITS, SECBIT_KEEP_CAPS), SyscallSucceeds());
-  }
-  ASSERT_THAT(setresuid(kUser1Uid, kUser1Uid, kUser1Uid), SyscallSucceeds());
+  ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(kUser1Uid, kUser1Gid, keep_caps));
 }
 
 // Runs a program with a single argument in a child process, wiring stdout to a
@@ -150,11 +145,7 @@ class CapsExecTest : public ::testing::Test {
     ASSERT_EQ(getxattr(print_helper_.c_str(), "security.capability", nullptr, 0), -1);
     ASSERT_EQ(errno, ENODATA);
 
-    FILE *fp = fopen("/proc/sys/kernel/cap_last_cap", "r");
-    ASSERT_NE(fp, nullptr);
-    int n = fscanf(fp, "%d\n", &cap_last_cap_);
-    ASSERT_EQ(n, 1);
-    fclose(fp);
+    cap_last_cap_ = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::GetLastCap());
   }
 
   std::filesystem::path path() const { return temp_dir_.path(); }
@@ -359,26 +350,7 @@ class CapsExecTest : public ::testing::Test {
   int cap_last_cap_;
 };
 
-// Helper to set V2 file capabilities (20 bytes).
-// - permitted: 64-bit mask of permitted capabilities
-// - inheritable: 64-bit mask of inheritable capabilities
-// - effective: whether to set the effective bit in the magic
-// Returns 0 on success, or -1 on error (with errno set).
-int SetFileCapabilitiesV2(const std::filesystem::path &path, uint64_t permitted,
-                          uint64_t inheritable, bool effective) {
-  uint32_t magic = VFS_CAP_REVISION_2;
-  if (effective) {
-    magic |= VFS_CAP_FLAGS_EFFECTIVE;
-  }
-
-  vfs_cap_data cap_data{};
-  cap_data.magic_etc = htole32(magic);
-  cap_data.data[0].permitted = htole32(static_cast<uint32_t>(permitted));
-  cap_data.data[0].inheritable = htole32(static_cast<uint32_t>(inheritable));
-  cap_data.data[1].permitted = htole32(static_cast<uint32_t>(permitted >> 32u));
-  cap_data.data[1].inheritable = htole32(static_cast<uint32_t>(inheritable >> 32u));
-  return setxattr(path.c_str(), "security.capability", &cap_data, sizeof(cap_data), 0);
-}
+using test_helper::SetFileCapabilitiesV2;
 
 // Helper to set V3 file capabilities (24 bytes).
 // - permitted: 64-bit mask of permitted capabilities
@@ -746,8 +718,7 @@ TEST(CapsTest, PermittedCapabilitiesCannotBeRegained) {
   for (const auto &cap : caps) {
     helper.RunInForkedProcess([cap]() {
       SetUpCapabilities(cap);
-      EXPECT_NONFATAL_FAILURE(test_helper::SetCapabilityPermitted(cap.cap_num),
-                              "Operation not permitted");
+      EXPECT_THAT(test_helper::TrySetCapabilityPermitted(cap.cap_num), SyscallResultIsErrno(EPERM));
     });
     EXPECT_TRUE(helper.WaitForChildren());
   }
@@ -771,8 +742,8 @@ TEST(CapsTest, PermittedCapabilitiesCannotBeDroppedIfTheyAreEffective) {
   for (const auto &cap : caps) {
     helper.RunInForkedProcess([cap]() {
       SetUpCapabilities(cap);
-      EXPECT_NONFATAL_FAILURE(test_helper::UnsetCapabilityPermitted(cap.cap_num),
-                              "Operation not permitted");
+      EXPECT_THAT(test_helper::TryUnsetCapabilityPermitted(cap.cap_num),
+                  SyscallResultIsErrno(EPERM));
     });
     EXPECT_TRUE(helper.WaitForChildren());
   }
@@ -796,7 +767,8 @@ TEST(CapsTest, CannotSetEffectiveCapsIfNotPermitted) {
   for (const auto &test_case : test_cases) {
     helper.RunInForkedProcess([test_case]() {
       SetUpCapabilities(test_case);
-      EXPECT_NONFATAL_FAILURE(test_helper::SetCapabilityEffective(CAP_AUDIT_READ), "SYS_capset");
+      EXPECT_THAT(test_helper::TrySetCapabilityEffective(CAP_AUDIT_READ),
+                  SyscallResultIsErrno(EPERM));
       EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_AUDIT_READ));
     });
     EXPECT_TRUE(helper.WaitForChildren());
@@ -804,37 +776,48 @@ TEST(CapsTest, CannotSetEffectiveCapsIfNotPermitted) {
 }
 
 TEST(CapsTest, AmbientCapabilitiesRequirePermittedAndInheritable) {
-  // Tests that ambient capabilities will be unset if inheritable or permitted
-  // are unset.
+  // Tests that ambient capabilities are cleared if inheritable or permitted are unset, and cannot
+  // be raised while either is unset.
   if (!test_helper::HasSysAdmin()) {
     GTEST_SKIP() << "Not running with sysadmin capabilities. skipping.";
   }
 
-  struct test_case_t {
-    capability_t caps;
-    const char *failure;
+  constexpr capability_t kTestCases[] = {
+      {CAP_AUDIT_READ, 0, 0, 0, 0, 0}, {CAP_AUDIT_READ, 0, 0, 0, 1, 0},
+      {CAP_AUDIT_READ, 0, 0, 1, 0, 0}, {CAP_AUDIT_READ, 0, 0, 1, 1, 0},
+      {CAP_AUDIT_READ, 0, 1, 0, 0, 0}, {CAP_AUDIT_READ, 0, 1, 0, 1, 0},
+      {CAP_AUDIT_READ, 1, 1, 0, 0, 0}, {CAP_AUDIT_READ, 1, 1, 0, 1, 0},
   };
 
-  std::vector<test_case_t> test_cases;
-
-  test_cases.push_back({{CAP_AUDIT_READ, 0, 0, 0, 0, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 0, 0, 0, 1, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 0, 0, 1, 0, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 0, 0, 1, 1, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 0, 1, 0, 0, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 0, 1, 0, 1, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 1, 1, 0, 0, 1}, "HasCapabilityAmbient"});
-  test_cases.push_back({{CAP_AUDIT_READ, 1, 1, 0, 1, 1}, "HasCapabilityAmbient"});
-
   test_helper::ForkHelper helper;
+  for (const auto &caps : kTestCases) {
+    SCOPED_TRACE(fxl::StringPrintf("(Eff Per Inh Bnd) (%d %d %d %d)", caps.effective,
+                                   caps.permitted, caps.inheritable, caps.bounding));
+    helper.RunInForkedProcess([caps]() {
+      test_helper::SetCapabilityEffective(CAP_SETPCAP);
+      test_helper::SetCapabilityEffective(caps.cap_num);
+      test_helper::SetCapabilityPermitted(caps.cap_num);
+      test_helper::SetCapabilityInheritable(caps.cap_num);
+      test_helper::SetCapabilityAmbient(caps.cap_num);
+      ASSERT_TRUE(test_helper::HasCapabilityAmbient(caps.cap_num));
 
-  for (const auto &test_case : test_cases) {
-    SCOPED_TRACE(fxl::StringPrintf("(Eff Per Inh Bnd Amb) (%d %d %d %d %d)",
-                                   test_case.caps.effective, test_case.caps.permitted,
-                                   test_case.caps.inheritable, test_case.caps.bounding,
-                                   test_case.caps.ambient));
-    helper.RunInForkedProcess([test_case]() {
-      EXPECT_NONFATAL_FAILURE(SetUpCapabilities(test_case.caps), test_case.failure);
+      if (caps.effective == 0) {
+        test_helper::UnsetCapabilityEffective(caps.cap_num);
+      }
+      if (caps.permitted == 0) {
+        test_helper::UnsetCapabilityPermitted(caps.cap_num);
+      }
+      if (caps.inheritable == 0) {
+        test_helper::UnsetCapabilityInheritable(caps.cap_num);
+      }
+      if (caps.bounding == 0) {
+        test_helper::UnsetCapabilityBounding(caps.cap_num);
+      }
+
+      // Dropping permitted or inheritable automatically clears the ambient capability.
+      EXPECT_FALSE(test_helper::HasCapabilityAmbient(caps.cap_num));
+      // Attempting to raise the ambient capability without both permitted and inheritable fails.
+      EXPECT_THAT(test_helper::TrySetCapabilityAmbient(caps.cap_num), SyscallResultIsErrno(EPERM));
     });
     EXPECT_TRUE(helper.WaitForChildren());
   }
@@ -1193,11 +1176,7 @@ TEST(CapsTest, CapsetMasksReservedBits) {
                                 (static_cast<uint64_t>(caps[1].inheritable) << 32);
 
     // 2. Determine the last valid capability supported by the running kernel.
-    int cap_last_cap = 0;
-    FILE *fp = fopen("/proc/sys/kernel/cap_last_cap", "r");
-    ASSERT_NE(fp, nullptr);
-    ASSERT_EQ(fscanf(fp, "%d\n", &cap_last_cap), 1);
-    fclose(fp);
+    int cap_last_cap = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::GetLastCap());
 
     // 3. Construct masks for valid vs reserved bits.
     uint64_t valid_mask = (1ULL << (cap_last_cap + 1)) - 1;
@@ -2547,6 +2526,122 @@ INSTANTIATE_TEST_SUITE_P(
         }),
     [](const ::testing::TestParamInfo<FileCapClearParam> &info) { return info.param.name; });
 
+namespace {
+
+class FilePrivilegeClearTest : public FileCapTest {
+ protected:
+  static constexpr mode_t kPerms = S_IRWXU | S_IRWXG | S_IRWXO;
+  static constexpr uint64_t kTestCaps = (1ULL << CAP_NET_ADMIN);
+
+  void SetUp() override {
+    FileCapTest::SetUp();
+    if (IsSkipped()) {
+      return;
+    }
+
+    test_file_ = path() / "test_file";
+    ASSERT_TRUE(files::WriteFile(test_file_.string(), "initial content"));
+    ASSERT_THAT(chmod(test_file_.c_str(), S_ISUID | S_ISGID | kPerms), SyscallSucceeds());
+    ASSERT_THAT(SetFileCapabilitiesV2(test_file_, kTestCaps, /*inheritable=*/0, /*effective=*/true),
+                SyscallSucceeds());
+
+    fd_ = fbl::unique_fd(open(test_file_.c_str(), O_WRONLY));
+    ASSERT_TRUE(fd_.is_valid());
+  }
+
+  testing::AssertionResult WriteAsUnprivilegedUser() {
+    test_helper::ForkHelper helper;
+    helper.RunInForkedProcess([this]() {
+      SwitchToUser1();
+      ASSERT_THAT(write(fd_.get(), "x", 1), SyscallSucceedsWithValue(1));
+    });
+    return helper.WaitForChildren();
+  }
+
+  fit::result<int, mode_t> SuidSgidBits() const {
+    struct stat st{};
+    if (stat(test_file_.c_str(), &st) < 0) {
+      return fit::error(errno);
+    }
+    return fit::ok(st.st_mode & (S_ISUID | S_ISGID));
+  }
+
+  std::filesystem::path test_file_;
+  fbl::unique_fd fd_;
+};
+
+}  // namespace
+
+// From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
+//
+//   CAP_FSETID
+//          •  Don't clear set-user-ID and set-group-ID mode bits when a
+//             file is modified;
+//
+// From <https://man7.org/linux/man-pages/man3/write.3p.html>:
+//
+//   If the file is a regular file, the S_ISUID and S_ISGID bits of the file
+//   mode may be cleared.
+//
+// Verifies that when a file has both S_ISUID/S_ISGID mode bits and
+// security.capability set, a modification by a caller holding CAP_FSETID
+// clears security.capability while retaining S_ISUID and S_ISGID, and a
+// subsequent modification without CAP_FSETID clears the retained S_ISUID and
+// S_ISGID bits.
+TEST_F(FilePrivilegeClearTest, CapFsetidRetainsSuidSgidWhileClearingFileCapabilities) {
+  ASSERT_THAT(write(fd_.get(), "x", 1), SyscallSucceedsWithValue(1));
+  EXPECT_THAT(getxattr(test_file_.c_str(), "security.capability", nullptr, 0),
+              SyscallFailsWithErrno(ENODATA));
+  EXPECT_THAT(SuidSgidBits(), SyscallResultIsOk(static_cast<mode_t>(S_ISUID | S_ISGID)));
+
+  ASSERT_TRUE(WriteAsUnprivilegedUser());
+  EXPECT_THAT(SuidSgidBits(), SyscallResultIsOk(0u));
+}
+
+// Verifies that re-applying S_ISUID and S_ISGID via chmod(2) after privilege
+// bits have been cleared causes a subsequent unprivileged write to clear them
+// again.
+TEST_F(FilePrivilegeClearTest, ReappliedSuidSgidClearedOnUnprivilegedWrite) {
+  ASSERT_TRUE(WriteAsUnprivilegedUser());
+  ASSERT_THAT(SuidSgidBits(), SyscallResultIsOk(0u));
+
+  ASSERT_THAT(chmod(test_file_.c_str(), S_ISUID | S_ISGID | kPerms), SyscallSucceeds());
+  ASSERT_THAT(SuidSgidBits(), SyscallResultIsOk(static_cast<mode_t>(S_ISUID | S_ISGID)));
+
+  ASSERT_TRUE(WriteAsUnprivilegedUser());
+  EXPECT_THAT(SuidSgidBits(), SyscallResultIsOk(0u));
+}
+
+// Verifies that re-applying security.capability via setxattr(2) after it has
+// been cleared by a prior write causes a subsequent write to clear it again.
+TEST_F(FilePrivilegeClearTest, ReappliedFileCapabilitiesClearedOnWrite) {
+  ASSERT_TRUE(WriteAsUnprivilegedUser());
+  ASSERT_THAT(SuidSgidBits(), SyscallResultIsOk(0u));
+  ASSERT_THAT(getxattr(test_file_.c_str(), "security.capability", nullptr, 0),
+              SyscallFailsWithErrno(ENODATA));
+
+  ASSERT_THAT(SetFileCapabilitiesV2(test_file_, kTestCaps, /*inheritable=*/0, /*effective=*/true),
+              SyscallSucceeds());
+  ASSERT_THAT(write(fd_.get(), "x", 1), SyscallSucceedsWithValue(1));
+  EXPECT_THAT(getxattr(test_file_.c_str(), "security.capability", nullptr, 0),
+              SyscallFailsWithErrno(ENODATA));
+}
+
+// Verifies that zero-length writes do not clear S_ISUID, S_ISGID, or
+// security.capability.
+TEST_F(FilePrivilegeClearTest, ZeroByteWriteRetainsSuidSgidAndFileCapabilities) {
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([this]() {
+    SwitchToUser1();
+    ASSERT_THAT(write(fd_.get(), "", 0), SyscallSucceedsWithValue(0));
+    ASSERT_THAT(pwrite(fd_.get(), "", 0, 0), SyscallSucceedsWithValue(0));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  EXPECT_THAT(SuidSgidBits(), SyscallResultIsOk(static_cast<mode_t>(S_ISUID | S_ISGID)));
+  EXPECT_THAT(getxattr(test_file_.c_str(), "security.capability", nullptr, 0), SyscallSucceeds());
+}
+
 // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
 //
 //   The file capability sets are stored in an extended attribute (see
@@ -2680,4 +2775,50 @@ TEST_F(FileCapTest, MalformedAndRevision1FileCapabilitiesRejected) {
   EXPECT_THAT(
       setxattr(test_file.c_str(), "security.capability", &v3_in_v2_buf, sizeof(v3_in_v2_buf), 0),
       SyscallFailsWithErrno(EINVAL));
+}
+
+// Verifies filesystem-UID capability fixup behavior across setfsuid(2) and setreuid(2):
+// - Changing fsuid from 0 to nonzero clears filesystem capabilities (e.g. CAP_CHOWN) from the
+//   effective set while preserving them in permitted and keeping non-filesystem capabilities
+//   effective.
+// - Resetting fsuid from nonzero back to 0 via setreuid(-1, -1) when euid stayed 0 does not
+//   re-enable filesystem capabilities (which only happens when fsuid changes back to 0 via
+//   setfsuid(2) or euid transitions from nonzero to 0).
+// - With SECBIT_NO_SETUID_FIXUP set, changing fsuid to nonzero preserves filesystem capabilities.
+TEST(CapabilitiesSetuidTest, SetfsuidCapabilityFixup) {
+  if (!test_helper::HasCapability(CAP_SETUID) || !test_helper::HasCapability(CAP_CHOWN) ||
+      !test_helper::HasCapability(CAP_SETPCAP)) {
+    GTEST_SKIP() << "Requires CAP_SETUID, CAP_CHOWN, and CAP_SETPCAP";
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([]() {
+    ASSERT_TRUE(test_helper::HasCapabilityEffective(CAP_CHOWN));
+    ASSERT_TRUE(test_helper::HasCapabilityEffective(CAP_SETUID));
+
+    // Dropping fsuid to nonzero clears CAP_CHOWN from effective while keeping it in permitted
+    // and leaving non-filesystem capabilities (such as CAP_SETUID) effective.
+    ASSERT_EQ(setfsuid(kUser1Uid), static_cast<int>(kRootUid));
+    ASSERT_EQ(setfsuid(-1), static_cast<int>(kUser1Uid));
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_CHOWN));
+    EXPECT_TRUE(test_helper::HasCapabilityPermitted(CAP_CHOWN));
+    EXPECT_TRUE(test_helper::HasCapabilityEffective(CAP_SETUID));
+
+    // setreuid(-1, -1) resets fsuid to euid (0), but because euid did not transition from
+    // nonzero to 0, CAP_CHOWN stays cleared in effective.
+    ASSERT_THAT(setreuid(static_cast<uid_t>(-1), static_cast<uid_t>(-1)), SyscallSucceeds());
+    EXPECT_EQ(setfsuid(-1), static_cast<int>(kRootUid));
+    EXPECT_FALSE(test_helper::HasCapabilityEffective(CAP_CHOWN));
+
+    // Re-enable CAP_CHOWN via setfsuid(nonzero) -> setfsuid(0).
+    ASSERT_EQ(setfsuid(kUser1Uid), static_cast<int>(kRootUid));
+    ASSERT_EQ(setfsuid(kRootUid), static_cast<int>(kUser1Uid));
+    EXPECT_TRUE(test_helper::HasCapabilityEffective(CAP_CHOWN));
+
+    // With SECBIT_NO_SETUID_FIXUP set, dropping fsuid to nonzero does not clear CAP_CHOWN.
+    SAFE_SYSCALL(prctl(PR_SET_SECUREBITS, SECBIT_NO_SETUID_FIXUP));
+    ASSERT_EQ(setfsuid(kUser1Uid), static_cast<int>(kRootUid));
+    EXPECT_TRUE(test_helper::HasCapabilityEffective(CAP_CHOWN));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }

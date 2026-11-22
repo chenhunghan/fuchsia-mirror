@@ -220,6 +220,10 @@ def _fidl_rust_next_library_flavor(
             "//build/config/rust/lints:allow_unused_crate_dependencies",
             "//build/config/rust/lints:deny_unused_results",
         ],
+        # Not all FIDL handle types (e.g. Interrupt, DebugLog, Timer) are
+        # supported by fdomain_client, so exclude fdomain bindings from
+        # wildcard builds unless explicitly depended on.
+        tags = ["manual"] if flavor == "fdomain" else [],
         testonly = testonly,
         visibility = visibility,
     )

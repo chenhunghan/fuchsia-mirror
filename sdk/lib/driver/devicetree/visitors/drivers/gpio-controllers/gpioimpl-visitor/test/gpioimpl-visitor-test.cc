@@ -211,13 +211,15 @@ TEST(GpioImplVisitorTest, TestGpiosProperty) {
   ASSERT_EQ((*controller_metadata_b->init_steps())[0].call()->call(),
             fuchsia_hardware_pinimpl::InitCall::WithPinConfig(
                 {{.pull = fuchsia_hardware_pin::Pull::kUp,
-                  .drive_type = fuchsia_hardware_pin::DriveType::kPushPull}}));
+                  .drive_type = fuchsia_hardware_pin::DriveType::kPushPull,
+                  .input_buffer_enabled = true}}));
 
   ASSERT_TRUE((*controller_metadata_b->init_steps())[1].call());
   ASSERT_EQ((*controller_metadata_b->init_steps())[1].call()->pin(),
             static_cast<uint32_t>(GROUP5_PIN1));
   ASSERT_EQ((*controller_metadata_b->init_steps())[1].call()->call(),
-            fuchsia_hardware_pinimpl::InitCall::WithPinConfig({{.function_name = "spi-bus"}}));
+            fuchsia_hardware_pinimpl::InitCall::WithPinConfig(
+                {{.function_name = "spi-bus", .input_buffer_enabled = false}}));
 
   ASSERT_FALSE(controller_metadata_b->device_pin_states().has_value());
 

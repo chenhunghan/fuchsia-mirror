@@ -20,7 +20,7 @@ Fuchsia system.
 devices and the blue boxes are drivers.
 
 
-## Node attributes
+## Node attributes {:#node-attributes}
 
 A node has the following attributes:
 
@@ -41,7 +41,7 @@ A node has the following attributes:
 A driver creating child nodes gets to assign node properties, capabilities,
 and symbols to the new nodes.
 
-## Node capabilities
+## Node capabilities {:#node-capabilities}
 
 A node represents a collection of resources, which in turn represents a hardware
 or virtual device in a Fuchsia system. When a parent driver creates a new node,
@@ -53,7 +53,7 @@ the child driver.
 However, not all capabilities in a driver’s incoming namespace are from a parent
 driver. Some capabilities may come from non-driver components in the system.
 
-## Node topology
+## Node topology {:#node-topology}
 
 Fuchsia's [driver manager][driver-manager] maintains a node topology that
 describes the parent-child relationships between nodes (representing devices)
@@ -86,7 +86,7 @@ unbound nodes are not associated with any specific components shown in the
 component topology. In fact, many nodes in the node topology are commonly left
 unbound (that is, unmatched with drivers) while the system is running. Second,
 in the node topology a node may have multiple parent nodes (see
-[Composite nodes](#composite_nodes)), which isn’t allowed in the component
+[Composite nodes](#composite-nodes)), which isn’t allowed in the component
 topology.
 
 From the component framework’s perspective, the drivers’ topology appears to be
@@ -119,12 +119,12 @@ bound to.
 A driver can perform the following lifecycle actions on a [`Node`][node-object]
 object it controls:
 
-*  [Create a child node](#node_creation) with specific node properties and
+*  [Create a child node](#node-creation) with specific node properties and
    capabilities.
-*  [Drop the node](#node_removal), which causes the driver manager to clean up
+*  [Drop the node](#node-removal), which causes the driver manager to clean up
    the node and its descendants in the node topology.
 
-### Node creation
+### Node creation {:#node-creation}
 
 A node is created when the [`AddChild`][addchild] FIDL method is called on an
 existing node. Either the driver that owns the existing node or another driver
@@ -133,9 +133,9 @@ on the node.
 
 When a driver creates a child node, the driver can take the following actions:
 
-*   Give the child node [properties](#node_attributes) that determine which
+*   Give the child node [properties](#node-attributes) that determine which
     drivers can bind to the node.
-*   Give the child node [capabilities](#node_capabilities) that later can be
+*   Give the child node [capabilities](#node-capabilities) that later can be
     used by a driver bound to the node.
 *   Keep the child node’s [`NodeController`][node-controller] object, which
     allows the parent driver to stop the child node.
@@ -154,7 +154,7 @@ at any time, which results in stopping the driver bound to the node. The driver
 receives the [`OnBind`][fidl-onbind] FIDL event through this object when
 the child node is bound to a driver.
 
-### Node removal
+### Node removal {:#node-removal}
 
 A node removal takes place when one of the following event occurs:
 
@@ -170,7 +170,7 @@ if the node to be removed is in the middle of the node topology, the driver fram
 ensures that all the child drivers are stopped and all the child nodes are removed
 before the target node is removed.
 
-## Composite nodes
+## Composite nodes {:#composite-nodes}
 
 The driver manager creates a composite node when a driver wishes to
 bind itself to multiple parent nodes. In this case, the driver manager adds
@@ -211,10 +211,10 @@ camera controller driver
 <!-- Reference links -->
 
 [driver-framework]: driver_framework.md
-[driver-manager]: driver_framework.md#driver_manager
-[driver-host]: driver_framework.md#driver_host
-[driver-index]: driver_framework.md#driver_index
-[driver-runtime]: driver_framework.md#driver_runtime
+[driver-manager]: driver_framework.md#driver-manager
+[driver-host]: driver_framework.md#driver-host
+[driver-index]: driver_framework.md#driver-index
+[driver-runtime]: driver_framework.md#driver-runtime
 [driver-binding]: driver_binding.md
 [node-properties]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.driver.framework/topology.fidl;l=48
 [capabilities]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.driver.framework/topology.fidl;l=61

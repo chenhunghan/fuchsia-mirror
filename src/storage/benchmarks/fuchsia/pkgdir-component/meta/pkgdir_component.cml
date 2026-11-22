@@ -21,7 +21,14 @@
             rights: [ "r*" ],
             path: "/blob",
         },
-        { protocol: "fuchsia.fxfs.BlobReader" },
+        {
+            protocol: [
+                "fuchsia.fxfs.BlobReader",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
+            ],
+            availability: "optional",
+        },
         { protocol: "fuchsia.tracing.provider.Registry" },
     ],
     expose: [

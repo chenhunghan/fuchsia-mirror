@@ -2,13 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The test component and package (`:system-update-committer-integration-test`
-# and `:package`) stay in BUILD.gn because they use RealmBuilder and
-# `//src/lib/fuchsia-component-test/realm_builder_server` is not in Bazel.
+test_suite(
+    name = "tests",
+    tests = [":system-update-committer-integration-tests"],
+    visibility = ["//src/sys/pkg:__pkg__"],
+)
+
 rustc_test(
     name = "test_driver",
     srcs = ["src/lib.rs"],
@@ -30,9 +44,7 @@ rustc_test(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN `//src/lib/fuchsia-component-test` is a group that also pulls in
-        # `:includes` and `realm_builder_server_component`.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-sync",
         "//src/sys/lib/cm_rust",
         "//src/sys/lib/component-events",
@@ -45,4 +57,47 @@ rustc_test(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:test-case",
     ],
+)
+
+fx_packaged_binary(
+    name = "test_driver_packaged_bin",
+    testonly = True,
+    binary = ":test_driver",
+    binary_name = "system_update_committer_integration_test",
+)
+
+fx_component_manifest(
+    name = "system-update-committer-integration-test-manifest",
+    testonly = True,
+    component_name = "system-update-committer-integration-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/system-update-committer-integration-test.cml",
+)
+
+fx_test_component(
+    name = "system-update-committer-integration-test",
+    compiled_manifest = ":system-update-committer-integration-test-manifest",
+    deps = [":test_driver_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "system-update-committer-integration-tests",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/pkg/bin/system-update-committer:component",
+    ],
+    test_components = [":system-update-committer-integration-test"],
+)
+
+fx_test(
+    name = "system-update-committer-integration-tests",
+    package = ":package",
 )

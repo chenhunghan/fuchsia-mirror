@@ -133,6 +133,7 @@ def send_http_request(
             return response_body
         except (
             ConnectionError,
+            TimeoutError,
             urllib.error.URLError,
         ) as err:
             for exception_to_skip in exceptions_to_skip:
@@ -150,8 +151,9 @@ def send_http_request(
                 )
                 continue
 
-            if isinstance(err, urllib.error.URLError) and isinstance(
-                err.reason, TimeoutError
+            if isinstance(err, TimeoutError) or (
+                isinstance(err, urllib.error.URLError)
+                and isinstance(err.reason, TimeoutError)
             ):
                 raise errors.HttpTimeoutError(
                     f"{err_msg} after {timeout}s"

@@ -102,12 +102,13 @@ fuchsia_cc_test(
         # TODO(b/337316750): Investigate how to remove these copts.
         "-mllvm",
         "--hwasan-globals=0",
+        # TODO(https://fxbug.dev/477786942): Fix -Wconversion warnings and remove.
+        "-Wno-conversion",
     ],
     deps = [
         ":common",
         "//src/lib/testing/predicates",
         "//zircon/system/ulib/ddk-platform-defs",
-        "//zircon/system/ulib/fzl",
         "@com_google_googletest//:gtest_main",
         "@fuchsia_sdk//fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_cpp",
@@ -117,6 +118,7 @@ fuchsia_cc_test(
         "@fuchsia_sdk//pkg/driver_fake_pin_cpp",
         "@fuchsia_sdk//pkg/driver_fake_platform_device_cpp",
         "@fuchsia_sdk//pkg/driver_testing_cpp",
+        "@fuchsia_sdk//pkg/fzl",
     ],
 )
 

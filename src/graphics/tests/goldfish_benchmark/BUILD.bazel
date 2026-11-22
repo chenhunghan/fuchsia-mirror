@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":goldfish_benchmark_test"],
+    visibility = ["//src/graphics:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "goldfish_benchmark_bin",
+    testonly = True,
+    srcs = ["main.cc"],
+    # Uses Zircon and FIDL headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.goldfish:fuchsia.hardware.goldfish_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "goldfish_benchmark_bin_packaged",
+    testonly = True,
+    binary = ":goldfish_benchmark_bin",
+    binary_name = "goldfish_benchmark",
+)
+
+fx_component_manifest(
+    name = "goldfish_benchmark_manifest",
+    testonly = True,
+    component_name = "goldfish_benchmark",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/goldfish_benchmark.cml",
+)
+
+fx_test_component(
+    name = "goldfish_benchmark_cmp",
+    compiled_manifest = ":goldfish_benchmark_manifest",
+    test_type = "system",
+    deps = [":goldfish_benchmark_bin_packaged"],
+)
+
+fx_package(
+    name = "goldfish-benchmark",
+    test_components = [":goldfish_benchmark_cmp"],
+)
+
+fx_test(
+    name = "goldfish_benchmark_test",
+    environments = ["//build/testing/environments:aemu_env"],
+    package = ":goldfish-benchmark",
+)

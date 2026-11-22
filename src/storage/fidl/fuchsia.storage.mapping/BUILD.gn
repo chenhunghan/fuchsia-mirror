@@ -31,14 +31,15 @@ fidl("fuchsia.storage.mapping") {
   sources = [ "mapping.fidl" ]
   visibility = [
     ":*",
+    "//src/recovery/system/android:*",
     "//src/starnix/modules/erofs:*",
-    "//src/storage/benchmarks/*",
-    "//src/storage/fxfs/platform:*",
-    "//src/storage/fxfs/test:*",
-    "//src/storage/lib/blob_pager_and_verifier:*",
+    "//src/storage/*",
     "//src/sys/pkg/bin/pkg-cache:*",
+    "//src/sys/pkg/lib/isolated-swd:*",
+    "//src/sys/pkg/testing/blobfs-ramdisk:*",
     "//src/sys/pkg/tests/pkg-cache:*",
     "//src/sys/pkg/tests/pkg-cache-as-base-resolver/using-realm-builder:*",
+    "//src/sys/pkg/tests/pkg-resolver:*",
   ]
   public_deps = [
     "//sdk/fidl/fuchsia.storage.block",

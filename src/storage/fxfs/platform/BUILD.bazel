@@ -30,7 +30,6 @@ _PLATFORM_SRCS = [
     "src/fuchsia/fxblob/blob.rs",
     "src/fuchsia/fxblob/directory.rs",
     "src/fuchsia/fxblob/mapping_provider.rs",
-    "src/fuchsia/fxblob/reader.rs",
     "src/fuchsia/fxblob/testing.rs",
     "src/fuchsia/fxblob/writer.rs",
     "src/fuchsia/inline_encryption.rs",
@@ -52,11 +51,8 @@ _PLATFORM_SRCS = [
 
 # @bazel2gn:transformer=deps
 _PLATFORM_DEPS = [
-    ":constants",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
     "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
     "//sdk/fidl/fuchsia.memory.attribution:fuchsia.memory.attribution_rust",
     "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_rust",
     "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
@@ -70,7 +66,7 @@ _PLATFORM_DEPS = [
     "//src/lib/fuchsia-component/client",
     "//src/lib/fuchsia-runtime",
     "//src/lib/fuchsia-sync",
-    "//src/performance/memory/attribution/refaults_vmo",
+    "//src/memory/attribution/refaults_vmo",
     "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
     "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
     "//src/storage/fxfs:lib",
@@ -144,6 +140,8 @@ rustc_library(
     deps = _PLATFORM_DEPS + [
         "//src/storage/crypt/fxfs/common:lib",
         "//src/storage/fxfs/crypto/insecure",
+        "//src/storage/lib/blob_pager_and_verifier",
+        "//src/storage/lib/block_server",
     ],
 )
 

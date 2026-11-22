@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fdomain-example-next_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+rustc_test(
+    name = "fdomain-example-next-bin",
+    srcs = [
+        "src/lib.rs",
+        "src/transport.rs",
+    ],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_rust_fdomain_next",
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_rust_next",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_next",
+        "//src/lib/fdomain/client",
+        "//src/lib/fdomain/container",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fdomain-example-next-bin_packaged",
+    testonly = True,
+    binary = ":fdomain-example-next-bin",
+    binary_name = "fdomain_example_next_bin",
+)
+
+fx_component_manifest(
+    name = "fdomain-example-next-manifest",
+    testonly = True,
+    component_name = "fdomain-example-next",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/fdomain-example-next.cml",
+)
+
+fx_test_component(
+    name = "fdomain-example-next-component",
+    compiled_manifest = ":fdomain-example-next-manifest",
+    deps = [":fdomain-example-next-bin_packaged"],
+)
+
+fx_package(
+    name = "fdomain-example-next",
+    testonly = True,
+    test_components = [":fdomain-example-next-component"],
+    visibility = ["//src/lib/fdomain:__pkg__"],
+)
+
+fx_test(
+    name = "fdomain-example-next_test",
+    package = ":fdomain-example-next",
+)

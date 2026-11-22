@@ -34,23 +34,24 @@ pub use arch_types_bindings::{GeneralRegsSource, UserEntryState};
 pub mod api;
 
 pub mod debugger;
+pub use debugger::{get_instruction_pointer, set_return_instruction_pointer};
 
 pub mod exception;
 pub use exception::{
-    ArchExceptionContext, arch_dump_exception_context, arch_exception_context_user_synth_code,
-    arch_exception_context_user_synth_data, arch_fill_in_exception_context,
+    ArchExceptionContext, arch_dump_exception_context, arch_fill_in_exception_context,
+    arch_install_exception_context, arch_remove_exception_context, dispatch_user_policy_exception,
 };
 
 pub mod ops;
-pub use ops::{enter_idle_state, flush_state_and_halt};
-
-pub mod spinlock;
+pub use ops::{enter_idle_state, flush_state_and_halt, restore_user_state, save_user_state};
 
 #[cfg(target_arch = "aarch64")]
 assert_arch_signatures!(arm64);
 
 #[cfg(target_arch = "riscv64")]
 assert_arch_signatures!(riscv64);
+#[cfg(target_arch = "x86_64")]
+assert_arch_signatures!(x86);
 
 use crate::kernel::percpu::PerCpu;
 use crate::kernel::types::cpu_num_t;
@@ -64,7 +65,6 @@ unsafe extern "C" {
     fn cpp_arch_enable_ints();
     fn cpp_arch_interrupt_save() -> InterruptSavedState;
     fn cpp_arch_interrupt_restore(state: InterruptSavedState);
-    fn cpp_arch_curr_cpu_num() -> u32;
     fn cpp_arch_max_num_cpus() -> u32;
     fn cpp_arch_set_blocking_disallowed(value: bool);
     fn cpp_arch_set_restricted_flag(restricted: bool);
@@ -73,44 +73,41 @@ unsafe extern "C" {
     // against C++ `struct percpu`.
     #[allow(improper_ctypes)]
     fn cpp_arch_get_curr_percpu() -> &'static PerCpu;
+    fn cpp_with_frame_pointers() -> bool;
     #[cfg(target_arch = "x86_64")]
     fn arch_setup_percpu(cpu_num: cpu_num_t, percpu: *mut PerCpu);
 }
 
-#[cfg(target_arch = "x86_64")]
-unsafe extern "C" {
-    fn cpp_arch_copy_from_user(
-        dst: *mut core::ffi::c_void,
-        src: *const core::ffi::c_void,
-        len: usize,
-    ) -> i32;
-    fn cpp_arch_copy_to_user(
-        dst: *mut core::ffi::c_void,
-        src: *const core::ffi::c_void,
-        len: usize,
-    ) -> i32;
-    fn cpp_arch_copy_from_user_capture_faults(
-        dst: *mut core::ffi::c_void,
-        src: *const core::ffi::c_void,
-        len: usize,
-        context: CopyContext,
-        fault_va: *mut usize,
-        fault_flags: *mut u32,
-    ) -> i32;
-    fn cpp_arch_copy_to_user_capture_faults(
-        dst: *mut core::ffi::c_void,
-        src: *const core::ffi::c_void,
-        len: usize,
-        context: CopyContext,
-        fault_va: *mut usize,
-        fault_flags: *mut u32,
-    ) -> i32;
-}
-
 /// Sets the architecture-specific restricted mode flag on the current CPU.
+#[inline(always)]
 pub fn set_restricted_flag(restricted: bool) {
     // SAFETY: Foreign function call into architecture-specific restricted mode flag setting.
     unsafe { cpp_arch_set_restricted_flag(restricted) }
+}
+
+/// Returns the architecture-specific restricted mode flag on the current CPU
+/// (`arch_get_restricted_flag`).
+///
+/// Call with interrupts or preemption disabled so the calling thread cannot migrate across CPUs
+/// and observe a stale flag.
+///
+/// # Safety
+///
+/// The calling CPU's per-CPU pointer register (`x20` on arm64, `s11` on riscv64, `%gs.base` on
+/// x86_64) must already be initialized to a valid per-CPU structure (i.e., after early per-CPU
+/// initialization).
+#[inline(always)]
+pub unsafe fn get_restricted_flag() -> bool {
+    // SAFETY: Caller guarantees per-CPU state is initialized on the calling CPU.
+    unsafe { arch_get_restricted_flag() }
+}
+
+/// Returns `true` if the kernel was compiled with frame pointers enabled (`WITH_FRAME_POINTERS`).
+#[inline(always)]
+pub fn with_frame_pointers() -> bool {
+    // SAFETY: `cpp_with_frame_pointers` is a pure compile-time configuration query with no
+    // preconditions.
+    unsafe { cpp_with_frame_pointers() }
 }
 
 /// The arch_blocking_disallowed() flag is used to check that in-kernel interrupt
@@ -145,12 +142,14 @@ pub fn enable_ints() {
 
 /// The saved interrupt state, representing architecture-specific interrupt flags.
 #[cfg(target_arch = "x86_64")]
+#[must_use = "saved interrupt state must be passed to a matching restore"]
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InterruptSavedState(usize);
 
 /// The saved interrupt state, representing architecture-specific interrupt flags.
 #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+#[must_use = "saved interrupt state must be passed to a matching restore"]
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InterruptSavedState(bool);
@@ -196,9 +195,12 @@ impl Drop for InterruptDisableGuard {
 }
 
 /// Returns the CPU number of the calling CPU.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
 #[inline(always)]
 pub fn curr_cpu_num() -> u32 {
-    unsafe { cpp_arch_curr_cpu_num() }
+    arch_curr_cpu_num()
 }
 
 /// Returns the maximum number of CPUs in the system.
@@ -248,9 +250,15 @@ pub unsafe fn setup_percpu(cpu_num: cpu_num_t, percpu: *mut PerCpu) {
 
 /// Copies `len` bytes from user memory at `src` into kernel memory at `dst`.
 ///
+/// # Panics
+///
+/// Panics if any `lockdep`-tracked locks are held.
+///
 /// # Safety
-/// Caller must ensure `dst` points to at least `len` bytes of valid memory
-/// and `src` is a user pointer.
+///
+/// Caller must ensure that the current CPU per-CPU and thread context are initialized, blocking is
+/// allowed, no spinlocks are held, and `dst` is valid for writes of `len` bytes in kernel memory
+/// without concurrent conflicting accesses.
 #[inline(always)]
 pub unsafe fn arch_copy_from_user(
     dst: *mut core::ffi::c_void,
@@ -264,21 +272,27 @@ pub unsafe fn arch_copy_from_user(
     }
     #[cfg(target_arch = "riscv64")]
     {
-        // SAFETY: Caller guarantees valid pointers and safety invariants.
+        // SAFETY: Caller upholds the `arch_copy_from_user` safety preconditions.
         unsafe { riscv64::arch_copy_from_user(dst, src, len) }
     }
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: Caller guarantees valid pointers and safety invariants.
-        Status::ok(unsafe { cpp_arch_copy_from_user(dst, src, len) })
+        // SAFETY: Caller upholds the `arch_copy_from_user` safety preconditions.
+        unsafe { x86::arch_copy_from_user(dst, src, len) }
     }
 }
 
 /// Copies `len` bytes from kernel memory at `src` into user memory at `dst`.
 ///
+/// # Panics
+///
+/// Panics if any `lockdep`-tracked locks are held.
+///
 /// # Safety
-/// Caller must ensure `src` points to at least `len` bytes of valid memory
-/// and `dst` is a user pointer.
+///
+/// Caller must ensure that the current CPU per-CPU and thread context are initialized, blocking is
+/// allowed, no spinlocks are held, and `src` is valid for reads of `len` initialized bytes in
+/// kernel memory without concurrent conflicting mutations.
 #[inline(always)]
 pub unsafe fn arch_copy_to_user(
     dst: *mut core::ffi::c_void,
@@ -292,13 +306,13 @@ pub unsafe fn arch_copy_to_user(
     }
     #[cfg(target_arch = "riscv64")]
     {
-        // SAFETY: Caller guarantees valid pointers and safety invariants.
+        // SAFETY: Caller upholds the `arch_copy_to_user` safety preconditions.
         unsafe { riscv64::arch_copy_to_user(dst, src, len) }
     }
     #[cfg(target_arch = "x86_64")]
     {
-        // SAFETY: Caller guarantees valid pointers and safety invariants.
-        Status::ok(unsafe { cpp_arch_copy_to_user(dst, src, len) })
+        // SAFETY: Caller upholds the `arch_copy_to_user` safety preconditions.
+        unsafe { x86::arch_copy_to_user(dst, src, len) }
     }
 }
 
@@ -317,27 +331,9 @@ pub struct UserCopyCaptureFaultsError {
 }
 
 impl From<Status> for UserCopyCaptureFaultsError {
+    #[inline(always)]
     fn from(status: Status) -> Self {
         Self { status, fault_info: None }
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn capture_faults_result(
-    status: i32,
-    fault_va: usize,
-    fault_flags: u32,
-) -> Result<(), UserCopyCaptureFaultsError> {
-    if let Err(status) = Status::ok(status) {
-        let fault_info = if fault_va != 0 || fault_flags != 0 {
-            Some(FaultInfo { pf_va: fault_va, pf_flags: fault_flags })
-        } else {
-            None
-        };
-        Err(UserCopyCaptureFaultsError { status, fault_info })
-    } else {
-        Ok(())
     }
 }
 
@@ -365,8 +361,10 @@ pub enum CopyContext {
 /// faults.
 ///
 /// # Safety
-/// Caller must ensure `dst` points to at least `len` bytes of valid memory, `src` is a user
-/// pointer, and `context` is not [`CopyContext::BlockingAllowed`] while holding a spinlock.
+///
+/// Caller must ensure that the current CPU per-CPU and thread context are initialized, `dst`
+/// is valid for writes of `len` bytes in kernel memory without concurrent conflicting
+/// accesses, and `context` is not [`CopyContext::BlockingAllowed`] while holding a spinlock.
 #[inline(always)]
 pub unsafe fn arch_copy_from_user_capture_faults(
     dst: *mut core::ffi::c_void,
@@ -381,26 +379,13 @@ pub unsafe fn arch_copy_from_user_capture_faults(
     }
     #[cfg(target_arch = "riscv64")]
     {
-        let _ = context;
-        // SAFETY: Caller guarantees valid pointers and safety invariants.
-        unsafe { riscv64::arch_copy_from_user_capture_faults(dst, src, len) }
+        // SAFETY: Caller upholds the `arch_copy_from_user_capture_faults` safety preconditions.
+        unsafe { riscv64::arch_copy_from_user_capture_faults(dst, src, len, context) }
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let mut fault_va = 0usize;
-        let mut fault_flags = 0u32;
-        // SAFETY: Foreign function call with valid pointer arguments.
-        let status = unsafe {
-            cpp_arch_copy_from_user_capture_faults(
-                dst,
-                src,
-                len,
-                context,
-                &raw mut fault_va,
-                &raw mut fault_flags,
-            )
-        };
-        capture_faults_result(status, fault_va, fault_flags)
+        // SAFETY: Caller upholds the `arch_copy_from_user_capture_faults` safety preconditions.
+        unsafe { x86::arch_copy_from_user_capture_faults(dst, src, len, context) }
     }
 }
 
@@ -408,8 +393,11 @@ pub unsafe fn arch_copy_from_user_capture_faults(
 /// faults.
 ///
 /// # Safety
-/// Caller must ensure `src` points to at least `len` bytes of valid memory, `dst` is a user
-/// pointer, and `context` is not [`CopyContext::BlockingAllowed`] while holding a spinlock.
+///
+/// Caller must ensure that the current CPU per-CPU and thread context are initialized, `src`
+/// is valid for reads of `len` initialized bytes in kernel memory without concurrent
+/// conflicting mutations, and `context` is not [`CopyContext::BlockingAllowed`] while holding a
+/// spinlock.
 #[inline(always)]
 pub unsafe fn arch_copy_to_user_capture_faults(
     dst: *mut core::ffi::c_void,
@@ -424,26 +412,13 @@ pub unsafe fn arch_copy_to_user_capture_faults(
     }
     #[cfg(target_arch = "riscv64")]
     {
-        let _ = context;
-        // SAFETY: Caller guarantees valid pointers and safety invariants.
-        unsafe { riscv64::arch_copy_to_user_capture_faults(dst, src, len) }
+        // SAFETY: Caller upholds the `arch_copy_to_user_capture_faults` safety preconditions.
+        unsafe { riscv64::arch_copy_to_user_capture_faults(dst, src, len, context) }
     }
     #[cfg(target_arch = "x86_64")]
     {
-        let mut fault_va = 0usize;
-        let mut fault_flags = 0u32;
-        // SAFETY: Foreign function call with valid pointer arguments.
-        let status = unsafe {
-            cpp_arch_copy_to_user_capture_faults(
-                dst,
-                src,
-                len,
-                context,
-                &raw mut fault_va,
-                &raw mut fault_flags,
-            )
-        };
-        capture_faults_result(status, fault_va, fault_flags)
+        // SAFETY: Caller upholds the `arch_copy_to_user_capture_faults` safety preconditions.
+        unsafe { x86::arch_copy_to_user_capture_faults(dst, src, len, context) }
     }
 }
 
@@ -451,6 +426,40 @@ pub unsafe fn arch_copy_to_user_capture_faults(
 #[inline(always)]
 pub fn set_blocking_disallowed(value: bool) {
     unsafe { cpp_arch_set_blocking_disallowed(value) }
+}
+
+pub use zx_types::ZX_TLS_STACK_GUARD_OFFSET;
+
+/// Returns the current compiler thread pointer (`tpidr_el1` on arm64, `tp` on riscv64, per-CPU
+/// `x86_percpu` pointer via `%gs:0` on x86_64).
+///
+/// Reads the register via inline assembly rather than `__builtin_thread_pointer()` because
+/// `llvm.thread.pointer` is `memory(none)` and would be CSE'd across `thread_init_early()` when
+/// `lk_main` updates the early-boot stack guard before installing the initial `Thread`.
+///
+/// On `x86_64`, because this returns the current CPU's per-CPU pointer rather than a per-thread
+/// pointer, dereferencing the returned pointer requires interrupts or preemption/CPU migration to
+/// be disabled.
+#[inline(always)]
+pub fn get_current_compiler_thread_pointer() -> *mut u8 {
+    let tp: usize;
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: Reads `tpidr_el1`, the kernel compiler thread-pointer register on arm64.
+    unsafe {
+        core::arch::asm!("mrs {}, tpidr_el1", out(reg) tp, options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "riscv64")]
+    // SAFETY: Reads `tp`, the kernel compiler thread-pointer register on riscv64.
+    unsafe {
+        core::arch::asm!("mv {}, tp", out(reg) tp, options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: In kernel mode on x86_64, `%gs:0` (`x86_percpu::direct`) is a valid 64-bit self
+    // pointer once `post_handoff_bootstrap` / secondary per-CPU setup has initialized `%gs.base`.
+    unsafe {
+        tp = x86::x86::x86_read_gs_offset64::<0>() as usize;
+    }
+    core::ptr::with_exposed_provenance_mut(tp)
 }
 
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
@@ -476,6 +485,36 @@ mod sys {
         pub fn platform_mp_cpu_unplug(
             cpu_id: crate::kernel::types::cpu_num_t,
         ) -> zx_types::zx_status_t;
+    }
+}
+
+/// Performs minimal architecture-specific boot CPU setup right after taking over from physboot.
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU during `post_handoff_bootstrap` with interrupts disabled,
+/// before per-CPU state or the trampoline mapping is torn down/used, and with a valid
+/// `arch_handoff` pointer from physboot.
+#[inline(always)]
+pub unsafe fn post_handoff_bootstrap(arch_handoff: *const ::handoff::ArchPhysHandoff) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let _ = arch_handoff;
+        // SAFETY: Forwarded from `post_handoff_bootstrap` on the boot CPU.
+        unsafe { arm64::arch::post_handoff_bootstrap() };
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        // SAFETY: Forwarded from `post_handoff_bootstrap` on the boot CPU with a valid
+        // `arch_handoff`.
+        unsafe { riscv64::arch::post_handoff_bootstrap(arch_handoff.cast()) };
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let _ = arch_handoff;
+        // SAFETY: Forwarded from `post_handoff_bootstrap` on CPU 0 at CPL 0 before `%gs.base` is
+        // switched from physboot's temporary per-CPU ABI region.
+        unsafe { x86::handoff::post_handoff_bootstrap() };
     }
 }
 

@@ -2,16 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! This module provides a subset of LSM hook implementations that check access based on the
+//! This module provides LSM hook implementations that check access based on the
 //! Linux capability bits held by the caller.
-//!
-//! See https://fxbug.dev/440048727 for the full set of hooks that we expect the common capabilities
-//! LSM to need to implement.
 //!
 //! The LSM hooks layer calls these hooks from the appropriate `security::` entrypoint, and the
 //! SELinux LSM may also delegate to them.  They should never be called into directly.
 
-use crate::security::{self, NonPrivateFsNode};
+use crate::security::{self, NonPrivateFsNode, SetuidFlags};
 use crate::task::loader::ResolvedProgram;
 use crate::task::{CurrentTask, Task};
 use crate::vfs::{FsStr, ValueOrSize, XattrOp};
@@ -20,34 +17,22 @@ use linux_uapi::{
     vfs_cap_data__bindgen_ty_1, vfs_ns_cap_data, vfs_ns_cap_data__bindgen_ty_1,
 };
 use starnix_logging::log_trace;
+use starnix_syscalls::SyscallResult;
 use starnix_uapi::auth::{
-    CAP_SETFCAP, CAP_SETPCAP, CAP_SYS_RAWIO, Capabilities, Credentials, PtraceAccessMode,
-    SecureBits,
+    CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH, CAP_FOWNER, CAP_FSETID, CAP_LINUX_IMMUTABLE,
+    CAP_MAC_OVERRIDE, CAP_MKNOD, CAP_SETFCAP, CAP_SETPCAP, CAP_SYS_NICE, CAP_SYS_RAWIO,
+    CAP_SYS_TIME, Capabilities, Credentials, PtraceAccessMode, SecureBits,
 };
 use starnix_uapi::errors::Errno;
 use starnix_uapi::mount_flags::MountFlags;
 use starnix_uapi::restricted_aspace::RESTRICTED_ASPACE_BASE;
 use starnix_uapi::user_address::UserAddress;
-use starnix_uapi::{errno, error, uid_t};
-use std::sync::atomic::{AtomicBool, Ordering};
+use starnix_uapi::{
+    PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, PR_CAP_AMBIENT_IS_SET, PR_CAP_AMBIENT_LOWER,
+    PR_CAP_AMBIENT_RAISE, PR_CAPBSET_DROP, PR_CAPBSET_READ, PR_GET_KEEPCAPS, PR_GET_SECUREBITS,
+    PR_SET_KEEPCAPS, PR_SET_SECUREBITS, errno, error, uid_t,
+};
 use zerocopy::{FromBytes as _, IntoBytes as _};
-
-/// Node security state maintained by the common capabilities LSM.
-///
-/// Caches whether an [`FsNode`] is known not to have a `security.capability` extended attribute,
-/// avoiding `FsNodeOps::get_xattr` and `FsNodeOps::remove_xattr` calls on every `execve(2)`,
-/// `write(2)`, `truncate(2)`, and `chown(2)` for unprivileged files.
-// TODO(https://fxbug.dev/565936266): Serialize `security.*` extended attribute mutations with a
-// per-node lock held across the underlying `FsNodeOps` call, and evolve this state to cache
-// `{ Unknown, Known(Option<FileCapabilities>) }` so lock-free reads only transition from
-// `Unknown` to `Known`.
-#[derive(Debug, Default)]
-pub(super) struct FsNodeState {
-    /// `true` if `fs_node` has been observed to have no `security.capability` extended attribute
-    /// (or resides on a filesystem that does not support extended attributes). Defaults to `false`
-    /// so that pre-existing on-disk inodes are checked on first access.
-    has_no_capabilities: AtomicBool,
-}
 
 /// File capabilities parsed from a `security.capability` extended attribute.
 struct FileCapabilities {
@@ -192,7 +177,7 @@ fn read_file_capabilities(
     current_task: &CurrentTask,
     fs_node: NonPrivateFsNode<'_>,
 ) -> Result<Option<FileCapabilities>, Errno> {
-    if fs_node.common_cap_state().has_no_capabilities.load(Ordering::Relaxed) {
+    if fs_node.has_no_privileges() {
         return Ok(None);
     }
 
@@ -205,9 +190,8 @@ fn read_file_capabilities(
         Ok(ValueOrSize::Value(bytes)) => bytes,
         Ok(ValueOrSize::Size(_)) => return error!(EINVAL),
         Err(err) if err == errno!(ERANGE) => return error!(EINVAL),
-        Err(err) if err == errno!(ENODATA) || err == errno!(ENOTSUP) || err == errno!(ENOSYS) => {
-            // TODO(https://fxbug.dev/565936266): Synchronize with concurrent `setxattr` calls.
-            fs_node.common_cap_state().has_no_capabilities.store(true, Ordering::Relaxed);
+        Err(err) if err == errno!(ENODATA) || err == errno!(ENOTSUP) => {
+            fs_node.set_has_no_privileges_if_not_suid_or_sgid();
             return Ok(None);
         }
         Err(err) => return Err(err),
@@ -217,13 +201,17 @@ fn read_file_capabilities(
     Ok(Some(caps))
 }
 
-/// Corresponds to the `capable()` LSM hook.
-pub(super) fn capable(current_task: &CurrentTask, capability: Capabilities) -> Result<(), Errno> {
-    creds_capable(&current_task.current_creds(), capability)
-}
-
+/// Checks whether `creds` holds `capability` in its effective set without invoking external LSM
+/// hooks.
 pub(super) fn creds_capable(creds: &Credentials, capability: Capabilities) -> Result<(), Errno> {
     creds.cap_effective.contains(capability).then_some(()).ok_or_else(|| errno!(EPERM))
+}
+
+/// Checks whether `current_task` has [`CAP_SYS_TIME`] to set the system clock or timezone.
+///
+/// Corresponds to the `settime()` LSM hook.
+pub(super) fn settime(current_task: &CurrentTask) -> Result<(), Errno> {
+    security::check_task_capable(current_task, CAP_SYS_TIME)
 }
 
 /// Retrieves the `(effective, inheritable, permitted)` capability sets of `target`.
@@ -285,6 +273,242 @@ pub(super) fn capset(
     Ok(())
 }
 
+/// Updates `new_creds` capability sets after user ID changes from `old_creds`.
+///
+/// Corresponds to the `task_fix_setuid()` LSM hook.
+pub(super) fn task_fix_setuid(
+    new_creds: &mut Credentials,
+    old_creds: &Credentials,
+    flags: SetuidFlags,
+) -> Result<(), Errno> {
+    // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
+    //
+    //   SECBIT_NO_SETUID_FIXUP
+    //          Setting this flag stops the kernel from adjusting the
+    //          process's permitted, effective, and ambient capability sets
+    //          when the thread's effective and filesystem UIDs are
+    //          switched between zero and nonzero values.
+    if old_creds.securebits.contains(SecureBits::NO_SETUID_FIXUP) {
+        return Ok(());
+    }
+
+    match flags {
+        SetuidFlags::Id | SetuidFlags::Re | SetuidFlags::Res => {
+            // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
+            //
+            //   •  If one or more of the real, effective, or saved set user IDs
+            //      was previously 0, and as a result of the UID changes all of
+            //      these IDs have a nonzero value, then all capabilities are
+            //      cleared from the permitted, effective, and ambient capability
+            //      sets.
+            //
+            //   ...
+            //
+            //   SECBIT_KEEP_CAPS
+            //          Setting this flag allows a thread that has one or more 0
+            //          UIDs to retain capabilities in its permitted set when it
+            //          switches all of its UIDs to nonzero values.  If this flag
+            //          is not set, then such a UID switch causes the thread to
+            //          lose all permitted capabilities.  This flag is always
+            //          cleared on an execve(2).
+            //
+            //          Note that even with the SECBIT_KEEP_CAPS flag set, the
+            //          effective capabilities of a thread are cleared when it
+            //          switches its effective UID to a nonzero value.  However, if
+            //          the thread has set this flag and its effective UID is
+            //          already nonzero, and the thread subsequently switches all
+            //          other UIDs to nonzero values, then the effective
+            //          capabilities will not be cleared.
+            //
+            //          The setting of the SECBIT_KEEP_CAPS flag is ignored if the
+            //          SECBIT_NO_SETUID_FIXUP flag is set.  (The latter flag
+            //          provides a superset of the effect of the former flag.)
+            let was_any_zero =
+                old_creds.uid == 0 || old_creds.euid == 0 || old_creds.saved_uid == 0;
+            let is_all_nonzero =
+                new_creds.uid != 0 && new_creds.euid != 0 && new_creds.saved_uid != 0;
+            if was_any_zero && is_all_nonzero {
+                if !old_creds.securebits.contains(SecureBits::KEEP_CAPS) {
+                    new_creds.cap_permitted = Capabilities::empty();
+                    new_creds.cap_effective = Capabilities::empty();
+                }
+                new_creds.cap_ambient = Capabilities::empty();
+            }
+
+            //   •  If the effective user ID is changed from 0 to nonzero, then all
+            //      capabilities are cleared from the effective set.
+            //
+            //   •  If the effective user ID is changed from nonzero to 0, then the
+            //      permitted set is copied to the effective set.
+            if old_creds.euid == 0 && new_creds.euid != 0 {
+                new_creds.cap_effective = Capabilities::empty();
+            } else if old_creds.euid != 0 && new_creds.euid == 0 {
+                new_creds.cap_effective = new_creds.cap_permitted;
+            }
+        }
+        SetuidFlags::Fs => {
+            // From <https://man7.org/linux/man-pages/man7/capabilities.7.html>:
+            //
+            //   •  If the filesystem user ID is changed from 0 to nonzero (see
+            //      setfsuid(2)), then the following capabilities are cleared from
+            //      the effective set: CAP_CHOWN, CAP_DAC_OVERRIDE,
+            //      CAP_DAC_READ_SEARCH, CAP_FOWNER, CAP_FSETID,
+            //      CAP_LINUX_IMMUTABLE (since Linux 2.6.30), CAP_MAC_OVERRIDE, and
+            //      CAP_MKNOD (since Linux 2.6.30).  If the filesystem UID is
+            //      changed from nonzero to 0, then any of these capabilities that
+            //      are enabled in the permitted set are enabled in the effective
+            //      set.
+            let fs_capabilities = CAP_CHOWN
+                | CAP_DAC_OVERRIDE
+                | CAP_DAC_READ_SEARCH
+                | CAP_FOWNER
+                | CAP_FSETID
+                | CAP_LINUX_IMMUTABLE
+                | CAP_MAC_OVERRIDE
+                | CAP_MKNOD;
+            if old_creds.fsuid == 0 && new_creds.fsuid != 0 {
+                new_creds.cap_effective &= !fs_capabilities;
+            } else if old_creds.fsuid != 0 && new_creds.fsuid == 0 {
+                new_creds.cap_effective |= new_creds.cap_permitted & fs_capabilities;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Handles capability-related `prctl(2)` options, returning `Ok(None)` if `option` is not
+/// handled by the common capabilities LSM.
+///
+/// Corresponds to the `task_prctl()` LSM hook.
+pub(super) fn task_prctl(
+    current_task: &CurrentTask,
+    option: u32,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+) -> Result<Option<SyscallResult>, Errno> {
+    match option {
+        PR_CAPBSET_READ => {
+            let cap = Capabilities::try_from(arg2)?;
+            Ok(Some(current_task.current_creds().cap_bounding.contains(cap).into()))
+        }
+        PR_CAPBSET_DROP => {
+            security::check_task_capable(current_task, CAP_SETPCAP)?;
+            let cap = Capabilities::try_from(arg2)?;
+            let mut creds = Credentials::clone(&current_task.current_creds());
+            creds.cap_bounding.remove(cap);
+            current_task.set_creds(creds);
+            Ok(Some(().into()))
+        }
+        PR_GET_SECUREBITS => Ok(Some(current_task.current_creds().securebits.bits().into())),
+        PR_SET_SECUREBITS => {
+            // Observed: Linux returns EPERM (not EINVAL) when unrecognized bits are set in flags,
+            // and checks CAP_SETPCAP in the caller's effective set directly without invoking
+            // other LSMs' `capable` hooks.
+            let flags = u32::try_from(arg2).map_err(|_| errno!(EPERM))?;
+            let securebits = SecureBits::from_bits(flags).ok_or_else(|| errno!(EPERM))?;
+
+            let mut creds = Credentials::clone(&current_task.current_creds());
+            creds.set_securebits(securebits)?;
+            creds_capable(&creds, CAP_SETPCAP)?;
+            current_task.set_creds(creds);
+            Ok(Some(().into()))
+        }
+        PR_GET_KEEPCAPS => {
+            Ok(Some(current_task.current_creds().securebits.contains(SecureBits::KEEP_CAPS).into()))
+        }
+        PR_SET_KEEPCAPS => {
+            if arg2 > 1 {
+                return error!(EINVAL);
+            }
+            // From <https://man7.org/linux/man-pages/man2/PR_SET_KEEPCAPS.2const.html>:
+            //
+            //   EPERM  The caller's SECBIT_KEEP_CAPS_LOCKED flag is set.
+            let mut creds = Credentials::clone(&current_task.current_creds());
+            if creds.securebits.contains(SecureBits::KEEP_CAPS_LOCKED) {
+                return error!(EPERM);
+            }
+            creds.securebits.set(SecureBits::KEEP_CAPS, arg2 != 0);
+            current_task.set_creds(creds);
+            Ok(Some(().into()))
+        }
+        PR_CAP_AMBIENT => {
+            if arg4 != 0 || arg5 != 0 {
+                return error!(EINVAL);
+            }
+            let Ok(operation) = u32::try_from(arg2) else {
+                return error!(EINVAL);
+            };
+            if operation == PR_CAP_AMBIENT_CLEAR_ALL {
+                if arg3 != 0 {
+                    return error!(EINVAL);
+                }
+                let mut creds = Credentials::clone(&current_task.current_creds());
+                creds.cap_ambient = Capabilities::empty();
+                current_task.set_creds(creds);
+                return Ok(Some(().into()));
+            }
+
+            let capability_arg = Capabilities::try_from(arg3)?;
+            match operation {
+                PR_CAP_AMBIENT_RAISE => {
+                    let mut creds = Credentials::clone(&current_task.current_creds());
+                    if !(creds.cap_permitted.contains(capability_arg)
+                        && creds.cap_inheritable.contains(capability_arg))
+                    {
+                        return error!(EPERM);
+                    }
+                    if creds.securebits.contains(SecureBits::NO_CAP_AMBIENT_RAISE) {
+                        return error!(EPERM);
+                    }
+                    creds.cap_ambient.insert(capability_arg);
+                    current_task.set_creds(creds);
+                    Ok(Some(().into()))
+                }
+                PR_CAP_AMBIENT_LOWER => {
+                    let mut creds = Credentials::clone(&current_task.current_creds());
+                    creds.cap_ambient.remove(capability_arg);
+                    current_task.set_creds(creds);
+                    Ok(Some(().into()))
+                }
+                PR_CAP_AMBIENT_IS_SET => Ok(Some(
+                    current_task.current_creds().cap_ambient.contains(capability_arg).into(),
+                )),
+                _ => error!(EINVAL),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Validates that `source` holds at least `target`'s permitted capabilities or has
+/// [`CAP_SYS_NICE`], preventing an unprivileged task from degrading the scheduling priority,
+/// CPU affinity, or nice value of a same-UID task that holds additional permitted capabilities
+/// (for example, acquired from file capabilities).
+fn check_safe_nice(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
+    // TODO(https://fxbug.dev/322893829): Also check that `source` and `target` are in the same
+    // user namespace once user namespaces are supported.
+    let same_user_namespace = true;
+    if same_user_namespace
+        && source.current_creds().cap_permitted.contains(target.real_creds().cap_permitted)
+    {
+        return Ok(());
+    }
+    security::check_task_capable(source, CAP_SYS_NICE)
+}
+
+/// Corresponds to the `task_setscheduler()` LSM hook.
+pub(super) fn task_setscheduler(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
+    check_safe_nice(source, target)
+}
+
+/// Corresponds to the `task_setnice()` LSM hook.
+pub(super) fn task_setnice(source: &CurrentTask, target: &Task) -> Result<(), Errno> {
+    check_safe_nice(source, target)
+}
+
 /// Corresponds to the `inode_setxattr()` LSM hook.
 pub(super) fn fs_node_setxattr(
     current_task: &CurrentTask,
@@ -299,7 +523,7 @@ pub(super) fn fs_node_setxattr(
     //   security.capability.  Writing to this extended attribute requires the
     //   CAP_SETFCAP capability.
     if name == XATTR_NAME_CAPS.to_bytes() {
-        return capable(current_task, CAP_SETFCAP);
+        return security::check_task_capable(current_task, CAP_SETFCAP);
     }
     Ok(())
 }
@@ -345,8 +569,10 @@ pub(super) fn fs_node_setsecurity(
     if name == XATTR_NAME_CAPS.to_bytes() {
         let caps = FileCapabilities::from_bytes(current_task, value)?;
         let serialized = caps.into_bytes(current_task)?;
+        // TODO(https://fxbug.dev/565936266): Serialize `security.*` extended attribute mutations
+        // and `HAS_NO_PRIVILEGES` updates under a per-node lock.
         fs_node.ops().set_xattr(&fs_node, current_task, name, &serialized, op)?;
-        fs_node.common_cap_state().has_no_capabilities.store(false, Ordering::Relaxed);
+        fs_node.clear_has_no_privileges();
         return Ok(Some(()));
     }
     Ok(None)
@@ -367,7 +593,7 @@ pub(super) fn fs_node_removexattr(
     name: &FsStr,
 ) -> Result<(), Errno> {
     if name == XATTR_NAME_CAPS.to_bytes() {
-        return capable(current_task, CAP_SETFCAP);
+        return security::check_task_capable(current_task, CAP_SETFCAP);
     }
     Ok(())
 }
@@ -379,8 +605,11 @@ pub(super) fn fs_node_removexattr(
 pub(super) fn fs_node_needs_killpriv(
     current_task: &CurrentTask,
     fs_node: NonPrivateFsNode<'_>,
-) -> Result<bool, Errno> {
-    Ok(read_file_capabilities(current_task, fs_node)?.is_some())
+) -> bool {
+    match fs_node.ops().get_xattr(&fs_node, current_task, XATTR_NAME_CAPS.to_bytes().into(), 0) {
+        Err(err) if err == errno!(ENODATA) || err == errno!(ENOTSUP) => false,
+        _ => true,
+    }
 }
 
 /// Removes any `security.capability` extended attribute from `fs_node`.
@@ -390,16 +619,11 @@ pub(super) fn fs_node_killpriv(
     current_task: &CurrentTask,
     fs_node: NonPrivateFsNode<'_>,
 ) -> Result<(), Errno> {
+    // TODO(https://fxbug.dev/565936266): Once `fs_node_needs_killpriv` and `fs_node_killpriv` are
+    // serialized under a per-node lock, `ENODATA` will no longer need to be ignored here.
     match fs_node.ops().remove_xattr(&fs_node, current_task, XATTR_NAME_CAPS.to_bytes().into()) {
-        Ok(()) => {
-            fs_node.common_cap_state().has_no_capabilities.store(true, Ordering::Relaxed);
-            Ok(())
-        }
-        Err(err) if err == errno!(ENODATA) || err == errno!(ENOTSUP) || err == errno!(ENOSYS) => {
-            fs_node.common_cap_state().has_no_capabilities.store(true, Ordering::Relaxed);
-            Ok(())
-        }
-        Err(err) => Err(err),
+        Err(err) if err == errno!(ENODATA) || err == errno!(ENOTSUP) => Ok(()),
+        result => result,
     }
 }
 

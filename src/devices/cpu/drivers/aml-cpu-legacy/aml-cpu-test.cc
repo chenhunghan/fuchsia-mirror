@@ -5,7 +5,6 @@
 #include "aml-cpu.h"
 
 #include <fidl/fuchsia.hardware.thermal/cpp/wire.h>
-#include <fuchsia/hardware/thermal/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
@@ -238,35 +237,11 @@ void FakeAmlThermal::SetFanLevel(SetFanLevelRequestView request,
   completer.Reply(ZX_ERR_OUT_OF_RANGE);
 }
 
-// Fake device that exposes the thermal banjo protocol. Upon calling Connect, a new instance of
-// FakeAmlThermal is created to serve a client, at which point any previous FakeThermalAml
-// instance is destroyed.
-class FakeThermalDevice : public ddk::ThermalProtocol<FakeThermalDevice, ddk::base_protocol> {
- public:
-  FakeThermalDevice()
-      : proto_({&thermal_protocol_ops_, this}), device_info_(kDefaultDeviceInfo), fidl_service_() {}
-
-  zx_status_t ThermalConnect(zx::channel chan) {
-    fidl_service_ = std::make_unique<FakeAmlThermal>();
-    fidl_service_->set_device_info(device_info_);
-    return fidl_service_->Init(fidl::ServerEnd<fuchsia_thermal::Device>(std::move(chan)));
-  }
-
-  const thermal_protocol_t* proto() const { return &proto_; }
-
-  void set_device_info(const fuchsia_thermal::wire::ThermalDeviceInfo& device_info) {
-    device_info_ = device_info;
-  }
-
- private:
-  thermal_protocol_t proto_;
-  fuchsia_thermal::wire::ThermalDeviceInfo device_info_;
-  std::unique_ptr<FakeAmlThermal> fidl_service_;
-};
-
 struct IncomingNamespace {
   fdf_fake::FakePDev pdev_server;
-  component::OutgoingDirectory outgoing{async_get_default_dispatcher()};
+  FakeAmlThermal thermal_server;
+  component::OutgoingDirectory pdev_outgoing{async_get_default_dispatcher()};
+  component::OutgoingDirectory thermal_outgoing{async_get_default_dispatcher()};
 };
 
 // Fixture that supports tests of AmlCpu::Create.
@@ -279,20 +254,32 @@ class AmlCpuBindingTest : public zxtest::Test {
 
     fdf_fake::FakePDev::Config config;
     config.mmios[0] = mmio_.mmio();
-    auto outgoing_endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
-    incoming_.SyncCall([config = std::move(config), server = std::move(outgoing_endpoints.server)](
+    auto pdev_outgoing_endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    auto thermal_outgoing_endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    incoming_.SyncCall([config = std::move(config),
+                        pdev_server = std::move(pdev_outgoing_endpoints.server),
+                        thermal_server = std::move(thermal_outgoing_endpoints.server)](
                            IncomingNamespace* infra) mutable {
       infra->pdev_server.SetConfig(std::move(config));
-      ASSERT_OK(infra->outgoing.AddService<fuchsia_hardware_platform_device::Service>(
+      ASSERT_OK(infra->pdev_outgoing.AddService<fuchsia_hardware_platform_device::Service>(
           infra->pdev_server.GetInstanceHandler()));
-      ASSERT_OK(infra->outgoing.Serve(std::move(server)));
+      ASSERT_OK(infra->pdev_outgoing.Serve(std::move(pdev_server)));
+
+      fuchsia_thermal::Service::InstanceHandler handler({
+          .device =
+              [infra](fidl::ServerEnd<fuchsia_thermal::Device> server_end) {
+                EXPECT_OK(infra->thermal_server.Init(std::move(server_end)));
+              },
+      });
+      ASSERT_OK(infra->thermal_outgoing.AddService<fuchsia_thermal::Service>(std::move(handler)));
+      ASSERT_OK(infra->thermal_outgoing.Serve(std::move(thermal_server)));
     });
     ASSERT_NO_FATAL_FAILURE();
     root_->AddFidlService(fuchsia_hardware_platform_device::Service::Name,
-                          std::move(outgoing_endpoints.client), "pdev");
+                          std::move(pdev_outgoing_endpoints.client), "pdev");
 
-    root_->AddProtocol(ZX_PROTOCOL_THERMAL, thermal_device_.proto()->ops,
-                       thermal_device_.proto()->ctx, "thermal");
+    root_->AddFidlService(fuchsia_thermal::Service::Name,
+                          std::move(thermal_outgoing_endpoints.client), "thermal");
 
     root_->SetMetadata(DEVICE_METADATA_CLUSTER_SIZE_LEGACY, &kClusterSizeMetadata,
                        sizeof(kClusterSizeMetadata));
@@ -304,7 +291,6 @@ class AmlCpuBindingTest : public zxtest::Test {
   async_patterns::TestDispatcherBound<IncomingNamespace> incoming_{incoming_loop_.dispatcher(),
                                                                    std::in_place};
   FakeMmio mmio_;
-  FakeThermalDevice thermal_device_;
 };
 
 TEST_F(AmlCpuBindingTest, OneDomain) {
@@ -314,21 +300,23 @@ TEST_F(AmlCpuBindingTest, OneDomain) {
 
 TEST_F(AmlCpuBindingTest, TwoDomains) {
   // Set up device info that defines two power domains.
-  thermal_device_.set_device_info([]() {
-    fuchsia_thermal::wire::ThermalDeviceInfo result;
+  incoming_.SyncCall([](IncomingNamespace* infra) {
+    infra->thermal_server.set_device_info([]() {
+      fuchsia_thermal::wire::ThermalDeviceInfo result;
 
-    result.active_cooling = false;
-    result.passive_cooling = false;
-    result.gpu_throttling = false;
-    result.num_trip_points = 0;
-    result.big_little = true;
-    result.critical_temp_celsius = 0;
+      result.active_cooling = false;
+      result.passive_cooling = false;
+      result.gpu_throttling = false;
+      result.num_trip_points = 0;
+      result.big_little = true;
+      result.critical_temp_celsius = 0;
 
-    result.opps[kLittleClusterIdx] = kFakeOperatingPoints;
-    result.opps[kBigClusterIdx] = kFakeOperatingPoints;
+      result.opps[kLittleClusterIdx] = kFakeOperatingPoints;
+      result.opps[kBigClusterIdx] = kFakeOperatingPoints;
 
-    return result;
-  }());
+      return result;
+    }());
+  });
 
   ASSERT_OK(AmlCpu::Create(nullptr, root_.get()));
   ASSERT_EQ(root_->child_count(), 2);

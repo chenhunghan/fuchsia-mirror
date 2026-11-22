@@ -56,5 +56,4 @@ fuchsia_driver_component("test") {
   component_name = "test"
   dml_label = ":test-dml"
   deps = [ ":test-driver" ]
-  info = "meta/test-info.json"
 }

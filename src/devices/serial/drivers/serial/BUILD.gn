@@ -32,7 +32,6 @@ fuchsia_cc_driver("serial-driver") {
 
 fuchsia_driver_component("serial") {
   dml_label = ":serial-dml"
-  info = "meta/serial-info.json"
   component_name = "serial"
   deps = [ ":serial-driver" ]
 }

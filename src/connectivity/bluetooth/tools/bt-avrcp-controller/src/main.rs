@@ -4,6 +4,7 @@
 
 use anyhow::{Context as _, Error, format_err};
 use argh::FromArgs;
+use bt_repl::{CommandSet as _, ReplControl, ReplHandler};
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_bluetooth_avrcp::{
     self as fidl_avrcp, AttributeRequestOption, BrowseControllerMarker, BrowseControllerProxy,
@@ -14,20 +15,14 @@ use fidl_fuchsia_bluetooth_avrcp_test::{
     BrowseControllerExtMarker, BrowseControllerExtProxy, ControllerExtMarker, ControllerExtProxy,
     PeerManagerExtMarker,
 };
-use fuchsia_async as fasync;
 use fuchsia_bluetooth::types::PeerId;
 use fuchsia_component::client::connect_to_protocol;
-use futures::channel::mpsc::{SendError, channel};
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryStreamExt, select};
+use futures::{FutureExt, TryStreamExt, select};
 use hex::FromHex;
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
 use std::pin::pin;
 use std::str::FromStr as _;
-use std::thread;
 
-use crate::commands::{Cmd, CmdHelper, ReplControl, avc_match_string};
+use crate::commands::{Cmd, avc_keys_help, avc_match_string, command_source};
 
 mod commands;
 
@@ -57,7 +52,7 @@ async fn send_passthrough<'a>(
     controller: &'a ControllerProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", Cmd::AvcCommand.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::AvcCommand.usage()));
     }
     let cmd = avc_match_string(args[0]);
     if cmd.is_none() {
@@ -77,7 +72,7 @@ async fn get_folder_items_with_attrs<'a>(
     controller: &'a BrowseControllerProxy,
 ) -> Result<String, Error> {
     if args.len() < 2 {
-        return Ok(format!("usage: {}", cmd.cmd_help()));
+        return Ok(format!("usage: {}", cmd.usage()));
     }
 
     let start_index = args[0].to_string().parse::<u32>()?;
@@ -138,7 +133,7 @@ async fn get_media_player_list<'a>(
     controller: &'a BrowseControllerProxy,
 ) -> Result<String, Error> {
     if args.len() != 2 {
-        return Ok(format!("usage: {}", Cmd::GetMediaPlayerList.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::GetMediaPlayerList.usage()));
     }
 
     let start_index = args[0].to_string().parse::<u32>()?;
@@ -180,7 +175,7 @@ async fn get_player_application_settings<'a>(
     controller: &'a ControllerProxy,
 ) -> Result<String, Error> {
     if args.len() > MAX_ATTRIBUTES as usize {
-        return Ok(format!("usage: {}", Cmd::GetPlayerApplicationSettings.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::GetPlayerApplicationSettings.usage()));
     }
 
     let ids = match parse_pas_ids(args.to_vec()) {
@@ -224,12 +219,12 @@ async fn send_raw_vendor<'a>(
     controller: &'a ControllerExtProxy,
 ) -> Result<String, Error> {
     if args.len() < 2 {
-        return Err(format_err!("usage: {}", Cmd::SendRawVendorCommand.cmd_help()));
+        return Err(format_err!("usage: {}", Cmd::SendRawVendorCommand.usage()));
     }
 
     match parse_raw_packet(args) {
         Ok((pdu_id, buf)) => {
-            eprintln!("Sending {:#?}", buf);
+            println!("Sending {:#?}", buf);
 
             match controller.send_raw_vendor_dependent_command(pdu_id, &buf).await? {
                 Ok(response) => Ok(format!("response: {:#?}", response)),
@@ -292,7 +287,7 @@ async fn set_volume<'a>(
     controller: &'a ControllerProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", Cmd::SetVolume.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::SetVolume.usage()));
     }
 
     let volume = if let Ok(val) = args[0].parse::<u8>() {
@@ -315,7 +310,7 @@ async fn change_path<'a>(
     controller: &'a BrowseControllerProxy,
 ) -> Result<String, Error> {
     if args.len() < 1 {
-        return Ok(format!("usage: {}", Cmd::ChangePath.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::ChangePath.usage()));
     }
     let path = match args[0] {
         ".." | "up" => fidl_avrcp::Path::Parent(fidl_avrcp::Parent {}),
@@ -338,7 +333,7 @@ async fn play_item<'a>(
     controller: &'a BrowseControllerProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", cmd.cmd_help()));
+        return Ok(format!("usage: {}", cmd.usage()));
     }
 
     let uid = args[0].parse::<u64>()?;
@@ -359,7 +354,7 @@ async fn set_browsed_player<'a>(
     controller: &'a BrowseControllerProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", Cmd::SetVolume.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::SetBrowsedPlayer.usage()));
     }
 
     let player_id = args[0].to_string().parse::<u16>()?;
@@ -387,113 +382,59 @@ async fn is_connected<'a>(
     Ok(s.iter().fold("".to_owned(), |msg, m| format!("{}\n{}", msg, m)))
 }
 
-/// Handle a single raw input command from a user and indicate whether the command should
-/// result in continuation or breaking of the read evaluate print loop.
-async fn handle_cmd<'a>(
+struct AvrcpHandler<'a> {
     controller: &'a ControllerProxy,
     test_controller: &'a ControllerExtProxy,
     browse_controller: &'a BrowseControllerProxy,
     test_browse_controller: &'a BrowseControllerExtProxy,
-    line: String,
-) -> Result<ReplControl, Error> {
-    let components: Vec<_> = line.trim().split_whitespace().collect();
-    if let Some((raw_cmd, args)) = components.split_first() {
-        let cmd = raw_cmd.parse();
-        let res = match cmd {
-            Ok(Cmd::AvcCommand) => send_passthrough(args, &controller).await,
-            Ok(Cmd::ChangePath) => change_path(args, &browse_controller).await,
-            Ok(Cmd::GetVirtualFileSystem) => {
-                get_folder_items_with_attrs(Cmd::GetVirtualFileSystem, args, &browse_controller)
-                    .await
-            }
-            Ok(Cmd::GetMediaAttributes) => get_media(args, &controller).await,
-            Ok(Cmd::GetMediaPlayerList) => get_media_player_list(args, &browse_controller).await,
-            Ok(Cmd::GetNowPlaying) => {
-                get_folder_items_with_attrs(Cmd::GetNowPlaying, args, &browse_controller).await
-            }
-            Ok(Cmd::GetPlayStatus) => get_play_status(args, &controller).await,
-            Ok(Cmd::GetPlayerApplicationSettings) => {
-                get_player_application_settings(args, &controller).await
-            }
-            Ok(Cmd::PlayVirtualFileSystem) => {
-                play_item(Cmd::PlayVirtualFileSystem, args, &browse_controller).await
-            }
-            Ok(Cmd::PlayNowPlaying) => {
-                play_item(Cmd::PlayNowPlaying, args, &browse_controller).await
-            }
-            Ok(Cmd::SetPlayerApplicationSettings) => {
-                set_player_application_settings(args, &controller).await
-            }
-            Ok(Cmd::SendRawVendorCommand) => send_raw_vendor(args, &test_controller).await,
-            Ok(Cmd::SupportedEvents) => get_events_supported(args, &test_controller).await,
-            Ok(Cmd::SetVolume) => set_volume(args, &controller).await,
-            Ok(Cmd::SetBrowsedPlayer) => set_browsed_player(args, &browse_controller).await,
-            Ok(Cmd::IsConnected) => {
-                is_connected(args, &test_controller, &test_browse_controller).await
-            }
-            Ok(Cmd::Help) => Ok(Cmd::help_msg()),
-            Ok(Cmd::Exit) | Ok(Cmd::Quit) => return Ok(ReplControl::Break),
-            Err(_) => Ok(format!("\"{}\" is not a valid command", raw_cmd)),
-        }?;
-        if res != "" {
-            println!("{}", res);
-        }
-    }
-
-    Ok(ReplControl::Continue)
 }
 
-/// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
-///
-/// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
-/// sends a ctrl-c or ctrl-d sequence.
-///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
-/// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
-fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>) {
-    // Editor thread and command processing thread must be synchronized so that output
-    // is printed in the correct order.
-    let (mut cmd_sender, cmd_receiver) = channel(512);
-    let (ack_sender, mut ack_receiver) = channel(512);
+impl ReplHandler for AvrcpHandler<'_> {
+    type Command = Cmd;
 
-    let _ = thread::spawn(move || -> Result<(), Error> {
-        let mut exec = fasync::LocalExecutorBuilder::new().build();
+    fn help_footer(&self) -> Option<String> {
+        Some(avc_keys_help())
+    }
 
-        let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Emacs)
-                .build();
-            let mut rl: Editor<CmdHelper, DefaultHistory> = Editor::with_config(config)?;
-            rl.set_helper(Some(CmdHelper::new()));
-            loop {
-                let readline = rl.readline(PROMPT);
-                match readline {
-                    Ok(line) => {
-                        cmd_sender.try_send(line)?;
-                    }
-                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("Error: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-                // wait until processing thread is finished evaluating the last command
-                // before running the next loop in the repl
-                if ack_receiver.next().await.is_none() {
-                    return Ok(());
-                };
+    async fn handle(&mut self, cmd: Cmd, args: &[&str]) -> Result<ReplControl, Error> {
+        let res = match cmd {
+            Cmd::AvcCommand => send_passthrough(args, self.controller).await,
+            Cmd::ChangePath => change_path(args, self.browse_controller).await,
+            Cmd::GetVirtualFileSystem => {
+                get_folder_items_with_attrs(Cmd::GetVirtualFileSystem, args, self.browse_controller)
+                    .await
             }
-        };
-        exec.run_singlethreaded(fut)
-    });
-    (cmd_receiver, ack_sender)
+            Cmd::GetMediaAttributes => get_media(args, self.controller).await,
+            Cmd::GetMediaPlayerList => get_media_player_list(args, self.browse_controller).await,
+            Cmd::GetNowPlaying => {
+                get_folder_items_with_attrs(Cmd::GetNowPlaying, args, self.browse_controller).await
+            }
+            Cmd::GetPlayStatus => get_play_status(args, self.controller).await,
+            Cmd::GetPlayerApplicationSettings => {
+                get_player_application_settings(args, self.controller).await
+            }
+            Cmd::PlayVirtualFileSystem => {
+                play_item(Cmd::PlayVirtualFileSystem, args, self.browse_controller).await
+            }
+            Cmd::PlayNowPlaying => {
+                play_item(Cmd::PlayNowPlaying, args, self.browse_controller).await
+            }
+            Cmd::SetPlayerApplicationSettings => {
+                set_player_application_settings(args, self.controller).await
+            }
+            Cmd::SendRawVendorCommand => send_raw_vendor(args, self.test_controller).await,
+            Cmd::SupportedEvents => get_events_supported(args, self.test_controller).await,
+            Cmd::SetVolume => set_volume(args, self.controller).await,
+            Cmd::SetBrowsedPlayer => set_browsed_player(args, self.browse_controller).await,
+            Cmd::IsConnected => {
+                is_connected(args, self.test_controller, self.test_browse_controller).await
+            }
+        }?;
+        if !res.is_empty() {
+            println!("{res}");
+        }
+        Ok(ReplControl::Continue)
+    }
 }
 
 async fn controller_listener(
@@ -518,44 +459,6 @@ async fn controller_listener(
                 controller.notify_notification_handled()?;
             }
         }
-    }
-    Ok(())
-}
-
-/// REPL execution
-async fn run_repl<'a>(
-    controller: &'a ControllerProxy,
-    test_controller: &'a ControllerExtProxy,
-    browse_controller: &'a BrowseControllerProxy,
-    test_browse_controller: &'a BrowseControllerExtProxy,
-) -> Result<(), Error> {
-    // `cmd_stream` blocks on input in a separate thread and passes commands and acks back to
-    // the main thread via async channels.
-    let (mut commands, mut acks) = cmd_stream();
-    loop {
-        if let Some(cmd) = commands.next().await {
-            match handle_cmd(
-                controller,
-                test_controller,
-                browse_controller,
-                test_browse_controller,
-                cmd,
-            )
-            .await
-            {
-                Ok(ReplControl::Continue) => {}
-                Ok(ReplControl::Break) => {
-                    println!("\n");
-                    break;
-                }
-                Err(e) => {
-                    println!("Error handling command: {}", e);
-                }
-            }
-        } else {
-            break;
-        }
-        acks.send(()).await?;
     }
     Ok(())
 }
@@ -631,9 +534,14 @@ async fn main() -> Result<(), Error> {
         1,
     )?;
 
+    let handler = AvrcpHandler {
+        controller: &controller,
+        test_controller: &test_controller,
+        browse_controller: &browse_controller,
+        test_browse_controller: &test_browse_controller,
+    };
     let event_fut = controller_listener(&controller, evt_stream).fuse();
-    let repl_fut =
-        run_repl(&controller, &test_controller, &browse_controller, &test_browse_controller).fuse();
+    let repl_fut = bt_repl::run(PROMPT, command_source(), handler).fuse();
 
     let mut event_fut = pin!(event_fut);
     let mut repl_fut = pin!(repl_fut);
@@ -644,7 +552,7 @@ async fn main() -> Result<(), Error> {
             eprintln!(
                 "Service connection returned {status:?}", status = result);
         },
-        _ = repl_fut => {}
+        result = repl_fut => result?,
     }
 
     Ok(())
@@ -656,68 +564,68 @@ mod tests {
     use assert_matches::assert_matches;
     use fidl::endpoints::create_proxy;
 
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_01() {
         assert_eq!(parse_raw_packet(&["0x40", "0xaaaa"]), Ok((0x40, vec![0xaa, 0xaa])));
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_02() {
         assert_eq!(parse_raw_packet(&["0x40", "0xaa", "0xaa"]), Ok((0x40, vec![0xaa, 0xaa])));
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_03() {
         assert_eq!(
             parse_raw_packet(&["0x40", "0xAa", "0XaA", "0x1234"]),
             Ok((0x40, vec![0xaa, 0xaa, 0x12, 0x34]))
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_04() {
         assert_eq!(
             parse_raw_packet(&["40", "0xaa", "0xaa", "0x1234"]),
             Ok((40, vec![0xaa, 0xaa, 0x12, 0x34]))
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_05() {
         assert_eq!(
             parse_raw_packet(&["40", "aa", "aa", "1234"]),
             Ok((40, vec![0xaa, 0xaa, 0x12, 0x34]))
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_06() {
         assert_eq!(parse_raw_packet(&["40", "aa,aa,1234"]), Ok((40, vec![0xaa, 0xaa, 0x12, 0x34])));
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_07() {
         assert_eq!(
             parse_raw_packet(&["40", "0xaa, 0xaa,    0x1234"]),
             Ok((40, vec![0xaa, 0xaa, 0x12, 0x34]))
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_08_err_pdu_overflow() {
         assert_eq!(
             parse_raw_packet(&["300", "0xaa, 0xaa,    0x1234"]),
             Err("invalid pdu_id 300".to_string())
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_09_err_invalid_hex_long() {
         assert_eq!(
             parse_raw_packet(&["40", "0xzz, 0xaa,    0x1234"]),
             Err("invalid hex string at 0xzz".to_string())
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_10_err_invalid_hex_short() {
         assert_eq!(
             parse_raw_packet(&["40", "zz, 0xaa, 0xqqqq"]),
             Err("invalid hex string at zz".to_string())
         );
     }
-    #[test]
+    #[fuchsia::test]
     fn test_raw_packet_parsing_11_err_invalid_hex() {
         assert_eq!(
             parse_raw_packet(&["40", "ab, 0xaa, 0xqqqq"]),
@@ -725,7 +633,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_pas_id_success() {
         let ids = vec!["1", "2", "3"];
         let result = parse_pas_ids(ids);
@@ -741,14 +649,14 @@ mod tests {
         );
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_pas_id_error() {
         let ids = vec!["fake", "id", "1"];
         let result = parse_pas_ids(ids);
         assert!(result.is_err());
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_parse_pas_id_invalid_id_error() {
         let ids = vec!["1", "2", "5"];
         let result = parse_pas_ids(ids);
@@ -766,6 +674,27 @@ mod tests {
         assert_matches!(
             res,
             Ok(m) if m.contains("usage")
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_avrcp_handler() {
+        let (controller, _c_stream) = create_proxy::<ControllerMarker>();
+        let (test_controller, _tc_stream) = create_proxy::<ControllerExtMarker>();
+        let (browse_controller, _bc_stream) = create_proxy::<BrowseControllerMarker>();
+        let (test_browse_controller, _tbc_stream) = create_proxy::<BrowseControllerExtMarker>();
+        let mut handler = AvrcpHandler {
+            controller: &controller,
+            test_controller: &test_controller,
+            browse_controller: &browse_controller,
+            test_browse_controller: &test_browse_controller,
+        };
+
+        assert!(handler.help_footer().unwrap().starts_with("AVC keys:"));
+        assert_eq!(handler.handle(Cmd::SetVolume, &[]).await.unwrap(), ReplControl::Continue);
+        assert_eq!(
+            handler.handle(Cmd::SetBrowsedPlayer, &[]).await.unwrap(),
+            ReplControl::Continue
         );
     }
 }

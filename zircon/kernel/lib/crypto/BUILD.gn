@@ -5,18 +5,22 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_rust_mod.gni")
 
 library_headers("headers") {
   headers = [
     "lib/crypto/global_prng.h",
     "lib/crypto/prng.h",
+    "lib/crypto/prng_ffi.h",
   ]
 
   public_deps = [
     ":crypto-entropy-src.headers",
-    "entropy:headers",
 
-    # <lib/crypto/prng.h> has #include <ktl/atomic.h>.
+    # <lib/crypto/prng.h> has #include <lib/object-constants.h>.
+    "//zircon/kernel/lib/object-constants:headers",
+
+    # <lib/crypto/prng.h> has #include <ktl/byte.h>.
     "//zircon/kernel/lib/ktl:headers",
   ]
 }
@@ -25,6 +29,9 @@ library_headers("crypto-entropy-src.headers") {
   headers = [ "lib/crypto/entropy_pool.h" ]
 }
 
+# The C++ EntropyPool is shared with physboot (which hands a pool over to the
+# kernel), so it stays in C++; the kernel proper uses the layout-identical Rust
+# port in entropy_pool.rs.
 source_set("crypto-entropy-src") {
   sources = [ "entropy_pool.cc" ]
   public_deps = [ ":crypto-entropy-src.headers" ]
@@ -47,23 +54,56 @@ source_set("crypto-entropy-test") {
   ]
 }
 
-static_library("crypto") {
-  public_deps = [ ":headers" ]
+kernel_rust_mod("crypto-rs") {
+  output_name = "crypto"
+  source_root = "mod.rs"
   sources = [
-    "global_prng.cc",
-    "prng.cc",
+    "boringssl.rs",
+    "entropy/collector.rs",
+    "entropy/hw_rng_collector.rs",
+    "entropy/jitterentropy_collector.rs",
+    "entropy/mod.rs",
+    "entropy/quality_test.rs",
+    "entropy_pool.rs",
+    "global_prng.rs",
+    "mod.rs",
+    "prng.rs",
+    "prng_ffi.rs",
   ]
   deps = [
+    "//sdk/rust/zx-status",
+    "//sdk/rust/zx-types",
+    "//src/lib/kprint",
+    "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
+    "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/arch:arch-rs",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/init:init_rust",
+    "//zircon/kernel/lib/object-constants:object-constants-rs",
+    "//zircon/system/ulib/explicit-memory:explicit-memory-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
+    "//zircon/third_party/lib/jitterentropy",
+  ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
+}
+
+static_library("crypto") {
+  public_deps = [ ":headers" ]
+  sources = [ "prng.cc" ]
+  deps = [
     ":crypto-entropy-src",
-    ":crypto-entropy-test",
+    ":crypto-rs",
     "boringssl",
-    "entropy",
-    "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/lib/fbl",
-    "//zircon/kernel/lib/init",
+    "//zircon/kernel/dev/hw_rng",
     "//zircon/kernel/lib/ktl",
-    "//zircon/kernel/phys/handoff",
-    "//zircon/system/ulib/explicit-memory",
+    "//zircon/kernel/lib/object-constants",
+
+    # prng.cc only static_asserts the layout of
+    # <lib/jitterentropy/jitterentropy.h>; the library itself is linked by
+    # :crypto-rs, which calls into it.
+    "//zircon/third_party/lib/jitterentropy:headers",
   ]
 }
 
@@ -71,18 +111,8 @@ group("tests") {
   testonly = true
 }
 
-source_set("kernel-tests") {
+group("kernel-tests") {
   testonly = true
-  sources = [
-    "global_prng_unittest.cc",
-    "prng_unittest.cc",
-  ]
-  deps = [
-    ":crypto",
-    "entropy:kernel-tests",
-    "//zircon/kernel/lib/unittest",
-    "//zircon/system/ulib/zircon-internal",
-  ]
 }
 
 group("phys-tests") {

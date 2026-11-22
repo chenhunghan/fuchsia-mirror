@@ -12,7 +12,7 @@ if (toolchain_environment == "kernel.phys") {
     sources = [ "code-patches.cc" ]
     deps = [
       "//zircon/kernel/lib/code-patching",
-      "//zircon/kernel/phys:symbolize",
+      "//zircon/kernel/phys/runtime",
     ]
   }
 }

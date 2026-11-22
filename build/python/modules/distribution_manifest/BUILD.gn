@@ -34,9 +34,11 @@ python_library("distribution_manifest") {
     "__init__.py",
     "distribution_manifest.py",
   ]
+  imports = [ ".." ]
   visibility = [
     ":*",
     "//build/components:*",
     "//build/dist:*",
   ]
+  enable_mypy = false
 }

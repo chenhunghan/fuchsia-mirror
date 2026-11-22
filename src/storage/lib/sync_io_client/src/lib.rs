@@ -120,9 +120,11 @@ pub trait SyncIo: Send + Sync + Sized + 'static {
         factory: F,
     ) -> Result<F::Result, zx::Status>;
 
-    /// Opens all nodes iteratively along the relative sub-paths given in `paths`.
-    /// Each item in `paths` is opened from the node returned by opening the previous item in
-    /// `paths`.
+    /// Opens each relative sub-path in `paths` from the previously opened node, stopping after
+    /// yielding the first error.
+    ///
+    /// `flags` must only contain permission flags (`fio::MASK_KNOWN_PERMISSIONS`); intermediate
+    /// components are restricted to directories and symlinks.
     fn open_pipelined<F: Factory<Self>>(
         &self,
         paths: &[&str],

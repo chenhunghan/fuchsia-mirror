@@ -12,6 +12,8 @@ use crate::constants::{
     DWORD_ALIGN_MASK, INLINE_DATA_SIZE, MAX_PRDT_ENTRIES, MAX_PRDT_ENTRY_BYTES, PRDT_DBC_MASK,
     UTP_COMMAND_DESCRIPTOR_SIZE,
 };
+use crate::query::QueryUpiu;
+use crate::upiu::{CommandUpiu, NopInUpiu, NopOutUpiu, ResponseUpiu};
 use static_assertions::const_assert_eq;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
@@ -160,20 +162,11 @@ pub struct CommandDescriptorLayout {
 
 impl CommandDescriptorLayout {
     /// SCSI COMMAND UPIU (32 B) + RESPONSE UPIU (56 B): response at 32, PRDT at 88.
-    pub const SCSI_COMMAND: Self = Self::new(
-        std::mem::size_of::<crate::upiu::CommandUpiu>(),
-        std::mem::size_of::<crate::upiu::ResponseUpiu>(),
-    );
+    pub const SCSI_COMMAND: Self = Self::new(size_of::<CommandUpiu>(), size_of::<ResponseUpiu>());
     /// QUERY REQUEST UPIU (288 B) + QUERY RESPONSE UPIU (288 B).
-    pub const QUERY: Self = Self::new(
-        std::mem::size_of::<crate::query::QueryUpiu>(),
-        std::mem::size_of::<crate::query::QueryUpiu>(),
-    );
+    pub const QUERY: Self = Self::new(size_of::<QueryUpiu>(), size_of::<QueryUpiu>());
     /// NOP OUT UPIU (32 B) + NOP IN UPIU (32 B).
-    pub const NOP: Self = Self::new(
-        std::mem::size_of::<crate::upiu::NopOutUpiu>(),
-        std::mem::size_of::<crate::upiu::NopInUpiu>(),
-    );
+    pub const NOP: Self = Self::new(size_of::<NopOutUpiu>(), size_of::<NopInUpiu>());
 
     /// Creates a layout.
     ///
@@ -189,7 +182,7 @@ impl CommandDescriptorLayout {
         assert!(
             request_length
                 + response_length
-                + MAX_PRDT_ENTRIES * std::mem::size_of::<PrdtEntry>()
+                + MAX_PRDT_ENTRIES * size_of::<PrdtEntry>()
                 + INLINE_DATA_SIZE
                 <= UTP_COMMAND_DESCRIPTOR_SIZE,
             "request, response, PRDT and inline data exceed the UCD size"

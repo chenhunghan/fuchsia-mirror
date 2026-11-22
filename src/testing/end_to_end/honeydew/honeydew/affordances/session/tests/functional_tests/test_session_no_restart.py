@@ -8,7 +8,7 @@ import logging
 import fuchsia_base_test
 from honeydew import errors
 from honeydew.affordances.session import errors as session_errors
-from honeydew.affordances.session import session_using_ffx
+from honeydew.affordances.session import session as session_affordance
 from honeydew.transports.ffx import types as ffx_types
 from honeydew.utils import common
 from mobly import asserts, test_runner
@@ -54,7 +54,7 @@ class SessionNoRestartTestCases(fuchsia_base_test.FuchsiaTestCases):
         lines = [
             line
             for line in res.splitlines()
-            if line.startswith(session_using_ffx.ELEMENT_PREFIX)
+            if line.startswith(session_affordance.ELEMENT_PREFIX)
         ]
         return set(lines)
 

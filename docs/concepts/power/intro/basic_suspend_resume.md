@@ -1,7 +1,7 @@
 # Basic Usage
 
 
-## Taking action on system suspend or resume
+## Taking action on system suspend or resume {:#taking-action-on-system-suspend-or-resume}
 
 A component may want to take some action when the CPU suspends or resumes. The
 component can use an [`SuspendBlocker`][suspend_blocker] to observe these

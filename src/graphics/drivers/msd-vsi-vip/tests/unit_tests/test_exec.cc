@@ -24,6 +24,81 @@ TEST_F(TestExec, SubmitBatchWithOffset) {
   ASSERT_NO_FATAL_FAILURE(CreateAndSubmitBufferWaitCompletion(default_context(), buffer_desc));
 }
 
+// Tests submitting a batch whose execution resource starts at a non-zero page offset in the VMO.
+TEST_F(TestExec, SubmitBatchWithNonZeroResourceOffset) {
+  device_->StartDeviceThread();
+
+  const uint32_t kPageSize = magma::page_size();
+  const uint32_t kBufferSize = kPageSize * 2;
+  const uint64_t kResourceOffset = kPageSize;
+  constexpr uint32_t kBatchOffset = 80;
+  constexpr uint32_t kDataSize = 4;
+  constexpr uint32_t kGpuAddr = 0x10000;
+  constexpr uint32_t kUnmappedGpuAddr = 0x50000;
+  constexpr uint32_t kSentinel = 0xDEADBEEFu;
+
+  std::shared_ptr<MsdVsiBuffer> buffer;
+  ASSERT_NO_FATAL_FAILURE(CreateMsdBuffer(kBufferSize, &buffer));
+
+  void* mapped_addr = nullptr;
+  ASSERT_TRUE(buffer->platform_buffer()->MapCpu(&mapped_addr));
+  auto* cmd_ptr = static_cast<uint32_t*>(mapped_addr);
+  for (uint32_t i = 0; i < kPageSize / sizeof(uint32_t); i++) {
+    cmd_ptr[i] = kSentinel;
+  }
+  BufferWriter buf_writer(cmd_ptr, kBufferSize,
+                          static_cast<uint32_t>(kResourceOffset + kBatchOffset));
+  MiWait::write(&buf_writer);
+  // Write a faulting LINK immediately after the user command; the driver's WriteLinkCommand
+  // must overwrite this slot in Page 1 with a LINK back to the ringbuffer.
+  MiLink::write(&buf_writer, 1, kUnmappedGpuAddr);
+  ASSERT_TRUE(buffer->platform_buffer()->UnmapCpu());
+
+  // Map only Page 1 onto the GPU; Page 0 remains unmapped.
+  ASSERT_TRUE(default_connection()
+                  ->MapBufferGpu(buffer, kGpuAddr, 1 /* page_offset */, 1 /* page_count */)
+                  .ok());
+
+  auto semaphore = magma::PlatformSemaphore::Create();
+  ASSERT_NE(semaphore, nullptr);
+
+  auto command_buffer = std::make_unique<msd::magma_command_buffer>(msd::magma_command_buffer{
+      .resource_count = 1,
+      .batch_buffer_resource_index = 0,
+      .batch_start_offset = kBatchOffset,
+      .wait_semaphore_count = 0,
+      .signal_semaphore_count = 1,
+      .flags = 0,
+  });
+  std::vector<CommandBuffer::ExecResource> resources;
+  resources.emplace_back(CommandBuffer::ExecResource{
+      .buffer = buffer,
+      .offset = kResourceOffset,
+      .length = kDataSize,
+  });
+  std::vector<std::shared_ptr<magma::PlatformSemaphore>> signal_semaphores{semaphore->Clone()};
+
+  auto batch = CommandBuffer::Create(default_context(), 0, std::move(command_buffer),
+                                     std::move(resources), std::move(signal_semaphores));
+  ASSERT_NE(batch, nullptr);
+  ASSERT_TRUE(batch->PrepareForExecution());
+  ASSERT_TRUE(batch->IsValidBatch());
+
+  ASSERT_TRUE(default_context()->SubmitBatch(std::move(batch)).ok());
+
+  constexpr uint64_t kTimeoutMs = 1000;
+  EXPECT_EQ(MAGMA_STATUS_OK, semaphore->Wait(kTimeoutMs).get());
+  EXPECT_FALSE(default_context()->killed());
+
+  mapped_addr = nullptr;
+  ASSERT_TRUE(buffer->platform_buffer()->MapCpu(&mapped_addr));
+  cmd_ptr = static_cast<uint32_t*>(mapped_addr);
+  constexpr uint32_t kLinkOffsetInPage = kBatchOffset + sizeof(uint64_t);
+  EXPECT_EQ(cmd_ptr[kLinkOffsetInPage / sizeof(uint32_t)], kSentinel);
+  EXPECT_EQ(cmd_ptr[(kLinkOffsetInPage + sizeof(uint32_t)) / sizeof(uint32_t)], kSentinel);
+  ASSERT_TRUE(buffer->platform_buffer()->UnmapCpu());
+}
+
 // Verifies reset while GPU is busy.
 TEST_F(TestExec, ResetAfterSubmit) {
   for (uint32_t i = 0; i < 100; i++) {

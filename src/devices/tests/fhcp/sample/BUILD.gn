@@ -33,9 +33,7 @@ fhcp_test_package("fhcp-sample-touchpad-test") {
   test_specs = {
     environments = [
       {
-        dimensions = {
-          device_type = "AEMU"
-        }
+        dimensions = aemu_env.dimensions
         tags = [ "fhcp-automated" ]
       },
     ]
@@ -54,21 +52,11 @@ fhcp_test_package("fhcp-sample-camera-test") {
   test_specs = {
     environments = [
       {
-        dimensions = {
-          device_type = "AEMU"
-        }
+        dimensions = aemu_env.dimensions
         tags = [ "fhcp-automated" ]
       },
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "fhcp-automated" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "fhcp-automated" ]
       },
     ]
@@ -87,21 +75,11 @@ fhcp_test_package("fhcp-sample-misc-test") {
   test_specs = {
     environments = [
       {
-        dimensions = {
-          device_type = "AEMU"
-        }
+        dimensions = aemu_env.dimensions
         tags = [ "fhcp-automated" ]
       },
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "fhcp-automated" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "fhcp-automated" ]
       },
     ]
@@ -120,21 +98,11 @@ fhcp_test_package("fhcp-sample-misc-manual-test") {
   test_specs = {
     environments = [
       {
-        dimensions = {
-          device_type = "AEMU"
-        }
+        dimensions = aemu_env.dimensions
         tags = [ "fhcp-manual" ]
       },
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "fhcp-manual" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "fhcp-manual" ]
       },
     ]

@@ -1,0 +1,155 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Curated role-resolution expectations for `meta/expectations_container.cml`.
+// Each entry exercises either one of the `task_role_overrides` filters in the
+// container manifest or `SchedulerManager`'s fallback mapping when no override
+// matches.
+[
+    // Unconditional process + thread overrides.
+    {
+        process: "renamed_puppet",
+        thread: "renamed_puppet",
+        expected_role: "first_custom_role",
+    },
+    {
+        process: "renamed_again",
+        thread: "renamed_again",
+        expected_role: "second_custom_role",
+    },
+
+    // `cgroup` filter: `puppet` matches `cpuset_custom_role` only inside
+    // `/bg_tasks` and otherwise falls back to the fair role for its `nice`
+    // value.
+    {
+        process: "puppet",
+        thread: "puppet",
+        cgroup: "/bg_tasks",
+        expected_role: "cpuset_custom_role",
+    },
+    {
+        process: "puppet",
+        thread: "puppet",
+        cgroup: "/",
+        expected_role: "fuchsia.starnix.fair.16",
+    },
+    {
+        process: "puppet",
+        thread: "puppet",
+        nice: 10,
+        expected_role: "fuchsia.starnix.fair.11",
+    },
+
+    // `is_leader` filter: only the thread-group leader (`tid == pid`) matches
+    // `app.leader`; a spawned thread that still carries the inherited command
+    // name falls back to its default fair role.
+    {
+        process: "test_app",
+        thread: "test_app",
+        is_leader: true,
+        expected_role: "app.leader",
+    },
+    {
+        process: "test_app",
+        thread: "test_app",
+        is_leader: false,
+        expected_role: "fuchsia.starnix.fair.16",
+    },
+
+    // `system_mode` filter: `RenderThread` promotes to `app.render.launch`
+    // during `LAUNCH`, while in `NOMINAL` mode evaluation continues to the
+    // `uclamp_min` and catch-all `RenderThread` rules below.
+    {
+        process: "test_app",
+        thread: "RenderThread",
+        system_mode: "LAUNCH",
+        expected_role: "app.render.launch",
+    },
+
+    // `uclamp_min` range filter (`128..=512`): values inside the inclusive
+    // range match `app.render.uclamp`, while values below or above fall through
+    // to `app.render.default`.
+    {
+        process: "test_app",
+        thread: "RenderThread",
+        uclamp_min: 256,
+        expected_role: "app.render.uclamp",
+    },
+    {
+        process: "test_app",
+        thread: "RenderThread",
+        uclamp_min: 64,
+        expected_role: "app.render.default",
+    },
+    {
+        process: "test_app",
+        thread: "RenderThread",
+        uclamp_min: 513,
+        expected_role: "app.render.default",
+    },
+
+    // `min_nice` / `max_nice` window (`-5..=5`): boundary values match
+    // `app.worker.nice_window`; values just outside fall back to standard fair
+    // priority buckets.
+    {
+        process: "test_app",
+        thread: "worker",
+        nice: -5,
+        expected_role: "app.worker.nice_window",
+    },
+    {
+        process: "test_app",
+        thread: "worker",
+        nice: 5,
+        expected_role: "app.worker.nice_window",
+    },
+    {
+        process: "test_app",
+        thread: "worker",
+        nice: -6,
+        expected_role: "fuchsia.starnix.fair.19",
+    },
+    {
+        process: "test_app",
+        thread: "worker",
+        nice: 6,
+        expected_role: "fuchsia.starnix.fair.13",
+    },
+
+    // Unmatched Linux scheduling policies: verify fallback to `SCHED_BATCH`
+    // fair mapping, `SCHED_IDLE` (`fair.0`), and `SCHED_FIFO` / `SCHED_RR`
+    // (`realtime`) with both default and explicit realtime priorities.
+    {
+        process: "unmatched_worker",
+        thread: "batch_thread",
+        policy: "SCHED_BATCH",
+        nice: 10,
+        expected_role: "fuchsia.starnix.fair.11",
+    },
+    {
+        process: "unmatched_worker",
+        thread: "idle_thread",
+        policy: "SCHED_IDLE",
+        expected_role: "fuchsia.starnix.fair.0",
+    },
+    {
+        process: "unmatched_worker",
+        thread: "fifo_default_prio",
+        policy: "SCHED_FIFO",
+        expected_role: "fuchsia.starnix.realtime",
+    },
+    {
+        process: "unmatched_worker",
+        thread: "rr_default_prio",
+        policy: "SCHED_RR",
+        expected_role: "fuchsia.starnix.realtime",
+    },
+    {
+        process: "unmatched_worker",
+        thread: "rr_explicit_prio",
+        policy: "SCHED_RR",
+        realtime_priority: 50,
+        expected_role: "fuchsia.starnix.realtime",
+    },
+]

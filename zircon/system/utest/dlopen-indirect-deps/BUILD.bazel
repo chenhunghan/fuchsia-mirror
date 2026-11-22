@@ -1,0 +1,80 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":dlopen-indirect-deps-test-pkg"],
+    visibility = ["//zircon/system/utest:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "dlopen-indirect-deps",
+    srcs = ["dlopen-indirect-deps.c"],
+    data = [":dlopen-indirect-deps-test-module"],
+    gn_output_name = "dlopen-indirect-deps-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_cc_library(
+    name = "dlopen-indirect-deps-test-module_lib",
+    testonly = True,
+    srcs = ["dlopen-indirect-deps-test-module/test-module.c"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "dlopen-indirect-deps-test-module",
+    testonly = True,
+    dynamic_deps = [":dlopen-indirect-deps-test-liba"],
+    visibility = ["//zircon/system/utest/debugger:__pkg__"],
+    deps = [":dlopen-indirect-deps-test-module_lib"],
+)
+
+fx_cc_library(
+    name = "dlopen-indirect-deps-test-liba_lib",
+    testonly = True,
+    srcs = ["dlopen-indirect-deps-test-module/dlopen-indirect-deps-test-liba/liba.c"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "dlopen-indirect-deps-test-liba",
+    testonly = True,
+    dynamic_deps = [":dlopen-indirect-deps-test-libb"],
+    visibility = ["//zircon/system/utest/debugger:__pkg__"],
+    deps = [":dlopen-indirect-deps-test-liba_lib"],
+)
+
+fx_cc_library(
+    name = "dlopen-indirect-deps-test-libb_lib",
+    testonly = True,
+    srcs = ["dlopen-indirect-deps-test-module/dlopen-indirect-deps-test-liba/dlopen-indirect-deps-test-libb/libb.c"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "dlopen-indirect-deps-test-libb",
+    testonly = True,
+    visibility = ["//zircon/system/utest/debugger:__pkg__"],
+    deps = [":dlopen-indirect-deps-test-libb_lib"],
+)
+
+fx_unittest_package(
+    name = "dlopen-indirect-deps-test-pkg",
+    package_name = "dlopen-indirect-deps-test",
+    unit_tests = [":dlopen-indirect-deps"],
+)

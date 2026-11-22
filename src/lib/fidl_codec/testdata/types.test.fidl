@@ -177,17 +177,17 @@ closed protocol FidlCodecTestProtocol {
         a array<IntStructUnion:optional, 3>;
     });
 
-    strict XUnion(struct {
-        isu IntStructXunion;
+    strict FlexibleUnion(struct {
+        isu IntStructFlexibleUnion;
         i int32;
     });
-    strict NullableXUnion(struct {
-        isu IntStructXunion:optional;
+    strict NullableFlexibleUnion(struct {
+        isu IntStructFlexibleUnion:optional;
         i int32;
     });
-    strict NullableXUnionIntFirst(struct {
+    strict NullableFlexibleUnionIntFirst(struct {
         i int32;
-        isu IntStructXunion:optional;
+        isu IntStructFlexibleUnion:optional;
     });
 
     strict ShortUnion(struct {
@@ -198,8 +198,8 @@ closed protocol FidlCodecTestProtocol {
         u U8U16UnionReserved;
         i int32;
     });
-    strict ShortXUnion(struct {
-        u U8U16Xunion;
+    strict ShortFlexibleUnion(struct {
+        u U8U16FlexibleUnion;
         i int32;
     });
     strict RecursiveUnion(struct {
@@ -321,7 +321,7 @@ type IntStructUnion = strict union {
     2: variant_tss TwoStringStruct;
 };
 
-type IntStructXunion = flexible union {
+type IntStructFlexibleUnion = flexible union {
     1: variant_i int32;
     2: variant_tss TwoStringStruct;
 };
@@ -336,7 +336,7 @@ type U8U16UnionReserved = strict union {
     3: variant_u16 uint16;
 };
 
-type U8U16Xunion = flexible union {
+type U8U16FlexibleUnion = flexible union {
     1: variant_u8 uint8;
     2: variant_u16 uint16;
 };

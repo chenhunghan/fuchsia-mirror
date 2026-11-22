@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":trace_fixture"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_source_library_zx(
+    name = "trace-test-utils",
+    testonly = True,
+    srcs = [
+        "compare_records.cc",
+        "fixture.cc",
+        "read_records.cc",
+        "squelch.cc",
+    ],
+    hdrs = [
+        "include/trace-test-utils/compare_records.h",
+        "include/trace-test-utils/fixture.h",
+        "include/trace-test-utils/fixture_macros.h",
+        "include/trace-test-utils/read_records.h",
+        "include/trace-test-utils/squelch.h",
+    ],
+    implementation_deps = [
+        # The kind of engine to use is up to the client, so we don't provide any
+        # trace-engine dependency here.
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//zircon/system/ulib/trace-provider:trace-handler",
+        "//zircon/system/ulib/trace-reader:trace-buffer-reader",
+        "//zircon/system/ulib/zx",
+    ],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <trace-test-utils/fixture.h> needs these
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//third_party/re2",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/trace-engine",
+        "//zircon/system/ulib/trace-reader",
+    ],
+)
+
+# Note: Fuchsia-only target matching platform-only deps via target_compatible_with.
+fx_cc_library(
+    name = "trace_fixture_test",
+    testonly = True,
+    srcs = ["trace_fixture_test.cc"],
+    implementation_deps = [
+        ":trace-test-utils",
+        "//zircon/system/ulib/trace",
+        "@com_google_googletest//:gtest",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "trace_fixture_tests",
+    deps = [
+        ":trace_fixture_test",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "trace_fixture",
+    unit_tests = [":trace_fixture_tests"],
+)

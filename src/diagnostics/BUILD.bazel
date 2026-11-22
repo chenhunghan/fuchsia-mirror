@@ -10,8 +10,12 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "host_tests",
     tests = [
+        "//src/developer/ffx/plugins/inspect:host_tests",
         "//src/developer/ffx/tools/triage:ffx_triage_lib_test",
-        "//src/diagnostics/lib/sampler-config:sampler-config_host_test",
+        "//src/diagnostics/lib/redactor:host_tests",
+        "//src/diagnostics/lib/sampler-config:host_tests",
+        "//src/diagnostics/lib/triage:host_tests",
+        "//src/diagnostics/lib/util/v2-argh-wrapper:host_tests",
         "//src/diagnostics/tools/inspect-hierarchy-analyzer:inspect_hierarchy_analyzer_bin_test",
         "//src/diagnostics/triage:triage_lib_test",
         "//src/diagnostics/triage/build/triage_config_test_runner:triage_config_test_runner_test",
@@ -24,9 +28,14 @@ test_suite(
 test_suite(
     name = "target_tests",
     tests = [
-        "//src/diagnostics/lib/log-command:log-command-test",
+        "//src/diagnostics/lib/inspect-fetcher:tests",
+        "//src/diagnostics/lib/log-command:tests",
+        "//src/diagnostics/lib/redactor:tests",
+        "//src/diagnostics/lib/redactor_client:tests",
         "//src/diagnostics/lib/ring-buffer:ring-buffer-tests",
-        "//src/diagnostics/lib/sampler-config:sampler-config-tests",
+        "//src/diagnostics/lib/sampler-config:tests",
+        "//src/diagnostics/lib/validating-log-listener:tests",
+        "//src/diagnostics/log_listener:tests",
         "//src/diagnostics/tests/inspect-system:tests",
     ],
 )

@@ -1,0 +1,7 @@
+# Verify AnyParameter accepts a fully initialized scalar argument.
+-- asm
+mov %r1, 42
+call 112
+exit
+-- result
+0

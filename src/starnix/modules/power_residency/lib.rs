@@ -153,21 +153,9 @@ fn add_power_residency_devices(
     }
     let registry = &kernel.device_registry;
     for (device_name, files) in files_by_device {
-        if registry
-            .objects
-            .root
-            .lookup(format!("devices/platform/{device_name}").as_str().into())
-            .is_some()
-        {
-            log_warn!(
-                "Ignoring {device_name} power residency entities from additional provider {}",
-                provider.instance_name()
-            );
-            continue;
-        }
         let has_dsu = files.iter().any(|spec| spec.entity == DSU_DVFS_ENTITY);
         let provider_for_files = provider.clone();
-        let device = registry.add_bus_device(
+        let Ok(device) = registry.add_bus_device(
             device_name.into(),
             Some(registry.objects.platform_device()),
             registry.objects.platform_bus(),
@@ -182,28 +170,36 @@ fn add_power_residency_devices(
                     dir.entry(&spec.file, BytesFile::new_node(file), mode!(IFREG, 0o444));
                 }
             },
-        );
+        ) else {
+            log_warn!(
+                "Ignoring {device_name} power residency entities from additional provider {}",
+                provider.instance_name()
+            );
+            continue;
+        };
         scope.add_scoped_device(device);
         if has_dsu {
-            add_dsu_devfreq_device(kernel, scope);
+            if let Err(err) = add_dsu_devfreq_device(kernel, scope) {
+                log_warn!("Failed to register DSU devfreq device: {:?}", err);
+            }
         }
     }
 }
 
 /// Adds the DSU's platform device and its devfreq device, which lists the DSU's frequencies in
 /// `available_frequencies`.
-fn add_dsu_devfreq_device(kernel: &Kernel, scope: &mut ServiceBindingScope) {
+fn add_dsu_devfreq_device(kernel: &Kernel, scope: &mut ServiceBindingScope) -> Result<(), Errno> {
     let registry = &kernel.device_registry;
-    let platform_device = scope.add_scoped_device(registry.add_bus_device(
+    let platform_device = registry.add_bus_device(
         DSU_DEVFREQ_DEVICE_NAME.into(),
         Some(registry.objects.platform_device()),
         registry.objects.platform_bus(),
         |device, dir| build_device_directory(device, dir),
-    ));
+    )?;
     let devfreq_class = registry.objects.get_or_create_class("devfreq".into());
-    scope.add_scoped_device(registry.add_numberless_device(
+    let devfreq_device = match registry.add_numberless_device(
         DSU_DEVFREQ_DEVICE_NAME.into(),
-        Some(platform_device),
+        Some(platform_device.clone()),
         devfreq_class,
         |device, dir| {
             build_device_directory(device, dir);
@@ -213,7 +209,16 @@ fn add_dsu_devfreq_device(kernel: &Kernel, scope: &mut ServiceBindingScope) {
                 mode!(IFREG, 0o444),
             );
         },
-    ));
+    ) {
+        Ok(device) => device,
+        Err(err) => {
+            registry.remove_device_with_kernel(kernel, platform_device);
+            return Err(err);
+        }
+    };
+    scope.add_scoped_device(platform_device);
+    scope.add_scoped_device(devfreq_device);
+    Ok(())
 }
 
 /// Returns the contents of the DSU's `available_frequencies` file: its frequencies in Hz, from
@@ -418,7 +423,6 @@ fn format_dvfs_stats(stats: &fpowerstats::Stats) -> String {
 mod tests {
     use super::*;
     use fidl::endpoints::{ServerEnd, create_sync_proxy};
-    use fuchsia_async as fasync;
     use futures::StreamExt;
     use starnix_core::testing::spawn_kernel_and_run_sync;
     use starnix_uapi::error;
@@ -440,26 +444,29 @@ mod tests {
         fpowerstats::Stats { entity: entity.to_string(), state_residency_data }
     }
 
-    /// Serves a fake provider that reports `reports` on `stream`.
-    async fn serve_provider(
-        stream: fpowerstats::DeviceRequestStream,
+    /// Spawns a fake provider serving `reports` on `kernel.kthreads`, returning a synchronous proxy
+    /// to it.
+    fn spawn_provider_server(
+        kernel: &Kernel,
         reports: Vec<fpowerstats::Stats>,
-    ) {
-        let _ = stream
-            .for_each(|request| {
-                let reports = &reports;
-                async move {
+    ) -> fpowerstats::DeviceSynchronousProxy {
+        let (proxy, server) = create_sync_proxy::<fpowerstats::DeviceMarker>();
+        kernel.kthreads.spawn_future(
+            move || async move {
+                // Convert `server` into a stream inside the future so its channel binds to the
+                // `kthreads` executor (`into_stream` panics on a synchronous thread with no
+                // executor, and would bind to the caller's thread-local executor on an async
+                // thread).
+                let mut stream = server.into_stream();
+                while let Some(request) = stream.next().await {
                     if let Ok(fpowerstats::DeviceRequest::GetStats { responder }) = request {
-                        let _ = responder.send(reports);
+                        let _ = responder.send(&reports);
                     }
                 }
-            })
-            .await;
-    }
-
-    /// Runs `serve` on its own thread, as residency files call providers synchronously.
-    fn spawn_server<F: Future<Output = ()> + 'static>(serve: impl FnOnce() -> F + Send + 'static) {
-        std::thread::spawn(move || fasync::LocalExecutor::default().run_singlethreaded(serve()));
+            },
+            "fake_power_stats_provider",
+        );
+        proxy
     }
 
     /// Returns a [`PowerStatsProvider`] reporting `entity_names` for tests that only exercise
@@ -468,17 +475,7 @@ mod tests {
         instance_name: &str,
         entity_names: impl IntoIterator<Item = impl Into<String>>,
     ) -> PowerStatsProvider {
-        fake_provider(
-            instance_name,
-            entity_names.into_iter().map(|name| stats(&name.into(), vec![])).collect(),
-        )
-    }
-
-    /// Returns a fake [`PowerStatsProvider`] named `instance_name` that serves `reports`.
-    fn fake_provider(instance_name: &str, reports: Vec<fpowerstats::Stats>) -> PowerStatsProvider {
-        let entity_names: Vec<_> = reports.iter().map(|stats| stats.entity.clone()).collect();
-        let (proxy, server) = create_sync_proxy::<fpowerstats::DeviceMarker>();
-        spawn_server(move || serve_provider(server.into_stream(), reports));
+        let (proxy, _) = create_sync_proxy::<fpowerstats::DeviceMarker>();
         PowerStatsProvider::new(instance_name, entity_names, proxy)
     }
 
@@ -643,7 +640,12 @@ mod tests {
                     )],
                 ),
             ];
-            let provider = Arc::new(fake_provider("test", entities.to_vec()));
+            let proxy = spawn_provider_server(current_task.kernel(), entities.to_vec());
+            let provider = Arc::new(PowerStatsProvider::new(
+                "test",
+                entities.iter().map(|stats| stats.entity.as_str()),
+                proxy,
+            ));
 
             for entity in &entities {
                 let spec = residency_file_spec(&entity.entity).expect("entity is served");
@@ -666,13 +668,11 @@ mod tests {
     #[::fuchsia::test]
     async fn read_fails_when_entity_is_no_longer_reported() {
         spawn_kernel_and_run_sync(|current_task| {
-            let (proxy, server) = create_sync_proxy::<fpowerstats::DeviceMarker>();
-            let reports = vec![stats("b", vec![])];
-            spawn_server(move || serve_provider(server.into_stream(), reports));
+            let proxy = spawn_provider_server(current_task.kernel(), vec![stats("b", vec![])]);
             let provider = Arc::new(PowerStatsProvider::new("test", ["a", "b"], proxy));
-            let file = perf_file("a", provider);
 
-            assert_eq!(file.read(current_task).map(|_| ()), error!(EIO));
+            assert!(perf_file("b", provider.clone()).read(current_task).is_ok());
+            assert_eq!(perf_file("a", provider).read(current_task).map(|_| ()), error!(EIO));
         })
         .await;
     }

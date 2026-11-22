@@ -13,15 +13,16 @@ use smallvec::smallvec;
 use starnix_core::fs::fuchsia::new_remote_file;
 use starnix_core::mm::{MemoryAccessor, MemoryAccessorExt};
 use starnix_core::testing::*;
-use starnix_core::vfs::SeekTarget;
 use starnix_core::vfs::buffers::{
     Buffer, InputBuffer, InputBufferCallback, OutputBuffer, OutputBufferCallback,
     PeekBufferSegmentsCallback, UserBuffersInputBuffer, UserBuffersOutputBuffer,
 };
+use starnix_core::vfs::{SeekTarget, new_memfd};
 use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::error;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::seal_flags::SealFlags;
 use starnix_uapi::user_address::UserAddress;
 
 async fn mock_remote_file_server(server: zx::Channel, stream: Option<zx::Stream>) {
@@ -58,6 +59,9 @@ async fn mock_remote_file_server(server: zx::Channel, stream: Option<zx::Stream>
                 responder
                     .send(Ok((&attrs.mutable_attributes, &attrs.immutable_attributes)))
                     .unwrap();
+            }
+            fio::FileRequest::GetExtendedAttribute { responder, .. } => {
+                responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw())).unwrap();
             }
             fio::FileRequest::ReadAt { count, responder, .. } => {
                 let data = vec![0u8; count as usize];
@@ -321,6 +325,63 @@ async fn test_vectored_stream_io() {
         let mut mem2 = vec![0u8; 100];
         current_task.read_memory_to_slice(addr2, &mut mem2).unwrap();
         assert_eq!(mem2, pattern[100..200]);
+    })
+    .await;
+}
+
+#[fuchsia::test]
+async fn test_memfd_vectored_write() {
+    spawn_kernel_and_run(async move |current_task| {
+        let file =
+            new_memfd(&current_task, b"vectored_write".into(), SealFlags::empty(), OpenFlags::RDWR)
+                .expect("new_memfd");
+
+        const LEN: usize = 32 * 1024;
+        let addr1 = map_memory(&current_task, UserAddress::default(), LEN as u64);
+        let addr2 = map_memory(&current_task, UserAddress::default(), LEN as u64);
+        current_task.write_memory(addr1, &[1u8; LEN]).unwrap();
+        current_task.write_memory(addr2, &[2u8; LEN]).unwrap();
+
+        // `VectoredOnlyInputBuffer` panics if the data is copied through a kernel buffer.
+        let mut buffer = VectoredOnlyInputBuffer {
+            inner: UserBuffersInputBuffer::unified_new(
+                &current_task,
+                smallvec![
+                    UserBuffer { address: addr1, length: LEN },
+                    UserBuffer { address: addr2, length: LEN },
+                ],
+            )
+            .unwrap(),
+        };
+        assert_eq!(file.write(&current_task, &mut buffer), Ok(2 * LEN));
+        assert_eq!(buffer.bytes_read(), 2 * LEN);
+        assert_eq!(file.node().info().size, 2 * LEN);
+
+        // A segment that Zircon cannot read ends the write after the preceding segments.
+        current_task.mm().unwrap().unmap(addr2, LEN).unwrap();
+        let mut buffer = UserBuffersInputBuffer::unified_new(
+            &current_task,
+            smallvec![
+                UserBuffer { address: addr1, length: LEN },
+                UserBuffer { address: addr2, length: LEN },
+            ],
+        )
+        .unwrap();
+        assert_eq!(file.write(&current_task, &mut buffer), Ok(LEN));
+        assert_eq!(buffer.bytes_read(), LEN);
+        assert_eq!(file.node().info().size, 3 * LEN);
+        assert_eq!(file.node().info().storage_size(), 3 * LEN);
+
+        let mut data = vec![0u8; 3 * LEN];
+        file.seek(&current_task, SeekTarget::Set(0)).unwrap();
+        let read_addr = map_memory(&current_task, UserAddress::default(), (3 * LEN) as u64);
+        let mut out =
+            UserBuffersOutputBuffer::unified_new_at(&current_task, read_addr, 3 * LEN).unwrap();
+        assert_eq!(file.read(&current_task, &mut out), Ok(3 * LEN));
+        current_task.read_memory_to_slice(read_addr, &mut data).unwrap();
+        assert_eq!(&data[..LEN], &[1u8; LEN]);
+        assert_eq!(&data[LEN..2 * LEN], &[2u8; LEN]);
+        assert_eq!(&data[2 * LEN..], &[1u8; LEN]);
     })
     .await;
 }

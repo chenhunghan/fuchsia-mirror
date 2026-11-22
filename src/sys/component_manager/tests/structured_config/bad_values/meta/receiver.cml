@@ -3,12 +3,15 @@
 // found in the LICENSE file.
 {
     include: [
-        "//src/sys/component_manager/tests/structured_config/all_config_types.shard.cml",
         "inspect/client.shard.cml",
         "syslog/client.shard.cml",
     ],
     program: {
         runner: "elf",
         binary: "bin/structured_config_bad_values",
+    },
+    config: {
+        my_flag: { type: "bool" },
+        my_uint8: { type: "uint8" },
     },
 }

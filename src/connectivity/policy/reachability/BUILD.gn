@@ -109,6 +109,7 @@ fuchsia_component("component") {
   component_name = "reachability"
   manifest = "meta/reachability.cml"
   deps = [ ":bin" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_package("package") {
@@ -122,6 +123,13 @@ fuchsia_component("component_with_fake_time") {
   manifest = "meta/reachability_with_fake_time.cml"
   deps = [ ":bin_with_fake_time" ]
   testonly = true
+  visibility = [ ":*" ]
+}
+
+fuchsia_package("package-for-tests") {
+  testonly = true
+  package_name = "reachability"
+  deps = [ ":component_with_fake_time" ]
 }
 
 group("tests") {

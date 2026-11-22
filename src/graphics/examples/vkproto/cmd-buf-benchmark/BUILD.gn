@@ -37,20 +37,9 @@ fuchsia_component("cmd-buf-benchmark-test-child-component") {
   ]
 }
 
-fuchsia_structured_config_values("default_config") {
-  cm_label = ":cmd-buf-benchmark-child-manifest"
-  values = {
-    gpu_vendor_id = 0
-    disabled_test_pattern = ""
-  }
-}
-
 fuchsia_package("cmd-buf-benchmark-test-child") {
   package_name = "cmd-buf-benchmark-test"
-  deps = [
-    ":cmd-buf-benchmark-test-child-component",
-    ":default_config",
-  ]
+  deps = [ ":cmd-buf-benchmark-test-child-component" ]
 }
 
 if (current_toolchain == default_toolchain) {

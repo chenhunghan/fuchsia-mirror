@@ -8,11 +8,13 @@
 #include <threads.h>
 #include <zircon/assert.h>
 #include <zircon/syscalls.h>
+#include <zircon/time.h>
+#include <zircon/types.h>
 
 #include <algorithm>
 #include <mutex>
 
-#include <zxtest/zxtest.h>
+#include "../test/unittest.h"
 
 struct Thread {
   thrd_t thrd;

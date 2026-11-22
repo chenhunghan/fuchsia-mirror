@@ -232,9 +232,7 @@ fuchsia_test_package("filesystem-stress-tests") {
   test_specs = {
     environments = [
       {
-        dimensions = {
-          device_type = "QEMU"
-        }
+        dimensions = emu_env.dimensions
         tags = [ "stress-tests" ]
       },
     ]

@@ -7,15 +7,7 @@
 #ifndef ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_FEATURE_H_
 #define ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_FEATURE_H_
 
-#include <assert.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <zircon/compiler.h>
-#include <zircon/features.h>
-
-#include <arch/arm64.h>
-#include <kernel/cpu.h>
-#include <ktl/atomic.h>
 
 enum arm64_microarch {
   UNKNOWN,
@@ -65,16 +57,8 @@ enum arm64_microarch {
   QEMU_TCG,
 };
 
-extern "C" enum arm64_microarch midr_to_microarch(uint64_t midr);
-
 extern uint32_t arm64_isa_features;
 extern uint32_t arm64_sve_features;
-extern bool feat_pmuv3_enabled;
-
-inline bool arm64_feature_test(uint32_t feature) { return arm64_isa_features & feature; }
-inline bool arm64_sve_feature_test(uint32_t feature) {
-  return ktl::atomic_ref(arm64_sve_features).load(ktl::memory_order_relaxed) & feature;
-}
 
 struct arm64_cache_features {
   // block size of the dc zva instruction, dcache cache line and icache cache line
@@ -126,27 +110,5 @@ struct arm64_mmu_features {
 
 // the global feature structure for mmu features
 extern arm64_mmu_features arm64_mmu_features;
-
-inline enum arm64_asid_width arm64_asid_width() {
-  DEBUG_ASSERT(arm64_mmu_features.asid_width != arm64_asid_width::UNKNOWN);
-  return arm64_mmu_features.asid_width;
-}
-
-inline enum arm64_asid_width arm64_vmid_width() {
-  DEBUG_ASSERT(arm64_mmu_features.vmid_width != arm64_asid_width::UNKNOWN);
-  return arm64_mmu_features.vmid_width;
-}
-
-// call on every cpu to initialize the feature set
-extern "C" void arm64_feature_init();
-
-// dump the feature set
-extern "C" void arm64_feature_debug(bool full);
-
-// Returns true if the current CPU is the first member of a cluster according to
-// MPIDR.
-extern "C" bool arm64_feature_current_is_first_in_cluster();
-
-extern "C" void arm64_print_midr_cpu_name(FILE*);
 
 #endif  // ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_FEATURE_H_

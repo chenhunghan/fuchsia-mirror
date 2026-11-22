@@ -44,6 +44,7 @@ rustc_binary(
     srcs = [
         "src/base_package_resolver.rs",
         "src/blob_fetcher.rs",
+        "src/blob_fetcher/queue.rs",
         "src/blob_fetcher/retry.rs",
         "src/cache_service.rs",
         "src/cache_service/missing_blobs.rs",
@@ -58,6 +59,7 @@ rustc_binary(
         "src/index.rs",
         "src/index/package.rs",
         "src/index/retained.rs",
+        "src/index/upgradable.rs",
         "src/index/writing.rs",
         "src/main.rs",
         "src/ota_downloader.rs",
@@ -67,7 +69,6 @@ rustc_binary(
         "src/retained_packages_service.rs",
         "src/root_dir.rs",
         "src/test_utils.rs",
-        "src/upgradable_packages.rs",
     ],
     build_flags = ["//build/config/rust:bootfs"],
     crate_name = "pkg_cache",
@@ -89,7 +90,6 @@ rustc_binary(
         "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
         "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
         "//sdk/rust/zx",
-        "//src/lib/async-utils",
         "//src/lib/cobalt/rust/builders",
         "//src/lib/collections/sorted-vec-map",
         "//src/lib/diagnostics/inspect/contrib/rust",
@@ -122,7 +122,6 @@ rustc_binary(
         "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
         "//src/sys/pkg/lib/package-directory",
         "//src/sys/pkg/lib/system-image",
-        "//src/sys/pkg/lib/work-queue",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:async-lock",
         "//third_party/rust_crates/vendor:futures",
@@ -196,9 +195,12 @@ fx_component(
     name = "component",
     compiled_manifest = ":manifest",
     visibility = [
+        "//src/security/tests/pkg_test/tests:__pkg__",
         "//src/sys/pkg/lib/isolated-swd:__pkg__",
         "//src/sys/pkg/tests/isolated-ota:__pkg__",
         "//src/sys/pkg/tests/pkg-cache:__pkg__",
+        "//src/sys/pkg/tests/pkg-cache-as-base-resolver/as-a-component-resolver:__pkg__",
+        "//src/sys/pkg/tests/pkg-resolver:__pkg__",
     ],
     deps = [":pkg_cache_packaged_bin"],
 )
@@ -218,7 +220,6 @@ resource(
 # allowed_in = ["eng"], so assembly keeps it out of production builds.
 fx_package(
     name = "disable-executability-restrictions",
-    package_name = "disable-executability-restrictions",
     resources = [":disable-executability-restrictions-resource"],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

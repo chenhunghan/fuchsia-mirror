@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+# Mirrors //build/config/python:generate_python_api_symbols in GN, which is
+# restricted to Linux hosts (`is_host && is_linux`).
+genrule(
+    name = "generate_python_api_symbols",
+    srcs = [
+        "@prebuilt_python//:python_exe",
+    ],
+    outs = ["python_api_symbols.lds"],
+    cmd = " ".join([
+        "$(location //build/config/python/generate_python_api_symbols)",
+        "--python-exe=$(location @prebuilt_python//:python_exe)",
+        "--llvm-readelf-exe=$(location @prebuilt_clang//:bin/llvm-readelf)",
+        "--output=$@",
+    ]),
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "//build/bazel/platforms:linux_flavor_host",
+    ],
+    tools = [
+        "//build/config/python/generate_python_api_symbols",
+        "@prebuilt_clang//:bin/llvm-readelf",
+    ],
+    visibility = ["//:__subpackages__"],
+)

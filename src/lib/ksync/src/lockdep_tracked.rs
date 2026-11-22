@@ -3,10 +3,12 @@
 // found in the LICENSE file.
 
 use crate::raw_lock::{
-    ConstRawLock, ExclusiveLockPolicy, LockPolicy, RawAssertHeldLock, RawLock, RawSharedLock,
+    AdoptableLockPolicy, ConstRawLock, ExclusiveLockPolicy, LockPolicy, RawAssertHeldLock, RawLock,
+    RawSharedLock, TryLockPolicy,
 };
 use core::ffi::c_void;
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 use pin_init::{PinInit, pin_data, pin_init};
 
 #[cfg(feature = "lock_dep")]
@@ -19,20 +21,23 @@ unsafe extern "C" {
         order: usize,
         assert_nestable: bool,
     );
+    fn cpp_lock_dep_move(src_entry_storage: *mut c_void, dst_entry_storage: *mut c_void);
     fn cpp_lock_dep_release(entry_storage: *mut c_void, flags: lockdep::LockFlags);
     fn cpp_lock_validate_release(entry_storage: *mut c_void, flags: lockdep::LockFlags);
     fn cpp_lock_validate_acquire(entry_storage: *mut c_void, flags: lockdep::LockFlags);
 }
 
-/// Opaque stack entry storage for a lockdep `AcquiredLockEntry`.
+/// Opaque pinned entry storage for a lockdep `AcquiredLockEntry`.
 ///
 /// C++ lockdep owns the contents between [`lockdep_acquire`] and the matching
 /// [`lockdep_release`] (the entry is linked into the thread's held-lock list and mutated by the
 /// validator), so Rust only ever hands out its address and never reads or writes the bytes.
+/// `PhantomData<*mut ()>` marks the storage `!Send` and `!Sync` because the entry is linked into
+/// thread-local (or per-CPU) `ThreadLockState`.
 #[cfg(feature = "lock_dep")]
 #[derive(Default)]
 #[repr(C, align(8))]
-struct LockEntryStorage(zr::OpaqueBytes<40>);
+struct LockEntryStorage(zr::OpaqueBytes<40>, PhantomData<*mut ()>);
 
 /// Records the acquisition of `lock` with lockdep, initializing `entry` with the given `order`.
 ///
@@ -44,9 +49,9 @@ struct LockEntryStorage(zr::OpaqueBytes<40>);
 /// # Safety
 ///
 /// `lock` must be initialized, `entry` must not currently hold a live `AcquiredLockEntry` (it
-/// must be freshly `Default`-initialized or have been destroyed by a prior [`lockdep_release`]),
-/// and the caller must guarantee that `entry` remains pinned on the stack until the matching
-/// [`lockdep_release`] completes.
+/// must be freshly `Default`-initialized or have been left inactive by a prior [`lockdep_release`]
+/// or [`lockdep_move`]), and the caller must guarantee that `entry` remains pinned in place until
+/// the matching [`lockdep_release`] (or a subsequent [`lockdep_move`]) completes.
 #[cfg(feature = "lock_dep")]
 #[inline]
 unsafe fn lockdep_acquire<L: RawLock, LP, const LOCK_FLAGS: lockdep::LockFlags>(
@@ -58,8 +63,8 @@ unsafe fn lockdep_acquire<L: RawLock, LP, const LOCK_FLAGS: lockdep::LockFlags>(
     // SAFETY: `lock.class_id` is null or a valid `LockClassId` (`RawLock::init`'s `# Safety`,
     // `const_init`, or the C++ `Lock<>` the lock mirrors; note that `LockClass` and `const_init`
     // are still safe until the follow-up making `LockClass` an `unsafe trait` and `const_init`
-    // `unsafe` lands); `entry` holds no live entry and stays pinned on the stack for the duration
-    // of the lock hold per this function's `# Safety`.
+    // `unsafe` lands); `entry` holds no live entry and stays pinned in place until released or
+    // moved per this function's `# Safety`.
     unsafe {
         cpp_lock_dep_acquire(
             lock.lock.as_mut_ptr(),
@@ -76,9 +81,10 @@ unsafe fn lockdep_acquire<L: RawLock, LP, const LOCK_FLAGS: lockdep::LockFlags>(
 ///
 /// # Safety
 ///
-/// `entry` must have been initialized by [`lockdep_acquire`], the current thread must hold the
-/// corresponding lock, and `flags` must equal the `LOCK_FLAGS` of that acquisition (it selects
-/// the `ThreadLockState` the entry is linked into).
+/// `entry` must hold a live, tracked `AcquiredLockEntry` (from [`lockdep_acquire`] or
+/// [`lockdep_move`]), the current thread must hold the corresponding lock, and `flags` must equal
+/// the `LOCK_FLAGS` of that acquisition (it selects the `ThreadLockState` the entry is linked
+/// into).
 #[cfg(feature = "lock_dep")]
 #[inline]
 unsafe fn lockdep_release(entry: &LockEntryStorage, flags: lockdep::LockFlags) {
@@ -94,8 +100,8 @@ unsafe fn lockdep_release(entry: &LockEntryStorage, flags: lockdep::LockFlags) {
 ///
 /// # Safety
 ///
-/// `entry` must have been initialized by [`lockdep_acquire`] and currently be tracked as held,
-/// and `flags` must equal the `LOCK_FLAGS` of that acquisition.
+/// `entry` must hold a live `AcquiredLockEntry` (from [`lockdep_acquire`] or [`lockdep_move`]) and
+/// currently be tracked as held, and `flags` must equal the `LOCK_FLAGS` of that acquisition.
 #[cfg(feature = "lock_dep")]
 #[inline]
 unsafe fn lockdep_untrack(entry: &LockEntryStorage, flags: lockdep::LockFlags) {
@@ -123,6 +129,27 @@ unsafe fn lockdep_retrack(entry: &LockEntryStorage, flags: lockdep::LockFlags) {
     }
 }
 
+/// Moves a live `AcquiredLockEntry` from pinned slot `src` into pinned slot `dst`, updating its
+/// pointer in the current thread's `ThreadLockState` held-lock list via C++
+/// `AcquiredLockEntry(AcquiredLockEntry&&)`.
+///
+/// # Safety
+///
+/// `src` must hold a live, currently tracked `AcquiredLockEntry` initialized by
+/// [`lockdep_acquire`] (or a prior `lockdep_move`) on the calling thread (i.e. not currently
+/// untracked via [`lockdep_untrack`]), and `dst` must be a distinct (`!core::ptr::eq(src, dst)`),
+/// valid, uninitialized (or previously released/moved-from) pinned slot that remains pinned until
+/// the matching [`lockdep_release`] (or a subsequent `lockdep_move`) completes.
+#[cfg(feature = "lock_dep")]
+#[inline]
+unsafe fn lockdep_move(src: &LockEntryStorage, dst: &LockEntryStorage) {
+    // SAFETY: `src` holds a live, currently tracked `AcquiredLockEntry` on the calling thread and
+    // `dst` is a distinct, valid pinned target slot per this function's `# Safety`.
+    unsafe {
+        cpp_lock_dep_move(src.0.get().cast(), dst.0.get().cast());
+    }
+}
+
 /// Guard state for a [`LockdepTracked`] lock acquisition, combining lockdep's stack entry storage
 /// with the underlying policy's `GuardState`.
 #[derive(Default)]
@@ -134,8 +161,11 @@ pub struct LockdepTrackedGuardState<S> {
 }
 
 /// Wraps a [`RawLock`] and [`LockPolicy`] with optional lockdep tracking state.
+///
+/// Aligned to 8 bytes so that `#[repr(C)]` FFI structs embedding a `LockdepTracked` lock maintain
+/// uniform 8-byte alignment across all lockdep configurations.
 #[pin_data]
-#[repr(C)]
+#[repr(C, align(8))]
 pub struct LockdepTracked<
     L: RawLock,
     P = <L as RawLock>::DefaultPolicy,
@@ -151,6 +181,21 @@ pub struct LockdepTracked<
 impl<L: RawLock, P, const LOCK_FLAGS: lockdep::LockFlags> LockdepTracked<L, P, LOCK_FLAGS> {
     /// Flags specifying validation rules for the lock class.
     pub const LOCK_FLAGS: lockdep::LockFlags = LOCK_FLAGS;
+
+    /// Returns the lockdep lock class ID this lock was initialized with, or `None` if lock class
+    /// metadata is not compiled in (neither the `lock_dep` nor the `lock_metadata_only` feature is
+    /// enabled).
+    #[inline]
+    pub fn class_id(&self) -> Option<*const c_void> {
+        #[cfg(any(feature = "lock_dep", feature = "lock_metadata_only"))]
+        {
+            Some(self.class_id)
+        }
+        #[cfg(not(any(feature = "lock_dep", feature = "lock_metadata_only")))]
+        {
+            None
+        }
+    }
 }
 
 impl<L: ConstRawLock, P, const LOCK_FLAGS: lockdep::LockFlags> LockdepTracked<L, P, LOCK_FLAGS> {
@@ -263,9 +308,9 @@ unsafe impl<
         args: Self::AcquireArgs,
     ) {
         #[cfg(feature = "lock_dep")]
-        // SAFETY: `lock` is initialized, `state.entry` is freshly `Default`-initialized per the
-        // `LockPolicy::acquire` contract, and the caller guarantees `state` is pinned on the stack
-        // for the duration of the lock hold.
+        // SAFETY: `lock` is initialized, `state.entry` holds no live entry per the
+        // `LockPolicy::acquire` contract, and the caller guarantees `state` stays pinned in place
+        // until released or moved.
         unsafe {
             lockdep_acquire(lock, &state.entry, 0, false);
         }
@@ -291,8 +336,8 @@ unsafe impl<
     ) {
         #[cfg(feature = "lock_dep")]
         // SAFETY: `lock` is initialized, `state.entry` was destroyed by the `release` that
-        // precedes a `reacquire`, and the caller guarantees `state` is pinned on the stack for
-        // the duration of the lock hold.
+        // precedes a `reacquire`, and the caller guarantees `state` stays pinned in place until
+        // released or moved.
         unsafe {
             lockdep_acquire(lock, &state.entry, 0, false);
         }
@@ -305,8 +350,8 @@ unsafe impl<
     #[inline]
     unsafe fn untrack(lock: &LockdepTracked<L, LP, LOCK_FLAGS>, state: &mut Self::GuardState) {
         #[cfg(feature = "lock_dep")]
-        // SAFETY: Caller guarantees `state` was initialized by `acquire` (with `LOCK_FLAGS`) and
-        // is currently held.
+        // SAFETY: Caller guarantees `state` holds a live, tracked entry (acquired with
+        // `LOCK_FLAGS`) for a lock currently held by the calling thread.
         unsafe {
             lockdep_untrack(&state.entry, LOCK_FLAGS);
         }
@@ -331,16 +376,54 @@ unsafe impl<
     }
 
     #[inline]
-    unsafe fn release(lock: &LockdepTracked<L, LP, LOCK_FLAGS>, state: &mut Self::GuardState) {
+    unsafe fn move_state(src: &mut Self::GuardState, dst: &mut Self::GuardState) {
         #[cfg(feature = "lock_dep")]
-        // SAFETY: The caller guarantees `state` matches the slot initialized in `acquire` (with
-        // `LOCK_FLAGS`) and that the current thread holds the lock.
+        // SAFETY: Caller guarantees `src` holds a live, tracked acquisition on the calling thread
+        // and `dst` is a distinct (`src` and `dst` are disjoint `&mut` references), valid pinned
+        // slot.
+        unsafe {
+            lockdep_move(&src.entry, &dst.entry);
+        }
+        // SAFETY: Caller upholds the `LockPolicy::move_state` contract.
+        unsafe {
+            P::move_state(&mut src.state, &mut dst.state);
+        }
+    }
+
+    #[inline]
+    unsafe fn release(lock: &LockdepTracked<L, LP, LOCK_FLAGS>, state: &mut Self::GuardState) {
+        // SAFETY: Caller upholds the `LockPolicy::release` contract, and `lock` is valid for the
+        // whole call.
+        unsafe { Self::release_raw(NonNull::from(lock), state) }
+    }
+
+    /// Does not access `*lock` after forwarding to `P::release_raw`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`LockPolicy::release_raw`], except that `*lock` only needs to remain valid for as
+    /// long as `P::release_raw` requires of the wrapped lock.
+    #[inline]
+    unsafe fn release_raw(
+        lock: NonNull<LockdepTracked<L, LP, LOCK_FLAGS>>,
+        state: &mut Self::GuardState,
+    ) {
+        #[cfg(feature = "lock_dep")]
+        // SAFETY: The caller guarantees `state` holds the active, tracked `GuardState` (from
+        // `acquire`, `try_acquire`, `reacquire`, or `move_state` with `LOCK_FLAGS`) and that the
+        // current thread holds the lock.
         unsafe {
             lockdep_release(&state.entry, LOCK_FLAGS);
         }
-        // SAFETY: Caller upholds the `LockPolicy::release` contract.
+        // SAFETY: `lock` is valid here, as the release has not been published yet. The wrapped
+        // lock is projected to by offsetting the pointer to the `lock` field, which stays within
+        // `*lock`, so no reference to `*lock` is formed, and `*lock` is not accessed again.
+        // Caller upholds the `LockPolicy::release_raw` contract.
         unsafe {
-            P::release(&lock.lock, &mut state.state);
+            let raw = lock
+                .byte_add(core::mem::offset_of!(LockdepTracked<L, LP, LOCK_FLAGS>, lock))
+                .cast::<L>();
+            P::release_raw(raw, &mut state.state);
         }
     }
 }
@@ -352,6 +435,15 @@ unsafe impl<
 // `TrackedCriticalMutex`).
 unsafe impl<L: RawLock, P: ExclusiveLockPolicy<L>, const LOCK_FLAGS: lockdep::LockFlags>
     ExclusiveLockPolicy<LockdepTracked<L, P, LOCK_FLAGS>> for LockdepTracked<L, P, LOCK_FLAGS>
+{
+}
+
+// SAFETY: `LockdepTracked::move_state` updates the entry's address in `ThreadLockState` via
+// `lockdep_move`, `lockdep_release` removes entries from `ThreadLockState` by pointer without
+// requiring LIFO order, and `P: AdoptableLockPolicy<L>` guarantees the inner policy is safe to
+// relocate and release out of LIFO order.
+unsafe impl<L: RawLock, P: AdoptableLockPolicy<L>, const LOCK_FLAGS: lockdep::LockFlags>
+    AdoptableLockPolicy<LockdepTracked<L, P, LOCK_FLAGS>> for LockdepTracked<L, P, LOCK_FLAGS>
 {
 }
 
@@ -440,9 +532,9 @@ unsafe impl<
         #[cfg(feature = "lock_dep")]
         {
             state.order = order;
-            // SAFETY: `lock` is initialized, `state.entry` is freshly `Default`-initialized per
-            // the `LockPolicy::acquire` contract, and the caller guarantees `state` is pinned on
-            // the stack for the duration of the lock hold.
+            // SAFETY: `lock` is initialized, `state.entry` holds no live entry per the
+            // `LockPolicy::acquire` contract, and the caller guarantees `state` stays pinned in
+            // place until released or moved.
             unsafe {
                 lockdep_acquire(lock, &state.entry, order, true);
             }
@@ -469,8 +561,8 @@ unsafe impl<
     ) {
         #[cfg(feature = "lock_dep")]
         // SAFETY: `lock` is initialized, `state.entry` was destroyed by the `release` that
-        // precedes a `reacquire`, and the caller guarantees `state` is pinned on the stack for
-        // the duration of the lock hold.
+        // precedes a `reacquire`, and the caller guarantees `state` stays pinned in place until
+        // released or moved.
         unsafe {
             lockdep_acquire(lock, &state.entry, state.order, true);
         }
@@ -483,8 +575,8 @@ unsafe impl<
     #[inline]
     unsafe fn untrack(lock: &LockdepTracked<L, LP, LOCK_FLAGS>, state: &mut Self::GuardState) {
         #[cfg(feature = "lock_dep")]
-        // SAFETY: Caller guarantees `state` was initialized by `acquire` (with `LOCK_FLAGS`) and
-        // is currently held.
+        // SAFETY: Caller guarantees `state` holds a live, tracked entry (acquired with
+        // `LOCK_FLAGS`) for a lock currently held by the calling thread.
         unsafe {
             lockdep_untrack(&state.entry, LOCK_FLAGS);
         }
@@ -509,16 +601,57 @@ unsafe impl<
     }
 
     #[inline]
-    unsafe fn release(lock: &LockdepTracked<L, LP, LOCK_FLAGS>, state: &mut Self::GuardState) {
+    unsafe fn move_state(src: &mut Self::GuardState, dst: &mut Self::GuardState) {
         #[cfg(feature = "lock_dep")]
-        // SAFETY: The caller guarantees `state` matches the slot initialized in `acquire` (with
-        // `LOCK_FLAGS`) and that the current thread holds the lock.
+        {
+            dst.order = core::mem::take(&mut src.order);
+            // SAFETY: Caller guarantees `src` holds a live, tracked acquisition on the calling
+            // thread and `dst` is a distinct (`src` and `dst` are disjoint `&mut` references),
+            // valid pinned slot.
+            unsafe {
+                lockdep_move(&src.entry, &dst.entry);
+            }
+        }
+        // SAFETY: Caller upholds the `LockPolicy::move_state` contract.
+        unsafe {
+            P::move_state(&mut src.state, &mut dst.state);
+        }
+    }
+
+    #[inline]
+    unsafe fn release(lock: &LockdepTracked<L, LP, LOCK_FLAGS>, state: &mut Self::GuardState) {
+        // SAFETY: Caller upholds the `LockPolicy::release` contract, and `lock` is valid for the
+        // whole call.
+        unsafe { Self::release_raw(NonNull::from(lock), state) }
+    }
+
+    /// Does not access `*lock` after forwarding to `P::release_raw`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`LockPolicy::release_raw`], except that `*lock` only needs to remain valid for as
+    /// long as `P::release_raw` requires of the wrapped lock.
+    #[inline]
+    unsafe fn release_raw(
+        lock: NonNull<LockdepTracked<L, LP, LOCK_FLAGS>>,
+        state: &mut Self::GuardState,
+    ) {
+        #[cfg(feature = "lock_dep")]
+        // SAFETY: The caller guarantees `state` holds the active, tracked `GuardState` (from
+        // `acquire`, `reacquire`, or `move_state` with `LOCK_FLAGS`) and that the current thread
+        // holds the lock.
         unsafe {
             lockdep_release(&state.entry, LOCK_FLAGS);
         }
-        // SAFETY: Caller upholds the `LockPolicy::release` contract.
+        // SAFETY: `lock` is valid here, as the release has not been published yet. The wrapped
+        // lock is projected to by offsetting the pointer to the `lock` field, which stays within
+        // `*lock`, so no reference to `*lock` is formed, and `*lock` is not accessed again.
+        // Caller upholds the `LockPolicy::release_raw` contract.
         unsafe {
-            P::release(&lock.lock, &mut state.state);
+            let raw = lock
+                .byte_add(core::mem::offset_of!(LockdepTracked<L, LP, LOCK_FLAGS>, lock))
+                .cast::<L>();
+            P::release_raw(raw, &mut state.state);
         }
     }
 }
@@ -534,6 +667,60 @@ unsafe impl<
 {
 }
 
+// SAFETY: `OrderedLockPolicy<P>::move_state` transfers `order` and updates the entry's address in
+// `ThreadLockState` via `lockdep_move`, `lockdep_release` removes entries without requiring LIFO
+// order, and `P: AdoptableLockPolicy<L>` guarantees the inner policy is safe to relocate and
+// release out of LIFO order.
+unsafe impl<
+    L: RawLock,
+    P: AdoptableLockPolicy<L, AcquireArgs = ()>,
+    LP: ExclusiveLockPolicy<L>,
+    const LOCK_FLAGS: lockdep::LockFlags,
+> AdoptableLockPolicy<LockdepTracked<L, LP, LOCK_FLAGS>> for OrderedLockPolicy<P>
+{
+}
+
+impl<L: RawLock, P: TryLockPolicy<L>, const LOCK_FLAGS: lockdep::LockFlags>
+    LockdepTracked<L, P, LOCK_FLAGS>
+{
+    #[doc(hidden)]
+    #[inline]
+    pub unsafe fn try_acquire_inner<LP: ExclusiveLockPolicy<L>>(
+        lock: &LockdepTracked<L, LP, LOCK_FLAGS>,
+        state: &mut LockdepTrackedGuardState<P::GuardState>,
+        args: P::AcquireArgs,
+    ) -> bool {
+        // SAFETY: Caller upholds the `TryLockPolicy::try_acquire` contract.
+        let acquired = unsafe { P::try_acquire(&lock.lock, &mut state.state, args) };
+        if acquired {
+            #[cfg(feature = "lock_dep")]
+            // SAFETY: `lock` is initialized, `state.entry` holds no live entry per the
+            // `TryLockPolicy::try_acquire` contract, and the caller guarantees `state` stays
+            // pinned in place until released or moved.
+            unsafe {
+                lockdep_acquire(lock, &state.entry, 0, false);
+            }
+        }
+        acquired
+    }
+}
+
+// SAFETY: `LockdepTracked` delegates non-blocking lock acquisition to `P` (which implements
+// `TryLockPolicy<L>`) and records lockdep acquisition only when `P::try_acquire` succeeds.
+// Requiring the target lock's default policy to match `P` mirrors `ExclusiveLockPolicy`.
+unsafe impl<L: RawLock, P: TryLockPolicy<L>, const LOCK_FLAGS: lockdep::LockFlags>
+    TryLockPolicy<LockdepTracked<L, P, LOCK_FLAGS>> for LockdepTracked<L, P, LOCK_FLAGS>
+{
+    #[inline]
+    unsafe fn try_acquire(
+        lock: &LockdepTracked<L, P, LOCK_FLAGS>,
+        state: &mut Self::GuardState,
+        args: Self::AcquireArgs,
+    ) -> bool {
+        // SAFETY: Caller upholds the `TryLockPolicy::try_acquire` contract.
+        unsafe { Self::try_acquire_inner(lock, state, args) }
+    }
+}
 /// Implements `LockPolicy<LockdepTracked<L, LP, LOCK_FLAGS>>` and
 /// `ExclusiveLockPolicy<LockdepTracked<L, LP, LOCK_FLAGS>>` for a concrete policy type `$policy`
 /// by delegating to `LockdepTracked<L, $policy, LOCK_FLAGS>`.
@@ -671,6 +858,16 @@ macro_rules! impl_lockdep_tracked_lock_policy {
             }
 
             #[inline]
+            unsafe fn move_state(src: &mut Self::GuardState, dst: &mut Self::GuardState) {
+                // SAFETY: Caller upholds the `LockPolicy::move_state` contract.
+                unsafe {
+                    <$crate::LockdepTracked<$l, $policy, LOCK_FLAGS> as $crate::LockPolicy<
+                        $crate::LockdepTracked<$l, $lp, LOCK_FLAGS>,
+                    >>::move_state(src, dst);
+                }
+            }
+
+            #[inline]
             unsafe fn release(
                 lock: &$crate::LockdepTracked<$l, $lp, LOCK_FLAGS>,
                 state: &mut Self::GuardState,
@@ -680,6 +877,24 @@ macro_rules! impl_lockdep_tracked_lock_policy {
                     <$crate::LockdepTracked<$l, $policy, LOCK_FLAGS> as $crate::LockPolicy<
                         $crate::LockdepTracked<$l, $lp, LOCK_FLAGS>,
                     >>::release(lock, state);
+                }
+            }
+
+            /// Forwards to the `release_raw` of the `LockdepTracked` policy this delegates to.
+            ///
+            /// # Safety
+            ///
+            /// As for that `release_raw`.
+            #[inline]
+            unsafe fn release_raw(
+                lock: ::core::ptr::NonNull<$crate::LockdepTracked<$l, $lp, LOCK_FLAGS>>,
+                state: &mut Self::GuardState,
+            ) {
+                // SAFETY: Caller upholds the `LockPolicy::release_raw` contract.
+                unsafe {
+                    <$crate::LockdepTracked<$l, $policy, LOCK_FLAGS> as $crate::LockPolicy<
+                        $crate::LockdepTracked<$l, $lp, LOCK_FLAGS>,
+                    >>::release_raw(lock, state);
                 }
             }
         }
@@ -692,11 +907,46 @@ macro_rules! impl_lockdep_tracked_lock_policy {
             $policy: $crate::ExclusiveLockPolicy<$l>,
         {
         }
+
+        // SAFETY: Delegates `move_state` and `release` to `LockdepTracked<$l, $policy,
+        // LOCK_FLAGS>`, and `$policy: AdoptableLockPolicy<$l>` guarantees relocating and
+        // non-LIFO release on the acquiring thread is sound.
+        unsafe impl<$($generics)* const LOCK_FLAGS: $crate::LockFlags>
+            $crate::AdoptableLockPolicy<$crate::LockdepTracked<$l, $lp, LOCK_FLAGS>> for $policy
+        where
+            $policy: $crate::AdoptableLockPolicy<$l>,
+        {
+        }
     };
     ($policy:ty $(,)?) => {
         $crate::impl_lockdep_tracked_lock_policy!(
             @impl $policy, [L: $crate::RawLock, LP: $crate::ExclusiveLockPolicy<L>,], L, LP
         );
+
+        // SAFETY: Delegates to `LockdepTracked<L, $policy, LOCK_FLAGS>`, and `$policy` guarantees
+        // exclusive mutual exclusion on `L` when `try_acquire` returns `true`.
+        unsafe impl<
+            L: $crate::RawLock,
+            LP: $crate::ExclusiveLockPolicy<L>,
+            const LOCK_FLAGS: $crate::LockFlags,
+        > $crate::TryLockPolicy<$crate::LockdepTracked<L, LP, LOCK_FLAGS>> for $policy
+        where
+            $policy: $crate::TryLockPolicy<L>,
+        {
+            #[inline]
+            unsafe fn try_acquire(
+                lock: &$crate::LockdepTracked<L, LP, LOCK_FLAGS>,
+                state: &mut Self::GuardState,
+                args: Self::AcquireArgs,
+            ) -> bool {
+                // SAFETY: Caller upholds the `TryLockPolicy::try_acquire` contract.
+                unsafe {
+                    <$crate::LockdepTracked<L, $policy, LOCK_FLAGS>>::try_acquire_inner(
+                        lock, state, args,
+                    )
+                }
+            }
+        }
     };
     ($policy:ty, $lock:ty, $default_policy:ty $(,)?) => {
         $crate::impl_lockdep_tracked_lock_policy!(

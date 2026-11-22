@@ -159,6 +159,34 @@ class ResolveSkillsTest(unittest.TestCase):
     def test_entries_without_skills_add_nothing(self):
         self.assertEqual(_resolve(["docs/README.yaml"]), {})
 
+    def test_manual_automatic_false_entry_is_skipped(self):
+        cfg = (
+            CONFIG
+            + r"""
+configs: {
+  id: "manual-simplify"
+  automatic: false
+  skills: "code-simplification"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: ".*\\.rs"
+  }
+}
+"""
+        )
+        resolved = {
+            r["skill_path"]: r["files"]
+            for r in resolve_skills.resolve(cfg, ["src/lib/foo.rs"], ROOT)
+        }
+        self.assertEqual(
+            resolved,
+            {
+                "/repo/.agents/skills/rust_best_practices/SKILL.md": [
+                    "src/lib/foo.rs"
+                ]
+            },
+        )
+
     def test_exclude_filters(self):
         # Like CRACS, a file matching any exclude_filters block is dropped.
         self.assertEqual(
@@ -301,6 +329,324 @@ class ResolveSkillsTest(unittest.TestCase):
             "src/devices/skills/devicetree_schema/SKILL.md",
         ):
             self.assertEqual(resolved.get(skill), sorted(dts_files))
+        rs_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text, ["src/lib/foo.rs"], root, project="fuchsia"
+            )
+        }
+        self.assertNotIn(
+            ".agents/skills/code-simplification/SKILL.md", rs_resolved
+        )
+        bazel_files = [
+            "BUILD.bazel",
+            "src/connectivity/bluetooth/BUILD.bazel",
+            "build/bazel/rules/cc/fx_cc_library.bzl",
+            "build/bazel/bazel_sdk/rules.bzl",
+            "src/foo/helper.bzl",
+            "build/bazel_sdk/fuchsia_rules_common/bind/providers.bzl",
+            "build/bazel_sdk/bazel_rules_fuchsia/fuchsia/defs.bzl",
+            "build/bazel_sdk/bazel_rules_fuchsia/fuchsia/workspace/"
+            "sdk_templates/package.BUILD.template",
+            "third_party/rust_crates/BUILD.bazel",
+            "third_party/mini_chromium/buildflags.bzl",
+            "third_party/bazel_vendor/rules_cc/BUILD.bazel",
+            "third_party/bazel_registries/bcr/defs.bzl",
+            "third_party/rust_crates/vendor/serde/BUILD.bazel",
+            "third_party/rust_crates/empty/foo/BUILD.bazel",
+            "third_party/boringssl/BUILD.generated.bzl",
+            "third_party/foo/src/defs.bzl",
+        ]
+        bazel_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text, bazel_files, root, project="fuchsia"
+            )
+        }
+        self.assertEqual(
+            bazel_resolved.get(
+                "build/bazel/.agents/skills/fuchsia-bazel-guidelines/SKILL.md"
+            ),
+            [
+                "BUILD.bazel",
+                "build/bazel/bazel_sdk/rules.bzl",
+                "build/bazel/rules/cc/fx_cc_library.bzl",
+                "src/connectivity/bluetooth/BUILD.bazel",
+                "src/foo/helper.bzl",
+                "third_party/mini_chromium/buildflags.bzl",
+                "third_party/rust_crates/BUILD.bazel",
+            ],
+        )
+        self.assertEqual(
+            bazel_resolved.get(
+                "build/bazel/.agents/skills/"
+                "fuchsia-bzl-file-guidelines/SKILL.md"
+            ),
+            [
+                "build/bazel/bazel_sdk/rules.bzl",
+                "build/bazel/rules/cc/fx_cc_library.bzl",
+                "src/foo/helper.bzl",
+                "third_party/mini_chromium/buildflags.bzl",
+            ],
+        )
+        self.assertEqual(
+            bazel_resolved.get(
+                "build/bazel/rules/.agents/skills/"
+                "fuchsia-bazel-rules-and-macros-guidelines/SKILL.md"
+            ),
+            [
+                "build/bazel/bazel_sdk/rules.bzl",
+                "build/bazel/rules/cc/fx_cc_library.bzl",
+                "build/bazel_sdk/fuchsia_rules_common/bind/providers.bzl",
+                "src/foo/helper.bzl",
+                "third_party/mini_chromium/buildflags.bzl",
+            ],
+        )
+        self.assertEqual(
+            bazel_resolved.get(
+                "build/bazel_sdk/.agents/skills/"
+                "fuchsia-bazel-sdk-guidelines/SKILL.md"
+            ),
+            [
+                "build/bazel_sdk/bazel_rules_fuchsia/fuchsia/defs.bzl",
+                "build/bazel_sdk/bazel_rules_fuchsia/fuchsia/workspace/"
+                "sdk_templates/package.BUILD.template",
+                "build/bazel_sdk/fuchsia_rules_common/bind/providers.bzl",
+            ],
+        )
+        for rel_skill in bazel_resolved:
+            self.assertFalse(
+                os.path.islink(os.path.join(root, rel_skill)),
+                msg=f"CRACS skill path must not be a symlink: {rel_skill}",
+            )
+            self.assertTrue(
+                os.path.isfile(os.path.join(root, rel_skill)),
+                msg=f"missing resolved skill: {rel_skill}",
+            )
+        vendor_bazel_resolved = resolve_skills.resolve(
+            text, bazel_files, root, project="vendor/google"
+        )
+        self.assertEqual(vendor_bazel_resolved, [])
+
+        wlan_fuchsia_files = [
+            "sdk/fidl/fuchsia.wlan.device.service/service.fidl",
+            "src/connectivity/wlan/FIDL.md",
+            "src/connectivity/wlan/BUILD.bazel",
+            "src/connectivity/wlan/wlancfg/src/main.rs",
+            "src/connectivity/wlan/drivers/third_party/intel/iwlwifi/mvm/mac.c",
+            "src/connectivity/wlan/tests/core/BUILD.gn",
+            "src/connectivity/wlan/tests/core/ConnectToApTest.py",
+            "src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/"
+            "wlan/wlan_policy/wlan_policy.py",
+            "src/testing/end_to_end/mobly_base_tests/fuchsia_wlan_base_test/"
+            "__init__.py",
+            "src/testing/end_to_end/mobly_controller/legacy_access_point/"
+            "access_point.py",
+        ]
+        wlan_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text, wlan_fuchsia_files, root, project="fuchsia"
+            )
+        }
+        self.assertEqual(
+            wlan_resolved.get(
+                "src/connectivity/wlan/.agents/skills/wlan-review-api/SKILL.md"
+            ),
+            [
+                "sdk/fidl/fuchsia.wlan.device.service/service.fidl",
+                "src/connectivity/wlan/FIDL.md",
+            ],
+        )
+        self.assertEqual(
+            wlan_resolved.get(
+                "src/connectivity/wlan/.agents/skills/"
+                "wlan-review-stack/SKILL.md"
+            ),
+            [
+                "src/connectivity/wlan/BUILD.bazel",
+                "src/connectivity/wlan/drivers/third_party/intel/iwlwifi/"
+                "mvm/mac.c",
+                "src/connectivity/wlan/wlancfg/src/main.rs",
+            ],
+        )
+        self.assertEqual(
+            wlan_resolved.get(
+                "src/connectivity/wlan/.agents/skills/wlan-review-e2e/SKILL.md"
+            ),
+            [
+                "src/connectivity/wlan/tests/core/BUILD.gn",
+                "src/connectivity/wlan/tests/core/ConnectToApTest.py",
+                "src/testing/end_to_end/honeydew/honeydew/affordances/"
+                "connectivity/wlan/wlan_policy/wlan_policy.py",
+                "src/testing/end_to_end/mobly_base_tests/"
+                "fuchsia_wlan_base_test/__init__.py",
+                "src/testing/end_to_end/mobly_controller/legacy_access_point/"
+                "access_point.py",
+            ],
+        )
+        vendor_wlan_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text,
+                ["tests/end_to_end/wlan/base_functional_test.py"],
+                root,
+                project="vendor/google",
+            )
+        }
+        self.assertEqual(
+            vendor_wlan_resolved.get(
+                "src/connectivity/wlan/.agents/skills/wlan-review-e2e/SKILL.md"
+            ),
+            ["tests/end_to_end/wlan/base_functional_test.py"],
+        )
+
+        wlan_simplify_skill = (
+            "src/connectivity/wlan/.agents/skills/"
+            "wlan-review-simplification/SKILL.md"
+        )
+        wlan_simplify_files = [
+            "sdk/fidl/fuchsia.wlan.device.service/service.fidl",
+            "src/connectivity/wlan/BUILD.bazel",
+            "src/connectivity/wlan/.agents/skills/wlan-e2e-test-promotion/"
+            "scripts/promote_e2e_tests.py",
+            "src/connectivity/wlan/drivers/third_party/intel/iwlwifi/mvm/mac.c",
+            "src/connectivity/wlan/drivers/wlansoftmac/rust_driver/src/lib.rs",
+            "src/connectivity/wlan/lib/sme/src/lib.rs",
+            "src/connectivity/wlan/tests/core/BUILD.gn",
+            "src/connectivity/wlan/tests/core/ConnectToApTest.py",
+            "src/connectivity/wlan/wlancfg/meta/wlancfg.cml",
+            "src/connectivity/wlan/wlancfg/src/main.rs",
+            "src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/"
+            "netstack/netstack.py",
+            "src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/"
+            "wlan/wlan_policy/wlan_policy.py",
+            "src/testing/end_to_end/mobly_base_tests/fuchsia_wlan_base_test/"
+            "__init__.py",
+            "src/testing/end_to_end/mobly_controller/legacy_access_point/"
+            "access_point.py",
+            "src/testing/end_to_end/mobly_controller/openwrt_access_point/"
+            "__init__.py",
+        ]
+        wlan_simplify_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text, wlan_simplify_files, root, project="fuchsia"
+            )
+        }
+        self.assertEqual(
+            wlan_simplify_resolved.get(wlan_simplify_skill),
+            [
+                "src/connectivity/wlan/drivers/wlansoftmac/rust_driver/src/"
+                "lib.rs",
+                "src/connectivity/wlan/lib/sme/src/lib.rs",
+                "src/connectivity/wlan/tests/core/ConnectToApTest.py",
+                "src/connectivity/wlan/wlancfg/src/main.rs",
+                "src/testing/end_to_end/honeydew/honeydew/affordances/"
+                "connectivity/wlan/wlan_policy/wlan_policy.py",
+                "src/testing/end_to_end/mobly_base_tests/"
+                "fuchsia_wlan_base_test/__init__.py",
+                "src/testing/end_to_end/mobly_controller/legacy_access_point/"
+                "access_point.py",
+                "src/testing/end_to_end/mobly_controller/openwrt_access_point/"
+                "__init__.py",
+            ],
+        )
+        self.assertFalse(
+            os.path.islink(os.path.join(root, wlan_simplify_skill)),
+            msg=f"CRACS skill path must not be a symlink: {wlan_simplify_skill}",
+        )
+        self.assertTrue(
+            os.path.isfile(os.path.join(root, wlan_simplify_skill)),
+            msg=f"missing resolved skill: {wlan_simplify_skill}",
+        )
+        vendor_wlan_simplify_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text,
+                [
+                    "drivers/wlan/broadcom/bcmdhd/src/driver.cc",
+                    "tests/end_to_end/wlan/BUILD.gn",
+                    "tests/end_to_end/wlan/base_functional_test.py",
+                ],
+                root,
+                project="vendor/google",
+            )
+        }
+        self.assertEqual(
+            vendor_wlan_simplify_resolved.get(wlan_simplify_skill),
+            ["tests/end_to_end/wlan/base_functional_test.py"],
+        )
+
+        wlan_commit_msg_skill = (
+            "src/connectivity/wlan/.agents/skills/"
+            "wlan-review-commit-message/SKILL.md"
+        )
+        self.assertEqual(
+            wlan_simplify_resolved.get(wlan_commit_msg_skill),
+            [
+                "sdk/fidl/fuchsia.wlan.device.service/service.fidl",
+                "src/connectivity/wlan/.agents/skills/wlan-e2e-test-promotion/"
+                "scripts/promote_e2e_tests.py",
+                "src/connectivity/wlan/BUILD.bazel",
+                "src/connectivity/wlan/drivers/third_party/intel/iwlwifi/mvm/"
+                "mac.c",
+                "src/connectivity/wlan/drivers/wlansoftmac/rust_driver/src/"
+                "lib.rs",
+                "src/connectivity/wlan/lib/sme/src/lib.rs",
+                "src/connectivity/wlan/tests/core/BUILD.gn",
+                "src/connectivity/wlan/tests/core/ConnectToApTest.py",
+                "src/connectivity/wlan/wlancfg/meta/wlancfg.cml",
+                "src/connectivity/wlan/wlancfg/src/main.rs",
+                "src/testing/end_to_end/honeydew/honeydew/affordances/"
+                "connectivity/wlan/wlan_policy/wlan_policy.py",
+                "src/testing/end_to_end/mobly_base_tests/"
+                "fuchsia_wlan_base_test/__init__.py",
+                "src/testing/end_to_end/mobly_controller/legacy_access_point/"
+                "access_point.py",
+                "src/testing/end_to_end/mobly_controller/openwrt_access_point/"
+                "__init__.py",
+            ],
+        )
+        self.assertFalse(
+            os.path.islink(os.path.join(root, wlan_commit_msg_skill)),
+            msg=f"CRACS skill path must not be a symlink: {wlan_commit_msg_skill}",
+        )
+        self.assertTrue(
+            os.path.isfile(os.path.join(root, wlan_commit_msg_skill)),
+            msg=f"missing resolved skill: {wlan_commit_msg_skill}",
+        )
+        vendor_wlan_commit_msg_resolved = {
+            os.path.relpath(r["skill_path"], root): r["files"]
+            for r in resolve_skills.resolve(
+                text,
+                [
+                    "bundles/buildbot/wlan/BUILD.gn",
+                    "connectivity/wlan/BUILD.gn",
+                    "drivers/wlan/broadcom/bcmdhd/src/driver.cc",
+                    "iris/modem/src/lib.rs",
+                    "starnix/android/hal/bluetooth/src/main.rs",
+                    "starnix/android/hal/wifi_aidl/src/main.rs",
+                    "starnix/android/hal/wifi_supplicant_aidl/src/main.rs",
+                    "tests/end_to_end/wlan/BUILD.gn",
+                    "tests/end_to_end/wlan/base_functional_test.py",
+                ],
+                root,
+                project="vendor/google",
+            )
+        }
+        self.assertEqual(
+            vendor_wlan_commit_msg_resolved.get(wlan_commit_msg_skill),
+            [
+                "bundles/buildbot/wlan/BUILD.gn",
+                "connectivity/wlan/BUILD.gn",
+                "drivers/wlan/broadcom/bcmdhd/src/driver.cc",
+                "starnix/android/hal/wifi_aidl/src/main.rs",
+                "starnix/android/hal/wifi_supplicant_aidl/src/main.rs",
+                "tests/end_to_end/wlan/BUILD.gn",
+                "tests/end_to_end/wlan/base_functional_test.py",
+            ],
+        )
 
     def test_filter_skipped_files_defaults_and_custom(self):
         retained, skipped = resolve_skills.filter_skipped_files(

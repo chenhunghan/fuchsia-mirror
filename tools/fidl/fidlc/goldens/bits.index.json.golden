@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/bits.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/bits.test.fidl",
       "data": "test.bits",
       "start_offset": 36,
       "end_offset": 45

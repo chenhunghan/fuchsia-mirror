@@ -203,6 +203,7 @@ class ResolvedBuildArgsFlags:
     lib_dirs: list[str]
     rustflags: list[str]
     rustenv: list[str]
+    extra_cpp_link_flags: list[str] = dataclasses.field(default_factory=list)
 
     @property
     def include_flags(self) -> list[str]:
@@ -225,10 +226,11 @@ class ResolvedBuildArgsFlags:
             result.extend(self.cflags_c)
         elif kind == ACTION_KIND_RUST_COMPILE:
             result.extend(self.rustflags)
-            result.extend([f"-Lnative={lib_dir}" for lib_dir in self.lib_dirs])
+            result.extend(f"-Lnative={lib_dir}" for lib_dir in self.lib_dirs)
         elif kind == ACTION_KIND_CPP_LINK:
-            result.extend([f"-Wl,-L{lib_dir}" for lib_dir in self.lib_dirs])
+            result.extend(f"-L{lib_dir}" for lib_dir in self.lib_dirs)
             result.extend(self.ldflags)
+            result.extend(self.extra_cpp_link_flags)
         else:
             raise AssertionError(f"Unknown action kind: {kind}")
         return result
@@ -246,6 +248,7 @@ class ResolvedBuildArgsFlags:
             lib_dirs=data.get("lib_dirs", []),
             rustflags=data.get("rustflags", []),
             rustenv=data.get("rustenv", []),
+            extra_cpp_link_flags=data.get("extra_cpp_link_flags", []),
         )
 
 

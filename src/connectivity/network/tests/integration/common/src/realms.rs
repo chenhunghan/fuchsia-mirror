@@ -208,18 +208,14 @@ pub mod constants {
     }
     pub mod netcfg {
         pub const COMPONENT_NAME: &str = "netcfg";
-        pub const COMPONENT_URL: &str = "#meta/netcfg.cm";
+        pub const COMPONENT_URL: &str = "netcfg#meta/netcfg.cm";
         pub mod fake {
-            pub const COMPONENT_URL: &str = "#meta/fake_netcfg.cm";
+            pub const COMPONENT_URL: &str = "fake-netcfg#meta/fake_netcfg.cm";
         }
-        // These capability names and filepaths should match the devfs capabilities used by netcfg
-        // in its component manifest, i.e. netcfg.cml.
-        pub const DEV_CLASS_NETWORK: &str = "dev-class-network";
-        pub const CLASS_NETWORK_PATH: &str = "class/network";
     }
     pub mod socket_proxy {
         pub const COMPONENT_NAME: &str = "network-socket-proxy";
-        pub const COMPONENT_URL: &str = "#meta/network-socket-proxy.cm";
+        pub const COMPONENT_URL: &str = "network-socket-proxy#meta/network-socket-proxy.cm";
     }
     pub mod secure_stash {
         pub const COMPONENT_NAME: &str = "stash_secure";
@@ -235,19 +231,20 @@ pub mod constants {
     }
     pub mod dhcpv6_client {
         pub const COMPONENT_NAME: &str = "dhcpv6-client";
-        pub const COMPONENT_URL: &str = "#meta/dhcpv6-client.cm";
+        pub const COMPONENT_URL: &str = "dhcpv6-client#meta/dhcpv6-client.cm";
     }
     pub mod dns_resolver {
         pub const COMPONENT_NAME: &str = "dns_resolver";
-        pub const COMPONENT_URL: &str = "#meta/dns_resolver_with_fake_time.cm";
+        pub const COMPONENT_URL: &str =
+            "dns-resolver-with-fake-time#meta/dns_resolver_with_fake_time.cm";
     }
     pub mod reachability {
         pub const COMPONENT_NAME: &str = "reachability";
-        pub const COMPONENT_URL: &str = "#meta/reachability_with_fake_time.cm";
+        pub const COMPONENT_URL: &str = "reachability#meta/reachability_with_fake_time.cm";
     }
     pub mod network_test_realm {
         pub const COMPONENT_NAME: &str = "controller";
-        pub const COMPONENT_URL: &str = "#meta/controller.cm";
+        pub const COMPONENT_URL: &str = "network-test-realm#meta/controller.cm";
     }
     pub mod fake_clock {
         pub const COMPONENT_NAME: &str = "fake_clock";
@@ -255,7 +252,7 @@ pub mod constants {
     }
     pub mod fake_socket_proxy {
         pub const COMPONENT_NAME: &str = "fake_socket_proxy";
-        pub const COMPONENT_URL: &str = "#meta/fake_socket_proxy.cm";
+        pub const COMPONENT_URL: &str = "fake_socket_proxy#meta/fake_socket_proxy.cm";
     }
 }
 
@@ -320,7 +317,7 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                 },
                 ..Default::default()
             },
-            KnownServiceProvider::Manager { use_dhcp_server, config, socket_proxy_type: _ } => {
+            KnownServiceProvider::Manager { use_dhcp_server, config, socket_proxy_type } => {
                 let enable_dhcpv6 = match config {
                     ManagerConfig::Dhcpv6 => true,
                     ManagerConfig::Forwarding
@@ -341,12 +338,16 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                     source: Some(fnetemul::ChildSource::Component(
                         constants::netcfg::COMPONENT_URL.to_string(),
                     )),
-                    program_args: Some(
-                        ["--min-severity", "DEBUG", "--config-data", config.as_str()]
-                            .into_iter()
-                            .map(Into::into)
-                            .collect(),
-                    ),
+                    config_values: Some(vec![
+                        fnetemul::ChildConfigValue {
+                            capability: "fuchsia.netcfg.MinSeverity".to_string(),
+                            value: cm_rust::ConfigValue::from("DEBUG").native_into_fidl(),
+                        },
+                        fnetemul::ChildConfigValue {
+                            capability: "fuchsia.netcfg.ConfigData".to_string(),
+                            value: cm_rust::ConfigValue::from(config.as_str()).native_into_fidl(),
+                        },
+                    ]),
                     exposes: Some(
                         [
                             fnet_dhcpv6::PrefixProviderMarker::PROTOCOL_NAME,
@@ -373,6 +374,12 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                             or_void_protocol_dep::<fnet_dhcpv6::ClientProviderMarker>(
                                 constants::dhcpv6_client::COMPONENT_NAME,
                                 enable_dhcpv6,
+                            ),
+                        )))
+                        .chain(std::iter::once(fnetemul::Capability::ChildDep(
+                            or_void_protocol_dep::<fposix_socket::ProviderMarker>(
+                                constants::netstack::COMPONENT_NAME,
+                                matches!(socket_proxy_type, SocketProxyType::None),
                             ),
                         )))
                         .chain(
@@ -427,6 +434,11 @@ impl<'a> From<&'a KnownServiceProvider> for fnetemul::ChildDef {
                                     fnet_ndp::RouterAdvertisementOptionWatcherProviderMarker,
                                 >(
                                     constants::netstack::COMPONENT_NAME,
+                                )),
+                                fnetemul::Capability::ChildDep(protocol_dep::<
+                                    fidl_fuchsia_driver_token::NodeBusTopologyMarker,
+                                >(
+                                    fnetemul::NETEMUL_SERVICES_COMPONENT_NAME,
                                 )),
                                 fnetemul::Capability::ChildDep(fnetemul::ChildDep {
                                     name: Some(

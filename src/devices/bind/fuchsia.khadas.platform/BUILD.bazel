@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.khadas.platform",
+    src = "fuchsia.khadas.platform.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = [
+        "//sdk:__pkg__",
+        "//src/devices/board/drivers/vim3-devicetree:__pkg__",
+        "//src/devices/board/drivers/vim3-dml:__pkg__",
+        "//src/devices/mcu/drivers/vim3-mcu:__pkg__",
+    ],
+)

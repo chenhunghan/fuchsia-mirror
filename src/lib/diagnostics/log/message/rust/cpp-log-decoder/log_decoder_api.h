@@ -4,7 +4,7 @@
 
 #ifndef SRC_LIB_DIAGNOSTICS_LOG_MESSAGE_RUST_CPP_LOG_DECODER_LOG_DECODER_API_H_
 #define SRC_LIB_DIAGNOSTICS_LOG_MESSAGE_RUST_CPP_LOG_DECODER_LOG_DECODER_API_H_
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 
 #include <string>
@@ -15,11 +15,11 @@
 
 namespace log_decoder {
 
-/// Converts a decoded FFI `LogMessage` into a FIDL `fuchsia::logger::LogMessage`.
+/// Converts a decoded FFI `LogMessage` into a FIDL `fuchsia_logger::LogMessage`.
 ///
 /// Converts timestamps, tags, severity, dropped log counts, and formats the message
 /// along with any key-value pairs (`"[file(line)] message key=value ..."`).
-fpromise::result<fuchsia::logger::LogMessage, std::string> ToFidlLogMessage(
+fpromise::result<fuchsia_logger::LogMessage, std::string> ToFidlLogMessage(
     const LogMessage& message);
 
 }  // namespace log_decoder

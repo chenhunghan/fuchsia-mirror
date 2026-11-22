@@ -168,7 +168,7 @@ template("_flex_crate") {
   generate_output_name = "${target_gen_dir}/${original_crate_name}_flex.rs"
 
   generated_file(generate_target_name) {
-    contents = "pub use ${original_crate_name}::*;"
+    contents = "#![allow(unused_imports)] pub use ${original_crate_name}::*;"
     outputs = [ generate_output_name ]
     forward_variables_from(invoker,
                            [

@@ -6,6 +6,8 @@
 
 use crate::arch_rs::ints_disabled;
 use crate::counters::define_kcounter;
+use crate::crypto::global_prng;
+use crate::instrumentation::asan::ASAN_PMM_FREE_MAGIC;
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::{AutounsignalEvent, Event};
 use crate::kernel::scheduler::peek_active_mask;
@@ -18,6 +20,7 @@ use crate::vm::evictor::Evictor;
 use crate::vm::page::{VmPage, VmPageDoublyLinkedList, VmPagePtr};
 use crate::vm::page_queues::PageQueues;
 use crate::vm::page_state::VmPageState;
+#[cfg(sanitize = "address")]
 use crate::vm::physmap::paddr_to_physmap;
 use crate::vm::pmm_arena::{PmmArena, PmmArenaInfo, PmmStateCount, print_page_state_counts};
 use crate::vm::pmm_checker::{CheckFailAction, PmmChecker};
@@ -40,10 +43,6 @@ const LOCAL_TRACE: u32 = 0;
 // TODO(https://fxbug.dev/549318457): Replace the C library `rand_r` with an RNG from the standard
 // `rand` crate and remove this definition.
 const RAND_MAX: core::ffi::c_int = 0x7fff_ffff;
-
-// TODO(https://fxbug.dev/521834554): Replicating the C++ version of this constant here until a
-// Rust instrumentation is supported.
-const ASAN_PMM_FREE_MAGIC: u8 = 0xfb;
 
 define_kcounter!(PMM_ALLOC_FAILED, "vm.pmm.alloc.failed", Sum);
 define_kcounter!(PMM_ALLOC_DELAYED, "vm.pmm.alloc.delayed", Sum);
@@ -226,29 +225,62 @@ impl PinnedDrop for FreeLoanedPagesHolder {
 }
 
 unsafe extern "C" {
-    fn asan_poison_shadow(address: usize, size: usize, value: u8);
-    fn asan_unpoison_shadow(address: usize, size: usize);
     fn rand_r(seed: *mut usize) -> core::ffi::c_int;
-    fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
 }
 
-fn asan_poison_page(page: &VmPage, value: u8) {
-    if cfg!(sanitize = "address") {
-        // SAFETY: FFI call to C++ asan shim.
-        unsafe {
-            asan_poison_shadow(paddr_to_physmap(page.paddr()).0, page::SIZE, value);
-        }
+/// Poisons the KASAN shadow memory covering `page` with `value`.
+///
+/// # Safety
+///
+/// `page` must be a valid PMM arena page mapped in the physmap and backed by writable KASAN shadow
+/// memory, and `value` must be a valid KASAN poison value (`>= ASAN_SMALLEST_POISONED_VALUE`).
+#[cfg(sanitize = "address")]
+unsafe fn asan_poison_page(page: &VmPage, value: u8) {
+    // SAFETY: Caller guarantees `page` is a valid PMM arena page mapped in the physmap and backed
+    // by writable KASAN shadow memory, and `value >= ASAN_SMALLEST_POISONED_VALUE`.
+    unsafe {
+        crate::instrumentation::asan::asan_poison_shadow(
+            paddr_to_physmap(page.paddr()).0,
+            page::SIZE,
+            value,
+        );
     }
 }
 
-fn asan_unpoison_page(page: &VmPage) {
-    if cfg!(sanitize = "address") {
-        // SAFETY: FFI call to C++ asan shim.
-        unsafe {
-            asan_unpoison_shadow(paddr_to_physmap(page.paddr()).0, page::SIZE);
-        }
+/// No-op when KASAN is disabled.
+///
+/// # Safety
+///
+/// `page` must be a valid PMM arena page mapped in the physmap and `value` must be a valid KASAN
+/// poison value.
+#[cfg(not(sanitize = "address"))]
+unsafe fn asan_poison_page(_page: &VmPage, _value: u8) {}
+
+/// Unpoisons the KASAN shadow memory covering `page`.
+///
+/// # Safety
+///
+/// `page` must be a valid PMM arena page mapped in the physmap and backed by writable KASAN shadow
+/// memory.
+#[cfg(sanitize = "address")]
+unsafe fn asan_unpoison_page(page: &VmPage) {
+    // SAFETY: Caller guarantees `page` is a valid PMM arena page mapped in the physmap and backed
+    // by writable KASAN shadow memory.
+    unsafe {
+        crate::instrumentation::asan::asan_unpoison_shadow(
+            paddr_to_physmap(page.paddr()).0,
+            page::SIZE,
+        );
     }
 }
+
+/// No-op when KASAN is disabled.
+///
+/// # Safety
+///
+/// `page` must be a valid PMM arena page mapped in the physmap.
+#[cfg(not(sanitize = "address"))]
+unsafe fn asan_unpoison_page(_page: &VmPage) {}
 
 // LINT.IfChange(is_phys_vmo_type)
 /// Whether the given type represents physical memory that should be turned into a VMO.
@@ -2217,13 +2249,10 @@ impl PmmNode {
         if cfg!(debug_assertions) {
             ksync::lock!(let mut guard = self.lock.lock());
             let token = guard.as_mut().token_mut();
-            // SAFETY: cpp_global_prng_draw writes size bytes into buffer.
-            unsafe {
-                cpp_global_prng_draw(
-                    (self.random_should_wait_seed.get_mut(token) as *mut usize).cast(),
-                    core::mem::size_of::<usize>(),
-                );
-            }
+            let mut seed = [0u8; core::mem::size_of::<usize>()];
+            global_prng::draw(&mut seed);
+            // SAFETY: `token` belongs to `self.lock`, which guards `random_should_wait_seed`.
+            *unsafe { self.random_should_wait_seed.get_mut(token) } = usize::from_ne_bytes(seed);
         }
     }
 
@@ -2297,12 +2326,22 @@ impl PmmNode {
         // SAFETY: free_token proves lock is held.
         let free_list = unsafe { self.free_list.get_mut(free_token) };
         for page in free_list.iter() {
-            asan_poison_page(page, ASAN_PMM_FREE_MAGIC);
+            // SAFETY: Every page on `free_list` is a valid PMM arena page mapped in the physmap
+            // and backed by writable KASAN shadow memory, and `ASAN_PMM_FREE_MAGIC` is a valid
+            // KASAN poison value.
+            unsafe {
+                asan_poison_page(page, ASAN_PMM_FREE_MAGIC);
+            }
         }
         // SAFETY: loaned_token proves lock is held.
         let free_loaned_list = unsafe { self.free_loaned_list.get_mut(loaned_token) };
         for page in free_loaned_list.iter() {
-            asan_poison_page(page, ASAN_PMM_FREE_MAGIC);
+            // SAFETY: Every page on `free_loaned_list` is a valid PMM arena page mapped in the
+            // physmap and backed by writable KASAN shadow memory, and `ASAN_PMM_FREE_MAGIC` is a
+            // valid KASAN poison value.
+            unsafe {
+                asan_poison_page(page, ASAN_PMM_FREE_MAGIC);
+            }
         }
     }
 
@@ -2708,17 +2747,6 @@ unsafe extern "C" fn rust_pmm_node_index_to_page(
     unsafe { node.index_to_page(index) }.as_ffi()
 }
 
-/// FFI wrapper for [`PmmNode::index_to_paddr`]; see `PmmNode::IndexToPaddr()`.
-///
-/// # Safety
-///
-/// `index` must be a non-zero value previously returned by [`rust_pmm_node_page_to_index`].
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_pmm_node_index_to_paddr(node: &PmmNode, index: u32) -> zx_paddr_t {
-    // SAFETY: The caller guarantees `index` is a non-zero value returned by `page_to_index`.
-    unsafe { node.index_to_paddr(index) }.0
-}
-
 /// FFI wrapper for [`PmmNode::page_queues`]; see `PmmNode::GetPageQueues()`.
 #[unsafe(no_mangle)]
 extern "C" fn rust_pmm_node_get_page_queues(node: &PmmNode) -> *mut PageQueues {
@@ -2883,8 +2911,8 @@ mod pmm_node_rust {
     use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
     use pin_init::{stack_pin_init, stack_try_pin_init};
     use unittest::{
-        assert_gt, assert_ne, assert_ok, assert_true, expect_eq, expect_false, expect_ne,
-        expect_ok, expect_true, unwrap_ok,
+        assert_gt, assert_ok, assert_true, expect_eq, expect_false, expect_ne, expect_ok,
+        expect_true, unwrap_ok,
     };
     use zx_status::Status;
 
@@ -4018,13 +4046,14 @@ mod pmm_node_rust {
     /// Verifies that kasan poisons freed PMM pages and unpoisons allocated pages.
     #[test]
     fn kasan_detects_use_after_free() {
-        unsafe extern "C" {
-            fn asan_region_is_poisoned(address: usize, size: usize) -> usize;
-            fn asan_entire_region_is_poisoned(address: usize, size: usize) -> bool;
-        }
-
         // TODO(https://fxbug.dev/42104852): Enable on arm64 when kasan poisoning works there.
-        if cfg!(all(sanitize = "address", target_arch = "x86_64")) {
+        #[cfg(all(sanitize = "address", target_arch = "x86_64"))]
+        {
+            use crate::instrumentation::asan::{
+                asan_entire_region_is_poisoned, asan_region_is_poisoned,
+            };
+            use unittest::assert_ne;
+
             stack_try_pin_init!(let node = ManagedPmmNode::init());
             let mut node = unwrap_ok!(node);
             assert_ok!(node.as_mut().setup());

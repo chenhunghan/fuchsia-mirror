@@ -4,35 +4,19 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
-library_headers("headers") {
-  headers = [ "lib/control-region.h" ]
-  public_deps = [
-    "//src/lib/lockdep:headers",
-    "//zircon/kernel/lib/ktl:headers",
-  ]
-}
-
 kernel_rust_mod("control-region-rs") {
-  sources = [
-    "control_region.rs",
-    "control_region_ffi.rs",
-  ]
+  sources = [ "control_region.rs" ]
   deps = [
     "//src/lib/ksync",
-    "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
     "//zircon/kernel/lib/arch:arch-rs",
   ]
 }
 
 group("control-region") {
-  public_deps = [
-    ":control-region-rs",
-    ":headers",
-  ]
+  public_deps = [ ":control-region-rs" ]
 }
 
 kernel_rust_mod("control-region-tests") {

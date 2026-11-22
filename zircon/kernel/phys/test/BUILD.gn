@@ -11,22 +11,14 @@ import("//build/zbi/kernel_cmdline.gni")
 import("//build/zbi/zbi_input.gni")
 import("//zircon/kernel/lib/code-patching/code-patching.gni")
 import("//zircon/kernel/params.gni")
-import("//zircon/kernel/phys/boot-shim/devicetree.gni")
 import("//zircon/kernel/phys/devicetree_boot_test.gni")
-import("//zircon/kernel/phys/kernel_elf_binary.gni")
-import("//zircon/kernel/phys/linuxboot_embed.gni")
+import("//zircon/kernel/phys/elf/kernel_elf_binary.gni")
+import("//zircon/kernel/phys/linuxboot-runtime/devicetree.gni")
 import("//zircon/kernel/phys/qemu.gni")
 import("//zircon/kernel/phys/qemu_kernel_test.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 import("phys_zbi_test.gni")
 import("turducken_zbi_test.gni")
-
-qemu_linuxboot_embed = []
-foreach(qemu, qemu_boot_formats) {
-  if (qemu.name == "linuxboot" && qemu.has_embed) {
-    qemu_linuxboot_embed += [ qemu ]
-  }
-}
 
 # Used for turducken_cuckoo_test(), instructing tuducken tests, when the tests
 # finishes successfully it should boot the next kernel item in the boot zbi.
@@ -47,9 +39,8 @@ source_set("qemu-test-main") {
   defines = [ "BOOT_TEST_SUCCESS_STRING=\"$boot_test_success_string\"" ]
   deps = [
     "..:boot-options",
-    "..:stdio",
+    "../output",
     "../runtime",
-    "../uart",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/libc",
@@ -69,18 +60,16 @@ source_set("devicetree-test-main") {
   sources = [ "devicetree-test-main.cc" ]
   defines = [ "BOOT_TEST_SUCCESS_STRING=\"$boot_test_success_string\"" ]
   deps = [
-    "..:address-space",
-    "..:stdio",
-    "../boot-shim:devicetree",
+    "..:boot-options",
+    "../address-space",
+    "../linuxboot-runtime",
+    "../output",
     "../runtime",
-    "../uart",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/libc",
-    "//zircon/kernel/phys:allocation",
-    "//zircon/kernel/phys:allocation-init",
+    "//zircon/kernel/phys/allocation",
     "//zircon/kernel/phys/lib/boot-shim",
-    "//zircon/kernel/phys/uart",
     "//zircon/system/ulib/uart",
   ]
   public_deps = [
@@ -95,7 +84,10 @@ source_set("zbi-test-main") {
   sources = [ "zbi-test-main.cc" ]
   defines = [ "BOOT_TEST_SUCCESS_STRING=\"$boot_test_success_string\"" ]
   public_deps = [ ":test-main" ]
-  deps = [ "//zircon/kernel/lib/libc" ]
+  deps = [
+    "../zbi-runtime:headers",
+    "//zircon/kernel/lib/libc",
+  ]
 }
 
 source_set("test-main") {
@@ -103,8 +95,7 @@ source_set("test-main") {
   public = [ "test-main.h" ]
   public_configs = [ ":includes" ]
   public_deps = [
-    "..:symbolize",
-    "../runtime:headers",
+    "../runtime",
     "//zircon/kernel/lib/arch:headers",
   ]
 }
@@ -211,10 +202,9 @@ common_test("memory-test") {
   sources = [ "phys-memory-test.cc" ]
   deps = [
     ":test-main",
-    "..:address-space",
-    "..:allocation",
-    "..:new",
-    "../uart",
+    "../address-space",
+    "../allocation",
+    "../memory:headers",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/libc",
   ]
@@ -223,7 +213,7 @@ common_test("memory-test") {
   # because that means the timeout is likely not the issue.
   #
   # Any changes to this timeout should be reflected in
-  # `//zircon/kernel/phys/boot-shim:devicetree-shim-memory-test`
+  # `//zircon/kernel/phys/linuxboot-runtime:devicetree-shim-memory-test`
   timeout = 150
 }
 
@@ -244,10 +234,10 @@ phys_zbi_test("zbi-decompress-test") {
   sources = [ "decompress-test.cc" ]
   deps = [
     ":test-main",
-    "..:address-space",
-    "..:allocation",
-    "..:zbi-memory",
-    "..:zbitl-allocation",
+    "../address-space",
+    "../allocation",
+    "../memory:headers",
+    "../zbi-runtime",
     "//src/lib/zbitl",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/libc",
@@ -265,12 +255,10 @@ zbi_executable("boot-zbi-load-test") {
     #":physboot-test-data.zbi",
     ":test-main",
     ":turducken",
-    "..:address-space",
-    "..:allocation",
-    "..:new",
-    "..:zbi-memory",
-    "..:zbitl-allocation",
+    "../address-space",
+    "../allocation",
     "../boot-zbi",
+    "../zbi-runtime",
     "//src/lib/zbitl",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/libc",
@@ -296,9 +284,9 @@ source_set("turducken") {
   public = [ "turducken.h" ]
   public_configs = [ ":includes" ]
   public_deps = [
-    "..:allocation",
-    "..:symbolize",
+    "../allocation",
     "../boot-zbi",
+    "../runtime",
     "//sdk/lib/zbi-format",
     "//src/lib/zbitl",
     "//zircon/kernel/lib/arch",
@@ -308,9 +296,9 @@ source_set("turducken") {
   sources = [ "turducken.cc" ]
   deps = [
     ":zbi-test-main",
-    "..:address-space",
-    "..:zbi-memory",
-    "..:zbitl-allocation",
+    "../address-space",
+    "../memory:headers",
+    "../zbi-runtime",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/ktl",
     "//zircon/kernel/lib/libc",
@@ -353,6 +341,63 @@ turducken_zbi_test("zbi-chain-load-core-tests") {
   timeout = false
 }
 
+zbi_executable("debugdata-boot-shim-test") {
+  visibility = [ ":*" ]
+  testonly = true
+  sources = [ "debugdata-boot-shim-test.cc" ]
+  deps = [
+    ":turducken",
+    "../elf",
+    "../lib/boot-shim",
+    "//zircon/kernel/lib/arch",
+  ]
+}
+
+# This brings the test program and the command-line to tell it to be the turkey
+# that publishes data for the duck to see.
+kernel_cmdline("debugdata-boot-shim-test.publish") {
+  visibility = [ ":*" ]
+  testonly = true
+  args = [ "debugdata.publish" ]
+  deps = [ ":debugdata-boot-shim-test" ]
+}
+
+# This just packs the same test as the turkey and the duck, the second instance
+# won't get the "publish" command line so it will check instead.
+turducken_zbi_test("zbi-debugdata-boot-shim-test") {
+  kernel = ":debugdata-boot-shim-test.publish"
+  if (toolchain_environment == "kernel.phys") {
+    sources = get_target_outputs(":debugdata-boot-shim-test")
+
+    # Prefer `data_deps` since zbi_input() adds `zbi_input_barrier` metadata,
+    # preventing this zbi_executable()'s kernel item from being prepended.
+    data_deps = [ ":debugdata-boot-shim-test" ]
+  }
+}
+
+# This is the duck inside the turkey below.  It checks for the debugdata item
+# and then hands off to its chicken: the hello-world test.
+turducken_zbi_test("debugdata-boot-shim-test.hello-world-test") {
+  visibility = [ ":*" ]
+  kernel = ":debugdata-boot-shim-test"
+  if (toolchain_environment == "kernel.phys") {
+    sources = get_target_outputs(":zbi-hello-world-test.executable")
+
+    # Prefer `data_deps` since zbi_input() adds `zbi_input_barrier` metadata,
+    # preventing this zbi_executable()'s kernel item from being prepended.
+    data_deps = [ ":zbi-hello-world-test.executable" ]
+  }
+}
+
+# This will add the debugdata, hand off the the duck above that checks it
+# and then hands off to hello-world-test.
+turducken_zbi_test("zbi-debugdata-boot-shim-hello-world-test") {
+  kernel = ":debugdata-boot-shim-test.publish"
+  data_deps = [ ":debugdata-boot-shim-test.hello-world-test.zbi" ]
+  zbi_files = get_target_outputs(data_deps[0])
+  sources = [ zbi_files[0] ]
+}
+
 zbi_executable("turducken-test") {
   visibility = [ ":*" ]
   testonly = true
@@ -390,72 +435,13 @@ qemu_kernel_test("qemu-phys-exception-test") {
   ]
 }
 
-if (qemu_linuxboot_embed != []) {
-  boot_test("linuxboot-embed-test") {
-    qemu_kernel = ":linuxboot-embed-hello-world-test-packed($phys_toolchain)"
-    foreach(qemu, qemu_linuxboot_embed) {
-      timeout = qemu.timeout
-      environments = qemu.supported_environments
-      forward_variables_from(qemu, [ "disabled" ])
-    }
-  }
-
-  if (toolchain_environment == "kernel.phys") {
-    phys_executable("linuxboot-embed-hello-world-test") {
-      testonly = true
-      sources = [ "linuxboot-embed-hello-world-test.cc" ]
-      deps = [
-        ":qemu-test-main",
-        "..:linuxboot-embed",
-        "//zircon/kernel/lib/ktl",
-        "//zircon/kernel/lib/libc",
-        "//zircon/system/ulib/pretty",
-      ]
-      foreach(qemu, qemu_linuxboot_embed) {
-        deps += qemu.deps
-      }
-    }
-
-    generated_file("linuxboot-embed-hello-world-test-data1.txt") {
-      visibility = [ ":*" ]
-      testonly = true
-      outputs = [ "$target_gen_dir/$target_name" ]
-      output_conversion = "list lines"
-      contents = [ "Hello, world!" ]
-    }
-
-    generated_file("linuxboot-embed-hello-world-test-data2.txt") {
-      visibility = [ ":*" ]
-      testonly = true
-      outputs = [ "$target_gen_dir/$target_name" ]
-      output_conversion = "list lines"
-      contents = [ "Lorem ipsum" ]
-    }
-
-    linuxboot_embed("linuxboot-embed-hello-world-test-packed") {
-      visibility = [ ":*" ]
-      testonly = true
-      shim_label = ":linuxboot-embed-hello-world-test"
-      deps = [
-        ":linuxboot-embed-hello-world-test-data1.txt",
-        ":linuxboot-embed-hello-world-test-data2.txt",
-      ]
-      inputs = []
-      foreach(label, deps) {
-        inputs += get_target_outputs(label)
-      }
-      emulator_support_aib = true
-    }
-  }
-}
-
 # turkey
 zbi_executable("trampoline-boot-test") {
   testonly = true
   sources = [ "trampoline-boot-test.cc" ]
   deps = [
     ":turducken",
-    "..:new",
+    "../allocation",
     "../boot-zbi",
     "//src/lib/zbitl",
     "//zircon/kernel/lib/boot-options",
@@ -504,6 +490,8 @@ group("phys-test") {
     ":zbi-boot-zbi-load-test",
     ":zbi-chain-load-core-tests",
     ":zbi-chain-load-hello-world-test",
+    ":zbi-debugdata-boot-shim-hello-world-test",
+    ":zbi-debugdata-boot-shim-test",
     ":zbi-decompress-test",
     ":zbi-memory-test",
     ":zbi-phys-exception-test",
@@ -526,19 +514,14 @@ group("phys-test") {
 }
 
 if (current_toolchain == default_toolchain) {
-  test_deps = []
-  if (qemu_linuxboot_embed != []) {
-    test_deps += [ ":linuxboot-embed-test" ]
-  }
-
   group("test") {
     testonly = true
     deps = [
-             ":phys-test($phys_toolchain)",
+      ":phys-test($phys_toolchain)",
 
-             # Debug Data propagation to userspace.
-             "debugdata-propagation:early-boot-debugdata-zbi-test",
-           ] + test_deps
+      # Debug Data propagation to userspace.
+      "debugdata-propagation:early-boot-debugdata-zbi-test",
+    ]
   }
 }
 

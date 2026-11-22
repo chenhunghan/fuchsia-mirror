@@ -13,8 +13,6 @@ package(default_applicable_licenses = ["//:license"])
 # This ensures we can always disable tests without causing build issues such as
 # unused imports, etc.
 
-# LINT.IfChange
-
 _RUST_EMPTY_GIDL_TEST_SOURCE = "rust/empty_conformance_test.rs"
 
 gidl(
@@ -47,5 +45,3 @@ fx_unittest_package(
     unit_tests = [":rust_empty_gidl_test_bin"],
     visibility = ["//tools/fidl/gidl:__pkg__"],
 )
-
-# LINT.ThenChange(BUILD.gn)

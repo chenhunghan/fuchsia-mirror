@@ -7,7 +7,7 @@ poor fit for use cases in Fuchsia. We will remove `absl` from the tree
 once existing clients of it are migrated away. This removal work is tracked in
 [https://fxbug.dev/42137495](https://fxbug.dev/42137495).
 
-## third_party/googletest
+## third_party/googletest {:#third-party-googletest}
 
 Note: The googletest library includes both the former gtest and gmock
 projects.

@@ -9,7 +9,7 @@ use crate::counters::define_kcounter;
 use crate::kernel::deadline::{Deadline, InstantUnknown};
 use crate::kernel::event::{AutounsignalEvent, Event};
 use crate::kernel::thread::{self, LOW_PRIORITY, ThreadPtr};
-use crate::ksync_kernel::declare_singleton_mutex;
+use crate::ksync_kernel::TrackedMutex;
 use crate::object::get_memory_watchdog;
 use crate::platform_rs::timer::{DurationMono, InstantMono, current_mono_time};
 use crate::vm::arch_vm_aspace::{NonTerminalAction, TerminalAction};
@@ -26,8 +26,9 @@ use core::pin::Pin;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use kprint::kprintln;
-use ksync::{KCell, LockToken, lock};
-use lazy_init::LazyInit;
+use ksync::{KCell, KMutex, LockToken, lock};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 
 #[cfg(console_enabled)]
 use crate::console::{CMD_AVAIL_ALWAYS, CmdArgs, static_command};
@@ -64,19 +65,49 @@ static SCANNER_REQUEST_EVENT: LazyInit<AutounsignalEvent> = LazyInit::uninit();
 /// Event that is signaled whenever the scanner is disabled. This is used to synchronize disable
 /// requests with the scanner thread.
 static SCANNER_DISABLED_EVENT: LazyInit<Event> = LazyInit::uninit();
-declare_singleton_mutex!(ScannerDisabledLock);
-static SCANNER_DISABLE_COUNT: KCell<u32, ScannerDisabledLock> = KCell::new(0);
 
-/// This variable needs to be protected by a mutex because it may be accessed by
-/// `push_disable_count` or `pop_disable_count` concurrently with
-/// `scanner_init_func`. We're reusing the `ScannerDisabledLock` because the push and pop
-/// functions already acquire it.
-static SCANNER_THREAD: KCell<Option<ThreadPtr>, ScannerDisabledLock> = KCell::new(None);
+#[ksync::guarded]
+struct ScannerDisabledState {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+    #[guarded_by(lock)]
+    disable_count: u32,
+    /// This variable needs to be protected by a mutex because it may be accessed by
+    /// `push_disable_count` or `pop_disable_count` concurrently with
+    /// `scanner_init_func`. We're reusing the `ScannerDisabledState` lock because the push and pop
+    /// functions already acquire it.
+    #[guarded_by(lock)]
+    thread: Option<ThreadPtr>,
+}
 
-declare_singleton_mutex!(
-    /// Mutex used to ensure only a single access scan is happening at once.
-    AccessedScannerLock
-);
+static SCANNER_DISABLED: LazyInit<ScannerDisabledState, NoCheck> = LazyInit::uninit();
+
+impl ScannerDisabledState {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `SCANNER_DISABLED` is initialized at `LK_INIT_LEVEL_EARLIEST` in
+        // `scanner_early_init_func` before any thread or console command can access it.
+        unsafe { SCANNER_DISABLED.get_unchecked() }
+    }
+}
+
+/// Mutex used to ensure only a single access scan is happening at once.
+#[ksync::guarded]
+struct AccessedScannerLock {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+}
+
+static ACCESSED_SCANNER_LOCK: LazyInit<AccessedScannerLock, NoCheck> = LazyInit::uninit();
+
+impl AccessedScannerLock {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `ACCESSED_SCANNER_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` in
+        // `scanner_early_init_func` before any thread or console command can access it.
+        unsafe { ACCESSED_SCANNER_LOCK.get_unchecked() }
+    }
+}
 static LAST_ACCESSED_SCAN_COMPLETE: AtomicI64 = AtomicI64::new(InstantMono::INFINITE_PAST.0);
 
 /// The accessed scan rate starts matched to the minimum aging period, since scanning more
@@ -175,7 +206,7 @@ extern "C" fn scanner_request_thread(_arg: *mut c_void) -> i32 {
             pmm::page_queues().disable_aging();
             // Grab the harvester lock to wait for any in progress scans to complete.
             {
-                lock!(let _guard = AccessedScannerLock::lock());
+                lock!(let _guard = AccessedScannerLock::get().lock_lock());
             }
             SCANNER_DISABLED_EVENT.signal();
         }
@@ -270,9 +301,8 @@ extern "C" fn scanner_request_thread(_arg: *mut c_void) -> i32 {
 }
 
 fn scanner_dump_info() {
-    lock!(let guard = ScannerDisabledLock::lock());
-    // SAFETY: `ScannerDisabledLock` is a singleton mutex and `guard.token()` proves it is held.
-    let disable_count = unsafe { *SCANNER_DISABLE_COUNT.get(guard.token()) };
+    lock!(let guard = ScannerDisabledState::get().lock_lock());
+    let disable_count = *guard.disable_count();
     if disable_count > 0 {
         kprintln!("[SCAN]: Scanner disabled with disable count of {}", disable_count);
     } else {
@@ -307,7 +337,7 @@ pub(super) fn wait_for_accessed_scan(update_time: InstantMono) {
         // scanning is sufficiently up to date.
         return;
     }
-    lock!(let _guard = AccessedScannerLock::lock());
+    lock!(let _guard = AccessedScannerLock::get().lock_lock());
     // Re-check now that we hold the lock in case a scan just finished and we were blocked on it.
     if !needs_accessed_scan(update_time) {
         return;
@@ -376,36 +406,28 @@ fn disable_page_table_reclaim() {
 /// current work and so should not be called with other locks held that may conflict with the
 /// scanner. Generally this is expected to be used by unittests.
 pub fn push_disable_count() {
-    lock!(let mut guard = ScannerDisabledLock::lock());
-    let token = guard.token_mut();
+    lock!(let mut guard = ScannerDisabledState::get().lock_lock());
     // Make sure we have a scanner thread, otherwise the wait may block forever.
-    // SAFETY: `ScannerDisabledLock` is a singleton mutex and `token` proves it is held.
-    unsafe {
-        debug_assert!(SCANNER_THREAD.get(token).is_some());
-        if *SCANNER_DISABLE_COUNT.get(token) == 0 {
-            SCANNER_OPERATION.fetch_or(SCANNER_OP_DISABLE, Ordering::SeqCst);
-            SCANNER_REQUEST_EVENT.signal();
-        }
-        *SCANNER_DISABLE_COUNT.get_mut(token) += 1;
+    debug_assert!(guard.thread().is_some());
+    if *guard.disable_count() == 0 {
+        SCANNER_OPERATION.fetch_or(SCANNER_OP_DISABLE, Ordering::SeqCst);
+        SCANNER_REQUEST_EVENT.signal();
     }
+    *guard.as_mut().disable_count_mut() += 1;
     let _ = SCANNER_DISABLED_EVENT.wait(&Deadline::infinite());
 }
 
 /// Decrease the disable count of the scanner, potentially re-enabling the scanner if it reaches
 /// zero.
 pub fn pop_disable_count() {
-    lock!(let mut guard = ScannerDisabledLock::lock());
-    let token = guard.token_mut();
-    // SAFETY: `ScannerDisabledLock` is a singleton mutex and `token` proves it is held.
-    unsafe {
-        debug_assert!(SCANNER_THREAD.get(token).is_some());
-        debug_assert!(*SCANNER_DISABLE_COUNT.get(token) > 0);
-        *SCANNER_DISABLE_COUNT.get_mut(token) -= 1;
-        if *SCANNER_DISABLE_COUNT.get(token) == 0 {
-            SCANNER_OPERATION.fetch_or(SCANNER_OP_ENABLE, Ordering::SeqCst);
-            SCANNER_REQUEST_EVENT.signal();
-            let _ = SCANNER_DISABLED_EVENT.unsignal();
-        }
+    lock!(let mut guard = ScannerDisabledState::get().lock_lock());
+    debug_assert!(guard.thread().is_some());
+    debug_assert!(*guard.disable_count() > 0);
+    *guard.as_mut().disable_count_mut() -= 1;
+    if *guard.disable_count() == 0 {
+        SCANNER_OPERATION.fetch_or(SCANNER_OP_ENABLE, Ordering::SeqCst);
+        SCANNER_REQUEST_EVENT.signal();
+        let _ = SCANNER_DISABLED_EVENT.unsignal();
     }
 }
 
@@ -457,7 +479,7 @@ pub unsafe fn debug_dump_state_before_panic() {
         unsafe { pmm::node().evictor().debug_get_evictor_thread() },
         unsafe { pmm::node().page_queues().debug_get_mru_thread() },
         unsafe { pmm::node().page_queues().debug_get_lru_thread() },
-        unsafe { *SCANNER_THREAD.get(&LockToken::new()) },
+        unsafe { *ScannerDisabledState::get().thread.get(&LockToken::new()) },
     ];
     // Attempt to dump information and backtraces for all the threads.
     for thread in threads {
@@ -479,14 +501,26 @@ pub unsafe fn debug_dump_state_before_panic() {
     }
 }
 
-fn scanner_init_func(_level: init::LkInitLevel) {
-    // SAFETY: `scanner_init_func` runs once during single-threaded boot before the scanner thread
-    // is resumed or any external callers access these events.
+fn scanner_early_init_func(_level: init::LkInitLevel) {
+    // SAFETY: `scanner_early_init_func` runs once during single-threaded early boot at
+    // `LK_INIT_LEVEL_EARLIEST` before any caller can access these locks or events.
     unsafe {
-        let _ =
+        let Ok(()) = Pin::static_ref(&SCANNER_DISABLED).init_pin(pin_init!(ScannerDisabledState {
+            lock <- KMutex::init(),
+            disable_count: KCell::new(0),
+            thread: KCell::new(None),
+        }));
+        let Ok(()) = Pin::static_ref(&ACCESSED_SCANNER_LOCK)
+            .init_pin(pin_init!(AccessedScannerLock { lock <- KMutex::init() }));
+        let Ok(()) =
             Pin::static_ref(&SCANNER_REQUEST_EVENT).init_pin(AutounsignalEvent::init_unsignaled());
-        let _ = Pin::static_ref(&SCANNER_DISABLED_EVENT).init_pin(Event::init_unsignaled());
+        let Ok(()) = Pin::static_ref(&SCANNER_DISABLED_EVENT).init_pin(Event::init_unsignaled());
     }
+}
+
+init::lk_init_hook!(scanner_early_init, scanner_early_init_func, init::LK_INIT_LEVEL_EARLIEST);
+
+fn scanner_init_func(_level: init::LkInitLevel) {
     // SAFETY: `scanner_request_thread` is a valid thread entry point with no argument.
     let thread = unsafe {
         thread::create_with_priority(
@@ -504,12 +538,8 @@ fn scanner_init_func(_level: init::LkInitLevel) {
         ZERO_PAGE_SCANS_PER_SECOND.init(BootOptions::get().page_scanner_zero_page_scans_per_second);
     }
     if !BootOptions::get().page_scanner_start_at_boot {
-        lock!(let mut guard = ScannerDisabledLock::lock());
-        // SAFETY: `ScannerDisabledLock` is a singleton mutex and `guard.token_mut()` proves it is
-        // held.
-        unsafe {
-            *SCANNER_DISABLE_COUNT.get_mut(guard.token_mut()) += 1;
-        }
+        lock!(let mut guard = ScannerDisabledState::get().lock_lock());
+        *guard.as_mut().disable_count_mut() += 1;
         SCANNER_OPERATION.fetch_or(SCANNER_OP_DISABLE, Ordering::SeqCst);
         SCANNER_REQUEST_EVENT.signal();
     }
@@ -585,13 +615,9 @@ fn scanner_init_func(_level: init::LkInitLevel) {
     }
 
     {
-        lock!(let mut guard = ScannerDisabledLock::lock());
-        let token = guard.token_mut();
-        // SAFETY: `ScannerDisabledLock` is a singleton mutex and `token` proves it is held.
-        unsafe {
-            debug_assert!(SCANNER_THREAD.get(token).is_none());
-            *SCANNER_THREAD.get_mut(token) = Some(thread);
-        }
+        lock!(let mut guard = ScannerDisabledState::get().lock_lock());
+        debug_assert!(guard.thread().is_none());
+        *guard.as_mut().thread_mut() = Some(thread);
     }
 }
 

@@ -47,10 +47,36 @@ dtb("arm-gic-dtb") {
   sources = [ "test/dts/interrupts.dts.S" ]
 }
 
+dtb("arm-gic-duplicate-sgi-dtb") {
+  sources = [ "test/dts/duplicate-sgi.dts.S" ]
+}
+
+dtb("arm-gic-invalid-sgi-mode-dtb") {
+  sources = [ "test/dts/invalid-sgi-mode.dts.S" ]
+}
+
+dtb("arm-gic-gicv2-sgi-dtb") {
+  sources = [ "test/dts/gicv2-sgi.dts.S" ]
+}
+
+dtb("arm-gic-out-of-range-sgi-dtb") {
+  sources = [ "test/dts/out-of-range-sgi.dts.S" ]
+}
+
 resource("arm-gic-dtb-file") {
-  sources = get_target_outputs(":arm-gic-dtb")
+  sources = get_target_outputs(":arm-gic-dtb") +
+            get_target_outputs(":arm-gic-duplicate-sgi-dtb") +
+            get_target_outputs(":arm-gic-invalid-sgi-mode-dtb") +
+            get_target_outputs(":arm-gic-gicv2-sgi-dtb") +
+            get_target_outputs(":arm-gic-out-of-range-sgi-dtb")
   outputs = [ "test-data/{{source_file_part}}" ]
-  deps = [ ":arm-gic-dtb" ]
+  deps = [
+    ":arm-gic-dtb",
+    ":arm-gic-duplicate-sgi-dtb",
+    ":arm-gic-gicv2-sgi-dtb",
+    ":arm-gic-invalid-sgi-mode-dtb",
+    ":arm-gic-out-of-range-sgi-dtb",
+  ]
 }
 
 fuchsia_unittest_package("arm-gic-visitor-test") {
@@ -59,4 +85,9 @@ fuchsia_unittest_package("arm-gic-visitor-test") {
     ":arm-gic-dtb-file",
     ":arm-gic-visitor-test-bin",
   ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }

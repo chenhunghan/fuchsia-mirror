@@ -45,5 +45,4 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "metadata_retriever_test_driver_info.json"
 }

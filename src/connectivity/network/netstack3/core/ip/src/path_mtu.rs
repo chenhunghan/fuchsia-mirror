@@ -8,14 +8,15 @@
 use core::num::NonZeroUsize;
 use core::time::Duration;
 
-use log::trace;
+use log::{debug, trace};
 use lru::LruCache;
-use net_types::ip::{GenericOverIp, Ip, IpAddress, IpVersionMarker, Mtu};
+use net_types::ip::{GenericOverIp, Ip, IpAddress, IpVersionMarker, Ipv4Mtu, Ipv6Mtu, Mtu};
 use netstack3_base::socket::SocketIpAddr;
 use netstack3_base::{
-    CoreTimerContext, HandleableTimer, Instant, InstantBindingsTypes, IpDeviceAddr,
-    TimerBindingsTypes, TimerContext,
+    CoreTimerContext, HandleableTimer, IcmpIpExt, Icmpv4ErrorCode, Icmpv6ErrorCode, Instant,
+    InstantBindingsTypes, IpDeviceAddr, TimerBindingsTypes, TimerContext,
 };
+use packet_formats::icmp::{IcmpDestUnreachable, Icmpv4DestUnreachableCode};
 
 /// The source address of a path.
 ///
@@ -69,45 +70,22 @@ impl<BC> PmtuBindingsContext for BC where BC: PmtuBindingsTypes + TimerContext {
 
 /// A handler for incoming PMTU events.
 ///
-/// `PmtuHandler` is intended to serve as the interface between ICMP the IP
+/// `PmtuHandler` serves as the interface between the transport layer and the IP
 /// layer, which holds the PMTU cache. In production, method calls are delegated
 /// to a real [`PmtuCache`], while in testing, method calls may be delegated to
 /// a fake implementation.
-pub(crate) trait PmtuHandler<I: Ip, BC> {
+pub trait PmtuHandler<I: Ip, BC> {
     /// Updates the PMTU between `src_ip` and `dst_ip` if `new_mtu` is less than
-    /// the current PMTU and does not violate the minimum MTU size requirements
-    /// for an IP.
+    /// the current PMTU.
     ///
     /// Returns the current PMTU after the update, whether or not it was updated.
-    /// `None` indicates that the PMTU was not updated and there was no existing
-    /// value in the cache.
-    //
-    // TODO(https://fxbug.dev/383355972): consider enforcing an IP version-specific
-    // minimum MTU with a type-safe MTU type.
     fn update_pmtu_if_less(
         &mut self,
         bindings_ctx: &mut BC,
         src_ip: PmtuSrcAddr<I::Addr>,
         dst_ip: PmtuDstAddr<I::Addr>,
-        new_mtu: Mtu,
-    ) -> Option<Mtu>;
-
-    /// Updates the PMTU between `src_ip` and `dst_ip` to the next lower
-    /// estimate from `from`.
-    ///
-    /// Returns the current PMTU after the update, whether or not it was updated.
-    /// `None` indicates that the PMTU was not updated and there was no existing
-    /// value in the cache.
-    //
-    // TODO(https://fxbug.dev/383355972): consider enforcing an IP version-specific
-    // minimum MTU with a type-safe MTU type.
-    fn update_pmtu_next_lower(
-        &mut self,
-        bindings_ctx: &mut BC,
-        src_ip: PmtuSrcAddr<I::Addr>,
-        dst_ip: PmtuDstAddr<I::Addr>,
-        from: Mtu,
-    ) -> Option<Mtu>;
+        new_mtu: I::Mtu,
+    ) -> I::Mtu;
 }
 
 fn maybe_schedule_timer<BC: PmtuBindingsContext>(
@@ -135,52 +113,28 @@ fn maybe_schedule_timer<BC: PmtuBindingsContext>(
     }
 }
 
-/// Returns the current MTU after an update to the cache.
-fn handle_update_result<BC: PmtuBindingsContext>(
-    bindings_ctx: &mut BC,
-    timer: &mut BC::Timer,
-    result: UpdateResult,
-    cache_is_empty: bool,
-) -> Option<Mtu> {
-    match result {
-        UpdateResult::Updated(new_mtu) => {
-            maybe_schedule_timer(bindings_ctx, timer, cache_is_empty);
-            Some(new_mtu)
-        }
-        // TODO(https://fxbug.dev/42174290): should we handle failure to update PMTU
-        // differently?
-        UpdateResult::NotUpdated(mtu) => mtu,
-    }
-}
+/// Enables a blanket implementation of [`PmtuHandler`].
+///
+/// Implementing this marker trait for a type enables a blanket implementation
+/// of `PmtuHandler` given the other requirements are met.
+pub trait UsePmtuHandlerBlanket {}
 
-impl<I: Ip, BC: PmtuBindingsContext, CC: PmtuContext<I, BC>> PmtuHandler<I, BC> for CC {
+impl<I: Ip, BC: PmtuBindingsContext, CC: PmtuContext<I, BC> + UsePmtuHandlerBlanket>
+    PmtuHandler<I, BC> for CC
+{
     fn update_pmtu_if_less(
         &mut self,
         bindings_ctx: &mut BC,
         src_ip: PmtuSrcAddr<I::Addr>,
         dst_ip: PmtuDstAddr<I::Addr>,
-        new_mtu: Mtu,
-    ) -> Option<Mtu> {
+        new_mtu: I::Mtu,
+    ) -> I::Mtu {
         self.with_state_mut(|cache| {
             let now = bindings_ctx.now();
-            let res = cache.update_pmtu_if_less(src_ip, dst_ip, new_mtu, now);
+            let mtu = cache.update_pmtu_if_less(src_ip, dst_ip, new_mtu, now);
             let is_empty = cache.is_empty();
-            handle_update_result(bindings_ctx, &mut cache.timer, res, is_empty)
-        })
-    }
-
-    fn update_pmtu_next_lower(
-        &mut self,
-        bindings_ctx: &mut BC,
-        src_ip: PmtuSrcAddr<I::Addr>,
-        dst_ip: PmtuDstAddr<I::Addr>,
-        from: Mtu,
-    ) -> Option<Mtu> {
-        self.with_state_mut(|cache| {
-            let now = bindings_ctx.now();
-            let res = cache.update_pmtu_next_lower(src_ip, dst_ip, from, now);
-            let is_empty = cache.is_empty();
-            handle_update_result(bindings_ctx, &mut cache.timer, res, is_empty)
+            maybe_schedule_timer(bindings_ctx, &mut cache.timer, is_empty);
+            mtu
         })
     }
 }
@@ -215,23 +169,23 @@ impl<A: IpAddress> PmtuCacheKey<A> {
 
 /// IP layer PMTU cache data.
 #[derive(Debug, PartialEq)]
-pub(crate) struct PmtuCacheData<I> {
-    pmtu: Mtu,
+pub(crate) struct PmtuCacheData<M, I> {
+    pmtu: M,
     last_updated: I,
 }
 
-impl<I: Instant> PmtuCacheData<I> {
+impl<M, I: Instant> PmtuCacheData<M, I> {
     /// Construct a new `PmtuCacheData`.
     ///
     /// `last_updated` will be set to `now`.
-    fn new(pmtu: Mtu, now: I) -> Self {
+    fn new(pmtu: M, now: I) -> Self {
         Self { pmtu, last_updated: now }
     }
 }
 
 /// A path MTU cache.
 pub struct PmtuCache<I: Ip, BT: PmtuBindingsTypes> {
-    cache: LruCache<PmtuCacheKey<I::Addr>, PmtuCacheData<BT::Instant>>,
+    cache: LruCache<PmtuCacheKey<I::Addr>, PmtuCacheData<I::Mtu, BT::Instant>>,
     timer: BT::Timer,
 }
 
@@ -244,115 +198,46 @@ impl<I: Ip, BC: PmtuBindingsTypes + TimerContext> PmtuCache<I, BC> {
     }
 }
 
-enum UpdateResult {
-    Updated(Mtu),
-    NotUpdated(Option<Mtu>),
-}
-
 impl<I: Ip, BT: PmtuBindingsTypes> PmtuCache<I, BT> {
     /// Gets the PMTU between `src_ip` and `dst_ip`.
     pub fn get_pmtu(
         &mut self,
         src_ip: PmtuSrcAddr<I::Addr>,
         dst_ip: PmtuDstAddr<I::Addr>,
-    ) -> Option<Mtu> {
+    ) -> Option<I::Mtu> {
         self.cache.get_mut(&PmtuCacheKey::new(src_ip, dst_ip)).map(|x| x.pmtu)
     }
 
-    /// Updates the PMTU between `src_ip` and `dst_ip` if `new_mtu` is less than the
-    /// current PMTU and does not violate the minimum MTU size requirements for an
-    /// IP.
+    /// Updates the PMTU between `src_ip` and `dst_ip` if `new_mtu` is less than
+    /// the current PMTU.
     ///
-    /// Returns the PMTU after updating the cache. Note that this could be `None` if
-    /// the cache was previously empty and the new PMTU was invalid, and could also
-    /// be a value that was already in the cache.
+    /// Returns the PMTU after updating the cache.
     fn update_pmtu_if_less(
         &mut self,
         src_ip: PmtuSrcAddr<I::Addr>,
         dst_ip: PmtuDstAddr<I::Addr>,
-        new_mtu: Mtu,
+        new_mtu: I::Mtu,
         now: BT::Instant,
-    ) -> UpdateResult {
+    ) -> I::Mtu {
         match self.get_pmtu(src_ip, dst_ip) {
-            // No PMTU exists so update.
-            None => self.update_pmtu(src_ip, dst_ip, new_mtu, now),
-            // A PMTU exists but it is greater than `new_mtu` so update.
-            Some(prev_mtu) if new_mtu < prev_mtu => self.update_pmtu(src_ip, dst_ip, new_mtu, now),
             // A PMTU exists but it is less than or equal to `new_mtu` so no need to
             // update.
-            Some(prev_mtu) => {
+            Some(prev_mtu) if prev_mtu <= new_mtu => {
                 trace!(
                     "update_pmtu_if_less: Not updating the PMTU between src {src_ip} and dst
                     {dst_ip} to {new_mtu:?}; is {prev_mtu:?}"
                 );
-                UpdateResult::NotUpdated(Some(prev_mtu))
+                prev_mtu
+            }
+            // No PMTU exists, or it is greater than `new_mtu`, so update.
+            None | Some(_) => {
+                let _previous = self
+                    .cache
+                    .put(PmtuCacheKey::new(src_ip, dst_ip), PmtuCacheData::new(new_mtu, now));
+                debug!("updated PMTU for path {src_ip} -> {dst_ip} to {new_mtu:?}");
+                new_mtu
             }
         }
-    }
-
-    /// Updates the PMTU between `src_ip` and `dst_ip` to the next lower
-    /// estimate from `from`.
-    ///
-    /// Returns `Ok(x)` on successful update (either PMTU is already lower than
-    /// `from`, in which case `x` is `None`, or a lower PMTU value exists that does
-    /// not violate IP specific minimum MTU requirements and it is less than the
-    /// current PMTU estimate, in which case `x` is `Some(a)` where `a` is the new
-    /// lower value.
-    ///
-    /// Returns `Err(x)` if no suitable lower PMTU value exists, where `x` is the
-    /// existing PMTU in the cache.
-    fn update_pmtu_next_lower(
-        &mut self,
-        src_ip: PmtuSrcAddr<I::Addr>,
-        dst_ip: PmtuDstAddr<I::Addr>,
-        from: Mtu,
-        now: BT::Instant,
-    ) -> UpdateResult {
-        if let Some(next_pmtu) = next_lower_pmtu_plateau(from) {
-            trace!(
-                "update_pmtu_next_lower: Attempting to update PMTU between src {src_ip} and dst \
-                {dst_ip} to {next_pmtu:?}"
-            );
-
-            self.update_pmtu_if_less(src_ip, dst_ip, next_pmtu, now)
-        } else {
-            // TODO(https://fxbug.dev/383355972): Should we make sure the current PMTU value
-            // is set to the IP specific minimum MTU value?
-            trace!(
-                "update_pmtu_next_lower: Not updating PMTU between src {src_ip} and dst {dst_ip} \
-                as there is no lower PMTU value from {from:?}"
-            );
-            UpdateResult::NotUpdated(self.get_pmtu(src_ip, dst_ip))
-        }
-    }
-
-    /// Updates the PMTU between `src_ip` and `dst_ip` if `new_mtu` does not violate
-    /// IP-specific minimum MTU requirements.
-    ///
-    /// Returns the PMTU after updating the cache. Note that this could be `None` if
-    /// the cache was previously empty and the new PMTU was invalid, and could also
-    /// be a value that was already in the cache.
-    fn update_pmtu(
-        &mut self,
-        src_ip: PmtuSrcAddr<I::Addr>,
-        dst_ip: PmtuDstAddr<I::Addr>,
-        new_mtu: Mtu,
-        now: BT::Instant,
-    ) -> UpdateResult {
-        // New MTU must not be smaller than the minimum MTU for an IP.
-        //
-        // TODO(https://fxbug.dev/383355972): consider enforcing this invariant with a
-        // type-safe MTU type that forces the caller to provide a valid MTU for the
-        // given IP version.
-        if new_mtu < I::MINIMUM_LINK_MTU {
-            return UpdateResult::NotUpdated(self.get_pmtu(src_ip, dst_ip));
-        }
-        let _previous =
-            self.cache.put(PmtuCacheKey::new(src_ip, dst_ip), PmtuCacheData::new(new_mtu, now));
-
-        log::debug!("updated PMTU for path {src_ip} -> {dst_ip} to {new_mtu:?}");
-
-        UpdateResult::Updated(new_mtu)
     }
 
     fn handle_timer(&mut self, now: BT::Instant) {
@@ -388,6 +273,59 @@ impl<I: Ip, BT: PmtuBindingsTypes> PmtuCache<I, BT> {
     fn is_empty(&self) -> bool {
         self.cache.is_empty()
     }
+}
+
+/// Returns the PMTU reported by the ICMP error `err`.
+///
+/// Returns `None` if `err` is not a PMTU error (i.e. neither an ICMPv4
+/// Destination Unreachable (Fragmentation Required) nor an ICMPv6 Packet Too
+/// Big error), or if no valid PMTU can be determined from it.
+pub fn pmtu_from_icmp_error<I: IcmpIpExt>(err: I::ErrorCode) -> Option<I::Mtu> {
+    I::map_ip(
+        err,
+        |err| match err {
+            Icmpv4ErrorCode::DestUnreachable {
+                code: Icmpv4DestUnreachableCode::FragmentationRequired,
+                message,
+                original_packet_length,
+            } => pmtu_from_icmpv4_fragmentation_required(&message, original_packet_length),
+            Icmpv4ErrorCode::DestUnreachable { code: _, message: _, original_packet_length: _ }
+            | Icmpv4ErrorCode::Redirect(_)
+            | Icmpv4ErrorCode::TimeExceeded(_)
+            | Icmpv4ErrorCode::ParameterProblem(_) => None,
+        },
+        |err| match err {
+            Icmpv6ErrorCode::PacketTooBig(mtu) => Ipv6Mtu::new(mtu),
+            Icmpv6ErrorCode::DestUnreachable(_)
+            | Icmpv6ErrorCode::TimeExceeded(_)
+            | Icmpv6ErrorCode::ParameterProblem(_) => None,
+        },
+    )
+}
+
+/// Returns the PMTU reported by an ICMPv4 Destination Unreachable
+/// (Fragmentation Required) `message` for an original packet of total length
+/// `original_packet_len`.
+///
+/// If `message` does not carry a Next-Hop MTU, the sender is assumed not to
+/// implement RFC 1191 and the PMTU is estimated as the next lower plateau from
+/// `original_packet_len`, per RFC 1191 section 5.
+///
+/// Returns `None` if the PMTU would be smaller than the IPv4 minimum link MTU.
+pub(crate) fn pmtu_from_icmpv4_fragmentation_required(
+    message: &IcmpDestUnreachable,
+    original_packet_len: u16,
+) -> Option<Ipv4Mtu> {
+    let mtu = match message.next_hop_mtu() {
+        Some(next_hop_mtu) => Mtu::new(u32::from(next_hop_mtu.get())),
+        None => {
+            debug!(
+                "Next-Hop MTU is 0 so using the next lower PMTU plateau from {original_packet_len}"
+            );
+            next_lower_pmtu_plateau(Mtu::new(u32::from(original_packet_len)))?
+        }
+    };
+    Ipv4Mtu::new(mtu)
 }
 
 /// Get next lower PMTU plateau value, if one exists.
@@ -437,42 +375,36 @@ fn next_lower_pmtu_plateau(start_mtu: Mtu) -> Option<Mtu> {
     None
 }
 
-#[cfg(test)]
-#[macro_use]
+#[cfg(any(test, feature = "testutils"))]
 pub(crate) mod testutil {
-    /// Implement the `PmtuHandler<$ip_version>` trait by just panicking.
-    macro_rules! impl_pmtu_handler {
-        ($ty:ty, $ctx:ty, $ip_version:ident) => {
-            impl PmtuHandler<net_types::ip::$ip_version, $ctx> for $ty {
-                fn update_pmtu_if_less(
-                    &mut self,
-                    _ctx: &mut $ctx,
-                    _src_ip: $crate::internal::path_mtu::PmtuSrcAddr<
-                        <net_types::ip::$ip_version as net_types::ip::Ip>::Addr,
-                    >,
-                    _dst_ip: $crate::internal::path_mtu::PmtuDstAddr<
-                        <net_types::ip::$ip_version as net_types::ip::Ip>::Addr,
-                    >,
-                    _new_mtu: Mtu,
-                ) -> Option<Mtu> {
-                    unimplemented!()
-                }
+    use core::num::NonZeroU16;
 
-                fn update_pmtu_next_lower(
-                    &mut self,
-                    _ctx: &mut $ctx,
-                    _src_ip: $crate::internal::path_mtu::PmtuSrcAddr<
-                        <net_types::ip::$ip_version as net_types::ip::Ip>::Addr,
-                    >,
-                    _dst_ip: $crate::internal::path_mtu::PmtuDstAddr<
-                        <net_types::ip::$ip_version as net_types::ip::Ip>::Addr,
-                    >,
-                    _from: Mtu,
-                ) -> Option<Mtu> {
-                    unimplemented!()
+    use net_types::ip::Mtu;
+    use netstack3_base::{IcmpIpExt, Icmpv4ErrorCode, Icmpv6ErrorCode};
+    use packet_formats::icmp::{IcmpDestUnreachable, Icmpv4DestUnreachableCode};
+
+    /// Constructs an ICMP PMTU error (ICMPv4 Destination Unreachable
+    /// (Fragmentation Required) or ICMPv6 Packet Too Big) reporting `mtu` as it
+    /// would appear on the wire.
+    ///
+    /// For IPv4, `mtu` is clamped to `u16::MAX` and the original packet length
+    /// is left unset, so that a Next-Hop MTU of 0 does not resolve to a PMTU
+    /// plateau.
+    pub fn new_pmtu_error<I: IcmpIpExt>(mtu: Mtu) -> I::ErrorCode {
+        I::map_ip_out(
+            mtu,
+            |mtu| {
+                let next_hop_mtu = u16::try_from(mtu.get()).unwrap_or(u16::MAX);
+                Icmpv4ErrorCode::DestUnreachable {
+                    code: Icmpv4DestUnreachableCode::FragmentationRequired,
+                    message: NonZeroU16::new(next_hop_mtu)
+                        .map(IcmpDestUnreachable::new_for_frag_req)
+                        .unwrap_or_default(),
+                    original_packet_length: 0,
                 }
-            }
-        };
+            },
+            |mtu| Icmpv6ErrorCode::PacketTooBig(mtu),
+        )
     }
 }
 
@@ -480,36 +412,39 @@ pub(crate) mod testutil {
 mod tests {
     use super::*;
 
+    use core::num::NonZeroU16;
+
     use ip_test_macro::ip_test;
+    use net_types::ip::{IpMtu as _, Ipv4, Ipv6};
     use net_types::{SpecifiedAddr, Witness as _};
     use netstack3_base::testutil::{
-        FakeBindingsCtx, FakeCoreCtx, FakeInstant, FakeTimerCtxExt, TestIpExt, assert_empty,
+        FakeBindingsCtx, FakeInstant, FakeTimerCtxExt, TestIpExt, assert_empty,
     };
     use netstack3_base::{CtxPair, InstantContext, IntoCoreTimerCtx};
+    use packet_formats::icmp::Icmpv6DestUnreachableCode;
     use test_case::test_case;
 
     struct FakePmtuContext<I: Ip> {
         cache: PmtuCache<I, FakeBindingsCtxImpl<I>>,
     }
 
-    type FakeCtxImpl<I> = CtxPair<FakeCoreCtxImpl<I>, FakeBindingsCtxImpl<I>>;
-    type FakeCoreCtxImpl<I> = FakeCoreCtx<FakePmtuContext<I>, (), ()>;
+    type FakeCtxImpl<I> = CtxPair<FakePmtuContext<I>, FakeBindingsCtxImpl<I>>;
     type FakeBindingsCtxImpl<I> = FakeBindingsCtx<PmtuTimerId<I>, (), (), ()>;
 
-    impl<I: Ip> PmtuContext<I, FakeBindingsCtxImpl<I>> for FakeCoreCtxImpl<I> {
+    impl<I: Ip> PmtuContext<I, FakeBindingsCtxImpl<I>> for FakePmtuContext<I> {
         fn with_state_mut<O, F: FnOnce(&mut PmtuCache<I, FakeBindingsCtxImpl<I>>) -> O>(
             &mut self,
             cb: F,
         ) -> O {
-            cb(&mut self.state.cache)
+            cb(&mut self.cache)
         }
     }
 
+    impl<I: Ip> UsePmtuHandlerBlanket for FakePmtuContext<I> {}
+
     fn new_context<I: Ip>() -> FakeCtxImpl<I> {
-        FakeCtxImpl::with_default_bindings_ctx(|bindings_ctx| {
-            FakeCoreCtxImpl::with_state(FakePmtuContext {
-                cache: PmtuCache::new::<IntoCoreTimerCtx>(bindings_ctx),
-            })
+        FakeCtxImpl::with_default_bindings_ctx(|bindings_ctx| FakePmtuContext {
+            cache: PmtuCache::new::<IntoCoreTimerCtx>(bindings_ctx),
         })
     }
 
@@ -559,20 +494,65 @@ mod tests {
         next_lower_pmtu_plateau(start)
     }
 
+    #[test_case(1500, 520 => Some(1500); "explicit mtu")]
+    #[test_case(68, 520 => Some(68); "explicit min mtu")]
+    #[test_case(67, 520 => None; "explicit below min mtu")]
+    #[test_case(0, 520 => Some(508); "rfc1191 plateau")]
+    #[test_case(0, 68 => None; "rfc1191 no lower plateau")]
+    fn test_pmtu_from_icmpv4_fragmentation_required(
+        next_hop_mtu: u16,
+        orig_total_len: u16,
+    ) -> Option<u16> {
+        let message = NonZeroU16::new(next_hop_mtu)
+            .map(IcmpDestUnreachable::new_for_frag_req)
+            .unwrap_or_default();
+        pmtu_from_icmpv4_fragmentation_required(&message, orig_total_len)
+            .map(|mtu| u16::try_from(mtu.get().get()).unwrap())
+    }
+
+    #[test_case(Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::FragmentationRequired,
+            message: IcmpDestUnreachable::new_for_frag_req(NonZeroU16::new(1500).unwrap()),
+            original_packet_length: 1520,
+        } => Ipv4Mtu::new(Mtu::new(1500)); "fragmentation required")]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::FragmentationRequired,
+            message: IcmpDestUnreachable::new_for_frag_req(NonZeroU16::new(67).unwrap()),
+            original_packet_length: 1520,
+        } => None; "fragmentation required below min mtu")]
+    #[test_case(Icmpv4ErrorCode::DestUnreachable {
+            code: Icmpv4DestUnreachableCode::DestHostUnreachable,
+            message: IcmpDestUnreachable::default(),
+            original_packet_length: 520,
+        } => None; "dest host unreachable")]
+    fn test_pmtu_from_icmpv4_error(err: Icmpv4ErrorCode) -> Option<Ipv4Mtu> {
+        pmtu_from_icmp_error::<Ipv4>(err)
+    }
+
+    #[test_case(Icmpv6ErrorCode::PacketTooBig(Mtu::new(1500)) => Ipv6Mtu::new(Mtu::new(1500));
+        "packet too big")]
+    #[test_case(Icmpv6ErrorCode::PacketTooBig(Mtu::new(1279)) => None;
+        "packet too big below min mtu")]
+    #[test_case(Icmpv6ErrorCode::DestUnreachable(Icmpv6DestUnreachableCode::AddrUnreachable)
+        => None; "dest unreachable")]
+    fn test_pmtu_from_icmpv6_error(err: Icmpv6ErrorCode) -> Option<Ipv6Mtu> {
+        pmtu_from_icmp_error::<Ipv6>(err)
+    }
+
     fn get_pmtu<I: Ip>(
-        core_ctx: &mut FakeCoreCtxImpl<I>,
+        core_ctx: &mut FakePmtuContext<I>,
         src_ip: PmtuSrcAddr<I::Addr>,
         dst_ip: PmtuDstAddr<I::Addr>,
-    ) -> Option<Mtu> {
-        core_ctx.state.cache.get_pmtu(src_ip, dst_ip)
+    ) -> Option<I::Mtu> {
+        core_ctx.cache.get_pmtu(src_ip, dst_ip)
     }
 
     fn get_last_updated<I: Ip>(
-        core_ctx: &mut FakeCoreCtxImpl<I>,
+        core_ctx: &mut FakePmtuContext<I>,
         src_ip: PmtuSrcAddr<I::Addr>,
         dst_ip: PmtuDstAddr<I::Addr>,
     ) -> Option<FakeInstant> {
-        core_ctx.state.cache.get_last_updated(src_ip, dst_ip)
+        core_ctx.cache.get_last_updated(src_ip, dst_ip)
     }
 
     #[ip_test(I)]
@@ -585,7 +565,7 @@ mod tests {
         assert_eq!(get_pmtu(&mut core_ctx, local_ip, remote_ip), None);
         assert_eq!(get_last_updated(&mut core_ctx, local_ip, remote_ip), None);
 
-        let new_mtu1 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 50);
+        let new_mtu1 = I::Mtu::new(Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 50)).unwrap();
         let start_time = bindings_ctx.now();
         let duration = Duration::from_secs(1);
 
@@ -603,7 +583,7 @@ mod tests {
                 remote_ip,
                 new_mtu1,
             ),
-            Some(new_mtu1)
+            new_mtu1
         );
 
         // Advance time to 2s.
@@ -618,7 +598,7 @@ mod tests {
             start_time + duration
         );
 
-        let new_mtu2 = Mtu::new(u32::from(new_mtu1) - 1);
+        let new_mtu2 = I::Mtu::new(Mtu::new(u32::from(new_mtu1.get()) - 1)).unwrap();
 
         // Advance time to 3s.
         assert_empty(bindings_ctx.trigger_timers_for(duration, &mut core_ctx));
@@ -634,7 +614,7 @@ mod tests {
                 remote_ip,
                 new_mtu2,
             ),
-            Some(new_mtu2)
+            new_mtu2
         );
 
         // Advance time to 4s.
@@ -649,7 +629,7 @@ mod tests {
             start_time + (duration * 3)
         );
 
-        let new_mtu3 = Mtu::new(u32::from(new_mtu2) - 1);
+        let new_mtu3 = I::Mtu::new(Mtu::new(u32::from(new_mtu2.get()) - 1)).unwrap();
 
         // Advance time to 5s.
         assert_empty(bindings_ctx.trigger_timers_for(duration, &mut core_ctx));
@@ -665,7 +645,7 @@ mod tests {
                 remote_ip,
                 new_mtu3,
             ),
-            Some(new_mtu3)
+            new_mtu3
         );
 
         // Advance time to 6s.
@@ -678,7 +658,7 @@ mod tests {
         let last_updated = start_time + (duration * 5);
         assert_eq!(get_last_updated(&mut core_ctx, local_ip, remote_ip).unwrap(), last_updated);
 
-        let new_mtu4 = Mtu::new(u32::from(new_mtu3) + 50);
+        let new_mtu4 = I::Mtu::new(Mtu::new(u32::from(new_mtu3.get()) + 50)).unwrap();
 
         // Advance time to 7s.
         assert_empty(bindings_ctx.trigger_timers_for(duration, &mut core_ctx));
@@ -692,7 +672,7 @@ mod tests {
                 remote_ip,
                 new_mtu4,
             ),
-            Some(new_mtu3)
+            new_mtu3
         );
 
         // Advance time to 8s.
@@ -703,30 +683,31 @@ mod tests {
         assert_eq!(get_pmtu(&mut core_ctx, local_ip, remote_ip).unwrap(), new_mtu3);
         assert_eq!(get_last_updated(&mut core_ctx, local_ip, remote_ip).unwrap(), last_updated);
 
-        let low_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) - 1);
+        let min_mtu = I::MINIMUM_LINK_MTU;
 
         // Advance time to 9s.
         assert_empty(bindings_ctx.trigger_timers_for(duration, &mut core_ctx));
 
-        // Updating with MTU value less than the minimum MTU should fail.
+        // Updating with the minimum link MTU should succeed.
         assert_eq!(
             PmtuHandler::update_pmtu_if_less(
                 &mut core_ctx,
                 &mut bindings_ctx,
                 local_ip,
                 remote_ip,
-                low_mtu,
+                min_mtu,
             ),
-            Some(new_mtu3)
+            min_mtu
         );
 
         // Advance time to 10s.
         assert_empty(bindings_ctx.trigger_timers_for(duration, &mut core_ctx));
 
-        // Make sure the update didn't work. PMTU and last updated should not
-        // have changed.
-        assert_eq!(get_pmtu(&mut core_ctx, local_ip, remote_ip).unwrap(), new_mtu3);
-        assert_eq!(get_last_updated(&mut core_ctx, local_ip, remote_ip).unwrap(), last_updated);
+        assert_eq!(get_pmtu(&mut core_ctx, local_ip, remote_ip).unwrap(), min_mtu);
+        assert_eq!(
+            get_last_updated(&mut core_ctx, local_ip, remote_ip).unwrap(),
+            start_time + (duration * 9)
+        );
     }
 
     #[ip_test(I)]
@@ -738,7 +719,7 @@ mod tests {
         // Make sure there are no timers.
         bindings_ctx.timers.assert_no_timers_installed();
 
-        let new_mtu1 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 50);
+        let new_mtu1 = I::Mtu::new(Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 50)).unwrap();
         let start_time = bindings_ctx.now();
         let duration = Duration::from_secs(1);
 
@@ -756,7 +737,7 @@ mod tests {
                 remote_ip,
                 new_mtu1,
             ),
-            Some(new_mtu1)
+            new_mtu1
         );
 
         // Make sure a task got scheduled.
@@ -784,7 +765,7 @@ mod tests {
         // `new_mtu1` and last updated instant should be updated to the start of
         // the test + 1s.
         let other_ip = PmtuDstAddr::try_from(get_other_ip_address::<I>()).unwrap();
-        let new_mtu2 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 100);
+        let new_mtu2 = I::Mtu::new(Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 100)).unwrap();
         assert_eq!(
             PmtuHandler::update_pmtu_if_less(
                 &mut core_ctx,
@@ -793,7 +774,7 @@ mod tests {
                 other_ip,
                 new_mtu2,
             ),
-            Some(new_mtu2)
+            new_mtu2
         );
 
         // Make sure there is still a task scheduled. (we know no timers got
@@ -883,6 +864,7 @@ mod tests {
         let local_ip = local_ip::<I>();
         let remote_ip = PmtuSrcAddr::new(I::TEST_ADDRS.remote_ip.get()).unwrap();
         let other_ip = |i| PmtuDstAddr::try_from(I::get_other_ip_address(i)).unwrap();
+        let max_mtu = I::Mtu::MAX;
 
         // Fill the cache to capacity.
         //
@@ -898,12 +880,12 @@ mod tests {
                     &mut bindings_ctx,
                     local_ip,
                     other_ip(i),
-                    Mtu::max(),
+                    max_mtu,
                 ),
-                Some(Mtu::max())
+                max_mtu
             );
         }
-        assert_eq!(core_ctx.state.cache.cache.len(), MAX_ENTRIES.get());
+        assert_eq!(core_ctx.cache.cache.len(), MAX_ENTRIES.get());
 
         // The next insertion should cause the LRU entry to be discarded.
         assert_eq!(
@@ -912,12 +894,12 @@ mod tests {
                 &mut bindings_ctx,
                 remote_ip,
                 local_ip.into(),
-                Mtu::max(),
+                max_mtu,
             ),
-            Some(Mtu::max())
+            max_mtu
         );
-        assert_eq!(core_ctx.state.cache.cache.len(), MAX_ENTRIES.get());
-        assert_eq!(core_ctx.state.cache.get_pmtu(local_ip, other_ip(0)), None);
-        assert_eq!(core_ctx.state.cache.get_pmtu(remote_ip, local_ip.into()), Some(Mtu::max()));
+        assert_eq!(core_ctx.cache.cache.len(), MAX_ENTRIES.get());
+        assert_eq!(core_ctx.cache.get_pmtu(local_ip, other_ip(0)), None);
+        assert_eq!(core_ctx.cache.get_pmtu(remote_ip, local_ip.into()), Some(max_mtu));
     }
 }

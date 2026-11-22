@@ -58,6 +58,7 @@ group("tests") {
 
     # Plugins migrated to Bazel define standalone unit test targets that are
     # not aggregated by `:ffx_debug_plugin_tests`.
+    "connect:tests",
     "limbo:tests",
   ]
 }

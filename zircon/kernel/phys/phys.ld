@@ -63,10 +63,10 @@ SECTIONS {
   /*
    * Code compiled for kernels should generate .debug_frame, not .eh_frame.
    * We don't want to clutter the runtime image with this data, since it's
-   * not used at runtime.  However, GCC currently generates .eh_frame even
-   * given -fno-unwind-tables.  So just discard all that data here.
-   * Unfortunately this may let us overlook some regression where other code
-   * is emitting .eh_frame rather than .debug_frame in the future.
+   * not used at runtime.
+   *
+   * TODO(https://fxbug.dev/584237049): Upgrade to an
+   * `ASSERT(SIZEOF(.eh_frame) == 0)`.
    */
   /DISCARD/ : {
     *(.eh_frame)
@@ -136,15 +136,14 @@ SECTIONS {
   /*
    * Global offset table entries.
    *
-   * We theoretically don't want/need any GOT entries, but BFD LD inserts
-   * an entry to _DYNAMIC into ".got", as required by the ABI, and three empty
-   * ".got.plt" entries on some architectures (required by their respective
+   * We theoretically don't want/need any GOT entries, but LLD inserts three
+   * empty ".got.plt" entries on some architectures (required by their respective
    * ABIs).
    *
-   * We assert that we have at most 4 × 64-bit entries.
+   * We assert that we have at most 3 × 64-bit entries.
    */
   .got : { *(.got.plt) *(.got) }
-  ASSERT(SIZEOF(.got) <= 4 * 8, ".got should contain only ABI-required entries.")
+  ASSERT(SIZEOF(.got) <= 3 * 8, ".got should contain only ABI-required entries.")
 
   /*
    * Instrumentation data.  Orphans placement can put this in weird places,
@@ -167,10 +166,9 @@ SECTIONS {
   __llvm_prf_cnts : { *(__llvm_prf_cnts) }
 
   /*
-   * Any writable orphan sections will be placed here.  The separate clause
-   * `SECTIONS ... INSERT BEFORE .bss` in phys-end.ld will attach after the
-   * orphans and before .bss.  Note that the linker invocation must use the
-   * switches `-T phys-end.ld -T phys.ld`, *in that order* for BFD ld to work.
+   * Any writable orphan sections will be placed here.  The separate
+   * `SECTIONS ... INSERT BEFORE .bss` clause below will attach after the
+   * orphans and before .bss.
    */
 
   .bss : {
@@ -205,6 +203,33 @@ PHDRS {
   note PT_NOTE FLAGS(4);        /* PF_R */
   dynamic PT_DYNAMIC FLAGS(4);  /* PF_R */
 }
+
+/*
+ * Using a separate `SECTIONS ... INSERT` clause makes it possible to control
+ * where orphan sections wind up relative to the magic symbols like _end and
+ * PHYS_LOAD_END so that identifier-named sections can be used at will without
+ * listing them all in explicitly in the linker script to get correct layout.
+ */
+SECTIONS {
+  .zbi.align : ALIGN(8) {
+    /*
+     * For ZBI format, the file size must be aligned to 8 bytes.  Just aligning
+     * doesn't do anything to the ultimate binary-format load image size when
+     * there isn't any subsequent data.  So align and write a useless word.
+     */
+    QUAD(0xdeadd00dfeedface);
+
+    /*
+     * This represents the end of the load image, as distinct from the end
+     * of data in memory.  That is, it's not aligned to the .bss alignment.
+     * That alignment padding isn't included in the file.  It only matters
+     * that the memory reserved for .bss at runtime includes the padding.
+     * But the load headers for boot headers need to identify the size of
+     * the load image on disk precisely, so they use this instead of _edata.
+     */
+    PROVIDE_HIDDEN(PHYS_LOAD_END = .);
+  }
+} INSERT BEFORE .bss
 
 /*
  * This has no real effect since the ELF headers aren't used at runtime.

@@ -119,6 +119,7 @@ fn process_line(
 
 fn main() -> Result<(), ProcessWrapperError> {
     let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
+    let temp_files = opts.temp_files;
 
     let mut command = Command::new(opts.executable);
     command
@@ -228,6 +229,7 @@ fn main() -> Result<(), ProcessWrapperError> {
         }
     }
 
+    drop(temp_files);
     exit(code)
 }
 

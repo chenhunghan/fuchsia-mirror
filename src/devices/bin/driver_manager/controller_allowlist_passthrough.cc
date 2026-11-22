@@ -62,7 +62,6 @@ const std::unordered_map<std::string, std::unordered_set<std::string_view>> kCon
      }},
     {"ScheduleUnbind",
      {
-         "bt-emulator",         // bt-host-integration-tests
          "driver_runner_test",  // driver-runner-test
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/ddk-lifecycle-test.cm",  // ddk-lifecycle-test
          "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/fvm.cm",  // paver-test

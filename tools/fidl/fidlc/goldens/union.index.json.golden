@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/union.test.fidl",
       "data": "test.union",
       "start_offset": 36,
       "end_offset": 46
@@ -20,7 +20,7 @@
       "identifier": "test.union/EmptyFlexibleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "EmptyFlexibleUnion",
         "start_offset": 2967,
         "end_offset": 2985
@@ -32,7 +32,7 @@
       "identifier": "test.union/ExplicitFlexibleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "ExplicitFlexibleUnion",
         "start_offset": 2714,
         "end_offset": 2735
@@ -43,7 +43,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 2762,
             "end_offset": 2763
@@ -57,7 +57,7 @@
           "name": "f",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "f",
             "start_offset": 2778,
             "end_offset": 2779
@@ -73,7 +73,7 @@
       "identifier": "test.union/ExplicitFoo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "ExplicitFoo",
         "start_offset": 1469,
         "end_offset": 1480
@@ -84,7 +84,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 1524,
             "end_offset": 1525
@@ -98,7 +98,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "s",
             "start_offset": 1507,
             "end_offset": 1508
@@ -114,7 +114,7 @@
       "identifier": "test.union/ExplicitPizzaOrPasta",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "ExplicitPizzaOrPasta",
         "start_offset": 264,
         "end_offset": 284
@@ -125,7 +125,7 @@
           "name": "pizza",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pizza",
             "start_offset": 309,
             "end_offset": 314
@@ -136,7 +136,7 @@
             "type_identifier": "test.union/Pizza",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pizza",
               "start_offset": 315,
               "end_offset": 320
@@ -148,7 +148,7 @@
           "name": "pasta",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pasta",
             "start_offset": 329,
             "end_offset": 334
@@ -159,7 +159,7 @@
             "type_identifier": "test.union/Pasta",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pasta",
               "start_offset": 335,
               "end_offset": 340
@@ -173,7 +173,7 @@
       "identifier": "test.union/ExplicitStrictFoo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "ExplicitStrictFoo",
         "start_offset": 1542,
         "end_offset": 1559
@@ -184,7 +184,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 1601,
             "end_offset": 1602
@@ -198,7 +198,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "s",
             "start_offset": 1584,
             "end_offset": 1585
@@ -214,7 +214,7 @@
       "identifier": "test.union/ExplicitUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "ExplicitUnion",
         "start_offset": 1066,
         "end_offset": 1079
@@ -225,7 +225,7 @@
           "name": "Primitive",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "Primitive",
             "start_offset": 1104,
             "end_offset": 1113
@@ -239,7 +239,7 @@
           "name": "StringNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "StringNeedsConstructor",
             "start_offset": 1128,
             "end_offset": 1150
@@ -255,7 +255,7 @@
       "identifier": "test.union/FieldCollision",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "FieldCollision",
         "start_offset": 991,
         "end_offset": 1005
@@ -266,7 +266,7 @@
           "name": "field_collision_tag",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "field_collision_tag",
             "start_offset": 1030,
             "end_offset": 1049
@@ -282,7 +282,7 @@
       "identifier": "test.union/FlexibleFoo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "FlexibleFoo",
         "start_offset": 1327,
         "end_offset": 1338
@@ -293,7 +293,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "s",
             "start_offset": 1365,
             "end_offset": 1366
@@ -307,7 +307,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 1382,
             "end_offset": 1383
@@ -323,7 +323,7 @@
       "identifier": "test.union/FlexiblePizzaOrPasta",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "FlexiblePizzaOrPasta",
         "start_offset": 351,
         "end_offset": 371
@@ -334,7 +334,7 @@
           "name": "pizza",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pizza",
             "start_offset": 398,
             "end_offset": 403
@@ -345,7 +345,7 @@
             "type_identifier": "test.union/Pizza",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pizza",
               "start_offset": 404,
               "end_offset": 409
@@ -357,7 +357,7 @@
           "name": "pasta",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pasta",
             "start_offset": 418,
             "end_offset": 423
@@ -368,7 +368,7 @@
             "type_identifier": "test.union/Pasta",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pasta",
               "start_offset": 424,
               "end_offset": 429
@@ -382,7 +382,7 @@
       "identifier": "test.union/FlexibleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "FlexibleUnion",
         "start_offset": 675,
         "end_offset": 688
@@ -393,7 +393,7 @@
           "name": "Primitive",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "Primitive",
             "start_offset": 715,
             "end_offset": 724
@@ -407,7 +407,7 @@
           "name": "StringNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "StringNeedsConstructor",
             "start_offset": 739,
             "end_offset": 761
@@ -421,7 +421,7 @@
           "name": "VectorStringAlsoNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "VectorStringAlsoNeedsConstructor",
             "start_offset": 777,
             "end_offset": 809
@@ -437,7 +437,7 @@
       "identifier": "test.union/NewerSimpleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "NewerSimpleUnion",
         "start_offset": 1698,
         "end_offset": 1714
@@ -448,7 +448,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 1770,
             "end_offset": 1771
@@ -462,7 +462,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "s",
             "start_offset": 1799,
             "end_offset": 1800
@@ -476,7 +476,7 @@
           "name": "v",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "v",
             "start_offset": 1825,
             "end_offset": 1826
@@ -492,7 +492,7 @@
       "identifier": "test.union/OlderSimpleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "OlderSimpleUnion",
         "start_offset": 1619,
         "end_offset": 1635
@@ -503,7 +503,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 1662,
             "end_offset": 1663
@@ -517,7 +517,7 @@
           "name": "f",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "f",
             "start_offset": 1678,
             "end_offset": 1679
@@ -533,7 +533,7 @@
       "identifier": "test.union/PizzaOrPasta",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "PizzaOrPasta",
         "start_offset": 159,
         "end_offset": 171
@@ -544,7 +544,7 @@
           "name": "pizza",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pizza",
             "start_offset": 196,
             "end_offset": 201
@@ -555,7 +555,7 @@
             "type_identifier": "test.union/Pizza",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pizza",
               "start_offset": 202,
               "end_offset": 207
@@ -567,7 +567,7 @@
           "name": "pasta",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pasta",
             "start_offset": 216,
             "end_offset": 221
@@ -578,7 +578,7 @@
             "type_identifier": "test.union/Pasta",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pasta",
               "start_offset": 222,
               "end_offset": 227
@@ -592,7 +592,7 @@
       "identifier": "test.union/ReverseOrdinalUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "ReverseOrdinalUnion",
         "start_offset": 1168,
         "end_offset": 1187
@@ -603,7 +603,7 @@
           "name": "first",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "first",
             "start_offset": 1234,
             "end_offset": 1239
@@ -617,7 +617,7 @@
           "name": "second",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "second",
             "start_offset": 1212,
             "end_offset": 1218
@@ -633,7 +633,7 @@
       "identifier": "test.union/StrictBoundedUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "StrictBoundedUnion",
         "start_offset": 2311,
         "end_offset": 2329
@@ -644,7 +644,7 @@
           "name": "v",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "v",
             "start_offset": 2354,
             "end_offset": 2355
@@ -660,7 +660,7 @@
       "identifier": "test.union/StrictFoo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "StrictFoo",
         "start_offset": 1400,
         "end_offset": 1409
@@ -671,7 +671,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "s",
             "start_offset": 1434,
             "end_offset": 1435
@@ -685,7 +685,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 1451,
             "end_offset": 1452
@@ -701,7 +701,7 @@
       "identifier": "test.union/StrictPizzaOrPasta",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "StrictPizzaOrPasta",
         "start_offset": 440,
         "end_offset": 458
@@ -712,7 +712,7 @@
           "name": "pizza",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pizza",
             "start_offset": 483,
             "end_offset": 488
@@ -723,7 +723,7 @@
             "type_identifier": "test.union/Pizza",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pizza",
               "start_offset": 489,
               "end_offset": 494
@@ -735,7 +735,7 @@
           "name": "pasta",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "pasta",
             "start_offset": 503,
             "end_offset": 508
@@ -746,7 +746,7 @@
             "type_identifier": "test.union/Pasta",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Pasta",
               "start_offset": 509,
               "end_offset": 514
@@ -760,7 +760,7 @@
       "identifier": "test.union/StrictSimpleUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "StrictSimpleUnion",
         "start_offset": 2039,
         "end_offset": 2056
@@ -771,7 +771,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "i",
             "start_offset": 2081,
             "end_offset": 2082
@@ -785,7 +785,7 @@
           "name": "f",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "f",
             "start_offset": 2097,
             "end_offset": 2098
@@ -799,7 +799,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "s",
             "start_offset": 2115,
             "end_offset": 2116
@@ -815,7 +815,7 @@
       "identifier": "test.union/StrictUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "StrictUnion",
         "start_offset": 835,
         "end_offset": 846
@@ -826,7 +826,7 @@
           "name": "Primitive",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "Primitive",
             "start_offset": 871,
             "end_offset": 880
@@ -840,7 +840,7 @@
           "name": "StringNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "StringNeedsConstructor",
             "start_offset": 895,
             "end_offset": 917
@@ -854,7 +854,7 @@
           "name": "VectorStringAlsoNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "VectorStringAlsoNeedsConstructor",
             "start_offset": 933,
             "end_offset": 965
@@ -870,7 +870,7 @@
       "identifier": "test.union/Union",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "Union",
         "start_offset": 525,
         "end_offset": 530
@@ -881,7 +881,7 @@
           "name": "Primitive",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "Primitive",
             "start_offset": 555,
             "end_offset": 564
@@ -895,7 +895,7 @@
           "name": "StringNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "StringNeedsConstructor",
             "start_offset": 579,
             "end_offset": 601
@@ -909,7 +909,7 @@
           "name": "VectorStringAlsoNeedsConstructor",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "VectorStringAlsoNeedsConstructor",
             "start_offset": 617,
             "end_offset": 649
@@ -925,7 +925,7 @@
       "identifier": "test.union/UnionContainingEmptyStruct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "UnionContainingEmptyStruct",
         "start_offset": 2159,
         "end_offset": 2185
@@ -936,7 +936,7 @@
           "name": "empty",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "empty",
             "start_offset": 2289,
             "end_offset": 2294
@@ -947,7 +947,7 @@
             "type_identifier": "test.union/Empty",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Empty",
               "start_offset": 2295,
               "end_offset": 2300
@@ -961,7 +961,7 @@
       "identifier": "test.union/UnionWithAttributes",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "UnionWithAttributes",
         "start_offset": 2894,
         "end_offset": 2913
@@ -972,7 +972,7 @@
           "name": "x",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "x",
             "start_offset": 2949,
             "end_offset": 2950
@@ -991,7 +991,7 @@
       "identifier": "test.union/Empty",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "Empty",
         "start_offset": 2134,
         "end_offset": 2139
@@ -1003,7 +1003,7 @@
       "identifier": "test.union/NullableUnionStruct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "NullableUnionStruct",
         "start_offset": 1257,
         "end_offset": 1276
@@ -1013,7 +1013,7 @@
           "name": "the_union",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "the_union",
             "start_offset": 1292,
             "end_offset": 1301
@@ -1024,7 +1024,7 @@
             "type_identifier": "test.union/Union",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "Union",
               "start_offset": 1302,
               "end_offset": 1307
@@ -1038,7 +1038,7 @@
       "identifier": "test.union/Pasta",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "Pasta",
         "start_offset": 112,
         "end_offset": 117
@@ -1048,7 +1048,7 @@
           "name": "sauce",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "sauce",
             "start_offset": 133,
             "end_offset": 138
@@ -1064,7 +1064,7 @@
       "identifier": "test.union/Pizza",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "Pizza",
         "start_offset": 54,
         "end_offset": 59
@@ -1074,7 +1074,7 @@
           "name": "toppings",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "toppings",
             "start_offset": 75,
             "end_offset": 83
@@ -1090,7 +1090,7 @@
       "identifier": "test.union/StructWithNullableUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "StructWithNullableUnion",
         "start_offset": 2636,
         "end_offset": 2659
@@ -1100,7 +1100,7 @@
           "name": "x1",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "x1",
             "start_offset": 2675,
             "end_offset": 2677
@@ -1111,7 +1111,7 @@
             "type_identifier": "test.union/OlderSimpleUnion",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "OlderSimpleUnion",
               "start_offset": 2678,
               "end_offset": 2694
@@ -1128,7 +1128,7 @@
           "name": "xu",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "xu",
             "start_offset": 2598,
             "end_offset": 2600
@@ -1139,7 +1139,7 @@
             "type_identifier": "test.union/OlderSimpleUnion",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "OlderSimpleUnion",
               "start_offset": 2601,
               "end_offset": 2617
@@ -1156,7 +1156,7 @@
           "name": "xu",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "xu",
             "start_offset": 2487,
             "end_offset": 2489
@@ -1167,7 +1167,7 @@
             "type_identifier": "test.union/StrictBoundedUnion",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "StrictBoundedUnion",
               "start_offset": 2490,
               "end_offset": 2508
@@ -1181,7 +1181,7 @@
       "identifier": "test.union/UnionSandwich",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "UnionSandwich",
         "start_offset": 2798,
         "end_offset": 2811
@@ -1191,7 +1191,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "a",
             "start_offset": 2827,
             "end_offset": 2828
@@ -1204,7 +1204,7 @@
           "name": "u",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "u",
             "start_offset": 2841,
             "end_offset": 2842
@@ -1215,7 +1215,7 @@
             "type_identifier": "test.union/ExplicitFlexibleUnion",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/union.test.fidl",
               "data": "ExplicitFlexibleUnion",
               "start_offset": 2843,
               "end_offset": 2864
@@ -1226,7 +1226,7 @@
           "name": "b",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "b",
             "start_offset": 2870,
             "end_offset": 2871
@@ -1243,7 +1243,7 @@
       "identifier": "test.union/TestProtocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/union.test.fidl",
         "data": "TestProtocol",
         "start_offset": 2394,
         "end_offset": 2406
@@ -1253,7 +1253,7 @@
           "identifier": "StrictUnionHenceResponseMayBeStackAllocated",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "StrictUnionHenceResponseMayBeStackAllocated",
             "start_offset": 2420,
             "end_offset": 2463
@@ -1267,7 +1267,7 @@
           "identifier": "FlexibleUnionHenceResponseMustBeHeapAllocated",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/union.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/union.test.fidl",
             "data": "FlexibleUnionHenceResponseMustBeHeapAllocated",
             "start_offset": 2529,
             "end_offset": 2574

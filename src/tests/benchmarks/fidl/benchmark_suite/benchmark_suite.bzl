@@ -10,7 +10,6 @@ visibility([
     "//src/tests/benchmarks/fidl/...",
 ])
 
-# LINT.IfChange
 _BENCHMARK_SUITE_DECLARATIONS = [
     {
         "name": "bool_array",
@@ -217,7 +216,6 @@ def _compute_benchmark_suites():
 ) = _compute_benchmark_suites()
 
 BENCHMARK_SUITE_FIDL_TARGET = "//src/tests/benchmarks/fidl/benchmark_suite:benchmark_suite_fidl"
-# LINT.ThenChange(//src/tests/benchmarks/fidl/benchmark_suite/benchmark_suite.gni)
 
 def _copy_replace_fidl_library_impl(ctx):
     outputs = []

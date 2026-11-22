@@ -1,0 +1,122 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:defs.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    ":dangerous_identifiers.bzl",
+    "DANGEROUS_TESTS",
+    "dangerous_fidl",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+py_binary(
+    name = "generate_fidl",
+    srcs = [
+        "generate/common.py",
+        "generate/generate.py",
+        "generate/identifiers.py",
+        "generate/styles.py",
+        "generate/uses.py",
+    ],
+    imports = ["generate"],
+    main = "generate/generate.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//visibility:private"],
+)
+
+[
+    dangerous_fidl(
+        name = test["fidl_target"],
+        enable_rust = test["rust_target"],
+        library_name = test["fidl_library"],
+        shard = test["shard"],
+        style = test["style"],
+        use = test["use"],
+    )
+    for test in DANGEROUS_TESTS
+]
+
+[
+    fx_cc_binary(
+        name = test["cpp_target"],
+        testonly = True,
+        srcs = ["main.cc"],
+        copts = [
+            "-include",
+            "fidl/" + test["fidl_library"] + "/cpp/fidl.h",
+        ],
+        target_compatible_with = ["@platforms//os:fuchsia"],
+        visibility = ["//visibility:private"],
+        deps = [":%s_cpp" % test["fidl_target"]],
+    )
+    for test in DANGEROUS_TESTS
+]
+
+[
+    fx_cc_binary(
+        name = test["hlcpp_target"],
+        testonly = True,
+        srcs = ["main.cc"],
+        copts = [
+            "-include",
+            test["fidl_library"].replace(".", "/") + "/cpp/fidl.h",
+        ],
+        target_compatible_with = ["@platforms//os:fuchsia"],
+        visibility = ["//visibility:private"],
+        deps = [":%s_hlcpp" % test["fidl_target"]],
+    )
+    for test in DANGEROUS_TESTS
+]
+
+filegroup(
+    name = "cpp_targets",
+    testonly = True,
+    srcs = [
+        ":" + test["cpp_target"]
+        for test in DANGEROUS_TESTS
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+)
+
+filegroup(
+    name = "hlcpp_targets",
+    testonly = True,
+    srcs = [
+        ":" + test["hlcpp_target"]
+        for test in DANGEROUS_TESTS
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+)
+
+filegroup(
+    name = "rust_targets",
+    testonly = True,
+    srcs = [
+        ":%s_rust" % test["fidl_target"]
+        for test in DANGEROUS_TESTS
+        if test["rust_target"]
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+)
+
+filegroup(
+    name = "tests",
+    testonly = True,
+    srcs = [
+        ":" + test["fidl_target"]
+        for test in DANGEROUS_TESTS
+    ] + [
+        ":cpp_targets",
+        ":hlcpp_targets",
+        ":rust_targets",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

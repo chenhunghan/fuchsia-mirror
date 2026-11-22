@@ -5,8 +5,8 @@
 #ifndef SRC_GRAPHICS_DISPLAY_DRIVERS_INTEL_DISPLAY_GTT_H_
 #define SRC_GRAPHICS_DISPLAY_DRIVERS_INTEL_DISPLAY_GTT_H_
 
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/vmo.h>
 

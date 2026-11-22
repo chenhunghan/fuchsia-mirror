@@ -18,7 +18,6 @@ fuchsia_driver_component("msd-virtio-driver-component") {
   dml_label = ":msd-virtio-gpu-dml"
   component_name = "msd_virtio"
   deps = [ ":msd-virtio-gpu-driver" ]
-  info = "meta/msd-virtio-info.json"
 }
 
 driver_bind_rules("msd-virtio-bind") {

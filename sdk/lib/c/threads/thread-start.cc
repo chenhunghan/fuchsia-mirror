@@ -59,7 +59,7 @@ uint64_t ThreadAbiReg(std::same_as<Thread> auto& thread) {
 // $tp set up yet.
 #if FUCHSIA_API_LEVEL_AT_MOST(30)
 
-// TODO(https://fxbug.dev/478347581): Ideally &StartThread itself would be the
+// TODO(https://fxbug.dev/537374958): Ideally &StartThread itself would be the
 // entry PC value given to zx::thread::start.  It gets two arguments in
 // registers, which are the user's function pointer and the void* to pass it.
 //

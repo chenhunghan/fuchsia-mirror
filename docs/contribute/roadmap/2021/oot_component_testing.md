@@ -290,7 +290,7 @@ covered in a [separate roadmap document][oot-system-testing].
 [components-test]: /docs/development/testing/components/README.md
 [covargs]: /tools/debug/covargs/
 [coverage]: /docs/contribute/testing/coverage.md
-[dac]: /docs/contribute/roadmap/2020/overview.md#implementing_drivers_as_components
+[dac]: /docs/contribute/roadmap/2020/overview.md#implementing-drivers-as-components
 [driver-abi-stability]: /docs/contribute/roadmap/2021/stable_driver_runtime.md
 [ffx]: /docs/development/tools/ffx/getting-started.md
 [ffx-plugin]: /docs/development/tools/ffx/development/README.md
@@ -312,13 +312,13 @@ covered in a [separate roadmap document][oot-system-testing].
 [llvm]: https://llvm.org/
 [oot-system-testing]: /docs/contribute/roadmap/2021/oot_system_testing.md
 [overnet]: /src/connectivity/overnet/README.md
-[qemu-download]: /docs/development/idk/download.md#qemu
+[qemu-download]: /docs/development/idk/download.md
 [realm-builder]: /docs/development/testing/components/realm_builder.md
 [realm-builder-languages]: /docs/development/testing/components/realm_builder.md#language-feature-matrix
 [rfc-0015]: /docs/contribute/governance/rfcs/0015_cts.md
 [rfc-0106]: /docs/contribute/governance/rfcs/0106_manifest_includes_in_sdk.md
 [runner-elf]: /docs/development/testing/components/test_runner_framework.md#elf-test-runner
-[runner-go]: /docs/development/testing/components/test_runner_framework.md#gotest-runner
+[runner-go]: /docs/development/testing/components/test_runner_framework.md#test-runners
 [runner-gtest]: /docs/development/testing/components/test_runner_framework.md#gtest-runner
 [runner-rust]: /docs/development/testing/components/test_runner_framework.md#rust-runner
 [rust]: https://www.rust-lang.org/

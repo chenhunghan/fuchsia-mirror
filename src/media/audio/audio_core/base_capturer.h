@@ -164,6 +164,8 @@ class BaseCapturer : public AudioObject,
   virtual void ReportStop();
   virtual void OnStateChanged(State old_state, State new_state);
   virtual void SetRoutingProfile(bool routable) = 0;
+  // Returns the resampler type used when linking sources to this capturer's mix stage.
+  virtual Mixer::Resampler resampler_type() const { return Mixer::Resampler::Default; }
 
   static bool StateIsRoutable(BaseCapturer::State state) {
     return state != BaseCapturer::State::WaitingForVmo && state != BaseCapturer::State::Shutdown;

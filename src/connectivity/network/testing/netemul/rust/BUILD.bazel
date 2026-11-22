@@ -9,7 +9,6 @@ package(default_applicable_licenses = ["//:license"])
 
 rustc_library(
     name = "lib",
-    testonly = True,
     srcs = ["src/lib.rs"],
     aspect_hints = [":lib_includes"],
     build_flags = ["//build/config/rust/lints:deny_unused_results"],

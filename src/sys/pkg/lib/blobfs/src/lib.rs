@@ -18,7 +18,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use vfs::execution_scope::ExecutionScope;
 use vfs::file::StreamIoConnection;
-use vfs::{ObjectRequest, ObjectRequestRef, ProtocolsExt};
+use vfs::{ObjectRequestRef, ProtocolsExt as _};
 use zx::Status;
 
 pub mod mock;
@@ -295,9 +295,10 @@ impl Client {
         self.reader.get_vmo(hash).await
     }
 
-    /// Open a blob for read using open3. `scope` will only be used if the client was configured to
-    /// use fuchsia.fxfs.BlobReader.
-    pub fn open_blob_for_read(
+    /// Open a blob for read. This should be called from within a
+    /// [`vfs::ObjectRequest::handle_async`] callback so that any returned error is sent via
+    /// `object_request`.
+    pub async fn open_blob_for_read(
         &self,
         blob: &Hash,
         flags: fio::Flags,
@@ -310,10 +311,24 @@ impl Client {
         if flags.creation_mode() != vfs::CreationMode::Never {
             return Err(zx::Status::NOT_SUPPORTED);
         }
-        // Errors below will be communicated via the `object_request` channel.
-        let object_request = object_request.take();
-        let () = open_blob_with_reader(self.reader.clone(), *blob, scope, flags, object_request);
-        Ok(())
+        let vmo = self.reader.get_vmo(blob).await.map_err(|e| match e {
+            GetBlobVmoError::GetVmo(status) => status,
+            GetBlobVmoError::Fidl(fidl::Error::ClientChannelClosed { epitaph, .. }) => {
+                error!("Blob reader channel closed: {epitaph:?}");
+                match epitaph.into() {
+                    Err(status) => status,
+                    Ok(()) => zx::Status::PEER_CLOSED,
+                }
+            }
+            GetBlobVmoError::Fidl(fidl_error) => {
+                error!("Transport error on get_vmo: {:?}", fidl_error);
+                zx::Status::INTERNAL
+            }
+            GetBlobVmoError::OpenBlob(fuchsia_fs::node::OpenError::OpenError(status)) => status,
+            GetBlobVmoError::OpenBlob(_) => zx::Status::INTERNAL,
+        })?;
+        let vmo_blob = vmo_blob::VmoBlob::new(vmo, (*blob).into());
+        object_request.create_connection::<StreamIoConnection<_>, _>(scope, vmo_blob, flags).await
     }
 
     /// Returns the list of known blobs in blobfs.
@@ -419,39 +434,6 @@ impl Client {
     }
 }
 
-/// Spawns a task on `scope` to attempt opening `blob` via `reader`. Creates a file connection to
-/// the blob using [`vmo_blob::VmoBlob`]. Errors will be sent via `object_request` asynchronously.
-fn open_blob_with_reader<P: ProtocolsExt + Send>(
-    reader: Arc<dyn BlobReader>,
-    blob_hash: Hash,
-    scope: ExecutionScope,
-    protocols: P,
-    object_request: ObjectRequest,
-) {
-    scope.clone().spawn(object_request.handle_async(async move |object_request| {
-        let vmo = reader.get_vmo(&blob_hash).await.map_err(|e| match e {
-            GetBlobVmoError::GetVmo(status) => status,
-            GetBlobVmoError::Fidl(fidl::Error::ClientChannelClosed { epitaph, .. }) => {
-                error!("Blob reader channel closed: {epitaph:?}");
-                match epitaph.into() {
-                    Err(status) => status,
-                    Ok(()) => zx::Status::PEER_CLOSED,
-                }
-            }
-            GetBlobVmoError::Fidl(fidl_error) => {
-                error!("Transport error on get_vmo: {:?}", fidl_error);
-                zx::Status::INTERNAL
-            }
-            GetBlobVmoError::OpenBlob(fuchsia_fs::node::OpenError::OpenError(status)) => status,
-            GetBlobVmoError::OpenBlob(_) => zx::Status::INTERNAL,
-        })?;
-        let vmo_blob = vmo_blob::VmoBlob::new(vmo, blob_hash.into());
-        object_request
-            .create_connection::<StreamIoConnection<_>, _>(scope, vmo_blob, protocols)
-            .await
-    }));
-}
-
 #[derive(thiserror::Error, Debug)]
 #[allow(missing_docs)]
 pub enum GetBlobVmoError {
@@ -530,6 +512,7 @@ mod tests {
     use super::*;
     use assert_matches::assert_matches;
     use blobfs_ramdisk::BlobfsRamdisk;
+    use delivery_blob::DeliveryBlobType;
     use fuchsia_async as fasync;
     use futures::stream::TryStreamExt as _;
     use std::sync::Arc;
@@ -638,19 +621,21 @@ mod tests {
         blobfs.stop().await.unwrap();
     }
 
-    #[test_case(blobfs_ramdisk::Implementation::CppBlobfs; "cpp_blobfs")]
-    #[test_case(blobfs_ramdisk::Implementation::Fxblob; "fxblob")]
+    #[test_case(blobfs_ramdisk::Implementation::CppBlobfs, DeliveryBlobType::Type1; "cpp_blobfs_type1")]
+    #[test_case(blobfs_ramdisk::Implementation::CppBlobfs, DeliveryBlobType::Type2; "cpp_blobfs_type2")]
+    #[test_case(blobfs_ramdisk::Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+    #[test_case(blobfs_ramdisk::Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
     #[fuchsia::test]
     async fn has_blob_return_false_if_blob_is_partially_written(
         blob_impl: blobfs_ramdisk::Implementation,
+        delivery_type: DeliveryBlobType,
     ) {
         let blobfs = BlobfsRamdisk::builder().implementation(blob_impl).start().await.unwrap();
         let client = Client::for_ramdisk(&blobfs);
 
         let content = &[3; 1024];
         let hash = fuchsia_merkle::root_from_slice(content);
-        let delivery_content =
-            delivery_blob::Type1Blob::generate(content, delivery_blob::CompressionMode::Always);
+        let delivery_content = delivery_blob::generate(delivery_type, content);
 
         let writer = client.open_blob_for_write(&hash, false).await.unwrap().into_proxy();
         assert!(!client.blob_present_and_up_to_date(&hash).await);

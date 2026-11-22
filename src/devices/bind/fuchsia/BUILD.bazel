@@ -2,27 +2,31 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load(
-    "@rules_fuchsia//fuchsia:defs.bzl",
-    "fuchsia_bind_cc_library",
-    "fuchsia_bind_library",
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Read by the bindc unit tests.
+exports_files(
+    ["fuchsia.bind"],
+    visibility = ["//tools/bindc:__pkg__"],
 )
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
-
-fuchsia_bind_library(
+bind_library(
     name = "fuchsia",
-    srcs = [
-        "fuchsia.bind",
-    ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
+    src = "fuchsia.bind",
+    api_area = "Unknown",
+    category = "partner",
+    visibility = ["//:__subpackages__"],
 )
 
-fuchsia_bind_cc_library(
+# Compatibility alias for existing Bazel callers; GN callers use `:fuchsia_cpp`.
+# @bazel2gn:skip
+alias(
     name = "fuchsia_cc",
-    library = "fuchsia",
-    target_compatible_with = ["@platforms//os:fuchsia"],
+    actual = ":fuchsia_cpp",
+    visibility = [
+        "//sdk/lib/driver/compat/cpp:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
 )

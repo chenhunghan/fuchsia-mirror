@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::{Auditable, common_cap, selinux_hooks};
+use super::{Auditable, selinux_hooks};
 use crate::vfs::socket::{Socket, SocketFile, SocketHandle};
 use crate::vfs::{DirEntryHandle, DowncastedFile, FsNode};
 use std::ops::Deref;
@@ -15,7 +15,6 @@ use std::ops::Deref;
 #[derive(Debug, Default)]
 pub struct FsNodeState {
     selinux: selinux_hooks::FsNodeState,
-    common_cap: common_cap::FsNodeState,
 }
 
 impl FsNodeState {
@@ -52,11 +51,6 @@ impl<'a> NonPrivateFsNode<'a> {
     /// Returns the SELinux [`selinux_hooks::FsNodeState`] for this non-private node.
     pub(super) fn selinux_state(self) -> &'a selinux_hooks::FsNodeState {
         &self.fs_node.security_state.selinux
-    }
-
-    /// Returns the common capabilities [`common_cap::FsNodeState`] for this non-private node.
-    pub(super) fn common_cap_state(self) -> &'a common_cap::FsNodeState {
-        &self.fs_node.security_state.common_cap
     }
 }
 

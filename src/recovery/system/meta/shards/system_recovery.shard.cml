@@ -16,33 +16,15 @@
     ],
     use: [
         {
-            directory: "config-data",
-            rights: [ "r*" ],
-            path: "/config/data",
-        },
-        {
             directory: "system-recovery-config",
             from: "#system-recovery-config",
             rights: [ "r*" ],
             path: "/system-recovery-config",
         },
         {
-            directory: "dev-sys-platform",
-            rights: [ "r*" ],
-            path: "/dev/sys/platform",
-        },
-        {
-            storage: "tmp",
-            path: "/tmp",
-        },
-        {
             protocol: [
                 "fuchsia.boot.WriteOnlyLog",
-                "fuchsia.feedback.CrashReporter",
-                "fuchsia.hwinfo.Product",
-                "fuchsia.location.namedplace.RegulatoryRegionConfigurator",
                 "fuchsia.recovery.FactoryReset",
-                "fuchsia.sysmem.Allocator",
                 "fuchsia.sysmem2.Allocator",
             ],
         },

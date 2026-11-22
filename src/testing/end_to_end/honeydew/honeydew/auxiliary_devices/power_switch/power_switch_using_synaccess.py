@@ -35,6 +35,7 @@ class PowerSwitchUsingSynaccess(power_switch.PowerSwitch):
     def __init__(
         self,
         host: str,
+        outlet: int,
         username: str | None = None,
         password: str | None = None,
     ) -> None:
@@ -42,28 +43,24 @@ class PowerSwitchUsingSynaccess(power_switch.PowerSwitch):
         password = password or "admin"  # default password
         self._host = host
         self.np02b = NP02B(host, username, password)
-
-    def power_on(self, outlet: int | None = None) -> None:
-        if outlet is None:
-            raise PowerSwitchSynaccessError(
-                "Outlet number must be specified for Synaccess PDU operation."
-            )
         try:
-            self.np02b.port(outlet).set(PowerState.ON)
+            self._port = self.np02b.port(outlet)
         except Exception as err:
             raise PowerSwitchSynaccessError(err) from err
 
-    def power_off(self, outlet: int | None = None) -> None:
-        if outlet is None:
-            raise PowerSwitchSynaccessError(
-                "Outlet number must be specified for Synaccess PDU operation."
-            )
+    def power_on(self) -> None:
         try:
-            self.np02b.port(outlet).set(PowerState.OFF)
+            self._port.set(PowerState.ON)
         except Exception as err:
             raise PowerSwitchSynaccessError(err) from err
 
-    def status(self) -> dict[str, bool]:
+    def power_off(self) -> None:
+        try:
+            self._port.set(PowerState.OFF)
+        except Exception as err:
+            raise PowerSwitchSynaccessError(err) from err
+
+    def _status(self) -> dict[str, bool]:
         """Returns the status of the np02b outlets.
 
         Return:

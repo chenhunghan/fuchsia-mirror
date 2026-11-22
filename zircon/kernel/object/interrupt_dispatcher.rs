@@ -10,22 +10,23 @@ use core::cell::UnsafeCell;
 use core::convert::Infallible;
 use core::mem::MaybeUninit;
 use core::pin::Pin;
-use core::ptr::NonNull;
 use fbl::{Canary, RefPtr};
 use ksync::{KMutex, guarded, lock};
 use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_DEFAULT_INTERRUPT_RIGHTS, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_INTERRUPT, zx_info_interrupt_t,
-    zx_instant_boot_t, zx_koid_t, zx_rights_t, zx_time_t,
+    ZX_DEFAULT_INTERRUPT_RIGHTS, ZX_OBJ_TYPE_INTERRUPT, zx_info_interrupt_t, zx_instant_boot_t,
+    zx_koid_t, zx_rights_t, zx_time_t,
 };
 
+use super::interrupt_dispatcher_ffi::cpp_interrupt_dispatcher_create;
 use super::interrupt_event_dispatcher::InterruptEventDispatcher;
 use super::msi_interrupt_dispatcher::MsiInterruptDispatcher;
 use super::port_dispatcher::{PortDispatcher, PortInterruptPacket};
 use super::thread_dispatcher::{AutoBlocked, Blocked};
 use super::virtual_interrupt_dispatcher::VirtualInterruptDispatcher;
+use crate::counters::define_kcounter;
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::AutounsignalEvent;
 use crate::kernel::thread::AutoPreemptDisabler;
@@ -33,26 +34,10 @@ use crate::platform_rs::timer::{
     CurrentTicksObservation, current_boot_time, timer_current_mono_and_boot_ticks,
     timer_get_ticks_to_time_ratio,
 };
+use crate::wake_vector::{AckBehavior, Diagnostics, WakeEvent};
 
-unsafe extern "C" {
-    fn cpp_interrupt_dispatcher_create(
-        flags: u32,
-        options: u32,
-        ctx: *mut u8,
-        init_fn: unsafe extern "C" fn(disp: &InterruptDispatcher, ctx: *mut u8),
-        out: *mut *mut InterruptDispatcher,
-    ) -> zx_types::zx_status_t;
-    fn cpp_interrupt_dispatcher_wake_event_initialize(disp: &InterruptDispatcher);
-    fn cpp_interrupt_dispatcher_wake_event_destroy(disp: &InterruptDispatcher);
-    fn cpp_interrupt_dispatcher_wake_event_trigger(
-        disp: &InterruptDispatcher,
-        timestamp: zx_time_t,
-    );
-    fn cpp_interrupt_dispatcher_wake_event_acknowledge(
-        disp: &InterruptDispatcher,
-        remain_signaled: bool,
-    );
-}
+define_kcounter!(DISPATCHER_INTERRUPT_CREATE_COUNT, "dispatcher.interrupt.create", Sum);
+define_kcounter!(DISPATCHER_INTERRUPT_DESTROY_COUNT, "dispatcher.interrupt.destroy", Sum);
 
 const DEFAULT_RIGHTS: zx_rights_t = ZX_DEFAULT_INTERRUPT_RIGHTS;
 
@@ -95,73 +80,47 @@ pub enum PostAckState {
     Retriggered,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AckBehavior {
-    ClearSignaled,
-    RemainSignaled,
-}
+/// Zero-sized token guarded by `InterruptDispatcherState::spinlock` to prove at compile time that
+/// `trigger` and `acknowledge` on the embedded [`WakeEvent`] are serialized without forming
+/// `&mut WakeEvent` (since [`WakeEvent`] may be concurrently read from `GLOBAL_LIST` /
+/// `PENDING_LIST`).
+struct WakeEventToken;
 
-/// Diagnostics information for a wake vector interrupt.
-#[repr(C)]
-pub struct WakeVectorDiagnostics {
-    /// Whether the wake vector is currently enabled.
-    pub enabled: bool,
-    /// Kernel object ID of the interrupt dispatcher.
-    pub koid: zx_koid_t,
-    /// NUL-terminated extra diagnostic string.
-    pub extra: [u8; ZX_MAX_NAME_LEN],
-}
-
-impl WakeVectorDiagnostics {
-    /// Formats `args` as a NUL-terminated string into `self.extra`.
-    pub fn print_extra(&mut self, args: core::fmt::Arguments<'_>) {
-        struct SliceWriter<'a> {
-            buf: &'a mut [u8],
-            pos: usize,
-        }
-        impl core::fmt::Write for SliceWriter<'_> {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                let bytes = s.as_bytes();
-                let avail = self.buf.len().saturating_sub(1).saturating_sub(self.pos);
-                let len = bytes.len().min(avail);
-                self.buf[self.pos..self.pos + len].copy_from_slice(&bytes[..len]);
-                self.pos += len;
-                self.buf[self.pos] = 0;
-                Ok(())
-            }
-        }
-        let mut w = SliceWriter { buf: &mut self.extra, pos: 0 };
-        let _ = core::fmt::Write::write_fmt(&mut w, args);
-    }
-}
-
-struct WakeEventGuard;
-
-impl WakeEventGuard {
+impl WakeEventToken {
+    /// # Safety
+    ///
+    /// `wake_event` must belong to the same [`InterruptDispatcherState`] as `self`, and that
+    /// dispatcher must have `is_wake_vector() == true` (so `wake_event` was initialized in
+    /// [`InterruptDispatcher::create_raw`] and remains initialized until
+    /// [`InterruptDispatcher::teardown`] runs at `ref_count == 0`).
     #[inline]
-    fn trigger(&mut self, disp: &InterruptDispatcher, timestamp: zx_instant_boot_t) {
-        // SAFETY: `self` is `#[guarded_by(spinlock)]` in `InterruptDispatcherState`, so holding
-        // `&mut self` proves the caller holds `spinlock` (`TrackedSpinlock` with `IrqSavePolicy`),
-        // satisfying `TA_GUARDED(spinlock_)` for `wake_event_.Trigger(...)`.
-        unsafe {
-            cpp_interrupt_dispatcher_wake_event_trigger(disp, timestamp);
-        }
+    unsafe fn trigger(&mut self, wake_event: &WakeEvent, timestamp: zx_instant_boot_t) {
+        // SAFETY: `&mut self` (guarded by `InterruptDispatcherState::spinlock`) serializes all
+        // `trigger` and `acknowledge` calls on the owning dispatcher's `wake_event`, and the
+        // caller guarantees `wake_event` belongs to that live wake-vector dispatcher (so
+        // `wake_event` is initialized and `teardown` cannot run while a reference to the
+        // dispatcher is live).
+        let _ = unsafe { wake_event.trigger(timestamp) };
     }
 
+    /// # Safety
+    ///
+    /// `wake_event` must belong to the same [`InterruptDispatcherState`] as `self`, and that
+    /// dispatcher must have `is_wake_vector() == true` (so `wake_event` was initialized in
+    /// [`InterruptDispatcher::create_raw`] and remains initialized until
+    /// [`InterruptDispatcher::teardown`] runs at `ref_count == 0`).
     #[inline]
-    fn acknowledge(&mut self, disp: &InterruptDispatcher, behavior: AckBehavior) {
-        let remain_signaled = matches!(behavior, AckBehavior::RemainSignaled);
-        // SAFETY: `self` is `#[guarded_by(spinlock)]` in `InterruptDispatcherState`, so holding
-        // `&mut self` proves the caller holds `spinlock` (`TrackedSpinlock` with `IrqSavePolicy`),
-        // satisfying `TA_GUARDED(spinlock_)` for `wake_event_.Acknowledge(...)`.
-        unsafe {
-            cpp_interrupt_dispatcher_wake_event_acknowledge(disp, remain_signaled);
-        }
+    unsafe fn acknowledge(&mut self, wake_event: &WakeEvent, behavior: AckBehavior) {
+        // SAFETY: `&mut self` (guarded by `InterruptDispatcherState::spinlock`) serializes all
+        // `trigger` and `acknowledge` calls on the owning dispatcher's `wake_event`, and the
+        // caller guarantees `wake_event` belongs to that live wake-vector dispatcher (so
+        // `wake_event` is initialized and `teardown` cannot run while a reference to the
+        // dispatcher is live).
+        unsafe { wake_event.acknowledge(behavior) };
     }
 }
 
 /// Concrete interrupt dispatcher variant stored inside [`InterruptDispatcherState`].
-#[repr(C)]
 pub enum InterruptKind {
     /// Virtual interrupt dispatcher.
     Virtual(VirtualInterruptDispatcher),
@@ -171,9 +130,18 @@ pub enum InterruptKind {
     Msi(MsiInterruptDispatcher),
 }
 
-zr::static_assert_size_and_align!(InterruptKind, 80, 8);
+zr::static_assert_size_and_align!(InterruptKind, 48, 8);
 
 impl InterruptKind {
+    #[inline]
+    fn fill_diagnostics(&self, koid: zx_koid_t, diagnostics: &mut Diagnostics) {
+        match self {
+            Self::Virtual(v) => v.fill_diagnostics(koid, diagnostics),
+            Self::Event(ev) => ev.fill_diagnostics(diagnostics),
+            Self::Msi(msi) => msi.fill_diagnostics(diagnostics),
+        }
+    }
+
     #[inline]
     fn mask_interrupt(&self) {
         match self {
@@ -224,22 +192,24 @@ pub struct InterruptDispatcherState {
     canary: Canary<{ fbl::magic(b"INTD") }>,
     flags: u32,
     options: u32,
-    dispatcher: NonNull<InterruptDispatcher>,
+
+    // Current state of the interrupt object
+    #[guarded_by(spinlock)]
+    state: InterruptState,
+
+    #[guarded_by(spinlock)]
+    wake_event_token: WakeEventToken,
 
     #[pin]
     event: AutounsignalEvent,
 
     kind: UnsafeCell<MaybeUninit<InterruptKind>>,
 
-    #[guarded_by(spinlock)]
-    wake_event: WakeEventGuard,
+    #[pin]
+    wake_event: WakeEvent,
 
     #[guarded_by(spinlock)]
     timestamp: zx_time_t,
-
-    // Current state of the interrupt object
-    #[guarded_by(spinlock)]
-    state: InterruptState,
 
     #[pin]
     port_packet: PortInterruptPacket,
@@ -258,39 +228,38 @@ pub struct InterruptDispatcherState {
 #[pinned_drop]
 impl PinnedDrop for InterruptDispatcherState {
     fn drop(self: Pin<&mut Self>) {
-        // SAFETY: `self.kind` was initialized during `rust_interrupt_dispatcher_state_init`
-        // and must be dropped first (matching C++ derived-before-base destructor order)
-        // while all `InterruptDispatcherState` fields (including `canary` and `flags`) and
-        // C++ `InterruptDispatcher` members (`wake_event_`) are still alive.
-        unsafe {
-            (*self.kind.get()).assume_init_drop();
-        }
+        // By the time the state is dropped, `InterruptDispatcher::teardown` has already dropped
+        // `kind` and unlinked `wake_event` from the global and pending wake-vector lists, so
+        // nothing else can reach this state any more.
+        DISPATCHER_INTERRUPT_DESTROY_COUNT.add(1);
     }
 }
 
-// SAFETY: `InterruptDispatcherState` synchronizes all mutable fields via `lock` and `spinlock`,
-// and `dispatcher` points to the enclosing `InterruptDispatcher` which outlives `Self`.
+// SAFETY: `InterruptDispatcherState` synchronizes all mutable fields via `lock`, `spinlock`, and
+// `WakeEvent`'s internal list locks.
 unsafe impl Send for InterruptDispatcherState {}
-// SAFETY: Shared references are synchronized via `lock` and `spinlock`.
+// SAFETY: Shared references are synchronized via `lock`, `spinlock`, and `WakeEvent`'s internal
+// list locks.
 unsafe impl Sync for InterruptDispatcherState {}
 
 impl InterruptDispatcherState {
     /// Creates a pin-initializer for `InterruptDispatcherState`.
-    pub fn new(
-        dispatcher: NonNull<InterruptDispatcher>,
+    pub(super) fn init(
+        _dispatcher: *const InterruptDispatcher,
         flags: u32,
         options: u32,
     ) -> impl PinInit<Self, Infallible> {
+        DISPATCHER_INTERRUPT_CREATE_COUNT.add(1);
         pin_init!(Self {
             canary: Canary::new(),
             flags,
             options,
-            dispatcher,
+            state: InterruptState::Idle.into(),
+            wake_event_token: WakeEventToken.into(),
             event <- AutounsignalEvent::init(false),
             kind: UnsafeCell::new(MaybeUninit::uninit()),
-            wake_event: WakeEventGuard.into(),
+            wake_event <- WakeEvent::init(),
             timestamp: 0.into(),
-            state: InterruptState::Idle.into(),
             port_packet <- PortInterruptPacket::init(),
             port_dispatcher: None.into(),
             lock <- KMutex::init(),
@@ -301,7 +270,17 @@ impl InterruptDispatcherState {
     /// Returns `true` if this interrupt is a virtual interrupt.
     #[inline]
     pub fn is_virtual(&self) -> bool {
-        matches!(self.kind(), InterruptKind::Virtual(_))
+        (self.flags & INTERRUPT_VIRTUAL) != 0
+    }
+
+    #[inline]
+    fn is_wake_vector(&self) -> bool {
+        (self.flags & INTERRUPT_WAKE_VECTOR) != 0
+    }
+
+    #[inline]
+    fn has_wake_event(&self) -> bool {
+        !self.is_virtual() || self.is_wake_vector()
     }
 
     #[inline]
@@ -315,8 +294,12 @@ impl InterruptDispatcherState {
     /// Returns a reference to the initialized [`InterruptKind`] variant.
     #[inline]
     pub fn kind(&self) -> &InterruptKind {
-        // SAFETY: `self.kind` is initialized during `rust_interrupt_dispatcher_state_init`
-        // before any method accesses `kind()`, and remains initialized until `PinnedDrop::drop`.
+        // SAFETY: Every `InterruptDispatcherState` is constructed only inside
+        // `InterruptDispatcher::create_raw`, which writes `self.kind` before returning any
+        // reference to the `InterruptDispatcher` (and before registering any interrupt handler),
+        // and `self.kind` remains initialized without mutation until
+        // `InterruptDispatcher::teardown` drops it in `~InterruptDispatcher()` at `ref_count == 0`
+        // when no `&Self` exists outside `teardown`.
         unsafe { (*self.kind.get()).assume_init_ref() }
     }
 
@@ -331,7 +314,11 @@ impl InterruptDispatcherState {
     }
 
     /// Triggers a virtual interrupt at `timestamp`.
-    pub fn trigger(&self, disp: &InterruptDispatcher, timestamp: zx_time_t) -> Result<(), Status> {
+    pub(super) fn trigger(
+        &self,
+        disp: &InterruptDispatcher,
+        timestamp: zx_time_t,
+    ) -> Result<(), Status> {
         if (self.flags & INTERRUPT_VIRTUAL) == 0 {
             return Err(Status::BAD_STATE);
         }
@@ -353,7 +340,7 @@ impl InterruptDispatcherState {
             *fields.timestamp = timestamp;
         }
 
-        if disp.is_wake_vector() {
+        if self.is_wake_vector() {
             // If this interrupt is configured to use Monotonic timestamps, then we need
             // to capture a new boot timestamp to use as the trigger time for the wake
             // vector. There is no way (nor will there ever be a way) to convert (after
@@ -363,7 +350,11 @@ impl InterruptDispatcherState {
             } else {
                 current_boot_time().0
             };
-            fields.wake_event.trigger(disp, boot_time_trigger);
+            // SAFETY: `fields.wake_event_token` and `self.wake_event` belong to `self`, and
+            // `self.is_wake_vector()` is `true`.
+            unsafe {
+                fields.wake_event_token.trigger(&self.wake_event, boot_time_trigger);
+            }
         }
 
         if *fields.state == InterruptState::NeedAck && fields.port_dispatcher.is_some() {
@@ -395,7 +386,7 @@ impl InterruptDispatcherState {
     }
 
     /// Destroys the interrupt state, masking and unregistering any underlying IRQ.
-    pub fn destroy(&self, disp: &InterruptDispatcher) -> Result<(), Status> {
+    pub(super) fn destroy(&self, disp: &InterruptDispatcher) -> Result<(), Status> {
         let old_state = {
             lock!(let mut guard = self.lock_spinlock());
             let fields = guard.as_mut().fields_mut();
@@ -462,62 +453,78 @@ impl InterruptDispatcher {
         DEFAULT_RIGHTS
     }
 
-    /// Initializes the `InterruptKind` of this `InterruptDispatcher` during construction.
+    /// Allocates and initializes a new `InterruptDispatcher` using `init_kind` to populate its
+    /// [`InterruptKind`].
+    pub(super) fn create_raw<F>(flags: u32, options: u32, init_kind: F) -> Option<RefPtr<Self>>
+    where
+        F: FnOnce() -> InterruptKind,
+    {
+        // SAFETY: `cpp_interrupt_dispatcher_create` returns either null on allocation failure or a
+        // freshly allocated, adopted `InterruptDispatcher` whose `InterruptDispatcherState` has
+        // been pin-initialized with an uninitialized `kind` and unlinked `wake_event`.
+        let raw_disp = unsafe { cpp_interrupt_dispatcher_create(flags, options) };
+        if raw_disp.is_null() {
+            return None;
+        }
+        // SAFETY: `raw_disp` is non-null and exported from `fbl::RefPtr<InterruptDispatcher>`.
+        let disp = unsafe { RefPtr::from_raw(raw_disp) };
+        let kind = init_kind();
+        // SAFETY: `disp` is uniquely owned here (`init_kind` has no access to `disp`, and kernel
+        // builds use `panic = "abort"` so `disp` cannot be dropped before initialization finishes),
+        // so no concurrent reader of `kind` exists yet.
+        unsafe {
+            (*disp.state().kind.get()).write(kind);
+        }
+        if disp.state().has_wake_event() {
+            // SAFETY: `init_global_list_lock()` runs at `LK_INIT_LEVEL_EARLIEST` before any
+            // `InterruptDispatcher` can be created, `wake_event` has not yet been initialized, and
+            // `disp.state().has_wake_event()` is `true` so `InterruptDispatcher::teardown` will
+            // call `wake_event.destroy()` before `wake_event` is dropped.
+            unsafe {
+                disp.initialize_wake_event();
+            }
+        }
+        Some(disp)
+    }
+
+    /// Tears down the variant payload and unlinks the embedded [`WakeEvent`] from the global and
+    /// pending wake-vector lists before [`InterruptDispatcherState`] is dropped in place.
+    ///
+    /// Called from `InterruptDispatcher::~InterruptDispatcher()` while `self` is still accessed
+    /// through a shared reference, before `rust_interrupt_dispatcher_state_destroy` forms an
+    /// exclusive `&mut InterruptDispatcherState` (which would otherwise alias concurrent shared
+    /// `&WakeEvent` accesses on `GLOBAL_LIST` / `PENDING_LIST`).
     ///
     /// # Safety
     ///
-    /// Must be called exactly once during `init_kind` in `InterruptDispatcher::create_raw`
-    /// after `InterruptDispatcherState` has been initialized and before any method accesses
-    /// `kind()`.
-    #[inline]
-    pub unsafe fn init_kind(&self, kind: InterruptKind) {
-        // SAFETY: Guaranteed by the caller to be called once during single-threaded
-        // construction before `kind()` is accessed.
+    /// Must only be called once, from `InterruptDispatcher::~InterruptDispatcher()`
+    /// (`ref_count == 0`) prior to `rust_interrupt_dispatcher_state_destroy`, after
+    /// [`Self::create_raw`] has initialized `kind` (and `wake_event`, when `has_wake_event()` is
+    /// `true`).
+    pub(super) unsafe fn teardown(&self) {
+        let state = self.state();
+        // SAFETY: `create_raw` initialized `state.kind`, `ref_count == 0` guarantees no concurrent
+        // reader of `state.kind` exists (any hardware/MSI IRQ handler was unregistered in
+        // `on_zero_handles` / `destroy`, or never registered on a failed `create` error path), and
+        // `teardown` is called once before `InterruptDispatcherState` is dropped (`MaybeUninit` has
+        // no drop glue).
         unsafe {
-            (*self.state().kind.get()).write(kind);
+            (*state.kind.get()).assume_init_drop();
         }
-    }
-
-    /// Allocates and initializes a new `InterruptDispatcher` using `init_kind` to populate its
-    /// [`InterruptKind`].
-    pub fn create_raw<F>(flags: u32, options: u32, init_kind: F) -> Option<RefPtr<Self>>
-    where
-        F: FnOnce(&Self),
-    {
-        /// # Safety
-        ///
-        /// `disp` must be a valid reference to an `InterruptDispatcher` with initialized
-        /// `InterruptDispatcherState`, and `ctx` must point to a valid `Option<F>`.
-        unsafe extern "C" fn trampoline<F>(disp: &InterruptDispatcher, ctx: *mut u8)
-        where
-            F: FnOnce(&InterruptDispatcher),
-        {
-            // SAFETY: `ctx` is valid per caller contract.
-            let f = unsafe { (&mut *(ctx as *mut Option<F>)).take().unwrap() };
-            f(disp);
+        if state.has_wake_event() {
+            // SAFETY: `create_raw` called `WakeEvent::initialize` because `state.has_wake_event()`
+            // is `true`, `ref_count == 0` guarantees no concurrent `trigger` or `acknowledge` on
+            // `state.wake_event` can run, and `teardown` is called once.
+            unsafe {
+                state.wake_event.destroy();
+            }
         }
-        let mut init_opt = Some(init_kind);
-        let mut raw_disp: *mut Self = core::ptr::null_mut();
-        // SAFETY: `init_opt` is valid on the stack for the duration of
-        // `cpp_interrupt_dispatcher_create`, and `raw_disp` is a valid out-pointer.
-        let status = unsafe {
-            cpp_interrupt_dispatcher_create(
-                flags,
-                options,
-                (&mut init_opt as *mut Option<F>).cast(),
-                trampoline::<F>,
-                &mut raw_disp,
-            )
-        };
-        Status::ok(status).ok()?;
-        // SAFETY: `raw_disp` is a valid exported `RefPtr<InterruptDispatcher>` from C++.
-        Some(unsafe { RefPtr::from_raw(raw_disp) })
     }
 
     /// Returns `true` if this interrupt is configured as a wake vector.
     #[inline]
     pub fn is_wake_vector(&self) -> bool {
-        (self.state().flags & INTERRUPT_WAKE_VECTOR) != 0
+        self.state().is_wake_vector()
     }
 
     #[inline]
@@ -525,35 +532,23 @@ impl InterruptDispatcher {
         self.state().event.signal();
     }
 
-    // Allow subclasses to add/remove the wake event instance from the global diagnostics list at
-    // the appropriate times during initialization and teardown. These methods do not need to be
-    // called unless the subclass needs to be able to wake the system from suspend. See
-    // lib/wake-vector.h for the specific requirements regarding when to initialize and destroy the
-    // wake event.
     /// Initializes the embedded `WakeEvent` and registers it in the global wake-vector list.
-    #[inline]
-    pub fn initialize_wake_event(&self) {
-        // SAFETY: `self` is a valid `InterruptDispatcher`.
+    ///
+    /// # Safety
+    ///
+    /// [`crate::wake_vector::init_global_list_lock`] must have completed, and this method must be
+    /// called at most once during construction in `create_raw` when `self.state().has_wake_event()`
+    /// is `true`.
+    unsafe fn initialize_wake_event(&self) {
+        let koid = self.get_koid();
+        let mut diagnostics = Diagnostics::new(koid);
+        self.state().kind().fill_diagnostics(koid, &mut diagnostics);
+        // SAFETY: `self.state().wake_event` is pinned inside `InterruptDispatcherState` for the
+        // lifetime of `self`, `init_global_list_lock()` has completed, `wake_event` is not yet
+        // initialized, and `has_wake_event()` is `true` so `Self::teardown` will call
+        // `wake_event.destroy()` before `wake_event` is dropped.
         unsafe {
-            cpp_interrupt_dispatcher_wake_event_initialize(self);
-        }
-    }
-
-    /// Destroys the embedded `WakeEvent` and removes it from the global wake-vector list.
-    #[inline]
-    pub fn destroy_wake_event(&self) {
-        // SAFETY: `self` is a valid `InterruptDispatcher`.
-        unsafe {
-            cpp_interrupt_dispatcher_wake_event_destroy(self);
-        }
-    }
-
-    /// Populates wake vector diagnostics for this interrupt dispatcher.
-    pub fn get_diagnostics(&self, diagnostics_out: &mut WakeVectorDiagnostics) {
-        match self.state().kind() {
-            InterruptKind::Virtual(v) => v.get_diagnostics(diagnostics_out),
-            InterruptKind::Event(ev) => ev.get_diagnostics(diagnostics_out),
-            InterruptKind::Msi(msi) => msi.get_diagnostics(diagnostics_out),
+            Pin::new_unchecked(&self.state().wake_event).initialize(&diagnostics);
         }
     }
 
@@ -615,8 +610,14 @@ impl InterruptDispatcher {
                         // if we are a wake vector and our consuming a pending interrupt, then
                         // make sure that our wake event remains signaled as we record the
                         // acknowledgement event.
-                        if self.is_wake_vector() {
-                            fields.wake_event.acknowledge(self, AckBehavior::RemainSignaled);
+                        if state.is_wake_vector() {
+                            // SAFETY: `fields.wake_event_token` and `state.wake_event` belong to
+                            // `state`, and `state.is_wake_vector()` is `true`.
+                            unsafe {
+                                fields
+                                    .wake_event_token
+                                    .acknowledge(&state.wake_event, AckBehavior::RemainSignaled);
+                            }
                         }
 
                         let out_timestamp = *fields.timestamp;
@@ -625,8 +626,14 @@ impl InterruptDispatcher {
                     } else {
                         // There is no pending interrupt. If we are a wake vector, ack our wake
                         // event and clear its signaled state.
-                        if self.is_wake_vector() {
-                            fields.wake_event.acknowledge(self, AckBehavior::ClearSignaled);
+                        if state.is_wake_vector() {
+                            // SAFETY: `fields.wake_event_token` and `state.wake_event` belong to
+                            // `state`, and `state.is_wake_vector()` is `true`.
+                            unsafe {
+                                fields
+                                    .wake_event_token
+                                    .acknowledge(&state.wake_event, AckBehavior::ClearSignaled);
+                            }
                         }
                     }
 
@@ -723,13 +730,18 @@ impl InterruptDispatcher {
 
         // If we are a wake vector, trigger the wake event which will wake the system
         // if suspended and prevent entering suspend until acknowledged.
-        if self.is_wake_vector() {
-            fields.wake_event.trigger(
-                self,
-                boot_trigger_time.unwrap_or_else(|| {
-                    timer_get_ticks_to_time_ratio().scale::<{ Round::DOWN }>(trigger_time.boot_now)
-                }),
-            );
+        if state.is_wake_vector() {
+            // SAFETY: `fields.wake_event_token` and `state.wake_event` belong to `state`, and
+            // `state.is_wake_vector()` is `true`.
+            unsafe {
+                fields.wake_event_token.trigger(
+                    &state.wake_event,
+                    boot_trigger_time.unwrap_or_else(|| {
+                        timer_get_ticks_to_time_ratio()
+                            .scale::<{ Round::DOWN }>(trigger_time.boot_now)
+                    }),
+                );
+            }
         }
 
         if fields.port_dispatcher.is_some() {
@@ -898,8 +910,14 @@ impl InterruptDispatcher {
                     // If we are a wake vector, record our last_ack timestamp, but do not
                     // clear the signaled state. We just sent a new port packet, so there
                     // is another interrupt signal on its way to user mode.
-                    if self.is_wake_vector() {
-                        fields.wake_event.acknowledge(self, AckBehavior::RemainSignaled);
+                    if state.is_wake_vector() {
+                        // SAFETY: `fields.wake_event_token` and `state.wake_event` belong to
+                        // `state`, and `state.is_wake_vector()` is `true`.
+                        unsafe {
+                            fields
+                                .wake_event_token
+                                .acknowledge(&state.wake_event, AckBehavior::RemainSignaled);
+                        }
                     }
 
                     post_ack_state = PostAckState::Retriggered;
@@ -907,8 +925,14 @@ impl InterruptDispatcher {
                     // There are no other interrupt pending right now. If we are a wake
                     // vector, ack our wake event clearing the signaled state in the
                     // process, then return to the Idle state.
-                    if self.is_wake_vector() {
-                        fields.wake_event.acknowledge(self, AckBehavior::ClearSignaled);
+                    if state.is_wake_vector() {
+                        // SAFETY: `fields.wake_event_token` and `state.wake_event` belong to
+                        // `state`, and `state.is_wake_vector()` is `true`.
+                        unsafe {
+                            fields
+                                .wake_event_token
+                                .acknowledge(&state.wake_event, AckBehavior::ClearSignaled);
+                        }
                     }
                     *fields.state = InterruptState::Idle;
                 }

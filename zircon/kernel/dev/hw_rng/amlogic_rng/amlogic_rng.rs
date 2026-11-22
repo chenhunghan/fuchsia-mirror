@@ -9,20 +9,13 @@ use crate::hw_rng::{HwRngOps, hw_rng_register};
 use crate::kernel::thread::sleep_relative;
 use crate::kernel::types::PAddr;
 use crate::platform_rs::timer::DurationMono;
-use core::ffi::c_void;
-use core::ptr::{NonNull, with_exposed_provenance};
+use core::ptr::with_exposed_provenance;
+use explicit_memory::mandatory_memset;
 use lazy_init::LazyInit;
 use regio::{Mmio, MmioPtr, Ro};
 use zbi::DcfgAmlogicRngDriver;
 
-unsafe extern "C" {
-    /// Securely zeroes `n` bytes at `dst`; never elided by the compiler.
-    fn mandatory_memset(dst: *mut u8, c: core::ffi::c_int, n: usize) -> *mut u8;
-}
-
-// Mirrors the `static_assert`s on `zbi_dcfg_amlogic_rng_driver_t` in `amlogic_rng_ffi.cc`.
-zr::static_assert!(core::mem::size_of::<DcfgAmlogicRngDriver>() == 24);
-zr::static_assert!(core::mem::align_of::<DcfgAmlogicRngDriver>() == 8);
+zr::static_assert_size_and_align!(DcfgAmlogicRngDriver, 24, 8);
 
 // Mask for the bit indicating RNG status.
 const AML_RNG_READY: u32 = 1;
@@ -44,81 +37,73 @@ fn rng_is_ready() -> bool {
     (RNG_STATUS.read() & AML_RNG_READY) == 1
 }
 
-/// `hw_rng_get_entropy` callback registered with the HW RNG dispatch layer.
-///
-/// # Safety
-///
-/// If `len > 0`, `buf` must point to writable memory of at least `len` bytes that is not
-/// accessed concurrently for the duration of the call. Must only be called after
-/// `amlogic_rng_init` has initialized the driver.
-unsafe extern "C" fn amlogic_hw_rng_get_entropy(
-    buf: Option<NonNull<c_void>>,
-    mut len: usize,
-) -> usize {
-    let Some(buf) = buf else {
-        return 0;
-    };
+struct AmlogicRng;
 
-    let dest: *mut u8 = buf.as_ptr().cast::<u8>();
-    let mut total_read: usize = 0;
-    let mut retry: usize = 0;
+impl HwRngOps for AmlogicRng {
+    fn get_entropy(&self, buf: &mut [u8]) -> usize {
+        let mut len = buf.len();
+        let dest: *mut u8 = buf.as_mut_ptr();
+        let mut total_read: usize = 0;
+        let mut retry: usize = 0;
 
-    while len > 0 {
-        // Retry until RNG is ready.
-        while !rng_is_ready() {
-            if retry > MAX_RETRY {
-                // SAFETY: `dest` points to writable memory of at least `len + total_read` bytes.
-                unsafe { mandatory_memset(dest, 0, len + total_read) };
-                return 0;
+        while len > 0 {
+            // Retry until RNG is ready.
+            while !rng_is_ready() {
+                if retry > MAX_RETRY {
+                    // SAFETY: `dest` points to writable memory of `buf.len()` (`len + total_read`)
+                    // bytes.
+                    unsafe { mandatory_memset(dest, 0, len + total_read) };
+                    return 0;
+                }
+
+                let _ = sleep_relative(DurationMono::from_micros(1));
+                retry += 1;
             }
 
-            let _ = sleep_relative(DurationMono::from_micros(1));
-            retry += 1;
+            let mut read_buf: u32 = RNG_DATA.read();
+            zr::static_assert!(core::mem::size_of::<u32>() == RNG_DRAW_SIZE);
+
+            let read_size = len.min(RNG_DRAW_SIZE);
+            // SAFETY: `dest.add(total_read)` points to writable memory within `buf` of at least
+            // `read_size` bytes, and `read_buf` is a valid source of `read_size` bytes. The two
+            // memories do not overlap.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    core::ptr::from_ref(&read_buf).cast::<u8>(),
+                    dest.add(total_read),
+                    read_size,
+                );
+            }
+            // SAFETY: `read_buf` is a live local `u32`, valid for writes of `size_of::<u32>()`
+            // bytes.
+            unsafe {
+                mandatory_memset(
+                    core::ptr::from_mut(&mut read_buf).cast::<u8>(),
+                    0,
+                    core::mem::size_of::<u32>(),
+                );
+            }
+
+            total_read += read_size;
+            len -= read_size;
+
+            // Hardware RNG expected to be ready after an interval.
+            let _ = sleep_relative(DurationMono::from_micros(*RNG_REFRESH_INTERVAL_USEC as i64));
         }
-
-        let mut read_buf: u32 = RNG_DATA.read();
-        zr::static_assert!(core::mem::size_of::<u32>() == RNG_DRAW_SIZE);
-
-        let read_size = len.min(RNG_DRAW_SIZE);
-        // SAFETY: `dest.add(total_read)` points to writable memory within `buf` of at least
-        // `read_size` bytes, and `read_buf` is a valid source of `read_size` bytes. The two
-        // memories do not overlap.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                core::ptr::from_ref(&read_buf).cast::<u8>(),
-                dest.add(total_read),
-                read_size,
-            );
-        }
-        // SAFETY: `read_buf` is a live local `u32`, valid for writes of `size_of::<u32>()`
-        // bytes.
-        unsafe {
-            mandatory_memset(
-                core::ptr::from_mut(&mut read_buf).cast::<u8>(),
-                0,
-                core::mem::size_of_val(&read_buf),
-            );
-        }
-
-        total_read += read_size;
-        len -= read_size;
-
-        // Hardware RNG expected to be ready after an interval.
-        let _ = sleep_relative(DurationMono::from_micros(*RNG_REFRESH_INTERVAL_USEC as i64));
+        total_read
     }
-    total_read
 }
 
-static OPS: HwRngOps = HwRngOps { hw_rng_get_entropy: amlogic_hw_rng_get_entropy };
+static DRIVER: AmlogicRng = AmlogicRng;
 
 /// Initializes the driver.
 ///
 /// # Safety
 ///
-/// Must only be called once, during early boot single-threaded initialization before
-/// secondary CPUs and multi-threading are started. The physical addresses in `config` must
-/// correspond to valid Amlogic hardware RNG registers in the peripheral memory map.
-pub unsafe fn amlogic_rng_init(config: &DcfgAmlogicRngDriver) {
+/// Must be called at most once during boot initialization, ordered against `hw_rng_*` calls as
+/// [`hw_rng_register`] requires. The physical addresses in `config` must correspond to valid Amlogic
+/// hardware RNG registers in the peripheral memory map.
+unsafe fn amlogic_rng_init(config: &DcfgAmlogicRngDriver) {
     assert!(config.rng_data_phys != 0);
     assert!(config.rng_status_phys != 0);
 
@@ -141,28 +126,24 @@ pub unsafe fn amlogic_rng_init(config: &DcfgAmlogicRngDriver) {
     assert!(!rng_status.io().as_ptr().is_null());
     assert!(rng_refresh_interval_usec > 0);
 
-    // SAFETY: The caller guarantees single-threaded, one-time initialization during early boot.
+    // SAFETY: The caller guarantees one-time initialization before the driver is registered.
     unsafe {
         RNG_DATA.init(rng_data);
         RNG_STATUS.init(rng_status);
         RNG_REFRESH_INTERVAL_USEC.init(rng_refresh_interval_usec);
     }
 
-    // SAFETY: Registration occurs during early boot before multi-threading, and `OPS` is a
-    // `'static` with a valid callback.
-    unsafe { hw_rng_register(&OPS) };
+    // SAFETY: The caller upholds `hw_rng_register`'s one-time, synchronized registration contract.
+    unsafe { hw_rng_register(&DRIVER) };
 }
 
-/// FFI wrapper for C++ callers.
+/// C-ABI entry point invoked during platform driver handoff.
 ///
 /// # Safety
 ///
-/// Must only be called once, during early boot single-threaded initialization before
-/// secondary CPUs and multi-threading are started. `config` must reference a valid,
-/// initialized `DcfgAmlogicRngDriver` with valid hardware register addresses.
+/// Same as [`amlogic_rng_init`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_amlogic_rng_init(config: &DcfgAmlogicRngDriver) {
-    // SAFETY: The caller guarantees early boot single-threaded invocation and valid hardware
-    // config.
+pub unsafe extern "C" fn AmlogicRngInit(config: &DcfgAmlogicRngDriver) {
+    // SAFETY: The caller upholds `amlogic_rng_init`'s requirements.
     unsafe { amlogic_rng_init(config) };
 }

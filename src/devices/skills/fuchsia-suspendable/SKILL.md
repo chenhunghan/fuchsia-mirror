@@ -277,7 +277,7 @@ impl Driver for MyDriver {
         Ok(Self { wake_lease })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         // If suspended when stopping, the runtime resumes the driver before calling stop().
     }
 
@@ -496,7 +496,7 @@ impl Driver for MyDriver {
         Ok(Self { config })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 impl SuspendableDriver for MyDriver {
@@ -521,7 +521,7 @@ driver_register!(Suspendable<MyDriver>);
 
 Inherit from [`fdf_power::Suspendable`](/sdk/lib/driver/power/cpp/suspend.h),
 take the power element runner from
-[`fdf::DriverContext`](/sdk/lib/driver/component/cpp/driver_context.h), and call
+[`fdf::DriverContext`](/sdk/lib/driver/component/cpp/driver_base2.h), and call
 `InitializeSuspend`:
 
 ```cpp

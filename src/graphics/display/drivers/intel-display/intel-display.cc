@@ -1814,10 +1814,10 @@ zx_status_t Controller::IntelGpuCoreReadPciConfig16(uint16_t addr, uint16_t* val
 
 zx_status_t Controller::IntelGpuCoreMapPciMmio(uint32_t pci_bar, uint8_t** addr_out,
                                                uint64_t* size_out) {
-  if (pci_bar > pci::kMaxBarCount) {
+  fbl::AutoLock lock(&bar_lock_);
+  if (pci_bar >= mapped_bars_.size()) {
     return ZX_ERR_INVALID_ARGS;
   }
-  fbl::AutoLock lock(&bar_lock_);
   if (!mapped_bars_[pci_bar]) {
     zx_status_t status =
         pci_.MapMmio(pci_bar, ZX_CACHE_POLICY_UNCACHED_DEVICE, &mapped_bars_[pci_bar]);
@@ -1834,7 +1834,8 @@ zx_status_t Controller::IntelGpuCoreMapPciMmio(uint32_t pci_bar, uint8_t** addr_
 }
 
 zx_status_t Controller::IntelGpuCoreUnmapPciMmio(uint32_t pci_bar) {
-  if (pci_bar > pci::kMaxBarCount) {
+  fbl::AutoLock lock(&bar_lock_);
+  if (pci_bar >= mapped_bars_.size()) {
     return ZX_ERR_INVALID_ARGS;
   }
   // No work needs to be done with MmioBuffers in use.

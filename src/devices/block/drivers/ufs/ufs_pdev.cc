@@ -20,7 +20,7 @@ namespace {
 
 using fuchsia_hardware_ufs_phy::wire::PowerState;
 
-// TODO(https://fxbug.dev/578184694): Scale the active interconnect bandwidth vote from the
+// TODO(https://fxbug.dev/588007813): Scale the active interconnect bandwidth vote from the
 // negotiated UniPro gear/lane rate instead of voting a fixed static ceiling.
 constexpr uint64_t kOperationalBandwidthBps = 1'000'000'000;  // 1 GB/s
 constexpr uint64_t kInactiveBandwidthBps = 0;
@@ -284,8 +284,7 @@ zx::result<> UfsPdev::PreResume() {
   return CallPhySetPowerStateLocked(PowerState::kActive);
 }
 
-// Triggers dynamic PHY calibration prior to UIC power mode / gear change
-// (https://fxbug.dev/505006874).
+// Triggers dynamic PHY calibration prior to UIC power mode / gear change.
 zx::result<> UfsPdev::PrePowerModeChange() {
   if (!ufs_phy_.is_valid()) {
     return zx::ok();

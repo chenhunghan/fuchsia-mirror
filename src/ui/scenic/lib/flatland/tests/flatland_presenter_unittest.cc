@@ -541,4 +541,38 @@ TEST_F(FlatlandPresenterTest, MultithreadedAccess) {
   EXPECT_EQ(loop_quits, kNumSessions);
 }
 
+TEST_F(FlatlandPresenterTest, NotifyExpectedPresentPreservesFifoOrderWithScheduleUpdate) {
+  scheduling::test::MockFrameScheduler frame_scheduler;
+  std::vector<std::string> events;
+
+  frame_scheduler.set_notify_expected_present_callback(
+      [&events](scheduling::SessionId session_id, zx::time expected_present_time,
+                zx::duration frame_interval, bool schedule_asap) {
+        EXPECT_EQ(session_id, 7u);
+        EXPECT_EQ(expected_present_time, zx::time(222'000'000));
+        EXPECT_EQ(frame_interval, zx::nsec(8'333'333));
+        EXPECT_TRUE(schedule_asap);
+        events.emplace_back("notify");
+      });
+  frame_scheduler.set_schedule_update_for_session_callback(
+      [&events](zx::time presentation_time, scheduling::SchedulingIdPair id_pair, bool squashable,
+                bool schedule_asap) {
+        EXPECT_EQ(id_pair.session_id, 7u);
+        EXPECT_EQ(presentation_time, zx::time(222'000'000));
+        EXPECT_TRUE(schedule_asap);
+        events.emplace_back("present");
+      });
+
+  auto presenter = CreateFlatlandPresenterImpl(frame_scheduler);
+  presenter->NotifyExpectedPresent(/*session_id=*/7, zx::time(222'000'000), zx::nsec(8'333'333),
+                                   /*schedule_asap=*/true);
+  presenter->ScheduleUpdateForSession(
+      zx::time(222'000'000), {.session_id = 7, .present_id = 1}, /*unsquashable=*/false,
+      /*release_fences=*/{}, /*release_counters=*/{}, /*present_fences=*/{},
+      /*schedule_asap=*/true);
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(events, (std::vector<std::string>{"notify", "present"}));
+}
+
 }  // namespace flatland::test

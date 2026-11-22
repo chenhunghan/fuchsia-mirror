@@ -8,12 +8,19 @@
 // through `DeviceSetup`, opens the device, and drives the Spinel handshake the host performs
 // during RCP initialization. It also covers the transport semantics (flow control credits, frame
 // size limits, error handling and rebinding) and a few raw transmits against the radio.
+//
+// The RCP's radio transmits into a `test.lowpan.rfsim.Medium`: `FakeMedium` below, served on the
+// same loop as the RCP, which records every frame. The medium's own behaviour is tested by
+// rf-medium-dispatcher-unittests.
 
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/rcp/spinel_device_server.h"
 
 #include <fidl/fuchsia.lowpan.spinel/cpp/fidl.h>
+#include <fidl/test.lowpan.rfsim/cpp/fidl.h>
 #include <lib/fidl/cpp/client.h>
+#include <zircon/assert.h>
 #include <zircon/errors.h>
+#include <zircon/types.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -29,6 +36,7 @@
 #include <openthread/platform/radio.h>
 
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/rcp/platform/platform.h"
+#include "src/connectivity/openthread/tests/ot-rcp-fuchsia/rcp/rfsim_client.h"
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host/mac_frame.h"
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host/mock_spinel_host.h"
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host/mock_spinel_host_fixture.h"
@@ -38,7 +46,10 @@ namespace ot_rcp::testing {
 namespace {
 
 using ot_rcp::Platform;
+using ot_rcp::RfsimClient;
 using ot_rcp::SpinelDeviceServer;
+
+namespace rfsim = test_lowpan_rfsim;
 
 // Node id the server is created with. Non-trivial, to prove the EUI-64 is derived from it.
 constexpr uint32_t kNodeId = 7;
@@ -63,25 +74,132 @@ constexpr uint32_t kRegrantForInitialWindow =
 
 // Re-grant periods to observe: enough to show the +increment grant is periodic, not a one-off.
 constexpr uint32_t kReplenishRounds = 3;
+// Consecutive raw transmissions: the second proves the radio returned to Receive after TxDone.
+constexpr uint8_t kTransmitCount = 2;
 
 uint64_t ExpectedEui64(uint32_t node_id) { return Platform::kEui64Base | node_id; }
+
+// The far end of the RCP's Radio channel: accepts Attach, records every Transmit (replying at once
+// as the real medium does), and delivers the frames the test injects to the pending Receive.
+class FakeMedium : public fidl::Server<rfsim::Medium> {
+ public:
+  // A frame some node passed to `Radio.Transmit`.
+  struct Transmission {
+    uint32_t node_id;
+    rfsim::Frame frame;
+  };
+
+  explicit FakeMedium(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
+
+  void Bind(fidl::ServerEnd<rfsim::Medium> server_end) {
+    bindings_.AddBinding(dispatcher_, std::move(server_end), this, fidl::kIgnoreBindingClosure);
+  }
+
+  // test.lowpan.rfsim/Medium
+  void Attach(AttachRequest& request, AttachCompleter::Sync& completer) override {
+    attached_node_ids_.push_back(request.node_id());
+    radios_.push_back(
+        std::make_unique<Radio>(*this, request.node_id(), std::move(request.radio())));
+    completer.Reply(fit::ok());
+  }
+
+  // Node ids passed to `Attach`, in order.
+  const std::vector<uint32_t>& attached_node_ids() const { return attached_node_ids_; }
+  // Every transmission, oldest first.
+  const std::vector<Transmission>& transmissions() const { return transmissions_; }
+  // How many `Radio.Receive` calls are outstanding.
+  size_t pending_receives() const {
+    return static_cast<size_t>(std::count_if(radios_.begin(), radios_.end(),
+                                             [](const auto& radio) { return radio->receiving(); }));
+  }
+
+  // Replies to the first attached node's pending `Receive` with `frame`. Returns false if no
+  // `Receive` is pending.
+  bool Deliver(rfsim::Frame frame, int8_t rssi_dbm, uint8_t lqi) {
+    return !radios_.empty() && radios_.front()->Deliver(std::move(frame), rssi_dbm, lqi);
+  }
+
+ private:
+  class Radio : public fidl::Server<rfsim::Radio> {
+   public:
+    Radio(FakeMedium& medium, uint32_t node_id, fidl::ServerEnd<rfsim::Radio> server_end)
+        : medium_(medium),
+          node_id_(node_id),
+          binding_(medium.dispatcher_, std::move(server_end), this, fidl::kIgnoreBindingClosure) {}
+
+    // test.lowpan.rfsim/Radio
+    void Transmit(TransmitRequest& request, TransmitCompleter::Sync& completer) override {
+      medium_.transmissions_.push_back({
+          .node_id = node_id_,
+          .frame = rfsim::Frame{{
+              .channel = request.channel(),
+              .psdu = std::move(request.psdu()),
+              .tx_power_dbm = request.tx_power_dbm(),
+          }},
+      });
+      completer.Reply();
+    }
+    void Receive(ReceiveCompleter::Sync& completer) override {
+      EXPECT_FALSE(pending_receive_.has_value()) << "second outstanding Radio.Receive";
+      pending_receive_ = completer.ToAsync();
+    }
+
+    bool receiving() const { return pending_receive_.has_value(); }
+
+    bool Deliver(rfsim::Frame frame, int8_t rssi_dbm, uint8_t lqi) {
+      if (!pending_receive_.has_value()) {
+        return false;
+      }
+      ReceiveCompleter::Async completer = std::move(*pending_receive_);
+      pending_receive_.reset();
+      completer.Reply({{.frame = std::move(frame), .rssi_dbm = rssi_dbm, .lqi = lqi}});
+      return true;
+    }
+
+   private:
+    FakeMedium& medium_;
+    const uint32_t node_id_;
+    std::optional<ReceiveCompleter::Async> pending_receive_;
+    // Last, so it is torn down before the pending completer.
+    fidl::ServerBinding<rfsim::Radio> binding_;
+  };
+
+  async_dispatcher_t* const dispatcher_;
+  std::vector<uint32_t> attached_node_ids_;
+  std::vector<Transmission> transmissions_;
+  std::vector<std::unique_ptr<Radio>> radios_;
+  fidl::ServerBindingGroup<rfsim::Medium> bindings_;
+};
 
 class SpinelDeviceServerTest : public MockSpinelHostFixture {
  protected:
   void TearDown() override {
-    // Unbind DeviceSetup before destroying the server it dispatches to, then let the client-side
-    // teardowns run.
+    // Unbind DeviceSetup before destroying the server it dispatches to. The server, and with it
+    // the RfsimClient it owns, goes before the medium, because RfsimClient treats a closed Radio
+    // channel as fatal. Then let the client-side teardowns run.
     setup_binding_.reset();
     server_.reset();
+    medium_.reset();
     RunLoopUntilIdle();
     MockSpinelHostFixture::TearDown();
   }
 
-  // Creates the server on the test loop and connects `setup_` to it.
+  // Creates the medium on the test loop and attaches an RfsimClient to it, then creates the server
+  // with that client as its radio medium and connects `setup_`. As in main(), the RCP is not served
+  // before it has attached.
   void StartRcp(uint32_t node_id = kNodeId,
                 SpinelDeviceServer::FlowControl flow_control = kFlowControl) {
     node_id_ = node_id;
-    server_.emplace(dispatcher(), node_id, flow_control);
+    medium_.emplace(dispatcher());
+    auto [medium_client, medium_server] = fidl::Endpoints<rfsim::Medium>::Create();
+    medium_->Bind(std::move(medium_server));
+    std::unique_ptr<RfsimClient> rfsim;
+    RfsimClient::Attach(
+        dispatcher(), node_id, std::move(medium_client),
+        [&rfsim](std::unique_ptr<RfsimClient> attached) { rfsim = std::move(attached); });
+    RunLoopUntil([&rfsim] { return rfsim != nullptr; });
+
+    server_.emplace(dispatcher(), node_id, flow_control, std::move(rfsim));
     auto [client_end, server_end] = fidl::Endpoints<fspinel::DeviceSetup>::Create();
     setup_binding_.emplace(dispatcher(), std::move(server_end), &*server_,
                            fidl::kIgnoreBindingClosure);
@@ -187,11 +305,38 @@ class SpinelDeviceServerTest : public MockSpinelHostFixture {
     ASSERT_NO_FATAL_FAILURE(OpenAndSync(host));
   }
 
+  // Checks that the RCP attached to the medium exactly once, with its node id.
+  void WaitForAttach() {
+    EXPECT_EQ(medium_->attached_node_ids(), std::vector<uint32_t>{node_id_})
+        << "ot-rcp-fuchsia must attach exactly once";
+  }
+
+  // Waits until the medium has recorded `count` transmissions, and asserts there are no more. The
+  // medium shares the test loop, so once it is idle every transmission the RCP made has been
+  // recorded.
+  void WaitForExactTransmissions(size_t count) {
+    RunLoopUntil([&] { return medium_->transmissions().size() >= count || HasFatalFailure(); });
+    ASSERT_FALSE(HasFatalFailure());
+    RunLoopUntilIdle();
+    ASSERT_EQ(medium_->transmissions().size(), count) << "unexpected extra transmissions";
+  }
+
   uint32_t node_id() const { return node_id_; }
+  // Everything the medium has recorded so far, oldest first.
+  const std::vector<FakeMedium::Transmission>& transmissions() const {
+    return medium_->transmissions();
+  }
+  FakeMedium& medium() {
+    ZX_ASSERT(medium_.has_value());
+    return *medium_;
+  }
 
  private:
   uint32_t node_id_ = 0;
-  // Declaration order matters: the binding is destroyed before the server it points to.
+  // Declaration order matters (members are destroyed bottom-up, as in TearDown): the medium
+  // outlives the server, which owns the RfsimClient attached to it, and the server outlives the
+  // binding that points to it.
+  std::optional<FakeMedium> medium_;
   std::optional<SpinelDeviceServer> server_;
   std::optional<fidl::ServerBinding<fspinel::DeviceSetup>> setup_binding_;
   fidl::Client<fspinel::DeviceSetup> setup_;
@@ -645,6 +790,140 @@ TEST_F(SpinelDeviceServerTest, SetChannelRacingBindingDropIsRetried) {
   ASSERT_NO_FATAL_FAILURE(OpenAndSync(host2));
   ASSERT_NO_FATAL_FAILURE(ExpectResponsive(host2));
   ExpectHealthy(host2);
+}
+
+// The RCP attaches with its node id and every raw transmission reaches the Medium's Radio with the
+// channel, PSDU (FCS included, forwarded as is) and transmit power the host configured, while the
+// host still gets its TX completion.
+TEST_F(SpinelDeviceServerTest, RawTransmitIsForwardedToMedium) {
+  constexpr uint16_t kPanId = 0xface;
+  constexpr uint16_t kShortAddress = 0x0002;
+  // Not the first channel, so a forwarded channel of 11 would be a coincidence, not a pass.
+  constexpr uint8_t kChannel = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN + 4;
+  constexpr int8_t kTxPower = -7;
+
+  MockSpinelHost host;
+  ASSERT_NO_FATAL_FAILURE(StartBindAndOpen(host));
+  ASSERT_NO_FATAL_FAILURE(WaitForAttach());
+  ASSERT_NO_FATAL_FAILURE(EnableRawLink(host, kPanId, kShortAddress, kChannel));
+  ASSERT_TRUE(Set(host, SPINEL_PROP_PHY_TX_POWER, PackSpinelValue(SPINEL_DATATYPE_INT8_S, kTxPower))
+                  .has_value());
+  EXPECT_TRUE(transmissions().empty()) << "nothing was transmitted yet";
+
+  for (uint8_t seq = 1; seq <= kTransmitCount; ++seq) {
+    SCOPED_TRACE(int{seq});
+    const std::vector<uint8_t> psdu = BroadcastDataFrame(kPanId, kShortAddress, seq);
+    std::optional<SpinelFrame> response = Transact(
+        host, SPINEL_CMD_PROP_VALUE_SET, SPINEL_PROP_STREAM_RAW, StreamRawValue(psdu, kChannel));
+    EXPECT_EQ(StreamRawTxDoneStatus(response), std::optional<unsigned int>(SPINEL_STATUS_OK));
+
+    ASSERT_NO_FATAL_FAILURE(WaitForExactTransmissions(seq));
+    const FakeMedium::Transmission& tx = transmissions().back();
+    EXPECT_EQ(tx.node_id, node_id());
+    EXPECT_EQ(tx.frame.channel(), kChannel);
+    EXPECT_EQ(tx.frame.psdu(), psdu);
+    EXPECT_EQ(tx.frame.tx_power_dbm(), kTxPower);
+  }
+
+  // Attaching exactly once is checked by WaitForAttach.
+  ASSERT_NO_FATAL_FAILURE(ExpectResponsive(host));
+  ExpectHealthy(host);
+}
+
+// The Medium observes SubMac's software retransmissions: an AR=1 frame that nobody acknowledges
+// is transmitted `1 + max_frame_retries` times before the host gets NO_ACK.
+TEST_F(SpinelDeviceServerTest, UnicastAckRequestedTransmitIsRetriedOnMedium) {
+  constexpr uint16_t kPanId = 0xface;
+  constexpr uint16_t kSrcShort = 0x0002;
+  constexpr uint16_t kDstShort = 0x0003;
+  constexpr uint8_t kChannel = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN + 2;
+  constexpr uint8_t kMaxFrameRetries = 2;
+  constexpr size_t kExpectedAttempts = 1 + kMaxFrameRetries;
+
+  MockSpinelHost host;
+  ASSERT_NO_FATAL_FAILURE(StartBindAndOpen(host));
+  ASSERT_NO_FATAL_FAILURE(WaitForAttach());
+  ASSERT_NO_FATAL_FAILURE(EnableRawLink(host, kPanId, kSrcShort, kChannel));
+
+  const std::vector<uint8_t> psdu =
+      UnicastAckRequestedDataFrame(kPanId, kDstShort, kSrcShort, /*seq=*/0x42);
+  std::optional<SpinelFrame> response =
+      Transact(host, SPINEL_CMD_PROP_VALUE_SET, SPINEL_PROP_STREAM_RAW,
+               StreamRawValue(psdu, kChannel, kMaxFrameRetries));
+  EXPECT_EQ(StreamRawTxDoneStatus(response), std::optional<unsigned int>(SPINEL_STATUS_NO_ACK));
+
+  ASSERT_NO_FATAL_FAILURE(WaitForExactTransmissions(kExpectedAttempts));
+  for (const FakeMedium::Transmission& tx : transmissions()) {
+    EXPECT_EQ(tx.node_id, node_id());
+    EXPECT_EQ(tx.frame.channel(), kChannel);
+    EXPECT_EQ(tx.frame.psdu(), psdu);
+  }
+
+  ASSERT_NO_FATAL_FAILURE(ExpectResponsive(host));
+  ExpectHealthy(host);
+}
+
+// A frame the medium delivers on the channel the RCP receives on reaches the host as an
+// unsolicited STREAM_RAW, with the RSSI the medium decided; frames on another channel and
+// acknowledgments do not.
+TEST_F(SpinelDeviceServerTest, ReceivedFrameReachesHost) {
+  constexpr uint16_t kPanId = 0xface;
+  constexpr uint16_t kShortAddress = 0x0002;
+  constexpr uint16_t kPeerShortAddress = 0x0005;
+  constexpr uint8_t kChannel = OT_RADIO_2P4GHZ_OQPSK_CHANNEL_MIN + 4;
+  constexpr int8_t kRssi = -60;
+  constexpr uint8_t kLqi = 200;
+
+  MockSpinelHost host;
+  ASSERT_NO_FATAL_FAILURE(StartBindAndOpen(host));
+  ASSERT_NO_FATAL_FAILURE(WaitForAttach());
+  ASSERT_NO_FATAL_FAILURE(EnableRawLink(host, kPanId, kShortAddress, kChannel));
+
+  auto deliver = [&](uint8_t channel, std::vector<uint8_t> psdu) {
+    RunLoopUntil([&] { return medium().pending_receives() == 1 || HasFatalFailure(); });
+    ASSERT_TRUE(
+        medium().Deliver(rfsim::Frame{{.channel = channel, .psdu = std::move(psdu)}}, kRssi, kLqi));
+  };
+  auto is_received_frame = [](const SpinelFrame& f) {
+    return f.IsPropValueIs(SPINEL_PROP_STREAM_RAW) && f.tid() == 0;
+  };
+
+  // Dropped by the RCP: another channel, and an acknowledgment (frame type 2, sequence 1, FCS).
+  ASSERT_NO_FATAL_FAILURE(
+      deliver(kChannel + 1, BroadcastDataFrame(kPanId, kPeerShortAddress, /*seq=*/1)));
+  ASSERT_NO_FATAL_FAILURE(deliver(kChannel, {0x02, 0x00, 0x01, 0x00, 0x00}));
+  // Received.
+  const std::vector<uint8_t> psdu = BroadcastDataFrame(kPanId, kPeerShortAddress, /*seq=*/2);
+  ASSERT_NO_FATAL_FAILURE(deliver(kChannel, psdu));
+
+  std::optional<SpinelFrame> received = WaitForFrame(host, is_received_frame);
+  ASSERT_TRUE(received.has_value());
+  const uint8_t* data = nullptr;
+  spinel_size_t data_len = 0;
+  int8_t rssi = 0;
+  int8_t noise_floor = 0;
+  uint16_t flags = 0;
+  uint8_t rx_channel = 0;
+  uint8_t lqi = 0;
+  uint64_t timestamp = 0;
+  ASSERT_GT(spinel_datatype_unpack(
+                received->payload().data(), static_cast<spinel_size_t>(received->payload().size()),
+                SPINEL_DATATYPE_DATA_WLEN_S SPINEL_DATATYPE_INT8_S SPINEL_DATATYPE_INT8_S
+                    SPINEL_DATATYPE_UINT16_S SPINEL_DATATYPE_STRUCT_S(
+                        SPINEL_DATATYPE_UINT8_S SPINEL_DATATYPE_UINT8_S SPINEL_DATATYPE_UINT64_S),
+                &data, &data_len, &rssi, &noise_floor, &flags, &rx_channel, &lqi, &timestamp),
+            0);
+  EXPECT_EQ(std::vector<uint8_t>(data, data + data_len), psdu);
+  EXPECT_EQ(rssi, kRssi);
+  EXPECT_EQ(rx_channel, kChannel);
+  EXPECT_EQ(lqi, kLqi);
+
+  RunLoopUntilIdle();
+  EXPECT_FALSE(host.TakeFrame(is_received_frame).has_value())
+      << "only the frame on the receive channel may reach the host";
+  EXPECT_EQ(medium().pending_receives(), 1u);
+  ASSERT_NO_FATAL_FAILURE(ExpectResponsive(host));
+  ExpectHealthy(host);
 }
 
 }  // namespace

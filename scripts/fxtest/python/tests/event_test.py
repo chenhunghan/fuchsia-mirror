@@ -227,6 +227,25 @@ class TestEvents(unittest.IsolatedAsyncioTestCase):
         self.assertListEqual(events, round_trip_events)
 
 
+class TestProgramExecutionPayload(unittest.TestCase):
+    def test_to_formatted_command_line(self) -> None:
+        self.assertEqual(
+            event.ProgramExecutionPayload(
+                "fx", ["--dir", "/out", "build"], {}
+            ).to_formatted_command_line(),
+            "fx --dir /out build",
+        )
+        # The absolute path to the program is shortened, but not its flags.
+        self.assertEqual(
+            event.ProgramExecutionPayload(
+                "/fuchsia/out/default/host-tools/ffx",
+                ["target", "list", "/abs/arg"],
+                {},
+            ).to_formatted_command_line(),
+            "ffx target list /abs/arg",
+        )
+
+
 class TestEventSpan(unittest.IsolatedAsyncioTestCase):
     def _create_event_span(
         self, payload: event.EventPayloadUnion | None

@@ -12,28 +12,35 @@ use std::sync::Arc;
 /// Type that represents the receiving end of a [Connector]. Every [Connector] is coupled to
 /// some [Receiver] to which connection requests to that [Connector] (or any of its clones) are
 /// delivered.
+#[cfg(target_os = "fuchsia")]
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct Receiver {
     /// `inner` uses an async mutex because it will be locked across an await point
     /// when asynchronously waiting for the next message.
-    inner: Arc<Mutex<UnboundedReceiver<fidl::Channel>>>,
+    inner: Arc<Mutex<UnboundedReceiver<zx::Channel>>>,
 }
 
+#[cfg(not(target_os = "fuchsia"))]
+#[derive(Debug, Clone)]
+pub struct Receiver;
+
+#[cfg(target_os = "fuchsia")]
 impl Clone for Receiver {
     fn clone(&self) -> Self {
         Self { inner: self.inner.clone() }
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl Receiver {
-    pub fn new(receiver: mpsc::UnboundedReceiver<fidl::Channel>) -> Self {
+    pub fn new(receiver: mpsc::UnboundedReceiver<zx::Channel>) -> Self {
         Self { inner: Arc::new(Mutex::new(receiver)) }
     }
 
     /// Waits to receive a message, or return `None` if there are no more messages and all
     /// senders are dropped.
-    pub async fn receive(&self) -> Option<fidl::Channel> {
+    pub async fn receive(&self) -> Option<zx::Channel> {
         let mut receiver_guard = self.inner.lock().await;
         receiver_guard.next().await
     }

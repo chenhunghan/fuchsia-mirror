@@ -65,7 +65,7 @@ VmarLoader::VmoName VmarLoader::GetVmoName(zx::unowned_vmo vmo) {
   return base_vmo_name;
 }
 
-zx_status_t VmarLoader::AllocateVmar(size_t vaddr_size, size_t vaddr_start,
+zx_status_t VmarLoader::AllocateVmar(size_t vaddr_start, size_t vaddr_size,
                                      std::optional<size_t> vmar_offset) {
   ZX_DEBUG_ASSERT_MSG(!load_image_vmar_, "AllocateVmar called twice");
   zx_vaddr_t child_addr;

@@ -6,7 +6,6 @@
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_VIDEO_DECODER_H_
 
 #include <fidl/fuchsia.hardware.amlogiccanvas/cpp/common_types.h>
-#include <fuchsia/mediacodec/cpp/fidl.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/device.h>
 #include <lib/ddk/driver.h>

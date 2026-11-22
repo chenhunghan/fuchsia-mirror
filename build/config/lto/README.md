@@ -29,9 +29,14 @@ In Fuchsia, LTO/ThinLTO can be enabled in two ways:
 1. **Toolchain Variants**:
    - Setting `select_variant = [ "lto" ]` or `select_variant = [ "thinlto" ]`
      (or targeting specific components with variant selectors) adds `"lto"` to
-     `toolchain_variant.tags`.
-   - In Bazel, this tag is forwarded as
-     `--//build/bazel/config/toolchain_tags:lto=True`.
+     `toolchain_variant.tags` (and `//build/config/lto:thinlto` to
+     `toolchain_variant.configs` for ThinLTO).
+   - In Bazel, `//build/bazel/config/bazel_args.gni` forwards these in
+     `--@fuchsia_rules_common//build_flags:enabled_features` (`"lto"`, and
+     additionally `"thinlto"`, spelled without an underscore so it does not
+     trigger upstream Bazel's `"thin_lto"` distributed LTO indexing paths),
+     matched via `//build/bazel/config/variant_features/lto:true` and
+     `//build/bazel/config/variant_features/thinlto:true`.
 
 2. **Compilation Optimization Modes (`optimize`)**:
    - Global or per-toolchain `optimize` settings in `//build/config/BUILD.gn`
@@ -164,7 +169,7 @@ Unlike `@rules_cc`, `@rules_rust` does not define a separate `rust_link` executi
 To route linked Rust actions to large RBE workers based on the target configuration:
 1. `//build/config/lto/BUILD.bazel` defines a configuration setting group
    `//build/config/lto:rust_lto_enabled` that matches when either:
-   - `//build/bazel/config/toolchain_tags/lto:true` is active, or
+   - `//build/bazel/config/variant_features/lto:true` is active, or
    - An `optimize` mode that enables LTO/ThinLTO for Rust (`moderate_lto`, `size_lto`,
      `speed_lto`, `moderate_thinlto`, `size_thinlto`, `speed_thinlto`) is active on a
      non-instrumented toolchain (excluding `size_thinlto_clang`, which only enables ThinLTO

@@ -38,36 +38,36 @@ type SampleUnion = strict union {
     3: raw_int int32;
 };
 
-type SampleXUnion = flexible union {
+type SampleFlexibleUnion = flexible union {
     1: i IntStruct;
     2: st SimpleTable;
     3: raw_int int32;
 };
 
-type SampleStrictXUnion = strict union {
+type SampleStrictUnion = strict union {
     1: i IntStruct;
     2: st SimpleTable;
     3: raw_int int32;
 };
 
-type SampleStrictXUnionStruct = struct {
-    xu SampleStrictXUnion;
+type SampleStrictUnionStruct = struct {
+    xu SampleStrictUnion;
 };
 
-type SampleXUnionStruct = struct {
-    xu SampleXUnion;
+type SampleFlexibleUnionStruct = struct {
+    xu SampleFlexibleUnion;
 };
 
-type SampleNullableXUnionStruct = struct {
-    opt_xu SampleXUnion:optional;
+type SampleNullableFlexibleUnionStruct = struct {
+    opt_xu SampleFlexibleUnion:optional;
 };
 
-type LLCPPStyleUnion = flexible union {
+type WireStyleUnion = flexible union {
     1: primitive int32;
 };
 
-type LLCPPStyleUnionStruct = struct {
-    u LLCPPStyleUnion;
+type WireStyleUnionStruct = struct {
+    u WireStyleUnion;
 };
 
 type Int16Bits = strict bits : uint16 {

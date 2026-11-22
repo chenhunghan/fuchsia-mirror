@@ -1,2 +1,4 @@
-fuchsia.ebpf: compute
-fuchsia.ebpf: hash_map
+fuchsia.ebpf: compute/interpreter
+fuchsia.ebpf: compute/jit [optional]
+fuchsia.ebpf: hash_map/interpreter
+fuchsia.ebpf: hash_map/jit [optional]

@@ -17,14 +17,10 @@ group("tests") {
   public_deps = []
 }
 
-fuchsia_component("default") {
-  testonly = true
-  manifest = "meta/fake-hrtimer.cml"
-  deps = [ ":bin" ]
-}
-
 # The resulting package URL will be:
 #     fuchsia-pkg://fuchsia.com/wake-alarms#meta/default.cm
+# Kept above the sentinel because bazel2gn does not translate fx_package and
+# GN tests consume this package via //src/starnix/tests/starnix_test_subpackages.gni.
 fuchsia_package("pkg") {
   package_name = "fake-hrtimer"
   testonly = true
@@ -78,4 +74,16 @@ rustc_binary("bin") {
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:scopeguard",
   ]
+}
+
+fuchsia_component_manifest("manifest") {
+  testonly = true
+  component_name = "default"
+  manifest = "meta/fake-hrtimer.cml"
+}
+
+fuchsia_component("default") {
+  testonly = true
+  cm_label = ":manifest"
+  deps = [ ":bin" ]
 }

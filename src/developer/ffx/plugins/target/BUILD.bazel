@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_target",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/target/add:ffx_target_add",
+        "//src/developer/ffx/plugins/target/bootloader:ffx_bootloader",
+        "//src/developer/ffx/plugins/target/default:ffx_target_default",
+        "//src/developer/ffx/plugins/target/discover:ffx_target_discover",
+        "//src/developer/ffx/plugins/target/echo:ffx_target_echo",
+        "//src/developer/ffx/plugins/target/fastboot:ffx_fastboot_tool",
+        "//src/developer/ffx/plugins/target/flash:ffx_flash",
+        "//src/developer/ffx/plugins/target/get-time:ffx_target_get_time",
+        "//src/developer/ffx/plugins/target/list:ffx_list",
+        "//src/developer/ffx/plugins/target/log-message:ffx_target_log_message",
+        "//src/developer/ffx/plugins/target/off:ffx_off",
+        "//src/developer/ffx/plugins/target/package:ffx_target_package",
+        "//src/developer/ffx/plugins/target/reboot:ffx_reboot",
+        "//src/developer/ffx/plugins/target/remove:ffx_target_remove",
+        "//src/developer/ffx/plugins/target/repository:ffx_target_repository",
+        "//src/developer/ffx/plugins/target/screenshot:ffx_target_screenshot",
+        "//src/developer/ffx/plugins/target/shell:ffx_target_shell",
+        "//src/developer/ffx/plugins/target/show:ffx_target_show",
+        "//src/developer/ffx/plugins/target/snapshot:ffx_snapshot",
+        "//src/developer/ffx/plugins/target/ssh:ffx_target_ssh",
+        "//src/developer/ffx/plugins/target/status:ffx_target_status",
+        "//src/developer/ffx/plugins/target/update:ffx_update",
+        "//src/developer/ffx/plugins/target/wait:ffx_wait",
+        "//src/developer/ffx/plugins/target/wipe:ffx_wipe",
+    ],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/frontends/ffx:__pkg__"],
+)
+
+ffx_tool(
+    name = "ffx_target_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-target",
+    edition = "2024",
+    visibility = [
+        "//src/connectivity/network/testing/conformance/emulator:__pkg__",
+        "//src/developer/ffx/tests/connection:__pkg__",
+    ],
+    deps = [
+        ":ffx_target_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)

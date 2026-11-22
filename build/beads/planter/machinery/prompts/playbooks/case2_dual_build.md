@@ -14,7 +14,9 @@ Use when the package retains `BUILD.gn`.
   targets to `fx_package` / `fx_component` / `fx_component_manifest` / `fx_packaged_binary` in
   `BUILD.bazel` and delete them from `BUILD.gn` (unless the coder prompt's assembly/size-creep
   fallback keeps `fuchsia_package` above the sentinel). Standalone `fx_component` and `fx_component_manifest`
-  targets with GN consumers sync below the sentinel via `bazel2gn`.
+  targets with GN consumers sync below the sentinel via `bazel2gn`. Replacing a GN package (also
+  with a `bazel_fuchsia_package` bridge or by unrolling a package `template()`) is a package
+  cutover: follow **Package cutover (two phases)** in `prompts/coder.md`, stopping after phase 1.
 - **Dual-build tests & `# @bazel2gn:skip` rules**: Define tests in `BUILD.bazel` without
   `# @bazel2gn:skip` so `bazel2gn` generates the GN copies (`<package_name>-gn`) below the sentinel.
   Never add `# @bazel2gn:skip` to a test rule or attribute unless one of the 5 unified test skip
@@ -40,10 +42,9 @@ Use when the package retains `BUILD.gn`.
   and report the unresolved finding(s) in `CoderReport.disputed_findings` and `summary` asking the
   reviewer which aggregation `test_suite()` (or where a new one, with a matching
   `bazel_test_suite()` in `BUILD.gn`, should be added if none exists) the package's
-  `test_suite()`(s) should be added to, suggesting asking the Build team if they do not know), and list generated GN
-  test copies in `group("tests")` above the sentinel (host copies as `:<name>($host_toolchain)`).
-  Never set `Build-Only: true` on any CL that adds, removes, or modifies test targets or `:tests`
-  edges.
+  `test_suite()`(s) should be added to, suggesting asking a member of
+  //build/bazel/BAZEL_OWNERS if they do not know), and list generated GN test copies in
+  `group("tests")` above the sentinel (host copies as `:<name>($host_toolchain)`).
 - **Starnix unit tests** (`test_type = "starnix"` or `.cml` including `starnix/unit_test.shard.cml`):
   Migrate to `fx_packaged_binary` + `fx_component_manifest` (`component_name` = old GN package name)
   + `fx_test_component(test_type = "starnix", deps = [...])` + `fx_package` + `fx_test` (adding

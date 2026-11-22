@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    crate_name = "fake_thermal_sensor_manager",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
+        "//sdk/fidl/fuchsia.hardware.trippoint:fuchsia.hardware.trippoint_rust",
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# @bazel2gn:raw_attribute:output_name = "fake_thermal_sensor_manager_bin_test"
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "fake_thermal_sensor_manager_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fake_thermal_sensor_manager",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "fake-thermal-sensor-manager",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/fake_thermal_sensor_manager.cml",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    visibility = ["//src/power/testing/fake-thermal-sensor-manager/tests:__pkg__"],
+    deps = [":fake_thermal_sensor_manager_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "fake-thermal-sensor-manager",
+    testonly = True,
+    components = [":component"],
+)
+
+fx_unittest_package(
+    name = "fake-thermal-sensor-manager-unittests",
+    unit_tests = [":bin_test"],
+)

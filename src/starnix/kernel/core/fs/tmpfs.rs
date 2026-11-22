@@ -20,9 +20,51 @@ use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::{FileMode, mode};
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::seal_flags::SealFlags;
-use starnix_uapi::{TMPFS_MAGIC, error, gid_t, statfs, uid_t};
+use starnix_uapi::{TMPFS_MAGIC, errno, error, gid_t, statfs, uid_t};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Validates the value of a `tmpfs` `size=` mount option.
+///
+/// See <https://man7.org/linux/man-pages/man5/tmpfs.5.html>.
+///
+/// Accepts a non-empty string consisting of zero or more unsigned integer digits (decimal,
+/// `0`-prefixed octal, or `0x`/`0X`-prefixed hexadecimal when followed by a hex digit, without
+/// rejecting large values), optionally followed by a binary unit suffix (`k`/`m`/`g`/`t`/`p`/`e`,
+/// case-insensitive) and/or `%`.
+fn validate_size_option(data: &FsStr) -> Result<(), Errno> {
+    let input = std::str::from_utf8(data.as_ref()).map_err(|_| errno!(EINVAL))?;
+    if input.is_empty() {
+        return error!(EINVAL);
+    }
+
+    // `0x`/`0X` selects base 16 only when followed by a hex digit; otherwise a leading `0` selects
+    // base 8 (leaving `x`/`X` unconsumed and rejected below).
+    let (radix, rest) =
+        if let Some(hex_rest) = input.strip_prefix("0x").or_else(|| input.strip_prefix("0X")) {
+            if hex_rest.starts_with(|c: char| c.is_ascii_hexdigit()) {
+                (16, hex_rest)
+            } else {
+                return error!(EINVAL);
+            }
+        } else if input.starts_with('0') {
+            (8, input)
+        } else {
+            (10, input)
+        };
+
+    // Consume zero or more digits in `radix` (empty digit sequences before a valid suffix and
+    // arbitrarily large values are accepted).
+    let rest = rest.trim_start_matches(|c: char| c.is_digit(radix));
+
+    // Consume an optional binary unit suffix, then an optional `%`.
+    let rest = rest
+        .strip_prefix(['k', 'K', 'm', 'M', 'g', 'G', 't', 'T', 'p', 'P', 'e', 'E'])
+        .unwrap_or(rest);
+    let rest = rest.strip_prefix('%').unwrap_or(rest);
+
+    if rest.is_empty() { Ok(()) } else { error!(EINVAL) }
+}
 
 pub struct TmpFs {
     name: &'static FsStr,
@@ -229,6 +271,10 @@ impl TmpFs {
             Some(_) => return error!(EINVAL),
             None => false,
         };
+        let size = mount_options.remove(b"size");
+        if let Some(ref size) = size {
+            validate_size_option(size.as_ref())?;
+        }
         let fs = FileSystem::new(
             kernel,
             CacheMode::Permanent,
@@ -239,6 +285,14 @@ impl TmpFs {
         let mut info = FsNodeInfo::new(mode!(IFDIR, 0o1777), FsCred { uid, gid });
         info.chmod(mode);
         fs.create_root_with_info(root_ino, TmpFsDirectory::new(), info);
+
+        if let Some(size) = size {
+            track_stub!(TODO("https://fxbug.dev/534918239"), "tmpfs size option quota enforcement");
+            log_warn!(
+                "Ignoring tmpfs size option (size={}): quota enforcement is not implemented",
+                size
+            );
+        }
 
         if !mount_options.is_empty() {
             track_stub!(
@@ -298,6 +352,7 @@ fn create_child_node(
     // blksize is PAGE_SIZE for in memory node.
     info.blksize = *PAGE_SIZE as usize;
     let child = parent.fs().create_node_and_allocate_node_id(ops, info);
+    child.set_has_no_privileges_if_not_suid_or_sgid();
     if mode.fmt() == FileMode::IFREG {
         // For files created in tmpfs, forbid sealing, by sealing the seal operation.
         child.write_guard_state.lock().enable_sealing(SealFlags::SEAL);
@@ -811,6 +866,111 @@ mod test {
                 Err(e) => e,
             };
             assert_eq!(err, errno!(EINVAL));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_validate_size_option() {
+        for valid in [
+            "0",
+            "4096",
+            "18446744073709551615",
+            "18446744073709551616",
+            "00",
+            "01000",
+            "010k",
+            "050%",
+            "00k%",
+            "0x0",
+            "0xe",
+            "0x1000",
+            "0X1000",
+            "0x10e",
+            "0x10E",
+            "0x10ee",
+            "0x10g",
+            "0x10eg",
+            "0x50%",
+            "0x10g%",
+            "0x10k%",
+            "64k",
+            "64K",
+            "16m",
+            "16M",
+            "9g",
+            "9G",
+            "1t",
+            "1T",
+            "1p",
+            "1P",
+            "1e",
+            "1E",
+            "15E",
+            "16E",
+            "0E",
+            "0%",
+            "50%",
+            "100%",
+            "G",
+            "%",
+            "k%",
+            "10k%",
+        ] {
+            assert_eq!(validate_size_option(valid.into()), Ok(()), "expected valid: {valid}");
+        }
+
+        for invalid in [
+            "", "0x", "0X", "0xk", "0x%", "0xg", "0xge", "0x10ge", "08", "09", "08k", "+100", "-1",
+            " 100", "100 ", "invalid", "9z", "50%%", "10%k", "10kk", "100k1", "k1", "%1",
+        ] {
+            assert_eq!(
+                validate_size_option(invalid.into()),
+                error!(EINVAL),
+                "expected EINVAL: {invalid}"
+            );
+        }
+        assert_eq!(validate_size_option(b"\xff".into()), error!(EINVAL));
+    }
+
+    #[::fuchsia::test]
+    async fn test_size_mount_option() {
+        spawn_kernel_and_run(async |current_task| {
+            for valid in [
+                "size=9G",
+                "size=50%",
+                "size=0x1000",
+                "size=01000",
+                "size=G",
+                "size=%",
+                "size=10k%",
+                "size=16E",
+            ] {
+                let result = tmp_fs(
+                    current_task,
+                    FileSystemOptions {
+                        source: Default::default(),
+                        flags: FileSystemFlags::empty().into(),
+                        params: MountParams::parse(valid.into()).expect("parsed mount option"),
+                    },
+                );
+                assert!(result.is_ok(), "expected tmp_fs to accept {valid}");
+            }
+
+            for invalid in ["size", "size=invalid", "size=08", "size=0xk"] {
+                let err = match tmp_fs(
+                    current_task,
+                    FileSystemOptions {
+                        source: Default::default(),
+                        flags: FileSystemFlags::empty().into(),
+                        params: MountParams::parse(invalid.into()).expect("parsed mount option"),
+                    },
+                ) {
+                    Ok(_) => panic!("expected EINVAL for {invalid}"),
+                    Err(err) => err,
+                };
+                assert_eq!(err, errno!(EINVAL), "expected EINVAL for {invalid}");
+            }
         })
         .await;
     }

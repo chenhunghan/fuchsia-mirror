@@ -7,7 +7,8 @@ use diagnostics_assertions::assert_data_tree;
 use diagnostics_reader::ArchiveReader;
 use fidl_fuchsia_component::{BinderMarker, CreateChildArgs, RealmMarker};
 use fidl_fuchsia_component_decl::{
-    Child, CollectionRef, ConfigOverride, ConfigSingleValue, ConfigValue, StartupMode,
+    Availability, Child, CollectionRef, Offer, OfferConfiguration, Ref as DeclRef, SelfRef,
+    StartupMode,
 };
 use fuchsia_component::client::{
     connect_to_protocol, connect_to_protocol_at_dir_root, open_childs_exposed_directory,
@@ -28,19 +29,22 @@ async fn inspect_parent_override() -> anyhow::Result<()> {
         name: Some(child_name.to_string()),
         url: Some(String::from(CHILD_URL)),
         startup: Some(StartupMode::Lazy),
-        config_overrides: Some(vec![ConfigOverride {
-            key: Some("greeting".to_string()),
-            value: Some(ConfigValue::Single(ConfigSingleValue::String(
-                expected_greeting.to_string(),
-            ))),
-            ..ConfigOverride::default()
-        }]),
         ..Child::default()
     };
 
     let collection_ref = CollectionRef { name: COLLECTION_NAME.to_string() };
+    let child_args = CreateChildArgs {
+        dynamic_offers: Some(vec![Offer::Config(OfferConfiguration {
+            source: Some(DeclRef::Self_(SelfRef)),
+            source_name: Some("fuchsia.example.config.Greeting".to_string()),
+            target_name: Some("fuchsia.example.config.Greeting".to_string()),
+            availability: Some(Availability::Required),
+            ..OfferConfiguration::default()
+        })]),
+        ..CreateChildArgs::default()
+    };
     realm
-        .create_child(&collection_ref, &child_decl, CreateChildArgs::default())
+        .create_child(&collection_ref, &child_decl, child_args)
         .await
         .context("sending create child message")?
         .map_err(|e| anyhow::format_err!("creating child: {e:?}"))?;
@@ -126,23 +130,29 @@ async fn inspect_default_value() -> anyhow::Result<()> {
 
 #[fuchsia::test]
 async fn inspect_realm_builder_parent_override() {
-    let mut child_overrides: Vec<fidl_fuchsia_component_decl::ConfigOverride> =
-        Vec::with_capacity(1);
-
-    child_overrides.push(fidl_fuchsia_component_decl::ConfigOverride {
-        key: Some("greeting".to_string()),
-        value: Some(fidl_fuchsia_component_decl::ConfigValue::Single(
-            fidl_fuchsia_component_decl::ConfigSingleValue::String("parent component".to_string()),
-        )),
-        ..Default::default()
-    });
-
     let builder = RealmBuilder::new().await.unwrap();
     let config_component = builder
         .add_child(
             "config_example_realm_builder_parent_override",
             CHILD_URL,
-            ChildOptions::new().eager().config_overrides(child_overrides),
+            ChildOptions::new().eager(),
+        )
+        .await
+        .unwrap();
+
+    builder
+        .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+            name: "fuchsia.example.config.Greeting".parse().unwrap(),
+            value: "parent component".into(),
+        }))
+        .await
+        .unwrap();
+    builder
+        .add_route(
+            Route::new()
+                .capability(Capability::configuration("fuchsia.example.config.Greeting"))
+                .from(Ref::self_())
+                .to(&config_component),
         )
         .await
         .unwrap();

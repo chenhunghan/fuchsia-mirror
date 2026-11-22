@@ -9,7 +9,7 @@ use clonable_error::ClonableError;
 use cm_rust::offer::OfferDeclCommon;
 use cm_rust::{CapabilityTypeName, ExposeDeclCommon, GenericRef, SourceName, UseDeclCommon};
 use cm_types::{Availability, Name, RelativePath};
-use fidl_fuchsia_component as fcomponent;
+use fidl_fuchsia_component_common as fcomponent;
 use itertools::Itertools;
 use moniker::{ChildName, ExtendedMoniker, Moniker};
 use router_error::{Explain, RouterError};

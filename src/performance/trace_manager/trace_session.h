@@ -17,6 +17,7 @@
 
 #include <iosfwd>
 #include <list>
+#include <memory>
 #include <variant>
 #include <vector>
 
@@ -138,9 +139,19 @@ class TraceSession {
   void OnV2ProviderStarted(ProviderConnection* connection);
   void CheckAllProvidersStarted();
   void NotifyStarted();
-  // Replies Ok to a StartTracing request still pending when Stop() or
-  // Terminate() interrupts startup. Does not change |state_|.
+  // Replies Ok to a pending StartTracing request, then runs the buffer saves held while it was
+  // pending. Called however the start completes: every provider started, the start timed out, or
+  // Stop() or Terminate() interrupted it. Does not change |state_|. No-op if no reply is pending.
   void CompletePendingStart();
+
+  // A buffer save may write to the consumer's socket and block until the data fits. Consumers may
+  // wait for the StartTracing reply before they read the socket, so while that reply is pending a
+  // save is held and run by |CompletePendingStart()| instead. Saves run immediately when the
+  // forwarder does not wait for the consumer (see |BufferForwarder::WritesWaitForConsumer()|).
+  void RunOrDeferBufferSave(fit::closure save);
+  // Writes everything in the buffer of a tracee that is being removed, through
+  // |RunOrDeferBufferSave()|. Writes only from |buffer|, which outlives the tracee.
+  void WriteBufferOfRemovedTracee(std::shared_ptr<SharedBuffer> buffer);
 
   // Provider stopping processing.
   void OnProviderStopped(TraceProviderBundle* bundle, bool write_results);
@@ -201,6 +212,12 @@ class TraceSession {
   StartTracingCallback start_callback_;
   StopTracingCallback stop_callback_;
   fit::closure terminate_callback_;
+
+  // Buffer saves held by |RunOrDeferBufferSave()| while a StartTracing reply is pending, in
+  // arrival order. Each one refers to the session and its tracee only through weak pointers. It
+  // keeps the tracee's buffer alive, so a save from a tracee removed in the meantime still writes
+  // its data.
+  std::vector<fit::closure> deferred_buffer_saves_;
 
   fuchsia_tracing_controller::FxtVersion fxt_version_;
 

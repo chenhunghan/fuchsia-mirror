@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::MapKey;
-use crate::maps::{Map, MapValueRef, RingBuffer, RingBufferWakeupPolicy};
+use crate::maps::{Map, MapValueRef, RingBufferReservations, RingBufferWakeupPolicy};
 use ebpf::{
     BpfValue, EbpfBufferPtr, EbpfHelperImpl, EbpfProgramContext, FromBpfValue, HelperSet, MapFlags,
 };
@@ -32,11 +32,19 @@ use zerocopy::IntoBytes as _;
 pub trait MapsContext<'a> {
     fn on_map_access(&mut self, map: &Map);
     fn add_value_ref(&mut self, map_ref: MapValueRef<'a>);
+
+    /// Returns the active ring buffer reservations for this program run.
+    fn ringbuf_reservations(&mut self) -> &mut RingBufferReservations<'a>;
 }
 
 pub trait MapsProgramContext: EbpfProgramContext {
     fn on_map_access(context: &mut Self::RunContext<'_>, map: &Map);
     fn add_value_ref<'a>(context: &mut Self::RunContext<'a>, map_ref: MapValueRef<'a>);
+
+    /// Returns the active ring buffer reservations for this program run.
+    fn ringbuf_reservations<'a, 'b>(
+        context: &'b mut Self::RunContext<'a>,
+    ) -> &'b mut RingBufferReservations<'a>;
 }
 
 impl<C: EbpfProgramContext> MapsProgramContext for C
@@ -49,6 +57,12 @@ where
 
     fn add_value_ref<'a>(context: &mut Self::RunContext<'a>, map_ref: MapValueRef<'a>) {
         context.add_value_ref(map_ref);
+    }
+
+    fn ringbuf_reservations<'a, 'b>(
+        context: &'b mut Self::RunContext<'a>,
+    ) -> &'b mut RingBufferReservations<'a> {
+        context.ringbuf_reservations()
     }
 }
 
@@ -165,8 +179,8 @@ extern "C" fn bpf_ktime_get_ns<C: EbpfProgramContext>(
     zx::MonotonicInstant::get().into_nanos().into()
 }
 
-extern "C" fn bpf_ringbuf_reserve<C: EbpfProgramContext>(
-    _context: &mut C::RunContext<'_>,
+extern "C" fn bpf_ringbuf_reserve<'a, C: MapsProgramContext>(
+    context: &mut C::RunContext<'a>,
     map: BpfValue,
     size: BpfValue,
     flags: BpfValue,
@@ -175,7 +189,7 @@ extern "C" fn bpf_ringbuf_reserve<C: EbpfProgramContext>(
 ) -> BpfValue {
     // SAFETY: The safety of the operation is ensured by the bpf verifier. The `map` must be a
     // reference to a `Map` object kept alive by the program itself.
-    let map: &Map = unsafe { &*map.as_ptr::<Map>() };
+    let map: &'a Map = unsafe { &*map.as_ptr::<Map>() };
 
     // Map type is checked by the verifier.
     assert!(map.schema.map_type == bpf_map_type_BPF_MAP_TYPE_RINGBUF);
@@ -184,11 +198,17 @@ extern "C" fn bpf_ringbuf_reserve<C: EbpfProgramContext>(
         return BpfValue::default();
     };
     let flags = u64::from(flags);
-    map.ringbuf_reserve(size, flags).map(BpfValue::from).unwrap_or_else(|_| BpfValue::default())
+    match map.ringbuf_reserve(size, flags) {
+        Ok(data_addr) => {
+            C::ringbuf_reservations(context).push(data_addr, map);
+            BpfValue::from(data_addr)
+        }
+        Err(_) => BpfValue::default(),
+    }
 }
 
-extern "C" fn bpf_ringbuf_submit<C: EbpfProgramContext>(
-    _context: &mut C::RunContext<'_>,
+extern "C" fn bpf_ringbuf_submit<'a, C: MapsProgramContext>(
+    context: &mut C::RunContext<'a>,
     data: BpfValue,
     flags: BpfValue,
     _: BpfValue,
@@ -196,17 +216,14 @@ extern "C" fn bpf_ringbuf_submit<C: EbpfProgramContext>(
     _: BpfValue,
 ) -> BpfValue {
     let flags = RingBufferWakeupPolicy::from(flags);
-
-    // SAFETY: The safety of the operation is ensured by the bpf verifier. The data has to come from
-    // the result of a reserve call.
-    unsafe {
-        RingBuffer::submit(u64::from(data), flags);
-    }
+    let data_addr = data.as_usize();
+    let map = C::ringbuf_reservations(context).remove(data_addr);
+    map.ringbuf_submit(data_addr, flags);
     0.into()
 }
 
-extern "C" fn bpf_ringbuf_discard<C: EbpfProgramContext>(
-    _context: &mut C::RunContext<'_>,
+extern "C" fn bpf_ringbuf_discard<'a, C: MapsProgramContext>(
+    context: &mut C::RunContext<'a>,
     data: BpfValue,
     flags: BpfValue,
     _: BpfValue,
@@ -214,12 +231,9 @@ extern "C" fn bpf_ringbuf_discard<C: EbpfProgramContext>(
     _: BpfValue,
 ) -> BpfValue {
     let flags = RingBufferWakeupPolicy::from(flags);
-
-    // SAFETY: The safety of the operation is ensured by the bpf verifier. The data has to come from
-    // the result of a reserve call.
-    unsafe {
-        RingBuffer::discard(u64::from(data), flags);
-    }
+    let data_addr = data.as_usize();
+    let map = C::ringbuf_reservations(context).remove(data_addr);
+    map.ringbuf_discard(data_addr, flags);
     0.into()
 }
 
@@ -816,6 +830,14 @@ pub trait SocketFilterProgramContext:
 }
 
 // Trait for `EbpfProgramContext` implementations that are used for
+// `BPF_PROG_TYPE_TRACEPOINT` programs.
+pub trait TracepointProgramContext: MapsProgramContext + CurrentTaskProgramContext {
+    fn get_helpers() -> HelperSet<Self> {
+        get_common_helpers().chain(get_current_task_helpers()).collect()
+    }
+}
+
+// Trait for `EbpfProgramContext` implementations that are used for
 // `BPF_PROG_TYPE_CGROUP_SKB` programs.
 pub trait CgroupSkbProgramContext:
     MapsProgramContext
@@ -889,8 +911,10 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
     struct TestRunContext<'a> {
         map_refs: Vec<MapValueRef<'a>>,
+        ringbuf_reservations: crate::maps::RingBufferReservations<'a>,
     }
     impl<'a> BpfSockContext for TestRunContext<'a> {
         type BpfSockRef = MockSocket;
@@ -899,6 +923,9 @@ mod tests {
         fn on_map_access(&mut self, _map: &Map) {}
         fn add_value_ref(&mut self, map_ref: MapValueRef<'a>) {
             self.map_refs.push(map_ref);
+        }
+        fn ringbuf_reservations(&mut self) -> &mut RingBufferReservations<'a> {
+            &mut self.ringbuf_reservations
         }
     }
 
@@ -926,7 +953,7 @@ mod tests {
         let map = Map::new(schema, "test").unwrap();
         let map_value = BpfValue::from(&*map as *const Map);
 
-        let mut context = TestRunContext { map_refs: vec![] };
+        let mut context = TestRunContext::default();
 
         // 1. Create entry for socket 42
         let sk_value1 = BpfValue::from(42u64);
@@ -992,7 +1019,7 @@ mod tests {
         let map = Map::new(schema, "test").unwrap();
         let map_value = BpfValue::from(&*map as *const Map);
 
-        let mut context = TestRunContext { map_refs: vec![] };
+        let mut context = TestRunContext::default();
 
         // 1. Create entry for socket 42
         let sk_value1 = BpfValue::from(42u64);
@@ -1065,7 +1092,7 @@ mod tests {
     /// these tests when the real helpers are implemented.
     #[fuchsia::test]
     fn test_probe_read_user_zeroes_destination() {
-        let mut context = TestRunContext { map_refs: vec![] };
+        let mut context = TestRunContext::default();
 
         // Stand in for stale executor-stack memory with a non-zero sentinel.
         let mut dst = [0xAAu8; 8];
@@ -1090,5 +1117,246 @@ mod tests {
             BpfValue::default(),
         );
         assert_eq!(dst_str, [0u8; 8], "probe_read_user_str left the destination uninitialized");
+    }
+
+    #[fuchsia::test]
+    fn test_ringbuf_reserve_submit_discard() {
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: zx::system_get_page_size(),
+            flags: MapFlags::empty(),
+        };
+        let map1 = Map::new(schema.clone(), "test_rb1").unwrap();
+        let map2 = Map::new(schema, "test_rb2").unwrap();
+        let map1_val = BpfValue::from(&*map1 as *const Map);
+        let map2_val = BpfValue::from(&*map2 as *const Map);
+
+        let mut context = TestRunContext::default();
+
+        let data1 = bpf_ringbuf_reserve::<TestContext>(
+            &mut context,
+            map1_val,
+            BpfValue::from(16u64),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(!data1.is_zero());
+
+        let data2 = bpf_ringbuf_reserve::<TestContext>(
+            &mut context,
+            map2_val,
+            BpfValue::from(16u64),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(!data2.is_zero());
+
+        let data3 = bpf_ringbuf_reserve::<TestContext>(
+            &mut context,
+            map1_val,
+            BpfValue::from(16u64),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(!data3.is_zero());
+
+        assert_eq!(map1.can_read(), Some(false));
+        assert_eq!(map2.can_read(), Some(false));
+
+        // Submit/discard out of reservation order to exercise swap_remove.
+        bpf_ringbuf_discard::<TestContext>(
+            &mut context,
+            data2,
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert_eq!(map2.can_read(), Some(true));
+        let page_size = zx::system_get_page_size() as u64;
+        let mut hdr_len = [0u8; 4];
+        map2.vmo().read(&mut hdr_len, 3 * page_size).unwrap();
+        assert_eq!(u32::from_ne_bytes(hdr_len), 16 | linux_uapi::BPF_RINGBUF_DISCARD_BIT);
+
+        bpf_ringbuf_submit::<TestContext>(
+            &mut context,
+            data1,
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert_eq!(map1.can_read(), Some(true));
+
+        bpf_ringbuf_discard::<TestContext>(
+            &mut context,
+            data3,
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(context.ringbuf_reservations.is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_ringbuf_duplicate_data_addr() {
+        let page_size = zx::system_get_page_size() as usize;
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: page_size as u32,
+            flags: MapFlags::empty(),
+        };
+        let map = Map::new(schema, "test_rb_dup").unwrap();
+        let map_val = BpfValue::from(&*map as *const Map);
+        let mut context = TestRunContext::default();
+
+        // Reserve the entire buffer (`page_size - 8` bytes + 8-byte header) so
+        // `producer_position` advances by `page_size` and wraps back to offset 0.
+        let data1 = bpf_ringbuf_reserve::<TestContext>(
+            &mut context,
+            map_val,
+            BpfValue::from((page_size - 8) as u64),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(!data1.is_zero());
+
+        // Simulate userspace advancing `consumer_position` (page 1) mid-program.
+        map.vmo().write(&(page_size as u64).to_ne_bytes(), page_size as u64).unwrap();
+
+        let data2 = bpf_ringbuf_reserve::<TestContext>(
+            &mut context,
+            map_val,
+            BpfValue::from(16u64),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert_eq!(data2.as_usize(), data1.as_usize());
+
+        bpf_ringbuf_submit::<TestContext>(
+            &mut context,
+            data1,
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(!context.ringbuf_reservations.is_empty());
+
+        bpf_ringbuf_discard::<TestContext>(
+            &mut context,
+            data2,
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+            BpfValue::default(),
+        );
+        assert!(context.ringbuf_reservations.is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_ringbuf_reserve_failures_do_not_leak() {
+        let page_size = zx::system_get_page_size() as u32;
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: page_size,
+            flags: MapFlags::empty(),
+        };
+        let map = Map::new(schema, "test_rb_fail").unwrap();
+        let map_val = BpfValue::from(&*map as *const Map);
+        let mut context = TestRunContext::default();
+
+        // Non-zero flags.
+        assert!(
+            bpf_ringbuf_reserve::<TestContext>(
+                &mut context,
+                map_val,
+                BpfValue::from(16u64),
+                BpfValue::from(1u64),
+                BpfValue::default(),
+                BpfValue::default(),
+            )
+            .is_zero()
+        );
+        // Size > max_entries.
+        assert!(
+            bpf_ringbuf_reserve::<TestContext>(
+                &mut context,
+                map_val,
+                BpfValue::from(u64::from(page_size) + 1),
+                BpfValue::default(),
+                BpfValue::default(),
+                BpfValue::default(),
+            )
+            .is_zero()
+        );
+        // Size > u32::MAX.
+        assert!(
+            bpf_ringbuf_reserve::<TestContext>(
+                &mut context,
+                map_val,
+                BpfValue::from(u64::from(u32::MAX) + 1),
+                BpfValue::default(),
+                BpfValue::default(),
+                BpfValue::default(),
+            )
+            .is_zero()
+        );
+
+        assert!(context.ringbuf_reservations.is_empty());
+    }
+
+    #[fuchsia::test]
+    fn test_ringbuf_many_concurrent_reservations() {
+        let page_size = zx::system_get_page_size() as u32;
+        let schema = MapSchema {
+            map_type: bpf_map_type_BPF_MAP_TYPE_RINGBUF,
+            key_size: 0,
+            value_size: 0,
+            max_entries: page_size,
+            flags: MapFlags::empty(),
+        };
+        let map = Map::new(schema, "test_rb_many").unwrap();
+        let map_val = BpfValue::from(&*map as *const Map);
+        let mut context = TestRunContext::default();
+
+        // Reserve more than 4 entries to exercise SmallVec spilling to the heap.
+        let mut addrs = Vec::new();
+        for _ in 0..6 {
+            let addr = bpf_ringbuf_reserve::<TestContext>(
+                &mut context,
+                map_val,
+                BpfValue::from(16u64),
+                BpfValue::default(),
+                BpfValue::default(),
+                BpfValue::default(),
+            );
+            assert!(!addr.is_zero());
+            addrs.push(addr);
+        }
+
+        for addr in addrs {
+            bpf_ringbuf_submit::<TestContext>(
+                &mut context,
+                addr,
+                BpfValue::default(),
+                BpfValue::default(),
+                BpfValue::default(),
+                BpfValue::default(),
+            );
+        }
+        assert!(context.ringbuf_reservations.is_empty());
     }
 }

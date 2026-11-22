@@ -4,8 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! ARM CoreSight component identification and ROM table traversal, mirroring
-//! `<dev/coresight/component.h>` and `<dev/coresight/rom_table.h>`.
+//! ARM CoreSight component identification and ROM table traversal.
 
 #![no_std]
 

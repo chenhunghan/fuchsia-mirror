@@ -54,9 +54,10 @@ class GeometryProvider {
   class ProviderEndpoint
       : public fidl::WireServer<fuchsia_ui_observation_geometry::ViewTreeWatcher> {
    public:
-    explicit ProviderEndpoint(
-        fidl::ServerEnd<fuchsia_ui_observation_geometry::ViewTreeWatcher> endpoint,
-        std::optional<zx_koid_t> context_view, fit::function<void()> destroy_instance_function);
+    ProviderEndpoint(GeometryProvider& provider,
+                     fidl::ServerEnd<fuchsia_ui_observation_geometry::ViewTreeWatcher> endpoint,
+                     std::optional<zx_koid_t> context_view,
+                     fit::function<void()> destroy_instance_function);
 
     ~ProviderEndpoint() override;
 
@@ -91,6 +92,9 @@ class GeometryProvider {
 
     // Resets the state of an |endpoint_| for subsequent |Watch| calls.
     void Reset();
+
+    // Owns `this` in `GeometryProvider::endpoints_`, so it always outlives `this`.
+    GeometryProvider& provider_;
 
     // Server-side endpoint binding.
     std::optional<fidl::ServerBinding<fuchsia_ui_observation_geometry::ViewTreeWatcher>> binding_;

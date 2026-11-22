@@ -35,11 +35,11 @@ func init() {
 				Name: "ByteArray/4096",
 				Comment: `
 			4096 byte array in a struct
-			Disabled on HLCPP / LLCPP due to clang performance issues`,
+			Disabled on HLCPP / C++ wire due to clang performance issues`,
 				Config: config.Config{
 					"size": 4096,
 				},
-				Denylist: []config.Binding{config.HLCPP, config.LLCPP, config.CPP, config.Rust, config.Rust},
+				Denylist: []config.Binding{config.HLCPP, config.CPPWire, config.CPP, config.Rust, config.Rust},
 			},
 		},
 	})

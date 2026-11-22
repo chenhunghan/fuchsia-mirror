@@ -2,13 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", "rustc_staticlib")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
+test_suite(
+    name = "tests",
+    tests = [
+        ":block_server_cc_tests_package",
+        ":block_server_tests",
+    ],
+    visibility = ["//src/storage:__pkg__"],
+)
+
 rustc_library(
     name = "block_server",
     srcs = [
@@ -28,6 +39,7 @@ rustc_library(
         "//src/devices/block/drivers:__subpackages__",
         "//src/storage/fvm:__pkg__",
         "//src/storage/fxfs/platform:__pkg__",
+        "//src/storage/fxfs/tools:__pkg__",
         "//src/storage/gpt/component:__pkg__",
         "//src/storage/gpt/rust:__pkg__",
         "//src/storage/lib/block_client/rust:__pkg__",
@@ -47,6 +59,7 @@ rustc_library(
         "//src/storage/lib/mapping",
         "//src/storage/lib/ptr_slice",
         "//src/storage/lib/storage_device",
+        "//src/storage/lib/units",
         "//src/storage/lib/vmo-fifo",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
@@ -56,7 +69,110 @@ rustc_library(
         "//third_party/rust_crates/vendor:zstd",
     ],
 )
-# LINT.ThenChange(BUILD.gn)
+
+rustc_staticlib(
+    name = "block_server_c",
+    srcs = [
+        "src/async_interface.rs",
+        "src/c_interface.rs",
+        "src/callback_interface.rs",
+        "src/callback_interface/block_service.rs",
+        "src/decompression_tests.rs",
+        "src/lib.rs",
+        "src/mapper.rs",
+        "src/testing.rs",
+        "src/verifier.rs",
+    ],
+    crate_features = ["c_interface"],
+    edition = "2024",
+    # Before this migration, GN listed //third_party/zstd in `deps` because:
+    # `rustc_staticlib` does not forward `link_deps`.
+    # Both the GN and Bazel `rustc_staticlib` forward `link_deps` now.
+    link_deps = ["//third_party/zstd"],
+    deps = [
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/trace/rust:trace",
+        "//src/storage/lib/block_protocol",
+        "//src/storage/lib/delivery_blob",
+        "//src/storage/lib/mapping",
+        "//src/storage/lib/ptr_slice",
+        "//src/storage/lib/storage_device",
+        "//src/storage/lib/units",
+        "//src/storage/lib/vmo-fifo",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:scopeguard",
+        "//third_party/rust_crates/vendor:slab",
+        "//third_party/rust_crates/vendor:zstd",
+    ],
+)
+
+# `rustc_staticlib` has no `hdrs` attribute, so the generated C header for
+# `:block_server_c` is exported from this target.
+fx_cc_library(
+    name = "block_server_cc",
+    srcs = ["block_server.cc"],
+    hdrs = [
+        "block_server.h",
+        "block_server_c.h",
+    ],
+    visibility = ["//src/devices/block:__subpackages__"],
+    deps = [
+        ":block_server_c",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "fake_block_server_cc",
+    srcs = ["fake_server.cc"],
+    hdrs = ["fake_server.h"],
+    visibility = [
+        "//src/developer/adb/bin/adb-reboot:__pkg__",
+        "//src/firmware/lib/fastboot/test:__pkg__",
+        "//src/firmware/paver/test:__pkg__",
+        "//src/storage/fvm:__pkg__",
+        "//src/storage/lib/fs_management/cpp:__pkg__",
+    ],
+    deps = [
+        ":block_server_cc",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+        "//src/storage/lib/block_client/cpp",
+        "//src/storage/lib/buffer",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "block_server_cc_tests",
+    srcs = ["block_server_cc_tests.cc"],
+    deps = [
+        ":block_server_cc",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/devices/lib/block",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/storage/lib/block_client/cpp",
+        "//src/storage/lib/buffer",
+    ],
+)
+
+fx_unittest_package(
+    name = "block_server_cc_tests_package",
+    package_name = "block-server-cc-tests",
+    unit_tests = [":block_server_cc_tests"],
+)
 
 rustc_test(
     name = "block_server_test",

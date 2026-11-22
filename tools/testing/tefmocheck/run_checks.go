@@ -9,6 +9,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
@@ -18,6 +20,33 @@ const checkTestNamePrefix = "testing_failure_mode/"
 
 func debugPathForCheck(check FailureModeCheck) string {
 	return filepath.Join(checkTestNamePrefix, check.Name(), "debug.txt")
+}
+
+// effectiveCategory returns check's explicit category if configured, or
+// CategoryInfra for legacy checks that set IsInfraFailure() without an explicit
+// category. Uncategorized non-infra checks remain "" so downstream analytics do
+// not mislabel uncategorized checks as system_or_test.
+func effectiveCategory(check FailureModeCheck) runtests.FailureCategory {
+	if cat := check.Category(); cat != "" {
+		return cat
+	}
+	if check.IsInfraFailure() {
+		return runtests.CategoryInfra
+	}
+	return ""
+}
+
+func categoryRank(cat runtests.FailureCategory) int {
+	switch cat {
+	case runtests.CategoryInfra:
+		return 3
+	case runtests.CategoryInfraOrSystem:
+		return 2
+	case runtests.CategorySystemOrTest:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // appendFailureReason adds the `Errors` from `extra` to `primary` and returns
@@ -35,12 +64,15 @@ func appendFailureReason(primary *runtests.FailureReason, extra *runtests.Failur
 	return primary
 }
 
-// RunChecks runs the given checks on the given TestingOutputs.
+// RunChecks runs the given checks on the given TestingOutputs and returns both
+// legacy synthetic TestDetails entries and a structured FailureModeSummary
+// (with Result=FailureModePass when no non-exoneration check matched).
 // A failed test means the Check() returned true. All matching checks are
 // incorporated into FailureReason.Errors on matching failing tests and test
 // cases, but after the first non-flake failed check, no further synthetic test
-// cases or top-level tests will be emitted. Tests will not be returned for
-// skipped or passed checks.
+// cases, top-level tests, or FailureModeSummary.Failures entries will be
+// emitted. Entries will not be returned for skipped, passed, or exoneration
+// checks.
 // Rationale: In order for the bugs associated with top-level check tests to be
 // useful, we want a failure to be associated only with the most specific,
 // helpful failure modes, which then get routed to specific bugs. Hence only a
@@ -52,8 +84,12 @@ func appendFailureReason(primary *runtests.FailureReason, extra *runtests.Failur
 // We want to be able to add many checks without cluttering the output test summary
 // with noise. Our flake detection system will identify a test that appears as a failure on
 // one run of a swarming task, and then disappears on other runs of that same task as a flake.
-func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string) ([]runtests.TestDetails, error) {
+func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string) ([]runtests.TestDetails, *runtests.FailureModeSummary, error) {
 	var checkTests []runtests.TestDetails
+	var checkFailures []runtests.CheckFailure
+	var fatalCheck FailureModeCheck
+	var highestFlakeCategory runtests.FailureCategory
+	var primaryFlakeCheck FailureModeCheck
 	reachedFailure := false
 	for _, check := range checks {
 		if failed := check.Check(to); !failed {
@@ -151,13 +187,19 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 						if attributedTestName != "" {
 							foundMatch = true
 						}
-						test.Cases = append(test.Cases, runtests.TestCaseResult{
-							DisplayName:   "tefmocheck: " + check.Name(),
-							SuiteName:     "tefmocheck",
-							CaseName:      check.Name(),
-							Status:        runtests.TestFailure,
-							FailureReason: runtests.FailureReasonFromMessage(check.FailureReason()),
-						})
+						// SkipPassedTest() uses runtests.IsFailure(), which treats TestExonerated
+						// as a failure so Block 1 still enriches FailureReason context on
+						// exonerated tests. Guard synthetic FAIL sub-case emission explicitly
+						// so we do not attach a failing case under an EXONERATED test suite.
+						if test.Status != runtests.TestExonerated {
+							test.Cases = append(test.Cases, runtests.TestCaseResult{
+								DisplayName:   "tefmocheck: " + check.Name(),
+								SuiteName:     "tefmocheck",
+								CaseName:      check.Name(),
+								Status:        runtests.TestFailure,
+								FailureReason: runtests.FailureReasonFromMessage(check.FailureReason()),
+							})
+						}
 					}
 				}
 			}
@@ -179,8 +221,9 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 			StartTime: time.Now(), // needed by ResultDB
 			Tags:      check.Tags(),
 		}
+		cat := effectiveCategory(check)
 		// Check if failure is an infrastructure failure.
-		if check.IsInfraFailure() {
+		if cat == runtests.CategoryInfra {
 			// Infra failures will have status value of "INFRA_FAIL"
 			// in summary.json. This will help distinguish regular failures
 			// which have status value "FAIL" from infra failures.
@@ -192,24 +235,46 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 			testDetails.OutputFiles = []string{outputFile}
 			outputFileAbsPath := filepath.Join(outputsDir, outputFile)
 			if err := os.MkdirAll(filepath.Dir(outputFileAbsPath), 0o777); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			debugText := fmt.Sprintf(
 				"This is a synthetic test that was produced by the tefmocheck tool during post-processing of test results. See https://fuchsia.googlesource.com/fuchsia/+/HEAD/tools/testing/tefmocheck/README.md\n%s",
 				check.DebugText())
 			if err := os.WriteFile(outputFileAbsPath, []byte(debugText), 0o666); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		for _, cof := range check.OutputFiles() {
 			relPath, err := filepath.Rel(outputsDir, cof)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			testDetails.OutputFiles = append(testDetails.OutputFiles, relPath)
 		}
+		checkResult := runtests.FailureModeFail
+		if check.IsFlake() {
+			checkResult = runtests.FailureModeFlaky
+		}
+		var infraDetails *runtests.InfraDetails
+		if cat == runtests.CategoryInfra && check.InfraDomain() != "" {
+			infraDetails = &runtests.InfraDetails{
+				Domain: check.InfraDomain(),
+			}
+		}
+		checkFailures = append(checkFailures, runtests.CheckFailure{
+			Name:           check.Name(),
+			Result:         checkResult,
+			FailureMessage: strings.TrimSpace(check.FailureReason()),
+			OutputFiles:    slices.Clone(testDetails.OutputFiles),
+			Category:       cat,
+			Infra:          infraDetails,
+		})
 		checkTests = append(checkTests, testDetails)
 		if check.IsFlake() {
+			if primaryFlakeCheck == nil || categoryRank(cat) > categoryRank(highestFlakeCategory) {
+				highestFlakeCategory = cat
+				primaryFlakeCheck = check
+			}
 			checkTests = append(checkTests, runtests.TestDetails{
 				Name:                 checkTestNamePrefix + check.Name(),
 				IsTestingFailureMode: true,
@@ -224,7 +289,41 @@ func RunChecks(checks []FailureModeCheck, to *TestingOutputs, outputsDir string)
 			// If this check was a flake, continue to see if we get another failure.
 			continue
 		}
+		fatalCheck = check
 		reachedFailure = true
 	}
-	return checkTests, nil
+	if len(checkFailures) == 0 {
+		return checkTests, &runtests.FailureModeSummary{
+			Result:   runtests.FailureModePass,
+			Failures: []runtests.CheckFailure{},
+		}, nil
+	}
+	failureMode := &runtests.FailureModeSummary{
+		Failures: checkFailures,
+	}
+	// A fatal check strictly determines the shard's failure_mode category so
+	// earlier non-fatal flakes cannot reclassify a real failure. Category
+	// precedence only applies when every matched check was a flake.
+	if fatalCheck != nil {
+		failureMode.Name = fatalCheck.Name()
+		failureMode.Result = runtests.FailureModeFail
+		failureMode.Category = effectiveCategory(fatalCheck)
+		if failureMode.Category == runtests.CategoryInfra && fatalCheck.InfraDomain() != "" {
+			failureMode.Infra = &runtests.InfraDetails{
+				Domain: fatalCheck.InfraDomain(),
+			}
+		}
+	} else {
+		if primaryFlakeCheck != nil {
+			failureMode.Name = primaryFlakeCheck.Name()
+		}
+		failureMode.Result = runtests.FailureModeFlaky
+		failureMode.Category = highestFlakeCategory
+		if failureMode.Category == runtests.CategoryInfra && primaryFlakeCheck != nil && primaryFlakeCheck.InfraDomain() != "" {
+			failureMode.Infra = &runtests.InfraDetails{
+				Domain: primaryFlakeCheck.InfraDomain(),
+			}
+		}
+	}
+	return checkTests, failureMode, nil
 }

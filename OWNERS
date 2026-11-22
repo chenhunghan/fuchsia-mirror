@@ -19,7 +19,9 @@
 # - '**.foo' matches files in this directory and any subdirectory.
 
 # Build system files throughout the tree
-per-file **.gn,**.gni,**.bazel,**.bzl,fuchsia.code-workspace = file:/build/OWNERS
+per-file fuchsia.code-workspace = file:/build/OWNERS
+per-file **.gn,**.gni = file:/build/BUILD_OWNERS
+per-file **.bazel,**.bzl = file:/build/bazel/BAZEL_OWNERS
 
 # These patterns give Bazel migration reviewers who are not Build team members
 # OWNERS approval rights on Bazel migration related files.

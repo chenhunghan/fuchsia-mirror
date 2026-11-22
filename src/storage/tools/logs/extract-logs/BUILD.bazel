@@ -2,11 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
 
 package(default_applicable_licenses = ["//:license"])
 
-rustc_binary(
+# Bridged to GN via `bazel_host_tool` in `BUILD.gn`.
+# @bazel2gn:skip
+rustc_binary_host_tool(
     name = "extract-logs",
     srcs = ["src/main.rs"],
     edition = "2024",

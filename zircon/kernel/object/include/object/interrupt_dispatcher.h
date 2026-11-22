@@ -8,7 +8,6 @@
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_INTERRUPT_DISPATCHER_H_
 
 #include <lib/object-constants.h>
-#include <lib/wake-vector.h>
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
@@ -18,30 +17,19 @@ class InterruptDispatcher;
 
 extern "C" {
 
-using InterruptKindInitFn = void (*)(const InterruptDispatcher* disp, void* ctx);
+InterruptDispatcher* cpp_interrupt_dispatcher_create(uint32_t flags, uint32_t options);
 
-zx_status_t cpp_interrupt_dispatcher_create(uint32_t flags, uint32_t options, void* ctx,
-                                            InterruptKindInitFn init_fn, InterruptDispatcher** out);
-void cpp_interrupt_dispatcher_wake_event_initialize(const InterruptDispatcher* disp);
-void cpp_interrupt_dispatcher_wake_event_destroy(const InterruptDispatcher* disp);
-void cpp_interrupt_dispatcher_wake_event_trigger(const InterruptDispatcher* disp,
-                                                 zx_instant_boot_t trigger_time);
-void cpp_interrupt_dispatcher_wake_event_acknowledge(const InterruptDispatcher* disp,
-                                                     bool remain_signaled);
-
-void rust_interrupt_dispatcher_state_init(const InterruptDispatcher* disp, void* state,
-                                          uint32_t flags, uint32_t options, void* ctx,
-                                          InterruptKindInitFn init_fn);
+void rust_interrupt_dispatcher_state_init(void* state, const InterruptDispatcher* disp,
+                                          uint32_t flags, uint32_t options);
+void rust_interrupt_dispatcher_teardown(const InterruptDispatcher* disp);
 void rust_interrupt_dispatcher_state_destroy(void* state);
 Lock<CriticalMutex>* rust_interrupt_dispatcher_state_get_lock(const void* state);
 void rust_interrupt_dispatcher_on_zero_handles(const InterruptDispatcher* disp);
 bool rust_interrupt_dispatcher_is_virtual(const InterruptDispatcher* disp);
-void rust_interrupt_dispatcher_get_diagnostics(
-    const InterruptDispatcher* disp, wake_vector::WakeVector::Diagnostics* diagnostics_out);
 
 }  // extern "C"
 
-class InterruptDispatcher final : public Dispatcher, public wake_vector::WakeVector {
+class InterruptDispatcher final : public Dispatcher {
  public:
   ~InterruptDispatcher() final;
   InterruptDispatcher& operator=(const InterruptDispatcher&) = delete;
@@ -61,26 +49,15 @@ class InterruptDispatcher final : public Dispatcher, public wake_vector::WakeVec
 
   void on_zero_handles() final { rust_interrupt_dispatcher_on_zero_handles(this); }
 
-  void GetDiagnostics(WakeVector::Diagnostics& diagnostics_out) const final;
-
  protected:
   Lock<CriticalMutex>* get_lock() const final;
 
  private:
-  friend zx_status_t cpp_interrupt_dispatcher_create(uint32_t flags, uint32_t options, void* ctx,
-                                                     InterruptKindInitFn init_fn,
-                                                     InterruptDispatcher** out);
-  friend void cpp_interrupt_dispatcher_wake_event_initialize(const InterruptDispatcher* disp);
-  friend void cpp_interrupt_dispatcher_wake_event_destroy(const InterruptDispatcher* disp);
-  friend void cpp_interrupt_dispatcher_wake_event_trigger(const InterruptDispatcher* disp,
-                                                          zx_instant_boot_t trigger_time);
-  friend void cpp_interrupt_dispatcher_wake_event_acknowledge(const InterruptDispatcher* disp,
-                                                              bool remain_signaled);
+  friend InterruptDispatcher* cpp_interrupt_dispatcher_create(uint32_t flags, uint32_t options);
 
-  InterruptDispatcher(uint32_t flags, uint32_t options, void* ctx, InterruptKindInitFn init_fn);
+  InterruptDispatcher(uint32_t flags, uint32_t options);
 
   OpaqueStorage<kInterruptDispatcherStateSize, kInterruptDispatcherStateAlign> opaque_storage_;
-  mutable wake_vector::WakeEvent wake_event_;
 };
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_INTERRUPT_DISPATCHER_H_

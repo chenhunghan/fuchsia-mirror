@@ -406,4 +406,44 @@ TEST_F(CrashRecoveryTest, DestroyAllIfacesWhileDestroyIfaceInFlight) {
   WaitForDeviceCount(dev_count);
 }
 
+TEST_F(CrashRecoveryTest, BusStartedRestartFailurePreservesConfigAndIfp) {
+  InitWithInterface();
+  uint32_t dev_count = DeviceCount();
+
+  brcmf_simdev* sim = nullptr;
+  brcmf_cfg80211_info* orig_config = nullptr;
+  brcmf_if* orig_ifp = nullptr;
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    sim = device->GetSim();
+    orig_config = sim->drvr->config;
+    orig_ifp = sim->drvr->iflist[0];
+  });
+  ASSERT_NOT_NULL(sim);
+  ASSERT_NOT_NULL(orig_config);
+  ASSERT_NOT_NULL(orig_ifp);
+
+  SetRecoveryHook([&]() {
+    sim->sim_fw->err_inj_.AddErrInjIovar("ver", ZX_ERR_TIMED_OUT, BCME_OK);
+    zx_status_t status = brcmf_bus_started(sim->drvr, /*drvr_restarting=*/true);
+    sim->sim_fw->err_inj_.DelErrInjIovar("ver");
+    EXPECT_EQ(status, ZX_ERR_TIMED_OUT);
+    EXPECT_EQ(sim->drvr->bus_if->state, BRCMF_BUS_DOWN);
+    EXPECT_EQ(sim->drvr->config, orig_config);
+    EXPECT_EQ(sim->drvr->iflist[0], orig_ifp);
+    return status;
+  });
+
+  ScheduleCrashNoWait(zx::msec(10));
+  env_->Run(kTestDuration);
+  WaitForRecoveryComplete();
+
+  WaitForDeviceCount(dev_count - 1);
+  WithSimDevice([&](brcmfmac::SimDevice* device) {
+    EXPECT_EQ(device->GetSim()->drvr->bus_if->state, BRCMF_BUS_DOWN);
+    EXPECT_EQ(device->GetSim()->drvr->config, orig_config);
+    EXPECT_EQ(device->GetSim()->drvr->iflist[0], orig_ifp);
+    EXPECT_NULL(device->GetClientInterface());
+  });
+}
+
 }  // namespace wlan::brcmfmac

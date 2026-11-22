@@ -33,10 +33,14 @@ constexpr std::string_view kGptMetaDefault = "default";
 class __EXPORT Fastboot : public FastbootBase {
  public:
   // Creates a Fastboot with max download size as a portion of total system memory.
-  Fastboot();
+  // `misc_dir` opts in to writing the Android BCB to `/misc` on `reboot-fastboot`.
+  explicit Fastboot(
+      fidl::ClientEnd<fuchsia_io::Directory> misc_dir = fidl::ClientEnd<fuchsia_io::Directory>());
   // Creates a Fastboot with specified max download size and svc_root for testing.
-  explicit Fastboot(size_t max_download_size, fidl::ClientEnd<fuchsia_io::Directory> svc_root =
-                                                  fidl::ClientEnd<fuchsia_io::Directory>());
+  explicit Fastboot(
+      size_t max_download_size,
+      fidl::ClientEnd<fuchsia_io::Directory> svc_root = fidl::ClientEnd<fuchsia_io::Directory>(),
+      fidl::ClientEnd<fuchsia_io::Directory> misc_dir = fidl::ClientEnd<fuchsia_io::Directory>());
 
  private:
   zx::result<> ProcessCommand(std::string_view command, Transport *transport) override;
@@ -74,7 +78,9 @@ class __EXPORT Fastboot : public FastbootBase {
   zx::result<fidl::UnownedClientEnd<fuchsia_fshost::Recovery>> ConnectToRecoveryService();
   zx::result<fidl::WireSyncClient<fuchsia_paver::BootManager>> FindBootManager();
   zx::result<> HandleShutdown(Transport *transport,
-                              fuchsia_hardware_power_statecontrol::ShutdownAction action);
+                              fuchsia_hardware_power_statecontrol::ShutdownAction action,
+                              bool reboot_to_userspace_fastboot = false);
+  zx::result<> WriteFastbootBootloaderMessage();
   zx::result<> WipeUserdata(Transport *transport);
   zx::result<> WriteFirmware(fuchsia_paver::wire::Configuration config,
                              std::string_view firmware_type, Transport *transport,
@@ -129,6 +135,8 @@ class __EXPORT Fastboot : public FastbootBase {
   fzl::OwnedVmoMapper download_vmo_mapper_;
   // Channel to svc.
   fidl::ClientEnd<fuchsia_io::Directory> svc_root_;
+  // Optional channel to /misc directory for testing.
+  fidl::ClientEnd<fuchsia_io::Directory> misc_dir_;
   fidl::ClientEnd<fuchsia_fshost::Recovery> fshost_recovery_;
   std::unique_ptr<BlobImageWriter> blob_writer_;
   /// Used to control what the target of "flash blob" requests are.
@@ -179,9 +187,9 @@ class Fastboot::BlobImageWriter {
 
   std::mutex mutex_;
   std::condition_variable_any cv_;
-  std::jthread sync_thread_;
   bool sync_requested_ = false;
   std::optional<zx::result<>> sync_error_ = std::nullopt;
+  std::jthread sync_thread_;
 };
 
 }  // namespace fastboot

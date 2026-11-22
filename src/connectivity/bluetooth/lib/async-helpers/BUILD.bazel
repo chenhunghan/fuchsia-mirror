@@ -17,18 +17,13 @@ test_suite(
 rustc_library(
     name = "async-helpers",
     srcs = [
-        "src/hanging_get/async_server.rs",
-        "src/hanging_get/mod.rs",
         "src/lib.rs",
         "src/maybe_stream.rs",
-        "src/responding_channel.rs",
     ],
     build_flags = ["//build/config/rust/lints:deny_unused_results"],
     edition = "2024",
     visibility = ["//src/connectivity/bluetooth:__subpackages__"],
     deps = [
-        "//src/lib/async-utils",
-        "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
     ],
 )
@@ -39,7 +34,6 @@ rustc_test(
     crate = ":async-helpers",
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
-        "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
     ],
 )
@@ -61,6 +55,5 @@ rustc_library(
 
 fx_unittest_package(
     name = "async-helpers-tests",
-    package_name = "async-helpers-tests",
     unit_tests = [":async_helpers_lib_test"],
 )

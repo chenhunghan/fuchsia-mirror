@@ -7,7 +7,6 @@
 #include <ios>
 
 #include "src/ui/lib/escher/geometry/types.h"
-#include "src/ui/lib/escher/shape/mesh_spec.h"
 #include "src/ui/lib/escher/third_party/granite/vk/command_buffer_pipeline_state.h"
 #include "src/ui/lib/escher/third_party/granite/vk/descriptor_set_layout.h"
 #include "src/ui/lib/escher/third_party/granite/vk/pipeline_layout.h"
@@ -58,73 +57,6 @@ std::ostream& operator<<(std::ostream& str, const Rectangle2D& r) {
   return str << "Rectangle2D[origin:" << r.origin << " extent:" << r.extent << " clockwise_uvs:["
              << r.clockwise_uvs[0] << "," << r.clockwise_uvs[1] << "," << r.clockwise_uvs[2] << ","
              << r.clockwise_uvs[3] << "]]";
-}
-
-std::ostream& operator<<(std::ostream& str, const MeshAttribute& attr) {
-  switch (attr) {
-    case MeshAttribute::kPosition2D:
-      str << "kPosition2D";
-      break;
-    case MeshAttribute::kPosition3D:
-      str << "kPosition3D";
-      break;
-    case MeshAttribute::kPositionOffset:
-      str << "kPositionOffset";
-      break;
-    case MeshAttribute::kUV:
-      str << "kUV";
-      break;
-    case MeshAttribute::kPerimeterPos:
-      str << "kPerimeterPos";
-      break;
-    case MeshAttribute::kBlendWeight1:
-      str << "kBlendWeight1";
-      break;
-    case MeshAttribute::kStride:
-      str << "kStride";
-      break;
-  }
-  return str;
-}
-
-std::ostream& operator<<(std::ostream& str, const MeshAttributes& attributes) {
-  static_assert(uint32_t(MeshAttribute::kStride) == (1 << 6), "missing enum");
-
-  constexpr std::array<MeshAttribute, 6> all_flags = {
-      {MeshAttribute::kPosition2D, MeshAttribute::kPosition3D, MeshAttribute::kPositionOffset,
-       MeshAttribute::kUV, MeshAttribute::kPerimeterPos, MeshAttribute::kBlendWeight1}};
-
-  bool has_flag = false;  // has a flag already been seen?
-  for (auto flag : all_flags) {
-    if (attributes & flag) {
-      // Put a pipe after the previous flag, if there is one.
-      if (has_flag) {
-        str << "|";
-      } else {
-        has_flag = true;
-      }
-      str << flag;
-    }
-  }
-
-  return str;
-}
-
-std::ostream& operator<<(std::ostream& str, const MeshSpec& spec) {
-  str << "MeshSpec[";
-
-  bool any_attributes = false;
-  for (uint32_t i = 0; i < VulkanLimits::kNumVertexBuffers; ++i) {
-    if (spec.attribute_count(i) > 0) {
-      if (any_attributes) {
-        str << ", ";
-      }
-      any_attributes = true;
-      str << i << ":" << spec.attributes[i];
-    }
-  }
-  str << "]";
-  return str;
 }
 
 std::ostream& operator<<(std::ostream& str, const ImageInfo& info) {

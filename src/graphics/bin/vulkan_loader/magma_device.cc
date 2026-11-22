@@ -54,11 +54,12 @@ zx::result<> MagmaDevice::Initialize(const fidl::ClientEnd<fuchsia_io::Directory
             FX_LOGS(ERROR) << "ICD missing flags";
             continue;
           }
+          std::string component_url(icd.component_url().get());
           auto data = node().CreateChild(std::to_string(i++));
-          data.RecordString("component_url", icd.component_url().data());
+          data.RecordString("component_url", component_url);
           data.RecordUint("flags", static_cast<uint32_t>(icd.flags()));
           if (icd.flags() & fuchsia_gpu_magma::wire::IcdFlags::kSupportsVulkan) {
-            zx::result icd_component = app()->CreateIcdComponent(icd.component_url().data());
+            zx::result icd_component = app()->CreateIcdComponent(component_url);
             if (icd_component.is_error()) {
               FX_LOGS(ERROR) << "Failed to create ICD component: " << icd_component.status_string();
               continue;

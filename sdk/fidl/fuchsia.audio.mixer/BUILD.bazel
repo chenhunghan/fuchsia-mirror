@@ -14,7 +14,6 @@ fidl_library(
         "sampler_options.fidl",
         "synthetic_clock.fidl",
     ],
-    enable_hlcpp = True,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.audio",

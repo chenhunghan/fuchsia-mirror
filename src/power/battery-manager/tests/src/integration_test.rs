@@ -8,9 +8,9 @@ mod fake_telemetry_governor_votes;
 use anyhow::Result;
 use battery_manager_test_harness::{
     DEFAULT_CHARGER_MAX_CURRENT_UA, DEFAULT_CHARGER_MAX_VOLTAGE_UV, FakeCharger, FidlRouteMode,
-    LeaseEvent, battery_manager_moniker, setup_realm, setup_realm_with_charger,
-    setup_realm_with_config, wait_for_battery_info, wait_for_inspect_match,
-    wait_for_matching_battery_info,
+    LeaseEvent, WakeAlarmEvent, battery_manager_moniker, setup_realm, setup_realm_with_charger,
+    setup_realm_with_config, setup_realm_with_wake_alarms, wait_for_battery_info,
+    wait_for_inspect_match, wait_for_matching_battery_info,
 };
 use diagnostics_assertions::{TreeAssertion, tree_assertion};
 use fake_governor_votes::{FAKE_GOVERNOR_CHARGE_CURRENT_LIMIT_UA, FAKE_GOVERNOR_OPERATING_MODE};
@@ -23,7 +23,9 @@ use fidl_fuchsia_hardware_power_charger as fcharger;
 use fidl_fuchsia_power_battery as fpower;
 use fidl_fuchsia_power_battery_test as spower;
 use fidl_fuchsia_testing as ftesting;
+use fidl_fuchsia_time_alarms as falarms;
 use fidl_test_hardwarepowercontrol as ftest_battery;
+use fuchsia_async as fasync;
 use futures::StreamExt as _;
 use futures::channel::mpsc;
 use test_case::test_case;
@@ -1738,4 +1740,242 @@ async fn test_governor_receives_periodic_samples() -> Result<()> {
         },
     });
     wait_for_inspect_match(&moniker, &sampled).await
+}
+
+/// Verifies that battery-manager arms a 47-second `WakeAlarms` poll when discharging at `<= 1%`
+/// scaled SOC, suppresses unchanged periodic samples while re-arming the alarm, forwards changed
+/// periodic samples with the wake alarm's `wake_lease` to `BatteryInfoWatcher`, and cancels the
+/// alarm when charging starts or when `0%` SOC is reached.
+#[fuchsia::test]
+async fn test_low_battery_waking_poll() -> Result<()> {
+    let (alarm_tx, mut alarm_rx) = mpsc::unbounded();
+    let (realm, _lease_events) =
+        setup_realm_with_wake_alarms(FidlRouteMode::NewOnly, false, alarm_tx).await?;
+
+    let battery_mgr: fpower::BatteryManagerProxy =
+        realm.root.connect_to_protocol_at_exposed_dir()?;
+    let service = fuchsia_component::client::Service::open_from_dir(
+        realm.root.get_exposed_dir(),
+        ftest_battery::ServiceMarker,
+    )?;
+    let control = service.watch_for_any().await?.connect_to_control()?;
+
+    let (watcher_client, watcher_stream) =
+        fidl::endpoints::create_request_stream::<fpower::BatteryInfoWatcherMarker>();
+    battery_mgr.watch(watcher_client)?;
+
+    let (info, mut watcher_stream) = wait_for_battery_info(watcher_stream).await?;
+    assert_default_battery_info(&info);
+
+    let fake_clock_control =
+        realm.root.connect_to_protocol_at_exposed_dir::<ftesting::FakeClockControlProxy>()?;
+    fake_clock_control.pause().await?;
+
+    // 1. Discharging above 1% (raw 4.0% -> scaled 2.0% with 3.0% shutdown offset) does not arm
+    //    a wake alarm.
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_seconds(1000).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {e:?}"))?;
+    control
+        .set_battery_status(&fbattery::Status {
+            level_percent: Some(4.0),
+            current_ua: Some(REFRESHED_DISCHARGING_CURRENT_UA),
+            ..Default::default()
+        })
+        .await?;
+    let (info_2pct, _) = wait_for_matching_battery_info(&mut watcher_stream, |info| {
+        info.level_percent == Some(2.0)
+            && info.charge_status == Some(fpower::ChargeStatus::Discharging)
+    })
+    .await?;
+    assert_eq!(info_2pct.level_percent, Some(2.0));
+    assert!(alarm_rx.try_recv().is_err(), "No wake alarm should be armed above 1% SOC");
+
+    // 2. Discharging at 1% (raw 3.1% -> scaled 1.0%) arms the 47s `battery_manager_sample` wake
+    //    alarm.
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_seconds(1000).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {e:?}"))?;
+    control
+        .set_battery_status(&fbattery::Status {
+            level_percent: Some(3.1),
+            current_ua: Some(REFRESHED_DISCHARGING_CURRENT_UA),
+            ..Default::default()
+        })
+        .await?;
+    wait_for_matching_battery_info(&mut watcher_stream, |info| {
+        info.level_percent == Some(1.0)
+            && info.charge_status == Some(fpower::ChargeStatus::Discharging)
+    })
+    .await?;
+
+    let (deadline_1, responder_1) = match alarm_rx
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("alarm_rx ended waiting for initial SetAndWait"))?
+    {
+        WakeAlarmEvent::SetAndWait { alarm_id, deadline, responder } => {
+            assert_eq!(alarm_id, "battery_manager_sample");
+            (deadline, responder)
+        }
+        other => panic!("Expected SetAndWait at 1% SOC, got {other:?}"),
+    };
+
+    // 3. Update `voltage_uv` on the battery driver (which is not in `supported_options.interest`,
+    //    so `Battery::Watch` does not fire) and fire the 47s wake alarm. Because voltage alone is
+    //    not a user-visible change (`has_user_visible_change` is false), battery-manager drops the
+    //    wake lease without notifying `BatteryInfoWatcher` and re-arms the next 47s alarm.
+    const SAMPLED_VOLTAGE_MV: u32 = 3500;
+    control
+        .set_battery_status(&fbattery::Status {
+            voltage_uv: Some(SAMPLED_VOLTAGE_MV * 1000),
+            ..Default::default()
+        })
+        .await?;
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_seconds(47).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {e:?}"))?;
+    let (lease_1, lease_1_peer) = zx::EventPair::create();
+    responder_1.send(Ok(lease_1))?;
+    fasync::OnSignals::new(&lease_1_peer, zx::Signals::EVENTPAIR_PEER_CLOSED).await?;
+
+    let (deadline_2, responder_2) = match alarm_rx
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("alarm_rx ended waiting for re-armed SetAndWait"))?
+    {
+        WakeAlarmEvent::SetAndWait { alarm_id, deadline, responder } => {
+            assert_eq!(alarm_id, "battery_manager_sample");
+            (deadline, responder)
+        }
+        other => panic!("Expected re-armed SetAndWait after unchanged sample, got {other:?}"),
+    };
+    assert!(
+        deadline_2 >= deadline_1 + zx::BootDuration::from_seconds(47),
+        "Expected re-armed deadline {deadline_2:?} to be at least 47s after {deadline_1:?}"
+    );
+
+    // 4. Update `current_ua` to 0 on the battery driver (also not in `supported_options.interest`,
+    //    so `Battery::Watch` does not fire, while changing inferred `charge_status` to
+    //    `NotCharging`). When the next 47s wake alarm fires, battery-manager polls
+    //    `Battery::GetStatus` and forwards the updated `BatteryInfo` along with a duplicate of the
+    //    wake alarm's `wake_lease` to `BatteryInfoWatcher`.
+    control
+        .set_battery_status(&fbattery::Status { current_ua: Some(0), ..Default::default() })
+        .await?;
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_seconds(47).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {e:?}"))?;
+    let (lease_2, lease_2_peer) = zx::EventPair::create();
+    let expected_koid = lease_2_peer.basic_info()?.koid;
+    responder_2.send(Ok(lease_2))?;
+
+    let (sampled_info, sampled_wake_lease) =
+        wait_for_matching_battery_info(&mut watcher_stream, |info| {
+            info.charge_status == Some(fpower::ChargeStatus::NotCharging)
+        })
+        .await?;
+    assert_eq!(sampled_info.level_percent, Some(1.0));
+    assert_eq!(sampled_info.present_voltage_mv, Some(SAMPLED_VOLTAGE_MV));
+    let sampled_wake_lease =
+        sampled_wake_lease.expect("Expected waking sample to forward wake_lease");
+    assert_eq!(sampled_wake_lease.basic_info()?.related_koid, expected_koid);
+
+    // Because the battery is still not charging at 1%, a third wake alarm is armed.
+    let responder_3 = match alarm_rx
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("alarm_rx ended waiting for third SetAndWait"))?
+    {
+        WakeAlarmEvent::SetAndWait { alarm_id, responder, .. } => {
+            assert_eq!(alarm_id, "battery_manager_sample");
+            responder
+        }
+        other => panic!("Expected SetAndWait while still at 1% SOC, got {other:?}"),
+    };
+
+    // 5. Plugging in the charger cancels the low-battery wake alarm; unplugging at 1% re-arms it;
+    //    and reaching 0% scaled SOC (raw 3.0%) cancels it.
+    control
+        .set_battery_status(&fbattery::Status {
+            level_percent: Some(3.1),
+            current_ua: Some(REFRESHED_CHARGING_CURRENT_UA),
+            ..Default::default()
+        })
+        .await?;
+    wait_for_matching_battery_info(&mut watcher_stream, |info| {
+        info.charge_status == Some(fpower::ChargeStatus::Charging)
+    })
+    .await?;
+    match alarm_rx
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("alarm_rx ended waiting for Cancel on charge"))?
+    {
+        WakeAlarmEvent::Cancel { alarm_id } => assert_eq!(alarm_id, "battery_manager_sample"),
+        other => panic!("Expected Cancel when charging starts, got {other:?}"),
+    }
+    let _ = responder_3.send(Err(falarms::WakeAlarmsError::Dropped));
+
+    control
+        .set_battery_status(&fbattery::Status {
+            level_percent: Some(3.1),
+            current_ua: Some(REFRESHED_DISCHARGING_CURRENT_UA),
+            ..Default::default()
+        })
+        .await?;
+    wait_for_matching_battery_info(&mut watcher_stream, |info| {
+        info.charge_status == Some(fpower::ChargeStatus::Discharging)
+    })
+    .await?;
+    let responder_4 = match alarm_rx
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("alarm_rx ended waiting for SetAndWait on unplug"))?
+    {
+        WakeAlarmEvent::SetAndWait { alarm_id, responder, .. } => {
+            assert_eq!(alarm_id, "battery_manager_sample");
+            responder
+        }
+        other => panic!("Expected SetAndWait when unplugged at 1%, got {other:?}"),
+    };
+
+    fake_clock_control
+        .advance(&ftesting::Increment::Determined(
+            zx::MonotonicDuration::from_seconds(1000).into_nanos(),
+        ))
+        .await?
+        .map_err(|e| anyhow::anyhow!("failed to advance fake clock: {e:?}"))?;
+    control
+        .set_battery_status(&fbattery::Status {
+            level_percent: Some(3.0),
+            current_ua: Some(REFRESHED_DISCHARGING_CURRENT_UA),
+            ..Default::default()
+        })
+        .await?;
+    wait_for_matching_battery_info(&mut watcher_stream, |info| info.level_percent == Some(0.0))
+        .await?;
+    match alarm_rx
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("alarm_rx ended waiting for Cancel at 0%"))?
+    {
+        WakeAlarmEvent::Cancel { alarm_id } => assert_eq!(alarm_id, "battery_manager_sample"),
+        other => panic!("Expected Cancel at 0% SOC, got {other:?}"),
+    }
+    let _ = responder_4.send(Err(falarms::WakeAlarmsError::Dropped));
+
+    Ok(())
 }

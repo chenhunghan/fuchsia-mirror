@@ -4,11 +4,17 @@
 
 load(
     "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
     "fx_component_manifest",
 )
 load(
     "//build/bazel/rules/components:structured_config.bzl",
     "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
 )
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
@@ -23,11 +29,13 @@ rustc_binary(
     deps = [":config_lib"],
 )
 
-# The GN build uses the `fuchsia_component_manifest("manifest")` target defined
-# above the bazel2gn sentinel in BUILD.gn instead, because
-# `fuchsia_structured_config_values("values")` calls
-# `get_target_outputs(":manifest")`.
-# @bazel2gn:skip
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "structured_config_rust_receiver_minimal_shards",
+)
+
 fx_component_manifest(
     name = "manifest",
     testonly = True,
@@ -43,4 +51,22 @@ fuchsia_structured_config_rust_lib(
     testonly = True,
     cm_label = ":manifest",
     crate_name = "receiver_config",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "rust",
+    package_name = "sc_rust_minimal_shards_test",
+    testonly = True,
+    components = [
+        ":component",
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
 )

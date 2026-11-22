@@ -18,6 +18,7 @@ use super::subcommands::node::args::NodeCommand;
 use super::subcommands::register::args::RegisterCommand;
 use super::subcommands::restart::args::RestartCommand;
 use super::subcommands::show::args::ShowCommand;
+use super::subcommands::suspend::args::SuspendCommand;
 use super::subcommands::test_node::args::TestNodeCommand;
 use argh::{ArgsInfo, FromArgs};
 
@@ -61,6 +62,7 @@ pub type BoxedListCompositeNodeSpecsCommand = Boxed<ListCompositeNodeSpecsComman
 pub type BoxedRegisterCommand = Boxed<RegisterCommand>;
 pub type BoxedRestartCommand = Boxed<RestartCommand>;
 pub type BoxedShowCommand = Boxed<ShowCommand>;
+pub type BoxedSuspendCommand = Boxed<SuspendCommand>;
 pub type BoxedTestNodeCommand = Boxed<TestNodeCommand>;
 pub type BoxedNodeCommand = Boxed<NodeCommand>;
 pub type BoxedHostCommand = Boxed<HostCommand>;
@@ -96,6 +98,7 @@ pub enum DriverSubCommand {
     Register(BoxedRegisterCommand),
     Restart(BoxedRestartCommand),
     Show(BoxedShowCommand),
+    Suspend(BoxedSuspendCommand),
     TestNode(BoxedTestNodeCommand),
     // New and improved driver commands.
     Node(BoxedNodeCommand),
@@ -121,6 +124,7 @@ pub enum DriverSubCommand {
     Restart(BoxedRestartCommand),
     StaticChecks(BoxedStaticChecksCommand),
     Show(BoxedShowCommand),
+    Suspend(BoxedSuspendCommand),
     TestNode(BoxedTestNodeCommand),
     // New and improved driver commands.
     Node(BoxedNodeCommand),

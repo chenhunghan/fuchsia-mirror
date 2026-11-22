@@ -153,6 +153,7 @@ class WebSemanticsTest : public gtest::RealLoopFixture {
     config.device_pixel_ratio = kDevicePixelRatio;
     config.use_scene_owner = true;
     config.accessibility_owner = ui_testing::UITestRealm::AccessibilityOwnerType::FAKE;
+    config.renderer = ui_testing::UITestRealm::RendererType::NULL_RENDERER;
     config.ui_to_client_services = {fuchsia::ui::composition::Allocator::Name_,
                                     fuchsia::ui::composition::Flatland::Name_,
                                     fuchsia::ui::input::ImeService::Name_};

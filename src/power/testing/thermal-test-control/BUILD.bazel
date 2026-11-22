@@ -1,0 +1,92 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":thermal-test-control-test"],
+    visibility = ["//src/power:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "thermal_test_control_bin",
+    srcs = [
+        "main.cc",
+        "thermal_test_control.cc",
+        "thermal_test_control.h",
+    ],
+    gn_output_name = "thermal_test_control",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/power/fidl/testing:test.thermal_cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "thermal_test_control_bin_packaged",
+    testonly = True,
+    binary = ":thermal_test_control_bin",
+    binary_name = "thermal_test_control",
+)
+
+fx_component_manifest(
+    name = "thermal_test_control_manifest",
+    testonly = True,
+    component_name = "thermal_test_control",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/thermal_test_control.cml",
+)
+
+fx_component(
+    name = "thermal-test-control-v2",
+    testonly = True,
+    compiled_manifest = ":thermal_test_control_manifest",
+    visibility = ["//:__subpackages__"],
+    deps = [":thermal_test_control_bin_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "thermal-test-control-test-bin",
+    srcs = [
+        "thermal_test_control.cc",
+        "thermal_test_control.h",
+        "thermal_test_control_unittest.cc",
+    ],
+    gn_output_name = "thermal_test_control_test_bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_cpp",
+        "//sdk/lib/component/testing/cpp",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/lib/testing/predicates",
+        "//src/power/fidl/testing:test.thermal_cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "thermal-test-control-test",
+    unit_tests = [":thermal-test-control-test-bin"],
+)

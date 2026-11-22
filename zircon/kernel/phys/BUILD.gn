@@ -14,7 +14,6 @@ import("//build/zbi/kernel_cmdline.gni")
 import("//build/zircon/zircon_cpu.gni")
 import("//zircon/kernel/kernel_package.gni")
 import("//zircon/kernel/params.gni")
-import("kernel_elf_binary.gni")
 
 declare_args() {
   # Cause //zircon/kernel/phys:boot_tests to generate the phys boot tests
@@ -128,158 +127,10 @@ if (toolchain_environment == "kernel.phys" ||
     linker_flags = [ "-defsym=PHYS_LOAD_ADDRESS=0" ]
   }
 
-  static_library("symbolize") {
-    public = [ "include/phys/symbolize.h" ]
-
-    complete_static_lib = true
-
-    sources = [
-      "panic.cc",
-      "symbolize.cc",
-    ]
-
-    deps = [
-      ":boot-options",
-      ":elf-image",
-      "log",
-      "runtime",
-      "//src/lib/elfldltl",
-      "//src/lib/symbolizer-markup",
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/lib/boot-options",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-      "//zircon/system/ulib/fbl",
-      "//zircon/system/ulib/pretty",
-    ]
-
-    public_deps = [
-      # "symbolize.h" has #include <phys/runtime/main.h>.
-      # "symbolize.h" has #include <phys/runtime/stack.h>.
-      "runtime:headers",
-
-      # "symbolize.h" has #include <phys/stdio.h>.
-      ":stdio",
-
-      # <phys/symbolize.h> has #include <lib/symbolizer-markup/writer.h>.
-      "//src/lib/symbolizer-markup",
-
-      # <phys/symbolize.h> has #include <lib/elfldltl/note.h>
-      "//src/lib/elfldltl",
-    ]
-
-    public_configs = [ ":includes" ]
-  }
-
   # This is used implicitly by phys_executable() targets,
   # including zbi_executable() targets.
   group("phys_executable.deps") {
-    deps = [
-      ":symbolize",
-      "//zircon/kernel/phys/runtime",
-    ]
-  }
-
-  # This is used implicitly by zbi_executable() targets.
-  source_set("zbi_executable.deps") {
-    sources = [
-      "zbi-header.S",
-      "zbi-main.cc",
-    ]
-    deps = [
-      ":boot-options",
-      ":stdio",
-      ":zbi-memory",
-      "runtime",
-      "uart",
-      "//src/lib/zbitl",
-      "//zircon/kernel/lib/boot-options",
-      "//zircon/kernel/lib/crypto:crypto-entropy-src",
-      "//zircon/system/ulib/uart",
-    ]
-  }
-
-  source_set("address-space.header") {
-    visibility = [
-      ":*",
-      "$arch_phys:address-space",
-      "handoff-prep:*",
-      "log:*",
-    ]
-    public_configs = [
-      "//zircon/kernel/lib/page:configuration",
-      ":includes",
-    ]
-
-    public = [
-      "$arch_phys/include/phys/arch/address-space.h",
-      "include/phys/address-space.h",
-    ]
-
-    public_deps = [
-      "runtime:headers",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-
-      # <phys/address-space.h> has #include <lib/fit/function.h>
-      "//sdk/lib/fit",
-
-      # <phys/address-space.h> has #include <lib/memalloc/range.h>
-      "//zircon/kernel/phys/lib/memalloc",
-
-      # <phys/address-space.h> has #include <lib/arch/paging.h>
-      # <phys/arch/address-space.h> has #include
-      # <lib/arch/${zircon_cpu}/paging-traits.h>
-      "//zircon/kernel/lib/arch:headers",
-
-      # <phys/address-space.h> has #include <hwreg/array.h>
-      "//zircon/system/ulib/hwreg:headers",
-    ]
-  }
-
-  static_library("address-space") {
-    complete_static_lib = true
-
-    public_deps = [ ":address-space.header" ]
-
-    sources = [ "address-space.cc" ]
-    deps = [
-      ":address-space-map",
-      ":allocation",
-      ":stdio",
-      "$arch_phys:address-space",
-      "uart",
-      "//zircon/kernel/phys/lib/memalloc",
-      "//zircon/system/ulib/uart",
-    ]
-  }
-
-  static_library("address-space-map") {
-    public_deps = [ ":address-space.header" ]
-
-    sources = [ "address-space-map.cc" ]
-    deps = [ ":allocation" ]
-  }
-
-  library_headers("stdio.headers") {
-    headers = [ "phys/stdio.h" ]
-    include_dir = "./include/"
-    public_deps = [
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-    ]
-  }
-
-  source_set("stdio") {
-    public = [ "include/phys/stdio.h" ]
-
-    public_configs = [ ":includes" ]
-
-    public_deps = [ ":stdio.headers" ]
-
-    deps = [ "//zircon/kernel/lib/boot-options" ]
-
-    sources = [ "stdio.cc" ]
+    deps = [ "//zircon/kernel/phys/runtime" ]
   }
 
   source_set("boot-options") {
@@ -314,136 +165,6 @@ if (toolchain_environment == "kernel.phys" ||
     sources = [ "raw-header.S" ]
   }
 
-  static_library("allocation") {
-    complete_static_lib = true
-
-    public = [ "include/phys/allocation.h" ]
-    if (toolchain_environment != "kernel.efi") {
-      sources = [ "allocation.cc" ]
-      deps = [
-        ":address-space.header",
-        "runtime:headers",
-        "//zircon/kernel/phys/lib/memalloc",
-      ]
-    }
-    public_deps = [
-      ":stdio.headers",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-
-      # allocation.h has #include <lib/memalloc/pool.h>.
-      # allocation.h has #include <lib/memalloc/range.h>.
-      "//zircon/kernel/phys/lib/memalloc:headers",
-
-      # allocation.h has #include <fbl/alloc_checker.h>.
-      "//zircon/system/ulib/fbl",
-
-      # allocation.h has #include <lib/fit/result.h>.
-      "//zircon/system/ulib/zx",
-    ]
-    public_configs = [ ":includes" ]
-  }
-
-  # This is only linked into a main phys executable and not into secondary
-  # modules, which only get the pool set up here handed off.
-  source_set("allocation-init") {
-    sources = [
-      "$arch_phys/include/phys/arch/arch-allocation.h",
-      "allocation-init.cc",
-    ]
-    public_deps = [ ":allocation" ]
-  }
-
-  source_set("new") {
-    public = [ "include/phys/new.h" ]
-    public_deps = [
-      # <phys/new.h> has #include <phys/allocation.h>.
-      ":allocation",
-
-      # <phys/new.h> has #include <lib/trivial-allocator/new.h>
-      "//src/lib/trivial-allocator",
-    ]
-  }
-
-  source_set("zbitl-allocation") {
-    public = [ "include/phys/zbitl-allocation.h" ]
-    sources = [ "zbitl-allocation.cc" ]
-    deps = [
-      ":allocation",
-      "//zircon/system/ulib/fbl",
-    ]
-    public_deps = [
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-
-      # zbitl-allocation.h has #include "allocation.h".
-      ":allocation",
-
-      # zbitl-allocation.h has #include <lib/zbitl/storage-traits.h>.
-      "//src/lib/zbitl",
-
-      # zbitl-allocation.h has #include <lib/fit/result.h>.
-      "//zircon/system/ulib/zx",
-    ]
-    public_configs = [ ":includes" ]
-  }
-
-  # This is a little library instead of a source_set() so it can be included
-  # implicitly by zbi_executable() without adding bloat to the tiny tests that
-  # don't use it.
-  static_library("zbi-memory") {
-    complete_static_lib = true
-
-    sources = [
-      "zbi-init-memory.cc",
-      "zbi-memory.cc",
-    ]
-    deps = [
-      ":address-space",
-      ":allocation-init",
-      ":symbolize",
-      "runtime:headers",
-      "//src/lib/zbitl",
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/lib/boot-options",
-      "//zircon/kernel/phys/lib/memalloc",
-    ]
-    public_deps = [
-      "//sdk/lib/zbi-format",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-
-      # allocation.h has #include <fbl/alloc_checker.h>.
-      "//zircon/system/ulib/fbl",
-    ]
-  }
-
-  static_library("elf-image") {
-    complete_static_lib = true
-
-    public = [ "include/phys/elf-image.h" ]
-    sources = [
-      "elf-image-mapinto.cc",
-      "elf-image.cc",
-    ]
-    public_configs = [ ":includes" ]
-    public_deps = [
-      ":address-space.header",
-      "//sdk/lib/fit",
-      "//src/lib/elfldltl",
-      "//src/lib/zbitl",
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/lib/code-patching",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-      "//zircon/system/ulib/zx",
-    ]
-    deps = [
-      ":allocation",
-      "handoff",
-    ]
-  }
-
   # This is always in phys_config_deps, but it only does anything in a
   # toolchain that enables ubsan, which will be via ubsan-custom since phys
   # environments are standalone.
@@ -463,20 +184,10 @@ if (toolchain_environment == "kernel.phys" ||
       ]
     }
   }
-
-  source_set("linuxboot-embed") {
-    public = [ "include/phys/linuxboot-embed.h" ]
-    public_configs = [ ":includes" ]
-    sources = [ "linuxboot-embed.cc" ]
-    deps = [ "//zircon/kernel/lib/arch" ]
-  }
 }
 
 config("includes") {
-  include_dirs = [
-    "include",
-    "//zircon/kernel/arch/${zircon_cpu}/phys/include",
-  ]
+  include_dirs = [ "include" ]
 }
 
 group("tests") {
@@ -494,6 +205,8 @@ group("boot_tests") {
   deps = [
     "boot-shim:boot_tests",
     "test",
+    "//zircon/kernel/phys/linuxboot-embed:boot_tests",
+    "//zircon/kernel/phys/linuxboot-runtime:boot_tests",
   ]
   if (all_cpu_phys_boot_tests) {
     foreach(cpu, standard_fuchsia_cpus) {

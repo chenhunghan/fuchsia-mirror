@@ -4,9 +4,8 @@
 
 #include "src/developer/forensics/feedback/attachments/inspect.h"
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/bridge.h>
@@ -34,56 +33,74 @@ Inspect::Inspect(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDir
       backoff_(std::move(backoff)),
       data_budget_(data_budget),
       redactor_(redactor) {
-  archive_accessor_.set_error_handler([this](const zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to " << feedback_data::kArchiveAccessorName;
-    fxl::WeakPtr<Inspect> self = ptr_factory_.GetWeakPtr();
-    async::PostDelayedTask(
-        dispatcher_,
-        [self] {
-          if (self) {
-            self->services_->Connect(self->archive_accessor_.NewRequest(self->dispatcher_),
-                                     feedback_data::kArchiveAccessorName);
-          }
-        },
-        backoff_->GetNext());
-  });
+  Connect();
+}
 
-  services_->Connect(archive_accessor_.NewRequest(dispatcher_),
-                     feedback_data::kArchiveAccessorName);
+void Inspect::Connect() {
+  auto [client, server] = fidl::Endpoints<fuchsia_diagnostics::ArchiveAccessor>::Create();
+  services_->Connect(feedback_data::kArchiveAccessorName, server.TakeChannel());
+  archive_accessor_ = fidl::Client(std::move(client), dispatcher_, this);
+}
+
+void Inspect::on_fidl_error(const fidl::UnbindInfo error) {
+  FX_LOGS(WARNING) << "Lost connection to " << feedback_data::kArchiveAccessorName << ": " << error;
+  archive_accessor_ = fidl::Client<fuchsia_diagnostics::ArchiveAccessor>();
+
+  fxl::WeakPtr<Inspect> self = ptr_factory_.GetWeakPtr();
+  async::PostDelayedTask(
+      dispatcher_,
+      [self] {
+        if (self) {
+          self->Connect();
+        }
+      },
+      backoff_->GetNext());
+}
+
+void Inspect::handle_unknown_event(
+    const fidl::UnknownEventMetadata<fuchsia_diagnostics::ArchiveAccessor> metadata) {
+  FX_LOGS(WARNING) << "Unexpected event ordinal: " << metadata.event_ordinal;
 }
 
 namespace {
 
 // Manages collecting Inspect data and calling |complete| with done.
-class InspectCollector {
+class InspectCollector : public fidl::AsyncEventHandler<fuchsia_diagnostics::BatchIterator> {
  public:
-  InspectCollector(::fit::callback<void(std::optional<Error>)> complete);
+  InspectCollector(async_dispatcher_t* dispatcher,
+                   fidl::ClientEnd<fuchsia_diagnostics::BatchIterator> iterator,
+                   ::fit::callback<void(std::optional<Error>)> complete);
 
   void Run();
 
-  ::fidl::InterfaceRequest<fuchsia::diagnostics::BatchIterator> NewRequest(
-      async_dispatcher_t* dispatcher);
   const std::vector<std::string>& Inspect() const;
+
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_diagnostics::BatchIterator> metadata) override;
 
  private:
   ::fit::callback<void(std::optional<Error>)> complete_;
-  fuchsia::diagnostics::BatchIteratorPtr batch_iterator_;
+  fidl::Client<fuchsia_diagnostics::BatchIterator> batch_iterator_;
   std::vector<std::string> inspect_;
 };
 
-InspectCollector::InspectCollector(::fit::callback<void(std::optional<Error>)> complete)
-    : complete_(std::move(complete)) {
-  batch_iterator_.set_error_handler([this](const zx_status_t status) mutable {
-    if (complete_ != nullptr) {
-      FX_PLOGS(WARNING, status) << "Lost connection to fuchsia.diagnostics.BatchIterator";
-      complete_(Error::kConnectionError);
-    }
-  });
+InspectCollector::InspectCollector(async_dispatcher_t* dispatcher,
+                                   fidl::ClientEnd<fuchsia_diagnostics::BatchIterator> iterator,
+                                   ::fit::callback<void(std::optional<Error>)> complete)
+    : complete_(std::move(complete)), batch_iterator_(std::move(iterator), dispatcher, this) {}
+
+void InspectCollector::on_fidl_error(const fidl::UnbindInfo error) {
+  if (complete_ != nullptr) {
+    FX_PLOGS(WARNING, error.status()) << "Lost connection to fuchsia.diagnostics.BatchIterator";
+    complete_(Error::kConnectionError);
+  }
 }
 
-::fidl::InterfaceRequest<fuchsia::diagnostics::BatchIterator> InspectCollector::NewRequest(
-    async_dispatcher_t* dispatcher) {
-  return batch_iterator_.NewRequest(dispatcher);
+void InspectCollector::handle_unknown_event(
+    const fidl::UnknownEventMetadata<fuchsia_diagnostics::BatchIterator> metadata) {
+  FX_LOGS(WARNING) << "Unexpected event ordinal: " << metadata.event_ordinal;
 }
 
 const std::vector<std::string>& InspectCollector::Inspect() const { return inspect_; }
@@ -93,47 +110,51 @@ void InspectCollector::Run() {
     return;
   }
 
-  FX_CHECK(batch_iterator_.is_bound())
+  FX_CHECK(batch_iterator_.is_valid())
       << "Attempting to collect Inspect without BatchIterator connection";
 
-  batch_iterator_->GetNext([this](auto result) mutable {
-    // Inspect collection has completed elsewhere, stop.
-    if (complete_ == nullptr) {
-      return;
-    }
+  batch_iterator_->GetNext().Then(
+      [this](fidl::Result<fuchsia_diagnostics::BatchIterator::GetNext>& result) mutable {
+        // Inspect collection has completed elsewhere, stop.
+        if (complete_ == nullptr) {
+          return;
+        }
 
-    // Get the next batch of Inspect data when done.
-    auto get_next = ::fit::defer([this] { Run(); });
+        if (result.is_error() && result.error_value().is_framework_error()) {
+          return;
+        }
 
-    // Try again if the result was an error.
-    if (result.is_err()) {
-      FX_LOGS(WARNING) << "Failed to retrieve Inspect batch: "
-                       << static_cast<uint64_t>(result.err());
-      return;
-    }
+        // Get the next batch of Inspect data when done.
+        auto get_next = ::fit::defer([this] { Run(); });
 
-    const std::vector<::fuchsia::diagnostics::FormattedContent>& batch = result.response().batch;
+        // Try again if the result was an error.
+        if (result.is_error()) {
+          FX_LOGS(WARNING) << "Failed to retrieve Inspect batch: " << result.error_value();
+          return;
+        }
 
-    // All of the Inspect data has been collected.
-    if (batch.empty()) {
-      complete_(std::nullopt);
-      get_next.cancel();
-      return;
-    }
+        const std::vector<fuchsia_diagnostics::FormattedContent>& batch = result->batch();
 
-    for (const ::fuchsia::diagnostics::FormattedContent& chunk : batch) {
-      if (!chunk.is_json()) {
-        FX_LOGS(WARNING) << "Invalid JSON Inspect chunk, skipping";
-        continue;
-      }
+        // All of the Inspect data has been collected.
+        if (batch.empty()) {
+          complete_(/*error=*/std::nullopt);
+          get_next.cancel();
+          return;
+        }
 
-      if (std::string json; fsl::StringFromVmo(chunk.json(), &json)) {
-        inspect_.push_back(std::move(json));
-      } else {
-        FX_LOGS(WARNING) << "Failed to convert Inspect chunk to string, skipping";
-      }
-    }
-  });
+        for (const fuchsia_diagnostics::FormattedContent& chunk : batch) {
+          if (!chunk.json().has_value()) {
+            FX_LOGS(WARNING) << "Invalid JSON Inspect chunk, skipping";
+            continue;
+          }
+
+          if (std::string json; fsl::StringFromVmo(chunk.json().value(), &json)) {
+            inspect_.push_back(std::move(json));
+          } else {
+            FX_LOGS(WARNING) << "Failed to convert Inspect chunk to string, skipping";
+          }
+        }
+      });
 }
 
 }  // namespace
@@ -141,7 +162,7 @@ void InspectCollector::Run() {
 ::fpromise::promise<AttachmentData> Inspect::Get(const uint64_t ticket) {
   FX_CHECK(!completers_.contains(ticket)) << "Ticket used twice: " << ticket;
 
-  if (!archive_accessor_.is_bound()) {
+  if (!archive_accessor_.is_valid()) {
     return ::fpromise::make_ok_promise(AttachmentData(Error::kConnectionError));
   }
 
@@ -159,24 +180,33 @@ void InspectCollector::Run() {
         }
       };
 
-  auto collector = std::make_unique<InspectCollector>(complete.share());
+  auto [iterator_client, iterator_server] =
+      fidl::Endpoints<fuchsia_diagnostics::BatchIterator>::Create();
+  auto collector =
+      std::make_unique<InspectCollector>(dispatcher_, std::move(iterator_client), complete.share());
 
   completers_[ticket] = std::move(complete);
 
-  fuchsia::diagnostics::StreamParameters params;
-  params.set_data_type(fuchsia::diagnostics::DataType::INSPECT)
-      .set_format(fuchsia::diagnostics::Format::JSON)
-      .set_stream_mode(fuchsia::diagnostics::StreamMode::SNAPSHOT)
-      .set_client_selector_configuration(
-          fuchsia::diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
+  fuchsia_diagnostics::StreamParameters params;
+  params.data_type(fuchsia_diagnostics::DataType::kInspect)
+      .format(fuchsia_diagnostics::Format::kJson)
+      .stream_mode(fuchsia_diagnostics::StreamMode::kSnapshot)
+      .client_selector_configuration(
+          fuchsia_diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
 
   if (const std::optional<size_t> budget = data_budget_->SizeInBytes(); budget.has_value()) {
-    fuchsia::diagnostics::PerformanceConfiguration performance;
-    performance.set_max_aggregate_content_size_bytes(*budget);
-    params.set_performance_configuration(std::move(performance));
+    fuchsia_diagnostics::PerformanceConfiguration performance;
+    performance.max_aggregate_content_size_bytes(*budget);
+    params.performance_configuration(std::move(performance));
   }
 
-  archive_accessor_->StreamDiagnostics(std::move(params), collector->NewRequest(dispatcher_));
+  if (const fit::result result = archive_accessor_->StreamDiagnostics({{
+          .stream_parameters = std::move(params),
+          .result_stream = std::move(iterator_server),
+      }});
+      result.is_error()) {
+    FX_LOGS(WARNING) << "Failed to call StreamDiagnostics: " << result.error_value();
+  }
 
   fxl::WeakPtr<Inspect> self = ptr_factory_.GetWeakPtr();
 

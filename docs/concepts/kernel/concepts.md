@@ -8,7 +8,7 @@ Dispatcher interface. These are implemented in
 [kernel/object](/zircon/kernel/object). Many are self-contained higher-level Objects.
 Some wrap lower-level [lk][glossary.lk] primitives.
 
-## [System Calls](/reference/syscalls)
+## [System calls](/reference/syscalls) {:#system-calls}
 
 Userspace code interacts with kernel objects via system calls, and almost
 exclusively via [Handles](/docs/concepts/kernel/handles.md).  In userspace, a Handle is represented as
@@ -68,7 +68,7 @@ the last one for that Object. The [`zx_handle_close_many()`](/reference/syscalls
 system call similarly closes an array of handles.
 
 
-## Kernel Object IDs
+## Kernel object IDs {:#kernel-object-ids}
 
 Every object in the kernel has a "kernel object id" or "koid" for short.
 It is a 64 bit unsigned integer that can be used to identify the object
@@ -112,7 +112,7 @@ See: [`zx_process_create()`](/reference/syscalls/process_create.md),
 and [`zx_thread_start()`](/reference/syscalls/thread_start.md).
 
 
-## Message Passing: Sockets and Channels
+## Message passing: Sockets and channels {:#message-passing-sockets-and-channels}
 
 Both Sockets and Channels are IPC Objects that are bi-directional and two-ended.
 Creating a Socket or a Channel will return two Handles, one referring to each endpoint
@@ -173,7 +173,7 @@ See: [`zx_port_create()`](/reference/syscalls/port_create.md),
 and [`zx_port_cancel()`](/reference/syscalls/port_cancel.md).
 
 
-## Events, Event Pairs.
+## Events, event pairs {:#events-event-pairs}
 
 An Event is the simplest Object, having no other state than its collection of active Signals.
 
@@ -185,7 +185,7 @@ See: [`zx_event_create()`](/reference/syscalls/event_create.md),
 and [`zx_eventpair_create()`](/reference/syscalls/eventpair_create.md).
 
 
-## Shared Memory: Virtual Memory Objects (VMOs)
+## Shared memory: Virtual memory objects (VMOs) {:#shared-memory-virtual-memory-objects-vmos}
 
 Virtual Memory Objects represent a set of physical pages of memory, or the *potential*
 for pages (which will be created/filled lazily, on-demand).

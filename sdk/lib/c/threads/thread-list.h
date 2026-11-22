@@ -50,7 +50,7 @@ extern Thread* gAllThreads LIBC_ASM_LINKAGE_DECLARE(gAllThreads) __LOCAL
 // performance-sensitive than dlopen, this uses a reader-writer lock with
 // thread creation as "reader" and dlopen (affecting TLS layout) as "writer".
 //
-// TODO(https://fxbug.dev/342469121): This is only needed in this form while
+// TODO(https://fxbug.dev/349433421): This is only needed in this form while
 // using the legacy musl dynamic linker.  The new libdl's implementation of
 // dlopen needs some analogous locking, but it can be done at finer grain.
 __TA_ACQUIRED_AFTER(kDlfcnLock)        //

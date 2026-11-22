@@ -15,7 +15,6 @@ rustc_library(
     proc_macro_deps = [
         "//src/connectivity/wlan/lib/bitfield:wlan-bitfield",
     ],
-    tags = ["manual"],
     visibility = ["//visibility:private"],
 )
 

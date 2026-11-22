@@ -133,10 +133,7 @@ template("kernel_switchset") {
         # <stdlib.h> has #include <lib/heap.h>.
         "//zircon/kernel/lib/heap:headers.config",
 
-        # <lib/lockup_detector.h> is included by some "low-level" headers.
-        "//zircon/kernel/lib/lockup_detector:headers.config",
-
-        # <kernel/idle_power_thread.h> has #include <lib/lazy_init/lazy_init.h>.
+        # <kernel/ffi.h> has #include <lib/lazy_init/lazy_init.h>.
         "//src/lib/lazy_init:headers.config",
 
         # <kernel/spinlock.h> has #include <lockdep/lock_policy.h>.
@@ -152,9 +149,6 @@ template("kernel_switchset") {
         # <kernel/thread.h> has #include <vm/kstack.h>.
         "//zircon/kernel/vm:headers.config",
 
-        # <vm/page.h> has #include <vm/phys/arena.h>
-        "//zircon/kernel/vm/phys:headers.config",
-
         # <vm/vm_object.h> has #include <lib/user_copy/user_ptr.h>.
         "//zircon/kernel/lib/user_copy:headers.config",
 
@@ -164,9 +158,6 @@ template("kernel_switchset") {
         "//sdk/lib/devicetree:headers.config",
         "//zircon/system/ulib/uart:headers.config",
         "//zircon/system/ulib/hwreg:headers.config",
-
-        # <vm/phys/arena.h> has #include <lib/memalloc/range.h>
-        "//zircon/kernel/phys/lib/memalloc:range.headers.config",
 
         # <lib/ktrace.h> has #include <lib/zircon-internal/ktrace.h>.
         "//zircon/system/ulib/zircon-internal:headers.config",
@@ -207,8 +198,6 @@ template("kernel_switchset") {
 
         "//zircon/kernel/lib/backtrace:headers.config",
 
-        "//zircon/kernel/lib/wake-vector:headers.config",
-
         "//zircon/kernel/lib/sched:headers.config",
 
         # <platform.h> has #include <lib/arch/ticks.h>.
@@ -220,9 +209,6 @@ template("kernel_switchset") {
 
         # <kernel/scheduler.h> depends on <lib/power-management/power-state.h>
         "//zircon/kernel/lib/power-management:headers.config",
-
-        # <kernel/scheduler.h> depends on <lib/stall.h>
-        "//zircon/kernel/lib/stall:headers.config",
 
         # <kernel/thread.h> depends on <lib/page-map/accessor.h>
         "//zircon/kernel/lib/page-map:headers.config",

@@ -19,9 +19,16 @@
         ],
         bind: "meta/bind/network-device.bindbc",
     },
-    capabilities: [],
+    capabilities: [
+        { service: "fuchsia.hardware.network.Service" },
+    ],
     use: [
         { service: "fuchsia.hardware.network.driver.Service" },
     ],
-    expose: [],
+    expose: [
+        {
+            service: "fuchsia.hardware.network.Service",
+            from: "self",
+        },
+    ],
 }

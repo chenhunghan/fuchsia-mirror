@@ -5,10 +5,10 @@
 
 import tempfile
 import unittest
-from collections.abc import Sequence
 from pathlib import Path
 
 import procfs
+from procfs_test_utils import make_fake_process
 
 
 class ParseStatFileTest(unittest.TestCase):
@@ -66,46 +66,6 @@ class ParseCmdlineFileTest(unittest.TestCase):
 
     def test_parse_empty_cmdline_without_fallback(self) -> None:
         self.assertEqual(procfs.parse_cmdline_file(b""), [])
-
-
-def make_fake_process(
-    proc_root: Path,
-    pid: int,
-    *,
-    comm: str = "test",
-    ppid: int = 1,
-    pgrp: int | None = None,
-    state: str = "S",
-    utime: int = 0,
-    stime: int = 0,
-    cmdline: Sequence[str] | None = None,
-    wchan: str | None = None,
-    fds: int = 0,
-) -> Path:
-    """Creates a mock /proc/<pid> directory populated with virtual files."""
-    pid_dir = proc_root / str(pid)
-    pid_dir.mkdir(parents=True, exist_ok=True)
-
-    actual_pgrp = pgrp if pgrp is not None else pid
-    stat_content = f"{pid} ({comm}) {state} {ppid} {actual_pgrp} 0 0 0 0 0 0 0 0 {utime} {stime} 0 0\n"
-    (pid_dir / "stat").write_text(stat_content, encoding="utf-8")
-
-    if cmdline is not None:
-        (pid_dir / "cmdline").write_bytes(
-            b"\0".join(arg.encode("utf-8") for arg in cmdline)
-            + (b"\0" if cmdline else b"")
-        )
-
-    if wchan is not None:
-        (pid_dir / "wchan").write_text(f"{wchan}\n", encoding="utf-8")
-
-    if fds > 0:
-        fd_dir = pid_dir / "fd"
-        fd_dir.mkdir(parents=True, exist_ok=True)
-        for fd in range(fds):
-            (fd_dir / str(fd)).touch()
-
-    return pid_dir
 
 
 class ReadProcessInfoTest(unittest.TestCase):

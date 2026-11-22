@@ -11,6 +11,7 @@
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/driver/outgoing/cpp/outgoing_directory.h>
+#include <lib/driver/platform-device/cpp/pdev.h>
 #include <lib/inspect/cpp/inspector.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/result.h>
@@ -125,6 +126,63 @@ zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> AmlCanvasD
   return zx::ok(std::move(controller_client));
 }
 
+zx::result<std::optional<std::vector<aml_canvas_metadata::CanvasConsumer>>>
+AmlCanvasDriver::GetDmlConsumers(const fdf::Namespace& incoming) {
+  zx::result<fidl::ClientEnd<fuchsia_hardware_platform_device::Device>> pdev_result =
+      incoming.Connect<fuchsia_hardware_platform_device::Service::Device>();
+  if (pdev_result.is_error()) {
+    fdf::error("Failed to connect to platform device: {}", pdev_result);
+    return pdev_result.take_error();
+  }
+  fdf::PDev pdev(std::move(pdev_result).value());
+
+  zx::result metadata = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+      "fuchsia.hardware.amlogiccanvas.Metadata");
+  if (metadata.is_error()) {
+    // Only DML boards provide this metadata.
+    return zx::ok(std::nullopt);
+  }
+
+  std::optional parsed = aml_canvas_metadata::CanvasMetadata::Parse(metadata.value());
+  if (!parsed.has_value() || !parsed->consumers.has_value() || parsed->consumers->empty()) {
+    fdf::error("Canvas metadata is malformed or has no consumers");
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  return zx::ok(std::move(parsed->consumers));
+}
+
+zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>>
+AmlCanvasDriver::AddConsumerNodes(
+    const std::vector<aml_canvas_metadata::CanvasConsumer>& consumers) {
+  zx::result<fdf::OwnedChildNode> owned_child = AddOwnedChild(name());
+  if (owned_child.is_error()) {
+    fdf::error("Failed to add owned child node: {}", owned_child);
+    return owned_child.take_error();
+  }
+
+  std::vector<fuchsia_driver_framework::Offer> offers = compat_server_.CreateOffers2();
+  offers.push_back(
+      fdf::MakeOffer2<fuchsia_hardware_amlogiccanvas::Service>(component::kDefaultInstance));
+
+  for (const aml_canvas_metadata::CanvasConsumer& consumer : consumers) {
+    const std::vector<fuchsia_driver_framework::NodeProperty2> properties = {
+        fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.amlogiccanvas.Service"),
+        fdf::MakeProperty2(bind_fuchsia::NAME, consumer.name),
+        fdf::MakeProperty2(bind_fuchsia::ID, consumer.id),
+    };
+    zx::result child =
+        fdf::AddChild(owned_child->node_, logger(), consumer.name, properties, offers);
+    if (child.is_error()) {
+      fdf::error("Failed to add child node for canvas consumer {}: {}", consumer.name, child);
+      return child.take_error();
+    }
+    consumer_controllers_.push_back(std::move(child).value());
+  }
+
+  consumers_node_ = std::move(owned_child->node_);
+  return zx::ok(std::move(owned_child->node_controller_));
+}
+
 zx::result<> AmlCanvasDriver::Start(fdf::DriverContext context) {
   component_inspector_.emplace(context.CreateInspector(this, inspector_));
   std::shared_ptr<fdf::Namespace> incoming_ptr(context.take_incoming());
@@ -141,8 +199,14 @@ zx::result<> AmlCanvasDriver::Start(fdf::DriverContext context) {
   }
   canvas_ = std::move(canvas_result).value();
 
+  zx::result consumers = GetDmlConsumers(*incoming_ptr);
+  if (consumers.is_error()) {
+    return consumers.take_error();
+  }
+
   zx::result<fidl::ClientEnd<fuchsia_driver_framework::NodeController>> controller_client_result =
-      AddChildNode(&compat_server_);
+      consumers.value().has_value() ? AddConsumerNodes(consumers.value().value())
+                                    : AddChildNode(&compat_server_);
   if (controller_client_result.is_error()) {
     fdf::error("Failed to add child node: {}", controller_client_result);
     return controller_client_result.take_error();

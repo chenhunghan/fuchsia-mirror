@@ -1398,9 +1398,9 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
         self.assertEqual(res.error, "")
         self.assertEqual(res.gn_cmd_str, gn_cmd)
         self.assertEqual(res.bazel_cmd_str, bazel_cmd)
-        self.assertIn("clang++", res.normalized_gn_args)
+        self.assertIn("clang", res.normalized_gn_args)
         self.assertIn("{SOURCE_ROOT}/src/app/foo.cc", res.normalized_gn_args)
-        self.assertIn("clang++", res.normalized_bazel_args)
+        self.assertIn("clang", res.normalized_bazel_args)
         self.assertIn("{SOURCE_ROOT}/src/app/foo.cc", res.normalized_bazel_args)
 
     def test_compare_clang_other_tool_candidates(self) -> None:
@@ -1638,7 +1638,7 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
         self.assertEqual(results[2].error, "")
         self.assertEqual(results[2].query, q_cpp)
-        self.assertIn("clang++", results[2].normalized_gn_args)
+        self.assertIn("clang", results[2].normalized_gn_args)
 
     def test_read_response_files_forwarded(self) -> None:
         query = CompareCommandsQuery(
@@ -1666,6 +1666,30 @@ class CompareGnAndBazelCommandsForTest(unittest.TestCase):
 
         execroot = mock_query.call_args[0][3]
         self.assertEqual(execroot, self.bazel_paths.execroot)
+
+
+class ConfiguredBazelLabelCpuTest(unittest.TestCase):
+    def test_config_name(self) -> None:
+        self.assertEqual(
+            compare_utils.ConfiguredBazelLabel(
+                "//a:b", "fuchsia_platform"
+            ).config_name,
+            "fuchsia_platform",
+        )
+        self.assertEqual(
+            compare_utils.ConfiguredBazelLabel(
+                "//a:b", "fuchsia_platform", cpu="arm64"
+            ).config_name,
+            "fuchsia_platform_arm64",
+        )
+
+    def test_invalid_cpu(self) -> None:
+        with self.assertRaises(ValueError):
+            compare_utils.ConfiguredBazelLabel(
+                "//a:b", "fuchsia_platform", cpu="mips"
+            )
+        with self.assertRaises(ValueError):
+            compare_utils.ConfiguredBazelLabel("//a:b", "host", cpu="arm64")
 
 
 if __name__ == "__main__":

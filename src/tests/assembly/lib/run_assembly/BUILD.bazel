@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Enable mypy on the generated python_library for GN consumers.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "run_assembly",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "lib.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/tests/assembly/assemble_image:__subpackages__"],
+)

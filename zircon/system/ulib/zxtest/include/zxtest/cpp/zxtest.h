@@ -13,7 +13,6 @@
 #include <string>
 #include <type_traits>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/assertion.h>
 #include <zxtest/base/parameterized-value-impl.h>
 #include <zxtest/base/runner.h>
@@ -180,16 +179,18 @@
 #define LIB_ZXTEST_BYTENE(actual, expected, size) !(LIB_ZXTEST_BYTEEQ(actual, expected, size))
 
 // Functions used as arguments for EvaluateCondition.
-#define LIB_ZXTEST_DESC_PROVIDER(desc, ...) \
-  [&] -> std::string { return std::string(desc) + std::string{fbl::StringPrintf(" " __VA_ARGS__)}; }
+#define LIB_ZXTEST_DESC_PROVIDER(desc, ...)                            \
+  [__VA_OPT__(&)]() -> std::string {                                   \
+    return zxtest::internal::FormatDescription(desc, " " __VA_ARGS__); \
+  }
 
 #define LIB_ZXTEST_COMPARE_FN(op) \
-  [](const auto& expected_, const auto& actual_) { return op(expected_, actual_); }
+  [](const auto& actual_, const auto& expected_) { return op(actual_, expected_); }
 
 #define LIB_ZXTEST_COMPARE_3_FN(op, third_param)                 \
   [](auto param) {                                               \
-    return [param](const auto& expected_, const auto& actual_) { \
-      return op(expected_, actual_, param);                      \
+    return [param](const auto& actual_, const auto& expected_) { \
+      return op(actual_, expected_, param);                      \
     };                                                           \
   }(third_param)
 

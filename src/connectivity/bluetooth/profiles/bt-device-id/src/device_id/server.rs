@@ -4,11 +4,12 @@
 
 use core::pin::Pin;
 use core::task::{Context, Poll};
+use fidl_fuchsia_bluetooth_bredr as bredr;
+use fidl_fuchsia_bluetooth_deviceid as di;
 use futures::channel::mpsc;
 use futures::stream::{FlattenUnordered, FuturesUnordered};
-use futures::{ready, select, Future, StreamExt};
+use futures::{Future, StreamExt, ready, select};
 use log::{info, trace, warn};
-use {fidl_fuchsia_bluetooth_bredr as bredr, fidl_fuchsia_bluetooth_deviceid as di};
 
 use crate::device_id::service_record::{DIRecord, DeviceIdentificationService};
 use crate::device_id::token::DeviceIdRequestToken;
@@ -20,7 +21,7 @@ pub struct BrEdrProfileAdvertisement {
     // alive for the duration of the advertisement.
     // The upstream `Profile` service may close this channel to signal the termination of the
     // advertisement.
-    pub connect_stream: bredr::ConnectionReceiverRequestStream,
+    pub connect_stream: bredr::ConnectionReceiver2RequestStream,
 }
 
 impl Future for BrEdrProfileAdvertisement {
@@ -32,9 +33,12 @@ impl Future for BrEdrProfileAdvertisement {
             match result {
                 None => return Poll::Ready(Ok(())),
                 Some(Err(e)) => return Poll::Ready(Err(e)),
-                // Otherwise, it's a spurious `bredr.ConnectionReceiver.Connect` request which
-                // can be ignored.
-                _ => {}
+                // Otherwise, it's a spurious `bredr.ConnectionReceiver2.Connected` request which
+                // can be acknowledged and ignored.
+                Some(Ok(bredr::ConnectionReceiver2Request::Connected { responder, .. })) => {
+                    let _ = responder.send();
+                }
+                Some(Ok(bredr::ConnectionReceiver2Request::_UnknownMethod { .. })) => {}
             }
         }
     }
@@ -135,11 +139,11 @@ impl DeviceIdServer {
         defs: Vec<bredr::ServiceDefinition>,
     ) -> Result<BrEdrProfileAdvertisement, Error> {
         let (connect_client, connect_stream) =
-            fidl::endpoints::create_request_stream::<bredr::ConnectionReceiverMarker>();
+            fidl::endpoints::create_request_stream::<bredr::ConnectionReceiver2Marker>();
         // The result of advertise (registered services) is not needed.
         let _advertise_fut = profile.advertise(bredr::ProfileAdvertiseRequest {
             services: Some(defs),
-            receiver: Some(connect_client),
+            connection_receiver: Some(connect_client),
             ..Default::default()
         });
         Ok(BrEdrProfileAdvertisement { connect_stream })
@@ -217,8 +221,8 @@ pub(crate) mod tests {
     use futures::SinkExt;
     use std::pin::pin;
 
-    use crate::device_id::service_record::tests::minimal_record;
     use crate::DEFAULT_MAX_DEVICE_ID_ADVERTISEMENTS;
+    use crate::device_id::service_record::tests::minimal_record;
 
     fn setup_server(
         max: Option<usize>,
@@ -276,12 +280,12 @@ pub(crate) mod tests {
     fn expect_advertise_request(
         exec: &mut fasync::TestExecutor,
         profile_server: &mut bredr::ProfileRequestStream,
-    ) -> bredr::ConnectionReceiverProxy {
+    ) -> bredr::ConnectionReceiver2Proxy {
         let mut profile_requests = Box::pin(profile_server.next());
         match exec.run_until_stalled(&mut profile_requests).expect("Should have request") {
             Some(Ok(bredr::ProfileRequest::Advertise { payload, responder, .. })) => {
                 let _ = responder.send(Ok(&bredr::ProfileAdvertiseResponse::default()));
-                payload.receiver.unwrap().into_proxy()
+                payload.connection_receiver.unwrap().into_proxy()
             }
             x => panic!("Expected Advertise request, got: {x:?}"),
         }

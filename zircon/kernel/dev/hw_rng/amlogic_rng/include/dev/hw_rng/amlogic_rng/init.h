@@ -9,8 +9,13 @@
 #define ZIRCON_KERNEL_DEV_HW_RNG_AMLOGIC_RNG_INCLUDE_DEV_HW_RNG_AMLOGIC_RNG_INIT_H_
 
 #include <lib/zbi-format/driver-config.h>
+#include <zircon/compiler.h>
+
+__BEGIN_CDECLS
 
 // Initializes the driver.
 void AmlogicRngInit(const zbi_dcfg_amlogic_rng_driver_t& config);
+
+__END_CDECLS
 
 #endif  // ZIRCON_KERNEL_DEV_HW_RNG_AMLOGIC_RNG_INCLUDE_DEV_HW_RNG_AMLOGIC_RNG_INIT_H_

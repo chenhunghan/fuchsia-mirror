@@ -14,6 +14,7 @@ rustc_library("lib") {
   deps = [
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/fidl/fuchsia.net.policy.properties:fuchsia.net.policy.properties_rust",
+    "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
     "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
     "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_rust",
@@ -23,20 +24,25 @@ rustc_library("lib") {
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:log",
   ]
 
   test_deps = [
+    "//sdk/rust/zx",
     "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/lib/fuchsia",
+    "//third_party/rust_crates:assert_matches",
   ]
 
   sources = [
+    "src/default_network_watcher.rs",
     "src/lib.rs",
-    "src/mark_watcher.rs",
+    "src/network_token_watcher.rs",
     "src/socket_provider.rs",
+    "src/socket_provider_connector.rs",
   ]
 
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
@@ -57,11 +63,13 @@ rustc_binary("socket_proxy") {
 }
 
 fuchsia_component_manifest("manifest") {
+  visibility = [ ":*" ]
   component_name = "network-socket-proxy"
   manifest = "meta/network_socket_proxy.cml"
 }
 
 fuchsia_component("component") {
+  visibility = [ ":*" ]
   cm_label = ":manifest"
   deps = [ ":socket_proxy" ]
 }

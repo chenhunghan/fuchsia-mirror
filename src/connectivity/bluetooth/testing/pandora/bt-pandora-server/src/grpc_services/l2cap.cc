@@ -71,20 +71,25 @@ const fuchsia_bluetooth::Uuid kNonReservedUuid{
 
 using ConnectionResult = std::pair<fuchsia_bluetooth::PeerId, fuchsia_bluetooth_bredr::Channel>;
 
-class ConnectionReceiverImpl : public fidl::Server<fuchsia_bluetooth_bredr::ConnectionReceiver> {
+class ConnectionReceiverImpl : public fidl::Server<fuchsia_bluetooth_bredr::ConnectionReceiver2> {
  public:
   explicit ConnectionReceiverImpl(std::promise<ConnectionResult> promise)
       : promise_(std::move(promise)) {}
 
   void Connected(ConnectedRequest& request, ConnectedCompleter::Sync& completer) override {
+    completer.Reply();
+    if (!request.peer_id().has_value() || !request.channel().has_value()) {
+      FX_LOGS(WARNING) << "Connected request missing peer_id or channel";
+      return;
+    }
     if (!called_) {
       called_ = true;
-      promise_.set_value(std::make_pair(request.peer_id(), std::move(request.channel())));
+      promise_.set_value(std::make_pair(*request.peer_id(), std::move(*request.channel())));
     }
   }
 
   void handle_unknown_method(
-      fidl::UnknownMethodMetadata<fuchsia_bluetooth_bredr::ConnectionReceiver> metadata,
+      fidl::UnknownMethodMetadata<fuchsia_bluetooth_bredr::ConnectionReceiver2> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override {
     FX_LOGS(WARNING) << "Unknown method received: " << metadata.method_ordinal;
   }
@@ -99,9 +104,9 @@ class ConnectionReceiverImpl : public fidl::Server<fuchsia_bluetooth_bredr::Conn
 ::grpc::Status L2capService::WaitConnection(::grpc::ServerContext* context,
                                             const ::pandora::l2cap::WaitConnectionRequest* request,
                                             ::pandora::l2cap::WaitConnectionResponse* response) {
-  auto endpoints = fidl::CreateEndpoints<fuchsia_bluetooth_bredr::ConnectionReceiver>();
+  auto endpoints = fidl::CreateEndpoints<fuchsia_bluetooth_bredr::ConnectionReceiver2>();
   if (endpoints.is_error()) {
-    return Status(StatusCode::INTERNAL, "Failed to create ConnectionReceiver endpoints");
+    return Status(StatusCode::INTERNAL, "Failed to create ConnectionReceiver2 endpoints");
   }
   auto [client_end, server_end] = std::move(*endpoints);
 
@@ -130,7 +135,7 @@ class ConnectionReceiverImpl : public fidl::Server<fuchsia_bluetooth_bredr::Conn
 
   fuchsia_bluetooth_bredr::ProfileAdvertiseRequest advertise_request;
   advertise_request.services() = std::move(services);
-  advertise_request.receiver() = std::move(client_end);
+  advertise_request.connection_receiver() = std::move(client_end);
   advertise_request.parameters() = std::move(channel_params);
   auto result = profile_client_->Advertise(std::move(advertise_request));
   if (result.is_error()) {

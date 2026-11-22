@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@rules_python//python:defs.bzl", "py_binary")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
@@ -15,4 +16,12 @@ test_suite(
         "//build/python/tests/host_test:host_tests",
         "//build/python/tests/serialization:host_tests",
     ],
+)
+
+py_binary(
+    name = "create_c_extension_import_hook",
+    srcs = ["create_c_extension_import_hook.py"],
+    main = "create_c_extension_import_hook.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
 )

@@ -587,10 +587,11 @@ std::optional<fuchsia_hardware_pin::DriveType> ConvertDriveType(
 
 std::optional<fuchsia_hardware_pinimpl::InitCall> ConvertInitCall(
     const gpio_metadata::InitCall& gc) {
-  if (gc.pin_config && (gc.pin_config->pull || gc.pin_config->function ||
-                        gc.pin_config->function_name || gc.pin_config->drive_strength_ua ||
-                        gc.pin_config->drive_type || gc.pin_config->power_source ||
-                        gc.pin_config->drive_strength || gc.pin_config->wake_vector)) {
+  if (gc.pin_config &&
+      (gc.pin_config->pull || gc.pin_config->function || gc.pin_config->function_name ||
+       gc.pin_config->drive_strength_ua || gc.pin_config->drive_type ||
+       gc.pin_config->power_source || gc.pin_config->drive_strength || gc.pin_config->wake_vector ||
+       gc.pin_config->input_buffer_enabled)) {
     fuchsia_hardware_pin::Configuration config;
     if (auto pull = ConvertPull(gc.pin_config->pull)) {
       config.pull(*pull);
@@ -615,6 +616,9 @@ std::optional<fuchsia_hardware_pinimpl::InitCall> ConvertInitCall(
     }
     if (gc.pin_config->wake_vector) {
       config.wake_vector(*gc.pin_config->wake_vector);
+    }
+    if (gc.pin_config->input_buffer_enabled) {
+      config.input_buffer_enabled(*gc.pin_config->input_buffer_enabled);
     }
     return fuchsia_hardware_pinimpl::InitCall::WithPinConfig(std::move(config));
   } else if (auto mode = ConvertBufferMode(gc.buffer_mode)) {
@@ -714,6 +718,10 @@ std::optional<fuchsia_hardware_pinimpl::Metadata> ConvertMetadata(
     }
     if (p.wake_vector) {
       config.wake_vector(*p.wake_vector);
+      has_config = true;
+    }
+    if (p.input_buffer_enabled) {
+      config.input_buffer_enabled(*p.input_buffer_enabled);
       has_config = true;
     }
 

@@ -160,7 +160,7 @@ The finding also appears on the **Checks** tab:
 
 ![IfThisThenThat appearing in the Checks tab](ifttt_checks_tab.png)
 
-##### Opting out
+##### Opting out {:#opting-out}
 
 To opt out of the IfThisThenThat check for a specific change, include
 `NO_IFTTT=<reason>` in the commit message.

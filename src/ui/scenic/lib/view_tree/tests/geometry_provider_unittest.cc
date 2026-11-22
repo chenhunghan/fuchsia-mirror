@@ -877,5 +877,54 @@ TEST_F(GeometryProviderTest, UpdateBeforeWatch) {
   EXPECT_EQ(client_result->updates()->size(), 1UL);
 }
 
+// Regression test for b/585548989: when an endpoint already has buffered snapshots and a newer
+// snapshot has been published to `SnapshotHolder` on the main thread before
+// `GeometryProvider::OnNewViewTreeSnapshot()` runs on the input thread, `Watch()` must pull the
+// latest snapshot from `SnapshotHolder` rather than replying with only the stale buffered
+// snapshots, and a subsequent `OnNewViewTreeSnapshot()` call must not duplicate it.
+TEST_F(GeometryProviderTest, WatchSyncsPendingSnapshotFromHolderBeforeReplying) {
+  // Seed an initial 1-node snapshot into the registered endpoint's buffer.
+  PopulateEndpointsWithSnapshots(/*num_snapshots=*/1, /*total_nodes=*/1);
+
+  // Publish a newer 2-node snapshot to `snapshot_holder_` without calling
+  // `geometry_provider_.OnNewViewTreeSnapshot()`, simulating `Watch()` arriving on the input
+  // thread ahead of `InputManager::OnNewViewTreeSnapshot()`.
+  snapshot_holder_->SetSnapshot(SingleDepthViewTreeSnapshot(/*total_nodes=*/2, ++sequence_number_));
+
+  std::optional<fuchsia_ui_observation_geometry::WatchResponse> first_result;
+  client_->Watch().ThenExactlyOnce(
+      [&first_result](
+          fidl::Result<fuchsia_ui_observation_geometry::ViewTreeWatcher::Watch>& result) {
+        ASSERT_TRUE(result.is_ok());
+        first_result = std::move(result.value());
+      });
+  RunLoopUntilIdle();
+
+  ASSERT_TRUE(first_result.has_value());
+  ASSERT_TRUE(first_result->updates().has_value());
+  ASSERT_EQ(first_result->updates()->size(), 2UL);
+  ASSERT_TRUE((*first_result->updates())[0].views().has_value());
+  EXPECT_EQ((*first_result->updates())[0].views()->size(), 1UL);
+  ASSERT_TRUE((*first_result->updates())[1].views().has_value());
+  EXPECT_EQ((*first_result->updates())[1].views()->size(), 2UL);
+
+  // Running the delayed `OnNewViewTreeSnapshot()` notification afterward must be a no-op and must
+  // not resolve a subsequent hanging `Watch()` with a duplicate snapshot.
+  std::optional<fuchsia_ui_observation_geometry::WatchResponse> second_result;
+  client_->Watch().ThenExactlyOnce(
+      [&second_result](
+          fidl::Result<fuchsia_ui_observation_geometry::ViewTreeWatcher::Watch>& result) {
+        if (result.is_ok()) {
+          second_result = std::move(result.value());
+        }
+      });
+  RunLoopUntilIdle();
+  EXPECT_FALSE(second_result.has_value());
+
+  geometry_provider_.OnNewViewTreeSnapshot();
+  RunLoopUntilIdle();
+  EXPECT_FALSE(second_result.has_value());
+}
+
 }  // namespace geometry_provider::test
 }  // namespace view_tree

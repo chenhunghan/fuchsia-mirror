@@ -41,10 +41,11 @@ rustc_library("driver_manager_utils") {
     "//src/devices/bin/driver_manager_rust/*",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/rust/zx",
     "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-component",
     "//third_party/rust_crates:thiserror",
   ]
 }
@@ -59,10 +60,11 @@ rustc_test("driver_manager_utils_test") {
   edition = "2024"
   deps =
       [
-        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/rust/zx",
         "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
         "//third_party/rust_crates:thiserror",
       ] +
       [

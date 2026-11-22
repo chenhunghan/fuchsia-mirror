@@ -25,6 +25,7 @@ from build.api.debug_symbols import (
 )
 from build.bazel.scripts import (
     bazel_action_utils,
+    bazel_build_events,
     bazel_label_mapper,
     bazel_rust_analyzer_utils,
     bazel_source_path_mapper,
@@ -67,42 +68,6 @@ def debug(msg: str) -> None:
 
 # Directory where to find Starlark input files.
 _STARLARK_DIR = os.path.join(os.path.dirname(_SCRIPT_DIR), "starlark")
-
-
-class BazelActionError(Exception):
-    """A Bazel action error was encountered."""
-
-
-class BazelActionScriptError(BazelActionError):
-    """Errors detected by the Bazel action script, not Bazel itself.
-
-    The exception contains a message describing the error, that has
-    not been printed to stderr yet.
-    """
-
-
-class SourceFilesNotFoundError(BazelActionScriptError):
-    """No source files found for a target."""
-
-
-class FileOutputConfigError(BazelActionScriptError):
-    """Invalid configuration for file outputs."""
-
-
-class DirectoryOutputConfigError(BazelActionScriptError):
-    """Invalid configuration for directory outputs."""
-
-
-class MissingOutputDirectoryError(BazelActionScriptError):
-    """Missing output directory after build."""
-
-
-class MissingTrackedFileError(BazelActionScriptError):
-    """Missing tracked file inside output directory."""
-
-
-class PackageExtractionError(BazelActionScriptError):
-    """Failed to extract a package archive."""
 
 
 @dataclasses.dataclass
@@ -152,11 +117,16 @@ class BazelActionResult(object):
             that were used by each of the built targets, as standard filesystem paths,
             keyed by the bazel target.
 
-        rust_project_crates: A list of CrateSpec dictionaries describing the crates of the
+        rust_crates: A list of CrateSpec dictionaries describing the crates of the
             the build targets and their dependencies.
 
         debug_symbols: A BazelDebugSymbolMap of DebugSymbolEntryType dictionaries for each
             built target, keyed by the bazel target label.
+
+        successful_targets: Set of Bazel target labels that completed with success
+            during this invocation.
+
+        failed_targets: Set of Bazel target labels that failed during this invocation.
     """
 
     configured_args: list[str]
@@ -166,6 +136,71 @@ class BazelActionResult(object):
     debug_symbols: BazelDebugSymbolMap = dataclasses.field(
         default_factory=BazelDebugSymbolMap
     )
+    successful_targets: set[str] = dataclasses.field(default_factory=set)
+    failed_targets: set[str] = dataclasses.field(default_factory=set)
+
+
+class BazelActionError(Exception):
+    """A Bazel action error was encountered.
+
+    Attributes:
+        msg: The human-readable error diagnostic.
+        partial_action_result: Optional BazelActionResult containing copied
+            outputs, depfiles, and manifests for targets that completed
+            successfully in a batched invocation despite overall failure.
+        partial_outputs: Optional AspectManifestOutputs extracted from BEP events
+            for completed targets.
+        successful_targets: Set of normalized and canonicalized Bazel labels for
+            targets that completed with success in this invocation.
+        failed_targets: Set of normalized and canonicalized Bazel labels for
+            targets that failed in this invocation.
+    """
+
+    def __init__(
+        self,
+        msg: str = "",
+        partial_action_result: BazelActionResult | None = None,
+        partial_outputs: bazel_action_utils.AspectManifestOutputs | None = None,
+        successful_targets: set[str] | None = None,
+        failed_targets: set[str] | None = None,
+    ):
+        super().__init__(msg)
+        self.partial_action_result = partial_action_result
+        self.partial_outputs = partial_outputs
+        self.successful_targets: set[str] = successful_targets or set()
+        self.failed_targets: set[str] = failed_targets or set()
+
+
+class BazelActionScriptError(BazelActionError):
+    """Errors detected by the Bazel action script, not Bazel itself.
+
+    The exception contains a message describing the error, that has
+    not been printed to stderr yet.
+    """
+
+
+class SourceFilesNotFoundError(BazelActionScriptError):
+    """No source files found for a target."""
+
+
+class FileOutputConfigError(BazelActionScriptError):
+    """Invalid configuration for file outputs."""
+
+
+class DirectoryOutputConfigError(BazelActionScriptError):
+    """Invalid configuration for directory outputs."""
+
+
+class MissingOutputDirectoryError(BazelActionScriptError):
+    """Missing output directory after build."""
+
+
+class MissingTrackedFileError(BazelActionScriptError):
+    """Missing tracked file inside output directory."""
+
+
+class PackageExtractionError(BazelActionScriptError):
+    """Failed to extract a package archive."""
 
 
 class BazelActionRunner(object):
@@ -211,6 +246,7 @@ class BazelActionRunner(object):
         targets: list[str],
         outputs: BazelActionOutputs,
         time_profile: build_utils.TimeProfile,
+        target_infos: list[bazel_action_utils.BazelTargetInfo] | None = None,
     ) -> BazelActionResult:
         """Run a bazel command.
 
@@ -361,13 +397,46 @@ class BazelActionRunner(object):
 
             on_exit.callback(_cleanup_genqueries)
 
-            aspect_manifest_outputs = (
-                self._invoke_bazel_and_return_aspect_outputs(
-                    targets,
-                    cmd,
-                    time_profile,
+            successful_targets: set[str] = set()
+            failed_targets: set[str] = set()
+            invocation_error: BazelActionError | None = None
+            try:
+                aspect_manifest_outputs = (
+                    self._invoke_bazel_and_return_aspect_outputs(
+                        targets,
+                        cmd,
+                        time_profile,
+                    )
                 )
-            )
+                successful_targets = set(targets)
+            except BazelActionError as e:
+                # Always record genquery files for cleanup in finally block even on error.
+                if e.partial_outputs:
+                    for entry in e.partial_outputs.genquery_output_files:
+                        label, comma, path_str = entry.partition(",")
+                        if comma == ",":
+                            genquery_files_to_cleanup.append(
+                                self.paths.execroot / path_str
+                            )
+
+                # Filter successful targets to real targets requested in this invocation.
+                canonical_requested_targets = {
+                    build_utils.canonicalize_label(req) for req in targets
+                }
+                real_successful_targets = {
+                    t
+                    for t in e.successful_targets
+                    if build_utils.canonicalize_label(t)
+                    in canonical_requested_targets
+                }
+
+                # If no real requested targets succeeded, re-raise immediately without partial result.
+                if not real_successful_targets or not e.partial_outputs:
+                    raise
+                aspect_manifest_outputs = e.partial_outputs
+                successful_targets = real_successful_targets
+                failed_targets = e.failed_targets
+                invocation_error = e
 
             # Parse genquery output files
             genquery_output_map = {}
@@ -387,12 +456,89 @@ class BazelActionRunner(object):
 
             genquery_files_to_cleanup.extend(genquery_output_map.values())
 
-            debug_symbol_manifest_paths = (
-                aspect_manifest_outputs.debug_symbol_manifest_paths
-            )
-            rust_manifest_paths = (
-                aspect_manifest_outputs.rust_analyzer_manifest_paths
-            )
+            if invocation_error is not None:
+                # Drop any target from successful_targets whose genquery or source
+                # manifest did not complete on disk, so we do not generate corrupted
+                # empty depfiles for it.
+                incomplete_targets = set()
+                for t in list(successful_targets):
+                    genquery_file = genquery_output_map.get(t)
+                    source_manifest = (
+                        aspect_manifest_outputs.fuchsia_sources_manifests.get(t)
+                    )
+                    if not (
+                        genquery_file
+                        and genquery_file.is_file()
+                        and source_manifest
+                        and (self.paths.execroot / source_manifest).is_file()
+                    ):
+                        incomplete_targets.add(t)
+                        incomplete_targets.add(
+                            build_utils.canonicalize_label(t)
+                        )
+                        incomplete_targets.add(build_utils.normalize_label(t))
+                successful_targets.difference_update(incomplete_targets)
+                if not any(t in successful_targets for t in targets):
+                    raise invocation_error
+
+                def is_target_successful(label: str) -> bool:
+                    return (
+                        label in successful_targets
+                        or build_utils.canonicalize_label(label)
+                        in successful_targets
+                        or build_utils.normalize_label(label)
+                        in successful_targets
+                    )
+
+                # On a partial batch failure, the Bazel invocation aborted early or some targets
+                # failed. Any unbuilt target's declared outputs (files, packages, directories)
+                # do not exist on disk, and attempting to copy them would raise FileNotFoundError
+                # or corrupt the incremental build state.
+                #
+                # Filter input_files_genqueries and target_infos to only the subset of targets that
+                # actually succeeded and had both their genquery and source manifest completed.
+                # This ensures that depfile generation and file copying only proceed for genuine,
+                # completed outputs.
+                input_files_genqueries = {
+                    t: q
+                    for t, q in input_files_genqueries.items()
+                    if is_target_successful(t)
+                }
+
+                if target_infos:
+                    successful_target_infos = [
+                        ti
+                        for ti in target_infos
+                        if is_target_successful(ti.bazel_target)
+                    ]
+                    outputs, _ = merge_target_info_outputs(
+                        successful_target_infos
+                    )
+                else:
+                    outputs = BazelActionOutputs(
+                        files=[],
+                        directories=[],
+                        packages=[],
+                        final_symlinks=[],
+                        copy_debug_symbols=False,
+                        export_test_packages=False,
+                    )
+
+            debug_symbol_manifest_paths = [
+                entry
+                for entry in aspect_manifest_outputs.debug_symbol_manifest_paths
+                if (
+                    entry.partition(",")[1]
+                    and (
+                        self.paths.execroot / entry.partition(",")[2]
+                    ).is_file()
+                )
+            ]
+            rust_manifest_paths = [
+                p
+                for p in aspect_manifest_outputs.rust_analyzer_manifest_paths
+                if (self.paths.execroot / p).is_file()
+            ]
             source_files_manifest_paths = (
                 aspect_manifest_outputs.source_files_manifest_paths
             )
@@ -502,13 +648,25 @@ class BazelActionRunner(object):
             rust_crate_specs
         )
 
-        return BazelActionResult(
+        result = BazelActionResult(
             configured_args=configured_args,
             output_files=all_output_files,
             source_files=input_files,
             rust_crates=rust_crates,
             debug_symbols=debug_symbols,
+            successful_targets=successful_targets,
+            failed_targets=failed_targets,
         )
+
+        if invocation_error:
+            raise BazelActionError(
+                str(invocation_error),
+                partial_action_result=result,
+                successful_targets=successful_targets,
+                failed_targets=failed_targets,
+            )
+
+        return result
 
     def query_for_package_archives(
         self,
@@ -914,8 +1072,40 @@ class BazelActionRunner(object):
                 stderr=None,
             )
 
-        if ret.returncode != 0:
+        aspect_manifest_outputs: (
+            bazel_action_utils.AspectManifestOutputs | None
+        ) = None
+        successful_targets: set[str] = set()
+        failed_targets: set[str] = set()
+        try:
+            if bep_json_path.exists():
+                time_profile.start(
+                    "parse_bep_manifests",
+                    "Parse manifest files from BEP events.",
+                )
+                stream = bazel_build_events.BuildEventStream.from_file(
+                    bep_json_path
+                )
+                aspect_manifest_outputs = bazel_action_utils.AspectManifestOutputs.from_build_event_stream(
+                    stream, self.paths.execroot
+                )
+                successful_targets, failed_targets = extract_completed_targets(
+                    stream
+                )
+        except (OSError, json.JSONDecodeError) as e:
+            print(
+                f"WARNING: Could not read or decode BEP event file {bep_json_path}: {e}",
+                file=sys.stderr,
+            )
+        except (KeyError, ValueError) as e:
+            print(
+                f"WARNING: Malformed BEP event data in {bep_json_path}: {e}",
+                file=sys.stderr,
+            )
+        finally:
             bep_json_path.unlink(missing_ok=True)
+
+        if ret.returncode != 0:
             if self.global_args.quiet:
                 # Print the captured outputs in quiet mode to help debugging build errors.
                 if output_sink.data:
@@ -936,21 +1126,19 @@ class BazelActionRunner(object):
                 .splitlines(),
                 targets,
             )
-            if verify_error_msg:
-                raise BazelActionError(verify_error_msg)
-
-            # Assume Bazel printed a reasonable error to stderr already.
-            raise BazelActionError()
-
-        try:
-            time_profile.start(
-                "parse_bep_manifests", "Parse manifest files from BEP events."
+            raise BazelActionError(
+                verify_error_msg or "",
+                partial_outputs=aspect_manifest_outputs,
+                successful_targets=successful_targets,
+                failed_targets=failed_targets,
             )
-            return bazel_action_utils.parse_build_event_manifests(
-                bep_json_path, self.paths.execroot
+
+        if aspect_manifest_outputs is None:
+            raise BazelActionError(
+                "Failed to parse aspect manifest outputs from BEP events."
             )
-        finally:
-            bep_json_path.unlink(missing_ok=True)
+
+        return aspect_manifest_outputs
 
     def _handle_debug_symbols(
         self,
@@ -1057,6 +1245,43 @@ def calculate_jobs_params(
         return [f"--jobs={jobs}"]
 
     return []
+
+
+def extract_completed_targets(
+    stream: bazel_build_events.BuildEventStream,
+) -> tuple[set[str], set[str]]:
+    """Extract successful and failed target labels from a BEP event stream.
+
+    Aspect completions (events where tc.aspect != "") and internal buildfiles_genquery
+    targets are ignored to ensure that aspects or analysis-only queries completing on
+    unbuilt targets do not falsely report real build targets as successful.
+
+    Returns:
+        (successful_targets, failed_targets) as disjoint sets of label strings, including
+        canonical and normalized label variants.
+    """
+    successful_targets: set[str] = set()
+    failed_targets: set[str] = set()
+    for tc in stream.targets_completed:
+        if tc.aspect or tc.label.startswith(
+            (
+                "//buildfiles_genquery",
+                "@//buildfiles_genquery",
+                "@@//buildfiles_genquery",
+            )
+        ):
+            continue
+        if tc.success:
+            successful_targets.add(tc.label)
+            successful_targets.add(build_utils.canonicalize_label(tc.label))
+            successful_targets.add(build_utils.normalize_label(tc.label))
+        else:
+            failed_targets.add(tc.label)
+            failed_targets.add(build_utils.canonicalize_label(tc.label))
+            failed_targets.add(build_utils.normalize_label(tc.label))
+    # Keep successful_targets and failed_targets strictly disjoint.
+    successful_targets.difference_update(failed_targets)
+    return successful_targets, failed_targets
 
 
 def verify_unknown_gn_targets(
@@ -1841,6 +2066,8 @@ def merge_debug_symbol_manifests(
         target_label = label.removeprefix("@@")
 
         input_manifest_path = os.path.join(bazel_execroot, manifest_path)
+        if not os.path.isfile(input_manifest_path):
+            continue
         with open(input_manifest_path, "rt") as f:
             input_manifest = json.load(f)
 

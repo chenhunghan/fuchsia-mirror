@@ -23,7 +23,6 @@ var templates embed.FS
 // template named "Generate-${file basename}".
 var includePaths = []string{
 	filepath.Join("lib", "syscalls", "category.inc"),
-	filepath.Join("lib", "syscalls", "kernel.inc"),
 	filepath.Join("lib", "syscalls", "kernel_wrappers.rs"),
 	filepath.Join("lib", "syscalls", "syscall_numbers.rs"),
 	filepath.Join("lib", "syscalls", "syscall_sigs.rs"),
@@ -51,14 +50,11 @@ func NewGenerator(cppFormatter, rustFormatter fidlgen.Formatter) *Generator {
 		"UpperCaseWithUnderscores": zither.UpperCaseWithUnderscores,
 		"Increment":                func(n int) int { return n + 1 },
 		"IsUserOutHandle":          isUserOutHandle,
-		"KernelIncDecl": func(syscall zither.Syscall) string {
-			return SyscallCDecl(syscall, PointerViewKernel, cDeclMacro)
-		},
-		"RustKernelParameterType": rustKernelParameterType,
-		"RustKernelReturnType":    rustKernelReturnType,
-		"RustName":                rust.LowerCaseWithUnderscores,
+		"RustKernelParameterType":  rustKernelParameterType,
+		"RustKernelReturnType":     rustKernelReturnType,
+		"RustName":                 rust.LowerCaseWithUnderscores,
 		"SyscallIncDecl": func(syscall zither.Syscall) string {
-			return SyscallCDecl(syscall, PointerViewUserspace, cDeclMacro)
+			return SyscallCDecl(syscall, cDeclMacro)
 		},
 		"UserOutHandles": userOutHandles,
 	}

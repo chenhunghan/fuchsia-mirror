@@ -1,0 +1,78 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_cc_test.bzl", "host_cc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fuzzing_traits_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    tests = [":fuzz_input_unittests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_library(
+    name = "cpp",
+    testonly = True,
+    srcs = ["fuzz_input.cc"],
+    hdrs = ["fuzz_input.h"],
+    includes = ["../../.."],
+    public_configs = ["//sdk/config"],  # For bazel2gn.
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "traits",
+    testonly = True,
+    hdrs = ["traits.h"],
+    # Needed for `#include <zircon/system/ulib/zx/include/lib/zx/*.h>`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    includes = ["../../.."],
+    public_configs = ["//sdk/config"],  # For bazel2gn.
+    deps = [
+        ":cpp",
+        "//sdk/lib/fidl/hlcpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "fuzzing_traits_unittests",
+    srcs = ["traits_unittest.cc"],
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    # Needed for `#include <zircon/system/ulib/zx/include/lib/zx/*.h>` in traits.h.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    deps = [
+        ":traits",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "fuzzing_traits_tests",
+    unit_tests = [":fuzzing_traits_unittests"],
+)
+
+# LINT.IfChange(fuzz_input_unittests)
+host_cc_test(
+    name = "fuzz_input_unittests",
+    srcs = ["fuzz_input_unittest.cc"],
+    deps = [
+        ":cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:fuzz_input_unittests)

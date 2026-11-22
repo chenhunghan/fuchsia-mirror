@@ -261,6 +261,7 @@ def run_shac(
     cwd: pathlib.Path,
     *,
     all_files: bool = False,
+    all_repos: bool = False,
     only_checks: Collection[str] = (),
     skip_checks: Collection[str] = (),
     explicit_files: Collection[str] | None = None,
@@ -275,11 +276,16 @@ def run_shac(
         fuchsia_dir: Absolute path to the Fuchsia checkout root.
         build_dir: Path to the active Fuchsia build directory.
         cwd: Current working directory for resolving relative paths.
-        all_files: If True, passes '--all' to SHAC to check all tracked files.
+        all_files: If True, passes '--all' to SHAC to check all tracked files
+            instead of only modified files.
+        all_repos: If True, runs in every active repository in the checkout
+            instead of only the repository enclosing cwd. Has no effect when
+            explicit_files is given.
         only_checks: Collection of check names to pass via '--only'.
         skip_checks: Collection of check names to pass via '--skip'.
         explicit_files: Optional collection of explicit file paths to check, or
-            None to run across all active repositories without file filtering.
+            None to run in the repository enclosing cwd (or across all active
+            repositories when all_repos is True) without file filtering.
             If an empty collection (or if all specified files are missing),
             returns without invoking SHAC.
         extra_args: Collection of extra CLI arguments forwarded to SHAC.
@@ -311,9 +317,15 @@ def run_shac(
         fuchsia_dir,
         cwd,
         explicit_files=valid_files,
+        all_repos=all_repos,
     )
     shac_groups = tuple(group for group in repo_groups if group.has_shac)
     if not shac_groups:
+        roots = ", ".join(str(group.repo_root) for group in repo_groups)
+        print(
+            f"WARNING: no shac.textproto found in {roots}; nothing to do.",
+            file=sys.stderr,
+        )
         return
 
     _ensure_static_check_tools_built(

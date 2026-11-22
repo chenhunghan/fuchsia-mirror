@@ -31,7 +31,8 @@ load(
     "FuchsiaStructuredConfigInfo",
 )
 
-COMMON_BUILD_FUCHSIA_PACKAGE_ATTRIBUTES = {
+# Attributes required by `build_fuchsia_package_common_impl()`.
+BUILD_FUCHSIA_PACKAGE_COMMON_ATTRS = {
     "package_name": attr.string(
         doc = "The name of the package",
         mandatory = True,
@@ -93,23 +94,26 @@ COMMON_BUILD_FUCHSIA_PACKAGE_ATTRIBUTES = {
     ),
 }
 
-def common_build_fuchsia_package_impl(
+def build_fuchsia_package_common_impl(
         ctx,
         ffx_package,
         ffx_package_is_ffx,
         cmc_tool,
         fuchsia_debug_symbol_info,
-        api_level = ""):
+        api_level = "",
+        create_validations = None):
     """Common implementation for building fuchsia packages.
 
     This function generates actions to build and archive a Fuchsia package
     containing components, resources, tools, and subpackages.
 
+    Calling rules must include `BUILD_FUCHSIA_PACKAGE_COMMON_ATTRS` in `attrs`.
+
     The function will declare files for the package manifest json, meta/package
     descriptor, meta.far file, and the final package archive (.far).
 
     Args:
-        ctx: The rule context.
+        ctx: The rule context for a rule with `BUILD_FUCHSIA_PACKAGE_COMMON_ATTRS`.
         ffx_package: The ffx package or package-tool executable.
         ffx_package_is_ffx: A boolean. If True, creates FFX isolated
           directories and uses the ffx CLI interface.
@@ -119,6 +123,11 @@ def common_build_fuchsia_package_impl(
         fuchsia_debug_symbol_info: Pre-merged FuchsiaDebugSymbolInfo provider
           for the package.
         api_level: Optionally specify the target API level.
+        create_validations: Optional function that takes the
+          FuchsiaPackageInfo of the package, creates validation actions for
+          it, and returns their output files. These are added to the
+          `_validation` output group, so Bazel runs them whenever the package
+          is built, without delaying the package's consumers.
 
     Returns:
         A list of providers including DefaultInfo, FuchsiaPackageInfo,
@@ -137,7 +146,7 @@ def common_build_fuchsia_package_impl(
     meta_package = ctx.actions.declare_file(pkg_dir + "meta/package")
     meta_far = ctx.actions.declare_file(pkg_dir + "meta.far")
     output_package_manifest = ctx.actions.declare_file(pkg_dir + "package_manifest.json")
-    far_file = ctx.actions.declare_file(archive_name)
+    far_file = ctx.actions.declare_file(pkg_dir + archive_name)
 
     # All of the resources that will go into the package
     package_resources = [
@@ -220,6 +229,7 @@ def common_build_fuchsia_package_impl(
 
     subpackages_args = []
     subpackages_inputs = []
+    subpackage_files = []
     subpackages = ctx.attr.subpackages
     if subpackages:
         subpackages_json = ctx.actions.declare_file(pkg_dir + "/subpackages.json")
@@ -231,11 +241,12 @@ def common_build_fuchsia_package_impl(
         )
 
         subpackages_args = ["--subpackages-build-manifest-path", subpackages_json.path]
-        subpackages_inputs = [subpackages_json] + [
+        subpackage_files = [
             file
             for subpackage in subpackages
             for file in subpackage[FuchsiaPackageInfo].files
         ]
+        subpackages_inputs = [subpackages_json] + subpackage_files
 
     # Validate binary paths in cmls.
     component_manifest_files = [c.component_info.manifest for c in packaged_components]
@@ -299,7 +310,7 @@ def common_build_fuchsia_package_impl(
     artifact_inputs = [r.src for r in package_resources] + [
         output_package_manifest,
         meta_far,
-    ] + subpackages_inputs
+    ] + subpackage_files
 
     # Create the far file.
     archive_args = []
@@ -331,12 +342,9 @@ def common_build_fuchsia_package_impl(
         **LOCAL_ONLY_ACTION_KWARGS
     )
 
-    output_files = [
-        far_file,
-        output_package_manifest,
-        manifest,
-        meta_far,
-    ] + build_inputs
+    package_files = depset(
+        [output_package_manifest, meta_far] + build_inputs + subpackage_files,
+    )
 
     # Sanity check that we are not trying to put 2 different resources at the same mountpoint
     resource_dest_to_srcs = {}
@@ -351,21 +359,30 @@ def common_build_fuchsia_package_impl(
                 ),
             )
 
+    package_info = FuchsiaPackageInfo(
+        fuchsia_cpu = fuchsia_cpu_from_ctx(ctx),
+        far_file = far_file,
+        package_manifest = output_package_manifest,
+        files = package_files.to_list(),
+        package_name = ctx.attr.package_name,
+        meta_far = meta_far,
+        package_resources = package_resources,
+        packaged_components = packaged_components,
+        build_id_dirs = fuchsia_debug_symbol_info.build_id_dirs_mapping.values(),
+    )
+
+    output_groups = {
+        "build_id_dirs": depset(transitive = fuchsia_debug_symbol_info.build_id_dirs_mapping.values()),
+    }
+    if create_validations:
+        output_groups["_validation"] = depset(create_validations(package_info))
+
     return [
-        DefaultInfo(files = depset(output_files), executable = stub_executable(ctx)),
-        FuchsiaPackageInfo(
-            fuchsia_cpu = fuchsia_cpu_from_ctx(ctx),
-            far_file = far_file,
-            package_manifest = output_package_manifest,
-            files = [output_package_manifest, meta_far] + build_inputs,
-            package_name = ctx.attr.package_name,
-            meta_far = meta_far,
-            package_resources = package_resources,
-            packaged_components = packaged_components,
-            build_id_dirs = fuchsia_debug_symbol_info.build_id_dirs_mapping.values(),
+        DefaultInfo(
+            files = depset([far_file], transitive = [package_files]),
+            executable = stub_executable(ctx),
         ),
+        package_info,
         fuchsia_debug_symbol_info,
-        OutputGroupInfo(
-            build_id_dirs = depset(transitive = fuchsia_debug_symbol_info.build_id_dirs_mapping.values()),
-        ),
+        OutputGroupInfo(**output_groups),
     ]

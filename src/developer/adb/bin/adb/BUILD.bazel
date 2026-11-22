@@ -2,9 +2,165 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":adb_test"],
+    visibility = ["//src/developer:__pkg__"],
+)
 
 exports_files(
     ["meta/adb.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "common",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
+        "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/sys/cpp",
+        "//src/developer/adb/third_party/adb",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "adb",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/adb.cml",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "adb-config",
+    cm_label = ":manifest",
+)
+
+fx_cc_binary(
+    name = "adb",
+    srcs = [
+        "adb.cc",
+        "adb.h",
+        "main.cc",
+        "service-manager.cc",
+        "service-manager.h",
+        "state-controller.cc",
+        "state-controller.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":adb-config",
+        ":common",
+    ],
+)
+
+fx_packaged_binary(
+    name = "adb_packaged",
+    binary = ":adb",
+    binary_name = "adb",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component(
+    name = "adb-component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/developer/adb/bin:__pkg__"],
+    deps = [":adb_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "adb-test-bin",
+    srcs = [
+        "adb.cc",
+        "adb.h",
+        "adb-test.cc",
+        "service-manager.cc",
+        "service-manager.h",
+        "state-controller.cc",
+        "state-controller.h",
+    ],
+    # adb-test.cc uses an angled `#include <src/lib/testing/loop_fixture/real_loop_fixture.h>`,
+    # which relies on the workspace root being on the system include path.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":common",
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "adb-test-bin_packaged",
+    testonly = True,
+    binary = ":adb-test-bin",
+    binary_name = "adb-test-bin",
+    install_root = "test/",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "adb-test-manifest",
+    testonly = True,
+    component_name = "adb_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/adb-test.cml",
+)
+
+fx_test_component(
+    name = "adb-test-component",
+    compiled_manifest = ":adb-test-manifest",
+    deps = [":adb-test-bin_packaged"],
+)
+
+fx_package(
+    name = "adb-test",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":adb-test-component"],
+)
+
+fx_test(
+    name = "adb_test",
+    package = ":adb-test",
 )

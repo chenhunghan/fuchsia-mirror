@@ -199,7 +199,8 @@ impl FifoDispatcher {
                 Err(UserCopyCaptureFaultsError { fault_info: Some(fault), .. }) => {
                     // If we have a fault the original status is irrelevant and we replace it with
                     // the result of the fault.
-                    if soft_fault(fault.pf_va, fault.pf_flags).is_err() {
+                    // SAFETY: Called in user thread context after dropping the FIFO lock.
+                    if unsafe { soft_fault(fault.pf_va, fault.pf_flags) }.is_err() {
                         // Regardless of why the copy or fault failed it means the underlying
                         // pointer is somehow bad, which we report to the user as an invalid
                         // argument.
@@ -334,7 +335,8 @@ impl FifoDispatcher {
                 Err(UserCopyCaptureFaultsError { fault_info: Some(fault), .. }) => {
                     // If we have a fault the original status is irrelevant and we replace it with
                     // the result of the fault.
-                    if soft_fault(fault.pf_va, fault.pf_flags).is_err() {
+                    // SAFETY: Called in user thread context after dropping the FIFO lock.
+                    if unsafe { soft_fault(fault.pf_va, fault.pf_flags) }.is_err() {
                         // Regardless of why the copy or fault failed it means the underlying
                         // pointer is somehow bad, which we report to the user as an invalid
                         // argument.

@@ -188,6 +188,15 @@ such as `package_label`.
 - `source_label` - The build-system agnostic (either GN or Bazel) label
 corresponding to the test. Used to determine the location of the test's
 source code for determining ownership and other metadata.
+- `produces_perf_results` - (Optional) Boolean. True if the test
+produces performance results (`*.fuchsiaperf.json` files).
+This includes correctness tests that also publish performance results.
+Omitted unless set by the test's build rule. Set automatically for tests
+defined with `python_perf_test` or `fuchsia_component_perf_test` that
+list expected metric names. This is intended to be used to change the
+retry behavior for failures and flakes in these tests (retrying the
+whole test shard rather than retrying the test within the shard), and to
+determine which tests are run multiple times in perfcompare builds.
 
 **Host tests only**
 

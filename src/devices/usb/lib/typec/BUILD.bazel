@@ -17,44 +17,62 @@ test_suite(
     visibility = ["//src/devices:__pkg__"],
 )
 
+_LIB_SRCS = [
+    "src/actor.rs",
+    "src/cc.rs",
+    "src/inspect.rs",
+    "src/lib.rs",
+    "src/port.rs",
+    "src/power.rs",
+    "src/runner.rs",
+    "src/state.rs",
+    "src/state/sink.rs",
+    "src/typec.rs",
+]
+
+# @bazel2gn:transformer=deps
+_LIB_DEPS = [
+    "//sdk/fidl/fuchsia.hardware.usb.connector:fuchsia.hardware.usb.connector_rust_next",
+    "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:log",
+]
+
 rustc_library(
     name = "typec",
-    srcs = [
-        "src/cc.rs",
-        "src/lib.rs",
-        "src/port.rs",
-        "src/state.rs",
-        "src/tests/cc.rs",
-        "src/tests/mod.rs",
-        "src/tests/spec.rs",
-        "src/tests/state.rs",
-        "src/typec.rs",
-    ],
+    srcs = _LIB_SRCS,
     edition = "2024",
-    # TODO(https://fxbug.dev/575661321): Remove once in-progress crate items are used outside tests.
-    # @bazel2gn:skip
-    rustc_flags = ["-Adead_code"],
-    deps = [
-        "//sdk/fidl/fuchsia.hardware.usb.connector:fuchsia.hardware.usb.connector_rust_next",
-        "//sdk/rust/zx",
-        "//src/lib/diagnostics/inspect/rust",
-        "//src/lib/fuchsia-async",
-        "//src/lib/fuchsia-sync",
-        "//third_party/rust_crates/vendor:anyhow",
-        "//third_party/rust_crates/vendor:log",
-    ],
+    deps = _LIB_DEPS,
 )
 
 rustc_test(
     name = "typec_test",
-    crate = ":typec",
-    # @bazel2gn:skip
-    rustc_flags = ["-Adead_code"],
+    srcs = _LIB_SRCS + [
+        "src/tests/attach.rs",
+        "src/tests/boot_and_accessories.rs",
+        "src/tests/cc.rs",
+        "src/tests/concurrency.rs",
+        "src/tests/disconnect.rs",
+        "src/tests/fixture.rs",
+        "src/tests/inspect.rs",
+        "src/tests/mod.rs",
+        "src/tests/spec.rs",
+        "src/tests/state.rs",
+        "src/tests/state_sink.rs",
+        "src/tests/vbus.rs",
+        "src/tests/vbus_discharge.rs",
+    ],
+    edition = "2024",
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:fuchsia"],
-    deps = [
+    deps = _LIB_DEPS + [
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
         "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
     ],
 )
 

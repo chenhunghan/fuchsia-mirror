@@ -1,0 +1,190 @@
+// Copyright 2023 The LUCI Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package luci.analysis.v1;
+
+
+option go_package = "go.chromium.org/luci/analysis/proto/v1;analysispb";
+
+// Specifies the source code that was tested.
+message Sources {
+  // The base version of code sources checked out. Mandatory.
+  oneof base_sources {
+    // The base version of code sources checked out.
+    GitilesCommit gitiles_commit = 1;
+
+    // The submitted Android Build ID that describes the base code sources tested.
+    //
+    // In presubmit, where the invocation is testing a pending build (a build ID
+    // starting with "P"), lookup its reference build (which will be a submitted
+    // build) and specify it here. Then specify the cherry-picked changes under
+    // `changelists`.
+    SubmittedAndroidBuild submitted_android_build = 4;
+  }
+
+  // The changelist(s) which were applied upon the base version of sources
+  // checked out. E.g. in commit queue tryjobs.
+  //
+  // At most 10 changelist(s) may be specified here. If there
+  // are more, only include the first 10 and set is_dirty.
+  repeated GerritChange changelists = 2;
+
+  // Whether there were any changes made to the sources, not described above.
+  // For example, a version of a dependency was upgraded before testing (e.g.
+  // in an autoroller recipe).
+  //
+  // Cherry-picking a changelist on top of the base checkout is not considered
+  // making the sources dirty as it is reported separately above.
+  bool is_dirty = 3;
+}
+
+// GitilesCommit specifies the position of the gitiles commit an invocation
+// ran against, in a repository's commit log. More specifically, a ref's commit
+// log.
+//
+// It also specifies the host/project/ref combination that the commit
+// exists in, to provide context.
+message GitilesCommit {
+  // The identity of the gitiles host, e.g. "chromium.googlesource.com".
+  // Mandatory.
+  string host = 1;
+
+  // Repository name on the host, e.g. "chromium/src". Mandatory.
+  string project = 2;
+
+  // Commit ref, e.g. "refs/heads/main" from which the commit was fetched.
+  // Not the branch name, use "refs/heads/branch"
+  // Mandatory.
+  string ref = 3;
+
+  // Commit SHA-1, as 40 lowercase hexadecimal characters. Mandatory.
+  string commit_hash = 4;
+
+  // Defines a total order of commits on the ref.
+  // A positive, monotonically increasing integer. The recommended
+  // way of obtaining this is by using the goto.google.com/git-numberer
+  // Gerrit plugin. Other solutions can be used as well, so long
+  // as the same scheme is used consistently for a ref.
+  // Mandatory.
+  int64 position = 5;
+}
+
+// Specifies the build ID of a submitted Android build. A submitted build is a
+// build that uses only changes that have been submitted to a branch.
+message SubmittedAndroidBuild {
+  // The Android Build API data realm.
+  // This is usually `prod`.
+  string data_realm = 1;
+
+  // The Android Build branch.
+  // E.g. `git_main`.
+  string branch = 2;
+
+  // The build ID of the *submitted* build.
+  //
+  // This must be parsed to an integer, as this will be exported to BigQuery
+  // and used for sorting results in source order.
+  //
+  // When comparing two build IDs on the same data realm and branch, we expect:
+  // - A higher number means a newer version of sources were used in a build.
+  // - An equal number means the same version of sources used in a build.
+  // - A smaller number means an earlier version of sources were used in a build.
+  int64 build_id = 3;
+}
+
+// A Gerrit patchset.
+message GerritChange {
+  // Gerrit hostname, e.g. "chromium-review.googlesource.com".
+  string host = 1;
+
+  // Gerrit project, e.g. "chromium/src".
+  string project = 5;
+
+  // Change number, e.g. 12345.
+  int64 change = 2;
+
+  // Patch set number, e.g. 1.
+  int64 patchset = 3;
+
+  // The kind of owner of the changelist. Output only.
+  ChangelistOwnerKind owner_kind = 4;
+}
+
+// Represents a reference in a source control system.
+message SourceRef {
+  // The source control system used.
+  // Only gitiles is supported at this moment. If other systems need to be
+  // supported in future (e.g. non-gitiles git, subversion, google storage
+  // buckets), they can be added here
+  oneof system {
+    // A branch in gitiles repository.
+    GitilesRef gitiles = 1;
+    // A branch in Android Build API.
+    AndroidBuildBranch android_build = 2;
+  }
+}
+
+// Represents a branch in a gitiles repository.
+message GitilesRef {
+  // The gitiles host, e.g. "chromium.googlesource.com".
+  string host = 1;
+
+  // The project on the gitiles host, e.g. "chromium/src".
+  string project = 2;
+
+  // Commit ref, e.g. "refs/heads/main" from which the commit was fetched.
+  // Not the branch name, use "refs/heads/branch"
+  string ref = 3;
+}
+
+// Represents a branch in Android Build API.
+message AndroidBuildBranch {
+  // The Android Build API data realm.
+  // This is usually `prod`.
+  string data_realm = 1;
+
+  // The Android Build branch.
+  // E.g. `git_main`.
+  string branch = 2;
+}
+
+// A gerrit changelist.
+message Changelist {
+  // Gerrit hostname, e.g. "chromium-review.googlesource.com".
+  string host = 1;
+
+  // Change number, e.g. 12345.
+  int64 change = 2;
+
+  // Patch set number, e.g. 1.
+  int32 patchset = 3;
+
+  // The kind of owner of the changelist.
+  ChangelistOwnerKind owner_kind = 4;
+}
+
+// ChangelistOwner describes the owner of a gerrit changelist.
+enum ChangelistOwnerKind {
+  // The changelist owner is not known.
+  CHANGELIST_OWNER_UNSPECIFIED = 0;
+
+  // The changelist is owned by a human.
+  HUMAN = 1;
+
+  // The changelist is owned by automation. (E.g. autoroller or
+  // automatic uprev process.)
+  AUTOMATION = 2;
+}

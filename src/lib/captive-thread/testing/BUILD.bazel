@@ -25,7 +25,7 @@ fx_cc_library_headers(
     deps = [
         "//src/lib/captive-thread",
         "@com_google_googletest//:gtest",
-    ],  # @bazel2gn:raw_overwrite:[ "//src/lib/captive-thread", "//third_party/googletest:gmock", "//third_party/googletest:gtest" ]
+    ],
 )
 
 fx_cc_library(
@@ -37,5 +37,5 @@ fx_cc_library(
         ":headers",
         "//src/lib/captive-thread",
         "@com_google_googletest//:gtest",
-    ],  # @bazel2gn:raw_overwrite:[ ":headers", "//src/lib/captive-thread", "//third_party/googletest:gmock", "//third_party/googletest:gtest" ]
+    ],
 )

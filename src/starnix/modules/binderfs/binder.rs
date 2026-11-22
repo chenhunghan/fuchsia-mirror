@@ -79,7 +79,7 @@ use starnix_uapi::{
     binder_driver_command_protocol_BC_TRANSACTION_SG, binder_driver_return_protocol_BR_OK,
     binder_extended_error, binder_freeze_info, binder_frozen_status_info, binder_transaction_data,
     binder_transaction_data_sg, binder_uintptr_t, binder_version, binder_write_read, errno, error,
-    flat_binder_object, transaction_flags_TF_ONE_WAY, uapi,
+    flat_binder_object, transaction_flags_TF_DEFER_COMPLETE, transaction_flags_TF_ONE_WAY, uapi,
 };
 use std::cell::Cell;
 use std::collections::btree_map::Entry;
@@ -184,7 +184,9 @@ impl FileOps for BinderConnection {
                         binder_process.find_or_register_thread(&current_task.task)?;
                     release_after!(binder_thread, current_task.kernel(), {
                         let thread_state = binder_thread.lock();
-                        if !thread_state.command_queue.is_empty() {
+                        // A `DeferredTransactionComplete` is only read along with the next command,
+                        // so it does not make the binder readable on its own.
+                        if thread_state.command_queue.has_non_deferred_commands() {
                             return FdEvents::POLLIN | FdEvents::POLLOUT;
                         } else if !thread_state.transactions.is_empty() {
                             return FdEvents::POLLOUT;
@@ -331,10 +333,11 @@ impl RemoteBinderConnection {
         current_task: &CurrentTask,
         vmo: fidl::Vmo,
         mapped_address: u64,
+        mapped_size: Option<u64>,
     ) -> Result<(), Errno> {
         let binder_process = self.binder_connection.proc()?;
         release_after!(binder_process, current_task.kernel(), {
-            binder_process.map_external_vmo(vmo, mapped_address)
+            binder_process.map_external_vmo(vmo, mapped_address, mapped_size)
         })
     }
 
@@ -934,12 +937,54 @@ impl BinderDriver {
                             cursor.advance(input.write_consumed)?;
 
                             // Handle all the data the calling thread sent, which may include
-                            // multiple commands.
-                            while cursor.bytes_read() < input.write_size as usize {
-                                self.handle_thread_write(&context, &mut files, &mut cursor)?;
-                                has_consumed_write = true;
-                                input.write_consumed = cursor.bytes_read() as u64;
-                            }
+                            // multiple commands. The reference count changes of all the commands
+                            // are applied together once the write buffer is consumed, so that
+                            // the resulting commands are batched per owner process. They must be
+                            // applied before reading, which may block.
+                            let mut actions = RefCountActions::default();
+                            release_after!(actions, (), || -> Result<(), Errno> {
+                                let mut increments_refcount = false;
+                                let mut write_result = Ok(());
+                                while cursor.bytes_read() < input.write_size as usize {
+                                    let command = match self.handle_thread_write(
+                                        &context,
+                                        &mut files,
+                                        &mut cursor,
+                                        &mut actions,
+                                    ) {
+                                        Ok(command) => command,
+                                        Err(err) => {
+                                            write_result = Err(err);
+                                            break;
+                                        }
+                                    };
+                                    increments_refcount |= matches!(
+                                        command,
+                                        binder_driver_command_protocol_BC_INCREFS
+                                            | binder_driver_command_protocol_BC_ACQUIRE
+                                    );
+                                    has_consumed_write = true;
+                                    input.write_consumed = cursor.bytes_read() as u64;
+                                }
+
+                                // libbinder holds a temporary reference on each proxy whose
+                                // reference count it increments, until the write that contains the
+                                // increment is consumed, i.e. until this ioctl returns. Waiting
+                                // for the next command after the BR_TRANSACTION_COMPLETE of a
+                                // reply sent with TF_DEFER_COMPLETE would keep these proxies, and
+                                // the remote objects they reference, alive until an unrelated
+                                // command arrives. So, return the BR_TRANSACTION_COMPLETE without
+                                // waiting. This also applies if a later command of the write
+                                // fails, as the consumed commands are reported to userspace even
+                                // then.
+                                if increments_refcount {
+                                    binder_thread
+                                        .lock()
+                                        .command_queue
+                                        .undefer_transaction_complete();
+                                }
+                                write_result
+                            })?;
                         }
 
                         if input.read_size > input.read_consumed {
@@ -1037,13 +1082,16 @@ impl BinderDriver {
     }
 
     /// Consumes one command from the userspace binder_write_read buffer and handles it.
-    /// This method will never block.
+    /// This method will never block. Returns the command that was handled.
+    /// Takes a `RefCountActions` that must be `release`d without holding a lock on
+    /// `BinderProcess`.
     fn handle_thread_write(
         &self,
         context: &OperationContext<'_>,
         files: &mut Vec<fbinder::FileHandle>,
         cursor: &mut UserMemoryCursor,
-    ) -> Result<(), Errno> {
+        actions: &mut RefCountActions,
+    ) -> Result<binder_driver_command_protocol, Errno> {
         let command = cursor.read_object::<binder_driver_command_protocol>()?;
         fuchsia_trace::duration!(
             CATEGORY_STARNIX_BINDER,
@@ -1065,7 +1113,7 @@ impl BinderDriver {
             | binder_driver_command_protocol_BC_DECREFS
             | binder_driver_command_protocol_BC_RELEASE => {
                 let handle = cursor.read_object::<u32>()?.into();
-                context.binder_proc.handle_refcount_operation(command, handle)
+                context.binder_proc.handle_refcount_operation(command, handle, actions)
             }
             binder_driver_command_protocol_BC_INCREFS_DONE
             | binder_driver_command_protocol_BC_ACQUIRE_DONE => {
@@ -1073,7 +1121,7 @@ impl BinderDriver {
                     weak_ref_addr: UserAddress::from(cursor.read_object::<binder_uintptr_t>()?),
                     strong_ref_addr: UserAddress::from(cursor.read_object::<binder_uintptr_t>()?),
                 };
-                context.binder_proc.handle_refcount_operation_done(command, object)
+                context.binder_proc.handle_refcount_operation_done(command, object, actions)
             }
             binder_driver_command_protocol_BC_FREE_BUFFER => {
                 let buffer_ptr = UserAddress::from(cursor.read_object::<binder_uintptr_t>()?);
@@ -1149,7 +1197,7 @@ impl BinderDriver {
             // must not flood the Fuchsia system log at ERROR level (fixes VIM3 logspam b/409499623).
             log_trace!("binder command {:#x} failed: {:?}", command, err);
         }
-        result
+        result.map(|()| command)
     }
 
     /// A binder thread is starting a transaction on a remote binder object.
@@ -1414,6 +1462,12 @@ impl BinderDriver {
     /// transaction, if it is still alive. Userspace does not expect a failure in response to its
     /// BC_REPLY: libbinder may defer writing a BC_REPLY until its looper reads the next command,
     /// and aborts on such a failure.
+    ///
+    /// If the reply is sent with `TF_DEFER_COMPLETE`, the BR_TRANSACTION_COMPLETE is read along
+    /// with the next command for the replying thread (see `handle_thread_read`), whether or not
+    /// the reply could be delivered. Unless the write that contains the reply also increments a
+    /// reference count: then, the BR_TRANSACTION_COMPLETE is read on its own (see
+    /// `BINDER_WRITE_READ` in `ioctl`).
     pub fn handle_reply(
         &self,
         context: &OperationContext<'_>,
@@ -1427,6 +1481,7 @@ impl BinderDriver {
             "data_size" => data.transaction_data.data_size as u64,
             "offsets_size" => data.transaction_data.offsets_size as u64
         );
+        let defer_complete = data.transaction_data.flags & transaction_flags_TF_DEFER_COMPLETE != 0;
         // Find the process and thread that initiated the transaction. This reply is for them.
         let (peer, trace_id, in_flight_reply) = {
             let mut thread_state = context.binder_thread.lock();
@@ -1435,7 +1490,7 @@ impl BinderDriver {
         };
         let Some((target_proc, target_thread)) = peer.upgrade() else {
             // The thread that initiated the transaction is dead, so there is nobody to reply to.
-            context.binder_thread.lock().complete_reply(in_flight_reply);
+            context.binder_thread.lock().complete_reply(in_flight_reply, defer_complete);
             return Ok(());
         };
         let mut send_reply = || -> Result<TransactionBuffers, TransactionError> {
@@ -1498,7 +1553,7 @@ impl BinderDriver {
                 target_thread.deliver_failed_reply(context.binder_proc.identifier(), &e, trace_id);
             }
         }
-        binder_thread.complete_reply(in_flight_reply);
+        binder_thread.complete_reply(in_flight_reply, defer_complete);
         Ok(())
     }
 
@@ -1664,11 +1719,20 @@ impl BinderDriver {
     /// thread keeps waiting for the next command (usually the reply) and returns it in a new batch
     /// of the same read, so that a single write/read of a two-way transaction observes both the
     /// BR_TRANSACTION_COMPLETE and the outcome of the transaction. The BR_TRANSACTION_COMPLETE of
-    /// a reply or of a oneway transaction is returned without waiting. Note that the `AcquireRef`
+    /// a reply or of a oneway transaction is returned without waiting, unless the reply was sent
+    /// with `TF_DEFER_COMPLETE`: then, its `DeferredTransactionComplete` is returned along with
+    /// the next command for the thread (usually the next transaction), so that a single
+    /// write/read sends the reply and receives the next transaction. Note that the `AcquireRef`
     /// of an object sent for the first time is queued before the `TwoWayTransactionComplete` of
     /// the transaction that sends it, so if the `AcquireRef` is returned, the terminal
     /// `TwoWayTransactionComplete` is only returned by the next read (see
     /// https://fxbug.dev/441451502).
+    ///
+    /// When waiting for the next command after a BR_TRANSACTION_COMPLETE, the
+    /// BR_TRANSACTION_COMPLETE is returned on its own if the read buffer cannot fit any other
+    /// command, or if the wait is interrupted. After a deferred BR_TRANSACTION_COMPLETE, if the
+    /// thread has no transaction pending, it waits for work, so a BR_SPAWN_LOOPER may be returned
+    /// instead of the next command.
     pub fn handle_thread_read(
         &self,
         context: &OperationContext<'_>,
@@ -1679,6 +1743,9 @@ impl BinderDriver {
         // already written to `read_buffer`.
         let mut remaining_buffer = *read_buffer;
         let mut bytes_read = 0;
+        // Whether the only command written so far is the BR_TRANSACTION_COMPLETE of a reply sent
+        // with TF_DEFER_COMPLETE, by a thread that had no transaction pending when it was written.
+        let mut only_idle_deferred_complete_written = false;
         loop {
             // Check if the process needs to spawn a new worker thread. This MUST be checked
             // inside the wait loop on every wake-up iteration: when threads are blocked waiting
@@ -1690,19 +1757,40 @@ impl BinderDriver {
             // heavy load would never request new threads, starving the thread pool and deadlocking
             // concurrent callers (e.g. `BinderLibTest.ThreadPoolAvailableThreads`).
             //
-            // It is only checked while nothing has been written yet, which is always the case for
-            // a thread waiting for work. Once commands have been written, the read is waiting for
-            // the outcome of a two-way transaction after its BR_TRANSACTION_COMPLETE, and must
-            // return that outcome rather than a BR_SPAWN_LOOPER. The next read checks again.
+            // It is only checked while the read waits for work: while nothing has been written
+            // yet, if the thread has no transaction pending and no deferred BR_TRANSACTION_COMPLETE
+            // is queued first (it is read first), or after a deferred BR_TRANSACTION_COMPLETE
+            // written while the thread had no transaction pending. Otherwise, the read waits for
+            // the outcome of the thread's own transaction (e.g. after the BR_TRANSACTION_COMPLETE
+            // of a two-way transaction, or of a deferred reply to a nested transaction), and must
+            // return that outcome rather than a BR_SPAWN_LOOPER, even if the outcome already
+            // popped the transaction (e.g. a BR_DEAD_REPLY). The next read checks again.
             let (mut proc_state, mut thread_state) = context.lock();
 
-            if bytes_read == 0 && proc_state.should_request_thread_locked(&thread_state) {
+            let waits_for_work = if bytes_read == 0 {
+                thread_state.transactions.is_empty()
+                    && !matches!(
+                        thread_state.command_queue.front(),
+                        Some(QueuedCommand { command: Command::DeferredTransactionComplete, .. })
+                    )
+            } else {
+                only_idle_deferred_complete_written
+            };
+            if waits_for_work && proc_state.should_request_thread_locked(&thread_state) {
                 drop(thread_state);
-                let bytes_written = Command::SpawnLooper
-                    .write_to_memory(context.memory_accessor, &remaining_buffer)?;
+                let bytes_written = match Command::SpawnLooper
+                    .write_to_memory(context.memory_accessor, &remaining_buffer)
+                {
+                    Ok(bytes_written) => bytes_written,
+                    // If a deferred BR_TRANSACTION_COMPLETE has already been written, return it
+                    // rather than the error: on error, `read_consumed` is not updated, so
+                    // userspace would never see it.
+                    Err(_) if bytes_read > 0 => return Ok(bytes_read),
+                    Err(err) => return Err(err),
+                };
                 debug_assert_eq!(bytes_written, Command::SpawnLooper.required_buffer_size());
                 proc_state.did_request_thread();
-                return Ok(bytes_written);
+                return Ok(bytes_read + bytes_written);
             }
 
             if thread_state.request_kick {
@@ -1721,7 +1809,8 @@ impl BinderDriver {
             // Whether the read must return after this batch, even if the batch is empty.
             let mut end_read = false;
             // Whether the read must wait for the next command after this batch, which then ends
-            // with the BR_TRANSACTION_COMPLETE of a two-way transaction.
+            // with the BR_TRANSACTION_COMPLETE of a two-way transaction or of a reply sent with
+            // TF_DEFER_COMPLETE.
             let mut wait_for_next_command = false;
             while remaining_buffer.length > 0 {
                 let is_first_command = bytes_read == batch_start;
@@ -1830,14 +1919,23 @@ impl BinderDriver {
                 // a command is already queued) and the buffer has room for any command. This does
                 // not apply to the BR_TRANSACTION_COMPLETE of a reply: when replying to a nested
                 // transaction, the thread's own transaction is still pending, and its reply must
-                // not be waited for here.
-                wait_for_next_command = matches!(command, Command::TwoWayTransactionComplete)
-                    && remaining_buffer.length >= Command::MAX_SIZE
-                    && (!thread_state.command_queue.is_empty()
-                        || matches!(
-                            thread_state.transactions.last(),
-                            Some(TransactionRole::Sender(_))
-                        ));
+                // not be waited for here. Unless the reply was sent with TF_DEFER_COMPLETE: then,
+                // userspace expects the next command to be waited for, whatever it is.
+                wait_for_next_command = remaining_buffer.length >= Command::MAX_SIZE
+                    && match command {
+                        Command::TwoWayTransactionComplete => {
+                            !thread_state.command_queue.is_empty()
+                                || matches!(
+                                    thread_state.transactions.last(),
+                                    Some(TransactionRole::Sender(_))
+                                )
+                        }
+                        Command::DeferredTransactionComplete => true,
+                        _ => false,
+                    };
+                only_idle_deferred_complete_written =
+                    matches!(command, Command::DeferredTransactionComplete)
+                        && thread_state.transactions.is_empty();
 
                 let is_terminal = command.is_terminal();
                 match command {
@@ -1881,9 +1979,13 @@ impl BinderDriver {
             }
 
             // If any data was written, return so userspace can process the commands, unless the
-            // read waits for the command following a two-way BR_TRANSACTION_COMPLETE.
+            // read waits for the command following a two-way or deferred BR_TRANSACTION_COMPLETE.
             if bytes_read > batch_start || end_read {
-                let wake_process = thread_state.transactions.is_empty()
+                // Wake another thread to handle the remaining process work, unless this thread
+                // waits for the next command after a deferred BR_TRANSACTION_COMPLETE: it then
+                // handles that work itself.
+                let wake_process = !wait_for_next_command
+                    && thread_state.transactions.is_empty()
                     && thread_state.command_queue.is_empty()
                     && proc_state.has_runnable_commands();
                 drop(thread_state);

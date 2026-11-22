@@ -7,16 +7,11 @@
 #include <fidl/fuchsia.hardware.ax88179/cpp/wire.h>
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <lib/async-loop/testing/cpp/real_loop.h>
-#include <lib/component/incoming/cpp/directory.h>
-#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/component/incoming/cpp/service_member_watcher.h>
-#include <lib/device-watcher/cpp/device-watcher.h>
-#include <lib/fdio/cpp/caller.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <lib/usb-virtual-bus-launcher/usb-virtual-bus-launcher.h>
 #include <lib/zx/clock.h>
 
-#include <fbl/string.h>
 #include <usb/cdc.h>
 #include <usb/usb.h>
 #include <zxtest/zxtest.h>
@@ -39,10 +34,12 @@ class UsbAx88179Test : public zxtest::Test, loop_fixture::RealLoop {
     auto bus = BusLauncher::Create({
         fuchsia_component_test::Capability::WithService(
             fuchsia_component_test::Service{{.name = ax88179::Service::Name}}),
+        fuchsia_component_test::Capability::WithService(
+            fuchsia_component_test::Service{{.name = fuchsia_hardware_network::Service::Name}}),
     });
     ASSERT_OK(bus.status_value());
     bus_ = std::move(bus.value());
-    ASSERT_NO_FATAL_FAILURE(InitUsbAx88179(&dev_path_));
+    ASSERT_NO_FATAL_FAILURE(InitUsbAx88179());
   }
 
   void TearDown() override {
@@ -51,7 +48,7 @@ class UsbAx88179Test : public zxtest::Test, loop_fixture::RealLoop {
     ASSERT_OK(bus_->Disable());
   }
 
-  void InitUsbAx88179(fbl::String* dev_path) {
+  void InitUsbAx88179() {
     namespace usb_peripheral = fuchsia_hardware_usb_peripheral;
     using ConfigurationDescriptor =
         ::fidl::VectorView<fuchsia_hardware_usb_peripheral::wire::FunctionDescriptor>;
@@ -79,27 +76,16 @@ class UsbAx88179Test : public zxtest::Test, loop_fixture::RealLoop {
     config_descs.push_back(std::move(config_desc));
     ASSERT_OK(bus_->SetupPeripheralDevice(std::move(device_desc), std::move(config_descs)));
 
-    fdio_cpp::UnownedFdioCaller caller(bus_->GetRootFd());
-    {
-      zx::result directory = component::OpenDirectoryAt(caller.directory(), "class/network");
-      ASSERT_OK(directory);
-      zx::result watch_result = device_watcher::WatchDirectoryForItems(
-          directory.value(), [&dev_path](std::string_view devpath) {
-            *dev_path = fbl::String::Concat({"class/network/", devpath});
-            return std::monostate{};
-          });
-      ASSERT_OK(watch_result);
-    }
+    component::SyncServiceMemberWatcher<fuchsia_hardware_network::Service::Device> watcher(
+        bus_->GetExposedDir());
+    zx::result device = watcher.GetNextInstance(false);
+    ASSERT_OK(device);
+    device_ = std::move(device.value());
   }
 
   void ConnectNetdeviceClient() {
-    fdio_cpp::UnownedFdioCaller caller(bus_->GetRootFd());
-    zx::result device =
-        component::ConnectAt<fuchsia_hardware_network::Device>(caller.directory(), dev_path_);
-    ASSERT_OK(device);
-
-    client_ = std::make_unique<network::client::NetworkDeviceClient>(std::move(device.value()),
-                                                                     dispatcher());
+    client_ =
+        std::make_unique<network::client::NetworkDeviceClient>(std::move(device_), dispatcher());
     client_->SetErrorCallback([this](zx_status_t error) {
       loop().Quit();
       ADD_FATAL_FAILURE("client failed with %s", zx_status_get_string(error));
@@ -168,7 +154,7 @@ class UsbAx88179Test : public zxtest::Test, loop_fixture::RealLoop {
 
  protected:
   std::optional<BusLauncher> bus_;
-  fbl::String dev_path_;
+  fidl::ClientEnd<fuchsia_hardware_network::Device> device_;
   std::unique_ptr<network::client::NetworkDeviceClient> client_;
   fuchsia_hardware_network::wire::PortId port_id_;
 };

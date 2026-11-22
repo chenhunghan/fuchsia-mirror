@@ -231,7 +231,7 @@ FIDL will generate a `JsonValue` class. `JsonValue` contains a public tag enum
 class representing the possible [variants][union-lexicon]:
 
 ```c++
-enum class Tag : fidl_xunion_tag_t {
+enum class Tag : fidl_union_tag_t {
   kIntValue = 2,
   kStringValue = 3,
 };
@@ -279,9 +279,9 @@ Example usage:
 class:
 
 ```c++
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     ... // other fields omitted
-    kUnknown = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    kUnknown = ::std::numeric_limits<uint32_t>::max(),
   };
 ```
 
@@ -392,7 +392,7 @@ type Outer = struct {
 
 the inner struct can be referred to as `SomeCustomName` or `Outer::Inner`.
 
-Another example of this is the [protocol result](#protocol-results) types: the
+Another example of this is the [protocol result](#protocols-results) types: the
 success and error variants of a type such as `TicTacToe_MakeMove_Result` can be
 referenced as `TicTacToe_MakeMove_Result::Response` and
 `TicTacToe_MakeMove_Result::Err`, respectively.
@@ -1268,7 +1268,7 @@ The test base provides an implementation for the virtual protocol events
 [lang-resource]: /docs/reference/fidl/language/language.md#value-vs-resource
 [lang-protocols]: /docs/reference/fidl/language/language.md#protocols
 [lang-protocol-composition]: /docs/reference/fidl/language/language.md#protocol-composition
-[result-callback-use-after-free]: /docs/development/languages/fidl/tutorials/cpp/topics/threading.md#additional_use-after-free_risks_with_thenexactlyonce
+[result-callback-use-after-free]: /docs/development/languages/fidl/tutorials/cpp/topics/threading.md#additional-use-after-free-risks-with-thenexactlyonce
 [specifying-asynchronous-continuation]: #specifying-asynchronous-continuation
 [union-lexicon]: /docs/reference/fidl/language/lexicon.md#union-terms
 [unknown-attr]: /docs/reference/fidl/language/attributes.md#unknown

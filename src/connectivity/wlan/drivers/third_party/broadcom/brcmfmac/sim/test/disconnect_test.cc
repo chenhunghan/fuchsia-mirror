@@ -8,6 +8,7 @@
 #include <zxtest/zxtest.h>
 
 #include "fidl/fuchsia.wlan.fullmac/cpp/wire_types.h"
+#include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/fweh.h"
 #include "src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac/sim/test/sim_test.h"
 
 using ::wlan::common::MacAddr;
@@ -429,6 +430,114 @@ TEST_F(SimTest, SmeDisassocThenConnectThenFwDeauth) {
   // And we should see no other disconnects.
   EXPECT_EQ(client_ifc.stats_.disassoc_indications.size(), 0U);
   EXPECT_EQ(client_ifc.stats_.deauth_results.size(), 0U);
+}
+
+TEST_F(SimTest, MicErrorClientLifecycle) {
+  simulation::FakeAp ap(env_.get(), kApBssid, kDefaultSsid, kApChannel,
+                        fuchsia_wlan_ieee80211::wire::ChannelBandwidth::kCbw20, 0);
+
+  ASSERT_EQ(Init(), ZX_OK);
+
+  SimInterface client_ifc;
+  ASSERT_EQ(StartInterface(wlan_common::WlanMacRole::kClient, &client_ifc, kStaMacAddr), ZX_OK);
+
+  // Pre-connect MIC error is ignored.
+  env_->ScheduleNotification(
+      [this] {
+        WithSimDevice([](brcmfmac::SimDevice* device) {
+          device->GetSim()->sim_fw->TriggerFirmwareMicError(0, kApBssid);
+        });
+      },
+      zx::sec(1));
+  env_->ScheduleNotification(
+      [&client_ifc] { EXPECT_EQ(client_ifc.stats_.mic_failure_indications.size(), 0U); },
+      zx::msec(1500));
+
+  client_ifc.AssociateWith(ap, zx::sec(2));
+
+  // Connected pairwise and group MIC errors report the connected BSSID rather than frame source.
+  const MacAddr kOtherAddr({0x34, 0x28, 0x47, 0xaa, 0xab, 0xc3});
+  env_->ScheduleNotification(
+      [this, kOtherAddr] {
+        WithSimDevice([kOtherAddr](brcmfmac::SimDevice* device) {
+          device->GetSim()->sim_fw->TriggerFirmwareMicError(0, kOtherAddr);
+        });
+      },
+      zx::sec(3));
+  env_->ScheduleNotification(
+      [this, kOtherAddr] {
+        WithSimDevice([kOtherAddr](brcmfmac::SimDevice* device) {
+          device->GetSim()->sim_fw->TriggerFirmwareMicError(BRCMF_EVENT_MSG_GROUP, kOtherAddr);
+        });
+      },
+      zx::sec(4));
+
+  // Verify no driver-initiated disconnect occurred while connected, then disconnect via AP deauth.
+  env_->ScheduleNotification(
+      [&client_ifc, &ap] {
+        EXPECT_EQ(client_ifc.stats_.connect_successes, 1U);
+        EXPECT_EQ(client_ifc.stats_.mic_failure_indications.size(), 2U);
+        EXPECT_EQ(client_ifc.stats_.disassoc_indications.size(), 0U);
+        EXPECT_EQ(client_ifc.stats_.disassoc_results.size(), 0U);
+        EXPECT_EQ(client_ifc.stats_.deauth_indications.size(), 0U);
+        EXPECT_EQ(client_ifc.stats_.deauth_results.size(), 0U);
+        ap.DeauthSta(kStaMacAddr, kDeauthReason);
+      },
+      zx::sec(5));
+
+  // Post-disconnect MIC error is ignored.
+  env_->ScheduleNotification(
+      [this] {
+        WithSimDevice([](brcmfmac::SimDevice* device) {
+          device->GetSim()->sim_fw->TriggerFirmwareMicError(0, kApBssid);
+        });
+      },
+      zx::sec(6));
+
+  env_->Run(kTestDuration);
+
+  ASSERT_EQ(client_ifc.stats_.connect_successes, 1U);
+  EXPECT_EQ(client_ifc.stats_.deauth_indications.size(), 1U);
+  EXPECT_EQ(client_ifc.stats_.deauth_results.size(), 0U);
+  EXPECT_EQ(client_ifc.stats_.disassoc_indications.size(), 0U);
+  EXPECT_EQ(client_ifc.stats_.disassoc_results.size(), 0U);
+  ASSERT_EQ(client_ifc.stats_.mic_failure_indications.size(), 2U);
+
+  std::list<fuchsia_wlan_fullmac::WlanFullmacImplIfcOnMichaelMicFailureRequest>::const_iterator it =
+      client_ifc.stats_.mic_failure_indications.cbegin();
+  ASSERT_TRUE(it->peer_sta_address().has_value());
+  ASSERT_EQ(it->peer_sta_address()->size(), ETH_ALEN);
+  EXPECT_BYTES_EQ(it->peer_sta_address()->data(), kApBssid.byte, ETH_ALEN);
+  ASSERT_TRUE(it->key_type().has_value());
+  EXPECT_EQ(it->key_type().value(), fuchsia_wlan_ieee80211::KeyType::kPairwise);
+
+  ++it;
+  ASSERT_TRUE(it->peer_sta_address().has_value());
+  ASSERT_EQ(it->peer_sta_address()->size(), ETH_ALEN);
+  EXPECT_BYTES_EQ(it->peer_sta_address()->data(), kApBssid.byte, ETH_ALEN);
+  ASSERT_TRUE(it->key_type().has_value());
+  EXPECT_EQ(it->key_type().value(), fuchsia_wlan_ieee80211::KeyType::kGroup);
+}
+
+TEST_F(SimTest, MicErrorOnSoftApIsIgnored) {
+  ASSERT_EQ(Init(), ZX_OK);
+
+  SimInterface softap_ifc;
+  ASSERT_EQ(StartInterface(wlan_common::WlanMacRole::kAp, &softap_ifc, kStaMacAddr), ZX_OK);
+
+  env_->ScheduleNotification([&softap_ifc] { softap_ifc.StartSoftAp(); }, zx::sec(1));
+  env_->ScheduleNotification(
+      [this] {
+        WithSimDevice([](brcmfmac::SimDevice* device) {
+          device->GetSim()->sim_fw->TriggerFirmwareSoftApMicError(0, kApBssid);
+        });
+      },
+      zx::sec(2));
+
+  env_->Run(kTestDuration);
+
+  ASSERT_EQ(softap_ifc.stats_.start_confirmations.size(), 1U);
+  EXPECT_EQ(softap_ifc.stats_.mic_failure_indications.size(), 0U);
 }
 
 }  // namespace wlan::brcmfmac

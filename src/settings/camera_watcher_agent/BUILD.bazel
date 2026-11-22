@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest", "fx_test_component")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":settings_camera_watcher_agent_tests"],
+    visibility = ["//src/settings:__pkg__"],
+)
+
+rustc_library(
+    name = "settings_camera_watcher_agent",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/settings/input:__pkg__",
+        "//src/settings/service:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.camera3:fuchsia.camera3_rust",
+        "//src/lib/fuchsia-async",
+        "//src/lib/trace/rust:trace",
+        "//src/settings/camera:settings_camera",
+        "//src/settings/common:settings_common",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# The bare binary only runs inside its custom-manifest
+# component; the test runs through the :settings_camera_watcher_agent_tests fx_test.
+rustc_test(
+    name = "settings_camera_watcher_agent_lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":settings_camera_watcher_agent",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/settings/test_common:settings_test_common",
+    ],
+)
+
+fx_packaged_binary(
+    name = "settings_camera_watcher_agent_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":settings_camera_watcher_agent_lib_test",
+    binary_name = "settings_camera_watcher_agent_lib_test",
+)
+
+fx_component_manifest(
+    name = "settings_camera_watcher_agent_tests_manifest",
+    testonly = True,
+    component_name = "settings_camera_watcher_agent_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/settings_camera_watcher_agent_tests.cml",
+)
+
+fx_test_component(
+    name = "settings_camera_watcher_agent_tests_component",
+    compiled_manifest = ":settings_camera_watcher_agent_tests_manifest",
+    deps = [":settings_camera_watcher_agent_lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "settings_camera_watcher_agent_tests-package",
+    package_name = "settings_camera_watcher_agent_tests",
+    test_components = [":settings_camera_watcher_agent_tests_component"],
+)
+
+fx_test(
+    name = "settings_camera_watcher_agent_tests",
+    max_log_severity = "ERROR",
+    package = ":settings_camera_watcher_agent_tests-package",
+)

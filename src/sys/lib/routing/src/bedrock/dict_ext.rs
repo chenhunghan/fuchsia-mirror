@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use capability_source::CapabilitySource;
 use cm_types::{IterablePath, RelativePath};
-use fidl_fuchsia_component_runtime::RouteRequest;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
 use router_error::RouterError;
 use runtime_capabilities::{Capability, Dictionary, Routable, Router, WeakInstanceToken};
 use std::sync::Arc;

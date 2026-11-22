@@ -11,6 +11,12 @@
     ],
     offer: [
         {
+            name: "clock-init",
+            service: "fuchsia.clock.Init",
+            from: "#clock-controller-ff63c000",
+            to: "#audio-controller-ff642000",
+        },
+        {
             name: "clock-gate",
             service: "fuchsia.hardware.clock.Service",
             from: "#clock-controller-ff63c000",
@@ -44,7 +50,16 @@
                                 },
                             },
                             {
-                                pin: 17,
+                                pin: 66,
+                                call: {
+                                    pin_config: {
+                                        function: 1,
+                                        drive_strength_ua: 3000,
+                                    },
+                                },
+                            },
+                            {
+                                pin: 65,
                                 call: {
                                     pin_config: {
                                         function: 1,
@@ -59,16 +74,7 @@
                                 },
                             },
                             {
-                                pin: 65,
-                                call: {
-                                    pin_config: {
-                                        function: 1,
-                                        drive_strength_ua: 3000,
-                                    },
-                                },
-                            },
-                            {
-                                pin: 66,
+                                pin: 17,
                                 call: {
                                     pin_config: {
                                         function: 1,

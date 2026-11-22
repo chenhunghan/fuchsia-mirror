@@ -13,8 +13,7 @@ mod polisher;
 
 use crate::arbiter::ChargeLimitArbiter;
 use crate::battery_info_recorders::RecorderConfig;
-use crate::battery_manager::{BatteryManager, BatterySimulationStateObserver, DriverUpdate};
-use crate::battery_simulator::SimulatedBatteryInfoSource;
+use crate::battery_manager::{BatteryManager, DriverUpdate};
 use crate::cache::Wakeup;
 pub(crate) use crate::config::BatteryManagerConfig;
 use crate::config::read_battery_manager_config;
@@ -36,7 +35,7 @@ use futures::channel::mpsc;
 use futures::prelude::*;
 use inspect_runtime::PublishOptions;
 use log::{error, info, warn};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 pub(crate) enum BatteryInfoSource {
     New(fbattery::BatteryProxy),
@@ -373,11 +372,6 @@ async fn main() -> Result<(), Error> {
         update_tx,
     ));
 
-    let battery_simulator = Arc::new(SimulatedBatteryInfoSource::new(
-        fpower::BatteryInfo::default(),
-        Arc::downgrade(&battery_manager) as Weak<dyn BatterySimulationStateObserver>,
-    ));
-
     let mut fs = ServiceFs::new();
     fs.dir("svc")
         .add_fidl_service(IncomingService::BatteryManager)
@@ -391,62 +385,17 @@ async fn main() -> Result<(), Error> {
 
     fs.for_each_concurrent(None, |request| {
         let battery_manager = battery_manager.clone();
-        let battery_simulator = battery_simulator.clone();
         let governors = governors.clone();
 
         async move {
             match request {
                 IncomingService::BatteryManager(stream) => {
-                    let res = battery_manager.serve(stream).await;
-                    if let Err(e) = res {
+                    if let Err(e) = battery_manager.serve(stream).await {
                         error!("BatteryManager failed {}", e);
                     }
                 }
                 IncomingService::BatterySimulator(stream) => {
-                    let res = stream
-                        .err_into()
-                        .try_for_each(|request| {
-                            let battery_simulator = battery_simulator.clone();
-                            let battery_manager = battery_manager.clone();
-                            async move {
-                                match request {
-                                    spower::BatterySimulatorRequest::DisconnectRealBattery {
-                                        ..
-                                    } => {
-                                        // Start simulation with an all-`None` override table so
-                                        // only fields explicitly set via subsequent simulator
-                                        // calls override the live `BatteryInfo`.
-                                        battery_simulator
-                                            .update_simulation(true, fpower::BatteryInfo::default())
-                                            .await?;
-                                    }
-                                    spower::BatterySimulatorRequest::ReconnectRealBattery {
-                                        ..
-                                    } => {
-                                        battery_simulator
-                                            .update_simulation(
-                                                false,
-                                                fpower::BatteryInfo::default(),
-                                            )
-                                            .await?;
-                                    }
-                                    spower::BatterySimulatorRequest::IsSimulating {
-                                        responder,
-                                        ..
-                                    } => {
-                                        let info = battery_manager.is_simulating();
-                                        responder.send(info)?;
-                                    }
-                                    _ => {
-                                        battery_simulator.handle_request(request).await?;
-                                    }
-                                }
-                                Ok::<(), Error>(())
-                            }
-                        })
-                        .await;
-
-                    if let Err(e) = res {
+                    if let Err(e) = battery_manager.serve_simulator(stream).await {
                         error!("BatterySimulator failed {}", e);
                     }
                 }

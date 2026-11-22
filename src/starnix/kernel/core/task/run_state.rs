@@ -55,6 +55,12 @@ pub enum RunState {
     /// This thread is blocked in a `Waiter`.
     Waiter(WaiterRef),
 
+    /// This thread is blocked in a killable `Waiter` (e.g. `wait_for_execve` during `vfork`).
+    ///
+    /// Only fatal signals or process termination interrupt this wait; non-fatal signals leave it
+    /// blocked.
+    KillableWaiter(WaiterRef),
+
     /// This thread is blocked in an `InterruptibleEvent`.
     Event(EventRef),
 
@@ -83,16 +89,24 @@ impl RunState {
     pub fn is_blocked(&self) -> bool {
         match self {
             RunState::Running => false,
-            RunState::Waiter(waiter) => waiter.is_valid(),
+            RunState::Waiter(waiter) | RunState::KillableWaiter(waiter) => waiter.is_valid(),
             RunState::Event(_) | RunState::Frozen(_) | RunState::TracingStopped => true,
         }
+    }
+
+    /// Whether this task is in a killable wait (e.g. `RunState::KillableWaiter`).
+    pub fn is_killable(&self) -> bool {
+        matches!(self, RunState::KillableWaiter(_))
     }
 
     /// Whether this task ignores signals other than SIGKILL while blocked in this state.
     pub fn ignores_signals(&self) -> bool {
         match self {
             RunState::Frozen(_) | RunState::TracingStopped => true,
-            RunState::Running | RunState::Waiter(_) | RunState::Event(_) => false,
+            RunState::Running
+            | RunState::Waiter(_)
+            | RunState::KillableWaiter(_)
+            | RunState::Event(_) => false,
         }
     }
 
@@ -105,7 +119,7 @@ impl RunState {
     pub(super) unsafe fn wake(&self) {
         match self {
             RunState::Running => (),
-            RunState::Waiter(waiter) => waiter.interrupt(),
+            RunState::Waiter(waiter) | RunState::KillableWaiter(waiter) => waiter.interrupt(),
             // SAFETY: Guaranteed by the caller.
             RunState::Event(event) => unsafe { event.interrupt() },
             // When frozen or stopped, the task is immune to any interrupts.
@@ -117,7 +131,7 @@ impl RunState {
     pub fn state_code(&self) -> TaskStateCode {
         match self {
             RunState::Running => TaskStateCode::Running,
-            RunState::Waiter(waiter) => {
+            RunState::Waiter(waiter) | RunState::KillableWaiter(waiter) => {
                 if waiter.is_valid() {
                     TaskStateCode::Sleeping
                 } else {

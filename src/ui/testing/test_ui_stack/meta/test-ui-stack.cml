@@ -38,6 +38,7 @@
                 "fuchsia.ui.focus.FocusChainListenerRegistry",
                 "fuchsia.ui.input.DeviceListenerRegistry",
                 "fuchsia.ui.input.ImeService",
+                "fuchsia.ui.input.internal.InputOwnership",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.input3.KeyEventInjector",
                 "fuchsia.ui.pointerinjector.Registry",
@@ -123,6 +124,14 @@
             availability: "transitional",
             default: false,
         },
+        {
+            config: "fuchsia.ui.test.Renderer",
+            key: "renderer",
+            type: "string",
+            max_size: 16,
+            availability: "transitional",
+            default: "vulkan",
+        },
     ],
     offer: [
         // [START collection_offers]
@@ -183,6 +192,12 @@
             to: "#realm_builder",
         },
         {
+            protocol: [ "fuchsia.input.injection.InputDeviceRegistry" ],
+            from: "parent",
+            to: "#realm_builder",
+            availability: "optional",
+        },
+        {
             storage: "tmp",
             from: "parent",
             to: "#realm_builder",
@@ -210,6 +225,7 @@
                 "fuchsia.ui.focus.FocusChainListenerRegistry",
                 "fuchsia.ui.input.DeviceListenerRegistry",
                 "fuchsia.ui.input.ImeService",
+                "fuchsia.ui.input.internal.InputOwnership",
                 "fuchsia.ui.input3.Keyboard",
                 "fuchsia.ui.input3.KeyEventInjector",
                 "fuchsia.ui.pointerinjector.Registry",

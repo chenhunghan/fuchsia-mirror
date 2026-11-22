@@ -36,6 +36,7 @@ mod registry;
 mod resolve;
 mod store;
 mod target_connector;
+mod transport_connector;
 
 pub use cache::{
     create_target_cache, get_discovery_cache_dir, get_discovery_cache_file,
@@ -55,7 +56,11 @@ pub use resolve::{
     get_discovered_targets, get_discovery_stream, resolve_target_address,
 };
 pub use target_connector::{
-    FDomainConnection, OvernetConnection, TargetConnection, TargetConnectionError, TargetConnector,
+    TargetConnectError, TargetConnector, TargetResolutionError, setup_fake_resolution,
+};
+pub use transport_connector::{
+    FDomainConnection, OvernetConnection, TargetConnection, TargetConnectionError,
+    TransportConnector,
 };
 
 pub use target_errors::{UNKNOWN_TARGET_NAME, UNSPECIFIED_TARGET_NAME};
@@ -88,6 +93,9 @@ pub enum KnockCriticalError {
     Custom(String),
 }
 
+/// A failure to reach a target that may succeed if retried, for example because the target is
+/// rebooting. Callers that wait for a target, such as `ffx target wait`, retry on these errors
+/// and give up on any other error, so an error that should be retried belongs here.
 #[derive(Debug, Error)]
 pub enum KnockNonCriticalError {
     #[error("Target not found: {target}")]
@@ -96,6 +104,15 @@ pub enum KnockNonCriticalError {
     RcsKnockFailed { detail: String },
     #[error("Timeout: {detail}")]
     Timeout { detail: String },
+    #[error(
+        "Cannot reach '{query}' at {target_spec} (the target may be rebooting, in fastboot, or at a new address that is not registered yet)"
+    )]
+    RegisteredTargetUnreachable {
+        query: String,
+        target_spec: String,
+        #[source]
+        source: Box<KnockNonCriticalError>,
+    },
     #[error("Other non-critical error: {0}")]
     Custom(String),
 }
@@ -130,7 +147,7 @@ const DOWN_REPOLL_DELAY_MS: u64 = 500;
 // LINT.IfChange(timeout_reaching_target)
 const TIMEOUT_REACHING_TARGET_MSG: &str = "Timeout attempting to reach target";
 // LINT.ThenChange(
-//     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx.py:timeout_reaching_target,
+//     //src/testing/end_to_end/honeydew/honeydew/transports/ffx/ffx_impl.py:timeout_reaching_target,
 //     //tools/lib/ffxutil/constants/constants.go:timeout_reaching_target,
 //     //tools/testing/tefmocheck/check-configs.yaml:timeout_reaching_target
 // )

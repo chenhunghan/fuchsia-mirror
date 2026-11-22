@@ -7,19 +7,14 @@
 #include "object/diagnostics.h"
 
 #include <inttypes.h>
-#include <lib/ktrace.h>
 #include <stdio.h>
 #include <string.h>
-#include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
-#include <object/channel_dispatcher.h>
 #include <object/handle.h>
-#include <object/io_buffer_dispatcher.h>
 #include <object/job_dispatcher.h>
 #include <object/process_dispatcher.h>
-#include <object/socket_dispatcher.h>
 #include <object/vm_object_dispatcher.h>
 #include <pretty/cpp/sizes.h>
 #include <vm/vm_object_paged.h>
@@ -29,330 +24,6 @@
 namespace {
 
 using pretty::FormattedBytes;
-
-// Machinery to walk over a job tree and run a callback on each process.
-template <typename ProcessCallbackType>
-class ProcessWalker final : public JobEnumerator {
- public:
-  ProcessWalker(ProcessCallbackType cb) : cb_(cb) {}
-  ProcessWalker(const ProcessWalker&) = delete;
-  ProcessWalker(ProcessWalker&& other) : cb_(other.cb_) {}
-
- private:
-  bool OnProcess(ProcessDispatcher* process) final {
-    cb_(process);
-    return true;
-  }
-
-  const ProcessCallbackType cb_;
-};
-
-template <typename ProcessCallbackType>
-ProcessWalker<ProcessCallbackType> MakeProcessWalker(ProcessCallbackType cb) {
-  return ProcessWalker<ProcessCallbackType>(cb);
-}
-
-const char* ObjectTypeToString(zx_obj_type_t type) {
-  switch (type) {
-    case ZX_OBJ_TYPE_PROCESS:
-      return "process";
-    case ZX_OBJ_TYPE_THREAD:
-      return "thread";
-    case ZX_OBJ_TYPE_VMO:
-      return "vmo";
-    case ZX_OBJ_TYPE_CHANNEL:
-      return "channel";
-    case ZX_OBJ_TYPE_EVENT:
-      return "event";
-    case ZX_OBJ_TYPE_PORT:
-      return "port";
-    case ZX_OBJ_TYPE_INTERRUPT:
-      return "interrupt";
-    case ZX_OBJ_TYPE_DEBUGLOG:
-      return "log";
-    case ZX_OBJ_TYPE_SOCKET:
-      return "socket";
-    case ZX_OBJ_TYPE_RESOURCE:
-      return "resource";
-    case ZX_OBJ_TYPE_EVENTPAIR:
-      return "event-pair";
-    case ZX_OBJ_TYPE_JOB:
-      return "job";
-    case ZX_OBJ_TYPE_VMAR:
-      return "vmar";
-    case ZX_OBJ_TYPE_FIFO:
-      return "fifo";
-    case ZX_OBJ_TYPE_GUEST:
-      return "guest";
-    case ZX_OBJ_TYPE_VCPU:
-      return "vcpu";
-    case ZX_OBJ_TYPE_TIMER:
-      return "timer";
-    case ZX_OBJ_TYPE_IOMMU:
-      return "iommu";
-    case ZX_OBJ_TYPE_BTI:
-      return "bti";
-    case ZX_OBJ_TYPE_PROFILE:
-      return "profile";
-    case ZX_OBJ_TYPE_PMT:
-      return "pmt";
-    case ZX_OBJ_TYPE_SUSPEND_TOKEN:
-      return "suspend-token";
-    case ZX_OBJ_TYPE_PAGER:
-      return "pager";
-    case ZX_OBJ_TYPE_EXCEPTION:
-      return "exception";
-    case ZX_OBJ_TYPE_CLOCK:
-      return "clock";
-    case ZX_OBJ_TYPE_STREAM:
-      return "stream";
-    case ZX_OBJ_TYPE_MSI:
-      return "msi";
-    case ZX_OBJ_TYPE_IOB:
-      return "iob";
-    case ZX_OBJ_TYPE_COUNTER:
-      return "counter";
-    case ZX_OBJ_TYPE_IOB_SHARED_REGION:
-      return "iob-shared-region";
-    case ZX_OBJ_TYPE_SAMPLER:
-      return "sampler";
-    default:
-      return "???";
-  }
-}
-
-void DumpPeerInfo(zx_obj_type_t type, const Dispatcher* disp) {
-  const zx_koid_t koid = disp->get_koid();
-  const zx_koid_t peer_koid = disp->get_related_koid();
-
-  switch (type) {
-    case ZX_OBJ_TYPE_CHANNEL: {
-      auto chan = DownCastDispatcher<const ChannelDispatcher>(disp);
-      const ChannelDispatcher::MessageCounts counts = chan->get_message_counts();
-
-      printf("    chan %7" PRIu64 " %7" PRIu64 " count %" PRIu64 " max %" PRIu64 "\n", koid,
-             peer_koid, counts.current, counts.max);
-      break;
-    }
-    case ZX_OBJ_TYPE_SOCKET: {
-      auto sock = DownCastDispatcher<const SocketDispatcher>(disp);
-      const zx_info_socket_t sock_info = sock->GetInfo();
-      const uint32_t flags = sock_info.options;
-
-      const char* sock_type = (flags & ZX_SOCKET_STREAM) ? "stream\0" : "datagram\0";
-      printf("    sock %s %7" PRIu64 " %7" PRIu64 " buf_avail %" PRIu64 "\n", sock_type, koid,
-             peer_koid, sock_info.rx_buf_available);
-      break;
-    }
-
-    case ZX_OBJ_TYPE_FIFO: {
-      printf("    fifo %7" PRIu64 " %7" PRIu64 "\n", koid, peer_koid);
-      break;
-    }
-    case ZX_OBJ_TYPE_EVENTPAIR: {
-      printf("    eventpair %7" PRIu64 " %7" PRIu64 "\n", koid, peer_koid);
-      break;
-    }
-    case ZX_OBJ_TYPE_IOB: {
-      auto iobuf = DownCastDispatcher<const IoBufferDispatcher>(disp);
-
-      auto region_count = iobuf->RegionCount();
-      printf("    iob %7" PRIu64 " %7" PRIu64 " region count %" PRIu64 "\n", koid, peer_koid,
-             region_count);
-      break;
-    }
-
-    default: {
-      printf("Unexpected error, peer type not supported.\n");
-      break;
-    }
-  }
-}
-
-void DumpProcessPeerDispatchers(zx_obj_type_t type, fbl::RefPtr<ProcessDispatcher> process,
-                                zx_koid_t koid_filter = ZX_KOID_INVALID) {
-  char pname[ZX_MAX_NAME_LEN];
-  bool printed_header = false;
-
-  process->handle_table().ForEachHandle(
-      [&](zx_handle_t handle, zx_rights_t rights, const Dispatcher* disp) {
-        if (disp->get_type() == type) {
-          zx_koid_t koid = disp->get_koid();
-          zx_koid_t peer_koid = disp->get_related_koid();
-
-          if (koid_filter != ZX_KOID_INVALID && koid_filter != koid && koid_filter != peer_koid) {
-            return ZX_OK;
-          }
-
-          if (!printed_header) {
-            [[maybe_unused]] zx_status_t status = process->get_name(pname);
-            DEBUG_ASSERT(status == ZX_OK);
-            printf("%7" PRIu64 " [%s]\n", process->get_koid(), pname);
-            printed_header = true;
-          }
-
-          DumpPeerInfo(type, disp);
-        }
-
-        return ZX_OK;
-      });
-}
-
-void DumpPeerDispatchersByKoid(zx_obj_type_t type, zx_koid_t id) {
-  auto pd = ProcessDispatcher::LookupProcessById(id);
-
-  if (pd) {
-    DumpProcessPeerDispatchers(type, pd);
-  } else {
-    auto walker = MakeProcessWalker([id, type](ProcessDispatcher* process) {
-      DumpProcessPeerDispatchers(type, fbl::RefPtr(process), id);
-    });
-    GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
-  }
-}
-
-void DumpAllPeerDispatchers(zx_obj_type_t type) {
-  auto walker = MakeProcessWalker([type](ProcessDispatcher* process) {
-    DumpProcessPeerDispatchers(type, fbl::RefPtr(process));
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
-}
-
-const char kRightsHeader[] =
-    "dup tr r w x map gpr spr enm des spo gpo sig sigp wt ins mj mp mt ap ms";
-
-bool HasRights(zx_rights_t rights, zx_rights_t desired) { return (rights & desired) == desired; }
-
-void FormatHandleRightsMask(zx_rights_t rights, char* buf, size_t buf_len) {
-  snprintf(buf, buf_len,
-           "%3d %2d %1d %1d %1d %3d %3d %3d %3d %3d %3d %3d %3d %4d %2d %3d %2d %2d %2d %2d %2d",
-           HasRights(rights, ZX_RIGHT_DUPLICATE), HasRights(rights, ZX_RIGHT_TRANSFER),
-           HasRights(rights, ZX_RIGHT_READ), HasRights(rights, ZX_RIGHT_WRITE),
-           HasRights(rights, ZX_RIGHT_EXECUTE), HasRights(rights, ZX_RIGHT_MAP),
-           HasRights(rights, ZX_RIGHT_GET_PROPERTY), HasRights(rights, ZX_RIGHT_SET_PROPERTY),
-           HasRights(rights, ZX_RIGHT_ENUMERATE), HasRights(rights, ZX_RIGHT_DESTROY),
-           HasRights(rights, ZX_RIGHT_SET_POLICY), HasRights(rights, ZX_RIGHT_GET_POLICY),
-           HasRights(rights, ZX_RIGHT_SIGNAL), HasRights(rights, ZX_RIGHT_SIGNAL_PEER),
-           HasRights(rights, ZX_RIGHT_WAIT), HasRights(rights, ZX_RIGHT_INSPECT),
-           HasRights(rights, ZX_RIGHT_MANAGE_JOB), HasRights(rights, ZX_RIGHT_MANAGE_PROCESS),
-           HasRights(rights, ZX_RIGHT_MANAGE_THREAD), HasRights(rights, ZX_RIGHT_APPLY_PROFILE),
-           HasRights(rights, ZX_RIGHT_MANAGE_SOCKET));
-}
-
-void DumpProcessHandles(zx_koid_t id) {
-  auto pd = ProcessDispatcher::LookupProcessById(id);
-  if (!pd) {
-    printf("process %" PRIu64 " not found!\n", id);
-    return;
-  }
-
-  char pname[ZX_MAX_NAME_LEN];
-  [[maybe_unused]] zx_status_t status = pd->get_name(pname);
-  DEBUG_ASSERT(status == ZX_OK);
-  printf("process %" PRIu64 " ('%s') handles:\n", id, pname);
-  printf("%7s %10s %10s: {%s} [type]\n", "koid", "handle", "rights", kRightsHeader);
-
-  uint32_t total = 0;
-  pd->handle_table().ForEachHandle(
-      [&](zx_handle_t handle, zx_rights_t rights, const Dispatcher* disp) {
-        char rights_mask[sizeof(kRightsHeader)];
-        FormatHandleRightsMask(rights, rights_mask, sizeof(rights_mask));
-        printf("%7" PRIu64 " %#10x %#10x: {%s} [%s]\n", disp->get_koid(), handle, rights,
-               rights_mask, ObjectTypeToString(disp->get_type()));
-        ++total;
-        return ZX_OK;
-      });
-  printf("total: %u handles\n", total);
-}
-
-}  // namespace
-
-void DumpHandlesForKoid(zx_koid_t id) {
-  if (id < ZX_KOID_FIRST) {
-    printf("invalid koid, non-reserved koids start at %" PRIu64 "\n", ZX_KOID_FIRST);
-    return;
-  }
-
-  // Wrapper type to let us build a linked list of all child processes.
-  struct ProcessNode : fbl::SinglyLinkedListable<ktl::unique_ptr<ProcessNode>> {
-    fbl::RefPtr<ProcessDispatcher> proc;
-  };
-  fbl::SinglyLinkedList<ktl::unique_ptr<ProcessNode>> procs;
-
-  bool alloc_failed = false;
-  // Enumerate all the children and build the linked list of all processes. This lets us separate
-  // the enumeration of the children, which requires holding the job dispatcher lock, with the
-  // iteration of the handles, which requires holding the handle table lock. Specifically it ensures
-  // we do not take the locks in the order JobDispatcher->HandleTable, as this is invalid.
-  auto find_processes = MakeProcessWalker([&](ProcessDispatcher* process) {
-    fbl::AllocChecker ac;
-    ktl::unique_ptr<ProcessNode> p = ktl::make_unique<ProcessNode>(&ac);
-    if (ac.check()) {
-      p->proc = fbl::RefPtr(process);
-      procs.push_front(ktl::move(p));
-    } else {
-      alloc_failed = true;
-    }
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&find_processes);
-
-  if (alloc_failed) {
-    printf("WARNING: Allocation failure, search has been truncated\n");
-  }
-
-  uint32_t total_proc = 0;
-  uint32_t total_handles = 0;
-
-  // Inspect all the handle tables of the processes we previously found.
-  for (auto& proc : procs) {
-    bool found_handle = false;
-    proc.proc->handle_table().ForEachHandle([&](zx_handle_t handle, zx_rights_t rights,
-                                                const Dispatcher* disp) {
-      if (disp->get_koid() != id) {
-        return ZX_OK;
-      }
-
-      if (total_handles == 0) {
-        printf("handles for koid %" PRIu64 " (%s):\n", id, ObjectTypeToString(disp->get_type()));
-        printf("%7s %10s: {%s} [name]\n", "pid", "rights", kRightsHeader);
-      }
-
-      char pname[ZX_MAX_NAME_LEN];
-      char rights_mask[sizeof(kRightsHeader)];
-      [[maybe_unused]] zx_status_t status = proc.proc->get_name(pname);
-      DEBUG_ASSERT(status == ZX_OK);
-      FormatHandleRightsMask(rights, rights_mask, sizeof(rights_mask));
-      printf("%7" PRIu64 " %#10x: {%s} [%s]\n", proc.proc->get_koid(), rights, rights_mask, pname);
-
-      ++total_handles;
-      found_handle = true;
-      return ZX_OK;
-    });
-    total_proc += found_handle;
-  }
-  if (total_handles > 0) {
-    printf("total: %u handles in %u processes\n", total_handles, total_proc);
-  } else {
-    printf("no handles found for koid %" PRIu64 "\n", id);
-  }
-}
-
-void ktrace_report_live_processes() {
-  // PID 0 refers to the kernel.
-  KTRACE_KERNEL_OBJECT_ALWAYS(/* koid */ 0, ZX_OBJ_TYPE_PROCESS, "kernel",
-                              ("job", ktrace::Koid(0)));
-
-  auto walker = MakeProcessWalker([](ProcessDispatcher* process) {
-    char name[ZX_MAX_NAME_LEN];
-    [[maybe_unused]] zx_status_t status = process->get_name(name);
-    DEBUG_ASSERT(status == ZX_OK);
-    KTRACE_KERNEL_OBJECT_ALWAYS(process->get_koid(), ZX_OBJ_TYPE_PROCESS, name,
-                                ("job", ktrace::Koid(process->job()->get_koid())));
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
-}
-
-namespace {
 
 // Returns a string representation of VMO-related rights.
 constexpr size_t kRightsStrLen = 8;
@@ -641,23 +312,6 @@ void DumpOrphanedMappedVmos(pretty::SizeUnit format_unit) {
   }
 }
 
-// Dumps VMOs under a VmAspace.
-class AspaceVmoDumper final : public VmEnumerator {
- public:
-  explicit AspaceVmoDumper(pretty::SizeUnit format_unit) : format_unit_(format_unit) {}
-  zx_status_t OnVmMapping(VmMapping* map, VmAddressRegion* vmar, uint depth,
-                          Guard<CriticalMutex>&) final TA_REQ(map->lock()) TA_REQ(vmar->lock()) {
-    auto vmo = map->vmo_locked();
-    DumpVmObject(*vmo, format_unit_, ZX_HANDLE_INVALID,
-                 /* rights */ 0u,
-                 /* koid */ vmo->user_id());
-    return ZX_ERR_NEXT;
-  }
-
- private:
-  pretty::SizeUnit format_unit_;
-};
-
 // Dumps all VMOs associated with a process.
 void DumpProcessVmObjects(zx_koid_t id, pretty::SizeUnit format_unit) {
   auto pd = ProcessDispatcher::LookupProcessById(id);
@@ -701,8 +355,7 @@ void DumpProcessVmObjects(zx_koid_t id, pretty::SizeUnit format_unit) {
   // Call DumpVmObject() on all VMOs under the process's VmAspace.
   printf("Mapped VMOs:\n");
   PrintVmoDumpHeader(/* handles */ false);
-  AspaceVmoDumper avd(format_unit);
-  pd->EnumerateAspaceChildren(&avd);
+  rust_diagnostics_dump_aspace_vm_objects(*pd, static_cast<char>(format_unit));
   PrintVmoDumpHeader(/* handles */ false);
 }
 
@@ -741,108 +394,9 @@ void DumpVmObjectCowTree(zx_koid_t id) {
   });
 }
 
-// Counts memory usage under a VmAspace.
-class VmCounter final : public VmEnumerator {
- public:
-  zx_status_t OnVmMapping(VmMapping* map, VmAddressRegion* vmar, uint depth,
-                          Guard<CriticalMutex>& guard) TA_REQ(map->lock())
-      TA_REQ(vmar->lock()) override {
-    const size_t map_size = map->size();
-    const uint64_t object_offset = map->object_offset();
-    fbl::RefPtr<VmObject> vmo = map->vmo_locked();
-
-    guard.CallUnlocked([this, &vmo, map_size, object_offset]() {
-      usage.mapped_bytes += map_size;
-
-      const VmObject::AttributionCounts counts =
-          vmo->GetAttributedMemoryInRange(object_offset, map_size);
-      const uint32_t share_count = vmo->share_count();
-      // Portions of the VMO itself may have sharing via copy-on-write and so, regardless of how
-      // many aspaces it is mapped into (represented by share_count), it may have a mix of reported
-      // private and non private bytes. At this point we can only perform approximations as we only
-      // have an aggregate VMO aspace sharing factor, and aggregate counts, with no ability to
-      // precisely know what portions of the private and shared vmo bytes are actually part of what
-      // level of aspace sharing.
-      // The approximation chosen here is to consider any shared bytes as shared, even if this
-      // specific VMO does not have other mappings, and to assume that if the VMO has multiple
-      // mappings that any private VMO bytes are actually shared.
-      if (share_count == 1) {
-        usage.private_bytes += counts.private_uncompressed_bytes;
-        usage.shared_bytes += counts.uncompressed_bytes - counts.private_uncompressed_bytes;
-        usage.scaled_shared_bytes +=
-            (counts.scaled_uncompressed_bytes - counts.private_uncompressed_bytes) / share_count;
-      } else {
-        usage.shared_bytes += counts.uncompressed_bytes;
-        usage.scaled_shared_bytes += counts.scaled_uncompressed_bytes / share_count;
-      }
-    });
-    return ZX_ERR_NEXT;
-  }
-
-  VmAspace::vm_usage_t usage = {};
-};
-
-}  // namespace
-
-zx_status_t VmAspace::GetMemoryUsage(vm_usage_t* usage) {
-  VmCounter vc;
-  fbl::RefPtr<VmAddressRegion> root_vmar = RootVmar();
-  if (!root_vmar) {
-    return ZX_ERR_INTERNAL;
-  }
-  if (root_vmar->EnumerateChildren(&vc) != ZX_OK) {
-    *usage = {};
-    return ZX_ERR_INTERNAL;
-  }
-  *usage = vc.usage;
-  return ZX_OK;
-}
-
-namespace {
-
-void DumpProcessAddressSpace(zx_koid_t id) {
-  auto pd = ProcessDispatcher::LookupProcessById(id);
-  if (!pd) {
-    printf("process %" PRIu64 " not found!\n", id);
-    return;
-  }
-
-  pd->DumpAspace(true);
-}
-
-// Prints (with the supplied prefix) the number of mapped, committed bytes for
-// each process in the system whose committed memory > |min_bytes|. Does not
-// take sharing into account, and does not count unmapped VMOs.
-void DumpProcessMemoryUsage(const char* prefix, size_t min_bytes) {
-  auto walker = MakeProcessWalker([&](ProcessDispatcher* process) {
-    VmObject::AttributionCounts counts = process->GetAttributedMemory();
-    if (counts.uncompressed_bytes >= min_bytes) {
-      char pname[ZX_MAX_NAME_LEN];
-      [[maybe_unused]] zx_status_t status = process->get_name(pname);
-      DEBUG_ASSERT(status == ZX_OK);
-      printf("%sproc %5" PRIu64 " %4zuM '%s'\n", prefix, process->get_koid(),
-             counts.uncompressed_bytes / MB, pname);
-    }
-  });
-  GetRootJobDispatcher()->EnumerateChildrenRecursive(&walker);
-}
-
 }  // namespace
 
 extern "C" {
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_process_handles(zx_koid_t id) { DumpProcessHandles(id); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_peer_dispatchers_by_koid(zx_obj_type_t type, zx_koid_t id) {
-  DumpPeerDispatchersByKoid(type, id);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_all_peer_dispatchers(zx_obj_type_t type) {
-  DumpAllPeerDispatchers(type);
-}
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_dump_all_vm_objects(bool hidden_only, char format_unit) {
@@ -868,14 +422,9 @@ FFI_ALWAYS_INLINE void cpp_dump_process_vm_objects(zx_koid_t id, char format_uni
 FFI_ALWAYS_INLINE void cpp_dump_vm_object_cow_tree(zx_koid_t id) { DumpVmObjectCowTree(id); }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_process_address_space(zx_koid_t id) { DumpProcessAddressSpace(id); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_process_memory_usage(const char* prefix, size_t min_bytes) {
-  DumpProcessMemoryUsage(prefix, min_bytes);
+FFI_ALWAYS_INLINE void cpp_dump_vm_object(const VmObject& vmo, char format_unit, zx_handle_t handle,
+                                          zx_rights_t rights, zx_koid_t koid) {
+  DumpVmObject(vmo, static_cast<pretty::SizeUnit>(format_unit), handle, rights, koid);
 }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_dump_handles_for_koid(zx_koid_t id) { DumpHandlesForKoid(id); }
 
 }  // extern "C"

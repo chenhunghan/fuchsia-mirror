@@ -2,10 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-shared_library("tee-client-api") {
-  public_deps = [ ":tee-client-api-static" ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -54,10 +50,24 @@ source_set("tee-client-api-static") {
     "//sdk/lib/fidl",
     "//zircon/system/ulib/zx",
   ]
+  visibility = [ ":*" ]
+  public_deps = [ ":tee-client-api-headers" ]
+}
+
+shared_library("tee-client-api") {
+  public_deps = [ ":tee-client-api-headers" ]
   visibility = [
     ":*",
+    "//src/devices/bin/driver_manager:*",
+    "//src/devices/tee/bin:*",
+    "//src/media/codec/examples/use_media_decoder:*",
+    "//src/media/drivers/amlogic_decoder:*",
+    "//src/security/bin/kms:*",
+    "//src/security/bin/tee_manager:*",
+    "//src/security/lib/kms-stateless:*",
     "//src/security/lib/tee/rust:*",
     "//src/sys/pkg/bin/system-update-configurator:*",
+    "//vendor/google/*",
   ]
-  public_deps = [ ":tee-client-api-headers" ]
+  deps = [ ":tee-client-api-static" ]
 }

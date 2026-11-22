@@ -71,7 +71,6 @@ rustc_library(
 
 fx_unittest_package(
     name = "diagnostics-data-tests",
-    package_name = "diagnostics-data-tests",
     unit_tests = [":lib_test"],
     visibility = ["//visibility:public"],
 )

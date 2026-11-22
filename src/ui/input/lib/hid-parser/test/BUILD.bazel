@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":hid-parser-package"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "hid-parser",
+    srcs = [
+        "hid-descriptor-test.cc",
+        "hid-helper-test.cc",
+        "hid-parser-test.cc",
+        "hid-report-data.h",
+        "hid-units-test.cc",
+        "hid-utest-data.cc",
+        "util.h",
+    ],
+    gn_output_name = "hid-parser-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/ui/input/lib/hid",
+        "//src/ui/input/lib/hid-parser",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "hid-parser-package",
+    package_name = "hid-parser-test",
+    unit_tests = [":hid-parser"],
+)

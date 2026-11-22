@@ -49,28 +49,38 @@ void MsdArmBuffer::RemoveMapping(GpuMapping* mapping) {
   gpu_mappings_.erase(mapping);
 }
 
-bool MsdArmBuffer::SetCommittedPages(uint64_t start_page, uint64_t page_count) {
-  const size_t page_size = zx_system_get_page_size();
-  if ((start_page + page_count) * page_size > platform_buffer()->size())
+bool MsdArmBuffer::ValidatePageRange(uint64_t start_page, uint64_t page_count) const {
+  const uint64_t buffer_page_count = platform_buf_->size() / zx_system_get_page_size();
+  if (start_page > buffer_page_count || page_count > buffer_page_count - start_page) {
     return DRETF(false, "invalid parameters start_page %lu page_count %lu", start_page, page_count);
+  }
+  return true;
+}
+
+bool MsdArmBuffer::SetCommittedPages(uint64_t start_page, uint64_t page_count) {
+  if (!ValidatePageRange(start_page, page_count)) {
+    return false;
+  }
 
   committed_region_ = Region::FromStartAndLength(start_page, page_count);
   return true;
 }
 
 bool MsdArmBuffer::CommitPageRange(uint64_t start_page, uint64_t page_count) {
-  const size_t page_size = zx_system_get_page_size();
-  if ((start_page + page_count) * page_size > platform_buffer()->size())
-    return DRETF(false, "invalid parameters start_page %lu page_count %lu", start_page, page_count);
+  if (!ValidatePageRange(start_page, page_count)) {
+    return false;
+  }
 
   committed_region_.Union(Region::FromStartAndLength(start_page, page_count));
   return true;
 }
 
 bool MsdArmBuffer::DecommitPageRange(uint64_t start_page, uint64_t page_count) {
-  [[maybe_unused]] const size_t page_size = zx_system_get_page_size();
-  DASSERT((start_page + page_count) * page_size <= platform_buffer()->size());
+  if (!ValidatePageRange(start_page, page_count)) {
+    return false;
+  }
 
+  const size_t page_size = zx_system_get_page_size();
   auto decommit_region = Region::FromStartAndLength(start_page, page_count);
   Region new_region(committed_region_);
   if (!new_region.Subtract(decommit_region)) {

@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/devicetree/devicetree.gni")
+import("//build/rust/rustc_binary.gni")
+
+dtb("test_devicetree_dtb") {
+  testonly = true
+  sources = [ "test_devicetree.dts" ]
+}
+
+resource("test_devicetree_resource") {
+  testonly = true
+  sources = get_target_outputs(":test_devicetree_dtb")
+  outputs = [ "data/test_devicetree.dtb" ]
+  deps = [ ":test_devicetree_dtb" ]
+}
+
+rustc_binary("fake_boot_items_bin") {
+  testonly = true
+  edition = "2024"
+  output_name = "fake_boot_items"
+  source_root = "fake_boot_items.rs"
+  sources = [ "fake_boot_items.rs" ]
+  deps = [
+    "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
+    "//sdk/rust/zbi",
+    "//sdk/rust/zx",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-component",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+fuchsia_component("fake_boot_items") {
+  testonly = true
+  manifest = "meta/fake_boot_items.cml"
+  deps = [
+    ":fake_boot_items_bin",
+    ":test_devicetree_resource",
+  ]
+}

@@ -55,16 +55,22 @@ const STALLED_FAST_DRIVER_HEALTH_CHECK_TIMEOUT: MonotonicDuration =
 
 /// Implement this trait if you'd like to get notifications when the system is about to go into
 /// suspend and come out of resume.
+///
+/// When the driver is stopped, any `suspend` or `resume` future that is still in flight is
+/// cancelled (dropped at whichever `.await` it is suspended on) before [`Driver::stop`] is called,
+/// because `stop` takes the driver by value and so cannot run concurrently with a transition.
+/// Implementations of `stop` must therefore cope with being called after a transition was
+/// abandoned partway through.
 pub trait SuspendableDriver: Driver {
     /// Called prior the system entering suspend. The system is not guaranteed to enter suspend,
     /// but `resume` will be called regardless before a subsequent suspension attempt occurs.
-    fn suspend(&self) -> impl Future<Output = ()> + Send;
+    fn suspend(&self) -> impl Future<Output = ()>;
 
     /// Called after `suspend` to indicate the system is no longer in suspend. The system may not
     /// have actually entered suspension in between `suspend` and `resume` invocations. NOTE: there
     /// is no initial call to `resume`; drivers are expected to start in a non-suspended state and
     /// `resume` will only be called after `suspend`.
-    fn resume(&self) -> impl Future<Output = ()> + Send;
+    fn resume(&self) -> impl Future<Output = ()>;
 
     /// Returns whether or not suspend is enabled. If false is returned, suspend and resume methods
     /// will never be called.
@@ -93,6 +99,9 @@ struct ActiveStallGuard<'a> {
 
 impl Drop for ActiveStallGuard<'_> {
     fn drop(&mut self) {
+        // The guard is dropped without completing when `Suspendable::stop` cancels the transition.
+        // `stopping` is set before that happens, so the latched stall condition is left in place
+        // instead of being cleared during teardown.
         self.watchdog.stalled.store(false, Ordering::Release);
         if !self.completed && !self.watchdog.stopping.load(Ordering::Acquire) {
             self.watchdog.health_latch.clear(POWER_TRANSITION_STALLED_REASON_CODE);
@@ -121,15 +130,6 @@ impl TransitionWatchdog {
         match select(transition_fut.as_mut(), timer).await {
             Either::Left(((), _timer)) => {}
             Either::Right(((), remaining_transition)) => {
-                // Why: The lifecycle server closes the health-alert reporter before calling
-                // `Suspendable::stop`, so outbound alert messages are already suppressed; checking
-                // `stopping` avoids mutating `HealthAlertLatch` or its `HealthCheckInspect` mirror
-                // while the driver is tearing down.
-                if self.stopping.load(Ordering::Acquire) {
-                    remaining_transition.await;
-                    return;
-                }
-
                 let timeout_ms = timeout.into_millis();
                 self.stalled.store(true, Ordering::Release);
                 let mut guard = ActiveStallGuard { watchdog: self, completed: false };
@@ -159,13 +159,6 @@ impl TransitionWatchdog {
                 guard.completed = true;
                 drop(guard);
 
-                // Why: The lifecycle server has already closed the health-alert reporter before
-                // `Suspendable::stop`, so checking `stopping` avoids recording a stale clear on
-                // `HealthAlertLatch` or its `HealthCheckInspect` mirror during teardown.
-                if self.stopping.load(Ordering::Acquire) {
-                    return;
-                }
-
                 self.health_latch.clear(POWER_TRANSITION_STALLED_REASON_CODE);
             }
         }
@@ -174,8 +167,11 @@ impl TransitionWatchdog {
 
 /// Wrapper trait to indicate the driver supports power operations.
 pub struct Suspendable<T: Driver> {
-    #[expect(unused)]
+    /// Runs the suspend tasks. Cancelled when the driver stops.
     scope: Option<fasync::Scope>,
+    /// Shared with the suspend tasks. They are spawned with `spawn_local` on the driver's
+    /// single-threaded executor, so `T` does not need to be `Send` or `Sync`. This is an `Arc`
+    /// rather than an `Rc` so that `Suspendable<T>` is still `Send` and `Sync` when `T` is.
     driver: Arc<T>,
     health_latch: HealthAlertLatch,
     stalled: Arc<AtomicBool>,
@@ -247,7 +243,7 @@ async fn run_element_runner<T: SuspendableDriver>(
     }
 }
 
-impl<T: SuspendableDriver + Send + Sync> Driver for Suspendable<T> {
+impl<T: SuspendableDriver> Driver for Suspendable<T> {
     const NAME: &str = T::NAME;
 
     async fn start(mut context: DriverContext) -> Result<Self, DriverError> {
@@ -288,7 +284,7 @@ impl<T: SuspendableDriver + Send + Sync> Driver for Suspendable<T> {
                 let runner = fidl::endpoints::ServerEnd::<fpower_broker::ElementRunnerMarker>::new(
                     runner.into_untyped(),
                 );
-                scope.spawn(async move {
+                scope.spawn_local(async move {
                     run_element_runner(weak_driver, watchdog, runner.into_stream()).await
                 });
             } else {
@@ -318,7 +314,7 @@ impl<T: SuspendableDriver + Send + Sync> Driver for Suspendable<T> {
                         Status::INTERNAL
                     })?;
 
-                scope.spawn(async move {
+                scope.spawn_local(async move {
                     run_suspend_blocker(weak_driver, watchdog, server.into_stream()).await
                 });
             }
@@ -330,9 +326,19 @@ impl<T: SuspendableDriver + Send + Sync> Driver for Suspendable<T> {
         Ok(Self { driver, scope, health_latch, stalled, stopping })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
+        // Set `stopping` before cancelling the suspend tasks, so that a stalled transition that is
+        // cancelled leaves its latched stall condition in place (see `ActiveStallGuard`).
         self.stopping.store(true, Ordering::Release);
-        self.driver.stop().await;
+        // The suspend tasks hold weak references to the driver and upgrade them while a power
+        // transition is in flight. Cancel them, abandoning any in-flight transition, so that this
+        // holds the only reference and can hand the driver to `stop` by value.
+        if let Some(scope) = self.scope {
+            scope.cancel().await;
+        }
+        let driver = Arc::into_inner(self.driver)
+            .expect("no other references to the driver remain when it is stopped");
+        driver.stop().await;
     }
 
     /// Forwards `request` to the wrapped driver and merges any active conditions from the shared
@@ -480,7 +486,7 @@ mod tests {
             })
         }
 
-        async fn stop(&self) {
+        async fn stop(self) {
             self.stop_called.store(true, Ordering::SeqCst);
             if let Some(entered_tx) = self.on_stop_entered.lock().take() {
                 let _ = entered_tx.send(());
@@ -557,6 +563,62 @@ mod tests {
         fn power_transition_stall_timeout(&self) -> Option<MonotonicDuration> {
             *self.stall_timeout.lock()
         }
+    }
+
+    /// A suspendable driver that is neither `Send` nor `Sync`.
+    struct LocalDriver {
+        transitions: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl Driver for LocalDriver {
+        const NAME: &str = "local_driver";
+
+        async fn start(_context: DriverContext) -> Result<Self, DriverError> {
+            Ok(Self { transitions: Default::default() })
+        }
+
+        async fn stop(self) {}
+    }
+
+    impl SuspendableDriver for LocalDriver {
+        async fn suspend(&self) {
+            self.transitions.set(self.transitions.get() + 1);
+        }
+
+        async fn resume(&self) {
+            self.transitions.set(self.transitions.get() + 1);
+        }
+
+        fn suspend_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_suspendable_does_not_require_send_or_sync() {
+        let (runner_client, runner_server) =
+            fidl::endpoints::create_endpoints::<fpower_broker::ElementRunnerMarker>();
+        let mut harness = TestHarness::<Suspendable<LocalDriver>>::new().set_power_element_args(
+            fdf::PowerElementArgs {
+                runner_server: Some(fidl_next::ServerEnd::from_untyped(
+                    runner_server.into_channel(),
+                )),
+                ..Default::default()
+            },
+        );
+        let driver_under_test = harness.start_driver().await.expect("Failed to start driver");
+
+        let runner = runner_client.into_proxy();
+        runner
+            .set_level(fhw_power::FrameworkElementLevels::On.into_primitive() as u8)
+            .await
+            .unwrap();
+        runner
+            .set_level(fhw_power::FrameworkElementLevels::Off.into_primitive() as u8)
+            .await
+            .unwrap();
+
+        driver_under_test.stop_driver().await;
     }
 
     #[fuchsia::test]
@@ -1123,7 +1185,7 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn test_stop_during_stall_preserves_latched_state_without_clearing() {
+    async fn test_stop_during_stall_cancels_transition_and_preserves_latched_state() {
         let (runner_client, runner_server) =
             fidl::endpoints::create_endpoints::<fpower_broker::ElementRunnerMarker>();
         let mut harness = TestHarness::<Suspendable<TestDriver>>::new().set_power_element_args(
@@ -1151,19 +1213,18 @@ mod tests {
         runner_proxy.set_level(1).await.expect("set level 1");
 
         let scope = fasync::Scope::new();
-        let set_level_task = scope.compute(async move {
-            let _ = runner_proxy.set_level(0).await;
-        });
+        let set_level_task = scope.compute(async move { runner_proxy.set_level(0).await });
 
         let _stall_alert = driver_under_test.next_health_alert().await.expect("stall alert");
 
-        // Stop the driver while the stall is active; once `Suspendable::stop` has set `stopping`
-        // and entered `TestDriver::stop`, unblock the transition so it completes during teardown
-        // without clearing the latch.
+        // Stop the driver while the stall is active. `Suspendable::stop` cancels the stalled
+        // transition before `TestDriver::stop` runs, so by the time `stop` is entered the suspend
+        // future, and with it the receiver it was blocked on, has been dropped.
         futures::future::join(driver_under_test.stop_driver(), async move {
-            let _ = stop_entered_rx.await;
-            let _ = unblock_tx.send(());
-            set_level_task.await;
+            stop_entered_rx.await.expect("TestDriver::stop should be entered");
+            assert!(unblock_tx.is_canceled(), "stalled suspend should be cancelled before stop");
+            // The element runner task was cancelled too, so the pending SetLevel fails.
+            assert!(set_level_task.await.is_err());
             let _ = stop_unblock_tx.send(());
         })
         .await;

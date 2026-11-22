@@ -12,7 +12,7 @@
 namespace zxdb {
 
 DwarfDieScanner::DwarfDieScanner(const DwarfUnit& unit) : unit_(unit) {
-  die_count_ = unit_.GetDieCount();
+  die_count_ = static_cast<uint32_t>(unit_.GetDieCount());
 
   // We prefer not to reallocate and normally the C++ component depth is < 8.
   tree_stack_.reserve(8);

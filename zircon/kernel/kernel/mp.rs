@@ -21,13 +21,14 @@ use crate::arch_rs::{
 };
 use crate::kconcurrent::{IRQ_SAVE_OPTION, clt_tag, single_chain_lock_guard_owned};
 use crate::lockup_detector::{
-    can_dump_registers_and_backtrace, dump_registers_and_backtrace_stdout, lockup_percpu_shutdown,
+    can_dump_registers_and_backtrace, dump_registers_and_backtrace, lockup_percpu_shutdown,
 };
 use crate::platform_rs::power::{
     PanicStartHaltOtherCpus, PlatformHaltAction, ZirconCrashReason, platform_halt,
     platform_panic_start_with_option,
 };
 use crate::platform_rs::timer::{DurationMono, InstantMono};
+use core::convert::Infallible;
 use core::ffi::c_void;
 use core::fmt::Write as _;
 use core::mem::MaybeUninit;
@@ -36,8 +37,9 @@ use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use debug::ltracef;
 use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, StringBuffer};
-use ksync::{KCell, LockToken};
-use lazy_init::LazyInit;
+use ksync::{KCell, KMutex, KMutexGuard, LockToken};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::{PinInit, pin_init};
 
 pub use super::types::{cpu_mask_t, cpu_num_t};
 use zx_status::Status;
@@ -123,6 +125,14 @@ pub struct AutounsignalMpUnplugEvent(
 unsafe impl Sync for AutounsignalMpUnplugEvent {}
 
 impl AutounsignalMpUnplugEvent {
+    /// Constructs a default `AutounsignalMpUnplugEvent` in place.
+    #[inline]
+    pub fn init() -> impl pin_init::PinInit<Self, core::convert::Infallible> {
+        // SAFETY: `cpp_autounsignal_mp_unplug_event_init` placement-constructs a valid
+        // `AutounsignalMpUnplugEvent` in place in the provided uninitialized slot.
+        zr::pin_init_ffi!(cpp_autounsignal_mp_unplug_event_init)
+    }
+
     /// Returns a mutable raw pointer to the underlying C++ `MpUnplugEvent` base subobject.
     #[inline]
     pub fn as_raw_mut(&self) -> *mut MpUnplugEvent {
@@ -177,7 +187,20 @@ impl AutounsignalMpUnplugEvent {
     }
 }
 
+impl Drop for AutounsignalMpUnplugEvent {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: `self` holds an initialized C++ `AutounsignalMpUnplugEvent` being destroyed
+        // exactly once with exclusive access.
+        unsafe { cpp_autounsignal_mp_unplug_event_destroy(self.0.get().cast()) };
+    }
+}
+
 unsafe extern "C" {
+    /// Placement-constructs an `AutounsignalMpUnplugEvent` in uninitialized storage.
+    fn cpp_autounsignal_mp_unplug_event_init(out: *mut MaybeUninit<AutounsignalMpUnplugEvent>);
+    /// Runs the C++ destructor for an initialized `AutounsignalMpUnplugEvent`.
+    fn cpp_autounsignal_mp_unplug_event_destroy(event: *mut AutounsignalMpUnplugEvent);
     fn cpp_mp_unplug_event_signal(event: *mut MpUnplugEvent);
     /// Clears any pending signal on `event`.
     fn cpp_mp_unplug_event_unsignal(event: *mut MpUnplugEvent) -> zx_status_t;
@@ -252,8 +275,32 @@ impl MpIpiTask {
 // `set_cpu_online` acquires this lock on secondary CPUs during bringup before per-CPU lockdep
 // state is initialized.
 ksync::declare_singleton_lock!(IpiTaskLock, crate::kernel::spinlock::SpinLock, cpu_align_exclusive,);
-// lock for serializing CPU hotplug/unplug operations
-crate::ksync_kernel::declare_singleton_mutex!(HotplugLock);
+#[ksync::guarded]
+pub struct HotplugMutex {
+    #[mutex]
+    lock: KMutex<crate::ksync_kernel::TrackedMutex>,
+}
+
+/// Lock for serializing CPU hotplug, unplug, and system-suspend CPU offline/online operations.
+pub type HotplugLock = HotplugMutexLockClass;
+
+static HOTPLUG_LOCK: LazyInit<HotplugMutex, NoCheck> = LazyInit::uninit();
+
+impl HotplugLock {
+    #[inline]
+    pub fn get() -> &'static KMutex<Self, crate::ksync_kernel::TrackedMutex> {
+        // SAFETY: `HOTPLUG_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` in
+        // `initialize_mp_state` before any CPU hotplug, unplug, or system-suspend operation can
+        // run.
+        &unsafe { HOTPLUG_LOCK.get_unchecked() }.lock
+    }
+
+    #[inline]
+    pub fn lock()
+    -> impl PinInit<KMutexGuard<'static, Self, crate::ksync_kernel::TrackedMutex>, Infallible> {
+        Self::get().lock()
+    }
+}
 
 // Global mp state to track what the cpus are up to.
 #[repr(C)]
@@ -306,14 +353,16 @@ fn initialize_mp_state(_level: init::LkInitLevel) {
             pin_init::pin_init_array_from_fn(|_| DoublyLinkedList::new()),
         ));
         let _ = Pin::static_ref(&MP.ready_cpu_event).init_pin(Event::init_unsignaled());
+        let Ok(()) = Pin::static_ref(&HOTPLUG_LOCK)
+            .init_pin(pin_init!(HotplugMutex { lock <- KMutex::init() }));
     }
 }
 
 init::lk_init_hook!(mp_early_init, initialize_mp_state, init::LK_INIT_LEVEL_EARLIEST);
 
-/// Converts a CPU ID to a CPU bitmask.
+/// Converts a CPU ID to a CPU bitmask, or 0 if `cpu` is not a valid CPU number.
 pub const fn cpu_num_to_mask(cpu: cpu_num_t) -> cpu_mask_t {
-    if cpu < cpu_mask_t::BITS { 1 << cpu } else { 0 }
+    super::types::cpu_num_to_mask(cpu)
 }
 
 /// Tracks if a CPU is online and initialized.
@@ -428,6 +477,9 @@ pub fn init() {}
 
 /// Trigger reschedules on other CPUs. Used mostly by inner threading
 /// and scheduler logic.
+// Out of line: inlining into `Scheduler::reschedule_common` and `Scheduler::reschedule_mask`
+// causes register spills on x64.
+#[inline(never)]
 pub fn reschedule(mut mask: cpu_mask_t, _flags: u32) {
     debug_assert!(ints_disabled());
 
@@ -727,9 +779,12 @@ pub unsafe fn unplug_current_cpu() -> ! {
         debug_assert!(guard.proof().owned_wait_queues().is_empty());
     }
 
-    // SAFETY: The caller guarantees interrupts are disabled on the calling CPU.
-    unsafe { crate::thread_sampler::sampler_percpu_shutdown() };
-    lockup_percpu_shutdown();
+    // SAFETY: The caller guarantees interrupts are disabled on the calling CPU (preventing
+    // migration) and `lockup_init` has completed.
+    unsafe {
+        crate::thread_sampler::sampler_percpu_shutdown();
+        lockup_percpu_shutdown();
+    }
     // SAFETY: `PerCpu::get_current().scheduler` is the current CPU's initialized scheduler (whose
     // fields are wrapped in `UnsafeCell`), and the caller upholds the interrupt-disabled and
     // lock-exclusion preconditions.
@@ -773,7 +828,7 @@ pub unsafe fn unplug_current_cpu() -> ! {
 /// This should be called in a thread context
 pub fn hotplug_cpu_mask(mut cpu_mask: cpu_mask_t) -> Result<(), Status> {
     debug_assert!(!ints_disabled());
-    ksync::lock!(let _lock = HotplugLock::lock());
+    ksync::lock!(let lock = HotplugLock::lock());
 
     // Make sure all of the requested CPUs are offline
     if (cpu_mask & get_online_mask()) != 0 {
@@ -784,9 +839,8 @@ pub fn hotplug_cpu_mask(mut cpu_mask: cpu_mask_t) -> Result<(), Status> {
         let cpu_id = highest_cpu_set(cpu_mask);
         cpu_mask &= !cpu_num_to_mask(cpu_id);
 
-        // SAFETY: `HotplugLock` serializes all hotplug and unplug operations, and `cpu_id` was
-        // verified offline above.
-        unsafe { platform_mp_cpu_hotplug(cpu_id) }?;
+        // SAFETY: `cpu_id` was verified offline under `HotplugLock` above.
+        unsafe { platform_mp_cpu_hotplug(cpu_id, lock.token()) }?;
     }
 
     Ok(())
@@ -950,7 +1004,9 @@ pub unsafe fn mbx_reschedule_irq() {
     stats::inc_reschedule_ipis();
 
     if scheduler::peek_is_active(cpu) {
-        thread::preempt_set_pending();
+        // Reusing `cpu` instead of reloading the current CPU number lets the compiler share
+        // `1 << cpu` with `peek_is_active`.
+        thread::preempt_set_pending_mask(cpu_num_to_mask(cpu));
     }
 }
 
@@ -966,10 +1022,14 @@ pub fn mbx_interrupt_irq() {
 ///
 /// # Safety
 ///
-/// The caller must serialize this with every other hotplug and unplug of `cpu_id`, and `cpu_id`
-/// must be fully stopped (not still booting and not partway through halting).
-pub unsafe fn platform_mp_cpu_hotplug(cpu_id: cpu_num_t) -> Result<(), Status> {
-    // SAFETY: Caller upholds the serialization and stopped-CPU preconditions.
+/// `cpu_id` must be fully stopped (not still booting and not partway through halting).
+pub unsafe fn platform_mp_cpu_hotplug(
+    cpu_id: cpu_num_t,
+    _token: &LockToken<'_, HotplugLock>,
+) -> Result<(), Status> {
+    // SAFETY: `_token` proves `HotplugLock` is held (serializing all hotplug, unplug, and
+    // system-suspend CPU offline/online operations), and the caller guarantees `cpu_id` is fully
+    // stopped.
     unsafe { crate::arch_rs::mp_cpu_hotplug(cpu_id) }
 }
 
@@ -1096,7 +1156,19 @@ fn mp_all_cpu_startup_sync_hook(_rl: init::LkInitLevel) {
             if target_cpu == INVALID_CPU {
                 break;
             }
-            if let Err(status) = dump_registers_and_backtrace_stdout(target_cpu) {
+            // SAFETY: `platform_panic_start_with_option` has disabled interrupts, so this CPU
+            // cannot migrate, and entered a terminal panic path. `target_cpu` was extracted from
+            // `expected_ready_mask` (`< max_num_cpus()`, `< SMP_MAX_CPUS`) and did not check into
+            // `ready_mask` (whereas the calling CPU did, so `target_cpu != curr_cpu_num()`), and
+            // `libc::stdio::stdout()` points to a `'static` `FILE` valid for the lifetime of the
+            // kernel. On `aarch64`, with interrupts disabled no current `Thread` is needed, and
+            // `target_cpu` is powered up: `dump_registers_and_backtrace` touches it only if
+            // `can_dump_registers_and_backtrace`, which is `arm64_dap_is_enabled`, and that means
+            // every CPU has started. Nothing unplugs or suspends a CPU until the kernel shell and
+            // user space start, after this level.
+            if let Err(status) =
+                unsafe { dump_registers_and_backtrace(target_cpu, libc::stdio::stdout()) }
+            {
                 kprint::kprintln!(
                     "failed to dump state for cpu-{}, status {}",
                     target_cpu,
@@ -1119,21 +1191,6 @@ init::lk_init_hook!(
 );
 
 // FFI exports for C++ callers in `mp_ffi.cc`.
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_mp_init() {
-    init();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_mp_reschedule(mask: cpu_mask_t, flags: u32) {
-    reschedule(mask, flags);
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_mp_reschedule_self() {
-    reschedule_self();
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_mp_interrupt(target: u8, mask: cpu_mask_t) {
@@ -1159,15 +1216,6 @@ pub extern "C" fn rust_mp_hotplug_cpu_mask(mask: cpu_mask_t) -> zx_status_t {
     Status::result_into_raw(hotplug_cpu_mask(mask))
 }
 
-/// # Safety
-///
-/// The caller must uphold the safety preconditions of [`unplug_current_cpu`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mp_unplug_current_cpu() -> ! {
-    // SAFETY: Caller upholds the safety requirements of `unplug_current_cpu`.
-    unsafe { unplug_current_cpu() }
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_mp_unplug_cpu_mask(
     mask: cpu_mask_t,
@@ -1176,69 +1224,9 @@ pub extern "C" fn rust_mp_unplug_cpu_mask(
     Status::result_into_raw(unplug_cpu_mask(mask, deadline))
 }
 
-/// # Safety
-///
-/// The caller must uphold the safety preconditions of [`mbx_reschedule_irq`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mp_mbx_reschedule_irq() {
-    // SAFETY: Caller upholds the safety requirements of `mbx_reschedule_irq`.
-    unsafe { mbx_reschedule_irq() };
-}
-
-/// # Safety
-///
-/// The caller must uphold the safety preconditions of [`mbx_generic_irq`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mp_mbx_generic_irq() {
-    // SAFETY: Caller upholds the safety requirements of `mbx_generic_irq`.
-    unsafe { mbx_generic_irq() };
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_mp_mbx_interrupt_irq() {
-    mbx_interrupt_irq();
-}
-
-/// # Safety
-///
-/// The caller must uphold the safety preconditions of [`set_cpu_online`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mp_set_cpu_online(cpu: cpu_num_t, online: bool) {
-    // SAFETY: The caller upholds the safety requirements of `set_cpu_online`.
-    unsafe { set_cpu_online(cpu, online) };
-}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_mp_get_online_mask() -> cpu_mask_t {
     get_online_mask()
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_mp_is_cpu_online(cpu: cpu_num_t) -> bool {
-    is_cpu_online(cpu)
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_mp_signal_curr_cpu_ready() {
-    signal_curr_cpu_ready();
-}
-
-/// # Safety
-///
-/// `deadline` must point to a valid [`Deadline`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mp_wait_for_all_cpus_ready(deadline: *const Deadline) -> zx_status_t {
-    // SAFETY: The caller guarantees `deadline` points to a valid `Deadline`.
-    Status::result_into_raw(wait_for_all_cpus_ready(unsafe { *deadline }))
-}
-
-/// # Safety
-///
-/// The caller must uphold the safety preconditions of [`platform_mp_cpu_hotplug`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_mp_cpu_hotplug(cpu_id: cpu_num_t) -> zx_status_t {
-    // SAFETY: Caller upholds the safety preconditions of `platform_mp_cpu_hotplug`.
-    Status::result_into_raw(unsafe { platform_mp_cpu_hotplug(cpu_id) })
 }
 
 /// # Safety
@@ -1344,13 +1332,14 @@ crate::console::static_command!(
 
 /// Kernel MP unit tests.
 #[cfg(ktest)]
-#[unittest::suite(name = "mp_rust")]
+#[unittest::suite(name = "mp")]
 mod tests {
     use crate::arch_rs::InterruptDisableGuard;
-    use crate::kernel::thread::preempt_is_enabled;
-    use crate::platform_rs::timer::InstantUnknown;
+    use crate::kernel::thread::{preempt_is_enabled, preempts_pending};
+    use crate::platform_rs::timer::{InstantUnknown, current_mono_time};
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-    use unittest::{assert_false, assert_true, subtest};
+    use kprint::kprintln;
+    use unittest::{assert_eq, assert_false, assert_true, subtest};
 
     /// Verifies querying online CPU mask and per-CPU online status.
     #[test]
@@ -1398,18 +1387,14 @@ mod tests {
         unittest::expect_ok!(status);
     }
 
-    // Verify that reschedule_self() ensures a preemption is pending (almost) immediately after
-    // re-enabling interrupts.
     /// mp_reschedule_self
     #[test]
     fn mp_reschedule_self() {
+        // Verify that reschedule_self() ensures a preemption is pending (almost) immediately after
+        // re-enabling interrupts.
         loop {
             let _apd = AutoPreemptDisabler::new();
             let local_mask = cpu_num_to_mask(curr_cpu_num());
-            let preempts_pending = || {
-                // SAFETY: `thread::current_get()` returns a valid pointer to the running thread.
-                unsafe { &*thread::current_get() }.preemption_state().preempts_pending()
-            };
             {
                 let _irqd = InterruptDisableGuard::new();
 
@@ -1423,16 +1408,16 @@ mod tests {
                 reschedule_self();
                 // We've just IPI'd our CPU.  However, interrupts are disabled so that IPI won't
                 // have resulted in a pending preemption just yet.
-                unittest::assert_eq!(0, local_mask & preempts_pending());
+                assert_eq!(0, local_mask & preempts_pending());
             }
             // We've just now re-enabled interrupts.  Either the IPI should have fired or it should
             // fire soon.
-            let mut last = crate::platform_rs::timer::current_mono_time();
+            let mut last = current_mono_time();
             while (local_mask & preempts_pending()) == 0 {
                 libarch::r#yield();
-                let now = crate::platform_rs::timer::current_mono_time();
+                let now = current_mono_time();
                 if now > last + DurationMono::from_seconds(5) {
-                    kprint::kprintln!("still waiting for preemption...");
+                    kprintln!("still waiting for preemption...");
                     last = now;
                 }
             }

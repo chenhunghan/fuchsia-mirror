@@ -13,6 +13,10 @@ fuchsia_driver_dml("dwc3-dml") {
   driver_name = "dwc3"
 }
 
+fuchsia_driver_dml_cpp_parser("dwc3-metadata") {
+  dml_label = ":dwc3-dml"
+}
+
 driver_bind_rules("dwc3_bind") {
   dml_label = ":dwc3-dml"
   bind_output = "dwc3.bindbc"
@@ -47,11 +51,13 @@ source_set("common") {
     "//build/config/fuchsia:enable_zircon_asserts",
   ]
   deps = [
+    "//sdk/lib/memory_barriers",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/devices/bind/fuchsia.designware.platform:fuchsia.designware.platform_cpp",
   ]
   public_deps = [
     ":dwc3-config",
+    ":dwc3-metadata",
     "//sdk/fidl/fuchsia.boot.metadata:fuchsia.boot.metadata_cpp",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_cpp",
@@ -101,7 +107,6 @@ fuchsia_component_manifest("dwc3-manifest") {
 }
 
 fuchsia_driver_component("dwc3") {
-  info = "meta/dwc3-info.json"
   cm_label = ":dwc3-manifest"
   deps = [
     ":dwc3-driver",
@@ -133,6 +138,7 @@ test("dwc3-test-bin") {
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/outgoing/cpp",
+    "//sdk/lib/driver/fake-bti/cpp",
     "//sdk/lib/driver/fake-clock/cpp",
     "//sdk/lib/driver/fake-platform-device/cpp",
     "//sdk/lib/driver/fake-reset/cpp",

@@ -73,9 +73,4 @@ struct cpu_stats {
     __atomic_fetch_add(&percpu::GetCurrent().gstats.name, 1u, __ATOMIC_RELAXED); \
   } while (0)
 
-#define CPU_STATS_INC(name)                                                     \
-  do {                                                                          \
-    __atomic_fetch_add(&percpu::GetCurrent().stats.name, 1u, __ATOMIC_RELAXED); \
-  } while (0)
-
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_STATS_H_

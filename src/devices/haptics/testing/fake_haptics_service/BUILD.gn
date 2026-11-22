@@ -9,11 +9,4 @@ import("//build/bazel/bazel_fuchsia_package.gni")
 bazel_fuchsia_package("package") {
   bazel_config = "fuchsia_platform"
   package_name = "fake_haptics_service"
-
-  # TODO(https://fxbug.dev/570694755): bazel_action pulls
-  # sysroot_for_fuchsia_platform without link_output_barrier while
-  # zxdb_e2e_symbols walks starnix_test_subpackages.
-  metadata = {
-    link_output_barrier = []
-  }
 }

@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
       "data": "test.protocollayouts",
       "start_offset": 8,
       "end_offset": 28
@@ -14,7 +14,7 @@
       "library_name": "test.protocollayouts.imported",
       "referenced_at": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
         "data": "test.protocollayouts.imported",
         "start_offset": 37,
         "end_offset": 66
@@ -26,7 +26,7 @@
       "library_name": "test.protocollayouts.imported",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "test.protocollayouts.imported",
         "start_offset": 8,
         "end_offset": 37
@@ -38,7 +38,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolFlexibleEventRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1288,
         "end_offset": 1323
@@ -48,7 +48,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolFlexibleOneWayRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 978,
         "end_offset": 1013
@@ -58,7 +58,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolFlexibleTwoWayNoErrorRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1051,
         "end_offset": 1086
@@ -68,7 +68,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolFlexibleTwoWayWithErrorRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1167,
         "end_offset": 1202
@@ -78,7 +78,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolStrictEventRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1649,
         "end_offset": 1684
@@ -88,7 +88,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolStrictOneWayRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1351,
         "end_offset": 1386
@@ -98,7 +98,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolStrictTwoWayNoErrorRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1420,
         "end_offset": 1455
@@ -108,7 +108,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolStrictTwoWayNoErrorResponse",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1461,
         "end_offset": 1496
@@ -118,7 +118,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocolStrictTwoWayWithErrorRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1532,
         "end_offset": 1567
@@ -128,7 +128,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol_FlexibleTwoWayNoError_Response",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1092,
         "end_offset": 1127
@@ -138,7 +138,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol_FlexibleTwoWayWithError_Response",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1208,
         "end_offset": 1243
@@ -148,7 +148,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol_StrictTwoWayWithError_Response",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "struct {\n        value int32;\n    }",
         "start_offset": 1573,
         "end_offset": 1608
@@ -158,7 +158,7 @@
       "identifier": "test.protocollayouts.imported/ImportStructPayload",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "ImportStructPayload",
         "start_offset": 861,
         "end_offset": 880
@@ -168,7 +168,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "ComposedOpenProtocol",
         "start_offset": 927,
         "end_offset": 947
@@ -178,7 +178,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "ComposedProtocol",
         "start_offset": 171,
         "end_offset": 187
@@ -188,7 +188,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol_FlexibleTwoWayNoError_Result",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "(struct {\n        value int32;\n    })",
         "start_offset": 1091,
         "end_offset": 1128
@@ -198,7 +198,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol_FlexibleTwoWayWithError_Result",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "(struct {\n        value int32;\n    })",
         "start_offset": 1207,
         "end_offset": 1244
@@ -208,7 +208,7 @@
       "identifier": "test.protocollayouts.imported/ComposedOpenProtocol_StrictTwoWayWithError_Result",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "(struct {\n        value int32;\n    })",
         "start_offset": 1572,
         "end_offset": 1609
@@ -218,7 +218,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocolOnAnonComposedRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "strict union {\n        1: b bool;\n    }",
         "start_offset": 532,
         "end_offset": 571
@@ -228,7 +228,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocolTwoWayAnonComposedRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "strict union {\n        1: b bool;\n    }",
         "start_offset": 287,
         "end_offset": 326
@@ -238,7 +238,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocol_TwoWayAnonComposedWithError_Response",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "strict union {\n        1: b bool;\n    }",
         "start_offset": 448,
         "end_offset": 487
@@ -248,7 +248,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocol_TwoWayAnonComposedWithError_Result",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "(strict union {\n        1: b bool;\n    })",
         "start_offset": 447,
         "end_offset": 488
@@ -258,7 +258,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocol_TwoWayNamedComposedWithError_Result",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "(ImportUnionPayload)",
         "start_offset": 766,
         "end_offset": 786
@@ -268,7 +268,7 @@
       "identifier": "test.protocollayouts.imported/ImportUnionPayload",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "ImportUnionPayload",
         "start_offset": 100,
         "end_offset": 118
@@ -278,7 +278,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocolOneWayAnonComposedRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "table {\n        1: a uint16;\n    }",
         "start_offset": 220,
         "end_offset": 254
@@ -288,7 +288,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocolTwoWayAnonComposedResponse",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "table {\n        1: a uint16;\n    }",
         "start_offset": 332,
         "end_offset": 366
@@ -298,7 +298,7 @@
       "identifier": "test.protocollayouts.imported/ComposedProtocolTwoWayAnonComposedWithErrorRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "table {\n        1: a uint16;\n    }",
         "start_offset": 408,
         "end_offset": 442
@@ -308,7 +308,7 @@
       "identifier": "test.protocollayouts.imported/ImportTablePayload",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
         "data": "ImportTablePayload",
         "start_offset": 45,
         "end_offset": 63
@@ -323,7 +323,7 @@
       "identifier": "test.protocollayouts/LocalUnionPayload",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
         "data": "LocalUnionPayload",
         "start_offset": 135,
         "end_offset": 152
@@ -334,7 +334,7 @@
           "name": "b",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "b",
             "start_offset": 179,
             "end_offset": 180
@@ -353,7 +353,7 @@
           "name": "b",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "b",
             "start_offset": 1371,
             "end_offset": 1372
@@ -372,7 +372,7 @@
           "name": "b",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "b",
             "start_offset": 1138,
             "end_offset": 1139
@@ -391,7 +391,7 @@
           "name": "b",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "b",
             "start_offset": 1293,
             "end_offset": 1294
@@ -443,7 +443,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "imp.ImportUnionPayload",
               "start_offset": 592,
               "end_offset": 614
@@ -477,7 +477,7 @@
             "type_identifier": "test.protocollayouts/LocalUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "LocalUnionPayload",
               "start_offset": 908,
               "end_offset": 925
@@ -503,7 +503,7 @@
       "identifier": "test.protocollayouts/LocalTablePayload",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
         "data": "LocalTablePayload",
         "start_offset": 81,
         "end_offset": 98
@@ -514,7 +514,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "a",
             "start_offset": 116,
             "end_offset": 117
@@ -533,7 +533,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "a",
             "start_offset": 1070,
             "end_offset": 1071
@@ -552,7 +552,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "a",
             "start_offset": 1176,
             "end_offset": 1177
@@ -571,7 +571,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "a",
             "start_offset": 1244,
             "end_offset": 1245
@@ -589,7 +589,7 @@
       "identifier": "test.protocollayouts/MainProtocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
         "data": "MainProtocol",
         "start_offset": 207,
         "end_offset": 219
@@ -599,7 +599,7 @@
           "identifier": "OneWayAnonComposed",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "OneWayAnonComposed",
             "start_offset": 201,
             "end_offset": 219
@@ -613,7 +613,7 @@
           "identifier": "TwoWayAnonComposed",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "TwoWayAnonComposed",
             "start_offset": 268,
             "end_offset": 286
@@ -631,7 +631,7 @@
           "identifier": "TwoWayAnonComposedWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "TwoWayAnonComposedWithError",
             "start_offset": 380,
             "end_offset": 407
@@ -649,7 +649,7 @@
           "identifier": "OnAnonComposed",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "OnAnonComposed",
             "start_offset": 517,
             "end_offset": 531
@@ -663,7 +663,7 @@
           "identifier": "OneWayNamedComposed",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "OneWayNamedComposed",
             "start_offset": 586,
             "end_offset": 605
@@ -674,7 +674,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
               "data": "ImportTablePayload",
               "start_offset": 606,
               "end_offset": 624
@@ -685,7 +685,7 @@
           "identifier": "TwoWayNamedComposed",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "TwoWayNamedComposed",
             "start_offset": 638,
             "end_offset": 657
@@ -696,7 +696,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
               "data": "ImportUnionPayload",
               "start_offset": 658,
               "end_offset": 676
@@ -708,7 +708,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
               "data": "ImportTablePayload",
               "start_offset": 682,
               "end_offset": 700
@@ -719,7 +719,7 @@
           "identifier": "TwoWayNamedComposedWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "TwoWayNamedComposedWithError",
             "start_offset": 714,
             "end_offset": 742
@@ -730,7 +730,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
               "data": "ImportTablePayload",
               "start_offset": 743,
               "end_offset": 761
@@ -745,7 +745,7 @@
           "identifier": "OnNamedComposed",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "OnNamedComposed",
             "start_offset": 815,
             "end_offset": 830
@@ -756,7 +756,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
               "data": "ImportUnionPayload",
               "start_offset": 831,
               "end_offset": 849
@@ -767,7 +767,7 @@
           "identifier": "OneWayImport",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "OneWayImport",
             "start_offset": 416,
             "end_offset": 428
@@ -778,7 +778,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "imp.ImportTablePayload",
               "start_offset": 429,
               "end_offset": 451
@@ -789,7 +789,7 @@
           "identifier": "TwoWayImport",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "TwoWayImport",
             "start_offset": 465,
             "end_offset": 477
@@ -800,7 +800,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "imp.ImportUnionPayload",
               "start_offset": 478,
               "end_offset": 500
@@ -812,7 +812,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "imp.ImportTablePayload",
               "start_offset": 506,
               "end_offset": 528
@@ -823,7 +823,7 @@
           "identifier": "TwoWayImportWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "TwoWayImportWithError",
             "start_offset": 542,
             "end_offset": 563
@@ -834,7 +834,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "imp.ImportTablePayload",
               "start_offset": 564,
               "end_offset": 586
@@ -849,7 +849,7 @@
           "identifier": "OnImport",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "OnImport",
             "start_offset": 644,
             "end_offset": 652
@@ -860,7 +860,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "imp.ImportUnionPayload",
               "start_offset": 653,
               "end_offset": 675
@@ -871,7 +871,7 @@
           "identifier": "OneWayLocal",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "OneWayLocal",
             "start_offset": 755,
             "end_offset": 766
@@ -882,7 +882,7 @@
             "type_identifier": "test.protocollayouts/LocalTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "LocalTablePayload",
               "start_offset": 767,
               "end_offset": 784
@@ -893,7 +893,7 @@
           "identifier": "TwoWayLocal",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "TwoWayLocal",
             "start_offset": 798,
             "end_offset": 809
@@ -904,7 +904,7 @@
             "type_identifier": "test.protocollayouts/LocalUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "LocalUnionPayload",
               "start_offset": 810,
               "end_offset": 827
@@ -916,7 +916,7 @@
             "type_identifier": "test.protocollayouts/LocalTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "LocalTablePayload",
               "start_offset": 833,
               "end_offset": 850
@@ -927,7 +927,7 @@
           "identifier": "TwoWayLocalWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "TwoWayLocalWithError",
             "start_offset": 864,
             "end_offset": 884
@@ -938,7 +938,7 @@
             "type_identifier": "test.protocollayouts/LocalTablePayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "LocalTablePayload",
               "start_offset": 885,
               "end_offset": 902
@@ -953,7 +953,7 @@
           "identifier": "OnLocal",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "OnLocal",
             "start_offset": 955,
             "end_offset": 962
@@ -964,7 +964,7 @@
             "type_identifier": "test.protocollayouts/LocalUnionPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
               "data": "LocalUnionPayload",
               "start_offset": 963,
               "end_offset": 980
@@ -975,7 +975,7 @@
           "identifier": "OneWayAnon",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "OneWayAnon",
             "start_offset": 1040,
             "end_offset": 1050
@@ -989,7 +989,7 @@
           "identifier": "TwoWayAnon",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "TwoWayAnon",
             "start_offset": 1099,
             "end_offset": 1109
@@ -1007,7 +1007,7 @@
           "identifier": "TwoWayAnonWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "TwoWayAnonWithError",
             "start_offset": 1205,
             "end_offset": 1224
@@ -1025,7 +1025,7 @@
           "identifier": "OnAnon",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "OnAnon",
             "start_offset": 1336,
             "end_offset": 1342
@@ -1041,7 +1041,7 @@
           "identifier": "test.protocollayouts.imported/ComposedProtocol",
           "referenced_at": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "imp.ComposedProtocol",
             "start_offset": 331,
             "end_offset": 351
@@ -1053,7 +1053,7 @@
       "identifier": "test.protocollayouts/OpenProtocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
         "data": "OpenProtocol",
         "start_offset": 1405,
         "end_offset": 1417
@@ -1063,7 +1063,7 @@
           "identifier": "FlexibleOneWay",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "FlexibleOneWay",
             "start_offset": 963,
             "end_offset": 977
@@ -1077,7 +1077,7 @@
           "identifier": "FlexibleTwoWayNoError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "FlexibleTwoWayNoError",
             "start_offset": 1029,
             "end_offset": 1050
@@ -1095,7 +1095,7 @@
           "identifier": "FlexibleTwoWayWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "FlexibleTwoWayWithError",
             "start_offset": 1143,
             "end_offset": 1166
@@ -1113,7 +1113,7 @@
           "identifier": "FlexibleEvent",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "FlexibleEvent",
             "start_offset": 1274,
             "end_offset": 1287
@@ -1127,7 +1127,7 @@
           "identifier": "StrictOneWay",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "StrictOneWay",
             "start_offset": 1338,
             "end_offset": 1350
@@ -1141,7 +1141,7 @@
           "identifier": "StrictTwoWayNoError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "StrictTwoWayNoError",
             "start_offset": 1400,
             "end_offset": 1419
@@ -1159,7 +1159,7 @@
           "identifier": "StrictTwoWayWithError",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "StrictTwoWayWithError",
             "start_offset": 1510,
             "end_offset": 1531
@@ -1177,7 +1177,7 @@
           "identifier": "StrictEvent",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "StrictEvent",
             "start_offset": 1637,
             "end_offset": 1648
@@ -1191,7 +1191,7 @@
           "identifier": "FlexibleOneWayNamedPayload",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
             "data": "FlexibleOneWayNamedPayload",
             "start_offset": 1701,
             "end_offset": 1727
@@ -1202,7 +1202,7 @@
             "type_identifier": "test.protocollayouts.imported/ImportStructPayload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/protocol_layouts/imported.test.fidl",
               "data": "ImportStructPayload",
               "start_offset": 1728,
               "end_offset": 1747
@@ -1215,7 +1215,7 @@
           "identifier": "test.protocollayouts.imported/ComposedOpenProtocol",
           "referenced_at": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_layouts/example.test.fidl",
             "data": "imp.ComposedOpenProtocol",
             "start_offset": 1432,
             "end_offset": 1456

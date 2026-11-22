@@ -15,7 +15,7 @@
     children: [
         {
             name: "http-client",
-            url: "#meta/http-client.cm",
+            url: "http-client#meta/http-client.cm",
         },
     ],
     use: [

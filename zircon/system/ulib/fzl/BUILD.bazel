@@ -2,16 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Build a fzl library so we can move fzl library off SDK
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library_zx")
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+package(default_applicable_licenses = ["//:license"])
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
-
-cc_library(
+# fzl is in the IDK only so in-tree targets built with the Bazel SDK rules
+# (e.g. drivers) can use it at HEAD.
+# TODO(https://fxbug.dev/444521390): Stabilize or remove from the IDK.
+idk_cc_source_library_zx(
     name = "fzl",
     srcs = [
         "memory-probe.cc",
@@ -34,12 +32,16 @@ cc_library(
         "include/lib/fzl/vmo-mapper.h",
         "include/lib/fzl/vmo-pool.h",
     ],
-    includes = [
-        "include",
-    ],
+    api_area = "Kernel",
+    category = "partner",
+    idk_name = "fzl",
+    stable = False,
     target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
     deps = [
+        # Many public headers here use various fbl headers.
         "//zircon/system/ulib/fbl",
-        "@fuchsia_sdk//pkg/zx",
+        # Many public headers here use various zx headers.
+        "//zircon/system/ulib/zx",
     ],
 )

@@ -114,11 +114,6 @@ board_input_bundle("main_bundle") {
       package_set = "bootfs"
       driver_components = [ "meta/generic-suspend.cm" ]
     },
-    {
-      package_target = "//src/devices/usb/drivers/dwc2:package"
-      package_set = "bootfs"
-      driver_components = [ "meta/dwc2.cm" ]
-    },
 
     # Base drivers that are in bootfs when base doesn't exist.
     {
@@ -247,7 +242,6 @@ group("vim3-release") {
     "//src/devices/temperature/drivers/aml-trip:package-archive",
     "//src/devices/thermal/drivers/aml-thermal:package-archive",
     "//src/devices/usb/drivers/aml-usb-phy:bazel_package-archive",
-    "//src/devices/usb/drivers/dwc2:package-archive",
     "//src/devices/usb/drivers/xhci:package-archive",
     "//src/graphics/display/drivers/aml-canvas:package-archive",
     "//src/graphics/display/drivers/amlogic-display:package-archive",

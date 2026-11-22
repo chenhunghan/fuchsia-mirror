@@ -50,7 +50,6 @@ if (current_toolchain == default_toolchain) {
 }
 
 export_fuchsia_package_to_bazel("fake-build-info.bazel_input") {
-  testonly = true
   package = ":fake-build-info"
 }
 

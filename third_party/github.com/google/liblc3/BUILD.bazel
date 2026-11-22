@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(lc3_warnings)
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "lc3_warnings",
+    cflags = ["-Wno-conversion"],
+)
+# LINT.ThenChange(BUILD.gn:lc3_warnings)
+
+fx_cc_library(
+    name = "lc3_codec",
+    srcs = [
+        "src/src/attdet.c",
+        "src/src/attdet.h",
+        "src/src/bits.c",
+        "src/src/bits.h",
+        "src/src/bwdet.c",
+        "src/src/bwdet.h",
+        "src/src/common.h",
+        "src/src/energy.c",
+        "src/src/energy.h",
+        "src/src/fastmath.h",
+        "src/src/lc3.c",
+        "src/src/ltpf.c",
+        "src/src/ltpf.h",
+        "src/src/ltpf_arm.h",
+        "src/src/ltpf_neon.h",
+        "src/src/mdct.c",
+        "src/src/mdct.h",
+        "src/src/mdct_neon.h",
+        "src/src/plc.c",
+        "src/src/plc.h",
+        "src/src/sns.c",
+        "src/src/sns.h",
+        "src/src/spec.c",
+        "src/src/spec.h",
+        "src/src/tables.c",
+        "src/src/tables.h",
+        "src/src/tns.c",
+        "src/src/tns.h",
+    ],
+    hdrs = [
+        "src/include/lc3.h",
+        "src/include/lc3_cpp.h",
+        "src/include/lc3_private.h",
+    ],
+    build_flags = [":lc3_warnings"],
+    includes = ["src/include"],
+    public_configs = [":lc3_includes_config"],
+    visibility = ["//src/media/codec/codecs/sw/lc3:__pkg__"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "lc3",
+    implementation_deps = [":lc3_codec"],
+)

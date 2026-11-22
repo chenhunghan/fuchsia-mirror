@@ -662,6 +662,7 @@ mod tests {
     use std::fs::File;
     use std::io::Write as _;
     use std::time::Duration;
+    use test_case::test_case;
     struct TestEnv {
         _tmp: tempfile::TempDir,
         metadata_path: Utf8PathBuf,
@@ -962,8 +963,10 @@ mod tests {
         assert_eq!(&actual, &contents2[..]);
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_store_delivery_blob_hard_link() {
+    async fn test_store_delivery_blob_hard_link(delivery_blob_type: DeliveryBlobType) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
@@ -974,6 +977,7 @@ mod tests {
 
         let repo = FileSystemRepository::builder(metadata_repo_path, blob_repo_path.clone())
             .copy_mode(CopyMode::HardLink)
+            .delivery_blob_type(delivery_blob_type)
             .build();
 
         // Store the blob.
@@ -983,15 +987,12 @@ mod tests {
         let uncompressed_path = dir.join("my-blob");
         std::fs::write(&uncompressed_path, contents).unwrap();
         let path = dir.join("my-delivery-blob");
-        generate_delivery_blob(&uncompressed_path, &path, DeliveryBlobType::Type1).await.unwrap();
+        generate_delivery_blob(&uncompressed_path, &path, delivery_blob_type).await.unwrap();
 
-        assert_matches!(
-            repo.store_delivery_blob(&hash, &path, DeliveryBlobType::Type1).await,
-            Ok(())
-        );
+        assert_matches!(repo.store_delivery_blob(&hash, &path, delivery_blob_type).await, Ok(()));
 
         // Make sure we can read it back.
-        let blob_path = blob_repo_path.join(format!("1/{hash}"));
+        let blob_path = blob_repo_path.join(format!("{}/{hash}", u32::from(delivery_blob_type)));
         let delivery_blob = std::fs::read(&blob_path).unwrap();
         let actual: Vec<u8> = delivery_blob::decompress(&delivery_blob).unwrap();
         assert_eq!(&actual, &contents[..]);
@@ -1010,8 +1011,10 @@ mod tests {
         check_links(&blob_path).await;
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_store_blob_generates_delivery_blob() {
+    async fn test_store_blob_generates_delivery_blob(delivery_blob_type: DeliveryBlobType) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
@@ -1021,7 +1024,7 @@ mod tests {
         std::fs::create_dir(&blob_repo_path).unwrap();
 
         let repo = FileSystemRepository::builder(metadata_repo_path, blob_repo_path.clone())
-            .delivery_blob_type(DeliveryBlobType::Type1)
+            .delivery_blob_type(delivery_blob_type)
             .build();
 
         // Store the blob.
@@ -1034,7 +1037,8 @@ mod tests {
         assert_matches!(repo.store_blob(&hash, contents.len() as u64, &path).await, Ok(()));
 
         // Make sure we can read the delivery blob.
-        let blob_path = blob_repo_path.join("1").join(hash.to_string());
+        let blob_path =
+            blob_repo_path.join(u32::from(delivery_blob_type).to_string()).join(hash.to_string());
         let delivery_blob = std::fs::read(&blob_path).unwrap();
         let actual = delivery_blob::decompress(&delivery_blob).unwrap();
         assert_eq!(&actual, &contents[..]);
@@ -1042,8 +1046,10 @@ mod tests {
         assert!(std::fs::metadata(&blob_path).unwrap().permissions().readonly());
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_store_delivery_blob() {
+    async fn test_store_delivery_blob(delivery_blob_type: DeliveryBlobType) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
@@ -1053,7 +1059,7 @@ mod tests {
         std::fs::create_dir(&blob_repo_path).unwrap();
 
         let repo = FileSystemRepository::builder(metadata_repo_path, blob_repo_path.clone())
-            .delivery_blob_type(DeliveryBlobType::Type1)
+            .delivery_blob_type(delivery_blob_type)
             .build();
 
         // Store the blob.
@@ -1061,17 +1067,15 @@ mod tests {
         let uncompressed_path = dir.join("my-blob");
         std::fs::write(&uncompressed_path, contents).unwrap();
         let path = dir.join("my-delivery-blob");
-        generate_delivery_blob(&uncompressed_path, &path, DeliveryBlobType::Type1).await.unwrap();
+        generate_delivery_blob(&uncompressed_path, &path, delivery_blob_type).await.unwrap();
         let delivery_blob = std::fs::read(&path).unwrap();
 
         let hash = fuchsia_merkle::root_from_slice(contents);
-        assert_matches!(
-            repo.store_delivery_blob(&hash, &path, DeliveryBlobType::Type1).await,
-            Ok(())
-        );
+        assert_matches!(repo.store_delivery_blob(&hash, &path, delivery_blob_type).await, Ok(()));
 
         // Make sure we can read the delivery blob.
-        let blob_path = blob_repo_path.join("1").join(hash.to_string());
+        let blob_path =
+            blob_repo_path.join(u32::from(delivery_blob_type).to_string()).join(hash.to_string());
         let stored_delivery_blob = std::fs::read(&blob_path).unwrap();
         assert_eq!(stored_delivery_blob, delivery_blob);
 

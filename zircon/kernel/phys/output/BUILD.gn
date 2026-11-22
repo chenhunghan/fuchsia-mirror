@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+
+library_headers("headers") {
+  headers = [
+    "phys/output/log.h",
+    "phys/output/stdout.h",
+    "phys/output/uart.h",
+  ]
+  public_deps = [
+    # <phys/output/log.h> has #include <phys/allocation/allocation.h>.
+    "//zircon/kernel/phys/allocation:headers",
+
+    # <phys/output/uart.h> has #include <lib/uart/all.h>.
+    "//zircon/system/ulib/uart:headers",
+  ]
+
+  if (is_kernel) {
+    public_deps += [
+      "//zircon/kernel/lib/ktl:headers",
+      "//zircon/kernel/lib/libc:headers",
+    ]
+  }
+}
+
+static_library("output") {
+  complete_static_lib = true
+
+  public_deps = [ ":headers" ]
+
+  sources = [
+    "log.cc",
+    "stdout.cc",
+    "uart.cc",
+  ]
+  deps = [
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+    "//zircon/kernel/phys/address-space:headers",
+    "//zircon/kernel/phys/allocation",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/uart",
+  ]
+}

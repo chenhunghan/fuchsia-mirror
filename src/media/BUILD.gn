@@ -22,6 +22,7 @@ group("tests") {
   deps = [
     ":bazel_tests",
     "audio:tests",
+    "//sdk/lib/media/audio/cpp:tests",
     "//sdk/lib/media/cpp:tests",
     "//src/media/audio:tests",
     "//src/media/codec:tests",

@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.amlogic.platform.a311d",
+    src = "fuchsia.amlogic.platform.a311d.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = [
+        "//sdk:__pkg__",
+        "//src/devices/power/drivers/aml-meson-power:__pkg__",
+        "//src/media/audio/drivers/aml-g12-tdm:__pkg__",
+    ],
+    deps = ["//src/devices/bind/fuchsia"],
+)

@@ -2120,3 +2120,111 @@ async fn waker_wakes_on_streaming_read_errors() {
     };
     assert_eq!(tid_4, got_tid);
 }
+
+#[fuchsia::test]
+async fn socket_read_clamps_max_bytes() {
+    let mut fdomain = FDomain::new_empty();
+
+    let hid_socket_write = 0;
+    let hid_socket_read = 2;
+
+    assert!(
+        fdomain
+            .create_socket(proto::SocketCreateSocketRequest {
+                options: proto::SocketType::Stream,
+                handles: [
+                    proto::NewHandleId { id: hid_socket_write },
+                    proto::NewHandleId { id: hid_socket_read },
+                ],
+            })
+            .is_ok()
+    );
+
+    for (idx, max_bytes) in [u64::MAX, (isize::MAX as u64) + 1].into_iter().enumerate() {
+        let tid_write = ((idx as u32) * 2 + 1).try_into().unwrap();
+        let tid_read = ((idx as u32) * 2 + 2).try_into().unwrap();
+        let payload = format!("clamped read payload {idx}").into_bytes();
+
+        fdomain.write_socket(
+            tid_write,
+            proto::SocketWriteSocketRequest {
+                handle: proto::HandleId { id: hid_socket_write },
+                data: payload.clone(),
+            },
+        );
+
+        let FDomainEvent::WroteSocket(got_tid, Ok(proto::SocketWriteSocketResponse { wrote })) =
+            fdomain.next().await.unwrap()
+        else {
+            panic!();
+        };
+        assert_eq!(tid_write, got_tid);
+        assert_eq!(payload.len(), wrote as usize);
+
+        fdomain.read_socket(
+            tid_read,
+            proto::SocketReadSocketRequest {
+                handle: proto::HandleId { id: hid_socket_read },
+                max_bytes,
+            },
+        );
+
+        let FDomainEvent::SocketData(
+            got_tid,
+            Ok(proto::SocketData { data: got_data, is_datagram }),
+        ) = fdomain.next().await.unwrap()
+        else {
+            panic!();
+        };
+        assert!(!is_datagram);
+        assert_eq!(tid_read, got_tid);
+        assert_eq!(payload, got_data);
+    }
+
+    let flag = Arc::new(FlagWaker(AtomicBool::new(false)));
+    let waker = Waker::from(flag);
+    let mut cx = Context::from_waker(&waker);
+
+    let tid_pending_read = 10.try_into().unwrap();
+    fdomain.read_socket(
+        tid_pending_read,
+        proto::SocketReadSocketRequest {
+            handle: proto::HandleId { id: hid_socket_read },
+            max_bytes: u64::MAX,
+        },
+    );
+    assert!(Pin::new(&mut fdomain).poll_next(&mut cx).is_pending());
+
+    let tid_write_after = 11.try_into().unwrap();
+    let delayed_payload = b"delayed payload after pending read".to_vec();
+    fdomain.write_socket(
+        tid_write_after,
+        proto::SocketWriteSocketRequest {
+            handle: proto::HandleId { id: hid_socket_write },
+            data: delayed_payload.clone(),
+        },
+    );
+
+    let mut got_write = false;
+    let mut got_read = false;
+    for _ in 0..2 {
+        match fdomain.next().await.unwrap() {
+            FDomainEvent::WroteSocket(got_tid, Ok(proto::SocketWriteSocketResponse { wrote })) => {
+                assert_eq!(tid_write_after, got_tid);
+                assert_eq!(delayed_payload.len(), wrote as usize);
+                got_write = true;
+            }
+            FDomainEvent::SocketData(
+                got_tid,
+                Ok(proto::SocketData { data: got_data, is_datagram }),
+            ) => {
+                assert_eq!(tid_pending_read, got_tid);
+                assert!(!is_datagram);
+                assert_eq!(delayed_payload, got_data);
+                got_read = true;
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+    assert!(got_write && got_read);
+}

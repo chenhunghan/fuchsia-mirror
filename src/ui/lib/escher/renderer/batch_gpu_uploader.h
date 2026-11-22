@@ -8,6 +8,8 @@
 #include <lib/fit/function.h>
 
 #include <algorithm>
+#include <cstring>
+#include <optional>
 #include <variant>
 
 #include "src/ui/lib/escher/escher.h"
@@ -25,9 +27,9 @@ namespace escher {
 // to the GPU driver.
 //
 // About synchronization:
-// We use semaphores for synchronization between BatchGpuDownloader/Uploader
-// and other gfx components, so we only need the barrier to synchronize all
-// transfer-related commands.
+// We use semaphores for synchronization between BatchGpuUploader and other gfx
+// components, so we only need the barrier to synchronize all transfer-related
+// commands.
 //
 // Currently users of BatchGpuUploader should manually enforce that the
 // BatchGpuUploader waits on other BatchGpuUploader or gfx::Engine if they write
@@ -36,9 +38,8 @@ namespace escher {
 // being signaled when command buffer finishes execution, which can be used for
 // synchronization.
 //
-// TODO(https://fxbug.dev/42098594) Add memory barriers so the BatchGpuUploader and
-// BatchGpuDownloader can handle synchronization of reads and writes on the same
-// Resource.
+// TODO(https://fxbug.dev/42098594) Add memory barriers so the BatchGpuUploader
+// can handle synchronization of reads and writes on the same Resource.
 //
 class BatchGpuUploader {
  public:
@@ -60,6 +61,10 @@ class BatchGpuUploader {
   // Callers of ScheduleWriteImage() and ScheduleWriteBuffer() may use
   // DataProviderCallback to defer writing if callers need to write to the
   // host-visible Vulkan buffers directly without copying data.
+  //
+  // The callback must write all `copy_size` bytes at `host_buffer_ptr`: the
+  // staging memory is recycled from earlier uploads and is not cleared, so any
+  // bytes left unwritten would upload stale data to the target.
   using DataProviderCallback = std::function<void(uint8_t* host_buffer_ptr, size_t copy_size)>;
 
   // Schedule a buffer-to-buffer copy that will be submitted when Submit()
@@ -109,55 +114,64 @@ class BatchGpuUploader {
         target_offset, real_copy_size);
   }
 
-  // Schedule a buffer-to-image copy that will be submitted when Submit()
-  // is called.  Reference will be retained in |resources_| until we call
-  // Submit(), where we keep the resources alive until submitted CommandBuffer
+  // Schedule a buffer-to-image copy that will be submitted when `Submit()`
+  // is called.  Reference will be retained in `resources_` until we call
+  // `Submit()`, where we keep the resources alive until submitted CommandBuffer
   // is retired.
   //
-  // |region| specifies the buffer region which will be copied to the target
+  // `region` specifies the buffer region which will be copied to the target
   // image.
-  //   |region.bufferOffset| should be set to zero since the src buffer is
-  //   managed internally by the uploader; currently |imageOffset| requires to
-  //   be zero and |imageExtent| requires to be the whole image.
-  // The default value of |region| is vk::BufferImageCopy(), in which case we
+  //   `region.bufferOffset` should be set to zero since the src buffer is
+  //   managed internally by the uploader; currently `imageOffset` requires to
+  //   be zero and `imageExtent` requires to be the whole image.
+  //   The target's format must be `eR8G8B8A8Unorm`, `eR8G8B8A8Srgb`,
+  //   `eB8G8R8A8Unorm`, `eB8G8R8A8Srgb` or `eR8Unorm`, and the region must be
+  //   color-aspect, single-layer and tightly packed (`bufferRowLength` and
+  //   `bufferImageHeight` both zero). Any other format, aspect, layer count or
+  //   packing, an empty extent, or a depth other than 1 crashes the process. A
+  //   region outside the image fails a debug check and is otherwise ignored, so
+  //   nothing is uploaded.
+  // The default value of `region` is `vk::BufferImageCopy()`, in which case we
   // create a default copy region which writes to the color data of an image
   // of one mipmap layer.
   //
-  // |write_function| is a callback function which will be called at
-  // GenerateCommands(), where we copy our data to the host-visible buffer.
+  // `write_function` is a callback function which will be called at
+  // `GenerateCommands()`, where we copy our data to the host-visible buffer.
+  // Its `copy_size` is the tightly packed byte size of `region`.
   void ScheduleWriteImage(const ImagePtr& target, DataProviderCallback write_function,
                           vk::ImageLayout final_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
                           vk::BufferImageCopy region = vk::BufferImageCopy());
 
-  // Schedule a buffer-to-image copy that will be submitted when Submit()
-  // is called.  Reference will be retained in |resources_| until we call
-  // Submit(), where we keep the resources alive until submitted CommandBuffer
+  // Schedule a buffer-to-image copy that will be submitted when `Submit()`
+  // is called.  Reference will be retained in `resources_` until we call
+  // `Submit()`, where we keep the resources alive until submitted CommandBuffer
   // is retired.
   //
-  // |region| specifies the buffer region which will be copied to the target
+  // `region` specifies the buffer region which will be copied to the target
   // image.
-  //   |region.bufferOffset| should be set to zero since the src buffer is
-  //   managed internally by the uploader; currently |imageOffset| requires to
-  //   be zero and |imageExtent| requires to be the whole image.
-  // The default value of |region| is vk::BufferImageCopy(), in which case we
+  //   `region` and the target's format have the same requirements as for the
+  //   `DataProviderCallback` overload above.
+  // The default value of `region` is `vk::BufferImageCopy()`, in which case we
   // create a default copy region which writes to the color data of an image
   // of one mipmap layer.
   //
-  // |host_data| will be kept until GenerateCommands() where we copy the data
-  // to the host-visible buffer.
+  // `host_data` will be kept until `GenerateCommands()` where we copy the data
+  // to the host-visible buffer. The process crashes if `host_data` has fewer
+  // bytes than `region` reads from the buffer; bytes past the ones `region`
+  // reads are ignored: they are never copied to the staging buffer, so they
+  // cannot reach another upload's range.
   template <class T>
   void ScheduleWriteImage(const ImagePtr& target, std::vector<T> host_data,
                           vk::ImageLayout final_layout = vk::ImageLayout::eShaderReadOnlyOptimal,
                           vk::BufferImageCopy region = vk::BufferImageCopy()) {
-    ScheduleWriteImage(
+    const vk::DeviceSize host_bytes = host_data.size() * sizeof(T);
+    ScheduleWriteImageImpl(
         target,
         [host_data = std::move(host_data)](uint8_t* host_buffer_ptr, size_t copy_size) mutable {
-          size_t requested_size = host_data.size() * sizeof(T);
-          FX_DCHECK(copy_size >= requested_size);
-          memcpy(static_cast<void*>(host_buffer_ptr), host_data.data(),
-                 std::min(copy_size, requested_size));
+          // `ScheduleWriteImageImpl()` verified that `copy_size` does not exceed `host_data`.
+          std::memcpy(host_buffer_ptr, host_data.data(), copy_size);
         },
-        final_layout, std::move(region));
+        final_layout, std::move(region), host_bytes);
   }
 
   // Submits all pending work to the given CommandBuffer. Users need to call
@@ -205,6 +219,13 @@ class BatchGpuUploader {
   };
 
   BufferPtr CreateBufferFromRecords();
+
+  // Shared implementation of both `ScheduleWriteImage()` overloads. If
+  // `available_host_bytes` is set, the process crashes if it is smaller than
+  // the number of bytes that `region` reads from the staging buffer.
+  void ScheduleWriteImageImpl(const ImagePtr& target, DataProviderCallback write_function,
+                              vk::ImageLayout final_layout, vk::BufferImageCopy region,
+                              std::optional<vk::DeviceSize> available_host_bytes);
 
   EscherWeakPtr escher_;
 

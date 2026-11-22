@@ -48,13 +48,13 @@ namespace internal {
 template <typename T>
 struct IsSupportedInt : std::false_type {};
 template <>
-struct IsSupportedInt<uint8_t> : std::true_type{};
+struct IsSupportedInt<uint8_t> : std::true_type {};
 template <>
-struct IsSupportedInt<uint16_t> : std::true_type{};
+struct IsSupportedInt<uint16_t> : std::true_type {};
 template <>
-struct IsSupportedInt<uint32_t> : std::true_type{};
+struct IsSupportedInt<uint32_t> : std::true_type {};
 template <>
-struct IsSupportedInt<uint64_t> : std::true_type{};
+struct IsSupportedInt<uint64_t> : std::true_type {};
 
 template <class IntType>
 constexpr IntType ComputeMask(uint32_t num_bits) {
@@ -96,7 +96,7 @@ class FieldPrinter {
 // they are not enabled.
 template <bool Enabled, typename IntType>
 struct FieldPrinterList {
-  void AppendField(const char* name, uint32_t bit_high_incl, uint32_t bit_low) {}
+  constexpr void AppendField(const char* name, uint32_t bit_high_incl, uint32_t bit_low) {}
 };
 
 template <typename IntType>
@@ -106,7 +106,7 @@ struct FieldPrinterList<true, IntType> {
   std::array<FieldPrinter, sizeof(IntType) * CHAR_BIT> fields;
   unsigned num_fields = 0;
 
-  void AppendField(const char* name, uint32_t bit_high_incl, uint32_t bit_low) {
+  constexpr void AppendField(const char* name, uint32_t bit_high_incl, uint32_t bit_low) {
     ZX_DEBUG_ASSERT(num_fields < fields.size());
     fields[num_fields++] = FieldPrinter(name, bit_high_incl, bit_low);
   }
@@ -131,8 +131,8 @@ class Field {
   using IntType = typename RegType::ValueType;
 
  public:
-  Field(FieldParameters<RegType::PrinterEnabled::value, IntType>* reg, const char* name,
-        uint32_t bit_high_incl, uint32_t bit_low) {
+  constexpr Field(FieldParameters<RegType::PrinterEnabled::value, IntType>* reg, const char* name,
+                  uint32_t bit_high_incl, uint32_t bit_low) {
     if constexpr (Enabled) {
       IntType mask = static_cast<IntType>(
           internal::ComputeMask<IntType>(bit_high_incl - bit_low + 1) << bit_low);
@@ -157,8 +157,8 @@ class RsvdZField : public Field<RegType, UnusedMarker, Enabled> {
   using IntType = typename RegType::ValueType;
 
  public:
-  RsvdZField(FieldParameters<RegType::PrinterEnabled::value, IntType>* reg, uint32_t bit_high_incl,
-             uint32_t bit_low)
+  constexpr RsvdZField(FieldParameters<RegType::PrinterEnabled::value, IntType>* reg,
+                       uint32_t bit_high_incl, uint32_t bit_low)
       : Field<RegType, UnusedMarker, Enabled>(reg, "RsvdZ", bit_high_incl, bit_low) {
     if constexpr (Enabled) {
       IntType mask = static_cast<IntType>(

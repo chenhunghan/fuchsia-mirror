@@ -32,9 +32,9 @@ __BEGIN_CDECLS
 #define CHECKPOINT_REACHED true
 #define CHECKPOINT_NOT_REACHED false
 #define HAS_ERRORS 1u
-#define NO_ERRORS 1u << 1
-#define SKIPPED 1u << 2
-#define NOT_SKIPPED 1u << 3
+#define NO_ERRORS (1u << 1u)
+#define SKIPPED (1u << 2u)
+#define NOT_SKIPPED (1u << 3u)
 
 #define CHECK_ERROR() ZX_ASSERT_MSG(LIB_ZXTEST_TEST_HAS_ERRORS, "Expected errors, non registered.");
 #define CHECK_NO_ERROR() ZX_ASSERT_MSG(!LIB_ZXTEST_TEST_HAS_ERRORS, "Unexpected errors.");

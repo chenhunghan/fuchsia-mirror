@@ -1,0 +1,251 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":stdcompat-tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":stdcompat-17-unit-test_host_test",
+        ":stdcompat-20-unit-test_host_test",
+        ":stdcompat-23-unit-test_host_test",
+        ":stdcompat-polyfills-no-inline-variables-unit-test_host_test",
+        ":stdcompat-polyfills-unit-test_host_test",
+    ],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+STDCOMPAT_TEST_SOURCES = [
+    "algorithm_test.cc",
+    "array_test.cc",
+    "inplace_vector_test.cc",
+
+    # TODO(https://fxbug.dev/352337748): atomic_test.cc is disabled to unblock
+    # the clang roll. Add it back to this list once the bug is fixed.
+    "bit_test.cc",
+    "functional_test.cc",
+    "memory_test.cc",
+    "queue_test.cc",
+    "source_location_test.cc",
+    "span_test.cc",
+    "string_view_test.cc",
+    "traits_test.cc",
+    "utility_internal_test.cc",
+    "utility_test.cc",
+    "vector_test.cc",
+    "version_test.cc",
+    "gtest.h",
+    "test_helper.h",
+]
+
+STDCOMPAT_TEST_DEPS = [
+    "//sdk/lib/stdcompat",
+    "//src/lib/fxl/test:gtest_main",
+    "@com_google_googletest//:gtest",
+]
+
+# This target will be forced to compile using stdcompat provided polyfills and
+# no inline variables.
+fx_cc_test_binary(
+    name = "stdcompat-polyfills-no-inline-variables-unit-test",
+    srcs = STDCOMPAT_TEST_SOURCES,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        ":stdcompat-select-polyfills",
+        ":stdcompat-no-inline-variables",
+        ":stdcompat-Wundef",
+        ":gtest-Wno-undef",
+    ],
+    deps = STDCOMPAT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "stdcompat-polyfills-no-inline-variables-test",
+    binary = ":stdcompat-polyfills-no-inline-variables-unit-test",
+)
+
+host_test(
+    name = "stdcompat-polyfills-no-inline-variables-unit-test_host_test",
+    binary = ":stdcompat-polyfills-no-inline-variables-unit-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# This target will be forced to compile using stdcompat provided polyfills.
+fx_cc_test_binary(
+    name = "stdcompat-polyfills-unit-test",
+    srcs = STDCOMPAT_TEST_SOURCES,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        ":stdcompat-select-polyfills",
+        ":stdcompat-Wundef",
+        ":gtest-Wno-undef",
+    ],
+    deps = STDCOMPAT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "stdcompat-polyfills-test",
+    binary = ":stdcompat-polyfills-unit-test",
+)
+
+host_test(
+    name = "stdcompat-polyfills-unit-test_host_test",
+    binary = ":stdcompat-polyfills-unit-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# These targets will let the feature-test macros pick the std implementation if
+# available.  They test all the available C++ modes, not just the default one
+# configured in the build.
+
+fx_cc_test_binary(
+    name = "stdcompat-17-unit-test",
+    srcs = STDCOMPAT_TEST_SOURCES,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        ":stdcompat-c++-17",
+        ":stdcompat-Wundef",
+        ":gtest-Wno-undef",
+    ],
+    deps = STDCOMPAT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "stdcompat-17-test",
+    binary = ":stdcompat-17-unit-test",
+)
+
+host_test(
+    name = "stdcompat-17-unit-test_host_test",
+    binary = ":stdcompat-17-unit-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_test_binary(
+    name = "stdcompat-20-unit-test",
+    srcs = STDCOMPAT_TEST_SOURCES,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        ":stdcompat-c++-20",
+        ":stdcompat-Wundef",
+        ":gtest-Wno-undef",
+    ],
+    deps = STDCOMPAT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "stdcompat-20-test",
+    binary = ":stdcompat-20-unit-test",
+)
+
+host_test(
+    name = "stdcompat-20-unit-test_host_test",
+    binary = ":stdcompat-20-unit-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_test_binary(
+    name = "stdcompat-23-unit-test",
+    srcs = STDCOMPAT_TEST_SOURCES,
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    build_flags = [
+        ":stdcompat-c++-23",
+        ":stdcompat-Wundef",
+        ":gtest-Wno-undef",
+    ],
+    deps = STDCOMPAT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "stdcompat-23-test",
+    binary = ":stdcompat-23-unit-test",
+)
+
+host_test(
+    name = "stdcompat-23-unit-test_host_test",
+    binary = ":stdcompat-23-unit-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# All the Fuchsia tests are collected into a single package.
+fx_package(
+    name = "stdcompat-tests_package",
+    package_name = "stdcompat-tests",
+    test_components = [
+        ":stdcompat-17-test",
+        ":stdcompat-20-test",
+        ":stdcompat-23-test",
+        ":stdcompat-polyfills-no-inline-variables-test",
+        ":stdcompat-polyfills-test",
+    ],
+)
+
+fx_test(
+    name = "stdcompat-tests",
+    package = ":stdcompat-tests_package",
+)
+
+build_flags(
+    name = "stdcompat-c++-17",
+    testonly = True,
+    cflags_cc = ["-std=c++17"],
+)
+
+build_flags(
+    name = "stdcompat-c++-20",
+    testonly = True,
+    cflags_cc = ["-std=c++20"],
+)
+
+build_flags(
+    name = "stdcompat-c++-23",
+    testonly = True,
+    cflags_cc = ["-std=c++23"],
+)
+
+build_flags(
+    name = "stdcompat-Wundef",
+    testonly = True,
+    cflags = ["-Wundef"],
+)
+
+build_flags(
+    name = "stdcompat-select-polyfills",
+    testonly = True,
+    defines = ["LIB_STDCOMPAT_USE_POLYFILLS"],
+)
+
+build_flags(
+    name = "stdcompat-no-inline-variables",
+    testonly = True,
+    defines = ["LIB_STDCOMPAT_NO_INLINE_VARIABLES"],
+)
+
+# In GN, the public config of //third_party/googletest:gtest appends
+# `-Wno-undef` after `:stdcompat-Wundef`, so these tests never actually built
+# with `-Wundef`. `@com_google_googletest//:gtest` does not add that flag, so
+# keep it here to build the same way GN did. Without it, the C++17 build fails
+# on `__cpp_lib_three_way_comparison` in inplace_vector_test.cc.
+# TODO(https://fxbug.dev/570694755): Fix the -Wundef errors in the tests and
+# drop this flag.
+build_flags(
+    name = "gtest-Wno-undef",
+    testonly = True,
+    cflags = ["-Wno-undef"],
+)

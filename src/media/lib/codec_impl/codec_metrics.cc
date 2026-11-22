@@ -22,7 +22,7 @@ CodecMetrics::CodecMetrics()
       metric_buffer_(metrics_buffer_->CreateMetricBuffer(
           media_metrics::kStreamProcessorEvents2MigratedMetricId)) {}
 
-CodecMetrics::CodecMetrics(std::shared_ptr<sys::ServiceDirectory> service_directory)
+CodecMetrics::CodecMetrics(fidl::ClientEnd<fuchsia_io::Directory> service_directory)
     : metrics_buffer_(
           cobalt::MetricsBuffer::Create(media_metrics::kProjectId, std::move(service_directory))),
       metric_buffer_(metrics_buffer_->CreateMetricBuffer(
@@ -30,7 +30,7 @@ CodecMetrics::CodecMetrics(std::shared_ptr<sys::ServiceDirectory> service_direct
 
 CodecMetrics::~CodecMetrics() {}
 
-void CodecMetrics::SetServiceDirectory(std::shared_ptr<sys::ServiceDirectory> service_directory) {
+void CodecMetrics::SetServiceDirectory(fidl::ClientEnd<fuchsia_io::Directory> service_directory) {
   metrics_buffer_->SetServiceDirectory(std::move(service_directory));
 }
 

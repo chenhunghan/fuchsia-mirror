@@ -8,10 +8,7 @@ load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# TODO(b/366268742): Enable MyPy type checking
-# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
 # Note: Host-only target matching platform-only deps via target_compatible_with.
-# @bazel2gn:raw_attribute:enable_mypy = false
 py_library(
     name = "debug_json",
     srcs = [
@@ -19,7 +16,6 @@ py_library(
         "debug_json.py",
     ],
     imports = [".."],
-    tags = ["no-pyrefly"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//src/memory/tools/snapshots:__pkg__"],
     deps = [
@@ -28,11 +24,9 @@ py_library(
     ],
 )
 
-# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
 host_py_test(
     name = "debug_json_test",
     srcs = ["debug_json_test.py"],
-    tags = ["no-pyrefly"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//src/memory/tools:__pkg__"],
     deps = [":debug_json"],

@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "common",
+    srcs = [
+        "delay_watcher_client.cc",
+        "delay_watcher_server.cc",
+        "fidl_thread.cc",
+        "logging.cc",
+        "memory_mapped_buffer.cc",
+    ],
+    hdrs = [
+        "base_fidl_server.h",
+        "delay_watcher_client.h",
+        "delay_watcher_server.h",
+        "fidl_thread.h",
+        "logging.h",
+        "memory_mapped_buffer.h",
+        "thread_checker.h",
+        "vector_of_weak_ptr.h",
+    ],
+    visibility = ["//src/media/audio/services:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.audio:fuchsia.audio_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/async-loop-testing/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/ffl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

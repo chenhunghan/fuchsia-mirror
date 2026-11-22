@@ -7,7 +7,7 @@ natively and exports DWARF symbols should work to some extent.
 
 Interpreted code such as Dart and JavaScript is not supported.
 
-## Run zxdb
+## Run zxdb {:#run-zxdb}
 
 There are several ways to attach `zxdb` to a component through
 `ffx component debug`:

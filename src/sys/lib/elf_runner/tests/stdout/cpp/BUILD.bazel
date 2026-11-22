@@ -15,11 +15,9 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
-# fx_cc_binary names the binary after the target; GN sets output_name.
 fx_cc_binary(
     name = "bin",
     srcs = ["src/main.cc"],
-    gn_output_name = "prints_when_launched_cpp",
     tags = ["manual"],
 )
 
@@ -39,6 +37,7 @@ fx_component_manifest(
 fx_component(
     name = "logs-stdout-and-stderr-cpp",
     compiled_manifest = ":logs-stdout-and-stderr-cpp-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )
 
@@ -52,6 +51,7 @@ fx_component_manifest(
 fx_component(
     name = "logs-default-cpp",
     compiled_manifest = ":logs-default-cpp-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )
 
@@ -65,6 +65,7 @@ fx_component_manifest(
 fx_component(
     name = "logs-stdout-cpp",
     compiled_manifest = ":logs-stdout-cpp-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )
 
@@ -78,5 +79,6 @@ fx_component_manifest(
 fx_component(
     name = "logs-stderr-cpp",
     compiled_manifest = ":logs-stderr-cpp-manifest",
+    visibility = ["//src/sys/lib/elf_runner/tests/stdout:__pkg__"],
     deps = [":bin_packaged_bin"],
 )

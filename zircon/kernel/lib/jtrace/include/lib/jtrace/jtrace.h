@@ -14,7 +14,6 @@
 #include <fbl/ref_ptr.h>
 #include <kernel/cpu.h>
 #include <kernel/jtrace_config.h>
-#include <kernel/persistent_ram.h>
 #include <ktl/type_traits.h>
 #include <ktl/unique_ptr.h>
 
@@ -124,8 +123,6 @@ using Entry = ktl::conditional_t<kUseLargeEntries == UseLargeEntries::Yes, Large
 }  // namespace jtrace
 
 #if JTRACE_TARGET_BUFFER_SIZE > 0
-inline void jtrace_init() { rust_jtrace_init(); }
-inline void jtrace_set_after_thread_init_early() { rust_jtrace_set_after_thread_init_early(); }
 inline void jtrace_set_location(void* ptr, size_t len) { rust_jtrace_set_location(ptr, len); }
 inline void jtrace_invalidate() { rust_jtrace_invalidate(); }
 inline void jtrace_log(jtrace::Entry<kJTraceUseLargeEntries>& e) { rust_jtrace_log(e); }
@@ -140,8 +137,6 @@ inline void jtrace_dump(jtrace::TraceBufferType which) { rust_jtrace_dump(which)
   } while (false)
 
 #else
-inline void jtrace_init() {}
-inline void jtrace_set_after_thread_init_early() {}
 inline void jtrace_set_location(void* ptr, size_t len) {}
 inline void jtrace_invalidate() {}
 inline void jtrace_log(jtrace::Entry<kJTraceUseLargeEntries>& e) {}

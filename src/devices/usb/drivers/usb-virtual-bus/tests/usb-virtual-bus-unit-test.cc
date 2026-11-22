@@ -8,6 +8,8 @@
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/sync/completion.h>
 
+#include <limits>
+
 #include <gtest/gtest.h>
 
 #include "src/devices/usb/drivers/usb-virtual-bus/usb-virtual-bus.h"
@@ -329,8 +331,9 @@ class UsbVirtualBusTest : public testing::Test {
   // Registers one VMO
   std::pair<uint8_t*, zx::vmo> RegisterVmo(fidl::SyncClient<fendpoint::Endpoint>& client,
                                            size_t data_size, size_t id = 1) {
-    auto result = client->RegisterVmos(
-        std::vector<fendpoint::VmoInfo>{{fendpoint::VmoInfo().id(id).size(data_size)}});
+    std::vector<fendpoint::VmoInfo> vmo_infos;
+    vmo_infos.emplace_back(std::move(fendpoint::VmoInfo().id(id).size(data_size)));
+    auto result = client->RegisterVmos({std::move(vmo_infos)});
     EXPECT_TRUE(result.is_ok());
     EXPECT_EQ(result->vmos().size(), 1UL);
     EXPECT_EQ(result->vmos()[0].id(), id);
@@ -1432,6 +1435,270 @@ TEST_F(UsbVirtualBusTest, GetHardwareInfo) {
   EXPECT_EQ(info.endpoints()->at(15).supported_types()->at(0).endpoint_type(),
             fdescriptor::EndpointType::kBulk);
   EXPECT_EQ(info.endpoints()->at(15).supported_types()->at(0).max_packet_size_limit(), 65535u);
+}
+
+TEST_F(UsbVirtualBusTest, EndpointBufferValidationAndOffsetTest) {
+  EnableAndConnect();
+
+  const uint8_t kOutEp = 1 | fidl::ToUnderlying(fdescriptor::EndpointDirection::kOut);
+  fidl::SyncClient<fendpoint::Endpoint> dev_ep(ConnectToEndpoint<fdci::UsbDciService>(kOutEp));
+  fidl::SyncClient<fendpoint::Endpoint> host_ep(ConnectToEndpoint<fhci::UsbHciService>(kOutEp));
+  EndpointHandler dev_handler;
+  EndpointHandler host_handler;
+
+  auto [dev_ptr, dev_vmo] = RegisterVmo(dev_ep, 4096, 1);
+
+  // Out-of-bounds VMO offset + size is rejected with ZX_ERR_OUT_OF_RANGE.
+  {
+    std::vector<frequest::BufferRegion> bad_buffer;
+    bad_buffer.emplace_back().buffer(frequest::Buffer::WithVmoId(1)).offset(4096).size(16);
+    std::vector<frequest::Request> bad_requests;
+    bad_requests.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(bad_buffer))));
+    ASSERT_TRUE(dev_ep->QueueRequests(std::move(bad_requests)).is_ok());
+
+    dev_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+      ASSERT_EQ(event.completion().size(), 1UL);
+      EXPECT_EQ(event.completion()[0].status(), ZX_ERR_OUT_OF_RANGE);
+    });
+    ASSERT_TRUE(dev_ep.HandleOneEvent(dev_handler).ok());
+  }
+
+  // Wrapping offset + size overflow is rejected with ZX_ERR_OUT_OF_RANGE.
+  {
+    std::vector<frequest::BufferRegion> overflow_buffer;
+    overflow_buffer.emplace_back()
+        .buffer(frequest::Buffer::WithVmoId(1))
+        .offset(std::numeric_limits<uint64_t>::max() - 8)
+        .size(16);
+    std::vector<frequest::Request> overflow_requests;
+    overflow_requests.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(overflow_buffer))));
+    ASSERT_TRUE(dev_ep->QueueRequests(std::move(overflow_requests)).is_ok());
+
+    dev_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+      ASSERT_EQ(event.completion().size(), 1UL);
+      EXPECT_EQ(event.completion()[0].status(), ZX_ERR_OUT_OF_RANGE);
+    });
+    ASSERT_TRUE(dev_ep.HandleOneEvent(dev_handler).ok());
+  }
+
+  // Multi-region requests are rejected with ZX_ERR_NOT_SUPPORTED.
+  {
+    std::vector<frequest::BufferRegion> multi_buffer;
+    multi_buffer.emplace_back().buffer(frequest::Buffer::WithVmoId(1)).offset(0).size(8);
+    multi_buffer.emplace_back().buffer(frequest::Buffer::WithVmoId(1)).offset(8).size(8);
+    std::vector<frequest::Request> multi_requests;
+    multi_requests.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(multi_buffer))));
+    ASSERT_TRUE(dev_ep->QueueRequests(std::move(multi_requests)).is_ok());
+
+    dev_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+      ASSERT_EQ(event.completion().size(), 1UL);
+      EXPECT_EQ(event.completion()[0].status(), ZX_ERR_NOT_SUPPORTED);
+    });
+    ASSERT_TRUE(dev_ep.HandleOneEvent(dev_handler).ok());
+  }
+
+  // A non-zero region offset places the data at that offset inside the registered VMO.
+  {
+    constexpr size_t kOffset = 512;
+    std::vector<uint8_t> payload(kMaxPacketSize);
+    for (size_t i = 0; i < kMaxPacketSize; ++i) {
+      payload[i] = static_cast<uint8_t>(i);
+    }
+    std::vector<frequest::BufferRegion> host_buf;
+    host_buf.emplace_back()
+        .buffer(frequest::Buffer::WithData(std::move(payload)))
+        .offset(0)
+        .size(kMaxPacketSize);
+    std::vector<frequest::Request> host_reqs;
+    host_reqs.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(host_buf))));
+    ASSERT_TRUE(host_ep->QueueRequests(std::move(host_reqs)).is_ok());
+
+    std::vector<frequest::BufferRegion> dev_buf;
+    dev_buf.emplace_back()
+        .buffer(frequest::Buffer::WithVmoId(1))
+        .offset(kOffset)
+        .size(kMaxPacketSize);
+    std::vector<frequest::Request> dev_reqs;
+    dev_reqs.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(dev_buf))));
+    ASSERT_TRUE(dev_ep->QueueRequests(std::move(dev_reqs)).is_ok());
+
+    host_handler.ExpectOnCompletion(
+        EndpointHandler::ExpectOnCompletionDirect(kMaxPacketSize, false));
+    dev_handler.ExpectOnCompletion(EndpointHandler::ExpectOnCompletionVmo(kMaxPacketSize));
+    ASSERT_TRUE(host_ep.HandleOneEvent(host_handler).ok());
+    ASSERT_TRUE(dev_ep.HandleOneEvent(dev_handler).ok());
+    for (size_t i = 0; i < kMaxPacketSize; ++i) {
+      EXPECT_EQ(dev_ptr[kOffset + i], static_cast<uint8_t>(i));
+    }
+  }
+
+  // A zero-length inline data transfer completes cleanly.
+  {
+    std::vector<frequest::BufferRegion> host_buf;
+    host_buf.emplace_back().buffer(frequest::Buffer::WithData({})).offset(0).size(0);
+    std::vector<frequest::Request> host_reqs;
+    host_reqs.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(host_buf))));
+    ASSERT_TRUE(host_ep->QueueRequests(std::move(host_reqs)).is_ok());
+
+    std::vector<frequest::BufferRegion> dev_buf;
+    dev_buf.emplace_back().buffer(frequest::Buffer::WithData({})).offset(0).size(0);
+    std::vector<frequest::Request> dev_reqs;
+    dev_reqs.emplace_back(
+        std::move(frequest::Request()
+                      .information(frequest::RequestInfo::WithBulk(frequest::BulkRequestInfo()))
+                      .data(std::move(dev_buf))));
+    ASSERT_TRUE(dev_ep->QueueRequests(std::move(dev_reqs)).is_ok());
+
+    host_handler.ExpectOnCompletion(EndpointHandler::ExpectOnCompletionDirect(0, false));
+    dev_handler.ExpectOnCompletion(EndpointHandler::ExpectOnCompletionDirect(0, false));
+    ASSERT_TRUE(host_ep.HandleOneEvent(host_handler).ok());
+    ASSERT_TRUE(dev_ep.HandleOneEvent(dev_handler).ok());
+  }
+
+  EXPECT_EQ(zx::vmar::root_self()->unmap(reinterpret_cast<zx_vaddr_t>(dev_ptr), 4096), ZX_OK);
+}
+
+// Verifies that a control IN request whose buffer is smaller than the data returned by the
+// device fails with ZX_ERR_BUFFER_TOO_SMALL.
+TEST_F(UsbVirtualBusTest, FidlControlInBufferTooSmallTest) {
+  EnableAndConnect();
+
+  fidl::SyncClient<fendpoint::Endpoint> ep_client(
+      ConnectToEndpoint<fhci::UsbHciService>(static_cast<uint8_t>(0)));
+  EndpointHandler event_handler;
+
+  constexpr size_t kBufferSize = 4;
+  std::vector<frequest::BufferRegion> buffer;
+  buffer.emplace_back()
+      .buffer(frequest::Buffer::WithData(std::vector<uint8_t>(kBufferSize)))
+      .offset(0)
+      .size(kBufferSize);
+  std::vector<frequest::Request> requests;
+  requests.emplace_back(std::move(
+      frequest::Request()
+          .information(frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
+              fdescriptor::UsbSetup()
+                  .bm_request_type(kStandardDeviceIn)
+                  .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kGetDescriptor))
+                  .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
+                  .w_index(0)
+                  .w_length(sizeof(usb_device_descriptor_t)))))
+          .data(std::move(buffer))));
+
+  driver_test().RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { return env.dci_.ExpectControl(); });
+  ASSERT_TRUE(ep_client->QueueRequests(std::move(requests)).is_ok());
+
+  event_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+    ASSERT_EQ(event.completion().size(), 1UL);
+    EXPECT_EQ(event.completion()[0].status(), ZX_ERR_BUFFER_TOO_SMALL);
+  });
+  ASSERT_TRUE(ep_client.HandleOneEvent(event_handler).ok());
+}
+
+// Verifies that a control OUT request whose buffer is smaller than setup.w_length fails with
+// ZX_ERR_BUFFER_TOO_SMALL.
+TEST_F(UsbVirtualBusTest, FidlControlOutBufferTooSmallTest) {
+  EnableAndConnect();
+
+  fidl::SyncClient<fendpoint::Endpoint> ep_client(
+      ConnectToEndpoint<fhci::UsbHciService>(static_cast<uint8_t>(0)));
+  EndpointHandler event_handler;
+
+  constexpr size_t kBufferSize = 4;
+  constexpr uint16_t kSetupLength = 16;
+  std::vector<frequest::BufferRegion> buffer;
+  buffer.emplace_back()
+      .buffer(frequest::Buffer::WithData(std::vector<uint8_t>(kBufferSize)))
+      .offset(0)
+      .size(kBufferSize);
+  std::vector<frequest::Request> requests;
+  requests.emplace_back(std::move(
+      frequest::Request()
+          .information(frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
+              fdescriptor::UsbSetup()
+                  .bm_request_type(kStandardDeviceOut)
+                  .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kSetDescriptor))
+                  .w_value(0)
+                  .w_index(0)
+                  .w_length(kSetupLength))))
+          .data(std::move(buffer))));
+
+  ASSERT_TRUE(ep_client->QueueRequests(std::move(requests)).is_ok());
+
+  event_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+    ASSERT_EQ(event.completion().size(), 1UL);
+    EXPECT_EQ(event.completion()[0].status(), ZX_ERR_BUFFER_TOO_SMALL);
+  });
+  ASSERT_TRUE(ep_client.HandleOneEvent(event_handler).ok());
+}
+
+// Verifies that a zero-length control OUT request with no data buffer completes with ZX_OK.
+TEST_F(UsbVirtualBusTest, FidlControlZeroLengthOutTest) {
+  EnableAndConnect();
+
+  fidl::SyncClient<fendpoint::Endpoint> ep_client(
+      ConnectToEndpoint<fhci::UsbHciService>(static_cast<uint8_t>(0)));
+  EndpointHandler event_handler;
+
+  std::vector<frequest::Request> requests;
+  requests.emplace_back(std::move(frequest::Request().information(
+      frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
+          fdescriptor::UsbSetup()
+              .bm_request_type(kStandardDeviceOut)
+              .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration))
+              .w_value(1)
+              .w_index(0)
+              .w_length(0))))));
+
+  driver_test().RunInEnvironmentTypeContext(
+      [](TestEnvironment& env) { return env.dci_.ExpectControl(); });
+  ASSERT_TRUE(ep_client->QueueRequests(std::move(requests)).is_ok());
+
+  event_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+    ASSERT_EQ(event.completion().size(), 1UL);
+    EXPECT_EQ(event.completion()[0].status(), ZX_OK);
+    EXPECT_EQ(event.completion()[0].transfer_size(), 0UL);
+  });
+  ASSERT_TRUE(ep_client.HandleOneEvent(event_handler).ok());
+}
+
+// Verifies that a control request missing its setup packet fails with ZX_ERR_INVALID_ARGS.
+TEST_F(UsbVirtualBusTest, FidlControlMissingSetupTest) {
+  EnableAndConnect();
+
+  fidl::SyncClient<fendpoint::Endpoint> ep_client(
+      ConnectToEndpoint<fhci::UsbHciService>(static_cast<uint8_t>(0)));
+  EndpointHandler event_handler;
+
+  std::vector<frequest::Request> requests;
+  requests.emplace_back(
+      std::move(frequest::Request().information(frequest::RequestInfo::WithBulk({}))));
+  ASSERT_TRUE(ep_client->QueueRequests(std::move(requests)).is_ok());
+
+  event_handler.ExpectOnCompletion([](fidl::Event<fendpoint::Endpoint::OnCompletion>& event) {
+    ASSERT_EQ(event.completion().size(), 1UL);
+    EXPECT_EQ(event.completion()[0].status(), ZX_ERR_INVALID_ARGS);
+  });
+  ASSERT_TRUE(ep_client.HandleOneEvent(event_handler).ok());
 }
 
 }  // namespace

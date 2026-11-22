@@ -3,8 +3,16 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":libasync_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
 
 rustc_library(
     name = "rust",
@@ -34,4 +42,25 @@ rustc_library(
         "//sdk/rust/zx",
         "//third_party/rust_crates/vendor:futures",
     ],
+)
+
+rustc_test(
+    name = "rust_test",
+    crate = ":rust",
+    # Match the original GN output_name ("libasync_lib_test").
+    crate_name = "libasync_lib_test",
+    # In GN, //sdk/lib/driver/runtime/rust/env transitively provides
+    # //src/devices/bin/driver_runtime via link_deps; in Bazel it uses the
+    # system-provided stub //src/devices/lib/driver:driver_runtime.
+    # @bazel2gn:skip
+    link_deps = ["//src/devices/bin/driver_runtime"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//sdk/lib/driver/runtime/rust/env"],
+)
+
+fx_unittest_package(
+    name = "libasync_tests",
+    unit_tests = [":rust_test"],
 )

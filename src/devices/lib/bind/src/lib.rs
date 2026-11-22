@@ -14,4 +14,5 @@ mod errors;
 pub mod interpreter;
 pub mod linter;
 pub mod parser;
+#[cfg(not(target_os = "fuchsia"))]
 pub mod test;

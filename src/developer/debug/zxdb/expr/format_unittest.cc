@@ -193,7 +193,7 @@ TEST_F(FormatTest, Float) {
   uint8_t buffer[8];
 
   // 32-bit float.
-  float in_float = 3.14159;
+  float in_float = 3.14159f;
   memcpy(buffer, &in_float, 4);
   ExprValue val_float(fxl::MakeRefCounted<BaseType>(BaseType::kBaseTypeFloat, 4, "float"),
                       std::vector<uint8_t>(buffer, &buffer[4]));

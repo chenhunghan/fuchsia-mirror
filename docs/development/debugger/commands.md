@@ -143,7 +143,7 @@ about the new active noun. For example:
     Tracepoint 1 state=enabled hits=0/10 location=MyFunction condition=x > 0 capture=[locals] exprs=[x, y]
     ```
 
-## Verbs
+## Verbs {#verbs}
 
 In zxdb, verbs are used in conjunction with nouns, which specify a zxdb object,
 to perform debugging actions. For a full list of zxdb verbs, see

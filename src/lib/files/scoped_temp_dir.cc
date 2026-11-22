@@ -7,6 +7,7 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 

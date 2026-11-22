@@ -5,11 +5,10 @@
 // https://opensource.org/licenses/MIT
 
 #include <zircon/errors.h>
-#include <zircon/rights.h>
 #include <zircon/types.h>
 
-#include <dev/iommu/bti.h>
-#include <dev/iommu/iommu.h>
+#include <new>
+
 #include <fbl/alloc_checker.h>
 #include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
@@ -17,20 +16,11 @@
 #include <object/bus_transaction_initiator_dispatcher.h>
 #include <object/handle.h>
 
-extern "C" {
-
-zx_status_t cpp_bus_transaction_initiator_dispatcher_create(
-    const iommu::Iommu* iommu, uint64_t bti_id,
+extern "C" zx_status_t cpp_bus_transaction_initiator_dispatcher_create(
+    const void* bti,
     ffi::Uninitialized<KernelHandle<BusTransactionInitiatorDispatcher>>* handle_out) {
-  zx::result<fbl::RefPtr<iommu::Bti>> maybe_bti =
-      const_cast<iommu::Iommu*>(iommu)->CreateBti(bti_id);
-  if (!maybe_bti.is_ok()) {
-    return maybe_bti.error_value();
-  }
-
   fbl::AllocChecker ac;
-  KernelHandle new_handle(
-      fbl::AdoptRef(new (&ac) BusTransactionInitiatorDispatcher(ktl::move(maybe_bti.value()))));
+  KernelHandle new_handle(fbl::AdoptRef(new (&ac) BusTransactionInitiatorDispatcher(bti)));
   if (!ac.check()) {
     return ZX_ERR_NO_MEMORY;
   }
@@ -38,5 +28,3 @@ zx_status_t cpp_bus_transaction_initiator_dispatcher_create(
   handle_out->Initialize(ktl::move(new_handle));
   return ZX_OK;
 }
-
-}  // extern "C"

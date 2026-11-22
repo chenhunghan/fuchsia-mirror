@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use crate::lsm_tree::types::{
-    DefaultOrdLowerBound, DefaultOrdUpperBound, FuzzyHash, LayerKey, MergeType, OrdLowerBound,
-    OrdUpperBound, SortByU64,
+    Coalesce, DefaultOrdLowerBound, DefaultOrdUpperBound, FuzzyHash, LayerKey, MergeType,
+    OrdLowerBound, OrdUpperBound, SortByU64,
 };
 use crate::serialized_types::serialized_key::{KeyDeserializer, KeySerializer, SerializeKey};
 use crate::serialized_types::varint::Buffer;
@@ -98,6 +98,10 @@ impl PartialOrd for TestKey {
         Some(self.cmp(other))
     }
 }
+
+impl<V> Coalesce<V> for TestKey {}
+
+impl<V> Coalesce<V> for i32 {}
 
 impl SortByU64 for i32 {
     fn get_leading_u64(&self) -> u64 {

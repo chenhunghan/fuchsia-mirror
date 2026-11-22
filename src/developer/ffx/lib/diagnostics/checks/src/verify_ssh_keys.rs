@@ -117,7 +117,10 @@ where
             {
                 Ok(k) => Some(k),
                 Err(e) => {
-                    notifier.warn(format!("{e}"))?;
+                    let doc_link = ffx_diagnostics_formatting::doc_link(
+                        "development/tools/ffx/workflows/troubleshoot-ssh-keys",
+                    );
+                    notifier.warn(format!("{e}\nFor SSH key debugging, see: {doc_link}"))?;
                     None
                 }
             };
@@ -203,6 +206,7 @@ mod test {
         let res = check.check_with_notifier(handle.clone(), &mut notifier).await;
         assert!(res.is_ok());
         let err: String = notifier.into();
-        assert!(err.to_string().contains("key verification failed"));
+        assert!(err.contains("key verification failed"));
+        assert!(err.contains("troubleshoot-ssh-keys"));
     }
 }

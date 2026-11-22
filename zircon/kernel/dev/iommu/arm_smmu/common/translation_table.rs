@@ -304,6 +304,13 @@ impl TranslationTableHelper {
         }
 
         // If the page is dirty, flush the cache.
+        //
+        // The `dsb sy` which ends this clean (on arm64) is relied on, in two ways. Levels are
+        // finished leaf first, so the clean of a new table must have completed before the clean
+        // of the parent table which points at it lets the SMMU walk into it. And when unmapping,
+        // the cleared descriptors must be in memory before the TLB invalidation which follows
+        // is issued: the SMMUv2 driver issues it with a register write and no barrier of its
+        // own (the SMMUv3 command queue has one).
         if self.levels[level_ndx].dirty {
             // SAFETY: `table_vaddr` is the non-zero physmap address of this level's table page.
             unsafe {

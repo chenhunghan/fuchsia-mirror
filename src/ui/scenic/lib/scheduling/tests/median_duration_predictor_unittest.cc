@@ -69,5 +69,22 @@ TEST(MedianDurationPredictor, MedianDuringPartialWindow) {
   EXPECT_EQ(predictor.GetPrediction(), kNewTarget);
 }
 
+TEST(MedianDurationPredictor, ResetClearsHistoryAndUpdatesPrediction) {
+  MedianDurationPredictor predictor(zx::msec(16), /*window_size=*/5);
+  predictor.InsertNewMeasurement(zx::msec(40));
+  predictor.InsertNewMeasurement(zx::msec(40));
+  predictor.InsertNewMeasurement(zx::msec(40));
+  EXPECT_EQ(predictor.GetPrediction(), zx::msec(40));
+
+  const zx::duration kResetPrediction = zx::nsec(8'333'333);
+  predictor.Reset(kResetPrediction);
+  EXPECT_EQ(predictor.GetPrediction(), kResetPrediction);
+
+  // Subsequent measurements start from a fresh partial window rather than mixing with stale 40ms
+  // samples.
+  predictor.InsertNewMeasurement(zx::nsec(8'489'396));
+  EXPECT_EQ(predictor.GetPrediction(), zx::nsec(8'489'396));
+}
+
 }  // namespace test
 }  // namespace scheduling

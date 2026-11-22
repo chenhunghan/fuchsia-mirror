@@ -52,6 +52,14 @@
         "descriptor": "CDC + ADB + Fastboot"
     },
     {
+        "pid": "a02d",
+        "descriptor": "Fastboot + VSOCK Bridge"
+    },
+    {
+        "pid": "a02e",
+        "descriptor": "CDC + Fastboot + VSOCK Bridge"
+    },
+    {
         "pid": "4ee0",
         "descriptor": "Fastboot (Fuchsia userspace and Pixel bootloader)"
     },

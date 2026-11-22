@@ -59,7 +59,7 @@ rustc_library("capability_source") {
   ]
   deps = []
   deps += [
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_common",
     "//src/lib/from-enum",
     "//src/sys/lib/cm_rust",
     "//src/sys/lib/cm_types",
@@ -76,7 +76,7 @@ rustc_test("capability_source_test") {
   edition = "2024"
   deps = []
   deps += [
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_common",
     "//src/lib/from-enum",
     "//src/sys/lib/cm_rust",
     "//src/sys/lib/cm_types",
@@ -86,7 +86,8 @@ rustc_test("capability_source_test") {
   if (is_host) {
     deps += [ "//third_party/rust_crates:serde" ]
   }
-  deps += [ "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust" ]
+  deps +=
+      [ "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common" ]
   if (is_host) {
     features = [ "serde" ]
   } else {

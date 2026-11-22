@@ -2,10 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
+    include: [ "syslog/client.shard.cml" ],
     use: [
+        // Inline Vulkan, sysmem, and trace client protocols with `"optional"` availability
+        // (matching `sdk/lib/vulkan/client.shard.cml` and `sdk/lib/trace/use.shard.cml`;
+        // `fuchsia.sysmem.Allocator` is retained for `libvulkan_gfxstream`, which still opens v1
+        // sysmem alongside `fuchsia.sysmem2.Allocator`) so hosts with the overlay disabled need
+        // not route Vulkan or sysmem.
         {
-            protocol: [ "fuchsia.ui.policy.DeviceListenerRegistry" ],
-            from: "parent",
+            protocol: [
+                "fuchsia.sysmem.Allocator",
+                "fuchsia.sysmem2.Allocator",
+                "fuchsia.tracing.provider.Registry",
+                "fuchsia.ui.composition.Allocator",
+                "fuchsia.ui.policy.DeviceListenerRegistry",
+                "fuchsia.vulkan.loader.Loader",
+            ],
             availability: "optional",
         },
     ],

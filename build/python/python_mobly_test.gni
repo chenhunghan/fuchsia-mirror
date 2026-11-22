@@ -157,7 +157,7 @@ import("//build/testing/host_test_data.gni")
 #       }
 #       affordances = {
 #         tracing = {
-#           "implementation" = "fuchsia-controller"
+#           "implementation" = "ffx"
 #         }
 #       }
 #     }
@@ -198,6 +198,13 @@ import("//build/testing/host_test_data.gni")
 #    Whether this test requires a running Fuchsia package server.
 #    Type: boolean
 #    Default: omitted (inherits test_spec default)
+#
+#  produces_perf_results (optional)
+#    Whether this test produces performance results (*.fuchsiaperf.json files).
+#    This is set automatically by python_perf_test(). Set it explicitly for
+#    other tests that publish performance results. See test_spec().
+#    Type: boolean
+#    Default: omitted
 #
 #  multi_fuchsia_device (optional)
 #    Whether a test is a multi-device test (requires 2+ fuchsia devices).
@@ -560,6 +567,7 @@ template("python_mobly_test") {
                              "isolated",
                              "needs_package_server",
                              "package_deps",
+                             "produces_perf_results",
                              "product_bundle",
                              "timeout_secs",
                              "visibility",
@@ -726,6 +734,7 @@ template("python_mobly_test") {
                              [
                                "isolated",
                                "needs_package_server",
+                               "produces_perf_results",
                                "visibility",
                                "timeout_secs",
                              ])

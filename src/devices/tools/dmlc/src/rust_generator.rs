@@ -537,7 +537,7 @@ mod tests {
             "get_string(dict, &make_key(prefix, \"mode\")).as_deref().and_then(MyEnum::from_str).or_else(|| get_uint8(dict, &make_key(prefix, \"mode\")).and_then(MyEnum::from_u8))"
         ));
         assert!(code.contains("pub struct ChildStruct {"));
-        assert!(code.contains("pub struct Test_driverMetadata {"));
+        assert!(code.contains("pub struct TestDriverMetadata {"));
         assert!(
             code.contains("pub fn parse(dict: &fdr::Dictionary, prefix: &str) -> Option<Self>")
         );

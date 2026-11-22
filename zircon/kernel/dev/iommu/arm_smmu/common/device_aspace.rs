@@ -6,8 +6,6 @@
 
 //! ARM SMMU stage-1 device address space.
 
-#[cfg(not(is_kernel))]
-use core::ffi::c_void;
 use core::pin::Pin;
 use core::sync::atomic::Ordering;
 
@@ -16,7 +14,7 @@ use region_alloc::{AllowOverlap, RegionSpan};
 use zx_status::Status;
 
 use super::constants::{PAGE_MASK, PAGE_SHIFT, PAGE_SIZE, PAGE_SIZE_USIZE};
-use super::env::{PinnedVmoSource, SmmuEnv, SmmuPage, SmmuRawMutex};
+use super::env::{PinnedVmoSource, SmmuEnv, SmmuPage, SmmuPinnedVmo, SmmuRawMutex};
 use super::page_cache::PageCache;
 use super::translation_table::{TranslationTableHelper, table_slice};
 use super::vmsav8_64::{
@@ -40,7 +38,155 @@ type Region = region_alloc::Region<SmmuRawMutex>;
 type RegionAllocator = region_alloc::RegionAllocator<SmmuRawMutex>;
 
 /// An allocation in a device's aspace is a `UniquePtr` to a region from our region allocator.
-pub type Allocation = UniquePtr<Region>;
+type Allocation = UniquePtr<Region>;
+
+/// Linear token representing an active stage-1 mapping in a [`DeviceAspace`].
+///
+/// Dropping the underlying region allocation directly would return its IOVA range to the region
+/// allocator while leaving valid page-table descriptors and cached TLB entries in place. A
+/// `MappingAllocation` can only be created by [`DeviceAspace::map`] and can only be disarmed by
+/// [`DeviceAspace::unmap`] (either directly or after storing inside a [`MappedPin`] and extracting
+/// via [`MappedPin::unmap`]).
+///
+/// # Panics
+///
+/// Dropping an unconsumed `MappingAllocation` panics via `assert!` in all build configurations.
+#[must_use = "a MappingAllocation must be passed to DeviceAspace::unmap or MappedPin::new"]
+pub struct MappingAllocation(Option<Allocation>);
+
+impl MappingAllocation {
+    #[inline]
+    fn new(alloc: Allocation) -> Self {
+        Self(Some(alloc))
+    }
+
+    /// Base device virtual address (IOVA) of this mapping.
+    #[inline]
+    pub fn base(&self) -> u64 {
+        self.0.as_ref().expect("MappingAllocation must hold a region").base()
+    }
+
+    /// Size in bytes of this mapping.
+    #[inline]
+    pub fn size(&self) -> u64 {
+        self.0.as_ref().expect("MappingAllocation must hold a region").size()
+    }
+
+    #[inline]
+    fn into_raw(mut self) -> Allocation {
+        self.0.take().expect("MappingAllocation must hold a region")
+    }
+}
+
+impl Drop for MappingAllocation {
+    fn drop(&mut self) {
+        assert!(self.0.is_none(), "MappingAllocation dropped without calling DeviceAspace::unmap");
+    }
+}
+
+/// Pinned memory, together with the mapping (if any) through which a device reaches it.
+///
+/// The memory goes back to its VMO, and from there to the PMM, when the [`SmmuPinnedVmo`] is
+/// dropped. That must not happen while a device can still reach it. So the pin cannot be taken
+/// out of this type on its own: the only way to it is [`MappedPin::unmap`], which first hands the
+/// mapping to the caller's closure and only then gives up the pin, as an [`UnmappedPin`]. Because
+/// the mapping is a linear [`MappingAllocation`], the closure itself cannot accidentally drop it
+/// without calling [`DeviceAspace::unmap`].
+///
+/// What this does not cover is a BTI which bypasses translation: there is no mapping, and what
+/// keeps a device from memory released by a leaked pin is the BTI having been put into fault
+/// mode first. That order is still kept by the order of statements.
+///
+/// # Panics
+///
+/// Dropping a `MappedPin` panics (via `assert!`, including in release builds) if a mapping is
+/// still attached -- including when overwriting an existing value (for example `*pin_mut() = ...`)
+/// or discarding the result of [`MappedPin::take`]. Always consume an attached mapping through
+/// [`MappedPin::unmap`] first.
+#[derive(Default)]
+pub struct MappedPin {
+    vmo: SmmuPinnedVmo,
+    mapping: Option<MappingAllocation>,
+}
+
+impl MappedPin {
+    /// Constructs a `MappedPin` holding nothing.
+    pub const fn empty() -> Self {
+        Self { vmo: SmmuPinnedVmo::empty(), mapping: None }
+    }
+
+    /// Joins a pin to the mapping made for it (`None` for a BTI which does not translate).
+    pub fn new(vmo: SmmuPinnedVmo, mapping: Option<MappingAllocation>) -> Self {
+        Self { vmo, mapping }
+    }
+
+    /// Returns the pin, to look at but not to take.
+    #[inline]
+    pub fn vmo(&self) -> &SmmuPinnedVmo {
+        &self.vmo
+    }
+
+    /// Returns `true` if this holds pinned memory.
+    #[inline]
+    pub fn has_vmo(&self) -> bool {
+        self.vmo.has_vmo()
+    }
+
+    /// Returns the mapping, if there is one.
+    #[inline]
+    pub fn mapping(&self) -> Option<&MappingAllocation> {
+        self.mapping.as_ref()
+    }
+
+    /// Returns `true` if a mapping is attached.
+    #[inline]
+    pub fn has_mapping(&self) -> bool {
+        self.mapping.is_some()
+    }
+
+    /// Takes the contents, leaving this empty.
+    #[inline]
+    pub fn take(&mut self) -> Self {
+        core::mem::take(self)
+    }
+
+    /// Removes the mapping, then gives up the pin.
+    ///
+    /// `unmap` is called with the mapping, if there is one. It must not return until no device
+    /// can reach the memory through it: the descriptors cleared and cleaned, and the TLB
+    /// invalidation completed (`DeviceAspace::unmap` with the BTI's invalidator).
+    pub fn unmap(mut self, unmap: impl FnOnce(MappingAllocation)) -> UnmappedPin {
+        if let Some(mapping) = self.mapping.take() {
+            unmap(mapping);
+        }
+        UnmappedPin(self.vmo.take())
+    }
+}
+
+impl Drop for MappedPin {
+    fn drop(&mut self) {
+        // Dropping a mapping would give its address range back while leaving the device able to
+        // reach memory which is about to be unpinned. `unmap` is the only way out.
+        assert!(self.mapping.is_none(), "MappedPin dropped with its mapping still attached");
+    }
+}
+
+/// Pinned memory which no mapping reaches any more. See [`MappedPin`].
+pub struct UnmappedPin(SmmuPinnedVmo);
+
+impl UnmappedPin {
+    /// Returns `true` if this holds pinned memory.
+    #[inline]
+    pub fn has_vmo(&self) -> bool {
+        self.0.has_vmo()
+    }
+
+    /// Returns the pin, which the caller may now release.
+    #[inline]
+    pub fn into_vmo(self) -> SmmuPinnedVmo {
+        self.0
+    }
+}
 
 /// Trait implemented by SMMU context bank TLB invalidation helpers passed into
 /// [`DeviceAspace::map`], [`DeviceAspace::unmap`], and [`DeviceAspace::free_translation_tables`].
@@ -53,101 +199,6 @@ pub trait TlbInvalidator {
     #[inline]
     fn invalidate_all(&mut self) {
         self.invalidate(0, 0);
-    }
-
-    /// Returns `true` if this invalidator is properly initialized.
-    ///
-    /// The C++ `TlbInvalOp` is a nullable callback/context pair, and `DeviceAspace::Unmap`
-    /// debug-asserts that both are set. A native Rust invalidator (e.g. the one `SmmuBti` passes
-    /// in) borrows the object it invalidates through, so it cannot be "unset" in that sense and
-    /// has nothing to check: this default implementation always returns `true`, which makes the
-    /// corresponding `debug_assert!(tlb_inval_op.is_valid())` in [`DeviceAspace::unmap`] trivially
-    /// true for such invalidators. The check is only meaningful for implementations which wrap a
-    /// nullable callback, such as the `TlbInvalOp` FFI adapter used by host tests, which
-    /// overrides this method.
-    #[inline]
-    fn is_valid(&self) -> bool {
-        true
-    }
-}
-
-/// Callback function pointer type for [`TlbInvalOp`].
-///
-/// Takes the context pointer the user constructed the [`TlbInvalOp`] with, as well as the base
-/// address and size of the region in the device's address space to invalidate. `0` is passed for
-/// `size` in the case that the entire device address space should be invalidated.
-#[cfg(not(is_kernel))]
-pub type TlbInvalCallback = unsafe extern "C" fn(ctx: *mut c_void, base: u64, size: u64);
-
-/// Definition of a callback which can be used to invalidate TLBs at the proper point in
-/// [`DeviceAspace::map`] and [`DeviceAspace::unmap`] operations.
-#[cfg(not(is_kernel))]
-#[repr(C)]
-#[derive(Debug)]
-pub struct TlbInvalOp {
-    cbk: Option<TlbInvalCallback>,
-    ctx: *mut c_void,
-}
-
-#[cfg(not(is_kernel))]
-const _: () = {
-    assert!(core::mem::size_of::<TlbInvalOp>() == 16);
-    assert!(core::mem::align_of::<TlbInvalOp>() == 8);
-};
-
-#[cfg(not(is_kernel))]
-impl TlbInvalOp {
-    /// Constructs a [`TlbInvalOp`] from a C callback function pointer and opaque context pointer.
-    ///
-    /// # Safety
-    ///
-    /// When `cbk` is `Some(f)` and `ctx` is non-null, invoking `f(ctx, base, size)` must be sound
-    /// for all [`TlbInvalOp::invalidate`] calls on the returned [`TlbInvalOp`].
-    #[inline]
-    pub const unsafe fn new(cbk: Option<TlbInvalCallback>, ctx: *mut c_void) -> Self {
-        Self { cbk, ctx }
-    }
-
-    /// Returns `true` if both the callback and context pointer are non-null.
-    #[inline]
-    pub const fn is_valid(&self) -> bool {
-        self.cbk.is_some() && !self.ctx.is_null()
-    }
-
-    /// Invokes the underlying callback to invalidate `[base, base + size)`.
-    #[inline]
-    pub fn invalidate(&mut self, base: u64, size: u64) {
-        let cbk = self.cbk.expect("TlbInvalOp callback must be non-null");
-        assert!(!self.ctx.is_null(), "TlbInvalOp context pointer must be non-null");
-        // SAFETY: `cbk` is `Some` and `self.ctx` is non-null, so the caller of `TlbInvalOp::new`
-        // guaranteed that invoking `cbk(self.ctx, base, size)` is sound.
-        unsafe {
-            cbk(self.ctx, base, size);
-        }
-    }
-
-    /// Invokes the underlying callback with `(0, 0)` to invalidate the entire address space.
-    #[inline]
-    pub fn invalidate_all(&mut self) {
-        self.invalidate(0, 0);
-    }
-}
-
-#[cfg(not(is_kernel))]
-impl TlbInvalidator for TlbInvalOp {
-    #[inline]
-    fn invalidate(&mut self, base: u64, size: u64) {
-        Self::invalidate(self, base, size);
-    }
-
-    #[inline]
-    fn invalidate_all(&mut self) {
-        Self::invalidate_all(self);
-    }
-
-    #[inline]
-    fn is_valid(&self) -> bool {
-        Self::is_valid(self)
     }
 }
 
@@ -196,11 +247,6 @@ impl DeviceAspace {
             return Err(Status::INVALID_ARGS);
         }
 
-        // Temporary porting note: the C++ `DeviceAspace::Create` took the root page from the page
-        // cache first and added the region afterwards, so a failure to add the region destroyed
-        // the object with the root page still in flight: a leaked PMM page in release builds, and
-        // a tripped destructor assert in debug builds. The steps are reordered here.
-        //
         // Pre-allocate the `DeviceAspace` and `RegionAllocator` boxes and add the initial valid
         // address space region to `avail_regions` before checking out `root_tt_page` from
         // `PageCache`. Because `PageCache::drop` debug-asserts `in_flight_pages == 0`, allocating
@@ -244,7 +290,7 @@ impl DeviceAspace {
         perms: u32,
         tlb_inval_op: &mut impl TlbInvalidator,
         location: Option<u64>,
-    ) -> Result<Allocation, Status> {
+    ) -> Result<MappingAllocation, Status> {
         // All requests have to be:
         //
         // 1) page aligned.
@@ -303,6 +349,7 @@ impl DeviceAspace {
         // Now use our `TranslationTableHelper` helper to populate our translation
         // tables. If something goes wrong during this process, hand our allocation
         // off to `unmap` to undo the changes we have made before we get out.
+        let alloc = MappingAllocation::new(alloc);
         let root_tt_page = self.root_tt_page.expect("root_tt_page must be valid during map");
         let alloc_base = alloc.base();
         let alloc_size = alloc.size();
@@ -368,7 +415,8 @@ impl DeviceAspace {
 
     /// Unmaps `alloc` from this device address space, invalidating TLB entries via `tlb_inval_op`
     /// before trimming the page cache.
-    pub fn unmap(&mut self, alloc: Allocation, tlb_inval_op: &mut impl TlbInvalidator) {
+    pub fn unmap(&mut self, alloc: MappingAllocation, tlb_inval_op: &mut impl TlbInvalidator) {
+        let alloc = alloc.into_raw();
         // Start by caching our allocation's device virtual address and size. Then
         // return the allocation to the region allocator.
         //
@@ -380,9 +428,6 @@ impl DeviceAspace {
         // allocation. If it is, we know that the translation table page is no longer
         // in use by any other allocation, and we can put it on the list to return to
         // the PMM after TLB invalidation.
-        // Note: this is only a real check for invalidators which wrap a nullable callback. See
-        // `TlbInvalidator::is_valid`.
-        debug_assert!(tlb_inval_op.is_valid());
         debug_assert_eq!(alloc.base() & PAGE_MASK, 0);
         debug_assert_eq!(alloc.size() & PAGE_MASK, 0);
 
@@ -563,9 +608,9 @@ impl DeviceAspace {
 
     /// Returns the physical address of the root (`L0`) translation table page.
     ///
-    /// Must not be called after [`DeviceAspace::free_translation_tables`]: as in the C++
-    /// `GetRootPaddr()`, it is a (debug-asserted) error to ask for the root table of an address
-    /// space which no longer has one. Release builds return `0` in that case.
+    /// Must not be called after [`DeviceAspace::free_translation_tables`]: it is a (debug-asserted)
+    /// error to ask for the root table of an address space which no longer has one. Release builds
+    /// return `0` in that case.
     #[inline]
     pub fn root_tt_paddr(&self) -> u64 {
         debug_assert!(self.root_tt_page.is_some());
@@ -576,6 +621,14 @@ impl DeviceAspace {
     #[inline]
     pub const fn page_cache(&self) -> &PageCache {
         &self.page_cache
+    }
+
+    /// Limits the number of further translation table pages this address space may fetch from the
+    /// PMM. See [`PageCache::set_test_alloc_budget`].
+    #[cfg(ktest)]
+    #[inline]
+    pub fn set_test_alloc_budget(&mut self, budget: Option<u32>) {
+        self.page_cache.set_test_alloc_budget(budget);
     }
 
     /// Returns a reference to this address space's [`RegionAllocator`].

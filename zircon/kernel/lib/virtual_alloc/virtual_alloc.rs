@@ -15,6 +15,7 @@ use crate::vm::pmm;
 use crate::vm::vm_aspace::VmAspace;
 use bitmap::{Bitmap, RawBitmapGeneric};
 use bitmap_storage::BitmapStorage;
+use core::mem::DropGuard;
 use debug::ltracef;
 use fbl::Canary;
 use page_list::{OwnedPage, PageList};
@@ -28,6 +29,7 @@ mod page_list {
     use crate::vm::page::{VmPage, VmPageDoublyLinkedList, VmPagePtr};
     use crate::vm::page_state::VmPageState;
     use crate::vm::pmm;
+    use crate::vm::pmm_node::PmmOptDelayReuse;
     use core::ops::Deref;
     use core::pin::Pin;
     use core::ptr::NonNull;
@@ -159,11 +161,11 @@ mod page_list {
         }
 
         /// Frees all pages currently in `self` back to the PMM, leaving `self` empty.
-        pub fn free_pages(self: Pin<&mut Self>) {
+        pub fn free_pages(self: Pin<&mut Self>, delay_reuse: PmmOptDelayReuse) {
             if !self.list.is_empty() {
                 // SAFETY: All pages in `self` are valid allocated PMM pages owned by `self`.
                 unsafe {
-                    pmm::free_list(self.project().list);
+                    pmm::node().free_list(self.project().list, delay_reuse);
                 }
             }
         }
@@ -186,7 +188,7 @@ mod page_list {
     #[pinned_drop]
     impl PinnedDrop for PageList {
         fn drop(self: Pin<&mut Self>) {
-            self.free_pages();
+            self.free_pages(PmmOptDelayReuse::Default);
         }
     }
 
@@ -631,8 +633,10 @@ impl VirtualAlloc {
         }
         // As this is the kernel aspace we cannot tolerate enlarging the operation, as other CPUs
         // may be accessing the nearby portions and we cannot trigger faults.
-        // SAFETY: The virtual range `[vaddr, vaddr + pages * page::SIZE)` is owned by this
-        // `VirtualAlloc` and is being freed.
+        // SAFETY: `[vaddr, vaddr + pages * page::SIZE)` lies within the kernel aspace, nothing
+        // relies on it staying mapped, and no Rust reference into it is live. `enlarge` is
+        // `ARCH_UNMAP_OPTION_NONE`. Unless `unmap_only_enlarge_on_oom()` is true,
+        // `can_attempt_contiguous_mappings()` is false and the range partly covers no large page.
         let status = unsafe {
             VmAspace::kernel_aspace().arch_aspace().unmap(vaddr, pages, ARCH_UNMAP_OPTION_NONE)
         };
@@ -640,44 +644,33 @@ impl VirtualAlloc {
     }
 
     fn alloc_map_pages(&self, vaddr: usize, num_pages: usize) -> Result<(), Status> {
-        struct Cleanup {
-            vaddr: usize,
-            mapped_count: usize,
-        }
-
-        impl Cleanup {
-            fn cancel(self) {
-                core::mem::forget(self);
-            }
-        }
-
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                if self.mapped_count > 0 {
-                    // SAFETY: The virtual range `[vaddr, vaddr + mapped_count * page::SIZE)` was
-                    // mapped by this call and is being unmapped on failure.
-                    let status = unsafe {
-                        VmAspace::kernel_aspace().arch_aspace().unmap(
-                            self.vaddr,
-                            self.mapped_count,
-                            ARCH_UNMAP_OPTION_NONE,
-                        )
-                    };
-                    assert!(status.is_ok());
-                }
-            }
-        }
-
         const MMU_FLAGS: ArchMmuFlags =
             ARCH_MMU_FLAG_CACHED | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
         assert!(num_pages > 0);
         stack_pin_init!(let alloc_pages = PageList::new());
-        let mut cleanup = Cleanup { vaddr, mapped_count: 0 };
+        // Unmaps the pages mapped so far unless dismissed.
+        let mut mapped_count = DropGuard::new(0, |mapped_count| {
+            if mapped_count > 0 {
+                // SAFETY: `[vaddr, vaddr + mapped_count * page::SIZE)` lies within the kernel
+                // aspace, nothing relies on it staying mapped, and no Rust reference into it is
+                // live. `enlarge` is `ARCH_UNMAP_OPTION_NONE`. Unless
+                // `unmap_only_enlarge_on_oom()` is true, `can_attempt_contiguous_mappings()` is
+                // false and the range partly covers no large page.
+                let status = unsafe {
+                    VmAspace::kernel_aspace().arch_aspace().unmap(
+                        vaddr,
+                        mapped_count,
+                        ARCH_UNMAP_OPTION_NONE,
+                    )
+                };
+                assert!(status.is_ok());
+            }
+        });
 
         if self.can_attempt_contiguous_mappings() {
             let align_pages = 1usize << (self.align_log2 - page::SHIFT);
             if align_pages > 1 {
-                while cleanup.mapped_count + align_pages <= num_pages {
+                while *mapped_count + align_pages <= num_pages {
                     stack_pin_init!(let contiguous_pages = PageList::new());
                     // Being in this path we know that `align_pages` is >1, which can only happen
                     // if our `align_log2` is greater than the system `page::SHIFT`. As such we
@@ -700,16 +693,16 @@ impl VirtualAlloc {
                     // allocated from the PMM.
                     unsafe {
                         VmAspace::kernel_aspace().arch_aspace().map_contiguous(
-                            vaddr + cleanup.mapped_count * page::SIZE,
+                            vaddr + *mapped_count * page::SIZE,
                             paddr,
                             align_pages,
                             MMU_FLAGS,
                         )?;
                     }
-                    cleanup.mapped_count += align_pages;
+                    *mapped_count += align_pages;
                 }
-                if cleanup.mapped_count == num_pages {
-                    cleanup.cancel();
+                if *mapped_count == num_pages {
+                    DropGuard::dismiss(mapped_count);
                     alloc_pages.as_mut().forget_pages();
                     return Ok(());
                 }
@@ -718,7 +711,7 @@ impl VirtualAlloc {
 
         // Allocate any remaining pages.
         stack_pin_init!(let remaining_pages = PageList::new());
-        remaining_pages.as_mut().alloc_pages(num_pages - cleanup.mapped_count, 0)?;
+        remaining_pages.as_mut().alloc_pages(num_pages - *mapped_count, 0)?;
 
         // Place them specifically at the end of any already allocated pages. This ensures that if
         // we should iterate too far we will hit a null page and not one of our contiguous pages to
@@ -727,10 +720,10 @@ impl VirtualAlloc {
         let mut current_page = alloc_pages.as_mut().splice_back(remaining_pages.as_mut());
         assert!(current_page.is_valid());
 
-        while cleanup.mapped_count < num_pages {
+        while *mapped_count < num_pages {
             const BATCH_PAGES: usize = 128;
             let mut paddrs = [PAddr(0); BATCH_PAGES];
-            let map_pages = core::cmp::min(BATCH_PAGES, num_pages - cleanup.mapped_count);
+            let map_pages = core::cmp::min(BATCH_PAGES, num_pages - *mapped_count);
             assert!(map_pages > 0);
             for paddr in paddrs.iter_mut().take(map_pages) {
                 assert!(current_page.is_valid());
@@ -743,20 +736,20 @@ impl VirtualAlloc {
             // `VirtualAlloc`, and `paddrs` contains `map_pages` valid physical addresses.
             unsafe {
                 VmAspace::kernel_aspace().arch_aspace().map(
-                    vaddr + cleanup.mapped_count * page::SIZE,
+                    vaddr + *mapped_count * page::SIZE,
                     paddrs.as_mut_ptr(),
                     map_pages,
                     MMU_FLAGS,
                     ExistingEntryAction::Error,
                 )?;
             }
-            cleanup.mapped_count += map_pages;
+            *mapped_count += map_pages;
         }
         // If we successfully mapped everything we should have iterated all the way to the end of
         // the pages we allocated.
         assert!(!current_page.is_valid());
 
-        cleanup.cancel();
+        DropGuard::dismiss(mapped_count);
         alloc_pages.as_mut().forget_pages();
 
         ltracef!("Mapped {num_pages} pages at {vaddr:x}\n");
@@ -788,6 +781,10 @@ impl VirtualAlloc {
     /// Returns whether or not the allocator will attempt to optimize large allocations with
     /// contiguous allocations and mappings that can get promoted to large pages. It does not
     /// guarantee that it will succeed at doing this though.
+    ///
+    /// # Safety-usable invariant
+    ///
+    /// If this returns false, this allocator maps only base pages.
     pub fn can_attempt_contiguous_mappings(&self) -> bool {
         // Ideally we would like to create the chance of using large pages with aligned allocations
         // and `map_contiguous`, but we can only do this if we can later safely unmap without
@@ -855,6 +852,7 @@ mod tests {
         ARCH_UNMAP_OPTION_NONE, ExistingEntryAction,
     };
     use crate::vm::page_state::{VmPageState, bindings as page_bindings};
+    use crate::vm::pmm_node::PmmOptDelayReuse;
     use crate::vm::scanner::AutoVmScannerDisable;
     use crate::vm::vm_address_region::{VmAddressRegion, flag as vmar_flag};
     use crate::vm::vm_aspace::VmAspace;
@@ -1253,7 +1251,9 @@ mod tests {
         expect_true!(range_empty(vaddr, 240));
 
         // Once we unmap our page we should successfully allocate the original mapping.
-        // SAFETY: `vaddr + 240 * page::SIZE` was mapped above.
+        // SAFETY: The page at `vaddr + 240 * page::SIZE` lies within the kernel aspace, nothing
+        // relies on it staying mapped, and no Rust reference into it is live. It was mapped above
+        // as a single base page and partly covers no large page.
         expect_ok!(unsafe {
             VmAspace::kernel_aspace().arch_aspace().unmap(
                 vaddr + 240 * page::SIZE,
@@ -1443,12 +1443,15 @@ mod tests {
             // size aligned and so no page is a candidate for any other allocation.
             let head_page = temp_pages.as_mut().pop_front().expect("head_page must exist");
             pages.as_mut().push_front(head_page);
-            temp_pages.as_mut().free_pages();
+            temp_pages.as_mut().free_pages(PmmOptDelayReuse::Default);
         }
 
         // A size aligned allocation should still work, as it should fall back to using
         // non-contiguous pages.
         let result = alloc.alloc_pages(ALIGN_PAGES);
+        // Return pages to the tail of the PMM free list rather than the head. Otherwise, we starve
+        // large contiguous allocations.
+        pages.as_mut().free_pages(PmmOptDelayReuse::Yes);
         assert_true!(result.is_ok());
         alloc.free_pages(unwrap_ok!(result), ALIGN_PAGES);
     }

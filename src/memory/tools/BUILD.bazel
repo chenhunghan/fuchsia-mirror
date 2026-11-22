@@ -12,6 +12,8 @@ test_suite(
     tests = [
         "//src/memory/tools/dataclasses_json_lite:dataclasses_json_lite_test",
         "//src/memory/tools/debug_json:debug_json_test",
+        "//src/memory/tools/dupefinder:host_tests",
+        "//src/memory/tools/dupefinder/tests:host_tests",
         "//src/memory/tools/images_json:images_json_test",
         "//src/memory/tools/multidict:multidict_test",
         "//src/memory/tools/smaps:smaps_test",

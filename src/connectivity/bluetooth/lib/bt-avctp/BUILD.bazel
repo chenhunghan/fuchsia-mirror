@@ -61,7 +61,6 @@ rustc_test(
 
 fx_unittest_package(
     name = "bt-avctp-tests",
-    package_name = "bt-avctp-tests",
     max_log_severity = "ERROR",
     unit_tests = [":bt-avctp_test"],
 )

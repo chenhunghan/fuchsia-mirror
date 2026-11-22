@@ -5,5 +5,6 @@ Security Critical: yes
 
 License: Apache-2.0, MIT
 License File: src/LICENSE-APACHE
+License File: src/extra/windows/wix/license.rtf
 License File: src/vte/LICENSE-APACHE
 License File: src/vte/LICENSE-MIT

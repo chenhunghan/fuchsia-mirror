@@ -107,7 +107,7 @@ to pass arguments to an executable.
 
 This option is disabled if console.shell is false.
 
-## zircon.system.pkgfs.cmd=\<command>
+## zircon.system.pkgfs.cmd=\<command> {:#zircon-system-pkgfs-cmd}
 
 This option requests that *command* be run once the blob partition is mounted.
 Any `+` characters in *command* are treated as argument separators, allowing you
@@ -128,7 +128,7 @@ also be mounted as `/system`.
 
 ## zircon.system.pkgfs.file.*path*=\<blobid>
 
-Used with [`zircon.system.pkgfs.cmd`](#zircon.system.pkgfs.cmd), above.
+Used with [`zircon.system.pkgfs.cmd`](#zircon-system-pkgfs-cmd), above.
 
 ## netsvc.netboot=\<bool>
 
@@ -201,7 +201,7 @@ is no prefix so paths are treated as exact relative paths from the root of the
 BOOTFS. e.g. with `userboot.root=pkg/foo` and `userboot.next=bin/app`, the names
 found in the BOOTFS will be `pkg/foo/bin/app`, `pkg/foo/lib/ld.so.1`, etc.
 
-## userboot.shutdown
+## userboot.shutdown {:#userboot-shutdown}
 
 If this option is set, userboot will attempt to power off the machine when the
 process it launches exits. Note if `userboot.reboot` is set then

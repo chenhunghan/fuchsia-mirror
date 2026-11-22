@@ -21,7 +21,6 @@ The steps are:
 1.  [Run the fx set command](#run-the-fx-set-command).
 1.  [Update your Vim startup file](#update-your-vim-startup-file).
 1.  [Restart Vim to configure YouCompleteMe](#restart-vim-to-configure-ycm).
-1.  [Build a compilation database](#build-a-compilation-database).
 
 ### Update your login script {#update-your-login-script}
 
@@ -67,7 +66,7 @@ To configure YouCompleteMe (YCM), you need to source the
 
 Restart your Vim to run the `source $FUCHSIA_DIR/scripts/vim/fuchsia.vim`
 command in your `~/.vimrc` file (see
-[Update your Vim startup file](#update-yout-vim-startup-file)).
+[Update your Vim startup file](#update-your-vim-startup-file)).
 
 To verify that your YCM works, place the cursor on an identifier in a `.cc` or
 `.h` file in Vim, then hit `Ctrl+]` to navigate to the definition of the

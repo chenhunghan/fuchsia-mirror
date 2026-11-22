@@ -5,6 +5,8 @@
 //! Physically contiguous, BTI-pinned, uncached DMA buffers for UFS descriptor lists and command
 //! descriptors.
 
+use core::ptr::{read_volatile, write_volatile};
+use std::{fmt, slice};
 use zx::{self, Bti, BtiOptions, CachePolicy, Pmt, VmarFlags, Vmo};
 
 /// A physically contiguous buffer pinned for DMA and mapped uncached into the root VMAR.
@@ -12,17 +14,18 @@ use zx::{self, Bti, BtiOptions, CachePolicy, Pmt, VmarFlags, Vmo};
 /// Dropping the buffer unmaps it but does not unpin it: if the controller might still access the
 /// memory, closing the PMT handle makes the kernel quarantine the pages instead of freeing them.
 /// Call [`ContiguousDmaBuffer::unpin`] once the controller is known to be quiesced.
-// TODO(https://fxbug.dev/567641541): Move to a library in //src/storage/lib and share with cqhci.
+// TODO(https://fxbug.dev/588008151): Move to a library in //src/storage/lib and share with cqhci.
 pub struct ContiguousDmaBuffer {
-    vmo: Vmo,
+    /// Retained to keep the contiguous VMO handle alive alongside the root-VMAR mapping.
+    _vmo: Vmo,
     pmt: Option<Pmt>,
     phys_address: usize,
     virt_address: usize,
     size: usize,
 }
 
-impl std::fmt::Debug for ContiguousDmaBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ContiguousDmaBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ContiguousDmaBuffer")
             .field("phys_address", &format_args!("{:#x}", self.phys_address))
             .field("size", &self.size)
@@ -75,7 +78,7 @@ impl ContiguousDmaBuffer {
             &vmo,
             0,
             rounded_size as u64,
-            std::slice::from_mut(&mut phys_address),
+            slice::from_mut(&mut phys_address),
         )?;
 
         let root_vmar = fuchsia_runtime::vmar_root_self();
@@ -97,12 +100,13 @@ impl ContiguousDmaBuffer {
             }
         };
 
-        Ok(Self { vmo, pmt: Some(pmt), phys_address, virt_address, size: rounded_size })
+        Ok(Self { _vmo: vmo, pmt: Some(pmt), phys_address, virt_address, size: rounded_size })
     }
 
     /// Returns a reference to the underlying VMO.
+    #[cfg(test)]
     pub fn vmo(&self) -> &Vmo {
-        &self.vmo
+        &self._vmo
     }
 
     /// Returns the base physical address of the contiguous memory buffer.
@@ -111,6 +115,7 @@ impl ContiguousDmaBuffer {
     }
 
     /// Returns the allocated size of the memory buffer.
+    #[cfg(test)]
     pub fn size(&self) -> usize {
         self.size
     }
@@ -139,10 +144,10 @@ impl ContiguousDmaBuffer {
             // accesses, as required for the strongly ordered (`UnCached`) mapping on AArch64.
             unsafe {
                 if width == 8 {
-                    let value = core::ptr::read_volatile(address as *const u64);
+                    let value = read_volatile(address as *const u64);
                     data[index..index + 8].copy_from_slice(&value.to_ne_bytes());
                 } else {
-                    data[index] = core::ptr::read_volatile(address as *const u8);
+                    data[index] = read_volatile(address as *const u8);
                 }
             }
         }
@@ -165,9 +170,9 @@ impl ContiguousDmaBuffer {
                 if width == 8 {
                     let mut chunk = [0u8; 8];
                     chunk.copy_from_slice(&data[index..index + 8]);
-                    core::ptr::write_volatile(address as *mut u64, u64::from_ne_bytes(chunk));
+                    write_volatile(address as *mut u64, u64::from_ne_bytes(chunk));
                 } else {
-                    core::ptr::write_volatile(address as *mut u8, data[index]);
+                    write_volatile(address as *mut u8, data[index]);
                 }
             }
         }

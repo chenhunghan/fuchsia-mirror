@@ -4,7 +4,6 @@
 
 #include "src/lib/metrics_buffer/metrics_buffer.h"
 
-#include <fidl/fuchsia.io/cpp/hlcpp_conversion.h>
 #include <inttypes.h>
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/loop.h>
@@ -56,8 +55,9 @@ std::shared_ptr<MetricsBuffer> MetricsBuffer::Create(uint32_t project_id) {
 
 // static
 std::shared_ptr<MetricsBuffer> MetricsBuffer::Create(
-    uint32_t project_id, std::shared_ptr<sys::ServiceDirectory> service_directory) {
-  return std::shared_ptr<MetricsBuffer>(new MetricsBuffer(project_id, service_directory));
+    uint32_t project_id, fidl::ClientEnd<fuchsia_io::Directory> service_directory) {
+  return std::shared_ptr<MetricsBuffer>(
+      new MetricsBuffer(project_id, std::move(service_directory)));
 }
 
 MetricsBuffer::MetricsBuffer(uint32_t project_id) : project_id_(project_id) {
@@ -66,14 +66,14 @@ MetricsBuffer::MetricsBuffer(uint32_t project_id) : project_id_(project_id) {
 }
 
 MetricsBuffer::MetricsBuffer(uint32_t project_id,
-                             std::shared_ptr<sys::ServiceDirectory> service_directory)
+                             fidl::ClientEnd<fuchsia_io::Directory> service_directory)
     : project_id_(project_id) {
-  SetServiceDirectory(service_directory);
+  SetServiceDirectory(std::move(service_directory));
 }
 
-MetricsBuffer::~MetricsBuffer() { SetServiceDirectory(nullptr); }
+MetricsBuffer::~MetricsBuffer() { SetServiceDirectory({}); }
 
-void MetricsBuffer::SetServiceDirectory(std::shared_ptr<sys::ServiceDirectory> service_directory) {
+void MetricsBuffer::SetServiceDirectory(fidl::ClientEnd<fuchsia_io::Directory> service_directory) {
   LOG(INFO, "SetServiceDirectory is called");
   std::unique_ptr<cobalt::MetricsImpl> logger_to_delete_outside_lock;
   std::unique_ptr<async::Loop> loop_to_stop_outside_lock;
@@ -89,11 +89,9 @@ void MetricsBuffer::SetServiceDirectory(std::shared_ptr<sys::ServiceDirectory> s
       logger_to_delete_outside_lock = std::move(cobalt_logger_);
     }
     ZX_DEBUG_ASSERT(!loop_ && !cobalt_logger_);
-    if (service_directory) {
+    if (service_directory.is_valid()) {
       LOG(INFO, "Creating new cobalt_logger");
       std::unique_ptr<cobalt::MetricsImpl> new_logger;
-      fidl::ClientEnd<fuchsia_io::Directory> directory =
-          fidl::HLCPPToNatural(service_directory->CloneChannel());
       auto loop = std::make_unique<async::Loop>(&kAsyncLoopConfigNoAttachToCurrentThread);
       zx_status_t status = loop->StartThread("MetricsBuffer");
       if (status != ZX_OK) {
@@ -104,13 +102,14 @@ void MetricsBuffer::SetServiceDirectory(std::shared_ptr<sys::ServiceDirectory> s
       }
       sync_completion_t finished;
       // Must create fuchsia_metrics::MetricEventLogger on same dispatcher that it'll use.
-      async::PostTask(loop->dispatcher(), [this, &loop, &directory, &new_logger, &finished] {
-        // MetricsImpl will internally use the directory to reconnect as needed, should we ever lose
-        // connection.
-        new_logger = std::make_unique<cobalt::MetricsImpl>(loop->dispatcher(), std::move(directory),
-                                                           project_id_);
-        sync_completion_signal(&finished);
-      });
+      async::PostTask(loop->dispatcher(),
+                      [this, &loop, &service_directory, &new_logger, &finished] {
+                        // MetricsImpl will internally use the directory to reconnect as needed,
+                        // should we ever lose connection.
+                        new_logger = std::make_unique<cobalt::MetricsImpl>(
+                            loop->dispatcher(), std::move(service_directory), project_id_);
+                        sync_completion_signal(&finished);
+                      });
       sync_completion_wait(&finished, ZX_TIME_INFINITE);
       loop_ = std::move(loop);
       cobalt_logger_ = std::move(new_logger);

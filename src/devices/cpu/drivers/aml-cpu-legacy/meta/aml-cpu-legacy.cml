@@ -20,7 +20,9 @@
     capabilities: [
         { service: "fuchsia.hardware.cpu.ctrl.Service" },
     ],
-    use: [],
+    use: [
+        { service: "fuchsia.hardware.thermal.Service" },
+    ],
     expose: [
         {
             service: "fuchsia.hardware.cpu.ctrl.Service",

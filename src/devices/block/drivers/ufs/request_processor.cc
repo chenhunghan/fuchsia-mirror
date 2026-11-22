@@ -42,6 +42,9 @@ RequestProcessor::Create<TaskManagementRequestProcessor, TaskManagementRequestDe
     Ufs &ufs, zx::unowned_bti bti, const fdf::MmioView mmio, uint8_t entry_count);
 
 void RequestProcessor::ReclaimTimedOutSlotsLocked() {
+  if (controller_.IsHardwarePoweredOff()) {
+    return;
+  }
   std::optional<uint32_t> doorbell;
   ForEachAllocatedSlotLocked(
       [this, &doorbell](uint8_t slot_num, RequestSlot &slot) TA_REQ(slot_lock_) {
@@ -62,7 +65,7 @@ void RequestProcessor::ReclaimTimedOutSlotsLocked() {
 
 zx::result<uint8_t> RequestProcessor::ReserveSlot() {
   std::lock_guard<std::mutex> lock(slot_lock_);
-  if (slot_allocation_blocked_) {
+  if (slot_allocation_blocked_ || controller_.IsHardwarePoweredOff()) {
     // Checked before ReclaimTimedOutSlotsLocked(), which reads the doorbell register: the
     // controller is about to be, or already is, powered down.
     return zx::error(ZX_ERR_BAD_STATE);
@@ -90,6 +93,7 @@ zx::result<uint8_t> RequestProcessor::ReserveSlot() {
 zx::result<> RequestProcessor::ClearSlotLocked(RequestSlot &request_slot) {
   if (request_slot.pmt.is_valid()) {
     zx_status_t status = request_slot.pmt.unpin();
+    request_slot.pinned_page_count = 0;
     if (status != ZX_OK) {
       fdf::error("Failed to unpin IO buffer: {}", zx_status_get_string(status));
       request_slot.result = status;
@@ -149,6 +153,11 @@ zx::result<> RequestProcessor::BlockSlotAllocation(zx::duration drain_timeout) {
     }
   }
   return zx::ok();
+}
+
+void RequestProcessor::CloseSlotAllocationGate() {
+  std::lock_guard<std::mutex> lock(slot_lock_);
+  slot_allocation_blocked_ = true;
 }
 
 void RequestProcessor::UnblockSlotAllocation() {

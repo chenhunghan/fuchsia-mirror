@@ -34,10 +34,12 @@ TouchInjector::TouchInjector(
     fidl::ServerEnd<fuchsia_ui_pointerinjector::Device> device,
     fit::function<void(InternalTouchEvent, StreamId stream_id, const view_tree::Snapshot& snapshot)>
         inject,
-    fit::function<void()> on_channel_closed)
+    fit::function<void()> on_channel_closed,
+    fit::function<fit::deferred_action<fit::closure>()> begin_batch)
     : Injector(std::move(snapshot_holder), std::move(inspect_node), std::move(settings),
                std::move(viewport), std::move(device), std::move(on_channel_closed)),
-      inject_(std::move(inject)) {
+      inject_(std::move(inject)),
+      begin_batch_(std::move(begin_batch)) {
   FX_DCHECK(inject_);
   FX_DCHECK(settings.device_type == fuchsia_ui_pointerinjector::wire::DeviceType::kTouch);
 }
@@ -101,6 +103,13 @@ void TouchInjector::CancelStream(uint32_t pointer_id, StreamId stream_id,
   inject_(CreateCancelEvent(settings.device_id, pointer_id, settings.context_koid,
                             settings.target_koid),
           stream_id, snapshot);
+}
+
+fit::deferred_action<fit::closure> TouchInjector::BeginBatch() {
+  if (begin_batch_) {
+    return begin_batch_();
+  }
+  return Injector::BeginBatch();
 }
 // LINT.ThenChange(//src/ui/scenic/lib/input/dso/touch_injector.cc)
 

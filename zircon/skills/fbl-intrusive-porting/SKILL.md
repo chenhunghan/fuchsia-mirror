@@ -25,6 +25,7 @@ learned during the porting of `SinglyLinkedList`.
 Intrusive lists manipulate pointers inside shared objects. Creating a mutable
 reference (`&mut Node`) to a shared object violates Rust's aliasing rules and is
 undefined behavior.
+
 * **Solution**: Use `core::cell::UnsafeCell` for the `next` (and `prev`)
   pointers in the node state. This allows mutating them via shared references
   (`&self`).
@@ -35,12 +36,14 @@ undefined behavior.
 To avoid conflicts when an object participates in multiple types of containers
 (e.g., both a singly and doubly linked list), derive macros should use
 container-specific helper attributes.
+
 * **Pattern**: Use `#[sll_node]` for `SinglyLinkedList`, and plan for
   `#[dll_node]` for `DoublyLinkedList`, rather than a generic `#[node]`.
 
 ### 3. Safe vs. Unsafe APIs
 Prioritize safe APIs for managed pointers and clearly mark unsafe operations for
 raw pointers.
+
 * **Pattern**: Use short, clean names for safe operations (e.g., `push_front`
   taking `UniquePtr` or `RefPtr`). Use a `_raw` suffix for unsafe operations
   taking raw pointers (e.g., `push_front_raw`).
@@ -49,6 +52,7 @@ raw pointers.
 Operations at a specific position (like `insert_after` or `erase_next`) are
 inherently unsafe if they take raw pointers, as the compiler cannot verify
 membership in the container.
+
 * **Solution**: Implement a `CursorMut` API. A cursor borrows the list mutably
   and points to a specific element. Operations on the cursor can be safe because
   the borrow checker ensures list integrity.
@@ -56,12 +60,14 @@ membership in the container.
 ### 5. Systematic Testing Across Pointer Types
 To ensure all operations work correctly for all supported pointer types, use
 declarative macros (`macro_rules!`) to generate a suite of tests for each type.
+
 * **Pattern**: Generate a separate module for each pointer type inside the macro
   to avoid name collisions without external crates.
 
 ### 6. Destructor Checks (Address Sensitivity)
 Since intrusive lists store pointers to objects, destroying an object while it
 is still in a list causes dangling pointers.
+
 * **Solution**: Implement `Drop` for the Node struct with a
   `debug_assert!(!self.in_container())`. This catches premature destruction of
   stack-allocated objects in debug builds.
@@ -70,6 +76,7 @@ is still in a list causes dangling pointers.
 If your container supports constant-time size tracking, and you pass the size to
 the iterator to support `ExactSizeIterator`, beware of operations like
 `split_after` where a new container is created with an initial size of 0.
+
 * **Pitfall**: Calling `iter().count()` or driving the iterator on such a
   container will cause the iterator's size counter to underflow (panicking in
   debug mode) or yield wrong results if `count()` is optimized to use `len()`.
@@ -81,6 +88,7 @@ the iterator to support `ExactSizeIterator`, beware of operations like
 If you have a marker trait (like `SizeTracker`) and all its implementations are
 trivial to clone, make the trait inherit from `Clone` (`trait SizeTracker:
 Clone`).
+
 * **Benefit**: This eliminates the need for duplicate `impl` blocks or complex
   `where S: SizeTracker + Clone` bounds in the container implementation.
 
@@ -88,6 +96,7 @@ Clone`).
 When manipulating raw pointers in intrusive structures, `unsafe` raw pointer
 dereferences and cell mutations can quickly clutter mutator methods, making the
 code error-prone and difficult to review.
+
 * **Pattern**: Encapsulate all raw pointer dereferencing and `UnsafeCell`
   mutations inside extremely localized **private node helper methods**
   (`get_next`, `set_next`, `get_prev`, `set_prev`) and container-internal
@@ -101,6 +110,7 @@ code error-prone and difficult to review.
 When sharing intrusive containers across the C++/Rust FFI boundary, both
 languages must be able to hold ownership of objects, and memory must always be
 reclaimed on the side that allocated it.
+
 * **Pattern**:
   1.  Define shared, multi-list containable C++ objects
       (`SharedUniqueObject`/`SharedRefObject`) in a common C++ header/source
@@ -123,6 +133,7 @@ reclaimed on the side that allocated it.
 Unit tests should be as safe and leak-free as possible. However, intrusive
 containers present unique borrow checker challenges when using managed pointer
 types (`UniquePtr`).
+
 * **Pattern**:
   * **Managed Pointers for General Testing**: Prioritize `UniquePtr` and
     `RefPtr` for standard container mutators and cursor tests. They eliminate
@@ -139,7 +150,9 @@ types (`UniquePtr`).
 
 ### 12. Pinned Receivers for Address-Sensitive Containers
 Containers whose sentinel points back at the container itself (such as
-`DoublyLinkedList`) are `!Unpin` and must never move after initialization.
+`DoublyLinkedList` and `WavlTree`) are `!Unpin` and must never move after
+initialization.
+
 * **Pattern**: Every mutating method takes `self: Pin<&mut Self>` (and any other
   list argument, e.g. `splice(other: Pin<&mut DoublyLinkedList<..>>)`, is also
   pinned). Read-only methods keep taking `&self`, which works through `Pin`'s
@@ -152,33 +165,47 @@ Containers whose sentinel points back at the container itself (such as
 * **Usage**: Callers never need `unsafe { list.get_unchecked_mut() }`. Pin the
   list with `stack_pin_init!(let list = ...)` or a `#[pin]` struct field
   projection, and reborrow with `as_mut()` for each mutation:
+
   ```rust
   stack_pin_init!(let list = DoublyLinkedList::<UniquePtr<Foo>>::new());
   list.as_mut().push_back(UniquePtr::try_new(Foo::new(1)).unwrap());
   while let Some(foo) = list.as_mut().pop_front() { /* ... */ }
   ```
+
   Helper functions should accept `Pin<&mut DoublyLinkedList<..>>` (and
   `Option<Pin<&mut ..>>`, reborrowed via `as_mut().map(Pin::as_mut)`) rather
   than `&mut DoublyLinkedList<..>`.
+
+* **Read-only Lookups**: Provide `&self` lookups returning a read-only `Cursor`
+  (e.g. `WavlTree::{find_cursor, lower_bound, upper_bound}`, with
+  `Cursor::{move_next, move_prev}`) alongside `_mut` variants taking `self:
+  Pin<&mut Self>` and returning a `CursorMut` (`find_cursor_mut`,
+  `lower_bound_mut`, `upper_bound_mut`), so pure searches never need a pinned
+  mutable borrow and only sites that erase through the cursor use the `_mut`
+  form.
 * **Pinned Elements**: Pinning the container alone does not stop safe code from
   `mem::swap`/`replace`-ing a *linked element* (and therefore its embedded node
   pointers) through a `&mut` element reference. To prevent this:
-  * `DoublyLinkedListNode<T>` contains `PhantomData<PhantomPinned>` and is
-    `!Unpin` (the `PhantomData` wrapper keeps the node FFI-safe; a bare
-    `PhantomPinned` trips `improper_ctypes` in `extern` signatures). Element
-    types that use `#[pin_data]` must mark their node field(s) `#[pin]`
+  * `DoublyLinkedListNode<T>` and `WavlTreeNode<T>` contain
+    `PhantomData<PhantomPinned>` and are `!Unpin` (the `PhantomData` wrapper
+    keeps the nodes FFI-safe; a bare `PhantomPinned` trips `improper_ctypes` in
+    `extern` signatures). Element types that use `#[pin_data]` (directly or via
+    `#[guarded]`, which adds it) must mark their node field(s) `#[pin]`
     (otherwise `#[pin_data]`'s generated `Unpin` impl ignores the node and the
-    element becomes `Unpin` again). `#[derive(DoublyLinkedListContainable)]`
-    enforces this at compile time: it rejects `#[dll_node]` fields on
-    `#[pin_data]` structs that are not also marked `#[pin]` (place the derive
-    above `#[pin_data]` so it can see the attribute). Types without
+    element becomes `Unpin` again). `#[derive(DoublyLinkedListContainable)]` and
+    `#[derive(WavlTreeContainable)]` enforce this at compile time: they reject
+    `#[dll_node]` / `#[wavl_node]` fields on `#[pin_data]` / `#[guarded]`
+    structs that are not also marked `#[pin]` (place the derive above
+    `#[pin_data]` / `#[guarded]` so it can see the attribute). Types without
     `#[pin_data]` inherit `!Unpin` automatically.
-  * Mutable element accessors (`front_mut`, `back_mut`, `iter_mut`,
-    `forward_iter_mut`, `reverse_iter_mut`, `CursorMut::get_mut`) return
-    `Pin<&mut P::Target>` (or iterators yielding it). Mutate element fields via
-    `#[pin_data]` projection, e.g.
-    `*list.as_mut().front_mut().unwrap().project().value = 1;`, and give element
-    methods that mutate `self: Pin<&mut Self>` receivers.
+  * Mutable element accessors on unordered containers like `DoublyLinkedList`
+    (`front_mut`, `back_mut`, `iter_mut`, `forward_iter_mut`,
+    `reverse_iter_mut`, `CursorMut::get_mut`) return `Pin<&mut P::Target>` (or
+    iterators yielding it). Mutate element fields via `#[pin_data]` projection,
+    e.g. `*list.as_mut().front_mut().unwrap().project().value = 1;`, and give
+    element methods that mutate `self: Pin<&mut Self>` receivers. `WavlTree`
+    omits mutable element accessors entirely, since mutating an element in place
+    could change its key and break the tree's ordering.
 * **Exclusive Access (`MutPtr`)**: The mutable element accessors are only
   available when `P: MutPtr`. `MutPtr` is an `unsafe` marker trait asserting
   that exclusive access to the container implies exclusive access to each

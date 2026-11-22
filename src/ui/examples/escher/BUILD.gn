@@ -44,7 +44,8 @@ renamed_binary("rainfall_bin_on_fb") {
   source_deps = [ "rainfall:rainfall_on_fb" ]
 }
 
-fuchsia_package_with_single_component("escher_rainfall_on_fb") {
+fuchsia_component("escher_rainfall_on_fb_component") {
+  component_name = "escher_rainfall_on_fb"
   manifest = "meta/escher_examples_on_fb.cml"
   deps = [
     ":flat_color_correction.frag",
@@ -57,13 +58,18 @@ fuchsia_package_with_single_component("escher_rainfall_on_fb") {
   ]
 }
 
+fuchsia_package("escher_rainfall_on_fb") {
+  deps = [ ":escher_rainfall_on_fb_component" ]
+}
+
 renamed_binary("rainfall_bin_on_scenic") {
   dest = "bin/escher_examples"
   source = "$root_out_dir/rainfall_on_scenic"
   source_deps = [ "rainfall:rainfall_on_scenic" ]
 }
 
-fuchsia_package_with_single_component("escher_rainfall_on_scenic") {
+fuchsia_component("escher_rainfall_on_scenic_component") {
+  component_name = "escher_rainfall_on_scenic"
   manifest = "meta/escher_examples_on_scenic.cml"
   deps = [
     ":flat_color_correction.frag",
@@ -74,4 +80,8 @@ fuchsia_package_with_single_component("escher_rainfall_on_scenic") {
     "//src/lib/vulkan:vulkan_validation_layers",
     "//src/lib/vulkan/swapchain:image_pipe_swapchain_layer",
   ]
+}
+
+fuchsia_package("escher_rainfall_on_scenic") {
+  deps = [ ":escher_rainfall_on_scenic_component" ]
 }

@@ -119,9 +119,10 @@ def dts_compile(args: argparse.Namespace, extra_dtc_args: list[str]) -> bool:
     cmd_args = [
         args.dtc_path,
         "--force",
-        "--out-dependency=" + args.dep_file,
-        "--out=" + args.dest_file,
     ]
+    if args.dep_file != "-":
+        cmd_args.append("--out-dependency=" + args.dep_file)
+    cmd_args.append("--out=" + args.dest_file)
     # An --include for each file listed in the includes_file
     cmd_args.extend(
         ["--include=" + line.strip() for line in args.includes_file]

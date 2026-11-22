@@ -97,4 +97,12 @@ message Params {
 
   // Kernel command-line arguments to pass on boot.
   repeated string zircon_args = 20;
+
+  // By default, tests that produce performance results are put into separate
+  // shards from other tests. The names of these shards have the "perf:"
+  // prefix. Each test in these shards is run only once within the shard
+  // (unless it's multiplied), so that failures can be retried by re-running
+  // the whole shard.
+  // Set this to put these tests in the same shards as other tests instead.
+  bool disable_separate_perf_shards = 21;
 }

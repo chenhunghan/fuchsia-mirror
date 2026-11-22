@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "efi",
+    srcs = ["guids.c"],
+    visibility = [
+        "//src/firmware/gigaboot:__subpackages__",
+        "//src/lib/zbitl:__subpackages__",
+        "//zircon/kernel:__subpackages__",
+    ],
+    deps = [":headers"],
+)
+
+fx_cc_library(
+    name = "efi-bindgen-c",
+    srcs = [
+        "efi_bindgen.c",
+        "efi_bindgen.h",
+    ],
+    implementation_deps = [":headers"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/efi/boot-services.h",
+        "include/efi/global-variable.h",
+        "include/efi/protocol/block-io.h",
+        "include/efi/protocol/device-path.h",
+        "include/efi/protocol/device-path-to-text.h",
+        "include/efi/protocol/disk-io.h",
+        "include/efi/protocol/driver-binding.h",
+        "include/efi/protocol/file.h",
+        "include/efi/protocol/graphics-output.h",
+        "include/efi/protocol/ip6.h",
+        "include/efi/protocol/loaded-image.h",
+        "include/efi/protocol/managed-network.h",
+        "include/efi/protocol/pci-root-bridge-io.h",
+        "include/efi/protocol/serial-io.h",
+        "include/efi/protocol/service-binding.h",
+        "include/efi/protocol/shell-parameters.h",
+        "include/efi/protocol/simple-file-system.h",
+        "include/efi/protocol/simple-network.h",
+        "include/efi/protocol/simple-text-input.h",
+        "include/efi/protocol/simple-text-output.h",
+        "include/efi/protocol/tcg2.h",
+        "include/efi/protocol/tcp6.h",
+        "include/efi/protocol/usb-io.h",
+        "include/efi/runtime-services.h",
+        "include/efi/system-table.h",
+        "include/efi/types.h",
+        "include/efi/zircon.h",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # All headers use `#include <zircon/compiler.h>`. On Fuchsia in Bazel,
+        # `<zircon/compiler.h>` is provided by the sysroot, whereas depending on
+        # `//zircon/system/public` shadows sysroot's `<zircon/syscalls.h>` in
+        # downstream consumers (https://fxbug.dev/457448700).
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+    ],
+)

@@ -4,11 +4,11 @@ description: >
   Performs an end-to-end migration of GN packages to Bazel using Planter,
   covering pre-migration checks, workspace branching, migration package
   selection from the control table, package migration/verification, CL
-  creation, and status reporting. Use this skill whenever the user
-  asks to migrate targets using Planter (e.g., "migrate X using planter",
-  "migrate the next X targets", "migrate targets in using planter"), run the
-  automated GN-to-Bazel package migration workflow, or migrate packages from
-  the control table.
+  creation, and status reporting. Use this skill whenever the user asks to
+  migrate targets using Planter (e.g., "migrate X using planter", "migrate the
+  next X targets", "migrate targets in using planter"), run the automated
+  workflow for GN-to-Bazel package migration, or migrate packages from the
+  control table.
 ---
 
 ## Terminology
@@ -339,9 +339,9 @@ re-uploading).
       the user which aggregation `test_suite()` (or where a new one, with a
       matching `bazel_test_suite()` in `BUILD.gn`, should be added if none
       exists) the package's `test_suite()`(s) should be added to, and suggest
-      asking the Build team if they do not know; in unattended Planter runs,
-      report the unresolved finding in `CoderReport.disputed_findings` and
-      `summary` for the reviewer.
+      asking a member of //build/bazel/BAZEL_OWNERS if they do not know; in
+      unattended Planter runs, report the unresolved finding in
+      `CoderReport.disputed_findings` and `summary` for the reviewer.
 
 6.  **Pass the model flags to Planter only as the user asks.**
     * Every `planter run` and `planter fleet` command that runs Planter's agents
@@ -397,8 +397,7 @@ Refer to `references/migration_package_selection.md` to select the **migration
 packages** and split them into **migration groups**.
 
   * Never select packages under the excluded directories listed in
-    `references/migration_package_selection.md` (`//zircon` and
-    `//src/zircon`).
+    `references/migration_package_selection.md` (`//zircon` and `//src/zircon`).
   * If this step fails, it's a **STOP** condition.
 
 ### Bazel Migration and CL Creation

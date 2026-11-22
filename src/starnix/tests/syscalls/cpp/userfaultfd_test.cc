@@ -30,7 +30,6 @@
 #include <linux/userfaultfd.h>
 
 #include "gtest/gtest.h"
-#include "src/lib/files/file.h"
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/proc_test_base.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
@@ -154,16 +153,7 @@ TEST(UffdTest, NoOperationsBeforeInit) {
   EXPECT_EQ(errno, EPERM);
 }
 
-class UffdProcTest : public ProcTestBase {
- public:
-  std::optional<test_helper::MemoryMappingExt> FindMemoryMappingInSmaps(uintptr_t addr) const {
-    std::string smaps;
-    if (!files::ReadFileToString(proc_path() + "/self/smaps", &smaps)) {
-      return std::nullopt;
-    }
-    return test_helper::find_memory_mapping_ext(addr, smaps);
-  }
-};
+using UffdProcTest = ProcTestBase;
 
 TEST_F(UffdProcTest, Register) {
   const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
@@ -178,7 +168,8 @@ TEST_F(UffdProcTest, Register) {
 
   uffd.register_range(start, len, UFFDIO_REGISTER_MODE_MISSING);
 
-  auto registered_mapping = FindMemoryMappingInSmaps(start);
+  auto registered_mapping = FindMemoryMappingExt(start);
+  ASSERT_TRUE(registered_mapping.has_value());
   ASSERT_TRUE(registered_mapping->ContainsFlag("um"));
 }
 
@@ -195,14 +186,16 @@ TEST_F(UffdProcTest, RegisterPart) {
 
   uffd.register_range(start + page_size, page_size, UFFDIO_REGISTER_MODE_MISSING);
 
-  auto page1 = FindMemoryMappingInSmaps(start);
+  auto page1 = FindMemoryMappingExt(start);
+  ASSERT_TRUE(page1.has_value());
   ASSERT_FALSE(page1->ContainsFlag("um"));
-  auto page2 = FindMemoryMappingInSmaps(start + page_size);
+  auto page2 = FindMemoryMappingExt(start + page_size);
   ASSERT_TRUE(page2.has_value());
   ASSERT_TRUE(page2->ContainsFlag("um"));
   ASSERT_EQ(page2->start, start + page_size);
   ASSERT_EQ(page2->end, start + (2 * page_size));
-  auto page3 = FindMemoryMappingInSmaps(start + (2 * page_size));
+  auto page3 = FindMemoryMappingExt(start + (2 * page_size));
+  ASSERT_TRUE(page3.has_value());
   ASSERT_FALSE(page3->ContainsFlag("um"));
 }
 
@@ -270,13 +263,15 @@ TEST_F(UffdProcTest, SmapsOnFork) {
     uffd.register_range(start, len, UFFDIO_REGISTER_MODE_MISSING);
 
     // The registration isn't reflected in child's smaps
-    auto registered_mapping = FindMemoryMappingInSmaps(start);
+    auto registered_mapping = FindMemoryMappingExt(start);
+    ASSERT_TRUE(registered_mapping.has_value());
     ASSERT_FALSE(registered_mapping->ContainsFlag("um"));
   });
   ASSERT_TRUE(helper.WaitForChildren());
 
   // Instead, it is reflected in the parent's smaps
-  auto registered_mapping = FindMemoryMappingInSmaps(start);
+  auto registered_mapping = FindMemoryMappingExt(start);
+  ASSERT_TRUE(registered_mapping.has_value());
   ASSERT_TRUE(registered_mapping->ContainsFlag("um"));
 }
 
@@ -303,9 +298,11 @@ TEST_F(UffdProcTest, Unregister) {
   // belong to.
   EXPECT_EQ(uffd_a.unregister_range(start, len), 0);
 
-  auto registered_mapping_a = FindMemoryMappingInSmaps(start);
+  auto registered_mapping_a = FindMemoryMappingExt(start);
+  ASSERT_TRUE(registered_mapping_a.has_value());
   ASSERT_FALSE(registered_mapping_a->ContainsFlag("um"));
-  auto registered_mapping_b = FindMemoryMappingInSmaps(start + page_size);
+  auto registered_mapping_b = FindMemoryMappingExt(start + page_size);
+  ASSERT_TRUE(registered_mapping_b.has_value());
   ASSERT_FALSE(registered_mapping_b->ContainsFlag("um"));
 }
 
@@ -327,8 +324,10 @@ TEST_F(UffdProcTest, Close) {
     uffd_b.register_range(start + page_size, page_size, UFFDIO_REGISTER_MODE_MISSING);
   }
 
-  auto registered_mapping_a = FindMemoryMappingInSmaps(start);
-  auto registered_mapping_b = FindMemoryMappingInSmaps(start + page_size);
+  auto registered_mapping_a = FindMemoryMappingExt(start);
+  ASSERT_TRUE(registered_mapping_a.has_value());
+  auto registered_mapping_b = FindMemoryMappingExt(start + page_size);
+  ASSERT_TRUE(registered_mapping_b.has_value());
   ASSERT_NE(registered_mapping_a->start, registered_mapping_b->start);
   ASSERT_TRUE(registered_mapping_a->ContainsFlag("um"));
   ASSERT_FALSE(registered_mapping_b->ContainsFlag("um"));
@@ -788,16 +787,19 @@ TEST_F(UffdProcTest, RegisterThenMove) {
     UffdWrapper uffd;
     uffd.api(UFFD_FEATURE_SIGBUS);
     uffd.register_range(start, len, UFFDIO_REGISTER_MODE_MISSING);
-    auto smaps_init = FindMemoryMappingInSmaps(start);
+    auto smaps_init = FindMemoryMappingExt(start);
+    ASSERT_TRUE(smaps_init.has_value());
     ASSERT_TRUE(smaps_init->ContainsFlag("um"));
 
     void *remapped = mremap(source, len, len, MREMAP_MAYMOVE | MREMAP_DONTUNMAP, 0);
     ASSERT_NE(remapped, MAP_FAILED);
     ASSERT_NE(remapped, source);
 
-    auto smaps_source = FindMemoryMappingInSmaps(start);
+    auto smaps_source = FindMemoryMappingExt(start);
+    ASSERT_TRUE(smaps_source.has_value());
     ASSERT_TRUE(smaps_source->ContainsFlag("um"));
-    auto smaps_remapped = FindMemoryMappingInSmaps(reinterpret_cast<intptr_t>(remapped));
+    auto smaps_remapped = FindMemoryMappingExt(remapped);
+    ASSERT_TRUE(smaps_remapped.has_value());
     ASSERT_FALSE(smaps_remapped->ContainsFlag("um"));
 
     // No sigbus on remapped
@@ -856,7 +858,8 @@ TEST_F(UffdProcTest, SmapsInheritanceOnFork) {
   uffd.register_range(start, len, UFFDIO_REGISTER_MODE_MISSING);
 
   // Reflects in parent's smaps.
-  auto registered_mapping = FindMemoryMappingInSmaps(start);
+  auto registered_mapping = FindMemoryMappingExt(start);
+  ASSERT_TRUE(registered_mapping.has_value());
   ASSERT_TRUE(registered_mapping->ContainsFlag("um"));
 
   test_helper::ForkHelper helper;
@@ -869,13 +872,13 @@ TEST_F(UffdProcTest, SmapsInheritanceOnFork) {
     child_uffd.api(UFFD_FEATURE_SIGBUS);
     child_uffd.register_range(start, page_size, UFFDIO_REGISTER_MODE_MISSING);
 
-    auto first_page = FindMemoryMappingInSmaps(start);
+    auto first_page = FindMemoryMappingExt(start);
     ASSERT_TRUE(first_page.has_value());
     ASSERT_TRUE(first_page->ContainsFlag("um"));
 
     // The second page was only registered in the parent before fork, so it should NOT have "um" in
     // the child's smaps.
-    auto second_page = FindMemoryMappingInSmaps(start + page_size);
+    auto second_page = FindMemoryMappingExt(start + page_size);
     ASSERT_TRUE(second_page.has_value());
     ASSERT_FALSE(second_page->ContainsFlag("um"));
 

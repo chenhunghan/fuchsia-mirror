@@ -4,10 +4,10 @@
 
 use anyhow::{Context as _, Error, format_err};
 use fidl_fidl_test_compatibility::{
-    EchoEchoArraysWithErrorResult, EchoEchoMinimalWithErrorResult, EchoEchoStructWithErrorResult,
-    EchoEchoTableWithErrorResult, EchoEchoUnionPayloadWithErrorRequest,
-    EchoEchoUnionPayloadWithErrorRequestUnknown, EchoEchoVectorsWithErrorResult,
-    EchoEchoXunionsWithErrorResult, EchoEvent, EchoMarker, EchoProxy, EchoRequest,
+    EchoEchoArraysWithErrorResult, EchoEchoFlexibleUnionsWithErrorResult,
+    EchoEchoMinimalWithErrorResult, EchoEchoStructWithErrorResult, EchoEchoTableWithErrorResult,
+    EchoEchoUnionPayloadWithErrorRequest, EchoEchoUnionPayloadWithErrorRequestUnknown,
+    EchoEchoVectorsWithErrorResult, EchoEvent, EchoMarker, EchoProxy, EchoRequest,
     EchoRequestStream, RequestUnion, RequestUnionUnknown, RespondWith, ResponseTable,
     ResponseUnion,
 };
@@ -234,17 +234,17 @@ async fn echo_server(stream: EchoRequestStream) -> Result<(), Error> {
                         responder.send(result).context("Error responding")?;
                     }
                 }
-                EchoRequest::EchoXunions { mut value, forward_to_server, responder } => {
+                EchoRequest::EchoFlexibleUnions { mut value, forward_to_server, responder } => {
                     if !forward_to_server.is_empty() {
                         let echo = connect_to_echo().context("Error connecting to proxy")?;
                         value = echo
-                            .echo_xunions(value, "")
+                            .echo_flexible_unions(value, "")
                             .await
-                            .context("Error calling echo_xunions on proxy")?;
+                            .context("Error calling echo_flexible_unions on proxy")?;
                     }
                     responder.send(value).context("Error responding")?;
                 }
-                EchoRequest::EchoXunionsWithError {
+                EchoRequest::EchoFlexibleUnionsWithError {
                     value,
                     result_err,
                     forward_to_server,
@@ -254,15 +254,15 @@ async fn echo_server(stream: EchoRequestStream) -> Result<(), Error> {
                     if !forward_to_server.is_empty() {
                         let echo = connect_to_echo().context("Error connecting to proxy")?;
                         let result = echo
-                            .echo_xunions_with_error(value, result_err, "", result_variant)
+                            .echo_flexible_unions_with_error(value, result_err, "", result_variant)
                             .await
-                            .context("Error calling echo_struct_with_error on proxy")?;
+                            .context("Error calling echo_flexible_unions_with_error on proxy")?;
                         responder.send(result).context("Error responding")?;
                     } else {
                         let result = if let RespondWith::Err = result_variant {
-                            EchoEchoXunionsWithErrorResult::Err(result_err)
+                            EchoEchoFlexibleUnionsWithErrorResult::Err(result_err)
                         } else {
-                            EchoEchoXunionsWithErrorResult::Ok(value)
+                            EchoEchoFlexibleUnionsWithErrorResult::Ok(value)
                         };
                         responder.send(result).context("Error responding")?;
                     }

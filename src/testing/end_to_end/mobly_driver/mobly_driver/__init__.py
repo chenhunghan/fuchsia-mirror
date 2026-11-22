@@ -13,7 +13,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any, NoReturn, Optional
 
 import logging_utils
@@ -295,7 +295,21 @@ def _execute_test(
     if logging_utils.supports_color():
         test_env["FORCE_COLOR"] = "1"
 
-    with NamedTemporaryFile(mode="w") as tmp_config:
+    with (
+        NamedTemporaryFile(mode="w") as tmp_config,
+        TemporaryDirectory(prefix="mobly_driver_rules_python.") as extract_root,
+    ):
+        # When the Mobly test is a Bazel py_binary() (e.g. from the Bazel
+        # python_mobly_test() rule), its rules_python Stage-1 launcher creates
+        # its venv in a temporary directory, and must then stay alive as the
+        # parent of the actual Python process (`subprocess.call`) to delete
+        # it. Signals sent to `proc` below (e.g. SIGTERM on timeout) would
+        # then only reach the launcher, and the test would be killed without
+        # its cleanup period. Providing a directory that we own and delete
+        # makes the launcher `os.execv()` the test instead, so that `proc` is
+        # the Mobly test process itself. This is ignored by GN .pyz tests.
+        test_env["RULES_PYTHON_EXTRACT_ROOT"] = extract_root
+
         config = driver.generate_test_config()
         print(api_infra.TESTPARSER_PREAMBLE)
         print(config)

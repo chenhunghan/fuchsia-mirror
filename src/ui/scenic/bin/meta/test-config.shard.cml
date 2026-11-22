@@ -52,6 +52,22 @@
             default: false,
         },
         {
+            config: "fuchsia.scenic.ImageImportWorkers",
+            key: "image_import_workers",
+            type: "uint8",
+            availability: "transitional",
+            default: 1,
+        },
+        {
+            // Empty uses the policy defaults listed in `config.shard.cml`.
+            config: "fuchsia.scenic.ImageImportPolicy",
+            key: "image_import_policy",
+            type: "string",
+            max_size: 256,
+            availability: "transitional",
+            default: "",
+        },
+        {
             config: "fuchsia.scenic.ICanHazDisplayId",
             key: "i_can_haz_display_id",
             type: "int64",

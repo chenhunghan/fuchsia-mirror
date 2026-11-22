@@ -1,0 +1,80 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":structured_config_malformed_test"],
+    visibility = ["//src/lib/assembly:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "fail_missing_program_manifest",
+    component_name = "fail_missing_program",
+    manifest = "meta/test_without_program.cml",
+)
+
+fx_component(
+    name = "fail_missing_program",
+    compiled_manifest = ":fail_missing_program_manifest",
+)
+
+fx_component_manifest(
+    name = "fail_bad_runner_manifest",
+    component_name = "fail_bad_runner",
+    manifest = "meta/test_with_fake_runner.cml",
+)
+
+fx_component(
+    name = "fail_bad_runner",
+    compiled_manifest = ":fail_bad_runner_manifest",
+)
+
+# this package should only be depended upon by the test below, including it in a
+# system image should cause product validation to fail
+fx_package(
+    name = "malformed_for_validation_fail",
+    components = [
+        ":fail_bad_runner",
+        ":fail_missing_program",
+    ],
+    # Built under host config as test data for `structured_config_malformed_test`.
+    target_compatible_with = [],
+    validate_structured_config = False,
+)
+
+host_test_data_files(
+    name = "test_asset_data",
+    testonly = True,
+    srcs = [":malformed_for_validation_fail"],
+    dest_dir = "malformed_for_validation_fail",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_rustc_test(
+    name = "structured_config_malformed_test",
+    srcs = ["malformed.rs"],
+    crate_root = "malformed.rs",
+    edition = "2024",
+    rustc_env = {
+        "TEST_META_FAR": "malformed_for_validation_fail/meta.far",
+    },
+    test_data = [":test_asset_data"],
+    deps = [
+        "//src/lib/assembly/structured_config",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+    ],
+)

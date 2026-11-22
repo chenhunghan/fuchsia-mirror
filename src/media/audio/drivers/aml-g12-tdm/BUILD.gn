@@ -60,6 +60,7 @@ source_set("aml-g12-tdm-source") {
   ]
   deps = [
     "//sdk/lib/driver/mmio/cpp",
+    "//sdk/lib/memory_barriers",
     "//src/devices/lib/driver",
     "//src/media/audio/drivers/lib/audio-proto-utils",
     "//src/media/audio/lib/simple-codec",
@@ -98,7 +99,6 @@ fuchsia_cc_driver("aml-g12-tdm-driver") {
 fuchsia_driver_component("aml-g12-tdm") {
   component_name = "aml-g12-tdm"
   deps = [ ":aml-g12-tdm-driver" ]
-  info = "meta/aml-g12-tdm-info.json"
   dml_label = ":aml-g12-tdm-dml"
 }
 
@@ -136,6 +136,7 @@ source_set("aml-g12-tdm-dai-source") {
     "//sdk/lib/driver/mmio/cpp",
     "//sdk/lib/driver/platform-device/cpp",
     "//sdk/lib/fit-promise",
+    "//sdk/lib/memory_barriers",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/devices/bind/fuchsia.amlogic.platform:fuchsia.amlogic.platform_cpp",
     "//src/devices/lib/amlogic",
@@ -144,7 +145,6 @@ source_set("aml-g12-tdm-dai-source") {
   ]
   public_deps = [
     ":aml-tdm-config-device",
-    "//sdk/banjo/fuchsia.hardware.audio:fuchsia.hardware.audio_banjo_cpp",
     "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
     "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_hlcpp",
     "//sdk/lib/async-loop:async-loop-cpp",
@@ -171,7 +171,6 @@ fuchsia_cc_driver("aml-g12-tdm-dai-driver") {
 fuchsia_driver_component("aml-g12-tdm-dai") {
   component_name = "aml-g12-tdm-dai"
   deps = [ ":aml-g12-tdm-dai-driver" ]
-  info = "meta/aml-g12-tdm-dai-info.json"
   dml_label = ":aml-g12-tdm-dai-dml"
 }
 

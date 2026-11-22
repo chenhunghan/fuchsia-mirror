@@ -57,7 +57,7 @@ The timing of the introduction of this RFC is linked to [RFC-0050] in two ways:
   implementation and migration required for [RFC-0050], obviating the need for a
   separate migration.
 
-## Design
+## Design {#design}
 
 ### Syntax {#design-syntax}
 
@@ -392,6 +392,6 @@ ordinals.
 [https://fxbug.dev/42157011]: https://bugs.fuchsia.dev/p/fuchsia/issues/detail?id=7704
 [extensible-method-args]: /docs/contribute/governance/rfcs/0050_syntax_revamp.md#extensible-method-args
 [flattened-name]: /docs/contribute/governance/rfcs/0050_syntax_revamp.md#flattened-name
-[grammar]: /docs/contribute/governance/rfcs/0050_syntax_revamp.md#grammar
-[abi-first]: /docs/contribute/governance/rfcs/0050_syntax_revamp.md#abi-first
+[grammar]: /docs/contribute/governance/rfcs/0050_syntax_revamp.md
+[abi-first]: /docs/contribute/governance/rfcs/0050_syntax_revamp.md#binary-wire-format-first
 [dart-named-params]: https://dart.dev/guides/language/language-tour#named-parameters

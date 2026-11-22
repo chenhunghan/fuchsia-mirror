@@ -101,63 +101,63 @@ TEST(EmptyStructSandwich, CheckBytes) {
   EXPECT_TRUE(ValueToBytes(input, expected));
 }
 
-TEST(XUnion, SerializeAndDeserializeInt32) {
-  SampleXUnionInStruct input;
+TEST(Union, SerializeAndDeserializeInt32) {
+  SampleUnionInStruct input;
   input.xu.set_i(0xdeadbeef);
 
-  EXPECT_TRUE(fidl::Equals(input, RoundTrip<SampleXUnionInStruct>(input)));
+  EXPECT_TRUE(fidl::Equals(input, RoundTrip<SampleUnionInStruct>(input)));
 }
 
-TEST(XUnion, SerializeAndDeserializeSimpleUnion) {
+TEST(Union, SerializeAndDeserializeSimpleUnion) {
   SimpleUnion su;
   su.set_str("hello");
 
-  SampleXUnionInStruct input;
+  SampleUnionInStruct input;
   input.xu.set_su(std::move(su));
 
-  EXPECT_TRUE(fidl::Equals(input, RoundTrip<SampleXUnionInStruct>(input)));
+  EXPECT_TRUE(fidl::Equals(input, RoundTrip<SampleUnionInStruct>(input)));
 }
 
-TEST(XUnion, SerializeAndDeserializeSimpleTable) {
+TEST(Union, SerializeAndDeserializeSimpleTable) {
   SimpleTable st;
   st.set_x(42);
   st.set_y(67);
 
-  SampleXUnionInStruct input;
+  SampleUnionInStruct input;
   input.xu.set_st(std::move(st));
 
-  EXPECT_TRUE(fidl::Equals(input, RoundTrip<SampleXUnionInStruct>(input)));
+  EXPECT_TRUE(fidl::Equals(input, RoundTrip<SampleUnionInStruct>(input)));
 }
 
-TEST(OptionalXUnionInStruct, SerializeAndDeserializeAbsent) {
-  OptionalXUnionInStruct input;
+TEST(OptionalUnionInStruct, SerializeAndDeserializeAbsent) {
+  OptionalUnionInStruct input;
   input.before = "before";
   input.after = "after";
 
-  OptionalXUnionInStruct output = RoundTrip<OptionalXUnionInStruct>(input);
+  OptionalUnionInStruct output = RoundTrip<OptionalUnionInStruct>(input);
   EXPECT_EQ(output.xu.get(), nullptr);
 }
 
-TEST(OptionalXUnionInStruct, SerializeAndDeserializePresent) {
-  auto xu = std::make_unique<SampleXUnion>();
+TEST(OptionalUnionInStruct, SerializeAndDeserializePresent) {
+  auto xu = std::make_unique<SampleUnion>();
   xu->set_i(0xdeadbeef);
 
-  OptionalXUnionInStruct input;
+  OptionalUnionInStruct input;
   input.before = "before";
   input.after = "after";
   input.xu = std::move(xu);
 
-  EXPECT_TRUE(fidl::Equals(input, RoundTrip<OptionalXUnionInStruct>(input)));
+  EXPECT_TRUE(fidl::Equals(input, RoundTrip<OptionalUnionInStruct>(input)));
 }
 
-TEST(XUnionInTable, SerializeAndDeserialize) {
-  SampleXUnion xu;
+TEST(UnionInTable, SerializeAndDeserialize) {
+  SampleUnion xu;
   xu.set_i(0xdeadbeef);
 
-  XUnionInTable input;
+  UnionInTable input;
   input.set_xu(std::move(xu));
 
-  EXPECT_TRUE(fidl::Equals(input, RoundTrip<XUnionInTable>(input)));
+  EXPECT_TRUE(fidl::Equals(input, RoundTrip<UnionInTable>(input)));
 }
 
 TEST(PrimitiveArrayInTable, SerializeAndDeserialize) {

@@ -96,6 +96,13 @@ struct EncodedPtr {
     kAligned = 0x50,  // Encoded value starts at naturally aligned location.
   };
 
+  friend constexpr uint8_t operator|(PtrType type, PtrModifier modifier) {
+    return static_cast<uint8_t>(type) | static_cast<uint8_t>(modifier);
+  }
+  friend constexpr uint8_t operator|(PtrModifier modifier, PtrType type) {
+    return static_cast<uint8_t>(modifier) | static_cast<uint8_t>(type);
+  }
+
   // This can be separately OR'd to indicate that the encoded address is
   // actually the location of the value as for Encoding::kAbsptr.
   static constexpr uint8_t kIndirect = 0x80;
@@ -198,8 +205,8 @@ struct EncodedPtr {
 
     std::optional<EncodedPtr> encoded;
     if (auto read = size == kDynamicSize  //
-                        ? memory.template ReadArray<std::byte>(vaddr, size)
-                        : memory.template ReadArray<std::byte>(vaddr)) {
+                        ? memory.template ReadArray<std::byte>(vaddr)
+                        : memory.template ReadArray<std::byte>(vaddr, size)) {
       uint8_t read_encoding = encoding;
       if (Indirect(encoding) && Modifier(encoding) == kPcrel) {
         // Always sign-extend a relative value.
@@ -210,11 +217,14 @@ struct EncodedPtr {
     if (!encoded) {
       return std::nullopt;
     }
+    if (Signed(encoded->encoding)) {
+      encoded->ptr = std::bit_cast<uint64_t>(encoded->sptr);
+    }
     switch (Modifier(encoding)) {
       case kAbs:
         break;
       case kPcrel:
-        encoded->ptr = vaddr + encoded->sptr;
+        encoded->ptr += vaddr;
         break;
       default:
         return std::nullopt;
@@ -242,8 +252,8 @@ struct EncodedPtr {
             .encoding = encoding,
             .encoded_size = static_cast<uint8_t>(leb->size_bytes),
         };
-        return std::nullopt;
       }
+      return std::nullopt;
     }
     if (Type(encoding) == kUleb128) {
       if (auto leb = Uleb128::Read(bytes)) {
@@ -252,8 +262,8 @@ struct EncodedPtr {
             .encoding = encoding,
             .encoded_size = static_cast<uint8_t>(leb->size_bytes),
         };
-        return std::nullopt;
       }
+      return std::nullopt;
     }
 
     const uint8_t encoded_size = EncodedSize(encoding, address_size);

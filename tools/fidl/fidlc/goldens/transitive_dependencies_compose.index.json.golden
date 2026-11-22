@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
       "data": "test.transitivedependenciescompose",
       "start_offset": 8,
       "end_offset": 42
@@ -14,7 +14,7 @@
       "library_name": "test.middle",
       "referenced_at": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
         "data": "test.middle",
         "start_offset": 51,
         "end_offset": 62
@@ -26,7 +26,7 @@
       "library_name": "test.bottom",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
         "data": "test.bottom",
         "start_offset": 8,
         "end_offset": 19
@@ -36,7 +36,7 @@
       "library_name": "test.middle",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/middle.test.fidl",
         "data": "test.middle",
         "start_offset": 8,
         "end_offset": 19
@@ -48,40 +48,40 @@
       "identifier": "test.bottom/BottomGetFooResponse",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
         "data": "struct {\n        foo Foo;\n    }",
-        "start_offset": 589,
-        "end_offset": 620
+        "start_offset": 108,
+        "end_offset": 139
       }
     },
     {
       "identifier": "test.bottom/Foo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
         "data": "Foo",
-        "start_offset": 175,
-        "end_offset": 178
+        "start_offset": 27,
+        "end_offset": 30
       }
     },
     {
       "identifier": "test.bottom/Bottom",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
         "data": "Bottom",
-        "start_offset": 371,
-        "end_offset": 377
+        "start_offset": 75,
+        "end_offset": 81
       }
     },
     {
       "identifier": "test.middle/Middle",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/middle.test.fidl",
         "data": "Middle",
-        "start_offset": 206,
-        "end_offset": 212
+        "start_offset": 58,
+        "end_offset": 64
       }
     }
   ],
@@ -95,20 +95,20 @@
       "identifier": "test.transitivedependenciescompose/Top",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
         "data": "Top",
-        "start_offset": 229,
-        "end_offset": 232
+        "start_offset": 81,
+        "end_offset": 84
       },
       "methods": [
         {
           "identifier": "GetFoo",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
             "data": "GetFoo",
-            "start_offset": 391,
-            "end_offset": 397
+            "start_offset": 95,
+            "end_offset": 101
           },
           "response_type": {
             "kind": "identifier",
@@ -121,10 +121,10 @@
           "identifier": "test.middle/Middle",
           "referenced_at": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
             "data": "test.middle.Middle",
-            "start_offset": 247,
-            "end_offset": 265
+            "start_offset": 99,
+            "end_offset": 117
           }
         }
       ]

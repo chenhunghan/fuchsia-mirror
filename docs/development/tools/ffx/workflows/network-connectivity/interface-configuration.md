@@ -18,13 +18,52 @@ Use the `lsusb` command to determine if the host sees any USB-attached Fuchsia d
 which reports a VID:PID tuple for any attached device:
 
 ```posix-terminal
-lsusb
+lsusb -d 18d1:
 ```
 
-Look for an entry in the output mentioning `Google Inc. CDC Ethernet`.
+Look for an entry in the output corresponding to your Fuchsia device. Common
+Fuchsia USB Product IDs (PIDs) under Vendor ID `0x18d1` include:
 
-You may see other results corresponding to other Google products whose PID is outside the range
-of Fuchsia PIDs.
+* `0xa020`: CDC Ethernet
+* `0xa025`: ADB only
+* `0xa026`: CDC Ethernet + ADB
+* `0xa027`: CDC Ethernet + Fastboot
+* `0xa028`: USB VSOCK Bridge
+* `0xa029`: CDC Ethernet + USB VSOCK Bridge
+* `0xa02a`: ADB + USB VSOCK Bridge
+* `0xa02b`: CDC Ethernet + ADB + USB VSOCK Bridge
+* `0xa02c`: CDC Ethernet + ADB + Fastboot
+* `0x4ee0` or `0xd00d`: Fastboot (bootloader or userspace Fastboot)
+
+You can also inspect the kernel's `sysfs` USB entries directly to view the
+vendor ID, product ID, serial number, and negotiated link speed without
+invoking `ffx`:
+
+```posix-terminal
+grep -H "18d1" /sys/bus/usb/devices/*/idVendor
+```
+
+For a matching device directory (for example, `/sys/bus/usb/devices/1-2`),
+inspect its attributes:
+
+```posix-terminal
+head -n 1 /sys/bus/usb/devices/1-2/{idVendor,idProduct,serial,speed}
+```
+
+If the device does not appear in `lsusb` or `/sys/bus/usb/devices`, check the
+kernel ring buffer for USB enumeration errors or cable issues (such as a
+charge-only USB cable or unpowered hub):
+
+```posix-terminal
+sudo dmesg | grep -i usb | tail -n 30
+```
+
+You can also inspect the USB bus topology and negotiated speeds (`480M`
+High-Speed or `5000M` SuperSpeed) using:
+
+```posix-terminal
+lsusb -t
+```
 
 ### Caveat: PID=0xa025 {:#caveat}
 
@@ -32,6 +71,32 @@ Some product configurations do not expose a CDC interface in the enumerated Fuch
 An `adb`-only configuration will have a PID of `0xa025`. If you see a Fuchsia device whose PID is
 `0xa025`, it intentionally contains no CDC interface, and thus there’s no corresponding network
 interface to configure.
+
+## Are the USB device node permissions configured? {:#usb-device-permissions}
+
+Even if a Fuchsia device appears in `lsusb` (which reads world-readable `sysfs`
+descriptors), host tools such as `ffx` and `fastboot` must open the underlying
+character device node under `/dev/bus/usb/<BUS>/<DEVICE>` with write
+permissions to communicate over USB Fastboot or USB VSOCK.
+
+Use the bus and device numbers reported by `lsusb -d 18d1:` (for example,
+`Bus 001 Device 015`) to check the permissions on the device node:
+
+```posix-terminal
+ls -l /dev/bus/usb/001/015
+```
+
+If the device node is owned by `root:root` with mode `0644` or `0664` and is
+not writable by your user account, `udev` rules are missing or have not been
+applied. Ensure your user is in the `plugdev` group (`id`), install a `udev`
+rule for Google USB devices (`0x18d1`) if one is not already present, and
+reload `udev`:
+
+```posix-terminal
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", MODE="0660", GROUP="plugdev"' | sudo tee /etc/udev/rules.d/70-fuchsia-usb.rules
+sudo udevadm control --reload-rules
+sudo udevadm trigger --settle --subsystem-match=usb --attr-match=idVendor=18d1
+```
 
 ## Is the CDC interface named correctly? {:#is-the-cdc-interface-named-correctly}
 

@@ -501,7 +501,7 @@ source file to the repository. However, the artifacts are identified in the
 the build, and thus that the product assembly build is hermetic and reproducible
 with regard to the artifacts selected in the `artifact_lock.json` file.
 
-## Implementation
+## Implementation {#implementation}
 
 The design proposed here will first be implemented to [move the workstation
 product integration to a separate repository][rfc0095].
@@ -911,7 +911,7 @@ generalization of a build system to operate asynchronously and distributed.
 * **[Decentralized Product Integration, Artifacts Selection Specification][rfc-spec]** RFC Draft
 * **[Product Assembly From Subassemblies][rfc-subassembly]** RFC Draft
 
-## Appendix
+## Appendix {#appendix}
 
 **Figure 4 - Legend of Global Integration Figure**
 ![Legend of Global Integration Figure][fig4]

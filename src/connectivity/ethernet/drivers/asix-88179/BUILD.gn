@@ -63,7 +63,6 @@ fuchsia_driver_component("asix-88179") {
   component_name = "asix-88179"
   dml_label = ":asix-88179-dml"
   deps = [ ":asix-88179-driver" ]
-  info = "meta/asix-88179-info.json"
 }
 
 fuchsia_driver_package("package") {
@@ -113,7 +112,6 @@ fuchsia_driver_component("fake-asix-88179") {
   testonly = true
   component_name = "fake-asix-88179"
   deps = [ ":fake-asix-88179-driver" ]
-  info = "meta/fake-asix-88179-info.json"
   manifest = "meta/fake-asix-88179.cml"
 }
 

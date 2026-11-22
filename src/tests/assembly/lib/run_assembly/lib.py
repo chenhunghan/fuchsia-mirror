@@ -2,23 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import os
 import subprocess
+
+StrPath = str | os.PathLike[str]
 
 
 def run_product_assembly(
-    ffx_bin,
-    platform,
-    product,
-    board_config,
-    platform_artifacts,
-    legacy_bundle,
-    outdir,
-    gendir,
-    suppress_overrides_warning=False,
-    extra_config=[],
-    capture_output=False,
-    **kwargs,
-):
+    ffx_bin: StrPath,
+    platform: StrPath,
+    product: StrPath,
+    board_config: StrPath,
+    platform_artifacts: StrPath,
+    legacy_bundle: StrPath | None,
+    outdir: StrPath,
+    gendir: StrPath,
+    suppress_overrides_warning: bool = False,
+    extra_config: list[str] = [],
+    capture_output: bool = False,
+    **kwargs: StrPath,
+) -> subprocess.CompletedProcess[bytes]:
     """
     Run `ffx assembly product ...` with appropriate configuration and arguments for host tests.
 
@@ -41,7 +44,7 @@ def run_product_assembly(
         "log.enabled=false",
     ]
 
-    args = [ffx_bin]
+    args: list[StrPath] = [ffx_bin]
     for c in base_config + extra_config:
         args += ["--config", c]
     args += [
@@ -73,4 +76,4 @@ def run_product_assembly(
         args.append("--" + arg_name.replace("_", "-"))
         args.append(value)
 
-    return subprocess.run(args, capture_output)
+    return subprocess.run(args, capture_output=capture_output)

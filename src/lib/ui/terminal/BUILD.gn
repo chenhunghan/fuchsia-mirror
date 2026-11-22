@@ -2,12 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_unittest_package("terminal_lib_tests") {
-  deps = [ ":terminal_test" ]
-}
-
 group("tests") {
   testonly = true
   public_deps = [ ":terminal_lib_tests" ]
@@ -80,4 +74,10 @@ rustc_test("terminal_test") {
          ] + [ "//third_party/rust_crates:anyhow" ]
   inputs = [ "//prebuilt/third_party/fonts/robotomono/RobotoMono-Regular.ttf" ]
   output_name = "terminal_lib_test"
+}
+
+fuchsia_unittest_package("terminal_lib_tests") {
+  package_name = "terminal_lib_tests-gn"
+  component_name = "terminal_lib_tests"
+  deps = [ ":terminal_test" ]
 }

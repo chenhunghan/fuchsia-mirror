@@ -70,7 +70,12 @@ if (is_host) {
       # Ninja is accessed implicitly by the test now.
       "//prebuilt/third_party/ninja/${host_os}-${host_cpu}/ninja",
     ]
-    deps = [ ":client_lib" ]
+    deps = [
+      ":client_lib",
+
+      # Imported lazily by the bazel_tests_json command.
+      "//build/bazel/scripts:bazel_tests_utils",
+    ]
   }
 
   group("host_tests") {
@@ -144,11 +149,13 @@ if (is_host) {
       ":ninja_artifacts",
       "//build/bazel/scripts:build_utils",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("build_api_filter") {
     sources = [ "build_api_filter.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -159,6 +166,7 @@ if (is_host) {
       "//build:*",
       "//build/bazel/scripts:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -169,6 +177,7 @@ if (is_host) {
       ":gn_ninja_outputs",
       "//build/bazel/scripts:build_utils",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -178,6 +187,7 @@ if (is_host) {
       ":gn_ninja_outputs",
       "//build/bazel/scripts:build_utils",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -187,6 +197,7 @@ if (is_host) {
       ":*",
       "//build/ninja_implicit_inputs:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -197,17 +208,20 @@ if (is_host) {
       "//build/beads/scripts:*",
       "//build/ninja_implicit_inputs:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("ninja_artifacts") {
     sources = [ "ninja_artifacts.py" ]
     deps = [ "//build/bazel/scripts:build_utils" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("script_commands") {
     sources = [ "script_commands.py" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -225,5 +239,6 @@ if (is_host) {
       ":script_commands",
       "//build/bazel/scripts:build_utils",
     ]
+    enable_mypy = false
   }
 }

@@ -1370,9 +1370,16 @@ TEST(ResolvedLayerTest, EqualityComparesAllFields) {
   layer2.content = ResolvedLayer::SolidColorContent{.color = {1.f, 1.f, 1.f, 1.f}};
   EXPECT_NE(layer1, layer2);
 
-  // 5. content inner fields (ImageContent image_id)
+  // 5. content inner fields (ImageContent image_id and image)
   layer2 = layer1;
   layer2.content = ResolvedLayer::ImageContent{.image_id = display::ImageId(2)};
+  EXPECT_NE(layer1, layer2);
+
+  layer2 = layer1;
+  layer2.content = ResolvedLayer::ImageContent{
+      .image_id = display::ImageId(1),
+      .image = reinterpret_cast<ImportedImage*>(uintptr_t{0x1000}),
+  };
   EXPECT_NE(layer1, layer2);
 
   // 6. topology_index

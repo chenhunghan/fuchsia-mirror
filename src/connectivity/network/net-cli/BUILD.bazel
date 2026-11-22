@@ -1,0 +1,232 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        ":net-cli-fdomain-tests",
+        ":net-cli-tests",
+    ],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":lib_fdomain_host_test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+_COMMON_SRCS = [
+    "src/capture.rs",
+    "src/filter.rs",
+    "src/lib.rs",
+    "src/opts/capture.rs",
+    "src/opts/dhcpd.rs",
+    "src/opts/dns.rs",
+    "src/opts/filter.rs",
+    "src/opts/mod.rs",
+    "src/ser.rs",
+]
+
+_COMMON_BUILD_FLAGS = ["//build/config/rust/lints:deny_unused_results"]
+
+# @bazel2gn:transformer=deps
+_COMMON_TEST_DEPS = [
+    "//src/connectivity/lib/net-declare",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates/vendor:assert_matches",
+    "//third_party/rust_crates/vendor:pretty_assertions",
+    "//third_party/rust_crates/vendor:proptest",
+    "//third_party/rust_crates/vendor:test-case",
+]
+
+rustc_library(
+    name = "lib",
+    srcs = _COMMON_SRCS,
+    build_flags = _COMMON_BUILD_FLAGS,
+    crate_name = "net_cli",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    # Fuchsia-only because this library depends on Fuchsia-only FIDL flex bindings.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/connectivity/network/net-cli/tests:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust_flex",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust_flex",
+        "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust_flex",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust_flex",
+        "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter_rust_flex",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust_flex",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust_flex",
+        "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers_rust_flex",
+        "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust_flex",
+        "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust_flex",
+        "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust_flex",
+        "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust_flex",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust_flex",
+        "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust_flex",
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/connectivity/lib/fidl_fuchsia_net_neighbor_ext",
+        "//src/connectivity/lib/fidl_fuchsia_net_stack_ext",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/network/lib/pcap:pcap-compile",
+        "//src/developer/lib/writer:lib",
+        "//src/lib/fdomain/client:flex_fidl",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_filter_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_net_matchers_ext",
+        "//src/lib/network/fidl_fuchsia_net_routes_ext",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_library(
+    name = "lib_fdomain",
+    srcs = _COMMON_SRCS,
+    build_flags = _COMMON_BUILD_FLAGS,
+    crate_features = ["fdomain"],
+    crate_name = "net_cli_fdomain",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    visibility = ["//src/connectivity/network/net-cli/ffx:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust_fdomain_flex",
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/connectivity/lib/fidl_fuchsia_net_neighbor_ext:fidl_fuchsia_net_neighbor_ext_fdomain",
+        "//src/connectivity/lib/fidl_fuchsia_net_stack_ext",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/network/lib/pcap:pcap-compile",
+        "//src/developer/lib/writer:lib",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_filter_ext:fidl_fuchsia_net_filter_ext_fdomain",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext:fidl_fuchsia_net_interfaces_ext_fdomain",
+        "//src/lib/network/fidl_fuchsia_net_matchers_ext:fidl_fuchsia_net_matchers_ext_fdomain",
+        "//src/lib/network/fidl_fuchsia_net_routes_ext:fidl_fuchsia_net_routes_ext_fdomain",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    build_flags = _COMMON_BUILD_FLAGS,
+    crate = ":lib",
+    # Preserve the GN unit test output name so generic :lib_test does not collide in root_out_dir.
+    crate_name = "net_cli_lib_test",
+    # Fuchsia-only because :lib depends on Fuchsia-only FIDL flex bindings.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = _COMMON_TEST_DEPS + [
+        "//src/lib/fdomain/local:local_fidl_flex",
+    ],
+)
+
+rustc_test(
+    name = "lib_fdomain_test",
+    build_flags = _COMMON_BUILD_FLAGS,
+    crate = ":lib_fdomain",
+    crate_features = ["fdomain"],
+    # Preserve the GN unit test output name from with_unit_tests = true.
+    crate_name = "net_cli_fdomain_lib_test",
+    deps = _COMMON_TEST_DEPS + [
+        "//src/lib/fdomain/local:local_fdomain_flex",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "lib_fdomain_host_test",
+    binary_name = "lib_fdomain_test",
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "net",
+    build_flags = _COMMON_BUILD_FLAGS,
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    # Fuchsia-only because this binary uses Fuchsia component and FIDL libraries.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+        "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
+        "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust",
+        "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust",
+        "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/developer/lib/writer:lib",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/lib/component_debug",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_unittest_package(
+    name = "net-cli-tests",
+    unit_tests = [":lib_test"],
+)
+
+fx_unittest_package(
+    name = "net-cli-fdomain-tests",
+    unit_tests = [":lib_fdomain_test"],
+)

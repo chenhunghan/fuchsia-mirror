@@ -6,5 +6,8 @@ package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["all_config_types.shard.cml"],
-    visibility = ["//src/sys/component_manager/tests/structured_config:__subpackages__"],
+    visibility = [
+        "//src/sys/component_manager/tests/structured_config:__subpackages__",
+        "//tools/configc:__pkg__",
+    ],
 )

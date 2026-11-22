@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_CRASH_SERVER_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_CRASH_SERVER_H_
 
-#include <fuchsia/net/http/cpp/fidl.h>
+#include <fidl/fuchsia.net.http/cpp/fidl.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/service_directory.h>
 
@@ -26,7 +26,7 @@ namespace crash_reports {
 // Represents the HTTP crash server to which the agent uploads crash reports to.
 //
 // |fuchsia.net.http.Loader| is expected to be in |services|.
-class CrashServer {
+class CrashServer : public fidl::AsyncEventHandler<fuchsia_net_http::Loader> {
  public:
   enum UploadStatus { kSuccess, kFailure, kThrottled, kTimedOut };
 
@@ -34,7 +34,7 @@ class CrashServer {
               const std::string& url, LogTags* tags,
               feedback::AnnotationManager* annotation_manager, timekeeper::Clock* clock);
 
-  virtual ~CrashServer() {}
+  ~CrashServer() override {}
 
   virtual bool HasPendingRequest() const { return pending_request_; }
 
@@ -58,7 +58,12 @@ class CrashServer {
       const Report& report, const Snapshot& snapshot,
       const feedback::AnnotationManager* annotation_manager, zx::time_boot uptime);
 
+  // |fidl::AsyncEventHandler<fuchsia_net_http::Loader>|
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
  private:
+  void Connect();
+
   async_dispatcher_t* dispatcher_;
   std::shared_ptr<sys::ServiceDirectory> services_;
   const std::string url_;
@@ -67,7 +72,7 @@ class CrashServer {
   timekeeper::Clock* clock_;
 
   bool pending_request_{false};
-  fuchsia::net::http::LoaderPtr loader_;
+  fidl::Client<fuchsia_net_http::Loader> loader_;
 
   FXL_DISALLOW_COPY_AND_ASSIGN(CrashServer);
 };

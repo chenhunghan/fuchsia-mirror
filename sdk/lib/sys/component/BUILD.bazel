@@ -28,16 +28,7 @@ cml_shard(
     name = "realm_builder.shard",
     includes = [":realm_builder_no_diagnostics.shard"],
     shard = "realm_builder.shard.cml",
-    visibility = [
-        "//src/lib/fuchsia-component-test:__pkg__",
-        "//src/lib/fuchsia-rseq:__pkg__",
-        "//src/starnix/modules/usbfs:__pkg__",
-        "//src/sys/cache_manager:__pkg__",
-        "//src/sys/component_manager:__subpackages__",
-        "//src/sys/run_test_suite:__subpackages__",
-        "//src/sys/test_manager:__pkg__",
-        "//src/sys/test_manager/tests:__pkg__",
-    ],
+    visibility = ["//:__subpackages__"],
 )
 
 cml_shard(

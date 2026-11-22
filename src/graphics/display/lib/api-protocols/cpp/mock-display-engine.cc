@@ -41,6 +41,7 @@ struct MockDisplayEngine::Expectation {
   StartCaptureChecker start_capture_checker;
   ReleaseCaptureChecker release_capture_checker;
   SetMinimumRgbChecker set_minimum_rgb_checker;
+  NotifyExpectedPresentChecker notify_expected_present_checker;
 };
 
 MockDisplayEngine::MockDisplayEngine() = default;
@@ -119,6 +120,11 @@ void MockDisplayEngine::ExpectReleaseCapture(ReleaseCaptureChecker checker) {
 void MockDisplayEngine::ExpectSetMinimumRgb(SetMinimumRgbChecker checker) {
   std::lock_guard<std::mutex> lock(mutex_);
   expectations_.push_back({.set_minimum_rgb_checker = std::move(checker)});
+}
+
+void MockDisplayEngine::ExpectNotifyExpectedPresent(NotifyExpectedPresentChecker checker) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  expectations_.push_back({.notify_expected_present_checker = std::move(checker)});
 }
 
 void MockDisplayEngine::CheckAllCallsReplayed() {
@@ -288,6 +294,20 @@ zx::result<> MockDisplayEngine::SetMinimumRgb(uint8_t minimum_rgb) {
   ZX_ASSERT_MSG(call_expectation.set_minimum_rgb_checker != nullptr,
                 "Received call type does not match expected call type");
   return call_expectation.set_minimum_rgb_checker(minimum_rgb);
+}
+
+void MockDisplayEngine::NotifyExpectedPresent(display::DisplayId display_id,
+                                              zx::time_monotonic expected_present_time,
+                                              zx::duration frame_interval) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ZX_ASSERT_MSG(call_index_ < expectations_.size(), "All expected calls were already received");
+  Expectation& call_expectation = expectations_[call_index_];
+  ++call_index_;
+
+  ZX_ASSERT_MSG(call_expectation.notify_expected_present_checker != nullptr,
+                "Received call type does not match expected call type");
+  call_expectation.notify_expected_present_checker(display_id, expected_present_time,
+                                                   frame_interval);
 }
 
 }  // namespace display::testing

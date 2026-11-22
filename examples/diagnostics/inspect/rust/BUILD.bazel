@@ -1,0 +1,99 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":inspect-example-rust-tests"],
+    visibility = ["//examples:__pkg__"],
+)
+
+rustc_binary(
+    name = "server_bin",
+    srcs = ["src/echo_server.rs"],
+    binary_name = "inspect_server_rust",
+    crate_root = "src/echo_server.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+
+        # [START inspect_libs]
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+
+        # [END inspect_libs]
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "inspect_server_rust_bin_test",
+    crate = ":server_bin",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_packaged_binary(
+    name = "server_bin_packaged",
+    binary = ":server_bin",
+    binary_name = "inspect_server_rust",
+)
+
+fx_component_manifest(
+    name = "server_component_manifest",
+    component_name = "echo_server",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_server.cml",
+)
+
+fx_component(
+    name = "server_component",
+    compiled_manifest = ":server_component_manifest",
+    deps = [":server_bin_packaged"],
+)
+
+fx_package(
+    name = "inspect-example-rust",
+    components = [
+        ":server_component",
+        "//examples/components/routing:echo_realm",
+        "//examples/components/routing/rust/echo_client:echo_client_cmp",
+    ],
+)
+
+fx_unittest_package(
+    name = "inspect-example-rust-tests",
+    unit_tests = [":inspect_server_rust_bin_test"],
+)

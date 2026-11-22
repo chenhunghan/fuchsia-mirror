@@ -20,4 +20,4 @@ pub mod power;
 pub mod smbios;
 pub mod timer;
 
-pub use platform::manufacturer;
+pub use platform::{manufacturer, platform_is_efi_expected};

@@ -79,7 +79,6 @@ shared_library("driver") {
     "//src/devices/board/drivers/astro:*",
     "//src/devices/board/drivers/integration-test:*",
     "//src/devices/board/drivers/nelson:*",
-    "//src/devices/board/drivers/qemu-arm64:*",
     "//src/devices/board/drivers/sherlock:*",
     "//src/devices/board/drivers/vim3:*",
     "//src/devices/board/drivers/x86:*",
@@ -182,7 +181,6 @@ shared_library("driver") {
     "//src/devices/tpm/drivers/tpm:*",
     "//src/devices/tpm/drivers/tpm-lpc:*",
     "//src/devices/usb/drivers/aml-usb-phy:*",
-    "//src/devices/usb/drivers/dwc2:*",
     "//src/devices/usb/drivers/usb-bus:*",
     "//src/devices/usb/drivers/usb-composite:*",
     "//src/devices/usb/drivers/usb-hub:*",
@@ -241,7 +239,6 @@ shared_library("driver") {
     "//third_party/pigweed/backends/pw_log:*",
     "//tools/create/goldens/my-driver-cpp:*",
     "//vendor/*",
-    "//zircon/third_party/dev/ethernet/e1000:*",
   ]
 }
 

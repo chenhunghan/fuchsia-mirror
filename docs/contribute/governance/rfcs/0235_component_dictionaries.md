@@ -166,7 +166,7 @@ A [capability name][docs-capability-name] is a sequence of one or more
 characters from the set `[A-Za-z0-9_-.]`, of size 1 to N (currently N = 100, but
 we may extend it in the future).
 
-### Dictionaries at runtime
+### Dictionaries at runtime {#dictionaries-at-runtime}
 
 We will introduce a public FIDL protocol that provides an interface to a
 dictionary. As FIDL-pseudocode:
@@ -493,7 +493,7 @@ syntax in `from` becomes a special case of the new path syntax.
 If part of a capability route passes through a dictionary, any security policies
 pertaining to that capability must still apply.
 
-## Security considerations
+## Security considerations {#security-considerations}
 
 When capabilities are routed in a dictionary, some transparency is lost because
 the identities of the capabilities inside the dictionary are hidden from the

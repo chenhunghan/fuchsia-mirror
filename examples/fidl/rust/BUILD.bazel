@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        ":echo-launcher-rust",
+        ":echo-rust-client",
+        ":echo-rust-client-sync",
+        ":echo-service-rust",
+        "//examples/fidl/rust/server:echo-rust-server",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)
+
+# //docs/development/languages/fidl/tutorials/rust/basics/client.md
+fx_package(
+    name = "echo-rust-client",
+    components = [
+        "//examples/fidl/echo-realm:echo_realm",
+        "//examples/fidl/rust/client:echo-client",
+        "//examples/fidl/rust/server:echo-server",
+    ],
+)
+
+# //docs/development/languages/fidl/tutorials/rust/basics/sync-client.md
+fx_package(
+    name = "echo-rust-client-sync",
+    components = [
+        "//examples/fidl/echo-realm:echo_realm",
+        "//examples/fidl/rust/client_sync:echo-client",
+        "//examples/fidl/rust/server:echo-server",
+    ],
+)
+
+# //docs/development/languages/fidl/tutorials/rust/topics/request-pipelining.md
+fx_package(
+    name = "echo-launcher-rust",
+    components = [
+        "//examples/fidl/echo-realm:echo_realm",
+        "//examples/fidl/rust/request_pipelining/client:echo-client",
+        "//examples/fidl/rust/request_pipelining/server:echo-server",
+    ],
+)
+
+# //docs/development/languages/fidl/tutorials/rust/topics/services.md
+fx_package(
+    name = "echo-service-rust",
+    components = [
+        "//examples/fidl/echo-realm:echo_realm",
+        "//examples/fidl/rust/services/client:echo-client",
+        "//examples/fidl/rust/services/server:echo-server",
+    ],
+)

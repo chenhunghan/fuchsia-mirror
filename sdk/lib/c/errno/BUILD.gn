@@ -4,13 +4,8 @@
 
 import("../libc.gni")
 
-libc_source_set("errno") {
-  dir = "$llvm_libc/src/errno"
+llvm_libc_source_set("errno") {
+  functions = []
   sources = [ "libc_errno.cpp" ]
-}
-
-# No unittests, but define this target because it is required of every
-# libc_component.
-libc_test("unittests") {
-  sources = []
+  test_sources = [ "errno_test.cpp" ]
 }

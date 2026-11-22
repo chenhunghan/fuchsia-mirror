@@ -30,7 +30,6 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 fidl("test.structuredconfig.receiver") {
   testonly = true
   sources = [ "receiver.test.fidl" ]
-  enable_hlcpp = true
   visibility = [
     ":*",
     "//src/sys/component_manager/tests/structured_config/*",

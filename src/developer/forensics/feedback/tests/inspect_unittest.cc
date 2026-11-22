@@ -4,7 +4,6 @@
 
 #include "src/developer/forensics/feedback/attachments/inspect.h"
 
-#include <fuchsia/mem/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/fpromise/result.h>
 #include <lib/inspect/cpp/vmo/types.h>

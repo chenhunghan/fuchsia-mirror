@@ -36,9 +36,6 @@ std::atomic_uint32_t IntelHDAController::device_id_gen_(0u);
 zx_protocol_device_t IntelHDAController::CONTROLLER_DEVICE_THUNKS = []() {
   zx_protocol_device_t ops = {};
   ops.version = DEVICE_OPS_VERSION;
-  ops.get_protocol = [](void* ctx, uint32_t proto_id, void* protocol) {
-    return static_cast<IntelHDAController*>(ctx)->DeviceGetProtocol(proto_id, protocol);
-  };
   ops.unbind = [](void* ctx) { static_cast<IntelHDAController*>(ctx)->DeviceShutdown(); };
   ops.release = [](void* ctx) { static_cast<IntelHDAController*>(ctx)->DeviceRelease(); };
   ops.message = [](void* ctx, fidl_incoming_msg_t msg, device_fidl_txn_t txn) {
@@ -49,14 +46,6 @@ zx_protocol_device_t IntelHDAController::CONTROLLER_DEVICE_THUNKS = []() {
   };
   return ops;
 }();
-
-ihda_codec_protocol_ops_t IntelHDAController::CODEC_PROTO_THUNKS = {
-    .get_driver_channel =
-        [](void* ctx, zx_handle_t* channel_out) {
-          return static_cast<IntelHDAController*>(ctx)->dsp_->CodecGetDispatcherChannel(
-              channel_out);
-        },
-};
 
 IntelHDAController::IntelHDAController(acpi::Client client)
     : state_(State::STARTING),
@@ -177,20 +166,6 @@ void IntelHDAController::ReleaseStreamTagLocked(bool input, uint8_t tag) {
   ZX_DEBUG_ASSERT((tag_pool & (1u << tag)) == 0);
 
   tag_pool = static_cast<uint16_t>((tag_pool | (1u << tag)));
-}
-
-zx_status_t IntelHDAController::DeviceGetProtocol(uint32_t proto_id, void* protocol) {
-  switch (proto_id) {
-    case ZX_PROTOCOL_IHDA_CODEC: {
-      auto proto = static_cast<ihda_codec_protocol_t*>(protocol);
-      proto->ops = &CODEC_PROTO_THUNKS;
-      proto->ctx = this;
-      return ZX_OK;
-    }
-    default:
-      LOG(ERROR, "Unsupported protocol 0x%08x", proto_id);
-      return ZX_ERR_NOT_SUPPORTED;
-  }
 }
 
 void IntelHDAController::DeviceShutdown() {

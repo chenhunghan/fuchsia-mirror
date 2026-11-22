@@ -10,8 +10,8 @@
 #include <lib/ddk/device.h>
 #include <lib/ddk/driver.h>
 #include <lib/ddk/io-buffer.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

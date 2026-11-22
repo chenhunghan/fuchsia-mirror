@@ -2,20 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use super::audit::Auditable;
 use super::fs_node::fs_node_init_with_dentry;
 use super::{
     FileSystemLabel, FileSystemState, FsNodeSidAndClass, NonPrivateDirEntry, NonPrivateFsNode,
-    check_permission, current_task_state, fs_node_effective_sid_and_class,
+    check_permission, check_permissions, current_task_state, fs_node_effective_sid_and_class,
 };
 
 use crate::task::CurrentTask;
+use crate::task::container_namespace::NamespaceNodePurpose;
 use crate::vfs::fs_args::MountParams;
 use crate::vfs::{FileSystem, FileSystemHandle, FileSystemOps, FsStr, Mount, NamespaceNode};
 use linux_uapi::AUDIT_SELINUX_ERR;
 use selinux::permission_check::PermissionCheck;
 use selinux::{
-    CommonFilePermission, FileSystemMountOptions, FileSystemPermission, ForClass, FsNodeClass,
-    SecurityId, SecurityServer,
+    CommonFilePermission, DirPermission, FileClass, FileSystemMountOptions, FileSystemPermission,
+    ForClass, FsNodeClass, InitialSid, KernelPermissionSet, SecurityId, SecurityServer,
 };
 use starnix_logging::{log_debug, track_stub};
 use starnix_uapi::error;
@@ -294,6 +296,56 @@ pub(in crate::security) fn sb_mount(
             (&audit_context).into(),
         )
     }
+}
+
+/// Checks if `current_task` has permission to open `path` in the container namespace for `purpose`.
+pub(in crate::security) fn check_container_namespace_access(
+    permission_check: &PermissionCheck<'_>,
+    current_task: &CurrentTask,
+    path: &str,
+    purpose: NamespaceNodePurpose,
+) -> Result<(), Errno> {
+    let security_server = permission_check.security_server();
+    // Only mediate container namespace mounts when the active policy opts in by defining
+    // `genfscon fuchsia_ns` rules, so existing container policies without `fuchsia_ns` labeling
+    // remain compatible.
+    if !security_server.has_genfscon_for_fs("fuchsia_ns".into()) {
+        return Ok(());
+    }
+
+    let source_sid = current_task_state(current_task).current_sid;
+    let permissions: KernelPermissionSet = match purpose {
+        NamespaceNodePurpose::DirectoryMount { read_only } => {
+            let mut permissions = DirPermission::Open | DirPermission::Read | DirPermission::Search;
+            if !read_only {
+                permissions |= DirPermission::Write;
+            }
+            permissions.into()
+        }
+        NamespaceNodePurpose::VolumeKeys => {
+            (CommonFilePermission::Open | CommonFilePermission::Read | CommonFilePermission::Write)
+                .for_class(FileClass::BlkFile)
+        }
+    };
+    // Append a trailing `/` so `genfscon fuchsia_ns` rules written with a trailing `/` match exact
+    // directories and their subdirectories without matching sibling paths sharing a string prefix.
+    let lookup_path = format!("{path}/");
+    let target_sid = security_server
+        .genfscon_label_for_fs_and_path(
+            "fuchsia_ns".into(),
+            lookup_path.as_bytes().into(),
+            /* class = */ None,
+        )
+        .unwrap_or_else(|_| InitialSid::Unlabeled.into());
+    let audit_context = [current_task.into(), Auditable::Name(path.into())];
+    check_permissions(
+        permission_check,
+        current_task,
+        source_sid,
+        target_sid,
+        permissions,
+        (&audit_context).into(),
+    )
 }
 
 /// Checks that `mount` is getting remounted with the same security state as before.

@@ -423,23 +423,12 @@ impl InputDevice {
     /// from `/sys/class/input`.
     ///
     /// Returns the `eventN` [`Device`], which should be passed to [`Self::unregister`] to remove
-    /// both devices.
+    /// both devices. Returns `EEXIST` or `EBUSY` if `input{minor}` or `event{minor}` is already
+    /// registered, rolling back `input{minor}` if `event{minor}` registration fails.
     pub fn register(self, kernel: &Kernel, minor: u32) -> Result<Device, Errno> {
         let registry = &kernel.device_registry;
-        let event_name = format!("event{minor}");
-        let event_metadata = DeviceMetadata::new(
-            format!("input/{event_name}").into(),
-            StarnixDeviceId::new(INPUT_MAJOR, minor),
-            DeviceMode::Char,
-        );
-        registry.register_minor(
-            event_name.as_str().into(),
-            event_metadata.clone(),
-            self.clone(),
-        )?;
-
         let input_class = registry.objects.input_class();
-        let info = self.info;
+        let info = self.info.clone();
 
         let input_device = registry.add_numberless_device(
             format!("input{minor}").as_str().into(),
@@ -472,17 +461,25 @@ impl InputDevice {
                     }
                 });
             },
-        );
+        )?;
 
-        let event_device = registry.add_major_device(
-            kernel,
-            event_name.as_str().into(),
-            event_metadata,
-            Some(input_device),
-            input_class,
-            build_device_directory,
-        );
-        Ok(event_device)
+        registry
+            .add_device_with_dir(
+                kernel,
+                format!("event{minor}").as_str().into(),
+                DeviceMetadata::new(
+                    format!("input/event{minor}").into(),
+                    StarnixDeviceId::new(INPUT_MAJOR, minor),
+                    DeviceMode::Char,
+                ),
+                Some(input_device.clone()),
+                input_class,
+                build_device_directory,
+                self,
+            )
+            .inspect_err(|_| {
+                registry.remove_device_with_kernel(kernel, input_device);
+            })
     }
 
     /// Unregisters an input device previously registered with [`Self::register`].
@@ -614,7 +611,7 @@ mod test {
     use pretty_assertions::assert_eq;
     use starnix_core::mm::{MemoryAccessor as _, MemoryAccessorExt as _};
     use starnix_core::task::dynamic_thread_spawner::SpawnRequestBuilder;
-    use starnix_core::task::{EventHandler, Waiter};
+    use starnix_core::task::{EventHandler, Kernel, Waiter};
     use starnix_core::testing::{map_memory, spawn_kernel_and_run};
     use starnix_core::vfs::FileHandle;
     use starnix_core::vfs::buffers::VecOutputBuffer;
@@ -4164,5 +4161,43 @@ mod test {
         assert_eq!(handle.lock().input_id.vendor, 0x1234);
         assert_eq!(handle.lock().input_id.product, 0x5678);
         assert_eq!(handle.lock().input_id.version, 0x0001);
+    }
+
+    #[::fuchsia::test]
+    async fn register_rolls_back_parent_input_device_on_event_failure() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let registry = &kernel.device_registry;
+            let root = &registry.objects.root;
+            let info = InputDeviceInfo::new(KEYBOARD_INPUT_ID, "starnix_buttons".to_string());
+
+            // Pre-occupy `(INPUT_MAJOR, 8)` under a different sysfs name so `input8` succeeds
+            // while `event8` fails with `EBUSY`.
+            registry
+                .add_device(
+                    kernel,
+                    "occupied_event8".into(),
+                    DeviceMetadata::new(
+                        "input/occupied_event8".into(),
+                        StarnixDeviceId::new(INPUT_MAJOR, 8),
+                        DeviceMode::Char,
+                    ),
+                    registry.objects.input_class(),
+                    InputDevice::new_keyboard(info.clone(), "conflict", &kernel.inspect_node),
+                )
+                .expect("registers conflicting minor");
+
+            let keyboard_device =
+                InputDevice::new_keyboard(info, "keyboard_device", &kernel.inspect_node);
+            assert_eq!(
+                keyboard_device.register(kernel, 8).unwrap_err(),
+                starnix_uapi::errno!(EBUSY)
+            );
+
+            // The transient `input8` parent device must have been rolled back.
+            assert!(root.lookup("devices/virtual/input/input8".into()).is_none());
+            assert!(root.lookup("class/input/input8".into()).is_none());
+        })
+        .await;
     }
 }

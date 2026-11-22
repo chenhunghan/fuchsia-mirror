@@ -4,7 +4,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_EXCEPTIONS_PROCESS_HANDLER_H_
 #define SRC_DEVELOPER_FORENSICS_EXCEPTIONS_PROCESS_HANDLER_H_
 
-#include <fuchsia/exception/internal/cpp/fidl.h>
+#include <fidl/fuchsia.exception.internal/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
 #include <lib/zx/channel.h>
@@ -17,17 +17,20 @@ namespace exceptions {
 
 // Handles a pending exception by handing it off to a subprocess. The lifetime of the subprocess
 // is automatically managed and it is replaced if it crashes.
-class ProcessHandler {
+class ProcessHandler : public fidl::AsyncEventHandler<fuchsia_exception_internal::CrashReporter> {
  public:
   using LogMonikerFn = fit::function<void(const std::string&)>;
   ProcessHandler(async_dispatcher_t* dispatcher, bool suspend_enabled, LogMonikerFn log_moniker,
                  fit::closure on_available);
-  ~ProcessHandler();
+  ~ProcessHandler() override;
 
   ProcessHandler(ProcessHandler&&) = default;
   ProcessHandler& operator=(ProcessHandler&&) = default;
 
   void Handle(zx::exception exception, zx::process process, zx::thread thread);
+
+  // |fidl::AsyncEventHandler<fuchsia_exception_internal::CrashReporter>|
+  void on_fidl_error(fidl::UnbindInfo error) override;
 
  private:
   async_dispatcher_t* dispatcher_;
@@ -36,7 +39,7 @@ class ProcessHandler {
   fit::closure on_available_;
 
   zx::process subprocess_;
-  fuchsia::exception::internal::CrashReporterPtr crash_reporter_;
+  fidl::Client<fuchsia_exception_internal::CrashReporter> crash_reporter_;
 };
 
 }  // namespace exceptions

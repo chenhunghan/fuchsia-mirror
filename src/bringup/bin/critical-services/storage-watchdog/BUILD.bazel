@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":storage-watchdog-unittests"],
+    visibility = ["//src/bringup:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":storage-watchdog-unittests-bin_host_test"],
+    visibility = ["//src/bringup:__pkg__"],
+)
+
+fx_cc_library(
+    name = "diagnostics-text",
+    srcs = ["diagnostics_text.cc"],
+    hdrs = ["diagnostics_text.h"],
+    implementation_deps = ["//third_party/rapidjson"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "pager-fault",
+    srcs = ["pager_fault.cc"],
+    hdrs = ["pager_fault.h"],
+    implementation_deps = select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/tbi",
+            "//src/lib/fsl",
+            "//zircon/system/ulib/task-utils",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = select({
+        "@platforms//os:fuchsia": ["//zircon/system/ulib/zx"],
+        # For zx_koid_t.
+        "//conditions:default": ["//zircon/system/public"],
+    }),
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "storage-watchdog",
+    srcs = [
+        "archivist_snapshot.cc",
+        "storage_watchdog.cc",
+        "wedge_dump.cc",
+    ],
+    hdrs = [
+        "archivist_snapshot.h",
+        "storage_watchdog.h",
+        "wedge_dump.h",
+    ],
+    implementation_deps = [
+        ":diagnostics-text",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/debug:backtrace-request",
+        "//src/lib/elf-search",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/task-utils",
+    ],
+    # Uses Zircon and Fuchsia FIDL headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/bringup/bin/critical-services:__pkg__"],
+    deps = [
+        ":pager-fault",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "storage-watchdog-unittests-bin",
+    srcs = [
+        "diagnostics_text_unittest.cc",
+        "pager_fault_unittest.cc",
+    ],
+    gn_output_name = "storage-watchdog-unittests",
+    deps = [
+        ":diagnostics-text",
+        ":pager-fault",
+        "//src/lib/fxl/test:gtest_main",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/fit",
+            "//src/lib/fsl",
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+fx_unittest_package(
+    name = "storage-watchdog-unittests",
+    unit_tests = [":storage-watchdog-unittests-bin"],
+)
+
+host_test(
+    name = "storage-watchdog-unittests-bin_host_test",
+    binary = ":storage-watchdog-unittests-bin",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

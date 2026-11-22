@@ -4,6 +4,8 @@
 
 #include "sysmem_metrics.h"
 
+#include <lib/zx/clock.h>
+
 #include <limits>
 
 #include "src/sysmem/metrics/metrics.cb.h"

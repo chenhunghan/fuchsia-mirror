@@ -83,65 +83,36 @@ struct ChildListTag {};
 struct GlobalListTag {};
 }  // namespace internal
 
-// Base for opting an object into a deferred deletion strategy that allows for object chains to be
-// deleted without causing unbounded recursion due to dropping refptrs in destructors.
-template <typename T>
+// Helper for opting a VmObject into a deferred deletion strategy that allows for object chains to
+// be deleted without causing unbounded recursion due to dropping refptrs in destructors.
 class VmDeferredDeleter {
  public:
-  // Calls MaybeDeadTransition and then drops the refptr to the given object by either placing it on
-  // the deferred delete list for another thread already running deferred delete to drop, or drops
-  // itself.
+  VmDeferredDeleter() = default;
+  ~VmDeferredDeleter() = default;
+  DISALLOW_COPY_ASSIGN_AND_MOVE(VmDeferredDeleter);
+
+  // Drops the refptr to the given VmObject by either placing it on the deferred delete list for
+  // another thread already running deferred delete to drop, or dropping it itself.
   // This can be used to avoid unbounded recursion when dropping chained refptrs, as found in
   // vmo parent_ refs.
-  static void DoDeferredDelete(fbl::RefPtr<T> object) {
-    Guard<CriticalMutex> guard{DeferredDeleteLock::Get()};
-    // If a parent has multiple children then it's possible for a given object to already be
-    // queued for deletion.
-    if (!object->deferred_delete_state_.InContainer()) {
-      delete_list_.push_front(ktl::move(object));
-    } else {
-      // We know a refptr is being held by the container (which we are holding the lock to), so can
-      // safely drop the vmo ref.
-      object.reset();
-    }
-    if (!running_delete_) {
-      running_delete_ = true;
-      while (!delete_list_.is_empty()) {
-        guard.CallUnlocked([ptr = delete_list_.pop_front()]() mutable {
-          ptr->MaybeDeadTransition();
-          ptr.reset();
-        });
-      }
-      running_delete_ = false;
-    }
-  }
+  static void DoDeferredDelete(fbl::RefPtr<VmObject> vmo);
 
  private:
   struct ListTraits {
-    static fbl::SinglyLinkedListNodeState<fbl::RefPtr<T>>& node_state(VmDeferredDeleter<T>& node) {
-      return node.deferred_delete_state_;
-    }
+    static fbl::SinglyLinkedListNodeState<fbl::RefPtr<VmObject>>& node_state(VmObject& vmo);
   };
 
-  // Mutex that protects the global delete list. As this class is templated we actually end up with
-  // a single mutex and a global list for each unique object type.
+  // Mutex that protects the global delete list.
   DECLARE_SINGLETON_CRITICAL_MUTEX(DeferredDeleteLock);
 
-  static fbl::SinglyLinkedListCustomTraits<fbl::RefPtr<T>, ListTraits> delete_list_
+  static fbl::SinglyLinkedListCustomTraits<fbl::RefPtr<VmObject>, ListTraits> delete_list_
       TA_GUARDED(DeferredDeleteLock::Get());
 
   static bool running_delete_ TA_GUARDED(DeferredDeleteLock::Get());
 
-  using DeferredDeleteState = fbl::SinglyLinkedListNodeState<fbl::RefPtr<T>>;
+  using DeferredDeleteState = fbl::SinglyLinkedListNodeState<fbl::RefPtr<VmObject>>;
   DeferredDeleteState deferred_delete_state_ TA_GUARDED(DeferredDeleteLock::Get());
 };
-
-template <typename T>
-bool VmDeferredDeleter<T>::running_delete_ = false;
-
-template <typename T>
-fbl::SinglyLinkedListCustomTraits<fbl::RefPtr<T>, typename VmDeferredDeleter<T>::ListTraits>
-    VmDeferredDeleter<T>::delete_list_;
 
 enum class VmObjectReadWriteOptions : uint8_t {
   None = 0,
@@ -642,6 +613,7 @@ class VmObject : public fbl::ContainableBaseClasses<
   virtual ~VmObject();
   friend fbl::RefPtr<VmObject>;
   friend void ::cpp_vm_object_free(VmObject*);
+  friend class VmDeferredDeleter;
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmObject);
 
@@ -706,6 +678,8 @@ class VmObject : public fbl::ContainableBaseClasses<
 
   // This member, if not null, is used to signal the user facing Dispatcher.
   VmObjectChildObserver* child_observer_ TA_GUARDED(ChildObserverLock::Get()) = nullptr;
+
+  VmDeferredDeleter deferred_deleter_;
 
   using GlobalList = fbl::TaggedDoublyLinkedList<VmObject*, internal::GlobalListTag>;
 

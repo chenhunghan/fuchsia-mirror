@@ -11,12 +11,12 @@
 #include <lib/boot-options/boot-options.h>
 #include <lib/zbi-format/driver-config.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <zircon/assert.h>
 
 #include <phys/runtime/arm64/info.h>
 #include <phys/runtime/arm64/smccc.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
 
 constexpr uint64_t kReset2 = static_cast<uint64_t>(arch::ArmSmcccFunction::kPsciSystemReset2);
 
@@ -27,7 +27,7 @@ void ArmPsciSetup(const zbi_dcfg_arm_psci_driver_t* cfg) {
 
   if (!cfg) {
     gArchPhysInfo->smccc_disabled = true;
-    debugf("%s: No ZBI_KERNEL_DRIVER_ARM_PSCI item found in ZBI.  Early PSCI disabled.\n",
+    printf("%s: No ZBI_KERNEL_DRIVER_ARM_PSCI item found in ZBI.  Early PSCI disabled.\n",
            ProgramName());
     return;
   }
@@ -39,7 +39,7 @@ void ArmPsciSetup(const zbi_dcfg_arm_psci_driver_t* cfg) {
   switch (BootOptions::Get()->phys_psci_reset) {
     case Arm64PhysPsciReset::kDisabled:
       gArchPhysInfo->smccc_disabled = true;
-      debugf("%s: Early PSCI disabled by boot option.\n", ProgramName());
+      printf("%s: Early PSCI disabled by boot option.\n", ProgramName());
       return;
     case Arm64PhysPsciReset::kShutdown:
       reset_args = cfg->shutdown_args;
@@ -75,7 +75,7 @@ void ArmPsciSetup(const zbi_dcfg_arm_psci_driver_t* cfg) {
 
   const char* insn = gArchPhysInfo->smccc_use_hvc ? "HVC" : "SMC";
   const char* cmd = have_reset2 ? "RESET2" : "RESET";
-  debugf("%s: Early PSCI via %s insn and %s with arguments: {%#zx, %#zx, %#zx}\n", ProgramName(),
+  printf("%s: Early PSCI via %s insn and %s with arguments: {%#zx, %#zx, %#zx}\n", ProgramName(),
          insn, cmd, gArchPhysInfo->psci_reset_registers[1], gArchPhysInfo->psci_reset_registers[2],
          gArchPhysInfo->psci_reset_registers[3]);
 }

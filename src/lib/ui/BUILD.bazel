@@ -11,5 +11,6 @@ test_suite(
         "//src/lib/ui/carnelian:carnelian-layout-tests",
         "//src/lib/ui/carnelian:carnelian-render-tests",
         "//src/lib/ui/fidl_fuchsia_ui_focus_ext:test-pkg",
+        "//src/lib/ui/terminal:tests",
     ],
 )

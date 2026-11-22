@@ -4,66 +4,82 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::ksync_kernel::declare_singleton_mutex;
-use core::ffi::{CStr, c_void};
+use crate::kernel::owned_wait_queue::OwnedWaitQueue;
+use crate::ksync_kernel::TrackedMutex;
+use core::ffi::CStr;
+use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 use fbl::RefPtr;
 use kalloc::Box;
-use object_constants_rs as object_constants;
+use ksync::{KCell, KMutex};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use zx_status::Status;
 use zx_types::{ZX_KOID_INVALID, ZX_MAX_NAME_LEN, zx_koid_t, zx_signals_t};
 
 use super::handle::HandleRef;
 use super::job_dispatcher::{JobDispatcher, ZX_JOB_NO_CHILDREN};
 use super::process_dispatcher::ProcessDispatcher;
-use super::root_job_observer_ffi::{
-    cpp_root_job_signal_observer_destroy, cpp_root_job_signal_observer_init,
-};
+use super::signal_observer::{SignalObserver, SignalObserverType};
 use crate::platform_rs::halt_token::HaltToken;
 use crate::platform_rs::power::{PlatformHaltAction, ZirconCrashReason, platform_halt};
 use crate::platform_rs::timer::{DurationMono, current_mono_time};
 
-declare_singleton_mutex!(CriticalProcessNameLock);
+#[ksync::guarded]
+struct CriticalProcessInfo {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+    #[guarded_by(lock)]
+    name: [u8; ZX_MAX_NAME_LEN],
+    #[guarded_by(lock)]
+    koid: zx_koid_t,
+}
 
-static CRITICAL_PROCESS_NAME: ksync::KCell<[u8; ZX_MAX_NAME_LEN], CriticalProcessNameLock> =
-    ksync::KCell::new([0; ZX_MAX_NAME_LEN]);
-static CRITICAL_PROCESS_KOID: ksync::KCell<zx_koid_t, CriticalProcessNameLock> =
-    ksync::KCell::new(ZX_KOID_INVALID);
+static CRITICAL_PROCESS_INFO: LazyInit<CriticalProcessInfo, NoCheck> = LazyInit::uninit();
+
+impl CriticalProcessInfo {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `CRITICAL_PROCESS_INFO` is initialized at `LK_INIT_LEVEL_EARLIEST` before
+        // `RootJobObserver` can be created or queried.
+        unsafe { CRITICAL_PROCESS_INFO.get_unchecked() }
+    }
+}
+
+fn critical_process_name_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before `RootJobObserver` can
+    // be created or queried.
+    unsafe {
+        let _ = Pin::static_ref(&CRITICAL_PROCESS_INFO).init_pin(pin_init!(CriticalProcessInfo {
+            lock <- KMutex::init(),
+            name: KCell::new([0; ZX_MAX_NAME_LEN]),
+            koid: KCell::new(ZX_KOID_INVALID),
+        }));
+    }
+}
+init::lk_init_hook!(
+    critical_process_name_lock,
+    critical_process_name_lock_init,
+    init::LK_INIT_LEVEL_EARLIEST
+);
 /// Latched to `true` (with `Release`/`Acquire` ordering) when a process critical to the root job
 /// begins exiting or being killed so concurrent teardown paths (such as `BusTransactionInitiator`
 /// leaked-page checks) observe that system-wide critical-process teardown has started.
 static CRITICAL_PROCESS_DYING: AtomicBool = AtomicBool::new(false);
 
-/// Inline storage for C++ `RootJobSignalObserver`.
-#[derive(Default)]
-#[repr(C, align(8))]
-struct RootJobSignalObserverStorage(
-    zr::OpaqueBytes<{ object_constants::kRootJobSignalObserverSize }>,
-);
-
-zr::static_assert_size_and_align!(
-    RootJobSignalObserverStorage,
-    object_constants::kRootJobSignalObserverSize,
-    object_constants::kRootJobSignalObserverAlign,
-);
-
-impl RootJobSignalObserverStorage {
-    #[inline]
-    fn get(&self) -> *mut c_void {
-        self.0.get().cast()
-    }
-}
-
 #[cfg(ktest)]
 type Callback = Box<dyn FnMut() + Send>;
 
+#[repr(C)]
 struct RootJobObserverInner {
+    signal_observer: SignalObserver,
     root_job: RefPtr<JobDispatcher>,
-    signal_observer: RootJobSignalObserverStorage,
     #[cfg(ktest)]
     callback: Option<Callback>,
 }
+
+zr::static_assert!(core::mem::offset_of!(RootJobObserverInner, signal_observer) == 0);
 
 /// Observes termination of the root job and coordinates system shutdown or notifications.
 pub struct RootJobObserver {
@@ -80,41 +96,28 @@ impl RootJobObserver {
         root_job_handle: Option<HandleRef<'_>>,
         #[cfg(ktest)] callback: Option<Callback>,
     ) -> Result<Self, Status> {
-        #[cfg(ktest)]
-        let has_callback = callback.is_some();
         let inner = Box::try_new(RootJobObserverInner {
+            signal_observer: SignalObserver::new(SignalObserverType::RootJob, 0),
             root_job: root_job.clone(),
-            signal_observer: RootJobSignalObserverStorage::default(),
             #[cfg(ktest)]
             callback,
         })
         .map_err(|_| Status::NO_MEMORY)?;
         let raw: *mut RootJobObserverInner = Box::into_raw(inner);
-        #[cfg(ktest)]
-        let ctx = if has_callback { raw.cast::<c_void>() } else { core::ptr::null_mut() };
-        #[cfg(not(ktest))]
-        let ctx = core::ptr::null_mut();
-
-        // SAFETY: `raw` points to a valid heap-allocated `RootJobObserverInner` at a stable
-        // address; raw field projection to `signal_observer` (`OpaqueBytes`) does not create a
-        // whole-struct reference.
-        let signal_observer_ptr = unsafe { (*raw).signal_observer.get() };
-        // SAFETY: `signal_observer_ptr` points to valid writable storage of size and alignment
-        // matching `RootJobSignalObserver` at a stable heap address until `Drop` unregisters it,
-        // and `ctx` is either null or points to `raw` (valid until `Drop` unregisters it).
-        unsafe {
-            cpp_root_job_signal_observer_init(signal_observer_ptr, ctx);
-        }
         let handle_ptr = root_job_handle.map_or(core::ptr::null(), |h| h.as_ptr().cast());
         // Observer registration on the root job object will always succeed.
         // Calling `add_observer` on the cloned `root_job` avoids holding any Rust reference to
-        // `*raw` across `add_observer`, which may synchronously invoke
-        // `rust_root_job_observer_on_match` when `root_job` currently has no children.
+        // `*raw` across `add_observer`, which may synchronously invoke `on_match_impl` when
+        // `root_job` currently has no children.
         //
-        // SAFETY: `signal_observer_ptr` is an initialized `RootJobSignalObserver` at a stable heap
-        // address, and `handle_ptr` is either null or a valid `Handle` pointer.
-        let _ =
-            unsafe { root_job.add_observer(signal_observer_ptr, handle_ptr, ZX_JOB_NO_CHILDREN) };
+        // SAFETY: `raw` points to a valid, freshly heap-allocated `RootJobObserverInner` with
+        // `signal_observer` at offset 0 (preserving whole-allocation provenance), is not already
+        // registered or mutably aliased, remains pinned on the heap until `Drop` calls
+        // `remove_observer` while holding a `RefPtr` to `root_job`, and `root_job`'s lock is not
+        // held by the calling thread.
+        let _ = unsafe {
+            root_job.add_observer(raw.cast::<SignalObserver>(), handle_ptr, ZX_JOB_NO_CHILDREN)
+        };
         // SAFETY: `raw` was obtained from `Box::into_raw` above and is non-null.
         Ok(Self { inner: unsafe { NonNull::new_unchecked(raw) } })
     }
@@ -152,40 +155,47 @@ impl RootJobObserver {
         Self::create(root_job, root_job_handle, Some(callback_box))
     }
 
-    /// Handles `ZX_JOB_NO_CHILDREN` signal notifications from C++ `RootJobSignalObserver::OnMatch`.
+    /// Handles `ZX_JOB_NO_CHILDREN` signal notifications from [`SignalObserver::on_match`].
     ///
     /// # Safety
     ///
     /// The caller must ensure this is called at most once per observer registration while holding
     /// the watched `JobDispatcher`'s lock (after erasing the observer from `observers_`), and that
-    /// non-null `rust_ctx` points to the live `RootJobObserverInner` passed during initialization
-    /// with no concurrent or reentrant calls to `on_match` on `rust_ctx`.
-    pub(super) unsafe fn on_match(rust_ctx: *mut c_void) {
+    /// `this` points to the `signal_observer` field at offset 0 of a live `RootJobObserverInner`
+    /// with provenance over the entire `RootJobObserverInner` and no concurrent or reentrant calls
+    /// to `on_match_impl` on `this`.
+    pub(super) unsafe fn on_match_impl(
+        this: *mut SignalObserver,
+        _signals: zx_signals_t,
+        _queue_to_own: Option<&OwnedWaitQueue>,
+    ) {
         // Remember, the root job's dispatcher lock is held for the duration of
         // this method. Take care to avoid calling anything that might attempt to
         // acquire that lock.
         #[cfg(ktest)]
-        if !rust_ctx.is_null() {
-            // SAFETY: `rust_ctx` points to a live `RootJobObserverInner` whose `callback` field is
+        {
+            let inner = this.cast::<RootJobObserverInner>();
+            // SAFETY: `inner` points to a live `RootJobObserverInner` whose `callback` field is
             // never mutated after allocation until `Drop` completes `remove_observer` under
             // `root_job`'s lock. Projecting to `callback` only reads that disjoint field, and the
             // shared borrow ends before invoking `callback_ptr`.
-            let callback_ptr = unsafe {
-                (*rust_ctx.cast::<RootJobObserverInner>()).callback.as_ref().map(Box::as_ptr)
-            };
+            let callback_ptr = unsafe { (*inner).callback.as_ref().map(Box::as_ptr) };
             if let Some(callback_ptr) = callback_ptr {
                 // SAFETY: `callback_ptr` points to the heap-allocated closure owned by this
-                // observer. `OnMatch` runs at most once under `root_job`'s lock, and `Drop` cannot
-                // deallocate the closure until `remove_observer` acquires and releases `root_job`'s
-                // lock.
+                // observer. `on_match_impl` runs at most once under `root_job`'s lock, and `Drop`
+                // cannot deallocate the closure until `remove_observer` acquires and releases
+                // `root_job`'s lock.
                 unsafe { (*callback_ptr)() };
                 return;
             }
         }
         #[cfg(not(ktest))]
-        let _ = rust_ctx;
+        let _ = this;
         Self::halt();
     }
+
+    /// Handles handle cancellation notifications from [`SignalObserver::on_cancel`] (no-op).
+    pub(super) fn on_cancel_impl(_this: *mut SignalObserver, _signals: zx_signals_t) {}
 
     /// Halts or reboots the platform in response to root job termination.
     ///
@@ -237,50 +247,33 @@ impl RootJobObserver {
 
     /// Record the dead process responsible for getting the root job killed.
     pub fn critical_process_kill(dead_process: &ProcessDispatcher) {
-        ksync::lock!(let mut guard = CriticalProcessNameLock::lock());
-        let token = guard.as_mut().token_mut();
-        // SAFETY: `token` proves the lock is held.
-        let current_koid = unsafe { *CRITICAL_PROCESS_KOID.get(token) };
-        if current_koid == ZX_KOID_INVALID {
+        ksync::lock!(let mut guard = CriticalProcessInfo::get().lock_lock());
+        if *guard.koid() == ZX_KOID_INVALID {
             let mut name = [0u8; ZX_MAX_NAME_LEN];
             let status = dead_process.get_name(&mut name);
             debug_assert!(status.is_ok());
-            // SAFETY: `token` proves exclusive access to the cell.
-            unsafe {
-                *CRITICAL_PROCESS_NAME.get_mut(token) = name;
-                *CRITICAL_PROCESS_KOID.get_mut(token) = dead_process.get_koid();
-            }
+            *guard.as_mut().name_mut() = name;
+            *guard.as_mut().koid_mut() = dead_process.get_koid();
         }
     }
 
     /// Returns the name of the critical process that caused root job termination.
     pub fn get_critical_process_name() -> [u8; ZX_MAX_NAME_LEN] {
-        ksync::lock!(let guard = CriticalProcessNameLock::lock());
-        let token = guard.token();
-        // SAFETY: `token` proves the lock is held.
-        unsafe { *CRITICAL_PROCESS_NAME.get(token) }
+        ksync::lock!(let guard = CriticalProcessInfo::get().lock_lock());
+        *guard.name()
     }
 
     /// Returns the KOID of the critical process that caused root job termination.
     pub fn get_critical_process_koid() -> zx_koid_t {
-        ksync::lock!(let guard = CriticalProcessNameLock::lock());
-        let token = guard.token();
-        // SAFETY: `token` proves the lock is held.
-        unsafe { *CRITICAL_PROCESS_KOID.get(token) }
+        ksync::lock!(let guard = CriticalProcessInfo::get().lock_lock());
+        *guard.koid()
     }
 
     #[cfg(ktest)]
     fn reset_critical_process_state_for_test() -> SavedCriticalProcessState {
-        ksync::lock!(let mut guard = CriticalProcessNameLock::lock());
-        let token = guard.as_mut().token_mut();
-        // SAFETY: `token` proves exclusive access to the cells.
-        let (name, koid) = unsafe {
-            let old_name = *CRITICAL_PROCESS_NAME.get(token);
-            let old_koid = *CRITICAL_PROCESS_KOID.get(token);
-            *CRITICAL_PROCESS_NAME.get_mut(token) = [0u8; ZX_MAX_NAME_LEN];
-            *CRITICAL_PROCESS_KOID.get_mut(token) = ZX_KOID_INVALID;
-            (old_name, old_koid)
-        };
+        ksync::lock!(let mut guard = CriticalProcessInfo::get().lock_lock());
+        let name = core::mem::replace(guard.as_mut().name_mut(), [0u8; ZX_MAX_NAME_LEN]);
+        let koid = core::mem::replace(guard.as_mut().koid_mut(), ZX_KOID_INVALID);
         let dying = CRITICAL_PROCESS_DYING.swap(false, Ordering::AcqRel);
         SavedCriticalProcessState { name, koid, dying }
     }
@@ -297,13 +290,9 @@ struct SavedCriticalProcessState {
 #[cfg(ktest)]
 impl SavedCriticalProcessState {
     fn restore(self) {
-        ksync::lock!(let mut guard = CriticalProcessNameLock::lock());
-        let token = guard.as_mut().token_mut();
-        // SAFETY: `token` proves exclusive access to the cells.
-        unsafe {
-            *CRITICAL_PROCESS_NAME.get_mut(token) = self.name;
-            *CRITICAL_PROCESS_KOID.get_mut(token) = self.koid;
-        }
+        ksync::lock!(let mut guard = CriticalProcessInfo::get().lock_lock());
+        *guard.as_mut().name_mut() = self.name;
+        *guard.as_mut().koid_mut() = self.koid;
         CRITICAL_PROCESS_DYING.store(self.dying, Ordering::Release);
     }
 }
@@ -312,16 +301,15 @@ impl Drop for RootJobObserver {
     fn drop(&mut self) {
         let raw = self.inner.as_ptr();
         let mut out_signals: zx_signals_t = 0;
-        // SAFETY: `raw` points to a valid `RootJobObserverInner`. Raw field projections to
-        // `signal_observer` and `root_job` avoid forming any whole-struct reference to `*raw`
-        // while `on_match` may still be running under `root_job`'s lock on another CPU.
-        // `remove_observer` acquires `root_job`'s lock, guaranteeing that any concurrent `OnMatch`
-        // or `OnCancel` callback has completed before `signal_observer` is destroyed and `raw` is
-        // reclaimed via `Box::from_raw`.
+        // SAFETY: `raw` points to a valid heap-pinned `RootJobObserverInner` with `signal_observer`
+        // at offset 0 (preserving whole-allocation provenance) that was registered only with
+        // `(*raw).root_job`. Projecting to `root_job` avoids forming any whole-struct reference to
+        // `*raw` while `on_match_impl` may still be running under `root_job`'s lock on another CPU.
+        // `root_job`'s lock is not held, and `remove_observer` acquires and releases it,
+        // guaranteeing that any concurrent callback has completed before `raw` is reclaimed via
+        // `Box::from_raw`.
         unsafe {
-            let signal_observer_ptr = (*raw).signal_observer.get();
-            (*raw).root_job.remove_observer(signal_observer_ptr, &mut out_signals);
-            cpp_root_job_signal_observer_destroy(signal_observer_ptr);
+            (*raw).root_job.remove_observer(raw.cast::<SignalObserver>(), &mut out_signals);
             drop(Box::from_raw(raw));
         }
     }
@@ -360,7 +348,9 @@ mod tests {
             ThreadDispatcher::create(parent_process, 0, b"unittest_thread")
                 .expect("failed to create thread");
         let thread = thread_handle.dispatcher();
-        thread.initialize().expect("failed to initialize thread");
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        unsafe { thread.initialize() }.expect("failed to initialize thread");
         thread.suspend().expect("failed to suspend thread");
         let entry = UserEntryState { pc: 0, sp: 0, arg1: 0, arg2: 0, tp: 0, abi_reg: 0 };
         thread.start(entry, true).expect("failed to start thread");
@@ -463,7 +453,7 @@ mod tests {
         let observer = RootJobObserver::new_with_callback(root_job.clone(), None, move || {
             // SAFETY: pointers are valid for the test duration.
             unsafe {
-                assert!((*proc_ptr.get()).state() == ProcessState::Dead);
+                assert!((*proc_ptr.get()).process_state() == ProcessState::Dead);
                 assert!((*thread_ptr.get()).is_dying_or_dead());
                 let evt = Event::from_raw_ref(event_ptr.get());
                 evt.signal();
@@ -472,7 +462,7 @@ mod tests {
         expect_true!(observer.is_ok());
 
         // Ensure everything is running.
-        expect_true!(child_process.dispatcher().state() == ProcessState::Running);
+        expect_true!(child_process.dispatcher().process_state() == ProcessState::Running);
         expect_true!(!child_thread.dispatcher().is_dying_or_dead());
 
         // Kill the parent job.
@@ -501,7 +491,7 @@ mod tests {
             let (event_ptr, proc_ptr, thread_ptr) = (event_ptr, proc_ptr, thread_ptr);
             // SAFETY: `event_ptr` points to the pinned `event` on the caller's stack frame.
             unsafe {
-                assert!((*proc_ptr.get()).state() == ProcessState::Dead);
+                assert!((*proc_ptr.get()).process_state() == ProcessState::Dead);
                 assert!((*thread_ptr.get()).is_dying_or_dead());
                 let evt = Event::from_raw_ref(event_ptr.get());
                 evt.signal();
@@ -510,7 +500,7 @@ mod tests {
         expect_true!(observer.is_ok());
 
         // Ensure everything is running.
-        expect_true!(child_process.dispatcher().state() == ProcessState::Running);
+        expect_true!(child_process.dispatcher().process_state() == ProcessState::Running);
         expect_true!(!child_thread.dispatcher().is_dying_or_dead());
 
         // Kill the process.

@@ -67,6 +67,9 @@ pub enum ReaderError {
     #[error("Failed to load tree name {0}")]
     FailedToLoadTree(String),
 
+    #[error("Failed to load blob name {0}")]
+    FailedToLoadBlob(String),
+
     #[error("Timed out reading tree")]
     TreeTimedOut,
 

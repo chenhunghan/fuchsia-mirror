@@ -2,11 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/host:defs.bzl", "cc_binary_host_tool")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":chunked-compression-unittests-package"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 cc_library(
     name = "chunked-compression",
@@ -45,9 +54,51 @@ cc_binary_host_tool(
     name = "chunked-compress",
     srcs = ["main.cc"],
     copts = ["-Wno-conversion"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":chunked-compression",
         "//zircon/system/ulib/fbl",
     ],
+)
+
+fx_cc_library(
+    name = "chunked-compression-testutils",
+    testonly = True,
+    srcs = ["test-utils.cc"],
+    hdrs = ["test-utils.h"],
+    implementation_deps = ["//zircon/third_party/ulib/cksum"],
+    deps = [
+        ":chunked-compression",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "chunked-compression-unittests",
+    srcs = [
+        "chunked-compressor-test.cc",
+        "chunked-decompressor-test.cc",
+        "compression-params-test.cc",
+        "header-reader-test.cc",
+        "header-writer-test.cc",
+        "multithreaded-chunked-compressor-test.cc",
+        "seek-table-test.cc",
+        "streaming-chunked-compressor-test.cc",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    deps = [
+        ":chunked-compression",
+        ":chunked-compression-testutils",
+        "//zircon/system/ulib/zxtest",
+        "//zircon/third_party/ulib/cksum",
+    ],
+)
+
+fx_unittest_package(
+    name = "chunked-compression-unittests-package",
+    package_name = "chunked-compression-unittests",
+    max_log_severity = "ERROR",
+    unit_tests = [":chunked-compression-unittests"],
 )

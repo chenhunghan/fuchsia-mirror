@@ -42,8 +42,10 @@ class RequestSlot {
     data_vmo = {};
     dma_offset = 0;
     dma_length = 0;
+    pinned_page_count = 0;
     is_read = false;
     is_scsi_command = false;
+    scsi_opcode = 0;
     response_upiu_offset = 0;
     result = ZX_OK;
     deadline = ZX_TIME_INFINITE;
@@ -53,14 +55,17 @@ class RequestSlot {
   std::unique_ptr<dma_buffer::ContiguousBuffer> command_descriptor_io;
   sync_completion_t complete{};
   zx::pmt pmt;
+  size_t pinned_page_count = 0;
   fit::callback<void(zx_status_t)> completion_cb;
   zx::unowned_vmo data_vmo;
   uint64_t dma_offset = 0;
   uint64_t dma_length = 0;
   bool is_read = false;
   bool is_scsi_command = false;
+  uint8_t scsi_opcode = 0;
   uint16_t response_upiu_offset = 0;
   zx_status_t result = ZX_OK;
+  // Abort deadline for the admin slot, or next stall-log deadline for I/O slots.
   zx_time_t deadline = 0;
 
   RequestSlot() = default;

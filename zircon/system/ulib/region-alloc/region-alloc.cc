@@ -5,6 +5,7 @@
 #include <lib/stdcompat/bit.h>
 #include <lib/zx/result.h>
 #include <string.h>
+#include <zircon/assert.h>
 
 #include <algorithm>
 
@@ -30,7 +31,9 @@ RegionAllocator::RegionPool::RefPtr RegionAllocator::RegionPool::Create(size_t m
 
 RegionAllocator::~RegionAllocator() {
   // No one should be destroying us while we have allocations in flight.
-  ZX_DEBUG_ASSERT(allocated_regions_by_base_.is_empty());
+  ZX_ASSERT_MSG(allocated_regions_by_base_.is_empty(),
+                "RegionAllocator destroyed with %zu allocated regions still in flight",
+                allocated_regions_by_base_.size());
 
   // We should have the same number of regions sorted by base address and by
   // size.
@@ -401,14 +404,14 @@ zx_status_t RegionAllocator::AddSubtractSanityCheckLocked(const ralloc_region_t&
 void RegionAllocator::ReleaseRegion(Region* region) {
   fbl::AutoLock alloc_lock(&alloc_lock_);
 
-  ZX_DEBUG_ASSERT(region != nullptr);
+  ZX_ASSERT(region != nullptr);
 
   // When a region comes back from a user, it should be in the
   // allocated_regions_by_base tree, but not in either of the avail_regions
   // trees, and not in any free list.  Remove it from the allocated_regions
   // bookkeeping and add it back to the available regions.
-  ZX_DEBUG_ASSERT(fbl::InContainer<SortByBaseTag>(*region));
-  ZX_DEBUG_ASSERT(!fbl::InContainer<SortBySizeTag>(*region));
+  ZX_ASSERT(fbl::InContainer<SortByBaseTag>(*region));
+  ZX_ASSERT(!fbl::InContainer<SortBySizeTag>(*region));
 
   allocated_regions_by_base_.erase(*region);
   AddRegionToAvailLocked(region);

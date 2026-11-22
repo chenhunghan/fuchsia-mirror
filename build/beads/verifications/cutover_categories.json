@@ -1,0 +1,118 @@
+{
+    "cutover_diff_abi_revision": {
+        "stage": 0,
+        "device_impact": "functional: the package targets a different API level and may be rejected"
+    },
+    "cutover_diff_blob_content": {
+        "stage": 0,
+        "device_impact": "functional: data or configuration read at runtime differs"
+    },
+    "cutover_diff_cm": {
+        "stage": 0,
+        "device_impact": "functional: capability routing, program arguments or the runner differ; the component may fail to start or lose access"
+    },
+    "cutover_diff_cmd_flags": {
+        "stage": 0,
+        "device_impact": "performance or functional: see the flag category below"
+    },
+    "cutover_diff_config": {
+        "stage": 0,
+        "device_impact": "functional: runtime configuration defaults differ"
+    },
+    "cutover_diff_dylib_renamed": {
+        "stage": 0,
+        "device_impact": "functional or size: a second copy of the library can end up in blobfs next to the GN one, and users that look it up by the old name fail"
+    },
+    "cutover_diff_elf_arch": {
+        "stage": 0,
+        "device_impact": "functional: the binary does not run on the device"
+    },
+    "cutover_diff_elf_dynsym": {
+        "stage": 0,
+        "device_impact": "functional: code that looks symbols up at runtime may fail"
+    },
+    "cutover_diff_elf_interp": {
+        "stage": 0,
+        "device_impact": "functional: the binary loads with a different dynamic linker"
+    },
+    "cutover_diff_elf_needed": {
+        "stage": 0,
+        "device_impact": "functional: the binary links different shared libraries and may fail to load"
+    },
+    "cutover_diff_elf_relro": {
+        "stage": 0,
+        "device_impact": "functional: a security hardening of the binary differs"
+    },
+    "cutover_diff_elf_sections": {
+        "stage": 0,
+        "device_impact": "functional or performance: for example a missing `.eh_frame` breaks unwinding and crash reports"
+    },
+    "cutover_diff_elf_soname": {
+        "stage": 0,
+        "device_impact": "functional: dependents look the library up by a different name"
+    },
+    "cutover_diff_elf_stack": {
+        "stage": 0,
+        "device_impact": "functional: an executable stack weakens security hardening"
+    },
+    "cutover_diff_elf_stripped": {
+        "stage": 0,
+        "device_impact": "performance: an unstripped binary is larger, so it takes more storage and page-in time"
+    },
+    "cutover_diff_elf_text_size": {
+        "stage": 0,
+        "device_impact": "performance: a large code size change suggests a different optimization level, LTO or allocator"
+    },
+    "cutover_diff_extra_blob": {
+        "stage": 0,
+        "device_impact": "functional or size: usually benign, but it grows the package and can shadow an expected path"
+    },
+    "cutover_diff_guard": {
+        "stage": 1,
+        "device_impact": "functional: the Bazel package changed after phase 1 and now differs from the GN package in ways phase 1 did not report; for records from before version 2, it changed and was not compared again"
+    },
+    "cutover_diff_missing_blob": {
+        "stage": 0,
+        "device_impact": "functional: a component may fail to start or fail to read a file it needs"
+    },
+    "cutover_diff_package_name": {
+        "stage": 0,
+        "device_impact": "functional: the package URL changes, so components and assembly entries that name the old package no longer resolve"
+    },
+    "cutover_diff_subpackages": {
+        "stage": 0,
+        "device_impact": "functional: a subpackaged component may be missing"
+    },
+    "cutover_info_ambiguous": {
+        "stage": 0,
+        "device_impact": "none: several GN packages share the package name, so the cutover was not compared (unverified)"
+    },
+    "cutover_info_dual_build_only": {
+        "stage": 0,
+        "device_impact": "none: the packages stay dual-built and are not cut over"
+    },
+    "cutover_info_guard_rebased": {
+        "stage": 0,
+        "device_impact": "none: the change was rebased since a version 1 phase-1 record, so the guard was skipped"
+    },
+    "cutover_info_not_compared": {
+        "stage": 0,
+        "device_impact": "none: the packages were not compared, so the cutover is unverified"
+    },
+    "cutover_info_not_covered": {
+        "stage": 0,
+        "device_impact": "none: part of a comparison did not run, so differences there are not detected"
+    },
+    "cutover_info_phase1_missing": {
+        "stage": 0,
+        "device_impact": "none: there is no phase-1 record, so the cutover is unverified"
+    },
+    "cutover_info_tool_unavailable": {
+        "stage": 0,
+        "device_impact": "none: a tool or the check itself failed, so part of the comparison is missing"
+    },
+    "cutover_summary": {
+        "stage": 0,
+        "device_impact": "none: the per-cutover summary"
+    }
+}

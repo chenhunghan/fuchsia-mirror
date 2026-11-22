@@ -402,29 +402,29 @@ test_bindingsdenylist::OnlyAppearsInImportingLibrary::member_only_appears_in_imp
   return *this;
 }
 
-::test_bindingsdenylist::OnlyLlcpp::OnlyLlcpp(OnlyLlcpp&& other) noexcept : OnlyLlcpp(::fidl::internal::DefaultConstructPossiblyInvalidObjectTag{}) {
+::test_bindingsdenylist::OnlyCpp::OnlyCpp(OnlyCpp&& other) noexcept : OnlyCpp(::fidl::internal::DefaultConstructPossiblyInvalidObjectTag{}) {
   *storage_ = std::move(*other.storage_);
 }
 
-::test_bindingsdenylist::OnlyLlcpp& ::test_bindingsdenylist::OnlyLlcpp::operator=(OnlyLlcpp&& other) noexcept {
+::test_bindingsdenylist::OnlyCpp& ::test_bindingsdenylist::OnlyCpp::operator=(OnlyCpp&& other) noexcept {
   if (this != &other) {
     *storage_ = std::move(*other.storage_);
   }
   return *this;
 }
 
-::test_bindingsdenylist::OnlyLlcpp::OnlyLlcpp(::fidl::internal::DefaultConstructPossiblyInvalidObjectTag)
+::test_bindingsdenylist::OnlyCpp::OnlyCpp(::fidl::internal::DefaultConstructPossiblyInvalidObjectTag)
     : storage_(std::make_shared<Storage_>()) {}
 
-::test_bindingsdenylist::OnlyLlcpp::OnlyLlcpp(std::shared_ptr<Storage_> storage) : storage_(std::move(storage)) {}
+::test_bindingsdenylist::OnlyCpp::OnlyCpp(std::shared_ptr<Storage_> storage) : storage_(std::move(storage)) {}
 
-::test_bindingsdenylist::OnlyLlcpp::Tag test_bindingsdenylist::OnlyLlcpp::Which() const {
-  return OnlyLlcpp::IndexToTag(storage_->index()).value();
+::test_bindingsdenylist::OnlyCpp::Tag test_bindingsdenylist::OnlyCpp::Which() const {
+  return OnlyCpp::IndexToTag(storage_->index()).value();
 }
 
-size_t test_bindingsdenylist::OnlyLlcpp::TagToIndex(::fidl::internal::NaturalDecoder* decoder, ::test_bindingsdenylist::OnlyLlcpp::Tag tag) {
+size_t test_bindingsdenylist::OnlyCpp::TagToIndex(::fidl::internal::NaturalDecoder* decoder, ::test_bindingsdenylist::OnlyCpp::Tag tag) {
   switch (tag) {
-    case ::test_bindingsdenylist::OnlyLlcpp::Tag::kX:
+    case ::test_bindingsdenylist::OnlyCpp::Tag::kX:
       return 1;
     default: {
       decoder->SetError(::fidl::internal::kCodingErrorUnknownUnionTag);
@@ -433,32 +433,32 @@ size_t test_bindingsdenylist::OnlyLlcpp::TagToIndex(::fidl::internal::NaturalDec
   }
 }
 
-std::optional<::test_bindingsdenylist::OnlyLlcpp::Tag> test_bindingsdenylist::OnlyLlcpp::IndexToTag(size_t index) {
+std::optional<::test_bindingsdenylist::OnlyCpp::Tag> test_bindingsdenylist::OnlyCpp::IndexToTag(size_t index) {
   switch (index) {
     case 1:
-      return ::test_bindingsdenylist::OnlyLlcpp::Tag::kX;
+      return ::test_bindingsdenylist::OnlyCpp::Tag::kX;
     default:
       return std::nullopt;
   }
 }
 
-::test_bindingsdenylist::OnlyLlcpp::OnlyLlcpp(const OnlyLlcpp& other) noexcept : OnlyLlcpp(other.CloneStorage_()) {}
+::test_bindingsdenylist::OnlyCpp::OnlyCpp(const OnlyCpp& other) noexcept : OnlyCpp(other.CloneStorage_()) {}
 
-::test_bindingsdenylist::OnlyLlcpp& test_bindingsdenylist::OnlyLlcpp::operator=(const OnlyLlcpp& other) noexcept {
+::test_bindingsdenylist::OnlyCpp& test_bindingsdenylist::OnlyCpp::operator=(const OnlyCpp& other) noexcept {
   if (this != &other) {
     storage_ = other.CloneStorage_();
   }
   return *this;
 }
 
-bool test_bindingsdenylist::OnlyLlcpp::operator==(const OnlyLlcpp& other) const noexcept {
+bool test_bindingsdenylist::OnlyCpp::operator==(const OnlyCpp& other) const noexcept {
   return *storage_ == *other.storage_;
 }
-bool test_bindingsdenylist::OnlyLlcpp::operator!=(const OnlyLlcpp& other) const noexcept {
+bool test_bindingsdenylist::OnlyCpp::operator!=(const OnlyCpp& other) const noexcept {
   return *storage_ != *other.storage_;
 }
 
-std::shared_ptr<::test_bindingsdenylist::OnlyLlcpp::Storage_> test_bindingsdenylist::OnlyLlcpp::CloneStorage_() const {
+std::shared_ptr<::test_bindingsdenylist::OnlyCpp::Storage_> test_bindingsdenylist::OnlyCpp::CloneStorage_() const {
   const Storage_& storage = *storage_;
   switch (storage_->index()) {
     case 1:
@@ -469,21 +469,21 @@ std::shared_ptr<::test_bindingsdenylist::OnlyLlcpp::Storage_> test_bindingsdenyl
       return std::make_shared<Storage_>();
   }
 }
-::test_bindingsdenylist::OnlyLlcpp test_bindingsdenylist::OnlyLlcpp::WithX(uint32_t val) {
-  return OnlyLlcpp(std::make_shared<Storage_>(
+::test_bindingsdenylist::OnlyCpp test_bindingsdenylist::OnlyCpp::WithX(uint32_t val) {
+  return OnlyCpp(std::make_shared<Storage_>(
       std::in_place_index_t<1>{},
       std::move(val)));
 }
 
-const ::fidl::internal::UnionMemberView<1, ::test_bindingsdenylist::OnlyLlcpp::Storage_> test_bindingsdenylist::OnlyLlcpp::x() const {
+const ::fidl::internal::UnionMemberView<1, ::test_bindingsdenylist::OnlyCpp::Storage_> test_bindingsdenylist::OnlyCpp::x() const {
   return ::fidl::internal::UnionMemberView<1, Storage_>(storage_);
 }
 
-::fidl::internal::UnionMemberView<1, ::test_bindingsdenylist::OnlyLlcpp::Storage_> test_bindingsdenylist::OnlyLlcpp::x() {
+::fidl::internal::UnionMemberView<1, ::test_bindingsdenylist::OnlyCpp::Storage_> test_bindingsdenylist::OnlyCpp::x() {
   return ::fidl::internal::UnionMemberView<1, Storage_>(storage_);
 }
 
-::test_bindingsdenylist::OnlyLlcpp& test_bindingsdenylist::OnlyLlcpp::x(uint32_t value) {
+::test_bindingsdenylist::OnlyCpp& test_bindingsdenylist::OnlyCpp::x(uint32_t value) {
   storage_->emplace<1>(std::move(value));
   return *this;
 }

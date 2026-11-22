@@ -161,6 +161,8 @@ void Injector::InjectEvents(fuchsia_ui_pointerinjector::wire::DeviceInjectReques
     return;
   }
 
+  auto batch = BeginBatch();
+
   for (auto& event : events) {
     TRACE_DURATION("input", "Injector::InjectEvents[event]");
     if (!event.has_timestamp() || !event.has_data()) {
@@ -279,6 +281,10 @@ StreamId Injector::ValidateEventStream(uint32_t pointer_id, EventPhase phase) {
 }
 
 void Injector::CancelOngoingStreams(const view_tree::Snapshot& snapshot) {
+  if (ongoing_streams_.empty()) {
+    return;
+  }
+  auto batch = BeginBatch();
   // Inject CANCEL event for each ongoing stream.
   for (const auto [pointer_id, stream_id] : ongoing_streams_) {
     CancelStream(pointer_id, stream_id, snapshot);

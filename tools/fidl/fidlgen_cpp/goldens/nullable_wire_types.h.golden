@@ -97,7 +97,7 @@ class SimpleUnion {
   SimpleUnion(SimpleUnion&&) = default;
   SimpleUnion& operator=(SimpleUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kA = 1,  // 0x1
     kB = 2,  // 0x2
   };
@@ -123,7 +123,7 @@ class SimpleUnion {
   ::test_nullable::wire::SimpleUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kA = 1,  // 0x1
     kB = 2,  // 0x2

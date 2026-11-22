@@ -10,3 +10,5 @@
 pub mod dev_init;
 pub mod platform;
 pub mod timer;
+
+pub use platform::platform_is_efi_expected;

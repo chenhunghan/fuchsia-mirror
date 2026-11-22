@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":image_assembly_config_builder_test"],
+    visibility = ["//src/lib/assembly:__pkg__"],
+)
+
+rustc_library(
+    name = "image_assembly_config_builder",
+    srcs = [
+        "src/compiled_package.rs",
+        "src/image_assembly_config_builder.rs",
+        "src/lib.rs",
+        "src/product_assembly.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build/assembly/tools/assembly:__pkg__",
+        "//src/lib/assembly:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+        "//src/lib/assembly/cli_args",
+        "//src/lib/assembly/components",
+        "//src/lib/assembly/config_capabilities",
+        "//src/lib/assembly/config_data",
+        "//src/lib/assembly/config_schema",
+        "//src/lib/assembly/constants",
+        "//src/lib/assembly/container",
+        "//src/lib/assembly/domain_config",
+        "//src/lib/assembly/driver_manifest",
+        "//src/lib/assembly/image_assembly_config",
+        "//src/lib/assembly/images_config",
+        "//src/lib/assembly/memory_buckets",
+        "//src/lib/assembly/named_file_map",
+        "//src/lib/assembly/package_utils",
+        "//src/lib/assembly/platform_artifacts",
+        "//src/lib/assembly/platform_configuration",
+        "//src/lib/assembly/product_input_bundle",
+        "//src/lib/assembly/release_info",
+        "//src/lib/assembly/shell_commands",
+        "//src/lib/assembly/structured_config",
+        "//src/lib/assembly/tool",
+        "//src/lib/assembly/util",
+        "//src/lib/assembly/validate_package",
+        "//src/lib/assembly/validate_util",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-url",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//src/sys/pkg/lib/fuchsia-pkg",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:rayon",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:textwrap",
+    ],
+)
+
+host_rustc_test(
+    name = "image_assembly_config_builder_test",
+    crate = ":image_assembly_config_builder",
+    deps = [
+        "//src/lib/assembly/release_info",
+        "//src/lib/assembly/test_util",
+        "//src/sys/pkg/lib/far/rust:fuchsia-archive",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

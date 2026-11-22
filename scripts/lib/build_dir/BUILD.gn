@@ -55,11 +55,13 @@ if (is_host) {
       "lib.py",
       "main_pb.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/lib/fx_cmd:*",
       "//scripts/lib/package_server:*",
       "//tools/devshell/python/status:*",
     ]
+    enable_mypy = false
   }
 }

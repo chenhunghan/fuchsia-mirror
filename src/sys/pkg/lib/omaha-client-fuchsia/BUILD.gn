@@ -8,9 +8,9 @@ import("//build/rust/rustc_test.gni")
 # The library and unit test binary are defined in BUILD.bazel. The unit test
 # binary and test package (`:omaha-client-fuchsia-tests`) also stay in GN
 # because `:omaha-client-fuchsia-tests` uses GN-only targets
-# (`//src/connectivity/network/dns:component`,
+# (`//src/connectivity/network/dns:package`,
 # `//src/connectivity/network/netstack3:package-for-tests`,
-# `//src/connectivity/policy/http-client:component`,
+# `//src/connectivity/policy/http-client:package`,
 # `//src/power/shutdown-shim/tests:shutdown_shim_component`, and
 # `//src/sys/stash:stash2_v2`).
 rustc_test("omaha-client-fuchsia_test") {
@@ -66,14 +66,16 @@ fuchsia_unittest_package("omaha-client-fuchsia-tests") {
 
   deps = [
     ":omaha-client-fuchsia-tests-test-driver",
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/power/shutdown-shim/tests:shutdown_shim_component",
     "//src/sys/pkg/bin/fake-channel-control",
     "//src/sys/pkg/testing:fake-ssl-certs",
     "//src/sys/stash:stash2_v2",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
 }
 
 group("tests") {

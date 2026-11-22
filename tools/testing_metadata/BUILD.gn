@@ -20,13 +20,9 @@ if (current_toolchain == default_toolchain) {
     tool_output_name = "testing_metadata"
 
     output_file = "${root_build_dir}/testing_metadata.json"
-    directory_owners_output_file = "${root_build_dir}/directory_owners.json"
     depfile = "${output_file}.d"
 
-    outputs = [
-      output_file,
-      directory_owners_output_file,
-    ]
+    outputs = [ output_file ]
     check_for_output_dir_leaks = false
 
     args = [
@@ -34,8 +30,6 @@ if (current_toolchain == default_toolchain) {
       rebase_path("//", root_build_dir),
       "--output",
       rebase_path(output_file, root_build_dir),
-      "--directory-owners-file-output",
-      rebase_path(directory_owners_output_file, root_build_dir),
       "--depfile",
       rebase_path(depfile, root_build_dir),
     ]

@@ -129,6 +129,7 @@ use super::dispatcher::{Dispatcher, impl_dispatcher_facade_with_state};
 use super::handle::{HandleRef, KernelHandle};
 use super::port_dispatcher_ffi::*;
 use super::process_dispatcher::ProcessDispatcher;
+use super::signal_observer::{SignalObserver, SignalObserverType};
 use super::thread_dispatcher::{AutoBlocked, Blocked};
 use crate::ksync_kernel::{TrackedCriticalMutex, TrackedSpinlock};
 use boot_options::BootOptions;
@@ -695,23 +696,11 @@ fn raise_packet_limit_exception(koid: zx_koid_t, num_packets: usize) {
     signal_policy_exception(ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_PACKETS, 0);
 }
 
-/// C++ `PortSignalObserver` base subobject (`SignalObserver` subclass).
-#[repr(C, align(8))]
-pub(super) struct PortSignalObserver {
-    _opaque: zr::OpaqueBytes<{ object_constants::kPortSignalObserverSize }>,
-}
-
-zr::static_assert_size_and_align!(
-    PortSignalObserver,
-    object_constants::kPortSignalObserverSize,
-    object_constants::kPortSignalObserverAlign,
-);
-
 /// Observers are weakly contained in `Dispatcher`s.
 #[derive(fbl::DoublyLinkedListContainable)]
 #[repr(C, align(8))]
 pub struct PortObserver {
-    signal_observer: PortSignalObserver,
+    signal_observer: SignalObserver,
     packet: UnsafeCell<PortPacket>,
     port: RefPtr<PortDispatcher>,
     /// Guarded by `port`'s lock.
@@ -731,11 +720,6 @@ unsafe impl Send for PortObserver {}
 
 impl Drop for PortObserver {
     fn drop(&mut self) {
-        // SAFETY: `self.signal_observer` was initialized by `cpp_port_signal_observer_init` in
-        // `PortObserver::try_new` and is no longer registered with any `Dispatcher`.
-        unsafe {
-            cpp_port_signal_observer_destroy(&raw mut self.signal_observer);
-        }
         PORT_OBSERVER_LIVE.add(-1);
         PORT_OBSERVER_FREED.add(1);
     }
@@ -771,7 +755,8 @@ impl PortObserver {
                     ..PacketSignal::default()
                 });
 
-                cpp_port_signal_observer_init((&raw mut (*slot).signal_observer).cast(), options);
+                (&raw mut (*slot).signal_observer)
+                    .write(SignalObserver::new(SignalObserverType::Port, options));
                 (&raw mut (*slot).packet).write(UnsafeCell::new(packet));
                 (&raw mut (*slot).port).write(port);
                 (&raw mut (*slot).node).write(DoublyLinkedListNode::new());
@@ -784,7 +769,7 @@ impl PortObserver {
         cache.allocate_init(init)
     }
 
-    /// Invoked by C++ `SignalObserver::OnMatch` under the watched `Dispatcher`'s lock.
+    /// Invoked by [`SignalObserver::on_match`] under the watched `Dispatcher`'s lock.
     ///
     /// # Safety
     ///
@@ -848,7 +833,7 @@ impl PortObserver {
         );
     }
 
-    /// Invoked by C++ `SignalObserver::OnCancel` under the watched `Dispatcher`'s lock.
+    /// Invoked by [`SignalObserver::on_cancel`] under the watched `Dispatcher`'s lock.
     ///
     /// # Safety
     ///
@@ -932,16 +917,19 @@ impl PortObserver {
     ///
     /// # Safety
     ///
-    /// `observer` must point to a live `PortObserver` that is not linked in `observers`, and the
-    /// owning `PortDispatcher`'s `lock` must *not* be held (lock ordering: `Dispatcher` before
-    /// `PortDispatcher`).
+    /// - `observer` must point to a valid, pinned `PortObserver` that is unlinked from `observers`
+    ///   and remains live and not mutably aliased until this call returns.
+    /// - `dispatcher` must be the `Dispatcher` with which `observer` was registered (never a
+    ///   different `Dispatcher`).
+    /// - Neither `dispatcher`'s lock nor the owning `PortDispatcher`'s `lock` may be held by the
+    ///   calling thread (lock ordering: `Dispatcher` before `PortDispatcher`).
     unsafe fn remove_from_dispatcher(observer: *mut Self, dispatcher: &Dispatcher) -> bool {
         let mut unused_signals: zx_signals_t = 0;
-        // SAFETY: `observer` is live and `dispatcher` is a valid reference per the caller
-        // contract; the port lock is not held, so acquiring the dispatcher lock inside is safe.
+        // SAFETY: `observer` is live, pinned, and unaliased with `signal_observer` at offset 0
+        // (preserving whole-allocation provenance), was registered only with `dispatcher`, and
+        // neither `dispatcher`'s lock nor the port lock is held per the caller contract.
         unsafe {
-            dispatcher
-                .remove_observer((&raw mut (*observer).signal_observer).cast(), &mut unused_signals)
+            dispatcher.remove_observer(observer.cast::<SignalObserver>(), &mut unused_signals)
         }
     }
 }
@@ -1083,12 +1071,10 @@ impl PortDispatcher {
             return Err(Status::INVALID_ARGS);
         }
 
-        // SAFETY: `cpp_port_dispatcher_create` initializes both out parameters on `ZX_OK`.
-        let (handle, rights) = unsafe {
-            KernelHandle::create_with_rights(|h, r| cpp_port_dispatcher_create(options, h, r))
-        }?;
+        // SAFETY: `cpp_port_dispatcher_create` initializes the out parameter on `ZX_OK`.
+        let handle = unsafe { KernelHandle::create(|h| cpp_port_dispatcher_create(options, h)) }?;
 
-        Ok((handle, rights))
+        Ok((handle, Self::default_rights()))
     }
 
     /// Returns `true` if this port was created with `ZX_PORT_BIND_TO_INTERRUPT`.
@@ -1160,7 +1146,9 @@ impl PortDispatcher {
             guard.as_mut().call_unlocked(|| {
                 // We cannot assert that remove_observer returns true because it's possible that
                 // the Dispatcher removed it before we got here.
-                // SAFETY: `observer` is live and unlinked from `observers`, and `lock` is not held.
+                // SAFETY: `observer` is slab-pinned, live, unlinked from `observers`, and not
+                // mutably aliased; `dispatcher` is the `Dispatcher` on which `observer` was
+                // registered; and neither `lock` nor `dispatcher`'s lock is held.
                 unsafe {
                     PortObserver::remove_from_dispatcher(observer, &dispatcher);
                 }
@@ -1911,8 +1899,10 @@ impl PortDispatcher {
                     RefPtr::<Dispatcher>::from_raw((*canceled_observer).unlink_dispatcher_locked())
                 };
                 guard.as_mut().call_unlocked(|| {
-                    // SAFETY: `canceled_observer` is live and unlinked from `observers`, and
-                    // `lock` is not held.
+                    // SAFETY: `canceled_observer` is slab-pinned, live, unlinked from `observers`,
+                    // and not mutably aliased; `dispatcher` is the `Dispatcher` on which
+                    // `canceled_observer` was registered; and neither `lock` nor `dispatcher`'s
+                    // lock is held.
                     unsafe {
                         PortObserver::remove_from_dispatcher(canceled_observer, &dispatcher);
                     }

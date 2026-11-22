@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "bin",
+    srcs = [
+        "src/main.rs",
+        "src/test_filing_enable.rs",
+        "src/test_snapshot_sanitizing.rs",
+        "src/test_snapshot_throttle.rs",
+        "src/test_trigger_truth.rs",
+    ],
+    crate_name = "diagnostics_detect_test_cases_bin",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
+        "//sdk/rust/zx",
+        "//src/diagnostics/detect/integration/realm_factory/fidl/test.detect.factory:fidl_rust",
+        # fake-clock/fidl defines library fuchsia.testing, unrelated to
+        # fuchsia.testing.harness.
+        "//src/lib/fake-clock/fidl:fidl_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/testing/realm_proxy/client",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "diagnostics_detect_test_cases_bin",
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    testonly = True,
+    component_name = "test_cases",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+        "//src/testing/realm_client:meta/realm_client.shard.cml",
+    ],
+    manifest = "meta/test_cases.cml",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":component-manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "pkg",
+    package_name = "diagnostics_detect_test_cases",
+    testonly = True,
+    components = [":component"],
+)

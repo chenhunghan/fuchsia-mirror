@@ -1,0 +1,72 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":manifest_tests"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":manifest_host_test"],
+)
+
+# Library for working with Font Provider font manifests.
+rustc_library(
+    name = "manifest",
+    srcs = [
+        "src/lib.rs",
+        "src/serde_ext.rs",
+        "src/v1_to_v2.rs",
+        "src/v2.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/fonts:__pkg__",
+        "//src/fonts/tools/manifest_generator:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust_common",
+        "//src/fonts/char_set",
+        "//src/fonts/offset_string",
+        "//src/lib/error/clonable_error",
+        "//src/lib/fuchsia-url",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:unicase",
+    ],
+)
+
+# The host target is called `manifest_test`, but the binary's name is
+# `manifest_lib_test`.
+#
+# fx run-host-tests manifest_lib_test # Host
+# fx test manifest_tests          # Fuchsia
+rustc_test(
+    name = "manifest_test",
+    crate = ":manifest",
+    deps = ["//third_party/rust_crates/vendor:assert_matches"],
+)
+
+wrap_host_rust_test(
+    name = "manifest_host_test",
+    binary_name = "manifest_test",
+)
+
+fx_unittest_package(
+    name = "manifest_tests",
+    unit_tests = [":manifest_test"],
+)

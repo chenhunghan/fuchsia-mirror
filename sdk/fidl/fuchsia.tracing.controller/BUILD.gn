@@ -31,7 +31,6 @@ fidl("fuchsia.tracing.controller") {
   sources = [ "trace_controller.fidl" ]
   sdk_area = "Diagnostics"
   sdk_category = "partner"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

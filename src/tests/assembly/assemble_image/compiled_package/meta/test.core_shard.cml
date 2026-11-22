@@ -14,4 +14,11 @@
             startup: "eager",
         },
     ],
+    offer: [
+        {
+            config: "fuchsia.example.AssertedByScrutinyTest",
+            from: "parent",
+            to: "#bar",
+        },
+    ],
 }

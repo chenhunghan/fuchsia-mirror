@@ -9,7 +9,7 @@
 
 use crate::errors::FxfsError;
 use crate::filesystem::FxFilesystemBuilder;
-use crate::lsm_tree::persistent_layer::PersistentLayerWriter;
+use crate::lsm_tree::persistent_layer::{BloomFilterOptions, PersistentLayerWriter};
 use crate::lsm_tree::skip_list_layer::SkipListLayer;
 use crate::lsm_tree::types::{Item, ItemRef, Layer, LayerIterator, LayerWriter as _};
 use crate::lsm_tree::{LayerSet, Query, layer_from_handle};
@@ -25,9 +25,9 @@ use crate::object_store::transaction::{
 };
 use crate::object_store::volume::{RootVolume, root_volume};
 use crate::object_store::{
-    AttributeId, DataObjectHandle, DirectWriter, Directory, FileExtent, HandleOptions, HandleOwner,
-    LastObjectId, LastObjectIdInfo, ObjectHandle, ObjectStore, ReadObjectHandle as _, ReservedId,
-    StoreInfo, StoreOptions, merge,
+    AttributeId, DataObjectHandle, DirectWriter, Directory, FileExtent, HandleOptions,
+    LastObjectId, LastObjectIdInfo, LocalHandleOwner, ObjectHandle, ObjectStore,
+    ReadObjectHandle as _, ReservedId, StoreInfo, StoreOptions, merge,
 };
 use crate::range::RangeExt;
 use crate::virtual_device::ReadOnlyDevice;
@@ -189,7 +189,12 @@ impl ObjectStore {
             // than are in the current layer set so `num_items` will likely be too small here. We
             // should calculate the correct amount ahead of time before emitting the object records.
             let num_items = inner_layer_set.sum_len();
-            let mut writer = PersistentLayerWriter::new(writer, num_items, fs.block_size()).await?;
+            let mut writer = PersistentLayerWriter::new(
+                writer,
+                Some(BloomFilterOptions { num_items }),
+                fs.block_size(),
+            )
+            .await?;
             let mut merger = inner_layer_set.merger();
             let mut iter =
                 ExtentMappingIterator::new(merger.query(Query::FullScan).await?, extents)?;
@@ -425,11 +430,11 @@ async fn create_metadata_ownership_layer(
 }
 
 /// Returns true if all extent records within `owner` are those referenced by `item`.
-async fn item_is_unique<H: HandleOwner>(
+async fn item_is_unique<H: LocalHandleOwner>(
     owner: &H,
     handle: &DataObjectHandle<H>,
 ) -> Result<bool, Error> {
-    let layer_set = owner.as_ref().tree().layer_set();
+    let layer_set = owner.store().tree().layer_set();
     let mut merger = layer_set.merger();
     let mut iter = merger.query(Query::FullScan).await?;
     while let Some(item) = iter.get() {
@@ -1078,8 +1083,8 @@ mod tests {
     async fn test_install_volume_large_layer_and_compaction() {
         use crate::object_store::journal::JournalOptions;
 
-        // Create an image with 15,000 files so its object tree layer exceeds the 1 MiB initial
-        // metadata reservation size (RESERVED_SPACE).
+        // Create an image with 15,000 files so its object tree layer exceeds the initial metadata
+        // reservation size (`journal::reserved_space`).
         let image = {
             let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
             let fs = FxFilesystem::new_empty(device).await.unwrap();
@@ -1136,8 +1141,9 @@ mod tests {
             }
         }
 
-        // Installing a volume whose layer exceeds RESERVED_SPACE should allocate from general free
-        // space and properly fund the store reservation instead of exhausting metadata_reservation.
+        // Installing a volume whose layer exceeds `journal::reserved_space` should allocate from
+        // general free space and properly fund the store reservation instead of exhausting
+        // metadata_reservation.
         ObjectStore::install_volume(&root, SRC_NAME, INSTALL_FILE, DST_NAME).await.unwrap();
 
         // Trigger a compaction and verify `other` flushes cleanly without running out of metadata

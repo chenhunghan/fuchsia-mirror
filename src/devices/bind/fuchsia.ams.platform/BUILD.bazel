@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.ams.platform",
+    src = "fuchsia.ams.platform.bind",
+    category = "partner",
+    visibility = [
+        "//src/devices/board/drivers/astro:__pkg__",
+        "//src/devices/board/drivers/nelson:__pkg__",
+        "//src/devices/board/drivers/sherlock:__pkg__",
+    ],
+)

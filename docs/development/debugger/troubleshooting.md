@@ -2,7 +2,6 @@
 
 This page lists common troubleshooting tips for `zxdb`:
 
-* [Ensure that zxdb and `debug_agent` are built](#zxdb-built)
 * [Ensure that ffx can communicate with the device](#ffx-device-communication)
 * [Ensure that the Fuchsia package server is running](#package-server-running)
 * [Diagnose problems with symbols](#diagnose-problems-symbols)

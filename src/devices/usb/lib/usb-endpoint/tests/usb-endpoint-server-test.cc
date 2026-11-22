@@ -790,7 +790,7 @@ TEST_F(UsbEndpointServerTest, UnbindWhileRequestInFlightDefersUnpinTest) {
 TEST_F(UsbEndpointServerTest, GetMappedRegisteredVmoAndCacheFlushTest) {
   std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
   vmo_info.emplace_back(
-      fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size()));
+      std::move(fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size())));
 
   sync_completion_t wait;
   zx::vmo client_vmo;
@@ -835,7 +835,7 @@ TEST_F(UsbEndpointServerTest, GetMappedRegisteredVmoAndCacheFlushTest) {
 TEST_F(UsbEndpointServerTest, GetMappedSucceedsForInFlightRequestAfterUnregisterVmosTest) {
   std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
   vmo_info.emplace_back(
-      fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size()));
+      std::move(fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size())));
 
   sync_completion_t wait;
   zx::vmo client_vmo;
@@ -895,7 +895,7 @@ TEST_F(UsbEndpointServerTest, GetMappedSucceedsForInFlightRequestAfterUnregister
 TEST_F(UsbEndpointServerTest, GetMappedSucceedsForInFlightRequestAfterClientUnbindTest) {
   std::vector<fuchsia_hardware_usb_endpoint::VmoInfo> vmo_info;
   vmo_info.emplace_back(
-      fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size()));
+      std::move(fuchsia_hardware_usb_endpoint::VmoInfo().id(12).size(zx_system_get_page_size())));
 
   sync_completion_t wait;
   zx::vmo client_vmo;
@@ -945,6 +945,23 @@ TEST_F(UsbEndpointServerTest, GetMappedSucceedsForInFlightRequestAfterClientUnbi
   ep_->RequestComplete(ZX_OK, 1024, std::move(req_var));
   EXPECT_STATUS(ep_->GetMapped(fuchsia_hardware_usb_request::Buffer::WithVmoId(12)).status_value(),
                 ZX_ERR_NOT_FOUND);
+}
+
+TEST_F(UsbEndpointServerTest, GetIterUnpinnedDataBufferReturnsNotFoundTest) {
+  const size_t page_size = zx_system_get_page_size();
+  usb::FidlRequest req;
+  req.add_data(std::vector<uint8_t>(64, 0xAB), 64, 0);
+
+  auto req_var = usb::RequestVariant(std::move(req));
+  auto iters = ep_->get_iter(req_var, page_size);
+  ASSERT_TRUE(iters.is_error());
+  EXPECT_STATUS(iters.status_value(), ZX_ERR_NOT_FOUND);
+
+  ASSERT_OK(std::get<usb::FidlRequest>(req_var).PhysMap(fake_bti_));
+  iters = ep_->get_iter(req_var, page_size);
+  ASSERT_OK(iters);
+  ASSERT_EQ(iters->size(), 1u);
+  EXPECT_EQ((*iters->at(0).begin()).second, 64u);
 }
 
 }  // namespace

@@ -102,7 +102,7 @@ cc_test_executable("camera_device_unittest_bin") {
     "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_hlcpp",
     "//sdk/lib/inspect/testing/cpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/camera/lib/fake_controller",
     "//src/lib/fsl",
     "//src/lib/fxl/test:gtest_main",

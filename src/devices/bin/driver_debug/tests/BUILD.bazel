@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":driver_debug_integration_tests"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+rustc_test(
+    name = "driver_debug_integration_test",
+    srcs = [
+        "driver_debug_test.rs",
+        "test_driver.rs",
+    ],
+    crate_root = "driver_debug_test.rs",
+    edition = "2024",
+    # In GN, //sdk/lib/driver/component/rust transitively provides
+    # //src/devices/bin/driver_runtime via link_deps; in Bazel it uses the
+    # system-provided stub //src/devices/lib/driver:driver_runtime.
+    # @bazel2gn:skip
+    link_deps = ["//src/devices/bin/driver_runtime"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.debug:fuchsia.driver.debug_rust",
+        "//sdk/lib/driver/component/rust",
+        "//sdk/lib/driver/debug/rust",
+        "//sdk/rust/zx",
+        "//src/devices/bin/driver_debug:driver_debug_lib",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_unittest_package(
+    name = "driver_debug_integration_tests",
+    unit_tests = [":driver_debug_integration_test"],
+)

@@ -42,7 +42,6 @@ fuchsia_driver_component("framebuffer-amd-display") {
     ":driver",
     "//src/graphics/display/lib/framebuffer-display:framebuffer-pci-boot-display-driver-shard",
   ]
-  info = "meta/framebuffer-amd-display-info.json"
 }
 
 fuchsia_driver_package("package") {

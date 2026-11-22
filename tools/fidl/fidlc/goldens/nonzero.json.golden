@@ -27,7 +27,7 @@
     {
       "name": "test.nonzero/NonzeroInt16",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 12,
         "column": 7,
         "length": 12
@@ -56,7 +56,7 @@
     {
       "name": "test.nonzero/NonzeroInt32",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 13,
         "column": 7,
         "length": 12
@@ -85,7 +85,7 @@
     {
       "name": "test.nonzero/NonzeroInt64",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 14,
         "column": 7,
         "length": 12
@@ -114,7 +114,7 @@
     {
       "name": "test.nonzero/NonzeroInt8",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 11,
         "column": 7,
         "length": 11
@@ -143,7 +143,7 @@
     {
       "name": "test.nonzero/NonzeroUint16",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 8,
         "column": 7,
         "length": 13
@@ -172,7 +172,7 @@
     {
       "name": "test.nonzero/NonzeroUint32",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 9,
         "column": 7,
         "length": 13
@@ -201,7 +201,7 @@
     {
       "name": "test.nonzero/NonzeroUint64",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 10,
         "column": 7,
         "length": 13
@@ -230,7 +230,7 @@
     {
       "name": "test.nonzero/NonzeroUint8",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
         "line": 7,
         "column": 7,
         "length": 12

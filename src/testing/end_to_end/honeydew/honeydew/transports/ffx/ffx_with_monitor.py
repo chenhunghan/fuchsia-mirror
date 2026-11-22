@@ -13,7 +13,7 @@ from honeydew import errors
 from honeydew.affordances_capable import FuchsiaDeviceAddressChange
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
-from honeydew.transports.ffx import ffx
+from honeydew.transports.ffx import ffx_impl
 from honeydew.transports.ffx.types import (
     MonitorTargetInfo,
 )
@@ -25,8 +25,15 @@ _FFX_MONITOR_CMDS: dict[str, list[str]] = {
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
+# Maximum time to wait for `ffx monitor` to observe a disconnection that has
+# already been confirmed by querying the target directly.
+_MONITOR_DISCONNECTION_TIMEOUT_SECS: float = 30.0
+# Delay between `ffx monitor status` polls while waiting for the monitor to
+# observe a change in connection state.
+_MONITOR_CONNECTION_POLL_INTERVAL_SECS: float = 0.5
 
-class FFXWithMonitor(ffx.FFX):
+
+class FFXWithMonitor(ffx_impl.FfxImpl):
     """Provides methods for Host-(Fuchsia)Target interactions via FFX with `ffx monitor`.
 
     # FFX monitor session management:
@@ -200,6 +207,74 @@ class FFXWithMonitor(ffx.FFX):
                     f"{self._target_name} did not connect to host within "
                     f"{timeout} seconds."
                 )
+            time.sleep(_MONITOR_CONNECTION_POLL_INTERVAL_SECS)
+
+    def wait_for_rcs_disconnection(
+        self,
+        timeout: float | None = None,
+    ) -> None:
+        """Wait until FFX observes that the RCS connection to the target has been disconnected.
+
+        In addition to confirming the disconnection by querying the target
+        directly, this waits for `ffx monitor` to observe the disconnection.
+        Otherwise, a subsequent `wait_for_rcs_connection()` may observe stale
+        monitor state from before the disconnection and return immediately,
+        e.g. while the target is still rebooting.
+
+        If the monitor does not observe the disconnection within
+        `_MONITOR_DISCONNECTION_TIMEOUT_SECS` (or the remaining `timeout`), a
+        warning is logged and this method returns.
+
+        Args:
+            timeout: Maximum time in seconds to wait for the RCS disconnection.
+                If None (default), waits indefinitely for the target to
+                disconnect and up to `_MONITOR_DISCONNECTION_TIMEOUT_SECS` for
+                `ffx monitor` to observe it.
+
+        Raises:
+            DeviceNotConnectedError: If FFX fails to reach target.
+            FfxTimeoutError: If the target does not disconnect within the
+                timeout.
+            FfxCommandError: In case of other FFX command failure.
+        """
+        caller_deadline: float | None = (
+            time.monotonic() + timeout if timeout is not None else None
+        )
+        super().wait_for_rcs_disconnection(timeout=timeout)
+
+        _LOGGER.info(
+            "Waiting for ffx monitor to observe that %s disconnected...",
+            self._target_name,
+        )
+        now: float = time.monotonic()
+        monitor_timeout: float = (
+            _MONITOR_DISCONNECTION_TIMEOUT_SECS
+            if caller_deadline is None
+            else min(
+                _MONITOR_DISCONNECTION_TIMEOUT_SECS,
+                max(0.0, caller_deadline - now),
+            )
+        )
+        deadline: float = now + monitor_timeout
+        while True:
+            target = self._get_target_status()
+            if not (
+                target.target_state == "Product" and target.rcs_state == "Y"
+            ):
+                _LOGGER.info(
+                    "ffx monitor observed that %s disconnected",
+                    self._target_name,
+                )
+                return
+            if time.monotonic() >= deadline:
+                _LOGGER.warning(
+                    "ffx monitor did not observe that %s disconnected within "
+                    "%s seconds.",
+                    self._target_name,
+                    monitor_timeout,
+                )
+                return
+            time.sleep(_MONITOR_CONNECTION_POLL_INTERVAL_SECS)
 
     def _get_target_status(self) -> MonitorTargetInfo:
         """Gets the status information of the target node from 'ffx monitor status'.
@@ -221,7 +296,6 @@ class FFXWithMonitor(ffx.FFX):
             cmd=cmd,
             include_target=False,
         )
-        _LOGGER.info("DEBUG: statuses: %s", statuses)
         targets = json.loads(statuses).get("targets", [])
         for target in targets:
             if target["nodename"] == self._target_name:

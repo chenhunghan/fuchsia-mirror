@@ -17,57 +17,10 @@
 using lockdep::AdoptLock;
 using lockdep::AliasedLock;
 using lockdep::AssertHeld;
-using lockdep::AssertOrderedAliasedLock;
 using lockdep::AssertOrderedLock;
 using lockdep::Guard;
 using lockdep::GuardMultiple;
 using lockdep::Lock;
-using lockdep::LockFlagsActiveListDisabled;
-using lockdep::LockFlagsReportingDisabled;
-using lockdep::LockFlagsTrackingDisabled;
 using lockdep::NullGuard;
-
-// Defines a singleton lock with the given name that wraps a raw global lock.
-// The singleton instance may be retrieved using the static Get() method
-// provided by the base class. The raw global lock is used as the underlying
-// lock instead of an internally-defined lock. This is useful to instrument an
-// existing global lock that may be shared with C code or for other reasons
-// cannot be completely replaced with the above global lock type.
-//
-// Arguments:
-//  name:        The name of the singleton to define.
-//  global_lock: The global lock to wrap with this lock type. This must be an
-//               lvalue reference expression to a lock with static storage
-//               duration, either external or internal.
-//  __VA_ARGS__: LockFlags expression specifying lock flags to honor in addition
-//               to the flags specified for the lock type using the
-//               LOCK_DEP_TRAITS macro below.
-//
-// Example usage:
-//
-//  extern SpinLock thread_lock;
-//  LOCK_DEP_SINGLETON_LOCK_WRAPPER(ThreadLock, thread_lock [, LockFlags]);
-//
-//  void DoThreadStuff() {
-//      Guard<SpinLock, IrqSave> guard{ThreadLock::Get()};
-//      // ...
-//  }
-#define DECLARE_SINGLETON_LOCK_WRAPPER(name, global_lock, ...) \
-  LOCK_DEP_SINGLETON_LOCK_WRAPPER(name, global_lock, ##__VA_ARGS__)
-
-#if WITH_LOCK_DEP
-#include <kernel/ffi.h>
-
-extern "C" {
-void cpp_lockdep_thread_lock_state_init(ffi::Uninitialized<lockdep::ThreadLockState>* out);
-void cpp_lockdep_system_init_thread_lock_state(lockdep::ThreadLockState* state);
-void* cpp_lockdep_iter_begin();
-void* cpp_lockdep_iter_next(void* state);
-const char* cpp_lockdep_state_name(const void* state);
-const void* cpp_lockdep_state_dependency_set(const void* state);
-void* cpp_lockdep_state_connected_set(void* state);
-void cpp_lockdep_trigger_loop_detection();
-}
-#endif
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_LOCKDEP_H_

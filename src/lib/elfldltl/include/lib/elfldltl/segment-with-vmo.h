@@ -10,6 +10,7 @@
 #include <lib/zx/vmo.h>
 #include <zircon/assert.h>
 
+#include <concepts>
 #include <type_traits>
 
 #include "diagnostics.h"
@@ -146,11 +147,11 @@ class SegmentWithVmo {
         zx::unowned_vmo other_vmo;
 
         // For copy from the unadorned Segment, there's never a VMO to copy.
-        if constexpr (!std::is_same_v<OtherSegment, Segment>) {
+        if constexpr (!std::same_as<OtherSegment, Segment>) {
           // Copy from the corresponding Segment subclass of this wrapper is
           // the other supported option, to clone the existing VMO, if any.
-          static_assert(std::is_same_v<OtherSegment, SameSegment<CopyT>> ||
-                        std::is_same_v<OtherSegment, SameSegment<OtherCopyT>>);
+          static_assert(std::same_as<OtherSegment, SameSegment<CopyT>> ||
+                        std::same_as<OtherSegment, SameSegment<OtherCopyT>>);
           other_vmo = other.vmo().borrow();
         }
 
@@ -289,7 +290,7 @@ class SegmentWithVmo {
     using DataWithZeroFillSegment = LoadInfo::DataWithZeroFillSegment;
     auto align_segment = [vmo, page_size, readonly, &diag](auto& segment) {
       using Segment = std::decay_t<decltype(segment)>;
-      if constexpr (std::is_same_v<Segment, DataWithZeroFillSegment>) {
+      if constexpr (std::same_as<Segment, DataWithZeroFillSegment>) {
         const size_t zero_size = segment.MakeAligned(page_size);
         if (zero_size > 0) {
           ZX_DEBUG_ASSERT(!segment.vmo());

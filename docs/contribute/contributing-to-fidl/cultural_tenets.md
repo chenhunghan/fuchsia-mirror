@@ -147,6 +147,6 @@ craft of being an engineer. Practice makes perfect.
  itself is expanded here to be relevant to our work.
 
 <!-- link labels -->
-[iterate]: /docs/contribute/governance/rfcs/rfc_process.md#iterate
+[iterate]: /docs/contribute/governance/rfcs/rfc_process.md#draft
 [medium]: /docs/contribute/governance/rfcs/0017_folding_ftp_into_rfc.md#medium
 [RFC]: /docs/contribute/governance/rfcs/rfc_process.md

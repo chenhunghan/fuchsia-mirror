@@ -7,6 +7,9 @@ use camino::Utf8PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Default delivery blob type used by pkg-resolver and package publishing when unspecified.
+pub const DEFAULT_DELIVERY_BLOB_TYPE: u32 = 1;
+
 /// A representative struct of all the configurable details of the software delivery system made
 /// available to a product owner
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, JsonSchema, WalkPaths)]
@@ -49,10 +52,6 @@ pub struct SwdConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub excessive_update_duration_seconds: Option<u32>,
 
-    /// Whether to use driver blob paging in pkg-cache.
-    #[serde(skip_serializing_if = "crate::common::is_default")]
-    pub use_driver_blob_paging: bool,
-
     /// Earliest time, in seconds on the boot timeline (starting at 0), at which pkg-cache will
     /// trigger garbage collection after the system is committed during that boot. If the commit
     /// occurs after this time, garbage collection runs immediately. It is skipped if any garbage
@@ -60,6 +59,11 @@ pub struct SwdConfig {
     /// device reboots before it runs. If unset, post-commit garbage collection is disabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub post_commit_gc_earliest_boot_seconds: Option<u16>,
+
+    /// The type of delivery blob to generate when publishing packages and fetch in pkg-resolver.
+    /// Defaults to 1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_blob_type: Option<u32>,
 }
 
 /// The trust store to use for SWD.
@@ -201,6 +205,7 @@ mod tests {
               "tuf_config_paths": ["/path/to/tuf_config.json"],
               "excessive_update_duration_seconds": 3600,
               "post_commit_gc_earliest_boot_seconds": 300,
+              "delivery_blob_type": 1,
             }
         "#;
 
@@ -225,6 +230,7 @@ mod tests {
                 tuf_config_paths: vec!["/path/to/tuf_config.json".into()],
                 excessive_update_duration_seconds: Some(3600),
                 post_commit_gc_earliest_boot_seconds: Some(300),
+                delivery_blob_type: Some(1),
                 ..Default::default()
             }
         );

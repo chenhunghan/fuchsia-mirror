@@ -44,7 +44,6 @@ rustc_library(
 
 rustc_test(
     name = "fidl-contrib_test",
-    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
     crate = ":fidl-contrib",
     # Only used by bazel2gn, to keep the GN `output_name` of the test binary.
     crate_name = "fidl_contrib_lib_test",
@@ -54,10 +53,7 @@ rustc_test(
         "//sdk/testing/fidl/protocols_tests:test.protocol.connector_rust",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-component",
-        # GN's //src/lib/fuchsia-component-test group also pulls in the
-        # RealmBuilder shard and server, which Bazel adds via `aspect_hints`
-        # and the package's `components`.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//third_party/rust_crates/vendor:anyhow",
     ],
 )

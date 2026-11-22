@@ -68,36 +68,21 @@ void LotsaSignals_DoPong(int main_tid, int* socks) {
   }
 }
 
-class ScopedSignalHandler {
- public:
-  ScopedSignalHandler(int signum, sighandler_t handler) : signum_(signum) {
-    prev_handler_ = signal(signum, handler);
-  }
-  ~ScopedSignalHandler() { signal(signum_, prev_handler_); }
-
- private:
-  int signum_;
-  sighandler_t prev_handler_;
-};
-
 }  // namespace
 
 // Ping-pongs a bunch of messages between two threads while spamming the main thread with signals.
 // This tests that epoll doesn't issue any spurious wakes.
 TEST(EpollTest, LotsaSignals) {
-  ScopedSignalHandler handler(SIGUSR1, &NoOpSigHandler);
+  test_helper::ScopedSigAction handler(SIGUSR1, &NoOpSigHandler);
 
-  int pair1[2];
-  int result = socketpair(AF_UNIX, SOCK_STREAM, 0, pair1);
-  ASSERT_EQ(result, 0);
-
-  int pair2[2];
-  result = socketpair(AF_UNIX, SOCK_STREAM, 0, pair2);
-  ASSERT_EQ(result, 0);
+  test_helper::ScopedSocketPair pair1;
+  ASSERT_TRUE(pair1);
+  test_helper::ScopedSocketPair pair2;
+  ASSERT_TRUE(pair2);
 
   // Ping pong
   pid_t main_tid = DoGetTid();
-  std::thread ponger([main_tid, one = fbl::unique_fd(pair1[1]), two = fbl::unique_fd(pair2[1])]() {
+  std::thread ponger([main_tid, one = std::move(pair1[1]), two = std::move(pair2[1])]() {
     int socks[2];
     socks[0] = one.get();
     socks[1] = two.get();
@@ -107,7 +92,7 @@ TEST(EpollTest, LotsaSignals) {
   fbl::unique_fd epfd(epoll_create(2));
   ASSERT_TRUE(epfd.is_valid());
 
-  fbl::unique_fd socks[2] = {fbl::unique_fd(pair1[0]), fbl::unique_fd(pair2[0])};
+  fbl::unique_fd socks[2] = {std::move(pair1[0]), std::move(pair2[0])};
   ASSERT_EQ(0, EpollAdd(epfd.get(), socks[0].get(), EPOLLIN, 0));
   ASSERT_EQ(0, EpollAdd(epfd.get(), socks[1].get(), EPOLLIN, 1));
 
@@ -142,9 +127,8 @@ TEST(EpollTest, LotsaSignals) {
 }
 
 TEST(EpollTest, CloseAfterAdd) {
-  int sockets[2];
-  int result = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets);
-  ASSERT_EQ(0, result);
+  test_helper::ScopedSocketPair sockets;
+  ASSERT_TRUE(sockets);
 
   fbl::unique_fd epfd(epoll_create(2));
   ASSERT_TRUE(epfd.is_valid());
@@ -153,15 +137,15 @@ TEST(EpollTest, CloseAfterAdd) {
   struct epoll_event event;
   event.events = EPOLLIN;
   event.data.u64 = 1;
-  result = epoll_ctl(epfd.get(), EPOLL_CTL_ADD, sockets[1], &event);
+  int result = epoll_ctl(epfd.get(), EPOLL_CTL_ADD, sockets[1].get(), &event);
   ASSERT_EQ(result, 0);
 
   // Write data in the "0" end so the "1" will be marked ready to read. Writing just one byte
   // ensures there can't be a short write.
-  ASSERT_EQ(1, HANDLE_EINTR(write(sockets[0], "a", 1)));
+  ASSERT_EQ(1, HANDLE_EINTR(write(sockets[0].get(), "a", 1)));
 
   // Close the read socket out from under epoll.
-  close(sockets[1]);
+  sockets[1].reset();
 
   // Waiting on the (now empty) epoll object should timeout rather than report it's ready to read
   // or that there's a bad file descriptor.
@@ -170,9 +154,8 @@ TEST(EpollTest, CloseAfterAdd) {
 }
 
 TEST(EpollTest, CtlModUpdatesData) {
-  int sockets[2];
-  int result = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets);
-  ASSERT_EQ(0, result);
+  test_helper::ScopedSocketPair sockets;
+  ASSERT_TRUE(sockets);
 
   fbl::unique_fd epfd(epoll_create(2));
   ASSERT_TRUE(epfd.is_valid());
@@ -180,9 +163,9 @@ TEST(EpollTest, CtlModUpdatesData) {
   struct epoll_event event;
   event.events = EPOLLIN;
   event.data.u32 = 1;
-  result = epoll_ctl(epfd.get(), EPOLL_CTL_ADD, sockets[1], &event);
+  int result = epoll_ctl(epfd.get(), EPOLL_CTL_ADD, sockets[1].get(), &event);
   ASSERT_EQ(result, 0);
-  ASSERT_EQ(1, HANDLE_EINTR(write(sockets[0], "a", 1)));
+  ASSERT_EQ(1, HANDLE_EINTR(write(sockets[0].get(), "a", 1)));
 
   event.data.u32 = 0;
   result = epoll_wait(epfd.get(), &event, 1, 1);
@@ -191,9 +174,9 @@ TEST(EpollTest, CtlModUpdatesData) {
   EXPECT_EQ(1, result) << errno;
 
   event.data.u32 = 2;
-  result = epoll_ctl(epfd.get(), EPOLL_CTL_MOD, sockets[1], &event);
+  result = epoll_ctl(epfd.get(), EPOLL_CTL_MOD, sockets[1].get(), &event);
 
-  ASSERT_EQ(1, HANDLE_EINTR(write(sockets[0], "a", 1)));
+  ASSERT_EQ(1, HANDLE_EINTR(write(sockets[0].get(), "a", 1)));
 
   event.data.u32 = 0;
   result = epoll_wait(epfd.get(), &event, 1, 1);
@@ -290,17 +273,11 @@ TEST(EpollTest, EpollIsPollable) {
   fbl::unique_fd epoll_fd(epoll_create(1));
   ASSERT_TRUE(epoll_fd.is_valid());
 
-  fbl::unique_fd side_a, side_b;
-  {
-    int sockets[2];
-    int result = socketpair(AF_UNIX, SOCK_STREAM, 0, sockets);
-    ASSERT_EQ(0, result);
-    side_a.reset(sockets[0]);
-    side_b.reset(sockets[1]);
-  }
+  test_helper::ScopedSocketPair sockets;
+  ASSERT_TRUE(sockets);
 
   // Register side_a for writability. It will be immediately asserted.
-  ASSERT_EQ(0, EpollAdd(epoll_fd.get(), side_a.get(), EPOLLOUT, 0));
+  ASSERT_EQ(0, EpollAdd(epoll_fd.get(), sockets[0].get(), EPOLLOUT, 0));
 
   // Verify that epoll_fd reports that it's readable.
   pollfd pfd = {.fd = epoll_fd.get(), .events = POLLIN};
@@ -345,39 +322,36 @@ TEST(EpollTest, PipeWritesNonemptyTriggerEpollInWithEpollET) {
 }
 
 TEST(EpollTest, SocketpairWritesNonemptyTriggerEpollInWithEpollET) {
-  int socketpair_fds[2];
-  SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, socketpair_fds));
-  fbl::unique_fd socket_a(socketpair_fds[0]);
-  fbl::unique_fd socket_b(socketpair_fds[1]);
+  test_helper::ScopedSocketPair sockets;
 
   struct epoll_event ev{};
   fbl::unique_fd epfd(epoll_create1(0));
 
   ev.events = EPOLLIN | EPOLLET;
-  ev.data.fd = socket_a.get();
+  ev.data.fd = sockets[0].get();
 
-  SAFE_SYSCALL(epoll_ctl(epfd.get(), EPOLL_CTL_ADD, socket_a.get(), &ev));
+  SAFE_SYSCALL(epoll_ctl(epfd.get(), EPOLL_CTL_ADD, sockets[0].get(), &ev));
 
   struct epoll_event events[1];
   ASSERT_EQ(0, epoll_wait(epfd.get(), events, 1, 0));
 
   // Write a byte into the socket so that it is nonempty.
   char buf = 'a';
-  EXPECT_EQ(1, write(socket_b.get(), &buf, 1));
+  EXPECT_EQ(1, write(sockets[1].get(), &buf, 1));
 
   // Read a EPOLLIN event.
   ASSERT_EQ(1, epoll_wait(epfd.get(), events, 1, 0));
-  EXPECT_EQ(events[0].data.fd, socket_a.get());
+  EXPECT_EQ(events[0].data.fd, sockets[0].get());
 
   // Now the epoll entry is not ready, so epoll_wait returns no ready items.
   ASSERT_EQ(0, epoll_wait(epfd.get(), events, 1, 0));
 
   // Write another byte to trigger EPOLLIN again.
-  EXPECT_EQ(1, write(socket_b.get(), &buf, 1));
+  EXPECT_EQ(1, write(sockets[1].get(), &buf, 1));
 
   // This marks the epoll entry as ready (even though the level didn't change).
   ASSERT_EQ(1, epoll_wait(epfd.get(), events, 1, 0));
-  EXPECT_EQ(events[0].data.fd, socket_a.get());
+  EXPECT_EQ(events[0].data.fd, sockets[0].get());
 }
 
 TEST(EpollTest, PipeReadFullTriggerEpollOutWithEpollET) {

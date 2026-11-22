@@ -511,7 +511,7 @@ void fidl::internal::WireBufferCompleterImpl<::test_zxtypes::StatusProtocol::B>:
 
 ::fidl::internal::TransactionalRequest<::test_zxtypes::StatusProtocol::A>::TransactionalRequest(int32_t arg)
     : body(::test_zxtypes::wire::StatusProtocolARequest{arg}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kStatusProtocol_A_Ordinal, ::test_zxtypes::kStatusProtocol_A_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kStatusProtocol_A_Ordinal, ::test_zxtypes::kStatusProtocol_A_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -536,7 +536,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_zxtypes::StatusProtocol::A>::TransactionalResponse(::test_zxtypes::wire::StatusProtocolAResult StatusProtocolAResult)
     : body(::fidl::WireResponse<::test_zxtypes::StatusProtocol::A>(StatusProtocolAResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kStatusProtocol_A_Ordinal, ::test_zxtypes::kStatusProtocol_A_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kStatusProtocol_A_Ordinal, ::test_zxtypes::kStatusProtocol_A_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_zxtypes::StatusProtocol::A>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kStatusProtocol_A_Ordinal, ::test_zxtypes::kStatusProtocol_A_DynamicFlags);
@@ -581,7 +581,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_zxtypes::StatusProtocol::B>::TransactionalRequest(int32_t arg)
     : body(::test_zxtypes::wire::StatusProtocolBRequest{arg}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kStatusProtocol_B_Ordinal, ::test_zxtypes::kStatusProtocol_B_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kStatusProtocol_B_Ordinal, ::test_zxtypes::kStatusProtocol_B_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -606,7 +606,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_zxtypes::StatusProtocol::B>::TransactionalResponse(::test_zxtypes::wire::StatusProtocolBResult StatusProtocolBResult)
     : body(::fidl::WireResponse<::test_zxtypes::StatusProtocol::B>(StatusProtocolBResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kStatusProtocol_B_Ordinal, ::test_zxtypes::kStatusProtocol_B_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kStatusProtocol_B_Ordinal, ::test_zxtypes::kStatusProtocol_B_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_zxtypes::StatusProtocol::B>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kStatusProtocol_B_Ordinal, ::test_zxtypes::kStatusProtocol_B_DynamicFlags);
@@ -1188,7 +1188,7 @@ void fidl::internal::WireBufferCompleterImpl<::test_zxtypes::ResultProtocol::B>:
 
 ::fidl::internal::TransactionalRequest<::test_zxtypes::ResultProtocol::A>::TransactionalRequest(int32_t arg)
     : body(::test_zxtypes::wire::ResultProtocolARequest{arg}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kResultProtocol_A_Ordinal, ::test_zxtypes::kResultProtocol_A_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kResultProtocol_A_Ordinal, ::test_zxtypes::kResultProtocol_A_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -1213,7 +1213,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_zxtypes::ResultProtocol::A>::TransactionalResponse(::test_zxtypes::wire::ResultProtocolAResult ResultProtocolAResult)
     : body(::fidl::WireResponse<::test_zxtypes::ResultProtocol::A>(ResultProtocolAResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kResultProtocol_A_Ordinal, ::test_zxtypes::kResultProtocol_A_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kResultProtocol_A_Ordinal, ::test_zxtypes::kResultProtocol_A_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_zxtypes::ResultProtocol::A>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kResultProtocol_A_Ordinal, ::test_zxtypes::kResultProtocol_A_DynamicFlags);
@@ -1258,7 +1258,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_zxtypes::ResultProtocol::B>::TransactionalRequest(int32_t arg)
     : body(::test_zxtypes::wire::ResultProtocolBRequest{arg}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kResultProtocol_B_Ordinal, ::test_zxtypes::kResultProtocol_B_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kResultProtocol_B_Ordinal, ::test_zxtypes::kResultProtocol_B_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -1283,7 +1283,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_zxtypes::ResultProtocol::B>::TransactionalResponse(::test_zxtypes::wire::ResultProtocolBResult ResultProtocolBResult)
     : body(::fidl::WireResponse<::test_zxtypes::ResultProtocol::B>(ResultProtocolBResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kResultProtocol_B_Ordinal, ::test_zxtypes::kResultProtocol_B_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_zxtypes::kResultProtocol_B_Ordinal, ::test_zxtypes::kResultProtocol_B_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_zxtypes::ResultProtocol::B>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_zxtypes::kResultProtocol_B_Ordinal, ::test_zxtypes::kResultProtocol_B_DynamicFlags);

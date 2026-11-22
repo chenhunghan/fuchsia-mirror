@@ -369,6 +369,127 @@ TEST(Index, ClearLLVMCacheEvictsUnitsAndLineTables) {
   EXPECT_GT(reloaded_line_table.GetNumSequences(), 0u);
 }
 
+namespace {
+
+class LineTableOverrideUnit : public DwarfUnit {
+ public:
+  LineTableOverrideUnit(fxl::RefPtr<DwarfUnit> inner, llvm::DWARFDebugLine::LineTable line_table)
+      : inner_(std::move(inner)), line_table_(std::move(line_table)) {}
+
+  DwarfBinary* GetBinary() const override { return inner_->GetBinary(); }
+  llvm::DWARFUnit* GetLLVMUnit() const override { return inner_->GetLLVMUnit(); }
+  int GetDwarfVersion() const override { return inner_->GetDwarfVersion(); }
+  llvm::DWARFDie GetUnitDie() const override { return inner_->GetUnitDie(); }
+  LazySymbol FunctionForRelativeAddress(uint64_t relative_address) const override {
+    return inner_->FunctionForRelativeAddress(relative_address);
+  }
+  uint64_t GetOffset() const override { return inner_->GetOffset(); }
+  std::string GetCompilationDir() const override { return inner_->GetCompilationDir(); }
+  const LineTable& GetLineTable() const override { return inner_->GetLineTable(); }
+  const llvm::DWARFDebugLine::LineTable* GetLLVMLineTable() const override { return &line_table_; }
+  uint64_t GetDieCount() const override { return inner_->GetDieCount(); }
+  llvm::DWARFDie GetLLVMDieAtIndex(uint64_t index) const override {
+    return inner_->GetLLVMDieAtIndex(index);
+  }
+  llvm::DWARFDie GetLLVMDieAtOffset(DwarfDieRef die_ref) const override {
+    return inner_->GetLLVMDieAtOffset(die_ref);
+  }
+  uint64_t GetIndexForLLVMDie(const llvm::DWARFDie& die) const override {
+    return inner_->GetIndexForLLVMDie(die);
+  }
+  DwarfDieRef GetDieRef(uint64_t offset) const override { return inner_->GetDieRef(offset); }
+  DwarfDieRef GetDieRef(const llvm::DWARFDie& die) const override { return inner_->GetDieRef(die); }
+
+ private:
+  fxl::RefPtr<DwarfUnit> inner_;
+  llvm::DWARFDebugLine::LineTable line_table_;
+};
+
+class SingleUnitBinaryWrapper : public DwarfBinary {
+ public:
+  SingleUnitBinaryWrapper(DwarfBinary* inner, fxl::RefPtr<DwarfUnit> unit)
+      : inner_(inner), unit_(std::move(unit)) {}
+
+  std::string GetName() const override { return inner_->GetName(); }
+  std::string GetBuildID() const override { return inner_->GetBuildID(); }
+  std::time_t GetModificationTime() const override { return inner_->GetModificationTime(); }
+  const DwarfSymbolFactory* GetSymbolFactory() const override { return inner_->GetSymbolFactory(); }
+  bool HasBinary() const override { return inner_->HasBinary(); }
+  llvm::object::ObjectFile* GetLLVMObjectFile() override { return inner_->GetLLVMObjectFile(); }
+  llvm::DWARFContext* GetLLVMContext() const override { return inner_->GetLLVMContext(); }
+  uint64_t GetMappedLength() const override { return inner_->GetMappedLength(); }
+  const std::map<std::string, llvm::ELF::Elf64_Sym>& GetELFSymbols() const override {
+    return inner_->GetELFSymbols();
+  }
+  const std::map<std::string, uint64_t> GetPLTSymbols() const override {
+    return inner_->GetPLTSymbols();
+  }
+  uint32_t GetNormalUnitCount() const override { return 1; }
+  uint32_t GetDWOUnitCount() const override { return 0; }
+  fxl::RefPtr<DwarfUnit> GetUnitAtIndex(UnitIndex i) override {
+    return (!i.is_dwo && i.index == 0) ? unit_ : nullptr;
+  }
+  fxl::RefPtr<DwarfUnit> UnitForRelativeAddress(uint64_t relative_address) override {
+    return inner_->UnitForRelativeAddress(relative_address);
+  }
+  std::optional<uint64_t> GetDebugAddrEntry(uint64_t addr_base, uint64_t index) const override {
+    return inner_->GetDebugAddrEntry(addr_base, index);
+  }
+  llvm::DWARFDie GetLLVMDieAtOffset(DwarfDieRef die_ref) const override {
+    return inner_->GetLLVMDieAtOffset(die_ref);
+  }
+  DwarfDieRef GetDieRefForSignature(uint64_t signature) const override {
+    return inner_->GetDieRefForSignature(signature);
+  }
+  void ClearLLVMCache() override { inner_->ClearLLVMCache(); }
+
+ private:
+  DwarfBinary* inner_;
+  fxl::RefPtr<DwarfUnit> unit_;
+};
+
+TEST(Index, OutOfBoundsLineTableFileId) {
+  TestSymbolModule setup(TestSymbolModule::kCheckedIn);
+  ASSERT_TRUE(setup.Init("", false).ok());
+
+  DwarfBinary* binary = setup.symbols()->binary();
+  fxl::RefPtr<DwarfUnit> unit0 = binary->GetUnitAtIndex(UnitIndex(false, 0));
+  ASSERT_TRUE(unit0);
+
+  const llvm::DWARFDebugLine::LineTable* orig_table = unit0->GetLLVMLineTable();
+  ASSERT_TRUE(orig_table);
+  ASSERT_FALSE(orig_table->Rows.empty());
+
+  llvm::DWARFDebugLine::LineTable modified_table = *orig_table;
+  // Valid 1-based file indices are in [1, FileNames.size()], so FileNames.size() + 1 is the exact
+  // boundary one past the end of the file table.
+  llvm::DWARFDebugLine::Row boundary_row = modified_table.Rows.back();
+  boundary_row.File = static_cast<uint16_t>(modified_table.Prologue.FileNames.size() + 1);
+  modified_table.Rows.push_back(boundary_row);
+
+  llvm::DWARFDebugLine::Row past_end_row = modified_table.Rows.back();
+  past_end_row.File = static_cast<uint16_t>(modified_table.Prologue.FileNames.size() + 2);
+  modified_table.Rows.push_back(past_end_row);
+
+  auto wrapped_unit = fxl::MakeRefCounted<LineTableOverrideUnit>(unit0, std::move(modified_table));
+  SingleUnitBinaryWrapper wrapped_binary(binary, wrapped_unit);
+
+  Index baseline_index;
+  SingleUnitBinaryWrapper baseline_binary(binary, unit0);
+  baseline_index.CreateIndex(baseline_binary, IndexNode::SymbolRef::kMainBinary);
+
+  Index index;
+  index.CreateIndex(wrapped_binary, IndexNode::SymbolRef::kMainBinary);
+
+  std::ostringstream baseline_files;
+  baseline_index.DumpFileIndex(baseline_files);
+  std::ostringstream files;
+  index.DumpFileIndex(files);
+  EXPECT_EQ(baseline_files.str(), files.str());
+}
+
+}  // namespace
+
 // Enable and substitute a path on your system to dump the index for a DWARF file.
 #if 0
 TEST(Index, DumpIndex) {

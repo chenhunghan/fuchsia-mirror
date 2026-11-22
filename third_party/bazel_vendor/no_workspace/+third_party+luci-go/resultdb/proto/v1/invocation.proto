@@ -1,0 +1,377 @@
+// Copyright 2019 The LUCI Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package luci.resultdb.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+import "resultdb/proto/v1/common.proto";
+import "resultdb/proto/v1/instruction.proto";
+import "resultdb/proto/v1/predicate.proto";
+
+option go_package = "go.chromium.org/luci/resultdb/proto/v1;resultpb";
+option java_package = "com.google.luci.resultdb.v1";
+option java_multiple_files = true;
+
+// A conceptual container of results. Immutable once finalized.
+// It represents all results of some computation; examples: swarming task,
+// buildbucket build, CQ attempt.
+// Composable: can include other invocations, see inclusion.proto.
+//
+// Next id: 26.
+message Invocation {
+  reserved 3; // bool interrupted, crbug.com/1078696.
+  reserved 17,18; // step and test instructions.
+
+  // Can be used to refer to this invocation, e.g. in ResultDB.GetInvocation
+  // RPC.
+  // Format: invocations/{INVOCATION_ID}
+  // See also https://aip.dev/122.
+  //
+  // Output only.
+  string name = 1;
+
+  enum State {
+    // The default value. This value is used if the state is omitted.
+    STATE_UNSPECIFIED = 0;
+
+    // The invocation was created and accepts new results.
+    ACTIVE = 1;
+
+    // The invocation is in the process of transitioning into FINALIZED state.
+    // This will happen automatically soon after all of its directly or
+    // indirectly included invocations become inactive.
+    FINALIZING = 2;
+
+    // The invocation is immutable and no longer accepts new results nor
+    // inclusions directly or indirectly.
+    FINALIZED = 3;
+  }
+
+  // Current state of the invocation.
+  //
+  // At creation time this can be set to FINALIZING e.g. if this invocation is
+  // a simple wrapper of another and will itself not be modified.
+  //
+  // When updating invocation, this can be set to FINALIZING. If set, this will trigger
+  // the finalization process of the invocation. This is useful for the cases when
+  // we want the update and the finalization to happen in the same transaction to
+  // prevent update-update race. This will guarantee eventual consistency.
+  //
+  // In other cases this is an output only field.
+  State state = 2;
+
+  // When the invocation was created.
+  // Output only.
+  google.protobuf.Timestamp create_time = 4;
+
+  // Invocation-level string key-value pairs.
+  // A key can be repeated.
+  //
+  // These tags may be re-exported alongside each test result.
+  //
+  // Total size (as measured by proto.Size()) must be <= 16 KB.
+  repeated StringPair tags = 5;
+
+  // == Finalization ===========================================================
+
+  // When the invocation started to finalize, i.e. transitioned to FINALIZING
+  // state. This means the invocation is immutable but directly or indirectly
+  // included invocations may not be.
+  //
+  // Output only.
+  google.protobuf.Timestamp finalize_start_time = 19;
+
+  // When the invocation was finalized, i.e. transitioned to FINALIZED state.
+  // If this field is set, implies that the invocation is finalized. This
+  // means the invocation and directly or indirectly included invocations
+  // are immutable.
+  //
+  // Output only.
+  google.protobuf.Timestamp finalize_time = 6;
+
+  // Timestamp when the invocation will be forcefully finalized.
+  // Can be extended with UpdateInvocation until finalized.
+  google.protobuf.Timestamp deadline = 7;
+
+  // Names of invocations included into this one. Overall results of this
+  // invocation is a UNION of results directly included into this invocation
+  // and results from the included invocations, recursively.
+  // For example, a Buildbucket build invocation may include invocations of its
+  // child swarming tasks and represent overall result of the build,
+  // encapsulating the internal structure of the build.
+  //
+  // The graph is directed.
+  // There can be at most one edge between a given pair of invocations.
+  // The shape of the graph does not matter. What matters is only the set of
+  // reachable invocations. Thus cycles are allowed and are noop.
+  //
+  // QueryTestResults returns test results from the transitive closure of
+  // invocations.
+  //
+  // This field can be set under Recorder.CreateInvocationsRequest to include
+  // existing invocations at the moment of invocation creation.
+  // New invocations created in the same batch (via
+  // Recorder.BatchCreateInvocationsRequest) are also allowed.
+  // Otherwise, this field is to be treated as Output only.
+  //
+  // To modify included invocations, use Recorder.UpdateIncludedInvocations in
+  // all other cases.
+  repeated string included_invocations = 8;
+
+  // Whether this invocation is a root of the invocation graph for export purposes.
+  //
+  // To help downstream systems (like LUCI Analysis) make sense of test results,
+  // and gather overall context for a result, ResultDB data export is centered
+  // around export roots.
+  // The export roots typically represent a top-level buildbucket build, like a
+  // postsubmit build or presubmit tryjob. Test results are only exported if
+  // they are included from a root. They may be exported multiple times of they
+  // are included by multiple roots (e.g. in case of re-used test results).
+  // Re-used test results can be identified because the parent invocation of the
+  // test result will be the same even though the export root will be different.
+  //
+  // N.B. Export roots do not affect legacy BigQuery exports configured by the
+  // BigQueryExports field.
+  bool is_export_root = 21;
+
+  // The module this invocation is reporting results for.
+  //
+  // If set, test results and artifacts uploaded to this invocation will need to
+  // match this module.
+  //
+  // Once this field is set to a non-empty value, it becomes invariant and may
+  // not be changed.
+  ModuleIdentifier module_id = 25;
+
+  // bigquery_exports indicates what BigQuery table(s) that results in this
+  // invocation should export to.
+  //
+  // Legacy feature: Prefer to use LUCI Analysis exports instead.
+  repeated BigQueryExport bigquery_exports = 9;
+
+  // LUCI identity (e.g. "user:<email>") who created the invocation.
+  // Typically, a LUCI service account (e.g.
+  // "user:cr-buildbucket@appspot.gserviceaccount.com"), but can also be a user
+  // (e.g. "user:johndoe@example.com").
+  //
+  // Output only.
+  string created_by = 10;
+
+  // Full name of the resource that produced results in this invocation.
+  // See also https://aip.dev/122#full-resource-names
+  // Typical examples:
+  // - Swarming task: "//chromium-swarm.appspot.com/tasks/deadbeef"
+  // - Buildbucket build: "//cr-buildbucket.appspot.com/builds/1234567890".
+  string producer_resource = 11;
+
+  // Realm that the invocation exists under.
+  // See https://chromium.googlesource.com/infra/luci/luci-py/+/refs/heads/master/appengine/auth_service/proto/realms_config.proto
+  string realm = 12;
+
+  // Deprecated. Values specified here are ignored.
+  HistoryOptions history_options = 13 [deprecated = true];
+
+  // Arbitrary JSON object that contains structured, domain-specific properties
+  // of the invocation.
+  //
+  // The serialized size must be <= 16 KB.
+  google.protobuf.Struct properties = 14;
+
+  // The code sources which were tested by this invocation.
+  // This is used to index test results for test history, and for
+  // related analyses (e.g. culprit analysis / changepoint analyses).
+  //
+  // The sources specified here applies only to:
+  // - the test results directly contained in this invocation, and
+  // - any directly included invocations which set their source_spec.inherit to
+  //   true.
+  //
+  // Clients should be careful to ensure the uploaded source spec is consistent
+  // between included invocations that upload the same test variants.
+  // Verdicts are associated with the sources of *any* of their constituent
+  // test results, so if there is inconsistency between included invocations,
+  // the position of the verdict becomes not well defined.
+  //
+  // Note that the sources specified here are shared with included invocations
+  // regardless of the realm of those included invocations.
+  //
+  // Attempting to update this field to a value other than its current value
+  // after is_source_spec_final is set will generate an error.
+  SourceSpec source_spec = 15;
+
+  // Whether the code sources specified by source_spec are final (immutable).
+  //
+  // To facilitate rapid export of invocations inheriting sources from this
+  // invocation, this property should be set to true as soon as possible
+  // after the invocation's sources are fixed. In most cases, clients
+  // will want to set this property to true at the same time as they set
+  // source_spec.
+  //
+  // This field is client owned. Consistent with https://google.aip.dev/129,
+  // it will not be forced to true when the invocation starts to finalize, even
+  // if its effective value will always be true at that point.
+  bool is_source_spec_final = 20;
+
+  // A user-specified baseline identifier that maps to a set of test variants.
+  // Often, this will be the source that generated the test result, such as the
+  // builder name for Chromium. For example, the baseline identifier may be
+  // try:linux-rel. The supported syntax for a baseline identifier is
+  // ^[a-z0-9\-_.]{1,100}:[a-zA-Z0-9\-_.\(\)]{1,128}`$. This syntax was selected
+  // to allow <buildbucket bucket name>:<buildbucket builder name> as a valid
+  // baseline ID.
+  // See go/src/go.chromium.org/luci/buildbucket/proto/builder_common.proto for
+  // character lengths for buildbucket bucket name and builder name.
+  //
+  // Baselines are used to identify new tests; a subtraction between the set of
+  // test variants for a baseline in the Baselines table and test variants from
+  // a given invocation determines whether a test is new.
+  //
+  // The caller must have `resultdb.baselines.put` to be able to
+  // modify this field.
+  string baseline_id = 16;
+
+  // Instructions for the steps and test results in this invocation.
+  // It may also contain instructions for test results in included invocations.
+  Instructions instructions = 23;
+
+  // Union of all variants of test results directly included by the invocation.
+  // This field will be populated by ResultDB during test result creation time.
+  Variant TestResultVariantUnion = 24;
+
+  // Additional JSON object(s) that contain additional structured data about the
+  // invocation. Unlike `properties` this field is not included (denormalized)
+  // in the test results export, it is only available in the finalized
+  // invocations BigQuery export.
+  //
+  // All google.protobuf.Struct values must contain a field '@type' which is
+  // a URL/resource name that uniquely identifies the type of the source
+  // protocol buffer message. This string must contain at least
+  // one "/" character. The last segment of the URL's path must represent the
+  // fully qualified name of the type (e.g. foo.com/x/some.package.MyMessage)
+  //
+  // ResultDB will not validate the contents with respect to this schema, but
+  // downstream systems may depend on the '@type' field to inform how the
+  // contents are interpreted.
+  //
+  // Each key is limited to 63 characters matching
+  // ^[a-z]([a-z0-9_]{0,61}[a-z0-9])?$.
+  // The size of each value is limited to <= 512 KB.
+  // The total size of the map (as measured by proto.Size())
+  // is limited to <= 2 MB.
+  //
+  // The following paths can be used for field masks:
+  // * "extended_properties" to target the whole extended_properties,
+  // * "extended_properties.some_key" to target one key of extended_properties.
+  map<string, google.protobuf.Struct> extended_properties = 22;
+}
+
+// BigQueryExport indicates that results in this invocation should be exported
+// to BigQuery after finalization.
+message BigQueryExport {
+  // Name of the BigQuery project.
+  string project = 1;
+
+  // Name of the BigQuery Dataset.
+  string dataset = 2;
+
+  // Name of the BigQuery Table.
+  string table = 3;
+
+  // TestResults indicates that test results should be exported.
+  message TestResults {
+    // Use predicate to query test results that should be exported to
+    // BigQuery table.
+    TestResultPredicate predicate = 1;
+  }
+
+  // TextArtifacts indicates that text artifacts should be exported.
+  message TextArtifacts {
+    // Use predicate to query artifacts that should be exported to
+    // BigQuery table.
+    //
+    // Sub-field predicate.content_type_regexp defaults to "text/.*".
+    ArtifactPredicate predicate = 1;
+  }
+
+  oneof result_type {
+    TestResults test_results = 4;
+    TextArtifacts text_artifacts = 6;
+  }
+}
+
+// HistoryOptions indicates how the invocations should be indexed, so that their
+// results can be queried over a range of time or of commits.
+// Deprecated: do not use.
+message HistoryOptions {
+  // Set this to index the results by the containing invocation's create_time.
+  bool use_invocation_timestamp = 1 [deprecated = true];
+
+  // Set this to index by commit position.
+  // It's up to the creator of the invocation to set this consistently over
+  // time across the same test variant.
+  CommitPosition commit = 2 [deprecated = true];
+}
+
+// Specifies the source code that was tested in an invocation, either directly
+// (via the sources field) or indirectly (via inherit_sources).
+message SourceSpec {
+   // Specifies the source position that was tested.
+   // Either this or inherit_sources may be set, but not both.
+   Sources sources = 1;
+
+   // Specifies that the source position of the invocation is inherited
+   // from the parent invocation it is included in.
+   //
+   // # Use case
+   // This is useful in situations where the testing infrastructure deduplicates
+   // execution of tests on identical binaries (e.g. using swarming's task
+   // deduplication feature).
+   //
+   // Let A be the invocation for a swarming task that receives only a
+   // test binary as input, with task deduplication enabled.
+   // Let B be the invocation for a buildbucket build which built the
+   // binary from sources (or at the very least knew the sources)
+   // and triggered invocation A.
+   // Invocation B includes invocation A.
+   //
+   // By setting A's source_spec to inherit, and specifying the sources
+   // on invocation B, the test results in A will be associated with
+   // the sources specified on invocation B, when queried via invocation B.
+   //
+   // This allows further invocations B2, B3 ... BN to be created which also
+   // re-use the test results in A but associate them with possibly different
+   // sources when queried via B2 ... BN (this is valid so long as the sources
+   // produce a binary-identical testing input).
+   //
+   // # Multiple inclusion paths
+   // It is possible for an invocation A to be included in the reachable
+   // invocation graph for an invocation C in more than one way.
+   //
+   // For example, we may have:
+   //   A -> B1 -> C
+   //   A -> B2 -> C
+   // as two paths of inclusion.
+   //
+   // If A sets inherit to true, the commit position assigned to its
+   // test results will be selected via *one* of the paths of inclusion
+   // into C (i.e. from B1 or B2).
+   //
+   // However, which path is selected is not guaranteed, so if clients
+   // must include the same invocation multiple times, they should
+   // make the source position via all paths the same.
+   bool inherit = 2;
+}

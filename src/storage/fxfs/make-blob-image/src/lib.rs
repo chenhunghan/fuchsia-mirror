@@ -18,8 +18,8 @@ use fxfs::errors::FxfsError;
 use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
 use fxfs::object_handle::WriteBytes;
 use fxfs::object_store::directory::Directory;
-use fxfs::object_store::journal::RESERVED_SPACE;
 use fxfs::object_store::journal::super_block::SuperBlockInstance;
+use fxfs::object_store::journal::{DEFAULT_RECLAIM_SIZE, reserved_space};
 use fxfs::object_store::transaction::{LockKey, lock_keys};
 use fxfs::object_store::volume::root_volume;
 use fxfs::object_store::{
@@ -122,7 +122,7 @@ pub async fn make_blob_image(
     if target_size == 0 {
         // Apply a default heuristic of 2x the actual image size.  This is necessary to use the
         // Fxfs image, since if it's completely full it can't be modified.
-        target_size = (actual_size + RESERVED_SPACE) * 2;
+        target_size = (actual_size + reserved_space(DEFAULT_RECLAIM_SIZE)) * 2;
     }
 
     if let Some(sparse_path) = sparse_output_image_path {

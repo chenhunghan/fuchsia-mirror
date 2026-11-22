@@ -13,7 +13,6 @@ fidl_library(
     ],
     api_area = "Diagnostics",
     category = "host_tool",
-    enable_hlcpp = True,
     stable = True,
     visibility = ["//visibility:public"],
     deps = [

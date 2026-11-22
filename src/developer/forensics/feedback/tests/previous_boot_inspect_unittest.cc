@@ -11,6 +11,7 @@
 #include <lib/fdio/fd.h>
 #include <lib/fpromise/result.h>
 #include <lib/inspect/cpp/vmo/types.h>
+#include <zlib.h>  // nogncheck: zlib.h belongs to the private :zlib_static dep of :zlib
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -28,6 +29,17 @@
 
 namespace forensics::feedback {
 namespace {
+
+// Compresses |data| into a single RFC 1950 zlib stream, the way Persistence stores it.
+std::string ZlibCompress(const std::string& data) {
+  auto size = compressBound(data.size());
+  std::string compressed(size, '\0');
+  FX_CHECK(compress2(reinterpret_cast<Bytef*>(compressed.data()), &size,
+                     reinterpret_cast<const Bytef*>(data.data()), data.size(),
+                     Z_DEFAULT_COMPRESSION) == Z_OK);
+  compressed.resize(size);
+  return compressed;
+}
 
 class PreviousBootDataProviderClosesConnectionThenReturnsData
     : public stubs::PreviousBootDataProviderBase {
@@ -108,7 +120,7 @@ class PreviousBootInspectTest : public UnitTestFixture {
 TEST_F(PreviousBootInspectTest, SucceedsReturnsInspectData) {
   const std::string kInspectData = "[{\"root\": {\"value\": 123}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -122,7 +134,7 @@ TEST_F(PreviousBootInspectTest, SucceedsReturnsInspectData) {
 TEST_F(PreviousBootInspectTest, CachesInspectDataOnDisk) {
   const std::string kInspectData = "[{\"root\": {\"value\": 123}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -170,7 +182,7 @@ TEST_F(PreviousBootInspectTest, ReconnectsOnConnectionClosed) {
 TEST_F(PreviousBootInspectTest, ReconnectsReturnsDataAfterRetry) {
   const std::string kInspectData = "[{\"root\": {\"value\": 123}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<PreviousBootDataProviderClosesConnectionThenReturnsData>(std::move(data)));
 
@@ -194,7 +206,7 @@ TEST_F(PreviousBootInspectTest, ReconnectsReturnsDataAfterRetry) {
 TEST_F(PreviousBootInspectTest, CachedResultMultipleGets) {
   const std::string kInspectData = "[{\"root\": {\"value\": 456}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -241,7 +253,7 @@ TEST_F(PreviousBootInspectTest, RedactsWithJsonReplacers) {
       "1234567890abcdefABCDEF0123456789,\n"  // Long Hex numbers are not redacted
       "\"106986199446298680449\"]";          // Obfuscated Gaia IDs are not redacted
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -275,7 +287,7 @@ TEST_F(PreviousBootInspectTest, CachesRedactedInspectDataOnDisk) {
       "1234567890abcdefABCDEF0123456789,\n"  // Long Hex numbers are not redacted
       "\"106986199446298680449\"]";          // Obfuscated Gaia IDs are not redacted
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -323,7 +335,7 @@ TEST_F(PreviousBootInspectTest, FileAlreadyExistsDoesNotFetchFromPersistence) {
 TEST_F(PreviousBootInspectTest, FileWriteFailure) {
   const std::string kInspectData = "[{\"root\": {\"value\": 123}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -340,7 +352,7 @@ TEST_F(PreviousBootInspectTest, FileWriteFailure) {
 TEST_F(PreviousBootInspectTest, FileDeletedAfterBeingCached) {
   const std::string kInspectData = "[{\"root\": {\"value\": 123}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 
@@ -373,7 +385,7 @@ TEST_F(PreviousBootInspectTest, FileDeletedAfterBeingCached) {
 TEST_F(PreviousBootInspectTest, ProvidedPathIsDirectory) {
   const std::string kInspectData = "[{\"root\": {\"value\": 123}}]";
   fuchsia_diagnostics_persistence::PreviousBootData data;
-  data.inspect(CreateFileHandle(kInspectData));
+  data.inspect(CreateFileHandle(ZlibCompress(kInspectData)));
   SetUpDataProviderServer(
       std::make_unique<stubs::PreviousBootDataProviderReturnsData>(std::move(data)));
 

@@ -7,6 +7,7 @@
 
 use crate::fake_charger::{FakeCharger, run_fake_charger};
 use crate::fake_sag::{LeaseEvent, run_fake_sag};
+use crate::fake_wake_alarms::{WakeAlarmEvent, run_fake_wake_alarms};
 use anyhow::Result;
 use fidl::endpoints::ServiceMarker as _;
 use fidl_fuchsia_component_test as ftest;
@@ -16,6 +17,7 @@ use fidl_fuchsia_hardware_power_charger as fcharger;
 use fidl_fuchsia_power_battery as fpower;
 use fidl_fuchsia_power_battery_test as spower;
 use fidl_fuchsia_power_system as fsystem;
+use fidl_fuchsia_time_alarms as falarms;
 use fidl_test_hardwarepowercontrol as ftest_battery;
 use fuchsia_component_test::{
     Capability, ChildOptions, DEFAULT_COLLECTION_NAME, DirectoryContents, RealmBuilder,
@@ -87,6 +89,25 @@ pub async fn setup_realm_with_config(
     fake_charger: Option<FakeCharger>,
     config_json: Option<String>,
 ) -> Result<(RealmInstance, mpsc::Receiver<LeaseEvent>)> {
+    setup_realm_full(mode, suspend_enabled, fake_charger, config_json, None).await
+}
+
+/// Builds the test realm with a fake `WakeAlarms` implementation routed to battery-manager.
+pub async fn setup_realm_with_wake_alarms(
+    mode: FidlRouteMode,
+    suspend_enabled: bool,
+    wake_alarms: mpsc::UnboundedSender<WakeAlarmEvent>,
+) -> Result<(RealmInstance, mpsc::Receiver<LeaseEvent>)> {
+    setup_realm_full(mode, suspend_enabled, None, None, Some(wake_alarms)).await
+}
+
+async fn setup_realm_full(
+    mode: FidlRouteMode,
+    suspend_enabled: bool,
+    fake_charger: Option<FakeCharger>,
+    config_json: Option<String>,
+    wake_alarms: Option<mpsc::UnboundedSender<WakeAlarmEvent>>,
+) -> Result<(RealmInstance, mpsc::Receiver<LeaseEvent>)> {
     let builder = RealmBuilder::new().await?;
     builder.driver_test_realm_setup().await?;
 
@@ -148,6 +169,32 @@ pub async fn setup_realm_with_config(
                 Route::new()
                     .capability(Capability::service::<fcharger::ServiceMarker>())
                     .from(&fake_charger)
+                    .to(&battery_manager),
+            )
+            .await?;
+    }
+
+    if let Some(wake_alarm_sender) = wake_alarms {
+        let fake_wake_alarms = builder
+            .add_local_child(
+                "fake_wake_alarms",
+                move |handles| run_fake_wake_alarms(handles, wake_alarm_sender.clone()).boxed(),
+                ChildOptions::new(),
+            )
+            .await?;
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::protocol_by_name("fuchsia.logger.LogSink"))
+                    .from(Ref::parent())
+                    .to(&fake_wake_alarms),
+            )
+            .await?;
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::protocol::<falarms::WakeAlarmsMarker>())
+                    .from(&fake_wake_alarms)
                     .to(&battery_manager),
             )
             .await?;

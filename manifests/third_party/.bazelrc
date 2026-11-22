@@ -1,0 +1,9 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Do not generate or update MODULE.bazel.lock in the workspace directory.
+common --lockfile_mode=off
+
+# Do not create bazel-* convenience symlinks in the workspace directory.
+common --experimental_convenience_symlinks=ignore

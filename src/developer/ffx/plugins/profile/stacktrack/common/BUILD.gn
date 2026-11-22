@@ -17,7 +17,7 @@ rustc_library("ffx_profile_stacktrack_common") {
     "//src/developer/ffx/lib/rcs:lib",
     "//src/developer/ffx/lib/symbolize",
     "//src/lib/fdomain/client",
-    "//src/performance/memory/stacktrack/lib/stacktrack_snapshot:stacktrack_snapshot_fdomain",
+    "//src/memory/stacktrack/lib/stacktrack_snapshot:stacktrack_snapshot_fdomain",
     "//src/sys/lib/cm_rust",
     "//src/sys/lib/component_debug:component_debug_fdomain",
     "//third_party/rust_crates:anyhow",

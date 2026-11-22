@@ -1,0 +1,475 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/devicetree:dtb.bzl", "dtb")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Provides relative path from the executable to the repository directory.
+# The expected path is platform specific.
+# LINT.IfChange(data_path)
+# @bazel2gn:skip
+build_flags(
+    name = "data_path",
+    defines = select({
+        "@platforms//os:fuchsia": ['LIB_DEVICETREE_DATA="data"'],
+        "//conditions:default": ['LIB_DEVICETREE_DATA="test_data/devicetree"'],
+    }),
+    visibility = ["//sdk/lib/devicetree/testing:__pkg__"],
+)
+# LINT.ThenChange(BUILD.gn:data_path)
+
+dtb(
+    name = "arm_gic2_no_msi",
+    srcs = ["synthetic/arm_gic2_no_msi.dts"],
+)
+
+dtb(
+    name = "arm_gic3_stride",
+    srcs = ["synthetic/arm_gic3_stride.dts"],
+)
+
+dtb(
+    name = "arm_qcom_rng",
+    srcs = ["synthetic/arm_qcom_rng.dts"],
+)
+
+dtb(
+    name = "arm_qcom_rng_configured",
+    srcs = ["synthetic/arm_qcom_rng_configured.dts"],
+)
+
+dtb(
+    name = "arm_gic3_four_stride",
+    srcs = ["synthetic/arm_gic3_four_stride.dts"],
+)
+
+dtb(
+    name = "arm_gic3_subsumed_stride",
+    srcs = ["synthetic/arm_gic3_subsumed_stride.dts"],
+)
+
+dtb(
+    name = "arm_idle_states",
+    srcs = ["synthetic/arm_idle_states.dts"],
+)
+
+dtb(
+    name = "arm_idle_states_and_domain",
+    srcs = ["synthetic/arm_idle_states_and_domain.dts"],
+)
+
+dtb(
+    name = "arm_idle_states_multiple",
+    srcs = ["synthetic/arm_idle_states_multiple.dts"],
+)
+
+dtb(
+    name = "arm_idle_states_multiple_with_invalid",
+    srcs = ["synthetic/arm_idle_states_multiple_with_invalid.dts"],
+)
+
+dtb(
+    name = "arm_idle_states_power_domains",
+    srcs = ["synthetic/arm_idle_states_power_domains.dts"],
+)
+
+dtb(
+    name = "arm_timer",
+    srcs = ["synthetic/arm_timer.dts"],
+)
+
+dtb(
+    name = "arm_timer_no_frequency_override",
+    srcs = ["synthetic/arm_timer_no_frequency_override.dts"],
+)
+
+dtb(
+    name = "arm_timer_mmio_no_frequency_override",
+    srcs = ["synthetic/arm_timer_mmio_no_frequency_override.dts"],
+)
+
+dtb(
+    name = "arm_timer_mmio_invalid_frames",
+    srcs = ["synthetic/arm_timer_mmio_invalid_frames.dts"],
+)
+
+dtb(
+    name = "arm_timer_mmio_no_frames",
+    srcs = ["synthetic/arm_timer_mmio_no_frames.dts"],
+)
+
+dtb(
+    name = "arm_timer_mmio",
+    srcs = ["synthetic/arm_timer_mmio.dts"],
+)
+
+dtb(
+    name = "chosen",
+    srcs = ["synthetic/chosen.dts"],
+)
+
+dtb(
+    name = "chosen_with_console",
+    srcs = ["synthetic/chosen_with_console.dts"],
+)
+
+dtb(
+    name = "chosen_with_serial_alias",
+    srcs = ["synthetic/chosen_with_serial_alias.dts"],
+)
+
+dtb(
+    name = "chosen_no_uart_interrupts",
+    srcs = ["synthetic/chosen_no_uart_interrupts.dts"],
+)
+
+dtb(
+    name = "chosen_with_console_aml",
+    srcs = ["synthetic/chosen_with_console_aml.dts"],
+)
+
+dtb(
+    name = "chosen_with_console_and_stdout_path",
+    srcs = ["synthetic/chosen_with_console_and_stdout_path.dts"],
+)
+
+dtb(
+    name = "chosen_with_reg_offset",
+    srcs = ["synthetic/chosen_with_reg_offset.dts"],
+)
+
+dtb(
+    name = "chosen_with_translation",
+    srcs = ["synthetic/chosen_with_translation.dts"],
+)
+
+dtb(
+    name = "chosen_unknown_intc",
+    srcs = ["synthetic/chosen_unknown_intc.dts"],
+)
+
+dtb(
+    name = "chosen_with_kaslr_only",
+    srcs = ["synthetic/chosen_with_kaslr_only.dts"],
+)
+
+dtb(
+    name = "chosen_with_rng_only",
+    srcs = ["synthetic/chosen_with_rng_only.dts"],
+)
+
+dtb(
+    name = "chosen_with_kaslr_and_rng",
+    srcs = ["synthetic/chosen_with_kaslr_and_rng.dts"],
+)
+
+dtb(
+    name = "complex_no_properties",
+    srcs = ["synthetic/complex_no_properties.dts"],
+)
+
+dtb(
+    name = "complex_with_alias",
+    srcs = ["synthetic/complex_with_alias.dts"],
+)
+
+dtb(
+    name = "complex_with_alias_first",
+    srcs = ["synthetic/complex_with_alias_first.dts"],
+)
+
+dtb(
+    name = "cpus_arm",
+    srcs = ["synthetic/cpus_arm.dts"],
+)
+
+dtb(
+    name = "cpus_arm_dynamiq",
+    srcs = ["synthetic/cpus_arm_dynamiq.dts"],
+)
+
+dtb(
+    name = "cpus_arm_no_cpu_map",
+    srcs = ["synthetic/cpus_arm_no_cpu_map.dts"],
+)
+
+dtb(
+    name = "cpus_arm_single_cell",
+    srcs = ["synthetic/cpus_arm_single_cell.dts"],
+)
+
+dtb(
+    name = "cpus_riscv",
+    srcs = ["synthetic/cpus_riscv.dts"],
+)
+
+dtb(
+    name = "cpus_riscv_nested_clusters",
+    srcs = ["synthetic/cpus_riscv_nested_clusters.dts"],
+)
+
+dtb(
+    name = "cpus_no_cpu_map_riscv",
+    srcs = ["synthetic/cpus_no_cpu_map_riscv.dts"],
+)
+
+dtb(
+    name = "empty",
+    srcs = ["synthetic/empty.dts"],
+)
+
+dtb(
+    name = "memory_complex",
+    srcs = ["synthetic/memory_complex.dts"],
+)
+
+dtb(
+    name = "serial_number",
+    srcs = ["synthetic/serial_number.dts"],
+)
+
+dtb(
+    name = "serial_number_bootargs",
+    srcs = ["synthetic/serial_number_bootargs.dts"],
+)
+
+dtb(
+    name = "memory",
+    srcs = ["synthetic/memory.dts"],
+)
+
+dtb(
+    name = "memory_reservations",
+    srcs = ["synthetic/memory_reservations.dts"],
+)
+
+dtb(
+    name = "plic_riscv",
+    srcs = ["synthetic/plic_riscv.dts"],
+)
+
+dtb(
+    name = "psci-hvc",
+    srcs = ["synthetic/psci-hvc.dts"],
+)
+
+dtb(
+    name = "psci-smc",
+    srcs = ["synthetic/psci-smc.dts"],
+)
+
+dtb(
+    name = "ramoops",
+    srcs = ["synthetic/ramoops.dts"],
+)
+
+dtb(
+    name = "reserved_memory",
+    srcs = ["synthetic/reserved_memory.dts"],
+)
+
+dtb(
+    name = "simple_with_properties",
+    srcs = ["synthetic/simple_with_properties.dts"],
+)
+
+dtb(
+    name = "simple_with_status",
+    srcs = ["synthetic/simple_with_status.dts"],
+)
+
+dtb(
+    name = "smmu_bad_irq",
+    srcs = ["synthetic/smmu_bad_irq.dts"],
+)
+
+dtb(
+    name = "smmu_defaults",
+    srcs = ["synthetic/smmu_defaults.dts"],
+)
+
+dtb(
+    name = "smmu_multi",
+    srcs = ["synthetic/smmu_multi.dts"],
+)
+
+dtb(
+    name = "smmu_overflow",
+    srcs = ["synthetic/smmu_overflow.dts"],
+)
+
+dtb(
+    name = "smmu_simple",
+    srcs = ["synthetic/smmu_simple.dts"],
+)
+
+dtb(
+    name = "qcom_msm_watchdog",
+    srcs = ["synthetic/qcom_msm_watchdog.dts"],
+)
+
+dtb(
+    name = "qcom_msm_watchdog_multiple_regs",
+    srcs = ["synthetic/qcom_msm_watchdog_multiple_regs.dts"],
+)
+
+host_test_data_files(
+    name = "host_data",
+    testonly = True,
+    srcs = [
+        "banana-pi-f3.dtb",
+        "crosvm-arm.dtb",
+        "khadas-vim3.dtb",
+        "muntjac.dtb",
+        "qemu-arm-gic2.dtb",
+        "qemu-arm-gic3.dtb",
+        "qemu-riscv.dtb",
+        "sifive-hifive-unmatched.dtb",
+        "vision-five-2.dtb",
+        ":arm_gic2_no_msi",
+        ":arm_gic3_four_stride",
+        ":arm_gic3_stride",
+        ":arm_gic3_subsumed_stride",
+        ":arm_idle_states",
+        ":arm_idle_states_and_domain",
+        ":arm_idle_states_multiple",
+        ":arm_idle_states_multiple_with_invalid",
+        ":arm_idle_states_power_domains",
+        ":arm_qcom_rng",
+        ":arm_qcom_rng_configured",
+        ":arm_timer",
+        ":arm_timer_mmio",
+        ":arm_timer_mmio_invalid_frames",
+        ":arm_timer_mmio_no_frames",
+        ":arm_timer_mmio_no_frequency_override",
+        ":arm_timer_no_frequency_override",
+        ":chosen",
+        ":chosen_no_uart_interrupts",
+        ":chosen_unknown_intc",
+        ":chosen_with_console",
+        ":chosen_with_console_aml",
+        ":chosen_with_console_and_stdout_path",
+        ":chosen_with_kaslr_and_rng",
+        ":chosen_with_kaslr_only",
+        ":chosen_with_reg_offset",
+        ":chosen_with_rng_only",
+        ":chosen_with_serial_alias",
+        ":chosen_with_translation",
+        ":complex_no_properties",
+        ":complex_with_alias",
+        ":complex_with_alias_first",
+        ":cpus_arm",
+        ":cpus_arm_dynamiq",
+        ":cpus_arm_no_cpu_map",
+        ":cpus_arm_single_cell",
+        ":cpus_no_cpu_map_riscv",
+        ":cpus_riscv",
+        ":cpus_riscv_nested_clusters",
+        ":empty",
+        ":memory",
+        ":memory_complex",
+        ":memory_reservations",
+        ":plic_riscv",
+        ":psci-hvc",
+        ":psci-smc",
+        ":qcom_msm_watchdog",
+        ":qcom_msm_watchdog_multiple_regs",
+        ":ramoops",
+        ":reserved_memory",
+        ":serial_number",
+        ":serial_number_bootargs",
+        ":simple_with_properties",
+        ":simple_with_status",
+        ":smmu_bad_irq",
+        ":smmu_defaults",
+        ":smmu_multi",
+        ":smmu_overflow",
+        ":smmu_simple",
+    ],
+    dest_dir = "test_data/devicetree",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//sdk/lib/devicetree/testing:__pkg__"],
+)
+
+resource(
+    name = "data",
+    srcs = [
+        "banana-pi-f3.dtb",
+        "crosvm-arm.dtb",
+        "khadas-vim3.dtb",
+        "muntjac.dtb",
+        "qemu-arm-gic2.dtb",
+        "qemu-arm-gic3.dtb",
+        "qemu-riscv.dtb",
+        "sifive-hifive-unmatched.dtb",
+        "vision-five-2.dtb",
+        ":arm_gic2_no_msi",
+        ":arm_gic3_four_stride",
+        ":arm_gic3_stride",
+        ":arm_gic3_subsumed_stride",
+        ":arm_idle_states",
+        ":arm_idle_states_and_domain",
+        ":arm_idle_states_multiple",
+        ":arm_idle_states_multiple_with_invalid",
+        ":arm_idle_states_power_domains",
+        ":arm_qcom_rng",
+        ":arm_qcom_rng_configured",
+        ":arm_timer",
+        ":arm_timer_mmio",
+        ":arm_timer_mmio_invalid_frames",
+        ":arm_timer_mmio_no_frames",
+        ":arm_timer_mmio_no_frequency_override",
+        ":arm_timer_no_frequency_override",
+        ":chosen",
+        ":chosen_no_uart_interrupts",
+        ":chosen_unknown_intc",
+        ":chosen_with_console",
+        ":chosen_with_console_aml",
+        ":chosen_with_console_and_stdout_path",
+        ":chosen_with_kaslr_and_rng",
+        ":chosen_with_kaslr_only",
+        ":chosen_with_reg_offset",
+        ":chosen_with_rng_only",
+        ":chosen_with_serial_alias",
+        ":chosen_with_translation",
+        ":complex_no_properties",
+        ":complex_with_alias",
+        ":complex_with_alias_first",
+        ":cpus_arm",
+        ":cpus_arm_dynamiq",
+        ":cpus_arm_no_cpu_map",
+        ":cpus_arm_single_cell",
+        ":cpus_no_cpu_map_riscv",
+        ":cpus_riscv",
+        ":cpus_riscv_nested_clusters",
+        ":empty",
+        ":memory",
+        ":memory_complex",
+        ":memory_reservations",
+        ":plic_riscv",
+        ":psci-hvc",
+        ":psci-smc",
+        ":qcom_msm_watchdog",
+        ":qcom_msm_watchdog_multiple_regs",
+        ":ramoops",
+        ":reserved_memory",
+        ":serial_number",
+        ":serial_number_bootargs",
+        ":simple_with_properties",
+        ":simple_with_status",
+        ":smmu_bad_irq",
+        ":smmu_defaults",
+        ":smmu_multi",
+        ":smmu_overflow",
+        ":smmu_simple",
+    ],
+    outputs = ["data/{{source_file_part}}"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//sdk/lib/devicetree/testing:__pkg__"],
+)

@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/testing/expectation/rules:fx_test_component_with_expectations.bzl",
+    "fx_component_manifest_with_expectations",
+    "fx_test_component_with_expectations",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":netstack-connect-tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_test(
+    name = "connect",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    proc_macro_deps = [
+        "//src/connectivity/network/tests/integration/macros:netstack_testing_macros",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/tcp-stream-ext",
+        "//third_party/rust_crates/vendor:futures-util",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:socket2",
+    ],
+)
+
+fx_packaged_binary(
+    name = "connect_packaged",
+    testonly = True,
+    binary = ":connect",
+    binary_name = "connect",
+)
+
+fx_component_manifest_with_expectations(
+    name = "netstack-connect-test-component_manifest",
+    component_name = "netstack-connect-test-component",
+    includes = [
+        "//src/connectivity/network/tests/integration/common:client.shard",
+        "//src/lib/testing/expectation:meta/client.shard",
+    ],
+    manifest = "meta/connect.cml",
+)
+
+fx_test_component_with_expectations(
+    name = "netstack-connect-test-component",
+    compiled_manifest = ":netstack-connect-test-component_manifest",
+    expectations = "expects.json5",
+    deps = [":connect_packaged"],
+)
+
+fx_package(
+    name = "netstack-connect-tests.package",
+    package_name = "netstack-connect-tests",
+    testonly = True,
+    subpackages = [
+        "//src/connectivity/network/netstack3:package-debug",
+        "//src/connectivity/network/testing/netemul/service:package",
+    ],
+    test_components = [":netstack-connect-test-component"],
+)
+
+fx_test(
+    name = "netstack-connect-tests",
+    package = ":netstack-connect-tests.package",
+)

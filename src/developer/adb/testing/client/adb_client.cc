@@ -13,6 +13,7 @@
 #include <zircon/status.h>
 #include <zircon/types.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -27,12 +28,33 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 AdbClientImpl::AdbClientImpl(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
 
+void AdbClientImpl::ResetPacketState() {
+  remote_id_ = 0;
+  payload_mode_ = PayloadMode::kNone;
+  remaining_payload_bytes_ = 0;
+}
+
+void AdbClientImpl::SetEndpointsForTesting(
+    fidl::ClientEnd<fuchsia_hardware_usb_endpoint::Endpoint> bulk_in,
+    fidl::ClientEnd<fuchsia_hardware_usb_endpoint::Endpoint> bulk_out, zx::vmo read_vmo) {
+  ResetSessionState(ZX_ERR_CANCELED);
+  read_request_pending_ = false;
+  read_vmo_ = std::move(read_vmo);
+  bulk_in_.Bind(std::move(bulk_in), dispatcher_, this);
+  bulk_out_.Bind(std::move(bulk_out), dispatcher_, &bulk_out_handler_);
+  usb_connected_ = true;
+}
+
 void AdbClientImpl::Setup(AdbClientImpl::SetupCompleter::Sync& completer) {
   FX_LOGS(INFO) << "AdbClientImpl::Setup called.";
-  if (usb_connected_) {
-    completer.Reply(fit::ok());
-    return;
-  }
+  ResetSessionState(ZX_ERR_CANCELED);
+  usb_connected_ = false;
+  bulk_in_ = {};
+  bulk_out_ = {};
+  bulk_in_addr_ = 0;
+  bulk_out_addr_ = 0;
+  read_request_pending_ = false;
+  read_vmo_.reset();
 
   if (auto status = DiscoverAndConnect(); status != ZX_OK) {
     FX_LOGS(ERROR) << "DiscoverAndConnect failed: " << zx_status_get_string(status);
@@ -44,16 +66,18 @@ void AdbClientImpl::Setup(AdbClientImpl::SetupCompleter::Sync& completer) {
 
 void AdbClientImpl::Connect(AdbClientImpl::ConnectCompleter::Sync& completer) {
   FX_LOGS(INFO) << "AdbClientImpl::Connect called.";
-  if (handshake_complete_) {
-    completer.Reply(fit::ok());
-    return;
-  }
-
   if (!usb_connected_) {
     FX_LOGS(ERROR) << "USB not connected. Call Setup() first.";
     completer.Reply(fit::error(ZX_ERR_BAD_STATE));
     return;
   }
+  if (connect_completer_ || execute_completer_) {
+    completer.Reply(fit::error(ZX_ERR_SHOULD_WAIT));
+    return;
+  }
+
+  handshake_complete_ = false;
+  ResetPacketState();
 
   // Construct A_CNXN packet
   apacket* p = get_apacket();
@@ -91,6 +115,10 @@ void AdbClientImpl::Connect(AdbClientImpl::ConnectCompleter::Sync& completer) {
 void AdbClientImpl::ExecuteCommand(AdbClientImpl::ExecuteCommandRequest& request,
                                    AdbClientImpl::ExecuteCommandCompleter::Sync& completer) {
   FX_LOGS(INFO) << "AdbClientImpl::ExecuteCommand called with " << request.command();
+  if (!usb_connected_ || !handshake_complete_) {
+    completer.Reply(fit::error(ZX_ERR_BAD_STATE));
+    return;
+  }
   // TODO(puneetha): Support multiple simultaneous commands.
   if (execute_completer_) {
     completer.Reply(fit::error(ZX_ERR_SHOULD_WAIT));
@@ -102,6 +130,11 @@ void AdbClientImpl::ExecuteCommand(AdbClientImpl::ExecuteCommandRequest& request
   // Open a shell stream for the command.
   // Use a new local ID for each command session.
   local_id_++;
+  remote_id_ = 0;
+  if (payload_mode_ == PayloadMode::kWrite) {
+    payload_mode_ = PayloadMode::kNone;
+    remaining_payload_bytes_ = 0;
+  }
   std::string cmd = "shell:" + std::string(request.command());
 
   apacket* p = get_apacket();
@@ -118,6 +151,10 @@ void AdbClientImpl::ExecuteCommand(AdbClientImpl::ExecuteCommandRequest& request
   // Ensure we are listening for the response BEFORE we send the request.
   if (auto status = QueueReadRequest(); status != ZX_OK) {
     FX_LOGS(ERROR) << "Failed to queue read request: " << zx_status_get_string(status);
+    execute_completer_->Reply(fit::error(status));
+    execute_completer_.reset();
+    put_apacket(p);
+    return;
   }
 
   if (auto status = SendPacket(p); status != ZX_OK) {
@@ -138,7 +175,9 @@ void AdbClientImpl::handle_unknown_method(
 void AdbClientImpl::OnCompletion(
     fidl::Event<fuchsia_hardware_usb_endpoint::Endpoint::OnCompletion>& event) {
   for (auto& completion : event.completion()) {
-    zx_status_t status = completion.status().value_or(ZX_OK);
+    read_request_pending_ = false;
+
+    zx_status_t status = completion.status().value_or(ZX_ERR_IO);
     if (status != ZX_OK) {
       FX_LOGS(ERROR) << "Bulk completion error: " << zx_status_get_string(status);
       if (status == ZX_ERR_IO_NOT_PRESENT) {
@@ -150,121 +189,217 @@ void AdbClientImpl::OnCompletion(
 
     if (!completion.request().has_value() || !completion.request()->data().has_value() ||
         completion.request()->data()->empty()) {
-      continue;
+      ResetSessionState(ZX_ERR_IO);
+      return;
     }
 
     auto& region = (*completion.request()->data())[0];
-    if (!region.buffer().has_value() || !region.buffer()->data().has_value()) {
-      continue;
+    if (!region.buffer().has_value()) {
+      ResetSessionState(ZX_ERR_IO);
+      return;
     }
 
-    const uint8_t* data = region.buffer()->data()->data();
     size_t len = static_cast<size_t>(completion.transfer_size().value_or(0));
-
-    if (expecting_payload_bytes_ > 0) {
-      size_t to_append = std::min(len, expecting_payload_bytes_);
-      command_output_.append(reinterpret_cast<const char*>(data), to_append);
-      expecting_payload_bytes_ -= to_append;
-
-      if (expecting_payload_bytes_ == 0) {
-        apacket* ack = get_apacket();
-        ack->msg.command = A_OKAY;
-        ack->msg.arg0 = local_id_;
-        ack->msg.arg1 = remote_id_;
-        ack->msg.magic = ack->msg.command ^ 0xffffffff;
-        SendPacket(ack);
-        put_apacket(ack);
+    uint64_t offset = region.offset().value_or(0);
+    std::vector<uint8_t> vmo_buf;
+    const uint8_t* data = nullptr;
+    if (region.buffer()->vmo_id().has_value()) {
+      if (len > kBulkReadSize || offset > kBulkReadSize - len) {
+        FX_LOGS(ERROR) << "VMO transfer out of bounds: offset=" << offset << " len=" << len;
+        ResetSessionState(ZX_ERR_IO);
+        return;
       }
-
-      if (auto status = QueueReadRequest(); status != ZX_OK) {
-        FX_LOGS(ERROR) << "Failed to re-queue read request: " << zx_status_get_string(status);
-      }
-      continue;
-    }
-
-    if (len < sizeof(amessage)) {
-      FX_LOGS(ERROR) << "Received packet too small for ADB header: " << len;
-      continue;
-    }
-
-    amessage msg;
-    memcpy(&msg, data, sizeof(amessage));
-
-    FX_LOGS(INFO) << "Received ADB packet: cmd=0x" << std::hex << msg.command << " arg0=0x"
-                  << msg.arg0 << " arg1=0x" << msg.arg1 << " len=" << std::dec << msg.data_length;
-
-    if (msg.command == A_CNXN) {
-      FX_LOGS(INFO) << "Received A_CNXN response";
-      handshake_complete_ = true;
-      if (connect_completer_) {
-        connect_completer_->Reply(fit::ok());
-        connect_completer_.reset();
-      }
-    } else if (msg.command == A_AUTH) {
-      FX_LOGS(INFO) << "Received A_AUTH response - auth not supported yet";
-      if (connect_completer_) {
-        connect_completer_->Reply(fit::error(ZX_ERR_NOT_SUPPORTED));
-        connect_completer_.reset();
-      }
-    } else if (msg.command == A_OKAY) {
-      if (msg.arg1 == local_id_) {
-        if (remote_id_ == 0) {
-          remote_id_ = msg.arg0;
-          FX_LOGS(INFO) << "ADB Stream opened (local=" << local_id_ << ", remote=" << remote_id_
-                        << ")";
-        } else {
-          FX_LOGS(INFO) << "ADB Device acknowledged write (local=" << local_id_ << ")";
+      vmo_buf.resize(len);
+      if (len > 0) {
+        if (auto cache_status =
+                read_vmo_.op_range(ZX_VMO_OP_CACHE_CLEAN_INVALIDATE, offset, len, nullptr, 0);
+            cache_status != ZX_OK) {
+          FX_LOGS(ERROR) << "Failed to invalidate VMO cache: "
+                         << zx_status_get_string(cache_status);
+          ResetSessionState(cache_status);
+          return;
+        }
+        if (auto read_status = read_vmo_.read(vmo_buf.data(), offset, len); read_status != ZX_OK) {
+          FX_LOGS(ERROR) << "Failed to read from VMO: " << zx_status_get_string(read_status);
+          ResetSessionState(read_status);
+          return;
         }
       }
-    } else if (msg.command == A_WRTE) {
-      if (msg.arg1 == local_id_) {
-        size_t payload_len = msg.data_length;
-        if (payload_len > 0) {
-          size_t payload_in_packet = len - sizeof(amessage);
-          if (payload_in_packet > 0) {
-            size_t to_append = std::min(payload_in_packet, payload_len);
-            command_output_.append(reinterpret_cast<const char*>(data + sizeof(amessage)),
-                                   to_append);
-            expecting_payload_bytes_ = payload_len - to_append;
-          } else {
-            expecting_payload_bytes_ = payload_len;
+      data = vmo_buf.data();
+    } else if (region.buffer()->data().has_value()) {
+      const auto& buf = region.buffer()->data().value();
+      if (len > buf.size() || offset > buf.size() - len) {
+        FX_LOGS(ERROR) << "Inline buffer transfer out of bounds: offset=" << offset
+                       << " len=" << len << " size=" << buf.size();
+        ResetSessionState(ZX_ERR_IO);
+        return;
+      }
+      data = buf.data() + offset;
+    } else {
+      ResetSessionState(ZX_ERR_IO);
+      return;
+    }
+
+    size_t buf_offset = 0;
+    while (buf_offset < len) {
+      const uint8_t* cur_data = data + buf_offset;
+      size_t rem_len = len - buf_offset;
+
+      if (remaining_payload_bytes_ > 0) {
+        size_t to_consume = std::min(rem_len, remaining_payload_bytes_);
+        const PayloadMode mode = payload_mode_;
+        if (mode == PayloadMode::kWrite) {
+          command_output_.append(reinterpret_cast<const char*>(cur_data), to_consume);
+        }
+        remaining_payload_bytes_ -= to_consume;
+        buf_offset += to_consume;
+
+        if (remaining_payload_bytes_ == 0) {
+          payload_mode_ = PayloadMode::kNone;
+          if (mode == PayloadMode::kConnect) {
+            handshake_complete_ = true;
+            if (connect_completer_) {
+              connect_completer_->Reply(fit::ok());
+              connect_completer_.reset();
+            }
+          } else if (mode == PayloadMode::kWrite) {
+            if (zx_status_t ack_status = SendOkay(); ack_status != ZX_OK) {
+              FX_LOGS(ERROR) << "Failed to send A_OKAY: " << zx_status_get_string(ack_status);
+              ResetSessionState(ack_status);
+              return;
+            }
           }
         }
-
-        if (expecting_payload_bytes_ == 0) {
-          apacket* ack = get_apacket();
-          ack->msg.command = A_OKAY;
-          ack->msg.arg0 = local_id_;
-          ack->msg.arg1 = remote_id_;
-          ack->msg.magic = ack->msg.command ^ 0xffffffff;
-          SendPacket(ack);
-          put_apacket(ack);
-        }
+        continue;
       }
-    } else if (msg.command == A_CLSE) {
-      if (msg.arg1 == local_id_) {
-        FX_LOGS(INFO) << "ADB Stream closed. Output size: " << command_output_.length();
-        if (execute_completer_) {
+
+      if (rem_len < sizeof(amessage)) {
+        FX_LOGS(ERROR) << "Received packet too small for ADB header: " << rem_len;
+        ResetSessionState(ZX_ERR_IO);
+        return;
+      }
+
+      amessage msg;
+      memcpy(&msg, cur_data, sizeof(amessage));
+      buf_offset += sizeof(amessage);
+
+      if (msg.magic != (msg.command ^ 0xffffffffu) || msg.data_length > MAX_PAYLOAD) {
+        FX_LOGS(ERROR) << "Received invalid ADB packet header: cmd=0x" << std::hex << msg.command
+                       << " magic=0x" << msg.magic << " len=" << std::dec << msg.data_length;
+        ResetSessionState(ZX_ERR_IO);
+        return;
+      }
+
+      FX_LOGS(INFO) << "Received ADB packet: cmd=0x" << std::hex << msg.command << " arg0=0x"
+                    << msg.arg0 << " arg1=0x" << msg.arg1 << " len=" << std::dec << msg.data_length;
+
+      size_t available_after_header = rem_len - sizeof(amessage);
+      size_t payload_in_packet =
+          std::min(available_after_header, static_cast<size_t>(msg.data_length));
+      size_t remaining_payload =
+          (msg.data_length > payload_in_packet) ? (msg.data_length - payload_in_packet) : 0;
+
+      if (msg.command == A_CNXN) {
+        FX_LOGS(INFO) << "Received A_CNXN response";
+        buf_offset += payload_in_packet;
+        if (remaining_payload > 0) {
+          payload_mode_ = PayloadMode::kConnect;
+          remaining_payload_bytes_ = remaining_payload;
+        } else {
+          handshake_complete_ = true;
+          if (connect_completer_) {
+            connect_completer_->Reply(fit::ok());
+            connect_completer_.reset();
+          }
+        }
+      } else if (msg.command == A_AUTH) {
+        FX_LOGS(INFO) << "Received A_AUTH response - auth not supported yet";
+        buf_offset += payload_in_packet;
+        if (remaining_payload > 0) {
+          payload_mode_ = PayloadMode::kDiscard;
+          remaining_payload_bytes_ = remaining_payload;
+        }
+        if (connect_completer_) {
+          connect_completer_->Reply(fit::error(ZX_ERR_NOT_SUPPORTED));
+          connect_completer_.reset();
+        }
+      } else if (msg.command == A_OKAY) {
+        buf_offset += payload_in_packet;
+        if (remaining_payload > 0) {
+          payload_mode_ = PayloadMode::kDiscard;
+          remaining_payload_bytes_ = remaining_payload;
+        }
+        if (msg.arg1 == local_id_) {
+          if (remote_id_ == 0) {
+            remote_id_ = msg.arg0;
+            FX_LOGS(INFO) << "ADB Stream opened (local=" << local_id_ << ", remote=" << remote_id_
+                          << ")";
+          } else {
+            FX_LOGS(INFO) << "ADB Device acknowledged write (local=" << local_id_ << ")";
+          }
+        }
+      } else if (msg.command == A_WRTE) {
+        if (execute_completer_ && msg.arg1 == local_id_ &&
+            (remote_id_ == 0 || msg.arg0 == remote_id_)) {
+          if (remote_id_ == 0) {
+            remote_id_ = msg.arg0;
+          }
+          if (payload_in_packet > 0) {
+            command_output_.append(reinterpret_cast<const char*>(cur_data + sizeof(amessage)),
+                                   payload_in_packet);
+          }
+          buf_offset += payload_in_packet;
+          if (remaining_payload > 0) {
+            payload_mode_ = PayloadMode::kWrite;
+            remaining_payload_bytes_ = remaining_payload;
+          } else if (zx_status_t ack_status = SendOkay(); ack_status != ZX_OK) {
+            FX_LOGS(ERROR) << "Failed to send A_OKAY: " << zx_status_get_string(ack_status);
+            ResetSessionState(ack_status);
+            return;
+          }
+        } else {
+          buf_offset += payload_in_packet;
+          if (remaining_payload > 0) {
+            payload_mode_ = PayloadMode::kDiscard;
+            remaining_payload_bytes_ = remaining_payload;
+          }
+        }
+      } else if (msg.command == A_CLSE) {
+        buf_offset += payload_in_packet;
+        if (remaining_payload > 0) {
+          payload_mode_ = PayloadMode::kDiscard;
+          remaining_payload_bytes_ = remaining_payload;
+        }
+        if (execute_completer_ && msg.arg1 == local_id_ &&
+            (remote_id_ == 0 || msg.arg0 == remote_id_)) {
+          FX_LOGS(INFO) << "ADB Stream closed. Output size: " << command_output_.length();
           execute_completer_->Reply(fit::ok(std::move(command_output_)));
+          command_output_.clear();
           execute_completer_.reset();
         }
+      } else {
+        FX_LOGS(INFO) << "Received unexpected command: " << std::hex << msg.command;
+        buf_offset += payload_in_packet;
+        if (remaining_payload > 0) {
+          payload_mode_ = PayloadMode::kDiscard;
+          remaining_payload_bytes_ = remaining_payload;
+        }
       }
-    } else {
-      FX_LOGS(INFO) << "Received unexpected command: " << std::hex << msg.command;
     }
 
     // Always queue a new read request to keep the bulk pipe filled.
     if (auto status = QueueReadRequest(); status != ZX_OK) {
       FX_LOGS(ERROR) << "Failed to re-queue read request: " << zx_status_get_string(status);
+      ResetSessionState(status);
+      return;
     }
   }
 }
 
 void AdbClientImpl::ResetSessionState(zx_status_t status) {
   handshake_complete_ = false;
-  remote_id_ = 0;
-  expecting_payload_bytes_ = 0;
   command_output_.clear();
+  ResetPacketState();
   if (connect_completer_) {
     connect_completer_->Reply(fit::error(status));
     connect_completer_.reset();
@@ -275,11 +410,32 @@ void AdbClientImpl::ResetSessionState(zx_status_t status) {
   }
 }
 
+void AdbClientImpl::BulkOutEventHandler::OnCompletion(
+    fidl::Event<fuchsia_hardware_usb_endpoint::Endpoint::OnCompletion>& event) {
+  for (const auto& completion : event.completion()) {
+    zx_status_t status = completion.status().value_or(ZX_ERR_IO);
+    if (status != ZX_OK) {
+      FX_LOGS(ERROR) << "Bulk OUT completion error: " << zx_status_get_string(status);
+      if (status == ZX_ERR_IO_NOT_PRESENT) {
+        parent_->usb_connected_ = false;
+      }
+      parent_->ResetSessionState(status);
+      return;
+    }
+  }
+}
+
+void AdbClientImpl::BulkOutEventHandler::on_fidl_error(fidl::UnbindInfo error) {
+  parent_->on_fidl_error(error);
+}
+
 void AdbClientImpl::on_fidl_error(fidl::UnbindInfo error) {
   FX_LOGS(ERROR) << "Bulk endpoint FIDL error: " << error;
   usb_connected_ = false;
   bulk_in_ = {};
   bulk_out_ = {};
+  read_request_pending_ = false;
+  read_vmo_.reset();
   ResetSessionState(error.status());
 }
 
@@ -489,8 +645,24 @@ zx_status_t AdbClientImpl::ConnectEndpoints() {
           return std::nullopt;
         }
 
+        fidl::Arena arena;
+        auto vmo_info = fuchsia_hardware_usb_endpoint::wire::VmoInfo::Builder(arena)
+                            .id(kBulkReadVmoId)
+                            .size(kBulkReadSize)
+                            .Build();
+        auto vmo_res =
+            fidl::WireCall(in_endpoints->client)
+                ->RegisterVmos(
+                    fidl::VectorView<fuchsia_hardware_usb_endpoint::wire::VmoInfo>::FromExternal(
+                        &vmo_info, 1));
+        if (!vmo_res.ok() || vmo_res->vmos.empty() || !vmo_res->vmos[0].has_vmo()) {
+          FX_LOGS(WARNING) << "RegisterVmos failed for " << try_instance;
+          return std::nullopt;
+        }
+        read_vmo_ = std::move(vmo_res->vmos[0].vmo());
+
         bulk_in_.Bind(std::move(in_endpoints->client), dispatcher_, this);
-        bulk_out_.Bind(std::move(out_endpoints->client), dispatcher_);
+        bulk_out_.Bind(std::move(out_endpoints->client), dispatcher_, &bulk_out_handler_);
 
         FX_LOGS(INFO) << "Successfully bound ADB endpoints using instance: " << try_instance;
         usb_connected_ = true;
@@ -506,6 +678,17 @@ zx_status_t AdbClientImpl::ConnectEndpoints() {
   return ZX_ERR_NOT_FOUND;
 }
 
+zx_status_t AdbClientImpl::SendOkay() {
+  apacket* ack = get_apacket();
+  ack->msg.command = A_OKAY;
+  ack->msg.arg0 = local_id_;
+  ack->msg.arg1 = remote_id_;
+  ack->msg.magic = ack->msg.command ^ 0xffffffff;
+  zx_status_t status = SendPacket(ack);
+  put_apacket(ack);
+  return status;
+}
+
 zx_status_t AdbClientImpl::SendPacket(apacket* p) {
   if (!bulk_out_.is_valid()) {
     return ZX_ERR_BAD_STATE;
@@ -514,7 +697,9 @@ zx_status_t AdbClientImpl::SendPacket(apacket* p) {
   size_t data_len = sizeof(amessage) + p->msg.data_length;
   std::vector<uint8_t> data(data_len);
   memcpy(data.data(), &p->msg, sizeof(amessage));
-  memcpy(data.data() + sizeof(amessage), p->payload.data(), p->msg.data_length);
+  if (p->msg.data_length > 0) {
+    memcpy(data.data() + sizeof(amessage), p->payload.data(), p->msg.data_length);
+  }
 
   fuchsia_hardware_usb_request::Request req;
   req.data().emplace();
@@ -544,14 +729,23 @@ zx_status_t AdbClientImpl::QueueReadRequest() {
     FX_LOGS(ERROR) << "Bulk IN endpoint is not valid";
     return ZX_ERR_BAD_STATE;
   }
+  if (read_request_pending_) {
+    return ZX_OK;
+  }
+
+  // A bulk IN read completes once the buffer is full or the device ends the transfer with a short
+  // packet. While a payload is in flight, request only the remaining payload bytes (up to
+  // kBulkReadSize) so packet-aligned payloads complete without requiring a zero-length packet.
+  const size_t read_size = remaining_payload_bytes_ > 0
+                               ? std::min(remaining_payload_bytes_, kBulkReadSize)
+                               : kBulkReadSize;
 
   fuchsia_hardware_usb_request::Request req;
   req.data().emplace();
   fuchsia_hardware_usb_request::BufferRegion region;
-  std::vector<uint8_t> data(1024);
-  region.buffer(fuchsia_hardware_usb_request::Buffer::WithData(std::move(data)));
+  region.buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(kBulkReadVmoId));
   region.offset(0);
-  region.size(1024);
+  region.size(read_size);
   req.data()->emplace_back(std::move(region));
   req.defer_completion(false);
   req.information(fuchsia_hardware_usb_request::RequestInfo::WithBulk({}));
@@ -568,5 +762,6 @@ zx_status_t AdbClientImpl::QueueReadRequest() {
                    << zx_status_get_string(result.error_value().status());
     return result.error_value().status();
   }
+  read_request_pending_ = true;
   return ZX_OK;
 }

@@ -2,47 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/host.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_library.gni")
+import("//build/bazel/bazel_host_tool.gni")
 import("//build/sdk/sdk_host_tool.gni")
-import("//build/testing/environments.gni")
 
 if (is_host) {
-  rustc_binary("bin") {
-    name = "bindc"
-    edition = "2024"
-
-    with_unit_tests = true
-    test_environments = [ host_env ]
-
-    deps = [
-      "//src/devices/lib/bind:lib",
-      "//third_party/rust_crates:anyhow",
-      "//third_party/rust_crates:clap",
-    ]
-
-    sources = [
-      "src/cpp_generator.rs",
-      "src/generate.rs",
-      "src/main.rs",
-      "src/rust_generator.rs",
-    ]
-
-    inputs = [
-      "//src/devices/bind/fuchsia/fuchsia.bind",
-      "src/templates/cpp_header.template",
-      "src/templates/rust_file.template",
-      "src/tests/expected_cpp_header_gen",
-      "src/tests/expected_deprecated_bind_cpp_header",
-      "src/tests/expected_rust_file_gen",
-      "src/tests/test_library.bind",
-    ]
+  bazel_host_tool("bin") {
+    bazel_target = ":bin"
+    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/bin"
+    output_name = "bindc"
+    install_host_tool = true
   }
 
-  install_host_tools("host") {
-    deps = [ ":bin" ]
-    outputs = [ "bindc" ]
+  # Users of `${host_tools_dir}/bindc`, such as bind_host_test(), depend on this
+  # target in their own host toolchain, which can be a variant toolchain (e.g.
+  # host_x64-asan-ubsan). bazel_host_tool() only installs the tool in the base
+  # host toolchain, so redirect there, like install_host_tools() does.
+  group("host") {
+    public_deps = [ ":bin(${toolchain_variant.base})" ]
   }
 
   sdk_host_tool("bindc_sdk") {
@@ -52,10 +28,8 @@ if (is_host) {
   }
 }
 
+# The unit tests of bindc are in //tools:host_tests.
 group("tests") {
   testonly = true
-  deps = [
-    ":bin_test($host_toolchain)",
-    "./examples:tests",
-  ]
+  deps = [ "./examples:tests" ]
 }

@@ -31,6 +31,11 @@ class TestWorkspaceShouldExcludeFile(unittest.TestCase):
             "bazel-repos",
             "bazel-out",
             "bazel-workspace",
+            "compile_commands.json",
+            "rust-project.json",
+            "pyrightconfig.base.json",
+            "go.mod",
+            "go.sum",
         ]
         for path in _EXPECTED_EXCLUDED_PATHS:
             self.assertTrue(
@@ -43,6 +48,7 @@ class TestWorkspaceShouldExcludeFile(unittest.TestCase):
             "src",
             ".clang-format",
             ".gn",
+            "pyrightconfig.json",
         ]
         for path in _EXPECTED_INCLUDED_PATHS:
             self.assertFalse(
@@ -1244,6 +1250,99 @@ alias(
         self.assertNotEqual(build_bazel.stat().st_mtime, 1000)
         self.assertEqual(module_bazel.stat().st_mtime, 1000)
 
+    def test_generate_fuchsia_platform_sysroot_repository_skips_pending_variants(
+        self,
+    ) -> None:
+        sysroot_entries = [
+            {"source": "user.libc_x64/libc.so", "dest": "dist/lib/ld.so.1"},
+            {"source": "user.libc_x64/libc.so.debug", "dest": "debug/libc.so"},
+            {
+                "source": "user.libc_x64-asan/libc.so",
+                "dest": "dist/lib/asan/ld.so.1",
+            },
+            {
+                "source": "user.libc_x64-asan/libc.so.debug",
+                "dest": "debug/asan/libc.so",
+            },
+            {
+                "source": "user.libc_x64/libc.so",
+                "dest": "dist/lib/heapdump/ld.so.1",
+            },
+            {
+                "source": "user.libc_x64/libc.so.debug",
+                "dest": "debug/heapdump/libc.so",
+            },
+            {
+                "source": "user.libc_x64-coverage-cts/libc.so",
+                "dest": "dist/lib/coverage-cts/ld.so.1",
+            },
+            {
+                "source": "user.libc_x64-coverage-cts/libc.so.debug",
+                "dest": "debug/coverage-cts/libc.so",
+            },
+            {
+                "source": "user.libc_x64-profile-use/libc.so",
+                "dest": "dist/lib/profile-use/ld.so.1",
+            },
+            {
+                "source": "user.libc_x64-profile-use/libc.so.debug",
+                "dest": "debug/profile-use/libc.so",
+            },
+            {
+                "source": "user.libc_x64-profile-use-rust/libc.so",
+                "dest": "dist/lib/profile-use-rust/ld.so.1",
+            },
+            {
+                "source": "user.libc_x64-profile-use-rust/libc.so.debug",
+                "dest": "debug/profile-use-rust/libc.so",
+            },
+        ]
+        with self._sysroot_json_path.open("w") as f:
+            json.dump(sysroot_entries, f)
+
+        workspace_utils.generate_fuchsia_platform_sysroot_repository(
+            self._repository_dir,
+            "test_sysroot_repo_name",
+            self._sysroot_json_path,
+            "x64",
+            self._build_dir,
+        )
+
+        build_bazel_content = (self._repository_dir / "BUILD.bazel").read_text()
+        self.assertIn("sysroot_library_dist.novariant", build_bazel_content)
+        self.assertIn("sysroot_library_dist.asan", build_bazel_content)
+        self.assertNotIn("heapdump", build_bazel_content)
+        self.assertNotIn("coverage-cts", build_bazel_content)
+        self.assertNotIn("profile-use", build_bazel_content)
+        self.assertNotIn("profile-use-rust", build_bazel_content)
+
+    def test_generate_fuchsia_platform_sysroot_repository_rejects_unmapped_variant(
+        self,
+    ) -> None:
+        sysroot_entries = [
+            {
+                "source": "user.libc_x64-unmapped/libc.so",
+                "dest": "dist/lib/unmapped-variant/ld.so.1",
+            },
+            {
+                "source": "user.libc_x64-unmapped/libc.so.debug",
+                "dest": "debug/unmapped-variant/libc.so",
+            },
+        ]
+        with self._sysroot_json_path.open("w") as f:
+            json.dump(sysroot_entries, f)
+
+        with self.assertRaisesRegex(
+            ValueError, "Unmapped sysroot variant 'unmapped-variant'"
+        ):
+            workspace_utils.generate_fuchsia_platform_sysroot_repository(
+                self._repository_dir,
+                "test_sysroot_repo_name",
+                self._sysroot_json_path,
+                "x64",
+                self._build_dir,
+            )
+
 
 class GenerateFuchsiaWorkspaceTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -1263,6 +1362,13 @@ class GenerateFuchsiaWorkspaceTest(unittest.TestCase):
                 "workspace/MODULE.bazel", self._file_content
             )
 
+        record_patch = mock.patch.object(
+            workspace_utils,
+            "record_fuchsia_workspace",
+            side_effect=fake_record_fuchsia_workspace,
+            autospec=True,
+            spec_set=True,
+        )
         patches = [
             mock.patch.object(
                 build_utils,
@@ -1274,15 +1380,12 @@ class GenerateFuchsiaWorkspaceTest(unittest.TestCase):
                 "get_bazel_relative_topdir",
                 return_value=("gen/build/bazel", set()),
             ),
-            mock.patch.object(
-                workspace_utils,
-                "record_fuchsia_workspace",
-                side_effect=fake_record_fuchsia_workspace,
-            ),
         ]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
+        self._record_fuchsia_workspace_mock = record_patch.start()
+        self.addCleanup(record_patch.stop)
 
     def tearDown(self) -> None:
         self._td.cleanup()
@@ -1316,6 +1419,63 @@ class GenerateFuchsiaWorkspaceTest(unittest.TestCase):
         self.assertEqual(module_bazel.read_text(), "updated")
         self.assertFalse(workspace_marker.exists())
         self.assertFalse(external_marker.exists())
+
+    def test_ignores_convenience_symlinks_added_after_initial_generation(
+        self,
+    ) -> None:
+        test_fuchsia_dir = self._root / "fuchsia"
+        test_fuchsia_dir.mkdir(parents=True, exist_ok=True)
+        (test_fuchsia_dir / "src").mkdir()
+
+        def record_top_level(
+            generated: workspace_utils.GeneratedWorkspaceFiles,
+            top_dir: Path,
+            fuchsia_dir: Path,
+            gn_output_dir: Path,
+            git_bin_path: Path,
+            log: T.Callable[[str], None] | None = None,
+        ) -> None:
+            del top_dir, gn_output_dir, git_bin_path, log
+            for name in sorted(os.listdir(fuchsia_dir)):
+                if not workspace_utils.workspace_should_exclude_file(name):
+                    generated.record_symlink(
+                        f"workspace/{name}", fuchsia_dir / name
+                    )
+
+        self._record_fuchsia_workspace_mock.side_effect = record_top_level
+        self._generate()
+        workspace_marker = self._workspace_dir / "marker"
+        workspace_marker.write_text("")
+        external_marker = self._external_dir / "marker"
+        external_marker.parent.mkdir(parents=True, exist_ok=True)
+        external_marker.write_text("")
+
+        # Simulate convenience symlinks created by //build/regenerator.py and
+        # `fx setup-go` after the initial workspace generation.
+        for name in (
+            "compile_commands.json",
+            "rust-project.json",
+            "pyrightconfig.base.json",
+            "go.mod",
+            "go.sum",
+            "bazel-workspace",
+            "bazel-bin",
+            "bazel-out",
+            "bazel-repos",
+        ):
+            (test_fuchsia_dir / name).symlink_to(self._build_dir / name)
+
+        self._generate()
+        self.assertTrue(workspace_marker.exists())
+        self.assertTrue(external_marker.exists())
+        for name in (
+            "compile_commands.json",
+            "rust-project.json",
+            "pyrightconfig.base.json",
+            "go.mod",
+            "go.sum",
+        ):
+            self.assertFalse(os.path.lexists(self._workspace_dir / name))
 
 
 class RecordAbseilCppRepositoryTest(unittest.TestCase):

@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":sdio-test",
+    ],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "sdio",
+    srcs = [
+        "main.cc",
+        "sdio.cc",
+        "sdio.h",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.sdio:fuchsia.hardware.sdio_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//zircon/system/ulib/fzl",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "sdio-test-bin",
+    srcs = [
+        "sdio.cc",
+        "sdio.h",
+        "sdio-test.cc",
+    ],
+    gn_output_name = "sdio-test",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.sdio:fuchsia.hardware.sdio_cpp",
+        # In Bazel, wire_test_base.h is separated into the _cpp_testing target.
+        "//sdk/fidl/fuchsia.hardware.sdio:fuchsia.hardware.sdio_cpp_testing",  # @bazel2gn:skip
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "sdio-test",
+    unit_tests = [":sdio-test-bin"],
+)

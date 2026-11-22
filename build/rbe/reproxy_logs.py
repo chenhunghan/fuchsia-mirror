@@ -21,10 +21,9 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Protocol
 
-import fuchsia
 from api.log import log_pb2
+from build.rbe import fuchsia, pb_message_util
 from go.api.command import command_pb2
-from pb_message_util import proto_message_to_bq_dict
 
 _SCRIPT_BASENAME = Path(__file__).name
 
@@ -584,7 +583,10 @@ def json_export_command(args: argparse.Namespace) -> int:
         reclient_bindir=fuchsia.RECLIENT_BINDIR,
         verbose=True,
     )
-    records = [proto_message_to_bq_dict(record) for record in log.proto.records]
+    records = [
+        pb_message_util.proto_message_to_bq_dict(record)
+        for record in log.proto.records
+    ]
     with open(args.output, "w") as output:
         json.dump(records, output, indent=2)
     return 0

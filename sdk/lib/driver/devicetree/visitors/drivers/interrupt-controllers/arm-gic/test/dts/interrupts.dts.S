@@ -3,6 +3,7 @@
 // found in the LICENSE file
 /dts-v1/;
 
+#include "sdk/lib/driver/devicetree/visitors/drivers/interrupt-controllers/arm-gic/arm-gicv3.h"
 #include "interrupts.h"
 
 / {
@@ -67,5 +68,20 @@
 		interrupt-controller;
 		reg = <0x0 0x4 0x0 0x1>;
 		interrupts = <0 IRQ7_SPI IRQ7_MODE 0 IRQ8_SPI IRQ8_MODE>;
+	};
+
+	sample-device@5 {
+		compatible = "fuchsia,sample-device";
+		interrupts-extended = <&gicv3 GIC_SGI IRQ9_SGI IRQ9_MODE 0>;
+		interrupt-names = "sgi-doorbell";
+		reg = <0x0 0x5 0x0 0x1>;
+	};
+
+	disabled-sgi-device@6 {
+		compatible = "fuchsia,sample-device";
+		status = "disabled";
+		interrupts-extended = <&gicv3 GIC_SGI IRQ9_SGI IRQ9_MODE 0>;
+		interrupt-names = "sgi-doorbell-disabled";
+		reg = <0x0 0x6 0x0 0x1>;
 	};
 };

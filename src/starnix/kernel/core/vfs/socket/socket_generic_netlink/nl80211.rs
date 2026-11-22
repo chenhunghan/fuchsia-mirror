@@ -3,15 +3,19 @@
 // found in the LICENSE file.
 
 use super::{GenericMessage, GenericNetlinkFamily};
+use crate::power::{
+    ContainerWakingStream, SuspendResumeManagerHandle, WakeupSourceOrigin,
+    create_proxy_for_wake_events_counter,
+};
 use starnix_logging::{log_debug, log_error, log_warn};
 
 use anyhow::{Context as _, Error, bail, format_err};
 use async_trait::async_trait;
-use fidl::endpoints::Proxy as _;
+use fidl::endpoints::{Proxy as _, RequestStream};
 use fidl_fuchsia_wlan_wlanix::{self as fidl_wlanix, Nl80211Message, Nl80211MessageArray};
 use fuchsia_async as fasync;
 use futures::channel::mpsc;
-use futures::{FutureExt as _, StreamExt, select_biased};
+use futures::{FutureExt as _, select_biased};
 use netlink::NETLINK_LOG_TAG;
 use netlink::messaging::Sender;
 use netlink_packet_core::buffer::NETLINK_HEADER_LEN;
@@ -19,15 +23,30 @@ use netlink_packet_core::{
     DoneMessage, ErrorMessage, NetlinkHeader, NetlinkMessage, NetlinkPayload,
 };
 use netlink_packet_utils::Emitable;
-use starnix_sync::{LockDepMutex, Nl80211ProxyLock};
+use starnix_sync::{LockDepMutex, Nl80211ProxyLock, Nl80211UnicastWakeLock};
 use starnix_uapi::errors;
 use std::sync::Arc;
 
 const INITIAL_RECONNECT_BACKOFF: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(100);
 const MAX_RECONNECT_BACKOFF: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(5_000);
+/// Duration to hold a Starnix wakeup source after receiving an `Nl80211Multicast`
+/// message carrying a `wake_lease` baton, giving userspace daemons (such as
+/// `wificond` and `system_server`) time to read the netlink socket and acquire
+/// their own wakelocks before the container can suspend again.
+///
+/// Matches Linux `bcmdhd`'s `CUSTOM_PNO_EVENT_LOCK_xTIME * DHD_PACKET_TIMEOUT_MS`
+/// (`10 * 100ms = 1000ms`).
+const MULTICAST_WAKE_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(1);
+/// Maximum duration to hold a Starnix wakeup source for an in-flight unicast
+/// `nl80211` request before timing out, so a hung `wlanix` FIDL call cannot
+/// block container suspension indefinitely.
+const UNICAST_WAKE_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
+const UNICAST_WAKE_NAME: &str = "nl80211-unicast";
 
 type ConnectWlanixFn =
     Box<dyn Fn() -> Result<fidl_wlanix::WlanixProxy, Error> + Send + Sync + 'static>;
+type ProxyWakeChannelFn =
+    Box<dyn Fn(zx::Channel, String) -> (zx::Channel, zx::Counter) + Send + Sync + 'static>;
 
 struct ReconnectState {
     next_backoff: zx::MonotonicDuration,
@@ -69,6 +88,48 @@ struct Nl80211FamilyInner {
     proxy: LockDepMutex<fidl_wlanix::Nl80211Proxy, Nl80211ProxyLock>,
     reconnect_state: futures::lock::Mutex<ReconnectState>,
     connect_wlanix_fn: ConnectWlanixFn,
+    proxy_wake_channel_fn: ProxyWakeChannelFn,
+    suspend_resume_manager: SuspendResumeManagerHandle,
+    in_flight_unicast_requests: LockDepMutex<usize, Nl80211UnicastWakeLock>,
+}
+
+/// Reference-counted RAII guard that keeps the `nl80211-unicast` Starnix wakeup
+/// source active while one or more unicast `nl80211` requests are in flight.
+struct UnicastWakeGuard<'a> {
+    inner: &'a Nl80211FamilyInner,
+    timed_out: bool,
+}
+
+impl<'a> UnicastWakeGuard<'a> {
+    fn acquire(inner: &'a Nl80211FamilyInner) -> Self {
+        let mut in_flight = inner.in_flight_unicast_requests.lock();
+        if *in_flight == 0 {
+            inner
+                .suspend_resume_manager
+                .activate_wakeup_source(WakeupSourceOrigin::WakeLock(UNICAST_WAKE_NAME.into()));
+        }
+        *in_flight += 1;
+        Self { inner, timed_out: false }
+    }
+
+    fn timeout(mut self) {
+        self.timed_out = true;
+    }
+}
+
+impl Drop for UnicastWakeGuard<'_> {
+    fn drop(&mut self) {
+        let mut in_flight = self.inner.in_flight_unicast_requests.lock();
+        *in_flight -= 1;
+        if *in_flight == 0 {
+            let origin = WakeupSourceOrigin::WakeLock(UNICAST_WAKE_NAME.into());
+            if self.timed_out {
+                self.inner.suspend_resume_manager.timeout_wakeup_source(&origin);
+            } else {
+                self.inner.suspend_resume_manager.deactivate_wakeup_source(&origin);
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -77,15 +138,24 @@ pub struct Nl80211Family {
 }
 
 impl Nl80211Family {
-    pub fn new() -> Result<Self, Error> {
-        Self::with_connect_fn(|| {
-            fuchsia_component::client::connect_to_protocol::<fidl_wlanix::WlanixMarker>()
-                .context("failed to connect to wlanix")
-        })
+    pub fn new(suspend_resume_manager: SuspendResumeManagerHandle) -> Result<Self, Error> {
+        Self::with_dependencies(
+            suspend_resume_manager,
+            || {
+                fuchsia_component::client::connect_to_protocol::<fidl_wlanix::WlanixMarker>()
+                    .context("failed to connect to wlanix")
+            },
+            create_proxy_for_wake_events_counter,
+        )
     }
 
-    fn with_connect_fn(
+    fn with_dependencies(
+        suspend_resume_manager: SuspendResumeManagerHandle,
         connect_wlanix_fn: impl Fn() -> Result<fidl_wlanix::WlanixProxy, Error> + Send + Sync + 'static,
+        proxy_wake_channel_fn: impl Fn(zx::Channel, String) -> (zx::Channel, zx::Counter)
+        + Send
+        + Sync
+        + 'static,
     ) -> Result<Self, Error> {
         let wlanix_svc = connect_wlanix_fn()?;
         let nl80211_proxy = Self::connect_proxy(&wlanix_svc)?;
@@ -94,6 +164,9 @@ impl Nl80211Family {
                 proxy: LockDepMutex::new(nl80211_proxy),
                 reconnect_state: futures::lock::Mutex::new(ReconnectState::new()),
                 connect_wlanix_fn: Box::new(connect_wlanix_fn),
+                proxy_wake_channel_fn: Box::new(proxy_wake_channel_fn),
+                suspend_resume_manager,
+                in_flight_unicast_requests: LockDepMutex::new(0),
             }),
         })
     }
@@ -264,10 +337,12 @@ impl<S: Sender<GenericMessage>> GenericNetlinkFamily<S> for Nl80211Family {
         assigned_family_id: u16,
         message_sink: mpsc::UnboundedSender<NetlinkMessage<GenericMessage>>,
     ) {
+        let counter_name = format!("nl80211-multicast-{group}");
+        let origin = WakeupSourceOrigin::WakeLock(counter_name.clone());
         let mut proxy = self.inner.proxy.lock().clone();
 
         while !message_sink.is_closed() {
-            let (client_end, mut stream) = fidl::endpoints::create_request_stream();
+            let (client_end, server_end) = fidl::endpoints::create_endpoints();
             if let Err(e) = proxy.get_multicast(fidl_wlanix::Nl80211GetMulticastRequest {
                 group: Some(group.clone()),
                 multicast: Some(client_end),
@@ -283,10 +358,24 @@ impl<S: Sender<GenericMessage>> GenericNetlinkFamily<S> for Nl80211Family {
                     return;
                 }
             } else {
+                let (local_channel, counter) = (self.inner.proxy_wake_channel_fn)(
+                    server_end.into_channel(),
+                    counter_name.clone(),
+                );
+                let mut stream = ContainerWakingStream::new(
+                    self.inner
+                        .suspend_resume_manager
+                        .add_message_counter(&counter_name, Some(counter)),
+                    fidl_wlanix::Nl80211MulticastRequestStream::from_channel(
+                        fidl::AsyncChannel::from_channel(local_channel),
+                    ),
+                );
                 let mut on_closed = std::pin::pin!(proxy.on_closed().fuse());
+                let mut wake_timeout = std::pin::pin!(futures::future::Fuse::terminated());
+                let mut next_req = stream.next().fuse();
                 loop {
                     select_biased! {
-                        req = stream.next().fuse() => {
+                        req = next_req => {
                             match req {
                                 Some(Ok(fidl_wlanix::Nl80211MulticastRequest::Message {
                                     payload,
@@ -304,8 +393,23 @@ impl<S: Sender<GenericMessage>> GenericNetlinkFamily<S> for Nl80211Family {
                                                         e,
                                                     );
                                                     if e.is_disconnected() {
+                                                        self.inner
+                                                            .suspend_resume_manager
+                                                            .deactivate_wakeup_source(&origin);
                                                         return;
                                                     }
+                                                } else if payload.wake_lease.is_some() {
+                                                    self.inner
+                                                        .suspend_resume_manager
+                                                        .activate_wakeup_source(origin.clone());
+                                                    wake_timeout.set(
+                                                        fasync::Timer::new(
+                                                            fasync::MonotonicInstant::after(
+                                                                MULTICAST_WAKE_TIMEOUT,
+                                                            ),
+                                                        )
+                                                        .fuse(),
+                                                    );
                                                 }
                                             }
                                             Err(e) => log_error!(
@@ -334,10 +438,16 @@ impl<S: Sender<GenericMessage>> GenericNetlinkFamily<S> for Nl80211Family {
                                 }
                                 None => break,
                             }
+                            drop(next_req);
+                            next_req = stream.next().fuse();
+                        }
+                        _ = wake_timeout => {
+                            self.inner.suspend_resume_manager.timeout_wakeup_source(&origin);
                         }
                         _ = on_closed => break,
                     }
                 }
+                self.inner.suspend_resume_manager.deactivate_wakeup_source(&origin);
             }
 
             // Wait for the parent Nl80211 proxy to close as the restart signal.
@@ -377,8 +487,28 @@ impl<S: Sender<GenericMessage>> GenericNetlinkFamily<S> for Nl80211Family {
             send_error_response(netlink_header, errors::EIO, sender);
             return;
         };
+        let mut wake_guard = Some(UnicastWakeGuard::acquire(&self.inner));
         let message = fidl_wlanix::Nl80211Message::Message(fidl_wlanix::Message { payload });
-        let vmo = match proxy.message_v2(&message).await {
+        let mut message_fut = proxy.message_v2(&message).fuse();
+        let mut wake_timeout = std::pin::pin!(
+            fasync::Timer::new(fasync::MonotonicInstant::after(UNICAST_WAKE_TIMEOUT)).fuse()
+        );
+        let message_res = loop {
+            select_biased! {
+                res = message_fut => break res,
+                _ = wake_timeout => {
+                    log_warn!(
+                        tag = NETLINK_LOG_TAG;
+                        "Unicast nl80211 request timed out holding wakeup source after {:?}",
+                        UNICAST_WAKE_TIMEOUT,
+                    );
+                    if let Some(guard) = wake_guard.take() {
+                        guard.timeout();
+                    }
+                }
+            }
+        };
+        let vmo = match message_res {
             Ok(Ok(value)) => value,
             Ok(Err(errno)) => {
                 log_error!(tag = NETLINK_LOG_TAG; "Failed to read nl80211 message: {}", errno);
@@ -428,11 +558,12 @@ impl<S: Sender<GenericMessage>> GenericNetlinkFamily<S> for Nl80211Family {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::power::SuspendResumeManager;
     use crate::vfs::socket::socket_generic_netlink::test_utils::*;
     use assert_matches::assert_matches;
     use fidl::endpoints::create_proxy_and_stream;
     use fuchsia_async::TestExecutor;
-    use futures::{FutureExt, pin_mut};
+    use futures::{FutureExt, StreamExt, pin_mut};
     use starnix_sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::Poll;
@@ -440,6 +571,7 @@ mod tests {
 
     struct TestHarness {
         family: Nl80211Family,
+        suspend_resume_manager: SuspendResumeManagerHandle,
         wlanix_rx: Mutex<mpsc::UnboundedReceiver<fidl_wlanix::WlanixRequestStream>>,
         connect_calls: Arc<AtomicUsize>,
         fail_connect: Arc<AtomicBool>,
@@ -452,17 +584,22 @@ mod tests {
             let connect_calls_clone = Arc::clone(&connect_calls);
             let fail_connect = Arc::new(AtomicBool::new(false));
             let fail_connect_clone = Arc::clone(&fail_connect);
+            let suspend_resume_manager = Arc::new(SuspendResumeManager::default());
 
-            let family = Nl80211Family::with_connect_fn(move || {
-                connect_calls_clone.fetch_add(1, Ordering::SeqCst);
-                if fail_connect_clone.load(Ordering::SeqCst) {
-                    return Err(format_err!("simulated connect_to_protocol error"));
-                }
-                let (wlanix_proxy, wlanix_stream) =
-                    create_proxy_and_stream::<fidl_wlanix::WlanixMarker>();
-                wlanix_tx.unbounded_send(wlanix_stream).expect("wlanix_rx dropped");
-                Ok(wlanix_proxy)
-            })
+            let family = Nl80211Family::with_dependencies(
+                suspend_resume_manager.clone(),
+                move || {
+                    connect_calls_clone.fetch_add(1, Ordering::SeqCst);
+                    if fail_connect_clone.load(Ordering::SeqCst) {
+                        return Err(format_err!("simulated connect_to_protocol error"));
+                    }
+                    let (wlanix_proxy, wlanix_stream) =
+                        create_proxy_and_stream::<fidl_wlanix::WlanixMarker>();
+                    wlanix_tx.unbounded_send(wlanix_stream).expect("wlanix_rx dropped");
+                    Ok(wlanix_proxy)
+                },
+                |channel, _name| (channel, zx::Counter::create()),
+            )
             .expect("Failed to create test family");
 
             let mut wlanix_stream =
@@ -474,7 +611,13 @@ mod tests {
                 }
             );
             (
-                Self { family, wlanix_rx: Mutex::new(wlanix_rx), connect_calls, fail_connect },
+                Self {
+                    family,
+                    suspend_resume_manager,
+                    wlanix_rx: Mutex::new(wlanix_rx),
+                    connect_calls,
+                    fail_connect,
+                },
                 nl80211_stream,
             )
         }
@@ -1008,5 +1151,403 @@ mod tests {
             -(expected_errno.error_code() as i32)
         );
         assert_eq!(err_msg.header, expected_header_bytes);
+    }
+
+    // Verifies that receiving a multicast message with a `wake_lease` baton:
+    // 1. Forwards the netlink message to the sink, activates the Starnix wakeup source, and
+    //    immediately drops the `wake_lease` baton (`EVENTPAIR_PEER_CLOSED`).
+    // 2. Resets the 1s `MULTICAST_WAKE_TIMEOUT` timer when a subsequent message with a
+    //    `wake_lease` arrives before the first timeout expires.
+    // 3. Deactivates the wakeup source once `MULTICAST_WAKE_TIMEOUT` elapses after the last
+    //    `wake_lease`-bearing message.
+    #[::fuchsia::test]
+    fn test_multicast_activates_timed_wakeup_source_and_extends_on_subsequent_baton() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+        let (sender, mut receiver) = mpsc::unbounded();
+        let mcast_fut =
+            GenericNetlinkFamily::<TestSender<GenericMessage>>::stream_multicast_messages(
+                &harness.family,
+                "scan".to_string(),
+                123,
+                sender,
+            );
+        pin_mut!(mcast_fut);
+
+        // Start the multicast stream and verify no wakeup source is active initially.
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+
+        // Extract the `Nl80211Multicast` client endpoint sent to wlanix via `GetMulticast`.
+        let multicast_req = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::GetMulticast { payload, .. })) => payload
+        );
+        let client_proxy: fidl_wlanix::Nl80211MulticastProxy =
+            multicast_req.multicast.expect("No client endpoint").into_proxy();
+
+        // Send a multicast message carrying a `wake_lease` baton at t = 0ms.
+        let (server_lease_1, client_lease_1) = zx::EventPair::create();
+        let message = fidl_wlanix::Nl80211Message::Message(fidl_wlanix::Message {
+            payload: vec![1, 2, 3, 4],
+        });
+        client_proxy
+            .message(fidl_wlanix::Nl80211MulticastMessageRequest {
+                message: Some(message.clone()),
+                wake_lease: Some(client_lease_1),
+                ..Default::default()
+            })
+            .expect("Failed to send multicast message");
+
+        // Poll `mcast_fut` to process the message: the netlink payload should be queued on
+        // `receiver`, `client_lease_1` should be dropped (`EVENTPAIR_PEER_CLOSED` observed on
+        // `server_lease_1`), and the wakeup source should block suspension.
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(receiver.try_recv().is_ok());
+        assert_matches!(
+            server_lease_1
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
+            zx::WaitResult::Ok(signals) if signals.contains(zx::Signals::EVENTPAIR_PEER_CLOSED)
+        );
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // Advance 400ms (still within the 1s timeout); the wakeup source remains active.
+        exec.set_fake_time(exec.now() + zx::MonotonicDuration::from_millis(400));
+        assert!(!exec.wake_expired_timers());
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // Send a second multicast message with a new `wake_lease` baton at t = 400ms to extend
+        // the wakeup timeout by another 1s (until t = 1400ms).
+        let (server_lease_2, client_lease_2) = zx::EventPair::create();
+        client_proxy
+            .message(fidl_wlanix::Nl80211MulticastMessageRequest {
+                message: Some(message),
+                wake_lease: Some(client_lease_2),
+                ..Default::default()
+            })
+            .expect("Failed to send second multicast message");
+
+        // Verify the second message is forwarded, its baton is dropped, and the wakeup source
+        // remains active.
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(receiver.try_recv().is_ok());
+        assert_matches!(
+            server_lease_2
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
+            zx::WaitResult::Ok(signals) if signals.contains(zx::Signals::EVENTPAIR_PEER_CLOSED)
+        );
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // At t = 1000ms (when the first message's timer would have expired, 600ms after the
+        // second message), the extended timeout has not yet expired.
+        exec.set_fake_time(exec.now() + zx::MonotonicDuration::from_millis(600));
+        assert!(!exec.wake_expired_timers());
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // At t = 1400ms (1s after the second message), the timeout expires and deactivates the
+        // wakeup source, allowing the container to suspend again.
+        exec.set_fake_time(exec.now() + zx::MonotonicDuration::from_millis(400));
+        assert!(exec.wake_expired_timers());
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+    }
+
+    // Verifies that a multicast message without a `wake_lease` (`wake_lease: None`) is still
+    // forwarded to the netlink sink, but does not activate a timed wakeup source.
+    #[::fuchsia::test]
+    fn test_multicast_without_wake_lease_does_not_activate_wakeup_source() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+        let (sender, mut receiver) = mpsc::unbounded();
+        let mcast_fut =
+            GenericNetlinkFamily::<TestSender<GenericMessage>>::stream_multicast_messages(
+                &harness.family,
+                "scan".to_string(),
+                123,
+                sender,
+            );
+        pin_mut!(mcast_fut);
+
+        // Start the multicast stream and obtain the `Nl80211Multicast` client proxy.
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        let multicast_req = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::GetMulticast { payload, .. })) => payload
+        );
+        let client_proxy: fidl_wlanix::Nl80211MulticastProxy =
+            multicast_req.multicast.expect("No client endpoint").into_proxy();
+
+        // Send a multicast message with `wake_lease: None`.
+        let message = fidl_wlanix::Nl80211Message::Message(fidl_wlanix::Message {
+            payload: vec![1, 2, 3, 4],
+        });
+        client_proxy
+            .message(fidl_wlanix::Nl80211MulticastMessageRequest {
+                message: Some(message),
+                wake_lease: None,
+                ..Default::default()
+            })
+            .expect("Failed to send multicast message");
+
+        // The message is forwarded to `receiver`, and the container remains able to suspend.
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(receiver.try_recv().is_ok());
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+    }
+
+    // Verifies that if the multicast stream closes while a timed wakeup source is active, the
+    // wakeup source is immediately deactivated rather than leaking or waiting for the 1s timer.
+    #[::fuchsia::test]
+    fn test_multicast_deactivates_wakeup_source_on_stream_close() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+        let (sender, mut receiver) = mpsc::unbounded();
+        let mcast_fut =
+            GenericNetlinkFamily::<TestSender<GenericMessage>>::stream_multicast_messages(
+                &harness.family,
+                "scan".to_string(),
+                123,
+                sender,
+            );
+        pin_mut!(mcast_fut);
+
+        // Start the multicast stream and obtain the `Nl80211Multicast` client proxy.
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        let multicast_req = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::GetMulticast { payload, .. })) => payload
+        );
+        let client_proxy: fidl_wlanix::Nl80211MulticastProxy =
+            multicast_req.multicast.expect("No client endpoint").into_proxy();
+
+        // Send a message with a `wake_lease` baton to activate the timed wakeup source.
+        let (_server_lease, client_lease) = zx::EventPair::create();
+        let message = fidl_wlanix::Nl80211Message::Message(fidl_wlanix::Message {
+            payload: vec![1, 2, 3, 4],
+        });
+        client_proxy
+            .message(fidl_wlanix::Nl80211MulticastMessageRequest {
+                message: Some(message),
+                wake_lease: Some(client_lease),
+                ..Default::default()
+            })
+            .expect("Failed to send multicast message");
+
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(receiver.try_recv().is_ok());
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // Dropping the multicast client proxy closes the stream before the 1s timer expires,
+        // which should immediately deactivate the wakeup source.
+        drop(client_proxy);
+        assert_matches!(exec.run_until_stalled(&mut mcast_fut), Poll::Pending);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+    }
+
+    fn serialize_messages_to_vmo(messages: Vec<Nl80211Message>) -> zx::Vmo {
+        let bytes =
+            fidl::persist(&Nl80211MessageArray { messages }).expect("Failed to persist messages");
+        let vmo = zx::Vmo::create(bytes.len() as u64).expect("Failed to create VMO");
+        vmo.write(&bytes, 0).expect("Failed to write VMO");
+        vmo.set_content_size(&(bytes.len() as u64)).expect("Failed to set VMO content size");
+        vmo
+    }
+
+    // Verifies that an in-flight unicast `handle_message` call activates the Starnix wakeup
+    // source (blocking container suspension) until all reply messages are enqueued on the sender.
+    #[::fuchsia::test]
+    fn test_unicast_holds_wakeup_source_until_replies_queued() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+
+        let mut header = NetlinkHeader::default();
+        header.message_type = 123;
+        header.sequence_number = 42;
+        let messages = Arc::new(Mutex::new(vec![]));
+        let mut sender = TestSender { messages: messages.clone() };
+
+        let handle_fut = GenericNetlinkFamily::handle_message(
+            &harness.family,
+            header,
+            vec![1, 2, 3, 4],
+            &mut sender,
+        );
+        pin_mut!(handle_fut);
+
+        // Polling `handle_fut` dispatches `MessageV2` to wlanix and holds the wakeup source.
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        let responder = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::MessageV2 { responder, .. })) => responder
+        );
+        let vmo = serialize_messages_to_vmo(vec![
+            Nl80211Message::Message(fidl_wlanix::Message { payload: vec![9, 8, 7, 6] }),
+            Nl80211Message::Done(fidl_wlanix::Done),
+        ]);
+        responder.send(Ok(vmo)).expect("Failed to send VMO response");
+
+        // Once `handle_fut` processes the reply and enqueues both messages, the wakeup source is
+        // deactivated.
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Ready(()));
+        assert_eq!(messages.lock().len(), 2);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+    }
+
+    // Verifies that overlapping in-flight unicast requests reference-count the wakeup source so
+    // completing the first request does not allow suspension while the second request is still
+    // waiting for wlanix.
+    #[::fuchsia::test]
+    fn test_unicast_overlapping_requests_refcount_wakeup_source() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+
+        let messages_1 = Arc::new(Mutex::new(vec![]));
+        let mut sender_1 = TestSender { messages: messages_1.clone() };
+        let messages_2 = Arc::new(Mutex::new(vec![]));
+        let mut sender_2 = TestSender { messages: messages_2.clone() };
+
+        let handle_fut_1 = GenericNetlinkFamily::handle_message(
+            &harness.family,
+            NetlinkHeader::default(),
+            vec![1],
+            &mut sender_1,
+        );
+        let handle_fut_2 = GenericNetlinkFamily::handle_message(
+            &harness.family,
+            NetlinkHeader::default(),
+            vec![2],
+            &mut sender_2,
+        );
+        pin_mut!(handle_fut_1);
+        pin_mut!(handle_fut_2);
+
+        // Start both requests concurrently; both are now waiting for `MessageV2` replies.
+        assert_matches!(exec.run_until_stalled(&mut handle_fut_1), Poll::Pending);
+        assert_matches!(exec.run_until_stalled(&mut handle_fut_2), Poll::Pending);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        let responder_1 = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::MessageV2 { responder, .. })) => responder
+        );
+        let responder_2 = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::MessageV2 { responder, .. })) => responder
+        );
+
+        // Complete the first request; the wakeup source must remain active for the second request.
+        responder_1
+            .send(Ok(serialize_messages_to_vmo(vec![Nl80211Message::Ack(fidl_wlanix::Ack)])))
+            .expect("Failed to send first response");
+        assert_matches!(exec.run_until_stalled(&mut handle_fut_1), Poll::Ready(()));
+        assert_eq!(messages_1.lock().len(), 1);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // Complete the second request; now the wakeup source is released.
+        responder_2
+            .send(Ok(serialize_messages_to_vmo(vec![Nl80211Message::Ack(fidl_wlanix::Ack)])))
+            .expect("Failed to send second response");
+        assert_matches!(exec.run_until_stalled(&mut handle_fut_2), Poll::Ready(()));
+        assert_eq!(messages_2.lock().len(), 1);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+    }
+
+    // Verifies that if an in-flight unicast request future is dropped (e.g. client socket closed)
+    // or if the wlanix channel closes mid-request, the wakeup source is released.
+    #[::fuchsia::test]
+    fn test_unicast_releases_wakeup_source_on_drop_or_channel_close() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+        let messages = Arc::new(Mutex::new(vec![]));
+        let mut sender = TestSender { messages };
+
+        // 1. Dropping the `handle_message` future mid-flight releases the wakeup source.
+        {
+            let mut handle_fut = Box::pin(GenericNetlinkFamily::handle_message(
+                &harness.family,
+                NetlinkHeader::default(),
+                vec![1, 2],
+                &mut sender,
+            ));
+            assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+            assert!(!harness.suspend_resume_manager.lock().can_suspend());
+            let _responder = assert_matches!(
+                exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+                Poll::Ready(Ok(fidl_wlanix::Nl80211Request::MessageV2 { responder, .. })) => responder
+            );
+        }
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+
+        // 2. Closing the wlanix `Nl80211` channel mid-request returns an error reply and releases
+        //    the wakeup source.
+        let handle_fut = GenericNetlinkFamily::handle_message(
+            &harness.family,
+            NetlinkHeader::default(),
+            vec![3, 4],
+            &mut sender,
+        );
+        pin_mut!(handle_fut);
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        drop(nl80211_stream);
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Ready(()));
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+    }
+
+    // Verifies that if wlanix does not reply within `UNICAST_WAKE_TIMEOUT` (5s), the safety timer
+    // releases the wakeup source so a hung FIDL call cannot block suspension indefinitely, and a
+    // late reply does not underflow the reference count.
+    #[::fuchsia::test]
+    fn test_unicast_safety_timeout_releases_wakeup_source() {
+        let mut exec = TestExecutor::new_with_fake_time();
+        let (harness, mut nl80211_stream) = TestHarness::new();
+        let messages = Arc::new(Mutex::new(vec![]));
+        let mut sender = TestSender { messages: messages.clone() };
+
+        let handle_fut = GenericNetlinkFamily::handle_message(
+            &harness.family,
+            NetlinkHeader::default(),
+            vec![1, 2, 3, 4],
+            &mut sender,
+        );
+        pin_mut!(handle_fut);
+
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        let responder = assert_matches!(
+            exec.run_until_stalled(&mut nl80211_stream.select_next_some()),
+            Poll::Ready(Ok(fidl_wlanix::Nl80211Request::MessageV2 { responder, .. })) => responder
+        );
+
+        // Just before `UNICAST_WAKE_TIMEOUT` (5s), the wakeup source is still held.
+        exec.set_fake_time(
+            exec.now() + UNICAST_WAKE_TIMEOUT - zx::MonotonicDuration::from_millis(1),
+        );
+        assert!(!exec.wake_expired_timers());
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+        assert!(!harness.suspend_resume_manager.lock().can_suspend());
+
+        // At `UNICAST_WAKE_TIMEOUT` (5s), the timer fires and releases the wakeup source while
+        // `handle_fut` remains pending waiting for `MessageV2`.
+        exec.set_fake_time(exec.now() + zx::MonotonicDuration::from_millis(1));
+        assert!(exec.wake_expired_timers());
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Pending);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+
+        // When the late reply arrives, `handle_fut` completes normally without double-decrementing
+        // `in_flight_unicast_requests`.
+        responder
+            .send(Ok(serialize_messages_to_vmo(vec![Nl80211Message::Ack(fidl_wlanix::Ack)])))
+            .expect("Failed to send late response");
+        assert_matches!(exec.run_until_stalled(&mut handle_fut), Poll::Ready(()));
+        assert_eq!(messages.lock().len(), 1);
+        assert!(harness.suspend_resume_manager.lock().can_suspend());
+        assert_eq!(*harness.family.inner.in_flight_unicast_requests.lock(), 0);
     }
 }

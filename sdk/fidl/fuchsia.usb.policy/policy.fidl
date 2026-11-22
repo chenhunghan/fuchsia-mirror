@@ -137,13 +137,30 @@ open protocol Configuration {
     }) -> () error zx.Status;
 
     /// Disconnects the Type-C port CC lines via the USB power debug service
-    /// to simulate a physical cable unplug. If `duration` is positive,
-    /// schedules an automatic Type-C cable reconnect after `duration` using a
-    /// hardware wake alarm in the persistent usb-policy service so reconnect
-    /// still completes even if the calling CLI session is terminated when the
-    /// USB link drops.
+    /// to simulate a physical cable unplug.
+    ///
+    /// If `duration` is positive, schedules an automatic Type-C cable reconnect
+    /// after `duration` using a hardware wake alarm in the persistent usb-policy
+    /// service so reconnect still completes even if the calling CLI session is
+    /// terminated when the USB link drops.
+    ///
+    /// If `wait` is true, the reply is sent once the scheduled reconnect has
+    /// restored the CC lines instead of right after the disconnect. Closing the
+    /// channel while waiting doesn't cancel the reconnect.
+    ///
+    /// # Errors
+    ///
+    /// * `ZX_ERR_INVALID_ARGS`: `duration < 0`, or `wait` is true with
+    ///   `duration == 0`.
+    /// * `ZX_ERR_UNAVAILABLE`: USB power debug or wake alarm service is
+    ///   unavailable.
+    /// * `ZX_ERR_CANCELED`: The pending reconnect was cancelled by a concurrent
+    ///   `ConnectCable` or `DisconnectCable` while waiting.
+    /// * `ZX_ERR_INTERNAL`: Failed to arm the wake alarm or update the Type-C
+    ///   cable connection state.
     flexible DisconnectCable(struct {
         duration zx.Duration;
+        wait bool;
     }) -> () error zx.Status;
 
     /// Reconnects the Type-C port CC lines via the USB power debug service after

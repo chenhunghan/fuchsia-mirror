@@ -1,0 +1,100 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-tool-cli-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "bt_tool_cli",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+rustc_test(
+    name = "bt_tool_cli_lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":lib",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_packaged_binary(
+    name = "bt_tool_cli_lib_test_bin",
+    testonly = True,
+    binary = ":bt_tool_cli_lib_test",
+    binary_name = "bt_tool_cli_lib_test",
+)
+
+fx_packaged_binary(
+    name = "bt_avrcp_controller_bin",
+    testonly = True,
+    binary = "//src/connectivity/bluetooth/tools/bt-avrcp-controller:bin",
+    binary_name = "bt-avrcp-controller",
+)
+
+fx_packaged_binary(
+    name = "bt_snoop_cli_bin",
+    testonly = True,
+    binary = "//src/connectivity/bluetooth/tools/bt-snoop-cli:bin",
+    binary_name = "bt-snoop-cli",
+)
+
+fx_component_manifest(
+    name = "bt-tool-cli-tests-component_manifest",
+    testonly = True,
+    component_name = "bt-tool-cli-tests-component",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/bt-tool-cli-tests.cml",
+)
+
+fx_test_component(
+    name = "bt-tool-cli-tests-component",
+    compiled_manifest = ":bt-tool-cli-tests-component_manifest",
+    deps = [":bt_tool_cli_lib_test_bin"],
+)
+
+fx_package(
+    name = "bt-tool-cli-tests_package",
+    package_name = "bt-tool-cli-tests",
+    testonly = True,
+    resources = [
+        # include these binaries in our package so we aren't dependent on the /bin
+        # ones.
+        ":bt_avrcp_controller_bin",
+        ":bt_snoop_cli_bin",
+    ],
+    test_components = [":bt-tool-cli-tests-component"],
+)
+
+fx_test(
+    name = "bt-tool-cli-tests",
+    package = ":bt-tool-cli-tests_package",
+)

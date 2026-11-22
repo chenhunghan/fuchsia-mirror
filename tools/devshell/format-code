@@ -14,6 +14,8 @@
 ## Options:
 ##   --emit             Emit formatted output to stdout instead of modifying files.
 ##   --all              Format all tracked files in the repository.
+##   --all-repositories Run in every active repository in the checkout, not
+##                      only the one enclosing the current directory.
 ##   --only <check>     Run only the specified formatter(s) (comma-separated or repeated).
 ##   --skip <check>     Skip the specified formatter(s) (comma-separated or repeated).
 ##   --files <files>    Comma-separated list of specific files to format.

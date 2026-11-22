@@ -260,6 +260,7 @@
 
 #include <stdbool.h>
 #include <sys/types.h>
+#include <stddef.h>
 #include <zircon/compiler.h>
 
 /* Indices of xsave feature states; state components are
@@ -287,62 +288,27 @@
 #define X86_XSAVE_STATE_BIT_PT (1 << X86_XSAVE_STATE_INDEX_PT)
 #define X86_XSAVE_STATE_BIT_PKRU (1 << X86_XSAVE_STATE_INDEX_PKRU)
 
-// Maximum buffer size needed for xsave and variants. To allocate, see ...BUFFER_SIZE below.
+// Maximum buffer size needed for xsave and variants.
 #define X86_MAX_EXTENDED_REGISTER_SIZE 1024
 
 // clang-format on
 
-enum x86_extended_register_feature {
-  X86_EXTENDED_REGISTER_X87,
-  X86_EXTENDED_REGISTER_SSE,
-  X86_EXTENDED_REGISTER_AVX,
-  X86_EXTENDED_REGISTER_MPX,
-  X86_EXTENDED_REGISTER_AVX512,
-  X86_EXTENDED_REGISTER_PT,
-  X86_EXTENDED_REGISTER_PKRU,
-};
-
-/* Identify which extended registers are supported.  Also initialize
- * the FPU if present */
-void x86_extended_register_init();
-
-/* Enable the requested feature on this CPU, return true on success.
- * It is currently assumed that if a feature is enabled on one CPU, the caller
- * will ensure it is enabled on all CPUs */
-bool x86_extended_register_enable_feature(enum x86_extended_register_feature);
-
-/* Return the size required for all requested features. */
-size_t x86_extended_register_size();
-
-/* Return the size required for all supported features, whether requested or not. */
-size_t x86_extended_register_max_size();
-
-/* Return all potentially supported (although possibly not currently enabled) state bits for xcr0 */
-uint64_t x86_extended_xcr0_component_bitmap();
+__BEGIN_CDECLS
 
 /* Returns whether or not xsave is supported by the CPU */
 bool x86_xsave_supported();
 
-/* Initialize a state vector. The passed in buffer must be X86_EXTENDED_REGISTER_SIZE big and it
- * must be 64-byte aligned. This function will initialize it for use in save and restore. */
-void x86_extended_register_init_state(void* buffer);
-
 /* Initialize a state vector to a specific set of state bits. The passed in buffer must be
- * X86_EXTENDED_REGISTER_SIZE big and it must be 64-byte aligned. This function will initialize it
- * for use in save and restore. */
+ * X86_MAX_EXTENDED_REGISTER_SIZE big and it must be 64-byte aligned. This function will initialize
+ * it for use in save and restore. */
 void x86_extended_register_init_state_from_bv(void* register_state, uint64_t xstate_bv);
 
 /* Save current state to state vector */
 void x86_extended_register_save_state(void* register_state);
 
-/* Restore a state created by x86_extended_register_init_state or
+/* Restore a state created by x86_extended_register_init_state_from_bv or
  * x86_extended_register_save_state */
 void x86_extended_register_restore_state(const void* register_state);
-
-struct Thread;
-void x86_extended_register_context_switch(Thread* old_thread, const Thread* new_thread);
-
-void x86_set_extended_register_pt_state(bool threads);
 
 uint64_t x86_xgetbv(uint32_t reg);
 void x86_xsetbv(uint32_t reg, uint64_t val);
@@ -359,7 +325,7 @@ struct x86_xsave_legacy_area {
   uint32_t mxcsr; /* SSE control status register. */
   uint32_t mxcsr_mask;
 
-  /* The x87/MMX state. For x87 the each "st" entry has the low 80 bits used for the register
+  /* The x87/MMX state. For x87 each "st" entry has the low 80 bits used for the register
    * contents. For MMX, the low 64 bits are used. The higher bits are unused. */
   struct {
     uint64_t low;
@@ -371,33 +337,36 @@ struct x86_xsave_legacy_area {
     uint64_t low;
     uint64_t high;
   } xmm[16];
-} __PACKED;
+};
 
-/* Returns the address within the given xsave area of the requested state component. The state
- * component indexes formats are described in section 13.4 of the Intel Software Developer's manual.
- * Use the X86_XSAVE_STATE_INDEX_* macros above for the component indices.
- *
- * The given register state must have previously been filled with the variant of XSAVE that the
- * system is using. Since the save area can be compressed, the offset of each component can vary
- * depending on the contents.
- *
- * The components 0 and 1 are special and refer to the legacy area. In both cases a pointer to the
- * x86_xsave_legacy_area will be returned. Note that "mark_present=true" will only affect the
- * requested component, so if you're writing to both x87 and SSE states, make two separate calls
- * even though the returned pointer will be the same.
- *
- * Some parts of the xsave area are can be marked as unused to optimize. If you plan on
- * writing to the area, set mark_present = true which will ensure that the corresponding area is
- * marked used. Without this, the registers might not be restored when the thread is resumed. This
- * is not currently supported for components >= 2. This means that to set AVX registers, for
- * example, AVX needed to have been previously used by the thread in question. This capability can
- * be added in the future if required.
- *
- * The size of the component will be placed in *size.
- *
- * This function will return null and fill 0 into *size if the component is not present. */
-void* x86_get_extended_register_state_component(void* register_state, uint32_t component,
-                                                bool mark_present, uint32_t* size);
+#ifdef __cplusplus
+static_assert(sizeof(x86_xsave_legacy_area) == 416);
+static_assert(alignof(x86_xsave_legacy_area) == 8);
+static_assert(offsetof(x86_xsave_legacy_area, mxcsr) == 24);
+static_assert(offsetof(x86_xsave_legacy_area, mxcsr_mask) == 28);
+static_assert(offsetof(x86_xsave_legacy_area, st) == 32);
+static_assert(offsetof(x86_xsave_legacy_area, xmm) == 160);
+#endif
+
+// Format described in Intel 3A section 13.4. Defined in this header alongside
+// x86_xsave_legacy_area so C++ static_asserts and Rust bindgen layout tests verify the 576-byte
+// XSAVE header offsets (xstate_bv, xcomp_bv) from a single source of truth.
+struct x86_xsave_area {
+  // Always valid, even when using the older fxsave.
+  struct x86_xsave_legacy_area legacy;
+
+  uint8_t reserved1[96];
+
+  // The xsave header. It and the extended regions are only valid when using xsave, not fxsave.
+  uint64_t xstate_bv;
+  uint64_t xcomp_bv;
+  uint8_t reserved2[48];
+};
+
+#ifdef __cplusplus
+static_assert(offsetof(x86_xsave_area, xstate_bv) == 512);
+static_assert(offsetof(x86_xsave_area, xcomp_bv) == 520);
+#endif
 
 /* Kernel tracking of the current state of the x86 debug registers for a particular thread */
 typedef struct x86_debug_state {
@@ -406,39 +375,12 @@ typedef struct x86_debug_state {
   uint64_t dr7;
 } x86_debug_state_t;
 
-/* Disables the HW debug functionalities for the current thread.
- * There is no "enable" call. To do this, use the x86_write_debug_state call. */
-void x86_disable_debug_state();
+#ifdef __cplusplus
+static_assert(sizeof(x86_debug_state_t) == 48);
+static_assert(alignof(x86_debug_state_t) == 8);
+#endif
 
-/* Checks whether the given state is valid to install on a running thread.
- * Will mask out reserved values on DR6 and DR7. This is for the caller convenience, considering
- * that we don't have a good mechanism to communicate back to the user what went wrong with the
- * call. */
-bool x86_validate_debug_state(x86_debug_state_t* debug_state);
-
-/* Only update the status section of |debug_state| (DR6). All other state will not be modified */
-void x86_read_debug_status(uint64_t* dr6);
-// Read the raw value of dr6 without any fixups. This is exposed for informational purposes only.
-void x86_read_raw_debug_status(uint64_t* dr6);
-
-void x86_write_debug_status(uint64_t dr6);
-
-/* Read from the CPU registers into |debug_state|. */
-void x86_read_hw_debug_regs(x86_debug_state_t* debug_state);
-
-/* Write from the |debug_state| into the CPU registers.
- *
- * IMPORTANT: This function is used in the context switch, so no validation is done, just writing.
- *            In any other context (eg. setting debug values from a syscall), you *MUST* call
- *            x86_validate_debug_state first. */
-void x86_write_hw_debug_regs(const x86_debug_state_t* debug_state);
-
-#ifndef NDEBUG
-
-void x86_print_dr6(uint64_t dr6);
-void x86_print_dr7(uint64_t dr7);
-
-#endif  // !NDEBUG
+__END_CDECLS
 
 #endif  // !__ASSEMBLER__
 

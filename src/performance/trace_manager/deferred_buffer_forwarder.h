@@ -38,6 +38,9 @@ class DeferredBufferForwarder : public BufferForwarder {
 
   TransferStatus Flush() override;
 
+  // Writes go to the file until Flush(), so they never wait for the consumer.
+  bool WritesWaitForConsumer() const override { return false; }
+
   ~DeferredBufferForwarder() override;
 
   // Protected for testing

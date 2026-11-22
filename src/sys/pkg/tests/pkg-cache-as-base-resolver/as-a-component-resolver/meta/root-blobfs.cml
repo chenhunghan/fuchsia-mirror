@@ -12,4 +12,12 @@
             url: "#meta/fake-dependencies.cm",
         },
     ],
+    offer: [
+        {
+            config: "fuchsia.pkgcache.UseDriverBlobPaging",
+            from: "void",
+            to: "#pkg-cache",
+            availability: "optional",
+        },
+    ],
 }

@@ -114,31 +114,4 @@ TEST(SocketCleanup, Stream) {
   EXPECT_OK(server_socket.wait_one(ZX_SOCKET_PEER_CLOSED, zx::time::infinite_past(), nullptr));
 }
 
-TEST(SocketCleanup, Datagram) {
-  auto endpoints = fidl::CreateEndpoints<fuchsia_posix_socket::DatagramSocket>();
-  ASSERT_OK(endpoints.status_value());
-
-  zx::socket client_socket, server_socket;
-  ASSERT_OK(zx::socket::create(0, &client_socket, &server_socket));
-
-  fidl::Arena alloc;
-  ASSERT_NO_FATAL_FAILURE(ServeAndExerciseFileDescriptionTeardown(
-      fidl::DiscoverableProtocolName<fuchsia_posix_socket::DatagramSocket>,
-      fidl::WireResponse<fuchsia_posix_socket::DatagramSocket::Describe>{
-          fuchsia_posix_socket::wire::DatagramSocketDescribeResponse::Builder(alloc)
-              .socket(std::move(client_socket))
-              .tx_meta_buf_size(0)
-              .rx_meta_buf_size(0)
-              .metadata_encoding_protocol_version(
-                  fuchsia_posix_socket::wire::UdpMetadataEncodingProtocolVersion::kZero)
-              .Build()},
-      std::move(endpoints.value())));
-
-  // Client must have disposed of its channel and socket handles on close.
-  EXPECT_STATUS(endpoints->client.channel().wait_one(ZX_CHANNEL_PEER_CLOSED,
-                                                     zx::time::infinite_past(), nullptr),
-                ZX_ERR_BAD_HANDLE);
-  EXPECT_OK(server_socket.wait_one(ZX_SOCKET_PEER_CLOSED, zx::time::infinite_past(), nullptr));
-}
-
 }  // namespace

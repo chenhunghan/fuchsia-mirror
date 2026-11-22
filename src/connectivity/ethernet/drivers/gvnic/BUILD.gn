@@ -82,7 +82,6 @@ fuchsia_driver_component("gvnic") {
     ":gvnic-driver",
     ":gvnic_bind",
   ]
-  info = "meta/gvnic-info.json"
 }
 
 fuchsia_driver_package("gvnic-package") {

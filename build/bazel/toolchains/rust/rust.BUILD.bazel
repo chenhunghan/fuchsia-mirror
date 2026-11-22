@@ -55,9 +55,15 @@ exports_files([
 exports_files(
     [
         "bin/cargo",
+        "bin/clippy-driver",
         "bin/rustc",
+        "bin/rustfmt",
     ],
-    visibility = ["@//tools/cargo-gnaw/tests:__pkg__"],
+    visibility = [
+        "@//tools/cargo-gnaw/tests:__pkg__",
+        "@//tools/fidl:__subpackages__",
+        "@//tools/shush:__pkg__",
+    ],
 )
 
 # The debug info level follows //build/config:default_debuginfo (added through
@@ -152,7 +158,11 @@ filegroup(
         ["lib/*.so"],
         allow_empty = True,  # This is empty on Mac builders.
     ),
-    visibility = ["@//tools/cargo-gnaw/tests:__pkg__"],
+    visibility = [
+        "@//tools/cargo-gnaw/tests:__pkg__",
+        "@//tools/fidl:__subpackages__",
+        "@//tools/shush:__pkg__",
+    ],
 )
 
 # Define the linux_x64 Rust toolchain.
@@ -324,15 +334,7 @@ rust_toolchain(
     clippy_driver = "//:bin/clippy-driver",
     dylib_ext = ".so",
     exec_triple = "aarch64-unknown-fuchsia",
-    extra_rustc_flags = _EXTRA_TARGET_RUST_FLAGS + [
-        # See https://fuchsia.dev/fuchsia-src/concepts/kernel/shadow_call_stack#use_in_zircon_fuchsia
-        # Rust compilers are detecting incompatible ABIs in rust builds. Any Rust
-        # code that is targeted for ARM64 Fuchsia must be compiled with shadow
-        # call stack to avoid build failures due to ABI mismatch. This also
-        # requires setting fixed-x18, which is the SCS register on ARM64 Fuchsia.
-        "-Zsanitizer=shadow-call-stack",
-        "-Zfixed-x18",
-    ],
+    extra_rustc_flags = _EXTRA_TARGET_RUST_FLAGS,
     llvm_cov = "@fuchsia_clang//:bin/llvm-cov",
     llvm_profdata = "@fuchsia_clang//:bin/llvm-profdata",
     lto = "//:lto_manual",

@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 #include <fcntl.h>
+#include <lib/fit/result.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include <optional>
 #include <string>
 
 #include <fbl/unique_fd.h>
@@ -16,7 +16,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "pidfd_policy"; }
+extern std::string GetTestPolicyName() { return "pidfd_policy"; }
 
 namespace {
 
@@ -35,7 +35,7 @@ struct PidFdGetFdTestCase {
   std::string name;
   std::string caller_context;
   int open_flags;
-  std::optional<int> expected_errno;
+  fit::result<int> expected_result;
 };
 
 class PidFdGetFdTest : public ::testing::TestWithParam<PidFdGetFdTestCase> {};
@@ -90,11 +90,7 @@ TEST_P(PidFdGetFdTest, PidFdGetFd) {
       // Attempt to duplicate `target_fd` from the target process into the caller process.
       fbl::unique_fd received_fd(
           static_cast<int>(syscall(SYS_pidfd_getfd, pidfd.get(), target_fd, 0)));
-      if (!param.expected_errno.has_value()) {
-        EXPECT_THAT(received_fd.get(), SyscallSucceeds());
-      } else {
-        EXPECT_THAT(received_fd.get(), SyscallFailsWithErrno(*param.expected_errno));
-      }
+      EXPECT_THAT(received_fd.get(), SyscallMatchesResult(param.expected_result));
     }));
   }
 
@@ -112,7 +108,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "Allowed",
             .caller_context = "test_u:test_r:test_pidfd_allow_all_t:s0",
             .open_flags = O_RDWR,
-            .expected_errno = std::nullopt,
+            .expected_result = fit::ok(),
         },
         // When `process { ptrace }` permission is denied to the caller for the target task,
         // `pidfd_getfd` fails with EPERM.
@@ -120,7 +116,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "DeniedWithoutPtrace",
             .caller_context = "test_u:test_r:test_pidfd_deny_ptrace_t:s0",
             .open_flags = O_RDWR,
-            .expected_errno = EPERM,
+            .expected_result = fit::error(EPERM),
         },
         // When `process { ptrace }` is allowed but `fd { use }` is denied on the target task's
         // file descriptor, `pidfd_getfd` must fail with EACCES.
@@ -128,7 +124,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "DeniedWithoutFdUse",
             .caller_context = "test_u:test_r:test_pidfd_deny_fd_use_t:s0",
             .open_flags = O_RDWR,
-            .expected_errno = EACCES,
+            .expected_result = fit::error(EACCES),
         },
         // When `process { ptrace }` and `fd { use }` are allowed, but `file { read }` is denied on
         // the target file, `pidfd_getfd` must fail with EACCES.
@@ -136,7 +132,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "DeniedWithoutFileRead",
             .caller_context = "test_u:test_r:test_pidfd_deny_file_read_t:s0",
             .open_flags = O_RDONLY,
-            .expected_errno = EACCES,
+            .expected_result = fit::error(EACCES),
         },
         // When `process { ptrace }`, `fd { use }`, and `file { write }` are allowed, `pidfd_getfd`
         // on a write-only target file descriptor succeeds even if `file { read }` is denied.
@@ -144,7 +140,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "AllowedWriteOnlyWithoutFileRead",
             .caller_context = "test_u:test_r:test_pidfd_deny_file_read_t:s0",
             .open_flags = O_WRONLY,
-            .expected_errno = std::nullopt,
+            .expected_result = fit::ok(),
         },
         // When `process { ptrace }`, `fd { use }`, and `file { read }` are allowed, but
         // `file { write }` is denied on a writable target file descriptor, `pidfd_getfd` must fail
@@ -153,7 +149,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "DeniedWithoutFileWrite",
             .caller_context = "test_u:test_r:test_pidfd_deny_file_write_t:s0",
             .open_flags = O_RDWR,
-            .expected_errno = EACCES,
+            .expected_result = fit::error(EACCES),
         },
         // When `process { ptrace }`, `fd { use }`, and `file { read }` are allowed, `pidfd_getfd`
         // on a read-only target file descriptor succeeds even if `file { write }` is denied.
@@ -161,7 +157,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "AllowedReadOnlyWithoutFileWrite",
             .caller_context = "test_u:test_r:test_pidfd_deny_file_write_t:s0",
             .open_flags = O_RDONLY,
-            .expected_errno = std::nullopt,
+            .expected_result = fit::ok(),
         },
         // When `process { ptrace }`, `fd { use }`, and `file { read append }` are allowed,
         // `pidfd_getfd` on a target file descriptor opened with `O_APPEND` succeeds even if
@@ -170,7 +166,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "AllowedAppendWithoutFileWrite",
             .caller_context = "test_u:test_r:test_pidfd_deny_file_write_t:s0",
             .open_flags = O_RDWR | O_APPEND,
-            .expected_errno = std::nullopt,
+            .expected_result = fit::ok(),
         },
         // When `process { ptrace }`, `fd { use }`, and `file { read write }` are allowed, but
         // `file { append }` is denied on a target file descriptor opened with `O_APPEND`,
@@ -179,7 +175,7 @@ INSTANTIATE_TEST_SUITE_P(
             .name = "DeniedAppendWithoutFileAppend",
             .caller_context = "test_u:test_r:test_pidfd_deny_file_append_t:s0",
             .open_flags = O_RDWR | O_APPEND,
-            .expected_errno = EACCES,
+            .expected_result = fit::error(EACCES),
         }),
     [](const ::testing::TestParamInfo<PidFdGetFdTestCase>& info) { return info.param.name; });
 

@@ -597,7 +597,7 @@ TEST_F(ReportStoreTest, UsesTmpUntilPersistentReady) {
   // Use directory that |scoped_mem_fs| can create using ScopedMemFsManager::Create, but |store_|
   // can't create using files::CreateDirectory
   const std::string cache_root = "/cache/delayed/path";
-  testing::ScopedMemFsManager scoped_mem_fs;
+  ScopedMemFsManager scoped_mem_fs;
   report_store_ = std::make_unique<ReportStore>(
       &tags_, info_context_, &annotation_manager_,
       /*temp_reports_root=*/

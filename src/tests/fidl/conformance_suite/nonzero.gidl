@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 success("StructOfNonZeroUInt8_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt8{
         foo: 1,
     },
@@ -15,7 +15,7 @@ success("StructOfNonZeroUInt8_one") {
 }
 
 encode_failure("StructOfNonZeroUInt8_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt8{
         foo: 0,
     },
@@ -23,7 +23,7 @@ encode_failure("StructOfNonZeroUInt8_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroUInt8_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroUInt8,
     bytes = {
         v2 = [
@@ -34,7 +34,7 @@ decode_failure("StructOfNonZeroUInt8_decode_zero") {
 }
 
 success("StructOfNonZeroUInt16_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt16{
         foo: 1,
     },
@@ -46,7 +46,7 @@ success("StructOfNonZeroUInt16_one") {
 }
 
 encode_failure("StructOfNonZeroUInt16_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt16{
         foo: 0,
     },
@@ -54,7 +54,7 @@ encode_failure("StructOfNonZeroUInt16_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroUInt16_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroUInt16,
     bytes = {
         v2 = [
@@ -65,7 +65,7 @@ decode_failure("StructOfNonZeroUInt16_decode_zero") {
 }
 
 success("StructOfNonZeroUInt32_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt32{
         foo: 1,
     },
@@ -77,7 +77,7 @@ success("StructOfNonZeroUInt32_one") {
 }
 
 encode_failure("StructOfNonZeroUInt32_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt32{
         foo: 0,
     },
@@ -85,7 +85,7 @@ encode_failure("StructOfNonZeroUInt32_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroUInt32_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroUInt32,
     bytes = {
         v2 = [
@@ -96,7 +96,7 @@ decode_failure("StructOfNonZeroUInt32_decode_zero") {
 }
 
 success("StructOfNonZeroUInt64_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt64{
         foo: 1,
     },
@@ -108,7 +108,7 @@ success("StructOfNonZeroUInt64_one") {
 }
 
 encode_failure("StructOfNonZeroUInt64_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroUInt64{
         foo: 0,
     },
@@ -116,7 +116,7 @@ encode_failure("StructOfNonZeroUInt64_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroUInt64_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroUInt64,
     bytes = {
         v2 = [
@@ -127,7 +127,7 @@ decode_failure("StructOfNonZeroUInt64_decode_zero") {
 }
 
 success("StructOfNonZeroInt8_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt8{
         foo: 1,
     },
@@ -139,7 +139,7 @@ success("StructOfNonZeroInt8_one") {
 }
 
 encode_failure("StructOfNonZeroInt8_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt8{
         foo: 0,
     },
@@ -147,7 +147,7 @@ encode_failure("StructOfNonZeroInt8_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroInt8_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroInt8,
     bytes = {
         v2 = [
@@ -158,7 +158,7 @@ decode_failure("StructOfNonZeroInt8_decode_zero") {
 }
 
 success("StructOfNonZeroInt16_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt16{
         foo: 1,
     },
@@ -170,7 +170,7 @@ success("StructOfNonZeroInt16_one") {
 }
 
 encode_failure("StructOfNonZeroInt16_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt16{
         foo: 0,
     },
@@ -178,7 +178,7 @@ encode_failure("StructOfNonZeroInt16_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroInt16_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroInt16,
     bytes = {
         v2 = [
@@ -189,7 +189,7 @@ decode_failure("StructOfNonZeroInt16_decode_zero") {
 }
 
 success("StructOfNonZeroInt32_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt32{
         foo: 1,
     },
@@ -201,7 +201,7 @@ success("StructOfNonZeroInt32_one") {
 }
 
 encode_failure("StructOfNonZeroInt32_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt32{
         foo: 0,
     },
@@ -209,7 +209,7 @@ encode_failure("StructOfNonZeroInt32_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroInt32_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroInt32,
     bytes = {
         v2 = [
@@ -220,7 +220,7 @@ decode_failure("StructOfNonZeroInt32_decode_zero") {
 }
 
 success("StructOfNonZeroInt64_one") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt64{
         foo: 1,
     },
@@ -232,7 +232,7 @@ success("StructOfNonZeroInt64_one") {
 }
 
 encode_failure("StructOfNonZeroInt64_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = StructOfNonZeroInt64{
         foo: 0,
     },
@@ -240,7 +240,7 @@ encode_failure("StructOfNonZeroInt64_encode_zero") {
 }
 
 decode_failure("StructOfNonZeroInt64_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = StructOfNonZeroInt64,
     bytes = {
         v2 = [
@@ -251,7 +251,7 @@ decode_failure("StructOfNonZeroInt64_decode_zero") {
 }
 
 success("ArrayOfNonZeroInt32_non_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = ArrayOfNonZeroInt32{
         foo: [1, 2],
     },
@@ -263,7 +263,7 @@ success("ArrayOfNonZeroInt32_non_zero") {
 }
 
 encode_failure("ArrayOfNonZeroInt32_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = ArrayOfNonZeroInt32{
         foo: [1, 0],
     },
@@ -271,7 +271,7 @@ encode_failure("ArrayOfNonZeroInt32_encode_zero") {
 }
 
 decode_failure("ArrayOfNonZeroInt32_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = ArrayOfNonZeroInt32,
     bytes = {
         v2 = [
@@ -282,7 +282,7 @@ decode_failure("ArrayOfNonZeroInt32_decode_zero") {
 }
 
 success("VectorOfNonZeroInt32_non_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = VectorOfNonZeroInt32{
         foo: [1, 2],
     },
@@ -295,7 +295,7 @@ success("VectorOfNonZeroInt32_non_zero") {
 }
 
 encode_failure("VectorOfNonZeroInt32_encode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     value = VectorOfNonZeroInt32{
         foo: [1, 0],
     },
@@ -303,7 +303,7 @@ encode_failure("VectorOfNonZeroInt32_encode_zero") {
 }
 
 decode_failure("VectorOfNonZeroInt32_decode_zero") {
-    bindings_allowlist = [cpp, llcpp],
+    bindings_allowlist = [cpp, cpp_wire],
     type = VectorOfNonZeroInt32,
     bytes = {
         v2 = [

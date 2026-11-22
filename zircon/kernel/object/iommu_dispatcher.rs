@@ -6,15 +6,16 @@
 
 use crate::counters::define_kcounter;
 use crate::ksync_kernel::TrackedCriticalMutex;
-use fbl::{Array, Canary, RefPtr};
+use fbl::{Array, Canary};
 use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{ZX_DEFAULT_IOMMU_RIGHTS, ZX_OBJ_TYPE_IOMMU, zx_rights_t};
 
 use super::KernelHandle;
-use super::iommu::Iommu;
+use super::dispatcher::impl_dispatcher_facade_with_state;
 use super::iommu_dispatcher_ffi::cpp_iommu_dispatcher_create;
+use crate::iommu::Iommu;
 
 use object_constants_rs as object_constants;
 
@@ -35,8 +36,8 @@ pub struct IommuDispatcherState {
     /// Magic canary value validating structural integrity.
     canary: Canary<{ fbl::magic(b"IOMM") }>,
 
-    /// Reference to the underlying C++ `iommu::Iommu` object (not protected by lock).
-    iommu: RefPtr<Iommu>,
+    /// Underlying `Iommu` (not protected by lock).
+    iommu: Iommu,
 
     /// Mutex guarding state operations.
     #[mutex]
@@ -47,18 +48,18 @@ impl IommuDispatcherState {
     /// Initializes the `IommuDispatcherState`.
     pub fn init(
         _dispatcher: *const IommuDispatcher,
-        iommu: RefPtr<Iommu>,
+        iommu: &Iommu,
     ) -> impl PinInit<Self, core::convert::Infallible> {
         DISPATCHER_IOMMU_CREATE_COUNT.add(1);
         pin_init!(Self {
             canary: Canary::new(),
-            iommu,
+            iommu: iommu.clone(),
             lock <- KMutex::init(),
         })
     }
 
-    /// Returns a reference to the underlying `Iommu` facade object.
-    pub fn iommu(&self) -> &RefPtr<Iommu> {
+    /// Returns a reference to the underlying `Iommu`.
+    fn iommu(&self) -> &Iommu {
         &self.iommu
     }
 }
@@ -67,10 +68,12 @@ impl IommuDispatcherState {
 impl PinnedDrop for IommuDispatcherState {
     fn drop(self: core::pin::Pin<&mut Self>) {
         DISPATCHER_IOMMU_DESTROY_COUNT.add(1);
+        // User mode's hold on the IOMMU ends with the dispatcher it held it through.
+        self.iommu.on_dispatcher_destroyed();
     }
 }
 
-crate::object::dispatcher::impl_dispatcher_facade_with_state!(
+impl_dispatcher_facade_with_state!(
     pub struct IommuDispatcher,
     IommuDispatcherState,
     ZX_OBJ_TYPE_IOMMU,
@@ -83,20 +86,17 @@ impl IommuDispatcher {
         type_param: u32,
         desc: Array<u8>,
     ) -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
-        let (desc_ptr, desc_len) = desc.into_raw_parts();
-        // SAFETY: `desc_ptr` points to `desc_len` bytes of valid heap-allocated memory that is
-        // transferred to C++ (`cpp_iommu_dispatcher_create` takes ownership of `desc_ptr`), and
-        // `cpp_iommu_dispatcher_create` initializes `handle` on success.
-        let handle = unsafe {
-            KernelHandle::create(|out| {
-                cpp_iommu_dispatcher_create(type_param, desc_ptr, desc_len, out)
-            })
-        }?;
+        let iommu = Iommu::create(type_param, &desc)?;
+        // SAFETY: `cpp_iommu_dispatcher_create` initializes `handle` on success.
+        let handle =
+            unsafe { KernelHandle::create(|out| cpp_iommu_dispatcher_create(&iommu, out)) }
+                .inspect_err(|_| iommu.abandon_create())?;
         Ok((handle, ZX_DEFAULT_IOMMU_RIGHTS))
     }
 
-    /// Returns a reference to the underlying `Iommu` facade object.
-    pub fn iommu(&self) -> &RefPtr<Iommu> {
+    /// Returns a reference to the underlying `Iommu`.
+    pub fn iommu(&self) -> &Iommu {
+        self.state().canary.assert();
         self.state().iommu()
     }
 }

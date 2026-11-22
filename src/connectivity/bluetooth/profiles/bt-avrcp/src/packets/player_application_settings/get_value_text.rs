@@ -5,11 +5,12 @@
 use packet_encoding::{Decodable, Encodable};
 
 use crate::packets::player_application_settings::{
-    PlayerApplicationSettingAttributeId, RepeatStatusMode,
+    PlayerApplicationSettingAttributeId, RepeatStatusMode, TEXT_ENTRY_HEADER_LEN,
+    decode_text_entries, encode_text_entries,
 };
 use crate::packets::{
-    AvcCommandType, CharsetId, Error, PacketResult, PduId, ShuffleMode, VendorCommand,
-    VendorDependentPdu,
+    AvcCommandType, Error, PacketResult, PduId, ShuffleMode, UNKNOWN_VALUE_PLACEHOLDER,
+    VendorCommand, VendorDependentPdu,
 };
 
 #[derive(Debug)]
@@ -111,26 +112,17 @@ impl Encodable for GetPlayerApplicationSettingValueTextCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueInfo {
     value_id: u8,
-    character_set_id: CharsetId,
-    value_string_length: u8,
-    value_string: Vec<u8>,
+    description: String,
 }
 
 impl ValueInfo {
-    pub fn new(
-        value_id: u8,
-        character_set_id: CharsetId,
-        value_string_length: u8,
-        value_string: Vec<u8>,
-    ) -> Self {
-        Self { value_id, character_set_id, value_string_length, value_string }
+    pub fn new(value_id: u8, description: impl Into<String>) -> Self {
+        Self { value_id, description: description.into() }
     }
 
-    // The size of `ValueInfo` in bytes.
-    // 1 byte for `value_id`, 2 bytes for `character_set_id`, 1 byte for
-    // `value_string_length`, `value_string_length` bytes for `value_string`.
+    /// Returns the encoded size of this entry in bytes.
     pub fn num_bytes(&self) -> usize {
-        4 + self.value_string_length as usize
+        TEXT_ENTRY_HEADER_LEN + self.description.len()
     }
 }
 
@@ -140,12 +132,12 @@ pub fn repeat_status_mode_to_value_info(value_ids: Vec<u8>) -> Result<Vec<ValueI
     for value in value_ids {
         let value_id = RepeatStatusMode::try_from(value).map_err(|_| Error::OutOfRange)?;
         let desc = match value_id {
-            RepeatStatusMode::Off => "Off".to_string().into_bytes(),
-            RepeatStatusMode::SingleTrackRepeat => "Single track repeat".to_string().into_bytes(),
-            RepeatStatusMode::AllTrackRepeat => "All track repeat".to_string().into_bytes(),
-            RepeatStatusMode::GroupRepeat => "Group repeat".to_string().into_bytes(),
+            RepeatStatusMode::Off => "Off",
+            RepeatStatusMode::SingleTrackRepeat => "Single track repeat",
+            RepeatStatusMode::AllTrackRepeat => "All track repeat",
+            RepeatStatusMode::GroupRepeat => "Group repeat",
         };
-        infos.push(ValueInfo::new(value, CharsetId::Utf8, desc.len() as u8, desc));
+        infos.push(ValueInfo::new(value, desc));
     }
     Ok(infos)
 }
@@ -156,11 +148,11 @@ pub fn shuffle_mode_to_value_info(value_ids: Vec<u8>) -> Result<Vec<ValueInfo>, 
     for value in value_ids {
         let value_id = ShuffleMode::try_from(value).map_err(|_| Error::OutOfRange)?;
         let desc = match value_id {
-            ShuffleMode::Off => "Off".to_string().into_bytes(),
-            ShuffleMode::AllTrackShuffle => "All tracks shuffle".to_string().into_bytes(),
-            ShuffleMode::GroupShuffle => "Group shuffle".to_string().into_bytes(),
+            ShuffleMode::Off => "Off",
+            ShuffleMode::AllTrackShuffle => "All tracks shuffle",
+            ShuffleMode::GroupShuffle => "Group shuffle",
         };
-        infos.push(ValueInfo::new(value, CharsetId::Utf8, desc.len() as u8, desc));
+        infos.push(ValueInfo::new(value, desc));
     }
     Ok(infos)
 }
@@ -168,13 +160,12 @@ pub fn shuffle_mode_to_value_info(value_ids: Vec<u8>) -> Result<Vec<ValueInfo>, 
 #[derive(Debug)]
 /// AVRCP 1.6.1 section 6.5.6 GetPlayerApplicationSettingValueText response.
 pub struct GetPlayerApplicationSettingValueTextResponse {
-    num_values: u8,
     value_infos: Vec<ValueInfo>,
 }
 
 impl GetPlayerApplicationSettingValueTextResponse {
     pub fn new(value_infos: Vec<ValueInfo>) -> GetPlayerApplicationSettingValueTextResponse {
-        Self { num_values: value_infos.len() as u8, value_infos }
+        Self { value_infos }
     }
 }
 
@@ -196,43 +187,11 @@ impl Decodable for GetPlayerApplicationSettingValueTextResponse {
     type Error = Error;
 
     fn decode(buf: &[u8]) -> PacketResult<Self> {
-        if buf.len() < 1 {
-            return Err(Error::InvalidMessage);
-        }
-
-        let num_values = buf[0];
-        // There must be at least 1 value ID provided.
-        // See AVRCP Sec 6.5.6
-        if num_values < 1 {
-            return Err(Error::InvalidMessage);
-        }
-        let mut value_infos: Vec<ValueInfo> = Vec::new();
-
-        let mut buf_idx: usize = 1;
-
-        while buf_idx + 4 < buf.len() {
-            let value_id = buf[buf_idx];
-            let charset_id: u16 = ((buf[buf_idx + 1] as u16) << 8) | (buf[buf_idx + 2] as u16);
-            let charset_id: CharsetId = CharsetId::try_from(charset_id)?;
-
-            let str_length: usize = buf[buf_idx + 3] as usize;
-            if (buf_idx + 4 + str_length) > buf.len() {
-                return Err(Error::InvalidMessageLength);
-            }
-            let mut value_string = vec![0; str_length];
-            value_string.copy_from_slice(&buf[buf_idx + 4..buf_idx + 4 + str_length]);
-            let value_info = ValueInfo::new(value_id, charset_id, str_length as u8, value_string);
-
-            value_infos.push(value_info);
-
-            buf_idx += 4 + str_length;
-        }
-
-        if value_infos.len() != num_values as usize {
-            return Err(Error::InvalidMessage);
-        }
-
-        Ok(Self { num_values, value_infos })
+        let value_infos =
+            decode_text_entries(buf, UNKNOWN_VALUE_PLACEHOLDER, |value_id, description| {
+                Ok(ValueInfo::new(value_id, description))
+            })?;
+        Ok(Self { value_infos })
     }
 }
 
@@ -240,42 +199,15 @@ impl Encodable for GetPlayerApplicationSettingValueTextResponse {
     type Error = Error;
 
     fn encoded_len(&self) -> usize {
-        let mut len: usize = 1;
-        for value_info in &self.value_infos {
-            len += value_info.num_bytes();
-        }
-        len
+        1 + self.value_infos.iter().map(ValueInfo::num_bytes).sum::<usize>()
     }
+
     fn encode(&self, buf: &mut [u8]) -> PacketResult<()> {
-        if buf.len() < self.encoded_len() {
-            return Err(Error::InvalidMessageLength);
-        }
-
-        buf[0] = u8::from(self.num_values);
-
-        // There must be at least 1 value ID provided.
-        // See AVRCP Sec 6.5.6
-        if self.num_values < 1 {
-            return Err(Error::ParameterEncodingError);
-        }
-
-        if self.num_values as usize != self.value_infos.len() {
-            return Err(Error::ParameterEncodingError);
-        }
-        let mut idx = 1;
-        for info in self.value_infos.iter() {
-            buf[idx] = u8::from(info.value_id);
-            let charset_id = u16::from(&info.character_set_id);
-            buf[idx + 1] = (charset_id >> 8) as u8;
-            buf[idx + 2] = charset_id as u8;
-            buf[idx + 3] = info.value_string_length;
-            for (i, str_byte) in info.value_string.iter().enumerate() {
-                buf[idx + 4 + i] = str_byte.clone();
-            }
-            idx += info.num_bytes();
-        }
-
-        Ok(())
+        encode_text_entries(
+            self.encoded_len(),
+            self.value_infos.iter().map(|info| (info.value_id, info.description.as_str())),
+            buf,
+        )
     }
 }
 
@@ -283,6 +215,13 @@ impl Encodable for GetPlayerApplicationSettingValueTextResponse {
 mod tests {
     use super::*;
     use crate::packets::VendorDependentRawPdu;
+    use crate::packets::player_application_settings::encode_error;
+
+    fn decode_infos(buf: &[u8]) -> Vec<ValueInfo> {
+        GetPlayerApplicationSettingValueTextResponse::decode(buf)
+            .expect("should decode")
+            .value_infos
+    }
 
     #[test]
     // Test GetPlayerApplicationSettingValueTextCommand encoding success.
@@ -348,11 +287,11 @@ mod tests {
     fn test_get_player_application_setting_value_text_response_encode() {
         let value_infos = vec![
             // 10 bytes.
-            ValueInfo::new(0x01, CharsetId::Utf16, 6, "abcdef".as_bytes().to_vec()),
+            ValueInfo::new(0x01, "abcdef"),
             // 8 bytes.
-            ValueInfo::new(0x04, CharsetId::Utf8, 4, "plop".as_bytes().to_vec()),
+            ValueInfo::new(0x04, "plop"),
             // 5 bytes.
-            ValueInfo::new(0x05, CharsetId::Ucs2, 1, "t".as_bytes().to_vec()),
+            ValueInfo::new(0x05, "t"),
         ];
         let response = GetPlayerApplicationSettingValueTextResponse::new(value_infos);
         assert_eq!(response.raw_pdu_id(), u8::from(&PduId::GetPlayerApplicationSettingValueText));
@@ -362,40 +301,121 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                0x03, 0x01, 0x03, 0xF7, 0x06, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x04, 0x00, 0x6A,
-                0x04, 0x70, 0x6C, 0x6F, 0x70, 0x05, 0x03, 0xE8, 0x01, 0x74,
+                0x03, 0x01, 0x00, 0x6A, 0x06, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x04, 0x00, 0x6A,
+                0x04, 0x70, 0x6C, 0x6F, 0x70, 0x05, 0x00, 0x6A, 0x01, 0x74,
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    // Test GetPlayerApplicationSettingValueTextResponse encoding failure cases.
+    fn test_get_player_application_setting_value_text_response_encode_errors() {
+        // Empty values list.
+        let empty = GetPlayerApplicationSettingValueTextResponse::new(vec![]);
+        assert_eq!(encode_error(&empty), Error::ParameterEncodingError);
+
+        // More than u8::MAX values.
+        let info = ValueInfo::new(0x01, "on");
+        let too_many =
+            GetPlayerApplicationSettingValueTextResponse::new(vec![info; usize::from(u8::MAX) + 1]);
+        assert_eq!(encode_error(&too_many), Error::ParameterEncodingError);
+
+        // Description exceeding u8::MAX bytes.
+        let too_long = GetPlayerApplicationSettingValueTextResponse::new(vec![ValueInfo::new(
+            0x01,
+            "a".repeat(usize::from(u8::MAX) + 1),
+        )]);
+        assert_eq!(encode_error(&too_long), Error::ParameterEncodingError);
+
+        // Buffer smaller than encoded length.
+        let valid =
+            GetPlayerApplicationSettingValueTextResponse::new(vec![ValueInfo::new(0x01, "on")]);
+        let mut buf = vec![0; valid.encoded_len() - 1];
+        assert_eq!(valid.encode(&mut buf[..]), Err(Error::InvalidMessageLength));
+    }
+
+    #[test]
+    // Test GetPlayerApplicationSettingValueTextResponse decoding success for UTF-8, ASCII,
+    // lossy UTF-8, and round-trip encoding.
+    fn test_get_player_application_setting_value_text_response_decode() {
+        // UTF-8 charset ID (0x006A).
+        let command = [0x01, 0x10, 0x00, 0x6A, 0x05, 0x61, 0x62, 0x63, 0x64, 0x65];
+        assert_eq!(decode_infos(&command), vec![ValueInfo::new(0x10, "abcde")]);
+
+        // ASCII charset ID (0x0003) and an empty UTF-8 description.
+        let command = [0x02, 0x01, 0x00, 0x03, 0x02, 0x6F, 0x6E, 0x02, 0x00, 0x6A, 0x00];
+        assert_eq!(
+            decode_infos(&command),
+            vec![ValueInfo::new(0x01, "on"), ValueInfo::new(0x02, "")]
+        );
+
+        // Invalid UTF-8 bytes labelled as UTF-8 are replaced lossily instead of failing decode.
+        let command = [0x01, 0x02, 0x00, 0x6A, 0x02, 0xFF, 0xFE];
+        assert_eq!(decode_infos(&command), vec![ValueInfo::new(0x02, "\u{FFFD}\u{FFFD}")]);
+
+        // Encode then decode round trip.
+        let expected = vec![
+            ValueInfo::new(0x01, "abcdef"),
+            ValueInfo::new(0x04, "plop"),
+            ValueInfo::new(0x05, "t"),
+        ];
+        let response = GetPlayerApplicationSettingValueTextResponse::new(expected.clone());
+        let mut encoded = vec![0; response.encoded_len()];
+        response.encode(&mut encoded).expect("should encode");
+        assert_eq!(decode_infos(&encoded), expected);
+    }
+
+    #[fuchsia::test]
+    // Test GetPlayerApplicationSettingValueTextResponse decoding gracefully handles
+    // non-UTF-8 and unknown CharsetIds by substituting a placeholder description.
+    fn test_get_player_application_setting_value_text_response_decode_non_utf8_charset() {
+        #[rustfmt::skip]
+        let command = [
+            0x03,
+            // Known non-UTF-8 charset (UTF-16 = 0x03F7).
+            0x10, 0x03, 0xF7, 0x05, 0x61, 0x62, 0x63, 0x64, 0x65,
+            // Unknown / out-of-range charset (0xFFFF) with non-UTF-8 bytes.
+            0x02, 0xFF, 0xFF, 0x02, 0xFF, 0xFE,
+            // Valid UTF-8 entry in the same response.
+            0x03, 0x00, 0x6A, 0x03, 0x4F, 0x66, 0x66,
+        ];
+        assert_eq!(
+            decode_infos(&command),
+            vec![
+                ValueInfo::new(0x10, UNKNOWN_VALUE_PLACEHOLDER),
+                ValueInfo::new(0x02, UNKNOWN_VALUE_PLACEHOLDER),
+                ValueInfo::new(0x03, "Off"),
             ]
         );
     }
 
     #[test]
-    // Test GetPlayerApplicationSettingValueTextResponse decoding success.
-    fn test_get_player_application_setting_value_text_response_decode() {
-        let command = [0x01, 0x10, 0x03, 0xF7, 0x05, 0x61, 0x62, 0x63, 0x64, 0x65];
-        let result = GetPlayerApplicationSettingValueTextResponse::decode(&command);
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(result.num_values, 1);
-        let expected_info = ValueInfo::new(0x10, CharsetId::Utf16, 5, "abcde".as_bytes().to_vec());
-        assert_eq!(result.value_infos, vec![expected_info]);
-    }
-
-    #[test]
     // Test GetPlayerApplicationSettingValueTextResponse decoding failure due
-    // to invalid CharsetId.
-    fn test_get_player_application_setting_value_text_response_decode_error() {
-        let command = [0x01, 0x02, 0xFF, 0xFF, 0x02, 0x62, 0x78];
-        let result = GetPlayerApplicationSettingValueTextResponse::decode(&command);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    // Test GetPlayerApplicationSettingValueTextResponse decoding failure due
-    // to invalid `num_attributes`.
+    // to invalid `num_values` or trailing bytes.
     fn test_get_player_application_setting_value_text_response_decode_attrs_error() {
+        // Empty buffer and zero count.
+        assert_eq!(
+            GetPlayerApplicationSettingValueTextResponse::decode(&[]).unwrap_err(),
+            Error::InvalidMessage
+        );
+        assert_eq!(
+            GetPlayerApplicationSettingValueTextResponse::decode(&[0x00]).unwrap_err(),
+            Error::InvalidMessage
+        );
+
+        // Count exceeds present entries.
         let command = [0x02, 0x02, 0x00, 0x04, 0x02, 0x62, 0x78];
-        let result = GetPlayerApplicationSettingValueTextResponse::decode(&command);
-        assert!(result.is_err());
+        assert_eq!(
+            GetPlayerApplicationSettingValueTextResponse::decode(&command).unwrap_err(),
+            Error::InvalidMessageLength
+        );
+
+        // Trailing unconsumed byte.
+        let trailing = [0x01, 0x02, 0x00, 0x6A, 0x02, 0x62, 0x78, 0x00];
+        assert_eq!(
+            GetPlayerApplicationSettingValueTextResponse::decode(&trailing).unwrap_err(),
+            Error::InvalidMessage
+        );
     }
 
     #[test]
@@ -403,8 +423,10 @@ mod tests {
     // to buffer that is too small.
     fn test_get_player_application_setting_value_text_response_decode_buf_error() {
         let command = [0x01, 0x01, 0x00, 0x04, 0x05, 0x01];
-        let result = GetPlayerApplicationSettingValueTextResponse::decode(&command);
-        assert!(result.is_err());
+        assert_eq!(
+            GetPlayerApplicationSettingValueTextResponse::decode(&command).unwrap_err(),
+            Error::InvalidMessageLength
+        );
     }
 
     #[test]
@@ -412,15 +434,7 @@ mod tests {
     /// ValueInfo object works as expected.
     fn test_repeat_status_mode_to_value_info() {
         let buf = vec![1, 4];
-        let expected = vec![
-            ValueInfo::new(1, CharsetId::Utf8, 3, vec![79, 102, 102]), // "Off"
-            ValueInfo::new(
-                4,
-                CharsetId::Utf8,
-                12,
-                vec![71, 114, 111, 117, 112, 32, 114, 101, 112, 101, 97, 116], // "Group repeat"
-            ),
-        ];
+        let expected = vec![ValueInfo::new(1, "Off"), ValueInfo::new(4, "Group repeat")];
         let res = repeat_status_mode_to_value_info(buf);
         assert_eq!(Ok(expected), res);
 
@@ -435,18 +449,7 @@ mod tests {
     /// ValueInfo object works as expected.
     fn test_shuffle_mode_to_value_info() {
         let buf = vec![1, 2];
-        let expected = vec![
-            ValueInfo::new(1, CharsetId::Utf8, 3, vec![79, 102, 102]), // "Off"
-            ValueInfo::new(
-                2,
-                CharsetId::Utf8,
-                18,
-                vec![
-                    65, 108, 108, 32, 116, 114, 97, 99, 107, 115, 32, 115, 104, 117, 102, 102, 108,
-                    101,
-                ], // "All tracks shuffle"
-            ),
-        ];
+        let expected = vec![ValueInfo::new(1, "Off"), ValueInfo::new(2, "All tracks shuffle")];
         let res = shuffle_mode_to_value_info(buf);
         assert_eq!(Ok(expected), res);
 

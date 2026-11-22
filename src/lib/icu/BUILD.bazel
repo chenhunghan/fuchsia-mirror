@@ -1,0 +1,72 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/icu:icu_group.bzl", "icu_group")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Placeholder targets mirroring //src/lib/icu/BUILD.gn for bazel2gn and Bazel
+# graph wiring until //third_party/icu libraries and icudtl.dat are exposed to Bazel.
+# Marked incompatible so targets depending on ICU fail loudly instead of linking
+# headers-only stubs.
+
+_ICU_DEFINES = [
+    "U_USING_ICU_NAMESPACE=0",
+    "U_ENABLE_DYLOAD=0",
+    "USE_CHROMIUM_ICU=1",
+    "U_ENABLE_TRACING=1",
+    "U_ENABLE_RESOURCE_TRACING=0",
+    "U_STATIC_IMPLEMENTATION",
+    "ICU_UTIL_DATA_IMPL=ICU_UTIL_DATA_FILE",
+]
+
+# TODO(https://fxbug.dev/571374004): Back these targets with real //third_party/icu libraries.
+fx_cc_library(
+    name = "icu_default",
+    defines = _ICU_DEFINES,
+    target_compatible_with = ["@platforms//:incompatible"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//third_party/icu/default/source/common:headers",
+        "//third_party/icu/default/source/i18n:headers",
+    ],
+)
+
+fx_cc_library(
+    name = "icu_latest",
+    defines = _ICU_DEFINES,
+    target_compatible_with = ["@platforms//:incompatible"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//third_party/icu/latest/source/common:headers",
+        "//third_party/icu/latest/source/i18n:headers",
+    ],
+)
+
+fx_cc_library(
+    name = "lib",
+    target_compatible_with = ["@platforms//:incompatible"],
+    visibility = ["//:__subpackages__"],
+    deps = [":icu_default"],
+)
+
+fx_cc_library(
+    name = "data",
+    target_compatible_with = ["@platforms//:incompatible"],
+    visibility = ["//:__subpackages__"],
+)
+
+# TODO(https://fxbug.dev/571374004): Back these targets with icudtl.dat resources.
+icu_group(
+    name = "icudtl",
+    target_compatible_with = ["@platforms//:incompatible"],
+    visibility = ["//:__subpackages__"],
+)
+
+icu_group(
+    name = "icudtl_root",
+    target_compatible_with = ["@platforms//:incompatible"],
+    visibility = ["//:__subpackages__"],
+)

@@ -377,7 +377,7 @@ impl HostDevice {
             fidl::endpoints::create_proxy_and_stream::<fidl_fuchsia_bluetooth_host::HostMarker>();
         let id_val = id.0 as u8;
         let address = Address::Public([id_val; 6]);
-        let path = format!("/dev/host{}", id_val);
+        let path = format!("test-host-{id_val}");
         let host_device = HostDevice::mock(id, address, path, host_proxy);
         (host_stream, host_device)
     }

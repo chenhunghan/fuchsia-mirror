@@ -4,9 +4,9 @@
 
 #include "src/graphics/display/drivers/intel-display/gtt.h"
 
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zircon-internal/align.h>
 #include <lib/zx/vmo.h>
 #include <limits.h>

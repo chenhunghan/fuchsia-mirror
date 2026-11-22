@@ -187,15 +187,9 @@ void Device::DdkInit(ddk::InitTxn txn) {
     return;
   }
 
-#ifdef ENABLE_ATLAS_CAMERA
-  bool atlas_camera_enabled = true;
-#else
-  bool atlas_camera_enabled = false;
-#endif
-
   // Initial transition to D state 0.
-  // Skip turning on Atlas camera unless enabled.
-  if ((name_ != "CAM0" && name_ != "NVM0") || atlas_camera_enabled) {
+  // Skip turning on the Atlas camera.
+  if (name_ != "CAM0" && name_ != "NVM0") {
     if (GetPowerStateInfo(DEV_POWER_STATE_D0)) {
       PowerStateTransitionResponse result = TransitionToPowerState(DEV_POWER_STATE_D0);
       if (result.status != ZX_OK) {

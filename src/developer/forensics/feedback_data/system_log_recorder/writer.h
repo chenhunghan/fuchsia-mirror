@@ -55,8 +55,16 @@ class SystemLogWriter {
 
   static constexpr size_t kMinFilesForSufficientCoverage = 5u;
 
+  // If |previous_logs_dir| is std::nullopt, only the current boot's files count against
+  // |max_num_files|.
+  //
+  // Otherwise, |previous_logs_dir| is where Feedback holds logs from previous boots. The current
+  // boot and the previous boots all share the |max_num_files| budget: if starting a new file would
+  // exceed the limit, the oldest file of the oldest boot will be deleted. Files from the current
+  // boot won't be pruned until no previous boot files remain.
   SystemLogWriter(const std::string& logs_dir, size_t max_num_files, StorageSize total_log_size,
-                  std::unique_ptr<Decoder> decoder);
+                  std::unique_ptr<Decoder> decoder,
+                  const std::optional<std::string>& previous_logs_dir);
 
   // Writes the consumed result to disk and returns whether a cache purge was detected.
   WriteResult Write(const LogMessageStore::ConsumeResult& result);
@@ -70,7 +78,8 @@ class SystemLogWriter {
   FlushAndReadLogsResult FlushAndReadLogs(const LogMessageStore::ConsumeResult& result);
 
  private:
-  // Truncates the first file to start anew.
+  // Truncates the first file to start anew, evicting the oldest files across (potentially) previous
+  // boots and the current boot until within |max_num_files_|.
   void StartNewFile();
 
   // Returns the path the |file_num|'th file created.
@@ -82,11 +91,13 @@ class SystemLogWriter {
   bool HasSufficientCoverage() const;
 
   const std::string logs_dir_;
+  const std::optional<std::string> previous_logs_dir_;
   const size_t max_num_files_;
   const StorageSize total_log_size_;
   std::unique_ptr<Decoder> decoder_;
 
   std::deque<size_t> file_queue_;
+  std::deque<std::string> previous_boot_file_queue_;
 
   bool recovering_from_purge_;
   fbl::unique_fd current_file_descriptor_;

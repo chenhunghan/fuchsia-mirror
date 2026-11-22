@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/host_tests:python_mobly_test.bzl", "python_mobly_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The python_mobly_test() targets below are tagged "manual", since running
+# Mobly tests needs device support that Bazel host tests do not have yet
+# (https://fxbug.dev/576736818). Only tests that need no device are run.
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":fake_mobly_test_e2e_test",
+        ":python_mobly_test_args_test",
+    ],
+    visibility = ["//build/bazel/rules/host_tests/tests:__pkg__"],
+)
+
+host_py_test(
+    name = "fake_mobly_test_e2e_test",
+    srcs = ["fake_mobly_test_e2e_test.py"],
+    test_data = [
+        ":fake_mobly_test_all_options",
+        ":fake_mobly_test_custom",
+        ":fake_mobly_timeout_test",
+    ],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+host_py_test(
+    name = "python_mobly_test_args_test",
+    srcs = ["python_mobly_test_args_test.py"],
+    test_data = [
+        ":fake_mobly_test_all_options",
+        ":fake_mobly_test_custom",
+        ":fake_mobly_test_default",
+        ":fake_mobly_test_params_source",
+    ],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+python_mobly_test(
+    name = "fake_mobly_test_default",
+    main = "fake_mobly_test.py",
+    tags = ["manual"],
+)
+
+python_mobly_test(
+    name = "fake_mobly_test_all_options",
+    cleanup_period_secs = 30,
+    extra_args = ["--v"],
+    honeydew_config = {
+        "transports": {
+            "ffx": {"setup_device_connection": False},
+        },
+    },
+    local_config_source = "testdata/config.yaml",
+    main = "fake_mobly_test.py",
+    multi_fuchsia_device = True,
+    params = {
+        "expected_values": {
+            "board": "x64",
+        },
+    },
+    ssh_key_path = "testdata/ssh_key",
+    tags = ["manual"],
+    target_address_type = "usb",
+    test_cases = ["test_pass"],
+    timeout_secs = 600,
+)
+
+python_mobly_test(
+    name = "fake_mobly_test_params_source",
+    main = "fake_mobly_test.py",
+    params_source = "testdata/params.yaml",
+    tags = ["manual"],
+)
+
+py_library(
+    name = "fake_mobly_test_helper",
+    testonly = True,
+    srcs = ["fake_mobly_test_helper.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# Uses the parameters that the targets above do not use.
+python_mobly_test(
+    name = "fake_mobly_test_custom",
+    srcs = ["fake_mobly_test_custom.py"],
+    data = ["testdata/test_data.txt"],
+    libraries = [":fake_mobly_test_helper"],
+    list_cases_argument = "custom_list_cases_argument",
+    local_config_source = "testdata/config.yaml",
+    main = "fake_mobly_test_custom.py",
+    main_callable = "custom_main",
+    tags = ["manual"],
+    test_data_deps = ["testdata/extra_test_data.txt"],
+)
+
+# Outlives its timeout, to check that the Mobly test gets SIGTERM and its
+# cleanup period. The main test timeout of mobly_driver is
+# `timeout_secs - cleanup_period_secs - 40s` (its final grace period), so 12s.
+# This leaves headroom under CI load for the py_binary() launcher, Python
+# startup and importing Mobly before Mobly installs its SIGTERM handler, and
+# for the 2s teardown_test within the cleanup period. The test only takes
+# about 14s, since teardown_test exits right after its 2s.
+python_mobly_test(
+    name = "fake_mobly_timeout_test",
+    cleanup_period_secs = 8,
+    local_config_source = "testdata/config.yaml",
+    main = "fake_mobly_timeout_test.py",
+    tags = ["manual"],
+    timeout_secs = 60,
+)

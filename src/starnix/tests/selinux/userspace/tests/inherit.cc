@@ -10,6 +10,8 @@
 #include <sys/time.h>
 
 #include <array>
+#include <deque>
+#include <vector>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -23,7 +25,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "inherit_policy"; }
+extern std::string GetTestPolicyName() { return "inherit_policy"; }
 
 namespace {
 
@@ -146,12 +148,13 @@ TEST(InheritTest, UnauthorizedFdDenialLogsPostExecComm) {
   fbl::unique_fd audit_fd = OpenNetlinkAuditSocket();
   ASSERT_TRUE(audit_fd.is_valid());
   ASSERT_TRUE(SendUserAuditMessage(audit_fd.get(), 1, "COMM_TEST_END").is_ok());
-  ASSERT_TRUE(RegisterAsAuditDaemon(audit_fd.get(), getpid()).is_ok());
+  std::deque<std::vector<char>> buffered_messages;
+  ASSERT_TRUE(RegisterAsAuditDaemon(audit_fd.get(), getpid(), &buffered_messages).is_ok());
 
   bool found_fd_denial = false;
   char buf[4096];
   while (true) {
-    auto recv_res = ReceiveNetlinkMessage(audit_fd.get(), buf, sizeof(buf));
+    auto recv_res = ReceiveNetlinkMessage(audit_fd.get(), buffered_messages, buf, sizeof(buf));
     if (recv_res.is_error() && recv_res.error_value() == EINTR) {
       continue;
     }

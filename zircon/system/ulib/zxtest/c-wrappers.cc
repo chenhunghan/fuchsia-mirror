@@ -121,19 +121,22 @@ size_t _zxtest_print_ptr(const void* val, char* buffer, size_t buffer_size) {
 }
 
 size_t _zxtest_print_hex(const void* val, size_t size, char* buffer, size_t buffer_size) {
-  if (buffer_size == 0 || buffer_size < 2 * size + 1) {
-    return 3 * size + 1;
-  }
-
   if (val == nullptr) {
-    snprintf(buffer, 10, "<nullptr>");
+    return snprintf(buffer, buffer_size, "<nullptr>");
   }
 
-  for (size_t curr = 0; curr < size; ++curr) {
-    snprintf(buffer + 3 * curr, buffer_size - curr, "%02X%*s", *((uint8_t*)(val) + curr),
-             (curr < size - 1) ? 1 : 0, " ");
+  // Each byte is two hex digits, with a space between bytes.
+  const size_t length = size == 0 ? 0 : (3 * size) - 1;
+  if (buffer_size <= length) {
+    return length;
   }
-  return 0;
+
+  const uint8_t* bytes = static_cast<const uint8_t*>(val);
+  buffer[0] = '\0';
+  for (size_t i = 0; i < size; ++i) {
+    snprintf(&buffer[3 * i], buffer_size - (3 * i), i + 1 < size ? "%02X " : "%02X", bytes[i]);
+  }
+  return length;
 }
 
 void zxtest_c_clean_buffer(char** buffer) { free(*buffer); }

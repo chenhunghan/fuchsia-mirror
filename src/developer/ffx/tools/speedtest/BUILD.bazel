@@ -41,6 +41,10 @@ ffx_tool(
     binary_name = "ffx-speedtest",
     edition = "2024",
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/ffx/tests/e2e/python:__pkg__",
+        "//src/tests/end_to_end/perf:__pkg__",
+    ],
     deps = [
         ":ffx_speedtest",
         "//src/developer/ffx/lib/fho:lib",

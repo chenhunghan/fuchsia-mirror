@@ -42,14 +42,9 @@ class TestElementControlServer : public fidl::Server<fuchsia_power_broker::Eleme
                                RegisterDependencyTokenCompleter::Sync& completer) override {
     FX_LOGS(DEBUG) << "[INTERCEPTOR] RegisterDependencyToken called for element: " << element_name_;
     zx::event token;
-    zx_status_t status = request.token().duplicate(ZX_RIGHT_SAME_RIGHTS, &token);
-    if (status == ZX_OK) {
-      std::lock_guard<std::mutex> lock(g_tokens_mutex);
-      g_captured_tokens[element_name_] = std::move(token);
-      FX_LOGS(DEBUG) << "[INTERCEPTOR] Successfully duplicated and stashed token for element: "
-                     << element_name_;
-    } else {
-      FX_LOGS(ERROR) << "[INTERCEPTOR] Failed to duplicate token: " << status;
+    zx_status_t dup_status = request.token().duplicate(ZX_RIGHT_SAME_RIGHTS, &token);
+    if (dup_status != ZX_OK) {
+      FX_LOGS(ERROR) << "[INTERCEPTOR] Failed to duplicate token: " << dup_status;
     }
 
     auto result = fidl::Call(real_control_)->RegisterDependencyToken(std::move(request));
@@ -60,6 +55,12 @@ class TestElementControlServer : public fidl::Server<fuchsia_power_broker::Eleme
         completer.Reply(fit::error(result.error_value().domain_error()));
       }
     } else {
+      if (dup_status == ZX_OK) {
+        std::scoped_lock lock(g_tokens_mutex);
+        g_captured_tokens[element_name_] = std::move(token);
+        FX_LOGS(DEBUG) << "[INTERCEPTOR] Successfully duplicated and stashed token for element: "
+                       << element_name_;
+      }
       completer.Reply(fit::ok());
     }
   }
@@ -257,6 +258,11 @@ zx::event TestLoopBase::GetCapturedToken(const std::string& element_name) {
 }
 
 void TestLoopBase::Initialize() {
+  {
+    std::scoped_lock lock(g_tokens_mutex);
+    g_captured_tokens.clear();
+  }
+
   {
     auto result = component::Connect<test_sagcontrol::State>();
     ASSERT_EQ(ZX_OK, result.status_value());
@@ -507,8 +513,9 @@ zx::eventpair TestLoopBase::PrepareDriver(std::string_view node_filter,
     FX_LOGS(INFO) << "Found " << node_vec.size() << " nodes matching filter '" << node_filter
                   << "'.";
     for (auto& node : node_vec) {
-      if (node.bound_driver_url().has_value() &&
-          node.bound_driver_url().value().ends_with(driver_url_suffix)) {
+      if (node.moniker().has_value() && node.bound_driver_url().has_value() &&
+          node.bound_driver_url().value().ends_with(driver_url_suffix) &&
+          node.driver_host_koid().has_value()) {
         FX_LOGS(INFO) << "driver found with moniker '" << node.moniker().value() << "'";
         found.emplace(node.moniker().value());
         old_koid = node.driver_host_koid().value();
@@ -543,6 +550,7 @@ zx::eventpair TestLoopBase::PrepareDriver(std::string_view node_filter,
       return {};
     }
     if (!cpu_token_result->assertive_dependency_token().has_value()) {
+      ADD_FAILURE() << "GetCpuDependencyToken response missing assertive_dependency_token";
       FX_LOGS(ERROR) << "GetCpuDependencyToken response missing assertive_dependency_token";
       return {};
     }
@@ -653,16 +661,24 @@ zx::eventpair TestLoopBase::PrepareDriver(std::string_view node_filter,
     while (!child_found) {
       auto child_vec = GetNodeInfo(child_name);
       for (auto& child_node : child_vec) {
-        std::string driver_url = child_node.bound_driver_url().has_value()
-                                     ? child_node.bound_driver_url().value()
-                                     : "<none>";
+        std::string_view child_moniker = child_node.moniker().has_value()
+                                             ? std::string_view(child_node.moniker().value())
+                                             : "<none>";
+        std::string_view driver_url = child_node.bound_driver_url().has_value()
+                                          ? std::string_view(child_node.bound_driver_url().value())
+                                          : "<none>";
         FX_LOGS(INFO) << "Found candidate child node '" << child_name << "' with moniker '"
-                      << child_node.moniker().value_or("<none>") << "' and driver URL '"
-                      << driver_url << "'";
+                      << child_moniker << "', driver URL '" << driver_url
+                      << "', bound=" << std::boolalpha << child_node.driver_host_koid().has_value();
+        // Driver Manager populates bound_driver_url as soon as Node::StartDriver enters the
+        // Starting state, before it creates the node's power element and registers its dependency
+        // token with Power Broker. Wait until driver_host_koid is populated, which only happens
+        // once the node transitions to DriverComponent after RegisterDependencyToken completes.
         if (child_node.bound_driver_url().has_value() &&
             !child_node.bound_driver_url().value().empty() &&
             child_node.bound_driver_url().value() != "unbound" &&
-            child_node.bound_driver_url().value() != "owned by composite(s)") {
+            child_node.bound_driver_url().value() != "owned by composite(s)" &&
+            child_node.driver_host_koid().has_value()) {
           FX_LOGS(INFO) << "child node '" << child_name << "' successfully bound to driver '"
                         << child_node.bound_driver_url().value() << "'";
           child_found = true;
@@ -750,62 +766,48 @@ zx::eventpair TestLoopBase::PrepareDriverWithPowerTokenOverrides(
                        /*use_df_elements=*/true, std::move(custom_entries), target_child_nodes);
 }
 
-fuchsia_component_sandbox::DictionaryRef TestLoopBase::CreateDictionaryForTest(
+zx::eventpair TestLoopBase::CreateDictionaryForTest(
     std::vector<CustomDictionaryEntry> custom_entries) {
-  // Start a background loop to run the sandbox connectors.
+  // Start a background loop to serve the receivers of the connectors in the dictionary.
   sandbox_connector_loop_.StartThread("sandbox-loop");
 
-  // Counter for the capability store.
-  auto cap_store = component::Connect<fuchsia_component_sandbox::CapabilityStore>();
-  uint32_t dict_id = next_cap_id_++;
-  auto capstore_result = fidl::Call(*cap_store)->DictionaryCreate({dict_id});
-  EXPECT_EQ(true, capstore_result.is_ok());
+  auto capabilities = component::Connect<fuchsia_component_runtime::Capabilities>();
+  ZX_ASSERT_MSG(capabilities.is_ok(),
+                "Failed to connect to fuchsia.component.runtime.Capabilities");
+  zx::eventpair dict, dict_peer;
+  ZX_ASSERT(zx::eventpair::create(0, &dict, &dict_peer) == ZX_OK);
+  auto create_result = fidl::Call(*capabilities)->DictionaryCreate({std::move(dict_peer)});
+  EXPECT_EQ(true, create_result.is_ok());
 
-  auto [sag_client, sag_server] = fidl::Endpoints<fuchsia_component_sandbox::Receiver>::Create();
-  uint32_t sag_id = next_cap_id_++;
-  auto connector_res = fidl::Call(*cap_store)->ConnectorCreate({sag_id, {std::move(sag_client)}});
-  EXPECT_EQ(true, connector_res.is_ok());
-
-  auto [broker_client, broker_server] =
-      fidl::Endpoints<fuchsia_component_sandbox::Receiver>::Create();
-  uint32_t broker_id = next_cap_id_++;
-  connector_res = fidl::Call(*cap_store)->ConnectorCreate({broker_id, {std::move(broker_client)}});
-  EXPECT_EQ(true, connector_res.is_ok());
-
-  auto [cpu_element_client, cpu_element_server] =
-      fidl::Endpoints<fuchsia_component_sandbox::Receiver>::Create();
-  uint32_t cpu_element_id = next_cap_id_++;
-  connector_res =
-      fidl::Call(*cap_store)->ConnectorCreate({cpu_element_id, {std::move(cpu_element_client)}});
-  EXPECT_EQ(true, connector_res.is_ok());
-
-  auto insert_res =
-      fidl::Call(*cap_store)
-          ->DictionaryInsert({dict_id, {"fuchsia.power.system.ActivityGovernor", sag_id}});
-  EXPECT_EQ(true, insert_res.is_ok());
-
-  insert_res = fidl::Call(*cap_store)
-                   ->DictionaryInsert({dict_id, {"fuchsia.power.broker.Topology", broker_id}});
-  EXPECT_EQ(true, insert_res.is_ok());
-
-  insert_res =
-      fidl::Call(*cap_store)
-          ->DictionaryInsert({dict_id, {"fuchsia.power.system.CpuElementManager", cpu_element_id}});
-  EXPECT_EQ(true, insert_res.is_ok());
-
-  for (auto& entry : custom_entries) {
-    uint32_t cap_id = next_cap_id_++;
+  auto insert_connector = [&](const std::string& name,
+                              fidl::ClientEnd<fuchsia_component_runtime::Receiver> client_end) {
+    zx::eventpair conn, conn_peer;
+    ZX_ASSERT(zx::eventpair::create(0, &conn, &conn_peer) == ZX_OK);
     auto connector_res =
-        fidl::Call(*cap_store)->ConnectorCreate({cap_id, {std::move(entry.client_end)}});
+        fidl::Call(*capabilities)->ConnectorCreate({std::move(conn_peer), std::move(client_end)});
     EXPECT_EQ(true, connector_res.is_ok());
 
-    auto insert_custom_res =
-        fidl::Call(*cap_store)->DictionaryInsert({dict_id, {entry.name, cap_id}});
-    EXPECT_EQ(true, insert_custom_res.is_ok());
-  }
+    zx::eventpair dict_dup;
+    ZX_ASSERT(dict.duplicate(ZX_RIGHT_SAME_RIGHTS, &dict_dup) == ZX_OK);
+    auto insert_res =
+        fidl::Call(*capabilities)->DictionaryInsert({std::move(dict_dup), name, std::move(conn)});
+    EXPECT_EQ(true, insert_res.is_ok());
+  };
 
-  auto dict_export = fidl::Call(*cap_store)->Export({dict_id});
-  auto dict_ref = std::move(dict_export->capability().dictionary().value());
+  auto [sag_client, sag_server] = fidl::Endpoints<fuchsia_component_runtime::Receiver>::Create();
+  insert_connector("fuchsia.power.system.ActivityGovernor", std::move(sag_client));
+
+  auto [broker_client, broker_server] =
+      fidl::Endpoints<fuchsia_component_runtime::Receiver>::Create();
+  insert_connector("fuchsia.power.broker.Topology", std::move(broker_client));
+
+  auto [cpu_element_client, cpu_element_server] =
+      fidl::Endpoints<fuchsia_component_runtime::Receiver>::Create();
+  insert_connector("fuchsia.power.system.CpuElementManager", std::move(cpu_element_client));
+
+  for (auto& entry : custom_entries) {
+    insert_connector(entry.name, std::move(entry.client_end));
+  }
 
   sag_connector_.emplace(
       async_patterns::PassDispatcher,
@@ -822,7 +824,7 @@ fuchsia_component_sandbox::DictionaryRef TestLoopBase::CreateDictionaryForTest(
       std::string(fidl::DiscoverableProtocolDefaultPath<fuchsia_power_system::CpuElementManager>),
       std::move(cpu_element_server));
 
-  return dict_ref;
+  return dict;
 }
 
 std::vector<fuchsia_driver_development::NodeInfo> TestLoopBase::GetNodeInfo(

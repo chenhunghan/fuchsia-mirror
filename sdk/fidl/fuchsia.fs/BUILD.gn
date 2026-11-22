@@ -34,7 +34,6 @@ fidl("fuchsia.fs") {
   ]
   sdk_area = "Storage"
   sdk_category = "prebuilt"
-  enable_hlcpp = true
   enable_rust_next = true
   stable = true
   visibility = [ "*" ]

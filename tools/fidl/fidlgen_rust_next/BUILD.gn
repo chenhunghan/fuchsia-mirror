@@ -14,6 +14,7 @@ if (is_host) {
     install_host_tool = true
   }
 
+  # LINT.IfChange(golden_tests)
   golden_files("fidlgen_rust_next_golden_tests") {
     testonly = true
 
@@ -49,12 +50,15 @@ if (is_host) {
       }
     }
   }
+
+  # LINT.ThenChange(golden_tests.bzl:golden_tests)
 }
 
 group("host") {
   deps = [ ":fidlgen_rust_next($host_toolchain)" ]
 }
 
+# LINT.IfChange(goldens)
 group("goldens") {
   testonly = true
 
@@ -71,6 +75,8 @@ group("goldens") {
     }
   }
 }
+
+# LINT.ThenChange(BUILD.bazel:goldens)
 
 group("tests") {
   testonly = true

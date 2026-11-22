@@ -6,8 +6,17 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "cc_binary_host_tool")
 load("//build/bazel/rules/idk:idk_host_tool.bzl", "idk_cc_binary_host_tool")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
+load("//tools/fidl/fidlc/testdata:info.bzl", "fidl_testdata_info")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fidlc_golden_tests"],
+    visibility = ["//tools:__pkg__"],
+)
 
 cc_library(
     name = "lib",
@@ -124,8 +133,8 @@ cc_library(
         "//sdk/lib/fit",
         "//src/lib/cmdline",
         "//src/lib/fxl",
+        "//third_party/re2",
         "//zircon/system/public",
-        "@re2",
     ],
     alwayslink = True,
 )
@@ -193,5 +202,22 @@ idk_cc_binary_host_tool(
 
 exports_files(
     ["schema.json"],
-    visibility = ["//build/bazel/rules/fidl:__subpackages__"],
+    visibility = [
+        "//build/bazel/rules/fidl:__subpackages__",
+        "//tools/fidl/lib/fidlgen/testing:__pkg__",
+    ],
+)
+
+# bazel2gn does not translate golden_test(), and the checked-in goldens use
+# Bazel workspace-relative source paths rather than GN build-directory paths.
+# @bazel2gn:skip
+golden_test(
+    name = "fidlc_golden_tests",
+    goldens = {
+        "goldens/%s.json.golden" % info["name"]: info["target"]
+        for info in fidl_testdata_info
+    } | {
+        "goldens/%s.index.json.golden" % info["name"]: info["target"] + "_index_json"
+        for info in fidl_testdata_info
+    },
 )

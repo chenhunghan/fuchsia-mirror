@@ -6,9 +6,40 @@ load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    [
+        "netemul-sandbox.cml",
+        "netemul-sandbox-tests.cml",
+    ],
+    visibility = ["//src/connectivity/network/testing/netemul/service:__pkg__"],
+)
+
+cml_shard(
+    name = "collection.shard",
+    shard = "collection.shard.cml",
+    visibility = ["//src/connectivity/network/testing/netemul/service:__pkg__"],
+)
+
 cml_shard(
     name = "client.shard",
-    includes = ["//sdk/lib/syslog:client.shard"],
+    includes = [
+        ":collection.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
     shard = "client.shard.cml",
-    visibility = ["//src/connectivity/network/testing/netemul/rust:__pkg__"],
+    visibility = [
+        "//src/connectivity/lowpan/tests/thread-integration-tests/common:__pkg__",
+        "//src/connectivity/network/testing/netemul/rust:__pkg__",
+        "//src/connectivity/network/tests/integration/common:__pkg__",
+    ],
+)
+
+cml_shard(
+    name = "common.shard",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    shard = "common.shard.cml",
+    visibility = ["//src/connectivity/network/testing/netemul/service:__pkg__"],
 )

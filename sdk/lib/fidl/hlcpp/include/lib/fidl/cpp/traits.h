@@ -34,9 +34,6 @@ template <typename T>
 struct IsFidlUnion : public std::false_type {};
 
 template <typename T>
-struct IsFidlXUnion : public std::false_type {};
-
-template <typename T>
 struct IsStdArray : public std::false_type {};
 
 template <typename T, size_t N>

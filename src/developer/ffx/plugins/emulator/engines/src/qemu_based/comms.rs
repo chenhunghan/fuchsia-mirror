@@ -93,10 +93,10 @@ impl CommsBackend<UnixStream> for QemuSocket {
             // socket which potentially could confuse other parts of the code that are doing cwd()
             // relative paths.
             //
-            // Print a warning and log the fact that we did this risky thing.
-            let msg_start = "Warning: path to emulator socket is too long, temporaily changing the working directory.";
+            // Log the fact that we did this risky thing.
+            let msg_start =
+                "Path to emulator socket is too long, temporarily changing the working directory.";
             let msg_restored = "Current directory restored";
-            eprintln!("{msg_start}");
             log::warn!("{msg_start}");
             let path = absolute_socket_path.parent().unwrap_or(&cwd);
             env::set_current_dir(path).map_err(|e| {
@@ -113,7 +113,6 @@ impl CommsBackend<UnixStream> for QemuSocket {
             env::set_current_dir(cwd)
                 .map_err(|e| bug!("Returning to original working directory: {e}"))?;
 
-            eprintln!("{msg_restored}");
             log::warn!("{msg_restored}");
             result
         } else {

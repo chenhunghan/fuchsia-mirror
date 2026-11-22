@@ -34,8 +34,6 @@ alias(
     ],
 )
 
-# LINT.IfChange
-
 # @bazel2gn:skip
 _CONFORMANCE_TEST_SOURCE = "src/conformance_test.rs"
 
@@ -68,5 +66,3 @@ fx_unittest_package(
         "//src/lib/dynfidl:__subpackages__",
     ],
 )
-
-# LINT.ThenChange(//src/lib/dynfidl/rust/BUILD.gn)

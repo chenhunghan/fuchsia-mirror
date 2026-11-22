@@ -4,7 +4,6 @@
 
 import("//build/config/clang/clang_toolchain_info.gni")
 import("//build/config/compilation_modes.gni")
-import("//build/config/export_bazel_tests.gni")
 import("//build/config/python_interpreter.gni")
 import("//build/icu/build_config.gni")
 import("//build/ninja_implicit_inputs/config.gni")
@@ -206,27 +205,33 @@ _hwasan_variant = {
 
 # Disable identical code folding in fuzzer toolchain variants, since accurate
 # stack traces are most useful under fuzzing than reduced binary sizes.
+# In Bazel, this is paired with _VARIANT_REMOVED_COMMON_CONFIGS in
+# //build/bazel/scripts/bazel_build_flags.py.
+#
+# LINT.IfChange(fuzzer_remove_common_configs)
 _fuzzer_remove_common_configs = [ "//build/config:icf" ]
+
+# LINT.ThenChange(//build/bazel/scripts/bazel_build_flags.py:variant_removed_common_configs)
 
 # Disable warnings about symbols that will be provided by compiler runtimes.
 _fuzzer_remove_shared_configs = [ "//build/config:symbol_no_undefined" ]
 
-# The vptr instrumentation requires RTTI.  If -fno-rtti is passed then
-# this checking is implicitly disabled.  However, another translation
-# unit built without -fno-rtti will have the checking enabled.  The
-# -fno-rtti vtables are not compatible with the checking at runtime, so a
-# vtable from a -fno-rtti TU used by code from a -frtti TU gets false
-# positive failures.  Since the vtables are emitted in multiple TUs in
-# COMDAT and one implementation chosen randomly at link time, there's no
-# way to be sure the checking code requiring RTTI uses its own
-# RTTI-enabled vtables rather than other non-RTTI vtables.  So just let
-# RTTI be enabled everywhere, and then get the vptr checking everywhere
-# too.
+# The vptr instrumentation requires RTTI. If -fno-rtti is passed then this
+# checking is implicitly disabled. However, another translation unit built
+# without -fno-rtti will have the checking enabled. The -fno-rtti vtables are
+# not compatible with the checking at runtime, so a vtable from a -fno-rtti TU
+# used by code from a -frtti TU gets false positive failures. Since the vtables
+# are emitted in multiple TUs in COMDAT and one implementation chosen randomly
+# at link time, there's no way to be sure the checking code requiring RTTI uses
+# its own RTTI-enabled vtables rather than other non-RTTI vtables. So just let
+# RTTI be enabled everywhere, and then get the vptr checking everywhere too.
+# In Bazel, this is paired with _VARIANT_REMOVED_COMMON_CONFIGS in
+# //build/bazel/scripts/bazel_build_flags.py.
+#
 # LINT.IfChange(ubsan)
-# In Bazel, this corresponds to -frtti in sanitizer.bzl:ubsan_feature.
 _ubsan_remove_common_configs = [ "//build/config:no_rtti" ]
 
-# LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:ubsan)
+# LINT.ThenChange(//build/bazel/scripts/bazel_build_flags.py:variant_removed_common_configs)
 
 declare_args() {
   # List of variants that will form the basis for variant toolchains.
@@ -1186,6 +1191,42 @@ if (toolchain_variant.base == host_x64_toolchain ||
   is_fuchsia_host = true
   is_host = true
   host_toolchain += toolchain_variant.suffix
+}
+
+# Only defined in `is_host` toolchains: label of the default host variant
+# toolchain for `toolchain_variant.base` based on global `select_variant`.
+# Unlike `host_default_variant_toolchain`, which is always based on the build
+# machine's `host_toolchain`, this applies the default host variant to the
+# current base toolchain, including cross-compiled host toolchains such as
+# `host_arm64` on x64 hosts. Falls back to `toolchain_variant.base` when no
+# host variant is selected. Does not evaluate per-target selectors or
+# `exclude_toolchain_tags`.
+#
+# For example, on an x64 build machine (labels relative to //build/toolchain):
+#
+#   select_variant   host_default_      default_host_variant_toolchain
+#                    variant_toolchain  in host_x64        in host_arm64
+#   ---------------  -----------------  -----------------  -----------------
+#   []               :host_x64          :host_x64          :host_arm64
+#   [ "host_asan" ]  :host_x64-asan     :host_x64-asan     :host_arm64-asan
+#   [ "lto" ] (1)    :host_x64          :host_x64          :host_arm64
+#
+# (1) BUILDCONFIG.gn appends a catch-all `novariant` selector to any non-empty
+#     `select_variant` other than `[ "clang" ]`. Target-only variants such as
+#     `lto` (`host = false`) never match host executables, so the catch-all
+#     does, and GN builds host executables in `:host_x64-novariant` (or
+#     `:host_arm64-novariant`). This variable, like
+#     `host_default_variant_toolchain`, still points at the base toolchain in
+#     that case; see //build/bazel/bazel_host_tool.gni for a consumer that
+#     handles it.
+if (is_host) {
+  if (_host_toolchain_variant_name != false &&
+      _host_toolchain_variant_name != "novariant") {
+    toolchain_variant.default_host_variant_toolchain =
+        "${toolchain_variant.base}-${_host_toolchain_variant_name}"
+  } else {
+    toolchain_variant.default_host_variant_toolchain = toolchain_variant.base
+  }
 }
 
 # Set `host_out_dir` once we're done modifying `host_toolchain`.

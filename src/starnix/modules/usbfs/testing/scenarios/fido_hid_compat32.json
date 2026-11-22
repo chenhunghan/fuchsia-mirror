@@ -1,0 +1,209 @@
+{
+    "name": "fido_hid_compat32",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 3,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd1",
+            "mode": "rdwr"
+        },
+        {
+            "type": "usbdevfs_ioctl",
+            "fd": "fd1",
+            "arch32": true,
+            "ifno": 0,
+            "sub_ioctl": "disconnect",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "usbdevfs_ioctl",
+            "fd": "fd1",
+            "arch32": true,
+            "ifno": -1,
+            "ioctl_code": 1074025983,
+            "arg_ptr": "valid",
+            "data_ptr": "null"
+        },
+        {
+            "type": "usbdevfs_ioctl",
+            "fd": "fd1",
+            "arch32": true,
+            "ifno": 0,
+            "ioctl_code": 1074025983,
+            "arg_ptr": "valid",
+            "data": [
+                1,
+                2,
+                3,
+                4
+            ]
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "usbdevfs_ioctl",
+            "fd": "fd1",
+            "arch32": true,
+            "ifno": 0,
+            "sub_ioctl": "connect",
+            "arg_ptr": "valid"
+        },
+        {
+            "type": "device_ep_push_in",
+            "ep": 129,
+            "data": [
+                85,
+                102,
+                119,
+                136,
+                144,
+                0,
+                6,
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+            ]
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "arch32": true,
+            "urb": "u_compat32_in",
+            "urb_type": "interrupt",
+            "ep": 129,
+            "buffer_len": 64,
+            "usercontext": 17152
+        },
+        {
+            "type": "poll",
+            "fd": "fd1",
+            "timeout_ms": 1000
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1",
+            "arch32": true
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_compat32_in"
+        },
+        {
+            "type": "usbdevfs_ioctl",
+            "fd": "fd1",
+            "arch32": true,
+            "ifno": 0,
+            "sub_ioctl": "disconnect",
+            "arg_ptr": "valid"
+        },
+        {
+            "type": "usbdevfs_ioctl",
+            "fd": "fd1",
+            "arch32": true,
+            "ifno": 0,
+            "sub_ioctl": "connect",
+            "arg_ptr": "valid"
+        },
+        {
+            "type": "close",
+            "fd": "fd1"
+        }
+    ]
+}

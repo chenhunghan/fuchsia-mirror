@@ -2,9 +2,31 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
 
+# A collection of utilities useful to debuggers and similar programs.
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":elflib_tests_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":elflib_unittest_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 fx_cc_library(
     name = "elflib",
@@ -17,4 +39,93 @@ fx_cc_library(
         "//zircon/system/ulib/fbl",
         "@prebuilt_llvm//:llvm_includes",
     ],  # @bazel2gn:raw_overwrite:[ "//zircon/system/public", "//zircon/system/ulib/fbl" ]
+)
+
+host_test_data_files(
+    name = "host_test_data",
+    testonly = True,
+    srcs = [
+        "test_data/6d4d8ac190ecc7.debug",
+        "test_data/stripped_example.elf",
+        "test_data/unstripped_example.arm64.rel.elf",
+        "test_data/unstripped_example.arm64.rela.elf",
+        "test_data/unstripped_example.x64.rel.elf",
+        "test_data/unstripped_example.x64.rela.elf",
+        "test_data/unstripped_example_stripped.arm64.rel.elf",
+        "test_data/unstripped_example_stripped.arm64.rela.elf",
+        "test_data/unstripped_example_stripped.x64.rel.elf",
+        "test_data/unstripped_example_stripped.x64.rela.elf",
+    ],
+    dest_dir = "test_data/elflib",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# An example stripped binary:
+# ```
+# #include <stdio.h>
+# #include <string.h>
+# int main(int argc, char** argv) {
+#   printf("%zu\n", strlen(argv[0]));
+#   return 0;
+# }
+# ```
+# Built with:
+# clang -Wl,-z,{rela,rel} --target={aarch64,x86_64}-fuchsia --sysroot=...
+# llvm-objcopy --strip-sections \
+#   unstripped_example.{arm64,x64}.{rela,rel}.elf \
+#   unstripped_example_stripped.{arm64,x64}.{rela,rel}.elf
+resource(
+    name = "test_data",
+    testonly = True,
+    srcs = [
+        "test_data/6d4d8ac190ecc7.debug",
+        "test_data/stripped_example.elf",
+        "test_data/unstripped_example.arm64.rel.elf",
+        "test_data/unstripped_example.arm64.rela.elf",
+        "test_data/unstripped_example.x64.rel.elf",
+        "test_data/unstripped_example.x64.rela.elf",
+        "test_data/unstripped_example_stripped.arm64.rel.elf",
+        "test_data/unstripped_example_stripped.arm64.rela.elf",
+        "test_data/unstripped_example_stripped.x64.rel.elf",
+        "test_data/unstripped_example_stripped.x64.rela.elf",
+    ],
+    outputs = ["data/{{source_file_part}}"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_cc_test_binary(
+    name = "elflib_unittest_bin",
+    srcs = ["elflib_unittest.cc"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    gn_output_name = "elflib_unittest",
+    deps = [
+        ":elflib",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+host_test(
+    name = "elflib_unittest_host_test",
+    binary = ":elflib_unittest_bin",
+    data = [":host_test_data"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_unittest_component(
+    name = "elflib_unittest_component",
+    binary = ":elflib_unittest_bin",
+    component_name = "elflib_tests",
+)
+
+fx_package(
+    name = "elflib_tests",
+    resources = [":test_data"],
+    test_components = [":elflib_unittest_component"],
+)
+
+fx_test(
+    name = "elflib_tests_test",
+    package = ":elflib_tests",
 )

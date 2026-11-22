@@ -5,6 +5,7 @@
 #ifndef LIB_LD_REMOTE_DYNAMIC_LINKER_H_
 #define LIB_LD_REMOTE_DYNAMIC_LINKER_H_
 
+#include <lib/elfldltl/init-fini.h>
 #include <lib/zx/vmar.h>
 
 #include <algorithm>
@@ -143,7 +144,7 @@ namespace ld {
 // Various other methods are provided for interrogating the list of modules and
 // accessing the dynamic linker stub module and the ld::RemoteAbi object.
 
-template <class Elf = elfldltl::Elf<>, RemoteLoadZygote Zygote = RemoteLoadZygote::kNo,
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, RemoteLoadZygote Zygote = RemoteLoadZygote::kNo,
           elfldltl::ElfMachine Machine = elfldltl::ElfMachine::kNative>
 class RemoteDynamicLinker {
  public:
@@ -197,7 +198,7 @@ class RemoteDynamicLinker {
 
       size_type load_bias;
     };
-    static_assert(!std::is_default_constructible_v<WithLoadBias>);
+    static_assert(!std::default_initializable<WithLoadBias>);
     static_assert(std::is_trivially_copyable_v<WithLoadBias>);
 
     // This type indicates that the module is already present in the process
@@ -214,7 +215,7 @@ class RemoteDynamicLinker {
 
       size_type load_bias;
     };
-    static_assert(!std::is_default_constructible_v<AlreadyLoaded>);
+    static_assert(!std::default_initializable<AlreadyLoaded>);
     static_assert(std::is_trivially_copyable_v<AlreadyLoaded>);
 
     // This is the type of the `.load` member: one of the above, with the
@@ -424,12 +425,10 @@ class RemoteDynamicLinker {
   // initial_modules list, each giving the iterator into `.modules()` for that
   // initial module's place in the load order.  The modules() list is complete,
   // remote_abi() has been initialized, and abi_stub_module() can be used.
-  template <class Diagnostics, typename GetDep>
+  template <class Diagnostics, elfldltl::InvocableAsR<GetDepResult(Soname)> GetDep>
   std::optional<InitResult> Init(Diagnostics& diag, InitModuleList initial_modules,
                                  GetDep&& get_dep,
                                  std::optional<elfldltl::ElfMachine> machine = Machine) {
-    static_assert(std::is_invocable_r_v<GetDepResult, GetDep, Soname>);
-
     assert(abi_stub_);
 
     assert(!initial_modules.empty());

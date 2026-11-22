@@ -9,7 +9,9 @@ use futures::executor::block_on;
 use fxfs::checksum::Checksums;
 use fxfs::lsm_tree::merge::MergeFn;
 use fxfs::lsm_tree::types::{Item, LayerIterator, LayerKey, MergeableKey, Value};
-use fxfs::lsm_tree::{LSMTree, Query, compact_with_iterator, layers_from_handles};
+use fxfs::lsm_tree::{
+    BloomFilterOptions, LSMTree, Query, compact_with_iterator, layers_from_handles,
+};
 use fxfs::object_store::allocator::merge::merge as allocator_merge;
 use fxfs::object_store::allocator::{AllocatorKey, AllocatorValue};
 use fxfs::object_store::journal::CompactionYielder;
@@ -34,6 +36,7 @@ fn create_tree_generic<K, V, F>(
     depth: u64,
     size: u64,
     merge_fn: MergeFn<K, V>,
+    use_bloom_filter: bool,
     mut populate_layer: F,
 ) -> LSMTree<K, V>
 where
@@ -42,6 +45,8 @@ where
     F: FnMut(&LSMTree<K, V>, u64, u64),
 {
     let items_per_layer = size / depth;
+    let bloom_filter_options =
+        use_bloom_filter.then_some(BloomFilterOptions { num_items: items_per_layer as usize });
     let mut handles = Vec::new();
 
     for layer_idx in 0..depth {
@@ -60,7 +65,7 @@ where
             let iter = merger.query(Query::FullScan).await.unwrap();
             compact_with_iterator(
                 iter,
-                items_per_layer as usize,
+                bloom_filter_options,
                 Writer::new(&handle).await,
                 BlockSize::SIZE_4KIB,
                 None::<CompactionYielder<'static>>,
@@ -82,7 +87,7 @@ where
 /// Populates an LSM tree with realistic file object records (`ObjectKey::object(key_id)`),
 /// with 50% key overlap across layers when `depth > 1`.
 fn create_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
-    create_tree_generic(depth, size, object_merge, |tree, layer_idx, items_per_layer| {
+    create_tree_generic(depth, size, object_merge, true, |tree, layer_idx, items_per_layer| {
         for i in 0..items_per_layer {
             let key_id = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
             let value = ObjectValue::file(
@@ -103,7 +108,7 @@ fn create_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
 /// Populates an LSM tree with long child keys and realistic child values,
 /// with 50% key overlap across layers when `depth > 1`.
 fn create_long_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
-    create_tree_generic(depth, size, object_merge, |tree, layer_idx, items_per_layer| {
+    create_tree_generic(depth, size, object_merge, true, |tree, layer_idx, items_per_layer| {
         for i in 0..items_per_layer {
             let key_id = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
             let name = "a".repeat(300);
@@ -117,7 +122,7 @@ fn create_long_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
 /// Populates an LSM tree with attribute extent records containing Fletcher checksums.  When
 /// `depth > 1`, half of the extents are present in every layer with identical ranges.
 fn create_extent_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> {
-    create_tree_generic(depth, size, object_merge, |tree, layer_idx, items_per_layer| {
+    create_tree_generic(depth, size, object_merge, true, |tree, layer_idx, items_per_layer| {
         for i in 0..items_per_layer {
             let extent_idx = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
             let offset = extent_idx * EXTENT_SIZE;
@@ -141,7 +146,7 @@ fn create_extent_tree(depth: u64, size: u64) -> LSMTree<ObjectKey, ObjectValue> 
 /// Populates an LSM tree with allocator extent records, with 50% overlap across layers when
 /// `depth > 1`.
 fn create_allocator_tree(depth: u64, size: u64) -> LSMTree<AllocatorKey, AllocatorValue> {
-    create_tree_generic(depth, size, allocator_merge, |tree, layer_idx, items_per_layer| {
+    create_tree_generic(depth, size, allocator_merge, false, |tree, layer_idx, items_per_layer| {
         for i in 0..items_per_layer {
             let extent_idx = if i % 2 == 0 { i * depth } else { i * depth + layer_idx };
             let offset = extent_idx * EXTENT_SIZE;

@@ -1,0 +1,95 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Without optimizations, debug builds trigger test timeouts (e.g.
+# minfs-full-tests), so enable optimizations for all builds.
+# TODO(https://fxbug.dev/566966051): Switch to disable_build_flags in rustc_library.
+# @bazel2gn:raw_attribute:configs -= [ "//build/config:default_optimize" ]
+rustc_binary(
+    name = "fvm_rust",
+    srcs = [
+        "src/buffers.rs",
+        "src/device.rs",
+        "src/main.rs",
+        "src/mapping.rs",
+        "src/zxcrypt.rs",
+    ],
+    build_flags = [
+        "//build/config:optimize_speed",
+        "//build/config/lto:lto-if-compatible",
+    ],
+    crate_name = "fvm",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+        "//src/storage/fvm/fidl/fuchsia.fvm:fuchsia.fvm_rust",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/block_server",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/lib/ptr_slice",
+        "//src/storage/lib/storage_xts",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:aes",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:event-listener",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:static_assertions",
+        "//third_party/rust_crates/vendor:uuid",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fvm_packaged_bin",
+    binary = ":fvm_rust",
+    binary_name = "fvm",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "fvm2",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+        "//src/storage/lib/fs_management:client.shard.cml",
+    ],
+    manifest = "meta/fvm2.cml",
+)
+
+fx_component(
+    name = "fvm-component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/storage:__subpackages__"],
+    deps = [":fvm_packaged_bin"],
+)

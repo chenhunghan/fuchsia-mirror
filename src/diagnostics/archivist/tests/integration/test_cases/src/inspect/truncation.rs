@@ -19,6 +19,7 @@ async fn accessor_truncation_test() {
     .await
     .expect("create base topology");
 
+    #[allow(clippy::collection_is_never_read)]
     let mut writers = vec![];
     for (i, x) in itertools::iproduct!(0..3, letters.iter()) {
         let puppet =

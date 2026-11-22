@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/python/python_host_test.gni")
+
+if (is_host) {
+  python_host_test("verify_stack_sizes_test") {
+    main_source = "tests/verify_stack_sizes_test.py"
+    sources = [
+      "//scripts/clang/stack_size_estimator/call_graph.py",
+      "//scripts/clang/stack_size_estimator/graph.py",
+      "//scripts/clang/stack_size_estimator/stack_estimator.py",
+      "verify_stack_sizes.py",
+    ]
+  }
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":verify_stack_sizes_test($host_toolchain)" ]
+}

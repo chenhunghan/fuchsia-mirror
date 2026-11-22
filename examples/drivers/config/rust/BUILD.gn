@@ -34,7 +34,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/component-info.json"
 }
 
 fuchsia_rust_driver("driver") {

@@ -57,7 +57,6 @@ fuchsia_driver_component("component") {
     ":crosvm-bind",
     ":driver",
   ]
-  info = "meta/crosvm-info.json"
   manifest = "meta/crosvm.cml"
 }
 

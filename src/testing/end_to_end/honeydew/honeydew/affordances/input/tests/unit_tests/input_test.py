@@ -10,16 +10,12 @@ from unittest import mock
 
 from honeydew import errors
 from honeydew.affordances import affordance
-from honeydew.affordances.input import Buttons, Gestures, InputError
 from honeydew.affordances.input import errors as input_errors
 from honeydew.affordances.input import input as input_affordance
 from honeydew.affordances.ui.user_input import errors as user_input_errors
 from honeydew.affordances.ui.user_input import types as ui_types
 from honeydew.affordances.ui.user_input import (
     user_input as user_input_affordance,
-)
-from honeydew.affordances.ui.user_input import (
-    user_input_using_fc,
 )
 from honeydew.device_classes import android_device
 from honeydew.fuchsia_device import fuchsia_device
@@ -46,7 +42,7 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             user_input_affordance.UserInput, instance=True
         )
         self.mock_touch: Any = mock.create_autospec(
-            user_input_using_fc.TouchDeviceUsingFc, instance=True
+            user_input_affordance.TouchDevice, instance=True
         )
         self.mock_mouse: Any = mock.create_autospec(
             user_input_affordance.AsyncMouseDevice, instance=True
@@ -57,11 +53,15 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             adb_transport.Adb, instance=True
         )
         self.mock_adb.run.return_value = ""
-        self.gestures = Gestures(self.mock_user_input, ui_types.Size(100, 200))
+        self.gestures = input_affordance.Gestures(
+            self.mock_user_input, ui_types.Size(100, 200)
+        )
 
     async def test_gestures_coordinates_taps_and_make_ready(self) -> None:
         """Verifies verify_supported, make_ready, screen_coordinate, tap, and tap_bottom."""
-        self.assertIs(InputError, input_errors.InputError)
+        self.assertTrue(
+            issubclass(input_errors.InputError, errors.HoneydewError)
+        )
         self.mock_user_input.verify_supported.assert_called_once_with()
         self.assertIsInstance(self.mock_touch, affordance.AsyncLazyReady)
         await self.gestures.make_ready()
@@ -96,7 +96,9 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
         """Verifies Gestures accepts a callable screen_size and recreates touch device on change."""
         current_size = ui_types.Size(100, 200)
         self.mock_user_input.create_touch_device.reset_mock()
-        gestures = Gestures(self.mock_user_input, lambda: current_size)
+        gestures = input_affordance.Gestures(
+            self.mock_user_input, lambda: current_size
+        )
         self.mock_user_input.create_touch_device.assert_called_once_with(
             ui_types.Size(100, 200)
         )
@@ -141,7 +143,7 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             self.mock_touch.swipe.assert_called_once_with(
                 start_location=ui_types.Coordinate(*start),
                 end_location=ui_types.Coordinate(*end),
-                move_event_count=59,
+                move_event_count=119,
                 duration_ms=500,
             )
             self.mock_touch.reset_mock()
@@ -149,7 +151,7 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             self.mock_touch.swipe.assert_called_once_with(
                 start_location=ui_types.Coordinate(*start),
                 end_location=ui_types.Coordinate(*end),
-                move_event_count=35,
+                move_event_count=71,
                 duration_ms=300,
             )
 
@@ -190,25 +192,31 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             raise errors.HoneydewError("screen_size query failed")
 
         with self.assertRaises(input_errors.InputError):
-            Gestures(self.mock_user_input, _failing_screen_size)
+            input_affordance.Gestures(
+                self.mock_user_input, _failing_screen_size
+            )
 
         self.mock_user_input.verify_supported.side_effect = (
             errors.NotSupportedError("user_input not supported")
         )
         with self.assertRaises(errors.NotSupportedError):
-            Gestures(self.mock_user_input, _failing_screen_size)
+            input_affordance.Gestures(
+                self.mock_user_input, _failing_screen_size
+            )
         self.mock_user_input.verify_supported.side_effect = None
 
         self.mock_user_input.create_touch_device.side_effect = (
             errors.HoneydewError("create_touch_device failed")
         )
         with self.assertRaises(input_errors.InputError):
-            Gestures(self.mock_user_input, ui_types.Size(100, 200))
+            input_affordance.Gestures(
+                self.mock_user_input, ui_types.Size(100, 200)
+            )
 
     async def test_buttons(self) -> None:
         """Verifies hardware keyevents and crown_scroll."""
         self.mock_user_input.verify_supported.reset_mock()
-        buttons = Buttons(self.mock_adb, self.mock_user_input)
+        buttons = input_affordance.Buttons(self.mock_adb, self.mock_user_input)
         self.mock_adb.verify_supported.assert_called_once_with()
         self.mock_user_input.verify_supported.assert_not_called()
         for fn, code in [
@@ -232,13 +240,13 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             scroll_v_detent=-2,
         )
 
-        buttons_no_ui = Buttons(self.mock_adb)
+        buttons_no_ui = input_affordance.Buttons(self.mock_adb)
         with self.assertRaises(errors.NotSupportedError):
             await buttons_no_ui.crown_scroll()
 
     async def test_buttons_wraps_honeydew_errors_in_input_error(self) -> None:
         """Verifies Buttons wraps ADB and UserInput HoneydewError in InputError."""
-        buttons = Buttons(self.mock_adb, self.mock_user_input)
+        buttons = input_affordance.Buttons(self.mock_adb, self.mock_user_input)
         self.mock_adb.run.side_effect = adb_errors.AdbCommandError("adb failed")
         for fn in (
             buttons.power,
@@ -258,7 +266,9 @@ class InputTest(unittest.IsolatedAsyncioTestCase):
             await buttons.crown_scroll(scroll_v_detent=1)
         self.mock_mouse.scroll.side_effect = None
 
-        buttons_fresh = Buttons(self.mock_adb, self.mock_user_input)
+        buttons_fresh = input_affordance.Buttons(
+            self.mock_adb, self.mock_user_input
+        )
         self.mock_user_input.create_mouse_device.side_effect = (
             user_input_errors.UserInputError("create_mouse_device failed")
         )

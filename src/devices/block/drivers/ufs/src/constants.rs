@@ -11,10 +11,13 @@
 pub const AUTO_HIBERNATE_TIMER_US: u32 = 2000;
 /// Tag identifying the UFS bandwidth vote on the `fuchsia.hardware.interconnect` path.
 pub const INTERCONNECT_TAG_UFS: u32 = u32::from_be_bytes(*b"UFS ");
+// TODO(https://fxbug.dev/588007813): Scale the active interconnect bandwidth vote from the
+// negotiated UniPro gear/lane rate instead of voting a fixed static ceiling.
 /// Average bandwidth voted on the interconnect path while the device is `Active`.
 pub const INTERCONNECT_AVG_BANDWIDTH_BPS: u64 = 2_000_000_000;
 /// Peak bandwidth voted on the interconnect path while the device is `Active`: two lanes at
-/// HS-G5 Rate B after 8b/10b line coding (UFS 4.0 section 5).
+/// ~23.2 Gbps/lane (rounded from HS-G5 Rate B: 23,347.2 Mbps at 38.4 MHz or 23,296.0 Mbps at
+/// 52 MHz) after 8b/10b line coding (UFS 4.0 section 4.2 and section 6.4.1, Table 6.8).
 pub const INTERCONNECT_PEAK_BANDWIDTH_BPS: u64 = 4_640_000_000;
 /// Smallest MMIO window accepted for the host controller: the standard UFSHCI register map
 /// (host capabilities through the vendor-specific block) spans offsets `0x00..0xFF` (UFSHCI 4.0
@@ -29,8 +32,12 @@ pub const INTERCONNECT_INSTANCE: &str = "ufs-interconnect";
 /// Composite parent instance name of the PCI device service.
 pub const PCI_INSTANCE: &str = "pci";
 /// Number of `TEST UNIT READY` attempts per LU during bring-up. The first command after a reset
-/// or power-on fails with `UNIT ATTENTION`, which the retry clears (UFS 3.1/4.0 section 11.3.1).
+/// or power-on fails with `UNIT ATTENTION`, which the retry clears (UFS 4.0 section 10.8.9,
+/// Table 10.67 and section 11.3.11).
 pub const TEST_UNIT_READY_ATTEMPTS: u32 = 3;
+/// Power level of the framework-managed UFS power element that keeps the device fully on;
+/// registered with `CpuElementManager` so the CPU execution state depends on it.
+pub const POWER_LEVEL_ON: u8 = 1;
 /// Scheduler role applied to the driver executor and block session threads.
 pub const WORKER_SCHEDULER_ROLE: &str = "fuchsia.devices.storage.ufs.worker";
 /// Dedicated scheduler role applied to the interrupt worker threads so completion notifications
@@ -40,31 +47,47 @@ pub const IRQ_SCHEDULER_ROLE: &str = "fuchsia.devices.storage.ufs.irq";
 // --- UFSHCI register, UTRD, UCD, and transfer processor constants (UFSHCI 3.0/4.0 sec 5 - 7) ---
 
 /// Byte granularity of `MCQCAP.QCFGPTR`: the per-queue configuration block starts at
-/// `QCFGPTR * 0x200` (UFSHCI 4.0 sections 5.2.2 and 5.2.9).
+/// `QCFGPTR * 0x200` (UFSHCI 4.0 sections 5.2.2 and 5.9.4).
 pub const MCQ_QUEUE_CONFIG_PTR_UNIT: usize = 0x200;
 /// Time allowed for `HCE` to toggle on reset/enable and for a UIC command issued during link
-/// startup to complete (UFSHCI 3.0/4.0 sections 5.3.3, 5.3.4, and 7.1.1).
+/// startup to complete (UFSHCI 3.0 sections 5.3.3-5.3.4 / UFSHCI 4.0 sections 5.3.4-5.3.5, and
+/// UFSHCI 4.0 section 7.1.1).
 pub const HOST_CONTROLLER_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(10);
-/// Number of `DME_LINKSTARTUP` attempts before bring-up or recovery gives up (UFSHCI 3.0/4.0
-/// section 7.1.1 allows the first attempt to fail while the device is still booting).
+/// Minimum interval between ISR error log/register-dump bursts so a noisy or stuck UniPro link
+/// cannot saturate the interrupt worker thread while atomic Inspect counters continue counting.
+pub const ISR_ERROR_LOG_INTERVAL: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
+/// Number of `DME_LINKSTARTUP` attempts before bring-up or `PowerDown` resume gives up (UFSHCI
+/// 4.0 section 7.1.1 allows the first attempt to fail while the device is still booting).
 pub const LINK_STARTUP_ATTEMPTS: u32 = 3;
 /// Delay between [`LINK_STARTUP_ATTEMPTS`] so the device can finish its own link startup.
 pub const LINK_STARTUP_RETRY_DELAY: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(10);
+/// `AHIT` value that disables auto-hibernate (timer value 0, UFSHCI 4.0 section 5.2.7).
+pub const AUTO_HIBERNATE_DISABLED: u32 = 0;
 /// Largest `AHIT.AH8ITV` (10-bit idle timer value, UFSHCI 3.0 section 5.2.5).
 pub const AUTO_HIBERNATE_MAX_TIMER_VALUE: u32 = 0x3FF;
 /// Largest `AHIT.TS` timer scale (`5` selects 100 ms steps, UFSHCI 3.0 section 5.2.5).
 pub const AUTO_HIBERNATE_MAX_TIMER_SCALE: u32 = 5;
-/// `UECPA.EC` error code for `PA_LINE_RESET`, which is reported but not fatal (UFSHCI 3.0/4.0
-/// section 5.3.5).
+/// `UECPA.EC` error code for `PA_LINE_RESET`, which is reported but not fatal (UFSHCI 3.0
+/// section 5.3.5 / UFSHCI 4.0 section 5.3.6).
 pub const UIC_PHY_ADAPTER_LAYER_LINE_RESET: u32 = 0x10;
+/// `UECDL.EC` bit for `PA_INIT_ERROR`, the Data Link Layer error the link cannot recover by
+/// retransmission and so the only `UECDL` code classified as fatal (UFSHCI 3.0 section 5.3.6 /
+/// UFSHCI 4.0 section 5.3.7).
+pub const UIC_DATA_LINK_LAYER_PA_INIT_ERROR: u32 = 1 << 13;
 
-/// Largest transfer request list the driver tracks; bounds the per-slot state arrays (`UTRLBA`
-/// list, UFSHCI 3.0/4.0 section 5.4.3).
+/// Largest transfer request slot count the driver tracks; bounds the per-slot state arrays
+/// (legacy single-doorbell mode supports up to 32 slots and UFSHCI 4.0 MCQ mode up to 256,
+/// UFSHCI 4.0 sections 5.2.1, 6.1, and 6.2).
 pub const MAX_REQUEST_LIST_SIZE: u8 = 64;
 /// Transfer slots in single-doorbell mode: one per `UTRLDBR` bit (UFSHCI 3.0/4.0 section 5.4.3).
 pub const SDB_SLOTS: usize = 32;
+
+/// Power-of-two buckets in the `request_gap_us` Inspect histogram.
+///
+/// Bucket 27 starts at `2^26` us (about 67 s), well above every low-power timer.
+pub const REQUEST_GAP_BUCKETS: usize = 28;
 /// Slot reserved for Admin/Query UPIUs so block I/O cannot starve control commands.
-pub const ADMIN_COMMAND_SLOT_NUMBER: u8 = (SDB_SLOTS - 1) as u8;
+pub const ADMIN_SLOT: u8 = (SDB_SLOTS - 1) as u8;
 /// `UTRD.CT` command type for UFS storage commands (UFSHCI 3.0/4.0 section 6.1.1).
 pub const COMMAND_TYPE_UFS_STORAGE: u8 = 0x1;
 /// Byte offset of dword 2 (`OCS`) inside a UTRD, polled directly after a posted completion
@@ -105,7 +128,8 @@ pub const PRDT_DBC_MASK: u32 = MAX_PRDT_ENTRY_BYTES - 1;
 /// (UFSHCI 3.0/4.0 section 6.1.2).
 pub const DWORD_ALIGN_MASK: u64 = 0x3;
 
-/// Time a UTP transfer request may stay outstanding before the stall watchdog logs an error.
+/// Default timeout for admin and query commands, and the periodic diagnostic error-logging interval
+/// for overdue data-path I/O slots (which are never aborted on elapsed time).
 pub const COMMAND_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(10);
 /// Spin re-reads of `UTRD.OCS` after a completion is signalled, covering the window in which the
 /// controller's posted write of the UTRD has not yet landed in memory.
@@ -164,7 +188,7 @@ pub const PA_LOCALVERINFO: u16 = 0x15A9;
 /// 5.8.3).
 pub const PA_GRANULARITY: u16 = 0x15AA;
 /// `PA_PWRModeUserData0`: Data Link `FC0ProtectionTimeOutVal` applied by the power mode change
-/// (MIPI UniPro v2.0 section 5.8.3, UFS 4.0 section 7.4).
+/// (MIPI UniPro v2.0 section 5.8.3, UFSHCI 4.0 sections 5.6.5 and 7.4).
 pub const PA_PWRMODEUSERDATA0: u16 = 0x15B0;
 /// `PA_PWRModeUserData1`: Data Link `TC0ReplayTimeOutVal` applied by the power mode change.
 pub const PA_PWRMODEUSERDATA1: u16 = 0x15B1;
@@ -181,21 +205,21 @@ pub const PA_PWRMODEUSERDATA5: u16 = 0x15B5;
 pub const PA_TXHSADAPTTYPE: u16 = 0x15D4;
 
 /// Host-local shadow of `DL_FC0ProtectionTimeOutVal`, written alongside `PA_PWRModeUserData0`
-/// so the host's Data Link timers match the negotiated values (UFS 4.0 section 7.4 / MIPI UniPro
-/// v2.0 section 5.9).
+/// so the host's Data Link timers match the negotiated values (UFSHCI 4.0 sections 5.6.5 and
+/// 7.4 / MIPI UniPro v2.0 section 5.9).
 pub const DME_LOCAL_FC0_PROTECTION_TIMEOUT_VAL: u16 = 0xD041;
-/// Host-local shadow of `DL_TC0ReplayTimeOutVal` (UFS 4.0 section 7.4 / MIPI UniPro v2.0 section
-/// 5.9).
+/// Host-local shadow of `DL_TC0ReplayTimeOutVal` (UFSHCI 4.0 sections 5.6.5 and 7.4 / MIPI
+/// UniPro v2.0 section 5.9).
 pub const DME_LOCAL_TC0_REPLAY_TIMEOUT_VAL: u16 = 0xD042;
-/// Host-local shadow of `DL_AFC0ReqTimeOutVal` (UFS 4.0 section 7.4 / MIPI UniPro v2.0 section
-/// 5.9).
+/// Host-local shadow of `DL_AFC0ReqTimeOutVal` (UFSHCI 4.0 sections 5.6.5 and 7.4 / MIPI
+/// UniPro v2.0 section 5.9).
 pub const DME_LOCAL_AFC0_REQ_TIMEOUT_VAL: u16 = 0xD043;
 /// Default `DL_FC0ProtectionTimeOutVal`: largest 13-bit value, so flow control never times out
-/// prematurely in HS mode (UFS 4.0 section 7.4).
+/// prematurely in HS mode (UFSHCI 4.0 section 7.4).
 pub const DL_FC0_PROTECTION_TIMEOUT_VAL: u32 = 8191;
-/// Default `DL_TC0ReplayTimeOutVal`: largest 16-bit value (UFS 4.0 section 7.4).
+/// Default `DL_TC0ReplayTimeOutVal`: largest 16-bit value (UFSHCI 4.0 section 7.4).
 pub const DL_TC0_REPLAY_TIMEOUT_VAL: u32 = 65535;
-/// Default `DL_AFC0ReqTimeOutVal`: largest 15-bit value (UFS 4.0 section 7.4).
+/// Default `DL_AFC0ReqTimeOutVal`: largest 15-bit value (UFSHCI 4.0 section 7.4).
 pub const DL_AFC0_REQ_TIMEOUT_VAL: u32 = 32767;
 /// Sleep between register polls (`HCE`, `UCRDY`, UIC completion, doorbells) once the spin
 /// budget is exhausted.
@@ -261,7 +285,7 @@ pub const PROVISIONING_TYPE_THIN_READ_ZERO: u8 = 0x03;
 /// Unit Descriptor `bLUWriteProtect`: permanently write protected (UFS 3.1/4.0 section 14.1.4.5).
 pub const LU_WRITE_PROTECT_PERMANENT: u8 = 0x02;
 /// PCI vendor ID of Intel host controllers, which need the 19.2 MHz reference clock and the
-/// link-timing workarounds in `Quirks`.
+/// link-timing workarounds in `HostQuirks`.
 pub const INTEL_VENDOR_ID: u16 = 0x8086;
 /// PCI vendor ID used by QEMU's emulated UFS controller.
 pub const REDHAT_VENDOR_ID: u16 = 0x1B36;
@@ -274,8 +298,20 @@ pub const DEVICE_INIT_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::fr
 pub const DEVICE_INIT_POLL_INTERVAL: zx::MonotonicDuration =
     zx::MonotonicDuration::from_micros(500);
 /// Time allowed for `HCS.UPMCRS` to report the outcome of a `PA_PWRMode` change (UFSHCI 3.0/4.0
-/// sections 5.3.1, 5.3.2, and 5.3.3).
+/// sections 5.3.1-5.3.2 and UFSHCI 3.0 section 5.3.3 / UFSHCI 4.0 section 5.3.4).
 pub const POWER_MODE_CHANGE_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
+/// Time limit for each wait in a link hibernate transition: for the controller to accept a UIC
+/// command (`HCS.UCRDY`, UFSHCI 4.0 section 5.3.4), and for `DME_HIBERNATE_ENTER` or
+/// `DME_HIBERNATE_EXIT` to complete (`IS.UHES` / `IS.UHXS`, section 5.3.1).
+pub const HIBERNATE_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
+/// Time the suspend drain waits beyond the command timeout, so that a stuck command times out
+/// before the drain gives up.
+pub const DRAIN_INFLIGHT_MARGIN: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(2);
+/// Wait before the first warning that an external power step is stalled. Normal calls finish in
+/// well under one second.
+pub const POWER_STEP_STALL_WARN: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
+/// Interval between later stall warnings for the same step.
+pub const POWER_STEP_STALL_REPEAT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(30);
 /// Settle time after a power mode change on Intel hosts before the link is probed to clear
 /// pending DME errors.
 pub const INTEL_POST_POWER_MODE_DELAY: zx::MonotonicDuration =
@@ -309,21 +345,32 @@ pub const MAX_NUMBER_LU_32: u8 = 1;
 pub const LUN_SCAN_COUNT_8: u8 = 8;
 /// Number of logical units scanned when `bMaxNumberLU == 1` (UFS 3.1/4.0 section 14.1.4.4).
 pub const LUN_SCAN_COUNT_32: u8 = 32;
-/// `PowerCondition` Inspect value recorded when the UFS device is in the active power condition
-/// (UFS 3.1/4.0 section 11.3.10, `START STOP UNIT` `POWER CONDITION = 1h`).
-pub const POWER_CONDITION_ACTIVE: u64 = 1;
-/// `LinkState` Inspect value recorded when the UniPro link is in the active state.
-pub const LINK_STATE_ACTIVE: u64 = 1;
 
 // --- SCSI command set, sense, and RPMB constants (SPC-4 / SBC-3 / UFS 3.1/4.0 sec 11 - 12) ---
 
+/// UPIU LUN of the UFS Device well-known LU, the target of `START STOP UNIT` power transitions
+/// (UFS 4.0 section 10.8.5, Table 10.64).
+pub const UFS_DEVICE_WLUN: u8 = 0xD0;
+/// Bit position of `POWER CONDITION` in `START STOP UNIT` CDB byte 4 (UFS 4.0 section
+/// 11.3.10).
+pub const START_STOP_POWER_CONDITION_SHIFT: u8 = 4;
 /// Mask of the sense data `RESPONSE CODE` in byte 0; bit 7 is `VALID` (SPC-4 section 4.5).
 pub const SENSE_RESPONSE_CODE_MASK: u8 = 0x7F;
+/// Sense `RESPONSE CODE` for fixed-format current errors (SPC-4 section 4.5.3).
+pub const SENSE_FIXED_FORMAT_CURRENT: u8 = 0x70;
+/// Sense `RESPONSE CODE` for fixed-format deferred errors (SPC-4 section 4.5.3).
+pub const SENSE_FIXED_FORMAT_DEFERRED: u8 = 0x71;
 /// Sense `RESPONSE CODE` for descriptor-format current errors, whose sense key is in byte 1
 /// rather than byte 2 (SPC-4 section 4.5.2).
 pub const SENSE_DESCRIPTOR_FORMAT_CURRENT: u8 = 0x72;
 /// Sense `RESPONSE CODE` for descriptor-format deferred errors (SPC-4 section 4.5.2).
 pub const SENSE_DESCRIPTOR_FORMAT_DEFERRED: u8 = 0x73;
+/// Fixed-format sense byte 2 bit 7: `FILEMARK` encountered (SPC-4 section 4.5.3).
+pub const SENSE_FILEMARK: u8 = 0x80;
+/// Fixed-format sense byte 2 bit 6: End-of-Medium (`EOM`, SPC-4 section 4.5.3).
+pub const SENSE_EOM: u8 = 0x40;
+/// Fixed-format sense byte 2 bit 5: Incorrect Length Indicator (`ILI`, SPC-4 section 4.5.3).
+pub const SENSE_ILI: u8 = 0x20;
 /// SCSI LUN prefix of the well-known logical unit addressing method (SAM-5 section 4.7.8).
 pub const SCSI_WELL_KNOWN_LUN_ID: u16 = 0xC100;
 /// Mask selecting the addressing method byte of a 16-bit SCSI LUN (SAM-5 section 4.7.8).
@@ -336,15 +383,16 @@ pub const MAX_LUN_INDEX: u16 = 31;
 pub const SERVICE_ACTION_READ_CAPACITY_16: u8 = 0x10;
 /// `FUA` bit in byte 1 of `READ`/`WRITE (10)/(16)` CDBs (SBC-3 sections 5.11 and 5.33).
 pub const CDB_FUA_BIT: u8 = 0x08;
-/// `SECURITY PROTOCOL` value for UFS RPMB in `SECURITY PROTOCOL IN/OUT` (UFS 3.1/4.0 section
-/// 12.2).
+/// `SECURITY PROTOCOL` value for UFS RPMB in `SECURITY PROTOCOL IN/OUT` (UFS 3.1 section
+/// 12.4.5.1 / UFS 4.0 section 12.4.6.1).
 pub const UFS_SECURITY_PROTOCOL: u8 = 0xEC;
-/// `SECURITY PROTOCOL SPECIFIC` value selecting RPMB region 0 (UFS 3.1/4.0 section 12.2).
+/// `SECURITY PROTOCOL SPECIFIC` value selecting RPMB region 0 (UFS 3.1 section 12.4.5.1 /
+/// UFS 4.0 section 12.4.6.1, Table 12.15).
 pub const RPMB_SECURITY_PROTOCOL_SPECIFIC: u16 = 0x0001;
 
 /// UPIU LUN of the RPMB well-known LU (UFS 3.1/4.0 section 10.8.5).
 pub const RPMB_LUN: u8 = 0xC4;
-/// Size of one RPMB data frame (UFS 3.1/4.0 section 12.2).
+/// Size of one Normal RPMB data frame (UFS 3.1/4.0 section 12.4.4.1).
 pub const RPMB_FRAME_SIZE: u64 = 512;
 /// Largest `fuchsia.hardware.rpmb/Request` buffer accepted: 16 frames.
 pub const MAX_RPMB_TRANSFER_SIZE: u64 = 8192;
@@ -352,7 +400,7 @@ pub const MAX_RPMB_TRANSFER_SIZE: u64 = 8192;
 /// Descriptor (`bRPMB_ReadWriteSize`). Kept at 2 frames (1 KiB) matching the C++ driver (`rpmb.h`)
 /// because `trusty_storage_proxy` concatenates up to 2 `Authenticated Data Write` frames
 /// (`reliable_write_size`) and 1 `Result Read Request` frame (`write_size`) into a single 3-frame
-/// `tx_frames` buffer, which UFS 3.1/4.0 section 12.4.4.1 requires to be sent as two separate
+/// `tx_frames` buffer, which UFS 4.0 section 12.4.7.1 requires to be sent as two separate
 /// `SECURITY PROTOCOL OUT` commands.
 pub const MAX_FRAMES_PER_TRANSFER: u64 = 2;
 /// `rpmb_size` reported when the RPMB Unit Descriptor is unreadable: 4 x 128 KiB = 512 KiB.

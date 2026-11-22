@@ -13,7 +13,7 @@ macro_rules! static_assert {
         } as usize] = [];
     };
     ($x:expr, $($arg:tt)+) => {
-        const _: () = assert!($x, $($arg)+);
+        const _: () = ::core::assert!($x, $($arg)+);
     };
 }
 

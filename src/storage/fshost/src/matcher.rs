@@ -556,18 +556,28 @@ mod tests {
     use crate::config::default_test_config;
     use crate::device::constants::LEGACY_FVM_TYPE_GUID;
     use crate::device::{DeviceTag, Parent, RegisteredDevices};
-    use crate::environment::{Filesystem, PartitionInfo, SinglePublisher};
-    use crate::matcher::config_matcher::ConfigMatcher;
+    use crate::environment::{DevicePublisher, Filesystem, PartitionInfo, SinglePublisher};
+    use crate::matcher::config_matcher::{ConfigMatcher, build_config_matchers};
     use anyhow::{Error, anyhow};
     use async_trait::async_trait;
-    use fidl_fuchsia_storage_block::{BlockInfo, BlockProxy, DeviceFlag};
+    use fidl::endpoints::{DiscoverableProtocolMarker as _, Proxy as _, ServerEnd};
+    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_storage_block::{BlockInfo, BlockMarker, BlockProxy, DeviceFlag};
     use fs_management::FVM_TYPE_GUID;
-    use fs_management::filesystem::{BlockConnector, ServingMultiVolumeFilesystem};
+    use fs_management::filesystem::{
+        BlockConnector, DirBasedBlockConnector, ServingMultiVolumeFilesystem,
+    };
     use fs_management::format::constants::{
         ALL_SYSTEM_PARTITION_LABELS, FUCHSIA_FVM_PARTITION_LABEL, FVM_PARTITION_LABEL,
     };
+    use fshost_assembly_config::{BlockDeviceConfig, BlockDeviceIdentifiers, BlockDeviceParent};
     use fuchsia_sync::Mutex;
+    use futures::StreamExt as _;
+    use futures::channel::mpsc;
+    use std::collections::HashSet;
     use std::sync::Arc;
+    use vfs::ExecutionScope;
+    use vfs::service::endpoint;
 
     #[derive(Clone)]
     struct MockDevice {
@@ -578,6 +588,8 @@ mod tests {
         is_fshost_ramdisk: bool,
         is_removable: bool,
         parent: Parent,
+        block_connector:
+            Option<Arc<dyn Fn() -> Result<Box<dyn BlockConnector>, Error> + Send + Sync>>,
     }
 
     impl MockDevice {
@@ -592,6 +604,7 @@ mod tests {
                 // Default to system partition table here mostly so we don't trip the publisher
                 // matcher unless we are testing it.
                 parent: Parent::SystemPartitionTable,
+                block_connector: None,
             }
         }
         fn set_content_format(mut self, format: DiskFormat) -> Self {
@@ -620,6 +633,13 @@ mod tests {
         }
         fn set_parent(mut self, parent: Parent) -> Self {
             self.parent = parent;
+            self
+        }
+        fn set_block_connector<F>(mut self, connector_fn: F) -> Self
+        where
+            F: Fn() -> Result<Box<dyn BlockConnector>, Error> + Send + Sync + 'static,
+        {
+            self.block_connector = Some(Arc::new(connector_fn));
             self
         }
     }
@@ -662,7 +682,10 @@ mod tests {
             self.partition_type.as_ref().ok_or_else(|| anyhow!("partition type not set"))
         }
         fn block_connector(&self) -> Result<Box<dyn BlockConnector>, Error> {
-            unreachable!()
+            match &self.block_connector {
+                Some(connector_fn) => connector_fn(),
+                None => unreachable!(),
+            }
         }
         fn block_proxy(&self) -> Result<BlockProxy, Error> {
             unreachable!()
@@ -1499,6 +1522,159 @@ mod tests {
                 .match_device(Box::new(device4), &mut env4)
                 .await
                 .expect("match_device failed for device 2")
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_config_matcher_multiple_paths() {
+        let scope = ExecutionScope::new();
+        let device_publisher = DevicePublisher::new(scope.clone());
+        let (block_dir, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+        vfs::directory::serve_on(
+            device_publisher.block_dir(),
+            fio::PERM_READABLE,
+            scope.clone(),
+            server_end,
+        );
+
+        // Duplicate destination paths must be rejected at staging time.
+        let duplicate_publisher = DevicePublisher::new(scope.clone());
+        assert!(
+            build_config_matchers(
+                &duplicate_publisher,
+                vec![
+                    BlockDeviceConfig {
+                        device: String::from("ota/durable_boot"),
+                        from: BlockDeviceIdentifiers {
+                            label: String::from("durable_boot"),
+                            parent: BlockDeviceParent::Gpt,
+                        },
+                    },
+                    BlockDeviceConfig {
+                        device: String::from("ota/durable_boot"),
+                        from: BlockDeviceIdentifiers {
+                            label: String::from("durable_boot"),
+                            parent: BlockDeviceParent::Gpt,
+                        },
+                    },
+                ],
+            )
+            .is_err()
+        );
+
+        let extra_matchers = build_config_matchers(
+            &device_publisher,
+            vec![
+                BlockDeviceConfig {
+                    device: String::from("durable_boot"),
+                    from: BlockDeviceIdentifiers {
+                        label: String::from("durable_boot"),
+                        parent: BlockDeviceParent::Gpt,
+                    },
+                },
+                BlockDeviceConfig {
+                    device: String::from("ota/durable_boot"),
+                    from: BlockDeviceIdentifiers {
+                        label: String::from("durable_boot"),
+                        parent: BlockDeviceParent::Gpt,
+                    },
+                },
+                BlockDeviceConfig {
+                    device: String::from("ota/zircon_a"),
+                    from: BlockDeviceIdentifiers {
+                        label: String::from("zircon_a"),
+                        parent: BlockDeviceParent::Gpt,
+                    },
+                },
+            ],
+        )
+        .expect("build_config_matchers failed");
+
+        // Open both paths before matching to verify pipelining works across all target paths.
+        let top_level_volume = fuchsia_fs::directory::open_async::<BlockMarker>(
+            &block_dir,
+            &format!("durable_boot/{}", BlockMarker::PROTOCOL_NAME),
+            fio::Flags::PROTOCOL_SERVICE,
+        )
+        .unwrap();
+        let nested_volume = fuchsia_fs::directory::open_async::<BlockMarker>(
+            &block_dir,
+            &format!("ota/durable_boot/{}", BlockMarker::PROTOCOL_NAME),
+            fio::Flags::PROTOCOL_SERVICE,
+        )
+        .unwrap();
+
+        let mut matchers =
+            Matchers::new_with_extra_matchers(&default_test_config(), extra_matchers);
+        let (sender, mut receiver) = mpsc::unbounded::<ServerEnd<BlockMarker>>();
+        let volume_dir = vfs::pseudo_directory! {
+            "volume" => endpoint(move |_scope, channel| {
+                sender.unbounded_send(channel.into_zx_channel().into()).unwrap();
+            }),
+        };
+        let device_scope = scope.clone();
+        let device1 = MockDevice::new()
+            .set_topological_path("gpt/durable_boot_1")
+            .set_partition_type([0x01; 16])
+            .set_partition_label("durable_boot")
+            .set_parent(Parent::SystemPartitionTable)
+            .set_block_connector(move || {
+                let (proxy, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+                vfs::directory::serve_on(
+                    volume_dir.clone(),
+                    fio::PERM_READABLE,
+                    device_scope.clone(),
+                    server_end,
+                );
+                Ok(Box::new(DirBasedBlockConnector::new(proxy, "volume".to_string())))
+            });
+
+        let mut env1 = MockEnv::new();
+        assert!(
+            matchers
+                .match_device(Box::new(device1), &mut env1)
+                .await
+                .expect("match_device failed for durable_boot")
+        );
+
+        let expected_koids: HashSet<_> = [
+            top_level_volume
+                .into_channel()
+                .unwrap()
+                .into_zx_channel()
+                .basic_info()
+                .unwrap()
+                .related_koid,
+            nested_volume
+                .into_channel()
+                .unwrap()
+                .into_zx_channel()
+                .basic_info()
+                .unwrap()
+                .related_koid,
+        ]
+        .into_iter()
+        .collect();
+        let actual_koids: HashSet<_> = [
+            receiver.next().await.unwrap().channel().koid().unwrap(),
+            receiver.next().await.unwrap().channel().koid().unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(actual_koids, expected_koids);
+
+        // A second physical device with the same (parent, label) must not match either path.
+        let device2 = MockDevice::new()
+            .set_topological_path("gpt/durable_boot_2")
+            .set_partition_type([0x01; 16])
+            .set_partition_label("durable_boot")
+            .set_parent(Parent::SystemPartitionTable);
+        let mut env2 = MockEnv::new();
+        assert!(
+            !matchers
+                .match_device(Box::new(device2), &mut env2)
+                .await
+                .expect("match_device failed for second durable_boot")
         );
     }
 

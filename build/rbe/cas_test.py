@@ -7,8 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import cas
-import cl_utils
+from build.rbe import cas, cl_utils
 
 
 class FileDownloadTests(unittest.TestCase):

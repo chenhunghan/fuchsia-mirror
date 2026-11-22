@@ -29,7 +29,7 @@
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-static_library("tests") {
+source_set("tests") {
   testonly = true
   sources = [
     "automation_instruction_unittests.cc",

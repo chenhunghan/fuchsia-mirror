@@ -158,11 +158,28 @@ async def _handle_driver_or_node_attach(
         return await _install_driver_attach_filter(daemon, req)
 
     target_desc = req.driver or req.node or ""
-    detail = f" (ffx error: {ffx_error})" if ffx_error else ""
+    if ffx_error is not None:
+        # The lookup itself failed, so "no match" would be misleading, and
+        # suggesting --wait would point at a filter that matches every new
+        # driver host.
+        return Response(
+            success=False,
+            message=(
+                f"Could not look up the driver host for '{target_desc}':"
+                f" {ffx_error}. To attach without `ffx driver`, find the"
+                " driver host process name (for example"
+                " 'driver-host-#<colocation name>') with"
+                " `fx debug cli console ps`, then run"
+                " `fx debug cli attach --exact --weak '<name>'`."
+                " The transport hazard warning needs `ffx driver`, so it is"
+                " not shown on that path; avoid the host that carries the"
+                " device connection."
+            ),
+        )
     return Response(
         success=False,
         message=(
-            f"No running driver_host matched '{target_desc}'{detail}. "
+            f"No running driver_host matched '{target_desc}'. "
             "Use --wait to install a filter for future driver starts."
         ),
     )

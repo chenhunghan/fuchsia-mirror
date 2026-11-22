@@ -39,7 +39,7 @@
             },
         },
         {
-            name: "pwm-ffd1b000",
+            name: "pwm",
             service: "fuchsia.pwm.Init",
             from: "#pwm-init",
             to: "#bt-uart-ffd24000",

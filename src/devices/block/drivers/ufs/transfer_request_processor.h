@@ -5,9 +5,9 @@
 #ifndef SRC_DEVICES_BLOCK_DRIVERS_UFS_TRANSFER_REQUEST_PROCESSOR_H_
 #define SRC_DEVICES_BLOCK_DRIVERS_UFS_TRANSFER_REQUEST_PROCESSOR_H_
 
-#include <lib/ddk/hw/arch_ops.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/fit/function.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/trace/event.h>
 
 #include <span>
@@ -128,8 +128,39 @@ class TransferRequestProcessor : public RequestProcessor {
     return static_cast<uint32_t>(std::popcount(allocated_slots_mask_ & kIoSlotsMask));
   }
 
+  // Aborts and releases any allocated I/O slots (0..30) after host controller DMA has been
+  // stopped (`controller_stopped == true`, i.e. `HCE == 0` cleared hardware `UTRLDBR`), or
+  // quarantines pinned PMTs without calling `unpin()` if disabling the host controller failed.
+  // Invokes each slot's completion callback with `abort_status` outside `slot_lock_`.
+  void AbortInflightIoRequests(bool controller_stopped,
+                               zx_status_t abort_status = ZX_ERR_IO_NOT_PRESENT)
+      TA_EXCL(slot_lock_);
+
+  size_t GetQuarantinedPmtCountForTesting() const {
+    return quarantined_pmt_count_.load(std::memory_order_acquire);
+  }
+  size_t GetQuarantinedPageCountForTesting() const {
+    return quarantined_page_count_.load(std::memory_order_acquire);
+  }
+  uint64_t GetTimeoutLogCountForTesting() const {
+    return timeout_log_count_.load(std::memory_order_acquire);
+  }
+
  private:
   friend class UfsTest;
+
+  struct TimeoutRegisterSnapshot {
+    uint32_t hcs = 0;
+    uint32_t is = 0;
+    uint32_t utrldbr = 0;
+    uint32_t uecpa = 0;
+    uint32_t uecdl = 0;
+    uint32_t uecn = 0;
+    uint32_t uect = 0;
+    uint32_t uecdme = 0;
+  };
+  TimeoutRegisterSnapshot CaptureTimeoutRegisters() TA_REQ(slot_lock_);
+  void QuarantineSlotPmtLocked(uint8_t slot_num, RequestSlot &request_slot) TA_REQ(slot_lock_);
 
   zx::result<> FillDescriptorAndSendRequest(
       uint8_t slot, DataDirection data_dir, uint16_t response_offset, uint16_t response_length,
@@ -145,7 +176,7 @@ class TransferRequestProcessor : public RequestProcessor {
                                                 scsi::StatusCode response_status);
   scsi::HostStatusCode ScsiStatusToHostStatus(scsi::StatusCode command_status);
 
-  void RequestCompletion(uint8_t slot_num, RequestSlot &request_slot, bool is_timeout,
+  void RequestCompletion(uint8_t slot_num, RequestSlot &request_slot, zx_status_t completion_status,
                          fit::callback<void(zx_status_t)> &cb, zx_status_t &status)
       TA_REQ(slot_lock_);
   zx_status_t UpiuCompletion(uint8_t slot_num, RequestSlot &request_slot,
@@ -157,28 +188,34 @@ class TransferRequestProcessor : public RequestProcessor {
 
   void SetDoorBellRegister(uint8_t slot_num) override {
     // Ensure host memory descriptors are visible before the MMIO doorbell write.
-    hw_wmb();
+    WriteDataMemoryBarrier();
     UtrListDoorBellReg::Get().FromValue(1u << slot_num).WriteTo(&register_);
   }
   uint32_t ReadDoorBellRegister() override {
     const uint32_t doorbell = UtrListDoorBellReg::Get().ReadFrom(&register_).door_bell();
     // Ensure the MMIO status read completes before reading subsequent host memory descriptors.
-    hw_rmb();
+    ReadDataMemoryBarrier();
     return doorbell;
   }
-  // Checks if the request at |slot_num| has completed (either via hardware completion or timeout).
-  // If the request completed, returns true, sets |cb| to the completion callback that was stored in
-  // the request slot, and sets |status| to the completion result status.
+
+  // Checks if the request at |slot_num| has completed via hardware doorbell clear. If it has,
+  // returns true, sets |cb| to the completion callback stored in the slot, and sets |status| to
+  // the completion result status. For an I/O slot still outstanding past its deadline, logs a
+  // controller register snapshot, re-arms the deadline, and returns false (admin slot timeouts are
+  // handled by SendRequestUpiu() instead).
   // The caller must invoke |cb(status)| after releasing |slot_lock_| to avoid lock re-entrancy and
   // inversion deadlocks.
   bool ProcessSlotCompletion(uint8_t slot_num, uint32_t doorbell,
-                             fit::callback<void(zx_status_t)> &cb, zx_status_t &status)
+                             fit::callback<void(zx_status_t)> &cb, zx_status_t &status,
+                             std::optional<TimeoutRegisterSnapshot> *timeout_snapshot = nullptr)
       TA_REQ(slot_lock_);
 
   // TODO(https://fxbug.dev/42075643): Background Operation uses the admin slot, causing a race
   // condition for admin commands running on the main thread. To fix this, per-slot locking is
   // required, but I added admin_slot_lock_ as a temporary solution.
   std::mutex admin_slot_lock_;
+
+  std::atomic<uint64_t> timeout_log_count_{0};
 };
 
 }  // namespace ufs

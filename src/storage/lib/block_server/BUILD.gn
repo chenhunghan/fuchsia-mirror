@@ -2,107 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_test_suite.gni")
-import("//build/components.gni")
-import("//build/rust/rustc_staticlib.gni")
-import("//build/test.gni")
-
-# The C/C++ targets below remain in GN because `block_server_cc` depends on
-# `//sdk/lib/driver/logging/cpp`, which has no Bazel build yet.
-# LINT.IfChange
-rustc_staticlib("block_server_c") {
-  visibility = [ ":*" ]
-  edition = "2024"
-  public = [ "block_server_c.h" ]
-  sources = [
-    "src/async_interface.rs",
-    "src/c_interface.rs",
-    "src/callback_interface.rs",
-    "src/callback_interface/block_service.rs",
-    "src/decompression_tests.rs",
-    "src/lib.rs",
-    "src/mapper.rs",
-    "src/testing.rs",
-    "src/verifier.rs",
-  ]
-  deps = [
-    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-runtime",
-    "//src/lib/fuchsia-sync",
-    "//src/lib/trace/rust:trace",
-    "//src/storage/lib/block_protocol",
-    "//src/storage/lib/delivery_blob",
-    "//src/storage/lib/mapping",
-    "//src/storage/lib/ptr_slice",
-    "//src/storage/lib/storage_device",
-    "//src/storage/lib/vmo-fifo",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:scopeguard",
-    "//third_party/rust_crates:slab",
-    "//third_party/rust_crates:zstd",
-
-    # `rustc_staticlib` does not forward `link_deps`.
-    "//third_party/zstd",
-  ]
-}
-
-# LINT.ThenChange(BUILD.bazel)
-
-source_set("block_server_cc") {
-  sources = [ "block_server.cc" ]
-  public = [ "block_server.h" ]
-  public_deps = [
-    ":block_server_c",
-    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
-    "//sdk/lib/async:async-cpp",
-    "//sdk/lib/driver/logging/cpp",
-    "//sdk/lib/driver/runtime:driver_runtime_cpp",
-    "//zircon/system/ulib/zx",
-  ]
-}
-
-source_set("fake_block_server_cc") {
-  sources = [ "fake_server.cc" ]
-  public = [ "fake_server.h" ]
-  public_deps = [
-    ":block_server_cc",
-    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
-    "//src/storage/lib/block_client/cpp",
-    "//src/storage/lib/buffer",
-    "//zircon/system/ulib/zx",
-  ]
-}
-
-test("block_server_cc_tests") {
-  sources = [ "block_server_cc_tests.cc" ]
-  deps = [
-    ":block_server_cc",
-    "//sdk/lib/driver/testing/cpp",
-    "//src/devices/lib/block",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/storage/lib/block_client/cpp",
-    "//src/storage/lib/buffer",
-  ]
-}
-
-fuchsia_unittest_package("block_server_cc_tests_package") {
-  package_name = "block-server-cc-tests"
-  deps = [ ":block_server_cc_tests" ]
-}
-
-bazel_test_suite("bazel_tests") {
-  target_tests = [ "//src/storage/lib/block_server:block_server_tests" ]
-}
-
 group("tests") {
   testonly = true
   deps = [
-    ":bazel_tests",
     ":block_server_cc_tests_package",
     ":block_server_tests",
     "integration:tests",
@@ -154,6 +56,7 @@ rustc_library("block_server") {
     "//src/devices/block/drivers/*",
     "//src/storage/fvm:*",
     "//src/storage/fxfs/platform:*",
+    "//src/storage/fxfs/tools:*",
     "//src/storage/gpt/component:*",
     "//src/storage/gpt/rust:*",
     "//src/storage/lib/block_client/rust:*",
@@ -173,6 +76,7 @@ rustc_library("block_server") {
     "//src/storage/lib/mapping",
     "//src/storage/lib/ptr_slice",
     "//src/storage/lib/storage_device",
+    "//src/storage/lib/units",
     "//src/storage/lib/vmo-fifo",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
@@ -181,6 +85,105 @@ rustc_library("block_server") {
     "//third_party/rust_crates:slab",
     "//third_party/rust_crates:zstd",
   ]
+}
+
+rustc_staticlib("block_server_c") {
+  sources = [
+    "src/async_interface.rs",
+    "src/c_interface.rs",
+    "src/callback_interface.rs",
+    "src/callback_interface/block_service.rs",
+    "src/decompression_tests.rs",
+    "src/lib.rs",
+    "src/mapper.rs",
+    "src/testing.rs",
+    "src/verifier.rs",
+  ]
+  features = [ "c_interface" ]
+  edition = "2024"
+  link_deps = [ "//third_party/zstd" ]
+  deps = [
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//src/lib/trace/rust:trace",
+    "//src/storage/lib/block_protocol",
+    "//src/storage/lib/delivery_blob",
+    "//src/storage/lib/mapping",
+    "//src/storage/lib/ptr_slice",
+    "//src/storage/lib/storage_device",
+    "//src/storage/lib/units",
+    "//src/storage/lib/vmo-fifo",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:scopeguard",
+    "//third_party/rust_crates:slab",
+    "//third_party/rust_crates:zstd",
+  ]
+}
+
+source_set("block_server_cc") {
+  sources = [ "block_server.cc" ]
+  public = [
+    "block_server.h",
+    "block_server_c.h",
+  ]
+  visibility = [
+    ":*",
+    "//src/devices/block/*",
+  ]
+  public_deps = [
+    ":block_server_c",
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/driver/runtime:driver_runtime_cpp",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+source_set("fake_block_server_cc") {
+  sources = [ "fake_server.cc" ]
+  public = [ "fake_server.h" ]
+  visibility = [
+    ":*",
+    "//src/developer/adb/bin/adb-reboot:*",
+    "//src/firmware/lib/fastboot/test:*",
+    "//src/firmware/paver/test:*",
+    "//src/storage/fvm:*",
+    "//src/storage/lib/fs_management/cpp:*",
+  ]
+  public_deps = [
+    ":block_server_cc",
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+    "//src/storage/lib/block_client/cpp",
+    "//src/storage/lib/buffer",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
+cc_test_executable("block_server_cc_tests") {
+  sources = [ "block_server_cc_tests.cc" ]
+  deps = [
+    ":block_server_cc",
+    "//sdk/lib/driver/testing/cpp",
+    "//src/devices/lib/block",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/storage/lib/block_client/cpp",
+    "//src/storage/lib/buffer",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_package("block_server_cc_tests_package") {
+  package_name = "block-server-cc-tests-gn"
+  component_name = "block-server-cc-tests"
+  deps = [ ":block_server_cc_tests" ]
 }
 
 rustc_test("block_server_test") {
@@ -210,6 +213,7 @@ rustc_test("block_server_test") {
            "//src/storage/lib/mapping",
            "//src/storage/lib/ptr_slice",
            "//src/storage/lib/storage_device",
+           "//src/storage/lib/units",
            "//src/storage/lib/vmo-fifo",
            "//third_party/rust_crates:anyhow",
            "//third_party/rust_crates:futures",

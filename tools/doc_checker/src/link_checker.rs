@@ -5,8 +5,8 @@
 //! link_checker implements the [`DocCheck` trait  used to perform checks on the links and images
 //! found in markdown documentation in the Fuchsia project.
 
-use crate::md_element::{CowStr, Element, LinkType};
-use crate::path_ext::normalize_path;
+use crate::md_element::{CowStr, Element, LinkType, Tag};
+use crate::path_ext::{is_reference_path, normalize_path};
 use crate::{DocCheck, DocCheckError, DocCheckerArgs, DocLine, DocPathExt, ReachabilityGraph};
 use anyhow::{Result, bail};
 use async_trait::async_trait;
@@ -37,11 +37,11 @@ const GERRIT_HOST: &str = "fuchsia.googlesource.com";
 
 pub(crate) const PUBLISHED_DOCS_HOST: &str = "fuchsia.dev";
 
-/// List of words that cannot be used as single word ALT text for images.
-/// This is a pretty small list (n < 5), but if it grows large, it might be
-/// better to manages as an external file vs. inline.
+/// Image alt text values that doc-checker rejects. The checked value is the
+/// image title followed by the alt text, so an image with a non-blank title is
+/// never rejected. Whether alt text is descriptive is left to the
+/// fuchsia-doc-style review agent (docs/skills/edit-fuchsia-doc).
 const DISALLOWED_ALT_IMAGE_TEXT: [&str; 1] = [""];
-// TODO(https://fxbug.dev/42064332): disallow "drawing, "image" for alt text";
 
 /// List of active repos under fuchsia.googlesource.com which can be linked to.
 const VALID_PROJECTS: [&str; 23] = [
@@ -74,9 +74,8 @@ const VALID_PROJECTS: [&str; 23] = [
 /// Links to other locations have to be allowed by adding the source doc
 /// page to FILES_ALLOWED_TO_LINK_TO_PUBLISHED_DOCS.
 /// "" - is the root of fuchsia.dev
-/// "reference" is the generated reference documentation.
 /// "schema" is the schema URLs used for parsing.
-const PUBLISHED_LINKS_ALLOWED: [&str; 3] = ["", "reference", "schema"];
+const PUBLISHED_LINKS_ALLOWED: [&str; 2] = ["", "schema"];
 
 /// A link (URL, or file path) and it location in the markdown.
 #[derive(Debug, Clone, Eq, Hash, PartialEq)]
@@ -98,6 +97,7 @@ struct LinkChecker {
     links: Vec<LinkReference>,
     reachability_graph: ReachabilityGraph,
     reference_docs_root: Option<PathBuf>,
+    reference_folder: PathBuf,
     pub(crate) glossary_terms: Option<HashSet<String>>,
 }
 
@@ -142,9 +142,9 @@ impl LinkChecker {
             } else {
                 link_to_check = url.to_string();
             }
-        } else if link.starts_with("/reference") {
-            // Generated reference docs are in /reference, and are
-            // treated as external since they are not part of the source tree.
+        } else if is_reference_path(link, &self.reference_folder) {
+            // Generated reference docs live under the configured reference folder and
+            // are treated as external since they are not part of the source tree.
             link_to_check = format!("https://{}{}", PUBLISHED_DOCS_HOST, link);
         } else if link.starts_with('/') {
             // paths are used as-is.
@@ -193,6 +193,13 @@ impl DocCheck for LinkChecker {
     /// Applies the checks for links.
     fn check<'a>(&mut self, element: &'a Element<'_>) -> Result<Option<Vec<DocCheckError>>> {
         let mut errors: Vec<DocCheckError> = vec![];
+        if self
+            .reference_docs_root
+            .as_ref()
+            .is_none_or(|r| !element.doc_line().file_name.starts_with(r))
+        {
+            check_headings(element, &mut errors);
+        }
 
         // Get all the links from the element. This is needed since the element is commonly
         // a Block or some other collection of elements.
@@ -200,15 +207,15 @@ impl DocCheck for LinkChecker {
             for ele in links {
                 let link: &'a CowStr<'a> = match ele {
                     Element::Link(link_type, link_url, link_title, elements, _) => {
-                        let link = match link_type {
-                            LinkType::Inline => link_url,
-                            LinkType::Reference => link_url,
-                            LinkType::ReferenceUnknown => {
-                                // Glossary reference links (e.g. [text][glossary.term]) are
-                                // resolved by DocContext::handle_broken_link to canonical in-tree
-                                // links to /docs/glossary/README.md#<anchor>. Process them as normal
-                                // links so their targets and fragment anchors are validated against
-                                // docs/glossary/_glossary.yaml without routing to handle_shortcut_unknown.
+                        match link_type {
+                            LinkType::ReferenceUnknown | LinkType::ShortcutUnknown => {
+                                // Glossary reference and shortcut links (e.g. [text][glossary.term]
+                                // or [glossary.term]) are resolved by
+                                // DocContext::handle_broken_link to canonical in-tree links to
+                                // /docs/glossary/README.md#<anchor>. Process them as normal links
+                                // so their targets and fragment anchors are validated against
+                                // docs/glossary/_glossary.yaml without routing to
+                                // handle_shortcut_unknown.
                                 if link_url.starts_with("/docs/glossary") {
                                     link_url
                                 } else {
@@ -218,7 +225,6 @@ impl DocCheck for LinkChecker {
                                     continue;
                                 }
                             }
-                            LinkType::Collapsed => link_url,
                             LinkType::CollapsedUnknown => {
                                 errors.push(DocCheckError::new_error(
                                     ele.doc_line().line_num,
@@ -230,39 +236,17 @@ impl DocCheck for LinkChecker {
                                 ));
                                 continue;
                             }
-                            LinkType::Shortcut => link_url,
-                            LinkType::ShortcutUnknown => {
-                                // Shortcut glossary links (e.g. [glossary.term]) are resolved by
-                                // DocContext::handle_broken_link to canonical in-tree links
-                                // to /docs/glossary/README.md#<anchor>. Process them as normal links
-                                // so their targets and fragment anchors are validated against
-                                // docs/glossary/_glossary.yaml without routing to handle_shortcut_unknown.
-                                if link_url.starts_with("/docs/glossary") {
-                                    link_url
-                                } else {
-                                    errors.extend(handle_shortcut_unknown(
-                                        ele, link_url, link_title, elements,
-                                    ));
-                                    continue;
-                                }
-                            }
-                            LinkType::Autolink => link_url,
-                            LinkType::Email => continue,
-                            LinkType::WikiLink { .. } => link_url,
-                        };
-                        if link.starts_with("mailto:") {
-                            // do nothing.
-                            continue;
+                            _ => match match_link_type(link_type, link_url) {
+                                Some(link) => link,
+                                None => continue,
+                            },
                         }
-                        link
                     }
                     Element::Image(link_type, link_url, link_title, elements, _) => {
                         // Unknown reference labels are reported here; the alt text is still
                         // checked, but there is no target to look up on disk.
                         let mut is_unknown_ref = false;
                         let link = match link_type {
-                            LinkType::Inline => link_url,
-                            LinkType::Reference => link_url,
                             LinkType::ReferenceUnknown => {
                                 errors.push(DocCheckError::new_error(
                                     ele.doc_line().line_num,
@@ -275,7 +259,6 @@ impl DocCheck for LinkChecker {
                                 is_unknown_ref = true;
                                 link_url
                             }
-                            LinkType::Collapsed => link_url,
                             LinkType::CollapsedUnknown => {
                                 errors.push(DocCheckError::new_error(
                                     ele.doc_line().line_num,
@@ -288,7 +271,6 @@ impl DocCheck for LinkChecker {
                                 is_unknown_ref = true;
                                 link_url
                             }
-                            LinkType::Shortcut => link_url,
                             LinkType::ShortcutUnknown => {
                                 // Check if this is a case where the text is in [].
                                 let text = elements
@@ -323,14 +305,11 @@ impl DocCheck for LinkChecker {
                                 }
                                 link_url
                             }
-                            LinkType::Autolink => link_url,
-                            LinkType::Email => continue,
-                            LinkType::WikiLink { .. } => link_url,
+                            _ => match match_link_type(link_type, link_url) {
+                                Some(link) => link,
+                                None => continue,
+                            },
                         };
-                        if link.starts_with("mailto:") {
-                            // do nothing.
-                            continue;
-                        }
                         // Check for alt text
                         let alt = ele.get_contents().trim().to_string();
                         if DISALLOWED_ALT_IMAGE_TEXT.contains(&alt.as_str()) {
@@ -374,6 +353,7 @@ impl DocCheck for LinkChecker {
                     &link_to_check,
                     &self.project,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                 )
                 .map_err(|err| errors.push(err))
                 .is_err();
@@ -485,7 +465,12 @@ pub(crate) fn do_in_tree_check(
     link_to_check: &str,
     in_tree_path: &Path,
 ) -> Result<PathBuf, DocCheckError> {
-    let rel_path = in_tree_path.strip_prefix("/").unwrap_or(in_tree_path);
+    // Resolve `.` and `..` before touching the filesystem so a path that escapes the root is
+    // rejected without probing the host or echoing `root_dir` in the error.
+    let normalized = normalize_path(in_tree_path).map_err(|e| {
+        DocCheckError::new_error(doc_line.line_num, doc_line.file_name.clone(), &e.to_string())
+    })?;
+    let rel_path = normalized.strip_prefix("/").unwrap_or(normalized.as_path());
     let filepath = root_dir.join(rel_path);
     if !path_helper::exists(&filepath) {
         // Look for missing the file extension.
@@ -546,18 +531,6 @@ pub(crate) fn do_in_tree_check(
         )
     })?;
 
-    let normalized_root = normalize_path(root_dir).unwrap_or_else(|_| root_dir.to_path_buf());
-    if !normalized_target.starts_with(&normalized_root) {
-        return Err(DocCheckError::new_error(
-            doc_line.line_num,
-            doc_line.file_name.clone(),
-            &format!(
-                "relative path {:?} points outside root directory {:?}",
-                in_tree_path, root_dir
-            ),
-        ));
-    }
-
     Ok(normalized_target)
 }
 
@@ -568,6 +541,7 @@ pub(crate) fn do_check_link(
     link: &str,
     project_being_checked: &str,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
 ) -> Result<(), DocCheckError> {
     match link.parse::<Uri>() {
         Ok(uri) => {
@@ -578,7 +552,13 @@ pub(crate) fn do_check_link(
                 },
                 None => return Ok(()),
             }
-            check_link_authority(doc_line, &uri, project_being_checked, allow_fuchsia_src_links)?;
+            check_link_authority(
+                doc_line,
+                &uri,
+                project_being_checked,
+                allow_fuchsia_src_links,
+                reference_folder,
+            )?;
 
             // Check for host language parameter on google owned urls.
             if uri
@@ -626,33 +606,39 @@ pub(crate) fn is_intree_link(
             Err(e) => bail!("Invalid Url {}: {:?}", link_to_check, e),
         };
         let parts = uri.path().split('/').collect::<Vec<&str>>();
-        if parts.len() <= 3 {
-            let p = parts.join("/");
-            if p == format!("/{}/", project) || p == format!("/{}", project) {
-                return Ok(None);
-            }
+        // `parts[0]` is empty; `parts[1]` must be exactly the project, since the prefix check
+        // above also matches sibling repositories such as `fuchsia-infra`.
+        if parts.get(1) != Some(&project) {
+            return Ok(None);
         }
-        // skip over any branch spec. The first part is empty. It is +, or +show, or +log, etc.
-        // Short URLs such as .../+/HEAD, .../+/refs/heads or .../+/refs/heads/main have no file
-        // path; they are not in-tree links and must not index past the end of `parts`.
-        if parts.len() > 3 && parts[2].starts_with('+') {
+        // Without a segment after the project (`.../fuchsia`, `.../fuchsia/`) the link is the
+        // repository landing page.
+        let Some(first) = parts.get(2).filter(|segment| !segment.is_empty()) else {
+            return Ok(None);
+        };
+        // skip over any branch spec. It is +, or +show, or +log, etc.
+        // Short URLs such as .../+, .../+/HEAD, .../+/refs/heads or .../+/refs/heads/main have no
+        // file path; they are not in-tree links and must not index past the end of `parts`.
+        if first.starts_with('+') {
             let filepath = PathBuf::from("/");
             // Include all refs/heads except for "releases", which should be directly linked.
-            if parts[3] == "refs"
+            if parts.get(3) == Some(&"refs")
                 && parts.get(4) == Some(&"heads")
                 && parts.get(5).is_some_and(|branch| *branch != "releases")
                 && parts.get(6).is_some_and(|segment| !segment.is_empty())
             {
-                return Ok(Some(filepath.join(parts[6..].join("/"))));
-            } else if parts[3] == "HEAD"
+                return normalize_path(&filepath.join(parts[6..].join("/"))).map(Some);
+            } else if parts.get(3) == Some(&"HEAD")
                 && parts.get(4).is_some_and(|folder| *folder == docs_folder.to_string_lossy())
             {
-                return Ok(Some(filepath.join(parts[4..].join("/"))));
+                return normalize_path(&filepath.join(parts[4..].join("/"))).map(Some);
             } else {
                 return Ok(None);
             }
         } else {
-            return Ok(Some(PathBuf::from(parts.join("/"))));
+            // Drop the leading empty segment and the project so the path is rooted at the
+            // repository root, like the branch-spec arms above.
+            return normalize_path(&Path::new("/").join(parts[2..].join("/"))).map(Some);
         }
     } else if link_to_check.starts_with('/') {
         return normalize_path(Path::new(filepath)).map(Some);
@@ -666,6 +652,7 @@ fn check_link_authority(
     uri: &Uri,
     project_being_checked: &str,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
 ) -> Result<(), DocCheckError> {
     let link_to_fuchsia_gerrit_host = match uri.authority() {
         Some(a) => *a == GERRIT_HOST,
@@ -729,7 +716,10 @@ fn check_link_authority(
       There is also a list of exceptions of files that can link via https, these allow gtiles to
       point to fuchsia.dev, and could be removed at some point in the future.
     */
-    if link_to_published_docs_host && !PUBLISHED_LINKS_ALLOWED.contains(&project) {
+    if link_to_published_docs_host
+        && !PUBLISHED_LINKS_ALLOWED.contains(&project)
+        && !is_reference_path(uri.path(), reference_folder)
+    {
         let base_name = doc_line
             .file_name
             .file_name()
@@ -753,6 +743,28 @@ fn check_link_authority(
         }
     }
     Ok(())
+}
+
+/// Returns the target of a link or image whose link type has a checkable destination, or `None`
+/// when there is nothing to check: e-mail autolinks, `mailto:` destinations, and unknown
+/// references. Callers report unknown references themselves, since the error messages (and the
+/// image alt-text check) depend on the element.
+fn match_link_type<'a, 's>(
+    link_type: &LinkType,
+    link_url: &'a CowStr<'s>,
+) -> Option<&'a CowStr<'s>> {
+    match link_type {
+        LinkType::Inline
+        | LinkType::Reference
+        | LinkType::Collapsed
+        | LinkType::Shortcut
+        | LinkType::Autolink
+        | LinkType::WikiLink { .. } => (!link_url.starts_with("mailto:")).then_some(link_url),
+        LinkType::Email
+        | LinkType::ReferenceUnknown
+        | LinkType::CollapsedUnknown
+        | LinkType::ShortcutUnknown => None,
+    }
 }
 
 fn handle_shortcut_unknown(
@@ -922,6 +934,61 @@ fn tcp_options() -> TcpOptions {
     options
 }
 
+/// Converts an input string into a canonical lowercase hyphenated anchor slug.
+pub(crate) fn slugify_anchor(input: &str) -> String {
+    input
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+        .to_ascii_lowercase()
+}
+
+fn is_valid_heading_anchor(anchor: &str) -> bool {
+    !anchor.is_empty()
+        && anchor.split('-').all(|part| {
+            !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
+}
+
+fn check_headings(element: &Element<'_>, errors: &mut Vec<DocCheckError>) {
+    match element {
+        Element::Block(Tag::Heading { id: Some(raw), .. }, elements, doc_line) => {
+            let mut tokens = raw.split_whitespace();
+            let anchor = tokens.next().and_then(|t| t.strip_prefix('#')).unwrap_or("");
+            if !is_valid_heading_anchor(anchor) || tokens.any(|t| !t.starts_with('.')) {
+                let title: String = elements.iter().map(|e| e.get_contents()).collect();
+                let title = title.rsplit_once('{').map_or(title.as_str(), |(t, _)| t);
+                let message = format!(
+                    "Invalid heading anchor '{{{raw}}}': anchors must use only lowercase ASCII alphanumeric characters separated by single hyphens"
+                );
+                // Suggest the normalized anchor, falling back to the heading title. Omit the
+                // suggestion when neither contains any ASCII alphanumeric characters.
+                let suggested = [slugify_anchor(anchor), slugify_anchor(title)]
+                    .into_iter()
+                    .find(|s| !s.is_empty());
+                errors.push(match suggested {
+                    Some(slug) => DocCheckError::new_error_helpful(
+                        doc_line.line_num,
+                        doc_line.file_name.clone(),
+                        &message,
+                        &format!("using '{{#{slug}}}'"),
+                    ),
+                    None => DocCheckError::new_error(
+                        doc_line.line_num,
+                        doc_line.file_name.clone(),
+                        &message,
+                    ),
+                });
+            }
+        }
+        Element::Block(_, elements, _) | Element::List(_, elements, _) => {
+            elements.iter().for_each(|e| check_headings(e, errors));
+        }
+        _ => {}
+    }
+}
+
 /// Loads the valid glossary term slugs and keys from docs/glossary/_glossary.yaml if present.
 fn load_glossary_terms(root_dir: &Path, docs_folder: &Path) -> Option<HashSet<String>> {
     let glossary_path = root_dir.join(docs_folder).join("glossary/_glossary.yaml");
@@ -942,32 +1009,16 @@ fn load_glossary_terms(root_dir: &Path, docs_folder: &Path) -> Option<HashSet<St
         Ok(e) => e,
         Err(_) => return None,
     };
-    let mut terms = HashSet::new();
     // As defined in docs/_common/_doc_widgets.md:34, DevSite only matches terms
     // that have a non-empty short_description.
-    for entry in entries
-        .into_iter()
-        .filter(|e| !e.term.trim().is_empty() && !e.short_description.trim().is_empty())
-    {
-        let term = entry.term.trim();
-        // Slug form: lowercase, non-alphanumerics collapsed to '-'
-        let mut slug = String::new();
-        let mut last_dash = true;
-        for c in term.chars() {
-            if c.is_alphanumeric() {
-                slug.push(c.to_ascii_lowercase());
-                last_dash = false;
-            } else if !last_dash {
-                slug.push('-');
-                last_dash = true;
-            }
-        }
-        let trimmed_slug = slug.trim_matches('-').to_string();
-        if !trimmed_slug.is_empty() {
-            terms.insert(trimmed_slug);
-        }
-    }
-    Some(terms)
+    Some(
+        entries
+            .into_iter()
+            .filter(|e| !e.term.trim().is_empty() && !e.short_description.trim().is_empty())
+            .map(|e| slugify_anchor(&e.term))
+            .filter(|s| !s.is_empty())
+            .collect(),
+    )
 }
 
 /// Called from main to register all the checks to preform which are implemented in this module.
@@ -985,6 +1036,7 @@ pub(crate) fn register_markdown_checks(
         allow_fuchsia_src_links: opt.allow_fuchsia_src_links,
         reachability_graph,
         reference_docs_root: opt.reference_docs_root.clone(),
+        reference_folder: opt.reference_folder.clone(),
         glossary_terms,
     };
     Ok(vec![Box::new(checker)])
@@ -993,7 +1045,7 @@ pub(crate) fn register_markdown_checks(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DocContext;
+    use crate::{DEFAULT_REFERENCE_FOLDER, DocContext};
 
     #[test]
     fn test_make_link_to_check() -> Result<()> {
@@ -1006,6 +1058,7 @@ mod tests {
             allow_fuchsia_src_links: false,
             reachability_graph: Default::default(),
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             glossary_terms: None,
         };
         let filename = PathBuf::from("/my/root/fuchsia/docs/index.md");
@@ -1046,6 +1099,7 @@ mod tests {
             reference_docs_root: None,
             skip_link_check: false,
             allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
         };
 
         let mut checks = register_markdown_checks(&opt, Default::default())?;
@@ -1084,7 +1138,7 @@ mod tests {
             ("https://fuchsia.googlesource.com/fuchsia/+/HEAD/sdk/lib/fdio", None),
             (
                 "https://fuchsia.googlesource.com/fuchsia/docs/README.md",
-                Some(PathBuf::from("/fuchsia/docs/README.md")),
+                Some(PathBuf::from("/docs/README.md")),
             ),
             (
                 "https://fuchsia.googlesource.com/fuchsia/+/7461d8882167e7a9d1b494e3b1734d2c063830fc/build/package.gni#604",
@@ -1115,10 +1169,39 @@ mod tests {
                 "/some/root/dir_sibling/docs/README.md",
                 Some(PathBuf::from("/some/root/dir_sibling/docs/README.md")),
             ),
+            // Gerrit URL paths are normalized like the root_dir and leading-slash forms.
+            (
+                "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../src/main.cc",
+                Some(PathBuf::from("/src/main.cc")),
+            ),
+            (
+                "https://fuchsia.googlesource.com/fuchsia/+show/HEAD/docs/../src/main.cc",
+                Some(PathBuf::from("/src/main.cc")),
+            ),
+            (
+                "https://fuchsia.googlesource.com/fuchsia/docs/../src/main.cc",
+                Some(PathBuf::from("/src/main.cc")),
+            ),
+            // A query string is split off before normalization.
+            (
+                "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../src/main.cc?format=TEXT",
+                Some(PathBuf::from("/src/main.cc")),
+            ),
         ];
         for (link_to_check, expected) in test_cases {
             let result = is_intree_link(project, root_dir, &docs_folder, link_to_check)?;
             assert_eq!(result, expected, "link: {link_to_check}");
+        }
+        // Gerrit URL paths that climb past the repository root are rejected before any caller
+        // can join them onto root_dir.
+        for escaping_url in [
+            "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../../../../etc/passwd",
+            "https://fuchsia.googlesource.com/fuchsia/+show/HEAD/docs/../../etc/passwd",
+            "https://fuchsia.googlesource.com/fuchsia/docs/../../etc/passwd",
+        ] {
+            let err = is_intree_link(project, root_dir, &docs_folder, escaping_url)
+                .expect_err(&format!("expected beyond-root error: {escaping_url}"));
+            assert!(err.to_string().contains("references parent beyond root"), "{err}");
         }
         // An empty root_dir never matches as a prefix.
         assert_eq!(
@@ -1129,11 +1212,17 @@ mod tests {
         // Gerrit URLs with a branch spec but no file path are not in-tree links and must not
         // index past the end of the path segments or resolve to the repository root.
         for short_url in [
+            "https://fuchsia.googlesource.com/fuchsia/+",
+            "https://fuchsia.googlesource.com/fuchsia/+show",
             "https://fuchsia.googlesource.com/fuchsia/+/HEAD",
             "https://fuchsia.googlesource.com/fuchsia/+/refs",
             "https://fuchsia.googlesource.com/fuchsia/+/refs/heads",
             "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main",
             "https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/",
+            // A repository whose name only shares the project's prefix is not this tree.
+            "https://fuchsia.googlesource.com/fuchsia-infra",
+            "https://fuchsia.googlesource.com/fuchsia-infra/docs/README.md",
+            "https://fuchsia.googlesource.com/fuchsia-infra/+/refs/heads/main/docs/README.md",
         ] {
             assert_eq!(
                 is_intree_link(project, root_dir, &docs_folder, short_url)?,
@@ -1160,7 +1249,14 @@ mod tests {
             "https://fuchsia.googlesource.com/cobalt/+/HEAD",
         ] {
             assert!(
-                do_check_link(&doc_line, ok_link, "cobalt", false).is_ok(),
+                do_check_link(
+                    &doc_line,
+                    ok_link,
+                    "cobalt",
+                    false,
+                    Path::new(DEFAULT_REFERENCE_FOLDER),
+                )
+                .is_ok(),
                 "expected ok: {ok_link}"
             );
         }
@@ -1172,8 +1268,14 @@ mod tests {
             "https://fuchsia.googlesource.com/cobalt/+/master/docs/README.md",
             "https://fuchsia.googlesource.com/cobalt/+/abc123/docs/README.md",
         ] {
-            let err = do_check_link(&doc_line, bad_link, "cobalt", false)
-                .expect_err(&format!("expected non-main branch error: {bad_link}"));
+            let err = do_check_link(
+                &doc_line,
+                bad_link,
+                "cobalt",
+                false,
+                Path::new(DEFAULT_REFERENCE_FOLDER),
+            )
+            .expect_err(&format!("expected non-main branch error: {bad_link}"));
             assert!(err.message.contains("Invalid link to non-main branch"), "{}", err.message);
             assert_eq!(err.help_suggestion.as_deref(), Some("filepath: /docs/README.md"));
         }
@@ -1192,6 +1294,7 @@ mod tests {
             reference_docs_root: None,
             skip_link_check: false,
             allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
         };
 
         let mut checks = register_markdown_checks(&opt, Default::default())?;
@@ -1347,6 +1450,35 @@ mod tests {
                     "\"no-extension.md\"",
                 )),
             ),
+            // Paths that climb past the root are rejected before any filesystem probe, with the
+            // same message whether or not the host path exists, and without naming root_dir.
+            (
+                "/docs/../../../../etc/passwd",
+                "/docs/../../../../etc/passwd",
+                Some(DocCheckError::new_error(
+                    1,
+                    PathBuf::from("some/file.md"),
+                    "Cannot normalize /docs/../../../../etc/passwd, references parent beyond root.",
+                )),
+            ),
+            (
+                "/docs/../../../../etc/missing.md",
+                "/docs/../../../../etc/missing.md",
+                Some(DocCheckError::new_error(
+                    1,
+                    PathBuf::from("some/file.md"),
+                    "Cannot normalize /docs/../../../../etc/missing.md, references parent beyond root.",
+                )),
+            ),
+            (
+                "../etc/passwd",
+                "../etc/passwd",
+                Some(DocCheckError::new_error(
+                    1,
+                    PathBuf::from("some/file.md"),
+                    "Cannot normalize ../etc/passwd, references parent beyond root.",
+                )),
+            ),
         ];
 
         for (link_to_check, in_tree_path, expected_error) in test_data {
@@ -1392,6 +1524,34 @@ mod tests {
     }
 
     #[test]
+    fn test_match_link_type() {
+        let url = CowStr::from("/docs/README.md");
+        let mailto = CowStr::from("mailto:user@example.com");
+        let checkable = [
+            LinkType::Inline,
+            LinkType::Reference,
+            LinkType::Collapsed,
+            LinkType::Shortcut,
+            LinkType::Autolink,
+            LinkType::WikiLink { has_pothole: false },
+        ];
+        for link_type in checkable {
+            assert_eq!(match_link_type(&link_type, &url), Some(&url), "{link_type:?}");
+            assert_eq!(match_link_type(&link_type, &mailto), None, "{link_type:?}");
+        }
+        // Unknown references are reported by the caller, so they never yield a target.
+        let unchecked = [
+            LinkType::Email,
+            LinkType::ReferenceUnknown,
+            LinkType::CollapsedUnknown,
+            LinkType::ShortcutUnknown,
+        ];
+        for link_type in unchecked {
+            assert_eq!(match_link_type(&link_type, &url), None, "{link_type:?}");
+        }
+    }
+
+    #[test]
     fn test_email_and_collapsed_unknown_do_not_swallow_or_panic() -> Result<()> {
         let opt = DocCheckerArgs {
             root: PathBuf::from("/path/to/fuchsia"),
@@ -1403,6 +1563,7 @@ mod tests {
             reference_docs_root: None,
             skip_link_check: false,
             allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
         };
         let mut checks = register_markdown_checks(&opt, Default::default())?;
         let file = PathBuf::from("/docs/README.md");
@@ -1441,6 +1602,7 @@ mod tests {
             reference_docs_root: None,
             skip_link_check: false,
             allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
         };
 
         let mut checks = register_markdown_checks(&opt, Default::default())?;
@@ -1535,6 +1697,7 @@ mod tests {
             reference_docs_root: None,
             skip_link_check: false,
             allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
         };
 
         let mut checks = register_markdown_checks(&opt, Default::default())?;
@@ -1595,6 +1758,7 @@ mod tests {
             allow_fuchsia_src_links: false,
             reachability_graph: Default::default(),
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             glossary_terms: Some(glossary_terms),
         };
 
@@ -1725,6 +1889,188 @@ mod tests {
         assert_eq!(terms.len(), 2);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn test_heading_anchor_validation() -> Result<()> {
+        let opt = DocCheckerArgs {
+            root: PathBuf::from("/path/to/fuchsia"),
+            project: "fuchsia".to_string(),
+            docs_folder: PathBuf::from("docs"),
+            check_external_links: false,
+            json: false,
+            allow_fuchsia_src_links: false,
+            reference_docs_root: None,
+            skip_link_check: false,
+            allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
+        };
+        let mut checks = register_markdown_checks(&opt, Default::default())?;
+        let checker = checks.first_mut().unwrap();
+        let file = PathBuf::from("/path/to/fuchsia/docs/README.md");
+
+        // 1. Valid anchors (including DevSite {:#...}, {: #... }, .numbered, Jinja, and plain
+        // {C++} text)
+        let valid_input = r#"
+# Valid Title {#valid-title}
+## DevSite syntax {:#devsite-syntax}
+### Spaced syntax {: #spaced-syntax .numbered }
+#### Plain braces {C++}
+##### Jinja {{ var }}
+###### Implicit heading
+"#;
+        let ctx = DocContext::new(file.clone(), valid_input, None::<&mut fn(_) -> _>);
+        for ele in ctx {
+            assert!(
+                checker.check(&ele)?.is_none(),
+                "Expected no errors for valid headings: {ele:?}"
+            );
+        }
+
+        // 2. Invalid anchors and expected helpful suggestions + exact line numbers
+        let invalid_cases = [
+            ("## Uppercase {#TRACE_ENABLED}", Some("using '{#trace-enabled}'")),
+            ("### Underscore {:#rt_sigaction}", Some("using '{#rt-sigaction}'")),
+            ("##### Leading dashes {#--debug}", Some("using '{#debug}'")),
+            ("### Double hyphen {:#a--b .numbered}", Some("using '{#a-b}'")),
+            (
+                "### Colon typo {#:font-collection-outputs}",
+                Some("using '{#font-collection-outputs}'"),
+            ),
+            ("### Dollar sign {#prefix-$target_name}", Some("using '{#prefix-target-name}'")),
+            ("### Trailing star {#forwarding-*}", Some("using '{#forwarding}'")),
+            ("## Empty anchor {#}", Some("using '{#empty-anchor}'")),
+            ("## Symbols only {#---}", Some("using '{#symbols-only}'")),
+            ("### `fx_build` {#}", Some("using '{#fx-build}'")),
+            (
+                "### Extra attr {:#time-an-event transformation=\"converted\"}",
+                Some("using '{#time-an-event}'"),
+            ),
+            ("> ## Quoted heading {#bad_quote}", Some("using '{#bad-quote}'")),
+            ("- ### List heading {#bad_list}", Some("using '{#bad-list}'")),
+            ("### Spaced {: #bad_spaced }", Some("using '{#bad-spaced}'")),
+            ("## Closing hashes {#Bad_close} ##", Some("using '{#bad-close}'")),
+            ("Setext {#Bad_setext}\n===", Some("using '{#bad-setext}'")),
+            ("## Strong {#__init__}", Some("using '{#init}'")),
+            // No ASCII alphanumeric text in the anchor or the title: error without a suggestion.
+            ("## --- {#}", None),
+            ("## 概要 {#}", None),
+        ];
+
+        for (markdown, expected_help) in invalid_cases {
+            let ctx = DocContext::new(file.clone(), markdown, None::<&mut fn(_) -> _>);
+            let mut errs = vec![];
+            for ele in ctx {
+                if let Some(e) = checker.check(&ele)? {
+                    errs.extend(e);
+                }
+            }
+            assert_eq!(errs.len(), 1, "Expected 1 error for '{markdown}', got: {errs:?}");
+            assert_eq!(errs[0].doc_line.line_num, 1);
+            assert!(
+                errs[0].message.contains("Invalid heading anchor"),
+                "Unexpected message: {}",
+                errs[0].message
+            );
+            assert_eq!(errs[0].help_suggestion.as_deref(), expected_help);
+        }
+
+        // 3. Duplicate headings report exact line number of the second heading
+        let dup_input = "## Dup {#bad_dup}\n\nText\n\n## Dup {#bad_dup}\n";
+        let ctx = DocContext::new(file, dup_input, None::<&mut fn(_) -> _>);
+        let mut line_nums = vec![];
+        for ele in ctx {
+            if let Some(e) = checker.check(&ele)? {
+                line_nums.extend(e.into_iter().map(|err| err.doc_line.line_num));
+            }
+        }
+        assert_eq!(line_nums, vec![1, 5]);
+
+        // 4. Auto-generated reference docs under reference_docs_root are skipped
+        let ref_root = PathBuf::from("/path/to/fuchsia/out/all_docs");
+        let mut ref_opt = opt;
+        ref_opt.reference_docs_root = Some(ref_root.clone());
+        let mut ref_checks = register_markdown_checks(&ref_opt, Default::default())?;
+        let ref_checker = ref_checks.first_mut().unwrap();
+        let ref_ctx = DocContext::new(
+            ref_root.join("tools/sdk/ffx.md"),
+            "## Auto {#ffx_wlan_ap_start}\n",
+            None::<&mut fn(_) -> _>,
+        );
+        for ele in ref_ctx {
+            assert!(ref_checker.check(&ele)?.is_none());
+        }
+        // ...while docs outside reference_docs_root are still checked.
+        let docs_ctx = DocContext::new(
+            PathBuf::from("/path/to/fuchsia/docs/README.md"),
+            "## Auto {#ffx_wlan_ap_start}\n",
+            None::<&mut fn(_) -> _>,
+        );
+        let mut docs_errs = vec![];
+        for ele in docs_ctx {
+            if let Some(e) = ref_checker.check(&ele)? {
+                docs_errs.extend(e);
+            }
+        }
+        assert_eq!(
+            docs_errs.len(),
+            1,
+            "Expected 1 error outside reference_docs_root: {docs_errs:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_custom_reference_folder() -> Result<()> {
+        let mut checker = LinkChecker {
+            root_dir: PathBuf::from("/my/root/fuchsia"),
+            project: "fuchsia".to_string(),
+            docs_folder: PathBuf::from("docs"),
+            check_remote_links: true,
+            links: vec![],
+            allow_fuchsia_src_links: false,
+            reachability_graph: Default::default(),
+            reference_docs_root: None,
+            reference_folder: PathBuf::from("/api_docs"),
+            glossary_terms: None,
+        };
+        let filename = PathBuf::from("/my/root/fuchsia/docs/index.md");
+
+        assert_eq!(
+            checker
+                .make_link_to_check(&filename, &CowStr::Borrowed("/api_docs/fidl/fuchsia.io.md"))?,
+            "https://fuchsia.dev/api_docs/fidl/fuchsia.io.md"
+        );
+        // Component-wise matching must not match a sibling prefix or the unconfigured default.
+        assert_eq!(
+            checker.make_link_to_check(&filename, &CowStr::Borrowed("/api_docs_extra/page.md"))?,
+            "/api_docs_extra/page.md"
+        );
+        assert_eq!(
+            checker.make_link_to_check(&filename, &CowStr::Borrowed("/reference/missing.md"))?,
+            "/reference/missing.md"
+        );
+
+        let file = PathBuf::from("/docs/README.md");
+        let input = "See [api](/api_docs/missing.md) and [legacy](/reference/missing.md) and \
+                     [bypass](https://fuchsia.dev/api_docs/../fuchsia-src/doc.md).";
+        let mut messages = vec![];
+        for ele in DocContext::new(file, input, None::<&mut fn(_) -> _>) {
+            if let Some(errs) = checker.check(&ele)? {
+                messages.extend(errs.into_iter().map(|e| e.message));
+            }
+        }
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(messages[0].contains("/reference/missing.md could not be found"), "{messages:?}");
+        assert!(
+            messages[1].contains("https://fuchsia.dev/fuchsia-src/doc.md via https"),
+            "{messages:?}"
+        );
+        assert_eq!(checker.links.len(), 1);
+        assert_eq!(checker.links[0].link, "https://fuchsia.dev/api_docs/missing.md");
+
         Ok(())
     }
 }

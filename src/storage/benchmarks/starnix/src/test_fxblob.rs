@@ -4,18 +4,19 @@
 
 use delivery_blob::CompressionMode;
 use erofs_serializer::SerializerNode;
-use fidl::endpoints::{ControlHandle as _, RequestStream as _};
+use fidl::endpoints::{ControlHandle as _, ServerEnd};
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_process_lifecycle::{LifecycleRequest, LifecycleRequestStream};
 use fidl_fuchsia_storage_partitions as fpartitions;
 use fuchsia_component::client::{Service, connect_to_protocol};
-use fuchsia_component::server::ServiceFs;
 use fuchsia_merkle::Hash;
+use fuchsia_runtime::HandleType;
 use fuchsia_storage_benchmarks::block_devices::BenchmarkVolumeFactory;
 use fuchsia_storage_benchmarks::filesystems::{
     BlobFilesystem as _, DeliveryBlob, Fxblob, FxblobInstance,
 };
 use futures::StreamExt as _;
+use futures::channel::oneshot;
 use futures::lock::Mutex as AsyncMutex;
 use rand::{RngExt as _, SeedableRng as _};
 use rand_xorshift::XorShiftRng;
@@ -257,6 +258,7 @@ impl Directory for ErofsBlobSubdir {
                     .await
                     .expect("ClearCaches transport error")
                     .expect("ClearCaches failed");
+                this.fs.clear_unreferenced_blobs();
                 let vmo = this.fs.get_vmo(&this.blob_hash).await;
                 *blob_guard = Some(VmoBlob::new(vmo, this.blob_hash.into()));
                 drop(blob_guard);
@@ -310,10 +312,6 @@ impl Directory for ErofsBlobSubdir {
     fn unregister_watcher(self: Arc<Self>, _: usize) {}
 }
 
-enum IncomingRequest {
-    Lifecycle(LifecycleRequestStream),
-}
-
 #[fuchsia::main]
 async fn main() {
     let partitions = Service::open(fpartitions::PartitionServiceMarker)
@@ -334,49 +332,51 @@ async fn main() {
         let mut buf = [0u8; 1];
         vmo.read(&mut buf, 0).expect("warm-up read failed");
     }
+    fs.clear_unreferenced_blobs();
 
     let metadata_bytes = build_bundle_metadata();
     let debug_proxy = fs.connect_to_debug();
     let scope = ExecutionScope::new();
-    let erofs_blobs_dir = vfs::pseudo_directory! {
-        "bundle" => ErofsBlobSubdir::new(
-            fs.clone(),
-            debug_proxy,
-            erofs_blob.name,
-            metadata_bytes,
-        ),
+    let (stop_tx, stop_rx) = oneshot::channel();
+    let stop_tx = Arc::new(std::sync::Mutex::new(Some(stop_tx)));
+    let out_dir = vfs::pseudo_directory! {
+        "erofs_blobs" => vfs::pseudo_directory! {
+            "bundle" => ErofsBlobSubdir::new(
+                fs.clone(),
+                debug_proxy,
+                erofs_blob.name,
+                metadata_bytes,
+            ),
+        },
+        "svc" => vfs::pseudo_directory! {
+            "fuchsia.storage.mapping.FileMapper" => fs.get_file_mapper_handler(scope.clone()),
+            "fuchsia.process.lifecycle.Lifecycle" => vfs::service::host(
+                move |mut stream: LifecycleRequestStream| {
+                    let stop_tx = Arc::clone(&stop_tx);
+                    async move {
+                        if let Some(Ok(LifecycleRequest::Stop { control_handle })) =
+                            stream.next().await
+                            && let Some(stop_tx) = stop_tx.lock().unwrap().take()
+                        {
+                            let _ = stop_tx.send(control_handle);
+                        }
+                    }
+                },
+            ),
+        },
     };
 
-    let (dir_client, dir_server) = fidl::endpoints::create_endpoints::<fio::DirectoryMarker>();
+    let export_handle = fuchsia_runtime::take_startup_handle(HandleType::DirectoryRequest.into())
+        .expect("missing directory request startup handle");
     vfs::directory::serve_on(
-        erofs_blobs_dir,
+        out_dir,
         fio::PERM_READABLE | fio::PERM_EXECUTABLE,
         scope.clone(),
-        dir_server,
+        ServerEnd::new(export_handle.into()),
     );
 
-    let mut svc = ServiceFs::new();
-    svc.add_remote("erofs_blobs", dir_client.into_proxy());
-    svc.dir("svc").add_service_at("fuchsia.process.lifecycle.Lifecycle", |chan| {
-        Some(IncomingRequest::Lifecycle(LifecycleRequestStream::from_channel(
-            fidl::AsyncChannel::from_channel(chan),
-        )))
-    });
-    svc.take_and_serve_directory_handle().expect("failed to serve outgoing directory");
+    let stop_control_handle = stop_rx.await.ok();
 
-    let mut stop_control_handle = None;
-    'outer: while let Some(request) = svc.next().await {
-        match request {
-            IncomingRequest::Lifecycle(mut stream) => {
-                if let Some(Ok(LifecycleRequest::Stop { control_handle })) = stream.next().await {
-                    stop_control_handle = Some(control_handle);
-                    break 'outer;
-                }
-            }
-        }
-    }
-
-    drop(svc);
     scope.shutdown();
     scope.wait().await;
     if let Ok(fs) = Arc::try_unwrap(fs) {

@@ -4,13 +4,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::userabi_ffi::{HandoffEndElf, ZERO_FILL};
 use crate::arch_rs::ops::{ZX_VM_FEATURE_CAN_MAP_XOM, arch_vm_features};
 use crate::object::{HandleOwner, VmAddressRegionDispatcher};
 use crate::vm::pmm::{ALLOC_FLAG_ANY, ALLOC_FLAG_CAN_WAIT};
+use crate::vm::vm_object::VmObject;
 use crate::vm::vm_object_paged::VmObjectPaged;
 use core::str::from_utf8;
 use debug::dprintf;
+use fbl::{RefPtr, Vector};
+use handoff::{PhysElfImage, PhysElfImage_Info, PhysMapping, PhysVmo};
 use page::SIZE as PAGE_SIZE;
 use zx_status::Status;
 use zx_types::{
@@ -18,6 +20,30 @@ use zx_types::{
     ZX_VM_CAN_MAP_WRITE, ZX_VM_PERM_EXECUTE, ZX_VM_PERM_READ, ZX_VM_PERM_WRITE, ZX_VM_SPECIFIC,
     zx_vaddr_t, zx_vm_option_t,
 };
+
+/// Culled from `PhysElfImage`.
+pub struct HandoffEndElf {
+    pub vmo: RefPtr<VmObject>,
+    pub stream_size: usize,
+    pub vmar_size: usize,
+    pub mappings: Vector<PhysMapping>,
+    pub info: PhysElfImage_Info,
+}
+
+/// The remaining hand-off data to be consumed at the end of the hand-off phase
+/// (see `end_handoff()`).
+pub struct HandoffEnd {
+    /// The data ZBI.
+    pub zbi: HandleOwner,
+
+    pub vdso: HandoffEndElf,
+    pub userboot: HandoffEndElf,
+
+    /// The VMOs deriving from the phys environment. As returned by `end_handoff()`,
+    /// the entirety of the array will be populated by real handles (if only by
+    /// stub VMOs) (as is convenient for userboot, its intended caller).
+    pub extra_phys_vmos: [HandleOwner; PhysVmo::MAX_EXTRA_HANDOFF_PHYS_VMOS],
+}
 
 pub struct MappedElf {
     pub vmar: HandleOwner,
@@ -33,7 +59,7 @@ pub fn map_handoff_elf(
     elf: HandoffEndElf,
     parent_vmar: &VmAddressRegionDispatcher,
 ) -> Result<MappedElf, Status> {
-    let elf_vmo = elf.vmo.ok_or(Status::INVALID_ARGS)?;
+    let elf_vmo = elf.vmo;
     let mut vmo_name_buffer = [0u8; ZX_MAX_NAME_LEN];
     elf_vmo.get_name(&mut vmo_name_buffer);
     let mut vmo_name = from_utf8(&vmo_name_buffer).unwrap_or("");
@@ -58,7 +84,7 @@ pub fn map_handoff_elf(
         vmar: HandleOwner::make(vmar_handle, vmar_rights).ok_or(Status::NO_MEMORY)?,
         vaddr_start: vmar_info.base,
         entry: vmar_info.base + elf.info.relative_entry_point,
-        stack_size: elf.info.stack_size(),
+        stack_size: Option::from(elf.info.stack_size),
     };
 
     // TODO(mcgrathr): emit symbolizer markup for these instead
@@ -81,7 +107,7 @@ pub fn map_handoff_elf(
     // VMO pages.  Sum those and make a single VMO for all the pages needed.
     let mut bss_total: usize = 0;
     for mapping in &*elf.mappings {
-        if mapping.paddr == ZERO_FILL {
+        if mapping.paddr == PhysElfImage::ZERO_FILL {
             bss_total += mapping.size;
         }
     }
@@ -121,7 +147,7 @@ pub fn map_handoff_elf(
             }
             segment_name = "code";
         }
-        let (vmo, vmo_offset) = if mapping.paddr == ZERO_FILL {
+        let (vmo, vmo_offset) = if mapping.paddr == PhysElfImage::ZERO_FILL {
             // Map from bss_vmo instead of elf.vmo; consume its pages from the end.
             bss_total -= mapping.size;
             segment_name = "bss";

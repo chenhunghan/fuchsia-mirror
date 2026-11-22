@@ -26,7 +26,7 @@ use linux_uapi::{
     usbdevfs_ctrltransfer, usbdevfs_disconnect_claim, usbdevfs_getdriver, usbdevfs_setinterface,
     usbdevfs_urb,
 };
-use serial_test::serial;
+pub(crate) use serial_test::serial;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
@@ -393,32 +393,70 @@ fn try_find_sysfs_usb_device() -> Option<PathBuf> {
     None
 }
 
-fn ensure_usb_device() -> &'static Path {
+fn ensure_usb_device() -> PathBuf {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         let dev_path = Path::new(USB_DEV_PATH);
-        if !dev_path.exists() && Path::new("/sys/class/udc").exists() {
-            setup_linux_dummy_hcd_gadget();
-        }
-        let deadline = Instant::now() + DEVICE_TIMEOUT;
-        loop {
-            let configured = dev_path.exists()
-                && try_find_sysfs_usb_device().is_some_and(|sysfs_dir| {
-                    fs::read_to_string(sysfs_dir.join("bConfigurationValue"))
-                        .map(|s| s.trim() == "1")
-                        .unwrap_or(false)
-                });
-            if configured {
-                break;
+        if Path::new("/sys/class/udc").exists() {
+            if !dev_path.exists() {
+                setup_linux_dummy_hcd_gadget();
             }
-            assert!(
-                Instant::now() < deadline,
-                "{USB_DEV_PATH} was not configured within {DEVICE_TIMEOUT:?}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
+        } else {
+            let cfg_resp = usbfs_linux_trace_exec::send_device_command(
+                usbfs_trace_schema::DEFAULT_CONTROL_ADDR,
+                &usbfs_trace_schema::DeviceCommand::ConfigureDevice {
+                    device: usbfs_trace_schema::DeviceSpec::default(),
+                },
+            )
+            .expect("ConfigureDevice RPC failed");
+            assert!(cfg_resp.ok, "ConfigureDevice failed: {:?}", cfg_resp.error);
+
+            let script_resp = usbfs_linux_trace_exec::send_device_command(
+                usbfs_trace_schema::DEFAULT_CONTROL_ADDR,
+                &usbfs_trace_schema::DeviceCommand::ScriptControl {
+                    bm_request_type: Some(0x40),
+                    b_request: 0xfe,
+                    w_value: None,
+                    w_index: None,
+                    w_length: None,
+                    action: serde_json::json!({ "auto_echo": true }),
+                },
+            )
+            .expect("ScriptControl RPC failed");
+            assert!(script_resp.ok, "ScriptControl failed: {:?}", script_resp.error);
         }
     });
-    Path::new(USB_DEV_PATH)
+    let bus_dir = Path::new("/sys/bus/usb/devices");
+    let deadline = Instant::now() + DEVICE_TIMEOUT;
+    loop {
+        if let Ok(entries) = fs::read_dir(bus_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let vid = fs::read_to_string(path.join("idVendor")).unwrap_or_default();
+                let pid = fs::read_to_string(path.join("idProduct")).unwrap_or_default();
+                let cfg = fs::read_to_string(path.join("bConfigurationValue")).unwrap_or_default();
+                if vid.trim() == "1234" && pid.trim() == "5678" && cfg.trim() == "1" {
+                    let busnum: u16 = fs::read_to_string(path.join("busnum"))
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(1);
+                    let devnum: u16 = fs::read_to_string(path.join("devnum"))
+                        .ok()
+                        .and_then(|s| s.trim().parse().ok())
+                        .unwrap_or(2);
+                    let dev_path = PathBuf::from(format!("/dev/bus/usb/{busnum:03}/{devnum:03}"));
+                    if dev_path.exists() {
+                        return dev_path;
+                    }
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{USB_DEV_PATH} did not appear within {DEVICE_TIMEOUT:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 fn open_usb_rdwr() -> OwnedFd {
@@ -636,16 +674,21 @@ unsafe fn usb_discard_urb(fd: &impl AsRawFd, urb: *mut usbdevfs_urb) -> Result<(
 #[test]
 #[serial]
 fn test_usb_devtmpfs_and_sysfs_discovery() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let dev_path = ensure_usb_device();
-    let meta = fs::metadata(dev_path).expect("failed to stat /dev/bus/usb/001/002");
+    let meta = fs::metadata(&dev_path).expect("failed to stat usbfs device node");
     assert!(meta.file_type().is_char_device(), "expected character device");
     let rdev = meta.rdev();
     let major = libc::major(rdev);
     let minor = libc::minor(rdev);
     assert_eq!(major, USB_DEVICE_MAJOR);
-    assert_eq!(minor, 1);
 
     let sysfs_dir = find_sysfs_usb_device();
+    let devnum_str = fs::read_to_string(sysfs_dir.join("devnum")).unwrap();
+    let devnum: u32 = devnum_str.trim().parse().expect("valid devnum");
+    assert!(devnum >= 2);
+    assert_eq!(minor, devnum - 1);
+
     assert_eq!(fs::read_to_string(sysfs_dir.join("idVendor")).unwrap(), "1234\n");
     assert_eq!(fs::read_to_string(sysfs_dir.join("idProduct")).unwrap(), "5678\n");
     assert_eq!(fs::read_to_string(sysfs_dir.join("bcdDevice")).unwrap(), "0543\n");
@@ -655,23 +698,26 @@ fn test_usb_devtmpfs_and_sysfs_discovery() {
     assert_eq!(fs::read_to_string(sysfs_dir.join("bNumConfigurations")).unwrap(), "1\n");
     assert_eq!(fs::read_to_string(sysfs_dir.join("bConfigurationValue")).unwrap(), "1\n");
     assert_eq!(fs::read_to_string(sysfs_dir.join("busnum")).unwrap(), "1\n");
-    assert_eq!(fs::read_to_string(sysfs_dir.join("devnum")).unwrap(), "2\n");
     assert_eq!(fs::read_to_string(sysfs_dir.join("speed")).unwrap(), "480\n");
 
     let uevent = fs::read_to_string(sysfs_dir.join("uevent")).unwrap();
     assert!(uevent.lines().any(|l| l == "MAJOR=189"), "uevent: {uevent}");
-    assert!(uevent.lines().any(|l| l == "MINOR=1"), "uevent: {uevent}");
-    assert!(uevent.lines().any(|l| l == "DEVNAME=bus/usb/001/002"), "uevent: {uevent}");
+    assert!(uevent.lines().any(|l| l == format!("MINOR={minor}")), "uevent: {uevent}");
+    assert!(
+        uevent.lines().any(|l| l == format!("DEVNAME=bus/usb/001/{devnum:03}")),
+        "uevent: {uevent}"
+    );
     assert!(uevent.lines().any(|l| l == "DEVTYPE=usb_device"), "uevent: {uevent}");
     assert!(uevent.lines().any(|l| l == "PRODUCT=1234/5678/543"), "uevent: {uevent}");
     assert!(uevent.lines().any(|l| l == "TYPE=0/0/0"), "uevent: {uevent}");
     assert!(uevent.lines().any(|l| l == "BUSNUM=001"), "uevent: {uevent}");
-    assert!(uevent.lines().any(|l| l == "DEVNUM=002"), "uevent: {uevent}");
+    assert!(uevent.lines().any(|l| l == format!("DEVNUM={devnum:03}")), "uevent: {uevent}");
 }
 
 #[test]
 #[serial]
 fn test_usb_read_raw_descriptors() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let dev_path = ensure_usb_device();
     let mut file = File::open(dev_path).expect("failed to open usbfs device read-only");
     let mut raw_desc = Vec::new();
@@ -711,6 +757,7 @@ fn test_usb_read_raw_descriptors() {
 #[test]
 #[serial]
 fn test_usb_rdonly_ioctl_rejected_with_eperm() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let dev_path = ensure_usb_device();
     let file = OpenOptions::new().read(true).open(dev_path).expect("open O_RDONLY failed");
 
@@ -721,6 +768,7 @@ fn test_usb_rdonly_ioctl_rejected_with_eperm() {
 #[test]
 #[serial]
 fn test_usb_device_info_ioctls() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let fd = open_usb_rdwr();
     let raw_fd = fd.as_raw_fd();
 
@@ -746,7 +794,7 @@ fn test_usb_device_info_ioctls() {
     // USBDEVFS_CONNECTINFO
     let mut ci = usbdevfs_connectinfo::default();
     assert_eq!(usb_get_connectinfo(&fd, &mut ci), Ok(()));
-    assert_eq!(ci.devnum, 2);
+    assert!(ci.devnum >= 2);
     assert_eq!(ci.slow, 0);
 
     // Negative test: null pointer passed to CONNECTINFO returns EFAULT
@@ -767,6 +815,7 @@ fn test_usb_device_info_ioctls() {
 #[test]
 #[serial]
 fn test_usb_interface_claim_release_and_disconnect_claim() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let fd1 = open_usb_rdwr();
     let fd2 = open_usb_rdwr();
 
@@ -815,6 +864,7 @@ fn test_usb_interface_claim_release_and_disconnect_claim() {
 #[test]
 #[serial]
 fn test_usb_setinterface_setconfiguration_clearhalt_reset() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let fd1 = open_usb_rdwr();
     let fd2 = open_usb_rdwr();
 
@@ -853,6 +903,7 @@ fn test_usb_setinterface_setconfiguration_clearhalt_reset() {
 #[test]
 #[serial]
 fn test_usb_synchronous_control_transfers() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let fd = open_usb_rdwr();
 
     // 1. Vendor Control OUT (0x40, bRequest=0x01) storing 4 bytes
@@ -943,6 +994,7 @@ fn test_usb_synchronous_control_transfers() {
 #[test]
 #[serial]
 fn test_usb_synchronous_bulk_transfers() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let fd1 = open_usb_rdwr();
     let fd2 = open_usb_rdwr();
 
@@ -1002,6 +1054,7 @@ fn test_usb_synchronous_bulk_transfers() {
 #[test]
 #[serial]
 fn test_usb_async_urb_submit_poll_reap_and_discard() {
+    let _exec_guard = usbfs_linux_trace_exec::lock_execution();
     let fd = open_usb_rdwr();
     let raw_fd = fd.as_raw_fd();
 
@@ -1203,3 +1256,26 @@ fn test_usb_async_urb_submit_poll_reap_and_discard() {
     // SAFETY: Testing rejection of non-existent endpoint.
     assert_eq!(unsafe { usb_submit_urb(&fd, &mut bad_ep_urb) }, Err(libc::ENOENT));
 }
+
+fn replay_golden_trace(name: &str, trace_json: &str) {
+    let trace: usbfs_trace_schema::RecordedTrace =
+        serde_json::from_str(trace_json).expect("valid RecordedTrace JSON");
+    let divergences: usbfs_trace_schema::DivergenceManifest =
+        serde_json::from_str(usbfs_trace_schema::scenarios::DIVERGENCES_JSON)
+            .expect("valid DivergenceManifest JSON");
+    let apply_divergences = !Path::new("/sys/class/udc").exists();
+    #[cfg(not(target_arch = "aarch64"))]
+    assert!(
+        !trace.steps.iter().any(|s| s.step.uses_arch32()),
+        "scenario '{name}' uses arch32 steps and must be marked #[ignore] on non-aarch64 targets"
+    );
+    let _ = name;
+    usbfs_linux_trace_exec::replay_trace(
+        &trace,
+        &divergences,
+        apply_divergences,
+        usbfs_trace_schema::DEFAULT_CONTROL_ADDR,
+    );
+}
+
+usbfs_trace_schema::usbfs_trace_tests!(replay_golden_trace, #[serial_test::serial]);

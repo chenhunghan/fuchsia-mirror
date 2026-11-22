@@ -3,18 +3,242 @@
 # found in the LICENSE file.
 
 load("@rules_fuchsia//fuchsia:assembly.bzl", "fuchsia_prebuilt_package")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":font_provider_unit_tests_test"],
 )
 
+test_suite(
+    name = "fonts_host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = ["//src/fonts/tools/manifest_generator:host_tests"],
+)
+
+rustc_binary(
+    name = "font_provider",
+    srcs = [
+        "src/font_service/asset/asset.rs",
+        "src/font_service/asset/cache.rs",
+        "src/font_service/asset/collection.rs",
+        "src/font_service/asset/loader.rs",
+        "src/font_service/asset/mod.rs",
+        "src/font_service/builder.rs",
+        "src/font_service/config.rs",
+        "src/font_service/debug.rs",
+        "src/font_service/family.rs",
+        "src/font_service/inspect.rs",
+        "src/font_service/mod.rs",
+        "src/font_service/typeface/collection.rs",
+        "src/font_service/typeface/matcher.rs",
+        "src/font_service/typeface/mod.rs",
+        "src/font_service/typeface/test_util.rs",
+        "src/font_service/typeface/typeface.rs",
+        "src/main.rs",
+    ],
+    edition = "2024",
+    link_deps = [
+        # TODO(https://fxbug.dev/42182239): Fix the leaks and remove this.
+        "//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS",
+        "@freetype2",
+    ],
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/fonts/asset_providers:__pkg__",
+        "//src/fonts/tests/integration:__pkg__",
+    ],
+    deps = [
+        ":config",
+        "//sdk/fidl/fuchsia.fonts.experimental:fuchsia.fonts.experimental_rust",
+        "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust",
+        "//sdk/fidl/fuchsia.intl:fuchsia.intl_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+        "//sdk/rust/zx",
+        "//src/fonts/char_set",
+        "//src/fonts/fidl_fuchsia_fonts_ext",
+        "//src/fonts/font_info",
+        "//src/fonts/manifest",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-url",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:heck",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:lru",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:unicase",
+    ],
+)
+
+rustc_test(
+    name = "font_provider_bin_test",
+    crate = ":font_provider",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/intl/unicode_utils/char_collection",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "font_provider_packaged_bin",
+    binary = ":font_provider",
+    binary_name = "font_provider",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "fonts",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/fonts.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "config",
+    cm_label = ":manifest",
+)
+
+fx_component(
+    name = "font_provider_cm",
+    compiled_manifest = ":manifest",
+    deps = [":font_provider_packaged_bin"],
+)
+
+fx_packaged_binary(
+    name = "font_provider_bin_test_packaged_bin",
+    testonly = True,
+    binary = ":font_provider_bin_test",
+    binary_name = "font_provider_bin_test",
+)
+
+fx_component_manifest(
+    name = "font_provider_unit_tests_cmp_manifest",
+    testonly = True,
+    component_name = "font_provider_bin_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/font_provider_bin_test.cml",
+)
+
+fx_test_component(
+    name = "font_provider_unit_tests_cmp",
+    compiled_manifest = ":font_provider_unit_tests_cmp_manifest",
+    deps = [":font_provider_bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "font_provider_unit_tests",
+    test_components = [":font_provider_unit_tests_cmp"],
+)
+
+fx_test(
+    name = "font_provider_unit_tests_test",
+    package = ":font_provider_unit_tests",
+)
+
+fx_component_manifest(
+    name = "font_provider_hermetic_for_test_manifest",
+    component_name = "font_provider_hermetic_for_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fonts_for_test.cml",
+)
+
+fx_component(
+    name = "font_provider_hermetic_for_test",
+    compiled_manifest = ":font_provider_hermetic_for_test_manifest",
+    visibility = [
+        "//src/ui/a11y/lib/semantics/tests:__pkg__",
+        "//src/ui/tests:__subpackages__",
+    ],
+    deps = [
+        ":font_provider_packaged_bin",
+        "//src/fonts/collections:downstream-test-fonts-collection",
+    ],
+)
+
+# A hermetic fonts provider which includes the fonts resources useful for
+# testing. `fuchsia_prebuilt_package` wraps the GN-built package for Bazel
+# product assembly while `fuchsia_package("fonts_hermetic_for_test")` remains in
+# `BUILD.gn`.
+# @bazel2gn:skip
 fuchsia_prebuilt_package(
     name = "fonts_hermetic_for_test",
     archive = "@gn_targets//src/fonts:fonts_hermetic_for_test",
+    visibility = ["//products/terminal:__pkg__"],
 )
 
+## Fonts server for tests: the test fixture will supply their own tests.
+
+fx_component_manifest(
+    name = "fonts_configurable_for_test_manifest",
+    component_name = "fonts_configurable_for_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fonts_configurable_for_test.cml",
+)
+
+fx_component(
+    name = "fonts_configurable_for_test_component",
+    compiled_manifest = ":fonts_configurable_for_test_manifest",
+)
+
+# A font server without any bundled fonts, intended for testing only.
+# The user must route the fonts in via `config-data`.
+# `fuchsia_prebuilt_package` wraps the GN-built package for Bazel product
+# assembly while `fuchsia_package("fonts_configurable_for_test")` remains in
+# `BUILD.gn`.
+# @bazel2gn:skip
 fuchsia_prebuilt_package(
     name = "fonts_configurable_for_test",
     archive = "@gn_targets//src/fonts:fonts_configurable_for_test",
+    visibility = ["//products/terminal:__pkg__"],
 )

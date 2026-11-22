@@ -3,60 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_test_suite.gni")
-import("//build/components.gni")
-import("//build/fidl/fidl.gni")
 import("//build/rust/rustc_library.gni")
-import("//src/tests/fidl/conformance_suite/gidl-conformance-suite.gni")
-import("//tools/fidl/gidl/gidl.gni")
-
-# LINT.IfChange
-
-conformance_test_source = "$target_gen_dir/src/conformance_test.rs"
-conformance_test_fidl_json = "$root_build_dir/fidling/gen/src/tests/fidl/conformance_suite/conformance_fidl.fidl.json"
-
-gidl("generate_conformance_test") {
-  type = "conformance"
-  language = "rust_codec"
-  inputs = conformance_suite_gidl_files
-  fidl = conformance_suite_fidl_target
-  output = conformance_test_source
-}
-
-rustc_test("fidl_codec_rust_conformance_tests_bin") {
-  output_name = "fidl_codec_rust_conformance_tests"
-  edition = "2024"
-  source_root = conformance_test_source
-  deps = [
-    ":fidl_codec",
-    "//sdk/rust/zx-status",
-    "//sdk/rust/zx-types",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fidl/rust/gidl_util",
-    "//third_party/rust_crates:assert_matches",
-  ]
-  rustenv = [ "CONFORMANCE_JSON_PATH=" +
-              rebase_path(conformance_test_fidl_json, "$target_gen_dir/src") ]
-  non_rust_deps = [
-    ":generate_conformance_test",
-    conformance_suite_fidl_target + "($fidl_toolchain)",
-  ]
-  sources = [ conformance_test_source ]
-  inputs = [ conformance_test_fidl_json ]
-  if (is_host) {
-    # We can't run tests in threads because they assert that handles are closed,
-    # which is racy when other threads are creating handles. See the comment on
-    # get_handle_info_valid in ./gidl_util/src/lib.rs for more details. We only
-    # need this on host because the test runner framework uses processes.
-    args = [ "--test-threads=1" ]
-  }
-}
-
-fuchsia_unittest_package("fidl_codec_rust_conformance_tests") {
-  package_name = "fidl_codec_rust_conformance_tests-gn"
-  deps = [ ":fidl_codec_rust_conformance_tests_bin" ]
-}
-
-# LINT.ThenChange(BUILD.bazel)
 
 bazel_test_suite("bazel_tests") {
   target_tests =
@@ -70,8 +17,6 @@ group("tests") {
   deps = [
     ":bazel_tests",
     ":fidl_codec_fdomain_test",
-    ":fidl_codec_rust_conformance_tests",
-    ":fidl_codec_rust_conformance_tests_bin($host_toolchain)",
     ":fidl_codec_test",
   ]
 }

@@ -5,7 +5,7 @@
 
 import unittest
 
-import tablefmt
+from build.rbe import tablefmt
 
 
 class CreateRowTests(unittest.TestCase):

@@ -11,11 +11,6 @@ _honeydew_config = {
       implementation = "ffx"
     }
   }
-  transports = {
-    adb = {
-      attempts = 1
-    }
-  }
 }
 
 python_perf_test("adb_throughput_test") {

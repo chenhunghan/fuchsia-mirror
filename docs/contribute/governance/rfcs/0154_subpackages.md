@@ -305,9 +305,10 @@ URL. These changes are represented by the following notional FIDL snippet:
 NOTE: The choice of a byte array for context was the result of several
 constraints, some FIDL limitations, and carefully considered opionions. For
 additional background, see the "Alternatives" sections:
-[Use context-specific `Resolver`s](#alternative-use-context-specific-componentresolvers)
+[Use context-specific `Resolver`s](#alternative-use-context-specific-resolvers)
 and
-[Alternative: FIDL Type representation for resolution context values](#alternative-fidl-type-representation-for-resolution-context-values).
+[Alternative: FIDL type representation for resolution context
+values](#alternative-fidl-type-representation-for-resolution-context-values).
 
 For a package at `package_url` that declares subpackages (a "parent" package),
 the returned `resolved_context` MUST be passed as the `context` input parameter
@@ -514,7 +515,7 @@ child (assuming a post-boot environment) follows:
        resolved `Component`, with the new component's `resolution_context`,
        which Component Manager caches in that component's state.
 
-### Future work
+### Future work {:#future-work}
 
 * **Consolidating `subpackages` and `contents` files** - If and when the
   proposed RFC for [Persistent FIDL package
@@ -567,7 +568,7 @@ child (assuming a post-boot environment) follows:
   dependencies based on a looser contract (behavior, API, and/or ABI guarantees,
   for example).
 
-## Implementation
+## Implementation {:#implementation}
 
 ### Fuchsia in-tree build system (GN rules and scripts)
 
@@ -629,7 +630,7 @@ use the `ffx package` replacement commands.
     affect or be affected by other planned changes, as part of
     [RFC-0124: Decentralized Product Integration: Artifact Description and Propagation](/docs/contribute/governance/rfcs/0124_decentralized_product_integration_artifact_description_and_propagation.md).
 
-### Bundling package dependencies for distribution
+### Bundling package dependencies for distribution {:#bundling-package-dependencies-for-distribution}
 
 One of the key use cases for subpackages is to support package distribution by
 ensuring a package and all of its direct and indirect dependencies can be
@@ -655,7 +656,7 @@ flat collection of all blobs across all packages.
 Implementations of the `fuchsia.pkg.PackageResolver` protocol MUST be updated
 to implement the behavior described in the above design section.
 
-#### Eager package loading
+#### Eager package loading {:#eager-package-loading}
 
 The package resolver MUST internally resolve all subpackages recursively, until
 all subpackages have been fetched, before returning a resolution result for the
@@ -950,7 +951,7 @@ workflows, compared to the proposed solution. For example:
     publish a package and all of its hash-pinned dependencies into a package
     store.
 
-### Alternative: Use context-specific resolvers
+### Alternative: Use context-specific resolvers {:#alternative-use-context-specific-resolvers}
 
 Instead of passing and returning a `resolution_context`, when resolving a
 component or package, the `Resolve` method could be modified to include a
@@ -987,7 +988,7 @@ a given subpackage name to the pinned package hash in the parent package's
 `meta/subpackages` file, allowing `PackageResolver` and `Resolver`
 implementations to survive resolver restarts, if necessary.
 
-### Alternative: FIDL Type representation for resolution context values
+### Alternative: FIDL type representation for resolution context values {:#alternative-fidl-type-representation-for-resolution-context-values}
 
 We considered several approaches for how to represent the resolution context,
 ultimately deciding to use a generic byte array for both `PackageResolver` and

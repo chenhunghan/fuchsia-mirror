@@ -17,6 +17,7 @@ rustc_test("rust_bin") {
     "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component-test",
+    "//src/sys/lib/cm_rust",
   ]
 
   sources = [ "rust/lib.rs" ]
@@ -52,42 +53,18 @@ fuchsia_test_component("cpp_test") {
 
 fuchsia_test_package("rust_config_integration_test") {
   test_components = [ ":rust_test" ]
-  deps = [
-    "//examples/components/config/rust:component",
-    "//examples/components/config/rust:values_from_gn",
-  ]
+  deps = [ "//examples/components/config/rust:component" ]
 }
 
 fuchsia_test_package("cpp_config_integration_test") {
   test_components = [ ":cpp_test" ]
-  deps = [
-    "//examples/components/config/cpp:component",
-    "//examples/components/config/cpp:values_from_gn",
-  ]
-}
-
-fuchsia_test_package("cpp_config_integration_test_with_json_values") {
-  test_components = [ ":cpp_test" ]
-  deps = [
-    "//examples/components/config/cpp:component",
-    "//examples/components/config/cpp:values_from_json_file",
-  ]
-}
-
-fuchsia_test_package("rust_config_integration_test_with_json_values") {
-  test_components = [ ":rust_test" ]
-  deps = [
-    "//examples/components/config/rust:component",
-    "//examples/components/config/rust:values_from_json_file",
-  ]
+  deps = [ "//examples/components/config/cpp:component" ]
 }
 
 group("hermetic_tests") {
   testonly = true
   deps = [
     ":cpp_config_integration_test",
-    ":cpp_config_integration_test_with_json_values",
     ":rust_config_integration_test",
-    ":rust_config_integration_test_with_json_values",
   ]
 }

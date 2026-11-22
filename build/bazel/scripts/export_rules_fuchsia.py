@@ -34,12 +34,23 @@ from pathlib import Path
 
 _SCRIPT_DIR = os.path.dirname(__file__)
 
+_EXCLUDED_DIR_NAMES = frozenset({".agents", "skills"})
+_EXCLUDED_FILE_NAMES = frozenset({"README.md"})
+
 
 def copy_tree(from_dir: Path, to_dir: Path) -> set[Path]:
-    """Copy a directory tree into another one, returns set of inputs."""
+    """Copy a directory tree into another one, returns set of inputs.
+
+    Excludes `.agents/` and `skills/` directories as well as `README.md` files,
+    which are for in-tree development and should not be exported to
+    `@rules_fuchsia`.
+    """
     result: set[Path] = set()
     for root, dirnames, filenames in os.walk(from_dir):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIR_NAMES]
         for filename in filenames:
+            if filename in _EXCLUDED_FILE_NAMES:
+                continue
             src_path = Path(root) / filename
             dst_path = to_dir / os.path.relpath(src_path, from_dir)
             dst_path.parent.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_ANNOTATIONS_ENCODE_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_ANNOTATIONS_ENCODE_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
 #include "src/developer/forensics/feedback/annotations/types.h"
 

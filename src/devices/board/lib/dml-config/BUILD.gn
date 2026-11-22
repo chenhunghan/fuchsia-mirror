@@ -2,59 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_test_suite.gni")
-import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
-
-if (is_fuchsia) {
-  fuchsia_component_manifest("board-config-manifest") {
-    component_name = "board-config"
-    manifest = "meta/board_config.cml"
-  }
-
-  fuchsia_structured_config_rust_lib("board_structured_config") {
-    cm_label = ":board-config-manifest"
-  }
-
-  rustc_test("dml-config_test") {
-    output_name = "dml_config_lib_test"
-    edition = "2024"
-    sources = [
-      "src/dump.rs",
-      "src/lib.rs",
-      "src/parser.rs",
-    ]
-    deps = [
-      ":board_structured_config",
-      ":fuchsia.board.dml.config_rust_common",
-      "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
-      "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust_common",
-      "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
-      "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_next",
-      "//sdk/lib/driver/runtime/rust/fidl",
-      "//sdk/rust/zx",
-      "//src/lib/fidl/rust/fidl",
-      "//src/lib/fidl/rust_next/fidl_next",
-      "//third_party/rust_crates:anyhow",
-      "//third_party/rust_crates:futures",
-      "//third_party/rust_crates:log",
-      "//third_party/rust_crates:phf",
-    ]
-  }
-
-  fuchsia_unittest_package("dml-config-unittests") {
-    deps = [ ":dml-config_test" ]
-  }
-}
-
-bazel_test_suite("dml-config-host-tests") {
-  host_tests = [ "//src/devices/board/lib/dml-config:dml-config_host_test" ]
-}
-
 group("tests") {
   testonly = true
   deps = [
-    ":dml-config-host-tests",
     ":dml-config-unittests",
     ":dml-config_host_test($host_toolchain)",
   ]
@@ -93,6 +43,15 @@ fidl("fuchsia.board.dml.config") {
     "//vendor/google/*",
   ]
   public_deps = [ "//sdk/fidl/fuchsia.driver.metadata" ]
+}
+
+fuchsia_component_manifest("board-config-manifest") {
+  component_name = "board-config"
+  manifest = "meta/board_config.cml"
+}
+
+fuchsia_structured_config_rust_lib("board_structured_config") {
+  cm_label = ":board-config-manifest"
 }
 
 rustc_library("dml-config") {
@@ -150,6 +109,39 @@ if (is_host) {
       "//third_party/rust_crates:anyhow",
     ]
   }
+}
+if (is_fuchsia) {
+  rustc_test("dml-config_test") {
+    sources = [
+      "src/dump.rs",
+      "src/lib.rs",
+      "src/parser.rs",
+    ]
+    output_name = "dml_config_lib_test"
+    edition = "2024"
+    deps = [
+      ":board_structured_config",
+      ":fuchsia.board.dml.config_rust_common",
+      "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
+      "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust_common",
+      "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
+      "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_next",
+      "//sdk/lib/driver/runtime/rust/fidl",
+      "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fidl/rust_next/fidl_next",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:phf",
+    ]
+  }
+}
+
+fuchsia_unittest_package("dml-config-unittests") {
+  package_name = "dml-config-unittests-gn"
+  component_name = "dml-config-unittests"
+  deps = [ ":dml-config_test" ]
 }
 if (is_host) {
   rustc_test("dml-config_host_test") {

@@ -5,9 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 mod amd;
-mod amd_ffi;
 pub mod apic;
-mod arch;
+pub mod arch;
 mod arch_ffi;
 pub mod bootstrap16;
 mod bootstrap16_ffi;
@@ -15,14 +14,18 @@ pub mod cache;
 mod cache_ffi;
 pub mod cpuid;
 pub mod crashlog;
+pub mod debugger;
 mod descriptor;
 mod descriptor_ffi;
-pub mod fake_msr_access;
+pub mod exceptions;
+mod exceptions_ffi;
+#[cfg(ktest)]
+mod fake_msr_access;
 pub mod feature;
-mod handoff;
+mod feature_ffi;
+pub mod handoff;
 mod handoff_ffi;
-pub mod hwp;
-mod hwp_ffi;
+mod hwp;
 #[path = "../hypervisor/mod.rs"]
 pub mod hypervisor;
 mod idle_states;
@@ -30,7 +33,6 @@ mod idle_states_ffi;
 mod idt;
 mod idt_ffi;
 mod intel;
-mod intel_ffi;
 pub mod interrupts;
 pub mod ioapic;
 mod ioport;
@@ -40,34 +42,62 @@ mod mmu_mem_types;
 mod mmu_mem_types_ffi;
 pub mod mp;
 mod mp_ffi;
+#[cfg(any(console_enabled, ktest))]
 mod msr;
 #[cfg(console_enabled)]
 mod msr_bench;
-mod msr_ffi;
+mod mwait_monitor;
 pub mod platform_access;
+#[cfg(ktest)]
+mod platform_tests;
 pub mod pv;
 pub mod registers;
+mod registers_ffi;
 pub mod restricted;
-mod restricted_ffi;
 pub mod smp;
 mod smp_ffi;
-pub(crate) mod spinlock;
-mod spinlock_ffi;
+mod spinlock;
 pub mod system_topology;
+pub mod thread;
+mod thread_ffi;
 mod timer_freq;
+mod user_copy;
+mod user_copy_ffi;
 pub mod vm;
 pub mod x86;
 
-pub use arch_ffi::{
-    arch_early_init, arch_enter_uspace, arch_init, arch_late_init_percpu, arch_prepare_uspace,
-    arch_prevm_init,
+pub use arch::{
+    arch_enter_idle_state, arch_flush_state_and_halt, early_init as arch_early_init,
+    init as arch_init, late_init_percpu as arch_late_init_percpu, prevm_init as arch_prevm_init,
+};
+pub use arch_ffi::{arch_enter_uspace, arch_prepare_uspace};
+pub use debugger::{
+    get_instruction_pointer as arch_get_instruction_pointer,
+    set_return_instruction_pointer as arch_set_return_instruction_pointer,
 };
 pub use ioport::IoBitmap;
+pub use mp::{arch_curr_cpu_num, arch_get_restricted_flag};
 pub use restricted::{
     ArchSavedNormalState, dump, enter_full, enter_restricted,
     redirect_restricted_exception_to_normal, save_restricted_exception_state,
     save_restricted_iframe_state, save_restricted_syscall_state, save_state_pre_restricted_entry,
     validate_state_pre_restricted_entry,
+};
+pub use spinlock::{
+    arch_spin_lock_non_instrumented, arch_spin_lock_trace_instrumented, arch_spin_trylock,
+    arch_spin_unlock,
+};
+pub use thread::{
+    context_switch as arch_context_switch, dump_thread as arch_dump_thread,
+    thread_get_blocked_fp as arch_thread_get_blocked_fp,
+};
+pub use thread_ffi::{
+    arch_reset_suspended_general_regs, arch_restore_user_state, arch_save_user_state,
+    arch_set_suspended_general_regs, arch_thread_construct_first, arch_thread_initialize,
+};
+pub use user_copy::{
+    arch_copy_from_user, arch_copy_from_user_capture_faults, arch_copy_to_user,
+    arch_copy_to_user_capture_faults,
 };
 
 #[cfg(ktest)]
@@ -78,6 +108,13 @@ use arch_x86_aspace_bindings as aspace_bindings;
 pub const MAX_CACHE_LINE: usize = 64;
 #[repr(align(64))]
 pub struct CpuAlignMarker;
+
+/// Kernel 64-bit code segment selector (GDT index 2: `2 << 3 = 0x10`).
+pub const CODE_64_SELECTOR: u16 = 0x10;
+
+/// 32-bit compatibility user code selector (GDT index 4 with Requested Privilege Level 3:
+/// `(4 << 3) | 3 = 0x23`), used as the `IA32_STAR[63:48]` base.
+pub const USER_CODE_SELECTOR: u16 = 0x20 | 3;
 
 /// User 64-bit code segment selector (GDT index 6 with Requested Privilege Level 3:
 /// `(6 << 3) | 3 = 0x33`).
@@ -222,6 +259,46 @@ zr::static_assert!(
 
 pub const MMU_GUEST_SIZE_SHIFT: usize = aspace_bindings::MMU_GUEST_SIZE_SHIFT as usize;
 
+/// x86-64 page table constants and helpers shared with `<arch/x86/mmu.h>` and
+/// `<page_tables/x86/constants.h>`.
+pub mod mmu {
+    use core::ptr;
+
+    use crate::kernel::types::PAddr;
+    use crate::vm::physmap::paddr_to_physmap;
+
+    use super::aspace_bindings;
+
+    pub const NO_OF_PT_ENTRIES: usize = aspace_bindings::NO_OF_PT_ENTRIES as usize;
+    pub const PDP_SHIFT: usize = aspace_bindings::PDP_SHIFT as usize;
+    pub const PD_SHIFT: usize = aspace_bindings::PD_SHIFT as usize;
+    pub const PT_SHIFT: usize = aspace_bindings::PT_SHIFT as usize;
+    pub const ADDR_OFFSET: usize = aspace_bindings::ADDR_OFFSET as usize;
+
+    pub const X86_MMU_PG_P: u64 = aspace_bindings::X86_MMU_PG_P as u64;
+    pub const X86_MMU_PG_RW: u64 = aspace_bindings::X86_MMU_PG_RW as u64;
+    pub const X86_MMU_PG_G: u64 = aspace_bindings::X86_MMU_PG_G as u64;
+    pub const X86_MMU_PG_NX: u64 = aspace_bindings::X86_MMU_PG_NX as u64;
+    pub const X86_FLAGS_MASK: u64 = aspace_bindings::X86_FLAGS_MASK as u64;
+
+    pub const X86_KERNEL_KASAN_RW_PT_FLAGS: u64 =
+        aspace_bindings::X86_KERNEL_KASAN_RW_PT_FLAGS as u64;
+    pub const X86_KERNEL_KASAN_PD_FLAGS: u64 = aspace_bindings::X86_KERNEL_KASAN_PD_FLAGS as u64;
+
+    unsafe extern "C" {
+        static upper_512gib_page_table_phys: usize;
+    }
+
+    /// Returns a pointer to the upper 512 GiB PDP table in the physmap.
+    #[cfg_attr(sanitize = "address", sanitize(address = "off"))]
+    pub fn x86_upper_512gib_page_table() -> *mut u64 {
+        // SAFETY: `upper_512gib_page_table_phys` is initialized once in `start.S` before any C or
+        // Rust code runs and never modified thereafter.
+        let phys = unsafe { upper_512gib_page_table_phys };
+        ptr::with_exposed_provenance_mut::<u64>(paddr_to_physmap(PAddr(phys)).0)
+    }
+}
+
 #[cfg(ktest)]
 /// Architecture unit tests for x86.
 #[unittest::suite(name = "x86")]
@@ -281,218 +358,5 @@ mod x86_tests {
         // Kernel address.
         assert_false!(is_valid_user_pc(KERNEL_ASPACE_BASE));
         assert_false!(is_valid_user_pc(0xffff_8000_0000_0000));
-    }
-}
-
-#[cfg(ktest)]
-/// x64 platform tests.
-#[unittest::suite(name = "x64_platform_tests_rust")]
-mod x64_platform_tests {
-    use super::apic::ApicInterruptDeliveryMode;
-    use super::cpuid::RealCpuId;
-    use super::feature::{
-        X86_FEATURE_RDTSCP, X86HypervisorList, x86_feature_test, x86_get_hypervisor,
-    };
-    use super::hwp::{intel_hwp_init, intel_hwp_supported};
-    use super::interrupts::X86_INT_NMI;
-    use super::lapic::apic_send_mask_ipi;
-    use super::msr::{read_msr_on_cpu, read_msr_safe_on_cpu, write_msr_on_cpu};
-    use super::platform_access::RealMsrAccess;
-    use super::registers::{X86_MSR_IA32_FMASK, X86_MSR_IA32_LSTAR, X86_MSR_IA32_TSC_AUX};
-    use super::x86::{read_msr, write_msr};
-    use crate::console::console_run_script_locked;
-    use crate::kernel::deadline::{Deadline, TimerSlack};
-    use crate::kernel::mp::{MpIpiTarget, is_cpu_online, sync_exec, sync_exec_raw};
-    use crate::kernel::scheduler::peek_active_mask;
-    use crate::kernel::types::cpu_num_to_mask;
-    use crate::platform_rs::timer::{DurationMono, current_mono_time};
-    use boot_options::BootOptions;
-    use kprint::kprintln;
-    use unittest::{expect_eq, expect_ne, expect_true};
-    use zx_status::sys::ZX_OK;
-
-    unsafe extern "C" fn rdtscp_aux(context: *mut core::ffi::c_void) {
-        // SAFETY: `context` points to a valid `u32` on the caller's stack.
-        let aux = unsafe { &mut *context.cast::<u32>() };
-        let aux_msr: u32;
-        // SAFETY: `rdtscp` reads the timestamp counter and IA32_TSC_AUX into eax, edx, ecx.
-        unsafe {
-            core::arch::asm!(
-                "rdtscp",
-                out("eax") _,
-                out("edx") _,
-                out("ecx") aux_msr,
-                options(nostack, preserves_flags),
-            );
-        }
-        *aux = aux_msr;
-    }
-
-    /// basic test of read/write MSR variants
-    #[test]
-    fn test_x64_msrs() {
-        let int_state = crate::arch_rs::arch_interrupt_save();
-        // Test read_msr for an MSR that is known to always exist on x64.
-        // SAFETY: `X86_MSR_IA32_LSTAR` is an architectural MSR that always exists on x86_64.
-        let val = unsafe { read_msr(X86_MSR_IA32_LSTAR) };
-        expect_ne!(val, 0u64);
-
-        // Test write_msr to write that value back.
-        // SAFETY: Writing back the current value of `X86_MSR_IA32_LSTAR` with interrupts disabled.
-        unsafe { write_msr(X86_MSR_IA32_LSTAR, val) };
-        crate::arch_rs::arch_interrupt_restore(int_state);
-
-        // Test read_msr_safe for an MSR that is known to not exist.
-        // If read_msr_safe is busted, then this will #GP (panic).
-        // TODO: Enable when the QEMU TCG issue is sorted (TCG never
-        // generates a #GP on MSR access).
-
-        // Test read_msr_on_cpu and read_msr_safe_on_cpu.
-        // SAFETY: `X86_MSR_IA32_FMASK` is an architectural MSR that always exists on x86_64.
-        let initial_fmask = unsafe { read_msr(X86_MSR_IA32_FMASK) };
-        for i in 0..crate::arch_rs::max_num_cpus() {
-            if !is_cpu_online(i) {
-                continue;
-            }
-            // SAFETY: CPU `i` is online and `X86_MSR_IA32_FMASK` is a valid MSR.
-            let fmask = unsafe { read_msr_on_cpu(i, X86_MSR_IA32_FMASK) };
-            expect_true!(fmask == Ok(initial_fmask));
-            // SAFETY: `read_msr_safe_on_cpu` catches `#GP(0)` faults and has no side effects.
-            let safe_fmask = unsafe { read_msr_safe_on_cpu(i, X86_MSR_IA32_FMASK) };
-            expect_true!(safe_fmask == Ok(initial_fmask));
-            // SAFETY: `0xdeadbeef` is an unimplemented MSR; `read_msr_safe_on_cpu` catches `#GP(0)`
-            // across both the local fast path and remote worker-thread path.
-            let _ = unsafe { read_msr_safe_on_cpu(i, 0xdeadbeef) };
-        }
-
-        let invalid_cpu = crate::arch_rs::max_num_cpus();
-        // SAFETY: `invalid_cpu` is out of range and returns `Err(Status::BAD_STATE)` without
-        // issuing `rdmsr`.
-        let invalid_res = unsafe { read_msr_safe_on_cpu(invalid_cpu, X86_MSR_IA32_FMASK) };
-        expect_true!(invalid_res == Err(Status::BAD_STATE));
-
-        // Test write_msr_on_cpu
-        for i in 0..crate::arch_rs::max_num_cpus() {
-            if !is_cpu_online(i) {
-                continue;
-            }
-            // SAFETY: CPU `i` is online and writing back `initial_fmask` preserves state.
-            let res = unsafe { write_msr_on_cpu(i, X86_MSR_IA32_FMASK, initial_fmask) };
-            expect_true!(res.is_ok());
-        }
-
-        // If RDTSCP is supported, check that the TSC_AUX MSR is correctly programmed.
-        if x86_feature_test(X86_FEATURE_RDTSCP) {
-            for i in 0..crate::arch_rs::max_num_cpus() {
-                if !is_cpu_online(i) {
-                    continue;
-                }
-                // SAFETY: CPU `i` is online and `X86_MSR_IA32_TSC_AUX` is supported when RDTSCP is
-                // present.
-                let cpuid = unsafe { read_msr_on_cpu(i, X86_MSR_IA32_TSC_AUX) };
-                expect_true!(cpuid == Ok(i as u64));
-
-                let mut aux: u32 = 0;
-                let mut mask = 0;
-                mask |= cpu_num_to_mask(i);
-                // SAFETY: `rdtscp_aux` is a valid callback and `&raw mut aux` is valid for the
-                // duration of the synchronous call.
-                unsafe {
-                    sync_exec_raw(MpIpiTarget::Mask, mask, rdtscp_aux, (&raw mut aux).cast());
-                }
-                expect_true!(cpuid == Ok(aux as u64));
-            }
-        }
-    }
-
-    /// test k cpu rdmsr commands
-    #[test]
-    fn test_x64_msrs_k_commands() {
-        expect_eq!(ZX_OK, console_run_script_locked("cpu features"));
-        expect_eq!(ZX_OK, console_run_script_locked("cpu rdmsr 0 0x10"));
-        expect_eq!(Status::BAD_STATE.into_raw(), console_run_script_locked("cpu rdmsr 9999 0x10"));
-        expect_eq!(
-            Status::INVALID_ARGS.into_raw(),
-            console_run_script_locked("cpu rdmsr 0 0x100000000")
-        );
-        // Verify that reading an unimplemented MSR via the debug console does not panic the kernel
-        // with #GP(0) (on TCG this returns 0, while on hardware/KVM `read_msr_safe_on_cpu` catches
-        // the #GP fault and returns an error status).
-        let _ = console_run_script_locked("cpu rdmsr 0 0xdeadbeef");
-    }
-
-    /// test k hwp commands
-    #[test]
-    fn test_x64_hwp_k_commands() {
-        // Don't test at all if HWP disabled on the command line.
-        if !BootOptions::get().x86_hwp {
-            return true;
-        }
-
-        // If we don't support HWP, expect every command to just return "not supported".
-        if !intel_hwp_supported(&RealCpuId) {
-            expect_eq!(Status::NOT_SUPPORTED.into_raw(), console_run_script_locked("hwp"));
-            return true;
-        }
-
-        // Test top-level parsing.
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp"));
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp invalid"));
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp 3"));
-
-        // Set policy.
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp set-policy"));
-        expect_eq!(
-            Status::INVALID_ARGS.into_raw(),
-            console_run_script_locked("hwp set-policy invalid-policy")
-        );
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp set-policy 3"));
-        expect_eq!(
-            Status::INVALID_ARGS.into_raw(),
-            console_run_script_locked("hwp set-policy performance 42")
-        );
-        expect_eq!(ZX_OK, console_run_script_locked("hwp set-policy performance"));
-        expect_eq!(ZX_OK, console_run_script_locked("hwp set-policy power-save"));
-
-        // Set Freq
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp set-freq"));
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp set-freq 0"));
-        expect_eq!(Status::INVALID_ARGS.into_raw(), console_run_script_locked("hwp set-freq 256"));
-        expect_eq!(
-            Status::INVALID_ARGS.into_raw(),
-            console_run_script_locked("hwp set-freq 10 10")
-        );
-        expect_eq!(ZX_OK, console_run_script_locked("hwp set-freq 100"));
-        expect_eq!(ZX_OK, console_run_script_locked("hwp set-freq 255"));
-
-        // Restore the policy to default across all CPUs.
-        let policy = BootOptions::get().x86_hwp_policy;
-        // SAFETY: `MpIpiTarget::All` does not require interrupts to be disabled.
-        unsafe {
-            sync_exec(MpIpiTarget::All, 0, || {
-                let mut msr = RealMsrAccess;
-                intel_hwp_init(&RealCpuId, &mut msr, policy);
-            });
-        }
-    }
-
-    // TODO(https://fxbug.dev/42169592): Unconditionally re-enable this test when
-    // https://fxbug.dev/42169592 has been resolved.
-    //
-    // Spam all the CPUs with NMIs, see that nothing bad happens.
-    /// test nmi spam
-    #[test]
-    fn test_nmi_spam() {
-        if x86_get_hypervisor() == X86HypervisorList::Kvm {
-            kprintln!("skipping test, see https://fxbug.dev/42169592");
-            return true;
-        }
-
-        const DURATION: DurationMono = DurationMono::from_millis(100);
-        let deadline = Deadline::after_mono(DURATION, TimerSlack::none());
-        while {
-            apic_send_mask_ipi(X86_INT_NMI.0, peek_active_mask(), ApicInterruptDeliveryMode::NMI);
-            current_mono_time().0 < deadline.when().0
-        } {}
     }
 }

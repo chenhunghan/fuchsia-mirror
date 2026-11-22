@@ -15,7 +15,6 @@ fidl_library(
     ],
     api_area = "UI",
     category = "partner",
-    enable_hlcpp = True,
     excluded_checks = [
         "invalid-case-for-decl-name",
     ],

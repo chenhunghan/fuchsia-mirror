@@ -85,8 +85,8 @@ impl fho::FfxTool for SuiteAdapter {{
     // This is provided only for completeness of the trait. Do not expect
     // it be meaningful. The correct value for plugins is determined within
     // ffx_plugin_impl().
-    fn requires_target() -> bool {{
-      false
+    fn target_need() -> fho::TargetNeed {{
+      fho::TargetNeed::None
     }}
 
     async fn from_env(env: fho::FhoEnvironment, cmd: Self::Command) -> fho::Result<Self> {{

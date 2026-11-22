@@ -50,7 +50,7 @@ dd if=/dev/zero bs=4096 count=8 of=${REGULAR_PATH}/regular
 echo -n "01234567" >> ${REGULAR_PATH}/regular
 
 ln -s regular ${REGULAR_PATH}/symlink
-LONG_SYMLINK_TARGET=$(printf 'x%.0s' {1..300})
+LONG_SYMLINK_TARGET=$(printf 'x%.0s' {1..4093})
 ln -s "${LONG_SYMLINK_TARGET}" ${REGULAR_PATH}/long_symlink
 ln ${REGULAR_PATH}/regular ${REGULAR_PATH}/hardlink
 touch ${REGULAR_PATH}/chowned
@@ -219,6 +219,11 @@ for f in ${MOUNT_PATH}/fscrypt/*
 do
 	echo "\"$(basename $f)\"",
 done
+
+# A short symlink whose target is stored in a data block rather than inline.
+umount ${MOUNT_PATH}
+mount -o loop,noinline_data -t f2fs /tmp/f2fs.img ${MOUNT_PATH}
+ln -s regular ${REGULAR_PATH}/noinline_symlink
 
 # Create orphan files (files unlinked while held open by a process)
 touch ${MOUNT_PATH}/orphan1 ${MOUNT_PATH}/orphan2 ${MOUNT_PATH}/orphan3

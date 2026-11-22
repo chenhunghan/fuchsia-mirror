@@ -13,6 +13,7 @@ load("@rules_cc//cc:defs.bzl", "cc_library")
 def _fx_cc_library_impl(
         name,
         configs,  # buildifier: disable=unused-variable - For GN conversion only.
+        friend,  # buildifier: disable=unused-variable - For GN conversion only.
         public_configs,  # buildifier: disable=unused-variable - For GN conversion only.
         build_flags,
         disable_build_flags,
@@ -43,6 +44,10 @@ fx_cc_library = macro(
     inherit_attrs = _cc_library_for_inherit_attrs,
     attrs = {
         "configs": attr.string_list(
+            doc = "Unused in Bazel, for GN conversion only.",
+            default = [],
+        ),
+        "friend": attr.string_list(
             doc = "Unused in Bazel, for GN conversion only.",
             default = [],
         ),

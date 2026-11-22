@@ -60,7 +60,6 @@ constexpr zx::duration kOOMCrashReportingDelay = zx::sec(90);
 // Crash reporting
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-const char kBuildVersionPath[] = "/config/build-info/version";
 const char kBuildPlatformVersionPath[] = "/config/build-info/platform_version";
 const char kBuildProductVersionPath[] = "/config/build-info/product_version";
 const char kBuildBoardPath[] = "/config/build-info/board";
@@ -92,16 +91,13 @@ constexpr zx::duration kSnapshotSharedRequestWindow = zx::sec(5);
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 constexpr char kDeviceIdPath[] = "/data/device_id.txt";
 constexpr char kCurrentLogsDir[] = "/cache/current_system_logs";
+constexpr char kPreviousLogsDir[] = "/cache/previous_system_logs";
 constexpr char kPreviousLogsFilePath[] = "/tmp/log.system.previous_boot.txt";
 constexpr char kPreviousBootKernelLogPath[] = "/tmp/log.kernel.previous_boot.txt";
 constexpr char kPreviousBootInspectPath[] = "/tmp/inspect.previous_boot.json";
 constexpr char kPreviousBootIdPath[] = "/tmp/boot_id.txt";
 constexpr char kCurrentBootIdPath[] = "/data/boot_id.txt";
-constexpr char kPreviousSystemTimePath[] = "/tmp/system_time.json";
-constexpr char kCurrentSystemTimePath[] = "/cache/system_time.json";
 constexpr char kBootIdTimelinePath[] = "/data/boot_id_timeline.txt";
-constexpr char kPreviousBuildVersionPath[] = "/tmp/build_version.txt";
-constexpr char kCurrentBuildVersionPath[] = "/data/build_version.txt";
 constexpr char kPreviousBuildPlatformVersionPath[] = "/tmp/build_platform_version.txt";
 constexpr char kCurrentBuildPlatformVersionPath[] = "/data/build_platform_version.txt";
 constexpr char kPreviousBuildProductVersionPath[] = "/tmp/build_product_version.txt";
@@ -109,16 +105,17 @@ constexpr char kCurrentBuildProductVersionPath[] = "/data/build_product_version.
 constexpr char kDataRegisterPath[] = "/tmp/data_register.json";
 constexpr char kKernelBootOptionsPath[] = "/boot/kernel/boot-options.txt";
 
-constexpr zx::duration kSystemTimeTrackerWritePeriod = zx::min(1);
-
 constexpr size_t kRedactionIdCacheCapacity = 1500;
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 // Legacy files
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 
-// Feedback no longer writes this file, but older versions may have left it behind.
+// Feedback no longer writes these files, but older versions may have left them behind.
+// TODO(https://fxbug.dev/587513818): Remove once it's guaranteed these files no longer exist.
+constexpr char kLegacyBuildVersionPath[] = "/data/build_version.txt";
 constexpr char kLegacyDiskBackedLogsMetadataPath[] = "/cache/disk_backed_logs_metadata.json";
+constexpr char kLegacySystemTimePath[] = "/cache/system_time.json";
 
 }  // namespace forensics::feedback
 

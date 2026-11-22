@@ -81,7 +81,7 @@ enum class EntropyTestSource : uint8_t { kHwRng, kJitterEntropy };
 enum class PageTableEvictionPolicy : uint8_t { kOnRequest, kNever, kAlways };
 
 // See kernel.scheduler.fair-placement-affinity.
-enum class FairPlacementAffinity : uint8_t { kCluster, kIdle, kHeadroom };
+enum class FairPlacementAffinity : uint8_t { kCluster, kIdle, kHeadroom, kQueueTime };
 
 // See kernel.enable-serial-syscalls.
 enum class SerialDebugSyscalls : uint8_t {

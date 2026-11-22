@@ -89,7 +89,12 @@ test("platform_auth_delegate_unittests") {
 test("platform_manager_unittests") {
   output_name = "platform_manager_unittests"
   sources = [ "platform_manager_unittests.cpp" ]
-  deps = [ ":common_test_deps" ]
+  deps = [
+    ":common_test_deps",
+    "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_cpp",
+    "//sdk/lib/component/incoming/cpp",
+    "//sdk/lib/component/testing/cpp",
+  ]
 }
 
 test("warm_platform_support_unittests") {
@@ -144,7 +149,7 @@ group("common_test_deps") {
   testonly = true
   public_deps = [
     "//sdk/lib/stdcompat",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/vfs/cpp",
     "//src/connectivity/weave/adaptation",
     "//src/lib/fxl/test:gtest_main",

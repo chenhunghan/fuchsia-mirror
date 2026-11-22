@@ -5,6 +5,7 @@
 //! md_parser defines the traits and structs used to parse markdown files into elements that can be
 //! checked.
 
+use crate::link_checker::slugify_anchor;
 use crate::{DocLine, parser};
 pub use pulldown_cmark::{CowStr, LinkType, Options, Parser, Tag};
 use std::collections::HashMap;
@@ -236,7 +237,7 @@ impl<'a> DocContext<'a> {
             // glossary document link: /docs/glossary/README.md#<slug>. This allows LinkChecker to validate
             // that the referenced term exists in docs/glossary/_glossary.yaml and prevents false-positive
             // "broken reference link" errors while ensuring broken/misspelled glossary targets are caught.
-            let slug = term.trim().replace(' ', "-").to_lowercase();
+            let slug = slugify_anchor(term);
             let target = format!("/docs/glossary/README.md#{}", slug);
             let normalized: &str = &text[link.span.clone()];
             Some((CowStr::Boxed(target.into()), normalized.into()))

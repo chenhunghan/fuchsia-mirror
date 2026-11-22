@@ -226,6 +226,9 @@ class UsbDevice : public UsbDeviceType,
  private:
   DISALLOW_COPY_ASSIGN_AND_MOVE(UsbDevice);
 
+  // Maximum number of attempts for each descriptor read issued during Init().
+  static constexpr size_t kGetDescriptorMaxAttempts = 3;
+
   struct RequestData {
     // True if the request is ready to be processed by the client during the next callback.
     bool ready_for_client;

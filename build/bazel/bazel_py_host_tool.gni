@@ -1,0 +1,162 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_build_action.gni")
+
+# Get host_tools_dir and host_tools_base_path_override without exposing them
+# (or anything else in host.gni) to files that import this one.
+_temp = {
+  import("//build/host.gni")
+}
+_host_tools_dir = _temp.host_tools_dir
+_host_tools_base_path_override = _temp.host_tools_base_path_override
+
+# The base host toolchain of the build machine, the only one that builds and
+# installs the archive. This is what `host_toolchain` is outside of host variant
+# toolchains (see //build/config/BUILDCONFIG.gn).
+_build_host_toolchain = "//build/toolchain:host_${host_cpu}"
+
+# Brings a Python zipapp built by a Bazel `py_zipapp_binary()` (see
+# //build/bazel/rules/python/py_zipapp_binary.bzl) into the Ninja build.
+#
+# This replaces a GN `python_binary()` (and optionally its
+# `install_python_tool()`) when migrating it to Bazel:
+#
+#   * Like `python_binary()`, it places the archive at
+#     `${target_out_dir}/${target_name}.pyz`, where `python_action()` (see
+#     //build/python/python_action.gni) and other GN consumers expect it.
+#   * If `host_tool_name` is set, like `install_python_tool()`, it also copies
+#     the archive to `${root_out_dir}/${host_tool_name}` and
+#     `${host_tools_dir}/${host_tool_name}` (see //build/host.gni), and lists
+#     it in `tool_paths.json`.
+#
+# Unlike `bazel_host_tool()` (//build/bazel/bazel_host_tool.gni), there is no
+# per-variant output location or `tool_paths` handling: a `.pyz` doesn't depend
+# on the CPU or on instrumentation, so it is built once, in the build machine's
+# base host toolchain, which also installs it. Other host toolchains (variants
+# such as `host_x64-asan`, or cross host toolchains such as `host_arm64`) only
+# copy it to their own `target_out_dir` for their `python_action()` targets.
+#
+# Example:
+#
+#   # BUILD.bazel
+#   py_zipapp_binary(
+#       name = "my_tool",
+#       main = "main.py",
+#       deps = [ ... ],
+#   )
+#
+#   # BUILD.gn
+#   bazel_py_host_tool("my_tool") {
+#     bazel_target = ":my_tool"
+#     host_tool_name = "my-tool"
+#   }
+#
+# Parameters
+#
+#   bazel_target (required)
+#     Label of the Bazel `py_zipapp_binary()` target.
+#     Type: Bazel label
+#
+#   bazel_output_path (optional)
+#     Path of the archive in the Bazel output tree, see `<bazel_path>` in
+#     `bazel_build_action()`.
+#     Type: string
+#     Default: "{{BAZEL_TARGET_OUT_DIR}}/${target_name}.pyz", the output of a
+#       `py_zipapp_binary()` with the same name and no `output_name`.
+#
+#   host_tool_name (optional)
+#     If set, installs the archive as a host tool with this name.
+#     Type: string
+#
+#   testonly
+#   visibility
+#
+template("bazel_py_host_tool") {
+  assert(is_host, "bazel_py_host_tool() can only be used in a host toolchain.")
+  assert(defined(invoker.bazel_target), "bazel_target is required")
+
+  if (current_toolchain != _build_host_toolchain) {
+    # Another host toolchain. `python_action()` (which resolves its binary in
+    # `host_toolchain`, the variant itself in a host variant toolchain) or other
+    # GN consumers here expect the archive in this toolchain's
+    # `target_out_dir`, so copy it there from the build machine's base host
+    # toolchain, without building or installing it again.
+    _base_target = ":${target_name}(${_build_host_toolchain})"
+    _base_target_out_dir = get_label_info(_base_target, "target_out_dir")
+
+    copy(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "testonly",
+                               "visibility",
+                             ])
+      sources = [ "${_base_target_out_dir}/${target_name}.pyz" ]
+      outputs = [ "${target_out_dir}/${target_name}.pyz" ]
+      deps = [ _base_target ]
+    }
+    not_needed(invoker, "*")
+  } else {
+    # Sub-builds (see //build/subbuild.gni) run Ninja without a Bazel
+    # workspace, so they can't build the archive.
+    assert(
+        _host_tools_base_path_override == "",
+        "bazel_py_host_tool() is not supported in sub-builds: ${target_name}")
+
+    if (defined(invoker.bazel_output_path)) {
+      _bazel_output_path = invoker.bazel_output_path
+    } else {
+      _bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/${target_name}.pyz"
+    }
+
+    _outputs = [ "${target_out_dir}/${target_name}.pyz" ]
+    if (defined(invoker.host_tool_name)) {
+      _host_tool_name = invoker.host_tool_name
+      _host_tool_path = "${root_out_dir}/${_host_tool_name}"
+      _outputs += [
+        _host_tool_path,
+        "${_host_tools_dir}/${_host_tool_name}",
+      ]
+    }
+
+    bazel_build_action(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "bazel_target",
+                               "testonly",
+                               "visibility",
+                             ])
+      bazel_config = "host"
+
+      # Use `root_build_dir` rather than the default `target_out_dir` as the
+      # base of `copy_outputs`, so outputs can also go to `root_out_dir` and
+      # `host_tools_dir`.
+      ninja_base_dir = root_build_dir
+      copy_outputs = []
+      foreach(_output, _outputs) {
+        copy_outputs += [
+          {
+            bazel = _bazel_output_path
+            ninja = rebase_path(_output, root_build_dir)
+          },
+        ]
+      }
+
+      if (defined(_host_tool_path)) {
+        # Like install_python_tool() (see //build/python/host.gni).
+        metadata = {
+          tool_paths = [
+            {
+              cpu = current_cpu
+              label = get_label_info(":${target_name}", "label_with_toolchain")
+              name = _host_tool_name
+              os = current_os
+              path = rebase_path(_host_tool_path, root_build_dir)
+            },
+          ]
+        }
+      }
+    }
+  }
+}

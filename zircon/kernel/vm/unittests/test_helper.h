@@ -7,40 +7,14 @@
 #ifndef ZIRCON_KERNEL_VM_UNITTESTS_TEST_HELPER_H_
 #define ZIRCON_KERNEL_VM_UNITTESTS_TEST_HELPER_H_
 
-#include <align.h>
 #include <assert.h>
-#include <bits.h>
-#include <lib/instrumentation/asan.h>
-#include <lib/unittest/unittest.h>
-#include <lib/unittest/user_memory.h>
-#include <zircon/errors.h>
 #include <zircon/types.h>
 
-#include <arch/kernel_aspace.h>
-#include <fbl/algorithm.h>
-#include <fbl/alloc_checker.h>
-#include <fbl/vector.h>
-#include <ktl/algorithm.h>
-#include <ktl/iterator.h>
-#include <ktl/utility.h>
-#include <vm/compression.h>
-#include <vm/fault.h>
-#include <vm/physmap.h>
-#include <vm/pmm.h>
-#include <vm/pmm_checker.h>
-#include <vm/pmm_node.h>
-#include <vm/scanner.h>
-#include <vm/vm.h>
-#include <vm/vm_address_region.h>
-#include <vm/vm_aspace.h>
+#include <fbl/ref_ptr.h>
 #include <vm/vm_object.h>
 #include <vm/vm_object_paged.h>
-#include <vm/vm_object_physical.h>
 
 namespace vm_unittest {
-
-constexpr uint kArchRwFlags = ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
-constexpr uint kArchRwUserFlags = kArchRwFlags | ARCH_MMU_FLAG_PERM_USER;
 
 // Stubbed page provider that is intended to be allowed to create a vmo that believes it is backed
 // by a user pager, but is incapable of actually providing pages.
@@ -103,20 +77,10 @@ void fill_region(uintptr_t seed, void* _ptr, size_t len);
 // test a region of memory against a known pattern
 bool test_region(uintptr_t seed, void* _ptr, size_t len);
 
-// Helper function used by vm_mapping_page_fault_optimisation_test.
-// Given a mapping, check that a run of consecutive pages are mapped (indicated by
-// expected_mapped_page_count) and that remaining pages are unmapped.
-bool verify_mapped_page_range(vaddr_t base, size_t mapping_size, size_t expected_mapped_page_count);
-
 // Verify that |vmo| has |expected_bytes| tracked by the continuous attribution system.
 //
 // This test helper must only be called on paged, non-slice VMOs.
 bool verify_continuous_attribution_bytes(VmObject& vmo, uint64_t expected_bytes);
-
-// Helper function that produces a filled out AttributionCounts for testing simple VMOs that just
-// have private and no shared content.
-VmObject::AttributionCounts make_private_attribution_counts(uint64_t uncompressed,
-                                                            uint64_t compressed);
 
 // Changes |vmo|'s high priority count by |delta|, taking care of the prepare and locking steps
 // required by PriorityChanger.
@@ -124,9 +88,6 @@ VmObject::AttributionCounts make_private_attribution_counts(uint64_t uncompresse
 // |delta| must be non-zero. The count may never go negative, so callers must only subtract what
 // they have already added, and must remove any additions before |vmo| is destroyed.
 void change_vmo_high_priority_count(VmObjectPaged& vmo, int64_t delta);
-
-// Use the function name as the test name
-#define VM_UNITTEST(fname) UNITTEST(#fname, fname)
 
 }  // namespace vm_unittest
 

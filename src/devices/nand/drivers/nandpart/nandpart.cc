@@ -155,9 +155,9 @@ zx::result<> Driver::Start(fdf::DriverContext context) {
 
     nand_protocol_t nand_proto;
     nand.GetProto(&nand_proto);
-    auto& device = devices_.emplace_back(
+    auto device =
         std::make_unique<NandPartDevice>(nand_proto, bad_block.value(), parent_op_size, nand_info,
-                                         static_cast<uint32_t>(part.first_block()), part.name()));
+                                         static_cast<uint32_t>(part.first_block()), part.name());
 
     // Find optional partition_config information.
     uint32_t copy_count = 1;
@@ -173,9 +173,9 @@ zx::result<> Driver::Start(fdf::DriverContext context) {
         device->Init(copy_count, node().borrow(), context.node_name(), incoming, outgoing());
     if (result.is_error()) {
       fdf::error("Failed to initialize nand-part device \"{}\": {}", part.name(), result);
-
       continue;
     }
+    devices_.push_back(std::move(device));
   }
 
   return zx::ok();
@@ -191,9 +191,20 @@ zx::result<> NandPartDevice::Init(uint32_t copy_count,
     return zx::error(ZX_ERR_BAD_STATE);
   }
 
+  fuchsia_hardware_badblock::Service::InstanceHandler handler({
+      .bad_block = bad_block_bindings_.CreateHandler(
+          this, fdf::Dispatcher::GetCurrent()->async_dispatcher(), fidl::kIgnoreBindingClosure),
+  });
+  zx::result add_service_result =
+      outgoing->AddService<fuchsia_hardware_badblock::Service>(std::move(handler), name_);
+  if (add_service_result.is_error()) {
+    fdf::error("Failed to add badblock service for \"{}\": {}", name_, add_service_result);
+    return add_service_result.take_error();
+  }
+  outgoing_ = outgoing;
+
   compat::DeviceServer::BanjoConfig banjo_config{.default_proto_id = ZX_PROTOCOL_NAND};
   banjo_config.callbacks[ZX_PROTOCOL_NAND] = nand_server_.callback();
-  banjo_config.callbacks[ZX_PROTOCOL_BAD_BLOCK] = bad_block_server_.callback();
 
   zx::result result =
       compat_server_.Initialize(incoming, outgoing, node_name, name_,
@@ -218,7 +229,8 @@ zx::result<> NandPartDevice::Init(uint32_t copy_count,
     return zx::error(status);
   }
 
-  const std::vector<fuchsia_driver_framework::Offer> offers = compat_server_.CreateOffers2();
+  std::vector<fuchsia_driver_framework::Offer> offers = compat_server_.CreateOffers2();
+  offers.push_back(fdf::MakeOffer2<fuchsia_hardware_badblock::Service>(name_));
 
   zx::result child =
       fdf::AddChild(parent, *fdf::Logger::GlobalInstance(), name_, properties, offers);
@@ -294,14 +306,13 @@ zx_status_t NandPartDevice::NandGetFactoryBadBlockList(uint32_t* bad_blocks, siz
   return ZX_ERR_NOT_SUPPORTED;
 }
 
-zx_status_t NandPartDevice::BadBlockGetBadBlockList(uint32_t* bad_block_list,
-                                                    size_t bad_block_list_len,
-                                                    size_t* bad_block_count) {
+void NandPartDevice::GetBadBlockList(GetBadBlockListCompleter::Sync& completer) {
   if (bad_blocks_.empty()) {
     zx::result bad_blocks = bad_block_->GetBadBlockList(
         erase_block_start_, erase_block_start_ + nand_info_.num_blocks - 1);
     if (bad_blocks.is_error()) {
-      return bad_blocks.status_value();
+      completer.ReplyError(bad_blocks.status_value());
+      return;
     }
     bad_blocks_ = std::move(bad_blocks.value());
     for (uint32_t& bad_block : bad_blocks_) {
@@ -309,24 +320,16 @@ zx_status_t NandPartDevice::BadBlockGetBadBlockList(uint32_t* bad_block_list,
     }
   }
 
-  *bad_block_count = bad_blocks_.size();
-  fdf::debug("Nandpart \"{}\": Bad block count: {}", name_, *bad_block_count);
-
-  if (bad_block_list_len == 0 || bad_blocks_.size() == 0) {
-    return ZX_OK;
-  }
-  if (bad_block_list == NULL) {
-    return ZX_ERR_INVALID_ARGS;
-  }
-
-  const size_t size = sizeof(uint32_t) * std::min(*bad_block_count, bad_block_list_len);
-  memcpy(bad_block_list, bad_blocks_.data(), size);
-  return ZX_OK;
+  fdf::debug("Nandpart \"{}\": Bad block count: {}", name_, bad_blocks_.size());
+  completer.ReplySuccess(fidl::VectorView<uint32_t>::FromExternal(bad_blocks_));
 }
 
-zx_status_t NandPartDevice::BadBlockMarkBlockBad(uint32_t block) {
+void NandPartDevice::MarkBlockBad(MarkBlockBadRequestView request,
+                                  MarkBlockBadCompleter::Sync& completer) {
+  uint32_t block = request->block;
   if (block >= nand_info_.num_blocks) {
-    return ZX_ERR_OUT_OF_RANGE;
+    completer.ReplyError(ZX_ERR_OUT_OF_RANGE);
+    return;
   }
 
   // First, invalidate our cached copy.
@@ -334,7 +337,18 @@ zx_status_t NandPartDevice::BadBlockMarkBlockBad(uint32_t block) {
 
   // Second, "write-through" to actually persist.
   block += erase_block_start_;
-  return bad_block_->MarkBlockBad(block);
+  zx_status_t status = bad_block_->MarkBlockBad(block);
+  if (status != ZX_OK) {
+    completer.ReplyError(status);
+  } else {
+    completer.ReplySuccess();
+  }
+}
+
+void NandPartDevice::handle_unknown_method(
+    fidl::UnknownMethodMetadata<fuchsia_hardware_badblock::BadBlock> metadata,
+    fidl::UnknownMethodCompleter::Sync& completer) {
+  fdf::error("Unknown BadBlock method: {}", metadata.method_ordinal);
 }
 
 }  // namespace nand

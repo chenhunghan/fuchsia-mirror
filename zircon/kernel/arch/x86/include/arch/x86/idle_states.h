@@ -77,14 +77,6 @@ class X86IdleState {
   // Returns the hint to provide to MWAIT to enter this state.
   uint32_t MwaitHint() const { return rust_x86_idle_state_mwait_hint(this); }
 
-  // Marks the idle state as entered.
-  void CountEntry() const { rust_x86_idle_state_count_entry(this); }
-
-  // Records that the system spent |duration| in this state before exiting.
-  void RecordDuration(zx_duration_t duration) const {
-    rust_x86_idle_state_record_duration(this, duration);
-  }
-
  private:
   [[maybe_unused]] OpaqueStorage<24, 8> storage_{};
 };

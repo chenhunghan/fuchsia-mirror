@@ -4,6 +4,7 @@
 @available(added=HEAD)
 library fuchsia.wlan.mlme;
 
+using fuchsia.power.system;
 using fuchsia.wlan.common as common;
 using fuchsia.wlan.ieee80211 as ieee80211;
 using fuchsia.wlan.internal as internal;
@@ -145,6 +146,11 @@ type ConnectConfirm = struct {
 
 type ReconnectRequest = struct {
     peer_sta_address ieee80211.MacAddr;
+
+    /// OWE public key used for Diffie Hellman exchange during reassociation.
+    /// Only included for OWE security type. Each association uses a new ephemeral key pair, so
+    /// this key replaces the one from the original ConnectRequest.
+    owe_public_key box<internal.OwePublicKey>;
 };
 
 type RoamRequest = struct {
@@ -476,6 +482,16 @@ type EapolConfirm = struct {
     dst_addr ieee80211.MacAddr;
 };
 
+/// Indicates a Michael MIC failure on a received TKIP frame
+/// (IEEE Std 802.11-2020 6.3.21.1).
+type MichaelMicFailureIndication = struct {
+    /// MAC address of the peer. In client mode, the connected BSSID.
+    peer_sta_address ieee80211.MacAddr;
+    /// Type of key the failure was detected on. Only [`KeyType.PAIRWISE`] and
+    /// [`KeyType.GROUP`] are valid.
+    key_type KeyType;
+};
+
 // Because these methods rely on an external entity to provide a response, events are used instead
 // of return values.
 closed protocol MLME {
@@ -528,8 +544,10 @@ closed protocol MLME {
 
     /// Indicates that an individual scan within the scheduled scan plan has been completed
     /// and all results have been sent for that individual scan.
-    strict -> OnScheduledScanMatchesAvailable(struct {
+    strict -> OnScheduledScanMatchesAvailable(resource struct {
         txn_id uint64;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     /// Indicates that scheduled scanning has been stopped by the firmware.
@@ -558,13 +576,17 @@ closed protocol MLME {
     });
 
     /// Receive notification that a fullmac-initiated roam attempt is in-progress.
-    strict -> RoamStartInd(struct {
+    strict -> RoamStartInd(resource struct {
         ind RoamStartIndication;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     /// Receive the result of a fullmac-initiated roam attempt.
-    strict -> RoamResultInd(struct {
+    strict -> RoamResultInd(resource struct {
         ind RoamResultIndication;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     strict -> AuthenticateInd(struct {
@@ -581,8 +603,10 @@ closed protocol MLME {
         resp DeauthenticateConfirm;
     });
 
-    strict -> DeauthenticateInd(struct {
+    strict -> DeauthenticateInd(resource struct {
         ind DeauthenticateIndication;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     strict -> AssociateInd(struct {
@@ -599,8 +623,10 @@ closed protocol MLME {
         resp DisassociateConfirm;
     });
 
-    strict -> DisassociateInd(struct {
+    strict -> DisassociateInd(resource struct {
         ind DisassociateIndication;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     strict ResetReq(struct {
@@ -638,6 +664,10 @@ closed protocol MLME {
     strict -> EapolConf(struct {
         resp EapolConfirm;
     });
+    /// Reports a Michael MIC failure detected on a received TKIP frame.
+    strict -> OnMichaelMicFailure(struct {
+        ind MichaelMicFailureIndication;
+    });
 
     // The following are extensions to the 802.11 MLME SAP interface.
 
@@ -645,12 +675,16 @@ closed protocol MLME {
         ind internal.SignalReportIndication;
     });
 
-    strict -> OnRssiThresholdBreached(struct {
+    strict -> OnRssiThresholdBreached(resource struct {
         cur_rssi_dbm int8;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
-    strict -> EapolInd(struct {
+    strict -> EapolInd(resource struct {
         ind EapolIndication;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
     strict SetControlledPort(struct {
         req SetControlledPortRequest;

@@ -12,7 +12,9 @@
 use starnix_core::fs_node_impl_not_dir;
 use starnix_core::task::{CgroupOps, CurrentTask, Kernel};
 use starnix_core::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
-use starnix_core::vfs::{AppendLockWriteGuard, FileOps, FsNode, FsNodeOps, InputBuffer};
+use starnix_core::vfs::{
+    AppendLockWriteGuard, FileObject, FileOps, FsNode, FsNodeOps, InputBuffer,
+};
 
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
@@ -59,6 +61,7 @@ impl FsNodeOps for ControlGroupNode {
         _guard: &AppendLockWriteGuard<'_>,
         _node: &FsNode,
         _current_task: &CurrentTask,
+        _file: Option<&FileObject>,
         _length: u64,
     ) -> Result<(), Errno> {
         Ok(())

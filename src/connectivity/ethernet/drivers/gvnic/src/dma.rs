@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use dma_buffer::{ContiguousBuffer, PagedBuffer};
+use dma_buffer::{CacheOptions, ContiguousBuffer, PagedBuffer};
 use mapped_vmo::Mapping;
 use std::mem::size_of;
 use zerocopy::byteorder::network_endian::{U32, U64};
@@ -29,12 +29,13 @@ impl PageList {
         let page_size = system_get_page_size() as usize;
         let len_usize = usize::try_from(length).map_err(|_| Status::INVALID_ARGS)?;
         let pages_bytes = len_usize.checked_mul(page_size).ok_or(Status::INVALID_ARGS)?;
-        let pages = PagedBuffer::new_with_vmar(bti, vmar, pages_bytes)?;
+        let pages = PagedBuffer::new_with_options(bti, vmar, pages_bytes, CacheOptions::Coherent)?;
 
-        let table_bytes = len_usize.checked_mul(size_of::<U64>()).ok_or(Status::INVALID_ARGS)?;
-        let paddr_table = ContiguousBuffer::new_with_vmar(bti, vmar, table_bytes)?;
+        let table_bytes = len_usize.checked_mul(size_of::<u64>()).ok_or(Status::INVALID_ARGS)?;
+        let mut paddr_table =
+            ContiguousBuffer::new_with_options(bti, vmar, table_bytes, 0, CacheOptions::Coherent)?;
         for (i, &paddr) in pages.phys().iter().enumerate() {
-            paddr_table.write_element(i, &U64::new(paddr as u64));
+            paddr_table.write_at(i, &U64::new(paddr as u64))?;
         }
 
         Ok(Self { id, length, pages, paddr_table })
@@ -74,15 +75,7 @@ impl PageList {
         dst_offset: usize,
         len: usize,
     ) -> Result<(), Status> {
-        if src_offset.checked_add(len).is_none_or(|end| end > self.pages.size())
-            || dst_offset.checked_add(len).is_none_or(|end| end > dst.len())
-        {
-            return Err(Status::OUT_OF_RANGE);
-        }
-        if dst.copy_from_at(dst_offset, &self.pages, src_offset, len) != len {
-            return Err(Status::OUT_OF_RANGE);
-        }
-        Ok(())
+        self.pages.copy_to_mapping(src_offset, dst, dst_offset, len)
     }
 
     pub(crate) fn copy_from(
@@ -92,14 +85,6 @@ impl PageList {
         src_offset: usize,
         len: usize,
     ) -> Result<(), Status> {
-        if dst_offset.checked_add(len).is_none_or(|end| end > self.pages.size())
-            || src_offset.checked_add(len).is_none_or(|end| end > src.len())
-        {
-            return Err(Status::OUT_OF_RANGE);
-        }
-        if self.pages.copy_from_at(dst_offset, src, src_offset, len) != len {
-            return Err(Status::OUT_OF_RANGE);
-        }
-        Ok(())
+        self.pages.copy_from_mapping(dst_offset, src, src_offset, len)
     }
 }

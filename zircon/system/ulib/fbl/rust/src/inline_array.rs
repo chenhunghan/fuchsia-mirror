@@ -47,6 +47,61 @@ zr::static_assert!(core::mem::size_of::<InlineArray<u32, 4>>() == 32);
 zr::static_assert!(core::mem::align_of::<InlineArray<u32, 4>>() == 8);
 
 impl<T, const N: usize, A: Allocator> InlineArray<T, N, A> {
+    /// Returns an in-place initializer that selects inline storage (when `count <= N`) or
+    /// allocates heap storage (when `count > N`) and calls `fill` to initialize all `count` slots.
+    ///
+    /// # Safety
+    ///
+    /// `fill` must initialize every element of the `&mut [MaybeUninit<T>]` slice passed to it.
+    unsafe fn init_storage_in(
+        count: usize,
+        allocator: A,
+        fill: impl FnOnce(&mut [MaybeUninit<T>]),
+    ) -> impl Init<Self, AllocError> {
+        let init = move |slot: *mut Self| -> Result<(), AllocError> {
+            let mut heap_data = if count <= N {
+                None
+            } else {
+                Some(Box::try_new_uninit_slice_in(count, allocator.clone())?)
+            };
+            let dst: &mut [MaybeUninit<T>] = match &mut heap_data {
+                None => {
+                    // SAFETY: `slot` points to valid storage for `Self` (`count <= N`), and
+                    // uninitialized memory is valid for `MaybeUninit<T>`.
+                    unsafe {
+                        core::slice::from_raw_parts_mut(
+                            (&raw mut (*slot).inline_storage).cast::<MaybeUninit<T>>(),
+                            count,
+                        )
+                    }
+                }
+                Some(buf) => buf,
+            };
+            fill(dst);
+            let ptr = match heap_data {
+                None => core::ptr::null_mut(),
+                Some(buf) => {
+                    // SAFETY: `fill` initialized all `count` elements of `buf`.
+                    let buf = unsafe { buf.assume_init() };
+                    Box::into_raw_with_allocator(buf).0.cast::<T>()
+                }
+            };
+            // SAFETY: `slot` points to valid writable storage for `Self`.
+            unsafe {
+                (&raw mut (*slot).count).write(count);
+                (&raw mut (*slot).ptr).write(ptr);
+                (&raw mut (*slot).allocator).write(allocator);
+            }
+            Ok(())
+        };
+        // SAFETY: When `init` returns `Ok(())`, `fill` has initialized all `count` elements in
+        // `dst` (either `inline_storage[..count]` when `count <= N`, leaving `[count..N]` as valid
+        // uninitialized `MaybeUninit<T>`s, or `heap_data[..count]` when `count > N`), and `count`,
+        // `ptr`, and `allocator` are written. On allocation failure, `Err(AllocError)` is returned
+        // before `*slot` is modified.
+        unsafe { pin_init::init_from_closure(init) }
+    }
+
     /// Returns an in-place initializer for an `InlineArray`.
     ///
     /// This initializes the array directly in its final location (e.g. on the caller's stack via
@@ -55,29 +110,14 @@ impl<T, const N: usize, A: Allocator> InlineArray<T, N, A> {
     where
         F: FnMut() -> T,
     {
-        let is_inline = count <= N;
-        // Number of elements that live in `inline_storage`; zero in heap mode.
-        let inline_count = if is_inline { count } else { 0 };
-        // Note: `init!` shadows each field name with an accessor once that field is initialized,
-        // so plain captured values (`count`, `allocator`) are consumed before their fields.
-        pin_init::init!(Self {
-            ptr: if is_inline {
-                core::ptr::null_mut()
-            } else {
-                let mut heap_data = Box::try_new_uninit_slice_in(count, allocator.clone())?;
-                for item in heap_data.iter_mut() {
+        // SAFETY: The loop writes to every element of `dst`.
+        unsafe {
+            Self::init_storage_in(count, allocator, move |dst| {
+                for item in dst.iter_mut() {
                     item.write(f());
                 }
-                // SAFETY: We just initialized all the values.
-                let heap_data = unsafe { heap_data.assume_init() };
-                Box::into_raw_with_allocator(heap_data).0 as *mut T
-            },
-            inline_storage <- pin_init::init_array_from_fn(|i| {
-                if i < inline_count { MaybeUninit::new(f()) } else { MaybeUninit::uninit() }
-            }),
-            allocator,
-            count,
-        }? AllocError)
+            })
+        }
     }
 
     /// Returns an in-place initializer for an `InlineArray`, initializing elements using
@@ -89,6 +129,27 @@ impl<T, const N: usize, A: Allocator> InlineArray<T, N, A> {
         Self::init_in_with(count, allocator, T::default)
     }
 
+    /// Returns an in-place initializer for an `InlineArray` of length `slice.len()`, initializing
+    /// each element by applying `f` to the corresponding element of `slice`.
+    pub fn init_from_slice_in_with<U, F>(
+        slice: &[U],
+        allocator: A,
+        mut f: F,
+    ) -> impl Init<Self, AllocError>
+    where
+        F: FnMut(&U) -> T,
+    {
+        // SAFETY: `dst` has length `slice.len()`, so the zipped loop writes to every element of
+        // `dst`.
+        unsafe {
+            Self::init_storage_in(slice.len(), allocator, move |dst| {
+                for (item, src) in dst.iter_mut().zip(slice) {
+                    item.write(f(src));
+                }
+            })
+        }
+    }
+
     /// Tries to create a new `InlineArray` of the given length with a specific allocator,
     /// initializing elements with the provided closure.
     pub fn try_new_in_with<F>(count: usize, allocator: A, f: F) -> Result<Self, AllocError>
@@ -97,6 +158,22 @@ impl<T, const N: usize, A: Allocator> InlineArray<T, N, A> {
     {
         let mut slot = MaybeUninit::<Self>::uninit();
         let init = Self::init_in_with(count, allocator, f);
+        // SAFETY: `slot` is a valid pointer to uninitialized memory for `Self`, and `init` fully
+        // initializes it when it returns `Ok`.
+        unsafe {
+            init.__init(slot.as_mut_ptr())?;
+            Ok(slot.assume_init())
+        }
+    }
+
+    /// Tries to create a new `InlineArray` of length `slice.len()` with a specific allocator,
+    /// initializing each element by applying `f` to the corresponding element of `slice`.
+    pub fn try_from_slice_in_with<U, F>(slice: &[U], allocator: A, f: F) -> Result<Self, AllocError>
+    where
+        F: FnMut(&U) -> T,
+    {
+        let mut slot = MaybeUninit::<Self>::uninit();
+        let init = Self::init_from_slice_in_with(slice, allocator, f);
         // SAFETY: `slot` is a valid pointer to uninitialized memory for `Self`, and `init` fully
         // initializes it when it returns `Ok`.
         unsafe {
@@ -160,6 +237,16 @@ impl<T, const N: usize, A: Allocator> InlineArray<T, N, A> {
 }
 
 impl<T, const N: usize> InlineArray<T, N, DefaultAllocator> {
+    /// Creates an empty `InlineArray` without allocating.
+    pub const fn new() -> Self {
+        Self {
+            count: 0,
+            ptr: core::ptr::null_mut(),
+            inline_storage: [const { MaybeUninit::uninit() }; N],
+            allocator: DefaultAllocator,
+        }
+    }
+
     /// Returns an in-place initializer for an `InlineArray` using the default allocator.
     /// Elements are initialized using `T::default()`.
     pub fn init(count: usize) -> impl Init<Self, AllocError>
@@ -178,6 +265,16 @@ impl<T, const N: usize> InlineArray<T, N, DefaultAllocator> {
         Self::init_in_with(count, DefaultAllocator, f)
     }
 
+    /// Returns an in-place initializer for an `InlineArray` of length `slice.len()` using the
+    /// default allocator, initializing each element by applying `f` to the corresponding element
+    /// of `slice`.
+    pub fn init_from_slice_with<U, F>(slice: &[U], f: F) -> impl Init<Self, AllocError>
+    where
+        F: FnMut(&U) -> T,
+    {
+        Self::init_from_slice_in_with(slice, DefaultAllocator, f)
+    }
+
     /// Tries to create a new `InlineArray` of the given length using the default allocator.
     /// Elements are initialized using `T::default()`.
     pub fn try_new(count: usize) -> Result<Self, AllocError>
@@ -194,6 +291,21 @@ impl<T, const N: usize> InlineArray<T, N, DefaultAllocator> {
         F: FnMut() -> T,
     {
         Self::try_new_in_with(count, DefaultAllocator, f)
+    }
+
+    /// Tries to create a new `InlineArray` of length `slice.len()` using the default allocator,
+    /// initializing each element by applying `f` to the corresponding element of `slice`.
+    pub fn try_from_slice_with<U, F>(slice: &[U], f: F) -> Result<Self, AllocError>
+    where
+        F: FnMut(&U) -> T,
+    {
+        Self::try_from_slice_in_with(slice, DefaultAllocator, f)
+    }
+}
+
+impl<T, const N: usize> Default for InlineArray<T, N, DefaultAllocator> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -399,7 +511,7 @@ mod tests {
     fn test_pinned_init() {
         let state = TestState::default();
 
-        for sz in 0..=3 {
+        for sz in 0..=6 {
             state.ctor_count.set(0);
             state.dtor_count.set(0);
             {
@@ -408,11 +520,91 @@ mod tests {
                         TestObject::new(&state)
                     })
                 );
-                let ia = ia.unwrap();
+                let ia = ia.unwrap().into_ref();
                 assert_eq!(ia.len(), sz);
             }
             assert_eq!(state.ctor_count.get(), sz);
             assert_eq!(state.dtor_count.get(), sz);
         }
+
+        state.fail_threshold.set(0);
+        state.ctor_count.set(0);
+        pin_init::stack_try_pin_init!(
+            let heap_err = InlineArray::<TestObject<'_>, 3, _>::init_in_with(
+                4,
+                TestAllocator { state: &state },
+                || TestObject::new(&state),
+            )
+        );
+        assert!(heap_err.is_err());
+        assert_eq!(state.ctor_count.get(), 0);
+    }
+
+    #[test]
+    fn test_from_slice_with() {
+        let state = TestState::default();
+        let empty = InlineArray::<TestObject<'_>, 3>::default();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        drop(empty);
+        assert_eq!(state.ctor_count.get(), 0);
+        assert_eq!(state.dtor_count.get(), 0);
+
+        let inputs: [u32; 7] = [10, 20, 30, 40, 50, 60, 70];
+
+        for sz in 0..=inputs.len() {
+            state.ctor_count.set(0);
+            state.dtor_count.set(0);
+            {
+                let ia = InlineArray::<(u32, TestObject<'_>), 3>::try_from_slice_with(
+                    &inputs[..sz],
+                    |&val| (val * 2, TestObject::new(&state)),
+                )
+                .unwrap();
+                assert_eq!(ia.len(), sz);
+                for (item, &expected) in ia.iter().zip(&inputs[..sz]) {
+                    assert_eq!(item.0, expected * 2);
+                }
+            }
+            assert_eq!(state.ctor_count.get(), sz);
+            assert_eq!(state.dtor_count.get(), sz);
+
+            state.ctor_count.set(0);
+            state.dtor_count.set(0);
+            {
+                let init = InlineArray::<(u32, TestObject<'_>), 3>::init_from_slice_with(
+                    &inputs[..sz],
+                    |&val| (val * 3, TestObject::new(&state)),
+                );
+                pin_init::stack_try_pin_init!(let ia = init);
+                let ia = ia.unwrap().into_ref();
+                assert_eq!(ia.len(), sz);
+                for (item, &expected) in ia.iter().zip(&inputs[..sz]) {
+                    assert_eq!(item.0, expected * 3);
+                }
+            }
+            assert_eq!(state.ctor_count.get(), sz);
+            assert_eq!(state.dtor_count.get(), sz);
+        }
+
+        state.fail_threshold.set(0);
+        state.ctor_count.set(0);
+        let inline_ok = InlineArray::<(u32, TestObject<'_>), 3, _>::try_from_slice_in_with(
+            &inputs[..3],
+            TestAllocator { state: &state },
+            |&val| (val, TestObject::new(&state)),
+        );
+        assert!(inline_ok.is_ok());
+        drop(inline_ok);
+        assert_eq!(state.live_obj_count.get(), 0);
+
+        state.ctor_count.set(0);
+        let heap_err = InlineArray::<(u32, TestObject<'_>), 3, _>::try_from_slice_in_with(
+            &inputs[..4],
+            TestAllocator { state: &state },
+            |&val| (val, TestObject::new(&state)),
+        );
+        assert!(heap_err.is_err());
+        assert_eq!(state.ctor_count.get(), 0);
     }
 }

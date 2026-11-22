@@ -5,7 +5,6 @@
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
 load("@fuchsia_rules_common//build_flags:extra_linker_flags.bzl", "extra_linker_flags")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
@@ -15,7 +14,9 @@ load(
     ":host_tests.bzl",
     "build_flags_cc_binary_host_test",
     "build_flags_cc_library",
+    "custom_linker_input_cc_lib",
     "verify_build_flags_labels_test",
+    "verify_shlib_extra_link_flags_test",
 )
 
 package(default_applicable_licenses = ["//:license"])
@@ -225,6 +226,12 @@ fx_cc_shared_library(
     deps = [":fx_cc_library_for_test"],
 )
 
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_shared_lib_name_for_test",
+    shared_lib_name = "libfx_cc_shared_library_custom_shared_lib_name.so",
+    deps = [":fx_cc_library_for_test"],
+)
+
 build_flags(
     name = "flags2",
     defines = ["SHOULD_NOT_BE_DEFINED"],
@@ -243,6 +250,7 @@ fx_cc_binary(
         ":fx_cc_binary_linkshared_transitive_features_for_test",
         ":fx_cc_shared_library_default_soname_for_test",
         ":fx_cc_shared_library_for_test",
+        ":fx_cc_shared_library_shared_lib_name_for_test",
         ":libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
     ],
     disable_build_flags = [":flags2"],
@@ -258,6 +266,7 @@ host_test(
         ":fx_cc_binary_linkshared_transitive_features_for_test",
         ":fx_cc_shared_library_default_soname_for_test",
         ":fx_cc_shared_library_for_test",
+        ":fx_cc_shared_library_shared_lib_name_for_test",
         ":libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
     ],
     test_args = [
@@ -267,6 +276,7 @@ host_test(
         "$(location :libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so)=libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so:libfx_cc_binary_linkshared_so_name_transitive_features_for_test.so",
         "$(location :fx_cc_shared_library_default_soname_for_test)=libfx_cc_shared_library_default_soname_for_test.so",
         "$(location :fx_cc_shared_library_for_test)=libcustom_soname.so",
+        "$(location :fx_cc_shared_library_shared_lib_name_for_test)=libfx_cc_shared_library_custom_shared_lib_name.so:libfx_cc_shared_library_custom_shared_lib_name.so",
     ],
 )
 
@@ -479,7 +489,7 @@ build_flags_cc_binary_host_test(
 )
 
 # Create an undefined symbol in a library with alwayslink = True
-cc_library(
+fx_cc_library(
     name = "undefined_symbol_lib",
     srcs = ["undefined_symbol_for_test.cc"],
     alwayslink = True,
@@ -559,4 +569,297 @@ build_flags_cc_binary_host_test(
         "pic",
     ],
     deps = [":transitive_features_lib"],
+)
+
+# Tests for fx_cc_shared_library() build_flags(), link_deps forwarding,
+# deps/dynamic_deps deduplication, pic_objects, user_link_flags, and
+# executable_link_deps isolation.
+
+fx_cc_library(
+    name = "shlib_link_deps_caller",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_CALLER"],
+)
+
+fx_cc_library(
+    name = "shlib_link_dep_provider",
+    srcs = ["check_library_with_ldflags.cc"],
+)
+
+# Unreferenced at link time so its symbol only survives in the shared library
+# if -Wl,--whole-archive / -Wl,--no-whole-archive is emitted.
+fx_cc_library(
+    name = "shlib_unreferenced_alwayslink_dep",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_UNREFERENCED_ALWAYSLINK"],
+    alwayslink = True,
+)
+
+# Exercises user_link_flags and additional_inputs sandbox staging on link_deps targets.
+custom_linker_input_cc_lib(
+    name = "shlib_custom_user_flags_dep",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    additional_inputs = ["shlib_extra_user_link_flags.rsp"],
+    local_defines = ["SHLIB_ROLE_PIC_OBJ"],
+    mode = "user_link_flags_and_inputs",
+    user_link_flags = ["@{additional_input}"],
+)
+
+extra_linker_flags(
+    name = "flags_shlib_link_deps",
+    link_deps = [
+        ":shlib_link_dep_provider",
+        ":shlib_custom_user_flags_dep",
+        ":shlib_unreferenced_alwayslink_dep",
+    ],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_with_link_deps",
+    build_flags = [":flags_shlib_link_deps"],
+    deps = [":shlib_link_deps_caller"],
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_whole_archive_flags",
+    expected_ordered_substrings = [
+        "-Wl,--whole-archive",
+        "shlib_unreferenced_alwayslink_dep",
+        "-Wl,--no-whole-archive",
+    ],
+    target_under_test = ":fx_cc_shared_library_with_link_deps",
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_user_flags_and_inputs",
+    expected_ordered_substrings = [
+        "shlib_custom_user_flags_dep",
+        "shlib_extra_user_link_flags.rsp",
+    ],
+    target_under_test = ":fx_cc_shared_library_with_link_deps",
+)
+
+# Verify deduplication when an alwayslink library appears in both deps and link_deps.
+fx_cc_library(
+    name = "shlib_dup_caller",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_DUP_CALLER"],
+)
+
+extra_linker_flags(
+    name = "flags_shlib_duplicate_alwayslink",
+    link_deps = [":shlib_unreferenced_alwayslink_dep"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_with_duplicate_alwayslink_link_dep",
+    build_flags = [":flags_shlib_duplicate_alwayslink"],
+    deps = [
+        ":shlib_dup_caller",
+        ":shlib_unreferenced_alwayslink_dep",
+    ],
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_duplicate_deps_dedup",
+    expect_empty = True,
+    target_under_test = ":fx_cc_shared_library_with_duplicate_alwayslink_link_dep",
+)
+
+# Verify direct and transitive dynamic_deps deduplication via CcSharedLibraryInfo.exports.
+# shlib_private_backing_dep has hidden visibility and is supplied only to
+# shlib_dyn_base via shlib_dyn_base_backing_holder (not in deps of
+# shlib_dyn_exported_dep): if shlib_dyn_exported_dep were NOT deduplicated against
+# dynamic_deps, --whole-archive would re-link it without shlib_private_backing_dep
+# and fail with an undefined symbol error.
+fx_cc_library(
+    name = "shlib_private_backing_dep",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    copts = ["-fvisibility=hidden"],
+    local_defines = ["SHLIB_ROLE_PRIVATE_BACKING"],
+)
+
+fx_cc_library(
+    name = "shlib_dyn_base_backing_holder",
+    deps = [":shlib_private_backing_dep"],
+)
+
+fx_cc_library(
+    name = "shlib_dyn_exported_dep",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_DYN_EXPORTED"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "shlib_dyn_base",
+    deps = [
+        ":shlib_dyn_base_backing_holder",
+        ":shlib_dyn_exported_dep",
+    ],
+)
+
+fx_cc_library(
+    name = "shlib_dyn_direct_caller",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_DYN_DIRECT_CALLER"],
+)
+
+extra_linker_flags(
+    name = "flags_shlib_dyn_exported_link_deps",
+    link_deps = [":shlib_dyn_exported_dep"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_with_direct_dyn_dedup",
+    build_flags = [":flags_shlib_dyn_exported_link_deps"],
+    dynamic_deps = [":shlib_dyn_base"],
+    deps = [":shlib_dyn_direct_caller"],
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_direct_dyn_dedup_flags",
+    expect_empty = True,
+    target_under_test = ":fx_cc_shared_library_with_direct_dyn_dedup",
+)
+
+fx_cc_library(
+    name = "shlib_dyn_mid_dep",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_DYN_MID"],
+)
+
+fx_cc_shared_library(
+    name = "shlib_dyn_mid",
+    dynamic_deps = [":shlib_dyn_base"],
+    deps = [":shlib_dyn_mid_dep"],
+)
+
+fx_cc_library(
+    name = "shlib_dyn_transitive_caller",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_DYN_TRANSITIVE_CALLER"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_with_transitive_dyn_dedup",
+    build_flags = [":flags_shlib_dyn_exported_link_deps"],
+    dynamic_deps = [":shlib_dyn_mid"],
+    deps = [":shlib_dyn_transitive_caller"],
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_transitive_dyn_dedup_flags",
+    expect_empty = True,
+    target_under_test = ":fx_cc_shared_library_with_transitive_dyn_dedup",
+)
+
+# Verify that hidden static libraries recorded in CcSharedLibraryInfo.link_once_static_libs
+# (privately linked into an upstream dynamic_dep, not in exports) still link cleanly
+# when supplied via build_flags link_deps on a downstream shared library.
+fx_cc_library(
+    name = "shlib_hidden_runtime_dep",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    copts = ["-fvisibility=hidden"],
+    local_defines = ["SHLIB_ROLE_HIDDEN_RUNTIME"],
+)
+
+fx_cc_library(
+    name = "shlib_hidden_runtime_user",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_HIDDEN_RUNTIME_USER"],
+    deps = [":shlib_hidden_runtime_dep"],
+)
+
+fx_cc_shared_library(
+    name = "shlib_dyn_base_with_hidden_runtime",
+    deps = [":shlib_hidden_runtime_user"],
+)
+
+fx_cc_library(
+    name = "shlib_per_dso_caller",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_PER_DSO_CALLER"],
+)
+
+extra_linker_flags(
+    name = "flags_shlib_hidden_runtime_link_deps",
+    link_deps = [":shlib_hidden_runtime_dep"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_with_per_dso_hidden_runtime",
+    build_flags = [":flags_shlib_hidden_runtime_link_deps"],
+    dynamic_deps = [":shlib_dyn_base_with_hidden_runtime"],
+    deps = [":shlib_per_dso_caller"],
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_per_dso_hidden_runtime_flags",
+    expected_ordered_substrings = ["shlib_hidden_runtime_dep"],
+    target_under_test = ":fx_cc_shared_library_with_per_dso_hidden_runtime",
+)
+
+# Verify executable_link_deps isolation on fx_cc_shared_library(): adding
+# flags_executable_link_deps_with_undefined alongside flags_shlib_link_deps must
+# not link undefined_symbol_lib or fail -Wl,--no-undefined.
+fx_cc_library(
+    name = "shlib_exec_isolation_caller",
+    srcs = ["shlib_link_deps_test_helpers.cc"],
+    local_defines = ["SHLIB_ROLE_EXEC_ISOLATION"],
+)
+
+fx_cc_shared_library(
+    name = "fx_cc_shared_library_ignores_executable_link_deps",
+    build_flags = [
+        ":flags_shlib_link_deps",
+        ":flags_executable_link_deps_with_undefined",
+    ],
+    deps = [":shlib_exec_isolation_caller"],
+)
+
+verify_shlib_extra_link_flags_test(
+    name = "verify_fx_cc_shared_library_ignores_exec_link_deps_flags",
+    target_under_test = ":fx_cc_shared_library_ignores_executable_link_deps",
+    unexpected_substrings = ["undefined_symbol_lib"],
+)
+
+build_flags_cc_binary_host_test(
+    name = "check_fx_cc_shared_library_link_deps",
+    srcs = ["check_fx_cc_shared_library_link_deps.cc"],
+    build_flags = [":flags1"],
+    dynamic_deps = [
+        ":fx_cc_shared_library_ignores_executable_link_deps",
+        ":fx_cc_shared_library_with_direct_dyn_dedup",
+        ":fx_cc_shared_library_with_duplicate_alwayslink_link_dep",
+        ":fx_cc_shared_library_with_link_deps",
+        ":fx_cc_shared_library_with_per_dso_hidden_runtime",
+        ":fx_cc_shared_library_with_transitive_dyn_dedup",
+    ],
+    linkopts = ["-ldl"],
+)
+
+verify_build_flags_labels_test(
+    name = "verify_fx_cc_shared_library_link_deps_labels",
+    expected_ordered_labels = [
+        "//build/config:relative_paths",
+        "//build/config:shared_library_config",
+        ":flags_shlib_link_deps",
+        ":flags_executable_link_deps_with_undefined",
+    ],
+    target_under_test = ":fx_cc_shared_library_ignores_executable_link_deps",
+    unexpected_labels = ["//build/config:executable_config"],
+)
+
+verify_build_flags_labels_test(
+    name = "verify_fx_cc_library_labels",
+    expected_ordered_labels = [
+        "//build/config:relative_paths",
+        ":fx_cc_library_flags",
+    ],
+    target_under_test = ":fx_cc_library_for_test",
+    unexpected_labels = [
+        ":flags2",
+        "//build/config:executable_config",
+    ],
 )

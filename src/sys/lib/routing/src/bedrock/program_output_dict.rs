@@ -15,9 +15,9 @@ use capability_source::{CapabilitySource, ComponentCapability, ComponentSource};
 use cm_rust::{CapabilityTypeName, GenericRef, NativeIntoFidl};
 use cm_types::{Name, Path, RelativePath};
 use component_id_index::InstanceId;
-use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_runtime as fruntime;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_runtime_common as fruntime;
+use fidl_fuchsia_io_common as fio;
 use moniker::{ChildName, ExtendedMoniker, Moniker};
 use router_error::RouterError;
 use runtime_capabilities::{

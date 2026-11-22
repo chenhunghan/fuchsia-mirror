@@ -1,0 +1,114 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "fidl.cpp.wire.interop.test",
+    testonly = True,
+    srcs = ["fidl.cpp.wire.interop.test.fidl"],
+    visibility = ["//visibility:private"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "fidl.cpp.wire.bindinggroup.test",
+    testonly = True,
+    srcs = ["fidl.cpp.wire.bindinggroup.test.fidl"],
+)
+
+fidl_library(
+    name = "fidl.cpp.constraint.protocol.test",
+    testonly = True,
+    srcs = ["fidl.cpp.constraint.protocol.test.fidl"],
+    visibility = ["//visibility:private"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_cpp_binding_group_tests_bin",
+    srcs = ["binding_group_test.cc"],
+    deps = [
+        ":fidl.cpp.wire.bindinggroup.test_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_cpp_binding_group_tests",
+    unit_tests = [":fidl_cpp_binding_group_tests_bin"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_cpp_wire_interop_tests_bin",
+    srcs = ["wire_interop_tests.cc"],
+    deps = [
+        ":fidl.cpp.wire.interop.test_cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_cpp_wire_interop_tests",
+    unit_tests = [":fidl_cpp_wire_interop_tests_bin"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_cpp_gen_api_tests_bin",
+    srcs = [
+        "any_error_in_test.cc",
+        "client_gen_api_test.cc",
+        "server_gen_api_test.cc",
+    ],
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    deps = [
+        ":fidl.cpp.constraint.protocol.test_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/testing/fidl/protocols_tests:test.basic.protocol_cpp",
+        "//sdk/testing/fidl/protocols_tests:test.error.methods_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_cpp_gen_api_tests",
+    unit_tests = [":fidl_cpp_gen_api_tests_bin"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_cpp_unknown_interactions_tests_bin",
+    srcs = ["unknown_interactions_tests.cc"],
+    deps = [
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/stdcompat",
+        "//sdk/testing/fidl/protocols_tests:test.unknown.interactions_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_cpp_unknown_interactions_tests",
+    unit_tests = [":fidl_cpp_unknown_interactions_tests_bin"],
+    visibility = ["//sdk/lib:__pkg__"],
+)

@@ -7,6 +7,7 @@ package bazel2gn
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -60,9 +61,10 @@ const gnEnvironmentLabelPrefix = "//build/testing/environments:"
 //     un-skipped `fx_test()` in the same file whose `package` refers to it.
 //  2. Every un-skipped `fx_test_component()`,
 //     `fx_test_component_with_expectations()`, or `fx_unittest_component()`
-//     listed in the `test_components` of such an `fx_package()` is marked to be
-//     converted to its GN counterpart. Any other test component in the same
-//     file listed in `test_components` is an error.
+//     listed in the `test_components` of such an `fx_package()`, or of an
+//     un-skipped `ctf_fx_package()`, is marked to be converted to its GN
+//     counterpart. Any other test component in the same file listed in
+//     `test_components` is an error.
 //
 // This must run before `resolveComponentTargets()`, which handles the
 // manifests and `fx_packaged_binary()` deps of the marked components.
@@ -95,12 +97,19 @@ func resolveTestPackages(f *syntax.File) error {
 	// `test_type` of the package's `fx_test()`, if any.
 	testComponents := map[string]string{}
 	testComponentPackages := map[string]syntax.Stmt{}
+	// The rule (`fx_package` or `ctf_fx_package`) of each entry in
+	// `testComponentPackages`, for error messages.
+	testComponentPackageRules := map[string]string{}
+	// Test components listed only by `ctf_fx_package()`s so far. Those have
+	// no `fx_test()`, so they don't constrain the `test_type`.
+	ctfOnlyTestComponents := map[string]bool{}
 	for _, stmt := range f.Stmts {
 		call, ok := callOfStmt(stmt)
 		if !ok {
 			continue
 		}
-		if fn, ok := call.Fn.(*syntax.Ident); !ok || fn.Name != "fx_package" {
+		fn, ok := call.Fn.(*syntax.Ident)
+		if !ok || (fn.Name != "fx_package" && fn.Name != ctfFxPackageRule) {
 			continue
 		}
 		skip, err := hasSkipAnnotation(stmt)
@@ -115,6 +124,22 @@ func resolveTestPackages(f *syntax.File) error {
 			return stmtError(stmt, err)
 		}
 		if len(components) == 0 {
+			continue
+		}
+		if fn.Name == ctfFxPackageRule {
+			// `ctfFxPackageToGN()` converts the package itself.
+			for _, c := range components {
+				cName, ok := strings.CutPrefix(c, ":")
+				if !ok {
+					continue
+				}
+				if _, ok := testComponents[cName]; !ok {
+					testComponents[cName] = ""
+					testComponentPackages[cName] = stmt
+					testComponentPackageRules[cName] = ctfFxPackageRule
+					ctfOnlyTestComponents[cName] = true
+				}
+			}
 			continue
 		}
 		name, _ := callStringAttr(call, "name")
@@ -144,11 +169,13 @@ func resolveTestPackages(f *syntax.File) error {
 				continue
 			}
 			cName := strings.TrimPrefix(c, ":")
-			if prev, ok := testComponents[cName]; ok && prev != testType {
+			if prev, ok := testComponents[cName]; ok && prev != testType && !ctfOnlyTestComponents[cName] {
 				return stmtError(stmt, fmt.Errorf("test component %q is in fx_packages whose fx_tests have different test_type (%q and %q), but its GN copy can only have one; use # @bazel2gn:skip and write the GN copy by hand", c, prev, testType))
 			}
 			testComponents[cName] = testType
 			testComponentPackages[cName] = stmt
+			testComponentPackageRules[cName] = "fx_package"
+			delete(ctfOnlyTestComponents, cName)
 		}
 	}
 
@@ -209,7 +236,7 @@ func resolveTestPackages(f *syntax.File) error {
 	for name := range testComponents {
 		if !resolved[name] {
 			pkgStmt := testComponentPackages[name]
-			return stmtError(pkgStmt, fmt.Errorf("test component \":%s\" isn't an un-skipped fx_test_component, fx_test_component_with_expectations, or fx_unittest_component in the same BUILD.bazel, so bazel2gn can't convert it to GN; use # @bazel2gn:skip on the fx_package and write the GN copy by hand", name))
+			return stmtError(pkgStmt, fmt.Errorf("test component \":%s\" isn't an un-skipped fx_test_component, fx_test_component_with_expectations, or fx_unittest_component in the same BUILD.bazel, so bazel2gn can't convert it to GN; use # @bazel2gn:skip on the %s and write the GN copy by hand", name, testComponentPackageRules[name]))
 		}
 	}
 	return nil
@@ -267,7 +294,11 @@ func unskippedTestComponents(call *syntax.CallExpr) ([]string, error) {
 // hand-written GN copy.
 func fxTestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 	var name, packageName string
-	var testComponents, components, subpackages, visArg *syntax.BinaryExpr
+	var testComponents, components, resources, subpackages, visArg *syntax.BinaryExpr
+	// Build-time package validation attributes (`validate_elf_binaries` maps
+	// to `!disable_elf_binaries_checks` in GN; `validate_structured_config` has
+	// the same name and meaning in both).
+	var validateElfBinaries, validateStructuredConfig *syntax.BinaryExpr
 	var fxTest *syntax.CallExpr
 
 	for _, arg := range call.Args {
@@ -302,8 +333,14 @@ func fxTestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 			testComponents = binaryExpr
 		case "components":
 			components = binaryExpr
+		case "resources":
+			resources = binaryExpr
 		case "subpackages":
 			subpackages = binaryExpr
+		case "validate_elf_binaries":
+			validateElfBinaries = binaryExpr
+		case "validate_structured_config":
+			validateStructuredConfig = binaryExpr
 		case "visibility":
 			visArg = binaryExpr
 		case fxTestArg:
@@ -326,14 +363,37 @@ func fxTestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 		packageName = name
 	}
 
+	var depsArg *syntax.BinaryExpr
+	switch {
+	case components != nil && resources != nil:
+		cList, cOk := unwrapParenExpr(components.Y).(*syntax.ListExpr)
+		rList, rOk := unwrapParenExpr(resources.Y).(*syntax.ListExpr)
+		if cOk && rOk {
+			depsArg = attrExpr("deps", &syntax.ListExpr{
+				List: append(slices.Clone(cList.List), rList.List...),
+			})
+		} else {
+			depsArg = attrExpr("deps", &syntax.BinaryExpr{
+				X:  components.Y,
+				Op: syntax.PLUS,
+				Y:  resources.Y,
+			})
+		}
+	case components != nil:
+		depsArg = components
+	case resources != nil:
+		depsArg = resources
+	}
+
 	body := []string{fmt.Sprintf("package_name = %s", strconv.Quote(packageName+gnTestPackageNameSuffix))}
 	for _, attr := range []struct {
 		gnName string
 		arg    *syntax.BinaryExpr
 	}{
 		{"test_components", testComponents},
-		// GN `fuchsia_test_package()` takes non-test components in `deps`.
-		{"deps", components},
+		// GN `fuchsia_test_package()` takes non-test components and package
+		// resources in `deps`.
+		{"deps", depsArg},
 		{"subpackages", subpackages},
 	} {
 		if attr.arg == nil {
@@ -347,6 +407,21 @@ func fxTestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 		body = append(body, lines...)
 	}
 
+	if validateElfBinaries != nil {
+		rhs, ok := unwrapParenExpr(validateElfBinaries.Y).(*syntax.Ident)
+		if !ok || (rhs.Name != "True" && rhs.Name != "False") {
+			return nil, fmt.Errorf("fx_package %q validate_elf_binaries must be True or False; use # @bazel2gn:skip and write the GN copy by hand", name)
+		}
+		body = append(body, fmt.Sprintf("disable_elf_binaries_checks = %t", rhs.Name == "False"))
+	}
+	if validateStructuredConfig != nil {
+		rhs, ok := unwrapParenExpr(validateStructuredConfig.Y).(*syntax.Ident)
+		if !ok || (rhs.Name != "True" && rhs.Name != "False") {
+			return nil, fmt.Errorf("fx_package %q validate_structured_config must be True or False; use # @bazel2gn:skip and write the GN copy by hand", name)
+		}
+		body = append(body, fmt.Sprintf("validate_structured_config = %t", rhs.Name == "True"))
+	}
+
 	if fxTest != nil {
 		testSpecs, err := fxTestSpecsToGN(fxTest)
 		if err != nil {
@@ -356,7 +431,7 @@ func fxTestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 	}
 
 	if visArg != nil {
-		lines, err := attrAssignmentToGN(visArg, "fx_package", nil /*compiledActionOutputs*/, false /*appendAspectHints*/, false /*hasWithUnitTests*/)
+		lines, err := attrAssignmentToGN(visArg, "fx_package", nil /*compiledActionOutputs*/, false /*appendDeps*/, false /*hasWithUnitTests*/)
 		if err != nil {
 			return nil, fmt.Errorf("converting fx_package visibility: %v", err)
 		}
@@ -380,6 +455,62 @@ func logSettingsToGN(maxSeverity, minSeverity string) []string {
 		lines = append(lines, indentPrefix+fmt.Sprintf("min_severity = %s", strconv.Quote(minSeverity)))
 	}
 	return append(lines, "}")
+}
+
+// wrapTestSpecs wraps GN `test_specs` entries into a `test_specs = { ... }`
+// block, or returns nil when no entries are set.
+func wrapTestSpecs(specs []string) []string {
+	if len(specs) == 0 {
+		return nil
+	}
+	ret := []string{"test_specs = {"}
+	ret = append(ret, indent(specs, 1)...)
+	return append(ret, "}")
+}
+
+// intLiteralValue returns the int64 value of a Starlark integer literal,
+// supporting optional parentheses and unary `+` / `-` operators.
+func intLiteralValue(expr syntax.Expr) (int64, error) {
+	expr = unwrapParenExpr(expr)
+	if unary, ok := expr.(*syntax.UnaryExpr); ok && (unary.Op == syntax.PLUS || unary.Op == syntax.MINUS) {
+		val, err := intLiteralValue(unary.X)
+		if err != nil {
+			return 0, err
+		}
+		if unary.Op == syntax.MINUS {
+			if val == math.MinInt64 {
+				return 0, errors.New("integer literal overflows int64")
+			}
+			return -val, nil
+		}
+		return val, nil
+	}
+	lit, ok := expr.(*syntax.Literal)
+	if !ok {
+		return 0, fmt.Errorf("expected an integer literal, got %T", expr)
+	}
+	if lit.Token != syntax.INT {
+		return 0, fmt.Errorf("expected an integer literal, got %s", strings.TrimSpace(lit.Raw))
+	}
+	val, ok := lit.Value.(int64)
+	if !ok {
+		return 0, fmt.Errorf("integer literal %s overflows int64", strings.TrimSpace(lit.Raw))
+	}
+	return val, nil
+}
+
+// parallelToGN validates a Bazel `parallel` attribute value and returns it for
+// GN `test_specs.parallel`, or 0 when `parallel = 0` (Bazel default, omitted in
+// GN because `test_spec.gni` requires `parallel > 0` when defined).
+func parallelToGN(expr syntax.Expr) (int64, error) {
+	val, err := intLiteralValue(expr)
+	if err != nil {
+		return 0, err
+	}
+	if val < 0 {
+		return 0, fmt.Errorf("parallel must be non-negative, got %d", val)
+	}
+	return val, nil
 }
 
 // fxTestSpecsToGN converts the attributes of an `fx_test()` call to the
@@ -422,6 +553,14 @@ func fxTestSpecsToGN(call *syntax.CallExpr) ([]string, error) {
 			if logSettingsIndex < 0 {
 				logSettingsIndex = len(specs)
 			}
+		case "parallel":
+			parallel, err := parallelToGN(binaryExpr.Y)
+			if err != nil {
+				return nil, fmt.Errorf("fx_test %q parallel: %v; use # @bazel2gn:skip on the fx_package and write the GN copy by hand", testName, err)
+			}
+			if parallel > 0 {
+				specs = append(specs, fmt.Sprintf("parallel = %d", parallel))
+			}
 		case "build_only":
 			rhs, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.Ident)
 			if !ok || (rhs.Name != "True" && rhs.Name != "False") {
@@ -454,13 +593,7 @@ func fxTestSpecsToGN(call *syntax.CallExpr) ([]string, error) {
 	if logSettingsIndex >= 0 {
 		specs = slices.Insert(specs, logSettingsIndex, logSettingsToGN(maxLogSeverity, minLogSeverity)...)
 	}
-	if len(specs) == 0 {
-		return nil, nil
-	}
-	ret := []string{"test_specs = {"}
-	ret = append(ret, indent(specs, 1)...)
-	ret = append(ret, "}")
-	return ret, nil
+	return wrapTestSpecs(specs), nil
 }
 
 // fxTestEnvironmentsToGN converts a list literal of
@@ -528,7 +661,7 @@ func fxUnittestComponentToGN(call *syntax.CallExpr) ([]string, error) {
 			lines[0] = "deps = " + lines[0]
 			body = append(body, lines...)
 		case "visibility":
-			lines, err := attrAssignmentToGN(binaryExpr, "fx_unittest_component", nil /*compiledActionOutputs*/, false /*appendAspectHints*/, false /*hasWithUnitTests*/)
+			lines, err := attrAssignmentToGN(binaryExpr, "fx_unittest_component", nil /*compiledActionOutputs*/, false /*appendDeps*/, false /*hasWithUnitTests*/)
 			if err != nil {
 				return nil, fmt.Errorf("converting fx_unittest_component visibility: %v", err)
 			}

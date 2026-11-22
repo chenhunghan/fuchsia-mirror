@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//src/developer/ffx/config.gni")
-
 # The list of tools under this directory
 _tools = [
   "//src/developer/ffx/plugins/assembly",
@@ -28,6 +26,7 @@ _tools = [
   "//src/developer/ffx/plugins/test",
   "//src/developer/ffx/plugins/trace",
   "//src/developer/ffx/plugins/wlan",
+  "agent",
   "auth",
   "bluetooth",
   "driver",
@@ -51,22 +50,12 @@ _tools = [
 
 group("tools") {
   public_deps = _tools
-
-  # Any plugins that can be built in dual mode should be listed here, and that
-  # will cause them to be built as host tools that ffx can invoke.
-  if (ffx_build_dual_mode_plugins_as_subtools) {
-    public_deps += dual_mode_subtools  # from config.gni
-  }
 }
 
 group("bins") {
   public_deps = []
   foreach(tool, _tools) {
     public_deps += [ "$tool:bin" ]
-  }
-
-  if (ffx_build_dual_mode_plugins_as_subtools) {
-    public_deps += dual_mode_subtool_bins  # from config.gni
   }
 }
 
@@ -81,21 +70,29 @@ group("tests") {
     "//src/developer/ffx/plugins/coverage",
     "//src/developer/ffx/plugins/forward",
     "//src/developer/ffx/plugins/fuzz",
+    "//src/developer/ffx/plugins/inspect",
+    "//src/developer/ffx/plugins/process",
+    "//src/developer/ffx/plugins/product",
     "//src/developer/ffx/plugins/session",
+    "//src/developer/ffx/plugins/setui",
+    "//src/developer/ffx/plugins/test",
+    "//src/developer/ffx/plugins/trace",
     "//src/developer/ffx/plugins/wlan",
+    "agent",
+    "driver",
+    "echo",
     "efi",
+    "gce",
+    "monitor",
+    "storage",
     "triage",
+    "uart",
+    "uart_driver",
+    "usb_driver",
+    "verify-ssh-keys",
   ]
   foreach(tool, _tools - _bazel_tested_tools) {
     deps += [ "$tool:tests" ]
-  }
-
-  # Playground is experimental so it's not in _tools but we still want to run
-  # the tests.
-  deps += [ "playground:tests" ]
-
-  if (ffx_build_dual_mode_plugins_as_subtools) {
-    deps += dual_mode_subtool_tests  # from config.gni
   }
 }
 

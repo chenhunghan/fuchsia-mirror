@@ -138,7 +138,6 @@ fuchsia_cc_driver("astro-driver") {
 fuchsia_driver_component("astro-component") {
   component_name = "astro"
   deps = [ ":astro-driver" ]
-  info = "meta/astro-info.json"
   manifest = "meta/astro.cml"
 }
 

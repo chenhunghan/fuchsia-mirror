@@ -78,12 +78,13 @@ impl InputDeviceRegistry {
         Ok(())
     }
 
-    /// Registers an input device client by delegating to [`DirectInputManager::add_device`].
+    /// Registers an input device client by delegating to
+    /// [`DirectInputManager::add_device_client_end`].
     pub async fn register_device(
         &self,
         device_client_end: ClientEnd<fir::InputDeviceMarker>,
     ) -> Result<u32, Errno> {
-        self.direct_input.add_device(device_client_end.into_proxy(), None).await
+        self.direct_input.add_device_client_end(device_client_end, None).await
     }
 
     /// Removes and unregisters an injected device.
@@ -1177,10 +1178,10 @@ mod tests {
             let kernel = current_task.kernel().clone();
 
             // Simulate framebuffer module initializing the DirectInputManager via get_or_init_direct_input.
-            let fb_manager = crate::get_or_init_direct_input(&kernel);
+            let fb_manager = crate::get_or_init_direct_input(&kernel, None);
 
             // Repeated calls return the identical instance.
-            let fb_manager_second = crate::get_or_init_direct_input(&kernel);
+            let fb_manager_second = crate::get_or_init_direct_input(&kernel, None);
             assert!(Arc::ptr_eq(&fb_manager, &fb_manager_second));
 
             // Peek into expando to ensure the registry path accesses the exact same manager.

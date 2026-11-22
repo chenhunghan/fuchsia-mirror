@@ -11,7 +11,7 @@ userspace environment at system startup. See [`userboot`](userboot.md) for more 
 
 [TOC]
 
-## ELF and the system ABI
+## ELF and the system ABI {#elf-and-the-system-abi}
 
 The standard Zircon userspace environment uses the [Executable and Linkable Format (ELF)](https://en.wikipedia.org/wiki/Executable_and_Linkable_Format)
 for machine-code executable files, and provides a dynamic linker and
@@ -24,7 +24,7 @@ Userspace code (given the appropriate capabilities) can use [system calls] to
 directly create processes and load programs without
 using ELF, but Zircon's standard ABI for machine code uses ELF as described here.
 
-## Background: Traditional ELF program loading
+## Background: Traditional ELF program loading {#background-traditional-elf-program-loading}
 
 [ELF](https://en.wikipedia.org/wiki/Executable_and_Linkable_Format) was
 introduced with Unix System V Release 4 and became the common standard
@@ -211,7 +211,7 @@ are always somewhere in the upper half of the address space. This is
 for the convenience of sanitizer runtimes, which need to reserve some lower
 fraction of the address space.
 
-## The **processargs** protocol
+## The **processargs** protocol {#the-processargs-protocol}
 
 [`<zircon/processargs.h>`](/zircon/system/public/zircon/processargs.h) defines
 the protocol for the *bootstrap message* sent on the *bootstrap channel* by
@@ -261,7 +261,7 @@ The handles serve many purposes, indicated by the *handle info entry* type:
 Most of these are just passed through by the program loader,
 which does not need to know what they're for.
 
-## The **loader service**
+## The **loader service** {#the-loader-service}
 
 In dynamic linking systems, an executable file refers to and uses at
 runtime additional files containing shared libraries and plugins. The
@@ -275,7 +275,7 @@ filesystems are implemented by userspace programs loaded this way. So
 program loading cannot be defined in terms of higher-layer abstractions
 such as a filesystem paradigm,
 as
-[traditional systems have done](#background_traditional-elf-program-loading).
+[traditional systems have done](#background-traditional-elf-program-loading).
 Instead, program loading is based only on [VMOs](/docs/reference/kernel_objects/vm_object.md) and
 a simple [channel](/docs/reference/kernel_objects/channel.md)-based protocol.
 

@@ -51,7 +51,7 @@ class UsbPowerHubUsingDmcTests(unittest.TestCase):
         """Test case to make sure creating UsbPowerHubUsingDmc when DMC_PATH not set
         will result in a failure."""
         with self.assertRaisesRegex(
-            usb_power_hub_using_dmc.UsbPowerDmcError,
+            errors.NotSupportedError,
             "environmental variable is not set",
         ):
             usb_power_hub_using_dmc.UsbPowerHubUsingDmc(device_name="fx-emu")
@@ -111,3 +111,57 @@ class UsbPowerHubUsingDmcTests(unittest.TestCase):
                 command=["ls"]
             )
         mock_host_shell_run.assert_called_once()
+
+    def test_from_config_with_auxiliary_devices_config(self) -> None:
+        """Test case for UsbPowerHub.from_config() with auxiliary_devices config."""
+        with mock.patch.dict(os.environ, _MOCK_OS_ENVIRON, clear=True):
+            hub = usb_power_hub.UsbPowerHub.from_config(
+                device_config={
+                    "auxiliary_devices": {
+                        "usb_power_hub": {
+                            "hardware": {"device_name": "fx-emu"},
+                            "implementation": {
+                                "module": "honeydew.auxiliary_devices.usb_power_hub.usb_power_hub_using_dmc",
+                                "class": "UsbPowerHubUsingDmc",
+                            },
+                        },
+                    },
+                },
+            )
+        self.assertIsInstance(hub, usb_power_hub_using_dmc.UsbPowerHubUsingDmc)
+
+    def test_from_config_without_config_returns_none_even_when_dmc_path_set(
+        self,
+    ) -> None:
+        """Test case verifying UsbPowerHub.from_config() is strictly config-driven."""
+        with mock.patch.dict(os.environ, _MOCK_OS_ENVIRON, clear=True):
+            hub = usb_power_hub.UsbPowerHub.from_config(device_config={})
+        self.assertIsNone(hub)
+
+    def test_from_config_with_none(self) -> None:
+        """Test case for UsbPowerHub.from_config() when no config is provided."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            hub = usb_power_hub.UsbPowerHub.from_config(device_config=None)
+        self.assertIsNone(hub)
+
+    def test_from_config_with_invalid_implementation_raises_usb_power_hub_error(
+        self,
+    ) -> None:
+        """Test UsbPowerHub.from_config() raises UsbPowerHubError on bad config."""
+        with self.assertRaises(usb_power_hub.UsbPowerHubError):
+            usb_power_hub.UsbPowerHub.from_config(
+                device_config={
+                    "auxiliary_devices": {
+                        "usb_power_hub": {
+                            "hardware": {"device_name": "fx-emu"},
+                            "implementation": {
+                                "module": (
+                                    "honeydew.auxiliary_devices."
+                                    "power_switch.power_switch_using_dmc"
+                                ),
+                                "class": "PowerSwitchUsingDmc",
+                            },
+                        },
+                    },
+                },
+            )

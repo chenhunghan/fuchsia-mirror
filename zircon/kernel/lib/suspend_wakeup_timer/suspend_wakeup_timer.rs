@@ -4,8 +4,6 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-mod suspend_wakeup_timer_ffi;
-
 use crate::arch_rs::curr_cpu_num;
 use crate::kernel::relaxed_atomic::RelaxedAtomicI64;
 use crate::kernel::timer::{Timer, ZX_CLOCK_BOOT};
@@ -21,11 +19,16 @@ use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_types::{ZX_TIME_INFINITE, zx_instant_boot_t};
 
 #[cfg(target_arch = "aarch64")]
-use self::suspend_wakeup_timer_ffi::{Armv7MmioTimer, Armv7MmioTimerSubtimer, IrqHandlerResult};
+use crate::armv7_mmio_timer::{
+    Armv7MmioTimer, IrqHandler, IrqHandlerResult, Timer as Armv7MmioTimerSubtimer,
+    Type as Armv7MmioTimerType,
+};
 #[cfg(target_arch = "aarch64")]
 use crate::kernel::types::cpu_num_to_mask;
 #[cfg(target_arch = "aarch64")]
-use crate::platform_rs::timer::{DurationBoot, current_boot_time};
+use crate::platform_rs::timer::current_boot_time;
+#[cfg(target_arch = "aarch64")]
+use core::ptr::NonNull;
 #[cfg(target_arch = "aarch64")]
 use zx_status::Status;
 
@@ -41,6 +44,20 @@ pub const CALLBACK_INLINE_SIZE: usize = core::mem::size_of::<usize>();
 /// fired, as well as what the originally requested resume time was.
 pub type Callback =
     zr::SendSyncInlineFn<'static, fn(InstantBoot, InstantBoot), CALLBACK_INLINE_SIZE>;
+
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+struct SuspendWakeupTimerPtr(NonNull<SuspendWakeupTimer>);
+
+// SAFETY: `SuspendWakeupTimer` is `Sync`, so sending a shared pointer to it across CPUs is sound.
+#[cfg(target_arch = "aarch64")]
+unsafe impl Send for SuspendWakeupTimerPtr {}
+
+#[cfg(target_arch = "aarch64")]
+const _: () = {
+    const fn assert_sync<T: Sync>() {}
+    assert_sync::<SuspendWakeupTimer>();
+};
 
 #[cfg(target_arch = "aarch64")]
 #[derive(Clone, Copy)]
@@ -63,9 +80,7 @@ impl Armv7MmioSuspendWakeupTimer {
 
         for timer_type in TIMER_TYPES {
             for i in 0..Armv7MmioTimer::MAX_TIMERS {
-                // SAFETY: `SuspendWakeupTimer::init` is only called at or after
-                // `LK_INIT_LEVEL_PLATFORM`, after `Armv7MmioTimer` initialization has completed.
-                if let Some(timer_block) = unsafe { Armv7MmioTimer::get(i) } {
+                if let Some(timer_block) = Armv7MmioTimer::get(i) {
                     let timer = if timer_type == Armv7MmioTimerType::Vct {
                         timer_block.vct_timer()
                     } else {
@@ -76,7 +91,7 @@ impl Armv7MmioSuspendWakeupTimer {
                         dprintf!(
                             INFO,
                             "Using ARMv7 {} timer #{} for suspend-wakeup.\n",
-                            if timer_type == Armv7MmioTimerType::Vct { "VCT" } else { "PCT" },
+                            timer.type_name(),
                             i
                         );
                         return Some(Self { timer });
@@ -86,13 +101,6 @@ impl Armv7MmioSuspendWakeupTimer {
         }
         None
     }
-}
-
-#[cfg(target_arch = "aarch64")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Armv7MmioTimerType {
-    Vct,
-    Pct,
 }
 
 /// Hardware timer backend selected by a [`SuspendWakeupTimer`].
@@ -227,7 +235,10 @@ impl PinnedDrop for SuspendWakeupTimer {
             Backend::Generic => {}
             #[cfg(target_arch = "aarch64")]
             Backend::Armv7Mmio(armv7_mmio) => {
-                let _ = armv7_mmio.timer.reset_handler();
+                // The registered `IrqHandler` closure points at `self`, so it must be gone before
+                // the storage is invalidated.
+                let status: Result<(), Status> = armv7_mmio.timer.reset_handler();
+                assert_eq!(status, Ok(()));
             }
         }
     }
@@ -267,12 +278,21 @@ impl SuspendWakeupTimer {
                     let status: Result<(), Status> = armv7_mmio.timer.cancel_timer();
                     assert_eq!(status, Ok(()));
 
-                    // SAFETY: `this` is pinned in place, and `SuspendWakeupTimer`'s `PinnedDrop`
-                    // implementation calls `timer.reset_handler()` before the storage is
-                    // invalidated.
-                    let status = unsafe {
-                        armv7_mmio.timer.set_handler(this.as_ref(), cpu_num_to_mask(BOOT_CPU_ID))
-                    };
+                    let timer_ptr =
+                        SuspendWakeupTimerPtr(NonNull::from_ref(this.as_ref().get_ref()));
+                    let status = armv7_mmio.timer.set_handler(
+                        IrqHandler::new(move || {
+                            // Bind the whole `SuspendWakeupTimerPtr` wrapper so the closure does
+                            // not disjoint-capture `timer_ptr.0` (`NonNull`, which is `!Send`).
+                            let timer_ptr = timer_ptr;
+                            // SAFETY: `timer_ptr` points to this pinned `SuspendWakeupTimer`, and
+                            // `PinnedDrop::drop` calls `reset_handler()` (waiting for any in-flight
+                            // IRQ handler to complete) before the storage is invalidated.
+                            let timer = unsafe { timer_ptr.0.as_ref() };
+                            Armv7MmioSuspendWakeupTimer::irq_handler(timer)
+                        }),
+                        cpu_num_to_mask(BOOT_CPU_ID),
+                    );
                     assert_eq!(status, Ok(()));
                 }
             }
@@ -327,9 +347,8 @@ impl SuspendWakeupTimer {
             #[cfg(target_arch = "aarch64")]
             Backend::Armv7Mmio(armv7_mmio) => {
                 debug_assert!(!armv7_mmio.timer.enabled());
-                let resume_delta = DurationBoot(
-                    0.max(self.resume_at.load().saturating_sub(current_boot_time().0)),
-                );
+                let resume_delta =
+                    0.max(self.resume_at.load().saturating_sub(current_boot_time().0));
                 let _ = armv7_mmio.timer.set_relative_timer(resume_delta);
             }
         }

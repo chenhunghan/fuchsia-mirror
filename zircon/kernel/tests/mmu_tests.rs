@@ -8,9 +8,9 @@
 #[cfg(ktest)]
 #[unittest::suite(name = "mmu")]
 mod mmu_tests {
-    use core::cell::Cell;
     use core::convert::Infallible;
     use core::ffi::c_void;
+    use core::mem::DropGuard;
     use core::pin::Pin;
     use core::ptr::from_ref;
     use core::sync::atomic::{AtomicBool, Ordering};
@@ -211,11 +211,16 @@ mod mmu_tests {
         }
     }
 
-    crate::ksync_kernel::declare_singleton_mutex!(
-        /// Since `toggle_page_alloc_fn` needs global state to operate, define a lock to ensure we
-        /// are only running a single instance of these tests at a time.
-        TogglePageAllocLock
-    );
+    /// Since `toggle_page_alloc_fn` needs global state to operate, define a lock to ensure we
+    /// are only running a single instance of these tests at a time.
+    #[ksync::guarded]
+    struct TogglePageAllocLock {
+        #[mutex]
+        lock: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
+    }
+
+    static TOGGLE_PAGE_ALLOC_LOCK: LazyInit<TogglePageAllocLock, NoCheck> = LazyInit::uninit();
+
     // `AtomicBool` provides `Sync` interior mutability across the stateless `PageAllocFn` C
     // callback while test runs are serialized by `TogglePageAllocLock`.
     static FAIL_PAGE_ALLOCS: AtomicBool = AtomicBool::new(false);
@@ -245,7 +250,9 @@ mod mmu_tests {
     /// create large vm region and unmap single pages
     #[test]
     fn test_large_region_unmap() {
-        ksync::lock!(let _guard = TogglePageAllocLock::lock());
+        // SAFETY: `TOGGLE_PAGE_ALLOC_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before any
+        // test runs.
+        ksync::lock!(let _guard = unsafe { TOGGLE_PAGE_ALLOC_LOCK.get_unchecked() }.lock_lock());
 
         const VA: usize = 1usize << PGTABLE_L1_SHIFT;
         // Force a large page.
@@ -362,10 +369,15 @@ mod mmu_tests {
         }
     }
 
-    crate::ksync_kernel::declare_singleton_mutex!(
-        /// Serializes `test_mapping_oom` runs that share the global `NODE` page list.
-        TestMappingOomLock
-    );
+    /// Serializes `test_mapping_oom` runs that share the global `NODE` page list.
+    #[ksync::guarded]
+    struct TestMappingOomLock {
+        #[mutex]
+        lock: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
+    }
+
+    static TEST_MAPPING_OOM_LOCK: LazyInit<TestMappingOomLock, NoCheck> = LazyInit::uninit();
+
     crate::ksync_kernel::declare_singleton_spinlock!(
         /// Spinlock protecting `NODE` (may be acquired while `ArchVmAspace` holds its mutex).
         TestPageAllocNodeLock
@@ -394,6 +406,10 @@ mod mmu_tests {
     fn mmu_tests_node_init(_level: init::LkInitLevel) {
         // SAFETY: Single-threaded initialization during early boot before any test runs.
         unsafe {
+            let _ = Pin::static_ref(&TOGGLE_PAGE_ALLOC_LOCK)
+                .init_pin(pin_init!(TogglePageAllocLock { lock <- ksync::KMutex::init() }));
+            let _ = Pin::static_ref(&TEST_MAPPING_OOM_LOCK)
+                .init_pin(pin_init!(TestMappingOomLock { lock <- ksync::KMutex::init() }));
             Pin::static_ref(&NODE)
                 .init_pin(ksync::KCell::pin_init(TestPageAllocNode::init()))
                 .unwrap();
@@ -441,34 +457,31 @@ mod mmu_tests {
     /// trigger oom failures when creating a mapping
     #[test]
     fn test_mapping_oom() {
-        ksync::lock!(let _guard = TestMappingOomLock::lock());
+        // SAFETY: `TEST_MAPPING_OOM_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before any
+        // test runs.
+        ksync::lock!(let _guard = unsafe { TEST_MAPPING_OOM_LOCK.get_unchecked() }.lock_lock());
 
         const MAPPING_PAGE_COUNT: usize = 8;
         const MAPPING_SIZE: usize = MAPPING_PAGE_COUNT * PAGE_SIZE;
         const MAPPING_START: usize = (1usize << PGTABLE_L1_SHIFT) - MAPPING_SIZE / 2;
 
         // Allocate the pages which will be mapped into the test aspace.
-        let mapping_pages: [Cell<Option<VmPagePtr>>; MAPPING_PAGE_COUNT] =
-            [const { Cell::new(None) }; MAPPING_PAGE_COUNT];
-        let mut mapping_paddrs = [PAddr(0); MAPPING_PAGE_COUNT];
-
-        let _undo = zr::defer(|| {
-            for mapping_page in &mapping_pages {
-                if let Some(page) = mapping_page.take() {
-                    // SAFETY: `page` was allocated by `pmm::alloc_page` below and is no longer
-                    // mapped into any `ArchVmAspace`.
-                    unsafe { pmm::free_page(page) };
-                }
+        let mut mapping_pages = DropGuard::new([None; MAPPING_PAGE_COUNT], |mapping_pages| {
+            for page in mapping_pages.into_iter().flatten() {
+                // SAFETY: `page` was allocated by `pmm::alloc_page` below and is no longer
+                // mapped into any `ArchVmAspace`.
+                unsafe { pmm::free_page(page) };
             }
         });
+        let mut mapping_paddrs = [PAddr(0); MAPPING_PAGE_COUNT];
 
         for (i, mapping_paddr) in mapping_paddrs.iter_mut().enumerate() {
             let (page, paddr) = unwrap_ok!(pmm::alloc_page(0));
-            mapping_pages[i].set(Some(page));
+            mapping_pages[i] = Some(page);
             *mapping_paddr = paddr;
         }
 
-        let _cleanup_node = zr::defer(|| {
+        let _cleanup_node = DropGuard::new((), |()| {
             while let Some(page_nn) = with_node(|node| node.pop_front()) {
                 // SAFETY: Every entry in `NODE` was freshly allocated via `pmm::alloc_page` below
                 // and was never consumed by an `ArchVmAspace`.
@@ -755,7 +768,7 @@ mod mmu_tests {
                 let arch_rw_flags: ArchMmuFlags =
                     ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
 
-                let mapping_result = unwrap_ok!(vmar.create_vm_mapping(
+                let mapping_result = unwrap_ok!(vmar.create_vm_mapping_no_overwrite(
                     0,
                     ALLOC_SIZE,
                     0,
@@ -765,15 +778,12 @@ mod mmu_tests {
                     VmObjectPaged::into_vm_object(vmo),
                     0,
                     arch_rw_flags,
-                    b"test",
                 ));
 
                 assert_ok!(mapping_result.mapping.map_range(0, ALLOC_SIZE, false, false));
 
                 let va = mapping_result.base;
-                let mapping = mapping_result.mapping;
-
-                let _cleanup_mapping = zr::defer(|| {
+                let _cleanup_mapping = DropGuard::new(mapping_result.mapping, |mapping| {
                     let _ = mapping.destroy();
                 });
 
@@ -826,7 +836,7 @@ mod mmu_tests {
                 // SAFETY: `thread` was just created and has not been resumed yet.
                 unsafe { thread.resume() };
 
-                let _cleanup_thread = zr::defer(|| {
+                let _cleanup_thread = DropGuard::new(thread, |thread| {
                     state.running.store(false, Ordering::SeqCst);
                     // SAFETY: `thread` was resumed above and is joined once here.
                     assert!(unsafe { thread.join(InstantMono::INFINITE) }.is_ok());
@@ -836,8 +846,10 @@ mod mmu_tests {
                 let _ = thread::sleep_relative(DurationMono::from_millis(50));
 
                 // Unmap a single page.
-                // SAFETY: Unmapping the single page at `target_offset` that the worker thread skips
-                // (`state.current_offset == i`), within a dynamic kernel test mapping.
+                // SAFETY: The page at `va + target_offset` lies within the kernel aspace, nothing
+                // relies on it staying mapped, and no Rust reference into it is live. `enlarge` is
+                // `ARCH_UNMAP_OPTION_NONE` and `unmap_only_enlarge_on_oom()` is true, so the rest
+                // of the large page it partly covers may stay in use.
                 let status = unsafe {
                     kaspace.arch_aspace().unmap(va + target_offset, 1, ARCH_UNMAP_OPTION_NONE)
                 };
@@ -862,7 +874,7 @@ mod mmu_tests {
         let _scanner_disable = AutoVmScannerDisable::new();
 
         let aspace = unwrap_some!(VmAspace::create(Type::User, b"test aspace"));
-        let _cleanup_aspace = zr::defer(|| {
+        let aspace = DropGuard::new(aspace, |aspace| {
             assert!(aspace.destroy().is_ok());
         });
 
@@ -880,7 +892,7 @@ mod mmu_tests {
             ));
             assert_ok!(vmo.commit_range(0, SMALL_PAGES_U64 * PAGE_SIZE_U64));
 
-            let mapping_result = unwrap_ok!(vmar.create_vm_mapping(
+            let mapping_result = unwrap_ok!(vmar.create_vm_mapping_no_overwrite(
                 0,
                 SMALL_PAGES * PAGE_SIZE,
                 0,
@@ -888,11 +900,9 @@ mod mmu_tests {
                 VmObjectPaged::into_vm_object(vmo.clone()),
                 0,
                 arch_rw_flags,
-                b"test",
             ));
             assert_ok!(mapping_result.mapping.map_range(0, SMALL_PAGES * PAGE_SIZE, false, false));
-            let mapping = mapping_result.mapping;
-            let _cleanup_mapping = zr::defer(|| {
+            let _cleanup_mapping = DropGuard::new(mapping_result.mapping, |mapping| {
                 assert!(mapping.destroy().is_ok());
             });
 
@@ -925,12 +935,11 @@ mod mmu_tests {
                 SMALL_PAGES_U64 * PAGE_SIZE_U64,
             ));
             assert_ok!(vmo.commit_range_pinned(0, SMALL_PAGES_U64 * PAGE_SIZE_U64, false));
-            let vmo_for_unpin = vmo.clone();
-            let _unpin = zr::defer(|| {
-                vmo_for_unpin.unpin(0, SMALL_PAGES_U64 * PAGE_SIZE_U64);
+            let vmo = DropGuard::new(vmo, |vmo| {
+                vmo.unpin(0, SMALL_PAGES_U64 * PAGE_SIZE_U64);
             });
 
-            let mapping_result = unwrap_ok!(vmar.create_vm_mapping(
+            let mapping_result = unwrap_ok!(vmar.create_vm_mapping_no_overwrite(
                 0,
                 SMALL_PAGES * PAGE_SIZE,
                 0,
@@ -938,11 +947,9 @@ mod mmu_tests {
                 VmObjectPaged::into_vm_object(vmo.clone()),
                 0,
                 arch_rw_flags,
-                b"test",
             ));
             assert_ok!(mapping_result.mapping.map_range(0, SMALL_PAGES * PAGE_SIZE, false, false));
-            let mapping = mapping_result.mapping;
-            let _cleanup_mapping = zr::defer(|| {
+            let _cleanup_mapping = DropGuard::new(mapping_result.mapping, |mapping| {
                 assert!(mapping.destroy().is_ok());
             });
 
@@ -972,12 +979,11 @@ mod mmu_tests {
             ));
             assert_ok!(vmo.commit_range(0, SMALL_PAGES_U64 * PAGE_SIZE_U64));
             assert_ok!(vmo.commit_range_pinned(PAGE_SIZE_U64, 2 * PAGE_SIZE_U64, false));
-            let vmo_for_unpin = vmo.clone();
-            let _unpin = zr::defer(|| {
-                vmo_for_unpin.unpin(PAGE_SIZE_U64, 2 * PAGE_SIZE_U64);
+            let vmo = DropGuard::new(vmo, |vmo| {
+                vmo.unpin(PAGE_SIZE_U64, 2 * PAGE_SIZE_U64);
             });
 
-            let mapping_result = unwrap_ok!(vmar.create_vm_mapping(
+            let mapping_result = unwrap_ok!(vmar.create_vm_mapping_no_overwrite(
                 0,
                 SMALL_PAGES * PAGE_SIZE,
                 0,
@@ -985,11 +991,9 @@ mod mmu_tests {
                 VmObjectPaged::into_vm_object(vmo.clone()),
                 0,
                 arch_rw_flags,
-                b"test",
             ));
             assert_ok!(mapping_result.mapping.map_range(0, SMALL_PAGES * PAGE_SIZE, false, false));
-            let mapping = mapping_result.mapping;
-            let _cleanup_mapping = zr::defer(|| {
+            let _cleanup_mapping = DropGuard::new(mapping_result.mapping, |mapping| {
                 assert!(mapping.destroy().is_ok());
             });
 
@@ -1027,14 +1031,13 @@ mod mmu_tests {
             for i in (0..ALT_PAGES_U64).step_by(2) {
                 assert_ok!(vmo.commit_range_pinned(i * PAGE_SIZE_U64, PAGE_SIZE_U64, false));
             }
-            let vmo_for_unpin = vmo.clone();
-            let _unpin = zr::defer(|| {
+            let vmo = DropGuard::new(vmo, |vmo| {
                 for i in (0..ALT_PAGES_U64).step_by(2) {
-                    vmo_for_unpin.unpin(i * PAGE_SIZE_U64, PAGE_SIZE_U64);
+                    vmo.unpin(i * PAGE_SIZE_U64, PAGE_SIZE_U64);
                 }
             });
 
-            let mapping_result = unwrap_ok!(vmar.create_vm_mapping(
+            let mapping_result = unwrap_ok!(vmar.create_vm_mapping_no_overwrite(
                 0,
                 ALT_PAGES * PAGE_SIZE,
                 0,
@@ -1042,11 +1045,9 @@ mod mmu_tests {
                 VmObjectPaged::into_vm_object(vmo.clone()),
                 0,
                 arch_rw_flags,
-                b"test",
             ));
             assert_ok!(mapping_result.mapping.map_range(0, ALT_PAGES * PAGE_SIZE, false, false));
-            let mapping = mapping_result.mapping;
-            let _cleanup_mapping = zr::defer(|| {
+            let _cleanup_mapping = DropGuard::new(mapping_result.mapping, |mapping| {
                 assert!(mapping.destroy().is_ok());
             });
 

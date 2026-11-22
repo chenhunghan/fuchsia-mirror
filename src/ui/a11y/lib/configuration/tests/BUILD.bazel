@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "configuration_tests",
+    srcs = ["color_transform_manager_test.cc"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    # -I. is required for color_transform_manager_test.cc's angled includes; raw_overwrite strips it for GN.
+    copts = [
+        "-Wno-conversion",
+        "-I.",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/config:Wno-conversion" ]
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/vfs/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/json_parser",
+        "//src/lib/testing/loop_fixture",
+        "//src/ui/a11y/lib/configuration",
+        "//third_party/rapidjson",
+    ],
+)

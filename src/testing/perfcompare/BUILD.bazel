@@ -10,14 +10,25 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "host_tests",
     tests = [
+        ":local_workflow_test",
         ":perfcompare_test",
     ],
     visibility = ["//src/testing:__pkg__"],
 )
 
-# TODO(https://fxbug.dev/496596903): Add type declarations to this
-# code and make it pass MyPy's type checks.
-# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
+host_py_test(
+    name = "local_workflow_test",
+    srcs = [
+        "local_workflow.py",
+        "local_workflow_test.py",
+        "perfcompare.py",
+        "stats.py",
+    ],
+    imports = ["."],
+    main = "local_workflow_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
 host_py_test(
     name = "perfcompare_test",
     srcs = [
@@ -28,7 +39,7 @@ host_py_test(
     ],
     imports = ["."],
     main = "perfcompare_test.py",
-    tags = ["no-pyrefly"],
+    main_callable = "TestMain",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     test_data = ["perfcompare_test_output.txt"],
 )

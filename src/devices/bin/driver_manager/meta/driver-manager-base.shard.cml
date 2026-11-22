@@ -95,7 +95,7 @@
             availability: "optional",
         },
         {
-            protocol: "fuchsia.component.sandbox.CapabilityStore",
+            protocol: "fuchsia.component.runtime.Capabilities",
             from: "framework",
         },
         {

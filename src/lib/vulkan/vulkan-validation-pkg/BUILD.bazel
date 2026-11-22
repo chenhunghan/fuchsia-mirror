@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/python:py_zipapp_binary.bzl", "py_zipapp_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "validation-server-bin",
+    srcs = ["validation_server.cc"],
+    gn_output_name = "validation-server",
+    # Uses Zircon headers (<zircon/processargs.h>) and Fuchsia-only deps (//sdk/lib/vfs/cpp).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/vfs/cpp",
+        "//src/lib/fxl",
+    ],
+)
+
+py_zipapp_binary(
+    name = "make_validation_client_cml",
+    srcs = ["make_validation_client_cml.py"],
+    main = "make_validation_client_cml.py",
+    deps = ["//build/python/modules/assembly"],
+)

@@ -180,13 +180,13 @@ TEST(LibraryLoader, InspectTypes) {
 
   const ProtocolMethod* found_method = nullptr;
   found_protocol->GetMethodByFullName(
-      "test.fidlcodec.examples/FidlCodecTestProtocol.NullableXUnion", &found_method);
+      "test.fidlcodec.examples/FidlCodecTestProtocol.NullableFlexibleUnion", &found_method);
 
   ASSERT_NE(nullptr, found_method);
   ASSERT_NE(nullptr, found_method->request());
   EXPECT_EQ(
-      "struct test.fidlcodec.examples/FidlCodecTestProtocolNullableXUnionRequest {\n"
-      "  union test.fidlcodec.examples/IntStructXunion {\n"
+      "struct test.fidlcodec.examples/FidlCodecTestProtocolNullableFlexibleUnionRequest {\n"
+      "  union test.fidlcodec.examples/IntStructFlexibleUnion {\n"
       "    1: int32 variant_i;\n"
       "    2: struct test.fidlcodec.examples/TwoStringStruct {\n"
       "      string value1;\n"
@@ -197,8 +197,8 @@ TEST(LibraryLoader, InspectTypes) {
       "}",
       found_method->request()->ToString(true));
   EXPECT_EQ(
-      "struct test.fidlcodec.examples/FidlCodecTestProtocolNullableXUnionRequest {\n"
-      "  union test.fidlcodec.examples/IntStructXunion isu;\n"
+      "struct test.fidlcodec.examples/FidlCodecTestProtocolNullableFlexibleUnionRequest {\n"
+      "  union test.fidlcodec.examples/IntStructFlexibleUnion isu;\n"
       "  int32 i;\n"
       "}",
       found_method->request()->ToString(false));

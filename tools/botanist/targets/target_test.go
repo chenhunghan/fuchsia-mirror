@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"go.fuchsia.dev/fuchsia/tools/botanist"
 	"go.fuchsia.dev/fuchsia/tools/botanist/constants"
 	"go.fuchsia.dev/fuchsia/tools/lib/ffxutil"
 )
@@ -100,13 +101,17 @@ func TestFromJSON(t *testing.T) {
 // of TestConfig.
 type testTarget struct {
 	FuchsiaTarget
-	nodename string
-	serial   string
-	pdu      *targetPDU
-	monsoon  *targetMonsoon
-	ipv4     net.IP
-	ipv6     *net.IPAddr
+	nodename     string
+	serial       string
+	deviceSerial string
+	experiments  botanist.Experiments
+	pdu          *targetPDU
+	monsoon      *targetMonsoon
+	ipv4         net.IP
+	ipv6         *net.IPAddr
 }
+
+var serialTargetIDExperiments = botanist.GetExperiments([]string{string(botanist.UseSerialTargetID)})
 
 func (t *testTarget) TestConfig(expectsSSH bool) (any, error) {
 	return TestbedConfig(t, expectsSSH, &testbedConfigOptions{PDU: t.pdu, Monsoon: t.monsoon})
@@ -115,8 +120,12 @@ func (t *testTarget) IPv4() (net.IP, error)      { return t.ipv4, nil }
 func (t *testTarget) IPv6() (*net.IPAddr, error) { return t.ipv6, nil }
 func (t *testTarget) Nodename() string           { return t.nodename }
 func (t *testTarget) SerialSocketPath() string   { return t.serial }
+func (t *testTarget) SerialNumber() string       { return t.deviceSerial }
 func (t *testTarget) SSHKey() string             { return "" }
 func (t *testTarget) GetSharedData() string      { return "/tmp/shared_data" }
+func (t *testTarget) UseFFXExperiment(e botanist.Experiment) bool {
+	return t.experiments.Contains(e)
+}
 
 func TestTestbedConfig(t *testing.T) {
 	tests := []struct {
@@ -167,16 +176,123 @@ func TestTestbedConfig(t *testing.T) {
 				Sernum: "12345",
 			}, SharedData: "/tmp/shared_data"},
 		},
+		{
+			name:       "valid_with_device_serial",
+			target:     testTarget{nodename: "node", serial: "serial", deviceSerial: "EM-12345678", ipv4: net.IPv4zero, ipv6: &net.IPAddr{IP: net.IPv6zero}, experiments: serialTargetIDExperiments},
+			expectsSSH: true,
+			want:       FuchsiaTestbedConfig{Type: "FuchsiaDevice", Nodename: "node", DeviceSerial: "EM-12345678", SerialSocket: "serial", IPv4: net.IPv4zero.String(), IPv6: net.IPv6zero.String(), SharedData: "/tmp/shared_data"},
+		},
+		{
+			name:       "device_serial_omitted_without_experiment",
+			target:     testTarget{nodename: "node", serial: "serial", deviceSerial: "EM-12345678", ipv4: net.IPv4zero, ipv6: &net.IPAddr{IP: net.IPv6zero}},
+			expectsSSH: true,
+			want:       FuchsiaTestbedConfig{Type: "FuchsiaDevice", Nodename: "node", SerialSocket: "serial", IPv4: net.IPv4zero.String(), IPv6: net.IPv6zero.String(), SharedData: "/tmp/shared_data"},
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := test.target.TestConfig(test.expectsSSH)
 			if err != nil {
-				t.Errorf("unexpected error from target.TestConfig(false): %s", err)
+				t.Errorf("unexpected error from target.TestConfig(%v): %s", test.expectsSSH, err)
 			}
 			if diff := cmp.Diff(test.want, got); diff != "" {
-				t.Errorf("TestConfig(false) mismatch (-want +got):\n%s", diff)
+				t.Errorf("TestConfig(%v) mismatch (-want +got):\n%s", test.expectsSSH, diff)
+			}
+		})
+	}
+}
+
+func TestTestbedConfig_Device(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		experiments botanist.Experiments
+		expectsSSH  bool
+		usbSocket   string
+		usbAddr     string
+		want        FuchsiaTestbedConfig
+		wantErr     bool
+	}{
+		{
+			name:       "network_device",
+			expectsSSH: true,
+			want: FuchsiaTestbedConfig{
+				Type:         "FuchsiaDevice",
+				Nodename:     "fuchsia-dev-1",
+				IPv4:         "192.168.42.112",
+				SerialSocket: "/tmp/mux",
+				SSHKey:       "/tmp/pkey",
+			},
+		},
+		{
+			name:        "force_ffx_usb_device_omits_ip_and_sets_usb_fields",
+			experiments: botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)}),
+			expectsSSH:  true,
+			usbSocket:   "/tmp/ffx_usb_driver_socketpath",
+			usbAddr:     "usb:cid:7",
+			want: FuchsiaTestbedConfig{
+				Type:          "FuchsiaDevice",
+				Nodename:      "fuchsia-dev-1",
+				SerialSocket:  "/tmp/mux",
+				SSHKey:        "/tmp/pkey",
+				DeviceUSB:     "usb:cid:7",
+				USBSocketPath: "/tmp/ffx_usb_driver_socketpath",
+			},
+		},
+		{
+			name:        "force_ffx_usb_missing_usb_address_errors",
+			experiments: botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)}),
+			expectsSSH:  true,
+			usbSocket:   "/tmp/ffx_usb_driver_socketpath",
+			wantErr:     true,
+		},
+		{
+			name:        "force_ffx_usb_missing_usb_socket_errors",
+			experiments: botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)}),
+			expectsSSH:  true,
+			usbAddr:     "usb:cid:7",
+			wantErr:     true,
+		},
+		{
+			name:        "force_ffx_usb_without_expects_ssh_succeeds",
+			experiments: botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)}),
+			expectsSSH:  false,
+			want: FuchsiaTestbedConfig{
+				Type:         "FuchsiaDevice",
+				Nodename:     "fuchsia-dev-1",
+				SerialSocket: "/tmp/mux",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dev := &Device{
+				genericFuchsiaTarget: &genericFuchsiaTarget{
+					nodename:     "fuchsia-dev-1",
+					serialSocket: "/tmp/mux",
+					ffx:          &FFXInstance{Experiments: tc.experiments},
+				},
+				config: DeviceConfig{
+					SerialNumber: "3676a5a3",
+					Network: NetworkProperties{
+						Nodename: "fuchsia-dev-1",
+						IPv4Addr: "192.168.42.112",
+					},
+					SSHKeys: []string{"/tmp/pkey"},
+				},
+			}
+			dev.SetUSBConfig(tc.usbSocket, tc.usbAddr)
+			got, err := dev.TestConfig(tc.expectsSSH)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("dev.TestConfig(%v) = (%+v, nil), want error", tc.expectsSSH, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("dev.TestConfig(%v) failed: %v", tc.expectsSSH, err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("dev.TestConfig(%v) mismatch (-want +got):\n%s", tc.expectsSSH, diff)
 			}
 		})
 	}

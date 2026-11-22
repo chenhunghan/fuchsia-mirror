@@ -5,6 +5,7 @@
 #ifndef SRC_DEVELOPER_DEBUG_ZXDB_CONSOLE_COMMAND_PARSER_H_
 #define SRC_DEVELOPER_DEBUG_ZXDB_CONSOLE_COMMAND_PARSER_H_
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,8 @@ namespace zxdb {
 
 class Command;
 class Err;
+enum class Verb;
+struct VerbRecord;
 
 struct CommandToken {
   CommandToken() = default;
@@ -28,6 +31,11 @@ struct CommandToken {
 Err TokenizeCommand(const std::string& input, std::vector<CommandToken>* result);
 
 Err ParseCommand(const std::string& input, Command* output);
+
+// Parses input against a caller-supplied verb table instead of GetVerbs(). Unit tests call this
+// function to exercise switch configurations independently of built-in verbs.
+Err ParseCommandForTest(const std::string& input, const std::map<Verb, VerbRecord>& verbs,
+                        Command* output);
 
 // A callback that fills out the command nouns based on the current context. The implementation
 // should fill out the target, thread, frame, etc. pointers of the given command structure.

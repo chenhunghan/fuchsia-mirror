@@ -7,6 +7,7 @@
 
 #include <cassert>
 #include <iterator>
+#include <type_traits>
 
 #include "layout.h"
 #include "svr4-abi.h"
@@ -73,9 +74,29 @@ class LinkMapList {
     return it;
   }
 
-  constexpr const_reverse_iterator rbegin() const { return const_reverse_iterator(this, nullptr); }
+  constexpr const_reverse_iterator rbegin() const { return crbegin(); }
 
-  constexpr const_reverse_iterator rend() const { return const_reverse_iterator(this, head_); }
+  constexpr const_reverse_iterator rend() const { return crend(); }
+
+  constexpr const_iterator cbegin() const { return begin(); }
+
+  constexpr const_iterator cend() const { return end(); }
+
+  constexpr const_reverse_iterator crbegin() const {
+    const_reverse_iterator it(this, nullptr);
+    if (head_) {
+      ++it;
+    }
+    return it;
+  }
+
+  constexpr const_reverse_iterator crend() const {
+    const_reverse_iterator it(this, head_);
+    if (head_) {
+      ++it;
+    }
+    return it;
+  }
 
   constexpr bool empty() const { return !head_; }
 
@@ -165,8 +186,8 @@ template <bool Reverse, bool Const>
 class LinkMapList<ElementType, Traits>::IteratorImpl {
  public:
   using value_type = LinkMapList::value_type;
-  using pointer = LinkMapList::pointer;
-  using reference = LinkMapList::reference;
+  using pointer = std::conditional_t<Const, const value_type*, value_type*>;
+  using reference = std::conditional_t<Const, const value_type&, value_type&>;
   using difference_type = LinkMapList::difference_type;
   using iterator_category = std::bidirectional_iterator_tag;
 
@@ -175,8 +196,8 @@ class LinkMapList<ElementType, Traits>::IteratorImpl {
   constexpr IteratorImpl(const IteratorImpl&) = default;
 
   // const_iterator is constructible from iterator.
-  template <bool C = Const, typename = std::enable_if_t<C>>
   constexpr IteratorImpl(const IteratorImpl<Reverse, false>& other)
+    requires Const
       : list_(other.list_), pos_(other.pos_) {}
 
   constexpr IteratorImpl& operator=(const IteratorImpl&) = default;

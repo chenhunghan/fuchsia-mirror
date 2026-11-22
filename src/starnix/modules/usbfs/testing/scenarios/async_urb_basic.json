@@ -1,0 +1,217 @@
+{
+    "name": "async_urb_basic",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd1",
+            "mode": "rdwr"
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1"
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "urb": "u_in_cancel",
+            "urb_type": "bulk",
+            "ep": 129,
+            "buffer_len": 64,
+            "usercontext": 4369
+        },
+        {
+            "type": "poll",
+            "fd": "fd1",
+            "events": [
+                "POLLOUT",
+                "POLLWRNORM"
+            ],
+            "timeout_ms": 0
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1"
+        },
+        {
+            "type": "discard_urb",
+            "fd": "fd1",
+            "urb": "u_in_cancel"
+        },
+        {
+            "type": "discard_urb",
+            "fd": "fd1",
+            "urb": "u_in_cancel"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1"
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_in_cancel"
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "urb": "u_out",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "data": [
+                16,
+                32,
+                48,
+                64
+            ],
+            "usercontext": 8738
+        },
+        {
+            "type": "device_ep_pop_out",
+            "ep": 2,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "poll",
+            "fd": "fd1",
+            "events": [
+                "POLLOUT",
+                "POLLWRNORM"
+            ],
+            "timeout_ms": 2000
+        },
+        {
+            "type": "reap_urb",
+            "fd": "fd1"
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_out"
+        },
+        {
+            "type": "device_ep_push_in",
+            "ep": 129,
+            "data": [
+                16,
+                32,
+                48,
+                64
+            ]
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "urb": "u_in",
+            "urb_type": "bulk",
+            "ep": 129,
+            "buffer_len": 64,
+            "usercontext": 13107
+        },
+        {
+            "type": "epoll_check",
+            "fd": "fd1",
+            "events": [
+                "EPOLLOUT"
+            ],
+            "timeout_ms": 2000
+        },
+        {
+            "type": "reap_urb",
+            "fd": "fd1"
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_in"
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "urb": "u_async_wait",
+            "urb_type": "bulk",
+            "ep": 129,
+            "buffer_len": 64,
+            "usercontext": 17476
+        },
+        {
+            "type": "start_op",
+            "task": "t_reap",
+            "inner": {
+                "type": "reap_urb",
+                "fd": "fd1"
+            }
+        },
+        {
+            "type": "device_ep_push_in",
+            "ep": 129,
+            "data": [
+                222,
+                173,
+                190,
+                239
+            ]
+        },
+        {
+            "type": "await_task",
+            "task": "t_reap",
+            "timeout_ms": 2000
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_async_wait"
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "close",
+            "fd": "fd1"
+        }
+    ]
+}

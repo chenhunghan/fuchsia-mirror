@@ -11,9 +11,6 @@ fuchsia_unittest_package("tests") {
   deps = [
     ":bin",
 
-    # netemul-sandbox-v2 is used to create hermetic test realms.
-    "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
     # TCPDump is under test.
     "//third_party/tcpdump:bin",
   ]
@@ -21,6 +18,9 @@ fuchsia_unittest_package("tests") {
     # The tests depend on `fuchsia.posix.socket/Provider` and
     # `fuchsia.posix.socket.packet/Provider` which the netstack exposes.
     "//src/connectivity/network/netstack3:package-debug",
+
+    # netemul-sandbox-v2 is used to create hermetic test realms.
+    "//src/connectivity/network/testing/netemul/service:package",
   ]
 }
 

@@ -10,18 +10,19 @@ use rand::RngExt as _;
 use starnix_core::fs::tmpfs::TmpFs;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::security::{self, PermissionFlags};
-use starnix_core::task::CurrentTask;
+use starnix_core::task::{CurrentTask, Kernel};
 use starnix_core::vfs::fs_args::MountParams;
 use starnix_core::vfs::pipe::Pipe;
 use starnix_core::vfs::rw_queue::{RwQueueReadGuard, RwQueueWriteGuard};
 use starnix_core::vfs::{
     AppendLockWriteGuard, CacheMode, CheckAccessReason, DirEntry, DirEntryHandle,
-    DirectoryEntryType, DirectoryMode, DirentSink, FallocMode, FileHandle, FileObject, FileOps,
-    FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsLockDepType, FsNode,
-    FsNodeFlags, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, MountInfo,
-    OutputBuffer, RenameContext, RenameFlags, SeekTarget, StatxFlags, SymlinkTarget, UnlinkKind,
-    ValueOrSize, VecInputBuffer, VecOutputBuffer, XattrOp, default_seek, emit_dotdot,
-    fileops_impl_directory, fileops_impl_seekable,
+    DirectoryEntryType, DirectoryMode, DirentSink, FILESYSTEM_MAX_STACK_DEPTH, FallocMode,
+    FileHandle, FileObject, FileOps, FileSystem, FileSystemHandle, FileSystemOps,
+    FileSystemOptions, FsLockDepType, FsNode, FsNodeAttrFlags, FsNodeFlags, FsNodeHandle,
+    FsNodeInfo, FsNodeOps, FsStr, FsString, InputBuffer, MountInfo, OutputBuffer, RenameContext,
+    RenameFlags, SeekTarget, StatxFlags, SymlinkTarget, UnlinkKind, ValueOrSize, VecInputBuffer,
+    VecOutputBuffer, XattrOp, default_seek, emit_dotdot, fileops_impl_directory,
+    fileops_impl_seekable,
 };
 use starnix_logging::{log_error, log_warn, track_stub};
 use starnix_sync::{
@@ -30,13 +31,12 @@ use starnix_sync::{
 };
 use starnix_uapi::auth::{Credentials, FsCred};
 use starnix_uapi::device_id::DeviceId;
-use starnix_uapi::errors::{EEXIST, ENOENT, Errno};
+use starnix_uapi::errors::{EEXIST, ENODATA, ENOENT, ENOSYS, ENOTSUP, Errno};
 use starnix_uapi::file_mode::{FileMode, mode};
 use starnix_uapi::open_flags::OpenFlags;
-use starnix_uapi::{errno, error, ino_t, off_t, statfs};
+use starnix_uapi::{XATTR_NAME_CAPS, errno, error, ino_t, off_t, statfs};
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use syncio::zxio_node_attr_has_t;
 
 // Name and value for the xattr used to mark opaque directories in the upper FS.
 // See https://docs.kernel.org/filesystems/overlayfs.html#whiteouts-and-opaque-directories
@@ -56,6 +56,7 @@ type DirEntries = Vec<DirEntryInfo>;
 struct DirentSinkAdapter {
     items: Vec<DirEntryInfo>,
     offset: off_t,
+    entry_count: usize,
 }
 
 impl DirentSink for DirentSinkAdapter {
@@ -70,6 +71,7 @@ impl DirentSink for DirentSinkAdapter {
             self.items.push(DirEntryInfo { name: name.to_owned(), inode_num, entry_type });
         }
         self.offset = offset;
+        self.entry_count += 1;
         Ok(())
     }
 
@@ -158,14 +160,7 @@ impl ActiveEntry {
         name: &FsStr,
     ) -> Result<ActiveEntry, Errno> {
         self.create_entry(current_task, name, |dir, mount, name| {
-            dir.create_node(
-                current_task,
-                mount,
-                name,
-                FileMode::IFCHR,
-                DeviceId::NONE,
-                FsCred::root(),
-            )
+            dir.create_node(current_task, mount, name, FileMode::IFCHR, DeviceId::NONE)
         })
     }
 
@@ -191,11 +186,25 @@ impl ActiveEntry {
         Ok(entry.is_whiteout())
     }
 
+    fn require_no_mounts(&self) -> Result<(), Errno> {
+        if self.entry().has_mounts()
+            && self.mount().as_ref().is_some_and(|mount| mount.has_submount(self.entry()))
+        {
+            return error!(EBUSY);
+        }
+        Ok(())
+    }
+
     fn read_dir_entries(&self, current_task: &CurrentTask) -> Result<Vec<DirEntryInfo>, Errno> {
         let mut sink = DirentSinkAdapter::default();
-        self.entry()
-            .open_anonymous(current_task, OpenFlags::DIRECTORY)?
-            .readdir(current_task, &mut sink)?;
+        let file = self.entry().open_anonymous(current_task, OpenFlags::DIRECTORY)?;
+        loop {
+            let prev_count = sink.entry_count;
+            file.readdir(current_task, &mut sink)?;
+            if sink.entry_count == prev_count {
+                break;
+            }
+        }
         Ok(sink.items)
     }
 }
@@ -251,13 +260,18 @@ impl OverlayNode {
         let entry = upper.as_ref().or(lower.as_ref()).expect("expect either lower or upper node");
         let ino = entry.entry().node.ino;
         let info = entry.entry().node.info().clone();
+        let flags = if entry.entry().node.has_no_privileges() {
+            FsNodeFlags::HAS_NO_PRIVILEGES
+        } else {
+            FsNodeFlags::empty()
+        };
 
         // Parent may be needed to initialize `upper`. We don't need to pass it if we have `upper`.
         let parent = if upper.is_some() { None } else { Some(self.clone()) };
 
         let overlay_node =
             OverlayNodeOps { node: OverlayNode::new(self.stack.clone(), lower, upper, parent) };
-        FsNode::new_uncached(ino, overlay_node, &node.fs(), info, FsNodeFlags::empty())
+        FsNode::new_uncached(ino, overlay_node, &node.fs(), info, flags)
     }
 
     /// If the file is currently in the lower FS, then promote it to the upper FS. No-op if the
@@ -288,43 +302,91 @@ impl OverlayNode {
             };
             let cred = info.cred();
 
-            let mut copy_up_creds = Credentials::clone(&self.stack.mounter);
-            security::fs_node_copy_up(current_task, &lower.entry.node, fs, &mut copy_up_creds);
-            let res = current_task.override_creds(Arc::new(copy_up_creds), || {
-                if info.mode.is_lnk() {
-                    let link_target = lower.entry.node.readlink(current_task)?;
-                    let link_path = match &link_target {
-                        SymlinkTarget::Node(_) => return error!(EIO),
-                        SymlinkTarget::Path(path) => path,
-                    };
-                    parent_upper.create_entry(current_task, name.as_ref(), |dir, mount, name| {
-                        dir.create_symlink(current_task, mount, name, link_path.as_ref(), cred)
-                    })
-                } else if info.mode.is_reg() && copy_mode == UpperCopyMode::CopyAll {
-                    // Regular files need to be copied from lower FS to upper FS.
-                    self.stack.create_upper_entry(
-                        current_task,
-                        parent_upper,
-                        name.as_ref(),
-                        |dir, name| {
-                            dir.create_entry(current_task, name, |dir_node, mount, name| {
-                                dir_node.create_node(
-                                    current_task,
-                                    mount,
-                                    name,
-                                    info.mode,
-                                    DeviceId::NONE,
-                                    cred,
-                                )
-                            })
-                        },
-                        |entry| copy_file_content(current_task, lower, &entry),
-                    )
-                } else {
-                    parent_upper.create_entry(current_task, name.as_ref(), |dir, mount, name| {
-                        dir.create_node(current_task, mount, name, info.mode, info.rdev, cred)
-                    })
+            let link_path = if info.mode.is_lnk() {
+                let link_target =
+                    self.as_mounter(current_task, || lower.entry.node.readlink(current_task))?;
+                match link_target {
+                    SymlinkTarget::Node(_) => return error!(EIO),
+                    SymlinkTarget::Path(path) => Some(path),
                 }
+            } else {
+                None
+            };
+
+            let mut copy_up_creds = self.mounter_creds_with_fscred(cred);
+            security::fs_node_copy_up(current_task, &lower.entry.node, fs, &mut copy_up_creds);
+            let copy_up_creds = Arc::new(copy_up_creds);
+            let res = self.as_mounter(current_task, || {
+                self.stack.create_upper_entry(
+                    current_task,
+                    parent_upper,
+                    name.as_ref(),
+                    |dir, temp_name| {
+                        current_task.override_creds(copy_up_creds.clone(), || {
+                            dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
+                                match &link_path {
+                                    Some(target) => dir_node.create_symlink(
+                                        current_task,
+                                        mount,
+                                        name,
+                                        target.as_ref(),
+                                    ),
+                                    None => dir_node.create_node(
+                                        current_task,
+                                        mount,
+                                        name,
+                                        info.mode,
+                                        info.rdev,
+                                    ),
+                                }
+                            })
+                        })
+                    },
+                    |entry| {
+                        if link_path.is_some() {
+                            return Ok(());
+                        }
+                        if info.mode.is_reg() && copy_mode == UpperCopyMode::CopyAll {
+                            copy_file_content(current_task, lower, entry)?;
+                            if info.mode.intersects(FileMode::ISUID | FileMode::ISGID) {
+                                entry.entry().node.fetch_and_refresh_info(current_task)?;
+                            }
+                        }
+                        entry.entry().node.update_attributes(
+                            current_task,
+                            /* force = */ false,
+                            |node_info| {
+                                node_info.uid = cred.uid;
+                                node_info.gid = cred.gid;
+                                node_info.mode = info.mode;
+                                Ok(())
+                            },
+                        )?;
+                        if info.mode.is_reg() {
+                            match lower.entry.node.get_xattr(
+                                current_task,
+                                &lower.mount,
+                                XATTR_NAME_CAPS.to_bytes().into(),
+                                usize::MAX,
+                            ) {
+                                Ok(ValueOrSize::Value(caps)) => entry.entry().node.set_xattr(
+                                    current_task,
+                                    entry.mount(),
+                                    XATTR_NAME_CAPS.to_bytes().into(),
+                                    &caps,
+                                    XattrOp::Set,
+                                )?,
+                                Ok(ValueOrSize::Size(_)) => return error!(EINVAL),
+                                // Nothing to copy if the attribute is not set on the lower
+                                // node, or if the lower filesystem does not support extended
+                                // attributes.
+                                Err(err) if matches!(err.code, ENODATA | ENOTSUP | ENOSYS) => {}
+                                Err(err) => return Err(err),
+                            }
+                        }
+                        Ok(())
+                    },
+                )
             });
 
             track_stub!(TODO("https://fxbug.dev/322874151"), "overlayfs copy xattrs");
@@ -357,15 +419,17 @@ impl OverlayNode {
     /// supposed to change while this method is executed. Note that OveralayFS doesn't handle
     /// the case when the underlying file systems are changed directly, but that restriction
     /// is not enforced.
-    fn create_entry<F>(
+    fn create_entry<FCreate, FInit>(
         self: &Arc<OverlayNode>,
         node: &FsNode,
         current_task: &CurrentTask,
         name: &FsStr,
-        do_create: F,
+        do_create: FCreate,
+        do_init: FInit,
     ) -> Result<ActiveEntry, Errno>
     where
-        F: Fn(&ActiveEntry, &FsStr) -> Result<ActiveEntry, Errno>,
+        FCreate: Fn(&ActiveEntry, &FsStr) -> Result<ActiveEntry, Errno>,
+        FInit: FnOnce(&ActiveEntry) -> Result<(), Errno>,
     {
         let upper = self.ensure_upper(current_task, &node.fs())?;
 
@@ -386,13 +450,7 @@ impl OverlayNode {
             Err(e) => return Err(e),
         };
 
-        self.stack.create_upper_entry(
-            current_task,
-            upper,
-            name,
-            |entry, fs| do_create(entry, fs),
-            |_entry| Ok(()),
-        )
+        self.stack.create_upper_entry(current_task, upper, name, do_create, do_init)
     }
 
     /// An overlay directory may appear empty when the corresponding upper dir isn't empty:
@@ -448,10 +506,56 @@ impl OverlayNode {
     fn as_mounter<R, F: FnOnce() -> R>(&self, current_task: &CurrentTask, do_work: F) -> R {
         current_task.override_creds(self.stack.mounter.clone(), do_work)
     }
+
+    fn mounter_creds_with_fscred(&self, fscred: FsCred) -> Credentials {
+        let mut creds = Credentials::clone(&self.stack.mounter);
+        creds.fsuid = fscred.uid;
+        creds.fsgid = fscred.gid;
+        creds
+    }
 }
 
 struct OverlayNodeOps {
     node: Arc<OverlayNode>,
+}
+
+impl OverlayNodeOps {
+    /// Creates and initializes a child entry staged through `work` using `owner` as the creator
+    /// filesystem identity while keeping `mounter` permissions for upper lookup and rename.
+    fn create_child_node<FCreate, FInit>(
+        &self,
+        node: &FsNode,
+        current_task: &CurrentTask,
+        name: &FsStr,
+        mode: FileMode,
+        owner: FsCred,
+        do_create: FCreate,
+        do_init: FInit,
+    ) -> Result<FsNodeHandle, Errno>
+    where
+        FCreate: Fn(&FsNodeHandle, &MountInfo, &FsStr) -> Result<FsNodeHandle, Errno>,
+        FInit: FnOnce(&ActiveEntry) -> Result<(), Errno>,
+    {
+        let mut creds = self.node.mounter_creds_with_fscred(owner);
+        security::dentry_create_files_as(current_task, node, mode, name, &mut creds)?;
+        let creds = Arc::new(creds);
+        self.node.as_mounter(current_task, || {
+            let new_upper_node = self.node.create_entry(
+                node,
+                current_task,
+                name,
+                |dir, temp_name| {
+                    current_task.override_creds(creds.clone(), || {
+                        dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
+                            do_create(dir_node, mount, name)
+                        })
+                    })
+                },
+                do_init,
+            )?;
+            Ok(self.node.init_fs_node_for_child(node, None, Some(new_upper_node)))
+        })
+    }
 }
 
 impl FsNodeOps for OverlayNodeOps {
@@ -627,17 +731,15 @@ impl FsNodeOps for OverlayNodeOps {
             // be indistuinguishable from those created to represent whiteouts.
             return error!(EPERM);
         }
-        let mut creds = Credentials::clone(&self.node.stack.mounter);
-        security::dentry_create_files_as(current_task, node, mode, name, &mut creds)?;
-        current_task.override_creds(Arc::new(creds), || {
-            let new_upper_node =
-                self.node.create_entry(node, current_task, name, |dir, temp_name| {
-                    dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
-                        dir_node.create_node(current_task, mount, name, mode, dev, owner.clone())
-                    })
-                })?;
-            Ok(self.node.init_fs_node_for_child(node, None, Some(new_upper_node)))
-        })
+        self.create_child_node(
+            node,
+            current_task,
+            name,
+            mode,
+            owner,
+            |dir_node, mount, name| dir_node.create_node(current_task, mount, name, mode, dev),
+            |_entry| Ok(()),
+        )
     }
 
     fn mkdir(
@@ -648,31 +750,20 @@ impl FsNodeOps for OverlayNodeOps {
         mode: FileMode,
         owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
-        let mut creds = Credentials::clone(&self.node.stack.mounter);
-        security::dentry_create_files_as(current_task, node, mode, name, &mut creds)?;
-        current_task.override_creds(Arc::new(creds), || {
-            let new_upper_node =
-                self.node.create_entry(node, current_task, name, |dir, temp_name| {
-                    let entry =
-                        dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
-                            dir_node.create_node(
-                                current_task,
-                                mount,
-                                name,
-                                mode,
-                                DeviceId::NONE,
-                                owner.clone(),
-                            )
-                        })?;
-
-                    // Set opaque attribute to ensure the new directory is not merged with lower.
-                    entry.set_opaque_xattr(current_task)?;
-
-                    Ok(entry)
-                })?;
-
-            Ok(self.node.init_fs_node_for_child(node, None, Some(new_upper_node)))
-        })
+        self.create_child_node(
+            node,
+            current_task,
+            name,
+            mode,
+            owner,
+            |dir_node, mount, name| {
+                dir_node.create_node(current_task, mount, name, mode, DeviceId::NONE)
+            },
+            |entry| {
+                // Set opaque attribute to ensure the new directory is not merged with lower.
+                entry.set_opaque_xattr(current_task)
+            },
+        )
     }
 
     fn create_symlink(
@@ -683,17 +774,15 @@ impl FsNodeOps for OverlayNodeOps {
         target: &FsStr,
         owner: FsCred,
     ) -> Result<FsNodeHandle, Errno> {
-        let mut creds = Credentials::clone(&self.node.stack.mounter);
-        security::dentry_create_files_as(current_task, node, FileMode::IFLNK, name, &mut creds)?;
-        current_task.override_creds(Arc::new(creds), || {
-            let new_upper_node =
-                self.node.create_entry(node, current_task, name, |dir, temp_name| {
-                    dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
-                        dir_node.create_symlink(current_task, mount, name, target, owner.clone())
-                    })
-                })?;
-            Ok(self.node.init_fs_node_for_child(node, None, Some(new_upper_node)))
-        })
+        self.create_child_node(
+            node,
+            current_task,
+            name,
+            FileMode::IFLNK,
+            owner,
+            |dir_node, mount, name| dir_node.create_symlink(current_task, mount, name, target),
+            |_entry| Ok(()),
+        )
     }
 
     fn readlink(&self, _node: &FsNode, current_task: &CurrentTask) -> Result<SymlinkTarget, Errno> {
@@ -711,11 +800,17 @@ impl FsNodeOps for OverlayNodeOps {
         self.node.as_mounter(current_task, || {
             let child_overlay = OverlayNode::from_fs_node(child)?;
             let upper_child = child_overlay.ensure_upper(current_task, &node.fs())?;
-            self.node.create_entry(node, current_task, name, |dir, temp_name| {
-                dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
-                    dir_node.link(current_task, mount, name, &upper_child.entry().node)
-                })
-            })?;
+            self.node.create_entry(
+                node,
+                current_task,
+                name,
+                |dir, temp_name| {
+                    dir.create_entry(current_task, temp_name, |dir_node, mount, name| {
+                        dir_node.link(current_task, mount, name, &upper_child.entry().node)
+                    })
+                },
+                |_entry| Ok(()),
+            )?;
             Ok(())
         })
     }
@@ -792,31 +887,35 @@ impl FsNodeOps for OverlayNodeOps {
         node: &FsNode,
         current_task: &CurrentTask,
         new_info: &FsNodeInfo,
-        has: zxio_node_attr_has_t,
+        has: FsNodeAttrFlags,
     ) -> Result<(), Errno> {
         self.node.as_mounter(current_task, || {
             let upper = self.node.ensure_upper(current_task, &node.fs())?.entry();
-            upper.node.update_attributes(current_task, |info| {
-                if has.modification_time {
-                    info.time_modify = new_info.time_modify;
-                }
-                if has.access_time {
-                    info.time_access = new_info.time_access;
-                }
-                if has.mode {
-                    info.mode = new_info.mode;
-                }
-                if has.uid {
-                    info.uid = new_info.uid;
-                }
-                if has.gid {
-                    info.gid = new_info.gid;
-                }
-                if has.rdev {
-                    info.rdev = new_info.rdev;
-                }
-                Ok(())
-            })
+            upper.node.update_attributes(
+                current_task,
+                has.contains(FsNodeAttrFlags::FORCE),
+                |info| {
+                    if has.contains(FsNodeAttrFlags::TIME_MODIFY) {
+                        info.time_modify = new_info.time_modify;
+                    }
+                    if has.contains(FsNodeAttrFlags::TIME_ACCESS) {
+                        info.time_access = new_info.time_access;
+                    }
+                    if has.contains(FsNodeAttrFlags::MODE) {
+                        info.mode = new_info.mode;
+                    }
+                    if has.contains(FsNodeAttrFlags::UID) {
+                        info.uid = new_info.uid;
+                    }
+                    if has.contains(FsNodeAttrFlags::GID) {
+                        info.gid = new_info.gid;
+                    }
+                    if has.contains(FsNodeAttrFlags::RDEV) {
+                        info.rdev = new_info.rdev;
+                    }
+                    Ok(())
+                },
+            )
         })
     }
 
@@ -847,27 +946,19 @@ impl FsNodeOps for OverlayNodeOps {
         guard: &AppendLockWriteGuard<'_>,
         node: &FsNode,
         current_task: &CurrentTask,
+        file: Option<&FileObject>,
         length: u64,
     ) -> Result<(), Errno> {
         self.node.as_mounter(current_task, || {
             let upper = self.node.ensure_upper(current_task, &node.fs())?;
-
-            upper.entry().node.truncate_locked(guard, current_task, length)
-        })
-    }
-
-    fn allocate(
-        &self,
-        guard: &AppendLockWriteGuard<'_>,
-        node: &FsNode,
-        current_task: &CurrentTask,
-        mode: FallocMode,
-        offset: u64,
-        length: u64,
-    ) -> Result<(), Errno> {
-        self.node.as_mounter(current_task, || {
-            let node = &self.node.ensure_upper(current_task, &node.fs())?.entry().node;
-            node.fallocate_locked(guard, current_task, mode, offset, length)
+            let upper_file = file
+                .and_then(|f| f.downcast_file::<OverlayFile>())
+                .and_then(|f| f.upper_file().ok());
+            let upper_file = upper_file.as_ref().map(|f| f as &FileObject);
+            let upper_node = &upper.entry().node;
+            upper_node.ops().truncate(guard, upper_node, current_task, upper_file, length)?;
+            upper_node.update_ctime_mtime();
+            Ok(())
         })
     }
 
@@ -1039,6 +1130,17 @@ struct OverlayFile {
     state: LockDepRwLock<OverlayFileState, OverlayFsStateLock>,
 }
 
+impl OverlayFile {
+    /// Returns the upper file, or `EBADF` if this file was not opened for writing and promoted.
+    fn upper_file(&self) -> Result<FileHandle, Errno> {
+        let state = self.state.read();
+        match &*state {
+            OverlayFileState::Upper(f) => Ok(f.clone()),
+            OverlayFileState::Lower(_) => error!(EBADF),
+        }
+    }
+}
+
 impl FileOps for OverlayFile {
     fileops_impl_seekable!();
 
@@ -1086,17 +1188,33 @@ impl FileOps for OverlayFile {
         data: &mut dyn InputBuffer,
     ) -> Result<usize, Errno> {
         self.node.as_mounter(current_task, || {
-            let state = self.state.read();
-            let file = match &*state {
-                OverlayFileState::Upper(f) => f.clone(),
-
-                // `write()` should be called only for files that were opened for write, and that
-                // required the file to be promoted to the upper FS.
-                OverlayFileState::Lower(_) => panic!("write() called for a lower FS file."),
-            };
-            std::mem::drop(state);
+            // `write()` should be called only for files that were opened for write, and that
+            // required the file to be promoted to the upper FS.
+            let file = self.upper_file()?;
             security::file_permission(current_task, &file, security::PermissionFlags::WRITE)?;
             file.ops().write(&file, current_task, offset, data)
+        })
+    }
+
+    fn fallocate(
+        &self,
+        guard: &AppendLockWriteGuard<'_>,
+        _file: &FileObject,
+        current_task: &CurrentTask,
+        mode: FallocMode,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), Errno> {
+        // `guard` already holds the upper node's append lock (via
+        // `OverlayNodeOps::append_lock_write`). Call the upper file's `FileOps` directly to avoid
+        // deadlocking in `FileObject::fallocate`, and update upper timestamps manually so
+        // `fetch_and_refresh_info` observes them.
+        self.node.as_mounter(current_task, || {
+            let file = self.upper_file()?;
+            security::file_permission(current_task, &file, security::PermissionFlags::WRITE)?;
+            file.ops().fallocate(guard, &file, current_task, mode, offset, length)?;
+            file.node().update_ctime_mtime();
+            Ok(())
         })
     }
 
@@ -1155,6 +1273,51 @@ pub struct OverlayStack {
 }
 
 impl OverlayStack {
+    fn compute_stack_depth(lower_fs: &FileSystemHandle, upper_fs: &FileSystemHandle) -> u32 {
+        std::cmp::max(lower_fs.stack_depth(), upper_fs.stack_depth()).saturating_add(1)
+    }
+
+    fn stack_depth(&self) -> u32 {
+        Self::compute_stack_depth(&self.lower_fs, &self.upper_fs)
+    }
+
+    fn build_fs(
+        kernel: &Kernel,
+        lower: ActiveEntry,
+        upper: ActiveEntry,
+        prepare_work: impl FnOnce() -> Result<ActiveEntry, Errno>,
+        mounter: Arc<Credentials>,
+        options: FileSystemOptions,
+    ) -> Result<FileSystemHandle, Errno> {
+        let lower_fs = lower.entry().node.fs();
+        let upper_fs = upper.entry().node.fs();
+
+        if upper_fs.fs_lockdep_type() == FsLockDepType::Recursive {
+            // Recursive filesystems (like OverlayFS itself) are not supported as upper filesystems.
+            return error!(EINVAL);
+        }
+
+        let stack_depth = Self::compute_stack_depth(&lower_fs, &upper_fs);
+        if stack_depth > FILESYSTEM_MAX_STACK_DEPTH {
+            log_warn!(
+                "overlayfs: maximum fs stacking depth exceeded ({} > {})",
+                stack_depth,
+                FILESYSTEM_MAX_STACK_DEPTH
+            );
+            return error!(EINVAL);
+        }
+
+        let work = prepare_work()?;
+        let stack = Arc::new(OverlayStack { lower_fs, upper_fs, work, mounter });
+
+        let root_node = OverlayNode::new(stack.clone(), Some(lower), Some(upper), None);
+        let root_info = root_node.main_entry().entry().node.info().clone();
+        let fs = FileSystem::new(kernel, CacheMode::Uncached, OverlayFs { stack }, options)?;
+        let root_ino = fs.allocate_ino();
+        fs.create_root_with_info(root_ino, OverlayNodeOps { node: root_node }, root_info);
+        Ok(fs)
+    }
+
     fn new_fs(
         current_task: &CurrentTask,
         options: FileSystemOptions,
@@ -1170,30 +1333,36 @@ impl OverlayStack {
 
         let lower = resolve_dir_param(current_task, &options.params, "lowerdir".into())?;
         let upper = resolve_dir_param(current_task, &options.params, "upperdir".into())?;
-        let work = resolve_dir_param(current_task, &options.params, "workdir".into())?;
+        let work_base = resolve_dir_param(current_task, &options.params, "workdir".into())?;
 
-        let lower_fs = lower.entry().node.fs();
-        let upper_fs = upper.entry().node.fs();
-
-        if upper_fs.fs_lockdep_type() == FsLockDepType::Recursive {
-            // Recursive filesystems (like OverlayFS itself) are not supported as upper filesystems.
+        if !Arc::ptr_eq(&upper.entry().node.fs(), &work_base.entry().node.fs())
+            || upper.mount() != work_base.mount()
+        {
+            log_warn!("overlayfs: upperdir and workdir must be on the same mount");
+            return error!(EINVAL);
+        }
+        if upper.entry().is_descendant_of(work_base.entry())
+            || work_base.entry().is_descendant_of(upper.entry())
+        {
+            log_warn!("overlayfs: upperdir and workdir must not overlap");
+            return error!(EINVAL);
+        }
+        if Arc::ptr_eq(&lower.entry().node.fs(), &work_base.entry().node.fs())
+            && (lower.entry().is_descendant_of(work_base.entry())
+                || work_base.entry().is_descendant_of(lower.entry()))
+        {
+            log_warn!("overlayfs: lowerdir and workdir must not overlap");
             return error!(EINVAL);
         }
 
-        if !Arc::ptr_eq(&upper_fs, &work.entry().node.fs()) {
-            log_error!("overlayfs: upperdir and workdir must be on the same FS");
-            return error!(EINVAL);
-        }
-
-        let kernel = current_task.kernel();
-        let mounter = current_task.current_creds().clone();
-        let stack = Arc::new(OverlayStack { lower_fs, upper_fs, work, mounter });
-        let root_node = OverlayNode::new(stack.clone(), Some(lower), Some(upper), None);
-        let root_info = root_node.main_entry().entry().node.info().clone();
-        let fs = FileSystem::new(kernel, CacheMode::Uncached, OverlayFs { stack }, options)?;
-        let root_ino = fs.allocate_ino();
-        fs.create_root_with_info(root_ino, OverlayNodeOps { node: root_node }, root_info);
-        Ok(fs)
+        Self::build_fs(
+            current_task.kernel(),
+            lower,
+            upper,
+            || Self::prepare_work_dir(current_task, &work_base),
+            current_task.current_creds().clone(),
+            options,
+        )
     }
 
     /// Given a filesystem, wraps it in a tmpfs-backed writable overlayfs.
@@ -1209,33 +1378,29 @@ impl OverlayStack {
         let invisible_tmp = TmpFs::new_fs(kernel);
         let create_dir =
             |name: &FsStr, mode: FileMode, cred: FsCred| -> Result<ActiveEntry, Errno> {
-                let create_dir_node = |dir: &FsNodeHandle, mount: &MountInfo, name: &FsStr| {
-                    dir.create_node(current_task, mount, name, mode, DeviceId::NONE, cred)
-                };
-                let mount = MountInfo::detached();
-                let root = invisible_tmp.root();
-                let entry = root.create_entry(current_task, &mount, name, create_dir_node)?;
-                Ok(ActiveEntry { entry, mount })
+                let mut creds = Credentials::clone(&Credentials::root());
+                creds.fsuid = cred.uid;
+                creds.fsgid = cred.gid;
+                current_task.override_creds(Arc::new(creds), || {
+                    let create_dir_node = |dir: &FsNodeHandle, mount: &MountInfo, name: &FsStr| {
+                        dir.create_node(current_task, mount, name, mode, DeviceId::NONE)
+                    };
+                    let mount = MountInfo::detached();
+                    let root = invisible_tmp.root();
+                    let entry = root.create_entry(current_task, &mount, name, create_dir_node)?;
+                    Ok(ActiveEntry { entry, mount })
+                })
             };
         let upper = create_dir("upper".into(), lower_info.mode, lower_info.cred())?;
-        let work = create_dir("work".into(), mode!(IFDIR, 0o700), FsCred::root())?;
 
-        let lower_fs = rootfs;
-        let upper_fs = invisible_tmp;
-
-        let mounter = Credentials::root();
-        let stack = Arc::new(OverlayStack { lower_fs, upper_fs, work, mounter });
-        let root_node = OverlayNode::new(stack.clone(), Some(lower), Some(upper), None);
-        let root_info = root_node.main_entry().entry().node.info().clone();
-        let fs = FileSystem::new(
+        Self::build_fs(
             kernel,
-            CacheMode::Uncached,
-            OverlayFs { stack },
+            lower,
+            upper,
+            || create_dir("work".into(), mode!(IFDIR, 0o700), FsCred::root()),
+            Credentials::root(),
             FileSystemOptions::default(),
-        )?;
-        let root_ino = fs.allocate_ino();
-        fs.create_root_with_info(root_ino, OverlayNodeOps { node: root_node }, root_info);
-        Ok(fs)
+        )
     }
 
     // Helper used to create new entry called `name` in `target_dir` in the upper FS.
@@ -1283,13 +1448,18 @@ impl OverlayStack {
             })
             .map_err(|e| {
                 // Remove the temp entry in case of a failure.
+                let unlink_kind = if entry.entry().node.is_dir() {
+                    UnlinkKind::Directory
+                } else {
+                    UnlinkKind::NonDirectory
+                };
                 self.work
                     .entry()
                     .unlink(
                         current_task,
                         self.work.mount(),
                         temp_name.as_ref(),
-                        UnlinkKind::NonDirectory,
+                        unlink_kind,
                         DirectoryMode::AllowAny,
                     )
                     .unwrap_or_else(|e| {
@@ -1300,6 +1470,125 @@ impl OverlayStack {
 
         Ok(entry)
     }
+
+    fn scan_dir_for_remove(
+        current_task: &CurrentTask,
+        dir: &ActiveEntry,
+    ) -> Result<(Vec<(FsString, ActiveEntry)>, Vec<FsString>), Errno> {
+        dir.require_no_mounts()?;
+        let mut subdirs = Vec::new();
+        let mut non_dirs = Vec::new();
+        for item in dir.read_dir_entries(current_task)? {
+            let child = dir.component_lookup(current_task, item.name.as_ref())?;
+            child.require_no_mounts()?;
+            if child.entry().node.is_dir() {
+                subdirs.push((item.name, child));
+            } else {
+                non_dirs.push(item.name);
+            }
+        }
+        Ok((subdirs, non_dirs))
+    }
+
+    /// Recursively unlinks `dir` (named `name` under `parent`) and all of its contents.
+    fn remove_dir_all(
+        current_task: &CurrentTask,
+        parent: &ActiveEntry,
+        name: &FsStr,
+        dir: ActiveEntry,
+    ) -> Result<(), Errno> {
+        // Walk the subtree before modifying anything so any nested submount aborts cleanly with
+        // `EBUSY` before partial unlinking, recording directories in pre-order (unlinked bottom-up
+        // via `.rev()`).
+        let mut to_remove = Vec::new();
+        let mut pending = vec![(parent.clone(), name.to_owned(), dir)];
+        while let Some((parent, name, dir)) = pending.pop() {
+            let (subdirs, non_dirs) = Self::scan_dir_for_remove(current_task, &dir)?;
+            for (child_name, child) in subdirs {
+                pending.push((dir.clone(), child_name, child));
+            }
+            to_remove.push((parent, name, dir, non_dirs));
+        }
+
+        for (parent, name, dir, non_dirs) in to_remove.into_iter().rev() {
+            for child_name in non_dirs {
+                dir.entry().unlink(
+                    current_task,
+                    dir.mount(),
+                    child_name.as_ref(),
+                    UnlinkKind::NonDirectory,
+                    DirectoryMode::AllowAny,
+                )?;
+            }
+            parent.entry().unlink(
+                current_task,
+                parent.mount(),
+                name.as_ref(),
+                UnlinkKind::Directory,
+                DirectoryMode::AllowAny,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Prepares a private `work` subdirectory inside `work_base`, clearing any stale contents or
+    /// inherited `S_ISGID` mode bits so staged nodes do not inherit `workdir` metadata.
+    fn prepare_work_dir(
+        current_task: &CurrentTask,
+        work_base: &ActiveEntry,
+    ) -> Result<ActiveEntry, Errno> {
+        match work_base.component_lookup(current_task, "work".into()) {
+            Ok(existing) => {
+                if !existing.entry().node.is_dir() {
+                    log_warn!("overlayfs: workdir/work is not a directory");
+                    return error!(EINVAL);
+                }
+                Self::remove_dir_all(current_task, work_base, "work".into(), existing)?;
+            }
+            Err(e) if e.code == ENOENT => {}
+            Err(e) => return Err(e),
+        }
+
+        let work = work_base.create_entry(current_task, "work".into(), |dir, mount, name| {
+            dir.create_node(current_task, mount, name, mode!(IFDIR, 0o000), DeviceId::NONE)
+        })?;
+        // Strip any inherited `S_ISGID`/mode bits so `work` stays `0o000` and does not alter
+        // staged children, then verify the mounter can still search and write `work` (e.g. holds
+        // `CAP_DAC_OVERRIDE` / SELinux `write` + `search`).
+        let init_result = (|| -> Result<(), Errno> {
+            if work.entry().node.fetch_and_refresh_info(current_task)?.mode != mode!(IFDIR, 0o000) {
+                work.entry().node.update_attributes(
+                    current_task,
+                    /* force = */ false,
+                    |node_info| {
+                        node_info.mode = mode!(IFDIR, 0o000);
+                        Ok(())
+                    },
+                )?;
+            }
+            work.entry().node.check_access(
+                current_task,
+                work.mount(),
+                PermissionFlags::WRITE | PermissionFlags::EXEC,
+                CheckAccessReason::InternalPermissionChecks,
+                work.entry(),
+            )
+        })();
+        if let Err(err) = init_result {
+            work_base
+                .entry()
+                .unlink(
+                    current_task,
+                    work_base.mount(),
+                    "work".into(),
+                    UnlinkKind::Directory,
+                    DirectoryMode::AllowAny,
+                )
+                .unwrap_or_else(|e| log_error!("Failed to cleanup work dir after an error: {}", e));
+            return Err(err);
+        }
+        Ok(work)
+    }
 }
 
 struct OverlayFs {
@@ -1309,6 +1598,10 @@ struct OverlayFs {
 impl FileSystemOps for OverlayFs {
     fn fs_lockdep_type(&self) -> FsLockDepType {
         FsLockDepType::Recursive
+    }
+
+    fn stack_depth(&self) -> u32 {
+        self.stack.stack_depth()
     }
 
     fn statfs(&self, _fs: &FileSystem, current_task: &CurrentTask) -> Result<statfs, Errno> {
@@ -1323,6 +1616,10 @@ impl FileSystemOps for OverlayFs {
 
     fn name(&self) -> &'static FsStr {
         "overlay".into()
+    }
+
+    fn is_storage_backed(&self) -> bool {
+        self.stack.lower_fs.is_storage_backed() || self.stack.upper_fs.is_storage_backed()
     }
 
     fn rename(
@@ -1464,7 +1761,10 @@ mod test {
     use fxfs_testing::{Hooks, TestFixture, TestFixtureOptions};
     use starnix_core::fs::fuchsia::RemoteFs;
     use starnix_core::testing::spawn_kernel_and_run;
-    use starnix_core::vfs::{FdFlags, LookupContext, Namespace, NamespaceNode, WhatToMount};
+    use starnix_core::vfs::{
+        FdFlags, LookupContext, Namespace, NamespaceNode, WhatToMount, fileops_impl_noop_sync,
+        fileops_impl_unbounded_seek, fs_node_impl_dir_readonly,
+    };
     use starnix_uapi::mount_flags::MountpointFlags;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use storage_device::DeviceHolder;
@@ -1599,6 +1899,105 @@ mod test {
             assert_eq!(refreshed.mode, mode!(IFDIR, 0o755));
             assert_eq!(refreshed.uid, 42);
             assert_eq!(refreshed.gid, 84);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_overlay_stack_depth() {
+        spawn_kernel_and_run(async move |current_task| {
+            let kernel = current_task.kernel();
+            let base = TmpFs::new_fs(kernel);
+            assert_eq!(base.stack_depth(), 0);
+
+            let overlay1 = OverlayStack::wrap_fs_in_writable_layer(current_task, base)
+                .expect("wrap first layer");
+            assert_eq!(overlay1.stack_depth(), 1);
+
+            let overlay2 = OverlayStack::wrap_fs_in_writable_layer(current_task, overlay1)
+                .expect("wrap second layer");
+            assert_eq!(overlay2.stack_depth(), 2);
+
+            assert_eq!(
+                OverlayStack::wrap_fs_in_writable_layer(current_task, overlay2).err(),
+                Some(errno!(EINVAL))
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_read_dir_entries_loops_multiple_pages() {
+        struct PagedDirFile {
+            calls: Arc<AtomicUsize>,
+        }
+        impl FileOps for PagedDirFile {
+            fileops_impl_directory!();
+            fileops_impl_noop_sync!();
+            fileops_impl_unbounded_seek!();
+
+            fn readdir(
+                &self,
+                file: &FileObject,
+                _current_task: &CurrentTask,
+                sink: &mut dyn DirentSink,
+            ) -> Result<(), Errno> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                match sink.offset() {
+                    0 => emit_dotdot(file, sink),
+                    2 => sink.add(10, 3, DirectoryEntryType::REG, "a".into()),
+                    3 => sink.add(11, 4, DirectoryEntryType::REG, "b".into()),
+                    4 => sink.add(12, 5, DirectoryEntryType::REG, "c".into()),
+                    _ => Ok(()),
+                }
+            }
+        }
+
+        struct PagedDirNode {
+            calls: Arc<AtomicUsize>,
+        }
+        impl FsNodeOps for PagedDirNode {
+            fs_node_impl_dir_readonly!();
+
+            fn create_file_ops(
+                &self,
+                _node: &FsNode,
+                _current_task: &CurrentTask,
+                _flags: OpenFlags,
+            ) -> Result<Box<dyn FileOps>, Errno> {
+                Ok(Box::new(PagedDirFile { calls: self.calls.clone() }))
+            }
+
+            fn lookup(
+                &self,
+                _entry: &DirEntry,
+                _current_task: &CurrentTask,
+                _name: &FsStr,
+            ) -> Result<FsNodeHandle, Errno> {
+                error!(ENOENT)
+            }
+        }
+
+        spawn_kernel_and_run(async move |current_task| {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let fs = TmpFs::new_fs(current_task.kernel());
+            let node = fs.create_node(
+                fs.allocate_ino(),
+                PagedDirNode { calls: calls.clone() },
+                FsNodeInfo::new(mode!(IFDIR, 0o755), FsCred::root()),
+            );
+            let dir = ActiveEntry {
+                entry: DirEntry::new(node, None, "paged".into()),
+                mount: MountInfo::detached(),
+            };
+            let names: Vec<FsString> = dir
+                .read_dir_entries(current_task)
+                .expect("read_dir_entries")
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            assert_eq!(names, vec![FsString::from("a"), FsString::from("b"), FsString::from("c")]);
+            assert_eq!(calls.load(Ordering::SeqCst), 5);
         })
         .await;
     }

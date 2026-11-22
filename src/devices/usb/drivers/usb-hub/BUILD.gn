@@ -60,7 +60,6 @@ fuchsia_driver_component("usb-hub") {
     ":*",
     "//src/devices/usb:drivers",
   ]
-  info = "meta/usb-hub-info.json"
   component_name = "usb-hub"
   deps = [ ":usb-hub-driver" ]
 }

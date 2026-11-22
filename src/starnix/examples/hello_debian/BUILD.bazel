@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# This binary is used in the integration tests for both C++ and Rust examples.
+rustc_binary(
+    name = "hello_debian_verifier",
+    testonly = True,
+    srcs = ["hello_debian_verifier.rs"],
+    crate_root = "hello_debian_verifier.rs",
+    edition = "2024",
+    visibility = [
+        "//src/starnix/examples/hello_debian/asm:__pkg__",
+        "//src/starnix/examples/hello_debian/cpp:__pkg__",
+        "//src/starnix/examples/hello_debian/rust:__pkg__",
+    ],
+    deps = [
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)

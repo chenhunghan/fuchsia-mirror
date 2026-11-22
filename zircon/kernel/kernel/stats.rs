@@ -8,19 +8,21 @@ use core::mem::offset_of;
 use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use percpu_bindings as bindings;
 
-unsafe extern "C" {
-    fn cpp_cpu_stats_inc_reschedules();
-    fn cpp_cpu_stats_inc_context_switches();
-    fn cpp_cpu_stats_inc_preempts();
-    fn cpp_cpu_stats_inc_yields();
-    fn cpp_cpu_stats_inc_interrupts();
-    fn cpp_cpu_stats_inc_timer_ints();
-    fn cpp_cpu_stats_inc_timers();
-    fn cpp_cpu_stats_inc_perf_ints();
-    fn cpp_cpu_stats_inc_syscalls();
-    fn cpp_cpu_stats_inc_page_faults();
-    fn cpp_cpu_stats_inc_reschedule_ipis();
-    fn cpp_cpu_stats_inc_generic_ipis();
+/// Increments the per-CPU counter `$field` of the CPU the caller runs on when the counter is looked
+/// up (a caller that can migrate may update the previous CPU's counter) with a relaxed atomic add.
+macro_rules! cpu_stats_inc {
+    ($field:ident) => {{
+        let stats = crate::kernel::percpu::PerCpu::get_current().stats.get();
+        // SAFETY: `stats` points to the `CpuStats` of a CPU (the calling one, unless the caller
+        // migrated after `get_current`), which lives in a `'static` `PerCpu` and whose event
+        // counters are only ever updated through atomic operations, so the add is sound on any
+        // CPU's counters. `&raw mut` projects the field place without forming a reference to the
+        // whole struct. `Relaxed` suffices: the counters are statistics that nothing synchronizes
+        // against.
+        unsafe {
+            AtomicU64::from_ptr(&raw mut (*stats).$field).fetch_add(1, Ordering::Relaxed);
+        }
+    }};
 }
 
 /// Per-CPU kernel level statistics (`struct cpu_stats`).
@@ -367,95 +369,65 @@ zr::static_assert!(
 /// Increment the reschedule counter for the current CPU.
 #[inline(always)]
 pub fn inc_reschedules() {
-    // SAFETY: cpp_cpu_stats_inc_reschedules increments the per-CPU reschedule counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_reschedules() }
+    cpu_stats_inc!(reschedules);
 }
 
 /// Increment the context switch counter for the current CPU.
 #[inline(always)]
 pub fn inc_context_switches() {
-    // SAFETY: cpp_cpu_stats_inc_context_switches increments the per-CPU context switch counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_context_switches() }
+    cpu_stats_inc!(context_switches);
 }
 
 /// Increment the preempt counter for the current CPU.
 #[inline(always)]
 pub fn inc_preempts() {
-    // SAFETY: cpp_cpu_stats_inc_preempts increments the per-CPU preempt counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_preempts() }
+    cpu_stats_inc!(preempts);
 }
 
 /// Increment the yield counter for the current CPU.
 #[inline(always)]
 pub fn inc_yields() {
-    // SAFETY: cpp_cpu_stats_inc_yields increments the per-CPU yield counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_yields() }
+    cpu_stats_inc!(yields);
 }
 
 /// Increment the interrupt counter for the current CPU.
 #[inline(always)]
 pub fn inc_interrupts() {
-    // SAFETY: cpp_cpu_stats_inc_interrupts increments the per-CPU interrupt counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_interrupts() }
+    cpu_stats_inc!(interrupts);
 }
 
 /// Increment the timer interrupt counter for the current CPU.
 #[inline(always)]
 pub fn inc_timer_ints() {
-    // SAFETY: cpp_cpu_stats_inc_timer_ints increments the per-CPU timer interrupt counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_timer_ints() }
+    cpu_stats_inc!(timer_ints);
 }
 
 /// Increment the timer callback counter for the current CPU.
 #[inline(always)]
 pub fn inc_timers() {
-    // SAFETY: cpp_cpu_stats_inc_timers increments the per-CPU timer callback counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_timers() }
-}
-
-/// Increment the performance monitor interrupt counter for the current CPU.
-#[inline(always)]
-pub fn inc_perf_ints() {
-    // SAFETY: cpp_cpu_stats_inc_perf_ints increments the per-CPU performance interrupt counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_perf_ints() }
+    cpu_stats_inc!(timers);
 }
 
 /// Increment the syscall counter for the current CPU.
 #[inline(always)]
 pub fn inc_syscalls() {
-    // SAFETY: cpp_cpu_stats_inc_syscalls increments the per-CPU syscall counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_syscalls() }
+    cpu_stats_inc!(syscalls);
 }
 
 /// Increment the page fault counter for the current CPU.
 #[inline(always)]
 pub fn inc_page_faults() {
-    // SAFETY: cpp_cpu_stats_inc_page_faults increments the per-CPU page fault counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_page_faults() }
+    cpu_stats_inc!(page_faults);
 }
 
 /// Increment the reschedule IPI counter for the current CPU.
 #[inline(always)]
 pub fn inc_reschedule_ipis() {
-    // SAFETY: cpp_cpu_stats_inc_reschedule_ipis increments the per-CPU reschedule IPI counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_reschedule_ipis() }
+    cpu_stats_inc!(reschedule_ipis);
 }
 
 /// Increment the generic IPI counter for the current CPU.
 #[inline(always)]
 pub fn inc_generic_ipis() {
-    // SAFETY: cpp_cpu_stats_inc_generic_ipis increments the per-CPU generic IPI counter
-    // for the currently executing CPU and is safe to call from any context.
-    unsafe { cpp_cpu_stats_inc_generic_ipis() }
+    cpu_stats_inc!(generic_ipis);
 }

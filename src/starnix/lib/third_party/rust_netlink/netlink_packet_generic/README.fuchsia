@@ -1,11 +1,11 @@
 Name: netlink-packet-generic
 URL: https://github.com/rust-netlink/netlink-packet-generic
-Revision: 865fe7cab27c9f1855e7cc577e03858f96dab344
 Version: 0.3.3
+Revision: 865fe7cab27c9f1855e7cc577e03858f96dab344
 Security Critical: yes
 
+License: MIT
 License File: LICENSE-MIT
-  License: MIT
 
 Description:
   This crate provides for serialization/deserialization of GENERIC NETLINK

@@ -80,6 +80,7 @@ def _features_list_transition_impl(settings, attr):
     new_features = normalize_features_list(cur_features + attr.feature_names)
     return {"//command_line_option:features": new_features}
 
+# Attributes required by `features_list_transition`.
 FEATURES_LIST_TRANSITION_ATTRS = {
     # NOTE: The "features" attribute name is built-in and reserved by Bazel.
     "feature_names": attr.string_list(
@@ -105,6 +106,7 @@ TRANSITIVE_FEATURES_ATTRS = {
 }
 
 features_list_transition = transition(
+    # Rules using this transition must include `FEATURES_LIST_TRANSITION_ATTRS`.
     implementation = _features_list_transition_impl,
     inputs = ["//command_line_option:features"],
     outputs = ["//command_line_option:features"],
@@ -143,8 +145,10 @@ CC_KNOWN_PROVIDERS = [
 def cc_apply_transitive_features_impl(ctx):
     """Implementation of cc_apply_transitive_features.
 
+    Calling rules must include `CC_APPLY_TRANSITIVE_FEATURES_ATTRS` in `attrs`.
+
     Args:
-      ctx: Rule context.
+      ctx: Rule context (with `CC_APPLY_TRANSITIVE_FEATURES_ATTRS`).
 
     Returns:
       List of providers forwarding target outputs and providers.
@@ -173,6 +177,8 @@ def cc_apply_transitive_features_impl(ctx):
         fail("Could not find any providers in: {}".format(actual.label))
     return result
 
+# Attributes required by `cc_apply_transitive_features_impl()` and
+# `cc_shared_library_apply_transitive_features_impl()`.
 CC_APPLY_TRANSITIVE_FEATURES_ATTRS = {
     "actual": attr.label(
         mandatory = True,
@@ -195,8 +201,10 @@ cc_apply_transitive_features = rule(
 def cc_shared_library_apply_transitive_features_impl(ctx):
     """Implementation of cc_shared_library_apply_transitive_features.
 
+    Calling rules must include `CC_APPLY_TRANSITIVE_FEATURES_ATTRS` in `attrs`.
+
     Args:
-      ctx: Rule context.
+      ctx: Rule context (with `CC_APPLY_TRANSITIVE_FEATURES_ATTRS`).
 
     Returns:
       List of providers forwarding shared library outputs and providers.

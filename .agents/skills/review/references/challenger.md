@@ -15,7 +15,7 @@ Your prompt gives you:
   `git`).
 - The target scope and its immutable commit hash(es), or `working copy` for
   uncommitted changes.
-- The effort level: `standard` (default) or `deep`.
+- The effort level: `standard` (default), `deep`, or `simplify`.
 - An intent summary of the change.
 - A JSON file of deduplicated Round-1 candidate findings
   (`draft_findings.json`), where each entry has a `finding_index`.
@@ -31,9 +31,10 @@ Read the actual diff and post-change files for the locations referenced in
 - `git diff <base>..<rev> -- <file>` (or `git diff HEAD -- <file>` for the
   working copy)
 
-In `deep` mode, also cross-check callers, callees, lock-ordering and lifetime
-invariants, and FIDL/IPC/syscall wire contracts across neighboring files before
-accepting or rejecting each finding.
+In `deep` and `simplify` modes, also cross-check callers, callees,
+lock-ordering and lifetime invariants, FIDL/IPC/syscall wire contracts, and any
+cited replacement utilities or types across neighboring files before accepting
+or rejecting each finding.
 
 If a file is missing on disk or you are reviewing a non-checked-out commit, read
 it via `git show <rev>:<path>` (or `jj file show -r <rev> <path>`).
@@ -86,6 +87,20 @@ codebase and diff:
     - Faults on our own side stay in scope: our bugs, our process or driver
       restarting while the peer keeps running, and resets that take down
       both sides.
+1.  **Unverified or counterproductive simplification (`code-simplification/*`)**:
+    When a candidate finding proposes deleting machinery, reusing an existing
+    helper, changing data-structure/layer altitude, simplifying control flow,
+    or trimming test assertions:
+    - **Reject** (`confidence` 0-50) if a cited replacement helper/crate does
+      not exist in the checkout, violates GN/Bazel visibility or toolchain/SDK
+      layering, or has subtly different behavior/error semantics; if code
+      proposed for deletion is required by another caller, trait, published SDK
+      FIDL/syscall ABI, or external trust boundary; or if the finding targets
+      verbatim-moved or untouched legacy code.
+    - **Reject** (`confidence` 51-79) if the proposed rewrite is subjective
+      naming/style preference, compresses clear multi-step code into dense
+      one-liners ("code golf"), or demands sweeping edits across unrelated
+      callers outside the change's blast radius.
 
 ## Step 3: Score confidence (0-100) and assign verdict
 
@@ -102,13 +117,23 @@ joined onto the candidate finding) to every candidate finding:
   hypothetical future changes, redundant with a stronger finding, or minor
   stylistic preference below the bar for interrupting a developer ->
   `verdict: "reject"`.
-- **80-100 (Verified concrete defect or clear rule breach)**: Confirmed bug, UB,
-  panic, data race, lifetime hazard, missing test coverage on new public logic,
-  or unambiguous violation of the cited Fuchsia rule introduced by this change
-  (or a concrete pre-existing bug moved or newly exposed by it) ->
-  `verdict: "accept"`.
-  - If the defect predates this change and is moved or newly exposed by it, set
-    `"pre_existing": true` and `"adjusted_severity": "suggestion"`.
+- **80-100 (Verified concrete defect, clear rule breach, or proven
+  simplification)**: Confirmed bug, UB, panic, data race, lifetime hazard,
+  missing test coverage on new public logic, unambiguous violation of the cited
+  Fuchsia rule introduced by this change (or a concrete pre-existing bug moved
+  or newly exposed by it), or an evidence-backed `code-simplification/*`
+  finding on newly added/modified code that (a) names a verified in-tree or
+  approved-crate helper with compatible layering, (b) proves across callers
+  that new indirection/config/defensive code has `<= 1` use or is unreachable,
+  (c) shows a localized data-structure, layer, or control-flow simplification
+  that eliminates redundant state/branching without changing behavior or ABI,
+  or (d) identifies unfocused/mock-echoing/duplicate test assertions ("testing
+  theatre") -> `verdict: "accept"`.
+  - For `code-simplification/*` findings, always set `"pre_existing": false`
+    and `"adjusted_severity": "suggestion"`.
+  - If a non-simplification defect predates this change and is moved or newly
+    exposed by it, set `"pre_existing": true` and
+    `"adjusted_severity": "suggestion"`.
   - Otherwise (when the defect is introduced by this change), set
     `"pre_existing": false`. If a verified finding is labeled `blocking` for an
     optional improvement rather than a correctness/security/invariant bug, set

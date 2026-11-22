@@ -5,38 +5,30 @@
 #ifndef SRC_DEVICES_BOARD_LIB_ACPI_PCI_INTERNAL_H_
 #define SRC_DEVICES_BOARD_LIB_ACPI_PCI_INTERNAL_H_
 
-#include <fuchsia/hardware/pciroot/cpp/banjo.h>
+#include <fidl/fuchsia.hardware.pci.root/cpp/driver/wire.h>
+#include <fidl/fuchsia.hardware.pci.root/cpp/wire.h>
+#include <fidl/fuchsia.hardware.pci/cpp/wire.h>
+#include <lib/async/dispatcher.h>
 #include <lib/ddk/device.h>
-#include <lib/ddk/driver.h>
-#include <lib/pci/pciroot.h>
+#include <lib/driver/outgoing/cpp/outgoing_directory.h>
+#include <lib/fdf/dispatcher.h>
+#include <lib/zx/interrupt.h>
+#include <lib/zx/iommu.h>
 #include <lib/zx/resource.h>
-#include <stdint.h>
-#include <zircon/compiler.h>
-#include <zircon/errors.h>
+#include <lib/zx/vmo.h>
 
+#include <cstdint>
+#include <memory>
+#include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include <acpica/acpi.h>
 #include <acpica/actypes.h>
 #include <ddktl/device.h>
 
 #include "src/devices/board/lib/acpi/acpi.h"
-#include "src/devices/board/lib/acpi/pci.h"
-
-__BEGIN_CDECLS
-// It would be nice to use the hwreg library here, but these structs should be kept
-// simple so that it can be passed across process boundaries.
-#define MB(n) (1024UL * 1024UL * (n))
-#define PCI_BUS_MAX 255
-
-// Base Address Allocation Structure, defined in PCI firmware spec v3.2 chapter 4.1.2
-struct pci_ecam_baas {
-  uint64_t base_address;
-  uint16_t segment_group;
-  uint8_t start_bus_num;
-  uint8_t end_bus_num;
-  uint32_t reserved0;
-};
+#include "src/devices/board/lib/acpi/pci-root-windows.h"
 
 // A structure derived from ACPI _PRTs that represents a zx::interrupt to create and
 // provide to the PCI bus driver.
@@ -45,70 +37,90 @@ struct acpi_legacy_irq {
   uint32_t options;  // Configuration for zx_interrupt_create
 };
 
-zx_status_t pci_report_current_resources(acpi::Acpi* acpi, zx_handle_t mmio_resource_handle);
+namespace acpi {
 
-class AcpiPciroot;
-using AcpiPcirootType = ddk::Device<AcpiPciroot, ddk::GetProtocolable>;
-class AcpiPciroot : ddk::PcirootProtocol<AcpiPciroot>, public AcpiPcirootType, public PcirootBase {
+// Everything a PCI root learns about itself from ACPI. The handles it holds are owned here and
+// stay valid for the life of the root.
+struct PciRootInfo {
+  char name[ACPI_NAMESEG_SIZE + 1] = {};
+  zx::iommu iommu;
+  uint8_t start_bus_num = 0;
+  uint8_t end_bus_num = 0;
+  uint16_t segment_group = 0;
+  // Present only when the MCFG table has an entry for this root's segment group.
+  std::optional<zx::vmo> ecam;
+  // The interrupts for each legacy vector found in the _PRTs, and the resources they were
+  // created from.
+  std::unordered_map<uint32_t, zx::interrupt> legacy_irqs;
+  std::vector<zx::resource> irq_resources;
+  std::vector<fuchsia_hardware_pci_root::wire::IrqRoutingEntry> routing;
+  std::vector<fuchsia_hardware_pci::wire::Bdf> acpi_bdfs;
+  // The address space this root produces, and the allocations made from it.
+  std::unique_ptr<acpi::PciRootWindows> windows;
+  zx::unowned_resource msi_resource;
+};
+
+}  // namespace acpi
+
+// Serves fuchsia.hardware.pci.root for a single ACPI PCI root. Config is served only on segment 0
+// when the root has no ECAM, since legacy PIO cannot address other segments.
+class AcpiPciRoot;
+using AcpiPciRootType = ddk::Device<AcpiPciRoot>;
+class AcpiPciRoot : public AcpiPciRootType,
+                    public fidl::WireServer<fuchsia_hardware_pci_root::Root>,
+                    public fdf::WireServer<fuchsia_hardware_pci_root::Config> {
  public:
-  struct Context {
-    char name[ACPI_NAMESEG_SIZE + 1];
-    ACPI_HANDLE acpi_object;
-    acpi::UniquePtr<ACPI_DEVICE_INFO> acpi_device_info;
-    zx_device_t* platform_bus;
-    std::unordered_map<uint32_t, acpi_legacy_irq> irqs;
-    std::vector<zx::resource> irq_resources;
-    std::vector<pci_irq_routing_entry_t> routing;
-    struct pci_platform_info info;
-    iommu::IommuManagerInterface* iommu;
-  };
+  // Publishes the root under |parent|, serving its protocols on |dispatcher|.
+  static zx_status_t Create(acpi::PciRootInfo info, zx_device_t* parent,
+                            async_dispatcher_t* dispatcher);
 
-  static zx_status_t Create(PciRootHost* root_host, AcpiPciroot::Context ctx, zx_device_t* parent,
-                            const char* name, std::vector<pci_bdf_t> acpi_bdfs);
-  using PcirootBase::PcirootAllocateMsi;
-  using PcirootBase::PcirootDriverShouldProxyConfig;
-  using PcirootBase::PcirootGetAddressSpace;
-  using PcirootBase::PcirootGetMsiHandle;
-  zx_status_t PcirootGetBti(uint32_t bdf, uint32_t index, zx::bti* bti);
-  zx_status_t PcirootGetPciPlatformInfo(pci_platform_info_t* info);
-  zx_status_t PcirootReadConfig8(const pci_bdf_t* address, uint16_t offset, uint8_t* value) final;
-  zx_status_t PcirootReadConfig16(const pci_bdf_t* address, uint16_t offset, uint16_t* value) final;
-  zx_status_t PcirootReadConfig32(const pci_bdf_t* address, uint16_t offset, uint32_t* value) final;
-  zx_status_t PcirootWriteConfig8(const pci_bdf_t* address, uint16_t offset, uint8_t value) final;
-  zx_status_t PcirootWriteConfig16(const pci_bdf_t* address, uint16_t offset, uint16_t value) final;
-  zx_status_t PcirootWriteConfig32(const pci_bdf_t* address, uint16_t offset, uint32_t value) final;
+  // fuchsia.hardware.pci.root/Root
+  void GetBti(GetBtiRequestView request, GetBtiCompleter::Sync& completer) override;
+  void GetPlatformInfo(GetPlatformInfoCompleter::Sync& completer) override;
+  void GetCam(GetCamCompleter::Sync& completer) override;
+  void GetLegacyInterrupt(GetLegacyInterruptRequestView request,
+                          GetLegacyInterruptCompleter::Sync& completer) override;
+  void GetAddressSpace(GetAddressSpaceRequestView request,
+                       GetAddressSpaceCompleter::Sync& completer) override;
+  void AllocateMsi(AllocateMsiRequestView request, AllocateMsiCompleter::Sync& completer) override;
+  void GetMsiHandle(GetMsiHandleRequestView request,
+                    GetMsiHandleCompleter::Sync& completer) override;
+
+  // fuchsia.hardware.pci.root/Config
+  void Read8(Read8RequestView request, fdf::Arena& arena, Read8Completer::Sync& completer) override;
+  void Read16(Read16RequestView request, fdf::Arena& arena,
+              Read16Completer::Sync& completer) override;
+  void Read32(Read32RequestView request, fdf::Arena& arena,
+              Read32Completer::Sync& completer) override;
+  void Write8(Write8RequestView request, fdf::Arena& arena,
+              Write8Completer::Sync& completer) override;
+  void Write16(Write16RequestView request, fdf::Arena& arena,
+               Write16Completer::Sync& completer) override;
+  void Write32(Write32RequestView request, fdf::Arena& arena,
+               Write32Completer::Sync& completer) override;
 
   void DdkRelease() { delete this; }
-  zx_status_t DdkGetProtocol(uint32_t proto_id, void* out) {
-    if (proto_id != ZX_PROTOCOL_PCIROOT) {
-      return ZX_ERR_NOT_SUPPORTED;
-    }
-
-    auto* proto = static_cast<ddk::AnyProtocol*>(out);
-    proto->ops = &pciroot_protocol_ops_;
-    proto->ctx = this;
-    return ZX_OK;
-  }
 
  private:
-  Context context_;
-  std::vector<pci_bdf_t> acpi_bdfs_;
-  AcpiPciroot(PciRootHost* root_host, AcpiPciroot::Context ctx, zx_device_t* parent,
-              const char* name, std::vector<pci_bdf_t> acpi_bdfs)
-      : AcpiPcirootType(parent),
-        PcirootBase(root_host),
-        context_(std::move(ctx)),
-        acpi_bdfs_(std::move(acpi_bdfs)) {}
-  virtual ~AcpiPciroot() = default;
+  AcpiPciRoot(acpi::PciRootInfo info, zx_device_t* parent, fdf_dispatcher_t* dispatcher)
+      : AcpiPciRootType(parent), info_(std::move(info)), outgoing_(dispatcher) {}
+
+  bool serves_config() const { return !info_.ecam.has_value() && info_.segment_group == 0; }
+
+  acpi::PciRootInfo info_;
+  fidl::ServerBindingGroup<fuchsia_hardware_pci_root::Root> root_bindings_;
+  fdf::ServerBindingGroup<fuchsia_hardware_pci_root::Config> config_bindings_;
+  // Declared last so it is torn down first, as it dispatches connections to the bindings above.
+  fdf::OutgoingDirectory outgoing_;
 };
 
 namespace acpi {
 
-ACPI_STATUS GetPciRootIrqRouting(acpi::Acpi* acpi, ACPI_HANDLE root_obj,
-                                 AcpiPciroot::Context* context);
+// Reads the root's _PRTs into |info|'s routing table, and the configuration of each legacy
+// interrupt vector they reference into |irqs|.
+ACPI_STATUS GetPciRootIrqRouting(acpi::Acpi* acpi, ACPI_HANDLE root_obj, acpi::PciRootInfo* info,
+                                 std::unordered_map<uint32_t, acpi_legacy_irq>* irqs);
 
 }  // namespace acpi
-
-__END_CDECLS
 
 #endif  // SRC_DEVICES_BOARD_LIB_ACPI_PCI_INTERNAL_H_

@@ -176,7 +176,7 @@ void UsbXhci::SetDeviceInformation(uint8_t slot, uint8_t port, const std::option
   state.pending_operations.push_back(std::move(context));
 
   // slot must exist in device_state_ so it's reported as connected.
-  device_state_[slot - 1] = fbl::MakeRefCounted<DeviceState>(slot - 1, this);
+  SetDeviceState(slot - 1, fbl::MakeRefCounted<DeviceState>(slot - 1, this));
 }
 
 std::optional<usb_speed_t> UsbXhci::GetDeviceSpeed(uint8_t slot) {
@@ -200,6 +200,8 @@ zx_status_t UsbXhci::DeviceOnline(uint32_t slot, uint16_t port, usb_speed_t spee
   state.pending_operations.push_back(std::move(context));
   return ZX_OK;
 }
+
+bool UsbXhci::Running() const { return running_; }
 
 void UsbXhci::Shutdown(zx_status_t status) {
   auto& state = GetTestHarness<EnumerationTests>()->state();
@@ -331,7 +333,8 @@ zx::result<> UsbXhci::Init(std::unique_ptr<dma_buffer::BufferFactory> buffer_fac
   interrupters_ = fbl::MakeArray<Interrupter>(1);
   interrupters_[0].Init(0, 0, nullptr, {}, 0, {}, this, {}, nullptr);
   interrupters_[0].Start(RuntimeRegisterOffset::Get().FromValue(0), kInterruptorMmio.View(0));
-  device_state_ = fbl::MakeArray<fbl::RefPtr<DeviceState>>(32);
+  max_slots_ = 32;
+  InitDeviceState(fbl::MakeArray<fbl::RefPtr<DeviceState>>(max_slots_));
   return zx::ok();
 }
 

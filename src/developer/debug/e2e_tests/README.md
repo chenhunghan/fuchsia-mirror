@@ -1,4 +1,4 @@
-<!--* freshness: { reviewed: '2026-10-12' } *-->
+<!--* freshness: { reviewed: '2026-11-06' } *-->
 
 # ZXDB E2E Tests (`e2e_tests`)
 
@@ -100,9 +100,13 @@ display information.
 
 Public headers and test directories expose these harnesses:
 
+- `zxdb::E2eTest`: Base GoogleTest fixture (`e2e_test.h`, `e2e_test.cc`) that
+  configures a `zxdb` `Session` and `MockConsole`, and connects to `debug_agent`
+  in `SetUp`.
 - `zxdb::ScriptTest`: End-to-end test harness (`script_test.h`,
-  `script_test.cc`) that replays `.script` files against a live `zxdb` `Console`
-  and `Session`.
+  `script_test.cc`) that reads `.script` header directives before
+  `E2eTest::SetUp` connects, and replays `.script` files against a live `zxdb`
+  `Console` and `Session`.
 - `zxdb::FfxDebugAgentBridge`: Manages an isolated `ffx` environment
   (`FFXIsolate`) and bridges the `debug_agent` Unix socket for E2E tests
   (`ffx_debug_agent_bridge.h`).

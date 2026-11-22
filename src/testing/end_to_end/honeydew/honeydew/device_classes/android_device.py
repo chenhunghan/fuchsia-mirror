@@ -39,6 +39,7 @@ from honeydew.affordances.ui.user_input import types as ui_types
 from honeydew.affordances.ui_navigation import (
     ui_navigation as ui_navigation_affordance,
 )
+from honeydew.affordances.usb import errors as usb_errors
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.adb import adb as adb_transport
 from honeydew.transports.adb import errors as adb_errors
@@ -54,6 +55,7 @@ _DEFAULT_TCP_ADB_SERIAL: str = (
     f"{_DEFAULT_TCP_ADB_HOST}:{_DEFAULT_TCP_ADB_PORT}"
 )
 _PONTIS_STATUS_TIMEOUT_SECS: float = 5.0
+_SCREEN_SIZE_ADB_TIMEOUT_SECS: float = 30.0
 
 _WAIT_FOR_DISCONNECT_TIMEOUT_SECS: float = 10.0
 _BOOT_SETUP_CMD_TIMEOUT_SECS: float = 10.0
@@ -172,6 +174,7 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
             (config or {}).get("screen_size")
         )
         self._screen_size_cache: ui_types.Size | None = None
+        self._initializing_adb: bool = False
         idle_config = (
             (config or {}).get("affordances", {}).get("android_idle", {})
         )
@@ -416,6 +419,16 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
             )
         return adb_serial
 
+    def _adb_attempts(self) -> int:
+        """Returns the configured maximum number of ADB command attempts."""
+        if self._config:
+            return int(
+                self._config.get("transports", {})
+                .get("adb", {})
+                .get("attempts", adb_transport._DEFAULT_RUN_ATTEMPTS)
+            )
+        return adb_transport._DEFAULT_RUN_ATTEMPTS
+
     @properties.Transport
     def adb(self) -> adb_transport.Adb:
         """Returns the ADB transport object configured to use su_root methods.
@@ -436,7 +449,7 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
         vendor_keys_path = None
         enabled = True
         output_dir: Path | str | None = None
-        attempts = adb_transport._DEFAULT_RUN_ATTEMPTS
+        attempts = self._adb_attempts()
         adb_config: dict[str, Any] = {}
 
         if self._config:
@@ -445,9 +458,6 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
             vendor_keys_path = adb_config.get("vendor_keys_path")
             enabled = adb_config.get("enabled", True)
             output_dir = adb_config.get("output_dir")
-            attempts = adb_config.get(
-                "attempts", adb_transport._DEFAULT_RUN_ATTEMPTS
-            )
 
         if not output_dir and self._ffx_config_data.logs_dir:
             ffx_logs_path = Path(self._ffx_config_data.logs_dir)
@@ -479,15 +489,26 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
         )
         adb_serial: str = self._resolve_adb_serial(use_adb_usb=use_adb_usb)
 
-        adb_obj: adb_transport.Adb = adb_transport.Adb(
-            device_name=self.device_name,
-            serial_number=adb_serial,
-            run_isolated_server=run_isolated_server,
-            output_dir=output_dir,
-            vendor_keys_path=vendor_keys_path,
-            ffx_transport=self.ffx,
-            attempts=attempts,
-        )
+        # `AndroidDevice.adb` is a `cached_property` that only caches `"adb"` in
+        # `self.__dict__` after this method returns. If `Adb.__init__()` triggers
+        # `_recover_adb_server()` -> `self._usb.after_connect()` ->
+        # `self.health_check()` -> `self._check_connections()`, accessing
+        # `self.adb` inside `_check_connections()` would re-enter this property
+        # and construct a second `Adb` instance recursively.
+        self._initializing_adb = True
+        try:
+            adb_obj: adb_transport.Adb = adb_transport.Adb(
+                device_name=self.device_name,
+                serial_number=adb_serial,
+                run_isolated_server=run_isolated_server,
+                output_dir=output_dir,
+                vendor_keys_path=vendor_keys_path,
+                ffx_transport=self.ffx,
+                attempts=attempts,
+                usb=self.usb,
+            )
+        finally:
+            self._initializing_adb = False
         # TODO(b/564946370): Remove temporary workaround once 'adb root' is
         # stable on USB connections.
         adb_obj.root = adb_obj.su_root  # type: ignore[method-assign]
@@ -500,33 +521,62 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
         self.register_for_on_device_close(adb_obj.close)
         return adb_obj
 
-    def _check_connections(self) -> None:
+    def _check_connections(self, timeout: int) -> None:
         """Checks health of all device transports including ADB."""
-        super()._check_connections()
+        super()._check_connections(timeout=timeout)
+
+        # Skip `self.adb.check_connection()` when:
+        # 1. `Adb.__init__()` is still running (`self._initializing_adb`), to
+        #    avoid re-entering the `self.adb` cached_property if `Adb.__init__()`
+        #    triggers `_recover_adb_server()` -> `self._usb.after_connect()` ->
+        #    `self.health_check()`. Once `Adb.__init__()` finishes, it has
+        #    already run `check_connection()`.
+        # 2. `Adb._recover_adb_server()` is currently running
+        #    (`self.adb._is_recovering`), since `_recover_adb_server()` is
+        #    invoked from inside `Adb.run()`'s retry loop (which may itself have
+        #    been called by an outer `health_check()` -> `adb.check_connection()`)
+        #    and `Adb.run()` will immediately retry the ADB command once
+        #    `_recover_adb_server()` returns. This still allows `health_check()`
+        #    to re-verify the `ffx` and `fc` legs above after the composite USB
+        #    reset without running a redundant nested `adb.check_connection()`.
+        if self._initializing_adb or (
+            "adb" in self.__dict__ and self.adb._is_recovering
+        ):
+            return
 
         try:
             with self._health_check_leg("adb"):
-                self.adb.check_connection()
+                self.adb.check_connection(timeout=timeout)
         except errors.NotEnabledError:
             _LOGGER.info(
                 "ADB is not enabled on %s, so skipping the ADB connection check.",
                 self.device_name,
             )
 
-    def wait_for_offline(self) -> None:
+    def wait_for_offline(self, timeout: float | None = None) -> None:
         """Wait for Android ADB and Fuchsia device to go offline.
+
+        Args:
+            timeout: Maximum time in seconds to wait for the device to go
+                offline. If None, uses default timeouts.
 
         Raises:
             errors.FuchsiaDeviceError: If Fuchsia device is not offline.
         """
+        start_time: float = time.monotonic()
         try:
             adb = self.adb
             _LOGGER.info(
                 "Waiting for ADB to disconnect on %s...", self.device_name
             )
+            adb_timeout: float = (
+                _WAIT_FOR_DISCONNECT_TIMEOUT_SECS
+                if timeout is None
+                else min(timeout, _WAIT_FOR_DISCONNECT_TIMEOUT_SECS)
+            )
             adb.run(
                 ["wait-for-disconnect"],
-                timeout=_WAIT_FOR_DISCONNECT_TIMEOUT_SECS,
+                timeout=adb_timeout,
                 attempts=1,
             )
         except (errors.NotSupportedError, errors.NotEnabledError):
@@ -543,7 +593,14 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
                 self.device_name,
                 err,
             )
-        super().wait_for_offline()
+        remaining_timeout: float | None = None
+        if timeout is not None:
+            remaining_timeout = timeout - (time.monotonic() - start_time)
+            if remaining_timeout <= 0:
+                raise errors.FuchsiaDeviceError(
+                    f"'{self.device_name}' failed to go offline within {timeout}s."
+                )
+        super().wait_for_offline(timeout=remaining_timeout)
 
     async def wait_for_online(
         self,
@@ -601,7 +658,9 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
                 f"{self.device_name} to complete boot (ADB connection)."
             )
         try:
-            adb.check_connection(timeout=remaining_timeout)
+            adb.check_connection(
+                timeout=remaining_timeout / self._adb_attempts()
+            )
         except adb_errors.AdbError as err:
             raise errors.FuchsiaDeviceError(
                 f"Failed waiting for ADB connection on {self.device_name} "
@@ -674,6 +733,14 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
                 "ADB is not enabled or supported on %s, so skipping ADB on_device_boot.",
                 self.device_name,
             )
+        except errors.TransportConnectionError:
+            try:
+                self.usb.get_diagnostic_info()
+            except errors.NotSupportedError:
+                pass
+            except usb_errors.UsbError as usb_err:
+                _LOGGER.warning("%s", usb_err)
+            raise
 
         await super().on_device_boot()
         self._screen_size_cache = None
@@ -1049,7 +1116,10 @@ class AndroidDevice(fuchsia_device.FuchsiaDevice):
             return self._screen_size_cache
 
         try:
-            output = self.adb.run(["shell", "wm", "size"])
+            output = self.adb.run(
+                ["shell", "wm", "size"],
+                timeout=_SCREEN_SIZE_ADB_TIMEOUT_SECS,
+            )
             override_match = re.search(r"Override size:\s*(\d+)x(\d+)", output)
             physical_match = re.search(r"Physical size:\s*(\d+)x(\d+)", output)
             match = override_match or physical_match

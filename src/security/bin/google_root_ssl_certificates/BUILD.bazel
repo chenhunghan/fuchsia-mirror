@@ -15,7 +15,6 @@ package(default_applicable_licenses = ["//:license"])
 
 fx_package(
     name = "google_root_ssl_certificates",
-    package_name = "google_root_ssl_certificates",
     resources = [":google_root_ssl_certificates_pem"],
     visibility = [
         "//build/bazel/rules/tests:__subpackages__",

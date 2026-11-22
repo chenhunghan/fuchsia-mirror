@@ -502,6 +502,8 @@ class FastbootTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.ffx_obj.notify_intentional_disconnect.assert_called_once()
+        power_switch.power_off.assert_called_once_with()
+        power_switch.power_on.assert_called_once_with()
         mock_time.assert_called()
         mock_sleep.assert_called()
 

@@ -30,22 +30,22 @@ by `fx set [....] --with //src/lib/diagnostics/inspect/rust:tests`.
 
 ## Benchmarking
 
-Benchmarks for `fuchsia_inspect` are available in the `rust_inspect_benchmarks`
-package.
+Benchmarks for `fuchsia_inspect` are available in the `rust-inspect-benchmarks`
+package (`//src/lib/diagnostics/inspect/rust:benchmarks`).
 
-One way to run the benchmarks is with the following commands:
+Include the benchmarks in your build (for example,
+`fx set terminal.x64 --with //src/lib/diagnostics/inspect/rust:benchmarks`),
+then run any of the host-driven performance test targets:
 
 ```
-$ fx test --e2e rust_inspect_benchmarks_test
-$ fx test --e2e rust_inspect_reader_benchmarks_test
+$ fx test --e2e --outdir="out/test_out" --timestamp-artifacts rust-inspect-reader-benchmark
+$ fx test --e2e --outdir="out/test_out" --timestamp-artifacts rust-inspect-snapshot-filter-benchmark
+$ fx test --e2e --outdir="out/test_out" --timestamp-artifacts rust-inspect-writer-benchmark
 ```
 
-You'll need to include `//src/tests/end_to_end/perf:test` in your
-build, by including it in your build set. You also need to build as
-`workstation_eng.x64` or `terminal.x64`. For example,
-`fx set workstation_eng.x64 --with //src/tests/end_to_end/perf:test`.
+To run a benchmark component in fast unit-test mode without collecting
+performance results:
 
-When adding a new benchmark, the test must be added to the appropriate Dart
-file, either `//src/tests/end_to_end/perf/test/rust_inspect_benchmarks_test.dart` or
-`//src/tests/end_to_end/perf/test/rust_inspect_reader_benchmarks_test.dart`, to be
-registered.
+```
+$ fx test fuchsia-pkg://fuchsia.com/rust-inspect-benchmarks#meta/writer.cm
+```

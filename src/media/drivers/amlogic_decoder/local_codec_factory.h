@@ -5,11 +5,13 @@
 #ifndef SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_LOCAL_CODEC_FACTORY_H_
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_LOCAL_CODEC_FACTORY_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <lib/closure-queue/closure_queue.h>
-#include <lib/fidl/cpp/binding.h>
+#include <lib/fit/function.h>
 
 #include <memory>
+#include <optional>
+#include <vector>
 
 #include <fbl/macros.h>
 
@@ -28,7 +30,7 @@ class DeviceCtx;
 //
 // Unlike a SW codec isolate's local CodecFactory, this HW codec's local
 // CodecFactory doesn't self-close after creating one codec.
-class LocalCodecFactory : public fuchsia::mediacodec::CodecFactory {
+class LocalCodecFactory : public fidl::Server<fuchsia_mediacodec::CodecFactory> {
  public:
   // Must run on the shared fidl sequence.
   //
@@ -36,7 +38,7 @@ class LocalCodecFactory : public fuchsia::mediacodec::CodecFactory {
   explicit LocalCodecFactory(DeviceCtx* device);
 
   // Must run on the shared fidl sequence.
-  ~LocalCodecFactory();
+  ~LocalCodecFactory() override;
 
   // This needs to be called before Bind(), not after.  The caller's
   // error_handler is called up to once, when/if the channel has an error.
@@ -65,27 +67,30 @@ class LocalCodecFactory : public fuchsia::mediacodec::CodecFactory {
   // CodecFactory interface
   //
 
-  void GetDetailedCodecDescriptions(GetDetailedCodecDescriptionsCallback callback) override;
+  void GetDetailedCodecDescriptions(
+      GetDetailedCodecDescriptionsCompleter::Sync& completer) override;
 
-  void CreateDecoder(
-      fuchsia::mediacodec::CreateDecoder_Params video_decoder_params,
-      ::fidl::InterfaceRequest<fuchsia::media::StreamProcessor> video_decoder) override;
+  void CreateDecoder(CreateDecoderRequest& request,
+                     CreateDecoderCompleter::Sync& completer) override;
 
-  void CreateEncoder(
-      fuchsia::mediacodec::CreateEncoder_Params encoder_params,
-      ::fidl::InterfaceRequest<fuchsia::media::StreamProcessor> encoder_request) override;
+  void CreateEncoder(CreateEncoderRequest& request,
+                     CreateEncoderCompleter::Sync& completer) override;
 
-  void AttachLifetimeTracking(zx::eventpair codec_end) override;
+  void AttachLifetimeTracking(AttachLifetimeTrackingRequest& request,
+                              AttachLifetimeTrackingCompleter::Sync& completer) override;
 
-  void handle_unknown_method(uint64_t ordinal, bool method_has_response) override;
+  void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_mediacodec::CodecFactory> metadata,
+                             fidl::UnknownMethodCompleter::Sync& completer) override;
 
  private:
   DeviceCtx* device_ = nullptr;
 
+  fit::closure error_handler_;
+
   // This binding doesn't channel-own this LocalCodecFactory.  The DeviceFidl
   // owns all the LocalCodecFactory(s).  The DeviceFidl will SetErrorHandler()
   // such that its ownership drops if the channel fails.
-  fidl::Binding<fuchsia::mediacodec::CodecFactory, LocalCodecFactory*> factory_binding_;
+  std::optional<fidl::ServerBinding<fuchsia_mediacodec::CodecFactory>> factory_binding_;
 
   bool is_error_handler_set_ = false;
 

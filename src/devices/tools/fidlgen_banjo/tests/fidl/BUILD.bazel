@@ -1,0 +1,568 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Depend on this target to have the IRs generated for all test FIDL libraries.
+filegroup(
+    name = "fidl",
+    testonly = True,
+    srcs = [
+        ":alias",
+        ":alignment",
+        ":api",
+        ":attributes",
+        ":binary",
+        ":bits",
+        ":buffer",
+        ":callback",
+        ":callback2",
+        ":constants",
+        ":empty",
+        ":enums",
+        ":example0",
+        ":example1",
+        ":example2",
+        ":example3",
+        ":example4",
+        ":example6",
+        ":example7",
+        ":example8",
+        ":example9",
+        ":fidlhandle",
+        ":handles",
+        ":interface",
+        ":order",
+        ":order1",
+        ":order2",
+        ":order3",
+        ":order4",
+        ":order5",
+        ":order6",
+        ":order7",
+        ":passcallback",
+        ":point",
+        ":preservenames",
+        ":protocolarray",
+        ":protocolbase",
+        ":protocolhandle",
+        ":protocolothertypes",
+        ":protocolprimitive",
+        ":protocolvector",
+        ":references",
+        ":rustderive",
+        ":simple",
+        ":tables",
+        ":types",
+        ":union",
+        ":view",
+    ],
+    visibility = ["//src/devices/tools/fidlgen_banjo/tests:__pkg__"],
+)
+
+# Note: badtype.test.fidl verifies that the banjo parser correctly fails, and
+# parameterattributes.test.fidl is an AST-only test; neither is compiled here.
+
+fidl_library(
+    name = "alias",
+    testonly = True,
+    srcs = ["alias.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.alias",
+)
+
+fidl_library(
+    name = "alignment",
+    testonly = True,
+    srcs = ["alignment.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.alignment",
+)
+
+fidl_library(
+    name = "api",
+    testonly = True,
+    srcs = ["api.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.api",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "attributes",
+    testonly = True,
+    srcs = ["attributes.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.attributes",
+)
+
+fidl_library(
+    name = "binary",
+    testonly = True,
+    srcs = ["binary.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.binary",
+)
+
+fidl_library(
+    name = "bits",
+    testonly = True,
+    srcs = ["bits.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.bits",
+)
+
+fidl_library(
+    name = "buffer",
+    testonly = True,
+    srcs = ["buffer.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.buffer",
+)
+
+fidl_library(
+    name = "callback",
+    testonly = True,
+    srcs = ["callback.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.callback",
+    deps = [
+        ":callback2",
+        "//zircon/vdso/zx",
+    ],
+)
+
+fidl_library(
+    name = "callback2",
+    testonly = True,
+    srcs = ["callback2.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.callback2",
+)
+
+fidl_library(
+    name = "constants",
+    testonly = True,
+    srcs = ["constants.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.constants",
+)
+
+fidl_library(
+    name = "empty",
+    testonly = True,
+    srcs = ["empty.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.empty",
+)
+
+fidl_library(
+    name = "enums",
+    testonly = True,
+    srcs = ["enums.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.enums",
+)
+
+fidl_library(
+    name = "example0",
+    testonly = True,
+    srcs = ["example0.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example0",
+)
+
+fidl_library(
+    name = "example1",
+    testonly = True,
+    srcs = ["example1.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example1",
+)
+
+fidl_library(
+    name = "example2",
+    testonly = True,
+    srcs = ["example2.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example2",
+)
+
+fidl_library(
+    name = "example3",
+    testonly = True,
+    srcs = ["example3.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example3",
+)
+
+fidl_library(
+    name = "example4",
+    testonly = True,
+    srcs = ["example4.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example4",
+)
+
+fidl_library(
+    name = "example6",
+    testonly = True,
+    srcs = ["example6.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example6",
+)
+
+fidl_library(
+    name = "example7",
+    testonly = True,
+    srcs = ["example7.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example7",
+)
+
+fidl_library(
+    name = "example8",
+    testonly = True,
+    srcs = ["example8.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example8",
+)
+
+fidl_library(
+    name = "example9",
+    testonly = True,
+    srcs = ["example9.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.example9",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "fidlhandle",
+    testonly = True,
+    srcs = ["fidlhandle.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.fidlhandle",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "handles",
+    testonly = True,
+    srcs = ["handles.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.handles",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "interface",
+    testonly = True,
+    srcs = ["interface.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.interface",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "order",
+    testonly = True,
+    srcs = ["order.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order",
+)
+
+fidl_library(
+    name = "order1",
+    testonly = True,
+    srcs = ["order1.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order1",
+)
+
+fidl_library(
+    name = "order2",
+    testonly = True,
+    srcs = ["order2.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order2",
+)
+
+fidl_library(
+    name = "order3",
+    testonly = True,
+    srcs = ["order3.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order3",
+)
+
+fidl_library(
+    name = "order4",
+    testonly = True,
+    srcs = ["order4.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order4",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "order5",
+    testonly = True,
+    srcs = ["order5.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order5",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "order6",
+    testonly = True,
+    srcs = ["order6.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order6",
+    deps = [":order7"],
+)
+
+fidl_library(
+    name = "order7",
+    testonly = True,
+    srcs = ["order7.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.order7",
+)
+
+fidl_library(
+    name = "passcallback",
+    testonly = True,
+    srcs = ["passcallback.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.passcallback",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "point",
+    testonly = True,
+    srcs = ["point.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.point",
+)
+
+fidl_library(
+    name = "preservenames",
+    testonly = True,
+    srcs = ["preservenames.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.preservenames",
+)
+
+fidl_library(
+    name = "protocolarray",
+    testonly = True,
+    srcs = ["protocolarray.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.protocolarray",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "protocolbase",
+    testonly = True,
+    srcs = ["protocolbase.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.protocolbase",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "protocolhandle",
+    testonly = True,
+    srcs = ["protocolhandle.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.protocolhandle",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "protocolothertypes",
+    testonly = True,
+    srcs = ["protocolothertypes.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.protocolothertypes",
+)
+
+fidl_library(
+    name = "protocolprimitive",
+    testonly = True,
+    srcs = ["protocolprimitive.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.protocolprimitive",
+)
+
+fidl_library(
+    name = "protocolvector",
+    testonly = True,
+    srcs = ["protocolvector.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.protocolvector",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "references",
+    testonly = True,
+    srcs = ["references.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.references",
+)
+
+fidl_library(
+    name = "rustderive",
+    testonly = True,
+    srcs = ["rustderive.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.rustderive",
+)
+
+fidl_library(
+    name = "simple",
+    testonly = True,
+    srcs = ["simple.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.simple",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "tables",
+    testonly = True,
+    srcs = ["tables.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.tables",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "types",
+    testonly = True,
+    srcs = ["types.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.types",
+    deps = ["//zircon/vdso/zx"],
+)
+
+fidl_library(
+    name = "union",
+    testonly = True,
+    srcs = ["union.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.union",
+)
+
+fidl_library(
+    name = "view",
+    testonly = True,
+    srcs = ["view.test.fidl"],
+    enable_cpp = False,
+    enable_rust = False,
+    enable_rust_next = False,
+    library_name = "banjo.examples.view",
+    deps = [":point"],
+)

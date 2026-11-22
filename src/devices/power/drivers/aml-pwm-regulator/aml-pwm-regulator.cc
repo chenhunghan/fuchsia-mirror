@@ -100,9 +100,9 @@ void AmlPwmRegulator::Disable(DisableCompleter::Sync& completer) {
   completer.ReplyError(ZX_ERR_NOT_SUPPORTED);
 }
 
-zx::result<std::unique_ptr<AmlPwmRegulator>> AmlPwmRegulator::Create(const VregMetadata& metadata,
-                                                                     AmlPwmRegulatorDriver& driver,
-                                                                     fdf::Namespace& incoming) {
+zx::result<std::unique_ptr<AmlPwmRegulator>> AmlPwmRegulator::Create(
+    const VregMetadata& metadata, std::optional<uint32_t> global_id, AmlPwmRegulatorDriver& driver,
+    fdf::Namespace& incoming) {
   auto connect_result = incoming.Connect<fuchsia_hardware_pwm::Service::Pwm>("pwm");
   if (connect_result.is_error()) {
     fdf::error("Unable to connect to fidl protocol - status: {}", connect_result.status_string());
@@ -144,6 +144,9 @@ zx::result<std::unique_ptr<AmlPwmRegulator>> AmlPwmRegulator::Create(const VregM
       fdf::MakeProperty2(bind_fuchsia::NAME, name),
       fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.vreg.Service"),
   };
+  if (global_id.has_value()) {
+    properties.push_back(fdf::MakeProperty2(bind_fuchsia::ID, *global_id));
+  }
 
   zx::result child = fdf::AddChild(driver.node(), driver.logger(), name, properties, offers);
   if (child.is_error()) {
@@ -167,7 +170,7 @@ zx::result<> AmlPwmRegulatorDriver::Start(fdf::DriverContext context) {
   auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
       "fuchsia.hardware.vreg.VregMetadata");
   if (dict_result.is_ok()) {
-    auto parsed = aml_pwm_regulator_metadata::Aml_pwm_regulatorMetadata::Parse(dict_result.value());
+    auto parsed = aml_pwm_regulator_metadata::VregMetadata::Parse(dict_result.value());
     if (!parsed.has_value()) {
       fdf::error("Failed to parse VregMetadata from Dictionary");
       return zx::error(ZX_ERR_INTERNAL);
@@ -211,8 +214,27 @@ zx::result<> AmlPwmRegulatorDriver::Start(fdf::DriverContext context) {
     return zx::error(ZX_ERR_INTERNAL);
   }
 
+  // DML boards map each vreg name to the global ID that consumers bind to.
+  std::optional<uint32_t> global_id;
+  zx::result ids_result =
+      pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>("fuchsia.hardware.vreg.Metadata");
+  if (ids_result.is_ok()) {
+    std::optional parsed = aml_pwm_regulator_metadata::VregIdsMetadata::Parse(ids_result.value());
+    if (parsed.has_value() && parsed->vregs.has_value()) {
+      for (const aml_pwm_regulator_metadata::VregInfo& vreg : parsed->vregs.value()) {
+        if (vreg.name == metadata.name().value()) {
+          global_id = vreg.id;
+          break;
+        }
+      }
+    }
+    if (!global_id.has_value()) {
+      fdf::warn("No vreg ID metadata for '{}'", metadata.name().value());
+    }
+  }
+
   // Build Voltage Regulator
-  auto regulator = AmlPwmRegulator::Create(metadata, *this, context.incoming());
+  auto regulator = AmlPwmRegulator::Create(metadata, global_id, *this, context.incoming());
   if (regulator.is_error()) {
     return regulator.take_error();
   }

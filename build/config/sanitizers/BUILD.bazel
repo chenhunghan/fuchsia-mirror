@@ -68,7 +68,6 @@ sanitizer_extra_options(
     sanitizer = "asan",
     variant_tags = ["asan"],
     visibility = [
-        "//sdk/lib/sys/component/cpp/testing:__pkg__",
         "//src/lib/llvm/fuchsia:__pkg__",
         "//src/lib/llvm/host:__pkg__",
     ],

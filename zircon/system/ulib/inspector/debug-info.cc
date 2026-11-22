@@ -99,6 +99,8 @@ const char* policy_exception_code_to_str(uint32_t policy_exception_code) {
       return "BAD_SYSCALL";
     case ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS:
       return "PORT_TOO_MANY_OBSERVERS";
+    case ZX_EXCP_POLICY_CODE_SPIN_DETECTION:
+      return "SPIN_DETECTION";
     default:
       return "<unknown policy code>";
   }
@@ -354,6 +356,14 @@ void inspector_print_debug_info_impl(FILE* out, zx_handle_t process_handle,
     if (backtrace_requested) {
       fprintf(out, "<== BACKTRACE REQUEST: process %s[%" PRIu64 "] thread %s[%" PRIu64 "]\n",
               process_name, pid, thread_name, tid);
+    } else if (report.header.type == ZX_EXCP_POLICY_ERROR &&
+               report.context.synth_code == ZX_EXCP_POLICY_CODE_SPIN_DETECTION) {
+      // A diagnostic from the kernel that gets resumed, like a backtrace request. It is not a
+      // crash, so say so and leave out the register and memory dumps.
+      fprintf(out,
+              "<== SPIN DETECTION: process %s[%" PRIu64 "] thread %s[%" PRIu64 "] on CPU %" PRIu32
+              "\n",
+              process_name, pid, thread_name, tid, report.context.synth_data);
     } else {
       // Normal exception.
       fprintf(out, "<== CRASH: process %s[%" PRIu64 "] thread %s[%" PRIu64 "]\n", process_name, pid,

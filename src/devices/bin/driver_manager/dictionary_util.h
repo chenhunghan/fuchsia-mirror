@@ -5,47 +5,61 @@
 #ifndef SRC_DEVICES_BIN_DRIVER_MANAGER_DICTIONARY_UTIL_H_
 #define SRC_DEVICES_BIN_DRIVER_MANAGER_DICTIONARY_UTIL_H_
 
-#include <fidl/fuchsia.component.sandbox/cpp/fidl.h>
+#include <fidl/fuchsia.component.runtime/cpp/fidl.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
+#include <lib/fit/function.h>
+#include <lib/zx/eventpair.h>
+#include <lib/zx/result.h>
 
 namespace driver_manager {
 
+// Returns a new handle to the same object as |handle|, with the same rights.
+zx::result<zx::eventpair> DuplicateEventpair(const zx::eventpair& handle);
+
+// Wraps the parts of fuchsia.component.runtime.Capabilities that driver manager uses. Dictionaries
+// and other capabilities are referenced by eventpair handles; see that protocol for details.
 class DictionaryUtil {
  public:
-  DictionaryUtil(fidl::ClientEnd<fuchsia_component_sandbox::CapabilityStore> store,
-                 async_dispatcher_t* dispatcher)
-      : store_(std::move(store), dispatcher), dispatcher_(dispatcher) {}
+  // Opens a new connection to fuchsia.component.runtime.Capabilities.
+  using CapabilitiesConnector =
+      fit::function<zx::result<fidl::ClientEnd<fuchsia_component_runtime::Capabilities>>()>;
+
+  // |connector| opens the dedicated connection that each route operation uses. If it is null, the
+  // protocol is connected to through the component's incoming namespace.
+  DictionaryUtil(fidl::ClientEnd<fuchsia_component_runtime::Capabilities> capabilities,
+                 async_dispatcher_t* dispatcher, CapabilitiesConnector connector = nullptr);
 
   virtual ~DictionaryUtil() = default;
 
-  virtual void ImportDictionary(
-      fuchsia_component_sandbox::DictionaryRef dictionary,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::NewCapabilityId>)> callback);
+  // Creates a shallow copy of |dictionary|. Component manager drains the dictionary that it is
+  // given in fuchsia.component/CreateChildArgs.additional_inputs, so each component gets a copy.
+  virtual void CopyDictionary(const zx::eventpair& dictionary,
+                              fit::callback<void(zx::result<zx::eventpair>)> callback);
 
-  virtual void ImportDictionaryWire(
-      fuchsia_component_sandbox::wire::DictionaryRef dictionary,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::wire::NewCapabilityId>)> callback);
-
-  virtual void CopyExportDictionary(
-      fuchsia_component_sandbox::CapabilityId dictionary,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> callback);
-
+  // Looks up |key| in |dictionary| and opens the directory it refers to. The entry may be a
+  // directory connector, or a directory connector router that is routed first.
   virtual void DictionaryDirConnectorOpen(
-      fuchsia_component_sandbox::CapabilityId dictionary, std::string_view key,
+      const zx::eventpair& dictionary, std::string_view key,
       fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback);
 
+  // Creates a dictionary that contains a directory connector for each entry in |receivers|.
   virtual void CreateDictionaryWith(
-      std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
+      std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
           receivers,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)> callback);
+      fit::callback<void(zx::result<zx::eventpair>)> callback);
 
  private:
-  void OpenDirConnector(
-      fuchsia_component_sandbox::wire::DirConnector connector,
+  // Routes |router| and opens the resulting directory connector. |key| is used for logging.
+  void RouteDirConnectorRouter(
+      zx::eventpair router, std::string key,
       fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback);
 
-  fidl::WireClient<fuchsia_component_sandbox::CapabilityStore> store_;
-  fuchsia_component_sandbox::NewCapabilityId cap_id_ = 0;
+  void OpenDirConnector(
+      zx::eventpair connector,
+      fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback);
+
+  fidl::WireClient<fuchsia_component_runtime::Capabilities> capabilities_;
+  CapabilitiesConnector connector_;
   async_dispatcher_t* dispatcher_;
 };
 
@@ -57,9 +71,9 @@ struct DirInfo {
   bool is_primary;
 };
 
-class DirReceiverImpl : public fidl::WireServer<fuchsia_component_sandbox::DirReceiver> {
+class DirReceiverImpl : public fidl::WireServer<fuchsia_component_runtime::DirReceiver> {
  public:
-  DirReceiverImpl(fidl::ServerEnd<fuchsia_component_sandbox::DirReceiver> dir_receiver,
+  DirReceiverImpl(fidl::ServerEnd<fuchsia_component_runtime::DirReceiver> dir_receiver,
                   std::vector<DirInfo> dir_infos, async_dispatcher_t* dispatcher)
       : dir_receiver_binding_(dispatcher, std::move(dir_receiver), this,
                               fidl::kIgnoreBindingClosure),
@@ -68,11 +82,8 @@ class DirReceiverImpl : public fidl::WireServer<fuchsia_component_sandbox::DirRe
 
  private:
   void Receive(ReceiveRequestView request, ReceiveCompleter::Sync& completer) override;
-  void handle_unknown_method(
-      fidl::UnknownMethodMetadata<fuchsia_component_sandbox::DirReceiver> metadata,
-      fidl::UnknownMethodCompleter::Sync& completer) override;
 
-  fidl::ServerBinding<fuchsia_component_sandbox::DirReceiver> dir_receiver_binding_;
+  fidl::ServerBinding<fuchsia_component_runtime::DirReceiver> dir_receiver_binding_;
   std::vector<DirInfo> dir_infos_;
   component::OutgoingDirectory out_;
 };

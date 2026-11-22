@@ -93,7 +93,9 @@ experimental results.
 
 #### Uncompressed Blobs
 
-![uncompressed_blobs](resources/0207_offline_blob_compression/uncompressed_blobs.svg)
+![Uncompressed blob downloaded from the blob server and compressed on the
+device as Blobfs writes
+it.](resources/0207_offline_blob_compression/uncompressed_blobs.svg)
 
 This is the current behavior. Blobs are downloaded directly in uncompressed form
 and compressed on-the-fly as Blobfs writes the blob to persistent storage.
@@ -101,7 +103,8 @@ and compressed on-the-fly as Blobfs writes the blob to persistent storage.
 
 #### Offline Compression
 
-![offline_compression](resources/0207_offline_blob_compression/offline_compression.svg)
+![Compressed blob downloaded from the blob server and written directly to
+Blobfs.](resources/0207_offline_blob_compression/offline_compression.svg)
 
 The package server supports downloading pre-compressed blob artifacts in a
 format suitable for ingestion by Blobfs. No on-device compression is required,
@@ -111,7 +114,9 @@ memory efficient manner using a streaming decompressor.
 
 #### Delta Between Uncompressed Blobs
 
-![delta_between_uncompressed_blobs](resources/0207_offline_blob_compression/delta_between_uncompressed_blobs.svg)
+![Delta patch from the blob server applied to the decompressed old blob; the
+new blob is recompressed and written to
+Blobfs.](resources/0207_offline_blob_compression/delta_between_uncompressed_blobs.svg)
 
 For each new blob, we find an old blob in the same package, and generate a patch
 between the two uncompressed blobs. Devices will need to download the patch,
@@ -125,7 +130,9 @@ prevent the eventual removal of compression code from Blobfs.
 
 #### Delta Between Compressed Blobs
 
-![delta_between_compressed_blobs](resources/0207_offline_blob_compression/delta_between_compressed_blobs.svg)
+![Delta patch from the blob server applied to the old compressed blob without
+decompression; the compressed new blob is written to
+Blobfs.](resources/0207_offline_blob_compression/delta_between_compressed_blobs.svg)
 
 Similar to above, except that we generate the patch between two offline
 compressed blobs. In this case, we don't need to decompress the old blob or
@@ -173,13 +180,15 @@ include the required changes to the update package format.
 ## Design
 
 
-### Delivery Blob
+### Delivery blob {:#delivery-blob}
 
 A delivery blob is a blob in a format suitable for efficient delivery and
 writing from the server to a device. Delivery blobs will include a header with
 metadata and a payload containing the blob data itself.
 
-![delivery_blob](resources/0207_offline_blob_compression/delivery_blob.svg)
+![Delivery blob layout: shared metadata (magic number, type, header length) and
+Blobfs-specific metadata form the header, followed by the blob
+payload.](resources/0207_offline_blob_compression/delivery_blob.svg)
 
 The delivery blob format shall include the following fields byte aligned and in
 little-endian:
@@ -206,10 +215,10 @@ backwards compatible manner.
 #### Production
 
 The Fuchsia product build process creates artifacts including uncompressed blobs
-and metadata specifying the supported [delivery blob](#delivery_blob) **Type**
+and metadata specifying the supported [delivery blob](#delivery-blob) **Type**
 the product expects to receive. The production blob server shall use a tool
 provided by the storage team in SDK to compress each blob and generate a
-[delivery blob](#delivery_blob) with the specified **Type** (`--type`). This
+[delivery blob](#delivery-blob) with the specified **Type** (`--type`). This
 allows the server to generate and serve multiple formats of a given blob, both
 to support the format transition, as well as handle potential differences in
 blob types used across different products.
@@ -238,13 +247,13 @@ Currently the build compresses all blobs when generating the Blobfs image.
 Instead, compression will be moved out of image generation, and will be
 performed separately on each blob using a dedicated tool. The output of
 the tool will be the blob in the specified
-[delivery blob format](#delivery_blob), which can be used directly by
+[delivery blob format](#delivery-blob), which can be used directly by
 the blob server on the host to save build time.
 
 Generating the final Blobfs image shall have the option to use delivery blobs
 directly as input (in addition to uncompressed blobs).
 
-#### Infrastructure Workflow
+#### Infrastructure workflow {:#infrastructure-workflow}
 
 The builders will upload delivery blobs generated during the product build &
 assembly in addition to uncompressed blobs to the shared GCS bucket for blobs.
@@ -261,7 +270,7 @@ verification.
 ### Blob Server Protocol
 
 
-#### Current State
+#### Current state {:#current-state}
 
 Currently the only metadata we need to download a blob is the hash, we can use
 the hash to find the uncompressed blob URL on the blob server, for example
@@ -280,12 +289,12 @@ format/type. For example, the URL for a blob of type 1 would be
 `https://blob.server.example/1/781205489a95d5915de51cf80861b7d773c879b87c4e0280b36ea42be8e98365`
 
 The size of the delivery blob can be obtained from the Content-Length HTTP
-header. The [delivery blob format](#delivery_blob) contains the length of the
+header. The [delivery blob format](#delivery-blob) contains the length of the
 header, allowing efficient extraction of just the payload if required.
 
 If the blob does not exist in the requested type, the server will return 404. In
 this case, we shall fall back to downloading and writing the blob uncompressed
-using the [existing write path](#current_state). This fallback will be disabled
+using the [existing write path](#current-state). This fallback will be disabled
 in production, and can be removed after offline compression has been fully
 rolled out.
 
@@ -298,7 +307,7 @@ in production.
 
 ### Blobfs
 
-#### Current State
+#### Current state {:#blobfs-current-state}
 
 The current flow for writing blobs is as follows:
 
@@ -315,12 +324,12 @@ internal, we suggest the current system could be extended to implement them by:
 
   1. To write a delivery blob, pkg-cache will open up `/blob/v1-781...` for
   writing, and write the delivery blob as-is. Truncation is no longer necessary
-  as the [delivery blob header](#delivery_blob) includes all information
+  as the [delivery blob header](#delivery-blob) includes all information
   required by Blobfs to write the blob.
 
   2. If the package resolver falls back to downloading the original uncompressed
   format, pkg-cache will instead open `/blob/781...` and follow the
-  [existing write path](#current_state_2).
+  [existing write path](#blobfs-current-state).
 
 Regardless of how the blob was written to the device, reading it back from
 Blobfs will remain the same, using the Merkle root as the path (e.g.
@@ -334,7 +343,7 @@ In order to reduce memory during writing, Blobfs shall stream the blob data to
 storage, and utilize a streaming decompressor for Merkle tree generation. As
 blobs should be considered untrusted inputs to the system, all decompression
 must be done in a sandboxed component. See [Security
-Considerations](#security_considerations) for more details.
+considerations](#security-considerations) for more details.
 
 After offline compression has rolled out, we may improve the performance of
 the write path further by making use of [zx stream] support.
@@ -431,11 +440,11 @@ most devices get updated, we can switch host side to generate the new type,
 and remove on-device support for this fallback method.
 
 
-## Security Considerations
+## Security considerations {:#security-considerations}
 
 Offline compression extends the attack surface on the decompressor, which must
 now parse data coming over the network, in addition to data stored on disk.
-Outside of using TLS, the blobs downloaded in [delivery format](#delivery_blob)
+Outside of using TLS, the blobs downloaded in [delivery format](#delivery-blob)
 do not include signing, and can only be verified by feeding untrusted data
 into the decompressor.
 
@@ -445,11 +454,11 @@ system cannot be compromised without chaining another attack to escape the
 sandbox. Any decompressed data will be verified using the merkle root hash, this
 prevents compromised decompressor from producing malicious output.
 
-Parsing the metadata in [delivery format](#delivery_blob) will be done using
+Parsing the metadata in [delivery format](#delivery-blob) will be done using
 security approved parsing library.
 
 Another possible attack is malicious blob being uploaded to infrastructure GCS
-bucket, which is covered in [Infrastructure Workflow](#infrastructure_workflow)
+bucket, which is covered in [Infrastructure workflow](#infrastructure-workflow)
 section.
 
 ## Privacy Considerations
@@ -585,7 +594,7 @@ Non A/B updates in Android uses imgdiff to patch APKs, it's running bsdiff on
 uncompressed files in APKs, when Android moved to A/B updates, imgdiff is
 replaced by [puffin].
 
-[delivery blobs]: #delivery_blob
+[delivery blobs]: #delivery-blob
 [zx stream]: /docs/reference/kernel_objects/stream.md
 [tANS encoding]: https://en.wikipedia.org/wiki/Asymmetric_numeral_systems#Tabled_variant_(tANS)
 [puffin]: https://android.googlesource.com/platform/external/puffin/+/refs/heads/master/README.md

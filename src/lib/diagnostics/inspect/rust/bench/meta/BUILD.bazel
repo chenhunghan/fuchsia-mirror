@@ -14,5 +14,9 @@ cml_shard(
         "//sdk/lib/syslog:client.shard",
     ],
     shard = "benchmark.shard.cml",
-    visibility = ["//src/lib/diagnostics/inspect/rust/bench:__subpackages__"],
+    visibility = [
+        "//src/lib/diagnostics/hierarchy/rust/bench:__pkg__",
+        "//src/lib/diagnostics/inspect/rust/bench:__subpackages__",
+        "//src/lib/trace/rust/bench:__pkg__",
+    ],
 )

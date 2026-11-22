@@ -22,7 +22,8 @@ When deleting a driver, do the following:
    - `available_in_git`: A git hash of the `fuchsia.git` repository that
      contained the most up-to-date version of the driver before it was
      deleted.
-   - `areas`: A list of areas for the driver from //build/drivers/areas.txt
+   - `areas`: A list of areas for the driver from
+     //docs/reference/hardware/_drivers_areas.yaml
    - `path`: The deleted driver's path in the `fuchsia.git`
      repository.
 

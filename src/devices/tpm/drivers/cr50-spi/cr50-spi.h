@@ -6,10 +6,12 @@
 
 #include <fidl/fuchsia.hardware.spi/cpp/wire.h>
 #include <fidl/fuchsia.hardware.tpmimpl/cpp/wire.h>
-#include <fuchsia/hardware/tpmimpl/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/ddk/device.h>
 #include <lib/inspect/cpp/inspector.h>
+
+#include <optional>
 
 #include <ddktl/device.h>
 
@@ -21,8 +23,7 @@ class Cr50SpiDevice;
 using DeviceType = ddk::Device<Cr50SpiDevice, ddk::Initializable, ddk::Unbindable,
                                ddk::Messageable<fuchsia_hardware_tpmimpl::TpmImpl>::Mixin>;
 
-class Cr50SpiDevice : public DeviceType,
-                      public ddk::TpmImplProtocol<Cr50SpiDevice, ddk::base_protocol> {
+class Cr50SpiDevice : public DeviceType {
  public:
   Cr50SpiDevice(zx_device_t* parent, acpi::Client acpi,
                 fidl::WireSyncClient<fuchsia_hardware_spi::Device> spi)
@@ -32,14 +33,13 @@ class Cr50SpiDevice : public DeviceType,
         spi_(std::move(spi)) {}
 
   static zx_status_t Create(void* ctx, zx_device_t* parent);
+  ~Cr50SpiDevice();
 
   zx_status_t Bind(std::unique_ptr<Cr50SpiDevice>* device_ptr);
 
   void DdkInit(ddk::InitTxn txn);
   void DdkUnbind(ddk::UnbindTxn txn);
   void DdkRelease();
-
-  void TpmImplConnectServer(zx::channel server);
 
   // FIDL methods.
   void Read(ReadRequestView request, ReadCompleter::Sync& completer) override;
@@ -68,6 +68,8 @@ class Cr50SpiDevice : public DeviceType,
   // Wake up the cr50 if it has gone idle.
   void WakeUp();
 
+  void Shutdown();
+
   async::Loop loop_;
   acpi::Client acpi_;
   fidl::WireSyncClient<fuchsia_hardware_spi::Device> spi_;
@@ -80,6 +82,7 @@ class Cr50SpiDevice : public DeviceType,
 
   sync_completion_t unbind_txn_ready_;
   std::optional<ddk::UnbindTxn> unbind_txn_;
+  std::optional<component::OutgoingDirectory> outgoing_;
 };
 
 }  // namespace cr50::spi

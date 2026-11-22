@@ -5,6 +5,32 @@
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
-    ["simple_trace.fxt"],
-    visibility = ["//src/performance/lib/fxt/rust:__pkg__"],
+    [
+        "example_benchmark.fxt",
+        "simple_trace.fxt",
+    ],
+    visibility = [
+        "//src/performance/lib/fxt/rust:__subpackages__",
+        "//src/performance/trace2json:__pkg__",
+    ],
+)
+
+exports_files(
+    [
+        "example_benchmark_expected.json",
+        "multi_category.fxt",
+        "multi_category_expected.json",
+        "multi_category_filtered_expected.json",
+        "no_magic.fxt",
+        "simple_trace.fxt.gz",
+        "simple_trace_exact_filtered_expected.json",
+        "simple_trace_expected.json",
+        "simple_trace_expected.json.gz",
+        "simple_trace_filtered_expected.json",
+        "simple_trace_multi_filtered_expected.json",
+        "simple_trace_no_events_expected.json",
+        "simple_trace_split_main_expected.json",
+        "simple_trace_split_system_expected.jsonlines",
+    ],
+    visibility = ["//src/performance/trace2json:__pkg__"],
 )

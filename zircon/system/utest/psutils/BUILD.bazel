@@ -1,0 +1,115 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":handles-test-pkg",
+        ":memgraph-test",
+    ],
+    visibility = ["//zircon/system/utest:__pkg__"],
+)
+
+# GN's bootfs_test() expects the binary at test/ps-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/ps-test", root_build_dir) destination = "test/ps-test" label = get_label_info(":ps", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "ps",
+    srcs = ["ps_test.c"],
+    gn_output_name = "ps-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/sys/bin/psutils:ps_internal",
+        "//zircon/system/ulib/pretty",
+        "//zircon/system/ulib/task-utils",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "handles",
+    srcs = ["handles_test.cc"],
+    gn_output_name = "handles-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/sys/bin/psutils:handles_internal",
+        "//zircon/system/ulib/pretty",
+        "//zircon/system/ulib/task-utils",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "memgraph",
+    srcs = ["memgraph_test.cc"],
+    gn_output_name = "memgraph-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/sys/bin/psutils:memgraph_internal",
+        "//zircon/system/ulib/task-utils",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "handles-test-pkg",
+    package_name = "handles-test",
+    unit_tests = [":handles"],
+)
+
+fx_packaged_binary(
+    name = "memgraph-test-packaged",
+    testonly = True,
+    binary = ":memgraph",
+    binary_name = "memgraph-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "memgraph-test-manifest",
+    testonly = True,
+    component_name = "memgraph-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/elf:create_raw_processes.shard.cml",
+    ],
+    manifest = "meta/memgraph_test.cml",
+)
+
+fx_test_component(
+    name = "memgraph-test-component",
+    compiled_manifest = ":memgraph-test-manifest",
+    deps = [":memgraph-test-packaged"],
+)
+
+fx_package(
+    name = "memgraph-test-pkg",
+    package_name = "memgraph-test",
+    testonly = True,
+    test_components = [":memgraph-test-component"],
+)
+
+fx_test(
+    name = "memgraph-test",
+    package = ":memgraph-test-pkg",
+)

@@ -15,17 +15,17 @@ use net_types::{MulticastAddr, UnicastAddr, Witness};
 use netstack3_base::ref_counted_hash_map::{InsertResult, RefCountedHashSet, RemoveResult};
 use netstack3_base::sync::{Mutex, RwLock};
 use netstack3_base::{
-    BroadcastIpExt, ChecksumOffloadSpec, CoreTimerContext, Device, DeviceIdContext, EventContext,
-    FrameDestination, GsoInfo, HandleableTimer, LinkDevice, NestedIntoCoreTimerCtx,
-    NetworkParsingContext, NetworkSerializer, PacketType, ReceivableFrameMeta, RecvFrameContext,
-    RecvIpFrameMeta, ResourceCounterContext, RngContext, SendFrameError, SendFrameErrorReason,
-    SendableFrameMeta, TimerContext, TimerHandler, TxMetadataBindingsTypes, WeakDeviceIdentifier,
-    WrapBroadcastMarker,
+    BroadcastIpExt, ChecksumOffloadSpec, CoreTimerContext, Device, DeviceIdContext,
+    ErrorAndSerializer, EventContext, FrameDestination, GsoInfo, HandleableTimer, LinkDevice,
+    NestedIntoCoreTimerCtx, NetworkParsingContext, NetworkSerializer, PacketType,
+    ReceivableFrameMeta, RecvFrameContext, RecvIpFrameMeta, ResourceCounterContext, RngContext,
+    SendFrameError, SendFrameErrorReason, SendableFrameMeta, TimerContext, TimerHandler,
+    TxMetadataBindingsTypes, WeakDeviceIdentifier, WrapBroadcastMarker,
 };
 use netstack3_ip::nud::{LinkResolutionContext, NudHandler, NudState, NudTimerId, NudUserConfig};
 use netstack3_ip::{DeviceIpLayerMetadata, IpCounters, IpPacketDestination};
 use netstack3_trace::trace_duration;
-use packet::{BufferMut, NestablePacketBuilder as _, NestableSerializer as _};
+use packet::{BufferMut, DynSerializer, NestablePacketBuilder as _, NestableSerializer as _};
 use packet_formats::arp::{ArpHardwareType, ArpNetworkType, peek_arp_types};
 use packet_formats::ethernet::{
     ETHERNET_HDR_LEN_NO_TAG, EtherType, EthernetFrame, EthernetFrameBuilder,
@@ -810,15 +810,22 @@ impl<
     {
         let Self { device_id, dst_addr } = self;
         let meta: BC::TxMetadata = Default::default();
-        send_as_ethernet_frame_to_dst(
+        // NB: The ARP body is type-erased so the Ethernet TX path is not
+        // instantiated once per ARP serializer type.
+        match send_as_ethernet_frame_to_dst(
             core_ctx,
             bindings_ctx,
             &device_id,
             dst_addr.get(),
-            body,
+            DynSerializer::new(&body),
             EtherType::Arp,
             meta,
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err(ErrorAndSerializer { serializer: _, error }) => {
+                Err(ErrorAndSerializer { serializer: body, error })
+            }
+        }
     }
 }
 
@@ -965,7 +972,7 @@ pub(crate) mod testutil {
 
     /// The mimum implied maximum Ethernet frame size for IPv6.
     pub const IPV6_MIN_IMPLIED_MAX_FRAME_SIZE: MaxEthernetFrameSize =
-        MaxEthernetFrameSize::from_mtu(Ipv6::MINIMUM_LINK_MTU).unwrap();
+        MaxEthernetFrameSize::from_mtu(Ipv6::MINIMUM_LINK_MTU.get()).unwrap();
 }
 
 #[cfg(test)]

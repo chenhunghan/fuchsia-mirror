@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "camera_sensor_cli_bin",
+    srcs = [
+        "debug_client.cc",
+        "debug_client.h",
+        "main.cc",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.camera2.debug:fuchsia.camera2.debug_hlcpp",
+        "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_hlcpp",
+        "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_cpp",
+        "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl:fxl_cli",
+    ],
+)
+
+fx_packaged_binary(
+    name = "camera_sensor_cli_packaged_bin",
+    binary = ":camera_sensor_cli_bin",
+    binary_name = "camera_sensor_cli_bin",
+)
+
+fx_package(
+    name = "camera_sensor_cli",
+    resources = [":camera_sensor_cli_packaged_bin"],
+)

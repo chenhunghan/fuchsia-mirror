@@ -16,6 +16,8 @@ use target_holders::moniker;
 use tokio::sync::mpsc::channel;
 
 #[derive(FfxTool)]
+// Always targets a device (via RCS or fastboot) despite the deferred proxy.
+#[target(Required)]
 pub struct RebootTool {
     context: EnvironmentContext,
     #[command]

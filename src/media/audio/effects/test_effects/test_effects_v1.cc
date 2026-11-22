@@ -4,6 +4,7 @@
 
 #include "src/media/audio/effects/test_effects/test_effects_v1.h"
 
+#include <array>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -15,7 +16,7 @@ namespace {
 static constexpr uint32_t TEST_EFFECTS_MAX = 255;
 static constexpr uint32_t TEST_EFFECTS_DEFAULT_MAX_FRAMES_PER_BATCH = 512;
 
-test_effect_v1_spec g_effects[TEST_EFFECTS_MAX] = {};
+std::array<test_effect_v1_spec, TEST_EFFECTS_MAX> g_effects = {};
 
 uint32_t g_instance_count = 0;
 
@@ -170,7 +171,8 @@ bool get_info(uint32_t effect_id, fuchsia_audio_effects_description* desc) {
 fuchsia_audio_effects_handle_t create_effect(uint32_t effect_id, uint32_t frame_rate,
                                              uint16_t channels_in, uint16_t channels_out,
                                              const char* config, size_t config_length) {
-  if (effect_id > TEST_EFFECTS_MAX || channels_in > FUCHSIA_AUDIO_EFFECTS_CHANNELS_MAX ||
+  if (effect_id >= fuchsia_audio_effects_module_v1_instance.num_effects ||
+      channels_in > FUCHSIA_AUDIO_EFFECTS_CHANNELS_MAX ||
       channels_out > FUCHSIA_AUDIO_EFFECTS_CHANNELS_MAX) {
     return FUCHSIA_AUDIO_EFFECTS_INVALID_HANDLE;
   }
@@ -244,7 +246,7 @@ zx_status_t ext_add_effect(test_effect_v1_spec effect) {
     return ZX_ERR_BAD_STATE;
   }
   auto id = fuchsia_audio_effects_module_v1_instance.num_effects;
-  if (id > TEST_EFFECTS_MAX) {
+  if (id >= g_effects.size()) {
     return ZX_ERR_OUT_OF_RANGE;
   }
   g_effects[id] = effect;

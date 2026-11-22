@@ -40,26 +40,6 @@ namespace {
 // Debugging color used to highlight images that have gone through the GPU rendering path.
 const std::array<float, 4> kGpuRenderingDebugColor = {0.9f, 0.5f, 0.5f, 1.f};
 
-// Returns an image type that describes the tiling format used for buffer with
-// this pixel format. The values are display driver specific and not documented
-// in the display coordinator FIDL API.
-// TODO(https://fxbug.dev/42108519): Remove this when image type is removed from the display
-// coordinator API.
-uint32_t BufferCollectionPixelFormatToImageTilingType(
-    fuchsia_images2::PixelFormatModifier pixel_format_modifier) {
-  switch (pixel_format_modifier) {
-    case fuchsia_images2::PixelFormatModifier::kIntelI915XTiled:
-      return 1;  // `IMAGE_TILING_TYPE_X_TILED`
-    case fuchsia_images2::PixelFormatModifier::kIntelI915YTiled:
-      return 2;  // `IMAGE_TILING_TYPE_Y_LEGACY_TILED`
-    case fuchsia_images2::PixelFormatModifier::kIntelI915YfTiled:
-      return 3;  // `IMAGE_TILING_TYPE_YF_TILED`
-    case fuchsia_images2::PixelFormatModifier::kLinear:
-    default:
-      return fuchsia_hardware_display_types::kImageTilingTypeLinear;
-  }
-}
-
 // Creates a duplicate of `token` in `duplicate`.
 // Returns an error string if it fails, otherwise `std::nullopt`.
 std::optional<std::string> DuplicateToken(
@@ -546,7 +526,7 @@ fpromise::result<> DisplayCompositor::EnsureCollectionDisplaySupportDetermined(
         collection_info.settings().value().image_format_constraints().value();
     buffer_collection_supports_display_[collection_id] = true;
     buffer_collection_tiling_type_map_[collection_id] =
-        BufferCollectionPixelFormatToImageTilingType(
+        display::BufferCollectionPixelFormatToImageTilingType(
             image_constraints.pixel_format_modifier().value());
 
     DisplayBufferCollectionMetadata metadata_info{
@@ -1740,12 +1720,12 @@ DisplayCompositor::AllocateDisplayRenderTargets(
           std::scoped_lock lock(lock_);
           buffer_collection_supports_display_[collection_id] = true;
           buffer_collection_tiling_type_map_[collection_id] =
-              BufferCollectionPixelFormatToImageTilingType(collection_info.settings()
-                                                               .value()
-                                                               .image_format_constraints()
-                                                               .value()
-                                                               .pixel_format_modifier()
-                                                               .value());
+              display::BufferCollectionPixelFormatToImageTilingType(collection_info.settings()
+                                                                        .value()
+                                                                        .image_format_constraints()
+                                                                        .value()
+                                                                        .pixel_format_modifier()
+                                                                        .value());
         }
 
         // The collection info is no longer needed, so move it to `out_collection_info` if provided.

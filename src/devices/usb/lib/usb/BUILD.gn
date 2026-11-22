@@ -61,6 +61,10 @@ config("enable_dfv1_logging") {
   defines = [ "DFV1_LOGGING" ]
 }
 
+config("enable_syslog_logging") {
+  defines = [ "SYSLOG_LOGGING" ]
+}
+
 source_set("usb-dfv2-compat-logging") {
   public = [
     "include/usb/request-cpp.h",
@@ -137,6 +141,25 @@ source_set("usb-fidl-dfv2-compat-logging") {
   ]
   public_configs = [
     ":enable_dfv2_compat_logging",
+    ":includes",
+  ]
+}
+
+source_set("usb-fidl-syslog") {
+  public = [ "include/usb/request-fidl.h" ]
+  sources = [
+    "align.h",
+    "include/usb/internal/request-fidl.h",
+  ]
+  public_deps = [
+    ":descriptors",
+    "//sdk/fidl/fuchsia.hardware.usb.request:fuchsia.hardware.usb.request_cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/devices/lib/io-buffer",
+    "//zircon/system/ulib/zx",
+  ]
+  public_configs = [
+    ":enable_syslog_logging",
     ":includes",
   ]
 }

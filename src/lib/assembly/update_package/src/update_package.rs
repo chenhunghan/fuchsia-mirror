@@ -552,6 +552,7 @@ mod tests {
             partitions_config: None,
             system_release_info,
             platform_tools: vec![],
+            delivery_blob_type: None,
         }));
 
         builder.set_repository(RepositoryUrl::parse_host("test.com".to_string()).unwrap());
@@ -700,6 +701,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }));
 
         // Add a Recovery ZBI/VBMeta to the update.
@@ -718,6 +720,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }));
 
         // Build and ensure the output is correct.
@@ -908,6 +911,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         }));
 
         let tool_provider = Box::new(FakeToolProvider::new_with_side_effect(blobfs_side_effect));

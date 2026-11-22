@@ -4,6 +4,11 @@ description: >
   Workflow to query Fuchsia WLAN E2E test failures in infra, find patterns in
   recurring flakes, analyze network failure modes, check hardware
   correlations, and parse syslogs, test logs, and AP logs for triaging issues.
+  Use when investigating a specific failing or flaky WLAN E2E test case, test
+  suite, or LUCI builder in Buildbucket or ResultDB. Don't use for sweeping
+  all wlan_e2e console builders to propose or associate Buganizer rules (use
+  wlan-e2e-console-triage) or running WLAN E2E tests locally or remotely (use
+  wlan-run-e2e-test).
 ---
 
 # Fuchsia WLAN E2E Test Triage
@@ -16,10 +21,35 @@ hardware/bot correlations for Buildbucket and ResultDB.
 target. The developer invoking the agent MUST provide the specific test case,
 test suite, or builder they want to investigate in their prompt.
 
+## Quick Start
+
+| Goal | Command / Action |
+| :--- | :--- |
+| **Missing target in prompt** | Ask the user which test case, suite, or builder to investigate and end your turn with `0` tool calls. |
+| **Bot failure-rate distribution** | `python3 src/connectivity/wlan/.agents/skills/wlan-e2e-test-luci-triage/scripts/luci_triage.py --builder <BUILDER> --bucket global.ci --cutoff-date <YYYY-MM-DD> --test-pattern "<REGEX>"` |
+| **List recent builder runs** | `bb ls turquoise/<BUCKET>/<BUILDER> -n 50 -nopage` |
+| **Query failed test results** | `rdb query -json -u -tr-fields testId,status,name,failureReason,summaryHtml,tags -test ".*<SUITE_OR_REGEX>.*" "build-<BUILD_ID>"` |
+| **List suite artifacts** | `/google/bin/releases/luci-cli/luci test-result artifact list -legacy -invocationid <SWARMING_INV> -testid <SUITE_TEST_ID> -resultid <RESULT_ID>` |
+| **Read or save test artifact** | `/google/bin/releases/luci-cli/luci test-result artifact get -legacy -invocationid <SWARMING_INV> -testid <SUITE_TEST_ID> -resultid <RESULT_ID> -artifactid "<ARTIFACT_ID>" [-o /tmp/snapshot.zip]` |
+
+## CLI Flag Guardrails (Do Not Run / Run This Instead)
+
+| Anti-Pattern (Do Not Run) | Verified Pattern (Run This Instead) | Why |
+| :--- | :--- | :--- |
+| `bb ls turquoise/<BUCKET>/<BUILDER>` without `-nopage` | `bb ls turquoise/<BUCKET>/<BUILDER> -n 50 -nopage` | Interactive pager hangs non-TTY agent shells. |
+| `rdb query -u ...` for bot failure rates | Omit `-u` (`rdb query -json -tr-fields testId,status,tags "build-<BUILD_ID>"`) | `-u` omits all-passing runs needed for `failures / total_runs`. |
+| `luci test-result artifact ...` without `-legacy` or on a sub-test ID | Pass `-legacy` with the top-level **suite** `-testid` and `-resultid` | File artifacts (`Snapshot_*.zip`, `test_log.INFO`) attach only to the suite result. |
+| `curl` on ResultDB artifact URLs | `/google/bin/releases/luci-cli/luci test-result artifact get -legacy ...` | Streams logs or downloads zips (`-o`) without `curl` allowlist blocks. |
+
+Stop after 2 consecutive CLI syntax or flag failures (check `--help` rather than
+retrying in a loop), and halt immediately on authentication or permission
+errors.
+
 ## Prerequisites
 
 This skill requires `depot_tools` to be installed and available in your `PATH`.
 Specifically, the workflow relies on:
+
 * `bb`: To query Buildbucket builds and logs.
 * `rdb`: To query ResultDB test results and artifacts.
 * `prpc`: Optional fallback for raw RPC calls when advanced queries or
@@ -34,6 +64,7 @@ to install them. You can install `depot_tools` by following the instructions at
 ### Step 1: Query Buildbucket for Relevant WLAN Builds
 To get a list of builds for a specific builder, use the `bb ls` command with the
 builder target formatted as `turquoise/<bucket>/<builder>`:
+
 * `turquoise`: The project name.
 * `<bucket>`: The LUCI bucket (typically `global.ci` for internal FYI builders,
   or `smart.ci` for smart-display builders).
@@ -43,18 +74,25 @@ Always include `-nopage` when running `bb ls` in terminal/agent environments to
 prevent the CLI from invoking an interactive pager and hanging.
 
 * **List recent builds**:
+
     ```bash
     bb ls turquoise/global.ci/fuchsia_internal.arm64-release-fyi -n 50 -nopage
     ```
+
 * **List build IDs only** (convenient for piping into ResultDB queries):
+
     ```bash
     bb ls turquoise/global.ci/fuchsia_internal.arm64-release-fyi -n 50 -id -nopage
     ```
+
 * **Filter by status** (e.g. only failed builds):
+
     ```bash
     bb ls turquoise/global.ci/fuchsia_internal.arm64-release-fyi -status failure -n 50 -id -nopage
     ```
+
 * **JSON output** (to inspect timestamps or summary details):
+
     ```bash
     bb ls turquoise/global.ci/fuchsia_internal.arm64-release-fyi -n 50 -json -nopage
     ```
@@ -69,6 +107,7 @@ ResultDB handles pagination automatically and provides a simpler interface than
 raw PRPC.
 
 **Scope & Filtering Logic**:
+
 * **Builder**: If the user provides a builder, restrict your search to that
   builder.
 * **Test Suite**: If the user provides a test suite name, you may be looking
@@ -79,6 +118,7 @@ raw PRPC.
   builder.
 
 **Query Modes**:
+
 * **Full Volume (Total Runs)**: Omit the `-u` flag to return all executions
   (both passed and failed). This is required in Step 3 to compute accurate
   pass/fail rates per bot.
@@ -86,44 +126,53 @@ raw PRPC.
   failures (`status: "FAIL"`) when looking for root causes.
 
 **Examples**:
+
 * **Query all test runs in a build (for bot pass/fail rate calculation)**:
+
     ```bash
     rdb query -json -tr-fields testId,status,name,failureReason,summaryHtml,tags "build-<BUILD_ID>"
     ```
+
 * **Filter by test regex (unexpected failures only)**:
+
     ```bash
     rdb query -json -u -tr-fields testId,status,name,failureReason,summaryHtml,tags -test ".*<TEST_SUITE_OR_REGEX>.*" "build-<BUILD_ID>"
     ```
+
 * **Extract all failed sub-test cases and failure reasons directly**: All
   sub-test results and error messages are already structured in ResultDB. You do
   not need to download or parse `test_summary.yaml` to discover which test cases
   failed or why:
+
     ```bash
     rdb query -json -u -tr-fields testId,status,failureReason "build-<BUILD_ID>" \
       | jq -r '.testResult | select(.failureReason != null) | "\(.testId) => \(.failureReason.primaryErrorMessage)"'
     ```
+
 * **Pipe failed build IDs directly from `bb ls`**:
+
     ```bash
     bb ls turquoise/global.ci/fuchsia_internal.arm64-release-fyi -status failure -n 10 -id -nopage | sed 's/^/build-/' | rdb query -json -u -tr-fields testId,status,name,failureReason,summaryHtml,tags
     ```
 
 ### Step 3: Analyze Hardware Correlations
 WLAN E2E flakes can sometimes be caused by hardware issues.
+
 1.  Iterate through the `tags` array on each `FAIL` test result.
 2.  Find the tag object where `key: "swarming_bot_id"`.
 3.  Tally the failures by `swarming_bot_id`.
 4.  **Validate against total runs (CRITICAL)**: Never rely solely on raw failure
     counts; a high number of failures on a bot may simply mean more runs were
     scheduled on it. Always validate:
-   * **Failure Rate**: Calculate `(bot_failures / bot_total_runs) * 100` using
-     runs fetched without `-u`.
-   * **Fleet Baseline Comparison**: Compare the suspicious bot's failure rate
-     against the fleet average (e.g. 70% vs. 1% baseline).
-   * **Symptom Concentration**: Check if a specific symptom (e.g. `Network not
-     found` or AP de-authentications) is localized to 1 or 2 specific bots.
-   * **DUT / Board Bringup vs. Testbed Flake**: Before blaming the testbed,
-     check if the failing bot(s) represent a new DUT/board type with a very
-     small fleet (N=1 or 2):
+    * **Failure Rate**: Calculate `(bot_failures / bot_total_runs) * 100` using
+      runs fetched without `-u`.
+    * **Fleet Baseline Comparison**: Compare the suspicious bot's failure rate
+      against the fleet average (e.g. 70% vs. 1% baseline).
+    * **Symptom Concentration**: Check if a specific symptom (e.g. `Network not
+      found` or AP de-authentications) is localized to 1 or 2 specific bots.
+    * **DUT / Board Bringup vs. Testbed Flake**: Before blaming the testbed,
+      check if the failing bot(s) represent a new DUT/board type with a very
+      small fleet (N=1 or 2):
        * *Do other bots with the same DUT pass?* -> Likely a testbed/AP hardware
          issue.
        * *Is this the only bot for this DUT, or do all bots of this DUT fail?*
@@ -145,9 +194,11 @@ ResultDB's hierarchy:
 
 * **List all artifacts for the test suite (`luci test-result artifact list`)**:
   Use the IDs of the **top-level test suite** result from Step 2:
+
     ```bash
     /google/bin/releases/luci-cli/luci test-result artifact list -legacy -invocationid <SWARMING_INV> -testid <TEST_ID> -resultid <RESULT_ID>
     ```
+
     *(Tip: Run `/google/bin/releases/luci-cli/luci ids
     "<suite_test_result_name>"` to extract `-invocationid`, `-testid`, and
     `-resultid` automatically from the test result name).*
@@ -155,11 +206,14 @@ ResultDB's hierarchy:
 * **Search artifacts across the build (`QueryArtifacts`)**: When searching
   across all runs in a build without knowing the individual test result names,
   you can query ResultDB with a `predicate` to find specific artifacts:
+
     ```bash
     echo '{"invocations": ["invocations/build-<BUILD_ID>"], "pageSize": 100, "predicate": {"testResultPredicate": {"testIdRegexp": ".*<TEST_SUITE_OR_NAME>.*"}, "artifactIdRegexp": ".*(Snapshot|test_log).*"}}' | rdb rpc luci.resultdb.v1.ResultDB QueryArtifacts
     ```
+
     *For root invocation-level logs (e.g., `serial_log.txt` or `syslog.txt`
     across shards)*:
+
     ```bash
     echo '{"invocations": ["invocations/build-<BUILD_ID>"], "pageSize": 100, "predicate": {"followEdges": {"includedInvocations": true}, "artifactIdRegexp": ".*(serial_log|syslog).*"}}' | rdb rpc luci.resultdb.v1.ResultDB QueryArtifacts
     ```
@@ -173,13 +227,16 @@ allowlist):
 * **Stream text logs to stdout (e.g. `test_log.INFO`, `test_summary.yaml`,
   `stdout-and-stderr.txt`)**: Print or pipe artifact content directly without
   downloading files or dealing with base64 decoding:
+
     ```bash
     /google/bin/releases/luci-cli/luci test-result artifact get -legacy -invocationid <SWARMING_INV> -testid <TEST_ID> -resultid <RESULT_ID> -artifactid "<ARTIFACT_ID>"
     ```
+
     *(Can be piped directly to `grep`, `head`, `tail`, etc.)*
 
 * **Download binary files (e.g. `Snapshot_*.zip`)**: Save to a local file using
   `-o`:
+
     ```bash
     /google/bin/releases/luci-cli/luci test-result artifact get -legacy -invocationid <SWARMING_INV> -testid <TEST_ID> -resultid <RESULT_ID> -artifactid "<SNAPSHOT_ARTIFACT_ID>" -o /tmp/snapshot.zip
 
@@ -189,9 +246,11 @@ allowlist):
 
 * **View build step and infra logs via `bb log`**: For harness-level crashes or
   build infrastructure logs:
+
     ```bash
     bb log <BUILD_ID> "<STEP_NAME>" "<LOG_NAME>"
     ```
+
     *(Tip: Run `bb get <BUILD_ID> -steps` to discover the exact step name for a
     failed test, e.g. `failures|<SHARD>|attempt 0 (fail)|failed: <TEST_ID>`,
     which contains logs like `stdout-and-stderr.txt`,
@@ -254,17 +313,18 @@ When debugging a failure, follow this specific order of operations:
     the logs between these markers to avoid cross-pollution.
 4.  **Filter by WLAN Tags:** Within those boundaries, look for evidence of what
     occurred on the device. WLAN logs are typically tagged with:
-   * `wlan` or `wlanif` (Generic core WLAN stack)
-   * `wlancfg` or `wlanix` (WLAN policy layer)
-   * `wlansoftmac` (SoftMAC layer)
-   * `brcmfmac` or `iwlwifi` or `synadhd` (Specific driver logs)
-   * `wlan-hw-sim` (Simulated environment)
+    * `wlan` or `wlanif` (Generic core WLAN stack)
+    * `wlancfg` or `wlanix` (WLAN policy layer)
+    * `wlansoftmac` (SoftMAC layer)
+    * `brcmfmac` or `iwlwifi` or `synadhd` (Specific driver logs)
+    * `wlan-hw-sim` (Simulated environment)
 5.  **Consult Fuchsia Source Code:** When you find suspicious logs (e.g. `AP
     Rejection status: 2` or `wlanif: interface destroyed`), use local Fuchsia
     code or `code_search` to find the relevant code in the Fuchsia platform to
     understand exactly what triggers that log.
 
 #### Guiding Principles for Fix Recommendations
+
 * **Avoid Knee-Jerk Timeout Bumps**: Do not simply recommend increasing a
   timeout. Investigate *why* the operation took longer: check whether
   device-side behavior changed (e.g. regressions in scan, association, or DHCP
@@ -279,11 +339,12 @@ When debugging a failure, follow this specific order of operations:
 ## Helper Scripts
 A Python script (`scripts/luci_triage.py`) automates extracting failure
 distributions by `swarming_bot_id`. It fetches both total runs and failures to
-accurately compute the failure rate. Run it as follows (use `--test-pattern
-".*"` if you want all variants; default bucket is `global.ci`, or specify
-`--bucket smart.ci` for smart-display builders):
+accurately compute the failure rate. Run it with a recent `--cutoff-date` (e.g.,
+14-30 days ago; use `--test-pattern ".*"` for all variants, default bucket
+`global.ci`, or `--bucket smart.ci` for smart-display builders):
+
 ```bash
-python3 src/connectivity/wlan/.agents/skills/wlan-e2e-test-luci-triage/scripts/luci_triage.py --builder fuchsia_internal.arm64-release-fyi --bucket global.ci --cutoff-date 2026-06-01 --test-pattern ".*"
+python3 src/connectivity/wlan/.agents/skills/wlan-e2e-test-luci-triage/scripts/luci_triage.py --builder fuchsia_internal.arm64-release-fyi --bucket global.ci --cutoff-date <YYYY-MM-DD> --test-pattern ".*"
 ```
 
 ## Example Case Study: Triaging `e2e_connection_test_using_adb`
@@ -291,6 +352,7 @@ When the user asks you to triage a test suite like
 `e2e_connection_test_using_adb`, follow these examples:
 
 **Scenario 1: Hardware Flake Analysis ("Network not found")**
+
 * **Observation**: The test failed with "Network not found".
 * **Action**: Query ResultDB for all recent failures of this test and parse the
   `swarming_bot_id` from the `tags`.
@@ -301,6 +363,7 @@ When the user asks you to triage a test suite like
   ghosts in the driver code.
 
 **Scenario 2: Root Causing AP Rejections on Suspend/Resume**
+
 * **Observation**: The `with_suspend_resume` variants of the test were
   occasionally failing because the connection dropped.
 * **Action**: We checked `test_log.INFO` and saw the test failing at an

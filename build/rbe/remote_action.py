@@ -17,15 +17,17 @@ import difflib
 import errno
 import filecmp
 import functools
+import glob
 import hashlib
 import multiprocessing
 import os
+import posixpath
 import re
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from pathlib import Path
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from pathlib import Path, PurePosixPath
 from typing import (
     AbstractSet,
     Any,
@@ -39,7 +41,8 @@ import fuchsia
 import output_leak_scanner
 import remotetool
 import textpb
-from build.rbe import casfs, rbe_profile
+from build.rbe import casfs, rbe_profile, reclient
+from build.scripts import lock_utils
 
 DownloaderCallback: TypeAlias = Callable[[], remotetool.RemoteTool]
 
@@ -54,6 +57,58 @@ PROJECT_ROOT_REL = cl_utils.relpath(PROJECT_ROOT, start=Path(os.curdir))
 # This is a known path where remote execution occurs.
 # This should only be used for workarounds as a last resort.
 _REMOTE_PROJECT_ROOT = Path("/b/f/w")
+_ROOT_POSIX_PATH = PurePosixPath("/")
+
+# Standard Unix Filesystem Hierarchy Standard (FHS) top-level directories.
+# When remote_exec_root is "/" or uses wildcards, container system paths must
+# not be mistaken for Fuchsia workspace paths (even if untracked directories
+# with matching names happen to exist in the local checkout root).
+_UNIX_SYSTEM_DIRS = frozenset(
+    {
+        "bin",
+        "boot",
+        "dev",
+        "etc",
+        "home",
+        "lib",
+        "lib32",
+        "lib64",
+        "libx32",
+        "media",
+        "mnt",
+        "opt",
+        "proc",
+        "root",
+        "run",
+        "sbin",
+        "srv",
+        "sys",
+        "tmp",
+        "usr",
+        "var",
+    }
+)
+
+# Subset of _UNIX_SYSTEM_DIRS that are strictly OS system trees and never serve
+# as parent directories for worker sandboxes (unlike /tmp, /var, /mnt, /opt,
+# /run, /home, /root, /srv).
+_NON_SANDBOX_SYSTEM_DIRS = frozenset(
+    {
+        "bin",
+        "boot",
+        "dev",
+        "etc",
+        "lib",
+        "lib32",
+        "lib64",
+        "libx32",
+        "media",
+        "proc",
+        "sbin",
+        "sys",
+        "usr",
+    }
+)
 
 # Extended attributes can be used to tell reproxy (filemetadata cache)
 # that an artifact already exists in the CAS.
@@ -265,38 +320,6 @@ def relativize_to_exec_root(path: Path, start: Path | None = None) -> Path:
     return cl_utils.relpath(path, start=(_path_or_default(start, PROJECT_ROOT)))
 
 
-def _reclient_canonical_working_dir_components(
-    subdir_components: Iterator[str],
-) -> Iterable[str]:
-    """Computes the path used by rewrapper --canonicalize_working_dir=true.
-
-    The exact values returned are an implementation detail of reclient
-    that is not reliable, so this should only be used as a last resort
-    in workarounds.
-
-    https://team.git.corp.google.com/foundry-x/re-client/+/refs/heads/master/internal/pkg/reproxy/action.go#177
-
-    Args:
-      subdir_components: a relative path like ('out', 'default', ...)
-
-    Yields:
-      Replacement path components like ('set_by_reclient', 'a', ...)
-    """
-    first = next(subdir_components, None)
-    if first is None or first == "":
-        return  # no components
-    yield "set_by_reclient"
-    for _ in subdir_components:
-        yield "a"
-
-
-def reclient_canonical_working_dir(build_subdir: Path) -> Path:
-    new_components = list(
-        _reclient_canonical_working_dir_components(iter(build_subdir.parts))
-    )
-    return Path(*new_components) if new_components else Path("")
-
-
 def _file_lines_matching(path: Path, substr: str) -> Iterable[str]:
     with open(path) as f:
         for line in f:
@@ -366,7 +389,7 @@ def _should_retry_remote_action(status: cl_utils.SubprocessResult) -> bool:
         return False
 
     # Reproxy is now required to be running, so it is not possible
-    # to "forget" to run reproxy (via fuchsia.REPROXY_WRAP).
+    # to "forget" to run reproxy (via reproxy_wrap.REPROXY_WRAP).
     # It makes sense to retry rewrapper now.
     if any(_matches_fail_to_dial(line) for line in status.stderr):
         return True
@@ -374,18 +397,18 @@ def _should_retry_remote_action(status: cl_utils.SubprocessResult) -> bool:
     return status.returncode in _RETRIABLE_REWRAPPER_STATUSES
 
 
-def _reproxy_log_dir() -> str | None:
+def _reproxy_log_dir(env: Mapping[str, str]) -> str | None:
     # Set by build/rbe/fuchsia-reproxy-wrap.sh.
-    return os.environ.get("RBE_proxy_log_dir", None)
+    return env.get("RBE_proxy_log_dir", None)
 
 
-def _rewrapper_log_dir() -> str | None:
+def _rewrapper_log_dir(env: Mapping[str, str]) -> str | None:
     # Set by build/rbe/fuchsia-reproxy-wrap.sh.
-    return os.environ.get("RBE_log_dir", None)
+    return env.get("RBE_log_dir", None)
 
 
-def _rewrapper_platform_env() -> str | None:
-    return os.environ.get("RBE_platform", None)
+def _rewrapper_platform_env(env: Mapping[str, str]) -> str | None:
+    return env.get("RBE_platform", None)
 
 
 def _remove_prefix(text: str, prefix: str) -> str:
@@ -405,11 +428,11 @@ class ReproxyLogEntry(object):
         self._raw = textpb.parse_lazy(log_record)
 
     @property
-    def command(self) -> Mapping[str, Any]:
+    def command(self) -> textpb.TextProtoMapping:
         return self._raw.get("command", [dict()])[0]
 
     @property
-    def identifiers(self) -> Mapping[str, Any]:
+    def identifiers(self) -> textpb.TextProtoMapping:
         return self.command["identifiers"][0]
 
     @property
@@ -417,7 +440,7 @@ class ReproxyLogEntry(object):
         return self.identifiers["execution_id"][0].text.strip('"')
 
     @property
-    def remote_metadata(self) -> Mapping[str, Any]:
+    def remote_metadata(self) -> textpb.TextProtoMapping:
         # remote_metadata does not always exist in the action log
         return self._raw.get("remote_metadata", [dict()])[0]
 
@@ -532,13 +555,15 @@ def _diagnose_fail_to_dial(line: str) -> None:
     # Check connection to reproxy.
     if "Fail to dial" in line:
         print(line)
+        from build.rbe import reproxy_wrap
+
         msg(
             f""""Fail to dial" could indicate that reproxy is not running.
 `reproxy` is launched automatically by `fx build`.
 If you are manually running a remote-wrapped build step,
 you may need to wrap your build command with:
 
-  {fuchsia.REPROXY_WRAP} -- command...
+  {reproxy_wrap.REPROXY_WRAP} -- command...
 
 'Proxy started successfully.' indicates that reproxy is running.
 """
@@ -590,7 +615,9 @@ def _diagnose_reproxy_error_line(line: str) -> None:
 
 
 def analyze_rbe_logs(
-    rewrapper_pid: int, action_log: Path | None = None
+    rewrapper_pid: int,
+    env: Mapping[str, str],
+    action_log: Path | None = None,
 ) -> None:
     """Attempt to explain failure by examining various logs.
 
@@ -598,17 +625,18 @@ def analyze_rbe_logs(
 
     Args:
       rewrapper_pid: process id of the failed rewrapper invocation.
+      env: environment variable mapping.
       action_log: The .rrpl file from `rewrapper --action_log=LOG`,
         which is a proxy.LogRecord textproto.
     """
     # See build/rbe/fuchsia-reproxy-wrap.sh for the setup of these
     # environment variables.
-    reproxy_logdir_str = _reproxy_log_dir()
+    reproxy_logdir_str = _reproxy_log_dir(env)
     if not reproxy_logdir_str:
         return  # give up
     reproxy_logdir = Path(reproxy_logdir_str)
 
-    rewrapper_logdir_str = _rewrapper_log_dir()
+    rewrapper_logdir_str = _rewrapper_log_dir(env)
     if not rewrapper_logdir_str:
         return  # give up
     rewrapper_logdir = Path(rewrapper_logdir_str)
@@ -1241,8 +1269,7 @@ def download_from_stub_path(
     # directories in the build workspace during a build, which happened
     # in b/394155554.
     lock_file = Path(".dl-locks") / stub_path
-    lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with cl_utils.BlockingFileLock(lock_file) as lock:
+    with lock_utils.BlockingFileLock(lock_file):
         if not stub_path.exists():
             msg(f"Ignoring request to download nonexistent stub: {stub_path}")
             return ok_result
@@ -1284,6 +1311,7 @@ class RemoteAction(object):
         self,
         rewrapper: Path,
         command: Sequence[str],
+        env: Mapping[str, str],
         rbe_profile: rbe_profile.RbeProfile | None = None,
         local_only_command: Sequence[str] | None = None,
         options: Sequence[str] | None = None,
@@ -1383,6 +1411,7 @@ class RemoteAction(object):
             casfs.ari_size instead of downloading them.
         """
         self._rewrapper = rewrapper
+        self._env = env
         self._config = cfg  # can be None
         self._exec_strategy = exec_strategy  # can be None
         self._save_temps = save_temps
@@ -1715,7 +1744,7 @@ exec "${{cmd[@]}}"
                 ).items()
             }
 
-        platform_env = _rewrapper_platform_env()
+        platform_env = _rewrapper_platform_env(self._env)
         if platform_env:
             # env takes precedence over the cfg (not merged)
             merged_values.update(take_dict_last_values(platform_env))
@@ -1865,7 +1894,7 @@ exec "${{cmd[@]}}"
     @property
     def remote_build_subdir(self) -> Path:  # relative
         if self.canonicalize_working_dir:
-            return reclient_canonical_working_dir(self.build_subdir)
+            return reclient.canonical_working_dir(self.build_subdir)
         return self.build_subdir
 
     @property
@@ -1991,7 +2020,7 @@ exec "${{cmd[@]}}"
         )
 
     def _generate_remote_command_prefix(self) -> Iterable[str]:
-        # No need to prepend with fuchsia.REPROXY_WRAP here,
+        # No need to prepend with reproxy_wrap.REPROXY_WRAP here,
         # because auto_relaunch_with_reproxy() does that.
         yield from self._generate_rewrapper_command_prefix()
         yield "--"
@@ -2131,7 +2160,7 @@ exec "${{cmd[@]}}"
             return
 
         self.vmsg("Collecting digests for all remote outputs.")
-        unique_log_dir = _reproxy_log_dir()  # unique per build
+        unique_log_dir = _reproxy_log_dir(self._env)  # unique per build
         build_id = Path(unique_log_dir).name if unique_log_dir else "unknown"
         stub_infos = log_record.make_download_stubs(
             files=self.output_files_relative_to_working_dir,
@@ -2205,7 +2234,7 @@ exec "${{cmd[@]}}"
 
     def downloader(self) -> remotetool.RemoteTool:
         cfg = self.exec_root / _REPROXY_CFG
-        return remotetool.configure_remotetool(cfg)
+        return remotetool.configure(cfg, env=self._env)
 
     def _cleanup(self) -> None:
         self.vmsg("Cleaning up temporary files.")
@@ -2356,6 +2385,7 @@ exec "${{cmd[@]}}"
         ] and self.diagnose_nonzero:
             analyze_rbe_logs(
                 rewrapper_pid=result.pid,
+                env=self._env,
                 action_log=self._action_log,
             )
 
@@ -2468,6 +2498,82 @@ exec "${{cmd[@]}}"
         with cl_utils.timer_cm("RemoteAction.run()"):
             return self.run()
 
+    @functools.cached_property
+    def _exec_root_top_entries(self) -> frozenset[str] | None:
+        """Top-level directory/file names at exec_root, or None if unavailable.
+
+        Listing only the top-level exec_root directory (never build_subdir) is
+        O(N) in the small number of root entries (cached once per RemoteAction)
+        and does not trigger casfs blob hydration.
+        """
+        try:
+            entries = set(os.listdir(self.exec_root))
+        except OSError:
+            return None
+        if self.build_subdir.parts:
+            entries.add(self.build_subdir.parts[0])
+        return frozenset(entries)
+
+    @functools.cached_property
+    def _needs_remote_workspace_validation(self) -> bool:
+        return (
+            self.rbe_profile.remote_exec_root == _ROOT_POSIX_PATH
+            or self.rbe_profile.remote_exec_root_has_wildcards
+        )
+
+    @functools.cached_property
+    def _first_exec_root_segment_is_glob(self) -> bool:
+        pattern_parts = self.rbe_profile.remote_exec_root.parts[1:]
+        return bool(pattern_parts) and glob.has_magic(pattern_parts[0])
+
+    def _is_valid_remote_workspace_relpath(self, rel: PurePosixPath) -> bool:
+        """Checks whether `rel` is a plausible workspace path under remote_exec_root."""
+        if not self._needs_remote_workspace_validation:
+            return True
+        if not rel.parts:
+            return False
+        top_part = rel.parts[0]
+        if self.build_subdir.parts and top_part == self.build_subdir.parts[0]:
+            return True
+        if (
+            self.canonicalize_working_dir
+            and reclient.is_canonical_working_dir_path(rel)
+        ):
+            return True
+        if top_part in _UNIX_SYSTEM_DIRS:
+            return False
+        top_entries = self._exec_root_top_entries
+        return top_entries is not None and top_part in top_entries
+
+    def _try_relativize_remote_dep(self, p: Path) -> Path | None:
+        """Attempts to relativize a remote depfile path to the working directory."""
+        if self.canonicalize_working_dir:
+            if (
+                rel_canonical := reclient.relativize_canonical_path(
+                    p, self.build_subdir
+                )
+            ) is not None:
+                return rel_canonical
+
+        if p.is_absolute():
+            norm_p = Path(posixpath.normpath(str(p)))
+            skip_exec_root_match = (
+                self._first_exec_root_segment_is_glob
+                and len(norm_p.parts) > 1
+                and norm_p.parts[1] in _NON_SANDBOX_SYSTEM_DIRS
+            )
+            if not skip_exec_root_match:
+                rel = self.rbe_profile.strip_remote_exec_root(norm_p)
+                if rel is not None and self._is_valid_remote_workspace_relpath(
+                    rel
+                ):
+                    return cl_utils.relpath(
+                        Path("/") / rel,
+                        start=Path("/") / self.remote_build_subdir,
+                    )
+
+        return None
+
     def _relativize_local_deps(self, path: str) -> str:
         p = Path(path)
         if p.is_absolute():
@@ -2479,35 +2585,29 @@ exec "${{cmd[@]}}"
 
     def _relativize_remote_deps(self, path: str) -> str:
         p = Path(path)
-        if p.is_absolute():
-            new_path = str(cl_utils.relpath(p, start=self.remote_working_dir))
+        if (rel_remote := self._try_relativize_remote_dep(p)) is not None:
+            new_path = str(rel_remote)
             self.vmsg(f"transformed dep path: {path} -> {new_path}")
             return new_path
+
+        if p.is_absolute():
+            msg(f"Unable to relativize path: {path}")
 
         return path
 
     def _relativize_remote_or_local_deps(self, path: str) -> str:
-        """Relativize absolute paths (in depfiles).
+        """Relativize remote or local paths in depfiles.
 
         Use this variant when it is uncertain whether or not a depfile
         came from remote or local execution.
         """
         p = Path(path)
-        if p.is_absolute():
-            if self.exec_root in p.parents:
-                new_path = str(cl_utils.relpath(p, start=self.working_dir))
-            elif self.remote_exec_root in p.parents:
-                new_path = str(
-                    cl_utils.relpath(p, start=self.remote_working_dir)
-                )
-            else:
-                msg(f"Unable to relativize path: {path}")
-                return path
-
+        if p.is_absolute() and self.exec_root in p.parents:
+            new_path = str(cl_utils.relpath(p, start=self.working_dir))
             self.vmsg(f"transformed dep path: {path} -> {new_path}")
             return new_path
 
-        return path
+        return self._relativize_remote_deps(path)
 
     def _filtered_outputs_for_comparison(
         self,
@@ -3152,6 +3252,7 @@ _MAIN_ARG_PARSER = _main_arg_parser()
 
 def remote_action_from_args(
     main_args: argparse.Namespace,
+    env: Mapping[str, str],
     remote_options: Sequence[str] | None = None,
     command: Sequence[str] | None = None,
     # These inputs and outputs can come from application-specific logic.
@@ -3167,7 +3268,7 @@ def remote_action_from_args(
         rbe_prof = kwargs.pop("rbe_profile", None)
     if rbe_prof is None:
         try:
-            rbe_prof = rbe_profile.load(PROJECT_ROOT, os.environ)
+            rbe_prof = rbe_profile.load(PROJECT_ROOT, env)
         except (ValueError, FileNotFoundError) as e:
             raise ValueError(str(e))
 
@@ -3197,6 +3298,7 @@ def remote_action_from_args(
         rewrapper=main_args.bindir / "rewrapper",
         options=(remote_options or []),
         command=command or main_args.command,
+        env=env,
         rbe_profile=rbe_prof,
         cfg=main_args.cfg,
         exec_strategy=main_args.exec_strategy,
@@ -3222,7 +3324,7 @@ def remote_action_from_args(
         remote_debug_command=main_args.remote_debug_command,
         use_xattr=_CAN_HAVE_XATTR and not main_args.disable_xattr,
         casfs_virtualize=kwargs.pop(
-            "casfs_virtualize", casfs.load().virtualize
+            "casfs_virtualize", casfs.load(PROJECT_ROOT, env).virtualize
         ),
         **kwargs,
     )
@@ -3301,7 +3403,10 @@ def forward_remote_flags(
 
 
 def auto_relaunch_with_reproxy(
-    script: Path, argv: Sequence[str], args: argparse.Namespace
+    script: Path,
+    argv: Sequence[str],
+    args: argparse.Namespace,
+    env: Mapping[str, str],
 ) -> None:
     """If reproxy is not already running, re-launch with reproxy running.
 
@@ -3310,6 +3415,7 @@ def auto_relaunch_with_reproxy(
       argv: the original complete invocation
       args: argparse Namespace for argv.  Only needs to be partially
           processed as far as inherit_main_arg_parser_flags().
+      env: environment variable mapping.
 
     Returns:
       nothing when reproxy is already running.
@@ -3325,8 +3431,8 @@ def auto_relaunch_with_reproxy(
         # Don't need reproxy when no call to rewrapper is expected.
         return
 
-    proxy_log_dir = _reproxy_log_dir()
-    rewrapper_log_dir = _rewrapper_log_dir()
+    proxy_log_dir = _reproxy_log_dir(env)
+    rewrapper_log_dir = _rewrapper_log_dir(env)
     if args.verbose:
         msg(f"Detected RBE_proxy_log_dir={proxy_log_dir}")
         msg(f"Detected RBE_log_dir={rewrapper_log_dir}")
@@ -3335,20 +3441,24 @@ def auto_relaunch_with_reproxy(
         # Ok for caller to proceed and eventually invoke rewrapper
         return
 
-    python = cl_utils.relpath(Path(sys.executable), start=Path(os.curdir))
-    relaunch_args = ["--", str(python), "-S", str(script), *argv]
-    # Wrap verbosely when auto-re-launching with reproxy wrapper, because
-    # this is typically used for one-off commands during debug.
-    # Normal builds should already be wrapped, and should not require auto-re-launching.
-    reproxy_wrap = [cl_utils.qualify_tool_path(fuchsia.REPROXY_WRAP), "-v"]
+    # Reproxy is missing: lazy import reproxy_wrap to handle the auto-relaunch
+    # with zero import overhead on the normal build fast-path.
+    from build.rbe import reproxy_wrap
 
-    cmd_str = cl_utils.command_quoted_str(reproxy_wrap + relaunch_args)
+    relaunch_cmd, relaunch_env = reproxy_wrap.relaunch_cmd_and_env(
+        script=script,
+        argv=argv,
+        fuchsia_dir=PROJECT_ROOT,
+        env=env,
+        verbose=True,
+    )
+    cmd_str = cl_utils.command_quoted_str(relaunch_cmd)
     msg(f"Automatically re-launching: {cmd_str}")
-    cl_utils.exec_relaunch(reproxy_wrap + relaunch_args)
+    cl_utils.exec_relaunch(relaunch_cmd, env=relaunch_env)
     assert False, "exec_relaunch() should never return"
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     # Move --remote-* flags from the wrapped command to equivalent main args.
     main_argv, filtered_command = forward_remote_flags(argv)
 
@@ -3365,11 +3475,13 @@ def main(argv: Sequence[str]) -> int:
         script=Path(__file__),
         argv=argv,
         args=main_args,
+        env=env,
     )
     # At this point, reproxy is guaranteed to be running.
 
     remote_action = remote_action_from_args(
         main_args=main_args,
+        env=env,
         remote_options=other_remote_options,
         command=filtered_command,
     )
@@ -3379,4 +3491,4 @@ def main(argv: Sequence[str]) -> int:
 
 if __name__ == "__main__":
     init_from_main_once()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

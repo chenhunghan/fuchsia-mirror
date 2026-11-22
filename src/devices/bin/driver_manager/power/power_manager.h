@@ -5,6 +5,7 @@
 #ifndef SRC_DEVICES_BIN_DRIVER_MANAGER_POWER_POWER_MANAGER_H_
 #define SRC_DEVICES_BIN_DRIVER_MANAGER_POWER_POWER_MANAGER_H_
 
+#include <fidl/fuchsia.driver.development/cpp/fidl.h>
 #include <fidl/fuchsia.power.broker/cpp/fidl.h>
 #include <fidl/fuchsia.power.broker/cpp/wire.h>
 #include <fidl/fuchsia.power.system/cpp/fidl.h>
@@ -15,6 +16,7 @@
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/zx/eventpair.h>
+#include <lib/zx/result.h>
 
 #include <memory>
 #include <variant>
@@ -87,8 +89,10 @@ class PowerManager : public fidl::WireServer<fuchsia_power_broker::ElementRunner
   void OnBootupComplete();
   void OnNodeBound(std::shared_ptr<const Node> node);
   void OnNodeUnbinding(std::shared_ptr<const Node> node);
-  void CreateAllDriversPowerElement(std::shared_ptr<Node> root_node);
+  void CreateAllDriversPowerElement(std::weak_ptr<Node> root_node);
   void LeaseAllDrivers(const std::shared_ptr<Node>& root_node, fit::callback<void()> callback);
+  void StartSuspendSession(const fuchsia_driver_development::NodeTarget& target,
+                           zx::eventpair token, fit::callback<void(zx::result<>)> cb);
   void CreatePowerElement(
       std::optional<fidl::ClientEnd<fuchsia_power_broker::Topology>> topology_client,
       std::string_view name, fuchsia_power_broker::DependencyToken element_token,

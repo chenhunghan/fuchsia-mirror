@@ -92,6 +92,7 @@
                                     fuchsia_type: "uint64",
                                 },
                                 wake_vector: { type: "boolean" },
+                                input_buffer_enabled: { type: "boolean" },
                                 pull: { $ref: "#/definitions/Pull" },
                                 buffer_mode: { $ref: "#/definitions/BufferMode" },
                                 power_source: {
@@ -124,6 +125,7 @@
                                     fuchsia_type: "uint64",
                                 },
                                 wake_vector: { type: "boolean" },
+                                input_buffer_enabled: { type: "boolean" },
                             },
                         },
                         InitCall: {

@@ -285,8 +285,8 @@ void BulkOddSupplyTestInner(bool check_vmar, bool use_src_offset) {
     uint64_t supply_len = kSupplyLengths[supply_idx];
     uint64_t offset = page_idx;
 
-    std::unique_ptr<TestThread> ts[kSupplyLengths[supply_idx]];
-    for (uint64_t j = 0; j < kSupplyLengths[supply_idx]; j++) {
+    std::vector<std::unique_ptr<TestThread>> ts(supply_len);
+    for (uint64_t j = 0; j < supply_len; j++) {
       uint64_t thread_offset = offset + j;
       ts[j] = std::make_unique<TestThread>([vmo, thread_offset, check_vmar]() -> bool {
         return check_buffer(vmo, thread_offset, 1, check_vmar);
@@ -473,13 +473,13 @@ TEST(Pager, VmarRemapTest) {
   std::unique_ptr<TestThread> ts[kNumPages];
   for (unsigned t = 0; t < kNumPages; t++) {
     ts[t] = std::make_unique<TestThread>([addr, t, vmo2]() -> bool {
-      uint8_t data[zx_system_get_page_size()];
-      vmo2->GenerateBufferContents(data, 1, t);
+      std::vector<uint8_t> data(zx_system_get_page_size());
+      vmo2->GenerateBufferContents(data.data(), 1, t);
       // Thread |t| accesses page |t|. Each thread will block here and generate a page request. We
       // will resolve the page request after switching out the mapping to vmo2, so the contents will
       // match vmo2, not vmo1.
-      return memcmp(data, reinterpret_cast<uint8_t*>(addr + t * zx_system_get_page_size()),
-                    zx_system_get_page_size()) == 0;
+      return memcmp(data.data(), reinterpret_cast<uint8_t*>(addr + t * zx_system_get_page_size()),
+                    data.size()) == 0;
     });
     ASSERT_TRUE(ts[t]->Start());
   }
@@ -543,10 +543,10 @@ TEST(Pager, VmarMapRangeTest) {
   // Verify the buffer contents. This should generate a new request for
   // the second page, which we want to fulfill.
   TestThread t2([vmo, &ptr]() -> bool {
-    uint8_t data[2 * zx_system_get_page_size()];
-    vmo->GenerateBufferContents(data, 2, 0);
+    std::vector<uint8_t> data(2 * zx_system_get_page_size());
+    vmo->GenerateBufferContents(data.data(), 2, 0);
 
-    return memcmp(data, reinterpret_cast<uint8_t*>(ptr), 2 * zx_system_get_page_size()) == 0;
+    return memcmp(data.data(), reinterpret_cast<uint8_t*>(ptr), data.size()) == 0;
   });
 
   ASSERT_TRUE(t2.Start());
@@ -1955,16 +1955,14 @@ TEST(Pager, PinnedSupplyPages) {
                                   zx_system_get_page_size(), aux_vmo.get(), 0));
 
   // Verify contents of the supplied page.
-  uint8_t buf[zx_system_get_page_size()];
-  ASSERT_OK(vmo.read(&buf[0], zx_system_get_page_size(), sizeof(buf)));
-  uint8_t expected[zx_system_get_page_size()];
-  memset(&expected[0], 0, zx_system_get_page_size());
-  ASSERT_EQ(0, memcmp(buf, expected, zx_system_get_page_size()));
+  const auto kZeroFill = vmo_test::TestFillPages<1>();
+  std::vector<uint8_t> buf(zx_system_get_page_size());
+  ASSERT_OK(vmo.read(buf.data(), zx_system_get_page_size(), buf.size()));
+  ASSERT_EQ(0, memcmp(buf.data(), kZeroFill.data(), buf.size()));
 
   // Overwrite the supplied page that we can check for later.
-  memset(&buf[0], 0xa, zx_system_get_page_size());
-  memset(&expected[0], 0xa, zx_system_get_page_size());
-  ASSERT_OK(vmo.write(&buf[0], zx_system_get_page_size(), sizeof(buf)));
+  const auto kExpected = vmo_test::TestFillPages<1, 0xa>();
+  ASSERT_OK(vmo.write(kExpected.data(), zx_system_get_page_size(), kExpected.size_bytes()));
 
   // Now pin the middle page.
   zx::iommu iommu;
@@ -1986,15 +1984,14 @@ TEST(Pager, PinnedSupplyPages) {
                                   aux_vmo.get(), 0));
 
   // Verify that the middle page hasn't been overwritten.
-  ASSERT_OK(vmo.read(&buf[0], zx_system_get_page_size(), sizeof(buf)));
-  ASSERT_EQ(0, memcmp(buf, expected, zx_system_get_page_size()));
+  ASSERT_OK(vmo.read(buf.data(), zx_system_get_page_size(), buf.size()));
+  ASSERT_EQ(0, memcmp(buf.data(), kExpected.data(), buf.size()));
 
   // Verify that the remaining pages have been supplied with zeros from the aux_vmo.
-  memset(&expected[0], 0, zx_system_get_page_size());
-  ASSERT_OK(vmo.read(&buf[0], 0, sizeof(buf)));
-  ASSERT_EQ(0, memcmp(buf, expected, zx_system_get_page_size()));
-  ASSERT_OK(vmo.read(&buf[0], 2 * zx_system_get_page_size(), sizeof(buf)));
-  ASSERT_EQ(0, memcmp(buf, expected, zx_system_get_page_size()));
+  ASSERT_OK(vmo.read(buf.data(), 0, buf.size()));
+  ASSERT_EQ(0, memcmp(buf.data(), kZeroFill.data(), buf.size()));
+  ASSERT_OK(vmo.read(buf.data(), 2 * zx_system_get_page_size(), buf.size()));
+  ASSERT_EQ(0, memcmp(buf.data(), kZeroFill.data(), buf.size()));
 }
 
 // Tests that resizing a non-resizable pager vmo fails.
@@ -2260,9 +2257,9 @@ TEST(Pager, FailOverlappingRangeRead) {
   ASSERT_TRUE(pager.CreateVmo(kNumPages, &vmo));
 
   auto read_helper = [vmo](uint64_t page_offset, uint64_t page_count) -> bool {
-    uint8_t data[page_count * zx_system_get_page_size()];
-    return vmo->vmo().read(data, page_offset * zx_system_get_page_size(),
-                           page_count * zx_system_get_page_size()) == ZX_OK;
+    std::vector<uint8_t> data(page_count * zx_system_get_page_size());
+    return vmo->vmo().read(data.data(), page_offset * zx_system_get_page_size(), data.size()) ==
+           ZX_OK;
   };
 
   // End of the request range overlaps with the failed range.
@@ -3744,10 +3741,10 @@ void WaitForData(const void* expected, const volatile void* data, size_t size) {
   // observe enough of the system to notice that we are actually performing undefined behavior.
   //
   // If we really wanted to insert this ASSERT here we could treat the kernel like a device and act
-  // like we are a driver and perform a read memory barrier (hw_rmb() in our ddk). This adds a
-  // dependency on the ddk and is, arguably, making things more confusing when we can simply leave
-  // it to the calling code to synchronize further with the kernel and perform a memcmp on a non
-  // volatile, but synchronized, reference to the data.
+  // like we are a driver and perform a read memory barrier (ReadDataMemoryBarrier() in
+  // //sdk/lib/memory_barriers). This adds a dependency on it and is, arguably, making things more
+  // confusing when we can simply leave it to the calling code to synchronize further with the
+  // kernel and perform a memcmp on a non volatile, but synchronized, reference to the data.
 }
 
 TEST(Pager, EarlyWakeOnSupply) {

@@ -209,6 +209,8 @@ pub(crate) trait BootfsConfigBuilder {
 /// The interface for specifying the configuration to provide for a package.
 pub(crate) trait PackageConfigBuilder {
     /// Add configuration to the builder for a component within a package.
+    // TODO(https://fxbug.dev/575932542): Remove packaged structured config builder support.
+    #[cfg(test)]
     fn component(&mut self, pkg_path: &str) -> Result<&mut dyn ComponentConfigBuilder>;
 
     /// Add a config data file to the package in the builder.
@@ -257,6 +259,7 @@ pub(crate) trait DomainConfigDirectoryBuilder {
 }
 
 /// The interface for specifying the configuration to provide for a component.
+#[cfg(test)]
 pub(crate) trait ComponentConfigBuilder {
     /// Add a value for a Structured Configuration field for a given component.
     fn field_value(
@@ -268,6 +271,7 @@ pub(crate) trait ComponentConfigBuilder {
 
 /// An extension trait that allows the field value to be passed without calling
 /// `.into()` at the call-site.
+#[cfg(test)]
 pub(crate) trait ComponentConfigBuilderExt {
     /// Add a value for a Structured Configuration field for a given component.
     fn field(
@@ -277,6 +281,7 @@ pub(crate) trait ComponentConfigBuilderExt {
     ) -> Result<&mut dyn ComponentConfigBuilder>;
 }
 
+#[cfg(test)]
 impl ComponentConfigBuilderExt for &mut dyn ComponentConfigBuilder {
     fn field(
         &mut self,
@@ -662,6 +667,7 @@ impl DomainConfigDirectoryBuilder for DomainConfigDirectory {
 }
 
 impl PackageConfigBuilder for PackageConfiguration {
+    #[cfg(test)]
     fn component(&mut self, pkg_path: &str) -> Result<&mut dyn ComponentConfigBuilder> {
         match self.components.entry(pkg_path.to_owned()) {
             entry @ Entry::Vacant(_) => {
@@ -705,6 +711,7 @@ impl PackageConfigBuilder for PackageConfiguration {
     }
 }
 
+#[cfg(test)]
 impl ComponentConfigBuilder for ComponentConfiguration {
     /// Add a value for a Structured Configuration field for a given component.
     fn field_value(

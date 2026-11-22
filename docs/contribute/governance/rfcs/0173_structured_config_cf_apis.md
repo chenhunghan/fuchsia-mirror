@@ -129,7 +129,7 @@ compiled component manifest.
 We have considered and rejected an [alternative](#typed-values-data) to store
 defined values using the same encoding as is sent to the component itself.
 
-### Component value sources
+### Component value sources {#component-value-sources}
 
 For packaged components, config values are stored in a "configuration value
 file". A configuration value file is a persistent FIDL encoding of
@@ -416,7 +416,7 @@ auditable.
 Per [RFC-0127], structured configuration is not designed to store user-
 generated data.
 
-## Testing
+## Testing {#testing}
 
 The most sensitive part of this design is the dynamic FIDL encoder used by
 Component Manager. Its prototype has been integrated as a "language backend" in

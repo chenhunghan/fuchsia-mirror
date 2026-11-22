@@ -18,7 +18,7 @@ Fuchsia follows an over-commit model: processes can allocate more memory than
 can be satisfied at a given moment and as memory pages are written they are
 physically allocated (wired) on the fly by kernel.
 
-## Userspace memory
+## Userspace memory {:#userspace-memory}
 
 Which processes are using all of the memory?
 
@@ -65,7 +65,7 @@ one other process. Note that this does not account for shared VMOs that are not
 mapped. It also does not indicate how many processes share the memory: it could
 be 2, it could be 50.
 
-### Visualize memory usage
+### Visualize memory usage {:#visualize-memory-usage}
 
 If you have a Fuchsia build, you can use treemap to visualize memory usage by
 the system.

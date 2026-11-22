@@ -161,7 +161,7 @@ void HidInstance::GetReportDesc(GetReportDescCompleter::Sync& completer) {
   const uint8_t* desc = base_->GetReportDesc();
 
   // (BUG 35762) Const cast is necessary until simple data types are generated
-  // as const in LLCPP. We know the data is not modified.
+  // as const in C++ wire bindings. We know the data is not modified.
   completer.Reply(fidl::VectorView<uint8_t>::FromExternal(const_cast<uint8_t*>(desc), desc_size));
 }
 

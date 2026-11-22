@@ -62,7 +62,6 @@ fuchsia_cc_driver("fusb302-driver") {
 }
 
 fuchsia_driver_component("fusb302") {
-  info = "meta/fusb302-info.json"
   component_name = "fusb302"
   deps = [ ":fusb302-driver" ]
   dml_label = ":fusb302-dml"

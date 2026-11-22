@@ -36,11 +36,11 @@ is compiled, the binary artifact created by the compiler interfaces with the sys
 through the ABI. Changes to the system ABI may require you to recompile
 your source code to account for the changes in the ABI.
 
-## ABI Surfaces
+## ABI surfaces {#abi-surfaces}
 
 This section describes the various ABI surfaces for Fuchsia components.
 
-### vDSO
+### vDSO {#vdso}
 
 The vDSO is a virtual shared library that provides access to the kernel.
 Concretely, the vDSO is an ELF shared library, called `libzircon.so`, that
@@ -108,7 +108,7 @@ For example, components access the root certificates through a namespace entry
 that contains a `certs.pem` file. The `pem` data format is therefore part of the
 system ABI.
 
-### Package conventions
+### Package conventions {#package-conventions}
 
 Fuchsia packages have a directory structure that follows certain naming
 conventions. These conventions are also part of the system ABI. This section
@@ -181,7 +181,7 @@ For example, the creator maps the vDSO and allocates a stack for the initial
 thread. The structure of the VMAR when the process is started is part of the
 system ABI.
 
-#### Job policy
+#### Job policy {#job-policy}
 
 Processes are run in jobs, which can apply policy to the processes and jobs they
 contain. The job policy applied to processes is part of the system ABI. For

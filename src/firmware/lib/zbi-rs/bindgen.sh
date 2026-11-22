@@ -75,7 +75,7 @@ echo ${tmp}
     --allowlist-var 'ZBI_.+' \
     --blocklist-type 'zbi_topology_.+_t_.*' \
     --blocklist-type 'zbi_topology_(entity|architecture_info|processor|node)_t' \
-    --blocklist-type 'zbi_dcfg_arm_smmu_driver_t' \
+    --blocklist-type 'zbi_dcfg_arm_smmu_v2_driver_t' \
     --use-core \
     -- -x c \
     -I ${FUCHSIA_DIR}/sdk/lib/zbi-format/include \

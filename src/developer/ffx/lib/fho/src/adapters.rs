@@ -26,7 +26,7 @@ macro_rules! embedded_plugin {
             $crate::macro_deps::check_strict_constraints(
                 &env.ffx_command().global,
                 Some(env.environment_context()),
-                <$tool as $crate::FfxTool<$err>>::requires_target(),
+                <$tool as $crate::FfxTool<$err>>::target_need(),
             )?;
 
             // Create the writer, and if the schema is flag is set,

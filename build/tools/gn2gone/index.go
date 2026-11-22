@@ -29,6 +29,13 @@ const (
 	RegionDotGN Region = "dotgn"
 )
 
+// AttrVar records an identifier referenced on the right-hand side of a target
+// attribute assignment (`=` or `+=`), e.g. `deps = common_deps + [ ":extra" ]`.
+type AttrVar struct {
+	Attr string
+	Name string
+}
+
 // Target is a call that defines a target: `<template>("<name>") { ... }`,
 // at any depth of `if`/`else` blocks, outside other targets.
 type Target struct {
@@ -42,8 +49,19 @@ type Target struct {
 	TestOnly bool
 	// Attrs are the attributes assigned directly in the target's block.
 	Attrs []string
+	// AttrVars are file-scope variable identifiers referenced in the target's
+	// attribute assignments (`=` or `+=`).
+	AttrVars      []AttrVar
+	localAssigned map[string]bool
 	// InCondition is true if the target is inside an `if`/`else`.
 	InCondition bool
+	// InLoop is true if the target is inside a `foreach`.
+	InLoop bool
+	// InTemplate is true if the target is inside a `template` definition.
+	InTemplate bool
+	// HasInnerControlFlow is true if an `if`/`else` or `foreach` block appears
+	// inside the target's body.
+	HasInnerControlFlow bool
 	// Condition is the innermost enclosing condition as written, e.g.
 	// "is_host", or "!(is_host)" in an `else` block; "" outside conditions.
 	Condition string
@@ -97,6 +115,9 @@ type FileIndex struct {
 	SentinelLine int
 	Targets      []*Target
 	Literals     []*Literal
+	// BelowVarRefs maps a top-level variable assigned (`=` or `+=`) in
+	// RegionBelow to other identifiers referenced on its right-hand side.
+	BelowVarRefs map[string][]string
 	// AboveOther counts top-level statements above the sentinel that are not
 	// `import()` or `assert()` calls or target definitions, e.g. variable
 	// assignments or `if` blocks. Such statements mean BUILD.gn can't simply
@@ -217,6 +238,8 @@ type walkCtx struct {
 	scopeOwner  string
 	callArgOf   string
 	inCondition bool
+	inLoop      bool
+	inTemplate  bool
 	condition   string
 	// suffix is set while walking an expression appended to an existing
 	// value (see Literal.Suffix). Lists reset it: their entries are separate
@@ -272,12 +295,17 @@ func (w *walker) walk(n *Node, ctx walkCtx, parentType, parentValue string) {
 				Region:      w.region(n.Line()),
 				Template:    n.Value,
 				InCondition: ctx.inCondition,
+				InLoop:      ctx.inLoop,
+				InTemplate:  ctx.inTemplate,
 				Condition:   ctx.condition,
 			}
 			if args != nil && len(args.Child) > 0 && args.Child[0].Type == "LITERAL" {
 				newTarget.Name = strings.Trim(args.Child[0].Value, `"`)
 			}
 			w.fi.Targets = append(w.fi.Targets, newTarget)
+		}
+		if ctx.target != nil && n.Value == "foreach" {
+			ctx.target.HasInnerControlFlow = true
 		}
 		if args != nil {
 			actx := nctx
@@ -287,6 +315,12 @@ func (w *walker) walk(n *Node, ctx walkCtx, parentType, parentValue string) {
 		if block != nil {
 			bctx := nctx
 			bctx.callArgOf = ""
+			switch n.Value {
+			case "foreach":
+				bctx.inLoop = true
+			case "template":
+				bctx.inTemplate = true
+			}
 			if newTarget != nil {
 				bctx.target = newTarget
 				bctx.attr = ""
@@ -300,6 +334,9 @@ func (w *walker) walk(n *Node, ctx walkCtx, parentType, parentValue string) {
 	case "CONDITION":
 		// Children: the condition, the `if` block, and an optional `else`
 		// block or nested `else if` CONDITION.
+		if ctx.target != nil {
+			ctx.target.HasInnerControlFlow = true
+		}
 		nctx := ctx
 		nctx.inCondition = true
 		cond := ""
@@ -339,6 +376,12 @@ func (w *walker) walk(n *Node, ctx walkCtx, parentType, parentValue string) {
 			nctx.suffix = n.Value == "+="
 			for _, c := range n.Child[min(1, len(n.Child)):] {
 				w.walk(c, nctx, "BINARY", n.Value)
+			}
+			if t := ctx.target; t != nil && ctx.attr == "" && !ctx.inScope && n.Value == "=" && lhs != "" {
+				if t.localAssigned == nil {
+					t.localAssigned = map[string]bool{}
+				}
+				t.localAssigned[lhs] = true
 			}
 			return
 		}
@@ -392,6 +435,20 @@ func (w *walker) walk(n *Node, ctx walkCtx, parentType, parentValue string) {
 				lit.InnerAttr = ctx.attr
 			}
 			w.fi.Literals = append(w.fi.Literals, lit)
+		}
+		return
+	case "IDENTIFIER":
+		if !ctx.inScope && ctx.callArgOf == "" && parentType != "ACCESSOR" && ctx.attr != "" && (ctx.op == "=" || ctx.op == "+=") {
+			if ctx.target != nil {
+				if !ctx.target.localAssigned[n.Value] {
+					ctx.target.AttrVars = append(ctx.target.AttrVars, AttrVar{Attr: ctx.attr, Name: n.Value})
+				}
+			} else if w.region(n.Line()) == RegionBelow {
+				if w.fi.BelowVarRefs == nil {
+					w.fi.BelowVarRefs = map[string][]string{}
+				}
+				w.fi.BelowVarRefs[ctx.attr] = append(w.fi.BelowVarRefs[ctx.attr], n.Value)
+			}
 		}
 		return
 	}

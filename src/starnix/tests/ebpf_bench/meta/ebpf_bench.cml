@@ -24,6 +24,9 @@
     },
     use: [
         {
+            protocol: [ "fuchsia.kernel.VmexResource" ],
+        },
+        {
             storage: "custom_artifacts",
             path: "/custom_artifacts",
         },

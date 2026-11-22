@@ -51,7 +51,11 @@ const (
 	HermeticShardPrefix = "hermetic:"
 
 	// The prefix added to the names of shards that run multiplied tests.
-	MultipliedShardPrefix = "multiplied:"
+	MultipliedShardPrefix = runtests.MultipliedShardPrefix
+
+	// The prefix added to the names of shards that run tests that produce
+	// performance results.
+	PerfShardPrefix = "perf:"
 
 	// The name of the key of the expected duration test tag.
 	expectedDurationTagKey = "expected_duration_milliseconds"
@@ -398,8 +402,8 @@ func PreserveOrder(shards []*Shard, modMatches []ModifierMatch) []*Shard {
 // PartitionShards splits a set of shards in two using the given partition
 // function.
 func PartitionShards(shards []*Shard, partitionFunc func(Test) bool, prefix string) ([]*Shard, []*Shard) {
-	matchingShards := make([]*Shard, 0, len(shards))
-	nonmatchingShards := make([]*Shard, 0, len(shards))
+	var matchingShards []*Shard
+	var nonmatchingShards []*Shard
 	for _, shard := range shards {
 		var matching []Test
 		var nonmatching []Test
@@ -433,13 +437,7 @@ func MarkShardsSkipped(shards []*Shard) ([]*Shard, error) {
 			if test.Affected {
 				return nil, errSkippedAffectedTest
 			}
-			summary.Tests = append(summary.Tests, runtests.TestDetails{
-				Name:        test.Name,
-				GNLabel:     test.Label,
-				SourceLabel: test.SourceLabel,
-				Status:      runtests.TestSkipped,
-				Tags:        test.Tags,
-			})
+			summary.Tests = append(summary.Tests, skippedTestDetails(test))
 		}
 		newShard := *shard
 		newShard.Skippable = true
@@ -456,19 +454,24 @@ func AddSummariesToShards(shards []*Shard) []*Shard {
 	for _, shard := range shards {
 		var summary runtests.TestSummary
 		for _, test := range shard.Tests {
-			summary.Tests = append(summary.Tests, runtests.TestDetails{
-				Name:        test.Name,
-				GNLabel:     test.Label,
-				SourceLabel: test.SourceLabel,
-				Status:      runtests.TestSkipped,
-				Tags:        test.Tags,
-			})
+			summary.Tests = append(summary.Tests, skippedTestDetails(test))
 		}
 		newShard := *shard
 		newShard.SummaryIfSkipped = summary
 		newShards = append(newShards, &newShard)
 	}
 	return newShards
+}
+
+func skippedTestDetails(test Test) runtests.TestDetails {
+	return runtests.TestDetails{
+		Name:        test.Name,
+		GNLabel:     test.Label,
+		SourceLabel: test.SourceLabel,
+		Status:      runtests.TestSkipped,
+		Tags:        test.Tags,
+		Metadata:    test.Metadata,
+	}
 }
 
 func divRoundUp(a, b int) int {
@@ -691,11 +694,7 @@ func shardByTime(shard *Shard, testDurations TestDurationsMap, numNewShards int)
 
 	var h subshardHeap
 	for i := 0; i < numNewShards; i++ {
-		// Initialize each subshard to have an empty list of tests so that it will
-		// be properly outputted in the json output file as a list instead of a nil
-		// value if the shard ends up with zero tests.
-		s := subshard{tests: []Test{}, targetStartupDuration: getTargetStartupDuration(shard.Env)}
-		h = append(h, s)
+		h = append(h, subshard{targetStartupDuration: getTargetStartupDuration(shard.Env)})
 	}
 
 	for _, test := range shard.Tests {

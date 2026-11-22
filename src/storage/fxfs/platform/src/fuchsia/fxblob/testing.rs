@@ -11,7 +11,7 @@ use anyhow::Error;
 use async_trait::async_trait;
 use blob_writer::BlobWriter;
 use delivery_blob::{CompressionMode, DeliveryBlobType, Type1Blob, Type2Blob};
-use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobReaderMarker, BlobWriterProxy, CreateBlobError};
+use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobWriterProxy, CreateBlobError};
 use fuchsia_component_client::connect_to_protocol_at_dir_svc;
 use fuchsia_merkle::Hash;
 use fxfs::errors::FxfsError;
@@ -105,13 +105,7 @@ impl BlobFixture for TestFixture {
     }
 
     async fn get_blob_vmo(&self, hash: Hash) -> zx::Vmo {
-        let blob_reader = connect_to_protocol_at_dir_svc::<BlobReaderMarker>(self.volume_out_dir())
-            .expect("failed to connect to the BlobReader service");
-        blob_reader
-            .get_vmo(&hash.into())
-            .await
-            .expect("transport error on BlobReader.GetVmo")
-            .expect("get_vmo failed")
+        self.blob_pager().unwrap().create_vmo(&hash.into()).await.expect("get_blob_vmo failed")
     }
 
     async fn get_blob(&self, hash: Hash) -> Result<Arc<FxBlob>, Error> {
@@ -126,7 +120,7 @@ impl BlobFixture for TestFixture {
             .into_any()
             .downcast::<BlobDirectory>()
             .unwrap()
-            .open_blob(&(hash.into()))
+            .open_blob(hash)
             .await?
             .ok_or_else(|| FxfsError::NotFound.into())
     }

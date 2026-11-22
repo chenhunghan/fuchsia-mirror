@@ -31,7 +31,6 @@ fidl("fuchsia.test.manager") {
   sources = [ "test_manager.fidl" ]
   sdk_area = "Testing"
   sdk_category = "host_tool"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

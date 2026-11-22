@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 use bstr::BString;
-use selinux_policy_derive::{Parse, Serialize, Validate};
+use selinux_policy_derive::{Parse, Serialize};
 use thiserror::Error;
 
-use super::traits::{HasName, HasPolicyId};
+use super::error::ValidateError;
+use super::traits::{HasName, HasPolicyId, Validate};
 use super::{MlsRange, Policy, RoleId, TypeId, UserId};
 use crate::NullessByteStr;
 
@@ -16,12 +17,21 @@ use crate::NullessByteStr;
 /// Used both in parsed binary policy structures (such as initial SIDs, `fs_use_*`, and
 /// `genfscon` rules) and at runtime when mapping userspace security context strings to
 /// [`crate::SecurityId`]s.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Parse, Serialize, Validate)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Parse, Serialize)]
 pub struct SecurityContext {
     user: UserId,
     role: RoleId,
     type_: TypeId,
     mls_range: MlsRange,
+}
+
+impl Validate for SecurityContext {
+    fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
+        self.user.validate(policy)?;
+        self.role.validate(policy)?;
+        policy.types().validate_concrete_type(self.type_)?;
+        self.mls_range.validate(policy)
+    }
 }
 
 impl SecurityContext {
@@ -230,6 +240,7 @@ pub enum SecurityContextError {
 #[cfg(test)]
 mod tests {
     use super::super::mls::{CategoryId, CategorySpan, MlsLevel, SensitivityId};
+    use super::super::traits::PolicyId;
     use super::*;
 
     fn test_policy() -> Policy {
@@ -638,5 +649,25 @@ mod tests {
         assert_eq!(equal_range.mls_range().high(), None);
         assert_eq!(equal_range, single_level);
         assert_eq!(policy.serialize_security_context(&equal_range), b"user0:object_r:type0:s0:c0");
+    }
+
+    #[test]
+    fn validate_security_context_rejects_type_attribute() {
+        let policy_bytes =
+            include_bytes!("../../testdata/micro_policies/allow_a_t_b_attr_class0_perm0_policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
+        let valid_context = policy.initial_context(crate::InitialSid::Kernel);
+        let attr_id = policy.types().get_attribute_by_name(b"b_attr").expect("look up b_attr").id();
+
+        let attr_context = SecurityContext::new(
+            valid_context.user(),
+            valid_context.role(),
+            attr_id,
+            valid_context.mls_range().clone(),
+        );
+        assert_eq!(
+            attr_context.validate(&policy),
+            Err(ValidateError::UnexpectedTypeAttribute { id: attr_id.as_u32() })
+        );
     }
 }

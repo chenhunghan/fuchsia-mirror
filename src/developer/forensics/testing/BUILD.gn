@@ -24,7 +24,7 @@ source_set("unit_test_fixture") {
   public_deps = [
     "//sdk/lib/inspect/testing/cpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//sdk/lib/vfs/cpp",
     "//src/developer/forensics/testing/stubs:cobalt",
@@ -68,8 +68,6 @@ source_set("gpretty_printers") {
   sources = [ "gpretty_printers.h" ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
     "//sdk/lib/fit-promise",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/crash_reports:filing_result",
@@ -80,8 +78,6 @@ source_set("gpretty_printers") {
     "//src/developer/forensics/utils:errors",
     "//src/developer/forensics/utils/cobalt",
     "//src/lib/fostr",
-    "//src/lib/fostr/fidl/fuchsia.mem",
-    "//src/lib/fsl",
     "//zircon/system/ulib/zx",
   ]
 }
@@ -107,7 +103,7 @@ source_set("log_message") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_hlcpp",
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
     "//zircon/system/ulib/zx",
   ]
 }

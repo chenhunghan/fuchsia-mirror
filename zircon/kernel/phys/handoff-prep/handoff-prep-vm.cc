@@ -17,9 +17,9 @@
 #include <ktl/inplace_vector.h>
 #include <ktl/iterator.h>
 #include <ktl/string_view.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
-#include <phys/elf-image.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
+#include <phys/elf/image.h>
 #include <phys/handoff-prep/handoff-prep.h>
 #include <phys/handoff/heap.h>
 #include <region-alloc/region.h>

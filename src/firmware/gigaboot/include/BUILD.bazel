@@ -1,0 +1,14 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "arpa/inet.h",
+        "shared/bootbyte.h",
+        "shared/xefi.h",
+    ],
+    visibility = ["//src/firmware/gigaboot/lib:__pkg__"],
+)

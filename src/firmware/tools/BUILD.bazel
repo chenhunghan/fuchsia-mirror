@@ -61,6 +61,14 @@ host_py_test(
 )
 
 host_py_test(
+    name = "post_processing_python_wrapper_test",
+    srcs = ["post_processing_python_wrapper_test.py"],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_data = ["post_processing_python_wrapper.sh"],
+)
+
+host_py_test(
     name = "zbi_to_android_boot_image_test",
     srcs = [
         "zbi_to_android_boot_image.py",

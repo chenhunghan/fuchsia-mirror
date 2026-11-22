@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import weakref
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from types import TracebackType
 from typing import Any, Self
 
@@ -572,6 +572,23 @@ def _release(resources: contextlib.ExitStack) -> None:
         _LOGGER.error(f"Error tearing down trace processor: {e}")
 
 
+def _iter_row_tuples(
+    result_iterator: Any, columns: Collection[str]
+) -> Iterator[tuple[Any, ...]]:
+    """Yields each row of a Perfetto `QueryResultIterator` as a tuple.
+
+    The iterator has already decoded every cell into its flat, row-major
+    `cells` sequence. Zipping `len(columns)` references to a single iterator
+    over `cells` groups consecutive cells into row tuples in C, without
+    copying `cells` or creating a per-row object.
+
+    `cells` is not a documented API of the Perfetto client. If a Perfetto
+    update changes it, the `query_rows` tests in tp_shell_test will fail.
+    """
+    cells_iter = iter(result_iterator.cells)
+    return zip(*([cells_iter] * len(columns)))
+
+
 class PerfettoTraceProcessor:
     """A wrapper around Perfetto's official Python TraceProcessor API.
 
@@ -731,12 +748,7 @@ class PerfettoTraceProcessor:
         try:
             result_iterator = self._tp.query(query)
             columns = tuple(result_iterator.column_names)
-
-            def row_gen() -> Iterator[tuple[Any, ...]]:
-                for row in result_iterator:
-                    yield tuple(getattr(row, col) for col in columns)
-
-            return columns, row_gen()
+            return columns, _iter_row_tuples(result_iterator, columns)
         except Exception as e:
             _LOGGER.error(f"Error running query: {e}")
             raise

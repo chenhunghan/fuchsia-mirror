@@ -1,0 +1,131 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":memory_metrics_tests_test"],
+    visibility = ["//src/memory:__pkg__"],
+)
+
+fx_cc_library(
+    name = "utils",
+    testonly = True,
+    srcs = ["test_utils.cc"],
+    hdrs = ["test_utils.h"],
+    # //zircon/system/public would shadow the sysroot's <zircon/syscalls.h> in Bazel.
+    implementation_deps = [
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+    ],
+    visibility = ["//src/memory/legacy/monitor/tests:__pkg__"],
+    deps = [
+        "//src/lib/fxl",
+        "//src/lib/testing/loop_fixture",
+        "//src/memory/legacy/metrics",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "memory_metrics_unittests",
+    srcs = [
+        "bucket_match_unittest.cc",
+        "capture_strategy_unittest.cc",
+        "capture_unittest.cc",
+        "digest_unittest.cc",
+        "mas_cache_unittest.cc",
+        "printer_unittest.cc",
+        "summary_unittest.cc",
+        "watcher_unittest.cc",
+    ],
+    # TODO(https://fxbug.dev/570694755): capture_strategy.h uses angled
+    # workspace-root `#include <src/lib/fxl/macros.h>`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    deps = [
+        ":utils",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/memory/legacy/metrics",
+        # //zircon/system/public would shadow the sysroot's <zircon/syscalls.h> in Bazel.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+        "//third_party/rapidjson",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "memory_metrics_unittests_component",
+    binary = ":memory_metrics_unittests",
+    component_name = "memory_metrics_unittests",
+)
+
+fx_cc_test_binary(
+    name = "memory_metrics_systemtests",
+    srcs = ["capture_systemtest.cc"],
+    deps = [
+        ":utils",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/memory/legacy/metrics",
+    ],
+)
+
+fx_packaged_binary(
+    name = "memory_metrics_systemtests_packaged_bin",
+    testonly = True,
+    binary = ":memory_metrics_systemtests",
+    binary_name = "memory_metrics_systemtests",
+)
+
+fx_component_manifest(
+    name = "memory_metrics_systemtests_manifest",
+    testonly = True,
+    component_name = "memory_metrics_systemtests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/memory_metrics_systemtests.cml",
+)
+
+fx_test_component(
+    name = "memory_metrics_systemtests_component",
+    compiled_manifest = ":memory_metrics_systemtests_manifest",
+    test_type = "system",
+    deps = [":memory_metrics_systemtests_packaged_bin"],
+)
+
+fx_package(
+    name = "memory_metrics_tests",
+    test_components = [
+        ":memory_metrics_systemtests_component",
+        ":memory_metrics_unittests_component",
+    ],
+)
+
+fx_test(
+    name = "memory_metrics_tests_test",
+    package = ":memory_metrics_tests",
+)

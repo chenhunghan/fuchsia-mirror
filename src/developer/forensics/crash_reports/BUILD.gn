@@ -12,7 +12,7 @@ source_set("annotation_map") {
 
   public_deps = [
     ":errors",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils:errors",
     "//src/lib/fxl",
@@ -96,7 +96,6 @@ source_set("crash_reporter") {
 
   deps = [
     ":constants",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp_hlcpp_conversion",
     "//sdk/lib/fit",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils/cobalt",
@@ -114,8 +113,8 @@ source_set("crash_server") {
     ":report",
     ":sized_data_reader",
     ":snapshot",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
-    "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_hlcpp",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
+    "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl",
     "//third_party/crashpad/src/util:net",
@@ -125,7 +124,6 @@ source_set("crash_server") {
   deps = [
     "//src/developer/forensics/feedback:constants",
     "//src/developer/forensics/utils:sized_data",
-    "//src/lib/fostr/fidl/fuchsia.net.http",
     "//src/lib/fsl",
   ]
 }
@@ -228,7 +226,8 @@ source_set("report") {
     ":program_shortname",
     ":report_id",
     ":snapshot",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
+    "//sdk/lib/fit-promise",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils:sized_data",
   ]
@@ -243,7 +242,7 @@ source_set("reporting_policy_watcher") {
   ]
 
   public_deps = [
-    "//sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
+    "//sdk/fidl/fuchsia.settings:fuchsia.settings_cpp",
     "//sdk/lib/async",
     "//sdk/lib/fit",
     "//sdk/lib/sys/cpp",
@@ -271,7 +270,7 @@ source_set("report_util") {
     ":product",
     ":program_shortname",
     ":report",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/lib/fit-promise",
     "//src/developer/forensics/utils:errors",
   ]
@@ -280,7 +279,7 @@ source_set("report_util") {
     ":annotation_map",
     ":constants",
     ":errors",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
+    "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils:regexp",
     "//src/lib/files",

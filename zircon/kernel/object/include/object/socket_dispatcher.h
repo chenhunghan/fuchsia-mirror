@@ -9,7 +9,6 @@
 
 #include <lib/object-constants.h>
 #include <stdint.h>
-#include <zircon/syscalls/object.h>
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
@@ -23,8 +22,6 @@ DECLARE_PEERED_DISPATCHER_RUST_PROTOS(SocketDispatcher, rust_socket_dispatcher)
 extern "C" {
 zx_status_t cpp_socket_dispatcher_create(
     void* holder, uint32_t flags, ffi::Uninitialized<KernelHandle<SocketDispatcher>>* handle_out);
-
-zx_info_socket_t rust_socket_dispatcher_get_info(const SocketDispatcher* disp);
 }  // extern "C"
 
 class SocketDispatcher final : public Dispatcher {
@@ -33,8 +30,6 @@ class SocketDispatcher final : public Dispatcher {
   ~SocketDispatcher() final;
 
   DECLARE_PEERED_DISPATCHER_RUST_METHODS(rust_socket_dispatcher, ZX_OBJ_TYPE_SOCKET, true)
-
-  zx_info_socket_t GetInfo() const { return rust_socket_dispatcher_get_info(this); }
 
  protected:
   Lock<CriticalMutex>* get_lock() const final;

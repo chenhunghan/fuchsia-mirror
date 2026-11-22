@@ -1,0 +1,190 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":camera_device_watcher_impl_unittest",
+        ":camera_device_watcher_unittest_test",
+    ],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "device_instance.cc",
+        "device_watcher_impl.cc",
+    ],
+    hdrs = [
+        "device_instance.h",
+        "device_watcher_impl.h",
+    ],
+    deps = [
+        ":fuchsia.camera.test_cpp",
+        "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_cpp",
+        "//sdk/fidl/fuchsia.camera3:fuchsia.camera3_cpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
+        "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/backoff",
+        "//src/lib/fsl",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "camera_device_watcher_bin",
+    srcs = ["main.cc"],
+    deps = [":lib"],
+)
+
+fidl_library(
+    name = "fuchsia.camera.test",
+    srcs = ["device_watcher_tester.fidl"],
+    enable_hlcpp = True,
+    # TODO(https://fxbug.dev/570694755): Disable unused Rust bindings in Bazel until
+    # //sdk/fidl/fuchsia.camera2 declares its transitive //sdk/fidl/fuchsia.sysmem2 Rust dep.
+    enable_rust = False,
+    # TODO(https://fxbug.dev/570694755): Disable unused Rust next bindings in Bazel until
+    # //sdk/fidl/fuchsia.camera2 declares its transitive //sdk/fidl/fuchsia.sysmem2 Rust dep.
+    enable_rust_next = False,
+    excluded_checks = ["string-bounds-not-specified"],
+    visibility = ["//src/camera/bin/virtual_camera:__pkg__"],
+    deps = ["//sdk/fidl/fuchsia.hardware.camera"],
+)
+
+fx_packaged_binary(
+    name = "camera_device_watcher_packaged_bin",
+    binary = ":camera_device_watcher_bin",
+    binary_name = "camera_device_watcher_bin",
+)
+
+fx_component_manifest(
+    name = "camera_device_watcher_manifest",
+    component_name = "camera_device_watcher",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/camera_device_watcher.cml",
+)
+
+fx_component(
+    name = "camera_device_watcher_cmp",
+    compiled_manifest = ":camera_device_watcher_manifest",
+    deps = [":camera_device_watcher_packaged_bin"],
+)
+
+fx_package(
+    name = "camera_device_watcher",
+    components = [":camera_device_watcher_cmp"],
+    package_repository_name = "fuchsia.com",
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_test_binary(
+    name = "camera_device_watcher_unittest_bin",
+    testonly = True,
+    srcs = ["device_watcher_unittest.cc"],
+    deps = [
+        ":fuchsia.camera.test_cpp",
+        ":lib",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/storage/lib/vfs/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "camera_device_watcher_unittest_packaged_bin",
+    testonly = True,
+    binary = ":camera_device_watcher_unittest_bin",
+    binary_name = "camera_device_watcher_unittest_bin",
+)
+
+fx_component_manifest(
+    name = "camera_device_watcher_unittest_manifest",
+    testonly = True,
+    component_name = "camera_device_watcher_unittest",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/camera_device_watcher_unittest.cml",
+)
+
+fx_test_component(
+    name = "camera_device_watcher_unittest_component",
+    compiled_manifest = ":camera_device_watcher_unittest_manifest",
+    deps = [":camera_device_watcher_unittest_packaged_bin"],
+)
+
+fx_package(
+    name = "camera_device_watcher_unittest",
+    components = [":camera_device_watcher_cmp"],
+    test_components = [":camera_device_watcher_unittest_component"],
+)
+
+fx_test(
+    name = "camera_device_watcher_unittest_test",
+    environments = ["//build/testing/environments:sherlock_env"],
+    package = ":camera_device_watcher_unittest",
+)
+
+fx_cc_test_binary(
+    name = "camera_device_watcher_impl_unittest_bin",
+    testonly = True,
+    srcs = ["device_watcher_impl_unittest.cc"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_cpp_testing",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# StopsRelaunchingAfterRepeatedFailures makes CreateChild fail, which logs an
+# error.
+fx_unittest_package(
+    name = "camera_device_watcher_impl_unittest",
+    max_log_severity = "ERROR",
+    unit_tests = [":camera_device_watcher_impl_unittest_bin"],
+)

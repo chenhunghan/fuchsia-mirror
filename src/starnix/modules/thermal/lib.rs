@@ -517,7 +517,7 @@ fn thermal_device_init(kernel: &Kernel) -> Result<(), Error> {
                     Err(error) => log_warn!("Failed to connect to SensorManager when building thermal zone for sensor {}: {:?}", sensor_name_clone, error),
                 }
             },
-        );
+        )?;
 
         // Create an asynchronous proxy for netlink calls.
         // The thermal netlink server periodically gets temperature data from the thermal sensors in

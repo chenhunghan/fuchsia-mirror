@@ -264,6 +264,18 @@ void TouchSourceBase::EndContest(StreamId stream_id, bool awarded_win) {
   PushEvent(stream_id, std::move(event));
 }
 
+void TouchSourceBase::SetBatchMode(bool in_batch) {
+  if (in_batch_ == in_batch) {
+    return;
+  }
+  in_batch_ = in_batch;
+  if (!in_batch_) {
+    FlushPendingEvents();
+  }
+}
+
+void TouchSourceBase::FlushPendingEvents() { SendPendingIfWaiting(); }
+
 void TouchSourceBase::PushEvent(StreamId stream_id, AugmentedTouchEvent event) {
   pending_events_.push({.stream_id = stream_id, .event = std::move(event)});
   SendPendingIfWaiting();
@@ -342,8 +354,14 @@ void TouchSourceBase::WatchBase(std::vector<fuchsia_ui_pointer::TouchResponse> r
 
   return_tickets_.clear();
 
-  for (const auto& [stream_id, gd_responses] : responses_per_stream) {
-    respond_(stream_id, gd_responses);
+  if (!responses_per_stream.empty()) {
+    fit::deferred_action<fit::closure> batch;
+    if (responses_per_stream.size() > 1 && begin_batch_) {
+      batch = begin_batch_();
+    }
+    for (const auto& [stream_id, gd_responses] : responses_per_stream) {
+      respond_(stream_id, gd_responses);
+    }
   }
 
   pending_callback_ = std::move(callback);
@@ -416,7 +434,7 @@ void TouchSourceBase::UpdateResponseBase(
 }
 
 void TouchSourceBase::SendPendingIfWaiting() {
-  if (!pending_callback_ || pending_events_.empty()) {
+  if (in_batch_ || !pending_callback_ || pending_events_.empty()) {
     return;
   }
   FX_DCHECK(return_tickets_.empty());

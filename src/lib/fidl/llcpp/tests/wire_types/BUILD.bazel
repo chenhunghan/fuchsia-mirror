@@ -1,0 +1,140 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_wire_type_api_tests_bin",
+    srcs = [
+        "bits_test.cc",
+        "enum_test.cc",
+        "serializable_test.cc",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            # These tests use the wire messaging layer.
+            "anonymous_test.cc",
+            "llcpp_types_tests.cc",
+            "traits_test.cc",
+
+            # These tests use handles.
+            "table_test.cc",
+            "union_test.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = select({
+        "@platforms//os:fuchsia": ["-Wno-conversion"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//sdk/testing/fidl/types_tests:test.types_cpp",
+        "//src/lib/fidl/llcpp/tests:arena_checker",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//src/lib/fidl/llcpp/tests:types_test_utils",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+fx_packaged_binary(
+    name = "fidl_llcpp_wire_type_api_tests_packaged_bin",
+    testonly = True,
+    binary = ":fidl_llcpp_wire_type_api_tests_bin",
+    binary_name = "fidl_llcpp_wire_type_api_tests",
+    install_root = "test/",
+)
+
+# Use `fuchsia.process.Launcher` for death tests
+fx_component_manifest(
+    name = "fidl_llcpp_wire_type_api_tests_manifest",
+    component_name = "fidl_llcpp_wire_type_api_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/wire_type_api_tests.cml",
+)
+
+fx_test_component(
+    name = "fidl_llcpp_wire_type_api_tests_component",
+    compiled_manifest = ":fidl_llcpp_wire_type_api_tests_manifest",
+    deps = [":fidl_llcpp_wire_type_api_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "fidl_llcpp_wire_type_api_tests",
+    testonly = True,
+    test_components = [":fidl_llcpp_wire_type_api_tests_component"],
+)
+
+fx_test(
+    name = "fidl_llcpp_wire_type_api_tests_test",
+    package = ":fidl_llcpp_wire_type_api_tests",
+    visibility = ["//src/lib:__pkg__"],
+)
+
+host_test(
+    name = "fidl_llcpp_wire_type_api_tests_host_test",
+    binary = ":fidl_llcpp_wire_type_api_tests_bin",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_builder_tests_bin",
+    srcs = [
+        "vector_view_test.cc",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            # These tests use Zircon handles.
+            "arena_test.cc",
+
+            # These tests use fbl.
+            "memory_test.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//sdk/lib/fidl",
+        "//sdk/lib/fidl/cpp/wire",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//src/lib/fidl/llcpp/tests:types_test_utils",
+            "//zircon/system/ulib/fbl",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_builder_tests",
+    unit_tests = [":fidl_llcpp_builder_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+host_test(
+    name = "fidl_llcpp_builder_tests_host_test",
+    binary = ":fidl_llcpp_builder_tests_bin",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/lib:__pkg__"],
+)

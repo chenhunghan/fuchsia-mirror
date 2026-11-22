@@ -1,0 +1,53 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/cpp/sdk_source_set.gni")
+import("//build/test.gni")
+
+group("tests") {
+  testonly = true
+  deps = [ ":resource-vote-cpp-test-pkg" ]
+}
+
+# Exported to the partner IDK because Bazel-built providers (e.g. vendor
+# regulator drivers) compile against it from source.
+sdk_source_set("cpp") {
+  category = "partner"
+  sdk_name = "driver_resource_vote_cpp"
+  stable = false
+  include_base = "//sdk"
+
+  sources = [
+    "vote-set.cc",
+    "vote-set.h",
+  ]
+
+  public_deps = [
+    "//sdk/lib/fit",
+    "//sdk/lib/fit-promise",
+    "//zircon/system/ulib/inspect",
+    "//zircon/system/ulib/zx",
+  ]
+
+  deps = [ "//sdk/lib/driver/logging/cpp" ]
+}
+
+test("resource-vote-cpp-test") {
+  sources = [ "vote-set-test.cc" ]
+  deps = [
+    ":cpp",
+    "//sdk/lib/fit-promise",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/inspect",
+  ]
+}
+
+fuchsia_unittest_package("resource-vote-cpp-test-pkg") {
+  package_name = "resource-vote-cpp-test"
+  manifest = "meta/resource-vote-cpp-test.cml"
+  deps = [ ":resource-vote-cpp-test" ]
+}

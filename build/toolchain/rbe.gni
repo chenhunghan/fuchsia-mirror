@@ -47,6 +47,7 @@ rbe_common_configs = [
 rbe_common_scripts = [ "//build/rbe/fuchsia-reproxy-wrap.sh" ]
 
 rbe_common_py_scripts = [
+  "//build/profile/procfs.py",
   "//build/rbe/remote_action.py",
   "//build/rbe/casfs.py",
   "//build/rbe/cl_utils.py",
@@ -54,6 +55,7 @@ rbe_common_py_scripts = [
   "//build/rbe/fuchsia.py",
   "//build/rbe/linker.py",
   "//build/rbe/output_leak_scanner.py",
+  "//build/scripts/lock_utils.py",
 ]
 
 # `log-it.sh LOGFILE -- command`

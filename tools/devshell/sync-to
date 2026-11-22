@@ -404,7 +404,11 @@ class SyncToCommand:
             )
 
     def https_to_sso(self, url: str) -> str:
-        return url.replace("https://", "sso://").replace(".googlesource.com", "")
+        return (
+            url.replace("https://", "sso://")
+            .replace("rpc://", "sso://")
+            .replace(".googlesource.com", "")
+        )
 
     def assert_correct_integration_manifest(self, checkout_info: dict) -> None:
         jiri_manifest = self.fuchsia_dir.joinpath(".jiri_manifest")

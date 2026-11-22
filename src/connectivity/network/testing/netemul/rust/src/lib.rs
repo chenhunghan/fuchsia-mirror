@@ -11,7 +11,6 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::ops::DerefMut as _;
-use std::path::Path;
 use std::pin::pin;
 use std::sync::Arc;
 use zx::AsHandleRef;
@@ -52,14 +51,6 @@ type Result<T = ()> = std::result::Result<T, anyhow::Error>;
 
 /// The default MTU used in netemul endpoint configurations.
 pub const DEFAULT_MTU: u16 = 1500;
-
-/// The devfs path at which endpoints show up.
-pub const NETDEVICE_DEVFS_PATH: &'static str = "class/network";
-
-/// Returns the full path for a device node `node_name` relative to devfs root.
-pub fn devfs_device_path(node_name: &str) -> std::path::PathBuf {
-    std::path::Path::new(NETDEVICE_DEVFS_PATH).join(node_name)
-}
 
 /// Creates a common netemul endpoint configuration for tests.
 pub fn new_endpoint_config(
@@ -678,35 +669,35 @@ impl<'a> TestRealm<'a> {
         })
     }
 
-    /// Adds a raw device connector to the realm's devfs.
+    /// Publishes a raw network device to `fuchsia.hardware.network.Service` in the realm.
     pub async fn add_raw_device(
         &self,
-        path: &Path,
-        device: fidl::endpoints::ClientEnd<fnetemul_network::DeviceProxy_Marker>,
+        instance_name: &str,
+        device: fidl::endpoints::ClientEnd<fnetwork::DeviceMarker>,
     ) -> Result {
-        let path = path.to_str().with_context(|| format!("convert {} to str", path.display()))?;
         self.realm()
-            .add_device(path, device)
+            .add_device(instance_name, device)
             .await
             .context("add device")?
             .map_err(zx::Status::err_from_raw)
             .context("add device error")
     }
 
-    /// Adds a device to the realm's virtual device filesystem.
-    pub async fn add_virtual_device(&self, e: &TestEndpoint<'_>, path: &Path) -> Result {
+    /// Publishes an endpoint to `fuchsia.hardware.network.Service` in the realm.
+    pub async fn add_virtual_device(&self, e: &TestEndpoint<'_>, instance_name: &str) -> Result {
+        let (port, port_server_end) = fidl::endpoints::create_endpoints::<fnetwork::PortMarker>();
+        e.get_port(port_server_end).context("get port")?;
         let (device, device_server_end) =
-            fidl::endpoints::create_endpoints::<fnetemul_network::DeviceProxy_Marker>();
-        e.get_proxy_(device_server_end).context("get proxy")?;
+            fidl::endpoints::create_endpoints::<fnetwork::DeviceMarker>();
+        port.into_proxy().get_device(device_server_end).context("get device")?;
 
-        self.add_raw_device(path, device).await
+        self.add_raw_device(instance_name, device).await
     }
 
-    /// Removes a device from the realm's virtual device filesystem.
-    pub async fn remove_virtual_device(&self, path: &Path) -> Result {
-        let path = path.to_str().with_context(|| format!("convert {} to str", path.display()))?;
+    /// Removes a device from `fuchsia.hardware.network.Service` in the realm.
+    pub async fn remove_virtual_device(&self, instance_name: &str) -> Result {
         self.realm()
-            .remove_device(path)
+            .remove_device(instance_name)
             .await
             .context("remove device")?
             .map_err(zx::Status::err_from_raw)

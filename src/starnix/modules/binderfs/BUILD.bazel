@@ -61,7 +61,6 @@ rustc_library(
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:bitflags",
         "//third_party/rust_crates/vendor:futures",
-        "//third_party/rust_crates/vendor:itertools",
         "//third_party/rust_crates/vendor:scopeguard",
         "//third_party/rust_crates/vendor:slab",
         "//third_party/rust_crates/vendor:smallvec",

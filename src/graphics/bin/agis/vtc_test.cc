@@ -2,12 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/gpu/agis/cpp/fidl.h>
+#include <fidl/fuchsia.gpu.agis/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
-#include <lib/sys/cpp/component_context.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/process.h>
 #include <zircon/assert.h>
 
 #include <thread>
@@ -52,7 +53,7 @@ uint64_t TimeMS() {
 
 }  // namespace
 
-class VtcTest {
+class VtcTest : public fidl::AsyncEventHandler<fuchsia_gpu_agis::ComponentRegistry> {
  public:
   // Register, retrieve vulkan socket, listen for commands and log them to the console.
   void Communicate(uint32_t wait_secs = 35);
@@ -61,16 +62,9 @@ class VtcTest {
     num_vtcs_ = 0;
     loop_ = std::make_unique<async::Loop>(&kAsyncLoopConfigAttachToCurrentThread);
 
-    std::unique_ptr<sys::ComponentContext> context = sys::ComponentContext::Create();
-
-    const zx_status_t status =
-        context->svc()->Connect(component_registry_.NewRequest(loop_->dispatcher()));
-    ZX_ASSERT(status == ZX_OK);
-    component_registry_.set_error_handler([this](zx_status_t status) {
-      FX_LOG_KV(ERROR, "|component_registry_| error handler", KV("status", status));
-      loop_->Quit();
-      assert(false);
-    });
+    zx::result client_end = component::Connect<fuchsia_gpu_agis::ComponentRegistry>();
+    ZX_ASSERT(client_end.is_ok());
+    component_registry_.Bind(std::move(*client_end), loop_->dispatcher(), this);
 
     process_koid_ = ProcessKoid();
     process_name_ = ProcessName();
@@ -82,6 +76,13 @@ class VtcTest {
       LoopWait();
       loop_->Quit();
     }
+  }
+
+  // |component_registry_| error handler.
+  void on_fidl_error(fidl::UnbindInfo info) override {
+    FX_LOG_KV(ERROR, "|component_registry_| error handler", FX_KV("status", info.status()));
+    loop_->Quit();
+    assert(false);
   }
 
   // LoopWait() guarantees that the callback supplied to any interface in the agis protocol
@@ -96,10 +97,11 @@ class VtcTest {
 
   void Register(uint64_t id, zx_koid_t process_koid, std::string process_name) {
     outstanding++;
-    component_registry_->Register(
-        id, process_koid, std::move(process_name),
-        [&](fuchsia::gpu::agis::ComponentRegistry_Register_Result result) {
-          ZX_ASSERT(!result.err());
+    component_registry_
+        ->Register(
+            {{.id = id, .process_koid = process_koid, .process_name = std::move(process_name)}})
+        .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Register> &result) {
+          ZX_ASSERT(result.is_ok());
           outstanding--;
         });
     LoopWait();
@@ -107,16 +109,16 @@ class VtcTest {
 
   void Unregister(uint64_t client_id) const {
     outstanding++;
-    component_registry_->Unregister(
-        client_id, [&](fuchsia::gpu::agis::ComponentRegistry_Unregister_Result result) {
-          ZX_ASSERT(!result.err());
+    component_registry_->Unregister({{.id = client_id}})
+        .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Unregister> &result) {
+          ZX_ASSERT(result.is_ok());
           outstanding--;
         });
   }
 
   // Ivars.
   std::unique_ptr<async::Loop> loop_;
-  fuchsia::gpu::agis::ComponentRegistryPtr component_registry_;
+  fidl::Client<fuchsia_gpu_agis::ComponentRegistry> component_registry_;
   size_t num_vtcs_;
   zx_koid_t process_koid_;
   std::string process_name_;
@@ -128,12 +130,10 @@ void VtcTest::Communicate(uint32_t wait_secs) {
   Register(client_id_, process_koid_, process_name_);
 
   zx::socket vulkan_socket;
-  component_registry_->GetVulkanSocket(
-      client_id_, [&](fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Result result) {
-        fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Response response(
-            std::move(result.response()));
-        ZX_ASSERT(!result.err());
-        vulkan_socket = response.ResultValue_();
+  component_registry_->GetVulkanSocket({{.id = client_id_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::GetVulkanSocket> &result) {
+        ZX_ASSERT(result.is_ok());
+        vulkan_socket = std::move(result->socket());
         ZX_ASSERT(vulkan_socket.is_valid());
         printf("VtcTest::Communicate: vulkan socket established %d\n", vulkan_socket.is_valid());
       });
@@ -179,7 +179,8 @@ void VtcTest::Communicate(uint32_t wait_secs) {
 
 int main(int argc, char **argv) {
   VtcTest test;
-  fuchsia_logging::SetTags({"vtc-test"});
+  fuchsia_logging::LogSettingsBuilder builder;
+  builder.WithTags({"vtc-test"}).BuildAndInitialize();
 
   test.SetUp();
 

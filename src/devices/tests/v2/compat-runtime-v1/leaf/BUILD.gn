@@ -43,5 +43,4 @@ fuchsia_driver_component("component") {
   component_name = "leaf"
   dml_label = ":leaf-dml"
   deps = [ ":driver" ]
-  info = "meta/leaf-info.json"
 }

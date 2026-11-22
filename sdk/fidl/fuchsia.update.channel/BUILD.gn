@@ -31,7 +31,6 @@ fidl("fuchsia.update.channel") {
   sources = [ "channel.fidl" ]
   sdk_area = "Software Delivery"
   sdk_category = "partner"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
 }

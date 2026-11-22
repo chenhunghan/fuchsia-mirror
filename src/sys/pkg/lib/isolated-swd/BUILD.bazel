@@ -61,12 +61,10 @@ rustc_test(
     deps = [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
-        "//src/lib/fdio/rust:fdio",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-url",
-        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
         "//src/sys/lib/cm_rust",
         "//src/sys/lib/fidl-fuchsia-pkg-ext",
         "//src/sys/pkg/lib/fuchsia-merkle",

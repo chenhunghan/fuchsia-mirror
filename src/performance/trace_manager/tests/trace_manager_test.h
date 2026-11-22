@@ -181,6 +181,8 @@ class TraceManagerTest : public gtest::TestLoopFixture,
   }
 
   void DropSocket() { destination_.reset(); }
+  // Destroys trace_manager, and with it any session, as when its process exits.
+  void DestroyTraceManager() { trace_manager_.reset(); }
   void DisconnectAllProviders() {
     for (auto& binding : fake_provider_bindings_) {
       std::visit([](auto& p) { p->Disconnect(); }, binding);

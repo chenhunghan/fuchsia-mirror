@@ -2,14 +2,31 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/testing/expectation/rules:fx_test_component_with_expectations.bzl",
+    "fx_component_manifest_with_expectations",
+    "fx_test_component_with_expectations",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: `netlink_test`, `netlink-lib-test-component`,
-# `netlink-lib-test-no-err-logs`, and `netlink-lib-test-with-err-logs` remain in
-# BUILD.gn above the sentinel because `fuchsia_test_with_expectations_package`
-# (`//src/lib/testing/expectation`) has no Bazel equivalent yet.
+test_suite(
+    name = "tests",
+    tests = [
+        ":netlink-lib-test-no-err-logs",
+        ":netlink-lib-test-with-err-logs",
+    ],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
 rustc_library(
     name = "netlink",
     srcs = [
@@ -86,4 +103,151 @@ rustc_library(
         "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:thiserror",
     ],
+)
+
+# This test compiles the library sources directly rather than using
+# `crate = ":netlink"`: it links the `testutils` flavor of
+# `fidl_fuchsia_net_neighbor_ext`, which has the same crate name as the
+# flavor `:netlink` depends on.
+rustc_test(
+    name = "netlink_test",
+    srcs = [
+        "src/client.rs",
+        "src/interfaces.rs",
+        "src/lib.rs",
+        "src/logging.rs",
+        "src/messaging.rs",
+        "src/multicast_groups.rs",
+        "src/nduseropt.rs",
+        "src/neighbors.rs",
+        "src/netlink_packet.rs",
+        "src/protocol_family.rs",
+        "src/protocol_family/sock_diag.rs",
+        "src/protocol_family/sock_diag/eventloop.rs",
+        "src/protocol_family/sock_diag/request.rs",
+        "src/route_eventloop.rs",
+        "src/route_tables.rs",
+        "src/routes.rs",
+        "src/rules.rs",
+        "src/rules/conversions.rs",
+        "src/util.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    # Matches the binary path in `meta/netlink-lib-test.cml`.
+    crate_name = "netlink_lib_test",
+    edition = "2024",
+    proc_macro_deps = [
+        "//src/connectivity/lib/ip-test-macro",
+        "//third_party/rust_crates/vendor:derivative",
+        "//third_party/rust_crates/vendor:proptest-derive",
+    ],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers_rust",
+        "//sdk/fidl/fuchsia.net.ndp:fuchsia.net.ndp_rust",
+        "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust",
+        "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
+        "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
+        "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust",
+        "//sdk/fidl/fuchsia.net.sockets:fuchsia.net.sockets_rust",
+        "//sdk/fidl/fuchsia.net.tcp:fuchsia.net.tcp_rust",
+        "//sdk/fidl/fuchsia.net.udp:fuchsia.net.udp_rust",
+        "//src/connectivity/lib/fidl_fuchsia_net_neighbor_ext:fidl_fuchsia_net_neighbor_ext_testutils",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/lib/oneshot-sync",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_net_matchers_ext",
+        "//src/lib/network/fidl_fuchsia_net_ndp_ext",
+        "//src/lib/network/fidl_fuchsia_net_routes_ext",
+        "//src/lib/network/fidl_fuchsia_net_sockets_ext",
+        "//src/lib/network/packet",
+        "//src/lib/proptest-support",
+        "//src/starnix/lib/linux_uapi",
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_core",
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_route",
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_sock_diag",
+        "//src/starnix/lib/third_party/rust_netlink/netlink_packet_utils",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:bit-set",
+        "//third_party/rust_crates/vendor:either",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:smallvec",
+        "//third_party/rust_crates/vendor:test-case",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "netlink_test_packaged",
+    testonly = True,
+    binary = ":netlink_test",
+    binary_name = "netlink_lib_test",
+)
+
+fx_component_manifest_with_expectations(
+    name = "netlink-lib-test_manifest",
+    component_name = "netlink-lib-test-component",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/testing/expectation:meta/client.shard",
+    ],
+    manifest = "meta/netlink-lib-test.cml",
+)
+
+fx_test_component_with_expectations(
+    name = "netlink-lib-test-component-no-err-logs",
+    compiled_manifest = ":netlink-lib-test_manifest",
+    expectations = "expects/expectations.json5",
+    treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS",
+    deps = [":netlink_test_packaged"],
+)
+
+fx_package(
+    name = "netlink-lib-test-no-err-logs-package",
+    package_name = "netlink-lib-test-no-err-logs",
+    test_components = [":netlink-lib-test-component-no-err-logs"],
+)
+
+fx_test(
+    name = "netlink-lib-test-no-err-logs",
+    package = ":netlink-lib-test-no-err-logs-package",
+)
+
+fx_test_component_with_expectations(
+    name = "netlink-lib-test-component-with-err-logs",
+    compiled_manifest = ":netlink-lib-test_manifest",
+    expectations = "expects/expectations.json5",
+    treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS",
+    deps = [":netlink_test_packaged"],
+)
+
+fx_package(
+    name = "netlink-lib-test-with-err-logs-package",
+    package_name = "netlink-lib-test-with-err-logs",
+    test_components = [":netlink-lib-test-component-with-err-logs"],
+)
+
+fx_test(
+    name = "netlink-lib-test-with-err-logs",
+    max_log_severity = "ERROR",
+    package = ":netlink-lib-test-with-err-logs-package",
 )

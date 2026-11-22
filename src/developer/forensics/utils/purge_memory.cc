@@ -9,7 +9,7 @@
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
-#include "src/performance/memory/scudo/mallopt.h"
+#include "src/memory/lib/scudo/mallopt.h"
 
 namespace forensics {
 

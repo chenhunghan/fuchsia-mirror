@@ -6,11 +6,18 @@
 #### CATEGORY=Source tree
 ### Bootstrap and synchronize local dependencies for a Fuchsia git checkout
 
-## usage: fx sync
+## usage: fx sync [--force]
+##
+##   --force   Re-run the sync even if the pinned state has not changed.
 ##
 ## If run in a plain OSS fuchsia.git clone without an existing Jiri checkout,
 ## initializes an untracked stub integration directory and synchronizes Jiri
 ## projects and prebuilt packages to match the current HEAD.
+##
+## In an internal checkout, where internal sources have been added at
+## //vendor/google as a git repository, the dependencies declared by that
+## repository are synchronized as well. fx sync never moves the fuchsia.git or
+## //vendor/google HEADs; it only brings the rest of the tree in line with them.
 ##
 ## A standard Jiri checkout is detected when .jiri_root or integration already
 ## exists without a .fxsync directory; in that case, fx sync exits without
@@ -22,6 +29,11 @@ fx-standard-switches "$@"
 set -- "${FX_ARGV[@]}"
 set -o pipefail
 
+force=false
+if [[ "$1" == "--force" ]]; then
+  force=true
+  shift
+fi
 if [[ $# -gt 0 ]]; then
   fx-error "Unknown argument: $1"
   fx-command-help
@@ -29,6 +41,12 @@ if [[ $# -gt 0 ]]; then
 fi
 
 declare -r fxsync_dir="${FUCHSIA_DIR}/.fxsync"
+
+# `fx` already ran this script before dispatching to the `fx sync` subcommand,
+# so there is nothing left to do unless --force was given.
+if [[ -n "${_FX_SYNC_RAN}" && "${force}" == false ]]; then
+  exit 0
+fi
 
 # Distinguish between three checkout states:
 # 1. Standard Jiri checkout: .jiri_root or integration exists, but .fxsync does
@@ -50,6 +68,15 @@ fi
 # invoked from a subdirectory/subproject or from the fx self-test harness).
 cd "${FUCHSIA_DIR}" || exit $?
 
+# In an internal checkout, internal sources live in a git repository at
+# //vendor/google, managed directly with git by the developer. Everything about
+# its dependencies is declared by the manifests inside that repository.
+declare -r vendor_google_path="vendor/google"
+vendor_google=false
+if [[ -e "${vendor_google_path}/.git" ]]; then
+  vendor_google=true
+fi
+
 # Detect whether the repo state is clean: the manifest_state_file should have
 # the current values of all pinned repos.
 declare -r manifest_state_file="${fxsync_dir}/manifest_state"
@@ -59,7 +86,65 @@ manifest_state="$(
     HEAD:third_party/cobalt \
     HEAD:third_party/cobalt_config
 )" || exit $?
-if [[ -f "${manifest_state_file}" && "$(<"${manifest_state_file}")" == "${manifest_state}" ]]; then
+if [[ "${vendor_google}" == true ]]; then
+  # Include vendor/google's manifests so that moving vendor/google (or adding
+  # or removing it) triggers a re-sync.
+  vendor_google_state="$(git -C "${vendor_google_path}" rev-parse HEAD:manifests)" || exit $?
+  manifest_state+=$'\n'"${vendor_google_path}:${vendor_google_state}"
+fi
+
+# Internal checkouts need internal CIPD packages. Jiri silently skips them when
+# the user is not logged in to CIPD, and records that in prebuilt.json (read by
+# the build as `internal_access`), which makes internal builds fail in
+# confusing ways. So in an internal checkout, being logged in to CIPD is
+# required: fail with the command to run (never prompt, since fx is often run
+# by agents and scripts). Since the manifest state is only recorded after a
+# successful sync, the next fx command retries automatically.
+declare -r cipd_bin="${FUCHSIA_DIR}/.jiri_root/bin/cipd"
+
+# Returns 0 if the user is logged in to CIPD.
+cipd_logged_in() {
+  "${cipd_bin}" auth-info >/dev/null 2>&1
+}
+
+# Returns 0 if Jiri skipped internal packages.
+cipd_packages_skipped() {
+  local -r prebuilt_json="${FUCHSIA_DIR}/.jiri_root/prebuilt.json"
+  [[ -f "${prebuilt_json}" && "$(<"${prebuilt_json}")" == *'"internal_access": false'* ]]
+}
+
+# Prints why internal packages are missing and how to fix it, then exits.
+fail_internal_packages_missing() {
+  if cipd_logged_in; then
+    fx-error "Some internal packages could not be fetched even though you are logged in to CIPD."
+    fx-error "Make sure your account has access to them."
+  else
+    fx-error "Internal checkouts require you to be logged in to CIPD to fetch internal packages."
+    fx-error "To fix, run:"
+    fx-error "  ${cipd_bin} auth-login"
+  fi
+  exit 1
+}
+
+# Runs a platform hook relative to FUCHSIA_DIR with `.jiri_root/bin` prepended
+# to PATH, matching Jiri's hook execution environment (notably
+# `add_symlink_to_bin.sh` checks `command -v jiri` on PATH). Output is
+# suppressed on success and printed to stderr on failure.
+run_hook() {
+  local -r hook="$1"
+  local output
+  local rc=0
+  output="$(PATH="${FUCHSIA_DIR}/.jiri_root/bin:${PATH}" "${FUCHSIA_DIR}/${hook}" 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    fx-error "Hook ${hook} failed (exit code ${rc}):"
+    if [[ -n "${output}" ]]; then
+      printf '%s\n' "${output}" >&2
+    fi
+    return "${rc}"
+  fi
+}
+
+if [[ "${force}" == false && -f "${manifest_state_file}" && "$(<"${manifest_state_file}")" == "${manifest_state}" ]]; then
   exit 0
 fi
 
@@ -83,37 +168,40 @@ if [[ ! -x "${jiri_bin}" ]]; then
 fi
 "${jiri_bin}" init \
   -analytics-opt=false \
-  -rewrite-sso-to-https=true \
   -keep-git-hooks=true \
   "${FUCHSIA_DIR}" || exit $?
 
-head_rev="$(git rev-parse HEAD)" || exit $?
 cobalt_rev="$(git rev-parse HEAD:third_party/cobalt)" || exit $?
 cobalt_config_rev="$(git rev-parse HEAD:third_party/cobalt_config)" || exit $?
 
-# Write Jiri's per-repository project metadata (.git/jiri/metadata.v2) so Jiri
-# recognizes the existing root git clone as the "fuchsia" project declared in
-# manifests/platform instead of attempting to clone it into FUCHSIA_DIR, and
-# write .git/JIRI_HEAD (which `jiri update` skips when `no-update` is true) for
-# hooks and tools that reference JIRI_HEAD.
-mkdir -p "${FUCHSIA_DIR}/.git/jiri"
-cat > "${FUCHSIA_DIR}/.git/jiri/metadata.v2" <<EOF
-<project name="fuchsia" path="." remote="https://fuchsia.googlesource.com/fuchsia" revision="${head_rev}"/>
-EOF
-echo "${head_rev}" > "${FUCHSIA_DIR}/.git/JIRI_HEAD"
+# Import dependency manifests directly rather than `manifests/platform` (or
+# `vendor/google/manifests/platform_internal`), which declare `fuchsia` and
+# `vendor/google` themselves as Jiri `<project>`s. Keeping both repos out of
+# Jiri lets the developer manage them purely with git without registering
+# no-update Jiri project metadata.
+# LINT.IfChange(platform_imports)
+imports=(
+  "manifests/third_party/all"
+  "manifests/prebuilts"
+)
+# LINT.ThenChange(//manifests/platform:platform_imports)
+if [[ "${vendor_google}" == true ]]; then
+  imports+=(
+    "vendor/google/manifests/third_party/all"
+    "vendor/google/manifests/prebuilts"
+  )
+fi
 
-# Configure Jiri not to fetch or reset the root "fuchsia" git repository during
-# `jiri update`, since the developer manages the root repository directly with
-# git (e.g. local branches or `git checkout`).
-"${jiri_bin}" project-config -no-update=true || exit $?
-
-# Generate the top-level .jiri_manifest importing manifests/platform and
+# Generate the top-level .jiri_manifest importing the dependency manifests and
 # pinning third_party/cobalt and third_party/cobalt_config to the revisions
 # recorded in the current fuchsia.git commit's gitlinks.
-cat > "${FUCHSIA_DIR}/.jiri_manifest" <<EOF
-<manifest>
-  <imports>
-    <localimport file="manifests/platform"/>
+{
+  echo "<manifest>"
+  echo "  <imports>"
+  for import_file in "${imports[@]}"; do
+    printf '    <localimport file="%s"/>\n' "${import_file}"
+  done
+  cat <<EOF
   </imports>
   <projects>
     <project name="cobalt"
@@ -129,6 +217,47 @@ cat > "${FUCHSIA_DIR}/.jiri_manifest" <<EOF
   </projects>
 </manifest>
 EOF
+} > "${FUCHSIA_DIR}/.jiri_manifest" || exit $?
+
+# Fail early if CIPD is already bootstrapped and the user is not logged in. On
+# the very first sync, Jiri bootstraps cipd during `jiri update`, so the check
+# after the update covers that case.
+if [[ "${vendor_google}" == true && -x "${cipd_bin}" ]] && ! cipd_logged_in; then
+  fail_internal_packages_missing
+fi
 
 "${jiri_bin}" update || exit $?
+
+# Check before updating JIRI_HEAD, running hooks, or recording manifest state,
+# so that missing internal packages fail with a clear message and the next fx
+# command retries the sync.
+if [[ "${vendor_google}" == true ]] && cipd_packages_skipped; then
+  fail_internal_packages_missing
+fi
+
+# Update JIRI_HEAD directly via git, since `jiri update` skips repos that are
+# not declared as Jiri projects. Hooks (e.g. create_jiri_hook_files.sh) and
+# tools reference JIRI_HEAD.
+git update-ref JIRI_HEAD HEAD || exit $?
+if [[ "${vendor_google}" == true ]]; then
+  git -C "${vendor_google_path}" update-ref JIRI_HEAD HEAD || exit $?
+fi
+
+# Run the hooks from `manifests/platform` directly, since Jiri only runs hooks
+# whose `project` attribute is an imported `<project>`.
+# LINT.IfChange(platform_hooks)
+declare -ra platform_hooks=(
+  "scripts/devshell/lib/add_symlink_to_bin.sh"
+  "sdk/ctf/build/internal/create_ctf_releases_gni.sh"
+  "build/info/create_jiri_hook_files.sh"
+  "tools/build/scripts/generate_prebuilt_versions.sh"
+  "tools/build/scripts/extract_protobuf_py3_wheel.sh"
+  "tools/build/scripts/extract_pydantic_core_wheel.sh"
+  "tools/build/scripts/extract_pathspec_wheel.sh"
+)
+# LINT.ThenChange(//manifests/platform:platform_hooks)
+for hook in "${platform_hooks[@]}"; do
+  run_hook "${hook}" || exit $?
+done
+
 echo "${manifest_state}" > "${manifest_state_file}"

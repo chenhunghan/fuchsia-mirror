@@ -25,6 +25,7 @@ ffx/driver/register.golden
 ffx/driver/restart.golden
 ffx/driver/show.golden
 ffx/driver/static-checks.golden
+ffx/driver/suspend.golden
 ffx/driver/test-node.golden
 ffx/driver/test-node/add.golden
 ffx/driver/test-node/remove.golden

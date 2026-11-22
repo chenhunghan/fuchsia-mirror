@@ -1,0 +1,173 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":stream_storage_unittest",
+        ":virtual_camera_agent_unittest",
+    ],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+fidl_library(
+    name = "fuchsia.camera.test.virtualcamera",
+    srcs = ["virtual_camera.fidl"],
+    enable_hlcpp = True,
+    visibility = ["//src/testing/sl4f:__pkg__"],
+)
+
+# Only fuchsia.camera.test.virtualcamera has external GN dependents
+# (//src/testing/sl4f); the C++ libraries, binary/component targets, and unit
+# tests are Bazel-only.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "virtual_camera_hal_controller",
+    srcs = ["virtual_camera_hal_controller.cc"],
+    hdrs = ["virtual_camera_hal_controller.h"],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    deps = [
+        ":stream_storage",
+        "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+# @bazel2gn:skip
+fx_cc_library(
+    name = "stream_storage",
+    srcs = ["stream_storage.cc"],
+    hdrs = ["stream_storage.h"],
+    deps = [
+        "//sdk/fidl/fuchsia.camera2.hal:fuchsia.camera2.hal_hlcpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)
+
+# @bazel2gn:skip
+fx_cc_library(
+    name = "virtual_camera_agent",
+    srcs = ["virtual_camera_agent.cc"],
+    hdrs = ["virtual_camera_agent.h"],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/camera/lib/stream_utils:stream_configs",
+    ],
+    deps = [
+        ":fuchsia.camera.test.virtualcamera_hlcpp",
+        ":stream_storage",
+        ":virtual_camera_hal_controller",
+        "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//src/camera/bin/device_watcher:fuchsia.camera.test_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+# @bazel2gn:skip
+fx_cc_binary(
+    name = "virtual_camera_bin",
+    srcs = ["main.cc"],
+    deps = [
+        ":stream_storage",
+        ":virtual_camera_agent",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "virtual_camera_packaged_bin",
+    binary = ":virtual_camera_bin",
+    binary_name = "virtual_camera",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "virtual_camera_manifest",
+    component_name = "virtual_camera",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/virtual_camera.cml",
+)
+
+# @bazel2gn:skip
+fx_component(
+    name = "virtual_camera_component",
+    compiled_manifest = ":virtual_camera_manifest",
+    deps = [":virtual_camera_packaged_bin"],
+)
+
+fx_package(
+    name = "virtual_camera_pkg",
+    package_name = "virtual_camera",
+    components = [":virtual_camera_component"],
+)
+
+# virtual_camera_agent is Bazel-only (no external GN dependents).
+# @bazel2gn:skip
+fx_cc_test_binary(
+    name = "virtual_camera_agent_unittest_bin",
+    srcs = ["virtual_camera_agent_unittest.cc"],
+    deps = [
+        ":virtual_camera_agent",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/camera/lib/stream_utils:stream_configs",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# virtual_camera_agent is Bazel-only (no external GN dependents).
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "virtual_camera_agent_unittest",
+    unit_tests = [":virtual_camera_agent_unittest_bin"],
+)
+
+# stream_storage is Bazel-only (no external GN dependents).
+# @bazel2gn:skip
+fx_cc_test_binary(
+    name = "stream_storage_unittest_bin",
+    srcs = ["stream_storage_unittest.cc"],
+    deps = [
+        ":stream_storage",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/camera/lib/stream_utils:stream_configs",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# stream_storage is Bazel-only (no external GN dependents).
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "stream_storage_unittest",
+    unit_tests = [":stream_storage_unittest_bin"],
+)

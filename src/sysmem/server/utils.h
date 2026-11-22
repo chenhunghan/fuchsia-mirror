@@ -50,7 +50,7 @@ struct SafeCastImpl<
 
   static constexpr TypeOut do_cast(TypeIn in) {
     if constexpr (sysmem::IsFidlEnum_v<TypeOut> || sysmem::IsFidlEnum_v<TypeIn>) {
-      // LLCPP natural enums can be converted to/from their underlying type, but only explicitly.
+      // FIDL C++ natural enums can be converted to/from their underlying type, but only explicitly.
       // Thanks to the static_assert()s above, we know that this static_cast<>() won't be narrowing
       // (or widening).
       return static_cast<TypeOut>(in);

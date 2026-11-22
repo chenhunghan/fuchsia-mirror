@@ -1,0 +1,11 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Hermetic multi-node Thread integration tests. common/ is the fixture they
+# share; every other directory is a suite, packaged on its own.
+
+group("tests") {
+  testonly = true
+  deps = [ "formation:tests" ]
+}

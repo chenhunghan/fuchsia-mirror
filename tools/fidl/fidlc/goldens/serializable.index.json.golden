@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/serializable.test.fidl",
       "data": "test.serializable",
       "start_offset": 172,
       "end_offset": 189
@@ -20,7 +20,7 @@
       "identifier": "test.serializable/SerializableUnion",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/serializable.test.fidl",
         "data": "SerializableUnion",
         "start_offset": 313,
         "end_offset": 330
@@ -31,7 +31,7 @@
           "name": "unused",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/serializable.test.fidl",
             "data": "unused",
             "start_offset": 355,
             "end_offset": 361
@@ -49,7 +49,7 @@
       "identifier": "test.serializable/SerializableTable",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/serializable.test.fidl",
         "data": "SerializableTable",
         "start_offset": 263,
         "end_offset": 280
@@ -63,7 +63,7 @@
       "identifier": "test.serializable/SerializableStruct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/serializable.test.fidl",
         "data": "SerializableStruct",
         "start_offset": 211,
         "end_offset": 229

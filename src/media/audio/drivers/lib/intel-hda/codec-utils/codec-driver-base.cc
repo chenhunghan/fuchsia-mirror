@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/hardware/intelhda/codec/cpp/banjo.h>
+#include <fidl/fuchsia.hardware.intel.hda/cpp/wire.h>
 #include <lib/zx/channel.h>
 #include <string.h>
 #include <zircon/assert.h>
@@ -52,25 +52,31 @@ zx_protocol_device_t IntelHDACodecDriverBase::CODEC_DEVICE_THUNKS = []() {
 zx::result<> IntelHDACodecDriverBase::Bind(zx_device_t* codec_dev, const char* name) {
   ZX_ASSERT(codec_dev != nullptr);
 
+  zx::result client_end =
+      ddk::Device<void>::DdkConnectFidlProtocol<fuchsia_hardware_intel_hda::CodecService::Device>(
+          codec_dev);
+  if (client_end.is_error()) {
+    LOG("Failed to connect to codec service (%s).", client_end.status_string());
+    return client_end.take_error();
+  }
+
+  // Obtain a channel handle from the device
+  fidl::WireResult result = fidl::WireCall(client_end.value())->GetChannel();
+  if (!result.ok()) {
+    LOG("Error fetching driver channel (%s).", result.status_string());
+    return zx::error(result.status());
+  }
+
+  return BindWithChannel(codec_dev, std::move(result.value().ch), name);
+}
+
+zx::result<> IntelHDACodecDriverBase::BindWithChannel(zx_device_t* codec_dev, zx::channel channel,
+                                                      const char* name) {
+  ZX_ASSERT(codec_dev != nullptr);
+
   if (codec_device_ != nullptr) {
     LOG("Codec already bound.");
     return zx::error(ZX_ERR_BAD_STATE);
-  }
-
-  ddk::IhdaCodecProtocolClient client;
-  zx_status_t result = ddk::IhdaCodecProtocolClient::CreateFromDevice(codec_dev, &client);
-  if (result != ZX_OK) {
-    LOG("Failure while attempting to fetch DDK protocol.");
-    return zx::error(result);
-  }
-
-  zx::channel channel;
-
-  // Obtain a channel handle from the device
-  result = client.GetDriverChannel(&channel);
-  if (result != ZX_OK) {
-    LOG("Error fetching driver channel.");
-    return zx::error(result);
   }
 
   auto device_channel = Channel::Create(std::move(channel));
@@ -78,6 +84,8 @@ zx::result<> IntelHDACodecDriverBase::Bind(zx_device_t* codec_dev, const char* n
     LOG("Error creating device channel.");
     return zx::error(ZX_ERR_NO_MEMORY);
   }
+
+  zx_status_t result;
 
   // Stash our reference to our device channel.  If activate succeeds, we
   // could start to receive messages from the codec device immediately.

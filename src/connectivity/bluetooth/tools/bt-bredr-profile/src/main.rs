@@ -5,6 +5,7 @@
 #![recursion_limit = "256"]
 
 use anyhow::{Context, Error, anyhow};
+use bt_repl::{CommandSet, Commands, ReplControl, ReplHandler};
 use bt_rfcomm::ServerChannel;
 use fidl::endpoints::create_request_stream;
 use fidl_fuchsia_bluetooth::{ChannelMode, ChannelParameters, SecurityRequirements};
@@ -13,18 +14,13 @@ use fidl_fuchsia_bluetooth_rfcomm_test::RfcommTestMarker;
 use fuchsia_async as fasync;
 use fuchsia_bluetooth::types::{PeerId, Uuid};
 use fuchsia_component::client::connect_to_protocol;
-use futures::channel::mpsc::{SendError, channel};
 use futures::channel::oneshot;
 use futures::lock::Mutex;
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryStreamExt, select};
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, Editor};
+use futures::{FutureExt, TryStreamExt, select};
 use std::sync::Arc;
-use std::thread;
 use test_rfcomm_client::RfcommManager;
 
-use crate::commands::{Cmd, CmdHelper, ReplControl};
+use crate::commands::Cmd;
 use crate::types::*;
 
 mod commands;
@@ -78,7 +74,7 @@ fn security_requirements_from_str(s: &str) -> Result<Option<SecurityRequirements
 
 /// Listen on the control event channel for new events.
 async fn connection_receiver(
-    mut connection_requests: ConnectionReceiverRequestStream,
+    mut connection_requests: ConnectionReceiver2RequestStream,
     end_ad_receiver: oneshot::Receiver<()>,
     state: Arc<Mutex<ProfileState>>,
     service_id: u32,
@@ -93,9 +89,11 @@ async fn connection_receiver(
                 Ok(None) => return Err(anyhow!("{} channel closed", tag)),
                 Ok(Some(event)) => event,
             };
-            let ConnectionReceiverRequest::Connected { channel, .. } = event else {
-                    return Err(anyhow!("ConnectionReceiverRequest: unknown method"));
+            let ConnectionReceiver2Request::Connected { payload, responder } = event else {
+                return Err(anyhow!("ConnectionReceiver2Request: unknown method"));
             };
+            let _ = responder.send();
+            let channel = payload.channel.ok_or_else(|| anyhow!("{}: missing channel", tag))?;
             let socket = channel.socket.ok_or_else(|| anyhow!("{}: missing socket", tag))?;
             let mode = channel.channel_mode.ok_or_else(|| anyhow!("{}: missing channel mode", tag))?;
             let max_tx_sdu_size = channel.max_tx_sdu_size.ok_or_else(|| anyhow!("{}: missing max tx sdu", tag))?;
@@ -122,7 +120,7 @@ async fn advertise(
 ) -> Result<(), Error> {
     if args.len() != 3 {
         println!("Error: invalid number of arguments");
-        println!("{}", Cmd::help_msg());
+        println!("usage: {}", Cmd::Advertise.usage());
         return Ok(());
     }
 
@@ -157,7 +155,7 @@ async fn advertise(
         .advertise(ProfileAdvertiseRequest {
             services: Some(svc_defs),
             parameters: Some(params),
-            receiver: Some(connect_client),
+            connection_receiver: Some(connect_client),
             ..Default::default()
         })
         .check()?;
@@ -417,131 +415,46 @@ async fn cleanup(state: Arc<Mutex<ProfileState>>) {
     state.lock().await.reset();
 }
 
-enum ParsedCmd {
-    Valid(Cmd, Vec<String>),
-    Empty,
-}
-
-/// Parse a single raw input command from a user into (command type, argument list)
-fn parse_cmd(line: String) -> Result<ParsedCmd, Error> {
-    let components: Vec<_> = line.trim().split_whitespace().collect();
-    match components.split_first() {
-        Some((raw_cmd, args)) => match raw_cmd.parse() {
-            Ok(cmd) => {
-                let args = args.iter().map(|s| s.to_string()).collect();
-                Ok(ParsedCmd::Valid(cmd, args))
-            }
-            Err(_) => Err(anyhow!("\"{}\" is not a valid command", raw_cmd)),
-        },
-        None => Ok(ParsedCmd::Empty),
-    }
-}
-
-async fn handle_cmd(
-    profile_svc: &ProfileProxy,
+/// Handles the commands entered into the bt-bredr-profile REPL.
+struct ProfileHandler {
+    profile_svc: ProfileProxy,
     state: Arc<Mutex<ProfileState>>,
-    cmd: Cmd,
-    args: Vec<String>,
-) -> Result<ReplControl, Error> {
-    match cmd {
-        Cmd::Advertise => advertise(profile_svc, state.clone(), &args).await?,
-        Cmd::RemoveService => remove_service(state.clone(), &args).await?,
-        Cmd::Services => services(state.clone()).await,
-        Cmd::Channels => channels(state.clone()).await,
-        Cmd::ConnectL2cap => connect_l2cap(profile_svc, state.clone(), &args).await?,
-        Cmd::ConnectRfcomm => connect_rfcomm(state.clone(), &args).await?,
-        Cmd::DisconnectL2cap => disconnect_l2cap(state.clone(), &args).await?,
-        Cmd::DisconnectRfcomm => disconnect_rfcomm(state.clone(), &args).await?,
-        Cmd::DisconnectRfcommSession => disconnect_rfcomm_session(state.clone(), &args).await?,
-        Cmd::SetupRfcomm => setup_rfcomm(state.clone()).await?,
-        Cmd::SendRls => send_rls(state.clone(), &args).await?,
-        Cmd::WriteL2cap => write_l2cap(state.clone(), &args).await?,
-        Cmd::WriteRfcomm => write_rfcomm(state.clone(), &args).await?,
-        Cmd::WriteLargeRfcomm => write_large_rfcomm(state.clone(), &args).await?,
-        Cmd::Help => println!("{}", Cmd::help_msg()),
-        Cmd::Exit | Cmd::Quit => {
-            cleanup(state.clone()).await;
-            return Ok(ReplControl::Break);
-        }
-    };
-    Ok(ReplControl::Continue)
 }
 
-/// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
-///
-/// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
-/// sends a ctrl-c or ctrl-d sequence.
-///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
-/// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
-fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>) {
-    let (mut cmd_sender, cmd_receiver) = channel(512);
-    let (ack_sender, mut ack_receiver) = channel(512);
+impl ReplHandler for ProfileHandler {
+    type Command = Cmd;
 
-    let _ = thread::spawn(move || -> Result<(), Error> {
-        let mut exec = fasync::LocalExecutorBuilder::new().build();
-
-        let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .build();
-            let mut rl = Editor::<CmdHelper, DefaultHistory>::with_config(config)?;
-            rl.set_helper(Some(CmdHelper::new()));
-
-            loop {
-                let readline = rl.readline(PROMPT);
-                match readline {
-                    Ok(line) => {
-                        cmd_sender.try_send(line)?;
-                    }
-                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("Error: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-
-                // Wait for processing thread to finish evaluating last command.
-                if ack_receiver.next().await.is_none() {
-                    return Ok(());
-                }
-            }
+    async fn handle(&mut self, command: Cmd, args: &[&str]) -> Result<ReplControl, Error> {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let profile_svc = &self.profile_svc;
+        let state = &self.state;
+        match command {
+            Cmd::Advertise => advertise(profile_svc, state.clone(), &args).await?,
+            Cmd::RemoveService => remove_service(state.clone(), &args).await?,
+            Cmd::Services => services(state.clone()).await,
+            Cmd::Channels => channels(state.clone()).await,
+            Cmd::ConnectL2cap => connect_l2cap(profile_svc, state.clone(), &args).await?,
+            Cmd::ConnectRfcomm => connect_rfcomm(state.clone(), &args).await?,
+            Cmd::DisconnectL2cap => disconnect_l2cap(state.clone(), &args).await?,
+            Cmd::DisconnectRfcomm => disconnect_rfcomm(state.clone(), &args).await?,
+            Cmd::DisconnectRfcommSession => disconnect_rfcomm_session(state.clone(), &args).await?,
+            Cmd::SetupRfcomm => setup_rfcomm(state.clone()).await?,
+            Cmd::SendRls => send_rls(state.clone(), &args).await?,
+            Cmd::WriteL2cap => write_l2cap(state.clone(), &args).await?,
+            Cmd::WriteRfcomm => write_rfcomm(state.clone(), &args).await?,
+            Cmd::WriteLargeRfcomm => write_large_rfcomm(state.clone(), &args).await?,
         };
-
-        exec.run_singlethreaded(fut)
-    });
-    (cmd_receiver, ack_sender)
-}
-
-/// Wait for raw commands from rustyline thread, and then parse and handle them.
-async fn run_repl(profile_svc: ProfileProxy, state: Arc<Mutex<ProfileState>>) -> Result<(), Error> {
-    // `cmd_stream` blocks on input in a separate thread and passes commands and acks back to
-    // the main thread via async channels.
-    let (mut commands, mut acks) = cmd_stream();
-
-    while let Some(raw_cmd) = commands.next().await {
-        match parse_cmd(raw_cmd) {
-            Ok(ParsedCmd::Valid(cmd, args)) => {
-                match handle_cmd(&profile_svc, state.clone(), cmd, args).await {
-                    Ok(ReplControl::Continue) => {}
-                    Ok(ReplControl::Break) => break,
-                    Err(e) => println!("Error handling command: {}", e),
-                }
-            }
-            Ok(ParsedCmd::Empty) => {}
-            Err(err) => println!("Error parsing command: {}", err),
-        }
-        // Notify readline loop that command has been evaluated.
-        acks.send(()).await?
+        Ok(ReplControl::Continue)
     }
 
-    Ok(())
+    /// Removes all services and closes all channels.
+    async fn on_exit(&mut self) {
+        cleanup(self.state.clone()).await;
+    }
+
+    fn help_footer(&self) -> Option<String> {
+        Some("See README for documentation.".to_string())
+    }
 }
 
 #[fuchsia::main(logging_tags = ["bt-bredr-profile"])]
@@ -554,7 +467,7 @@ async fn main() -> Result<(), Error> {
     let rfcomm_mgr = RfcommManager::from_proxy(profile_svc.clone(), rfcomm_test_svc);
     let state = Arc::new(Mutex::new(ProfileState::new(rfcomm_mgr)));
 
-    run_repl(profile_svc, state.clone()).await
+    bt_repl::run(PROMPT, Commands::<Cmd>::new(), ProfileHandler { profile_svc, state }).await
 }
 
 #[cfg(test)]
@@ -589,5 +502,27 @@ mod tests {
         // Disconnecting an already disconnected channel should not fail.
         // (It should only print a message)
         assert!(disconnect_l2cap(state.clone(), &args).await.is_ok());
+    }
+
+    #[fuchsia::test]
+    async fn on_exit_cleans_up_state() {
+        let (profile, _profile_server) =
+            fidl::endpoints::create_proxy_and_stream::<ProfileMarker>();
+        let (rfcomm_test, _rfcomm_test_server) =
+            fidl::endpoints::create_proxy_and_stream::<RfcommTestMarker>();
+        let state = Arc::new(Mutex::new(ProfileState::new(RfcommManager::from_proxy(
+            profile.clone(),
+            rfcomm_test,
+        ))));
+        let (socket, _peer_socket) = fidl::Socket::create_stream();
+        let _ = state.lock().await.l2cap_channels.insert(L2capChannel {
+            socket,
+            mode: ChannelMode::Basic,
+            max_tx_sdu_size: 672,
+        });
+
+        let mut handler = ProfileHandler { profile_svc: profile, state: state.clone() };
+        handler.on_exit().await;
+        assert!(state.lock().await.l2cap_channels.map().is_empty());
     }
 }

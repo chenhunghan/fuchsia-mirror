@@ -234,6 +234,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         assert_eq!(extract_blob_contents(&assembled_system), None);
         assembled_system

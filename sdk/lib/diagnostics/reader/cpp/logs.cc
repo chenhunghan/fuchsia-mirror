@@ -81,8 +81,7 @@ LogsSubscription::Promise LogsSubscription::ReadBatch() {
         return;
       }
       std::string json;
-      fsl::SizedVmo vmo(std::move(content.json()->vmo()), content.json()->size());
-      if (!fsl::StringFromVmo(vmo, &json)) {
+      if (!fsl::StringFromVmo(content.json().value(), &json)) {
         completer.complete_error("Failed to read returned VMO");
         return;
       }

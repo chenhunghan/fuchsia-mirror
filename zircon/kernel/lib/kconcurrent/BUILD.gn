@@ -8,11 +8,7 @@ import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 library_headers("headers") {
-  headers = [
-    "lib/kconcurrent/chainlock.h",
-    "lib/kconcurrent/copy.h",
-    "lib/kconcurrent/seqlock.h",
-  ]
+  headers = [ "lib/kconcurrent/chainlock.h" ]
 
   public_deps = [
     "//src/lib/lockdep:headers",
@@ -39,10 +35,7 @@ kernel_rust_mod("kconcurrent_rs") {
 }
 
 source_set("kconcurrent") {
-  sources = [
-    "chainlock_transaction.cc",
-    "seqlock.cc",
-  ]
+  sources = [ "chainlock_transaction.cc" ]
   public_deps = [ ":headers" ]
   deps = [
     ":kconcurrent_rs",

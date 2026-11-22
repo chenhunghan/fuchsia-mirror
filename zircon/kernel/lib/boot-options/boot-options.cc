@@ -567,6 +567,15 @@ void BootOptions::PrintValue(const Arm64AlternateVbar& value, FILE* out) {
   Enum<Arm64AlternateVbar>(EnumPrinter{value, out});
 }
 
+bool BootOptions::Parse(std::string_view value, Arm64Atomics BootOptions::* member) {
+  return Enum<Arm64Atomics>(EnumParser{value, &(this->*member)}).Check();
+}
+
+void BootOptions::PrintValue(const Arm64Atomics& value, FILE* out) {
+  std::string_view name = Arm64AtomicsName(value);
+  fprintf(out, "%.*s", static_cast<int>(name.size()), name.data());
+}
+
 #endif  // BOOT_OPTIONS_GENERATOR || defined(__aarch64__)
 
 #if BOOT_OPTIONS_GENERATOR || defined(__x86_64__)

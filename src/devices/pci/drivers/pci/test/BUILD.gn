@@ -116,7 +116,6 @@ fuchsia_driver_component("pci_fake") {
   testonly = true
   component_name = "fake-bus-pci"
   deps = [ ":pci_fake-driver" ]
-  info = "meta/pci_fake-info.json"
   manifest = "meta/pci_fake.cml"
 }
 

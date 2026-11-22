@@ -20,7 +20,6 @@ fuchsia_cc_driver("aml-spinand-driver") {
 
 fuchsia_driver_component("aml-spinand") {
   dml_label = ":aml-spinand-dml"
-  info = "meta/aml-spinand-info.json"
   component_name = "aml-spinand"
   deps = [ ":aml-spinand-driver" ]
 }

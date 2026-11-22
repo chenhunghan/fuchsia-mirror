@@ -52,7 +52,7 @@ provide binary compatibility with those applications for a long period of time.
 Windows missed that opportunity and now tries to guess the target ABI revision
 for binaries using heuristics, which creates significant developer pain.
 
-## Terminology
+## Terminology {#terminology}
 
 A *release* of Fuchsia is a build of the Fuchsia operating system and associated
 packages that is deployed to a user population. A release has a version number
@@ -95,7 +95,7 @@ in that release.
 A given API level implicates a specific ABI revision, but multiple API levels
 might implicate the same ABI revision.
 
-#### API level
+#### API level {#api-level}
 
 Note: The definition of an API level has been updated by both [RFC-0083] and
 [RFC-0246]. As of [RFC-0246], they are **32-bit** integers.
@@ -115,7 +115,7 @@ Syntactically, a Fuchsia *API level* is an unsigned, 64-bit integer.
 As the platform evolves (see *Evolution* below), API levels are assigned in
 increasing order and are intended to be understood by human beings, including end-developers.
 
-#### ABI revision
+#### ABI revision {#abi-revision}
 
 A Fuchsia *ABI revision* denotes the semantics of the [Fuchsia System Interface]
 that an application expects the platform to provide. A given release of Fuchsia
@@ -141,7 +141,7 @@ the semantics of a future version of the [Fuchsia System Interface]. As a
 result, ABI revisions are intended to be understood by machines and only rarely
 interpreted by human beings.
 
-#### Evolution
+#### Evolution {#evolution}
 
 The platform increases the API level whenever the platform adds or removes an
 API from the [Fuchsia IDK] or when the ABI revision changes. In practice, the
@@ -165,7 +165,7 @@ will likely need to refine that document over time as the project gains
 implementation experience about what changes commonly do and do not break
 applications in practice.
 
-### Applications
+### Applications {#applications}
 
 End-developers select a single *target API level* when building a component.
 The target API level controls which declarations in the [Fuchsia IDK]
@@ -181,7 +181,7 @@ developer expected the platform to provide when they built their component. A
 given package can contain many components, each of which can select whichever
 target ABI revision they prefer.
 
-### Platform
+### Platform {#platform}
 
 The platform maintains a list of *supported ABI revisions*. The platform
 provides binary compatibility for components that target a supported ABI
@@ -260,7 +260,7 @@ gain access to a newly introduced API, the developer must change their target
 API level, which requires them to migrate off any interfaces that were
 deprecated in that API level.
 
-## Implementation
+## Implementation {#implementation}
 
 Implementing this design involves many layers of the Fuchsia system. This
 document provides a sketch of the changes needed at each implicated layer, but
@@ -318,7 +318,7 @@ manifest. Another possibility is to add the ABI revision to the
 `fuchsia.ldsvc.Loader` protocol, which is typically routed to the source of the
 executable.
 
-### Component framework
+### Component framework {#component-framework}
 
 The tools that build component manifests should take the target API level as a
 command-line parameter and embed the corresponding ABI revision in the component

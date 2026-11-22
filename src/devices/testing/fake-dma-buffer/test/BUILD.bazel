@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fake-dma-buffer-test"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fake-dma-buffer-test-bin",
+    srcs = ["fake-dma-buffer-test.cc"],
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+    }),
+    gn_output_name = "fake-dma-buffer-test",
+    deps = [
+        "//sdk/lib/driver/mmio/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fit",
+        "//src/devices/testing/fake-dma-buffer",
+        "//src/lib/ddk",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fake-dma-buffer-test",
+    unit_tests = [":fake-dma-buffer-test-bin"],
+)

@@ -35,7 +35,7 @@ rustc_library(
 # to Bazel once `fx_package` supports `subpackages` and
 # `//src/bringup/bin/ptysvc:package`,
 # `//src/testing/zx-test-util:exit_with_code_util`, and
-# `//src/zircon/bin/zxsh:sh` are available in Bazel.
+# `//src/developer/zxsh:sh` are available in Bazel.
 rustc_test(
     name = "pty_test",
     crate = ":pty",

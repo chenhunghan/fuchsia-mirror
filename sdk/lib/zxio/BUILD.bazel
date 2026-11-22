@@ -45,26 +45,9 @@ fx_cc_library_headers(
     ],
 )
 
-fx_cc_library_headers(
-    name = "udp_socket_private",
-    hdrs = ["include/lib/zxio/cpp/udp_socket_private.h"],
-    include_dir = "include",
-    visibility = [
-        "//sdk/lib/zxio:__subpackages__",
-        # The udp_serde library needs access to the constants in this file as
-        # part of the serialization protocol used for sending UDP packets
-        # between netstack and clients using fdio.
-        "//src/connectivity/network/lib/udp_serde:__pkg__",
-    ],
-    deps = [
-        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_cpp",
-    ],
-)
-
 fx_cc_library(
     name = "zxio_private_headers",
     hdrs = [
-        "dgram_cache.h",
         "private.h",
         "socket_address.h",
     ],
@@ -80,7 +63,6 @@ fx_cc_library(
     srcs = [
         "create.cc",
         "debuglog.cc",
-        "dgram_cache.cc",
         "fault_catcher.cc",
         "get_vmo.cc",
         "handle_holder.cc",
@@ -116,7 +98,6 @@ fx_cc_library(
     ],
     implementation_deps = [
         ":inception",
-        ":udp_socket_private",
         ":zxio_private_headers",
         "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
         "//sdk/fidl/fuchsia.hardware.pty:fuchsia.hardware.pty_cpp",
@@ -127,7 +108,6 @@ fx_cc_library(
         "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_cpp",
         "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_cpp",
         "//sdk/lib/stdcompat",
-        "//src/connectivity/network/lib/udp_serde",
         "//zircon/system/ulib/fbl",
         "//zircon/system/ulib/zx",
         "//zircon/third_party/ulib/safemath",

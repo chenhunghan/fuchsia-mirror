@@ -23,7 +23,7 @@ fidl_library(
     stable = True,
     visibility = ["//visibility:public"],
     deps = [
-        "//sdk/fidl/fuchsia.device.fs",
+        "//sdk/fidl/fuchsia.driver.token",
         "//sdk/fidl/fuchsia.net",
         "//sdk/fidl/fuchsia.power.broker",
         "//zircon/vdso/zx",

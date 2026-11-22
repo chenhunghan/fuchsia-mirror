@@ -1,0 +1,112 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", "rustc_staticlib")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":cpp-log-decoder-tests"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
+# NOTE: It isn't currently possible to link to more than one rustc_staticlib; it
+# results in duplicate definition linker errors on LTO builds. To workaround
+# this, log_decoder_c_bindings is included in the fake-log-sink rustc static
+# library, which is then used by the C++ fake-log-sink library.
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    crate_name = "log_decoder_c_bindings",
+    edition = "2024",
+    visibility = ["//src/lib/diagnostics/fake-log-sink/rust:__pkg__"],
+    deps = [
+        "//src/lib/diagnostics/log/encoding/rust",
+        "//src/lib/diagnostics/log/message/rust",
+        "//third_party/rust_crates/vendor:bumpalo",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# Use this target if you need both fake-log-sink and cpp-log-decoder (see
+# comment above).
+fx_cc_library(
+    name = "headers",
+    testonly = True,
+    hdrs = ["log_decoder.h"],
+    implementation_deps = ["//src/lib/diagnostics/fake-log-sink/rust:rust_ffi"],
+    visibility = [
+        "//src/lib/diagnostics/fake-log-sink/cpp:__pkg__",
+        "//src/storage/lib/watchdog:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+rustc_staticlib(
+    name = "staticlib",
+    srcs = ["src/lib.rs"],
+    build_flags = [
+        "//build/config:optimize_size",
+        "//build/config/lto:thinlto-if-compatible",
+    ],
+    crate_name = "log_decoder_c_bindings",
+    edition = "2024",
+    deps = [
+        "//src/lib/diagnostics/log/encoding/rust",
+        "//src/lib/diagnostics/log/message/rust",
+        "//third_party/rust_crates/vendor:bumpalo",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# `log_decoder_api_cpp` uses `<lib/zx/time.h>` (`zx::time_boot`) and FIDL
+# bindings (`fuchsia.logger_cpp`), which are Fuchsia-only.
+fx_cc_library(
+    name = "log_decoder_api_cpp",
+    srcs = ["log_decoder_api.cc"],
+    hdrs = [
+        "log_decoder.h",
+        "log_decoder_api.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/fit-promise",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "log_decoder_api",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/lib/diagnostics/fidl_log_message_parser:__pkg__"],
+    deps = [
+        ":log_decoder_api_cpp",
+        ":staticlib",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "cpp-log-decoder-unittest",
+    srcs = ["test.cc"],
+    deps = [
+        ":log_decoder_api_cpp",
+        ":staticlib",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "cpp-log-decoder-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":cpp-log-decoder-unittest"],
+)

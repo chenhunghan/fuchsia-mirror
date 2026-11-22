@@ -12,6 +12,7 @@
 #include <cassert>
 #include <concepts>
 #include <ranges>
+#include <tuple>
 
 #include "layout.h"
 #include "symbol.h"
@@ -48,9 +49,9 @@ concept SymbolNameArray =
 // This does the heavy lifting at compile time.  It computes the necessary size
 // for a hash table with bucket depth of one for the given set of symbol names.
 // It produces a permutation of the Names array that assigns a unique table
-// index to each symbol name.  Its static methods provide that computed
-// computed size, so parallel tables can be indexed by name; and lookups to
-// translate a name in the set to its index in a table.
+// index to each symbol name.  Its static methods provide that computed size,
+// so parallel tables can be indexed by name; and lookups to translate a name
+// in the set to its index in a table.
 template <const auto& Names, double MaxOverheadRatio = 1.0>
   requires SymbolNameArray<decltype(Names)>
 class PerfectSymbolSet {
@@ -78,7 +79,7 @@ class PerfectSymbolSet {
   // This is the ratio of waste to number of names (the ideal table size).
   static consteval double OverheadRatio() {
     uint32_t overhead = Overhead();
-    return overhead == 0 ? 0.0 : static_cast<double>(Names.size()) / overhead;
+    return overhead == 0 ? 0.0 : static_cast<double>(overhead) / static_cast<double>(Names.size());
   }
 
   // Find a name in the set.  If present, return its table index.
@@ -171,7 +172,7 @@ class PerfectSymbolSet {
 // operator[] does a quick hash lookup, but there is no .find() method.  It
 // doesn't have other container / range methods itself, but its Enumerate()
 // method returns a range that is similar to enumerating std::unordered_map.
-// Its iterators are different than st::unordered_map iterators, because they
+// Its iterators are different than std::unordered_map iterators, because they
 // yield a pair of references rather than a reference to a pair.  So even for
 // mutable use, it must be bound with `auto [name, value]` and not `auto&`.
 template <typename T, const auto& Names, auto... SetArgs>
@@ -201,20 +202,20 @@ class PerfectSymbolMap {
   static constexpr auto Iterable(auto& map) {
     return std::views::transform(Set::IndexMap(), [&map](const auto& elt) {
       const auto& [i, name] = elt;
-      return std::pair<const SymbolName&, T&>{name, map[i]};
+      return std::forward_as_tuple(name, map[i]);
     });
   }
 
   std::array<T, Set::TableSize()> map_{};
 };
 
-// elfldltl::PerfectSymbolFilter is a PerfectSymbolMap<const Sym*> with some
+// elfldltl::PerfectSymbolFilter wraps a PerfectSymbolMap<const Sym*> with some
 // conveniences for using it with the <lib/elfldltl/resolve.h> Module API.
 // Initialize it with pointers into a specific module's symbol table.  Then use
 // it as a symbol lookup function for the chosen subset of that module.
 template <const auto& Names, ElfApi ElfLayout = Elf<>, auto... SetArgs>
   requires SymbolNameArray<decltype(Names)>
-class PerfectSymbolFilter : public PerfectSymbolMap<const typename ElfLayout::Sym*, Names> {
+class PerfectSymbolFilter {
  public:
   using Elf = ElfLayout;
   using Sym = Elf::Sym;

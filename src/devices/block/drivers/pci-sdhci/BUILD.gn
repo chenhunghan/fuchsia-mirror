@@ -32,9 +32,9 @@ fuchsia_cc_driver("pci-sdhci-driver") {
     "//sdk/fidl/fuchsia.hardware.sdhci:fuchsia.hardware.sdhci_cpp",
     "//sdk/lib/driver/component/cpp",
     "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/driver/pci/cpp",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/devices/lib/driver:driver_runtime",
-    "//src/devices/pci/lib/device-protocol-pci",
     "//zircon/system/ulib/sync",
   ]
 }
@@ -46,7 +46,6 @@ fuchsia_driver_component("pci-sdhci") {
     ":pci-sdhci-bind",
     ":pci-sdhci-driver",
   ]
-  info = "meta/pci-sdhci-info.json"
 }
 
 fuchsia_driver_package("package") {

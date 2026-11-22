@@ -30,6 +30,11 @@ if (current_cpu != "riscv64") {
 #       for a canonical example.
 #     - Type: list(string)
 #
+#   * build_only
+#     - Optional: See boot_test().
+#     - Type: bool
+#     - Default: false
+#
 #   * disabled
 #     - Optional: See boot_test().
 #     - Type: bool
@@ -170,6 +175,7 @@ template("zbi_test") {
     forward_variables_from(invoker,
                            [
                              "assert_no_deps",
+                             "build_only",
                              "data_deps",
                              "disabled",
                              "environments",
@@ -177,7 +183,7 @@ template("zbi_test") {
                              "qemu_kernel",
                              "timeout",
                            ])
-    if (!defined(environments)) {
+    if (!defined(environments) && !(defined(build_only) && build_only)) {
       environments = _all_emu_envs
     }
     zbi = ":$zbi_target"

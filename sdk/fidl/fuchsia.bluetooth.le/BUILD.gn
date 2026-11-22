@@ -2,17 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//tools/fidl/measure-tape/measure_tape.gni")
-
-measure_tape("hlcpp_measure_tape_for_peer") {
-  target_binding = "hlcpp"
-  target_types = [ "fuchsia.bluetooth.le/Peer" ]
-  fidls = [
-    "//sdk/fidl/fuchsia.bluetooth",
-    "//sdk/fidl/fuchsia.bluetooth.le",
-  ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________

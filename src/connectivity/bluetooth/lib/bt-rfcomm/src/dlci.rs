@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::format_err;
 use core::fmt::{self, Display};
 
 use crate::frame::FrameParseError;
@@ -156,7 +155,7 @@ impl TryFrom<u8> for ServerChannel {
     type Error = RfcommError;
     fn try_from(src: u8) -> Result<ServerChannel, Self::Error> {
         if src < Self::MIN.0 || src > Self::MAX.0 {
-            return Err(RfcommError::Other(format_err!("Out of range: {:?}", src).into()));
+            return Err(RfcommError::ServerChannelOutOfRange(src));
         }
         Ok(ServerChannel(src))
     }
@@ -319,14 +318,14 @@ mod tests {
 
         let invalid = 0;
         let sc = ServerChannel::try_from(invalid);
-        assert_matches!(sc, Err(_));
+        assert_matches!(sc, Err(RfcommError::ServerChannelOutOfRange(0)));
 
         let too_large = 31;
         let sc = ServerChannel::try_from(too_large);
-        assert_matches!(sc, Err(_));
+        assert_matches!(sc, Err(RfcommError::ServerChannelOutOfRange(31)));
 
         let u8_max = u8::MAX;
         let sc = ServerChannel::try_from(u8_max);
-        assert_matches!(sc, Err(_));
+        assert_matches!(sc, Err(RfcommError::ServerChannelOutOfRange(u8::MAX)));
     }
 }

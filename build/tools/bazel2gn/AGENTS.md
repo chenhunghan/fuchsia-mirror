@@ -27,7 +27,8 @@ motivation, and comment annotations.
 -   [`constants.go`](./constants.go): Rule-to-GN-template mappings
     (`bazelRuleToGNTemplate`, `noGNEquivalent`), attribute omissions
     (`attrsToOmitByRules`), attribute renames (`commonAttrMap`,
-    `attrMapsByRules`), extra GN expressions (`extraGnExpressionByRules`),
+    `attrMapsByRules`), extra GN expressions (`extraGnExpressionByRules`,
+    `defaultGnExpressionByRules`),
     assignment operators (`bazelAttrToGNAssignmentOps`), platform constraints,
     `coptToConfig`, third-party repo mappings, and `@bazel2gn:*` annotation
     prefixes.
@@ -41,6 +42,16 @@ motivation, and comment annotations.
     `compiled_action` `outs` and `depfile` (placed under `$target_gen_dir`
     unless overwritten), `args` (`$(location <label>)`, `$(execpath <label>)`,
     and `$(RULEDIR)`), `tool`, `tool_output_name`, `deps`, and `mnemonic`.
+-   [`config.go`](./config.go): Loads and validates optional per-directory-tree
+    `.bazel2gn.json` configuration files (`gn_imports` and custom `rules`
+    mappings) along the path from `--fuchsia_dir` to the synced package.
+-   [`ctf_fx_package.go`](./ctf_fx_package.go): Converts `ctf_fx_package`
+    into `ctf_fuchsia_package`, keeping `package_name` unchanged (no `-gn`
+    suffix) because CTF releases identify packages by name.
+-   [`fx_cc_shared_library.go`](./fx_cc_shared_library.go): Converts the
+    `fx_cc_shared_library` output file name (`shared_lib_name`, or the
+    default derived from `name`) into GN `shared_library` `output_name`,
+    `output_extension`, and `output_prefix_override`.
 -   [`fx_component.go`](./fx_component.go): Validates component manifest and
     component rules (`fx_component_manifest`,
     `fx_component_manifest_with_expectations`, `fx_component`, and converted
@@ -68,6 +79,12 @@ motivation, and comment annotations.
     binary output names (`bin_output_name` / `arch32_bin_output_name`), and
     auto-wraps same-file Linux binaries consumed exclusively by
     `linux_resource` in `if (is_linux && !is_host)`.
+-   [`resource.go`](./resource.go): Validates and converts `resource`,
+    `fuchsia_package_resource`, `resource_group`,
+    `fuchsia_package_resource_group`, `resource_tree`, and
+    `fuchsia_package_resource_collection` into GN `resource`, `resource_group`,
+    `resource_tree`, and `group` targets, and rewrites same-file
+    `compiled_action` output references into `$target_gen_dir/...` with `deps`.
 -   [`rust_check_cfg.go`](./rust_check_cfg.go): Converts
     `rustc_check_cfg_build_flags` macro calls into GN `config` targets with
     `--check-cfg=cfg(...)` in `rustflags`.
@@ -96,8 +113,8 @@ motivation, and comment annotations.
 -   [`bazel_migration.gni`](./bazel_migration.gni): Umbrella `.gni` file
     imported below the sentinel in all generated `BUILD.gn` files.
 -   [`third_party_target_map.json`](./third_party_target_map.json): Embedded
-    JSON table mapping external Bazel repo labels (`@...`) to
-    `//third_party/...` GN labels.
+    JSON table mapping external Bazel repo labels (`@...`) and root-package
+    third-party labels (e.g., `//:glm`) to `//third_party/...` GN labels.
 -   [`cmd/main.go`](./cmd/main.go): CLI host binary (`--gn_bin`,
     `--buildifier_bin`, `--fuchsia_dir`, `--directory_list`, `--check_only`,
     `--workers`) that discovers or reads target directories, formats
@@ -127,7 +144,9 @@ When adding support for a Bazel rule or attribute, check all five touchpoints:
         shared across rules). Compose maps with `mustMergeMaps`; duplicate keys
         panic at startup.
     -   Add fixed GN assignments required by a rule (e.g., `sdk = "shared"`,
-        `testonly = true`) to `extraGnExpressionByRules`.
+        `testonly = true`) to `extraGnExpressionByRules`, and GN assignments
+        that a `# @bazel2gn:raw_attribute:` may override (e.g.
+        `enable_mypy = false`) to `defaultGnExpressionByRules`.
     -   Add attributes requiring `+=` or `-=` in GN (such as `configs`,
         `build_flags`, `disable_build_flags`) to `bazelAttrToGNAssignmentOps`.
 3.  **Value transformers ([`bazel2gn.go`](./bazel2gn.go) &
@@ -175,15 +194,22 @@ When adding support for a Bazel rule or attribute, check all five touchpoints:
     `cc_binary` and `fx_cc_binary` map to `executable` by default, and convert
     to `loadable_module` when `linkshared = True` is set (stripping any trailing
     `.so` from `name` into `output_name` so GN does not produce `<name>.so.so`).
+    `fx_cc_shared_library` maps to `shared_library`, and
+    `fxCcSharedLibraryOutputNameToGN` sets `output_name`, `output_extension`,
+    and `output_prefix_override` so the GN file name matches Bazel's
+    `shared_lib_name` (default `lib<name>.so`). Its `deps` stay GN `deps`
+    (linked in, headers not forwarded); the GN-only `gn_public_deps` and
+    `gn_public_configs` map to GN `public_deps` and `public_configs`.
 -   **Same-package visibility (`":*"`)**: Bazel grants implicit same-package
     visibility, whereas GN does not. `ensureSamePackageVisibility` injects
     `":*"` into restricted GN visibility lists unless `"*"`, `"//*"`, `":*"`, or
     `"./*"` is already present.
 -   **`aspect_hints` ordering**: `buildifier` sorts `aspect_hints` before `deps`
     / `implementation_deps`, but all three can map to `deps` in GN.
-    `reorderAspectHints` moves `aspect_hints` after other `deps`-mapped
-    attributes and uses `+=` (emitting `deps = []` first if earlier `deps`
-    assignments are conditional).
+    `reorderAppendedDeps` moves `aspect_hints` (and `dynamic_deps` of
+    `fx_cc_shared_library`, which also maps to `deps`) after other
+    `deps`-mapped attributes and uses `+=` (emitting `deps = []` first if
+    earlier `deps` assignments are conditional or absent).
 -   **`exec_properties` is Bazel-only**: GN templates don't accept it, so
     `execPropertiesToGN` maps `exec_properties = RBE_USE_LARGE_WORKER` on Rust
     rules to `concurrent_jobs.rust_highmem` (via a `_concurrent_jobs`
@@ -204,9 +230,10 @@ When adding support for a Bazel rule or attribute, check all five touchpoints:
     @bazel2gn:raw_overwrite:` (`# @bazel2gn:path_overwrite:` is rejected).
 -   **Third-party label mapping
     ([`third_party_target_map.json`](./third_party_target_map.json))**: External
-    repo labels (`@...`) are resolved via `third_party_target_map.json`
-    (embedded into `bazel2gn_lib` via `//go:embed`). Keep keys sorted and remove
-    mappings when external repositories are retired.
+    repo labels (`@...`) and root-package third-party labels (e.g., `//:glm`)
+    are resolved via `third_party_target_map.json` (embedded into `bazel2gn_lib`
+    via `//go:embed`). Keep keys sorted and remove mappings when external
+    repositories are retired.
 -   **Self-hosting build files**: [`BUILD.bazel`](./BUILD.bazel) is the source
     of truth for building `bazel2gn`. [`BUILD.gn`](./BUILD.gn) wraps `:bazel2gn`
     via `bazel_host_tool("bazel2gn")` and intentionally does **not** use the

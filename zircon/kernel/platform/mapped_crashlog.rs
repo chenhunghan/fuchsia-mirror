@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use crate::crashlog::{DLOG_DUMP_BEGIN, DLOG_DUMP_DISABLED, DLOG_DUMP_END};
 use crate::kernel::deadline::{Deadline, SlackMode, TimerSlack};
 use crate::kernel::timer::{Timer, ZX_CLOCK_MONOTONIC};
 use crate::ksync_kernel::TrackedSpinlock;
@@ -30,6 +31,84 @@ use zx_status::Status;
 use zx_types::{zx_instant_boot_t, zx_instant_mono_t, zx_status_t};
 
 const RAM_CRASHLOG_V1_SIZE: usize = 72;
+
+/// Returns the byte offset of the first occurrence of `needle` in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// Whether `haystack` contains `needle` anywhere.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    find(haystack, needle).is_some()
+}
+
+/// Writes the recovered persistent debuglog `dlog`, if non-empty, through `write`.
+///
+/// When `use_dlog_dump_markers` is true, wraps `dlog` in `DLOG_DUMP_BEGIN` and `DLOG_DUMP_END` so
+/// userspace feedback extracts it as the previous boot's kernel log. This preserves recent kernel
+/// logs in snapshots after a warm reset with no crashlog payload (such as a hardware watchdog
+/// reset or power-button reset).
+fn write_recovered_dlog(write: &mut impl FnMut(&[u8]), dlog: &[u8], use_dlog_dump_markers: bool) {
+    if dlog.is_empty() {
+        return;
+    }
+    let mut fmt_buf = [0u8; 80];
+    write(kformat!(&mut fmt_buf, "Recovered {} bytes from the persistent debug log\n", dlog.len()));
+    if use_dlog_dump_markers {
+        write(DLOG_DUMP_BEGIN);
+        write(b"\n");
+    } else {
+        write(b"=================== BEGIN ===================\n");
+    }
+    write(dlog);
+    if !dlog.ends_with(b"\n") {
+        write(b"\n");
+    }
+    if use_dlog_dump_markers {
+        write(DLOG_DUMP_END);
+        write(b"\n");
+    } else {
+        write(b"=================== END ===================\n");
+    }
+}
+
+/// Writes the crashlog `payload` and recovered persistent debuglog `dlog` through `write`.
+///
+/// Wraps `dlog` in `DLOG_DUMP_BEGIN` and `DLOG_DUMP_END` unless `payload` already contains a real
+/// debuglog dump. If `payload` contains the `DLOG_DUMP_DISABLED` placeholder (the default when
+/// `kernel.render-dlog-to-crashlog` is false) and `dlog` is non-empty, strips that placeholder so
+/// userspace extracts `dlog` instead.
+fn write_payload_and_recovered_dlog(write: &mut impl FnMut(&[u8]), payload: &[u8], dlog: &[u8]) {
+    let dlog_dump_span = find(payload, DLOG_DUMP_BEGIN).map(|begin| {
+        let end = find(&payload[begin..], DLOG_DUMP_END).map_or(payload.len(), |rel_end| {
+            let end = begin + rel_end + DLOG_DUMP_END.len();
+            if payload.get(end) == Some(&b'\n') { end + 1 } else { end }
+        });
+        (begin, end)
+    });
+    let payload_has_disabled_dlog = dlog_dump_span
+        .is_some_and(|(begin, end)| contains(&payload[begin..end], DLOG_DUMP_DISABLED));
+
+    if let Some((begin, end)) = dlog_dump_span
+        && payload_has_disabled_dlog
+        && !dlog.is_empty()
+    {
+        if begin > 0 {
+            write(&payload[..begin]);
+        }
+        if end < payload.len() {
+            write(&payload[end..]);
+        }
+    } else if !payload.is_empty() {
+        write(payload);
+    }
+
+    let payload_has_dlog_dump = dlog_dump_span.is_some() && !payload_has_disabled_dlog;
+    write_recovered_dlog(write, dlog, !payload_has_dlog_dump);
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -272,16 +351,16 @@ unsafe impl Interface for MappedCrashlog {
         // Create a string representation of the HW reboot reason.
         // SAFETY: `kBootConstants` is initialized by physboot before kernel entry and remains
         // read-only for the life of the kernel.
-        let hw_reason = unsafe { cpp_boot_constants_hw_reboot_reason() };
+        let hw_reason = HwRebootReason::from_raw(unsafe { cpp_boot_constants_hw_reboot_reason() });
         let mut str_hw_reason_buf = [0u8; 16];
-        let str_hw_reason: &[u8] = match HwRebootReason::from_raw(hw_reason) {
-            Some(HwRebootReason::Undefined) => b"UNKNOWN",
-            Some(HwRebootReason::Cold) => b"COLD BOOT",
-            Some(HwRebootReason::Warm) => b"WARM BOOT",
-            Some(HwRebootReason::Brownout) => b"BROWNOUT",
-            Some(HwRebootReason::Watchdog) => b"HW WATCHDOG",
-            Some(HwRebootReason::UserHardReset) => b"USER HARD RESET",
-            None => kformat!(&mut str_hw_reason_buf, "0x{:08x}", hw_reason),
+        let str_hw_reason: &[u8] = match hw_reason {
+            HwRebootReason::UNDEFINED => b"UNKNOWN",
+            HwRebootReason::COLD => b"COLD BOOT",
+            HwRebootReason::WARM => b"WARM BOOT",
+            HwRebootReason::BROWNOUT => b"BROWNOUT",
+            HwRebootReason::WATCHDOG => b"HW WATCHDOG",
+            HwRebootReason::USER_HARD_RESET => b"USER HARD RESET",
+            _ => kformat!(&mut str_hw_reason_buf, "0x{:08x}", hw_reason.as_raw()),
         };
 
         if let Err(status) = self.log_recovery_result
@@ -294,10 +373,15 @@ unsafe impl Interface for MappedCrashlog {
             );
         }
 
-        // If we failed to recover any crashlog and there is no HW reboot reason,
-        // simply report the size as 0.
+        // Persistent debuglog recovery runs independently of the crashlog header, so a recovered
+        // persistent debuglog may exist even when no valid crashlog header is present.
+        let dlog = persistent_dlog_get_recovered_log().unwrap_or(&[]);
+
+        // If we failed to recover any crashlog or persistent dlog and there is no HW reboot
+        // reason, simply report the size as 0.
         if self.log_recovery_result.is_err()
-            && HwRebootReason::from_raw(hw_reason) == Some(HwRebootReason::Undefined)
+            && hw_reason == HwRebootReason::UNDEFINED
+            && dlog.is_empty()
         {
             return 0;
         }
@@ -315,6 +399,7 @@ unsafe impl Interface for MappedCrashlog {
                 b"WARNING - Could not recover crashlog from RAM. \
 Only HW reboot reason is available.\n",
             );
+            write_recovered_dlog(&mut write, dlog, true);
             return written;
         }
 
@@ -385,26 +470,15 @@ and may contain errors!\n",
             );
         }
 
-        if !rlog.payload.is_null() && rlog.payload_len != 0 {
+        let payload: &[u8] = if !rlog.payload.is_null() && rlog.payload_len != 0 {
             // SAFETY: `rlog.payload` is a non-null pointer into `self.crashlog_buffer` validated
             // by `ram_crashlog_recover` for `rlog.payload_len` bytes, and `recover` is called
             // before `enable_crashlog_uptime_updates(true)` or `finalize` modifies the buffer.
-            let payload = unsafe { slice_from_raw_parts(rlog.payload, rlog.payload_len as usize) };
-            write(payload);
-        }
-
-        // Render any persistent dlog we happened to recover
-        let dlog = persistent_dlog_get_recovered_log().unwrap_or(&[]);
-        if !dlog.is_empty() {
-            write(kformat!(
-                &mut fmt_buf,
-                "Recovered {} bytes from the persistent debug log\n",
-                dlog.len()
-            ));
-            write(b"=================== BEGIN ===================\n");
-            write(dlog);
-            write(b"=================== END ===================\n");
-        }
+            unsafe { slice_from_raw_parts(rlog.payload, rlog.payload_len as usize) }
+        } else {
+            &[]
+        };
+        write_payload_and_recovered_dlog(&mut write, payload, dlog);
 
         // Report the total length.
         written
@@ -440,13 +514,31 @@ mod tests {
     use kalloc::Box;
     use libc::stdio::StringFile;
     use pin_init::stack_pin_init;
-    use unittest::{assert_gt, assert_ok, expect_eq, expect_true, unwrap_some};
+    use unittest::{
+        assert_false, assert_gt, assert_ok, assert_true, expect_eq, expect_true, unwrap_some,
+    };
 
     const CRASHLOG_BUFFER_SIZE: usize = 256;
     const TEST_PAYLOAD: &[u8] = b"test panic payload\n";
 
-    fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|window| window == needle)
+    struct TestBuf {
+        buf: [u8; 512],
+        len: usize,
+    }
+
+    impl TestBuf {
+        fn new() -> Self {
+            Self { buf: [0; 512], len: 0 }
+        }
+
+        fn push(&mut self, bytes: &[u8]) {
+            self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+            self.len += bytes.len();
+        }
+
+        fn as_bytes(&self) -> &[u8] {
+            &self.buf[..self.len]
+        }
     }
 
     /// Verify recovered crashlog length matches written bytes without trailing NULs.
@@ -499,10 +591,90 @@ mod tests {
 
         expect_eq!(measured_len, written_len);
         expect_eq!(written_len, string_file.as_bytes().len());
-        expect_true!(contains_subslice(
-            string_file.as_bytes(),
-            b"ZIRCON REBOOT REASON (KERNEL PANIC)\n\n"
-        ));
-        expect_true!(contains_subslice(string_file.as_bytes(), TEST_PAYLOAD));
+        expect_true!(contains(string_file.as_bytes(), b"ZIRCON REBOOT REASON (KERNEL PANIC)\n\n"));
+        expect_true!(contains(string_file.as_bytes(), TEST_PAYLOAD));
+    }
+
+    /// Tests that a recovered persistent debuglog replaces a disabled-dlog placeholder.
+    #[test]
+    fn disabled_dlog_stub_replaced_by_recovered_dlog_test() {
+        const PAYLOAD: &[u8] = b"panic buffer: empty\n\n\
+--- BEGIN DLOG DUMP ---\n\
+DLOG -> Crashlog disabled\n\n\
+--- END DLOG DUMP ---\n";
+        const DLOG: &[u8] = b"==== WEDGE DUMP ====\nline 2\n";
+
+        let mut out = TestBuf::new();
+        write_payload_and_recovered_dlog(&mut |b| out.push(b), PAYLOAD, DLOG);
+        let bytes = out.as_bytes();
+
+        assert_false!(contains(bytes, DLOG_DUMP_DISABLED));
+        let first_begin = find(bytes, DLOG_DUMP_BEGIN);
+        assert_true!(first_begin.is_some());
+        if let Some(pos) = first_begin {
+            assert_true!(find(&bytes[pos + DLOG_DUMP_BEGIN.len()..], DLOG_DUMP_BEGIN).is_none());
+        }
+        assert_true!(
+            bytes
+                == b"panic buffer: empty\n\n\
+Recovered 28 bytes from the persistent debug log\n\
+--- BEGIN DLOG DUMP ---\n\
+==== WEDGE DUMP ====\n\
+line 2\n\
+--- END DLOG DUMP ---\n"
+        );
+    }
+
+    /// Tests that a disabled-dlog placeholder stays intact when no log was recovered.
+    #[test]
+    fn disabled_dlog_stub_preserved_when_recovered_dlog_empty_test() {
+        const PAYLOAD: &[u8] = b"panic buffer: empty\n\n\
+--- BEGIN DLOG DUMP ---\n\
+DLOG -> Crashlog disabled\n\n\
+--- END DLOG DUMP ---\n";
+
+        let mut out = TestBuf::new();
+        write_payload_and_recovered_dlog(&mut |b| out.push(b), PAYLOAD, b"");
+        assert_true!(out.as_bytes() == PAYLOAD);
+    }
+
+    /// Tests that a real debuglog dump stays intact alongside a recovered persistent log.
+    #[test]
+    fn real_dlog_dump_preserved_with_recovered_dlog_test() {
+        const PAYLOAD: &[u8] = b"panic buffer: empty\n\n\
+--- BEGIN DLOG DUMP ---\n\
+crashlog dlog\n\
+--- END DLOG DUMP ---\n";
+        const DLOG: &[u8] = b"persistent dlog\n";
+
+        let mut out = TestBuf::new();
+        write_payload_and_recovered_dlog(&mut |b| out.push(b), PAYLOAD, DLOG);
+        assert_true!(
+            out.as_bytes()
+                == b"panic buffer: empty\n\n\
+--- BEGIN DLOG DUMP ---\n\
+crashlog dlog\n\
+--- END DLOG DUMP ---\n\
+Recovered 16 bytes from the persistent debug log\n\
+=================== BEGIN ===================\n\
+persistent dlog\n\
+=================== END ===================\n"
+        );
+    }
+
+    /// Tests that a recovered persistent log uses DLOG DUMP markers on an empty payload.
+    #[test]
+    fn empty_payload_with_recovered_dlog_test() {
+        const DLOG: &[u8] = b"watchdog bite";
+
+        let mut out = TestBuf::new();
+        write_payload_and_recovered_dlog(&mut |b| out.push(b), b"", DLOG);
+        assert_true!(
+            out.as_bytes()
+                == b"Recovered 13 bytes from the persistent debug log\n\
+--- BEGIN DLOG DUMP ---\n\
+watchdog bite\n\
+--- END DLOG DUMP ---\n"
+        );
     }
 }

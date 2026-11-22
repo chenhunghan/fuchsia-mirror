@@ -2,77 +2,37 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/cpp/sdk_static_library.gni")
 import("//build/fuzz.gni")
-import("//build/test.gni")
+import("//build/testing/host_test.gni")
+import("//build/testing/host_test_data.gni")
 
 # A collection of utilities useful to debuggers and similar programs.
 
-test("elflib_unittest") {
-  sources = [ "elflib_unittest.cc" ]
-
-  deps = [
-    ":elflib",
-    ":test_data",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-  ]
-
-  # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
-  configs += [ "//build/config:Wno-conversion" ]
-}
-
-_test_data_sources = [
-  "test_data/6d4d8ac190ecc7.debug",
-  "test_data/stripped_example.elf",
-]
-
-# An example stripped binary:
-# ```
-# #include <stdio.h>
-# #include <string.h>
-# int main(int argc, char** argv) {
-#   printf("%zu\n", strlen(argv[0]));
-#   return 0;
-# }
-# ```
-# Built with:
-# clang -Wl,-z,{rela,rel} --target={aarch64,x86_64}-fuchsia --sysroot=...
-# llvm-objcopy --strip-sections \
-#   unstripped_example.{arm64,x64}.{rela,rel}.elf \
-#   unstripped_example_stripped.{arm64,x64}.{rela,rel}.elf
-foreach(cpu,
-        [
-          "arm64",
-          "x64",
-        ]) {
-  foreach(rel,
-          [
-            "rela",
-            "rel",
-          ]) {
-    _test_data_sources += [
-      "test_data/unstripped_example.$cpu.$rel.elf",
-      "test_data/unstripped_example_stripped.$cpu.$rel.elf",
-    ]
-  }
-}
-
+# bazel2gn does not translate host_test().
 if (is_host) {
   host_test_data("test_data") {
-    sources = _test_data_sources
+    sources = [
+      "test_data/6d4d8ac190ecc7.debug",
+      "test_data/stripped_example.elf",
+      "test_data/unstripped_example.arm64.rel.elf",
+      "test_data/unstripped_example.arm64.rela.elf",
+      "test_data/unstripped_example.x64.rel.elf",
+      "test_data/unstripped_example.x64.rela.elf",
+      "test_data/unstripped_example_stripped.arm64.rel.elf",
+      "test_data/unstripped_example_stripped.arm64.rela.elf",
+      "test_data/unstripped_example_stripped.x64.rel.elf",
+      "test_data/unstripped_example_stripped.x64.rela.elf",
+    ]
+    outputs = [ "$root_out_dir/test_data/elflib/{{source_file_part}}" ]
   }
-} else {
-  resource("test_data") {
-    testonly = true
-    sources = _test_data_sources
-    outputs = [ "data/{{source_file_part}}" ]
-  }
-}
 
-fuchsia_unittest_package("elflib_tests") {
-  deps = [ ":elflib_unittest" ]
+  host_test("elflib_unittest") {
+    binary_path = "$root_out_dir/elflib_unittest"
+    args = [ "env ELFLIB_TEST_DATA_DIR=" +
+             rebase_path("$root_out_dir/test_data/elflib", root_build_dir) ]
+    deps = [ ":elflib_unittest_bin" ]
+    data_deps = [ ":test_data" ]
+  }
 }
 
 group("tests") {
@@ -85,6 +45,7 @@ group("tests") {
   ]
 }
 
+# Fuzzer rules do not have Bazel equivalents yet.
 fuchsia_library_fuzzer("elflib_fuzzer") {
   sources = [ "elflib_fuzztest.cc" ]
   deps = [ ":elflib" ]
@@ -139,4 +100,46 @@ static_library("elflib") {
     "//zircon/system/public",
     "//zircon/system/ulib/fbl",
   ]
+}
+if (is_fuchsia) {
+  resource("test_data") {
+    testonly = true
+    sources = [
+      "test_data/6d4d8ac190ecc7.debug",
+      "test_data/stripped_example.elf",
+      "test_data/unstripped_example.arm64.rel.elf",
+      "test_data/unstripped_example.arm64.rela.elf",
+      "test_data/unstripped_example.x64.rel.elf",
+      "test_data/unstripped_example.x64.rela.elf",
+      "test_data/unstripped_example_stripped.arm64.rel.elf",
+      "test_data/unstripped_example_stripped.arm64.rela.elf",
+      "test_data/unstripped_example_stripped.x64.rel.elf",
+      "test_data/unstripped_example_stripped.x64.rela.elf",
+    ]
+    outputs = [ "data/{{source_file_part}}" ]
+  }
+}
+
+cc_test_executable("elflib_unittest_bin") {
+  sources = [ "elflib_unittest.cc" ]
+  configs += [ "//build/config:Wno-conversion" ]
+  output_name = "elflib_unittest"
+  deps = [
+    ":elflib",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_component("elflib_unittest_component") {
+  deps = [ ":elflib_unittest_bin" ]
+  component_name = "elflib_tests"
+}
+
+fuchsia_test_package("elflib_tests") {
+  package_name = "elflib_tests-gn"
+  test_components = [ ":elflib_unittest_component" ]
+  deps = [ ":test_data" ]
 }

@@ -45,7 +45,7 @@ group("tests") {
     "fidl_codec:tests",
     "files:tests",
     "fostr:tests",
-    "fsl:fsl_tests",
+    "fsl:tests",
     "fuchsia:tests",
     "fuchsia-async:tests",
     "fuchsia-component:tests",

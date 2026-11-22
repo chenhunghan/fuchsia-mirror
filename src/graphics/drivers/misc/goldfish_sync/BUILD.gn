@@ -63,7 +63,6 @@ fuchsia_driver_component("goldfish_sync_driver") {
   dml_label = ":goldfish_sync-dml"
   component_name = "goldfish_sync"
   deps = [ ":goldfish_sync_driver-driver" ]
-  info = "meta/goldfish_sync_driver-info.json"
 }
 
 test("goldfish-sync-device-test") {

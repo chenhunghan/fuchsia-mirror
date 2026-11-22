@@ -362,18 +362,18 @@ state without needing to dig through logs.
 
    * {C++}
 
-      In [BUILD.gn][cpp-part1-build] in `public_deps` under `source_set("lib")`:
+      In [BUILD.bazel][cpp-part1-build] in `deps` on the `lib` `fx_cc_library` target:
 
-      ```cpp
-      {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/codelab/cpp/part_2/BUILD.gn" region_tag="part_1_solution_build_dep" adjust_indentation="auto" %}
+      ```bazel
+      {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/codelab/cpp/part_2/BUILD.bazel" region_tag="part_1_solution_build_dep" adjust_indentation="auto" %}
       ```
 
    * {Rust}
 
-      In [BUILD.gn][rust-part1-build] in `deps` under `rustc_binary("bin")`:
+      In [BUILD.bazel][rust-part1-build] in `deps` on the `bin` `rustc_binary` target:
 
-      ```rust
-      {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/codelab/rust/part_2/BUILD.gn" region_tag="part_1_solution_build_dep" adjust_indentation="auto" %}
+      ```bazel
+      {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/diagnostics/inspect/codelab/rust/part_2/BUILD.bazel" region_tag="part_1_solution_build_dep" adjust_indentation="auto" %}
       ```
 
 2. Initialize Inspect:
@@ -465,7 +465,7 @@ Now that you have added Inspect to your component, you can read what it says:
 1. Rebuild and update the target system
 
    ```posix-terminal
-   fx build && fx ota
+   fx bazel2gn && fx build && fx ota
    ```
 
 2. Run the client:
@@ -1393,7 +1393,7 @@ This section is under construction.
 [cpp-part1-main]: /examples/diagnostics/inspect/codelab/cpp/part_1/main.cc
 [cpp-part1-reverser-h]: /examples/diagnostics/inspect/codelab/cpp/part_1/reverser.h
 [cpp-part1-reverser-cc]: /examples/diagnostics/inspect/codelab/cpp/part_1/reverser.cc
-[cpp-part1-build]: /examples/diagnostics/inspect/codelab/cpp/part_1/BUILD.gn
+[cpp-part1-build]: /examples/diagnostics/inspect/codelab/cpp/part_1/BUILD.bazel
 [cpp-client-main]: /examples/diagnostics/inspect/codelab/cpp/client/main.cc#118
 [cpp-part2-meta]: /examples/diagnostics/inspect/codelab/cpp/part_2/meta/integration_test.cml
 [cpp-part3-unittest]: /examples/diagnostics/inspect/codelab/cpp/part_3/reverser_unittests.cc
@@ -1404,7 +1404,7 @@ This section is under construction.
 [rust-part1]: /examples/diagnostics/inspect/codelab/rust/part_1
 [rust-part1-main]: /examples/diagnostics/inspect/codelab/rust/part_1/src/main.rs
 [rust-part1-reverser]: /examples/diagnostics/inspect/codelab/rust/part_1/src/reverser.rs
-[rust-part1-build]: /examples/diagnostics/inspect/codelab/rust/part_1/BUILD.gn
+[rust-part1-build]: /examples/diagnostics/inspect/codelab/rust/part_1/BUILD.bazel
 [rust-client-main]: /examples/diagnostics/inspect/codelab/rust/client/src/main.rs#41
 [rust-part2-meta]: /examples/diagnostics/inspect/codelab/rust/part_2/meta/part_2.cml
 [rust-part3-unittest]: /examples/diagnostics/inspect/codelab/rust/part_3/src/reverser.rs#99

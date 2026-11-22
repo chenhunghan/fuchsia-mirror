@@ -8,9 +8,7 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_ARCH_H_
 #define ZIRCON_KERNEL_INCLUDE_ARCH_H_
 
-#include <stdio.h>
-#include <sys/types.h>
-#include <zircon/compiler.h>
+#include <stdint.h>
 
 struct iframe_t;
 
@@ -25,21 +23,7 @@ struct UserEntryState {
   uint64_t abi_reg = 0;
 };
 
-void PrintFrame(const iframe_t&, FILE* = stdout);
-
 extern "C" {
-// Early platform initialization, before UART, MMU, kernel command line args, etc.
-void arch_early_init();
-
-// Perform any set up required before virtual memory is enabled, or the heap is set up.
-void arch_prevm_init();
-
-// Perform any set up required after heap/MMU is available.
-void arch_init();
-
-// Perform any per-CPU set up required.
-void arch_late_init_percpu();
-
 // Fill in *|out| with the iframe_t that should be passed to arch_enter_uspace()
 // on the current thread.  Initialize it and other user-visible hardware state
 // first.  The rest of the current thread's state must already have been

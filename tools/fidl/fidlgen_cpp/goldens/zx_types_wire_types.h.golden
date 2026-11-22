@@ -1059,11 +1059,11 @@ class StatusUnion {
   StatusUnion(StatusUnion&&) = default;
   StatusUnion& operator=(StatusUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
     kStatusVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_zxtypes::wire::StatusUnion::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1110,7 +1110,7 @@ class StatusUnion {
   ::test_zxtypes::wire::StatusUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
@@ -1132,11 +1132,11 @@ class StatusUnionAlias {
   StatusUnionAlias(StatusUnionAlias&&) = default;
   StatusUnionAlias& operator=(StatusUnionAlias&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
     kStatusVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_zxtypes::wire::StatusUnionAlias::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1183,7 +1183,7 @@ class StatusUnionAlias {
   ::test_zxtypes::wire::StatusUnionAlias::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
@@ -1207,7 +1207,7 @@ class StatusProtocolAResult {
   StatusProtocolAResult(StatusProtocolAResult&&) = default;
   StatusProtocolAResult& operator=(StatusProtocolAResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1242,7 +1242,7 @@ class StatusProtocolAResult {
   ::test_zxtypes::wire::StatusProtocolAResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
@@ -1266,7 +1266,7 @@ class StatusProtocolBResult {
   StatusProtocolBResult(StatusProtocolBResult&&) = default;
   StatusProtocolBResult& operator=(StatusProtocolBResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1301,7 +1301,7 @@ class StatusProtocolBResult {
   ::test_zxtypes::wire::StatusProtocolBResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
@@ -1323,11 +1323,11 @@ class ResultUnion {
   ResultUnion(ResultUnion&&) = default;
   ResultUnion& operator=(ResultUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
     kResultVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_zxtypes::wire::ResultUnion::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1374,7 +1374,7 @@ class ResultUnion {
   ::test_zxtypes::wire::ResultUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
@@ -1396,11 +1396,11 @@ class ResultUnionAlias {
   ResultUnionAlias(ResultUnionAlias&&) = default;
   ResultUnionAlias& operator=(ResultUnionAlias&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
     kResultVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_zxtypes::wire::ResultUnionAlias::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -1447,7 +1447,7 @@ class ResultUnionAlias {
   ::test_zxtypes::wire::ResultUnionAlias::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
@@ -1471,7 +1471,7 @@ class ResultProtocolAResult {
   ResultProtocolAResult(ResultProtocolAResult&&) = default;
   ResultProtocolAResult& operator=(ResultProtocolAResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1506,7 +1506,7 @@ class ResultProtocolAResult {
   ::test_zxtypes::wire::ResultProtocolAResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
@@ -1530,7 +1530,7 @@ class ResultProtocolBResult {
   ResultProtocolBResult(ResultProtocolBResult&&) = default;
   ResultProtocolBResult& operator=(ResultProtocolBResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1565,7 +1565,7 @@ class ResultProtocolBResult {
   ::test_zxtypes::wire::ResultProtocolBResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2

@@ -5,17 +5,18 @@
 #include "msd_vsi_device.h"
 
 #include <lib/fit/defer.h>
-#include <lib/magma/platform/platform_barriers.h>
 #include <lib/magma/platform/platform_logger.h>
 #include <lib/magma/platform/platform_mmio.h>
 #include <lib/magma/platform/platform_thread.h>
 #include <lib/magma/platform/platform_trace.h>
 #include <lib/magma/util/short_macros.h>
 #include <lib/magma_service/msd.h>
+#include <lib/memory_barriers/memory_barriers.h>
 
 #include <algorithm>
 #include <chrono>
 #include <iterator>
+#include <limits>
 #include <thread>
 
 #include <fbl/string_printf.h>
@@ -1024,9 +1025,9 @@ void MsdVsiDevice::LinkRingbuffer(uint32_t wait_link_offset, uint32_t gpu_addr,
   // We will first modify the second dword which specifies the address,
   // as the hardware may be executing at the address of the current WAIT.
   ringbuffer_->Overwrite32(wait_link_offset + sizeof(uint32_t), gpu_addr);
-  magma::barriers::Barrier();
+  DataSynchronizationBarrier();
   ringbuffer_->Overwrite32(wait_link_offset, MiLink::kCommandType | dest_prefetch);
-  magma::barriers::Barrier();
+  DataSynchronizationBarrier();
 }
 
 bool MsdVsiDevice::WriteLinkCommand(magma::PlatformBuffer* buf, uint32_t write_offset,
@@ -1203,10 +1204,15 @@ bool MsdVsiDevice::SubmitCommandBuffer(std::shared_ptr<MsdVsiContext> context,
     TRACE_VTHREAD_DURATION_BEGIN("magma", "Command Buffer", "NPU", buf->id(),
                                  magma::PlatformTrace::GetCurrentTicks(), "id", buf->id());
 
-    uint32_t write_offset = command_buf->GetBatchBufferWriteOffset();
+    std::optional<uint64_t> maybe_write_offset = command_buf->GetBatchBufferWriteOffset();
+    if (!maybe_write_offset || *maybe_write_offset > std::numeric_limits<uint32_t>::max()) {
+      MAGMA_LOG(ERROR, "Batch buffer write offset overflow");
+      return false;
+    }
 
     // Write a LINK at the end of the command buffer that links back to the ringbuffer.
-    if (!WriteLinkCommand(buf, write_offset, kRbPrefetch, rb_complete_addr)) {
+    if (!WriteLinkCommand(buf, static_cast<uint32_t>(*maybe_write_offset), kRbPrefetch,
+                          rb_complete_addr)) {
       MAGMA_LOG(ERROR, "Failed to write LINK from command buffer to ringbuffer");
       return false;
     }

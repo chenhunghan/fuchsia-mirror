@@ -10,6 +10,7 @@
 #include <lib/inspect/component/cpp/tree_handler_settings.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/stdcompat/optional.h>
+#include <zircon/availability.h>
 
 #include <functional>
 #include <memory>
@@ -54,6 +55,15 @@ class TreeServer final : public fidl::WireServer<fuchsia_inspect::Tree> {
   /// `OpenChild`.
   void ListChildNames(ListChildNamesRequestView request,
                       ListChildNamesCompleter::Sync& completer) override;
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  // TODO(https://fxbug.dev/582755866): Stubbed until C++ BlobProperty writer support lands.
+  void ListBlobChildNames(ListBlobChildNamesRequestView request,
+                          ListBlobChildNamesCompleter::Sync& completer) override;
+
+  void OpenBlobChild(OpenBlobChildRequestView request,
+                     OpenBlobChildCompleter::Sync& completer) override;
+#endif
 
   void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_inspect::Tree> md,
                              fidl::UnknownMethodCompleter::Sync& completer) override {

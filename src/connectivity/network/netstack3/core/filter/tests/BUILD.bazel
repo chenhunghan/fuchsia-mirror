@@ -2,11 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [":netstack3-core-filter-integration-test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":netstack3_filter_integration_test_host_test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
 
 rustc_test(
     name = "netstack3_filter_integration_test",

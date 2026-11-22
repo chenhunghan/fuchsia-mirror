@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Normalization that makes C++ and Rust spellings of the same thing compare
 //! equal: `CommitRange` and `commit_range`, `lock_` and `self.lock`,
 //! `ZX_ERR_NO_MEMORY` and `Status::NO_MEMORY`.

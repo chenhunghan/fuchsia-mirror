@@ -7,7 +7,8 @@
 #include <boot-config-contents.h>
 #include <string.h>
 
-#include <phys/address-space.h>
+#include <phys/address-space/address-space.h>
+#include <phys/memory/init.h>
 
 #include "../test-main.h"
 #include "linux-boot-config.h"

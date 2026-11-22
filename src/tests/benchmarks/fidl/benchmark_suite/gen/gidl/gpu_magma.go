@@ -35,7 +35,7 @@ func init() {
 					"num_semaphores":    32,
 				},
 				// GIDL currently generates output that is slow to compile in clang.
-				Denylist: []config.Binding{config.LLCPP, config.HLCPP, config.CPP},
+				Denylist: []config.Binding{config.CPPWire, config.HLCPP, config.CPP},
 			},
 		},
 	})

@@ -172,9 +172,9 @@ if (is_host) {
     #
     # The targets to use instead are:
     # - ffx itself (`//src/developer/ffx:test_data`) if only using core
-    #   functionality of ffx (no plugins not listed in `config.gni`'s
-    #   `required_ffx_plugins` or `included_ffx_plugins` lists). This should be
-    #   the rare case.
+    #   functionality of ffx (no plugins outside
+    #   `//src/developer/ffx/frontends/ffx/BUILD.bazel`'s `plugin_deps`). This
+    #   should be the rare case.
     # - the whole "suite" of tools (`//src/developer/ffx:suite_test_data`) if
     #   a many subtools are used, or the subtools used aren't really usefully
     #   constrained.
@@ -238,13 +238,8 @@ if (is_host) {
     group("host_test_data_bazel_inputs") {
       public_deps = [
         ":test_data.bazel_input",
-        "//src/developer/ffx/plugins/component:ffx_component_tool_test_data.bazel_input",
         "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data.bazel_input",
-        "//src/developer/ffx/plugins/inspect:ffx_inspect_tool_test_data.bazel_input",
         "//src/developer/ffx/plugins/log:ffx_log_tool_test_data.bazel_input",
-        "//src/developer/ffx/plugins/product:ffx_product_tool_test_data.bazel_input",
-        "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data.bazel_input",
-        "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data.bazel_input",
       ]
     }
   } else {
@@ -256,10 +251,14 @@ if (is_host) {
 
   group("suite_test_data") {
     testonly = true
-    public_deps = [ ":test_data" ]
-    if (ffx_build_dual_mode_plugins_as_subtools) {
-      public_deps += dual_mode_subtool_test_data
-    }
+    public_deps = [
+      ":test_data",
+      "//src/developer/ffx/plugins/component:ffx_component_tool_test_data",
+      "//src/developer/ffx/plugins/debug:ffx_debug_plugin_tool_test_data",
+      "//src/developer/ffx/plugins/emulator:ffx_emulator_tool_test_data",
+      "//src/developer/ffx/plugins/product_bundle:ffx_product_bundle_tool_test_data",
+      "//src/developer/ffx/plugins/repository:ffx_repository_tool_test_data",
+    ]
   }
 
   # LINT.IfChange
@@ -272,15 +271,13 @@ if (is_host) {
     sources = [
       "//src/developer/ffx/data/config.json",
       "//src/developer/ffx/lib/pbms/data/config.json",
+      "//src/developer/ffx/plugins/emulator/data/config.json",
+      "//src/developer/ffx/plugins/product/data/config.json",
+      "//src/developer/ffx/plugins/repository/data/config.json",
     ]
 
     # Merge the values, not just the top level.
     deep_merge = true
-
-    # Add in the 'dual-mode' config default files if we're doing dual mode
-    if (ffx_build_dual_mode_plugins_as_subtools) {
-      sources += dual_mode_defaults
-    }
 
     # Add any dynamically generated config.json files (ie. from ffx plugin
     # roots) here.
@@ -322,12 +319,12 @@ group("tests") {
     "core:tests($host_toolchain)",
     "lib:tests($host_toolchain)",
     "playground:tests($host_toolchain)",
+    "plugins/doctor:tests($host_toolchain)",
     "plugins/emulator/common:ffx_emulator_common_test($host_toolchain)",
     "plugins/package:tests($host_toolchain)",
     "plugins/platform/preflight:tests($host_toolchain)",
     "plugins/target:tests($host_toolchain)",
     "plugins/target/default:ffx_target_default_test($host_toolchain)",
-    "plugins/trace:tests($host_toolchain)",
     "plugins/version:ffx_version_test($host_toolchain)",
     "tests($host_toolchain)",
     "tools/bluetooth/common:ffx_bluetooth_common_test($host_toolchain)",

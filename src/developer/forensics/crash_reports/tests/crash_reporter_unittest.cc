@@ -6,7 +6,7 @@
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <fidl/fuchsia.mem/cpp/fidl.h>
-#include <fuchsia/time/cpp/fidl.h>
+#include <fidl/fuchsia.time/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/clock.h>
@@ -83,7 +83,6 @@ constexpr CrashServer::UploadStatus kUploadTimeout = CrashServer::UploadStatus::
 
 constexpr char kProgramName[] = "crashing_program";
 
-constexpr char kBuildVersion[] = "some-version";
 constexpr char kBuildPlatformVersion[] = "some-platform-version";
 constexpr char kBuildProductVersion[] = "some-product-version";
 const std::string kProductVersion =
@@ -104,7 +103,6 @@ constexpr size_t kDailyPerProductQuota = 100u;
 constexpr zx::duration kResetOffset = zx::min(20);
 
 const std::map<std::string, std::string> kFeedbackAnnotations = {
-    {feedback::kBuildVersionKey, kBuildVersion},
     {feedback::kBuildBoardKey, kBuildBoard},
     {feedback::kBuildPlatformVersionKey, kBuildPlatformVersion},
     {feedback::kBuildProductVersionKey, kBuildProductVersion},
@@ -187,7 +185,6 @@ class CrashReporterTest : public UnitTestFixture {
     annotation_manager_ = std::make_unique<feedback::AnnotationManager>(
         dispatcher(),
         std::set<std::string>{
-            feedback::kBuildVersionKey,
             feedback::kBuildBoardKey,
             feedback::kBuildPlatformVersionKey,
             feedback::kBuildProductVersionKey,
@@ -197,7 +194,6 @@ class CrashReporterTest : public UnitTestFixture {
             feedback::kSystemUpdateChannelCurrentKey,
         },
         feedback::Annotations{
-            {feedback::kBuildVersionKey, ErrorOrString(kBuildVersion)},
             {feedback::kBuildBoardKey, ErrorOrString(kBuildBoard)},
             {feedback::kBuildPlatformVersionKey, ErrorOrString(kBuildPlatformVersion)},
             {feedback::kBuildProductVersionKey, ErrorOrString(kBuildProductVersion)},
@@ -224,7 +220,7 @@ class CrashReporterTest : public UnitTestFixture {
 
     if (const zx_status_t status =
             clock_handle_.signal(/*clear_mask=*/0,
-                                 /*set_mask=*/fuchsia::time::SIGNAL_UTC_CLOCK_LOGGING_QUALITY);
+                                 /*set_mask=*/fuchsia_time::kSignalUtcClockLoggingQuality);
         status != ZX_OK) {
       FX_PLOGS(FATAL, status) << "Failed to sync clock";
     }
@@ -280,7 +276,6 @@ class CrashReporterTest : public UnitTestFixture {
         {feedback::kOSNameKey, "Fuchsia"},
         {feedback::kOSVersionKey, kBuildPlatformVersion},
         {feedback::kOSChannelKey, kDefaultChannel},
-        {feedback::kBuildVersionKey, kBuildVersion},
         {feedback::kBuildBoardKey, kBuildBoard},
         {feedback::kBuildPlatformVersionKey, kBuildPlatformVersion},
         {feedback::kBuildProductVersionKey, kBuildProductVersion},

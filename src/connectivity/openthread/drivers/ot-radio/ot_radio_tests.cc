@@ -130,4 +130,22 @@ TEST(OtRadioTestCase, SpinelFramerTest) {
   // Teardown
   ASSERT_OK(dev->ShutDown());
 }
+
+TEST(OtRadioTestCase, ResetRetryWithoutFidlBindingTest) {
+  ot::OtRadioDevice dev(nullptr);
+  dev.BeginResetRetryTimer();
+  ASSERT_TRUE(dev.IsHardResetting());
+
+  // While `inbound_frame_available_` is false and the retry timer has not
+  // expired, `ShouldRetryReset()` returns false and keeps the timer active.
+  ASSERT_FALSE(dev.ShouldRetryReset());
+  ASSERT_TRUE(dev.IsHardResetting());
+
+  // Simulate an inbound frame arriving before any FIDL client has bound
+  // `fidl_binding_` via `SetChannel()`. `HandleResetRetry()` must clear the
+  // reset retry timer without aborting on an unbound `fidl_binding_`.
+  dev.SetInboundFrameAvailableForTest(true);
+  dev.HandleResetRetry();
+  ASSERT_FALSE(dev.IsHardResetting());
+}
 }  // namespace

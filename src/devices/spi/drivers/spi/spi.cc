@@ -18,27 +18,72 @@
 
 #include "spi-child.h"
 #include "src/devices/spi/drivers/spi/spi_config.h"
+#include "src/devices/spi/drivers/spi/spi_parser.h"
 
 namespace spi {
+
+namespace {
+fuchsia_hardware_spi_businfo::SpiBusMetadata ConvertMetadata(
+    const spi_metadata::SpiBusMetadata& generic) {
+  std::vector<fuchsia_hardware_spi_businfo::SpiChannel> channels;
+  channels.reserve(generic.channels.size());
+  for (const auto& c : generic.channels) {
+    channels.push_back(fuchsia_hardware_spi_businfo::SpiChannel{{
+        .cs = c.cs,
+        .vid = c.vid,
+        .pid = c.pid,
+        .did = c.did,
+        .cs_polarity_high = c.cs_polarity_high,
+        .word_length_bits = c.word_length_bits,
+        .is_bus_controller = c.is_bus_controller,
+        .clock_polarity_high = c.clock_polarity_high,
+        .max_frequency_hz = c.max_frequency_hz,
+        .global_id = c.id,
+    }});
+  }
+  return {{.channels = std::move(channels), .bus_id = generic.bus_id}};
+}
+}  // namespace
 
 zx::result<> SpiDriver::Start(fdf::DriverContext context) {
   incoming_ = context.take_incoming();
   node_token_ = context.take_node_token();
 
-  zx::result metadata_result =
-      fdf_metadata::GetMetadata<fuchsia_hardware_spi_businfo::SpiBusMetadata>(*incoming_);
-  if (metadata_result.is_error()) {
-    fdf::error("Failed to get SPI metadata: {}", metadata_result);
-    return metadata_result.take_error();
-  }
-  fuchsia_hardware_spi_businfo::SpiBusMetadata& metadata = metadata_result.value();
+  std::optional<fuchsia_hardware_spi_businfo::SpiBusMetadata> metadata_opt;
 
-  if (!metadata.bus_id()) {
+  // Try to get generic Dictionary metadata first.
+  zx::result generic_res =
+      fdf_metadata::GetMetadataFromFidlServiceIfExists<fuchsia_driver_metadata::Dictionary>(
+          incoming_->svc_dir(), fuchsia_hardware_spi_businfo::SpiBusMetadata::kSerializableName);
+  if (generic_res.is_ok()) {
+    if (const auto& generic_dict = generic_res.value(); generic_dict.has_value()) {
+      auto parsed = spi_metadata::SpiBusMetadata::Parse(*generic_dict);
+      if (parsed.has_value()) {
+        metadata_opt = ConvertMetadata(*parsed);
+      } else {
+        fdf::debug("Failed to parse generic SPI metadata; falling back to legacy metadata");
+      }
+    }
+  }
+
+  if (!metadata_opt.has_value()) {
+    zx::result metadata_result =
+        fdf_metadata::GetMetadata<fuchsia_hardware_spi_businfo::SpiBusMetadata>(*incoming_);
+    if (metadata_result.is_error()) {
+      fdf::error("Failed to get SPI metadata: {}", metadata_result);
+      return metadata_result.take_error();
+    }
+    metadata_opt = std::move(*metadata_result);
+  }
+
+  const fuchsia_hardware_spi_businfo::SpiBusMetadata& metadata = *metadata_opt;
+
+  if (const auto& bus_id = metadata.bus_id(); bus_id.has_value()) {
+    bus_id_ = *bus_id;
+  } else {
     fdf::error("No bus ID metadata provided");
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
-
-  bus_id_ = *metadata.bus_id();
 
   zx::result scheduler_role_name_result =
       fdf_metadata::GetMetadataIfExists<fuchsia_scheduler::RoleName>(*incoming_);
@@ -46,8 +91,8 @@ zx::result<> SpiDriver::Start(fdf::DriverContext context) {
     fdf::error("Failed to get scheduler role name: {}", scheduler_role_name_result);
     return scheduler_role_name_result.take_error();
   }
-  if (scheduler_role_name_result.value().has_value()) {
-    const auto& scheduler_role_name = scheduler_role_name_result.value().value();
+  if (const auto& role_name = scheduler_role_name_result.value(); role_name.has_value()) {
+    const auto& scheduler_role_name = *role_name;
 
     zx::result result = fdf::SynchronizedDispatcher::Create(
         {}, "SPI", [](fdf_dispatcher_t*) {}, scheduler_role_name.role());
@@ -131,8 +176,13 @@ zx::result<> SpiDriver::AddTestChild(
 zx::result<> SpiDriver::AddChildren(const fuchsia_hardware_spi_businfo::SpiBusMetadata& metadata,
                                     fdf::WireSharedClient<fuchsia_hardware_spiimpl::SpiImpl> client,
                                     const spi_config::Config& config) {
-  bool has_siblings = metadata.channels()->size() > 1;
-  for (auto& channel : *metadata.channels()) {
+  const auto& channels_opt = metadata.channels();
+  if (!channels_opt.has_value()) {
+    return zx::ok();
+  }
+  const auto& channels = *channels_opt;
+  bool has_siblings = channels.size() > 1;
+  for (const auto& channel : channels) {
     const auto cs = channel.cs().value_or(0);
     const auto vid = channel.vid().value_or(0);
     const auto pid = channel.pid().value_or(0);

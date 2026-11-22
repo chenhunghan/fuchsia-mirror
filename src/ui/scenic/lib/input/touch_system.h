@@ -9,6 +9,8 @@
 #include <fidl/fuchsia.ui.pointer/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fidl/cpp/wire/channel.h>
+#include <lib/fit/defer.h>
+#include <lib/fit/function.h>
 #include <lib/sys/cpp/component_context.h>
 
 #include <map>
@@ -71,7 +73,13 @@ class TouchSystem : public fidl::Server<fuchsia_ui_pointer_augment::LocalHit> {
   void InjectTouchEventHitTested(InternalTouchEvent event, StreamId stream_id,
                                  const view_tree::Snapshot& snapshot);
 
+  // Defers outbound FIDL event flushing across touch contenders until the returned guard goes out
+  // of scope (supports nested scopes).
+  fit::deferred_action<fit::closure> ScopedTouchBatch();
+
  private:
+  void BeginTouchBatch();
+  void EndTouchBatch();
   // Finds the ViewRef koid registered with the other side of the |original| channel and returns it.
   // Returns ZX_KOID_INVALID if the related channel isn't found.
   zx_koid_t FindViewRefKoidOfRelatedChannel(
@@ -142,6 +150,7 @@ class TouchSystem : public fidl::Server<fuchsia_ui_pointer_augment::LocalHit> {
 
   const ContenderId a11y_contender_id_ = 1;
   ContenderId next_contender_id_ = 2;
+  size_t batch_depth_ = 0;
 };
 
 }  // namespace scenic_impl::input

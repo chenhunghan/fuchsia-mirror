@@ -15,6 +15,22 @@
 
 class Guest;
 
+// PL011 registers.
+enum class Pl011Register : uint64_t {
+  DR = 0x00,
+  FR = 0x18,
+  IBRD = 0x24,
+  FBRD = 0x28,
+  LCR = 0x2c,
+  CR = 0x30,
+  IFLS = 0x34,
+  IMSC = 0x38,
+  ICR = 0x44,
+};
+
+constexpr uint16_t kPl011FlagRegisterRxFifoEmpty = 1u << 4u;
+constexpr uint16_t kPl011FlagRegisterTxFifoEmpty = 1u << 7u;
+
 // Implements the PL011 UART.
 class Pl011 : public IoHandler, public PlatformDevice {
  public:

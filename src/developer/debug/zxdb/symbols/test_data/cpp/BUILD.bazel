@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Compiled to produce an ELF shared library with DWARF debug info; it is not run
+# on a device, but is read by zxdb tests on the host to test symbol handling.
+fx_cc_library(
+    name = "zxdb_symbol_test_lib",
+    srcs = [
+        "line_lookup_symbol_test.cc",
+        "type_test.cc",
+        "zxdb_symbol_test.cc",
+        "zxdb_symbol_test.h",
+        "zxdb_symbol_test2.cc",
+    ],
+    alwayslink = True,
+)
+
+# This rule will be called as a dependency of the zxdb tests.
+fx_cc_shared_library(
+    name = "zxdb_symbol_test",
+    visibility = [
+        "//src/developer/debug/zxdb/client:__pkg__",
+        "//src/developer/debug/zxdb/symbols:__pkg__",
+    ],
+    deps = [":zxdb_symbol_test_lib"],
+)

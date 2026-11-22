@@ -10,7 +10,6 @@
 #include <lib/fxt/fields.h>
 #include <lib/fxt/interned_category.h>
 #include <lib/fxt/interned_string.h>
-#include <lib/io.h>
 #include <lib/ktrace.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <platform.h>
@@ -19,15 +18,14 @@
 #include <zircon/types.h>
 
 #include <arch/ops.h>
-#include <arch/user_copy.h>
 #include <fbl/alloc_checker.h>
 #include <hypervisor/ktrace.h>
-#include <kernel/ffi.h>
-#include <kernel/koid.h>
 #include <kernel/mp.h>
 #include <kernel/thread.h>
+#include <ktl/algorithm.h>
 #include <ktl/atomic.h>
 #include <ktl/iterator.h>
+#include <ktl/limits.h>
 #include <lk/init.h>
 #include <vm/fault.h>
 #include <vm/vm_aspace.h>
@@ -42,24 +40,7 @@ zx_status_t rust_ktrace_init_cpu_buffer(void* ktrace_ptr, uint32_t cpu_num, void
 void rust_ktrace_clear_cpu_buffers(void* ktrace_ptr);
 void rust_ktrace_free(void* ktrace_ptr);
 void rust_ktrace_set_active(void* ktrace_ptr);
-
-#ifdef UNITTESTS_ENABLED
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void* cpp_ktrace_get_thread_local_override() {
-  Thread* current = Thread::Current::Get();
-  if (likely(current != nullptr)) {
-    return current->rust_ktrace_override();
-  }
-  return nullptr;
-}
-
-void cpp_ktrace_set_thread_local_override(void* ktrace_ptr) {
-  Thread* current = Thread::Current::Get();
-  if (current) {
-    current->set_rust_ktrace_override(ktrace_ptr);
-  }
-}
-#endif
+void rust_ktrace_report_live_processes();
 }
 
 namespace {
@@ -168,7 +149,7 @@ void KTrace::ReportMetadata() {
   // will be inserted into the buffer associated with the CPU we're running on, which may not be
   // the boot CPU. Fortunately for us, these process and thread names, unlike the other metadata
   // records, do not need to exist before any records that reference them are emitted.
-  ktrace_report_live_processes();
+  rust_ktrace_report_live_processes();
   ktrace_report_live_threads();
 }
 
@@ -197,8 +178,7 @@ zx_status_t KTrace::Start(uint32_t action, uint32_t categories) {
 
       // Initialize each per-CPU buffer by allocating the storage used to back it.
       for (uint32_t i = 0; i < num_buffers; i++) {
-        const zx_status_t init_status =
-            buffers[i].Init(buffer_size, "ktrace", cpu_context_map_.GetCpuRef(i));
+        const zx_status_t init_status = buffers[i].Init(buffer_size, cpu_context_map_.GetCpuRef(i));
         if (init_status != ZX_OK) {
           // Any allocated buffers will be destructed when we return.
           DiagsPrintf(INFO, "ktrace: cannot alloc buffer %u: %d\n", i, init_status);
@@ -375,10 +355,16 @@ zx::result<size_t> KTrace::ReadUser(user_out_ptr<void> ptr, uint32_t offset, siz
   // Reads must be serialized with respect to all other non-write operations.
   Guard<Mutex> guard{&lock_};
 
+  const size_t total_size = static_cast<size_t>(buffer_size_) * num_buffers_;
+
   // If the passed in ptr is nullptr, then return the buffer size needed to read all of the
   // per-CPU buffers' contents.
   if (!ptr) {
-    return zx::ok(buffer_size_ * num_buffers_);
+    return zx::ok(total_size);
+  }
+
+  if (len > ktl::numeric_limits<uint32_t>::max()) {
+    return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
   // If the per-CPU buffers have not been initialized, there's nothing to do, so return early.
@@ -388,7 +374,7 @@ zx::result<size_t> KTrace::ReadUser(user_out_ptr<void> ptr, uint32_t offset, siz
 
   // Eventually, this should support users passing in buffers smaller than the sum of the size of
   // all per-CPU buffers, but for now we do not allow this.
-  if (len < (buffer_size_ * num_buffers_)) {
+  if (len < total_size) {
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
@@ -397,6 +383,10 @@ zx::result<size_t> KTrace::ReadUser(user_out_ptr<void> ptr, uint32_t offset, siz
   user_out_ptr<ktl::byte> byte_ptr = ptr.reinterpret<ktl::byte>();
 
   auto copy_fn = [&](uint32_t byte_offset, ktl::span<ktl::byte> src) {
+    if (src.empty()) {
+      return ZX_OK;
+    }
+
     // This is safe to do while holding the lock_ because the KTrace lock is a leaf lock that is
     // not acquired during the course of a page fault.
     zx_status_t status = ZX_ERR_BAD_STATE;
@@ -420,7 +410,12 @@ zx::result<size_t> KTrace::ReadUser(user_out_ptr<void> ptr, uint32_t offset, siz
   };
 
   for (uint32_t i = 0; i < num_buffers_; i++) {
-    const zx::result<size_t> result = percpu_buffers_[i].Read(copy_fn, static_cast<uint32_t>(len));
+    const uint32_t to_read =
+        static_cast<uint32_t>(ktl::min<size_t>(len - bytes_read, buffer_size_));
+    if (to_read == 0) {
+      break;
+    }
+    const zx::result<size_t> result = percpu_buffers_[i].Read(copy_fn, to_read);
     if (result.is_error()) {
       DiagsPrintf(INFO, "failed to copy out ktrace data: %d\n", result.status_value());
       // If we copied some data from a previous buffer, we have to return the fact that we did so

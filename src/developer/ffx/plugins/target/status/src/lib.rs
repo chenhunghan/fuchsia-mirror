@@ -20,6 +20,8 @@ pub struct StatusUpdate {
 }
 
 #[derive(FfxTool)]
+// Resolves the target inside `run_diagnostics` via `EnvironmentContext`.
+#[target(Required)]
 pub struct Status {
     #[command]
     cmd: args::TargetStatus,

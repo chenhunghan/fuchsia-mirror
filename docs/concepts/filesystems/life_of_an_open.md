@@ -47,7 +47,7 @@ pipes, etc, what does the standard library do to make all these resources
 appear functionally the same? How does that client know what messages to send
 over these handles?
 
-## Fdio
+## Fdio {:#fdio}
 
 A library called [**fdio**](/sdk/lib/fdio/)
 is responsible for providing a unified interface to a variety of resources --
@@ -65,7 +65,7 @@ differently.
 For the purposes of this document, we’ll be focusing on the primary protocol
 used by filesystem clients: [FIDL](/docs/development/languages/fidl/README.md).
 
-## FIDL
+## FIDL {:#fidl}
 
 A program calling `open("foo")` will have called into the standard library,
 found an “fdio” object corresponding to the current working directory, and will
@@ -186,7 +186,7 @@ depending on the “operation” field provided by the client. In the open case,
 `Open` ordinal is noticed as the operation, so (1) a handle is expected, and
 (2) the ‘data’ field (“foo”) is interpreted as the path.
 
-### VFS Layer
+### VFS layer {:#vfs-layer}
 
 In Fuchsia, the “VFS layer” is a filesystem-independent library of code, which
 may dispatch and interpret server-side messages, and call operations in the
@@ -234,7 +234,7 @@ vnode, and another “/” segment is detected, then the process continues until
 component in a path, or (3) `lookup` finds a **mountpoint vnode**, which is a
 vnode that has an attached “remote” handle. For now, we will ignore mountpoint
 vnodes, although they are discussed in a section on [filesystem
-mounting](/docs/concepts/filesystems/filesystems.md#Mounting).
+mounting](/docs/concepts/filesystems/filesystems.md#mounting).
 
 Let’s assume `lookup` successfully found the “foo” Vnode. The filesystem server
 will proceed to call the VFS interface “Open”, verifying that the requested

@@ -19,7 +19,6 @@ use driver_manager_utils::DictionaryUtil;
 use fidl::endpoints::{ServerEnd, create_endpoints};
 use fidl_fuchsia_component as fcomponent;
 use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_sandbox as fsandbox;
 use fidl_fuchsia_driver_crash as fcrash;
 use fidl_fuchsia_driver_development as fdd;
 use fidl_fuchsia_driver_framework as fdf;
@@ -778,7 +777,7 @@ impl DriverRunner {
     pub async fn restart_with_dictionary(
         self: &Rc<Self>,
         moniker: String,
-        dictionary: fsandbox::DictionaryRef,
+        dictionary: zx::EventPair,
         reset_eventpair: zx::EventPair,
     ) {
         let imported = self.dictionary_util.import_dictionary(dictionary).await;
@@ -806,7 +805,7 @@ impl DriverRunner {
                 }
                 assert!(restarted_node.is_none(), "Multiple nodes with same moniker not possible.");
                 restarted_node = Some(node.clone());
-                node.set_subtree_dictionary(imported);
+                node.set_subtree_dictionary(imported.clone());
                 node.restart_node();
                 return false; // Found it, stop searching.
             }
@@ -936,6 +935,7 @@ mod tests {
     use futures::channel::mpsc;
     use std::sync::atomic::Ordering;
 
+    use fidl_fuchsia_component_runtime as fruntime;
     use fidl_fuchsia_driver_index as fdi;
 
     #[fuchsia::test]
@@ -943,14 +943,13 @@ mod tests {
         let (realm, _) = fidl::endpoints::create_proxy::<fcomponent::RealmMarker>();
         let (introspector, _) = fidl::endpoints::create_proxy::<fcomponent::IntrospectorMarker>();
         let (driver_index, _) = fidl::endpoints::create_proxy::<fdi::DriverIndexMarker>();
-        let (capability_store, _) =
-            fidl::endpoints::create_proxy::<fsandbox::CapabilityStoreMarker>();
+        let (capabilities, _) = fidl::endpoints::create_proxy::<fruntime::CapabilitiesMarker>();
         let (loader_service_factory, _) = mpsc::unbounded();
 
         let driver_runner = DriverRunner::new(
             realm,
             introspector,
-            DictionaryUtil::new(capability_store),
+            DictionaryUtil::new(capabilities),
             driver_index,
             loader_service_factory,
             false,
@@ -1003,14 +1002,13 @@ mod tests {
         let (realm, _) = fidl::endpoints::create_proxy::<fcomponent::RealmMarker>();
         let (introspector, _) = fidl::endpoints::create_proxy::<fcomponent::IntrospectorMarker>();
         let (driver_index, _) = fidl::endpoints::create_proxy::<fdi::DriverIndexMarker>();
-        let (capability_store, _) =
-            fidl::endpoints::create_proxy::<fsandbox::CapabilityStoreMarker>();
+        let (capabilities, _) = fidl::endpoints::create_proxy::<fruntime::CapabilitiesMarker>();
         let (loader_service_factory, _) = mpsc::unbounded();
 
         let driver_runner = DriverRunner::new(
             realm,
             introspector,
-            DictionaryUtil::new(capability_store),
+            DictionaryUtil::new(capabilities),
             driver_index,
             loader_service_factory,
             false,

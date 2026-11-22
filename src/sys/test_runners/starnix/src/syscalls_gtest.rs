@@ -5,22 +5,18 @@
 use crate::debian_guest::DebianGuest;
 use crate::{gtest, helpers, results_parser};
 
-use anyhow::{self, Context};
-use cm_types::NamespacePath;
+use anyhow::{self, Context, bail};
 use fidl::endpoints;
 use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_test::{self as ftest, CaseListenerProxy, Result_ as TestResult, Status};
 use gtest_runner_lib::parser::TestSuiteOutput;
 use helpers::TestType;
-use namespace::Namespace;
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Read;
 use std::path::Path;
-use std::sync::Arc;
 
 const HOST_TMP_DIR: &str = "/tmp";
-const CML_TARGET_KERNEL_FIELD: &str = "test_target_kernel";
+const LIST_TESTS_ARG: &str = "list_tests";
 
 /// Shallow helper struct, simply for encapsulating the various ways that tests report.
 struct TestRunnerReport {
@@ -30,80 +26,46 @@ struct TestRunnerReport {
     individual_report_proxies: HashMap<String, CaseListenerProxy>,
 }
 
-pub async fn run_syscall_gtests(
-    tests: Vec<ftest::Invocation>,
-    mut test_start_info: frunner::ComponentStartInfo,
-    run_listener_proxy: &ftest::RunListenerProxy,
-    component_runner: &frunner::ComponentRunnerProxy,
-    debian_guest: Arc<DebianGuest>,
-) -> Result<(), anyhow::Error> {
-    let program_data = test_start_info.program.as_mut().unwrap();
-    let test_target_kernel =
-        helpers::take_opt_str_value_from_dict(program_data, CML_TARGET_KERNEL_FIELD)?;
+pub(crate) async fn get_cases_list_for_syscall_gtests_on_guest(
+    test_start_info: &mut frunner::ComponentStartInfo,
+    debian_guest: &DebianGuest,
+) -> Result<Vec<ftest::Case>, anyhow::Error> {
+    let guest_binary_location =
+        helpers::prepare_guest_syscall_test(test_start_info, debian_guest).await?;
+    let list_tests_arg = helpers::format_arg(TestType::Gtest, LIST_TESTS_ARG);
+    let (exec_command, guest_output_filename) =
+        format_exec_command(&guest_binary_location, &list_tests_arg);
 
-    match test_target_kernel.as_deref() {
-        Some("linux") => {
-            log::info!(
-                "Linux {} specified, bootstrapping the Machina guest.",
-                CML_TARGET_KERNEL_FIELD
-            );
-            run_on_debian_guest(&tests, &mut test_start_info, run_listener_proxy, debian_guest)
-                .await
-        }
-        None => {
-            log::info!(
-                "No {} specified, defaulting to Starnix environment for execution.",
-                CML_TARGET_KERNEL_FIELD
-            );
-
-            // Forward Starnix kernel tests over to the vanilla Gtest runner.
-            gtest::run_gtest_cases(
-                tests,
-                test_start_info,
-                run_listener_proxy,
-                component_runner,
-                TestType::Gtest,
-            )
-            .await
-        }
-        Some(unexpected_target) => {
-            anyhow::bail!(
-                "Unexpected and unknown {} specified. Value: {}",
-                CML_TARGET_KERNEL_FIELD,
-                unexpected_target
-            )
-        }
+    let return_code = debian_guest.execute(&exec_command, &[], None, None, None).await?;
+    if return_code != 0 {
+        bail!(
+            "Failed to list tests on guest (command: '{}', exit code {})",
+            exec_command,
+            return_code
+        );
     }
+
+    let read_content = fetch_guest_output_file(debian_guest, &guest_output_filename)
+        .await
+        .context("reading tests from guest output file")?;
+    gtest::parse_gtest_cases(read_content)
 }
 
 /// Runs a set of tests within a Debian guest and reports the results. This function handles setup,
 /// pushing test dependencies, executing the tests, and retrieving and parsing the output.
-async fn run_on_debian_guest(
+pub(crate) async fn run_syscall_gtests_on_guest(
     tests: &Vec<ftest::Invocation>,
     test_start_info: &mut frunner::ComponentStartInfo,
     run_listener_proxy: &ftest::RunListenerProxy,
-    debian_guest: Arc<DebianGuest>,
+    debian_guest: &DebianGuest,
 ) -> Result<(), anyhow::Error> {
-    // We need to take() the namespace from the start_info, but will immediately clone it back.
-    let mut test_component_ns = Namespace::try_from(test_start_info.ns.take().unwrap())?;
-    test_start_info.ns = Some(test_component_ns.clone().try_into()?);
-    let test_pkg_dir = test_component_ns
-        .remove(&NamespacePath::new("/pkg")?)
-        .ok_or_else(|| anyhow::anyhow!("Could not find /pkg in namespace!"))?
-        .into_proxy();
-
-    // Initialize the environment.
+    let guest_binary_location =
+        helpers::prepare_guest_syscall_test(test_start_info, debian_guest).await?;
     let test_runner_report =
         initialize_test_runner_reporting(tests, run_listener_proxy, test_start_info)?;
-
-    let data_mount = helpers::get_syscall_data_mount(&test_pkg_dir).await?;
-    debian_guest.configure_data_mount(data_mount);
-
-    let guest_binary_location = helpers::get_guest_syscall_test_binary_path(test_start_info)?;
-    let test_binary_file =
-        helpers::open_guest_syscall_test_binary(&test_pkg_dir, test_start_info).await?;
-    debian_guest.push_data_to_guest(test_binary_file, &guest_binary_location).await?;
-    let (exec_command, guest_output_filename) = format_exec_command(tests, &guest_binary_location);
+    let test_filter_arg = gtest::create_tests_filter_arg(tests, TestType::Gtest);
+    let (exec_command, guest_output_filename) =
+        format_exec_command(&guest_binary_location, &test_filter_arg);
 
     // Execute the tests and retrieve the results. The command's overall return code is ignored, as
     // the gTest results are parsed from the stdout in get_test_results.
@@ -116,7 +78,7 @@ async fn run_on_debian_guest(
             Some(test_runner_report.stderr),
         )
         .await?;
-    let test_results = get_test_results(debian_guest.clone(), guest_output_filename).await?;
+    let test_results = get_test_results(debian_guest, &guest_output_filename).await;
 
     // Report results back to the test runner. We mark the overall test suite as "Passed,"
     // but we will parse and report the actual status of individual tests afterwards.
@@ -128,70 +90,64 @@ async fn run_on_debian_guest(
     Ok(())
 }
 
-/// Formats the guest exec command, handling the appropriate gtest filters as well
-/// as the JSON output file for test results. Returns the (exec_command, output_filepath)
-fn format_exec_command(
-    tests: &Vec<ftest::Invocation>,
-    guest_binary_location: &Path,
-) -> (String, String) {
-    let test_filter_arg = gtest::create_tests_filter_arg(tests, TestType::Gtest);
+/// Formats a guest gTest command with the given argument and a unique JSON output file, returning
+/// the guest command string and output filename.
+fn format_exec_command(guest_binary_location: &Path, gtest_arg: &str) -> (String, String) {
     let guest_output_filename = helpers::unique_test_result_filename();
     let guest_output_path = helpers::get_guest_syscall_test_output_path(&guest_output_filename);
     let output_arg = helpers::format_arg(
         TestType::Gtest,
-        &format!("output={}:{}", "json", guest_output_path.display()),
+        &format!("output=json:{}", guest_output_path.display()),
     );
-    let exec_command =
-        format!("{} {} {}", guest_binary_location.display(), test_filter_arg, output_arg);
+    let exec_command = format!("{} {} {}", guest_binary_location.display(), gtest_arg, output_arg);
 
     (exec_command, guest_output_filename)
+}
+
+async fn fetch_guest_output_file(
+    debian_guest: &DebianGuest,
+    guest_output_filename: &str,
+) -> Result<String, anyhow::Error> {
+    let host_test_output_path = Path::new(HOST_TMP_DIR).join(guest_output_filename);
+    let guest_test_output_path = helpers::get_guest_syscall_test_output_path(guest_output_filename);
+    let host_test_output_file =
+        OpenOptions::new().write(true).create_new(true).open(&host_test_output_path)?;
+    let file_channel: zx::Channel = fdio::transfer_fd(host_test_output_file)?.into();
+    let file_client_end = endpoints::ClientEnd::from(file_channel);
+
+    // Since `transfer_fd` consumes the backing file handle, read the transferred file by path and
+    // clean up the temporary host copy regardless of whether transfer or read succeeded.
+    let result =
+        debian_guest.get_file(&guest_test_output_path, file_client_end).await.and_then(|()| {
+            std::fs::read_to_string(&host_test_output_path)
+                .with_context(|| format!("Failed to read {}", host_test_output_path.display()))
+        });
+    let _ = std::fs::remove_file(&host_test_output_path);
+    result
 }
 
 /// Transfers a test results file from a guest and parses its contents. In the case of transfer or
 /// parsing errors, it logs a warning and returns an empty vector. The test reporting mechanism
 /// should handle interpreting the empty vector appropriately.
 async fn get_test_results(
-    debian_guest: Arc<DebianGuest>,
-    guest_output_filename: String,
-) -> Result<Vec<TestSuiteOutput>, anyhow::Error> {
-    // Firstly, transfer the results file from the guest back to the host.
-    let host_test_output_path = Path::new(HOST_TMP_DIR).join(&guest_output_filename);
-    let guest_test_output_path =
-        helpers::get_guest_syscall_test_output_path(&guest_output_filename);
-    let host_test_output_file =
-        OpenOptions::new().write(true).create_new(true).open(&host_test_output_path)?;
-    let file_channel: zx::Channel = fdio::transfer_fd(host_test_output_file)?.into();
-    let file_client_end = endpoints::ClientEnd::from(file_channel);
-    let transfer_result = debian_guest.get_file(&guest_test_output_path, file_client_end).await;
+    debian_guest: &DebianGuest,
+    guest_output_filename: &str,
+) -> Vec<TestSuiteOutput> {
+    match fetch_guest_output_file(debian_guest, guest_output_filename).await {
+        Ok(gtest_output_buffer) => {
+            let test_results =
+                results_parser::parse_results(TestType::Gtest, gtest_output_buffer.trim())
+                    .with_context(|| format!("Failed to parse {}", guest_output_filename));
 
-    match transfer_result {
-        Ok(_) => {
-            // Read and parse the results. Since the backing file handle is consumed by the transfer_fd
-            // call, we need to reopen the file to read the contents.
-            let mut host_test_output_file =
-                OpenOptions::new().read(true).open(&host_test_output_path)?;
-            let mut gtest_output_buffer = String::new();
-            let test_results = host_test_output_file
-                .read_to_string(&mut gtest_output_buffer)
-                .with_context(|| format!("Failed to read {}", host_test_output_path.display()))
-                .and_then(|_| {
-                    results_parser::parse_results(TestType::Gtest, gtest_output_buffer.trim())
-                        .with_context(|| {
-                            format!("Failed to parse {}", host_test_output_path.display())
-                        })
-                });
-
-            // If tests crashes then we may fail to read or parse the output file. We should handle that
-            // edge case gracefully so that callers can decide how to proceed.
-            let test_result_list = match test_results {
+            // If tests crash then we may fail to parse the output file. Handle that edge case
+            // gracefully so callers can report unfinished cases as failed.
+            match test_results {
                 Ok(results) => results.testsuites,
                 Err(e) => {
                     log::error!("Tests crashed whilst running: {}", e);
                     vec![]
                 }
-            };
-
-            Ok(test_result_list)
+            }
         }
         Err(e) => {
             // Transfer errors could be an issue with the Machina guest, but are most likely
@@ -202,7 +158,7 @@ async fn get_test_results(
                 "Failed to transfer results file, which likely indicates the tests crashed while running: {}",
                 e
             );
-            Ok(vec![])
+            vec![]
         }
     }
 }
@@ -240,4 +196,105 @@ fn initialize_test_runner_reporting(
         top_level_report_proxy,
         individual_report_proxies: test_report_proxies,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::debian_guest::test_helpers::{MockDebianGuest, send_command_exit};
+    use fidl_fuchsia_virtualization_guest_interaction::InteractiveGuestRequest;
+    use std::io::Write;
+
+    #[fuchsia::test]
+    async fn test_get_cases_list_for_syscall_gtests_on_guest() {
+        const BINARY_PATH: &str = "data/tests/linux_foo_test_bin";
+        let pkg = helpers::TestPackageDir::with_guest_binary(BINARY_PATH);
+        let mut start_info = pkg.start_info(
+            "fuchsia-pkg://fuchsia.com/pkg#meta/linux_foo_test.cm",
+            BINARY_PATH,
+            &[],
+        );
+
+        let mock = MockDebianGuest::with_request_handler(|request| match request {
+            InteractiveGuestRequest::PutFile { remote_path, responder, .. } => {
+                assert!(remote_path.starts_with("/linux_foo_test_bin_"));
+                responder.send(zx::sys::ZX_OK).expect("send PutFile response");
+            }
+            InteractiveGuestRequest::ExecuteCommand { command, command_listener, .. } => {
+                assert!(command.contains("--gtest_list_tests"));
+                assert!(command.contains("--gtest_output=json:/test_result-"));
+                send_command_exit(command_listener, 0);
+            }
+            InteractiveGuestRequest::GetFile { remote_path, local_file, responder } => {
+                assert!(remote_path.starts_with("/test_result-"));
+                let mut host_file: std::fs::File =
+                    fdio::create_fd(local_file.into_channel().into())
+                        .expect("fd from client")
+                        .into();
+                let list_json = r#"{
+                    "tests": 2,
+                    "name": "AllTests",
+                    "testsuites": [
+                        {
+                            "name": "SysctlTest",
+                            "tests": 2,
+                            "testsuite": [
+                                { "name": "ReadsKernelVersion", "file": "sysctl.cc", "line": 10 },
+                                { "name": "DISABLED_FlakyCase", "file": "sysctl.cc", "line": 20 }
+                            ]
+                        }
+                    ]
+                }"#;
+                host_file.write_all(list_json.as_bytes()).expect("write list json");
+                drop(host_file);
+                responder.send(zx::sys::ZX_OK).expect("send GetFile response");
+            }
+            other => panic!("Unexpected InteractiveGuest request: {:?}", other),
+        });
+
+        let cases = get_cases_list_for_syscall_gtests_on_guest(&mut start_info, &mock.guest)
+            .await
+            .expect("enumerate guest gtest cases");
+
+        assert_eq!(mock.put_file_count(), 1);
+        assert_eq!(cases.len(), 2);
+        assert_eq!(cases[0].name.as_deref(), Some("SysctlTest.ReadsKernelVersion"));
+        assert_eq!(cases[0].enabled, Some(true));
+        assert_eq!(cases[1].name.as_deref(), Some("SysctlTest.DISABLED_FlakyCase"));
+        assert_eq!(cases[1].enabled, Some(false));
+
+        mock.finish().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_get_cases_list_for_syscall_gtests_on_guest_nonzero_exit() {
+        const BINARY_PATH: &str = "data/tests/linux_foo_test_bin";
+        let pkg = helpers::TestPackageDir::with_guest_binary(BINARY_PATH);
+        let mut start_info = pkg.start_info(
+            "fuchsia-pkg://fuchsia.com/pkg#meta/linux_foo_test.cm",
+            BINARY_PATH,
+            &[],
+        );
+
+        let mock = MockDebianGuest::with_request_handler(|request| match request {
+            InteractiveGuestRequest::PutFile { responder, .. } => {
+                responder.send(zx::sys::ZX_OK).expect("send PutFile response");
+            }
+            InteractiveGuestRequest::ExecuteCommand { command, command_listener, .. } => {
+                assert!(command.contains("--gtest_list_tests"));
+                send_command_exit(command_listener, 1);
+            }
+            other => panic!("Unexpected InteractiveGuest request: {:?}", other),
+        });
+
+        let err = get_cases_list_for_syscall_gtests_on_guest(&mut start_info, &mock.guest)
+            .await
+            .expect_err("expected error on non-zero list exit code");
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("--gtest_list_tests"), "unexpected error: {err_msg}");
+        assert!(err_msg.contains("exit code 1"), "unexpected error: {err_msg}");
+        assert_eq!(mock.put_file_count(), 1);
+
+        mock.finish().await;
+    }
 }

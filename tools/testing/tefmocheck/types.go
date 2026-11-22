@@ -116,6 +116,12 @@ type FailureModeCheck interface {
 	// IsInfraFailure is true if the check is a result of an
 	// infrastructure failure.
 	IsInfraFailure() bool
+	// Category returns the explicit FailureCategory configured on this check,
+	// or "" if uncategorized.
+	Category() runtests.FailureCategory
+	// InfraDomain returns the optional infrastructure domain ("tools" or
+	// "environment") when Category is "infra", or "" if unset.
+	InfraDomain() runtests.InfraDomain
 	// IsExoneration is true if the check should exonerate the matching test.
 	IsExoneration() bool
 	// FailureReason is the human-readable error message.
@@ -162,6 +168,14 @@ func (c baseCheck) Tags() []build.TestTag {
 
 func (c baseCheck) IsInfraFailure() bool {
 	return false
+}
+
+func (c baseCheck) Category() runtests.FailureCategory {
+	return ""
+}
+
+func (c baseCheck) InfraDomain() runtests.InfraDomain {
+	return ""
 }
 
 func (c baseCheck) IsExoneration() bool {

@@ -5,11 +5,15 @@
 #ifndef SRC_STARNIX_TESTS_SYSCALLS_CPP_PROC_TEST_BASE_H_
 #define SRC_STARNIX_TESTS_SYSCALLS_CPP_PROC_TEST_BASE_H_
 
-#include <sys/mount.h>
+#include <unistd.h>
+
+#include <optional>
+#include <string>
+#include <string_view>
 
 #include <gtest/gtest.h>
 
-#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
+#include "src/lib/files/file.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 // Some tests run in environments where /proc is not mounted by default, such as the chromiumos
@@ -24,31 +28,43 @@ class ProcTestBase : public ::testing::Test {
     // but first the mount point needs to exist in the image
     // (prebuilt/starnix/chromiumos-image-amd64/system.img).
     if (access(kProc, F_OK) != 0) {
-      proc_ = test_helper::get_tmp_path() + kProc;
-      ASSERT_THAT(mkdir(proc_.c_str(), 0777), SyscallSucceeds());
-      ASSERT_THAT(mount(nullptr, proc_.c_str(), "proc", 0, nullptr), SyscallSucceeds());
-      mounted_ = true;
-    }
-  }
-
-  void TearDown() override {
-    if (mounted_) {
-      ASSERT_THAT(umount(proc_.c_str()), SyscallSucceeds());
-      ASSERT_THAT(rmdir(proc_.c_str()), SyscallSucceeds());
+      proc_dir_.emplace();
+      ASSERT_FALSE(proc_dir_->path().empty());
+      proc_mount_ = ASSERT_RESULT_SUCCESS_AND_RETURN(
+          test_helper::ScopedMount::Mount("proc", proc_dir_->path(), "proc", 0, nullptr));
     }
   }
 
   std::string proc_path() const {
-    if (mounted_) {
-      return proc_;
-    } else {
-      return kProc;
+    if (proc_dir_.has_value()) {
+      return proc_dir_->path();
     }
+    return kProc;
   }
 
- protected:
-  bool mounted_ = false;
-  std::string proc_;
+  // Returns the `/proc/self/smaps` entry containing `addr`, or `std::nullopt` if unavailable.
+  std::optional<test_helper::MemoryMappingExt> FindMemoryMappingExt(uintptr_t addr) const {
+    std::string smaps;
+    if (!files::ReadFileToString(proc_path() + "/self/smaps", &smaps)) {
+      return std::nullopt;
+    }
+    return test_helper::find_memory_mapping_ext(addr, smaps);
+  }
+
+  std::optional<test_helper::MemoryMappingExt> FindMemoryMappingExt(
+      const volatile void* addr) const {
+    return FindMemoryMappingExt(reinterpret_cast<uintptr_t>(addr));
+  }
+
+  // Returns the KiB value for `field_name` (without trailing `:`) from `/proc/self/status`.
+  std::optional<size_t> GetStatusFieldInKb(std::string_view field_name) const {
+    return test_helper::GetStatusFieldInKb(proc_path() + "/self/status", field_name);
+  }
+
+ private:
+  // Order matters: `proc_mount_` must be unmounted before `proc_dir_` removes the mount point.
+  std::optional<test_helper::ScopedTempDir> proc_dir_;
+  test_helper::ScopedMount proc_mount_;
 };
 
 #endif  // SRC_STARNIX_TESTS_SYSCALLS_CPP_PROC_TEST_BASE_H_

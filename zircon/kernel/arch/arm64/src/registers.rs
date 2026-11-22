@@ -4,16 +4,19 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Hardware breakpoints and watchpoints, and the per-thread MDSCR_EL1 debug enables.
+//! Hardware breakpoints and watchpoints, the per-thread MDSCR_EL1 debug enables, and the exception
+//! frame dump.
 
+use kprint::kprint;
 use libarch::arm64::{
     BreakpointControlRegister, DEBUG_BANK_SIZE, DebugFeatureRegister0, ID_AA64DFR0_EL1,
     MonitorDebugSystemControlRegister, WatchpointControlRegister, write_dbgbcr, write_dbgbvr,
     write_dbgwcr, write_dbgwvr,
 };
 
-use super::isb;
+use super::exceptions::alt_hex_lead;
 use super::vm::is_user_accessible;
+use super::{Iframe, isb};
 
 /// Kernel tracking of the current state of the debug registers for a particular thread
 /// (`arm64_debug_state_t`).
@@ -225,4 +228,99 @@ pub(super) unsafe fn arm64_write_hw_debug_regs(debug_state: &Arm64DebugState) {
         let dbgwvr = hw_wp.dbgwvr;
         arm64_write_hw_watchpoint_by_index(i, dbgwcr, dbgwvr);
     }
+}
+
+/// Prints `frame`'s registers to the console.
+pub(super) fn print_frame(frame: &Iframe) {
+    kprint!("iframe {:p}:\n", frame);
+    kprint!(
+        "x0  {:cs}{:x} x1  {:cs}{:x} x2  {:cs}{:x} x3  {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[0]),
+        frame.r[0],
+        alt_hex_lead::<18>(frame.r[1]),
+        frame.r[1],
+        alt_hex_lead::<18>(frame.r[2]),
+        frame.r[2],
+        alt_hex_lead::<18>(frame.r[3]),
+        frame.r[3]
+    );
+    kprint!(
+        "x4  {:cs}{:x} x5  {:cs}{:x} x6  {:cs}{:x} x7  {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[4]),
+        frame.r[4],
+        alt_hex_lead::<18>(frame.r[5]),
+        frame.r[5],
+        alt_hex_lead::<18>(frame.r[6]),
+        frame.r[6],
+        alt_hex_lead::<18>(frame.r[7]),
+        frame.r[7]
+    );
+    kprint!(
+        "x8  {:cs}{:x} x9  {:cs}{:x} x10 {:cs}{:x} x11 {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[8]),
+        frame.r[8],
+        alt_hex_lead::<18>(frame.r[9]),
+        frame.r[9],
+        alt_hex_lead::<18>(frame.r[10]),
+        frame.r[10],
+        alt_hex_lead::<18>(frame.r[11]),
+        frame.r[11]
+    );
+    kprint!(
+        "x12 {:cs}{:x} x13 {:cs}{:x} x14 {:cs}{:x} x15 {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[12]),
+        frame.r[12],
+        alt_hex_lead::<18>(frame.r[13]),
+        frame.r[13],
+        alt_hex_lead::<18>(frame.r[14]),
+        frame.r[14],
+        alt_hex_lead::<18>(frame.r[15]),
+        frame.r[15]
+    );
+    kprint!(
+        "x16 {:cs}{:x} x17 {:cs}{:x} x18 {:cs}{:x} x19 {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[16]),
+        frame.r[16],
+        alt_hex_lead::<18>(frame.r[17]),
+        frame.r[17],
+        alt_hex_lead::<18>(frame.r[18]),
+        frame.r[18],
+        alt_hex_lead::<18>(frame.r[19]),
+        frame.r[19]
+    );
+    kprint!(
+        "x20 {:cs}{:x} x21 {:cs}{:x} x22 {:cs}{:x} x23 {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[20]),
+        frame.r[20],
+        alt_hex_lead::<18>(frame.r[21]),
+        frame.r[21],
+        alt_hex_lead::<18>(frame.r[22]),
+        frame.r[22],
+        alt_hex_lead::<18>(frame.r[23]),
+        frame.r[23]
+    );
+    kprint!(
+        "x24 {:cs}{:x} x25 {:cs}{:x} x26 {:cs}{:x} x27 {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[24]),
+        frame.r[24],
+        alt_hex_lead::<18>(frame.r[25]),
+        frame.r[25],
+        alt_hex_lead::<18>(frame.r[26]),
+        frame.r[26],
+        alt_hex_lead::<18>(frame.r[27]),
+        frame.r[27]
+    );
+    kprint!(
+        "x28 {:cs}{:x} x29 {:cs}{:x} lr  {:cs}{:x} usp {:cs}{:x}\n",
+        alt_hex_lead::<18>(frame.r[28]),
+        frame.r[28],
+        alt_hex_lead::<18>(frame.r[29]),
+        frame.r[29],
+        alt_hex_lead::<18>(frame.lr),
+        frame.lr,
+        alt_hex_lead::<18>(frame.usp),
+        frame.usp
+    );
+    kprint!("elr  {:cs}{:x}\n", alt_hex_lead::<18>(frame.elr), frame.elr);
+    kprint!("spsr {:cs}{:x}\n", alt_hex_lead::<18>(frame.spsr), frame.spsr);
 }

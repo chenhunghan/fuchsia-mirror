@@ -1,0 +1,89 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":ot-rcp-fuchsia-mock-spinel-host-unittests"],
+    visibility = ["//src/connectivity/openthread:__pkg__"],
+)
+
+# A mock spinel FIDL client.
+fx_cc_library(
+    name = "mock-spinel-host",
+    testonly = True,
+    srcs = [
+        "mock_spinel_host.cc",
+        "spinel_frame.cc",
+    ],
+    hdrs = [
+        "mock_spinel_host.h",
+        "spinel_frame.h",
+    ],
+    # Depends on Fuchsia-only FIDL IPC client bindings.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/connectivity/openthread/tests/ot-rcp-fuchsia:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fit",
+        "//third_party/openthread:libopenthread-spinel-rcp",
+        "//third_party/openthread/include/openthread",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# Builders for IEEE 802.15.4 MAC frames (PSDUs) carried in Spinel STREAM_RAW.
+fx_cc_library(
+    name = "mac-frame",
+    testonly = True,
+    srcs = ["mac_frame.cc"],
+    hdrs = ["mac_frame.h"],
+    visibility = ["//src/connectivity/openthread/tests/ot-rcp-fuchsia:__subpackages__"],
+    alwayslink = True,
+)
+
+# gtest fixture that drives a MockSpinelHost the way lowpan-ot-driver drives an
+# RCP (Open + reset sync, GET/SET with TID matching, raw link bring-up). The
+# derived fixture launches the RCP and supplies the DeviceSetup client.
+fx_cc_library(
+    name = "mock-spinel-host-fixture",
+    testonly = True,
+    srcs = ["mock_spinel_host_fixture.cc"],
+    hdrs = ["mock_spinel_host_fixture.h"],
+    implementation_deps = ["//src/lib/testing/predicates"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/connectivity/openthread/tests/ot-rcp-fuchsia:__subpackages__"],
+    deps = [
+        ":mock-spinel-host",
+        "//src/lib/testing/loop_fixture",
+        "//zircon/system/ulib/zx",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "mock_spinel_host_unittests",
+    srcs = ["spinel_frame_unittest.cc"],
+    gn_output_name = "ot_rcp_fuchsia_mock_spinel_host_unittests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":mock-spinel-host",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "ot-rcp-fuchsia-mock-spinel-host-unittests",
+    unit_tests = [":mock_spinel_host_unittests"],
+)

@@ -101,7 +101,7 @@ where
     fn receive_icmp_error(
         core_ctx: &mut CC,
         bindings_ctx: &mut BC,
-        _device: &CC::DeviceId,
+        device: &CC::DeviceId,
         original_src_ip: Option<SpecifiedAddr<I::Addr>>,
         original_dst_ip: SpecifiedAddr<I::Addr>,
         mut original_body: &[u8],
@@ -119,6 +119,7 @@ where
         let original_seqnum = SeqNum::new(flow_and_seqnum.sequence_num());
 
         TcpApi::<I, _>::new(CtxPair { core_ctx, bindings_ctx }).on_icmp_error(
+            device.downgrade(),
             original_src_ip,
             original_dst_ip,
             original_src_port,
@@ -539,6 +540,7 @@ fn handle_incoming_packet<WireI, BC, CC, H>(
                     conn_addr,
                     seg.into_empty(),
                     &TcpIpSockOptions { marks: *marks, ..Default::default() },
+                    None,
                 );
             }
             None
@@ -880,6 +882,7 @@ where
             conn_addr.ip,
             seg.into_empty(),
             &socket_options.ip_options,
+            None,
         );
     }
 
@@ -1302,6 +1305,7 @@ where
             incoming_addrs,
             seg.into_empty(),
             &socket_options.ip_options,
+            None,
         );
     }
 

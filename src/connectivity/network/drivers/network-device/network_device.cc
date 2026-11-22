@@ -5,7 +5,6 @@
 #include "network_device.h"
 
 #include <lib/driver/component/cpp/driver_export2.h>
-#include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/fdf/cpp/env.h>
 
@@ -16,8 +15,6 @@ namespace network {
 namespace {
 
 constexpr char kDriverName[] = "network-device";
-constexpr char kDevFsClassName[] = "network";
-constexpr char kDevFsChildNodeName[] = "network-device";
 
 }  // namespace
 
@@ -31,6 +28,7 @@ NetworkDevice::~NetworkDevice() {
 
 void NetworkDevice::Start(fdf::DriverContext context, fdf::StartCompleter completer) {
   auto incoming = std::shared_ptr<fdf::Namespace>(context.take_incoming());
+  node_token_ = context.take_node_token();
 
   zx::result<> result = [&]() -> zx::result<> {
     zx::result dispatchers = OwnedDeviceInterfaceDispatchers::Create();
@@ -54,27 +52,17 @@ void NetworkDevice::Start(fdf::DriverContext context, fdf::StartCompleter comple
     }
     device_ = std::move(device.value());
 
-    // Create a devfs connector and child node for netcfg to discover and connect to.
-    zx::result connector = devfs_connector_.Bind(dispatcher());
-    if (connector.is_error()) {
-      fdf::error("failed to bind devfs connector: {}", connector);
-      return connector.take_error();
+    if (zx::result result = outgoing()->AddService<fuchsia_hardware_network::Service>(
+            fuchsia_hardware_network::Service::InstanceHandler({
+                .device = fit::bind_member<&NetworkDevice::Connect>(this),
+                .token =
+                    token_bindings_.CreateHandler(this, dispatcher(), fidl::kIgnoreBindingClosure),
+            }));
+        result.is_error()) {
+      fdf::error("failed to add network service to outgoing directory: {}", result);
+      return result.take_error();
     }
 
-    fuchsia_driver_framework::DevfsAddArgs devfs_args;
-    devfs_args.connector(std::move(connector.value()))
-        .class_name(kDevFsClassName)
-        .connector_supports(fuchsia_device_fs::ConnectionType::kController);
-
-    // Use AddOwnedChild to prevent other drivers from binding to the node. The node only exists for
-    // netcfg to discover and connect to, no other drivers are involved.
-    zx::result child = AddOwnedChild(kDevFsChildNodeName, devfs_args);
-    if (child.is_error()) {
-      fdf::error("failed to add child node: {}", child);
-      return child.take_error();
-    }
-
-    child_node_.Bind(std::move(child->node_));
     return zx::ok();
   }();
 
@@ -89,10 +77,24 @@ void NetworkDevice::Start(fdf::DriverContext context, fdf::StartCompleter comple
 
 void NetworkDevice::Stop(fdf::StopCompleter completer) {
   fdf::info("{:p} Stop", static_cast<const void*>(this));
+  token_bindings_.RemoveAll();
   device_->Teardown([completer = std::move(completer), this]() mutable {
     fdf::info("{:p} Stop Done", static_cast<const void*>(this));
     completer(zx::ok());
   });
+}
+
+void NetworkDevice::Get(GetCompleter::Sync& completer) {
+  if (!node_token_.is_valid()) {
+    completer.ReplyError(ZX_ERR_NOT_FOUND);
+    return;
+  }
+  zx::event copy;
+  if (zx_status_t status = node_token_.duplicate(ZX_RIGHT_SAME_RIGHTS, &copy); status != ZX_OK) {
+    completer.ReplyError(status);
+    return;
+  }
+  completer.ReplySuccess(std::move(copy));
 }
 
 void NetworkDevice::Connect(fidl::ServerEnd<fuchsia_hardware_network::Device> request) {

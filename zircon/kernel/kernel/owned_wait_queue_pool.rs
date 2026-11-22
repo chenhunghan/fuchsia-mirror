@@ -8,21 +8,17 @@
 
 use crate::counters::define_kcounter;
 use crate::kernel::owned_wait_queue::OwnedWaitQueue;
-use crate::ksync_kernel::KSpinlock;
 use crate::object_cache::{ObjectCache, UniquePtr};
 use core::convert::Infallible;
-use core::mem::{MaybeUninit, align_of, offset_of, size_of};
+use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
 use fbl::DoublyLinkedList;
 use ksync::{KMutex, LockToken, PhantomMutex};
 use lazy_init::LazyInit;
-use owned_wait_queue_pool_bindings as bindings;
 use pin_init::{InPlaceWrite, PinInit, init_from_closure, pin_data, pin_init};
-use zr::static_assert;
 use zx_status::Status;
-use zx_types::zx_status_t;
 
 define_kcounter!(OWQ_POOL_EXCESS_CAPACITY, "owned_wait_queue.pool.excess_capacity", Sum);
 
@@ -51,7 +47,6 @@ init::lk_init_hook!(
 /// Global pool for [`OwnedWaitQueue`] objects.
 #[ksync::guarded]
 #[pin_data]
-#[repr(C)]
 pub struct OwnedWaitQueuePool {
     #[pin]
     cache: ObjectCache<OwnedWaitQueue>,
@@ -78,18 +73,6 @@ unsafe impl Send for OwnedWaitQueuePool {}
 // SAFETY: All interior mutation of `free_list` is synchronized by `OwnedWaitQueuePoolLock`, and
 // `cache`, `active_threads`, and `total_allocated` are thread-safe (`Sync`).
 unsafe impl Sync for OwnedWaitQueuePool {}
-
-const EXPECTED_CACHE_SIZE: usize = size_of::<ObjectCache<OwnedWaitQueue>>();
-const EXPECTED_POOL_SIZE: usize = EXPECTED_CACHE_SIZE + 16;
-
-static_assert!(size_of::<OwnedWaitQueuePool>() == size_of::<bindings::OwnedWaitQueuePool>());
-static_assert!(align_of::<OwnedWaitQueuePool>() == align_of::<bindings::OwnedWaitQueuePool>());
-static_assert!(size_of::<OwnedWaitQueuePool>() == EXPECTED_POOL_SIZE);
-static_assert!(align_of::<OwnedWaitQueuePool>() == 8);
-static_assert!(offset_of!(OwnedWaitQueuePool, cache) == 0);
-static_assert!(offset_of!(OwnedWaitQueuePool, free_list) == EXPECTED_CACHE_SIZE);
-static_assert!(offset_of!(OwnedWaitQueuePool, active_threads) == EXPECTED_CACHE_SIZE + 8);
-static_assert!(offset_of!(OwnedWaitQueuePool, total_allocated) == EXPECTED_CACHE_SIZE + 12);
 
 impl OwnedWaitQueuePool {
     /// Creates an in-place initializer for an [`OwnedWaitQueuePool`].
@@ -250,117 +233,6 @@ impl OwnedWaitQueuePool {
     pub fn get_excess_capacity_for_test(&self) -> i64 {
         OWQ_POOL_EXCESS_CAPACITY.sum_across_all_cpus()
     }
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePoolLock::Get()`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/lazy_owned_wait_queue.h`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_owned_wait_queue_pool_lock_get() -> *mut KSpinlock<OwnedWaitQueuePoolLock> {
-    core::ptr::from_ref(OwnedWaitQueuePoolLock::get()).cast_mut()
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::OwnedWaitQueuePool()`.
-///
-/// # Safety
-///
-/// `pool` must point to valid, aligned, uninitialized storage for an [`OwnedWaitQueuePool`], and
-/// the initialized object must remain pinned in memory until dropped by
-/// [`rust_owned_wait_queue_pool_destroy`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_pool_new(
-    pool: *mut MaybeUninit<OwnedWaitQueuePool>,
-) {
-    debug_assert!(!pool.is_null());
-    // SAFETY: Caller guarantees `pool` points to valid, aligned, uninitialized storage that
-    // remains pinned after initialization.
-    let slot = unsafe { &mut *pool };
-    let _ = slot.write_pin_init(OwnedWaitQueuePool::new());
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::~OwnedWaitQueuePool()`.
-///
-/// # Safety
-///
-/// `pool` must point to a valid, initialized [`OwnedWaitQueuePool`] with exclusive access, an
-/// empty `free_list`, and that will not be used again.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_pool_destroy(pool: *mut OwnedWaitQueuePool) {
-    debug_assert!(!pool.is_null());
-    // SAFETY: Caller guarantees `pool` points to a valid, initialized `OwnedWaitQueuePool`.
-    unsafe {
-        core::ptr::drop_in_place(pool);
-    }
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::Get()`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_owned_wait_queue_pool_get() -> *mut OwnedWaitQueuePool {
-    core::ptr::from_ref(OwnedWaitQueuePool::get()).cast_mut()
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::Grow()`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_owned_wait_queue_pool_grow(pool: &OwnedWaitQueuePool) -> zx_status_t {
-    Status::result_into_raw(pool.grow())
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::Shrink()`.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_owned_wait_queue_pool_shrink(pool: &OwnedWaitQueuePool) {
-    pool.shrink();
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::RecycleLocked()`.
-///
-/// # Safety
-///
-/// `queue` must point to a valid, pinned [`OwnedWaitQueue`] allocated from this pool's cache in a
-/// clean state (no owner, no waiters, and no concurrent mutation of its owner or waiter fields)
-/// that is not currently in any list, must remain valid and unmoved while in the pool, and the
-/// caller must hold [`OwnedWaitQueuePoolLock`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_pool_recycle_locked(
-    pool: &OwnedWaitQueuePool,
-    queue: *mut OwnedWaitQueue,
-) {
-    debug_assert!(!queue.is_null(), "Cannot recycle a null queue.");
-    // SAFETY: The caller guarantees `queue` is a valid, non-null pointer.
-    let queue = unsafe { NonNull::new_unchecked(queue) };
-    // SAFETY: The C++ declaration is `TA_REQ(OwnedWaitQueuePoolLock::Get())`.
-    let mut token = unsafe { LockToken::new() };
-    // SAFETY: Caller upholds the safety requirements of `recycle_locked`.
-    unsafe {
-        pool.recycle_locked(queue, &mut token);
-    }
-}
-
-/// C++ FFI entry point for `OwnedWaitQueuePool::BorrowLocked()`.
-///
-/// # Safety
-///
-/// The caller must hold [`OwnedWaitQueuePoolLock`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/owned_wait_queue_pool.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_owned_wait_queue_pool_borrow_locked(
-    pool: &OwnedWaitQueuePool,
-) -> *mut OwnedWaitQueue {
-    // SAFETY: The C++ declaration is `TA_REQ(OwnedWaitQueuePoolLock::Get())`.
-    let mut token = unsafe { LockToken::new() };
-    pool.borrow_locked(&mut token).as_ptr()
 }
 
 /// Tests for [`OwnedWaitQueuePool`].

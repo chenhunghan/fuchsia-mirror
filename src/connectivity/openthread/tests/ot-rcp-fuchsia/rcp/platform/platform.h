@@ -32,7 +32,8 @@ class Platform {
   // The live Platform. Asserts that one exists.
   static Platform& Get();
 
-  Platform(async_dispatcher_t* dispatcher, uint32_t node_id);
+  // `radio_medium` carries what the radio transmits and receives, and must outlive the platform.
+  Platform(async_dispatcher_t* dispatcher, uint32_t node_id, RadioMedium& radio_medium);
   ~Platform();
   Platform(const Platform&) = delete;
   Platform& operator=(const Platform&) = delete;
@@ -62,6 +63,7 @@ class Platform {
 
   async_dispatcher_t* const dispatcher_;
   const uint32_t node_id_;
+  RadioMedium& radio_medium_;
   const std::string log_tag_ = "rcp-" + std::to_string(node_id_);
   otPlatResetReason reset_reason_ = OT_PLAT_RESET_REASON_POWER_ON;
 
@@ -72,7 +74,7 @@ class Platform {
   async::TaskClosure milli_task_;
 
   // Constructed fresh with every Platform, which is what returns it to its power-on configuration.
-  Radio radio_{dispatcher_};
+  Radio radio_{dispatcher_, radio_medium_};
 };
 
 }  // namespace ot_rcp

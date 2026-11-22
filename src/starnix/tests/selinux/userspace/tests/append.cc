@@ -142,4 +142,4 @@ TEST(AppendTest, WriteAllowedAfterPermissiveOpenAndSetEnforce) {
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() { return "append_policy"; }
+extern std::string GetTestPolicyName() { return "append_policy"; }

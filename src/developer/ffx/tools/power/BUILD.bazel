@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "ffx_power",
+    srcs = [
+        "src/args.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//sdk/fidl/fuchsia.power:fuchsia.power_rust_fdomain",
+        "//sdk/fidl/fuchsia.power.manager.debug:fuchsia.power.manager.debug_rust_fdomain",
+        "//sdk/fidl/fuchsia.power.topology.test:fuchsia.power.topology.test_rust_fdomain",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fdomain/client",
+        "//src/power/tools/cli:lib_fdomain",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_power_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-power",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":ffx_power",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)

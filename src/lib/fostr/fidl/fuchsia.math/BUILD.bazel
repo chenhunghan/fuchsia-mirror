@@ -3,8 +3,18 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//src/lib/fostr/build:fostr_fidl.bzl", "fostr_fidl")
 
 package(default_applicable_licenses = ["//:license"])
+
+fostr_fidl(
+    name = "fuchsia.math",
+    additional_include = "src/lib/fostr/fidl/fuchsia.math/amendments.h",
+    amendments_path = "amendments.json",
+    fidl_target = "//sdk/fidl/fuchsia.math",
+    public_deps = [":amendments"],
+    visibility = ["//:__subpackages__"],
+)
 
 fx_cc_library(
     name = "amendments",

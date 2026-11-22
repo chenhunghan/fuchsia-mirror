@@ -2,31 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-# The libraries and `wlan-storage_test` are defined in `BUILD.bazel` and synced
-# below the sentinel. The test component and package stay in GN because
-# `wlan-storage-tests` packages `//src/sys/stash:stash_secure_v2` and
-# `//src/sys/stash:stash_v2`, which are not built by Bazel yet.
-fuchsia_component("wlan_storage_lib_test") {
-  testonly = true
-  manifest = "meta/wlan_storage_lib_test.cml"
-  deps = [ ":wlan-storage_test" ]
-}
-
-fuchsia_test_package("wlan-storage-tests") {
-  test_components = [ ":wlan_storage_lib_test" ]
-  deps = [
-    "//src/sys/stash:stash_secure_v2",
-    "//src/sys/stash:stash_v2",
-  ]
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
-  }
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -107,6 +82,35 @@ rustc_test("wlan-storage_test") {
            "//third_party/rust_crates:rand",
          ]
   output_name = "wlan_storage_lib_test"
+}
+
+fuchsia_component_manifest("wlan_storage_lib_test_manifest") {
+  testonly = true
+  component_name = "wlan_storage_lib_test"
+  manifest = "meta/wlan_storage_lib_test.cml"
+}
+
+fuchsia_test_component("wlan_storage_lib_test") {
+  cm_label = ":wlan_storage_lib_test_manifest"
+  deps = [ ":wlan-storage_test" ]
+}
+
+fuchsia_test_package("wlan-storage-tests") {
+  package_name = "wlan-storage-tests-gn"
+  test_components = [ ":wlan_storage_lib_test" ]
+  deps = [
+    "//src/sys/stash:stash_secure_v2",
+    "//src/sys/stash:stash_v2",
+  ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+  visibility = [
+    ":*",
+    "//src/connectivity/wlan:*",
+  ]
 }
 
 rustc_library("wlan-storage-constants") {

@@ -84,6 +84,19 @@ class VersionReg : public hwreg::RegisterBase<VersionReg, uint32_t, hwreg::Enabl
   static auto Get() { return hwreg::RegisterAddr<VersionReg>(RegisterMap::kVER); }
 };
 
+// UFSHCI 3.0 section 5.2.4 / UFSHCI 4.0 section 5.2.6
+// "Offset 14h: HCMID - Host Controller Identification Descriptor - Manufacturer ID".
+class HostControllerProdManufIdReg
+    : public hwreg::RegisterBase<HostControllerProdManufIdReg, uint32_t, hwreg::EnablePrinter> {
+ public:
+  DEF_FIELD(31, 16, product_id);
+  DEF_FIELD(15, 0, manufacturer_id);
+
+  static auto Get() {
+    return hwreg::RegisterAddr<HostControllerProdManufIdReg>(RegisterMap::kHCPMID);
+  }
+};
+
 // UFSHCI Specification Version 3.0, section 5.2.5
 // "Offset 18h: AHIT – Auto-Hibernate Idle Timer".
 class AutoHibernateIdleTimerReg
@@ -239,8 +252,8 @@ class HostUicErrorCodeDataLinkLayerReg
   }
 };
 
-// UECDL error code bit for a PA_INIT error (UniPro DL_ErrorPAInit), indicating that the Data Link
-// layer was re-initialized (JESD220E section 8.3.2).
+// UECDL error code bit for PA_INIT_ERROR (UniPro DL_ErrorPAInit), indicating a fatal Data Link
+// layer re-initialization error (UFSHCI 3.0 section 5.3.6 / UFSHCI 4.0 sections 5.3.7 and 8.2.2).
 constexpr uint32_t kUicDataLinkLayerErrorPaInit = 1u << 13u;
 
 // UFSHCI Specification Version 3.0, section 5.3.7

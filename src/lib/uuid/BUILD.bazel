@@ -2,15 +2,63 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "tests",
+    tests = [":uuid_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":uuid_unittests_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
     name = "uuid",
     srcs = ["uuid.cc"],
     hdrs = ["uuid.h"],
-    visibility = ["//visibility:public"],
+    visibility = [
+        "//sdk/lib/syslog/cpp:__pkg__",
+        "//src/bringup:__subpackages__",
+        "//src/developer:__subpackages__",
+        "//src/firmware:__subpackages__",
+        "//src/lib/analytics/cpp/core_dev_tools:__pkg__",
+        "//src/storage:__subpackages__",
+        "//src/zircon:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
     deps = ["//src/lib/fxl:string_printf"],
     alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "uuid_unittests",
+    srcs = ["uuid_unittest.cc"],
+    deps = [
+        ":uuid",
+        "//src/lib/fxl/test:gtest_main",
+        "//third_party/re2",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "uuid_tests",
+    unit_tests = [":uuid_unittests"],
+)
+
+host_test(
+    name = "uuid_unittests_host_test",
+    binary = ":uuid_unittests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )

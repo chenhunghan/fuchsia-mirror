@@ -96,7 +96,7 @@
     {
       "name": "test.importedconstvalues/BITS_MEMBER",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
         "line": 11,
         "column": 7,
         "length": 11
@@ -126,7 +126,7 @@
     {
       "name": "test.importedconstvalues/BITS_MEMBER_PRIMITIVE",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
         "line": 16,
         "column": 7,
         "length": 21
@@ -141,27 +141,27 @@
               "type": "string",
               "value": {
                 "kind": "literal",
-                "value": "hlcpp, llcpp, dart",
-                "expression": "\"hlcpp, llcpp, dart\"",
+                "value": "hlcpp, cpp, dart",
+                "expression": "\"hlcpp, cpp, dart\"",
                 "literal": {
                   "kind": "string",
-                  "value": "hlcpp, llcpp, dart",
-                  "expression": "\"hlcpp, llcpp, dart\""
+                  "value": "hlcpp, cpp, dart",
+                  "expression": "\"hlcpp, cpp, dart\""
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
                 "line": 15,
                 "column": 20,
-                "length": 20
+                "length": 18
               }
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
             "line": 15,
             "column": 1,
-            "length": 40
+            "length": 38
           }
         }
       ],
@@ -188,7 +188,7 @@
     {
       "name": "test.importedconstvalues/ENUM_MEMBER",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
         "line": 12,
         "column": 7,
         "length": 11
@@ -218,7 +218,7 @@
     {
       "name": "test.importedconstvalues/ENUM_MEMBER_PRIMITIVE",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
         "line": 20,
         "column": 7,
         "length": 21
@@ -233,27 +233,27 @@
               "type": "string",
               "value": {
                 "kind": "literal",
-                "value": "hlcpp, llcpp, dart",
-                "expression": "\"hlcpp, llcpp, dart\"",
+                "value": "hlcpp, cpp, dart",
+                "expression": "\"hlcpp, cpp, dart\"",
                 "literal": {
                   "kind": "string",
-                  "value": "hlcpp, llcpp, dart",
-                  "expression": "\"hlcpp, llcpp, dart\""
+                  "value": "hlcpp, cpp, dart",
+                  "expression": "\"hlcpp, cpp, dart\""
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
                 "line": 19,
                 "column": 20,
-                "length": 20
+                "length": 18
               }
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
             "line": 19,
             "column": 1,
-            "length": 40
+            "length": 38
           }
         }
       ],
@@ -289,7 +289,7 @@
         "MyStruct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
         "line": 9,
         "column": 6,
         "length": 8
@@ -309,7 +309,7 @@
                 "identifier": "test.dependent/MY_STRING"
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
                 "line": 5,
                 "column": 8,
                 "length": 24
@@ -317,7 +317,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
             "line": 5,
             "column": 1,
             "length": 32
@@ -336,7 +336,7 @@
                 "identifier": "test.dependent/MY_ALIASED_STRING"
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
                 "line": 6,
                 "column": 8,
                 "length": 32
@@ -344,7 +344,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
             "line": 6,
             "column": 1,
             "length": 40
@@ -363,7 +363,7 @@
                 "identifier": "test.dependent/MY_TRUE"
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
                 "line": 7,
                 "column": 8,
                 "length": 22
@@ -371,7 +371,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
             "line": 7,
             "column": 1,
             "length": 30
@@ -390,7 +390,7 @@
                 "identifier": "test.dependent/MY_FALSE"
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
                 "line": 8,
                 "column": 8,
                 "length": 23
@@ -398,7 +398,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/imported_const_values/example.test.fidl",
             "line": 8,
             "column": 1,
             "length": 31

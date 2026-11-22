@@ -23,9 +23,7 @@ rustc_library(
     ],
     edition = "2024",
     link_deps = [
-        # Bazel links against the static library target directly; GN depends on
-        # the default shared_library target.
-        "//src/security/lib/tee/tee-client-api:tee-client-api-static",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
+        "//src/security/lib/tee/tee-client-api:tee-client-api-import",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
     ],
     visibility = [
         "//src/security/bin/kms:__pkg__",

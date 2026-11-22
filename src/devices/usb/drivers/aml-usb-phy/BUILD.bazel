@@ -114,10 +114,12 @@ fuchsia_cc_test(
         ":common",
         "//src/lib/testing/predicates",
         "@com_google_googletest//:gtest_main",
+        "@fuchsia_sdk//bind/fuchsia:fuchsia_cc",
+        "@fuchsia_sdk//fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
         "@fuchsia_sdk//pkg/async_patterns_testing_cpp",
+        "@fuchsia_sdk//pkg/driver_fake_mmio_reg_cpp",
         "@fuchsia_sdk//pkg/driver_fake_platform_device_cpp",
         "@fuchsia_sdk//pkg/driver_testing_cpp",
-        "@internal_sdk//pkg/fake-mmio-reg",
         "@internal_sdk//pkg/mock-registers",
     ],
 )

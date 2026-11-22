@@ -131,6 +131,14 @@ impl<'a> SuiteReporter<'a> {
             &EntityInfo { tags: Some(tags), ..EntityInfo::default() },
         );
     }
+
+    /// Set the runner for this suite.
+    pub fn set_runner(&self, runner: String) {
+        self.reporter.set_entity_info(
+            &self.entity,
+            &EntityInfo { runner: Some(runner), ..EntityInfo::default() },
+        );
+    }
 }
 
 /// An enumeration of different known artifact types.
@@ -244,6 +252,7 @@ pub enum EntityId {
 pub struct EntityInfo {
     pub expected_children: Option<u32>,
     pub tags: Option<Vec<TestTag>>,
+    pub runner: Option<String>,
 }
 
 /// A trait for structs that report test results.

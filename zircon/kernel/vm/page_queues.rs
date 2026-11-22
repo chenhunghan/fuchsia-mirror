@@ -22,7 +22,7 @@ use crate::vm::{pmm, scanner};
 use core::cell::UnsafeCell;
 use core::ffi::{CStr, c_void};
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::{MaybeUninit, offset_of};
+use core::mem::MaybeUninit;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -31,9 +31,7 @@ use fbl::{DoublyLinkedListContainable, RefPtr};
 use kprint::{kformat, kprintln};
 use ksync::{KMutex, LockToken, guarded, kcell_init};
 use page_bindings::{vm_page_state, vm_page_t};
-use page_queues_bindings as bindings;
-use pin_init::{InPlaceWrite as _, PinInit, pin_data, pin_init_array_from_fn};
-use vm_constants_rs as vm_constants;
+use pin_init::{PinInit, pin_data, pin_init_array_from_fn};
 use zx_types::ZX_TIME_INFINITE_PAST;
 
 define_kcounter!(PQ_AGING_REASON_TIMEOUT, "pq.aging.reason.timeout", Sum);
@@ -78,7 +76,6 @@ pub enum LruAction {
 }
 
 /// Helper struct to group queue length counts returned by [`PageQueues::queue_counts`].
-#[repr(C)]
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Counts {
     pub reclaim: [usize; NUM_RECLAIM],
@@ -90,29 +87,6 @@ pub struct Counts {
     pub failed_reclaim: usize,
     pub high_priority: usize,
 }
-zr::static_assert!(offset_of!(Counts, reclaim) == offset_of!(bindings::PageQueues_Counts, reclaim));
-zr::static_assert!(
-    offset_of!(Counts, reclaim_isolate) == offset_of!(bindings::PageQueues_Counts, reclaim_isolate)
-);
-zr::static_assert!(
-    offset_of!(Counts, pager_backed_dirty)
-        == offset_of!(bindings::PageQueues_Counts, pager_backed_dirty)
-);
-zr::static_assert!(
-    offset_of!(Counts, anonymous) == offset_of!(bindings::PageQueues_Counts, anonymous)
-);
-zr::static_assert!(offset_of!(Counts, wired) == offset_of!(bindings::PageQueues_Counts, wired));
-zr::static_assert!(
-    offset_of!(Counts, anonymous_zero_fork)
-        == offset_of!(bindings::PageQueues_Counts, anonymous_zero_fork)
-);
-zr::static_assert!(
-    offset_of!(Counts, failed_reclaim) == offset_of!(bindings::PageQueues_Counts, failed_reclaim)
-);
-zr::static_assert!(
-    offset_of!(Counts, high_priority) == offset_of!(bindings::PageQueues_Counts, high_priority)
-);
-zr::static_assert!(size_of::<Counts>() == size_of::<bindings::PageQueues_Counts>());
 
 /// Helper struct to group reclaimable queue length counts returned by
 /// [`PageQueues::get_reclaim_queue_counts`].
@@ -189,7 +163,6 @@ zr::static_assert!(PageQueue::RECLAIM_LAST.0 + 1 == PageQueue::NUM_QUEUES.0);
 /// in the inactive queues. Additional queues have reduced value as sufficiently old pages
 /// quickly become equivalently unlikely to be used in the future.
 pub const NUM_RECLAIM: usize = 8;
-zr::static_assert!(NUM_RECLAIM == bindings::PageQueues_kNumReclaim);
 
 /// Two active queues are used to allow for better fidelity of active information. This prevents
 /// a race between aging once and needing to collect/harvest age information.
@@ -788,15 +761,6 @@ pub struct PageQueues {
 
     phantom: PhantomData<PhantomPinned>,
 }
-
-zr::static_assert!(core::mem::size_of::<PageQueues>() == vm_constants::kPageQueuesStorageSize);
-zr::static_assert!(core::mem::align_of::<PageQueues>() == vm_constants::kPageQueuesStorageAlign);
-zr::static_assert!(
-    core::mem::size_of::<PageQueues>() == core::mem::size_of::<bindings::PageQueues>()
-);
-zr::static_assert!(
-    core::mem::align_of::<PageQueues>() == core::mem::align_of::<bindings::PageQueues>()
-);
 
 // SAFETY: `PageQueues` is internally synchronized via its own `lock` and `list_lock`, and the
 // pointers it holds only reference objects that outlive it.
@@ -2337,7 +2301,9 @@ impl PageQueues {
     /// # Safety
     ///
     /// The caller must guarantee `pages` are owned by a VMO and assigned to this PageQueue.
-    #[inline]
+    ///
+    /// Deliberately not `#[inline]`: this processes up to a full batch per call, so the call is
+    /// amortized, and inlining duplicated the spinlock/LRU body into every `BatchPQRemove` user.
     pub unsafe fn remove_array_into_list(
         &self,
         pages: &[VmPagePtr],
@@ -3319,204 +3285,6 @@ unsafe fn slice_from_raw_parts_or_empty<'a, T>(ptr: *const T, count: usize) -> &
     }
 }
 
-/// Initializes a `PageQueues` instance in `slot`.
-///
-/// # Safety
-///
-/// The caller must ensure `slot` is non-null, aligned to `align_of::<PageQueues>()`, valid for
-/// exclusive reads and writes of `size_of::<PageQueues>()` bytes, and that the initialized
-/// `PageQueues` remains pinned at `slot` until dropped via [`rust_page_queues_destroy`].
-// SAFETY: Symbol name is prefixed and unique across the kernel link unit.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_init(slot: *mut MaybeUninit<PageQueues>) {
-    // SAFETY: Caller guarantees `slot` is non-null, aligned, valid for exclusive writes, and
-    // remains pinned until `rust_page_queues_destroy` is called.
-    let _ = unsafe { &mut *slot }.write_pin_init(PageQueues::init());
-}
-
-/// Drops a `PageQueues` instance in place.
-///
-/// # Safety
-///
-/// The caller must ensure `queues` is non-null, aligned to `align_of::<PageQueues>()`, and points
-/// to a pinned `PageQueues` initialized by [`rust_page_queues_init`] that will not be accessed
-/// concurrently or used again after this call. All pages must have been removed from `queues`,
-/// and neither `queues.lock` nor `queues.list_lock` may be held by the current thread.
-// SAFETY: Symbol name is prefixed and unique across the kernel link unit.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_destroy(queues: *mut PageQueues) {
-    // SAFETY: Caller guarantees `queues` is non-null, aligned, and points to a pinned,
-    // initialized `PageQueues` that will not be accessed again. Note that `PageQueues` is `!Unpin`
-    // and contains `UnsafeCell`, so `drop_in_place` forming `Pin<&mut PageQueues>` does not emit
-    // `noalias` / `Unique` retags that would conflict with `mru_thread` or `lru_thread` before
-    // `<PageQueues as PinnedDrop>::drop` calls `self.stop_threads()` as its first statement.
-    unsafe {
-        core::ptr::drop_in_place(queues);
-    }
-}
-
-/// FFI wrapper for [`PageQueues::set_wired`].
-///
-/// # Safety
-///
-/// `page` and `object` must be valid pointers meeting the preconditions of
-/// [`PageQueues::set_wired`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_set_wired(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-    object: *mut bindings::VmCowPages,
-    page_offset: u64,
-) {
-    debug_assert!(!object.is_null());
-    // SAFETY: Caller guarantees `page` and `object` are valid pointers upholding `set_wired`
-    // preconditions.
-    unsafe {
-        let cow = &*(object as *const VmCowPages);
-        let page_ptr = VmPagePtr::from_ffi_unchecked(page);
-        queues.set_wired(page_ptr, cow, page_offset);
-    }
-}
-
-/// FFI wrapper for [`PageQueues::set_anonymous`].
-///
-/// # Safety
-///
-/// `page` and `object` must be valid pointers meeting the preconditions of
-/// [`PageQueues::set_anonymous`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_set_anonymous(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-    object: *mut bindings::VmCowPages,
-    page_offset: u64,
-    skip_reclaim: bool,
-) {
-    debug_assert!(!object.is_null());
-    // SAFETY: Caller guarantees `page` and `object` are valid pointers upholding `set_anonymous`
-    // preconditions.
-    unsafe {
-        let cow = &*(object as *const VmCowPages);
-        let page_ptr = VmPagePtr::from_ffi_unchecked(page);
-        queues.set_anonymous(page_ptr, cow, page_offset, skip_reclaim);
-    }
-}
-
-/// FFI wrapper for [`PageQueues::set_reclaim`].
-///
-/// # Safety
-///
-/// `page` and `object` must be valid pointers meeting the preconditions of
-/// [`PageQueues::set_reclaim`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_set_reclaim(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-    object: *mut bindings::VmCowPages,
-    page_offset: u64,
-) {
-    debug_assert!(!object.is_null());
-    // SAFETY: Caller guarantees `page` and `object` are valid pointers upholding `set_reclaim`
-    // preconditions.
-    unsafe {
-        let cow = &*(object as *const VmCowPages);
-        let page_ptr = VmPagePtr::from_ffi_unchecked(page);
-        queues.set_reclaim(page_ptr, cow, page_offset);
-    }
-}
-
-/// FFI wrapper for [`PageQueues::set_pager_backed_dirty`].
-///
-/// # Safety
-///
-/// `page` and `object` must be valid pointers meeting the preconditions of
-/// [`PageQueues::set_pager_backed_dirty`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_set_pager_backed_dirty(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-    object: *mut bindings::VmCowPages,
-    page_offset: u64,
-) {
-    debug_assert!(!object.is_null());
-    // SAFETY: Caller guarantees `page` and `object` are valid pointers upholding
-    // `set_pager_backed_dirty` preconditions.
-    unsafe {
-        let cow = &*(object as *const VmCowPages);
-        let page_ptr = VmPagePtr::from_ffi_unchecked(page);
-        queues.set_pager_backed_dirty(page_ptr, cow, page_offset);
-    }
-}
-
-/// FFI wrapper for [`PageQueues::set_high_priority`].
-///
-/// # Safety
-///
-/// `page` and `object` must be valid pointers meeting the preconditions of
-/// [`PageQueues::set_high_priority`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_set_high_priority(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-    object: *mut bindings::VmCowPages,
-    page_offset: u64,
-) {
-    debug_assert!(!object.is_null());
-    // SAFETY: Caller guarantees `page` and `object` are valid pointers upholding
-    // `set_high_priority` preconditions.
-    unsafe {
-        let cow = &*(object as *const VmCowPages);
-        let page_ptr = VmPagePtr::from_ffi_unchecked(page);
-        queues.set_high_priority(page_ptr, cow, page_offset);
-    }
-}
-
-/// FFI wrapper for [`PageQueues::move_to_wired`].
-///
-/// # Safety
-///
-/// `page` must be a valid pointer meeting the preconditions of [`PageQueues::move_to_wired`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_move_to_wired(queues: &PageQueues, page: *mut vm_page_t) {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
-    // SAFETY: Caller upholds `move_to_wired` preconditions.
-    unsafe { queues.move_to_wired(page_ptr) };
-}
-
-/// FFI wrapper for [`PageQueues::move_to_anonymous`].
-///
-/// # Safety
-///
-/// `page` must be a valid pointer meeting the preconditions of [`PageQueues::move_to_anonymous`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_move_to_anonymous(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-    skip_reclaim: bool,
-) {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
-    // SAFETY: Caller upholds `move_to_anonymous` preconditions.
-    unsafe { queues.move_to_anonymous(page_ptr, skip_reclaim) };
-}
-
-/// FFI wrapper for [`PageQueues::move_to_reclaim`].
-///
-/// # Safety
-///
-/// `page` must be a valid pointer meeting the preconditions of [`PageQueues::move_to_reclaim`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_move_to_reclaim(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-) {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
-    // SAFETY: Caller upholds `move_to_reclaim` preconditions.
-    unsafe { queues.move_to_reclaim(page_ptr) };
-}
-
 /// FFI wrapper for [`PageQueues::move_to_reclaim_dont_need`].
 ///
 /// # Safety
@@ -3532,57 +3300,6 @@ pub unsafe extern "C" fn rust_page_queues_move_to_reclaim_dont_need(
     let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
     // SAFETY: Caller upholds `move_to_reclaim_dont_need` preconditions.
     unsafe { queues.move_to_reclaim_dont_need(page_ptr) };
-}
-
-/// FFI wrapper for [`PageQueues::move_to_pager_backed_dirty`].
-///
-/// # Safety
-///
-/// `page` must be a valid pointer meeting the preconditions of
-/// [`PageQueues::move_to_pager_backed_dirty`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_move_to_pager_backed_dirty(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-) {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
-    // SAFETY: Caller upholds `move_to_pager_backed_dirty` preconditions.
-    unsafe { queues.move_to_pager_backed_dirty(page_ptr) };
-}
-
-/// FFI wrapper for [`PageQueues::move_to_high_priority`].
-///
-/// # Safety
-///
-/// `page` must be a valid pointer meeting the preconditions of
-/// [`PageQueues::move_to_high_priority`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_move_to_high_priority(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-) {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
-    // SAFETY: Caller upholds `move_to_high_priority` preconditions.
-    unsafe { queues.move_to_high_priority(page_ptr) };
-}
-
-/// FFI wrapper for [`PageQueues::move_anonymous_to_anonymous_zero_fork`].
-///
-/// # Safety
-///
-/// `page` must be a valid pointer meeting the preconditions of
-/// [`PageQueues::move_anonymous_to_anonymous_zero_fork`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_move_anonymous_to_anonymous_zero_fork(
-    queues: &PageQueues,
-    page: *mut vm_page_t,
-) {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page) };
-    // SAFETY: Caller upholds `move_anonymous_to_anonymous_zero_fork` preconditions.
-    unsafe { queues.move_anonymous_to_anonymous_zero_fork(page_ptr) };
 }
 
 /// FFI wrapper for [`PageQueues::compress_failed`].
@@ -3611,7 +3328,7 @@ pub unsafe extern "C" fn rust_page_queues_compress_failed(
 pub unsafe extern "C" fn rust_page_queues_change_object_offset_array(
     queues: &PageQueues,
     pages: *mut *mut vm_page_t,
-    cow: *mut bindings::VmCowPages,
+    cow: *const VmCowPages,
     offsets: *const u64,
     count: usize,
 ) {
@@ -3620,7 +3337,6 @@ pub unsafe extern "C" fn rust_page_queues_change_object_offset_array(
     // guarantees `cow`, `pages`, and `offsets` are valid non-null pointers upholding
     // `change_object_offset_array` preconditions.
     unsafe {
-        let cow = cow as *const VmCowPages;
         debug_assert!(slice_from_raw_parts_or_empty(pages, count).iter().all(|x| !x.is_null()));
         let pages_slice = slice_from_raw_parts_or_empty(pages as *const VmPagePtr, count);
         let offsets_slice = slice_from_raw_parts_or_empty(offsets, count);
@@ -3681,48 +3397,6 @@ pub unsafe extern "C" fn rust_page_queues_mark_accessed(queues: &PageQueues, pag
     unsafe { queues.mark_accessed(page_ptr) };
 }
 
-/// FFI wrapper for [`PageQueues::rotate_reclaim_queues`].
-///
-/// # Safety
-///
-/// The caller must ensure `queues` is a valid shared reference to an initialized `PageQueues` for
-/// the duration of this call, and that neither `queues.lock` nor `queues.list_lock` is held by the
-/// current thread.
-// SAFETY: Symbol name is prefixed and unique across the kernel link unit.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_rotate_reclaim_queues(queues: &PageQueues) {
-    queues.rotate_reclaim_queues();
-}
-
-/// FFI wrapper for [`PageQueues::queue_counts`].
-///
-/// # Safety
-///
-/// `out_counts` must point to a valid writable `Counts`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_queue_counts(
-    queues: &PageQueues,
-    out_counts: *mut c_void,
-) {
-    let counts = queues.queue_counts();
-    // SAFETY: Caller guarantees `out_counts` points to a valid `Counts`.
-    unsafe {
-        *(out_counts as *mut Counts) = counts;
-    }
-}
-
-/// FFI wrapper for [`PageQueues::reclaim_is_only_pager_backed`].
-///
-/// # Safety
-///
-/// `queues` must be a valid reference to an initialized `PageQueues`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_reclaim_is_only_pager_backed(
-    queues: &PageQueues,
-) -> bool {
-    queues.reclaim_is_only_pager_backed()
-}
-
 /// FFI wrapper for [`PageQueues::is_page_reclaimable`].
 ///
 /// # Safety
@@ -3735,49 +3409,6 @@ pub unsafe extern "C" fn rust_page_queues_is_page_reclaimable(page: *const vm_pa
     let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
     // SAFETY: Caller upholds `is_page_reclaimable` preconditions.
     unsafe { PageQueues::is_page_reclaimable(page_ptr) }
-}
-
-/// FFI wrapper for [`PageQueues::debug_page_is_reclaim`].
-///
-/// # Safety
-///
-/// `page` must be a valid `vm_page_t` pointer, and `out_queue` (if non-null) must be a valid
-/// writable `usize` pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_debug_page_is_reclaim(
-    queues: &PageQueues,
-    page: *const vm_page_t,
-    out_queue: *mut usize,
-) -> bool {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
-    // SAFETY: Caller upholds `debug_page_is_reclaim` preconditions.
-    let q_opt = unsafe { queues.debug_page_is_reclaim(page_ptr) };
-    if let Some(q) = q_opt {
-        if !out_queue.is_null() {
-            // SAFETY: Caller guarantees `out_queue` is valid when non-null.
-            unsafe { *out_queue = q };
-        }
-        true
-    } else {
-        false
-    }
-}
-
-/// FFI wrapper for [`PageQueues::debug_page_is_reclaim_isolate`].
-///
-/// # Safety
-///
-/// `page` must be a valid `vm_page_t` pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_debug_page_is_reclaim_isolate(
-    queues: &PageQueues,
-    page: *const vm_page_t,
-) -> bool {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
-    // SAFETY: Caller upholds `debug_page_is_reclaim_isolate` preconditions.
-    unsafe { queues.debug_page_is_reclaim_isolate(page_ptr) }
 }
 
 /// FFI wrapper for [`PageQueues::debug_page_is_pager_backed_dirty`].
@@ -3794,70 +3425,6 @@ pub unsafe extern "C" fn rust_page_queues_debug_page_is_pager_backed_dirty(
     let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
     // SAFETY: Caller upholds `debug_page_is_pager_backed_dirty` preconditions.
     unsafe { queues.debug_page_is_pager_backed_dirty(page_ptr) }
-}
-
-/// FFI wrapper for [`PageQueues::debug_page_is_anonymous`].
-///
-/// # Safety
-///
-/// `page` must be a valid `vm_page_t` pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_debug_page_is_anonymous(
-    queues: &PageQueues,
-    page: *const vm_page_t,
-) -> bool {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
-    // SAFETY: Caller upholds `debug_page_is_anonymous` preconditions.
-    unsafe { queues.debug_page_is_anonymous(page_ptr) }
-}
-
-/// FFI wrapper for [`PageQueues::debug_page_is_any_anonymous`].
-///
-/// # Safety
-///
-/// `page` must be a valid `vm_page_t` pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_debug_page_is_any_anonymous(
-    queues: &PageQueues,
-    page: *const vm_page_t,
-) -> bool {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
-    // SAFETY: Caller upholds `debug_page_is_any_anonymous` preconditions.
-    unsafe { queues.debug_page_is_any_anonymous(page_ptr) }
-}
-
-/// FFI wrapper for [`PageQueues::debug_page_is_wired`].
-///
-/// # Safety
-///
-/// `page` must be a valid `vm_page_t` pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_debug_page_is_wired(
-    queues: &PageQueues,
-    page: *const vm_page_t,
-) -> bool {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
-    // SAFETY: Caller upholds `debug_page_is_wired` preconditions.
-    unsafe { queues.debug_page_is_wired(page_ptr) }
-}
-
-/// FFI wrapper for [`PageQueues::debug_page_is_high_priority`].
-///
-/// # Safety
-///
-/// `page` must be a valid `vm_page_t` pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_page_queues_debug_page_is_high_priority(
-    queues: &PageQueues,
-    page: *const vm_page_t,
-) -> bool {
-    // SAFETY: Caller guarantees `page` is a valid `vm_page_t` pointer.
-    let page_ptr = unsafe { VmPagePtr::from_ffi_unchecked(page.cast_mut()) };
-    // SAFETY: Caller upholds `debug_page_is_high_priority` preconditions.
-    unsafe { queues.debug_page_is_high_priority(page_ptr) }
 }
 
 // ------------------------------------------------------------------------------------------------

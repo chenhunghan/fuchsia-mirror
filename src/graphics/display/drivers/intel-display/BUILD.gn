@@ -117,6 +117,7 @@ source_set("common_srcs") {
     "//sdk/lib/driver/incoming/cpp",
     "//sdk/lib/driver/logging/cpp",
     "//sdk/lib/driver/mmio/cpp",
+    "//sdk/lib/driver/pci/cpp",
     "//sdk/lib/driver/runtime:driver_runtime_cpp",
     "//sdk/lib/zbi-format",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
@@ -124,7 +125,6 @@ source_set("common_srcs") {
     "//src/devices/bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cpp",
     "//src/devices/lib/driver:driver_runtime",
     "//src/devices/pci/lib/cpp:headers",
-    "//src/devices/pci/lib/device-protocol-pci",
     "//src/devices/pci/lib/pci",
     "//src/graphics/display/lib/api-protocols/cpp",
     "//src/graphics/display/lib/api-types/cpp",
@@ -152,7 +152,6 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("intel-display") {
   component_name = "intel-display"
   deps = [ ":driver" ]
-  info = "meta/intel-display-info.json"
   dml_label = ":intel-display-dml"
 }
 

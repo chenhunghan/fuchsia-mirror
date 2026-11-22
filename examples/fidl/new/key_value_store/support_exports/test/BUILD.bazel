@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["meta/runner.cml"],
+    visibility = ["//examples/fidl/new/key_value_store/support_exports:__subpackages__"],
+)
+
+rustc_test(
+    name = "runner_bin",
+    srcs = ["src/main.rs"],
+    crate_root = "src/main.rs",
+    edition = "2024",
+    tags = ["manual"],
+    visibility = [
+        "//examples/fidl/new/key_value_store/support_exports/cpp_natural:__pkg__",
+        "//examples/fidl/new/key_value_store/support_exports/cpp_wire:__pkg__",
+        "//examples/fidl/new/key_value_store/support_exports/rust:__pkg__",
+        "//examples/fidl/new/key_value_store/support_exports/rust_next:__pkg__",
+    ],
+    deps = [
+        "//examples/fidl/new/key_value_store/support_exports/fidl:examples.keyvaluestore.supportexports_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//tools/fidl/example-tester:example_tester",
+    ],
+)

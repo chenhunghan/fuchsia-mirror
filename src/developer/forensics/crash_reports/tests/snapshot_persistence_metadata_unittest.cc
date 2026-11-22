@@ -65,7 +65,7 @@ TEST_F(SnapshotPersistenceMetadataTest, SnapshotDirectory) {
 }
 
 TEST_F(SnapshotPersistenceMetadataTest, RecreateFromFilesystem_FailsInitially) {
-  testing::ScopedMemFsManager scoped_mem_fs;
+  ScopedMemFsManager scoped_mem_fs;
   SnapshotPersistenceMetadata metadata("/cache/delayed/path", StorageSize::Megabytes(1));
   ASSERT_FALSE(metadata.IsDirectoryUsable());
 

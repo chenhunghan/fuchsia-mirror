@@ -4,8 +4,8 @@
 
 #include "src/graphics/drivers/msd-arm-mali/src/performance_counters.h"
 
-#include <lib/magma/platform/platform_barriers.h>
 #include <lib/magma/platform/platform_logger.h>
+#include <lib/memory_barriers/memory_barriers.h>
 
 #include "src/graphics/drivers/msd-arm-mali/src/registers.h"
 
@@ -89,7 +89,7 @@ bool PerformanceCounters::Enable() {
   }
   // Ensure the cache flush or any previous read completes before signaling the hardware to
   // write into the buffer.
-  magma::barriers::Barrier();
+  DataSynchronizationBarrier();
 
   auto base = registers::PerformanceCounterBase::Get().FromValue(kPerfBufferStartOffset);
   base.WriteTo(owner_->register_io());

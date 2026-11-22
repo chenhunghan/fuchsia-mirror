@@ -303,10 +303,8 @@ bool AccumulateMaxPaddingBytesFromHeightLowerBound(
   }
   auto& block_aligned_format = block_aligned_format_result.value();
 
-  auto image_bytes_non_block_aligned =
-      CheckedNumeric<uint64_t>(ImageFormatImageSize(non_block_aligned_format));
-  auto image_bytes_block_aligned =
-      CheckedNumeric<uint64_t>(ImageFormatImageSize(block_aligned_format));
+  const auto image_bytes_non_block_aligned = ImageFormatImageSizeChecked(non_block_aligned_format);
+  const auto image_bytes_block_aligned = ImageFormatImageSizeChecked(block_aligned_format);
   if (!image_bytes_non_block_aligned.IsValid()) {
     complain(FROM_HERE, Warn, "!image_bytes_non_block_aligned.IsValid()");
     return false;

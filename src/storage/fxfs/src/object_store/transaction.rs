@@ -920,6 +920,79 @@ impl MetadataReservation<'_> {
     }
 }
 
+/// A transaction that has been committed via [`Transaction::commit`].
+///
+/// While held (e.g. `let committed = txn.commit().await?;`), this keeps the following resources
+/// until it is dropped or continued via [`Self::continue_transaction`]:
+/// - the transaction locks, still in the write-locked state, so readers are blocked;
+/// - the in-flight transaction slot;
+/// - the remaining metadata reservation.
+///
+/// The common case, `txn.commit().await?;`, drops `CommittedTransaction` immediately.  Avoid
+/// holding a bound `CommittedTransaction` across an `.await` unnecessarily.
+///
+/// If dropped without calling [`Self::continue_transaction`], the locks, limiter slot, and
+/// reservation are released and any registered `on_abort` callbacks are discarded without running.
+///
+/// Calling [`Self::continue_transaction`] downgrades the write locks back to transaction locks,
+/// moves any registered `on_abort` callbacks onto the new [`Transaction`], and tops up its metadata
+/// reservation so another batch of mutations can be added and committed under the same locks.
+pub struct CommittedTransaction<'a> {
+    transaction: Transaction<'a>,
+    offset: u64,
+    on_abort: Option<Box<dyn FnOnce() + Send + Sync + 'a>>,
+}
+
+impl std::fmt::Debug for CommittedTransaction<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommittedTransaction")
+            .field("transaction", &self.transaction)
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+impl<'a> CommittedTransaction<'a> {
+    /// Returns the journal offset at which this transaction was committed.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Registers a cleanup callback to be invoked if a subsequent [`Transaction`] created via
+    /// [`Self::continue_transaction`] is dropped before its final commit.
+    ///
+    /// Multiple callbacks may be registered across a transaction chain; they run in LIFO
+    /// (newest-first) order.
+    pub fn on_abort(&mut self, f: impl FnOnce() + Send + Sync + 'a) {
+        self.on_abort = Some(match self.on_abort.take() {
+            None => Box::new(f),
+            Some(prev) => Box::new(move || {
+                f();
+                prev();
+            }),
+        });
+    }
+
+    /// Downgrades write locks to transaction locks, transfers any registered `on_abort` callbacks
+    /// to the new [`Transaction`], and acquires a fresh metadata reservation to continue mutating
+    /// under the same locks.
+    ///
+    /// If acquiring the metadata reservation fails (for example with `FxfsError::NoSpace`) or is
+    /// cancelled while waiting for journal space, the [`Transaction`] is dropped, releasing the
+    /// locks and invoking any registered `on_abort` callbacks.
+    pub async fn continue_transaction(mut self) -> Result<Transaction<'a>, Error> {
+        assert!(self.transaction.mutations.is_empty());
+        assert!(self.transaction.new_objects.is_empty());
+        assert!(self.transaction.checksums.is_empty());
+        self.transaction.includes_write = false;
+        self.transaction.committed = false;
+        self.transaction.on_abort = self.on_abort.take();
+        self.transaction.sink.downgrade_locks(&self.transaction.txn_locks);
+        self.transaction.add_transaction_reservation().await?;
+        Ok(self.transaction)
+    }
+}
+
 /// A transaction groups mutation records to be committed as a group.
 pub struct Transaction<'a> {
     sink: Arc<dyn TransactionSink>,
@@ -949,6 +1022,14 @@ pub struct Transaction<'a> {
     /// If set, indicates that this transaction is nested within `parent_transaction` and shares
     /// its in-flight transaction slot.
     pub(crate) parent_transaction: Option<&'a Transaction<'a>>,
+
+    /// Optional cleanup callback invoked if this transaction (created via
+    /// [`CommittedTransaction::continue_transaction`]) is dropped before committing.
+    on_abort: Option<Box<dyn FnOnce() + Send + Sync + 'a>>,
+
+    /// Set once the transaction has reached the commit point in the sink so that dropping the
+    /// future during a subsequent post-commit `.await` (e.g. test hooks) does not run `on_abort`.
+    committed: bool,
 }
 
 impl<'a> Transaction<'a> {
@@ -998,6 +1079,8 @@ impl<'a> Transaction<'a> {
             includes_write: false,
             skip_journal_checks: options.skip_journal_checks,
             parent_transaction: options.parent_transaction,
+            on_abort: None,
+            committed: false,
         };
         transaction.add_transaction_reservation().await?;
 
@@ -1369,15 +1452,51 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// Commits a transaction.  If successful, returns the journal offset of the transaction.
-    pub async fn commit(mut self) -> Result<u64, Error> {
-        debug!(txn:? = &self; "Commit");
-        let sink = self.sink.clone();
-        sink.commit(&mut self).await
+    /// Updates the value of an existing object mutation within the transaction in place while
+    /// preserving its operation and associated object. Returns `true` if a matching mutation was
+    /// found and updated.
+    pub fn update_object_mutation_value(
+        &mut self,
+        store_object_id: u64,
+        key: ObjectKey,
+        f: impl FnOnce(&mut ObjectValue),
+    ) -> bool {
+        let probe = TxnMutation {
+            object_id: store_object_id,
+            mutation: Mutation::insert_object(key, ObjectValue::None),
+            associated_object: AssocObj::None,
+        };
+        let Some(mut txn_mutation) = self.mutations.take(&probe) else {
+            return false;
+        };
+        if let Mutation::ObjectStore(mutation) = &mut txn_mutation.mutation {
+            f(&mut mutation.item.value);
+        }
+        self.mutations.insert(txn_mutation);
+        true
     }
 
-    /// Commits and then runs the callback whilst locks are held.  The callback accepts a single
-    /// parameter which is the journal offset of the transaction.
+    /// Marks this transaction as having reached the commit point so `Drop` will not invoke
+    /// `on_abort` if the commit future is cancelled before returning.
+    pub(crate) fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+
+    /// Commits a transaction.  Returns a [`CommittedTransaction`] that holds the transaction's
+    /// locks until dropped, or that can be used to start a chained transaction under the same
+    /// locks via [`CommittedTransaction::continue_transaction`].
+    pub async fn commit(mut self) -> Result<CommittedTransaction<'a>, Error> {
+        debug!(txn:? = &self; "Commit");
+        let sink = self.sink.clone();
+        let offset = sink.commit(&mut self).await?;
+        let on_abort = self.on_abort.take();
+        Ok(CommittedTransaction { transaction: self, offset, on_abort })
+    }
+
+    /// Commits and then runs the callback synchronously whilst both the transaction locks and the
+    /// journal writer lock (`FxFilesystem::commit_mutex`) are held (and before any post-commit
+    /// hooks run).  The callback accepts a single parameter which is the journal offset of the
+    /// transaction.
     pub async fn commit_with_callback<R: Send>(
         mut self,
         f: impl FnOnce(u64) -> R + Send,
@@ -1392,49 +1511,9 @@ impl<'a> Transaction<'a> {
             }),
         )
         .await?;
+        // Prevent `Transaction::drop` from running `on_abort` when `self` is dropped below.
+        self.on_abort = None;
         Ok(res.expect("callback should have been called"))
-    }
-
-    /// Commits the current batch of mutations in the transaction, runs `f` synchronously once the
-    /// batch is committed while write locks are still held, and prepares `self` to be used again
-    /// with write locks downgraded to transaction locks and a fresh metadata reservation.
-    ///
-    /// # Partial-commit and drop-safety caveats
-    ///
-    /// `commit_and_continue` is split into three phases:
-    /// 1. **Pre-commit (async, fallible)**: upgrades transaction locks, waits for journal space,
-    ///    and acquires the journal commit mutex. If an error or task cancellation (future drop)
-    ///    occurs here, the current batch of mutations is **not** committed and `f` is **not**
-    ///    called.
-    /// 2. **Commit point (synchronous, infallible)**: applies the mutations to in-memory state and
-    ///    buffers them in the journal, then immediately invokes `f()` with no intervening `.await`
-    ///    points while write locks are still held.
-    /// 3. **Post-commit (async, fallible)**: downgrades write locks to transaction locks and
-    ///    acquires a new metadata reservation for the next batch. **If an error (e.g.,
-    ///    `FxfsError::NoSpace`) or task cancellation occurs during this phase, the batch committed
-    ///    in phase 2 remains committed and `f` has already run.**
-    ///
-    /// Because of this, callers must uphold two invariants:
-    /// - **Intermediate on-disk consistency**: Every batch committed via `commit_and_continue` must
-    ///   leave on-disk state valid on its own (or protected by a graveyard entry included in that
-    ///   batch so orphaned state is cleaned up on remount or by a background reaper).
-    /// - **Synchronizing cleanup guards and state via `f`**: Any caller-side state transition or
-    ///   cleanup guard (such as arming a `scopeguard` to queue a graveyard tombstone or trim) that
-    ///   must take effect if and only if the batch commits **must** be performed inside `f` by
-    ///   mutating state in the caller's frame (or in `AssociatedObject::will_apply_mutation`).
-    ///   Arming a cleanup guard *before* `commit_and_continue` will fire spuriously if phase 1
-    ///   fails or is cancelled; arming it *after* `commit_and_continue(...).await` returns will
-    ///   miss failures or cancellation in phase 3 after the batch has already committed.
-    pub async fn commit_and_continue(&mut self, f: impl FnOnce() + Send) -> Result<(), Error> {
-        debug!(txn:? = self; "Commit");
-        let sink = self.sink.clone();
-        sink.commit_with_callback(self, Box::new(|_| f())).await?;
-        assert!(self.mutations.is_empty());
-        assert!(self.new_objects.is_empty());
-        assert!(self.checksums.is_empty());
-        self.includes_write = false;
-        sink.downgrade_locks(&self.txn_locks);
-        self.add_transaction_reservation().await
     }
 
     /// Prepares to commit by upgrading transaction locks to write locks and waiting for active
@@ -1454,6 +1533,11 @@ impl Drop for Transaction<'_> {
             sink.transaction_limiter().sub();
         }
         sink.drop_transaction(self);
+        if !self.committed {
+            if let Some(on_abort) = self.on_abort.take() {
+                on_abort();
+            }
+        }
     }
 }
 
@@ -1503,10 +1587,11 @@ impl<T> From<T> for BorrowedOrOwned<'_, T> {
 /// upgradeable read lock).  When first acquired, these block other writes (including other
 /// transaction locks) but do not block reads.  When it is time to commit a transaction, these locks
 /// are upgraded to full write locks (without ever dropping the lock) and then dropped after
-/// committing (unless commit_and_continue is used).  This way, reads are only blocked for the
-/// shortest possible time.  It follows that write locks should be used sparingly.  Locks are
-/// granted in order with one exception: when a lock is in the initial _transaction_ lock state
-/// (LockState::Locked), all read locks are allowed even if there are other tasks waiting for the
+/// committing (unless [`CommittedTransaction::continue_transaction`] is used).  This way, reads are
+/// only blocked for the shortest possible time.  It follows that write locks should be used
+/// sparingly.  Locks are granted in order with one exception: when a lock is in the initial
+/// _transaction_ lock state (LockState::Locked), all read locks are allowed even if there are other
+/// tasks waiting for the
 /// lock.  The reason for this is because we allow read locks to be taken by tasks that have taken a
 /// _transaction_ lock (i.e. recursion is allowed).  In other cases, such as when a writer is
 /// waiting and there are only readers, readers will queue up behind the writer.
@@ -2090,13 +2175,17 @@ impl<'a> From<&'a LockManager> for LockManagerRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AssocObj, AttributeId, LockKey, LockKeys, LockManager, LockState, Mutation,
-        ObjectMutationIterator, Options, ReservationOptions, Transaction,
-        TransactionConcurrencyLimiter, TransactionSink, TxnMutation,
+        AssocObj, AssociatedObject, AttributeId, LockKey, LockKeys, LockManager, LockState,
+        Mutation, ObjectItem, ObjectManager, ObjectMutationIterator, ObjectStoreMutation, Options,
+        ReservationOptions, Transaction, TransactionConcurrencyLimiter, TransactionSink,
+        TxnMutation,
     };
     use crate::filesystem::FxFilesystem;
     use crate::object_store::allocator::{Reservation, ReservationOwner};
-    use crate::object_store::{BytesAndNodes, ObjectKey, ObjectValue};
+    use crate::object_store::volume::root_volume;
+    use crate::object_store::{
+        AttributeKey, BytesAndNodes, NewChildStoreOptions, ObjectKey, ObjectValue,
+    };
     use anyhow::Error;
     use async_trait::async_trait;
     use fuchsia_async as fasync;
@@ -2796,7 +2885,7 @@ mod tests {
         use storage_device::DeviceHolder;
         use storage_device::fake_device::FakeDevice;
 
-        let reclaim_size = 65536;
+        let reclaim_size = 32768;
         let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
         let (mut hooks, fs_hooks) = Hooks::new();
         let fs = FxFilesystemBuilder::new()
@@ -2815,8 +2904,11 @@ mod tests {
         fs.journal().force_compact().await.expect("force_compact failed");
         fs.journal().pause_compactions().await;
 
+        let waited_for_journal_space = Arc::new(AtomicBool::new(false));
+        let waited_clone = waited_for_journal_space.clone();
         let journal_clone = fs.journal().clone();
         hooks.set_waiting_for_journal_space(move || {
+            waited_clone.store(true, Ordering::SeqCst);
             journal_clone.resume_compactions();
         });
 
@@ -2832,9 +2924,9 @@ mod tests {
             .await
             .expect("new_transaction failed");
 
-        // Repeatedly write mutations and call commit_and_continue so the journal must extend past
-        // its reserved space unless commit_and_continue checks for journal space and waits for
-        // compaction.
+        // Repeatedly write mutations and continue into a new transaction so the journal must
+        // extend past its reserved space unless `continue_transaction` checks for journal space
+        // and waits for compaction.
         for _ in 0..64 {
             for i in 0..16 {
                 transaction.add(
@@ -2845,9 +2937,16 @@ mod tests {
                     ),
                 );
             }
-            transaction.commit_and_continue(|| {}).await.expect("commit_and_continue failed");
+            transaction = transaction
+                .commit()
+                .await
+                .expect("commit failed")
+                .continue_transaction()
+                .await
+                .expect("continue_transaction failed");
         }
         transaction.commit().await.expect("commit failed");
+        assert!(waited_for_journal_space.load(Ordering::SeqCst));
 
         fs.close().await.expect("close failed");
     }
@@ -2887,7 +2986,13 @@ mod tests {
         assert!(transaction.includes_write());
         assert!(!transaction.checksums().is_empty());
 
-        transaction.commit_and_continue(|| {}).await.expect("commit_and_continue failed");
+        transaction = transaction
+            .commit()
+            .await
+            .expect("commit failed")
+            .continue_transaction()
+            .await
+            .expect("continue_transaction failed");
 
         assert!(!transaction.includes_write());
         assert!(transaction.checksums().is_empty());
@@ -2996,8 +3101,7 @@ mod tests {
                 .new_transaction(lock_keys![LOCK_KEY_1], Options::default())
                 .await
                 .unwrap();
-            let offset = txn.commit().await.expect("commit should succeed");
-            assert_eq!(offset, 1);
+            assert_eq!(txn.commit().await.expect("commit should succeed").offset(), 1);
             assert_eq!(sink.commits.load(Ordering::Relaxed), 1);
             assert_eq!(sink.drops.load(Ordering::Relaxed), 1);
         }
@@ -3022,28 +3126,84 @@ mod tests {
             assert_eq!(sink.drops.load(Ordering::Relaxed), 2);
         }
 
-        // 3. Test commit_and_continue across multiple iterations
+        // 3. Test CommittedTransaction with chained on_abort callbacks across multiple iterations,
+        //    then abort (callbacks run newest-first).
         {
+            let order = Arc::new(fuchsia_sync::Mutex::new(Vec::new()));
             let mut txn = sink
                 .clone()
                 .new_transaction(lock_keys![LOCK_KEY_1], Options::default())
                 .await
                 .unwrap();
             for i in 0..100 {
-                let mut callback_called = false;
-                txn.commit_and_continue(|| callback_called = true)
+                let mut committed = txn.commit().await.expect("commit should succeed");
+                if i == 0 || i == 1 {
+                    let order_clone = order.clone();
+                    committed.on_abort(move || {
+                        order_clone.lock().push(i);
+                    });
+                }
+                txn = committed
+                    .continue_transaction()
                     .await
-                    .expect("commit_and_continue should succeed");
-                assert!(callback_called);
+                    .expect("continue_transaction should succeed");
+                assert!(order.lock().is_empty());
                 assert_eq!(sink.commits.load(Ordering::Relaxed), 3 + i);
-                assert_eq!(sink.callbacks.load(Ordering::Relaxed), 2 + i);
+                assert_eq!(sink.callbacks.load(Ordering::Relaxed), 1);
                 assert_eq!(sink.downgrades.load(Ordering::Relaxed), 1 + i);
             }
             std::mem::drop(txn);
+            assert_eq!(*order.lock(), vec![1, 0]);
             assert_eq!(sink.drops.load(Ordering::Relaxed), 3);
         }
 
-        // 4. Test drop without commit
+        // 4. Test CommittedTransaction with on_abort followed by final commit (no abort)
+        {
+            let aborted = Arc::new(AtomicBool::new(false));
+            let txn = sink
+                .clone()
+                .new_transaction(lock_keys![LOCK_KEY_1], Options::default())
+                .await
+                .unwrap();
+            let mut committed = txn.commit().await.expect("commit should succeed");
+            let aborted_clone = aborted.clone();
+            committed.on_abort(move || {
+                aborted_clone.store(true, Ordering::Relaxed);
+            });
+            let txn = committed
+                .continue_transaction()
+                .await
+                .expect("continue_transaction should succeed");
+            txn.commit().await.expect("final commit should succeed");
+            assert!(!aborted.load(Ordering::Relaxed));
+            assert_eq!(sink.drops.load(Ordering::Relaxed), 4);
+        }
+
+        // 5. Test CommittedTransaction with on_abort followed by commit_with_callback (no abort)
+        {
+            let aborted = Arc::new(AtomicBool::new(false));
+            let txn = sink
+                .clone()
+                .new_transaction(lock_keys![LOCK_KEY_1], Options::default())
+                .await
+                .unwrap();
+            let mut committed = txn.commit().await.expect("commit should succeed");
+            let aborted_clone = aborted.clone();
+            committed.on_abort(move || {
+                aborted_clone.store(true, Ordering::Relaxed);
+            });
+            let txn = committed
+                .continue_transaction()
+                .await
+                .expect("continue_transaction should succeed");
+            txn.commit_with_callback(|_| ())
+                .await
+                .expect("final commit_with_callback should succeed");
+            assert!(!aborted.load(Ordering::Relaxed));
+            assert_eq!(sink.drops.load(Ordering::Relaxed), 5);
+        }
+
+        // 6. Test drop without commit
         {
             let txn = sink
                 .clone()
@@ -3051,19 +3211,128 @@ mod tests {
                 .await
                 .unwrap();
             std::mem::drop(txn);
-            assert_eq!(sink.drops.load(Ordering::Relaxed), 4);
+            assert_eq!(sink.drops.load(Ordering::Relaxed), 6);
         }
 
-        // 5. Test failure mode
+        // 7. Test failure mode on standalone commit and on final commit of a chained transaction
         {
+            let aborted = Arc::new(AtomicBool::new(false));
+            let txn = sink
+                .clone()
+                .new_transaction(lock_keys![LOCK_KEY_1], Options::default())
+                .await
+                .unwrap();
+            let mut committed = txn.commit().await.expect("commit should succeed");
+            let aborted_clone = aborted.clone();
+            committed.on_abort(move || {
+                aborted_clone.store(true, Ordering::Relaxed);
+            });
+            let txn = committed
+                .continue_transaction()
+                .await
+                .expect("continue_transaction should succeed");
+
             sink.should_fail.store(true, Ordering::Relaxed);
+            assert!(txn.commit().await.is_err());
+            assert!(aborted.load(Ordering::Relaxed));
+            assert_eq!(sink.drops.load(Ordering::Relaxed), 7);
+
             let txn = sink
                 .clone()
                 .new_transaction(lock_keys![LOCK_KEY_1], Options::default())
                 .await
                 .unwrap();
             assert!(txn.commit().await.is_err());
-            assert_eq!(sink.drops.load(Ordering::Relaxed), 5);
+            assert_eq!(sink.drops.load(Ordering::Relaxed), 8);
         }
+    }
+
+    #[fuchsia::test]
+    async fn test_update_object_mutation_value_preserves_assoc_obj() {
+        struct Recorder {
+            called: AtomicBool,
+            saw_cleared_flag: AtomicBool,
+        }
+
+        impl AssociatedObject for Recorder {
+            fn will_apply_mutation(
+                &self,
+                mutation: &Mutation,
+                _object_id: u64,
+                _manager: &ObjectManager,
+            ) {
+                self.called.store(true, Ordering::Relaxed);
+                if let Mutation::ObjectStore(ObjectStoreMutation {
+                    item:
+                        ObjectItem {
+                            value:
+                                ObjectValue::Attribute { size: 4096, has_overwrite_extents: false },
+                            ..
+                        },
+                    ..
+                }) = mutation
+                {
+                    self.saw_cleared_flag.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let device = DeviceHolder::new(FakeDevice::new(8192, 4096));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let root_volume = root_volume(fs.clone()).await.expect("root_volume failed");
+        let store = root_volume
+            .new_volume("test", NewChildStoreOptions::default())
+            .await
+            .expect("new_volume failed");
+
+        let attr_key = ObjectKey::attribute(1000, AttributeId::DATA, AttributeKey::Attribute);
+        let recorder =
+            Recorder { called: AtomicBool::new(false), saw_cleared_flag: AtomicBool::new(false) };
+
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object_attribute(
+                    store.store_object_id(),
+                    1000,
+                    AttributeId::DATA
+                )],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        assert!(!transaction.update_object_mutation_value(
+            store.store_object_id(),
+            attr_key.clone(),
+            |_| panic!("should not be called when mutation is absent"),
+        ));
+
+        transaction.add_with_object(
+            store.store_object_id(),
+            Mutation::replace_or_insert_object(
+                attr_key.clone(),
+                ObjectValue::attribute(4096, true),
+            ),
+            AssocObj::Borrowed(&recorder),
+        );
+
+        assert!(transaction.update_object_mutation_value(
+            store.store_object_id(),
+            attr_key.clone(),
+            |value| {
+                if let ObjectValue::Attribute { has_overwrite_extents, .. } = value {
+                    *has_overwrite_extents = false;
+                }
+            },
+        ));
+
+        transaction.commit().await.expect("commit failed");
+
+        assert!(recorder.called.load(Ordering::Relaxed));
+        assert!(recorder.saw_cleared_flag.load(Ordering::Relaxed));
+        let item = store.tree().find(&attr_key).await.expect("find failed").expect("missing attr");
+        assert_eq!(item.value, ObjectValue::attribute(4096, false));
+
+        fs.close().await.expect("close failed");
     }
 }

@@ -5,7 +5,7 @@
 use crate::error::RoutingError;
 use async_trait::async_trait;
 use capability_source::CapabilitySource;
-use fidl_fuchsia_component_runtime::RouteRequest;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
 use futures::StreamExt;
 use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;

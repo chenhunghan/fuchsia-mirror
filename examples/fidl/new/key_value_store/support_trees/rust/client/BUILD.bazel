@@ -26,9 +26,6 @@ fuchsia_structured_config_rust_lib(
     cm_label = ":manifest",
 )
 
-# GN puts the binary in a per-target directory so the `client_bin` outputs
-# of the sibling key_value_store examples don't collide.
-# @bazel2gn:raw_attribute:output_dir = target_out_dir + "/rust"
 rustc_binary(
     name = "bin",
     srcs = ["src/main.rs"],

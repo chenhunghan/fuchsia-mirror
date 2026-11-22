@@ -10,6 +10,7 @@ from datetime import timedelta
 from typing import Any
 from unittest.mock import call, mock_open, patch
 
+import yaml
 from mobly_driver.driver import common, infra
 
 _HONEYDEW_CONFIG: dict[str, Any] = {
@@ -101,6 +102,139 @@ class InfraMoblyDriverTest(unittest.TestCase):
         mock_read_yaml.assert_not_called()
         mock_read_json.assert_called_once_with("tb/json/path")
         self.assertEqual(ret, "yaml_str")
+
+    @patch.dict(os.environ, {"DMC_PATH": "/path/to/dmc"}, clear=True)
+    @patch("mobly_driver.driver.common.read_json_from_file")
+    def test_generate_test_config_populates_dmc_auxiliary_devices(
+        self,
+        mock_read_json: Any,
+    ) -> None:
+        """Verifies DMC auxiliary_devices are populated when DMC_PATH is set."""
+        mock_read_json.return_value = [
+            {"type": "FuchsiaDevice", "nodename": "dut-1"},
+            {"type": "FuchsiaDevice", "nodename": "dut-2"},
+            {
+                "type": "AccessPoint",
+                "nodename": "ap-1",
+                "ip": "192.168.42.11",
+                "ssh_key": "/path/to/key",
+            },
+            {
+                "type": "AccessPoint",
+                "ip": "192.168.42.12",
+                "ssh_key": "/path/to/key",
+            },
+            {
+                "type": "AccessPoint",
+                "model": "OpenWrtOne",
+                "nodename": "openwrt-ap-1",
+                "ip": "192.168.42.13",
+                "ssh_key": "/path/to/key",
+            },
+        ]
+        honeydew_config = {
+            "transports": _HONEYDEW_CONFIG["transports"],
+            "auxiliary_devices": {
+                "custom_aux": {
+                    "hardware": {"foo": "bar"},
+                    "implementation": {"module": "m", "class": "C"},
+                },
+            },
+        }
+        driver = infra.InfraDriver(
+            tb_json_path="tb/json/path",
+            honeydew_config=honeydew_config,
+            output_path="/tmp/out",
+        )
+        yaml_str = driver.generate_test_config()
+        self.assertNotIn("&id", yaml_str)
+
+        parsed = yaml.safe_load(yaml_str)
+        controllers = parsed["TestBeds"][0]["Controllers"]
+
+        expected_dmc_power_switch_impl = {
+            "module": (
+                "honeydew.auxiliary_devices.power_switch.power_switch_using_dmc"
+            ),
+            "class": "PowerSwitchUsingDmc",
+        }
+        expected_dmc_usb_hub_impl = {
+            "module": (
+                "honeydew.auxiliary_devices.usb_power_hub."
+                "usb_power_hub_using_dmc"
+            ),
+            "class": "UsbPowerHubUsingDmc",
+        }
+
+        fuchsia_devices = controllers["FuchsiaDevice"]
+        self.assertEqual(len(fuchsia_devices), 2)
+        for idx, expected_name in enumerate(["dut-1", "dut-2"]):
+            aux = fuchsia_devices[idx]["honeydew_config"]["auxiliary_devices"]
+            self.assertEqual(
+                aux["power_switch"],
+                {
+                    "hardware": {"device_name": expected_name},
+                    "implementation": expected_dmc_power_switch_impl,
+                },
+            )
+            self.assertEqual(
+                aux["usb_power_hub"],
+                {
+                    "hardware": {"device_name": expected_name},
+                    "implementation": expected_dmc_usb_hub_impl,
+                },
+            )
+            self.assertEqual(
+                aux["custom_aux"],
+                {
+                    "hardware": {"foo": "bar"},
+                    "implementation": {"module": "m", "class": "C"},
+                },
+            )
+
+        access_points = controllers["AccessPoint"]
+        self.assertEqual(len(access_points), 2)
+        self.assertEqual(
+            access_points[0]["auxiliary_devices"],
+            {
+                "power_switch": {
+                    "hardware": {"device_name": "ap-1"},
+                    "implementation": expected_dmc_power_switch_impl,
+                },
+            },
+        )
+        self.assertNotIn("auxiliary_devices", access_points[1])
+        self.assertNotIn("auxiliary_devices", controllers["OpenWrtAP"][0])
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch("mobly_driver.driver.common.read_json_from_file")
+    def test_generate_test_config_without_dmc_path_omits_dmc_auxiliary_devices(
+        self,
+        mock_read_json: Any,
+    ) -> None:
+        """Verifies DMC auxiliary_devices are not added when DMC_PATH is unset."""
+        mock_read_json.return_value = [
+            {"type": "FuchsiaDevice", "nodename": "dut-1"},
+            {
+                "type": "AccessPoint",
+                "nodename": "ap-1",
+                "ip": "192.168.42.11",
+                "ssh_key": "/path/to/key",
+            },
+        ]
+        driver = infra.InfraDriver(
+            tb_json_path="tb/json/path",
+            honeydew_config=_HONEYDEW_CONFIG,
+            output_path="/tmp/out",
+        )
+        parsed = yaml.safe_load(driver.generate_test_config())
+        controllers = parsed["TestBeds"][0]["Controllers"]
+
+        self.assertNotIn(
+            "auxiliary_devices",
+            controllers["FuchsiaDevice"][0]["honeydew_config"],
+        )
+        self.assertNotIn("auxiliary_devices", controllers["AccessPoint"][0])
 
     @patch(
         "mobly_driver.driver.common.read_json_from_file",

@@ -4,6 +4,8 @@
 
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
+import("//build/rust/rustc_library.gni")
 
 group("tests") {
   testonly = true
@@ -16,7 +18,6 @@ group("tests") {
 }
 
 rustc_library("inspect_validator") {
-  testonly = true
   edition = "2024"
   with_unit_tests = true
 
@@ -70,12 +71,16 @@ fuchsia_unittest_package("inspect_validator_unittest") {
 }
 
 # The program that actually executes the validator tests.
-rustc_test("validator_bin") {
+# Uses `rustc_binary` with `--test` rather than `rustc_test` so the `validator`
+# package can be non-testonly when cached in product bundles, while still
+# serving `fuchsia.test.Suite` via `rust_test_runner`.
+rustc_binary("validator_bin") {
   name = "validator"
   edition = "2024"
   source_root = "src/main.rs"
 
   sources = [ "src/main.rs" ]
+  rustflags = [ "--test" ]
 
   deps = [
     ":inspect_validator",
@@ -94,25 +99,22 @@ fuchsia_test_component("inspect_validator_test_executor") {
 
 # Pre-compiled manifest for #validator_component
 fuchsia_component_manifest("validator_component_manifest") {
-  testonly = true
   component_name = "validator"
   manifest = "meta/validator.cml"
 }
 
 # Component containing the test cases.
-fuchsia_test_component("validator_component") {
+fuchsia_component("validator_component") {
   cm_label = ":validator_component_manifest"
   deps = [ ":validator_bin" ]
 }
 
 fuchsia_package("validator") {
-  testonly = true
   package_name = "inspect_validator"
   deps = [ ":validator_component" ]
 }
 
 export_fuchsia_package_to_bazel("validator.bazel_input") {
-  testonly = true
   package = ":validator"
 }
 

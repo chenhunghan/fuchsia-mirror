@@ -15,9 +15,10 @@
 
 #include <ktl/byte.h>
 #include <ktl/span.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
-#include <phys/zbitl-allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
+#include <phys/allocation/zbitl.h>
+#include <phys/memory/init.h>
 
 #include "test-main.h"
 

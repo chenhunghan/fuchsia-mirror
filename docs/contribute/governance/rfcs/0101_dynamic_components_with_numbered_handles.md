@@ -33,7 +33,7 @@ Instead, it interacts with the user via the provided sockets.
 
 ## Design
 
-### Background
+### Background {:#background}
 
 There are two dimensions of lifecycle transitions in the component framework.
 The first has to do with existence (`Created` and `Destroyed`). The second
@@ -166,7 +166,7 @@ alternatives listed below:
     persistent storage is also wiped out. Thus components that use persistent
     storage are not a good candidate for this feature.
 
-### Routing numbered handles as capabilities
+### Routing numbered handles as capabilities {:#routing-numbered-handles-as-capabilities}
 
 Routing numbered handles could be done explicitly by the component framework.
 
@@ -242,7 +242,7 @@ This solution is a larger commitment and more complex than the proposed design.
 That said, the proposed design does not prevent or conflict with explicit
 routing of numbered handles in the future.
 
-### StartChild
+### StartChild {:#startchild}
 
 This alternative proposes adding the numbered handles as an argument to the
 `StartChild` call on `Realm`. This is similar to the proposed design but has the
@@ -274,7 +274,7 @@ protocol StarterWithArgs {
 };
 ```
 
-This proposal is very similar to [StartChild](#StartChild). A protocol exposed
+This proposal is very similar to [StartChild](#startchild). A protocol exposed
 in this fashion has the benefit of being easier to audit and allowlist, but also
 introduces a race between calling `Start` and binding to any other capability
 exposed by the component. In addition, the ordering concerns are worsened by the

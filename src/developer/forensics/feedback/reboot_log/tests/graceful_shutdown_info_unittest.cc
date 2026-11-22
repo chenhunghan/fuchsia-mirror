@@ -4,6 +4,8 @@
 
 #include "src/developer/forensics/feedback/reboot_log/graceful_shutdown_info.h"
 
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+
 #include <format>
 #include <vector>
 
@@ -20,19 +22,27 @@ namespace forensics {
 namespace feedback {
 namespace {
 
-using ::fuchsia::hardware::power::statecontrol::ShutdownAction;
-using ::fuchsia::hardware::power::statecontrol::ShutdownOptions;
+using ::fuchsia_hardware_power_statecontrol::ShutdownAction;
+using ::fuchsia_hardware_power_statecontrol::ShutdownOptions;
+using ::testing::ElementsAre;
+using ::testing::ElementsAreArray;
 
 constexpr char kFilename[] = "graceful_shutdown_info.json";
+constexpr zx::duration kDefaultUptime = zx::msec(65487494);
+constexpr zx::duration kDefaultRuntime = zx::msec(64208920);
 
-std::string BuildJsonWithEmptyReasons(const std::string_view action) {
+std::string BuildJsonWithEmptyReasons(const std::string_view action,
+                                      const zx::duration uptime = kDefaultUptime,
+                                      const zx::duration runtime = kDefaultRuntime) {
   // Use {{ and }} to escape the curly braces for std::format.
   return std::format(
       R"({{
     "action": "{}",
-    "reasons": []
+    "reasons": [],
+    "uptime_ms": {},
+    "runtime_ms": {}
 }})",
-      action);
+      action, uptime.to_msecs(), runtime.to_msecs());
 }
 
 TEST(GracefulShutdownInfoTest, VerifyLegacyContentConversion) {
@@ -116,8 +126,10 @@ TEST(GracefulShutdownInfoTest, VerifyContentConversion) {
   };
 
   for (const GracefulShutdownReason reason : reasons) {
-    EXPECT_THAT(FromJson(ToJson(GracefulShutdownAction::kReboot, {reason})).reasons,
-                testing::ElementsAre(reason));
+    EXPECT_THAT(
+        FromJson(ToJson(GracefulShutdownAction::kReboot, {reason}, kDefaultUptime, kDefaultRuntime))
+            .reasons,
+        ElementsAre(reason));
   }
 }
 
@@ -149,8 +161,10 @@ TEST(GracefulShutdownInfoTest, VerifyContentConversionWithMultipleReasons) {
   };
 
   // Verify all reasons at once.
-  EXPECT_THAT(FromJson(ToJson(GracefulShutdownAction::kReboot, reasons)).reasons,
-              testing::ElementsAreArray(reasons));
+  EXPECT_THAT(
+      FromJson(ToJson(GracefulShutdownAction::kReboot, reasons, kDefaultUptime, kDefaultRuntime))
+          .reasons,
+      ElementsAreArray(reasons));
 }
 
 struct ReadActionTestParam {
@@ -203,7 +217,138 @@ TEST_P(ReadActionTest, FromJson) {
 TEST(GracefulShutdownInfoTest, VerifyContentConversionWithNoReasons) {
   // ToJson() & FromJson() for shutdown reasons from
   // |power::statecontrol::ShutdownReason| should be reversible when there are no reasons.
-  EXPECT_TRUE(FromJson(ToJson(GracefulShutdownAction::kReboot, {})).reasons.empty());
+  EXPECT_TRUE(FromJson(ToJson(GracefulShutdownAction::kReboot, /*reasons=*/{}, kDefaultUptime,
+                              kDefaultRuntime))
+                  .reasons.empty());
+}
+
+TEST(GracefulShutdownInfoTest, VerifyTimeConversion) {
+  const GracefulShutdownInfo info =
+      FromJson(ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kUserRequest},
+                      kDefaultUptime, kDefaultRuntime));
+  EXPECT_EQ(info.uptime, kDefaultUptime);
+  EXPECT_EQ(info.runtime, kDefaultRuntime);
+}
+
+struct MissingOrOutOfRangeTimeTestParam {
+  std::string test_name;
+  std::string json;
+  std::optional<zx::duration> expected_uptime;
+  std::optional<zx::duration> expected_runtime;
+};
+
+class MissingOrOutOfRangeTimeTest
+    : public UnitTestFixture,
+      public ::testing::WithParamInterface<MissingOrOutOfRangeTimeTestParam> {};
+
+INSTANTIATE_TEST_SUITE_P(
+    WithVariousTimes, MissingOrOutOfRangeTimeTest,
+    ::testing::ValuesIn(std::vector<MissingOrOutOfRangeTimeTestParam>({
+        {
+            .test_name = "MissingBothTimes",
+            .json = R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ] })",
+            .expected_uptime = std::nullopt,
+            .expected_runtime = std::nullopt,
+        },
+        {
+            .test_name = "MissingRuntime",
+            .json = R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "uptime_ms": 1234 })",
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = std::nullopt,
+        },
+        {
+            .test_name = "MissingUptime",
+            .json = R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "runtime_ms": 1098 })",
+            .expected_uptime = std::nullopt,
+            .expected_runtime = zx::msec(1098),
+        },
+        {
+            .test_name = "ZeroTimes",
+            .json =
+                R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "uptime_ms": 0, "runtime_ms": 0 })",
+            .expected_uptime = zx::msec(0),
+            .expected_runtime = zx::msec(0),
+        },
+        {
+            .test_name = "NegativeUptime",
+            .json =
+                R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "uptime_ms": -1, "runtime_ms": 1098 })",
+            .expected_uptime = std::nullopt,
+            .expected_runtime = zx::msec(1098),
+        },
+        {
+            .test_name = "NegativeRuntime",
+            .json =
+                R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "uptime_ms": 1234, "runtime_ms": -1 })",
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = std::nullopt,
+        },
+        {
+            .test_name = "UptimeExceedsInt64Max",
+            .json =
+                R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "uptime_ms": 9223372036854775808, "runtime_ms": 1098 })",
+            .expected_uptime = std::nullopt,
+            .expected_runtime = zx::msec(1098),
+        },
+        {
+            .test_name = "RuntimeExceedsInt64Max",
+            .json =
+                R"({ "action": "REBOOT", "reasons": [ "SYSTEM UPDATE" ], "uptime_ms": 1234, "runtime_ms": 9223372036854775808 })",
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = std::nullopt,
+        },
+    })),
+    [](const ::testing::TestParamInfo<MissingOrOutOfRangeTimeTestParam>& info) {
+      return info.param.test_name;
+    });
+
+TEST_P(MissingOrOutOfRangeTimeTest, ParsesRemainingFields) {
+  const MissingOrOutOfRangeTimeTestParam& param = GetParam();
+  EXPECT_EQ(FromJson(param.json), (GracefulShutdownInfo{
+                                      .action = GracefulShutdownAction::kReboot,
+                                      .reasons = {GracefulShutdownReason::kSystemUpdate},
+                                      .uptime = param.expected_uptime,
+                                      .runtime = param.expected_runtime,
+                                  }));
+}
+
+struct InvalidTimeSchemaTestParam {
+  std::string test_name;
+  std::string json;
+};
+
+class InvalidTimeSchemaTest : public UnitTestFixture,
+                              public ::testing::WithParamInterface<InvalidTimeSchemaTestParam> {};
+
+INSTANTIATE_TEST_SUITE_P(WithInvalidTimeTypes, InvalidTimeSchemaTest,
+                         ::testing::ValuesIn(std::vector<InvalidTimeSchemaTestParam>({
+                             {
+                                 .test_name = "UptimeIsString",
+                                 .json = R"({ "reasons": [], "uptime_ms": "1234" })",
+                             },
+                             {
+                                 .test_name = "RuntimeIsString",
+                                 .json = R"({ "reasons": [], "runtime_ms": "1098" })",
+                             },
+                             {
+                                 .test_name = "UptimeIsFloat",
+                                 .json = R"({ "reasons": [], "uptime_ms": 12.34 })",
+                             },
+                             {
+                                 .test_name = "RuntimeIsArray",
+                                 .json = R"({ "reasons": [], "runtime_ms": [] })",
+                             },
+                         })),
+                         [](const ::testing::TestParamInfo<InvalidTimeSchemaTestParam>& info) {
+                           return info.param.test_name;
+                         });
+
+TEST_P(InvalidTimeSchemaTest, ReturnsNotParseable) {
+  const InvalidTimeSchemaTestParam& param = GetParam();
+  EXPECT_EQ(FromJson(param.json), (GracefulShutdownInfo{
+                                      .action = GracefulShutdownAction::kNotParseable,
+                                      .reasons = {GracefulShutdownReason::kNotParseable},
+                                  }));
 }
 
 TEST(GracefulShutdownInfoTest, MissingActionImpliesReboot) {
@@ -252,22 +397,22 @@ INSTANTIATE_TEST_SUITE_P(WithVariousShutdownActions, ToGracefulShutdownActionTes
                          ::testing::ValuesIn(std::vector<ToGracefulShutdownActionTestParam>({
                              {
                                  "Poweroff",
-                                 ShutdownAction::POWEROFF,
+                                 ShutdownAction::kPoweroff,
                                  GracefulShutdownAction::kPoweroff,
                              },
                              {
                                  "Reboot",
-                                 ShutdownAction::REBOOT,
+                                 ShutdownAction::kReboot,
                                  GracefulShutdownAction::kReboot,
                              },
                              {
                                  "RebootToRecovery",
-                                 ShutdownAction::REBOOT_TO_RECOVERY,
+                                 ShutdownAction::kRebootToRecovery,
                                  GracefulShutdownAction::kRebootToRecovery,
                              },
                              {
                                  "RebootToBootloader",
-                                 ShutdownAction::REBOOT_TO_BOOTLOADER,
+                                 ShutdownAction::kRebootToBootloader,
                                  GracefulShutdownAction::kRebootToBootloader,
                              },
                              {
@@ -284,7 +429,7 @@ TEST_P(ToGracefulShutdownActionTest, ToGracefulShutdownAction) {
   const ToGracefulShutdownActionTestParam& param = GetParam();
 
   ShutdownOptions options;
-  options.set_action(param.input_shutdown_action);
+  options.action(param.input_shutdown_action);
   EXPECT_EQ(ToGracefulShutdownAction(options), param.output_reason);
 }
 
@@ -302,16 +447,20 @@ class WriteGracefulShutdownInfoTest : public UnitTestFixture {
  protected:
   std::string Path() { return files::JoinPath(tmp_dir_.path(), kFilename); }
 
-  static std::string BuildJson(const std::string_view action, const std::string& reason) {
+  static std::string BuildJson(const std::string_view action, const std::string& reason,
+                               const zx::duration uptime = kDefaultUptime,
+                               const zx::duration runtime = kDefaultRuntime) {
     // Use {{ and }} to escape the curly braces for std::format.
     return std::format(
         R"({{
     "action": "{}",
     "reasons": [
         "{}"
-    ]
+    ],
+    "uptime_ms": {},
+    "runtime_ms": {}
 }})",
-        action, reason);
+        action, reason, uptime.to_msecs(), runtime.to_msecs());
   }
 
  private:
@@ -441,7 +590,8 @@ INSTANTIATE_TEST_SUITE_P(WithVariousShutdownReasons, WriteGracefulShutdownReason
 TEST_P(WriteGracefulShutdownReasonsTest, WritesReasons) {
   const ReasonTestParam& param = GetParam();
 
-  WriteGracefulShutdownInfo(GracefulShutdownAction::kReboot, {param.input_shutdown_reason}, Path());
+  WriteGracefulShutdownInfo(GracefulShutdownAction::kReboot, {param.input_shutdown_reason},
+                            kDefaultUptime, kDefaultRuntime, Path());
 
   std::string contents;
   ASSERT_TRUE(files::ReadFileToString(Path(), &contents));
@@ -494,7 +644,8 @@ INSTANTIATE_TEST_SUITE_P(WithVariousShutdownActions, WriteGracefulShutdownAction
 TEST_P(WriteGracefulShutdownActionTest, WritesAction) {
   const ActionTestParam& param = GetParam();
 
-  WriteGracefulShutdownInfo(param.input_shutdown_action, /*reasons=*/{}, Path());
+  WriteGracefulShutdownInfo(param.input_shutdown_action, /*reasons=*/{}, kDefaultUptime,
+                            kDefaultRuntime, Path());
 
   std::string contents;
   ASSERT_TRUE(files::ReadFileToString(Path(), &contents));

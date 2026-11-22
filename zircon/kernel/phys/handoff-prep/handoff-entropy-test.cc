@@ -13,7 +13,7 @@
 #include <ktl/array.h>
 #include <ktl/span.h>
 #include <ktl/utility.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/symbolize.h>
 
 #include "../test/phys-unittest.h"
 #include "../test/test-main.h"

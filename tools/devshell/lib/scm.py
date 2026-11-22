@@ -137,12 +137,17 @@ def get_repo_groups(
     fuchsia_dir: pathlib.Path,
     cwd: pathlib.Path,
     explicit_files: Collection[str] | None = None,
+    *,
+    all_repos: bool = False,
 ) -> Sequence[RepoGroup]:
-    """Discovers active repositories and partitions explicit files if provided.
+    """Discovers target repositories and partitions explicit files if provided.
 
-    - In default (--git) or --all mode (when explicit_files is None):
-      returns RepoGroups for all active repositories with empty `files=()`.
-      SHAC handles all git diffing and file discovery internally.
+    - When explicit_files is None and all_repos is False: returns a single
+      RepoGroup for the repository enclosing `cwd` with empty `files=()`.
+    - When explicit_files is None and all_repos is True: returns RepoGroups
+      for all active repositories (plus the repository enclosing `cwd`) with
+      empty `files=()`. SHAC handles all git diffing and file discovery
+      internally.
     - In --files / --target mode (when explicit_files is not None): resolves
       each file's enclosing repository and populates RepoGroup.files with
       relative path strings for `shac -C <repo_root>`. If explicit_files is
@@ -150,9 +155,15 @@ def get_repo_groups(
 
     Args:
         fuchsia_dir: Absolute path to the Fuchsia checkout root.
-        cwd: Current working directory for resolving relative paths.
+        cwd: Current working directory for resolving relative paths and the
+            default target repository.
         explicit_files: Optional collection of user-specified file paths. If
-            None, returns all active repositories for whole-repo checks.
+            None, targets the repository enclosing `cwd` (or all active
+            repositories when `all_repos` is True).
+        all_repos: If True and `explicit_files` is None, returns all active
+            repositories in the checkout instead of only the repository
+            enclosing `cwd`. Ignored when `explicit_files` is given, because
+            each file already selects its own repository.
 
     Returns:
         A deterministically sorted sequence of RepoGroups (root repo first,
@@ -175,10 +186,13 @@ def get_repo_groups(
         return (rootness_subkey, group.repo_root)
 
     if explicit_files is None:
-        repos = {
-            *_find_active_repositories(fuchsia_dir),
-            _get_repo_root_for_path(cwd),
-        }
+        if all_repos:
+            repos = {
+                *_find_active_repositories(fuchsia_dir),
+                _get_repo_root_for_path(cwd),
+            }
+        else:
+            repos = {_get_repo_root_for_path(cwd)}
         return tuple(
             sorted(
                 (

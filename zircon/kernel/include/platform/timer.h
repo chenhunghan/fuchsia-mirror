@@ -9,16 +9,15 @@
 #define ZIRCON_KERNEL_INCLUDE_PLATFORM_TIMER_H_
 
 #include <assert.h>
-#include <lib/arch/ticks.h>
+#include <debug.h>
+#include <stdio.h>
 #include <zircon/compiler.h>
 #include <zircon/time.h>
 #include <zircon/types.h>
 
 #include <fbl/enum_bits.h>
-#include <kernel/ffi.h>
 #include <ktl/atomic.h>
 #include <ktl/optional.h>
-#include <ktl/type_traits.h>
 
 namespace internal {
 
@@ -98,50 +97,6 @@ inline zx_ticks_t timer_get_boot_ticks_offset() {
   return internal::boot_ticks_offset.load(ktl::memory_order_relaxed);
 }
 
-// API to set/clear a hardware timer that is responsible for calling timer_tick() when it fires.
-zx_status_t platform_set_oneshot_timer(zx_ticks_t deadline);
-void platform_stop_timer();
-
-// Shutdown the calling CPU's platform timer.
-//
-// Should be called after |platform_stop_timer|, but before taking the CPU offline.
-//
-// TODO(maniscalco): Provide a "resume" function so we can suspend/resume.
-void platform_shutdown_timer();
-
-// Suspend the platform timer for the calling CPU.
-//
-// It is an error to call this function with interrupts enabled.
-zx_status_t platform_suspend_timer_curr_cpu();
-
-// Resume the platform timer for the calling CPU.
-//
-// It is an error to call this function with interrupts enabled.
-zx_status_t platform_resume_timer_curr_cpu();
-
-// C linkage so that Rust timer interrupt handlers can call it directly.
-extern "C" void timer_tick();
-
-// A bool indicating whether or not user mode has direct access to the registers
-// which allow directly observing the tick counter or not.
-bool platform_usermode_can_access_tick_registers();
-
-// Current monotonic time in nanoseconds.
-zx_instant_mono_t current_mono_time();
-
-// Current boot time in nanoseconds.
-zx_instant_boot_t current_boot_time();
-
-// Monotonic and boot time representing the same instant in both timelines.
-struct InstantMonoAndBootTime {
-  zx_instant_mono_t mono_time;
-  zx_instant_boot_t boot_time;
-};
-
-// Current monotonic and boot time in nanoseconds, derived from a coherent
-// observation of the offsets and raw ticks.
-InstantMonoAndBootTime current_mono_and_boot_time();
-
 // Monotonic time and boot ticks representing same instant in both timelines.
 // This is primarily useful for lining up samples of monotonic time with
 // corresponding trace events, which use boot ticks, so that computed and
@@ -151,27 +106,40 @@ struct InstantMonoTimeAndBootTicks {
   zx_instant_boot_ticks_t boot_ticks;
 };
 
-// Current monotonic time in nanoseconds and boot ticks, derived from a coherent
-// observation of the offsets and raw ticks.
-InstantMonoTimeAndBootTicks current_mono_time_and_boot_ticks();
-
-// High-precision timer ticks per second.
-zx_ticks_t ticks_per_second();
-
 namespace affine {
 class Ratio;  // Fwd decl.
 }  // namespace affine
 
-// Setter/getter pair for the ratio which defines the relationship between the
-// system's tick counter, and the current_time/clock_monotonic clock.  This gets
-// set once by architecture specific platform code, after an appropriate ticks
-// source has been selected and characterized.
-void timer_set_ticks_to_time_ratio(const affine::Ratio& ticks_to_time);
-const affine::Ratio& timer_get_ticks_to_time_ratio();
+// TODO(https://fxbug.dev/540178114): Remove these FFI declarations and C++ wrappers once remaining
+// C++ callers are ported to Rust.
+extern "C" {
+zx_instant_mono_t rust_current_mono_time();
+zx_instant_boot_t rust_current_boot_time();
+InstantMonoTimeAndBootTicks rust_current_mono_time_and_boot_ticks();
+zx_ticks_t rust_ticks_per_second();
+const affine::Ratio* rust_timer_get_ticks_to_time_ratio();
+}  // extern "C"
 
-// Convert a sample taken early on to a proper zx_ticks_t, if possible.
-// This returns 0 if early samples are not convertible.
-zx_ticks_t platform_convert_early_ticks(arch::EarlyTicks sample);
+// Current monotonic time in nanoseconds.
+inline zx_instant_mono_t current_mono_time() { return rust_current_mono_time(); }
+
+// Current boot time in nanoseconds.
+inline zx_instant_boot_t current_boot_time() { return rust_current_boot_time(); }
+
+// Current monotonic time in nanoseconds and boot ticks, derived from a coherent
+// observation of the offsets and raw ticks.
+inline InstantMonoTimeAndBootTicks current_mono_time_and_boot_ticks() {
+  return rust_current_mono_time_and_boot_ticks();
+}
+
+// High-precision timer ticks per second.
+inline zx_ticks_t ticks_per_second() { return rust_ticks_per_second(); }
+
+// Getter for the ratio which defines the relationship between the system's
+// tick counter, and the current_time/clock_monotonic clock.
+inline const affine::Ratio& timer_get_ticks_to_time_ratio() {
+  return *rust_timer_get_ticks_to_time_ratio();
+}
 
 // A special version of `current_ticks` which is explicitly synchronized with
 // memory loads/stores in an architecture/timer specific way.  For example, when
@@ -229,8 +197,32 @@ FBL_ENABLE_ENUM_BITS(GetTicksSyncFlag)
 // monotonic ticks value provided by timer_current_mono_ticks. This ticks value is the raw counter
 // adjusted by a constant used to make the ticks timeline start ticking from 0 when the system
 // boots.
+extern "C" {
+
+zx_ticks_t rust_platform_current_raw_ticks_synchronized_0();
+zx_ticks_t rust_platform_current_raw_ticks_synchronized_3();
+zx_ticks_t rust_platform_current_raw_ticks_synchronized_5();
+zx_ticks_t rust_platform_current_raw_ticks_synchronized_10();
+
+}  // extern "C"
+
 template <GetTicksSyncFlag Flags>
-zx_ticks_t platform_current_raw_ticks_synchronized();
+inline zx_ticks_t platform_current_raw_ticks_synchronized() {
+  constexpr uint8_t kFlags = static_cast<uint8_t>(Flags);
+  if constexpr (kFlags == 0) {
+    return rust_platform_current_raw_ticks_synchronized_0();
+  } else if constexpr (kFlags == 3) {
+    return rust_platform_current_raw_ticks_synchronized_3();
+  } else if constexpr (kFlags == 5) {
+    return rust_platform_current_raw_ticks_synchronized_5();
+  } else if constexpr (kFlags == 10) {
+    return rust_platform_current_raw_ticks_synchronized_10();
+  } else {
+    static_assert(kFlags == 0 || kFlags == 3 || kFlags == 5 || kFlags == 10,
+                  "Unsupported GetTicksSyncFlag combination");
+  }
+}
+
 inline zx_ticks_t platform_current_raw_ticks() {
   return platform_current_raw_ticks_synchronized<GetTicksSyncFlag::kNone>();
 }
@@ -366,27 +358,17 @@ inline bool timer_is_monotonic_paused() {
 
 extern "C" {
 
-struct CppRatio {
-  uint32_t numerator;
-  uint32_t denominator;
-};
 zx_instant_mono_ticks_t cpp_timer_current_mono_ticks();
+zx_instant_mono_ticks_t cpp_timer_current_mono_ticks_synchronized_after_and_before_stores();
 zx_instant_boot_ticks_t cpp_timer_current_boot_ticks();
 zx_ticks_t cpp_timer_get_mono_ticks_offset();
 zx_ticks_t cpp_timer_get_boot_ticks_offset();
-zx_instant_mono_t cpp_current_mono_time();
-zx_instant_boot_t cpp_current_boot_time();
-zx_ticks_t cpp_ticks_per_second();
-CppRatio cpp_timer_get_ticks_to_time_ratio();
 CurrentTicksObservation cpp_timer_current_mono_and_boot_ticks();
-void cpp_timer_set_ticks_to_time_ratio(CppRatio ticks_to_time);
 void cpp_timer_set_initial_ticks(uint64_t ticks);
 // Returns false if the monotonic clock is paused. Otherwise, stores the result of
 // |timer_convert_mono_to_raw_ticks| in |out_raw_ticks| and returns true.
 bool cpp_timer_convert_mono_to_raw_ticks(zx_instant_mono_ticks_t mono_ticks,
                                          zx_ticks_t* out_raw_ticks);
-zx_status_t cpp_platform_set_oneshot_timer(zx_ticks_t deadline);
-void cpp_platform_stop_timer();
 void cpp_timer_pause_monotonic();
 void cpp_timer_unpause_monotonic();
 bool cpp_timer_is_monotonic_paused();

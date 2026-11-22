@@ -160,3 +160,30 @@ class TestFileTest(unittest.TestCase):
             self.assertTrue(entries[0].needs_package_server)
             self.assertFalse(entries[1].needs_package_server)
             self.assertIsNone(entries[2].needs_package_server)
+
+    def test_ignores_unknown_fields(self) -> None:
+        """Ensure unknown properties in tests.json are ignored when parsing."""
+        contents = [
+            {
+                "test": {
+                    "name": "fuchsia-pkg://fuchsia.com/pkg#meta/test.cm",
+                    "label": "//src:pkg",
+                    "os": "linux",
+                    "package_url": "fuchsia-pkg://fuchsia.com/pkg#meta/test.cm",
+                    "path": "pkg_test_test.sh",
+                    "unknown_extra_field": "pkg_test_test.sh",
+                },
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "tests.json")
+            with open(path, "w") as f:
+                json.dump(contents, f)
+
+            entries = TestEntry.from_file(path)
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(
+                entries[0].test.package_url,
+                "fuchsia-pkg://fuchsia.com/pkg#meta/test.cm",
+            )
+            self.assertEqual(entries[0].test.path, "pkg_test_test.sh")

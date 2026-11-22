@@ -73,11 +73,6 @@ constexpr zxio_object_type_t ProtocolToObjectType(std::string_view protocol) {
   if (protocol == kProtocolName<fuchsia_hardware_pty::Device>) {
     return ZXIO_OBJECT_TYPE_TTY;
   }
-  static_assert(kProtocolName<fuchsia_posix_socket::DatagramSocket> ==
-                "fuchsia.posix.socket.DatagramSocket");
-  if (protocol == kProtocolName<fuchsia_posix_socket::DatagramSocket>) {
-    return ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET;
-  }
   static_assert(kProtocolName<fuchsia_posix_socket::StreamSocket> ==
                 "fuchsia.posix.socket.StreamSocket");
   if (protocol == kProtocolName<fuchsia_posix_socket::StreamSocket>) {
@@ -162,33 +157,6 @@ zx_status_t zxio_create_with_info(zx_handle_t raw_handle, const zx_info_handle_b
           return zxio_pty_init(
               storage, response.has_event() ? std::move(response.event()) : zx::eventpair{},
               fidl::ClientEnd<fuchsia_hardware_pty::Device>(queryable.TakeChannel()));
-        }
-        case ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET: {
-          const fidl::UnownedClientEnd<fuchsia_posix_socket::DatagramSocket> socket(
-              queryable.borrow().channel());
-          fidl::WireResult result = fidl::WireCall(socket)->Describe();
-          if (!result.ok()) {
-            return result.status();
-          }
-          fidl::WireResponse response = result.value();
-          if (!(response.has_socket() && response.has_tx_meta_buf_size() &&
-                response.has_rx_meta_buf_size() &&
-                response.has_metadata_encoding_protocol_version())) {
-            return ZX_ERR_INVALID_ARGS;
-          }
-          zx_info_socket_t info;
-          if (const zx_status_t status =
-                  response.socket().get_info(ZX_INFO_SOCKET, &info, sizeof(info), nullptr, nullptr);
-              status != ZX_OK) {
-            return status;
-          }
-          const zxio_datagram_prelude_size_t prelude_size{
-              .tx = response.tx_meta_buf_size(),
-              .rx = response.rx_meta_buf_size(),
-          };
-          return zxio_datagram_socket_init(
-              storage, std::move(response.socket()), info, prelude_size,
-              fidl::ClientEnd<fuchsia_posix_socket::DatagramSocket>(queryable.TakeChannel()));
         }
         case ZXIO_OBJECT_TYPE_STREAM_SOCKET: {
           const fidl::UnownedClientEnd<fuchsia_posix_socket::StreamSocket> socket(
@@ -445,19 +413,6 @@ zx_status_t zxio_create_with_type(zxio_storage_t* storage, zxio_object_type_t ty
       return zxio_synchronous_datagram_socket_init(
           storage, std::move(event),
           fidl::ClientEnd<fuchsia_posix_socket::SynchronousDatagramSocket>(std::move(client)));
-    }
-    case ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET: {
-      zx::socket socket(va_arg(args, zx_handle_t));
-      zx_info_socket_t* info = va_arg(args, zx_info_socket_t*);
-      zxio_datagram_prelude_size_t* prelude_size = va_arg(args, zxio_datagram_prelude_size_t*);
-      zx::channel client(va_arg(args, zx_handle_t));
-      if (storage == nullptr || !socket.is_valid() || info == nullptr || prelude_size == nullptr ||
-          !client.is_valid()) {
-        return ZX_ERR_INVALID_ARGS;
-      }
-      return zxio_datagram_socket_init(
-          storage, std::move(socket), *info, *prelude_size,
-          fidl::ClientEnd<fuchsia_posix_socket::DatagramSocket>(std::move(client)));
     }
     case ZXIO_OBJECT_TYPE_DIR: {
       zx::channel control(va_arg(args, zx_handle_t));

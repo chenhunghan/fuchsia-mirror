@@ -23,10 +23,11 @@ impl DefineSubsystemConfiguration<ExampleConfig> for ExampleSubsystemConfig {
         if example_config.include_example_aib {
             builder.platform_bundle("example_assembly_bundle")?;
 
-            // Set structured config for a component in the example AIB
-            let mut component_config = builder.package("for-test").component("meta/bar.cm")?;
-            component_config.field("asserted_by_scrutiny_test", "check this string!")?;
-            component_config.field("mutable_by_parent_config", "don't check this string!")?;
+            // Set structured config capability for a component in the example AIB
+            builder.set_config_capability(
+                "fuchsia.example.AssertedByScrutinyTest",
+                Config::new(ConfigValueType::String { max_size: 30 }, "check this string!".into()),
+            )?;
         }
 
         Ok(())

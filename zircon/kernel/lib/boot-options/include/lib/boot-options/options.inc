@@ -181,6 +181,85 @@ See also [lockup detector](/zircon/kernel/lib/lockup_detector/README.md).
 When 0, heartbeat detection is disabled.
 )""")
 
+DEFINE_OPTION("kernel.lockup-detector.fair-starvation-threshold-ms", uint64_t,
+              lockup_detector_fair_starvation_threshold_ms, {0}, R"""(
+When a CPU has run only deadline threads for longer than this threshold while
+fair threads were queued on it, the lockup detector reports a fair starvation
+episode: it names the deadline thread that ran for more than half of the
+episode, if there is one, and prints the running thread and the queued fair
+threads with their ids and affinity masks.  This identifies a deadline thread
+that keeps a CPU to itself, for example by polling in a loop for something only
+a fair thread on that CPU can provide, and deadline load that exceeds what the
+CPU can currently supply, in which case no one thread is named.
+
+The scheduler tracks the starvation precisely, but the report is made from the
+CPU's heartbeat: fair threads are starved for the threshold rounded up to the
+next heartbeat, which is up to kernel.lockup-detector.heartbeat-period-ms more
+than the threshold.  A threshold shorter than the heartbeat period is raised to
+it, with a warning at boot.  An episode that continues is reported again every
+10 thresholds.
+
+See also `kernel.lockup-detector.fair-starvation-exception`,
+`kernel.lockup-detector.fair-starvation-relief-ms` and
+[lockup detector](/zircon/kernel/lib/lockup_detector/README.md).
+
+When 0, fair starvation detection is disabled.
+
+When kernel.lockup-detector.heartbeat-period-ms is 0, fair starvation detection
+is disabled.
+)""")
+
+DEFINE_OPTION("kernel.lockup-detector.fair-starvation-exception", bool,
+              lockup_detector_fair_starvation_exception, {false}, R"""(
+When enabled, a fair starvation report (see
+`kernel.lockup-detector.fair-starvation-threshold-ms`) also raises a policy
+exception on the deadline thread that the report names, if it is a user thread
+and is the thread running when the report is made, so that the system's
+exception handling records where the thread was executing.  A report that names
+no thread raises no exception.  crashsvc prints the thread and resumes it.  If
+nothing handles the exception, the thread's process is terminated.
+)""")
+
+DEFINE_OPTION("kernel.lockup-detector.fair-starvation-relief-ms", uint64_t,
+              lockup_detector_fair_starvation_relief_ms, {0}, R"""(
+After a fair starvation report (see
+`kernel.lockup-detector.fair-starvation-threshold-ms`), the reporting CPU
+guarantees fair threads a share of its time for this long (see
+`kernel.lockup-detector.fair-starvation-relief-percent`), ahead of deadline
+threads.  Deadline threads on that CPU can miss deadlines during this time.
+Nothing is reported during this time.  When the time is up, the guarantee ends
+and detection starts over.
+
+Relief only ever follows a report: fair threads are not protected before the
+threshold is reached, so that the starvation remains visible.
+
+When 0, starvation is reported but not relieved.
+)""")
+
+DEFINE_OPTION("kernel.lockup-detector.fair-starvation-relief-percent", uint32_t,
+              lockup_detector_fair_starvation_relief_percent, {5}, R"""(
+The share of a CPU's time that fair threads are guaranteed during fair
+starvation relief (see `kernel.lockup-detector.fair-starvation-relief-ms`),
+measured over windows of
+`kernel.lockup-detector.fair-starvation-relief-window-ms`.  Values are clamped
+to the range 1 to 50.
+)""")
+
+DEFINE_OPTION("kernel.lockup-detector.fair-starvation-relief-window-ms", uint64_t,
+              lockup_detector_fair_starvation_relief_window_ms, {20}, R"""(
+The window over which fair threads get their share during fair starvation
+relief (see `kernel.lockup-detector.fair-starvation-relief-percent`).  In each
+window fair threads run ahead of deadline threads until they have had their
+share, so deadline threads on that CPU can be delayed by the share of one
+window at a time: 1 ms with the defaults.  The delay can be up to twice that
+across a window boundary, when fair threads take their share at the end of one
+window and at the start of the next.  A running deadline thread is preempted at
+the end of each window, so that fair threads get their share however long
+deadline threads run.  A shorter window spreads the same share into shorter
+delays, at the cost of more context switches.  Values are clamped to the range
+1 to 1000.
+)""")
+
 DEFINE_OPTION("kernel.lockup-detector.heartbeat-age-threshold-ms", uint64_t,
               lockup_detector_heartbeat_age_threshold_ms, {3000}, R"""(
 The maximum age of a secondary CPU's last heartbeat before it is considered to
@@ -340,6 +419,27 @@ DEFINE_OPTION("kernel.oom.trigger-on-alloc-failure", bool, oom_trigger_on_alloc_
               R"""(
 This option controls whether potentially user-visible PMM allocation failures due to running out of
 memory trigger an OOM response.
+)""")
+
+DEFINE_OPTION("kernel.persistent-dlog.target-size", uint32_t, persistent_dlog_target_size, {0},
+              R"""(
+Sets the target size in bytes for the persistent debuglog in persistent RAM
+(passed to the kernel as `ZBI_TYPE_NVRAM` by the bootloader or boot shim). The
+persistent debuglog preserves recent kernel logs across warm resets and reports
+them in the next boot's crashlog.
+
+When set to 0, the kernel uses its compile-time target size (usually 0, which
+disables the persistent debuglog). Otherwise, the kernel rounds the value down
+to the persistent RAM allocation granularity and caps it at half of the space
+remaining after the minimum crashlog allocation. Persistent tracing and the
+crashlog share the rest.
+
+If the persistent debuglog is larger than the kernel's static recovery buffer,
+the kernel waits until heap initialization to recover the previous log (up to
+the maximum single kernel heap allocation size, slightly under 1 MiB), replay
+earlier kernel debuglog entries, and start recording new entries.
+
+This option currently takes effect only on the generic ARM platform.
 )""")
 
 DEFINE_OPTION("kernel.phys.verbose", bool, phys_verbose, {true}, R"""(
@@ -968,8 +1068,9 @@ of deadline threads, when selecting a CPU for a waking or migrating thread. A
 fair thread whose estimated demand cannot be supplied by a candidate CPU at its
 maximum processing rate is placed elsewhere when a feasible candidate exists.
 
-When disabled, only constant bandwidth demand and the weights of the fair
-threads already runnable on each candidate are considered.
+When disabled, only constant bandwidth demand is considered and fair placement
+falls back to `kernel.scheduler.fair-placement-affinity` (`idle` by default),
+which prefers an idle CPU over a busy CPU in the thread's last cluster.
 
 TODO(https://fxbug.dev/448195120): Enable by default once synchronous
 hand-offs and producer/consumer pairs on homogeneous cores keep their
@@ -1045,7 +1146,7 @@ baked.
 )""")
 
 DEFINE_OPTION("kernel.scheduler.fair-placement-affinity", FairPlacementAffinity,
-              scheduler_fair_placement_affinity, {FairPlacementAffinity::kHeadroom}, R"""(
+              scheduler_fair_placement_affinity, {FairPlacementAffinity::kIdle}, R"""(
 When a fair thread wakes or migrates, candidate CPUs that can supply its
 estimated demand about equally well are ordered by a secondary policy. This
 option selects how the thread's last cluster (cache affinity) is weighed against
@@ -1056,17 +1157,34 @@ CPUs that are available right now:
    which keeps cache affinity but leaves a thread whose demand is not yet
    known waiting behind other work in a small cluster (measured as a ~20 ms
    cold-start regression on a heterogeneous device).
- * `idle`: prefer an idle CPU, then the last cluster, then the lowest power cost.
-   Any idle CPU is preferred over a busy CPU in the last cluster.
- * `headroom` (default): prefer an available CPU, then the last cluster, then an idle CPU,
+ * `idle` (default): prefer an idle CPU, then the last cluster, then the lowest power
+   cost. Any idle CPU is preferred over a busy CPU in the last cluster,
+   including an idle CPU of a slower class. On a device whose big cores
+   greatly outnumber its little cores this spreads waking threads to free
+   capacity at the cost of occasionally running a thread on a little core;
+   refusing the slower class instead was measured to be far worse on a device
+   with a single top-class core, because it keeps work queued on that core.
+ * `queue-time`: order candidates by their estimated queue time
+   (the runtime estimates of their runnable fair threads, at the CPU's
+   processing rate). Within the last cluster the least-loaded CPU wins, an
+   idle CPU having no queue time; a CPU in another cluster is chosen only
+   when the one the thread would otherwise take has more than 250us queued,
+   and the search stops at the first CPU with 25us or less. This is the
+   ordering in use before share-based placement; measured on a heterogeneous
+   device, replacing it with the policies above cost a large messaging app
+   about 20 ms of cold-start time that `idle` only partly recovered.
+ * `headroom`: prefer an available CPU, then the last cluster, then an idle CPU,
    then the lowest power cost. A CPU is available if it is idle or if its
    projected fair headroom for the thread covers the thread's estimated demand
-   (at least a tenth of a CPU when the demand is not yet known), so light
-   threads stay in their cluster while threads that need more go to free
-   capacity immediately.
+   (at least a tenth of a CPU when the demand is not yet known). Measured on a
+   heterogeneous device, this keeps too many waking threads on busy CPUs in
+   their cluster (about 20% fewer migrations to idle CPUs) and costs about
+   17 ms on cold app launches against `idle`, whether or not the thread's
+   demand is known.
 
 The remaining tie-breaks (projected headroom, weight entitlement, deadline load)
-are the same under every policy. Deadline threads are not affected.
+are the same under `cluster`, `idle` and `headroom`; `queue-time` uses the
+deadline load as its only further tie-break. Deadline threads are not affected.
 
 TODO(https://fxbug.dev/448195120): Remove once a policy is chosen.
 )""")

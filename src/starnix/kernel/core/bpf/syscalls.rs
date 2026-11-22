@@ -6,9 +6,10 @@
 #![allow(non_upper_case_globals)]
 
 use crate::bpf::attachments::{BpfAttachAttr, bpf_prog_attach, bpf_prog_detach};
+use crate::bpf::check_cap_or_sys_admin;
 use crate::bpf::fs::{BpfFsDir, BpfHandle, get_bpf_object, resolve_pinned_bpf_object};
 use crate::bpf::map::{self, BpfMap, BpfMapHandle};
-use crate::bpf::program::{Program, ProgramInfo};
+use crate::bpf::program::{Program, ProgramInfo, bpf_prog_run};
 use crate::mm::{MemoryAccessor, MemoryAccessorExt};
 use crate::security;
 use crate::task::CurrentTask;
@@ -20,28 +21,28 @@ use smallvec::smallvec;
 use starnix_logging::{log_error, log_trace, log_warn, track_stub};
 use starnix_syscalls::{SUCCESS, SyscallResult};
 use starnix_types::user_buffer::UserBuffer;
-use starnix_uapi::auth::{CAP_NET_ADMIN, CAP_SYS_ADMIN};
+use starnix_uapi::auth::{CAP_BPF, CAP_NET_ADMIN, CAP_SYS_ADMIN};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::user_address::{UserAddress, UserCString, UserRef};
 use starnix_uapi::{
     BPF_F_RDONLY, BPF_F_WRONLY, bpf_attr__bindgen_ty_1, bpf_attr__bindgen_ty_2,
-    bpf_attr__bindgen_ty_4, bpf_attr__bindgen_ty_5, bpf_attr__bindgen_ty_8, bpf_attr__bindgen_ty_9,
-    bpf_attr__bindgen_ty_10, bpf_attr__bindgen_ty_12, bpf_cmd, bpf_cmd_BPF_BTF_GET_FD_BY_ID,
-    bpf_cmd_BPF_BTF_GET_NEXT_ID, bpf_cmd_BPF_BTF_LOAD, bpf_cmd_BPF_ENABLE_STATS,
-    bpf_cmd_BPF_ITER_CREATE, bpf_cmd_BPF_LINK_CREATE, bpf_cmd_BPF_LINK_DETACH,
-    bpf_cmd_BPF_LINK_GET_FD_BY_ID, bpf_cmd_BPF_LINK_GET_NEXT_ID, bpf_cmd_BPF_LINK_UPDATE,
-    bpf_cmd_BPF_MAP_CREATE, bpf_cmd_BPF_MAP_DELETE_BATCH, bpf_cmd_BPF_MAP_DELETE_ELEM,
-    bpf_cmd_BPF_MAP_FREEZE, bpf_cmd_BPF_MAP_GET_FD_BY_ID, bpf_cmd_BPF_MAP_GET_NEXT_ID,
-    bpf_cmd_BPF_MAP_GET_NEXT_KEY, bpf_cmd_BPF_MAP_LOOKUP_AND_DELETE_BATCH,
-    bpf_cmd_BPF_MAP_LOOKUP_AND_DELETE_ELEM, bpf_cmd_BPF_MAP_LOOKUP_BATCH,
-    bpf_cmd_BPF_MAP_LOOKUP_ELEM, bpf_cmd_BPF_MAP_UPDATE_BATCH, bpf_cmd_BPF_MAP_UPDATE_ELEM,
-    bpf_cmd_BPF_OBJ_GET, bpf_cmd_BPF_OBJ_GET_INFO_BY_FD, bpf_cmd_BPF_OBJ_PIN,
-    bpf_cmd_BPF_PROG_ATTACH, bpf_cmd_BPF_PROG_BIND_MAP, bpf_cmd_BPF_PROG_DETACH,
-    bpf_cmd_BPF_PROG_GET_FD_BY_ID, bpf_cmd_BPF_PROG_GET_NEXT_ID, bpf_cmd_BPF_PROG_LOAD,
-    bpf_cmd_BPF_PROG_QUERY, bpf_cmd_BPF_PROG_RUN, bpf_cmd_BPF_RAW_TRACEPOINT_OPEN,
-    bpf_cmd_BPF_TASK_FD_QUERY, bpf_cmd_BPF_TOKEN_CREATE, bpf_map_info,
-    bpf_map_type_BPF_MAP_TYPE_DEVMAP, bpf_map_type_BPF_MAP_TYPE_DEVMAP_HASH,
+    bpf_attr__bindgen_ty_4, bpf_attr__bindgen_ty_5, bpf_attr__bindgen_ty_7, bpf_attr__bindgen_ty_8,
+    bpf_attr__bindgen_ty_9, bpf_attr__bindgen_ty_10, bpf_attr__bindgen_ty_12, bpf_cmd,
+    bpf_cmd_BPF_BTF_GET_FD_BY_ID, bpf_cmd_BPF_BTF_GET_NEXT_ID, bpf_cmd_BPF_BTF_LOAD,
+    bpf_cmd_BPF_ENABLE_STATS, bpf_cmd_BPF_ITER_CREATE, bpf_cmd_BPF_LINK_CREATE,
+    bpf_cmd_BPF_LINK_DETACH, bpf_cmd_BPF_LINK_GET_FD_BY_ID, bpf_cmd_BPF_LINK_GET_NEXT_ID,
+    bpf_cmd_BPF_LINK_UPDATE, bpf_cmd_BPF_MAP_CREATE, bpf_cmd_BPF_MAP_DELETE_BATCH,
+    bpf_cmd_BPF_MAP_DELETE_ELEM, bpf_cmd_BPF_MAP_FREEZE, bpf_cmd_BPF_MAP_GET_FD_BY_ID,
+    bpf_cmd_BPF_MAP_GET_NEXT_ID, bpf_cmd_BPF_MAP_GET_NEXT_KEY,
+    bpf_cmd_BPF_MAP_LOOKUP_AND_DELETE_BATCH, bpf_cmd_BPF_MAP_LOOKUP_AND_DELETE_ELEM,
+    bpf_cmd_BPF_MAP_LOOKUP_BATCH, bpf_cmd_BPF_MAP_LOOKUP_ELEM, bpf_cmd_BPF_MAP_UPDATE_BATCH,
+    bpf_cmd_BPF_MAP_UPDATE_ELEM, bpf_cmd_BPF_OBJ_GET, bpf_cmd_BPF_OBJ_GET_INFO_BY_FD,
+    bpf_cmd_BPF_OBJ_PIN, bpf_cmd_BPF_PROG_ATTACH, bpf_cmd_BPF_PROG_BIND_MAP,
+    bpf_cmd_BPF_PROG_DETACH, bpf_cmd_BPF_PROG_GET_FD_BY_ID, bpf_cmd_BPF_PROG_GET_NEXT_ID,
+    bpf_cmd_BPF_PROG_LOAD, bpf_cmd_BPF_PROG_QUERY, bpf_cmd_BPF_PROG_RUN,
+    bpf_cmd_BPF_RAW_TRACEPOINT_OPEN, bpf_cmd_BPF_TASK_FD_QUERY, bpf_cmd_BPF_TOKEN_CREATE,
+    bpf_map_info, bpf_map_type_BPF_MAP_TYPE_DEVMAP, bpf_map_type_BPF_MAP_TYPE_DEVMAP_HASH,
     bpf_map_type_BPF_MAP_TYPE_SK_STORAGE, bpf_prog_info, errno, error,
 };
 use zerocopy::{FromBytes, IntoBytes};
@@ -157,9 +158,6 @@ pub fn sys_bpf(
     attr_addr: UserAddress,
     attr_size: u32,
 ) -> Result<SyscallResult, Errno> {
-    // TODO: https://fxbug.dev/322874504 - Allow containers to configure the kernel's initial
-    // "unprivileged_bpf_disabled" setting, and apply capability checks appropriately.
-
     // The best available documentation on the various BPF commands is at
     // https://www.kernel.org/doc/html/latest/userspace-api/ebpf/syscall.html.
     // Comments on commands are copied from there.
@@ -526,6 +524,7 @@ pub fn sys_bpf(
             let btf_attr: bpf_attr__bindgen_ty_12 = read_attr(current_task, attr_addr, attr_size)?;
             log_trace!("BPF_BTF_LOAD {:?}", btf_attr);
             security::check_bpf_access(current_task, cmd, &btf_attr, attr_size)?;
+            check_cap_or_sys_admin(current_task, CAP_BPF)?;
             let data = current_task
                 .read_memory_to_vec(UserAddress::from(btf_attr.btf), btf_attr.btf_size as usize)?;
             install_bpf_fd(current_task, BpfTypeFormat { data })
@@ -533,11 +532,20 @@ pub fn sys_bpf(
         bpf_cmd_BPF_PROG_DETACH => {
             let attach_attr: BpfAttachAttr = read_attr(current_task, attr_addr, attr_size)?;
             security::check_bpf_access(current_task, cmd, &attach_attr, attr_size)?;
+            // Linux gates cgroup BPF_PROG_DETACH on the BPF LSM hook rather than CAP_NET_ADMIN.
             bpf_prog_detach(current_task, attach_attr)
         }
         bpf_cmd_BPF_PROG_RUN => {
-            track_stub!(TODO("https://fxbug.dev/322874055"), "BPF_PROG_RUN");
-            error!(EINVAL)
+            let mut run_attr: bpf_attr__bindgen_ty_7 =
+                read_attr(current_task, attr_addr, attr_size)?;
+            log_trace!("BPF_PROG_RUN {:?}", run_attr);
+            security::check_bpf_access(current_task, cmd, &run_attr, attr_size)?;
+            // Capabilities are enforced when loading programs, not in BPF_PROG_RUN, matching Linux.
+            let bpf_fd = FdNumber::from_raw(run_attr.prog_fd as i32);
+            let object = get_bpf_object(current_task, bpf_fd)?;
+            let program = object.as_program()?;
+            security::check_bpf_prog_access(current_task, &program.security_state)?;
+            bpf_prog_run(current_task, program, &mut run_attr, attr_addr, attr_size)
         }
         bpf_cmd_BPF_PROG_GET_NEXT_ID => {
             security::check_task_capable(current_task, CAP_SYS_ADMIN)?;

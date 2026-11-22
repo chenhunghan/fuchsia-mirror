@@ -13,14 +13,13 @@
 #include <lib/zbi-format/zbi.h>
 #include <lib/zbitl/item.h>
 #include <lib/zbitl/items/kernel.h>
+#include <stdio.h>
 
 #include <ktl/byte.h>
 #include <ktl/optional.h>
 #include <ktl/string_view.h>
 #include <ktl/utility.h>
-#include <phys/allocation.h>
-#include <phys/runtime/main.h>
-#include <phys/stdio.h>
+#include <phys/allocation/allocation.h>
 #include <pretty/cpp/sizes.h>
 
 #include <ktl/enforce.h>
@@ -473,9 +472,9 @@ fit::result<BootZbi::Error> BootZbi::Load(uint32_t extra_data_capacity,
   return fit::ok();
 }
 
-void BootZbi::Log() {
-  LogAddresses();
-  LogBoot(KernelEntryAddress());
+void BootZbi::Log(const char* program_name) {
+  LogAddresses(program_name);
+  LogBoot(program_name, KernelEntryAddress());
 }
 
 [[noreturn]] void BootZbi::Boot(ktl::optional<void*> argument) {
@@ -485,19 +484,19 @@ void BootZbi::Log() {
 
 #define ADDR "0x%016" PRIx64
 
-void BootZbi::LogAddresses() const {
-  debugf("%s:    Kernel @ [" ADDR ", " ADDR ")  %s\n", ProgramName(), KernelLoadAddress(),
+void BootZbi::LogAddresses(const char* program_name) const {
+  printf("%s:    Kernel @ [" ADDR ", " ADDR ")  %s\n", program_name, KernelLoadAddress(),
          KernelLoadAddress() + KernelLoadSize(), pretty::FormattedBytes(KernelLoadSize()).c_str());
-  debugf("%s:       BSS @ [" ADDR ", " ADDR ")  %s\n", ProgramName(),
+  printf("%s:       BSS @ [" ADDR ", " ADDR ")  %s\n", program_name,
          KernelLoadAddress() + KernelLoadSize(), KernelLoadAddress() + KernelMemorySize(),
          pretty::FormattedBytes(static_cast<size_t>(KernelHeader()->reserve_memory_size)).c_str());
-  debugf("%s:       ZBI @ [" ADDR ", " ADDR ")  %s\n", ProgramName(), DataLoadAddress(),
+  printf("%s:       ZBI @ [" ADDR ", " ADDR ")  %s\n", program_name, DataLoadAddress(),
          DataLoadAddress() + DataLoadSize(),
          pretty::FormattedBytes(static_cast<size_t>(DataLoadSize())).c_str());
 }
 
-void BootZbi::LogBoot(uint64_t entry) {
-  debugf("%s:     Entry @  " ADDR "  Booting...\n", ProgramName(), entry);
+void BootZbi::LogBoot(const char* program_name, uint64_t entry) {
+  printf("%s:     Entry @  " ADDR "  Booting...\n", program_name, entry);
 }
 
 void BootZbi::InitZbi(BootZbi::InputZbi input_zbi) {

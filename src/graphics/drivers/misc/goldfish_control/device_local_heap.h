@@ -23,7 +23,7 @@ namespace goldfish {
 
 class Control;
 
-// LLCPP synchronous server of a goldfish device-local Fuchsia sysmem Heap
+// FIDL wire synchronous server of a goldfish device-local Fuchsia sysmem Heap
 // interface.
 class DeviceLocalHeap : public Heap {
  public:

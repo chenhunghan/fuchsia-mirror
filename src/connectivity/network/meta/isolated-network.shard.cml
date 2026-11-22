@@ -7,7 +7,7 @@
     // DNS resolver need and their interdependencies.
     //
     // It assumes the package it is included in subpackages netstack
-    // (`package-for-tests`) and contains the dns_resolver component (`deps`).
+    // (`package-for-tests`) and dns-resolver (`package`).
     include: [ "//src/connectivity/network/meta/isolated-network-offers.shard.cml" ],
     children: [
         {
@@ -16,7 +16,7 @@
         },
         {
             name: "dns_resolver",
-            url: "#meta/dns_resolver.cm",
+            url: "dns-resolver#meta/dns_resolver.cm",
         },
     ],
     offer: [

@@ -5,7 +5,6 @@
 #include "src/developer/forensics/last_reboot/last_reboot_info_provider.h"
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
-#include <fidl/fuchsia.feedback/cpp/hlcpp_conversion.h>
 
 #include "src/developer/forensics/feedback/reboot_log/final_shutdown_info.h"
 
@@ -32,10 +31,10 @@ LastRebootInfoProvider::LastRebootInfoProvider(
     last_reboot_.planned(planned.value());
   }
 
-  if (std::optional<::fuchsia::feedback::RebootReason> fidl_reboot_reason =
+  if (const std::optional<fuchsia_feedback::RebootReason> fidl_reboot_reason =
           final_shutdown_info.ToFidlRebootReason();
       fidl_reboot_reason.has_value()) {
-    last_reboot_.reason(fidl::HLCPPToNatural(fidl_reboot_reason.value()));
+    last_reboot_.reason(fidl_reboot_reason.value());
   }
 }
 

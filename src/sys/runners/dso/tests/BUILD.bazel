@@ -1,0 +1,189 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/dso:fuchsia_dso.bzl",
+    "fuchsia_cc_dso",
+    "fuchsia_rust_dso",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":dso_runner_integration_tests"],
+    visibility = [
+        "//src/sys:__pkg__",
+        "//src/sys/runners/dso:__pkg__",
+    ],
+)
+
+fidl_library(
+    name = "fidl",
+    srcs = ["fidl/test.fidl"],
+    library_name = "fidl.test.dso",
+)
+
+fuchsia_rust_dso(
+    name = "rust_dso",
+    srcs = ["src/rust_dso.rs"],
+    crate_root = "src/rust_dso.rs",
+    edition = "2024",
+    deps = [
+        ":fidl_rust",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "rust_dso_packaged_bin",
+    testonly = True,
+    binary = ":rust_dso",
+    binary_name = "librust_dso.so",
+    install_root = "lib/",
+)
+
+fx_component_manifest(
+    name = "rust_dso_manifest",
+    testonly = True,
+    component_name = "rust_dso",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/rust_dso.cml",
+)
+
+fx_component(
+    name = "rust_dso_component",
+    testonly = True,
+    compiled_manifest = ":rust_dso_manifest",
+    deps = [":rust_dso_packaged_bin"],
+)
+
+fuchsia_cc_dso(
+    name = "cpp_dso",
+    srcs = ["src/cpp_dso.cc"],
+    is_async = True,
+    deps = [
+        ":fidl_cpp",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "cpp_dso_packaged_bin",
+    testonly = True,
+    binary = ":cpp_dso",
+    binary_name = "libcpp_dso.so",
+    install_root = "lib/",
+)
+
+fx_component_manifest(
+    name = "cpp_dso_manifest",
+    testonly = True,
+    component_name = "cpp_dso",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/cpp_dso.cml",
+)
+
+fx_component(
+    name = "cpp_dso_component",
+    testonly = True,
+    compiled_manifest = ":cpp_dso_manifest",
+    deps = [":cpp_dso_packaged_bin"],
+)
+
+rustc_test(
+    name = "dso_integration_test_bin",
+    srcs = ["src/dso_integration_test.rs"],
+    crate_root = "src/dso_integration_test.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":fidl_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "dso_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":dso_integration_test_bin",
+    binary_name = "dso_integration_test_bin",
+)
+
+fx_component_manifest(
+    name = "dso_integration_test_manifest",
+    testonly = True,
+    component_name = "dso_integration_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/sys/testing:rust_test_runner.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/dso_integration_test.cml",
+)
+
+fx_test_component(
+    name = "dso_integration_test_component",
+    compiled_manifest = ":dso_integration_test_manifest",
+    deps = [":dso_integration_test_packaged_bin"],
+)
+
+fx_package(
+    name = "dso_runner_integration_tests_package",
+    package_name = "dso_runner_integration_tests",
+    components = [
+        ":cpp_dso_component",
+        ":rust_dso_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/sys/runners/dso:component",
+    ],
+    test_components = [":dso_integration_test_component"],
+)
+
+fx_test(
+    name = "dso_runner_integration_tests",
+    # asan and coverage modes change the dso file paths, so just disable the test
+    # on those builds. We could make it work by parameterizing the cml file to
+    # account for the alternate paths, but it didn't seem worth the effort. We
+    # still get coverage in these modes from the unit test.
+    # Mirrors the GN `!is_asan && !is_coverage` guard in `group("tests")`.
+    # @bazel2gn:skip
+    build_only = select({
+        "@prebuilt_clang//:asan-sancov_variant": True,
+        "@prebuilt_clang//:asan-ubsan_variant": True,
+        "@prebuilt_clang//:asan_variant": True,
+        "@prebuilt_clang//:coverage-rust_variant": True,
+        "@prebuilt_clang//:coverage_variant": True,
+        "@prebuilt_clang//:hwasan-ubsan_variant": True,
+        "@prebuilt_clang//:hwasan_variant": True,
+        "//conditions:default": False,
+    }),
+    package = ":dso_runner_integration_tests_package",
+)

@@ -13,6 +13,7 @@
 #include <lib/driver/outgoing/cpp/outgoing_directory.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zx/interrupt.h>
 #include <lib/zx/vmo.h>
 #include <threads.h>
@@ -29,7 +30,6 @@
 #include "dw-gmac-dma.h"
 #include "pinned-buffer.h"
 #include "src/connectivity/network/drivers/network-device/device/public/locks.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 // clang-format off
 #define DW_MAC_MAC_CONF             (0x0000)

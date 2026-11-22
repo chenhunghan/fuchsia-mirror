@@ -11,15 +11,22 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 from postprocess_crates_vendor import (
     _apply_alias_visibility,
+    apply_fuchsia_license,
     check_package_groups_exist,
+    get_fuchsia_license_crate_packages,
     get_restricted_crate_packages,
+    get_rust_fuchsia_license_crates,
     get_rust_package_paths,
     get_rust_package_visibilities,
+)
+from postprocess_crates_vendor import main as postprocess_main
+from postprocess_crates_vendor import (
     process_one,
     restrict_crate_package,
 )
@@ -334,6 +341,163 @@ class PostprocessCratesVendorTest(unittest.TestCase):
             build_file.write_text("package()\n")
             with self.assertRaisesRegex(ValueError, "failed to restrict"):
                 restrict_crate_package(build_file)
+
+    def test_uses_fuchsia_license_packages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fuchsia_dir = pathlib.Path(tmp)
+            cargo_dir = fuchsia_dir / "third_party/rust_crates"
+            cargo_dir.mkdir(parents=True)
+            (cargo_dir / "Cargo.toml").write_text(
+                textwrap.dedent(
+                    """\
+                    [patch.crates-io]
+                    zstd-sys = { path = "forks/zstd-sys" }
+                    sapphire-async = { path = "intree/sunstone/sapphire-async" }
+
+                    [gn.package.zstd-sys."2.1.2+zstd.1.5.7"]
+                    uses_fuchsia_license = true
+
+                    [gn.package.sapphire-async."0.1.0"]
+                    uses_fuchsia_license = true
+                    """
+                )
+            )
+            (cargo_dir / "forks/zstd-sys").mkdir(parents=True)
+            (cargo_dir / "intree/sunstone/sapphire-async").mkdir(parents=True)
+            zstd_build = cargo_dir / "forks/zstd-sys/BUILD.bazel"
+            zstd_build.write_text(
+                textwrap.dedent(
+                    """\
+                    package(
+                        default_package_metadata = [":package_info"],
+                        default_visibility = ["//visibility:public"],
+                    )
+                    """
+                )
+            )
+
+            path_overrides = get_rust_package_paths(fuchsia_dir)
+            crates = get_rust_fuchsia_license_crates(fuchsia_dir)
+            self.assertEqual(
+                crates,
+                {
+                    ("zstd-sys", "2.1.2+zstd.1.5.7"),
+                    ("sapphire-async", "0.1.0"),
+                },
+            )
+            pkgs = get_fuchsia_license_crate_packages(
+                fuchsia_dir, path_overrides, crates
+            )
+            self.assertEqual(
+                pkgs,
+                {
+                    "third_party/rust_crates/forks/zstd-sys",
+                    "third_party/rust_crates/intree/sunstone/sapphire-async",
+                },
+            )
+
+            apply_fuchsia_license(zstd_build)
+            want = textwrap.dedent(
+                """\
+                package(
+                    default_package_metadata = [
+                        "//:license",
+                        ":package_info",
+                    ],
+                    default_visibility = ["//visibility:public"],
+                )
+                """
+            )
+            self.assertEqual(zstd_build.read_text(), want)
+            # Re-running is idempotent.
+            apply_fuchsia_license(zstd_build)
+            self.assertEqual(zstd_build.read_text(), want)
+
+    def test_process_one_adds_fallback_license_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fuchsia_dir = pathlib.Path(tmp)
+            ansi_dir = (
+                fuchsia_dir / "third_party/rust_crates/vendor/ansi_term-0.12.1"
+            )
+            ansi_dir.mkdir(parents=True)
+            (ansi_dir / "LICENCE").write_text("MIT")
+            ansi_build = ansi_dir / "BUILD.bazel"
+            ansi_build.write_text(
+                textwrap.dedent(
+                    """\
+                    license(
+                        name = "license",
+                        license_kinds = ["@rules_license//licenses/spdx:MIT"],
+                    )
+                    """
+                )
+            )
+            process_one(ansi_build, fuchsia_dir, {}, {})
+            want = textwrap.dedent(
+                """\
+                license(
+                    name = "license",
+                    license_kinds = ["@rules_license//licenses/spdx:MIT"],
+                    license_text = "LICENCE",
+                )
+                """
+            )
+            self.assertEqual(ansi_build.read_text(), want)
+            # Idempotent on rerun.
+            process_one(ansi_build, fuchsia_dir, {}, {})
+            self.assertEqual(ansi_build.read_text(), want)
+
+    def test_main_follows_intree_symlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            fuchsia_dir = pathlib.Path(tmp)
+            rust_dir = fuchsia_dir / "third_party/rust_crates"
+            rust_dir.mkdir(parents=True)
+            (rust_dir / "Cargo.toml").write_text("")
+            (rust_dir / "BUILD.bazel").write_text("")
+
+            target_dir = fuchsia_dir / "src/intree_crate"
+            target_dir.mkdir(parents=True)
+            (target_dir / "LICENCE").write_text("MIT\n")
+            build_file = target_dir / "BUILD.bazel"
+            build_file.write_text(
+                textwrap.dedent(
+                    """\
+                    license(
+                        name = "license",
+                        license_kinds = ["@rules_license//licenses/spdx:MIT"],
+                    )
+                    """
+                )
+            )
+            intree_dir = rust_dir / "intree"
+            intree_dir.mkdir()
+            (intree_dir / "intree_crate").symlink_to(target_dir)
+
+            with mock.patch.object(
+                sys,
+                "argv",
+                [
+                    "postprocess_crates_vendor.py",
+                    "--search-dir",
+                    str(intree_dir),
+                    "--fuchsia-dir",
+                    str(fuchsia_dir),
+                ],
+            ):
+                self.assertEqual(postprocess_main(), 0)
+
+            self.assertEqual(
+                build_file.read_text(),
+                textwrap.dedent(
+                    """\
+                    license(
+                        name = "license",
+                        license_kinds = ["@rules_license//licenses/spdx:MIT"],
+                        license_text = "LICENCE",
+                    )
+                    """
+                ),
+            )
 
 
 if __name__ == "__main__":

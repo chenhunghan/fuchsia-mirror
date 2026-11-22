@@ -4,9 +4,12 @@
 
 #[cfg(test)]
 mod tests {
+    use blob_pager_and_verifier::BlobPagerAndVerifier;
     use blob_writer::BlobWriter;
     use delivery_blob::{CompressionMode, Type1Blob};
     use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions};
+    use fidl_fuchsia_storage_block as fblock;
+    use fidl_fuchsia_storage_mapping as fmapping;
     use fs_management::Fxfs;
     use fs_management::filesystem::Filesystem;
     use fuchsia_component::client::connect_to_protocol_at_dir_svc;
@@ -36,10 +39,14 @@ mod tests {
         )
         .expect("failed to connect to the BlobCreator");
 
-        let blob_reader = connect_to_protocol_at_dir_svc::<fidl_fuchsia_fxfs::BlobReaderMarker>(
-            vol.exposed_dir(),
-        )
-        .expect("failed to connect to the BlobReader");
+        let mapping_provider =
+            connect_to_protocol_at_dir_svc::<fmapping::MappingProviderMarker>(vol.exposed_dir())
+                .expect("failed to connect to MappingProvider");
+        let mapper = connect_to_protocol_at_dir_svc::<fblock::MapperMarker>(vol.exposed_dir())
+            .expect("failed to connect to Mapper");
+        let blob_pager = BlobPagerAndVerifier::new(&mapping_provider, &mapper)
+            .await
+            .expect("failed to create BlobPagerAndVerifier");
 
         let mut data = vec![1; 196608];
         rand::fill(&mut data[..]);
@@ -60,11 +67,7 @@ mod tests {
 
         blob_writer.write(&compressed_data).await.unwrap();
 
-        let vmo = blob_reader
-            .get_vmo(&hash.into())
-            .await
-            .expect("transport error on the BlobReader")
-            .expect("get_vmo failed");
+        let vmo = blob_pager.create_vmo(&hash.into()).await.expect("create_vmo failed");
         let mut read_data = vec![0; vmo.get_content_size().unwrap() as usize];
         let () = vmo.read(&mut read_data, 0).expect("vmo read failed");
         assert_eq!(data, read_data)
@@ -91,10 +94,14 @@ mod tests {
         )
         .expect("failed to connect to the Blob service");
 
-        let blob_reader = connect_to_protocol_at_dir_svc::<fidl_fuchsia_fxfs::BlobReaderMarker>(
-            vol.exposed_dir(),
-        )
-        .expect("failed to connect to the BlobReader");
+        let mapping_provider =
+            connect_to_protocol_at_dir_svc::<fmapping::MappingProviderMarker>(vol.exposed_dir())
+                .expect("failed to connect to MappingProvider");
+        let mapper = connect_to_protocol_at_dir_svc::<fblock::MapperMarker>(vol.exposed_dir())
+            .expect("failed to connect to Mapper");
+        let blob_pager = BlobPagerAndVerifier::new(&mapping_provider, &mapper)
+            .await
+            .expect("failed to create BlobPagerAndVerifier");
 
         let mut data = vec![1; 499712];
         rand::fill(&mut data[..]);
@@ -117,11 +124,7 @@ mod tests {
 
         blob_writer.write(&compressed_data).await.unwrap();
 
-        let vmo = blob_reader
-            .get_vmo(&hash.into())
-            .await
-            .expect("transport error on the BlobReader")
-            .expect("get_vmo failed");
+        let vmo = blob_pager.create_vmo(&hash.into()).await.expect("create_vmo failed");
         let mut read_data = vec![0; vmo.get_content_size().unwrap() as usize];
         let () = vmo.read(&mut read_data, 0).expect("vmo read failed");
         assert_eq!(data, read_data)

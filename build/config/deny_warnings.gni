@@ -1,0 +1,12 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# LINT.IfChange(deny_warnings)
+declare_args() {
+  # Controls whether to promote Rust warnings to errors (-Dwarnings in
+  # //build/config:werror). Note that C/C++ -Werror in //build/config:werror is
+  # gated on !use_ccache rather than deny_warnings.
+  deny_warnings = true
+}
+# LINT.ThenChange(//build/bazel/BUILD.gn:deny_warnings)

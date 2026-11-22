@@ -337,16 +337,17 @@ async fn test_hfp_ag_service_advertisement(tf: HfpAgIntegrationTest) {
 /// Expects a connection request on the `connect_requests` stream from the `other` peer.
 /// Returns the Channel.
 async fn expect_connection(
-    connect_requests: &mut bredr::ConnectionReceiverRequestStream,
+    connect_requests: &mut bredr::ConnectionReceiver2RequestStream,
     other: PeerId,
 ) -> Channel {
     match connect_requests.select_next_some().await.expect("should receive connection request") {
-        bredr::ConnectionReceiverRequest::Connected { peer_id, channel, .. } => {
-            assert_eq!(other, peer_id.into());
-            channel.try_into().unwrap()
+        bredr::ConnectionReceiver2Request::Connected { payload, responder, .. } => {
+            responder.send().unwrap();
+            assert_eq!(other, payload.peer_id.unwrap().into());
+            payload.channel.unwrap().try_into().unwrap()
         }
-        bredr::ConnectionReceiverRequest::_UnknownMethod { .. } => {
-            panic!("ConnectionReceiverRequest: unknown method");
+        bredr::ConnectionReceiver2Request::_UnknownMethod { .. } => {
+            panic!("ConnectionReceiver2Request: unknown method");
         }
     }
 }

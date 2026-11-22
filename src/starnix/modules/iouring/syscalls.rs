@@ -50,7 +50,7 @@ pub fn sys_io_uring_setup(
         1 => {
             let io_uring_group = limits.io_uring_group.load(atomic::Ordering::Relaxed).try_into();
             if io_uring_group.is_err()
-                || !current_task.current_creds().is_in_group(io_uring_group.unwrap())
+                || !current_task.current_creds().is_in_fs_group(io_uring_group.unwrap())
             {
                 security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
             }
@@ -114,7 +114,12 @@ pub fn sys_io_uring_register(
     let io_uring = file.downcast_file::<IoUringFileObject>().ok_or_else(|| errno!(EOPNOTSUPP))?;
     match opcode {
         IORING_REGISTER_BUFFERS => {
-            // TODO(https://fxbug.dev/297431387): Check nr_args for zero and return EINVAL here.
+            if arg.is_null() {
+                return error!(EFAULT);
+            }
+            if nr_args.raw() == 0 {
+                return error!(EINVAL);
+            }
             let iovec = IOVecPtr::new(current_task, arg);
             let buffers = current_task.read_iovec(iovec, nr_args)?;
             io_uring.register_buffers(buffers);

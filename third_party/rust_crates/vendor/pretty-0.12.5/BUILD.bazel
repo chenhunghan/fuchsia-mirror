@@ -73,6 +73,6 @@ rust_library(
     deps = [
         "//third_party/rust_crates/vendor/arrayvec-0.5.2:arrayvec",
         "//third_party/rust_crates/vendor/typed-arena-2.0.2:typed_arena",
-        "//third_party/rust_crates/vendor/unicode-width-0.2.2:unicode_width",
+        "//third_party/rust_crates/vendor/unicode-width-0.2.3:unicode_width",
     ],
 )

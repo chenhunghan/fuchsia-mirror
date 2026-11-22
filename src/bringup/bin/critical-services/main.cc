@@ -26,6 +26,7 @@
 #include <lib/svc/outgoing.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/zx/channel.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -303,7 +304,8 @@ void RunOomThread() {
   }
 }
 
-void RunCrashSvcThread(bool exception_handler_available, bool storage_stall_watchdog_enabled) {
+void RunCrashSvcThread(bool exception_handler_available, bool storage_stall_watchdog_enabled,
+                       uint64_t storage_stall_watchdog_simulate_stall_secs) {
   // Get the root job.
   zx::result<zx::job> root_job = GetRootJob();
   if (!root_job.is_ok()) {
@@ -337,7 +339,7 @@ void RunCrashSvcThread(bool exception_handler_available, bool storage_stall_watc
   fit::function<ExceptionDisposition(const zx::process&, const zx_exception_report_t&)>
       exception_hook;
   if (storage_stall_watchdog_enabled) {
-    storage_watchdog::Arm();
+    storage_watchdog::Arm(storage_stall_watchdog_simulate_stall_secs);
     backtrace_request_hook = storage_watchdog::OnBacktraceRequest;
     // A page fault that timed out waiting for the pager means storage is stuck. Printing such a
     // crash would read memory behind the same pager and block crashsvc until storage comes back.
@@ -346,8 +348,9 @@ void RunCrashSvcThread(bool exception_handler_available, bool storage_stall_watc
           static_cast<zx_status_t>(report.context.synth_code) != ZX_ERR_TIMED_OUT) {
         return ExceptionDisposition::kPrintAndHandoff;
       }
-      return storage_watchdog::OnPagerTimeout(process) ? ExceptionDisposition::kHoldUntilReboot
-                                                       : ExceptionDisposition::kHandoffNoPrint;
+      return storage_watchdog::OnPagerTimeout(process, report)
+                 ? ExceptionDisposition::kHoldUntilReboot
+                 : ExceptionDisposition::kHandoffNoPrint;
     };
   }
 
@@ -421,7 +424,8 @@ int main(int argc, char** argv) {
   // Handle exceptions on another thread; the system won't deliver exceptions to the thread that
   // generated them.
   std::thread crashsvc(RunCrashSvcThread, config.exception_handler_available(),
-                       config.storage_stall_watchdog_enabled());
+                       config.storage_stall_watchdog_enabled(),
+                       config.storage_stall_watchdog_simulate_stall_secs());
 
   component::OutgoingDirectory outgoing{loop.dispatcher()};
   zx::result result = outgoing.ServeFromStartupInfo();

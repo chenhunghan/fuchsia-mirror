@@ -34,10 +34,12 @@ python_library("fast_copy_mock") {
     "__init__.py",
     "fast_copy_mock.py",
   ]
+  imports = [ ".." ]
   visibility = [
     ":*",
     "//build/python:*",
     "//build/python/tests/assembly:*",
   ]
   deps = [ "//build/python/modules/assembly" ]
+  enable_mypy = false
 }

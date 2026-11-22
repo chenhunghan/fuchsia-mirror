@@ -12,6 +12,7 @@ use crate::util::listener::{
 };
 use crate::util::state_machine::{self, ExitReason, IntoStateExt, StateMachineStatusPublisher};
 use anyhow::format_err;
+use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_sme as fidl_sme;
 use fuchsia_async::{self as fasync, DurationExt};
 use fuchsia_inspect::Node as InspectNode;
@@ -160,19 +161,54 @@ impl WriteInspect for Status {
 #[derive(Clone, PartialEq)]
 pub struct ApConfig {
     pub id: types::NetworkIdentifier,
-    pub credential: Vec<u8>,
+    pub credential: types::Credential,
     pub radio_config: RadioConfig,
     pub mode: types::ConnectivityMode,
     pub band: types::OperatingBand,
 }
 
-impl From<ApConfig> for fidl_sme::ApConfig {
-    fn from(config: ApConfig) -> Self {
-        fidl_sme::ApConfig {
+impl TryFrom<ApConfig> for fidl_sme::ApConfig {
+    type Error = anyhow::Error;
+
+    fn try_from(config: ApConfig) -> Result<Self, Self::Error> {
+        let protocol = match config.id.security_type {
+            types::SecurityType::None => fidl_internal::Protocol::Open,
+            types::SecurityType::Wep => fidl_internal::Protocol::Wep,
+            types::SecurityType::Wpa => fidl_internal::Protocol::Wpa1,
+            types::SecurityType::Wpa2 => fidl_internal::Protocol::Wpa2Personal,
+            types::SecurityType::Wpa3 => fidl_internal::Protocol::Wpa3Personal,
+        };
+        let credentials = match config.credential {
+            types::Credential::None => None,
+            types::Credential::Password(password) => {
+                Some(Box::new(match config.id.security_type {
+                    types::SecurityType::Wep => {
+                        fidl_internal::Credentials::Wep(fidl_internal::WepCredentials {
+                            key: password,
+                        })
+                    }
+                    types::SecurityType::None
+                    | types::SecurityType::Wpa
+                    | types::SecurityType::Wpa2
+                    | types::SecurityType::Wpa3 => fidl_internal::Credentials::Wpa(
+                        fidl_internal::WpaCredentials::Passphrase(password),
+                    ),
+                }))
+            }
+            types::Credential::Psk(psk) => {
+                let psk = psk
+                    .try_into()
+                    .map_err(|psk: Vec<u8>| format_err!("Invalid PSK length: {}", psk.len()))?;
+                Some(Box::new(fidl_internal::Credentials::Wpa(fidl_internal::WpaCredentials::Psk(
+                    psk,
+                ))))
+            }
+        };
+        Ok(fidl_sme::ApConfig {
             ssid: config.id.ssid.to_vec(),
-            password: config.credential,
+            authentication: fidl_internal::Authentication { protocol, credentials },
             radio_cfg: config.radio_config.into(),
-        }
+        })
     }
 }
 
@@ -370,11 +406,13 @@ fn transition_to_starting(
 ///    operation or the driver crashes.  Either scenario should be considered fatal.
 /// 2. If the start request fails because the AP state machine cannot communicate with the SME,
 ///    the state machine will exit with an error.
-/// 3. If the start request fails due to an error reported by the SME, it's possible that a client
-///    interface associated with the same PHY is scanning.  In this case, allow the operation to be
-///    retried by transitioning back through the starting state.  Once the retries are exhausted,
-///    exit the state machine with an error.
-/// 4. When the start request finishes, transition into the started state.
+/// 3. If the start request fails with `StartApResultCode::InvalidArguments`, exit the state
+///    machine immediately with an error without retrying.
+/// 4. If the start request fails due to another error reported by the SME, it's possible that a
+///    client interface associated with the same PHY is scanning.  In this case, allow the
+///    operation to be retried by transitioning back through the starting state.  Once the retries
+///    are exhausted, exit the state machine with an error.
+/// 5. When the start request finishes, transition into the started state.
 async fn starting_state(
     mut deps: CommonStateDependencies,
     req: ApConfig,
@@ -419,11 +457,32 @@ async fn starting_state(
             .map_err(|e| ExitReason(Err(e)))?;
     }
 
-    let ap_config = fidl_sme::ApConfig::from(req.clone());
+    let ap_config = match fidl_sme::ApConfig::try_from(req.clone()) {
+        Ok(ap_config) => ap_config,
+        Err(e) => {
+            if let Err(e) = deps.state_tracker.reset_state(ApStateUpdate::new(
+                req.id.clone(),
+                types::OperatingState::Failed,
+                req.mode,
+                req.band,
+            )) {
+                info!("Unable to notify listeners of AP start failure: {:?}", e);
+            }
+            deps.telemetry_sender.send(TelemetryEvent::StartApResult(Err(())));
+            return Err(ExitReason(Err(format_err!("Failed to derive SME AP config: {}", e))));
+        }
+    };
     let start_result = match deps.proxy.start(&ap_config).await {
         Ok(fidl_sme::StartApResultCode::Success) => {
             deps.telemetry_sender.send(TelemetryEvent::StartApResult(Ok(())));
             Ok(())
+        }
+        Ok(fidl_sme::StartApResultCode::InvalidArguments) => {
+            deps.telemetry_sender.send(TelemetryEvent::StartApResult(Err(())));
+            Err(format_err!(
+                "Failed to start AP: {:?}",
+                fidl_sme::StartApResultCode::InvalidArguments
+            ))
         }
         Ok(code) => {
             // Log a metric indicating that starting the AP failed.
@@ -642,6 +701,7 @@ mod tests {
     use futures::stream::StreamFuture;
     use futures::task::Poll;
     use std::pin::pin;
+    use test_case::test_case;
 
     struct TestValues {
         deps: CommonStateDependencies,
@@ -719,7 +779,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -782,7 +842,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -836,7 +896,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -878,7 +938,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -917,7 +977,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -971,7 +1031,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1054,7 +1114,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1145,7 +1205,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1300,7 +1360,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1427,7 +1487,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1505,7 +1565,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1544,7 +1604,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1608,7 +1668,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1680,7 +1740,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1707,7 +1767,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1758,7 +1818,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1855,6 +1915,180 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn test_sme_invalid_arguments_while_starting_does_not_retry() {
+        let mut exec = fasync::TestExecutor::new();
+        let mut test_values = test_setup();
+
+        let (start_sender, mut start_receiver) = oneshot::channel();
+        let radio_config = new_radio_config();
+        let req = ApConfig {
+            id: types::NetworkIdentifier {
+                ssid: types::Ssid::try_from("test_ssid").unwrap(),
+                security_type: types::SecurityType::Wpa2,
+            },
+            credential: types::Credential::None,
+            radio_config,
+            mode: types::ConnectivityMode::Unrestricted,
+            band: types::OperatingBand::Any,
+        };
+
+        // Start off in the starting state with AP_START_MAX_RETRIES retry attempts.
+        let fut = starting_state(test_values.deps, req, AP_START_MAX_RETRIES, Some(start_sender));
+        let fut = run_state_machine(fut);
+        let mut fut = pin!(fut);
+
+        let sme_fut = test_values.sme_req_stream.into_future();
+        let mut sme_fut = pin!(sme_fut);
+
+        // Handle the initial stop request.
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            poll_sme_req(&mut exec, &mut sme_fut),
+            Poll::Ready(fidl_sme::ApSmeRequest::Stop { responder }) => {
+                responder
+                    .send(fidl_sme::StopApResultCode::Success)
+                    .expect("could not send AP stop response");
+            }
+        );
+
+        // There should be a stopped state update followed by a starting state update.
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
+                assert!(updates.access_points.is_empty());
+            }
+        );
+        assert_matches!(
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
+                let update = updates.access_points.pop().expect("no new updates available.");
+                assert_eq!(update.state, types::OperatingState::Starting);
+            }
+        );
+
+        // Wait for a start request, verify its authentication field, and send back InvalidArguments.
+        assert_matches!(
+            poll_sme_req(&mut exec, &mut sme_fut),
+            Poll::Ready(fidl_sme::ApSmeRequest::Start { config, responder }) => {
+                assert_eq!(
+                    config.authentication,
+                    fidl_internal::Authentication {
+                        protocol: fidl_internal::Protocol::Wpa2Personal,
+                        credentials: None,
+                    }
+                );
+                responder
+                    .send(fidl_sme::StartApResultCode::InvalidArguments)
+                    .expect("could not send AP start response");
+            }
+        );
+
+        // The state machine should exit immediately without retrying.
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
+
+        // Verify that the start receiver got an error.
+        assert_matches!(exec.run_until_stalled(&mut start_receiver), Poll::Ready(Err(_)));
+
+        // There should be a failure notification.
+        assert_matches!(
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
+                let update = updates.access_points.pop().expect("no new updates available.");
+                assert_eq!(update.state, types::OperatingState::Failed);
+            }
+        );
+
+        // A metric should be logged for the failure to start the AP.
+        assert_matches!(
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Err(())))
+        );
+
+        // No hardware defect should be logged for invalid arguments.
+        assert_matches!(test_values.defect_receiver.try_recv(), Err(e) if e.is_closed());
+    }
+
+    #[fuchsia::test]
+    fn test_invalid_ap_config_while_starting_does_not_retry() {
+        let mut exec = fasync::TestExecutor::new();
+        let mut test_values = test_setup();
+
+        let (start_sender, mut start_receiver) = oneshot::channel();
+        let radio_config = new_radio_config();
+        let req = ApConfig {
+            id: types::NetworkIdentifier {
+                ssid: types::Ssid::try_from("test_ssid").unwrap(),
+                security_type: types::SecurityType::Wpa2,
+            },
+            credential: types::Credential::Psk(vec![0x11; 31]),
+            radio_config,
+            mode: types::ConnectivityMode::Unrestricted,
+            band: types::OperatingBand::Any,
+        };
+
+        // Start off in the starting state with AP_START_MAX_RETRIES retry attempts.
+        let fut = starting_state(test_values.deps, req, AP_START_MAX_RETRIES, Some(start_sender));
+        let fut = run_state_machine(fut);
+        let mut fut = pin!(fut);
+
+        let sme_fut = test_values.sme_req_stream.into_future();
+        let mut sme_fut = pin!(sme_fut);
+
+        // Handle the initial stop request.
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Pending);
+        assert_matches!(
+            poll_sme_req(&mut exec, &mut sme_fut),
+            Poll::Ready(fidl_sme::ApSmeRequest::Stop { responder }) => {
+                responder
+                    .send(fidl_sme::StopApResultCode::Success)
+                    .expect("could not send AP stop response");
+            }
+        );
+
+        // The state machine should exit immediately without sending a start request or retrying.
+        assert_matches!(exec.run_until_stalled(&mut fut), Poll::Ready(()));
+        assert_matches!(
+            exec.run_until_stalled(&mut sme_fut).map(|(req, _)| req),
+            Poll::Ready(None)
+        );
+
+        // Verify that the start receiver got an error.
+        assert_matches!(exec.run_until_stalled(&mut start_receiver), Poll::Ready(Err(_)));
+
+        // There should be a stopped state update, a starting state update, and a failure notification.
+        assert_matches!(
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(updates)) => {
+                assert!(updates.access_points.is_empty());
+            }
+        );
+        assert_matches!(
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
+                let update = updates.access_points.pop().expect("no new updates available.");
+                assert_eq!(update.state, types::OperatingState::Starting);
+            }
+        );
+        assert_matches!(
+            test_values.update_receiver.try_recv(),
+            Ok(listener::Message::NotifyListeners(mut updates)) => {
+                let update = updates.access_points.pop().expect("no new updates available.");
+                assert_eq!(update.state, types::OperatingState::Failed);
+            }
+        );
+
+        // A metric should be logged for the failure to start the AP.
+        assert_matches!(
+            test_values.telemetry_receiver.try_recv(),
+            Ok(TelemetryEvent::StartApResult(Err(())))
+        );
+
+        // No hardware defect should be logged for invalid arguments.
+        assert_matches!(test_values.defect_receiver.try_recv(), Err(e) if e.is_closed());
+    }
+
+    #[fuchsia::test]
     fn test_stop_after_start_failure() {
         let mut exec = fasync::TestExecutor::new();
         let mut test_values = test_setup();
@@ -1863,7 +2097,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1975,7 +2209,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config: radio_config.clone(),
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -1987,7 +2221,7 @@ mod tests {
 
         let requested_config = ApConfig {
             id: requested_id.clone(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -2094,7 +2328,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -2171,6 +2405,195 @@ mod tests {
         );
     }
 
+    #[test_case(
+        types::SecurityType::None,
+        types::Credential::None,
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: None,
+        });
+        "open_without_credential"
+    )]
+    #[test_case(
+        types::SecurityType::None,
+        types::Credential::Password(b"password".to_vec()),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        });
+        "open_with_password"
+    )]
+    #[test_case(
+        types::SecurityType::None,
+        types::Credential::Psk(vec![0x11; 32]),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([0x11; 32]),
+            ))),
+        });
+        "open_with_psk"
+    )]
+    #[test_case(
+        types::SecurityType::Wep,
+        types::Credential::None,
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wep,
+            credentials: None,
+        });
+        "wep_without_credential"
+    )]
+    #[test_case(
+        types::SecurityType::Wep,
+        types::Credential::Password(b"12345".to_vec()),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wep,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wep(
+                fidl_internal::WepCredentials { key: b"12345".to_vec() },
+            ))),
+        });
+        "wep_with_password"
+    )]
+    #[test_case(
+        types::SecurityType::Wep,
+        types::Credential::Psk(vec![0x11; 32]),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wep,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([0x11; 32]),
+            ))),
+        });
+        "wep_with_psk"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa,
+        types::Credential::None,
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa1,
+            credentials: None,
+        });
+        "wpa_without_credential"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa,
+        types::Credential::Password(b"password".to_vec()),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa1,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        });
+        "wpa_with_password"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa,
+        types::Credential::Psk(vec![0x11; 32]),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa1,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([0x11; 32]),
+            ))),
+        });
+        "wpa_with_psk"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa2,
+        types::Credential::None,
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: None,
+        });
+        "wpa2_without_credential"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa2,
+        types::Credential::Password(b"password".to_vec()),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        });
+        "wpa2_with_password"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa2,
+        types::Credential::Psk(vec![0x11; 32]),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([0x11; 32]),
+            ))),
+        });
+        "wpa2_with_psk"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa2,
+        types::Credential::Psk(vec![0x11; 31]),
+        None;
+        "wpa2_with_invalid_psk_length"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa3,
+        types::Credential::None,
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa3Personal,
+            credentials: None,
+        });
+        "wpa3_without_credential"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa3,
+        types::Credential::Password(b"password".to_vec()),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa3Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        });
+        "wpa3_with_password"
+    )]
+    #[test_case(
+        types::SecurityType::Wpa3,
+        types::Credential::Psk(vec![0x11; 32]),
+        Some(fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa3Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([0x11; 32]),
+            ))),
+        });
+        "wpa3_with_psk"
+    )]
+    #[fuchsia::test(add_test_attr = false)]
+    fn test_ap_config_to_sme_ap_config(
+        security_type: types::SecurityType,
+        credential: types::Credential,
+        expected_authentication: Option<fidl_internal::Authentication>,
+    ) {
+        let radio_config = new_radio_config();
+        let ap_config = ApConfig {
+            id: types::NetworkIdentifier {
+                ssid: types::Ssid::try_from("test_ssid").unwrap(),
+                security_type,
+            },
+            credential,
+            radio_config: radio_config.clone(),
+            mode: types::ConnectivityMode::Unrestricted,
+            band: types::OperatingBand::Any,
+        };
+
+        assert_eq!(
+            fidl_sme::ApConfig::try_from(ap_config).ok(),
+            expected_authentication.map(|authentication| fidl_sme::ApConfig {
+                ssid: b"test_ssid".to_vec(),
+                authentication,
+                radio_cfg: radio_config.into(),
+            })
+        );
+    }
+
     #[fuchsia::test]
     fn test_manual_start_causes_starting_notification() {
         let mut exec = fasync::TestExecutor::new();
@@ -2180,7 +2603,7 @@ mod tests {
         let radio_config = new_radio_config();
         let requested_config = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -2315,7 +2738,7 @@ mod tests {
         let radio_config = new_radio_config();
         let config = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -2682,7 +3105,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,
@@ -2705,7 +3128,7 @@ mod tests {
         let radio_config = new_radio_config();
         let req = ApConfig {
             id: create_network_id(),
-            credential: vec![],
+            credential: types::Credential::None,
             radio_config,
             mode: types::ConnectivityMode::Unrestricted,
             band: types::OperatingBand::Any,

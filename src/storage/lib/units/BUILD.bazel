@@ -16,7 +16,9 @@ rustc_library(
     }),
     crate_name = "storage_units",
     edition = "2024",
-    visibility = ["//src/storage/fxfs:__subpackages__"],
+    visibility = [
+        "//src/storage:__subpackages__",
+    ],
     deps = select({
         "@platforms//os:fuchsia": ["//sdk/rust/zx"],
         "//conditions:default": [],

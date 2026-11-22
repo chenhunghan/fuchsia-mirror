@@ -54,7 +54,6 @@ test("loadable-tests") {
 
   sources = [ "loadable-tests.cc" ]
   deps = [
-    "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_cpp",
     "//sdk/lib/fdio",
     "//src/bringup/lib/restricted-machine",
     "//src/lib/symbolizer-markup",

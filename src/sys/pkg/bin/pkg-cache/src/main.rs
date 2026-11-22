@@ -35,6 +35,7 @@ use fuchsia_url::fuchsia_pkg::AbsolutePackageUrl;
 use futures::join;
 use futures::prelude::*;
 use log::{error, info};
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use vfs::directory::helper::DirectlyMutable as _;
@@ -56,7 +57,6 @@ mod package_fetcher;
 mod required_blobs;
 mod retained_packages_service;
 mod root_dir;
-mod upgradable_packages;
 
 use root_dir::{CachedRootDir, RootDir, RootDirCache, RootDirFactory};
 
@@ -64,7 +64,6 @@ use root_dir::{CachedRootDir, RootDir, RootDirCache, RootDirFactory};
 mod test_utils;
 
 const COBALT_CONNECTOR_BUFFER_SIZE: usize = 1000;
-const MAX_CONCURRENT_PACKAGE_FETCHES: usize = 5;
 
 struct CobaltConnectedService;
 impl ConnectedProtocol for CobaltConnectedService {
@@ -179,48 +178,36 @@ async fn main_inner() -> Result<(), Error> {
         startup_profiling_seconds,
         post_commit_gc_earliest_boot_seconds,
     } = config;
+    let blob_fetch_concurrency_limit = NonZeroUsize::new(blob_fetch_concurrency_limit.into())
+        .context("blob_fetch_concurrency_limit must be nonzero")?;
     let mut blobfs_builder = blobfs::Client::builder().readable().writable().executable();
-    let mut blob_verifier = None;
-    if use_driver_blob_paging {
-        let verifier_result: Result<blob_pager_and_verifier::BlobPagerAndVerifier, Error> = async {
-            let mapping_provider = connect_to_protocol::<fstorage_mapping::MappingProviderMarker>()
-                .context("error connecting to fuchsia.storage.mapping.MappingProvider")?;
-            let mapper = connect_to_protocol::<fstorage_block::MapperMarker>()
-                .context("error connecting to fuchsia.storage.block.Mapper")?;
+    let blob_verifier = if use_driver_blob_paging {
+        let mapping_provider = connect_to_protocol::<fstorage_mapping::MappingProviderMarker>()
+            .context("error connecting to fuchsia.storage.mapping.MappingProvider")?;
+        let mapper = connect_to_protocol::<fstorage_block::MapperMarker>()
+            .context("error connecting to fuchsia.storage.block.Mapper")?;
+        let verifier =
             blob_pager_and_verifier::BlobPagerAndVerifier::new(&mapping_provider, &mapper)
                 .await
-                .context("error initializing BlobPagerAndVerifier")
-        }
-        .await;
+                .context("error initializing BlobPagerAndVerifier")?;
 
-        match verifier_result {
-            Ok(verifier) => {
-                info!("Using driver blob paging");
-                inspector.root().record_string("driver_blob_paging_status", "active");
-                if startup_profiling_seconds > 0 {
-                    verifier
-                        .record_and_replay_profile(
-                            blob_pager_and_verifier::BOOT_PROFILE_NAME,
-                            zx::MonotonicDuration::from_seconds(startup_profiling_seconds.into()),
-                        )
-                        .await;
-                }
-                let verifier = Arc::new(verifier);
-                blobfs_builder = blobfs_builder.reader(DriverBlobReader(verifier.clone()));
-                blob_verifier = Some(verifier);
-            }
-            Err(error) => {
-                error!(
-                    error:?;
-                    "Failed to initialize driver blob paging, falling back to Fxfs BlobReader"
-                );
-                inspector.root().record_string("driver_blob_paging_status", "fallback");
-            }
+        info!("Using driver blob paging");
+        inspector.root().record_string("driver_blob_paging_status", "active");
+        if startup_profiling_seconds > 0 {
+            verifier
+                .record_and_replay_profile(
+                    blob_pager_and_verifier::BOOT_PROFILE_NAME,
+                    zx::MonotonicDuration::from_seconds(startup_profiling_seconds.into()),
+                )
+                .await;
         }
+        let verifier = Arc::new(verifier);
+        blobfs_builder = blobfs_builder.reader(DriverBlobReader(verifier.clone()));
+        Some(verifier)
     } else {
         inspector.root().record_string("driver_blob_paging_status", "disabled");
-    }
-    let driver_blob_paging_active = blob_verifier.is_some();
+        None
+    };
     let blobfs = blobfs_builder.build().await.context("error opening blobfs")?;
 
     let authenticator = context_authenticator::ContextAuthenticator::new();
@@ -277,9 +264,10 @@ async fn main_inner() -> Result<(), Error> {
     let cache_index = Arc::new(cache_index);
     inspector.root().record_lazy_child("base-packages", base_index.record_lazy_inspect());
     inspector.root().record_lazy_child("cache-packages", cache_index.record_lazy_inspect());
-    let upgradable_packages = enable_upgradable_packages
-        .then(|| upgradable_packages::UpgradablePackages::new(Arc::clone(&cache_index)));
-    let package_index = Arc::new(PackageIndex::new(blobfs.clone(), upgradable_packages));
+    let package_index = Arc::new(PackageIndex::new(
+        blobfs.clone(),
+        enable_upgradable_packages.then(|| Arc::clone(&cache_index)),
+    ));
     inspector.root().record_lazy_child("index", package_index.record_lazy_inspect());
     let scope = vfs::execution_scope::ExecutionScope::new();
     let (cobalt_sender, cobalt_fut) = ProtocolConnector::new_with_buffer_size(
@@ -356,7 +344,7 @@ async fn main_inner() -> Result<(), Error> {
     let () = svc_dir
         .add_entry(
             ffxfs::BlobReaderMarker::PROTOCOL_NAME,
-            get_blob_reader_handler(driver_blob_paging_active, &blobfs),
+            get_blob_reader_handler(use_driver_blob_paging, &blobfs),
         )
         .context("adding fuchsia.fxfs/BlobReader to /svc")?;
     if let Some(blob_verifier) = blob_verifier {
@@ -479,8 +467,8 @@ async fn main_inner() -> Result<(), Error> {
             )
             .context("adding fuchsia.component.resolution/Resolver-base to /svc")?;
     }
-    let (blob_fetcher_fut, blob_fetcher) = blob_fetcher::BlobFetcher::new(
-        blob_fetch_concurrency_limit.into(),
+    let blob_fetcher = blob_fetcher::BlobFetcher::new(
+        blob_fetch_concurrency_limit,
         blob_fetcher::Params::builder()
             .header_network_timeout(zx::BootDuration::from_seconds(
                 blob_network_header_timeout_seconds.into(),
@@ -494,7 +482,6 @@ async fn main_inner() -> Result<(), Error> {
         fidl_connector::ServiceReconnector::<fpkg_http::ClientMarker>::new(),
         inspector.root().create_child("blob_fetcher"),
     );
-    let blob_fetcher_fut = Task::spawn(blob_fetcher_fut);
     {
         let blob_fetcher = blob_fetcher.clone();
         let () = svc_dir
@@ -509,16 +496,14 @@ async fn main_inner() -> Result<(), Error> {
             )
             .context("adding fuchsia.pkg.internal/OtaDownloader to /svc")?;
     }
-    let (package_fetcher_fut, package_fetcher) = package_fetcher::PackageFetcher::new(
-        MAX_CONCURRENT_PACKAGE_FETCHES,
-        package_index.clone(),
+    let package_fetcher = package_fetcher::PackageFetcher::new(
+        Arc::clone(&package_index),
         blobfs.clone(),
         blob_fetcher,
         root_dir_factory.clone(),
         open_packages.clone(),
         inspector.root().create_child("package_fetcher"),
     );
-    let package_fetcher_fut = Task::spawn(package_fetcher_fut);
     let tuf_authority = fidl_connector::ServiceReconnector::<fpkg::AuthorityMarker>::new();
     {
         let resolver = ota_resolver::Resolver::new(
@@ -644,8 +629,6 @@ async fn main_inner() -> Result<(), Error> {
     let () = scope.wait().await;
     drop(post_commit_gc_task);
     drop(post_commit_gc_inspect);
-    let () = blob_fetcher_fut.await;
-    let () = package_fetcher_fut.await;
     let () = cobalt_fut.await;
 
     Ok(())

@@ -9,8 +9,6 @@
 
 #include "src/bringup/bin/device-name-provider/device_name_provider_config.h"
 
-constexpr char kDefaultDevdir[] = "/dev";
-
 struct DeviceNameProviderArgs {
   // This is the string value of `netsvc.interface`.
   // It is overridden by the string value of `--interface` on the binary commandline.
@@ -18,9 +16,6 @@ struct DeviceNameProviderArgs {
   // This is the string value of `zircon.nodename`.
   // It is overridden by the string value of `--nodename` on the binary commandline.
   std::string nodename;
-  // This defaults to "/dev"
-  // BUT it overridden by `--devdir` on the binary commandline.
-  std::string devdir;
   // This is the integer value of `zircon.namegen`
   // It is overridden by the value of `--namegen` on the commandline.
   // `--namegen 0` enables wordnames, any other value is treated as 1.

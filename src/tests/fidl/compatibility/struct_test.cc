@@ -389,7 +389,7 @@ void InitializeStruct(Struct* s) {
   s->unions.nullable_u->set_b(bool_distribution(rand_engine));
 
   s->table.set_s(random_string);
-  s->xunion_.set_s(random_string);
+  s->flexible_union.set_s(random_string);
 
   // bool
   s->b = bool_distribution(rand_engine);
@@ -709,9 +709,9 @@ void ExpectEq(const Struct& a, const Struct& b) {
   EXPECT_EQ(a.unions.nullable_u->is_b(), b.unions.nullable_u->is_b());
   EXPECT_EQ(a.unions.nullable_u->b(), b.unions.nullable_u->b());
 
-  // tables and xunions
+  // tables and flexible unions
   EXPECT_TRUE(fidl::Equals(a.table, b.table));
-  EXPECT_TRUE(fidl::Equals(a.xunion_, b.xunion_));
+  EXPECT_TRUE(fidl::Equals(a.flexible_union, b.flexible_union));
 
   // bool
   EXPECT_EQ(a.b, b.b);

@@ -17,6 +17,7 @@ cc_library(
         "scoped_test_env.h",
         "test_with_loop.h",
     ],
+    visibility = ["//src/developer/debug:__subpackages__"],
     deps = [
         ":common",
         "//src/developer/debug/shared:test_support",
@@ -31,7 +32,6 @@ cc_library(
         "adapters_unittest.cc",
         "address_ranges_unittest.cc",
         "cache_dir_unittest.cc",
-        "checked_math_unittest.cc",
         "curl_unittest.cc",
         "data_extractor_unittest.cc",
         "err_or_unittest.cc",
@@ -48,22 +48,6 @@ cc_library(
         "//src/lib/files",
         "//zircon/system/ulib/fbl",
         "@com_google_googletest//:gtest",
-    ],
-    alwayslink = True,
-)
-
-# Simple support library for writing perf tests. This is a much simpler variant
-# of //zircon/system/ulib/perftest that will run on the host.
-cc_library(
-    name = "perf_test",
-    testonly = True,
-    srcs = [
-        "perf_test.cc",
-        "perf_test.h",
-    ],
-    implementation_deps = ["//src/lib/fxl"],
-    deps = [
-        "@com_googletest_gtest//:gtest",
     ],
     alwayslink = True,
 )
@@ -94,7 +78,6 @@ cc_library(
         "address_ranges.h",
         "async_util.h",
         "cache_dir.h",
-        "checked_math.h",
         "curl.h",
         "data_extractor.h",
         "err.h",

@@ -8,15 +8,14 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_WAIT_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_WAIT_H_
 
+#include <assert.h>
 #include <lib/kconcurrent/chainlock.h>
 
+#include <fbl/canary.h>
 #include <fbl/intrusive_wavl_tree.h>
 #include <fbl/macros.h>
-#include <kernel/deadline.h>
-#include <kernel/preempt_disabled_token.h>
 #include <kernel/scheduler_state.h>
-#include <kernel/timer.h>
-#include <kernel/wait_ffi.h>
+#include <ktl/utility.h>
 
 struct Thread;
 class WaitQueueCollection;
@@ -36,41 +35,8 @@ enum class ResourceOwnership {
 // Whether a block or a sleep can be interrupted.
 enum class Interruptible : bool { No, Yes };
 
-// Whether to force base profile inheritance.
-enum class ForceInheritance : bool { No, Yes };
-
 extern "C" {
 void rust_wait_queue_base_destroy(WaitQueueBase* wait_queue);
-uint32_t rust_wait_queue_base_magic(const WaitQueueBase* wait_queue);
-bool rust_wait_queue_base_is_empty(const WaitQueueBase* wait_queue);
-uint32_t rust_wait_queue_base_count(const WaitQueueBase* wait_queue);
-zx_status_t rust_wait_queue_base_unblock_thread(WaitQueueBase* wait_queue, Thread* t,
-                                                zx_status_t wait_queue_error);
-zx_status_t rust_wait_queue_base_block_etc_preamble(WaitQueueBase* wait_queue,
-                                                    Thread* current_thread,
-                                                    const Deadline* deadline, uint32_t signal_mask,
-                                                    ResourceOwnership reason,
-                                                    Interruptible interruptible);
-zx_status_t rust_wait_queue_base_block_etc_postamble(const WaitQueueBase* wait_queue,
-                                                     Thread* current_thread,
-                                                     const Deadline* deadline);
-void rust_wait_queue_base_dequeue(WaitQueueBase* wait_queue, Thread* t,
-                                  zx_status_t wait_queue_error);
-void rust_wait_queue_base_validate_queue(const WaitQueueBase* wait_queue);
-void rust_wait_queue_base_timeout_handler(Timer* timer, zx_instant_mono_t now, void* arg);
-void rust_wait_queue_base_update_blocked_thread_effective_profile(WaitQueueBase* wait_queue,
-                                                                  Thread* t);
-
-zx_status_t rust_wait_queue_block_etc(WaitQueue* wait_queue, Thread* current_thread,
-                                      const Deadline* deadline, uint32_t signal_mask,
-                                      ResourceOwnership reason, Interruptible interruptible);
-bool rust_wait_queue_wake_one(WaitQueue* wait_queue, zx_status_t wait_queue_error);
-void rust_wait_queue_wake_all(WaitQueue* wait_queue, zx_status_t wait_queue_error);
-bool rust_wait_queue_wake_one_locked(WaitQueue* wait_queue, zx_status_t wait_queue_error,
-                                     bool* out_woken);
-bool rust_wait_queue_wake_all_locked(WaitQueue* wait_queue, zx_status_t wait_queue_error,
-                                     uint32_t* out_woken);
-void rust_wait_queue_move_thread(WaitQueue* source, WaitQueue* dest, Thread* t);
 }  // extern "C"
 
 // The collection of threads currently blocked in a wait queue.
@@ -90,45 +56,20 @@ class WaitQueueCollection {
    public:
     ThreadState() = default;
 
-    ~ThreadState();
+    ~ThreadState() { DEBUG_ASSERT(blocking_wait_queue_ == nullptr); }
 
     // Disallow copying.
     ThreadState(const ThreadState&) = delete;
     ThreadState& operator=(const ThreadState&) = delete;
 
-    bool InWaitQueue() const { return blocked_threads_tree_node_.InContainer(); }
-
-    zx_status_t BlockedStatus() const { return blocked_status_; }
-
-    void Block(Thread* current_thread, Interruptible interruptible, zx_status_t status)
-        TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread));
-
-    void Unsleep(Thread* thread, zx_status_t status) TA_REQ(chainlock_transaction_token)
-        TA_REL(ChainLockable::GetLock(*thread));
-
-    void AssertNoOwnedWaitQueues() const {}
-
-    void AssertNotBlocked() const {
-      DEBUG_ASSERT(blocking_wait_queue_ == nullptr);
-      DEBUG_ASSERT(!InWaitQueue());
-    }
-
-    WaitQueueBase* blocking_wait_queue() { return blocking_wait_queue_; }
-    const WaitQueueBase* blocking_wait_queue() const { return blocking_wait_queue_; }
-    Interruptible interruptible() const { return interruptible_; }
-
    private:
     // WaitQueues, WaitQueueCollections, and their List types, can
     // directly manipulate the contents of the per-thread state, for now.
-    friend class OwnedWaitQueue;
     friend class Scheduler;
     friend class WaitQueue;
     friend class WaitQueueBase;
     friend class WaitQueueCollection;
     friend struct WaitQueueCollection::BlockedThreadTreeTraits;
-
-    // Dumping routines are allowed to see inside us.
-    friend class ThreadDumper;
 
     // If blocked, a pointer to the WaitQueue the Thread is on.
     WaitQueueBase* blocking_wait_queue_ = nullptr;
@@ -156,20 +97,10 @@ class WaitQueueCollection {
   };
 
   constexpr WaitQueueCollection() {}
-  ~WaitQueueCollection() {
-    Validate();
-    DEBUG_ASSERT(threads_.is_empty());
-  }
+  ~WaitQueueCollection() { DEBUG_ASSERT(threads_.is_empty()); }
 
-  void Validate() const {
-    // TODO(johngro): We could perform a more rigorous check of the two maintained
-    // invariants of the threads_ collection, however we probably only want to do
-    // so if kSchedulerExtraInvariantValidation is true.
-  }
-
-  // Passthrus for the underlying container's size and is_empty methods.
+  // Passthru for the underlying container's size method.
   uint32_t Count() const { return static_cast<uint32_t>(threads_.size()); }
-  bool IsEmpty() const { return threads_.is_empty(); }
 
   // Peek at the first Thread in the collection.
   Thread* PeekFront() { return threads_.is_empty() ? nullptr : &threads_.front(); }
@@ -177,7 +108,6 @@ class WaitQueueCollection {
 
   // Accessor for the underlying thread collection.
   const auto& threads() const { return threads_; }
-  auto& threads() { return threads_; }
 
   // Disallow copying and moving.
   WaitQueueCollection(const WaitQueueCollection&) = delete;
@@ -205,55 +135,9 @@ class WaitQueueCollection {
 
 // Base class for wait queue types, providing common functionality.
 class WaitQueueBase : public ChainLockable {
- public:
-  uint32_t magic() const { return rust_wait_queue_base_magic(this); }
-  bool IsEmpty() const TA_REQ_SHARED(get_lock()) { return rust_wait_queue_base_is_empty(this); }
-  uint32_t Count() const TA_REQ_SHARED(get_lock()) { return rust_wait_queue_base_count(this); }
-
-  // Remove a specific thread out of the wait queue it's blocked on, and deal
-  // with any PI side effects.  Note: when calling this function:
-  //
-  // 1) The thread |t| must be actively blocked in the WaitQueue instance
-  //    indicated by |this|.
-  // 2) In addition to |t|'s lock, all of the ChainLocks downstream of |t|
-  //    (starting from |t| and ending at the target of |t|'s PI graph) must be
-  //    held.  Note that we are only able to statically assert that the first
-  //    two of these locks; |t|'s lock, and the lock of the wait queue |t| is
-  //    currently blocked in.
-  // 3) During the call UnblockThread, all of the locks identified in #2 (above)
-  //    will be released.
-  zx_status_t UnblockThread(Thread* t, zx_status_t wait_queue_error)
-      TA_REL(get_lock(), ChainLockable::GetLock(*t))
-          TA_REQ(chainlock_transaction_token, preempt_disabled_token);
-
  protected:
-  friend class Scheduler;
-
   explicit constexpr WaitQueueBase(uint32_t magic) : magic_(magic) {}
   ~WaitQueueBase();
-
-  inline zx_status_t BlockEtcPreamble(Thread* current_thread, const Deadline& deadline,
-                                      uint signal_mask, ResourceOwnership reason,
-                                      Interruptible interruptible)
-      TA_REQ(get_lock(), ChainLockable::GetLock(*current_thread));
-
-  inline zx_status_t BlockEtcPostamble(Thread* current_thread, const Deadline& deadline)
-      TA_EXCL(get_lock())
-          TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread));
-
-  void Dequeue(Thread* t, zx_status_t wait_queue_error)
-      TA_REQ(get_lock(), ChainLockable::GetLock(*t));
-
-  void ValidateQueue() const TA_REQ_SHARED(get_lock());
-
-  static void TimeoutHandler(Timer* timer, zx_instant_mono_t now, void* arg);
-
-  // Recompute the effective profile of a thread which is known to be blocked in
-  // this wait queue, reordering the thread in the queue collection as needed.
-  //
-  // This method does not deal with the consequences of profile inheritance, and
-  // should only ever be called from the scheduler's PI update code.
-  void UpdateBlockedThreadEffectiveProfile(Thread& t) TA_REQ(get_lock(), t);
 
   uint32_t magic_;
   WaitQueueCollection collection_ TA_GUARDED(get_lock());
@@ -271,69 +155,6 @@ class WaitQueue : public WaitQueueBase {
   WaitQueue(WaitQueue&&) = delete;
   WaitQueue& operator=(WaitQueue&) = delete;
   WaitQueue& operator=(WaitQueue&&) = delete;
-
-  // Block on a wait queue.
-  // The returned status is whatever the caller of WaitQueue::Wake_*() specifies.
-  // A deadline other than Deadline::infinite() will abort at the specified time
-  // and return ZX_ERR_TIMED_OUT. A deadline in the past will immediately return.
-  zx_status_t Block(Thread* const current_thread, const Deadline& deadline,
-                    Interruptible interruptible) TA_REL(get_lock())
-      TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread)) {
-    return BlockEtc(current_thread, deadline, 0, ResourceOwnership::Normal, interruptible);
-  }
-
-  // Block on a wait queue with a zx_instant_mono_t-typed deadline.
-  zx_status_t Block(Thread* const current_thread, zx_instant_mono_t deadline,
-                    Interruptible interruptible) TA_REL(get_lock())
-      TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread)) {
-    return BlockEtc(current_thread, Deadline::no_slack(deadline), 0, ResourceOwnership::Normal,
-                    interruptible);
-  }
-
-  // Block on a wait queue, ignoring existing signals in |signal_mask|.
-  // The returned status is whatever the caller of WaitQueue::Wake_*() specifies, or
-  // ZX_ERR_TIMED_OUT if the deadline has elapsed or is in the past.
-  // This will never timeout when called with a deadline of Deadline::infinite().
-  zx_status_t BlockEtc(Thread* current_thread, const Deadline& deadline, uint signal_mask,
-                       ResourceOwnership reason, Interruptible interruptible) TA_REL(get_lock())
-      TA_REQ(chainlock_transaction_token, ChainLockable::GetLock(*current_thread));
-
-  // Release one or more threads from the wait queue.
-  // wait_queue_error = what WaitQueue::Block() should return for the blocking thread.
-  //
-  // Returns true if a thread was woken, and false otherwise.
-  bool WakeOne(zx_status_t wait_queue_error) TA_EXCL(chainlock_transaction_token, get_lock());
-  void WakeAll(zx_status_t wait_queue_error) TA_EXCL(chainlock_transaction_token, get_lock());
-
-  // Locked versions of the wake calls.  These calls are going to need to obtain
-  // locks for each of the threads woken, which could result in needing to back
-  // off and start the operation again. Each routine returns a
-  // std::optional (bool or u32).
-  //
-  // ++ If the optional holds a value, then the value is the number of threads
-  //    which were woken, and the operation succeeded.
-  // ++ Otherwise, the operation failed with a Backoff error and the queue's
-  //    lock needs to be dropped before trying again.
-  //
-  // It is assumed that forming a lock cycle should be impossible.  If such a
-  // cycle is detected (like, if the caller was holding the lock of one of the
-  // thread's blocked in this queue at the time of the call) it will trigger a
-  // DEBUG_ASSERT.
-  //
-  // Either way, unlike the non-Locked versions of these routines, the wait
-  // queue's lock is held for the duration of the operation, instead of being
-  // release as soon as possible (during the call to SchedulerUnlock)
-  ktl::optional<bool> WakeOneLocked(zx_status_t wait_queue_error)
-      TA_REQ(chainlock_transaction_token, get_lock(), preempt_disabled_token);
-  ktl::optional<uint32_t> WakeAllLocked(zx_status_t wait_queue_error)
-      TA_REQ(chainlock_transaction_token, get_lock(), preempt_disabled_token);
-
- protected:
-  explicit constexpr WaitQueue(uint32_t magic) : WaitQueueBase(magic) {}
-
-  // Move the specified thread from the source wait queue to the dest wait queue.
-  static void MoveThread(WaitQueue* source, WaitQueue* dest, Thread* t)
-      TA_REQ(source->get_lock(), dest->get_lock(), ChainLockable::GetLock(*t));
 };
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_WAIT_H_

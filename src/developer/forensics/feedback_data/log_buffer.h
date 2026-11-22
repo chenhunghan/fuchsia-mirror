@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_LOG_BUFFER_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_LOG_BUFFER_H_
 
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/zx/time.h>
 
@@ -29,7 +29,7 @@ class LogBuffer {
   // |capacity|.
   //
   // Messages are assumed to be received mostly in order.
-  void Add(::fpromise::result<fuchsia::logger::LogMessage, std::string> message);
+  void Add(::fpromise::result<fuchsia_logger::LogMessage, std::string> message);
 
   // Returns std::nullopt if the buffer is empty.
   std::optional<zx::time_boot> FirstTimestamp() const;
@@ -41,7 +41,7 @@ class LogBuffer {
 
  private:
   struct Message {
-    Message(const ::fpromise::result<fuchsia::logger::LogMessage, std::string>& message,
+    Message(const ::fpromise::result<fuchsia_logger::LogMessage, std::string>& message,
             zx::time_boot default_timestamp);
 
     zx::time_boot timestamp;

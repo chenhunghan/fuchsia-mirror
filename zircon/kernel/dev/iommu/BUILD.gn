@@ -4,7 +4,6 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 kernel_rust_mod("iommu_rs") {
@@ -12,35 +11,24 @@ kernel_rust_mod("iommu_rs") {
     "bti.rs",
     "escaped_name.rs",
     "mod.rs",
+    "stub.rs",
   ]
   deps = [
+    "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
+    "//src/lib/kalloc",
+    "//src/lib/ksync",
     "//src/lib/zr",
+    "//third_party/rust_crates:pin-init",
     "//zircon/kernel/lib/debug",
+    "//zircon/kernel/lib/page:page-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
   ]
 }
 
-static_library("iommu") {
-  public_deps = [ ":headers" ]
-
-  sources = [
-    "bti_ffi.cc",
-    "pmt_ffi.cc",
-  ]
-
-  deps = [
-    ":iommu_rs",
-    "//zircon/kernel/lib/fbl",
-    "//zircon/kernel/lib/libc",
-    "//zircon/kernel/vm:headers",
-  ]
-}
-
-library_headers("headers") {
-  headers = [
-    "dev/iommu/bti.h",
-    "dev/iommu/common.h",
-    "dev/iommu/iommu.h",
-    "dev/iommu/pmt.h",
-  ]
+# The generic IOMMU layer (dispatch across the stub IOMMU and the hardware
+# drivers) is the Rust module above. Depending on this target is how it reaches
+# the kernel.
+group("iommu") {
+  deps = [ ":iommu_rs" ]
 }

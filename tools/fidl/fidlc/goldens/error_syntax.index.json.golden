@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
       "data": "test.errorsyntax",
       "start_offset": 173,
       "end_offset": 189
@@ -14,7 +14,7 @@
       "library_name": "test.errorsyntax.parent",
       "referenced_at": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
         "data": "test.errorsyntax.parent",
         "start_offset": 198,
         "end_offset": 221
@@ -26,7 +26,7 @@
       "library_name": "test.errorsyntax.parent",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "data": "test.errorsyntax.parent",
         "start_offset": 173,
         "end_offset": 196
@@ -38,7 +38,7 @@
       "identifier": "test.errorsyntax.parent/ParentUsesErrorSyntaxComposedCallWhichMayFailRequest",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "data": "struct {\n        s string;\n    }",
         "start_offset": 275,
         "end_offset": 307
@@ -48,7 +48,7 @@
       "identifier": "test.errorsyntax.parent/ParentUsesErrorSyntax_ComposedCallWhichMayFail_Response",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "data": "struct {\n        value int64;\n    }",
         "start_offset": 313,
         "end_offset": 348
@@ -58,7 +58,7 @@
       "identifier": "test.errorsyntax.parent/ParentUsesErrorSyntax",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "data": "ParentUsesErrorSyntax",
         "start_offset": 215,
         "end_offset": 236
@@ -68,7 +68,7 @@
       "identifier": "test.errorsyntax.parent/ParentUsesErrorSyntax_ComposedCallWhichMayFail_Result",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
         "data": "(struct {\n        value int64;\n    })",
         "start_offset": 312,
         "end_offset": 349
@@ -115,7 +115,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "data": "s",
             "start_offset": 370,
             "end_offset": 371
@@ -134,7 +134,7 @@
           "name": "value",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "data": "value",
             "start_offset": 408,
             "end_offset": 413
@@ -151,7 +151,7 @@
       "identifier": "test.errorsyntax/ExampleUseOfErrorSyntax",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
         "data": "ExampleUseOfErrorSyntax",
         "start_offset": 240,
         "end_offset": 263
@@ -161,7 +161,7 @@
           "identifier": "ComposedCallWhichMayFail",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error_syntax/parent.test.fidl",
             "data": "ComposedCallWhichMayFail",
             "start_offset": 250,
             "end_offset": 274
@@ -179,7 +179,7 @@
           "identifier": "CallWhichMayFail",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "data": "CallWhichMayFail",
             "start_offset": 336,
             "end_offset": 352
@@ -199,7 +199,7 @@
           "identifier": "test.errorsyntax.parent/ParentUsesErrorSyntax",
           "referenced_at": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/error_syntax/child.test.fidl",
             "data": "test.errorsyntax.parent.ParentUsesErrorSyntax",
             "start_offset": 278,
             "end_offset": 323

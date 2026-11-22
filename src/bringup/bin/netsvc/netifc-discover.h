@@ -5,10 +5,13 @@
 #ifndef SRC_BRINGUP_BIN_NETSVC_NETIFC_DISCOVER_H_
 #define SRC_BRINGUP_BIN_NETSVC_NETIFC_DISCOVER_H_
 
+#include <fidl/fuchsia.driver.framework/cpp/wire.h>
 #include <fidl/fuchsia.hardware.network/cpp/wire.h>
-#include <lib/stdcompat/string_view.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/result.h>
+
+#include <string>
+#include <string_view>
 
 #include "src/bringup/bin/netsvc/inet6.h"
 
@@ -18,7 +21,8 @@ struct NetdeviceInterface {
   mac_addr_t mac;
 };
 
-zx::result<NetdeviceInterface> netifc_discover(const std::string& devdir,
-                                               std::string_view topological_path);
+std::string BusInfoToPath(fidl::VectorView<fuchsia_driver_framework::wire::BusInfo> bus_info_list);
+
+zx::result<NetdeviceInterface> netifc_discover(std::string_view topological_path);
 
 #endif  // SRC_BRINGUP_BIN_NETSVC_NETIFC_DISCOVER_H_

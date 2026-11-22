@@ -8,14 +8,20 @@
 //! Test utilities for starting a blobfs server.
 
 use anyhow::{Context as _, Error, anyhow};
-use delivery_blob::{CompressionMode, Type1Blob};
+use blob_pager_and_verifier::BlobPagerAndVerifier;
+use delivery_blob::DeliveryBlobType;
 use fidl::endpoints::{ClientEnd, DiscoverableProtocolMarker};
 use fidl_fuchsia_fs_startup::{CreateOptions, MountOptions};
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_io as fio;
+use fidl_fuchsia_storage_block as fblock;
+use fidl_fuchsia_storage_mapping as fmapping;
+use fuchsia_async as fasync;
 use fuchsia_merkle::Hash;
+use futures::TryStreamExt as _;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 const RAMDISK_BLOCK_SIZE: u64 = 512;
 static FXFS_BLOB_VOLUME_NAME: &str = "blob";
@@ -156,23 +162,39 @@ impl BlobfsRamdiskBuilder {
             Implementation::Fxblob => {
                 let fs =
                     fs.serve_multi_volume().await.context("serving multi volume filesystem")?;
-                let volume = if needs_format {
-                    fs.create_volume(
-                        FXFS_BLOB_VOLUME_NAME,
-                        CreateOptions::default(),
-                        MountOptions { as_blob: Some(true), ..MountOptions::default() },
-                    )
-                    .await
-                    .context("creating blob volume")?
-                } else {
-                    fs.open_volume(
-                        FXFS_BLOB_VOLUME_NAME,
-                        MountOptions { as_blob: Some(true), ..MountOptions::default() },
-                    )
-                    .await
-                    .context("opening blob volume")?
+                let mount_options = MountOptions {
+                    as_blob: Some(true),
+                    use_driver_blob_paging: Some(true),
+                    ..MountOptions::default()
                 };
-                ServingFilesystem::MultiVolume(fs, volume)
+                let volume = if needs_format {
+                    fs.create_volume(FXFS_BLOB_VOLUME_NAME, CreateOptions::default(), mount_options)
+                        .await
+                        .context("creating blob volume")?
+                } else {
+                    fs.open_volume(FXFS_BLOB_VOLUME_NAME, mount_options)
+                        .await
+                        .context("opening blob volume")?
+                };
+                let mapping_provider = fuchsia_component::client::connect_to_protocol_at_dir_svc::<
+                    fmapping::MappingProviderMarker,
+                >(volume.exposed_dir())
+                .context("connecting to MappingProvider")?;
+                let mapper = fuchsia_component::client::connect_to_protocol_at_dir_svc::<
+                    fblock::MapperMarker,
+                >(volume.exposed_dir())
+                .context("connecting to Mapper")?;
+                let blob_pager = Arc::new(
+                    BlobPagerAndVerifier::new_with_cache_capacity(&mapping_provider, &mapper, 0)
+                        .await
+                        .context("creating BlobPagerAndVerifier")?,
+                );
+                ServingFilesystem::MultiVolume {
+                    scope: fasync::Scope::new_with_name("blobfs_ramdisk_blob_reader"),
+                    blob_pager,
+                    volume,
+                    fs,
+                }
             }
         };
 
@@ -210,17 +232,21 @@ pub struct BlobfsRamdisk {
 /// wrap either blobfs or fxblob.
 enum ServingFilesystem {
     SingleVolume(fs_management::filesystem::ServingSingleVolumeFilesystem),
-    MultiVolume(
-        fs_management::filesystem::ServingMultiVolumeFilesystem,
-        fs_management::filesystem::ServingVolume,
-    ),
+    MultiVolume {
+        scope: fasync::Scope,
+        blob_pager: Arc<BlobPagerAndVerifier>,
+        volume: fs_management::filesystem::ServingVolume,
+        fs: fs_management::filesystem::ServingMultiVolumeFilesystem,
+    },
 }
 
 impl ServingFilesystem {
     async fn shutdown(self) -> Result<(), Error> {
         match self {
             Self::SingleVolume(fs) => fs.shutdown().await.context("shutting down single volume"),
-            Self::MultiVolume(fs, _volume) => {
+            Self::MultiVolume { fs, volume: _, blob_pager, scope } => {
+                scope.cancel().await;
+                drop(blob_pager);
                 fs.shutdown().await.context("shutting down multi volume")
             }
         }
@@ -229,7 +255,7 @@ impl ServingFilesystem {
     fn exposed_dir(&self) -> Result<&fio::DirectoryProxy, Error> {
         match self {
             Self::SingleVolume(fs) => Ok(fs.exposed_dir()),
-            Self::MultiVolume(_fs, volume) => Ok(volume.exposed_dir()),
+            Self::MultiVolume { volume, .. } => Ok(volume.exposed_dir()),
         }
     }
 
@@ -237,7 +263,7 @@ impl ServingFilesystem {
     fn blob_dir_name(&self) -> &'static str {
         match self {
             Self::SingleVolume(_) => "blob-exec",
-            Self::MultiVolume(_, _) => "root",
+            Self::MultiVolume { .. } => "root",
         }
     }
 
@@ -249,7 +275,7 @@ impl ServingFilesystem {
                 fio::PERM_READABLE,
             )
             .context("opening svc dir")?),
-            Self::MultiVolume(_, _) => Ok(fuchsia_fs::directory::open_directory_async(
+            Self::MultiVolume { .. } => Ok(fuchsia_fs::directory::open_directory_async(
                 self.exposed_dir()?,
                 "svc",
                 fio::PERM_READABLE,
@@ -266,10 +292,33 @@ impl ServingFilesystem {
     }
 
     fn blob_reader_proxy(&self) -> Result<ffxfs::BlobReaderProxy, Error> {
-        fuchsia_component::client::connect_to_protocol_at_dir_root::<ffxfs::BlobReaderMarker>(
-            &self.svc_dir()?,
-        )
-        .context("connecting to fuchsia.fxfs.BlobReader")
+        match self {
+            Self::SingleVolume(_) => fuchsia_component::client::connect_to_protocol_at_dir_root::<
+                ffxfs::BlobReaderMarker,
+            >(&self.svc_dir()?)
+            .context("connecting to fuchsia.fxfs.BlobReader"),
+            Self::MultiVolume { blob_pager, scope, .. } => {
+                let (proxy, mut stream) =
+                    fidl::endpoints::create_proxy_and_stream::<ffxfs::BlobReaderMarker>();
+                let blob_pager = blob_pager.clone();
+                scope.spawn(async move {
+                    while let Ok(Some(ffxfs::BlobReaderRequest::GetVmo { blob_hash, responder })) =
+                        stream.try_next().await
+                    {
+                        blob_pager.clear_cache();
+                        let res = blob_pager.create_vmo(&blob_hash).await.map_err(|e| {
+                            e.root_cause()
+                                .downcast_ref::<zx::Status>()
+                                .copied()
+                                .unwrap_or(zx::Status::INTERNAL)
+                                .into_raw()
+                        });
+                        let _ = responder.send(res);
+                    }
+                });
+                Ok(proxy)
+            }
+        }
     }
 
     fn overwrite_configuration_proxy(
@@ -284,7 +333,7 @@ impl ServingFilesystem {
     fn implementation(&self) -> Implementation {
         match self {
             Self::SingleVolume(_) => Implementation::CppBlobfs,
-            Self::MultiVolume(_, _) => Implementation::Fxblob,
+            Self::MultiVolume { .. } => Implementation::Fxblob,
         }
     }
 }
@@ -346,6 +395,11 @@ impl BlobfsRamdisk {
         unsafe { Ok(openat::Dir::from_raw_fd(fd.into_raw_fd())) }
     }
 
+    /// Returns the blob filesystem implementation used by this ramdisk.
+    pub fn implementation(&self) -> Implementation {
+        self.fs.implementation()
+    }
+
     /// Signals blobfs to unmount and waits for it to exit cleanly, returning a new
     /// [`BlobfsRamdiskBuilder`] initialized with the ramdisk.
     pub async fn into_builder(self) -> Result<BlobfsRamdiskBuilder, Error> {
@@ -391,16 +445,17 @@ impl BlobfsRamdisk {
         self.write_blob(merkle, &bytes).await
     }
 
-    /// Writes a blob with hash `merkle` and blob contents `bytes` to blobfs. `bytes` should be
-    /// uncompressed. Ignores AlreadyExists errors. Overwrites already existing blobs if `overwrite`
-    /// is true.
-    pub async fn write_blob_with_overwrite(
+    /// Writes a blob with hash `merkle` and blob contents `bytes` to blobfs using `delivery_type`.
+    /// `bytes` should be uncompressed. Ignores AlreadyExists errors. Overwrites already existing
+    /// blobs if `overwrite` is true.
+    pub async fn write_blob_with_delivery_type_and_overwrite(
         &self,
         merkle: Hash,
         bytes: &[u8],
+        delivery_type: DeliveryBlobType,
         overwrite: bool,
     ) -> Result<(), Error> {
-        let compressed_data = Type1Blob::generate(bytes, CompressionMode::Attempt);
+        let compressed_data = delivery_blob::generate(delivery_type, bytes);
         let blob_creator = self.blob_creator_proxy()?;
         let writer_client_end = match blob_creator.create(&merkle.into(), overwrite).await? {
             Ok(writer_client_end) => writer_client_end,
@@ -417,6 +472,35 @@ impl BlobfsRamdisk {
             .context("failed to create BlobWriter")?;
         blob_writer.write(&compressed_data).await?;
         Ok(())
+    }
+
+    /// Writes a blob with hash `merkle` and blob contents `bytes` to blobfs. `bytes` should be
+    /// uncompressed. Ignores AlreadyExists errors. Overwrites already existing blobs if `overwrite`
+    /// is true.
+    pub async fn write_blob_with_overwrite(
+        &self,
+        merkle: Hash,
+        bytes: &[u8],
+        overwrite: bool,
+    ) -> Result<(), Error> {
+        self.write_blob_with_delivery_type_and_overwrite(
+            merkle,
+            bytes,
+            DeliveryBlobType::Type1,
+            overwrite,
+        )
+        .await
+    }
+
+    /// Writes a blob with hash `merkle` and blob contents `bytes` to blobfs using `delivery_type`.
+    /// `bytes` should be uncompressed. Ignores AlreadyExists errors.
+    pub async fn write_blob_with_delivery_type(
+        &self,
+        merkle: Hash,
+        bytes: &[u8],
+        delivery_type: DeliveryBlobType,
+    ) -> Result<(), Error> {
+        self.write_blob_with_delivery_type_and_overwrite(merkle, bytes, delivery_type, false).await
     }
 
     /// Writes a blob with hash `merkle` and blob contents `bytes` to blobfs. `bytes` should be
@@ -670,16 +754,18 @@ mod tests {
         blobfs.stop().await.unwrap();
     }
 
-    #[test_case(Implementation::CppBlobfs; "blobfs")]
-    #[test_case(Implementation::Fxblob; "fxblob")]
+    #[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type1; "blobfs_type1")]
+    #[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type2; "blobfs_type2")]
+    #[test_case(Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+    #[test_case(Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
     #[fuchsia::test]
-    async fn blob_creator_api(implementation: Implementation) {
+    async fn blob_creator_api(implementation: Implementation, delivery_type: DeliveryBlobType) {
         let blobfs = BlobfsRamdisk::builder().implementation(implementation).start().await.unwrap();
         assert_eq!(blobfs.list_blobs().unwrap(), BTreeSet::from([]));
 
         let bytes = &[1u8; 40];
         let hash = fuchsia_merkle::root_from_slice(bytes);
-        let compressed_data = Type1Blob::generate(bytes, CompressionMode::Always);
+        let compressed_data = delivery_blob::generate(delivery_type, bytes);
 
         let blob_creator = blobfs.blob_creator_proxy().unwrap();
         let blob_writer = blob_creator.create(&hash, false).await.unwrap().unwrap();

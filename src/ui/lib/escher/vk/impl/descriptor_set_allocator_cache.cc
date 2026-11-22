@@ -10,7 +10,8 @@
 namespace escher {
 namespace impl {
 
-DescriptorSetAllocatorCache::DescriptorSetAllocatorCache(vk::Device device) : device_(device) {}
+DescriptorSetAllocatorCache::DescriptorSetAllocatorCache(vk::Device device, EscherWeakPtr escher)
+    : device_(device), escher_(std::move(escher)) {}
 
 DescriptorSetAllocatorPtr DescriptorSetAllocatorCache::ObtainDescriptorSetAllocator(
     const DescriptorSetLayout& layout, const SamplerPtr& immutable_sampler) {
@@ -38,20 +39,21 @@ DescriptorSetAllocatorPtr DescriptorSetAllocatorCache::ObtainDescriptorSetAlloca
   {
     TRACE_DURATION(
         "gfx", "escher::impl::DescriptorSetAllocatorCache::ObtainDescriptorSetAllocator[creation]");
-    allocator = std::make_shared<DescriptorSetAllocator>(device_, layout, immutable_sampler);
+    allocator =
+        std::make_shared<DescriptorSetAllocator>(device_, layout, escher_, immutable_sampler);
   }
   descriptor_set_allocators_[hash] = allocator;
   return allocator;
 }
 
-void DescriptorSetAllocatorCache::BeginFrame() {
+void DescriptorSetAllocatorCache::BeginFrame(uint64_t last_finished_sequence_number) {
   TRACE_DURATION("gfx", "escher::impl::DescriptorSetAllocatorCache::BeginFrame");
   auto it = descriptor_set_allocators_.begin();
   while (it != descriptor_set_allocators_.end()) {
     if (it->second.expired()) {
       it = descriptor_set_allocators_.erase(it);
     } else {
-      it->second.lock()->BeginFrame();
+      it->second.lock()->BeginFrame(last_finished_sequence_number);
       ++it;
     }
   }

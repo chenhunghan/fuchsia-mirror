@@ -160,8 +160,7 @@ impl core::fmt::Debug for Handle {
     }
 }
 
-// This layout is mirrored by `HandleLayoutCheck` in handle.cc, which pins the C++ view of the same
-// bytes so the two definitions can never drift apart silently.
+// Pin the layout of `Handle` to verify field offsets against `HANDLE_PRESERVE_SIZE`.
 zr::static_assert!(core::mem::size_of::<Handle>() == 40);
 zr::static_assert!(core::mem::align_of::<Handle>() == 8);
 zr::static_assert!(core::mem::offset_of!(Handle, handle_table_id) == 0);
@@ -597,12 +596,6 @@ impl HandleOwner {
         let ptr = self.ptr;
         core::mem::forget(self);
         ptr
-    }
-
-    /// Releases ownership of an optional `HandleOwner`, returning null if `None`.
-    #[inline]
-    pub fn release_opt(owner: Option<Self>) -> *mut Handle {
-        owner.map_or(core::ptr::null_mut(), |o| o.release().as_ptr())
     }
 
     /// Duplicates this handle with the given rights.

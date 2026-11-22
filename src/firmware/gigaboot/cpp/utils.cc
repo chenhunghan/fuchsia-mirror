@@ -311,19 +311,24 @@ std::optional<gigaboot::RebootMode> GetCommandlineRebootMode(bool allow_disk_fal
 
 // TODO(b/285053546) 'BootByte' usage should be removed in favour of ABR Metadata
 bool SetRebootMode(RebootMode mode) {
-  return gEfiSystemTable != nullptr &&
+  return gEfiSystemTable != nullptr && gEfiSystemTable->RuntimeServices != nullptr &&
+         gEfiSystemTable->RuntimeServices->SetVariable != nullptr &&
          set_bootbyte(gEfiSystemTable->RuntimeServices, RebootModeToByte(mode)) == EFI_SUCCESS;
 }
 
 std::optional<RebootMode> GetOneShotRebootMode(AbrDataOneShotFlags one_shot_flags) {
-  if (AbrIsOneShotRecoveryBootSet(one_shot_flags)) {
-    return RebootMode::kRecovery;
-  }
   if (AbrIsOneShotBootloaderBootSet(one_shot_flags)) {
     return RebootMode::kBootloader;
   }
+  if (AbrIsOneShotRecoveryBootSet(one_shot_flags)) {
+    return RebootMode::kRecovery;
+  }
 
   // TODO(b/285053546) 'BootByte' usage should be removed in favour of ABR Metadata
+  if (gEfiSystemTable == nullptr || gEfiSystemTable->RuntimeServices == nullptr ||
+      gEfiSystemTable->RuntimeServices->GetVariable == nullptr) {
+    return std::nullopt;
+  }
   uint8_t bootbyte;
   efi_status status = get_bootbyte(gEfiSystemTable->RuntimeServices, &bootbyte);
   if (status != EFI_SUCCESS) {
@@ -331,6 +336,33 @@ std::optional<RebootMode> GetOneShotRebootMode(AbrDataOneShotFlags one_shot_flag
   }
 
   return ParseByteToRebootMode(bootbyte);
+}
+
+RebootMode LoadRebootMode(ZirconBootOps zb_ops, bool allow_cmdline_disk_fallback) {
+  if (auto reboot_mode = GetCommandlineRebootMode(allow_cmdline_disk_fallback);
+      reboot_mode.has_value()) {
+    return reboot_mode.value();
+  }
+
+  AbrDataOneShotFlags one_shot_flags = kAbrDataOneShotFlagNone;
+  AbrOps abr_ops = GetAbrOpsFromZirconBootOps(&zb_ops);
+  if (AbrGetAndClearOneShotFlags(&abr_ops, &one_shot_flags) != kAbrResultOk) {
+    printf("Warning: failed to get one shot flags from ABR; checking legacy bootbyte\n");
+    one_shot_flags = kAbrDataOneShotFlagNone;
+  } else {
+    printf("abr.one_shot_flags = 0x%02x\n", one_shot_flags);
+  }
+
+  RebootMode reboot_mode = GetOneShotRebootMode(one_shot_flags).value_or(RebootMode::kNormal);
+
+  // TODO(b/285053546) 'BootByte' usage should be removed in favour of ABR Metadata
+  // Reset previous reboot mode immediately to prevent it from being sticky.
+  if (reboot_mode != RebootMode::kNormal && !SetRebootMode(RebootMode::kNormal)) {
+    printf("Error: failed to reset reboot mode\n");
+    return RebootMode::kNormal;
+  }
+
+  return reboot_mode;
 }
 
 // See `ToStr()` for format details

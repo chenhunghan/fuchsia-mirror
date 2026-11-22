@@ -53,7 +53,8 @@ inline constexpr std::string_view kRemoteAbiStubSuffix = ".so";
 // the stub dynamic linker used at runtime came from the same ld library source
 // tree as this class.
 
-template <class Elf = elfldltl::Elf<>, elfldltl::ElfMachine Machine = elfldltl::ElfMachine::kNative>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>,
+          elfldltl::ElfMachine Machine = elfldltl::ElfMachine::kNative>
 class RemoteAbiStub : public fbl::RefCounted<RemoteAbiStub<Elf>> {
  public:
   // Once created, the RemoteAbiStub only needs to be used as const.

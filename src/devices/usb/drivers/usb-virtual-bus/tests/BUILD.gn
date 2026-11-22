@@ -79,3 +79,26 @@ fuchsia_unittest_package("usb-virtual-bus-unit-test") {
     }
   }
 }
+
+# Virtual Bus Tester Function FIDL Test
+fuchsia_test_component("usb-virtual-bus-tester-function-fidl-test-component") {
+  component_name = "usb-function-fidl-test"
+  manifest = "//src/devices/usb/testing/usb-function-fidl-test/meta/usb-function-fidl-test.cml"
+  deps = [ "//src/devices/usb/testing/usb-function-fidl-test:usb_function_fidl_test_bin" ]
+}
+
+fuchsia_test_package("usb-virtual-bus-tester-function-fidl-test") {
+  test_components = [ ":usb-virtual-bus-tester-function-fidl-test-component" ]
+  deps = [
+    "virtual-bus-tester-function",
+    "//sdk/lib/driver_test_realm:driver_manager_test",
+    "//sdk/lib/driver_test_realm:fake_resolver",
+    "//src/devices/misc/drivers/test-parent",
+    "//src/devices/usb/testing/usb-function-fidl-test/fake-usb-peripheral",
+  ]
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
+}

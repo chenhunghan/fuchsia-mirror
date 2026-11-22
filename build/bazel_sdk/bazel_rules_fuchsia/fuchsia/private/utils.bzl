@@ -9,6 +9,7 @@ load(
     "flatten",
     "stub_executable",
 )
+load("@fuchsia_rules_common//devicetree:preprocess.bzl", "preprocess_dts")
 load(":providers.bzl", "FuchsiaProvidersInfo")
 
 _INVALID_LABEL_CHARACTERS = "\"!%@^_#$&'()*+,;<=>?[]{|}~/".elems()
@@ -395,20 +396,12 @@ def preprocess_file(ctx, source, includes, headers = [], files = depset()):
 
     dest_filename = source.basename.rstrip(".S")
     output_file = ctx.actions.declare_file(dest_filename)
-
-    pp_args = ctx.actions.args()
-    pp_args.add("-undef")
-    pp_args.add("-P")
-    pp_args.add_all(includes, before_each = "-I")
-    pp_args.add("-x", "assembler-with-cpp")
-    pp_args.add(source)
-    pp_args.add("-o", output_file)
-
-    ctx.actions.run(
-        executable = ctx.executable._preprocessor_binary,
-        arguments = [pp_args],
-        inputs = [source] + headers + files.to_list(),
-        outputs = [output_file],
+    return preprocess_dts(
+        ctx,
+        preprocessor = ctx.executable._preprocessor_binary,
+        source = source,
+        output_file = output_file,
+        includes = includes,
+        inputs = depset(direct = headers, transitive = [files]),
         mnemonic = "ClangPreprocessor",
     )
-    return output_file

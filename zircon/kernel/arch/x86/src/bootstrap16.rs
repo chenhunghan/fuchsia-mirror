@@ -9,12 +9,16 @@
 use core::cell::{Cell, UnsafeCell};
 use core::ffi::c_void;
 use core::mem::{align_of, offset_of, size_of};
+use core::pin::Pin;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use crate::kernel::mutex::Mutex;
+use crate::ksync_kernel::TrackedMutex;
 use debug::{ltracef, tracef};
 use fbl::RefPtr;
-use ksync::LockPolicy;
+use ksync::{KMutex, LockPolicy};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use zx_status::Status;
 
 use super::bootstrap16_ffi::{
@@ -124,7 +128,35 @@ zr::static_assert!(offset_of!(X86ApBootstrapData, per_cpu) == BCD_PER_CPU_BASE_O
 /// Initialized once during single-threaded early boot in [`x86_bootstrap16_init`] before secondary
 /// CPU bringup calls [`x86_bootstrap16_acquire`], so `Ordering::Relaxed` is sufficient.
 static BOOTSTRAP_PHYS_ADDR: AtomicUsize = AtomicUsize::new(usize::MAX);
-static BOOTSTRAP_LOCK: Mutex = Mutex::new();
+#[ksync::guarded]
+struct BootstrapLock {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+}
+
+/// Serializes use of the bootstrap region, from [`x86_bootstrap16_acquire`] to
+/// [`x86_bootstrap16_release`]. Constructed by the `x86_bootstrap16_lock` init hook.
+static BOOTSTRAP_LOCK: LazyInit<BootstrapLock, NoCheck> = LazyInit::uninit();
+
+impl BootstrapLock {
+    #[inline]
+    fn raw_mutex() -> &'static Mutex {
+        // SAFETY: `BOOTSTRAP_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` by
+        // `x86_bootstrap16_lock_init` before `x86_bootstrap16_init` runs or
+        // `x86_bootstrap16_acquire` can reach `BOOTSTRAP_LOCK`.
+        unsafe { BOOTSTRAP_LOCK.get_unchecked() }.lock.raw_mutex()
+    }
+}
+
+fn x86_bootstrap16_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before secondary CPUs are
+    // started, and so before any use of `BOOTSTRAP_LOCK` in `x86_bootstrap16_acquire`.
+    unsafe {
+        let Ok(()) = Pin::static_ref(&BOOTSTRAP_LOCK)
+            .init_pin(pin_init!(BootstrapLock { lock <- KMutex::init() }));
+    }
+}
+init::lk_init_hook!(x86_bootstrap16_lock, x86_bootstrap16_lock_init, init::LK_INIT_LEVEL_EARLIEST);
 
 struct BootstrapAspaceCell(UnsafeCell<Option<RefPtr<VmAspace>>>);
 
@@ -173,8 +205,8 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
 
     ltracef!("bootstrap_phys_addr {:#x}\n", bootstrap_phys_addr);
 
-    let start_addr = core::ptr::addr_of!(X86_BOOTSTRAP16_START).addr();
-    let end_addr = core::ptr::addr_of!(X86_BOOTSTRAP16_END).addr();
+    let start_addr = (&raw const X86_BOOTSTRAP16_START).addr();
+    let end_addr = (&raw const X86_BOOTSTRAP16_END).addr();
     // Make sure the entrypoint code is in the bootstrap code that will be loaded.
     if entry64 < start_addr || entry64 >= end_addr {
         core::hint::cold_path();
@@ -185,10 +217,10 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
     let bootstrap_virt_addr_cell = Cell::new(core::ptr::null_mut::<c_void>());
 
     // Ensure only one caller is using the bootstrap region.
-    // SAFETY: `BOOTSTRAP_LOCK` is a statically initialized `Mutex` whose
+    // SAFETY: `BootstrapLock::raw_mutex()` is an initialized `Mutex` with static storage whose
     // ownership spans from `x86_bootstrap16_acquire` to `x86_bootstrap16_release`.
     unsafe {
-        <Mutex as LockPolicy<Mutex>>::acquire(&BOOTSTRAP_LOCK, &mut (), ());
+        <Mutex as LockPolicy<Mutex>>::acquire(BootstrapLock::raw_mutex(), &mut (), ());
     }
 
     // Clean up the kernel address space on the way out. The bootstrap address space does not need
@@ -196,13 +228,13 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
     let mut cleanup = zr::defer(|| {
         let virt_addr = bootstrap_virt_addr_cell.get();
         if !virt_addr.is_null() {
-            // SAFETY: `virt_addr` was allocated from `kernel_aspace` in `x86_bootstrap16_acquire`
-            // and is being cleaned up on error exit.
+            // SAFETY: `virt_addr` is in a mapping of the root VMAR whose whole VMO range is pinned
+            // by a pin this code owns, and nothing uses that mapping any more.
             let _ = unsafe { kernel_aspace.free_region(virt_addr.addr()) };
         }
         // SAFETY: `BOOTSTRAP_LOCK` was acquired on the current thread above.
         unsafe {
-            <Mutex as LockPolicy<Mutex>>::release(&BOOTSTRAP_LOCK, &mut ());
+            <Mutex as LockPolicy<Mutex>>::release(BootstrapLock::raw_mutex(), &mut ());
         }
     });
 
@@ -219,14 +251,13 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
         // These next two come implicitly from the shared kernel aspace:
         // 2) The kernel's version of the bootstrap code page (matched mapping)
         // 3) The page containing the aps_still_booting counter (matched mapping)
-        let mut vaddr = core::ptr::without_provenance_mut(bootstrap_phys_addr);
-        // SAFETY: `vaddr` is a valid local pointer and `bootstrap_phys_addr` is the reserved
-        // low-memory bootstrap physical region.
+        // SAFETY: The cache policy in the flags is appropriate for all mappings of the physical
+        // range, and creating this mapping is sound.
         let res = unsafe {
             new_aspace.alloc_physical(
                 b"bootstrap_mapping",
                 X86_BOOTSTRAP16_BUFFER_SIZE,
-                &mut vaddr,
+                Some(bootstrap_phys_addr),
                 page::SHIFT as u8,
                 PAddr(bootstrap_phys_addr),
                 vmm_flag::VALLOC_SPECIFIC,
@@ -251,24 +282,26 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
 
     // Map the AP bootstrap page and a low mem data page to configure
     // the AP processors with.
-    let mut bootstrap_virt_ptr: *mut c_void = core::ptr::null_mut();
-    // SAFETY: `bootstrap_virt_ptr` is a valid local pointer and `bootstrap_phys_addr` is the
-    // reserved bootstrap physical region.
+    // SAFETY: The cache policy in the flags is appropriate for all mappings of the physical range,
+    // and creating this mapping is sound.
     let res = unsafe {
         kernel_aspace.alloc_physical(
             b"bootstrap16_aperture",
             X86_BOOTSTRAP16_BUFFER_SIZE,
-            &mut bootstrap_virt_ptr,    // requested virtual address
-            page::SHIFT as u8,          // alignment log2
-            PAddr(bootstrap_phys_addr), // physical address
-            0,                          // vmm flags
+            None,                                               // requested virtual address
+            page::SHIFT as u8,                                  // alignment log2
+            PAddr(bootstrap_phys_addr),                         // physical address
+            0,                                                  // vmm flags
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE, // arch mmu flags
         )
     };
-    if let Err(status) = res {
-        tracef!("could not allocate AP bootstrap page: {}\n", status.into_raw());
-        return Err(status);
-    }
+    let bootstrap_virt_ptr: *mut c_void = match res {
+        Ok(base) => core::ptr::with_exposed_provenance_mut(base),
+        Err(status) => {
+            tracef!("could not allocate AP bootstrap page: {}\n", status.into_raw());
+            return Err(status);
+        }
+    };
     debug_assert!(!bootstrap_virt_ptr.is_null());
     bootstrap_virt_addr_cell.set(bootstrap_virt_ptr);
     let bootstrap_virt_u8 = bootstrap_virt_ptr.cast::<u8>();
@@ -279,8 +312,8 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
     assert!(bootstrap_code_len <= page::SIZE - 8);
     let temp_gdt_offset = (bootstrap_code_len + 7) & !7;
 
-    let temp_gdt_start = core::ptr::addr_of!(super::descriptor_ffi::TEMP_GDT).cast::<u8>();
-    let temp_gdt_end = core::ptr::addr_of!(super::descriptor_ffi::TEMP_GDT_END).cast::<u8>();
+    let temp_gdt_start = core::ptr::addr_of!(super::descriptor_ffi::TEMP_GDT) as *const u8;
+    let temp_gdt_end = core::ptr::addr_of!(super::descriptor_ffi::TEMP_GDT_END);
     let temp_gdt_len = temp_gdt_end.addr() - temp_gdt_start.addr();
     assert!(temp_gdt_len > 0 && temp_gdt_len < u16::MAX as usize);
 
@@ -295,7 +328,7 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
     // points to `bootstrap_code_len` bytes of `.text.bootstrap16`.
     unsafe {
         core::ptr::copy_nonoverlapping(
-            core::ptr::addr_of!(X86_BOOTSTRAP16_START),
+            (&raw const X86_BOOTSTRAP16_START).cast::<u8>(),
             bootstrap_virt_u8,
             bootstrap_code_len,
         );
@@ -365,7 +398,7 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
     assert!(phys_kernel_pml4 <= u32::MAX as usize);
 
     let virt_long_mode_high_entry =
-        core::ptr::addr_of!(X86_SECONDARY_CPU_LONG_MODE_HIGH_ENTRY).addr() as u64;
+        (&raw const X86_SECONDARY_CPU_LONG_MODE_HIGH_ENTRY).addr() as u64;
 
     // SAFETY: `bootstrap_data` points to the 2nd page of the mapped `bootstrap_virt_u8`
     // aperture, which is page-aligned and writable.
@@ -401,15 +434,15 @@ pub(super) fn x86_bootstrap16_acquire(entry64: usize) -> Result<(*mut c_void, PA
 /// released.
 pub(super) unsafe fn x86_bootstrap16_release(bootstrap_aperture: *mut c_void) {
     debug_assert!(!bootstrap_aperture.is_null());
-    debug_assert!(BOOTSTRAP_LOCK.is_held());
+    debug_assert!(BootstrapLock::raw_mutex().is_held());
     let kernel_aspace = VmAspace::kernel_aspace();
     let addr = bootstrap_aperture.addr() - page::SIZE;
-    // SAFETY: `addr` is the base virtual address of the 3-page `bootstrap16_aperture` region
-    // allocated in `x86_bootstrap16_acquire`.
+    // SAFETY: `addr` is in a mapping of the root VMAR whose whole VMO range is pinned by a pin this
+    // code owns, and nothing uses that mapping any more.
     let _ = unsafe { kernel_aspace.free_region(addr) };
 
     // SAFETY: `BOOTSTRAP_LOCK` was acquired in `x86_bootstrap16_acquire` on the current thread.
     unsafe {
-        <Mutex as LockPolicy<Mutex>>::release(&BOOTSTRAP_LOCK, &mut ());
+        <Mutex as LockPolicy<Mutex>>::release(BootstrapLock::raw_mutex(), &mut ());
     }
 }

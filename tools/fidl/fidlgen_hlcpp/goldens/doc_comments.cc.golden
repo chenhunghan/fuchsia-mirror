@@ -69,7 +69,7 @@ StrictUnion::StrictUnion(StrictUnion&& other) : tag_(other.tag_) {
     case ::test::doccomments::StrictUnion::Tag::kField:
       Field_ = std::move(other.Field_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
       break;
   }
 }
@@ -82,7 +82,7 @@ StrictUnion& StrictUnion::operator=(StrictUnion&& other) {
       case ::test::doccomments::StrictUnion::Tag::kField:
         Field_ = std::move(other.Field_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
         break;
     }
   }
@@ -105,10 +105,10 @@ void StrictUnion::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<int32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &Field_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -117,11 +117,11 @@ void StrictUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &Field_,
           encoder->Alloc(::fidl::EncodingInlineSize<int32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -130,18 +130,18 @@ void StrictUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void StrictUnion::Decode(::fidl::Decoder* _decoder, StrictUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::doccomments::StrictUnion::Tag::kField: {
@@ -181,15 +181,15 @@ void StrictUnion::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid);
 }
 
-void StrictUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void StrictUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
         break;
       case ::test::doccomments::StrictUnion::Tag::kField:
         new (&Field_) int32_t();
@@ -216,7 +216,7 @@ FlexibleUnion::FlexibleUnion(FlexibleUnion&& other) : tag_(other.tag_) {
     case ::test::doccomments::FlexibleUnion::Tag::kField:
       Field_ = std::move(other.Field_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -233,7 +233,7 @@ FlexibleUnion& FlexibleUnion::operator=(FlexibleUnion&& other) {
       case ::test::doccomments::FlexibleUnion::Tag::kField:
         Field_ = std::move(other.Field_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -260,10 +260,10 @@ void FlexibleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<int32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &Field_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -272,11 +272,11 @@ void FlexibleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &Field_,
           encoder->Alloc(::fidl::EncodingInlineSize<int32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::doccomments::FlexibleUnion::Tag::kUnknown: {
@@ -290,18 +290,18 @@ void FlexibleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void FlexibleUnion::Decode(::fidl::Decoder* _decoder, FlexibleUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::doccomments::FlexibleUnion::Tag::kField: {
@@ -309,7 +309,7 @@ void FlexibleUnion::Decode(::fidl::Decoder* _decoder, FlexibleUnion* value, size
       break;
     }
     default: {
-      auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+      auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
       break;
@@ -337,7 +337,7 @@ FlexibleUnion& FlexibleUnion::set_Field(int32_t value) {
   Field_ = std::move(value);
   return *this;
 }
-FlexibleUnion& FlexibleUnion::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+FlexibleUnion& FlexibleUnion::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -348,21 +348,21 @@ void FlexibleUnion::Destroy() {
     case ::test::doccomments::FlexibleUnion::Tag::kField:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid);
 }
 
-void FlexibleUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void FlexibleUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
         break;
       case ::test::doccomments::FlexibleUnion::Tag::kField:
         new (&Field_) int32_t();

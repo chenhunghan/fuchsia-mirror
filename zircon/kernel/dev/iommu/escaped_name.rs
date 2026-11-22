@@ -24,6 +24,7 @@ pub struct EscapedName<'a>(&'a [u8]);
 
 impl<'a> EscapedName<'a> {
     /// Wraps `name`, which is taken to end at its first NUL byte (if any).
+    #[must_use]
     #[inline]
     pub fn new(name: &'a [u8]) -> Self {
         let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
@@ -31,6 +32,7 @@ impl<'a> EscapedName<'a> {
     }
 
     /// Like [`Self::new`], but substitutes `<unknown>` for an empty name.
+    #[must_use]
     #[inline]
     pub fn new_or_unknown(name: &'a [u8]) -> Self {
         let this = Self::new(name);
@@ -38,12 +40,14 @@ impl<'a> EscapedName<'a> {
     }
 
     /// Returns `true` if the name has no bytes before its first NUL.
+    #[must_use]
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// Returns the raw bytes of the name, up to but not including its first NUL.
+    #[must_use]
     #[inline]
     pub fn as_bytes(&self) -> &'a [u8] {
         self.0

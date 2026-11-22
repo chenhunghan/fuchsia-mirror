@@ -1291,7 +1291,7 @@ fn test_receiving_router_advertisement_mtu_option() {
     assert_eq!(ctx.core_ctx.ipv6().icmp.ndp_counters.rx.router_advertisement.get(), 3);
     assert_eq!(
         ip::IpDeviceMtuContext::<Ipv6>::get_mtu(&mut ctx.core_ctx(), &device),
-        Ipv6::MINIMUM_LINK_MTU,
+        Ipv6::MINIMUM_LINK_MTU.get(),
     );
 }
 

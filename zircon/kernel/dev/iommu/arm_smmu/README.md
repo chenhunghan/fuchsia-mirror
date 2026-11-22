@@ -9,6 +9,21 @@ This document is intended to give a high level overview of:
 3) Assumptions and limitations of the current driver implementation.
 4) Possible future directions to add more functionality as the needs arise.
 
+## Where the code is
+
+The driver is written in Rust. Type and method names in this document are the
+Rust ones.
+
+| What | Where |
+| :--- | :--- |
+| `SmmuV2`, `SmmuV2Bti`, `SmmuV2Pmt` | `v2/smmu.rs`, `v2/smmu_bti.rs`, `v2/smmu_pmt.rs` |
+| `StreamMatchRegGroup`, `ContextBank` | `v2/stream_match_reg.rs`, `v2/context_bank.rs` |
+| Register definitions | `v2/registers.rs` |
+| Debug console (`k smmuv2`) | `v2/console.rs` |
+| Stage 1 translation tables, the device address space, the page cache | `common/` |
+| The `Iommu`, `Bti` and `Pmt` types which dispatch to this driver or the stub IOMMU | `../mod.rs`, `../stub.rs` |
+| In-kernel tests (`k ut arm_smmu`, `k ut arm_smmu_v2`) | `unit_tests.rs`, `v2/unit_tests.rs` |
+
 ## References
 
 This driver was written using
@@ -461,7 +476,7 @@ transaction stalling features, even when an SMMU supports such a thing.
 ### Initialization
 
 Zircon SMMU driver instances are instantiated using details provided in the ZBI
-in an array of `zbi_dcfg_arm_smmu_driver_t`, one driver instance per structure
+in an array of `zbi_dcfg_arm_smmu_v2_driver_t`, one driver instance per structure
 instance.  The initialization information passed via ZBI contains a number of
 details, however the most critical of these are:
 
@@ -501,12 +516,12 @@ The drivers are _functionally_ disabled.  Driver instances will still be created
 based on ZBI information, however no resources will be claimed, and the SMMU
 hardware configuration will not be changed.  Any attempt by user-mode to create
 an IOMMU Dispatcher backed by an SMMU will succeed, however an instance of the
-`StubIommu` driver will be substituted instead and stub-iommu behavior will be
-in effect.  No checking for base address validity or collision will be made, and
-user-mode drivers will be allowed to access both MMIO and IRQ resources which
-would otherwise be reserved for the kernel driver.  The primary purpose of
-"disabled" mode is to provide a bringup path where the kernel driver can be
-checked in while still delegating SMMU control to the user-mode driver
+stub IOMMU (`../stub.rs`) will be substituted instead and stub-iommu behavior
+will be in effect.  No checking for base address validity or collision will be
+made, and user-mode drivers will be allowed to access both MMIO and IRQ
+resources which would otherwise be reserved for the kernel driver.  The primary
+purpose of "disabled" mode is to provide a bringup path where the kernel driver
+can be checked in while still delegating SMMU control to the user-mode driver
 framework.  A secondary benefit is that it lets the kernel SMMU console examine
 SMMU register state while the hardware is under user-mode control.
 
@@ -584,13 +599,13 @@ Kernel IOMMU drivers must provide implementations of three different interfaces
 to the dispatcher level of the kernel so that it can implement the syscall
 interface.  For the SMMU driver, these implementations are:
 
-##### `arm_smmu::Smmu`
+##### `SmmuV2`
 
-This is the driver's implementation of the `iommu::Iommu`.
+This is what an `Iommu` (`../mod.rs`) holds for an SMMU.
 
 The primary purpose of this interface is to create BTI interfaces with specific
 stream IDs in response to user-mode requests.  In addition to the interface
-contract, the `Smmu` implementation is generally responsible for managing much
+contract, the `SmmuV2` implementation is generally responsible for managing much
 of the hardware bookkeeping and resource allocation.
 
 It:
@@ -605,9 +620,9 @@ It:
   Hardware](#initial-lock-down-and-adopted-hardware)).
 + Collects resources and constructs BTIs based on higher level requests.
 
-##### `arm_smmu::SmmuBti`
+##### `SmmuV2Bti`
 
-This is the driver's implementation of the `iommu::Bti` interface.
+This is what a `Bti` (`../mod.rs`) holds for an SMMU.
 
 A BTI (or "Bus Transaction Initiator", a Zircon term) is a kernel object
 representing "Some non-AP hardware which is able to post read/write transactions
@@ -621,19 +636,18 @@ bookkeeping which defines the virtual address space seen by a "device", and a
 address space from any one of a collection of Stream IDs which are configured by
 user-mode BTI creation requests.
 
-SMMU BTIs are constructed during a call to `CreateBti` on the `arm_smmu::Smmu`
-implementation of the `iommu::Iommu` interface.  A single `bus_txn_id` argument
-is provided by user-mode and specifies the Stream ID(s) to be assigned to this
-BTI instance.  Currently, the parameter carries the mask and value fields used
-to program an SMR, with the value packed into bits 0-15 and the mask packed into
-bits 16-31.
+SMMU BTIs are constructed during a call to `create_bti` on the `SmmuV2`.  A
+single `bus_txn_id` argument is provided by user-mode and specifies the Stream
+ID(s) to be assigned to this BTI instance.  Currently, the parameter carries the
+mask and value fields used to program an SMR, with the value packed into bits
+0-15 and the mask packed into bits 16-31.
 
 Any attempt to create a new BTI which shares any Stream IDs with a currently
 active BTI will fail.  Each SID must always map to exactly one policy, or none
 at all.
 
-Each `arm_smmu::SmmuBti` instance logically owns at least one
-`arm_smmu::StreamMatchRegisterGroup`, and exactly one `arm_smmu::ContextBank`
+Each `SmmuV2Bti` instance logically owns at least one
+`StreamMatchRegGroup`, and exactly one `ContextBank`
 object.  Currently, the only way for a BTI instance to have _more_ than one SMRG
 object in its collection would be for it to adopt that configuration from one
 handed off from the bootloaders, however in the future it may be necessary to
@@ -647,35 +661,35 @@ The primary user-facing purpose of a BTI object is to manage the "mapping"
 portion of a `zx_bti_pin` operation.  Higher level code is responsible for
 "pinning" a VMO using a `PinnedVmObject`, which prevents the VMM from swapping
 out or relocating any of the physical pages which back the pinned range of the
-VMO.  Ownership of the pinned VMO object is then given to the `arm_smmu::SmmuBti`
-implementation via the `Map` call.  If the `SmmuBti` instance is not in a
+VMO.  Ownership of the pinned VMO object is then given to the `SmmuV2Bti`
+implementation via the `map` call.  If the `SmmuV2Bti` instance is not in a
 faulted state, it is responsible for setting up any required PTEs and performing
 any TLB maintenance needed to locate the `PinnedVmObject` in the device's
 virtual address space (with the proper permissions) before transferring
-ownership of the `PinnedVmObject` to newly constructed `arm_smmu::SmmuPmt`
+ownership of the `PinnedVmObject` to newly constructed `SmmuV2Pmt`
 instance.
 
-##### `arm_smmu::SmmuPmt`
+##### `SmmuV2Pmt`
 
-This is the driver's implementation of the `iommu::Pmt` interface.
+This is what a `Pmt` (`../mod.rs`) holds for an SMMU.
 
 The primary job of a "Pinned Memory Token" is to manage the lifecycle of regions
 of memory pinned using a `zx_bti_pin` syscall.  Three methods in particular need
 to be implemented to allow the dispatcher level to operate properly.
 
-###### `QueryAddress`
+###### `query_address`
 
 Given an offset into the pinned memory, returns the address of the memory in the
-_devices virtual address_ space.  When the `SmmuBti` is operating in passthru
+_devices virtual address_ space.  When the `SmmuV2Bti` is operating in passthru
 mode, this will simply be the physical address of the memory.  When operating in
 enforced/translation mode, it will be an actual device vaddr which will be
 translated by the MMU hardware to the true physical address during transactions.
 
-The dispatcher and syscall levels of code use `QueryAddress` to build the
+The dispatcher and syscall levels of code use `query_address` to build the
 scatter-gather map for user-mode during a `zx_bti_pin` operation.  User-mode
 does not have any direct access to this method.
 
-###### `ReleasePinnedMemory`
+###### `release_pinned_memory`
 
 Called in response to a user's call to `zx_pmt_unpin`.  This is the formal
 signal to a BTI that a driver is finished accessing the memory which had been
@@ -685,7 +699,7 @@ underlying pinned physical pages, flushing the TLBs in the process to revoke
 access.  Then the owned `PinnedVmObject` can be destroyed, unpinning the memory
 and allowing it to be actively managed by the VMM once again.
 
-###### `OnDispatcherZeroHandles`
+###### `on_dispatcher_zero_handles`
 
 Called by the dispatcher level when the final handle to the dispatcher has been
 closed and the dispatcher is about to destroy itself.  Assuming that the
@@ -697,7 +711,7 @@ initiating transactions to access that pinned memory.
 In this situation, PMTs work with their owner BTIs to cause the BTI to enter its
 fault state, removing *all* access that the BTI's Stream IDs have been granted
 and denying requests to pin new memory until the driver has signaled that it has
-regained control of its hardware by calling `ReleaseQuarantine` on its BTI
+regained control of its hardware by calling `release_quarantine` on its BTI
 instance (typically after a driver restart).
 
 Note: Strictly speaking, a BTI does not *have* to enter a fault state when a PMT
@@ -734,13 +748,13 @@ execution takes place in IRQ context.
 
 #### Smmu Locks
 
-The top level `arm_smmu::Smmu` object contains three locks.  They are:
+The top level `SmmuV2` object contains three locks.  They are:
 
-+ The `InstanceLock`.  A static Mutex class member used to protect the global
++ The `SmmuV2InstanceLock`.  A singleton mutex used to protect the global
   collection of Smmus instances as they are created, and as users attempt to
   create Iommu dispatchers representing specific Smmu instances.  When needed,
   this lock must be held before any other locks.
-+ The main lock, or just `lock_`.  Also a mutex, the main Smmu lock needs to be
++ The main lock, or just `lock`.  Also a mutex, the main Smmu lock needs to be
   held for the duration of most user-facing operations. Binding a specific SMMU
   to a dispatcher instance, creating or destroying BTIs, and allocating
   SMRG/Context-Bank objects to use with BTIs are all operations which require
@@ -762,8 +776,8 @@ claiming the interrupts.  The Zircon interrupt drivers serialize calls to
 interrupts using an internal spinlock.  Other interrupt operations (such as
 masking and unmasking) are _not protected by this internal spinlock_.
 
-Global interrupts are unmasked at the end of `Smmu::Init` and will be handled
-by the top level `Smmu` class.
+Global interrupts are unmasked at the end of `SmmuV2::init` and will be handled
+by the top level `SmmuV2` class.
 
 When a BTI is created, it needs to associate its instance with the specific
 interrupt, and unmask the interrupt so that it can fire.  When it is time for
@@ -772,7 +786,7 @@ mask the interrupt, and synchronize with any interrupt dispatch which may be in
 flight.
 
 The `irq_lock` is used synchronize these association/disassociation events
-against in-flight IRQ dispatch.  The main `Smmu` instance maintains a set of
+against in-flight IRQ dispatch.  The main `SmmuV2` instance maintains a set of
 `ContextIrqVector` instances protected by the `irq_lock`.  In this structure,
 there is a `RefPtr` to the BTI instance which the interrupt targets, as well as
 a flag indicating whether or not an interrupt is in flight.
@@ -784,14 +798,15 @@ During association, the lock is held and the BTI records a reference to itself
 in the proper `ContextIrqVector`.  The interrupt is then unmasked and the
 `irq_lock` is dropped.
 
-During dispatch, `Smmu::HandleContextIrq` will hold the `irq_lock` as it
+During dispatch, `SmmuV2::handle_context_irq` will hold the `irq_lock` as it
 examines the interrupt's `ContextIrqVector` state.  It will take a local
 reference to any associated BTI, mark the interrupt as being in flight and mask
 the interrupt before dropping the lock.
 
 Then, if there was an associated BTI instance, it will obtain the BTI instance's
 lock and dispatch the interrupt to it.  Once dispatch is complete and the BTI
-lock dropped, the IRQ handler will grab the `irq_lock` one last time and record
+lock dropped, the IRQ handler drops its local BTI reference while the interrupt
+is still marked as in flight, then grabs the `irq_lock` one last time to record
 the interrupt as being no longer in flight before dropping the lock and being
 done.
 
@@ -808,14 +823,14 @@ the BTI association with the IRQ.
 
 #### BTI Locks
 
-The `arm_smmu::SmmuBti` object currently contains two locks, `lock_` which is a
-spinlock, and `pmt_lock_` which is a mutex.  When both locks must be held, the
-`pmt_lock_` must be acquired first (also implied by the fact that the pmt lock
+The `SmmuV2Bti` object currently contains two locks, `lock` which is a
+spinlock, and `pmt_lock` which is a mutex.  When both locks must be held, the
+`pmt_lock` must be acquired first (also implied by the fact that the pmt lock
 is a mutex, while the main lock is a spinlock).
 
-##### The main BTI `lock_`
+##### The main BTI `lock`
 
-The main `lock_` must be held for the majority of operations which affect the
+The main `lock` must be held for the majority of operations which affect the
 underlying hardware state of the BTI.  These include:
 
 + Assigning a new SMRG.
@@ -828,18 +843,22 @@ As noted earlier, if a BTI's lock must be held while also holding the owning
 SMMU's `irq_lock`, the BTI's lock must be acquired first.  Currently, this only
 needs to happen while:
 
-1) Enabling a context bank interrupt during initialization.
-2) Unregistering a context bank interrupt during shutdown.
-3) Re-enabling interrupt after handling a context bank fault.
+1) Associating a new BTI with its context bank interrupt, and enabling it.
+2) Re-enabling the interrupt when a BTI is released from its fault state (without
+   holding the SMMU's main `lock`; a release of a BTI which is not in its fault
+   state leaves the interrupt, and any fault the bank has recorded, alone).
+
+(Removing the association during shutdown is done under the SMMU's main lock and
+the `irq_lock`, without the BTI's lock.)
 
 Special care is taken during the shutdown sequence to ensure that there is no
 interrupt in flight after the BTI reference held by the IRQ registration has
 been cleared, ensuring that the IRQ handler will never be left holding the final
 reference to the BTI resulting in an attempt to destroy the object at IRQ time.
 
-##### The main BTI `pmt_lock_`
+##### The main BTI `pmt_lock`
 
-A BTI's `pmt_lock_` is used:
+A BTI's `pmt_lock` is used:
 
 + When creating a new PMT and adding it to the active collection.
 + When removing a PMT from the active collection, whether it was leaked or not.
@@ -850,20 +869,19 @@ A BTI's `pmt_lock_` is used:
 
 #### PMT Locks
 
-The `arm_smmu::SmmuPmt` object currently does not have any lock members.  Instead,
-all `SmmuPmt` hold a reference to their owning `SmmuBti` object which is valid
-for the entire life of the `SmmuPmt` object, released only when the `SmmuPmt` is
-finally destroyed.  `SmmuPmt` state is protected using their owning `SmmuBti`'s
-`pmt_lock_`, along with a series of static annotations for operations which
-begin from a `SmmuPmt` method, and runtime `AssertHeld` operations whose use is
-demanded by the static analyzer for operations starting from a `SmmuBti`'s
-methods.
+The `SmmuV2Pmt` object currently does not have any lock members.  Instead, all
+`SmmuV2Pmt` hold a reference to their owning `SmmuV2Bti` object which is valid
+for the entire life of the `SmmuV2Pmt` object, released only when the
+`SmmuV2Pmt` is finally destroyed.  `SmmuV2Pmt` state is protected using their
+owning `SmmuV2Bti`'s `pmt_lock`: a method which touches that state takes the
+`LockToken` of the owner's `pmt_lock` as an argument, so it cannot be called
+without the lock held.
 
 ### Resource ownership
 
 The SMMU hardware resources consist mostly of registers which represent a pool
-of SMRGs, and a pool of Context Banks.  `arm_smmu::StreamMatchRegGroup` and
-`arm_smmu::ContextBank` objects are created to own the specific registers which
+of SMRGs, and a pool of Context Banks.  `StreamMatchRegGroup` and
+`ContextBank` objects are created to own the specific registers which
 are associated with the logical hardware instances, however the registers
 themselves are not protected with individual locks at this level as doing so can
 easily lead to a very complex locking structure with a great deal of potential
@@ -925,16 +943,17 @@ maintain the configuration they were given by the early stages of system boot.
 ### The kernel debug console
 
 A small debug console is implemented by the driver in engineering builds which
-have the kernel console enabled.  It can be accessed using the `k smmu` command.
-It allows developers to enumerate the discovered SMMUs and the BTIs which
-currently exist along with their state. Additionally, it can be used to dump the
-low level register state of the SMMUs and provides physical register addresses
-so that developers can more easily directly manipulate the register state using
-`k pm` commands.  Finally, it can be used to force lockdown of non-adopted BTI
-hardware, either at the context bank level or the SMRG level.  Revoking access
-at the context bank level while hardware is still attempting to perform accesses
-results in CB faults, while force-disabling the SMRs will result in a global
-fault due to a sudden inability to match a transaction's Stream ID.
+have the kernel console enabled.  It can be accessed using the `k smmuv2`
+command.  It allows developers to enumerate the discovered SMMUs and the BTIs
+which currently exist along with their state.  Additionally, it can be used to
+dump the low level register state of the SMMUs and provides physical register
+addresses so that developers can more easily directly manipulate the register
+state using `k pm` commands.  Finally, it can be used to force lockdown of
+non-adopted BTI hardware, either at the context bank level or the SMRG level.
+Revoking access at the context bank level while hardware is still attempting to
+perform accesses results in CB faults, while force-disabling the SMRs will
+result in a global fault due to a sudden inability to match a transaction's
+Stream ID.
 
 Extreme care should be taken when using the console to perform any modification
 to SMMU state using the console.  Do not be surprised if attempts to modify a

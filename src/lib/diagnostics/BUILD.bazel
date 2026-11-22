@@ -10,6 +10,8 @@ test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
+        "//src/lib/diagnostics/inspect/rust:host_tests",
+        "//src/lib/diagnostics/log/rust:host_tests",
         "//src/lib/diagnostics/python/fuchsia_inspect:python_inspect_test",
     ],
 )
@@ -21,10 +23,18 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/lib/diagnostics/fidl_log_message_parser/integration:tests",
+        "//src/lib/diagnostics/fidl_log_message_parser/tests",
         "//src/lib/diagnostics/inspect/contrib/rust:fuchsia-inspect-contrib-tests",
         "//src/lib/diagnostics/inspect/derive/tests:fuchsia-inspect-derive-tests",
+        "//src/lib/diagnostics/inspect/runtime/rust:tests",
+        "//src/lib/diagnostics/inspect/rust:tests",
         "//src/lib/diagnostics/inspect/rust/bench/snapshot_filter:rust-inspect-benchmarks-test",
         "//src/lib/diagnostics/inspect/rust/bench/utils:inspect-bench-utils-unittests",
+        "//src/lib/diagnostics/log/encoding/rust:tests",
+        "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:tests",
+        "//src/lib/diagnostics/log/rust:tests",
+        "//src/lib/diagnostics/log/rust_cpp_bridge:tests",
         "//src/lib/diagnostics/selectors-ext:selectors-ext-test",
     ],
 )

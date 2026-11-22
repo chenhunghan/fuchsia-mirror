@@ -2,9 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-url-tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fuchsia-url_host_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 rustc_library(
     name = "fuchsia-url",
@@ -29,12 +46,7 @@ rustc_library(
         "src/resource.rs",
         "src/test.rs",
     ],
-    crate_name = "fuchsia_url",
     edition = "2024",
-    test_deps = [
-        "//third_party/rust_crates/vendor:assert_matches",
-        "//third_party/rust_crates/vendor:serde_json",
-    ],
     visibility = [
         "//build/assembly:__subpackages__",
         "//src/developer/ffx:__subpackages__",
@@ -49,7 +61,6 @@ rustc_library(
         "//tools/test_list_tool:__subpackages__",
         "//vendor/google:__subpackages__",
     ],
-    with_unit_tests = True,
     deps = [
         "//src/sys/pkg/lib/fuchsia-hash",
         "//third_party/rust_crates/vendor:percent-encoding",
@@ -58,4 +69,23 @@ rustc_library(
         "//third_party/rust_crates/vendor:thiserror",
         "//third_party/rust_crates/vendor:url",
     ],
+)
+
+rustc_test(
+    name = "fuchsia-url_test",
+    crate = ":fuchsia-url",
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "fuchsia-url_host_test",
+    binary_name = "fuchsia-url_test",
+)
+
+fx_unittest_package(
+    name = "fuchsia-url-tests",
+    unit_tests = [":fuchsia-url_test"],
 )

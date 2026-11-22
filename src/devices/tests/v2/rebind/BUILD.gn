@@ -46,7 +46,6 @@ fuchsia_driver_component("child_driver_component") {
   component_name = "rebind_child"
   dml_label = ":rebind_child-dml"
   deps = [ ":child_driver" ]
-  info = "meta/component-info.json"
 }
 
 fuchsia_driver_dml("rebind_parent-dml") {
@@ -84,7 +83,6 @@ fuchsia_driver_component("parent_driver_component") {
   component_name = "rebind_parent"
   dml_label = ":rebind_parent-dml"
   deps = [ ":parent_driver" ]
-  info = "meta/component-info.json"
 }
 
 group("drivers") {

@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Verify whether adb should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_library(
+    name = "adb",
+    srcs = [
+        "adb-protocol.cc",
+        "socket.cc",
+        "transport.cc",
+    ],
+    hdrs = [
+        "adb-base.h",
+        "adb-protocol.h",
+        "socket.h",
+        "transport.h",
+        "types.h",
+    ],
+    includes = ["."],
+    public_configs = [":adb-headers"],
+    # Uses Zircon headers (lib/zx, zircon/assert.h) and fuchsia.hardware.adb FIDL bindings.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/developer/adb/bin/adb:__pkg__",
+        "//src/developer/adb/testing/client:__pkg__",
+        "//src/developer/adb/third_party:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

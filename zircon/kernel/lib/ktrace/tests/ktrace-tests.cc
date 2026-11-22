@@ -17,24 +17,22 @@
 #include <arch/interrupt.h>
 #include <arch/ops.h>
 #include <kernel/thread.h>
+#include <ktl/limits.h>
 
 extern "C" {
 int32_t rust_ktrace_test_interop(void* ktrace_ptr, uint64_t header, uint64_t val);
 void rust_ktrace_test_macros();
+void rust_ktrace_set_thread_local_override(void* ktrace_ptr);
 }
 
 class AutoThreadKTraceOverride {
  public:
   explicit AutoThreadKTraceOverride(const KTrace& ktrace) {
     DEBUG_ASSERT(ktrace.rust_ktrace() != nullptr);
-    Thread* current = Thread::Current::Get();
-    DEBUG_ASSERT(current->rust_ktrace_override() == nullptr);
-    current->set_rust_ktrace_override(ktrace.rust_ktrace());
+    DEBUG_ASSERT(Thread::Current::Get()->rust_ktrace_override() == nullptr);
+    rust_ktrace_set_thread_local_override(ktrace.rust_ktrace());
   }
-  ~AutoThreadKTraceOverride() {
-    Thread* current = Thread::Current::Get();
-    current->set_rust_ktrace_override(nullptr);
-  }
+  ~AutoThreadKTraceOverride() { rust_ktrace_set_thread_local_override(nullptr); }
   AutoThreadKTraceOverride(const AutoThreadKTraceOverride&) = delete;
   AutoThreadKTraceOverride& operator=(const AutoThreadKTraceOverride&) = delete;
 };
@@ -377,13 +375,23 @@ class KTraceTests {
       res->Commit();
     }
 
-    // Verify that passing in too small of a buffer results in a ZX_ERR_INVALID_ARGS.
+    // Verify that passing in too small or oversized lengths results in ZX_ERR_INVALID_ARGS without
+    // advancing the per-CPU read pointers.
+    result = ktrace.ReadUser(user_mem->user_out<void>(), 0, 0);
+    ASSERT_EQ(ZX_ERR_INVALID_ARGS, result.status_value());
     result = ktrace.ReadUser(user_mem->user_out<void>(), 0, total_bufsize - 1);
+    ASSERT_EQ(ZX_ERR_INVALID_ARGS, result.status_value());
+    result = ktrace.ReadUser(user_mem->user_out<void>(), 0, 0x1'0000'0000ULL);
+    ASSERT_EQ(ZX_ERR_INVALID_ARGS, result.status_value());
+    result = ktrace.ReadUser(user_mem->user_out<void>(), 0, 0x1'0000'0000ULL + kPageSize);
+    ASSERT_EQ(ZX_ERR_INVALID_ARGS, result.status_value());
+    result = ktrace.ReadUser(user_mem->user_out<void>(), 0, ktl::numeric_limits<size_t>::max());
     ASSERT_EQ(ZX_ERR_INVALID_ARGS, result.status_value());
 
     // Verify that passing in a large enough buffer correctly reads the data out.
     result = ktrace.ReadUser(user_mem->user_out<void>(), 0, total_bufsize);
     ASSERT_OK(result.status_value());
+    ASSERT_EQ(static_cast<size_t>(total_bufsize), result.value());
     ASSERT_OK(user_mem->VmoRead(dst, 0, total_bufsize));
     ASSERT_BYTES_EQ(reinterpret_cast<uint8_t*>(dst), reinterpret_cast<uint8_t*>(src),
                     total_bufsize);

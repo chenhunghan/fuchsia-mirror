@@ -121,6 +121,15 @@ pub fn apply_overrides(
         // Check if there is an override for this path.
         if let Some(o) = ctx.override_map.remove(current_path.as_path()) {
             match o.operation {
+                StarnixFileOperation::Mkdir => {
+                    // There's already a directory here, copy it as is below.
+                    anyhow::ensure!(
+                        node.directory().is_some(),
+                        "Directory to create already exists as a non-directory in image {}: {}",
+                        image_name,
+                        current_path
+                    );
+                }
                 StarnixFileOperation::Remove => {
                     ctx.skipped_inodes.insert(inode);
                     return Ok(()); // Drop this node.
@@ -223,46 +232,53 @@ pub fn apply_overrides(
         image_name,
     )?;
 
+    // Create any missing parent directories of this path.
+    fn create_parent_dirs(
+        ctx: &mut Context,
+        path_components: &[&str],
+        xattrs: &ext4_metadata::ExtendedAttributes,
+    ) -> anyhow::Result<()> {
+        let mut current_inode = ext4_metadata::ROOT_INODE_NUM;
+        for i in 0..path_components.len() - 1 {
+            let component = path_components[i];
+            let node = ctx.new_metadata.get(current_inode).unwrap();
+            let dir = match node.info() {
+                ext4_metadata::NodeInfo::Directory(d) => d,
+                _ => anyhow::bail!("Path component {} is not a directory", component),
+            };
+
+            if let Some((_, child_inode)) =
+                dir.children.iter().find(|(k, _)| k.as_str() == component)
+            {
+                current_inode = *child_inode;
+            } else {
+                ctx.max_inode += 1;
+                let new_dir_inode = ctx.max_inode;
+                ctx.new_metadata.insert_directory(
+                    new_dir_inode,
+                    DEFAULT_NEW_DIR_MODE,
+                    0,
+                    0,
+                    xattrs.clone(),
+                );
+                ctx.new_metadata.add_child(&path_components[0..=i], new_dir_inode);
+                current_inode = new_dir_inode;
+            }
+        }
+        Ok(())
+    }
+
     // Handle remaining overrides (creates).
-    for (path, o) in ctx.override_map {
+    for (path, o) in std::mem::take(&mut ctx.override_map) {
+        let path_components: Vec<&str> = path.iter().collect();
+        let xattrs = if let Some(ref label) = o.seclabel {
+            [((*b"security.selinux").into(), label.as_bytes().into())].into()
+        } else {
+            ext4_metadata::ExtendedAttributes::default()
+        };
         match o.operation {
             StarnixFileOperation::Create(src_path) => {
-                let path_components: Vec<&str> = path.iter().collect();
-                let mut current_inode = ext4_metadata::ROOT_INODE_NUM;
-
-                let xattrs = if let Some(ref label) = o.seclabel {
-                    [((*b"security.selinux").into(), label.as_bytes().into())].into()
-                } else {
-                    ext4_metadata::ExtendedAttributes::default()
-                };
-
-                // Create missing parent directories.
-                for i in 0..path_components.len() - 1 {
-                    let component = path_components[i];
-                    let node = ctx.new_metadata.get(current_inode).unwrap();
-                    let dir = match node.info() {
-                        ext4_metadata::NodeInfo::Directory(d) => d,
-                        _ => anyhow::bail!("Path component {} is not a directory", component),
-                    };
-
-                    if let Some((_, child_inode)) =
-                        dir.children.iter().find(|(k, _)| k.as_str() == component)
-                    {
-                        current_inode = *child_inode;
-                    } else {
-                        ctx.max_inode += 1;
-                        let new_dir_inode = ctx.max_inode;
-                        ctx.new_metadata.insert_directory(
-                            new_dir_inode,
-                            DEFAULT_NEW_DIR_MODE,
-                            0,
-                            0,
-                            xattrs.clone(),
-                        );
-                        ctx.new_metadata.add_child(&path_components[0..=i], new_dir_inode);
-                        current_inode = new_dir_inode;
-                    }
-                }
+                create_parent_dirs(&mut ctx, &path_components, &xattrs)?;
 
                 // Now create the file.
                 ctx.max_inode += 1;
@@ -275,6 +291,19 @@ pub fn apply_overrides(
                 );
                 ctx.new_metadata.add_child(&path_components, ctx.max_inode);
                 ctx.new_files.push((ctx.max_inode, src_path));
+            }
+            StarnixFileOperation::Mkdir => {
+                create_parent_dirs(&mut ctx, &path_components, &xattrs)?;
+
+                ctx.max_inode += 1;
+                ctx.new_metadata.insert_directory(
+                    ctx.max_inode,
+                    o.mode.unwrap_or(DEFAULT_NEW_DIR_MODE),
+                    o.uid.unwrap_or(0),
+                    o.gid.unwrap_or(0),
+                    xattrs,
+                );
+                ctx.new_metadata.add_child(&path_components, ctx.max_inode);
             }
             StarnixFileOperation::Overwrite(_) => {
                 anyhow::bail!("File to overwrite not found in image {}: {}", image_name, path);

@@ -4,14 +4,13 @@
 
 #include "src/developer/forensics/utils/cobalt/logger.h"
 
-#include <fuchsia/metrics/cpp/fidl.h>
+#include <fidl/fuchsia.metrics/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
 #include <string>
 
-#include "src/cobalt/bin/utils/error_utils.h"
 #include "src/developer/forensics/utils/cobalt/metrics.h"
 #include "src/lib/fxl/strings/string_printf.h"
 
@@ -20,7 +19,6 @@ namespace cobalt {
 namespace {
 
 using async::PostDelayedTask;
-using ::cobalt::ErrorToString;
 using fxl::StringPrintf;
 
 constexpr uint32_t kMaxPendingEvents = 500u;
@@ -38,44 +36,61 @@ Logger::Logger(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirec
       clock_(clock),
       logger_reconnection_backoff_(/*initial_delay=*/zx::msec(100), /*retry_factor=*/2u,
                                    /*max_delay=*/zx::hour(1)) {
-  logger_.set_error_handler([this](zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection with fuchsia.metrics.MetricEventLogger";
-    RetryConnectingToLogger();
-  });
-
-  ::fidl::InterfaceRequest<fuchsia::metrics::MetricEventLogger> logger_request =
-      logger_.NewRequest();
-  ConnectToLogger(std::move(logger_request));
+  auto [client, server] = fidl::Endpoints<fuchsia_metrics::MetricEventLogger>::Create();
+  logger_ = fidl::Client(std::move(client), dispatcher_, this);
+  ConnectToLogger(std::move(server));
 }
 
-void Logger::ConnectToLogger(
-    ::fidl::InterfaceRequest<fuchsia::metrics::MetricEventLogger> logger_request) {
-  // Connect to the LoggerFactory.
-  logger_factory_ = services_->Connect<fuchsia::metrics::MetricEventLoggerFactory>();
+void Logger::on_fidl_error(const fidl::UnbindInfo error) {
+  // Binding a new client to a dispatcher that is shutting down crashes the process.
+  if (error.is_dispatcher_shutdown()) {
+    return;
+  }
 
-  logger_factory_.set_error_handler([](zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection with fuchsia.metrics.MetricEventLoggerFactory";
-  });
+  FX_PLOGS(WARNING, error.status()) << "Lost connection with fuchsia.metrics.MetricEventLogger";
+  logger_ = fidl::Client<fuchsia_metrics::MetricEventLogger>();
+  RetryConnectingToLogger();
+}
+
+void Logger::ConnectToLogger(fidl::ServerEnd<fuchsia_metrics::MetricEventLogger> logger_request) {
+  // Connect to the LoggerFactory.
+  auto [client, server] = fidl::Endpoints<fuchsia_metrics::MetricEventLoggerFactory>::Create();
+  services_->Connect(fidl::DiscoverableProtocolName<fuchsia_metrics::MetricEventLoggerFactory>,
+                     server.TakeChannel());
+  logger_factory_ = fidl::Client(std::move(client), dispatcher_);
 
   // We don't need a long standing connection to the LoggerFactory so we unbind after setting up
   // the Logger.
-  fuchsia::metrics::ProjectSpec project;
-  project.set_customer_id(1);
-  project.set_project_id(kProjectId);
+  fuchsia_metrics::ProjectSpec project;
+  project.customer_id(1);
+  project.project_id(kProjectId);
 
-  logger_factory_->CreateMetricEventLogger(
-      std::move(project), std::move(logger_request),
-      [this](fuchsia::metrics::MetricEventLoggerFactory_CreateMetricEventLogger_Result status) {
-        logger_factory_.Unbind();
+  logger_factory_
+      ->CreateMetricEventLogger({{
+          .project_spec = std::move(project),
+          .logger = std::move(logger_request),
+      }})
+      .Then([this](fidl::Result<fuchsia_metrics::MetricEventLoggerFactory::CreateMetricEventLogger>&
+                       status) {
+        logger_factory_ = fidl::Client<fuchsia_metrics::MetricEventLoggerFactory>();
 
-        if (status.is_response()) {
+        if (status.is_ok()) {
           logger_reconnection_backoff_.Reset();
-        } else if (status.err() == fuchsia::metrics::Error::SHUT_DOWN) {
+          return;
+        }
+
+        if (status.error_value().is_framework_error()) {
+          FX_PLOGS(WARNING, status.error_value().framework_error().status())
+              << "Lost connection with fuchsia.metrics.MetricEventLoggerFactory";
+          return;
+        }
+
+        if (status.error_value().domain_error() == fuchsia_metrics::Error::kShutDown) {
           FX_LOGS(INFO) << "Stopping sending Cobalt events";
-          logger_.Unbind();
+          logger_ = fidl::Client<fuchsia_metrics::MetricEventLogger>();
         } else {
-          FX_LOGS(WARNING) << "Failed to set up Cobalt: " << ErrorToString(status.err());
-          logger_.Unbind();
+          FX_LOGS(WARNING) << "Failed to set up Cobalt: " << status.error_value();
+          logger_ = fidl::Client<fuchsia_metrics::MetricEventLogger>();
           RetryConnectingToLogger();
         }
       });
@@ -88,13 +103,12 @@ void Logger::RetryConnectingToLogger() {
 
   // Bind |logger_| and immediately send the events that were not acknowledged by the server on the
   // previous connection.
-  ::fidl::InterfaceRequest<fuchsia::metrics::MetricEventLogger> logger_request =
-      logger_.NewRequest();
+  auto [client, server] = fidl::Endpoints<fuchsia_metrics::MetricEventLogger>::Create();
+  logger_ = fidl::Client(std::move(client), dispatcher_, this);
   SendAllPendingEvents();
 
-  reconnect_task_.Reset([this, request = std::move(logger_request)]() mutable {
-    ConnectToLogger(std::move(request));
-  });
+  reconnect_task_.Reset(
+      [this, request = std::move(server)]() mutable { ConnectToLogger(std::move(request)); });
 
   PostDelayedTask(
       dispatcher_, [reconnect = reconnect_task_.callback()]() { reconnect(); },
@@ -129,10 +143,13 @@ void Logger::SendEvent(uint64_t event_id) {
   }
   Event& event = pending_events_.at(event_id);
 
-  auto callback = [this, event_id, &event](fpromise::result<void, fuchsia::metrics::Error> result) {
+  auto callback = [this, event_id, &event](const auto& result) {
     if (result.is_error()) {
+      if (result.error_value().is_framework_error()) {
+        return;
+      }
       FX_LOGS(INFO) << StringPrintf("Cobalt logging error: status %s, event %s",
-                                    ErrorToString(result.error()).c_str(),
+                                    result.error_value().FormatDescription().c_str(),
                                     event.ToString().c_str());
     }
 
@@ -143,19 +160,22 @@ void Logger::SendEvent(uint64_t event_id) {
 
   switch (event.type) {
     case EventType::kInteger:
-      logger_->LogInteger(event.metric_id, event.count, event.dimensions,
-                          [callback = std::move(callback)](
-                              ::fuchsia::metrics::MetricEventLogger_LogInteger_Result result) {
-                            callback(std::move(result));
-                          });
+      logger_
+          ->LogInteger({{
+              .metric_id = event.metric_id,
+              .value = static_cast<int64_t>(event.count),
+              .event_codes = event.dimensions,
+          }})
+          .Then(std::move(callback));
       break;
     case EventType::kOccurrence:
-      logger_->LogOccurrence(
-          event.metric_id, event.count, event.dimensions,
-          [callback = std::move(callback)](
-              ::fuchsia::metrics::MetricEventLogger_LogOccurrence_Result result) {
-            callback(std::move(result));
-          });
+      logger_
+          ->LogOccurrence({{
+              .metric_id = event.metric_id,
+              .count = event.count,
+              .event_codes = event.dimensions,
+          }})
+          .Then(std::move(callback));
       break;
   }
 }

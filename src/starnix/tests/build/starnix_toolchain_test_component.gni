@@ -39,6 +39,12 @@ import("//src/starnix/kernel/starnix.gni")
 #     Note that benchmarks use the global fxfs instance to get more realistic performance results
 #     while non-benchmarks use a test-fxfs component for faster iteration in development.
 #     Type: bool
+#   is_machina_test (optional)
+#     Set to true if this test runs on a Machina Linux guest VM rather than a Starnix container.
+#     Requires `uses_expectations = true`, and uses the minimal
+#     `//src/starnix/tests:machina_test_with_expectations` shard instead of pulling in the Starnix
+#     container realm.
+#     Type: bool
 #
 #   The remaining parameters are forwarded to the fuchsia_component template.
 template("starnix_toolchain_test_component") {
@@ -65,6 +71,11 @@ template("starnix_toolchain_test_component") {
     deps = [ test_label ]
   }
 
+  if (defined(invoker.is_machina_test) && invoker.is_machina_test) {
+    assert(defined(invoker.uses_expectations) && invoker.uses_expectations,
+           "is_machina_test requires uses_expectations = true")
+  }
+
   if (defined(invoker.uses_expectations) && invoker.uses_expectations) {
     target_type = "fuchsia_test_component_with_expectations"
   } else {
@@ -75,6 +86,7 @@ template("starnix_toolchain_test_component") {
     forward_variables_from(invoker,
                            "*",
                            [
+                             "is_machina_test",
                              "is_starnix_benchmark",
                              "test_label",
                            ])
@@ -95,7 +107,11 @@ template("starnix_toolchain_test_component") {
       } else {
         expectations = "expectations/${target_name}.json5"
       }
-      deps += [ "//src/starnix/tests:starnix_test_with_expectations" ]
+      if (defined(invoker.is_machina_test) && invoker.is_machina_test) {
+        deps += [ "//src/starnix/tests:machina_test_with_expectations" ]
+      } else {
+        deps += [ "//src/starnix/tests:starnix_test_with_expectations" ]
+      }
     } else if (defined(invoker.is_starnix_benchmark) &&
                invoker.is_starnix_benchmark) {
       deps += [ "//src/starnix/tests:starnix_benchmark" ]

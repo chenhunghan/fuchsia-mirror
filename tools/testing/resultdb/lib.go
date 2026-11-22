@@ -207,7 +207,7 @@ func testToResultSink(test *runtests.TestDetails, tags []*resultpb.StringPair, r
 		}
 	}
 	// TODO(b/527958852): Report test cases blocked by a fixture setup failure as
-	// PRECLUDED once runtests.TestStatus has a dedicated not-run status.
+	// PRECLUDED.
 	// This must run after the test case and top-level results are collected so
 	// that the *fixture is not reported twice under the same fine_name.
 	r, ts = appendFixtureResult(r, ts, test)
@@ -569,7 +569,7 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 	var propCache []cachedPropsAndTags
 
 	for _, testCase := range testCases {
-		testID := LegacyTestCaseID(testDetail.Name, testCase.SuiteName, testCase.CaseName)
+		testID := LegacyTestCaseIDForCase(testDetail, &testCase)
 		if len(testID) > MaxTestIDLength {
 			log.Printf("[ERROR] Skip uploading to ResultDB due to test_id exceeding %d bytes max limit: %q", MaxTestIDLength, testID)
 			testsSkipped = append(testsSkipped, testID)
@@ -618,6 +618,8 @@ func testCaseToResultSink(testCases []runtests.TestCaseResult, tags []*resultpb.
 			r.FailureReason = toResultDBFailureReason(testCase.FailureReason, testCaseFailureReasonKind)
 		} else if testCaseStatus == resultpb.TestResult_SKIPPED {
 			r.SkippedReason = &resultpb.SkippedReason{Kind: resultpb.SkippedReason_DISABLED_AT_DECLARATION}
+		} else if testCaseStatus == resultpb.TestResult_PRECLUDED {
+			r.SummaryHtml = "<p>Precluded: not run due to a higher-level failure.</p>"
 		} else if testStatus == resultpb.TestResult_PASSED {
 			testCaseStatus = testStatus
 		}
@@ -770,6 +772,16 @@ func LegacyTestCaseID(testName, suiteName, caseName string) string {
 	return fmt.Sprintf("%s/%s:%s", testName, suiteName, caseName)
 }
 
+// LegacyTestCaseIDForCase returns the legacy test_id for testCase. For tests
+// that report a runner, it keeps the pre-split form (empty suite, full case
+// name from DisplayName) so the legacy test_id and its history don't change.
+func LegacyTestCaseIDForCase(testDetail *runtests.TestDetails, testCase *runtests.TestCaseResult) string {
+	if testDetail.Runner != "" && testCase.DisplayName != "" {
+		return LegacyTestCaseID(testDetail.Name, "", testCase.DisplayName)
+	}
+	return LegacyTestCaseID(testDetail.Name, testCase.SuiteName, testCase.CaseName)
+}
+
 // testDetailsToResultSink converts TestDetail defined in /tools/testing/runtests/runtests.go
 // to ResultSink's TestResult. Returns an error if a test result cannot be mapped to
 // result_sink.Status
@@ -804,6 +816,8 @@ func testDetailsToResultSink(tags []*resultpb.StringPair, testDetail *runtests.T
 		r.FailureReason = toResultDBFailureReason(testDetail.FailureReason, failureReasonKind)
 	} else if testStatus == resultpb.TestResult_SKIPPED {
 		r.SkippedReason = &resultpb.SkippedReason{Kind: resultpb.SkippedReason_OTHER, ReasonMessage: "skipped because unaffected"}
+	} else if testStatus == resultpb.TestResult_PRECLUDED {
+		r.SummaryHtml = "<p>Precluded: not run due to a higher-level failure.</p>"
 	}
 
 	r.StartTime = timestamppb.New(testDetail.StartTime)
@@ -898,7 +912,14 @@ func testCaseProperties(format string, caseTags []build.TestTag, testDetail *run
 	}
 
 	customTags := make([]build.TestTag, 0, len(testDetail.Tags)+len(caseTags))
-	customTags = append(customTags, testDetail.Tags...)
+	for _, tag := range testDetail.Tags {
+		// Suite-level stability exoneration tags describe the aggregate suite
+		// outcome; failing test cases carry their own case-level tags in
+		// caseTags, and passing/skipped test cases should not inherit them.
+		if !strings.HasPrefix(tag.Key, "luci_exoneration_v2_") {
+			customTags = append(customTags, tag)
+		}
+	}
 	customTags = append(customTags, caseTags...)
 
 	addCommonProperties(fields, &tags, testDetail.Metadata.Owners, customTags, buildTags)
@@ -996,6 +1017,8 @@ func resultDBStatus(result runtests.TestStatus) (resultpb.TestResult_Status, res
 		return resultpb.TestResult_FAILED, resultpb.FailureReason_CRASH, nil
 	case runtests.TestExonerated:
 		return resultpb.TestResult_FAILED, resultpb.FailureReason_ORDINARY, nil
+	case runtests.TestPrecluded:
+		return resultpb.TestResult_PRECLUDED, resultpb.FailureReason_KIND_UNSPECIFIED, nil
 	}
 	return resultpb.TestResult_STATUS_UNSPECIFIED, resultpb.FailureReason_KIND_UNSPECIFIED, fmt.Errorf("cannot map Result: %s to result_sink test_result status", result)
 }

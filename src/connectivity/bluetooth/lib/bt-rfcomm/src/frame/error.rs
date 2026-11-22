@@ -32,6 +32,4 @@ pub enum FrameParseError {
     UnsupportedMuxCommandType(u8),
     #[error("Value is out of range")]
     OutOfRange,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }

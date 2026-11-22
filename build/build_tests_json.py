@@ -589,7 +589,6 @@ def dedupe_test_groups(groups: list[ResolvedTestGroup]) -> None:
 
 def build_tests_json(
     build_dir: Path,
-    with_bazel_tests: bool = False,
     command_runner: CommandRunner | None = None,
     quiet: bool = True,
 ) -> set[Path]:
@@ -611,7 +610,6 @@ def build_tests_json(
 
     Args:
         build_dir: Fuchsia build directory.
-        with_bazel_tests: Whether to export Bazel tests.
         command_runner: Optional command runner to use for running bazel commands.
         quiet: Whether to print status updates.
 
@@ -671,39 +669,27 @@ def build_tests_json(
 
     validation_errors: list[str] = []
 
-    # Placeholder for tests from Bazel, needed for type checking clarity.
-    bazel_tests = bazel_tests_utils.BazelTestsJson(
-        tests=[], grouped_tests={}, inputs=set()
+    bazel_paths = build_utils.BazelPaths.new(build_dir=build_dir)
+    # Collect the files listing Bazel device test suites for each
+    # product_bundle_test_group so `generate_tests_json` can query them in a
+    # single pass and return their test specs in `bazel_tests.grouped_tests`
+    # keyed by suite file path.
+    group_suite_files = [
+        build_dir / test_group["bazel_target_test_suites"]
+        for test_group in test_groups
+        if "bazel_target_test_suites" in test_group
+    ]
+    bazel_tests = bazel_tests_utils.generate_tests_json(
+        bazel_paths,
+        command_runner,
+        quiet=quiet,
+        extra_device_suite_files=group_suite_files,
     )
 
-    if with_bazel_tests:
-        bazel_paths = build_utils.BazelPaths.new(build_dir=build_dir)
-        # Collect the files listing Bazel device test suites for each
-        # product_bundle_test_group so `generate_tests_json` can query them in a
-        # single pass and return their test specs in `bazel_tests.grouped_tests`
-        # keyed by suite file path.
-        group_suite_files = [
-            build_dir / test_group["bazel_target_test_suites"]
-            for test_group in test_groups
-            if "bazel_target_test_suites" in test_group
-        ]
-        bazel_tests = bazel_tests_utils.generate_tests_json(
-            bazel_paths,
-            command_runner,
-            quiet=quiet,
-            extra_device_suite_files=group_suite_files,
-        )
-
-        # Add the non-product-bundle-specific tests to the overall set
-        # of non-product-bundle-specific tests.  The grouped tests are
-        # added later.
-        tests.extend(bazel_tests.tests)
-
-    else:
-        # `//build/images/updates:all_package_manifests.list` unconditionally
-        # reads `bazel_test_packages.list`, and its GN action is `no_op.sh`
-        # (`touch`), which would otherwise create an empty non-JSON file.
-        bazel_tests_utils.write_bazel_test_packages_list(build_dir, [])
+    # Add the non-product-bundle-specific tests to the overall set
+    # of non-product-bundle-specific tests.  The grouped tests are
+    # added later.
+    tests.extend(bazel_tests.tests)
 
     # Test entries for deduplication.
     #

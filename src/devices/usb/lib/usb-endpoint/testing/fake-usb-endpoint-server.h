@@ -67,6 +67,9 @@ class FakeEndpoint : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoint
     completer.Reply(fit::ok(std::move(expected_get_info_.front().second)));
     expected_get_info_.pop();
   }
+  void GetAlignmentInfo(GetAlignmentInfoCompleter::Sync& completer) override {
+    completer.Reply(fit::as_error(ZX_ERR_NOT_SUPPORTED));
+  }
   // QueueRequests: adds requests to a queue, which will be replied to when RequestComplete() is
   // called or if there is already a completion saved from before.
   void QueueRequests(QueueRequestsRequest& request,

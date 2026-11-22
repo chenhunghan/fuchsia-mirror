@@ -5,7 +5,7 @@
 from typing import Any, ClassVar, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from shared.protocol.base import BaseRequest
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "mem-read"
 
@@ -40,6 +40,8 @@ class MemReadRequest(BaseRequest[MemReadResponse]):
     address: str
     size: int = 64
     pid: int | None = None
-    thread_id: int | None = None
+    thread_id: int | None = Field(
+        default=None, validation_alias=THREAD_ID_ALIAS
+    )
     frame_index: int = 0
     response_type: ClassVar[Any] = MemReadResponse

@@ -11,11 +11,10 @@
 #include <stdint.h>
 #include <zircon/compiler.h>
 
-// TODO(https://fxbug.dev/565806419): Remove once callers of heap_init, profile_track_alloc, and
+// TODO(https://fxbug.dev/565806419): Remove once callers of profile_track_alloc and
 // profile_track_free are migrated to Rust.
 __BEGIN_CDECLS
 
-void rust_heap_init(void);
 uint32_t rust_profile_track_alloc(size_t size);
 void rust_profile_track_free(uint32_t handle, size_t size);
 

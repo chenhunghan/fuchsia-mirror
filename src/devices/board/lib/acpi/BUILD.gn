@@ -4,19 +4,12 @@
 import("//build/components.gni")
 import("//build/test.gni")
 
-declare_args() {
-  # If true, power on the Atlas camera at boot.
-  # TODO(https://fxbug.dev/42162166): remove once we have a better way to manage ACPI device power.
-  i_can_haz_atlas_camera = false
-}
-
 group("tests") {
   testonly = true
   deps = [ ":acpi-board-lib-tests" ]
 }
 
 shared_public_deps = [
-  "//sdk/banjo/fuchsia.hardware.pciroot:fuchsia.hardware.pciroot_banjo_c",
   "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",
   "//sdk/fidl/fuchsia.hardware.spi.businfo:fuchsia.hardware.spi.businfo_cpp",
   "//src/devices/bind/fuchsia:fuchsia_cpp",
@@ -46,20 +39,22 @@ shared_fuchsia_public_deps = [
 ]
 
 shared_deps = [
-  "//src/devices/bind/fuchsia:fuchsia_cpp",
   "//src/devices/bind/fuchsia.pci:fuchsia.pci_cpp",
   "//zircon/system/ulib/fbl",
   "//zircon/system/ulib/zx",
 ]
 
 shared_fuchsia_deps = [
-  "//sdk/banjo/fuchsia.hardware.pciroot:fuchsia.hardware.pciroot_banjo_cpp",
   "//sdk/fidl/fuchsia.hardware.acpi:fuchsia.hardware.acpi_cpp",
   "//sdk/fidl/fuchsia.hardware.interrupt:fuchsia.hardware.interrupt_cpp",
+  "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp",
+  "//sdk/fidl/fuchsia.hardware.pci.root:fuchsia.hardware.pci.root_cpp",
+  "//sdk/lib/driver/outgoing/cpp",
   "//src/devices/lib/acpi",
   "//src/devices/pci/lib/cpp:headers",
   "//src/devices/pci/lib/pci",
   "//src/lib/ddk:ddk-deprecated-binding-headers",
+  "//zircon/system/ulib/region-alloc",
   "//zircon/system/ulib/sync:sync-cpp",
   "//zircon/system/ulib/zircon-internal",
 ]
@@ -109,6 +104,8 @@ source_set("acpi") {
     "irq-fragment.h",
     "manager.cc",
     "manager.h",
+    "pci-root-windows.cc",
+    "pci-root-windows.h",
     "pci.cc",
     "pci.h",
     "pci_irqs.cc",
@@ -119,22 +116,13 @@ source_set("acpi") {
     "resources.h",
   ]
 
-  defines = []
-
-  if (i_can_haz_atlas_camera) {
-    defines += [ "ENABLE_ATLAS_CAMERA" ]
-  }
-
   public_deps = shared_public_deps + shared_fuchsia_public_deps
   deps = shared_deps + shared_fuchsia_deps + [ "//src/lib/ddk" ]
-  defines += shared_defines
+  defines = shared_defines
 
   # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
   # rather than builders.
   configs += [ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
-}
-
-source_set("acpi-pci") {
 }
 
 test("acpi-test") {
@@ -152,6 +140,10 @@ test("acpi-test") {
     "irq-fragment.cc",
     "manager-test.cc",
     "manager.cc",
+    "pci-root-windows-test.cc",
+    "pci-root-windows.cc",
+    "pciroot-test.cc",
+    "pciroot.cc",
     "power-resource-test.cc",
     "power-resource.cc",
     "resources.cc",
@@ -165,6 +157,9 @@ test("acpi-test") {
          [
            "test:mock-acpi",
            "//sdk/lib/async-loop-testing/cpp",
+           "//sdk/lib/component/incoming/cpp",
+           "//sdk/lib/driver/incoming/cpp",
+           "//src/devices/testing/fake-msi",
            "//src/devices/testing/fake-resource",
            "//src/devices/testing/mock-ddk",
            "//zircon/system/ulib/zxtest",

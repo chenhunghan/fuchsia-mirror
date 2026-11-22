@@ -84,7 +84,6 @@ template("ot_radio_driver") {
 
   fuchsia_driver_component("ot-radio-${driver_suffix}") {
     deps = [ ":ot-radio-${driver_suffix}_driver" ]
-    info = "meta/ot-radio-${driver_suffix}-info.json"
     manifest = "meta/ot-radio-${driver_suffix}.cml"
   }
 

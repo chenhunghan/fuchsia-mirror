@@ -192,7 +192,7 @@ mod tests {
             },
             capability_policy: HashMap::new(),
             debug_capability_policy: HashMap::new(),
-            child_policy: ChildPolicyAllowlists { reboot_on_terminate: vec![] },
+            child_policy: ChildPolicyAllowlists::default(),
         })
     });
     static RESTRICTIVE_SECURITY_POLICY: LazyLock<Arc<SecurityPolicy>> =

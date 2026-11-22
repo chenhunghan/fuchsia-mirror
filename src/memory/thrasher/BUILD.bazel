@@ -1,0 +1,220 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":thrasher_tests"],
+    visibility = ["//src/memory:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["lib.cc"],
+    hdrs = ["lib.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fidl/cpp/wire",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/fit",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "thrasher",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",  # Added
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+        "//src/lib/fxl",
+        "//src/lib/fxl:fxl_cli",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "thrasher",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "thrasher_manifest",
+    component_name = "thrasher",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/thrasher.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":thrasher_manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":bin_packaged"],
+)
+
+resource(
+    name = "thrasher_resources",
+    src = "test_data",
+    dest = "data/test_data",
+)
+
+fx_package(
+    name = "thrasher",
+    components = [":component"],
+    resources = [":thrasher_resources"],
+)
+
+fx_cc_test_binary(
+    name = "thrasher_test",
+    srcs = ["tests.cc"],
+    # tests.cc uses an angled `#include <src/lib/testing/loop_fixture/real_loop_fixture.h>`,
+    # which relies on the workspace root being on the system include path.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_cpp",
+        "//sdk/lib/async-testing",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fidl/cpp/wire",
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_cpp",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/zx",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "thrasher_test_packaged",
+    testonly = True,
+    binary = ":thrasher_test",
+    binary_name = "thrasher_test",
+    install_root = "test/",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "thrasher_tests_manifest",
+    testonly = True,
+    component_name = "thrasher_tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/sys/testing:gtest_runner.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/thrasher_tests.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_test_component(
+    name = "thrasher_tests_component",
+    compiled_manifest = ":thrasher_tests_manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":thrasher_test_packaged"],
+)
+
+# Kept in BUILD.gn above the sentinel because bazel2gn cannot translate
+# resource() or test packages with resources.
+# @bazel2gn:skip
+resource(
+    name = "thrasher_test_resources",
+    testonly = True,
+    src = "test_data",
+    dest = "data/test_data",
+)
+
+# @bazel2gn:skip
+resource(
+    name = "thrasher_empty_dir_resource",
+    testonly = True,
+    src = "empty_dir/.placeholder",
+    dest = "data/empty_dir/.placeholder",
+)
+
+# @bazel2gn:skip
+resource(
+    name = "thrasher_unmappable_dir_resource",
+    testonly = True,
+    src = "unmappable_dir/empty_file",
+    dest = "data/unmappable_dir/empty_file",
+)
+
+# @bazel2gn:skip
+resource(
+    name = "thrasher_test_dir_resource",
+    testonly = True,
+    src = "test_dir/test_data",
+    dest = "data/test_dir/test_data",
+)
+
+# @bazel2gn:skip
+fx_package(
+    name = "thrasher_tests_package",
+    package_name = "thrasher_tests",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    resources = [
+        ":thrasher_empty_dir_resource",
+        ":thrasher_test_dir_resource",
+        ":thrasher_test_resources",
+        ":thrasher_unmappable_dir_resource",
+    ],
+    test_components = [":thrasher_tests_component"],
+)
+
+fx_test(
+    name = "thrasher_tests",
+    package = ":thrasher_tests_package",
+)

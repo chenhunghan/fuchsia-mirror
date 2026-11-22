@@ -3,7 +3,11 @@
 The [`ffx debug symbolize`][ffx-debug-symbolize] command processes logs
 into symbolized format (that is, human-readable stack traces).
 
-## Concepts
+* [Concepts](#concepts)
+* [Symbolize logs from an external source](#symbolize-external-logs)
+* [Pass options and extra symbolizer flags](#extra-symbolizer-flags)
+
+## Concepts {:#concepts}
 
 The example below shows symbolized logs from a Fuchsia device:
 
@@ -22,24 +26,24 @@ With symbolized logs, you can read the file names and line
 numbers of the source code (for example,
 `in main() src/hello_world/hello_world.cc:9`) where an error has occurred.
 
-By default, the [`ffx log`][ffx-log] command automatically prints symbolized
+By default, [`ffx log`][ffx-log] automatically prints symbolized
 logs when debug symbols are registered in your environment. (To turn off this
-feature, run `ffx log -–no-symbols`.) The `ffx debug symbolize` command
+feature, run `ffx log --symbolize off`.) The `ffx debug symbolize` command
 (which `ffx log` uses in the background) takes logs with symbolization markups
 as input and generates symbolized logs as output. This process works as long as
 the debug symbols corresponding to such markups are registered in your
 environment (see [Register debug symbols][register-debug-symbols]).
 
-## Symbolize logs from an external source
+## Symbolize logs from an external source {:#symbolize-external-logs}
 
-During development, the `ffx log` automatically processes registered debug
+During development, `ffx log` automatically processes registered debug
 symbols and prints symbolized logs, so you may never need to manually process
 logs into symbolized format in your environment. But in some cases, you may
 obtain a copy of raw logs from an external source (for instance, output from
 a Fuchsia builder). If you want to process such logs into symbolized format,
 you can pass the logs as input to the `ffx debug symbolize` command.
 
-To manually process logs into symbolize format, do the following:
+To manually process logs into symbolized format, do the following:
 
 Note: Symbolizing logs from an external source requires that the corresponding
 debug symbols are registered in your environment or available online
@@ -54,12 +58,71 @@ debug symbols are registered in your environment or available online
    The terminal now waits for input.
 
 2. Copy raw logs containing symbolization markups.
-3. Paste it in the `ffx debug symbolize` terminal.
+3. Paste them into the `ffx debug symbolize` terminal.
 
    The tool prints the logs in symbolized format.
+
+## Pass options and extra symbolizer flags {:#extra-symbolizer-flags}
+
+`ffx debug symbolize` supports built-in flags as well as forwarding additional
+options directly to the underlying [`symbolizer`][symbolizer-reference] host
+tool.
+
+* [Built-in options](#built-in-options)
+* [Extra symbolizer arguments](#extra-symbolizer-arguments)
+
+### Built-in options {:#built-in-options}
+
+* `--no-prettify`: Disables backtrace prettifying. By default,
+  `ffx debug symbolize` passes `--prettify-backtrace` and `--omit-module-lines`
+  to the symbolizer. Specifying `--no-prettify` omits these flags so raw frame
+  lines and module mappings are printed.
+
+### Extra symbolizer arguments {:#extra-symbolizer-arguments}
+
+Any arguments starting with `-` intended for the underlying
+[`symbolizer`][symbolizer-reference] tool must be specified after a `--`
+separator:
+
+```posix-terminal
+ffx debug symbolize [options] -- [symbolizer_args...]
+```
+
+Common extra flags passed to the symbolizer include:
+
+* `-s <path>`, `--symbol-path=<path>`: Adds a directory or ELF file to the
+  symbol search path.
+* `--build-id-dir=<path>`: Adds a `.build-id`-structured directory to the symbol
+  search path.
+* `--ids-txt=<path>`: Adds an `ids.txt` mapping file (`<build ID> <file path>`)
+  to the symbol search path.
+* `--symbol-index=<path>`: Specifies an explicit `symbol-index` configuration
+  file (defaults to `~/.fuchsia/debug/symbol-index`).
+* `--symbol-cache=<path>`: Specifies a custom directory for downloaded symbols
+  cache (defaults to `~/.fuchsia/debug/symbol-cache`).
+* `--symbol-server=<url>`: Adds a private symbol server URL (authentication
+  requires running `gcloud auth application-default login`).
+* `--public-symbol-server=<url>`: Adds an unauthenticated public symbol server
+  URL.
+* `--dumpfile-output=<path>`: Writes structured JSON dumpfile output to the
+  given file path.
+* `--verbose`: Enables `DEBUG`-level logging to `stderr`.
+
+For example, to pass an explicit symbol path and enable verbose output:
+
+```posix-terminal
+ffx debug symbolize -- -s /path/to/symbols --verbose
+```
+
+To display usage information for the underlying `symbolizer` host tool:
+
+```posix-terminal
+ffx debug symbolize -- --help
+```
 
 <!-- Reference links -->
 
 [ffx-debug-symbolize]: https://fuchsia.dev/reference/tools/sdk/ffx#symbolize
 [ffx-log]: https://fuchsia.dev/reference/tools/sdk/ffx#ffx_log
 [register-debug-symbols]: /docs/development/tools/ffx/workflows/register-debug-symbols.md
+[symbolizer-reference]: /reference/tools/sdk/symbolizer.md

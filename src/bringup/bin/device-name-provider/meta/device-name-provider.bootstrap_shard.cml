@@ -42,18 +42,21 @@
             to: "#device_name_provider",
         },
         {
-            // TODO(https://fxbug.dev/324273348): Remove this capability once the clients have
-            // been migrated to services. The service capability has been added below.
-            directory: "dev-class",
-            from: "#devfs-with-pkg",
-            as: "dev-class-network",
+            service: "fuchsia.hardware.network.Service",
+            from: "#boot-drivers",
             to: "#device_name_provider",
-            subdir: "network",
+            availability: "optional",
         },
         {
-            // This service replaces the directory capability above.
             service: "fuchsia.hardware.network.Service",
-            from: "#devfs-with-pkg",
+            from: "#base-drivers",
+            to: "#device_name_provider",
+            availability: "optional",
+            source_availability: "unknown",
+        },
+        {
+            protocol: "fuchsia.driver.token.NodeBusTopology",
+            from: "#driver_manager",
             to: "#device_name_provider",
         },
         {

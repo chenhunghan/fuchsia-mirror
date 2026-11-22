@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "stressor-bin",
+    srcs = [
+        "blob_actor.rs",
+        "deletion_actor.rs",
+        "environment.rs",
+        "instance_actor.rs",
+        "main.rs",
+        "read_actor.rs",
+    ],
+    crate_name = "blobfs_stressor",
+    crate_root = "main.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/storage/stress-tests:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/lib/blob_writer:blob-writer",
+        "//src/storage/lib/delivery_blob",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/stress-tests/utils",
+        "//src/sys/lib/stress-test",
+        "//src/sys/pkg/lib/fuchsia-merkle",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)

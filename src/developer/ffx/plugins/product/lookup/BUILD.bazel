@@ -36,7 +36,6 @@ rustc_library(
 host_rustc_test(
     name = "lib_test",
     crate = ":lib",
-    # Unique output_name in GN for generic lib_test target.
     crate_name = "ffx_product_lookup_lib_test",
     edition = "2024",
     visibility = [

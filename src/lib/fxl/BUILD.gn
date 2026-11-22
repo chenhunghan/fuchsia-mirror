@@ -2,58 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/testing/cc_test_executable.gni")
-
-cc_test_executable("fxl_unittests") {
-  testonly = true
-
-  sources = [
-    "command_line_unittest.cc",
-    "functional/apply_unittest.cc",
-    "functional/cancelable_callback_unittest.cc",
-    "log_settings_command_line_unittest.cc",
-    "memory/ref_counted_unittest.cc",
-    "memory/weak_ptr_unittest.cc",
-    "observer_list_unittest.cc",
-    "strings/ascii_unittest.cc",
-    "strings/concatenate_unittest.cc",
-    "strings/join_strings_unittest.cc",
-    "strings/split_string_unittest.cc",
-    "strings/string_number_conversions_unittest.cc",
-    "strings/string_printf_unittest.cc",
-    "strings/substitute_unittest.cc",
-    "strings/trim_unittest.cc",
-    "synchronization/thread_annotations_unittest.cc",
-    "test/test_settings_unittest.cc",
-  ]
-
-  deps = [
-    ":fxl",
-    "test:gtest_main",
-    "test:test_settings",
-    "//sdk/lib/syslog/cpp",
-    "//src/lib/files",
-    "//third_party/googletest:gmock",
-    "//third_party/googletest:gtest",
-  ]
-}
-
 if (is_fuchsia) {
-  import("//build/components.gni")
-
-  fuchsia_unittest_package("fxl_tests") {
-    manifest = "meta/fxl_unittests.cml"
-    deps = [ ":fxl_unittests" ]
-    test_specs = {
-      log_settings = {
-        max_severity = "FATAL"
-      }
-    }
-  }
-
   group("tests") {
     testonly = true
-    deps = [ ":fxl_tests" ]
+    deps = [ ":fxl_tests_package" ]
   }
 }
 
@@ -188,6 +140,10 @@ source_set("fxl") {
     "observer_list.h",
     "synchronization/thread_annotations.h",
   ]
+  visibility = [
+    "//*",
+    "//vendor/google/*",
+  ]
   public_deps = [
     ":common",
     ":functional",
@@ -201,6 +157,10 @@ source_set("fxl") {
 source_set("cli") {
   sources = [ "log_settings_command_line.cc" ]
   public = [ "log_settings_command_line.h" ]
+  visibility = [
+    "//*",
+    "//vendor/google/*",
+  ]
   public_deps = [
     ":cli_no_logging",
     "//sdk/lib/syslog/cpp",
@@ -218,4 +178,61 @@ source_set("cli_no_logging") {
 
 group("fxl_cli") {
   public_deps = [ ":cli" ]
+  visibility = [
+    "//*",
+    "//vendor/google/*",
+  ]
+}
+
+cc_test_executable("fxl_unittests") {
+  sources = [
+    "//src/lib/fxl/test/test_settings_unittest.cc",
+    "command_line_unittest.cc",
+    "functional/apply_unittest.cc",
+    "functional/cancelable_callback_unittest.cc",
+    "log_settings_command_line_unittest.cc",
+    "memory/ref_counted_unittest.cc",
+    "memory/weak_ptr_unittest.cc",
+    "observer_list_unittest.cc",
+    "strings/ascii_unittest.cc",
+    "strings/concatenate_unittest.cc",
+    "strings/join_strings_unittest.cc",
+    "strings/split_string_unittest.cc",
+    "strings/string_number_conversions_unittest.cc",
+    "strings/string_printf_unittest.cc",
+    "strings/substitute_unittest.cc",
+    "strings/trim_unittest.cc",
+    "synchronization/thread_annotations_unittest.cc",
+  ]
+  deps = [
+    ":fxl",
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/files",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/fxl/test:test_settings",
+    "//third_party/googletest:gtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_component_manifest("fxl_tests_manifest") {
+  testonly = true
+  component_name = "fxl_tests"
+  manifest = "meta/fxl_unittests.cml"
+}
+
+fuchsia_test_component("fxl_tests_component") {
+  cm_label = ":fxl_tests_manifest"
+  deps = [ ":fxl_unittests" ]
+}
+
+fuchsia_test_package("fxl_tests_package") {
+  package_name = "fxl_tests-gn"
+  test_components = [ ":fxl_tests_component" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "FATAL"
+    }
+  }
 }

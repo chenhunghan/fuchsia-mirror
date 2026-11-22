@@ -46,6 +46,5 @@ wrap_host_rust_test(
 
 fx_unittest_package(
     name = "config_value_file_tests",
-    package_name = "config_value_file_tests",
     unit_tests = [":config_value_file_test"],
 )

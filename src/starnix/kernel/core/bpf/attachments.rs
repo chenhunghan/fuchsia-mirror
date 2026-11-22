@@ -455,6 +455,9 @@ impl<'a> MapsContext<'a> for SockOptEbpfRunContextImpl<'a> {
     fn add_value_ref(&mut self, map_ref: MapValueRef<'a>) {
         self.ebpf_run_context.add_value_ref(map_ref);
     }
+    fn ringbuf_reservations(&mut self) -> &mut ebpf_api::RingBufferReservations<'a> {
+        self.ebpf_run_context.ringbuf_reservations()
+    }
 }
 
 impl<'a> CurrentTaskContext for SockOptEbpfRunContextImpl<'a> {
@@ -710,40 +713,45 @@ impl CgroupEbpfProgramSet {
         current_task: &CurrentTask,
         level: u32,
         optname: u32,
-        value_buf: Vec<u8>,
-        optlen: usize,
-        error: Option<Errno>,
+        result: Result<Vec<u8>, Errno>,
+        buffer_size: usize,
         socket: &Socket,
-    ) -> Result<(Vec<u8>, usize), Errno> {
+    ) -> Result<Vec<u8>, Errno> {
         let Some(prog) = self.get_sockopt.upgrade() else {
-            return error.map(|e| Err(e)).unwrap_or_else(|| Ok((value_buf, optlen)));
+            return result;
         };
+
+        let page_size = *PAGE_SIZE as usize;
+        let max_optlen = std::cmp::min(buffer_size, page_size);
 
         let bpf_sock = BpfSock::from_socket(socket);
 
-        let retval = error.as_ref().map(|e| -(e.code.error_code() as i32)).unwrap_or(0);
-        let mut bpf_sockopt = BpfSockOptWithValue::new(
-            level,
-            optname,
-            value_buf.clone(),
-            optlen as u32,
-            retval,
-            &bpf_sock,
-        );
+        let mut bpf_optval = vec![0u8; max_optlen];
+        let (optlen, retval) = match &result {
+            Ok(optval) => {
+                let copy_len = std::cmp::min(optval.len(), max_optlen);
+                bpf_optval[..copy_len].copy_from_slice(&optval[..copy_len]);
+                (optval.len(), 0)
+            }
+            Err(e) => (buffer_size, -(e.code.error_code() as i32)),
+        };
+
+        let mut bpf_sockopt =
+            BpfSockOptWithValue::new(level, optname, bpf_optval, optlen as u32, retval, &bpf_sock);
 
         // Run the program.
-        let result = prog.run(current_task, &mut bpf_sockopt);
+        let prog_result = prog.run(current_task, &mut bpf_sockopt);
 
         let retval = bpf_sockopt.retval;
 
-        let retval = match result {
+        let retval = match prog_result {
             0 if is_error_return_value(retval) => retval,
             0 => -(linux_uapi::EPERM as i32),
             1 => retval,
             _ => {
                 // TODO(https://fxbug.dev/413490751): Change this to panic once
                 // result validation is implemented in the verifier.
-                log_error!("eBPF getsockopt program returned invalid result: {}", result);
+                log_error!("eBPF getsockopt program returned invalid result: {}", prog_result);
                 retval
             }
         };
@@ -757,12 +765,23 @@ impl CgroupEbpfProgramSet {
         match usize::try_from(new_optlen) {
             // Fail if the program set an invalid `optlen`.
             Err(_) => error!(EFAULT),
-            Ok(new_optlen) if new_optlen > value_buf.len() => error!(EFAULT),
+
+            // If the original value was larger than a page and the program
+            // didn't change `optlen`, return the original value.
+            Ok(new_optlen) if optlen > max_optlen && new_optlen == optlen => {
+                result.or_else(|_| error!(EFAULT))
+            }
+
+            Ok(new_optlen) if new_optlen > max_optlen => error!(EFAULT),
 
             // If `optlen` is set to 0 then proceed with the original value.
-            Ok(0) => Ok((value_buf, optlen)),
+            Ok(0) => Ok(result.unwrap_or_default()),
 
-            Ok(new_optlen) => Ok((bpf_sockopt.take_value(), new_optlen)),
+            Ok(new_optlen) => {
+                let mut bpf_optval = bpf_sockopt.take_value();
+                bpf_optval.truncate(new_optlen);
+                Ok(bpf_optval)
+            }
         }
     }
 
@@ -1371,12 +1390,11 @@ mod tests {
                     current_task,
                     0,
                     0,
-                    vec![1, 2, 3, 4],
+                    Ok(vec![1, 2, 3, 4]),
                     4,
-                    None,
                     &unix_socket,
                 ),
-                Ok((vec![1, 2, 3, 4], 4))
+                Ok(vec![1, 2, 3, 4])
             );
             assert!(matches!(
                 root_cgroup.run_setsockopt_prog(

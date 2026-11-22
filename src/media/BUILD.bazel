@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+
 package(default_applicable_licenses = ["//:license"])
 
 # Media device tests defined in Bazel. These are exported to `fx test` and
@@ -10,17 +12,38 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//sdk/lib/media/audio/cpp:media_audio_cpp_unittests",
+        "//src/media/audio/audio_core/mixer:tests",
+        "//src/media/audio/consumer:tests",
         "//src/media/audio/drivers/lib/audio-proto-utils:audio-proto-utils-tests",
+        "//src/media/audio/lib/analysis:tests",
+        "//src/media/audio/lib/clock:tests",
+        "//src/media/audio/lib/effects_loader:tests",
         "//src/media/audio/lib/format:tests",
         "//src/media/audio/lib/format2:tests",
+        "//src/media/audio/lib/processing:tests",
         "//src/media/audio/lib/rust:fuchsia_audio_fdomain_tests",
         "//src/media/audio/lib/rust:fuchsia_audio_tests",
         "//src/media/audio/lib/timeline:audio_lib_timeline_unittests",
         "//src/media/audio/lib/wav:audio_lib_wav_unittests",
+        "//src/media/audio/services/ffxdaemon:tests",
+        "//src/media/audio/services/mixer/common:tests",
+        "//src/media/audio/services/mixer/fidl:tests",
+        "//src/media/audio/services/mixer/mix:tests",
+        "//src/media/audio/tools/audio-driver-ctl:tests",
         "//src/media/codec/codecs/test:timestamp_extrapolator_tests",
+        "//src/media/drivers/amlogic_decoder/tests/runner:tests",
         "//src/media/haptics:haptics_system_test",
         "//src/media/lib/blocking_mpsc_queue:blocking_mpsc_queue_unittests",
-        "//src/media/lib/extend_bits/unit_tests:extend-bits-tests",
+        "//src/media/lib/extend_bits/unit_tests:tests",
+        "//src/media/sessions:tests",
         "//src/media/stream_processors/test:stream_processor_lib_test",
     ],
+)
+
+cml_shard(
+    name = "testing/drm_test_realm.shard",
+    includes = ["//sdk/lib/trace:client.shard"],
+    shard = "testing/drm_test_realm.shard.cml",
+    visibility = ["//:__subpackages__"],
 )

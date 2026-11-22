@@ -23,7 +23,13 @@ idk_cc_source_library(
     # Widely used in GN, so GN visibility stays open via raw_overwrite; Bazel
     # visibility is limited to actual Bazel dependents.
     visibility = [
+        "//sdk/ctf/tests/pkg/svc:__pkg__",
+        "//sdk/lib/async_patterns/cpp/tests:__pkg__",
+        "//src/developer/adb/bin/adb-shell:__pkg__",
         "//src/lib/testing/loop_fixture:__pkg__",
+        "//src/media/audio/services/common:__pkg__",
+        "//src/power/testing/system-integration/util:__pkg__",
+        "//vendor/google:__subpackages__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
     deps = [
         # <real_loop.h> has #include <lib/async/cpp/executor.h>

@@ -1,0 +1,102 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/fidl/fidlc/testdata:fidl_golden_library.bzl", "fidl_golden_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+_STANDALONE_LIBRARIES = [
+    "anonymous.test.fidl",
+    "arrays.test.fidl",
+    "bits_constants.test.fidl",
+    "bits.test.fidl",
+    "byte_and_bytes.test.fidl",
+    "constants.test.fidl",
+    "consts.test.fidl",
+    "doc_comments.test.fidl",
+    "driver_handle.test.fidl",
+    "driver_one_way.test.fidl",
+    "driver_service.test.fidl",
+    "driver_two_way.test.fidl",
+    "empty_struct.test.fidl",
+    "encapsulated_structs.test.fidl",
+    "enum.test.fidl",
+    "error.test.fidl",
+    "escaping.test.fidl",
+    "experimental_maybe_from_alias.test.fidl",
+    "experimental_zx_c_types.test.fidl",
+    "handles_in_types.test.fidl",
+    "handles.test.fidl",
+    "inheritance_with_recursive_decl.test.fidl",
+    "inheritance.test.fidl",
+    "new_type.test.fidl",
+    "nonzero.test.fidl",
+    "nullable.test.fidl",
+    "overlay.test.fidl",
+    "padding.test.fidl",
+    "protocol_request.test.fidl",
+    "protocols.test.fidl",
+    "request_flexible_envelope.test.fidl",
+    "serializable.test.fidl",
+    "sensitive.test.fidl",
+    "service.test.fidl",
+    "string_arrays.test.fidl",
+    "struct.test.fidl",
+    "table.test.fidl",
+    "time.test.fidl",
+    "types_in_protocols.test.fidl",
+    "union_sandwich.test.fidl",
+    "union.test.fidl",
+    "unknown_interactions.test.fidl",
+    "vectors.test.fidl",
+    "versions.test.fidl",
+    "zx_types.test.fidl",
+]
+
+_LIBRARIES_WITH_DRIVERS = [
+    "driver_handle.test.fidl",
+    "driver_one_way.test.fidl",
+    "driver_service.test.fidl",
+    "driver_two_way.test.fidl",
+    "handles.test.fidl",
+    "unknown_interactions.test.fidl",
+]
+
+_LIBRARIES_WITH_ZX_C_TYPES = [
+    "experimental_zx_c_types.test.fidl",
+    "overlay.test.fidl",
+    "string_arrays.test.fidl",
+]
+
+[
+    fidl_golden_library(
+        name = "test." + filename.removesuffix(".test.fidl").replace("_", ""),
+        srcs = [filename],
+        contains_drivers = filename in _LIBRARIES_WITH_DRIVERS,
+        experimental_flags = (
+            ["allow_new_types"] if filename == "new_type.test.fidl" else (
+                ["zx_c_types"] if filename in _LIBRARIES_WITH_ZX_C_TYPES else []
+            )
+        ),
+        versioned = "test:1" if filename == "versions.test.fidl" else None,
+        deps = ["//zircon/vdso/zx"] + (
+            ["//sdk/fidl/fdf"] if filename == "handles.test.fidl" else []
+        ),
+    )
+    for filename in _STANDALONE_LIBRARIES
+]
+
+# Ensure the files above exist. The test library targets are only reachable
+# through fidl_testdata_info in info.bzl, so when removing a library it's easy
+# to forget to remove it from _STANDALONE_LIBRARIES.
+genrule(
+    name = "verify_files_exist",
+    testonly = True,
+    srcs = _STANDALONE_LIBRARIES,
+    outs = ["files_in_standalone_libraries_exist.verified"],
+    cmd = "touch $@",
+    visibility = ["//tools/fidl/fidlc:__pkg__"],
+)
+# LINT.ThenChange(BUILD.gn)

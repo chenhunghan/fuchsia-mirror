@@ -31,7 +31,6 @@ fidl("fuchsia.hardware.pty") {
   sources = [ "pty.fidl" ]
   sdk_area = "Drivers"
   sdk_category = "prebuilt"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

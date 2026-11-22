@@ -119,3 +119,16 @@ TEST_F(FlatlandViewTest, Initialize) {
   EXPECT_EQ(kWidth, width_);
   EXPECT_EQ(kHeight, height_);
 }
+
+namespace {
+
+TEST_F(FlatlandViewTest, CreateFailsOnInvalidViewCreationToken) {
+  FlatlandView::ResizeCallback resize_callback = [](uint32_t width, uint32_t height) {};
+
+  auto view = FlatlandView::Create(view_incoming_.borrow(), fuchsia_ui_views::ViewCreationToken{},
+                                   std::move(resize_callback), dispatcher());
+  EXPECT_FALSE(view);
+  RunLoopUntilIdle();
+}
+
+}  // namespace

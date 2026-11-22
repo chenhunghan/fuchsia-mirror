@@ -52,7 +52,6 @@ fuchsia_unittest_package("wlan-virtio-hwsim-driver-tests") {
 
 fuchsia_driver_component("wlan-virtio-hwsim") {
   component_name = "wlan-virtio-hwsim"
-  info = "meta/wlan_virtio_hwsim_info.json"
   deps = [
     ":wlan-virtio-hwsim-driver",
     ":wlan_virtio_hwsim_bind",

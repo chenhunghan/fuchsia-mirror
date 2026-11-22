@@ -218,9 +218,9 @@ class FuchsiaDeviceTests(fuchsia_base_test.FuchsiaBaseTest):
         """Test case for wait_for_online()"""
         await self.dut.wait_for_online()
 
-    async def test_resolve_device_address(self) -> None:
+    def test_resolve_device_address(self) -> None:
         """Test case for resolve_device_address()"""
-        await self.dut.resolve_device_address()
+        self.dut.resolve_device_address()
 
 
 if __name__ == "__main__":

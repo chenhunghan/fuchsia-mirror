@@ -4,11 +4,13 @@
 
 #include "src/devices/power/drivers/aml-pwm-regulator/aml-pwm-regulator.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.pwm/cpp/wire_test_base.h>
 #include <fidl/fuchsia.hardware.vreg/cpp/fidl.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 
+#include <bind/fuchsia/cpp/bind.h>
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/predicates/status.h"
@@ -128,6 +130,20 @@ class AmlPwmRegulatorTestEnvironment : public fdf_testing::Environment {
     pwm_.ExpectEnable();
   }
 
+  // Adds the vreg ID metadata that DML boards generate from vreg offers.
+  void AddVregIdMetadata(std::string_view vreg_name, uint32_t id) {
+    std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+    entries.emplace_back("vregs._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(2));
+    entries.emplace_back("vregs.0.id", fuchsia_driver_metadata::DictionaryValue::WithInt64(1));
+    entries.emplace_back("vregs.0.name",
+                         fuchsia_driver_metadata::DictionaryValue::WithStr("other-vreg"));
+    entries.emplace_back("vregs.1.id", fuchsia_driver_metadata::DictionaryValue::WithInt64(id));
+    entries.emplace_back("vregs.1.name",
+                         fuchsia_driver_metadata::DictionaryValue::WithStr(std::string(vreg_name)));
+    fuchsia_driver_metadata::Dictionary metadata{{.entries = std::move(entries)}};
+    pdev_.AddFidlMetadata("fuchsia.hardware.vreg.Metadata", metadata);
+  }
+
   zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override {
     {
       zx::result result = to_driver_vfs.AddService<fuchsia_hardware_platform_device::Service>(
@@ -194,6 +210,8 @@ class AmlPwmRegulatorTest : public ::testing::Test {
 
   fidl::WireSyncClient<fuchsia_hardware_vreg::Vreg>& client() { return client_; }
 
+  fdf_testing::BackgroundDriverTest<FixtureConfig>& driver_test() { return driver_test_; }
+
  private:
   fdf_testing::BackgroundDriverTest<FixtureConfig> driver_test_;
   fidl::WireSyncClient<fuchsia_hardware_vreg::Vreg> client_;
@@ -243,6 +261,44 @@ TEST_F(AmlPwmRegulatorTest, RegulatorTest) {
   EXPECT_EQ(result->error_value(), ZX_ERR_INVALID_ARGS);
 
   WithPwm([&](auto& pwm) { pwm.VerifyAndClear(); });
+}
+
+TEST_F(AmlPwmRegulatorTest, NoGlobalId) {
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    std::vector<fuchsia_driver_framework::NodeProperty2> properties =
+        node.children().at("pwm-0-regulator").GetProperties();
+    ASSERT_EQ(properties.size(), 2u);
+    EXPECT_EQ(properties[0].key(), bind_fuchsia::NAME);
+    EXPECT_EQ(properties[1].key(), bind_fuchsia::SERVICE);
+  });
+}
+
+// The global ID from the vreg ID metadata is published as `fuchsia.ID`.
+TEST(AmlPwmRegulatorGlobalIdTest, GlobalId) {
+  static constexpr std::string_view kVregName = "vreg-pwm-big";
+  static constexpr uint32_t kGlobalId = 0x12345678;
+
+  fdf_testing::BackgroundDriverTest<FixtureConfig> driver_test;
+  driver_test.RunInEnvironmentTypeContext([](auto& env) {
+    env.Init(kVregName);
+    env.AddVregIdMetadata(kVregName, kGlobalId);
+  });
+  ASSERT_OK(driver_test.StartDriver());
+
+  driver_test.RunInNodeContext([](fdf_testing::TestNode& node) {
+    std::vector<fuchsia_driver_framework::NodeProperty2> properties =
+        node.children().at(std::string(kVregName)).GetProperties();
+    ASSERT_EQ(properties.size(), 3u);
+    EXPECT_EQ(properties[0].key(), bind_fuchsia::NAME);
+    ASSERT_TRUE(properties[0].value().string_value().has_value());
+    EXPECT_EQ(properties[0].value().string_value().value(), kVregName);
+    EXPECT_EQ(properties[1].key(), bind_fuchsia::SERVICE);
+    EXPECT_EQ(properties[2].key(), bind_fuchsia::ID);
+    ASSERT_TRUE(properties[2].value().int_value().has_value());
+    EXPECT_EQ(properties[2].value().int_value().value(), kGlobalId);
+  });
+
+  ASSERT_OK(driver_test.StopDriver());
 }
 
 }  // namespace aml_pwm_regulator

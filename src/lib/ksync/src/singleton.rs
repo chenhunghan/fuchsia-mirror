@@ -9,9 +9,9 @@ pub type SingletonMutex<Class, M> = KMutex<Class, M>;
 
 /// Declares a singleton userspace mutex.
 ///
-/// This is only available outside the kernel. The kernel's `declare_singleton_mutex!` (along with
-/// `declare_singleton_critical_mutex!`, `declare_singleton_spinlock!` and
-/// `declare_singleton_monitored_spinlock!`) lives with the kernel's raw locks in
+/// This is only available outside the kernel. In the kernel, mutexes and critical mutexes cannot be
+/// statically initialized, while `declare_singleton_spinlock!` and
+/// `declare_singleton_monitored_spinlock!` live with the kernel's raw locks in
 /// `//zircon/kernel/lib/ksync`.
 ///
 /// This macro defines a struct with the given name and visibility, registers it as a singleton

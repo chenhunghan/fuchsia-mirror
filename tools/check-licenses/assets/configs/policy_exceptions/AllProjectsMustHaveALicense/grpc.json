@@ -2,8 +2,8 @@
     "policy_exceptions": {
         "AllProjectsMustHaveALicense": [
             {
-                "bug": "TODO: b/missing",
-                "description": "Migrated from legacy _config.json",
+                "bug": "b/585200385",
+                "description": "gRPC subdirectories whose license files live in the top-level gRPC repository.",
                 "paths": [
                     "third_party/grpc/src/third_party",
                     "third_party/grpc/src/third_party/upb",

@@ -56,11 +56,12 @@ TEST(ImageFormat, IntelYTiledFormat_V2) {
 
 TEST(ImageFormat, IntelYTiledFormat_V2_wire) {
   fidl::Arena allocator;
-  sysmem_v2::wire::ImageFormatConstraints constraints(allocator);
-  constraints.set_pixel_format(fuchsia_images2::wire::PixelFormat::kNv12);
-  constraints.set_pixel_format_modifier(
-      allocator, fuchsia_images2::wire::PixelFormatModifier::kIntelI915YTiled);
-  constraints.set_min_size(allocator, fuchsia_math::wire::SizeU{128u, 32u});
+  auto constraints =
+      sysmem_v2::wire::ImageFormatConstraints::Builder(allocator)
+          .pixel_format(fuchsia_images2::wire::PixelFormat::kNv12)
+          .pixel_format_modifier(fuchsia_images2::wire::PixelFormatModifier::kIntelI915YTiled)
+          .min_size(fuchsia_math::wire::SizeU{128u, 32u})
+          .Build();
 
   auto image_format_result = ImageConstraintsToFormat(allocator, constraints, 3440u, 1440u);
   EXPECT_TRUE(image_format_result.is_ok());
@@ -204,12 +205,13 @@ TEST(ImageFormat, IntelCcsFormats_V1_wire) {
 
 TEST(ImageFormat, IntelYTiledFormat_V2BytesPerRowDivisor) {
   fidl::Arena allocator;
-  sysmem_v2::wire::ImageFormatConstraints constraints(allocator);
-  constraints.set_pixel_format(fuchsia_images2::wire::PixelFormat::kB8G8R8A8);
-  constraints.set_pixel_format_modifier(
-      allocator, fuchsia_images2::wire::PixelFormatModifier::kIntelI915YTiled);
-  constraints.set_min_size(allocator, fuchsia_math::wire::SizeU{128u, 32u});
-  constraints.set_bytes_per_row_divisor(512u);
+  auto constraints =
+      sysmem_v2::wire::ImageFormatConstraints::Builder(allocator)
+          .pixel_format(fuchsia_images2::wire::PixelFormat::kB8G8R8A8)
+          .pixel_format_modifier(fuchsia_images2::wire::PixelFormatModifier::kIntelI915YTiled)
+          .min_size(fuchsia_math::wire::SizeU{128u, 32u})
+          .bytes_per_row_divisor(512u)
+          .Build();
 
   constexpr uint32_t kImageWidth = 540u / 4;
   constexpr uint32_t kImageHeight = 140u;
@@ -231,7 +233,7 @@ TEST(ImageFormat, IntelYTiledFormat_V2BytesPerRowDivisor) {
   }
 
   // Check that increasing the bytes per row increases the calculated image size.
-  image_format.set_bytes_per_row(512u * 3);
+  image_format.bytes_per_row() = 512u * 3;
   {
     constexpr uint32_t kWidthInTiles = fbl::round_up(512u * 3, kYTileByteWidth) / kYTileByteWidth;
     constexpr uint32_t kHeightInTiles = fbl::round_up(kImageHeight, kYTileHeight) / kYTileHeight;
@@ -297,10 +299,8 @@ TEST(ImageFormat, IntelBytesPerRowDivisorIsLeastCommonMultiple) {
 }
 
 TEST(ImageFormat, IntelCcsPlaneOnlyWithCcsModifier) {
-  fuchsia_images2::ImageFormat image_format;
-  image_format.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
-  image_format.size() = {1920u, 1080u};
-  image_format.bytes_per_row() = 1920u * 4;
+  fuchsia_sysmem2::ImageFormatConstraints constraints;
+  constraints.pixel_format() = fuchsia_images2::PixelFormat::kB8G8R8A8;
 
   constexpr uint32_t kCcsPlane = 3;
   uint64_t offset;
@@ -308,13 +308,15 @@ TEST(ImageFormat, IntelCcsPlaneOnlyWithCcsModifier) {
   for (const auto modifier : {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
                               fuchsia_images2::PixelFormatModifier::kIntelI915YTiled,
                               fuchsia_images2::PixelFormatModifier::kIntelI915YfTiled}) {
-    image_format.pixel_format_modifier() = modifier;
+    constraints.pixel_format_modifier() = modifier;
+    auto image_format = ImageConstraintsToFormat(constraints, 1920u, 1080u).take_value();
     EXPECT_FALSE(ImageFormatPlaneByteOffset(image_format, kCcsPlane, &offset));
     EXPECT_FALSE(ImageFormatPlaneRowBytes(image_format, kCcsPlane, &row_bytes));
   }
   for (const auto modifier : {fuchsia_images2::PixelFormatModifier::kIntelI915YTiledCcs,
                               fuchsia_images2::PixelFormatModifier::kIntelI915YfTiledCcs}) {
-    image_format.pixel_format_modifier() = modifier;
+    constraints.pixel_format_modifier() = modifier;
+    auto image_format = ImageConstraintsToFormat(constraints, 1920u, 1080u).take_value();
     EXPECT_TRUE(ImageFormatPlaneByteOffset(image_format, kCcsPlane, &offset));
     EXPECT_TRUE(ImageFormatPlaneRowBytes(image_format, kCcsPlane, &row_bytes));
   }

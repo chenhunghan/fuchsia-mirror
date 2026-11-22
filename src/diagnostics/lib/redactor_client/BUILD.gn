@@ -43,6 +43,7 @@ rustc_library("redactor_client") {
   ]
   deps = [
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+    "//sdk/rust/zx",
     "//src/diagnostics/lib/redactor",
     "//src/lib/fuchsia-component",
     "//third_party/rust_crates:log",
@@ -54,6 +55,7 @@ rustc_test("redactor_client_test") {
   edition = "2024"
   deps = [
            "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+           "//sdk/rust/zx",
            "//src/diagnostics/lib/redactor",
            "//src/lib/fuchsia-component",
            "//third_party/rust_crates:log",

@@ -17,10 +17,6 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 DMC_PATH_KEY: str = "DMC_PATH"
 
 
-class UsbPowerDmcError(usb_power_hub.UsbPowerHubError):
-    """Custom exception class for raising DMC related errors."""
-
-
 class UsbPowerState(enum.StrEnum):
     """Different power states supported by `dmc set-usb-power-state`."""
 
@@ -31,14 +27,17 @@ class UsbPowerState(enum.StrEnum):
 class UsbPowerHubUsingDmc(usb_power_hub.UsbPowerHub):
     """UsbPowerHub auxiliary device implementation using DMC.
 
-    Note: `UsbPowerUsingDmc` is implemented to do power off/on the usb for a
+    Note: `UsbPowerHubUsingDmc` is implemented to do power off/on the usb for a
     Fuchsia device that is hosted in Fuchsia Infra labs and Fuchsia Infra
     workflows are different from local workflows. As a result,
-    `UsbPowerUsingDmc` will only work for FuchsiaInfra labs and will not work
+    `UsbPowerHubUsingDmc` will only work for FuchsiaInfra labs and will not work
     for local set ups or any other setups for that matter.
 
     Args:
         device_name: Device name returned by `ffx target list`.
+
+    Raises:
+        errors.NotSupportedError: If `DMC_PATH` is not set in the environment.
     """
 
     def __init__(self, device_name: str) -> None:
@@ -48,20 +47,17 @@ class UsbPowerHubUsingDmc(usb_power_hub.UsbPowerHub):
         try:
             self._dmc_path: str = os.environ[DMC_PATH_KEY]
         except KeyError as error:
-            raise UsbPowerDmcError(
+            raise errors.NotSupportedError(
                 f"{DMC_PATH_KEY} environmental variable is not set on "
                 f"{platform.node()}"
             ) from error
 
     # List all the public methods
-    def power_off(self, port: int | None = None) -> None:
+    def power_off(self) -> None:
         """Turns off the usb power to the Fuchsia device.
 
-        Args:
-            port: None. Not being used by this implementation.
-
         Raises:
-            UsbPowerError: In case of failure.
+            UsbPowerHubError: In case of failure.
         """
         _LOGGER.info("Powering off usb for %s...", self._name)
         self._run(
@@ -71,14 +67,11 @@ class UsbPowerHubUsingDmc(usb_power_hub.UsbPowerHub):
         )
         _LOGGER.info("Successfully powered off usb for %s...", self._name)
 
-    def power_on(self, port: int | None = None) -> None:
+    def power_on(self) -> None:
         """Turns on the usb power to the Fuchsia device.
 
-        Args:
-            port: None. Not being used by this implementation.
-
         Raises:
-            UsbPowerError: In case of failure.
+            UsbPowerHubError: In case of failure.
         """
         _LOGGER.info("Powering on usb for %s...", self._name)
         self._run(

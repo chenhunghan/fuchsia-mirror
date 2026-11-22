@@ -55,6 +55,11 @@ type StartOptions = table {
     /// If true, allows writing Type 3 delivery blobs. Defaults to false.
     /// NOTE: Type 3 delivery blobs are currently UNSTABLE / EXPERIMENTAL and subject to change.
     11: allow_type3_blobs bool;
+
+    /// If true, checks the filesystem (as `Check` would) before starting it, and fails to start if
+    /// the check fails.  This is cheaper than calling `Check` and then `Start`.  Only supported by
+    /// Fxfs.
+    12: fsck_before_start bool;
 };
 // LINT.ThenChange(//src/storage/lib/fs_management/cpp/options_test.cc)
 

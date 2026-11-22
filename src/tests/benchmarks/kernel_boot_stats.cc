@@ -22,7 +22,7 @@ constexpr const char* kTestSuiteName = "fuchsia.kernel.boot";
 // Each kcounter names a time point.  The corresponding "test result" names the
 // interval between that time point and the previous one.
 //
-// **NOTE** Code in //zircon/kernel/top/handoff.cc and other places in the the
+// **NOTE** Code in //zircon/kernel/top/handoff.rs and other places in the
 // kernel populate the "boot.timeline.*" kcounters with various time samples.
 // This table is responsible for listing all of those sampling points in their
 // intended chronological order and for giving appropriate names to each

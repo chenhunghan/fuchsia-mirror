@@ -62,4 +62,41 @@ TEST_F(PersistentStatusTest, All) {
   EXPECT_FALSE(PersistentStatus("tool").IsFirstDirectLaunch());
 }
 
+TEST_F(PersistentStatusTest, InternalStatusOverridesExternalStatus) {
+  metric_properties::SetBool("analytics-status", true);
+  metric_properties::Set("analytics-status-internal", "0");
+  metric_properties::Delete("uuid");
+
+  EXPECT_FALSE(PersistentStatus::IsFirstLaunchOfFirstTool());
+  EXPECT_FALSE(PersistentStatus::IsEnabled());
+
+  metric_properties::Set("analytics-status-internal", "1");
+  EXPECT_TRUE(PersistentStatus::IsEnabled());
+
+  metric_properties::Set("analytics-status-internal", "2");
+  EXPECT_TRUE(PersistentStatus::IsEnabled());
+
+  PersistentStatus::Disable();
+  EXPECT_FALSE(PersistentStatus::IsEnabled());
+  EXPECT_EQ(metric_properties::Get("analytics-status-internal"), "0");
+
+  PersistentStatus::Enable();
+  EXPECT_TRUE(PersistentStatus::IsEnabled());
+  EXPECT_EQ(metric_properties::Get("analytics-status-internal"), "1");
+
+  metric_properties::Set("analytics-status-internal", "2");
+  PersistentStatus::Enable();
+  EXPECT_TRUE(PersistentStatus::IsEnabled());
+  EXPECT_EQ(metric_properties::Get("analytics-status-internal"), "2");
+}
+
+TEST_F(PersistentStatusTest, GetUuidRegeneratesWhenMissing) {
+  metric_properties::SetBool("analytics-status", true);
+  metric_properties::Delete("uuid");
+
+  std::string generated = PersistentStatus::GetUuid();
+  EXPECT_TRUE(uuid::IsValid(generated));
+  EXPECT_EQ(metric_properties::Get("uuid"), generated);
+}
+
 }  // namespace analytics::core_dev_tools::internal

@@ -9,7 +9,9 @@ use std::{env, fs};
 
 use anyhow::{Context, Result};
 use argh::FromArgs;
-use gtest_test_parser::{ChildGuard, TestResult, parse_str};
+use gtest_test_parser::{
+    DEFAULT_SIGNAL_GRACE_PERIOD, SupervisedChild, TerminationSignals, TestResult, parse_str,
+};
 
 const TEST_OUTPUT_SUMMARY_PATH_ENV_KEY: &str = "TEST_OUTPUT_SUMMARY_PATH";
 
@@ -54,6 +56,9 @@ fn main() -> Result<()> {
         let binary = &args.command[0];
         let command_arguments = &args.command[1..];
 
+        let signals = TerminationSignals::register()
+            .context("error registering termination signal handlers")?;
+
         let mut child = Command::new(binary)
             .args(command_arguments)
             .stdout(Stdio::piped())
@@ -62,7 +67,8 @@ fn main() -> Result<()> {
             .with_context(|| format!("error running test binary {binary}"))?;
 
         let child_stdout = child.stdout.take().expect("child stdout was piped");
-        let guard = ChildGuard::new(child);
+        let supervised_child = SupervisedChild::new(child, signals, DEFAULT_SIGNAL_GRACE_PERIOD)
+            .context("error starting signal forwarder for test binary process")?;
 
         let mut reader = BufReader::new(child_stdout);
         let mut captured_lines = Vec::new();
@@ -78,9 +84,11 @@ fn main() -> Result<()> {
             line_buf.clear();
         }
 
-        let status = guard.wait().context("error waiting for test binary process")?;
-        if !status.success() {
-            exit_code = status.code().unwrap_or(1);
+        let outcome = supervised_child.wait().context("error waiting for test binary process")?;
+        if !outcome.status.success() {
+            exit_code = outcome.status.code().unwrap_or(1);
+        } else if outcome.signaled {
+            exit_code = 1;
         }
 
         captured_lines.join("\n")

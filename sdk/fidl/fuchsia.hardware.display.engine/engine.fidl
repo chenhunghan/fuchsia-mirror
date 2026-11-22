@@ -197,6 +197,17 @@ type RawDisplayInfo = resource struct {
     preferred_modes
             vector<fuchsia.hardware.display.types.Mode>:<MAX_COUNT_DISPLAY_INFO_PREFERRED_MODES>;
 
+    /// Optional variable-refresh-rate capabilities parallel to
+    /// `preferred_modes`.
+    ///
+    /// Must be either empty (indicating default/empty [`VrrConfig`] for all
+    /// `preferred_modes`) or have the exact same length as `preferred_modes`.
+    /// Entries corresponding to modes without
+    /// [`fuchsia.hardware.display.types/ModeFlags.VARIABLE_REFRESH_RATE`] must
+    /// be empty tables.
+    preferred_mode_vrr_configs
+            vector<fuchsia.hardware.display.types.VrrConfig>:<MAX_COUNT_DISPLAY_INFO_PREFERRED_MODES>;
+
     /// Display capabilities, encoded using the E-EDID standard.
     ///
     /// E-EDID (Enhanced Extended Display Identification Data) is a VESA
@@ -612,6 +623,22 @@ open protocol Engine {
         /// [`Engine.ImportImageForCapture`].
         capture_image_id ImageId;
     }) -> () error zx.Status;
+
+    /// Hints that upcoming configuration submissions are expected for
+    /// `display_id` with target `frame_interval`, and the first configuration
+    /// with such timing is expected at `expected_present_time`.
+    ///
+    /// Sent on a best-effort one-way basis (for example after an idle timeout
+    /// ahead of a single frame or frame burst, or when presentation cadence
+    /// changes) so variable-refresh-rate engines with active-idle collapse can
+    /// wake display hardware or re-anchor VSync generation ahead of
+    /// [`Engine.SubmitConfiguration`]. Engines that do not consume
+    /// expected-present hints must ignore this call.
+    flexible NotifyExpectedPresent(struct {
+        display_id fuchsia.hardware.display.types.DisplayId;
+        expected_present_time zx.InstantMono;
+        frame_interval zx.DurationMono;
+    });
 };
 
 service Service {

@@ -13,11 +13,13 @@
 
 use crate::kernel::types::PAddr;
 use crate::pdev_power::{
-    CONTROL_INTERFACE_ARM_WFI, CONTROL_INTERFACE_CPU_DRIVER,
-    K_POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT, PdevPowerOps, PowerCpuState, PowerDomainConfigFfi,
-    PowerRebootFlags, ProcessorPowerLevelFfi, pdev_register_power,
-    power_management_boot_boost_enabled, power_management_register_domains,
-    power_management_rppm_enabled, power_management_set_rate_limits,
+    ActivePowerLevelConfig, ControlInterface, IdlePowerStateConfig, PdevPowerOps, PowerCpuState,
+    PowerDomainConfig, PowerRebootFlags, pdev_register_power, power_management_boot_boost_enabled,
+    power_management_register_domains, power_management_rppm_enabled,
+    power_management_set_rate_limits,
+};
+use crate::psci::{
+    psci_cpu_off, psci_cpu_on, psci_get_cpu_state, psci_system_off, psci_system_reset2_raw,
 };
 use core::sync::atomic::{AtomicPtr, Ordering};
 use debug::dprintf;
@@ -59,11 +61,6 @@ unsafe extern "C" {
         boot_partition_sel: u64,
     ) -> i64;
     fn cpp_moonflower_tz_io_write(paddr: usize, val: u32) -> i64;
-    fn psci_system_reset2_raw(reset_type: u32, cookie: u32) -> Result<(), Status>;
-    fn psci_system_off() -> Result<(), Status>;
-    fn psci_cpu_off() -> Result<(), Status>;
-    fn psci_cpu_on(hw_cpu_id: u64, entry: u64, context: u64) -> Result<(), Status>;
-    fn psci_get_cpu_state(hw_cpu_id: u64, out_state: *mut PowerCpuState) -> Result<(), Status>;
 }
 
 /// Configures hardware for reboot/shutdown via Qualcomm TZ SMC call.
@@ -90,26 +87,24 @@ extern "C" fn moonflower_reboot(flags: PowerRebootFlags) -> Result<(), Status> {
     dprintf!(INFO, "Moonflower reboot: flags {:#x}\n", flags as u32);
     set_download_mode(MoonflowerDownloadMode::NoDump);
     configure_hw_for_shutdown();
-    // SAFETY: PSCI warm reset call for Moonflower SoC.
-    unsafe { psci_system_reset2_raw(VENDOR_SPECIFIC_WARM_RESET_TYPE, 0) }
+    psci_system_reset2_raw(VENDOR_SPECIFIC_WARM_RESET_TYPE, 0)
 }
 
 /// Shuts down the Moonflower platform via PSCI system off call.
 extern "C" fn moonflower_shutdown() -> Result<(), Status> {
     configure_hw_for_shutdown();
-    // SAFETY: PSCI system off call to hardware firmware.
-    unsafe { psci_system_off() }
+    psci_system_off()
 }
 
 /// Powers off the calling CPU core via PSCI CPU off call.
 extern "C" fn moonflower_cpu_off() -> Result<(), Status> {
-    // SAFETY: PSCI CPU off call.
-    unsafe { psci_cpu_off() }
+    psci_cpu_off()
 }
 
 /// Powers on the CPU core with the specified hardware ID via PSCI CPU on call.
 extern "C" fn moonflower_cpu_on(hw_cpu_id: u64, entry: u64, context: u64) -> Result<(), Status> {
-    // SAFETY: PSCI CPU on call.
+    // SAFETY: `PdevPowerOps::cpu_on` callers (via `power_cpu_on`) supply the kernel secondary
+    // entry physical address and bootstrap context (or operator-authorized console arguments).
     unsafe { psci_cpu_on(hw_cpu_id, entry, context) }
 }
 
@@ -121,8 +116,11 @@ extern "C" fn moonflower_get_cpu_state(
     if out_state.is_null() {
         return Err(Status::INVALID_ARGS);
     }
-    // SAFETY: PSCI get cpu state with valid pointer.
-    unsafe { psci_get_cpu_state(hw_cpu_id, out_state) }
+    let state = psci_get_cpu_state(hw_cpu_id)?;
+    // SAFETY: `out_state` was checked non-null above, and `PdevPowerOps::get_cpu_state` callers
+    // supply a pointer valid for writes of `PowerCpuState`.
+    unsafe { out_state.write(state) };
+    Ok(())
 }
 
 /// Helper function to construct a `regio::MmioBank` for the OPP index register.
@@ -228,65 +226,56 @@ pub extern "C" fn moonflower_power_init() {
 
     dprintf!(INFO, "POWER: initializing moonflower power domain\n");
 
-    let wfi_name = c"WFI".as_ptr();
-    let lowsvs_name = c"LowSVS".as_ptr();
-    let svs_name = c"SVS".as_ptr();
-    let nominal_name = c"Nominal".as_ptr();
-    let turbo_name = c"Turbo".as_ptr();
+    let idle_states = [IdlePowerStateConfig::ARM_WFI];
 
-    let levels = [
-        ProcessorPowerLevelFfi {
-            options: K_POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT,
-            processing_rate: 0,
-            power_coefficient_nw: 100_000,
-            control_interface: CONTROL_INTERFACE_ARM_WFI,
-            control_argument: 0,
-            diagnostic_name: wfi_name,
-        },
-        ProcessorPowerLevelFfi {
+    let active_levels = [
+        ActivePowerLevelConfig {
             options: 0,
             processing_rate: 360,
-            power_coefficient_nw: 20_000_000,
-            control_interface: CONTROL_INTERFACE_CPU_DRIVER,
+            active_power_nw: 20_000_000,
+            static_power_nw: 0,
+            control_interface: ControlInterface::CpuDriver,
             control_argument: 3,
-            diagnostic_name: lowsvs_name,
+            diagnostic_name: "LowSVS",
         },
-        ProcessorPowerLevelFfi {
+        ActivePowerLevelConfig {
             options: 0,
             processing_rate: 506,
-            power_coefficient_nw: 31_000_000,
-            control_interface: CONTROL_INTERFACE_CPU_DRIVER,
+            active_power_nw: 31_000_000,
+            static_power_nw: 0,
+            control_interface: ControlInterface::CpuDriver,
             control_argument: 2,
-            diagnostic_name: svs_name,
+            diagnostic_name: "SVS",
         },
-        ProcessorPowerLevelFfi {
+        ActivePowerLevelConfig {
             options: 0,
             processing_rate: 798,
-            power_coefficient_nw: 66_000_000,
-            control_interface: CONTROL_INTERFACE_CPU_DRIVER,
+            active_power_nw: 66_000_000,
+            static_power_nw: 0,
+            control_interface: ControlInterface::CpuDriver,
             control_argument: 1,
-            diagnostic_name: nominal_name,
+            diagnostic_name: "Nominal",
         },
-        ProcessorPowerLevelFfi {
+        ActivePowerLevelConfig {
             options: 0,
             processing_rate: 1000,
-            power_coefficient_nw: 102_000_000,
-            control_interface: CONTROL_INTERFACE_CPU_DRIVER,
+            active_power_nw: 102_000_000,
+            static_power_nw: 0,
+            control_interface: ControlInterface::CpuDriver,
             control_argument: 0,
-            diagnostic_name: turbo_name,
+            diagnostic_name: "Turbo",
         },
     ];
 
-    let domain_config = [PowerDomainConfigFfi {
+    let domain_config = [PowerDomainConfig {
         domain_id: 0,
         cpu_mask: 0xf,
-        levels: levels.as_ptr(),
-        level_count: levels.len(),
+        active_levels: &active_levels,
+        idle_states: &idle_states,
+        active_transitions: &[],
     }];
 
-    // SAFETY: `domain_config` points to the valid local `levels` array whose `diagnostic_name`
-    // pointers come from NUL-terminated string literals.
-    if let Err(status) = unsafe { power_management_register_domains(&domain_config) } {
+    if let Err(status) = power_management_register_domains(&domain_config) {
         dprintf!(
             CRITICAL,
             "POWER: Failed to register moonflower power domain: {}\n",

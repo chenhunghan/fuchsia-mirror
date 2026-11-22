@@ -175,6 +175,7 @@ fuchsia_partitions_configuration(
         ":vbmeta_b",
         ":vbmeta_r",
         ":fvm",
+        ":fxfs",
     ],
 )
 

@@ -17,7 +17,9 @@ scripts ot locations.
 
   GNI file computing the Bazel command-line arguments to use to match
   the current GN build configuration, with regards to optimization mode,
-  sanitizer mode, verbosity and remote builds.
+  sanitizer and variant modes (via
+  `--@fuchsia_rules_common//build_flags:enabled_features`), verbosity, and
+  remote builds.
 
 - logging.gni:
 
@@ -47,17 +49,19 @@ scripts ot locations.
 - `select/`:
 
   Bazel `config_setting()` predicates matching the build settings in
-  `variables/`, used in `select()` statements.
+  `variables/` and composite `config_setting_group()` targets (such as
+  `is_profile` and `is_coverage`), used in `select()` statements.
 
 - `derived/`:
 
   Starlark constants and `config_setting_group()` targets derived from global
   or toolchain-specific build configuration values.
 
-- `toolchain_tags/`:
+- `variant_features/`:
 
-  Auto-generated `bool_flag()`, `config_setting()`, and `.gni` definitions
-  exposing GN `toolchain_variant.tags` to Bazel. See
-  `toolchain_tags/README.md` for details.
+  Cycle-free `feature_flag()` and `config_setting()` definitions exposing active
+  GN toolchain variants (derived from `toolchain_variant.tags` and
+  `toolchain_variant.configs`) to Bazel. See `variant_features/README.md` for
+  details.
 
 

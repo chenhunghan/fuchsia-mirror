@@ -126,14 +126,20 @@ void RunnerListTests();
 // Verify that TestDriverImpl actually resets on the right spots,
 // and behaves correctly on fatal and non fatal failure(EXPECT_*, ASSERT_*).
 void TestDriverImplFatalFailureEndsTest();
+void TestDriverImplSkipAfterFailure();
 void TestDriverImplNonFatalFailureDoesNotEndTest();
 void TestDriverImplResetOnTestCompletion();
 void TestDriverImplReset();
+void TestDriverImplNonFatalFailureAfterFatalFailure();
+void TestDriverImplResetOnTestCaseEnd();
 
 // Verify that we parse options correctly.
 void RunnerOptionsParseFromCmdLineShort();
 void RunnerOptionsParseFromCmdLineLong();
 void RunnerOptionsParseFromCmdLineErrors();
+void RunnerOptionsParseFromCmdLineHelpNoValue();
+void RunnerOptionsParseFromCmdLineOutputNoValue();
+void RunnerRunAllTestsExitStatusForOptions();
 
 // Verify that swapping the reporter actually changes where things are outputted.
 void ReporterWritesToLogSink();
@@ -146,6 +152,8 @@ void FilterOpFilterPartialMatch();
 void FilterOpFilterFullNegativeMatch();
 void FilterOpFilterMultiMatch();
 void FilterOpFilterCombined();
+void FilterOpFilterCombinedNoColon();
+void FilterOpFilterEmptyPositive();
 
 // Verify that parameterized value tests run correctly.
 void TestAddParameterizedSuites();
@@ -156,6 +164,7 @@ void TestValuesBool();
 void TestValuesSimilarTypes();
 void TestValuesCombine();
 void TestTuplesCombine();
+void TestRangesCombine();
 void TestRange();
 
 // Fuchsia only tests.
@@ -226,18 +235,26 @@ static constexpr RegisteredTest kRegisteredTests[] = {
     RUN_TEST(ReporterSetLogSink),
     RUN_TEST(ReporterWritesToLogSink),
     RUN_TEST(TestDriverImplFatalFailureEndsTest),
+    RUN_TEST(TestDriverImplSkipAfterFailure),
     RUN_TEST(TestDriverImplNonFatalFailureDoesNotEndTest),
     RUN_TEST(TestDriverImplReset),
     RUN_TEST(TestDriverImplResetOnTestCompletion),
+    RUN_TEST(TestDriverImplNonFatalFailureAfterFatalFailure),
+    RUN_TEST(TestDriverImplResetOnTestCaseEnd),
     RUN_TEST(RunnerOptionsParseFromCmdLineShort),
     RUN_TEST(RunnerOptionsParseFromCmdLineLong),
     RUN_TEST(RunnerOptionsParseFromCmdLineErrors),
+    RUN_TEST(RunnerOptionsParseFromCmdLineHelpNoValue),
+    RUN_TEST(RunnerOptionsParseFromCmdLineOutputNoValue),
+    RUN_TEST(RunnerRunAllTestsExitStatusForOptions),
     RUN_TEST(FilterOpFilterEmptyMatchesAll),
     RUN_TEST(FilterOpFilterFullMatch),
     RUN_TEST(FilterOpFilterFullNegativeMatch),
     RUN_TEST(FilterOpFilterPartialMatch),
     RUN_TEST(FilterOpFilterMultiMatch),
     RUN_TEST(FilterOpFilterCombined),
+    RUN_TEST(FilterOpFilterCombinedNoColon),
+    RUN_TEST(FilterOpFilterEmptyPositive),
     RUN_TEST(TestAddParameterizedSuites),
     RUN_TEST(TestAddParameterizedTests),
     RUN_TEST(TestAddParameterizedInstaniations),
@@ -246,6 +263,7 @@ static constexpr RegisteredTest kRegisteredTests[] = {
     RUN_TEST(TestValuesCombine),
     RUN_TEST(TestValuesSimilarTypes),
     RUN_TEST(TestTuplesCombine),
+    RUN_TEST(TestRangesCombine),
     RUN_TEST(TestRange),
 #ifdef __Fuchsia__
     RUN_TEST(DeathStatementCrash),

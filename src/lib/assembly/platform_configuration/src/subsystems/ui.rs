@@ -6,9 +6,57 @@ use crate::subsystems::prelude::*;
 use anyhow::ensure;
 use assembly_config_capabilities::{Config, ConfigNestedValueType, ConfigValueType};
 use assembly_config_schema::platform_settings::ui_config::{
+    ImageImportConfig, ImageImportKinds, ImageImportNeverShown, ImageImportOffScreenOrder,
     PlatformUiConfig, UnsignedIntegerRangeInclusive,
 };
 use assembly_constants::{BoardFeature, FileEntry, PackageDestination, PackageSetDestination};
+
+// Maximum CML string size for `fuchsia.scenic.ImageImportPolicy`; the grammar bounds valid strings
+// to 139 bytes (< 256).
+// LINT.IfChange(max_len)
+const IMAGE_IMPORT_POLICY_MAX_LEN: u32 = 256;
+// LINT.ThenChange(/src/ui/scenic/bin/meta/config.shard.cml:image_import_policy)
+
+// LINT.IfChange
+// Formats the set fields of `ImageImportConfig` into the comma-separated `key=value`
+// `fuchsia.scenic.ImageImportPolicy` string consumed by Scenic's `ParseImageImportPolicy()`.
+// Unset (`None`) fields are omitted so Scenic's `ImageImporterImpl::Config` defaults apply.
+fn format_image_import_policy(config: &ImageImportConfig) -> String {
+    let mut parts = Vec::with_capacity(6);
+    if let Some(kinds) = config.kinds {
+        let v = match kinds {
+            ImageImportKinds::PredictedKindFirst => "predicted_kind_first",
+            ImageImportKinds::Concurrent => "concurrent",
+        };
+        parts.push(format!("kinds={v}"));
+    }
+    if let Some(off_screen) = config.off_screen {
+        let v = match off_screen {
+            ImageImportOffScreenOrder::MostRecentFirst => "most_recent_first",
+            ImageImportOffScreenOrder::LeastRecentFirst => "least_recent_first",
+        };
+        parts.push(format!("off_screen={v}"));
+    }
+    if let Some(never_shown) = config.never_shown {
+        let v = match never_shown {
+            ImageImportNeverShown::WhenIdle => "when_idle",
+            ImageImportNeverShown::WhenFree => "when_free",
+            ImageImportNeverShown::Never => "never",
+        };
+        parts.push(format!("never_shown={v}"));
+    }
+    if let Some(idle_ms) = config.idle_ms {
+        parts.push(format!("idle_ms={idle_ms}"));
+    }
+    if let Some(display_cap) = config.display_cap {
+        parts.push(format!("display_cap={display_cap}"));
+    }
+    if let Some(reply_thread) = config.reply_thread {
+        parts.push(format!("reply_thread={reply_thread}"));
+    }
+    parts.join(",")
+}
+// LINT.ThenChange(/src/ui/scenic/lib/flatland/image_import/image_importer_impl.cc, /src/lib/assembly/config_schema/src/platform_settings/ui_config.rs, /src/ui/scenic/bin/meta/config.shard.cml:image_import_policy, /src/ui/scenic/lib/flatland/image_import/tests/image_importer_impl_unittest.cc:policy_test_cases)
 
 pub(crate) struct UiSubsystem;
 
@@ -152,6 +200,23 @@ impl DefineSubsystemConfiguration<PlatformUiConfig> for UiSubsystem {
             ),
         )?;
         builder.set_config_capability(
+            "fuchsia.scenic.ImageImportWorkers",
+            Config::new(ConfigValueType::Uint8, ui_config.image_import.workers.into()),
+        )?;
+        let image_import_policy = format_image_import_policy(&ui_config.image_import);
+        ensure!(
+            image_import_policy.len() <= IMAGE_IMPORT_POLICY_MAX_LEN as usize,
+            "Formatted image_import_policy ({} bytes) exceeds max_size ({IMAGE_IMPORT_POLICY_MAX_LEN})",
+            image_import_policy.len(),
+        );
+        builder.set_config_capability(
+            "fuchsia.scenic.ImageImportPolicy",
+            Config::new(
+                ConfigValueType::String { max_size: IMAGE_IMPORT_POLICY_MAX_LEN },
+                image_import_policy.into(),
+            ),
+        )?;
+        builder.set_config_capability(
             "fuchsia.scenic.ICanHazDisplayId",
             Config::new(ConfigValueType::Int64, (-1i64).into()),
         )?;
@@ -278,5 +343,125 @@ impl DefineSubsystemConfiguration<PlatformUiConfig> for UiSubsystem {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::ConfigurationBuilderImpl;
+    use std::num::NonZeroU32;
+
+    fn run_ui_subsystem(
+        image_import: ImageImportConfig,
+    ) -> anyhow::Result<crate::common::CompletedConfiguration> {
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            ..ConfigurationContext::default_for_tests()
+        };
+        let ui_config = PlatformUiConfig { enabled: true, image_import, ..Default::default() };
+        let mut builder = ConfigurationBuilderImpl::default();
+        UiSubsystem::define_configuration(&context, &ui_config, &mut builder)?;
+        Ok(builder.build())
+    }
+
+    // Each policy string here must also be a `policy` in Scenic's `kPolicyTestCases`
+    // (`image_importer_impl_unittest.cc`), which checks that Scenic parses it to the intended values.
+    // LINT.IfChange(policy_test_cases)
+    fn image_import_policy_cases() -> Vec<(ImageImportConfig, &'static str)> {
+        vec![
+            (ImageImportConfig::default(), ""),
+            (
+                ImageImportConfig {
+                    kinds: Some(ImageImportKinds::Concurrent),
+                    off_screen: Some(ImageImportOffScreenOrder::LeastRecentFirst),
+                    never_shown: Some(ImageImportNeverShown::WhenFree),
+                    idle_ms: Some(250),
+                    display_cap: NonZeroU32::new(3),
+                    reply_thread: Some(true),
+                    ..Default::default()
+                },
+                "kinds=concurrent,off_screen=least_recent_first,never_shown=when_free,idle_ms=250,\
+                 display_cap=3,reply_thread=true",
+            ),
+            (
+                ImageImportConfig {
+                    kinds: Some(ImageImportKinds::PredictedKindFirst),
+                    off_screen: Some(ImageImportOffScreenOrder::MostRecentFirst),
+                    never_shown: Some(ImageImportNeverShown::Never),
+                    reply_thread: Some(false),
+                    ..Default::default()
+                },
+                "kinds=predicted_kind_first,off_screen=most_recent_first,never_shown=never,\
+                 reply_thread=false",
+            ),
+            (
+                ImageImportConfig {
+                    never_shown: Some(ImageImportNeverShown::WhenIdle),
+                    ..Default::default()
+                },
+                "never_shown=when_idle",
+            ),
+            (ImageImportConfig { idle_ms: Some(0), ..Default::default() }, "idle_ms=0"),
+            (
+                ImageImportConfig {
+                    idle_ms: Some(u32::MAX),
+                    display_cap: NonZeroU32::new(1),
+                    ..Default::default()
+                },
+                "idle_ms=4294967295,display_cap=1",
+            ),
+            (
+                ImageImportConfig {
+                    kinds: Some(ImageImportKinds::PredictedKindFirst),
+                    off_screen: Some(ImageImportOffScreenOrder::LeastRecentFirst),
+                    never_shown: Some(ImageImportNeverShown::WhenIdle),
+                    idle_ms: Some(u32::MAX),
+                    display_cap: NonZeroU32::new(u32::MAX),
+                    reply_thread: Some(false),
+                    ..Default::default()
+                },
+                "kinds=predicted_kind_first,off_screen=least_recent_first,never_shown=when_idle,\
+                 idle_ms=4294967295,display_cap=4294967295,reply_thread=false",
+            ),
+        ]
+    }
+    // LINT.ThenChange(/src/ui/scenic/lib/flatland/image_import/tests/image_importer_impl_unittest.cc:policy_test_cases)
+
+    #[test]
+    fn image_import_policy_cases_format_and_assemble() {
+        for (input, expected_policy) in image_import_policy_cases() {
+            let config = run_ui_subsystem(ImageImportConfig { workers: 3, ..input })
+                .unwrap_or_else(|e| panic!("expected '{expected_policy}' to succeed, got '{e}'"));
+            assert_eq!(
+                config.configuration_capabilities["fuchsia.scenic.ImageImportWorkers"].value(),
+                serde_json::json!(3)
+            );
+            assert_eq!(
+                config.configuration_capabilities["fuchsia.scenic.ImageImportPolicy"].value(),
+                serde_json::json!(expected_policy)
+            );
+        }
+    }
+
+    #[test]
+    fn image_import_workers_default_and_zero_assemble() {
+        let default_config = run_ui_subsystem(ImageImportConfig::default()).unwrap();
+        assert_eq!(
+            default_config.configuration_capabilities["fuchsia.scenic.ImageImportWorkers"].value(),
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            default_config.configuration_capabilities["fuchsia.scenic.ImageImportPolicy"].value(),
+            serde_json::json!("")
+        );
+
+        let zero_config =
+            run_ui_subsystem(ImageImportConfig { workers: 0, ..Default::default() }).unwrap();
+        assert_eq!(
+            zero_config.configuration_capabilities["fuchsia.scenic.ImageImportWorkers"].value(),
+            serde_json::json!(0)
+        );
     }
 }

@@ -30,7 +30,7 @@ dependencies** that are included in images. For more information on the
 structure and usage of these build configurations, see
 [Build configuration](software_assembly/build_configuration.md).
 
-### Build targets
+### Build targets {:#build-targets}
 
 Build targets are defined in `BUILD.gn` files that exist throughout the source
 tree. These files use a Python-like syntax to declare buildable objects.
@@ -54,7 +54,8 @@ built-in target declaration types are defined in the
 [GN reference][gn-reference]. There are also a handful of custom templates in
 `.gni` files in the [`//build` project][build-project].
 
-Fuchsia defines many [custom templates](/docs/development/components/build.md#gn_templates)
+Fuchsia defines many [custom
+templates](/docs/development/components/build.md#component-package)
 to support defining and building Fuchsia specific artifacts.
 
 ### Build optimization flags {:#build-optimization-flags}

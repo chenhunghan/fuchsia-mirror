@@ -68,13 +68,15 @@ class Process:
     koid: int
     name: str
     vmos_koid: List[int] = field(metadata=config(field_name="vmos"))
+    # The `Capture` this object belongs to, set by `parse()`.
+    _capture: "Capture" = field(init=False, repr=False, compare=False)
 
     @cached_property
-    def vmos(self) -> Tuple[VMO]:
+    def vmos(self) -> Tuple[VMO, ...]:
         return tuple(self._capture.vmo_by_koid[koid] for koid in self.vmos_koid)
 
     @cached_property
-    def vmos_and_their_ancestors(self) -> Tuple[VMO]:
+    def vmos_and_their_ancestors(self) -> Tuple[VMO, ...]:
         koids = set()
         for vmo in self.vmos:
             koids.add(vmo.koid)
@@ -91,6 +93,8 @@ class VMO:
     committed_bytes: int
     allocated_bytes: int
     populated_bytes: Optional[int] = None
+    # The `Capture` this object belongs to, set by `parse()`.
+    _capture: "Capture" = field(init=False, repr=False, compare=False)
 
     def __str__(self):
         return f"VMO(koid={self.koid!r} name={self.name!r})"
@@ -209,6 +213,8 @@ class ProfileMemoryDebug:
 def parse(path: Path):
     """Parses `ffx profile memory --debug-json`"""
     with open(path, "rt") as f:
+        # `from_dict` is added by `@dataclass_json` at runtime.
+        # pyrefly: ignore[missing-attribute]
         result = ProfileMemoryDebug.from_dict(json.load(f))
     for o in itertools.chain(result.capture.processes, result.capture.vmos):
         o._capture = result.capture

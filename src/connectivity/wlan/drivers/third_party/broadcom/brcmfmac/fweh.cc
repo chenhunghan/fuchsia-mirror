@@ -203,6 +203,11 @@ void brcmf_fweh_handle_if_event(struct brcmf_pub* drvr, struct brcmf_event_msg* 
   struct brcmf_if* ifp;
   zx_status_t err = ZX_OK;
 
+  if (data == nullptr || emsg->datalen < sizeof(*ifevent)) {
+    BRCMF_ERR("IF event datalen %u too small, expected %zu", emsg->datalen, sizeof(*ifevent));
+    return;
+  }
+
   BRCMF_DBG(EVENT, "action: %u ifidx: %u bsscfgidx: %u flags: %u role: %u", ifevent->action,
             ifevent->ifidx, ifevent->bsscfgidx, ifevent->flags, ifevent->role);
 
@@ -416,7 +421,11 @@ void brcmf_fweh_detach(struct brcmf_pub* drvr) {
   if (ifp) {
     /* clear all events */
     memset(eventmask, 0, BRCMF_EVENTING_MASK_LEN);
-    (void)brcmf_fil_iovar_data_set(ifp, "event_msgs", eventmask, BRCMF_EVENTING_MASK_LEN, nullptr);
+    zx_status_t status =
+        brcmf_fil_iovar_data_set(ifp, "event_msgs", eventmask, BRCMF_EVENTING_MASK_LEN, nullptr);
+    if (status != ZX_OK) {
+      BRCMF_DBG(FIL, "Failed to clear event_msgs on detach: %s", zx_status_get_string(status));
+    }
   }
   /* cancel the worker */
   fweh->event_work.Cancel();

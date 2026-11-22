@@ -160,7 +160,7 @@ proptest! {
                     }
                 }
                 Event::RemoveHost => {
-                            let mut rm_device = pin!(hd.rm_device("/dev/host1"));
+                            let mut rm_device = pin!(hd.rm_device(host_device_1.path()));
                             let _ = executor.run_until_stalled(&mut rm_device);
                             active_host = 2;
                 }

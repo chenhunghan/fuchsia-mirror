@@ -91,7 +91,7 @@ enum class RemoteZygoteVmo : bool { kVmo = false, kDecodedPtr = true };
 // module.  These are all the details usually needed either to launch a main
 // executable, or to assimilate a new linking domain via its passive ABI and/or
 // via some custom entry-point protocol for the root module.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 class RemoteZygoteDomain {
  public:
   using ExecInfo = RemoteDecodedModule<Elf>::ExecInfo;
@@ -110,7 +110,7 @@ class RemoteZygoteDomain {
   size_type rdebug_vaddr() const { return rdebug_vaddr_; }
 
  private:
-  template <RemoteZygoteVmo, class>
+  template <RemoteZygoteVmo, elfldltl::ElfApi>
   friend class RemoteZygote;
 
   ExecInfo exec_info_;
@@ -121,7 +121,7 @@ class RemoteZygoteDomain {
 // Underneath it just holds a std::vector, so it's cheaper to just move it
 // around or leave an unused default-constructed one around than to use
 // something like std::unique_ptr<ld::RemoteZygote>.
-template <RemoteZygoteVmo Vmo = RemoteZygoteVmo::kVmo, class Elf = elfldltl::Elf<>>
+template <RemoteZygoteVmo Vmo = RemoteZygoteVmo::kVmo, elfldltl::ElfApi Elf = elfldltl::Elf<>>
 class RemoteZygote {
  public:
   using Linker = RemoteDynamicLinker<Elf, RemoteLoadZygote::kYes>;

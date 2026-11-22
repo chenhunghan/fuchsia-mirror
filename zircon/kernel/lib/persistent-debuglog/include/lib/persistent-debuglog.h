@@ -32,10 +32,6 @@ void persistent_dlog_init_early();
 // processing, before we start up the secondary CPUs.
 void persistent_dlog_set_location(void* vaddr, size_t len);
 
-// Writes a string to the persistent dlog, if enabled.  Otherwise, this is a
-// no-op.
-void persistent_dlog_write(const ktl::string_view str);
-
 // Invalidates the state of the persistent dlog.  This gets called every time we
 // gracefully reboot, so that we don't end up recovering a dlog after reboot and
 // end up producing an unnecessary crashlog.
@@ -48,7 +44,6 @@ __BEGIN_CDECLS
 
 void rust_persistent_dlog_init_early(void);
 void rust_persistent_dlog_set_location(void* vaddr, size_t len);
-void rust_persistent_dlog_write(const char* ptr, size_t len);
 void rust_persistent_dlog_invalidate(void);
 const char* rust_persistent_dlog_get_recovered_log(size_t* out_len);
 

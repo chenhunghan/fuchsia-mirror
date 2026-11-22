@@ -52,6 +52,7 @@ rustc_library(
         "//src/connectivity/wlan/lib/power_manager",
         "//src/connectivity/wlan/lib/rsn:wlan-rsn",
         "//src/connectivity/wlan/lib/statemachine:wlan-statemachine",
+        "//src/diagnostics/lib/redactor",
         "//src/lib/diagnostics/inspect/contrib/rust",
         "//src/lib/diagnostics/inspect/rust",
         "//src/lib/fidl/rust/fidl",

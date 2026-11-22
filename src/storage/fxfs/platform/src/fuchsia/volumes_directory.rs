@@ -5,7 +5,7 @@
 use crate::fuchsia::component::map_to_raw_status;
 use crate::fuchsia::directory::FxDirectory;
 use crate::fuchsia::errors::map_to_status;
-use crate::fuchsia::fxblob::{BlobDirectory, Identifier};
+use crate::fuchsia::fxblob::BlobDirectory;
 use crate::fuchsia::memory_pressure::{MemoryPressureLevel, MemoryPressureMonitor};
 use crate::fuchsia::profile::new_profile_state;
 use crate::fuchsia::remote_volume::UnmountFn;
@@ -18,8 +18,8 @@ use fidl_fuchsia_fs_startup::{
     CheckOptions, CreateOptions, MountOptions, VolumeRequest, VolumeRequestStream,
 };
 use fidl_fuchsia_fxfs::{
-    self as ffxfs, DebugMarker, FileBackedVolumeProviderMarker, ProfileManagerRequest,
-    ProjectIdMarker,
+    self as ffxfs, DebugMarker, DebugRequest, DebugRequestStream, FileBackedVolumeProviderMarker,
+    ProfileManagerRequest, ProjectIdMarker,
 };
 use fidl_fuchsia_io as fio;
 use fs_inspect::{FsInspectTree, FsInspectVolume};
@@ -113,7 +113,6 @@ impl MountedVolumesGuard<'_> {
         crypt: Option<Arc<dyn Crypt>>,
         mode: Mode,
         as_blob: bool,
-        use_driver_blob_paging: bool,
     ) -> Result<FxVolumeAndRoot, Error> {
         let store = match mode {
             Mode::Create { guid, low_32_bit_object_ids } => self
@@ -144,7 +143,6 @@ impl MountedVolumesGuard<'_> {
                 name,
                 store,
                 self.volumes_directory.memory_pressure_config,
-                use_driver_blob_paging,
             )
             .await?
         } else {
@@ -152,20 +150,18 @@ impl MountedVolumesGuard<'_> {
                 name,
                 store,
                 self.volumes_directory.memory_pressure_config,
-                false,
             )
             .await?
         };
         // If there is an ongoing startup profile activity across all volumes, apply it to the
-        // mounted volume unless this is a blob volume using driver blob paging (where pkg-cache
-        // drives blob profiling).
-        if !(as_blob && use_driver_blob_paging) {
+        // mounted volume unless this is a blob volume (where pkg-cache drives blob profiling).
+        if !as_blob {
             if let Some(ProfileState { profile_name, all_volumes: true, .. }) =
                 &(*self.volumes_directory.profiling_state.lock().await)
             {
                 if let Err(e) = volume
                     .volume()
-                    .record_and_replay_profile(new_profile_state(as_blob), profile_name)
+                    .record_and_replay_profile(new_profile_state(), profile_name)
                     .await
                 {
                     error!(
@@ -217,7 +213,6 @@ impl MountedVolumesGuard<'_> {
                 name,
                 store.clone(),
                 self.volumes_directory.memory_pressure_config,
-                false,
             )
             .await?;
         let fx_volume = fx_volume_and_root.volume().clone();
@@ -321,7 +316,6 @@ impl MountedVolumesGuard<'_> {
         name: &str,
         store: Arc<ObjectStore>,
         flush_task_config: MemoryPressureConfig,
-        use_driver_blob_paging: bool,
     ) -> Result<FxVolumeAndRoot, Error> {
         let unique_id = zx::Event::create();
         let volume = FxVolumeAndRoot::new::<T>(
@@ -333,9 +327,6 @@ impl MountedVolumesGuard<'_> {
             self.volumes_directory.memory_pressure_config,
         )
         .await?;
-        if use_driver_blob_paging {
-            volume.volume().set_use_driver_blob_paging(true);
-        }
         volume
             .volume()
             .start_background_task(flush_task_config, self.volumes_directory.mem_monitor.as_ref());
@@ -611,12 +602,12 @@ impl VolumesDirectory {
         match volume_name.as_ref() {
             Some(volume_name) => {
                 let (volume, is_blob) = volumes.get_unlocked_volume_by_name(&volume_name).await?;
-                if is_blob && volume.volume().use_driver_blob_paging() {
+                if is_blob {
                     return Err(zx::Status::NOT_SUPPORTED);
                 }
                 if let Err(error) = volume
                     .volume()
-                    .record_and_replay_profile(new_profile_state(is_blob), &profile_name)
+                    .record_and_replay_profile(new_profile_state(), &profile_name)
                     .await
                 {
                     error!(
@@ -632,13 +623,13 @@ impl VolumesDirectory {
                 for MountedVolume { volume, .. } in volumes.mounted_volumes.values() {
                     let is_blob =
                         volume.root().clone().into_any().downcast::<BlobDirectory>().is_ok();
-                    if is_blob && volume.volume().use_driver_blob_paging() {
+                    if is_blob {
                         continue;
                     }
                     // Just log the errors, don't stop half-way.
                     if let Err(error) = volume
                         .volume()
-                        .record_and_replay_profile(new_profile_state(is_blob), &profile_name)
+                        .record_and_replay_profile(new_profile_state(), &profile_name)
                         .await
                     {
                         error!(
@@ -675,35 +666,16 @@ impl VolumesDirectory {
             return Err(zx::Status::SHOULD_WAIT);
         }
         let (volume, is_blob) = volumes.get_unlocked_volume_by_name(&volume_name).await?;
-        if is_blob && volume.volume().use_driver_blob_paging() {
+        if is_blob {
             return Err(zx::Status::NOT_SUPPORTED);
         }
 
         let (opened_node, profile_name) = match identifier {
-            fidl_fuchsia_fxfs::ProfileIdentifier::BlobHash(hash) => {
-                if !is_blob {
-                    warn!("Attempted to use a blob hash identifier on a non-blob volume");
-                    return Err(zx::Status::INVALID_ARGS);
-                }
-                let id = Identifier::from(fuchsia_hash::Hash::from(hash));
-                let blob_dir = volume
-                    .root()
-                    .clone()
-                    .into_any()
-                    .downcast::<BlobDirectory>()
-                    .map_err(|_| zx::Status::IO_DATA_INTEGRITY)?;
-                let opened = blob_dir.open_blob(&id).await.map_err(|_| zx::Status::INTERNAL)?;
-                let Some(node) = opened else {
-                    return Err(zx::Status::NOT_FOUND);
-                };
-                (node.into_dyn(), fuchsia_hash::Hash::from(hash).to_string())
+            fidl_fuchsia_fxfs::ProfileIdentifier::BlobHash(_) => {
+                warn!("Attempted to use a blob hash identifier on a non-blob volume");
+                return Err(zx::Status::INVALID_ARGS);
             }
             fidl_fuchsia_fxfs::ProfileIdentifier::ObjectId(oid) => {
-                if is_blob {
-                    warn!("Attempted to use an object ID identifier on a blob volume");
-                    return Err(zx::Status::INVALID_ARGS);
-                }
-
                 let opened_node =
                     volume.volume().open_file_by_id(oid).await.map_err(map_to_status)?;
 
@@ -713,7 +685,7 @@ impl VolumesDirectory {
         };
 
         if let Err(error) =
-            volume.volume().record_xor_replay_profile(new_profile_state(is_blob), opened_node).await
+            volume.volume().record_xor_replay_profile(new_profile_state(), opened_node).await
         {
             error!(
                 error:?,
@@ -762,6 +734,28 @@ impl VolumesDirectory {
             ),
             ProfileManagerRequest::StopTasks { responder } => {
                 self.stop_profile_tasks().await;
+                responder.send(Ok(()))
+            }
+        }
+    }
+
+    /// Handles a single `fuchsia.fxfs.Debug` request. Debug operations are filesystem-wide: they
+    /// apply to every mounted volume and the root/metadata stores regardless of which outgoing
+    /// directory (the component's or a volume's) the request arrived on.
+    ///
+    /// Returns an error only if the response could not be sent.
+    pub async fn handle_debug_request(&self, request: DebugRequest) -> Result<(), fidl::Error> {
+        match request {
+            DebugRequest::Compact { responder } => responder.send(
+                self.root_volume
+                    .filesystem()
+                    .journal()
+                    .force_compact()
+                    .await
+                    .map_err(map_to_raw_status),
+            ),
+            DebugRequest::ClearCaches { responder } => {
+                self.clear_caches().await;
                 responder.send(Ok(()))
             }
         }
@@ -821,7 +815,6 @@ impl VolumesDirectory {
                     low_32_bit_object_ids: options.restrict_inode_ids_to_32_bit.unwrap_or(false),
                 },
                 as_blob,
-                false,
             )
             .await
     }
@@ -835,7 +828,7 @@ impl VolumesDirectory {
         crypt: Option<Arc<dyn Crypt>>,
         as_blob: bool,
     ) -> Result<FxVolumeAndRoot, Error> {
-        self.lock().await.create_or_mount_volume(name, crypt, Mode::Mount, as_blob, false).await
+        self.lock().await.create_or_mount_volume(name, crypt, Mode::Mount, as_blob).await
     }
 
     /// Checks the integrity of volume `name`, or succeeds silently if the volume doesn't exist.
@@ -941,20 +934,19 @@ impl VolumesDirectory {
                 }
             }),
         )?;
-        {
-            let vol_scope = volume.volume().scope().clone();
-            let weak_vol = Arc::downgrade(volume.volume());
-            svc_dir.add_entry(
-                DebugMarker::PROTOCOL_NAME,
-                vfs::service::host(move |requests| {
-                    let weak_vol = weak_vol.clone();
-                    let scope = vol_scope.clone();
-                    async move {
-                        let _ = FxVolume::handle_debug_requests(weak_vol, scope, requests).await;
-                    }
-                }),
-            )?;
-        }
+        // The Debug protocol is filesystem-wide, so it is served by VolumesDirectory rather than
+        // the volume. Like the Admin entry above, this holds a strong reference to
+        // VolumesDirectory, which is permitted (see the note at the top of this function).
+        let me = self.clone();
+        svc_dir.add_entry(
+            DebugMarker::PROTOCOL_NAME,
+            vfs::service::host(move |requests| {
+                let me = me.clone();
+                async move {
+                    let _ = me.handle_debug_requests(requests).await;
+                }
+            }),
+        )?;
         volume.root().clone().register_additional_volume_services(&svc_dir)?;
 
         let scope = volume.admin_scope().clone();
@@ -986,7 +978,6 @@ impl VolumesDirectory {
             .crypt
             .map(|crypt| Arc::new(RemoteCrypt::new_with_device(crypt, device)) as Arc<dyn Crypt>);
         let as_blob = mount_options.as_blob.unwrap_or(false);
-        let use_driver_blob_paging = mount_options.use_driver_blob_paging.unwrap_or(false);
         let guid = create_options.guid;
         let low_32_bit_object_ids = create_options.restrict_inode_ids_to_32_bit.unwrap_or(false);
         let volume = guard
@@ -995,7 +986,6 @@ impl VolumesDirectory {
                 crypt,
                 Mode::Create { guid, low_32_bit_object_ids },
                 as_blob,
-                use_driver_blob_paging,
             )
             .await?;
         self.serve_volume(&volume, outgoing_directory_server_end, as_blob)
@@ -1239,10 +1229,9 @@ impl VolumesDirectory {
             .crypt
             .map(|crypt| Arc::new(RemoteCrypt::new_with_device(crypt, device)) as Arc<dyn Crypt>);
         let as_blob = options.as_blob.unwrap_or(false);
-        let use_driver_blob_paging = options.use_driver_blob_paging.unwrap_or(false);
         let mut guard = self.lock().await;
         let volume = guard
-            .create_or_mount_volume(name, crypt, Mode::Mount, as_blob, use_driver_blob_paging)
+            .create_or_mount_volume(name, crypt, Mode::Mount, as_blob)
             .await
             .context("failed to mount volume")?;
         self.serve_volume(&volume, outgoing_directory_server_end, as_blob)
@@ -1301,6 +1290,15 @@ impl VolumesDirectory {
                     return Ok(());
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Serves `fuchsia.fxfs.Debug` requests on `stream` until the client closes the connection or
+    /// an error occurs.
+    async fn handle_debug_requests(&self, mut stream: DebugRequestStream) -> Result<(), Error> {
+        while let Some(request) = stream.try_next().await.context("Reading request")? {
+            self.handle_debug_request(request).await.context("Sending response")?;
         }
         Ok(())
     }
@@ -1417,6 +1415,7 @@ impl PagerDirtyByteCount {
 mod tests {
     use super::{Mode, serve_startup_volume_proxy};
     use crate::fuchsia::RemoteCrypt;
+    use crate::fuchsia::fxblob::testing::new_blob_fixture;
     use crate::fuchsia::memory_pressure::MemoryPressureLevel;
     use crate::fuchsia::testing::{
         self, TestFixture, close_file_checked, open_dir_checked, open_file_checked,
@@ -2195,7 +2194,6 @@ mod tests {
                         Some(crypt.clone()),
                         Mode::Create { guid: None, low_32_bit_object_ids: false },
                         false,
-                        false,
                     )
                     .await
                 {
@@ -2287,6 +2285,11 @@ mod tests {
             .await
             .expect("create encrypted volume failed");
 
+        let other_vol = volumes_directory
+            .create_and_mount_volume("other_vol", None, false, CreateOptions::default())
+            .await
+            .expect("create second volume failed");
+
         let (dir_proxy, dir_server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
         volumes_directory.serve_volume(&vol, dir_server_end, false).expect("serve_volume failed");
 
@@ -2310,12 +2313,42 @@ mod tests {
             .map_err(Status::err_from_raw)
             .expect("sync failed");
 
+        let (other_root, other_root_server_end) = create_proxy::<fio::DirectoryMarker>();
+        other_vol
+            .root()
+            .clone()
+            .serve(fio::PERM_READABLE | fio::PERM_WRITABLE, other_root_server_end);
+        let other_file = open_file_checked(
+            &other_root,
+            "bar",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+        other_file.write(b"Other volume").await.expect("write fidl failed").expect("write failed");
+        other_file
+            .sync()
+            .await
+            .expect("sync fidl failed")
+            .map_err(Status::err_from_raw)
+            .expect("sync failed");
+
         let (_, attrs) = file
             .get_attributes(fio::NodeAttributesQuery::ID)
             .await
             .expect("get_attributes fidl failed")
             .expect("get_attributes failed");
         let file_id = attrs.id.expect("missing file id");
+
+        let (_, other_attrs) = other_file
+            .get_attributes(fio::NodeAttributesQuery::ID)
+            .await
+            .expect("get_attributes fidl failed")
+            .expect("get_attributes failed");
+        let other_file_id = other_attrs.id.expect("missing other file id");
 
         let store = vol.volume().store();
         // Flush the store so that records are compacted into a PersistentLayer.
@@ -2330,12 +2363,23 @@ mod tests {
             .await
             .expect("tree find failed");
 
+        let other_store = other_vol.volume().store();
+        other_store.flush().await.expect("flush other store failed");
+        other_store.tree().clear_cache();
+        let _ = other_store
+            .tree()
+            .find(&fxfs::object_store::ObjectKey::object(other_file_id))
+            .await
+            .expect("other tree find failed");
+
         let layer_object_id =
             store.tree().immutable_layer_set().layers[0].handle().unwrap().object_id();
 
         // Verify all caches are populated prior to ClearCaches.
         assert!(vol.volume().dirent_cache().len() > 0);
         assert!(store.tree().cache_len() > 0);
+        assert!(other_vol.volume().dirent_cache().len() > 0);
+        assert!(other_store.tree().cache_len() > 0);
         assert!(store.key_manager().get(file_id).await.unwrap().is_some());
         assert!(
             filesystem.root_store().key_manager().get(layer_object_id).await.unwrap().is_some()
@@ -2344,21 +2388,24 @@ mod tests {
         let debug_proxy = connect_to_protocol_at_dir_svc::<DebugMarker>(&dir_proxy)
             .expect("Unable to connect to debug service");
 
+        debug_proxy.compact().await.expect("compact fidl failed").expect("compact failed");
+
         debug_proxy
             .clear_caches()
             .await
             .expect("clear_caches fidl failed")
             .expect("clear_caches failed");
 
-        // Verify dirent cache and TreeCache are cleared.
+        // Verify dirent cache and TreeCache are cleared across all mounted volumes.
         assert_eq!(vol.volume().dirent_cache().len(), 0);
         assert_eq!(store.tree().cache_len(), 0);
+        assert_eq!(other_vol.volume().dirent_cache().len(), 0);
+        assert_eq!(other_store.tree().cache_len(), 0);
         // Verify non-permanent file key is evicted from the volume store.
         assert!(store.key_manager().get(file_id).await.unwrap().is_none());
 
-        // Also clear caches on the top-level VolumesDirectory and verify permanent layer keys in
-        // root_store are preserved so reading from the encrypted volume continues to work.
-        volumes_directory.clear_caches().await;
+        // Verify permanent layer keys in root_store are preserved so reading from the encrypted
+        // volume continues to work.
         assert!(
             filesystem.root_store().key_manager().get(layer_object_id).await.unwrap().is_some()
         );
@@ -2369,9 +2416,12 @@ mod tests {
             .expect("tree find after clear_caches failed");
 
         close_file_checked(file).await;
+        close_file_checked(other_file).await;
         std::mem::drop(root);
+        std::mem::drop(other_root);
         std::mem::drop(dir_proxy);
         std::mem::drop(vol);
+        std::mem::drop(other_vol);
         volumes_directory.terminate().await;
         std::mem::drop(volumes_directory);
         filesystem.close().await.expect("close filesystem failed");
@@ -2695,10 +2745,8 @@ mod tests {
     #[fuchsia::test(threads = 10)]
     async fn test_profile_start() {
         const PREMOUNT_BLOB: &str = "premount_blob";
-        const PREMOUNT_DRIVER_BLOB: &str = "premount_driver_blob";
         const PREMOUNT_NOBLOB: &str = "premount_noblob";
         const LIVE_BLOB: &str = "live_blob";
-        const LIVE_DRIVER_BLOB: &str = "live_driver_blob";
         const LIVE_NOBLOB: &str = "live_noblob";
 
         const RECORDING_NAME: &str = "foo";
@@ -2722,10 +2770,6 @@ mod tests {
                 .await
                 .unwrap();
             volumes_directory
-                .create_and_mount_volume(PREMOUNT_DRIVER_BLOB, None, true, CreateOptions::default())
-                .await
-                .expect("create_and_mount_volume failed");
-            volumes_directory
                 .create_and_mount_volume(PREMOUNT_NOBLOB, None, false, CreateOptions::default())
                 .await
                 .unwrap();
@@ -2733,10 +2777,6 @@ mod tests {
                 .create_and_mount_volume(LIVE_BLOB, None, true, CreateOptions::default())
                 .await
                 .unwrap();
-            volumes_directory
-                .create_and_mount_volume(LIVE_DRIVER_BLOB, None, true, CreateOptions::default())
-                .await
-                .expect("create_and_mount_volume failed");
             volumes_directory
                 .create_and_mount_volume(LIVE_NOBLOB, None, false, CreateOptions::default())
                 .await
@@ -2769,12 +2809,6 @@ mod tests {
                 .mount_volume(PREMOUNT_BLOB, None, true)
                 .await
                 .expect("Reopen volume");
-            let _premount_driver_blob = volumes_directory
-                .lock()
-                .await
-                .create_or_mount_volume(PREMOUNT_DRIVER_BLOB, None, Mode::Mount, true, true)
-                .await
-                .expect("Reopen volume");
             let _premount_noblob = volumes_directory
                 .mount_volume(PREMOUNT_NOBLOB, None, false)
                 .await
@@ -2791,12 +2825,6 @@ mod tests {
             // Live mount volumes.
             let _live_blob =
                 volumes_directory.mount_volume(LIVE_BLOB, None, true).await.expect("Reopen volume");
-            let _live_driver_blob = volumes_directory
-                .lock()
-                .await
-                .create_or_mount_volume(LIVE_DRIVER_BLOB, None, Mode::Mount, true, true)
-                .await
-                .expect("Reopen volume");
             let _live_noblob = volumes_directory
                 .mount_volume(LIVE_NOBLOB, None, false)
                 .await
@@ -2831,50 +2859,34 @@ mod tests {
                 .mount_volume(PREMOUNT_BLOB, None, true)
                 .await
                 .expect("Reopen volume");
-            let _premount_driver_blob = volumes_directory
-                .mount_volume(PREMOUNT_DRIVER_BLOB, None, true)
-                .await
-                .expect("Reopen volume");
             let _premount_noblob = volumes_directory
                 .mount_volume(PREMOUNT_NOBLOB, None, false)
                 .await
                 .expect("Reopen volume");
             let _live_blob =
                 volumes_directory.mount_volume(LIVE_BLOB, None, true).await.expect("Reopen volume");
-            let _live_driver_blob = volumes_directory
-                .mount_volume(LIVE_DRIVER_BLOB, None, true)
-                .await
-                .expect("Reopen volume");
             let _live_noblob = volumes_directory
                 .mount_volume(LIVE_NOBLOB, None, false)
                 .await
                 .expect("Reopen volume");
 
             // Verify which recordings ran based on the saved recordings.
-            volumes_directory
-                .delete_profile(PREMOUNT_BLOB, RECORDING_NAME)
-                .await
-                .expect("Finding profile to delete.");
             assert_eq!(
                 volumes_directory
-                    .delete_profile(PREMOUNT_DRIVER_BLOB, RECORDING_NAME)
+                    .delete_profile(PREMOUNT_BLOB, RECORDING_NAME)
                     .await
-                    .expect_err("Driver blob volume should not have recorded a profile in Fxfs"),
+                    .expect_err("Blob volume should not have recorded a profile in Fxfs"),
                 zx::Status::NOT_FOUND
             );
             volumes_directory
                 .delete_profile(PREMOUNT_NOBLOB, RECORDING_NAME)
                 .await
                 .expect("Finding profile to delete.");
-            volumes_directory
-                .delete_profile(LIVE_BLOB, RECORDING_NAME)
-                .await
-                .expect("Finding profile to delete.");
             assert_eq!(
                 volumes_directory
-                    .delete_profile(LIVE_DRIVER_BLOB, RECORDING_NAME)
+                    .delete_profile(LIVE_BLOB, RECORDING_NAME)
                     .await
-                    .expect_err("Driver blob volume should not have recorded a profile in Fxfs"),
+                    .expect_err("Blob volume should not have recorded a profile in Fxfs"),
                 zx::Status::NOT_FOUND
             );
             volumes_directory
@@ -2904,7 +2916,7 @@ mod tests {
         .await
         .unwrap();
         let volume = volumes_directory
-            .create_and_mount_volume("foo", None, true, CreateOptions::default())
+            .create_and_mount_volume("foo", None, false, CreateOptions::default())
             .await
             .unwrap();
 
@@ -2942,7 +2954,7 @@ mod tests {
         .await
         .unwrap();
         let volume = volumes_directory
-            .create_and_mount_volume("foo", None, true, CreateOptions::default())
+            .create_and_mount_volume("foo", None, false, CreateOptions::default())
             .await
             .unwrap();
 
@@ -3073,72 +3085,16 @@ mod tests {
 
     #[fuchsia::test(threads = 10)]
     async fn test_record_xor_replay_profile_blob() {
-        use crate::fuchsia::fxblob::testing::{BlobFixture, new_blob_fixture, open_blob_fixture};
-        use crate::fuchsia::pager::PagerBacked;
-        use delivery_blob::CompressionMode;
-
         let fixture = new_blob_fixture().await;
-        let hash = {
-            let data = vec![88u8; 1024];
-            fixture.write_blob(&data, CompressionMode::Never).await
-        };
-
-        // Close and reopen to clear all caches so that subsequent reads trigger page faults.
-        let device = fixture.close().await;
-        device.ensure_unique();
-
-        device.reopen(false);
-        let fixture = open_blob_fixture(device).await;
-        let hash = {
-            let volumes_directory = fixture.volumes_directory().clone();
-            let identifier = ProfileIdentifier::BlobHash(*hash);
-
-            volumes_directory
-                .clone()
-                .record_xor_replay_profile("blob".to_owned(), identifier, 600)
-                .await
-                .expect("Starting record_xor_replay_profile recording");
-
-            // Trigger page faults by reading the VMO.
-            let vmo = fixture.get_blob_vmo(hash).await;
-            let mut read_buf = vec![0u8; 1024];
-            vmo.read(&mut read_buf, 0).expect("VMO read failed");
-
-            volumes_directory.stop_profile_tasks().await;
-            hash
-        };
-
-        // Close and reopen again to clear caches and persist the profile.
-        let device = fixture.close().await;
-        device.ensure_unique();
-
-        device.reopen(false);
-        let fixture = open_blob_fixture(device).await;
         {
             let volumes_directory = fixture.volumes_directory().clone();
-            let identifier = ProfileIdentifier::BlobHash(*hash);
+            let identifier = ProfileIdentifier::BlobHash([0u8; 32]);
 
-            // Verify that initially nothing is paged in.
-            let blob = fixture.get_blob(hash).await.expect("Opening blob");
-            assert_eq!(blob.vmo().info().unwrap().populated_bytes, 0);
-
-            // Since the profile exists, it will replay it.
-            volumes_directory
-                .clone()
+            let err = volumes_directory
                 .record_xor_replay_profile("blob".to_owned(), identifier, 600)
                 .await
-                .expect("Starting record_xor_replay_profile replay");
-
-            // Await all data being played back by checking that things have paged in.
-            async {
-                while blob.vmo().info().unwrap().populated_bytes == 0 {
-                    fasync::Timer::new(Duration::from_millis(25)).await;
-                }
-            }
-            .on_timeout(Duration::from_secs(60), || panic!("Replay did not page in for all VMOs"))
-            .await;
-
-            volumes_directory.stop_profile_tasks().await;
+                .expect_err("record_xor_replay_profile should not be supported on blob volumes");
+            assert_eq!(err, zx::Status::NOT_SUPPORTED);
         }
         fixture.close().await;
     }
@@ -3827,7 +3783,7 @@ mod tests {
     #[fuchsia::test(threads = 10)]
     async fn test_volume_installation() {
         let fixture = TestFixture::open(
-            DeviceHolder::new(FakeDevice::new(1024, 4096)),
+            DeviceHolder::new(FakeDevice::new(2048, 4096)),
             TestFixtureOptions { format: true, encrypted: false, ..Default::default() },
         )
         .await;
@@ -3964,7 +3920,6 @@ mod tests {
                     None,
                     Mode::Create { guid: None, low_32_bit_object_ids: true },
                     false,
-                    false,
                 )
                 .await
                 .expect("create volume failed");
@@ -4019,7 +3974,7 @@ mod tests {
             let mut guard = volumes_directory.lock().await;
 
             let vol = guard
-                .create_or_mount_volume("low_32", None, Mode::Mount, false, false)
+                .create_or_mount_volume("low_32", None, Mode::Mount, false)
                 .await
                 .expect("mount volume failed");
 

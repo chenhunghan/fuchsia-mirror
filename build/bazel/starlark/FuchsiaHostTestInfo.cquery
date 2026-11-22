@@ -19,6 +19,11 @@ def format(target):
             "error": "missing_fuchsia_host_test_info",
             "label": str(target.label),
         })
+    if "IncompatiblePlatformProvider" in p:
+        return json.encode({
+            "incompatible": True,
+            "label": str(target.label),
+        })
     host_test_info = p.get("//build/bazel/rules/host_tests:host_test.bzl%FuchsiaHostTestInfo")
     if not host_test_info:
         return json.encode({

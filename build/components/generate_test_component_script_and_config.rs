@@ -4,8 +4,8 @@
 
 use anyhow::{Context, Error};
 use clap::Parser;
-use fidl_fuchsia_component_decl::Component;
-use fidl_fuchsia_data as fdata;
+use fidl_fuchsia_component_decl_common::Component;
+use fidl_fuchsia_data_common as fdata;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;

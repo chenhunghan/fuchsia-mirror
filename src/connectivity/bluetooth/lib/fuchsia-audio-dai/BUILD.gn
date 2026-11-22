@@ -2,56 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_test.gni")
-
-# TODO(https://fxbug.dev/571945302): Migrate the unit tests to Bazel once
-# //src/lib/fuchsia-component-test and
-# //src/connectivity/bluetooth/testing/realmbuilder-mock-helpers are in Bazel.
-rustc_test("fuchsia-audio-dai_test") {
-  output_name = "fuchsia_audio_dai_lib_test"
-  edition = "2024"
-
-  deps = [
-    "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.media:fuchsia.media_rust",
-    "//sdk/rust/zx",
-    "//src/connectivity/bluetooth/testing/realmbuilder-mock-helpers",
-    "//src/lib/async-utils",
-    "//src/lib/fdio/rust:fdio",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component-test",
-    "//src/lib/fuchsia-fs",
-    "//src/lib/fuchsia-sync",
-    "//src/lib/testing/fixture",
-    "//src/storage/lib/vfs/rust:vfs",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:derivative",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-  ]
-
-  sources = [
-    "src/audio.rs",
-    "src/discover.rs",
-    "src/driver.rs",
-    "src/lib.rs",
-    "src/test.rs",
-  ]
-
-  configs += [ "//build/config/rust/lints:deny_unused_results" ]
-}
-
-fuchsia_unittest_package("fuchsia-audio-dai-tests") {
-  deps = [ ":fuchsia-audio-dai_test" ]
-}
-
 group("tests") {
   testonly = true
-  deps = [ ":fuchsia-audio-dai-tests" ]
+  deps = [ ":fuchsia-audio-dai-tests-package" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -114,4 +67,52 @@ if (is_fuchsia) {
       "//third_party/rust_crates:log",
     ]
   }
+}
+if (is_fuchsia) {
+  rustc_test("fuchsia-audio-dai_test") {
+    sources = [
+      "src/audio.rs",
+      "src/discover.rs",
+      "src/driver.rs",
+      "src/lib.rs",
+      "src/test.rs",
+    ]
+    edition = "2024"
+    proc_macro_deps = [ "//third_party/rust_crates:derivative" ] +
+                      [ "//src/lib/testing/fixture" ]
+    deps = [
+             "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust",
+             "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+             "//sdk/fidl/fuchsia.media:fuchsia.media_rust",
+             "//sdk/rust/zx",
+             "//src/lib/fdio/rust:fdio",
+             "//src/lib/fidl/rust/fidl",
+             "//src/lib/fuchsia-async",
+             "//src/lib/fuchsia-fs",
+             "//src/lib/fuchsia-sync",
+             "//src/storage/lib/vfs/rust:vfs",
+             "//third_party/rust_crates:anyhow",
+             "//third_party/rust_crates:futures",
+             "//third_party/rust_crates:log",
+           ] +
+           [
+             "//src/connectivity/bluetooth/testing/realmbuilder-mock-helpers",
+             "//src/lib/async-utils",
+             "//src/lib/fuchsia",
+             "//src/lib/fuchsia-component-test",
+           ]
+    configs += [ "//build/config/rust/lints:deny_unused_results" ]
+    output_name = "fuchsia_audio_dai_lib_test"
+  }
+}
+
+fuchsia_unittest_component("fuchsia-audio-dai-tests-component") {
+  deps = [ ":fuchsia-audio-dai_test" ]
+  component_name = "fuchsia-audio-dai-tests"
+}
+
+fuchsia_test_package("fuchsia-audio-dai-tests-package") {
+  package_name = "fuchsia-audio-dai-tests-gn"
+  test_components = [ ":fuchsia-audio-dai-tests-component" ]
+  deps = [ "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component" ]
 }

@@ -7,15 +7,20 @@
 #include <fidl/fuchsia.fshost/cpp/wire.h>
 #include <fidl/fuchsia.hardware.power.statecontrol/cpp/natural_ostream.h>
 #include <fidl/fuchsia.paver/cpp/wire.h>
+#include <fidl/fuchsia.storage.block/cpp/wire.h>
+#include <lib/async-loop/cpp/loop.h>
+#include <lib/async-loop/default.h>
 #include <lib/async/default.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fastboot/fastboot.h>
 #include <lib/fdio/directory.h>
 #include <lib/zx/result.h>
+#include <lib/zx/time.h>
 #include <zircon/status.h>
 
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -29,6 +34,8 @@
 #include "src/firmware/lib/fastboot/sparse_format.h"
 #include "src/lib/fxl/strings/split_string.h"
 #include "src/lib/fxl/strings/string_printf.h"
+#include "src/storage/lib/block_client/cpp/reader_writer.h"
+#include "src/storage/lib/block_client/cpp/remote_block_device.h"
 
 namespace fastboot {
 namespace {
@@ -41,12 +48,24 @@ constexpr char kFastbootLogTag[] = __FILE__;
 
 constexpr auto kShutdownDelay = std::chrono::seconds(1);
 
+constexpr zx::duration kMiscProbeTimeout = zx::sec(1);
+
 constexpr uint64_t kFillBufferNumPages = 1ull;
 
 /// Suffix added to the product if it happens to match the name of the board. This prevents issues
 /// when trying to flash a product via https://flash.android.com/ since it currently relies on the
 /// values of `product` and `hw-revision` to be unique.
 constexpr char kUniqueProductSuffix = '-';
+
+// From bootable/recovery/bootloader_message/include/bootloader_message/bootloader_message.h.
+struct BootloaderMessage {
+  char command[32];
+  char status[32];
+  char recovery[768];
+  char stage[32];
+  char reserved[1184];
+};
+static_assert(sizeof(BootloaderMessage) == 2048);
 
 struct FlashPartitionInfo {
   std::string_view partition;
@@ -176,7 +195,8 @@ const Fastboot::VariableHashTable& Fastboot::GetVariableTable() {
   return *kVariableTable;
 }
 
-Fastboot::Fastboot() {
+Fastboot::Fastboot(fidl::ClientEnd<fuchsia_io::Directory> misc_dir)
+    : misc_dir_(std::move(misc_dir)) {
   // Allocate up to 2% of total memory for the fastboot download buffer.
   //
   // We may need to tweak this further; low-memory devices need to be conservative here to avoid
@@ -188,8 +208,11 @@ Fastboot::Fastboot() {
   max_download_size_ = zx_system_get_physmem() / 50;
 }
 
-Fastboot::Fastboot(size_t max_download_size, fidl::ClientEnd<fuchsia_io::Directory> svc_root)
-    : max_download_size_(max_download_size), svc_root_(std::move(svc_root)) {}
+Fastboot::Fastboot(size_t max_download_size, fidl::ClientEnd<fuchsia_io::Directory> svc_root,
+                   fidl::ClientEnd<fuchsia_io::Directory> misc_dir)
+    : max_download_size_(max_download_size),
+      svc_root_(std::move(svc_root)),
+      misc_dir_(std::move(misc_dir)) {}
 
 zx::result<> Fastboot::ProcessCommand(std::string_view command, Transport* transport) {
   for (const CommandEntry& cmd : GetCommandTable()) {
@@ -605,15 +628,129 @@ zx::result<> Fastboot::RebootBootloader(const std::string& command, Transport* t
 }
 
 zx::result<> Fastboot::RebootFastboot(const std::string& command, Transport* transport) {
-  // Userspace fastboot runs automatically in the Fuchsia recovery image.
-  return HandleShutdown(transport, ShutdownAction::kRebootToRecovery);
+  return HandleShutdown(transport, ShutdownAction::kRebootToRecovery,
+                        /*reboot_to_userspace_fastboot=*/true);
 }
 
 zx::result<> Fastboot::RebootRecovery(const std::string& command, Transport* transport) {
   return HandleShutdown(transport, ShutdownAction::kRebootToRecovery);
 }
 
-zx::result<> Fastboot::HandleShutdown(Transport* transport, ShutdownAction action) {
+zx::result<> Fastboot::WriteFastbootBootloaderMessage() {
+  if (!misc_dir_.is_valid()) {
+    return zx::ok();
+  }
+
+  auto connect_misc = [this] {
+    return component::ConnectAt<fuchsia_storage_block::Block>(misc_dir_.borrow());
+  };
+
+  zx::result probe_end = connect_misc();
+  if (probe_end.is_error()) {
+    const zx_status_t status = probe_end.status_value();
+    if (status == ZX_ERR_NOT_FOUND || status == ZX_ERR_PEER_CLOSED ||
+        status == ZX_ERR_UNAVAILABLE) {
+      FX_LOGST(WARNING, kFastbootLogTag) << "/misc not available (" << zx_status_get_string(status)
+                                         << "); rebooting to recovery without writing BCB";
+      return zx::ok();
+    }
+    return probe_end.take_error();
+  }
+
+  // Probe GetInfo() with a bounded deadline because fshost's StagedPublisher keeps /block/misc
+  // open and queues pipelined requests indefinitely when misc is configured in fshost but absent
+  // from the on-disk GPT.
+  async::Loop loop(&kAsyncLoopConfigNoAttachToCurrentThread);
+  std::optional<zx::result<uint32_t>> block_size_result;
+  fidl::WireClient<fuchsia_storage_block::Block> probe_client(std::move(*probe_end),
+                                                              loop.dispatcher());
+  probe_client->GetInfo().Then(
+      [&loop,
+       &block_size_result](fidl::WireUnownedResult<fuchsia_storage_block::Block::GetInfo>& result) {
+        if (!result.ok()) {
+          block_size_result = zx::error(result.status());
+        } else if (result->is_error()) {
+          block_size_result = zx::error(result->error_value());
+        } else {
+          block_size_result = zx::ok(result->value()->info.block_size);
+        }
+        loop.Quit();
+      });
+  const zx_status_t run_status = loop.Run(zx::deadline_after(kMiscProbeTimeout));
+  probe_client = {};
+  loop.Shutdown();
+
+  if (!block_size_result.has_value()) {
+    FX_LOGST(WARNING, kFastbootLogTag)
+        << "Timed out probing /misc block device (" << zx_status_get_string(run_status)
+        << "); rebooting to recovery without writing BCB";
+    return zx::ok();
+  }
+  if (block_size_result->is_error()) {
+    const zx_status_t status = block_size_result->status_value();
+    if (status == ZX_ERR_NOT_FOUND || status == ZX_ERR_PEER_CLOSED ||
+        status == ZX_ERR_UNAVAILABLE) {
+      FX_LOGST(WARNING, kFastbootLogTag)
+          << "/misc block device unavailable (" << zx_status_get_string(status)
+          << "); rebooting to recovery without writing BCB";
+      return zx::ok();
+    }
+    return block_size_result->take_error();
+  }
+  const uint32_t block_size = block_size_result->value();
+  if (block_size == 0) {
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+
+  zx::result client_end = connect_misc();
+  if (client_end.is_error()) {
+    return client_end.take_error();
+  }
+  zx::result device = block_client::RemoteBlockDevice::Create(std::move(*client_end));
+  if (device.is_error()) {
+    return device.take_error();
+  }
+  block_client::ReaderWriter reader_writer(**device);
+
+  BootloaderMessage message = {};
+  constexpr std::string_view kBootRecovery = "boot-recovery";
+  constexpr std::string_view kRecoveryFastboot = "recovery\n--fastboot\n";
+  std::memcpy(message.command, kBootRecovery.data(), kBootRecovery.size());
+  std::memcpy(message.recovery, kRecoveryFastboot.data(), kRecoveryFastboot.size());
+
+  const size_t write_size =
+      ((sizeof(message) + block_size - 1) / block_size) * static_cast<size_t>(block_size);
+  if (write_size == sizeof(message)) {
+    if (zx_status_t status = reader_writer.Write(0, sizeof(message), &message); status != ZX_OK) {
+      return zx::error(status);
+    }
+  } else {
+    std::vector<uint8_t> buf(write_size, 0);
+    if (zx_status_t status = reader_writer.Read(0, buf.size(), buf.data()); status != ZX_OK) {
+      return zx::error(status);
+    }
+    std::memcpy(buf.data(), &message, sizeof(message));
+    if (zx_status_t status = reader_writer.Write(0, buf.size(), buf.data()); status != ZX_OK) {
+      return zx::error(status);
+    }
+  }
+
+  BlockFifoRequest flush_request = {
+      .command =
+          {
+              .opcode = std::to_underlying(fuchsia_storage_block::wire::BlockOpcode::kFlush),
+              .flags = 0,
+          },
+      .vmoid = BLOCK_VMOID_INVALID,
+  };
+  if (zx_status_t status = (*device)->FifoTransaction(&flush_request, 1); status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok();
+}
+
+zx::result<> Fastboot::HandleShutdown(Transport* transport, ShutdownAction action,
+                                      bool reboot_to_userspace_fastboot) {
   zx::result admin = ConnectToPowerStateControl();
   if (admin.is_error()) {
     return SendResponse(ResponseType::kFail,
@@ -629,6 +766,13 @@ zx::result<> Fastboot::HandleShutdown(Transport* transport, ShutdownAction actio
     if (status.is_error()) {
       return SendResponse(ResponseType::kFail, "Background sync failed", transport, status)
           .take_error();
+    }
+  }
+
+  if (reboot_to_userspace_fastboot) {
+    if (zx::result status = WriteFastbootBootloaderMessage(); status.is_error()) {
+      return SendResponse(ResponseType::kFail, "Failed to write bootloader message", transport,
+                          status);
     }
   }
 
@@ -1081,8 +1225,11 @@ Fastboot::BlobImageWriter::BlobImageWriter(fidl::ClientEnd<fuchsia_io::File> ima
 }
 
 Fastboot::BlobImageWriter::~BlobImageWriter() {
-  sync_thread_.request_stop();
-  cv_.notify_one();
+  if (sync_thread_.joinable()) {
+    sync_thread_.request_stop();
+    cv_.notify_one();
+    sync_thread_.join();
+  }
 }
 
 zx::result<> Fastboot::BlobImageWriter::EnsureSize(uint64_t new_size) {
@@ -1108,8 +1255,10 @@ zx::result<> Fastboot::BlobImageWriter::CheckSyncError() {
 zx::result<> Fastboot::BlobImageWriter::JoinSyncThread() {
   if (sync_thread_.joinable()) {
     sync_thread_.request_stop();
+    cv_.notify_one();
     sync_thread_.join();
   }
+  std::lock_guard lock(mutex_);
   return sync_error_ ? *sync_error_ : zx::ok();
 }
 

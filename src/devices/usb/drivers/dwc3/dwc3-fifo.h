@@ -13,6 +13,7 @@ namespace dwc3 {
 
 template <bool manage_lifetime, typename gtest_base>
 class TestFixture;
+class Dwc3TestHelper;
 
 static inline const uint32_t kBufferSize = zx_system_get_page_size();
 // 12 corresponds to 4KiB page alignment (1 << 12).
@@ -22,6 +23,7 @@ template <typename T>
 class Fifo {
   template <bool manage_lifetime, typename gtest_base>
   friend class TestFixture;
+  friend class Dwc3TestHelper;
 
  public:
   virtual zx::result<> Init(zx::bti& bti, bool cached) {

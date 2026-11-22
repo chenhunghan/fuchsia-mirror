@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Generated using `fx fuzz update sysmem-fuzz/sysmem_fuzzer_multi`.
+resource(
+    name = "corpus_multi",
+    srcs = [
+        "sysmem_fuzz_corpus_multi_buffer_collecton_constraints.dat",
+        "sysmem_fuzz_corpus_multi_buffer_format_modifier_constraints.dat",
+    ],
+    outputs = ["data/src/sysmem/tests/sysmem/fuzz/corpus_multi/{{source_file_part}}"],
+    visibility = ["//src/sysmem/tests/sysmem/fuzz:__pkg__"],
+)

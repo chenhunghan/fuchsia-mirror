@@ -23,7 +23,7 @@ Subjecting the development process of the Fuchsia platform to OOT tests that are
 able to circumvent platform contracts threatens Fuchsia’s ability to be
 [updatable][fuchsia-updatable].
 
-### What are system tests?
+### What are system tests? {#what-are-system-tests}
 
 System testing is testing that’s conducted on a complete assembled system in
 order to validate that the system meets certain requirements. In a
@@ -469,9 +469,9 @@ additional justification or otherwise be discouraged by the platform team.
 
 [acts]: https://android.googlesource.com/platform/tools/test/connectivity/+/HEAD/acts
 [cf]: /docs/concepts/components/v2/README.md
-[ffx-components]: /docs/development/tools/ffx/getting-started.md#interacting_with_components
+[ffx-components]: /docs/development/tools/ffx/getting-started.md#interacting-with-components
 [ffx-plugins]: /docs/development/tools/ffx/development/README.md
-[ffx-proxy-plugin]: /docs/development/tools/ffx/development/README.md#fidl-proxy
+[ffx-proxy-plugin]: /docs/development/tools/ffx/development/README.md
 [fidl-abi-compatibility]: /docs/development/languages/fidl/guides/compatibility/README.md
 [fsi]: /docs/concepts/kernel/system.md
 [fuchsia-updatable]: /docs/concepts/principles/updatable.md

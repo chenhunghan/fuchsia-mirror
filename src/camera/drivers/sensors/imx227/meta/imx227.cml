@@ -21,6 +21,7 @@
         { service: "fuchsia.hardware.clock.Service" },
         { service: "fuchsia.hardware.gpio.Service" },
         { service: "fuchsia.hardware.i2c.Service" },
+        { service: "fuchsia.hardware.mipicsi.Service" },
         {
             service: "fuchsia.hardware.pin.PinStatesService",
             availability: "optional",

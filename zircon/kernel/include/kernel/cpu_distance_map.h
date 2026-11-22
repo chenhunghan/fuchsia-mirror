@@ -25,6 +25,14 @@
 
 class CpuDistanceMap;
 
+extern "C" {
+using CpuDistanceCallback = uint32_t (*)(cpu_num_t from_id, cpu_num_t to_id, void* ctx);
+#ifdef UNITTESTS_ENABLED
+CpuDistanceMap* cpp_cpu_distance_map_create_for_test(size_t cpu_count, CpuDistanceCallback cb,
+                                                     void* ctx);
+#endif
+}  // extern "C"
+
 // Don't use directly.  Use CpuDistanceMap::Get().
 extern lazy_init::LazyInit<CpuDistanceMap> g_cpu_distance_map;
 
@@ -96,6 +104,10 @@ class CpuDistanceMap {
 
  private:
   friend struct CpuDistanceMapTestAccess;
+#ifdef UNITTESTS_ENABLED
+  friend CpuDistanceMap* cpp_cpu_distance_map_create_for_test(size_t cpu_count,
+                                                              CpuDistanceCallback cb, void* ctx);
+#endif
 
   struct Entry {
     Distance distance;
@@ -143,11 +155,6 @@ class CpuDistanceMap {
       return CpuDistanceMap{cpu_count, entry_count, ktl::move(distance_map)};
     }
     return ktl::nullopt;
-  }
-
-  // Creates a default distance map where every CPU is equidistant.
-  static ktl::optional<CpuDistanceMap> Create(size_t cpu_count) {
-    return Create(cpu_count, [](cpu_num_t i, cpu_num_t j) -> Distance { return i == j ? 0 : 1; });
   }
 
   // Returns a linear index into the compact distance matrix.
@@ -210,13 +217,19 @@ class CpuDistanceMap {
 
 extern "C" {
 
-using CpuDistanceCallback = uint32_t (*)(cpu_num_t from_id, cpu_num_t to_id, void* ctx);
-
 void cpp_cpu_distance_map_init(size_t cpu_count, CpuDistanceCallback cb, void* ctx);
 void cpp_cpu_distance_map_set_distance_threshold(uint32_t threshold);
 void cpp_cpu_distance_map_dump();
 const CpuDistanceMap* cpp_cpu_distance_map_get();
 size_t cpp_cpu_distance_map_cpu_count(const CpuDistanceMap* map);
+CpuDistanceMap::Distance cpp_cpu_distance_map_distance_threshold(const CpuDistanceMap* map);
+CpuDistanceMap::Distance cpp_cpu_distance_map_index(const CpuDistanceMap* map, cpu_num_t i,
+                                                    cpu_num_t j);
+#ifdef UNITTESTS_ENABLED
+void cpp_cpu_distance_map_set_threshold_for_test(CpuDistanceMap* map,
+                                                 CpuDistanceMap::Distance threshold);
+void cpp_cpu_distance_map_destroy_for_test(CpuDistanceMap* map);
+#endif
 
 }  // extern "C"
 

@@ -22,7 +22,7 @@ class RebootLog {
   static RebootLog ParseRebootLog(const std::string& zircon_reboot_log_path,
                                   const std::string& graceful_shutdown_info_path,
                                   const std::string& legacy_graceful_reboot_log_path,
-                                  const std::string& previous_system_time_path,
+                                  std::optional<zx::time_boot> last_log_timestamp,
                                   const std::string& previous_boot_kernel_log_path,
                                   const std::string& final_shutdown_info_path, bool not_a_fdr,
                                   bool supports_user_initiated_poweroffs,
@@ -31,12 +31,18 @@ class RebootLog {
   const std::string& RebootLogStr() const { return reboot_log_str_; }
   const FinalShutdownInfo& GetFinalShutdownInfo() const { return final_shutdown_info_; }
 
+  // Whether the uptime was approximated from the timestamp of the last message in the previous
+  // boot logs. Only meaningful for the first component instance.
+  bool IsUptimeFromLogs() const { return uptime_from_logs_; }
+
   // Exposed for testing purposes.
-  RebootLog(FinalShutdownInfo final_shutdown_info, std::string reboot_log_str);
+  RebootLog(FinalShutdownInfo final_shutdown_info, std::string reboot_log_str,
+            bool uptime_from_logs);
 
  private:
   FinalShutdownInfo final_shutdown_info_;
   std::string reboot_log_str_;
+  bool uptime_from_logs_;
 };
 
 }  // namespace feedback

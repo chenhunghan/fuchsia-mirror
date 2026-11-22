@@ -177,28 +177,29 @@ struct ResolverDefinition {
   constexpr bool uses_static_tls() const { return module_->uses_static_tls(); }
   constexpr auto static_tls_bias() const { return module_->static_tls_bias(); }
 
-  template <
-      class Diagnostics, typename T = TlsDescResolver,
-      typename = std::enable_if_t<std::is_invocable_v<T, Diagnostics&, const ResolverDefinition&>>>
-  constexpr auto tls_desc(Diagnostics& diag) const {
+  template <class Diagnostics>
+  constexpr auto tls_desc(Diagnostics& diag) const
+    requires std::invocable<TlsDescResolver, Diagnostics&, const ResolverDefinition&>
+  {
     return (*tlsdesc_resolver_)(diag, *this);
   }
 
-  template <class Diagnostics, typename T = TlsDescResolver,
-            typename = std::enable_if_t<
-                std::is_invocable_v<T, Diagnostics&, const ResolverDefinition&, Addend>>>
-  constexpr auto tls_desc(Diagnostics& diag, Addend addend) const {
+  template <class Diagnostics>
+  constexpr auto tls_desc(Diagnostics& diag, Addend addend) const
+    requires std::invocable<TlsDescResolver, Diagnostics&, const ResolverDefinition&, Addend>
+  {
     return (*tlsdesc_resolver_)(diag, *this, addend);
   }
 
-  template <typename T = TlsDescResolver, typename = std::enable_if_t<std::is_invocable_v<T>>>
-  constexpr auto tls_desc_undefined_weak() const {
+  constexpr auto tls_desc_undefined_weak() const
+    requires std::invocable<TlsDescResolver>
+  {
     return (*tlsdesc_resolver_)();
   }
 
-  template <typename T = TlsDescResolver,
-            typename = std::enable_if_t<std::is_invocable_v<T, Addend>>>
-  constexpr auto tls_desc_undefined_weak(Addend addend) const {
+  constexpr auto tls_desc_undefined_weak(Addend addend) const
+    requires std::invocable<TlsDescResolver, Addend>
+  {
     return (*tlsdesc_resolver_)(addend);
   }
 

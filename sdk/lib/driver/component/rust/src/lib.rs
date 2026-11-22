@@ -41,7 +41,7 @@ pub use fidl_next_fuchsia_driver_framework::{
 /// Driver authors should implement this trait, taking information from the [`DriverContext`]
 /// passed to the [`Driver::start`] method to set up, and then tearing down any resources they use
 /// in the [`Driver::stop`] method.
-pub trait Driver: Sized + Send + Sync + 'static {
+pub trait Driver: Sized + 'static {
     /// The name of the driver as it will appear in logs
     const NAME: &str;
 
@@ -54,14 +54,21 @@ pub trait Driver: Sized + Send + Sync + 'static {
     /// In order for the driver to be properly considered started, it must return `Ok`
     /// and bind the client end for the [`DriverStartArgs::node`] given in
     /// [`DriverContext::start_args`].
-    fn start(context: DriverContext) -> impl Future<Output = Result<Self, DriverError>> + Send;
+    fn start(context: DriverContext) -> impl Future<Output = Result<Self, DriverError>>;
 
     /// This will be called when the driver has been asked to stop, and should do any
     /// asynchronous cleanup necessary before the driver is fully shut down.
     ///
+    /// The driver is passed by value: health checks still in flight have been cancelled by the
+    /// time this is called, so nothing else holds a reference to the driver, and it is dropped
+    /// when the returned future completes. This lets the driver move resources out of itself
+    /// during teardown without interior mutability.
+    ///
     /// Note: The driver will not be considered fully stopped until the node client end bound in
     /// [`Driver::start`] has been closed.
-    fn stop(&self) -> impl Future<Output = ()> + Send;
+    fn stop(self) -> impl Future<Output = ()> {
+        async {}
+    }
 
     /// Called when the driver has been asked to suspend.
     ///
@@ -76,7 +83,7 @@ pub trait Driver: Sized + Send + Sync + 'static {
     ///
     /// Only called when `power_managed_dispatchers_enabled` is set to `"true"` in the
     /// driver's component manifest.
-    fn system_suspend(&self) -> impl Future<Output = Result<(), DriverError>> + Send {
+    fn system_suspend(&self) -> impl Future<Output = Result<(), DriverError>> {
         async { Ok(()) }
     }
 
@@ -101,7 +108,7 @@ pub trait Driver: Sized + Send + Sync + 'static {
     fn system_resume(
         &self,
         _lease: Option<zx::EventPair>,
-    ) -> impl Future<Output = Result<(), DriverError>> + Send {
+    ) -> impl Future<Output = Result<(), DriverError>> {
         async { Ok(()) }
     }
 
@@ -129,7 +136,7 @@ pub trait Driver: Sized + Send + Sync + 'static {
     fn health_check(
         &self,
         request: HealthCheckRequest,
-    ) -> impl Future<Output = Result<HealthCheckResponse, HealthCheckError>> + Send {
+    ) -> impl Future<Output = Result<HealthCheckResponse, HealthCheckError>> {
         async move {
             match request {
                 HealthCheckRequest::Ping => Ok(HealthCheckResponse::default()),

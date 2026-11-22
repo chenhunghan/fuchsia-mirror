@@ -11,7 +11,7 @@
 #include <zircon/assert.h>
 
 #include <ktl/string_view.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/symbolize.h>
 
 #include <ktl/enforce.h>
 

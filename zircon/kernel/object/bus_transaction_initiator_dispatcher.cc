@@ -8,14 +8,11 @@
 
 #include <lib/object-constants.h>
 
-#include <kernel/ffi.h>
-
-BusTransactionInitiatorDispatcher::BusTransactionInitiatorDispatcher(fbl::RefPtr<Bti> bti)
+BusTransactionInitiatorDispatcher::BusTransactionInitiatorDispatcher(const void* bti)
     : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(BusTransactionInitiatorDispatcher,
                            kBusTransactionInitiatorDispatcherStateOffset);
-  rust_bus_transaction_initiator_dispatcher_state_init(&opaque_storage_, this,
-                                                       fbl::ExportToRawPtr(&bti));
+  rust_bus_transaction_initiator_dispatcher_state_init(&opaque_storage_, this, bti);
 }
 
 IMPLEMENT_DISPATCHER_RUST_STATE(BusTransactionInitiatorDispatcher,
@@ -24,8 +21,4 @@ IMPLEMENT_DISPATCHER_RUST_STATE(BusTransactionInitiatorDispatcher,
 
 void BusTransactionInitiatorDispatcher::on_zero_handles() {
   rust_bus_transaction_initiator_dispatcher_on_zero_handles(this);
-}
-
-iommu::Bti& BusTransactionInitiatorDispatcher::bti() const {
-  return *rust_bus_transaction_initiator_dispatcher_get_bti(this);
 }

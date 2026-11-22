@@ -22,15 +22,13 @@ class FakeCodecAdapter : public CodecAdapter {
   bool IsCoreCodecRequiringOutputConfigForFormatDetection() override;
   bool IsCoreCodecMappedBufferUseful(CodecPort port) override;
   bool IsCoreCodecHwBased(CodecPort port) override;
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override;
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override;
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
   void CoreCodecStartStream() override;
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override;
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
@@ -40,10 +38,7 @@ class FakeCodecAdapter : public CodecAdapter {
                                  const std::vector<std::unique_ptr<CodecPacket>>& packets) override;
   void CoreCodecRecycleOutputPacket(CodecPacket* packet) override;
   void CoreCodecEnsureBuffersNotConfigured(CodecPort port) override;
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override;
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override;
   void CoreCodecMidStreamOutputBufferReConfigPrepare() override;

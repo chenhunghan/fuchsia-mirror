@@ -10,6 +10,7 @@
 #include <concepts>
 #include <cstdint>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -127,52 +128,40 @@ class GnuHash {
     }
 
     if (max_symndx == 0) [[unlikely]] {
-      return 0;
+      return chain_index_bias_;
     }
 
     // Now start at that place in the chain table and count how many remain.
+    const uint32_t max_chain_words = MaxChainWords();
+    if (max_symndx < chain_index_bias_ ||  // Check for bogus index.
+        max_symndx - chain_index_bias_ >= max_chain_words) [[unlikely]] {
+      return 0;
+    }
 
     if constexpr (sizeof(Addr) == sizeof(uint32_t)) {
-      auto chain = tables_.subspan(filter_index_mask_ + 1 + bucket_count_);
-      if (max_symndx > chain_index_bias_ ||  // Check for bogus index.
-          max_symndx - chain_index_bias_ >= chain.size()) [[unlikely]] {
-        return 0;
-      }
+      auto chain = tables_.subspan(filter_index_mask_ + 1 + bucket_count_, max_chain_words);
       for (uint32_t hash : chain.subspan(max_symndx - chain_index_bias_)) {
         ++max_symndx;
-        if (hash & 1) {
+        if (hash & 1u) {
           return max_symndx;
         }
       }
     } else {
-      if (max_symndx > chain_index_bias_) [[unlikely]] {
-        return 0;
-      }
-
       auto words = tables_.subspan(filter_index_mask_ + 1);
-
+      const uint32_t end_offset = bucket_count_ + max_chain_words;
       uint32_t offset = BucketChainStart(max_symndx);
 
-      if ((offset >> 1) >= words.size()) [[unlikely]] {
-        return 0;
-      }
-
-      if (offset & 1) {
+      if (offset & 1u) {
         // The first element of interest shares a word with the previous one.
         ++max_symndx;
-        if (words[offset >> 1] & kSecondEnd) {
+        if (words[offset >> 1u] & kSecondEnd) {
           return max_symndx;
         }
         ++offset;
       }
 
-      // Check the remaining words two at a time for the end marker.
-      offset >>= 1;
-      if (offset >= words.size()) [[unlikely]] {
-        return 0;
-      }
-
-      for (uint64_t word : words.subspan(offset)) {
+      // Check the remaining complete word-pairs two at a time for the end marker.
+      for (uint64_t word : words.first(end_offset >> 1u).subspan(offset >> 1u)) {
         ++max_symndx;
         if (word & kFirstEnd) {
           return max_symndx;
@@ -181,6 +170,10 @@ class GnuHash {
         if (word & kSecondEnd) {
           return max_symndx;
         }
+      }
+
+      if ((end_offset & 1u) && offset < end_offset && (words[end_offset >> 1u] & kFirstEnd)) {
+        return max_symndx + 1;
       }
     }
 
@@ -199,7 +192,8 @@ class GnuHash {
     TableIterator begin, end;
     begin.table_ = end.table_ = this;
     begin.i_ = AbsoluteBucketChainStart(chain_index_bias_);
-    end.i_ = static_cast<uint32_t>(tables_.size() * kBucketsPerAddr);
+    const uint32_t symtab_limit = symtab_size();
+    end.i_ = symtab_limit > chain_index_bias_ ? AbsoluteBucketChainStart(symtab_limit) : begin.i_;
     return std::ranges::subrange(begin, end);
   }
 
@@ -295,25 +289,20 @@ class GnuHash {
       begin.table_ = end.table_ = &table;
       end.GoToEnd();
 
-      if (bucket_start == 0) {
-        // No such bucket, so begin() == end().
+      if (bucket_start == 0 || bucket_start < table.chain_index_bias_ ||
+          bucket_start - table.chain_index_bias_ >= table.MaxChainWords()) [[unlikely]] {
+        // No such bucket or a bogus index from the bucket table: begin() == end().
         begin.i_ = end.i_;
       } else {
         begin.i_ = table.AbsoluteBucketChainStart(bucket_start);
-
-        // Check for a bogus index coming from the bucket table.
         const uint32_t tables_index = begin.i_ / kBucketsPerAddr;
-        if (bucket_start < table.chain_index_bias_ ||  //
-            tables_index >= table.tables_.size()) [[unlikely]] {
-          begin.i_ = end.i_;
-        } else {
-          // Store with the low bit set for quick comparisons to the chain table.
-          begin.hash_ = hash | 1;
 
-          // We're now pointing to the start of the bucket.
-          // Advance to the first symbol matching the hash value.
-          begin.AdvanceToNextHashMatch(table.tables_[tables_index]);
-        }
+        // Store with the low bit set for quick comparisons to the chain table.
+        begin.hash_ = hash | 1u;
+
+        // We're now pointing to the start of the bucket.
+        // Advance to the first symbol matching the hash value.
+        begin.AdvanceToNextHashMatch(table.tables_[tables_index]);
       }
 
       return Range{begin, end};
@@ -400,7 +389,7 @@ class GnuHash {
   };
   using BucketRange = std::ranges::subrange<BucketIterator>;
 
-  // Iterate over the hash buckets to yield a BucketIerator for each bucket.
+  // Iterate over the hash buckets to yield a BucketIterator for each bucket.
   // Together this allows for exhaustive iteration over the whole table.
   // Here each "bucket" is not actually a hash bucket in the DT_GNU_HASH
   // primary hash table used for lookup, but is instead a run within a bucket
@@ -424,30 +413,41 @@ class GnuHash {
     constexpr TableIterator& operator++() {  // prefix
       const uint32_t hash = CurrentHash();
       if constexpr (sizeof(Addr) == sizeof(uint32_t)) {
-        // Advance past each word that matches the current hash value.
+        // Advance past each word in the bucket that matches the current hash value.
         do {
-          ++i_;
-        } while (i_ < table_->tables_.size() && table_->tables_[i_] == hash);
+          if (table_->tables_[i_++] & 1u) {
+            break;
+          }
+        } while (i_ < table_->tables_.size() && (table_->tables_[i_] | 1u) == hash);
       } else {
         // If the current entry is in the second half of its word-pair, skip
         // it first.  Then check two words at a time.  If the current entry
         // is in the first half, then it's harmless to check it again.
-        if (i_ & 1) {
+        if (i_ & 1u) {
+          const uint32_t word_idx = i_ >> 1u;
           ++i_;
+          if (table_->tables_[word_idx] & kSecondEnd) {
+            return *this;
+          }
         }
 
-        const uint64_t hash_twice = (static_cast<uint64_t>(hash) << 32) | hash;
-        for (uint64_t word : table_->tables_.subspan(i_ >> 1)) {
-          word |= (uint64_t{1} << 32) | 1;
+        const uint32_t chain_hash = hash & ~1u;
+        const uint64_t hash_twice = (static_cast<uint64_t>(chain_hash) << 32u) | chain_hash;
+        for (uint64_t word : table_->tables_.subspan(i_ >> 1u)) {
           if (word != hash_twice) {
-            if (static_cast<uint32_t>(word >> Shift(0)) == hash) {
-              // The first word matched though the second didn't.  Skip just one.
+            if ((static_cast<uint32_t>(word >> Shift(0)) | 1u) == hash) {
+              // The first word matched.  Skip it, and also skip the second
+              // word if the bucket continues and the second word matches too.
               ++i_;
+              if (!(word & kFirstEnd) && (static_cast<uint32_t>(word >> Shift(1)) | 1u) == hash) {
+                ++i_;
+              }
             }
             break;
           }
 
-          // Both words matched.  Advance to the next pair of entries.
+          // Both words matched and neither ended the bucket.
+          // Advance to the next pair of entries.
           i_ += 2;
         }
       }
@@ -470,12 +470,14 @@ class GnuHash {
     constexpr uint32_t CurrentBucket() const { return i_ - table_->AbsoluteBucketChainStart(0); }
 
     constexpr uint32_t CurrentHash() const {
-      return static_cast<uint32_t>(table_->tables_[i_ / kBucketsPerAddr] >> Shift(i_)) | 1;
+      return static_cast<uint32_t>(table_->tables_[i_ / kBucketsPerAddr] >> Shift(i_)) | 1u;
     }
 
     const GnuHash* table_ = nullptr;
     uint32_t i_ = -1;
   };
+
+  static constexpr size_t kMaxTableAddrs = std::numeric_limits<uint32_t>::max() / kBucketsPerAddr;
 
   // Return Word index for the start of the bucket's chain table, relative to
   // the start of the bucket table.
@@ -488,8 +490,18 @@ class GnuHash {
     return ((filter_index_mask_ + 1) * kBucketsPerAddr) + BucketChainStart(symndx);
   }
 
+  // Upper bound on the number of chain table entries that can fit in tables_
+  // and in a 32-bit symbol table index.
+  constexpr uint32_t MaxChainWords() const {
+    const uint32_t total_words = static_cast<uint32_t>(tables_.size() * kBucketsPerAddr);
+    const uint32_t chain_start = AbsoluteBucketChainStart(chain_index_bias_);
+    return std::min(total_words - chain_start,
+                    std::numeric_limits<uint32_t>::max() - chain_index_bias_);
+  }
+
   constexpr GnuHash(std::span<const Addr> table, const Sizes& sizes)
-      : tables_(table.subspan(kAddrPerSizes)),
+      : tables_(
+            table.subspan(kAddrPerSizes, std::min(table.size() - kAddrPerSizes, kMaxTableAddrs))),
         bucket_count_(sizes.nbucket),
         chain_index_bias_(sizes.bias),
         filter_index_mask_(sizes.nfilter - 1),
@@ -516,25 +528,26 @@ class GnuHash {
         };
       }
 
-      const size_t total_addrs = table.size() - kAddrPerSizes;
+      const size_t total_addrs = std::min(table.size() - kAddrPerSizes, kMaxTableAddrs);
 
-      // There must be one slot for each bucket, followed by at least one more
-      // slot for the chain table.  This minimum number of slots can be rounded
-      // up to the number of slots per Addr, since there is always a whole
-      // number of Addr words in the overall table.
-      const uint32_t bucket_slots = (sizes.nbucket + 1 + kBucketsPerAddr - 1) / kBucketsPerAddr;
-      const uint32_t max_buckets = bucket_slots * kBucketsPerAddr;
+      // There must be one slot for each bucket.  This minimum number of slots
+      // can be rounded up to the number of slots per Addr, since there is
+      // always a whole number of Addr words in the overall table.  If all
+      // buckets are empty (zero), the chain table can be empty too.
+      const uint64_t bucket_slots =
+          (static_cast<uint64_t>(sizes.nbucket) + kBucketsPerAddr - 1) / kBucketsPerAddr;
 
       if (sizes.nbucket > 0 &&                   // Cannot be empty.
-          sizes.nbucket <= max_buckets &&        // Check for overflow.
           sizes.shift < 32 &&                    // Must be plausible.
           std::has_single_bit(sizes.nfilter) &&  // Must be power of two.
-          total_addrs >= sizes.nfilter &&        // Space for the filters.
-          // There must be space for the buckets and the chain table.  We can't
-          // really tell how much space is needed for the chain table without
-          // examining all the buckets, so those indices can't be presumed
-          // valid later.
-          total_addrs - sizes.nfilter >= bucket_slots) [[likely]] {
+          sizes.nfilter <= total_addrs &&        // Space for the filters.
+          // There must be space for the buckets, without overflowing 32-bit
+          // word indices.  We can't tell how much space is needed for the
+          // chain table without examining all the buckets, so those indices
+          // can't be presumed valid later.
+          total_addrs - sizes.nfilter >= bucket_slots &&
+          sizes.nbucket <= std::numeric_limits<uint32_t>::max() - (sizes.nfilter * kBucketsPerAddr))
+          [[likely]] {
         return sizes;
       }
     }

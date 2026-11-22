@@ -6,7 +6,7 @@
 
 #include "src/starnix/tests/selinux/userspace/util.h"
 
-extern std::string DoPrePolicyLoadWork() { return "userspace_initial_context_policy"; }
+extern std::string GetTestPolicyName() { return "userspace_initial_context_policy"; }
 
 namespace {
 

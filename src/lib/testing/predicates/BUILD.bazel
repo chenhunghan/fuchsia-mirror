@@ -2,13 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
-load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "tests",
+    tests = [":predicates-lib-test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# In GN, //third_party/googletest:gtest is testonly, whereas in Bazel @com_google_googletest//:gtest
+# is not testonly and non-testonly targets depend on :predicates.
+# @bazel2gn:raw_attribute:testonly = true
+fx_cc_library(
     name = "predicates",
     srcs = [
         "status.cc",
@@ -16,24 +27,44 @@ cc_library(
     hdrs = [
         "status.h",
     ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = ["//:__subpackages__"],
     deps = [
-        "@com_google_googletest//:gtest_main",
-        "@fuchsia_sdk//pkg/zx",
+        # "status.h" has #include <lib/fit/result.h>
+        "//sdk/lib/fit",
+        # "status.h" has #include <zircon/status.h>.
+        "//src/zircon/lib/zircon:headers",
+        # "status.h" has #include <gtest/gtest.h>.
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "predicates-lib-unittests",
+    srcs = ["predicates_test.cc"],
+    # Links zx_status_get_string from the Zircon vDSO.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":predicates",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/zx",
     ],
 )
 
-fx_cc_binary(
-    name = "predicates-lib-unittests",
-    testonly = True,
-    srcs = ["predicates_test.cc"],
-    tags = ["manual"],
-    deps = [":predicates"],
+fx_unittest_component(
+    name = "predicates-lib-test-component",
+    binary = ":predicates-lib-unittests",
+    component_name = "predicates-lib-test",
 )
 
-fx_unittest_package(
+fx_package(
+    name = "predicates-lib-test-package",
+    package_name = "predicates-lib-test",
+    test_components = [":predicates-lib-test-component"],
+)
+
+fx_test(
     name = "predicates-lib-test",
     environments = ["//build/testing/environments:emu_env"],
-    unit_tests = [":predicates-lib-unittests"],
+    package = ":predicates-lib-test-package",
 )

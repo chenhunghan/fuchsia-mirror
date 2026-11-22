@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#![cfg(target_os = "fuchsia")]
+
 use crate::Measurable;
 use anyhow::{Context as _, Result};
 use fidl_fuchsia_pkg::{

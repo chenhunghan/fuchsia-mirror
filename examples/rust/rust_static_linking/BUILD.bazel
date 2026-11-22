@@ -25,7 +25,6 @@ fx_cc_library(
 
 fx_unittest_package(
     name = "static_linking_tests",
-    package_name = "static_linking_tests",
     unit_tests = [":lib_test"],
     visibility = ["//examples:__pkg__"],
 )

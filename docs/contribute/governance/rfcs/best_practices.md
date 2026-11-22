@@ -133,7 +133,7 @@ On the other hand, RFCs _may_ link to documentation. In fact, if your RFC
 contains lots of background information, consider moving that background into
 documentation and linking to it instead!
 
-[minor amendments]: rfc_process.md#process_to_amend_rfcs
+[minor amendments]: rfc_process.md#process-to-amend-rfcs
 [fx-gitiles]: https://fuchsia.googlesource.com/fuchsia
 
 ## Update these best practices

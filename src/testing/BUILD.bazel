@@ -10,7 +10,10 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/testing/loadbench:tests",
+        "//src/testing/sl4f/proxy:tests",
         "//src/testing/system-validation:tests",
+        "//src/testing/trf_codegen/lib/runtime:tests",
     ],
 )
 
@@ -18,6 +21,15 @@ test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
+        "//src/testing/catapult_converter:host_tests",
+        "//src/testing/end_to_end/libs/tests:host_tests",
+        "//src/testing/end_to_end/mobly_base_tests/fuchsia_async_extension/tests:host_tests",
+        "//src/testing/end_to_end/mobly_base_tests/mobly_logger_extension:host_tests",
+        "//src/testing/end_to_end/mobly_controller/attenuator/tests:host_tests",
+        "//src/testing/end_to_end/mobly_controller/iperf/tests:host_tests",
+        "//src/testing/end_to_end/mobly_driver/tests/unit_tests:host_tests",
+        "//src/testing/end_to_end/mobly_driver/tests/unit_tests/api:host_tests",
+        "//src/testing/end_to_end/mobly_driver/tests/unit_tests/driver:host_tests",
         "//src/testing/perfcompare:host_tests",
     ],
 )

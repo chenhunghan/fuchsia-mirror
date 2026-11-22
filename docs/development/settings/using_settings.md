@@ -132,7 +132,7 @@ let settings = proxy.watch().expect("settings retrieved");
 let screen_reader_enabled = settings.screen_reader.ok_or(false);
 ```
 
-## Writing
+## Writing {:#writing}
 
 Applications can affect Settings by utilizing the same table structure found
 for reading data. Each mutable protocol offers a counterpart method to `Watch`

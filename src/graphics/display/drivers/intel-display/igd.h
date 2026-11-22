@@ -5,7 +5,7 @@
 #ifndef SRC_GRAPHICS_DISPLAY_DRIVERS_INTEL_DISPLAY_IGD_H_
 #define SRC_GRAPHICS_DISPLAY_DRIVERS_INTEL_DISPLAY_IGD_H_
 
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zx/resource.h>
 #include <lib/zx/vmo.h>
 #include <zircon/assert.h>

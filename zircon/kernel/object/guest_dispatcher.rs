@@ -6,6 +6,7 @@
 
 use crate::counters::define_kcounter;
 use crate::ksync_kernel::TrackedCriticalMutex;
+use core::pin::Pin;
 use fbl::{Canary, RefPtr, UniquePtr};
 use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
@@ -37,8 +38,8 @@ pub struct GuestDispatcherState {
     /// Magic canary value validating structural integrity.
     canary: Canary<{ fbl::magic(b"GSTD") }>,
 
-    /// Owned pointer to the underlying C++ `Guest` object (not protected by lock).
-    guest: UniquePtr<Guest>,
+    /// Owned pointer to the underlying `Guest` object (not protected by lock).
+    guest: Pin<UniquePtr<Guest>>,
 
     /// Mutex guarding state operations.
     #[mutex]
@@ -49,7 +50,7 @@ impl GuestDispatcherState {
     /// Initializes the `GuestDispatcherState`.
     pub fn init(
         _dispatcher: *const GuestDispatcher,
-        guest: UniquePtr<Guest>,
+        guest: Pin<UniquePtr<Guest>>,
     ) -> impl PinInit<Self, core::convert::Infallible> {
         DISPATCHER_GUEST_CREATE_COUNT.add(1);
         pin_init!(Self {
@@ -59,8 +60,8 @@ impl GuestDispatcherState {
         })
     }
 
-    /// Returns a reference to the underlying `Guest` facade object.
-    pub fn guest(&self) -> &Guest {
+    /// Returns a reference to the pinned `Guest` pointer.
+    pub fn guest(&self) -> &Pin<UniquePtr<Guest>> {
         &self.guest
     }
 }
@@ -98,22 +99,30 @@ impl GuestDispatcher {
         }
 
         let guest = Guest::create()?;
-        let vmar = guest.root_vmar();
+        let vmar = Guest::root_vmar(&guest);
 
-        // SAFETY: `UniquePtr::into_raw(guest)` transfers sole ownership of `guest` to
-        // `cpp_guest_dispatcher_create`, which adopts it into `ktl::unique_ptr<Guest>`, and
-        // `cpp_guest_dispatcher_create` initializes `out` on `ZX_OK`.
-        let new_guest_handle = unsafe {
-            KernelHandle::create(|out| cpp_guest_dispatcher_create(UniquePtr::into_raw(guest), out))
-        }?;
+        // SAFETY: The guest is never moved: its pointer is either adopted by
+        // `rust_guest_dispatcher_state_init`, which pins it again, or turned back into a
+        // `UniquePtr` and dropped in place below if `cpp_guest_dispatcher_create` fails.
+        let guest = unsafe { Pin::into_inner_unchecked(guest) };
+        let guest_raw = UniquePtr::into_raw(guest);
+        // SAFETY: `cpp_guest_dispatcher_create` takes ownership of `guest_raw` and initializes
+        // `out` on `ZX_OK`, and leaves ownership with the caller otherwise.
+        let new_guest_handle =
+            unsafe { KernelHandle::create(|out| cpp_guest_dispatcher_create(guest_raw, out)) }
+                .inspect_err(|_| {
+                    // SAFETY: `cpp_guest_dispatcher_create` failed, so `guest_raw` is still the
+                    // sole owner of the guest released above.
+                    drop(unsafe { UniquePtr::from_raw(guest_raw) });
+                })?;
 
         let (vmar_handle, vmar_rights) = VmAddressRegionDispatcher::create(vmar, 0)?;
 
         Ok((new_guest_handle, Self::default_rights(), vmar_handle, vmar_rights))
     }
 
-    /// Returns a reference to the underlying `Guest` facade object.
-    pub fn guest(&self) -> &Guest {
+    /// Returns a reference to the pinned `Guest` pointer.
+    pub fn guest(&self) -> &Pin<UniquePtr<Guest>> {
         self.state().guest()
     }
 
@@ -127,6 +136,6 @@ impl GuestDispatcher {
         key: u64,
     ) -> Result<(), Status> {
         self.state().canary.assert();
-        self.state().guest.set_trap(kind, addr, len, port, key)
+        Guest::set_trap(&self.state().guest, kind, addr, len, port, key)
     }
 }

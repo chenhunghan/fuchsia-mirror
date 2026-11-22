@@ -5,7 +5,7 @@
 use crate::log::*;
 use crate::lsm_tree::TreeCounters;
 use crate::lsm_tree::types::{
-    BoxedItem, Item, ItemRef, Key, Layer, LayerIterator, LayerIteratorMut, LayerKey,
+    BoxedItem, Coalesce, Item, ItemRef, Key, Layer, LayerIterator, LayerIteratorMut, LayerKey,
     MaybeContainsKey, MergeType, OrdLowerBound, Value,
 };
 use anyhow::Error;
@@ -701,12 +701,29 @@ impl<K, V> DerefMut for MutMergeLayerIterator<'_, K, V> {
     }
 }
 
-// Merges the given item into a mutable layer.
-pub(super) fn merge_into<K: Debug + OrdLowerBound, V: Debug>(
+// Merges the given item into a mutable layer, coalescing adjacent compatible records via
+// `Coalesce`.
+pub(super) fn merge_into<K: Coalesce<V> + Debug + OrdLowerBound, V: Debug>(
     mut_iter: Box<dyn LayerIteratorMut<K, V> + '_>,
     item: Item<K, V>,
     merge_fn: MergeFn<K, V>,
 ) -> Result<(), Error> {
+    fn emit_item<K: Coalesce<V>, V>(
+        mut_merge_iter: &mut MutMergeLayerIterator<'_, K, V>,
+        buffered_emit: &mut Option<Item<K, V>>,
+        next: Item<K, V>,
+    ) -> Result<(), Error> {
+        if let Some(prev) = buffered_emit.as_mut() {
+            if let Some(coalesced) = K::coalesce(prev.as_item_ref(), next.as_item_ref())? {
+                *prev = coalesced;
+                return Ok(());
+            }
+            mut_merge_iter.as_mut().insert(buffered_emit.take().unwrap());
+        }
+        *buffered_emit = Some(next);
+        Ok(())
+    }
+
     let merge_item = if mut_iter.get().is_some() { MergeItem::Iter } else { MergeItem::None };
     let mut mut_merge_iter = MutMergeLayerIterator(MergeLayerIterator {
         layer: None,
@@ -715,6 +732,7 @@ pub(super) fn merge_into<K: Debug + OrdLowerBound, V: Debug>(
         item: merge_item,
     });
     let mut item_merge_iter = MergeLayerIterator::new_with_item(0, MergeItem::Item(item.boxed()));
+    let mut buffered_emit: Option<Item<K, V>> = None;
     while mut_merge_iter.is_some() && item_merge_iter.is_some() {
         if mut_merge_iter.0 > item_merge_iter {
             // In this branch the mutable layer is left and the item we're merging-in is right.
@@ -727,15 +745,37 @@ pub(super) fn merge_into<K: Debug + OrdLowerBound, V: Debug>(
             match merge_result {
                 MergeResult::EmitLeft => {
                     if let Some(item) = mut_merge_iter.take_item() {
-                        mut_merge_iter.as_mut().insert(*item);
+                        emit_item(&mut mut_merge_iter, &mut buffered_emit, *item)?;
                         mut_merge_iter.set_item_from_iter();
                     } else {
-                        mut_merge_iter.advance();
+                        if let Some(prev) = buffered_emit.as_mut() {
+                            if let Some(coalesced) =
+                                K::coalesce(prev.as_item_ref(), mut_merge_iter.item())?
+                            {
+                                *prev = coalesced;
+                                mut_merge_iter.as_mut().erase();
+                                mut_merge_iter.set_item_from_iter();
+                                continue;
+                            }
+                            mut_merge_iter.as_mut().insert(buffered_emit.take().unwrap());
+                        }
+                        if let Some(coalesced) =
+                            K::coalesce(mut_merge_iter.item(), item_merge_iter.item())?
+                        {
+                            let MergeItem::Item(item) = &mut item_merge_iter.item else {
+                                unreachable!();
+                            };
+                            **item = coalesced;
+                            mut_merge_iter.as_mut().erase();
+                            mut_merge_iter.set_item_from_iter();
+                        } else {
+                            mut_merge_iter.advance();
+                        }
                     }
                 }
                 MergeResult::Other { emit, left, right } => {
                     if let Some(emit) = emit {
-                        mut_merge_iter.as_mut().insert(*emit);
+                        emit_item(&mut mut_merge_iter, &mut buffered_emit, *emit)?;
                     }
                     match left {
                         ItemOp::Keep => {}
@@ -771,7 +811,7 @@ pub(super) fn merge_into<K: Debug + OrdLowerBound, V: Debug>(
                 MergeResult::EmitLeft => break, // Item is inserted outside the loop
                 MergeResult::Other { emit, left, right } => {
                     if let Some(emit) = emit {
-                        mut_merge_iter.as_mut().insert(*emit);
+                        emit_item(&mut mut_merge_iter, &mut buffered_emit, *emit)?;
                     }
                     match left {
                         ItemOp::Keep => {}
@@ -798,13 +838,27 @@ pub(super) fn merge_into<K: Debug + OrdLowerBound, V: Debug>(
         }
     } // while ...
 
-    // The only way we could get here with both items is via the break above, so we know the correct
-    // order required here.
     if let MergeItem::Item(item) = item_merge_iter.item {
-        mut_merge_iter.as_mut().insert(*item);
+        emit_item(&mut mut_merge_iter, &mut buffered_emit, *item)?;
     }
-    if let Some(item) = mut_merge_iter.take_item() {
-        mut_merge_iter.as_mut().insert(*item);
+    while mut_merge_iter.is_some() {
+        if let Some(item) = mut_merge_iter.take_item() {
+            emit_item(&mut mut_merge_iter, &mut buffered_emit, *item)?;
+            mut_merge_iter.set_item_from_iter();
+        } else if let Some(prev) = buffered_emit.as_mut() {
+            if let Some(coalesced) = K::coalesce(prev.as_item_ref(), mut_merge_iter.item())? {
+                *prev = coalesced;
+                mut_merge_iter.as_mut().erase();
+                mut_merge_iter.set_item_from_iter();
+            } else {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if let Some(item) = buffered_emit {
+        mut_merge_iter.as_mut().insert(item);
     }
     if let RawIterator::Mut(mut iter) = mut_merge_iter.0.iter {
         iter.commit();
@@ -816,10 +870,12 @@ pub(super) fn merge_into<K: Debug + OrdLowerBound, V: Debug>(
 mod tests {
     use super::ItemOp::{Discard, Keep, Replace};
     use super::{MergeLayerIterator, MergeResult, Merger};
-    use crate::lsm_tree::persistent_layer::{PersistentLayer, PersistentLayerWriter};
+    use crate::lsm_tree::persistent_layer::{
+        BloomFilterOptions, PersistentLayer, PersistentLayerWriter,
+    };
     use crate::lsm_tree::skip_list_layer::SkipListLayer;
     use crate::lsm_tree::types::{
-        FuzzyHash, Item, ItemRef, Key, Layer, LayerIterator, LayerKey, LayerWriter,
+        Coalesce, FuzzyHash, Item, ItemRef, Key, Layer, LayerIterator, LayerKey, LayerWriter,
         MaybeContainsKey, MergeType, OrdLowerBound, OrdUpperBound, SortByU64,
     };
     use crate::lsm_tree::{Query, TreeCounters, Value};
@@ -1822,7 +1878,7 @@ mod tests {
         let write_handle = FakeObjectHandle::new(object.clone());
         let mut writer = PersistentLayerWriter::<_, K, V>::new(
             Writer::new(&write_handle).await,
-            items.len(),
+            Some(BloomFilterOptions { num_items: items.len() }),
             BlockSize::SIZE_512B,
         )
         .await
@@ -2128,5 +2184,169 @@ mod tests {
         // A query with > MAX_HASH_PARTITIONS (e.g. 10MB range: 0..10485760 = 10 partitions)
         merger.query(Query::LimitedRange(&key_large)).await.expect("seek failed");
         assert_eq!(counters.excessive_hash_partitions.load(Ordering::Relaxed), 1);
+    }
+
+    #[derive(
+        Clone,
+        Eq,
+        Hash,
+        FuzzyHash,
+        PartialEq,
+        Debug,
+        serde::Serialize,
+        serde::Deserialize,
+        TypeFingerprint,
+        Versioned,
+        SerializeKey,
+    )]
+    struct CoalescingTestKey(Range<u64>);
+
+    versioned_type! { 1.. => CoalescingTestKey }
+
+    impl SortByU64 for CoalescingTestKey {
+        fn get_leading_u64(&self) -> u64 {
+            self.0.end
+        }
+    }
+
+    impl OrdUpperBound for CoalescingTestKey {
+        fn cmp_upper_bound(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.end.cmp(&other.0.end).then(other.0.start.cmp(&self.0.start))
+        }
+    }
+
+    impl OrdLowerBound for CoalescingTestKey {
+        fn cmp_lower_bound(&self, other: &Self) -> std::cmp::Ordering {
+            self.0.start.cmp(&other.0.start)
+        }
+    }
+
+    impl Coalesce<i32> for CoalescingTestKey {
+        fn may_coalesce(_item: ItemRef<'_, Self, i32>) -> bool {
+            true
+        }
+
+        fn coalesce(
+            left: ItemRef<'_, Self, i32>,
+            right: ItemRef<'_, Self, i32>,
+        ) -> Result<Option<Item<Self, i32>>, anyhow::Error> {
+            if left.key.0.end == right.key.0.start && left.value == right.value {
+                Ok(Some(Item::new(
+                    CoalescingTestKey(left.key.0.start..right.key.0.end),
+                    *left.value,
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_merge_into_coalesces() {
+        // Pure splitting/visibility MergeFn with no coalescing of its own.
+        fn split_only_merge(
+            left: &MergeLayerIterator<'_, CoalescingTestKey, i32>,
+            right: &MergeLayerIterator<'_, CoalescingTestKey, i32>,
+        ) -> MergeResult<CoalescingTestKey, i32> {
+            if left.key().0.end <= right.key().0.start {
+                return MergeResult::EmitLeft;
+            }
+            if right.layer_index < left.layer_index && left.key().0.start < right.key().0.start {
+                return MergeResult::Other {
+                    emit: Some(
+                        Item::new(
+                            CoalescingTestKey(left.key().0.start..right.key().0.start),
+                            *left.value(),
+                        )
+                        .boxed(),
+                    ),
+                    left: Replace(
+                        Item::new(
+                            CoalescingTestKey(right.key().0.start..left.key().0.end),
+                            *left.value(),
+                        )
+                        .boxed(),
+                    ),
+                    right: Keep,
+                };
+            }
+            if left.layer_index < right.layer_index {
+                if left.key().0.end >= right.key().0.end {
+                    MergeResult::Other { emit: None, left: Keep, right: Discard }
+                } else {
+                    MergeResult::Other {
+                        emit: None,
+                        left: Keep,
+                        right: Replace(
+                            Item::new(
+                                CoalescingTestKey(left.key().0.end..right.key().0.end),
+                                *right.value(),
+                            )
+                            .boxed(),
+                        ),
+                    }
+                }
+            } else if right.key().0.end >= left.key().0.end {
+                MergeResult::Other { emit: None, left: Discard, right: Keep }
+            } else {
+                MergeResult::Other {
+                    emit: None,
+                    left: Replace(
+                        Item::new(
+                            CoalescingTestKey(right.key().0.end..left.key().0.end),
+                            *left.value(),
+                        )
+                        .boxed(),
+                    ),
+                    right: Keep,
+                }
+            }
+        }
+
+        // Left-to-right, right-to-left, and 3-way hole fill (`0..10`, `20..30`, then `10..20`).
+        let skip_list = SkipListLayer::new(100);
+        for range in [0..10, 20..30, 10..20] {
+            let bound = CoalescingTestKey(range.start..range.start);
+            skip_list.merge_into(Item::new(CoalescingTestKey(range), 1), &bound, split_only_merge);
+        }
+        assert_eq!(skip_list.len(), 1);
+
+        // Overlapping overwrite (`5..25` with same value) splits `0..30` and re-coalesces back
+        // into `0..30`.
+        skip_list.merge_into(
+            Item::new(CoalescingTestKey(5..25), 1),
+            &CoalescingTestKey(5..5),
+            split_only_merge,
+        );
+        assert_eq!(skip_list.len(), 1);
+
+        // Same-start partial overwrite (`0..15` over `0..30`) breaks `cmp_lower_bound` ties by
+        // `layer_index` and re-coalesces the replaced `15..30` tail back into `0..30`.
+        skip_list.merge_into(
+            Item::new(CoalescingTestKey(0..15), 1),
+            &CoalescingTestKey(0..0),
+            split_only_merge,
+        );
+        assert_eq!(skip_list.len(), 1);
+
+        // Same-start full overwrite (`0..40` over `0..30` followed by `40..50`) discards `0..30`
+        // and coalesces with `40..50` into `0..50`.
+        skip_list.merge_into(
+            Item::new(CoalescingTestKey(40..50), 1),
+            &CoalescingTestKey(40..40),
+            split_only_merge,
+        );
+        assert_eq!(skip_list.len(), 2);
+        skip_list.merge_into(
+            Item::new(CoalescingTestKey(0..40), 1),
+            &CoalescingTestKey(0..0),
+            split_only_merge,
+        );
+        assert_eq!(skip_list.len(), 1);
+
+        let mut iter = skip_list.seek(Bound::Unbounded);
+        assert_eq!(iter.get(), Some(ItemRef { key: &CoalescingTestKey(0..50), value: &1 }));
+        iter.advance().await.unwrap();
+        assert!(iter.get().is_none());
     }
 }

@@ -7,7 +7,6 @@ import argparse
 import contextlib
 import filecmp
 import io
-import multiprocessing
 import os
 import shutil
 import subprocess
@@ -17,7 +16,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import cl_utils
+from build.rbe import cl_utils
 
 
 class ImmediateExit(Exception):
@@ -48,7 +47,7 @@ class AutoEnvPrefixCommandTests(unittest.TestCase):
 
 
 class TimerCMTests(unittest.TestCase):
-    @mock.patch("cl_utils._ENABLE_TIMERS", True)
+    @mock.patch.object(cl_utils, "_ENABLE_TIMERS", True)
     def test_basic(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -1081,46 +1080,6 @@ class ExecRelaunchTests(unittest.TestCase):
                     self.go_away()
         mock_call.assert_called_once()
         mock_exit.assert_called_with(exit_code)
-
-
-def increment_file(file: Path) -> int:
-    if not file.exists():
-        # First writer creates with value 1
-        file.write_text("1")
-        return 1
-    else:
-        count = int(file.read_text()) + 1
-        file.write_text(f"{count}")
-        return count
-
-
-def locked_increment_file(file: Path) -> int:
-    lockfile = file.with_suffix(".lock")
-    with cl_utils.BlockingFileLock(lockfile) as lock:
-        return increment_file(file)
-
-
-class BlockingFileLockTests(unittest.TestCase):
-    def test_exclusion(self) -> None:
-        N = 50
-        with tempfile.TemporaryDirectory() as td:
-            count_file = Path(td) / "count"
-            try:
-                with multiprocessing.Pool() as pool:
-                    counts = pool.map(locked_increment_file, [count_file] * N)
-            except OSError:  # in case /dev/shm is not writeable (required)
-                counts = list(map(locked_increment_file, [count_file] * N))
-
-            self.assertEqual(sorted(counts), list(range(1, N + 1)))
-
-            # Run a second batch, same lock file
-            try:
-                with multiprocessing.Pool() as pool:
-                    counts = pool.map(locked_increment_file, [count_file] * N)
-            except OSError:  # in case /dev/shm is not writeable (required)
-                counts = list(map(locked_increment_file, [count_file] * N))
-
-            self.assertEqual(sorted(counts), list(range(N + 1, 2 * N + 1)))
 
 
 class SubprocessResultTests(unittest.TestCase):

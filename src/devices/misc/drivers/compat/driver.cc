@@ -21,7 +21,6 @@
 #include <lib/fpromise/promise.h>
 #include <lib/fpromise/single_threaded_executor.h>
 #include <lib/sync/cpp/completion.h>
-#include <zircon/dlfcn.h>
 
 #include "src/devices/lib/log/log.h"
 #include "src/devices/misc/drivers/compat/compat_driver_server.h"
@@ -34,7 +33,6 @@ using namespace fuchsia_driver_framework;
 }
 namespace fio = fuchsia_io;
 namespace fkernel = fuchsia_kernel;
-namespace fldsvc = fuchsia_ldsvc;
 namespace fdm = fuchsia_system_state;
 
 using fpromise::bridge;
@@ -338,7 +336,6 @@ Driver::~Driver() {
   if (ShouldCallRelease()) {
     record_->ops->release(context_);
   }
-  dlclose(library_);
   {
     std::lock_guard guard(kGlobalLoggerListLock);
     global_logger_list.RemoveLogger(driver_path(), inner_logger_, node_name_);
@@ -525,7 +522,7 @@ zx_status_t Driver::GetProperties(device_props_args_t* out_args,
         break;
       default:
         logger_->log(fdf::ERROR, "Unsupported property type, value: %lu",
-                     static_cast<fidl_xunion_tag_t>(value.Which()));
+                     static_cast<fidl_union_tag_t>(value.Which()));
         break;
     }
     return out_value;

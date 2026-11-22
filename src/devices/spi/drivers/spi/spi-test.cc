@@ -4,6 +4,7 @@
 
 #include "spi.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.spi.businfo/cpp/wire.h>
 #include <fidl/fuchsia.hardware.spiimpl/cpp/driver/wire.h>
 #include <fidl/fuchsia.scheduler/cpp/fidl.h>
@@ -16,9 +17,11 @@
 #include <lib/spi/spi.h>
 #include <zircon/errors.h>
 
+#include <algorithm>
 #include <array>
 #include <map>
 
+#include <bind/fuchsia/cpp/bind.h>
 #include <gtest/gtest.h>
 
 #include "spi-child.h"
@@ -300,6 +303,33 @@ class FakeSpiImplServer : public fdf::WireServer<fuchsia_hardware_spiimpl::SpiIm
   fdf::ServerBindingGroup<fuchsia_hardware_spiimpl::SpiImpl> bindings_;
 };
 
+class GenericMetadataServer final : public fidl::WireServer<fuchsia_driver_metadata::Metadata> {
+ public:
+  zx::result<> Serve(fdf::OutgoingDirectory& outgoing, async_dispatcher_t* dispatcher,
+                     std::string service_name,
+                     const fuchsia_driver_metadata::Dictionary& metadata) {
+    auto persisted = fidl::Persist(metadata);
+    if (persisted.is_error()) {
+      return zx::error(persisted.error_value().status());
+    }
+    metadata_bytes_ = std::move(persisted.value());
+
+    fuchsia_driver_metadata::Service::InstanceHandler handler({
+        .metadata = bindings_.CreateHandler(this, dispatcher, fidl::kIgnoreBindingClosure),
+    });
+
+    return outgoing.component().AddService(std::move(handler), std::move(service_name));
+  }
+
+ private:
+  void GetPersistedMetadata(GetPersistedMetadataCompleter::Sync& completer) override {
+    completer.ReplySuccess(fidl::VectorView<uint8_t>::FromExternal(metadata_bytes_));
+  }
+
+  std::vector<uint8_t> metadata_bytes_;
+  fidl::ServerBindingGroup<fuchsia_driver_metadata::Metadata> bindings_;
+};
+
 class TestEnvironment : public fdf_testing::Environment {
  public:
   zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override {
@@ -307,6 +337,16 @@ class TestEnvironment : public fdf_testing::Environment {
       if (zx::result result = spi_metadata_server_.Serve(
               to_driver_vfs, fdf::Dispatcher::GetCurrent()->async_dispatcher(),
               spi_metadata_.value());
+          result.is_error()) {
+        return result.take_error();
+      }
+    }
+
+    if (generic_metadata_.has_value()) {
+      if (zx::result result = generic_metadata_server_.Serve(
+              to_driver_vfs, fdf::Dispatcher::GetCurrent()->async_dispatcher(),
+              fuchsia_hardware_spi_businfo::SpiBusMetadata::kSerializableName,
+              generic_metadata_.value());
           result.is_error()) {
         return result.take_error();
       }
@@ -330,6 +370,14 @@ class TestEnvironment : public fdf_testing::Environment {
     role_name_ = fuchsia_scheduler::RoleName(std::move(role_name));
   }
 
+  void SetGenericSpiMetadata(fuchsia_driver_metadata::Dictionary metadata) {
+    generic_metadata_ = std::move(metadata);
+  }
+
+  void SetSpiMetadata(fuchsia_hardware_spi_businfo::SpiBusMetadata metadata) {
+    spi_metadata_ = std::move(metadata);
+  }
+
   zx::result<> SetSpiChannelCount(uint32_t count) {
     std::vector<fuchsia_hardware_spi_businfo::SpiChannel> channels;
     channels.reserve(count);
@@ -349,8 +397,10 @@ class TestEnvironment : public fdf_testing::Environment {
  private:
   FakeSpiImplServer fake_spi_impl_;
   fdf_metadata::MetadataServer<fuchsia_hardware_spi_businfo::SpiBusMetadata> spi_metadata_server_;
+  GenericMetadataServer generic_metadata_server_;
   fdf_metadata::MetadataServer<fuchsia_scheduler::RoleName> scheduler_role_name_metadata_server_;
   std::optional<fuchsia_hardware_spi_businfo::SpiBusMetadata> spi_metadata_;
+  std::optional<fuchsia_driver_metadata::Dictionary> generic_metadata_;
   std::optional<fuchsia_scheduler::RoleName> role_name_;
 };
 
@@ -964,6 +1014,157 @@ TEST_F(SpiDeviceTest, TestService) {
 
   uint8_t txbuf[] = {0, 1, 2, 3, 4, 5, 6};
   EXPECT_OK(spilib_transmit(device_client, txbuf, sizeof(txbuf)));
+}
+
+TEST_F(SpiDeviceTest, DictionaryMetadataTest) {
+  constexpr uint32_t kBusId = 3;
+  constexpr uint32_t kCs0 = 0;
+  constexpr uint32_t kCs1 = 1;
+  constexpr uint32_t kGlobalId0 = 42;
+  constexpr uint32_t kGlobalId1 = 99;
+  constexpr uint32_t kVid = 1;
+  constexpr uint32_t kPid = 2;
+  constexpr uint32_t kDid = 3;
+
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+  entries.emplace_back("provider", fuchsia_driver_metadata::DictionaryValue::WithInt64(kBusId));
+  entries.emplace_back("channels._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(2));
+  entries.emplace_back("channels.0.cs", fuchsia_driver_metadata::DictionaryValue::WithInt64(kCs0));
+  entries.emplace_back("channels.0.id",
+                       fuchsia_driver_metadata::DictionaryValue::WithInt64(kGlobalId0));
+  entries.emplace_back("channels.0.max_frequency_hz",
+                       fuchsia_driver_metadata::DictionaryValue::WithInt64(20'000'000));
+  entries.emplace_back("channels.1.cs", fuchsia_driver_metadata::DictionaryValue::WithInt64(kCs1));
+  entries.emplace_back("channels.1.id",
+                       fuchsia_driver_metadata::DictionaryValue::WithInt64(kGlobalId1));
+  entries.emplace_back("channels.1.vid", fuchsia_driver_metadata::DictionaryValue::WithInt64(kVid));
+  entries.emplace_back("channels.1.pid", fuchsia_driver_metadata::DictionaryValue::WithInt64(kPid));
+  entries.emplace_back("channels.1.did", fuchsia_driver_metadata::DictionaryValue::WithInt64(kDid));
+
+  fuchsia_driver_metadata::Dictionary dict{{.entries = std::move(entries)}};
+
+  driver_test().RunInEnvironmentTypeContext(
+      [dict = std::move(dict)](TestEnvironment& environment) mutable {
+        environment.SetGenericSpiMetadata(std::move(dict));
+      });
+
+  zx::event node_token;
+  ASSERT_OK(zx::event::create(0, &node_token));
+
+  ASSERT_TRUE(driver_test()
+                  .StartDriverWithCustomStartArgs(
+                      [node_token = std::move(node_token)](fdf::DriverStartArgs& args) mutable {
+                        spi_config::Config config{{
+                            .enable_suspend = true,
+                            .expose_debug_capabilities = false,
+                        }};
+                        args.config(config.ToVmo());
+                        args.node_token(std::move(node_token));
+                      })
+                  .is_ok());
+
+  driver_test().RunInNodeContext([&](fdf_testing::TestNode& node) {
+    ASSERT_EQ(1u, node.children().count("spi"));
+    fdf_testing::TestNode& spi_bus = node.children().at("spi");
+    ASSERT_EQ(2u, spi_bus.children().size());
+    ASSERT_TRUE(spi_bus.children().count("spi-3-0"));
+    ASSERT_TRUE(spi_bus.children().count("spi-3-1"));
+
+    {
+      auto properties = spi_bus.children().at("spi-3-0").GetProperties();
+      auto id_prop = std::ranges::find_if(
+          properties, [](const auto& prop) { return prop.key() == bind_fuchsia::ID; });
+      ASSERT_NE(id_prop, properties.end());
+      ASSERT_EQ(id_prop->value().Which(),
+                fuchsia_driver_framework::NodePropertyValue::Tag::kIntValue);
+      EXPECT_EQ(id_prop->value().int_value().value(), kGlobalId0);
+    }
+
+    {
+      auto properties = spi_bus.children().at("spi-3-1").GetProperties();
+      auto find_int_prop = [&](const std::string& key) -> std::optional<uint32_t> {
+        auto it =
+            std::ranges::find_if(properties, [&](const auto& prop) { return prop.key() == key; });
+        if (it == properties.end() ||
+            it->value().Which() != fuchsia_driver_framework::NodePropertyValue::Tag::kIntValue) {
+          return std::nullopt;
+        }
+        return it->value().int_value().value();
+      };
+      EXPECT_EQ(find_int_prop(bind_fuchsia::ID), kGlobalId1);
+      EXPECT_EQ(find_int_prop(bind_fuchsia::PLATFORM_DEV_VID), kVid);
+      EXPECT_EQ(find_int_prop(bind_fuchsia::PLATFORM_DEV_PID), kPid);
+      EXPECT_EQ(find_int_prop(bind_fuchsia::PLATFORM_DEV_DID), kDid);
+    }
+  });
+
+  zx::result client = driver_test().Connect<fuchsia_hardware_spi::Service::Device>("spi-3-0");
+  ASSERT_TRUE(client.is_ok());
+  uint8_t txbuf[] = {1, 2, 3, 4};
+  set_current_test_cs(kCs0);
+  set_test_mode(FakeSpiImplServer::SpiTestMode::kTransmit);
+  EXPECT_OK(spilib_transmit(*client, txbuf, sizeof(txbuf)));
+}
+
+TEST_F(SpiDeviceTest, DictionaryMetadataMissingBusIdTest) {
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+  entries.emplace_back("channels._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(1));
+  entries.emplace_back("channels.0.cs", fuchsia_driver_metadata::DictionaryValue::WithInt64(0));
+
+  fuchsia_driver_metadata::Dictionary dict{{.entries = std::move(entries)}};
+
+  driver_test().RunInEnvironmentTypeContext(
+      [dict = std::move(dict)](TestEnvironment& environment) mutable {
+        environment.SetGenericSpiMetadata(std::move(dict));
+      });
+
+  zx::event node_token;
+  ASSERT_OK(zx::event::create(0, &node_token));
+
+  zx::result<> start_result = driver_test().StartDriverWithCustomStartArgs(
+      [node_token = std::move(node_token)](fdf::DriverStartArgs& args) mutable {
+        spi_config::Config config{{
+            .enable_suspend = true,
+            .expose_debug_capabilities = false,
+        }};
+        args.config(config.ToVmo());
+        args.node_token(std::move(node_token));
+      });
+  EXPECT_EQ(start_result.status_value(), ZX_ERR_INVALID_ARGS);
+}
+
+TEST_F(SpiDeviceTest, LegacyEmptyChannelsFallbackTest) {
+  constexpr uint32_t kBusId = 5;
+  fuchsia_hardware_spi_businfo::SpiBusMetadata metadata{{
+      .channels = std::vector<fuchsia_hardware_spi_businfo::SpiChannel>{},
+      .bus_id = kBusId,
+  }};
+
+  driver_test().RunInEnvironmentTypeContext(
+      [metadata = std::move(metadata)](TestEnvironment& environment) mutable {
+        environment.SetSpiMetadata(std::move(metadata));
+      });
+
+  zx::event node_token;
+  ASSERT_OK(zx::event::create(0, &node_token));
+
+  ASSERT_TRUE(driver_test()
+                  .StartDriverWithCustomStartArgs(
+                      [node_token = std::move(node_token)](fdf::DriverStartArgs& args) mutable {
+                        spi_config::Config config{{
+                            .enable_suspend = true,
+                            .expose_debug_capabilities = false,
+                        }};
+                        args.config(config.ToVmo());
+                        args.node_token(std::move(node_token));
+                      })
+                  .is_ok());
+
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    ASSERT_EQ(1u, node.children().count("spi"));
+    fdf_testing::TestNode& spi_bus = node.children().at("spi");
+    EXPECT_TRUE(spi_bus.children().empty());
+  });
 }
 
 }  // namespace spi

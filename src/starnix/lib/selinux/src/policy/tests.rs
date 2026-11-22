@@ -1226,6 +1226,10 @@ fn policy_genfscon_root_path() {
     let policy_bytes = include_bytes!("../../testdata/composite_policies/compiled/genfscon_policy");
     let policy = parse_and_validate(policy_bytes);
 
+    assert!(policy.has_genfscon_for_fs("fs_with_path_rules".into()));
+    assert!(policy.has_genfscon_for_fs("fs_2_with_path_rules".into()));
+    assert!(!policy.has_genfscon_for_fs("unknown_fs".into()));
+
     {
         let context = policy.genfscon_label_for_fs_and_path(
             "fs_with_path_rules".into(),
@@ -1300,4 +1304,55 @@ fn policy_genfscon_mixed_order() {
         );
         assert_eq!(policy.serialize_security_context(&context.unwrap()), expected_label.as_bytes());
     }
+}
+
+fn set_type_bounds_for_test(policy: &mut Policy, child: &[u8], parent: Option<&[u8]>) -> TypeId {
+    let parent_id = parent.map(|name| policy.types.get_by_name(name).unwrap().id());
+    let child_id = policy.types.get_by_name(child).unwrap().id();
+    policy.types.set_bounds_for_test(child_id, parent_id);
+    child_id
+}
+
+fn is_allowed_by_access_decision(
+    policy: &Policy,
+    source_type: TypeId,
+    target_type: TypeId,
+    target_class: &str,
+    permission: &str,
+) -> bool {
+    let base = policy.initial_context(InitialSid::Kernel);
+    let source =
+        SecurityContext::new(base.user(), base.role(), source_type, base.mls_range().clone());
+    let target =
+        SecurityContext::new(base.user(), base.role(), target_type, base.mls_range().clone());
+    let class = policy.classes().get_by_name(target_class.as_bytes()).expect("class not found");
+    let permission_id =
+        policy.find_permission_id_by_name(class, permission).expect("permission not found");
+    let permission_bit = AccessVector::from(permission_id);
+    let access_decision = policy.compute_access_decision(&source, &target, class);
+    permission_bit == access_decision.allow & permission_bit
+}
+
+#[test]
+fn typebounds_query_time_enforcement_for_unvalidated_binary_policies() {
+    // Case 1: Child has `allow` permissions that exceed its `typebounds` parent.
+    let security_server_policy_bytes =
+        include_bytes!("../../testdata/micro_policies/security_server_tests_policy");
+    let mut policy = parse_and_validate(security_server_policy_bytes);
+    let type0_id = set_type_bounds_for_test(&mut policy, b"type0", Some(b"unconfined_t"));
+    assert!(!is_allowed_by_access_decision(&policy, type0_id, type0_id, "process", "fork"));
+    assert!(!is_allowed_by_access_decision(&policy, type0_id, type0_id, "class0", "perm0"));
+
+    // Case 2: Paired `(parent_s, child_t)` is allowed without `(parent_s, parent_t)`, which
+    // `checkpolicy` refuses to compile. `(child_s, child_t)` must still be denied because it is
+    // bounded by `(parent_s, parent_t)`, while standalone `(parent_s, child_t)` remains allowed.
+    let composite_policy_bytes = include_bytes!(
+        "../../testdata/composite_policies/compiled/with_unlabeled_access_domain_policy"
+    );
+    let mut policy = parse_and_validate(composite_policy_bytes);
+    let child_s = set_type_bounds_for_test(&mut policy, b"allowed_t", Some(b"unconfined_t"));
+    let parent_s = policy.types().get_by_name(b"unconfined_t").unwrap().id();
+    let child_t = set_type_bounds_for_test(&mut policy, b"unlabeled_t", Some(b"devnull_t"));
+    assert!(is_allowed_by_access_decision(&policy, parent_s, child_t, "process", "getsched"));
+    assert!(!is_allowed_by_access_decision(&policy, child_s, child_t, "process", "getsched"));
 }

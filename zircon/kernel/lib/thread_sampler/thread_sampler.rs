@@ -6,8 +6,6 @@
 
 //! Periodic thread stack sampler and FXT profiler record emitter.
 
-mod thread_sampler_ffi;
-
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
@@ -19,6 +17,7 @@ use fbl::{Array, Vector};
 use fxt_layout::ProfilerRecordType;
 use kprint::kprint;
 use ksync::LockToken;
+use lazy_init::{LazyInit, NoCheck};
 use zerocopy::IntoBytes;
 use zx_status::Status;
 use zx_types::{zx_koid_t, zx_sampler_config_t};
@@ -27,7 +26,7 @@ use crate::arch_rs::{GeneralRegsSource, InterruptDisableGuard, curr_cpu_num, int
 use crate::kernel::deadline::{Deadline, TimerSlack};
 use crate::kernel::mp::{MpIpiTarget, sync_exec};
 use crate::kernel::percpu::PerCpu;
-use crate::kernel::thread::{cpp_thread_signal_sample_stack, sleep_relative};
+use crate::kernel::thread::{signal_sample_stack, sleep_relative};
 use crate::kernel::types::cpu_num_t;
 use crate::ktrace_rs::{RecordHeader, RecordType};
 use crate::percpu_writer::Buffer;
@@ -36,7 +35,42 @@ use crate::platform_rs::timer::{
 };
 use crate::user_copy::{UserInPtr, UserOutPtr};
 
-crate::ksync_kernel::declare_singleton_mutex!(ThreadSamplerLock);
+#[ksync::guarded]
+pub(crate) struct ThreadSamplerMutex {
+    #[mutex]
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
+}
+
+pub(crate) type ThreadSamplerLock = ThreadSamplerMutexLockClass;
+
+static THREAD_SAMPLER_LOCK: LazyInit<ThreadSamplerMutex, NoCheck> = LazyInit::uninit();
+
+impl ThreadSamplerLock {
+    #[inline]
+    pub(crate) fn get() -> &'static ksync::KMutex<Self, crate::ksync_kernel::TrackedMutex> {
+        // SAFETY: `THREAD_SAMPLER_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before
+        // `ThreadSamplerLock` can be acquired.
+        &unsafe { THREAD_SAMPLER_LOCK.get_unchecked() }.lock
+    }
+
+    #[inline]
+    pub(crate) fn lock() -> impl pin_init::PinInit<
+        ksync::KMutexGuard<'static, Self, crate::ksync_kernel::TrackedMutex>,
+        core::convert::Infallible,
+    > {
+        Self::get().lock()
+    }
+}
+
+fn thread_sampler_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before `ThreadSamplerLock`
+    // can be acquired.
+    unsafe {
+        let Ok(()) = Pin::static_ref(&THREAD_SAMPLER_LOCK)
+            .init_pin(pin_init::pin_init!(ThreadSamplerMutex { lock <- ksync::KMutex::init() }));
+    }
+}
+init::lk_init_hook!(thread_sampler_lock, thread_sampler_lock_init, init::LK_INIT_LEVEL_EARLIEST);
 
 /// The current state of the thread sampler.
 ///
@@ -256,7 +290,7 @@ unsafe impl Sync for ThreadSampler {}
 /// The single global [`ThreadSampler`] instance.
 pub static THREAD_SAMPLER: ThreadSampler = ThreadSampler::new();
 
-/// Joins the sampling session on the current CPU if one exists (`sampler::sampler_percpu_init`).
+/// Joins the sampling session on the current CPU if one exists.
 ///
 /// # Safety
 ///
@@ -266,8 +300,7 @@ pub unsafe fn sampler_percpu_init() {
     unsafe { THREAD_SAMPLER.schedule_marking() };
 }
 
-/// Exits the sampling session on the current CPU if one exists
-/// (`sampler::sampler_percpu_shutdown`).
+/// Exits the sampling session on the current CPU if one exists.
 ///
 /// # Safety
 ///
@@ -478,7 +511,7 @@ impl ThreadSampler {
                     return Err(Status::INVALID_ARGS);
                 };
                 for i in 0..num_cpus {
-                    let buf = Buffer::new(buffer_size, b"sampler", 0, i as u64)?;
+                    let buf = Buffer::new(buffer_size, 0, i as u64)?;
                     buffers.push_back(buf).map_err(|_| Status::NO_MEMORY)?;
                 }
                 buffers.try_into_array().map_err(|_| Status::NO_MEMORY)
@@ -946,12 +979,12 @@ impl ThreadSampler {
         //   storage.
         // - Interrupts are disabled on the current CPU, preventing CPU migration and serializing
         //   all `set_deadline` and `cancel` calls on this CPU's `sampling_timer`.
-        // - `cpp_thread_signal_sample_stack` is a valid FFI timer callback, and `session_id` is
-        //   passed by value encoded via `without_provenance_mut`.
+        // - `signal_sample_stack` is a valid FFI timer callback, and `session_id` is passed by
+        //   value encoded via `without_provenance_mut`.
         unsafe {
             Pin::static_ref(&PerCpu::get_current().sampling_timer).set_deadline(
                 &deadline,
-                cpp_thread_signal_sample_stack,
+                signal_sample_stack,
                 without_provenance_mut(session_id as usize),
             );
         }
@@ -985,12 +1018,12 @@ impl ThreadSampler {
         //   storage.
         // - Interrupts are disabled inside the timer callback on the current CPU, preventing CPU
         //   migration and serializing `set_deadline` and `cancel` on this CPU's `sampling_timer`.
-        // - `cpp_thread_signal_sample_stack` is a valid FFI timer callback, and `session_id` is
-        //   passed by value encoded via `without_provenance_mut`.
+        // - `signal_sample_stack` is a valid FFI timer callback, and `session_id` is passed by
+        //   value encoded via `without_provenance_mut`.
         unsafe {
             Pin::static_ref(&PerCpu::get_current().sampling_timer).set_deadline(
                 &deadline,
-                cpp_thread_signal_sample_stack,
+                signal_sample_stack,
                 without_provenance_mut(session_id as usize),
             );
         }

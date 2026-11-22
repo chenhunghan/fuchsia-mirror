@@ -65,6 +65,9 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
             functional on the DUT. Defaults to True.
         verify_no_irq_storm (bool, optional): Whether to verify no DWC3
             unhandled IRQ or driver dispatcher storm occurred. Defaults to True.
+        max_dispatcher_request_rate_hz (float, optional): Maximum allowed
+            driver dispatcher request rate in Hz for the IRQ storm check.
+            Defaults to 20000.0.
 
         GN targets only need to specify parameters that override these
         defaults (e.g. calibration for smoke vs. multi-hour soak profiles).
@@ -109,9 +112,7 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
         )
         if self._usb_power_hub is not None:
             _LOGGER.info("Teardown Safety Invariant: Ensuring USB power is ON.")
-            await asyncio.to_thread(
-                self._usb_power_hub.power_on, port=self._usb_port
-            )
+            await asyncio.to_thread(self._usb_power_hub.power_on)
 
         try:
             await asyncio.wait_for(
@@ -285,10 +286,9 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
         reconnect.
         """
         pre_boot_id = await self.dut.boot_id()
-        self.dut.fuchsia_controller.before_usb_disconnect()
-        self.dut.ffx.notify_intentional_disconnect()
+        self.dut.usb.before_disconnect()
         power_hub = self.require_usb_power_hub()
-        await asyncio.to_thread(power_hub.power_off, port=self._usb_port)
+        await asyncio.to_thread(power_hub.power_off)
         _LOGGER.info("Waiting for DUT to go offline...")
         try:
             await asyncio.to_thread(self.dut.wait_for_offline)
@@ -298,7 +298,7 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
                 )
                 await asyncio.sleep(disconnect_duration)
         finally:
-            await asyncio.to_thread(power_hub.power_on, port=self._usb_port)
+            await asyncio.to_thread(power_hub.power_on)
             _LOGGER.info("Waiting for DUT to reconnect...")
             try:
                 await asyncio.wait_for(
@@ -311,7 +311,7 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
                     f"USB within {reconnect_timeout}s after USB power-on."
                 ) from e
 
-        self.dut.fuchsia_controller.after_usb_reconnect()
+        self.dut.usb.after_connect()
         # Re-initialize the Netstack affordance FIDL proxy so it connects to
         # the new Fuchsia Controller context created after reconnect.
         if hasattr(self.dut, "netstack") and hasattr(
@@ -358,6 +358,12 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
         )
         verify_no_irq_storm = bool(
             self.user_params.get("verify_no_irq_storm", True)
+        )
+        # Active CDC/ADB/FFX soak traffic reaches ~5.3k-7.7k req/s (vs ~5k
+        # idle disconnect baseline), while real spin-loops hit 50k-300k+ req/s
+        # (see b/585317021).
+        max_dispatcher_request_rate_hz = float(
+            self.user_params.get("max_dispatcher_request_rate_hz", 20000.0)
         )
 
         _FATAL_ERRORS = (errors.FuchsiaDeviceError,)
@@ -421,7 +427,10 @@ class UsbSoakTest(usb_lib.UsbPowerHubBaseTest):
                     post_irq = await take_irq_storm_snapshot(self.dut)
                     post_dwc3 = collect_dwc3_irq_metrics(self.dut)
                     assert_no_irq_storm(
-                        pre_irq, post_irq, phase=f"epoch {epoch}"
+                        pre_irq,
+                        post_irq,
+                        phase=f"epoch {epoch}",
+                        max_dispatcher_request_rate_hz=max_dispatcher_request_rate_hz,
                     )
                     assert_no_dwc3_unhandled_irq_storm(
                         pre_dwc3,

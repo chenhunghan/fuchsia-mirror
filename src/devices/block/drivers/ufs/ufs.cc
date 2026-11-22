@@ -246,9 +246,10 @@ void Ufs::ProcessIoSubmissions() {
                opcode, io_bytes](zx_status_t status) mutable {
       vmo.reset();
       if (status == ZX_ERR_CANCELED) {
-        // The slot gate closed between ReserveSlot() and the doorbell (see
-        // TransferRequestProcessor::SendRequestUsingSlot()): nothing reached the hardware, so the
-        // request is simply retried once the gate re-opens.
+        // Either the slot gate closed between ReserveSlot() and the doorbell (see
+        // TransferRequestProcessor::SendRequestUsingSlot()), or a forced controller power-down /
+        // reinitialization aborted an uncompleted slot once HCE was cleared: re-queue the request
+        // so it is replayed once the slot gate re-opens (unless the driver is shutting down).
         std::scoped_lock lock(lock_);
         if (shutdown_) {
           req.Complete(ZX_ERR_IO_NOT_PRESENT);
@@ -606,34 +607,48 @@ void Ufs::SetHardwarePoweredOff(bool powered_off) {
   }
 }
 
-zx_status_t Ufs::StopHostControllerForPowerDown() {
-  // RequestProcessor::BlockSlotAllocation() must have run: the I/O completion path only stays away
-  // from the registers because no I/O slot is allocated once the controller is powered off.
-  ZX_DEBUG_ASSERT(transfer_request_processor_->GetInflightIoCount() == 0);
+zx_status_t Ufs::StopHostControllerForPowerDown(zx_status_t abort_status) {
+  // Normal SuspendPower() drains in-flight I/O via RequestProcessor::BlockSlotAllocation() first;
+  // forced error-recovery or driver-teardown paths may still reach here with live slots, which are
+  // aborted with |abort_status| below once HCE = 0 has stopped DMA.
+  if (uint32_t inflight = transfer_request_processor_->GetInflightIoCount(); inflight > 0) {
+    fdf::warn("Stopping host controller for PowerDown with {} in-flight I/O slot(s)", inflight);
+  }
 
   // Serialise against UIC commands / key-slot writes that are already past their
   // IsHardwarePoweredOff() check (see uic_lock()).
   std::lock_guard<std::mutex> lock(uic_lock_);
 
-  zx_status_t status = ZX_OK;
+  // Mask interrupts under ah8_lock_ before setting hardware_powered_off_ so Auto-Hibern8 cannot
+  // re-enable UHES/UHXS in IE and no level-triggered interrupt can spin while Isr() early-returns
+  // on IsHardwarePoweredOff().
   {
-    // Also hold ah8_lock_ so that an Auto-Hibern8 enable/disable that passed its own
-    // IsHardwarePoweredOff() check cannot write IE/AHIT between the IE = 0 below and the flag.
     std::scoped_lock ah8_lock(ah8_lock_);
-    // Disable interrupt generation before powering down the PHY so link-loss events during
-    // power-down do not raise spurious error interrupts.
+    ah8_enabled_ = false;
     InterruptEnableReg::Get().FromValue(0).WriteTo(&GetMmio());
-    status = DisableHostController();
-    if (status != ZX_OK) {
-      fdf::error("Failed to disable host controller before PowerDown: {}",
-                 zx_status_get_string(status));
-    }
+  }
+
+  // Mark hardware powered off under slot_lock_ (outside ah8_lock_, preserving slot_lock_ ->
+  // ah8_lock_ order) before DisableHostController() writes HCE = 0 (which clears UTRLDBR in
+  // hardware), so a concurrent IoLoop wakeup in ProcessCompletionOfIoRequests() cannot observe
+  // UTRLDBR == 0 while IsHardwarePoweredOff() is still false and misinterpret an uncompleted slot
+  // as a hardware completion.
+  {
+    std::lock_guard<std::mutex> slot_lock(transfer_request_processor_->GetSlotLock());
     hardware_powered_off_.store(true, std::memory_order_release);
+  }
+
+  const zx_status_t status = DisableHostController();
+  if (status != ZX_OK) {
+    fdf::error("Failed to disable host controller before PowerDown: {}",
+               zx_status_get_string(status));
   }
   // From here on the ISR / I/O paths must not touch UFSHCI registers: the PHY driver is about to
   // gate the UFSHCI power domains and clocks. (Drains the IRQ and admin workers; done outside
   // ah8_lock_.)
   SetHardwarePoweredOff(true);
+  transfer_request_processor_->AbortInflightIoRequests(/*controller_stopped=*/status == ZX_OK,
+                                                       abort_status);
   return status;
 }
 
@@ -870,6 +885,19 @@ zx_status_t Ufs::Init() {
     properties_.write_kib = inspect_node_.CreateUint("block.write.kib", 0);
     properties_.flush_kib = inspect_node_.CreateUint("block.flush.kib", 0);
     properties_.trim_kib = inspect_node_.CreateUint("block.trim.kib", 0);
+    // Create inspect_node_ status and error counters before InitController() arms irq_handler_ so
+    // Isr() never races with property creation or drops early error counts.
+    properties_.power_suspended = inspect_node_.CreateBool("power_suspended", false);
+    properties_.runtime_sleeping = inspect_node_.CreateBool("runtime_sleeping", false);
+    properties_.link_idle = inspect_node_.CreateBool("link_idle", false);
+    properties_.suspend_failures = inspect_node_.CreateUint("suspend_failures", 0);
+    properties_.resume_failures = inspect_node_.CreateUint("resume_failures", 0);
+    properties_.runtime_sleep_count = inspect_node_.CreateUint("runtime_sleep_count", 0);
+    properties_.link_idle_count = inspect_node_.CreateUint("link_idle_count", 0);
+    properties_.link_vote_error_count = inspect_node_.CreateUint("link_vote_error_count", 0);
+    properties_.auto_hibern8_error_count = inspect_node_.CreateUint("auto_hibern8_error_count", 0);
+    properties_.uic_error_count = inspect_node_.CreateUint("uic_error_count", 0);
+    properties_.fatal_error_count = inspect_node_.CreateUint("fatal_error_count", 0);
     PopulateVersionInspect(&inspect_node_);
     PopulateCapabilitiesInspect(&inspect_node_);
   }
@@ -890,11 +918,6 @@ zx_status_t Ufs::Init() {
 
   if (zx::result<> result = InitDeviceInterface(controller_node); result.is_error()) {
     fdf::error("Failed to initialize device interface: {}", result);
-    return result.error_value();
-  }
-
-  if (zx::result<> result = device_manager_->GetControllerDescriptor(); result.is_error()) {
-    fdf::error("Failed to get controller descriptor: {}", result);
     return result.error_value();
   }
 
@@ -1002,6 +1025,9 @@ zx::result<> Ufs::InitController() {
 
   const auto caps = CapabilityReg::Get().ReadFrom(&mmio);
   auto_hibernation_supported_ = caps.auto_hibernation_support();
+  const uint16_t host_manufacturer_id =
+      static_cast<uint16_t>(HostControllerProdManufIdReg::Get().ReadFrom(&mmio).manufacturer_id());
+  increment_host_pa_tactivate_quirk_ = (host_manufacturer_id == kGoogleManufacturerId);
   if (caps.crypto_support()) {
     auto inline_crypto_client =
         incoming_->Connect<fuchsia_hardware_ufs_phy::Service::InlineCrypto>("phy");
@@ -1015,28 +1041,6 @@ zx::result<> Ufs::InitController() {
       fdf::info("UFS host controller inline encryption enabled");
     }
   }
-
-  // Create and post IRQ worker
-  {
-    auto irq_dispatcher = fdf::SynchronizedDispatcher::Create(
-        fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "ufs-irq-worker",
-        [this](fdf_dispatcher_t*) { OnDispatcherShutdown(); }, kIrqDispatcherRole);
-    if (irq_dispatcher.is_error()) {
-      fdf::error("Failed to create IRQ dispatcher: {}",
-                 zx_status_get_string(irq_dispatcher.status_value()));
-      return zx::error(irq_dispatcher.status_value());
-    }
-    irq_worker_dispatcher_ = *std::move(irq_dispatcher);
-
-    irq_handler_.set_object(irq_.get());
-    zx_status_t status = irq_handler_.Begin(irq_worker_dispatcher_.async_dispatcher());
-    if (status != ZX_OK) {
-      fdf::error("Failed to begin IRQ wait: {}", zx_status_get_string(status));
-      return zx::error(status);
-    }
-  }
-
-  auto cancel_irq = fit::defer([this] { irq_handler_.Cancel(); });
 
   // Notify platform UFS that we are going to init the UFS host controller.
   if (zx::result<> result = Notify(NotifyEvent::kInit, 0); result.is_error()) {
@@ -1070,6 +1074,11 @@ zx::result<> Ufs::InitController() {
     return transfer_request_processor.take_error();
   }
   transfer_request_processor_ = std::move(*transfer_request_processor);
+  if (config_.command_timeout_sec() > 0) {
+    const zx::duration command_timeout = zx::sec(config_.command_timeout_sec());
+    task_management_request_processor_->SetTimeout(command_timeout);
+    transfer_request_processor_->SetTimeout(command_timeout);
+  }
 
   auto device_manager = DeviceManager::Create(*this, *transfer_request_processor_, properties_);
   if (device_manager.is_error()) {
@@ -1117,8 +1126,37 @@ zx::result<> Ufs::InitController() {
     exception_event_dispatcher_ = *std::move(ee_dispatcher);
   }
 
-  cancel_irq.cancel();
+  // Arm the IRQ handler last so a pending interrupt at startup cannot run Isr() before the request
+  // processors, device manager, and worker dispatchers exist.
+  {
+    auto irq_dispatcher = fdf::SynchronizedDispatcher::Create(
+        fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "ufs-irq-worker",
+        [this](fdf_dispatcher_t*) { OnDispatcherShutdown(); }, kIrqDispatcherRole);
+    if (irq_dispatcher.is_error()) {
+      fdf::error("Failed to create IRQ dispatcher: {}",
+                 zx_status_get_string(irq_dispatcher.status_value()));
+      return zx::error(irq_dispatcher.status_value());
+    }
+    irq_worker_dispatcher_ = *std::move(irq_dispatcher);
+
+    irq_handler_.set_object(irq_.get());
+    zx_status_t status = irq_handler_.Begin(irq_worker_dispatcher_.async_dispatcher());
+    if (status != ZX_OK) {
+      fdf::error("Failed to begin IRQ wait: {}", zx_status_get_string(status));
+      return zx::error(status);
+    }
+  }
+
   return zx::ok();
+}
+
+void Ufs::ClearLinkStartupUicErrors() {
+  const fdf::MmioBuffer& mmio = GetMmio();
+  // Read UECPA and UECDL once before clearing IS.UE: both are read-to-clear (UFSHCI 3.0
+  // sections 5.3.5-5.3.6), so stale link-startup errors do not pollute later error dumps.
+  std::ignore = HostUicErrorCodePhyAdapterLayerReg::Get().ReadFrom(&mmio);
+  std::ignore = HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&mmio);
+  InterruptStatusReg::Get().FromValue(0).set_uic_error(true).WriteTo(&mmio);
 }
 
 zx::result<> Ufs::InitDeviceInterface(inspect::Node& controller_node) {
@@ -1139,7 +1177,7 @@ zx::result<> Ufs::InitDeviceInterface(inspect::Node& controller_node) {
   fdf::info("UFS device found");
 
   // Clear any residual UIC error flags from link startup and configure operational interrupts.
-  InterruptStatusReg::Get().FromValue(0).set_uic_error(true).WriteTo(&mmio);
+  ClearLinkStartupUicErrors();
   InterruptEnableReg::Get()
       .FromValue(0)
       .set_crypto_engine_fatal_error_enable(true)
@@ -1154,9 +1192,7 @@ zx::result<> Ufs::InitDeviceInterface(inspect::Node& controller_node) {
       .set_uic_hibernate_enter_status_enable(false)  // The hibernate commands use polling mode.
       .set_uic_hibernate_exit_status_enable(false)   // The hibernate commands use polling mode.
       .set_uic_power_mode_status_enable(false)       // The power mode uses polling mode.
-      .set_uic_test_mode_status_enable(true)
       .set_uic_error_enable(true)
-      .set_uic_dme_endpointreset(true)
       .set_utp_transfer_request_completion_enable(true)
       .WriteTo(&mmio);
 
@@ -1194,6 +1230,13 @@ zx::result<> Ufs::InitDeviceInterface(inspect::Node& controller_node) {
     return result.take_error();
   }
 
+  // Read device and geometry descriptors before UniPro attribute initialization so wManufacturerID
+  // is available for per-device UniPro timing quirks.
+  if (zx::result<> result = device_manager_->GetControllerDescriptor(); result.is_error()) {
+    fdf::error("Failed to get controller descriptor: {}", result);
+    return result.take_error();
+  }
+
   auto unipro_node = controller_node.CreateChild("unipro");
   auto attributes_node = controller_node.CreateChild("attributes");
   if (qemu_quirk_) {
@@ -1217,17 +1260,6 @@ zx::result<> Ufs::InitDeviceInterface(inspect::Node& controller_node) {
       return result.take_error();
     }
   }
-  properties_.power_suspended = inspect_node_.CreateBool("power_suspended", false);
-  properties_.runtime_sleeping = inspect_node_.CreateBool("runtime_sleeping", false);
-  properties_.link_idle = inspect_node_.CreateBool("link_idle", false);
-  properties_.suspend_failures = inspect_node_.CreateUint("suspend_failures", 0);
-  properties_.resume_failures = inspect_node_.CreateUint("resume_failures", 0);
-  properties_.runtime_sleep_count = inspect_node_.CreateUint("runtime_sleep_count", 0);
-  properties_.link_idle_count = inspect_node_.CreateUint("link_idle_count", 0);
-  properties_.link_vote_error_count = inspect_node_.CreateUint("link_vote_error_count", 0);
-  properties_.auto_hibern8_error_count = inspect_node_.CreateUint("auto_hibern8_error_count", 0);
-  properties_.uic_error_count = inspect_node_.CreateUint("uic_error_count", 0);
-  properties_.fatal_error_count = inspect_node_.CreateUint("fatal_error_count", 0);
 
   zx::result<uint32_t> result = device_manager_->GetBootLunEnabled();
   if (result.is_error()) {
@@ -1347,6 +1379,8 @@ zx::result<> Ufs::ReinitAfterPowerDown() {
       return zx::error(status);
     }
   }
+  transfer_request_processor_->AbortInflightIoRequests(/*controller_stopped=*/true,
+                                                       ZX_ERR_CANCELED);
   if (zx_status_t status = EnableHostController(); status != ZX_OK) {
     fdf::error("Failed to re-enable host controller: {}", zx_status_get_string(status));
     return zx::error(status);
@@ -1369,7 +1403,7 @@ zx::result<> Ufs::ReinitAfterPowerDown() {
     return zx::error(ZX_ERR_NOT_FOUND);
   }
 
-  InterruptStatusReg::Get().FromValue(0).set_uic_error(true).WriteTo(&mmio);
+  ClearLinkStartupUicErrors();
   InterruptEnableReg::Get()
       .FromValue(0)
       .set_crypto_engine_fatal_error_enable(true)
@@ -1377,16 +1411,9 @@ zx::result<> Ufs::ReinitAfterPowerDown() {
       .set_host_controller_fatal_error_enable(true)
       .set_utp_error_enable(true)
       .set_device_fatal_error_enable(true)
-      .set_uic_command_completion_enable(false)
       .set_utp_task_management_request_completion_enable(true)
-      .set_uic_link_startup_status_enable(false)
       .set_uic_link_lost_status_enable(true)
-      .set_uic_hibernate_enter_status_enable(false)
-      .set_uic_hibernate_exit_status_enable(false)
-      .set_uic_power_mode_status_enable(false)
-      .set_uic_test_mode_status_enable(true)
       .set_uic_error_enable(true)
-      .set_uic_dme_endpointreset(true)
       .set_utp_transfer_request_completion_enable(true)
       .WriteTo(&mmio);
 
@@ -1463,8 +1490,9 @@ zx_status_t Ufs::ClearLunUnitAttention(uint16_t scsi_lun) {
   if (scsi_status == std::to_underlying(scsi::StatusCode::CHECK_CONDITION)) {
     auto* sense_data =
         reinterpret_cast<scsi::FixedFormatSenseDataHeader*>(response.value()->GetSenseData());
-    // Per JEDEC UFS 3.1 Section 11.2.1 / 10.7.2, UFS devices return autosense in the Response
-    // UPIU and clear the pending UNIT ATTENTION condition upon delivering the response.
+    // Per UFS 4.0 section 10.7.2.1 and section 10.8.9, Table 10.67, UFS devices return autosense
+    // in the Response UPIU and clear the pending UNIT ATTENTION condition upon delivering the
+    // response.
     if (sense_data->sense_key() == scsi::SenseKey::UNIT_ATTENTION) {
       return ZX_OK;
     }
@@ -1518,8 +1546,9 @@ zx::result<> Ufs::ClearUnitAttentions() {
     zx_status_t status = ZX_ERR_INTERNAL;
     for (int retry = 0; retry < kMaxRetries; ++retry) {
       // UFS devices return autosense in the response UPIU, so a single TEST UNIT READY that
-      // receives CHECK CONDITION / UNIT ATTENTION has already cleared the condition (JEDEC UFS 3.1
-      // Section 11.2.1). Only retry if the LU reports NOT READY (ZX_ERR_UNAVAILABLE).
+      // receives CHECK CONDITION / UNIT ATTENTION has already cleared the condition (UFS 4.0
+      // section 10.7.2.1 and section 10.8.9, Table 10.67). Only retry if the LU reports NOT READY
+      // (ZX_ERR_UNAVAILABLE).
       status = ClearLunUnitAttention(lun);
       if (status != ZX_ERR_UNAVAILABLE) {
         break;
@@ -2294,7 +2323,7 @@ zx::result<> Ufs::ConfigureCryptoSlot(uint8_t slot, uint32_t data_unit_size) {
 }
 
 void Ufs::WriteCryptoConfigLocked(uint8_t slot, uint32_t data_unit_size) {
-  // Configure UFSHCI CRYPTO_CFG per Section 5.6.3:
+  // Configure UFSHCI x-CRYPTOCFG per UFSHCI 4.0 sections 5.8.3 and 7.1.3:
   // 1. Clear CFGE = 0 first.
   // 2. Program remaining configuration words (DWORD 17 = 0).
   // 3. Write CFGE = 1 | DUSIZE to DWORD 16 last.
@@ -2341,11 +2370,13 @@ zx::result<> Ufs::RestoreCryptoState() {
     return zx::ok();
   }
 
-  // TODO(https://fxbug.dev/568465123): CRYPTOCFG has been rewritten above, but HCE = 0 also clears
-  // the key material in the host controller's key table, and that must be re-pushed by the
-  // platform inline encryption provider (the driver never holds the keys) before encrypted I/O
-  // can resume. Until a provider-side key restore is plumbed through the PHY protocol (part of
-  // https://fxbug.dev/527952709), fail the resume rather than let encrypted I/O silently proceed
+  // TODO(https://fxbug.dev/588007498): CRYPTOCFG has been rewritten above, and HCE = 0 resets
+  // x-CRYPTOCFG.CFGE to 0 while CRYPTOKEY reset state is implementation-specific (UFSHCI 4.0
+  // sections 5.3.5 and 5.8.3); PowerDown rail collapse or platform key-hardware policy loses the
+  // key material in the controller's key table, which must be re-pushed by the platform inline
+  // encryption provider (the driver never holds the keys) before encrypted I/O can resume. Until
+  // a provider-side key restore is plumbed through the PHY protocol (part of
+  // https://fxbug.dev/588007497), fail the resume rather than let encrypted I/O silently proceed
   // with an empty key table. DeviceManager::SuspendPower() falls back to Sleep when keys are
   // programmed, so normal suspend/resume avoids reaching this.
   fdf::error("Cannot restore {} inline encryption key(s) after a host controller reset",
@@ -2494,6 +2525,25 @@ void Ufs::Stop(fdf::StopCompleter completer) {
   }
   for (auto& cmd : pending) {
     cmd.request.Complete(ZX_ERR_IO_NOT_PRESENT);
+  }
+
+  // Close the slot gate and abort any transfer slots still allocated on teardown (for example,
+  // stalled I/O requests, which are never aborted on elapsed time, or a timed-out admin slot 31).
+  // Closing the gate first ensures that a ProcessIoSubmissions() pass that popped a command before
+  // shutdown_ was set either sees the closed gate in ReserveSlot()/SendRequestUsingSlot() and
+  // completes with ZX_ERR_IO_NOT_PRESENT, or already holds a slot that is aborted below after
+  // HCE = 0 stops DMA, so BlockDevice::ShutdownAsync() never hangs on a stranded bio.
+  if (transfer_request_processor_ != nullptr) {
+    transfer_request_processor_->CloseSlotAllocationGate();
+    std::lock_guard<std::mutex> admin_lock(transfer_request_processor_->admin_slot_lock());
+    if (transfer_request_processor_->GetIoSlotState().has_allocated_slots) {
+      if (!IsHardwarePoweredOff() && mmio_.has_value()) {
+        StopHostControllerForPowerDown(ZX_ERR_IO_NOT_PRESENT);
+      } else {
+        transfer_request_processor_->AbortInflightIoRequests(IsHardwarePoweredOff(),
+                                                             ZX_ERR_IO_NOT_PRESENT);
+      }
+    }
   }
 
   if (devs.empty()) {

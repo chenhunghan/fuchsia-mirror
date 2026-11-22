@@ -23,17 +23,24 @@ class MetricsProcessor(metaclass=abc.ABCMeta):
     MetricsProcessor subclasses can be used as follows:
 
     ```
-    processor = MetricsProcessorSet([
-      CpuMetricsProcessor(aggregates_only=True),
-      FpsMetricsProcessor(aggregates_only=False),
-      MyCustomProcessor(...),
-      power_sampler.metrics_processor(),
-    ])
+    model_processors = [
+        CpuMetricsProcessor(aggregates_only=True),
+        MemoryMetricsProcessor(),
+        MyCustomProcessor(...),
+        power_sampler.metrics_processor(),
+    ]
+    fxt_processors = [
+        FpsMetricsProcessor(aggregates_only=False),
+    ]
 
     ... gather traces, start and stop the power sampler, create the model ...
 
+    results = [
+        *(r for p in model_processors for r in p.process_metrics(model)),
+        *(r for p in fxt_processors for r in p.process_metrics_with_fxt(fxt_path)),
+    ]
     metrics.TestCaseResult.write_fuchsiaperf_json(
-        processor.process_metrics(model), test_suite_name, output_path
+        results, test_suite_name, output_path
     )
     ```
     NB: `output_path` must end in `fuchsiaperf.json`
@@ -112,7 +119,8 @@ class MetricsProcessor(metaclass=abc.ABCMeta):
             model: The input trace model.
 
         Returns:
-            The generated metrics.
+            The generated metrics. FXT-only subclasses that implement
+            `process_metrics_with_fxt()` return `[]`.
         """
         raise NotImplementedError()
 

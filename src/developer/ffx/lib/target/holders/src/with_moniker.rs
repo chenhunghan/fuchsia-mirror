@@ -4,7 +4,7 @@
 
 use fdomain_client::fidl::DiscoverableProtocolMarker;
 use ffx_command_error::Result;
-use fho::{FhoEnvironment, TryFromEnvWith};
+use fho::{FhoEnvironment, TargetNeed, TryFromEnvWith};
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -27,6 +27,7 @@ where
     P: fdomain_client::fidl::Proxy + 'static,
     P::Protocol: fdomain_client::fidl::DiscoverableProtocolMarker,
 {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Output = P;
     type Error = ffx_command_error::Error;
     async fn try_from_env_with(
@@ -67,6 +68,7 @@ impl ExposedDirectoryConnector {
 }
 
 impl TryFromEnvWith for ExposedDirectoryConnector {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Output = fdomain_fuchsia_io::DirectoryProxy;
     type Error = ffx_command_error::Error;
 
@@ -116,6 +118,7 @@ where
     P: fdomain_client::fidl::Proxy + 'static,
     P::Protocol: fdomain_client::fidl::DiscoverableProtocolMarker,
 {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Output = Option<P>;
     type Error = ffx_command_error::Error;
 

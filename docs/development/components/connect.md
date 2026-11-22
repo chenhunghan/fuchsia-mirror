@@ -477,6 +477,20 @@ To listen for stop notifications in your child component:
 [`eager`][cml-children], which causes the component framework to implicitly
 start that child with the parent.
 
+Note: Root-reachable `eager` startup (where a component and all of its static
+ancestors up to `/` are marked `startup: "eager"`) runs unconditionally during
+system boot and holds resources before any client requests a capability.
+Therefore, root-reachable `eager` components are governed by the
+`child_policy.eager_startup` policy allowlist in
+[`//src/security/policy/component_manager_policy_base.json5`][src-security-policy]
+(and its `_userdebug` / `_eng` counterparts). Prefer default on-demand
+capability routing whenever a client connects to an exposed capability, or
+implement [stopping idle components](/docs/development/components/stop_idle.md)
+(`OnEscrow` and `delivery: "on_readable"`) if your component only performs
+one-shot boot verification or infrequent work. Internal `eager` children of a
+`lazy` parent component and dynamic children in collections (such as test
+realms) do not require an allowlist entry.
+
 If the eager child fails to start for any reason (such as a missing component),
 component manager exhibits the following behavior:
 
@@ -513,12 +527,11 @@ fx list-packages --verbose {{ '<var label="package name">my-package</var>' }}
 ```
 
 This command outputs a list of the package sets where the matching package is
-found. For example, `system-update-checker` is in the `base` and `universe`
-package sets:
+found. For example, `system-update-committer` is in the `base` package set:
 
 ```none {:.devsite-disable-click-to-copy}
-$ fx list-packages --verbose system-update-checker
-system-update-checker [base universe]
+$ fx list-packages --verbose system-update-committer
+system-update-committer [base]
 ```
 
 You can also look at all the packages in the base package set using the `--base`
@@ -544,13 +557,13 @@ To enable this feature, do the following:
 1.  Mark the child as `on_terminate: "reboot"` in the parent's component manifest:
 
     ```json5
-    // core.cml
+    // system-update-realm.cml
     {
         children: [
             ...
             {
-                name: "system-update-checker",
-                url: "fuchsia-pkg://fuchsia.com/system-update-checker#meta/system-update-checker.cm",
+                name: "system-update-committer",
+                url: "fuchsia-pkg://fuchsia.com/system-update-committer#meta/system-update-committer.cm",
                 startup: "eager",
                 {{ '<strong>' }}on_terminate: "reboot",{{ '</strong>' }}
             },
@@ -560,17 +573,17 @@ To enable this feature, do the following:
 
 1.  Add the component's moniker to component manager's security policy allowlist
     at
-    [`//src/security/policy/component_manager_policy.json5`][src-security-policy]:
+    [`//src/security/policy/component_manager_policy_base.json5`][src-security-policy]:
 
     ```json5
-    // //src/security/policy/component_manager_policy.json5
+    // //src/security/policy/component_manager_policy_base.json5
     {
         security_policy: {
             ...
             child_policy: {
                 reboot_on_terminate: [
                     ...
-                    "/core/system-update-checker",
+                    "/core/system-update/system-update-committer",
                 ],
             },
         },
@@ -853,13 +866,13 @@ troubleshoot the cause:
 [cml-program]: https://fuchsia.dev/reference/cml#program
 [cml-use]: https://fuchsia.dev/reference/cml#use
 [doc-capabilities]: /docs/concepts/components/v2/capabilities/README.md
-[doc-epitaphs]: /docs/reference/fidl/language/wire-format/README.md#epitaph_control_message_ordinal_0xffffffff
+[doc-epitaphs]: /docs/reference/fidl/language/wire-format/README.md#epitaph
 [doc-fidlcat]: /docs/development/monitoring/fidlcat/README.md
 [doc-lifecycle]: /docs/concepts/components/v2/lifecycle.md
 [doc-logs]: /docs/concepts/components/diagnostics/README.md#logs
 [doc-manifests]: /docs/concepts/components/v2/component_manifests.md
 [doc-packages]: /docs/concepts/packages/package.md
-[doc-package-set]: /docs/concepts/packages/package.md#types_of_packages
+[doc-package-set]: /docs/concepts/packages/package.md#types-of-packages
 [doc-protocol]: /docs/concepts/components/v2/capabilities/protocol.md
 [doc-realms]: /docs/concepts/components/v2/realms.md
 [doc-resolvers]: /docs/concepts/components/v2/capabilities/resolver.md

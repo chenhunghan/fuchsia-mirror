@@ -22,7 +22,7 @@ use fidl_fuchsia_net_routes_ext as fnet_routes_ext;
 use fuchsia_async::{DurationExt as _, TimeoutExt as _};
 use futures::future::TryFutureExt as _;
 use futures::stream::{self, StreamExt as _, TryStreamExt as _};
-use net_declare::{fidl_ip_v4, fidl_ip_v4_with_prefix, fidl_mac, net_subnet_v4};
+use net_declare::{fidl_ip_v4, fidl_ip_v4_with_prefix, net_subnet_v4};
 use net_types::ethernet::Mac;
 use net_types::ip::{Ip, Ipv4};
 use netemul::{InterfaceConfig, RealmUdpSocket as _};
@@ -987,8 +987,6 @@ impl PersistenceMode {
                     max: Some(86400),
                     ..Default::default()
                 }),
-                fidl_fuchsia_net_dhcp::Parameter::PermittedMacs(vec![]),
-                fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(vec![]),
                 fidl_fuchsia_net_dhcp::Parameter::ArpProbe(false),
                 fidl_fuchsia_net_dhcp::Parameter::BoundDeviceNames(vec![]),
             ]
@@ -1014,14 +1012,6 @@ fn test_dhcpd_parameters(if_name: String) -> Vec<fidl_fuchsia_net_dhcp::Paramete
             max: Some(60),
             ..Default::default()
         }),
-        fidl_fuchsia_net_dhcp::Parameter::PermittedMacs(vec![fidl_mac!("aa:bb:cc:dd:ee:ff")]),
-        fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(vec![
-            fidl_fuchsia_net_dhcp::StaticAssignment {
-                host: Some(fidl_mac!("aa:bb:cc:dd:ee:ff")),
-                assigned_addr: Some(fidl_ip_v4!("192.168.0.2")),
-                ..Default::default()
-            },
-        ]),
         fidl_fuchsia_net_dhcp::Parameter::ArpProbe(true),
         fidl_fuchsia_net_dhcp::Parameter::BoundDeviceNames(vec![if_name]),
     ]
@@ -1037,12 +1027,6 @@ fn param_name(param: &fidl_fuchsia_net_dhcp::Parameter) -> fidl_fuchsia_net_dhcp
         }
         fidl_fuchsia_net_dhcp::Parameter::Lease(_) => {
             fidl_fuchsia_net_dhcp::ParameterName::LeaseLength
-        }
-        fidl_fuchsia_net_dhcp::Parameter::PermittedMacs(_) => {
-            fidl_fuchsia_net_dhcp::ParameterName::PermittedMacs
-        }
-        fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(_) => {
-            fidl_fuchsia_net_dhcp::ParameterName::StaticallyAssignedAddrs
         }
         fidl_fuchsia_net_dhcp::Parameter::ArpProbe(_) => {
             fidl_fuchsia_net_dhcp::ParameterName::ArpProbe

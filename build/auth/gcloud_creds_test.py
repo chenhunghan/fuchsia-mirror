@@ -6,7 +6,6 @@
 """Unit tests for gcloud_creds.py."""
 
 import json
-import os
 import pathlib
 import shutil
 import subprocess
@@ -19,10 +18,7 @@ from build.auth import apt, gcloud, gcloud_creds
 
 
 class IsolateGcloudCredsTestBase(unittest.TestCase):
-    """Shared base class for isolating credentials tests.
-
-    De-duplicates temporary directories, mock ADC file creation, and CLI runner helpers.
-    """
+    """Shared base class for isolating credentials tests."""
 
     def setUp(self) -> None:
         gcloud.path.cache_clear()
@@ -51,26 +47,6 @@ class IsolateGcloudCredsTestBase(unittest.TestCase):
         path.write_text(json.dumps(content))
         return path
 
-    def _run_main_cli(
-        self, args: list[str], adc_path: pathlib.Path | None = None
-    ) -> tuple[int, str, str]:
-        """Helper to execute main() as a CLI, capturing exit code, stdout, and stderr."""
-        import contextlib
-        import io
-
-        environ = {}
-        if adc_path:
-            environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(adc_path)
-
-        with mock.patch.dict(os.environ, environ):
-            stdout = io.StringIO()
-            stderr = io.StringIO()
-            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
-                stderr
-            ):
-                exit_code = gcloud_creds.main(args)
-            return exit_code, stdout.getvalue(), stderr.getvalue()
-
 
 class IsolateCredentialsTest(IsolateGcloudCredsTestBase):
     """Tests the primary credentials isolation function 'isolate_credentials()'."""
@@ -92,7 +68,7 @@ class IsolateCredentialsTest(IsolateGcloudCredsTestBase):
         assert local_adc is not None
         self.assertTrue(local_adc.is_file())
         self.assertEqual(
-            local_adc, self.out_dir / gcloud_creds.ISOLATED_ADC_FILENAME
+            local_adc, self.out_dir / gcloud_creds._ISOLATED_ADC_FILENAME
         )
 
         # Read the isolated copy back and verify changes
@@ -148,7 +124,7 @@ class IsolateCredentialsTest(IsolateGcloudCredsTestBase):
         # Should not create any isolated copy or modify anything
         self.assertIsNone(local_adc)
         self.assertFalse(
-            (self.out_dir / gcloud_creds.ISOLATED_ADC_FILENAME).exists()
+            (self.out_dir / gcloud_creds._ISOLATED_ADC_FILENAME).exists()
         )
 
     def test_isolate_credentials_missing_source_raises_gcloud_creds_error(
@@ -180,7 +156,7 @@ class IsolateCredentialsSafeTest(IsolateGcloudCredsTestBase):
         assert local_adc is not None
         self.assertTrue(local_adc.is_file())
         self.assertEqual(
-            local_adc, self.out_dir / gcloud_creds.ISOLATED_ADC_FILENAME
+            local_adc, self.out_dir / gcloud_creds._ISOLATED_ADC_FILENAME
         )
 
     def test_isolate_credentials_missing_source_safe_returns_none(self) -> None:
@@ -195,46 +171,17 @@ class IsolateCredentialsSafeTest(IsolateGcloudCredsTestBase):
         self.assertIsNone(local_adc)
 
 
-class MainCliTest(IsolateGcloudCredsTestBase):
-    """Tests the CLI entrypoint 'main()' function directly."""
-
-    def test_main_cli_no_args_displays_help(self) -> None:
-        exit_code, stdout, _ = self._run_main_cli([])
-        self.assertEqual(exit_code, 0)
-        self.assertIn("usage:", stdout)
-        self.assertIn("{isolate,login,ensure}", stdout)
-
-    def test_main_cli_isolate_subcommand_success(self) -> None:
-        adc_src = self._create_mock_adc()
-        exit_code, stdout, _ = self._run_main_cli(
-            [
-                "isolate",
-                "--out-dir",
-                str(self.out_dir),
-                "--quota-project",
-                "cli-project-sub",
-            ],
-            adc_src,
-        )
-
-        self.assertEqual(exit_code, 0)
-        local_adc_path = self.out_dir / gcloud_creds.ISOLATED_ADC_FILENAME
-        self.assertEqual(stdout.strip(), str(local_adc_path))
-        self.assertTrue(local_adc_path.is_file())
-
-        isolated_content = json.loads(local_adc_path.read_text())
-        self.assertEqual(
-            isolated_content["quota_project_id"], "cli-project-sub"
-        )
+class EnsureOauthAndLoginTest(IsolateGcloudCredsTestBase):
+    """Tests OAuth credential verification, login, and installation helpers."""
 
     @mock.patch.object(shutil, "which", return_value="/bin/gcloud")
     @mock.patch.object(subprocess, "run")
     def test_run_gcloud_login_when_gcloud_exists(
         self, mock_run: mock.Mock, mock_which: mock.Mock
     ) -> None:
-        gcloud_creds.run_gcloud_login()
+        gcloud_creds._run_gcloud_login()
         mock_run.assert_called_once_with(
-            ["/bin/gcloud", "auth", "application-default", "login"],
+            ("/bin/gcloud", "auth", "application-default", "login"),
             stdin=mock.ANY,
             stdout=mock.ANY,
             stderr=mock.ANY,
@@ -252,10 +199,10 @@ class MainCliTest(IsolateGcloudCredsTestBase):
     ) -> None:
         mock_path.side_effect = [None, pathlib.Path("/usr/bin/gcloud")]
 
-        gcloud_creds.ensure_gcloud_installed()
+        gcloud_creds._ensure_gcloud_installed()
 
         mock_install.assert_called_once_with(
-            gcloud_creds.GOOGLE_CLOUD_CLI_PACKAGE, interactive=True
+            gcloud_creds._GOOGLE_CLOUD_CLI_PACKAGE, interactive=True
         )
 
     @mock.patch.object(gcloud, "path", return_value=None)
@@ -270,7 +217,7 @@ class MainCliTest(IsolateGcloudCredsTestBase):
         mock_install.side_effect = RuntimeError("Installation declined.")
 
         with self.assertRaises(gcloud_creds.GcloudCredsError) as ctx:
-            gcloud_creds.ensure_gcloud_installed()
+            gcloud_creds._ensure_gcloud_installed()
         self.assertIn("Installation declined.", str(ctx.exception))
 
     @mock.patch.object(gcloud, "path", return_value=None)
@@ -279,97 +226,79 @@ class MainCliTest(IsolateGcloudCredsTestBase):
         self, mock_exists: mock.Mock, mock_path: mock.Mock
     ) -> None:
         with self.assertRaises(gcloud_creds.GcloudCredsError) as ctx:
-            gcloud_creds.ensure_gcloud_installed()
+            gcloud_creds._ensure_gcloud_installed()
         self.assertIn(
             "https://cloud.google.com/sdk/docs/install", str(ctx.exception)
         )
 
-    @mock.patch.object(shutil, "which", return_value="/bin/gcloud")
-    @mock.patch.object(subprocess, "run")
-    def test_main_cli_login_success(
-        self, mock_run: mock.Mock, mock_which: mock.Mock
-    ) -> None:
-        exit_code, _, _ = self._run_main_cli(["login"])
-        self.assertEqual(exit_code, 0)
-        mock_run.assert_called_once_with(
-            ["/bin/gcloud", "auth", "application-default", "login"],
-            stdin=mock.ANY,
-            stdout=mock.ANY,
-            stderr=mock.ANY,
-            check=True,
-        )
-
-    def test_main_cli_ensure_when_already_exists(self) -> None:
-        adc_src = self._create_mock_adc()
-        exit_code, stdout, _ = self._run_main_cli(
-            [
-                "ensure",
-                "--out-dir",
-                str(self.out_dir),
-                "--quota-project",
-                "ensure-project",
-            ],
-            adc_src,
-        )
-
-        self.assertEqual(exit_code, 0)
-        local_adc_path = self.out_dir / gcloud_creds.ISOLATED_ADC_FILENAME
-        self.assertEqual(stdout.strip(), str(local_adc_path))
-
-    @mock.patch.object(gcloud_creds, "run_gcloud_login")
-    def test_main_cli_ensure_when_missing_with_interactive(
-        self, mock_login: mock.Mock
-    ) -> None:
-        # Simulate missing global credentials file during resolve
-        with mock.patch.object(
-            gcloud, "resolve_global_adc_path"
-        ) as mock_resolve:
-            mock_resolve.return_value = self.temp_dir / "missing.json"
-
-            # Create the file after login is mock-called
-            def side_effect() -> None:
-                self._create_mock_adc(filename="missing.json")
-
-            mock_login.side_effect = side_effect
-
-            exit_code, stdout, _ = self._run_main_cli(
-                [
-                    "ensure",
-                    "--out-dir",
-                    str(self.out_dir),
-                    "--quota-project",
-                    "ensure-project-interactive",
-                    "--interactive",
-                ]
-            )
-
-            self.assertEqual(exit_code, 0)
-            mock_login.assert_called_once()
-            local_adc_path = self.out_dir / gcloud_creds.ISOLATED_ADC_FILENAME
-            self.assertEqual(stdout.strip(), str(local_adc_path))
-
-    def test_main_cli_ensure_when_missing_non_interactive_returns_one(
+    @mock.patch.object(gcloud_creds, "_ensure_gcloud_installed", autospec=True)
+    @mock.patch.object(gcloud_creds, "_run_gcloud_login", autospec=True)
+    @mock.patch.object(
+        gcloud, "has_valid_adc_token", autospec=True, return_value=True
+    )
+    def test_ensure_oauth_reuses_valid_adc_and_isolates(
         self,
+        _mock_valid_token: mock.Mock,
+        mock_login: mock.Mock,
+        _mock_installed: mock.Mock,
     ) -> None:
+        adc_src = self._create_mock_adc()
         with mock.patch.object(
-            gcloud, "resolve_global_adc_path"
-        ) as mock_resolve:
-            mock_resolve.return_value = self.temp_dir / "missing.json"
+            gcloud,
+            "resolve_global_adc_path",
+            autospec=True,
+            return_value=adc_src,
+        ):
+            self.assertIsNone(gcloud_creds.ensure_oauth(out_dir=self.out_dir))
+            isolated = gcloud_creds.ensure_oauth(
+                out_dir=self.out_dir,
+                quota_project="fake-quota-project",
+            )
+        mock_login.assert_not_called()
+        self.assertEqual(
+            isolated, self.out_dir / gcloud_creds._ISOLATED_ADC_FILENAME
+        )
 
-            exit_code, _, stderr = self._run_main_cli(
-                [
-                    "ensure",
-                    "--out-dir",
-                    str(self.out_dir),
-                    "--quota-project",
-                    "ensure-project",
-                ]
+    @mock.patch.object(gcloud_creds, "_ensure_gcloud_installed", autospec=True)
+    @mock.patch.object(gcloud_creds, "_run_gcloud_login", autospec=True)
+    def test_ensure_oauth_force_reloads_default_adc_path(
+        self, mock_login: mock.Mock, _mock_installed: mock.Mock
+    ) -> None:
+        fresh_adc = self.temp_dir / "fresh_default_adc.json"
+
+        def write_fresh(_args: object) -> None:
+            fresh_adc.write_text(
+                json.dumps(
+                    {"type": "authorized_user", "quota_project_id": "old"}
+                )
             )
 
-            self.assertEqual(exit_code, 1)
-            self.assertIn(
-                "No credentials found and --interactive is not set.", stderr
+        mock_login.side_effect = write_fresh
+        stale_adc = self._create_mock_adc(filename="stale.json")
+        with (
+            mock.patch.object(
+                gcloud,
+                "resolve_global_adc_path",
+                autospec=True,
+                return_value=stale_adc,
+            ),
+            mock.patch.object(
+                gcloud,
+                "get_default_adc_path",
+                autospec=True,
+                return_value=fresh_adc,
+            ),
+        ):
+            isolated = gcloud_creds.ensure_oauth(
+                force=True,
+                out_dir=self.out_dir,
+                quota_project="fake-quota-project",
+                gcloud_args=("--no-browser",),
             )
+        mock_login.assert_called_once_with(("--no-browser",))
+        self.assertEqual(
+            isolated, self.out_dir / gcloud_creds._ISOLATED_ADC_FILENAME
+        )
 
 
 if __name__ == "__main__":

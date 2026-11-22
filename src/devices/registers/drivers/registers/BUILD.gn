@@ -32,7 +32,6 @@ fuchsia_cc_driver("registers-driver") {
 }
 
 fuchsia_driver_component("registers") {
-  info = "meta/registers-info.json"
   component_name = "registers"
   dml_label = ":registers-dml"
   deps = [ ":registers-driver" ]

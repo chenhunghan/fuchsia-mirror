@@ -78,6 +78,66 @@ ARCH_ARM64_SYSREG(ArmCurrentEl, "CurrentEL");
 // the stack and only uses scratch registers.
 extern "C" void ArmDropToEl1();
 
+// [arm/sysreg]/midr_el1: Main ID Register
+struct ArmMidrEl1 : public SysRegBase<ArmMidrEl1, uint64_t> {
+  enum class Implementer : uint8_t {
+    kSoftware = 0x00,
+    kArm = 'A',     // 0x41
+    kCavium = 'C',  // 0x43
+    kApple = 'a',   // 0x61
+    kAmpere = 0xc0,
+  };
+
+  // Implementer::kArm part_num() values.
+  enum class ArmPartNum : uint16_t {
+    kCortexA32 = 0xd01,
+    kCortexA53 = 0xd03,
+    kCortexA35 = 0xd04,
+    kCortexA55 = 0xd05,
+    kCortexA65 = 0xd06,
+    kCortexA57 = 0xd07,
+    kCortexA72 = 0xd08,
+    kCortexA73 = 0xd09,
+    kCortexA75 = 0xd0a,
+    kCortexA76 = 0xd0b,
+    kNeoverseN1 = 0xd0c,
+    kCortexA77 = 0xd0d,
+    kCortexA76Ae = 0xd0e,
+    kNeoverseV1 = 0xd40,
+    kCortexA78 = 0xd41,
+    kCortexA78Ae = 0xd42,
+    kCortexA65Ae = 0xd43,
+    kCortexX1 = 0xd44,
+    kCortexA510 = 0xd46,
+    kCortexA710 = 0xd47,
+    kCortexX2 = 0xd48,
+    kNeoverseN2 = 0xd49,
+    kNeoverseE1 = 0xd4a,
+    kCortexA78C = 0xd4b,
+    kCortexX1C = 0xd4c,
+    kCortexA715 = 0xd4d,
+    kCortexX3 = 0xd4e,
+    kCortexA520 = 0xd80,
+    kCortexA720 = 0xd81,
+    kCortexX4 = 0xd82,
+    kCortexX925 = 0xd85,
+    kCortexA725 = 0xd87,
+  };
+
+  constexpr bool IsArmCore(ArmPartNum part) const {
+    return implementer() == Implementer::kArm && part_num() == static_cast<uint16_t>(part);
+  }
+  constexpr bool IsCortexA55() const { return IsArmCore(ArmPartNum::kCortexA55); }
+
+  DEF_RSVDZ_FIELD(63, 32);
+  DEF_ENUM_FIELD(Implementer, 31, 24, implementer);
+  DEF_FIELD(23, 20, variant);
+  DEF_FIELD(19, 16, architecture);
+  DEF_FIELD(15, 4, part_num);
+  DEF_FIELD(3, 0, revision);
+};
+ARCH_ARM64_SYSREG(ArmMidrEl1, "midr_el1");
+
 // This type covers the following register formats:
 // * [arm/sysreg]/mpidr_el1: Multiprocessor Affinity Register (EL1)
 // * [arm/sysreg]/vmpidr_el2: Virtualization Multiprocessor ID Register (EL2)

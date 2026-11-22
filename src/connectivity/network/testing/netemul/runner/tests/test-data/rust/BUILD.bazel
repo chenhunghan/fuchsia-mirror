@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "meta/test-driver.cml",
+        "meta/test-root.cml",
+    ],
+    visibility = ["//src/connectivity/network/testing/netemul/runner/tests/test-data:__pkg__"],
+)
+
+# Preserve GN `output_name = "rust_test"` required by `meta/test-driver.cml`.
+# @bazel2gn:raw_attribute:output_name = "rust_test"
+rustc_test(
+    name = "rust",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = ["//src/connectivity/network/testing/netemul/runner/tests/test-data:__pkg__"],
+)

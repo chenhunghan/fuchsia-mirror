@@ -4,9 +4,11 @@
 
 //! Implementation of the network socket proxy.
 //!
-//! Runs proxied versions of fuchsia.posix.socket.Provider and fuchsia.posix.socket.raw.Provider.
+//! Runs proxied versions of fuchsia.posix.socket.Provider and fuchsia.posix.socket.raw.Provider,
+//! and serves fuchsia.net.policy.socketproxy.SocketProviderConnector.
 
 use fidl_fuchsia_net as fnet;
+use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 use fidl_fuchsia_posix_socket::{self as fposix_socket, OptionalUint32};
 use fuchsia_async as fasync;
 use fuchsia_component::server::{ServiceFs, ServiceFsDir};
@@ -17,8 +19,10 @@ use futures::lock::Mutex;
 use log::error;
 use std::sync::Arc;
 
-mod mark_watcher;
+mod default_network_watcher;
+mod network_token_watcher;
 mod socket_provider;
+mod socket_provider_connector;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct SocketMarks {
@@ -106,12 +110,17 @@ impl std::fmt::Display for SocketMarks {
 struct SocketProxy {
     marks: Arc<Mutex<IValue<SocketMarks>>>,
     socket_provider: socket_provider::SocketProvider,
+    #[inspect(rename = "watched_networks")]
+    connector: socket_provider_connector::SocketProviderConnector,
 }
 
 impl SocketProxy {
     fn new() -> Self {
         let marks = Arc::new(Mutex::new(IValue::new(SocketMarks::default())));
-        Self { marks: marks.clone(), socket_provider: socket_provider::SocketProvider::new(marks) }
+        let socket_provider = socket_provider::SocketProvider::new(marks.clone());
+        let connector =
+            socket_provider_connector::SocketProviderConnector::new(socket_provider.clone());
+        Self { marks, socket_provider, connector }
     }
 
     async fn set_marks(&self, marks: SocketMarks) {
@@ -120,6 +129,7 @@ impl SocketProxy {
 }
 
 enum IncomingService {
+    SocketProviderConnector(fnp_socketproxy::SocketProviderConnectorRequestStream),
     PosixSocket(fidl_fuchsia_posix_socket::ProviderRequestStream),
     PosixSocketRaw(fidl_fuchsia_posix_socket_raw::ProviderRequestStream),
 }
@@ -137,6 +147,7 @@ pub async fn run() -> Result<(), anyhow::Error> {
     let mut fs = ServiceFs::new_local();
     let _: &mut ServiceFsDir<'_, _> = fs
         .dir("svc")
+        .add_fidl_service(IncomingService::SocketProviderConnector)
         .add_fidl_service(IncomingService::PosixSocket)
         .add_fidl_service(IncomingService::PosixSocketRaw);
 
@@ -149,6 +160,9 @@ pub async fn run() -> Result<(), anyhow::Error> {
         let proxy = Arc::clone(&proxy_for_service);
         async move {
             match service {
+                IncomingService::SocketProviderConnector(stream) => {
+                    proxy.connector.run(stream).await
+                }
                 IncomingService::PosixSocket(stream) => proxy.socket_provider.run(stream).await,
                 IncomingService::PosixSocketRaw(stream) => {
                     proxy.socket_provider.run_raw(stream).await
@@ -161,11 +175,11 @@ pub async fn run() -> Result<(), anyhow::Error> {
     let scope = fasync::Scope::new();
 
     let proxy_clone = Arc::clone(&proxy);
-    let _ = scope.spawn_local(async move {
-        mark_watcher::watch_properties(proxy_clone).await;
+    let _: fasync::JoinHandle<()> = scope.spawn_local(async move {
+        default_network_watcher::watch_default_network_properties(proxy_clone).await;
     });
 
-    let _ = scope.spawn_local(async move {
+    let _: fasync::JoinHandle<()> = scope.spawn_local(async move {
         service_fut.await;
         error!("The main services future has terminated. It should never terminate");
         // Abort the scope to signal that the main service loop has unexpectedly ended.
@@ -193,6 +207,7 @@ mod test {
             marks: {
                 has_mark: false,
             },
+            watched_networks: {},
         });
 
         let marks = SocketMarks {
@@ -228,6 +243,7 @@ mod test {
             marks: {
                 has_mark: false,
             },
+            watched_networks: {},
         });
     }
 }

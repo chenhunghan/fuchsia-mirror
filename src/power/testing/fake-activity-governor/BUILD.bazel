@@ -1,0 +1,45 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fake-activity-governor-unittests"],
+    visibility = ["//src/power:__pkg__"],
+)
+
+rustc_library(
+    name = "fake-activity-governor",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust_next",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "fake-activity-governor_test",
+    crate = ":fake-activity-governor",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "fake-activity-governor-unittests",
+    unit_tests = [":fake-activity-governor_test"],
+)

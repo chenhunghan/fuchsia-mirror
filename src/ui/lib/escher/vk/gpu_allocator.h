@@ -27,6 +27,9 @@ namespace escher {
 class GpuAllocator {
  public:
   GpuAllocator() : weak_factory_(this) {}
+  // All `GpuMem`, `Buffer`, and `Image` objects obtained from this allocator, including
+  // suballocations and `out_ptr` memory, must be destroyed before the allocator.
+  // `VmaGpuAllocator` and `NaiveGpuAllocator` abort via `FX_CHECK` if any are still alive.
   virtual ~GpuAllocator() = default;
 
   fxl::WeakPtr<GpuAllocator> GetWeakPtr() { return weak_factory_.GetWeakPtr(); }

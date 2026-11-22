@@ -54,6 +54,8 @@ source_set("types") {
     ":*",
     "//src/ui/scenic/lib/allocation:*",
     "//src/ui/scenic/lib/display:*",
+    "//src/ui/scenic/lib/display/coordinator_proxy:*",
+    "//src/ui/scenic/lib/display/coordinator_proxy/tests:*",
     "//src/ui/scenic/lib/flatland:*",
     "//src/ui/scenic/lib/types/tests:*",
     "//src/ui/scenic/lib/view_tree:*",

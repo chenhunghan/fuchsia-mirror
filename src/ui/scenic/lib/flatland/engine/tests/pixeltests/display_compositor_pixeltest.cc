@@ -27,7 +27,6 @@
 #include "src/lib/testing/predicates/status.h"
 #include "src/ui/lib/escher/flatland/rectangle_compositor.h"
 #include "src/ui/lib/escher/impl/vulkan_utils.h"
-#include "src/ui/lib/escher/renderer/batch_gpu_downloader.h"
 #include "src/ui/lib/escher/renderer/batch_gpu_uploader.h"
 #include "src/ui/lib/escher/test/common/gtest_escher.h"
 #include "src/ui/lib/escher/util/image_utils.h"
@@ -37,6 +36,7 @@
 #include "src/ui/scenic/lib/display/util.h"
 #include "src/ui/scenic/lib/flatland/buffers/util.h"
 #include "src/ui/scenic/lib/flatland/engine/display_compositor.h"
+#include "src/ui/scenic/lib/flatland/engine/tests/pixeltests/test_board.h"
 #include "src/ui/scenic/lib/flatland/flatland_types.h"
 #include "src/ui/scenic/lib/flatland/renderer/null_renderer.h"
 #include "src/ui/scenic/lib/flatland/renderer/vk_renderer.h"
@@ -218,20 +218,7 @@ CompareConfig GetCompareConfigForBoard(std::string_view board_name, int display_
 
 [[maybe_unused]] CompareConfig GetCompareConfigForCurrentTestEnvironment(int display_width,
                                                                          int display_height) {
-  static constexpr std::string_view board_name =
-#if defined(PLATFORM_ASTRO)
-      "astro";
-#elif defined(PLATFORM_SHERLOCK)
-      "sherlock";
-#elif defined(PLATFORM_NELSON)
-      "nelson";
-#elif defined(PLATFORM_VIM3)
-      "vim3";
-#else
-      "default";
-#endif
-
-  return GetCompareConfigForBoard(board_name, display_width, display_height);
+  return GetCompareConfigForBoard(GetTestBoardName(), display_width, display_height);
 }
 
 static std::vector<uint8_t> GetColoredPixels(uint32_t bytes_per_row, uint32_t row_width,

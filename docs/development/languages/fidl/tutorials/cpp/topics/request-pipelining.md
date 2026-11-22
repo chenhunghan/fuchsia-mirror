@@ -240,7 +240,7 @@ ffx component destroy /core/ffx-laboratory:echo_realm
 [pipelining]: /docs/development/api/fidl.md#request-pipelining
 [src]: /examples/fidl/cpp/request_pipelining
 [server-tut]: /docs/development/languages/fidl/tutorials/cpp/basics/server.md
-[server-tut-main]: /docs/development/languages/fidl/tutorials/cpp/basics/server.md#main
+[server-tut-main]: /docs/development/languages/fidl/tutorials/cpp/basics/server.md
 [client-tut]: /docs/development/languages/fidl/tutorials/cpp/basics/client.md
 [rubric]: /docs/development/api/fidl.md#request-pipelining
 [overview]: /docs/development/languages/fidl/tutorials/cpp/README.md

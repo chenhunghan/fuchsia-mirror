@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 """Unit tests for honeydew.utils.common.py."""
 
+import signal
 import time
 import unittest
 from collections.abc import Callable
@@ -17,7 +18,7 @@ from parameterized import param, parameterized
 CONFIG_DICT: dict[str, Any] = {
     "affordances": {
         "tracing": {
-            "implementation": "fuchsia-controller",
+            "implementation": "ffx",
         },
     },
     "transports": {
@@ -232,7 +233,7 @@ class CommonUtilsTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 should_exist=True,
                 expected_value={
-                    "implementation": "fuchsia-controller",
+                    "implementation": "ffx",
                 },
             ),
             param(
@@ -244,7 +245,7 @@ class CommonUtilsTests(unittest.IsolatedAsyncioTestCase):
                     "implementation",
                 ),
                 should_exist=True,
-                expected_value="fuchsia-controller",
+                expected_value="ffx",
             ),
             param(
                 label="returning_list",
@@ -380,3 +381,66 @@ class CommonUtilsTests(unittest.IsolatedAsyncioTestCase):
                 timeout=5, exception_message="Outer time_limit timed out"
             ):
                 _inner_method_with_timeout()
+
+    def test_time_limit_nested_restores_outer_alarm(self) -> None:
+        """Test case for nested common.time_limit() restoring the outer alarm on exit."""
+        with common.time_limit(
+            timeout=10, exception_message="Outer time_limit timed out"
+        ):
+            outer_handler = signal.getsignal(signal.SIGALRM)
+            with common.time_limit(
+                timeout=5, exception_message="Inner time_limit timed out"
+            ):
+                self.assertIsNot(
+                    signal.getsignal(signal.SIGALRM), outer_handler
+                )
+            # After the inner time_limit exits, the outer handler must be
+            # restored and the outer alarm must still be armed (> 0s remaining).
+            self.assertIs(signal.getsignal(signal.SIGALRM), outer_handler)
+            remaining = signal.alarm(0)
+            self.assertGreater(remaining, 0)
+            signal.alarm(remaining)
+        self.assertEqual(signal.alarm(0), 0)
+
+    def test_time_limit_nested_inner_fires_and_restores_outer_alarm(
+        self,
+    ) -> None:
+        """Test case for nested common.time_limit() where inner fires first and restores outer alarm."""
+        with common.time_limit(
+            timeout=10, exception_message="Outer time_limit timed out"
+        ):
+            outer_handler = signal.getsignal(signal.SIGALRM)
+            with self.assertRaisesRegex(
+                errors.HoneydewTimeoutError, "Inner time_limit timed out"
+            ):
+                with common.time_limit(
+                    timeout=1, exception_message="Inner time_limit timed out"
+                ):
+                    time.sleep(2)
+            # Outer handler and remaining alarm must still be active after
+            # catching the inner timeout.
+            self.assertIs(signal.getsignal(signal.SIGALRM), outer_handler)
+            remaining = signal.alarm(0)
+            self.assertGreater(remaining, 0)
+            signal.alarm(remaining)
+        self.assertEqual(signal.alarm(0), 0)
+
+    def test_time_limit_nested_outer_fires_unwinds_through_inner(self) -> None:
+        """Test case for nested common.time_limit() where outer fires first and unwinds through inner."""
+        with self.assertRaisesRegex(
+            errors.HoneydewTimeoutError, "Outer time_limit timed out"
+        ):
+            with common.time_limit(
+                timeout=1, exception_message="Outer time_limit timed out"
+            ):
+                try:
+                    with common.time_limit(
+                        timeout=10,
+                        exception_message="Inner time_limit timed out",
+                    ):
+                        time.sleep(2)
+                except errors.HoneydewError as err:
+                    raise AssertionError(
+                        "Inner except block should not catch outer time_limit"
+                    ) from err
+        self.assertEqual(signal.alarm(0), 0)

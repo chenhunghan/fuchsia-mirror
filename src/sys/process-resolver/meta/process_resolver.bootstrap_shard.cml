@@ -25,6 +25,12 @@
             to: "#process_resolver",
             availability: "optional",
         },
+        {
+            protocol: "fuchsia.process.Resolver",
+            from: "#process_resolver",
+            to: "self/toolbox",
+            target_availability: "unknown",
+        },
     ],
     expose: [
         {

@@ -89,8 +89,13 @@ class FakeProvider : public fidl::Server<fuchsia_tracing_provider::Provider> {
   int terminate_count() const { return terminate_count_; }
 
   void SendAlert(const char* alert_name);
+  // Asks trace_manager to save rolling buffer |wrapped_count|. If that is the buffer being
+  // written, first switches to the other rolling buffer, as trace-engine does. Other values
+  // (stale or invalid requests) are sent without changing the buffer.
   void SendSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end);
   void SendStoppedPacket();
+  // The number of TRACE_PROVIDER_BUFFER_SAVED packets trace_manager has sent so far.
+  int buffer_saved_count();
   const std::vector<std::string>& GetEnabledCategories() const { return enabled_categories_; }
 
   void SetKnownCategories(std::vector<fuchsia_tracing::KnownCategory> known_categories) {
@@ -109,6 +114,13 @@ class FakeProvider : public fidl::Server<fuchsia_tracing_provider::Provider> {
   void ResetBufferPointers();
   void InitBufferHeader();
   void UpdateBufferHeaderAfterStopped();
+
+  // Starts writing to the other rolling buffer, leaving the current one ready to be saved.
+  void SwitchRollingBuffer();
+  void WriteWrappedCountToHeader();
+  // The VMO offset of the buffer records are being written to: the only buffer in oneshot mode,
+  // the current rolling buffer otherwise.
+  size_t CurrentBufferOffset() const;
 
   void WriteInitRecord();
   void WriteBlobRecord();
@@ -130,12 +142,17 @@ class FakeProvider : public fidl::Server<fuchsia_tracing_provider::Provider> {
   size_t total_buffer_size_ = 0;
   size_t durable_buffer_size_ = 0;
   size_t rolling_buffer_size_ = 0;
+  // The write offset within the current buffer.
   size_t buffer_next_ = 0;
+  // The number of times the provider has switched rolling buffers; its low bit selects the
+  // current one.
+  uint32_t wrapped_count_ = 0;
 
   int initialize_count_ = 0;
   int start_count_ = 0;
   int stop_count_ = 0;
   int terminate_count_ = 0;
+  int buffer_saved_count_ = 0;
 
   std::vector<
       typename fidl::Server<fuchsia_tracing_provider::Provider>::GetKnownCategoriesCompleter::Async>

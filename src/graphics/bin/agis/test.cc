@@ -3,12 +3,13 @@
 // found in the LICENSE file.
 
 #include <arpa/inet.h>
-#include <fuchsia/gpu/agis/cpp/fidl.h>
+#include <fidl/fuchsia.gpu.agis/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
-#include <lib/sys/cpp/component_context.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/process.h>
 #include <lib/zxio/zxio.h>
 
 #include <thread>
@@ -39,6 +40,54 @@ uint64_t TimeMS() {
       .count();
 }
 
+// Event handler that logs and quits |loop| if the connection errors out, and fails the test
+// when |fail_test| is set.
+template <typename Protocol>
+class ErrorHandler : public fidl::AsyncEventHandler<Protocol> {
+ public:
+  ErrorHandler(const char *name, async::Loop *loop, bool fail_test)
+      : name_(name), loop_(loop), fail_test_(fail_test) {}
+
+  void on_fidl_error(fidl::UnbindInfo info) override {
+    FX_LOG_KV(ERROR, "agis-test: error handler", FX_KV("client", name_),
+              FX_KV("status", info.status()));
+    if (loop_) {
+      loop_->Quit();
+    }
+    if (fail_test_) {
+      ADD_FAILURE() << name_ << " disconnected: " << info;
+    }
+  }
+
+ private:
+  const char *name_;
+  async::Loop *loop_;
+  bool fail_test_;
+};
+
+// Connects |client| to |Protocol| in the test's namespace, dispatching on |dispatcher|.
+template <typename Protocol>
+void Connect(fidl::Client<Protocol> &client, async_dispatcher_t *dispatcher,
+             fidl::AsyncEventHandler<Protocol> *event_handler) {
+  zx::result client_end = component::Connect<Protocol>();
+  ASSERT_TRUE(client_end.is_ok()) << client_end.status_string();
+  client.Bind(std::move(*client_end), dispatcher, event_handler);
+}
+
+// Returns the domain error carried by |result|, failing the test if there is none.
+template <typename Method>
+std::optional<fuchsia_gpu_agis::Error> DomainError(const fidl::Result<Method> &result) {
+  if (result.is_ok()) {
+    ADD_FAILURE() << "expected an error, got success";
+    return std::nullopt;
+  }
+  if (!result.error_value().is_domain_error()) {
+    ADD_FAILURE() << "expected a domain error, got " << result.error_value();
+    return std::nullopt;
+  }
+  return result.error_value().domain_error();
+}
+
 }  // namespace
 
 class AgisTest : public testing::Test {
@@ -47,32 +96,14 @@ class AgisTest : public testing::Test {
     num_vtcs_ = 0;
     loop_ = std::make_unique<async::Loop>(&kAsyncLoopConfigAttachToCurrentThread);
 
-    std::unique_ptr<sys::ComponentContext> context = sys::ComponentContext::Create();
+    component_registry_handler_.emplace("component_registry", loop_.get(), /*fail_test=*/true);
+    Connect(component_registry_, loop_->dispatcher(), &*component_registry_handler_);
 
-    zx_status_t status =
-        context->svc()->Connect(component_registry_.NewRequest(loop_->dispatcher()));
-    EXPECT_EQ(status, ZX_OK);
-    component_registry_.set_error_handler([this](zx_status_t status) {
-      FX_LOG_KV(ERROR, "|component_registry_| error handler", FX_KV("status", status));
-      loop_->Quit();
-      ASSERT_TRUE(false);
-    });
+    observer_handler_.emplace("observer", loop_.get(), /*fail_test=*/true);
+    Connect(observer_, loop_->dispatcher(), &*observer_handler_);
 
-    status = context->svc()->Connect(observer_.NewRequest(loop_->dispatcher()));
-    EXPECT_EQ(status, ZX_OK);
-    observer_.set_error_handler([this](zx_status_t status) {
-      FX_LOG_KV(ERROR, "agis-test: |observer_| error handler");
-      loop_->Quit();
-      ASSERT_TRUE(false);
-    });
-
-    status = context->svc()->Connect(connector_.NewRequest(loop_->dispatcher()));
-    EXPECT_EQ(status, ZX_OK);
-    connector_.set_error_handler([this](zx_status_t status) {
-      FX_LOG_KV(ERROR, "agis-test: |connector_| error handler");
-      loop_->Quit();
-      ASSERT_TRUE(false);
-    });
+    connector_handler_.emplace("connector", loop_.get(), /*fail_test=*/true);
+    Connect(connector_, loop_->dispatcher(), &*connector_handler_);
 
     process_koid_ = ProcessKoid();
     process_name_ = ProcessName();
@@ -101,10 +132,11 @@ class AgisTest : public testing::Test {
 
   void Register(uint64_t id, zx_koid_t process_koid, std::string process_name) {
     outstanding++;
-    component_registry_->Register(
-        id, process_koid, std::move(process_name),
-        [&](fuchsia::gpu::agis::ComponentRegistry_Register_Result result) {
-          EXPECT_FALSE(result.err());
+    component_registry_
+        ->Register(
+            {{.id = id, .process_koid = process_koid, .process_name = std::move(process_name)}})
+        .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Register> &result) {
+          EXPECT_TRUE(result.is_ok()) << result.error_value();
           outstanding--;
         });
     LoopWait();
@@ -112,20 +144,18 @@ class AgisTest : public testing::Test {
 
   void Unregister(uint64_t client_id) {
     outstanding++;
-    component_registry_->Unregister(
-        client_id, [&](fuchsia::gpu::agis::ComponentRegistry_Unregister_Result result) {
-          EXPECT_FALSE(result.err());
+    component_registry_->Unregister({{.id = client_id}})
+        .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Unregister> &result) {
+          EXPECT_TRUE(result.is_ok()) << result.error_value();
           outstanding--;
         });
   }
 
   void Vtcs() {
     outstanding++;
-    observer_->Vtcs([&](fuchsia::gpu::agis::Observer_Vtcs_Result result) {
-      fuchsia::gpu::agis::Observer_Vtcs_Response response(std::move(result.response()));
-      EXPECT_FALSE(result.err());
-      std::vector<fuchsia::gpu::agis::Vtc> vtcs(response.ResultValue_());
-      num_vtcs_ = vtcs.size();
+    observer_->Vtcs().Then([&](fidl::Result<fuchsia_gpu_agis::Observer::Vtcs> &result) {
+      EXPECT_TRUE(result.is_ok()) << result.error_value();
+      num_vtcs_ = result.is_ok() ? result->vtcs().size() : 0;
       outstanding--;
     });
   }
@@ -134,9 +164,12 @@ class AgisTest : public testing::Test {
   // Ivars.
   //
   std::unique_ptr<async::Loop> loop_;
-  fuchsia::gpu::agis::ComponentRegistryPtr component_registry_;
-  fuchsia::gpu::agis::ObserverPtr observer_;
-  fuchsia::gpu::agis::ConnectorPtr connector_;
+  std::optional<ErrorHandler<fuchsia_gpu_agis::ComponentRegistry>> component_registry_handler_;
+  std::optional<ErrorHandler<fuchsia_gpu_agis::Observer>> observer_handler_;
+  std::optional<ErrorHandler<fuchsia_gpu_agis::Connector>> connector_handler_;
+  fidl::Client<fuchsia_gpu_agis::ComponentRegistry> component_registry_;
+  fidl::Client<fuchsia_gpu_agis::Observer> observer_;
+  fidl::Client<fuchsia_gpu_agis::Connector> connector_;
   size_t num_vtcs_;
   zx_koid_t process_koid_;
   std::string process_name_;
@@ -147,12 +180,12 @@ class AgisTest : public testing::Test {
 TEST_F(AgisTest, Register) {
   Register(client_id_, process_koid_, process_name_);
   outstanding++;
-  component_registry_->Register(client_id_, process_koid_, process_name_,
-                                [&](fuchsia::gpu::agis::ComponentRegistry_Register_Result result) {
-                                  EXPECT_EQ(result.err(),
-                                            fuchsia::gpu::agis::Error::ALREADY_REGISTERED);
-                                  outstanding--;
-                                });
+  component_registry_
+      ->Register({{.id = client_id_, .process_koid = process_koid_, .process_name = process_name_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Register> &result) {
+        EXPECT_EQ(DomainError(result), fuchsia_gpu_agis::Error::kAlreadyRegistered);
+        outstanding--;
+      });
   LoopWait();
   Unregister(client_id_);
   LoopWait();
@@ -164,10 +197,10 @@ TEST_F(AgisTest, Unregister) {
   Unregister(client_id_);
   LoopWait();
   outstanding++;
-  component_registry_->Unregister(
-      client_id_, [&](fuchsia::gpu::agis::ComponentRegistry_Unregister_Result result) {
-        EXPECT_TRUE(result.is_err());
-        EXPECT_EQ(result.err(), fuchsia::gpu::agis::Error::NOT_FOUND);
+  component_registry_->Unregister({{.id = client_id_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Unregister> &result) {
+        EXPECT_TRUE(result.is_error());
+        EXPECT_EQ(DomainError(result), fuchsia_gpu_agis::Error::kNotFound);
         outstanding--;
       });
   LoopWait();
@@ -191,18 +224,20 @@ TEST_F(AgisTest, Vtcs) {
 // Test registry overflow.
 TEST_F(AgisTest, MaxVtcs) {
   uint32_t i = 0;
-  for (i = 0; i < fuchsia::gpu::agis::MAX_VTCS; i++) {
+  for (i = 0; i < fuchsia_gpu_agis::kMaxVtcs; i++) {
     Register(client_id_ + i, process_koid_, process_name_ + "+" + std::to_string(i));
   }
   outstanding++;
-  component_registry_->Register(client_id_ + i, process_koid_,
-                                process_name_ + "+" + std::to_string(i),
-                                [&](fuchsia::gpu::agis::ComponentRegistry_Register_Result result) {
-                                  EXPECT_EQ(result.err(), fuchsia::gpu::agis::Error::VTCS_EXCEEDED);
-                                  outstanding--;
-                                });
+  component_registry_
+      ->Register({{.id = client_id_ + i,
+                   .process_koid = process_koid_,
+                   .process_name = process_name_ + "+" + std::to_string(i)}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Register> &result) {
+        EXPECT_EQ(DomainError(result), fuchsia_gpu_agis::Error::kVtcsExceeded);
+        outstanding--;
+      });
   LoopWait();
-  for (i = 0; i < fuchsia::gpu::agis::MAX_VTCS; i++) {
+  for (i = 0; i < fuchsia_gpu_agis::kMaxVtcs; i++) {
     Unregister(client_id_ + i);
   }
   LoopWait();
@@ -211,22 +246,23 @@ TEST_F(AgisTest, MaxVtcs) {
 // Validate retrieved socket.
 TEST_F(AgisTest, UsableSocket) {
   outstanding++;
-  component_registry_->Register(client_id_, process_koid_, process_name_,
-                                [&](fuchsia::gpu::agis::ComponentRegistry_Register_Result result) {
-                                  EXPECT_FALSE(result.err());
-                                  outstanding--;
-                                });
+  component_registry_
+      ->Register({{.id = client_id_, .process_koid = process_koid_, .process_name = process_name_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Register> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        outstanding--;
+      });
   LoopWait();
 
   // Issue hanging get for the vulkan-end socket.  Notice there is no following LoopWait() call.
   zx::socket vulkan_socket;
-  component_registry_->GetVulkanSocket(
-      client_id_, [&](fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Result result) {
-        fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Response response(
-            std::move(result.response()));
-        EXPECT_FALSE(result.err());
-        vulkan_socket = response.ResultValue_();
-        EXPECT_TRUE(vulkan_socket.is_valid());
+  component_registry_->GetVulkanSocket({{.id = client_id_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::GetVulkanSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          vulkan_socket = std::move(result->socket());
+          EXPECT_TRUE(vulkan_socket.is_valid());
+        }
       });
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   loop_->RunUntilIdle();
@@ -236,14 +272,17 @@ TEST_F(AgisTest, UsableSocket) {
   std::string process_name;
   zx_koid_t process_koid = 0;
   outstanding++;
-  observer_->Vtcs([&](fuchsia::gpu::agis::Observer_Vtcs_Result result) {
-    fuchsia::gpu::agis::Observer_Vtcs_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    std::vector<fuchsia::gpu::agis::Vtc> vtcs(response.ResultValue_());
-    EXPECT_EQ(vtcs.size(), 1ul);
-    global_id = vtcs.front().global_id();
-    process_koid = vtcs.front().process_koid();
-    process_name = vtcs.front().process_name();
+  observer_->Vtcs().Then([&](fidl::Result<fuchsia_gpu_agis::Observer::Vtcs> &result) {
+    EXPECT_TRUE(result.is_ok()) << result.error_value();
+    if (result.is_ok()) {
+      const std::vector<fuchsia_gpu_agis::Vtc> &vtcs = result->vtcs();
+      EXPECT_EQ(vtcs.size(), 1ul);
+      if (!vtcs.empty()) {
+        global_id = vtcs.front().global_id().value();
+        process_koid = vtcs.front().process_koid().value();
+        process_name = vtcs.front().process_name().value();
+      }
+    }
     outstanding--;
   });
   LoopWait();
@@ -254,12 +293,14 @@ TEST_F(AgisTest, UsableSocket) {
   // Explicitly retrieve the ffx-end socket and implicitly satisfy the hanging GetVulkanSocket.
   outstanding++;
   zx::socket ffx_socket;
-  connector_->GetSocket(global_id, [&](fuchsia::gpu::agis::Connector_GetSocket_Result result) {
-    fuchsia::gpu::agis::Connector_GetSocket_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    ffx_socket = response.ResultValue_();
-    outstanding--;
-  });
+  connector_->GetSocket({{.global_id = global_id}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::Connector::GetSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          ffx_socket = std::move(result->socket());
+        }
+        outstanding--;
+      });
 
   while (!vulkan_socket.is_valid() || !ffx_socket.is_valid()) {
     LoopWait(30);
@@ -287,12 +328,12 @@ TEST_F(AgisTest, Reget) {
 
   // Issue hanging get for the vulkan-end socket.  Notice there is no following LoopWait() call.
   zx::socket vulkan_socket;
-  component_registry_->GetVulkanSocket(
-      client_id_, [&](fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Result result) {
-        fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Response response(
-            std::move(result.response()));
-        EXPECT_FALSE(result.err());
-        vulkan_socket = response.ResultValue_();
+  component_registry_->GetVulkanSocket({{.id = client_id_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::GetVulkanSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          vulkan_socket = std::move(result->socket());
+        }
       });
   std::this_thread::sleep_for(std::chrono::milliseconds(50));
   loop_->RunUntilIdle();
@@ -302,14 +343,17 @@ TEST_F(AgisTest, Reget) {
   uint32_t global_id = 0;
   std::string process_name;
   zx_koid_t process_koid = 0;
-  observer_->Vtcs([&](fuchsia::gpu::agis::Observer_Vtcs_Result result) {
-    fuchsia::gpu::agis::Observer_Vtcs_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    std::vector<fuchsia::gpu::agis::Vtc> vtcs(response.ResultValue_());
-    EXPECT_EQ(vtcs.size(), 1ul);
-    global_id = vtcs.front().global_id();
-    process_name = vtcs.front().process_name();
-    process_koid = vtcs.front().process_koid();
+  observer_->Vtcs().Then([&](fidl::Result<fuchsia_gpu_agis::Observer::Vtcs> &result) {
+    EXPECT_TRUE(result.is_ok()) << result.error_value();
+    if (result.is_ok()) {
+      const std::vector<fuchsia_gpu_agis::Vtc> &vtcs = result->vtcs();
+      EXPECT_EQ(vtcs.size(), 1ul);
+      if (!vtcs.empty()) {
+        global_id = vtcs.front().global_id().value();
+        process_name = vtcs.front().process_name().value();
+        process_koid = vtcs.front().process_koid().value();
+      }
+    }
     outstanding--;
   });
   LoopWait();
@@ -317,12 +361,14 @@ TEST_F(AgisTest, Reget) {
   // Explicitly retrieve the ffx-end socket and implicitly satisfy the hanging GetVulkanSocket.
   outstanding++;
   zx::socket ffx_socket;
-  connector_->GetSocket(global_id, [&](fuchsia::gpu::agis::Connector_GetSocket_Result result) {
-    fuchsia::gpu::agis::Connector_GetSocket_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    ffx_socket = response.ResultValue_();
-    outstanding--;
-  });
+  connector_->GetSocket({{.global_id = global_id}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::Connector::GetSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          ffx_socket = std::move(result->socket());
+        }
+        outstanding--;
+      });
 
   while (!vulkan_socket.is_valid() || !ffx_socket.is_valid()) {
     LoopWait(30);
@@ -330,21 +376,23 @@ TEST_F(AgisTest, Reget) {
 
   // Re-get the socket.
   vulkan_socket.reset();
-  component_registry_->GetVulkanSocket(
-      client_id_, [&](fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Result result) {
-        fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Response response(
-            std::move(result.response()));
-        EXPECT_FALSE(result.err());
-        vulkan_socket = response.ResultValue_();
+  component_registry_->GetVulkanSocket({{.id = client_id_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::GetVulkanSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          vulkan_socket = std::move(result->socket());
+        }
       });
 
   outstanding++;
-  connector_->GetSocket(global_id, [&](fuchsia::gpu::agis::Connector_GetSocket_Result result) {
-    fuchsia::gpu::agis::Connector_GetSocket_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    ffx_socket = response.ResultValue_();
-    outstanding--;
-  });
+  connector_->GetSocket({{.global_id = global_id}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::Connector::GetSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          ffx_socket = std::move(result->socket());
+        }
+        outstanding--;
+      });
 
   while (!vulkan_socket.is_valid() || !ffx_socket.is_valid()) {
     LoopWait(30);
@@ -377,14 +425,17 @@ TEST_F(AgisTest, ReverseGet) {
   uint32_t global_id = 0;
   std::string process_name;
   zx_koid_t process_koid = 0;
-  observer_->Vtcs([&](fuchsia::gpu::agis::Observer_Vtcs_Result result) {
-    fuchsia::gpu::agis::Observer_Vtcs_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    std::vector<fuchsia::gpu::agis::Vtc> vtcs(response.ResultValue_());
-    EXPECT_EQ(vtcs.size(), 1ul);
-    global_id = vtcs.front().global_id();
-    process_name = vtcs.front().process_name();
-    process_koid = vtcs.front().process_koid();
+  observer_->Vtcs().Then([&](fidl::Result<fuchsia_gpu_agis::Observer::Vtcs> &result) {
+    EXPECT_TRUE(result.is_ok()) << result.error_value();
+    if (result.is_ok()) {
+      const std::vector<fuchsia_gpu_agis::Vtc> &vtcs = result->vtcs();
+      EXPECT_EQ(vtcs.size(), 1ul);
+      if (!vtcs.empty()) {
+        global_id = vtcs.front().global_id().value();
+        process_name = vtcs.front().process_name().value();
+        process_koid = vtcs.front().process_koid().value();
+      }
+    }
     outstanding--;
   });
   LoopWait();
@@ -392,22 +443,24 @@ TEST_F(AgisTest, ReverseGet) {
   // Retrieve the ffx socket end first.
   outstanding++;
   zx::socket ffx_socket;
-  connector_->GetSocket(global_id, [&](fuchsia::gpu::agis::Connector_GetSocket_Result result) {
-    fuchsia::gpu::agis::Connector_GetSocket_Response response(std::move(result.response()));
-    EXPECT_FALSE(result.err());
-    ffx_socket = response.ResultValue_();
-    outstanding--;
-  });
+  connector_->GetSocket({{.global_id = global_id}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::Connector::GetSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          ffx_socket = std::move(result->socket());
+        }
+        outstanding--;
+      });
 
   // Retrieve the vulkan socket end second.
   outstanding++;
   zx::socket vulkan_socket;
-  component_registry_->GetVulkanSocket(
-      client_id_, [&](fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Result result) {
-        fuchsia::gpu::agis::ComponentRegistry_GetVulkanSocket_Response response(
-            std::move(result.response()));
-        EXPECT_FALSE(result.err());
-        vulkan_socket = response.ResultValue_();
+  component_registry_->GetVulkanSocket({{.id = client_id_}})
+      .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::GetVulkanSocket> &result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        if (result.is_ok()) {
+          vulkan_socket = std::move(result->socket());
+        }
         outstanding--;
       });
 
@@ -441,7 +494,6 @@ TEST(AgisDisconnect, Main) {
   uint64_t client_id = TimeMS();
   bool disconnect_outstanding = false;
   auto loop = std::make_unique<async::Loop>(&kAsyncLoopConfigAttachToCurrentThread);
-  std::unique_ptr<sys::ComponentContext> context = sys::ComponentContext::Create();
   auto loop_wait = [&disconnect_outstanding, &loop]() {
     while (disconnect_outstanding) {
       EXPECT_EQ(loop->RunUntilIdle(), ZX_OK);
@@ -451,73 +503,64 @@ TEST(AgisDisconnect, Main) {
 
   // Create a component_registry, register |client_id| and verify its presence.
   {
-    fuchsia::gpu::agis::ComponentRegistryPtr component_registry;
-    context->svc()->Connect(component_registry.NewRequest(loop->dispatcher()));
-    component_registry.set_error_handler([&loop](zx_status_t status) {
-      FX_LOG_KV(ERROR, "Register Disconnect ComponentRegistry ErrHandler", FX_KV("status", status));
-      if (loop) {
-        loop->Quit();
-      }
-    });
+    ErrorHandler<fuchsia_gpu_agis::ComponentRegistry> component_registry_handler(
+        "Register Disconnect ComponentRegistry", loop.get(), /*fail_test=*/false);
+    fidl::Client<fuchsia_gpu_agis::ComponentRegistry> component_registry;
+    Connect(component_registry, loop->dispatcher(), &component_registry_handler);
 
     disconnect_outstanding = true;
-    component_registry->Register(client_id, process_koid, process_name,
-                                 [&](fuchsia::gpu::agis::ComponentRegistry_Register_Result result) {
-                                   EXPECT_FALSE(result.err());
-                                   disconnect_outstanding = false;
-                                 });
+    component_registry
+        ->Register({{.id = client_id, .process_koid = process_koid, .process_name = process_name}})
+        .Then([&](fidl::Result<fuchsia_gpu_agis::ComponentRegistry::Register> &result) {
+          EXPECT_TRUE(result.is_ok()) << result.error_value();
+          disconnect_outstanding = false;
+        });
     loop_wait();
 
-    fuchsia::gpu::agis::ObserverPtr observer;
-    context->svc()->Connect(observer.NewRequest(loop->dispatcher()));
-    observer.set_error_handler([&loop](zx_status_t status) {
-      FX_LOG_KV(ERROR, "Register Disconnect Observer ErrHandler", FX_KV("status", status));
-      if (loop) {
-        loop->Quit();
-      }
-    });
+    ErrorHandler<fuchsia_gpu_agis::Observer> observer_handler("Register Disconnect Observer",
+                                                              loop.get(), /*fail_test=*/false);
+    fidl::Client<fuchsia_gpu_agis::Observer> observer;
+    Connect(observer, loop->dispatcher(), &observer_handler);
     disconnect_outstanding = true;
-    observer->Vtcs([&](fuchsia::gpu::agis::Observer_Vtcs_Result result) {
-      fuchsia::gpu::agis::Observer_Vtcs_Response response(std::move(result.response()));
-      EXPECT_FALSE(result.err());
-      std::vector<fuchsia::gpu::agis::Vtc> vtcs(response.ResultValue_());
-      EXPECT_EQ(vtcs.size(), 1ul);
-      bool found = false;
-      for (const auto &vtc : vtcs) {
-        if (vtc.process_koid() == process_koid) {
-          EXPECT_EQ(vtc.process_name(), process_name);
-          found = true;
-          break;
+    observer->Vtcs().Then([&](fidl::Result<fuchsia_gpu_agis::Observer::Vtcs> &result) {
+      EXPECT_TRUE(result.is_ok()) << result.error_value();
+      if (result.is_ok()) {
+        const std::vector<fuchsia_gpu_agis::Vtc> &vtcs = result->vtcs();
+        EXPECT_EQ(vtcs.size(), 1ul);
+        bool found = false;
+        for (const auto &vtc : vtcs) {
+          if (vtc.process_koid() == process_koid) {
+            EXPECT_EQ(vtc.process_name(), process_name);
+            found = true;
+            break;
+          }
         }
+        EXPECT_TRUE(found);
       }
-      EXPECT_TRUE(found);
       disconnect_outstanding = false;
     });
     loop_wait();
   }
 
   // Create a new observer and verify that |process_koid| is no longer registered.
-  fuchsia::gpu::agis::ObserverPtr observer;
-  context->svc()->Connect(observer.NewRequest(loop->dispatcher()));
-  observer.set_error_handler([&loop](zx_status_t status) {
-    FX_LOG_KV(ERROR, "Verify Disconnect Observer ErrHandler ", FX_KV("status", status));
-    if (loop) {
-      loop->Quit();
-    }
-  });
+  ErrorHandler<fuchsia_gpu_agis::Observer> observer_handler("Verify Disconnect Observer",
+                                                            loop.get(), /*fail_test=*/false);
+  fidl::Client<fuchsia_gpu_agis::Observer> observer;
+  Connect(observer, loop->dispatcher(), &observer_handler);
 
   bool found = true;
   while (found) {
     disconnect_outstanding = true;
-    observer->Vtcs([&](fuchsia::gpu::agis::Observer_Vtcs_Result result) {
-      EXPECT_FALSE(result.err());
-      auto vtcs(result.response().ResultValue_());
+    observer->Vtcs().Then([&](fidl::Result<fuchsia_gpu_agis::Observer::Vtcs> &result) {
+      EXPECT_TRUE(result.is_ok()) << result.error_value();
       bool component_found = false;
-      for (const auto &vtc : vtcs) {
-        if (vtc.process_koid() == process_koid) {
-          EXPECT_EQ(vtc.process_name(), process_name);
-          component_found = true;
-          break;
+      if (result.is_ok()) {
+        for (const auto &vtc : result->vtcs()) {
+          if (vtc.process_koid() == process_koid) {
+            EXPECT_EQ(vtc.process_name(), process_name);
+            component_found = true;
+            break;
+          }
         }
       }
       found = component_found;

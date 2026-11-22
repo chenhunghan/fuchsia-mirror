@@ -41,7 +41,6 @@ fx_packaged_binary(
 
 fx_package(
     name = "audio_listener",
-    package_name = "audio_listener",
     package_repository_name = "fuchsia.com",
     resources = [":bin_packaged"],
     visibility = ["//bundles/assembly:__subpackages__"],

@@ -9,8 +9,10 @@
 #include <lib/unittest/unittest.h>
 
 #include <arch/interrupt.h>
+#include <kernel/deadline.h>
 #include <kernel/mp.h>
 #include <kernel/scheduler.h>
+#include <kernel/timer.h>
 
 #if defined(__x86_64__)
 #include <lib/backtrace/global_cpu_context_exchange.h>

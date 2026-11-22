@@ -300,15 +300,9 @@ fn derive_ap_config(
         None => return Err(format_err!("invalid NetworkIdentifier")),
     };
     let credential = match config.credential.as_ref() {
-        Some(credential) => match credential {
-            fidl_policy::Credential::None(fidl_policy::Empty) => b"".to_vec(),
-            fidl_policy::Credential::Password(bytes) => bytes.to_vec(),
-            fidl_policy::Credential::Psk(bytes) => bytes.to_vec(),
-            credential => {
-                return Err(format_err!("Unrecognized credential: {:?}", credential));
-            }
-        },
-        None => b"".to_vec(),
+        Some(credential) => types::Credential::try_from(credential.clone())
+            .map_err(|_| format_err!("Unrecognized credential: {:?}", credential))?,
+        None => types::Credential::None,
     };
 
     // TODO(https://fxbug.dev/42131511): Improve the channel selection algorithm.

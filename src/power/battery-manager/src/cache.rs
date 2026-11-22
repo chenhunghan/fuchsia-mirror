@@ -49,6 +49,10 @@ const SAMPLE_COALESCE_WINDOW: zx::BootDuration = zx::BootDuration::from_millis(1
 /// ID of the wake alarm that schedules samples. All governors share one alarm.
 const SAMPLE_ALARM_ID: &str = "battery_manager_sample";
 
+/// Voter name under which battery-manager records its own sample interval (e.g. while discharging
+/// at low battery) in `battery_sample_interval`.
+const INTERNAL_SAMPLE_VOTER: &str = "battery_manager";
+
 const INSPECTOR_NODE_GOVERNOR_TELEMETRY: &str = "governor_telemetry";
 const INSPECTOR_NODE_BATTERY_SAMPLE_INTERVAL: &str = "battery_sample_interval";
 const INSPECTOR_NODE_CHARGER_SAMPLE_INTERVAL: &str = "charger_sample_interval";
@@ -647,6 +651,9 @@ struct Topic<P: Protocol> {
     subscription: Subscription<P::Status>,
     connections: BTreeMap<ConnectionId, Connection<P>>,
     next_id: ConnectionId,
+    /// Start of [`INTERNAL_SAMPLE_VOTER`]'s current sample interval: when it was armed, or when
+    /// the last driver push or waking sample arrived.
+    internal_interval_start: Option<fasync::BootInstant>,
     interval_votes: Arc<IntervalVotes>,
     sampling: Arc<SamplingState>,
     /// Notifies the sampler that sample deadlines may have changed.
@@ -665,10 +672,38 @@ impl<P: Protocol> Topic<P> {
             subscription,
             connections: BTreeMap::new(),
             next_id: 0,
+            internal_interval_start: None,
             interval_votes,
             sampling,
             rearm,
         }
+    }
+
+    fn internal_sample_interval(&self) -> Option<zx::BootDuration> {
+        self.interval_votes
+            .vote(INTERNAL_SAMPLE_VOTER)
+            .map(|millis| zx::BootDuration::from_millis(i64::try_from(millis).unwrap_or(i64::MAX)))
+    }
+
+    fn set_internal_sample_interval(&mut self, interval: Option<zx::BootDuration>) {
+        let vote = interval.map(|interval| interval.max(MIN_SAMPLE_INTERVAL).into_millis() as u64);
+        if self.interval_votes.vote(INTERNAL_SAMPLE_VOTER) == vote {
+            return;
+        }
+        self.interval_votes.set_vote(INTERNAL_SAMPLE_VOTER.to_string(), vote);
+        self.internal_interval_start = vote.map(|_| fasync::BootInstant::now());
+        self.rearm();
+    }
+
+    fn internal_sample_deadline(&self) -> Option<fasync::BootInstant> {
+        Some(self.internal_interval_start? + self.internal_sample_interval()?)
+    }
+
+    fn is_internal_due(&self, now: fasync::BootInstant, include_waking: bool) -> bool {
+        include_waking
+            && self
+                .internal_sample_deadline()
+                .is_some_and(|deadline| deadline <= now + SAMPLE_COALESCE_WINDOW)
     }
 
     fn rearm(&mut self) {
@@ -767,6 +802,9 @@ impl<P: Protocol> Topic<P> {
             connection.offer(status, lease, now, include_waking);
         }
         driver.status = Some(status.clone());
+        if self.internal_sample_interval().is_some() {
+            self.internal_interval_start = Some(now);
+        }
         self.rearm();
     }
 
@@ -775,7 +813,8 @@ impl<P: Protocol> Topic<P> {
         if self.driver.is_none() {
             return SampleDeadlines::default();
         }
-        self.connections.values().fold(SampleDeadlines::default(), |deadlines, connection| {
+        let initial = SampleDeadlines { wake: self.internal_sample_deadline(), timer: None };
+        self.connections.values().fold(initial, |deadlines, connection| {
             let deadline = connection.sample_deadline();
             let next = if connection.wake_on_max_interval {
                 SampleDeadlines { wake: deadline, timer: None }
@@ -786,30 +825,34 @@ impl<P: Protocol> Topic<P> {
         })
     }
 
-    /// Returns the driver to read if any connection is due for a sample at `now`.
+    /// Returns the driver to read if any connection or internal interval is due for a sample at
+    /// `now`.
     fn due_driver(&self, now: fasync::BootInstant, include_waking: bool) -> Option<P::Proxy> {
         let proxy = &self.driver.as_ref()?.proxy;
-        self.connections
-            .values()
-            .any(|connection| connection.is_due(now, include_waking))
-            .then(|| proxy.clone())
+        (self.is_internal_due(now, include_waking)
+            || self.connections.values().any(|connection| connection.is_due(now, include_waking)))
+        .then(|| proxy.clone())
     }
 
     /// Delivers the result of a sample: `status`, or `None` if the driver could not be read.
     ///
     /// Completes any governor `Watch` whose `max_interval` is due or whose interest changed, and
-    /// returns whether the cached status itself changed (so battery-manager only runs `Polisher`
-    /// and notifies `BatteryInfoWatcher` clients when a sampled field actually changed).
+    /// returns whether battery-manager should process the sample (because the cached status itself
+    /// changed or an internal sample was due).
     fn sampled(
         &mut self,
         status: Option<&P::Status>,
         lease: Option<&zx::EventPair>,
         include_waking: bool,
     ) -> bool {
+        let now = fasync::BootInstant::now();
+        let internal_due = self.is_internal_due(now, include_waking);
         let Some(driver) = &mut self.driver else {
             return false;
         };
-        let now = fasync::BootInstant::now();
+        if internal_due {
+            self.internal_interval_start = Some(now);
+        }
         let Some(status) = status else {
             // Retry after another interval rather than immediately.
             for connection in
@@ -824,7 +867,7 @@ impl<P: Protocol> Topic<P> {
             connection.offer(status, lease, now, include_waking);
         }
         driver.status = Some(status.clone());
-        changed
+        changed || internal_due
     }
 
     /// Returns the connected driver's spec, as served to governors.
@@ -1056,6 +1099,16 @@ impl Cache {
 
     pub(crate) fn publish_battery(&self, status: &fbattery::Status, lease: Option<&zx::EventPair>) {
         self.battery.borrow_mut().publish(status, lease);
+    }
+
+    /// Sets or clears battery-manager's own waking sample interval on the battery driver.
+    pub(crate) fn set_battery_sample_interval(&self, interval: Option<zx::BootDuration>) {
+        self.battery.borrow_mut().set_internal_sample_interval(interval);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn battery_sample_interval(&self) -> Option<zx::BootDuration> {
+        self.battery_sample_interval_vote(INTERNAL_SAMPLE_VOTER)
     }
 
     /// Delivers a battery sample: `status`, or `None` if the driver could not be read.
@@ -2642,5 +2695,50 @@ mod tests {
         assert!(lease.is_some());
         assert_eq!(harness.reads.get(), 1);
         assert_eq!(harness.fired_alarms.borrow().len(), 1);
+    }
+
+    /// Verifies that `set_battery_sample_interval` schedules waking samples independent of
+    /// governor connections, resets the deadline on pushed battery updates, and cancels the wake
+    /// alarm when cleared.
+    #[fuchsia::test(allow_stalls = false)]
+    async fn test_internal_battery_sample_interval_polls_with_wake_alarms() {
+        let harness = Harness::new(Alarms::Working);
+        let interval = zx::BootDuration::from_nanos(SAMPLE_INTERVAL.into_nanos());
+        harness.cache.set_battery_sample_interval(Some(interval));
+        assert_eq!(
+            harness.cache.sampling.battery_interval_votes.vote(INTERNAL_SAMPLE_VOTER),
+            Some(interval.into_millis() as u64)
+        );
+
+        advance(SAMPLE_INTERVAL - BEFORE_DEADLINE).await;
+        let _: Poll<()> = TestExecutor::poll_until_stalled(std::future::pending()).await;
+        assert_eq!(harness.reads.get(), 0);
+
+        // First internal waking sample fires at `SAMPLE_INTERVAL` and notifies `on_sampled`.
+        advance(BEFORE_DEADLINE).await;
+        let _: Poll<()> = TestExecutor::poll_until_stalled(std::future::pending()).await;
+        assert_eq!(harness.reads.get(), 1);
+        assert_eq!(harness.changed_notifications.get(), 1);
+        assert_eq!(harness.fired_alarms.borrow().len(), 1);
+
+        // A pushed battery update restarts the internal interval.
+        advance(HALF_INTERVAL).await;
+        harness.cache.publish_battery(&battery_status(NEW_LEVEL_PERCENT, VOLTAGE_UV), None);
+        advance(HALF_INTERVAL).await;
+        let _: Poll<()> = TestExecutor::poll_until_stalled(std::future::pending()).await;
+        assert_eq!(harness.reads.get(), 1);
+
+        // Next sample fires `SAMPLE_INTERVAL` after the pushed update.
+        advance(HALF_INTERVAL).await;
+        let _: Poll<()> = TestExecutor::poll_until_stalled(std::future::pending()).await;
+        assert_eq!(harness.reads.get(), 2);
+        assert_eq!(harness.changed_notifications.get(), 2);
+        assert_eq!(harness.fired_alarms.borrow().len(), 2);
+
+        // Clearing the interval withdraws the vote and cancels the armed wake alarm.
+        harness.cache.set_battery_sample_interval(None);
+        assert_eq!(harness.cache.sampling.battery_interval_votes.vote(INTERNAL_SAMPLE_VOTER), None);
+        let _: Poll<()> = TestExecutor::poll_until_stalled(std::future::pending()).await;
+        assert_eq!(harness.canceled_alarms.get(), 1);
     }
 }

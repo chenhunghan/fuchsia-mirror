@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display};
 use std::num::NonZeroU64;
 use std::pin::{Pin, pin};
-use std::str::FromStr;
 use std::{fs, io, path};
 
 use fidl::endpoints::{ProtocolMarker, RequestStream as _, Responder as _};
@@ -43,10 +42,12 @@ use fidl_fuchsia_net_matchers_ext as fnet_matchers_ext;
 use fidl_fuchsia_net_name as fnet_name;
 use fidl_fuchsia_net_ndp as fnet_ndp;
 use fidl_fuchsia_net_policy_properties as fnp_properties;
+use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
 use fidl_fuchsia_net_reachability as freachability;
 use fidl_fuchsia_net_resources as fnet_resources;
 use fidl_fuchsia_net_routes_admin as fnet_routes_admin;
 use fidl_fuchsia_net_routes_ext as fnet_routes_ext;
+use fidl_fuchsia_posix_socket as fposix_socket;
 use fuchsia_async as fasync;
 
 use anyhow::{Context as _, anyhow, format_err};
@@ -190,46 +191,6 @@ pub(crate) struct DnsServerUpdate {
 /// are started or stopped.
 type DnsServerWatchers<'a> =
     async_utils::stream::StreamMap<DnsServersUpdateSource, BoxStream<'a, DnsServerUpdate>>;
-
-/// Defines log levels.
-#[derive(Debug, Copy, Clone)]
-pub struct LogLevel(diagnostics_log::Severity);
-
-impl Default for LogLevel {
-    fn default() -> Self {
-        Self(diagnostics_log::Severity::Info)
-    }
-}
-
-impl FromStr for LogLevel {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, anyhow::Error> {
-        match s.to_uppercase().as_str() {
-            "TRACE" => Ok(Self(diagnostics_log::Severity::Trace)),
-            "DEBUG" => Ok(Self(diagnostics_log::Severity::Debug)),
-            "INFO" => Ok(Self(diagnostics_log::Severity::Info)),
-            "WARN" => Ok(Self(diagnostics_log::Severity::Warn)),
-            "ERROR" => Ok(Self(diagnostics_log::Severity::Error)),
-            "FATAL" => Ok(Self(diagnostics_log::Severity::Fatal)),
-            _ => Err(anyhow::anyhow!("unrecognized log level = {}", s)),
-        }
-    }
-}
-
-/// Network Configuration tool.
-///
-/// Configures network components in response to events.
-#[derive(argh::FromArgs, Debug)]
-struct Opt {
-    /// minimum severity for logs
-    #[argh(option, default = "Default::default()")]
-    min_severity: LogLevel,
-
-    /// config file to use
-    #[argh(option, default = "\"/netcfg-config/netcfg_default.json5\".to_string()")]
-    config_data: String,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -476,6 +437,7 @@ struct InterfaceState {
     device_class: DeviceClass,
     config: InterfaceConfigState,
     provisioning: interface::ProvisioningType,
+    metric: u32,
 }
 
 /// State for an interface.
@@ -518,6 +480,7 @@ impl InterfaceState {
         device_class: DeviceClass,
         dhcpv6_pd_config: Option<fnet_dhcpv6::PrefixDelegationConfig>,
         provisioning: interface::ProvisioningType,
+        metric: u32,
     ) -> Result<Self, errors::Error> {
         let interface_admin_auth =
             control.get_authorization_for_interface().await.map_err(|e| {
@@ -537,6 +500,7 @@ impl InterfaceState {
             }),
             device_class,
             provisioning,
+            metric,
         })
     }
 
@@ -545,24 +509,28 @@ impl InterfaceState {
         control: fidl_fuchsia_net_interfaces_ext::admin::Control,
         device_class: DeviceClass,
         provisioning: interface::ProvisioningType,
+        metric: u32,
     ) -> Self {
         Self {
             control,
             device_class,
             config: InterfaceConfigState::WlanAp(WlanApInterfaceState { interface_naming_id }),
             provisioning,
+            metric,
         }
     }
 
     fn new_blackhole(
         control: fidl_fuchsia_net_interfaces_ext::admin::Control,
         provisioning: interface::ProvisioningType,
+        metric: u32,
     ) -> Self {
         Self {
             control,
             device_class: DeviceClass::Blackhole,
             config: InterfaceConfigState::Blackhole(BlackholeInterfaceState),
             provisioning,
+            metric,
         }
     }
 
@@ -597,7 +565,7 @@ impl InterfaceState {
         dhcpv4_configuration_streams: &mut dhcpv4::ConfigurationStreamMap,
         dhcpv6_prefixes_streams: &mut dhcpv6::PrefixesStreamMap,
     ) -> Result<(), errors::Error> {
-        let Self { config, provisioning, device_class, .. } = self;
+        let Self { config, provisioning, device_class, metric, .. } = self;
         let fnet_interfaces_ext::Properties {
             online,
             has_default_ipv4_route,
@@ -628,11 +596,13 @@ impl InterfaceState {
                     network::NetworkId::fuchsia(properties.id),
                     network::NetworkUpdate::Properties(network::NetworkPropertiesChange {
                         added: true,
-                        delegated: None,
+                        source_properties: network::NetworkSourceProperties::Fuchsia(
+                            network::FuchsiaNetworkProperties { metric: *metric },
+                        ),
                         dns_servers: None,
                         connectivity_state: None,
-                        name: Some(properties.name.clone()),
-                        network_type: Some((*device_class).into()),
+                        name: properties.name.clone(),
+                        network_type: (*device_class).into(),
                     }),
                 ))
                 .await;
@@ -686,6 +656,7 @@ impl InterfaceState {
 
 /// Network Configuration state.
 pub struct NetCfg<'a> {
+    svc_dir: fio::DirectoryProxy,
     lookup_admin: fnet_name::LookupAdminProxy,
     filter_control: FilterControl,
     interface_state: fnet_interfaces::StateProxy,
@@ -783,6 +754,46 @@ async fn optional_svc_connect<S: fidl::endpoints::DiscoverableProtocolMarker>(
         Ok(None)
     } else {
         req.connect().context("error connecting to service").map(Some)
+    }
+}
+
+/// Handles a `SocketProviderConnector` request as a pass-through for
+/// configurations without a means of aligning sockets with a network.
+///
+/// Forwards requests without a `network_token` directly to
+/// `fuchsia.posix.socket/Provider`, and closes requests that specify a
+/// `network_token` with `ZX_ERR_NOT_SUPPORTED`.
+fn handle_socket_provider_connector_request(
+    svc_dir: &fio::DirectoryProxy,
+    res: Result<fnp_socketproxy::SocketProviderConnectorRequest, fidl::Error>,
+) {
+    match res {
+        Ok(fnp_socketproxy::SocketProviderConnectorRequest::Connect {
+            options,
+            provider,
+            control_handle: _,
+        }) => {
+            if options.network_token.is_some() {
+                warn!(
+                    "Rejecting SocketProviderConnector.Connect with NetworkToken: \
+                    aligning sockets with a specific network is not supported"
+                );
+                if let Err(e) = provider.close_with_epitaph(zx::Status::NOT_SUPPORTED) {
+                    warn!("Failed to close fuchsia.posix.socket/Provider with epitaph: {e:?}");
+                }
+            } else if let Err(e) =
+                new_protocol_connector_in_dir::<fposix_socket::ProviderMarker>(svc_dir)
+                    .connect_with(provider.into_channel())
+            {
+                warn!("Failed to forward fuchsia.posix.socket/Provider to netstack: {e:?}");
+            }
+        }
+        Ok(fnp_socketproxy::SocketProviderConnectorRequest::_UnknownMethod { ordinal, .. }) => {
+            warn!("Received unknown method with ordinal {ordinal} on SocketProviderConnector");
+        }
+        Err(e) => {
+            error!("fuchsia.net.policy.socketproxy/SocketProviderConnector request error: {e:?}");
+        }
     }
 }
 
@@ -907,6 +918,7 @@ enum RequestStream {
     DelegatedNetworks(fnp_properties::NetworkRegistryRequestStream),
     NetworkTokenResolver(fnp_properties::NetworkTokenResolverRequestStream),
     PrivilegedNetworkLookup(fnp_properties::PrivilegedNetworkLookupRequestStream),
+    SocketProviderConnector(fnp_socketproxy::SocketProviderConnectorRequestStream),
     Reachability(freachability::MonitorRequestStream),
 }
 
@@ -920,6 +932,9 @@ impl std::fmt::Debug for RequestStream {
             RequestStream::DelegatedNetworks(_) => write!(f, "DelegatedNetworks"),
             RequestStream::NetworkTokenResolver(_) => write!(f, "NetworkTokenResolver"),
             RequestStream::PrivilegedNetworkLookup(_) => write!(f, "PrivilegedNetworkLookup"),
+            RequestStream::SocketProviderConnector(_) => {
+                write!(f, "SocketProviderConnector")
+            }
             RequestStream::Reachability(_) => write!(f, "Reachability"),
         }
     }
@@ -972,6 +987,9 @@ enum ProvisioningEvent {
     Dhcpv6Prefixes(Option<(InterfaceId, Result<Vec<fnet_dhcpv6::Prefix>, fidl::Error>)>),
     DnsServerWatcherRequest(
         (dns::ConnectionId, Result<fnet_name::DnsServerWatcherRequest, fidl::Error>),
+    ),
+    SocketProviderConnectorRequest(
+        Result<fnp_socketproxy::SocketProviderConnectorRequest, fidl::Error>,
     ),
     MasqueradeEvent(masquerade::Event),
     NdpDnsExpired(InterfaceId, net_types::ip::Ipv6Addr),
@@ -1044,6 +1062,7 @@ impl<'a> NetCfg<'a> {
             .context("failed to initialize network registry inspect")?;
 
         Ok(NetCfg {
+            svc_dir,
             lookup_admin,
             filter_control,
             interface_state,
@@ -1213,14 +1232,12 @@ impl<'a> NetCfg<'a> {
                     }
                 }
             }
-            // TODO(https://fxbug.dev/475916525): Update the name of this source once these
-            // servers are provided directly by Starnix.
-            // SocketProxy DNS updates are pushed directly via the NetworkRegistry protocol
+            // Delegated DNS updates are pushed directly via the NetworkRegistry protocol
             // rather than an active DNS server watcher stream. Thus, the watcher completion
             // handler is a no-op.
-            // We need to maintain this variant to allow for SocketProxy DNS servers to be
+            // We need to maintain this variant to allow for Delegated DNS servers to be
             // prioritized in dns-resolver over other DNS server sources.
-            DnsServersUpdateSource::SocketProxy => Ok(()),
+            DnsServersUpdateSource::Delegated => Ok(()),
         }
     }
 
@@ -1244,8 +1261,8 @@ impl<'a> NetCfg<'a> {
         let mut masquerade_handler = MasqueradeHandler::default();
 
         let mut fs = ServiceFs::new_local();
-        let _: &mut ServiceFsDir<'_, _> = fs
-            .dir("svc")
+        let mut outgoing_svc = fs.dir("svc");
+        let _: &mut ServiceFsDir<'_, _> = outgoing_svc
             .add_fidl_service(RequestStream::Dhcpv6PrefixProvider)
             .add_fidl_service(RequestStream::Masquerade)
             .add_fidl_service(RequestStream::DnsServerWatcher)
@@ -1254,6 +1271,11 @@ impl<'a> NetCfg<'a> {
             .add_fidl_service(RequestStream::NetworkTokenResolver)
             .add_fidl_service(RequestStream::PrivilegedNetworkLookup)
             .add_fidl_service(RequestStream::Reachability);
+        // Only serve the pass-through connector when per-network socket proxying is disabled.
+        if !self.enable_socket_proxy {
+            let _: &mut ServiceFsDir<'_, _> =
+                outgoing_svc.add_fidl_service(RequestStream::SocketProviderConnector);
+        }
 
         let _inspect_server_task =
             inspect_runtime::publish(&self.inspector, inspect_runtime::PublishOptions::default())
@@ -1265,6 +1287,10 @@ impl<'a> NetCfg<'a> {
 
         let mut dhcpv6_prefix_provider_requests =
             futures::stream::SelectAll::<fnet_dhcpv6::PrefixProviderRequestStream>::new();
+
+        let mut socket_provider_connector_requests = futures::stream::SelectAll::<
+            fnp_socketproxy::SocketProviderConnectorRequestStream,
+        >::new();
 
         // Maintain a queue of masquerade events to be dispatched to the masquerade handler.
         let mut masquerade_events = futures::stream::SelectAll::<masquerade::EventStream>::new();
@@ -1387,6 +1413,11 @@ impl<'a> NetCfg<'a> {
                         ProvisioningEvent::DnsServerWatcherRequest(req)
                     )
                 }
+                req = socket_provider_connector_requests.select_next_some() => {
+                    Event::ProvisioningEvent(
+                        ProvisioningEvent::SocketProviderConnectorRequest(req)
+                    )
+                }
                 masq_event = masquerade_events.select_next_some() => {
                     Event::ProvisioningEvent(
                         ProvisioningEvent::MasqueradeEvent(
@@ -1455,7 +1486,7 @@ impl<'a> NetCfg<'a> {
                             dns_servers: Some(dns_servers),
                         }) => {
                             self.update_dns_servers(
-                                dns_server_watcher::DnsServersUpdateSource::SocketProxy,
+                                dns_server_watcher::DnsServersUpdateSource::Delegated,
                                 dns_servers,
                             )
                             .await;
@@ -1471,6 +1502,7 @@ impl<'a> NetCfg<'a> {
                         event,
                         &mut dns_watchers,
                         &mut dhcpv6_prefix_provider_requests,
+                        &mut socket_provider_connector_requests,
                         &mut dns_server_watcher_incoming_requests,
                         &mut masquerade_handler,
                         &mut masquerade_events,
@@ -1487,6 +1519,9 @@ impl<'a> NetCfg<'a> {
         dns_watchers: &mut DnsServerWatchers<'_>,
         dhcpv6_prefix_provider_requests: &mut futures::stream::SelectAll<
             fnet_dhcpv6::PrefixProviderRequestStream,
+        >,
+        socket_provider_connector_requests: &mut futures::stream::SelectAll<
+            fnp_socketproxy::SocketProviderConnectorRequestStream,
         >,
         dns_server_watcher_incoming_requests: &mut dns::DnsServerWatcherRequestStreams,
         masquerade_handler: &mut MasqueradeHandler,
@@ -1585,7 +1620,7 @@ impl<'a> NetCfg<'a> {
                     DnsServersUpdateSource::Default
                     | DnsServersUpdateSource::Dhcpv4 { .. }
                     | DnsServersUpdateSource::Dhcpv6 { .. }
-                    | DnsServersUpdateSource::SocketProxy => {
+                    | DnsServersUpdateSource::Delegated => {
                         self.update_dns_servers(source, servers).await
                     }
                 };
@@ -1625,6 +1660,9 @@ impl<'a> NetCfg<'a> {
                     RequestStream::PrivilegedNetworkLookup(req_stream) => {
                         self.netpol_networks_service.add_stream(req_stream);
                     }
+                    RequestStream::SocketProviderConnector(req_stream) => {
+                        socket_provider_connector_requests.push(req_stream);
+                    }
                     RequestStream::Reachability(req_stream) => {
                         self.netpol_networks_service.add_stream(req_stream);
                     }
@@ -1655,6 +1693,7 @@ impl<'a> NetCfg<'a> {
                                      device_class: _,
                                      config,
                                      provisioning: _,
+                                     metric: _,
                                  }| {
                                     match config {
                                         InterfaceConfigState::Host(HostInterfaceState {
@@ -1770,6 +1809,9 @@ impl<'a> NetCfg<'a> {
             }
             ProvisioningEvent::DnsServerWatcherRequest((id, req)) => {
                 self.dns_server_watch_responders.handle_request(id, req, &self.dns_servers)?;
+            }
+            ProvisioningEvent::SocketProviderConnectorRequest(res) => {
+                handle_socket_provider_connector_request(&self.svc_dir, res);
             }
             ProvisioningEvent::MasqueradeEvent(event) => {
                 masquerade_handler
@@ -2136,6 +2178,7 @@ impl<'a> NetCfg<'a> {
                             }),
                         control,
                         provisioning,
+                        metric,
                     }) => {
                         if previous_online.is_some() {
                             Self::handle_dhcpv4_client_update(
@@ -2175,11 +2218,16 @@ impl<'a> NetCfg<'a> {
                                             network::NetworkUpdate::Properties(
                                                 network::NetworkPropertiesChange {
                                                     added: true,
-                                                    delegated: None,
+                                                    source_properties:
+                                                        network::NetworkSourceProperties::Fuchsia(
+                                                            network::FuchsiaNetworkProperties {
+                                                                metric: *metric,
+                                                            },
+                                                        ),
                                                     dns_servers: None,
                                                     connectivity_state: None,
-                                                    name: Some(name.clone()),
-                                                    network_type: Some((*device_class).into()),
+                                                    name: name.clone(),
+                                                    network_type: (*device_class).into(),
                                                 },
                                             ),
                                         ))
@@ -2192,7 +2240,7 @@ impl<'a> NetCfg<'a> {
                                         dns_servers,
                                         dns_server_watch_responders,
                                         netpol_networks_service,
-                                        dns_server_watcher::DnsServersUpdateSource::SocketProxy,
+                                        dns_server_watcher::DnsServersUpdateSource::Delegated,
                                         updated_dns,
                                     )
                                     .await;
@@ -2217,7 +2265,7 @@ impl<'a> NetCfg<'a> {
                                         dns_servers,
                                         dns_server_watch_responders,
                                         netpol_networks_service,
-                                        dns_server_watcher::DnsServersUpdateSource::SocketProxy,
+                                        dns_server_watcher::DnsServersUpdateSource::Delegated,
                                         updated_dns,
                                     )
                                     .await;
@@ -2692,7 +2740,7 @@ impl<'a> NetCfg<'a> {
                 })
             })?;
         let interface_state =
-            InterfaceState::new_blackhole(control, interface::ProvisioningType::Local);
+            InterfaceState::new_blackhole(control, interface::ProvisioningType::Local, metric);
 
         assert_matches!(
             self.interface_states
@@ -2714,7 +2762,7 @@ impl<'a> NetCfg<'a> {
         let device_info =
             device_instance.get_device_info().await.context("error getting device info and MAC")?;
 
-        let DeviceInfo { mac, port_class, topological_path } = &device_info;
+        let DeviceInfo { mac, port_class, bus_info } = &device_info;
 
         let mac = mac.ok_or_else(|| {
             warn!("devices without mac address not supported yet");
@@ -2734,8 +2782,7 @@ impl<'a> NetCfg<'a> {
             );
             return Ok(());
         }
-        let device_info =
-            DeviceInfoRef { device_class, mac: &mac, topological_path: &topological_path };
+        let device_info = DeviceInfoRef { device_class, mac: &mac, bus_info };
 
         let interface_type = device_info.interface_type();
         let metric = match interface_type {
@@ -2746,17 +2793,15 @@ impl<'a> NetCfg<'a> {
             InterfaceType::Blackhole => self.interface_metrics.blackhole_metric,
         }
         .into();
-        let (interface_name, interface_naming_id) = match self
-            .interface_naming_config
-            .generate_stable_name(&topological_path, &mac, device_class)
-        {
-            Ok((name, interface_naming_id)) => (name.to_string(), interface_naming_id),
-            Err(interface::NameGenerationError::GenerationError(e)) => {
-                return Err(devices::AddDeviceError::Other(errors::Error::Fatal(
-                    e.context("error getting stable name"),
-                )));
-            }
-        };
+        let (interface_name, interface_naming_id) =
+            match self.interface_naming_config.generate_stable_name(bus_info, &mac, device_class) {
+                Ok((name, interface_naming_id)) => (name.to_string(), interface_naming_id),
+                Err(interface::NameGenerationError::GenerationError(e)) => {
+                    return Err(devices::AddDeviceError::Other(errors::Error::Fatal(
+                        e.context("error getting stable name"),
+                    )));
+                }
+            };
 
         info!(
             "adding {device_instance:?} to stack with name = {interface_name} and \
@@ -2796,6 +2841,7 @@ impl<'a> NetCfg<'a> {
             &device_info,
             dns_watchers,
             provisioning,
+            metric,
         )
         .await
         .context("error configuring ethernet interface")
@@ -2816,6 +2862,7 @@ impl<'a> NetCfg<'a> {
         device_info: &DeviceInfoRef<'_>,
         dns_watchers: &mut DnsServerWatchers<'_>,
         provisioning_type: ProvisioningType,
+        metric: u32,
     ) -> Result<(), errors::Error> {
         let ForwardedDeviceClasses { ipv4, ipv6 } = &self.forwarded_device_classes;
         let ipv4_forwarding = ipv4.contains(&device_info.device_class);
@@ -2869,6 +2916,7 @@ impl<'a> NetCfg<'a> {
                     control,
                     device_info.device_class,
                     provisioning_type,
+                    metric,
                 )),
             };
 
@@ -2929,6 +2977,7 @@ impl<'a> NetCfg<'a> {
                             device_info.device_class,
                             dhcpv6_pd_config,
                             provisioning_type,
+                            metric,
                         )
                         .await?,
                     )
@@ -3639,10 +3688,10 @@ impl<'a> NetCfg<'a> {
                 errors::Error::NonFatal(e) | errors::Error::Fatal(e) => e,
             })?;
 
-        let DeviceInfo { mac, port_class: _, topological_path } = &device_info;
+        let DeviceInfo { mac, port_class: _, bus_info } = &device_info;
         let mac = mac.ok_or_else(|| anyhow!("devices without mac not supported"))?;
 
-        Ok(interface::generate_identifier(&mac, topological_path))
+        Ok(interface::generate_identifier(&mac, bus_info))
     }
 
     async fn handle_ndp_dns_expired(
@@ -3671,14 +3720,16 @@ impl<'a> NetCfg<'a> {
 }
 
 pub async fn run() -> Result<(), anyhow::Error> {
-    let opt: Opt = argh::from_env();
-    let Opt { min_severity: LogLevel(min_severity), config_data } = &opt;
+    let structured_config = netcfg_structured_config::Config::take_from_startup_handle();
+    let netcfg_structured_config::Config { config_data, min_severity, redact_network_identifiers } =
+        &structured_config;
+    let min_severity: diagnostics_log::Severity = min_severity.parse()?;
 
     // Use the diagnostics_log library directly rather than e.g. the #[fuchsia::main] macro on
-    // the main function, so that we can specify the logging severity level at runtime based on a
-    // command line argument.
+    // the main function, so that we can specify the logging severity level at runtime based on
+    // structured config.
     diagnostics_log::initialize(
-        diagnostics_log::PublishOptions::default().minimum_severity(*min_severity),
+        diagnostics_log::PublishOptions::default().minimum_severity(min_severity),
     )?;
 
     // Enable redaction of MAC addresses in logs and Inspect before anything
@@ -3687,14 +3738,12 @@ pub async fn run() -> Result<(), anyhow::Error> {
     // starts so that the identifiers it logs are hashed rather than masked.
     // TODO(https://fxbug.dev/576752502): Initialize the redactor synchronously
     // once the salt is provided at startup.
-    let netcfg_structured_config::Config { redact_network_identifiers } =
-        netcfg_structured_config::Config::take_from_startup_handle();
-    if redact_network_identifiers {
+    if *redact_network_identifiers {
         redactor_client::enable().await;
     }
 
     info!("starting");
-    debug!("starting with options = {:?}", opt);
+    debug!("starting with structured_config = {structured_config:?}");
 
     let Config {
         dns_config: DnsConfig { servers },
@@ -3978,6 +4027,7 @@ mod tests {
     }
 
     fn test_netcfg(args: NetcfgTestArgs) -> Result<(NetCfg<'static>, ServerEnds), anyhow::Error> {
+        let (svc_dir, _svc_dir_server) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
         let (lookup_admin, lookup_admin_server) =
             fidl::endpoints::create_proxy::<fnet_name::LookupAdminMarker>();
         let (filter_control, _filter_server) = crate::masquerade::test::MockFilter::default()
@@ -4021,6 +4071,7 @@ mod tests {
 
         Ok((
             NetCfg {
+                svc_dir,
                 lookup_admin,
                 filter_control,
                 interface_state,
@@ -4185,10 +4236,9 @@ mod tests {
     }
 
     const TEST_MAC: fidl_fuchsia_net::MacAddress = fidl_mac!("00:01:02:03:04:05");
-    const TEST_TOPOLOGICAL_PATH: &'static str = "/dev/foo/bar/network-device";
 
     fn test_interface_naming_id() -> interface::InterfaceNamingIdentifier {
-        interface::generate_identifier(&TEST_MAC.into(), TEST_TOPOLOGICAL_PATH)
+        interface::generate_identifier(&TEST_MAC.into(), &[])
     }
 
     async fn expect_get_interface_auth(control: &mut fnet_interfaces_admin::ControlRequestStream) {
@@ -4239,6 +4289,7 @@ mod tests {
                 port_class.try_into().unwrap(),
                 None,
                 interface::ProvisioningType::Local,
+                Metric::default().into(),
             ),
             expect_get_interface_auth(&mut control_request_stream)
         );
@@ -4402,6 +4453,7 @@ mod tests {
             control_client,
             port_class.try_into().unwrap(),
             interface::ProvisioningType::Local,
+            Metric::default().into(),
         );
         assert_matches::assert_matches!(
             netcfg.interface_states.insert(INTERFACE_ID, wlan_ap),
@@ -4498,6 +4550,7 @@ mod tests {
                 port_class.try_into().unwrap(),
                 None,
                 interface::ProvisioningType::Local,
+                Metric::default().into(),
             ),
             expect_get_interface_auth(&mut control)
         );
@@ -4827,6 +4880,7 @@ mod tests {
                         interface_naming_id: test_interface_naming_id(),
                     }),
                     provisioning: interface::ProvisioningType::Local,
+                    metric: Metric::default().into(),
                 },
             ),
             None
@@ -4887,6 +4941,7 @@ mod tests {
             port_class.try_into().unwrap(),
             None,
             interface::ProvisioningType::Local,
+            Metric::default().into(),
         );
         let mut control = control_server_end.into_stream();
         let (new_host_result, ()) =
@@ -5033,6 +5088,7 @@ mod tests {
             port_class.try_into().unwrap(),
             None,
             interface::ProvisioningType::Local,
+            Metric::default().into(),
         );
         let mut control = control_server_end.into_stream();
         let (new_host_result, ()) =
@@ -5172,6 +5228,7 @@ mod tests {
                 port_class.try_into().unwrap(),
                 None,
                 interface::ProvisioningType::Local,
+                Metric::default().into(),
             ),
             expect_get_interface_auth(&mut control_request_stream)
         );
@@ -5460,7 +5517,8 @@ mod tests {
                                 test_interface_naming_id(),
                                 control,
                                 device_class,
-                                interface::ProvisioningType::Local
+                                interface::ProvisioningType::Local,
+                                Metric::default().into(),
                             )
                         ),
                         None
@@ -5486,6 +5544,7 @@ mod tests {
                             device_class,
                             None,
                             interface::ProvisioningType::Local,
+                            Metric::default().into(),
                         ),
                         expect_get_interface_auth(&mut control_request_stream)
                     );
@@ -5903,6 +5962,7 @@ mod tests {
                     upstream
                         .then_some(fnet_dhcpv6::PrefixDelegationConfig::Empty(fnet_dhcpv6::Empty)),
                     interface::ProvisioningType::Local,
+                    Metric::default().into(),
                 ),
                 expect_get_interface_auth(&mut control_request_stream)
             );
@@ -6034,6 +6094,7 @@ mod tests {
                     ALLOWED_UPSTREAM_DEVICE_CLASS,
                     None,
                     *provisioning_action,
+                    Metric::default().into(),
                 ),
                 expect_get_interface_auth(&mut control_request_stream)
             );
@@ -6987,6 +7048,7 @@ mod tests {
                         interface_naming_id: test_interface_naming_id(),
                     }),
                     provisioning: interface::ProvisioningType::Local,
+                    metric: Metric::default().into(),
                 },
             ),
             None
@@ -7071,5 +7133,68 @@ mod tests {
         assert_eq!(netcfg.ndp_dns_servers.len(), 1);
         assert_eq!(netcfg.ndp_dns_servers.get(&(IFACE_ID, router_a)), None);
         assert!(netcfg.ndp_dns_servers.contains_key(&(IFACE_ID, router_b)));
+    }
+
+    #[fuchsia::test]
+    async fn test_passthrough_socket_provider_connector() {
+        let mut fs = ServiceFs::new_local();
+        let _: &mut ServiceFs<_> =
+            fs.add_fidl_service(|stream: fposix_socket::ProviderRequestStream| stream);
+        let (svc_dir, svc_server) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+        let _: &mut ServiceFs<_> = fs.serve_connection(svc_server).expect("serve svc_dir");
+
+        let (connector, mut connector_stream) = fidl::endpoints::create_proxy_and_stream::<
+            fnp_socketproxy::SocketProviderConnectorMarker,
+        >();
+
+        // Providing any NetworkToken closes the provider channel with NOT_SUPPORTED.
+        let (token_handle, _peer) = zx::EventPair::create();
+        let (rejected_provider, rejected_server) =
+            fidl::endpoints::create_proxy::<fposix_socket::ProviderMarker>();
+        connector
+            .connect(
+                fnp_socketproxy::SocketProviderOptions {
+                    network_token: Some(fnp_properties::NetworkToken { value: token_handle }),
+                    ..Default::default()
+                },
+                rejected_server,
+            )
+            .expect("connect with token");
+        let req = connector_stream.next().await.expect("connector request");
+        handle_socket_provider_connector_request(&svc_dir, req);
+        assert_matches!(
+            rejected_provider.take_event_stream().next().await,
+            Some(Err(fidl::Error::ClientChannelClosed { epitaph, .. }))
+                if epitaph == zx::Status::NOT_SUPPORTED
+        );
+
+        // Omitting the NetworkToken forwards the provider channel to fuchsia.posix.socket.Provider.
+        let (forwarded_provider, forwarded_server) =
+            fidl::endpoints::create_proxy::<fposix_socket::ProviderMarker>();
+        connector
+            .connect(fnp_socketproxy::SocketProviderOptions::default(), forwarded_server)
+            .expect("connect without token");
+        let req = connector_stream.next().await.expect("connector request");
+        handle_socket_provider_connector_request(&svc_dir, req);
+
+        // Send a Provider request over the vended channel and answer it from the mock
+        // ServiceFs to verify that netcfg connected the server end to
+        // fuchsia.posix.socket.Provider in svc_dir.
+        let provider_server_fut = async {
+            let mut provider_stream = fs.next().await.expect("forwarded Provider connection");
+            match provider_stream.next().await.expect("Provider request").expect("fidl ok") {
+                fposix_socket::ProviderRequest::InterfaceNameToIndex { name, responder } => {
+                    assert_eq!(name, "lo");
+                    responder.send(Ok(1)).expect("send response");
+                }
+                other => panic!("unexpected Provider request: {other:?}"),
+            }
+        };
+        let ((), idx_res) = futures::future::join(
+            provider_server_fut,
+            forwarded_provider.interface_name_to_index("lo"),
+        )
+        .await;
+        assert_eq!(idx_res.expect("fidl call"), Ok(1));
     }
 }

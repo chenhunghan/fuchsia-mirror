@@ -360,10 +360,10 @@ func isGNOnlyBazelAttr(kind, attr string) bool {
 	switch kind {
 	case "fx_cc_binary", "fx_cc_test_binary", "cc_binary_host_tool", "idk_cc_binary_host_tool", "host_cc_test":
 		return attr == "gn_output_name" || attr == "public_configs" || attr == "disable_syslog_backend"
-	case "fx_cc_library", "cc_shared_library_zx", "cc_source_library_zx", "cc_static_library_zx":
+	case "fx_cc_library", "fx_cc_shared_library_zx", "fx_cc_source_library_zx", "fx_cc_static_library_zx":
 		return attr == "configs" || attr == "public_configs"
 	case "fx_cc_shared_library":
-		return attr == "public_configs"
+		return attr == "gn_public_configs" || attr == "gn_public_deps"
 	case "fidl_library":
 		return attr == "additional_cpp_configs" || attr == "non_fidl_deps"
 	case "rustc_library", "rustc_dylib":

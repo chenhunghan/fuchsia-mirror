@@ -2,16 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fuchsia_bluetooth::types::Channel;
 use packet_encoding::{Decodable, Encodable};
 
 use crate::frame::FrameParseError;
 
 /// The maximum size (in bytes) of a Test Command pattern.
 /// This is an arbitrarily chosen constant, and is not defined in the RFCOMM/GSM specs.
-/// This length is chosen as the maximum amount of data that can fit in a single
-/// packet of the underlying Channel.
-const TEST_COMMAND_MAX_PATTERN_LENGTH: usize = Channel::DEFAULT_MAX_TX;
+/// Chosen to match the default L2CAP MTU (Bluetooth Core Spec Vol. 3, Part A §5.1).
+const TEST_COMMAND_MAX_PATTERN_LENGTH: usize = 672;
 
 /// The Test Command is used to test the connection between two entities in a Session.
 /// The command can be arbitrarily sized, and contains a pattern that must be echoed

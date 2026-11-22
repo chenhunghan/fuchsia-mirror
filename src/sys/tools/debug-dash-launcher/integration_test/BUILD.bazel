@@ -2,17 +2,36 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# `debug-dash-launcher-test` stays in BUILD.gn above the bazel2gn sentinel
-# because it packages `//src/bringup/bin/ptysvc:component` (which is GN-only).
+test_suite(
+    name = "tests",
+    tests = [":debug-dash-launcher-test"],
+    visibility = ["//src/sys:__pkg__"],
+)
+
 rustc_test(
     name = "test_bin",
     srcs = ["src/lib.rs"],
+    # Preserves GN `output_name = "debug_dash_launcher_test"` expected by
+    # `meta/test.cml`.
     crate_name = "debug_dash_launcher_test",
     edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//sdk/fidl/fuchsia.dash:fuchsia.dash_rust",
         "//sdk/rust/zx",
@@ -20,4 +39,48 @@ rustc_test(
         "//src/lib/fuchsia-component",
         "//third_party/rust_crates/vendor:futures",
     ],
+)
+
+fx_packaged_binary(
+    name = "test_bin_packaged_bin",
+    testonly = True,
+    binary = ":test_bin",
+    binary_name = "debug_dash_launcher_test",
+)
+
+fx_component_manifest(
+    name = "debug-dash-launcher-test-manifest",
+    testonly = True,
+    component_name = "debug-dash-launcher-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/test.cml",
+)
+
+fx_test_component(
+    name = "debug-dash-launcher-test-component",
+    compiled_manifest = ":debug-dash-launcher-test-manifest",
+    deps = [
+        ":test_bin_packaged_bin",
+        "//src/developer/zxsh:sh",
+    ],
+)
+
+fx_package(
+    name = "debug-dash-launcher-test-package",
+    package_name = "debug-dash-launcher-test",
+    components = [
+        "//src/bringup/bin/ptysvc:component",
+        "//src/sys/tools/debug-dash-launcher:component",
+        "//src/sys/tools/debug-dash-launcher/integration_test/mock_resolver",
+    ],
+    test_components = [":debug-dash-launcher-test-component"],
+)
+
+fx_test(
+    name = "debug-dash-launcher-test",
+    package = ":debug-dash-launcher-test-package",
 )

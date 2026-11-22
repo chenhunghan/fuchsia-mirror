@@ -1,0 +1,171 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# The definitions in BUILD.gn are not converted by bazel2gn (due to
+# target(default_library_type, ...), version_script ldflags, and GN-only unit
+# test targets that link private symbols directly via :re2_source). Keep the
+# library targets manually synchronized.
+#
+# GN builds `re2` via `default_library_type`: a shared library (libre2.so) on
+# Fuchsia and a static archive on host. `:re2` mirrors this by resolving to
+# `:re2_import` (wrapping `:re2_shared`) on Fuchsia and `:re2_static` on host.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+
+package(default_applicable_licenses = [
+    ":license",
+    ":license_rune",
+])
+
+license(
+    name = "license",
+    package_name = "re2",
+    license_kinds = ["@rules_license//licenses/spdx:BSD-3-Clause"],
+    license_text = "src/LICENSE",
+)
+
+# Covers src/util/rune.cc and src/util/utf.h (see README.fuchsia).
+license(
+    name = "license_rune",
+    package_name = "re2",
+    license_kinds = ["@rules_license//licenses/spdx:X11"],
+    license_text = "NOTICE.fuchsia",
+)
+
+# LINT.IfChange
+alias(
+    name = "re2",
+    actual = select({
+        "@platforms//os:fuchsia": ":re2_import",
+        "//conditions:default": ":re2_static",
+    }),
+    visibility = ["//:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "re2_static",
+    srcs = [
+        "src/re2/bitmap256.cc",
+        "src/re2/bitmap256.h",
+        "src/re2/bitstate.cc",
+        "src/re2/compile.cc",
+        "src/re2/dfa.cc",
+        "src/re2/filtered_re2.cc",
+        "src/re2/mimics_pcre.cc",
+        "src/re2/nfa.cc",
+        "src/re2/onepass.cc",
+        "src/re2/parse.cc",
+        "src/re2/perl_groups.cc",
+        "src/re2/pod_array.h",
+        "src/re2/prefilter.cc",
+        "src/re2/prefilter.h",
+        "src/re2/prefilter_tree.cc",
+        "src/re2/prefilter_tree.h",
+        "src/re2/prog.cc",
+        "src/re2/prog.h",
+        "src/re2/re2.cc",
+        "src/re2/regexp.cc",
+        "src/re2/regexp.h",
+        "src/re2/set.cc",
+        "src/re2/simplify.cc",
+        "src/re2/sparse_array.h",
+        "src/re2/sparse_set.h",
+        "src/re2/tostring.cc",
+        "src/re2/unicode_casefold.cc",
+        "src/re2/unicode_casefold.h",
+        "src/re2/unicode_groups.cc",
+        "src/re2/unicode_groups.h",
+        "src/re2/walker-inl.h",
+        "src/util/rune.cc",
+        "src/util/strutil.cc",
+        "src/util/strutil.h",
+        "src/util/utf.h",
+    ],
+    build_flags = [":re2_skipped_warnings"],
+    # Ensure symbols are not hidden at compile time; :re2_shared restricts the
+    # exported dynamic symbol set using src/libre2.symbols.
+    disable_build_flags = ["//build/config:symbol_visibility_hidden"],
+    implementation_deps = [
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:fixed_array",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/container:inlined_vector",
+        "@abseil-cpp//absl/hash",
+        "@abseil-cpp//absl/log:absl_check",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/types:optional",
+        "@abseil-cpp//absl/types:span",
+    ],
+    deps = [":headers"],
+    # Link every object into :re2_shared on Fuchsia; keep a plain static
+    # archive on host so unused translation units are not whole-archived.
+    alwayslink = select({
+        "@platforms//os:fuchsia": True,
+        "//conditions:default": False,
+    }),
+)
+
+# Built as a shared library on Fuchsia to save production image space; see
+# fxrev.dev/532721.
+fx_cc_shared_library(
+    name = "re2_shared",
+    additional_linker_inputs = ["src/libre2.symbols"],
+    shared_lib_name = "libre2.so",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    user_link_flags = ["-Wl,--version-script=$(location src/libre2.symbols)"],
+    deps = [":re2_static"],
+)
+
+# rules_cc and rules_rust `deps` / `link_deps` require `CcInfo`, which
+# `cc_shared_library()` does not provide, so `:re2` uses this wrapper on
+# Fuchsia.
+cc_import(
+    name = "re2_import",
+    shared_library = ":re2_shared",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":headers"],
+)
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "src/re2/filtered_re2.h",
+        "src/re2/re2.h",
+        "src/re2/set.h",
+        "src/re2/stringpiece.h",
+    ],
+    include_dir = "src",
+    deps = [
+        # re2.h has inline calls into absl/base/call_once.h and
+        # absl/strings/string_view.h, while src/libre2.symbols hides internal
+        # absl::* symbols inside libre2.so. Forwarding these here ensures
+        # consumers of :re2_import link Abseil directly, matching group("re2")
+        # in BUILD.gn.
+        "@abseil-cpp//absl/base",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+build_flags(
+    name = "re2_skipped_warnings",
+    cflags = [
+        "-Wno-conversion",
+        "-Wno-deprecated-declarations",
+        "-Wno-extra-semi",
+        "-Wno-missing-field-initializers",
+        "-Wno-tautological-unsigned-enum-zero-compare",
+        "-Wno-tautological-unsigned-zero-compare",
+        "-Wno-unused",
+        "-Wno-unused-parameter",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)

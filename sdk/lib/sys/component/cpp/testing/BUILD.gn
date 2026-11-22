@@ -5,10 +5,6 @@
 group("cpp") {
   public_deps = [
     ":cpp_library",
-
-    # TODO(https://fxbug.dev/340905704): suppress container-overflow detection
-    # due to false-positive with libc++ header code.
-    "//build/config/sanitizers:suppress-asan-container-overflow",
     "//src/lib/fuchsia-component-test:includes",
     "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
   ]
@@ -71,25 +67,30 @@ if (is_fuchsia) {
       "internal/realm.h",
     ]
     sdk_name = "sys_component_cpp_testing"
+    deps = [
+      "//sdk/fidl/fuchsia.component:fuchsia.component_cpp_hlcpp_conversion",
+      "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp_hlcpp_conversion",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_hlcpp_conversion",
+    ]
     include_base = "//sdk"
     public_configs = [ "//sdk/config" ]
     stable = true
-    visibility = [
-      ":*",
-      "//sdk/lib/driver/devicetree/testing:*",
-      "//sdk/lib/driver_test_realm/realm_builder/cpp:*",
-      "//src/media/audio/drivers/tests:*",
-      "//src/ui/scenic/lib/flatland/testing:*",
-    ]
+    visibility = [ "//*" ]
     public_deps = [
       "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
       "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+      "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
       "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_hlcpp",
+      "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_cpp",
+      "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_cpp",
       "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_hlcpp",
+      "//sdk/fidl/fuchsia.data:fuchsia.data_cpp",
       "//sdk/fidl/fuchsia.data:fuchsia.data_hlcpp",
       "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
       "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+      "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
       "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
+      "//sdk/lib/component/incoming/cpp",
       "//sdk/lib/component/outgoing/cpp",
       "//sdk/lib/fdio",
       "//sdk/lib/fidl/cpp/wire",

@@ -27,6 +27,9 @@ std::chrono::nanoseconds ParseDurationString(const std::string& duration);
 // as an integer.
 size_t ParseInstancesString(const std::string& instances_str);
 
+// Returns an unowned handle to a profile for the specified CPU affinity mask.
+zx::unowned_profile GetProfile(zx_cpu_set_t affinity);
+
 // Returns an unowned handle to a profile for the specified priority. Maintains
 // an internal map of already requested profiles and returns the same handle for
 // multiple requests for the same priority.
@@ -36,7 +39,8 @@ zx::unowned_profile GetProfile(int priority, std::optional<zx_cpu_set_t> affinit
 // Maintains an internal map of already requested profiles and returns the same
 // handle for multiple request for the same deadline parameters.
 zx::unowned_profile GetProfile(zx::duration capacity, zx::duration deadline, zx::duration period,
-                               std::optional<zx_cpu_set_t> affinity = std::nullopt);
+                               std::optional<zx_cpu_set_t> affinity = std::nullopt,
+                               bool critical = false);
 
 // Returns an unowned handle to the tracing resource. Maintains an internal handle and returns the
 // same value for multiple requests.

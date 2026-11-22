@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use anyhow::{Context as _, Result};
-use ffx_config::EnvironmentContext;
-use ffx_config::logging::{DisableableFilter, LOGGING_ID, target_levels_log};
+use ffx_config::logging::{DisableableFilter, LOG_DIR, LOGGING_ID, target_levels_log};
+use ffx_config::{ConfigError, ConfigLevel, EnvironmentContext};
 use logging::{FfxLog, FfxLogSink, FormatOpts, LogSinkTrait, TargetsFilter};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -86,15 +86,25 @@ pub struct MultiFileLogger {
     sinks: Arc<RwLock<LogSinkContainer>>,
 }
 
-fn default_log_path(ctx: &EnvironmentContext) -> Result<PathBuf> {
-    let mut log_path = log_dir(ctx)?;
-    log_path.push("fuchsia-controller");
-    log_path.set_extension("log");
-    Ok(log_path)
+fn log_path_for_dir(mut dir: PathBuf) -> PathBuf {
+    dir.push("fuchsia-controller");
+    dir.set_extension("log");
+    dir
+}
+
+fn strict_log_dir(ctx: &EnvironmentContext) -> Result<Option<PathBuf>> {
+    match ctx.query(LOG_DIR).level(Some(ConfigLevel::Runtime)).build().get::<PathBuf>(ctx) {
+        Ok(dir) if dir.as_os_str().is_empty() => {
+            anyhow::bail!("A strict context requires a non-empty `{LOG_DIR}` path");
+        }
+        Ok(dir) => Ok(Some(dir)),
+        Err(ConfigError::KeyNotFound | ConfigError::NoValueSet(_)) => Ok(None),
+        Err(e) => anyhow::bail!("Invalid `{LOG_DIR}` in strict context config: {e}"),
+    }
 }
 
 fn log_dir(ctx: &EnvironmentContext) -> Result<PathBuf> {
-    ctx.get("log.dir").map_err(Into::into)
+    ctx.get(LOG_DIR).map_err(Into::into)
 }
 
 impl MultiFileLogger {
@@ -104,15 +114,23 @@ impl MultiFileLogger {
 
     pub fn add_log_output(&self, ctx: &EnvironmentContext) -> Result<()> {
         // DO NOT RUN THIS AFTER GETTING THE LOCK.
-        let log_dir = match log_dir(ctx) {
-            Ok(l) => l,
-            // If no log dir has been set then no logging will happen.
-            Err(e) => {
-                eprintln!(">>> WARNING <<< logging is not enabled for this context: {e:?}");
-                return Ok(());
+        let log_dir = if ctx.is_strict() {
+            match strict_log_dir(ctx)? {
+                Some(l) => l,
+                // In strict mode, omitting `log.dir` is expected when file logging is unused.
+                None => return Ok(()),
+            }
+        } else {
+            match log_dir(ctx) {
+                Ok(l) => l,
+                // If no log dir has been set then no logging will happen.
+                Err(e) => {
+                    eprintln!(">>> WARNING <<< logging is not enabled for this context: {e:?}");
+                    return Ok(());
+                }
             }
         };
-        let log_path = default_log_path(ctx)?;
+        let log_path = log_path_for_dir(log_dir.clone());
         // The above code queries the config, which logs, so do not use the config after acquiring
         // the lock, else it will deadlock.
         let mut sinks = self.sinks.write().unwrap();
@@ -137,10 +155,18 @@ impl MultiFileLogger {
 
     pub fn remove_log_output(&self, ctx: &EnvironmentContext) -> Result<()> {
         // DO NOT RUN THIS AFTER GETTING THE LOCK.
-        let log_path = match default_log_path(ctx) {
-            Ok(l) => l,
-            Err(_) => return Ok(()),
+        let log_dir = if ctx.is_strict() {
+            match strict_log_dir(ctx) {
+                Ok(Some(l)) => l,
+                Ok(None) | Err(_) => return Ok(()),
+            }
+        } else {
+            match log_dir(ctx) {
+                Ok(l) => l,
+                Err(_) => return Ok(()),
+            }
         };
+        let log_path = log_path_for_dir(log_dir);
         let mut sinks = self.sinks.write().unwrap();
         // The above code queries the config, which logs, so do not use the config after acquiring
         // the lock, else it will deadlock.
@@ -241,5 +267,29 @@ mod tests {
         assert_eq!(logger.sinks.read().unwrap().keys().len(), 1);
         logger.remove_log_output(&ctx).unwrap();
         assert_eq!(logger.sinks.read().unwrap().keys().len(), 0);
+    }
+
+    #[test]
+    fn test_strict_context_without_log_dir_is_noop() {
+        let ctx = EnvironmentContext::strict(ExecutableKind::Test, ConfigMap::new()).unwrap();
+        let logger = MultiFileLogger::new();
+        logger.add_log_output(&ctx).unwrap();
+        assert!(logger.sinks.read().unwrap().is_empty());
+        logger.remove_log_output(&ctx).unwrap();
+    }
+
+    #[test]
+    fn test_strict_context_rejects_invalid_log_dir() {
+        for invalid in
+            [serde_json::json!(""), serde_json::json!(123), serde_json::json!("$SHARED_DATA/logs")]
+        {
+            let mut config = ConfigMap::new();
+            config.insert("log".to_string(), serde_json::json!({"dir": invalid}));
+            let ctx = EnvironmentContext::strict(ExecutableKind::Test, config).unwrap();
+            let logger = MultiFileLogger::new();
+            let err = logger.add_log_output(&ctx).unwrap_err();
+            assert!(err.to_string().contains(LOG_DIR), "{invalid}: {err}");
+            assert!(logger.sinks.read().unwrap().is_empty());
+        }
     }
 }

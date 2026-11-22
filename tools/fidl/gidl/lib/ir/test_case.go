@@ -84,12 +84,12 @@ const (
 	LanguageCpp               Language = "cpp"
 	LanguageDart              Language = "dart"
 	LanguageDriverCpp         Language = "driver_cpp"
-	LanguageDriverLlcpp       Language = "driver_llcpp"
+	LanguageDriverCppWire     Language = "driver_cpp_wire"
 	LanguageDynfidl           Language = "dynfidl"
 	LanguageFuchsiaController Language = "fuchsia_controller"
 	LanguageFuzzerCorpus      Language = "fuzzer_corpus"
 	LanguageHlcpp             Language = "hlcpp"
-	LanguageLlcpp             Language = "llcpp"
+	LanguageCppWire           Language = "cpp_wire"
 	LanguagePython            Language = "python"
 	LanguageReference         Language = "reference"
 	LanguageRust              Language = "rust"
@@ -102,12 +102,12 @@ func AllLanguages() []Language {
 		LanguageCpp,
 		LanguageDart,
 		LanguageDriverCpp,
-		LanguageDriverLlcpp,
+		LanguageDriverCppWire,
 		LanguageDynfidl,
 		LanguageFuchsiaController,
 		LanguageFuzzerCorpus,
 		LanguageHlcpp,
-		LanguageLlcpp,
+		LanguageCppWire,
 		LanguagePython,
 		LanguageReference,
 		LanguageRust,

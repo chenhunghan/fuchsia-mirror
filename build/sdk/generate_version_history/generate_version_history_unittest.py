@@ -6,6 +6,8 @@ import copy
 import datetime
 import unittest
 
+# The GN `python_library()` of `generate_version_history` doesn't run mypy, so
+# mypy can't see its attributes here.
 import generate_version_history
 
 FAKE_VERSION_HISTORY = {
@@ -48,7 +50,7 @@ class GenerateVersionHistoryTests(unittest.TestCase):
     def test_replace_abi_revisions(self) -> None:
         version_history = copy.deepcopy(FAKE_VERSION_HISTORY)
 
-        generate_version_history.replace_special_abi_revisions(
+        generate_version_history.replace_special_abi_revisions(  # type: ignore[attr-defined]
             version_history,
             "e821407c0ffd857326038a504d76c5e11b738608",
             datetime.datetime(2024, 7, 19, 18, 59, 39, 0, datetime.UTC),
@@ -100,7 +102,7 @@ class GenerateVersionHistoryTests(unittest.TestCase):
     def test_add_deprecated_status_field(self) -> None:
         version_history = copy.deepcopy(FAKE_VERSION_HISTORY)
 
-        generate_version_history.add_deprecated_status_field(version_history)
+        generate_version_history.add_deprecated_status_field(version_history)  # type: ignore[attr-defined]
 
         self.assertEqual(
             version_history,

@@ -215,6 +215,13 @@ void describe(const char* argument) {
     std::cout << "logical core count: " << core_count << std::endl;
   }
 
+  const auto [core_ids_status, core_ids] = client.GetLogicalCoreIds();
+  if (core_ids_status == ZX_OK) {
+    for (uint64_t id : core_ids) {
+      std::cout << " + logical core id: " << id << std::endl;
+    }
+  }
+
   const auto [relative_perf2_status, relative_perf2] = client.GetRelativePerformance2();
   if (relative_perf2_status == ZX_OK) {
     std::cout << "relative performance: " << relative_perf2 << std::endl;

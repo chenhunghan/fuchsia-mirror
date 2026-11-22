@@ -24,7 +24,7 @@ use std::sync::Arc;
 pub const SCHED_CAPACITY_SCALE: u32 = 1024;
 
 /// Default system power/scheduling mode active before any mode transition occurs.
-pub(super) const DEFAULT_SYSTEM_MODE: &str = "NOMINAL";
+pub const DEFAULT_SYSTEM_MODE: &str = "NOMINAL";
 
 /// Bounded timeout for synchronous `fuchsia.scheduler.RoleManager` FIDL calls.
 const ROLE_MANAGER_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(5);
@@ -209,6 +209,36 @@ impl SchedulerManager {
         Ok(scheduler_state.role_name())
     }
 
+    /// Resolves `(role_name, is_system_mode_dependent)` for offline role-override tests without a
+    /// running `Kernel` or `SchedulerManager` instance.
+    ///
+    /// Returns an error if `is_leader` is `true` while `process_name != thread_name`, since at
+    /// runtime in Starnix a thread-group leader (`tid == pid`) always shares a single
+    /// [`TaskCommand`] for both `process_name` and `thread_name`.
+    pub fn resolve_role_name_for_tests<'a>(
+        role_overrides: &'a RoleOverrides,
+        process_name: &str,
+        thread_name: &str,
+        cgroup_path: &str,
+        is_leader: bool,
+        scheduler_state: &SchedulerState,
+        system_mode: &str,
+    ) -> Result<(&'a str, bool), anyhow::Error> {
+        anyhow::ensure!(
+            !is_leader || process_name == thread_name,
+            "is_leader=true requires matching process_name ({process_name:?}) and thread_name ({thread_name:?})"
+        );
+        Ok(Self::resolve_role_name_with_overrides(
+            role_overrides,
+            &TaskCommand::new(process_name.as_bytes()),
+            &TaskCommand::new(thread_name.as_bytes()),
+            cgroup_path,
+            is_leader,
+            scheduler_state,
+            system_mode,
+        ))
+    }
+
     fn resolve_role_name(
         &self,
         process_name: &TaskCommand,
@@ -218,16 +248,35 @@ impl SchedulerManager {
         scheduler_state: &SchedulerState,
     ) -> (&str, bool) {
         let scope = RcuReadScope::new();
-        let (override_name, is_system_mode_dependent) =
-            self.role_overrides.get_role_name_with_filters(
-                process_name,
-                thread_name,
-                cgroup_path,
-                is_leader,
-                scheduler_state.normal_priority().as_nice(),
-                scheduler_state.uclamp_min,
-                self.system_mode.as_ref(&scope),
-            );
+        Self::resolve_role_name_with_overrides(
+            &self.role_overrides,
+            process_name,
+            thread_name,
+            cgroup_path,
+            is_leader,
+            scheduler_state,
+            self.system_mode.as_ref(&scope),
+        )
+    }
+
+    fn resolve_role_name_with_overrides<'a>(
+        role_overrides: &'a RoleOverrides,
+        process_name: &TaskCommand,
+        thread_name: &TaskCommand,
+        cgroup_path: &str,
+        is_leader: bool,
+        scheduler_state: &SchedulerState,
+        system_mode: &str,
+    ) -> (&'a str, bool) {
+        let (override_name, is_system_mode_dependent) = role_overrides.get_role_name_with_filters(
+            process_name,
+            thread_name,
+            cgroup_path,
+            is_leader,
+            scheduler_state.normal_priority().as_nice(),
+            scheduler_state.uclamp_min,
+            system_mode,
+        );
         (override_name.unwrap_or_else(|| scheduler_state.role_name()), is_system_mode_dependent)
     }
 
@@ -665,6 +714,39 @@ pub struct SchedulerState {
 }
 
 impl SchedulerState {
+    /// Constructs a [`SchedulerState`] from Linux scheduler attributes (`policy`, `nice`,
+    /// `realtime_priority`, and `uclamp_min`) for role-resolution tests.
+    pub fn for_tests(
+        policy: &str,
+        nice: i32,
+        realtime_priority: i32,
+        uclamp_min: u32,
+    ) -> Result<Self, anyhow::Error> {
+        anyhow::ensure!(
+            (-20..=19).contains(&nice),
+            "nice={nice} outside valid Linux range [-20, 19]"
+        );
+        anyhow::ensure!(
+            uclamp_min <= SCHED_CAPACITY_SCALE,
+            "uclamp_min={uclamp_min} exceeds SCHED_CAPACITY_SCALE ({SCHED_CAPACITY_SCALE})"
+        );
+        let raw_policy = match policy {
+            "SCHED_NORMAL" | "SCHED_OTHER" => SCHED_NORMAL,
+            "SCHED_BATCH" => SCHED_BATCH,
+            "SCHED_IDLE" => SCHED_IDLE,
+            "SCHED_FIFO" => SCHED_FIFO,
+            "SCHED_RR" => SCHED_RR,
+            other => anyhow::bail!("unsupported Linux scheduling policy {other:?}"),
+        };
+        let policy = SchedulingPolicy::try_from(raw_policy)
+            .map_err(|e| anyhow::anyhow!("invalid scheduling policy: {e:?}"))?;
+        let realtime_priority = policy.realtime_priority_from(realtime_priority).map_err(|e| {
+            anyhow::anyhow!("invalid realtime_priority={realtime_priority} for {policy:?}: {e:?}")
+        })?;
+        let normal_priority = NormalPriority::from_setpriority_syscall(nice);
+        Ok(Self { policy, normal_priority, realtime_priority, uclamp_min, ..Self::default() })
+    }
+
     pub(crate) fn is_default(&self) -> bool {
         let default = Self::default();
         self.policy == default.policy
@@ -1112,7 +1194,7 @@ mod tests {
     async fn role_overrides_non_realtime() {
         spawn_kernel_and_run_sync(|current_task| {
             let mut builder = RoleOverrides::new();
-            builder.add("my_task", "my_task", None, "overridden_role");
+            builder.add("overridden_role").process("my_task").thread("my_task");
             let overrides = builder.build().unwrap();
             let manager = SchedulerManager::new_for_tests(None, overrides);
 
@@ -1157,19 +1239,13 @@ mod tests {
         });
 
         let mut builder = RoleOverrides::new();
-        builder.add_with_filters(
-            "app_proc",
-            "app_proc",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("^(LAUNCH|LAUNCH_EXTEND)$".to_string()),
-            "launch_boost_role",
-        );
-        builder.add("app_proc", "app_proc", None, "default_app_role");
-        builder.add("static_proc", "static_proc", None, "default_app_role");
+        builder
+            .add("launch_boost_role")
+            .process("app_proc")
+            .thread("app_proc")
+            .system_mode("^(LAUNCH|LAUNCH_EXTEND)$");
+        builder.add("default_app_role").process("app_proc").thread("app_proc");
+        builder.add("default_app_role").process("static_proc").thread("static_proc");
         let overrides = builder.build().unwrap();
         let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
 
@@ -1325,18 +1401,12 @@ mod tests {
         });
 
         let mut builder = RoleOverrides::new();
-        builder.add_with_filters(
-            "app_proc",
-            "app_proc",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("^LAUNCH$".to_string()),
-            "missing_launch_role",
-        );
-        builder.add("app_proc", "app_proc", None, "default_app_role");
+        builder
+            .add("missing_launch_role")
+            .process("app_proc")
+            .thread("app_proc")
+            .system_mode("^LAUNCH$");
+        builder.add("default_app_role").process("app_proc").thread("app_proc");
         let overrides = builder.build().unwrap();
         let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
 
@@ -1494,18 +1564,8 @@ mod tests {
         });
 
         let mut builder = RoleOverrides::new();
-        builder.add_with_filters(
-            "app_proc",
-            ".*",
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("^LAUNCH$".to_string()),
-            "launch_boost_role",
-        );
-        builder.add("app_proc", ".*", None, "default_app_role");
+        builder.add("launch_boost_role").process("app_proc").system_mode("^LAUNCH$");
+        builder.add("default_app_role").process("app_proc");
         let overrides = builder.build().unwrap();
         let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
 
@@ -1925,6 +1985,99 @@ mod tests {
             }
             .task_priority(),
             -100
+        );
+    }
+
+    #[fuchsia::test]
+    fn scheduler_state_for_tests_validates_inputs() {
+        let normal = SchedulerState::for_tests("SCHED_NORMAL", -20, 0, 0).expect("SCHED_NORMAL");
+        assert_eq!(normal.role_name(), "fuchsia.starnix.fair.26");
+
+        let other = SchedulerState::for_tests("SCHED_OTHER", 0, 0, 1024).expect("SCHED_OTHER");
+        assert_eq!(other.role_name(), "fuchsia.starnix.fair.16");
+        assert_eq!(other.uclamp_min, 1024);
+
+        let batch = SchedulerState::for_tests("SCHED_BATCH", 19, 0, 0).expect("SCHED_BATCH");
+        assert_eq!(batch.role_name(), "fuchsia.starnix.fair.6");
+
+        let idle = SchedulerState::for_tests("SCHED_IDLE", 0, 0, 0).expect("SCHED_IDLE");
+        assert_eq!(idle.role_name(), "fuchsia.starnix.fair.0");
+
+        let fifo = SchedulerState::for_tests("SCHED_FIFO", 0, 1, 0).expect("SCHED_FIFO");
+        assert_eq!(fifo.role_name(), "fuchsia.starnix.realtime");
+
+        let rr = SchedulerState::for_tests("SCHED_RR", 0, 99, 0).expect("SCHED_RR");
+        assert_eq!(rr.role_name(), "fuchsia.starnix.realtime");
+
+        // Out-of-range nice values.
+        assert!(SchedulerState::for_tests("SCHED_NORMAL", -21, 0, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_NORMAL", 20, 0, 0).is_err());
+
+        // Out-of-range uclamp_min (> SCHED_CAPACITY_SCALE).
+        assert!(SchedulerState::for_tests("SCHED_NORMAL", 0, 0, 1025).is_err());
+
+        // Unsupported scheduling policies.
+        assert!(SchedulerState::for_tests("SCHED_DEADLINE", 0, 0, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_UNKNOWN", 0, 0, 0).is_err());
+
+        // Invalid (policy, realtime_priority) pairs.
+        assert!(SchedulerState::for_tests("SCHED_NORMAL", 0, 1, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_OTHER", 0, -1, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_BATCH", 0, 1, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_IDLE", 0, 1, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_FIFO", 0, 0, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_FIFO", 0, 100, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_RR", 0, 0, 0).is_err());
+        assert!(SchedulerState::for_tests("SCHED_RR", 0, -1, 0).is_err());
+    }
+
+    #[fuchsia::test]
+    fn resolve_role_name_for_tests_enforces_leader_name_invariant() {
+        let mut builder = RoleOverrides::new();
+        builder.add("app.leader").process("^app$").thread("^app$").is_leader(true);
+        let overrides = builder.build().expect("valid regexes");
+        let state = SchedulerState::for_tests("SCHED_NORMAL", 0, 0, 0).expect("valid state");
+
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "app",
+                "/",
+                true,
+                &state,
+                DEFAULT_SYSTEM_MODE,
+            )
+            .expect("leader with matching process and thread names"),
+            ("app.leader", false)
+        );
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "worker",
+                "/",
+                false,
+                &state,
+                DEFAULT_SYSTEM_MODE,
+            )
+            .expect("non-leader with distinct process and thread names"),
+            ("fuchsia.starnix.fair.16", false)
+        );
+
+        let err = SchedulerManager::resolve_role_name_for_tests(
+            &overrides,
+            "app",
+            "main",
+            "/",
+            true,
+            &state,
+            DEFAULT_SYSTEM_MODE,
+        )
+        .expect_err("leader with process != thread must fail");
+        assert!(
+            format!("{err:#}").contains("is_leader=true requires matching process_name"),
+            "{err:#}"
         );
     }
 }

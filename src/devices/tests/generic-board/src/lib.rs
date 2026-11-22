@@ -88,7 +88,7 @@ impl Driver for GenericBoardDriver {
         Ok(Self { _node: node, _pbus: pbus })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 static GENERIC_BOARD_PARSER_CONFIG: DmlParserConfig =

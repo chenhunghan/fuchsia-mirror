@@ -69,7 +69,7 @@ impl Policy {
         self.policy_capabilities.contains(policy_cap)
     }
 
-    /// Returns true if `bounded` is bounded by `parent` in the policy.
+    /// Returns true if `bounded` is bounded by `parent`, directly or transitively.
     pub fn is_bounded_by(&self, bounded: TypeId, parent: TypeId) -> bool {
         let mut current = self.types.get_by_id(bounded).unwrap().bounded_by();
         while let Some(bound_id) = current {
@@ -191,6 +191,11 @@ impl Policy {
             .flat_map(|entry| entry.paths().iter())
     }
 
+    /// Returns whether the policy defines any `genfscon` statements for `fs_type`.
+    pub fn has_genfscon_for_fs(&self, fs_type: NullessByteStr<'_>) -> bool {
+        self.genfscon_find_all(fs_type.as_bytes()).next().is_some()
+    }
+
     /// If there is a `genfscon` statement for the given filesystem type, returns the associated
     /// [`SecurityContext`], taking the `node_path` into account. `class` defines the type of
     /// the file in the given `node_path`. It can only be omitted when looking up the filesystem
@@ -204,12 +209,6 @@ impl Policy {
         // All contexts listed in the policy for the file system type.
         let fs_contexts = self.genfscon_find_all(fs_type.as_bytes());
 
-        #[derive(PartialEq)]
-        enum OrderType {
-            Alphabetic,
-            ByLength,
-            Unknown,
-        }
         // The correct match is the closest parent among the ones given in the policy file.
         // E.g. if in the policy we have
         //     genfscon foofs "/" label1
@@ -221,22 +220,7 @@ impl Policy {
         //
         // Partial paths are prefix-matched, so that "/abc/default" would also be assigned label3.
         let mut result: Option<&GenfsConPath> = None;
-        let mut order_type = OrderType::Unknown;
-        let mut prev_path_bytes: Option<&[u8]> = None;
         for fs_context in fs_contexts {
-            // Determine the order type based on the first entries.
-            let path = fs_context.partial_path();
-            if order_type == OrderType::Unknown {
-                if let Some(prev) = prev_path_bytes {
-                    if path.len() > prev.len() {
-                        order_type = OrderType::Alphabetic;
-                    } else if path < prev {
-                        order_type = OrderType::ByLength;
-                    }
-                }
-                prev_path_bytes = Some(path);
-            }
-
             // Check if the class matches.
             let class_matches = class.is_none()
                 || fs_context.class().map(|other| other == class.unwrap()).unwrap_or(true);
@@ -244,27 +228,13 @@ impl Policy {
                 continue;
             }
 
-            if order_type == OrderType::Alphabetic
-                && fs_context.partial_path() > node_path.as_bytes()
+            if result
+                .as_ref()
+                .is_none_or(|c| c.partial_path().len() < fs_context.partial_path().len())
+                && node_path.as_bytes().starts_with(fs_context.partial_path())
             {
-                // We know that:
-                // - We have alphabetic order,
-                // - The current path is lexicographically greater than our target path.
-                // We can infer that we have passed any potential prefixes in alphabetical order.
-                break;
-            }
-
-            if node_path.as_bytes().starts_with(fs_context.partial_path()) {
-                if result
-                    .as_ref()
-                    .map_or(true, |c| c.partial_path().len() < fs_context.partial_path().len())
-                {
-                    // The path matches, and it's the closest parent so far.
-                    result = Some(fs_context);
-                    if order_type == OrderType::ByLength {
-                        break;
-                    }
-                }
+                // The path matches, and it's the closest parent so far.
+                result = Some(fs_context);
             }
         }
 
@@ -420,7 +390,8 @@ impl Policy {
     /// An [`AccessDecision`] is accumulated, starting from no permissions to be granted,
     /// nor audit-logged if allowed, and all permissions to be audit-logged if denied.
     /// Permissions that are explicitly `allow`ed, but that are subject to unsatisfied
-    /// constraints, are removed from the allowed set.
+    /// constraints, are removed from the allowed set. If `source` is bounded by a parent type,
+    /// the allowed permissions are further intersected with those granted to the parent.
     pub fn compute_access_decision(
         &self,
         source: &SecurityContext,
@@ -430,6 +401,35 @@ impl Policy {
         let mut access_decision =
             self.compute_explicitly_allowed(source.type_(), target.type_(), class);
         access_decision.allow -= self.compute_denied_by_constraints(source, target, class);
+
+        // If `source` is bounded by a `parent` type then bound the allowed permissions to those
+        // granted to the parent on `target` (or on `target`'s parent type, if `target` is also
+        // bounded).
+        if let Some(parent_source_type) = self.types.get_by_id(source.type_()).unwrap().bounded_by()
+        {
+            let parent_source = SecurityContext::new(
+                source.user(),
+                source.role(),
+                parent_source_type,
+                source.mls_range().clone(),
+            );
+            let parent_target_type = self
+                .types
+                .get_by_id(target.type_())
+                .unwrap()
+                .bounded_by()
+                .unwrap_or_else(|| target.type_());
+            let parent_target = SecurityContext::new(
+                target.user(),
+                target.role(),
+                parent_target_type,
+                target.mls_range().clone(),
+            );
+            let parent_decision =
+                self.compute_access_decision(&parent_source, &parent_target, class);
+            access_decision.allow &= parent_decision.allow;
+        }
+
         access_decision
     }
 
@@ -475,20 +475,6 @@ impl Policy {
             }
         }
 
-        // If `source` is bounded by some `parent` then bound the allowed permissions to those
-        // available to the parent. Doing the calculation here ensures that type-bounds take into
-        // account bounding ancestors, if any.
-        if let Some(parent) = self.types.get_by_id(source).unwrap().bounded_by() {
-            // If `source == target` then this is a "self" permission check, which should be
-            // bounded to the parent domain's "self" permissions.
-            let access = if source == target {
-                self.compute_explicitly_allowed(parent, parent, class)
-            } else {
-                self.compute_explicitly_allowed(parent, target, class)
-            };
-            computed_access_vector &= access.allow;
-        }
-
         if self.is_neveraudit(source) {
             computed_audit_allow = AccessVector::NONE;
             computed_audit_deny = AccessVector::NONE;
@@ -525,6 +511,10 @@ impl Policy {
 
     /// Computes the access decision for a set of extended permissions of a given `kind` and with a
     /// given `prefix` byte, for a particular `source` and `target` context and `class`.
+    ///
+    /// Extended permission bitmaps are evaluated directly for `(source, target)` without applying
+    /// `typebounds` filtering; only the base permission check (`ioctl` / `nlmsg`) performed by
+    /// [`Self::compute_access_decision`] is bounded.
     pub fn compute_xperms_access_decision(
         &self,
         kind: XpermsKind,

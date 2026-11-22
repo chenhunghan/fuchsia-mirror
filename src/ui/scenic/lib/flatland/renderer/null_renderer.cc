@@ -13,6 +13,51 @@
 #include <optional>
 
 namespace flatland {
+namespace {
+
+struct NullGpuCollection final : public Renderer::GpuCollection {
+  explicit NullGpuCollection(allocation::GlobalBufferCollectionId collection_id)
+      : collection_id(collection_id) {}
+  const allocation::GlobalBufferCollectionId collection_id;
+};
+
+struct NullGpuImage final : public Renderer::GpuImage {
+  bool WasSampled() const override { return sampled; }
+  bool sampled = false;
+};
+
+}  // namespace
+
+fit::result<ImportImageError, std::unique_ptr<Renderer::GpuCollection>>
+NullRenderer::CreateGpuCollection(allocation::GlobalBufferCollectionId collection_id,
+                                  fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token) {
+  if (collection_id == allocation::kInvalidId || !token.is_valid()) {
+    return fit::error(ImportImageError::kCollectionFailed);
+  }
+  // Closing a sysmem token without sending `Release()` first causes sysmem to
+  // fail the whole buffer collection.
+  const fidl::OneWayStatus status = fidl::WireCall(token)->Release();
+  if (!status.ok()) {
+    return fit::error(ImportImageError::kCollectionFailed);
+  }
+  return fit::ok(std::make_unique<NullGpuCollection>(collection_id));
+}
+
+fit::result<ImportImageError, std::unique_ptr<Renderer::GpuImage>> NullRenderer::CreateGpuImage(
+    const allocation::ImageMetadata& metadata, GpuCollection& collection,
+    uint64_t per_buffer_bytes) {
+  if (metadata.collection_id == allocation::kInvalidId ||
+      metadata.identifier == allocation::kInvalidImageId || metadata.width == 0 ||
+      metadata.height == 0) {
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+  const auto& null_collection = static_cast<const NullGpuCollection&>(collection);
+  FX_CHECK(metadata.collection_id == null_collection.collection_id);
+  if (per_buffer_bytes == 0) {
+    return fit::error(ImportImageError::kImageTooLarge);
+  }
+  return fit::ok(std::make_unique<NullGpuImage>());
+}
 
 fpromise::promise<> NullRenderer::ImportBufferCollection(
     allocation::GlobalBufferCollectionId collection_id,
@@ -158,6 +203,22 @@ void NullRenderer::Render(const allocation::ImageMetadata& render_target,
     }
 
     const auto& image = std::get<ResolvedLayer::ImageContent>(layer.content);
+    if (image.image != nullptr) {
+      const ImportWord word = image.image->word();
+      FX_DCHECK(IsReadyForGpuComposition(word));
+      if (!word.released) {
+        if (word.gpu == ImportState::kFailed && render_args.omitted_layer_counts != nullptr) {
+          ++(*render_args.omitted_layer_counts)[OmittedLayerTracker::ReasonIndex(
+              OmittedLayerReason::kGpuImportFailed)];
+        } else if (word.gpu == ImportState::kReady) {
+          auto* slot = static_cast<NullGpuImage*>(image.image->gpu_image());
+          FX_CHECK(slot != nullptr);
+          slot->sampled = true;
+        }
+      }
+      continue;
+    }
+
     const auto& image_map_itr_ = image_map_.find(image.image_id);
     FX_DCHECK(image_map_itr_ != image_map_.end());
     const auto& image_constraints = image_map_itr_->second;
@@ -187,6 +248,13 @@ fuchsia_images2::PixelFormat NullRenderer::ChoosePreferredRenderTargetFormat(
 bool NullRenderer::SupportsRenderInProtected() const { return false; }
 
 bool NullRenderer::RequiresRenderInProtected(std::span<const ResolvedLayer> layers) const {
+  for (const auto& layer : layers) {
+    if (const auto* image = std::get_if<ResolvedLayer::ImageContent>(&layer.content);
+        image != nullptr && image->image != nullptr) {
+      const ImportWord word = image->image->word();
+      FX_DCHECK(IsReadyForGpuComposition(word));
+    }
+  }
   return false;
 }
 

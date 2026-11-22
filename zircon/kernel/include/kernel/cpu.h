@@ -31,24 +31,6 @@ constexpr cpu_mask_t cpu_num_to_mask(cpu_num_t num) {
   return (static_cast<cpu_mask_t>(1u) << num);
 }
 
-constexpr cpu_mask_t mask_all_but_one(cpu_num_t num) { return CPU_MASK_ALL ^ cpu_num_to_mask(num); }
-
-constexpr cpu_num_t highest_cpu_set(cpu_mask_t mask) {
-  if (mask == 0) {
-    return 0;
-  }
-
-  return static_cast<cpu_num_t>((sizeof(cpu_mask_t) * CHAR_BIT) - 1) - __builtin_clz(mask);
-}
-
-constexpr cpu_num_t lowest_cpu_set(cpu_mask_t mask) {
-  if (mask == 0) {
-    return 0;
-  }
-
-  return static_cast<cpu_num_t>(__builtin_ctz(mask));
-}
-
 // Removes one CPU from the mask and returns its ID.
 //
 // Returns INVALID_CPU if the mask is empty.

@@ -15,8 +15,7 @@
 #include <lib/fit/defer.h>
 #include <sys/mman.h>
 
-#include <filesystem>
-#include <vector>
+#include <concepts>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -37,6 +36,7 @@ class ElfldltlLoaderTests : public elfldltl::testing::LoadTests<Traits> {
   using Base = elfldltl::testing::LoadTests<Traits>;
   using typename Base::Loader;
   using typename Base::LoadInfo;
+  using typename Base::LoadResult;
   using Relro = typename Loader::Relro;
   using Region = typename LoadInfo::Region;
 
@@ -49,9 +49,18 @@ class ElfldltlLoaderTests : public elfldltl::testing::LoadTests<Traits> {
     }
   }
 
-  void Load(std::string_view so_path, LoadOptions options = {}) {
-    std::optional<typename Base::LoadResult> result;
-    Base::Load(so_path, result);
+  void Load(std::string_view so_path, LoadOptions options = {},
+            fit::function<void(LoadResult&)> before_load = nullptr, uintptr_t vmar_bias = 0) {
+    auto load_args = [vmar_bias]() {
+      if constexpr (Traits::kHasMemory) {
+        EXPECT_EQ(vmar_bias, 0u);
+        return std::make_tuple();
+      } else {
+        return std::make_tuple(vmar_bias);
+      }
+    };
+    std::optional<LoadResult> result;
+    Base::Load(so_path, result, std::make_tuple(), load_args(), std::move(before_load));
     ASSERT_TRUE(result);
 
     elfldltl::DirectMemory mem;
@@ -59,10 +68,12 @@ class ElfldltlLoaderTests : public elfldltl::testing::LoadTests<Traits> {
       mem.set_base(result->loader.memory().base());
       mem.set_image(result->loader.memory().image());
     } else {
+      const uintptr_t image_start = result->info.vaddr_start() + result->loader.load_bias();
       mem.set_base(result->info.vaddr_start());
-      mem.set_image(
-          {reinterpret_cast<std::byte*>(result->info.vaddr_start() + result->loader.load_bias()),
-           result->info.vaddr_size()});
+      mem.set_image({
+          reinterpret_cast<std::byte*>(image_start),
+          result->info.vaddr_size(),
+      });
     }
 
     EXPECT_EQ(mem.base(), result->info.vaddr_start());
@@ -82,9 +93,9 @@ class ElfldltlLoaderTests : public elfldltl::testing::LoadTests<Traits> {
     ASSERT_TRUE(dyn);
 
     elfldltl::RelocationInfo<Elf> reloc_info;
-    ASSERT_TRUE(elfldltl::DecodeDynamic(diag, mem, *dyn,
-                                        elfldltl::DynamicRelocationInfoObserver(reloc_info),
-                                        elfldltl::DynamicSymbolInfoObserver(sym_info_)));
+    ASSERT_TRUE(elfldltl::DecodeDynamic(  //
+        diag, mem, *dyn, elfldltl::DynamicRelocationInfoObserver(reloc_info),
+        elfldltl::DynamicSymbolInfoObserver(sym_info_)));
 
     if (options.reloc) {
       uintptr_t bias = reinterpret_cast<uintptr_t>(mem.image().data()) - mem.base();
@@ -281,5 +292,40 @@ TYPED_TEST(ElfldltlLoaderTests, ResolveSymbolic) {
   EXPECT_EQ(this->template lookup_sym<decltype(NeedsPlt)>(elfldltl::SymbolName{"NeedsPlt"})(), 2);
   EXPECT_EQ(this->template lookup_sym<decltype(NeedsGot)>(elfldltl::SymbolName{"NeedsGot"})(), 3);
 }
+
+#ifdef __Fuchsia__
+TYPED_TEST(ElfldltlLoaderTests, VmarBias) {
+  using Loader = TestFixture::Loader;
+  using LoadResult = TestFixture::LoadResult;
+  if constexpr (!std::derived_from<Loader, elfldltl::RemoteVmarLoader>) {
+    GTEST_SKIP() << "test only applies to RemoteVmarLoader subclasses";
+  } else {
+    // This is passed to Loader::Allocate() instead of LoadInfo.
+    struct VaddrInfo {
+      uintptr_t vaddr_start() const { return start_; }
+      uintptr_t vaddr_size() const { return size_; }
+
+      uintptr_t start_, size_;
+    };
+    const size_t vmar_bias = 2 * Loader::page_size();
+    auto before_load = [vmar_bias](LoadResult& result) {
+      const VaddrInfo allocate_info = {
+          // The base address must match the original LoadInfo so that
+          // Loader::Allocate() computes the initial load_bias_ properly.
+          .start_ = result.info.vaddr_start(),
+
+          // This determines the size of the VMAR allocated, which needs to
+          // include the bias space that won't be used by Load().
+          .size_ = result.info.vaddr_size() + vmar_bias,
+      };
+      elfldltl::testing::ExpectOkDiagnostics diag;
+      ASSERT_TRUE(result.loader.Allocate(diag, allocate_info));
+    };
+    ASSERT_NO_FATAL_FAILURE(this->Load(kRet24, {.reloc = false}, before_load, vmar_bias));
+
+    EXPECT_EQ(this->template entry<decltype(Return24)>()(), 24);
+  }
+}
+#endif
 
 }  // namespace

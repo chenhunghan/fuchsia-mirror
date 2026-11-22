@@ -35,7 +35,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/probe_gpio_driver_info.json"
 }
 
 fuchsia_driver_package("probe_gpio_driver") {

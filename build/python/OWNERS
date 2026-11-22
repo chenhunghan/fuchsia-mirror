@@ -2,6 +2,7 @@ aaronwood@google.com
 crjohns@google.com
 jayzhuang@google.com
 jpavankumar@google.com
+nathaniel@google.com
 
 per-file fidl_python.gni = file:/src/fidl/OWNERS
 per-file fidl_python.gni = file:/tools/fidl/fidlgen_python/OWNERS

@@ -3,47 +3,35 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import argparse
-import json
 import os
 import subprocess
-import sys
+import unittest
 
 import python.runfiles.runfiles as runfiles
 
-parser = argparse.ArgumentParser()
-parser.add_argument(
-    "--verbose", action="store_true", help="Print verbose output."
+# The host test wrapper script to invoke, which must be listed in the test's
+# `test_data`.
+_TEST_RLOCATION = (
+    "_main/build/bazel/rules/host_tests/tests/py/test_with_unittests"
 )
-parser.add_argument(
-    "test_script", help="Rlocation of host python test wrapper script."
-)
-args = parser.parse_args()
 
-r = runfiles.Create()
-assert r, "Cannot find runfiles"
-test_location = r.Rlocation(args.test_script)
-assert test_location, "Cannot find test in runfiles"
-test_env = r.EnvVars()
 
-if args.verbose:
-    print(
-        f"Found test at {test_location} \nEnvironment: {json.dumps(test_env, indent=2)}\n"
-        + f"cwd = {os.getcwd()}\n",
-        flush=True,
-    )
-
-output = subprocess.check_output(
-    [test_location, "--list_host_python_unittests"], env=test_env, text=True
-)
-expected_output = (
-    "TestWithUnittests.test_something\nTestWithUnittests.test_something_else\n"
-)
-if output != expected_output:
-    print(
-        f"ERROR: Unexpected output: [\n{output}\n] EXPECTED [\n{expected_output}\n]",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-print("Test run succesfully!")
+class ListUnittestsTest(unittest.TestCase):
+    def test_list_host_python_unittests(self) -> None:
+        r = runfiles.Create()
+        self.assertIsNotNone(r, "Cannot find runfiles")
+        test_script = r.Rlocation(_TEST_RLOCATION)
+        self.assertTrue(
+            test_script is not None and os.path.exists(test_script),
+            f"Cannot find {_TEST_RLOCATION} in runfiles",
+        )
+        output = subprocess.check_output(
+            [test_script, "--list_host_python_unittests"],
+            env=r.EnvVars(),
+            text=True,
+        )
+        self.assertEqual(
+            output,
+            "TestWithUnittests.test_something\n"
+            + "TestWithUnittests.test_something_else\n",
+        )

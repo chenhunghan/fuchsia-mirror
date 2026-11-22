@@ -648,7 +648,7 @@ void LoopExprNode::EmitBytecode(VmStream& stream) const {
   }
 
   // Top of actual loop contents.
-  uint32_t loop_top = stream.size();
+  uint32_t loop_top = static_cast<uint32_t>(stream.size());
 
   VmBytecodeForwardJumpIfFalse precondition_jumper;
   if (precondition_) {

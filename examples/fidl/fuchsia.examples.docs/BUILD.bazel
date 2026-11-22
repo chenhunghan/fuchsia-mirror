@@ -41,6 +41,7 @@ fidl_library(
     name = "versioning",
     testonly = True,
     srcs = ["versioning.test.fidl"],
+    enable_cpp = False,
     excluded_checks = ["string-bounds-not-specified"],
     library_name = "fuchsia.examples.docs",
 
@@ -51,4 +52,14 @@ fidl_library(
     versioned = "fuchsia",
     available = ["fuchsia:HEAD"],
     visibility = ["//build/bazel/rules/fidl/tests:__pkg__"],
+)
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        ":fuchsia.examples.docs",
+        ":versioning",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
 )

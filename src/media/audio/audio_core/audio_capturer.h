@@ -66,6 +66,7 @@ class AudioCapturer : public BaseCapturer,
   void BeginShutdown() override;
   void OnStateChanged(State old_state, State new_state) override;
   void SetRoutingProfile(bool routable) override;
+  Mixer::Resampler resampler_type() const final { return Mixer::Resampler::LowPassWindowedSinc; }
 
  private:
   void NotifyGainMuteChanged();

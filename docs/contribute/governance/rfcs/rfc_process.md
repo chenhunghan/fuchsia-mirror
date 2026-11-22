@@ -426,7 +426,7 @@ assign you a new facilaitor. At this point, your RFC will move back to the
 their RFC; Faciliator comments on the CL for the RFC indicating that the RFC is
 no longer on hold.
 
-### How decisions are made
+### How decisions are made {#how-decisions-are-made}
 
 The decision whether to accept an RFC is made by the Eng Council, acting in
 [rough consensus](https://en.wikipedia.org/wiki/Rough_consensus) with each
@@ -446,7 +446,7 @@ following factors:
 Decisions made by the Eng Council can be escalated to the governing authority
 for the project.
 
-### Process to amend RFCs
+### Process to amend RFCs {#process-to-amend-rfcs}
 
 An existing RFC can be amended if the following criteria are met:
 

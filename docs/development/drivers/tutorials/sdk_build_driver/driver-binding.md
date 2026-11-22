@@ -110,7 +110,7 @@ file to compile the bind rules:
 {% includecode gerrit_repo="fuchsia/sdk-samples/drivers" gerrit_path="src/qemu_edu/drivers/BUILD.bazel" region_tag="bind_rules" adjust_indentation="auto" %}
 ```
 
-## Implement driver hooks
+## Implement driver hooks {:#implement-driver-hooks}
 
 Once a driver is bound, the framework loads the component binary and constructs
 an instance of the driver class registered using the
@@ -295,6 +295,6 @@ on Fuchsia.
 [concepts-bind-libraries]: /docs/development/drivers/concepts/device_driver_model/driver-binding.md#bind-libraries
 [concepts-component-manifest]: /docs/concepts/components/v2/component_manifests.md
 [concepts-driver-binding]: /docs/concepts/drivers/driver_binding.md
-[concepts-driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
-[concepts-node-properties]: /docs/concepts/drivers/drivers_and_nodes.md#node_properties
+[concepts-driver-manager]: /docs/concepts/drivers/driver_framework.md#driver-manager
+[concepts-node-properties]: /docs/concepts/drivers/drivers_and_nodes.md#node-attributes
 [concepts-packages]: /docs/concepts/packages/package.md

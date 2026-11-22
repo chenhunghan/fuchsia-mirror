@@ -11,8 +11,12 @@ from collections.abc import Callable
 from typing import Any
 from unittest import mock
 
+import fuchsia_controller_py
 import honeydew
-from honeydew import device_classes, errors
+from honeydew import (
+    device_classes,
+    errors,
+)
 from honeydew.device_classes import (
     android_device,
     smart_display,
@@ -20,7 +24,7 @@ from honeydew.device_classes import (
 )
 from honeydew.fuchsia_device.fuchsia_device import FuchsiaDevice
 from honeydew.transports.ffx import config as ffx_config
-from honeydew.transports.ffx import ffx
+from honeydew.transports.ffx import ffx_impl
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fuchsia_controller_transport,
@@ -48,7 +52,6 @@ _INPUT_ARGS: dict[str, Any] = {
         subtools_search_path=None,
         proxy_timeout_secs=None,
         ssh_keepalive_timeout=None,
-        emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
         shared_data=_SHARED_DATA,
@@ -93,16 +96,20 @@ class InitTests(unittest.TestCase):
         return_value=FuchsiaDevice,
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     @mock.patch.object(
         fuchsia_controller_transport.FuchsiaController,
         "check_connection",
         autospec=True,
     )
-    @mock.patch("fuchsia_controller_py.Context", autospec=True)
+    @mock.patch.object(
+        fuchsia_controller_py.Context,
+        "strict",
+        autospec=True,
+    )
     def test_create_device_return(
         self,
-        mock_fc_context: mock.Mock,
+        mock_fc_context_strict: mock.Mock,
         mock_fc_check_connection: mock.Mock,
         mock_ffx_check_connection: mock.Mock,
         mock_get_device_class: mock.Mock,
@@ -122,13 +129,14 @@ class InitTests(unittest.TestCase):
         )
 
         mock_get_device_class.assert_called_once()
-        mock_fc_context.assert_called_once_with(
+        mock_fc_context_strict.assert_called_once_with(
             config={
-                "log.level": "debug",
-                "log.dir": "/tmp/logs",
+                "log": {"dir": "/tmp/logs", "level": "debug"},
                 "shared_data": _SHARED_DATA,
-                "connectivity.enable_usb": "false",
-                "connectivity.usb_driver_autostart": "false",
+                "connectivity": {
+                    "enable_usb": False,
+                    "usb_driver_autostart": False,
+                },
             },
             target=_INPUT_ARGS["target_name"],
         )
@@ -141,16 +149,20 @@ class InitTests(unittest.TestCase):
         return_value=FuchsiaDevice,
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     @mock.patch.object(
         fuchsia_controller_transport.FuchsiaController,
         "check_connection",
         autospec=True,
     )
-    @mock.patch("fuchsia_controller_py.Context", autospec=True)
+    @mock.patch.object(
+        fuchsia_controller_py.Context,
+        "strict",
+        autospec=True,
+    )
     def test_create_device_using_device_ip_port(
         self,
-        mock_fc_context: mock.Mock,
+        mock_fc_context_strict: mock.Mock,
         mock_fc_check_connection: mock.Mock,
         mock_ffx_check_connection: mock.Mock,
         mock_get_device_class: mock.Mock,
@@ -171,13 +183,14 @@ class InitTests(unittest.TestCase):
         )
 
         mock_get_device_class.assert_called_once()
-        mock_fc_context.assert_called_once_with(
+        mock_fc_context_strict.assert_called_once_with(
             config={
-                "log.level": "debug",
-                "log.dir": "/tmp/logs",
+                "log": {"dir": "/tmp/logs", "level": "debug"},
                 "shared_data": _SHARED_DATA,
-                "connectivity.enable_usb": "false",
-                "connectivity.usb_driver_autostart": "false",
+                "connectivity": {
+                    "enable_usb": False,
+                    "usb_driver_autostart": False,
+                },
             },
             target=str(_INPUT_ARGS["target_ip_port"]),
         )
@@ -190,46 +203,59 @@ class InitTests(unittest.TestCase):
         return_value=FuchsiaDevice,
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "run",
+        return_value='[{"nodename": "fuchsia-emulator", "addresses": [{"type": "Usb", "cid": 42}]}]',
+        autospec=True,
+    )
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     @mock.patch.object(
         fuchsia_controller_transport.FuchsiaController,
         "check_connection",
         autospec=True,
     )
-    @mock.patch("fuchsia_controller_py.Context", autospec=True)
+    @mock.patch.object(
+        fuchsia_controller_py.Context,
+        "strict",
+        autospec=True,
+    )
     def test_create_device_using_device_usb(
         self,
-        mock_fc_context: mock.Mock,
+        mock_fc_context_strict: mock.Mock,
         mock_fc_check_connection: mock.Mock,
         mock_ffx_check_connection: mock.Mock,
+        mock_ffx_run: mock.Mock,
         mock_get_device_class: mock.Mock,
     ) -> None:
-        """Test case for honeydew.create_device() where it returns a device
-        from a UsbAddress."""
-        target_usb = custom_types.UsbAddress(42)
-        self.assertIsInstance(
-            honeydew.create_device(
-                custom_types.DeviceInfo(
-                    name=_INPUT_ARGS["target_name"],
-                    serial_number=None,
-                    address=target_usb,
-                    serial_socket=None,
-                ),
-                ffx_config_data=_INPUT_ARGS["ffx_config_data"],
+        """Test case for honeydew.create_device() refreshing a stale UsbAddress
+        so FFX and FuchsiaController connect to the current USB CID."""
+        stale_usb = custom_types.UsbAddress(7)
+        refreshed_usb = custom_types.UsbAddress(42)
+        device = honeydew.create_device(
+            custom_types.DeviceInfo(
+                name=_INPUT_ARGS["target_name"],
+                serial_number=None,
+                address=stale_usb,
+                serial_socket=None,
             ),
-            FuchsiaDevice,
+            ffx_config_data=_INPUT_ARGS["ffx_config_data"],
         )
+        self.assertIsInstance(device, FuchsiaDevice)
+        self.assertEqual(device._device_info.address, refreshed_usb)
 
         mock_get_device_class.assert_called_once()
-        mock_fc_context.assert_called_once_with(
+        mock_ffx_run.assert_called_once()
+        mock_fc_context_strict.assert_called_once_with(
             config={
-                "log.level": "debug",
-                "log.dir": "/tmp/logs",
+                "log": {"dir": "/tmp/logs", "level": "debug"},
                 "shared_data": _SHARED_DATA,
-                "connectivity.enable_usb": "false",
-                "connectivity.usb_driver_autostart": "false",
+                "connectivity": {
+                    "enable_usb": False,
+                    "usb_driver_autostart": False,
+                },
             },
-            target=str(target_usb),
+            target=str(refreshed_usb),
         )
         mock_fc_check_connection.assert_called()
         mock_ffx_check_connection.assert_called()
@@ -413,8 +439,8 @@ class InitTests(unittest.TestCase):
         ],
         name_func=_custom_test_name_func,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
-    @mock.patch.object(ffx.FFX, "get_target_product", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "get_target_product", autospec=True)
     def test_get_device_class(
         self,
         parameterized_dict: dict[str, Any],

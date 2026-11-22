@@ -78,9 +78,9 @@ bool DwarfStackEntry::operator==(const DwarfStackEntry& other) const {
   constexpr double kEpsilon = 0.000000001;
 
   if (TreatAsFloat()) {
-    if (isnan(other.data_.float_value) || isnan(other.data_.float_value))
+    if (isnan(data_.float_value) || isnan(other.data_.float_value))
       return false;
-    return fabsf(other.data_.float_value - other.data_.float_value) < kEpsilon;
+    return fabsf(data_.float_value - other.data_.float_value) < kEpsilon;
   }
   if (TreatAsDouble()) {
     if (isnan(data_.double_value) || isnan(other.data_.double_value))

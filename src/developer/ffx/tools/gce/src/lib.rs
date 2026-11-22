@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fho::subtool_suite::{FfxSubtoolSuite, Subtool, SubtoolBox, SubtoolSuite, ToolSuiteCommand};
-use fho::{FfxTool, FhoEnvironment, Result};
+use fho::subtool_suite::{FfxSubtoolSuite, Subtool, SubtoolBox, SubtoolSuite};
 
 mod args;
 mod subtools;
@@ -13,29 +12,19 @@ pub use args::{
 };
 pub use subtools::{ListTool, SerialTool, ShowTool, StartTool, StopTool};
 
-impl ToolSuiteCommand for GceCommand {
-    type SubCommand = GceSubCommand;
-    fn into_subcommand(self) -> Self::SubCommand {
-        self.subcommand
-    }
-}
-
 pub struct GceSuite;
 
 impl SubtoolSuite for GceSuite {
     type Command = GceCommand;
 
-    async fn new_subtool(
-        env: FhoEnvironment,
-        subcommand: GceSubCommand,
-    ) -> Result<Box<dyn SubtoolBox>> {
-        Ok(match subcommand {
-            GceSubCommand::Start(cmd) => Subtool::new(StartTool::from_env(env, cmd).await?),
-            GceSubCommand::List(cmd) => Subtool::new(ListTool::from_env(env, cmd).await?),
-            GceSubCommand::Show(cmd) => Subtool::new(ShowTool::from_env(env, cmd).await?),
-            GceSubCommand::Serial(cmd) => Subtool::new(SerialTool::from_env(env, cmd).await?),
-            GceSubCommand::Stop(cmd) => Subtool::new(StopTool::from_env(env, cmd).await?),
-        })
+    fn new_subtool(cmd: GceCommand) -> Box<dyn SubtoolBox> {
+        match cmd.subcommand {
+            GceSubCommand::Start(cmd) => Subtool::<StartTool>::new(cmd),
+            GceSubCommand::List(cmd) => Subtool::<ListTool>::new(cmd),
+            GceSubCommand::Show(cmd) => Subtool::<ShowTool>::new(cmd),
+            GceSubCommand::Serial(cmd) => Subtool::<SerialTool>::new(cmd),
+            GceSubCommand::Stop(cmd) => Subtool::<StopTool>::new(cmd),
+        }
     }
 }
 

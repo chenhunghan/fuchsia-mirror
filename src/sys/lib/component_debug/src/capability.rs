@@ -67,11 +67,17 @@ pub async fn get_all_route_segments(
                 }
                 // If the instance is not yet resolved, then we can't get its resolved declaration.
                 // If the component doesn't exist, then it's been destroyed since the
-                // `get_all_instances` call and we can't get its resolved declaration. Both of these
-                // things are expected, so ignore these errors.
+                // `get_all_instances` call and we can't get its resolved declaration.
+                // If component manager cannot re-resolve the declaration on demand (for example,
+                // a previously-resolved universe component whose package server is offline), skip
+                // it rather than aborting the whole capability search.
                 Err(
                     GetDeclarationError::InstanceNotResolved(_)
-                    | GetDeclarationError::InstanceNotFound(_),
+                    | GetDeclarationError::InstanceNotFound(_)
+                    | GetDeclarationError::BadUrl(_)
+                    | GetDeclarationError::ResolveFailed(_)
+                    | GetDeclarationError::PackageOpenFailed(_)
+                    | GetDeclarationError::PackageReadFailed(_),
                 ) => Ok(vec![]),
                 Err(err) => Err(FindInstancesError::GetDeclarationError {
                     moniker: instance.moniker.clone(),
@@ -258,6 +264,96 @@ mod tests {
         assert!(found_expose);
         assert!(found_offer);
         assert!(found_declaration);
+    }
+
+    #[fuchsia::test]
+    async fn segments_skips_unresolvable_instance() {
+        let realm_query = serve_realm_query_with_decl_errors(
+            vec![
+                fsys::Instance {
+                    moniker: Some("./my_foo".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/foo#meta/foo.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some("fuchsia-pkg://fuchsia.com/foo#meta/foo.cm".to_string()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/debugger".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/debugger#meta/debugger.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/debugger#meta/debugger.cm".to_string(),
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/pkg_open_failed".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/pkg_open#meta/pkg_open.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/pkg_open#meta/pkg_open.cm".to_string(),
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/pkg_read_failed".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/pkg_read#meta/pkg_read.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/pkg_read#meta/pkg_read.cm".to_string(),
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/bad_url".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/bad_url#meta/bad_url.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/bad_url#meta/bad_url.cm".to_string(),
+                        ),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            HashMap::from([(
+                "./my_foo".to_string(),
+                ComponentDeclBuilder::new()
+                    .use_(UseBuilder::protocol().name("fuchsia.foo.bar"))
+                    .build()
+                    .native_into_fidl(),
+            )]),
+            HashMap::from([
+                ("./core/debugger".to_string(), fsys::GetDeclarationError::ResolveFailed),
+                (
+                    "./core/pkg_open_failed".to_string(),
+                    fsys::GetDeclarationError::PackageOpenFailed,
+                ),
+                (
+                    "./core/pkg_read_failed".to_string(),
+                    fsys::GetDeclarationError::PackageReadFailed,
+                ),
+                ("./core/bad_url".to_string(), fsys::GetDeclarationError::BadUrl),
+            ]),
+        );
+
+        let segments =
+            get_all_route_segments("fuchsia.foo.bar".to_string(), &realm_query).await.unwrap();
+        assert_eq!(segments.len(), 1);
+        match &segments[0] {
+            RouteSegment::UseBy { moniker, .. } => {
+                assert_eq!(moniker, &Moniker::parse_str("/my_foo").unwrap());
+            }
+            _ => panic!("Expected UseBy route segment"),
+        }
     }
 
     #[cfg(feature = "serde")]

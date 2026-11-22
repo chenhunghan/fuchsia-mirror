@@ -88,6 +88,7 @@ group("tests") {
   testonly = true
   deps = [
     ":critical-services-unittests",
+    "crashsvc:tests",
     "storage-watchdog:tests",
     "test:critical-services-integration-test",
   ]

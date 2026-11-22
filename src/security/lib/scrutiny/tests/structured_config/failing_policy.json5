@@ -5,7 +5,12 @@
     components: {
         "fuchsia-pkg://fuchsia.com/for-test#meta/bar.cm": {
             fields: {
-                asserted_by_scrutiny_test: "not the string that was packaged",
+                asserted_by_scrutiny_test: "not the string that was configured",
+            },
+        },
+        "fuchsia-pkg://fuchsia.com/package_for_scrutiny_testing#meta/packaged_config_component.cm": {
+            fields: {
+                immutable_packaged_config: "not the string that was packaged",
 
                 // This string matches the packaged one, but should still cause verification to fail
                 // because we don't want a mutable-by-parent config field to be changed at runtime.

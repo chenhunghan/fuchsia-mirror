@@ -105,6 +105,7 @@ func main() {
 	}
 
 	commonParams := syncParams{
+		fuchsiaDir:    *fuchsiaDir,
 		buildifierBin: *buildifierBin,
 		gnBin:         *gnBin,
 		checkOnly:     *checkOnly,
@@ -221,6 +222,7 @@ func writeDiagnostics(w io.Writer, fuchsiaDir string, errs []dirError) error {
 }
 
 type syncParams struct {
+	fuchsiaDir string
 	// relDir is the directory relative to the Fuchsia root, used to suggest a
 	// fix command in check-only mode.
 	relDir string
@@ -253,12 +255,17 @@ func syncDirectory(ctx context.Context, bazelInputPath string, gnOutputPath stri
 		}
 	}
 
+	cfg, err := bazel2gn.LoadConfigForDir(p.fuchsiaDir, p.relDir)
+	if err != nil {
+		return &bazel2gn.FileError{Path: bazelInputPath, Err: fmt.Errorf("loading %s: %v", bazel2gn.ConfigFileName, err)}
+	}
+
 	bazelIn, err := bazel2gn.ParseBytes(bazelInputPath, formatted)
 	if err != nil {
 		return &bazel2gn.FileError{Path: bazelInputPath, Err: fmt.Errorf("parsing: %w", err)}
 	}
 
-	finalLines, err := bazel2gn.FileToGN(bazelIn)
+	finalLines, err := bazel2gn.FileToGNWithConfig(bazelIn, p.relDir, cfg)
 	if err != nil {
 		var fileErr *bazel2gn.FileError
 		if !errors.As(err, &fileErr) {
@@ -284,10 +291,21 @@ func syncDirectory(ctx context.Context, bazelInputPath string, gnOutputPath stri
 		return fmt.Errorf("reading GN targets to preserve from %s: %v", gnOutputPath, err)
 	}
 
+	var extraImports strings.Builder
+	if cfg != nil {
+		for _, imp := range cfg.GNImports {
+			fmt.Fprintf(&extraImports, "import(%q)\n", imp)
+		}
+	}
+	importsSection := bazel2gnComment
+	if extraImports.Len() > 0 {
+		importsSection += extraImports.String()
+	}
+
 	finalContent, err := gnFormatted(
 		ctx,
 		p.gnBin,
-		toPreserve+"\n"+bazel2gn.SentinelComment+"\n"+bazel2gnComment+"\n"+strings.Join(finalLines, "\n"),
+		toPreserve+"\n"+bazel2gn.SentinelComment+"\n"+importsSection+"\n"+strings.Join(finalLines, "\n"),
 	)
 	if err != nil {
 		return &bazel2gn.FileError{Path: gnOutputPath, Err: fmt.Errorf("formatting GN targets: %v", err)}

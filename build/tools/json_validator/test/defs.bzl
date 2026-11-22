@@ -26,6 +26,7 @@ def json_validator_valico_test(name, test_schema, test_document, extra_args = []
     host_py_test(
         name = name,
         main = "json_validator_valico_test_runner.py",
+        main_callable = "main",
         srcs = ["json_validator_valico_test_runner.py"],
         deps = [
             "@rules_python//python/runfiles",

@@ -24,7 +24,7 @@ extern "C" int cpp_out_of_mem() {
   return rv;
 }
 
-extern "C" int llcpp_channel_overflow() {
+extern "C" int wire_channel_overflow() {
   async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
 
   // The protocol used doesn't matter, the server endpoint of the channel isn't sent to the
@@ -35,7 +35,7 @@ extern "C" int llcpp_channel_overflow() {
   while (true) {
     client->FileReport(fuchsia_feedback::wire::CrashReport())
         .ThenExactlyOnce(
-            [](fidl::WireUnownedResult<fuchsia_feedback::CrashReporter::FileReport> &) {});
+            [](fidl::WireUnownedResult<fuchsia_feedback::CrashReporter::FileReport>&) {});
   }
 
   loop.Run();

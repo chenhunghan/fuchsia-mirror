@@ -193,6 +193,8 @@ pub struct DmlParserConfig {
 /// A list of instructions for how to convert common DML service offers into parent nodes
 /// of composite node specs.
 pub static STANDARD_SERVICE_CONFIGS: phf::Map<&'static str, ServiceBindConfig> = phf::phf_map! {
+    // TODO(b/583944265): Add bind rule to bind to `fuchsia.ID`. See `fuchsia.gpio.Init`'s
+    // `ServiceBindConfig`.
     "fuchsia.clock.Init" => ServiceBindConfig {
         transport: TransportType::None,
         rules: &[PropertyRule {
@@ -203,6 +205,8 @@ pub static STANDARD_SERVICE_CONFIGS: phf::Map<&'static str, ServiceBindConfig> =
         }],
         ..DEFAULT_SERVICE_BIND_CONFIG
     },
+    // TODO(b/583944265): Add bind rule to bind to `fuchsia.ID`. See `fuchsia.gpio.Init`'s
+    // `ServiceBindConfig`.
     "fuchsia.pwm.Init" => ServiceBindConfig {
         transport: TransportType::None,
         rules: &[PropertyRule {
@@ -215,12 +219,21 @@ pub static STANDARD_SERVICE_CONFIGS: phf::Map<&'static str, ServiceBindConfig> =
     },
     "fuchsia.gpio.Init" => ServiceBindConfig {
         transport: TransportType::None,
-        rules: &[PropertyRule {
-            bind_key: "fuchsia.BIND_INIT_STEP",
-            sources: &[ValueSource::Integer(0x4F495047)],
-            value_type: RuleValueType::Integer,
-            destination: Destination::Both,
-        }],
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_INIT_STEP",
+                sources: &[ValueSource::Integer(0x4F495047)],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            // Multiple GPIO controllers may exist, so we bind to the unique ID of each controller.
+            PropertyRule {
+                bind_key: "fuchsia.ID",
+                sources: &[ValueSource::ProviderId],
+                value_type: RuleValueType::Integer,
+                destination: Destination::BindRules,
+            },
+        ],
         ..DEFAULT_SERVICE_BIND_CONFIG
     },
     "fuchsia.hardware.gpu.mali.Service" => ServiceBindConfig {
@@ -293,6 +306,73 @@ pub static STANDARD_SERVICE_CONFIGS: phf::Map<&'static str, ServiceBindConfig> =
                 sources: &[ValueSource::ConstraintKey("topo")],
                 value_type: RuleValueType::Integer,
                 destination: Destination::BindRules,
+            },
+        ],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.hardware.usb.phy.Service" => ServiceBindConfig {
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_VID",
+                sources: &[ValueSource::ConstraintKey("vid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_PID",
+                sources: &[ValueSource::ConstraintKey("pid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_PLATFORM_DEV_DID",
+                sources: &[ValueSource::ConstraintKey("did")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
+            },
+        ],
+        ..DEFAULT_ID_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.hardware.serial.Service" => ServiceBindConfig {
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_SERIAL_CLASS",
+                sources: &[ValueSource::ConstraintKey("class")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::BindRules,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.NAME",
+                sources: &[
+                    ValueSource::ConstraintKey("name"),
+                    ValueSource::ResourceName,
+                    ValueSource::ResourceNode,
+                ],
+                value_type: RuleValueType::String,
+                destination: Destination::Properties,
+            },
+        ],
+        ..DEFAULT_SERVICE_BIND_CONFIG
+    },
+    "fuchsia.hardware.sdio.Service" => ServiceBindConfig {
+        rules: &[
+            PropertyRule {
+                bind_key: "fuchsia.BIND_SDIO_VID",
+                sources: &[ValueSource::ConstraintKey("vid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::BindRules,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_SDIO_PID",
+                sources: &[ValueSource::ConstraintKey("pid")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::BindRules,
+            },
+            PropertyRule {
+                bind_key: "fuchsia.BIND_SDIO_FUNCTION",
+                sources: &[ValueSource::ConstraintKey("function")],
+                value_type: RuleValueType::Integer,
+                destination: Destination::Both,
             },
         ],
         ..DEFAULT_SERVICE_BIND_CONFIG

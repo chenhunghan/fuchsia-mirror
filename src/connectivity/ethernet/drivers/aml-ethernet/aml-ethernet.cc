@@ -4,6 +4,7 @@
 
 #include "aml-ethernet.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/driver.h>
@@ -15,12 +16,14 @@
 
 #include <iterator>
 
+#include <bind/fuchsia/cpp/bind.h>
 #include <fbl/algorithm.h>
 #include <fbl/alloc_checker.h>
 #include <fbl/auto_lock.h>
 #include <soc/aml-s912/s912-hw.h>
 
 #include "aml-regs.h"
+#include "src/connectivity/ethernet/drivers/aml-ethernet/aml-ethernet_parser.h"
 #include "src/devices/i2c/lib/i2c-channel-legacy/i2c-channel.h"
 
 namespace eth {
@@ -80,6 +83,12 @@ zx_status_t AmlEthernet::InitPdev() {
     }
     pdev_ = fdf::PDev{std::move(pdev_client.value())};
   }
+
+  zx::result global_id = GetGlobalId(pdev_);
+  if (global_id.is_error()) {
+    return global_id.status_value();
+  }
+  global_id_ = global_id.value();
 
   // Not needed on vim3.
   i2c_ = ddk::I2cChannel(parent(), "i2c");
@@ -201,9 +210,37 @@ zx_status_t AmlEthernet::Bind() {
       fuchsia_hardware_ethernet_board::Service::Name,
   };
 
+  std::vector<zx_device_str_prop_t> props;
+  if (global_id_.has_value()) {
+    props.push_back({bind_fuchsia::ID, str_prop_int_val(*global_id_)});
+  }
+
   return DdkAdd(ddk::DeviceAddArgs("aml-ethernet")
                     .set_fidl_service_offers(offers)
-                    .set_outgoing_dir(endpoints->client.TakeChannel()));
+                    .set_outgoing_dir(endpoints->client.TakeChannel())
+                    .set_str_props(props));
+}
+
+zx::result<std::optional<uint32_t>> AmlEthernet::GetGlobalId(fdf::PDev& pdev) {
+  zx::result metadata = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+      "fuchsia.hardware.ethernet.board.Metadata");
+  if (metadata.is_error()) {
+    // Only DML boards provide this metadata.
+    return zx::ok(std::nullopt);
+  }
+
+  std::optional parsed = aml_ethernet_metadata::EthBoardMetadata::Parse(metadata.value());
+  if (!parsed.has_value() || !parsed->consumers.has_value() || parsed->consumers->empty()) {
+    zxlogf(ERROR, "Ethernet board metadata is malformed or has no consumers");
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  // The device can only carry one `fuchsia.ID`.
+  if (parsed->consumers->size() > 1) {
+    zxlogf(ERROR, "Ethernet board service has %zu consumers, but only one is supported",
+           parsed->consumers->size());
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
+  }
+  return zx::ok(parsed->consumers->front().id);
 }
 
 void AmlEthernet::DdkRelease() { delete this; }

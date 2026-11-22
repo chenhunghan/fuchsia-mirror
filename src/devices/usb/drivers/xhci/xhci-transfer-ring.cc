@@ -90,7 +90,7 @@ zx_status_t TransferRing::AllocInternal(Control control) {
       if (!hci_->HasCoherentState()) {
         InvalidatePageCache(new_link_trb, ZX_CACHE_FLUSH_DATA);
       }
-      hw_mb();
+      DataMemoryBarrier();
       spare_trb->ptr = (*new_trb).phys();
       spare_control.set_EntTC(0).ToTrb(spare_trb);
       if (!hci_->HasCoherentState()) {
@@ -116,7 +116,7 @@ zx_status_t TransferRing::AllocInternal(Control control) {
     link_trb->status = 0;
     // Restore the previous state
     RestoreLocked(link_state);
-    hw_mb();
+    DataMemoryBarrier();
     Control::Get()
         .FromValue(0)
         .set_Type(Control::Link)
@@ -208,9 +208,9 @@ zx_status_t TransferRing::AddTRB(const TRB& trb, std::unique_ptr<TRBContext> con
   trbs_->status = 0;
   // Control must be the last thing to be written -- to ensure that ptr points to a valid location
   // in memory
-  hw_mb();
+  DataMemoryBarrier();
   control.ToTrb(trbs_);
-  hw_mb();
+  DataMemoryBarrier();
   AdvancePointer();
   pending_trbs_.push_back(std::move(context));
   if (!hci_->HasCoherentState()) {
@@ -593,7 +593,7 @@ zx_status_t TransferRing::AllocBuffer(dma_buffer::ContiguousBuffer** out) {
   }
   control.set_EntTC(1);
   trbs[count - 1].ptr = trb_start_phys_;
-  hw_mb();
+  DataMemoryBarrier();
   control.ToTrb(trbs + (count - 1));
   zx_status_t status = ring_->AddSegmentIfNoneLock();
   if (status != ZX_OK) {

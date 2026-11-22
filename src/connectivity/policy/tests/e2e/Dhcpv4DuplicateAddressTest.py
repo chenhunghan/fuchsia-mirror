@@ -16,6 +16,7 @@ from mobly import asserts, signals, test_runner
 from openwrt_access_point import DhcpConfig, Dnsmasq
 from openwrt_access_point import InterfaceName as OpenWrtInterfaceName
 from openwrt_access_point import Lan
+from openwrt_access_point.lib.uci_dhcp_options import UciSection
 
 
 class Dhcpv4DuplicateAddressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
@@ -83,11 +84,22 @@ class Dhcpv4DuplicateAddressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             # interface below, unicast DHCP replies (DHCPOFFER/DHCPACK) from dnsmasq
             # to those IPs would be routed to loopback (`lo`) by the AP's kernel and
             # never transmitted over Wi-Fi. Force broadcast replies (255.255.255.255)
-            # so they reach the DUT.
+            # so they reach the DUT: OpenWrt's dnsmasq.init always passes
+            # `--dhcp-broadcast=tag:needs-broadcast`, and the `mac` section tags
+            # every client with `needs-broadcast`.
             self.openwrt_ap.dhcp.start_dhcp(
                 config=DhcpConfig(
-                    lan=Lan(start=pool_start, limit=pool_limit, broadcast=True),
-                    dnsmasq=Dnsmasq(noping=True),
+                    lan=Lan(start=pool_start, limit=pool_limit),
+                    dnsmasq=Dnsmasq(custom_uci_options={"noping": True}),
+                    custom_uci_sections={
+                        "broadcast_all": UciSection(
+                            section_type="mac",
+                            options={
+                                "networkid": "needs-broadcast",
+                                "mac": "*:*:*:*:*:*",
+                            },
+                        ),
+                    },
                 )
             )
 

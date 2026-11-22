@@ -2,18 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
-executable("bin") {
-  output_name = "audio-codec-ctl"
-  sources = [ "main.cc" ]
-  deps = [
-    "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
-    "//sdk/lib/component/incoming/cpp",
-    "//zircon/system/ulib/zx",
-  ]
+# Wraps the Bazel package that assembly ships, so that
+# //src/media/audio/tools:tools doesn't publish a second, different copy.
+# LINT.IfChange
+bazel_fuchsia_package("audio-codec-ctl") {
+  bazel_config = "fuchsia_platform"
 }
-
-fuchsia_package("audio-codec-ctl") {
-  deps = [ ":bin" ]
-}
+# LINT.ThenChange(BUILD.bazel)

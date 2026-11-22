@@ -33,7 +33,7 @@ fidl("fuchsia.memory.attribution.plugin") {
   visibility = [
     ":*",
     "//src/developer/ffx/plugins/profile/memory/*",
-    "//src/performance/memory/*",
+    "//src/memory/*",
   ]
   public_deps = [
     "//sdk/fidl/fuchsia.kernel",

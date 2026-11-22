@@ -10,6 +10,7 @@
 use crate::arch_rs::x86::lapic::{apic_bsp_id, apic_local_id};
 use crate::arch_rs::x86::pv::PvEoi;
 use crate::arch_rs::x86::smp::{x86_bringup_aps, x86_init_smp};
+use crate::kernel::cpu_distance_map::CpuDistanceMap;
 use crate::kernel::mp::SMP_MAX_CPUS;
 use crate::kernel::types::cpu_num_t;
 use crate::pdev_power::PowerCpuState;
@@ -19,7 +20,7 @@ use crate::platform_rs::mapped_crashlog::MappedCrashlog;
 use crate::topology::{self, Graph};
 use boot_options::BootOptions;
 use core::cell::UnsafeCell;
-use core::ffi::{CStr, c_char, c_void};
+use core::ffi::{CStr, c_char};
 use core::pin::Pin;
 use core::ptr::slice_from_raw_parts;
 use core::sync::atomic::Ordering;
@@ -32,19 +33,10 @@ use zx_status::Status;
 static MAPPED_CRASHLOG: LazyInit<MappedCrashlog, NoCheck> = LazyInit::uninit();
 static EFI_CRASHLOG: EfiCrashlog = EfiCrashlog::new();
 
-type CpuDistanceCallback =
-    extern "C" fn(from_id: cpu_num_t, to_id: cpu_num_t, ctx: *mut c_void) -> u32;
-
 unsafe extern "C" {
-    fn arch_mp_prep_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status>;
-    fn arch_mp_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status>;
-
     fn cpp_phys_handoff_crashlog(size: &mut usize) -> *const u8;
     fn cpp_phys_handoff_nvram(size: &mut usize) -> *mut u8;
     fn cpp_phys_handoff_memory(count: &mut usize) -> *const memalloc::Range;
-    fn cpp_cpu_distance_map_init(cpu_count: usize, cb: CpuDistanceCallback, ctx: *mut c_void);
-    fn cpp_cpu_distance_map_set_distance_threshold(threshold: u32);
-    fn cpp_cpu_distance_map_dump();
 }
 
 /// Preserves crashlog and NVRAM locations handed off from physboot before handoff memory is
@@ -96,7 +88,12 @@ fn platform_init_crashlog() {
 }
 
 /// Super early platform initialization, before almost everything.
-fn platform_early_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU during single-threaded early boot while the physboot
+/// handoff remains valid.
+pub unsafe fn platform_early_init() {
     /* extract bootloader data while still accessible */
     /* this includes debug uart config, etc. */
     platform_save_bootloader_data();
@@ -113,20 +110,8 @@ fn platform_early_init() {
     }
 }
 
-/// FFI entry point for [`platform_early_init`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_early_init() {
-    platform_early_init();
-}
-
 /// Perform any set up required before virtual memory is enabled, or the heap is set up.
-fn platform_prevm_init() {}
-
-/// FFI entry point for [`platform_prevm_init`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_prevm_init() {
-    platform_prevm_init();
-}
+pub fn platform_prevm_init() {}
 
 /// SMP topology discovery state populated during [`traverse_topology`] and consumed by
 /// [`platform_init_smp`] on the bootstrap processor.
@@ -172,28 +157,6 @@ impl BootCell {
 unsafe impl Sync for BootCell {}
 
 static SMP_BOOT_DATA: BootCell = BootCell::new();
-
-/// Initializes the global `CpuDistanceMap` with distances computed by `f`.
-fn cpu_distance_map_initialize<F>(cpu_count: usize, mut f: F)
-where
-    F: FnMut(cpu_num_t, cpu_num_t) -> u32,
-{
-    extern "C" fn trampoline<F>(from_id: cpu_num_t, to_id: cpu_num_t, ctx: *mut c_void) -> u32
-    where
-        F: FnMut(cpu_num_t, cpu_num_t) -> u32,
-    {
-        // SAFETY: `ctx` is a valid pointer to `f` for the duration of `cpp_cpu_distance_map_init`.
-        let cb = unsafe { &mut *ctx.cast::<F>() };
-        cb(from_id, to_id)
-    }
-
-    let ctx = core::ptr::from_mut(&mut f).cast::<c_void>();
-    // SAFETY: `trampoline::<F>` and `ctx` are valid for the synchronous callbacks made during
-    // `cpp_cpu_distance_map_init`.
-    unsafe {
-        cpp_cpu_distance_map_init(cpu_count, trampoline::<F>, ctx);
-    }
-}
 
 /// Discovers active CPUs from the system topology graph and initializes the CPU distance map.
 fn traverse_topology(_level: init::LkInitLevel) {
@@ -244,13 +207,16 @@ fn traverse_topology(_level: init::LkInitLevel) {
                 if smp_data.apic_ids.push_back(apic_id).is_err() {
                     dprintf!(CRITICAL, "Failed to allocate apic_ids table, disabling SMP!\n");
                     smp_data.apic_ids = fbl::Vector::new();
-                    cpu_distance_map_initialize(1, |_, _| 0);
+                    // SAFETY: `traverse_topology` runs once on the BSP at `LK_INIT_LEVEL_TOPOLOGY`,
+                    // before anything uses the map, and this path returns right after.
+                    unsafe { CpuDistanceMap::initialize(1, |_, _| 0) };
                     return;
                 }
                 if logical_ids.push_back(index as cpu_num_t).is_err() {
                     dprintf!(CRITICAL, "Failed to allocate logical_ids table, disabling SMP!\n");
                     smp_data.apic_ids = fbl::Vector::new();
-                    cpu_distance_map_initialize(1, |_, _| 0);
+                    // SAFETY: As for the `apic_ids` failure above.
+                    unsafe { CpuDistanceMap::initialize(1, |_, _| 0) };
                     return;
                 }
             }
@@ -289,7 +255,7 @@ fn traverse_topology(_level: init::LkInitLevel) {
     // Record the lowest level at which cpus are shared in the hierarchy, used later to
     // set the global distance threshold.
     let mut lowest_sharing_level: u32 = 4; // Start at the highest level we might compute.
-    cpu_distance_map_initialize(cpu_count, |from_id, to_id| {
+    let distance = |from_id: cpu_num_t, to_id: cpu_num_t| -> u32 {
         let logical_from_id = logical_ids[from_id as usize];
         let logical_to_id = logical_ids[to_id as usize];
         let topology: &Graph = topology::get_system_topology();
@@ -343,7 +309,10 @@ fn traverse_topology(_level: init::LkInitLevel) {
         // Above socket level is all distance 4
         lowest_sharing_level = core::cmp::min(lowest_sharing_level, 4);
         4
-    });
+    };
+    // SAFETY: `traverse_topology` runs once on the BSP at `LK_INIT_LEVEL_TOPOLOGY`, before anything
+    // uses the map.
+    unsafe { CpuDistanceMap::initialize(cpu_count, distance) };
 
     // Set the point at which we should consider scheduling to be distant. Set it
     // one past the point a which we started seeing some sharing at the cache, die,
@@ -351,10 +320,10 @@ fn traverse_topology(_level: init::LkInitLevel) {
     // Limitations: does not handle asymmetric topologies, such as hybrid cpus
     // with dissimilar cpu clusters.
     let distance_threshold: u32 = lowest_sharing_level + 1;
-    // SAFETY: `CpuDistanceMap` was initialized above.
+    // SAFETY: `CpuDistanceMap` was initialized above, and the BSP has not started any other CPU.
     unsafe {
-        cpp_cpu_distance_map_set_distance_threshold(distance_threshold);
-        cpp_cpu_distance_map_dump();
+        CpuDistanceMap::set_distance_threshold(distance_threshold);
+        CpuDistanceMap::dump();
     }
 }
 
@@ -389,8 +358,7 @@ fn platform_init_smp() {
 #[unsafe(no_mangle)]
 pub extern "C" fn platform_mp_prep_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
     // TODO: Make sure the IOAPIC and PCI have nothing for this CPU
-    // SAFETY: `arch_mp_prep_cpu_unplug` is safe to call with `cpu_id`.
-    unsafe { arch_mp_prep_cpu_unplug(cpu_id) }
+    crate::arch_rs::x86::mp::mp_prep_cpu_unplug(cpu_id)
 }
 
 /// Shutdown the specified CPU. Called after it is no longer being scheduled on.
@@ -403,13 +371,10 @@ pub extern "C" fn platform_mp_prep_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), S
 pub unsafe extern "C" fn platform_mp_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
     // SAFETY: Caller guarantees `cpu_id` is not the calling CPU and is already offline/halted and
     // no longer being scheduled on.
-    unsafe { arch_mp_cpu_unplug(cpu_id) }
+    unsafe { crate::arch_rs::x86::mp::mp_cpu_unplug(cpu_id) }
 }
 
-/// Global C-string pointer wrapper for SMBIOS strings shared with C++ (`extern const char*`).
-///
-/// `#[repr(transparent)]` over [`zr::AtomicConstPtr<c_char>`] has the exact ABI layout of a C
-/// `const char*` global variable while satisfying Rust `Sync` requirements without `static mut`.
+/// Global C-string pointer wrapper for SMBIOS strings.
 #[repr(transparent)]
 struct GlobalCStr(zr::AtomicConstPtr<c_char>);
 
@@ -437,17 +402,38 @@ impl GlobalCStr {
 /// in the case where these aren't matchable or the table isn't walk-able, `"<null>"` if the table
 /// specifies there isn't a value provided, or `"<missing string>"` if the table specifies a string
 /// index that doesn't match the string table.
-#[unsafe(export_name = "manufacturer")]
 static MANUFACTURER: GlobalCStr = GlobalCStr::new(c"unknown");
 
 /// System product name pointer specified in the SMBIOS table (see [`MANUFACTURER`]).
-#[unsafe(export_name = "product")]
 static PRODUCT: GlobalCStr = GlobalCStr::new(c"unknown");
 
 /// Manufacturer information, fetched from SMBIOS during system startup.
 #[inline]
 pub fn manufacturer() -> &'static CStr {
     MANUFACTURER.as_c_str()
+}
+
+/// Returns true if `needle` is a substring of `haystack`.
+fn cstr_contains(haystack: &CStr, needle: &[u8]) -> bool {
+    needle.is_empty() || haystack.to_bytes().windows(needle.len()).any(|window| window == needle)
+}
+
+/// Returns true if `manufacturer` and `product` identify a platform expected to have functioning
+/// EFI support.
+fn is_efi_expected_for(manufacturer: &CStr, product: &CStr) -> bool {
+    // All Intel NUCs are expected to have functioning EFI support.
+    cstr_contains(manufacturer, b"Intel") && cstr_contains(product, b"NUC")
+}
+
+/// Return true if the platform/manufacturer provided by SMBIOS is expected to have functioning
+/// EFI support.
+///
+/// Return false if no EFI is expected or unknown.
+///
+/// While most x86_64 platforms _will_ have EFI support, some platforms (in particular, QEMU and
+/// Chromebooks) don't have EFI support, and this is fine.
+pub fn platform_is_efi_expected() -> bool {
+    is_efi_expected_for(MANUFACTURER.as_c_str(), PRODUCT.as_c_str())
 }
 
 /// Updates `manufacturer` and `product` if `hdr` describes an SMBIOS v2.0+ System Information
@@ -470,13 +456,19 @@ fn update_smbios_system_info(
 }
 
 /// Later platform initialization, after the kernel heap is set up.
-fn platform_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU before starting secondary CPUs and before `end_handoff`.
+pub unsafe fn platform_init() {
     platform_init_crashlog();
 
     // Initialize all PvEoi instances and SMBIOS information prior to starting secondary CPUs.
     PvEoi::init_all();
 
-    super::smbios::pc_init_smbios();
+    // SAFETY: Caller guarantees `platform_init` runs once on the boot CPU before starting
+    // secondary CPUs and before `end_handoff`.
+    unsafe { super::smbios::pc_init_smbios() };
 
     let _ = super::smbios::walk_structs(|version, h, raw_bytes, st| {
         update_smbios_system_info(version, h, raw_bytes, st, &MANUFACTURER, &PRODUCT);
@@ -491,25 +483,9 @@ fn platform_init() {
     platform_init_smp();
 }
 
-/// FFI entry point for [`platform_init`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_init() {
-    platform_init();
-}
-
 /// Queries the power state of `cpu_id`.
 pub fn platform_get_cpu_state(_cpu_id: cpu_num_t) -> Result<PowerCpuState, Status> {
     Err(Status::NOT_SUPPORTED)
-}
-
-/// FFI entry point for [`platform_get_cpu_state`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_get_cpu_state(
-    cpu_id: cpu_num_t,
-    out_state: &mut PowerCpuState,
-) -> Result<(), Status> {
-    *out_state = platform_get_cpu_state(cpu_id)?;
-    Ok(())
 }
 
 /// Unit tests for PC platform initialization helpers.
@@ -591,5 +567,16 @@ mod tests {
         );
         assert_eq!(mfr.as_c_str(), c"Google");
         assert_eq!(prod.as_c_str(), c"PC");
+    }
+
+    /// Verifies `is_efi_expected_for` matches Intel NUC SMBIOS manufacturer and product strings.
+    #[test]
+    fn test_is_efi_expected_for() {
+        assert!(is_efi_expected_for(c"Intel(R) Client Systems", c"NUC11TNHi5"));
+        assert!(is_efi_expected_for(c"Intel Corporation", c"NUC7i5DNHE"));
+        assert!(!is_efi_expected_for(c"QEMU", c"Standard PC (Q35 + ICH9, 2009)"));
+        assert!(!is_efi_expected_for(c"Intel Corporation", c"Other"));
+        assert!(!is_efi_expected_for(c"Other", c"NUC"));
+        assert!(!is_efi_expected_for(c"unknown", c"unknown"));
     }
 }

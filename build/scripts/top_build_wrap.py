@@ -22,21 +22,22 @@ import tempfile
 import time
 from typing import Mapping, Sequence, TextIO
 
+from build.profile import profile_wrap
+from build.rbe import reproxy_wrap
+from build.resultstore import rsproxy_wrap
 from build.scripts import python_subprocess
 from build.tui import build_tui_wrap
 
 _SCRIPT: pathlib.Path = pathlib.Path(__file__)
 _SOURCE_DIR: pathlib.Path = _SCRIPT.resolve().parent.parent.parent
 
-_PROFILE_WRAPPER: pathlib.Path = pathlib.Path("build/profile/profile_wrap.sh")
+_PROFILE_WRAPPER: pathlib.Path = pathlib.Path("build/profile/profile_wrap.py")
 _HARDWARE_PROFILER: pathlib.Path = pathlib.Path(
     "build/profile/hardware_profiler.py"
 )
-_REPROXY_WRAPPER: pathlib.Path = pathlib.Path(
-    "build/rbe/fuchsia-reproxy-wrap.sh"
-)
+_REPROXY_WRAPPER: pathlib.Path = reproxy_wrap.REPROXY_WRAP
 _RSPROXY_WRAPPER: pathlib.Path = pathlib.Path(
-    "build/resultstore/fuchsia-rsproxy-wrap.sh"
+    "build/resultstore/rsproxy_wrap.py"
 )
 
 _BUILD_LOGS_DIR: str = "_build_logs"
@@ -54,17 +55,19 @@ FAILURE_SUMMARY_RELPATH: pathlib.Path = (
     pathlib.Path(_TUI_LOGS_DIR) / _FAILURE_SUMMARY_TXT
 )
 
-_BUILD_PROFILE_DIR: str = "build_profile"
-_SYSTEM_PROFILE_JSON: str = "system_profile.json"
-_HARDWARE_PROFILE_JSON: str = "hardware_profile.json"
-_HARDWARE_PROFILE_CACHE_JSON: str = "hardware_profile.cache.json"
+_BUILD_PROFILE_DIR: str = profile_wrap.LOGS_SUBDIR
+_SYSTEM_PROFILE_JSON: str = profile_wrap.SYSTEM_PROFILE_JSON_NAME
+_HARDWARE_PROFILE_JSON: str = profile_wrap.HARDWARE_PROFILE_JSON_NAME
+_HARDWARE_PROFILE_CACHE_JSON: str = (
+    profile_wrap.HARDWARE_PROFILE_CACHE_JSON_NAME
+)
 
-_REPROXY_LOGS_DIR: str = "reproxy_logs"
-_REPROXY_TMPDIRS_DIR: str = ".reproxy_tmpdirs"
-_RBE_METRICS_TXT: str = "rbe_metrics.txt"
-_REPROXY_RRPL: str = "reproxy.rrpl"
+_REPROXY_LOGS_DIR: str = reproxy_wrap.LOGS_SUBDIR
+_REPROXY_TMPDIRS_DIR: str = reproxy_wrap.TMPDIRS_SUBDIR
+_RBE_METRICS_TXT: str = reproxy_wrap.METRICS_TXT_NAME
+_REPROXY_RRPL: str = reproxy_wrap.RRPL_NAME
 
-_RSPROXY_LOGS_DIR: str = "rsproxy_logs"
+_RSPROXY_LOGS_DIR: str = rsproxy_wrap.LOGS_SUBDIR
 
 
 def msg(text: str, file: TextIO = sys.stderr) -> None:
@@ -279,11 +282,12 @@ class WrapContext:
         system_profile_log = profile_log_dir / _SYSTEM_PROFILE_JSON
         hardware_profile_log = profile_log_dir / _HARDWARE_PROFILE_JSON
 
-        cmd = [
-            str(self.source_dir / _PROFILE_WRAPPER),
+        cmd = python_subprocess.cmd(
+            self.source_dir,
+            self.source_dir / _PROFILE_WRAPPER,
             "--system-log",
             str(system_profile_log),
-        ]
+        )
         if self.config.verbose:
             cmd.append("--verbose")
         cmd.append("--")
@@ -293,10 +297,7 @@ class WrapContext:
             name="profile",
             prefix=cmd,
             log_dir=profile_log_dir,
-            artifacts={
-                "system_profile": system_profile_log,
-                "hardware_profile": hardware_profile_log,
-            },
+            artifacts=profile_wrap.profile_artifacts(profile_log_dir),
             post_build_uploads=uploads,
         )
 
@@ -311,13 +312,14 @@ class WrapContext:
             self.config.build_dir / _REPROXY_TMPDIRS_DIR / self.log_dir.name
         )
 
-        cmd = [
-            str(self.source_dir / _REPROXY_WRAPPER),
+        cmd = python_subprocess.cmd(
+            self.source_dir,
+            self.source_dir / _REPROXY_WRAPPER,
             "--logdir",
             str(reproxy_log_dir),
             "--tmpdir",
             str(reproxy_tmpdir),
-        ]
+        )
         if self.config.rbe_auth_type:
             cmd.extend(["--auth-type", self.config.rbe_auth_type])
         if self.config.use_machine_credentials:
@@ -337,10 +339,7 @@ class WrapContext:
             name="rbe",
             prefix=cmd,
             log_dir=reproxy_log_dir,
-            artifacts={
-                "metrics": metrics_file,
-                "rrpl": rrpl_file,
-            },
+            artifacts=reproxy_wrap.reproxy_artifacts(reproxy_log_dir),
             post_build_uploads=uploads,
         )
 
@@ -361,7 +360,9 @@ class WrapContext:
             return None
 
         rsproxy_log_dir = self.log_dir / _RSPROXY_LOGS_DIR
-        cmd = [str(self.source_dir / _RSPROXY_WRAPPER)]
+        cmd = python_subprocess.cmd(
+            self.source_dir, self.source_dir / _RSPROXY_WRAPPER
+        )
         if self.config.enable_resultstore:
             if self.config.resultstore_auth_type:
                 cmd.extend(["--auth-type", self.config.resultstore_auth_type])
@@ -391,7 +392,7 @@ class WrapContext:
             name="resultstore",
             prefix=cmd,
             log_dir=rsproxy_log_dir,
-            artifacts={"log_dir": rsproxy_log_dir},
+            artifacts=rsproxy_wrap.rsproxy_artifacts(rsproxy_log_dir),
             post_build_uploads=all_post_build_uploads,
         )
 
@@ -607,7 +608,7 @@ def parse_args(argv: Sequence[str]) -> tuple[Config | None, list[str]]:
     return config, wrapped_command
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     try:
         config, command = parse_args(argv)
     except (ValueError, argparse.ArgumentError) as e:
@@ -617,7 +618,7 @@ def main(argv: Sequence[str]) -> int:
     if config is None:
         return 0
 
-    context = WrapContext(config, environ=os.environ)
+    context = WrapContext(config, environ=env)
     full_cmd = context.command_prefix() + command
     exec_env = context.execution_env()
 
@@ -633,4 +634,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

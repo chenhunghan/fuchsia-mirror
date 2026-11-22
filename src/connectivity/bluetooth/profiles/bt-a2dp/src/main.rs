@@ -456,9 +456,10 @@ mod tests {
     use bt_channel_test_support::{Transport, create_test_channels};
     use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_bluetooth_a2dp as a2dp;
-    use fidl_fuchsia_bluetooth_bredr::{ProfileRequest, ProfileRequestStream};
     use futures::task::Poll;
+    use std::pin::pin;
     use test_case::test_case;
+    use test_profile_server::{ConnectChannel, TestProfileServer};
 
     use crate::config::DEFAULT_INITIATOR_DELAY;
     use crate::media::AudioSourceType;
@@ -467,8 +468,8 @@ mod tests {
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
     }
 
-    fn setup_connected_peers() -> (Arc<ConnectedPeers>, ProfileRequestStream) {
-        let (proxy, stream) = create_proxy_and_stream::<bredr::ProfileMarker>();
+    fn setup_connected_peers() -> (Arc<ConnectedPeers>, TestProfileServer) {
+        let (proxy, stream) = TestProfileServer::create_endpoints();
         let peers = Arc::new(ConnectedPeers::new(
             stream::StreamsBuilder::default(),
             Permits::new(1),
@@ -597,28 +598,20 @@ mod tests {
 
         // After fast forwarding time, expect and handle the `connect` request
         // because A2DP-sink should be initiating.
-        let (_test, local_channel) = create_test_channels(transport);
-        let request = exec.run_until_stalled(&mut prof_stream.next());
-        match request {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect {
-                peer_id,
-                responder,
-                connection,
-                ..
-            }))) => {
-                assert_eq!(PeerId(1), peer_id.into());
-                match connection {
-                    bredr::ConnectParameters::L2cap(params) => assert_eq!(
-                        Some(crate::config::MAX_RX_SDU_SIZE),
-                        params.parameters.unwrap().max_rx_packet_size
-                    ),
-                    x => panic!("Expected L2cap connection, got {:?}", x),
-                };
-                let channel = local_channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("responder sends");
-            }
-            x => panic!("Should have sent a connect request, but got {:?}", x),
+        let mut connect_fut = pin!(prof_stream.expect_connect_request());
+        let req = exec
+            .run_until_stalled(&mut connect_fut)
+            .expect("Should have sent a connect request")
+            .assert_peer(PeerId(1))
+            .assert_channel(ConnectChannel::L2CapPsm(bredr::PSM_AVDTP));
+        match &req.connection {
+            bredr::ConnectParameters::L2cap(params) => assert_eq!(
+                Some(crate::config::MAX_RX_SDU_SIZE),
+                params.parameters.as_ref().unwrap().max_rx_packet_size
+            ),
+            x => panic!("Expected L2cap connection, got {:?}", x),
         };
+        let _test = req.accept_with_transport(transport);
         run_to_stalled(&mut exec);
 
         // The remote peer did not connect to us, A2DP Sink should initiate a connection

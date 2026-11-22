@@ -2,11 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::target_interface;
 use safe_string::{ControlCharError, TermSafe};
 use std::ops::Deref;
-use target_behavior::target_interface;
 
-use fho::{FhoEnvironment, TryFromEnv};
+use fho::{FhoEnvironment, TargetNeed, TryFromEnv};
 
 /// Holder struct for the target's Nodename.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -75,10 +75,11 @@ impl TryFrom<Option<String>> for NodenameHolder {
 }
 
 impl TryFromEnv for NodenameHolder {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
-        let connector = target_env.init_connection_behavior(env.environment_context()).await?;
+        let connector = target_env.init(env.environment_context());
         let (resolution, _conn) = connector.connect(env.environment_context()).await?;
         let identity = resolution
             .identify(&env.environment_context())

@@ -12,7 +12,7 @@ FuchsiaPackageInfo = provider(
         "package_name": "The name of the package",
         "far_file": "The far archive",
         "meta_far": "The meta.far file",
-        "files": "All files that compose this package, including the manifest and meta.far",
+        "files": "A list of all files that compose this package, including the manifest, meta.far, and any subpackage files",
         "build_id_dirs": "Directories containing the debug symbols",
         "packaged_components": "A list of all the components in the form of FuchsiaPackagedComponentInfo structs",
         "package_resources": "A list of resources added to this package",

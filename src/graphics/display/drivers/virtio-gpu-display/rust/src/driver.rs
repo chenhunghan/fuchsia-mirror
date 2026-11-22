@@ -63,7 +63,7 @@ impl Driver for VirtioGpuDisplayDriver {
         Ok(Self { node: device_node, outgoing_directory_task })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         log::debug!("virtio-gpu-display driver stopped");
     }
 }

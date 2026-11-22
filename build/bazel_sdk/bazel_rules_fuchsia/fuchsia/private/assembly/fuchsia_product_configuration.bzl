@@ -11,8 +11,8 @@ load("@fuchsia_rules_common//assembly:json_utils.bzl", "extract_labels")
 load(
     "@fuchsia_rules_common//assembly:product_configuration.bzl",
     "BUILD_TYPES",
-    "COMMON_PRODUCT_ASSEMBLY_ATTRIBUTES",
-    "common_product_configuration_impl",
+    "PRODUCT_CONFIGURATION_COMMON_ATTRS",
+    "product_configuration_common_impl",
 )
 load(
     "@fuchsia_rules_common//assembly:providers.bzl",
@@ -44,7 +44,7 @@ def _fuchsia_product_configuration_impl(ctx):
     else:
         repo_name = ctx.attr._release_repository_flag[BuildSettingInfo].value
 
-    return common_product_configuration_impl(ctx, sdk.assembly_config, repo_name = repo_name)
+    return product_configuration_common_impl(ctx, sdk.assembly_config, repo_name = repo_name)
 
 def _fuchsia_prebuilt_product_configuration_impl(ctx):
     directory = select_root_dir_with_file(ctx.files.files, "product_configuration.json")
@@ -79,7 +79,7 @@ _fuchsia_product_configuration = rule(
     implementation = _fuchsia_product_configuration_impl,
     toolchains = [FUCHSIA_TOOLCHAIN_DEFINITION],
     # Use the common product assembly attributes from @fuchsia_rules_common
-    attrs = COMMON_PRODUCT_ASSEMBLY_ATTRIBUTES | {
+    attrs = PRODUCT_CONFIGURATION_COMMON_ATTRS | {
         "_release_repository_flag": attr.label(
             doc = "String flag used to set the name of the release repository.",
             default = "@rules_fuchsia//fuchsia/flags:fuchsia_release_repository",

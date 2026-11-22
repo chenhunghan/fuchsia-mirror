@@ -154,5 +154,5 @@ buffer usage, and also relies on FIDL implementation detail.
 <!-- xrefs -->
 [zx_object_get_info]: /reference/syscalls/object_get_info.md
 [ZX_INFO_HANDLE_BASIC]: /reference/syscalls/object_get_info.md#zx_info_handle_basic
-[wformat-transactional]: /docs/reference/fidl/language/wire-format/README.md#Transactional-Messages
+[wformat-transactional]: /docs/reference/fidl/language/wire-format/README.md#transactional-messages
 [zx_channel_call]: /reference/syscalls/channel_call.md

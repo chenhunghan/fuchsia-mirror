@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "mocks",
+    testonly = True,
+    srcs = [
+        "mock_color_transform_handler.cc",
+        "mock_focus_chain.cc",
+        "mock_pointer_event_registry.cc",
+        "mock_property_provider.cc",
+        "mock_setui_accessibility.cc",
+    ],
+    hdrs = [
+        "mock_color_transform_handler.h",
+        "mock_focus_chain.h",
+        "mock_pointer_event_registry.h",
+        "mock_property_provider.h",
+        "mock_setui_accessibility.h",
+    ],
+    implementation_deps = [
+        "//src/ui/a11y/lib/util",
+    ],
+    # Fuchsia-only because headers include HLCPP FIDL bindings and //sdk/lib/sys/cpp/testing:cpp.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/ui/a11y/bin/a11y_manager/tests:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_hlcpp",
+        "//sdk/fidl/fuchsia.intl:fuchsia.intl_hlcpp",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
+        "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_hlcpp",
+        "//sdk/fidl/fuchsia.ui.input.accessibility:fuchsia.ui.input.accessibility_hlcpp",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)

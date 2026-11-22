@@ -158,18 +158,21 @@ zx::result<> UsbXhci::Init(std::unique_ptr<dma_buffer::BufferFactory> buffer_fac
     return zx::error(ZX_ERR_NO_MEMORY);
   }
   max_slots_ = 32;
-  device_state_ = fbl::MakeArray<fbl::RefPtr<DeviceState>>(&ac, max_slots_);
+  auto device_states = fbl::MakeArray<fbl::RefPtr<DeviceState>>(&ac, max_slots_);
   if (!ac.check()) {
     return zx::error(ZX_ERR_NO_MEMORY);
   }
+  InitDeviceState(std::move(device_states));
 
   // Create device_state_
   auto state = fbl::MakeRefCounted<DeviceState>(kDeviceId, this);
-  fbl::AutoLock _(&state->transaction_lock());
-  state->SetDeviceInformation(kSlot, kPort, std::nullopt);
-  state->AddressDeviceCommand(this, kSlot, kPort, std::nullopt, nullptr, 0, nullptr, nullptr,
-                              false);
-  GetDeviceState()[kDeviceId] = std::move(state);
+  {
+    fbl::AutoLock _(&state->transaction_lock());
+    state->SetDeviceInformation(kSlot, kPort, std::nullopt);
+    state->AddressDeviceCommand(this, kSlot, kPort, std::nullopt, nullptr, 0, nullptr, nullptr,
+                                false);
+  }
+  SetDeviceState(kDeviceId, std::move(state));
 
   zx::result bti = fake_bti::CreateFakeBti();
   EXPECT_OK(bti);
@@ -367,6 +370,80 @@ TEST_F(EndpointHarness, QueueControlRequest) {
   EXPECT_TRUE(status_trb->IOC());
 }
 
+TEST_F(EndpointHarness, QueueControlOutAndNoDataRequests) {
+  Init(0);
+
+  std::vector<fendpoint::VmoInfo> vmo_info;
+  vmo_info.emplace_back(std::move(fendpoint::VmoInfo().id(8).size(zx_system_get_page_size())));
+  {
+    fidl::Result<fendpoint::Endpoint::RegisterVmos> result =
+        client_->RegisterVmos({std::move(vmo_info)});
+    ASSERT_TRUE(result.is_ok());
+  }
+
+  // 1. Control OUT with a data stage -> Setup::OUT (TRT=2), Data DIRECTION=0, Status DIRECTION=1.
+  expected_ring_doorbell_.emplace(kSlot, 1);
+  {
+    std::vector<frequest::Request> requests;
+    requests.emplace_back()
+        .defer_completion(false)
+        .information(frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
+            fdescriptor::UsbSetup()
+                .bm_request_type(kStandardDeviceOut)
+                .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kSetDescriptor))
+                .w_value(usb_descriptor_w_value(fdescriptor::DescriptorType::kDevice))
+                .w_length(64))))
+        .data()
+        .emplace()
+        .emplace_back()
+        .offset(0)
+        .size(64)
+        .buffer(frequest::Buffer::WithVmoId(8));
+    ASSERT_TRUE(client_->QueueRequests(std::move(requests)).is_ok());
+  }
+  sync_completion_wait(&doorbell_, zx::time::infinite().get());
+
+  auto iter = trbs().begin();
+  // First TRB in trbs() is the ring's initial TRB from TransferRing::Init.
+  auto setup_trb = static_cast<struct Setup*>(static_cast<TRB*>((++iter)->get()));
+  EXPECT_EQ(setup_trb->length(), 8UL);
+  EXPECT_EQ(setup_trb->IDT(), 1UL);
+  EXPECT_EQ(setup_trb->TRT(), Setup::OUT);
+
+  auto data_trb = static_cast<ControlData*>(static_cast<TRB*>((++iter)->get()));
+  EXPECT_EQ(data_trb->DIRECTION(), 0UL);
+  EXPECT_EQ(data_trb->LENGTH(), 64UL);
+
+  auto status_trb = static_cast<Status*>(static_cast<TRB*>((++iter)->get()));
+  EXPECT_EQ(status_trb->DIRECTION(), 1UL);
+  EXPECT_TRUE(status_trb->IOC());
+
+  // 2. Control with no data stage -> Setup::NoDataStage (TRT=0), Status DIRECTION=1.
+  sync_completion_reset(&doorbell_);
+  expected_ring_doorbell_.emplace(kSlot, 1);
+  {
+    std::vector<frequest::Request> requests;
+    requests.emplace_back().defer_completion(false).information(
+        frequest::RequestInfo::WithControl(frequest::ControlRequestInfo().setup(
+            fdescriptor::UsbSetup()
+                .bm_request_type(kStandardDeviceOut)
+                .b_request(fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration))
+                .w_value(1)
+                .w_length(0))));
+    ASSERT_TRUE(client_->QueueRequests(std::move(requests)).is_ok());
+  }
+  sync_completion_wait(&doorbell_, zx::time::infinite().get());
+
+  auto no_data_setup = static_cast<struct Setup*>(static_cast<TRB*>((++iter)->get()));
+  EXPECT_EQ(no_data_setup->length(), 8UL);
+  EXPECT_EQ(no_data_setup->IDT(), 1UL);
+  EXPECT_EQ(no_data_setup->TRT(), Setup::NoDataStage);
+
+  auto no_data_status = static_cast<Status*>(static_cast<TRB*>((++iter)->get()));
+  EXPECT_EQ(no_data_status->DIRECTION(), 1UL);
+  EXPECT_TRUE(no_data_status->IOC());
+}
+
 TEST_F(EndpointHarness, QueueNormalRequest) {
   // ep_addr needs to be non-0 to queue a normal request.
   Init(1);
@@ -434,7 +511,7 @@ TEST_F(EndpointHarness, QueueRequestWithNullDeviceState) {
   }
 
   // Simulate device teardown racing with in-flight FIDL requests.
-  driver_test().driver()->GetDeviceState()[kDeviceId].reset();
+  driver_test().driver()->SetDeviceState(kDeviceId, nullptr);
 
   // Queue a request - must complete gracefully, not crash.
   // No doorbell should be rung since the request fails early.
@@ -460,7 +537,7 @@ TEST_F(EndpointHarness, UnbindAfterDeviceStateDropped) {
 
   auto endpoints = fidl::Endpoints<fuchsia_hardware_usb_endpoint::Endpoint>::Create();
   {
-    auto state = driver_test().driver()->GetDeviceState()[kDeviceId];
+    auto state = driver_test().driver()->GetDeviceState(kDeviceId);
     ASSERT_TRUE(state);
     fbl::AutoLock _(&state->transaction_lock());
     auto& ep = state->GetEndpoint(0);
@@ -478,7 +555,7 @@ TEST_F(EndpointHarness, UnbindAfterDeviceStateDropped) {
   // Simulate UsbXhci::DeviceOffline disconnecting and dropping UsbXhci's DeviceState reference
   // while the FIDL Endpoint client channel is still bound.
   {
-    auto state = std::move(driver_test().driver()->GetDeviceState()[kDeviceId]);
+    auto state = driver_test().driver()->TakeDeviceState(kDeviceId);
     ASSERT_TRUE(state);
     {
       fbl::AutoLock _(&state->transaction_lock());
@@ -486,7 +563,7 @@ TEST_F(EndpointHarness, UnbindAfterDeviceStateDropped) {
     }
     state->ResetHci();
   }
-  ASSERT_FALSE(driver_test().driver()->GetDeviceState()[kDeviceId]);
+  ASSERT_FALSE(driver_test().driver()->GetDeviceState(kDeviceId));
 
   auto cancel_res = client->CancelAll();
   ASSERT_TRUE(cancel_res.is_error());
@@ -501,7 +578,7 @@ TEST_F(EndpointHarness, UnbindAfterDeviceStateDropped) {
 namespace {
 
 TEST_F(EndpointHarness, GetEndpointAfterResetHciDoesNotDereferenceNullHci) {
-  auto state = driver_test().driver()->GetDeviceState()[kDeviceId];
+  auto state = driver_test().driver()->GetDeviceState(kDeviceId);
   ASSERT_TRUE(state);
   state->ResetHci();
 
@@ -566,7 +643,7 @@ TEST_F(EndpointHarness, ConcurrentResetHciDuringEndpointCalls) {
 
   auto endpoints = fidl::Endpoints<fendpoint::Endpoint>::Create();
   {
-    auto state = driver_test().driver()->GetDeviceState()[kDeviceId];
+    auto state = driver_test().driver()->GetDeviceState(kDeviceId);
     ASSERT_TRUE(state);
     fbl::AutoLock _(&state->transaction_lock());
     auto& ep = state->GetEndpoint(0);
@@ -601,7 +678,7 @@ TEST_F(EndpointHarness, ConcurrentResetHciDuringEndpointCalls) {
   // Let worker issue a few rounds of FIDL calls before tearing down DeviceState.
   zx::nanosleep(zx::deadline_after(zx::msec(5)));
   {
-    auto state = std::move(driver_test().driver()->GetDeviceState()[kDeviceId]);
+    auto state = driver_test().driver()->TakeDeviceState(kDeviceId);
     ASSERT_TRUE(state);
     state->ResetHci();
   }

@@ -1,0 +1,1 @@
+Test data of fake_mobly_test_custom_bin, used to test python_mobly_test().

@@ -8,19 +8,11 @@
 
 #include <lib/object-constants.h>
 
-#include <arch/hypervisor.h>
-#include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
-#include <ktl/unique_ptr.h>
-#include <ktl/utility.h>
-#include <object/guest_dispatcher.h>
 
-VcpuDispatcher::VcpuDispatcher(fbl::RefPtr<GuestDispatcher> guest_dispatcher,
-                               ktl::unique_ptr<Vcpu> vcpu)
-    : Dispatcher(0u) {
+VcpuDispatcher::VcpuDispatcher(GuestDispatcher* guest_dispatcher, Vcpu* vcpu) : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(VcpuDispatcher, kVcpuDispatcherStateOffset);
-  rust_vcpu_dispatcher_state_init(&opaque_storage_, this, fbl::ExportToRawPtr(&guest_dispatcher),
-                                  vcpu.release());
+  rust_vcpu_dispatcher_state_init(&opaque_storage_, this, guest_dispatcher, vcpu);
 }
 
 IMPLEMENT_DISPATCHER_RUST_STATE(VcpuDispatcher, rust_vcpu_dispatcher_state_get_lock,

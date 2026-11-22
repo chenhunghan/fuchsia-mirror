@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "virtio-spec",
+    srcs = ["virtio-abi.cc"],
+    hdrs = ["virtio-abi.h"],
+    visibility = [
+        "//src/graphics/display/drivers/virtio-gpu-display:__pkg__",
+        "//src/graphics/drivers/msd-virtio-gpu/src:__pkg__",
+        "//src/graphics/drivers/msd-virtio-gpu/tests/integration:__pkg__",
+        "//src/graphics/drivers/msd-virtio-gpu/tests/unit_tests:__pkg__",
+    ],
+    alwayslink = True,
+)

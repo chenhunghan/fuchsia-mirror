@@ -123,3 +123,27 @@ def is_invoked_by_agent(env: typing.Mapping[str, str] | None = None) -> bool:
         if env.get(var) is not None:
             return True
     return False
+
+
+def resolve_session_id(
+    env: typing.Mapping[str, str] | None = None,
+) -> str | None:
+    """Resolve the calling agent's session ID from agent_session_ids.txt.
+
+    Checks FFX_AGENT_SESSION_ID, ANTIGRAVITY_CONVERSATION_ID, and
+    CLAUDE_CODE_SESSION_ID in precedence order, ignoring empty or
+    whitespace-only values.
+
+    Args:
+        env: Optional mapping representing the environment. Defaults to os.environ.
+
+    Returns:
+        First stripped non-empty session ID string, or None if unset.
+    """
+    target_env = os.environ if env is None else env
+    for var in get_agent_session_id_env_vars():
+        if (raw := target_env.get(var)) is not None and (
+            stripped := raw.strip()
+        ):
+            return stripped
+    return None

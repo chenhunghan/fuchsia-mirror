@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_source_library_zx(
+    name = "simple-codec",
+    srcs = [
+        "simple-codec-client.cc",
+        "simple-codec-helper.cc",
+        "simple-codec-server.cc",
+    ],
+    hdrs = [
+        "include/lib/simple-codec/simple-codec-client.h",
+        "include/lib/simple-codec/simple-codec-helper.h",
+        "include/lib/simple-codec/simple-codec-server.h",
+        "include/lib/simple-codec/simple-codec-server-internal.h",
+        "include/lib/simple-codec/simple-codec-types.h",
+    ],
+    includes = ["include"],
+    visibility = [
+        "//src/devices/power/drivers/nelson-brownout-protection:__pkg__",
+        "//src/media/audio:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_hlcpp",
+        "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        # TODO(https://fxbug.dev/383345297): Remove depedency on TLS (maybe done by C++ bindings
+        # unification).
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//src/devices/bind/fuchsia:fuchsia_cpp",
+        "//src/devices/lib/driver:driver_runtime",
+        "//src/lib/ddktl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/inspect",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+)

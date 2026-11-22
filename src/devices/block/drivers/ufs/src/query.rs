@@ -201,7 +201,7 @@ impl QueryUpiu {
 
     /// Creates a `ReadDescriptor` Query Request UPIU for the specified typed descriptor `D`.
     pub fn read_typed_descriptor<D: Descriptor>(index: u8) -> Self {
-        Self::read_descriptor(D::TYPE, index, std::mem::size_of::<D>() as u16)
+        Self::read_descriptor(D::TYPE, index, size_of::<D>() as u16)
     }
 
     /// Creates a `ReadDescriptor` Query Request UPIU for the specified descriptor type.
@@ -308,7 +308,7 @@ impl QueryUpiu {
     /// or its `bDescriptorIDN` does not match `D::TYPE`, and [`UfsError::InvalidParameter`] if `D`
     /// does not fit in the 256-byte data segment.
     pub fn parse_descriptor<D: Descriptor>(&self) -> Result<D, UfsError> {
-        let capacity = std::mem::size_of::<D>();
+        let capacity = size_of::<D>();
         if capacity > self.command_data.len() {
             return Err(UfsError::InvalidParameter);
         }

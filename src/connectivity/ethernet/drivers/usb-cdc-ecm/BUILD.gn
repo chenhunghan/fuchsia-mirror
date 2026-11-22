@@ -60,7 +60,6 @@ fuchsia_driver_component("usb-cdc-ecm") {
   component_name = "usb-cdc-ecm"
   dml_label = ":usb-cdc-ecm-dml"
   deps = [ ":usb-cdc-ecm-driver" ]
-  info = "meta/usb-cdc-ecm-info.json"
 }
 
 fuchsia_driver_package("package") {
@@ -89,20 +88,43 @@ source_set("usb-cdc-ecm-lib") {
 }
 
 test("usb-cdc-ecm-unittest") {
-  sources = [ "usb-cdc-ecm-unittest.cc" ]
+  sources = [
+    "usb-cdc-ecm-unittest.cc",
+    "usb-cdc-ecm.cc",
+    "usb-cdc-ecm.h",
+  ]
   deps = [
+    ":ethernet_usb_cdc_ecm_bind",
     ":usb-cdc-ecm-lib",
+    "//sdk/banjo/fuchsia.hardware.usb.request:fuchsia.hardware.usb.request_banjo_c",
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
+    "//sdk/lib/driver/compat/cpp",
+    "//sdk/lib/driver/component/cpp",
+    "//sdk/lib/driver/logging/cpp",
+    "//sdk/lib/driver/testing/cpp",
     "//sdk/lib/driver/testing/cpp:scoped_global_logger",
     "//sdk/lib/fdio",
+    "//src/devices/lib/driver:driver_runtime",
+    "//src/devices/usb/lib/usb:usb-dfv2-compat-logging",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
     "//third_party/googletest:gtest",
+    "//zircon/system/ulib/fbl",
+    "//zircon/system/ulib/pretty",
   ]
 }
 
 fuchsia_unittest_package("usb-cdc-ecm-unittest-package") {
   package_name = "usb-cdc-ecm-unittest"
   deps = [ ":usb-cdc-ecm-unittest" ]
+
+  # Unit tests intentionally exercise error paths (such as malformed interrupt
+  # notifications and control transfer failures) that log at ERROR severity.
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }
 
 fuchsia_library_fuzzer("usb-cdc-ecm-descriptor-fuzzer") {
@@ -127,17 +149,17 @@ test("usb-cdc-ecm-integration") {
   output_name = "usb-cdc-ecm-integration-test"
   sources = [ "usb-cdc-ecm-test.cc" ]
   deps = [
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
+    "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_cpp",
     "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
     "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_cpp",
     "//sdk/fidl/fuchsia.hardware.usb.virtual.bus:fuchsia.hardware.usb.virtual.bus_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/async-loop-testing/cpp",
+    "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/fdio",
-    "//sdk/lib/fdio-caller",
-    "//sdk/lib/stdcompat",
     "//src/connectivity/lib/network-device/cpp",
-    "//src/devices/lib/client:device_topology",
     "//src/devices/usb/lib/usb:cdc",
     "//src/devices/usb/lib/usb:descriptors",
     "//src/devices/usb/testing/usb-virtual-bus-launcher",
@@ -156,9 +178,12 @@ fuchsia_unittest_package("usb-cdc-ecm-integration-test") {
   deps = [
     ":usb-cdc-ecm",
     ":usb-cdc-ecm-integration",
-    "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration",
     "//src/connectivity/ethernet/drivers/usb-cdc-function",
-    "//src/connectivity/network/drivers/network-device",
+
+    # TODO(https://fxbug.dev/317149053): Re-add netdevice-migration and
+    # network-device once DriverBase2 no longer clears the per-DSO global
+    # fdf::Logger when one of multiple colocated network-device instances in
+    # driver-host-root tears down, and re-enable DISABLED_TransmitReceive.
     "//src/devices/board/drivers/integration-test",
     "//src/devices/bus/drivers/platform",
     "//src/devices/usb/drivers/usb-bus",
@@ -166,6 +191,15 @@ fuchsia_unittest_package("usb-cdc-ecm-integration-test") {
     "//src/devices/usb/drivers/usb-peripheral",
     "//src/devices/usb/drivers/usb-virtual-bus",
   ]
+
+  # usb-virtual-bus-launcher's EventWatcher closes the FunctionRegistered event
+  # channel with ZX_ERR_CANCELED once registration completes, which causes
+  # usb-peripheral to log at ERROR severity.
+  test_specs = {
+    log_settings = {
+      max_severity = "ERROR"
+    }
+  }
 }
 
 group("tests") {

@@ -42,10 +42,6 @@ bool rust_vm_page_list_is_offset_in_interval(const VmPageList* list, uint64_t of
 void rust_vm_page_list_return_interval_slot(VmPageList* list, uint64_t offset);
 zx_status_t rust_vm_page_list_populate_slots_in_interval(VmPageList* list, uint64_t start_offset,
                                                          uint64_t end_offset);
-zx_status_t rust_vm_page_list_clip_interval_start(VmPageList* list, uint64_t interval_start,
-                                                  uint64_t len);
-zx_status_t rust_vm_page_list_clip_interval_end(VmPageList* list, uint64_t interval_end,
-                                                uint64_t len);
 VmPageOrMarker* rust_vm_page_list_lookup_or_allocate_internal(VmPageList* list, uint64_t offset);
 VmPageOrMarkerSlotAndBool rust_vm_page_list_lookup_or_allocate_check_for_interval(
     VmPageList* list, uint64_t offset, bool split_interval);
@@ -53,17 +49,6 @@ VmPageOrMarkerConstSlotAndOffset rust_vm_page_list_find_interval_start_for_end(
     const VmPageList* list, uint64_t end_offset);
 VmPageOrMarkerConstSlotAndOffset rust_vm_page_list_find_interval_end_for_start(
     const VmPageList* list, uint64_t start_offset);
-zx_status_t rust_vm_page_list_add_zero_interval_internal(VmPageList* list, uint64_t start_offset,
-                                                         uint64_t end_offset, uint32_t dirty_state,
-                                                         uint64_t awaiting_clean_len,
-                                                         bool replace_existing_slot);
-vm_page_t* rust_vm_page_list_replace_page_with_zero_interval(VmPageList* list, uint64_t offset,
-                                                             uint32_t dirty_state);
-zx_status_t rust_vm_page_list_overwrite_zero_interval(VmPageList* list, uint64_t old_start_offset,
-                                                      uint64_t old_end_offset,
-                                                      uint64_t new_start_offset,
-                                                      uint64_t new_end_offset,
-                                                      uint32_t new_dirty_state);
 VmPageOrMarker* rust_vm_page_list_batch_inserter_lookup_or_allocate(
     VmPageList::BatchInserter* inserter, uint64_t offset);
 }  // extern "C"
@@ -172,37 +157,6 @@ bool VmPageList::IsOffsetInZeroInterval(uint64_t offset) const {
 
 bool VmPageList::IsOffsetInInterval(uint64_t offset) const {
   return rust_vm_page_list_is_offset_in_interval(this, offset);
-}
-
-zx_status_t VmPageList::AddZeroIntervalInternal(uint64_t start_offset, uint64_t end_offset,
-                                                VmPageOrMarker::IntervalDirtyState dirty_state,
-                                                uint64_t awaiting_clean_len,
-                                                bool replace_existing_slot) {
-  return rust_vm_page_list_add_zero_interval_internal(this, start_offset, end_offset,
-                                                      static_cast<uint32_t>(dirty_state),
-                                                      awaiting_clean_len, replace_existing_slot);
-}
-
-vm_page_t* VmPageList::ReplacePageWithZeroInterval(uint64_t offset,
-                                                   VmPageOrMarker::IntervalDirtyState dirty_state) {
-  return rust_vm_page_list_replace_page_with_zero_interval(this, offset,
-                                                           static_cast<uint32_t>(dirty_state));
-}
-
-zx_status_t VmPageList::OverwriteZeroInterval(uint64_t old_start_offset, uint64_t old_end_offset,
-                                              uint64_t new_start_offset, uint64_t new_end_offset,
-                                              VmPageOrMarker::IntervalDirtyState new_dirty_state) {
-  return rust_vm_page_list_overwrite_zero_interval(this, old_start_offset, old_end_offset,
-                                                   new_start_offset, new_end_offset,
-                                                   static_cast<uint32_t>(new_dirty_state));
-}
-
-zx_status_t VmPageList::ClipIntervalStart(uint64_t interval_start, uint64_t len) {
-  return rust_vm_page_list_clip_interval_start(this, interval_start, len);
-}
-
-zx_status_t VmPageList::ClipIntervalEnd(uint64_t interval_end, uint64_t len) {
-  return rust_vm_page_list_clip_interval_end(this, interval_end, len);
 }
 
 // Trampolines into the Rust VmPageSpliceList implementation, which likewise shares the layout of

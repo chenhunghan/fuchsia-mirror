@@ -22,7 +22,8 @@ class TouchInjector : public Injector {
                 fit::function<void(InternalTouchEvent, StreamId stream_id,
                                    const view_tree::Snapshot& snapshot)>
                     inject,
-                fit::function<void()> on_channel_closed);
+                fit::function<void()> on_channel_closed,
+                fit::function<fit::deferred_action<fit::closure>()> begin_batch = nullptr);
 
  protected:
   // |Injector|
@@ -31,12 +32,15 @@ class TouchInjector : public Injector {
   // |Injector|
   void CancelStream(uint32_t pointer_id, StreamId stream_id,
                     const view_tree::Snapshot& snapshot) override;
+  // |Injector|
+  fit::deferred_action<fit::closure> BeginBatch() override;
 
  private:
   InternalTouchEvent PointerInjectorEventToInternalTouchEvent(
       fuchsia_ui_pointerinjector::wire::Event& event, uint64_t trace_flow_id) const;
   // Used to inject the event into InputSystem for dispatch to clients.
   const fit::function<void(InternalTouchEvent, StreamId, const view_tree::Snapshot&)> inject_;
+  const fit::function<fit::deferred_action<fit::closure>()> begin_batch_;
 };
 
 }  // namespace scenic_impl::input_dso

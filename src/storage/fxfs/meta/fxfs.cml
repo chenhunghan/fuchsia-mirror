@@ -35,7 +35,6 @@
                 "fuchsia.fs.Admin",
                 "fuchsia.fs.startup.Startup",
                 "fuchsia.fs.startup.Volumes",
-                "fuchsia.fxfs.BlobReader",
                 "fuchsia.fxfs.Debug",
                 "fuchsia.fxfs.ProfileManager",
                 "fuchsia.fxfs.VolumeInstaller",
@@ -45,7 +44,6 @@
     use: [
         {
             protocol: [
-                "fuchsia.feedback.CrashReporter",
                 "fuchsia.memory.attribution.PagerStatsSink",
                 "fuchsia.memorypressure.Provider",
                 "fuchsia.power.battery.BatteryManager",
@@ -83,7 +81,6 @@
                 "fuchsia.fs.Admin",
                 "fuchsia.fs.startup.Startup",
                 "fuchsia.fs.startup.Volumes",
-                "fuchsia.fxfs.BlobReader",
                 "fuchsia.fxfs.Debug",
                 "fuchsia.fxfs.ProfileManager",
                 "fuchsia.fxfs.VolumeInstaller",

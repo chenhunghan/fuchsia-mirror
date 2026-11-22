@@ -4,6 +4,7 @@
 
 import("//build/bazel/bazel_test_suite.gni")
 import("//build/python/python_binary.gni")
+import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
 import("//build/testing/host_test_data.gni")
 
@@ -31,6 +32,26 @@ bazel_test_suite("bazel_tests") {
   host_tests = [ "//build/python:host_tests" ]
 }
 
+python_library("coverage_site") {
+  enable_mypy = true
+  library_deps = [ "//third_party/pylibs/coverage" ]
+  source_root = "coverage_site"
+  sources = [
+    "__init__.py",
+    "_fuchsia_pycov.py",
+    "sitecustomize.py",
+  ]
+}
+
+python_host_test("coverage_site_test") {
+  main_source = "coverage_site/coverage_site_test.py"
+  sources = [ "coverage_site/coverage_site_test.py" ]
+  libraries = [
+    ":coverage_site",
+    "//third_party/pylibs/coverage",
+  ]
+}
+
 # Python test scripts in subdirectories that have been migrated to Bazel-only
 # host_py_test() targets. Listing them here makes them subject to GN mypy
 # type checking as required by //build/shac.star.
@@ -56,8 +77,10 @@ group("host_tests") {
   testonly = true
   deps = [
     ":bazel_tests",
+    ":coverage_site_test",
     ":type_checked_scripts",
     "tests/bin",
+    "tests/imports:tests",
     "tests/lib",
   ]
 }
@@ -74,6 +97,7 @@ python_binary("python_hermetic_concatenate") {
 python_binary("package_python_wheel") {
   enable_mypy = true
   main_source = "package_python_wheel.py"
+  sources = [ "package_python_binary.py" ]
   deps = [ "//build/python/modules/depfile" ]
 }
 

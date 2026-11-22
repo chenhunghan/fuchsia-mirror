@@ -942,7 +942,7 @@ async fn dispatch_control_request(
 }
 
 /// Cleans up and removes the specified interface.
-async fn remove_interface(ctx: &mut Ctx, id: BindingId) {
+pub(crate) async fn remove_interface(ctx: &mut Ctx, id: BindingId) {
     let (devices::StaticNetdeviceInfo { handler, tx_notifier: _ }, weak_id) = {
         let core_id = ctx
             .bindings_ctx()

@@ -16,6 +16,13 @@ py_library(
 )
 
 py_library(
+    name = "procfs_test_utils",
+    srcs = ["procfs_test_utils.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/scripts:__pkg__"],
+)
+
+py_library(
     name = "system_profiler",
     srcs = ["system_profiler.py"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
@@ -36,7 +43,10 @@ host_py_test(
     srcs = ["procfs_test.py"],
     imports = ["."],
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    deps = [":procfs"],
+    deps = [
+        ":procfs",
+        ":procfs_test_utils",
+    ],
 )
 
 host_py_test(

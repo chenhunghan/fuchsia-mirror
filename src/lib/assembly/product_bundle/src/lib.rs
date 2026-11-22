@@ -15,8 +15,8 @@ mod v2;
 pub use gcs::is_gcs_uri;
 pub use product_bundle::{
     LoadedProductBundle, ProductBundle, ProductBundleExtractError, ProductBundleLoadError,
-    ProductBundleWriteError, get_repositories, load_virtual_device_manifest, load_virtual_devices,
-    relativize_bundle_path,
+    ProductBundleWriteError, get_repositories, load_ota_manifest, load_virtual_device_manifest,
+    load_virtual_devices, relativize_bundle_path,
 };
 pub use product_bundle_builder::ProductBundleBuilder;
 pub use v2::{ProductBundleV2, Repository, Type};

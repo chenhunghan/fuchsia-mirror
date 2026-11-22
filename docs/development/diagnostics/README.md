@@ -11,7 +11,7 @@ observability systems are:
 * [Snapshots](#snapshots)
 * [Detect](#detect)
 
-## Logging
+## Logging {:#logging}
 
 Logs play an important part in diagnostics as they describe human readable
 events that have happened on a Fuchsia system. In Fuchsia, a component can
@@ -28,7 +28,7 @@ You should consider using logging if you want the ability to:
 * View low frequency messages and events that are human readable.
 * View the data in snapshots and other Fuchsia tools.
 
-## Tracing
+## Tracing {:#tracing}
 
 Fuchsia's [tracing system][tracing-docs] offers a comprehensive way to collect,
 aggregate, and visualize fine-grained diagnostic tracing information from
@@ -52,7 +52,7 @@ You should consider using tracing if you want the ability to:
 * Query and aggregate trace data offline using SQL in the Perfetto Trace
   Processor.
 
-## Inspect
+## Inspect {:#inspect}
 
 Fuchsia provides you with Inspect which enables Fuchsia components to expose
 structured diagnostic information about their current state. You can then use
@@ -71,7 +71,7 @@ You should consider using Inspect if you want the ability to:
 * Build visualizations, analysis, and create automated anomaly detection based
   on snapshots.
 
-## Cobalt
+## Cobalt {:#cobalt}
 
 Cobalt is a pipeline for collecting metrics data from user-owned devices in the
 field and producing aggregated reports.
@@ -87,7 +87,7 @@ monitoring.
 For more information about Cobalt, see [Cobalt: Telemetry with built-in privacy
 ][cobalt-readme].
 
-## Snapshots
+## Snapshots {:#snapshots}
 
 Fuchsia devices have the ability to capture snapshots that contain information
 about the current state of the entire system. This includes information about
@@ -95,7 +95,7 @@ the Fuchsia build running on the system, kernel and system logs, and Inspect
 data from the system and its components. You can also capture a snapshot with
 the [`ffx target snapshot`][ffx-snapshot-ref] tool.
 
-## Detect
+## Detect {:#detect}
 
 Additionally, Fuchsia devices run [Detect][detect-docs] which is able to trigger
 crash reports based on periodically snapshotting a subset of components Inspect

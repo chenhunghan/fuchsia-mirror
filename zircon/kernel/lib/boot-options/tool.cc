@@ -108,10 +108,8 @@ void WriteJsonOption(rapidjson::PrettyWriter<rapidjson::FileWriteStream>& writer
   if constexpr (std::is_enum_v<T>) {
     writer.StartArray();
     Enum<T>(EnumEnumerator{[&writer](std::string_view name) {
-                             writer.String(name.data(),
-                                           static_cast<rapidjson::SizeType>(name.size()));
-                           },
-                           T{}});
+      writer.String(name.data(), static_cast<rapidjson::SizeType>(name.size()));
+    }});
     writer.EndArray();
   } else {
     writer.String(type);

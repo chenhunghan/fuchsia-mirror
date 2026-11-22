@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -10,22 +10,22 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/connectivity/ethernet/drivers/usb-ncm-function:tests",
+        "//src/connectivity/lib/network-device/cpp:tests",
         "//src/connectivity/location:target_tests",
-        "//src/connectivity/lowpan/lib/lowpan_driver_common:tests",
-        "//src/connectivity/lowpan/lib/spinel_pack:spinel-pack-tests",
-        "//src/connectivity/network:target_tests",
+        "//src/connectivity/overnet/tests/fidl:tests",
         "//src/connectivity/overnet/tests/integration:tests",
     ],
 )
 
 test_suite(
     name = "host_tests",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
+        "//src/connectivity/ethernet/drivers/usb-ncm-function:host_tests",
         "//src/connectivity/lib/at-commands:host_tests",
         "//src/connectivity/lib/at-commands/codegen:host_tests",
-        "//src/connectivity/lowpan/lib/spinel_pack:spinel_pack_host_test",
-        "//src/connectivity/network:host_tests",
+        "//src/connectivity/overnet/tests/fidl:host_tests",
         "//src/connectivity/overnet/tests/integration:host_tests",
     ],
 )

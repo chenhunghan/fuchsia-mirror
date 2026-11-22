@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+# FIDL API summary Labels are referenced within a symbolic macro, so the files
+# must be exported to the FIDL rules package.
+package_group(
+    name = "fidl_api_summary_verifiers",
+    packages = ["//build/bazel/rules/fidl/..."],
+)
+
+# Most IDK shared libraries are defined under //sdk/lib/. There are several
+# exceptions plus the macro tests.
+package_group(
+    name = "shared_library_ifs_file_verifiers",
+    packages = [
+        "//build/bazel/bazel_idk/tests/...",
+        "//sdk/lib/...",
+        "//src/devices/bin/driver_runtime",
+        "//src/memory/heapdump/instrumentation",
+        "//zircon/system/ulib/trace-engine",
+    ],
+)

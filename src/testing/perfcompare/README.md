@@ -55,7 +55,7 @@ The perfcompare tool can be used to run perf tests locally and to
 compare the results.
 
 As an example, suppose you want to compare the results from
-`rust_inspect_benchmarks_test` on two Git commits,
+`rust-inspect-writer-benchmark` on two Git commits,
 `BEFORE_VERSION` and `AFTER_VERSION`.
 
 This test case is tested in the `terminal` product and may not work in
@@ -66,14 +66,14 @@ The following commands would gather a dataset of perf test results for
 
 ```sh
 git checkout BEFORE_VERSION
-# Covers dependencies of rust_inspect_benchmarks_test.
+# Covers dependencies of rust-inspect-writer-benchmark.
 fx set terminal.x64 --with //bundles/buildbot/terminal
 fx build
-fx update
+fx ota
 python3 src/testing/perfcompare/perfcompare.py run_local \
   --boots=5 \
-  --iter_cmd='fx test --e2e rust_inspect_benchmarks_test' \
-  --iter_file='out/test_out/*/*.fuchsiaperf.json' \
+  --iter_cmd='rm -rf out/perfcompare_iter_out && fx test --no-build --e2e --outdir=out/perfcompare_iter_out --no-timestamp-artifacts rust-inspect-writer-benchmark' \
+  --iter_file='out/perfcompare_iter_out/**/*.fuchsiaperf.json' \
   --dest=perf_results_before
 ```
 
@@ -83,11 +83,11 @@ results dataset in a different directory, `perf_results_after`:
 ```sh
 git checkout AFTER_VERSION
 fx build
-fx update
+fx ota
 python3 src/testing/perfcompare/perfcompare.py run_local \
   --boots=5 \
-  --iter_cmd='fx test --e2e rust_inspect_benchmarks_test' \
-  --iter_file='out/test_out/*/*.fuchsiaperf.json' \
+  --iter_cmd='rm -rf out/perfcompare_iter_out && fx test --no-build --e2e --outdir=out/perfcompare_iter_out --no-timestamp-artifacts rust-inspect-writer-benchmark' \
+  --iter_file='out/perfcompare_iter_out/**/*.fuchsiaperf.json' \
   --dest=perf_results_after
 ```
 

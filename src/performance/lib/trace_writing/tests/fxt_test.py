@@ -178,6 +178,28 @@ class FxtTest(unittest.TestCase):
         self.assertIsInstance(records[0], trace_model.Waking)
         self.assertIsInstance(records[1], trace_model.ContextSwitch)
 
+    def test_thread_wakeup_waker_argument(self) -> None:
+        builder = fxt.Builder()
+        start = len(builder.to_bytes())
+        builder.add_thread_wakeup(
+            timestamp_ns=1000, cpu_number=3, tid=200, waker_tid=201
+        )
+        record = builder.to_bytes()[start:]
+        words = struct.unpack(f"<{len(record) // 8}Q", record)
+        header = words[0]
+        # Header, timestamp, tid, then a koid argument: header, "waker"
+        # (padded to one word) and the koid.
+        self.assertEqual(len(words), 6)
+        self.assertEqual(header & 0xF, 8)
+        self.assertEqual((header >> 4) & 0xFFF, 6)
+        self.assertEqual((header >> 16) & 0xF, 1)
+        self.assertEqual((header >> 20) & 0xFFFF, 3)
+        self.assertEqual(header >> 60, 2)
+        self.assertEqual(words[1:3], (1000, 200))
+        self.assertEqual(words[3] & 0xF, 8)
+        self.assertEqual(record[32:37], b"waker")
+        self.assertEqual(words[5], 201)
+
     def test_string_too_long_raises(self) -> None:
         builder = fxt.Builder()
         too_long = "x" * 0x8000
@@ -230,15 +252,31 @@ class FxtTest(unittest.TestCase):
                     "tid": 51,
                     "args": {},
                 },
+                {
+                    "ph": "C",
+                    "cat": "json_cat",
+                    "name": "Demand:Constant",
+                    "ts": 14.0,
+                    "pid": 50,
+                    "tid": 51,
+                    "args": {"CPU": 100.0, "Normalized": 0.5},
+                },
             ]
         }
         builder_from_dict = fxt.Builder.from_json_dict(json_data)
         model_dict = create_model_from_fxt_builder(builder_from_dict)
         events_dict = list(model_dict.all_events())
-        self.assertEqual(len(events_dict), 2)
+        self.assertEqual(len(events_dict), 3)
         names = [e.name for e in events_dict]
         self.assertIn("json_slice", names)
         self.assertIn("json_inst", names)
+        counters = [
+            e for e in events_dict if isinstance(e, trace_model.CounterEvent)
+        ]
+        self.assertEqual(
+            [(e.name, dict(e.args)) for e in counters],
+            [("Demand:Constant", {"CPU": 100.0, "Normalized": 0.5})],
+        )
 
         # Also test from_json_string
         import json
@@ -246,7 +284,42 @@ class FxtTest(unittest.TestCase):
         json_str = json.dumps(json_data)
         builder_from_str = fxt.Builder.from_json_string(json_str)
         model_str = create_model_from_fxt_builder(builder_from_str)
-        self.assertEqual(len(list(model_str.all_events())), 2)
+        self.assertEqual(len(list(model_str.all_events())), 3)
+
+    def test_from_json_dict_preserves_counter_id(self) -> None:
+        # trace2json exports a counter's ID (for example, the CPU index of the
+        # kernel's per-CPU counters) as the JSON "id" field, omitting it for 0.
+        counter = {
+            "ph": "C",
+            "cat": "kernel:power",
+            "name": "Rate",
+            "pid": 50,
+            "tid": 51,
+        }
+        json_data = {
+            "traceEvents": [
+                {
+                    "ph": "M",
+                    "name": "process_name",
+                    "pid": 50,
+                    "args": {"name": "p_json"},
+                },
+                {**counter, "ts": 10.0, "args": {"CPU": 1000}},
+                {**counter, "ts": 20.0, "id": "0x3", "args": {"CPU": 360}},
+            ]
+        }
+        model = create_model_from_fxt_builder(
+            fxt.Builder.from_json_dict(json_data)
+        )
+        counters = sorted(
+            (e.id, e.name, dict(e.args))
+            for e in model.all_events()
+            if isinstance(e, trace_model.CounterEvent)
+        )
+        self.assertEqual(
+            counters,
+            [(0, "Rate", {"CPU": 1000.0}), (3, "Rate", {"CPU": 360.0})],
+        )
 
     def test_write_to_file(self) -> None:
         builder = fxt.Builder()

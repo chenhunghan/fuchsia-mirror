@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":mdns-util-tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    deps = [
+        ":source_set",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+    ],
+)
+
+fx_packaged_binary(
+    name = "mdns_util_bin",
+    binary = ":bin",
+    binary_name = "mdns-util",
+)
+
+fx_package(
+    name = "mdns-util",
+    resources = [":mdns_util_bin"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "source_set",
+    srcs = [
+        "commands.cc",
+        "formatting.cc",
+        "mdns_impl.cc",
+    ],
+    hdrs = [
+        "commands.h",
+        "formatting.h",
+        "mdns_impl.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.net.mdns:fuchsia.net.mdns_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fostr",
+        "//src/lib/fsl",
+        "//src/lib/fxl:fxl_cli",
+        "//src/lib/inet",
+        "//src/lib/line_input",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "mdns_util_test",
+    srcs = ["test/mdns_impl_test.cc"],
+    deps = [
+        ":source_set",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_unittest_package(
+    name = "mdns-util-tests",
+    unit_tests = [":mdns_util_test"],
+)

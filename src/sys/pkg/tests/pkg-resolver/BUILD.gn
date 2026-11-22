@@ -168,17 +168,18 @@ fuchsia_test_package("pkg-resolver-integration-tests") {
     ":ca.cert-resource",
     ":empty-repo",
     ":pkg-resolver-component",
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
-    "//src/sys/pkg/bin/pkg-cache:production-component-and-config",
+    "//src/sys/pkg/bin/pkg-cache:component",
     "//src/sys/pkg/bin/system-update-committer:component",
 
     # For ramdisk devices, needed to back blobfs (which in turn backs pkg-cache)
     "//src/storage/testing:storage_driver_test_realm",
   ]
   subpackages = [
+    "//src/connectivity/network/dns:package",
+
     # Isolated, low-deps netstack.
     "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
   ]
   test_specs = {
     log_settings = {
@@ -256,6 +257,7 @@ rustc_library("lib") {
     "//sdk/fidl/fuchsia.pkg.internal:fuchsia.pkg.internal_rust",
     "//sdk/fidl/fuchsia.pkg.rewrite:fuchsia.pkg.rewrite_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
     "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
     "//sdk/fidl/fuchsia.tracing.provider:fuchsia.tracing.provider_rust",
     "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
@@ -269,6 +271,7 @@ rustc_library("lib") {
     "//src/lib/fuchsia-fs",
     "//src/lib/fuchsia-sync",
     "//src/lib/fuchsia-url",
+    "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
     "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
     "//src/storage/lib/vfs/rust:vfs",
     "//src/sys/lib/cm_rust",
@@ -449,6 +452,7 @@ rustc_test("resolve_succeeds") {
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:rand",
+    "//third_party/rust_crates:test-case",
   ]
 }
 
@@ -594,5 +598,6 @@ rustc_test("pkg_authority") {
     "//src/lib/http-uri-ext",
     "//src/sys/lib/fidl-fuchsia-pkg-rewrite-ext",
     "//src/sys/pkg/lib/fuchsia-pkg-testing",
+    "//third_party/rust_crates:test-case",
   ]
 }

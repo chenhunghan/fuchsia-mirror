@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":stream-cpp-tests"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "stream_cpp_unittests",
+    srcs = ["log_message_unittest.cc"],
+    # TODO(https://fxbug.dev/570694755): log_message_unittest.cc uses angled
+    # workspace-root `#include <src/...>`, which GN resolves via root `-I.`
+    # while Bazel only adds `-iquote .`.
+    copts = ["-I."],
+    # Uses Fuchsia-only FIDL bindings (<fidl/fuchsia.diagnostics/cpp/fidl.h>,
+    # <fidl/fuchsia.logger/cpp/fidl.h>) and Zircon/FSL headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/stdcompat",
+        "//src/lib/diagnostics/fidl_log_message_parser",
+        "//src/lib/diagnostics/fidl_log_message_parser:test_support",
+        "//src/lib/fsl",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "stream-cpp-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":stream_cpp_unittests"],
+)

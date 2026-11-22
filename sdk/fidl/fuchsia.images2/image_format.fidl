@@ -35,27 +35,40 @@ type ImageFormat = table {
     /// not to be displayed.  See `display_rect`.
     4: size fuchsia.math.SizeU;
 
-    /// Number of bytes per row. For multi-plane YUV formats, this is the number
-    /// of bytes per row in the Y plane.
+    /// Number of bytes per row in plane 0 (for multi-plane YUV formats, the Y
+    /// plane).
     ///
-    /// When this field is not set, there is no padding at the end of each row
-    /// of pixels. In other words, when not set, the stride is equal to the
-    /// "stride bytes per width pixel" times the `size.width`.
+    /// This field is required whenever image layout (`ImageFormatImageSize`,
+    /// `ImageFormatPlaneByteOffset`, or `ImageFormatPlaneRowBytes`) is queried,
+    /// for both linear and non-linear formats. Callers constructing an
+    /// `ImageFormat` from sysmem constraints should populate it via
+    /// `ImageConstraintsToFormat` / `ImageFormatMinimumRowBytes` (or
+    /// `constraints_to_image_format` / `minimum_row_bytes` in Rust).
     ///
-    /// When set, the value in this field must be >= the "stride bytes per width
-    /// pixel" times the `size.width`. If equal, there is no padding at the end
-    /// of each row of pixels. If greater, the difference is how much padding is
-    /// at the end of each row of pixels, in bytes.
+    /// For `PixelFormatModifier.LINEAR` (as well as modifiers whose plane 0 is
+    /// linear, such as `ARM_LINEAR_TE` and `GOOGLE_GOLDFISH_OPTIMAL`), this is
+    /// the byte offset from the start of row N of plane 0 to the start of row
+    /// N+1 of plane 0, and must be >= the "stride bytes per width pixel" times
+    /// `size.width`. If equal, there is no padding at the end of each row of
+    /// pixels; if greater, the difference is the per-row padding in bytes.
     ///
-    /// This field has no assigned meaning when 'pixel_format_modifier' isn't
-    /// 'PixelFormatModifier::Linear'. Instead participants are expected to
-    /// implicitly know that a tiled (not linear) format will contain `size`
-    /// pixels by rounding up to the closest tile boundary greater than or equal
-    /// to width and same separately for height, without any "extra" tiles in
-    /// either direction. Tiled (not linear) formats don't have any way to
-    /// specify more blocks in either direction than are implied by `size`. When
-    /// relevant consumers support display_rect, `size` can imply more tiles
-    /// than display_rect touches.
+    /// For tiled or block-compressed modifiers (`INTEL_I915_*_TILED*`,
+    /// `PVR_FBCDC_*`, `ARM_AFBC_*`), this is the byte stride of one uncompressed
+    /// pixel row of the linearized plane 0 surface, aligned up to a multiple of
+    /// the format's tile/block row-byte width (`ImageFormatRowBytesMinDivisor`),
+    /// must be >= `size.width` times "stride bytes per width pixel" rounded up
+    /// to `ImageFormatRowBytesMinDivisor`, and determines the horizontal
+    /// tile/block count in `image-format` layout calculations. Converting sysmem
+    /// `ImageFormatConstraints` to an `ImageFormat` via the `image-format`
+    /// library's `ImageConstraintsToFormat` (C++) or
+    /// `constraints_to_image_format` (Rust) utility function fills out this
+    /// field for callers. Note that ARM AFBC hardware unpackers configure
+    /// surface dimensions from `size` without a separate compressed row-stride
+    /// register, so AFBC producers and consumers should not pad `bytes_per_row`
+    /// beyond the row byte width implied by the block/tiled-header-aligned
+    /// `size.width` (4 bytes per pixel times aligned `size.width`, as produced
+    /// by `ImageConstraintsToFormat` / `constraints_to_image_format` when row
+    /// constraints do not add extra padding).
     ///
     /// This is not "row stride in pixels", nor is it "per-pixel stride" (which
     /// themselves are two different things both distinct from bytes_per_row).
@@ -72,10 +85,6 @@ type ImageFormat = table {
     /// necessarily divisible by the size in bytes of a pixel ("stride bytes per
     /// width pixel"), so we indicate the padding using this field rather than
     /// trying to incorporate the padding as a larger "fake" `size.width`.
-    ///
-    /// When `pixel_format_modifier` == `PixelFormatModifier.Linear`, this is
-    /// the offset in bytes of byte 0 of row 1 of plane 0 minus the offset in
-    /// bytes of byte 0 of row 0 of plane 0.
     5: bytes_per_row uint32;
 
     /// The rect within a frame that's for display. This is the location and

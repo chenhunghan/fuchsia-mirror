@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":injector-tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "injector_tests",
+    srcs = [
+        "injector_config_setup_unittest.cc",
+        "injector_unittest.cc",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.pointerinjector:fuchsia.ui.pointerinjector_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/ui/input/lib/injector",
+        "//src/ui/input/lib/injector/tests/mocks",
+        # @com_google_googletest//:gtest bundles GoogleMock; GN uses a separate :gmock target.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_component(
+    name = "injector-component",
+    binary = ":injector_tests",
+)
+
+# TODO(https://fxbug.dev/42157485): Implement unit test for Injector.
+fx_package(
+    name = "injector-tests-package",
+    package_name = "injector-tests",
+    test_components = [":injector-component"],
+)
+
+fx_test(
+    name = "injector-tests",
+    max_log_severity = "ERROR",
+    package = ":injector-tests-package",
+)

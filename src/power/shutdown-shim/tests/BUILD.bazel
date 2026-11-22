@@ -6,13 +6,82 @@ load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":shutdown-shim-integration-tests"],
+    visibility = ["//src/power:__pkg__"],
+)
+
+rustc_test(
+    name = "shutdown_shim_integration_test_bin",
+    srcs = [
+        "src/main.rs",
+        "src/reboot_watcher_client.rs",
+        "src/shutdown_mocks.rs",
+    ],
+    crate_root = "src/main.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.power:fuchsia.power_rust",
+        "//sdk/fidl/fuchsia.power.internal:fuchsia.power.internal_rust",
+        "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/fidl/fuchsia.system.state:fuchsia.system.state_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "shutdown_shim_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":shutdown_shim_integration_test_bin",
+    binary_name = "shutdown_shim_integration_test_bin",
+)
+
+fx_component_manifest(
+    name = "shutdown_shim_integration_test_manifest",
+    testonly = True,
+    component_name = "shutdown-shim-integration-tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/shutdown-shim-integration-test.cml",
+)
+
+fx_test_component(
+    name = "shutdown_shim_integration_test_component",
+    compiled_manifest = ":shutdown_shim_integration_test_manifest",
+    deps = [":shutdown_shim_integration_test_packaged_bin"],
+)
 
 # Skipped by bazel2gn because these targets are hand-written in BUILD.gn for
 # callers in //src/sys/pkg/bin/omaha-client and //src/sys/pkg/lib/omaha-client-fuchsia.
@@ -55,3 +124,18 @@ fx_component(
     ],
 )
 # LINT.ThenChange(BUILD.gn)
+
+fx_package(
+    name = "shutdown-shim-integration-tests-package",
+    package_name = "shutdown-shim-integration-tests",
+    components = [
+        ":shutdown_shim_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":shutdown_shim_integration_test_component"],
+)
+
+fx_test(
+    name = "shutdown-shim-integration-tests",
+    package = ":shutdown-shim-integration-tests-package",
+)

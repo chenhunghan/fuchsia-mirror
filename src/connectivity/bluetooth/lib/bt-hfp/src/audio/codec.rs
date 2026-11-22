@@ -3,6 +3,9 @@
 // found in the LICENSE file.
 
 use anyhow::anyhow;
+use fidl_fuchsia_audio_device as audio_device;
+use fidl_fuchsia_hardware_audio as audio;
+use fuchsia_async as fasync;
 use fuchsia_audio_device::codec;
 use fuchsia_audio_device::codec::CodecRequest;
 use fuchsia_bluetooth::types::{PeerId, peer_audio_stream_id};
@@ -11,10 +14,6 @@ use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
 use log::{info, warn};
 use std::sync::Arc;
-use {
-    fidl_fuchsia_audio_device as audio_device, fidl_fuchsia_hardware_audio as audio,
-    fuchsia_async as fasync,
-};
 
 use super::{Control, ControlEvent, Error, HF_INPUT_UUID};
 use crate::codec_id::CodecId;
@@ -169,7 +168,7 @@ impl Control for CodecControl {
                 start_request(Err(zx::Status::INTERNAL));
             }
             ControlEvent::RequestStop { id: _ } => {
-                let Some(stop_request) = self.inner.lock().start_request.take() else {
+                let Some(stop_request) = self.inner.lock().stop_request.take() else {
                     return;
                 };
                 stop_request(Err(zx::Status::INTERNAL));
@@ -525,5 +524,50 @@ mod tests {
             connect_peer_to_codec(&mut codec, &mut provider_requests, &[CodecId::CVSD]).await;
         // Should be able to do the whole start request lifetime again now
         start_request_lifetime(codec_client, codec, CodecId::CVSD, provider_requests).await
+    }
+
+    #[fixture(codec_setup_connected)]
+    #[fuchsia::test]
+    async fn failed_stop_request_closes_codec(
+        codec_client: audio::CodecProxy,
+        mut codec: CodecControl,
+        _provider_requests: ProviderRequestStream,
+    ) {
+        let mut event_stream = codec.take_events();
+
+        let start_fut = codec_client.start();
+        let Some(ControlEvent::RequestStart { .. }) = event_stream.next().await else {
+            panic!("Expected start request from event stream");
+        };
+        let (connection, _stream) = connection_for_codec(PeerId(1), CodecId::MSBC, false);
+        codec.start(PeerId(1), connection, CodecId::MSBC).expect("should start ok");
+        let _ = start_fut.await.expect("start to succeed");
+
+        let mut stop_fut = codec_client.stop();
+        let (waker, _wake_count) = futures_test::task::new_count_waker();
+        let Poll::Pending = stop_fut.poll_unpin(&mut Context::from_waker(&waker)) else {
+            panic!("Expected stop to be pending");
+        };
+
+        let Some(ControlEvent::RequestStop { id }) = event_stream.next().await else {
+            panic!("Expected stop request from event stream");
+        };
+        assert_eq!(id, PeerId(1));
+
+        codec.failed_request(
+            ControlEvent::RequestStop { id },
+            Error::UnsupportedParameters { source: anyhow!("stop failed") },
+        );
+        assert!(codec.inner.lock().stop_request.is_none());
+
+        let Err(fidl::Error::ClientChannelClosed { .. }) = stop_fut.await else {
+            panic!("Expected stop future to fail with closed channel after failed_request");
+        };
+        let Some(ControlEvent::Stopped { id: stopped_id, error: Some(_) }) =
+            event_stream.next().await
+        else {
+            panic!("Expected Stopped event with error from event stream");
+        };
+        assert_eq!(stopped_id, PeerId(1));
     }
 }

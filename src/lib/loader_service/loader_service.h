@@ -7,12 +7,14 @@
 
 #include <fidl/fuchsia.ldsvc/cpp/wire.h>
 #include <lib/async/dispatcher.h>
+#include <lib/fit/function.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
 #include <zircon/types.h>
 
 #include <memory>
+#include <string>
 #include <utility>
 
 #include <fbl/macros.h>
@@ -37,8 +39,14 @@ class LoaderServiceBase : public std::enable_shared_from_this<LoaderServiceBase>
   zx::result<fidl::ClientEnd<fuchsia_ldsvc::Loader>> Connect();
 
  protected:
-  LoaderServiceBase(async_dispatcher_t* dispatcher, std::string name)
-      : dispatcher_(dispatcher), name_(std::move(name)) {}
+  LoaderServiceBase(async_dispatcher_t* dispatcher, std::string name);
+
+  async_dispatcher_t* dispatcher() const { return dispatcher_; }
+
+  // Asynchronous version of LoadObjectImpl. Defaults to invoking LoadObjectImpl synchronously so
+  // existing subclasses continue working unchanged; subclasses backed by async FIDL I/O override
+  // this to serve pipelined LoadObject requests concurrently without blocking the dispatcher.
+  virtual void LoadObjectAsync(std::string path, fit::callback<void(zx::result<zx::vmo>)> callback);
 
  private:
   // Pure virtual methods to be implemented by subclasses.
@@ -56,7 +64,7 @@ class LoaderServiceBase : public std::enable_shared_from_this<LoaderServiceBase>
   // "asan/libfoo.so".
   virtual zx::result<zx::vmo> LoadObjectImpl(std::string path) = 0;
 
-  const std::string& log_prefix();
+  const std::string& log_prefix() const { return log_prefix_; }
 
   async_dispatcher_t* dispatcher_;
   // This name is only used when logging to provide useful context for which loader service is
@@ -114,6 +122,8 @@ class LoaderService : public LoaderServiceBase {
   LoaderService(async_dispatcher_t* dispatcher, fbl::unique_fd lib_dir, std::string name)
       : LoaderServiceBase(dispatcher, std::move(name)), dir_(std::move(lib_dir)) {}
   zx::result<zx::vmo> LoadObjectImpl(std::string path) override;
+  void LoadObjectAsync(std::string path,
+                       fit::callback<void(zx::result<zx::vmo>)> callback) override;
 
  private:
   fbl::unique_fd dir_;

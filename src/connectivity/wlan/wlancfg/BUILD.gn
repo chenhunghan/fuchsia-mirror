@@ -6,14 +6,6 @@ import("//build/components.gni")
 import("//build/fuzz.gni")
 import("//build/rust/rustc_fuzzer.gni")
 
-declare_args() {
-  # Selects the wlan configuration type to use. Choices:
-  #   "client" - client mode
-  #   "ap" - access point mode
-  #   "" (empty string) - no configuration
-  wlancfg_config_type = "client"
-}
-
 # Enabling a soft-transition, remove when complete
 # TODO(122864) Remove transitional labels
 group("for_transition") {

@@ -4,10 +4,7 @@
 
 group("tests") {
   testonly = true
-  public_deps = [
-    ":cm_fidl_analyzer_test($host_toolchain)",
-    "//tools/lib/cm_fidl_analyzer/tests($host_toolchain)",
-  ]
+  public_deps = [ ":cm_fidl_analyzer_test($host_toolchain)" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -51,13 +48,9 @@ rustc_library("cm_fidl_analyzer") {
     "//tools/lib/cm_fidl_analyzer/*",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
     "//sdk/rust/zx-status",
-    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-sync",
     "//src/lib/fuchsia-url",
     "//src/sys/component_manager/lib/router_error",
@@ -91,13 +84,9 @@ if (is_host) {
     edition = "2024"
     proc_macro_deps = [ "//third_party/rust_crates:async-trait" ]
     deps = [
-             "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
-             "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-             "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
-             "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
-             "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+             "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+             "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
              "//sdk/rust/zx-status",
-             "//src/lib/fidl/rust/fidl",
              "//src/lib/fuchsia-sync",
              "//src/lib/fuchsia-url",
              "//src/sys/component_manager/lib/router_error",
@@ -118,8 +107,8 @@ if (is_host) {
              "//third_party/rust_crates:thiserror",
              "//third_party/rust_crates:url",
            ] + [
-             "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-             "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust",
+             "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+             "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust_common",
              "//src/lib/fuchsia",
              "//src/sys/lib/cm_rust/testing",
              "//src/sys/lib/cm_types",

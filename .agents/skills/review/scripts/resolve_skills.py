@@ -14,8 +14,9 @@ reviews load the same Fuchsia skills as the hosted agent:
   * A skill without "/" resolves to `.agents/skills/<name>/SKILL.md`; a skill
     with "/" resolves to `<repo root>/<skill>/SKILL.md`, or to
     `<repo root>/<skill>` if it already ends in `/SKILL.md`.
-  * Entries without skills (e.g. the default `use_default_subagents` entry) add
-    nothing here; the review skill's `general` task covers that.
+  * Entries without skills (e.g. the default `use_default_subagents` entry) or
+    on-demand entries with `automatic: false` add nothing here; the review
+    skill's `general` task and explicit `deep`/`simplify` modes cover those.
   * With `--project=vendor/google`, entries from
     `vendor/google/.agents/code-review/agent_configs.textproto` are used too
     (when that file exists), with their skills resolved relative to
@@ -201,6 +202,8 @@ def resolve(config_text, files, repo_root, project="fuchsia", extra_configs=()):
             entries.append((entry, skill_root))
     by_skill = {}
     for entry, skill_root in entries:
+        if any(v.lower() == "false" for v in entry.get("automatic", [])):
+            continue
         skills = entry.get("skills", [])
         if not skills:
             continue

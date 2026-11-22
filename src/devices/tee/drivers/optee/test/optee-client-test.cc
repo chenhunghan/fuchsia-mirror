@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <zircon/types.h>
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <set>
@@ -805,7 +806,7 @@ TEST_F(OpteeClientTestRpmb, RequestWriteInvalid) {
 
 class OpteeClientTestWaitQueue : public OpteeClientTestBase {
  public:
-  const int kInitSessionId = 0;
+  static constexpr uint32_t kInitSessionId = 0;
   static constexpr int kSleepCommand = 1;
   static constexpr int kWakeUpCommand = 2;
   static constexpr int kNopeCommand = 3;
@@ -895,9 +896,9 @@ class OpteeClientTestWaitQueue : public OpteeClientTestBase {
   void TearDown() override {}
 
  protected:
-  int cur_sid_{kInitSessionId};
-  int sleep_key_{0};
-  int invoke_done_cnt_{0};
+  std::atomic<uint32_t> cur_sid_{kInitSessionId};
+  std::atomic<int> sleep_key_{0};
+  std::atomic<int> invoke_done_cnt_{0};
 
   async::Loop clients_loop_;
 };

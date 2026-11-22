@@ -19,4 +19,5 @@ rustc_library(
         "//src/developer/ffx/core/macro:lib",
     ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    version = "0.1.0",
 )

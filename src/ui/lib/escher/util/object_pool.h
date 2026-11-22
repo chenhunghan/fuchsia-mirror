@@ -7,6 +7,7 @@
 
 #include <lib/syslog/cpp/macros.h>
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -79,9 +80,12 @@ class ObjectPool {
   // allocation.
   static size_t InitialBlockSize() { return 64U; }
 
-  // Return the number of objects that can be held in the "block_index-th"
-  // allocation.
-  static size_t NumObjectsInBlock(size_t block_index) { return InitialBlockSize() << block_index; }
+  // Return the number of objects in the `block_index`-th block. Block sizes
+  // double from `InitialBlockSize()` up to the 1024-object
+  // (`InitialBlockSize() << 4`) cap.
+  static size_t NumObjectsInBlock(size_t block_index) {
+    return InitialBlockSize() << std::min(block_index, kMaxBlockIndexShift);
+  }
 
   // Total number of objects that can be allocated from the pool without
   // changing the amount of underlying memory.
@@ -96,6 +100,9 @@ class ObjectPool {
 
   // Return the number of objects that have been allocated but not freed.
   size_t UnfreedObjectCount() const { return GetCapacity() - vacants_.size(); }
+
+  size_t vacant_count() const { return vacants_.size(); }
+  size_t num_blocks() const { return blocks_.size(); }
 
   // Release all pool resources.  Illegal to call while there are still unfreed
   // objects.  ObjectPool only releases memory when Clear() is called.
@@ -116,6 +123,10 @@ class ObjectPool {
   const PolicyType& policy() const { return policy_; }
 
  private:
+  // Cap per-block doubling at `InitialBlockSize() << kMaxBlockIndexShift`
+  // (1024 objects) so block sizes do not double without bound.
+  static constexpr size_t kMaxBlockIndexShift = 4;
+
   // Allocate a new block of objects, and add them all to |vacants_|.  Called
   // by Allocate() when |vacants_| is empty.
   void AllocateBlock() {

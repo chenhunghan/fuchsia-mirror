@@ -11,6 +11,7 @@ wrappers for the outcomes of the selection process.
 
 import asyncio
 from collections import defaultdict
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import Enum
 import itertools
@@ -57,6 +58,7 @@ async def select_tests(
     recorder: event.EventRecorder | None = None,
     exact_match: bool = False,
     override_matcher_path: list[str] | None = None,
+    exact_label_matches: Mapping[str, Collection[str]] | None = None,
 ) -> selection_types.TestSelections:
     """Perform selection on the incoming list of tests.
 
@@ -73,6 +75,10 @@ async def select_tests(
         fuzzy_distance_threshold (int, optional): Distance threshold for including tests in selection.
         recorder (EventRecorder, optional): If set, record match duration events.
         exact_match (bool, optional): If set, force exact matches only. Otherwise do fuzzy matching.
+        exact_label_matches (Mapping[str, Collection[str]], optional): Map from
+            selection argument to the exact test labels it resolved to (e.g.
+            on-demand Bazel labels or target patterns). Matched directly
+            without spawning dldist or substring-matching other targets.
 
     Raises:
         RuntimeError: If the required dldist script is not found
@@ -191,6 +197,30 @@ async def select_tests(
                 matcher_script_prefix=matcher_prefix,
             )
 
+            exact_names = [
+                n
+                for n in group.names
+                if exact_label_matches is not None and n in exact_label_matches
+            ]
+            dldist_names = [
+                n
+                for n in group.names
+                if exact_label_matches is None or n not in exact_label_matches
+            ]
+
+            async def exact_label_match(name: str) -> list[_TestDistance]:
+                assert exact_label_matches is not None
+                wanted = exact_label_matches[name]
+                return [
+                    _TestDistance(
+                        entry,
+                        PERFECT_MATCH_DISTANCE
+                        if extract_label(entry) in wanted
+                        else NO_MATCH_DISTANCE,
+                    )
+                    for entry in entries
+                ]
+
             async def closest_name_match() -> list[_TestDistance]:
                 lowest_score_dict: defaultdict[Test, int] = defaultdict(
                     lambda: NO_MATCH_DISTANCE
@@ -198,19 +228,22 @@ async def select_tests(
                 tests = []
                 if not exact_match:
                     tasks = (
-                        [label.distances(n, recorder, id) for n in group.names]
-                        + [name.distances(n, recorder, id) for n in group.names]
+                        [label.distances(n, recorder, id) for n in dldist_names]
+                        + [
+                            name.distances(n, recorder, id)
+                            for n in dldist_names
+                        ]
                         + [
                             component.distances(n, recorder, id)
-                            for n in group.names
+                            for n in dldist_names
                         ]
                         + [
                             package.distances(n, recorder, id)
-                            for n in group.names
+                            for n in dldist_names
                         ]
                         + [
                             trailing_path.distances(n, recorder, id)
-                            for n in group.names
+                            for n in dldist_names
                         ]
                     )
                 else:
@@ -222,15 +255,15 @@ async def select_tests(
                     tasks = (
                         [
                             label.distances(n, recorder, id, exact=True)
-                            for n in group.names
+                            for n in dldist_names
                         ]
                         + [
                             name.distances(n, recorder, id, exact=True)
-                            for n in group.names
+                            for n in dldist_names
                         ]
                         + [
                             trailing_path.distances(n, recorder, id, exact=True)
-                            for n in group.names
+                            for n in dldist_names
                         ]
                     )
                 results: list[list[_TestDistance]] = await asyncio.gather(
@@ -249,7 +282,8 @@ async def select_tests(
                 ]
 
             match_tries = (
-                [closest_name_match()]
+                ([closest_name_match()] if dldist_names else [])
+                + [exact_label_match(n) for n in exact_names]
                 + [
                     component.distances(c, recorder, id, exact=exact_match)
                     for c in group.components

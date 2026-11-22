@@ -14,7 +14,7 @@ import fuchsia_wlan_base_test
 from honeydew.utils.deadline import Deadline
 from legacy_access_point.ap_lib import dhcp_config
 from mobly import asserts, test_runner
-from openwrt_access_point.lib.dhcp_config import DhcpConfig, Lan
+from openwrt_access_point import DhcpConfig, Lan
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -105,9 +105,11 @@ class Dhcpv4InteropBasicTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 config=DhcpConfig(
                     lan=Lan(
                         lease_time=f"{LEASE_TIME}s",
-                        dhcp_options_force=[
-                            f"{OPT_NUM_RENEWAL_TIME},{RENEWAL_TIME_SECS}"
-                        ],
+                        custom_uci_options={
+                            "dhcp_option_force": [
+                                f"{OPT_NUM_RENEWAL_TIME},{RENEWAL_TIME_SECS}"
+                            ],
+                        },
                     )
                 )
             )

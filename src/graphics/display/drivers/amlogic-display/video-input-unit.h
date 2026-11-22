@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <memory>
 
+#include "src/graphics/display/drivers/amlogic-display/image-info.h"
 #include "src/graphics/display/drivers/amlogic-display/pixel-grid-size2d.h"
 #include "src/graphics/display/drivers/amlogic-display/rdma.h"
 #include "src/graphics/display/lib/api-types/cpp/color-conversion.h"
@@ -63,7 +64,10 @@ class VideoInputUnit {
 
   // Schedules the given |config| to be applied by the RDMA engine when the next VSYNC interrupt
   // occurs.
-  void FlipOnVsync(const display::DriverLayer& layer, const display::Mode& display_mode,
+  //
+  // `image_info` must correspond to the image specified in `layer`.
+  void FlipOnVsync(const display::DriverLayer& layer, const ImageInfo& image_info,
+                   const display::Mode& display_mode,
                    const display::ColorConversion& color_conversion,
                    display::DriverConfigStamp config_stamp);
 

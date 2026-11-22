@@ -4,6 +4,7 @@
 
 use super::*;
 use assert_matches::assert_matches;
+use delivery_blob::CompressionMode;
 use test_case::test_case;
 
 #[test_case(Implementation::CppBlobfs; "blobfs")]
@@ -19,10 +20,15 @@ async fn open_missing_fails(implementation: Implementation) {
     blobfs.stop().await.unwrap();
 }
 
-#[test_case(Implementation::CppBlobfs; "blobfs")]
-#[test_case(Implementation::Fxblob; "fxblob")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type1; "blobfs_type1")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type2; "blobfs_type2")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
 #[fuchsia::test]
-async fn corrupt_create_fails_on_last_byte_write(implementation: Implementation) {
+async fn corrupt_create_fails_on_last_byte_write(
+    implementation: Implementation,
+    delivery_type: DeliveryBlobType,
+) {
     let blobfs = BlobfsRamdisk::builder().implementation(implementation).start().await.unwrap();
     let creator = blobfs.blob_creator_proxy().unwrap();
 
@@ -31,7 +37,8 @@ async fn corrupt_create_fails_on_last_byte_write(implementation: Implementation)
     let hash = fuchsia_merkle::root_from_slice(&bytes);
     // Corrupt the last byte.
     bytes[8193] ^= 1;
-    let compressed = Type1Blob::generate(&bytes, CompressionMode::Never);
+    let compressed =
+        delivery_blob::generate_with_mode(delivery_type, &bytes, CompressionMode::Never);
     let compressed_len: u64 = compressed.len().try_into().unwrap();
 
     let writer = creator.create(&hash, false).await.unwrap().unwrap().into_proxy();
@@ -68,14 +75,17 @@ async fn cppblobfs_concurrent_create_fails() {
     blobfs.stop().await.unwrap();
 }
 
+#[test_case(DeliveryBlobType::Type1; "type1")]
+#[test_case(DeliveryBlobType::Type2; "type2")]
 #[fuchsia::test]
-async fn fxblob_concurrent_creation_succeeds() {
+async fn fxblob_concurrent_creation_succeeds(delivery_type: DeliveryBlobType) {
     let blobfs = BlobfsRamdisk::builder().fxblob().start().await.unwrap();
     let creator = blobfs.blob_creator_proxy().unwrap();
 
     let bytes = vec![0u8; 100];
     let hash = fuchsia_merkle::root_from_slice(&bytes);
-    let compressed = Type1Blob::generate(&bytes, CompressionMode::Never);
+    let compressed =
+        delivery_blob::generate_with_mode(delivery_type, &bytes, CompressionMode::Never);
     let compressed_len: u64 = compressed.len().try_into().unwrap();
 
     // Create and write all but the last byte.
@@ -99,16 +109,22 @@ async fn fxblob_concurrent_creation_succeeds() {
     blobfs.stop().await.unwrap();
 }
 
-#[test_case(Implementation::CppBlobfs; "blobfs")]
-#[test_case(Implementation::Fxblob; "fxblob")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type1; "blobfs_type1")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type2; "blobfs_type2")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
 #[fuchsia::test]
-async fn create_already_present_returns_already_exists(implementation: Implementation) {
+async fn create_already_present_returns_already_exists(
+    implementation: Implementation,
+    delivery_type: DeliveryBlobType,
+) {
     let blobfs = BlobfsRamdisk::builder().implementation(implementation).start().await.unwrap();
     let creator = blobfs.blob_creator_proxy().unwrap();
 
     let bytes = vec![0u8; 1];
     let hash = fuchsia_merkle::root_from_slice(&bytes);
-    let compressed = Type1Blob::generate(&bytes, CompressionMode::Never);
+    let compressed =
+        delivery_blob::generate_with_mode(delivery_type, &bytes, CompressionMode::Never);
     let compressed_len: u64 = compressed.len().try_into().unwrap();
 
     let writer0 = creator.create(&hash, false).await.unwrap().unwrap().into_proxy();
@@ -127,16 +143,22 @@ async fn create_already_present_returns_already_exists(implementation: Implement
 
 // ReadDirents on /blob should only return blobs if they are fully written and do not have
 // outstanding deletion requests.
-#[test_case(Implementation::CppBlobfs; "blobfs")]
-#[test_case(Implementation::Fxblob; "fxblob")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type1; "blobfs_type1")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type2; "blobfs_type2")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
 #[fuchsia::test]
-async fn readdirents_only_returns_valid_blobs(implementation: Implementation) {
+async fn readdirents_only_returns_valid_blobs(
+    implementation: Implementation,
+    delivery_type: DeliveryBlobType,
+) {
     let blobfs_server =
         BlobfsRamdisk::builder().implementation(implementation).start().await.unwrap();
     let creator = blobfs_server.blob_creator_proxy().unwrap();
     let bytes = vec![0u8; 2];
     let hash = fuchsia_merkle::root_from_slice(&bytes);
-    let compressed = Type1Blob::generate(&bytes, CompressionMode::Never);
+    let compressed =
+        delivery_blob::generate_with_mode(delivery_type, &bytes, CompressionMode::Never);
     let compressed_len: u64 = compressed.len().try_into().unwrap();
 
     // Blob doesn't appear until it is fully written.
@@ -166,16 +188,22 @@ async fn readdirents_only_returns_valid_blobs(implementation: Implementation) {
     let () = blobfs_server.stop().await.unwrap();
 }
 
-#[test_case(Implementation::CppBlobfs; "blobfs")]
-#[test_case(Implementation::Fxblob; "fxblob")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type1; "blobfs_type1")]
+#[test_case(Implementation::CppBlobfs, DeliveryBlobType::Type2; "blobfs_type2")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+#[test_case(Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
 #[fuchsia::test]
-async fn create_partial_write_drop_create(implementation: Implementation) {
+async fn create_partial_write_drop_create(
+    implementation: Implementation,
+    delivery_type: DeliveryBlobType,
+) {
     let blobfs = BlobfsRamdisk::builder().implementation(implementation).start().await.unwrap();
     let creator = blobfs.blob_creator_proxy().unwrap();
 
     let bytes = vec![0u8; 100];
     let hash = fuchsia_merkle::root_from_slice(&bytes);
-    let compressed = Type1Blob::generate(&bytes, CompressionMode::Never);
+    let compressed =
+        delivery_blob::generate_with_mode(delivery_type, &bytes, CompressionMode::Never);
     let compressed_len: u64 = compressed.len().try_into().unwrap();
 
     // Create and write all but the last byte.

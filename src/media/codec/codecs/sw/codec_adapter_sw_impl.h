@@ -36,28 +36,18 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
       : CodecAdapterSW(lock, codec_adapter_events) {}
   ~CodecAdapterSWImpl() = default;
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override {
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override {
     std::lock_guard<std::mutex> lock(lock_);
-    fuchsia_sysmem2::BufferCollectionConstraints result;
-
-    // The CodecImpl won't hand us the sysmem token, so we shouldn't expect to
-    // have the token here.
-    ZX_DEBUG_ASSERT(!partial_settings.has_sysmem_token());
-
-    const auto constraints = BufferCollectionConstraints(port);
-
-    result.min_buffer_count_for_camping() = constraints.min_buffer_count_for_camping;
+    fuchsia_sysmem2::BufferCollectionConstraints result = BufferCollectionConstraints(port);
 
     ZX_DEBUG_ASSERT(!result.min_buffer_count_for_dedicated_slack().has_value());
     ZX_DEBUG_ASSERT(!result.min_buffer_count_for_shared_slack().has_value());
 
-    auto& bmc = result.buffer_memory_constraints().emplace();
-    bmc.min_size_bytes() = constraints.buffer_memory_constraints.min_size_bytes;
-    bmc.max_size_bytes() = constraints.buffer_memory_constraints.max_size_bytes;
-
     // These are all false because SW encode.
+    auto& bmc = result.buffer_memory_constraints().has_value()
+                    ? *result.buffer_memory_constraints()
+                    : result.buffer_memory_constraints().emplace();
     bmc.physically_contiguous_required() = false;
     bmc.secure_required() = false;
 
@@ -66,7 +56,9 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
     // We don't have to fill out usage - CodecImpl takes care of that.
     ZX_DEBUG_ASSERT(!result.usage().has_value());
 
-    return result;
+    return CoreCodecGetBufferCollectionConstraints3Result{
+        .constraints = std::move(result),
+    };
   }
 
   void CoreCodecSetBufferCollectionInfo(
@@ -85,13 +77,7 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
         }
       });
 
-      bool is_active = [this, &item]() FXL_NO_THREAD_SAFETY_ANALYSIS {
-        std::unique_lock<std::mutex> lock(lock_);
-        while (output_reconfig_pending_ && !item.is_format_details()) {
-          reconfig_cond_.wait(lock);
-        }
-        return stream_active_;
-      }();
+      const bool is_active = WaitForOutputReconfigToComplete();
       if (!is_active) {
         return;
       }
@@ -103,13 +89,16 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
               "Midstream format change not supported after input packet.");
           return;
         }
-        if (ProcessFormatDetails(item.format_details()) == kShouldTerminate) {
+        if (ProcessFormatDetails(item.format_details2()) == kShouldTerminate) {
           // A failure was reported through `events_` or the stream was stopped.
           return;
         }
         {
           std::lock_guard<std::mutex> lock(lock_);
-          output_reconfig_pending_ = true;
+          if (!IsStreamActiveLocked()) {
+            return;
+          }
+          SetOutputReconfigPendingLocked();
         }
         // CodecImpl guarantees that QueueInputFormatDetails() will happen before
         // any input packets (in CodecImpl::HandlePendingInputFormatDetails()),
@@ -140,7 +129,7 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
     }
   }
 
-  void InitChunkInputStream(const fuchsia::media::FormatDetails& format_details)
+  void InitChunkInputStream(const fuchsia_media::FormatDetails& format_details)
       __TA_EXCLUDES(lock_) {
     {
       std::lock_guard<std::mutex> lock(lock_);
@@ -153,12 +142,7 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
           if (!output_item_ || output_item_->packet == nullptr) {
             std::optional<CodecPacket*> maybe_output_packet = free_output_packets_.WaitForElement();
             if (!maybe_output_packet) {
-              bool active;
-              {
-                std::lock_guard<std::mutex> lock(lock_);
-                active = stream_active_;
-              }
-              if (!active) {
+              if (!IsStreamActive()) {
                 return ChunkInputStream::kTerminate;
               }
               // We should close the stream since we couldn't fetch output buffer.
@@ -170,12 +154,7 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
 
             const CodecBuffer* buffer = output_buffer_pool_.AllocateBuffer();
             if (!buffer) {
-              bool active;
-              {
-                std::lock_guard<std::mutex> lock(lock_);
-                active = stream_active_;
-              }
-              if (!active) {
+              if (!IsStreamActive()) {
                 return ChunkInputStream::kTerminate;
               }
               events_->onCoreCodecFailCodec("Could not get output buffer.");
@@ -265,7 +244,7 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
   // `codec_params_` should be initialized in this method, followed by calling
   // `InitChunkInputStream()` so that `chunk_input_stream_` and `min_output_buffer_size_` are
   // initialized.
-  virtual InputLoopStatus ProcessFormatDetails(const fuchsia::media::FormatDetails& format_details)
+  virtual InputLoopStatus ProcessFormatDetails(const fuchsia_media::FormatDetails& format_details)
       __TA_EXCLUDES(lock_) = 0;
 
   // Processes the data from input data. If processing was successful, returns the number
@@ -284,7 +263,7 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
   //
   // `codec_params_` is guaranteed to be populated when `CodecAdapterSWImpl` calls this method.
   // `OutputFormatDetails()` runs on `input_processing_thread_` when reached through
-  // `CoreCodecGetOutputFormat()`, and holds `lock_` when calling this method so that direct
+  // `CoreCodecGetOutputFormat2()`, and holds `lock_` when calling this method so that direct
   // callers such as tests, and any future off-thread caller, are safe. Because this method is
   // called both with `lock_` held and without `lock_` held (on `input_processing_thread_`),
   // implementations must not acquire `lock_`.
@@ -293,22 +272,23 @@ class CodecAdapterSWImpl : public CodecAdapterSW<fit::deferred_action<fit::closu
   // `codec_params_`.
   virtual size_t MinOutputBufferSize() = 0;
 
-  // Returns the constraints to use for `CodecAdapter::CoreCodecGetBufferCollectionConstraints2`
-  // depending on the port. The fields used are:
-  // - fuchsia::sysmem::BufferCollectionConstraints.min_buffer_count_for_camping
-  // - fuchsia::sysmem::BufferCollectionConstraints.buffer_memory_constraints.min_size_bytes
-  // - fuchsia::sysmem::BufferCollectionConstraints.buffer_memory_constraints.max_size_bytes
+  // Returns the constraints to use for `CodecAdapter::CoreCodecGetBufferCollectionConstraints3`
+  // depending on the port. The returned table is passed through, except that
+  // `buffer_memory_constraints.physically_contiguous_required` and
+  // `buffer_memory_constraints.secure_required` are overwritten with false. The
+  // `min_buffer_count_for_dedicated_slack`, `min_buffer_count_for_shared_slack`,
+  // `image_format_constraints`, and `usage` fields must be left unset.
   //
   // For `kOutputPort`, once `ProcessFormatDetails()` has succeeded at least once, this method may
   // be called even after `CleanUpAfterStream()` (where `ResetCodecParams()` has reset
   // `codec_params_`) before a subsequent stream runs `ProcessFormatDetails()`. Implementations
   // must not assume `codec_params_.has_value()` here and should use `min_output_buffer_size_` if
   // the minimum output buffer size depends on stream format details.
-  virtual fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
+  virtual fuchsia_sysmem2::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
       __TA_REQUIRES(lock_) = 0;
 
   virtual TimestampExtrapolator CreateTimestampExtrapolator(
-      const fuchsia::media::FormatDetails& format_details) = 0;
+      const fuchsia_media::FormatDetails& format_details) = 0;
 
   // Reset `codec_params_` to `std::nullopt` under `lock_`.
   void ResetCodecParams() __TA_EXCLUDES(lock_) {

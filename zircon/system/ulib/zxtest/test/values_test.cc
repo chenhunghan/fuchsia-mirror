@@ -311,7 +311,7 @@ void TestTuplesCombine() {
                      std::tuple("a", "b")),
           std::tuple(std::tuple(20, 21), std::tuple(25, 26), std::tuple(2.5, 2.6),
                      std::tuple("a", "b")),
-      };
+  };
   ZX_ASSERT_MSG(c4.size() == e4.size(), "Provider size should be %zu, got %zu.", e4.size(),
                 c4.size());
 
@@ -341,7 +341,7 @@ void TestTuplesCombine() {
           std::tuple(std::tuple(20, 21), std::tuple(15, 16), 2.5, std::tuple("a", "b")),
           std::tuple(std::tuple(20, 21), std::tuple(25, 26), 1.5, std::tuple("a", "b")),
           std::tuple(std::tuple(20, 21), std::tuple(25, 26), 2.5, std::tuple("a", "b")),
-      };
+  };
   ZX_ASSERT_MSG(c5.size() == e5.size(), "Provider size should be %zu, got %zu.", e5.size(),
                 c5.size());
 
@@ -354,6 +354,50 @@ void TestTuplesCombine() {
     ZX_ASSERT(std::get<1>(e5[i]) == std::get<1>(c5[i]));
     ZX_ASSERT(std::get<2>(e5[i]) == std::get<2>(c5[i]));
     ZX_ASSERT(std::get<3>(e5[i]) == std::get<3>(c5[i]));
+  }
+}
+
+void TestRangesCombine() {
+  // Both Range providers have the same type, so they share storage.
+  auto c1 = ::zxtest::Combine(::zxtest::Range(0, 2), ::zxtest::Range(10, 12));
+  std::vector<std::tuple<int, int>> e1 = {
+      std::tuple(0, 10),
+      std::tuple(0, 11),
+      std::tuple(1, 10),
+      std::tuple(1, 11),
+  };
+  ZX_ASSERT_MSG(c1.size() == e1.size(), "Provider size should be %zu, got %zu.", e1.size(),
+                c1.size());
+  for (size_t i = 0; i < c1.size(); ++i) {
+    ZX_ASSERT_MSG(e1[i] == c1[i], "Expected (%d, %d), got (%d, %d)", std::get<0>(e1[i]),
+                  std::get<1>(e1[i]), std::get<0>(c1[i]), std::get<1>(c1[i]));
+  }
+
+  // Combining more than two goes through the internal Combine.
+  auto c2 =
+      ::zxtest::Combine(::zxtest::Range(0, 2), ::zxtest::Range(10, 12), ::zxtest::Range(20, 22));
+  ZX_ASSERT_MSG(c2.size() == 8, "Provider size should be 8, got %zu.", c2.size());
+  for (size_t i = 0; i < c2.size(); ++i) {
+    const auto [x, y, z] = c2[i];
+    const int ex = static_cast<int>(i / 4), ey = 10 + static_cast<int>(i / 2 % 2),
+              ez = 20 + static_cast<int>(i % 2);
+    ZX_ASSERT_MSG(x == ex && y == ey && z == ez, "Expected (%d, %d, %d), got (%d, %d, %d)", ex, ey,
+                  ez, x, y, z);
+  }
+
+  // Both nested Combine providers have the same type, so they share storage.
+  auto c3 = ::zxtest::Combine(::zxtest::Combine(::zxtest::Values(1, 2), ::zxtest::Values(3)),
+                              ::zxtest::Combine(::zxtest::Values(5), ::zxtest::Values(6, 7)));
+  std::vector<std::tuple<std::tuple<int, int>, std::tuple<int, int>>> e3 = {
+      std::tuple(std::tuple(1, 3), std::tuple(5, 6)),
+      std::tuple(std::tuple(1, 3), std::tuple(5, 7)),
+      std::tuple(std::tuple(2, 3), std::tuple(5, 6)),
+      std::tuple(std::tuple(2, 3), std::tuple(5, 7)),
+  };
+  ZX_ASSERT_MSG(c3.size() == e3.size(), "Provider size should be %zu, got %zu.", e3.size(),
+                c3.size());
+  for (size_t i = 0; i < c3.size(); ++i) {
+    ZX_ASSERT_MSG(e3[i] == c3[i], "Unexpected value at index %zu", i);
   }
 }
 

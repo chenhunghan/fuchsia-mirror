@@ -37,10 +37,6 @@ zx_status_t Graph::Initialize(Graph* graph, const zbi_topology_node_t* flat_node
   return rust_system_topology_graph_initialize(graph, flat_nodes, count);
 }
 
-zx_status_t Graph::InitializeSystemTopology(const zbi_topology_node_t* nodes, size_t count) {
-  return rust_system_topology_initialize_system_topology(nodes, count);
-}
-
 void Graph::Dump() const { rust_system_topology_graph_dump(this); }
 
 uint8_t GetPerformanceClass(cpu_num_t cpu_id) {

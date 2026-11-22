@@ -40,6 +40,12 @@
   .int \end - \begin
   .int \ident
   .popsection
+
+  // This relocation does nothing, but its addend makes each patched range
+  // distinct to the linker.  Otherwise identical code folding (--icf=all)
+  // could merge two functions that differ only in their patch case IDs, such
+  // as two code_patching_hermetic_stub() functions of the same size.
+  .reloc \begin, BFD_RELOC_NONE, \ident
 .endm  // .code_patching.range
 
 /// Defines an instruction range to be patched.  See .code_patching.range.

@@ -242,3 +242,78 @@ class TestMethodTest(unittest.TestCase):
         )
         self.assertTrue(test_default_device.needs_package_server())
         self.assertFalse(test_default_host.needs_package_server())
+
+    def test_is_host_test_classification(self) -> None:
+        host_test = Test(
+            TestEntry(
+                test=TestSection(
+                    name="host_test",
+                    label="//src/host_test",
+                    os="linux",
+                    path="host_x64/host_test",
+                ),
+            )
+        )
+        pure_device_test_with_path = Test(
+            TestEntry(
+                test=TestSection(
+                    name="fuchsia-pkg://fuchsia.com/pkg#meta/test.cm",
+                    label="//src/device_test",
+                    os="linux",
+                    package_url="fuchsia-pkg://fuchsia.com/pkg#meta/test.cm",
+                    path="pkg_test_test.sh",
+                ),
+                environments=[
+                    EnvironmentEntry(
+                        dimensions=DimensionsEntry(device_type="AEMU")
+                    )
+                ],
+                expects_ssh=True,
+            )
+        )
+        boot_test_with_path = Test(
+            TestEntry(
+                test=TestSection(
+                    name="boot_test",
+                    label="//src/boot_test",
+                    os="linux",
+                    path="boot_test.sh",
+                ),
+                environments=[
+                    EnvironmentEntry(
+                        dimensions=DimensionsEntry(device_type="AEMU")
+                    )
+                ],
+                is_boot_test=True,
+            )
+        )
+        bootfs_test = Test(
+            TestEntry(
+                test=TestSection(
+                    name="bootfs_test",
+                    label="//src/bootfs_test",
+                    os="fuchsia",
+                    path="/boot/test/bootfs_test",
+                ),
+                expects_ssh=False,
+            )
+        )
+
+        self.assertTrue(host_test.is_host_test())
+        self.assertFalse(host_test.needs_device())
+
+        self.assertTrue(pure_device_test_with_path.is_pure_device_test())
+        self.assertTrue(pure_device_test_with_path.needs_device())
+        self.assertFalse(pure_device_test_with_path.is_host_test())
+        self.assertFalse(pure_device_test_with_path.is_e2e_test())
+        self.assertFalse(pure_device_test_with_path.is_boot_test())
+
+        self.assertTrue(boot_test_with_path.is_boot_test())
+        self.assertFalse(boot_test_with_path.is_host_test())
+        self.assertFalse(boot_test_with_path.is_e2e_test())
+        self.assertFalse(boot_test_with_path.is_pure_device_test())
+
+        self.assertFalse(bootfs_test.is_host_test())
+        self.assertFalse(bootfs_test.is_e2e_test())
+        self.assertFalse(bootfs_test.is_pure_device_test())
+        self.assertFalse(bootfs_test.is_boot_test())

@@ -75,6 +75,42 @@ TEST_F(DisplayInfoTest, InitializeFailureOnEmptyPreferredModes) {
   EXPECT_STATUS(display_info_result, ZX_ERR_INVALID_ARGS);
 }
 
+TEST_F(DisplayInfoTest, CommittedModeVsyncIntervalPrefersVrrConfigVsyncPeriod) {
+  static constexpr display::PixelFormat kPixelFormat = display::PixelFormat::kR8G8B8A8;
+  const display::Mode kVrrMode({
+      .active_width = 1080,
+      .active_height = 2410,
+      .refresh_rate_millihertz = 120'000,
+      .flags = fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+  });
+  const display::Mode kFixedMode({
+      .active_width = 1080,
+      .active_height = 2410,
+      .refresh_rate_millihertz = 60'000,
+  });
+
+  fuchsia_hardware_display_types::VrrConfig vrr_config;
+  vrr_config.vsync_period(4'166'666);
+  vrr_config.min_frame_interval(8'333'333);
+
+  AddedDisplayInfo added_display_info = {
+      .display_id = display::DisplayId(1),
+      .pixel_formats = {kPixelFormat},
+      .preferred_modes = {kVrrMode, kFixedMode},
+      .preferred_mode_vrr_configs = {std::move(vrr_config), {}},
+  };
+  zx::result<std::unique_ptr<DisplayInfo>> display_info_result =
+      DisplayInfo::Create(std::move(added_display_info));
+  ASSERT_OK(display_info_result);
+
+  std::unique_ptr<DisplayInfo> display_info = std::move(display_info_result).value();
+  display_info->committed_mode_id = display::ModeId(1);
+  EXPECT_EQ(display_info->GetCommittedModeVsyncInterval(), zx::nsec(4'166'666));
+
+  display_info->committed_mode_id = display::ModeId(2);
+  EXPECT_EQ(display_info->GetCommittedModeVsyncInterval(), zx::nsec(16'666'666));
+}
+
 }  // namespace
 
 }  // namespace display_coordinator

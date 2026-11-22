@@ -12,8 +12,11 @@ import("fuchsia_test_component_manifest.gni")
 declare_args() {
   # When enabled, changes tests.json entries for fuchsia_test_package tests so
   # that botanist will use test-pilot to execute them. The tests.json changes
-  # include adding a "path" entry for the test and setting "os" to "linux".
-  use_test_pilot = false
+  # include adding a "path" entry for the test and setting "os" to "linux". This
+  # is true by default, because we want to use test-pilot for
+  # fuchsia_test_package in all cases.
+  # TODO(https://fxbug.dev/555387345): remove this gn arg once it is no longer referenced.
+  use_test_pilot = true
 }
 
 _log_severity_allowed_val = [

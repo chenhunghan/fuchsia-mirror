@@ -74,7 +74,7 @@ component URL fragment (`#meta/<component>.cm`). If the fragment contains any
 other content, or if a relative component includes URL query parameters
 (`?key=value`), the component will not resolve.
 
-### Relative path URLs to subpackaged components
+### Relative path URLs to subpackaged components {#relative-path-urls-to-subpackaged-components}
 
 A relative path URL is resolved at runtime based on a known "context". For
 components resolving a child component by relative URL, the context is a
@@ -131,7 +131,7 @@ fuchsia-pkg://fuchsia.com/package#meta/child.cm
 [doc-manifests]: /docs/concepts/components/v2/component_manifests.md
 [doc-package]: /docs/concepts/packages/package.md
 [doc-package-url]: /docs/concepts/packages/package_url.md
-[doc-package-url-resource-path]: /docs/concepts/packages/package_url.md#resource-paths
+[doc-package-url-resource-path]: /docs/concepts/packages/package_url.md#resource-path
 [doc-relative-package-url]: /docs/concepts/packages/package.md#relative-package-urls
 [doc-resolvers]: /docs/concepts/components/v2/capabilities/resolver.md
 [doc-runners]: /docs/concepts/components/v2/capabilities/runner.md

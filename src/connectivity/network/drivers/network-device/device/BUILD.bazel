@@ -1,0 +1,284 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":network-device-lib-test",
+        ":network-device-microbenchmarks",
+    ],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/42155349): Get rid of this target once std::shared_mutex
+# and std::shared_lock have thread analysis annotations.
+fx_cc_library(
+    name = "shared_lock",
+    hdrs = ["public/locks.h"],
+    visibility = [
+        "//src/connectivity/ethernet/drivers/ethernet/netdevice-migration:__pkg__",
+        "//src/connectivity/ethernet/drivers/third_party/igc:__pkg__",
+        "//src/connectivity/ethernet/drivers/virtio:__pkg__",
+    ],
+)
+
+_DEVICE_SRCS = [
+    "device_interface.cc",
+    "device_port.cc",
+    "diagnostics_service.cc",
+    "port_watcher.cc",
+    "rx_queue.cc",
+    "session.cc",
+    "simple_rx_buffer_estimator.cc",
+    "status_watcher.cc",
+    "tx_queue.cc",
+]
+
+_DEVICE_HDRS = [
+    "data_structs.h",
+    "definitions.h",
+    "device_interface.h",
+    "device_port.h",
+    "diagnostics_service.h",
+    "event_hook.h",
+    "log.h",
+    "port_watcher.h",
+    "public/network_device.h",
+    "rx_queue.h",
+    "session.h",
+    "simple_rx_buffer_estimator.h",
+    "status_watcher.h",
+    "tx_queue.h",
+]
+
+fx_cc_library(
+    name = "device_driver",
+    srcs = _DEVICE_SRCS,
+    hdrs = _DEVICE_HDRS,
+    defines = ["NETDEV_DRIVER"],
+    visibility = ["//src/connectivity/network/drivers/network-device:__pkg__"],
+    deps = [
+        ":shared_lock",
+        "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+        "//sdk/lib/fidl",
+        "//src/connectivity/lib/network-device/buffer_descriptor",
+        "//src/connectivity/network/drivers/network-device/mac:mac_driver",
+        "//src/lib/debug:backtrace-request",
+        "//src/lib/vmo_store",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "device",
+    srcs = _DEVICE_SRCS,
+    hdrs = _DEVICE_HDRS,
+    visibility = [
+        "//src/connectivity/network/tun/network-tun:__pkg__",
+        "//src/virtualization/bin/vmm/device/virtio_net:__pkg__",
+    ],
+    deps = [
+        ":shared_lock",
+        "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+        "//sdk/lib/fidl",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/lib/network-device/buffer_descriptor",
+        "//src/connectivity/network/drivers/network-device/mac",
+        "//src/lib/debug:backtrace-request",
+        "//src/lib/vmo_store",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+_TEST_UTIL_SRCS = [
+    "test_session.cc",
+    "test_util.cc",
+]
+
+_TEST_UTIL_HDRS = [
+    "test_session.h",
+    "test_util.h",
+]
+
+fx_cc_library(
+    name = "test_util_driver",
+    testonly = True,
+    srcs = _TEST_UTIL_SRCS,
+    hdrs = _TEST_UTIL_HDRS,
+    defines = ["NETDEV_DRIVER"],
+    visibility = ["//src/connectivity/network/drivers/network-device:__pkg__"],
+    deps = [
+        ":device_driver",
+        "//sdk/lib/driver/logging/cpp",
+        "//src/lib/testing/predicates",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "test_util",
+    testonly = True,
+    srcs = _TEST_UTIL_SRCS,
+    hdrs = _TEST_UTIL_HDRS,
+    deps = [
+        ":device",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/testing/predicates",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "test_bin",
+    srcs = [
+        "data_structs-test.cc",
+        "network_device-test.cc",
+        "simple_rx_buffer_estimator-test.cc",
+        "status_watcher-test.cc",
+    ],
+    gn_output_name = "network-device-lib-test",
+    tags = ["manual"],
+    deps = [
+        ":device",
+        ":test_util",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/connectivity/network/drivers/network-device/mac:test_util",
+        "//src/lib/fsl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_bin_packaged",
+    testonly = True,
+    binary = ":test_bin",
+    binary_name = "network-device-lib-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "network-device-lib-test-manifest",
+    testonly = True,
+    component_name = "network-device-lib-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default",
+    ],
+    manifest = "meta/network-device-lib-test.cml",
+)
+
+fx_test_component(
+    name = "network-device-lib-test-component",
+    compiled_manifest = ":network-device-lib-test-manifest",
+    deps = [":test_bin_packaged"],
+)
+
+fx_package(
+    name = "network-device-lib-test-package",
+    package_name = "network-device-lib-test",
+    testonly = True,
+    test_components = [":network-device-lib-test-component"],
+)
+
+fx_test(
+    name = "network-device-lib-test",
+    max_log_severity = "ERROR",
+    package = ":network-device-lib-test-package",
+)
+
+fx_cc_test_binary(
+    name = "microbenchmarks_bin",
+    srcs = [
+        "network_device-microbenchmarks.cc",
+        "test_session.cc",
+        "test_session.h",
+    ],
+    gn_output_name = "network-device-microbenchmarks",
+    tags = ["manual"],
+    deps = [
+        ":device",
+        "//sdk/lib/driver/runtime/testing/cpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/perftest",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "microbenchmarks_bin_packaged",
+    testonly = True,
+    binary = ":microbenchmarks_bin",
+    binary_name = "network-device-microbenchmarks",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "network-device-microbenchmarks-manifest",
+    testonly = True,
+    component_name = "network-device-microbenchmarks",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/network-device-microbenchmarks.cml",
+)
+
+fx_test_component(
+    name = "network-device-microbenchmarks-component",
+    compiled_manifest = ":network-device-microbenchmarks-manifest",
+    deps = [":microbenchmarks_bin_packaged"],
+)
+
+fx_package(
+    name = "network-device-microbenchmarks-package",
+    package_name = "network-device-microbenchmarks",
+    testonly = True,
+    test_components = [":network-device-microbenchmarks-component"],
+)
+
+fx_test(
+    name = "network-device-microbenchmarks",
+    package = ":network-device-microbenchmarks-package",
+)

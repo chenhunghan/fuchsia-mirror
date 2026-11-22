@@ -71,6 +71,7 @@ class ShacRunnerTest(unittest.TestCase):
             self.fuchsia_dir,
             self.fuchsia_dir,
             explicit_files=("//foo.cc",),
+            all_repos=False,
         )
         self.assertIn("ERROR: no such file:", mock_stderr.getvalue())
 
@@ -143,6 +144,9 @@ class ShacRunnerTest(unittest.TestCase):
                 scm, "get_repo_groups", autospec=True, return_value=repo_groups
             ),
             mock.patch.object(subprocess, "run", autospec=True) as mock_run,
+            mock.patch.object(
+                sys, "stderr", new_callable=io.StringIO
+            ) as mock_stderr,
         ):
             shac_runner.run_shac(
                 "check",
@@ -152,6 +156,11 @@ class ShacRunnerTest(unittest.TestCase):
             )
 
         mock_run.assert_not_called()
+        self.assertEqual(
+            mock_stderr.getvalue(),
+            f"WARNING: no shac.textproto found in {self.fuchsia_dir};"
+            " nothing to do.\n",
+        )
 
     def test_run_shac_skips_build_when_static_check_tools_present(self) -> None:
         self._populate_static_check_tools()
@@ -295,7 +304,7 @@ class ShacRunnerTest(unittest.TestCase):
         with (
             mock.patch.object(
                 scm, "get_repo_groups", autospec=True, return_value=repo_groups
-            ),
+            ) as mock_get_groups,
             mock.patch.object(
                 subprocess,
                 "run",
@@ -313,6 +322,13 @@ class ShacRunnerTest(unittest.TestCase):
                 skip_checks=("rustfmt",),
                 extra_args=("--no-color",),
             )
+
+        mock_get_groups.assert_called_once_with(
+            self.fuchsia_dir,
+            self.fuchsia_dir,
+            explicit_files=None,
+            all_repos=False,
+        )
 
         self.assertEqual(mock_run.call_count, 2)
         build_call = mock_run.call_args_list[0]
@@ -528,7 +544,7 @@ class ShacRunnerTest(unittest.TestCase):
         with (
             mock.patch.object(
                 scm, "get_repo_groups", autospec=True, return_value=repo_groups
-            ),
+            ) as mock_get_groups,
             mock.patch.object(
                 subprocess,
                 "run",
@@ -541,7 +557,15 @@ class ShacRunnerTest(unittest.TestCase):
                 self.fuchsia_dir,
                 self.build_dir,
                 self.fuchsia_dir,
+                all_repos=True,
             )
+
+        mock_get_groups.assert_called_once_with(
+            self.fuchsia_dir,
+            self.fuchsia_dir,
+            explicit_files=None,
+            all_repos=True,
+        )
 
         self.assertEqual(mock_run.call_count, 3)
         build_command = mock_run.call_args_list[0].args[0]

@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
 
 package(default_applicable_licenses = ["//:license"])
@@ -17,7 +17,7 @@ go_library(
         "timer.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/check-licenses/metrics",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//visibility:public"],
 )
 
@@ -30,6 +30,6 @@ host_go_test(
         "timer_test.go",
     ],
     embed = [":metrics"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools/check-licenses:__subpackages__"],
 )

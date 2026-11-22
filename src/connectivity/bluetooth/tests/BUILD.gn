@@ -13,7 +13,6 @@ group("tests") {
     "bt-host-integration:tests",
     "bt-inspect-integration:bt-inspect-integration-tests",
     "bt-le-integration:bt-le-integration-tests",
-    "bt-manifest-integration-tests:tests",
     "bt-profile-integration:bt-profile-integration-tests",
   ]
 }

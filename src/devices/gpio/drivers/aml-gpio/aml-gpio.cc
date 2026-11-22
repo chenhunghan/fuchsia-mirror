@@ -701,6 +701,10 @@ void AmlGpio::ReleaseInterrupt(
 
 void AmlGpio::Configure(fuchsia_hardware_pinimpl::wire::PinImplConfigureRequest* request,
                         fdf::Arena& arena, ConfigureCompleter::Sync& completer) {
+  if (request->config.has_input_buffer_enabled()) {
+    return completer.buffer(arena).ReplyError(ZX_ERR_NOT_SUPPORTED);
+  }
+
   zx_status_t status;
 
   const AmlGpioBlock* block;

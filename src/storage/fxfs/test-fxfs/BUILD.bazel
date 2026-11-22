@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "test-fxfs-manifest",
+    component_name = "test-fxfs",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/storage/fs_test/meta:fxfs_crypt_test.shard",
+    ],
+    manifest = "meta/test-fxfs.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "test_fxfs_config",
+    testonly = True,
+    cm_label = ":test-fxfs-manifest",
+)
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "test-fxfs",
+    edition = "2024",
+    tags = [
+        # `:vfs` in BUILD.gn is an alias to `:vfs_dylib` on Fuchsia in Bazel;
+        # assert_no_deps_aspect checks the resolved target label.
+        "assert_no_deps=//src/storage/lib/vfs/rust:vfs_dylib",  # @bazel2gn:path_overwrite://src/storage/lib/vfs/rust:vfs
+    ],
+    deps = [
+        ":test_fxfs_config",
+        "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_rust",
+        "//sdk/fidl/fuchsia.hardware.inlineencryption:fuchsia.hardware.inlineencryption_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component/client",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/memory/attribution/refaults_vmo",
+        "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+        "//src/storage/fxfs:lib",
+        "//src/storage/fxfs/crypto",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/fxfs/platform",
+        "//src/storage/fxfs/test-fxfs/fidl/fuchsia.test.fxfs:fuchsia.test.fxfs_rust",
+        "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
+        "//src/storage/lib/storage_device",
+        "//src/storage/lib/vfs/rust:vfs_static",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "test-fxfs",
+)
+
+fx_component(
+    name = "test-fxfs",
+    testonly = True,
+    compiled_manifest = ":test-fxfs-manifest",
+    deps = [":bin_packaged_bin"],
+)

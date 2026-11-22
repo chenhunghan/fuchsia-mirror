@@ -11,6 +11,7 @@
 
 #include <array>
 #include <concepts>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 
@@ -66,6 +67,20 @@ enum class RemoteAbiTranscriberImplType {
 template <typename T, RemoteAbiTranscriberImplType>
 struct RemoteAbiTranscriberImpl;
 
+// This is used only to probe for the AbiMembers template alias in
+// RemoteAbiTranscribableClass, below.  (std::tuple suffices for AbiBases.)
+template <auto...>
+using RemoteAbiTranscriberMembersProbe = void;
+
+// This is satisfied by a class or struct type that provides the API described
+// below for the member-by-member transcription implementation.
+template <class T>
+concept RemoteAbiTranscribableClass = std::is_class_v<T> && requires {
+  typename T::AbiLocal;
+  typename T::template AbiBases<std::tuple>;
+  typename T::template AbiMembers<RemoteAbiTranscriberMembersProbe>;
+};
+
 // Choose among the main implementation types.  Any type T not correctly
 // categorized by this should have a RemoteAbiTranscriber<T> specialization.
 template <typename T>
@@ -75,8 +90,8 @@ inline constexpr RemoteAbiTranscriberImplType kRemoteAbiTranscriberImplType =
         // elfldltl::Elf<...> types are already universal.
         : elfldltl::kIsLayout<T> ? RemoteAbiTranscriberImplType::kVerbatim
           // Other types without specializations transcribe member-by-member.
-          : std::is_class_v<T> ? RemoteAbiTranscriberImplType::kClass
-                               : RemoteAbiTranscriberImplType::kUnsupported;
+          : RemoteAbiTranscribableClass<T> ? RemoteAbiTranscriberImplType::kClass
+                                           : RemoteAbiTranscriberImplType::kUnsupported;
 
 template <typename T>
 struct RemoteAbiTranscriber
@@ -240,11 +255,12 @@ struct RemoteAbiTranscriberImpl<T, RemoteAbiTranscriberImplType::kClass> {
     return ctx.template MemberFromLocal<Member, MemberType, LocalMember, Local>(out.*Member, in);
   }
 
-  static constexpr bool Same(auto a, decltype(a) b) { return a == b; }
-  template <typename A, typename B>
-    requires(!std::same_as<A, B>)
-  static constexpr bool Same(A a, B b) {
-    return false;
+  static constexpr bool Same(auto a, auto b) {
+    if constexpr (std::same_as<decltype(a), decltype(b)>) {
+      return a == b;
+    } else {
+      return false;
+    }
   }
 
   template <auto... M>

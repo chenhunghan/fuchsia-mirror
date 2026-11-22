@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":openthread-fuchsia-tests"],
+    visibility = ["//src/connectivity/lowpan:__pkg__"],
+)
+
+# GN's `if (openthread_upstream_version == "49c59ec519cc8b49dd58978d1bc80b7ae7ba88d0")`
+# / `:openthread_240214` block is an unused soft-transition leftover (`cfg(openthread_240214)`
+# is unreferenced and `openthread_upstream_version` has moved on) and is omitted in Bazel.
+# TODO(https://fxbug.dev/356474618): re-enable and fix existing lints
+# configs += [ "//build/config/rust/lints:clippy_warn_all" ]
+rustc_library(
+    name = "openthread_fuchsia",
+    srcs = [
+        "src/backing/alarm.rs",
+        "src/backing/infra_if.rs",
+        "src/backing/mod.rs",
+        "src/backing/nat64.rs",
+        "src/backing/radio.rs",
+        "src/backing/reset.rs",
+        "src/backing/resolver.rs",
+        "src/backing/trel.rs",
+        "src/backing/udp.rs",
+        "src/binding.rs",
+        "src/lib.rs",
+        "src/logging.rs",
+        "src/to_escaped_string.rs",
+    ],
+    edition = "2024",
+    link_deps = ["//src/connectivity/openthread/third_party/openthread/platform"],
+    visibility = ["//src/connectivity/lowpan:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.mdns:fuchsia.net.mdns_rust",
+        "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lowpan/lib/lowpan_driver_common",
+        "//src/connectivity/lowpan/lib/openthread_rust:openthread",
+        "//src/connectivity/lowpan/lib/openthread_sys",
+        "//src/connectivity/lowpan/lib/spinel_pack",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:socket2",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+# //src/connectivity/openthread/third_party/openthread/platform is C++, so GN
+# test binaries linking it with rustc need dynamic_cpp_standard_library;
+# Bazel's C++ toolchain links libc++ automatically via link_deps.
+# @bazel2gn:raw_attribute:configs += [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_test(
+    name = "openthread_fuchsia_test",
+    crate = ":openthread_fuchsia",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "openthread-fuchsia-tests",
+    unit_tests = [":openthread_fuchsia_test"],
+)

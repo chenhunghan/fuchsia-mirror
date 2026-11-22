@@ -129,7 +129,7 @@ mod tests {
     use futures::prelude::*;
 
     struct TestEnv {
-        _blobfs_fake: FakeBlobfs,
+        blobfs_fake: FakeBlobfs,
     }
 
     impl TestEnv {
@@ -148,7 +148,7 @@ mod tests {
             let root_dir = RootDir::new(blobfs_client, metafar_blob.merkle).await.unwrap();
             let sub_dir = NonMetaSubdir::new(root_dir, "dir0/".to_string());
             (
-                Self { _blobfs_fake: blobfs_fake },
+                Self { blobfs_fake },
                 vfs::directory::serve_read_only(
                     sub_dir,
                     vfs::execution_scope::ExecutionScope::new(),
@@ -244,5 +244,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fuchsia_fs::file::read(&proxy).await.unwrap(), b"bloblob".to_vec())
+    }
+
+    #[fuchsia::test]
+    async fn non_meta_subdir_open_file_missing_blob() {
+        let (env, sub_dir) = TestEnv::new().await;
+        env.blobfs_fake.delete_blob(fuchsia_merkle::root_from_slice(b"bloblob"));
+
+        assert_matches!(
+            fuchsia_fs::directory::open_file(&sub_dir, "dir1/file", fio::PERM_READABLE).await,
+            Err(fuchsia_fs::node::OpenError::OpenError(zx::Status::IO_DATA_INTEGRITY))
+        );
+        assert_matches!(
+            fuchsia_fs::directory::open_file(&sub_dir, "dir1/missing", fio::PERM_READABLE).await,
+            Err(fuchsia_fs::node::OpenError::OpenError(zx::Status::NOT_FOUND))
+        );
     }
 }

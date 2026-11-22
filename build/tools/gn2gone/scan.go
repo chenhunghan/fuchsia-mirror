@@ -409,16 +409,54 @@ func (idx *Index) gnBuiltUnderTest(dir string, sentinel *FileIndex, cleanup []Re
 	// The resolver only knows sentinel directories, so these are matched
 	// separately (see handWrittenLibrary).
 	handWritten := map[string][]string{}
+	belowVars := map[string][]*Literal{}
 	for _, l := range sentinel.Literals {
-		if l.Region != RegionBelow || l.Target == nil || l.Target.Name == "" || IsBazelLabel(l) {
+		if l.Region != RegionBelow || IsBazelLabel(l) {
 			continue
 		}
-		if l.Attr == "visibility" || l.Attr == "assert_no_deps" {
+		if l.Target == nil {
+			if l.Attr != "" && l.InnerAttr == "" {
+				belowVars[l.Attr] = append(belowVars[l.Attr], l)
+			}
+			continue
+		}
+		if l.Target.Name == "" || l.Attr == "visibility" || l.Attr == "assert_no_deps" {
 			continue
 		}
 		edges[l.Target.Name] = append(edges[l.Target.Name], idx.Resolver.Resolve(l)...)
-		if label, ok := idx.handWrittenLibrary(l, dir, testOnly); ok {
+		if label, ok := idx.handWrittenLibraryAttr(l, l.Attr, dir, testOnly); ok {
 			handWritten[l.Target.Name] = append(handWritten[l.Target.Name], label)
+		}
+	}
+	for _, t := range sentinel.Targets {
+		if t.Region != RegionBelow || t.Name == "" || len(t.AttrVars) == 0 {
+			continue
+		}
+		type targetAttrVar struct {
+			attr, name string
+		}
+		seenVar := map[targetAttrVar]bool{}
+		for _, av := range t.AttrVars {
+			if av.Attr == "visibility" || av.Attr == "assert_no_deps" || IsBazelLabel(&Literal{Target: t, Attr: av.Attr}) {
+				continue
+			}
+			vQueue := []string{av.Name}
+			for len(vQueue) > 0 {
+				vn := vQueue[0]
+				vQueue = vQueue[1:]
+				key := targetAttrVar{av.Attr, vn}
+				if seenVar[key] {
+					continue
+				}
+				seenVar[key] = true
+				for _, l := range belowVars[vn] {
+					edges[t.Name] = append(edges[t.Name], idx.Resolver.ResolveAs(l, t, av.Attr)...)
+					if label, ok := idx.handWrittenLibraryAttr(l, av.Attr, dir, testOnly); ok {
+						handWritten[t.Name] = append(handWritten[t.Name], label)
+					}
+				}
+				vQueue = append(vQueue, sentinel.BelowVarRefs[vn]...)
+			}
 		}
 	}
 	// Start from the tests GN test groups run, and from every synced test
@@ -466,9 +504,15 @@ func (idx *Index) gnBuiltUnderTest(dir string, sentinel *FileIndex, cleanup []Re
 					queue = append(queue, r.Target)
 				}
 			case relatedDir(dir, r.Dir, testOnly) && r.Side == RegionAbove:
-				if other := idx.Sentinel[r.Dir]; other != nil {
-					if t := other.target(r.Target, RegionAbove); t != nil && isLibrary(t) && !isTestTarget(t) && !isSubTest(r) && !privateTarget(other, t) {
-						found["//"+r.Dir+":"+r.Target] = true
+				if other := idx.Sentinel[r.Dir]; other != nil && !isSubTest(r) {
+					if t := other.target(r.Target, RegionAbove); t != nil && !isTestTarget(t) && !privateTarget(other, t) {
+						if isLibrary(t) {
+							found["//"+r.Dir+":"+r.Target] = true
+						} else if t.Template == "group" {
+							for _, label := range idx.aboveGroupUnderTest(r.Dir, other, t, dir) {
+								found[label] = true
+							}
+						}
 					}
 				}
 			case relatedDir(dir, r.Dir, testOnly) && r.HitsSynced() && idx.builtByGN(r.Dir, dir):
@@ -499,13 +543,82 @@ func (idx *Index) usedOutsideSynced(dir string, fi *FileIndex, t *Target) bool {
 	return false
 }
 
-// handWrittenLibrary reports whether `l`, in the synced section of `dir`,
-// names a library defined in a BUILD.gn that bazel2gn doesn't sync, in an
-// ancestor directory of `dir` (or a sibling, if `siblings`). Such a library is
-// GN-built by definition, so per the dual-run decision its tests keep running
-// in GN. It returns the library's label.
-func (idx *Index) handWrittenLibrary(l *Literal, dir string, siblings bool) (string, bool) {
-	switch l.Attr {
+// aboveGroupUnderTest follows non-test, non-private RegionAbove `group` target
+// `root` in related sentinel directory `otherDir` across `deps` and
+// `public_deps`, returning GN-built targets in `otherDir` that it reaches.
+func (idx *Index) aboveGroupUnderTest(otherDir string, other *FileIndex, root *Target, testDir string) []string {
+	walked := map[*Target]bool{root: true}
+	gQueue := []*Target{root}
+	var out []string
+	var syncedRefs []Ref
+	for len(gQueue) > 0 {
+		g := gQueue[0]
+		gQueue = gQueue[1:]
+		for _, l := range other.Literals {
+			if l.Target != g || (l.Attr != "deps" && l.Attr != "public_deps") || l.InnerAttr != "" || IsBazelLabel(l) {
+				continue
+			}
+			for _, r2 := range idx.Resolver.Resolve(l) {
+				if r2.Dir != otherDir {
+					continue
+				}
+				subTest := r2.Tier == TierPrefix && strings.Contains(r2.RefName[len(r2.Target):], "test")
+				if r2.Side == RegionAbove {
+					t2 := other.target(r2.Target, RegionAbove)
+					if t2 == nil || isTestTarget(t2) || subTest || privateTarget(other, t2) {
+						continue
+					}
+					if isLibrary(t2) {
+						out = append(out, "//"+otherDir+":"+r2.Target)
+					} else if t2.Template == "group" && !walked[t2] {
+						walked[t2] = true
+						gQueue = append(gQueue, t2)
+					}
+				} else if r2.HitsSynced() && !subTest && (r2.Target == "" || !isTestTarget(other.target(r2.Target, RegionBelow))) {
+					syncedRefs = append(syncedRefs, r2)
+				}
+			}
+		}
+	}
+	if len(syncedRefs) > 0 && idx.builtByGNOutsideGroups(otherDir, other, walked, testDir) {
+		for _, r2 := range syncedRefs {
+			label := "//" + otherDir
+			if r2.Target != "" {
+				label += ":" + r2.Target
+			}
+			out = append(out, label)
+		}
+	}
+	return out
+}
+
+func (idx *Index) builtByGNOutsideGroups(otherDir string, other *FileIndex, walked map[*Target]bool, testDir string) bool {
+	for _, ref := range idx.Refs[otherDir] {
+		if ref.Lit.Region == RegionBelow && (ref.Lit.File == other.Path || path.Dir(ref.Lit.File) == testDir) {
+			continue
+		}
+		if ref.Lit.File == other.Path && walked[ref.Lit.Target] {
+			continue
+		}
+		if ref.HitsSynced() {
+			return true
+		}
+		if ref.Side == RegionAbove {
+			if g := other.target(ref.Target, RegionAbove); g != nil && walked[g] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// handWrittenLibraryAttr reports whether `l` (used via target attribute `attr`
+// in the synced section of `dir`) names a library defined in a BUILD.gn that
+// bazel2gn doesn't sync, in an ancestor directory of `dir` (or a sibling /
+// Zircon ulib pair, if `siblings`). Such a library is GN-built by definition,
+// so per the dual-run decision its tests keep running in GN.
+func (idx *Index) handWrittenLibraryAttr(l *Literal, attr, dir string, siblings bool) (string, bool) {
+	switch attr {
 	case "deps", "public_deps", "proc_macro_deps", "test_deps", "non_rust_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "sdk_deps", "non_sdk_deps", "source_deps":
 		if l.InnerAttr != "" {
 			return "", false
@@ -793,12 +906,20 @@ func isLibrary(t *Target) bool {
 }
 
 // relatedDir reports whether `other` is an ancestor of `dir`, or, if
-// `siblings`, a sibling of it.
+// `siblings`, a sibling of it or its Zircon `zircon/system/ulib/<name>` pair.
 func relatedDir(dir, other string, siblings bool) bool {
 	if other == "" {
 		return dir != ""
 	}
-	return strings.HasPrefix(dir, other+"/") || (siblings && path.Dir(dir) == path.Dir(other))
+	if strings.HasPrefix(dir, other+"/") || (siblings && path.Dir(dir) == path.Dir(other)) {
+		return true
+	}
+	if siblings {
+		if rest, ok := strings.CutPrefix(dir, "zircon/system/utest/"); ok && other == "zircon/system/ulib/"+rest {
+			return true
+		}
+	}
+	return false
 }
 
 // builtByGN reports whether anything in GN other than `dir`'s synced section

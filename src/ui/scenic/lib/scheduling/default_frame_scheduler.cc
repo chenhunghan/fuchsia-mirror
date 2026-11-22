@@ -9,6 +9,9 @@
 #include <lib/syslog/cpp/macros.h>
 #include <lib/trace/event.h>
 
+#include <algorithm>
+#include <tuple>
+
 #include "src/ui/scenic/lib/utils/logging.h"
 
 namespace {
@@ -51,13 +54,33 @@ void DefaultFrameScheduler::Initialize(std::shared_ptr<const VsyncTiming> vsync_
                                        UpdateSessions update_sessions,
                                        OnCpuWorkDone on_cpu_work_done,
                                        OnFramePresented on_frame_presented,
-                                       RenderScheduledFrame render_scheduled_frame) {
+                                       RenderScheduledFrame render_scheduled_frame,
+                                       NotifyExpectedPresentCallback notify_expected_present) {
   FX_CHECK(vsync_timing_ == nullptr) << "Tried to initialize twice";
   vsync_timing_ = vsync_timing;
   update_sessions_ = std::move(update_sessions);
   on_cpu_work_done_ = std::move(on_cpu_work_done);
   on_frame_presented_ = std::move(on_frame_presented);
   render_scheduled_frame_ = std::move(render_scheduled_frame);
+  notify_expected_present_ = std::move(notify_expected_present);
+}
+
+void DefaultFrameScheduler::NotifyExpectedPresent(SessionId session_id,
+                                                  zx::time expected_present_time,
+                                                  zx::duration frame_interval, bool schedule_asap) {
+  TRACE_DURATION("gfx", "DefaultFrameScheduler::NotifyExpectedPresent", "session_id", session_id,
+                 "expected_present_time", expected_present_time.get(), "frame_interval",
+                 frame_interval.get(), "schedule_asap", schedule_asap);
+  // TODO(https://fxbug.dev/582304167): Arbitrate per-session VRR cadence hints across concurrent
+  // sessions. Until multi-session aggregation is implemented, only forward hints from
+  // `schedule_asap` sessions so background or child views cannot override the primary composer's
+  // cadence.
+  if (!schedule_asap) {
+    return;
+  }
+  if (notify_expected_present_) {
+    notify_expected_present_(expected_present_time, frame_interval);
+  }
 }
 
 void DefaultFrameScheduler::SetRenderContinuously(bool render_continuously) {
@@ -83,14 +106,29 @@ std::pair<zx::time, zx::time> DefaultFrameScheduler::ComputePresentationAndWakeu
   if (schedule_asap) {
     // If the client requested a future time, we should respect it. We only want to schedule ASAP
     // if the requested time is effectively "now" (i.e. within the current vsync interval), or
-    // explicitly 0.
-    const zx::time next_vsync_time = last_vsync_time + vsync_interval;
+    // explicitly 0. Project `next_vsync_time` onto the VSync grid at or after `now` so idle gaps
+    // or VRR self-refresh periods (where `now > last_vsync_time + vsync_interval`) do not leave
+    // the target in the past.
+    const zx::time next_vsync_time = FramePredictor::ComputeNextVsyncTime(
+        last_vsync_time, vsync_interval, std::max(now, last_vsync_time + vsync_interval));
     if (requested_presentation_time <= next_vsync_time) {
-      // We target scheduling the frame as soon as possible, i.e. "now". However, kernel CPU
-      // scheduling delays might result in `new_target_presentation_time` being in the past. We pick
-      // the earlier time to avoid violating the `DCHECK` invariant in `ApplyUpdates()`.
+      // We target scheduling the frame as soon as possible, i.e. "now". Although `next_vsync_time`
+      // is projected at or after `now`, kernel CPU scheduling delays or uncalibrated VSync timings
+      // might still result in `new_target_presentation_time` being in the past. We pick the earlier
+      // time to avoid violating the `DCHECK` invariant in `ApplyUpdates()`.
       return std::make_pair(next_vsync_time, std::min(now, next_vsync_time));
     }
+
+    // For a future `schedule_asap` target (e.g., 60 fps / VRR pacing on a 120 Hz TE display),
+    // wake 1ms after the preceding VSync boundary instead of consulting `FramePredictor`.
+    // That avoids presenting early on the preceding VSync (if `FramePredictor`'s predicted
+    // duration exceeds `vsync_interval`) while maximizing render headroom for `target_vsync_time`.
+    constexpr zx::duration kPostVsyncMargin = zx::msec(1);
+    const zx::time target_vsync_time = FramePredictor::ComputeNextVsyncTime(
+        last_vsync_time, vsync_interval, requested_presentation_time);
+    const zx::time wakeup_time =
+        std::clamp(target_vsync_time - vsync_interval + kPostVsyncMargin, now, target_vsync_time);
+    return std::make_pair(target_vsync_time, wakeup_time);
   }
 
   const PredictedTimes& times =
@@ -130,9 +168,13 @@ void DefaultFrameScheduler::RequestFrame(zx::time requested_presentation_time, b
                          << "  wakeup=" << new_wakeup_time.get();
   }
 
-  // If there is no render waiting we should schedule a frame. Likewise, if newly predicted wake up
-  // time is earlier than the current one then we need to reschedule the next wake-up.
-  if (!frame_render_task_.is_pending() || new_wakeup_time < wakeup_time_) {
+  // If there is no render waiting we should schedule a frame. Likewise, if the newly predicted
+  // wake up time is earlier than the current one, or wakes at the same time (e.g. `now`) for an
+  // earlier target VSync, we need to reschedule so `next_target_presentation_time_` does not stay
+  // pointed at a later VSync and prematurely collect future updates.
+  if (!frame_render_task_.is_pending() ||
+      std::tie(new_wakeup_time, new_target_presentation_time) <
+          std::tie(wakeup_time_, next_target_presentation_time_)) {
     frame_render_task_.Cancel();
 
     next_target_presentation_time_ = new_target_presentation_time;
@@ -142,24 +184,38 @@ void DefaultFrameScheduler::RequestFrame(zx::time requested_presentation_time, b
 }
 
 void DefaultFrameScheduler::HandleNextFrameRequest() {
-  // Finds and requests a frame for the lowest `requested_presentation_time` across all sessions'
-  // next update.
-  if (!pending_present_requests_.empty()) {
-    SessionId last_session = scheduling::kInvalidSessionId;
-    zx::time next_min_time = zx::time(std::numeric_limits<zx_time_t>::max());
-    bool schedule_asap = false;
-    for (const auto& [id_pair, request] : pending_present_requests_) {
-      if (id_pair.session_id != last_session &&
-          !sessions_with_unsquashable_updates_pending_presentation_.contains(id_pair.session_id)) {
-        last_session = id_pair.session_id;
-        next_min_time = std::min(next_min_time, request.requested_presentation_time);
-        schedule_asap |= request.schedule_asap;
-      }
+  // ASAP and normal sessions map `requested_presentation_time` to `(wakeup_time, target_time)` via
+  // different rules: e.g., a normal `Present(0)` sleeps until its predicted latch point, whereas a
+  // future ASAP `Present(V5)` wakes after `V4`. Merging both into a single `min(requested_time)`
+  // and OR-ing `schedule_asap` would let a future ASAP request on one session force an immediate
+  // `now` wakeup for another session's normal request.
+  //
+  // Within ASAP sessions alone and within normal sessions alone, `(wakeup_time, target_time)` is
+  // monotonic in `requested_presentation_time`, so we only need the minimum timestamp from the head
+  // (`PresentId`-earliest) updatable request of each group.
+  SessionId last_session = scheduling::kInvalidSessionId;
+  zx::time min_asap_time = zx::time::infinite();
+  zx::time min_normal_time = zx::time::infinite();
+  for (const auto& [id_pair, request] : pending_present_requests_) {
+    // `pending_present_requests_` is sorted by `(session_id, present_id)`, so the first entry seen
+    // for each session is its next present in order. Skip sessions blocked on an in-flight
+    // unsquashable present.
+    if (id_pair.session_id != last_session &&
+        !sessions_with_unsquashable_updates_pending_presentation_.contains(id_pair.session_id)) {
+      last_session = id_pair.session_id;
+      zx::time& min_time = request.schedule_asap ? min_asap_time : min_normal_time;
+      min_time = std::min(min_time, request.requested_presentation_time);
     }
+  }
 
-    if (next_min_time.get() != std::numeric_limits<zx_time_t>::max()) {
-      RequestFrame(next_min_time, /*schedule_asap=*/schedule_asap);
-    }
+  // `RequestFrame` retains whichever call produces the earlier `(wakeup_time, target_time)`. Submit
+  // ASAP first so the common immediate (`wakeup = now`) case avoids canceling and re-posting
+  // `frame_render_task_` when a normal session is also pending.
+  if (min_asap_time < zx::time::infinite()) {
+    RequestFrame(min_asap_time, /*schedule_asap=*/true);
+  }
+  if (min_normal_time < zx::time::infinite()) {
+    RequestFrame(min_normal_time, /*schedule_asap=*/false);
   }
 }
 
@@ -462,11 +518,14 @@ void DefaultFrameScheduler::HandleFramePresented(uint64_t frame_number, zx::time
   sessions_with_unsquashable_updates_pending_presentation_.clear();
 
   if (!last_frame_is_presented_ || render_continuously_) {
-    RequestFrame(zx::time(0), /*schedule_asap=*/false);
-  } else {
-    // Schedule next frame if any unhandled presents are left.
-    HandleNextFrameRequest();
+    // `!last_frame_is_presented_` means `MaybeRenderFrame` already woke up at its scheduled time
+    // and latched updates, skipping `RenderScheduledFrame` only because the previous frame was
+    // still in flight. Render that already-latched frame immediately now that the display is free;
+    // otherwise (`render_continuously_`), pace the next empty frame via `FramePredictor`.
+    RequestFrame(zx::time(0), /*schedule_asap=*/!last_frame_is_presented_);
   }
+  // Schedule next frame if any unhandled presents are left.
+  HandleNextFrameRequest();
 }
 
 void DefaultFrameScheduler::RemoveSession(SessionId session_id) {

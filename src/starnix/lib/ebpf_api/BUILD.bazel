@@ -3,8 +3,15 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":starnix_ebpf_api_tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
 
 rustc_library(
     name = "ebpf_api",
@@ -98,4 +105,9 @@ rustc_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+fx_unittest_package(
+    name = "starnix_ebpf_api_tests",
+    unit_tests = [":ebpf_api_lib_test"],
 )

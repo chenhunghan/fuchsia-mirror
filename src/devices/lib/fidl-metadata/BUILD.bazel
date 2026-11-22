@@ -24,9 +24,7 @@ fx_cc_library(
     ],
     # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
     # rather than builders.
-    copts = [
-        "-DFIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES",
-    ],  # @bazel2gn:raw_overwrite:[ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
+    build_flags = ["//build/cpp:fidl-wire-deprecated-mutable-tables"],
     implementation_deps = [
         "//sdk/fidl/fuchsia.hardware.adcimpl:fuchsia.hardware.adcimpl_cpp",
         "//sdk/fidl/fuchsia.hardware.i2c.businfo:fuchsia.hardware.i2c.businfo_cpp",

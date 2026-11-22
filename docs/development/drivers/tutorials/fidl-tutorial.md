@@ -13,7 +13,7 @@ concepts:
 For a complete working example in the Fuchsia source tree, see the
 [Zircon transport example](/examples/drivers/transport/zircon/v2/).
 
-## FIDL Protocol Definition
+## FIDL protocol definition
 
 The following snippets utilize this FIDL definition:
 
@@ -37,13 +37,13 @@ service EchoService {
 };
 ```
 
-## Parent Driver (The Server)
+## Parent driver (the server) {:#parent-driver-the-server}
 
 The parent driver implements the `fidl.examples.echo/Echo` protocol, serves
 `fidl.examples.echo.EchoService` in its outgoing directory, and offers that
 service when adding a child node.
 
-### Driver Manifest
+### Driver manifest
 
 In the parent driver's manifest (`.dml`), declare and expose the FIDL service
 capability:
@@ -60,7 +60,7 @@ expose: [
 ],
 ```
 
-### Server Code
+### Server code
 
 ```cpp
 #include <fidl/fidl.examples.echo/cpp/wire.h>
@@ -124,9 +124,9 @@ class ParentDriver : public fdf::DriverBase2,
 FUCHSIA_DRIVER_EXPORT2(ParentDriver);
 ```
 
-## Child Driver (The Client)
+## Child driver (the client)
 
-### Driver Manifest
+### Driver manifest
 
 In the child driver's manifest (`.dml`), declare that the driver uses the
 service:
@@ -140,7 +140,7 @@ use: [
 Note that the child driver's bind rules are automatically generated from its
 DML.
 
-### Client Code
+### Client code
 
 The following code snippet shows how a child driver that has bound to the parent
 node connects to and calls the `Echo` protocol:

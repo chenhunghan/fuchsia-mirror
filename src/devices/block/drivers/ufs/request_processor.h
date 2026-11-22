@@ -16,6 +16,13 @@
 
 namespace ufs {
 
+// Timeout for admin (slot 31), query, NOP, and task-management commands: callers waiting on
+// internal control commands during init, discovery, and power transitions receive ZX_ERR_TIMED_OUT
+// when it elapses, while slot 31 stays quarantined in SlotState::kTimeout until UTRLDBR[31] clears
+// or HCE = 0 stops DMA. For data-path I/O slots (0..30) it is the periodic stall-logging interval:
+// I/O slots are never aborted on elapsed time because Fxfs cannot recover from an I/O error and
+// unpinning before UTRLDBR clears risks late DMA into freed pages, so wedged requests are logged
+// every kCommandTimeout and left to the storage and userpager watchdogs (on eng/userdebug builds).
 constexpr zx::duration kCommandTimeout = zx::sec(10);
 
 // Maximum tight spin-wait retries when waiting for descriptor OCS update after doorbell clearance.
@@ -68,6 +75,7 @@ class RequestProcessor {
   // admin UPIUs. Returns ZX_ERR_TIMED_OUT if the allocated slots do not drain within
   // |drain_timeout|; allocation stays blocked in that case as well.
   zx::result<> BlockSlotAllocation(zx::duration drain_timeout) TA_EXCL(slot_lock_);
+  void CloseSlotAllocationGate() TA_EXCL(slot_lock_);
   void UnblockSlotAllocation() TA_EXCL(slot_lock_);
   bool HasAllocatedSlots() const TA_EXCL(slot_lock_);
 
@@ -115,6 +123,8 @@ class RequestProcessor {
   zx::duration timeout_ = kCommandTimeout;
 
   std::atomic<bool> disable_completion_{false};
+  std::atomic<size_t> quarantined_pmt_count_{0};
+  std::atomic<size_t> quarantined_page_count_{0};
 
  private:
   virtual std::optional<uint8_t> GetAdminCommandSlotNumber() const { return std::nullopt; }

@@ -166,7 +166,12 @@ impl<'a, D: Driver> DriverUnderTest<'a, D> {
     }
 
     /// Returns a reference to the driver instance.
-    pub fn get_driver(&self) -> Option<&'_ D> {
+    ///
+    /// The driver runs on its own thread, so this requires `D: Sync`.
+    pub fn get_driver(&self) -> Option<&'_ D>
+    where
+        D: Sync,
+    {
         unsafe {
             // SAFETY: We know that the driver_token is valid and that the driver is of type T.
             get_driver_from_token(self.token)

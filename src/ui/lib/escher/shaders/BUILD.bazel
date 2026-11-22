@@ -1,0 +1,165 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_map")
+load(
+    "//build/bazel/rules/packages:resources.bzl",
+    "fuchsia_package_resource_group",
+    "resource_group",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Copies shaders needed for escher linux tests to a specific test data
+# directory near the test binary. bazel2gn does not translate
+# host_test_data_map(), so the GN copy stays above the sentinel in BUILD.gn.
+# @bazel2gn:skip
+host_test_data_map(
+    name = "host_shader_data",
+    testonly = True,
+    files_map = {
+        # Flatland renderer.
+        "test_data/escher/shaders/flatland/flat_main.frag": "flatland/flat_main.frag",
+        "test_data/escher/shaders/flatland/flat_main.vert": "flatland/flat_main.vert",
+
+        # Flatland Color Correction.
+        "test_data/escher/shaders/flatland/flat_color_correction.frag": "flatland/flat_color_correction.frag",
+        "test_data/escher/shaders/flatland/flat_color_correction.vert": "flatland/flat_color_correction.vert",
+
+        # Paper renderer.
+        "test_data/escher/shaders/model_renderer/main.vert": "model_renderer/main.vert",
+        "test_data/escher/shaders/paper/common/use.glsl": "paper/common/use.glsl",
+        "test_data/escher/shaders/paper/frag/main_ambient_light.frag": "paper/frag/main_ambient_light.frag",
+        "test_data/escher/shaders/paper/frag/main_point_light.frag": "paper/frag/main_point_light.frag",
+        "test_data/escher/shaders/paper/vert/main_shadow_volume_extrude.vert": "paper/vert/main_shadow_volume_extrude.vert",
+
+        # Only used by Escher tests.
+        "test_data/escher/shaders/test/main.frag": "test/main.frag",
+        "test_data/escher/shaders/test/shadow_map_generation.frag": "test/shadow_map_generation.frag",
+        "test_data/escher/shaders/test/shadow_map_lighting.frag": "test/shadow_map_lighting.frag",
+
+        # Pre-compiled SPIR-V files.
+        "test_data/escher/shaders/shaders_flatland_flat_main_frag14695981039346656037.spirv": "spirv/shaders_flatland_flat_main_frag14695981039346656037.spirv",
+        "test_data/escher/shaders/shaders_flatland_flat_main_vert14695981039346656037.spirv": "spirv/shaders_flatland_flat_main_vert14695981039346656037.spirv",
+        "test_data/escher/shaders/shaders_flatland_flat_color_correction_frag14695981039346656037.spirv": "spirv/shaders_flatland_flat_color_correction_frag14695981039346656037.spirv",
+        "test_data/escher/shaders/shaders_flatland_flat_color_correction_vert14695981039346656037.spirv": "spirv/shaders_flatland_flat_color_correction_vert14695981039346656037.spirv",
+        "test_data/escher/shaders/shaders_model_renderer_main_vert15064700897732225279.spirv": "spirv/shaders_model_renderer_main_vert15064700897732225279.spirv",
+        "test_data/escher/shaders/shaders_model_renderer_main_vert4304586084079301274.spirv": "spirv/shaders_model_renderer_main_vert4304586084079301274.spirv",
+        "test_data/escher/shaders/shaders_model_renderer_main_vert7456302057085141907.spirv": "spirv/shaders_model_renderer_main_vert7456302057085141907.spirv",
+        "test_data/escher/shaders/shaders_paper_frag_main_ambient_light_frag4304586084079301274.spirv": "spirv/shaders_paper_frag_main_ambient_light_frag4304586084079301274.spirv",
+        "test_data/escher/shaders/shaders_paper_frag_main_ambient_light_frag7456302057085141907.spirv": "spirv/shaders_paper_frag_main_ambient_light_frag7456302057085141907.spirv",
+        "test_data/escher/shaders/shaders_paper_frag_main_ambient_light_frag9217636760892358205.spirv": "spirv/shaders_paper_frag_main_ambient_light_frag9217636760892358205.spirv",
+        "test_data/escher/shaders/shaders_paper_frag_main_point_light_frag15064700897732225279.spirv": "spirv/shaders_paper_frag_main_point_light_frag15064700897732225279.spirv",
+        "test_data/escher/shaders/shaders_paper_vert_main_shadow_volume_extrude_vert15276133142244279294.spirv": "spirv/shaders_paper_vert_main_shadow_volume_extrude_vert15276133142244279294.spirv",
+        "test_data/escher/shaders/shaders_paper_vert_main_shadow_volume_extrude_vert9217636760892358205.spirv": "spirv/shaders_paper_vert_main_shadow_volume_extrude_vert9217636760892358205.spirv",
+        "test_data/escher/shaders/shaders_model_renderer_main_vert12890958529260787213.spirv": "spirv/shaders_model_renderer_main_vert12890958529260787213.spirv",
+        "test_data/escher/shaders/shaders_test_main_frag12890958529260787213.spirv": "spirv/shaders_test_main_frag12890958529260787213.spirv",
+        "test_data/escher/shaders/shaders_test_main_frag4304586084079301274.spirv": "spirv/shaders_test_main_frag4304586084079301274.spirv",
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/ui/lib/escher:__subpackages__"],
+)
+
+resource_group(
+    name = "escher_shaders_resources",
+    files = [
+        # Flatland renderer.
+        {
+            "source": "flatland/flat_main.frag",
+            "dest": "data/shaders/flatland/flat_main.frag",
+        },
+        {
+            "source": "flatland/flat_main.vert",
+            "dest": "data/shaders/flatland/flat_main.vert",
+        },
+
+        # Flatland Color Correction.
+        {
+            "source": "flatland/flat_color_correction.frag",
+            "dest": "data/shaders/flatland/flat_color_correction.frag",
+        },
+        {
+            "source": "flatland/flat_color_correction.vert",
+            "dest": "data/shaders/flatland/flat_color_correction.vert",
+        },
+
+        # Paper renderer.
+        {
+            "source": "model_renderer/main.vert",
+            "dest": "data/shaders/model_renderer/main.vert",
+        },
+        {
+            "source": "paper/common/use.glsl",
+            "dest": "data/shaders/paper/common/use.glsl",
+        },
+        {
+            "source": "paper/frag/main_ambient_light.frag",
+            "dest": "data/shaders/paper/frag/main_ambient_light.frag",
+        },
+        {
+            "source": "paper/frag/main_point_light.frag",
+            "dest": "data/shaders/paper/frag/main_point_light.frag",
+        },
+        {
+            "source": "paper/vert/main_shadow_volume_extrude.vert",
+            "dest": "data/shaders/paper/vert/main_shadow_volume_extrude.vert",
+        },
+
+        # Only used by Escher tests.
+        {
+            "source": "test/main.frag",
+            "dest": "data/shaders/test/main.frag",
+        },
+        {
+            "source": "test/shadow_map_generation.frag",
+            "dest": "data/shaders/test/shadow_map_generation.frag",
+        },
+        {
+            "source": "test/shadow_map_lighting.frag",
+            "dest": "data/shaders/test/shadow_map_lighting.frag",
+        },
+    ],
+    visibility = [
+        "//src/ui/lib/escher:__pkg__",
+        "//src/ui/scenic:__pkg__",
+        "//src/ui/tests/scenic-stress-tests:__pkg__",
+    ],
+)
+
+fuchsia_package_resource_group(
+    name = "escher_shaders_spirv_resources",
+    srcs = [
+        # Flatland renderer.
+        "spirv/shaders_flatland_flat_main_frag14695981039346656037.spirv",
+        "spirv/shaders_flatland_flat_main_vert14695981039346656037.spirv",
+
+        # Flatland Color Correction
+        "spirv/shaders_flatland_flat_color_correction_frag14695981039346656037.spirv",
+        "spirv/shaders_flatland_flat_color_correction_vert14695981039346656037.spirv",
+
+        # Paper renderer.
+        "spirv/shaders_model_renderer_main_vert15064700897732225279.spirv",
+        "spirv/shaders_model_renderer_main_vert4304586084079301274.spirv",
+        "spirv/shaders_model_renderer_main_vert7456302057085141907.spirv",
+        "spirv/shaders_paper_frag_main_ambient_light_frag4304586084079301274.spirv",
+        "spirv/shaders_paper_frag_main_ambient_light_frag7456302057085141907.spirv",
+        "spirv/shaders_paper_frag_main_ambient_light_frag9217636760892358205.spirv",
+        "spirv/shaders_paper_frag_main_point_light_frag15064700897732225279.spirv",
+        "spirv/shaders_paper_vert_main_shadow_volume_extrude_vert15276133142244279294.spirv",
+        "spirv/shaders_paper_vert_main_shadow_volume_extrude_vert9217636760892358205.spirv",
+
+        # Tests
+        "spirv/shaders_model_renderer_main_vert12890958529260787213.spirv",
+        "spirv/shaders_test_main_frag12890958529260787213.spirv",
+        "spirv/shaders_test_main_frag4304586084079301274.spirv",
+    ],
+    basename_only = True,
+    dest = "data/shaders",
+    visibility = [
+        "//src/ui/lib/escher:__pkg__",
+        "//src/ui/scenic:__pkg__",
+        "//src/ui/tests/scenic-stress-tests:__pkg__",
+    ],
+)

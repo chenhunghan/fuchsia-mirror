@@ -38,8 +38,8 @@ rustc_library("router_error") {
     "//tools/lib/cm_fidl_analyzer/*",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust_common",
     "//sdk/rust/zx-status",
     "//src/sys/lib/moniker",
     "//third_party/rust_crates:thiserror",

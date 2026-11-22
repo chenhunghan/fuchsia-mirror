@@ -2,17 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: `fdomain-example-component` and `fdomain-example` remain in BUILD.gn
-# above the sentinel because `fdomain-example-bin` depends on
-# `//src/storage/lib/vfs/rust:vfs` (`rustc_dylib("vfs_dylib")`). `@rules_rust`
-# puts both `src/storage/lib/vfs/rust/libvfs-<hash>.so` and its `_solib_*`
-# symlink into `default_runfiles` when a `rustc_test` lists `vfs` in `deps`,
-# causing `fx_packaged_binary` + `fx_package` to fail with:
-# "Multiple files are being installed into the package at lib/libvfs-<hash>.so".
+test_suite(
+    name = "tests",
+    tests = [":fdomain-example_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
 rustc_test(
     name = "fdomain-example-bin",
     srcs = [
@@ -20,6 +30,7 @@ rustc_test(
         "src/transport.rs",
     ],
     edition = "2024",
+    tags = ["manual"],
     visibility = ["//visibility:private"],
     deps = [
         "//examples/fidl/fuchsia.examples:fuchsia.examples_rust",
@@ -35,4 +46,40 @@ rustc_test(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "fdomain-example-bin_packaged",
+    testonly = True,
+    binary = ":fdomain-example-bin",
+    binary_name = "fdomain_example_bin",
+)
+
+fx_component_manifest(
+    name = "fdomain-example-manifest",
+    testonly = True,
+    component_name = "fdomain-example",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/fdomain-example.cml",
+)
+
+fx_test_component(
+    name = "fdomain-example-component",
+    compiled_manifest = ":fdomain-example-manifest",
+    deps = [":fdomain-example-bin_packaged"],
+)
+
+fx_package(
+    name = "fdomain-example",
+    testonly = True,
+    test_components = [":fdomain-example-component"],
+    visibility = ["//src/lib/fdomain:__pkg__"],
+)
+
+fx_test(
+    name = "fdomain-example_test",
+    package = ":fdomain-example",
 )

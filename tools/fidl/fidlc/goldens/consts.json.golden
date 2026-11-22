@@ -128,7 +128,7 @@
         "BitsType"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 31,
         "column": 6,
         "length": 8
@@ -152,7 +152,7 @@
         {
           "name": "VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
             "line": 32,
             "column": 5,
             "length": 5
@@ -172,7 +172,7 @@
         {
           "name": "true",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
             "line": 33,
             "column": 5,
             "length": 4
@@ -197,7 +197,7 @@
     {
       "name": "test.consts/ANSWER",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 7,
         "column": 7,
         "length": 6
@@ -230,7 +230,7 @@
     {
       "name": "test.consts/ANSWER_IN_BINARY",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 9,
         "column": 7,
         "length": 16
@@ -263,7 +263,7 @@
     {
       "name": "test.consts/ANSWER_NARROWED",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 8,
         "column": 7,
         "length": 15
@@ -292,7 +292,7 @@
     {
       "name": "test.consts/CONVERSION_FACTOR",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 15,
         "column": 7,
         "length": 17
@@ -325,7 +325,7 @@
     {
       "name": "test.consts/DIAMOND",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 11,
         "column": 7,
         "length": 7
@@ -358,7 +358,7 @@
     {
       "name": "test.consts/ENABLED_FLAG",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 5,
         "column": 7,
         "length": 12
@@ -391,7 +391,7 @@
     {
       "name": "test.consts/FUCHSIA",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 12,
         "column": 7,
         "length": 7
@@ -424,7 +424,7 @@
     {
       "name": "test.consts/MIN_TEMP",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 14,
         "column": 7,
         "length": 8
@@ -457,7 +457,7 @@
     {
       "name": "test.consts/OFFSET",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 6,
         "column": 7,
         "length": 6
@@ -490,7 +490,7 @@
     {
       "name": "test.consts/POPULATION_USA_2018",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 10,
         "column": 7,
         "length": 19
@@ -523,7 +523,7 @@
     {
       "name": "test.consts/USERNAME",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 13,
         "column": 7,
         "length": 8
@@ -556,7 +556,7 @@
     {
       "name": "test.consts/ZX_CONST",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 19,
         "column": 7,
         "length": 8
@@ -585,7 +585,7 @@
     {
       "name": "test.consts/ZX_OBJ_VAL",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 17,
         "column": 7,
         "length": 10
@@ -615,7 +615,7 @@
     {
       "name": "test.consts/ZX_RIGHTS_VAL",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 18,
         "column": 7,
         "length": 13
@@ -645,7 +645,7 @@
     {
       "name": "test.consts/bitsPrimitiveTrue",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 39,
         "column": 7,
         "length": 17
@@ -674,7 +674,7 @@
     {
       "name": "test.consts/bitsPrimitiveVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 36,
         "column": 7,
         "length": 16
@@ -703,7 +703,7 @@
     {
       "name": "test.consts/bitsPrimitiveValNarrowed",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 37,
         "column": 7,
         "length": 24
@@ -732,7 +732,7 @@
     {
       "name": "test.consts/bitsTrue",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 38,
         "column": 7,
         "length": 8
@@ -762,7 +762,7 @@
     {
       "name": "test.consts/bitsVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 35,
         "column": 7,
         "length": 7
@@ -792,7 +792,7 @@
     {
       "name": "test.consts/enumPrimitiveTrue",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 29,
         "column": 7,
         "length": 17
@@ -821,7 +821,7 @@
     {
       "name": "test.consts/enumPrimitiveVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 26,
         "column": 7,
         "length": 16
@@ -850,7 +850,7 @@
     {
       "name": "test.consts/enumPrimitiveValNarrowed",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 27,
         "column": 7,
         "length": 24
@@ -879,7 +879,7 @@
     {
       "name": "test.consts/enumTrue",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 28,
         "column": 7,
         "length": 8
@@ -909,7 +909,7 @@
     {
       "name": "test.consts/enumVal",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 25,
         "column": 7,
         "length": 7
@@ -944,7 +944,7 @@
         "EnumType"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
         "line": 21,
         "column": 6,
         "length": 8
@@ -955,7 +955,7 @@
         {
           "name": "VALUE",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
             "line": 22,
             "column": 5,
             "length": 5
@@ -975,7 +975,7 @@
         {
           "name": "true",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/consts.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/consts.test.fidl",
             "line": 23,
             "column": 5,
             "length": 4

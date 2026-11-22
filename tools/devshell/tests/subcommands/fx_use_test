@@ -127,4 +127,18 @@ WARNING: If you want to use \"foo\", please unset the \$FUCHSIA_NODENAME and \$F
     BT_EXPECT_FILE_CONTAINS "${device_file}" "foo"
 }
 
+# Check that listing build directories skips persistent .build_lock files.
+TEST_fx-use-lists-build-dirs-ignoring-build-lock() {
+    touch "${FUCHSIA_DIR}/out/default.build_lock"
+    touch "${FUCHSIA_DIR}/out/secondary.build_lock"
+    local out="${BT_TEMP_DIR}/_fx_use_stdout"
+
+    # Non-TUI `fx use` without arguments prints available build dirs and exits 1.
+    BT_EXPECT_FAIL "${fx}" use >"${out}" 2>&1
+
+    BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "out/default (current)"
+    BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "out/secondary"
+    BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${out}" ".build_lock"
+}
+
 BT_RUN_TESTS "$@"

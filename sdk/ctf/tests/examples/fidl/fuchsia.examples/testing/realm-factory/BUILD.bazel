@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "ctf_example_realm_factory",
+    edition = "2024",
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_rust",
+        "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/fidl:test.example_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "ctf_example_realm_factory",
+)
+
+fx_component_manifest(
+    name = "echo-realm-factory_manifest",
+    testonly = True,
+    component_name = "echo-realm-factory",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/testing/realm_proxy:service/meta/realm_proxy.shard",
+    ],
+    manifest = "meta/realm-factory.cml",
+)
+
+fx_component(
+    name = "echo-realm-factory-component",
+    testonly = True,
+    compiled_manifest = ":echo-realm-factory_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "echo-realm-factory",
+    testonly = True,
+    components = [
+        ":echo-realm-factory-component",
+        "//examples/fidl/cpp/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    visibility = ["//sdk/ctf/tests/examples/fidl/fuchsia.examples:__subpackages__"],
+)

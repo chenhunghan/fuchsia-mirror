@@ -361,6 +361,7 @@ mod tests {
     use fidl_fuchsia_power_battery as fbattery;
     use fuchsia_async as fasync;
     use futures::StreamExt;
+    use std::task::Poll;
 
     const MB: u64 = 1024 * 1024;
 
@@ -979,7 +980,8 @@ mod tests {
             }
         });
 
-        let mut collector = ScenicCollector::with_archive_accessor(Some(proxy));
+        let mut collector = ScenicCollector::with_archive_accessor(Some(proxy))
+            .with_timeout(zx::MonotonicDuration::from_seconds(30));
         let initial = collector.collect_at(mono(1_000_000_000)).await;
         assert_eq!(initial, ScenicMetrics { frame_count: Some(100), fps: None });
 
@@ -989,6 +991,112 @@ mod tests {
         // 63 frames over 1.050s -> 60 FPS (not 63 FPS).
         let next = collector.collect_at(mono(2_050_000_000)).await;
         assert_eq!(next, ScenicMetrics { frame_count: Some(163), fps: Some(60) });
+    }
+
+    #[fuchsia::test]
+    fn test_scenic_collector_with_timeout() {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(1_000_000_000));
+
+        let disconnected =
+            ScenicCollector::disconnected().with_timeout(zx::MonotonicDuration::from_seconds(5));
+        assert!(!disconnected.is_enabled());
+
+        let (proxy, mut stream) = create_proxy_and_stream::<fdiagnostics::ArchiveAccessorMarker>();
+        let _server = fasync::Task::local(async move {
+            let mut snapshot_idx = 0_usize;
+            while let Some(Ok(request)) = stream.next().await {
+                match request {
+                    fdiagnostics::ArchiveAccessorRequest::StreamDiagnostics {
+                        stream_parameters,
+                        result_stream,
+                        ..
+                    } => {
+                        assert_eq!(
+                            stream_parameters
+                                .performance_configuration
+                                .and_then(|config| config.batch_retrieval_timeout_seconds),
+                            Some(5)
+                        );
+                        snapshot_idx += 1;
+                        let current_idx = snapshot_idx;
+                        let mut batch_stream = result_stream.into_stream();
+                        let mut sent = false;
+                        while let Some(Ok(batch_req)) = batch_stream.next().await {
+                            match batch_req {
+                                fdiagnostics::BatchIteratorRequest::WaitForReady { responder } => {
+                                    let _ = responder.send();
+                                }
+                                fdiagnostics::BatchIteratorRequest::GetNext { responder } => {
+                                    if current_idx == 1 {
+                                        if sent {
+                                            let _ = responder.send(Ok(Vec::new()));
+                                            continue;
+                                        }
+                                        sent = true;
+                                        // Delay 2s (8x past the 250ms default timeout).
+                                        fasync::Timer::new(fasync::MonotonicInstant::after(
+                                            zx::MonotonicDuration::from_seconds(2),
+                                        ))
+                                        .await;
+                                        let json = "[{\"data_source\":\"Inspect\",\"metadata\":{\"component_url\":\"fuchsia-pkg://fuchsia.com/scenic#meta/scenic.cm\",\"filename\":\"fuchsia.inspect.Tree\",\"timestamp\":0},\"moniker\":\"core/ui/scenic\",\"payload\":{\"root\":{\"scenic\":{\"FrameScheduler\":{\"most_recent_frame_number\":100}}}},\"version\":1}]";
+                                        let size = json.len() as u64;
+                                        let vmo =
+                                            zx::Vmo::create(size).expect("create inspect vmo");
+                                        vmo.write(json.as_bytes(), 0).expect("write inspect vmo");
+                                        let buffer = fidl_fuchsia_mem::Buffer { vmo, size };
+                                        let _ = responder.send(Ok(vec![
+                                            fdiagnostics::FormattedContent::Json(buffer),
+                                        ]));
+                                    } else {
+                                        let _parked = responder;
+                                        futures::future::pending::<()>().await;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    fdiagnostics::ArchiveAccessorRequest::WaitForReady { responder, .. } => {
+                        let _ = responder.send();
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let mut collector = ScenicCollector::with_archive_accessor(Some(proxy))
+            .with_timeout(zx::MonotonicDuration::from_seconds(5));
+
+        {
+            let mut slow_fut = std::pin::pin!(collector.collect_at(mono(1_000_000_000)));
+            assert!(exec.run_until_stalled(&mut slow_fut).is_pending());
+
+            // Past the 250ms default timeout (t = 2.0s), the custom 5s timeout keeps waiting.
+            exec.set_fake_time(fasync::MonotonicInstant::from_nanos(2_000_000_000));
+            assert!(exec.run_until_stalled(&mut slow_fut).is_pending());
+
+            // At t = 3.0s (+2s server delay), the delayed snapshot completes instead of flaking.
+            exec.set_fake_time(fasync::MonotonicInstant::from_nanos(3_000_000_000));
+            assert_eq!(
+                exec.run_until_stalled(&mut slow_fut),
+                Poll::Ready(ScenicMetrics { frame_count: Some(100), fps: None })
+            );
+        }
+
+        {
+            let mut hung_fut = std::pin::pin!(collector.collect_at(mono(4_000_000_000)));
+            assert!(exec.run_until_stalled(&mut hung_fut).is_pending());
+
+            exec.set_fake_time(fasync::MonotonicInstant::from_nanos(7_900_000_000));
+            assert!(exec.run_until_stalled(&mut hung_fut).is_pending());
+
+            exec.set_fake_time(fasync::MonotonicInstant::from_nanos(8_000_000_000));
+            assert_eq!(
+                exec.run_until_stalled(&mut hung_fut),
+                Poll::Ready(ScenicMetrics::default())
+            );
+        }
     }
 
     #[fuchsia::test]

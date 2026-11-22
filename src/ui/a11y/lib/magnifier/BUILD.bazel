@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "magnifier",
+    srcs = [
+        "magnifier_2.cc",
+        "magnifier_util.cc",
+    ],
+    hdrs = [
+        "magnifier_2.h",
+        "magnifier_util.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/async-default",
+        "//sdk/lib/syslog/cpp",
+        "//src/ui/a11y/lib/gesture_manager:util",
+        "//zircon/system/ulib/fbl",
+    ],
+    visibility = [
+        "//src/ui/a11y/lib:__subpackages__",
+        "//src/ui/a11y/testing:__pkg__",
+    ],
+    deps = [
+        "//:glm",
+        "//sdk/lib/async:async-cpp",
+        "//src/lib/callback",
+        "//src/lib/fxl",
+        "//src/ui/a11y/lib/gesture_manager",
+        "//src/ui/a11y/lib/gesture_manager/arena",
+        "//src/ui/a11y/lib/gesture_manager/gesture_util",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

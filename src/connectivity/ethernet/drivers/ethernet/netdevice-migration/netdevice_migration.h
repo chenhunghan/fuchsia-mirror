@@ -12,6 +12,7 @@
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <zircon/system/public/zircon/compiler.h>
 
 #include <queue>
@@ -25,7 +26,6 @@
 
 #include "src/connectivity/network/drivers/network-device/device/public/locks.h"
 #include "src/devices/lib/dev-operation/include/lib/operation/ethernet.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace netdevice_migration {
 

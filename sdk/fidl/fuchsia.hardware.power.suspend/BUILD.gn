@@ -32,7 +32,6 @@ fidl("fuchsia.hardware.power.suspend") {
   sdk_area = "Drivers"
   sdk_category = "partner"
   contains_drivers = true
-  enable_hlcpp = true
   stable = false
   visibility = [ "*" ]
   public_deps = [ "//zircon/vdso/zx" ]

@@ -513,7 +513,7 @@ impl Scanner {
             name,
             parent: scanned_node.parent,
             children: scanned_node.children.clone(),
-            properties: scanned_node.properties.clone(),
+            properties: scanned_node.properties,
         };
         nodes_in_tree.push((this_node, id));
         Ok((nodes_in_tree, properties_under))

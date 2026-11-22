@@ -104,7 +104,7 @@ impl SuiteServer for TestServer {
         let test_data_parent = self.output_dir_parent_path.clone();
         let test_url = test_url.to_owned();
         let (fut, test_suite_abortable_handle) =
-            abortable(self.serve_test_suite(stream, weak_component.clone()));
+            abortable(self.serve_test_suite(stream, weak_component));
 
         fasync::Task::local(async move {
             match fut.await {

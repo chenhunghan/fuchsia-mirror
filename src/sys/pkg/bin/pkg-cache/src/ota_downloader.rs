@@ -61,15 +61,16 @@ async fn fetch_blob(
 ) -> Result<u64, Error> {
     blob_fetcher
         .push(
+            blob_fetcher.new_priority(),
             blob_id,
-            crate::blob_fetcher::QueueContext::new(
+            crate::blob_fetcher::FetchParams::new(
                 base_url.parse().map_err(Error::InvalidBaseUrl)?,
                 match overwrite_existing {
                     true => crate::blob_fetcher::ConflictBehavior::Overwrite,
                     false => crate::blob_fetcher::ConflictBehavior::AskBlobfs,
                 },
-                ftrace::Id::new(),
             ),
+            ftrace::Id::new(),
         )
         .await
         .map_err(Error::BlobPush)?
@@ -83,7 +84,7 @@ pub(crate) enum Error {
     InvalidBaseUrl(#[source] http::uri::InvalidUri),
 
     #[error("pushing a blob onto the fetch queue")]
-    BlobPush(#[source] work_queue::Closed),
+    BlobPush(#[source] crate::blob_fetcher::Cancelled),
 
     #[error("forwarding to blob fetcher")]
     BlobFetch(#[source] Arc<crate::blob_fetcher::FetchError>),

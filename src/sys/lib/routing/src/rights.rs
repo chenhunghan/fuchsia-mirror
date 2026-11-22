@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 use crate::error::{RightsRoutingError, RoutingError};
-use fidl_fuchsia_component_runtime::RouteRequest;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
+use fidl_fuchsia_io_common as fio;
 use moniker::ExtendedMoniker;
 use router_error::RouterError;
 #[cfg(feature = "serde")]

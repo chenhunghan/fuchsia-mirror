@@ -300,12 +300,14 @@ impl JobPolicyAllowlists {
 #[serde(deny_unknown_fields)]
 pub struct ChildPolicyAllowlists {
     reboot_on_terminate: Option<Vec<String>>,
+    eager_startup: Option<Vec<String>>,
 }
 
 impl ChildPolicyAllowlists {
     fn merge(self, another: ChildPolicyAllowlists) -> Result<Self, Error> {
         return Ok(ChildPolicyAllowlists {
             reboot_on_terminate: merge_vec!(self, another, reboot_on_terminate),
+            eager_startup: merge_vec!(self, another, eager_startup),
         });
     }
 }
@@ -588,6 +590,7 @@ fn translate_child_policy(
 ) -> component_internal::ChildPolicyAllowlists {
     component_internal::ChildPolicyAllowlists {
         reboot_on_terminate: child_policy.reboot_on_terminate,
+        eager_startup: child_policy.eager_startup,
         ..Default::default()
     }
 }
@@ -940,6 +943,7 @@ mod tests {
                 ],
                 child_policy: {
                     reboot_on_terminate: [ "/buz" ],
+                    eager_startup: [ "/core/eager_daemon" ],
                 },
             },
             namespace_capabilities: [
@@ -1050,6 +1054,7 @@ mod tests {
                     ),
                     child_policy: Some(component_internal::ChildPolicyAllowlists {
                         reboot_on_terminate: Some(vec!["/buz".to_string()]),
+                        eager_startup: Some(vec!["/core/eager_daemon".to_string()]),
                         ..Default::default()
                     }),
                     ..Default::default()

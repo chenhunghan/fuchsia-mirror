@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = ["include/fuchsia-tcti.h"],
+)
+
+fx_cc_library(
+    name = "agent-static",
+    srcs = ["src/fuchsia-tcti-agent.cc"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.tpm:fuchsia.tpm_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    deps = [":headers"],
+    alwayslink = True,
+)
+
+# TCG TSS 2.0 Fuchsia TCTI Bridge for fuchsia.tpm.Command. This is the default
+# library that should be used by most applications.
+fx_cc_shared_library(
+    name = "agent",
+    # GN dependents include the headers through their dependency on the shared library.
+    gn_public_deps = [":headers"],
+    visibility = ["//third_party/tpm2-tss:__pkg__"],
+    deps = [":agent-static"],
+)
+
+# TCG TSS 2.0 Fuchsia TCTI Bridge for fuchsia.tpm.TpmDevice. This is a
+# specalist library implementation that should be used by implementors of
+# fuchsia.tpm.Command.
+fx_cc_library(
+    name = "device",
+    srcs = ["src/fuchsia-tcti-device.cc"],
+    hdrs = ["include/fuchsia-tcti.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.tpm:fuchsia.tpm_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    visibility = ["//third_party/tpm2-tss:__pkg__"],
+)

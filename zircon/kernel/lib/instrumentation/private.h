@@ -7,11 +7,13 @@
 #ifndef ZIRCON_KERNEL_LIB_INSTRUMENTATION_PRIVATE_H_
 #define ZIRCON_KERNEL_LIB_INSTRUMENTATION_PRIVATE_H_
 
+#include <lib/llvm-profdata/llvm-profdata.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
+#include <kernel/ffi.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
 #include <ktl/type_traits.h>
@@ -33,9 +35,6 @@ struct InstrumentationDataVmo {
   Handle* handle = nullptr;
 };
 
-// profile.cc
-InstrumentationDataVmo LlvmProfdataVmo();
-
 // sancov_ffi.cc
 InstrumentationDataVmo SancovGetPcVmo();
 InstrumentationDataVmo SancovGetCountsVmo();
@@ -54,9 +53,22 @@ struct InstrumentationDataVmoFfi {
   Handle* handle;
 };
 
-void cpp_llvm_profdata_vmo(InstrumentationDataVmoFfi* out);
-void cpp_sancov_get_pc_vmo(InstrumentationDataVmoFfi* out);
-void cpp_sancov_get_counts_vmo(InstrumentationDataVmoFfi* out);
+void cpp_sancov_get_pc_vmo(ffi::Uninitialized<InstrumentationDataVmoFfi>* out);
+void cpp_sancov_get_counts_vmo(ffi::Uninitialized<InstrumentationDataVmoFfi>* out);
+
+// profile_ffi.cc
+void cpp_llvm_profdata_new(ffi::Uninitialized<LlvmProfdata>* out);
+void cpp_llvm_profdata_init(LlvmProfdata* profdata, const uint8_t* build_id, size_t build_id_len);
+size_t cpp_llvm_profdata_size_bytes(const LlvmProfdata* profdata);
+void cpp_llvm_profdata_write_fixed_data(LlvmProfdata* profdata, uint8_t* data, size_t data_len,
+                                        ffi::Uninitialized<LlvmProfdata::LiveData>* out);
+void cpp_llvm_profdata_bounds(const LlvmProfdata* profdata,
+                              ffi::Uninitialized<LlvmProfdata::LiveDataBounds>* out);
+void cpp_llvm_profdata_live_data_for_bounds(const LlvmProfdata* profdata, uint8_t* bounds_data,
+                                            size_t bounds_size,
+                                            ffi::Uninitialized<LlvmProfdata::LiveData>* out);
+void cpp_llvm_profdata_copy_live_data(LlvmProfdata* profdata, const LlvmProfdata::LiveData* data);
+void cpp_llvm_profdata_use_live_data(const LlvmProfdata::LiveData* data);
 
 __END_CDECLS
 

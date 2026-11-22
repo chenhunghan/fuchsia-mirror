@@ -17,6 +17,7 @@
     use: [
         {
             protocol: [
+                "fuchsia.net.tun.Control",
                 "fuchsia.netemul.network.NetworkContext",
                 "fuchsia.netemul.test.CounterA",
                 "fuchsia.netemul.test.CounterB",
@@ -30,11 +31,6 @@
         {
             storage: "cache",
             path: "/cache",
-        },
-        {
-            directory: "test-specific-devfs",
-            rights: [ "r*" ],
-            path: "/dev",
         },
         {
             config: "fuchsia.netemul.test.Config",

@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/toolchain/ifs_shared_library.gni")
-
 group("tee_internal_api") {
   public_deps = [
     ":headers",
@@ -13,19 +11,6 @@ group("tee_internal_api") {
 
 config("config") {
   include_dirs = [ "include" ]
-}
-
-ifs_shared_library("lib") {
-  abi = "libtee_internal.ifs"
-}
-
-# Trusted Applications link against an ifs specification that says that
-# "libtee_internal.so" exports the TEE_ entry points. They actually are exported
-# by the ta_runtime binary, but TAs will have "libtee_internal.so" in their
-# DT_NEEDED list. This is an empty stub library that satisfies this requirement
-# at TA load time.
-shared_library("tee_internal_stub_so") {
-  output_name = "tee_internal"
 }
 
 group("tests") {
@@ -69,6 +54,22 @@ source_set("headers") {
     "//src/microfuchsia/tee/*",
     "//src/tee/tee_internal_api:*",
     "//vendor/*",
+  ]
+}
+
+ifs_shared_library("lib") {
+  abi = "libtee_internal.ifs"
+  visibility = [
+    ":*",
+    "//src/microfuchsia/tee/*",
+  ]
+}
+
+shared_library("tee_internal_stub_so") {
+  output_name = "libtee_internal"
+  visibility = [
+    ":*",
+    "//src/microfuchsia/tee/runtime:*",
   ]
 }
 

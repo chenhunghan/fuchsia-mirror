@@ -5,6 +5,7 @@
 #ifndef LIB_FUCHSIA_MEM_EXT_FUCHSIA_MEM_EXT_H_
 #define LIB_FUCHSIA_MEM_EXT_FUCHSIA_MEM_EXT_H_
 
+#include <fidl/fuchsia.mem/cpp/natural_types.h>
 #include <fuchsia/mem/cpp/fidl.h>
 #include <lib/stdcompat/span.h>
 #include <lib/zx/result.h>
@@ -44,11 +45,27 @@ zx::result<fuchsia::mem::Data> CreateWithData(cpp20::span<const uint8_t> data,
 zx::result<fuchsia::mem::Data> CreateWithData(std::vector<uint8_t> data, size_t size_threshold,
                                               std::string_view vmo_name = "");
 
+// Natural bindings (fuchsia_mem::Data) counterparts of the CreateWithData
+// functions above. They behave identically but produce a fuchsia_mem::Data;
+// they carry a distinct name because the two families differ only in their
+// return type.
+zx::result<fuchsia_mem::Data> CreateNaturalWithData(cpp20::span<const uint8_t> data,
+                                                    std::string_view vmo_name = "");
+zx::result<fuchsia_mem::Data> CreateNaturalWithData(std::vector<uint8_t> data,
+                                                    std::string_view vmo_name = "");
+zx::result<fuchsia_mem::Data> CreateNaturalWithData(cpp20::span<const uint8_t> data,
+                                                    size_t size_threshold,
+                                                    std::string_view vmo_name = "");
+zx::result<fuchsia_mem::Data> CreateNaturalWithData(std::vector<uint8_t> data,
+                                                    size_t size_threshold,
+                                                    std::string_view vmo_name = "");
+
 // Extracts the data from |data| and returns it to the caller. Consumes |data|.
 //
 // Returns an error if the data instance is malformed or if the data could not
 // be read.
 zx::result<std::vector<uint8_t>> ExtractData(fuchsia::mem::Data data);
+zx::result<std::vector<uint8_t>> ExtractData(fuchsia_mem::Data data);
 
 }  // namespace fuchsia_mem_ext
 

@@ -55,7 +55,8 @@ extern struct __libc __libc ATTR_LIBC_VISIBILITY;
 
 extern size_t __hwcap ATTR_LIBC_VISIBILITY;
 
-// TODO(49419) These exist for legacy err.h support, which we will be removing.
+// TODO(https://fxbug.dev/42126385): These exist for legacy err.h support, which
+// we will be removing.
 extern char* __progname ATTR_LIBC_VISIBILITY;
 extern char* __progname_full ATTR_LIBC_VISIBILITY;
 

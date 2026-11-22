@@ -7,6 +7,7 @@ load(
     "fx_component",
     "fx_component_manifest",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
@@ -51,6 +52,7 @@ rustc_library(
     visibility = ["//src/connectivity/network/testing/network-test-realm/tests:__pkg__"],
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component_manifest(
     name = "unreliable-echo-v4_manifest",
     component_name = "unreliable-echo-v4",
@@ -58,13 +60,14 @@ fx_component_manifest(
     manifest = "meta/unreliable-echo-v4.cml",
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component(
     name = "unreliable-echo-v4",
     compiled_manifest = ":unreliable-echo-v4_manifest",
-    visibility = ["//src/connectivity/network/testing/network-test-realm/tests:__pkg__"],
     deps = [":bin.packaged"],
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component_manifest(
     name = "unreliable-echo-v6_manifest",
     component_name = "unreliable-echo-v6",
@@ -72,9 +75,19 @@ fx_component_manifest(
     manifest = "meta/unreliable-echo-v6.cml",
 )
 
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
 fx_component(
     name = "unreliable-echo-v6",
     compiled_manifest = ":unreliable-echo-v6_manifest",
-    visibility = ["//src/connectivity/network/testing/network-test-realm/tests:__pkg__"],
     deps = [":bin.packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "unreliable-echo",
+    testonly = True,
+    components = [
+        ":unreliable-echo-v4",
+        ":unreliable-echo-v6",
+    ],
 )

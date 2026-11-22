@@ -7,8 +7,8 @@ import("./test_lists.gni")
 
 assert(is_host, "WLAN end-to-end tests only supported for host testing")
 
-python_mobly_test("wlan_canary_test") {
-  main_source = "WlanCanaryTest.py"
+python_mobly_test("canary_test") {
+  main_source = "CanaryTest.py"
   libraries = [
     "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_python",
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
@@ -73,6 +73,11 @@ python_mobly_test("apf_test") {
   ]
 }
 
+_sched_scan_odpm_data_sources = [
+  "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_start_sched_scan_with_frequency_filter_no_match.txt",
+  "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_start_sched_scan_with_scan_plans.txt",
+]
+
 python_mobly_test("sched_scan_test") {
   main_source = "//src/connectivity/wlan/tests/wlanix/SchedScanTest.py"
   libraries = [
@@ -83,10 +88,30 @@ python_mobly_test("sched_scan_test") {
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
   ]
   data_package_name = "test_data"
-  data_sources = [
-    "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_start_sched_scan_with_frequency_filter_no_match.txt",
-    "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.test_start_sched_scan_with_scan_plans.txt",
+  data_sources = _sched_scan_odpm_data_sources
+
+  produces_perf_results = true
+}
+
+# A subset of scheduled scan test cases to run with ODPM capturing, to be in a
+# performance builder.
+python_mobly_test("sched_scan_odpm_test") {
+  main_source = "//src/connectivity/wlan/tests/wlanix/SchedScanTest.py"
+  libraries = [
+    "//src/connectivity/wlan/tests/common",
+    "//src/connectivity/wlan/tests/utils:wlan_test_utils",
+    "//src/connectivity/wlan/tests/wlanix/wlanix_testing",
+    "//src/testing/end_to_end/honeydew",
+    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
   ]
+  test_cases = [
+    "test_start_sched_scan_with_frequency_filter_no_match",
+    "test_start_sched_scan_with_scan_plans",
+  ]
+  data_package_name = "test_data"
+  data_sources = _sched_scan_odpm_data_sources
+
+  produces_perf_results = true
 }
 
 # TODO(https://fxbug.dev/490145504): Plumb this test through to a builder with performance capture enabled.
@@ -103,6 +128,8 @@ python_mobly_test("create_client_iface_benchmark_test") {
     "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.wlan.wlanix.txt",
   ]
   data_package_name = "test_data"
+
+  produces_perf_results = true
 }
 
 # This is a helper group so developers can easily add all tests to their build.

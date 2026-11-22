@@ -1,0 +1,129 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/testing/expectation/rules:fx_test_component_with_expectations.bzl",
+    "fx_component_manifest_with_expectations",
+    "fx_test_component_with_expectations",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":enumeration-integration-test"],
+    visibility = ["//src/microfuchsia:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "example_test",
+    srcs = ["example_test_main.cc"],
+)
+
+fx_packaged_binary(
+    name = "example_test_packaged",
+    testonly = True,
+    binary = ":example_test",
+    binary_name = "example_test",
+)
+
+fx_cc_test_binary(
+    name = "check_path_test",
+    srcs = ["check_path_test_main.cc"],
+)
+
+fx_packaged_binary(
+    name = "check_path_test_packaged",
+    testonly = True,
+    binary = ":check_path_test",
+    binary_name = "check_path_test",
+)
+
+fx_component_manifest(
+    name = "example-test-manifest",
+    testonly = True,
+    component_name = "example-test",
+    includes = ["//sdk/lib/sys/testing:elf_test_runner.shard.cml"],
+    manifest = "meta/example-test.cml",
+)
+
+fx_component(
+    name = "example-test-component",
+    testonly = True,
+    compiled_manifest = ":example-test-manifest",
+    deps = [":example_test_packaged"],
+)
+
+fx_component_manifest(
+    name = "check-path-test-manifest",
+    testonly = True,
+    component_name = "check-path-test",
+    includes = ["//sdk/lib/sys/testing:elf_test_runner.shard.cml"],
+    manifest = "meta/check-path-test.cml",
+)
+
+fx_component(
+    name = "check-path-test-component",
+    testonly = True,
+    compiled_manifest = ":check-path-test-manifest",
+    deps = [":check_path_test_packaged"],
+)
+
+resource(
+    name = "enumeration-integration-test-config",
+    src = "enumeration_integration_test_config.json5",
+    dest = "enumeration_test_adapter_config/config/test_config.json5",
+)
+
+resource(
+    name = "empty-file",
+    src = "empty",
+    dest = "test_data_dir/empty",
+)
+
+fx_component_manifest_with_expectations(
+    name = "enumeration-integration-test-manifest",
+    component_name = "enumeration-integration-test",
+    includes = ["//src/lib/testing/expectation:meta/common.shard"],
+    manifest = "meta/enumeration-integration-test.cml",
+)
+
+fx_test_component_with_expectations(
+    name = "enumeration-integration-test-component",
+    compiled_manifest = ":enumeration-integration-test-manifest",
+    expectations = "enumeration-integration-test-expectations.json5",
+)
+
+fx_package(
+    name = "enumeration-integration-test-package",
+    testonly = True,
+    components = [
+        ":check-path-test-component",
+        ":example-test-component",
+    ],
+    resources = [
+        ":empty-file",
+        ":enumeration-integration-test-config",
+    ],
+    subpackages = ["//src/microfuchsia/tee/testing/enumeration_test_adapter:enumeration-test-adapter"],
+    test_components = [":enumeration-integration-test-component"],
+)
+
+fx_test(
+    name = "enumeration-integration-test",
+    package = ":enumeration-integration-test-package",
+)

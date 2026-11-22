@@ -13,7 +13,6 @@ fidl_library(
     ],
     api_area = "Storage",
     category = "partner",
-    enable_hlcpp = True,
     stable = False,
     visibility = ["//visibility:public"],
     deps = [

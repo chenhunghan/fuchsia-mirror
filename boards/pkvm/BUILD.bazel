@@ -27,6 +27,7 @@ fuchsia_board_input_bundle(
 
 fuchsia_board_configuration(
     name = "x64",
+    arch = "x64",
     board_input_bundles = [":x64_bib"],
     board_name = "pkvm-x64",
     hardware_info = {
@@ -57,6 +58,7 @@ fuchsia_board_input_bundle(
 
 fuchsia_board_configuration(
     name = "arm64",
+    arch = "arm64",
     board_input_bundles = [":arm64_bib"],
     board_name = "pkvm-arm64",
     filesystems = {

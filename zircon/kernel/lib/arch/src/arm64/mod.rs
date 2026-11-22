@@ -9,6 +9,7 @@ mod feature;
 mod intrin;
 mod memory;
 mod system;
+mod ticks;
 
 pub use cache::*;
 pub use debug::*;
@@ -17,3 +18,4 @@ pub use feature::*;
 pub use intrin::*;
 pub use memory::*;
 pub use system::*;
+pub use ticks::*;

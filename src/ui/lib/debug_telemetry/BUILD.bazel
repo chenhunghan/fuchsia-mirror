@@ -1,0 +1,123 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":debug_telemetry_tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+cml_shard(
+    name = "meta/gpu.shard",
+    shard = "meta/gpu.shard.cml",
+)
+
+cml_shard(
+    name = "meta/kernel.shard",
+    shard = "meta/kernel.shard.cml",
+)
+
+cml_shard(
+    name = "meta/power.shard",
+    shard = "meta/power.shard.cml",
+)
+
+cml_shard(
+    name = "meta/scenic.shard",
+    shard = "meta/scenic.shard.cml",
+)
+
+cml_shard(
+    name = "meta/client.shard",
+    includes = [
+        ":meta/gpu.shard",
+        ":meta/kernel.shard",
+        ":meta/power.shard",
+        ":meta/scenic.shard",
+    ],
+    shard = "meta/client.shard.cml",
+)
+
+expect_includes(
+    name = "gpu_includes",
+    includes = [":meta/gpu.shard"],
+)
+
+expect_includes(
+    name = "kernel_includes",
+    includes = [":meta/kernel.shard"],
+)
+
+expect_includes(
+    name = "power_includes",
+    includes = [":meta/power.shard"],
+)
+
+expect_includes(
+    name = "scenic_includes",
+    includes = [":meta/scenic.shard"],
+)
+
+expect_includes(
+    name = "all_includes",
+    includes = [":meta/client.shard"],
+)
+
+rustc_library(
+    name = "debug_telemetry",
+    srcs = [
+        "src/cpu.rs",
+        "src/gpu.rs",
+        "src/lib.rs",
+        "src/memory.rs",
+        "src/power.rs",
+        "src/scenic.rs",
+    ],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_rust",
+        "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "debug_telemetry_test",
+    crate = ":debug_telemetry",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+fx_unittest_package(
+    name = "debug_telemetry_tests",
+    unit_tests = [":debug_telemetry_test"],
+)

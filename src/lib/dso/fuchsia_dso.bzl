@@ -8,6 +8,9 @@ Counterparts to `fuchsia_cc_dso()` and `fuchsia_rust_dso()` in
 `//src/lib/dso/fuchsia_dso.gni`.
 """
 
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
 load("//build/bazel/rules/rust:rustc_cdylib.bzl", "rustc_cdylib")
@@ -17,6 +20,34 @@ visibility([
     "//examples/...",
     "//src/...",
 ])
+
+def _cc_dso_impl(ctx):
+    shlib = ctx.attr.shared_library
+    cc_shlib_info = shlib[CcSharedLibraryInfo]
+    providers = [
+        shlib[DefaultInfo],
+        cc_shlib_info,
+        CcInfo(
+            linking_context = cc_common.create_linking_context(
+                linker_inputs = depset([cc_shlib_info.linker_input]),
+            ),
+        ),
+    ]
+    if OutputGroupInfo in shlib:
+        providers.append(shlib[OutputGroupInfo])
+    return providers
+
+_cc_dso = rule(
+    doc = "Exposes a `fuchsia_cc_dso` `fx_cc_shared_library` target with `CcInfo` so dependents such as `rustc_test(link_deps)` can link against it directly.",
+    implementation = _cc_dso_impl,
+    attrs = {
+        "shared_library": attr.label(
+            mandatory = True,
+            providers = [DefaultInfo, CcSharedLibraryInfo],
+        ),
+    },
+    provides = [CcInfo, CcSharedLibraryInfo],
+)
 
 def _dedupe_implicit_deps(deps, implicit_labels):
     """Appends `implicit_labels` to `deps`, avoiding duplicate labels when `deps` is a list."""
@@ -91,6 +122,7 @@ def fuchsia_cc_dso(
         target_compatible_with = ["@platforms//os:fuchsia"]
 
     impl_name = name + "_impl"
+    shlib_name = name + "_shlib"
     inner_tags = list(tags) if tags else []
     if "manual" not in inner_tags:
         inner_tags.append("manual")
@@ -110,24 +142,36 @@ def fuchsia_cc_dso(
     )
 
     fx_cc_shared_library(
-        name = name,
+        name = shlib_name,
         aspect_hints = aspect_hints,
         build_flags = build_flags,
         disable_build_flags = disable_build_flags,
         disable_instrumentation = disable_instrumentation,
         shared_lib_name = "lib{}.so".format(out_name),
-        tags = tags,
+        tags = inner_tags,
         target_compatible_with = target_compatible_with,
         testonly = testonly,
         user_link_flags = linkopts,
-        visibility = visibility,
+        visibility = ["//visibility:private"],
         deps = [":" + impl_name],
+    )
+
+    _cc_dso(
+        name = name,
+        aspect_hints = aspect_hints,
+        shared_library = ":" + shlib_name,
+        tags = tags,
+        target_compatible_with = target_compatible_with,
+        testonly = testonly,
+        visibility = visibility,
     )
 
 def fuchsia_rust_dso(
         *,
         name,
+        output_name = None,
         deps = None,
+        rustc_flags = None,
         target_compatible_with = None,
         **kwargs):
     """Defines a Fuchsia Rust DSO shared library (`lib<output_name>.so`) for `dso_runner`.
@@ -138,11 +182,14 @@ def fuchsia_rust_dso(
 
     Args:
         name: Name of the target.
+        output_name: Optional base name of the output `.so` (`lib<output_name>.so`).
+            Defaults to `crate_name` (if set) or `name`.
         deps: Rust dependencies; implicit DSO dependencies are appended
             automatically without duplicating existing labels.
+        rustc_flags: Optional extra flags passed to `rustc_cdylib()`.
         target_compatible_with: Platform constraints (defaults to Fuchsia if unset).
         **kwargs: Additional `rustc_cdylib` attributes (`srcs`, `crate_root`,
-            `edition`, `output_name`, etc.).
+            `edition`, etc.).
     """
     implicit_deps = [
         Label("//src/lib/fuchsia"),
@@ -154,9 +201,19 @@ def fuchsia_rust_dso(
     if target_compatible_with == None:
         target_compatible_with = ["@platforms//os:fuchsia"]
 
+    # Match GN's clang_toolchain `solink` behavior and `fx_cc_shared_library()`
+    # by setting `DT_SONAME` to `lib<out_name>.so` so `dlopen_vmo_vmar()` in
+    # `dso_runner` deduplicates pre-linked Rust DSOs (e.g. in `dso_runner_tests`)
+    # instead of loading a second instance.
+    out_name = output_name or kwargs.get("crate_name") or name.replace("-", "_")
+    soname_flag = ["-Clink-arg=-Wl,-soname=lib{}.so".format(out_name)]
+    all_rustc_flags = soname_flag + (rustc_flags or [])
+
     rustc_cdylib(
         name = name,
+        output_name = output_name,
         deps = all_deps,
+        rustc_flags = all_rustc_flags,
         target_compatible_with = target_compatible_with,
         **kwargs
     )

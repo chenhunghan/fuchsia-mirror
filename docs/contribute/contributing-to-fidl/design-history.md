@@ -253,7 +253,7 @@ _Legend:_
 | &ndash;    | Terminal events | [In review](https://fuchsia-review.googlesource.com/c/fuchsia/+/632266/)
 
 <!-- link labels -->
-[rfcs]: /docs/contribute/governance/rfcs/README.md#proposals
+[rfcs]: /docs/contribute/governance/rfcs/all_rfcs.md
 [ftps]: /docs/contribute/governance/deprecated-ftp-process.md
 [protobuf-self-describe]: https://developers.google.com/protocol-buffers/docs/techniques#self-description
 [measure-tape]: /tools/fidl/measure-tape/README.md

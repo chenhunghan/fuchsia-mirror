@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef SRC_CONNECTIVITY_NETWORK_TESTS_SYSCALL_UTIL_H_
-#define SRC_CONNECTIVITY_NETWORK_TESTS_SYSCALL_UTIL_H_
+#ifndef SRC_CONNECTIVITY_NETWORK_TESTS_SOCKET_UTIL_H_
+#define SRC_CONNECTIVITY_NETWORK_TESTS_SOCKET_UTIL_H_
 
 #include <lib/fit/defer.h>
 #include <netinet/ip.h>
@@ -40,8 +40,6 @@ inline constexpr std::chrono::duration kNegativeCheckTimeout = std::chrono::seco
 
 // TODO(https://fxbug.dev/328778498): Remove and use the positive and negative variants.
 inline constexpr std::chrono::duration kDeprecatedTimeout = std::chrono::seconds(2);
-
-constexpr char kFastUdpEnvVar[] = "FAST_UDP";
 
 struct SocketDomain {
   // Should only be used when switching on the return value of which(), because
@@ -106,14 +104,6 @@ sockaddr_in6 MapIpv4SockaddrToIpv6Sockaddr(const sockaddr_in& addr4);
 // Returns the socket info associated with the provided `fd`, backed by a
 // `fposix_socket::StreamSocket`.
 void ZxSocketInfoStream(int fd, zx_info_socket_t& out_info);
-
-// Returns the socket info associated with the provided `fd`, backed by a
-// `fposix_socket::DatagramSocket`.
-void ZxSocketInfoDgram(int fd, zx_info_socket_t& out_info);
-
-// Returns the underlying zircon socket associated with the provided `fd`,
-// backed by a `fposix_socket::DatagramSocket`.
-void ZxSocketDgram(int fd, zx::socket& out_socket);
 
 #endif
 
@@ -357,4 +347,4 @@ class SocketAddr {
 #define SKIP_IF_CANT_ACCESS_RAW_SOCKETS() ((void*)0)
 #endif
 
-#endif  // SRC_CONNECTIVITY_NETWORK_TESTS_SYSCALL_UTIL_H_
+#endif  // SRC_CONNECTIVITY_NETWORK_TESTS_SOCKET_UTIL_H_

@@ -27,7 +27,7 @@
         },
         {
             name: "local-mdns",
-            url: "#meta/mdns.cm",
+            url: "mdns#meta/mdns.cm",
         },
         {
             name: "local-netstack",
@@ -45,7 +45,7 @@
         },
         {
             name: "remote-mdns",
-            url: "#meta/mdns.cm",
+            url: "mdns#meta/mdns.cm",
         },
         {
             name: "remote-netstack",

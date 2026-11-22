@@ -7,6 +7,8 @@ use fuchsia_pkg::{MetaContents, MetaPackage, MetaSubpackages};
 use std::collections::BTreeMap;
 use std::convert::TryInto as _;
 use std::io;
+use std::pin::pin;
+use std::task::Poll;
 
 pub fn add_meta_far_to_blobfs(
     blobfs: &fuchsia_pkg_testing::blobfs::Fake,
@@ -68,4 +70,57 @@ pub fn get_meta_far_with_subpackages_bytes(
     let mut meta_far = Vec::new();
     fuchsia_archive::write(&mut meta_far, path_content_map).unwrap();
     meta_far
+}
+
+pub fn blob_to_vmo(contents: &[u8]) -> zx::Vmo {
+    let vmo = zx::Vmo::create(contents.len() as u64).unwrap();
+    vmo.write(contents, 0).unwrap();
+    vmo
+}
+
+pub fn respond_get_vmo(responder: fidl_fuchsia_fxfs::BlobReaderGetVmoResponder, contents: &[u8]) {
+    responder.send(Ok(blob_to_vmo(contents))).unwrap();
+}
+
+pub async fn next_get_vmo_async(
+    blob_reader_stream: &mut fidl_fuchsia_fxfs::BlobReaderRequestStream,
+) -> (Hash, fidl_fuchsia_fxfs::BlobReaderGetVmoResponder) {
+    match futures::StreamExt::next(blob_reader_stream).await {
+        Some(Ok(fidl_fuchsia_fxfs::BlobReaderRequest::GetVmo { blob_hash, responder })) => {
+            (Hash::from(blob_hash), responder)
+        }
+        other => panic!("unexpected blob reader request: {other:?}"),
+    }
+}
+
+pub async fn expect_get_vmo_async(
+    blob_reader_stream: &mut fidl_fuchsia_fxfs::BlobReaderRequestStream,
+    expected_hash: Hash,
+) -> fidl_fuchsia_fxfs::BlobReaderGetVmoResponder {
+    let (blob_hash, responder) = next_get_vmo_async(blob_reader_stream).await;
+    assert_eq!(blob_hash, expected_hash);
+    responder
+}
+
+pub fn expect_get_vmo(
+    executor: &mut fuchsia_async::TestExecutor,
+    blob_reader_stream: &mut fidl_fuchsia_fxfs::BlobReaderRequestStream,
+    expected_hash: Hash,
+) -> fidl_fuchsia_fxfs::BlobReaderGetVmoResponder {
+    match executor
+        .run_until_stalled(&mut pin!(expect_get_vmo_async(blob_reader_stream, expected_hash)))
+    {
+        Poll::Ready(responder) => responder,
+        Poll::Pending => panic!("BlobReaderRequest::GetVmo stalled"),
+    }
+}
+
+pub fn next_get_vmo(
+    executor: &mut fuchsia_async::TestExecutor,
+    blob_reader_stream: &mut fidl_fuchsia_fxfs::BlobReaderRequestStream,
+) -> (Hash, fidl_fuchsia_fxfs::BlobReaderGetVmoResponder) {
+    match executor.run_until_stalled(&mut pin!(next_get_vmo_async(blob_reader_stream))) {
+        Poll::Ready(res) => res,
+        Poll::Pending => panic!("BlobReaderRequest::GetVmo stalled"),
+    }
 }

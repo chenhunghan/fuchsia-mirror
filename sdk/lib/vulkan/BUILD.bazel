@@ -13,5 +13,9 @@ cml_shard(
         "//sdk/lib/trace:use.shard.cml",
     ],
     shard = "client.shard.cml",
-    visibility = ["//src/lib/ui/fuchsia-vulkan:__pkg__"],
+    visibility = [
+        "//src/chromium/web_engine/meta/shards:__pkg__",
+        "//src/lib/ui/fuchsia-vulkan:__pkg__",
+        "//src/sys/runners/dso:__pkg__",
+    ],
 )

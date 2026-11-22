@@ -9,8 +9,8 @@ mod tests {
     use cm_rust::{CapabilityDecl, CapabilityTypeName, OfferSource, StorageDirectorySource};
     use cm_rust_testing::*;
     use component_id_index::{IndexEntry, InstanceId};
-    use fidl_fuchsia_component_decl as fdecl;
-    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_component_decl_common as fdecl;
+    use fidl_fuchsia_io_common as fio;
     use moniker::Moniker;
     use routing::component_instance::ComponentInstanceInterface;
     use routing_test_helpers::component_id_index::make_index_file;

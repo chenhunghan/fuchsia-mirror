@@ -46,7 +46,7 @@ source_set("src") {
     "//sdk/fidl/fuchsia.driver.compat:fuchsia.driver.compat_cpp",
     "//sdk/fidl/fuchsia.hardware.vsi:fuchsia.hardware.vsi_cpp",
     "//sdk/lib/driver/incoming/cpp",
-    "//src/graphics/magma/lib/magma/platform:barriers",
+    "//sdk/lib/memory_barriers",
     "//src/graphics/magma/lib/magma/platform:buffer",
     "//src/graphics/magma/lib/magma/platform:bus_mapper",
     "//src/graphics/magma/lib/magma/platform:device_dfv2",

@@ -19,7 +19,8 @@
 #include <cstdint>
 
 #include <gtest/gtest.h>
-#include <src/lib/fidl/llcpp/tests/types_test_utils.h>
+
+#include "src/lib/fidl/llcpp/tests/types_test_utils.h"
 
 namespace test = ::llcpptest_handleraii_test;
 

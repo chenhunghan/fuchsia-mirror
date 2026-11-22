@@ -70,7 +70,6 @@ template("camera_controller_driver") {
 
   fuchsia_driver_component(driver_component_target) {
     deps = [ ":${driver_target}" ]
-    info = "meta/${driver_target}-info.json"
     manifest = "meta/camera-controller-${board}.cml"
   }
 

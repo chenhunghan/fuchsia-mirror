@@ -170,8 +170,8 @@ Fuchsia can safely abandon this flexibility for the foreseeable future. By
 embracing the static hardware configurations of the boards we plan to support,
 we can *greatly simplify* the way drivers are discovered and configured, which
 in turn allows driver creation to be much more ergonomic.  Of course, there are
-still situations where dynamism is unavoidable.  See [Non-Static
-Considerations](#non-static-considerations) for examples of these situations,
+still situations where dynamism is unavoidable.  See [Non-static
+considerations](#non-static-considerations) for examples of these situations,
 and how we plan to address them.
 
 ## Summary
@@ -373,7 +373,8 @@ parent "clock-dsi" {
 In the driver DML, capability requirements include a `name` field, which
 specifies exactly which role each service connection fulfills locally.
 Further, by specifying a unique `name`, the DML compiler
-([`dmlc`](#the-compiler-dmlc)) can automatically generate strongly-typed
+([`dmlc`](#the-compiler-dmlc-and-tooling-integration)) can automatically
+generate strongly-typed
 `clock_pixel_` and `clock_dsi_` accessors that can be used in driver code.
 
 To keep these names unique and avoid collisions, `dmlc` will validate at
@@ -500,7 +501,7 @@ The Board DML uses the local name alias from the driver along with the driver's
 name to explicitly state routes between specific instances of services across
 driver topology.
 
-### The Compiler (dmlc) and Tooling Integration
+### The compiler (dmlc) and tooling integration {:#the-compiler-dmlc-and-tooling-integration}
 
 The DML toolchain executes during driver build and product assembly, and will
 operate on both Board DMLs and Driver DMLs.  Driver DMLs will be parsed and
@@ -633,7 +634,7 @@ Framework primitives, such as:
   rich, structured configuration or payload schemas directly in their
   manifests.
 
-### Non-Static Considerations
+### Non-static considerations {:#non-static-considerations}
 
 Not all aspects of driver instantiation can be known statically at assembly.
 There are a few important use cases that need to be explicitly accounted for to

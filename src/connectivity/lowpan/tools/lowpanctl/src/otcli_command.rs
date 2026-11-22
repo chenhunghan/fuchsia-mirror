@@ -6,7 +6,7 @@ use crate::context::LowpanCtlContext;
 use crate::prelude::*;
 use futures::channel::mpsc::channel;
 use futures::task::Poll;
-use rustyline::{DefaultEditor, error::ReadlineError}; //CompletionType, Config, EditMode, Editor};
+use line_editor::{Editor, ReadlineError};
 use std::pin::Pin;
 
 /// Contains the arguments decoded for the `otcli` command.
@@ -29,11 +29,15 @@ impl OtCliCommand {
             let mut exec = fasync::LocalExecutorBuilder::new().build();
 
             let fut = async {
-                let mut rl = DefaultEditor::new()?;
+                let mut rl = Editor::new();
                 loop {
                     let readline = rl.readline("> ");
                     match readline {
                         Ok(line) => {
+                            let line = String::from_utf8_lossy(&line).into_owned();
+                            if !line.is_empty() {
+                                let _ = rl.add_history(line.as_str());
+                            }
                             cmd_sender.try_send(line)?;
                         }
                         Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {

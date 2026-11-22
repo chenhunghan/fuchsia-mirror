@@ -701,21 +701,6 @@ def maybe_implement_test(series, variant, subs, fresh):
             )
             f.write(content + dns)
 
-    # Update the variant BUILD.gn file with a TODO telling the user to add structured config
-    # defaults to `client_config_values`.
-    with open(variant_root_gn_file_path, "r") as f:
-        content = f.read()
-        dns_count = get_dns_count(content)
-        dns_counts[variant_root_gn_file_path] = dns_count + 1
-        with open(variant_root_gn_file_path, "wt") as f:
-            dns = textwrap.dedent(
-                """
-            # TODO(%s): Add a `values` field to `client_config_values` after editing client.cml.
-            """
-                % DNS
-            )
-            f.write(content + dns)
-
     # Remove the TODO.md file, then generate the templates in its place.
     os.remove(todo_md_file_path)
     binding_templates_dir = TEMPLATES_DIR / "implement_test"

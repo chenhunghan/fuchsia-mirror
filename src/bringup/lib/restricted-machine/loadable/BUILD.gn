@@ -11,11 +11,11 @@ restricted_loadable_module("caller") {
 }
 
 # Simplified version of //build/config/zircon:hermetic-code-blob
-# relying on :nolibc as a basis.
+# relying on :nolibc-nostartfiles as a basis.
 config("restricted-loadable-config") {
   ldflags = []
   configs = [
-    "//build/config/zircon:nolibc",
+    "//build/config/zircon:nolibc-nostartfiles",
     "//build/config/zircon:no-synthetic-sections",
   ]
   if (!is_gcc) {

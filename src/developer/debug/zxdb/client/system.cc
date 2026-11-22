@@ -968,7 +968,7 @@ void System::DetachFromAllTargets(fit::callback<void(int)> cb) {
       weak_this->DeleteTarget(result.target.get());
     }
 
-    cb(results.size());
+    cb(static_cast<int>(results.size()));
   });
 }
 

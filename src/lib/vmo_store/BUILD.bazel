@@ -2,29 +2,89 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# vmo_store library that can be shared across drivers
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+package(default_applicable_licenses = ["//:license"])
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+test_suite(
+    name = "tests",
+    tests = [":vmo-store-test"],
+    visibility = ["//src/lib:__pkg__"],
 )
 
-cc_library(
+# vmo_store library that can be shared across drivers.
+# TODO(https://fxbug.dev/444521390): Switch to idk_cc_source_library() + bazel2gn
+# once //zircon/system/ulib/{fbl,fzl} expose _idk Bazel targets.
+# LINT.IfChange
+# @bazel2gn:skip
+fx_cc_library(
     name = "vmo_store",
     hdrs = [
-        "growable_slab.h",
-        "owned_vmo_store.h",
-        "storage_types.h",
-        "stored_vmo.h",
-        "vmo_store.h",
+        "include/lib/vmo_store/growable_slab.h",
+        "include/lib/vmo_store/owned_vmo_store.h",
+        "include/lib/vmo_store/storage_types.h",
+        "include/lib/vmo_store/stored_vmo.h",
+        "include/lib/vmo_store/vmo_store.h",
     ],
+    includes = ["include"],
+    # Uses Fuchsia-only Zircon VMO, VMAR, and BTI headers (zx, fzl).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/connectivity/ethernet/drivers:__subpackages__",
+        "//src/connectivity/network/drivers/network-device/device:__pkg__",
+        "//src/connectivity/network/tun/network-tun:__pkg__",
+        "//src/devices/block/drivers:__subpackages__",
+        "//src/devices/radar/lib/vmo-manager:__pkg__",
+        "//src/devices/spi/drivers/aml-spi:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+# LINT.ThenChange(BUILD.gn)
+
+fx_cc_test_binary(
+    name = "test_bin",
+    srcs = [
+        "growable_slab_test.cc",
+        "map_pin_test.cc",
+        "owned_vmo_store_test.cc",
+        "typed_store_test.cc",
+    ],
+    gn_output_name = "vmo-store-test",
+    # Links Fuchsia-only vmo_store and fake-bti libraries.
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
-        "//zircon/system/ulib/fzl",
-        "@fuchsia_sdk//pkg/fit-promise",
-        "@fuchsia_sdk//pkg/stdcompat",
-        "@fuchsia_sdk//pkg/zx",
+        ":vmo_store",
+        "//src/devices/testing/fake-bti",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "@com_google_googletest//:gtest",
     ],
+)
+
+fx_unittest_component(
+    name = "vmo-store-test-component",
+    binary = ":test_bin",
+    component_name = "vmo-store-test",
+)
+
+fx_package(
+    name = "vmo-store-test-package",
+    package_name = "vmo-store-test",
+    test_components = [":vmo-store-test-component"],
+)
+
+fx_test(
+    name = "vmo-store-test",
+    environments = ["//build/testing/environments:emu_env"],
+    package = ":vmo-store-test-package",
 )

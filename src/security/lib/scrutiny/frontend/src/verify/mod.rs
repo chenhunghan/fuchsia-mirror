@@ -118,9 +118,9 @@ mod tests {
     use cm_types::Url;
     use component_id_index::InstanceId;
     use fidl::persist;
-    use fidl_fuchsia_component_decl as fdecl;
-    use fidl_fuchsia_component_internal as component_internal;
-    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_component_decl_common as fdecl;
+    use fidl_fuchsia_component_internal_common as component_internal;
+    use fidl_fuchsia_io_common as fio;
     use maplit::hashset;
     use routing::component_instance::ComponentInstanceInterface;
     use scrutiny_collection::core::{

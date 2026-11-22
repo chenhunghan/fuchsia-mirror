@@ -61,7 +61,6 @@ fuchsia_cc_driver("usb-composite-driver") {
 
 fuchsia_driver_component("usb-composite") {
   dml_label = ":usb-composite-dml"
-  info = "meta/usb-composite-info.json"
   component_name = "usb-composite"
   deps = [ ":usb-composite-driver" ]
 }

@@ -9,52 +9,58 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_MUTEX_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_MUTEX_H_
 
-#include <assert.h>
-#include <debug.h>
-#include <lib/fxt/interned_string.h>
+#include <lib/kconcurrent/chainlock.h>
 #include <lib/zircon-internal/thread_annotations.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <zircon/compiler.h>
 #include <zircon/time.h>
 
-#include <fbl/canary.h>
 #include <fbl/macros.h>
-#include <kernel/lazy_owned_wait_queue.h>
+#include <kernel/ffi.h>
+#include <kernel/lock_trace_config.h>
 #include <kernel/lock_validation_guard.h>
 #include <kernel/lockdep.h>
-#include <kernel/owned_wait_queue.h>
-#include <kernel/spin_tracing_storage.h>
-#include <kernel/thread.h>
-#include <ktl/atomic.h>
+#include <kernel/spin_tracing_config.h>
 
+class CriticalMutex;
 class Mutex;
 
-// Rust implementations of the Mutex methods, in //zircon/kernel/kernel/mutex.rs. The Mutex
-// methods below and in //zircon/kernel/kernel/mutex.cc forward to these. Only the Mutex methods
-// may call them; see the `# Safety` sections in mutex.rs for their preconditions.
+// Rust implementations of the Mutex and CriticalMutex methods, in //zircon/kernel/kernel/mutex.rs.
+// The methods below forward to these. Only Mutex and CriticalMutex methods may call them; see the
+// `# Safety` sections in mutex.rs for their preconditions.
 extern "C" {
+void rust_mutex_init(Mutex* mutex);
+void rust_mutex_set_lock_class_id(Mutex* mutex, lockdep::LockClassId lcid);
 void rust_mutex_destroy(Mutex* mutex);
-void rust_mutex_acquire_common(Mutex* mutex, zx_duration_t spin_max_duration)
+void rust_mutex_acquire(Mutex* mutex, zx_duration_t spin_max_duration)
     TA_EXCL(chainlock_transaction_token);
-[[nodiscard]] bool rust_mutex_acquire_common_with_timeslice_extension(
-    Mutex* mutex, zx_duration_t spin_max_duration, zx_duration_t timeslice_extension)
+void rust_mutex_release(Mutex* mutex) TA_EXCL(chainlock_transaction_token);
+bool rust_mutex_is_held(const Mutex* mutex);
+void rust_mutex_assert_held(const Mutex* mutex);
+
+void rust_critical_mutex_init(CriticalMutex* mutex);
+void rust_critical_mutex_set_lock_class_id(CriticalMutex* mutex, lockdep::LockClassId lcid);
+void rust_critical_mutex_destroy(CriticalMutex* mutex);
+[[nodiscard]] bool rust_critical_mutex_acquire(CriticalMutex* mutex,
+                                               zx_duration_t spin_max_duration)
     TA_EXCL(chainlock_transaction_token);
-void rust_mutex_release_contended(Mutex* mutex, Thread* current_thread, uintptr_t old_mutex_state)
+void rust_critical_mutex_release(CriticalMutex* mutex, bool should_clear)
     TA_EXCL(chainlock_transaction_token);
+bool rust_critical_mutex_is_held(const CriticalMutex* mutex);
+void rust_critical_mutex_assert_held(const CriticalMutex* mutex);
+bool rust_critical_mutex_is_contested(const CriticalMutex* mutex);
 }
 
 // Kernel mutex support.
 //
-class TA_CAP("mutex") Mutex
-    : public spin_tracing::LockNameStorage<spin_tracing::LockType::kMutex,
-                                           kSchedulerLockSpinTracingEnabled |
-                                               kLockNameTracingEnabled> {
+// This is a facade over the Rust `Mutex` in //zircon/kernel/kernel/mutex.rs, which is stored in
+// place in `storage_`. All methods, including the constructors and destructor, forward to Rust.
+class TA_CAP("mutex") Mutex {
  public:
-  constexpr Mutex() = default;
-  explicit Mutex(const fxt::InternedString& name_stringref)
-      : LockNameStorage(name_stringref.id()) {}
+  Mutex() { rust_mutex_init(this); }
 
-  ~Mutex();
+  ~Mutex() { rust_mutex_destroy(this); }
 
   // No moving or copying allowed.
   DISALLOW_COPY_ASSIGN_AND_MOVE(Mutex);
@@ -71,135 +77,43 @@ class TA_CAP("mutex") Mutex
   static constexpr zx_duration_t DEFAULT_TIMESLICE_EXTENSION = SPIN_MAX_DURATION;
 
   // Acquire the mutex.
-  inline void Acquire(zx_duration_t spin_max_duration = SPIN_MAX_DURATION) TA_ACQ();
+  void Acquire(zx_duration_t spin_max_duration = SPIN_MAX_DURATION) TA_ACQ() {
+    rust_mutex_acquire(this, spin_max_duration);
+  }
 
   // Release the mutex. Must be held by the current thread.
-  //
-  // Note: that this simply thunks directly to ReleaseInternal, which does not
-  // have any annotations. Methods of capability objects (see TA_CAP, above)
-  // which are annotated with TA_ACQ/TA_REL effectively have static thread
-  // analysis disabled for them.  It is assumed that they will "do whatever it
-  // takes" to either acquire or release the capability.  By thunking to a
-  // non-annotated method, we can guarantee that the implementation of the
-  // release operation *is* subject to static analysis, helping to guarantee
-  // that we are holding (or not holding) all of the proper capabilities when
-  // interacting with things like threads, wait queues, and the scheduler.  The
-  // contended release operation is implemented in Rust
-  // (//zircon/kernel/kernel/mutex.rs), and so is not subject to clang's static
-  // thread safety analysis.
-  void Release() TA_REL() { ReleaseInternal(); }
+  void Release() TA_REL() { rust_mutex_release(this); }
 
   // does the current thread hold the mutex?
-  bool IsHeld() const { return (holder() == Thread::Current::Get()); }
+  bool IsHeld() const { return rust_mutex_is_held(this); }
 
   // Panic unless the given lock is held.
   //
   // Can be used when thread safety analysis can't prove you are holding
   // a lock. The asserts may be optimized away in release builds.
-  void AssertHeld() const TA_ASSERT() { DEBUG_ASSERT(IsHeld()); }
+  void AssertHeld() const TA_ASSERT() { rust_mutex_assert_held(this); }
 
-  // <jedi_mindtrick>This is not the method you are looking for.</jedi_mindtrick>
-  void MarkReleased() const TA_REL() {}
-
-  // Is the mutex contested i.e. is at least one thread blocked waiting on it?
-  //
-  // The contested flag does not track threads which are spin-waiting on the
-  // Mutex and have yet to enter a blocking phase.
-  bool IsContested() const { return val() & STATE_FLAG_CONTESTED; }
-
- protected:
-  // TimesliceExtension is used to control whether a timeslice extension will be
-  // set and if so, what value will be used.
-  template <bool Enabled>
-  struct TimesliceExtension;
-
-  // Used by both Mutex and CriticalMutex.
-  //
-  // If TimesliceExtensionEnabled is true, attempt to set the timeslice
-  // extension after acquiring the mutex and return true if the extension was
-  // set.  Otherwise, return false.
-  template <bool TimesliceExtensionEnabled>
-  bool AcquireCommon(zx_duration_t spin_max_duration,
-                     TimesliceExtension<TimesliceExtensionEnabled> timeslice_extension);
-
- private:
-  friend struct MutexLayout;
-
-  // The actual implementation of the Release operation.  See above for why this
-  // is separate from |Release()|.
-  //
-  // The uncontended fast path is implemented in C++, in mutex.cc, and only the
-  // contended slow path crosses into Rust.  ThinLTO inlines this C++ fast path
-  // into callers; it does not reliably inline the Rust implementation into C++
-  // callers.  It is deliberately not defined inline in this header: doing so
-  // makes callers such as lockdep::Guard<CriticalMutex>::Release too large to be
-  // inlined themselves.
-  //
-  // Rust callers use a copy of this fast path, Mutex::release in
-  // //zircon/kernel/kernel/mutex.rs, which must be kept identical to this one.
-  //
-  // Must stay in sync with the acquire paths in Mutex::acquire_common and
-  // Mutex::acquire_contended_mutex in //zircon/kernel/kernel/mutex.rs.  In
-  // particular, uncontended releases are not traced (see the static assertion on
-  // KERNEL_MUTEX_TRACING_LEVEL in mutex.rs).
-  void ReleaseInternal();
-
-  static constexpr uint32_t MAGIC = 0x6D757478;  // 'mutx'
-  static constexpr uintptr_t STATE_FREE = 0u;
-  static constexpr uintptr_t STATE_FLAG_CONTESTED = 1u;
-
-  // Accessors to extract the holder pointer from the val member
-  uintptr_t val() const { return val_.load(ktl::memory_order_relaxed); }
-
-  static Thread* holder_from_val(uintptr_t value) {
-    return reinterpret_cast<Thread*>(value & ~STATE_FLAG_CONTESTED);
+  // Records the lock class name of |lcid| for mutex name tracing. Called by lockdep::Lock<Mutex>
+  // when it is constructed, before the mutex is shared.
+  void SetLockClassId(lockdep::LockClassId lcid) {
+    if constexpr (kNameTracingEnabled) {
+      rust_mutex_set_lock_class_id(this, lcid);
+    }
   }
 
-  Thread* holder() const { return holder_from_val(val()); }
+ private:
+  friend class CriticalMutex;
 
-  fbl::Canary<MAGIC> magic_;
+  // Whether the Rust `Mutex` has lock name storage (see `MUTEX_NAME_TRACING_ENABLED`).
+  static constexpr bool kNameTracingEnabled =
+      kSchedulerLockSpinTracingEnabled || kLockNameTracingEnabled;
 
-  // See the comment near the start of Mutex::acquire_contended_mutex in
-  // //zircon/kernel/kernel/mutex.rs for details about this variable, and how it
-  // affects the spin phase behavior of Mutex::acquire_contended_mutex
-  ktl::atomic<cpu_num_t> maybe_acquired_on_cpu_{INVALID_CPU};
-  // Holds the owning Thread* bitwise-ORed with STATE_FLAG_CONTESTED, or STATE_FREE. C++ must only
-  // ever store STATE_FREE here: Rust types this word as AtomicPtr<Thread> and dereferences the
-  // holders it loads, which relies on every other value having been stored by Rust.
-  ktl::atomic<uintptr_t> val_{STATE_FREE};
-  LazyOwnedWaitQueue wait_;
+  // The size and alignment of the Rust `Mutex`, which asserts them against mutex_bindings.
+  static constexpr size_t kStorageSize = kNameTracingEnabled ? 32 : 24;
+  static constexpr size_t kStorageAlign = 8;
+
+  [[maybe_unused]] OpaqueStorage<kStorageSize, kStorageAlign> storage_;
 };
-
-// TimesliceExtension specializations for Mutex::Acquire and
-// Mutex::AcquireCommon.
-//
-// No timeslice extension.
-template <>
-struct Mutex::TimesliceExtension<false> {};
-// A timeslice extension of |value| nanoseconds.
-template <>
-struct Mutex::TimesliceExtension<true> {
-  zx_duration_t value;
-};
-
-template <>
-inline bool Mutex::AcquireCommon<false>(zx_duration_t spin_max_duration,
-                                        TimesliceExtension<false>) {
-  // Without a timeslice extension no extension is ever set.
-  rust_mutex_acquire_common(this, spin_max_duration);
-  return false;
-}
-
-template <>
-inline bool Mutex::AcquireCommon<true>(zx_duration_t spin_max_duration,
-                                       TimesliceExtension<true> timeslice_extension) {
-  return rust_mutex_acquire_common_with_timeslice_extension(this, spin_max_duration,
-                                                            timeslice_extension.value);
-}
-
-inline void Mutex::Acquire(zx_duration_t spin_max_duration) TA_ACQ() {
-  AcquireCommon(spin_max_duration, TimesliceExtension<false>{});
-}
 
 // CriticalMutex is a mutex variant that uses a thread timeslice extension to
 // disable preemption for a limited time during the critical section.
@@ -227,16 +141,15 @@ inline void Mutex::Acquire(zx_duration_t spin_max_duration) TA_ACQ() {
 // * Interrupts may remain enabled while holding a CriticalMutex, avoiding
 //   undesirable IRQ latency.
 //
-class TA_CAP("mutex") CriticalMutex : private Mutex {
+// Like Mutex, this is a facade over the Rust `CriticalMutex` in //zircon/kernel/kernel/mutex.rs,
+// which is stored in place in `storage_`.
+class TA_CAP("mutex") CriticalMutex {
  public:
-  CriticalMutex() = default;
-  ~CriticalMutex() = default;
-  explicit CriticalMutex(const fxt::InternedString& name_stringref) : Mutex(name_stringref) {}
+  CriticalMutex() { rust_critical_mutex_init(this); }
+  ~CriticalMutex() { rust_critical_mutex_destroy(this); }
 
-  CriticalMutex(const CriticalMutex&) = delete;
-  CriticalMutex& operator=(const CriticalMutex&) = delete;
-  CriticalMutex(CriticalMutex&&) = delete;
-  CriticalMutex& operator=(CriticalMutex&&) = delete;
+  // No moving or copying allowed.
+  DISALLOW_COPY_ASSIGN_AND_MOVE(CriticalMutex);
 
   // Acquire the mutex. Returns whether or not a time slice extension was set, and must be
   // subsequently cleared on Release. More simply, the return value must be passed into the Release
@@ -244,38 +157,34 @@ class TA_CAP("mutex") CriticalMutex : private Mutex {
   enum class ShouldClear : bool { No = false, Yes = true };
   [[nodiscard]] ShouldClear Acquire(zx_duration_t spin_max_duration = Mutex::SPIN_MAX_DURATION)
       TA_ACQ() {
-    // TODO(maniscalco): What's the right duration here?  Is it a function of
-    // spin_max_duration?
-    const TimesliceExtension<true> timeslice_extension{spin_max_duration};
-    return static_cast<ShouldClear>(Mutex::AcquireCommon(spin_max_duration, timeslice_extension));
+    return static_cast<ShouldClear>(rust_critical_mutex_acquire(this, spin_max_duration));
   }
 
   // Release the mutex. Must be held by the current thread. The |should_clear| parameter is the
   // return value of the matching |Acquire| call.
   void Release(ShouldClear should_clear) TA_REL() {
-    Mutex::Release();
-
-    if (should_clear == ShouldClear::Yes) {
-      Thread::Current::preemption_state().ClearTimesliceExtension();
-    }
+    rust_critical_mutex_release(this, should_clear == ShouldClear::Yes);
   }
 
   // See |Mutex::IsHeld|.
-  bool IsHeld() const { return Mutex::IsHeld(); }
+  bool IsHeld() const { return rust_critical_mutex_is_held(this); }
 
   // See |Mutex::AssertHeld|.
-  void AssertHeld() const TA_ASSERT() { Mutex::AssertHeld(); }
+  void AssertHeld() const TA_ASSERT() { rust_critical_mutex_assert_held(this); }
 
   // See |Mutex::IsContested|.
-  bool IsContested() const { return Mutex::IsContested(); }
+  bool IsContested() const { return rust_critical_mutex_is_contested(this); }
 
-  // We inherited privately from Mutex, which hides the SetLockClassId method
-  // from lockdep.  Explicitly pass the call it makes to SetLockClassId to the
-  // underlying implementation so we get named locked when we are collecting
-  // lock contention trace data.
-  void SetLockClassId(lockdep::LockClassId lcid) { Mutex::SetLockClassId(lcid); }
+  // See |Mutex::SetLockClassId|.
+  void SetLockClassId(lockdep::LockClassId lcid) {
+    if constexpr (Mutex::kNameTracingEnabled) {
+      rust_critical_mutex_set_lock_class_id(this, lcid);
+    }
+  }
 
  private:
+  // The Rust `CriticalMutex` is a transparent wrapper around a Rust `Mutex`.
+  [[maybe_unused]] OpaqueStorage<Mutex::kStorageSize, Mutex::kStorageAlign> storage_;
 };
 
 // Lock policy for kernel mutexes
@@ -363,17 +272,6 @@ LOCK_DEP_POLICY(CriticalMutex, CriticalMutexPolicy);
 #define DECLARE_CRITICAL_MUTEX(containing_type, ...) \
   LOCK_DEP_INSTRUMENT(containing_type, ::CriticalMutex, ##__VA_ARGS__)
 
-// Declares a |lock_type| member of the struct or class |containing_type|.
-//
-// Example usage:
-//
-// struct MyType {
-//     DECLARE_LOCK(MyType, LockType [, LockFlags]) lock;
-// };
-//
-#define DECLARE_LOCK(containing_type, lock_type, ...) \
-  LOCK_DEP_INSTRUMENT(containing_type, lock_type, ##__VA_ARGS__)
-
 // By default, singleton mutexes in the kernel use Mutex in order to avoid
 // a useless global dtor
 //
@@ -385,14 +283,5 @@ LOCK_DEP_POLICY(CriticalMutex, CriticalMutexPolicy);
 
 #define DECLARE_SINGLETON_CRITICAL_MUTEX(name, ...) \
   LOCK_DEP_SINGLETON_LOCK(name, ::CriticalMutex, ##__VA_ARGS__)
-
-// Declares a singleton |lock_type| with the name |name|.
-//
-// Example usage:
-//
-//  DECLARE_SINGLETON_LOCK(MyGlobalLock, LockType, [, LockFlags]);
-//
-#define DECLARE_SINGLETON_LOCK(name, lock_type, ...) \
-  LOCK_DEP_SINGLETON_LOCK(name, lock_type, ##__VA_ARGS__)
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_MUTEX_H_

@@ -75,3 +75,9 @@ ignore-missing-imports = ["*"]
 skip-interpreter-query = true
 python-version = "3.14"
 python-platform = "linux"
+
+[tool.pyrefly.errors]
+implicit-any-type-argument = "error"
+unused-ignore = "error"
+redundant-cast = "error"
+incompatible-comparison = "error"

@@ -7,10 +7,14 @@
 #include <lib/async/cpp/task.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/component/incoming/cpp/service_member_watcher.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <atomic>
+
 #include "src/developer/adb/third_party/adb/adb-protocol.h"
+#include "src/developer/adb/third_party/adb/socket.h"
 
 namespace adb {
 
@@ -32,7 +36,11 @@ void Adb::ReceiveCallback(
     return;
   }
 
-  impl_->Receive().Then(fit::bind_member<&Adb::ReceiveCallback>(this));
+  auto impl = GetImpl();
+  if (!impl.is_valid()) {
+    return;
+  }
+  impl->Receive().Then(fit::bind_member<&Adb::ReceiveCallback>(this));
   if (response.is_error()) {
     FX_PLOGS(ERROR, response.error_value()) << "Failed result";
     return;
@@ -129,22 +137,29 @@ void Adb::ReceiveCallback(
 }
 
 bool Adb::SendUsbPacket(uint8_t* buf, size_t len) {
-  static uint32_t payload_cnt = 0;
-  static size_t total_sent = 0;
+  static std::atomic<uint32_t> payload_cnt = 0;
+  static std::atomic<size_t> total_sent = 0;
 
-  payload_cnt++;
+  uint32_t count = payload_cnt.fetch_add(1, std::memory_order_relaxed) + 1;
+
+  auto impl = GetImpl();
+  if (!impl.is_valid()) {
+    FX_LOGS(WARNING) << "Packet " << count << " dropped, UsbAdbImpl not connected";
+    return false;
+  }
 
   bool success = false;
-  auto result = impl_.sync()->QueueTx(fidl::VectorView<uint8_t>::FromExternal(buf, len));
+  // TODO(https://fxbug.dev/584844411): Pipeline async QueueTx calls for bulk TX throughput.
+  auto result = impl.sync()->QueueTx(fidl::VectorView<uint8_t>::FromExternal(buf, len));
   if (!result.ok() || result->is_error()) {
-    FX_LOGS(WARNING) << "Packet " << payload_cnt << " send failed "
+    FX_LOGS(WARNING) << "Packet " << count << " send failed "
                      << (result.ok() ? result->error_value() : result.status());
   } else {
-    total_sent += len;
-    FX_LOGS(DEBUG) << "sent packet " << payload_cnt << " of len " << len << " total " << total_sent;
+    size_t sent = total_sent.fetch_add(len, std::memory_order_relaxed) + len;
+    FX_LOGS(DEBUG) << "sent packet " << count << " of len " << len << " total " << sent;
     success = true;
   }
-  FX_LOGS(DEBUG) << "queued packet " << payload_cnt << " " << success;
+  FX_LOGS(DEBUG) << "queued packet " << count << " " << success;
   return success;
 }
 
@@ -183,11 +198,6 @@ zx_status_t Adb::Init(DeviceConnector* connector) {
   }
   device_client_ = std::move(dev.value());
 
-  auto fd_connection =
-      std::make_unique<BlockingConnectionAdapter>(std::make_unique<FdConnection>(this));
-  transport_.SetConnection(std::move(fd_connection));
-  transport_.connection()->Start();
-
   auto status = StartUsbAdbImpl();
   if (status != ZX_OK) {
     return status;
@@ -203,6 +213,14 @@ zx_status_t Adb::Init(DeviceConnector* connector) {
   return ZX_OK;
 }
 
+fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> Adb::GetImpl() {
+  std::lock_guard lock(impl_lock_);
+  if (!impl_.is_valid()) {
+    return {};
+  }
+  return impl_.Clone();
+}
+
 zx_status_t Adb::StartUsbAdbImpl() {
   auto ends = fidl::CreateEndpoints<fuchsia_hardware_adb::UsbAdbImpl>();
   if (!ends.is_ok()) {
@@ -212,11 +230,22 @@ zx_status_t Adb::StartUsbAdbImpl() {
   pending_packet_.reset();
   copied_len_ = 0;
 
-  impl_teardown_ = std::make_shared<libsync::Completion>();
-  impl_ = fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl>(
+  auto fd_connection =
+      std::make_unique<BlockingConnectionAdapter>(std::make_unique<FdConnection>(this));
+  transport_.SetConnection(std::move(fd_connection));
+  transport_.connection()->Start();
+
+  auto teardown = std::make_shared<libsync::Completion>();
+  fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> impl(
       std::move(ends->client), dispatcher_,
-      fidl::ObserveTeardown([teardown = impl_teardown_] { teardown->Signal(); }));
-  impl_->Receive().Then(fit::bind_member<&Adb::ReceiveCallback>(this));
+      fidl::ObserveTeardown([teardown] { teardown->Signal(); }));
+  {
+    std::lock_guard lock(impl_lock_);
+    impl_ = impl.Clone();
+    impl_teardown_ = std::move(teardown);
+  }
+  impl->Receive().Then(fit::bind_member<&Adb::ReceiveCallback>(this));
+  impl = {};
 
   auto result = fidl::WireCall(device_client_)->StartAdb(std::move(ends->server));
   if (!result.ok() || result->is_error()) {
@@ -231,17 +260,43 @@ zx_status_t Adb::StartUsbAdbImpl() {
 }
 
 void Adb::StopUsbAdbImpl() {
-  std::shared_ptr<libsync::Completion> teardown = std::move(impl_teardown_);
+  std::shared_ptr<libsync::Completion> teardown;
   {
-    fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> old_impl = std::move(impl_);
+    fidl::WireSharedClient<fuchsia_hardware_adb::UsbAdbImpl> old_impl;
+    {
+      std::lock_guard lock(impl_lock_);
+      old_impl = std::move(impl_);
+      teardown = std::move(impl_teardown_);
+    }
     if (old_impl.is_valid()) {
       old_impl.AsyncTeardown();
     }
   }
+  transport_.online = false;
   if (teardown) {
     teardown->Wait();
   }
-  handle_offline(&transport_);
+  // Close transport sockets on |dispatcher_| because their async::WaitMethod objects and the
+  // socket lists are single-threaded on |dispatcher_|, falling back to the caller thread only if
+  // |dispatcher_| has already shut down.
+  libsync::Completion task_done;
+  bool closed_on_dispatcher = false;
+  if (async::PostTask(dispatcher_, [this, &closed_on_dispatcher,
+                                    signal_done = fit::defer([&] { task_done.Signal(); })] {
+        handle_offline(&transport_);
+        close_all_sockets(&transport_);
+        closed_on_dispatcher = true;
+      }) == ZX_OK) {
+    task_done.Wait();
+  }
+  if (!closed_on_dispatcher) {
+    handle_offline(&transport_);
+    close_all_sockets(&transport_);
+  }
+  if (auto connection = transport_.connection()) {
+    connection->Stop();
+    transport_.SetConnection(nullptr);
+  }
 }
 
 zx::result<std::unique_ptr<Adb>> Adb::Create(async_dispatcher_t* dispatcher) {
@@ -272,12 +327,7 @@ zx::result<std::unique_ptr<Adb>> Adb::Create(async_dispatcher_t* dispatcher) {
   return zx::ok(std::move(adb));
 }
 
-Adb::~Adb() {
-  StopUsbAdbImpl();
-  if (auto connection = transport_.connection()) {
-    connection->Stop();
-  }
-}
+Adb::~Adb() { StopUsbAdbImpl(); }
 
 zx_status_t Adb::Reset() {
   auto result = fidl::WireCall(device_client_)->StopAdb();

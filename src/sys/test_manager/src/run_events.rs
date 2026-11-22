@@ -45,7 +45,7 @@ pub(crate) enum SuiteEventPayload {
     CustomArtifact(ftest_manager::CustomArtifact),
     SuiteSyslog(ftest_manager::Syslog),
     SuiteStderr(zx::Socket),
-    SuiteStarted,
+    SuiteStarted { runner: Option<String> },
     SuiteStopped(SuiteResult),
     DebugData(ClientEnd<DebugDataIteratorMarker>),
 }
@@ -58,10 +58,10 @@ pub struct SuiteEvents {
 impl Into<FidlEvent> for SuiteEvents {
     fn into(self) -> FidlEvent {
         match self.payload {
-            SuiteEventPayload::SuiteStarted => FidlEvent {
+            SuiteEventPayload::SuiteStarted { runner } => FidlEvent {
                 timestamp: Some(self.timestamp),
                 details: Some(FidlEventDetails::SuiteStarted(
-                    ftest_manager::SuiteStartedEventDetails { ..Default::default() },
+                    ftest_manager::SuiteStartedEventDetails { runner, ..Default::default() },
                 )),
                 ..Default::default()
             },
@@ -247,10 +247,10 @@ impl SuiteEvents {
         }
     }
 
-    pub fn suite_started() -> Self {
+    pub fn suite_started(runner: Option<String>) -> Self {
         Self {
             timestamp: zx::MonotonicInstant::get().into_nanos(),
-            payload: SuiteEventPayload::SuiteStarted,
+            payload: SuiteEventPayload::SuiteStarted { runner },
         }
     }
 
@@ -286,11 +286,21 @@ mod tests {
 
     #[test]
     fn suite_events() {
-        let event = SuiteEvents::suite_started().into_event();
+        let event = SuiteEvents::suite_started(None).into_event();
         assert_matches!(event.timestamp, Some(_));
         assert_eq!(
             event.details,
             Some(FidlEventDetails::SuiteStarted(ftest_manager::SuiteStartedEventDetails {
+                ..Default::default()
+            }))
+        );
+
+        let event = SuiteEvents::suite_started(Some("gtest_runner".into())).into_event();
+        assert_matches!(event.timestamp, Some(_));
+        assert_eq!(
+            event.details,
+            Some(FidlEventDetails::SuiteStarted(ftest_manager::SuiteStartedEventDetails {
+                runner: Some("gtest_runner".into()),
                 ..Default::default()
             }))
         );

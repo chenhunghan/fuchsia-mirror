@@ -57,7 +57,6 @@ TYPED_TEST(DlTests, NotFound) {
   }
 }
 
-// TODO(https://fxbug.dev/339028040): Test missing symbol in transitive dep.
 // Load a module that depends on libld-dep-a.so, but this dependency does not
 // provide the c symbol referenced by the root module, so relocation fails.
 TYPED_TEST(DlTests, MissingSymbol) {

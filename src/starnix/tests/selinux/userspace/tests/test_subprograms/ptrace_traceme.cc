@@ -13,11 +13,8 @@
 int main(int argc, char** argv) {
   bool expect_success = std::atoi(argv[1]);
   pid_t pid = 0;
-  if (expect_success) {
-    EXPECT_THAT(ptrace(PTRACE_TRACEME, pid, nullptr, nullptr), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(ptrace(PTRACE_TRACEME, pid, nullptr, nullptr), SyscallFailsWithErrno(EACCES));
-  }
+  EXPECT_THAT(ptrace(PTRACE_TRACEME, pid, nullptr, nullptr),
+              SyscallSucceedsOrFailsWithErrno(expect_success, EACCES));
 
   return ::testing::Test::HasFailure() ? 1 : 0;
 }

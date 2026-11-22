@@ -269,6 +269,14 @@ void DisplayEngineFidlAdapter::ReleaseCapture(
   completer.buffer(arena).ReplySuccess();
 }
 
+void DisplayEngineFidlAdapter::NotifyExpectedPresent(
+    fuchsia_hardware_display_engine::wire::EngineNotifyExpectedPresentRequest* request,
+    fdf::Arena& arena, NotifyExpectedPresentCompleter::Sync& completer) {
+  engine_.NotifyExpectedPresent(display::DisplayId(request->display_id),
+                                zx::time_monotonic(request->expected_present_time),
+                                zx::duration(request->frame_interval));
+}
+
 void DisplayEngineFidlAdapter::handle_unknown_method(
     fidl::UnknownMethodMetadata<fuchsia_hardware_display_engine::Engine> metadata,
     fidl::UnknownMethodCompleter::Sync& completer) {

@@ -6,13 +6,13 @@
 
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/syslog/cpp/log_settings.h>
 #include <lib/zx/event.h>
 
 #include <queue>
 
 #include <fbl/mutex.h>
 #include <gtest/gtest.h>
-#include <sdk/lib/syslog/cpp/log_settings.h>
 
 #include "src/lib/testing/predicates/status.h"
 

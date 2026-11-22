@@ -70,10 +70,7 @@ impl FileOps for PowerWakeupCountFile {
             }
             let wakeup_count = self.suspend_resume_manager.total_wakeup_events();
             let content = serialize_for_file(wakeup_count);
-            if offset >= content.len() {
-                return Ok(0);
-            }
-            data.write(&content[offset..])
+            data.write_tail(&content, offset)
         })
     }
 

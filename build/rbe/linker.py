@@ -18,8 +18,7 @@ import sys
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 
-import cl_utils
-import depfile
+from build.rbe import cl_utils, depfile
 
 _SCRIPT_BASENAME = Path(__file__).name
 

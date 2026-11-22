@@ -302,12 +302,13 @@ func (f *Ffx) GetDefaultTarget(ctx context.Context) (string, error) {
 }
 
 // Flash uses "ffx target flash" to flash a product bundle into a device.
-// pubKeyPath is optional and ignored if empty.
-func (f *Ffx) Flash(ctx context.Context, fastbootSerial, productDir, pubKeyPath string) error {
-	ffxArgs := []string{
-		"--target", fastbootSerial,
-		"target", "flash",
-		"--product-bundle", productDir}
+// target and pubKeyPath are optional and ignored if empty.
+func (f *Ffx) Flash(ctx context.Context, target, productDir, pubKeyPath string) error {
+	var ffxArgs []string
+	if target != "" {
+		ffxArgs = append(ffxArgs, "--target", target)
+	}
+	ffxArgs = append(ffxArgs, "target", "flash", "--product-bundle", productDir)
 	if pubKeyPath != "" {
 		ffxArgs = append(ffxArgs, "--authorized-keys", pubKeyPath)
 	}

@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::{Error, format_err};
-use async_helpers::hanging_get::asynchronous as hanging_get;
 use fidl_fuchsia_bluetooth_sys::{self as sys, HostWatcherRequest, HostWatcherRequestStream};
 use fuchsia_bluetooth::types::host_info::HostInfo;
 
@@ -13,21 +12,21 @@ use log::warn;
 use crate::host_dispatcher::*;
 
 pub async fn run(hd: HostDispatcher, mut stream: HostWatcherRequestStream) -> Result<(), Error> {
-    let mut watch_hosts_subscriber = hd.watch_hosts().await;
+    let watch_hosts_subscriber = hd.watch_hosts();
     while let Some(event) = stream.next().await {
-        handler(hd.clone(), &mut watch_hosts_subscriber, event?).await?;
+        handler(hd.clone(), &watch_hosts_subscriber, event?).await?;
     }
     Ok(())
 }
 
 async fn handler(
     hd: HostDispatcher,
-    watch_hosts_subscriber: &mut hanging_get::Subscriber<sys::HostWatcherWatchResponder>,
+    watch_hosts_subscriber: &WatchHostsSubscriber,
     request: HostWatcherRequest,
 ) -> Result<(), Error> {
     match request {
         HostWatcherRequest::Watch { responder } => {
-            watch_hosts_subscriber.register(responder).await.map_err(|e| {
+            watch_hosts_subscriber.register(responder).map_err(|e| {
                 // If we cannot register the observation, we return an error from the handler
                 // function. This terminates the stream and will drop the channel, as we are unable
                 // to fulfill our contract for Watch(). The client can attempt to reconnect and

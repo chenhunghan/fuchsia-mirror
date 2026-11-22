@@ -8,6 +8,7 @@
 #include <lib/zx/result.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <zircon/assert.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
@@ -169,7 +170,8 @@ class RegionAllocator {
   class Region;
   using RegionSlabTraits =
       fbl::ManualDeleteSlabAllocatorTraits<Region*, kRegionPoolSlabSize, fbl::Mutex,
-                                           fbl::SlabAllocatorOptions::AllowManualDeleteOperator>;
+                                           fbl::SlabAllocatorOptions::AllowManualDeleteOperator |
+                                               fbl::SlabAllocatorOptions::EnableObjectCount>;
 
   class Region
       : public ralloc_region_t,
@@ -217,7 +219,7 @@ class RegionAllocator {
         // bookkeeping information (which is logically owned by the
         // pool) needs to be mutable in order to merge with other
         // regions in the pool.
-        ZX_DEBUG_ASSERT(region->owner_ != nullptr);
+        ZX_ASSERT(region->owner_ != nullptr);
         Region* r = const_cast<Region*>(region);
         r->owner_->ReleaseRegion(r);
       }
@@ -265,7 +267,10 @@ class RegionAllocator {
     // Attempt to allocate at least one slab up front when we are created.
     explicit RegionPool(size_t num_slabs) : fbl::SlabAllocator<RegionSlabTraits>(num_slabs, true) {}
 
-    ~RegionPool() {}
+    ~RegionPool() {
+      ZX_ASSERT_MSG(obj_count() == 0, "RegionPool destroyed with %zu regions still allocated",
+                    obj_count());
+    }
 
     // No one may copy, assign or move us.
     DISALLOW_COPY_ASSIGN_AND_MOVE(RegionPool);

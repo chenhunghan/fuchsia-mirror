@@ -31,7 +31,7 @@ TEST_F(ConsoleContextTest, CurrentBreakpoint) {
   auto event = console().GetOutputEvent();
   ASSERT_TRUE(debug::StringContains(event.output.AsString(), "Created Breakpoint 1"))
       << event.output.AsString();
-  int breakpoint_1_backend_id = mock_remote_api()->last_breakpoint_id();
+  uint32_t breakpoint_1_backend_id = static_cast<uint32_t>(mock_remote_api()->last_breakpoint_id());
 
   // Breakpoint 2.
   console().ProcessInputLine("b 0x20000");

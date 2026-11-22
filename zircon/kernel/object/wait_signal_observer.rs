@@ -1,14 +1,15 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2020 The Fuchsia Authors
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use core::ffi::c_void;
-use core::mem::MaybeUninit;
+use core::cell::UnsafeCell;
+use core::marker::PhantomData;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicU32, Ordering};
 use fbl::{Canary, RefPtr};
-use zr::ToMutPtr;
+use ksync::LockToken;
 use zx_status::Status;
 use zx_types::zx_signals_t;
 
@@ -18,271 +19,226 @@ use crate::kernel::owned_wait_queue::OwnedWaitQueue;
 use super::dispatcher::Dispatcher;
 use super::handle::HandleRef;
 use super::handle_table::HandleTableLockClass;
-use ksync::LockToken;
-use object_constants_rs as object_constants;
+use super::signal_observer::{SignalObserver, SignalObserverType};
 
-unsafe extern "C" {
-    fn cpp_wait_signal_observer_init(observer: *mut c_void);
-    fn cpp_wait_signal_observer_destroy(observer: *mut c_void);
-}
-
-zr::static_assert_size_and_align!(
-    WaitSignalObserverState,
-    object_constants::kWaitSignalObserverStorageSize,
-    object_constants::kWaitSignalObserverStorageAlign,
-);
-
-/// The Rust state for `WaitSignalObserver`, stored in the C++ object's `opaque_storage_`.
+/// Helper struct for waiting on the `object_wait_one` and `object_wait_many` syscalls.
+///
+/// Participates in the [`SignalObserver`] intrusive list on [`Dispatcher`]. Every field is
+/// wrapped in [`UnsafeCell`] (or [`AtomicU32`]) so `WaitSignalObserver` contains zero `Freeze`
+/// bytes while another CPU may concurrently run [`Self::on_match_impl`] or
+/// [`Self::on_cancel_impl`] under `Dispatcher`'s lock.
 #[repr(C, align(8))]
-pub struct WaitSignalObserverState {
-    canary: Canary<{ fbl::magic(b"WTSO") }>,
-    // Safety invariant: Between `begin()` and `end()`, points to a live, initialized `Event`.
-    event: *const Event,
-    dispatcher: Option<RefPtr<Dispatcher>>,
+pub struct WaitSignalObserver<'e> {
+    base: SignalObserver,
+    canary: UnsafeCell<Canary<{ fbl::magic(b"WTSO") }>>,
     final_signal_state: AtomicU32,
+    /// Safety invariant: Between [`Self::begin`] and [`Self::end`], points to a live, initialized
+    /// [`Event`] outliving `'e`.
+    event: UnsafeCell<*const Event>,
+    dispatcher: UnsafeCell<Option<RefPtr<Dispatcher>>>,
+    _event: PhantomData<&'e Event>,
 }
 
-impl WaitSignalObserverState {
-    /// Callback when watched signals match.
-    ///
-    /// # Safety
-    ///
-    /// - `self.event` must point to a valid, initialized `Event` that stays live through the
-    ///   signal operation (as required by [`Event::signal_worker`]).
-    /// - `queue_to_own` must be null or point to a valid, initialized `OwnedWaitQueue`.
-    /// - No `ChainLockTransaction` may be active on this CPU.
-    pub unsafe fn on_match(&self, signals: zx_signals_t, queue_to_own: *mut c_void) {
-        self.canary.assert();
-        // Save the signal state, and wake our waiter.
-        self.final_signal_state.store(signals, Ordering::Release);
-        // SAFETY: The caller guarantees `queue_to_own` is null or a valid `OwnedWaitQueue`,
-        // `self.event` points to a live `Event`, and no `ChainLockTransaction` is active.
-        unsafe {
-            let queue_to_own = queue_to_own.cast::<OwnedWaitQueue>().as_ref();
-            Event::signal_worker(self.event, Ok(()), queue_to_own);
-        }
-    }
+zr::static_assert!(core::mem::offset_of!(WaitSignalObserver<'_>, base) == 0);
 
-    /// Callback when handle is cancelled or closed.
-    ///
-    /// # Safety
-    ///
-    /// - `self.event` must point to a valid, initialized `Event` that stays live through the
-    ///   signal operation (as required by [`Event::signal_worker`]).
-    /// - No `ChainLockTransaction` may be active on this CPU.
-    pub unsafe fn on_cancel(&self, signals: zx_signals_t) {
-        self.canary.assert();
-        // Save the signal state, and wake our waiter.
-        self.final_signal_state
-            .store(signals | zx_types::ZX_SIGNAL_HANDLE_CLOSED, Ordering::Release);
-        // SAFETY: The caller guarantees `self.event` points to a live `Event` and no
-        // `ChainLockTransaction` is active.
-        unsafe {
-            Event::signal_worker(self.event, Err(Status::CANCELED), None);
-        }
-    }
-}
-
-impl Drop for WaitSignalObserverState {
-    fn drop(&mut self) {
-        self.canary.assert();
-        debug_assert!(self.dispatcher.is_none());
-    }
-}
-
-/// FFI initialization of `WaitSignalObserverState` called from C++ constructor.
-///
-/// # Safety
-///
-/// `storage` must point to valid uninitialized memory of size and alignment
-/// matching `WaitSignalObserverState`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_signal_observer_init(
-    storage: *mut MaybeUninit<WaitSignalObserverState>,
-) {
-    // SAFETY: `storage` is non-null and points to uninitialized storage of matching size and align.
-    unsafe {
-        (*storage).write(WaitSignalObserverState {
-            canary: Canary::new(),
-            event: core::ptr::null(),
-            dispatcher: None,
-            final_signal_state: AtomicU32::new(0),
-        });
-    }
-}
-
-/// FFI destruction of `WaitSignalObserverState` called from C++ destructor.
-///
-/// # Safety
-///
-/// `storage` must point to a valid initialized `WaitSignalObserverState`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_signal_observer_destroy(storage: *mut WaitSignalObserverState) {
-    // SAFETY: `storage` points to an initialized `WaitSignalObserverState`.
-    unsafe {
-        core::ptr::drop_in_place(storage);
-    }
-}
-
-/// FFI callback when watched signals match.
-///
-/// # Safety
-///
-/// - `state` must point to a valid initialized `WaitSignalObserverState` whose `event` points to a
-///   live, initialized `Event`.
-/// - `queue_to_own` must be null or point to a valid, initialized `OwnedWaitQueue`.
-/// - No `ChainLockTransaction` may be active on this CPU.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_signal_observer_on_match(
-    state: &WaitSignalObserverState,
-    signals: zx_signals_t,
-    queue_to_own: *mut c_void,
-) {
-    // SAFETY: Forwarded from the caller.
-    unsafe {
-        state.on_match(signals, queue_to_own);
-    }
-}
-
-/// FFI callback when handle is cancelled or closed.
-///
-/// # Safety
-///
-/// - `state` must point to a valid initialized `WaitSignalObserverState` whose `event` points to a
-///   live, initialized `Event`.
-/// - No `ChainLockTransaction` may be active on this CPU.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_wait_signal_observer_on_cancel(
-    state: &WaitSignalObserverState,
-    signals: zx_signals_t,
-) {
-    // SAFETY: Forwarded from the caller.
-    unsafe {
-        state.on_cancel(signals);
-    }
-}
-
-/// Helper struct for waiting on `object_wait_one` and `object_wait_many` syscalls.
-///
-/// Wraps the underlying C++ `WaitSignalObserver` which participates in the `SignalObserver`
-/// intrusive list on `Dispatcher`.
-#[repr(C, align(8))]
-pub struct WaitSignalObserver {
-    storage: zr::OpaqueBytes<{ object_constants::kWaitSignalObserverSize }>,
-}
-
-zr::static_assert!(
-    core::mem::size_of::<WaitSignalObserver>() == object_constants::kWaitSignalObserverSize
-);
-zr::static_assert!(
-    core::mem::align_of::<WaitSignalObserver>() == object_constants::kWaitSignalObserverAlign
-);
-
-impl Default for WaitSignalObserver {
+impl Default for WaitSignalObserver<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl WaitSignalObserver {
-    /// Creates a new `WaitSignalObserver` initialized in-place.
+impl<'e> WaitSignalObserver<'e> {
+    /// Creates a new `WaitSignalObserver`.
     pub fn new() -> Self {
-        let mut observer = Self { storage: zr::OpaqueBytes::default() };
-        // SAFETY: `observer` has `kWaitSignalObserverSize` bytes aligned to `kWaitSignalObserverAlign`,
-        // matching `WaitSignalObserver` layout.
-        unsafe {
-            cpp_wait_signal_observer_init(observer.as_mut_ptr());
-        }
-        observer
-    }
-
-    #[inline]
-    fn as_mut_ptr(&mut self) -> *mut c_void {
-        self.storage.to_mut_ptr().cast()
-    }
-
-    #[inline]
-    fn state_mut(&mut self) -> &mut WaitSignalObserverState {
-        // SAFETY: `self.as_mut_ptr()` points to an initialized C++ `WaitSignalObserver` whose
-        // `opaque_storage_` is located at offset `kWaitSignalObserverStorageOffset`.
-        unsafe {
-            let state_ptr = self
-                .as_mut_ptr()
-                .cast::<u8>()
-                .add(object_constants::kWaitSignalObserverStorageOffset);
-            &mut *state_ptr.cast::<WaitSignalObserverState>()
+        Self {
+            base: SignalObserver::new(SignalObserverType::WaitSignal, 0),
+            canary: UnsafeCell::new(Canary::new()),
+            final_signal_state: AtomicU32::new(0),
+            event: UnsafeCell::new(core::ptr::null()),
+            dispatcher: UnsafeCell::new(None),
+            _event: PhantomData,
         }
     }
 
     #[inline]
-    fn signal_observer_ptr(&mut self) -> *mut c_void {
-        self.as_mut_ptr()
+    fn assert_canary(&self) {
+        // SAFETY: `self.canary` is initialized in `new` and only mutated in `Canary::drop` after
+        // `end` has synchronized with any concurrent callbacks.
+        unsafe {
+            (*self.canary.get()).assert();
+        }
+    }
+
+    /// Returns a pointer to the embedded [`SignalObserver`] base with `SharedReadWrite` provenance
+    /// over the entire `WaitSignalObserver` (every byte of `Self` is inside `UnsafeCell`).
+    #[inline]
+    fn as_signal_observer_ptr(&self) -> *mut SignalObserver {
+        core::ptr::from_ref(self).cast::<SignalObserver>().cast_mut()
     }
 
     /// Begins observing signals on the given handle while holding the handle table lock.
     ///
-    /// # Invariants
-    ///
     /// Calling this requires a `LockToken<'_, HandleTableLockClass>` to prove that the handle
-    /// table lock is held. If this succeeds, `end()` must be called before the `Event` is
-    /// destroyed.
-    pub fn begin(
-        &mut self,
+    /// table lock is held. If this succeeds, [`Self::end`] must be called before dropping this
+    /// observer.
+    ///
+    /// # Safety
+    ///
+    /// - `self` must not already be registered (any prior `Ok(())` call to [`Self::begin`] must
+    ///   have been paired with [`Self::end`]).
+    /// - The calling thread must not hold `handle.dispatcher()`'s lock.
+    /// - If this call returns `Ok(())`, the caller must call [`Self::end`] without holding the
+    ///   handle table lock or `handle.dispatcher()`'s lock before calling [`Self::begin`] again,
+    ///   dropping `self`, or destroying `event`; while registered, the caller must not rely on
+    ///   [`Drop`], leak `self`, or forget `self`.
+    pub unsafe fn begin(
+        self: Pin<&Self>,
         _token: &LockToken<'_, HandleTableLockClass>,
-        event: &Event,
+        event: &'e Event,
         handle: &HandleRef<'_>,
         watched_signals: zx_signals_t,
     ) -> Result<(), Status> {
-        let signal_observer_ptr = self.signal_observer_ptr();
-        let state = self.state_mut();
-        state.canary.assert();
-        debug_assert!(state.dispatcher.is_none());
+        let self_ref = self.get_ref();
+        self_ref.assert_canary();
+        // Calling `begin` twice without an intervening `end` would re-insert an already-linked
+        // `SignalObserver` node and race on `self_ref.event`.
+        // SAFETY: `WaitSignalObserver` is `!Sync`, and only `begin`, `end`, and `Drop` on the
+        // owning thread access `self_ref.dispatcher`.
+        unsafe {
+            debug_assert!((*self_ref.dispatcher.get()).is_none());
+        }
 
-        state.event = event as *const Event;
-        let dispatcher = handle.dispatcher();
+        // Store `event` before calling `add_observer`: `add_observer` synchronously invokes
+        // `on_match_impl` if one of `watched_signals` is already active.
+        // SAFETY: `self` is not currently registered with any `Dispatcher`, so no concurrent
+        // callback can read `self_ref.event`.
+        unsafe {
+            *self_ref.event.get() = core::ptr::from_ref(event);
+        }
+        let dispatcher = handle.as_handle().dispatcher();
+        let base_ptr = self_ref.as_signal_observer_ptr();
 
         // Wait for one of `watched_signals` to become active.
         //
         // Note that `watched_signals` may be 0, in which case we won't receive
         // a callback, but will remain queued until `end` is called.
-        // SAFETY: `signal_observer_ptr` and `handle.as_ptr()` point to valid initialized objects.
+        // SAFETY: `self` is pinned with zero `Freeze` bytes and is not mutably aliased until
+        // `Drop` (which the caller runs only after `end`), `base_ptr` points to the
+        // `SignalObserver` base at offset 0 with provenance over the entire `WaitSignalObserver`,
+        // the caller guarantees `self` is not already registered (checked by `debug_assert!`
+        // above), `self_ref.event` points to `event` which outlives registration per the caller's
+        // contract, `dispatcher` is kept alive in `self_ref.dispatcher` until `end` unregisters
+        // `self`, and the caller guarantees `dispatcher`'s lock is not held.
         unsafe {
-            dispatcher.add_observer(signal_observer_ptr, handle.as_ptr().cast(), watched_signals)
-        }?;
+            dispatcher.add_observer(base_ptr, handle.as_ptr().cast(), watched_signals)?;
+        }
 
-        state.dispatcher = Some(dispatcher);
+        // SAFETY: `WaitSignalObserver` is `!Sync`, only `begin`, `end`, and `Drop` on the owning
+        // thread access `self_ref.dispatcher`, and `*self_ref.dispatcher.get()` is guaranteed to
+        // be `None` at entry (per caller contract and `debug_assert!` above), so overwriting via
+        // `ptr::write` avoids dead `RefPtr::drop` glue.
+        unsafe {
+            self_ref.dispatcher.get().write(Some(dispatcher.clone()));
+        }
         Ok(())
     }
 
     /// Ends observing signals and returns the final observed signals.
     ///
     /// This should *not* be called under the handle table lock.
-    pub fn end(&mut self) -> zx_signals_t {
-        let signal_observer_ptr = self.signal_observer_ptr();
-        let state = self.state_mut();
-        state.canary.assert();
-        debug_assert!(state.dispatcher.is_some());
+    pub fn end(self: Pin<&Self>) -> zx_signals_t {
+        let self_ref = self.get_ref();
+        self_ref.assert_canary();
+        // SAFETY: `WaitSignalObserver` is `!Sync`, and only `begin`, `end`, and `Drop` on the
+        // owning thread access `self_ref.dispatcher`.
+        let dispatcher =
+            unsafe { (*self_ref.dispatcher.get()).take() }.expect("dispatcher must be present");
 
-        let dispatcher = state.dispatcher.take().expect("dispatcher must be present");
+        let base_ptr = self_ref.as_signal_observer_ptr();
         let mut signals: zx_signals_t = 0;
-        // SAFETY: `signal_observer_ptr` points to a valid observer.
-        let was_removed = unsafe { dispatcher.remove_observer(signal_observer_ptr, &mut signals) };
+        // SAFETY: `base_ptr` points to the `SignalObserver` base at offset 0 of pinned `self` with
+        // provenance over the entire `WaitSignalObserver`, `self` has zero `Freeze` bytes and is
+        // not mutably aliased during `end`, `self` was only registered with `dispatcher` in
+        // `begin` (never another `Dispatcher`), and `dispatcher`'s lock is not held per `begin`'s
+        // caller contract. `remove_observer` acquires `dispatcher`'s lock, synchronizing with any
+        // concurrent `on_match_impl` or `on_cancel_impl` callback.
+        let was_removed = unsafe { dispatcher.remove_observer(base_ptr, &mut signals) };
 
-        // If `was_removed` is false, it means a callback was fired and `final_signal_state` has a value.
+        // If `was_removed` is false, it means a callback was fired and `final_signal_state` has a
+        // value. `Acquire` pairs with the `Release` store in `on_match_impl` / `on_cancel_impl`.
         if !was_removed {
-            return state.final_signal_state.load(Ordering::Acquire);
+            return self_ref.final_signal_state.load(Ordering::Acquire);
         }
 
         // Otherwise, return the set of signals at the point of removal.
         signals
     }
+
+    /// Callback when watched signals match (`SignalObserver::on_match`).
+    ///
+    /// # Safety
+    ///
+    /// - `this` must point to a valid, live `WaitSignalObserver` whose `event` points to a live,
+    ///   initialized `Event` that remains valid and unaliased by mutable references for the
+    ///   duration of this call.
+    /// - The watched `Dispatcher`'s lock must be held by the caller.
+    #[inline]
+    pub(super) unsafe fn on_match_impl(
+        this: *mut Self,
+        signals: zx_signals_t,
+        queue_to_own: Option<&OwnedWaitQueue>,
+    ) {
+        // SAFETY: `this` points to a live `WaitSignalObserver` under the watched `Dispatcher`'s
+        // lock, and `canary`, `final_signal_state`, and `event` remain valid for the duration of
+        // the callback (the waiting thread cannot complete `end` or destroy `event` until the
+        // watched `Dispatcher`'s lock is released).
+        unsafe {
+            (*(*this).canary.get()).assert();
+            // Save the signal state, and wake our waiter. `Release` pairs with the `Acquire` load
+            // in `end` (in addition to `Dispatcher`'s lock synchronization in `remove_observer`).
+            (*this).final_signal_state.store(signals, Ordering::Release);
+            let event = &**(*this).event.get();
+            event.signal_etc(Ok(()), queue_to_own);
+        }
+    }
+
+    /// Callback when handle is cancelled or closed (`SignalObserver::on_cancel`).
+    ///
+    /// # Safety
+    ///
+    /// - `this` must point to a valid, live `WaitSignalObserver` whose `event` points to a live,
+    ///   initialized `Event` that remains valid and unaliased by mutable references for the
+    ///   duration of this call.
+    /// - The watched `Dispatcher`'s lock must be held by the caller.
+    #[inline]
+    pub(super) unsafe fn on_cancel_impl(this: *mut Self, signals: zx_signals_t) {
+        // SAFETY: `this` points to a live `WaitSignalObserver` under the watched `Dispatcher`'s
+        // lock, and `canary`, `final_signal_state`, and `event` remain valid for the duration of
+        // the callback (the waiting thread cannot complete `end` or destroy `event` until the
+        // watched `Dispatcher`'s lock is released).
+        unsafe {
+            (*(*this).canary.get()).assert();
+            // Save the signal state, and wake our waiter. `Release` pairs with the `Acquire` load
+            // in `end` (in addition to `Dispatcher`'s lock synchronization in `remove_observer`).
+            (*this)
+                .final_signal_state
+                .store(signals | zx_types::ZX_SIGNAL_HANDLE_CLOSED, Ordering::Release);
+            let event = &**(*this).event.get();
+            event.signal_result(Err(Status::CANCELED));
+        }
+    }
 }
 
-impl Drop for WaitSignalObserver {
+impl Drop for WaitSignalObserver<'_> {
     fn drop(&mut self) {
-        // SAFETY: `self` is a valid `WaitSignalObserver`.
+        debug_assert!(
+            self.dispatcher.get_mut().is_none(),
+            "WaitSignalObserver dropped without end()",
+        );
+        // SAFETY: `self.dispatcher` is guaranteed to be `None` on drop (`end()` takes it);
+        // writing `None` without dropping lets LLVM elide dead `RefPtr<Dispatcher>` drop glue.
         unsafe {
-            cpp_wait_signal_observer_destroy(self.as_mut_ptr());
+            core::ptr::write(self.dispatcher.get_mut(), None);
         }
     }
 }

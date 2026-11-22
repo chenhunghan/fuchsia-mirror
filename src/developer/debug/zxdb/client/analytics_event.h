@@ -6,11 +6,17 @@
 #define SRC_DEVELOPER_DEBUG_ZXDB_CLIENT_ANALYTICS_EVENT_H_
 
 #include <chrono>
+#include <string>
+#include <string_view>
 
 #include "src/developer/debug/zxdb/common/err.h"
 #include "src/lib/analytics/cpp/core_dev_tools/google_analytics_4_client.h"
 
 namespace zxdb {
+
+// Searches for the current USER environment value in `input` and replaces each occurrence with
+// "$USER". Returns `input` unchanged if USER is unset or empty.
+std::string ObfuscateUser(std::string_view input);
 
 // Base class for all zxdb analytics events. All events are associated with a session identifier,
 // and the analytics library automatically adds a client/user identifier to all events.
@@ -32,6 +38,10 @@ class AnalyticsEvent : public analytics::core_dev_tools::Ga4Event {
 class SessionStarted final : public AnalyticsEvent {
  public:
   explicit SessionStarted(const std::string& session_id);
+
+  // Records whether an AI agent started this zxdb process. This comes from the environment of the
+  // process, so it's the same for all events in the session.
+  void SetRunByAgent(bool run_by_agent);
 };
 
 // Issued when the session is connected to a RemoteAPI implementation.

@@ -8,8 +8,7 @@
 #define ZIRCON_KERNEL_LIB_CRYPTO_INCLUDE_LIB_CRYPTO_GLOBAL_PRNG_H_
 
 #include <lib/crypto/prng.h>
-
-#include <kernel/ffi.h>
+#include <lib/crypto/prng_ffi.h>
 
 namespace crypto {
 
@@ -17,19 +16,10 @@ namespace global_prng {
 
 // Returns a pointer to the global PRNG singleton.  The pointer is
 // guaranteed to be non-null.
-Prng* GetInstance();
+inline Prng* GetInstance() { return rust_crypto_global_prng_get_instance(); }
 
 }  // namespace global_prng
 
 }  // namespace crypto
-
-extern "C" {
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_global_prng_is_thread_safe();
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_global_prng_draw(uint8_t* buffer, size_t len);
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_global_prng_add_entropy(const uint8_t* buffer, size_t len);
-}
 
 #endif  // ZIRCON_KERNEL_LIB_CRYPTO_INCLUDE_LIB_CRYPTO_GLOBAL_PRNG_H_

@@ -383,12 +383,10 @@ impl FileOps for PerfEventFile {
                         zx::MonotonicInstant::get().into_nanos() as u64;
                 }
 
-                // If we are sampling, invoke the profiler and collect a sample.
-                // Currently this is an example sample collection.
-                track_stub!(
-                    TODO("https://fxbug.dev/398914921"),
-                    "[perf_event_open] implement full sampling features"
-                );
+                // If we are sampling, start a profiler session. Sampling is time-based
+                // (CounterId::Nanoseconds) regardless of the event type, and the profiler allows
+                // only one session at a time, so other sampling events fail to start their own.
+                // Some mmap metadata is still hardcoded; see create_seq_lock.
                 if sampling_period(&perf_event_file.attr).is_some() {
                     ping_receiver(perf_event_file.ioctl_sender.clone(), IoctlOp::Enable);
                 }
@@ -840,10 +838,9 @@ async fn set_up_profiler(
         ..Default::default()
     };
 
-    track_stub!(
-        TODO("https://fxbug.dev/398914921"),
-        "[perf_event_open] allow for profiling system-wide not during tests"
-    );
+    // Every Linux task in this container is a process in the Starnix kernel's own job, so
+    // profiling that job covers all Linux tasks. Profiling system-wide would only add samples
+    // from native Fuchsia threads, which cannot be mapped to a Linux pid/tid and are dropped.
     let job = fuchsia_runtime::job_default();
     let koid = job.koid().map_err(|e| errno!(EINVAL, e.to_string()))?;
     let tasks = vec![
@@ -1313,7 +1310,7 @@ pub fn sys_perf_event_open(
 
     // Only require CAP_PERFMON (or CAP_SYS_ADMIN) when `perf_event_paranoid` exceeds the
     // threshold for the requested event.
-    // TODO(https://fxbug.dev/398914921): Starnix currently starts a job-wide profiler session
+    // TODO(https://fxbug.dev/427246425): Starnix currently starts a job-wide profiler session
     // regardless of `target`, so apply the CPU-wide threshold (`paranoid > 0`) to all targets
     // until sampling is scoped to the target task.
     let paranoid = current_task.kernel().perf_event_paranoid.load(Ordering::Relaxed);
@@ -1345,7 +1342,7 @@ pub fn sys_perf_event_open(
     // - type is PERF_TYPE_HARDWARE or
     // - type is in [CACHE, TRACEPOINT, BREAKPOINT, RAW) and pid == -1
     // - or when a low `perf_event_paranoid` waived the capability requirement
-    //   (TODO(https://fxbug.dev/398914921): sampling is currently job-wide regardless of
+    //   (TODO(https://fxbug.dev/427246425): sampling is currently job-wide regardless of
     //   target task or event type).
     let check_cpu = !requires_capability
         || match event_type {

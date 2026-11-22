@@ -258,13 +258,13 @@ total compilation time (assuming infinite parallelism) to the dependency chain
 which is the longest to compile. This also simplifies build rules, a topic [du
 jour](https://fxbug.dev/42154884).
 
-## Design
+## Design {#design}
 
 We split the design in three parts:
 
 1. First, [guiding principles](#guiding-principles) to inform design choices,
    and anchor the approach and path taken;
-1. Description of a [canonical FIDL toolchain](#canonical-toolchain) as an
+1. Description of a [canonical FIDL toolchain](#canonical-fidl-toolchain) as an
    example of how to decompose building FIDL to account for all requirements
    described;
 1. Lastly, some [specific cleanups](#eating-our-broccoli) which the Fuchsia FIDL

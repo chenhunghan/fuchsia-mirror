@@ -103,7 +103,6 @@ fx_test_component(
 
 fx_package(
     name = "package-directory-tests",
-    package_name = "package-directory-tests",
     test_components = [":test-component"],
 )
 

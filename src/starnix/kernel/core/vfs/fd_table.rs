@@ -8,7 +8,7 @@ use crate::task::{CurrentTask, register_delayed_release};
 use crate::vfs::{FdNumber, FileHandle, FileReleaser};
 use bitflags::bitflags;
 use fuchsia_rcu::subtle::{RcuPtrRef, rcu_ptr_upgrade};
-use fuchsia_rcu::{RcuDroppable, RcuReadScope, rcu_drop};
+use fuchsia_rcu::{RcuDroppable, RcuReadScope};
 use fuchsia_rcu_collections::rcu_array::RcuArray;
 use linux_uapi::{FD_CLOEXEC, FIOCLEX, FIONCLEX};
 use macro_rules_attribute::apply;
@@ -100,14 +100,10 @@ impl EncodedEntry {
         let ptr = Self::decode_ptr(value);
         if !ptr.is_null() {
             // SAFETY: The pointer is valid because it was encoded in `self.value`.
+            // Concurrent `FdTable` RCU readers in `rcu_ptr_upgrade` remain safe because
+            // `FileObjectState::weak_handle` holds a weak reference to this `Arc<FileReleaser>`
+            // allocation and defers dropping it to RCU. See `RcuWeakFileHandle`.
             let file = unsafe { Arc::from_raw(ptr) };
-            // Defer a weak reference to RCU so that the allocation remains valid (but
-            // un-upgradable) during the RCU grace period for concurrent readers.
-            // The remaining strong reference is held by the FlushedFile for the DelayedRelease
-            // queue which ensures we drop the FileHandle in a place where it will execute before
-            // returning from any syscall.
-            let weak = Arc::downgrade(&file);
-            rcu_drop(weak);
             register_delayed_release(FlushedFile(file, id));
         }
     }
@@ -272,6 +268,16 @@ impl Releasable for FlushedFile {
         let current_task = context;
         let FlushedFile(file, id) = self;
         file.flush(current_task, id);
+        // We are already inside `DelayedReleaser::apply`. If this was the last `FileHandle`
+        // reference, release the `FileObject` inline instead of dropping `FileReleaser` and
+        // boxing it for a second `DelayedReleaser` pass.
+        let raw = Arc::as_ptr(&file);
+        if let Some(releaser) = Arc::into_inner(file) {
+            // `releaser` owns `weak_handle`, which keeps the allocation at `raw` alive (with
+            // strong count 0) for concurrent `FdTable` RCU readers until it is dropped on RCU.
+            debug_assert!(std::ptr::eq(releaser.weak_handle().as_ptr(), raw));
+            releaser.release(current_task);
+        }
     }
 }
 
@@ -773,6 +779,30 @@ impl FdTable {
         }
     }
 
+    /// Fills `batch` with open file descriptors starting at `start_fd` (inclusive), returning
+    /// the number of descriptors written to `batch`.
+    pub fn fill_fd_batch(&self, start_fd: usize, batch: &mut [FdNumber]) -> usize {
+        if batch.is_empty() {
+            return 0;
+        }
+        let scope = RcuReadScope::new();
+        let view = self.read_entries(&scope);
+        let Some(slice) = view.slice.get(start_fd..) else {
+            return 0;
+        };
+        let mut count = 0;
+        for (offset, encoded_entry) in slice.iter().enumerate() {
+            if !encoded_entry.is_none() {
+                batch[count] = FdNumber::from_raw((start_fd + offset) as i32);
+                count += 1;
+                if count == batch.len() {
+                    break;
+                }
+            }
+        }
+        count
+    }
+
     /// Returns a vector of all current file descriptors in the table.
     pub fn get_all_fds(&self) -> Vec<FdNumber> {
         let mut fds = Vec::new();
@@ -876,7 +906,9 @@ pub enum TargetFdNumber {
 mod test {
     use super::*;
     use crate::fs::fuchsia::SyslogFile;
+    use crate::task::DelayedReleaser;
     use crate::testing::*;
+    use fuchsia_rcu::rcu_synchronize;
 
     fn add(
         current_task: &CurrentTask,
@@ -1038,6 +1070,86 @@ mod test {
             let mut visited = Vec::new();
             files.for_each_fd(|fd| visited.push(fd));
             assert_eq!(visited, vec![fd1, fd2]);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_fd_table_fill_fd_batch() {
+        spawn_kernel_and_run(async |current_task| {
+            let files = SharedFdTable::default();
+            let file = SyslogFile::new_file(&current_task);
+
+            let fd0 = add(&current_task, &files, file.clone()).unwrap();
+            let fd1 = add(&current_task, &files, file.clone()).unwrap();
+            let fd2 = add(&current_task, &files, file.clone()).unwrap();
+            let fd3 = add(&current_task, &files, file).unwrap();
+            files.close(fd1).unwrap();
+
+            let mut batch = [FdNumber::from_raw(0); 2];
+            assert_eq!(files.fill_fd_batch(0, &mut batch), 2);
+            assert_eq!(batch, [fd0, fd2]);
+
+            let next_start = batch[1].raw() as usize + 1;
+            assert_eq!(files.fill_fd_batch(next_start, &mut batch), 1);
+            assert_eq!(batch[0], fd3);
+
+            let after_last = batch[0].raw() as usize + 1;
+            assert_eq!(files.fill_fd_batch(after_last, &mut batch), 0);
+            assert_eq!(files.fill_fd_batch(100, &mut batch), 0);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_fd_table_close_rcu_guard_upgrade() {
+        spawn_kernel_and_run(async |current_task| {
+            let files = SharedFdTable::default();
+            let file = SyslogFile::new_file(&current_task);
+            let fd = add(&current_task, &files, file).unwrap();
+
+            // Hold an RCU read guard across close() and DelayedReleaser::apply() to verify that
+            // the underlying Arc<FileReleaser> allocation remains valid (and un-upgradable)
+            // after unique FileObject inline release.
+            {
+                let scope = RcuReadScope::new();
+                let view = files.read_entries(&scope);
+                let guard = view.slice[fd.raw() as usize].read(&scope).unwrap();
+                assert!(guard.to_handle().is_some());
+
+                assert!(files.close(fd).is_ok());
+                DelayedReleaser::default().apply(&current_task);
+
+                assert!(guard.to_handle().is_none());
+            }
+            rcu_synchronize();
+
+            // Also cover the non-unique FlushedFile path (Arc::into_inner -> None), where a
+            // cloned FileHandle outlives close() + FlushedFile::release and drops later via
+            // FileReleaser::drop -> DelayedReleaser::apply -> RcuWeakFileHandle::drop.
+            let shared_file = SyslogFile::new_file(&current_task);
+            let shared_fd0 = add(&current_task, &files, shared_file.clone()).unwrap();
+            let shared_fd1 = add(&current_task, &files, shared_file.clone()).unwrap();
+
+            assert!(files.close(shared_fd0).is_ok());
+            DelayedReleaser::default().apply(&current_task);
+            rcu_synchronize();
+
+            {
+                let scope = RcuReadScope::new();
+                let view = files.read_entries(&scope);
+                let shared_guard = view.slice[shared_fd1.raw() as usize].read(&scope).unwrap();
+                assert!(shared_guard.to_handle().is_some());
+
+                assert!(files.close(shared_fd1).is_ok());
+                DelayedReleaser::default().apply(&current_task);
+                assert!(shared_guard.to_handle().is_some());
+
+                drop(shared_file);
+                DelayedReleaser::default().apply(&current_task);
+                assert!(shared_guard.to_handle().is_none());
+            }
+            rcu_synchronize();
         })
         .await;
     }

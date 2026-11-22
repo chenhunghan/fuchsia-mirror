@@ -5,7 +5,7 @@
 #ifndef SRC_DEVICES_BLOCK_DRIVERS_FTL_NAND_DRIVER_H_
 #define SRC_DEVICES_BLOCK_DRIVERS_FTL_NAND_DRIVER_H_
 
-#include <fuchsia/hardware/badblock/c/banjo.h>
+#include <fidl/fuchsia.hardware.badblock/cpp/wire.h>
 #include <fuchsia/hardware/nand/c/banjo.h>
 #include <inttypes.h>
 #include <lib/ddk/device.h>
@@ -32,14 +32,16 @@ struct OperationCounters {
 // NAND protocol.
 class NandDriver : public ftl::NdmBaseDriver {
  public:
-  static std::unique_ptr<NandDriver> Create(const nand_protocol_t* parent,
-                                            const bad_block_protocol_t* bad_block,
-                                            uint32_t ftl_original_size = 0);
+  static std::unique_ptr<NandDriver> Create(
+      const nand_protocol_t* parent,
+      fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block =
+          fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock>(ZX_HANDLE_INVALID),
+      uint32_t ftl_original_size = 0);
 
-  static std::unique_ptr<NandDriver> CreateWithCounters(const nand_protocol_t* parent,
-                                                        const bad_block_protocol_t* bad_block,
-                                                        OperationCounters* counters,
-                                                        uint32_t ftl_original_size = 0);
+  static std::unique_ptr<NandDriver> CreateWithCounters(
+      const nand_protocol_t* parent,
+      fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block,
+      OperationCounters* counters, uint32_t ftl_original_size = 0);
 
   virtual const nand_info_t& info() const = 0;
 

@@ -142,6 +142,18 @@ class Builder:
         return res
 
     @staticmethod
+    def _pack_koid_argument(name: str, koid: int) -> bytes:
+        name_ref = Builder._make_string_ref(name)
+        name_bytes = name.encode("utf-8")
+        words = 2 + Builder._align(len(name_bytes)) // 8
+        header = 8 | (words << 4) | (name_ref << 16)
+        return (
+            Builder._pack_word(header)
+            + Builder._pad_bytes(name_bytes)
+            + Builder._pack_word(koid)
+        )
+
+    @staticmethod
     def _pack_argument(name: str, value: Any) -> bytes:
         name_ref = Builder._make_string_ref(name)
         name_bytes = name.encode("utf-8")
@@ -154,13 +166,7 @@ class Builder:
             return Builder._pack_word(header) + Builder._pad_bytes(name_bytes)
 
         if name == "process" and isinstance(value, int):
-            words = 2 + name_words
-            header = 8 | (words << 4) | (name_ref << 16)
-            return (
-                Builder._pack_word(header)
-                + Builder._pad_bytes(name_bytes)
-                + Builder._pack_word(value)
-            )
+            return Builder._pack_koid_argument(name, value)
 
         if isinstance(value, int) and -0x80000000 <= value <= 0x7FFFFFFF:
             words = 1 + name_words
@@ -844,7 +850,11 @@ class Builder:
         return self
 
     def add_thread_wakeup(
-        self, timestamp_ns: int, cpu_number: int, tid: int
+        self,
+        timestamp_ns: int,
+        cpu_number: int,
+        tid: int,
+        waker_tid: int | None = None,
     ) -> Self:
         """Emit a Thread Wakeup Scheduler event (Record Type 8).
 
@@ -852,14 +862,25 @@ class Builder:
             timestamp_ns: The timestamp of the wakeup in nanoseconds.
             cpu_number: The CPU index.
             tid: The thread ID that was awakened.
+            waker_tid: The thread ID that issued the wakeup, written as the
+                `waker` koid argument. Defaults to None (no argument).
 
         Returns:
             The builder instance for method chaining.
         """
-        header = 8 | (3 << 4) | (0 << 16) | (cpu_number << 20) | (2 << 60)
+        args_bytes = b""
+        num_args = 0
+        if waker_tid is not None:
+            args_bytes = Builder._pack_koid_argument("waker", waker_tid)
+            num_args = 1
+        words = 3 + len(args_bytes) // 8
+        header = (
+            8 | (words << 4) | (num_args << 16) | (cpu_number << 20) | (2 << 60)
+        )
         res = Builder._pack_word(header)
         res += Builder._pack_word(timestamp_ns)
         res += Builder._pack_word(tid)
+        res += args_bytes
         self._buf.write(res)
         return self
 
@@ -977,18 +998,16 @@ class Builder:
                     args=ev.get("args"),
                 )
             elif ph == "C":
-                args = ev.get("args") or {}
-                for k, v in args.items():
-                    compound_name = f"{name}:{k}:0"
-                    builder.add_counter(
-                        cat,
-                        compound_name,
-                        ts_ns,
-                        pid,
-                        tid,
-                        {"value": v},
-                        counter_id=0,
-                    )
+                counter_id = cls._parse_correlation_id(ev.get("id", 0))
+                builder.add_counter(
+                    cat,
+                    name,
+                    ts_ns,
+                    pid,
+                    tid,
+                    ev.get("args") or {},
+                    counter_id=counter_id,
+                )
             elif ph == "b":
                 async_id = cls._parse_correlation_id(ev.get("id", 0))
                 builder.add_async_begin(cat, name, ts_ns, pid, tid, async_id)

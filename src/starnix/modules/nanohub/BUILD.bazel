@@ -135,7 +135,6 @@ fx_test(
 
 fx_package(
     name = "google_display",
-    package_name = "google_display",
     components = [
         ":google_display_component",
     ],
@@ -160,7 +159,6 @@ fx_component_manifest(
 
 fx_package(
     name = "sockettunnel",
-    package_name = "sockettunnel",
     components = [
         ":sockettunnel_component",
     ],
@@ -185,7 +183,6 @@ fx_component_manifest(
 
 fx_package(
     name = "google_nanohub",
-    package_name = "google_nanohub",
     components = [
         ":google_nanohub_component",
     ],
@@ -210,7 +207,6 @@ fx_component_manifest(
 
 fx_package(
     name = "google_backlight",
-    package_name = "google_backlight",
     components = [
         ":google_backlight_component",
     ],

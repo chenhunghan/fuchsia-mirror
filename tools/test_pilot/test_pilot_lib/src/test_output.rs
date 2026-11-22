@@ -51,6 +51,11 @@ pub struct TestResult {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+
+    /// The test's runner, if known.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runner: Option<String>,
 }
 
 impl TestResult {
@@ -103,13 +108,26 @@ impl TestResult {
         }
 
         for other_case in other.cases {
-            if let Some(existing_case) = self.cases.iter_mut().find(|c| {
-                c.case_name == other_case.case_name
-                    && (c.suite_name == other_case.suite_name
-                        || c.suite_name.is_empty()
-                        || other_case.suite_name.is_empty())
-            }) {
-                changed |= existing_case.merge(other_case);
+            // Prefer an exact match. Only fall back to ignoring an empty suite name if the display
+            // names don't conflict, so e.g. a crate-root Rust test `foo` isn't merged into
+            // `tests::foo`.
+            let index = self
+                .cases
+                .iter()
+                .position(|c| {
+                    c.case_name == other_case.case_name && c.suite_name == other_case.suite_name
+                })
+                .or_else(|| {
+                    self.cases.iter().position(|c| {
+                        c.case_name == other_case.case_name
+                            && (c.suite_name.is_empty() || other_case.suite_name.is_empty())
+                            && (c.display_name == other_case.display_name
+                                || c.display_name.is_empty()
+                                || other_case.display_name.is_empty())
+                    })
+                });
+            if let Some(index) = index {
+                changed |= self.cases[index].merge(other_case);
             } else {
                 self.cases.push(other_case);
                 changed = true;
@@ -132,6 +150,10 @@ impl TestResult {
         }
         if other.exit_code.is_some() && other.exit_code != self.exit_code {
             self.exit_code = other.exit_code;
+            changed = true;
+        }
+        if other.runner.is_some() && other.runner != self.runner {
+            self.runner = other.runner;
             changed = true;
         }
 
@@ -666,56 +688,101 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn test_merge_cases_with_same_case_name() {
+        let named = |display_name: &str, suite_name: &str, case_name: &str| TestCaseResult {
+            display_name: String::from(display_name),
+            suite_name: String::from(suite_name),
+            case_name: String::from(case_name),
+            status: TestStatus::Pass,
+            ..Default::default()
+        };
+
+        // A crate-root Rust test and a test in a module share a case name but stay separate.
+        let mut under_test = TestResult::default();
+        assert!(under_test.merge(TestResult {
+            cases: vec![named("tests::foo", "tests", "foo"), named("foo", "", "foo")],
+            ..Default::default()
+        }));
+        assert_eq!(
+            under_test.cases,
+            vec![named("tests::foo", "tests", "foo"), named("foo", "", "foo")]
+        );
+
+        // A case without suite or display name still merges into a case with a suite name.
+        let mut under_test =
+            TestResult { cases: vec![named("Suite.Case", "Suite", "Case")], ..Default::default() };
+        assert!(under_test.merge(TestResult {
+            cases: vec![TestCaseResult {
+                case_name: String::from("Case"),
+                format: String::from("GoogleTest"),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }));
+        assert_eq!(under_test.cases.len(), 1);
+        assert_eq!(under_test.cases[0].format, "GoogleTest");
+    }
+
+    #[fuchsia::test]
     fn test_merge_lifecycle_fields() {
         // When self fields are None and other has Some, other's fields take precedence.
         let mut under_test = TestResult {
             setup_succeeded: None,
             teardown_succeeded: None,
             exit_code: None,
+            runner: None,
             ..Default::default()
         };
         assert!(under_test.merge(TestResult {
             setup_succeeded: Some(true),
             teardown_succeeded: Some(false),
             exit_code: Some(0),
+            runner: Some(String::from("gtest_runner")),
             ..Default::default()
         }));
         assert_eq!(under_test.setup_succeeded, Some(true));
         assert_eq!(under_test.teardown_succeeded, Some(false));
         assert_eq!(under_test.exit_code, Some(0));
+        assert_eq!(under_test.runner.as_deref(), Some("gtest_runner"));
 
         // When other has None, self fields are preserved.
         assert!(!under_test.merge(TestResult {
             setup_succeeded: None,
             teardown_succeeded: None,
             exit_code: None,
+            runner: None,
             ..Default::default()
         }));
         assert_eq!(under_test.setup_succeeded, Some(true));
         assert_eq!(under_test.teardown_succeeded, Some(false));
         assert_eq!(under_test.exit_code, Some(0));
+        assert_eq!(under_test.runner.as_deref(), Some("gtest_runner"));
 
         // When other has Some with identical values, self fields are preserved and merge returns false.
         assert!(!under_test.merge(TestResult {
             setup_succeeded: Some(true),
             teardown_succeeded: Some(false),
             exit_code: Some(0),
+            runner: Some(String::from("gtest_runner")),
             ..Default::default()
         }));
         assert_eq!(under_test.setup_succeeded, Some(true));
         assert_eq!(under_test.teardown_succeeded, Some(false));
         assert_eq!(under_test.exit_code, Some(0));
+        assert_eq!(under_test.runner.as_deref(), Some("gtest_runner"));
 
         // When other has Some, it overwrites existing self fields.
         assert!(under_test.merge(TestResult {
             setup_succeeded: Some(false),
             teardown_succeeded: Some(true),
             exit_code: Some(86),
+            runner: Some(String::from("rust_test_runner")),
             ..Default::default()
         }));
         assert_eq!(under_test.setup_succeeded, Some(false));
         assert_eq!(under_test.teardown_succeeded, Some(true));
         assert_eq!(under_test.exit_code, Some(86));
+        assert_eq!(under_test.runner.as_deref(), Some("rust_test_runner"));
     }
 
     #[fuchsia::test]
@@ -853,6 +920,7 @@ mod tests {
             setup_succeeded: Some(true),
             teardown_succeeded: Some(true),
             exit_code: Some(86),
+            runner: Some(String::from("elf_test_runner")),
         };
 
         let temp_dir = tempdir().expect("to create temporary directory");
@@ -899,7 +967,8 @@ mod tests {
                 },
                 "setup_succeeded": true,
                 "teardown_succeeded": true,
-                "exit_code": 86
+                "exit_code": 86,
+                "runner": "elf_test_runner"
             })
         );
 

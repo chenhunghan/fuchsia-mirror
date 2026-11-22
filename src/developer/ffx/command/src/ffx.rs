@@ -484,12 +484,36 @@ fn format_strict_check_error_enums(errors: &Vec<StrictCheckErrorEnum>) -> String
 // discovery.
 const VALID_STRICT_PREFIXES: &[&str] = &["id:", "serial:"];
 
+/// Describes whether an ffx subtool requires a target specifier in `--strict` mode.
+///
+/// Ordered from least to most restrictive (`None < Optional < Required`); the
+/// derived `Ord` implementation depends on variant declaration order.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TargetNeed {
+    /// The subtool does not use `-t`/`--target` for target resolution.
+    None,
+    /// The subtool may use `-t`/`--target`; if provided, it must be valid in strict mode.
+    Optional,
+    /// The subtool requires a valid `-t`/`--target` in strict mode.
+    Required,
+}
+
+impl TargetNeed {
+    /// Downgrades `Required` to `Optional`, leaving `Optional` and `None` unchanged.
+    pub const fn or_optional(self) -> Self {
+        match self {
+            Self::Required => Self::Optional,
+            other => other,
+        }
+    }
+}
+
 /// When a tool is run in "strict" mode there are certain constraints on passed
 /// arguments. This ensures they are all satisfied
 pub fn check_strict_constraints(
     ffx: &Ffx,
     context: Option<&EnvironmentContext>,
-    requires_target: bool,
+    target_need: TargetNeed,
 ) -> Result<()> {
     // In this case we're not in strict mode so we just exit out
     if !ffx.strict {
@@ -515,8 +539,14 @@ pub fn check_strict_constraints(
         errors.push(StrictCheckErrorEnum::MustHaveLogDestination);
     }
 
-    if requires_target {
-        validate_strict_target(ffx.target.as_deref(), &mut errors);
+    match target_need {
+        TargetNeed::Required => validate_strict_target(ffx.target.as_deref(), &mut errors),
+        TargetNeed::Optional => {
+            if ffx.target.is_some() {
+                validate_strict_target(ffx.target.as_deref(), &mut errors);
+            }
+        }
+        TargetNeed::None => {}
     }
 
     validate_strict_configs(&ffx.config, &mut errors);
@@ -1026,7 +1056,8 @@ mod test {
             let cmd_line =
                 FfxCommandLine::new(None, &case.inputs).expect("Command line should parse");
             let context = cmd_line.global.load_context(ExecutableKind::Test).ok();
-            match check_strict_constraints(&cmd_line.global, context.as_ref(), true) {
+            match check_strict_constraints(&cmd_line.global, context.as_ref(), TargetNeed::Required)
+            {
                 Err(Error::User(got_err)) => match got_err.downcast_ref::<StrictCheckError>() {
                     Some(StrictCheckError::User(inner_errs)) => {
                         assert_eq!(
@@ -1051,6 +1082,42 @@ mod test {
                     unreachable!();
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_check_ffx_strict_target_need() {
+        assert!(TargetNeed::None < TargetNeed::Optional);
+        assert!(TargetNeed::Optional < TargetNeed::Required);
+        let parse = |extra: &[&str]| {
+            let mut argv =
+                vec!["ffx", "--strict", "--log-output", "/tmp/out.log", "--machine", "json"];
+            argv.extend_from_slice(extra);
+            argv.push("echo");
+            FfxCommandLine::new(None, &argv).unwrap().global
+        };
+        let missing = parse(&[]);
+        let invalid = parse(&["--target", "bad-target"]);
+        let valid = parse(&["--target", "192.168.1.1:8081"]);
+
+        for (ffx, need, expected) in [
+            (&missing, TargetNeed::None, None),
+            (&invalid, TargetNeed::None, None),
+            (&missing, TargetNeed::Optional, None),
+            (&valid, TargetNeed::Optional, None),
+            (
+                &invalid,
+                TargetNeed::Optional,
+                Some(StrictCheckErrorEnum::TargetSpecificationInvalid("bad-target".into())),
+            ),
+            (&missing, TargetNeed::Required, Some(StrictCheckErrorEnum::MustHaveTarget)),
+            (&valid, TargetNeed::Required, None),
+        ] {
+            let got = check_strict_constraints(ffx, None, need).err().map(|err| match err {
+                Error::User(e) => e.downcast::<StrictCheckError>().unwrap(),
+                other => panic!("expected user error, got {other:?}"),
+            });
+            assert_eq!(got, expected.map(|e| StrictCheckError::User(vec![e])), "need={need:?}");
         }
     }
 

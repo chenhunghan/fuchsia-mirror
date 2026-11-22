@@ -83,8 +83,8 @@ type familyKinds struct {
 }
 
 // FamilyKinds are general categories identifying what operation we should use
-// to pass a value without a move (LLCPP). It also defines the way we should
-// initialize a field.
+// to pass a value without a move (in wire types). It also defines the way we
+// should initialize a field.
 var FamilyKinds = namespacedEnum(familyKinds{}).(familyKinds)
 
 type typeKind namespacedEnumMember
@@ -110,7 +110,7 @@ var TypeKinds = namespacedEnum(typeKinds{}).(typeKinds)
 type Type struct {
 	nameVariants
 
-	// Defines what operation we should use to pass a value without a move (LLCPP). It also
+	// Defines what operation we should use to pass a value without a move (in wire types). It also
 	// defines the way we should initialize a field.
 	WireFamily familyKind
 
@@ -945,7 +945,7 @@ func Compile(r fidlgen.Root) *Root {
 		root.Dependencies = append(root.Dependencies, l.Name.Parse())
 	}
 
-	// zx::channel is always referenced by the protocols in llcpp bindings API
+	// zx::channel is always referenced by the protocols in wire bindings API
 	if len(r.Protocols) > 0 {
 		c.handleTypes["channel"] = struct{}{}
 	}

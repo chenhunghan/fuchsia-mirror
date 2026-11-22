@@ -10,8 +10,10 @@
 #include <lib/mmio-ptr/fake.h>
 #include <lib/zircon-internal/thread_annotations.h>
 
+#include <atomic>
 #include <functional>
 #include <mutex>
+#include <unordered_map>
 #include <vector>
 
 #include "src/devices/block/drivers/nvme/registers.h"
@@ -28,7 +30,18 @@ struct NvmeRegisterCallbacks {
 // Implements fake MMIO support for the NVMe controller registers.
 class FakeRegisters {
  public:
+  enum class IrqOrderingEventType {
+    kMaskSet,
+    kIoCqDoorbell,
+    kMaskClear,
+  };
+  struct IrqOrderingEvent {
+    IrqOrderingEventType type;
+    uint32_t value;
+  };
+
   FakeRegisters();
+  void Reset();
 
   fdf::MmioBuffer GetBuffer() {
     return fdf_testing::CreateMmioBuffer(nvme::NVME_REG_DOORBELL_BASE + 0x100,
@@ -39,15 +52,28 @@ class FakeRegisters {
 
   void SetUpCompletionDoorbell(size_t index) {
     std::lock_guard<std::mutex> lock(doorbells_lock_);
-    completion_doorbells_.emplace(index, nvme::DoorbellReg{});
+    completion_doorbells_.insert_or_assign(index, nvme::DoorbellReg{});
   }
 
   void SetUpSubmissionDoorbell(size_t index) {
     std::lock_guard<std::mutex> lock(doorbells_lock_);
-    submission_doorbells_.emplace(index, nvme::DoorbellReg{});
+    submission_doorbells_.insert_or_assign(index, nvme::DoorbellReg{});
   }
 
+  nvme::CapabilityReg& caps() { return caps_; }
+  nvme::ControllerConfigReg& ccfg() { return ccfg_; }
   nvme::ControllerStatusReg& csts() { return csts_; }
+  size_t admin_queue_addr_reads() const { return admin_queue_addr_reads_.load(); }
+
+  std::vector<IrqOrderingEvent> irq_ordering_events() const {
+    std::lock_guard<std::mutex> lock(events_lock_);
+    return irq_ordering_events_;
+  }
+
+  void ClearIrqOrderingEvents() {
+    std::lock_guard<std::mutex> lock(events_lock_);
+    irq_ordering_events_.clear();
+  }
 
  private:
   nvme::CapabilityReg caps_;
@@ -63,6 +89,10 @@ class FakeRegisters {
   std::mutex doorbells_lock_;
   std::unordered_map<size_t, nvme::DoorbellReg> completion_doorbells_ TA_GUARDED(doorbells_lock_);
   std::unordered_map<size_t, nvme::DoorbellReg> submission_doorbells_ TA_GUARDED(doorbells_lock_);
+  std::atomic<size_t> admin_queue_addr_reads_ = 0;
+
+  mutable std::mutex events_lock_;
+  std::vector<IrqOrderingEvent> irq_ordering_events_ TA_GUARDED(events_lock_);
 
   // Define read/write for |bits| that just crashes.
 #define STUB_IO_OP(bits)                                                                          \

@@ -111,3 +111,51 @@ pub fn arm_smccc_smc(
     // required registers and returns results in x0-x3, x6.
     unsafe { arm_smccc_smc_internal(w0, x1, x2, x3, x4, x5, x6, w7) }
 }
+
+unsafe extern "C" {
+    /// Calls the low-level HVC assembly routine (`arm_smccc_hvc_internal`).
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the calling CPU is executing at EL1 (`CurrentEL.EL == 1`) and
+    /// that the function ID and argument registers conform to the ARM SMCCC specification and are
+    /// safe to execute at the hypervisor level.
+    fn arm_smccc_hvc_internal(
+        w0: u32,
+        x1: u64,
+        x2: u64,
+        x3: u64,
+        x4: u64,
+        x5: u64,
+        x6: u64,
+        w7: u32,
+    ) -> ArmSmcccResult;
+}
+
+/// Calls the low-level HVC function.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling CPU is executing at EL1 (`CurrentEL.EL == 1`), so that `hvc` traps to the
+///   hypervisor rather than into the kernel's own `VBAR_EL2` when running at EL2 (`FEAT_VHE`).
+/// - `w0`, `x1..=x6`, and `w7` conform to the ARM SMCCC specification and executing the hypercall
+///   at the hypervisor level preserves Rust memory safety.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub unsafe fn arm_smccc_hvc(
+    w0: u32, // Function Identifier
+    x1: u64, // x1-x6: Parameters
+    x2: u64,
+    x3: u64,
+    x4: u64,
+    x5: u64,
+    x6: u64,
+    w7: u32, // Secure OS ID[31:16]
+) -> ArmSmcccResult {
+    // SAFETY: Direct call to the assembly HVC routine, whose calling convention preserves the
+    // required registers and returns results in x0-x3, x6. The caller guarantees `CurrentEL == EL1`
+    // and that the function ID and arguments are SMCCC-conformant and safe to execute at the
+    // hypervisor level.
+    unsafe { arm_smccc_hvc_internal(w0, x1, x2, x3, x4, x5, x6, w7) }
+}

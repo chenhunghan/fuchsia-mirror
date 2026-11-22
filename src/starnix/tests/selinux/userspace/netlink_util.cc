@@ -21,15 +21,18 @@
 
 namespace netlink_util {
 
-int SendNetlinkMsg(const netlink_util::NetlinkSocketTestCase& test_case) {
+namespace {
+
+int SendNetlinkMsgImpl(const netlink_util::NetlinkSocketTestCase& test_case, int* out_errno) {
   auto sockcreate = ScopedTaskAttrResetter::SetTaskAttr(
       "sockcreate", MakeTestSecurityContext(test_case.label_type));
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   fbl::unique_fd sock_fd(socket(AF_NETLINK, SOCK_RAW, test_case.protocol));
   if (!sock_fd.is_valid()) {
-    ADD_FAILURE() << "Creating socket failed with error:" << strerror(errno);
-    return errno;
+    *out_errno = errno;
+    ADD_FAILURE() << "Creating socket failed with error:" << strerror(*out_errno);
+    return -1;
   }
   union {
     struct rtmsg rtmsg;
@@ -98,6 +101,7 @@ int SendNetlinkMsg(const netlink_util::NetlinkSocketTestCase& test_case) {
 
   int ret = (int)sendto(sock_fd.get(), nlh, nlh->nlmsg_len, 0, (struct sockaddr*)&sa, sizeof(sa));
   if (ret < 0) {
+    *out_errno = errno;
     return ret;
   }
 
@@ -109,11 +113,23 @@ int SendNetlinkMsg(const netlink_util::NetlinkSocketTestCase& test_case) {
   // Await for reply to synchronize after send which checks capabilities asynchronously in Starnix.
   ret = (int)recvmsg(sock_fd.get(), &msg, 0);
   if (ret < 0) {
-    ADD_FAILURE() << "recvmsg failed with error: " << strerror(errno);
+    *out_errno = errno;
+    ADD_FAILURE() << "recvmsg failed with error: " << strerror(*out_errno);
     return ret;
   }
 
   return 0;
+}
+
+}  // namespace
+
+int SendNetlinkMsg(const netlink_util::NetlinkSocketTestCase& test_case) {
+  int saved_errno = 0;
+  int ret = SendNetlinkMsgImpl(test_case, &saved_errno);
+  if (ret < 0) {
+    errno = saved_errno;
+  }
+  return ret;
 }
 
 }  // namespace netlink_util

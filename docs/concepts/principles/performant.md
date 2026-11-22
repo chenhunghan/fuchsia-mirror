@@ -44,7 +44,7 @@ for network latency.
 
 [design-principles]: /docs/contribute/governance/rfcs/0027_you_only_pay_what_you_use.md
 [programming-language]: /docs/contribute/governance/rfcs/0082_starnix.md
-[structs-and-tables]: /docs/contribute/governance/rfcs/0047_tables.md#should_i_use_a_struct_or_a_table
+[structs-and-tables]: /docs/contribute/governance/rfcs/0047_tables.md#should-i-use-a-struct-or-a-table
 [benchmarked]: /src/tests/benchmarks
 [fair-scheduling]: /docs/concepts/kernel/fair_scheduler.md
-[async-com]: /docs/concepts/fidl/overview.md#messaging_models
+[async-com]: /docs/concepts/fidl/overview.md#messaging-models

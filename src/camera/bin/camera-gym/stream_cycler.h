@@ -8,6 +8,7 @@
 #include <fuchsia/camera3/cpp/fidl.h>
 #include <fuchsia/sysmem2/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/async/cpp/task.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/result.h>
 
@@ -85,6 +86,9 @@ class StreamCycler {
   // Disconnect a single stream.
   void DisconnectStream(uint32_t stream_index);
 
+  // Disconnect all active streams.
+  void DisconnectAllStreams();
+
   // Utility to return what the next config_index should be.
   uint32_t NextConfigIndex();
 
@@ -137,6 +141,11 @@ class StreamCycler {
 
   // TODO(?????) - Is this really the ideal way to communicate status back?
   CommandStatusHandler command_status_handler_;
+
+  async::TaskClosureMethod<StreamCycler, &StreamCycler::ForceNextStreamConfiguration>
+      force_next_stream_task_{this};
+  async::TaskClosureMethod<StreamCycler, &StreamCycler::CheckAllWatchdogs> check_watchdogs_task_{
+      this};
 
   // Track the moving region of interest
   MovingWindow moving_window_;

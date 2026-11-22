@@ -63,9 +63,9 @@ void UfsRpmbDevice::Serve(fidl::ServerEnd<fuchsia_hardware_rpmb::Rpmb> request) 
                        fidl::kIgnoreBindingClosure);
 }
 
-// TODO(https://fxbug.dev/527604372): Currently, this returns hardcoded/static values for CID.
-// In the future, this should be updated to query the actual UFS device's Card Identification (CID)
-// data.
+// TODO(https://fxbug.dev/588007123): EmmcDeviceInfo.cid is populated with zeros today. Unlike eMMC,
+// UFS has no CID register and instead exposes device identity via the Device Descriptor (UFS 4.0
+// section 14.1.4.2, Table 14.4) and String Descriptors (UFS 4.0 sections 14.1.4.9-14.1.4.13).
 void UfsRpmbDevice::GetDeviceInfo(GetDeviceInfoCompleter::Sync& completer) {
   uint8_t rpmb_size = 4;  // Default: 512KB (4 * 128KB)
   uint8_t reliable_write_sector_count = 1;
@@ -100,7 +100,7 @@ void UfsRpmbDevice::GetDeviceInfo(GetDeviceInfoCompleter::Sync& completer) {
               rpmb_desc_res.status_string());
   }
 
-  // TODO(https://fxbug.dev/527604372): Rename this FIDL type to be more agnostic (e.g. not have
+  // TODO(https://fxbug.dev/588007123): Rename this FIDL type to be more agnostic (e.g. not have
   // eMMC).
   fuchsia_hardware_rpmb::wire::EmmcDeviceInfo emmc_info = {
       .cid = {},
@@ -161,7 +161,7 @@ void UfsRpmbDevice::Request(RequestRequestView request, RequestCompleter::Sync& 
   }
 
   // Lazily allocate and map the shared DMA VMO.
-  // TODO(https://fxbug.dev/527604372): Consider decommitting this VMO or creating it for each
+  // TODO(https://fxbug.dev/588007123): Consider decommitting this VMO or creating it for each
   // request to reduce persistent memory overhead.
   if (!dma_vmo_.is_valid()) {
     uint64_t vmo_size = fbl::round_up(kMaxRpmbTransferSize, page_size);

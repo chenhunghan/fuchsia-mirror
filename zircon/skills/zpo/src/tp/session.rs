@@ -20,13 +20,19 @@ use anyhow::{Context, bail};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 /// How long an unused session lives.
 pub const IDLE_TIMEOUT: &str = "30m";
 /// The first trace processor release with `server unix` and `query --remote`.
 pub const MIN_VERSION: u32 = 59;
+
+/// Locks `m`. A thread that panicked while holding one of these locks
+/// leaves a usable map or set behind, so poisoning is ignored.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Starts, finds and stops warm sessions.
 pub struct Sessions {
@@ -68,12 +74,13 @@ impl Sessions {
 
     /// The trace processor's major version (59 for v59.1), or None if unknown.
     pub fn major_version(&self) -> Option<u32> {
-        let mut cache = self.version.lock().unwrap();
+        let mut cache = lock(&self.version);
         if let Some(v) = cache.get(&self.tp) {
             return *v;
         }
         let v = self.run(&["--version"], Duration::from_secs(20)).ok().and_then(|o| {
-            let re = regex_lite::Regex::new(r"Perfetto v(\d+)").unwrap();
+            let re =
+                regex_lite::Regex::new(r"Perfetto v(\d+)").expect("the pattern is a valid regex");
             re.captures(&o.stdout).and_then(|c| c[1].parse().ok())
         });
         if v.is_some() {
@@ -145,7 +152,7 @@ impl Sessions {
                 msg.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect();
             bail!("the trace processor could not load {}: {}", trace.display(), tail);
         }
-        self.started.lock().unwrap().insert(name.clone());
+        lock(&self.started).insert(name.clone());
         Ok(name)
     }
 
@@ -164,12 +171,12 @@ impl Sessions {
     /// Stops a session.
     pub fn kill(&self, name: &str) {
         let _ = self.run(&["server", "kill", name], Duration::from_secs(20));
-        self.started.lock().unwrap().remove(name);
+        lock(&self.started).remove(name);
     }
 
     /// Stops the sessions this process started (the idle timeout covers crashes).
     pub fn kill_started(&self) {
-        let names: Vec<String> = self.started.lock().unwrap().iter().cloned().collect();
+        let names: Vec<String> = lock(&self.started).iter().cloned().collect();
         for n in names {
             self.kill(&n);
         }
@@ -177,7 +184,7 @@ impl Sessions {
 
     /// The sessions this process started.
     pub fn started(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.started.lock().unwrap().iter().cloned().collect();
+        let mut v: Vec<String> = lock(&self.started).iter().cloned().collect();
         v.sort();
         v
     }

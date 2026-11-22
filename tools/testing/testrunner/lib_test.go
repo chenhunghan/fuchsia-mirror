@@ -385,7 +385,7 @@ func TestFilterTests(t *testing.T) {
 }
 
 func multipliedRun(details runtests.TestDetails) runtests.TestDetails {
-	details.Tags = []build.TestTag{{Key: "is_multiplied_run", Value: "true"}}
+	details.Tags = []build.TestTag{{Key: runtests.MultipliedRunTagKey, Value: "true"}}
 	return details
 }
 
@@ -410,6 +410,9 @@ func TestRunAndOutputTests(t *testing.T) {
 		emptyStatus bool
 		// Whether the test should return a connection error.
 		connErr bool
+		// Whether the test should return a nil result with a connection error
+		// (matching FuchsiaSerialTester).
+		nilResultConnErr bool
 		// Whether the tester should fail to reconnect.
 		failReconnect bool
 		// The duration that the test will take to run.
@@ -629,12 +632,28 @@ func TestRunAndOutputTests(t *testing.T) {
 				"foo/5": {fail: true},
 			},
 			expectedResults: []runtests.TestDetails{
-				succeededTest("foo", 0, defaultDuration),
+				multipliedRun(succeededTest("foo", 0, defaultDuration)),
 				multipliedRun(succeededTest("foo", 1, defaultDuration)),
 				multipliedRun(succeededTest("foo", 2, defaultDuration)),
 				multipliedRun(succeededTest("foo", 3, defaultDuration)),
 				multipliedRun(succeededTest("foo", 4, defaultDuration)),
-				failedTest("foo", 5, defaultDuration),
+				multipliedRun(failedTest("foo", 5, defaultDuration)),
+			},
+		},
+		{
+			name: "stop on failure fails on first run",
+			tests: []testsharder.Test{
+				{
+					Test:         build.Test{Name: "foo"},
+					RunAlgorithm: testsharder.StopOnFailure,
+					Runs:         5,
+				},
+			},
+			behavior: map[string]testBehavior{
+				"foo/0": {fail: true},
+			},
+			expectedResults: []runtests.TestDetails{
+				multipliedRun(failedTest("foo", 0, defaultDuration)),
 			},
 		},
 		{
@@ -673,7 +692,7 @@ func TestRunAndOutputTests(t *testing.T) {
 				},
 			},
 			expectedResults: []runtests.TestDetails{
-				succeededTest("foo", 0, defaultDuration),
+				multipliedRun(succeededTest("foo", 0, defaultDuration)),
 				multipliedRun(succeededTest("foo", 1, defaultDuration)),
 				multipliedRun(succeededTest("foo", 2, defaultDuration)),
 				multipliedRun(succeededTest("foo", 3, defaultDuration)),
@@ -694,10 +713,10 @@ func TestRunAndOutputTests(t *testing.T) {
 				"foo/3": {fail: true},
 			},
 			expectedResults: []runtests.TestDetails{
-				failedTest("foo", 0, defaultDuration),
-				succeededTest("foo", 1, defaultDuration),
+				multipliedRun(failedTest("foo", 0, defaultDuration)),
+				multipliedRun(succeededTest("foo", 1, defaultDuration)),
 				multipliedRun(succeededTest("foo", 2, defaultDuration)),
-				failedTest("foo", 3, defaultDuration),
+				multipliedRun(failedTest("foo", 3, defaultDuration)),
 				multipliedRun(succeededTest("foo", 4, defaultDuration)),
 			},
 		},
@@ -818,7 +837,7 @@ func TestRunAndOutputTests(t *testing.T) {
 				},
 			},
 			expectedResults: []runtests.TestDetails{
-				succeededTest("foo", 0, defaultDuration),
+				multipliedRun(succeededTest("foo", 0, defaultDuration)),
 				multipliedRun(succeededTest("foo", 1, defaultDuration)),
 				multipliedRun(succeededTest("foo", 2, defaultDuration)),
 				multipliedRun(succeededTest("foo", 3, defaultDuration)),
@@ -839,8 +858,8 @@ func TestRunAndOutputTests(t *testing.T) {
 				"foo/1": {fail: true},
 			},
 			expectedResults: []runtests.TestDetails{
-				succeededTest("foo", 0, defaultDuration),
-				failedTest("foo", 1, defaultDuration),
+				multipliedRun(succeededTest("foo", 0, defaultDuration)),
+				multipliedRun(failedTest("foo", 1, defaultDuration)),
 			},
 		},
 		{
@@ -881,6 +900,23 @@ func TestRunAndOutputTests(t *testing.T) {
 			},
 			expectedResults: []runtests.TestDetails{
 				succeededTest("foo", 2, defaultDuration),
+			},
+		},
+		{
+			name: "retries on nil-result connection error",
+			tests: []testsharder.Test{
+				{
+					Test:         build.Test{Name: "foo"},
+					RunAlgorithm: testsharder.StopOnFailure,
+					Runs:         1,
+				},
+			},
+			behavior: map[string]testBehavior{
+				"foo/0": {nilResultConnErr: true},
+				"foo/1": {nilResultConnErr: true},
+			},
+			expectedResults: []runtests.TestDetails{
+				succeededTest("foo", 0, defaultDuration),
 			},
 		},
 		{
@@ -937,7 +973,7 @@ func TestRunAndOutputTests(t *testing.T) {
 			// test, but all previous results should still be reported.
 			expectedResults: []runtests.TestDetails{
 				failedTest("foo", 0, defaultDuration),
-				succeededTest("bar", 0, defaultDuration),
+				multipliedRun(succeededTest("bar", 0, defaultDuration)),
 				succeededTest("foo", 1, defaultDuration),
 			},
 			wantErr: true,
@@ -1148,6 +1184,8 @@ func TestRunAndOutputTests(t *testing.T) {
 					} else if behavior.connErr {
 						result.Status = runtests.TestFailure
 						return result, connectionError{fmt.Errorf("conn err")}
+					} else if behavior.nilResultConnErr {
+						return nil, connectionError{fmt.Errorf("conn err")}
 					}
 
 					if timeout > 0 && behavior.duration >= timeout {
@@ -1252,6 +1290,10 @@ func (t *fuchsiaTarget) IPv4() (net.IP, error) {
 
 func (t *fuchsiaTarget) IPv6() (*net.IPAddr, error) {
 	return nil, nil
+}
+
+func (t *fuchsiaTarget) GetFFX() *targets.FFXInstance {
+	return nil
 }
 
 func TestExecute(t *testing.T) {
@@ -1478,5 +1520,56 @@ func TestRunHealthCheckWithoutDMC(t *testing.T) {
 	}
 	if err := runHealthCheck(context.Background(), tester); err != reconnectErr {
 		t.Errorf("runHealthCheck() = %v, want %v", err, reconnectErr)
+	}
+}
+
+func TestExecuteSkipsFinalizeForSerialTester(t *testing.T) {
+	t.Setenv(botanistconstants.NodenameEnvKey, "fuchsia-device")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	serial, socket := serialAndSocket()
+	defer serial.Close()
+	defer socket.Close()
+
+	// Construct a real *FuchsiaSerialTester with an empty serialSocketPath: if
+	// execute() called finalize() -> Reconnect(), execute() would fail.
+	oldSerialTester := serialTester
+	defer func() { serialTester = oldSerialTester }()
+	serialTester = func(_ context.Context, _ string) (Tester, error) {
+		return &FuchsiaSerialTester{socket: socket}, nil
+	}
+
+	test := testsharder.Test{
+		Test: build.Test{
+			Name: "myfoo",
+			Path: "foo",
+			OS:   "fuchsia",
+		},
+		Runs: 1,
+	}
+
+	go func() {
+		expectedCmd := "\r\nruntests foo\r\n"
+		buf := make([]byte, len(expectedCmd))
+		if _, err := io.ReadFull(serial, buf); err != nil {
+			return
+		}
+		_, _ = io.WriteString(serial, runtests.StartedSignature+test.Name+"\n"+runtests.SuccessSignature+test.Name+"\n")
+	}()
+
+	o, err := CreateTestOutputs(tap.NewProducer(io.Discard), mkdtemp(t, "outputs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+
+	err = execute(ctx, []testsharder.Test{test}, o, net.IPAddr{}, "", "unused-socket-path", t.TempDir(), Options{
+		UseSerial:     true,
+		SnapshotFile:  "snapshot.zip",
+		FuchsiaTarget: &fuchsiaTarget{},
+	})
+	if err != nil {
+		t.Fatalf("execute() with *FuchsiaSerialTester returned unexpected error: %v", err)
 	}
 }

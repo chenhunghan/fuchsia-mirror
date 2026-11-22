@@ -58,7 +58,7 @@ the `debuglog` virtual terminal.
 Many parts of the kernel have unit tests, which report success/failure
 automatically. These unit tests are built using the primitives provided by [the
 kernel unit-test library](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/lib/unittest/).
-You can find these statically by searching for `UNITTEST_START_TESTCASE`.
+You can find these statically by searching for `unittest::suite`.
 
 These tests can be run from the shell with `k ut`. `k ut all` will run all tests
 or you can use `k ut $TEST_NAME` to run a specific test.
@@ -67,13 +67,13 @@ or you can use `k ut $TEST_NAME` to run a specific test.
 
 Many parts of the kernel provide diagnostics, whose output requires manual
 inspection. Some of these diagnostics are used to verify correctness (e.g.
-[`timer_diag`](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/tests/timer_tests.cc;l=198;drc=2031b0ccd0bb978f1c4056a7764f6810e527e156)),
+[`timer_diag`](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/tests/timer_tests.rs)),
 while others simply stress test a part of the system (e.g.
-[`timer_stress`](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/tests/timer_tests.cc;l=198;drc=2031b0ccd0bb978f1c4056a7764f6810e527e156)).
+[`timer_stress`](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/tests/timer_tests.rs)).
 
 To run a diagnostic, simply pass its name to the `k` command. For example, to
 run the kernel's [builtin
-benchmarks](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/tests/benchmarks.cc),
+benchmarks](https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/kernel/tests/benchmarks.rs),
 run `k bench`. To find the full set of kernel diagnostics statically, search for
 `STATIC_COMMAND`. To enumerate them dynamically, run `k help`.
 

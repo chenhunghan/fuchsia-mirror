@@ -26,6 +26,14 @@ class NullRenderer final : public Renderer {
  public:
   ~NullRenderer() override = default;
 
+  fit::result<ImportImageError, std::unique_ptr<GpuCollection>> CreateGpuCollection(
+      allocation::GlobalBufferCollectionId collection_id,
+      fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token) override;
+
+  fit::result<ImportImageError, std::unique_ptr<GpuImage>> CreateGpuImage(
+      const allocation::ImageMetadata& metadata, GpuCollection& collection,
+      uint64_t per_buffer_bytes) override;
+
   // |BufferCollectionImporter|
   fpromise::promise<> ImportBufferCollection(
       allocation::GlobalBufferCollectionId collection_id,

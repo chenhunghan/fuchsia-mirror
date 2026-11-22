@@ -112,7 +112,7 @@ test_platforms = [
     cpu = "arm64"
   },
   { # P3
-    device_type = "Intel NUC Kit NUC7i5DNHE"
+    device_type = "Intel NUC Kit NUC11TNHv5"
     cpu = "x64"
   },
 ]
@@ -124,7 +124,7 @@ and consider the specification of
 environments = [
   { # E1
      dimensions = {
-       device_type = "Intel NUC Kit NUC7i5DNHE"
+       device_type = "Intel NUC Kit NUC11TNHv5"
      }
   },
   { # E2

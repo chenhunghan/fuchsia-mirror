@@ -35,9 +35,11 @@ python_library("common") {
     "__init__.py",
     "utils/ies.py",
   ]
+  imports = [ ".." ]
   visibility = [
     ":*",
     "//src/connectivity/wlan/tests/core:*",
     "//src/connectivity/wlan/tests/wlanix:*",
   ]
+  enable_mypy = false
 }

@@ -16,5 +16,13 @@ py_binary(
         "verify_golden_files.py",
     ],
     main = "verify_golden_files.py",
-    visibility = ["//visibility:public"],
+    visibility = ["//build/bazel/rules:__subpackages__"],
+)
+
+py_binary(
+    name = "golden_test",
+    testonly = True,
+    srcs = ["golden_test.py"],
+    main = "golden_test.py",
+    visibility = ["//build/bazel/rules/testing:__pkg__"],
 )

@@ -2,108 +2,98 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{Error, format_err};
-use fuchsia_async as fasync;
-use futures::channel::mpsc::{SendError, channel};
-use futures::{Sink, SinkExt, Stream, StreamExt};
-use log::{info, warn};
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
-use std::thread;
+use anyhow::Error;
+use bt_repl::{Commands, ReplControl, ReplHandler};
+use futures::{FutureExt, select_biased};
 
-use crate::accessor::*;
-use crate::commands::*;
+use crate::accessor::{
+    AccessorClient, CHA, CLEAR_LINE, list_all_mas_instances, register_for_notifications,
+    unregister_notifications,
+};
+use crate::commands::Cmd;
 
 const PROMPT: &str = "MESSAGE_ACCESSOR> ";
 
-// Starts the accessor REPL. This first requests a list of remote services and resolves the
-// returned future with an error if no services are found.
-pub async fn start_accessor_loop<'a>(client: AccessorClient) -> Result<(), Error> {
-    let (mut commands, mut acks) = cmd_stream();
-    while let Some(cmd) = commands.next().await {
-        handle_cmd(cmd, client.clone()).await?;
-        acks.send(()).await?;
+struct AccessorHandler {
+    client: AccessorClient,
+}
+
+impl ReplHandler for AccessorHandler {
+    type Command = Cmd;
+
+    async fn handle(&mut self, cmd: Cmd, args: &[&str]) -> Result<ReplControl, Error> {
+        match cmd {
+            Cmd::ListAllMasInstances => list_all_mas_instances(self.client.clone()).await?,
+            Cmd::TurnOnNotifications => {
+                register_for_notifications(args, self.client.clone()).await?
+            }
+            Cmd::TurnOffNotifications => unregister_notifications(self.client.clone()).await?,
+        }
+        Ok(ReplControl::Continue)
+    }
+}
+
+// Starts the accessor REPL.
+pub async fn start_accessor_loop(client: AccessorClient) -> Result<(), Error> {
+    let peer_id = client.peer_id();
+    let disconnect_fut = client.wait_for_disconnect().fuse();
+    let handler = AccessorHandler { client };
+    let repl_fut = bt_repl::run(PROMPT, Commands::<Cmd>::new(), handler).fuse();
+    futures::pin_mut!(disconnect_fut, repl_fut);
+
+    select_biased! {
+        () = disconnect_fut => {
+            println!("{CLEAR_LINE}{CHA}Peer {peer_id:?} disconnected");
+            Ok(())
+        }
+        res = repl_fut => res,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidl::endpoints::create_proxy_and_stream;
+    use fidl_fuchsia_bluetooth::PeerId;
+    use fidl_fuchsia_bluetooth_map::{AccessorMarker, AccessorRequest};
+    use fuchsia_async as fasync;
+    use futures::StreamExt as _;
+
+    #[fuchsia::test]
+    async fn accessor_handler_dispatches_commands() {
+        let (proxy, mut stream) = create_proxy_and_stream::<AccessorMarker>();
+        let client = AccessorClient::new(PeerId { value: 1 }, proxy);
+        let mut handler = AccessorHandler { client };
+
+        let server_task = fasync::Task::local(async move {
+            match stream.next().await {
+                Some(Ok(AccessorRequest::ListAllMasInstances { responder })) => {
+                    responder.send(Ok(&[])).expect("send response");
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        });
+
+        let res = handler.handle(Cmd::ListAllMasInstances, &[]).await.expect("list ok");
+        assert_eq!(res, ReplControl::Continue);
+        server_task.await;
+
+        let res = handler
+            .handle(Cmd::TurnOffNotifications, &[])
+            .await
+            .expect("turn-off-notifications ok");
+        assert_eq!(res, ReplControl::Continue);
     }
 
-    Ok(())
-}
+    #[fuchsia::test(allow_stalls = false)]
+    async fn wait_for_disconnect_resolves_when_accessor_closes() {
+        let (proxy, stream) = create_proxy_and_stream::<AccessorMarker>();
+        let client = AccessorClient::new(PeerId { value: 1 }, proxy);
 
-// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
-///
-/// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
-/// sends a ctrl-c or ctrl-d sequence.
-///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
-/// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
-fn cmd_stream() -> (impl Stream<Item = String>, impl Sink<(), Error = SendError>) {
-    // Editor thread and command processing thread must be synchronized so that output
-    // is printed in the correct order.
-    let (mut cmd_sender, cmd_receiver) = channel(512);
-    let (ack_sender, mut ack_receiver) = channel(512);
+        let mut disconnect_fut = Box::pin(client.wait_for_disconnect());
+        assert!(fasync::TestExecutor::poll_until_stalled(&mut disconnect_fut).await.is_pending());
 
-    let _ = thread::spawn(move || -> Result<(), Error> {
-        let mut exec = fasync::LocalExecutorBuilder::new().build();
-
-        let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Emacs)
-                .build();
-            let c = CmdHelper::new();
-            let mut rl: Editor<CmdHelper, DefaultHistory> = Editor::with_config(config)?;
-            rl.set_helper(Some(c));
-            loop {
-                let readline = rl.readline(PROMPT);
-                match readline {
-                    Ok(line) => {
-                        cmd_sender.try_send(line)?;
-                    }
-                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        warn!("Error: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-                // wait until processing thread is finished evaluating the last command
-                // before running the next loop in the repl
-                if ack_receiver.next().await.is_none() {
-                    return Ok(());
-                }
-            }
-        };
-        exec.run_singlethreaded(fut)
-    });
-    (cmd_receiver, ack_sender)
-}
-
-// Processes `cmd` and returns its result.
-async fn handle_cmd(line: String, client: AccessorClient) -> Result<(), Error> {
-    let mut components = line.trim().split_whitespace();
-    let cmd = components.next().map(|c| c.parse());
-    let args: Vec<&str> = components.collect();
-
-    match cmd {
-        Some(Ok(Cmd::Exit)) => {
-            return Err(format_err!("Terminating current Accessor FIDL client"));
-        }
-        Some(Ok(Cmd::Help)) => {
-            info!("{}", Cmd::help_msg());
-            Ok(())
-        }
-        Some(Ok(Cmd::ListAllMasInstances)) => list_all_mas_instances(client).await,
-        Some(Ok(Cmd::TurnOnNotifications)) => register_for_notifications(&args, client).await,
-        Some(Ok(Cmd::TurnOffNotifications)) => unregister_notifications(client).await,
-        Some(Err(e)) => {
-            info!("Unknown command: {:?}", e);
-            Ok(())
-        }
-        None => Ok(()),
+        drop(stream);
+        assert!(fasync::TestExecutor::poll_until_stalled(&mut disconnect_fut).await.is_ready());
     }
 }

@@ -275,22 +275,13 @@ macro_rules! expand_platform_current_raw_ticks_synchronized {
 }
 
 expand_platform_current_raw_ticks_synchronized! {
-    rust_platform_current_raw_ticks_synchronized_0 = 0;
-    rust_platform_current_raw_ticks_synchronized_1 = 1;
-    rust_platform_current_raw_ticks_synchronized_2 = 2;
-    rust_platform_current_raw_ticks_synchronized_3 = 3;
-    rust_platform_current_raw_ticks_synchronized_4 = 4;
-    rust_platform_current_raw_ticks_synchronized_5 = 5;
-    rust_platform_current_raw_ticks_synchronized_6 = 6;
-    rust_platform_current_raw_ticks_synchronized_7 = 7;
-    rust_platform_current_raw_ticks_synchronized_8 = 8;
-    rust_platform_current_raw_ticks_synchronized_9 = 9;
-    rust_platform_current_raw_ticks_synchronized_10 = 10;
-    rust_platform_current_raw_ticks_synchronized_11 = 11;
-    rust_platform_current_raw_ticks_synchronized_12 = 12;
-    rust_platform_current_raw_ticks_synchronized_13 = 13;
-    rust_platform_current_raw_ticks_synchronized_14 = 14;
-    rust_platform_current_raw_ticks_synchronized_15 = 15;
+    rust_platform_current_raw_ticks_synchronized_0 = GET_TICKS_SYNC_FLAG_NONE;
+    rust_platform_current_raw_ticks_synchronized_3 =
+        GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS | GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES;
+    rust_platform_current_raw_ticks_synchronized_5 =
+        GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS;
+    rust_platform_current_raw_ticks_synchronized_10 =
+        GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
 }
 
 /// Converts a raw TSC duration in ticks to nanoseconds.
@@ -702,7 +693,7 @@ fn calibrate_tsc(has_pv_clock: bool) {
 }
 
 fn pc_init_timer(_level: init::LkInitLevel) {
-    let cpu_model: &X86ModelInfo = x86_get_model();
+    let cpu_model: X86ModelInfo = x86_get_model();
     // Declares the desired PIT frequency to be 1000, which gives us ~1ms granularity.
     // This may not be used if we chose to use a different platform reference timer.
     const DESIRED_PIT_FREQUENCY: u32 = 1000;
@@ -1081,23 +1072,7 @@ pub fn platform_shutdown_timer() {
     }
 }
 
-/// Suspends the platform timer on the current CPU.
-pub fn platform_suspend_timer_curr_cpu() -> Result<(), Status> {
-    Err(Status::NOT_SUPPORTED)
-}
-
-/// Resumes the platform timer on the current CPU.
-pub fn platform_resume_timer_curr_cpu() -> Result<(), Status> {
-    Err(Status::NOT_SUPPORTED)
-}
-
-/// Represents a raw early tick sample collected before the platform timer is initialized.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EarlyTicks {
-    /// Raw TSC value sampled during early boot.
-    pub tsc: u64,
-}
+pub use libarch::EarlyTicks;
 
 zr::static_assert_size_and_align!(EarlyTicks, 8, 8);
 
@@ -1150,46 +1125,4 @@ pub extern "C" fn rust_convert_raw_tsc_duration_to_nanoseconds(duration: i64) ->
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_convert_raw_tsc_timestamp_to_clock_monotonic(ts: i64) -> zx_instant_mono_t {
     convert_raw_tsc_timestamp_to_clock_monotonic(ts)
-}
-
-/// FFI entry point for [`platform_set_oneshot_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_set_oneshot_timer(deadline: zx_ticks_t) -> Result<(), Status> {
-    platform_set_oneshot_timer(deadline)
-}
-
-/// FFI entry point for [`platform_stop_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_stop_timer() {
-    platform_stop_timer();
-}
-
-/// FFI entry point for [`platform_shutdown_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_shutdown_timer() {
-    platform_shutdown_timer();
-}
-
-/// FFI entry point for [`platform_suspend_timer_curr_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_timer_curr_cpu() -> Result<(), Status> {
-    platform_suspend_timer_curr_cpu()
-}
-
-/// FFI entry point for [`platform_resume_timer_curr_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_resume_timer_curr_cpu() -> Result<(), Status> {
-    platform_resume_timer_curr_cpu()
-}
-
-/// FFI entry point for [`platform_convert_early_ticks`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_convert_early_ticks(sample: EarlyTicks) -> zx_instant_mono_ticks_t {
-    platform_convert_early_ticks(sample)
-}
-
-/// FFI entry point for [`platform_usermode_can_access_tick_registers`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_usermode_can_access_tick_registers() -> bool {
-    platform_usermode_can_access_tick_registers()
 }

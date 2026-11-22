@@ -22,6 +22,7 @@ class NcpAdapter;
 }
 
 namespace ot_rcp {
+
 class RcpInstance {
  public:
   // Delivers one RCP-to-host frame. Returns false if the frame cannot be delivered now (it then
@@ -29,8 +30,9 @@ class RcpInstance {
   using RcpToHostFn = fit::function<bool(const uint8_t* frame, uint16_t length)>;
 
   // Creates the platform on `dispatcher` for `node_id`. The OpenThread instance is not started
-  // until the first Reset().
-  RcpInstance(async_dispatcher_t* dispatcher, uint32_t node_id, RcpToHostFn rcp_to_host);
+  // until the first Reset(). `radio_medium` carries what the radio transmits and receives.
+  RcpInstance(async_dispatcher_t* dispatcher, uint32_t node_id, RcpToHostFn rcp_to_host,
+              std::unique_ptr<RadioMedium> radio_medium);
   ~RcpInstance();
 
   RcpInstance(const RcpInstance&) = delete;
@@ -54,6 +56,8 @@ class RcpInstance {
 
   async_dispatcher_t* const dispatcher_;
   const uint32_t node_id_;
+  // Borrowed by every `platform_`, so declared before it.
+  const std::unique_ptr<RadioMedium> radio_medium_;
   RcpToHostFn rcp_to_host_;
   // Re-created on every `Reset()`, which returns the radio and alarms to their power-on state.
   std::optional<Platform> platform_;

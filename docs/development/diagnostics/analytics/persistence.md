@@ -8,7 +8,9 @@ Inspect.
 
 *   **Automatic collection in development**: On `eng` and `userdebug` builds,
     all Inspect data across the system is automatically persisted across
-    reboots. No configuration required.
+    reboots. No configuration is required by default; storage-constrained
+    products may instead keep their `previous_boot` allowlist active on these
+    builds to bound `/cache` usage.
 
 *   **Production (`user`) builds require privacy configuration**: On production
     devices, persisted Inspect data must be explicitly allowlisted in a
@@ -86,11 +88,11 @@ event-driven pipeline snapshotting service:
               │ Snapshot query
               ▼
 ┌───────────────────────────┐   writes active snapshot
-│ Diagnostics Persistence   ├───► /cache/active/active.json
+│ Diagnostics Persistence   ├───► /cache/active/active.json.zlib
 │                           │     /cache/active/metadata.json
 │ • Periodic (every 300s)   │
 │ • Low battery trigger     │   on reboot: rotate
-│ • Wait for update check   ├───► /cache/previous_boot/active.json
+│ • Wait for update check   ├───► /cache/previous_boot/active.json.zlib
 └─────────────┬─────────────┘     /cache/previous_boot/metadata.json
               │ Serves via FIDL
               ▼
@@ -105,7 +107,7 @@ event-driven pipeline snapshotting service:
 Persistence connects to `fuchsia.diagnostics.ArchiveAccessor.previous_boot`.
 Archivist dynamically applies the allowlist selectors configured for the
 pipeline, or bypasses filtering when `DISABLE_FILTERING.txt` is present (such
-as in `eng` and `userdebug` builds).
+as in most `eng` and `userdebug` builds).
 
 ### 2. Snapshot triggers {#snapshot-triggers}
 
@@ -123,8 +125,14 @@ Persistence records active system snapshots using two triggers:
 
 ### 3. Active-to-previous boot rotation {#active-to-previous-boot-rotation}
 
-*   Active snapshots and metadata are saved to `/cache/active/active.json` and
-    `/cache/active/metadata.json`.
+*   Active snapshots and metadata are saved to `/cache/active/active.json.zlib`
+    and `/cache/active/metadata.json`.
+
+*   Snapshots are stored as JSON compressed into a single RFC 1950 zlib stream
+    to limit their use of `/cache`. `PreviousBootDataProvider` serves the
+    compressed file and reports it as `InspectFormat.JSON` with
+    `Compression.ZLIB_RFC_1950`. Consumers decompress it; for example, Feedback
+    attaches the decompressed, redacted JSON as `inspect.previous_boot.json`.
 
 *   On startup, Persistence atomically cleans `/cache/previous_boot` and moves
     `/cache/active` to `/cache/previous_boot`.

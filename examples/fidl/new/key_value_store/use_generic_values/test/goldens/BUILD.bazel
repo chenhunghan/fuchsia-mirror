@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+    "resource",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+resource(
+    name = "test_write_items_default_error_client",
+    srcs = ["test_write_items_default_error_client.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_default_error_server",
+    srcs = ["test_write_items_default_error_server.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_default_success_client",
+    srcs = ["test_write_items_default_success_client.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_default_success_server",
+    srcs = ["test_write_items_default_success_server.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_concat_success_client",
+    srcs = ["test_write_items_concat_success_client.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_concat_success_server",
+    srcs = ["test_write_items_concat_success_server.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_overwrite_success_client",
+    srcs = ["test_write_items_overwrite_success_client.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+resource(
+    name = "test_write_items_overwrite_success_server",
+    srcs = ["test_write_items_overwrite_success_server.log.golden"],
+    outputs = ["data/goldens/{{source_file_part}}"],
+)
+
+# These are structurally the same as the resource libraries built for the baseline, except with two
+# more resources protocols added related to the `Concat` and `Overwrite` tests.
+fuchsia_package_resource_collection(
+    name = "resources",
+    resources = [
+        ":test_write_items_concat_success_client",
+        ":test_write_items_concat_success_server",
+        ":test_write_items_default_error_client",
+        ":test_write_items_default_error_server",
+        ":test_write_items_default_success_client",
+        ":test_write_items_default_success_server",
+        ":test_write_items_overwrite_success_client",
+        ":test_write_items_overwrite_success_server",
+    ],
+    visibility = [
+        "//examples/fidl/new/key_value_store/use_generic_values/rust:__pkg__",
+        "//examples/fidl/new/key_value_store/use_generic_values/rust_next:__pkg__",
+    ],
+)

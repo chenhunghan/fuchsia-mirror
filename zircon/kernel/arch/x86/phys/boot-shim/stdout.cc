@@ -12,9 +12,7 @@
 #include <lib/uart/all.h>
 
 #include <phys/boot-options.h>
-#include <phys/uart/driver.h>
-
-#include "../legacy-boot.h"
+#include <phys/linuxboot-runtime/x86/legacy-boot.h>
 
 // Legacy loaders like QEMU provide no means of information about the
 // serial port, just the command line.  So parse it just for kernel.serial.

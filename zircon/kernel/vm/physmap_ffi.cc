@@ -4,14 +4,18 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include "vm/physmap_ffi.h"
-
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
 #include <vm/physmap.h>
+#include <vm/physmap_ffi.h>
 
 extern "C" {
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_is_physmap_addr(zx_vaddr_t vaddr) {
+  return is_physmap_addr(reinterpret_cast<const void*>(vaddr));
+}
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE bool cpp_is_physmap_phys_addr(zx_paddr_t paddr) {

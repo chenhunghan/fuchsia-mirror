@@ -18,13 +18,10 @@
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
-#include <arch/x86/msr_ffi.h>
 #include <arch/x86/registers.h>
-#include <arch/x86/smp_ffi.h>
 #include <kernel/cpu.h>
 
 struct iframe_t;
-struct syscall_regs_t;
 
 // Currently, we assume at compile time that we are operating in a mode where we
 // have 48 active virtual address bits.  If/when this changes, we need to come
@@ -43,13 +40,6 @@ static constexpr uint8_t kX86VAddrBits = 48;
 // an address might be a user-mode address ((addr & Mask) == 0), or might be a
 // kernel address ((addr & Mask) == Mask).
 static constexpr uint64_t kX86CanonicalAddressMask = ~((uint64_t{1} << (kX86VAddrBits - 1)) - 1);
-
-#define X86_8BYTE_MASK 0xFFFFFFFF
-
-// Called by assembly.
-extern "C" void x86_exception_handler(struct iframe_t* frame);
-extern "C" void x86_nmi_handler(struct iframe_t* frame);
-extern "C" void platform_irq(struct iframe_t* frame);
 
 struct arch_exception_context {
   struct iframe_t* frame;
@@ -70,50 +60,21 @@ struct arch_exception_context {
   bool is_page_fault;
 };
 
-// Register state layout used by x86_64_context_switch().
-struct x86_64_context_switch_frame {
-  uint64_t r15, r14, r13, r12;
-  uint64_t rbp;
-  uint64_t rbx;
-  uint64_t rip;
-};
+static_assert(sizeof(arch_exception_context) == 32);
+static_assert(alignof(arch_exception_context) == 8);
 
 // Implemented in or called from assembly.
 extern "C" {
 
 #if __has_feature(safe_stack)
-void x86_64_context_switch(vaddr_t* oldsp, vaddr_t newsp, Thread* new_thread,
-                           vaddr_t* old_unsafe_sp, vaddr_t new_unsafe_sp);
 void x86_uspace_entry(const struct iframe_t* iframe, vaddr_t unsafe_sp) __NO_RETURN;
 #else
-void x86_64_context_switch(vaddr_t* oldsp, vaddr_t newsp, Thread* new_thread);
 void x86_uspace_entry(const struct iframe_t* iframe) __NO_RETURN;
 #endif
 
 void x86_syscall();
 
-void x86_syscall_process_pending_signals(struct syscall_regs_t* gregs);
-
 }  // extern C
-
-/* @brief Bring all of the specified APs up and hand them over to the kernel
- *
- * This function must not be called before x86_init_smp.
- *
- * May be called by any running CPU.  Due to requiring use of the very limited
- * low 1MB of memory, this function is not re-entrant.  Itshould not be executed
- * more than once concurrently.
- *
- * @param apic_ids A list of all APIC IDs to launch.
- * @param count The number of entries in the apic_ids list.
- *
- * @return ZX_ERR_INVALID_ARGS if an unknown APIC ID was provided.
- * @return ZX_ERR_BAD_STATE if one of the targets is currently online
- * @return ZX_ERR_TIMED_OUT if one of the targets failed to launch
- */
-inline zx_status_t x86_bringup_aps(uint32_t* apic_ids, uint32_t count) {
-  return rust_x86_bringup_aps(apic_ids, count);
-}
 
 #define IO_BITMAP_BITS 65536
 #define IO_BITMAP_BYTES (IO_BITMAP_BITS / 8)
@@ -202,14 +163,6 @@ static inline void cpuid_c(uint32_t sel, uint32_t sel_c, uint32_t* a, uint32_t* 
   __cpuid_count(sel, sel_c, *a, *b, *c, *d);
 }
 
-static inline ulong x86_get_cr2() {
-  ulong rv;
-
-  __asm__ __volatile__("mov %%cr2, %0" : "=r"(rv));
-
-  return rv;
-}
-
 static inline ulong x86_get_cr3() {
   ulong rv;
 
@@ -243,23 +196,6 @@ static inline void x86_set_cr4(ulong in_val) {
   __asm__ __volatile__("mov %0,%%cr4 \n\t" : : "r"(in_val));
 }
 
-#define DEFINE_REGISTER_ACCESSOR(REG)                     \
-  static inline void set_##REG(uint16_t value) {          \
-    __asm__ volatile("mov %0, %%" #REG : : "r"(value));   \
-  }                                                       \
-  static inline uint16_t get_##REG() {                    \
-    uint16_t value;                                       \
-    __asm__ volatile("mov %%" #REG ", %0" : "=r"(value)); \
-    return value;                                         \
-  }
-
-DEFINE_REGISTER_ACCESSOR(ds)
-DEFINE_REGISTER_ACCESSOR(es)
-DEFINE_REGISTER_ACCESSOR(fs)
-DEFINE_REGISTER_ACCESSOR(gs)
-
-#undef DEFINE_REGISTER_ACCESSOR
-
 static inline uint64_t read_msr(uint32_t msr_id) {
   uint32_t msr_read_val_lo;
   uint32_t msr_read_val_hi;
@@ -280,11 +216,6 @@ static inline uint32_t read_msr32(uint32_t msr_id) {
 // Implemented in assembly.
 extern "C" zx_status_t read_msr_safe(uint32_t msr_id, uint64_t* val);
 
-// Read msr |msr_id| on CPU |cpu| and return the 64-bit value.
-inline uint64_t read_msr_on_cpu(cpu_num_t cpu, uint32_t msr_id) {
-  return rust_x86_read_msr_on_cpu(cpu, msr_id);
-}
-
 static inline void write_msr(uint32_t msr_id, uint64_t msr_write_val) {
   __asm__ __volatile__("wrmsr \n\t"
                        :
@@ -294,11 +225,6 @@ static inline void write_msr(uint32_t msr_id, uint64_t msr_write_val) {
 // Write value |val| into MSR |msr_id|. Returns ZX_OK if the write was successful or
 // a non-Ok status if the write failed because we received a #GP fault.
 zx_status_t write_msr_safe(uint32_t msr_id, uint64_t val);
-
-// Write value |val| into MSR |msr_id| on cpu |cpu|.
-inline void write_msr_on_cpu(cpu_num_t cpu, uint32_t msr_id, uint64_t val) {
-  rust_x86_write_msr_on_cpu(cpu, msr_id, val);
-}
 
 static inline bool x86_is_paging_enabled() {
   if (x86_get_cr0() & X86_CR0_PG)
@@ -451,13 +377,5 @@ void mds_buff_overwrite();
 void x86_ras_fill();
 
 }  // extern C
-
-struct CpuContext;
-
-extern "C" {
-zx_status_t cpp_x86_request_context(cpu_num_t target_cpu, zx_duration_mono_t timeout,
-                                    CpuContext* context);
-void cpp_x86_print_frame(const iframe_t* frame);
-}  // extern "C"
 
 #endif  // ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_X86_H_

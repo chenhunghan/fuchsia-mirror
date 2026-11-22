@@ -19,11 +19,20 @@
             ],
         },
     },
+    capabilities: [
+        { service: "fuchsia.hardware.network.Service" },
+    ],
     use: [
         {
             name: "default",
             service: "fuchsia.hardware.network.driver.Service",
             generate_bind_rule: false,
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.network.Service",
+            from: "self",
         },
     ],
 }

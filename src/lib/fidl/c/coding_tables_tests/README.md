@@ -9,7 +9,7 @@ For example, given the following FIDL definition:
 
 ```fidl
 library example;
-xunion MyMessage {
+flexible union MyMessage {
     int32 a;
     int64 b;
     SomeStruct c;
@@ -19,13 +19,13 @@ xunion MyMessage {
 It is expected to generate coding tables along the lines of:
 
 ```cpp
-static const ::fidl::FidlXUnionField example_MyMessageFields[] = {
-    ::fidl::FidlXUnionField(&fidl::internal::kInt32Table, [... xunion ordinal for a ...]),
-    ::fidl::FidlXUnionField(&fidl::internal::kInt64Table, [... xunion ordinal for b ...]),
-    ::fidl::FidlXUnionField(&example_SomeStructTable, [... xunion ordinal for c ...])
+static const ::fidl::FidlUnionField example_MyMessageFields[] = {
+    ::fidl::FidlUnionField(&fidl::internal::kInt32Table, [... union ordinal for a ...]),
+    ::fidl::FidlUnionField(&fidl::internal::kInt64Table, [... union ordinal for b ...]),
+    ::fidl::FidlUnionField(&example_SomeStructTable, [... union ordinal for c ...])
 };
 const fidl_type_t example_MyMessageTable =
-    fidl_type_t(::fidl::FidlCodedXUnion(3, example_MyMessageFields, "example/MyMessage"));
+    fidl_type_t(::fidl::FidlCodedUnion(3, example_MyMessageFields, "example/MyMessage"));
 ```
 
 The test will check that the pointers in the coding tables are as expected.

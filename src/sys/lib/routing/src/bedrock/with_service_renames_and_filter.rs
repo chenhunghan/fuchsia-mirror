@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use capability_source::{AggregateCapability, CapabilitySource, FilteredProviderSource};
 use cm_rust::NameMapping;
 use cm_rust::offer::{OfferDecl, OfferServiceDecl};
-use fidl_fuchsia_component_runtime::RouteRequest;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
 use router_error::RouterError;
 #[cfg(target_os = "fuchsia")]
 use runtime_capabilities::CapabilityBound;
@@ -51,8 +51,10 @@ impl Routable<DirConnector> for ServiceRenameRouter {
                         target.clone(),
                     )
                     .unwrap();
-                let dir_connector =
-                    DirConnector::from_directory_entry(dir_entry, fidl_fuchsia_io::PERM_READABLE);
+                let dir_connector = DirConnector::from_directory_entry(
+                    dir_entry,
+                    fidl_fuchsia_io_common::PERM_READABLE,
+                );
                 return Ok(Some(dir_connector));
             }
             #[cfg(not(target_os = "fuchsia"))]

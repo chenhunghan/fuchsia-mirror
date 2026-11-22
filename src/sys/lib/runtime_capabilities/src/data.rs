@@ -2,7 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{CapabilityBound, RemoteError};
+use crate::CapabilityBound;
+#[cfg(target_os = "fuchsia")]
+use crate::RemoteError;
+#[cfg(target_os = "fuchsia")]
 use fidl_fuchsia_component_sandbox as fsandbox;
 use flyweights::{FlyByteStr, FlyStr};
 use std::fmt::Debug;
@@ -27,6 +30,7 @@ impl CapabilityBound for Data {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl TryFrom<fsandbox::Data> for Data {
     type Error = RemoteError;
 
@@ -41,6 +45,7 @@ impl TryFrom<fsandbox::Data> for Data {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl From<Data> for fsandbox::Data {
     fn from(data: Data) -> Self {
         match data {
@@ -52,6 +57,7 @@ impl From<Data> for fsandbox::Data {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl From<Data> for fsandbox::Capability {
     fn from(data: Data) -> Self {
         Self::Data(data.into())

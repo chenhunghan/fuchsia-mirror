@@ -53,7 +53,7 @@ use crate::kernel::owned_wait_queue::{OwnedWaitQueue, ThreadUnblockList};
 use crate::kernel::scheduler;
 use crate::kernel::thread::{self, Interruptible, PreemptDisabledToken, Thread};
 use crate::kernel::wait_queue::{ResourceOwnership, WaitQueue, WaitQueueBase, WaitQueueLockOps};
-use crate::platform_rs::timer::{InstantMono, InstantUnknown};
+use crate::platform_rs::timer::InstantMono;
 
 /// Magic value for a live [`Event`].
 const MAGIC: u32 = fbl::magic(b"evnt");
@@ -204,12 +204,16 @@ impl Event {
 
     /// Waits for the event to be signaled, with a deadline.
     ///
-    /// [`Event::wait`] and other wait functions will return `Ok(())` if already signaled, even if
-    /// the deadline has passed. They will return `Err(Status::TIMED_OUT)` after the deadline
-    /// passes if the event has not been signaled.
+    /// [`Event::wait`] and other wait functions return `Ok(())` (or the custom error status passed
+    /// to [`Event::signal_result`] or [`Event::signal_etc`]) if the event is already signaled,
+    /// even if the deadline has passed.
     ///
-    /// May also return `Err(Status::INTERNAL_INTR_KILLED)` or `Err(Status::INTERNAL_INTR_RETRY)`
-    /// if the waiting thread is killed or suspended.
+    /// # Errors
+    ///
+    /// Returns `Err(Status::TIMED_OUT)` if the deadline passes before the event is signaled,
+    /// `Err(Status::INTERNAL_INTR_KILLED)` or `Err(Status::INTERNAL_INTR_RETRY)` if the waiting
+    /// thread is killed or suspended, or any custom error status passed to
+    /// [`Event::signal_result`] or [`Event::signal_etc`].
     pub fn wait(&self, deadline: &Deadline) -> Result<(), Status> {
         // SAFETY: `self` is a valid `Event`, kept alive at least until `wait` returns;
         // `wait_worker` asserts no transaction is active and (in debug) that blocking is allowed.
@@ -242,14 +246,7 @@ impl Event {
     ) -> Result<(), Status> {
         // SAFETY: `self` is a valid `Event`, kept alive at least until `wait_deadline` returns;
         // `wait_worker` asserts no transaction is active and (in debug) that blocking is allowed.
-        unsafe {
-            Self::wait_worker(
-                self,
-                &Deadline::no_slack(InstantUnknown(deadline.0)),
-                interruptible,
-                0,
-            )
-        }
+        unsafe { Self::wait_worker(self, &Deadline::no_slack(deadline.into()), interruptible, 0) }
     }
 
     /// Internal wait implementation shared by all `wait*` entry points.
@@ -374,7 +371,7 @@ impl Event {
 
     /// Signals the event with `ZX_OK` and wakes all waiting threads.
     pub fn signal(&self) {
-        self.signal_result(Ok(()));
+        self.signal_etc(Ok(()), None);
     }
 
     /// Signals the event with a specific status result.
@@ -533,7 +530,7 @@ impl Event {
                         drop(front_proof);
                         if assigned.is_err() {
                             core::hint::cold_path();
-                            while let Some(t) = unblock_list.as_mut().as_list().pop_front() {
+                            while let Some(t) = unblock_list.as_mut().pop_front() {
                                 // SAFETY: `t` is blocked in `event.wait` (so live); its lock was
                                 // acquired by `lock_for_wake_*_in_place` in this transaction with
                                 // no guard or proof left, and is released exactly once here.
@@ -571,21 +568,17 @@ impl Event {
                 ChainLockTransaction::finalize(token);
 
                 if queue_to_own.is_some() {
-                    let t = unblock_list
-                        .as_mut()
-                        .as_list()
-                        .pop_front()
-                        .expect("non-empty list has a front");
-                    // SAFETY: `t` was just dequeued with its lock held (so it is live).
-                    let t: &Thread = unsafe { t.as_ref() };
-                    // SAFETY: `t`'s lock is held by this transaction (checked by `adopt`) with no
-                    // guard or proof for it; `unblock_synchronous` releases it.
-                    let t_guard = unsafe { OwnerGuard::adopt(t, token) };
+                    let t = unblock_list.as_mut().pop_front().expect("non-empty list has a front");
                     // The new owner of the queue will unblock synchronously. This causes us to
                     // defer rescheduling until we block in ChannelDispatcher::MessageWaiter::Wait.
                     //
-                    // SAFETY: `t` was dequeued above with its `blocked_status` set.
-                    unsafe { scheduler::unblock_synchronous(t_guard, token) };
+                    // SAFETY: `t` is non-idle (it was blocked in `wait`) and was dequeued above
+                    // with its `blocked_status` set and its lock held by the active, finalized
+                    // transaction `token` with no conflicting reference, guard, or proof live;
+                    // interrupts and local preemption are disabled by
+                    // `EAGER_RESCHED_DISABLE_AND_IRQ_SAVE_OPTION`; and `t` is not dereferenced
+                    // after this call.
+                    unsafe { scheduler::unblock_synchronous(t, token) };
                 }
 
                 // We have all of our locks now, time to proceed with the wake operations.
@@ -710,44 +703,32 @@ impl Deref for AutounsignalEvent {
 /// FFI entry point for `Event::WaitWorker`.
 ///
 /// # Safety
-/// `event` must be a valid `Event` and `deadline` a valid `Deadline` (if not infinite, on the
-/// monotonic timeline); no `ChainLockTransaction` may be active on this CPU, and the caller must
-/// be in blockable thread context.
+/// `event` must point to a valid, initialized `Event` that stays live through the wait preamble
+/// (see [`Event::wait_worker`]); if `deadline` is not infinite it must use the monotonic timeline;
+/// no `ChainLockTransaction` may be active on this CPU; and the caller must be in blockable thread
+/// context.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_event_wait_worker(
     event: *const Event,
-    deadline: *const Deadline,
+    deadline: &Deadline,
     interruptible: Interruptible,
-    signal_mask: u32,
 ) -> zx_status_t {
-    // SAFETY: The caller guarantees `deadline` is valid; only a shared reference is formed.
-    let deadline = unsafe { &*deadline };
     // SAFETY: The caller guarantees `event` points to a valid `Event`, `deadline` is on the
     // monotonic timeline (if finite), and we are in blockable thread context with no active
     // `ChainLockTransaction`.
-    Status::result_into_raw(unsafe {
-        Event::wait_worker(event, deadline, interruptible, signal_mask)
-    })
+    Status::result_into_raw(unsafe { Event::wait_worker(event, deadline, interruptible, 0) })
 }
 
 /// FFI entry point for `Event::Signal`.
 ///
 /// # Safety
 /// `event` must point to a valid, initialized `Event` that stays live through the signal operation
-/// (see [`Event::signal_worker`]), `queue_to_own` must be null or point to a valid, initialized
-/// `OwnedWaitQueue`, and no `ChainLockTransaction` may be active on this CPU.
+/// (see [`Event::signal_worker`]), and no `ChainLockTransaction` may be active on this CPU.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_event_signal(
-    event: *const Event,
-    wait_result: zx_status_t,
-    queue_to_own: *mut OwnedWaitQueue,
-) {
-    // SAFETY: The caller guarantees `queue_to_own` is null or a valid `OwnedWaitQueue`; only a
-    // shared reference is formed, all mutation goes through its locked cells.
-    let queue_to_own: Option<&OwnedWaitQueue> = unsafe { queue_to_own.as_ref() };
+pub unsafe extern "C" fn rust_event_signal(event: *const Event, wait_result: zx_status_t) {
     // SAFETY: Forwarded from the caller; `event` is passed as `*const Event` so no `&Event`
     // outlives `wait.lock()` inside `signal_worker`.
-    unsafe { Event::signal_worker(event, Status::ok(wait_result), queue_to_own) };
+    unsafe { Event::signal_worker(event, Status::ok(wait_result), None) };
 }
 
 /// FFI entry point for `Event::Unsignal`.
@@ -767,7 +748,7 @@ pub unsafe extern "C" fn rust_event_unsignal(event: *const Event) -> zx_status_t
 /// `event` must point to a live `Event` that C++ is destroying and that no other thread can
 /// concurrently read or write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_event_destroy(event: *mut Event) {
+pub unsafe extern "C" fn rust_event_destroy_fields(event: *mut Event) {
     // SAFETY: The caller guarantees `event` is a live `Event` being destroyed with exclusive
     // teardown access to `magic` and `flags`.
     unsafe { (*event).destroy_fields() };
@@ -775,16 +756,20 @@ pub unsafe extern "C" fn rust_event_destroy(event: *mut Event) {
 
 /// [`Event`] and [`AutounsignalEvent`] unit tests.
 #[cfg(ktest)]
-#[unittest::suite(name = "event_rust")]
+#[unittest::suite(name = "event")]
 mod tests {
     use super::{AutounsignalEvent, Event, FLAGS_AUTOUNSIGNAL, FLAGS_NONE, MAGIC, NOT_SIGNALED};
+    use crate::arch_rs::curr_cpu_num;
     use crate::kconcurrent::{
         ChainLockTransaction, IRQ_SAVE_OPTION, OwnerGuard, TransactionResult, clt_tag,
         single_chain_lock_guard_owned,
     };
     use crate::kernel::deadline::Deadline;
     use crate::kernel::owned_wait_queue::OwnedWaitQueue;
+    use crate::kernel::relaxed_atomic::RelaxedAtomicBool;
+    use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
     use crate::kernel::thread::{self, DEFAULT_PRIORITY, Interruptible, ThreadPtr};
+    use crate::kernel::types::cpu_num_to_mask;
     use crate::platform_rs::timer::{
         DurationMono, InstantMono, current_mono_time, zx_msec, zx_usec,
     };
@@ -792,11 +777,105 @@ mod tests {
     use core::sync::atomic::{AtomicBool, AtomicI64, Ordering};
     use pin_init::stack_pin_init;
     use unittest::{
-        assert_eq, assert_true, expect_eq, expect_err, expect_false, expect_true, subtest,
-        unwrap_ok,
+        assert_ne, assert_true, expect_eq, expect_err, expect_false, expect_true, unwrap_ok,
     };
     use zx_status::Status;
     use zx_types::{ZX_ERR_BAD_STATE, ZX_ERR_CANCELED, ZX_OK, ZX_TIME_INFINITE, zx_status_t};
+
+    /// Ensure that Event::signal while holding a spinlock is safe.
+    #[test]
+    fn event_signal_spinlock_test() {
+        // This is a regression test for https://fxbug.dev/42157402.
+        struct Args<'a> {
+            about_to_wait: RelaxedAtomicBool,
+            event: &'a Event,
+        }
+
+        extern "C" fn waiter(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to `args`, which `join_waiter` keeps alive until this thread is
+            // joined.
+            let args = unsafe { &*arg.cast::<Args<'_>>() };
+            args.about_to_wait.store(true);
+            let _ = args.event.wait_infinite();
+            0
+        }
+
+        // Pin the current thread to its CPU.
+        // SAFETY: Unit tests run in thread context after multi-threading is initialized.
+        let current_thread = unsafe { ThreadPtr::current() };
+        // SAFETY: `current_thread` is the live currently executing thread.
+        let original_affinity_mask = unsafe { current_thread.get_cpu_affinity() };
+        let _restore_affinity = zr::defer(move || {
+            // SAFETY: `current_thread` is the live currently executing thread.
+            unsafe { current_thread.set_cpu_affinity(original_affinity_mask) };
+        });
+        let target_cpu = curr_cpu_num();
+        // SAFETY: `current_thread` is the live currently executing thread.
+        unsafe { current_thread.set_cpu_affinity(cpu_num_to_mask(target_cpu)) };
+
+        // Create a thread that can only run on this same CPU.
+        stack_pin_init!(let event = Event::init_unsignaled());
+        let args = Args { about_to_wait: RelaxedAtomicBool::new(false), event: &event };
+        // SAFETY: `name` is NUL-terminated, we are in a blockable thread context with no active
+        // `ChainLockTransaction`, `waiter` and `&args` are valid, and `join_waiter` signals `event`
+        // and joins `t` before `args` or `event` go out of scope.
+        let t = unwrap_ok!(unsafe {
+            thread::create_with_priority(
+                c"event_signal_spinlock_test".as_ptr(),
+                waiter,
+                core::ptr::from_ref(&args).cast_mut().cast(),
+                DEFAULT_PRIORITY,
+            )
+        });
+        // SAFETY: `t` was just created and has not been resumed or joined yet.
+        unsafe { t.set_cpu_affinity(cpu_num_to_mask(target_cpu)) };
+
+        // Give the thread deadline parameters with 100% utilization to increase the likelihood that
+        // it reaches its Event::wait_infinite before the current thread reaches its Event::signal.
+        // SAFETY: `t` is valid and we are in normal thread context with no spinlocks, `t`'s lock,
+        // or active `ChainLockTransaction` held.
+        unsafe {
+            t.set_base_profile(&SchedulerStateBaseProfile::deadline(
+                DurationMono(zx_usec(150)),
+                DurationMono(zx_usec(150)),
+            ))
+        };
+        // SAFETY: `t` was just created and has not been resumed or joined yet.
+        unsafe { t.resume() };
+
+        let mut join_waiter = zr::defer(|| {
+            args.event.signal();
+            // SAFETY: `t` was resumed above and is joined at most once (either on the normal path
+            // after `cancel()` or here on early return).
+            let _ = unsafe { t.join(InstantMono::INFINITE) };
+        });
+
+        // Spin until we know the waiter has started running.
+        while !args.about_to_wait.load() {
+            thread::r#yield();
+        }
+
+        crate::ksync_kernel::declare_singleton_monitored_spinlock!(SpinlockForEventSignalTest);
+        {
+            ksync::lock!(
+                let _guard = SpinlockForEventSignalTest::get().lock_with(ksync::source_tag!())
+            );
+            args.event.signal();
+            // Now that we have signaled, we should see that a preemption is pending on this CPU.
+            // SAFETY: The current `Thread` pointer is initialized and stays valid for the duration
+            // of this test, and `PreemptionState` consists solely of relaxed atomics; no `&Thread`
+            // is formed.
+            assert_ne!(
+                0,
+                unsafe { (*thread::current_preemption_state()).preempts_pending() }
+                    & cpu_num_to_mask(target_cpu)
+            );
+        }
+
+        join_waiter.cancel();
+        // SAFETY: `join_waiter` was canceled above, so `t` is joined once here.
+        let _ = unwrap_ok!(unsafe { t.join(InstantMono::INFINITE) });
+    }
 
     /// A result passed to `signal_etc` before any thread waits is propagated to the waiter.
     #[test]
@@ -811,91 +890,37 @@ mod tests {
         expect_err!(wake_result, signal_result, "");
     }
 
-    struct EventWaiterArgs<'a> {
-        event: &'a Event,
-        wake_result: Result<(), Status>,
-    }
-
-    extern "C" fn event_waiter_thread(arg: *mut c_void) -> i32 {
-        // SAFETY: `arg` points to a valid `EventWaiterArgs` that outlives this thread, and no
-        // other thread accesses `wake_result` until after this thread is joined.
-        let event_args = unsafe { &mut *arg.cast::<EventWaiterArgs<'_>>() };
-        event_args.wake_result = event_args.event.wait_infinite();
-        0
-    }
-
-    #[derive(Clone, Copy)]
-    enum Signal {
-        Only,
-        Queue,
-    }
-
-    /// Tests that the result in a `signal_etc` call is propagated to the waiter when the waiter
-    /// enters a blocking state before the event is signaled.
-    fn run_signal_result_after_wait_test(signal: Signal) -> bool {
-        (subtest!(|signal: Signal| {
-            stack_pin_init!(let event = Event::init_unsignaled());
-
-            let signal_result = Status::err_from_raw(42);
-
-            let mut args = EventWaiterArgs { event: &event, wake_result: Ok(()) };
-
-            // SAFETY: `event_waiter_thread` and `&mut args` are valid, and `waiter` is joined
-            // below before `args` or `event` go out of scope.
-            let waiter = unwrap_ok!(unsafe {
-                thread::create_with_priority(
-                    c"event waiter thread".as_ptr(),
-                    event_waiter_thread,
-                    (&raw mut args).cast(),
-                    DEFAULT_PRIORITY,
-                )
-            });
-            // SAFETY: `waiter` was just created and has not been resumed or joined yet.
-            unsafe { waiter.resume() };
-
-            let mut wait_duration = DurationMono(zx_usec(1));
-            loop {
-                // Check if the waiter thread is in the blocked state, indicating that the event
-                // has latched.
-                // SAFETY: `waiter` has not been joined yet.
-                if unsafe { waiter.is_blocked() } {
-                    break;
-                }
-                // Nope - sleep and try again.
-                let _ = thread::sleep_relative(wait_duration);
-                wait_duration = wait_duration * 2;
-            }
-
-            match signal {
-                Signal::Queue => {
-                    stack_pin_init!(let queue = OwnedWaitQueue::init());
-                    event.signal_etc(signal_result, Some(&*queue));
-                    queue.reset_owner_if_no_waiters();
-                }
-                Signal::Only => {
-                    event.signal_result(signal_result);
-                }
-            }
-
-            // SAFETY: `waiter` has not been joined yet.
-            let thread_retcode = unwrap_ok!(unsafe { waiter.join(InstantMono::INFINITE) });
-
-            assert_eq!(thread_retcode, 0, "");
-
-            expect_err!(args.wake_result, signal_result, "");
-        }))(signal)
-    }
-
     /// test signaling event with result after waiting
     #[test]
     fn signal_result_after_wait_test() {
-        assert_true!(run_signal_result_after_wait_test(Signal::Only));
+        stack_pin_init!(let event = Event::init_unsignaled());
+        stack_pin_init!(let gate = Event::init_signaled());
+        let ctx = WaitCtx::ten_seconds(&event, &gate);
+        let mut waiters = Waiters::<1>::spawn(&ctx);
+        assert_true!(waiters.all_spawned_and_blocked());
+
+        let signal_result = Status::err_from_raw(42);
+        event.signal_result(signal_result);
+
+        expect_eq!(waiters.join(0), signal_result.into_raw());
     }
 
     /// test signaling event with result after waiting (using OwnedWaitQueue)
     #[test]
     fn signal_etc_after_wait_test() {
-        assert_true!(run_signal_result_after_wait_test(Signal::Queue));
+        stack_pin_init!(let event = Event::init_unsignaled());
+        stack_pin_init!(let queue = OwnedWaitQueue::init());
+        stack_pin_init!(let gate = Event::init_signaled());
+        // Dropped after `waiters` (declared later), so the waiter has exited by then.
+        let _owq_reset = OwqReset(&queue);
+        let ctx = WaitCtx::ten_seconds(&event, &gate);
+        let mut waiters = Waiters::<1>::spawn(&ctx);
+        assert_true!(waiters.all_spawned_and_blocked());
+
+        let signal_result = Status::err_from_raw(42);
+        event.signal_etc(signal_result, Some(&*queue));
+
+        expect_eq!(waiters.join(0), signal_result.into_raw());
     }
 
     /// Layout and constants: a fresh `Event`/`AutounsignalEvent` initializes as expected.
@@ -1043,7 +1068,7 @@ mod tests {
                 // SAFETY: `ctx` outlives the thread, which `Drop` joins.
                 unsafe {
                     thread::spawn(
-                        c"event_rust_waiter".as_ptr(),
+                        c"event_waiter".as_ptr(),
                         wait_entry,
                         core::ptr::from_ref(ctx).cast_mut().cast(),
                     )
@@ -1116,27 +1141,53 @@ mod tests {
         false
     }
 
-    /// Each signal of an `AutounsignalEvent` wakes exactly one waiter and leaves it unsignaled.
+    /// Signaling a standard `Event` wakes all blocked waiters with the signaled status.
+    #[test]
+    fn test_event_signal_wakes_all_waiters() {
+        stack_pin_init!(let event = Event::init_unsignaled());
+        stack_pin_init!(let gate = Event::init_signaled());
+        let ctx = WaitCtx::ten_seconds(&event, &gate);
+        let mut waiters = Waiters::<3>::spawn(&ctx);
+        assert_true!(waiters.all_spawned_and_blocked());
+        expect_eq!(queue_count(&event), 3);
+
+        let status = Status::err_from_raw(42);
+        event.signal_result(status);
+        expect_true!(event.is_signaled());
+        expect_eq!(queue_count(&event), 0);
+
+        for i in 0..3 {
+            expect_eq!(waiters.join(i), status.into_raw());
+        }
+        expect_true!(event.is_signaled());
+    }
+
+    /// Each signal of an `AutounsignalEvent` wakes one waiter with its status and stays unsignaled.
     #[test]
     fn test_autounsignal_event_wakes_one_per_signal() {
-        pin_init::stack_pin_init!(let event = AutounsignalEvent::init_unsignaled());
+        stack_pin_init!(let event = AutounsignalEvent::init_unsignaled());
         // Nothing to inspect before the waiters exit, so the gate is open from the start.
-        pin_init::stack_pin_init!(let gate = Event::init_signaled());
+        stack_pin_init!(let gate = Event::init_signaled());
         let ctx = WaitCtx::ten_seconds(&event, &gate);
         let mut waiters = Waiters::<2>::spawn(&ctx);
-        unittest::assert_true!(waiters.all_spawned_and_blocked());
+        assert_true!(waiters.all_spawned_and_blocked());
         expect_eq!(queue_count(&event), 2);
 
-        // Each signal wakes exactly one thread and leaves the event unsignaled.
-        event.signal();
+        // Each signal wakes one thread with its own status and leaves the event unsignaled.
+        let first_status = Status::err_from_raw(11);
+        let second_status = Status::err_from_raw(22);
+        event.signal_result(first_status);
         expect_true!(wait_until_count(&event, 1));
         expect_false!(event.is_signaled());
-        event.signal();
+        event.signal_result(second_status);
         expect_true!(wait_until_count(&event, 0));
         expect_false!(event.is_signaled());
 
-        expect_eq!(waiters.join(0), ZX_OK);
-        expect_eq!(waiters.join(1), ZX_OK);
+        let r0 = waiters.join(0);
+        let r1 = waiters.join(1);
+        let delivered_distinct = (r0 == first_status.into_raw() && r1 == second_status.into_raw())
+            || (r0 == second_status.into_raw() && r1 == first_status.into_raw());
+        expect_true!(delivered_distinct, "expected one waiter with 11 and the other with 22");
         expect_false!(event.is_signaled());
     }
 
@@ -1178,7 +1229,7 @@ mod tests {
         let ctx = unsafe { &*arg.cast::<HolderCtx>() };
         // SAFETY: The spawning test also keeps the `owq` alive until it joins us.
         let owq = unsafe { &*ctx.owq };
-        ChainLockTransaction::until_done(IRQ_SAVE_OPTION, clt_tag!("event_rust_holder"), |token| {
+        ChainLockTransaction::until_done(IRQ_SAVE_OPTION, clt_tag!("event_holder"), |token| {
             // Held first-in-chain in a finalized transaction, released when `_guard` drops.
             let _guard = OwnerGuard::new(owq, token);
             ChainLockTransaction::finalize(token);
@@ -1230,7 +1281,7 @@ mod tests {
         // SAFETY: `holder_ctx` and `owq` outlive the thread, which is joined below.
         let holder = unsafe {
             thread::spawn(
-                c"event_rust_holder".as_ptr(),
+                c"event_holder".as_ptr(),
                 holder_entry,
                 core::ptr::from_ref(&holder_ctx).cast_mut().cast(),
             )

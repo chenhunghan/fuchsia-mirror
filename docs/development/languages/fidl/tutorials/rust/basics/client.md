@@ -37,20 +37,20 @@ Create a new component project at `examples/fidl/rust/client`:
    }
    ```
 
-1. Declare a target for the client in `examples/fidl/rust/client/BUILD.gn`:
+1. Declare a target for the client in `examples/fidl/rust/client/BUILD.bazel`:
 
-   ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client/BUILD.gn" region_tag="imports" %}
+   ```bazel
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client/BUILD.bazel" region_tag="imports" %}
 
    # Declare an executable for the client.
-   rustc_binary("bin") {
-     name = "fidl_echo_rust_client"
-     edition = "2024"
+   rustc_binary(
+       name = "bin",
+       binary_name = "fidl_echo_rust_client",
+       srcs = ["src/main.rs"],
+       edition = "2024",
+   )
 
-     sources = [ "src/main.rs" ]
-   }
-
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client/BUILD.gn" region_tag="rest" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client/BUILD.bazel" region_tag="rest" %}
    ```
 
 1. Add a component manifest in `examples/fidl/rust/client/meta/client.cml`:
@@ -79,8 +79,8 @@ Create a new component project at `examples/fidl/rust/client`:
 
 1. Add the following dependencies to the `rustc_binary`:
 
-   ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client/BUILD.gn" region_tag="deps" %}
+   ```bazel
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/client/BUILD.bazel" region_tag="deps" %}
    ```
 
 1. Then, import them in `main.rs`:
@@ -224,7 +224,7 @@ ffx component destroy /core/ffx-laboratory:echo_realm
 <!-- xrefs -->
 [glossary.realm]: /docs/glossary/README.md#realm
 [bindings-ref]: /docs/reference/fidl/bindings/rust-bindings.md
-[events]: /docs/reference/fidl/bindings/rust-bindings.md#protocol-events-client
+[events]: /docs/reference/fidl/bindings/rust-bindings.md#protocols-events-client
 [rustdoc]: https://fuchsia.dev/go/rustdoc/
 [server-tut]: /docs/development/languages/fidl/tutorials/rust/basics/server.md
 [sync-client]: /docs/development/languages/fidl/tutorials/rust/basics/sync-client.md

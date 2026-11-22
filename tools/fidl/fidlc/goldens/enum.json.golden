@@ -22,7 +22,7 @@
         "MyEmptyFlexibleEnum"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "line": 20,
         "column": 6,
         "length": 19
@@ -39,7 +39,7 @@
         "MyFlexibleEnum"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "line": 8,
         "column": 6,
         "length": 14
@@ -50,7 +50,7 @@
         {
           "name": "FOO",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 9,
             "column": 5,
             "length": 3
@@ -70,7 +70,7 @@
         {
           "name": "BAR",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 10,
             "column": 5,
             "length": 3
@@ -97,7 +97,7 @@
         "MyFlexibleEnumWithCustomUnknown"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "line": 13,
         "column": 6,
         "length": 31
@@ -108,7 +108,7 @@
         {
           "name": "FOO",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 14,
             "column": 5,
             "length": 3
@@ -128,7 +128,7 @@
         {
           "name": "BAR",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 15,
             "column": 5,
             "length": 3
@@ -148,7 +148,7 @@
         {
           "name": "CUSTOM_UNKNOWN",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 17,
             "column": 5,
             "length": 14
@@ -169,7 +169,7 @@
               "name": "unknown",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
                 "line": 16,
                 "column": 5,
                 "length": 8
@@ -187,7 +187,7 @@
         "MyStrictEnum"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "line": 3,
         "column": 6,
         "length": 12
@@ -198,7 +198,7 @@
         {
           "name": "FOO",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 4,
             "column": 5,
             "length": 3
@@ -218,7 +218,7 @@
         {
           "name": "BAR",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "line": 5,
             "column": 5,
             "length": 3

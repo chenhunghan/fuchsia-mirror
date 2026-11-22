@@ -4,9 +4,10 @@
 
 #include "src/developer/forensics/feedback/reboot_log/reboot_log.h"
 
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
+#include <format>
 #include <string>
 #include <string_view>
 
@@ -26,10 +27,19 @@ namespace forensics {
 namespace feedback {
 namespace {
 
-using fuchsia::hardware::power::statecontrol::ShutdownAction;
-using fuchsia::hardware::power::statecontrol::ShutdownReason;
+using fuchsia_hardware_power_statecontrol::ShutdownAction;
+using fuchsia_hardware_power_statecontrol::ShutdownReason;
 
 using ::testing::HasSubstr;
+using ::testing::Not;
+using ::testing::TestParamInfo;
+using ::testing::ValuesIn;
+using ::testing::WithParamInterface;
+
+constexpr zx::duration kDefaultGracefulUptime = zx::msec(6543);
+constexpr zx::duration kDefaultGracefulRuntime = zx::msec(5432);
+constexpr zx::duration kDefaultLastLogUptime = zx::msec(4321);
+constexpr zx::time_boot kDefaultLastLogTimestamp(kDefaultLastLogUptime.get());
 
 class SimpleRedactor : public RedactorBase {
  public:
@@ -101,22 +111,18 @@ class RebootLogTest : public UnitTestFixture {
   }
 
   void WriteGracefulShutdownInfoContents(
-      fuchsia::hardware::power::statecontrol::ShutdownOptions options) {
+      fuchsia_hardware_power_statecontrol::ShutdownOptions options) {
     FX_CHECK(tmp_dir_.NewTempFileWithData("", &graceful_shutdown_info_path_))
         << "Failed to create temporary graceful shutdown info";
 
     FX_CHECK(files::WriteFile(
         graceful_shutdown_info_path_,
-        ToJson(ToGracefulShutdownAction(options), ToGracefulShutdownReasons(options))));
-  }
-
-  void WritePreviousSystemTimeContents(const std::string& contents) {
-    FX_CHECK(tmp_dir_.NewTempFileWithData(contents, &previous_system_time_path_))
-        << "Failed to create temporary previous system time file";
+        ToJson(ToGracefulShutdownAction(options), ToGracefulShutdownReasons(options),
+               kDefaultGracefulUptime, kDefaultGracefulRuntime)));
   }
 
   std::string WriteLegacyGracefulRebootLogContents(
-      fuchsia::hardware::power::statecontrol::ShutdownOptions options) {
+      fuchsia_hardware_power_statecontrol::ShutdownOptions options) {
     std::string path;
     FX_CHECK(tmp_dir_.NewTempFileWithData("", &path))
         << "Failed to create temporary graceful reboot log";
@@ -128,11 +134,10 @@ class RebootLogTest : public UnitTestFixture {
 
   RebootLog ParseRebootLog(const std::string& zircon_reboot_log_path,
                            const std::string& graceful_shutdown_info_path,
-                           const std::string& legacy_graceful_reboot_log_path,
-                           const std::string& previous_system_time_path, bool not_a_fdr,
+                           const std::string& legacy_graceful_reboot_log_path, bool not_a_fdr,
                            bool supports_user_initiated_poweroffs) {
     return RebootLog::ParseRebootLog(zircon_reboot_log_path, graceful_shutdown_info_path,
-                                     legacy_graceful_reboot_log_path, previous_system_time_path,
+                                     legacy_graceful_reboot_log_path, last_log_timestamp_,
                                      previous_boot_kernel_log_path_, final_shutdown_info_path_,
                                      not_a_fdr, supports_user_initiated_poweroffs,
                                      /*first_component_instance=*/true, redactor_.get());
@@ -140,7 +145,7 @@ class RebootLogTest : public UnitTestFixture {
 
   std::string zircon_reboot_log_path_;
   std::string graceful_shutdown_info_path_;
-  std::string previous_system_time_path_;
+  std::optional<zx::time_boot> last_log_timestamp_;
   std::string previous_boot_kernel_log_path_;
   std::string final_shutdown_info_path_;
   std::unique_ptr<RedactorBase> redactor_;
@@ -153,11 +158,11 @@ class RebootLogTest : public UnitTestFixture {
 class RebootLogReasonTest : public RebootLogTest,
                             public testing::WithParamInterface<RebootReasonTestParam> {};
 
-fuchsia::hardware::power::statecontrol::ShutdownOptions NewShutdownOptions(
+fuchsia_hardware_power_statecontrol::ShutdownOptions NewShutdownOptions(
     ShutdownAction action, std::vector<ShutdownReason> reasons) {
-  fuchsia::hardware::power::statecontrol::ShutdownOptions options;
-  options.set_action(action);
-  options.set_reasons(std::move(reasons));
+  fuchsia_hardware_power_statecontrol::ShutdownOptions options;
+  options.action(action);
+  options.reasons(std::move(reasons));
   return options;
 }
 
@@ -175,35 +180,35 @@ INSTANTIATE_TEST_SUITE_P(
             "ZirconCleanGracefulUserRequest",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "USER REQUEST",
         },
         {
             "ZirconCleanGracefulSystemUpdate",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::SYSTEM_UPDATE,
+            ShutdownReason::kSystemUpdate,
             "SYSTEM UPDATE",
         },
         {
             "ZirconCleanGracefulNetstackMigration",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::NETSTACK_MIGRATION,
+            ShutdownReason::kNetstackMigration,
             "NETSTACK MIGRATION",
         },
         {
             "ZirconCleanGracefulHighTemperature",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::HIGH_TEMPERATURE,
+            ShutdownReason::kHighTemperature,
             "HIGH TEMPERATURE",
         },
         {
             "ZirconCleanGracefulSessionFailure",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::SESSION_FAILURE,
+            ShutdownReason::kSessionFailure,
             "SESSION FAILURE",
         },
         {
@@ -216,13 +221,13 @@ INSTANTIATE_TEST_SUITE_P(
         {
             "Cold",
             std::nullopt,
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "USER REQUEST",
         },
         {
             "ColdWithHwReason",
             "HW REBOOT REASON (COLD BOOT)\n\n",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "USER REQUEST",
         },
         {
@@ -236,33 +241,33 @@ INSTANTIATE_TEST_SUITE_P(
             "KernelPanic",
             "HW REBOOT REASON (UNKNOWN)\n\n"
             "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "KERNEL PANIC",
         },
         {
             "OOM",
             "HW REBOOT REASON (UNKNOWN)\n\n"
             "ZIRCON REBOOT REASON (OOM)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "OOM",
         },
         {
             "SwWatchdog",
             "HW REBOOT REASON (UNKNOWN)\n\n"
             "ZIRCON REBOOT REASON (SW WATCHDOG)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "SOFTWARE WATCHDOG TIMEOUT",
         },
         {
             "HwWatchdog",
             "HW REBOOT REASON (HW WATCHDOG)\n\n",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "HARDWARE WATCHDOG TIMEOUT",
         },
         {
             "Brownout",
             "HW REBOOT REASON (BROWNOUT)\n\n",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "BROWNOUT",
         },
         {
@@ -276,14 +281,14 @@ INSTANTIATE_TEST_SUITE_P(
             "SpontaneousDuringShutdown",
             "HW REBOOT REASON (UNKNOWN)\n\n"
             "ZIRCON REBOOT REASON (UNKNOWN)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "SPONTANEOUS DURING SHUTDOWN",
         },
         {
             "RootJobTermination",
             "HW REBOOT REASON (UNKNOWN)\n\n"
             "ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "ROOT JOB TERMINATION",
         },
         {
@@ -302,7 +307,7 @@ INSTANTIATE_TEST_SUITE_P(
         {
             "NotParseable",
             "NOT PARSEABLE",
-            ShutdownReason::USER_REQUEST,
+            ShutdownReason::kUserRequest,
             "NOT PARSEABLE",
         },
     })),
@@ -316,13 +321,13 @@ TEST_P(RebootLogReasonTest, Succeed) {
 
   if (param.shutdown_reason.has_value()) {
     WriteGracefulShutdownInfoContents(
-        NewShutdownOptions(ShutdownAction::REBOOT, {param.shutdown_reason.value()}));
+        NewShutdownOptions(ShutdownAction::kReboot, {param.shutdown_reason.value()}));
   }
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), param.output_reboot_reason);
 }
@@ -334,22 +339,22 @@ INSTANTIATE_TEST_SUITE_P(WithVariousShutdownActions, ColdBootTest,
                          ::testing::ValuesIn(std::vector<ShutdownActionTestParam>({
                              {
                                  "Poweroff",
-                                 ShutdownAction::POWEROFF,
+                                 ShutdownAction::kPoweroff,
                                  GracefulShutdownAction::kPoweroff,
                              },
                              {
                                  "Reboot",
-                                 ShutdownAction::REBOOT,
+                                 ShutdownAction::kReboot,
                                  GracefulShutdownAction::kReboot,
                              },
                              {
                                  "RebootToRecovery",
-                                 ShutdownAction::REBOOT_TO_RECOVERY,
+                                 ShutdownAction::kRebootToRecovery,
                                  GracefulShutdownAction::kRebootToRecovery,
                              },
                              {
                                  "RebootToBootloader",
-                                 ShutdownAction::REBOOT_TO_BOOTLOADER,
+                                 ShutdownAction::kRebootToBootloader,
                                  GracefulShutdownAction::kRebootToBootloader,
                              },
                          })),
@@ -362,12 +367,12 @@ TEST_P(ColdBootTest, UsesGracefulReasons) {
   const ShutdownActionTestParam& param = GetParam();
 
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(*param.shutdown_action, {ShutdownReason::USER_REQUEST}));
+      NewShutdownOptions(*param.shutdown_action, {ShutdownReason::kUserRequest}));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction(),
             param.output_shutdown_action);
@@ -375,12 +380,12 @@ TEST_P(ColdBootTest, UsesGracefulReasons) {
 }
 
 TEST_F(ColdBootTest, EmptyGracefulReasonsIsGenericGraceful) {
-  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::POWEROFF, {}));
+  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::kPoweroff, /*reasons=*/{}));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction(),
             GracefulShutdownAction::kPoweroff);
@@ -388,12 +393,12 @@ TEST_F(ColdBootTest, EmptyGracefulReasonsIsGenericGraceful) {
 }
 
 TEST_F(ColdBootTest, EmptyGracefulReasonsRebootIsGenericGraceful) {
-  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::REBOOT, {}));
+  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::kReboot, /*reasons=*/{}));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction(),
             GracefulShutdownAction::kReboot);
@@ -401,20 +406,20 @@ TEST_F(ColdBootTest, EmptyGracefulReasonsRebootIsGenericGraceful) {
 }
 
 TEST_F(ColdBootTest, EmptyGracefulInfoIsCold) {
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_FALSE(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction().has_value());
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "COLD");
 }
 
 TEST_F(ColdBootTest, EmptyGracefulInfoIsSpontaneous) {
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/true));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/true));
 
   EXPECT_FALSE(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction().has_value());
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "SPONTANEOUS");
@@ -427,22 +432,22 @@ INSTANTIATE_TEST_SUITE_P(WithVariousShutdownAction, ShutdownActionTest,
                          ::testing::ValuesIn(std::vector<ShutdownActionTestParam>({
                              {
                                  "Poweroff",
-                                 ShutdownAction::POWEROFF,
+                                 ShutdownAction::kPoweroff,
                                  GracefulShutdownAction::kPoweroff,
                              },
                              {
                                  "Reboot",
-                                 ShutdownAction::REBOOT,
+                                 ShutdownAction::kReboot,
                                  GracefulShutdownAction::kReboot,
                              },
                              {
                                  "RebootToRecovery",
-                                 ShutdownAction::REBOOT_TO_RECOVERY,
+                                 ShutdownAction::kRebootToRecovery,
                                  GracefulShutdownAction::kRebootToRecovery,
                              },
                              {
                                  "RebootToBootloader",
-                                 ShutdownAction::REBOOT_TO_BOOTLOADER,
+                                 ShutdownAction::kRebootToBootloader,
                                  GracefulShutdownAction::kRebootToBootloader,
                              },
                              {
@@ -465,10 +470,10 @@ TEST_P(ShutdownActionTest, ActionParsed) {
     WriteGracefulShutdownInfoContents(NewShutdownOptions(*param.shutdown_action, {}));
   }
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction(),
             param.output_shutdown_action);
@@ -483,12 +488,12 @@ TEST_P(RebootLogReasonTest, LegacyTxtFallback) {
   std::string legacy_graceful_reboot_log_path;
   if (param.shutdown_reason.has_value()) {
     legacy_graceful_reboot_log_path = WriteLegacyGracefulRebootLogContents(
-        NewShutdownOptions(ShutdownAction::REBOOT, {param.shutdown_reason.value()}));
+        NewShutdownOptions(ShutdownAction::kReboot, {param.shutdown_reason.value()}));
   }
 
   const RebootLog reboot_log(ParseRebootLog(
       zircon_reboot_log_path_, graceful_shutdown_info_path_, legacy_graceful_reboot_log_path,
-      previous_system_time_path_, /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+      /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), param.output_reboot_reason);
 }
@@ -498,12 +503,12 @@ TEST_F(RebootLogReasonTest, Succeed_ZirconCleanGracefulFdr) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::SYSTEM_UPDATE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kSystemUpdate}));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/false, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/false,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "FACTORY DATA RESET");
 }
@@ -513,10 +518,10 @@ TEST_F(RebootLogReasonTest, Succeed_ZirconUnknownFdr) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (UNKNOWN)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/false, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/false,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(),
             "SPONTANEOUS DURING SHUTDOWN");
@@ -529,13 +534,13 @@ TEST_F(RebootLogReasonTest, Succeed_ZirconUnknownDuringShutdownKeepsAction) {
   WriteZirconRebootLogContents(
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (UNKNOWN)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
-  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::REBOOT_TO_BOOTLOADER,
-                                                       {ShutdownReason::DEVELOPER_REQUEST}));
+  WriteGracefulShutdownInfoContents(
+      NewShutdownOptions(ShutdownAction::kRebootToBootloader, {ShutdownReason::kDeveloperRequest}));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(),
             "SPONTANEOUS DURING SHUTDOWN");
@@ -553,10 +558,10 @@ TEST_F(RebootLogReasonTest, Succeed_ZirconCleanGracefulNotParseable) {
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
   WriteGracefulShutdownInfoContents("NOT PARSEABLE");
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "GENERIC GRACEFUL");
 
@@ -571,13 +576,13 @@ TEST_F(RebootLogReasonTest, Succeed_RebootReasonsUnset) {
   WriteZirconRebootLogContents(
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
-  fuchsia::hardware::power::statecontrol::ShutdownOptions options;
-  options.set_action(ShutdownAction::REBOOT);
+  fuchsia_hardware_power_statecontrol::ShutdownOptions options;
+  options.action(ShutdownAction::kReboot);
   WriteGracefulShutdownInfoContents(std::move(options));
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "GENERIC GRACEFUL");
 }
@@ -586,11 +591,11 @@ TEST_F(RebootLogReasonTest, Succeed_RebootReasonsEmpty) {
   WriteZirconRebootLogContents(
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
-  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::REBOOT, {}));
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::kReboot, /*reasons=*/{}));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "GENERIC GRACEFUL");
 }
@@ -600,10 +605,10 @@ TEST_F(RebootLogReasonTest, SucceedNoGracefulShutdownInfo) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToGracefulShutdownAction(), std::nullopt);
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "GENERIC GRACEFUL");
@@ -617,24 +622,24 @@ INSTANTIATE_TEST_SUITE_P(WithVariousRebootLogs, RebootLogMultiReasonTest,
                              {{
                                   "SystemUpdateThenNetstackMigration",
                                   {
-                                      ShutdownReason::SYSTEM_UPDATE,
-                                      ShutdownReason::NETSTACK_MIGRATION,
+                                      ShutdownReason::kSystemUpdate,
+                                      ShutdownReason::kNetstackMigration,
                                   },
                                   "SYSTEM UPDATE",
                               },
                               {
                                   "NetstackMigrationThenSystemUpdate",
                                   {
-                                      ShutdownReason::NETSTACK_MIGRATION,
-                                      ShutdownReason::SYSTEM_UPDATE,
+                                      ShutdownReason::kNetstackMigration,
+                                      ShutdownReason::kSystemUpdate,
                                   },
                                   "SYSTEM UPDATE",
                               },
                               {
                                   "UnexpectedCombination",
                                   {
-                                      ShutdownReason::OUT_OF_MEMORY,
-                                      ShutdownReason::SYSTEM_UPDATE,
+                                      ShutdownReason::kOutOfMemory,
+                                      ShutdownReason::kSystemUpdate,
                                   },
                                   "UNEXPECTED REASON GRACEFUL",
                               }})),
@@ -649,12 +654,12 @@ TEST_P(RebootLogMultiReasonTest, Succeed) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
 
-  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::REBOOT, param.reasons));
+  WriteGracefulShutdownInfoContents(NewShutdownOptions(ShutdownAction::kReboot, param.reasons));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), param.output_reboot_reason);
 }
@@ -755,10 +760,10 @@ TEST_P(RebootLogTimeTest, Succeed) {
     WriteZirconRebootLogContents(param.zircon_reboot_log.value());
   }
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   if (param.output_uptime.has_value()) {
     ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Uptime().has_value());
@@ -775,83 +780,288 @@ TEST_P(RebootLogTimeTest, Succeed) {
   }
 }
 
-TEST_F(RebootLogTest, FallbackToSystemTimeTracker_NoZirconValues) {
-  WritePreviousSystemTimeContents(R"({"uptime_ms":9876,"runtime_ms":8765})");
-
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
-
-  ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Uptime().has_value());
-  EXPECT_EQ(*reboot_log.GetFinalShutdownInfo().Uptime(), zx::msec(9876));
-  ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Runtime().has_value());
-  EXPECT_EQ(*reboot_log.GetFinalShutdownInfo().Runtime(), zx::msec(8765));
-
-  EXPECT_THAT(reboot_log.RebootLogStr(), HasSubstr("FALLBACK UPTIME (ms)\n9876"));
-  EXPECT_THAT(reboot_log.RebootLogStr(), HasSubstr("FALLBACK RUNTIME (ms)\n8765"));
-}
-
-TEST_F(RebootLogTest, FallbackToSystemTimeTracker_NegativeZirconValues) {
-  WriteZirconRebootLogContents(
-      "HW REBOOT REASON (UNKNOWN)\n\n"
-      "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n-1234\nRUNTIME (ms)\n-1098");
-  WritePreviousSystemTimeContents(R"({"uptime_ms":9876,"runtime_ms":8765})");
-
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
-
-  ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Uptime().has_value());
-  EXPECT_EQ(*reboot_log.GetFinalShutdownInfo().Uptime(), zx::msec(9876));
-  ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Runtime().has_value());
-  EXPECT_EQ(*reboot_log.GetFinalShutdownInfo().Runtime(), zx::msec(8765));
-
-  EXPECT_THAT(reboot_log.RebootLogStr(), HasSubstr("FALLBACK UPTIME (ms)\n9876"));
-  EXPECT_THAT(reboot_log.RebootLogStr(), HasSubstr("FALLBACK RUNTIME (ms)\n8765"));
-}
-
-TEST_F(RebootLogTest, NoPreviousSystemTimeFile) {
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+TEST_F(RebootLogTest, NoTimeSources) {
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   EXPECT_FALSE(reboot_log.GetFinalShutdownInfo().Uptime().has_value());
   EXPECT_FALSE(reboot_log.GetFinalShutdownInfo().Runtime().has_value());
 }
 
-TEST_F(RebootLogTest, NoFallbackToSystemTimeTracker_MissingRuntime) {
-  WriteZirconRebootLogContents(
-      "HW REBOOT REASON (UNKNOWN)\n\n"
-      "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n");
-  WritePreviousSystemTimeContents(R"({"uptime_ms":9876,"runtime_ms":8765})");
+struct FallbackTimeTestParam {
+  std::string test_name;
+  std::optional<std::string> zircon_reboot_log;
+  std::optional<std::string> graceful_shutdown_info;
+  std::optional<zx::time_boot> last_log_timestamp;
+  std::optional<zx::duration> expected_uptime;
+  std::optional<zx::duration> expected_runtime;
+  std::optional<zx::duration> expected_fallback_uptime;
+  std::optional<zx::duration> expected_fallback_runtime;
+  bool expected_uptime_from_logs;
+};
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+class RebootLogFallbackTimeTest : public RebootLogTest,
+                                  public WithParamInterface<FallbackTimeTestParam> {};
 
-  ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Uptime().has_value());
-  EXPECT_EQ(*reboot_log.GetFinalShutdownInfo().Uptime(), zx::msec(1234));
-  ASSERT_FALSE(reboot_log.GetFinalShutdownInfo().Runtime().has_value());
-}
+INSTANTIATE_TEST_SUITE_P(
+    WithVariousFallbackSources, RebootLogFallbackTimeTest,
+    ValuesIn(std::vector<FallbackTimeTestParam>({
+        {
+            .test_name = "GracefulShutdownInfo_NoZirconValues",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = ToJson(GracefulShutdownAction::kReboot,
+                                             {GracefulShutdownReason::kUserRequest},
+                                             kDefaultGracefulUptime, kDefaultGracefulRuntime),
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = kDefaultGracefulUptime,
+            .expected_runtime = kDefaultGracefulRuntime,
+            .expected_fallback_uptime = kDefaultGracefulUptime,
+            .expected_fallback_runtime = kDefaultGracefulRuntime,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "GracefulShutdownInfo_NegativeZirconValues",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "UPTIME (ms)\n-1234\nRUNTIME (ms)\n-1098",
+            .graceful_shutdown_info = ToJson(GracefulShutdownAction::kReboot,
+                                             {GracefulShutdownReason::kUserRequest},
+                                             kDefaultGracefulUptime, kDefaultGracefulRuntime),
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = kDefaultGracefulUptime,
+            .expected_runtime = kDefaultGracefulRuntime,
+            .expected_fallback_uptime = kDefaultGracefulUptime,
+            .expected_fallback_runtime = kDefaultGracefulRuntime,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "NoFallback_ZirconValuesPresent",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "UPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
+            .graceful_shutdown_info = ToJson(GracefulShutdownAction::kReboot,
+                                             {GracefulShutdownReason::kUserRequest},
+                                             kDefaultGracefulUptime, kDefaultGracefulRuntime),
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = zx::msec(1098),
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "NoFallback_ZirconMissingRuntime",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "UPTIME (ms)\n1234\nRUNTIME (ms)\n",
+            .graceful_shutdown_info = ToJson(GracefulShutdownAction::kReboot,
+                                             {GracefulShutdownReason::kUserRequest},
+                                             kDefaultGracefulUptime, kDefaultGracefulRuntime),
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "NoFallback_ZirconMissingUptime",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "DOWNTIME (ms)\n1234\nRUNTIME (ms)\n5678",
+            .graceful_shutdown_info = ToJson(GracefulShutdownAction::kReboot,
+                                             {GracefulShutdownReason::kUserRequest},
+                                             kDefaultGracefulUptime, kDefaultGracefulRuntime),
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = std::nullopt,
+            .expected_runtime = zx::msec(5678),
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "Logs_NoOtherValues",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = std::nullopt,
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = kDefaultLastLogUptime,
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = kDefaultLastLogUptime,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = true,
+        },
+        {
+            .test_name = "Logs_NegativeZirconValues",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "UPTIME (ms)\n-1234\nRUNTIME (ms)\n-1098",
+            .graceful_shutdown_info = std::nullopt,
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = kDefaultLastLogUptime,
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = kDefaultLastLogUptime,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = true,
+        },
+        {
+            .test_name = "Logs_GracefulShutdownInfoMissingTimes",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = R"({"action": "REBOOT", "reasons": ["SYSTEM UPDATE"]})",
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = kDefaultLastLogUptime,
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = kDefaultLastLogUptime,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = true,
+        },
+        {
+            .test_name = "Logs_GracefulShutdownInfoNotParseable",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = "NOT PARSEABLE",
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = kDefaultLastLogUptime,
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = kDefaultLastLogUptime,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = true,
+        },
+        {
+            .test_name = "NoFallback_GracefulShutdownInfoMissingTimesWithoutLogs",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = R"({"action": "REBOOT", "reasons": ["SYSTEM UPDATE"]})",
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = std::nullopt,
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "NoFallback_GracefulShutdownInfoNotParseableWithoutLogs",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = "NOT PARSEABLE",
+            .last_log_timestamp = std::nullopt,
+            .expected_uptime = std::nullopt,
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "Logs_ZirconValuesTakePrecedence",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "UPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
+            .graceful_shutdown_info = std::nullopt,
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = zx::msec(1098),
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "Logs_GracefulShutdownInfoTakesPrecedence",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info = ToJson(GracefulShutdownAction::kReboot,
+                                             {GracefulShutdownReason::kUserRequest},
+                                             kDefaultGracefulUptime, kDefaultGracefulRuntime),
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = kDefaultGracefulUptime,
+            .expected_runtime = kDefaultGracefulRuntime,
+            .expected_fallback_uptime = kDefaultGracefulUptime,
+            .expected_fallback_runtime = kDefaultGracefulRuntime,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "GracefulShutdownInfo_OnlyUptimePresentDoesNotMixWithLogs",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info =
+                R"({"action": "REBOOT", "reasons": ["USER REQUEST"], "uptime_ms": 6543})",
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = zx::msec(6543),
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = zx::msec(6543),
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "GracefulShutdownInfo_OnlyRuntimePresentDoesNotMixWithLogs",
+            .zircon_reboot_log = std::nullopt,
+            .graceful_shutdown_info =
+                R"({"action": "REBOOT", "reasons": ["USER REQUEST"], "runtime_ms": 5432})",
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = std::nullopt,
+            .expected_runtime = zx::msec(5432),
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = zx::msec(5432),
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "NoFallback_ZirconMissingUptimeWithLogs",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "DOWNTIME (ms)\n1234\nRUNTIME (ms)\n5678",
+            .graceful_shutdown_info = std::nullopt,
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = std::nullopt,
+            .expected_runtime = zx::msec(5678),
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+        {
+            .test_name = "NoFallback_ZirconMissingRuntimeWithLogs",
+            .zircon_reboot_log = "HW REBOOT REASON (UNKNOWN)\n\n"
+                                 "ZIRCON REBOOT REASON (NO CRASH)\n\n"
+                                 "UPTIME (ms)\n1234\nRUNTIME (ms)\n",
+            .graceful_shutdown_info = std::nullopt,
+            .last_log_timestamp = kDefaultLastLogTimestamp,
+            .expected_uptime = zx::msec(1234),
+            .expected_runtime = std::nullopt,
+            .expected_fallback_uptime = std::nullopt,
+            .expected_fallback_runtime = std::nullopt,
+            .expected_uptime_from_logs = false,
+        },
+    })),
+    [](const TestParamInfo<FallbackTimeTestParam>& info) { return info.param.test_name; });
 
-TEST_F(RebootLogTest, NoFallbackToSystemTimeTracker_MissingUptime) {
-  WriteZirconRebootLogContents(
-      "HW REBOOT REASON (UNKNOWN)\n\n"
-      "ZIRCON REBOOT REASON (NO CRASH)\n\nDOWNTIME (ms)\n1234\nRUNTIME (ms)\n5678");
-  WritePreviousSystemTimeContents(R"({"uptime_ms":9876,"runtime_ms":8765})");
+TEST_P(RebootLogFallbackTimeTest, Succeed) {
+  const FallbackTimeTestParam& param = GetParam();
+  if (param.zircon_reboot_log.has_value()) {
+    WriteZirconRebootLogContents(*param.zircon_reboot_log);
+  }
+  if (param.graceful_shutdown_info.has_value()) {
+    WriteGracefulShutdownInfoContents(*param.graceful_shutdown_info);
+  }
+  last_log_timestamp_ = param.last_log_timestamp;
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
-  ASSERT_FALSE(reboot_log.GetFinalShutdownInfo().Uptime().has_value());
-  ASSERT_TRUE(reboot_log.GetFinalShutdownInfo().Runtime().has_value());
-  EXPECT_EQ(*reboot_log.GetFinalShutdownInfo().Runtime(), zx::msec(5678));
+  EXPECT_EQ(reboot_log.GetFinalShutdownInfo().Uptime(), param.expected_uptime);
+  EXPECT_EQ(reboot_log.GetFinalShutdownInfo().Runtime(), param.expected_runtime);
+  EXPECT_EQ(reboot_log.IsUptimeFromLogs(), param.expected_uptime_from_logs);
+
+  if (param.expected_fallback_uptime.has_value()) {
+    EXPECT_THAT(reboot_log.RebootLogStr(),
+                HasSubstr(std::format("FALLBACK UPTIME (ms)\n{}",
+                                      param.expected_fallback_uptime->to_msecs())));
+  } else {
+    EXPECT_THAT(reboot_log.RebootLogStr(), Not(HasSubstr("FALLBACK UPTIME (ms)")));
+  }
+
+  if (param.expected_fallback_runtime.has_value()) {
+    EXPECT_THAT(reboot_log.RebootLogStr(),
+                HasSubstr(std::format("FALLBACK RUNTIME (ms)\n{}",
+                                      param.expected_fallback_runtime->to_msecs())));
+  } else {
+    EXPECT_THAT(reboot_log.RebootLogStr(), Not(HasSubstr("FALLBACK RUNTIME (ms)")));
+  }
 }
 
 TEST_F(RebootLogTest, ParsesCriticalProcess) {
@@ -860,10 +1070,10 @@ TEST_F(RebootLogTest, ParsesCriticalProcess) {
       "ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098\n"
       "ROOT JOB TERMINATED BY CRITICAL PROCESS DEATH: foo (1)");
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   const FinalShutdownInfo& shutdown_info = reboot_log.GetFinalShutdownInfo();
   ASSERT_TRUE(shutdown_info.IsCrash());
@@ -881,7 +1091,7 @@ INSTANTIATE_TEST_SUITE_P(
             "ConcatenatesZirconAndGraceful",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            {ShutdownReason::USER_REQUEST},
+            {ShutdownReason::kUserRequest},
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098\n"
             "GRACEFUL SHUTDOWN ACTION: (REBOOT)\n"
@@ -893,7 +1103,7 @@ INSTANTIATE_TEST_SUITE_P(
             "ConcatenatesZirconUngracefulAndGraceful",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            {ShutdownReason::USER_REQUEST},
+            {ShutdownReason::kUserRequest},
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098\n"
             "GRACEFUL SHUTDOWN ACTION: (REBOOT)\n"
@@ -913,7 +1123,7 @@ INSTANTIATE_TEST_SUITE_P(
             "MultipleGracefulRebootLog",
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098",
-            {ShutdownReason::NETSTACK_MIGRATION, ShutdownReason::SYSTEM_UPDATE},
+            {ShutdownReason::kNetstackMigration, ShutdownReason::kSystemUpdate},
             "HW REBOOT REASON (WARM BOOT)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098\n"
             "GRACEFUL SHUTDOWN ACTION: (REBOOT)\n"
@@ -922,8 +1132,10 @@ INSTANTIATE_TEST_SUITE_P(
         {
             "NoZirconRebootLog",
             std::nullopt,
-            {ShutdownReason::USER_REQUEST},
+            {ShutdownReason::kUserRequest},
             "HW REBOOT REASON (COLD BOOT)\n"
+            "FALLBACK UPTIME (ms)\n6543\n"
+            "FALLBACK RUNTIME (ms)\n5432\n\n"
             "GRACEFUL SHUTDOWN ACTION: (REBOOT)\n"
             "GRACEFUL REBOOT REASONS: (USER REQUEST)\n\nFINAL REBOOT REASON (USER REQUEST)",
         },
@@ -938,13 +1150,13 @@ TEST_P(RebootLogStrTest, Succeed) {
 
   if (!param.shutdown_reasons.empty()) {
     WriteGracefulShutdownInfoContents(
-        NewShutdownOptions(ShutdownAction::REBOOT, param.shutdown_reasons));
+        NewShutdownOptions(ShutdownAction::kReboot, param.shutdown_reasons));
   }
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
 
   if (param.output_reboot_log_str.has_value()) {
     EXPECT_EQ(reboot_log.RebootLogStr(), param.output_reboot_log_str.value());
@@ -956,12 +1168,12 @@ TEST_F(RebootLogStrTest, Succeed_SetGracefulFDR) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::FACTORY_DATA_RESET}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kFactoryDataReset}));
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/true,
+                                            /*supports_user_initiated_poweroffs=*/false));
   EXPECT_EQ(reboot_log.RebootLogStr(),
             "HW REBOOT REASON (UNKNOWN)\n\n"
             "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098\n"
@@ -975,10 +1187,10 @@ TEST_F(RebootLogStrTest, Succeed_InferFDR) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
 
-  const RebootLog reboot_log(
-      ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                     /*not_a_fdr=*/false, /*supports_user_initiated_poweroffs=*/false));
+  const RebootLog reboot_log(ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
+                                            /*legacy_graceful_reboot_log_path=*/"",
+                                            /*not_a_fdr=*/false,
+                                            /*supports_user_initiated_poweroffs=*/false));
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "FACTORY DATA RESET");
   EXPECT_EQ(reboot_log.RebootLogStr(),
             "HW REBOOT REASON (UNKNOWN)\n\n"
@@ -1012,10 +1224,10 @@ FINAL REBOOT REASON (ROOT JOB TERMINATION))";
 
   WriteZirconRebootLogContents(std::string(kContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                 /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                 /*legacy_graceful_reboot_log_path=*/"",
                  /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
 
   std::string dlog;
@@ -1042,11 +1254,11 @@ TEST_F(RebootLogStrTest, Succeed_SetDlogWithEmbeddedNullCharacters) {
 
   WriteZirconRebootLogContents(std::string(kContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   const RebootLog reboot_log =
       ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                     /*legacy_graceful_reboot_log_path=*/"",
                      /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
 
   std::string dlog;
@@ -1073,11 +1285,11 @@ test dlog dump line2
 
   WriteZirconRebootLogContents(std::string(kContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   const RebootLog reboot_log =
       ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                     /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                     /*legacy_graceful_reboot_log_path=*/"",
                      /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
 
   std::string dlog;
@@ -1107,10 +1319,10 @@ ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)
 
   WriteZirconRebootLogContents(std::string(kContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                 /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                 /*legacy_graceful_reboot_log_path=*/"",
                  /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
 
   std::string dlog;
@@ -1136,10 +1348,10 @@ ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)
 
   WriteZirconRebootLogContents(std::string(kContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                 /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                 /*legacy_graceful_reboot_log_path=*/"",
                  /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
 
   EXPECT_FALSE(files::IsFile(previous_boot_kernel_log_path_));
@@ -1163,11 +1375,12 @@ ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)
 
   WriteZirconRebootLogContents(std::string(kNoDlogContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   RebootLog::ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                            /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                            previous_boot_kernel_log_path_, final_shutdown_info_path_,
+                            /*legacy_graceful_reboot_log_path=*/"",
+                            /*last_log_timestamp=*/std::nullopt, previous_boot_kernel_log_path_,
+                            final_shutdown_info_path_,
                             /*not_a_fdr=*/true,
                             /*supports_user_initiated_poweroffs=*/true,
                             /*first_component_instance=*/true, redactor_.get());
@@ -1198,8 +1411,9 @@ FINAL REBOOT REASON (ROOT JOB TERMINATION))";
   WriteZirconRebootLogContents(std::string(kContents));
 
   RebootLog::ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                            /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
-                            previous_boot_kernel_log_path_, final_shutdown_info_path_,
+                            /*legacy_graceful_reboot_log_path=*/"",
+                            /*last_log_timestamp=*/std::nullopt, previous_boot_kernel_log_path_,
+                            final_shutdown_info_path_,
                             /*not_a_fdr=*/true,
                             /*supports_user_initiated_poweroffs=*/true,
                             /*first_component_instance=*/false, redactor_.get());
@@ -1231,11 +1445,11 @@ FINAL REBOOT REASON (ROOT JOB TERMINATION))";
 
   WriteZirconRebootLogContents(std::string(kContents));
   WriteGracefulShutdownInfoContents(
-      NewShutdownOptions(ShutdownAction::REBOOT, {ShutdownReason::CRITICAL_COMPONENT_FAILURE}));
+      NewShutdownOptions(ShutdownAction::kReboot, {ShutdownReason::kCriticalComponentFailure}));
 
   redactor_ = std::make_unique<SimpleRedactor>();
   ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_,
-                 /*legacy_graceful_reboot_log_path=*/"", previous_system_time_path_,
+                 /*legacy_graceful_reboot_log_path=*/"",
                  /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false);
 
   std::string dlog;
@@ -1248,20 +1462,22 @@ TEST_F(RebootLogTest, UsesPersistedFinalShutdownInfo) {
       "HW REBOOT REASON (UNKNOWN)\n\n"
       "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n1234\nRUNTIME (ms)\n1098");
 
-  RebootLog reboot_log = RebootLog::ParseRebootLog(
-      zircon_reboot_log_path_, graceful_shutdown_info_path_, "", previous_system_time_path_,
-      previous_boot_kernel_log_path_, final_shutdown_info_path_,
-      /*not_a_fdr=*/false, /*supports_user_initiated_poweroffs=*/false,
-      /*first_component_instance=*/true, redactor_.get());
+  RebootLog reboot_log =
+      RebootLog::ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_, "",
+                                /*last_log_timestamp=*/std::nullopt, previous_boot_kernel_log_path_,
+                                final_shutdown_info_path_,
+                                /*not_a_fdr=*/false, /*supports_user_initiated_poweroffs=*/false,
+                                /*first_component_instance=*/true, redactor_.get());
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "FACTORY DATA RESET");
   ASSERT_TRUE(files::IsFile(final_shutdown_info_path_));
 
-  reboot_log = RebootLog::ParseRebootLog(
-      zircon_reboot_log_path_, graceful_shutdown_info_path_, "", previous_system_time_path_,
-      previous_boot_kernel_log_path_, final_shutdown_info_path_,
-      /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false,
-      /*first_component_instance=*/false, redactor_.get());
+  reboot_log =
+      RebootLog::ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_, "",
+                                /*last_log_timestamp=*/std::nullopt, previous_boot_kernel_log_path_,
+                                final_shutdown_info_path_,
+                                /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false,
+                                /*first_component_instance=*/false, redactor_.get());
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "FACTORY DATA RESET");
 }
@@ -1271,11 +1487,12 @@ TEST_F(RebootLogTest, DoNotReparseIfFinalShutdownInfoIsUnparseable) {
 
   ASSERT_TRUE(files::WriteFile(final_shutdown_info_path_, "INVALID JSON"));
 
-  const RebootLog reboot_log = RebootLog::ParseRebootLog(
-      zircon_reboot_log_path_, graceful_shutdown_info_path_, "", previous_system_time_path_,
-      previous_boot_kernel_log_path_, final_shutdown_info_path_,
-      /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false,
-      /*first_component_instance=*/false, redactor_.get());
+  const RebootLog reboot_log =
+      RebootLog::ParseRebootLog(zircon_reboot_log_path_, graceful_shutdown_info_path_, "",
+                                /*last_log_timestamp=*/std::nullopt, previous_boot_kernel_log_path_,
+                                final_shutdown_info_path_,
+                                /*not_a_fdr=*/true, /*supports_user_initiated_poweroffs=*/false,
+                                /*first_component_instance=*/false, redactor_.get());
 
   EXPECT_EQ(reboot_log.GetFinalShutdownInfo().ToRebootReasonString(), "NOT PARSEABLE");
 }

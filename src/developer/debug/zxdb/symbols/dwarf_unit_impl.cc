@@ -96,7 +96,7 @@ const llvm::DWARFDebugLine::LineTable* DwarfUnitImpl::GetLLVMLineTable() const {
 uint64_t DwarfUnitImpl::GetDieCount() const { return unit_->getNumDIEs(); }
 
 llvm::DWARFDie DwarfUnitImpl::GetLLVMDieAtIndex(uint64_t index) const {
-  return unit_->getDIEAtIndex(index);
+  return unit_->getDIEAtIndex(static_cast<uint32_t>(index));
 }
 
 llvm::DWARFDie DwarfUnitImpl::GetLLVMDieAtOffset(DwarfDieRef die_ref) const {

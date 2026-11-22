@@ -19,7 +19,6 @@
 #include <ktl/optional.h>
 #include <ktl/type_traits.h>
 #include <vm/page_state.h>
-#include <vm/phys/arena.h>
 
 class FreeLoanedPagesHolder;
 
@@ -273,10 +272,5 @@ static_assert(offsetof(vm_page_t, loaned_state_priv) %
                   alignof(decltype(vm_page_t::loaned_state_priv)) ==
               0);
 static_assert(offsetof(vm_page_t, loaned_state_priv) % alignof(vm_page_state) == 0);
-
-// Assert that the page structure isn't growing uncontrollably, and that its
-// size and alignment are kept in sync with the arena selection algorithm.
-static_assert(sizeof(vm_page_t) == kArenaPageBookkeepingSize);
-static_assert(alignof(vm_page_t) == kArenaPageBookkeepingAlignment);
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_PAGE_H_

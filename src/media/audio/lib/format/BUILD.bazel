@@ -61,13 +61,6 @@ fx_cc_library(
     alwayslink = True,
 )
 
-# TODO(https://fxbug.dev/570694755): bazel2gn maps @com_google_googletest//:gtest to //third_party/googletest:gtest, while GN requires //third_party/googletest:gmock.
-# @bazel2gn:skip
-alias(
-    name = "gmock",
-    actual = "@com_google_googletest//:gtest",
-)
-
 fx_cc_test_binary(
     name = "unittest-bin",
     srcs = [
@@ -79,17 +72,14 @@ fx_cc_test_binary(
     tags = ["manual"],
     deps = [
         ":format",
-        # Bazel's gtest target bundles gmock, whereas GN defines gmock separately.
-        ":gmock",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
         "//src/lib/fxl/test:gtest_main",
         "//src/zircon/lib/zircon",
+        "@com_google_googletest//:gtest",
     ],
 )
 
 fx_unittest_package(
     name = "audio_lib_format_unittests",
-    # TODO(https://fxbug.dev/570694755): Map fx_unittest_package parallel to GN test_specs in bazel2gn.
-    # @bazel2gn:skip
     parallel = 4,
     unit_tests = [":unittest-bin"],
 )

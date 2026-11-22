@@ -54,7 +54,7 @@ template("devicetree_boot_test") {
                              "visibility",
                            ])
     deps += [
-      "//zircon/kernel/arch/$current_cpu/phys:linuxboot",
+      "//zircon/kernel/phys/linuxboot-runtime",
       "//zircon/kernel/phys/test:devicetree-test-main",
     ]
     emulator_support_aib = true

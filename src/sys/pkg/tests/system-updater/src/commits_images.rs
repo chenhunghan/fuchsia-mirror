@@ -3,6 +3,8 @@
 // found in the LICENSE file.
 
 use super::*;
+use crate::progress_reporting::assert_success_monitor_states;
+use fidl_fuchsia_update_installer_ext::StateId;
 use pretty_assertions::assert_eq;
 
 #[fuchsia::test]
@@ -204,17 +206,9 @@ async fn skips_commit_when_should_commit_is_false() {
         .await
         .unwrap();
 
-    let states: Vec<fidl_fuchsia_update_installer_ext::State> =
-        attempt.map(|res| res.unwrap()).collect().await;
-    assert_eq!(
-        states.iter().map(|s| s.id()).collect::<Vec<_>>(),
-        vec![
-            fidl_fuchsia_update_installer_ext::StateId::Prepare,
-            fidl_fuchsia_update_installer_ext::StateId::Stage,
-            fidl_fuchsia_update_installer_ext::StateId::Stage,
-            fidl_fuchsia_update_installer_ext::StateId::Fetch,
-            fidl_fuchsia_update_installer_ext::StateId::CompleteButNotActive,
-        ]
+    assert_success_monitor_states(
+        attempt.map(|res| res.unwrap()).collect().await,
+        &[StateId::Prepare, StateId::Stage, StateId::Fetch, StateId::CompleteButNotActive],
     );
 
     assert_eq!(
@@ -256,18 +250,9 @@ async fn skips_commit_when_should_commit_is_false_packageless() {
         .await
         .unwrap();
 
-    let states: Vec<fidl_fuchsia_update_installer_ext::State> =
-        attempt.map(|res| res.unwrap()).collect().await;
-    assert_eq!(
-        states.iter().map(|s| s.id()).collect::<Vec<_>>(),
-        vec![
-            fidl_fuchsia_update_installer_ext::StateId::Prepare,
-            fidl_fuchsia_update_installer_ext::StateId::Stage,
-            fidl_fuchsia_update_installer_ext::StateId::Stage,
-            fidl_fuchsia_update_installer_ext::StateId::Stage,
-            fidl_fuchsia_update_installer_ext::StateId::Fetch,
-            fidl_fuchsia_update_installer_ext::StateId::CompleteButNotActive,
-        ]
+    assert_success_monitor_states(
+        attempt.map(|res| res.unwrap()).collect().await,
+        &[StateId::Prepare, StateId::Stage, StateId::Fetch, StateId::CompleteButNotActive],
     );
 
     assert_eq!(

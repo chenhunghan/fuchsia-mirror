@@ -25,4 +25,8 @@ go_binary_host_tool(
     name = "fidlmerge",
     embed = [":gopkg"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    # The default of the private `_fidlmerge` attribute in
+    # //src/lib/fostr/build:fostr_fidl.bzl, so Bazel checks visibility against
+    # that package.
+    visibility = ["//src/lib/fostr/build:__pkg__"],
 )

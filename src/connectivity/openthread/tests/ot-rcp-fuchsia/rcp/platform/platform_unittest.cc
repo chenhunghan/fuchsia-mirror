@@ -11,6 +11,7 @@
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/rcp/platform/platform.h"
 
 #include <lib/async-testing/test_loop.h>
+#include <lib/async/cpp/task.h>
 #include <lib/fit/function.h>
 #include <lib/zx/time.h>
 
@@ -18,6 +19,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 #include <openthread/instance.h>
@@ -89,11 +91,27 @@ otInstance* FakeInstance() {
   return reinterpret_cast<otInstance*>(&storage);
 }
 
+// These tests never transmit. A transmission fails the test, and `done` is still posted, so the
+// radio does not stay stuck in Transmit.
+class UnusedMedium : public RadioMedium {
+ public:
+  explicit UnusedMedium(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
+
+  void Transmit(const MediumFrame& frame, int8_t tx_power_dbm, DoneFn done) override {
+    ADD_FAILURE() << "unexpected transmission";
+    EXPECT_EQ(async::PostTask(dispatcher_, [done = std::move(done)]() mutable { done(); }), ZX_OK);
+  }
+  void SetReceiver(RadioReceiver* receiver) override {}
+
+ private:
+  async_dispatcher_t* const dispatcher_;
+};
+
 class PlatformTest : public ::testing::Test {
  protected:
   void SetUp() override {
     Core() = FakeCore();
-    platform_.emplace(loop_.dispatcher(), kNodeId);
+    platform_.emplace(loop_.dispatcher(), kNodeId, medium_);
   }
 
   void TearDown() override {
@@ -110,7 +128,9 @@ class PlatformTest : public ::testing::Test {
   }
 
   async::TestLoop loop_;
-  // Declared after `loop_` so that it is destroyed first, even if TearDown() does not run.
+  UnusedMedium medium_{loop_.dispatcher()};
+  // Declared after `loop_` and `medium_` so that it is destroyed first, even if TearDown() does not
+  // run.
   std::optional<Platform> platform_;
 };
 
@@ -164,7 +184,7 @@ TEST_F(PlatformTest, DestroyCancelsPendingTaskletsAndRecreateIsUsable) {
   loop_.RunUntilIdle();
   EXPECT_EQ(Core().tasklet_process_calls, 0);
 
-  platform_.emplace(loop_.dispatcher(), kNodeId);
+  platform_.emplace(loop_.dispatcher(), kNodeId, medium_);
   otTaskletsSignalPending(FakeInstance());
   loop_.RunUntilIdle();
   EXPECT_EQ(Core().tasklet_process_calls, 1);
@@ -279,7 +299,7 @@ TEST_F(PlatformTest, DestroyCancelsAlarmAndRecreateIsUsable) {
   loop_.RunFor(zx::sec(1));
   EXPECT_EQ(Core().alarm_fired_calls, 0);
 
-  platform_.emplace(loop_.dispatcher(), kNodeId);
+  platform_.emplace(loop_.dispatcher(), kNodeId, medium_);
   otPlatAlarmMilliStartAt(FakeInstance(), otPlatAlarmMilliGetNow(), 10);
   loop_.RunFor(zx::msec(10));
   EXPECT_EQ(Core().alarm_fired_calls, 1);
@@ -310,7 +330,7 @@ TEST_F(PlatformTest, NodeIdAndLogTagFollowCreate) {
   EXPECT_EQ(Platform::Get().log_tag(), "rcp-" + std::to_string(kNodeId));
 
   platform_.reset();
-  platform_.emplace(loop_.dispatcher(), kOtherNodeId);
+  platform_.emplace(loop_.dispatcher(), kOtherNodeId, medium_);
   EXPECT_EQ(Platform::Get().node_id(), kOtherNodeId);
   EXPECT_EQ(Platform::Get().log_tag(), "rcp-" + std::to_string(kOtherNodeId));
 }

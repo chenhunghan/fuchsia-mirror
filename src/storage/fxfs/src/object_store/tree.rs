@@ -3,11 +3,18 @@
 // found in the LICENSE file.
 
 use crate::lsm_tree::types::{LayerIterator, MergeableKey, Value};
-use crate::lsm_tree::{LSMTree, LockedLayer, Query, Yielder, compact_with_iterator};
+use crate::lsm_tree::{
+    BloomFilterOptions, LSMTree, LockedLayer, Query, Yielder, compact_with_iterator,
+};
 use crate::object_handle::WriteBytes;
-use crate::object_store::journal;
 use anyhow::{Context, Error};
 use std::future::{Future, ready};
+
+/// If a tree has only one immutable layer larger than this threshold, minor compactions leave it
+/// in place rather than merging into it so small flushes don't repeatedly rewrite a large base
+/// layer. Kept decoupled from `journal::DEFAULT_RECLAIM_SIZE` so tuning journal reclaim does not
+/// silently change compaction base-layer retention.
+pub const MINOR_COMPACTION_MERGE_THRESHOLD: u64 = 524_288;
 
 pub trait MajorCompactable<K: 'static, V: 'static> {
     /// Returns an iterator that wraps another iterator that is appropriate for major compactions.
@@ -73,12 +80,9 @@ where
 
     // If there's only one immutable layer to merge with and it's big, don't merge with it.
     // Instead, we'll create a new layer and eventually that will grow to be big enough to merge
-    // with the existing layers.  The threshold here cannot be so big such that merging with a
-    // layer that big ends up using so much journal space that we have to immediately flush
-    // again as that has the potential to end up in an infinite loop, and so the number chosen
-    // here is related to the journal's RECLAIM_SIZE.
+    // with the existing layers.
     if layer_count == 1
-        && total_size > journal::DEFAULT_RECLAIM_SIZE
+        && total_size > MINOR_COMPACTION_MERGE_THRESHOLD
         && layer_set.layers[split_index - 1].handle().is_some()
     {
         split_index -= 1;
@@ -90,15 +94,17 @@ where
         let start_time = std::time::Instant::now();
         let merged_layer_count = layer_set.layers.len();
         let block_size = writer.block_size();
-        let total_len = layer_set.sum_len();
+        let bloom_filter_options = Some(BloomFilterOptions { num_items: layer_set.sum_len() });
         let mut merger = layer_set.merger();
         let iter = merger.query(Query::FullScan).await?;
         let bytes_written = if layers_to_keep.is_empty() {
             let major_iter = LSMTree::<K, V>::major_iter(iter).await?;
-            compact_with_iterator(major_iter, total_len, writer, block_size, yielder).await
+            compact_with_iterator(major_iter, bloom_filter_options, writer, block_size, yielder)
+                .await
         } else {
             let minor_iter = LSMTree::<K, V>::minor_iter(iter, &layers_to_keep).await?;
-            compact_with_iterator(minor_iter, total_len, writer, block_size, yielder).await
+            compact_with_iterator(minor_iter, bloom_filter_options, writer, block_size, yielder)
+                .await
         }
         .context("ObjectStore::flush")?;
 

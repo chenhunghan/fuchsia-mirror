@@ -60,9 +60,6 @@ const std::unordered_map<std::string_view, ServiceEntry> kClassNameToService = {
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.audio.StreamConfigConnectorOutputService",
       "stream_config_connector"}},
     {"battery", {ServiceEntry::kDevfsAndService, "fuchsia.power.battery.InfoService", "device"}},
-    {"bt-emulator",
-     {ServiceEntry::kDevfsAndService, "fuchsia.hardware.bluetooth.EmulatorService", "device"}},
-    {"bt-hci", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.bluetooth.Service", "vendor"}},
     {"clock-impl",
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.clock.measure.Service", "measurer"}},
     {"codec",
@@ -93,7 +90,6 @@ const std::unordered_map<std::string_view, ServiceEntry> kClassNameToService = {
     {"media-codec",
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.mediacodec.Service", "device"}},
     {"midi", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.midi.Service", "controller"}},
-    {"network", {ServiceEntry::kDevfsAndService, "fuchsia.hardware.network.Service", "device"}},
     {"ot-radio", {ServiceEntry::kDevfsAndService, "fuchsia.lowpan.spinel.Service", "device_setup"}},
     {"power-sensor",
      {ServiceEntry::kDevfsAndService, "fuchsia.hardware.power.sensor.Service", "device"}},
@@ -166,7 +162,6 @@ std::unordered_map<std::string_view, uint8_t> classes_that_assume_ordering({
 //
 const std::unordered_set<std::string> kClassesThatAllowTopologicalPath({
     "devfs_service_test",
-    "network",
 });
 // LINT.ThenChange(//src/devices/bin/driver_manager_rust/devfs/src/class_names.rs)
 

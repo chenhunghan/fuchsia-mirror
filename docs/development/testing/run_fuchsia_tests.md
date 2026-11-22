@@ -164,7 +164,7 @@ To run a component on a specific package, use both `-p <PACKAGE_NAME>` and `-c
 fx test -p my_example_test_pkg -c my_example_test
 ```
 
-## Set the minimum log severity
+## Set the minimum log severity {#set-the-minimum-log-severity}
 
 `fx test` (and the underlying `ffx test`) accept a flag ``--min-severity-logs` which allows you to
 set the minimum severity of the logs that are emitted by the test and components under the test.
@@ -229,7 +229,7 @@ To:
 fx test <PATH_TO_HOST_TEST>
 ```
 
-### run-e2e-tests
+### run-e2e-tests {#run-e2e-tests}
 
 Substitute `fx run-e2e-tests` with `fx test` and an additional `--e2e` flag.
 
@@ -282,7 +282,7 @@ saved to the specified directory.
 [scripting-layer-for-fuchsia]: /docs/development/testing/sl4f.md
 [component-uri]: /docs/reference/components/url.md
 [fuchsia-package-name]: /docs/concepts/packages/package_url.md#package-name
-[resource-path]: /docs/concepts/packages/package_url.md#resource-paths
+[resource-path]: /docs/concepts/packages/package_url.md#resource-path
 [test-manager]: /docs/get-started/learn/components/component-tests.md
 [fx-test-flags]: https://fuchsia.dev/reference/tools/fx/cmd/test
 [ffx-test]: /docs/development/tools/ffx/workflows/run-device-tests.md

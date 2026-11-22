@@ -1,0 +1,27 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//src/sys/test_runners/rust/default.shard.cml",
+        "syslog/client.shard.cml",
+    ],
+    program: {
+        binary: "bin/rf_medium_dispatcher_component_test",
+    },
+    children: [
+        {
+            name: "rf-medium-dispatcher",
+            url: "#meta/rf-medium-dispatcher.cm",
+        },
+    ],
+    use: [
+        {
+            protocol: [
+                "test.lowpan.rfsim.Medium",
+                "test.lowpan.rfsim.Monitor",
+            ],
+            from: "#rf-medium-dispatcher",
+        },
+    ],
+}

@@ -12,9 +12,9 @@ fidl_library(
         "resources.fidl",
     ],
     api_area = "Netstack",
-    category = "prebuilt",
+    category = "partner",
     enable_hlcpp = True,
-    stable = True,
+    stable = False,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.net",

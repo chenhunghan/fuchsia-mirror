@@ -20,8 +20,9 @@ class Namespace;
 
 struct IoCommand {
   void Complete(zx_status_t status) {
-    ZX_ASSERT(completion_cb);
-    completion_cb(status);
+    auto cb = std::move(completion_cb);
+    ZX_ASSERT(cb);
+    cb(status);
   }
 
   block_server::Operation operation;

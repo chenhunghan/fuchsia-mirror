@@ -21,7 +21,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "mprotect_policy"; }
+extern std::string GetTestPolicyName() { return "mprotect_policy"; }
 
 namespace {
 
@@ -217,7 +217,7 @@ TEST(MProtectTest, ExecStackInSignal) {
       ss.ss_sp = mapping->mapping();
       ss.ss_size = SIGSTKSZ;
       ss.ss_flags = 0;
-      SAFE_SYSCALL(sigaltstack(&ss, nullptr) == -1);
+      EXPECT_THAT(sigaltstack(&ss, nullptr), SyscallSucceeds());
 
       // Configure the signal handler
       auto signal_handler = [](int signum) -> void {
@@ -316,12 +316,8 @@ TEST_P(MProtectExecmod, ExecMod) {
     }
 
     // Try to make the mapping executable.
-    int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
-    if (param.expect_success) {
-      EXPECT_THAT(result, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC),
+                SyscallSucceedsOrFailsWithErrno(param.expect_success, EACCES));
   }));
 }
 
@@ -373,12 +369,8 @@ TEST(ExecModTest, ForkPreservesCowModifiedInChild) {
 
       test_helper::ForkHelper helper;
       helper.RunInForkedProcess([&] {
-        int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
-        if (modify_mapping) {
-          EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-        } else {
-          EXPECT_THAT(result, SyscallSucceeds());
-        }
+        EXPECT_THAT(mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC),
+                    SyscallSucceedsOrFailsWithErrno(!modify_mapping, EACCES));
       });
       EXPECT_TRUE(helper.WaitForChildren());
     }
@@ -409,12 +401,8 @@ TEST(ExecModTest, ForkPreservesCowModifiedInParent) {
       test_helper::ForkHelper helper;
       helper.RunInForkedProcess([&] { EXPECT_THAT(sem.Wait(), SyscallSucceeds()); });
 
-      int result = mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC);
-      if (modify_mapping) {
-        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-      } else {
-        EXPECT_THAT(result, SyscallSucceeds());
-      }
+      EXPECT_THAT(mprotect(mapping->mapping(), pagesize, PROT_READ | PROT_EXEC),
+                  SyscallSucceedsOrFailsWithErrno(!modify_mapping, EACCES));
 
       EXPECT_THAT(sem.Notify(1), SyscallSucceeds());
       EXPECT_TRUE(helper.WaitForChildren());
@@ -452,13 +440,9 @@ TEST(ExecModTest, ShrinkAndRegrowPreservesCowModified) {
       ASSERT_EQ(grown, map_addr) << strerror(errno);
       map_len = pagesize * 2;
 
-      int result =
-          mprotect(static_cast<char *>(map_addr) + pagesize, pagesize, PROT_READ | PROT_EXEC);
-      if (modify_mapping) {
-        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-      } else {
-        EXPECT_THAT(result, SyscallSucceeds());
-      }
+      EXPECT_THAT(
+          mprotect(static_cast<char *>(map_addr) + pagesize, pagesize, PROT_READ | PROT_EXEC),
+          SyscallSucceedsOrFailsWithErrno(!modify_mapping, EACCES));
     }
   }));
 }
@@ -493,12 +477,8 @@ TEST(ExecModTest, MovePreservesCowModified) {
       cleanup_dst.cancel();
       map_addr = dst_addr;
 
-      int result = mprotect(map_addr, pagesize, PROT_READ | PROT_EXEC);
-      if (modify_mapping) {
-        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-      } else {
-        EXPECT_THAT(result, SyscallSucceeds());
-      }
+      EXPECT_THAT(mprotect(map_addr, pagesize, PROT_READ | PROT_EXEC),
+                  SyscallSucceedsOrFailsWithErrno(!modify_mapping, EACCES));
     }
   }));
 }

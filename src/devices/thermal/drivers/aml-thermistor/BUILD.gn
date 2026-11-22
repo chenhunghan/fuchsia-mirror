@@ -48,7 +48,6 @@ fuchsia_cc_driver("aml-thermistor-driver") {
 }
 
 fuchsia_driver_component("aml-thermistor") {
-  info = "meta/aml-thermistor-info.json"
   component_name = "aml-thermistor"
   deps = [
     ":aml-thermistor-bind",

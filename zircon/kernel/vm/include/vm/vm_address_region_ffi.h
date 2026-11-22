@@ -7,87 +7,84 @@
 #ifndef ZIRCON_KERNEL_VM_INCLUDE_VM_VM_ADDRESS_REGION_FFI_H_
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_VM_ADDRESS_REGION_FFI_H_
 
+#include <lib/btree.h>
+#include <stddef.h>
+#include <sys/types.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
+#include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
+#include <vm/arch_vm_aspace.h>
 #include <vm/vm_address_region.h>
-#include <vm/vm_address_region_enumerator.h>
+#include <vm/vm_address_region_observer.h>
+#include <vm/vm_constants.h>
 
-struct CppVmAddressRegionEnumerator {
-  using VmarsAndMappings =
-      VmAddressRegionEnumerator<VmAddressRegionEnumeratorType::VmarsAndMappings, VmAddressRegion>;
-  using MappingsOnly =
-      VmAddressRegionEnumerator<VmAddressRegionEnumeratorType::MappingsOnly, VmAddressRegion>;
+using VmAddressRegionSubregions =
+    btree::BTree<vaddr_t, fbl::RefPtr<VmAddressRegionOrMapping>, VmAddressRegionObserver>;
+static_assert(sizeof(VmAddressRegionSubregions) == kVmAddressRegionSubregionsSize);
+static_assert(alignof(VmAddressRegionSubregions) == kVmAddressRegionSubregionsAlign);
+using VmAddressRegionSubregionsCursor = VmAddressRegionSubregions::const_iterator;
+static_assert(sizeof(VmAddressRegionSubregionsCursor) == kVmAddressRegionSubregionsCursorSize);
+static_assert(alignof(VmAddressRegionSubregionsCursor) == kVmAddressRegionSubregionsCursorAlign);
+using VmAddressRegionObserverState = VmAddressRegionObserver::State;
 
-  CppVmAddressRegionEnumerator(VmAddressRegionEnumeratorType type, VmAddressRegion& vmar,
-                               vaddr_t min_addr, vaddr_t max_addr) TA_REQ(vmar.lock());
-  ~CppVmAddressRegionEnumerator();
-
-  VmAddressRegionEnumeratorType type;
-  union {
-    VmarsAndMappings vmars_and_mappings;
-    MappingsOnly mappings_only;
-  };
-};
-
+using VmMappingProtectionRanges = btree::BTree<vaddr_t, arch_mmu_flags_t>;
+static_assert(sizeof(VmMappingProtectionRanges) == kVmMappingProtectionRangesSize);
+static_assert(alignof(VmMappingProtectionRanges) == kVmMappingProtectionRangesAlign);
 using VmMappingProtectionRangesCursor = VmMappingProtectionRanges::const_iterator;
 static_assert(sizeof(VmMappingProtectionRangesCursor) == kVmMappingProtectionRangesCursorSize);
 static_assert(alignof(VmMappingProtectionRangesCursor) == kVmMappingProtectionRangesCursorAlign);
 
 __BEGIN_CDECLS
 
-void cpp_vm_address_region_construct_root(ffi::Uninitialized<VmAddressRegion>* slot,
-                                          VmAspace* aspace, vaddr_t base, size_t size,
-                                          uint32_t vmar_flags);
-void cpp_vm_address_region_construct_child(ffi::Uninitialized<VmAddressRegion>* slot,
-                                           VmAddressRegion* parent, vaddr_t base, size_t size,
-                                           uint32_t vmar_flags, const char* name);
-void cpp_vm_address_region_construct_kernel_root(ffi::Uninitialized<VmAddressRegion>* slot,
-                                                 VmAspace* kernel_aspace);
-void cpp_vm_address_region_destruct(VmAddressRegion* vmar);
-void* cpp_vm_address_region_state(VmAddressRegion* vmar);
-void* cpp_vm_address_region_or_mapping_state(VmAddressRegionOrMapping* region_or_mapping);
-bool cpp_vm_address_region_or_mapping_lock_is_held(
-    const VmAddressRegionOrMapping* region_or_mapping);
-bool cpp_vm_address_region_or_mapping_region_lock_is_held(
-    const VmAddressRegionOrMapping* region_or_mapping);
-VmAddressRegion* cpp_vm_address_region_or_mapping_as_vm_address_region(
-    VmAddressRegionOrMapping* region_or_mapping);
-VmMapping* cpp_vm_address_region_or_mapping_as_vm_mapping(
-    VmAddressRegionOrMapping* region_or_mapping);
-zx_status_t cpp_vm_address_region_reserve_space(VmAddressRegion* vmar, const char* name,
-                                                size_t base, size_t size,
-                                                arch_mmu_flags_t arch_mmu_flags);
-VmAddressRegion* cpp_vm_address_region_create_sub_vmar(VmAddressRegion* vmar, size_t offset,
-                                                       size_t size, uint8_t align_pow2,
-                                                       uint32_t vmar_flags, const char* name,
-                                                       zx_status_t* out_status);
-VmMapping* cpp_vm_address_region_create_vm_mapping(
-    VmAddressRegion* vmar, size_t mapping_offset, size_t size, uint8_t align_pow2,
-    uint32_t vmar_flags, const VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-    const char* name, vaddr_t* out_base, zx_status_t* out_status);
+void cpp_vm_address_region_subregions_construct(
+    ffi::Uninitialized<VmAddressRegionSubregions>* subregions);
+void cpp_vm_address_region_subregions_destroy(VmAddressRegionSubregions* subregions);
+bool cpp_vm_address_region_subregions_is_empty(const VmAddressRegionSubregions* subregions);
+void cpp_vm_address_region_subregions_begin(
+    const VmAddressRegionSubregions* subregions,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
+void cpp_vm_address_region_subregions_upper_bound(
+    const VmAddressRegionSubregions* subregions, vaddr_t key,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
+void cpp_vm_address_region_subregions_find(
+    const VmAddressRegionSubregions* subregions, vaddr_t key,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
+void cpp_vm_address_region_subregions_insert(
+    VmAddressRegionSubregions* subregions, vaddr_t key, VmAddressRegionOrMapping* region,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
+void cpp_vm_address_region_subregions_update(VmAddressRegionSubregions* subregions,
+                                             const VmAddressRegionSubregionsCursor* cursor,
+                                             VmAddressRegionOrMapping* region);
+void cpp_vm_address_region_subregions_erase(VmAddressRegionSubregions* subregions,
+                                            const VmAddressRegionSubregionsCursor* cursor);
+size_t cpp_vm_address_region_subregions_calculate_utilization_slow(
+    const VmAddressRegionSubregions* subregions);
+// TODO(https://fxbug.dev/528405969): Remove cfi_unchecked_callee once cross-language
+// CFI between Clang C++ and rustc is supported in the kernel.
+zx_status_t cpp_vm_address_region_subregions_walk(
+    const VmAddressRegionSubregions* subregions,
+    zx_status_t (*subtree)(const VmAddressRegionObserverState* state, void* ctx)
+        [[clang::cfi_unchecked_callee]],
+    zx_status_t (*leaf)(const VmAddressRegionObserverState* state,
+                        const VmAddressRegionSubregionsCursor* first,
+                        const VmAddressRegionSubregionsCursor* last, void* ctx)
+        [[clang::cfi_unchecked_callee]],
+    void* ctx);
+bool cpp_vm_address_region_subregions_cursor_is_valid(
+    const VmAddressRegionSubregionsCursor* cursor);
+const VmAddressRegionOrMapping* cpp_vm_address_region_subregions_cursor_get(
+    const VmAddressRegionSubregionsCursor* cursor);
+void cpp_vm_address_region_subregions_cursor_next(VmAddressRegionSubregionsCursor* cursor);
+void cpp_vm_address_region_subregions_cursor_prev(VmAddressRegionSubregionsCursor* cursor);
+bool cpp_vm_address_region_subregions_cursor_eq(const VmAddressRegionSubregionsCursor* cursor,
+                                                const VmAddressRegionSubregionsCursor* other);
+vaddr_t cpp_vm_address_region_observer_state_min_addr(const VmAddressRegionObserverState* state);
+bool cpp_vm_address_region_observer_state_max_gap(const VmAddressRegionObserverState* state,
+                                                  ffi::Uninitialized<size_t>* out_max_gap);
+vaddr_t cpp_vm_address_region_observer_state_max_addr(const VmAddressRegionObserverState* state);
 
-void cpp_vm_address_region_enumerator_construct(
-    ffi::Uninitialized<CppVmAddressRegionEnumerator>* out, VmAddressRegionEnumeratorType type,
-    VmAddressRegion* vmar, vaddr_t min_addr, vaddr_t max_addr);
-void cpp_vm_address_region_enumerator_destroy(CppVmAddressRegionEnumerator* enumerator);
-VmAddressRegionOrMapping* cpp_vm_address_region_enumerator_next(
-    CppVmAddressRegionEnumerator* enumerator, uint* out_depth);
-void cpp_vm_address_region_enumerator_pause(CppVmAddressRegionEnumerator* enumerator);
-void cpp_vm_address_region_enumerator_resume(CppVmAddressRegionEnumerator* enumerator);
-
-void cpp_vm_mapping_construct(ffi::Uninitialized<VmMapping>* slot, VmAddressRegion* parent,
-                              bool private_clone, vaddr_t base, size_t size, uint32_t vmar_flags,
-                              VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-                              bool mergeable);
-void cpp_vm_mapping_construct_with_ranges(ffi::Uninitialized<VmMapping>* slot,
-                                          VmAddressRegion* parent, bool private_clone, vaddr_t base,
-                                          size_t size, uint32_t vmar_flags, VmObject* vmo,
-                                          uint64_t vmo_offset, arch_mmu_flags_t first_mmu_flags,
-                                          VmMappingProtectionRanges* ranges, bool mergeable);
-void cpp_vm_mapping_destruct(VmMapping* mapping);
-void* cpp_vm_mapping_state(VmMapping* mapping);
 void cpp_vm_mapping_protection_ranges_construct(
     ffi::Uninitialized<VmMappingProtectionRanges>* ranges);
 void cpp_vm_mapping_protection_ranges_destroy(VmMappingProtectionRanges* ranges);

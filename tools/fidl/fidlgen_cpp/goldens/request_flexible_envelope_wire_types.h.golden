@@ -52,10 +52,10 @@ class FlexibleFoo {
   FlexibleFoo(FlexibleFoo&&) = default;
   FlexibleFoo& operator=(FlexibleFoo&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kS = 1,  // 0x1
     kI = 2,  // 0x2
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_requestflexibleenvelope::wire::FlexibleFoo::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -88,7 +88,7 @@ class FlexibleFoo {
   ::test_requestflexibleenvelope::wire::FlexibleFoo::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kS = 1,  // 0x1
     kI = 2,  // 0x2
@@ -109,7 +109,7 @@ class StrictFoo {
   StrictFoo(StrictFoo&&) = default;
   StrictFoo& operator=(StrictFoo&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kS = 1,  // 0x1
     kI = 2,  // 0x2
   };
@@ -141,7 +141,7 @@ class StrictFoo {
   ::test_requestflexibleenvelope::wire::StrictFoo::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kS = 1,  // 0x1
     kI = 2,  // 0x2

@@ -16,20 +16,53 @@
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/driver/testing/cpp/scoped_global_logger.h>
 #include <lib/fdf/cpp/dispatcher.h>
+#include <lib/fdf/dispatcher.h>
 #include <lib/inspect/cpp/inspect.h>
+#include <lib/sync/cpp/completion.h>
+#include <lib/zx/bti.h>
+#include <lib/zx/interrupt.h>
+#include <lib/zx/resource.h>
+#include <lib/zx/vmo.h>
+#include <zircon/syscalls.h>
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <limits>
 #include <memory>
+#include <span>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include <fake-mmio-reg/fake-mmio-reg.h>
+#include <fbl/algorithm.h>
 #include <gtest/gtest.h>
 
+#include "src/graphics/display/drivers/amlogic-display/board-resources.h"
+#include "src/graphics/display/drivers/amlogic-display/common.h"
+#include "src/graphics/display/drivers/amlogic-display/image-info.h"
 #include "src/graphics/display/drivers/amlogic-display/pixel-grid-size2d.h"
+#include "src/graphics/display/drivers/amlogic-display/rdma-regs.h"
+#include "src/graphics/display/drivers/amlogic-display/rdma.h"
 #include "src/graphics/display/drivers/amlogic-display/structured_config.h"
 #include "src/graphics/display/drivers/amlogic-display/vout-dsi.h"
+#include "src/graphics/display/drivers/amlogic-display/vpu.h"
 #include "src/graphics/display/lib/api-protocols/cpp/display-engine-events-fidl.h"
+#include "src/graphics/display/lib/api-types/cpp/color-conversion.h"
+#include "src/graphics/display/lib/api-types/cpp/color.h"
+#include "src/graphics/display/lib/api-types/cpp/config-check-result.h"
 #include "src/graphics/display/lib/api-types/cpp/driver-buffer-collection-id.h"
+#include "src/graphics/display/lib/api-types/cpp/driver-capture-image-id.h"
+#include "src/graphics/display/lib/api-types/cpp/driver-config-stamp.h"
+#include "src/graphics/display/lib/api-types/cpp/driver-image-id.h"
+#include "src/graphics/display/lib/api-types/cpp/driver-layer.h"
+#include "src/graphics/display/lib/api-types/cpp/image-metadata.h"
+#include "src/graphics/display/lib/api-types/cpp/image-tiling-type.h"
+#include "src/graphics/display/lib/api-types/cpp/mode-id.h"
+#include "src/graphics/display/lib/api-types/cpp/pixel-format.h"
+#include "src/graphics/display/lib/api-types/cpp/rectangle.h"
 #include "src/graphics/display/lib/driver-utils/poll-until.h"
 #include "src/lib/fsl/handles/object_info.h"
 #include "src/lib/testing/predicates/status.h"
@@ -331,7 +364,9 @@ class FakeCanvas : public fidl::WireServer<fuchsia_hardware_amlogiccanvas::Devic
   }
 
   void Config(ConfigRequestView request, ConfigCompleter::Sync& completer) override {
-    for (size_t i = 0; i < std::size(in_use_); i++) {
+    // The driver treats canvas index 0 as invalid for capture images
+    // (https://fxbug.dev/42082204), so never hand it out.
+    for (size_t i = 1; i < std::size(in_use_); i++) {
       ZX_DEBUG_ASSERT_MSG(i <= std::numeric_limits<uint8_t>::max(),
                           "Canvas index out of range: %zu", i);
       if (!in_use_[i]) {
@@ -812,6 +847,365 @@ TEST_F(FakeSysmemTest, NoLeakCaptureCanvas) {
 
   driver_test_.RunInEnvironmentTypeContext(
       [](AmlogicDisplayTestEnvironment& env) { env.canvas().CheckThatNoEntriesInUse(); });
+}
+
+// Builds a fullscreen image layer for the panel used by `FakeSysmemTest`.
+display::DriverLayer MakePanelImageLayer(display::DriverImageId image_id) {
+  constexpr int32_t kPanelWidth = 600;
+  constexpr int32_t kPanelHeight = 1024;
+  return display::DriverLayer({
+      .display_destination =
+          display::Rectangle({.x = 0, .y = 0, .width = kPanelWidth, .height = kPanelHeight}),
+      .image_source =
+          display::Rectangle({.x = 0, .y = 0, .width = kPanelWidth, .height = kPanelHeight}),
+      .image_id = image_id,
+      .image_metadata = display::ImageMetadata({
+          .width = kPanelWidth,
+          .height = kPanelHeight,
+          .tiling_type = display::ImageTilingType::kLinear,
+      }),
+      .fallback_color = display::Color({
+          .format = display::PixelFormat::kB8G8R8A8,
+          .bytes = std::initializer_list<uint8_t>{0, 0, 0, 0, 0, 0, 0, 0},
+      }),
+  });
+}
+
+TEST_F(FakeSysmemTest, StartCaptureRejectsUnknownCaptureImageHandles) {
+  display_engine_->SetDisplayAttachedForTesting(true);
+
+  // Import a display image so a display image ID exists that must not resolve
+  // in the capture namespace.
+  constexpr display::DriverBufferCollectionId kDisplayCollectionId(1);
+  auto display_token = ImportBufferCollection(kDisplayCollectionId);
+  zx::result<display::DriverImageId> display_import = display_engine_->ImportImage(
+      MakePanelImageLayer(display::kInvalidDriverImageId).image_metadata(), kDisplayCollectionId,
+      /*buffer_index=*/0);
+  ASSERT_OK(display_import);
+  EXPECT_EQ(display_import.value(), display::DriverImageId(1));
+
+  EXPECT_STATUS(
+      display_engine_->StartCapture(display::DriverCaptureImageId(display_import->value())),
+      zx::error(ZX_ERR_NOT_FOUND));
+  EXPECT_STATUS(display_engine_->StartCapture(display::DriverCaptureImageId(0xdeadbeef)),
+                zx::error(ZX_ERR_NOT_FOUND));
+  EXPECT_STATUS(display_engine_->ReleaseCapture(display::DriverCaptureImageId(0xdeadbeef)),
+                zx::error(ZX_ERR_NOT_FOUND));
+
+  // A released capture handle must not resolve a second time.
+  SetBufferCollectionBuilderForCapture();
+  constexpr display::DriverBufferCollectionId kCaptureCollectionId(2);
+  auto capture_token = ImportBufferCollection(kCaptureCollectionId);
+  zx::result<display::DriverCaptureImageId> capture_import =
+      display_engine_->ImportImageForCapture(kCaptureCollectionId, /*buffer_index=*/0);
+  ASSERT_OK(capture_import);
+  EXPECT_EQ(capture_import.value(), display::DriverCaptureImageId(1'000'000'001));
+  EXPECT_OK(display_engine_->ReleaseCapture(capture_import.value()));
+  EXPECT_STATUS(display_engine_->ReleaseCapture(capture_import.value()),
+                zx::error(ZX_ERR_NOT_FOUND));
+
+  display_engine_->ReleaseImage(display_import.value());
+  EXPECT_OK(display_engine_->ReleaseBufferCollection(kDisplayCollectionId));
+  EXPECT_OK(display_engine_->ReleaseBufferCollection(kCaptureCollectionId));
+  driver_test_.RunInEnvironmentTypeContext(
+      [](AmlogicDisplayTestEnvironment& env) { env.canvas().CheckThatNoEntriesInUse(); });
+}
+
+TEST_F(FakeSysmemTest, CheckConfigurationRejectsUnknownDisplayImageHandles) {
+  constexpr display::ModeId kPanelModeId(1);
+  display_engine_->SetDisplayAttachedForTesting(true);
+
+  constexpr display::DriverBufferCollectionId kDisplayCollectionId(1);
+  auto display_token = ImportBufferCollection(kDisplayCollectionId);
+  zx::result<display::DriverImageId> display_import = display_engine_->ImportImage(
+      MakePanelImageLayer(display::kInvalidDriverImageId).image_metadata(), kDisplayCollectionId,
+      /*buffer_index=*/0);
+  ASSERT_OK(display_import);
+  EXPECT_EQ(display_import.value(), display::DriverImageId(1));
+
+  const display::DriverLayer valid_layer = MakePanelImageLayer(display_import.value());
+  EXPECT_EQ(display_engine_->CheckConfiguration(kPanelDisplayId, kPanelModeId,
+                                                display::ColorConversion::kIdentity,
+                                                std::span(&valid_layer, 1)),
+            display::ConfigCheckResult::kOk);
+
+  // An image ID that was never imported is invalid on any hardware.
+  const display::DriverLayer unknown_layer =
+      MakePanelImageLayer(display::DriverImageId(0xdeadbeef));
+  EXPECT_EQ(display_engine_->CheckConfiguration(kPanelDisplayId, kPanelModeId,
+                                                display::ColorConversion::kIdentity,
+                                                std::span(&unknown_layer, 1)),
+            display::ConfigCheckResult::kInvalidConfig);
+
+  // Capture image IDs live in a separate namespace and must not resolve as
+  // display images.
+  SetBufferCollectionBuilderForCapture();
+  constexpr display::DriverBufferCollectionId kCaptureCollectionId(2);
+  auto capture_token = ImportBufferCollection(kCaptureCollectionId);
+  zx::result<display::DriverCaptureImageId> capture_import =
+      display_engine_->ImportImageForCapture(kCaptureCollectionId, /*buffer_index=*/0);
+  ASSERT_OK(capture_import);
+  display_engine_->ReleaseImage(display_import.value());
+  const display::DriverLayer cross_namespace_layer =
+      MakePanelImageLayer(display::DriverImageId(capture_import->value()));
+  EXPECT_EQ(display_engine_->CheckConfiguration(kPanelDisplayId, kPanelModeId,
+                                                display::ColorConversion::kIdentity,
+                                                std::span(&cross_namespace_layer, 1)),
+            display::ConfigCheckResult::kInvalidConfig);
+
+  // Submitting or releasing unknown display image IDs must be a harmless no-op.
+  display_engine_->SubmitConfiguration(kPanelDisplayId, kPanelModeId,
+                                       display::ColorConversion::kIdentity,
+                                       std::span(&unknown_layer, 1), display::DriverConfigStamp(1));
+  display_engine_->ReleaseImage(display::DriverImageId(0xdeadbeef));
+  display_engine_->ReleaseImage(display::DriverImageId(capture_import->value()));
+
+  EXPECT_OK(display_engine_->ReleaseCapture(capture_import.value()));
+  EXPECT_OK(display_engine_->ReleaseBufferCollection(kDisplayCollectionId));
+  EXPECT_OK(display_engine_->ReleaseBufferCollection(kCaptureCollectionId));
+  driver_test_.RunInEnvironmentTypeContext(
+      [](AmlogicDisplayTestEnvironment& env) { env.canvas().CheckThatNoEntriesInUse(); });
+}
+
+class FakeBufferCollectionForBackedAfbc : public FakeBufferCollectionBase {
+ public:
+  FakeBufferCollectionForBackedAfbc(zx::vmo backing_vmo, uint32_t width, uint32_t height)
+      : backing_vmo_(std::move(backing_vmo)),
+        afbc_constraints_(
+            fuchsia_sysmem2::wire::ImageFormatConstraints::Builder(arena_)
+                .pixel_format(fuchsia_images2::wire::PixelFormat::kR8G8B8A8)
+                .pixel_format_modifier(
+                    fuchsia_images2::wire::PixelFormatModifier::kArmAfbc16X16SplitBlockSparseYuv)
+                .min_size(fuchsia_math::wire::SizeU{.width = width, .height = height})
+                .bytes_per_row_divisor(64)
+                .Build()) {}
+  ~FakeBufferCollectionForBackedAfbc() override = default;
+
+  void VerifyBufferCollectionConstraints(
+      const fuchsia_sysmem2::wire::BufferCollectionConstraints& constraints) override {}
+  void VerifyName(const std::string& name) override { EXPECT_EQ(name, "Display"); }
+
+  void WaitForAllBuffersAllocated(WaitForAllBuffersAllocatedCompleter::Sync& completer) override {
+    zx::vmo vmo_dup;
+    EXPECT_OK(backing_vmo_.duplicate(ZX_RIGHT_SAME_RIGHTS, &vmo_dup));
+    auto collection = fuchsia_sysmem2::wire::BufferCollectionInfo::Builder(arena_)
+                          .buffers(std::vector{fuchsia_sysmem2::wire::VmoBuffer::Builder(arena_)
+                                                   .vmo(std::move(vmo_dup))
+                                                   .vmo_usable_start(0)
+                                                   .Build()})
+                          .settings(fuchsia_sysmem2::wire::SingleBufferSettings::Builder(arena_)
+                                        .image_format_constraints(afbc_constraints_)
+                                        .Build())
+                          .Build();
+    auto response =
+        fuchsia_sysmem2::wire::BufferCollectionWaitForAllBuffersAllocatedResponse::Builder(arena_)
+            .buffer_collection_info(collection)
+            .Build();
+    completer.Reply(fit::ok(&response));
+  }
+
+ private:
+  fidl::Arena<fidl::kDefaultArenaInitialCapacity> arena_;
+  zx::vmo backing_vmo_;
+  fuchsia_sysmem2::wire::ImageFormatConstraints afbc_constraints_;
+};
+
+class AfbcAndCaptureEngineTest : public FakeSysmemTest {
+ public:
+  static constexpr int32_t kAstroWidth = 600;
+  static constexpr int32_t kAstroHeight = 1024;
+  static constexpr display::ModeId kAstroModeId = display::ModeId(1);
+  // Large enough to back a kAstroWidth x kAstroHeight AFBC image.
+  static constexpr size_t kAstroAfbcImageBytes = 4u * 1024u * 1024u;
+
+  void SetUp() override {
+    FakeSysmemTest::SetUp();
+    display_engine_->SetVpuForTesting(
+        std::make_unique<Vpu>(vpu_mmio_.GetMmioBuffer(), hhi_mmio_.GetMmioBuffer(),
+                              aobus_mmio_.GetMmioBuffer(), reset_mmio_.GetMmioBuffer()));
+
+    zx::bti dma_bti;
+    ASSERT_OK(display_engine_->bti_for_testing().duplicate(ZX_RIGHT_SAME_RIGHTS, &dma_bti));
+    zx::interrupt rdma_irq;
+    ASSERT_OK(zx::interrupt::create(zx::resource(), 0u, ZX_INTERRUPT_VIRTUAL, &rdma_irq));
+    zx::result<fdf::SynchronizedDispatcher> dispatcher_result = fdf::SynchronizedDispatcher::Create(
+        fdf::SynchronizedDispatcher::Options::kAllowSyncCalls, "test_rdma_irq",
+        [this](fdf_dispatcher_t*) { rdma_dispatcher_shutdown_.Signal(); },
+        /*scheduler_role=*/{});
+    ASSERT_OK(dispatcher_result);
+    rdma_dispatcher_ = dispatcher_result->borrow();
+
+    inspect_node_ = inspector_.GetRoot().CreateChild("test_viu");
+    auto rdma = std::make_unique<RdmaEngine>(vpu_mmio_.GetMmioBuffer(), std::move(dma_bti),
+                                             std::move(rdma_irq),
+                                             std::move(dispatcher_result).value(), &inspect_node_);
+    ASSERT_OK(rdma->SetupRdma());
+
+    const PixelGridSize2D size = {.width = kAstroWidth, .height = kAstroHeight};
+    zx::result<std::unique_ptr<VideoInputUnit>> viu_result =
+        VideoInputUnit::CreateForTesting(vpu_mmio_.GetMmioBuffer(), std::move(rdma), size, size);
+    ASSERT_OK(viu_result);
+    display_engine_->SetVideoInputUnitForTesting(std::move(viu_result).value());
+    display_engine_->SetDisplayAttachedForTesting(true);
+    display_engine_->SetFullyInitializedForTesting();
+    vpu_mmio_[VPU_RDMA_ACCESS_AUTO3].SetWriteCallback(
+        [this](uint64_t value) { afbc_rdma_auto3_ = value; });
+  }
+
+  void TearDown() override {
+    if (rdma_dispatcher_->get() != nullptr) {
+      fdf_dispatcher_shutdown_async(rdma_dispatcher_->get());
+      driver_test_.runtime().RunUntil([this]() { return rdma_dispatcher_shutdown_.signaled(); });
+    }
+    display_engine_.reset();
+    vpu_mmio_[VPU_RDMA_ACCESS_AUTO3].SetWriteCallback([](uint64_t) {});
+    FakeSysmemTest::TearDown();
+  }
+
+  // Imports one linear display image, one AFBC display image, and one capture
+  // image.
+  //
+  // Keeps the buffer collection tokens alive for the rest of the test.
+  void ImportAfbcAndCaptureImages() {
+    linear_token_ = ImportBufferCollection(display::DriverBufferCollectionId(3));
+    zx::result<display::DriverImageId> linear_import = display_engine_->ImportImage(
+        kAfbcImageMetadata, display::DriverBufferCollectionId(3), /*buffer_index=*/0);
+    ASSERT_OK(linear_import);
+    linear_image_id_ = linear_import.value();
+
+    ASSERT_OK(zx::vmo::create(fbl::round_up(kAstroAfbcImageBytes, zx_system_get_page_size()), 0u,
+                              &afbc_vmo_));
+    SetBufferCollectionBuilder([this] {
+      zx::vmo vmo_dup;
+      EXPECT_OK(afbc_vmo_.duplicate(ZX_RIGHT_SAME_RIGHTS, &vmo_dup));
+      return std::make_unique<FakeBufferCollectionForBackedAfbc>(std::move(vmo_dup), kAstroWidth,
+                                                                 kAstroHeight);
+    });
+    afbc_token_ = ImportBufferCollection(display::DriverBufferCollectionId(1));
+    zx::result<display::DriverImageId> afbc_import = display_engine_->ImportImage(
+        kAfbcImageMetadata, display::DriverBufferCollectionId(1), /*buffer_index=*/0);
+    ASSERT_OK(afbc_import);
+    afbc_image_id_ = afbc_import.value();
+
+    SetBufferCollectionBuilderForCapture();
+    capture_token_ = ImportBufferCollection(display::DriverBufferCollectionId(2));
+    zx::result<display::DriverCaptureImageId> capture_import =
+        display_engine_->ImportImageForCapture(display::DriverBufferCollectionId(2),
+                                               /*buffer_index=*/0);
+    ASSERT_OK(capture_import);
+    capture_image_id_ = capture_import.value();
+
+    linear_layers_ = {display::DriverLayer({
+        .display_destination = kFullScreenRect,
+        .image_source = kFullScreenRect,
+        .image_id = linear_image_id_,
+        .image_metadata = kAfbcImageMetadata,
+        .fallback_color = display::Color({
+            .format = display::PixelFormat::kB8G8R8A8,
+            .bytes = std::initializer_list<uint8_t>{0, 0, 0, 0, 0, 0, 0, 0},
+        }),
+    })};
+
+    afbc_layers_ = {display::DriverLayer({
+        .display_destination = kFullScreenRect,
+        .image_source = kFullScreenRect,
+        .image_id = afbc_image_id_,
+        .image_metadata = kAfbcImageMetadata,
+        .fallback_color = display::Color({
+            .format = display::PixelFormat::kB8G8R8A8,
+            .bytes = std::initializer_list<uint8_t>{0, 0, 0, 0, 0, 0, 0, 0},
+        }),
+    })};
+  }
+
+  void ReleaseAfbcAndCaptureImages() {
+    EXPECT_OK(display_engine_->ReleaseCapture(capture_image_id_));
+    display_engine_->ReleaseImage(afbc_image_id_);
+    display_engine_->ReleaseImage(linear_image_id_);
+  }
+
+ protected:
+  static constexpr display::ImageMetadata kAfbcImageMetadata = display::ImageMetadata({
+      .width = kAstroWidth,
+      .height = kAstroHeight,
+      .tiling_type = display::ImageTilingType::kLinear,
+  });
+  static constexpr display::Rectangle kFullScreenRect =
+      display::Rectangle({.x = 0, .y = 0, .width = kAstroWidth, .height = kAstroHeight});
+
+  zx::vmo afbc_vmo_;
+  fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken> linear_token_;
+  fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken> afbc_token_;
+  fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken> capture_token_;
+  display::DriverImageId linear_image_id_ = display::kInvalidDriverImageId;
+  display::DriverImageId afbc_image_id_ = display::kInvalidDriverImageId;
+  display::DriverCaptureImageId capture_image_id_ = display::kInvalidDriverCaptureImageId;
+  std::vector<display::DriverLayer> linear_layers_;
+  std::vector<display::DriverLayer> afbc_layers_;
+
+  ddk_fake::FakeMmioRegRegion hhi_mmio_{/*reg_size=*/4, /*reg_count=*/0x1000};
+  ddk_fake::FakeMmioRegRegion aobus_mmio_{/*reg_size=*/4, /*reg_count=*/0x1000};
+  ddk_fake::FakeMmioRegRegion reset_mmio_{/*reg_size=*/4, /*reg_count=*/0x1000};
+  inspect::Inspector inspector_;
+  inspect::Node inspect_node_;
+  fdf::UnownedSynchronizedDispatcher rdma_dispatcher_;
+  libsync::Completion rdma_dispatcher_shutdown_;
+  uint64_t afbc_rdma_auto3_ = 0;
+};
+
+TEST_F(AfbcAndCaptureEngineTest, StartCaptureRejectedWhileAfbcImageDisplayed) {
+  ASSERT_NO_FATAL_FAILURE(ImportAfbcAndCaptureImages());
+
+  afbc_rdma_auto3_ = 0;
+
+  // Scanning out the AFBC image arms the AFBC RDMA channel.
+  display_engine_->SubmitConfiguration(kPanelDisplayId, kAstroModeId,
+                                       display::ColorConversion::kIdentity, afbc_layers_,
+                                       display::DriverConfigStamp(1));
+  EXPECT_NE(afbc_rdma_auto3_, 0u);
+
+  // VDIN1 capture must be rejected while AFBC scanout is active: capturing
+  // the decoder's output would turn an out-of-bounds AFBC body offset into a
+  // physical memory read primitive.
+  EXPECT_STATUS(display_engine_->StartCapture(capture_image_id_), zx::error(ZX_ERR_NOT_SUPPORTED));
+
+  // Switching to a linear image clears the AFBC scanout state, so capture may
+  // start.
+  display_engine_->SubmitConfiguration(kPanelDisplayId, kAstroModeId,
+                                       display::ColorConversion::kIdentity, linear_layers_,
+                                       display::DriverConfigStamp(2));
+  EXPECT_OK(display_engine_->StartCapture(capture_image_id_));
+
+  display_engine_->OnCaptureCompleteForTesting();
+
+  ReleaseAfbcAndCaptureImages();
+}
+
+TEST_F(AfbcAndCaptureEngineTest, AfbcConfigRejectedWhileCaptureActive) {
+  ASSERT_NO_FATAL_FAILURE(ImportAfbcAndCaptureImages());
+
+  // With no image displayed, capture may start.
+  ASSERT_OK(display_engine_->StartCapture(capture_image_id_));
+
+  // An AFBC layer is rejected at check time while capture is active...
+  EXPECT_EQ(display_engine_->CheckConfiguration(kPanelDisplayId, kAstroModeId,
+                                                display::ColorConversion::kIdentity, afbc_layers_),
+            display::ConfigCheckResult::kUnsupportedConfig);
+
+  // ...and ignored at submit time, leaving the AFBC RDMA channel unarmed.
+  afbc_rdma_auto3_ = 0;
+  display_engine_->SubmitConfiguration(kPanelDisplayId, kAstroModeId,
+                                       display::ColorConversion::kIdentity, afbc_layers_,
+                                       display::DriverConfigStamp(1));
+  EXPECT_EQ(afbc_rdma_auto3_, 0u);
+
+  // Completing the capture allows AFBC configurations again.
+  display_engine_->OnCaptureCompleteForTesting();
+  EXPECT_EQ(display_engine_->CheckConfiguration(kPanelDisplayId, kAstroModeId,
+                                                display::ColorConversion::kIdentity, afbc_layers_),
+            display::ConfigCheckResult::kOk);
+
+  ReleaseAfbcAndCaptureImages();
 }
 
 }  // namespace

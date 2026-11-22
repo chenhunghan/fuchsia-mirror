@@ -7,7 +7,7 @@ import("//build/assembly/test_product_bundle.gni")
 import("//build/go/go_library.gni")
 import("//build/go/go_test.gni")
 import("//build/testing/boot_tests/zbi_test.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 
 group("polling-input-test") {
   testonly = true
@@ -36,10 +36,9 @@ if (is_phys_toolchain) {
     deps = [
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/libc",
-      "//zircon/kernel/phys:stdio",
+      "//zircon/kernel/phys/output",
       "//zircon/kernel/phys/runtime",
       "//zircon/kernel/phys/test:zbi-test-main",
-      "//zircon/kernel/phys/uart",
       "//zircon/system/ulib/uart",
     ]
   }

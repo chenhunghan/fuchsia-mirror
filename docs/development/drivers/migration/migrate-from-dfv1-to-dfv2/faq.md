@@ -4,7 +4,7 @@ Before you start working DFv1-to-DFv2 migration, the frequently asked
 questions below can help you identify special conditions or edge cases
 that may apply to your driver.
 
-## What is the compatibility shim and when is it necessary?
+## What is the compatibility shim and when is it necessary? {:#what-is-the-compatibility-shim-and-when-is-it-necessary}
 
 DFv1 and DFv2 drivers exist under a single branch of the node topology
 tree (that is, until all the drivers are migrated to DFv2) and they need
@@ -222,7 +222,7 @@ contains most of the new APIs).
 [load-firmware]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/ddk/include/lib/ddk/driver.h;l=416
 [logging-h]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/compat/cpp/logging.h
 [synchronized-dispatchers]: /docs/concepts/drivers/driver-dispatcher-and-threads.md#synchronized-and-unsynchronized
-[gc-intel-wifi]:https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243
+[gc-intel-wifi]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243
 [pcie-iwlwifi-driver-cc]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/692243/47/src/connectivity/wlan/drivers/third_party/intel/iwlwifi/platform/pcie-iwlwifi-driver.cc
 [codelab-driver-service]: /docs/get-started/sdk/learn/driver/driver-service.md
 [logger-h]: https://source.corp.google.com/h/turquoise-internal/turquoise/+/main:sdk/lib/driver/logging/cpp/logger.h;l=15
@@ -240,7 +240,7 @@ contains most of the new APIs).
 [update-component-manifests]: update-other-services-to-dfv2.md#update-component-manifests-of-other-drivers
 [use-dispatchers]: update-other-services-to-dfv2.md#use-dispatchers
 [use-dfv2-inspect]: update-other-services-to-dfv2.md#use-the-dfv2-inspect
-[use-dfv2-logger]: update-other-services-to-dfv2.md#use-the-dfv2-logger
+[use-dfv2-logger]: update-other-services-to-dfv2.md
 [implement-firmware]: update-other-services-to-dfv2.md#implement-your-own-load-firmware-method
 [use-node-properties]: update-other-services-to-dfv2.md#use-the-node-properties-generated-from-fidl-service-offers
 [update-unit-tests]: update-other-services-to-dfv2.md#update-unit-tests-to-dfv2

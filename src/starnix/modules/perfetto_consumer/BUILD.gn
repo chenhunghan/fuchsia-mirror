@@ -2,22 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-# Keep perfetto_consumer_tests in GN because exclude_toolchain_tags cannot be
-# expressed on Bazel fx_test and the unit test depends on
-# //zircon/system/ulib/trace-test-utils which is not yet migrated to Bazel.
-fuchsia_unittest_package("perfetto_consumer_tests") {
-  package_name = "perfetto_consumer_tests"
-  manifest = "meta/perfetto_consumer_tests.cml"
-  deps = [ ":perfetto_consumer_test" ]
-  test_type = "starnix"
-}
-
 group("tests") {
   testonly = true
   deps = [
-    ":perfetto_consumer_tests",
+    ":perfetto_consumer_tests_package",
     "lib/perfetto:tests",
   ]
 }
@@ -78,13 +66,59 @@ rustc_library("perfetto_consumer") {
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:futures",
   ]
-  with_unit_tests = true
-  exclude_toolchain_tags = [
-    "asan",
-    "hwasan",
+}
+if (is_fuchsia) {
+  rustc_test("perfetto_consumer_test") {
+    sources = [
+      "atrace.rs",
+      "blob_sink.rs",
+      "lib.rs",
+      "packet_forwarder.rs",
+      "testing.rs",
+    ]
+    source_root = "lib.rs"
+    edition = "2024"
+    deps = [
+             "//sdk/rust/zx",
+             "//src/lib/trace/rust:trace",
+             "//src/lib/trace/rust:trace-observer",
+             "//src/performance/lib/fxt/rust",
+             "//src/starnix/kernel/core",
+             "//src/starnix/lib/starnix_logging",
+             "//src/starnix/lib/starnix_uapi",
+             "//src/starnix/modules/perfetto_consumer/lib/perfetto",
+             "//src/starnix/modules/perfetto_consumer/lib/perfetto:perfetto_protos",
+             "//src/starnix/modules/perfetto_consumer/lib/perfetto:perfetto_trace_protos",
+             "//src/starnix/modules/perfetto_consumer/lib/perfetto/trace_decoder",
+             "//third_party/rust_crates:anyhow",
+             "//third_party/rust_crates:futures",
+           ] + [ "//src/lib/fuchsia" ]
+    output_name = "starnix_modules_perfetto_consumer_lib_test"
+    link_deps = [ "//zircon/system/ulib/trace-test-utils" ]
+    lint_config = "//src/starnix/config:starnix_clippy_lints_test"
+    exclude_toolchain_tags = [
+      "asan",
+      "hwasan",
+    ]
+  }
+}
+
+fuchsia_component_manifest("perfetto_consumer_tests_manifest") {
+  testonly = true
+  component_name = "perfetto_consumer_tests"
+  manifest = "meta/perfetto_consumer_tests.cml"
+}
+
+fuchsia_test_component("perfetto_consumer_tests_component") {
+  cm_label = ":perfetto_consumer_tests_manifest"
+  test_type = "starnix"
+  deps = [
+    ":perfetto_consumer_test",
+    "//src/starnix/kernel/vdso",
   ]
-  test_deps = [
-    "//src/lib/fuchsia",
-    "//zircon/system/ulib/trace-test-utils",
-  ]
+}
+
+fuchsia_test_package("perfetto_consumer_tests_package") {
+  package_name = "perfetto_consumer_tests-gn"
+  test_components = [ ":perfetto_consumer_tests_component" ]
 }

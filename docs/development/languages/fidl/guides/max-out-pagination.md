@@ -54,7 +54,7 @@ be done in two steps:
 2. Determine the size of each present field
 
 The size of `Peer` is then the table header -- i.e. `sizeof(fidl_table_t)`, 16
-bytes -- plus the largest set ordinal * envelope header (16 bytes) -- i.e.
+bytes -- plus the largest set ordinal * envelope header (8 bytes) -- i.e.
 `max_set_ordinal * sizeof(fidl_envelope_t)` -- plus the total size of the
 content, that is, each present field’s content added.
 
@@ -80,8 +80,8 @@ content of the vector, which are the actual commands. As a result, before you
 account for the size of each individual command, there is a fixed size of 32
 bytes.
 
-A [command][scenic-command] is a [union][fidl-wire-format-union] that has a 24
-bytes header (i.e. `sizeof(fidl_xunion_t)`) followed by the content, which is 8
+A [command][scenic-command] is a [union][fidl-wire-format-union] that has a 16
+bytes header (i.e. `sizeof(fidl_union_t)`) followed by the content, which is 8
 bytes aligned.
 
 The size of a `Command` union content depends on the variant selected. This
@@ -89,7 +89,7 @@ example uses the `input` variant of type
 [`fuchsia.ui.input.Command`][input-command].
 
 The `input` variant (of the scenic command) is itself a union, which adds
-another 24 bytes header, followed by the content of that union, such as a
+another 16 bytes header, followed by the content of that union, such as a
 `send_pointer_input` of type
 [`SendPointerInputCmd`][input-send-pointer-input-cmd].
 
@@ -151,14 +151,14 @@ Packing][lostart].
 
 Now that you have sized all the pieces of a command, you add the total size:
 
-* Header of `fuchsia.ui.scenic.Command`: 24 bytes, i.e. `sizeof(fidl_xunion_t)`
+* Header of `fuchsia.ui.scenic.Command`: 16 bytes, i.e. `sizeof(fidl_union_t)`
 * Content with variant `input`:
-  * Header of `fuchsia.ui.input.Command`: 24 bytes, i.e. `sizeof(fidl_xunion_t)`
+  * Header of `fuchsia.ui.input.Command`: 16 bytes, i.e. `sizeof(fidl_union_t)`
   * Content with variant `set_hard_keyboard_delivery`:
     * Struct `SendPointerInputCmd`: 52 bytes
     * Padding to align to 8 bytes: 4 bytes
 
-This results in a total size of 104 bytes.
+This results in a total size of 88 bytes.
 
 <!-- xrefs -->
 [lostart]: http://www.catb.org/esr/structure-packing/

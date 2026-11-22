@@ -9,6 +9,8 @@ import("//build/fidl/toolchain.gni")
 import("//build/rust/rust_auxiliary_args.gni")
 
 default_rustc_prefix = "//prebuilt/third_party/rust/${host_platform}"
+default_rust_bindgen_prefix =
+    "//prebuilt/third_party/rust_bindgen/${host_platform}"
 
 _version_file_dir =
     get_label_info("//build/rust:rust_toolchain_version", "target_out_dir")
@@ -19,6 +21,11 @@ declare_args() {
   # This can be used to test custom Rust toolchains.
   # LINT.IfChange
   rustc_prefix = default_rustc_prefix
+
+  # Sets a custom base directory for `bindgen`. This is used to compile Fuchsia
+  # with custom bindgen binaries, in order to test upstream bindgen changes or
+  # locally created patches.
+  rust_bindgen_prefix = default_rust_bindgen_prefix
 
   # Enable debug assertions, e.g. for overflow checking.
   rust_debug_assertions = !is_release
@@ -34,9 +41,8 @@ declare_args() {
 }
 
 if (rustc_prefix == default_rustc_prefix) {
-  _rustc_version = read_file(
-          "//prebuilt/third_party/rust/${host_platform}/.versions/rust.cipd_version",
-          "json")
+  _rustc_version =
+      read_file("${default_rustc_prefix}/.versions/rust.cipd_version", "json")
   default_rustc_version_string = _rustc_version.instance_id
 } else {
   default_rustc_version_string = ""
@@ -140,8 +146,6 @@ if (current_os == "linux") {
 } else if (current_os == "win") {
   _suffix = "windows-msvc"
 } else if (current_os == "uefi") {
-  # TODO(https://fxbug.dev/460196031): Remove this assert when aarch64-uefi triple is supported.
-  assert(current_cpu == "x64")
   _suffix = "unknown-uefi"
 } else if (current_os == "fuchsia") {
   _suffix = "unknown-fuchsia"

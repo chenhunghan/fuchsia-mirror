@@ -34,5 +34,4 @@ fuchsia_driver_component("component") {
   testonly = true
   component_name = "left_parent"
   deps = [ ":driver" ]
-  info = "meta/info.json"
 }

@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//src/lib/dso:fuchsia_dso.bzl", "fuchsia_cc_dso")
+
+package(default_applicable_licenses = ["//:license"])
+
+fuchsia_cc_dso(
+    name = "lib",
+    srcs = ["main.cc"],
+    is_async = False,
+    output_name = "simple_dso",
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/dso/cpp:sync",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lib_packaged",
+    binary = ":lib",
+    binary_name = "libsimple_dso.so",
+    install_root = "lib/",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "simple_dso",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/simple_dso.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":lib_packaged"],
+)
+
+fx_package(
+    name = "simple_dso",
+    components = [":component"],
+)

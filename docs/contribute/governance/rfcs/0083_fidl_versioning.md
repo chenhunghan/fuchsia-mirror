@@ -316,7 +316,7 @@ file, except that using the `removed` attribute maintains historical accuracy,
 whereas deleting the element does not. This provides a way to avoid `.fidl`
 files becoming bloated and unreadable as changes accumulate.
 
-### Purpose of `HEAD`
+### Purpose of HEAD {#purpose-of-head}
 
 The `HEAD` version identifier represents the bleeding edge of development.
 Clients are free to program against `HEAD` bindings, but they should not expect
@@ -848,7 +848,7 @@ i.e. without taking action to migrate.
 [gcp-versioning]: https://cloud.google.com/apis/design/versioning
 [gcp-compatibility]: https://cloud.google.com/apis/design/compatibility
 [nfa-dfa]: https://en.wikipedia.org/wiki/Powerset_construction
-[compositional model]: /docs/contribute/governance/rfcs/0023_compositional_model_protocols.md#compositional_model
+[compositional model]: /docs/contribute/governance/rfcs/0023_compositional_model_protocols.md#compositional-model
 [strict-vs-flexible]: /docs/reference/fidl/language/language.md#strict-vs-flexible
 [value-vs-resource]: /docs/reference/fidl/language/language.md#value-vs-resource
 [max-bound]: https://fuchsia-review.googlesource.com/c/fuchsia/+/325737

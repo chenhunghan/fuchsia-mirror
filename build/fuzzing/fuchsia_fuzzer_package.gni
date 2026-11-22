@@ -90,7 +90,11 @@ template("fuchsia_fuzzer_package") {
 
     fuchsia_package(package_target) {
       testonly = true
-      visibility = [ ":*" ]
+      visibility = [
+        ":*",
+        "//build/assembly/overrides:*",
+        "//local/*",
+      ]
       package_name = package_name
       deps = []
       forward_variables_from(invoker, "*", no_forward)

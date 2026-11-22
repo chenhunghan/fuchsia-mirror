@@ -1,0 +1,187 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":loadbench_tests"],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "tracing.cc",
+        "utility.cc",
+        "workload.cc",
+    ],
+    hdrs = [
+        "action.h",
+        "measurement.h",
+        "object.h",
+        "random.h",
+        "tracing.h",
+        "utility.h",
+        "worker.h",
+        "workload.h",
+    ],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_hlcpp",
+        "//src/lib/files",
+        "//third_party/re2",
+    ],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/performance/lib/fxt",
+        "//third_party/rapidjson",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/trace-reader",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["loadbench.cc"],
+    gn_output_name = "loadbench",
+    deps = [":lib"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "loadbench",
+)
+
+resource(
+    name = "loadbench_data",
+    srcs = [
+        "data/asymmetric_fair_starvation.json",
+        "data/deadline_spin_one_cpu.json",
+        "data/deadline_spin_one_cpu_fair_hog.json",
+        "data/deadline_test.json",
+        "data/example.json",
+        "data/port_test.json",
+    ],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+fx_component_manifest(
+    name = "loadbench_component_manifest",
+    component_name = "loadbench",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/loadbench.cml",
+)
+
+fx_component(
+    name = "loadbench_component",
+    compiled_manifest = ":loadbench_component_manifest",
+    deps = [
+        ":bin_packaged",
+        ":loadbench_data",
+    ],
+)
+
+fx_component_manifest(
+    name = "loadbench_cli_manifest",
+    component_name = "loadbench_cli",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/loadbench_cli.cml",
+)
+
+fx_component(
+    name = "loadbench_cli",
+    compiled_manifest = ":loadbench_cli_manifest",
+    deps = [
+        ":bin_packaged",
+        ":loadbench_data",
+    ],
+)
+
+fx_package(
+    name = "loadbench",
+    components = [
+        ":loadbench_cli",
+        ":loadbench_component",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "loadbench_unittests",
+    srcs = [
+        "tracing_unittest.cc",
+        "workload_unittest.cc",
+    ],
+    deps = [
+        ":lib",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/performance/lib/fxt",
+        "//third_party/re2",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "loadbench_unittests_packaged",
+    testonly = True,
+    binary = ":loadbench_unittests",
+    binary_name = "loadbench_unittests",
+)
+
+fx_component_manifest(
+    name = "loadbench_unittests_manifest",
+    testonly = True,
+    component_name = "loadbench_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/loadbench_unittests.cml",
+)
+
+fx_test_component(
+    name = "loadbench_unittests_component",
+    compiled_manifest = ":loadbench_unittests_manifest",
+    deps = [
+        ":loadbench_data",
+        ":loadbench_unittests_packaged",
+    ],
+)
+
+fx_package(
+    name = "loadbench_tests_package",
+    package_name = "loadbench_tests",
+    test_components = [":loadbench_unittests_component"],
+)
+
+fx_test(
+    name = "loadbench_tests",
+    max_log_severity = "ERROR",
+    package = ":loadbench_tests_package",
+    test_type = "system",
+)

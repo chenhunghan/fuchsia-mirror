@@ -119,6 +119,8 @@
 //! Submitting threads receive `BR_TRANSACTION_COMPLETE` immediately after submitting a transaction
 //! or reply:
 //! - `Command::TransactionComplete` (reply): 2-step flow (`"BinderTransactionComplete"`).
+//! - `Command::DeferredTransactionComplete` (reply sent with `TF_DEFER_COMPLETE`): 2-step flow
+//!   (`"BinderDeferredTransactionComplete"`).
 //! - `Command::TwoWayTransactionComplete`: 2-step flow (`"BinderTwoWayTransactionComplete"`).
 //! - `Command::OnewayTransactionComplete`: 2-step flow (`"BinderOnewayTransactionComplete"`).
 //!
@@ -278,6 +280,14 @@ pub fn on_command_enqueued(command: &Command, trace_id: fuchsia_trace::Id) {
                 CATEGORY_STARNIX_BINDER,
                 "BinderTransactionComplete",
                 "enqueue_transaction_complete",
+                trace_id
+            );
+        }
+        Command::DeferredTransactionComplete => {
+            fuchsia_trace::instaflow_begin!(
+                CATEGORY_STARNIX_BINDER,
+                "BinderDeferredTransactionComplete",
+                "enqueue_deferred_transaction_complete",
                 trace_id
             );
         }
@@ -458,6 +468,14 @@ pub fn on_command_dequeued(command: &Command, trace_id: fuchsia_trace::Id) {
                 CATEGORY_STARNIX_BINDER,
                 "BinderTransactionComplete",
                 "dequeue_transaction_complete",
+                trace_id
+            );
+        }
+        Command::DeferredTransactionComplete => {
+            fuchsia_trace::instaflow_end!(
+                CATEGORY_STARNIX_BINDER,
+                "BinderDeferredTransactionComplete",
+                "dequeue_deferred_transaction_complete",
                 trace_id
             );
         }

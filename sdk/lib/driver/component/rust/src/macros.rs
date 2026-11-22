@@ -46,7 +46,7 @@ pub const fn make_driver_registration<T: Driver>() -> DriverRegistration {
 ///         // implement binding the node client, creating children, etc. here.
 ///         Ok(Self)
 ///     }
-///     async fn stop(&self) {
+///     async fn stop(self) {
 ///         info!("driver stop message");
 ///     }
 /// }

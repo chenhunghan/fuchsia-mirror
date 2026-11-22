@@ -9,8 +9,8 @@ import("//build/rust/rustc_test.gni")
 # GN because they depend on
 # //src/connectivity/network/testing/netemul/rust:lib and
 # //src/connectivity/network/tests/integration/common:netstack_testing_common,
-# subpackage //src/connectivity/network/netstack3:package-debug, and package
-# //src/connectivity/network/testing/netemul/service:netemul-sandbox, which are
+# and subpackage //src/connectivity/network/netstack3:package-debug and
+# //src/connectivity/network/testing/netemul/service:package, which are
 # not built by Bazel yet.
 rustc_test("fidl_fuchsia_posix_socket_ext_test") {
   output_name = "fidl_fuchsia_posix_socket_ext_lib_test"
@@ -45,15 +45,15 @@ rustc_test("fidl_fuchsia_posix_socket_ext_test") {
 
 fuchsia_test_component("fidl-fuchsia-posix-socket-ext-test") {
   manifest = "meta/fidl-fuchsia-posix-socket-ext-test.cml"
-  deps = [
-    ":fidl_fuchsia_posix_socket_ext_test",
-    "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-  ]
+  deps = [ ":fidl_fuchsia_posix_socket_ext_test" ]
 }
 
 fuchsia_test_package("fidl-fuchsia-posix-socket-ext-tests") {
   test_components = [ ":fidl-fuchsia-posix-socket-ext-test" ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/testing/netemul/service:package",
+  ]
 }
 
 group("tests") {

@@ -37,7 +37,7 @@ impl ToTokens for StructDecl<'_> {
 /// Creates a TryFromEnv invocation for the given type.
 enum TryFromEnvInvocation<'a> {
     Normal(&'a syn::Type),
-    Decorated(ExprCall),
+    Decorated(ExprCall, &'a syn::Type),
 }
 
 impl ToTokens for TryFromEnvInvocation<'_> {
@@ -59,7 +59,7 @@ impl ToTokens for TryFromEnvInvocation<'_> {
                     )
                 });
             }
-            Decorated(expr) => {
+            Decorated(expr, _) => {
                 let span = Span::call_site().located_at(expr.span());
                 tokens.extend(quote_spanned! {span=>
                     fho::macro_deps::futures::future::TryFutureExt::map_err(
@@ -144,7 +144,8 @@ impl<'a> VariableCreationCollection<'a> {
                 self.join_results_names.push(field.field_name);
             }
             With(expr, field) => {
-                self.try_from_env_invocations.push(TryFromEnvInvocation::Decorated(expr));
+                self.try_from_env_invocations
+                    .push(TryFromEnvInvocation::Decorated(expr, field.field_ty));
                 self.join_results_names.push(field.field_name);
             }
             Command(field) => {
@@ -189,12 +190,19 @@ impl ToTokens for CheckCollection {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetNeedOverride {
+    None,
+    Optional,
+    Required,
+}
+
 pub struct NamedFieldStruct<'a> {
     command_field_decl: CommandFieldTypeDecl<'a>,
     struct_decl: StructDecl<'a>,
     checks: CheckCollection,
     vcc: VariableCreationCollection<'a>,
-    requires_target: bool,
+    target_need_override: Option<TargetNeedOverride>,
 }
 
 fn extract_command_field<'a>(
@@ -208,18 +216,18 @@ fn extract_command_field<'a>(
     Ok(f)
 }
 
-fn parse_requires_target(parent_ast: &syn::DeriveInput) -> Result<bool, ParseError> {
-    let mut requires_target = true;
-    let mut found = false;
+fn parse_target_need(
+    parent_ast: &syn::DeriveInput,
+) -> Result<Option<TargetNeedOverride>, ParseError> {
+    let mut target_need = None;
     for attr in &parent_ast.attrs {
         if attr.path().is_ident("target") {
-            if found {
+            if target_need.is_some() {
                 return Err(ParseError::InvalidTargetAttr(
                     attr.span(),
                     "Only one #[target] attribute is allowed".into(),
                 ));
             }
-            found = true;
             let ident: Ident = match attr.parse_args() {
                 Ok(ident) => ident,
                 Err(e) => {
@@ -229,14 +237,21 @@ fn parse_requires_target(parent_ast: &syn::DeriveInput) -> Result<bool, ParseErr
                     ));
                 }
             };
-            if ident == "None" {
-                requires_target = false;
-            } else {
-                return Err(ParseError::InvalidTargetAttr(ident.span(), "Expected `None`".into()));
-            }
+            let parsed = match ident.to_string().as_str() {
+                "None" => TargetNeedOverride::None,
+                "Optional" => TargetNeedOverride::Optional,
+                "Required" => TargetNeedOverride::Required,
+                _ => {
+                    return Err(ParseError::InvalidTargetAttr(
+                        ident.span(),
+                        "Expected `None`, `Optional`, or `Required`".into(),
+                    ));
+                }
+            };
+            target_need = Some(parsed);
         }
     }
-    Ok(requires_target)
+    Ok(target_need)
 }
 
 fn parse_main_error(parent_ast: &syn::DeriveInput) -> Result<syn::Type, ParseError> {
@@ -271,21 +286,45 @@ impl<'a> NamedFieldStruct<'a> {
         let err_ty = parse_main_error(parent_ast)?;
         let struct_decl = StructDecl(&parent_ast, err_ty);
         let attrs = FromEnvAttributes::from_attrs(&parent_ast.attrs)?;
-        let requires_target = parse_requires_target(parent_ast)?;
+        let target_need_override = parse_target_need(parent_ast)?;
         let checks = CheckCollection(attrs.checks);
         let mut vcc = VariableCreationCollection::new();
         for field in fields.into_iter() {
             vcc.add_field(field)?;
         }
-        Ok(Self { command_field_decl, struct_decl, checks, vcc, requires_target })
+        Ok(Self { command_field_decl, struct_decl, checks, vcc, target_need_override })
     }
 }
 
 impl ToTokens for NamedFieldStruct<'_> {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let Self { command_field_decl, struct_decl, checks, vcc, requires_target } = self;
+        let Self { command_field_decl, struct_decl, checks, vcc, target_need_override } = self;
         let command_field_name = command_field_decl.0.field_name;
         let join_results_names = &vcc.join_results_names;
+        let target_need_expr = match target_need_override {
+            Some(TargetNeedOverride::None) => quote! { fho::macro_deps::TargetNeed::None },
+            Some(TargetNeedOverride::Optional) => quote! { fho::macro_deps::TargetNeed::Optional },
+            Some(TargetNeedOverride::Required) => quote! { fho::macro_deps::TargetNeed::Required },
+            None => {
+                let mut expr = quote! { fho::macro_deps::TargetNeed::None };
+                for inv in &vcc.try_from_env_invocations {
+                    let field_need = match inv {
+                        TryFromEnvInvocation::Normal(ty) => {
+                            let span = Span::call_site().located_at(ty.span());
+                            quote_spanned! {span=> <#ty as fho::TryFromEnv>::TARGET_NEED }
+                        }
+                        TryFromEnvInvocation::Decorated(call, ty) => {
+                            let span = Span::call_site().located_at(call.span());
+                            quote_spanned! {span=>
+                                fho::macro_deps::target_need_of::<#ty, _, _>(|| #call)
+                            }
+                        }
+                    };
+                    expr = quote! { #expr.max(#field_need) };
+                }
+                expr
+            }
+        };
         let span = Span::call_site();
         let res = quote_spanned! {span=>
             #struct_decl {
@@ -310,8 +349,8 @@ impl ToTokens for NamedFieldStruct<'_> {
                 fn has_schema(&self) -> bool {
                     <<Self as fho::FfxMain>::Writer as fho::macro_deps::writer::ToolIO>::has_schema()
                 }
-                fn requires_target() -> bool {
-                    #requires_target
+                fn target_need() -> fho::macro_deps::TargetNeed {
+                    #target_need_expr
                 }
             }
         };
@@ -454,23 +493,30 @@ mod tests {
     }
 
     #[test]
-    fn test_no_target() {
-        let ast = parse_macro_derive(
-            r#"
-            #[derive(FfxTool)]
-            #[target(None)]
-            struct Foo {
-                #[command]
-                bar: bool,
-            }
-            "#,
-        );
-        let ds = crate::extract_struct_info(&ast).unwrap();
-        let syn::Fields::Named(fields) = &ds.fields else {
-            unreachable!();
-        };
-        let nfs = NamedFieldStruct::new(&ast, &fields).unwrap();
-        assert!(!nfs.requires_target);
+    fn test_target_overrides() {
+        for (attr, expected) in [
+            ("None", TargetNeedOverride::None),
+            ("Optional", TargetNeedOverride::Optional),
+            ("Required", TargetNeedOverride::Required),
+        ] {
+            let src = format!(
+                r#"
+                #[derive(FfxTool)]
+                #[target({attr})]
+                struct Foo {{
+                    #[command]
+                    bar: bool,
+                }}
+                "#
+            );
+            let ast = parse_macro_derive(&src);
+            let ds = crate::extract_struct_info(&ast).unwrap();
+            let syn::Fields::Named(fields) = &ds.fields else {
+                unreachable!();
+            };
+            let nfs = NamedFieldStruct::new(&ast, &fields).unwrap();
+            assert_eq!(nfs.target_need_override, Some(expected));
+        }
     }
 
     #[test]
@@ -494,13 +540,16 @@ mod tests {
     }
 
     #[test]
-    fn test_no_no_target() {
+    fn test_no_target_attr_infers_from_fields() {
         let ast = parse_macro_derive(
             r#"
             #[derive(FfxTool)]
             struct Foo {
                 #[command]
                 bar: bool,
+                plain: u32,
+                #[with(something("stuff"))]
+                decorated: u8,
             }
             "#,
         );
@@ -509,7 +558,20 @@ mod tests {
             unreachable!();
         };
         let nfs = NamedFieldStruct::new(&ast, &fields).unwrap();
-        assert!(nfs.requires_target);
+        assert_eq!(nfs.target_need_override, None);
+        let generated = nfs.into_token_stream().to_string();
+        let expected_body = quote! {
+            fn target_need() -> fho::macro_deps::TargetNeed {
+                fho::macro_deps::TargetNeed::None
+                    .max(<u32 as fho::TryFromEnv>::TARGET_NEED)
+                    .max(fho::macro_deps::target_need_of::<u8, _, _>(|| something("stuff")))
+            }
+        }
+        .to_string();
+        assert!(
+            generated.contains(&expected_body),
+            "expected generated code to contain `{expected_body}`, got `{generated}`"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@
 #include <lib/fidl/cpp/wire/vector_view.h>
 #include <lib/fidl/cpp/wire/wire_types.h>
 #include <lib/inspect/component/cpp/service.h>
+#include <zircon/availability.h>
 #include <zircon/types.h>
 
 #include <variant>
@@ -149,5 +150,21 @@ void TreeServer::OpenChild(OpenChildRequestView request, OpenChildCompleter::Syn
       },
       data_);
 }
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+void TreeServer::ListBlobChildNames(ListBlobChildNamesRequestView request,
+                                    ListBlobChildNamesCompleter::Sync& completer) {
+  // TODO(https://fxbug.dev/582755866): Return blob child names once C++ BlobProperty writer
+  // support lands.
+  TreeNameIterator::StartSelfManagedServer(executor_.dispatcher(),
+                                           std::move(request->tree_iterator), {});
+}
+
+void TreeServer::OpenBlobChild(OpenBlobChildRequestView request,
+                               OpenBlobChildCompleter::Sync& completer) {
+  // TODO(https://fxbug.dev/582755866): Open blob child once C++ BlobProperty writer support lands.
+  completer.ReplyError(ZX_ERR_NOT_FOUND);
+}
+#endif
 
 }  // namespace inspect

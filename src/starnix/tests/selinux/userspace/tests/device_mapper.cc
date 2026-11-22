@@ -30,7 +30,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "minimal_policy"; }
+extern std::string GetTestPolicyName() { return "minimal_policy"; }
 
 namespace {
 
@@ -41,11 +41,9 @@ void EnsureDeviceMapperControlExists() {
     return;  // Already exists
   }
 
-  // Create /dev/mapper directory
-  mkdir("/dev/mapper", 0755);  // Ignore error, might exist
-
-  int major = 10;   // Default misc
-  int minor = 236;  // Default device-mapper minor
+  // Default misc major and device-mapper minor numbers.
+  int major = 10;
+  int minor = 236;
 
   std::string content;
   if (files::ReadFileToString("/sys/class/misc/device-mapper/dev", &content)) {
@@ -70,8 +68,8 @@ void EnsureDeviceMapperControlExists() {
     }
   }
 
-  ASSERT_THAT(mknod("/dev/mapper/control", S_IFCHR | 0600, makedev(major, minor)),
-              ::testing::AnyOf(SyscallSucceeds(), SyscallFailsWithErrno(EEXIST)));
+  ASSERT_THAT(EnsureDeviceNode("/dev/mapper/control", S_IFCHR | 0600, makedev(major, minor)),
+              SyscallResultIsOk());
 }
 
 // Initializes a dm_ioctl struct with the standard version and size,
@@ -91,12 +89,17 @@ dm_ioctl InitDmIoctl(std::string_view name = {}) {
 
 class DeviceMapperTest : public ::testing::Test {
  protected:
+  static void SetUpTestSuite() {
+    if (test_helper::HasCapability(CAP_SYS_ADMIN)) {
+      EnsureDeviceMapperControlExists();
+    }
+  }
+
   void SetUp() override {
     if (!test_helper::HasCapability(CAP_SYS_ADMIN)) {
       GTEST_SKIP() << "Need CAP_SYS_ADMIN to run this test";
     }
 
-    EnsureDeviceMapperControlExists();
     ctrl_fd_ = fbl::unique_fd(SAFE_SYSCALL(open("/dev/mapper/control", O_RDWR)));
   }
 

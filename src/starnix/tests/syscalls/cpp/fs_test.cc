@@ -4,11 +4,13 @@
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <lib/fit/defer.h>
 #include <sys/fsuid.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -955,6 +957,59 @@ TEST_F(AccessTest, FsUidIgnoredUnlessEaccess) {
   EXPECT_TRUE(helper.WaitForChildren());
 }
 
+// Group permission checks use the filesystem GID, which access() sets to the real GID and
+// AT_EACCESS leaves at the effective GID.
+TEST_F(AccessTest, ChecksGroupAgainstFsGid) {
+  std::string only_group_file;
+  ASSERT_TRUE(CreateFile("only_group", 0040, kOwnerUid, kOwnerGid, only_group_file));
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kOwnerGid, kNonOwnerGid, 0), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kNonOwnerUid, kNonOwnerUid, 0), SyscallSucceeds());
+
+    EXPECT_THAT(access(only_group_file.c_str(), R_OK), SyscallSucceeds());
+    EXPECT_THAT(faccessat(AT_FDCWD, only_group_file.c_str(), R_OK, AT_EACCESS),
+                SyscallFailsWithErrno(EACCES));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kNonOwnerGid, kOwnerGid, 0), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kNonOwnerUid, kNonOwnerUid, 0), SyscallSucceeds());
+
+    EXPECT_THAT(access(only_group_file.c_str(), R_OK), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(faccessat(AT_FDCWD, only_group_file.c_str(), R_OK, AT_EACCESS), SyscallSucceeds());
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+// setfsgid(2) changes the group used for file permission checks, but not for access().
+TEST_F(AccessTest, FsGidIgnoredUnlessEaccess) {
+  std::string only_group_file;
+  ASSERT_TRUE(CreateFile("only_group", 0040, kOwnerUid, kOwnerGid, only_group_file));
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kNonOwnerGid, kNonOwnerGid, kOwnerGid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kNonOwnerUid, kNonOwnerUid, 0), SyscallSucceeds());
+    ASSERT_THAT(faccessat(AT_FDCWD, only_group_file.c_str(), R_OK, AT_EACCESS),
+                SyscallFailsWithErrno(EACCES));
+
+    ASSERT_EQ(setfsgid(kOwnerGid), static_cast<int>(kNonOwnerGid));
+    ASSERT_EQ(setfsgid(-1), static_cast<int>(kOwnerGid));
+
+    EXPECT_THAT(faccessat(AT_FDCWD, only_group_file.c_str(), R_OK, AT_EACCESS), SyscallSucceeds());
+    EXPECT_THAT(access(only_group_file.c_str(), R_OK), SyscallFailsWithErrno(EACCES));
+    fbl::unique_fd fd(open(only_group_file.c_str(), O_RDONLY));
+    EXPECT_TRUE(fd.is_valid()) << "open(O_RDONLY): " << std::strerror(errno);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
 // access() for root users should use permitted capabilities instead of effective capabilities.
 TEST_F(AccessTest, RootAccessCheckUsesPermittedCaps) {
   test_helper::ForkHelper helper;
@@ -1372,6 +1427,69 @@ TEST_P(FsMountTest, ChownSameOwnerAndGroupFails) {
   EXPECT_TRUE(helper.WaitForChildren());
 
   SAFE_SYSCALL(unlink(user1_file.c_str()));
+}
+
+// The owner of a file may change its group to a group that it is a member of, as determined by the
+// filesystem GID and the supplementary groups, not by the effective GID.
+TEST_P(FsMountTest, OwnerChownChecksGroupAgainstFsGid) {
+  std::string user1_file = files::JoinPath(mount_path_, "user1_file");
+  close(SAFE_SYSCALL(creat(user1_file.c_str(), S_IRWXU)));
+  SAFE_SYSCALL(chown(user1_file.c_str(), kUser1Uid, kUser1Gid));
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([user1_file] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kUser2Gid, kUser1Gid, kUser1Gid), SyscallSucceeds());
+    ASSERT_EQ(setfsgid(kUser2Gid), static_cast<int>(kUser1Gid));
+    ASSERT_THAT(setresuid(kUser1Uid, kUser1Uid, kUser1Uid), SyscallSucceeds());
+    test_helper::DropAllCapabilities();
+    ASSERT_EQ(setfsgid(-1), static_cast<int>(kUser2Gid));
+
+    // The filesystem GID is a member of kUser2Gid, but not of the effective GID kUser1Gid.
+    EXPECT_THAT(chown(user1_file.c_str(), -1, kUser2Gid), SyscallSucceeds());
+    EXPECT_THAT(chown(user1_file.c_str(), -1, kUser1Gid), SyscallFailsWithErrno(EPERM));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+
+  struct stat file_stat;
+  SAFE_SYSCALL(stat(user1_file.c_str(), &file_stat));
+  EXPECT_EQ(file_stat.st_gid, kUser2Gid);
+
+  SAFE_SYSCALL(unlink(user1_file.c_str()));
+}
+
+// Only the owner of a file, as determined by the filesystem UID, may change its group.
+TEST_P(FsMountTest, OwnerChownChecksOwnerAgainstFsUid) {
+  std::string user1_file = files::JoinPath(mount_path_, "user1_file");
+  close(SAFE_SYSCALL(creat(user1_file.c_str(), S_IRWXU)));
+  SAFE_SYSCALL(chown(user1_file.c_str(), kUser1Uid, kUser1Gid));
+
+  test_helper::ForkHelper helper;
+  // The effective UID owns the file, but the filesystem UID does not.
+  helper.RunInForkedProcess([user1_file] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kUser1Gid, kUser1Gid, kUser1Gid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kUser2Uid, kUser1Uid, kUser1Uid), SyscallSucceeds());
+    ASSERT_EQ(setfsuid(kUser2Uid), static_cast<int>(kUser1Uid));
+    test_helper::DropAllCapabilities();
+    ASSERT_EQ(setfsuid(-1), static_cast<int>(kUser2Uid));
+
+    EXPECT_THAT(chown(user1_file.c_str(), -1, kUser1Gid), SyscallFailsWithErrno(EPERM));
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
+
+  // The filesystem UID owns the file, but the effective UID does not.
+  helper.RunInForkedProcess([user1_file] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kUser1Gid, kUser1Gid, kUser1Gid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kUser1Uid, kUser2Uid, kUser2Uid), SyscallSucceeds());
+    ASSERT_EQ(setfsuid(kUser1Uid), static_cast<int>(kUser2Uid));
+    test_helper::DropAllCapabilities();
+    ASSERT_EQ(setfsuid(-1), static_cast<int>(kUser1Uid));
+
+    EXPECT_THAT(chown(user1_file.c_str(), -1, kUser1Gid), SyscallSucceeds());
+  });
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 TEST_P(FsMountTest, ChownOnSUIDFileDropsSUIDBit) {
@@ -1860,46 +1978,53 @@ class FsCasefoldTest : public ::testing::TestWithParam<std::string_view> {
     }
 
     std::string_view fs_type = GetParam();
-    std::string base_dir;
-
-    if (fs_type == "fxfs") {
-      if (!test_helper::IsStarnix()) {
-        GTEST_SKIP() << "Fxfs is only available on Starnix";
-      }
-      const char *dir = getenv("MUTABLE_STORAGE");
-      if (dir == nullptr) {
-        GTEST_SKIP() << "MUTABLE_STORAGE environment variable is not set";
-      }
-      temp_dir_.emplace(dir);
-      base_dir = temp_dir_->path();
-    } else {
-      temp_dir_.emplace();
-      base_dir = temp_dir_->path() + "/mount";
-
-      std::string source = "none";
-      if (fs_type != "tmpfs") {
-        auto loop = CreateLoopDeviceForImage(temp_dir_->path() + "/fs.img", fs_type);
-        if (loop.is_error()) {
-          GTEST_SKIP() << "mkfs." << fs_type << " not available";
-        }
-        loop_device_ = std::move(loop.value());
-        source = loop_device_->path();
-      }
-
-      const char *data = (fs_type == "tmpfs") ? "casefold" : nullptr;
-      auto mount = test_helper::ScopedMount::CreateDirAndMount(source, base_dir,
-                                                               std::string(fs_type), 0, data);
-      if (mount.is_error()) {
-        int err = mount.error_value();
-        if (err == EINVAL || err == ENODEV || err == EOPNOTSUPP) {
-          GTEST_SKIP() << "Mount " << fs_type << " failed: " << strerror(err);
-        }
-        FAIL() << "Mount " << fs_type << " failed: " << strerror(err);
-      }
-      scoped_mount_ = std::move(mount.value());
+    if (fs_type == "fxfs" && !test_helper::IsStarnix()) {
+      GTEST_SKIP() << "Fxfs is only available on Starnix";
     }
 
-    base_dir_ = base_dir;
+    temp_dir_.emplace();
+    ASSERT_FALSE(temp_dir_->path().empty());
+    std::string mount_dir = temp_dir_->path() + "/mount";
+
+    std::string source = "none";
+    std::string mount_fs_type(fs_type);
+    const char *data = nullptr;
+    if (fs_type == "fxfs") {
+      source = "/data";
+      mount_fs_type = "remotefs";
+      data = "casefold";
+    } else if (fs_type == "tmpfs") {
+      data = "casefold";
+    } else {
+      auto loop = CreateLoopDeviceForImage(temp_dir_->path() + "/fs.img", fs_type);
+      if (loop.is_error()) {
+        GTEST_SKIP() << "mkfs." << fs_type << " not available";
+      }
+      loop_device_ = std::move(loop.value());
+      source = loop_device_->path();
+    }
+
+    auto mount =
+        test_helper::ScopedMount::CreateDirAndMount(source, mount_dir, mount_fs_type, 0, data);
+    if (mount.is_error()) {
+      int err = mount.error_value();
+      // Linux kernels prior to 6.10 (or built without CONFIG_UNICODE) reject the tmpfs
+      // "casefold" mount option with EINVAL; Starnix always supports it and must not skip.
+      bool must_succeed = test_helper::IsStarnix() && (fs_type == "fxfs" || fs_type == "tmpfs");
+      if (!must_succeed && (err == EINVAL || err == ENODEV || err == EOPNOTSUPP)) {
+        GTEST_SKIP() << "Mount " << fs_type << " failed: " << strerror(err);
+      }
+      FAIL() << "Mount " << fs_type << " failed: " << strerror(err);
+    }
+    scoped_mount_ = std::move(mount.value());
+
+    if (fs_type == "fxfs") {
+      mount_temp_dir_.emplace(mount_dir);
+      ASSERT_FALSE(mount_temp_dir_->path().empty());
+      base_dir_ = mount_temp_dir_->path();
+    } else {
+      base_dir_ = mount_dir;
+    }
     auto casefold_dir = CreateCasefoldDir(base_dir_ + "/casefold_dir");
     ASSERT_THAT(casefold_dir, SyscallResultIsOk());
     casefold_dir_ = std::move(casefold_dir.value());
@@ -1924,6 +2049,7 @@ class FsCasefoldTest : public ::testing::TestWithParam<std::string_view> {
   std::optional<test_helper::ScopedTempDir> temp_dir_;
   std::optional<test_helper::ScopedLoopDevice> loop_device_;
   std::optional<test_helper::ScopedMount> scoped_mount_;
+  std::optional<test_helper::ScopedTempDir> mount_temp_dir_;
   std::string base_dir_;
   std::string casefold_dir_;
 };
@@ -2356,7 +2482,94 @@ TEST_P(FsCasefoldTest, UnicodeLookupGivenNameExceedingNameMaxMatchesNormalizedNa
   // Looking up via the 300-byte NFD name succeeds in Linux casefold filesystems because
   // the given name normalizes to the 200-byte NFC name on disk.
   EXPECT_THAT(access(nfd_path.c_str(), F_OK), SyscallSucceeds());
-  EXPECT_THAT(open(nfd_path.c_str(), O_RDONLY), SyscallSucceeds());
+  fbl::unique_fd nfd_fd(open(nfd_path.c_str(), O_RDONLY));
+  EXPECT_THAT(nfd_fd.get(), SyscallSucceeds());
+  EXPECT_THAT(fbl::unique_fd(open(nfd_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666)).get(),
+              SyscallFailsWithErrno(EEXIST));
+}
+
+TEST_P(FsCasefoldTest, UnmatchedNameExceedingNameMaxFailsWithEnametoolong) {
+  std::string existing_path = foo_mixed();
+  fbl::unique_fd fd(open(existing_path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0666));
+  ASSERT_THAT(fd.get(), SyscallSucceeds());
+
+  std::string unmatched_long_path = path(std::string(NAME_MAX + 1, 'a'));
+  EXPECT_THAT(access(unmatched_long_path.c_str(), F_OK), SyscallFailsWithErrno(ENAMETOOLONG));
+  EXPECT_THAT(fbl::unique_fd(open(unmatched_long_path.c_str(), O_WRONLY | O_CREAT, 0666)).get(),
+              SyscallFailsWithErrno(ENAMETOOLONG));
+  EXPECT_THAT(rename(existing_path.c_str(), unmatched_long_path.c_str()),
+              SyscallFailsWithErrno(ENAMETOOLONG));
+}
+
+TEST_P(FsCasefoldTest, SetCasefoldRequiresInodeOwnerOrCapFowner) {
+  if (!test_helper::HasCapability(CAP_SETUID) || !test_helper::HasCapability(CAP_SETGID) ||
+      !test_helper::HasCapability(CAP_CHOWN) || !test_helper::HasCapability(CAP_FOWNER)) {
+    GTEST_SKIP() << "Need CAP_SETUID, CAP_SETGID, CAP_CHOWN, and CAP_FOWNER";
+  }
+
+  constexpr uid_t kOwnerUid = 65534;
+  constexpr gid_t kOwnerGid = 65534;
+  constexpr uid_t kCapFownerUid = 65533;
+  constexpr gid_t kCapFownerGid = 65533;
+  constexpr uint32_t kCasefoldFlag = FS_CASEFOLD_FL;
+
+  ASSERT_THAT(chmod(base_dir().c_str(), 0755), SyscallSucceeds());
+  fbl::unique_fd base_fd(open(base_dir().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(base_fd.get(), SyscallSucceeds());
+
+  std::string root_dir = base_dir() + "/root_owned_dir";
+  std::string user_dir = base_dir() + "/user_owned_dir";
+  ASSERT_THAT(mkdir(root_dir.c_str(), 0755), SyscallSucceeds());
+  ASSERT_THAT(mkdir(user_dir.c_str(), 0755), SyscallSucceeds());
+  ASSERT_THAT(chown(user_dir.c_str(), kOwnerUid, kOwnerGid), SyscallSucceeds());
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(setresgid(kOwnerGid, kOwnerGid, kOwnerGid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kOwnerUid, kOwnerUid, kOwnerUid), SyscallSucceeds());
+    test_helper::DropAllCapabilities();
+
+    fbl::unique_fd root_dir_fd(openat(base_fd.get(), "root_owned_dir", O_RDONLY | O_DIRECTORY));
+    ASSERT_THAT(root_dir_fd.get(), SyscallSucceeds());
+    uint32_t flags = 0;
+    ASSERT_THAT(ioctl(root_dir_fd.get(), FS_IOC_GETFLAGS, &flags), SyscallSucceeds());
+    // Non-owner without CAP_FOWNER fails with EPERM even when leaving flags unchanged.
+    EXPECT_THAT(ioctl(root_dir_fd.get(), FS_IOC_SETFLAGS, &flags), SyscallFailsWithErrno(EPERM));
+    uint32_t casefold_flags = flags | kCasefoldFlag;
+    EXPECT_THAT(ioctl(root_dir_fd.get(), FS_IOC_SETFLAGS, &casefold_flags),
+                SyscallFailsWithErrno(EPERM));
+
+    fbl::unique_fd user_dir_fd(openat(base_fd.get(), "user_owned_dir", O_RDONLY | O_DIRECTORY));
+    ASSERT_THAT(user_dir_fd.get(), SyscallSucceeds());
+    flags = 0;
+    ASSERT_THAT(ioctl(user_dir_fd.get(), FS_IOC_GETFLAGS, &flags), SyscallSucceeds());
+    flags |= kCasefoldFlag;
+    ASSERT_THAT(ioctl(user_dir_fd.get(), FS_IOC_SETFLAGS, &flags), SyscallSucceeds());
+    uint32_t updated_flags = 0;
+    ASSERT_THAT(ioctl(user_dir_fd.get(), FS_IOC_GETFLAGS, &updated_flags), SyscallSucceeds());
+    EXPECT_NE(updated_flags & kCasefoldFlag, 0u);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  // Non-root process with only CAP_FOWNER in its effective set can clear FS_CASEFOLD_FL on a
+  // directory owned by another UID.
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(prctl(PR_SET_KEEPCAPS, 1), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kCapFownerGid, kCapFownerGid, kCapFownerGid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kCapFownerUid, kCapFownerUid, kCapFownerUid), SyscallSucceeds());
+    test_helper::SetCapabilityEffective(CAP_FOWNER);
+
+    fbl::unique_fd user_dir_fd(openat(base_fd.get(), "user_owned_dir", O_RDONLY | O_DIRECTORY));
+    ASSERT_THAT(user_dir_fd.get(), SyscallSucceeds());
+    uint32_t flags = 0;
+    ASSERT_THAT(ioctl(user_dir_fd.get(), FS_IOC_GETFLAGS, &flags), SyscallSucceeds());
+    flags &= ~kCasefoldFlag;
+    ASSERT_THAT(ioctl(user_dir_fd.get(), FS_IOC_SETFLAGS, &flags), SyscallSucceeds());
+    uint32_t updated_flags = 0;
+    ASSERT_THAT(ioctl(user_dir_fd.get(), FS_IOC_GETFLAGS, &updated_flags), SyscallSucceeds());
+    EXPECT_EQ(updated_flags & kCasefoldFlag, 0u);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
 }
 
 TEST_P(FsCasefoldTest, UnicodeCanonicalEquivalenceWithMultiByteExpansion) {
@@ -2667,6 +2880,119 @@ TEST(FsTest, Openat2EmptyPathAndSymlinkTargetFailsWithEnoent) {
               SyscallFailsWithErrno(ENOENT));
   EXPECT_THAT(Openat2Call(dir_fd.get(), "", open_how{.flags = O_RDONLY}),
               SyscallFailsWithErrno(ENOENT));
+}
+
+TEST(FsTest, Openat2AbsolutePathIgnoresDirFdAndEnforcesResolveNoXdev) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string file_path = temp_dir.path() + "/file";
+  ASSERT_TRUE(files::WriteFile(file_path, "data"));
+
+  fbl::unique_fd file_fd(open(file_path.c_str(), O_RDONLY));
+  ASSERT_THAT(file_fd.get(), SyscallSucceeds());
+  fbl::unique_fd proc_fd(open("/proc/self", O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(proc_fd.get(), SyscallSucceeds());
+
+  // For absolute paths without `RESOLVE_IN_ROOT` or `RESOLVE_BENEATH`, `dir_fd` is ignored (even
+  // if it is a non-directory) and `RESOLVE_NO_XDEV` confines resolution to the mount of `/`.
+  fbl::unique_fd root_fd(static_cast<int>(
+      Openat2Call(file_fd.get(), "/", open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV})));
+  ASSERT_THAT(root_fd.get(), SyscallSucceeds());
+  EXPECT_THAT(Openat2Call(proc_fd.get(), "/proc/self/stat",
+                          open_how{.flags = O_RDONLY, .resolve = RESOLVE_NO_XDEV}),
+              SyscallFailsWithErrno(EXDEV));
+}
+
+TEST(FsTest, Openat2ResolveInRootChecksDirFdForRootPath) {
+  test_helper::ScopedTempDir temp_dir;
+  const std::string file_path = temp_dir.path() + "/file";
+  ASSERT_TRUE(files::WriteFile(file_path, "data"));
+  const std::string no_exec_dir = temp_dir.path() + "/no_exec";
+  ASSERT_THAT(mkdir(no_exec_dir.c_str(), 0444), SyscallSucceeds());
+
+  fbl::unique_fd dir_fd(open(temp_dir.path().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(dir_fd.get(), SyscallSucceeds());
+  fbl::unique_fd file_fd(open(file_path.c_str(), O_RDONLY));
+  ASSERT_THAT(file_fd.get(), SyscallSucceeds());
+  fbl::unique_fd no_exec_fd(open(no_exec_dir.c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(no_exec_fd.get(), SyscallSucceeds());
+
+  // Passing `/` or `//` with `RESOLVE_IN_ROOT` on a non-directory `dir_fd` fails with `ENOTDIR`.
+  EXPECT_THAT(
+      Openat2Call(file_fd.get(), "/", open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT}),
+      SyscallFailsWithErrno(ENOTDIR));
+  EXPECT_THAT(
+      Openat2Call(file_fd.get(), "//", open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT}),
+      SyscallFailsWithErrno(ENOTDIR));
+
+  // Passing `/` or `//` with `RESOLVE_IN_ROOT` on a directory `dir_fd` succeeds.
+  fbl::unique_fd root_in_dir_fd(static_cast<int>(Openat2Call(
+      dir_fd.get(), "/", open_how{.flags = O_RDONLY | O_DIRECTORY, .resolve = RESOLVE_IN_ROOT})));
+  ASSERT_THAT(root_in_dir_fd.get(), SyscallSucceeds());
+  fbl::unique_fd double_slash_in_dir_fd(static_cast<int>(Openat2Call(
+      dir_fd.get(), "//", open_how{.flags = O_RDONLY | O_DIRECTORY, .resolve = RESOLVE_IN_ROOT})));
+  ASSERT_THAT(double_slash_in_dir_fd.get(), SyscallSucceeds());
+
+  // `/` and `//` do not require execute (search) permission on `dir_fd`, whereas `/.` does.
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    test_helper::DropAllCapabilities();
+
+    fbl::unique_fd slash_fd(static_cast<int>(
+        Openat2Call(no_exec_fd.get(), "/",
+                    open_how{.flags = O_RDONLY | O_DIRECTORY, .resolve = RESOLVE_IN_ROOT})));
+    ASSERT_THAT(slash_fd.get(), SyscallSucceeds());
+    fbl::unique_fd double_slash_fd(static_cast<int>(
+        Openat2Call(no_exec_fd.get(), "//",
+                    open_how{.flags = O_RDONLY | O_DIRECTORY, .resolve = RESOLVE_IN_ROOT})));
+    ASSERT_THAT(double_slash_fd.get(), SyscallSucceeds());
+    EXPECT_THAT(Openat2Call(no_exec_fd.get(), "/.",
+                            open_how{.flags = O_RDONLY | O_DIRECTORY, .resolve = RESOLVE_IN_ROOT}),
+                SyscallFailsWithErrno(EACCES));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(FsTest, Openat2ResolveInRootWithAtFdcwd) {
+  test_helper::ScopedTempDir temp_dir;
+  ASSERT_TRUE(files::WriteFile(temp_dir.path() + "/inside", "inside"));
+
+  struct stat expected_dir_stat = {};
+  ASSERT_THAT(stat(temp_dir.path().c_str(), &expected_dir_stat), SyscallSucceeds());
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&] {
+    ASSERT_THAT(chdir(temp_dir.path().c_str()), SyscallSucceeds());
+
+    fbl::unique_fd cwd_root_fd(static_cast<int>(Openat2Call(
+        AT_FDCWD, "/", open_how{.flags = O_RDONLY | O_DIRECTORY, .resolve = RESOLVE_IN_ROOT})));
+    ASSERT_THAT(cwd_root_fd.get(), SyscallSucceeds());
+    struct stat actual_dir_stat = {};
+    ASSERT_THAT(fstat(cwd_root_fd.get(), &actual_dir_stat), SyscallSucceeds());
+    EXPECT_EQ(actual_dir_stat.st_dev, expected_dir_stat.st_dev);
+    EXPECT_EQ(actual_dir_stat.st_ino, expected_dir_stat.st_ino);
+
+    fbl::unique_fd inside_fd(static_cast<int>(
+        Openat2Call(AT_FDCWD, "/inside", open_how{.flags = O_RDONLY, .resolve = RESOLVE_IN_ROOT})));
+    ASSERT_THAT(inside_fd.get(), SyscallSucceeds());
+    char buf[16] = {};
+    ASSERT_THAT(read(inside_fd.get(), buf, sizeof(buf)), SyscallSucceedsWithValue(6));
+    EXPECT_EQ(std::string(buf, 6), "inside");
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST(FsTest, Openat2ResolveBeneathAndInRootFailsWithEinval) {
+  test_helper::ScopedTempDir temp_dir;
+  ASSERT_TRUE(files::WriteFile(temp_dir.path() + "/file", "data"));
+  fbl::unique_fd dir_fd(open(temp_dir.path().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_THAT(dir_fd.get(), SyscallSucceeds());
+
+  const open_how how{
+      .flags = O_RDONLY,
+      .resolve = static_cast<uint64_t>(RESOLVE_BENEATH) | static_cast<uint64_t>(RESOLVE_IN_ROOT)};
+  EXPECT_THAT(Openat2Call(dir_fd.get(), "/", how), SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(Openat2Call(dir_fd.get(), "file", how), SyscallFailsWithErrno(EINVAL));
+  EXPECT_THAT(Openat2Call(-1, "", how), SyscallFailsWithErrno(EINVAL));
 }
 
 }  // namespace

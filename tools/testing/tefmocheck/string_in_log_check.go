@@ -75,6 +75,11 @@ type stringInLogCheck struct {
 	AddTag bool
 	// InfraFailure is true if the check is related to infra.
 	InfraFailure bool
+	// FailureCategory is the optional explicit category for this check.
+	FailureCategory runtests.FailureCategory
+	// Domain is the optional infra domain ("tools" or "environment") when
+	// effective category is "infra".
+	Domain runtests.InfraDomain
 	// If true, add a synthetic test case to every failed test. If AttributeToTest is
 	// set, the synthetic test case will be added to the specified test instead
 	// of every failed test.
@@ -115,15 +120,17 @@ type stringInLogCheckConfig struct {
 		Start string `yaml:"start_string"`
 		End   string `yaml:"end_string"`
 	} `yaml:"except_blocks"`
-	SkipPassedTask        bool `yaml:"skip_passed_task"`
-	SkipAllPassedTests    bool `yaml:"skip_all_passed_tests"`
-	SkipPassedTest        bool `yaml:"skip_passed_test"`
-	IgnoreFlakes          bool `yaml:"ignore_flakes"`
-	AlwaysFlake           bool `yaml:"always_flake"`
-	AttributeToTest       bool `yaml:"attribute_to_test"`
-	AddTag                bool `yaml:"add_tag"`
-	InfraFailure          bool `yaml:"infra_failure"`
-	EmitSyntheticTestCase bool `yaml:"emit_synthetic_test_case"`
+	SkipPassedTask        bool                     `yaml:"skip_passed_task"`
+	SkipAllPassedTests    bool                     `yaml:"skip_all_passed_tests"`
+	SkipPassedTest        bool                     `yaml:"skip_passed_test"`
+	IgnoreFlakes          bool                     `yaml:"ignore_flakes"`
+	AlwaysFlake           bool                     `yaml:"always_flake"`
+	AttributeToTest       bool                     `yaml:"attribute_to_test"`
+	AddTag                bool                     `yaml:"add_tag"`
+	InfraFailure          bool                     `yaml:"infra_failure"`
+	Category              runtests.FailureCategory `yaml:"category"`
+	InfraDomain           runtests.InfraDomain     `yaml:"infra_domain"`
+	EmitSyntheticTestCase bool                     `yaml:"emit_synthetic_test_case"`
 }
 
 // toChecks converts a stringInLogCheckConfig to a slice of FailureModeCheck.
@@ -133,6 +140,22 @@ func (c *stringInLogCheckConfig) toChecks() ([]FailureModeCheck, error) {
 	}
 	if len(c.LogTypes) == 0 {
 		return nil, fmt.Errorf("string_in_log_check 'log_types' field is required and must be a list of strings; given: %v", c.LogTypes)
+	}
+	switch c.Category {
+	case "", runtests.CategoryInfra, runtests.CategoryInfraOrSystem, runtests.CategorySystemOrTest:
+	default:
+		return nil, fmt.Errorf("string_in_log_check invalid 'category' %q; must be one of %q, %q, %q", c.Category, runtests.CategoryInfra, runtests.CategoryInfraOrSystem, runtests.CategorySystemOrTest)
+	}
+	if c.InfraFailure && c.Category != "" && c.Category != runtests.CategoryInfra {
+		return nil, fmt.Errorf("string_in_log_check cannot set both 'infra_failure: true' and 'category' %q", c.Category)
+	}
+	switch c.InfraDomain {
+	case "", runtests.InfraDomainTools, runtests.InfraDomainEnvironment:
+	default:
+		return nil, fmt.Errorf("string_in_log_check invalid 'infra_domain' %q; must be %q or %q", c.InfraDomain, runtests.InfraDomainTools, runtests.InfraDomainEnvironment)
+	}
+	if c.InfraDomain != "" && c.Category != runtests.CategoryInfra && !c.InfraFailure {
+		return nil, fmt.Errorf("string_in_log_check 'infra_domain' requires category %q or 'infra_failure: true'", runtests.CategoryInfra)
 	}
 	var re *regexp.Regexp
 	if c.IsRegex {
@@ -187,6 +210,8 @@ func (c *stringInLogCheckConfig) toChecks() ([]FailureModeCheck, error) {
 			AttributeToTest:       c.AttributeToTest,
 			AddTag:                c.AddTag,
 			InfraFailure:          c.InfraFailure,
+			FailureCategory:       c.Category,
+			Domain:                c.InfraDomain,
 			emitSyntheticTestCase: c.EmitSyntheticTestCase,
 			regex:                 re,
 		}
@@ -615,7 +640,15 @@ func (c *stringInLogCheck) Tags() []build.TestTag {
 }
 
 func (c *stringInLogCheck) IsInfraFailure() bool {
-	return c.InfraFailure
+	return c.InfraFailure || c.FailureCategory == runtests.CategoryInfra
+}
+
+func (c *stringInLogCheck) Category() runtests.FailureCategory {
+	return c.FailureCategory
+}
+
+func (c *stringInLogCheck) InfraDomain() runtests.InfraDomain {
+	return c.Domain
 }
 
 func (c *stringInLogCheck) FailureReason() string {

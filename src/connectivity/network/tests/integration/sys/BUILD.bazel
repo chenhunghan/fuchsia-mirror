@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "sys",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    # Needed by bazel2gn to preserve GN output_name.
+    crate_name = "netstack_sys_integration_test",
+    edition = "2024",
+    proc_macro_deps = [
+        "//src/connectivity/network/tests/integration/macros:netstack_testing_macros",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/connectivity/network/tests/integration:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.scheduler.deprecated:fuchsia.scheduler.deprecated_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/network/testing/netemul/fidl:fuchsia.netemul_rust",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/async-utils",
+        "//src/lib/diagnostics/reader",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

@@ -15,7 +15,7 @@ query versions at runtime. Changes may be API breaking, but they are expected to
 be ABI compatible. The FIDL compiler performs some basic validation, but it does
 not guarantee ABI compatibility.
 
-## Concepts
+## Concepts {#concepts}
 
 The unit of versioning is a group of libraries, called a **platform**. By
 convention, libraries are named starting with the platform name. For example,
@@ -44,7 +44,7 @@ No matter what set of versions you target, if FIDL compilation succeeds, then it
 is also guaranteed to succeed for all subsets of that set, and for all possible
 singleton sets.
 
-## Syntax
+## Syntax {#syntax}
 
 The `@available` attribute is allowed on any [FIDL element][element]. It takes
 the following arguments:
@@ -123,7 +123,7 @@ more complicated example of inheritance:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/fuchsia.examples.docs/versioning.test.fidl" region_tag="inheritance" %}
 ```
 
-## Deprecation
+## Deprecation {#deprecation}
 
 Deprecation is used to indicate that an element will be removed in the future.
 When you deprecate an element, you should add a `# Deprecation` section to the

@@ -60,6 +60,10 @@ group("tests") {
 
     # Plugins migrated to Bazel define standalone unit test targets that are
     # not aggregated by `:ffx_audio_tests`.
+    "device:tests",
     "gen:tests",
+    "list-devices:tests",
+    "play:tests",
+    "record:tests",
   ]
 }

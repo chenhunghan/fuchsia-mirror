@@ -73,6 +73,7 @@ def compute_clang_features(
     default_compile_flags_feature = get_default_compile_flags_feature(
         clang_info,
         target_os,
+        target_cpu = target_cpu,
         sysroot = sysroot,
         use_default_build_flags = use_default_build_flags,
     )
@@ -236,6 +237,39 @@ def compute_clang_features(
         ],
     )
 
+    # LINT.IfChange(in_tree_clang_prefix_map)
+    # The list of "-fcoverage-prefix-map={FROM}={TO}" flags below ensures that
+    # the source file paths embedded in coverage sections within instrumented
+    # binaries respect the GN-based convention of using a "../../" prefix for
+    # source files. By default, Bazel actions run relative to the execroot and
+    # would embed a source path like "src/foo/lib.cc" instead of
+    # "../../src/foo/lib.cc".
+    #
+    # Note that the following flags are matched in reverse order by Clang (the
+    # last matching entry wins), so specific guard prefixes must appear after
+    # the "" catch-all entry.
+    _IN_TREE_COVERAGE_PREFIX_MAP_FLAGS = [
+        "-fcoverage-prefix-map={}={}".format(old, new)
+        for old, new in (
+            ("", "../../"),  # Fallback: prepend "../../" to checkout-relative paths.
+            (".", "."),  # Preserve "." (-ffile-compilation-dir=.) instead of "../../.".
+            ("./", "../../"),  # Strip "./" (from -iquote .) so "./foo" -> "../../foo".
+            ("./bazel-out/", "bazel-out/"),  # Guard -iquote . ./bazel-out/ lookups.
+            ("./external/", "external/"),  # Guard -iquote . ./external/ lookups.
+            ("./fuchsia_build_generated/", "fuchsia_build_generated/"),  # Guard -iquote . GN-bridged lookups.
+            ("../", "../"),  # Avoid doubling "../" on already-relative parent paths.
+            ("bazel-out/", "bazel-out/"),  # Keep generated outputs unprefixed.
+            ("external/", "external/"),  # Keep external repository files unprefixed.
+            ("fuchsia_build_generated/", "fuchsia_build_generated/"),  # Keep GN-bridged files.
+            ("/", "/"),  # Keep absolute sysroot/toolchain paths unchanged.
+        )
+    ]
+    # LINT.ThenChange(
+    #   //build/beads/scripts/normalize_clang_args.py:in_tree_clang_prefix_map,
+    #   //build/beads/scripts/normalize_clang_args_test.py:in_tree_clang_prefix_map,
+    #   //build/config/BUILD.bazel:in_tree_clang_prefix_map,
+    # )
+
     # LINT.IfChange(coverage)
     coverage_feature = feature(
         name = "coverage",
@@ -266,13 +300,12 @@ def compute_clang_features(
                 ],
                 flag_groups = [
                     flag_group(
-                        flags = [
-                            # This flag will get applied after the default
-                            # set of flags so we can think of this as an override
-                            "-O1",
-                            # Rewrite relative source paths in coverage mappings so they
-                            # start with ../../ (matching GN and rustc's --remap-path-prefix=.=../..).
-                            "-fcoverage-prefix-map==../../",
+                        flags = ([] if use_default_build_flags else ["-O1"]) + (
+                            # For in-tree builds (use_default_build_flags=True), rewrite
+                            # checked-in source paths to ../../<path> while guarding
+                            # external/, bazel-out/, and fuchsia_build_generated/.
+                            _IN_TREE_COVERAGE_PREFIX_MAP_FLAGS if use_default_build_flags else []
+                        ) + [
                             # Enable binary profile correlation required by ffx coverage.
                             "-mllvm",
                             "-profile-correlate=binary",
@@ -328,10 +361,9 @@ def compute_clang_features(
     # )
 
     # LINT.IfChange(coverage_rust)
-    coverage_rust_feature = feature(
-        name = "coverage-rust",
-        enabled = "coverage-rust" in enabled_features,
-        flag_sets = [
+    coverage_rust_flag_sets = []
+    if not use_default_build_flags:
+        coverage_rust_flag_sets.append(
             flag_set(
                 actions = action_names.all_compile_actions + action_names.all_link_actions,
                 flag_groups = [
@@ -345,23 +377,27 @@ def compute_clang_features(
                     with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "coverage"]),
                 ],
             ),
-        ] + (
-            [
-                flag_set(
-                    actions = action_names.all_link_actions,
-                    flag_groups = [
-                        flag_group(
-                            flags = [
-                                "-Wl,-dynamic-linker=coverage-rust/ld.so.1",
-                            ],
-                        ),
-                    ],
-                    with_features = [
-                        with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "coverage"]),
-                    ],
-                ),
-            ] if is_fuchsia else []
-        ),
+        )
+    if is_fuchsia:
+        coverage_rust_flag_sets.append(
+            flag_set(
+                actions = action_names.all_link_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-Wl,-dynamic-linker=coverage-rust/ld.so.1",
+                        ],
+                    ),
+                ],
+                with_features = [
+                    with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "coverage"]),
+                ],
+            ),
+        )
+    coverage_rust_feature = feature(
+        name = "coverage-rust",
+        enabled = "coverage-rust" in enabled_features,
+        flag_sets = coverage_rust_flag_sets,
     )
     # LINT.ThenChange(
     #   //build/config/BUILD.gn:optimize_coverage,
@@ -379,8 +415,7 @@ def compute_clang_features(
                     flag_group(
                         flags = [
                             "-fprofile-generate",
-                            "-O1",
-                        ],
+                        ] + ([] if use_default_build_flags else ["-O1"]),
                     ),
                 ],
             ),
@@ -429,10 +464,9 @@ def compute_clang_features(
     # )
 
     # LINT.IfChange(profile_rust)
-    profile_rust_feature = feature(
-        name = "profile-rust",
-        enabled = "profile-rust" in enabled_features,
-        flag_sets = [
+    profile_rust_flag_sets = []
+    if not use_default_build_flags:
+        profile_rust_flag_sets.append(
             flag_set(
                 actions = action_names.all_compile_actions + action_names.all_link_actions,
                 flag_groups = [
@@ -446,23 +480,27 @@ def compute_clang_features(
                     with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "profile"]),
                 ],
             ),
-        ] + (
-            [
-                flag_set(
-                    actions = action_names.all_link_actions,
-                    flag_groups = [
-                        flag_group(
-                            flags = [
-                                "-Wl,-dynamic-linker=profile-rust/ld.so.1",
-                            ],
-                        ),
-                    ],
-                    with_features = [
-                        with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "profile"]),
-                    ],
-                ),
-            ] if is_fuchsia else []
-        ),
+        )
+    if is_fuchsia:
+        profile_rust_flag_sets.append(
+            flag_set(
+                actions = action_names.all_link_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-Wl,-dynamic-linker=profile-rust/ld.so.1",
+                        ],
+                    ),
+                ],
+                with_features = [
+                    with_feature_set(not_features = ["asan", "hwasan", "ubsan", "sancov", "profile"]),
+                ],
+            ),
+        )
+    profile_rust_feature = feature(
+        name = "profile-rust",
+        enabled = "profile-rust" in enabled_features,
+        flag_sets = profile_rust_flag_sets,
     )
     # LINT.ThenChange(
     #   //build/config/BUILD.gn:optimize_profile,
@@ -597,6 +635,24 @@ def compute_clang_features(
         features.append(
             compute_cc_toolchain_feature_for_default_build_flags(
                 default_flags_set = default_flags_set,
+            ),
+        )
+
+    for marker in [
+        "cfi",
+        "coverage-cts",
+        "fuzzer",
+        "heapdump",
+        "instrumented",
+        "lto",
+        "profile-use",
+        "profile-use-rust",
+        "thinlto",
+    ]:
+        features.append(
+            feature(
+                name = marker,
+                enabled = marker in enabled_features,
             ),
         )
 
@@ -958,7 +1014,7 @@ def generate_clang_cc_toolchain(
         name = name,
         all_files = ":" + all_files,
         ar_files = ":ar",
-        as_files = ":empty",
+        as_files = ":" + compiler_files,
         compiler_files = ":" + compiler_files,
         dwp_files = ":empty",
         linker_files = ":" + linker_files,

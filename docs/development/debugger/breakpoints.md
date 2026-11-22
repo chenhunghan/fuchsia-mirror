@@ -254,6 +254,41 @@ breakpoint on the result. It won't re-evaluate the expression. In the above
 example, it triggers when `bar` changes but not if `foo[5]` changes to point
 to a different `bar`.
 
+## Non-stopping tracepoints
+
+A tracepoint collects frame data at a code location or memory watchpoint and
+resumes the thread immediately. Use the `trace` (`tr`) command to create a
+tracepoint that does not halt the target process:
+
+```none {: .devsite-terminal data-terminal-prefix="[zxdb]" }
+trace -e x -e y -l -m 10 MyFunction if x > 0
+Created Tracepoint 1 state=enabled hits=0/10 location=MyFunction condition=x > 0 capture=[locals] exprs=[x, y]
+```
+
+You can configure what data `trace` collects on each hit:
+
+* `-e` (`--expression`): Evaluates an expression on each hit. Specify `-e`
+  multiple times to evaluate multiple expressions.
+* `-l` (`--locals`): Captures local variables in the current frame.
+* `--registers`: Captures general-purpose registers in the current frame.
+* `-b` (`--backtrace`) and `-r` (`--raw-backtrace`): Captures symbolic or raw
+  stack frames.
+* `--max-frames`: Limits the number of matching target frames evaluated per hit
+  (10 by default).
+* `-c` (`--condition`) or `if <expr>`: Filters hits with a boolean expression.
+* `-m` (`--max-hits`): Disables the tracepoint automatically after the
+  specified number of hits (20 by default).
+
+Use the `tracepoint` (`tp`) noun to list, select, disable, enable, or remove
+tracepoints:
+
+```none {: .devsite-terminal data-terminal-prefix="[zxdb]" }
+tp
+[zxdb] tp 1 disable
+[zxdb] tp 1 enable
+[zxdb] tp 1 rm
+```
+
 ## Programmatic breakpoints
 
 In some cases you may want to catch a specific condition in your code. To do this

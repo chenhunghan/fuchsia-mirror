@@ -616,7 +616,7 @@ pub fn send_fake_nflog_message(uid: u32) {
     write_attr(&mut msg_body, NFULA_UID, &uid_bytes);
 
     // Write PAYLOAD attribute (placeholder IPv4 header)
-    let mut ip_hdr = vec![0u8; 20];
+    let mut ip_hdr = [0u8; 20];
     ip_hdr[0] = 0x45; // Version 4, IHL 5
     ip_hdr[12..16].copy_from_slice(&[127, 0, 0, 1]);
     ip_hdr[16..20].copy_from_slice(&[8, 8, 8, 8]);
@@ -983,7 +983,7 @@ impl DeviceListener for Arc<LockDepMutex<NetlinkSocketInner, NetlinkSocketInnerL
     fn on_device_event(&self, action: UEventAction, device: Device, context: UEventContext) {
         let path = device.path_from_depth(0);
 
-        let mut props = device.get_uevent_properties_list();
+        let mut props = device.get_netlink_uevent_properties_list();
 
         // Prepend ACTION and SEQNUM to maintain existing order
         props.insert(0, (b"ACTION".into(), action.to_string().into()));

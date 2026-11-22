@@ -9,6 +9,7 @@ use crate::Inspector;
 use crate::reader::LinkValue;
 use crate::reader::error::ReaderError;
 use crate::reader::readable_tree::SnapshotSource;
+use crate::writer::blob_buffer::BLOB_HEADER_SIZE_BYTES;
 use diagnostics_hierarchy::{ArrayContent, Property};
 use inspect_format::{
     Array, Block, BlockAccessorExt, BlockContainer, BlockIndex, BlockType, Bool, Buffer, Container,
@@ -78,6 +79,15 @@ impl Snapshot {
         let Some(generation) = header_block.unlocked_generation_count() else {
             return Err(ReaderError::InconsistentSnapshot);
         };
+        // `"BLOB"` headers are always V2 (`HEADER_ORDER`) and must carry a `vmo_size`; only legacy
+        // V1 `"INSP"` headers (`order == 0`) omit `vmo_size`.
+        let header_vmo_size = header_block.vmo_size()?;
+        if expected_magic == constants::BLOB_HEADER_MAGIC_NUMBER && header_vmo_size.is_none() {
+            // BLOB VMOs are the only VMOs not subject to a max size in Inspect.
+            // Regular INSP VMOs have a set MAX_VMO_SIZE.
+            return Err(ReaderError::InvalidVmo);
+        }
+
         if header_block.is_frozen() {
             #[cfg(target_os = "fuchsia")]
             {
@@ -86,13 +96,13 @@ impl Snapshot {
                     return Err(ReaderError::Vmo(zx::Status::BAD_STATE));
                 }
             }
-            if let Ok(buffer) = BackingBuffer::try_from(source) {
+            if let Ok(buffer) = BackingBuffer::try_from_with_max_size(source, max_vmo_size) {
                 return Ok(Snapshot { buffer });
             }
         }
 
         // Read the buffer
-        let mut vmo_size = if let Some(vmo_size) = header_block.vmo_size()? {
+        let mut vmo_size = if let Some(vmo_size) = header_vmo_size {
             cmp::min(vmo_size as usize, source.len())
         } else {
             source.len()
@@ -235,6 +245,62 @@ impl Snapshot {
             None,
             || {},
         )
+    }
+
+    /// Returns the raw payload byte slice stored after the 32-byte `"BLOB"` header in a blob
+    /// [`Snapshot`], excluding both the header and any trailing page-alignment padding bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReaderError::InvalidVmo`] if this snapshot does not start with a valid 32-byte
+    /// `"BLOB"` header whose `vmo_size` is between 32 bytes and the backing buffer's length.
+    pub fn blob_payload(&self) -> Result<&[u8], ReaderError> {
+        let payload_len = self.blob_payload_len()?;
+        if payload_len == 0 {
+            return Ok(&[]);
+        }
+        self.buffer.get_slice_at(BLOB_HEADER_SIZE_BYTES, payload_len).ok_or(ReaderError::InvalidVmo)
+    }
+
+    /// Consumes this blob [`Snapshot`] and returns its raw payload bytes as a `Vec<u8>`,
+    /// stripping the 32-byte `"BLOB"` header and any trailing page-alignment padding bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReaderError::InvalidVmo`] if this snapshot does not start with a valid 32-byte
+    /// `"BLOB"` header whose `vmo_size` is between 32 bytes and the backing buffer's length.
+    pub fn into_blob_payload(self) -> Result<Vec<u8>, ReaderError> {
+        let payload_len = self.blob_payload_len()?;
+        if payload_len == 0 {
+            return Ok(Vec::new());
+        }
+        match self.buffer {
+            // `BackingBuffer::Bytes` is always an owned heap copy taken during snapshotting (never
+            // backed by the original VMO or caller slice), and `into_blob_payload` consumes `self`
+            // by value, so stripping the header in place avoids a second heap allocation without
+            // mutating the underlying source VMO.
+            BackingBuffer::Bytes(mut bytes) => {
+                bytes.drain(..BLOB_HEADER_SIZE_BYTES);
+                bytes.truncate(payload_len);
+                Ok(bytes)
+            }
+            BackingBuffer::Container(container) => container
+                .get_slice_at(BLOB_HEADER_SIZE_BYTES, payload_len)
+                .map(|slice| slice.to_vec())
+                .ok_or(ReaderError::InvalidVmo),
+        }
+    }
+
+    fn blob_payload_len(&self) -> Result<usize, ReaderError> {
+        if self.buffer.len() < BLOB_HEADER_SIZE_BYTES {
+            return Err(ReaderError::InvalidVmo);
+        }
+        let header = Block::parse_blob_header(&self.buffer).ok_or(ReaderError::InvalidVmo)?;
+        let vmo_size = header.vmo_size()?.ok_or(ReaderError::InvalidVmo)? as usize;
+        if vmo_size > self.buffer.len() {
+            return Err(ReaderError::InvalidVmo);
+        }
+        vmo_size.checked_sub(BLOB_HEADER_SIZE_BYTES).ok_or(ReaderError::InvalidVmo)
     }
 
     pub(crate) fn get_name(&self, index: BlockIndex) -> Option<String> {
@@ -534,20 +600,15 @@ pub enum BackingBuffer {
     Container(Container),
 }
 
-#[cfg(target_os = "fuchsia")]
-impl TryFrom<&zx::Vmo> for BackingBuffer {
-    type Error = ReaderError;
-    fn try_from(source: &zx::Vmo) -> Result<Self, Self::Error> {
-        let container = Container::read_only(source)?;
-        Ok(BackingBuffer::Container(container))
-    }
-}
-
-#[cfg(not(target_os = "fuchsia"))]
-impl TryFrom<&Vec<u8>> for BackingBuffer {
-    type Error = ReaderError;
-    fn try_from(source: &Vec<u8>) -> Result<Self, Self::Error> {
-        let container = Container::read_only(source);
+impl BackingBuffer {
+    pub fn try_from_with_max_size(
+        source: &SnapshotSource,
+        max_size: Option<usize>,
+    ) -> Result<Self, ReaderError> {
+        #[cfg(target_os = "fuchsia")]
+        let container = Container::read_only_with_max_size(source, max_size)?;
+        #[cfg(not(target_os = "fuchsia"))]
+        let container = Container::read_only_with_max_size(source, max_size);
         Ok(BackingBuffer::Container(container))
     }
 }
@@ -1064,6 +1125,235 @@ mod tests {
 
         assert_matches!(Snapshot::try_once_from_vmo(&source), Err(ReaderError::InvalidVmo));
         assert_matches!(Snapshot::try_from(&source), Err(ReaderError::InvalidVmo));
+
+        Ok(())
+    }
+
+    #[cfg(target_os = "fuchsia")]
+    #[fuchsia::test]
+    fn blob_payload_strips_header_and_page_padding() -> Result<(), Error> {
+        let allocated_size = constants::PAGE_SIZE_BYTES;
+        let payload = b"non_aligned_payload";
+        let logical_size = BLOB_HEADER_SIZE_BYTES + payload.len();
+        let (mut container, parent_storage) = Container::read_and_write(allocated_size).unwrap();
+
+        // Fill the entire 4 KiB page with sentinel bytes first so any leaked padding is caught.
+        container.get_slice_mut_at(0, allocated_size).unwrap().fill(0xAA);
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_blob_header(logical_size)?;
+        container.copy_from_slice_at(BLOB_HEADER_SIZE_BYTES, payload);
+
+        // Capture the full underlying bytes before calling `into_blob_payload` so we can verify
+        // the source VMO (header, payload, and padding) is never modified.
+        let expected_unfrozen_raw = container.get_slice_at(0, allocated_size).unwrap().to_vec();
+
+        // 1. Unfrozen snapshot (`BackingBuffer::Bytes`).
+        let unfrozen_snapshot = Snapshot::try_from_blob_vmo(&parent_storage)?;
+        assert_matches!(unfrozen_snapshot.buffer, BackingBuffer::Bytes(_));
+        assert_eq!(unfrozen_snapshot.blob_payload()?, payload);
+        assert_eq!(unfrozen_snapshot.into_blob_payload()?, payload);
+        assert_eq!(container.get_slice_at(0, allocated_size).unwrap(), &expected_unfrozen_raw[..]);
+
+        // 2. Frozen CoW snapshot (`BackingBuffer::Container`, whose `.len()` is 4096).
+        let _ = container.block_at_unchecked_mut::<Header>(BlockIndex::HEADER).freeze();
+        let expected_frozen_raw = container.get_slice_at(0, allocated_size).unwrap().to_vec();
+        let frozen_source = parent_storage.create_child(
+            zx::VmoChildOptions::SNAPSHOT | zx::VmoChildOptions::NO_WRITE,
+            0,
+            allocated_size as u64,
+        )?;
+        let frozen_snapshot = Snapshot::try_from_blob_vmo(&frozen_source)?;
+        assert_matches!(frozen_snapshot.buffer, BackingBuffer::Container(_));
+        assert_eq!(frozen_snapshot.blob_payload()?, payload);
+        assert_eq!(frozen_snapshot.into_blob_payload()?, payload);
+        let mut actual_frozen_raw = vec![0u8; allocated_size];
+        frozen_source.read(&mut actual_frozen_raw, 0)?;
+        assert_eq!(actual_frozen_raw, expected_frozen_raw);
+        assert_eq!(container.get_slice_at(0, allocated_size).unwrap(), &expected_frozen_raw[..]);
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "fuchsia"))]
+    #[fuchsia::test]
+    fn blob_payload_strips_header() -> Result<(), Error> {
+        // Notice that on non-fuchsia targets we do not allocate padding bytes because of page
+        // alignment, so all the logic from the test above that deals with page alignment
+        // padding has been dropped for clarity.
+        let payload = b"payload";
+        let size = BLOB_HEADER_SIZE_BYTES + payload.len();
+        let (mut container, ()) = Container::read_and_write(size).unwrap();
+
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_blob_header(size)?;
+        container.copy_from_slice_at(BLOB_HEADER_SIZE_BYTES, payload);
+
+        // 1. Unfrozen snapshot (`BackingBuffer::Bytes`).
+        let unfrozen_source = container.get_slice(container.len()).unwrap().to_vec();
+        let expected_unfrozen_raw = unfrozen_source.clone();
+        let unfrozen_snapshot = Snapshot::try_from_blob_vmo(&unfrozen_source)?;
+        assert_matches!(unfrozen_snapshot.buffer, BackingBuffer::Bytes(_));
+        assert_eq!(unfrozen_snapshot.blob_payload()?, payload);
+        assert_eq!(unfrozen_snapshot.into_blob_payload()?, payload);
+        assert_eq!(unfrozen_source, expected_unfrozen_raw);
+
+        // 2. Frozen snapshot (`BackingBuffer::Container`).
+        let _ = container.block_at_unchecked_mut::<Header>(BlockIndex::HEADER).freeze();
+        let frozen_source = container.get_slice(container.len()).unwrap().to_vec();
+        let expected_frozen_raw = frozen_source.clone();
+        let frozen_snapshot = Snapshot::try_from_blob_vmo(&frozen_source)?;
+        assert_matches!(frozen_snapshot.buffer, BackingBuffer::Container(_));
+        assert_eq!(frozen_snapshot.blob_payload()?, payload);
+        assert_eq!(frozen_snapshot.into_blob_payload()?, payload);
+        assert_eq!(frozen_source, expected_frozen_raw);
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn blob_payload_empty() -> Result<(), Error> {
+        let (mut container, storage) =
+            Container::read_and_write(constants::PAGE_SIZE_BYTES).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_blob_header(BLOB_HEADER_SIZE_BYTES)?;
+        let source = get_source!(container, storage);
+        let snapshot = Snapshot::try_from_blob_vmo(&source)?;
+        assert!(snapshot.blob_payload()?.is_empty());
+        assert!(snapshot.into_blob_payload()?.is_empty());
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn blob_payload_rejects_inspect_header() -> Result<(), Error> {
+        let (mut container, storage) =
+            Container::read_and_write(constants::PAGE_SIZE_BYTES).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_inspect_header(constants::PAGE_SIZE_BYTES)?;
+        let source = get_source!(container, storage);
+        let snapshot = Snapshot::try_from(&source)?;
+        assert_matches!(snapshot.blob_payload(), Err(ReaderError::InvalidVmo));
+        assert_matches!(snapshot.into_blob_payload(), Err(ReaderError::InvalidVmo));
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn blob_payload_rejects_vmo_size_smaller_than_header() -> Result<(), Error> {
+        let (mut container, storage) =
+            Container::read_and_write(constants::PAGE_SIZE_BYTES).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_blob_header(16)?;
+        let source = get_source!(container, storage);
+        let snapshot = Snapshot::try_from_blob_vmo(&source)?;
+        assert_matches!(snapshot.blob_payload(), Err(ReaderError::InvalidVmo));
+        assert_matches!(snapshot.into_blob_payload(), Err(ReaderError::InvalidVmo));
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn snapshot_frozen_blob_vmo_does_not_clamp_to_max_vmo_size() -> Result<(), Error> {
+        let allocated_size = constants::MAX_VMO_SIZE + constants::PAGE_SIZE_BYTES;
+        let tail = b"beyond_max_vmo_size";
+        let (mut container, parent_storage) = Container::read_and_write(allocated_size).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_blob_header(allocated_size)?;
+        container.copy_from_slice_at(allocated_size - tail.len(), tail);
+        let _ = container.block_at_unchecked_mut::<Header>(BlockIndex::HEADER).freeze();
+
+        #[cfg(target_os = "fuchsia")]
+        let snapshot = {
+            let frozen_source = parent_storage.create_child(
+                zx::VmoChildOptions::SNAPSHOT | zx::VmoChildOptions::NO_WRITE,
+                0,
+                allocated_size as u64,
+            )?;
+            Snapshot::try_from_blob_vmo(&frozen_source)?
+        };
+        #[cfg(not(target_os = "fuchsia"))]
+        let snapshot = {
+            #[allow(clippy::let_unit_value)]
+            let _ = parent_storage;
+            let frozen_source = container.get_slice(container.len()).unwrap().to_vec();
+            Snapshot::try_from_blob_vmo(&frozen_source)?
+        };
+
+        assert_matches!(snapshot.buffer, BackingBuffer::Container(_));
+        assert_eq!(snapshot.buffer.len(), allocated_size);
+        let payload = snapshot.blob_payload()?;
+        assert_eq!(&payload[payload.len() - tail.len()..], tail);
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn blob_snapshot_rejects_header_without_size_info() -> Result<(), Error> {
+        let (mut container, storage) =
+            Container::read_and_write(constants::PAGE_SIZE_BYTES).unwrap();
+        let mut header = Block::free(&mut container, BlockIndex::HEADER, 0, BlockIndex::EMPTY)?
+            .become_reserved()
+            .become_blob_header(constants::PAGE_SIZE_BYTES)?;
+        header.set_order(0)?;
+
+        let source = get_source!(container, storage);
+        assert_matches!(Snapshot::try_from_blob_vmo(&source), Err(ReaderError::InvalidVmo));
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn blob_payload_rejects_vmo_size_larger_than_buffer() -> Result<(), Error> {
+        let (mut container, storage) =
+            Container::read_and_write(constants::PAGE_SIZE_BYTES).unwrap();
+        let _ = Block::free(
+            &mut container,
+            BlockIndex::HEADER,
+            constants::HEADER_ORDER,
+            BlockIndex::EMPTY,
+        )?
+        .become_reserved()
+        .become_blob_header(2 * constants::PAGE_SIZE_BYTES)?;
+        let source = get_source!(container, storage);
+        let snapshot = Snapshot::try_from_blob_vmo(&source)?;
+        assert_matches!(snapshot.blob_payload(), Err(ReaderError::InvalidVmo));
+        assert_matches!(snapshot.into_blob_payload(), Err(ReaderError::InvalidVmo));
 
         Ok(())
     }

@@ -94,65 +94,65 @@ TEST(StructWithSomeFieldsRemoved, CodingTable) {
   EXPECT_EQ(0xffffffffffff0000, coded_struct.elements[4].padding.mask_64);
 }
 
-TEST(MyXUnion, CodingTableWhenNullable) {
-  const fidl_type& type = *fidl::test::example::codingtables::CodingMyXUnionRequest::FidlType;
+TEST(MyUnion, CodingTableWhenNullable) {
+  const fidl_type& type = *fidl::test::example::codingtables::CodingMyUnionRequest::FidlType;
   ASSERT_EQ(kFidlTypeStruct, type.type_tag());
   const FidlCodedStruct& request_struct = type.coded_struct();
   ASSERT_EQ(1, request_struct.element_count);
-  ASSERT_STREQ("fidl.test.example.codingtables/CodingMyXUnionRequest", request_struct.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/CodingMyUnionRequest", request_struct.name);
   ASSERT_EQ(kFidlStructElementType_Field, request_struct.elements[0].header.element_type);
   ASSERT_EQ(kFidlIsResource_NotResource, request_struct.elements[0].header.is_resource);
-  const FidlStructField& my_xunion_field = request_struct.elements[0].field;
-  EXPECT_EQ(0, my_xunion_field.offset_v2);
+  const FidlStructField& my_union_field = request_struct.elements[0].field;
+  EXPECT_EQ(0, my_union_field.offset_v2);
 
-  const fidl_type& my_xunion_type = *my_xunion_field.field_type;
-  ASSERT_EQ(kFidlTypeXUnion, my_xunion_type.type_tag());
-  const FidlCodedXUnion& my_xunion_table = my_xunion_type.coded_union();
+  const fidl_type& my_union_type = *my_union_field.field_type;
+  ASSERT_EQ(kFidlTypeUnion, my_union_type.type_tag());
+  const FidlCodedUnion& my_union_table = my_union_type.coded_union();
 
-  // Please keep these assertions in the same order as FidlCodedXUnion's member variables.
+  // Please keep these assertions in the same order as FidlCodedUnion's member variables.
 
-  ASSERT_EQ(2, my_xunion_table.field_count);
+  ASSERT_EQ(2, my_union_table.field_count);
 
-  ASSERT_EQ(&fidl_internal_kBoolTable, my_xunion_table.fields[0].type);
-  ASSERT_EQ(&fidl_internal_kInt32Table, my_xunion_table.fields[1].type);
+  ASSERT_EQ(&fidl_internal_kBoolTable, my_union_table.fields[0].type);
+  ASSERT_EQ(&fidl_internal_kInt32Table, my_union_table.fields[1].type);
 
-  ASSERT_EQ(kFidlNullability_Nullable, my_xunion_table.nullable);
+  ASSERT_EQ(kFidlNullability_Nullable, my_union_table.nullable);
 
-  ASSERT_STREQ("fidl.test.example.codingtables/MyXUnion", my_xunion_table.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/MyUnion", my_union_table.name);
 
-  ASSERT_EQ(kFidlStrictness_Flexible, my_xunion_type.coded_union().strictness);
-  ASSERT_EQ(kFidlIsResource_NotResource, my_xunion_type.coded_union().is_resource);
+  ASSERT_EQ(kFidlStrictness_Flexible, my_union_type.coded_union().strictness);
+  ASSERT_EQ(kFidlIsResource_NotResource, my_union_type.coded_union().is_resource);
 }
 
-TEST(MyStrictXUnion, CodingTableWhenNullable) {
-  const fidl_type& type = *fidl::test::example::codingtables::CodingMyStrictXUnionRequest::FidlType;
+TEST(MyStrictUnion, CodingTableWhenNullable) {
+  const fidl_type& type = *fidl::test::example::codingtables::CodingMyStrictUnionRequest::FidlType;
   ASSERT_EQ(kFidlTypeStruct, type.type_tag());
   const FidlCodedStruct& request_struct = type.coded_struct();
   ASSERT_EQ(1, request_struct.element_count);
 
-  ASSERT_STREQ("fidl.test.example.codingtables/CodingMyStrictXUnionRequest", request_struct.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/CodingMyStrictUnionRequest", request_struct.name);
   ASSERT_EQ(kFidlStructElementType_Field, request_struct.elements[0].header.element_type);
   ASSERT_EQ(kFidlIsResource_NotResource, request_struct.elements[0].header.is_resource);
-  const FidlStructField& my_strict_xunion_field = request_struct.elements[0].field;
-  EXPECT_EQ(0, my_strict_xunion_field.offset_v2);
+  const FidlStructField& my_strict_union_field = request_struct.elements[0].field;
+  EXPECT_EQ(0, my_strict_union_field.offset_v2);
 
-  const fidl_type& my_strict_xunion_type = *my_strict_xunion_field.field_type;
-  ASSERT_EQ(kFidlTypeXUnion, my_strict_xunion_type.type_tag());
-  const FidlCodedXUnion& my_strict_xunion_table = my_strict_xunion_type.coded_union();
+  const fidl_type& my_strict_union_type = *my_strict_union_field.field_type;
+  ASSERT_EQ(kFidlTypeUnion, my_strict_union_type.type_tag());
+  const FidlCodedUnion& my_strict_union_table = my_strict_union_type.coded_union();
 
-  // Please keep these assertions in the same order as FidlCodedXUnion's member variables.
+  // Please keep these assertions in the same order as FidlCodedUnion's member variables.
 
-  ASSERT_EQ(2, my_strict_xunion_table.field_count);
+  ASSERT_EQ(2, my_strict_union_table.field_count);
 
-  ASSERT_EQ(&fidl_internal_kBoolTable, my_strict_xunion_table.fields[0].type);
-  ASSERT_EQ(&fidl_internal_kInt32Table, my_strict_xunion_table.fields[1].type);
+  ASSERT_EQ(&fidl_internal_kBoolTable, my_strict_union_table.fields[0].type);
+  ASSERT_EQ(&fidl_internal_kInt32Table, my_strict_union_table.fields[1].type);
 
-  ASSERT_EQ(kFidlNullability_Nullable, my_strict_xunion_table.nullable);
+  ASSERT_EQ(kFidlNullability_Nullable, my_strict_union_table.nullable);
 
-  ASSERT_STREQ("fidl.test.example.codingtables/MyStrictXUnion", my_strict_xunion_table.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/MyStrictUnion", my_strict_union_table.name);
 
-  ASSERT_EQ(kFidlStrictness_Strict, my_strict_xunion_type.coded_union().strictness);
-  ASSERT_EQ(kFidlIsResource_NotResource, my_strict_xunion_type.coded_union().is_resource);
+  ASSERT_EQ(kFidlStrictness_Strict, my_strict_union_type.coded_union().strictness);
+  ASSERT_EQ(kFidlIsResource_NotResource, my_strict_union_type.coded_union().is_resource);
 }
 
 TEST(MyTable, CodingTable) {
@@ -194,55 +194,55 @@ TEST(MyTable, CodingTable) {
   ASSERT_EQ(kFidlTypeVector, field_3.type->type_tag());
 }
 
-TEST(MyXUnion, CodingTableWhenNonnullable) {
+TEST(MyUnion, CodingTableWhenNonnullable) {
   const fidl_type& type =
-      *fidl::test::example::codingtables::CodingVectorOfMyXUnionRequest::FidlType;
+      *fidl::test::example::codingtables::CodingVectorOfMyUnionRequest::FidlType;
   ASSERT_EQ(kFidlTypeStruct, type.type_tag());
   const FidlCodedStruct& request_struct = type.coded_struct();
   ASSERT_EQ(1, request_struct.element_count);
-  ASSERT_STREQ("fidl.test.example.codingtables/CodingVectorOfMyXUnionRequest", request_struct.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/CodingVectorOfMyUnionRequest", request_struct.name);
   ASSERT_EQ(kFidlStructElementType_Field, request_struct.elements[0].header.element_type);
   ASSERT_EQ(kFidlIsResource_NotResource, request_struct.elements[0].header.is_resource);
-  const FidlStructField& vector_of_my_xunion_field = request_struct.elements[0].field;
-  EXPECT_EQ(0, vector_of_my_xunion_field.offset_v2);
-  const fidl_type& vector_of_my_xunion_type = *vector_of_my_xunion_field.field_type;
-  ASSERT_EQ(kFidlTypeVector, vector_of_my_xunion_type.type_tag());
-  const FidlCodedVector& xunion_vector = vector_of_my_xunion_type.coded_vector();
+  const FidlStructField& vector_of_my_union_field = request_struct.elements[0].field;
+  EXPECT_EQ(0, vector_of_my_union_field.offset_v2);
+  const fidl_type& vector_of_my_union_type = *vector_of_my_union_field.field_type;
+  ASSERT_EQ(kFidlTypeVector, vector_of_my_union_type.type_tag());
+  const FidlCodedVector& union_vector = vector_of_my_union_type.coded_vector();
 
-  const fidl_type& xunion_type = *xunion_vector.element;
-  ASSERT_EQ(kFidlTypeXUnion, xunion_type.type_tag());
-  const FidlCodedXUnion& coded_xunion = xunion_type.coded_union();
+  const fidl_type& union_type = *union_vector.element;
+  ASSERT_EQ(kFidlTypeUnion, union_type.type_tag());
+  const FidlCodedUnion& coded_union = union_type.coded_union();
 
-  ASSERT_EQ(kFidlNullability_Nonnullable, coded_xunion.nullable);
+  ASSERT_EQ(kFidlNullability_Nonnullable, coded_union.nullable);
 
-  ASSERT_EQ(kFidlStrictness_Flexible, coded_xunion.strictness);
-  ASSERT_EQ(kFidlIsResource_NotResource, coded_xunion.is_resource);
+  ASSERT_EQ(kFidlStrictness_Flexible, coded_union.strictness);
+  ASSERT_EQ(kFidlIsResource_NotResource, coded_union.is_resource);
 }
 
-TEST(MyStrictXUnion, CodingTableWhenNonnullable) {
+TEST(MyStrictUnion, CodingTableWhenNonnullable) {
   const fidl_type& type =
-      *fidl::test::example::codingtables::CodingVectorOfMyStrictXUnionRequest::FidlType;
+      *fidl::test::example::codingtables::CodingVectorOfMyStrictUnionRequest::FidlType;
   ASSERT_EQ(kFidlTypeStruct, type.type_tag());
   const FidlCodedStruct& request_struct = type.coded_struct();
   ASSERT_EQ(1, request_struct.element_count);
-  ASSERT_STREQ("fidl.test.example.codingtables/CodingVectorOfMyStrictXUnionRequest",
+  ASSERT_STREQ("fidl.test.example.codingtables/CodingVectorOfMyStrictUnionRequest",
                request_struct.name);
   ASSERT_EQ(kFidlStructElementType_Field, request_struct.elements[0].header.element_type);
   ASSERT_EQ(kFidlIsResource_NotResource, request_struct.elements[0].header.is_resource);
-  const FidlStructField& vector_of_my_xunion_field = request_struct.elements[0].field;
-  EXPECT_EQ(0, vector_of_my_xunion_field.offset_v2);
-  const fidl_type& vector_of_my_xunion_type = *vector_of_my_xunion_field.field_type;
-  ASSERT_EQ(kFidlTypeVector, vector_of_my_xunion_type.type_tag());
-  const FidlCodedVector& xunion_vector = vector_of_my_xunion_type.coded_vector();
+  const FidlStructField& vector_of_my_union_field = request_struct.elements[0].field;
+  EXPECT_EQ(0, vector_of_my_union_field.offset_v2);
+  const fidl_type& vector_of_my_union_type = *vector_of_my_union_field.field_type;
+  ASSERT_EQ(kFidlTypeVector, vector_of_my_union_type.type_tag());
+  const FidlCodedVector& union_vector = vector_of_my_union_type.coded_vector();
 
-  const fidl_type& xunion_type = *xunion_vector.element;
-  ASSERT_EQ(kFidlTypeXUnion, xunion_type.type_tag());
-  const FidlCodedXUnion& coded_xunion = xunion_type.coded_union();
+  const fidl_type& union_type = *union_vector.element;
+  ASSERT_EQ(kFidlTypeUnion, union_type.type_tag());
+  const FidlCodedUnion& coded_union = union_type.coded_union();
 
-  ASSERT_EQ(kFidlNullability_Nonnullable, coded_xunion.nullable);
+  ASSERT_EQ(kFidlNullability_Nonnullable, coded_union.nullable);
 
-  ASSERT_EQ(kFidlStrictness_Strict, coded_xunion.strictness);
-  ASSERT_EQ(kFidlIsResource_NotResource, coded_xunion.is_resource);
+  ASSERT_EQ(kFidlStrictness_Strict, coded_union.strictness);
+  ASSERT_EQ(kFidlIsResource_NotResource, coded_union.is_resource);
 }
 
 TEST(MyBits, CodingTable) {
@@ -292,37 +292,37 @@ TEST(NumberCollision, CodingTable) {
   ASSERT_EQ(5, number_collision_table.element_count);
 }
 
-TEST(ForeignXUnions, CodingTable) {
+TEST(ForeignUnions, CodingTable) {
   const fidl_type& req_type =
-      *fidl::test::example::codingtables::CodingForeignXUnionsRequest::FidlType;
+      *fidl::test::example::codingtables::CodingForeignUnionsRequest::FidlType;
   ASSERT_EQ(kFidlTypeStruct, req_type.type_tag());
   const FidlCodedStruct& request_struct = req_type.coded_struct();
   ASSERT_EQ(1, request_struct.element_count);
-  ASSERT_STREQ("fidl.test.example.codingtables/CodingForeignXUnionsRequest", request_struct.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/CodingForeignUnionsRequest", request_struct.name);
   ASSERT_EQ(kFidlStructElementType_Field, request_struct.elements[0].header.element_type);
   ASSERT_EQ(kFidlIsResource_NotResource, request_struct.elements[0].header.is_resource);
   const FidlStructField& tx_field = request_struct.elements[0].field;
   const fidl_type& tx_type = *tx_field.field_type;
-  ASSERT_EQ(kFidlTypeXUnion, tx_type.type_tag());
-  const FidlCodedXUnion& tx_table = tx_type.coded_union();
-  ASSERT_STREQ("fidl.test.example.codingtablesdeps/MyXUnionA", tx_table.name);
+  ASSERT_EQ(kFidlTypeUnion, tx_type.type_tag());
+  const FidlCodedUnion& tx_table = tx_type.coded_union();
+  ASSERT_STREQ("fidl.test.example.codingtablesdeps/MyUnionA", tx_table.name);
   ASSERT_EQ(kFidlNullability_Nonnullable, tx_table.nullable);
   ASSERT_EQ(kFidlIsResource_NotResource, tx_table.is_resource);
   ASSERT_EQ(2, tx_table.field_count);
 
   const fidl_type& resp_type =
-      *fidl::test::example::codingtables::CodingForeignXUnionsResponse::FidlType;
+      *fidl::test::example::codingtables::CodingForeignUnionsResponse::FidlType;
   ASSERT_EQ(kFidlTypeStruct, resp_type.type_tag());
   const FidlCodedStruct& response_struct = resp_type.coded_struct();
   ASSERT_EQ(1, response_struct.element_count);
-  ASSERT_STREQ("fidl.test.example.codingtables/CodingForeignXUnionsResponse", response_struct.name);
+  ASSERT_STREQ("fidl.test.example.codingtables/CodingForeignUnionsResponse", response_struct.name);
   ASSERT_EQ(kFidlStructElementType_Field, response_struct.elements[0].header.element_type);
   ASSERT_EQ(kFidlIsResource_NotResource, request_struct.elements[0].header.is_resource);
   const FidlStructField& rx_field = response_struct.elements[0].field;
   const fidl_type& rx_type = *rx_field.field_type;
-  ASSERT_EQ(kFidlTypeXUnion, rx_type.type_tag());
-  const FidlCodedXUnion& rx_table = rx_type.coded_union();
-  ASSERT_STREQ("fidl.test.example.codingtablesdeps/MyXUnionA", rx_table.name);
+  ASSERT_EQ(kFidlTypeUnion, rx_type.type_tag());
+  const FidlCodedUnion& rx_table = rx_type.coded_union();
+  ASSERT_STREQ("fidl.test.example.codingtablesdeps/MyUnionA", rx_table.name);
   ASSERT_EQ(kFidlNullability_Nullable, rx_table.nullable);
   ASSERT_EQ(kFidlIsResource_NotResource, rx_table.is_resource);
   ASSERT_EQ(2, rx_table.field_count);

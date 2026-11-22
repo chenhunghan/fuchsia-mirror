@@ -18,6 +18,11 @@ MdnsTransceiver::MdnsTransceiver() = default;
 
 MdnsTransceiver::~MdnsTransceiver() = default;
 
+void MdnsTransceiver::SetEnabledMedia(Media enabled_media) {
+  FX_DCHECK(!interface_watcher_);
+  enabled_media_ = enabled_media;
+}
+
 void MdnsTransceiver::SetVerbose(bool verbose) {
 #ifdef MDNS_TRACE
   verbose_ = verbose;
@@ -173,6 +178,10 @@ bool MdnsTransceiver::StartInterfaceTransceivers(const net::interfaces::Properti
       FX_LOGS(WARNING) << "Not starting MDNS transceiver on interface \"" << properties.name()
                        << "\" with unknown port class.";
       return false;
+  }
+
+  if (enabled_media_ != Media::kBoth && media != enabled_media_) {
+    return false;
   }
 
   std::vector<IpSubnet> addresses;

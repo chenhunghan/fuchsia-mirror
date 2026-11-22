@@ -47,9 +47,10 @@ rustc_library("bt-repl") {
     "//src/connectivity/bluetooth/*",
   ]
   deps = [
+    "//src/lib/line-editor",
     "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:bstr",
     "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:rustyline",
   ]
 }
 if (is_fuchsia) {
@@ -63,9 +64,10 @@ if (is_fuchsia) {
     ]
     edition = "2024"
     deps = [
+             "//src/lib/line-editor",
              "//third_party/rust_crates:anyhow",
+             "//third_party/rust_crates:bstr",
              "//third_party/rust_crates:futures",
-             "//third_party/rust_crates:rustyline",
            ] + [ "//src/lib/fuchsia" ]
     configs += [ "//build/config/rust/lints:deny_unused_results" ]
   }

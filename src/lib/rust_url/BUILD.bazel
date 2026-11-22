@@ -44,7 +44,6 @@ fx_cc_test_binary(
 
 fx_unittest_package(
     name = "rust_url_unittests",
-    package_name = "rust_url_unittests",
     unit_tests = [":rust_url_unittests_bin"],
     visibility = ["//src/lib:__pkg__"],
 )

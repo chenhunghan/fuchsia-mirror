@@ -10,4 +10,8 @@ etryzelaar@google.com
 jayzhuang@google.com
 thomasalpinus@google.com
 
+# OSS Compliance:
+per-file README.fuchsia,**/README.fuchsia = file:/build/licenses/OWNERS
+per-file NOTICE.fuchsia,**/NOTICE.fuchsia = file:/build/licenses/OWNERS
+
 # COMPONENT: Rust>third_party

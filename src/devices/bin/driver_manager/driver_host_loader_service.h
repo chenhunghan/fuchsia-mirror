@@ -21,6 +21,8 @@ class DriverHostLoaderService : public loader::LoaderService {
       : LoaderService(dispatcher, std::move(lib_fd), std::move(name)) {}
 
   virtual zx::result<zx::vmo> LoadObjectImpl(std::string path) override;
+  void LoadObjectAsync(std::string path,
+                       fit::callback<void(zx::result<zx::vmo>)> callback) override;
 };
 }  // namespace driver_manager
 

@@ -40,7 +40,6 @@ fuchsia_driver_component("isolateddevmgr-test-driver") {
   testonly = true
   component_name = "isolateddevmgr-test-driver"
   deps = [ ":isolateddevmgr-test-driver-driver" ]
-  info = "meta/isolateddevmgr-test-driver-info.json"
   manifest = "meta/isolateddevmgr-test-driver.cml"
 }
 

@@ -8,8 +8,7 @@ use anyhow::Error;
 use clonable_error::ClonableError;
 use cm_graph::DependencyNode;
 use directed_graph::DirectedGraph;
-use fidl_fuchsia_component_resolution as fresolution;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_component_resolution_common as fresolution;
 use std::sync::{Arc, LazyLock};
 use thiserror::Error;
 use url::Url;
@@ -19,7 +18,7 @@ use zx_status as zx;
 #[cfg(target_os = "fuchsia")]
 use {
     cm_rust::{FidlIntoNative, NativeIntoFidl},
-    fuchsia_trace as trace,
+    fidl_fuchsia_io as fio, fuchsia_trace as trace,
 };
 
 /// The prefix for relative URLs internally represented as url::Url.
@@ -48,10 +47,12 @@ pub struct ResolvedComponent {
 // mem_util which has a test dependency on `vfs`, which isn't typically allowed to be built on
 // host.
 #[cfg(target_os = "fuchsia")]
-impl TryFrom<fresolution::Component> for ResolvedComponent {
+impl TryFrom<fidl_fuchsia_component_resolution::Component> for ResolvedComponent {
     type Error = ResolverError;
 
-    fn try_from(component: fresolution::Component) -> Result<Self, Self::Error> {
+    fn try_from(
+        component: fidl_fuchsia_component_resolution::Component,
+    ) -> Result<Self, Self::Error> {
         let decl_buffer: fidl_fuchsia_mem::Data =
             component.decl.ok_or(ResolverError::RemoteInvalidData)?;
         let mut dependencies = DirectedGraph::new();
@@ -81,7 +82,7 @@ impl TryFrom<fresolution::Component> for ResolvedComponent {
 }
 
 #[cfg(target_os = "fuchsia")]
-impl From<ResolvedComponent> for fresolution::Component {
+impl From<ResolvedComponent> for fidl_fuchsia_component_resolution::Component {
     fn from(component: ResolvedComponent) -> Self {
         let ResolvedComponent {
             context_to_resolve_children,
@@ -95,12 +96,12 @@ impl From<ResolvedComponent> for fresolution::Component {
             .expect("failed to serialize validated manifest");
         let decl_vmo = fidl::Vmo::create(decl_bytes.len() as u64).expect("failed to create VMO");
         decl_vmo.write(&decl_bytes, 0).expect("failed to write to VMO");
-        fresolution::Component {
+        fidl_fuchsia_component_resolution::Component {
             decl: Some(fidl_fuchsia_mem::Data::Buffer(fidl_fuchsia_mem::Buffer {
                 vmo: decl_vmo,
                 size: decl_bytes.len() as u64,
             })),
-            package: package.map(|p| fresolution::Package {
+            package: package.map(|p| fidl_fuchsia_component_resolution::Package {
                 url: Some(p.url),
                 directory: Some(p.directory),
                 ..Default::default()
@@ -138,7 +139,7 @@ pub fn read_and_validate_manifest_bytes(
     dependencies: &mut DirectedGraph<DependencyNode>,
 ) -> Result<cm_rust::ComponentDecl, ResolverError> {
     trace::duration!("component_manager", "read_and_validate_manifest_bytes");
-    let component_decl: fidl_fuchsia_component_decl::Component =
+    let component_decl: fidl_fuchsia_component_decl_common::Component =
         fidl::unpersist(bytes).map_err(ResolverError::manifest_invalid)?;
     cm_fidl_validator::validate(&component_decl, dependencies)
         .map_err(ResolverError::manifest_invalid)?;
@@ -164,13 +165,15 @@ pub struct ResolvedPackage {
     /// The package url.
     pub url: String,
     /// The package directory client proxy.
+    #[cfg(target_os = "fuchsia")]
     pub directory: fidl::endpoints::ClientEnd<fio::DirectoryMarker>,
 }
 
-impl TryFrom<fresolution::Package> for ResolvedPackage {
+#[cfg(target_os = "fuchsia")]
+impl TryFrom<fidl_fuchsia_component_resolution::Package> for ResolvedPackage {
     type Error = ResolverError;
 
-    fn try_from(package: fresolution::Package) -> Result<Self, Self::Error> {
+    fn try_from(package: fidl_fuchsia_component_resolution::Package) -> Result<Self, Self::Error> {
         Ok(ResolvedPackage {
             url: package.url.ok_or(ResolverError::PackageUrlMissing)?,
             directory: package.directory.ok_or(ResolverError::PackageDirectoryMissing)?,
@@ -833,8 +836,10 @@ mod tests {
     use async_trait::async_trait;
     use capability_source::{BuiltinCapabilities, NamespaceCapabilities};
     use cm_rust_testing::new_decl_from_json;
+    #[cfg(target_os = "fuchsia")]
     use fidl::endpoints::create_endpoints;
-    use fidl_fuchsia_component_decl as fdecl;
+    use fidl_fuchsia_component_decl_common as fdecl;
+    #[cfg(target_os = "fuchsia")]
     use fidl_fuchsia_mem as fmem;
     use moniker::{BorrowedChildName, Moniker};
     use serde_json::json;
@@ -847,11 +852,12 @@ mod tests {
         ComponentAddress::parse_relative_url(&url.parse().unwrap()).unwrap()
     }
 
+    #[cfg(target_os = "fuchsia")]
     #[test]
     fn test_resolved_package() {
         let url = "some_url".to_string();
         let (dir_client, _) = create_endpoints::<fio::DirectoryMarker>();
-        let fidl_package = fresolution::Package {
+        let fidl_package = fidl_fuchsia_component_resolution::Package {
             url: Some(url.clone()),
             directory: Some(dir_client),
             ..Default::default()

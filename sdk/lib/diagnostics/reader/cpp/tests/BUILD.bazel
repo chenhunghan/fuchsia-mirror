@@ -1,0 +1,122 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":archive_reader_cpp_integration_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["program.cc"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "archive_reader_test_app",
+)
+
+fx_component_manifest(
+    name = "archive_reader_test_app_manifest",
+    testonly = True,
+    component_name = "archive_reader_test_app",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/archive_reader_test_app.cml",
+)
+
+fx_component(
+    name = "archive_reader_test_app",
+    testonly = True,
+    compiled_manifest = ":archive_reader_test_app_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "test",
+    srcs = ["test.cc"],
+    deps = [
+        "//sdk/lib/diagnostics/reader/cpp",
+        # TODO(https://fxbug.dev/570694755): GN's :cpp is an umbrella group
+        # bundling :cpp_library and realm_builder_server_component.
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//third_party/re2",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_packaged",
+    testonly = True,
+    binary = ":test",
+    binary_name = "archive_reader_integration_tests",
+)
+
+fx_component_manifest(
+    name = "archive_reader_tests_manifest",
+    testonly = True,
+    component_name = "archive_reader_tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/archive_reader_integration_tests.cml",
+)
+
+fx_test_component(
+    name = "archive_reader_tests",
+    compiled_manifest = ":archive_reader_tests_manifest",
+    deps = [":test_packaged"],
+)
+
+fx_package(
+    name = "archive_reader_cpp_integration_tests_package",
+    package_name = "archive_reader_cpp_integration_tests",
+    testonly = True,
+    components = [
+        ":archive_reader_test_app",
+        # TODO(https://fxbug.dev/570694755): Pulled in transitively via
+        # //sdk/lib/sys/component/cpp/testing:cpp in GN.
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":archive_reader_tests"],
+)
+
+# We intentionally emit ERROR logs for the purposes of testing.
+fx_test(
+    name = "archive_reader_cpp_integration_tests",
+    max_log_severity = "ERROR",
+    package = ":archive_reader_cpp_integration_tests_package",
+)

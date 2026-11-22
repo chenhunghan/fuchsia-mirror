@@ -63,7 +63,7 @@ if (is_fuchsia) {
       "//src/devices/i2c/testing/fake-i2c",
       "//src/lib/fxl/test:gtest_main",
       "//src/lib/testing/predicates",
-      "//third_party/googletest:gmock",
+      "//third_party/googletest:gtest",
     ]
     testonly = true
     emit_tool_path = false

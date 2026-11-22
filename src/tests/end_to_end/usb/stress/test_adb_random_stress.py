@@ -262,7 +262,7 @@ class AdbRandomStressTest(fuchsia_base_test.FuchsiaBaseTest):
     async def _cmd_su_root_unroot_toggle(self) -> None:
         """Toggles between su_root and su_unroot."""
         _LOGGER.info("Running: adb su_root/su_unroot toggle")
-        if self.dut.adb.is_root:
+        if self.dut.adb.verify_root():
             await self._unroot()
         if self.dut.adb.is_su_root:
             await self._su_unroot()

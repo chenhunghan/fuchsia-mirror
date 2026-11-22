@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import relativize_args
+from build.rbe import relativize_args
 
 
 class SplitTransformJoinTest(unittest.TestCase):

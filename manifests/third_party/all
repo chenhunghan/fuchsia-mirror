@@ -15,7 +15,7 @@
              path="third_party/libc-tests"
              remote="https://fuchsia.googlesource.com/libc-tests"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="609fb1eea59b08f3e4549c91c89cdb796085a35c"/>
+             revision="3e2a32eaee2e811679918dff68deb4fec0cb4a68"/>
     <project name="third_party/abseil-cpp"
              path="third_party/abseil-cpp/src"
              revision="1f0ebd4a3585f2c2680e35a22c8b170c09e432c1"
@@ -42,6 +42,10 @@
              path="third_party/android/platform/bionic"
              remote="https://fuchsia.googlesource.com/third_party/android.googlesource.com/platform/bionic"
              revision="ef05112f99bcdeb56941f3493cceb0abed0f9385"/>
+    <project name="third_party/android.googlesource.com/platform/bootable/libbootloader"
+             path="third_party/android/platform/bootable/libbootloader/src"
+             remote="https://fuchsia.googlesource.com/third_party/android.googlesource.com/platform/bootable/libbootloader"
+             revision="b5c99964b58cb360eea7b68d13566342d2465f0f"/>
     <project name="third_party/android.googlesource.com/platform/frameworks/native"
              path="third_party/android/platform/frameworks/native"
              remote="https://fuchsia.googlesource.com/third_party/android.googlesource.com/platform/frameworks/native"
@@ -99,7 +103,7 @@
     <project name="third_party/crashpad"
              path="third_party/crashpad/src"
              remote="https://fuchsia.googlesource.com/third_party/crashpad"
-             revision="d3a51ae7fde2a8fac68f274642517fad08f89655"
+             revision="39e1eb23b0a8ab34edce4e4b175f161f7c977b1a"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="chromium/mini_chromium"
              path="third_party/mini_chromium/src"
@@ -145,7 +149,7 @@
              path="third_party/freetype2"
              remote="https://fuchsia.googlesource.com/third_party/freetype2"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="fa1ee00d232591d7d9363fd4877aca8bb6ee7434"/>
+             revision="377e8abc5949250e296b3f5bc48ba327cc5a544d"/>
     <project name="third_party/shac-project/checks-cpp"
              path="third_party/shac-project/checks-cpp/src"
              remote="https://fuchsia.googlesource.com/shac-project/checks-cpp"
@@ -287,10 +291,10 @@
     <project name="llvm-project/libc"
              path="third_party/llvm-libc/src"
              remote="https://llvm.googlesource.com/llvm-project/libc"
-             revision="f12ec0d6ef78d5f506dd36a0964085e63c887974"/>
+             revision="2f83afd75e3b96a59b9a4791a08007f58e7bce94"/>
     <project name="third_party/luci-go"
              path="third_party/luci-go"
-             revision="fafdc4716763545bd274386a1aeeea8a89e338bc"
+             revision="08cf78a72edb46eb528fd9b223105276b4116a44"
              remote="https://fuchsia.googlesource.com/third_party/luci-go"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/lz4"
@@ -327,7 +331,7 @@
              path="third_party/mobly/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/mobly"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="626b088f6a7318d32b7d2026d99337ce82b1c7ea"/>
+             revision="32cf61cb4367ab6c376e9a92b6c7976d35e2ae61"/>
     <project name="third_party/github.com/google/snippet-uiautomator"
              path="third_party/snippet-uiautomator/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/snippet-uiautomator"
@@ -402,12 +406,12 @@
              path="third_party/perfetto"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/perfetto"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="9aa9e2933f8a935bee40f959be05b3ad02d4c04f" />
+             revision="aeb44770ffcb6e33bc1c2bb6bec85ced58f7f862" />
     <project name="third_party/pigweed"
              path="third_party/pigweed/src"
              remote="https://fuchsia.googlesource.com/third_party/pigweed.googlesource.com/pigweed/pigweed"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="6813be695aacc3d41e4989b42000705c991f4836"/>
+             revision="2daa9a85c668f35c5e8ff387de0236bc7eb23e05"/>
     <project name="third_party/github.com/google/python_portpicker"
              path="third_party/python_portpicker/src"
              remote="https://fuchsia.googlesource.com/third_party/github.com/google/python_portpicker"
@@ -422,7 +426,7 @@
     <project name="protobuf-gn"
              path="build/secondary/third_party/protobuf"
              remote="https://fuchsia.googlesource.com/protobuf-gn"
-             revision="d699fe2d979e883f2ed61dd2ee09bdb5cf87c2db"
+             revision="7d409919a199abe7a629a43d0596c69efe589c1b"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/github.com/wolever/parameterized"
              path="third_party/parameterized/src"
@@ -442,7 +446,7 @@
     <project name="third_party/rapidjson"
              path="third_party/rapidjson"
              remote="https://fuchsia.googlesource.com/third_party/rapidjson"
-             revision="a8bf9c8352dc5791585438a2909624489eaf981c"
+             revision="05bdf9409b8086e3a0efd208b648e4662be00f5d"
              gerrithost="https://fuchsia-review.googlesource.com"/>
     <project name="third_party/re2"
              path="third_party/re2/src"
@@ -457,7 +461,7 @@
     <project name="scudo"
              path="third_party/scudo/src"
              remote="https://llvm.googlesource.com/scudo"
-             revision="404e732f1ad016f5b9e2aaf157818b8bf8bd93c5"/>
+             revision="5941a0046c31b5b362c2faa74cda3fb5d63bf574"/>
     <project name="gwp-asan"
              path="third_party/scudo/gwp_asan"
              remote="https://llvm.googlesource.com/gwp-asan"
@@ -514,12 +518,12 @@
              path="third_party/openthread"
              remote="https://fuchsia.googlesource.com/third_party/openthread"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="dffd417212cd30fe0ba665bab8618559a5c086b8"/>
+             revision="c97437ef9fc6b7ef597d7b431b07bc2f92265b1e"/>
     <project name="third_party/openweave-core"
              path="third_party/openweave-core"
              remote="https://fuchsia.googlesource.com/third_party/openweave-core"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="ac451ed21f59d285b19f55c67ed65a3846fb1913"/>
+             revision="3b44318ffc07730763013a53dd499fd9dbb4ef0e"/>
     <project name="third_party/vboot_reference"
              path="third_party/vboot_reference"
              remote="https://fuchsia.googlesource.com/third_party/vboot_reference"
@@ -534,7 +538,7 @@
              path="third_party/vulkan-cts"
              remote="https://fuchsia.googlesource.com/third_party/vulkan-cts"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="a183b0d9932670f5eb08505bdde4d8661839a8a5"
+             revision="8a59f10ccfc2ca0aa7c781d2bdf000fbf5007783"
              attributes="vulkan-cts"/>
     <project name="third_party/Vulkan-Headers"
              path="third_party/Vulkan-Headers/src"
@@ -570,7 +574,7 @@
              path="third_party/zlib"
              remote="https://fuchsia.googlesource.com/third_party/zlib"
              gerrithost="https://fuchsia-review.googlesource.com"
-             revision="903e73377f5a7097bd56c05e1a3aa64230fcc606"/>
+             revision="3ee049020ceb58dcde03a44855e9528d3b9476d5"/>
     <project name="third_party/zstd"
              path="third_party/zstd/src"
              remote="https://fuchsia.googlesource.com/third_party/zstd"

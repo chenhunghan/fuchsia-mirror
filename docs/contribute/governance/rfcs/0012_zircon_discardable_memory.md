@@ -346,7 +346,7 @@ having two separate notions of size is confusing and prone to bugs. So until we
 have other concrete use cases that would clearly benefit from having an internal
 size in addition to an external size, we choose to avoid taking that approach.
 
-### Faster locking API with atomics
+### Faster locking API with atomics {:#faster-locking-api-with-atomics}
 
 This locking optimization provides an alternate low-latency option to lock and
 unlock discardable VMOs, and is meant to be used by clients that expect to lock

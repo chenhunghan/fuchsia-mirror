@@ -4,17 +4,25 @@
 
 load(
     "//build/bazel/rules/components:fx_component.bzl",
-    "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":task-exceptions-test"],
+    visibility = ["//src/sys:__pkg__"],
+)
 
 rustc_library(
     name = "task-exceptions",
@@ -66,9 +74,19 @@ fx_component_manifest(
     manifest = "meta/task-exceptions-tests.cml",
 )
 
-fx_component(
+fx_test_component(
     name = "task-exceptions-cmp",
-    testonly = True,
     compiled_manifest = ":task-exceptions-cmp-manifest",
     deps = [":task-exceptions_test_packaged_bin"],
+)
+
+fx_package(
+    name = "task-exceptions-tests",
+    components = ["//src/sys/component_manager/tests/crash_introspect:panic_on_start"],
+    test_components = [":task-exceptions-cmp"],
+)
+
+fx_test(
+    name = "task-exceptions-test",
+    package = ":task-exceptions-tests",
 )

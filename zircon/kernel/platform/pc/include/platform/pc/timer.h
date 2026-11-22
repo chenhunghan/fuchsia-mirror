@@ -8,9 +8,22 @@
 #define ZIRCON_KERNEL_PLATFORM_PC_INCLUDE_PLATFORM_PC_TIMER_H_
 
 #include <stdint.h>
+#include <zircon/compiler.h>
 #include <zircon/time.h>
 
-zx_duration_t convert_raw_tsc_duration_to_nanoseconds(int64_t duration);
-zx_instant_mono_t convert_raw_tsc_timestamp_to_clock_monotonic(int64_t ts);
+__BEGIN_CDECLS
+
+zx_duration_t rust_convert_raw_tsc_duration_to_nanoseconds(int64_t duration);
+zx_instant_mono_t rust_convert_raw_tsc_timestamp_to_clock_monotonic(int64_t ts);
+
+__END_CDECLS
+
+inline zx_duration_t convert_raw_tsc_duration_to_nanoseconds(int64_t duration) {
+  return rust_convert_raw_tsc_duration_to_nanoseconds(duration);
+}
+
+inline zx_instant_mono_t convert_raw_tsc_timestamp_to_clock_monotonic(int64_t ts) {
+  return rust_convert_raw_tsc_timestamp_to_clock_monotonic(ts);
+}
 
 #endif  // ZIRCON_KERNEL_PLATFORM_PC_INCLUDE_PLATFORM_PC_TIMER_H_

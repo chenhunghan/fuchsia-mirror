@@ -47,7 +47,6 @@ fuchsia_driver_component("use_component") {
     ":driver",
     ":use_bind",
   ]
-  info = "meta/use_info.json"
 }
 
 fuchsia_driver_component("no_use_component") {
@@ -58,5 +57,4 @@ fuchsia_driver_component("no_use_component") {
     ":driver",
     ":no_use_bind",
   ]
-  info = "meta/no_use_info.json"
 }

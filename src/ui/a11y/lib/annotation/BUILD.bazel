@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "annotation",
+    hdrs = [
+        "highlight_delegate.h",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    implementation_deps = [
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/ui/scenic/cpp",
+        "//src/lib/fsl",
+        "//src/ui/a11y/lib/util",
+    ],
+    visibility = ["//src/ui/a11y:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
+        "//sdk/fidl/fuchsia.ui.annotation:fuchsia.ui.annotation_hlcpp",
+        "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_hlcpp",
+        "//sdk/fidl/fuchsia.ui.input.accessibility:fuchsia.ui.input.accessibility_hlcpp",
+    ],
+    alwayslink = True,
+)

@@ -48,6 +48,7 @@ fuchsia_library_fuzzer("sysmem_fuzzer") {
     "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//src/sysmem/server:sysmem_common_srcs",
+    "//zircon/system/ulib/image-format",
     "//zircon/system/ulib/sync:sync-cpp",
   ]
 }
@@ -62,6 +63,7 @@ fuchsia_library_fuzzer("sysmem_fuzzer_multi") {
     "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//src/sysmem/server:sysmem_common_srcs",
+    "//zircon/system/ulib/image-format",
     "//zircon/system/ulib/sync:sync-cpp",
   ]
 }

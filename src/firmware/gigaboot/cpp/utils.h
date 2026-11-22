@@ -6,6 +6,7 @@
 #define SRC_FIRMWARE_GIGABOOT_CPP_UTILS_H_
 
 #include <lib/abr/ops.h>
+#include <lib/zircon_boot/zircon_boot.h>
 #include <lib/zx/time.h>
 #include <xefi.h>
 
@@ -165,6 +166,12 @@ std::optional<RebootMode> GetCommandlineRebootMode(bool allow_disk_fallback);
 // Get the reboot mode indicated by |one_shot_flags| and/or the bootbyte data.
 // Returns std::nullopt on failure
 std::optional<RebootMode> GetOneShotRebootMode(AbrDataOneShotFlags one_shot_flags);
+
+// Loads and consumes the desired reboot mode in priority order:
+//   1. UEFI commandline arguments
+//   2. ABR one-shot flags and/or legacy EFI bootbyte (cleared once read)
+//   3. Default to normal boot
+RebootMode LoadRebootMode(ZirconBootOps zb_ops, bool allow_cmdline_disk_fallback);
 
 // Convert hex string to `efi_guid`
 // Input string should be in RFC4122 "registry format"

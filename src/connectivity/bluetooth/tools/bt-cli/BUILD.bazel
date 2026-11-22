@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-cli-unittests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/commands.rs",
+        "src/main.rs",
+        "src/types.rs",
+    ],
+    binary_name = "bt-cli",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.sys:fuchsia.bluetooth.sys_rust",
+        "//src/connectivity/bluetooth/lib/bt-repl",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/tools/lib/pairing-delegate",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:regex",
+    ],
+)
+
+rustc_test(
+    name = "bt_cli_bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/bt-fidl-mocks",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_package(
+    name = "bt-cli-unittests",
+    unit_tests = [":bt_cli_bin_test"],
+)

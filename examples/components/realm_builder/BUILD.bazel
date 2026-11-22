@@ -1,0 +1,140 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":realm-builder-examples"],
+    visibility = ["//examples:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "cpp_bin_packaged",
+    testonly = True,
+    binary = "//examples/components/realm_builder/cpp:bin",
+    binary_name = "cpp_sample_realm",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "cpp-component-manifest",
+    testonly = True,
+    component_name = "cpp",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "//examples/components/realm_builder/cpp:meta/sample_realm.cml",
+)
+
+fx_test_component(
+    name = "cpp-component",
+    compiled_manifest = ":cpp-component-manifest",
+    deps = [":cpp_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "rust_bin_packaged",
+    testonly = True,
+    binary = "//examples/components/realm_builder/rust:rust_sample_realm",
+    binary_name = "rust_sample_realm",
+)
+
+fx_component_manifest(
+    name = "rust-component-manifest",
+    testonly = True,
+    component_name = "rust",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "//examples/components/realm_builder/rust:meta/sample_realm.cml",
+)
+
+fx_test_component(
+    name = "rust-component",
+    compiled_manifest = ":rust-component-manifest",
+    deps = [":rust_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "echo_client_bin_packaged",
+    binary = "//examples/components/routing/rust/echo_client:bin",
+    binary_name = "echo_client_rust",
+)
+
+fx_component_manifest(
+    name = "echo_client_component_manifest",
+    component_name = "echo_client",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_client.cml",
+)
+
+fx_component(
+    name = "echo_client_component",
+    compiled_manifest = ":echo_client_component_manifest",
+    deps = [":echo_client_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "echo_server_bin_packaged",
+    binary = "//examples/components/routing/rust/echo_server:bin",
+    binary_name = "echo_server_rust",
+)
+
+fx_component_manifest(
+    name = "echo_server_component_manifest",
+    component_name = "echo_server",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_server.cml",
+)
+
+fx_component(
+    name = "echo_server_component",
+    compiled_manifest = ":echo_server_component_manifest",
+    deps = [":echo_server_bin_packaged"],
+)
+
+# Run with `fx test realm-builder-examples`.
+fx_package(
+    name = "package",
+    package_name = "realm-builder-examples",
+    testonly = True,
+    components = [
+        ":echo_client_component",
+        ":echo_server_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [
+        ":cpp-component",
+        ":rust-component",
+    ],
+)
+
+fx_test(
+    name = "realm-builder-examples",
+    package = ":package",
+)

@@ -40,5 +40,6 @@ host_rustc_test(
         "//src/lib/fuchsia",
         "//third_party/rust_crates/vendor:camino",
         "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:zip",
     ],
 )

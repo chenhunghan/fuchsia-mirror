@@ -943,6 +943,9 @@ multiconst!(u32, [
     ZX_EXCEPTION_CHANNEL_TYPE_PROCESS = 3;
     ZX_EXCEPTION_CHANNEL_TYPE_JOB = 4;
     ZX_EXCEPTION_CHANNEL_TYPE_JOB_DEBUGGER = 5;
+
+    /// The maximum number of debugger exception channels that can be bound to a job.
+    ZX_EXCEPTION_CHANNEL_JOB_DEBUGGER_MAX_COUNT = 32;
 ]);
 
 /// A byte used only to control memory alignment. All padding bytes are considered equal
@@ -1616,6 +1619,8 @@ multiconst!(zx_excp_policy_code_t, [
     ZX_EXCP_POLICY_CODE_PORT_TOO_MANY_OBSERVERS = 19;
     ZX_EXCP_POLICY_CODE_HANDLE_LEAK             = 20;
     ZX_EXCP_POLICY_CODE_NEW_IOB                 = 21;
+    ZX_EXCP_POLICY_CODE_NEW_SAMPLER             = 22;
+    ZX_EXCP_POLICY_CODE_SPIN_DETECTION          = 23;
 ]);
 
 #[repr(C)]
@@ -3392,6 +3397,7 @@ pub const ZX_IOMMU_MAX_DESC_LEN: usize = 4096;
 multiconst!(u32, [
     ZX_IOMMU_TYPE_STUB = 0;
     ZX_IOMMU_TYPE_INTEL = 1;
+    ZX_IOMMU_TYPE_ARM_SMMU = 2;
 ]);
 
 pub const ZX_SAMPLER_MIN_PERIOD: zx_duration_t = 10_000;
@@ -3699,3 +3705,17 @@ pub struct zx_rseq_t {
 }
 
 pub const ZX_INFO_INVALID_CPU: u32 = 0xFFFFFFFF;
+
+/// Offset of `stack_guard` from the compiler thread pointer in the `*-fuchsia` C/C++ ABI.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub const ZX_TLS_STACK_GUARD_OFFSET: isize = 0x10;
+/// Offset of `unsafe_sp` from the compiler thread pointer in the `*-fuchsia` C/C++ ABI.
+#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+pub const ZX_TLS_UNSAFE_SP_OFFSET: isize = 0x18;
+
+/// Offset of `stack_guard` from the compiler thread pointer in the `*-fuchsia` C/C++ ABI.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+pub const ZX_TLS_STACK_GUARD_OFFSET: isize = -0x10;
+/// Offset of `unsafe_sp` from the compiler thread pointer in the `*-fuchsia` C/C++ ABI.
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
+pub const ZX_TLS_UNSAFE_SP_OFFSET: isize = -0x8;

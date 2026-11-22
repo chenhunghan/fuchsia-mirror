@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
 
 test_suite(
@@ -10,6 +12,16 @@ test_suite(
     tests = [
         "//src/bringup/bin/auto-slot-committer:tests",
         "//src/bringup/bin/console:tests",
+        "//src/bringup/bin/critical-services/storage-watchdog:tests",
         "//src/bringup/bin/ptysvc:tests",
+        "//src/bringup/bin/virtcon:tests",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/bringup/bin/critical-services/storage-watchdog:host_tests",
     ],
 )

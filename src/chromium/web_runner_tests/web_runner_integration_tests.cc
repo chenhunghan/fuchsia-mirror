@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <fuchsia/web/cpp/fidl.h>
+#include <lib/fidl/cpp/binding.h>
 #include <lib/fit/function.h>
 #include <lib/sys/component/cpp/testing/realm_builder.h>
 #include <lib/sys/cpp/service_directory.h>

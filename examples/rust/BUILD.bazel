@@ -25,7 +25,6 @@ fx_unittest_component(
 
 fx_package(
     name = "rust-examples",
-    package_name = "rust-examples",
     test_components = [
         ":testing_lib_test",
         ":testing_integration_test",

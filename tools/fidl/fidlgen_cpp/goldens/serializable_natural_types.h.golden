@@ -112,7 +112,7 @@ class SerializableUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kUnused = 1,  // 0x1
   };
   static constexpr char kSerializableName[] = "test.serializable.SerializableUnion";

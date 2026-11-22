@@ -120,7 +120,7 @@ struct CodingTraits<fidl::basic_ticks<kClockId>> {
 };
 
 template <typename T>
-struct CodingTraits<std::unique_ptr<T>, typename std::enable_if<!IsFidlXUnion<T>::value>::type> {
+struct CodingTraits<std::unique_ptr<T>, std::enable_if_t<!IsFidlUnion<T>::value>> {
   static constexpr size_t kInlineSize = sizeof(uintptr_t);
   template <class EncoderImpl>
   static void Encode(EncoderImpl* encoder, std::unique_ptr<T>* value, size_t offset,

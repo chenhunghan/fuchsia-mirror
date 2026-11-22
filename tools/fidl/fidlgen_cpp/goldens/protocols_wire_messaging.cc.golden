@@ -1065,7 +1065,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithAndWithoutRequestRespons
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithAndWithoutRequestResponse::NoRequestWithResponse>::TransactionalResponse(::fidl::StringView ret)
     : body(::fidl::WireResponse<::test_protocols::WithAndWithoutRequestResponse::NoRequestWithResponse>(ret)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_NoRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_NoRequestWithResponse_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithAndWithoutRequestResponse_NoRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_NoRequestWithResponse_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithAndWithoutRequestResponse::NoRequestWithResponse>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_NoRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_NoRequestWithResponse_DynamicFlags);
@@ -1114,7 +1114,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithAndWithoutRequestRespons
 
     ::fidl::internal::TransactionalRequest<::test_protocols::WithAndWithoutRequestResponse::WithRequestNoResponse>::TransactionalRequest(::fidl::StringView arg)
     : body(::test_protocols::wire::WithAndWithoutRequestResponseWithRequestNoResponseRequest { arg } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestNoResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestNoResponse_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestNoResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestNoResponse_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1141,7 +1141,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithAndWithoutRequestRespons
 
     ::fidl::internal::TransactionalRequest<::test_protocols::WithAndWithoutRequestResponse::WithRequestEmptyResponse>::TransactionalRequest(::fidl::StringView arg)
     : body(::test_protocols::wire::WithAndWithoutRequestResponseWithRequestEmptyResponseRequest { arg } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestEmptyResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestEmptyResponse_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestEmptyResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestEmptyResponse_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1188,7 +1188,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithAndWithoutRequestRespons
 
     ::fidl::internal::TransactionalRequest<::test_protocols::WithAndWithoutRequestResponse::WithRequestWithResponse>::TransactionalRequest(::fidl::StringView arg)
     : body(::test_protocols::wire::WithAndWithoutRequestResponseWithRequestWithResponseRequest { arg } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1214,7 +1214,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithAndWithoutRequestRespons
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithAndWithoutRequestResponse::WithRequestWithResponse>::TransactionalResponse(::fidl::StringView ret)
     : body(::fidl::WireResponse<::test_protocols::WithAndWithoutRequestResponse::WithRequestWithResponse>(ret)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithAndWithoutRequestResponse::WithRequestWithResponse>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_WithRequestWithResponse_DynamicFlags);
@@ -1277,7 +1277,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithAndWithoutRequestRespons
 
     ::fidl::internal::TransactionalEvent<::test_protocols::WithAndWithoutRequestResponse::OnWithResponse>::TransactionalEvent(::fidl::StringView ret)
     : body{ ret } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithAndWithoutRequestResponse_OnWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_OnWithResponse_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithAndWithoutRequestResponse_OnWithResponse_Ordinal, ::test_protocols::kWithAndWithoutRequestResponse_OnWithResponse_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocols::WithAndWithoutRequestResponse::OnWithResponse>::TransactionalEvent() {
@@ -2429,7 +2429,7 @@ return MakeReply(::test_protocols::wire::WithErrorSyntaxHandleInResultResult::Wi
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::ResponseAsStruct>::TransactionalResponse(::test_protocols::wire::WithErrorSyntaxResponseAsStructResult WithErrorSyntaxResponseAsStructResult)
     : body(::fidl::WireResponse<::test_protocols::WithErrorSyntax::ResponseAsStruct>(WithErrorSyntaxResponseAsStructResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_ResponseAsStruct_Ordinal, ::test_protocols::kWithErrorSyntax_ResponseAsStruct_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithErrorSyntax_ResponseAsStruct_Ordinal, ::test_protocols::kWithErrorSyntax_ResponseAsStruct_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::ResponseAsStruct>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_ResponseAsStruct_Ordinal, ::test_protocols::kWithErrorSyntax_ResponseAsStruct_DynamicFlags);
@@ -2494,7 +2494,7 @@ return MakeReply(::test_protocols::wire::WithErrorSyntaxHandleInResultResult::Wi
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::ErrorAsPrimitive>::TransactionalResponse(::test_protocols::wire::WithErrorSyntaxErrorAsPrimitiveResult WithErrorSyntaxErrorAsPrimitiveResult)
     : body(::fidl::WireResponse<::test_protocols::WithErrorSyntax::ErrorAsPrimitive>(WithErrorSyntaxErrorAsPrimitiveResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_ErrorAsPrimitive_Ordinal, ::test_protocols::kWithErrorSyntax_ErrorAsPrimitive_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithErrorSyntax_ErrorAsPrimitive_Ordinal, ::test_protocols::kWithErrorSyntax_ErrorAsPrimitive_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::ErrorAsPrimitive>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_ErrorAsPrimitive_Ordinal, ::test_protocols::kWithErrorSyntax_ErrorAsPrimitive_DynamicFlags);
@@ -2559,7 +2559,7 @@ return MakeReply(::test_protocols::wire::WithErrorSyntaxHandleInResultResult::Wi
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::ErrorAsEnum>::TransactionalResponse(::test_protocols::wire::WithErrorSyntaxErrorAsEnumResult WithErrorSyntaxErrorAsEnumResult)
     : body(::fidl::WireResponse<::test_protocols::WithErrorSyntax::ErrorAsEnum>(WithErrorSyntaxErrorAsEnumResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_ErrorAsEnum_Ordinal, ::test_protocols::kWithErrorSyntax_ErrorAsEnum_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithErrorSyntax_ErrorAsEnum_Ordinal, ::test_protocols::kWithErrorSyntax_ErrorAsEnum_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::ErrorAsEnum>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_ErrorAsEnum_Ordinal, ::test_protocols::kWithErrorSyntax_ErrorAsEnum_DynamicFlags);
@@ -2624,7 +2624,7 @@ return MakeReply(::test_protocols::wire::WithErrorSyntaxHandleInResultResult::Wi
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::HandleInResult>::TransactionalResponse(::test_protocols::wire::WithErrorSyntaxHandleInResultResult WithErrorSyntaxHandleInResultResult)
     : body(::fidl::WireResponse<::test_protocols::WithErrorSyntax::HandleInResult>(std::move(WithErrorSyntaxHandleInResultResult))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_HandleInResult_Ordinal, ::test_protocols::kWithErrorSyntax_HandleInResult_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithErrorSyntax_HandleInResult_Ordinal, ::test_protocols::kWithErrorSyntax_HandleInResult_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithErrorSyntax::HandleInResult>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithErrorSyntax_HandleInResult_Ordinal, ::test_protocols::kWithErrorSyntax_HandleInResult_DynamicFlags);
@@ -3483,7 +3483,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalRequest<::test_protocols::ChannelProtocol::MethodA>::TransactionalRequest(int64_t a, int64_t b)
     : body(::test_protocols::wire::ChannelProtocolMethodARequest { a, b } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MethodA_Ordinal, ::test_protocols::kChannelProtocol_MethodA_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_MethodA_Ordinal, ::test_protocols::kChannelProtocol_MethodA_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -3506,7 +3506,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalEvent<::test_protocols::ChannelProtocol::EventA>::TransactionalEvent(int64_t a, int64_t b)
     : body{ a, b } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_EventA_Ordinal, ::test_protocols::kChannelProtocol_EventA_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_EventA_Ordinal, ::test_protocols::kChannelProtocol_EventA_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocols::ChannelProtocol::EventA>::TransactionalEvent() {
@@ -3537,7 +3537,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalRequest<::test_protocols::ChannelProtocol::MethodB>::TransactionalRequest(int64_t a, int64_t b)
     : body(::test_protocols::wire::ChannelProtocolMethodBRequest { a, b } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MethodB_Ordinal, ::test_protocols::kChannelProtocol_MethodB_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_MethodB_Ordinal, ::test_protocols::kChannelProtocol_MethodB_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -3563,7 +3563,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalResponse<::test_protocols::ChannelProtocol::MethodB>::TransactionalResponse(int64_t result)
     : body(::fidl::WireResponse<::test_protocols::ChannelProtocol::MethodB>(result)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MethodB_Ordinal, ::test_protocols::kChannelProtocol_MethodB_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_MethodB_Ordinal, ::test_protocols::kChannelProtocol_MethodB_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::ChannelProtocol::MethodB>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MethodB_Ordinal, ::test_protocols::kChannelProtocol_MethodB_DynamicFlags);
@@ -3612,7 +3612,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalRequest<::test_protocols::ChannelProtocol::TakeHandle>::TransactionalRequest(::zx::handle&& h)
     : body(::test_protocols::wire::ChannelProtocolTakeHandleRequest { std::move(h) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_TakeHandle_Ordinal, ::test_protocols::kChannelProtocol_TakeHandle_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_TakeHandle_Ordinal, ::test_protocols::kChannelProtocol_TakeHandle_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::ChannelProtocol::TakeHandle>::_CloseHandles() {
         body._CloseHandles();
@@ -3662,7 +3662,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalRequest<::test_protocols::ChannelProtocol::MutateSocket>::TransactionalRequest(::zx::socket&& a)
     : body(::test_protocols::wire::ChannelProtocolMutateSocketRequest { std::move(a) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MutateSocket_Ordinal, ::test_protocols::kChannelProtocol_MutateSocket_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_MutateSocket_Ordinal, ::test_protocols::kChannelProtocol_MutateSocket_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::ChannelProtocol::MutateSocket>::_CloseHandles() {
         body._CloseHandles();
@@ -3691,7 +3691,7 @@ fidl::internal::WireCompleterBase<::test_protocols::ChannelProtocol::MutateSocke
 
     ::fidl::internal::TransactionalResponse<::test_protocols::ChannelProtocol::MutateSocket>::TransactionalResponse(::zx::socket&& b)
     : body(::fidl::WireResponse<::test_protocols::ChannelProtocol::MutateSocket>(std::move(b))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MutateSocket_Ordinal, ::test_protocols::kChannelProtocol_MutateSocket_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kChannelProtocol_MutateSocket_Ordinal, ::test_protocols::kChannelProtocol_MutateSocket_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::ChannelProtocol::MutateSocket>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kChannelProtocol_MutateSocket_Ordinal, ::test_protocols::kChannelProtocol_MutateSocket_DynamicFlags);
@@ -4500,7 +4500,7 @@ fidl::internal::WireCompleterBase<::test_protocols::HandleRightsProtocol::Respon
 
     ::fidl::internal::TransactionalRequest<::test_protocols::HandleRightsProtocol::NoResponseMethod>::TransactionalRequest(::zx::socket&& h)
     : body(::test_protocols::wire::HandleRightsProtocolNoResponseMethodRequest { std::move(h) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kHandleRightsProtocol_NoResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_NoResponseMethod_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kHandleRightsProtocol_NoResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_NoResponseMethod_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::HandleRightsProtocol::NoResponseMethod>::_CloseHandles() {
         body._CloseHandles();
@@ -4530,7 +4530,7 @@ fidl::internal::WireCompleterBase<::test_protocols::HandleRightsProtocol::Respon
 
     ::fidl::internal::TransactionalRequest<::test_protocols::HandleRightsProtocol::ResponseMethod>::TransactionalRequest(::zx::socket&& h)
     : body(::test_protocols::wire::HandleRightsProtocolResponseMethodRequest { std::move(h) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kHandleRightsProtocol_ResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_ResponseMethod_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kHandleRightsProtocol_ResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_ResponseMethod_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::HandleRightsProtocol::ResponseMethod>::_CloseHandles() {
         body._CloseHandles();
@@ -4559,7 +4559,7 @@ fidl::internal::WireCompleterBase<::test_protocols::HandleRightsProtocol::Respon
 
     ::fidl::internal::TransactionalResponse<::test_protocols::HandleRightsProtocol::ResponseMethod>::TransactionalResponse(::zx::socket&& h)
     : body(::fidl::WireResponse<::test_protocols::HandleRightsProtocol::ResponseMethod>(std::move(h))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kHandleRightsProtocol_ResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_ResponseMethod_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kHandleRightsProtocol_ResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_ResponseMethod_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::HandleRightsProtocol::ResponseMethod>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kHandleRightsProtocol_ResponseMethod_Ordinal, ::test_protocols::kHandleRightsProtocol_ResponseMethod_DynamicFlags);
@@ -4607,7 +4607,7 @@ fidl::internal::WireCompleterBase<::test_protocols::HandleRightsProtocol::Respon
 
     ::fidl::internal::TransactionalEvent<::test_protocols::HandleRightsProtocol::AnEvent>::TransactionalEvent(::zx::socket&& h)
     : body{ std::move(h) } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kHandleRightsProtocol_AnEvent_Ordinal, ::test_protocols::kHandleRightsProtocol_AnEvent_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kHandleRightsProtocol_AnEvent_Ordinal, ::test_protocols::kHandleRightsProtocol_AnEvent_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocols::HandleRightsProtocol::AnEvent>::TransactionalEvent() {
@@ -5346,7 +5346,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithProtocolEnds::StructCont
 
     ::fidl::internal::TransactionalRequest<::test_protocols::WithProtocolEnds::ClientEnds>::TransactionalRequest(::fidl::ClientEnd<::test_protocols::DiscoverableProtocol>&& in)
     : body(::test_protocols::wire::WithProtocolEndsClientEndsRequest { std::move(in) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_ClientEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ClientEnds_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithProtocolEnds_ClientEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ClientEnds_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::WithProtocolEnds::ClientEnds>::_CloseHandles() {
         body._CloseHandles();
@@ -5375,7 +5375,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithProtocolEnds::StructCont
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithProtocolEnds::ClientEnds>::TransactionalResponse(::fidl::ClientEnd<::test_protocols::DiscoverableProtocol>&& out)
     : body(::fidl::WireResponse<::test_protocols::WithProtocolEnds::ClientEnds>(std::move(out))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_ClientEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ClientEnds_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithProtocolEnds_ClientEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ClientEnds_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithProtocolEnds::ClientEnds>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_ClientEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ClientEnds_DynamicFlags);
@@ -5427,7 +5427,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithProtocolEnds::StructCont
 
     ::fidl::internal::TransactionalRequest<::test_protocols::WithProtocolEnds::ServerEnds>::TransactionalRequest(::fidl::ServerEnd<::test_protocols::DiscoverableProtocol>&& in)
     : body(::test_protocols::wire::WithProtocolEndsServerEndsRequest { std::move(in) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_ServerEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ServerEnds_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithProtocolEnds_ServerEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ServerEnds_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::WithProtocolEnds::ServerEnds>::_CloseHandles() {
         body._CloseHandles();
@@ -5456,7 +5456,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithProtocolEnds::StructCont
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithProtocolEnds::ServerEnds>::TransactionalResponse(::fidl::ServerEnd<::test_protocols::DiscoverableProtocol>&& out)
     : body(::fidl::WireResponse<::test_protocols::WithProtocolEnds::ServerEnds>(std::move(out))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_ServerEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ServerEnds_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithProtocolEnds_ServerEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ServerEnds_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithProtocolEnds::ServerEnds>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_ServerEnds_Ordinal, ::test_protocols::kWithProtocolEnds_ServerEnds_DynamicFlags);
@@ -5508,7 +5508,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithProtocolEnds::StructCont
 
     ::fidl::internal::TransactionalRequest<::test_protocols::WithProtocolEnds::StructContainingEnds>::TransactionalRequest(::test_protocols::wire::ProtocolEnds&& in)
     : body(::test_protocols::wire::WithProtocolEndsStructContainingEndsRequest { std::move(in) } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_StructContainingEnds_Ordinal, ::test_protocols::kWithProtocolEnds_StructContainingEnds_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithProtocolEnds_StructContainingEnds_Ordinal, ::test_protocols::kWithProtocolEnds_StructContainingEnds_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_protocols::WithProtocolEnds::StructContainingEnds>::_CloseHandles() {
         body._CloseHandles();
@@ -5537,7 +5537,7 @@ fidl::internal::WireCompleterBase<::test_protocols::WithProtocolEnds::StructCont
 
     ::fidl::internal::TransactionalResponse<::test_protocols::WithProtocolEnds::StructContainingEnds>::TransactionalResponse(::test_protocols::wire::ProtocolEnds&& out)
     : body(::fidl::WireResponse<::test_protocols::WithProtocolEnds::StructContainingEnds>(std::move(out))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_StructContainingEnds_Ordinal, ::test_protocols::kWithProtocolEnds_StructContainingEnds_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kWithProtocolEnds_StructContainingEnds_Ordinal, ::test_protocols::kWithProtocolEnds_StructContainingEnds_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::WithProtocolEnds::StructContainingEnds>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kWithProtocolEnds_StructContainingEnds_Ordinal, ::test_protocols::kWithProtocolEnds_StructContainingEnds_DynamicFlags);
@@ -5810,7 +5810,7 @@ fidl::WireServer<::test_protocols::ManyParameters>::Handler fidl::WireServer<::t
 
     ::fidl::internal::TransactionalRequest<::test_protocols::ManyParameters::Fifteen>::TransactionalRequest(bool p1, bool p2, bool p3, bool p4, bool p5, bool p6, bool p7, bool p8, bool p9, bool p10, bool p11, bool p12, bool p13, bool p14, bool p15)
     : body(::test_protocols::wire::ManyParametersFifteenRequest { p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, p13, p14, p15 } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kManyParameters_Fifteen_Ordinal, ::test_protocols::kManyParameters_Fifteen_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kManyParameters_Fifteen_Ordinal, ::test_protocols::kManyParameters_Fifteen_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6091,7 +6091,7 @@ fidl::internal::WireCompleterBase<::test_protocols::MethodWithUnion::UnionMethod
 
     ::fidl::internal::TransactionalRequest<::test_protocols::MethodWithUnion::UnionMethod>::TransactionalRequest(::test_protocols::wire::TheUnion u)
     : body(::test_protocols::wire::MethodWithUnionUnionMethodRequest { u } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kMethodWithUnion_UnionMethod_Ordinal, ::test_protocols::kMethodWithUnion_UnionMethod_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kMethodWithUnion_UnionMethod_Ordinal, ::test_protocols::kMethodWithUnion_UnionMethod_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6117,7 +6117,7 @@ fidl::internal::WireCompleterBase<::test_protocols::MethodWithUnion::UnionMethod
 
     ::fidl::internal::TransactionalResponse<::test_protocols::MethodWithUnion::UnionMethod>::TransactionalResponse(::fidl::WireOptional<::test_protocols::wire::TheUnion> u)
     : body(::fidl::WireResponse<::test_protocols::MethodWithUnion::UnionMethod>(u)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kMethodWithUnion_UnionMethod_Ordinal, ::test_protocols::kMethodWithUnion_UnionMethod_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocols::kMethodWithUnion_UnionMethod_Ordinal, ::test_protocols::kMethodWithUnion_UnionMethod_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocols::MethodWithUnion::UnionMethod>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocols::kMethodWithUnion_UnionMethod_Ordinal, ::test_protocols::kMethodWithUnion_UnionMethod_DynamicFlags);

@@ -2,11 +2,29 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_proc_macro", "rustc_test")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_proc_macro.bzl", "rustc_proc_macro")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fuchsia-rcu-atomic-tests-pkg",
+        ":fuchsia-rcu-tests",
+    ],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fuchsia-rcu-traits_test"],
+    visibility = ["//src/lib:__pkg__"],
 )
 
 _COMMON_SRCS = [
@@ -26,18 +44,14 @@ _COMMON_SRCS = [
     "src/state_machine.rs",
 ]
 
-# @bazel2gn:transformer=deps
-_COMMON_DEPS = [
-    ":fuchsia-rcu-traits",
-    "//sdk/rust/zx",
-    "//src/lib/fuchsia-sync",
-]
-
 rustc_proc_macro(
     name = "fuchsia-rcu-derive",
     srcs = ["macro/src/lib.rs"],
     crate_root = "macro/src/lib.rs",
     edition = "2024",
+    # GN's rustc_macro() transitions to $host_toolchain internally.
+    # @bazel2gn:skip
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//third_party/rust_crates/vendor:proc-macro2",
         "//third_party/rust_crates/vendor:quote",
@@ -55,7 +69,11 @@ rustc_library(
         ":fuchsia-rcu-derive",
     ],
     version = "0.1.0",
-    with_unit_tests = True,
+    visibility = [
+        "//src/lib/fuchsia-sync:__pkg__",
+        "//src/lib/trace/rust:__pkg__",
+        "//src/starnix/lib/starnix_types:__pkg__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:bstr",
         "//third_party/rust_crates/vendor:lock_api",
@@ -65,32 +83,87 @@ rustc_library(
     }),
 )
 
+host_rustc_test(
+    name = "fuchsia-rcu-traits_test",
+    crate = ":fuchsia-rcu-traits",
+    crate_features = ["std"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# Uses Fuchsia-only zx::Futex and fuchsia_sync::Completion APIs.
 rustc_library(
     name = "fuchsia-rcu",
     srcs = _COMMON_SRCS,
     crate_features = ["rseq_backend"],
     edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
     version = "0.1.0",
-    with_unit_tests = True,
-    deps = _COMMON_DEPS + [
+    visibility = [
+        ":__subpackages__",
+        "//examples/rcu:__pkg__",
+        "//src/lib/fuchsia-rcu-collections:__pkg__",
+        "//src/starnix:__subpackages__",
+    ],
+    deps = [
+        ":fuchsia-rcu-traits",
+        "//sdk/rust/zx",
         "//src/lib/fuchsia-rseq",
+        "//src/lib/fuchsia-sync",
     ],
 )
 
+rustc_test(
+    name = "fuchsia-rcu_test",
+    crate = ":fuchsia-rcu",
+    crate_features = ["rseq_backend"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+# bazel2gn does not yet support `parallel` on `fx_unittest_package()`, so the GN
+# copy is defined by hand above the sentinel in BUILD.gn while GN callers remain.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "fuchsia-rcu-tests",
+    # The state machine tests spawn multiple threads and make assertion about
+    # shared global state, so we can't run multiple tests in parallel.
+    parallel = 1,
+    unit_tests = [":fuchsia-rcu_test"],
+)
+
+# Uses Fuchsia-only zx::Futex and fuchsia_sync::Completion APIs.
 rustc_library(
     name = "fuchsia-rcu-atomic",
     testonly = True,
     srcs = _COMMON_SRCS,
     crate_name = "fuchsia_rcu",
     edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
     version = "0.1.0",
-    deps = _COMMON_DEPS,
+    visibility = [":__subpackages__"],
+    deps = [
+        ":fuchsia-rcu-traits",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-sync",
+    ],
 )
 
 rustc_test(
     name = "fuchsia-rcu-atomic-tests",
-    srcs = _COMMON_SRCS,
-    edition = "2024",
+    crate = ":fuchsia-rcu-atomic",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
     version = "0.1.0",
-    deps = _COMMON_DEPS,
+)
+
+# bazel2gn does not yet support `parallel` on `fx_unittest_package()`, so the GN
+# copy is defined by hand above the sentinel in BUILD.gn while GN callers remain.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "fuchsia-rcu-atomic-tests-pkg",
+    package_name = "fuchsia-rcu-atomic-tests",
+    # The state machine tests spawn multiple threads and make assertion about
+    # shared global state, so we can't run multiple tests in parallel.
+    parallel = 1,
+    unit_tests = [":fuchsia-rcu-atomic-tests"],
 )

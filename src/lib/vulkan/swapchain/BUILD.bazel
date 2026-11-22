@@ -1,0 +1,226 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//src/lib/vulkan:vulkan_layer_group.bzl", "vulkan_layer_group")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(swapchain)
+
+fx_cc_library_headers(
+    name = "surface_header",
+    hdrs = ["image_pipe_surface.h"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//src/lib/vulkan:headers"],
+)
+
+fx_cc_library(
+    name = "layer_common",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//third_party/Vulkan-Headers:vulkan_headers",
+        "//third_party/Vulkan-Utility-Libraries:vulkan_layer_settings",
+        "//third_party/Vulkan-ValidationLayers:layer_common",
+    ],
+)
+
+fx_cc_binary(
+    name = "swapchain",
+    srcs = [
+        "fuchsia_platform_event.cc",
+        "image_pipe_surface_async.cc",
+        "image_pipe_surface_async.h",
+        "image_pipe_swapchain_layer.cc",
+        "platform_event.h",
+        "vulkan_utils.cc",
+        "vulkan_utils.h",
+    ],
+    copts = ["-Wno-unused-function"],
+    gn_output_name = "VkLayer_image_pipe_swapchain",
+    linkopts = ["-static-libstdc++"],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":layer_common",
+        ":surface_header",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/ui/scenic/cpp",
+        "//src/lib/fsl",
+        "//src/lib/ui/flatland-frame-scheduling:simple_present",
+        "//zircon/system/ulib/trace",
+    ],
+)
+
+fx_packaged_binary(
+    name = "swapchain_packaged",
+    binary = ":swapchain",
+    binary_name = "VkLayer_image_pipe_swapchain.so",
+    install_root = "lib/",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [":__pkg__"],
+)
+
+resource(
+    name = "swapchain-config",
+    src = "VkLayer_image_pipe_swapchain.json",
+    dest = "data/vulkan/explicit_layer.d/{{source_file_part}}",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [":__pkg__"],
+)
+
+vulkan_layer_group(
+    name = "image_pipe_swapchain_layer",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":swapchain-config",
+        ":swapchain_packaged",
+    ],
+)
+
+fx_cc_library(
+    name = "display",
+    srcs = [
+        "display_coordinator_listener.cc",
+        "fuchsia_platform_event.cc",
+        "image_pipe_surface_display.cc",
+        "vulkan_utils.cc",
+    ],
+    hdrs = [
+        "display_coordinator_listener.h",
+        "image_pipe_surface_display.h",
+        "platform_event.h",
+        "vulkan_utils.h",
+    ],
+    copts = ["-Wno-unused-function"],
+    implementation_deps = [
+        ":layer_common",
+        ":surface_header",
+        "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+        "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "fb",
+    srcs = ["image_pipe_swapchain_layer.cc"],
+    copts = ["-Wno-unused-function"],
+    defines = ["USE_IMAGEPIPE_SURFACE_FB"],
+    gn_output_name = "VkLayer_image_pipe_swapchain_fb",
+    linkopts = ["-static-libstdc++"],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":display",
+        ":layer_common",
+        ":surface_header",
+        "//zircon/system/ulib/trace",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fb_packaged",
+    binary = ":fb",
+    binary_name = "VkLayer_image_pipe_swapchain_fb.so",
+    install_root = "lib/",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [":__pkg__"],
+)
+
+resource(
+    name = "fb-config",
+    src = "VkLayer_image_pipe_swapchain_fb.json",
+    dest = "data/vulkan/explicit_layer.d/{{source_file_part}}",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [":__pkg__"],
+)
+
+vulkan_layer_group(
+    name = "image_pipe_swapchain_fb_layer",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":fb-config",
+        ":fb_packaged",
+    ],
+)
+
+fx_cc_binary(
+    name = "fb_skip_present",
+    srcs = ["image_pipe_swapchain_layer.cc"],
+    copts = ["-Wno-unused-function"],
+    defines = [
+        "USE_IMAGEPIPE_SURFACE_FB",
+        "SKIP_PRESENT",
+    ],
+    gn_output_name = "VkLayer_image_pipe_swapchain_fb_skip_present",
+    linkopts = ["-static-libstdc++"],
+    linkshared = True,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":display",
+        ":layer_common",
+        ":surface_header",
+        "//zircon/system/ulib/trace",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fb_skip_present_packaged",
+    binary = ":fb_skip_present",
+    binary_name = "VkLayer_image_pipe_swapchain_fb_skip_present.so",
+    install_root = "lib/",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [":__pkg__"],
+)
+
+resource(
+    name = "fb_skip_present-config",
+    src = "VkLayer_image_pipe_swapchain_fb_skip_present.json",
+    dest = "data/vulkan/explicit_layer.d/{{source_file_part}}",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [":__pkg__"],
+)
+
+vulkan_layer_group(
+    name = "image_pipe_swapchain_fb_skip_present_layer",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":fb_skip_present-config",
+        ":fb_skip_present_packaged",
+    ],
+)
+
+# LINT.ThenChange(//src/lib/vulkan/swapchain/BUILD.gn:swapchain)

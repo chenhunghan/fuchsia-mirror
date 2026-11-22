@@ -7,12 +7,6 @@
 
 #include <fidl/fuchsia.hardware.usb.endpoint/cpp/fidl.h>
 
-#ifdef DFV2_COMPAT_LOGGING
-#include <lib/driver/compat/cpp/logging.h>  // nogncheck
-#else
-#include <lib/ddk/debug.h>  // nogncheck
-#endif
-
 #include <mutex>
 
 #include <usb/request-fidl.h>
@@ -171,10 +165,10 @@ class EndpointClient : public internal::EndpointClientBase,
   }
 
   void on_fidl_error(fidl::UnbindInfo error) override {
-    if (error.status() == ZX_ERR_CANCELED) {
-      zxlogf(DEBUG, "on_fidl_error: %s", error.FormatDescription().c_str());
+    if (error.is_user_initiated() || error.is_peer_closed() || error.status() == ZX_ERR_CANCELED) {
+      FDF_LOG(DEBUG, "on_fidl_error: %s", error.FormatDescription().c_str());
     } else {
-      zxlogf(ERROR, "on_fidl_error: %s", error.FormatDescription().c_str());
+      FDF_LOG(ERROR, "on_fidl_error: %s", error.FormatDescription().c_str());
     }
     if (on_unbind_) {
       auto cb = std::move(on_unbind_);
@@ -201,20 +195,20 @@ zx_status_t EndpointClient<DeviceType>::Init(uint8_t ep_addr, fidl::ClientEnd<Pr
                                              async_dispatcher_t* dispatcher) {
   auto endpoints = fidl::CreateEndpoints<fuchsia_hardware_usb_endpoint::Endpoint>();
   if (endpoints.is_error()) {
-    zxlogf(ERROR, "Creating endpoint error: %s", zx_status_get_string(endpoints.status_value()));
+    FDF_LOG(ERROR, "Creating endpoint error: %s", zx_status_get_string(endpoints.status_value()));
     return endpoints.status_value();
   }
   auto result = fidl::Call(client)->ConnectToEndpoint({ep_addr, std::move(endpoints->server)});
   if (result.is_error()) {
-    zxlogf(ERROR, "ConnectToEndpoint failed =: %s",
-           result.error_value().FormatDescription().c_str());
+    FDF_LOG(ERROR, "ConnectToEndpoint failed =: %s",
+            result.error_value().FormatDescription().c_str());
     return result.error_value().is_framework_error()
                ? result.error_value().framework_error().status()
                : ZX_ERR_INTERNAL;
   }
   client_.Bind(std::move(endpoints->client), dispatcher, this);
   if (!client_.is_valid()) {
-    zxlogf(ERROR, "Could not bind to endpoint!");
+    FDF_LOG(ERROR, "Could not bind to endpoint!");
     return ZX_ERR_CONNECTION_REFUSED;
   }
 

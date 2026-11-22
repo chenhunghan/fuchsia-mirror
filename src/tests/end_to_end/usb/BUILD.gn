@@ -32,6 +32,12 @@ group("usb_disconnect_test") {
   public_deps = [ "stress:usb_disconnect_test($host_toolchain)" ]
 }
 
+group("scatter_gather_test") {
+  testonly = true
+  public_deps =
+      [ "functional/zero_function:scatter_gather_test($host_toolchain)" ]
+}
+
 group("zero_function_test") {
   testonly = true
   public_deps = [ "functional:zero_function_test($host_toolchain)" ]
@@ -55,6 +61,7 @@ group("zero_function_throughput_large_test") {
 group("zero_function") {
   testonly = true
   public_deps = [
+    ":scatter_gather_test",
     ":zero_function_stress_test",
     ":zero_function_test",
     ":zero_function_throughput_large_test",

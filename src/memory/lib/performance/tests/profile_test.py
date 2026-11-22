@@ -4,7 +4,7 @@
 """Test for profile.py"""
 
 import unittest
-from unittest.mock import Mock
+from unittest import mock
 
 from memory import profile
 from reporting import metrics
@@ -74,7 +74,7 @@ class ProfileTest(unittest.TestCase):
         def ffx_run_fake_implementation(args: list[str]) -> str:
             return MM2_OUTPUT
 
-        dut = Mock()
+        dut = mock.Mock()
         dut.ffx.run.side_effect = ffx_run_fake_implementation
         report = profile.capture(
             dut, buckets_metrics=".*Graphics", board_memory=8 * 1024**3
@@ -104,6 +104,30 @@ class ProfileTest(unittest.TestCase):
             ],
         )
 
+    @mock.patch.object(profile, "time", autospec=True, spec_set=True)
+    def test_elapsed_time(self, mock_time: mock.MagicMock) -> None:
+        mock_time.perf_counter.side_effect = (1.0, 1.5)
+        dut = mock.Mock()
+        dut.ffx.run.return_value = MM2_OUTPUT
+        report = profile.capture(dut, measure_elapsed_time=True)
+
+        elapsed_metrics = tuple(
+            m
+            for m in report.structured
+            if m.label == "Memory/Tool/MemoryProfileElapsedMs"
+        )
+        self.assertSequenceEqual(
+            elapsed_metrics,
+            (
+                metrics.TestCaseResult(
+                    label="Memory/Tool/MemoryProfileElapsedMs",
+                    unit=metrics.Unit.milliseconds,
+                    values=(500.0,),
+                    doc="Wall-clock time taken by 'ffx profile memory' to complete",
+                ),
+            ),
+        )
+
     def test_capture_abridged(self) -> None:
         abridged_output = MM2_OUTPUT.replace(
             '"ComponentDigest":', '"Summary":', 1
@@ -126,7 +150,7 @@ class ProfileTest(unittest.TestCase):
             )
             return abridged_output
 
-        dut = Mock()
+        dut = mock.Mock()
         dut.ffx.run.side_effect = ffx_run_fake_implementation
         report = profile.capture(
             dut,
@@ -161,7 +185,7 @@ class ProfileTest(unittest.TestCase):
                 raise RuntimeError("Boom")
             return MM2_OUTPUT
 
-        dut = Mock()
+        dut = mock.Mock()
         dut.ffx.run.side_effect = ffx_run_fake_implementation
         report = profile.capture(
             dut, principal_groups={"fxfs": "*/fxfs"}, board_memory=8 * 1024**3
@@ -243,4 +267,139 @@ class ProfileTest(unittest.TestCase):
                     },
                 }
             },
+        )
+
+    def test_fuchsia_os_populated_bytes_independent_clamping(self) -> None:
+        anon_bucket = {
+            "name": "[Addl]PopulatedAnonymousBytes",
+            "committed_size": 500_000_000,
+            "populated_size": 500_000_000,
+        }
+        component_profile = {
+            "ComponentDigest": {
+                "kernel": {
+                    "memory_statistics": {
+                        "total_bytes": 8588746752,
+                    },
+                },
+                "principals": [],
+                "digest": {
+                    "buckets": [
+                        anon_bucket,
+                        {
+                            "name": "StarnixContainer",
+                            "committed_size": 200_000_000,
+                            "populated_size": 200_000_000,
+                        },
+                        {
+                            "name": "EngTools",
+                            "committed_size": 50_000_000,
+                            "populated_size": 50_000_000,
+                        },
+                    ]
+                },
+            }
+        }
+
+        # When board_memory < total_bytes, reserved_memory_bytes clamps to 0
+        # without reducing fuchsia_anon_memory_bytes (500M - 200M - 50M = 250M).
+        results_underestimated_board = profile.process_component_profile(
+            principal_groups={},
+            buckets_metrics=None,
+            component_profile=component_profile,
+            board_memory=2 * 1024**3,
+        )
+        self.assertEqual(
+            results_underestimated_board,
+            [
+                metrics.TestCaseResult(
+                    label="Memory/System/FuchsiaOSPopulatedBytes",
+                    unit=metrics.Unit.bytes,
+                    values=[250_000_000],
+                    doc="Fuchsia OS Populated Memory",
+                ),
+            ],
+        )
+
+        # When starnix_bytes + eng_tools_bytes > addl_anon_bytes,
+        # fuchsia_anon_memory_bytes clamps to 0 without reducing
+        # reserved_memory_bytes (8 GiB - 8588746752 = 1187840).
+        anon_bucket["populated_size"] = 100_000_000
+        results_negative_anon = profile.process_component_profile(
+            principal_groups={},
+            buckets_metrics=None,
+            component_profile=component_profile,
+            board_memory=8 * 1024**3,
+        )
+        self.assertEqual(
+            results_negative_anon,
+            [
+                metrics.TestCaseResult(
+                    label="Memory/System/FuchsiaOSPopulatedBytes",
+                    unit=metrics.Unit.bytes,
+                    values=[1187840],
+                    doc="Fuchsia OS Populated Memory",
+                ),
+            ],
+        )
+
+    def test_fuchsia_os_populated_bytes_excludes_erofs_and_ext4(self) -> None:
+        component_profile = {
+            "ComponentDigest": {
+                "kernel": {
+                    "memory_statistics": {
+                        "total_bytes": 8588746752,
+                    },
+                },
+                "principals": [],
+                "digest": {
+                    "buckets": [
+                        {
+                            "name": "[Addl]PopulatedAnonymousBytes",
+                            "committed_size": 500_000_000,
+                            "populated_size": 500_000_000,
+                        },
+                        {
+                            "name": "StarnixContainer",
+                            "committed_size": 200_000_000,
+                            "populated_size": 200_000_000,
+                        },
+                        {
+                            "name": "Erofs",
+                            "committed_size": 120_000_000,
+                            "populated_size": 120_000_000,
+                        },
+                        {
+                            "name": "Ext4",
+                            "committed_size": 30_000_000,
+                            "populated_size": 30_000_000,
+                        },
+                        {
+                            "name": "EngTools",
+                            "committed_size": 50_000_000,
+                            "populated_size": 50_000_000,
+                        },
+                    ]
+                },
+            }
+        }
+
+        # reserved (8 GiB - 8588746752 = 1187840) +
+        # anon (500M - 200M - 120M - 30M - 50M = 100M) = 101_187_840.
+        results = profile.process_component_profile(
+            principal_groups={},
+            buckets_metrics=None,
+            component_profile=component_profile,
+            board_memory=8 * 1024**3,
+        )
+        self.assertEqual(
+            results,
+            [
+                metrics.TestCaseResult(
+                    label="Memory/System/FuchsiaOSPopulatedBytes",
+                    unit=metrics.Unit.bytes,
+                    values=[101_187_840],
+                    doc="Fuchsia OS Populated Memory",
+                ),
+            ],
         )

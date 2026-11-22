@@ -1,0 +1,132 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "test_realm_proxy",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/pkg/lib/blobfs",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/lib/package-directory",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//src/sys/pkg/tests/pkgdir/test_realm_proxy/fidl:fuchsia.pkg.test_rust",
+        "//src/testing/realm_proxy",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# //src/storage/fxfs:fxfs_component is a component, not a crate, so attach it
+# via `data` (which bazel2gn maps to `non_rust_deps` in GN).
+rustc_binary(
+    name = "bin-fxblob",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "test_realm_proxy_fxblob",
+    crate_features = ["use_fxblob"],
+    data = ["//src/storage/fxfs:fxfs_component"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/sys/pkg/lib/blobfs",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/fuchsia-pkg-testing",
+        "//src/sys/pkg/lib/package-directory",
+        "//src/sys/pkg/testing/blobfs-ramdisk",
+        "//src/sys/pkg/tests/pkgdir/test_realm_proxy/fidl:fuchsia.pkg.test_rust",
+        "//src/testing/realm_proxy",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "test_realm_proxy",
+)
+
+fx_component_manifest(
+    name = "test_realm_proxy_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//src/storage/lib/fs_management:client.shard.cml",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/testing/realm_proxy:service/meta/realm_proxy.shard",
+    ],
+    manifest = "meta/default.cml",
+)
+
+fx_component(
+    name = "test_realm_proxy_component",
+    testonly = True,
+    compiled_manifest = ":test_realm_proxy_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "bin_fxblob_packaged",
+    testonly = True,
+    binary = ":bin-fxblob",
+    binary_name = "test_realm_proxy_fxblob",
+)
+
+# Both `test_realm_proxy_manifest` and `test_realm_proxy_fxblob_manifest`
+# compile to `component_name = "default"` (`meta/default.cm` in this Bazel
+# package's output directory), so mark the fxblob manifest and component
+# `manual` to avoid a `meta/default.cm` action conflict under `:all`.
+fx_component_manifest(
+    name = "test_realm_proxy_fxblob_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//src/storage/lib/fs_management:client.shard.cml",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/testing/realm_proxy:service/meta/realm_proxy.shard",
+    ],
+    manifest = "meta/default-fxblob.cml",
+    tags = ["manual"],
+)
+
+fx_component(
+    name = "test_realm_proxy_component_fxblob",
+    testonly = True,
+    compiled_manifest = ":test_realm_proxy_fxblob_manifest",
+    tags = ["manual"],
+    deps = [":bin_fxblob_packaged"],
+)

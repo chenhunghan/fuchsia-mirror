@@ -16,14 +16,13 @@ package(default_applicable_licenses = ["//:license"])
 rustc_test(
     name = "pkg_from_framework_bin",
     srcs = ["pkg_from_framework.rs"],
-    aspect_hints = ["//src/lib/fuchsia-component-test:includes"],
     crate_name = "pkg_from_framework",
     crate_root = "pkg_from_framework.rs",
     edition = "2024",
     deps = [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/sys/lib/cm_rust",
         "//third_party/rust_crates/vendor:anyhow",

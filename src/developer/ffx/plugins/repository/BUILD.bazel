@@ -2,23 +2,52 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//src/developer/ffx/build:gn_ffx_test_data.bzl", "gn_ffx_test_data")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
 
 package(default_applicable_licenses = ["//:license"])
 
-exports_files(
-    ["data/config.json"],
+ffx_plugin(
+    name = "ffx_repository",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    config_data = ["data/config.json"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/repository/create:ffx_repository_create",
+        "//src/developer/ffx/plugins/repository/default:ffx_repository_default",
+        "//src/developer/ffx/plugins/repository/packages:ffx_repository_packages",
+        "//src/developer/ffx/plugins/repository/publish:ffx_repository_publish",
+        "//src/developer/ffx/plugins/repository/serve-archive:ffx_repository_serve_archive",
+        "//src/developer/ffx/plugins/repository/server:ffx_repository_server",
+    ],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
     visibility = ["//src/developer/ffx:__pkg__"],
 )
 
-# Exposes the GN-built ffx-repository subtool and metadata JSON to Bazel host
-# tests until //src/developer/ffx/plugins/repository is migrated to Bazel.
-# @bazel2gn:skip
-gn_ffx_test_data(
-    name = "ffx_repository_tool_test_data",
-    expected_files = [
-        "ffx-repository",
-        "ffx-repository.json",
+# LINT.IfChange(ffx_repository_tool)
+# Avoid instrumenting this target as it has a large negative impact on
+# performance.
+# TODO(https://fxbug.dev/576944236): Disable instrumentation (asan, coverage,
+# profile) for this tool once Rust rules support it in Bazel.
+idk_ffx_tool(
+    name = "ffx_repository_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-repository",
+    visibility = [
+        "//build/bazel/rules/host_tests:__pkg__",
+        "//src/developer/ffx/build/tests:__pkg__",
+        "//src/sys/pkg/tests/system-tests:__pkg__",
     ],
-    visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+    deps = [
+        ":ffx_repository_suite",
+        "//src/lib/fuchsia-async",
+    ],
 )
+# LINT.ThenChange(//src/developer/ffx/plugins/repository/BUILD.gn:ffx_repository_tool)

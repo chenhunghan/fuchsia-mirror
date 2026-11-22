@@ -1,0 +1,123 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":examples_fidl_canvas_baseline_rust_tests"],
+    visibility = ["//examples/fidl/new/canvas/baseline:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "client_bin_packaged",
+    binary = "//examples/fidl/new/canvas/baseline/rust/client:bin",
+    binary_name = "client_bin",
+)
+
+fx_component_manifest(
+    name = "client_manifest",
+    component_name = "canvas_baseline_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//examples/fidl/new/canvas/baseline:meta/client.cml",
+)
+
+fx_component(
+    name = "client",
+    compiled_manifest = ":client_manifest",
+    deps = [
+        ":client_bin_packaged",
+    ],
+)
+
+fx_packaged_binary(
+    name = "server_bin_packaged",
+    binary = "//examples/fidl/new/canvas/baseline/rust/server:bin",
+    binary_name = "server_bin",
+)
+
+fx_component_manifest(
+    name = "server_manifest",
+    component_name = "canvas_baseline_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//examples/fidl/new/canvas/baseline:meta/server.cml",
+)
+
+fx_component(
+    name = "server",
+    compiled_manifest = ":server_manifest",
+    deps = [":server_bin_packaged"],
+)
+
+fx_package(
+    name = "examples_fidl_canvas_baseline_rust",
+    components = [
+        ":client",
+        ":server",
+    ],
+    visibility = ["//examples/fidl/new/canvas/baseline:__pkg__"],
+)
+
+# The following is an internal test harness for validating this example. It is
+# not part of the example itself, and exists as a validation method to ensure
+# that the code does not go stale.
+fx_packaged_binary(
+    name = "runner_bin_packaged",
+    testonly = True,
+    binary = "//examples/fidl/new/canvas/baseline/test:runner_bin",
+    binary_name = "runner_bin",
+)
+
+fx_component_manifest(
+    name = "test_manifest",
+    testonly = True,
+    component_name = "test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "//examples/fidl/new/canvas/baseline/test:meta/runner.cml",
+)
+
+fx_test_component(
+    name = "test",
+    compiled_manifest = ":test_manifest",
+    deps = [
+        ":runner_bin_packaged",
+        "//examples/fidl/new/canvas/baseline/test/goldens:resources",
+    ],
+)
+
+fx_package(
+    name = "examples_fidl_canvas_baseline_rust_tests_pkg",
+    package_name = "examples_fidl_canvas_baseline_rust_tests",
+    testonly = True,
+    components = [
+        ":client",
+        ":server",
+        "//examples/fidl/new/canvas/baseline/realm",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":test"],
+)
+
+fx_test(
+    name = "examples_fidl_canvas_baseline_rust_tests",
+    package = ":examples_fidl_canvas_baseline_rust_tests_pkg",
+)

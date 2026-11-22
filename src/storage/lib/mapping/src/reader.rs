@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{BLOCK_SIZE, Extents, File, PagePrecommit};
+use crate::{BLOCK_SIZE, DeliveryHandler, Extents, File, Files, PagePrecommit};
 use anyhow::{Error, anyhow, bail};
 use fuchsia_sync::{Mutex, MutexGuard};
 use std::cmp::{Ordering, Reverse, max, min};
@@ -456,24 +456,66 @@ pub fn read_buffer_from_extents(
     )
 }
 
+// Wraps a `BlockService` so every individual `read_blocks` sub-request clones `guard` into its
+// completion callback, keeping `guard` alive until all submitted physical block reads finish even
+// if an outer multi-extent (`SplittableBuffer`) or multi-chunk (`ReadContext`) read aborts early.
+pub(crate) struct GuardedBlockService<'a, S: BlockService + ?Sized, G> {
+    inner: &'a S,
+    guard: G,
+}
+
+impl<'a, S: BlockService + ?Sized, G> GuardedBlockService<'a, S, G> {
+    pub(crate) fn new(inner: &'a S, guard: G) -> Self {
+        Self { inner, guard }
+    }
+}
+
+impl<S: BlockService + ?Sized, G: Clone + Send + Sync + 'static> BlockService
+    for GuardedBlockService<'_, S, G>
+{
+    fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
+        self.inner.allocate_buffer(max_len)
+    }
+
+    fn read_blocks(
+        &self,
+        device_offset: u64,
+        dest_buffer: OwnedBuffer,
+        on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
+    ) -> Result<(), Error> {
+        let guard = self.guard.clone();
+        self.inner.read_blocks(
+            device_offset,
+            dest_buffer,
+            Box::new(move |res| {
+                let _guard = guard;
+                on_complete(res);
+            }),
+        )
+    }
+}
+
 /// A [`BlockService`] that maps logical block offsets through the extents of a mapped [`File`]
-/// in a parent session.
-pub struct ChildBlockService<S: ?Sized> {
+/// registered under `parent_key` in a parent session's [`Files`].
+pub struct ChildBlockService<S: ?Sized, D: DeliveryHandler> {
     parent_service: Arc<S>,
-    file: Arc<File>,
+    parent_files: Arc<Files<S, D>>,
+    parent_key: u64,
 }
 
-impl<S: BlockService + ?Sized> ChildBlockService<S> {
-    pub fn new(parent_service: Arc<S>, file: Arc<File>) -> Self {
-        Self { parent_service, file }
+impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> ChildBlockService<S, D> {
+    pub fn new(parent_service: Arc<S>, parent_files: Arc<Files<S, D>>, parent_key: u64) -> Self {
+        Self { parent_service, parent_files, parent_key }
     }
 
-    pub fn file(&self) -> &Arc<File> {
-        &self.file
+    fn file(&self) -> Option<Arc<File>> {
+        self.parent_files.get_file(self.parent_key)
     }
 }
 
-impl<S: BlockService + ?Sized> BlockService for ChildBlockService<S> {
+impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> BlockService
+    for ChildBlockService<S, D>
+{
     fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
         self.parent_service.allocate_buffer(max_len)
     }
@@ -484,11 +526,15 @@ impl<S: BlockService + ?Sized> BlockService for ChildBlockService<S> {
         dest_buffer: OwnedBuffer,
         on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
     ) -> Result<(), Error> {
+        let file = self
+            .file()
+            .ok_or_else(|| anyhow!("Parent file {} is no longer mapped", self.parent_key))?;
+        let guarded_service = GuardedBlockService::new(self.parent_service.as_ref(), file.clone());
         read_buffer_from_extents(
-            self.file.extents(),
+            file.extents(),
             device_offset,
             dest_buffer,
-            self.parent_service.as_ref(),
+            &guarded_service,
             on_complete,
         )
     }
@@ -678,6 +724,7 @@ pub(crate) mod tests {
             ControlFlow::Continue(())
         });
 
+        assert_eq!(service.read_count(), 2);
         assert!(completed.load(Ordering::Relaxed));
     }
 
@@ -1107,9 +1154,9 @@ pub(crate) mod tests {
 
     #[test]
     fn test_read_aligned_range_extent_beyond_actual_end_break() {
-        let inner = FakeBlockService::new_with_cap(vec![0u8; 8192], Some(4096));
+        let inner = FakeBlockService::new_with_cap(vec![0u8; 12288], Some(4096));
         let mappings = Extents::try_new(
-            [Extent::new(0..4096, Some(0)), Extent::new(4096..8192, Some(4096))],
+            [Extent::new(0..4096, Some(0)), Extent::new(4096..8192, Some(8192))],
             0,
         )
         .unwrap();
@@ -1137,6 +1184,7 @@ pub(crate) mod tests {
             0,
         )
         .unwrap();
+        assert_eq!(mappings.len(), 1);
 
         let count = Arc::new(AtomicUsize::new(0));
         let count_clone = count.clone();
@@ -1154,6 +1202,7 @@ pub(crate) mod tests {
         });
 
         assert_eq!(count.load(Ordering::Relaxed), 1);
+        assert_eq!(service.read_count(), 1);
         assert!(completed.load(Ordering::Relaxed));
     }
 
@@ -1425,13 +1474,16 @@ pub(crate) mod tests {
     fn test_child_block_service() {
         let mut device_data = vec![0u8; 16384];
         device_data[4096..8192].fill(0x55);
+        device_data[8192..12288].fill(0xAA);
         let parent_service = Arc::new(FakeBlockService::new(device_data));
 
         let mappings = Extents::try_new([Extent::new(0..4096, Some(4096))], 0).unwrap();
         let file = Arc::new(File::new(mappings, 4096, Transform::None));
+        let parent_files = Arc::new(Files::new_without_pager(parent_service.clone()));
+        parent_files.insert(1, file);
 
-        let child_service = ChildBlockService::new(parent_service.clone(), file.clone());
-        assert_eq!(child_service.file().extents().iter_extents(0).count(), 1);
+        let child_service = ChildBlockService::new(parent_service.clone(), parent_files.clone(), 1);
+        assert_eq!(child_service.file().expect("parent file").extents().iter_extents(0).count(), 1);
 
         let dest = child_service.allocate_buffer(4096);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1448,6 +1500,29 @@ pub(crate) mod tests {
         let buffer = rx.recv().unwrap().unwrap();
         assert_eq!(buffer.len(), 4096);
         assert!(buffer.as_ptr_slice().iter_as::<u8>().all(|b| b == 0x55));
+
+        // Overwrite the parent file in `parent_files` and confirm `child_service` dynamically
+        // resolves the updated extents.
+        let new_mappings =
+            Extents::try_new([Extent::new(0..4096, Some(8192))], 0).expect("new extents");
+        let new_file = Arc::new(File::new(new_mappings, 4096, Transform::None));
+        parent_files.insert(1, new_file);
+
+        let dest2 = child_service.allocate_buffer(4096);
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        child_service
+            .read_blocks(
+                0,
+                dest2,
+                Box::new(move |res| {
+                    tx2.send(res).expect("send completion");
+                }),
+            )
+            .expect("read_blocks after parent overwrite");
+
+        let buffer2 = rx2.recv().expect("recv completion").expect("read_blocks result");
+        assert_eq!(buffer2.len(), 4096);
+        assert!(buffer2.as_ptr_slice().iter_as::<u8>().all(|b| b == 0xAA));
     }
 
     #[test]

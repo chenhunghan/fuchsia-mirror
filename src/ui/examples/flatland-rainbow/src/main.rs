@@ -566,7 +566,17 @@ async fn main() {
           present_parameters = sched_lib.wait_to_update().fuse() => {
             trace::duration!("gfx", "FlatlandApp::PresentBegin");
             app.draw(present_parameters.expected_presentation_time, renderer.deref_mut());
-            trace::flow_begin!("gfx", "Flatland::PerAppPresent[flatland-rainbow-example]", present_count.into());
+            {
+                // Perfetto binds `flow_begin!` to its innermost enclosing slice, so this
+                // post-draw leaf slice lets `AppRenderLatencyMetricsProcessor` exclude
+                // `app.draw()` from `AppRenderVsyncLatency`.
+                trace::duration!("gfx", "FlatlandApp::PresentFlowBegin");
+                trace::flow_begin!(
+                    "gfx",
+                    "Flatland::PerAppPresent[flatland-rainbow-example]",
+                    present_count.into()
+                );
+            }
             present_count += 1;
             let mut present_args = fland::PresentArgs::from(present_parameters);
             let counter_for_wait = use_present_fences.then(|| {

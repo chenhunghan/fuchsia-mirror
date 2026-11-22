@@ -97,7 +97,7 @@ view (if the error is recoverable) or crash/restart (if not recoverable). Care
 must be taken in the UI framework implementation to avoid repeated attempts to
 connect with an invalid semantic tree.
 
-### Hit testing
+### Hit testing {:#hit-testing}
 
 Hit testing is the process of translating a location on screen to a particular
 semantic node. In order to hit test on Fuchsia, the framework must solve two

@@ -13,8 +13,8 @@ use ip_test_macro::ip_test;
 use net_declare::{net_ip_v4, net_ip_v6, net_mac};
 use net_types::ethernet::Mac;
 use net_types::ip::{
-    AddrSubnet, GenericOverIp, Ip, IpAddr, IpAddress, IpInvariant, IpVersion, Ipv4, Ipv4Addr, Ipv6,
-    Ipv6Addr, Mtu, Subnet,
+    AddrSubnet, GenericOverIp, Ip, IpAddr, IpAddress, IpInvariant, IpMtu as _, IpVersion, Ipv4,
+    Ipv4Addr, Ipv6, Ipv6Addr, Mtu, Subnet,
 };
 use net_types::{
     MulticastAddr, NonMappedAddr, SpecifiedAddr, UnicastAddr, Witness as _, ZonedAddr,
@@ -61,7 +61,7 @@ use netstack3_base::{
 };
 use netstack3_core::device::{
     DeviceId, EthernetCreationProperties, EthernetLinkDevice, MaxEthernetFrameSize,
-    RecvEthernetFrameMeta,
+    RecvEthernetFrameMeta, WeakDeviceId,
 };
 use netstack3_core::filter::{
     Action, Hook, IpRoutines, MarkAction, NatRoutines, PacketMatcher, Routine, Routines, Rule,
@@ -75,6 +75,7 @@ use netstack3_core::testutil::{
     Ctx, CtxPairExt as _, DEFAULT_INTERFACE_METRIC, FakeBindingsCtx, FakeCtx, FakeCtxBuilder,
     new_simple_fake_network,
 };
+use netstack3_core::udp::UdpSocketId;
 use netstack3_core::{BindingsContext, CoreCtx, IpExt, StackState};
 use netstack3_device::queue::{ReceiveQueueContext as _, ReceiveQueueHandler as _};
 use netstack3_device::testutil::IPV6_MIN_IMPLIED_MAX_FRAME_SIZE;
@@ -1737,7 +1738,7 @@ impl GetPmtuIpExt for Ipv4 {
     ) -> Option<Mtu> {
         let local_ip = PmtuSrcAddr::new(local_ip).unwrap();
         let remote_ip = PmtuDstAddr::new(remote_ip).unwrap();
-        state.ipv4().inner.pmtu_cache().lock().get_pmtu(local_ip, remote_ip)
+        state.ipv4().inner.pmtu_cache().lock().get_pmtu(local_ip, remote_ip).map(|mtu| mtu.get())
     }
 }
 
@@ -1749,10 +1750,32 @@ impl GetPmtuIpExt for Ipv6 {
     ) -> Option<Mtu> {
         let local_ip = PmtuSrcAddr::new(local_ip).unwrap();
         let remote_ip = PmtuDstAddr::new(remote_ip).unwrap();
-        state.ipv6().inner.pmtu_cache().lock().get_pmtu(local_ip, remote_ip)
+        state.ipv6().inner.pmtu_cache().lock().get_pmtu(local_ip, remote_ip).map(|mtu| mtu.get())
     }
 }
 
+/// The local port of the UDP socket used in PMTU tests.
+const PMTU_LOCAL_PORT: NonZeroU16 = NonZeroU16::new(1234).unwrap();
+/// The remote port of the original UDP packets used in PMTU tests.
+const PMTU_REMOTE_PORT: NonZeroU16 = NonZeroU16::new(5678).unwrap();
+
+/// Creates a UDP socket listening on `local_ip:PMTU_LOCAL_PORT`, so that ICMP
+/// errors for the original packets created by [`create_orig_packet_buf`] are
+/// delivered to a socket.
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
+fn listen_pmtu_udp_socket<I: IpExt + TestIpExt>(
+    ctx: &mut FakeCtx,
+) -> UdpSocketId<I, WeakDeviceId<FakeBindingsCtx>, FakeBindingsCtx> {
+    let fake_config = I::TEST_ADDRS;
+    let mut udp_api = ctx.core_api().udp::<I>();
+    let socket = udp_api.create();
+    udp_api
+        .listen(&socket, Some(ZonedAddr::Unzoned(fake_config.local_ip)), Some(PMTU_LOCAL_PORT))
+        .unwrap();
+    socket
+}
+
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
 #[ip_test(I)]
 #[test_case(false; "from remote")]
 #[test_case(true; "from router")]
@@ -1769,13 +1792,15 @@ fn test_ip_update_pmtu<I: GetPmtuIpExt>(from_router: bool) {
     let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.clone()).build();
     let device: DeviceId<_> = device_ids[0].clone().into();
     let frame_dst = LocalFrameDestination::Individual { local: () };
+    // NB: Setup a corresponding UDP socket so that the PMTU update is considered valid.
+    let _socket = listen_pmtu_udp_socket::<I>(&mut ctx);
 
     let router_ip = I::get_other_remote_ip_address(1).get();
     let icmp_src_ip = if from_router { router_ip } else { fake_config.remote_ip.get() };
 
     // Update PMTU from None.
 
-    let new_mtu1 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 100);
+    let new_mtu1 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 100);
 
     // Create ICMP IP buf
     let packet_buf = create_packet_too_big_buf(
@@ -1806,7 +1831,7 @@ fn test_ip_update_pmtu<I: GetPmtuIpExt>(from_router: bool) {
 
     // Don't update PMTU when current PMTU is less than reported MTU.
 
-    let new_mtu2 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 200);
+    let new_mtu2 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 200);
 
     // Create ICMP IP buf with MTU larger than current PMTU.
     let packet_buf = create_packet_too_big_buf(
@@ -1836,7 +1861,7 @@ fn test_ip_update_pmtu<I: GetPmtuIpExt>(from_router: bool) {
 
     // Update PMTU when current PMTU is greater than the reported MTU.
 
-    let new_mtu3 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 50);
+    let new_mtu3 = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 50);
 
     // Create ICMP IP buf with MTU smaller than current PMTU.
     let packet_buf = create_packet_too_big_buf(
@@ -1865,6 +1890,7 @@ fn test_ip_update_pmtu<I: GetPmtuIpExt>(from_router: bool) {
     );
 }
 
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
 #[ip_test(I)]
 fn test_ip_update_pmtu_too_low<I: GetPmtuIpExt>() {
     // Test receiving a Packet Too Big (IPv6) or Dest Unreachable
@@ -1875,10 +1901,12 @@ fn test_ip_update_pmtu_too_low<I: GetPmtuIpExt>() {
     let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.clone()).build();
     let device: DeviceId<_> = device_ids[0].clone().into();
     let frame_dst = LocalFrameDestination::Individual { local: () };
+    // NB: Setup a corresponding UDP socket so that the PMTU update is considered valid.
+    let _socket = listen_pmtu_udp_socket::<I>(&mut ctx);
 
     // Update PMTU from None but with an MTU too low.
 
-    let new_mtu1 = u32::from(I::MINIMUM_LINK_MTU) - 1;
+    let new_mtu1 = u32::from(I::MINIMUM_LINK_MTU.get()) - 1;
 
     // Create ICMP IP buf
     let packet_buf = create_packet_too_big_buf(
@@ -1892,8 +1920,49 @@ fn test_ip_update_pmtu_too_low<I: GetPmtuIpExt>() {
     // Receive the IP packet.
     ctx.test_api().receive_ip_packet::<I, _>(&device, Some(frame_dst), packet_buf);
 
-    // Should have dispatched the packet.
-    IpCounterExpectations::<I>::expect_dispatched(1).assert_counters(&ctx.core_ctx(), &device);
+    // Should have dispatched the packet and delivered the error to the
+    // transport layer, which does not update the PMTU cache as the MTU is too
+    // low.
+    IpCounterExpectations::<I> {
+        receive_icmp_error: 1,
+        ..IpCounterExpectations::expect_dispatched(1)
+    }
+    .assert_counters(&ctx.core_ctx(), &device);
+
+    assert_eq!(
+        I::get_pmtu(&ctx.core_ctx, fake_config.local_ip.get(), fake_config.remote_ip.get()),
+        None
+    );
+}
+
+#[ip_test(I)]
+fn test_ip_update_pmtu_no_matching_socket<I: GetPmtuIpExt>() {
+    let fake_config = I::TEST_ADDRS;
+    let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.clone()).build();
+    let device: DeviceId<_> = device_ids[0].clone().into();
+    let frame_dst = LocalFrameDestination::Individual { local: () };
+
+    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 100);
+
+    // Create ICMP IP buf
+    let packet_buf = create_packet_too_big_buf(
+        fake_config.remote_ip.get(),
+        fake_config.local_ip.get(),
+        u16::try_from(u32::from(new_mtu)).unwrap(),
+        create_orig_packet_buf::<I>(fake_config.local_ip.get(), fake_config.remote_ip.get(), 8)
+            .into(),
+    );
+
+    // Receive the IP packet.
+    ctx.test_api().receive_ip_packet::<I, _>(&device, Some(frame_dst), packet_buf);
+
+    // Should have dispatched the packet, and ignored it in the transport layer since there's no
+    // matching socket.
+    IpCounterExpectations::<I> {
+        receive_icmp_error: 1,
+        ..IpCounterExpectations::expect_dispatched(1)
+    }
+    .assert_counters(&ctx.core_ctx(), &device);
 
     assert_eq!(
         I::get_pmtu(&ctx.core_ctx, fake_config.local_ip.get(), fake_config.remote_ip.get()),
@@ -1912,7 +1981,7 @@ fn test_ip_update_pmtu_unparsable_original_packet<I: GetPmtuIpExt>() {
     let device: DeviceId<_> = device_ids[0].clone().into();
     let frame_dst = LocalFrameDestination::Individual { local: () };
 
-    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 100);
+    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 100);
 
     // Create ICMP IP buf with an empty original packet.
     let packet_buf = create_packet_too_big_buf(
@@ -1966,7 +2035,7 @@ fn test_ip_update_pmtu_invalid_original_addrs<I: GetPmtuIpExt>(invalid: InvalidP
         InvalidPmtuPath::UnspecifiedDst => (fake_config.local_ip.get(), I::UNSPECIFIED_ADDRESS),
     };
 
-    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 100);
+    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 100);
 
     // Create ICMP IP buf
     let packet_buf = create_packet_too_big_buf(
@@ -1995,6 +2064,7 @@ fn test_ip_update_pmtu_invalid_original_addrs<I: GetPmtuIpExt>(invalid: InvalidP
     );
 }
 
+#[netstack3_core::context_ip_bounds(I, FakeBindingsCtx)]
 #[ip_test(I)]
 fn test_ip_update_pmtu_multicast_destination<I: GetPmtuIpExt>() {
     // Verify PMTU updates apply to multicast destinations.
@@ -2003,9 +2073,11 @@ fn test_ip_update_pmtu_multicast_destination<I: GetPmtuIpExt>() {
     let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.clone()).build();
     let device: DeviceId<_> = device_ids[0].clone().into();
     let frame_dst = LocalFrameDestination::Individual { local: () };
+    // NB: Setup a corresponding UDP socket so that the PMTU update is considered valid.
+    let _socket = listen_pmtu_udp_socket::<I>(&mut ctx);
     let group = I::get_multicast_addr(1).get();
 
-    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU) + 100);
+    let new_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) + 100);
 
     // Create ICMP IP buf
     let packet_buf = create_packet_too_big_buf(
@@ -2028,14 +2100,16 @@ fn test_ip_update_pmtu_multicast_destination<I: GetPmtuIpExt>() {
     assert_eq!(I::get_pmtu(&ctx.core_ctx, fake_config.local_ip.get(), group).unwrap(), new_mtu);
 }
 
-/// Create buffer to be used as the ICMP message body
-/// where the original packet's body  length is `body_len`.
+/// Create buffer to be used as the ICMP message body where the original
+/// packet carries a UDP packet from `PMTU_LOCAL_PORT` to `PMTU_REMOTE_PORT`
+/// with a body of `body_len` bytes.
 fn create_orig_packet_buf<I: IpExt>(
     src_ip: I::Addr,
     dst_ip: I::Addr,
     body_len: usize,
 ) -> Buf<Vec<u8>> {
     Buf::new(vec![0; body_len], ..)
+        .wrap_in(UdpPacketBuilder::new(src_ip, dst_ip, Some(PMTU_LOCAL_PORT), PMTU_REMOTE_PORT))
         .wrap_in(I::PacketBuilder::new(src_ip, dst_ip, 64, IpProto::Udp.into()))
         .serialize_vec_outer(&mut NetworkSerializationContext::default())
         .unwrap()
@@ -2056,6 +2130,11 @@ fn test_ipv4_remote_no_rfc1191(from_router: bool) {
     let (mut ctx, device_ids) = FakeCtxBuilder::with_addrs(fake_config.clone()).build();
     let device: DeviceId<_> = device_ids[0].clone().into();
     let frame_dst = LocalFrameDestination::Individual { local: () };
+    // NB: Setup a corresponding UDP socket so that the PMTU update is considered valid.
+    let _socket = listen_pmtu_udp_socket::<Ipv4>(&mut ctx);
+
+    // The original packet's total length is the IPv4 header (20 bytes) plus
+    // the UDP header (8 bytes) plus the body length.
 
     let router_ip = Ipv4::get_other_remote_ip_address(1).get();
     let icmp_src_ip = if from_router { router_ip } else { fake_config.remote_ip.get() };
@@ -2063,7 +2142,7 @@ fn test_ipv4_remote_no_rfc1191(from_router: bool) {
     // Update from None.
 
     // Create ICMP IP buf w/ orig packet body len = 500; orig packet len =
-    // 520
+    // 528
     let packet_buf = create_packet_too_big_buf(
         icmp_src_ip,
         fake_config.local_ip.get(),
@@ -2099,7 +2178,7 @@ fn test_ipv4_remote_no_rfc1191(from_router: bool) {
 
     // Don't Update when packet size is too small.
 
-    // Create ICMP IP buf w/ orig packet body len = 1; orig packet len = 21
+    // Create ICMP IP buf w/ orig packet body len = 1; orig packet len = 29
     let packet_buf = create_packet_too_big_buf(
         icmp_src_ip,
         fake_config.local_ip.get(),
@@ -2111,7 +2190,9 @@ fn test_ipv4_remote_no_rfc1191(from_router: bool) {
     // Receive the IP packet.
     ctx.test_api().receive_ip_packet::<Ipv4, _>(&device, Some(frame_dst), packet_buf);
 
-    // Should have dispatched the packet.
+    // Should have dispatched the packet and delivered the error to the
+    // transport layer, which does not update the PMTU cache as there is no
+    // valid lower PMTU value.
     IpCounterExpectations::<Ipv4> {
         receive_icmp_error: 2,
         ..IpCounterExpectations::expect_dispatched(2)
@@ -2128,7 +2209,7 @@ fn test_ipv4_remote_no_rfc1191(from_router: bool) {
 
     // Update to lower PMTU estimate based on original packet size.
 
-    // Create ICMP IP buf w/ orig packet body len = 60; orig packet len = 80
+    // Create ICMP IP buf w/ orig packet body len = 60; orig packet len = 88
     let packet_buf = create_packet_too_big_buf(
         icmp_src_ip,
         fake_config.local_ip.get(),
@@ -2159,7 +2240,7 @@ fn test_ipv4_remote_no_rfc1191(from_router: bool) {
     // packet size is higher than current PMTU.
 
     // Create ICMP IP buf w/ orig packet body len = 290; orig packet len =
-    // 310
+    // 318
     let packet_buf = create_packet_too_big_buf(
         icmp_src_ip,
         fake_config.local_ip.get(),
@@ -2568,7 +2649,7 @@ fn test_drop_multicast_source<I: IpExt + TestIpExt>() {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: I::TEST_ADDRS.local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU.get()).unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         )

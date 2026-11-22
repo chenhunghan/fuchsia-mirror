@@ -778,8 +778,8 @@ Some ideas for future direction might be:
 
 ### Alternative: comparison to the command pattern
 
-The [command pattern](/docs/development/api/fidl.md#command-union) is useful to
-allow clients to batch many requests to be processed by a server. It is also
+The [command pattern](/docs/development/api/fidl.md#command-pattern) is useful
+to allow clients to batch many requests to be processed by a server. It is also
 possible to use the command pattern to achieve the kind of evolvability
 described in this RFC.
 
@@ -1000,7 +1000,7 @@ can receive both one way and two way interactions:
 [`zx_channel_write`]: /reference/syscalls/channel_write.md
 [RFC-0024]: 0024_mandatory_source_compatibility.md
 [RFC-0033]: 0033_handling_unknown_fields_strictness.md
-[RFC-0037-transactional-message-header-v3]: 0037_transactional_message_header_v3.md#transactional-message-header-v3
+[RFC-0037-transactional-message-header-v3]: 0037_transactional_message_header_v3.md#version-3
 [RFC-0037]: 0037_transactional_message_header_v3.md
 [RFC-0057]: 0057_default_no_handles.md
 [RFC-0060]: 0060_error_handling.md

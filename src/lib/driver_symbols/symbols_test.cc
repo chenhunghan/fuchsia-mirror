@@ -153,4 +153,69 @@ TEST(SymbolsTest, ThreadSymbolsRestrictedDriver) {
   ASSERT_EQ(*result, want_symbols);
 }
 
+TEST(SymbolsTest, EmptySymbolsTable) {
+  constexpr std::string_view kDriverUrl = "fuchsia-boot:///#meta/driver.cm";
+
+  zx::vmo vmo;
+  ASSERT_NO_FATAL_FAILURE(CreateFakeElf({}, &vmo));
+  auto result = driver_symbols::FindRestrictedSymbols(zx::unowned(vmo), kDriverUrl);
+  ASSERT_OK(result);
+  ASSERT_EQ(result->size(), 0);
+}
+
+TEST(SymbolsTest, DynsymAfterLeadingSections) {
+  constexpr std::string_view kDriverUrl = "fuchsia-boot:///#meta/driver.cm";
+  constexpr uint64_t kDynamicSymbolsTableOffset = 0x0500;
+  constexpr uint64_t kStringTableOffset = 0x1ff0;
+  constexpr uint64_t kSectionHeaderTableOffset = 0x2500;
+  constexpr uint64_t kVmoSize = 0x4000;
+
+  Elf64_Ehdr elf_header = {
+      .e_ident = {0x7f, 'E', 'L', 'F'},
+      .e_shoff = kSectionHeaderTableOffset,
+      .e_shentsize = sizeof(Elf64_Shdr),
+      .e_shnum = 4,
+  };
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(kVmoSize, 0, &vmo));
+  ASSERT_OK(vmo.write(&elf_header, 0, sizeof(elf_header)));
+
+  constexpr std::string_view kSym = "dlopen";
+  Elf64_Sym sym_entries[2] = {
+      {.st_name = 1},
+      {.st_name = 999},  // Out-of-bounds st_name should be skipped safely.
+  };
+  ASSERT_OK(vmo.write(sym_entries, kDynamicSymbolsTableOffset, sizeof(sym_entries)));
+  ASSERT_OK(vmo.write(kSym.data(), kStringTableOffset + 1, kSym.size() + 1));
+
+  Elf64_Shdr section_headers[4] = {
+      {.sh_type = SHT_NULL},
+      {.sh_type = SHT_PROGBITS},
+      {
+          .sh_type = SHT_DYNSYM,
+          .sh_offset = kDynamicSymbolsTableOffset,
+          .sh_size = sizeof(sym_entries),
+          .sh_link = 3,
+          .sh_entsize = sizeof(Elf64_Sym),
+      },
+      {
+          .sh_type = SHT_STRTAB,
+          .sh_offset = kStringTableOffset,
+          .sh_size = kSym.size() + 2,
+      },
+  };
+  ASSERT_OK(vmo.write(section_headers, kSectionHeaderTableOffset, sizeof(section_headers)));
+
+  auto result = driver_symbols::FindRestrictedSymbols(zx::unowned(vmo), kDriverUrl);
+  ASSERT_OK(result);
+  ASSERT_EQ(result->size(), 1);
+  EXPECT_EQ((*result)[0], "dlopen");
+
+  // Truncate the string table size by 1 byte so the symbol name lacks a null terminator.
+  section_headers[3].sh_size = kSym.size() + 1;
+  ASSERT_OK(vmo.write(section_headers, kSectionHeaderTableOffset, sizeof(section_headers)));
+  auto bad_result = driver_symbols::FindRestrictedSymbols(zx::unowned(vmo), kDriverUrl);
+  EXPECT_EQ(bad_result.status_value(), ZX_ERR_INVALID_ARGS);
+}
+
 }  // namespace

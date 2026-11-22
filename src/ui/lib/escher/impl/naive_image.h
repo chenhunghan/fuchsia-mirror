@@ -17,6 +17,16 @@ class NaiveImage : public Image {
   static ImagePtr AdoptVkImage(ResourceManager* image_owner, ImageInfo info, vk::Image image,
                                GpuMemPtr mem, vk::ImageLayout initial_layout);
 
+  // Takes ownership of `image`, a `vk::Image` already created on
+  // `image_owner->vk_device()` and bound to `mem->base()` at `mem->offset()`,
+  // and destroys it on that device when the returned `NaiveImage` is destroyed.
+  // Makes no Vulkan calls and never returns `nullptr`. Aborts via `FX_CHECK` on
+  // null `image_owner`, `image_owner->vk_device()`, `image`, `mem`, or
+  // `mem->base()`, or when `info.is_transient()` does not match
+  // `vk::MemoryPropertyFlagBits::eLazilyAllocated` in `info.memory_flags`.
+  static ImagePtr AdoptBoundVkImage(ResourceManager* image_owner, ImageInfo info, vk::Image image,
+                                    GpuMemPtr mem, vk::ImageLayout initial_layout);
+
   // Destroys image_ and releases the reference to mem_.
   ~NaiveImage() override;
 
@@ -26,10 +36,7 @@ class NaiveImage : public Image {
   const GpuMemPtr& memory() const { return mem_; }
 
  private:
-  // Constructor.  In some cases it is necessary to wrap an un-owned vk::Image,
-  // which should not be destroyed when this Image is destroyed (e.g. when
-  // working with images associated with a vk::SwapchainKHR); this is done by
-  // passing nullptr as the |mem| argument.
+  // Constructor. `mem` must be non-null and own the memory backing `image`.
   NaiveImage(ResourceManager* image_owner, ImageInfo info, vk::Image image, GpuMemPtr mem,
              vk::ImageLayout initial_layout);
 

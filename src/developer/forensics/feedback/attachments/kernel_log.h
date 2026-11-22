@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_ATTACHMENTS_KERNEL_LOG_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_ATTACHMENTS_KERNEL_LOG_H_
 
-#include <fuchsia/boot/cpp/fidl.h>
+#include <fidl/fuchsia.boot/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
 #include <lib/fpromise/promise.h>
@@ -23,7 +23,8 @@ namespace forensics::feedback {
 // Retrieves the kernel log.
 //
 // fuchsia.boot.ReadOnlyLog is expected to be in |services|.
-class KernelLog : public AttachmentProvider {
+class KernelLog : public AttachmentProvider,
+                  public fidl::AsyncEventHandler<fuchsia_boot::ReadOnlyLog> {
  public:
   KernelLog(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
             std::unique_ptr<backoff::Backoff> backoff, RedactorBase* redactor);
@@ -36,13 +37,17 @@ class KernelLog : public AttachmentProvider {
   // already completed.
   void ForceCompletion(uint64_t ticket, Error error) override;
 
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
  private:
+  void Connect();
+
   async_dispatcher_t* dispatcher_;
   std::shared_ptr<sys::ServiceDirectory> services_;
   std::unique_ptr<backoff::Backoff> backoff_;
   RedactorBase* redactor_;
 
-  fuchsia::boot::ReadOnlyLogPtr read_only_log_;
+  fidl::Client<fuchsia_boot::ReadOnlyLog> read_only_log_;
 
   // Calls to Get that haven't yet completed.
   std::vector<::fit::callback<void(std::variant<zx::debuglog, Error>)>> waiting_;

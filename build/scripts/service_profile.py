@@ -194,19 +194,6 @@ class ProfilePaths:
         return [self.active_json]
 
 
-@dataclasses.dataclass(frozen=True)
-class WorkspaceSymlink:
-    """Represents a symlink to be populated into a synthetic Bazel workspace.
-
-    Attributes:
-        workspace_relpath: Destination symlink path relative to the Bazel workspace root.
-        target_path: Source file or directory path in the Fuchsia checkout.
-    """
-
-    workspace_relpath: Path
-    target_path: Path
-
-
 class ServiceProfileManager(Generic[T]):
     """Protocol-based, schema-agnostic manager for service configuration profiles.
 
@@ -296,29 +283,6 @@ class ServiceProfileManager(Generic[T]):
     ) -> str:
         """Returns the active profile name."""
         return self.resolve_paths(fuchsia_dir, environ).active_name
-
-    def workspace_symlinks(self, fuchsia_dir: Path) -> list[WorkspaceSymlink]:
-        """Returns symlinks required in synthetic Bazel workspaces.
-
-        If an active on-disk configuration file exists, returns a WorkspaceSymlink
-        mapping its relative path within the workspace to the source file in fuchsia_dir.
-        Returns an empty list if no active on-disk configuration exists.
-
-        Args:
-            fuchsia_dir: Root directory of the Fuchsia source checkout.
-
-        Returns:
-            List of WorkspaceSymlink instances describing workspace symlinks.
-        """
-        config_path = fuchsia_dir / self.spec.config_relpath
-        if config_path.is_file():
-            return [
-                WorkspaceSymlink(
-                    workspace_relpath=self.spec.config_relpath,
-                    target_path=config_path,
-                )
-            ]
-        return []
 
     def select(self, fuchsia_dir: Path, name: str) -> None:
         """Selects a profile by copying its template and recording the name into the single JSON config.
@@ -473,12 +437,23 @@ class ServiceProfileManager(Generic[T]):
         print(getattr(prof, "auth_type", "none"))
         return 0
 
+    def _cmd_quota_project(
+        self, args: argparse.Namespace, environ: Mapping[str, str]
+    ) -> int:
+        prof = self.load(args.fuchsia_dir, environ)
+        print(getattr(prof, "quota_project", ""))
+        return 0
+
     def _cmd_run(
         self, args: argparse.Namespace, environ: Mapping[str, str]
     ) -> int:
         prof = self.load(args.fuchsia_dir, environ, name=args.profile)
         new_env = dict(environ)
         new_env.update(prof.to_env_dict())
+        if args.profile:
+            # Also select the profile for anything in the command that
+            # resolves it from scratch, like Bazel repository rules.
+            new_env[self.spec.env_profile_var] = args.profile
 
         cmd = args.cmd_args
         if cmd and cmd[0] == "--":
@@ -554,6 +529,13 @@ class ServiceProfileManager(Generic[T]):
             help=f"Print the active {self.spec.service_name} profile's auth_type.",
         )
         parser_auth_type.set_defaults(func=self._cmd_auth_type)
+
+        # quota-project
+        parser_quota_project = subparsers.add_parser(
+            "quota-project",
+            help=f"Print the active {self.spec.service_name} profile's GCP quota project.",
+        )
+        parser_quota_project.set_defaults(func=self._cmd_quota_project)
 
         # run
         parser_run = subparsers.add_parser(

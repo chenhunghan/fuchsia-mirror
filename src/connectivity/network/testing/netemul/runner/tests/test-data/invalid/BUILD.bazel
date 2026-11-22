@@ -1,0 +1,68 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "invalid-config_manifest",
+    testonly = True,
+    component_name = "invalid-config",
+    includes = ["//src/connectivity/network/testing/netemul/runner:default.shard"],
+    manifest = "meta/invalid-config.cml",
+)
+
+fx_component(
+    name = "invalid-config",
+    testonly = True,
+    compiled_manifest = ":invalid-config_manifest",
+)
+
+fx_component_manifest(
+    name = "missing-config_manifest",
+    testonly = True,
+    component_name = "missing-config",
+    includes = ["//src/connectivity/network/testing/netemul/runner:default.shard"],
+    manifest = "meta/missing-config.cml",
+)
+
+fx_component(
+    name = "missing-config",
+    testonly = True,
+    compiled_manifest = ":missing-config_manifest",
+)
+
+fx_component_manifest(
+    name = "test-suite-not-used_manifest",
+    testonly = True,
+    component_name = "test-suite-not-used",
+    includes = ["//src/connectivity/network/testing/netemul/runner:default.shard"],
+    manifest = "meta/test-suite-not-used.cml",
+)
+
+fx_component(
+    name = "test-suite-not-used",
+    testonly = True,
+    compiled_manifest = ":test-suite-not-used_manifest",
+)
+
+fuchsia_package_resource_collection(
+    name = "invalid",
+    testonly = True,
+    resources = [
+        ":invalid-config",
+        ":missing-config",
+        ":test-suite-not-used",
+    ],
+    visibility = ["//src/connectivity/network/testing/netemul/runner/tests/test-data:__pkg__"],
+)

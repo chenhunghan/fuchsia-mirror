@@ -1,0 +1,150 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/config/clang/call_graph_section.gni")
+import("//build/zircon/c_utils.gni")
+
+# Check the stack usage of the entry points of a linked ELF file.
+#
+# This defines an action() target that estimates the maximum stack usage of
+# each entry point of the linked file reached by $deps, from the call graph
+# section and the stack sizes section that the file is compiled with (see
+# //build/config/clang/call_graph_section.gni), and fails if any entry
+# point can use more stack than its budget. The entry points are the ELF
+# header entry point (if any), the defined function symbols in the dynamic
+# symbol table, e.g. the exported functions of a shared library, and the
+# functions matching $entry_points. The error for a violation gives the call
+# path that reaches the maximum, so that it is clear whether to reduce the
+# usage or to change the budget consciously. See verify_stack_sizes.py
+# --help for the details of the check and its report.
+#
+# The target belongs in the `validations` list of the linking target, so
+# that a violation fails the build without holding up anything that depends
+# on the linked file. When the build does not emit the call graph section
+# ($call_graph_section is false), the target is an empty group.
+#
+# Parameters
+#
+#   * deps
+#     - Required: Must reach one linking target.  See link_output_rspfile().
+#     - Type: list(label)
+#
+#   * max_stack_usage
+#     - Required: The budget, in bytes, for the maximum stack usage of each
+#       entry point, including everything it calls and, on x86-64, the
+#       return address pushed by each call and the red zone of a leaf
+#       function.
+#     - Type: integer
+#
+#   * entry_points
+#     - Optional: fnmatch patterns over the names in the symbol table; the
+#       functions whose names match are entry points too, e.g. alternates
+#       that are not exported but are entered from outside.
+#     - Type: list(string)
+#     - Default: []
+#
+#   * limits
+#     - Optional: A budget for particular entry points, tighter or looser
+#       than $max_stack_usage, each named by any of its symbol names.
+#     - Type: scope of integer
+#     - Default: {}
+#
+#   * leaves
+#     - Optional: Entry points that must call nothing at all, each named by
+#       any of its symbol names.
+#     - Type: list(string)
+#     - Default: []
+#
+#   * exclude_functions
+#     - Optional: Functions asserted to be unreachable in this file, such as
+#       a panic path that never returns, which the estimate leaves out along
+#       with the calls to them. Each is a name, or a scope with an `address`
+#       (and a `name` for the reader) for a local function whose name is not
+#       unique.
+#     - Type: list(string or scope)
+#     - Default: []
+#
+#   * testonly, visibility
+#     - Optional: Usual GN meanings.
+#
+template("verify_stack_sizes") {
+  assert(defined(invoker.deps),
+         "verify_stack_sizes(\"$target_name\") requires `deps`")
+  assert(defined(invoker.max_stack_usage),
+         "verify_stack_sizes(\"$target_name\") requires `max_stack_usage`")
+
+  if (!call_graph_section) {
+    group(target_name) {
+      forward_variables_from(invoker,
+                             [
+                               "testonly",
+                               "visibility",
+                             ])
+      not_needed(invoker, "*")
+    }
+  } else {
+    main_target = target_name
+    rspfile_target = "_verify_stack_sizes.$main_target.rsp"
+    rspfile = "$target_gen_dir/$main_target.rsp"
+    policy_target = "_verify_stack_sizes.$main_target.policy"
+    policy_file = "$target_gen_dir/$main_target.policy.json"
+
+    link_output_rspfile(rspfile_target) {
+      visibility = [ ":$main_target" ]
+      forward_variables_from(invoker, [ "testonly" ])
+      outputs = [ rspfile ]
+      deps = invoker.deps
+    }
+
+    # The policy that the script checks the file against, in the form that
+    # its --help describes.
+    generated_file(policy_target) {
+      visibility = [ ":$main_target" ]
+      forward_variables_from(invoker, [ "testonly" ])
+      outputs = [ policy_file ]
+      output_conversion = "json"
+      contents = {
+        forward_variables_from(invoker,
+                               [
+                                 "max_stack_usage",
+                                 "entry_points",
+                                 "limits",
+                                 "leaves",
+                                 "exclude_functions",
+                               ])
+      }
+    }
+
+    toolchain_utils_action(main_target) {
+      forward_variables_from(invoker,
+                             [
+                               "testonly",
+                               "visibility",
+                             ])
+      script = "//build/toolchain/stack_usage_check/verify_stack_sizes.py"
+      utils = [ "llvm-readelf" ]
+      deps = [
+        ":$policy_target",
+        ":$rspfile_target",
+      ]
+      sources = [ rspfile ]
+      inputs = [
+        policy_file,
+
+        # The script imports the estimator from here.
+        "//scripts/clang/stack_size_estimator/call_graph.py",
+        "//scripts/clang/stack_size_estimator/graph.py",
+        "//scripts/clang/stack_size_estimator/stack_estimator.py",
+      ]
+      outputs = [ "$target_out_dir/$main_target.json" ]
+      depfile = "$target_out_dir/$main_target.d"
+      args = [
+        "--rspfile=" + rebase_path(rspfile, root_build_dir),
+        "--config=" + rebase_path(policy_file, root_build_dir),
+        "--output=" + rebase_path(outputs[0], root_build_dir),
+        "--depfile=" + rebase_path(depfile, root_build_dir),
+      ]
+    }
+  }
+}

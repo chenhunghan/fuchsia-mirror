@@ -5,7 +5,11 @@
 import("//build/bazel/bazel_test_suite.gni")
 
 bazel_test_suite("bazel_tests") {
-  target_tests = [ "//src/lib/testing/sharding:sharder-test" ]
+  target_tests = [
+    "//src/lib/testing/sharding:sharder-test",
+    "//src/lib/testing/sharding/rules/tests:sharding_example_package_test",
+    "//src/lib/testing/sharding/rules/tests:sharding_expectations_package_test",
+  ]
 }
 
 group("tests") {
@@ -42,6 +46,26 @@ group("tests") {
 # rerun bazel2gn.
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
+
+expect_includes("expected_includes_client") {
+  includes = [ "meta/client.shard.cml" ]
+  visibility = [
+    ":*",
+    "//src/*",
+    "//third_party/gvisor_syscall_tests/*",
+    "//vendor/*",
+  ]
+}
+
+expect_includes("expected_includes_client_with_expectations") {
+  includes = [ "meta/client_with_expectations.shard.cml" ]
+  visibility = [
+    ":*",
+    "//src/*",
+    "//third_party/gvisor_syscall_tests/*",
+    "//vendor/*",
+  ]
+}
 
 rustc_binary("bin") {
   testonly = true

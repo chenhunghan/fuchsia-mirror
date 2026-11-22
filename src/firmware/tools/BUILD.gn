@@ -9,6 +9,7 @@ bazel_test_suite("bazel_tests") {
     "//src/firmware/tools:android_boot_image_test",
     "//src/firmware/tools:android_misc_info_test",
     "//src/firmware/tools:cipd_utils_test",
+    "//src/firmware/tools:post_processing_python_wrapper_test",
     "//src/firmware/tools:zbi_to_android_boot_image_test",
   ]
 }

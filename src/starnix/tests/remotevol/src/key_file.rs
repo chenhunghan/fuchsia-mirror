@@ -54,7 +54,7 @@ async fn key_file_exists_but_starnix_volume_doesnt() {
     wait_for_starnix_volume_to_be_mounted().await;
 
     // Check that both the volume keys were written out to the storage capability.
-    let _key_file = fuchsia_fs::directory::read_file(&container_data_proxy, "key_file")
+    let _key_file = fuchsia_fs::directory::read_file(&container_data_proxy, "fbe_keys/key_file")
         .await
         .expect("failed to read the key file");
 

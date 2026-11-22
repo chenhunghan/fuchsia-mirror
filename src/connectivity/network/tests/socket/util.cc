@@ -34,24 +34,6 @@ void ZxSocketInfoStream(int fd, zx_info_socket_t& out_info) {
       response.socket().get_info(ZX_INFO_SOCKET, &out_info, sizeof(out_info), nullptr, nullptr));
 }
 
-void ZxSocketInfoDgram(int fd, zx_info_socket_t& out_info) {
-  zx::socket socket;
-  ZxSocketDgram(fd, socket);
-  ASSERT_OK(socket.get_info(ZX_INFO_SOCKET, &out_info, sizeof(out_info), nullptr, nullptr));
-}
-
-void ZxSocketDgram(int fd, zx::socket& out_socket) {
-  fidl::ClientEnd<fuchsia_posix_socket::DatagramSocket> client_end;
-  ASSERT_OK(fdio_fd_clone(fd, client_end.channel().reset_and_get_address()));
-  fidl::WireSyncClient client{std::move(client_end)};
-
-  const fidl::WireResult result = client->Describe();
-  ASSERT_OK(result.status());
-  const fidl::WireResponse response = result.value();
-  ASSERT_TRUE(response.has_socket());
-  out_socket = std::move(response.socket());
-}
-
 #endif
 
 void GetSocketType(int fd, uint32_t& sock_type) {
@@ -81,9 +63,6 @@ void TxCapacity(int fd, size_t& out_capacity) {
   if (sock_type == SOCK_STREAM) {
     ASSERT_NO_FATAL_FAILURE(ZxSocketInfoStream(fd, zx_socket_info));
     out_capacity += zx_socket_info.tx_buf_max;
-  } else if (sock_type == SOCK_DGRAM && std::getenv(kFastUdpEnvVar)) {
-    ASSERT_NO_FATAL_FAILURE(ZxSocketInfoDgram(fd, zx_socket_info));
-    out_capacity += zx_socket_info.tx_buf_max;
   }
 #endif
 }
@@ -107,9 +86,6 @@ void RxCapacity(int fd, size_t& out_capacity) {
   // not artificially increasing the buffer sizes.
   if (sock_type == SOCK_STREAM) {
     ASSERT_NO_FATAL_FAILURE(ZxSocketInfoStream(fd, zx_socket_info));
-    out_capacity += zx_socket_info.rx_buf_max;
-  } else if (sock_type == SOCK_DGRAM && std::getenv(kFastUdpEnvVar)) {
-    ASSERT_NO_FATAL_FAILURE(ZxSocketInfoDgram(fd, zx_socket_info));
     out_capacity += zx_socket_info.rx_buf_max;
   }
 #endif

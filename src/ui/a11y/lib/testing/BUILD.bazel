@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "formatting",
+    testonly = True,
+    srcs = ["formatting.cc"],
+    hdrs = ["formatting.h"],
+    visibility = ["//src/ui/a11y:__subpackages__"],
+    deps = [
+        # third_party/glm has no BUILD.bazel; Bazel uses the root //:glm target.
+        "//:glm",  # @bazel2gn:path_overwrite://third_party/glm
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "input",
+    testonly = True,
+    srcs = ["input.cc"],
+    hdrs = ["input.h"],
+    visibility = ["//src/ui/a11y:__subpackages__"],
+    deps = [
+        # third_party/glm has no BUILD.bazel; Bazel uses the root //:glm target.
+        "//:glm",  # @bazel2gn:path_overwrite://third_party/glm
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_hlcpp",
+        "//sdk/fidl/fuchsia.ui.input.accessibility:fuchsia.ui.input.accessibility_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "input_v2",
+    testonly = True,
+    srcs = ["input_v2.cc"],
+    hdrs = ["input_v2.h"],
+    visibility = ["//src/ui/a11y/lib/gesture_manager/recognizers_v2/tests:__pkg__"],
+    deps = [
+        # third_party/glm has no BUILD.bazel; Bazel uses the root //:glm target.
+        "//:glm",  # @bazel2gn:path_overwrite://third_party/glm
+        "//sdk/fidl/fuchsia.math:fuchsia.math_hlcpp",
+        "//sdk/fidl/fuchsia.ui.pointer.augment:fuchsia.ui.pointer.augment_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "view_ref_helper",
+    testonly = True,
+    srcs = ["view_ref_helper.cc"],
+    hdrs = ["view_ref_helper.h"],
+    visibility = ["//src/ui/a11y:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/ui/a11y/lib/util",
+    ],
+    alwayslink = True,
+)

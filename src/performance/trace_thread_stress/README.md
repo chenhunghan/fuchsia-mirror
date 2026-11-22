@@ -33,12 +33,15 @@ The workload takes three parameters via structured config:
 * `interval_ms` The time each thread waits between writing trace events.
   Defaults to 10.
 
-These can be set in the `ffx component run` command, for example
+These can be overridden with `ffx component config set` when running in a
+transient collection such as `/core/ffx-laboratory`, for example
 
 ```
-ffx component run core/trace_manager/workloads:thread_stress
-fuchsia-pkg://fuchsia.com/trace_thread_stress#meta/trace_thread_stress.cm
---config "thread_count=10"
+ffx component create /core/ffx-laboratory:thread_stress \
+  fuchsia-pkg://fuchsia.com/trace_thread_stress#meta/trace_thread_stress.cm
+ffx component resolve /core/ffx-laboratory:thread_stress
+ffx component config set --reload /core/ffx-laboratory:thread_stress \
+  "thread_count=10"
 ```
 
 will run the workload with only 10 threads instead of 100.

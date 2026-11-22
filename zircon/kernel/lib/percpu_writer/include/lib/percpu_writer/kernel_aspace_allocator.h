@@ -12,8 +12,7 @@
 #include <ktl/byte.h>
 
 extern "C" {
-ktl::byte* rust_percpu_writer_kernel_aspace_allocator_allocate(uint32_t size,
-                                                               const char* buffer_name);
+ktl::byte* rust_percpu_writer_kernel_aspace_allocator_allocate(uint32_t size);
 void rust_percpu_writer_kernel_aspace_allocator_free(ktl::byte* ptr);
 }
 
@@ -24,8 +23,8 @@ namespace percpu_writer {
 // provide an allocator backed by a VmAspace.
 class KernelAspaceAllocator {
  public:
-  static ktl::byte* Allocate(uint32_t size, const char* buffer_name) {
-    return rust_percpu_writer_kernel_aspace_allocator_allocate(size, buffer_name);
+  static ktl::byte* Allocate(uint32_t size) {
+    return rust_percpu_writer_kernel_aspace_allocator_allocate(size);
   }
   static void Free(ktl::byte* ptr) { rust_percpu_writer_kernel_aspace_allocator_free(ptr); }
 };

@@ -121,12 +121,19 @@
             ],
         },
         {
+            protocol: [ "fuchsia.fxfs.BlobCreator" ],
+            from: "parent",
+            to: "#pkg-cache",
+        },
+        {
             protocol: [
-                "fuchsia.fxfs.BlobCreator",
                 "fuchsia.fxfs.BlobReader",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
             ],
             from: "parent",
             to: "#pkg-cache",
+            availability: "optional",
         },
         {
             config: [
@@ -138,12 +145,17 @@
             to: "#pkg-cache",
         },
         {
+            config: "fuchsia.pkgcache.UseDriverBlobPaging",
+            from: "parent",
+            to: "#pkg-cache",
+            availability: "optional",
+        },
+        {
             config: [
                 "fuchsia.fshost.StartupProfilingSeconds",
                 "fuchsia.pkgcache.BlobDownloadResumptionAttemptsLimit",
                 "fuchsia.pkgcache.BlobFetchConcurrencyLimit",
                 "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
-                "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "void",
             to: "#pkg-cache",
@@ -211,12 +223,16 @@
         {
             protocol: [
                 "fuchsia.fxfs.BlobCreator",
-                "fuchsia.fxfs.BlobReader",
                 "fuchsia.metrics.MetricEventLoggerFactory",
                 "fuchsia.net.http.Loader",
                 "fuchsia.paver.Paver",
             ],
             from: "parent",
+            to: "#system-updater",
+        },
+        {
+            protocol: "fuchsia.fxfs.BlobReader",
+            from: "#pkg-cache",
             to: "#system-updater",
         },
         {

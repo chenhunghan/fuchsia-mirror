@@ -2,9 +2,110 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":audio_consumer_tests"],
+    visibility = ["//src/media:__pkg__"],
+)
 
 exports_files(
     ["meta/audio_consumer.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_binary(
+    name = "audio_consumer_bin",
+    srcs = [
+        "consumer.cc",
+        "consumer.h",
+        "consumer_creator.cc",
+        "consumer_creator.h",
+        "main.cc",
+    ],
+    gn_output_name = "audio_consumer",
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/media/cpp:no_converters",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "audio_consumer_packaged_bin",
+    binary = ":audio_consumer_bin",
+    binary_name = "audio_consumer",
+)
+
+fx_component_manifest(
+    name = "audio_consumer_manifest",
+    component_name = "audio_consumer",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/audio_consumer.cml",
+)
+
+fx_component(
+    name = "audio_consumer_component",
+    compiled_manifest = ":audio_consumer_manifest",
+    deps = [":audio_consumer_packaged_bin"],
+)
+
+fx_cc_test_binary(
+    name = "audio_consumer_tests_bin",
+    srcs = [
+        "consumer.cc",
+        "consumer.h",
+        "test/audio_consumer_tests.cc",
+        "test/fake_audio_core.h",
+        "test/fake_audio_renderer.h",
+        "test/fake_gain_control.h",
+        "test/get_koid.cc",
+        "test/get_koid.h",
+    ],
+    # TODO(https://fxbug.dev/570694755): test/audio_consumer_tests.cc uses an
+    # angled workspace-root `#include <src/...>`, which GN resolves via root
+    # `-I.` while Bazel only adds `-iquote .`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    gn_output_name = "audio_consumer_tests",
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/media/cpp:no_converters",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_consumer_tests",
+    parallel = 4,
+    unit_tests = [":audio_consumer_tests_bin"],
 )

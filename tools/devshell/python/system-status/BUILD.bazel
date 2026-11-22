@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/python:py_zipapp_binary.bzl", "py_zipapp_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":system_status_test"],
+    visibility = ["//tools:__pkg__"],
+)
+
+_COMMON_DEPS = [
+    "//scripts/lib/ffx_cmd",
+    "//scripts/lib/statusinfo",
+    "//scripts/lib/termout",
+]
+
+py_zipapp_binary(
+    name = "system-status",
+    srcs = ["main.py"],
+    main = "main.py",
+    deps = _COMMON_DEPS,
+)
+
+host_py_test(
+    name = "system_status_test",
+    srcs = [
+        "main.py",
+        "tests/test_system_status.py",
+    ],
+    imports = ["."],
+    main = "tests/test_system_status.py",
+    deps = _COMMON_DEPS,
+)

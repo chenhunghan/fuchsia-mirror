@@ -4,9 +4,13 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::diagnostics_ffi::dump_vm_object;
 use super::io_buffer_dispatcher::IoBufferDispatcher;
+use super::job_dispatcher::JobEnumerator;
 use super::process_dispatcher::ProcessDispatcher;
+use super::singleton::get_root_job_dispatcher;
 use super::vm_object_dispatcher::{VmObjectDispatcher, VmoOwnership, vmo_to_info_entry};
+use crate::ktrace_rs::{Koid, kernel_object_always};
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_INVALID, ARCH_MMU_FLAG_PERM_EXECUTE, ARCH_MMU_FLAG_PERM_READ,
     ARCH_MMU_FLAG_PERM_WRITE, ArchMmuFlags,
@@ -16,29 +20,45 @@ use crate::vm::vm_address_region::{VmAddressRegion, VmAspaceGuard, VmEnumerator}
 use crate::vm::vm_aspace::VmAspace;
 use crate::vm::vm_mapping::{FlagsRange, VmMapping};
 use crate::vm::vm_object::VmObject;
-use core::ffi::CStr;
+use core::ffi::{CStr, c_char};
 use core::pin::Pin;
-use fbl::RefPtr;
+use fbl::{RefPtr, SinglyLinkedList, SinglyLinkedListContainable, SinglyLinkedListNode, UniquePtr};
+use kprint::{kformat, kprintln};
 use zx_status::Status;
 use zx_types::{
-    ZX_INFO_MAPS_TYPE_ASPACE, ZX_INFO_MAPS_TYPE_MAPPING, ZX_INFO_MAPS_TYPE_VMAR, ZX_MAX_NAME_LEN,
-    ZX_VM_PERM_EXECUTE, ZX_VM_PERM_READ, ZX_VM_PERM_WRITE, zx_info_maps_mapping_t, zx_info_maps_t,
-    zx_info_vmo_t,
+    ZX_HANDLE_INVALID, ZX_INFO_MAPS_TYPE_ASPACE, ZX_INFO_MAPS_TYPE_MAPPING, ZX_INFO_MAPS_TYPE_VMAR,
+    ZX_KOID_FIRST, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_BTI, ZX_OBJ_TYPE_CHANNEL, ZX_OBJ_TYPE_CLOCK,
+    ZX_OBJ_TYPE_COUNTER, ZX_OBJ_TYPE_DEBUGLOG, ZX_OBJ_TYPE_EVENT, ZX_OBJ_TYPE_EVENTPAIR,
+    ZX_OBJ_TYPE_EXCEPTION, ZX_OBJ_TYPE_FIFO, ZX_OBJ_TYPE_GUEST, ZX_OBJ_TYPE_INTERRUPT,
+    ZX_OBJ_TYPE_IOB, ZX_OBJ_TYPE_IOB_SHARED_REGION, ZX_OBJ_TYPE_IOMMU, ZX_OBJ_TYPE_JOB,
+    ZX_OBJ_TYPE_MSI, ZX_OBJ_TYPE_PAGER, ZX_OBJ_TYPE_PMT, ZX_OBJ_TYPE_PORT, ZX_OBJ_TYPE_PROCESS,
+    ZX_OBJ_TYPE_PROFILE, ZX_OBJ_TYPE_RESOURCE, ZX_OBJ_TYPE_SAMPLER, ZX_OBJ_TYPE_SOCKET,
+    ZX_OBJ_TYPE_STREAM, ZX_OBJ_TYPE_SUSPEND_TOKEN, ZX_OBJ_TYPE_THREAD, ZX_OBJ_TYPE_TIMER,
+    ZX_OBJ_TYPE_VCPU, ZX_OBJ_TYPE_VMAR, ZX_OBJ_TYPE_VMO, ZX_RIGHT_APPLY_PROFILE, ZX_RIGHT_DESTROY,
+    ZX_RIGHT_DUPLICATE, ZX_RIGHT_ENUMERATE, ZX_RIGHT_EXECUTE, ZX_RIGHT_GET_POLICY,
+    ZX_RIGHT_GET_PROPERTY, ZX_RIGHT_INSPECT, ZX_RIGHT_MANAGE_JOB, ZX_RIGHT_MANAGE_PROCESS,
+    ZX_RIGHT_MANAGE_SOCKET, ZX_RIGHT_MANAGE_THREAD, ZX_RIGHT_MAP, ZX_RIGHT_READ,
+    ZX_RIGHT_SET_POLICY, ZX_RIGHT_SET_PROPERTY, ZX_RIGHT_SIGNAL, ZX_RIGHT_SIGNAL_PEER,
+    ZX_RIGHT_TRANSFER, ZX_RIGHT_WAIT, ZX_RIGHT_WRITE, ZX_VM_PERM_EXECUTE, ZX_VM_PERM_READ,
+    ZX_VM_PERM_WRITE, zx_info_maps_mapping_t, zx_info_maps_t, zx_info_vmo_t, zx_koid_t,
+    zx_obj_type_t, zx_rights_t,
 };
 
 #[cfg(console_enabled)]
+use super::channel_dispatcher::ChannelDispatcher;
+#[cfg(console_enabled)]
 use super::diagnostics_ffi::{
-    dump_all_peer_dispatchers, dump_all_vm_objects, dump_handles_for_koid,
-    dump_orphaned_mapped_vmos, dump_orphaned_slices, dump_peer_dispatchers_by_koid,
-    dump_process_address_space, dump_process_handles, dump_process_memory_usage,
-    dump_process_vm_objects, dump_vm_object_cow_tree,
+    dump_all_vm_objects, dump_orphaned_mapped_vmos, dump_orphaned_slices, dump_process_vm_objects,
+    dump_vm_object_cow_tree,
 };
+#[cfg(console_enabled)]
+use super::dispatcher::Dispatcher;
 #[cfg(console_enabled)]
 use super::handle::HandleTableArena;
 #[cfg(console_enabled)]
-use super::job_dispatcher::{JobDispatcher, JobEnumerator};
+use super::job_dispatcher::JobDispatcher;
 #[cfg(console_enabled)]
-use super::singleton::get_root_job_dispatcher;
+use super::socket_dispatcher::SocketDispatcher;
 #[cfg(console_enabled)]
 use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 #[cfg(console_enabled)]
@@ -48,29 +68,21 @@ use crate::kernel::thread;
 #[cfg(console_enabled)]
 use crate::platform_rs::timer::DurationMono;
 #[cfg(console_enabled)]
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 #[cfg(console_enabled)]
 use core::ptr;
 #[cfg(console_enabled)]
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(console_enabled)]
-use kprint::{kformat, kprintln};
-#[cfg(console_enabled)]
 use zx_types::{
-    ZX_OBJ_TYPE_BTI, ZX_OBJ_TYPE_CHANNEL, ZX_OBJ_TYPE_DEBUGLOG, ZX_OBJ_TYPE_EVENT,
-    ZX_OBJ_TYPE_EVENTPAIR, ZX_OBJ_TYPE_EXCEPTION, ZX_OBJ_TYPE_FIFO, ZX_OBJ_TYPE_GUEST,
-    ZX_OBJ_TYPE_INTERRUPT, ZX_OBJ_TYPE_IOB, ZX_OBJ_TYPE_IOMMU, ZX_OBJ_TYPE_JOB, ZX_OBJ_TYPE_PAGER,
-    ZX_OBJ_TYPE_PMT, ZX_OBJ_TYPE_PORT, ZX_OBJ_TYPE_PROCESS, ZX_OBJ_TYPE_PROFILE,
-    ZX_OBJ_TYPE_RESOURCE, ZX_OBJ_TYPE_SOCKET, ZX_OBJ_TYPE_SUSPEND_TOKEN, ZX_OBJ_TYPE_THREAD,
-    ZX_OBJ_TYPE_TIMER, ZX_OBJ_TYPE_UPPER_BOUND, ZX_OBJ_TYPE_VCPU, ZX_OBJ_TYPE_VMAR,
-    ZX_OBJ_TYPE_VMO, ZX_POL_ACTION_ALLOW, ZX_POL_ACTION_ALLOW_EXCEPTION, ZX_POL_ACTION_DENY,
-    ZX_POL_ACTION_DENY_EXCEPTION, ZX_POL_ACTION_KILL, ZX_POL_ACTION_MAX,
+    ZX_KOID_INVALID, ZX_OBJ_TYPE_UPPER_BOUND, ZX_POL_ACTION_ALLOW, ZX_POL_ACTION_ALLOW_EXCEPTION,
+    ZX_POL_ACTION_DENY, ZX_POL_ACTION_DENY_EXCEPTION, ZX_POL_ACTION_KILL, ZX_POL_ACTION_MAX,
     ZX_POL_AMBIENT_MARK_VMO_EXEC, ZX_POL_BAD_HANDLE, ZX_POL_MAX, ZX_POL_NEW_ANY,
     ZX_POL_NEW_CHANNEL, ZX_POL_NEW_EVENT, ZX_POL_NEW_EVENTPAIR, ZX_POL_NEW_FIFO, ZX_POL_NEW_IOB,
     ZX_POL_NEW_PAGER, ZX_POL_NEW_PORT, ZX_POL_NEW_PROCESS, ZX_POL_NEW_PROFILE, ZX_POL_NEW_SAMPLER,
     ZX_POL_NEW_SOCKET, ZX_POL_NEW_TIMER, ZX_POL_NEW_VMO, ZX_POL_OVERRIDE_ALLOW,
-    ZX_POL_OVERRIDE_DENY, ZX_POL_VMAR_WX, ZX_POL_WRONG_OBJECT, ZX_TASK_RETCODE_SYSCALL_KILL,
-    zx_koid_t,
+    ZX_POL_OVERRIDE_DENY, ZX_POL_VMAR_WX, ZX_POL_WRONG_OBJECT, ZX_SOCKET_DATAGRAM,
+    ZX_TASK_RETCODE_SYSCALL_KILL,
 };
 
 /// Abstraction around writing `zx_info_vmo_t`s to user space. As there are multiple versions of the
@@ -104,7 +116,6 @@ fn copy_cstr_to_name(dst: &mut [u8; ZX_MAX_NAME_LEN], src: &CStr) {
 }
 
 /// Returns the NUL-terminated prefix of a `ZX_MAX_NAME_LEN` name buffer for printing.
-#[cfg(console_enabled)]
 fn c_name(name: &[u8]) -> &CStr {
     CStr::from_bytes_until_nul(name).unwrap_or(c"")
 }
@@ -178,6 +189,7 @@ impl<'a, W: VmarMapsInfoWriter> AspaceEnumerator<'a, W> {
 }
 
 impl<W: VmarMapsInfoWriter> VmEnumerator for AspaceEnumerator<'_, W> {
+    #[inline(never)]
     fn on_vm_mapping(
         &mut self,
         map: &VmMapping,
@@ -289,10 +301,7 @@ pub fn get_vm_aspace_maps(
 
     if max > 0 {
         let mut entry = zx_info_maps_t::default();
-        // SAFETY: `target_aspace` is a live `VmAspace`, and `VmAspace::rename` is only called
-        // during `VmAspace` initialization before the object is published, so no concurrent
-        // `rename` can occur.
-        let name = unsafe { target_aspace.name_ptr() };
+        let name = target_aspace.name_ptr();
         copy_cstr_to_name(&mut entry.name, name);
         entry.base = target_aspace.base();
         entry.size = target_aspace.size();
@@ -345,6 +354,7 @@ impl<'a, W: VmoInfoWriter> AspaceVmoEnumerator<'a, W> {
 }
 
 impl<W: VmoInfoWriter> VmEnumerator for AspaceVmoEnumerator<'_, W> {
+    #[inline(never)]
     fn on_vm_mapping(
         &mut self,
         map: &VmMapping,
@@ -441,13 +451,42 @@ pub fn get_process_vmos(
     Ok((actual, available))
 }
 
+/// Dumps VMOs under a `VmAspace`.
+struct AspaceVmoDumper {
+    format_unit: c_char,
+}
+
+impl VmEnumerator for AspaceVmoDumper {
+    fn on_vm_mapping(
+        &mut self,
+        map: &VmMapping,
+        _vmar: &VmAddressRegion,
+        _depth: u32,
+        guard: Pin<&mut VmAspaceGuard<'_>>,
+    ) -> Status {
+        let vmo = map.vmo_locked(guard.token()).expect("mapping in aspace must have a VMO");
+        dump_vm_object(
+            &vmo,
+            self.format_unit,
+            ZX_HANDLE_INVALID,
+            /* rights */ 0,
+            /* koid */ vmo.user_id(),
+        );
+        Status::NEXT
+    }
+}
+
+/// Dumps all VMOs mapped in `process`'s address spaces using `format_unit`.
+pub(super) fn dump_aspace_vm_objects(process: &ProcessDispatcher, format_unit: c_char) {
+    let mut avd = AspaceVmoDumper { format_unit };
+    process.enumerate_aspace_children(&mut avd);
+}
+
 /// Machinery to walk over a job tree and run a callback on each process.
-#[cfg(console_enabled)]
 struct ProcessWalker<F: FnMut(&ProcessDispatcher)> {
     cb: F,
 }
 
-#[cfg(console_enabled)]
 impl<F: FnMut(&ProcessDispatcher)> JobEnumerator for ProcessWalker<F> {
     fn on_process(&mut self, process: &ProcessDispatcher) -> bool {
         (self.cb)(process);
@@ -455,7 +494,6 @@ impl<F: FnMut(&ProcessDispatcher)> JobEnumerator for ProcessWalker<F> {
     }
 }
 
-#[cfg(console_enabled)]
 fn make_process_walker<F: FnMut(&ProcessDispatcher)>(cb: F) -> ProcessWalker<F> {
     ProcessWalker { cb }
 }
@@ -477,6 +515,43 @@ impl<F: FnMut(&JobDispatcher)> JobEnumerator for JobWalker<F> {
 #[cfg(console_enabled)]
 fn make_job_walker<F: FnMut(&JobDispatcher)>(cb: F) -> JobWalker<F> {
     JobWalker { cb }
+}
+
+fn object_type_to_string(obj_type: zx_obj_type_t) -> &'static str {
+    match obj_type {
+        ZX_OBJ_TYPE_PROCESS => "process",
+        ZX_OBJ_TYPE_THREAD => "thread",
+        ZX_OBJ_TYPE_VMO => "vmo",
+        ZX_OBJ_TYPE_CHANNEL => "channel",
+        ZX_OBJ_TYPE_EVENT => "event",
+        ZX_OBJ_TYPE_PORT => "port",
+        ZX_OBJ_TYPE_INTERRUPT => "interrupt",
+        ZX_OBJ_TYPE_DEBUGLOG => "log",
+        ZX_OBJ_TYPE_SOCKET => "socket",
+        ZX_OBJ_TYPE_RESOURCE => "resource",
+        ZX_OBJ_TYPE_EVENTPAIR => "event-pair",
+        ZX_OBJ_TYPE_JOB => "job",
+        ZX_OBJ_TYPE_VMAR => "vmar",
+        ZX_OBJ_TYPE_FIFO => "fifo",
+        ZX_OBJ_TYPE_GUEST => "guest",
+        ZX_OBJ_TYPE_VCPU => "vcpu",
+        ZX_OBJ_TYPE_TIMER => "timer",
+        ZX_OBJ_TYPE_IOMMU => "iommu",
+        ZX_OBJ_TYPE_BTI => "bti",
+        ZX_OBJ_TYPE_PROFILE => "profile",
+        ZX_OBJ_TYPE_PMT => "pmt",
+        ZX_OBJ_TYPE_SUSPEND_TOKEN => "suspend-token",
+        ZX_OBJ_TYPE_PAGER => "pager",
+        ZX_OBJ_TYPE_EXCEPTION => "exception",
+        ZX_OBJ_TYPE_CLOCK => "clock",
+        ZX_OBJ_TYPE_STREAM => "stream",
+        ZX_OBJ_TYPE_MSI => "msi",
+        ZX_OBJ_TYPE_IOB => "iob",
+        ZX_OBJ_TYPE_COUNTER => "counter",
+        ZX_OBJ_TYPE_IOB_SHARED_REGION => "iob-shared-region",
+        ZX_OBJ_TYPE_SAMPLER => "sampler",
+        _ => "???",
+    }
 }
 
 /// Per-`zx_obj_type_t` handle counts, indexed by object type.
@@ -561,6 +636,151 @@ fn dump_job_list() {
         kprintln!("{:7u} '{:s}'", job.get_koid(), c_name(&name));
     });
     get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+}
+
+/// Returns the socket type label (`"datagram"` or `"stream"`) for `SocketDispatcher` options.
+#[cfg(console_enabled)]
+fn socket_type_str(options: u32) -> &'static str {
+    if (options & ZX_SOCKET_DATAGRAM) != 0 { "datagram" } else { "stream" }
+}
+
+/// Dumps koid, peer koid, and type-specific details for a peer dispatcher.
+#[cfg(console_enabled)]
+fn dump_peer_info(obj_type: zx_obj_type_t, disp: &Dispatcher) {
+    let koid = disp.get_koid();
+    let peer_koid = disp.get_related_koid();
+
+    match obj_type {
+        ZX_OBJ_TYPE_CHANNEL => {
+            let chan = disp.downcast::<ChannelDispatcher>().expect("dispatcher type is channel");
+            let (current, max) = chan.get_message_counts();
+
+            kprintln!("    chan {:7u} {:7u} count {:u} max {:u}", koid, peer_koid, current, max);
+        }
+        ZX_OBJ_TYPE_SOCKET => {
+            let sock = disp.downcast::<SocketDispatcher>().expect("dispatcher type is socket");
+            let sock_info = sock.get_info();
+
+            kprintln!(
+                "    sock {:s} {:7u} {:7u} buf_avail {:u}",
+                socket_type_str(sock_info.options),
+                koid,
+                peer_koid,
+                sock_info.rx_buf_available
+            );
+        }
+        ZX_OBJ_TYPE_FIFO => {
+            kprintln!("    fifo {:7u} {:7u}", koid, peer_koid);
+        }
+        ZX_OBJ_TYPE_EVENTPAIR => {
+            kprintln!("    eventpair {:7u} {:7u}", koid, peer_koid);
+        }
+        ZX_OBJ_TYPE_IOB => {
+            let iobuf = disp.downcast::<IoBufferDispatcher>().expect("dispatcher type is iob");
+
+            let region_count = iobuf.region_count();
+            kprintln!("    iob {:7u} {:7u} region count {:u}", koid, peer_koid, region_count);
+        }
+
+        _ => {
+            kprintln!("Unexpected error, peer type not supported.");
+        }
+    }
+}
+
+/// Dumps peer dispatchers of `obj_type` in `process`, optionally filtered by `koid_filter`.
+#[cfg(console_enabled)]
+fn dump_process_peer_dispatchers(
+    obj_type: zx_obj_type_t,
+    process: &ProcessDispatcher,
+    koid_filter: zx_koid_t,
+) {
+    let mut pname = [0u8; ZX_MAX_NAME_LEN];
+    let mut printed_header = false;
+
+    let _ = process.handle_table().for_each_handle(|_handle, _rights, disp| {
+        if disp.get_type() == obj_type {
+            let koid = disp.get_koid();
+            let peer_koid = disp.get_related_koid();
+
+            if koid_filter != ZX_KOID_INVALID && koid_filter != koid && koid_filter != peer_koid {
+                return Ok(());
+            }
+
+            if !printed_header {
+                let status = process.get_name(&mut pname);
+                debug_assert!(status.is_ok());
+                kprintln!("{:7u} [{:s}]", process.get_koid(), c_name(&pname));
+                printed_header = true;
+            }
+
+            dump_peer_info(obj_type, disp);
+        }
+
+        Ok(())
+    });
+}
+
+/// Dumps peer dispatchers of `obj_type` matching process or object koid `id`.
+#[cfg(console_enabled)]
+fn dump_peer_dispatchers_by_koid(obj_type: zx_obj_type_t, id: zx_koid_t) {
+    let pd = ProcessDispatcher::lookup_process_by_id(id);
+
+    if let Some(pd) = pd {
+        dump_process_peer_dispatchers(obj_type, &pd, ZX_KOID_INVALID);
+    } else {
+        let mut walker = make_process_walker(|process: &ProcessDispatcher| {
+            dump_process_peer_dispatchers(obj_type, process, id);
+        });
+        get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+    }
+}
+
+/// Dumps all peer dispatchers of `obj_type` across all processes.
+#[cfg(console_enabled)]
+fn dump_all_peer_dispatchers(obj_type: zx_obj_type_t) {
+    let mut walker = make_process_walker(|process: &ProcessDispatcher| {
+        dump_process_peer_dispatchers(obj_type, process, ZX_KOID_INVALID);
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+}
+
+const RIGHTS_HEADER: &str =
+    "dup tr r w x map gpr spr enm des spo gpo sig sigp wt ins mj mp mt ap ms";
+
+fn has_rights(rights: zx_rights_t, desired: zx_rights_t) -> bool {
+    (rights & desired) == desired
+}
+
+fn format_handle_rights_mask(rights: zx_rights_t, buf: &mut [u8]) -> &[u8] {
+    kformat!(
+        buf,
+        concat!(
+            "{:3d} {:2d} {:1d} {:1d} {:1d} {:3d} {:3d} {:3d} {:3d} {:3d} {:3d} {:3d} {:3d} {:4d} ",
+            "{:2d} {:3d} {:2d} {:2d} {:2d} {:2d} {:2d}"
+        ),
+        has_rights(rights, ZX_RIGHT_DUPLICATE),
+        has_rights(rights, ZX_RIGHT_TRANSFER),
+        has_rights(rights, ZX_RIGHT_READ),
+        has_rights(rights, ZX_RIGHT_WRITE),
+        has_rights(rights, ZX_RIGHT_EXECUTE),
+        has_rights(rights, ZX_RIGHT_MAP),
+        has_rights(rights, ZX_RIGHT_GET_PROPERTY),
+        has_rights(rights, ZX_RIGHT_SET_PROPERTY),
+        has_rights(rights, ZX_RIGHT_ENUMERATE),
+        has_rights(rights, ZX_RIGHT_DESTROY),
+        has_rights(rights, ZX_RIGHT_SET_POLICY),
+        has_rights(rights, ZX_RIGHT_GET_POLICY),
+        has_rights(rights, ZX_RIGHT_SIGNAL),
+        has_rights(rights, ZX_RIGHT_SIGNAL_PEER),
+        has_rights(rights, ZX_RIGHT_WAIT),
+        has_rights(rights, ZX_RIGHT_INSPECT),
+        has_rights(rights, ZX_RIGHT_MANAGE_JOB),
+        has_rights(rights, ZX_RIGHT_MANAGE_PROCESS),
+        has_rights(rights, ZX_RIGHT_MANAGE_THREAD),
+        has_rights(rights, ZX_RIGHT_APPLY_PROFILE),
+        has_rights(rights, ZX_RIGHT_MANAGE_SOCKET)
+    )
 }
 
 #[cfg(console_enabled)]
@@ -677,6 +897,146 @@ fn dump_job_policies_by_koid(id: zx_koid_t) {
 }
 
 #[cfg(console_enabled)]
+fn dump_process_handles(id: zx_koid_t) {
+    let pd = ProcessDispatcher::lookup_process_by_id(id);
+    let Some(pd) = pd else {
+        kprintln!("process {:u} not found!", id);
+        return;
+    };
+
+    let mut pname = [0u8; ZX_MAX_NAME_LEN];
+    let status = pd.get_name(&mut pname);
+    debug_assert!(status.is_ok());
+    kprintln!("process {:u} ('{:s}') handles:", id, c_name(&pname));
+    kprintln!("{:>7s} {:>10s} {:>10s}: {{{:s}}} [type]", "koid", "handle", "rights", RIGHTS_HEADER);
+
+    let mut total: u32 = 0;
+    let _ = pd.handle_table().for_each_handle(|handle, rights, disp| {
+        let mut rights_mask = [0u8; RIGHTS_HEADER.len() + 1];
+        let rights_mask = format_handle_rights_mask(rights, &mut rights_mask);
+        kprintln!(
+            "{:7u} {:#10x} {:#10x}: {{{:s}}} [{:s}]",
+            disp.get_koid(),
+            handle,
+            rights,
+            rights_mask,
+            object_type_to_string(disp.get_type())
+        );
+        total += 1;
+        Ok(())
+    });
+    kprintln!("total: {:u} handles", total);
+}
+
+/// Prints all handles and owning processes for the specified koid.
+pub fn dump_handles_for_koid(id: zx_koid_t) {
+    if id < ZX_KOID_FIRST {
+        kprintln!("invalid koid, non-reserved koids start at {:u}", ZX_KOID_FIRST);
+        return;
+    }
+
+    /// Wrapper type to let us build a linked list of all child processes.
+    #[derive(fbl::Recyclable, SinglyLinkedListContainable)]
+    struct ProcessNode {
+        #[sll_node]
+        node: SinglyLinkedListNode<ProcessNode>,
+        proc: RefPtr<ProcessDispatcher>,
+    }
+    let mut procs: SinglyLinkedList<UniquePtr<ProcessNode>> = SinglyLinkedList::new();
+
+    let mut alloc_failed = false;
+    // Enumerate all the children and build the linked list of all processes. This lets us separate
+    // the enumeration of the children, which requires holding the job dispatcher lock, with the
+    // iteration of the handles, which requires holding the handle table lock. Specifically it
+    // ensures we do not take the locks in the order JobDispatcher->HandleTable, as this is invalid.
+    let mut find_processes = make_process_walker(|process: &ProcessDispatcher| {
+        let p = UniquePtr::try_new(ProcessNode {
+            node: SinglyLinkedListNode::new(),
+            proc: RefPtr::from_ref(process),
+        });
+        if let Ok(p) = p {
+            procs.push_front(p);
+        } else {
+            alloc_failed = true;
+        }
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut find_processes);
+
+    if alloc_failed {
+        kprintln!("WARNING: Allocation failure, search has been truncated");
+    }
+
+    let mut total_proc: u32 = 0;
+    let mut total_handles: u32 = 0;
+
+    // Inspect all the handle tables of the processes we previously found.
+    for proc in procs.iter() {
+        let mut found_handle = false;
+        let _ = proc.proc.handle_table().for_each_handle(|_handle, rights, disp| {
+            if disp.get_koid() != id {
+                return Ok(());
+            }
+
+            if total_handles == 0 {
+                kprintln!(
+                    "handles for koid {:u} ({:s}):",
+                    id,
+                    object_type_to_string(disp.get_type())
+                );
+                kprintln!("{:>7s} {:>10s}: {{{:s}}} [name]", "pid", "rights", RIGHTS_HEADER);
+            }
+
+            let mut pname = [0u8; ZX_MAX_NAME_LEN];
+            let status = proc.proc.get_name(&mut pname);
+            debug_assert!(status.is_ok());
+            let mut rights_mask = [0u8; RIGHTS_HEADER.len() + 1];
+            let rights_mask = format_handle_rights_mask(rights, &mut rights_mask);
+            kprintln!(
+                "{:7u} {:#10x}: {{{:s}}} [{:s}]",
+                proc.proc.get_koid(),
+                rights,
+                rights_mask,
+                c_name(&pname)
+            );
+
+            total_handles += 1;
+            found_handle = true;
+            Ok(())
+        });
+        total_proc += found_handle as u32;
+    }
+    if total_handles > 0 {
+        kprintln!("total: {:u} handles in {:u} processes", total_handles, total_proc);
+    } else {
+        kprintln!("no handles found for koid {:u}", id);
+    }
+}
+
+/// Emits a kernel object record for the kernel and every live process to the trace buffer.
+pub fn ktrace_report_live_processes() {
+    // PID 0 refers to the kernel.
+    kernel_object_always!(
+        /* koid */ 0u64,
+        ZX_OBJ_TYPE_PROCESS,
+        &b"kernel"[..],
+        "job" => Koid(0)
+    );
+
+    let mut walker = make_process_walker(|process: &ProcessDispatcher| {
+        let mut name = [0u8; ZX_MAX_NAME_LEN];
+        let status = process.get_name(&mut name);
+        debug_assert!(status.is_ok());
+        kernel_object_always!(
+            process.get_koid(),
+            ZX_OBJ_TYPE_PROCESS,
+            c_name(&name).to_bytes(),
+            "job" => Koid(process.job().get_koid())
+        );
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
+}
+
+#[cfg(console_enabled)]
 fn kill_process(id: zx_koid_t) {
     // search the process list and send a kill if found
     let pd = ProcessDispatcher::lookup_process_by_id(id);
@@ -687,6 +1047,40 @@ fn kill_process(id: zx_koid_t) {
     // if found, outside of the lock hit it with kill
     kprintln!("killing process {:u}", id);
     pd.kill(ZX_TASK_RETCODE_SYSCALL_KILL);
+}
+
+#[cfg(console_enabled)]
+fn dump_process_address_space(id: zx_koid_t) {
+    let pd = ProcessDispatcher::lookup_process_by_id(id);
+    let Some(pd) = pd else {
+        kprintln!("process {:u} not found!", id);
+        return;
+    };
+
+    pd.dump_aspace();
+}
+
+/// Prints (with the supplied prefix) the number of mapped, committed bytes for
+/// each process in the system whose committed memory > `min_bytes`. Does not
+/// take sharing into account, and does not count unmapped VMOs.
+#[cfg(console_enabled)]
+fn dump_process_memory_usage(prefix: &str, min_bytes: usize) {
+    let mut walker = make_process_walker(|process: &ProcessDispatcher| {
+        let counts: AttributionCounts = process.get_attributed_memory();
+        if counts.uncompressed_bytes >= min_bytes {
+            let mut pname = [0u8; ZX_MAX_NAME_LEN];
+            let status = process.get_name(&mut pname);
+            debug_assert!(status.is_ok());
+            kprintln!(
+                "{:s}proc {:5u} {:4u}M '{:s}'",
+                prefix,
+                process.get_koid(),
+                counts.uncompressed_bytes / MB,
+                c_name(&pname)
+            );
+        }
+    });
+    get_root_job_dispatcher().enumerate_children_recursive(&mut walker);
 }
 
 #[cfg(console_enabled)]
@@ -750,7 +1144,7 @@ fn dump_handle_rights_key_map() {
 fn dump_address_space(arg: &CmdArgs) {
     if "kernel".starts_with(arg.as_str()) {
         // The arg is a prefix of "kernel".
-        VmAspace::kernel_aspace().dump(true);
+        VmAspace::kernel_aspace().dump();
     } else {
         dump_process_address_space(arg.arg_uint);
     }
@@ -796,7 +1190,7 @@ extern "C" fn hwd_thread(_arg: *mut c_void) -> i32 {
 extern "C" fn mwd_thread(_arg: *mut c_void) -> i32 {
     loop {
         let _ = thread::sleep_relative(DurationMono::from_seconds(1));
-        dump_process_memory_usage(c"MemoryHog! ", MWD_LIMIT_BYTES.load(Ordering::Relaxed));
+        dump_process_memory_usage("MemoryHog! ", MWD_LIMIT_BYTES.load(Ordering::Relaxed));
     }
 }
 
@@ -1016,3 +1410,24 @@ static_command!(
     cmd_diagnostics,
     CMD_AVAIL_NORMAL
 );
+
+/// Kernel unit tests for object diagnostics.
+#[cfg(all(ktest, console_enabled))]
+#[unittest::suite(name = "diagnostics")]
+mod tests {
+    use super::socket_type_str;
+    use crate::object::socket_dispatcher::SocketDispatcher;
+    use unittest::{expect_true, unwrap_ok};
+    use zx_types::{ZX_SOCKET_DATAGRAM, ZX_SOCKET_STREAM};
+
+    /// Verifies stream vs. datagram socket type formatting.
+    #[test]
+    fn test_socket_type_str() {
+        let (stream_ep0, _stream_ep1, _) = unwrap_ok!(SocketDispatcher::create(ZX_SOCKET_STREAM));
+        let (datagram_ep0, _datagram_ep1, _) =
+            unwrap_ok!(SocketDispatcher::create(ZX_SOCKET_DATAGRAM));
+
+        expect_true!(socket_type_str(stream_ep0.dispatcher().get_info().options) == "stream");
+        expect_true!(socket_type_str(datagram_ep0.dispatcher().get_info().options) == "datagram");
+    }
+}

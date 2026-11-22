@@ -2,23 +2,83 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":webpki-roots-fuchsia_tests_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
 rustc_library(
     name = "webpki-roots-fuchsia",
-    srcs = [
-        "src/lib.rs",
-    ],
+    srcs = ["src/lib.rs"],
     edition = "2024",
-    version = "0.1.0",
-    visibility = ["//visibility:public"],
-    with_host_unit_tests = True,
+    visibility = [
+        "//src/lib/fuchsia-hyper:__pkg__",
+        "//src/sys/time/lib/httpdate-hyper:__pkg__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:base64",
         "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:rustls",
         "//third_party/rust_crates/vendor:rustls-webpki",
     ],
+)
+
+rustc_test(
+    name = "webpki-roots-fuchsia_test",
+    crate = ":webpki-roots-fuchsia",
+    # Sets GN output_name via bazel2gn to match the binary path in
+    # meta/webpki_roots_fuchsia_lib_test.cml.
+    crate_name = "webpki_roots_fuchsia_lib_test",
+)
+
+fx_packaged_binary(
+    name = "webpki-roots-fuchsia_test_packaged_bin",
+    testonly = True,
+    binary = ":webpki-roots-fuchsia_test",
+    binary_name = "webpki_roots_fuchsia_lib_test",
+)
+
+fx_component_manifest(
+    name = "webpki-roots-fuchsia_tests_manifest",
+    testonly = True,
+    component_name = "webpki-roots-fuchsia_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/webpki_roots_fuchsia_lib_test.cml",
+)
+
+fx_test_component(
+    name = "webpki-roots-fuchsia_tests_component",
+    compiled_manifest = ":webpki-roots-fuchsia_tests_manifest",
+    test_type = "system",
+    deps = [":webpki-roots-fuchsia_test_packaged_bin"],
+)
+
+fx_package(
+    name = "webpki-roots-fuchsia_tests",
+    test_components = [":webpki-roots-fuchsia_tests_component"],
+)
+
+fx_test(
+    name = "webpki-roots-fuchsia_tests_test",
+    package = ":webpki-roots-fuchsia_tests",
 )

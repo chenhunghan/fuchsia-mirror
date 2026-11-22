@@ -24,8 +24,8 @@ Platform& Platform::Get() {
   return *current_;
 }
 
-Platform::Platform(async_dispatcher_t* dispatcher, uint32_t node_id)
-    : dispatcher_(dispatcher), node_id_(node_id) {
+Platform::Platform(async_dispatcher_t* dispatcher, uint32_t node_id, RadioMedium& radio_medium)
+    : dispatcher_(dispatcher), node_id_(node_id), radio_medium_(radio_medium) {
   ZX_ASSERT_MSG(current_ == nullptr, "only one Platform may exist at a time");
   current_ = this;
   tasklet_task_.set_handler([this]() {

@@ -131,12 +131,14 @@ targets containing tests for different platforms in a single `test_suite()`).
 Note: **TODO([https://fxbug.dev/540003943][fxbug-540003943]{:.external}):**
 Formalize this.
 
-It is TBD whether `test_suite()` targets should specify
-`target_compatible_with`.
+#### Do not set target_compatible_with on test_suite() {:#test-suite-target-compatible-with}
 
-Note: **TODO([https://fxbug.dev/540003943][fxbug-540003943]{:.external}):**
-Decide whether `test_suite()` targets should specify `target_compatible_with`
-and update this text.
+Do not set `target_compatible_with` on `test_suite()` targets; set it on leaf
+test targets instead (for example, `fx_test()`, `fx_unittest_package()`,
+`host_*_test()`, or `host_test()`). Bazel silently drops an incompatible
+`test_suite()` from `cquery tests(...)`, which hides misplaced tests during
+`tests.json` generation. The `bazel_test_suite_target_compatible_with` `shac`
+check enforces this.
 
 #### CPU architecture {:#cpu-architecture}
 

@@ -63,6 +63,7 @@ fx_package(
     name = "sync-manager",
     testonly = True,
     components = [":component"],
+    visibility = ["//src/connectivity/network:__subpackages__"],
 )
 
 fx_component_manifest(

@@ -17,7 +17,6 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
 fx_cc_binary(
     name = "bin",
     testonly = True,
@@ -64,9 +63,7 @@ fx_component(
 
 fx_package(
     name = "fidl_microbenchmarks_libfidl",
-    package_name = "fidl_microbenchmarks_libfidl",
     testonly = True,
     components = [":benchmark"],
     visibility = ["//src/tests/benchmarks:__subpackages__"],
 )
-# LINT.ThenChange(//src/tests/benchmarks/fidl/libfidl/BUILD.gn)

@@ -8,7 +8,6 @@ import("//build/components.gni")
 # //bundles/assembly/bazel_inputs bridge (//bundles/assembly:testing_support is
 # non-testonly).
 fuchsia_package("stress-test-runner") {
-  testonly = true
   deps = [ ":stress-test-runner-cmp" ]
 }
 
@@ -43,7 +42,6 @@ group("tests") {
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 rustc_binary("bin") {
-  testonly = true
   sources = [
     "src/main.rs",
     "src/test.rs",
@@ -71,13 +69,11 @@ rustc_binary("bin") {
 }
 
 fuchsia_component_manifest("manifest") {
-  testonly = true
   component_name = "stress-test-runner"
   manifest = "meta/stress-test-runner.cml"
 }
 
 fuchsia_component("stress-test-runner-cmp") {
-  testonly = true
   cm_label = ":manifest"
   deps = [ ":bin" ]
 }

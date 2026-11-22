@@ -115,14 +115,9 @@ pub async fn get_child_component_event_matcher(
     component_moniker: &str,
 ) -> Result<component_events::matcher::EventMatcher> {
     let realm_moniker = &realm.get_moniker().await.context("calling get moniker")?;
-    let moniker_for_match =
-        format!("./{}/{}/{}", NETEMUL_SANDBOX_MONIKER, realm_moniker, component_moniker);
+    let moniker_for_match = format!("./{}/{}", realm_moniker, component_moniker);
     Ok(component_events::matcher::EventMatcher::ok().moniker(moniker_for_match))
 }
-
-/// The name of the netemul sandbox component, which is the parent component of
-/// managed test realms.
-const NETEMUL_SANDBOX_MONIKER: &str = "sandbox";
 
 /// Gets the moniker of a component in a test realm, relative to the root of the
 /// dynamic collection in which it is running.
@@ -131,7 +126,7 @@ pub async fn get_component_moniker<'a>(
     component: &str,
 ) -> Result<String> {
     let realm_moniker = realm.get_moniker().await.context("calling get moniker")?;
-    Ok([NETEMUL_SANDBOX_MONIKER, &realm_moniker, component].join("/"))
+    Ok([&realm_moniker, component].join("/"))
 }
 
 /// Gets inspect data in realm.
@@ -148,7 +143,6 @@ pub async fn get_inspect_data(
         .retry(diagnostics_reader::RetryConfig::MinSchemaCount(1))
         .add_selector(
             diagnostics_reader::ComponentSelector::new(vec![
-                NETEMUL_SANDBOX_MONIKER.into(),
                 realm_moniker.into_owned(),
                 component_moniker.into(),
             ])

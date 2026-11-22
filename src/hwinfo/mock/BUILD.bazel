@@ -68,4 +68,5 @@ fx_package(
     package_name = "hwinfo-mock",
     testonly = True,
     components = [":component"],
+    visibility = ["//src/hwinfo/mock/integration/testing/realm-factory:__pkg__"],
 )

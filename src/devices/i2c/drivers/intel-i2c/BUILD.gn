@@ -58,10 +58,10 @@ fuchsia_cc_driver("intel-i2c-driver") {
     "//sdk/fidl/fuchsia.hardware.i2cimpl:fuchsia.hardware.i2cimpl_cpp",
     "//sdk/lib/driver/mmio/cpp",
     "//sdk/lib/driver/outgoing/cpp",
+    "//sdk/lib/driver/pci/cpp",
     "//sdk/lib/fit",
     "//src/devices/lib/driver",
     "//src/devices/lib/driver:driver_runtime",
-    "//src/devices/pci/lib/device-protocol-pci",
     "//src/devices/pci/lib/pci",
     "//src/lib/ddk",
     "//src/lib/ddk:ddk-metadata-headers",
@@ -82,7 +82,6 @@ fuchsia_driver_component("intel-i2c") {
     ":intel-i2c-driver",
     ":intel_i2c_bind",
   ]
-  info = "meta/intel-i2c-info.json"
 }
 
 fuchsia_driver_package("package") {
@@ -96,7 +95,6 @@ fuchsia_driver_component("intel-i2c-dfv2") {
     ":intel-i2c-driver",
     ":intel_i2c_bind_dfv2",
   ]
-  info = "meta/intel-i2c-info.json"
   manifest = "meta/intel-i2c-dfv2.cml"
 }
 

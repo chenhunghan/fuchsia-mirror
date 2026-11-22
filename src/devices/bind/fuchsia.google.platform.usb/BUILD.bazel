@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.google.platform.usb",
+    src = "fuchsia.google.platform.usb.bind",
+    category = "partner",
+    visibility = [
+        "//src/developer/adb/drivers/usb-adb-function:__pkg__",
+        "//src/developer/ffx/lib/usb_vsock_host:__pkg__",
+        "//src/developer/remote-control/usb/vsock-usb:__pkg__",
+        "//src/devices/usb/tests/usb-hci-test:__pkg__",
+        "//src/firmware/drivers/usb-fastboot-function:__pkg__",
+    ],
+)

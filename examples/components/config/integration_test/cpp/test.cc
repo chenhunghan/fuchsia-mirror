@@ -58,7 +58,7 @@ TEST_F(IntegrationTest, ConfigCpp) {
 
   auto data = GetInspect(child_name, moniker);
 
-  // Verify that the published values match the static package definition in ../../cpp/BUILD.gn.
+  // Verify that the published values match the default values in ../../cpp/meta/config_example.cml.
   EXPECT_EQ(rapidjson::Value("World"), data.GetByPath({"root", "config", "greeting"}));
   EXPECT_EQ(rapidjson::Value(100), data.GetByPath({"root", "config", "delay_ms"}));
 }
@@ -70,12 +70,18 @@ TEST_F(IntegrationTest, ConfigCppReplaceSome) {
   auto child_name = "config_example_replace_some";
   realm_builder.AddChild(child_name, kChildUrl, options);
 
-  // [START config_load]
-  realm_builder.InitMutableConfigFromPackage(child_name);
-  // [END config_load]
-
   // [START config_replace]
-  realm_builder.SetConfigValue(child_name, "greeting", "Fuchsia");
+  std::vector<component_testing::ConfigCapability> configurations;
+  configurations.push_back({
+      .name = "fuchsia.example.config.Greeting",
+      .value = component_testing::ConfigValue("Fuchsia"),
+  });
+  realm_builder.AddConfiguration(std::move(configurations));
+  realm_builder.AddRoute({
+      .capabilities = {component_testing::Config{.name = "fuchsia.example.config.Greeting"}},
+      .source = component_testing::SelfRef{},
+      .targets = {component_testing::ChildRef{child_name}},
+  });
   // [END config_replace]
 
   realm_builder.AddRoute(component_testing::Route{
@@ -91,47 +97,32 @@ TEST_F(IntegrationTest, ConfigCppReplaceSome) {
   EXPECT_EQ(rapidjson::Value(100), data.GetByPath({"root", "config", "delay_ms"}));
 }
 
-TEST_F(IntegrationTest, ConfigCppReplaceAllPackaged) {
+TEST_F(IntegrationTest, ConfigCppReplaceAll) {
   auto realm_builder = component_testing::RealmBuilder::Create();
   auto options =
       component_testing::ChildOptions{.startup_mode = component_testing::StartupMode::EAGER};
-  auto child_name = "config_example_replace_all_packaged";
+  auto child_name = "config_example_replace_all";
   realm_builder.AddChild(child_name, kChildUrl, options);
 
-  realm_builder.InitMutableConfigFromPackage(child_name);
-
-  realm_builder.SetConfigValue(child_name, "greeting", "Fuchsia");
-  realm_builder.SetConfigValue(child_name, "delay_ms",
-                               component_testing::ConfigValue::Uint64(200u));
-
-  realm_builder.AddRoute(component_testing::Route{
-      .capabilities = {component_testing::Protocol{"fuchsia.logger.LogSink"}},
-      .source = component_testing::ParentRef(),
-      .targets = {component_testing::ChildRef{child_name}}});
-  auto realm = realm_builder.Build();
-  auto moniker = "realm_builder:" + realm.component().GetChildName() + "/" + child_name;
-
-  auto data = GetInspect(child_name, moniker);
-
-  EXPECT_EQ(rapidjson::Value("Fuchsia"), data.GetByPath({"root", "config", "greeting"}));
-  EXPECT_EQ(rapidjson::Value(200), data.GetByPath({"root", "config", "delay_ms"}));
-}
-
-// Same test as above except the config is initialized to empty.
-TEST_F(IntegrationTest, ConfigCppSetAllWhenEmpty) {
-  auto realm_builder = component_testing::RealmBuilder::Create();
-  auto options =
-      component_testing::ChildOptions{.startup_mode = component_testing::StartupMode::EAGER};
-  auto child_name = "config_example_set_all";
-  realm_builder.AddChild(child_name, kChildUrl, options);
-
-  // [START config_empty]
-  realm_builder.InitMutableConfigToEmpty(child_name);
-  // [END config_empty]
-
-  realm_builder.SetConfigValue(child_name, "greeting", "Fuchsia");
-  realm_builder.SetConfigValue(child_name, "delay_ms",
-                               component_testing::ConfigValue::Uint64(200u));
+  std::vector<component_testing::ConfigCapability> configurations;
+  configurations.push_back({
+      .name = "fuchsia.example.config.Greeting",
+      .value = component_testing::ConfigValue("Fuchsia"),
+  });
+  configurations.push_back({
+      .name = "fuchsia.example.config.DelayMs",
+      .value = component_testing::ConfigValue::Uint64(200u),
+  });
+  realm_builder.AddConfiguration(std::move(configurations));
+  realm_builder.AddRoute({
+      .capabilities =
+          {
+              component_testing::Config{.name = "fuchsia.example.config.Greeting"},
+              component_testing::Config{.name = "fuchsia.example.config.DelayMs"},
+          },
+      .source = component_testing::SelfRef{},
+      .targets = {component_testing::ChildRef{child_name}},
+  });
 
   realm_builder.AddRoute(component_testing::Route{
       .capabilities = {component_testing::Protocol{"fuchsia.logger.LogSink"}},

@@ -45,7 +45,7 @@ static device_info_t* get_device(const char* nodename) {
 static device_info_t* add_device(device_info_t* device) {
   device_info_t* known_device = get_device(device->nodename);
   if (!known_device) {
-    if (devices_count > MAX_DEVICES) {
+    if (devices_count >= MAX_DEVICES) {
       return NULL;
     }
     known_device = &devices[devices_count];
@@ -100,7 +100,7 @@ static bool on_device(device_info_t* device, void* cookie) {
 
 static void usage(void) {
   fprintf(stderr, "usage: %s [options]\n", appname);
-  netboot_usage(false);
+  netboot_usage();
 }
 
 int main(int argc, char** argv) {

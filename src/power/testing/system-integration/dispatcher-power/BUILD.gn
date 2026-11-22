@@ -18,7 +18,7 @@ cc_test_executable("test") {
   sources = [ "test.cc" ]
   deps = [
     ":test.power.dispatcher_cpp",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_cpp",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_cpp",
     "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_cpp",
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
     "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_cpp",

@@ -26,33 +26,41 @@ KernelLog::KernelLog(async_dispatcher_t* dispatcher,
       services_(std::move(services)),
       backoff_(std::move(backoff)),
       redactor_(redactor) {
-  read_only_log_.set_error_handler([this](const zx_status_t status) {
-    FX_PLOGS(WARNING, status) << "Lost connection to fuchsia.boot.ReadOnlyLog";
+  Connect();
+}
 
-    for (auto& waiting : waiting_) {
-      if (waiting != nullptr) {
-        waiting(Error::kConnectionError);
-      }
+void KernelLog::Connect() {
+  auto [client, server] = fidl::Endpoints<fuchsia_boot::ReadOnlyLog>::Create();
+  services_->Connect(fidl::DiscoverableProtocolName<fuchsia_boot::ReadOnlyLog>,
+                     server.TakeChannel());
+  read_only_log_ = fidl::Client(std::move(client), dispatcher_, this);
+}
+
+void KernelLog::on_fidl_error(const fidl::UnbindInfo error) {
+  FX_PLOGS(WARNING, error.status()) << "Lost connection to fuchsia.boot.ReadOnlyLog";
+  read_only_log_ = fidl::Client<fuchsia_boot::ReadOnlyLog>();
+
+  for (auto& waiting : waiting_) {
+    if (waiting != nullptr) {
+      waiting(Error::kConnectionError);
     }
+  }
 
-    fxl::WeakPtr<KernelLog> self = ptr_factory_.GetWeakPtr();
-    async::PostDelayedTask(
-        dispatcher_,
-        [self] {
-          if (self) {
-            self->services_->Connect(self->read_only_log_.NewRequest(self->dispatcher_));
-          }
-        },
-        backoff_->GetNext());
-  });
-
-  services_->Connect(read_only_log_.NewRequest(dispatcher_));
+  fxl::WeakPtr<KernelLog> self = ptr_factory_.GetWeakPtr();
+  async::PostDelayedTask(
+      dispatcher_,
+      [self] {
+        if (self) {
+          self->Connect();
+        }
+      },
+      backoff_->GetNext());
 }
 
 ::fpromise::promise<AttachmentData> KernelLog::Get(const uint64_t ticket) {
   FX_CHECK(!completers_.contains(ticket)) << "Ticket used twice: " << ticket;
 
-  if (!read_only_log_.is_bound()) {
+  if (!read_only_log_.is_valid()) {
     return ::fpromise::make_ok_promise(AttachmentData(Error::kConnectionError));
   }
 
@@ -74,11 +82,19 @@ KernelLog::KernelLog(async_dispatcher_t* dispatcher,
 
   fxl::WeakPtr<KernelLog> self = ptr_factory_.GetWeakPtr();
 
-  read_only_log_->Get([complete = complete.share()](zx::debuglog debuglog) mutable {
-    if (complete != nullptr) {
-      complete(std::move(debuglog));
-    }
-  });
+  read_only_log_->Get().Then(
+      [complete = complete.share()](fidl::Result<fuchsia_boot::ReadOnlyLog::Get>& result) mutable {
+        if (complete == nullptr) {
+          return;
+        }
+
+        if (result.is_error()) {
+          complete(Error::kConnectionError);
+          return;
+        }
+
+        complete(std::move(result->log()));
+      });
 
   return consume
       .and_then([self, ticket, this](zx::debuglog& debuglog) {

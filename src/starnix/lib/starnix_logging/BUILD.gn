@@ -2,12 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
 import("//src/starnix/build/args.gni")
-
-fuchsia_unittest_package("starnix_logging-tests") {
-  deps = [ ":starnix_logging_lib_test" ]
-}
 
 group("tests") {
   testonly = true
@@ -113,4 +108,10 @@ rustc_test("starnix_logging_lib_test") {
     "//third_party/rust_crates:pretty_assertions",
     "//third_party/rust_crates:regex-lite",
   ]
+}
+
+fuchsia_unittest_package("starnix_logging-tests") {
+  package_name = "starnix_logging-tests-gn"
+  component_name = "starnix_logging-tests"
+  deps = [ ":starnix_logging_lib_test" ]
 }

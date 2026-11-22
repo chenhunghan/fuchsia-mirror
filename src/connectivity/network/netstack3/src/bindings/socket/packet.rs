@@ -31,7 +31,9 @@ use netstack3_core::ip::{DeviceIpLayerMetadata, Marks};
 use packet::Buf;
 use packet_formats::ethernet::EtherType;
 
-use crate::bindings::bpf::{SocketFilterProgram, SocketFilterResult, SocketFilterSkBuff};
+use crate::bindings::bpf::{
+    SocketFilterProgram, SocketFilterResult, SocketFilterSkBuff, ValidVerifiedProgram,
+};
 use crate::bindings::devices::BindingId;
 use crate::bindings::errno::ErrnoError;
 use crate::bindings::socket::queue::{BodyLen, MessageQueue, NoSpace};
@@ -397,7 +399,7 @@ impl worker::SocketWorkerHandler for BindingData {
         ctx: &mut Ctx,
         request: Self::Request,
     ) -> ControlFlow<Self::CloseResponder, Option<Self::RequestStream>> {
-        RequestHandler { ctx, data: self }.handle_request(request)
+        RequestHandler { ctx, data: self }.handle_request(request).await
     }
 
     async fn close(self, ctx: &mut Ctx) {
@@ -613,7 +615,7 @@ impl<'a> RequestHandler<'a> {
         result.map_err(|e| e.into_errno_error())
     }
 
-    fn handle_request(
+    async fn handle_request(
         self,
         request: fppacket::SocketRequest,
     ) -> ControlFlow<fppacket::SocketCloseResponder, Option<fppacket::SocketRequestStream>> {
@@ -780,14 +782,28 @@ impl<'a> RequestHandler<'a> {
                 // TODO(https://fxbug.dev/574457735): Support marks on packet sockets.
                 responder.send(Err(fposix::Errno::Eopnotsupp)).unwrap_or_log("failed to respond")
             }
-            fppacket::SocketRequest::AttachBpfFilterUnsafe { code, responder } => {
-                info!("AttachBpfFilterUnsafe is called on a packet socket.");
-                let result = SocketFilterProgram::new_from_bytecode(code)
-                    .map(|program| {
-                        *self.data.id.socket_state().bpf_filter.write() = Some(program);
-                        ()
-                    })
-                    .map_err(|e| e.into());
+            fppacket::SocketRequest::AttachBpfFilter { program, responder } => {
+                info!("AttachBpfFilter is called on a packet socket.");
+                let result = match ValidVerifiedProgram::try_from(program) {
+                    Err(e) => {
+                        warn!("invalid BPF program: {e:?}");
+                        Err(fposix::Errno::Einval)
+                    }
+                    Ok(valid_program) if !valid_program.maps.is_empty() => {
+                        warn!("maps not allowed in socket filter");
+                        Err(fposix::Errno::Einval)
+                    }
+                    Ok(valid_program) => {
+                        let maps_cache = self.ctx.bindings_ctx().ebpf_manager.maps_cache();
+                        match SocketFilterProgram::new(valid_program, maps_cache).await {
+                            Ok(program) => {
+                                *self.data.id.socket_state().bpf_filter.write() = Some(program);
+                                Ok(())
+                            }
+                            Err(e) => Err(e.into()),
+                        }
+                    }
+                };
                 responder.send(result).unwrap_or_log("failed to respond");
             }
             fppacket::SocketRequest::GetCookie { responder } => {

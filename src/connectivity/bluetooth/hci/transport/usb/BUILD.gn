@@ -47,7 +47,6 @@ fuchsia_driver_component("bt-transport-usb") {
     ":bt-transport-usb-driver",
     ":bt_transport_usb_bind",
   ]
-  info = "meta/bt-transport-usb-info.json"
 }
 
 fuchsia_driver_package("package") {

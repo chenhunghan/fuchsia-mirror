@@ -15,9 +15,16 @@
         default_dispatcher_opts: [ "allow_sync_calls" ],
         bind: "meta/bind/tpm-lpc.bindbc",
     },
-    capabilities: [],
+    capabilities: [
+        { service: "fuchsia.hardware.tpmimpl.Service" },
+    ],
     use: [
         { service: "fuchsia.hardware.acpi.Service" },
     ],
-    expose: [],
+    expose: [
+        {
+            service: "fuchsia.hardware.tpmimpl.Service",
+            from: "self",
+        },
+    ],
 }

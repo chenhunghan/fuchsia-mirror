@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":dma-buffer-rust-tests"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+rustc_library(
+    name = "rust",
+    srcs = [
+        "src/lib.rs",
+        "src/phys_iter.rs",
+    ],
+    crate_name = "dma_buffer",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = [
+        "//src/connectivity/ethernet/drivers/gvnic:__pkg__",
+        "//src/devices/block/drivers/cqhci:__pkg__",
+        "//src/devices/block/drivers/nvme:__pkg__",
+        "//src/graphics/display/drivers/virtio-gpu-display:__pkg__",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/mapped-vmo",
+        "//src/lib/shared-buffer",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "dma_buffer_lib_test",
+    crate = ":rust",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/driver/fake-bti/rust",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "dma-buffer-rust-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":dma_buffer_lib_test"],
+)

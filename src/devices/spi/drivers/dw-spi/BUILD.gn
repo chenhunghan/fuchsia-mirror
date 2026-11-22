@@ -11,6 +11,10 @@ fuchsia_driver_dml("dw-spi-dml") {
   driver_name = "dw-spi"
 }
 
+fuchsia_driver_dml_rust_parser("dw-spi-metadata") {
+  dml_label = ":dw-spi-dml"
+}
+
 driver_bind_rules("bind_rules") {
   dml_label = ":dw-spi-dml"
   bind_output = "dw-spi.bindbc"
@@ -36,6 +40,7 @@ fuchsia_rust_driver("dw-spi-driver") {
     "src/tests.rs",
   ]
   deps = [
+    ":dw-spi-metadata",
     "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_rust_next",
     "//sdk/fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_rust_next",
     "//sdk/fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_rust_next",
@@ -54,6 +59,7 @@ fuchsia_rust_driver("dw-spi-driver") {
     "//sdk/lib/driver/resource/rust:fdf_resource",
     "//sdk/lib/driver/runtime/rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",
@@ -66,6 +72,7 @@ fuchsia_rust_driver("dw-spi-driver") {
     "//third_party/rust_crates:serde",
   ]
   test_deps = [
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust",
     "//sdk/fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_rust_next",
     "//sdk/lib/driver/fake-clock/rust",
@@ -86,7 +93,6 @@ fuchsia_driver_component("dw-spi") {
     ":bind_rules",
     ":dw-spi-driver",
   ]
-  info = "meta/dw-spi-info.json"
 }
 
 fuchsia_driver_package("package") {

@@ -18,12 +18,12 @@ zx::event MakeEvent() {
 TEST(StrictUnion, Construction) {
   // Strict union is not default constructible.
   static_assert(!std::is_default_constructible_v<test_types::TestUnion>);
-  static_assert(!std::is_default_constructible_v<test_types::TestStrictXUnion>);
+  static_assert(!std::is_default_constructible_v<test_types::TestStrictUnion>);
 
   // As are any aggregates thereof.
-  static_assert(!std::is_default_constructible_v<test_types::TestStrictXUnionInStruct>,
+  static_assert(!std::is_default_constructible_v<test_types::TestStrictUnionInStruct>,
                 "Struct of strict union is not default constructible");
-  static_assert(!std::is_default_constructible_v<test_types::TestStrictXUnionInArrayInStruct>,
+  static_assert(!std::is_default_constructible_v<test_types::TestStrictUnionInArrayInStruct>,
                 "Strict union is not default constructible");
 
   test_types::TestUnion value = test_types::TestUnion::WithCopyable({{.x = 42}});
@@ -35,11 +35,11 @@ TEST(StrictUnion, Construction) {
 
 TEST(StrictUnion, Move) {
   // Moving a value union recursively moves fields instead of clearing the union.
-  test_types::TestStrictXUnion value = test_types::TestStrictXUnion::WithCopyable({{.x = 42}});
-  test_types::TestStrictXUnion value2 = std::move(value);
-  EXPECT_EQ(value.Which(), test_types::TestStrictXUnion::Tag::kCopyable);
+  test_types::TestStrictUnion value = test_types::TestStrictUnion::WithCopyable({{.x = 42}});
+  test_types::TestStrictUnion value2 = std::move(value);
+  EXPECT_EQ(value.Which(), test_types::TestStrictUnion::Tag::kCopyable);
   EXPECT_EQ(value.copyable().value().x(), 42);
-  EXPECT_EQ(value2.Which(), test_types::TestStrictXUnion::Tag::kCopyable);
+  EXPECT_EQ(value2.Which(), test_types::TestStrictUnion::Tag::kCopyable);
   EXPECT_EQ(value2.copyable().value().x(), 42);
 
   // They do not share the same storage.
@@ -63,7 +63,7 @@ TEST(StrictUnion, Move) {
 
 TEST(FlexibleUnion, Construction) {
   // Flexible union is not default constructible.
-  static_assert(!std::is_default_constructible_v<test_types::TestXUnion>);
+  static_assert(!std::is_default_constructible_v<test_types::TestFlexibleUnion>);
 
   // As are any aggregates thereof.
   static_assert(!std::is_default_constructible_v<test_types::TestFlexibleUnionInStruct>,
@@ -71,7 +71,7 @@ TEST(FlexibleUnion, Construction) {
   static_assert(!std::is_default_constructible_v<test_types::TestFlexibleUnionInArrayInStruct>,
                 "Flexible union is not default constructible");
 
-  test_types::TestXUnion value = test_types::TestXUnion::WithCopyable({{.x = 42}});
+  test_types::TestFlexibleUnion value = test_types::TestFlexibleUnion::WithCopyable({{.x = 42}});
   EXPECT_TRUE(value.copyable());
   EXPECT_TRUE(value.copyable().has_value());
   EXPECT_EQ(value.copyable().value().x(), 42);
@@ -80,7 +80,7 @@ TEST(FlexibleUnion, Construction) {
 
 TEST(FlexibleUnion, Unknown) {
   // Use an internal API to make an unknown union.
-  test_types::TestXUnion unknown{fidl::internal::DefaultConstructPossiblyInvalidObjectTag{}};
+  test_types::TestFlexibleUnion unknown{fidl::internal::DefaultConstructPossiblyInvalidObjectTag{}};
   EXPECT_TRUE(unknown.IsUnknown());
 }
 
@@ -89,11 +89,11 @@ TEST(FlexibleUnion, Unknown) {
 // align with strict unions.
 TEST(FlexibleUnion, Move) {
   // Moving a value union recursively moves fields instead of clearing the union.
-  test_types::TestNonResourceXUnion value = test_types::TestNonResourceXUnion::WithPrimitive(42);
-  test_types::TestNonResourceXUnion value2 = std::move(value);
-  EXPECT_EQ(value.Which(), test_types::TestNonResourceXUnion::Tag::kPrimitive);
+  test_types::TestNonResourceUnion value = test_types::TestNonResourceUnion::WithPrimitive(42);
+  test_types::TestNonResourceUnion value2 = std::move(value);
+  EXPECT_EQ(value.Which(), test_types::TestNonResourceUnion::Tag::kPrimitive);
   EXPECT_EQ(value.primitive().value(), 42);
-  EXPECT_EQ(value2.Which(), test_types::TestNonResourceXUnion::Tag::kPrimitive);
+  EXPECT_EQ(value2.Which(), test_types::TestNonResourceUnion::Tag::kPrimitive);
   EXPECT_EQ(value2.primitive().value(), 42);
 
   // They do not share the same storage.
@@ -101,12 +101,12 @@ TEST(FlexibleUnion, Move) {
   EXPECT_EQ(value2.primitive().value(), 42);
 
   // Moving a resource union recursively moves fields instead of clearing the union.
-  test_types::TestXUnion resource = test_types::TestXUnion::WithH(MakeEvent());
-  test_types::TestXUnion resource2 = std::move(resource);
-  EXPECT_EQ(resource.Which(), test_types::TestXUnion::Tag::kH);
+  test_types::TestFlexibleUnion resource = test_types::TestFlexibleUnion::WithH(MakeEvent());
+  test_types::TestFlexibleUnion resource2 = std::move(resource);
+  EXPECT_EQ(resource.Which(), test_types::TestFlexibleUnion::Tag::kH);
   EXPECT_TRUE(resource.h().has_value());
   EXPECT_FALSE(resource.h()->is_valid());
-  EXPECT_EQ(resource2.Which(), test_types::TestXUnion::Tag::kH);
+  EXPECT_EQ(resource2.Which(), test_types::TestFlexibleUnion::Tag::kH);
   EXPECT_TRUE(resource2.h().has_value());
   EXPECT_TRUE(resource2.h()->is_valid());
 
@@ -117,29 +117,29 @@ TEST(FlexibleUnion, Move) {
 
 // These operations should be common across strict/flexible unions.
 TEST(Union, SetAndGetFieldsUsingMutableAccessors) {
-  test_types::TestXUnion u = test_types::TestXUnion::WithPrimitive(0);
+  test_types::TestFlexibleUnion u = test_types::TestFlexibleUnion::WithPrimitive(0);
   u.primitive() = 42;
-  EXPECT_EQ(u.Which(), test_types::TestXUnion::Tag::kPrimitive);
+  EXPECT_EQ(u.Which(), test_types::TestFlexibleUnion::Tag::kPrimitive);
   u.copyable() = test_types::CopyableStruct{42};
-  EXPECT_EQ(u.Which(), test_types::TestXUnion::Tag::kCopyable);
+  EXPECT_EQ(u.Which(), test_types::TestFlexibleUnion::Tag::kCopyable);
   u.h() = MakeEvent();
-  EXPECT_EQ(u.Which(), test_types::TestXUnion::Tag::kH);
+  EXPECT_EQ(u.Which(), test_types::TestFlexibleUnion::Tag::kH);
   EXPECT_EQ(u.primitive().value_or(0), 0);
 }
 
 TEST(Union, SetFieldsUsingSetters) {
-  test_types::TestXUnion u = test_types::TestXUnion::WithPrimitive(0);
+  test_types::TestFlexibleUnion u = test_types::TestFlexibleUnion::WithPrimitive(0);
   u.primitive(42);
-  EXPECT_EQ(u.Which(), test_types::TestXUnion::Tag::kPrimitive);
+  EXPECT_EQ(u.Which(), test_types::TestFlexibleUnion::Tag::kPrimitive);
   u.copyable(test_types::CopyableStruct{42});
-  EXPECT_EQ(u.Which(), test_types::TestXUnion::Tag::kCopyable);
+  EXPECT_EQ(u.Which(), test_types::TestFlexibleUnion::Tag::kCopyable);
   u.h(MakeEvent());
-  EXPECT_EQ(u.Which(), test_types::TestXUnion::Tag::kH);
+  EXPECT_EQ(u.Which(), test_types::TestFlexibleUnion::Tag::kH);
   EXPECT_EQ(u.primitive().value_or(0), 0);
 }
 
 TEST(Union, IntoOptional) {
-  test_types::TestXUnion u = test_types::TestXUnion::WithPrimitive(42);
+  test_types::TestFlexibleUnion u = test_types::TestFlexibleUnion::WithPrimitive(42);
   std::optional<int32_t> p = u.primitive();
   EXPECT_TRUE(p.has_value());
   EXPECT_EQ(p.value(), 42);
@@ -151,20 +151,20 @@ TEST(Union, IntoOptional) {
 }
 
 TEST(Union, Copy) {
-  static_assert(!std::is_copy_constructible_v<test_types::TestXUnion>,
+  static_assert(!std::is_copy_constructible_v<test_types::TestFlexibleUnion>,
                 "Resource type is not copyable");
-  static_assert(!std::is_copy_assignable_v<test_types::TestXUnion>,
+  static_assert(!std::is_copy_assignable_v<test_types::TestFlexibleUnion>,
                 "Resource type is not copyable");
-  static_assert(std::is_copy_constructible_v<test_types::TestNonResourceXUnion>,
+  static_assert(std::is_copy_constructible_v<test_types::TestNonResourceUnion>,
                 "Value type is copyable");
-  static_assert(std::is_copy_assignable_v<test_types::TestNonResourceXUnion>,
+  static_assert(std::is_copy_assignable_v<test_types::TestNonResourceUnion>,
                 "Value type is copyable");
 
-  test_types::TestNonResourceXUnion value = test_types::TestNonResourceXUnion::WithPrimitive(42);
-  test_types::TestNonResourceXUnion value2 = value;
-  EXPECT_EQ(value.Which(), test_types::TestNonResourceXUnion::Tag::kPrimitive);
+  test_types::TestNonResourceUnion value = test_types::TestNonResourceUnion::WithPrimitive(42);
+  test_types::TestNonResourceUnion value2 = value;
+  EXPECT_EQ(value.Which(), test_types::TestNonResourceUnion::Tag::kPrimitive);
   EXPECT_EQ(value.primitive().value(), 42);
-  EXPECT_EQ(value2.Which(), test_types::TestNonResourceXUnion::Tag::kPrimitive);
+  EXPECT_EQ(value2.Which(), test_types::TestNonResourceUnion::Tag::kPrimitive);
   EXPECT_EQ(value2.primitive().value(), 42);
 
   // They do not share the same storage.
@@ -173,40 +173,40 @@ TEST(Union, Copy) {
 }
 
 TEST(Union, Equality) {
-  test_types::TestStrictXUnion u = test_types::TestStrictXUnion::WithPrimitive(42);
-  test_types::TestStrictXUnion different1 = test_types::TestStrictXUnion::WithPrimitive(0);
-  test_types::TestStrictXUnion different2 = test_types::TestStrictXUnion::WithCopyable({{.x = 0}});
+  test_types::TestStrictUnion u = test_types::TestStrictUnion::WithPrimitive(42);
+  test_types::TestStrictUnion different1 = test_types::TestStrictUnion::WithPrimitive(0);
+  test_types::TestStrictUnion different2 = test_types::TestStrictUnion::WithCopyable({{.x = 0}});
 
   EXPECT_EQ(u, u);
-  EXPECT_EQ(u, test_types::TestStrictXUnion{u});
+  EXPECT_EQ(u, test_types::TestStrictUnion{u});
   EXPECT_NE(u, different1);
   EXPECT_NE(u, different2);
 }
 
 TEST(Union, OptionalUnion) {
-  test_types::TestStrictOptionalXUnionInStruct us;
-  us.xu(std::make_unique<test_types::TestStrictXUnion>(
-      test_types::TestStrictXUnion::WithPrimitive(42)));
+  test_types::TestStrictOptionalUnionInStruct us;
+  us.xu(std::make_unique<test_types::TestStrictUnion>(
+      test_types::TestStrictUnion::WithPrimitive(42)));
   EXPECT_TRUE(us.xu().has_value());
-  test_types::TestStrictOptionalXUnionInStruct us2 = std::move(us);
+  test_types::TestStrictOptionalUnionInStruct us2 = std::move(us);
   EXPECT_FALSE(us.xu().has_value());
   EXPECT_TRUE(us2.xu().has_value());
-  EXPECT_EQ(us2.xu().value(), test_types::TestStrictXUnion::WithPrimitive(42));
+  EXPECT_EQ(us2.xu().value(), test_types::TestStrictUnion::WithPrimitive(42));
 
   us2.xu().reset();
   EXPECT_FALSE(us2.xu().has_value());
-  EXPECT_EQ(us2.xu().value_or(test_types::TestStrictXUnion::WithPrimitive(1)),
-            test_types::TestStrictXUnion::WithPrimitive(1));
+  EXPECT_EQ(us2.xu().value_or(test_types::TestStrictUnion::WithPrimitive(1)),
+            test_types::TestStrictUnion::WithPrimitive(1));
 }
 
 TEST(Union, Traits) {
-  static_assert(fidl::IsFidlType<test_types::TestStrictXUnion>::value);
-  static_assert(fidl::IsUnion<test_types::TestStrictXUnion>::value);
+  static_assert(fidl::IsFidlType<test_types::TestStrictUnion>::value);
+  static_assert(fidl::IsUnion<test_types::TestStrictUnion>::value);
   static_assert(!fidl::IsUnion<int>::value);
   static_assert(!fidl::IsUnion<test_types::FlexibleBits>::value);
-  static_assert(fidl::TypeTraits<test_types::TestStrictXUnion>::kPrimarySize ==
+  static_assert(fidl::TypeTraits<test_types::TestStrictUnion>::kPrimarySize ==
                 sizeof(fidl_union_t));
-  static_assert(fidl::TypeTraits<test_types::TestStrictXUnion>::kMaxOutOfLine ==
+  static_assert(fidl::TypeTraits<test_types::TestStrictUnion>::kMaxOutOfLine ==
                 0);  // Envelope inlining
 }
 

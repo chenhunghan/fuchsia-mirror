@@ -367,7 +367,7 @@ fidl::internal::WireCompleterBase<::test_emptystruct::EmptyProtocol::SendAndRece
 
 ::fidl::internal::TransactionalRequest<::test_emptystruct::EmptyProtocol::Send>::TransactionalRequest(const ::test_emptystruct::wire::Empty& e)
     : body(::test_emptystruct::wire::EmptyProtocolSendRequest{e}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_emptystruct::kEmptyProtocol_Send_Ordinal, ::test_emptystruct::kEmptyProtocol_Send_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_emptystruct::kEmptyProtocol_Send_Ordinal, ::test_emptystruct::kEmptyProtocol_Send_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -390,7 +390,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalEvent<::test_emptystruct::EmptyProtocol::Receive>::TransactionalEvent(const ::test_emptystruct::wire::Empty& e)
     : body{e} {
-  ::fidl::InitTxnHeader(&header, 0, ::test_emptystruct::kEmptyProtocol_Receive_Ordinal, ::test_emptystruct::kEmptyProtocol_Receive_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_emptystruct::kEmptyProtocol_Receive_Ordinal, ::test_emptystruct::kEmptyProtocol_Receive_DynamicFlags);
 }
 
 ::fidl::internal::TransactionalEvent<::test_emptystruct::EmptyProtocol::Receive>::TransactionalEvent() {
@@ -421,7 +421,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_emptystruct::EmptyProtocol::SendAndReceive>::TransactionalRequest(const ::test_emptystruct::wire::Empty& e)
     : body(::test_emptystruct::wire::EmptyProtocolSendAndReceiveRequest{e}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_emptystruct::kEmptyProtocol_SendAndReceive_Ordinal, ::test_emptystruct::kEmptyProtocol_SendAndReceive_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_emptystruct::kEmptyProtocol_SendAndReceive_Ordinal, ::test_emptystruct::kEmptyProtocol_SendAndReceive_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -447,7 +447,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_emptystruct::EmptyProtocol::SendAndReceive>::TransactionalResponse(const ::test_emptystruct::wire::Empty& e)
     : body(::fidl::WireResponse<::test_emptystruct::EmptyProtocol::SendAndReceive>(e)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_emptystruct::kEmptyProtocol_SendAndReceive_Ordinal, ::test_emptystruct::kEmptyProtocol_SendAndReceive_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_emptystruct::kEmptyProtocol_SendAndReceive_Ordinal, ::test_emptystruct::kEmptyProtocol_SendAndReceive_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_emptystruct::EmptyProtocol::SendAndReceive>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_emptystruct::kEmptyProtocol_SendAndReceive_Ordinal, ::test_emptystruct::kEmptyProtocol_SendAndReceive_DynamicFlags);

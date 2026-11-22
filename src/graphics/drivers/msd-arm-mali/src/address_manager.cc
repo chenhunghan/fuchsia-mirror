@@ -4,8 +4,8 @@
 
 #include "src/graphics/drivers/msd-arm-mali/src/address_manager.h"
 
-#include <lib/magma/platform/platform_barriers.h>
 #include <lib/magma/platform/platform_logger.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <stdlib.h>
 
 #include <chrono>
@@ -285,7 +285,7 @@ void AddressManager::HardwareSlot::InvalidateSlot(mali::RegisterIo* io) {
 
   // Ensure CPU reads and writes to buffers in the address space don't happen
   // until after the hardware got the command to finish using the buffer.
-  magma::barriers::Barrier();
+  DataSynchronizationBarrier();
 }
 
 void AddressManager::HardwareSlot::WaitForMmuIdle(mali::RegisterIo* io) {
@@ -317,7 +317,7 @@ void AddressManager::HardwareSlot::FlushMmuRange(mali::RegisterIo* io, uint64_t 
 
   // Ensure page table writes are completed before the hardware tries to
   // access the buffer.
-  magma::barriers::WriteBarrier();
+  WriteDataSynchronizationBarrier();
   constexpr uint32_t kRegionLengthOffset = 11;
 
   // The low 12 bits are used to specify how many pages are to be locked in
@@ -341,7 +341,7 @@ void AddressManager::HardwareSlot::FlushMmuRange(mali::RegisterIo* io, uint64_t 
   WaitForMmuIdle(io);
   // If a page range was unmapped, ensure the hardware is no longer accessing
   // it before any CPU reads or writes to the memory.
-  magma::barriers::Barrier();
+  DataSynchronizationBarrier();
 }
 
 void AddressManager::HardwareSlot::UnlockMmu(mali::RegisterIo* io) {

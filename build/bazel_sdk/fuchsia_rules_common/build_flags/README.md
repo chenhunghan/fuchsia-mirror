@@ -605,6 +605,119 @@ cc_binary(
 )
 ```
 
+## Supporting `cc_shared_library()` targets
+
+`fx_cc_shared_library()` wraps `@rules_cc`'s `cc_shared_library()`, which cannot
+use the `deps`-based wiring shown above for `cc_binary()`:
+
+1. `cc_shared_library()` does not compile sources of its own (`copts`,
+   `cxxopts`, and `conlyopts` do not exist) and accepts custom linker arguments
+   through `user_link_flags` rather than `linkopts`.
+2. `cc_shared_library()` enforces shared-library ownership and export boundaries
+   across `deps` (`exports_filter`, `dynamic_deps`, and single-static-link
+   checks across shared-library graphs). Attaching a synthetic helper target
+   such as `:<name>.final_build_flags` to `deps` is rejected or distorts the
+   target's export graph.
+
+Instead, `wrap_cc_macro_args_with_build_flags()` passes the link response file
+through `user_link_flags` and attaches both helper targets to
+`additional_linker_inputs`:
+
+```py
+_final_cc_build_flags(
+    name = "shlib1.final_build_flags",
+    build_flags = [...],
+    target_type = "cxx_shared_library",
+    include_link_deps = True,
+    existing_deps = [...],
+    existing_dynamic_deps = [...],
+)
+
+_cc_response_file_internal(
+    name = "shlib1.cc_link.build_flags",
+    action_kind = "cc_link",
+    final_build_flags = ":shlib1.final_build_flags",
+)
+
+cc_shared_library(
+    name = "shlib1",
+    deps = [...],
+    dynamic_deps = [...],
+    user_link_flags = ["@$(location :shlib1.cc_link.build_flags)"],
+    additional_linker_inputs = [
+        ":shlib1.cc_link.build_flags",
+        ":shlib1.final_build_flags",
+    ],
+    features = ["-fuchsia_default_build_flags"],
+)
+```
+
+Not being able to attach `:<name>.final_build_flags` to `deps` has four direct
+consequences across the `build_flags()` implementation:
+
+- **Serializing `link_deps` into the link response file (`include_link_deps`,
+  `extra_cpp_link_items`, `extra_cpp_link_flags`)**:
+  `additional_linker_inputs` only stages `DefaultInfo.files` into the linker
+  sandbox and ignores `CcInfo(linking_context = ...)`. When
+  `include_link_deps = True`:
+  - `_final_cc_build_flags` adds library artifacts (including object-only
+    `LibraryToLink.pic_objects`) and `additional_inputs` from
+    `BuildFlagsInfo.link_deps` to `DefaultInfo.files` so
+    `additional_linker_inputs` stages them into the sandbox. This is gated on
+    `include_link_deps` so `cc_binary()` (which also lists
+    `:<name>.final_build_flags` in `additional_linker_inputs` for `link_inputs`)
+    does not stage unused PIC static archives alongside the non-PIC archives it
+    links via `deps`. Note that unlike `dynamic_deps`,
+    `additional_linker_inputs` does not merge `data_runfiles` on
+    `cc_shared_library()`, so runtime shared-library dependencies still belong
+    in `dynamic_deps`.
+  - `_cc_response_file_internal` writes those library paths (wrapped in
+    `-Wl,--whole-archive` / `-Wl,--no-whole-archive` when `alwayslink = True`,
+    assuming Fuchsia's in-tree ELF/`ld.lld` toolchains on `@platforms//os:fuchsia`
+    and `@platforms//os:linux`) and `user_link_flags` directly into
+    `:<name>.cc_link.build_flags`.
+  - `BuildFlagsListInfo` exposes two representations of those arguments:
+    `extra_cpp_link_items` (mixing `str` flags and `File` objects written via
+    `Args.add_all()` so Bazel preserves execution-time RBE path mapping) and
+    `extra_cpp_link_flags` (`list[str]` paths exported by
+    `expand_build_args_json.cquery` so `bazel_build_args.py` can reconstruct
+    linker commands statically without reading response files from disk).
+
+- **Manual `deps` / `dynamic_deps` deduplication (`existing_deps`,
+  `existing_dynamic_deps`)**:
+  Because `include_link_deps = True` injects libraries via `user_link_flags`
+  outside `cc_shared_library()`'s native linker graph, Bazel cannot
+  automatically deduplicate them against libraries already linked through `deps`
+  or exported by `dynamic_deps`. `_final_cc_build_flags` therefore inspects
+  `existing_deps` (`CcInfo`) and `existing_dynamic_deps`
+  (`CcSharedLibraryInfo`, including transitive `dynamic_deps` and `exports`) in
+  `_compute_link_deps_flags()` to skip already-linked owners and library files,
+  avoiding duplicate-symbol errors or statically re-bundling symbols provided by
+  a dynamic dependency. Note that `CcSharedLibraryInfo.link_once_static_libs`
+  (libraries privately linked into an upstream `dynamic_deps` DSO rather than
+  exported) is intentionally neither skipped nor rejected: `link_deps` models
+  per-DSO hidden runtime support archives (matching GN's
+  `toolchain_variant.link_deps`) that each shared library must link for itself
+  without requiring `linkable_more_than_once` tags; stateful libraries with
+  static initializers or ODR requirements belong in `deps` / `dynamic_deps`,
+  not `build_flags(link_deps = ...)`.
+
+- **Explicit PIC static archive validation**:
+  Native `cc_shared_library()` linking automatically selects
+  `pic_static_library` and rejects non-PIC-only archives. When serializing
+  `link_deps` manually in `_compute_link_deps_flags()`, the rule must explicitly
+  prefer `pic_static_library` (before `interface_library`, `dynamic_library`,
+  and `pic_objects`) and fail analysis if a `link_deps` target only provides a
+  non-PIC `static_library` or non-PIC object-only `LibraryToLink.objects`.
+
+- **Aspect inspection via `additional_linker_inputs`
+  (`collect_build_flags_labels_aspect`)**:
+  Because `cc_shared_library()` has no `:<name>.final_build_flags` entry in
+  `deps`, `collect_build_flags_labels_aspect` in `aspects.bzl` checks `deps`
+  first (covering `cc_library()` and `cc_binary()`, where
+  `:<name>.final_build_flags` is attached unconditionally) and falls back to
+  `additional_linker_inputs` for `cc_shared_library()`.
+
 ## Default `build_flags()` labels.
 
 The list of default `build_flags()` labels to use for C++ artifacts is
@@ -718,3 +831,11 @@ Initially, the default `build_flags()` will likely be written manually,
 with `LINT` checks to ensure consistency with the GN definitions, however
 tooling will be introduced later to make this process much easier (exact
 details not discussed in the current document).
+
+## Feature Flags
+
+- **`feature_flag()`** (`@fuchsia_rules_common//build_flags:feature_flag.bzl`):
+  Declares a cycle-free build setting reflecting whether a toolchain feature
+  is enabled via `--features=<name>`, `transitive_features`, or `enabled_features`.
+  Because it does not depend on `cc_toolchain`, it can be safely referenced
+  by default build flags without circular dependencies.

@@ -59,7 +59,7 @@ fuchsia_hardware_usb_phy::AmlogicPhyType ConvertPhyType(aml_usb_phy::AmlogicPhyT
 }
 
 fuchsia_hardware_usb_phy::Metadata ConvertMetadata(
-    const aml_usb_phy_metadata::Aml_usb_phyMetadata& parsed) {
+    const aml_usb_phy_metadata::AmlUsbPhyConfig& parsed) {
   fuchsia_hardware_usb_phy::Metadata metadata;
   if (parsed.phy_type.has_value()) {
     metadata.phy_type(ConvertPhyType(*parsed.phy_type));
@@ -187,9 +187,9 @@ zx::result<> AmlUsbPhyDevice::Start(fdf::DriverContext context) {
 
   fuchsia_hardware_usb_phy::Metadata usb_phy_metadata;
   auto dict_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
-      "fuchsia.hardware.usb.phy.Metadata");
+      "fuchsia.hardware.usb.phy.AmlUsbPhyConfig");
   if (dict_result.is_ok()) {
-    auto parsed = aml_usb_phy_metadata::Aml_usb_phyMetadata::Parse(dict_result.value());
+    auto parsed = aml_usb_phy_metadata::AmlUsbPhyConfig::Parse(dict_result.value());
     if (!parsed.has_value()) {
       fdf::error("Failed to parse metadata from Dictionary");
       return zx::error(ZX_ERR_INTERNAL);
@@ -287,6 +287,24 @@ zx::result<> AmlUsbPhyDevice::Start(fdf::DriverContext context) {
     }
   }
 
+  // DML boards map each child's name to the global ID that consumers bind to. Other boards provide
+  // the legacy `fuchsia.hardware.usb.phy.Metadata` FIDL table under the same ID, which doesn't
+  // decode as a Dictionary.
+  zx::result ids_result = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
+      "fuchsia.hardware.usb.phy.Metadata");
+  if (ids_result.is_ok()) {
+    std::optional parsed = aml_usb_phy_metadata::UsbPhyMetadata::Parse(ids_result.value());
+    if (parsed.has_value() && parsed->phys.has_value()) {
+      for (const aml_usb_phy_metadata::PhyInfo& phy : parsed->phys.value()) {
+        for (ChildNode* child : {&xhci_, &dwc2_}) {
+          if (phy.name == child->name()) {
+            child->set_global_id(phy.id);
+          }
+        }
+      }
+    }
+  }
+
   // Create and initialize device
   const auto& phy_type = usb_phy_metadata.phy_type();
   if (!phy_type.has_value()) {
@@ -376,6 +394,9 @@ zx::result<> AmlUsbPhyDevice::ChildNode::Publish() {
       fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_DID, property_did_),
       fdf::MakeProperty2(bind_fuchsia::SERVICE, "fuchsia.hardware.usb.phy.Service"),
   };
+  if (global_id_.has_value()) {
+    properties.push_back(fdf::MakeProperty2(bind_fuchsia::ID, *global_id_));
+  }
   zx::result child = fdf::AddChild(parent_->node_client_.borrow(), *fdf::Logger::GlobalInstance(),
                                    name_, properties, offers);
   if (child.is_error()) {

@@ -4,6 +4,8 @@
 
 #include "src/lib/fsl/vmo/vector.h"
 
+#include <zircon/syscalls.h>
+
 #include <gtest/gtest.h>
 
 namespace fsl {
@@ -21,6 +23,11 @@ TEST(VmoVector, ShortVector) {
   EXPECT_TRUE(VmoFromVector(v, &buf));
   EXPECT_TRUE(VectorFromVmo(buf, &v_out));
   EXPECT_EQ(v, v_out);
+
+  ::fuchsia_mem::Buffer natural_buf;
+  EXPECT_TRUE(VmoFromVector(v, &natural_buf));
+  EXPECT_TRUE(VectorFromVmo(natural_buf, &v_out));
+  EXPECT_EQ(v, v_out);
 }
 
 TEST(VmoVector, EmptyVector) {
@@ -34,6 +41,11 @@ TEST(VmoVector, EmptyVector) {
   ::fuchsia::mem::Buffer buf;
   EXPECT_TRUE(VmoFromVector(v, &buf));
   EXPECT_TRUE(VectorFromVmo(buf, &v_out));
+  EXPECT_EQ(v, v_out);
+
+  ::fuchsia_mem::Buffer natural_buf;
+  EXPECT_TRUE(VmoFromVector(v, &natural_buf));
+  EXPECT_TRUE(VectorFromVmo(natural_buf, &v_out));
   EXPECT_EQ(v, v_out);
 }
 
@@ -49,6 +61,11 @@ TEST(VmoVector, ShortUnsignedVector) {
   EXPECT_TRUE(VmoFromVector(v, &buf));
   EXPECT_TRUE(VectorFromVmo(buf, &v_out));
   EXPECT_EQ(v, v_out);
+
+  ::fuchsia_mem::Buffer natural_buf;
+  EXPECT_TRUE(VmoFromVector(v, &natural_buf));
+  EXPECT_TRUE(VectorFromVmo(natural_buf, &v_out));
+  EXPECT_EQ(v, v_out);
 }
 
 TEST(VmoVector, EmptyUnsignedVector) {
@@ -63,6 +80,26 @@ TEST(VmoVector, EmptyUnsignedVector) {
   EXPECT_TRUE(VmoFromVector(v, &buf));
   EXPECT_TRUE(VectorFromVmo(buf, &v_out));
   EXPECT_EQ(v, v_out);
+
+  ::fuchsia_mem::Buffer natural_buf;
+  EXPECT_TRUE(VmoFromVector(v, &natural_buf));
+  EXPECT_TRUE(VectorFromVmo(natural_buf, &v_out));
+  EXPECT_EQ(v, v_out);
+}
+
+TEST(VmoVector, SizeLargerThanVmo) {
+  std::vector<uint8_t> v(123, 42);
+  std::vector<uint8_t> v_out;
+
+  ::fuchsia::mem::Buffer buf;
+  EXPECT_TRUE(VmoFromVector(v, &buf));
+  buf.size = zx_system_get_page_size() + 1;
+  EXPECT_FALSE(VectorFromVmo(buf, &v_out));
+
+  ::fuchsia_mem::Buffer natural_buf;
+  EXPECT_TRUE(VmoFromVector(v, &natural_buf));
+  natural_buf.size() = zx_system_get_page_size() + 1;
+  EXPECT_FALSE(VectorFromVmo(natural_buf, &v_out));
 }
 
 }  // namespace

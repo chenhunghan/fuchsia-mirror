@@ -42,7 +42,6 @@ fuchsia_cc_driver("fake-ot-radio-driver-driver") {
 }
 
 fuchsia_driver_component("fake-ot-radio-driver") {
-  info = "meta/fake-ot-radio-driver-info.json"
   testonly = true
   component_name = "fake-ot-radio"
   deps = [ ":fake-ot-radio-driver-driver" ]

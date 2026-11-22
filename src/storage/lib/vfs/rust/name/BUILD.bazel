@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":name-unittests"],
+    visibility = ["//src/storage:__pkg__"],
+)
 
 rustc_library(
     name = "name",
@@ -12,13 +20,11 @@ rustc_library(
         "src/lib.rs",
         "src/repr.rs",
     ],
-    crate_name = "name",
     edition = "2024",
-    test_deps = [
-        "//third_party/rust_crates/vendor:assert_matches",
+    visibility = [
+        "//src/storage/lib/vfs/rust:__pkg__",
+        "//src/sys/lib/cm_types:__pkg__",
     ],
-    visibility = ["//:__subpackages__"],
-    with_unit_tests = True,
     deps = [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
         "//sdk/rust/zx-status",
@@ -26,4 +32,18 @@ rustc_library(
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:thiserror",
     ],
+)
+
+rustc_test(
+    name = "name_test",
+    crate = ":name",
+    tags = ["manual"],
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_package(
+    name = "name-unittests",
+    unit_tests = [":name_test"],
 )

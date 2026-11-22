@@ -24,6 +24,9 @@ cc_library(
     alwayslink = True,
 )
 
+# In GN, the Bazel-built library replaces the GN-built one in the toolchain that
+# matches Bazel's build configuration. See //build/bazel/bazel_shared_library.gni.
+# @bazel2gn:raw_attribute:bazel_target = ":fdio_gn_outputs"
 idk_cc_shared_library_zx(
     name = "fdio",
     srcs = [
@@ -136,6 +139,20 @@ fx_cc_library(
         # Used in GN only (synced via bazel2gn).
         "//third_party/abseil-cpp/absl/time/internal/cctz:__pkg__",
         "//third_party/cobalt/third_party/abseil-cpp/absl/time/internal/cctz:__pkg__",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "fdio-spawn-actions",
+    hdrs = ["include/lib/fdio/spawn-actions.h"],
+    build_flags = ["//build/config:all_source"],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/devices/bin/driver_playground:__pkg__"],
+    deps = [
+        ":fdio",
+        "//zircon/system/ulib/zx",
     ],
     alwayslink = True,
 )

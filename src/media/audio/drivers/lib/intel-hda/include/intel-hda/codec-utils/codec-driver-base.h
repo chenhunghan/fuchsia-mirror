@@ -62,6 +62,10 @@ class IntelHDACodecDriverBase : public fbl::RefCounted<IntelHDACodecDriverBase> 
   // flight during a call to Bind.
   zx::result<> Bind(zx_device_t* codec_dev, const char* name);
 
+  // Same as Bind, but uses an already-obtained codec driver channel instead of connecting to
+  // fuchsia.hardware.intel.hda/CodecService on |codec_dev|.
+  zx::result<> BindWithChannel(zx_device_t* codec_dev, zx::channel channel, const char* name);
+
   // Send a codec command to our codec device.
   zx_status_t SendCodecCommand(uint16_t nid, CodecVerb verb, bool no_ack);
 

@@ -5,12 +5,16 @@
 #ifndef SRC_LIB_DIAGNOSTICS_FIDL_LOG_MESSAGE_PARSER_LOG_MESSAGE_H_
 #define SRC_LIB_DIAGNOSTICS_FIDL_LOG_MESSAGE_PARSER_LOG_MESSAGE_H_
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
+#include <lib/async/dispatcher.h>
+#include <lib/fit/function.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/log_level.h>
 
+#include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <src/lib/diagnostics/log/message/rust/cpp-log-decoder/log_decoder.h>
@@ -25,16 +29,16 @@ struct MessageParserDeleter {
   void operator()(MessageParser* parser) const;
 };
 
-// LogBatchIterator wraps a fuchsia::diagnostics::BatchIterator and maintains the necessary state
+// LogBatchIterator wraps a fuchsia_diagnostics::BatchIterator and maintains the necessary state
 // (MessageParser) to decode log messages from it.
-// This class is thread-hostile; the same restrictions as InterfacePtr
-// (see the comment for InterfacePtr at sdk/lib/fidl/hlcpp/include/lib/fidl/cpp/interface_ptr.h)
-// apply to this class. In short, all calls to this class (including the destructor) should
-// be made from the thread to which the interface was bound.
+// This class is thread-hostile; all calls to this class (including the destructor) should
+// be made from the thread running the dispatcher to which the client was bound.
 class LogBatchIterator {
  public:
-  explicit LogBatchIterator(fuchsia::diagnostics::BatchIteratorPtr iterator,
-                            fuchsia::diagnostics::Format format);
+  LogBatchIterator(
+      fidl::ClientEnd<fuchsia_diagnostics::BatchIterator> iterator,
+      fuchsia_diagnostics::Format format, async_dispatcher_t* dispatcher,
+      fidl::AsyncEventHandler<fuchsia_diagnostics::BatchIterator>* event_handler = nullptr);
   ~LogBatchIterator() = default;
 
   // Non-copyable, but movable.
@@ -50,13 +54,13 @@ class LogBatchIterator {
   //   processing the entire payload from the BatchIterator).
   // - If the outer result is Ok, it contains a vector. Each element in the
   //   vector is an fpromise::result representing an individual log message:
-  //   - An Ok(fuchsia::logger::LogMessage) means a single log message was
+  //   - An Ok(fuchsia_logger::LogMessage) means a single log message was
   //     successfully decoded from the batch.
   //   - An Err(std::string) means that a specific item in the batch could not
-  //     be converted into a fuchsia::logger::LogMessage. This could be due to
+  //     be converted into a fuchsia_logger::LogMessage. This could be due to
   //     malformed data for that specific log entry.
   using GetNextCallback = fit::callback<void(
-      fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+      fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                        std::string>)>;
 
   // Calls GetNext on the underlying BatchIterator and converts the results.
@@ -67,8 +71,8 @@ class LogBatchIterator {
   //
   // Callback details:
   // - Threading: The callback is invoked on the thread running the dispatcher
-  //   associated with the underlying FIDL client (`iterator_`), which is typically
-  //   the default dispatcher of the thread where the `LogBatchIterator` was created.
+  //   associated with the underlying FIDL client (`iterator_`), which is the
+  //   `dispatcher` passed to the constructor.
   // - Execution: Since `GetNextCallback` is a `fit::callback`, it will be invoked
   //   at most once.
   // - Lifetime/Cancellation: If the `LogBatchIterator` is destroyed or unbound
@@ -78,21 +82,17 @@ class LogBatchIterator {
   //   callback is invoked or the `LogBatchIterator` is destroyed/unbound.
   void GetNext(GetNextCallback callback);
 
-  void Unbind() { iterator_.Unbind(); }
-
-  void set_error_handler(fit::function<void(zx_status_t)> handler) {
-    iterator_.set_error_handler(std::move(handler));
-  }
+  void Unbind() { iterator_ = {}; }
 
  private:
-  fuchsia::diagnostics::BatchIteratorPtr iterator_;
+  fidl::Client<fuchsia_diagnostics::BatchIterator> iterator_;
   std::unique_ptr<MessageParser, MessageParserDeleter> parser_;
 };
 
 // Prints formatted content to the log.
-fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                  std::string>
-ConvertFormattedContentToLogMessages(fuchsia::diagnostics::FormattedContent content,
+ConvertFormattedContentToLogMessages(fuchsia_diagnostics::FormattedContent content,
                                      MessageParser* parser = nullptr);
 
 // Get the severity corresponding to the given verbosity. Note that
@@ -100,7 +100,7 @@ ConvertFormattedContentToLogMessages(fuchsia::diagnostics::FormattedContent cont
 // as incrementally "more vebose than" the baseline.
 fuchsia_logging::RawLogSeverity GetSeverityFromVerbosity(uint8_t verbosity);
 
-fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                  std::string>
 ConvertFormattedFxtToLogMessages(std::span<const uint8_t> data, bool expect_extended_attribution);
 

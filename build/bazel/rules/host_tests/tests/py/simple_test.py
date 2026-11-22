@@ -3,7 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import sys
+import unittest
 
-print("OK")
-sys.exit(0)
+
+class SimpleTest(unittest.TestCase):
+    def test_simple(self) -> None:
+        self.assertTrue(True)

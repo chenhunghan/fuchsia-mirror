@@ -14,10 +14,12 @@
 #include <ktl/byte.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
-#include <phys/address-space.h>
-#include <phys/elf-image.h>
+#include <phys/address-space/address-space.h>
+#include <phys/elf/image.h>
 #include <phys/kernel-package/kernel-package.h>
-#include <phys/symbolize.h>
+#include <phys/memory/init.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
 
 #include "../test-main.h"
 #include "get-int.h"
@@ -84,7 +86,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
 
   // The GN target for get-int uses kernel_elf_interp() on this test binary.
   printf("Verifying PT_INTERP matches test build ID...\n");
-  elf.AssertInterpMatchesBuildId(kGetInt, symbolize.build_id());
+  elf.AssertInterpMatchesBuildId(kGetInt, *Self().build_id());
 
   auto emit_markup = [&symbolize](const ElfImage& image) {
     symbolize.ModuleContext(image, kGetIntModuleId);

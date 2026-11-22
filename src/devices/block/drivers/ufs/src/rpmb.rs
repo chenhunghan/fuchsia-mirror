@@ -8,6 +8,7 @@
 //! (`0xB5`) command and receiving `rx_frames` in a single `SECURITY PROTOCOL IN` (`0xA2`,
 //! protocol `0xEC`, specific `0x0001`) command.
 
+use crate::DriverMmio;
 use crate::constants::{
     COPY_CHUNK_SIZE, DEFAULT_RPMB_SIZE_UNITS, MAX_FRAMES_PER_TRANSFER,
     MAX_RPMB_LOGICAL_BLOCK_SIZE_SHIFT, MAX_RPMB_RELIABLE_WRITE_SECTORS, MAX_RPMB_TRANSFER_SIZE,
@@ -19,13 +20,13 @@ use crate::device_manager::DeviceManager;
 use crate::request_list::DataDirection;
 use crate::scsi::ScsiOpcode;
 use crate::transfer_request_processor::{DataTransfer, TransferRequestProcessor};
-use crate::{DriverMmio, test_unit_ready};
 use fidl_fuchsia_hardware_rpmb as frpmb;
 use futures::StreamExt;
 use futures::lock::Mutex as AsyncMutex;
 use log::{info, warn};
 use mmio::Mmio;
 use std::sync::Arc;
+use std::{cmp, fmt};
 
 /// Server for the `fuchsia.hardware.rpmb/Rpmb` protocol on UFS well-known LU 0xC4.
 pub struct UfsRpmbServer<M: Mmio = DriverMmio> {
@@ -40,8 +41,8 @@ pub struct UfsRpmbServer<M: Mmio = DriverMmio> {
     staging_vmo: AsyncMutex<Arc<zx::Vmo>>,
 }
 
-impl<M: Mmio> std::fmt::Debug for UfsRpmbServer<M> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<M: Mmio> fmt::Debug for UfsRpmbServer<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UfsRpmbServer")
             .field("device_info", &self.device_info)
             .field("max_frames_per_transfer", &self.max_frames_per_transfer)
@@ -73,7 +74,7 @@ impl<M: Mmio> UfsRpmbServer<M> {
     /// Sends TEST UNIT READY to the RPMB well-known LU, retrying to clear any pending Unit
     /// Attention. Returns whether the LU is ready.
     pub async fn probe_rpmb_lun(processor: &TransferRequestProcessor<M>) -> bool {
-        match test_unit_ready(processor, RPMB_LUN).await {
+        match processor.send_test_unit_ready(RPMB_LUN).await {
             Ok(()) => {
                 info!(lun = RPMB_LUN; "UFS RPMB well-known LU ready");
                 true
@@ -217,10 +218,10 @@ impl<M: Mmio> UfsRpmbServer<M> {
     /// Chunking `tx_frames` at [`MAX_FRAMES_PER_TRANSFER`] (2 frames, matching the C++ driver's
     /// `rpmb.cc`) is required because `trusty_storage_proxy` concatenates up to 2 `Authenticated
     /// Data Write Request` frames (`reliable_write_size = 1024`) and 1 `Result Read Request` frame
-    /// (`write_size = 512`) into a single 3-frame `tx_frames` VMO range, which JEDEC UFS 3.1/4.0
-    /// section 12.4.4.1 requires to be sent as two separate `SECURITY PROTOCOL OUT` commands.
+    /// (`write_size = 512`) into a single 3-frame `tx_frames` VMO range, which UFS 4.0
+    /// section 12.4.7.1 requires to be sent as two separate `SECURITY PROTOCOL OUT` commands.
     /// Conversely, `rx_frames` is received in a single `SECURITY PROTOCOL IN` command so
-    /// multi-frame reads follow one `SECURITY PROTOCOL OUT` request (UFS 3.1/4.0 section 12.4.4.2).
+    /// multi-frame reads follow one `SECURITY PROTOCOL OUT` request (UFS 4.0 section 12.4.7.2).
     async fn handle_rpmb_request(&self, request: frpmb::Request) -> Result<(), zx::Status> {
         let tx_size = request.tx_frames.size;
         Self::validate_frame_range(&request.tx_frames.vmo, request.tx_frames.offset, tx_size)?;
@@ -232,6 +233,10 @@ impl<M: Mmio> UfsRpmbServer<M> {
         }
 
         let staging_vmo = self.staging_vmo.lock().await;
+        // Hold one transaction guard across the entire SECURITY PROTOCOL OUT + IN sequence: UFS
+        // 4.0 section 12.4 stages the response to OUT in volatile RPMB state until IN reads it
+        // back, so suspend/PowerDown must wait for IN to finish rather than splitting the pair.
+        let tx_guard = self.processor.begin_client_transaction().await.map_err(zx::Status::from)?;
 
         // 1. Transmit tx_frames via SCSI SECURITY PROTOCOL OUT (0xB5) in chunks of up to
         //    max_frames_per_transfer frames (2 frames = 1 KiB).
@@ -240,7 +245,7 @@ impl<M: Mmio> UfsRpmbServer<M> {
 
         while frames_sent < tx_frame_count {
             let frames_to_send =
-                std::cmp::min(tx_frame_count - frames_sent, self.max_frames_per_transfer);
+                cmp::min(tx_frame_count - frames_sent, self.max_frames_per_transfer);
             let chunk_size = (frames_to_send * RPMB_FRAME_SIZE) as u32;
             let chunk_offset = frames_sent * RPMB_FRAME_SIZE;
 
@@ -254,7 +259,7 @@ impl<M: Mmio> UfsRpmbServer<M> {
 
             let cdb =
                 ScsiOpcode::build_security_protocol_cdb(DataDirection::HostToDevice, chunk_size);
-            self.processor
+            tx_guard
                 .send_scsi_command(
                     RPMB_LUN,
                     cdb,
@@ -274,7 +279,7 @@ impl<M: Mmio> UfsRpmbServer<M> {
             let rx_bytes = rx_frames.size as u32;
             let cdb =
                 ScsiOpcode::build_security_protocol_cdb(DataDirection::DeviceToHost, rx_bytes);
-            self.processor
+            tx_guard
                 .send_scsi_command(
                     RPMB_LUN,
                     cdb,
@@ -296,15 +301,21 @@ impl<M: Mmio> UfsRpmbServer<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::power::{PowerControl, PowerState};
+    use crate::query::QueryUpiu;
     use crate::scsi::ScsiStatus;
     use crate::testing::fake_ufs::{FakeMmio, FakeUfs};
     use crate::testing::{
         OCS_SUCCESS, PAGE_SIZE, create_test_device_manager, create_test_processor, fake_utp,
-        scsi_response, wait_for_any_doorbell,
+        scsi_response, wait_async, wait_for_any_doorbell,
     };
-    use crate::upiu::CommandUpiu;
+    use crate::upiu::{CommandUpiu, UpiuTransactionCode};
+    use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_mem::Range;
     use fuchsia_async as fasync;
+    use futures::poll;
+    use std::sync::mpsc as sync_mpsc;
+    use std::thread;
     use zerocopy::IntoBytes;
 
     #[fuchsia::test]
@@ -346,7 +357,7 @@ mod tests {
         let (mmio_vmo, processor) = create_test_processor();
         let utp = fake_utp(&mmio_vmo, &processor);
 
-        let hardware = std::thread::spawn(move || {
+        let hardware = thread::spawn(move || {
             let mut utp = utp;
             // 1. probe_rpmb_lun issues TEST UNIT READY on RPMB_LUN.
             let slot = wait_for_any_doorbell(&utp);
@@ -359,11 +370,12 @@ mod tests {
                 OCS_SUCCESS,
             );
 
-            // 2. UfsRpmbServer::new reads the RPMB Unit Descriptor via Query Request on ADMIN_SLOT;
-            //    answer with a non-zero response to exercise the DEFAULT_RPMB_SIZE_UNITS fallback.
+            // 2. UfsRpmbServer::new reads the RPMB Unit Descriptor via Query Request on the admin
+            //    slot; answer with a non-zero response to exercise the DEFAULT_RPMB_SIZE_UNITS
+            //    fallback.
             let slot = wait_for_any_doorbell(&utp);
-            let mut query_resp: crate::query::QueryUpiu = utp.request(slot);
-            query_resp.header.trans_type = crate::upiu::UpiuTransactionCode::QueryResponse as u8;
+            let mut query_resp: QueryUpiu = utp.request(slot);
+            query_resp.header.trans_type = UpiuTransactionCode::QueryResponse as u8;
             query_resp.header.response = 1;
             utp.complete(slot, query_resp.as_bytes(), OCS_SUCCESS);
 
@@ -400,7 +412,7 @@ mod tests {
 
         assert!(UfsRpmbServer::probe_rpmb_lun(&processor).await);
         let server = Arc::new(UfsRpmbServer::new(&device_manager, processor).await.unwrap());
-        let (proxy, stream) = fidl::endpoints::create_proxy_and_stream::<frpmb::RpmbMarker>();
+        let (proxy, stream) = create_proxy_and_stream::<frpmb::RpmbMarker>();
         let server_task = fasync::Task::local(server.serve(stream));
 
         let info = proxy.get_device_info().await.unwrap();
@@ -424,5 +436,122 @@ mod tests {
         assert_eq!(in_len, 2 * RPMB_FRAME_SIZE as u32);
         drop(proxy);
         server_task.await;
+    }
+
+    #[fuchsia::test]
+    async fn test_rpmb_paired_out_in_parks_on_resume_and_drains_atomically_before_suspend() {
+        let mut fake_ufs = FakeUfs::new();
+        fake_ufs.geometry_desc.rpmb_read_write_size = 4;
+        let (mmio_vmo, processor) = create_test_processor();
+        let device_manager = create_test_device_manager(&fake_ufs);
+        let mut utp = fake_utp(&mmio_vmo, &processor);
+
+        let (out1_seen_tx, out1_seen_rx) = sync_mpsc::channel();
+        let (allow_in_tx, allow_in_rx) = sync_mpsc::channel();
+
+        let hardware = thread::spawn(move || {
+            // 1. Answer the initial RPMB Unit Descriptor query.
+            let slot = wait_for_any_doorbell(&utp);
+            let mut query_resp: QueryUpiu = utp.request(slot);
+            query_resp.header.trans_type = UpiuTransactionCode::QueryResponse as u8;
+            query_resp.header.response = 1;
+            utp.complete(slot, query_resp.as_bytes(), OCS_SUCCESS);
+
+            // 2. Request A waits for client IO admission to open before issuing OUT + IN.
+            for expected_op in [ScsiOpcode::SecurityProtocolOut, ScsiOpcode::SecurityProtocolIn] {
+                let slot = wait_for_any_doorbell(&utp);
+                let cmd: CommandUpiu = utp.request(slot);
+                assert_eq!(cmd.header.lun, RPMB_LUN);
+                assert_eq!(cmd.cdb[0], expected_op as u8);
+                utp.complete(
+                    slot,
+                    scsi_response(slot, ScsiStatus::Good.as_u8()).as_bytes(),
+                    OCS_SUCCESS,
+                );
+            }
+
+            // 3. Request B starts while Active; suspend begins between OUT and IN, so IN must
+            //    bypass paused client IO rather than deadlocking the in-flight drain.
+            let slot = wait_for_any_doorbell(&utp);
+            let cmd: CommandUpiu = utp.request(slot);
+            assert_eq!(cmd.cdb[0], ScsiOpcode::SecurityProtocolOut as u8);
+            utp.complete(
+                slot,
+                scsi_response(slot, ScsiStatus::Good.as_u8()).as_bytes(),
+                OCS_SUCCESS,
+            );
+            out1_seen_tx.send(()).unwrap();
+
+            let slot = wait_for_any_doorbell(&utp);
+            let cmd: CommandUpiu = utp.request(slot);
+            assert_eq!(cmd.cdb[0], ScsiOpcode::SecurityProtocolIn as u8);
+            allow_in_rx.recv().unwrap();
+            utp.complete(
+                slot,
+                scsi_response(slot, ScsiStatus::Good.as_u8()).as_bytes(),
+                OCS_SUCCESS,
+            );
+        });
+
+        let server =
+            Arc::new(UfsRpmbServer::new(&device_manager, Arc::clone(&processor)).await.unwrap());
+        let power = PowerControl::new(device_manager, Arc::clone(&processor), None, ());
+        let mut guard = power.lock().await;
+        let (proxy, stream) = create_proxy_and_stream::<frpmb::RpmbMarker>();
+        let server_task = fasync::Task::local(server.serve(stream));
+
+        // Part A: A request arriving during system sleep waits on client IO admission without
+        // reserving a transfer slot.
+        guard.set_state(PowerState::SystemSleep, false);
+        let req_a = frpmb::Request {
+            tx_frames: Range {
+                vmo: zx::Vmo::create(PAGE_SIZE).unwrap(),
+                offset: 0,
+                size: RPMB_FRAME_SIZE,
+            },
+            rx_frames: Some(Box::new(Range {
+                vmo: zx::Vmo::create(PAGE_SIZE).unwrap(),
+                offset: 0,
+                size: RPMB_FRAME_SIZE,
+            })),
+        };
+        let mut fut_a = Box::pin(proxy.request(req_a));
+        assert!(poll!(fut_a.as_mut()).is_pending());
+        assert!(wait_async(|| processor.requests().blocked_on_admission() == 1).await);
+        assert_eq!(processor.busy_slot_count(), 0);
+        assert!(!processor.requests().has_inflight_work());
+
+        guard.set_state(PowerState::Active, false);
+        assert_eq!(fut_a.await.unwrap(), Ok(()));
+
+        // Part B: If system sleep begins after OUT completes, in-flight draining waits for the
+        // paired IN command to finish so the RPMB request/response pair is not split.
+        let req_b = frpmb::Request {
+            tx_frames: Range {
+                vmo: zx::Vmo::create(PAGE_SIZE).unwrap(),
+                offset: 0,
+                size: RPMB_FRAME_SIZE,
+            },
+            rx_frames: Some(Box::new(Range {
+                vmo: zx::Vmo::create(PAGE_SIZE).unwrap(),
+                offset: 0,
+                size: RPMB_FRAME_SIZE,
+            })),
+        };
+        let req_b_task = fasync::Task::local(async move { proxy.request(req_b).await.unwrap() });
+        fasync::unblock(move || out1_seen_rx.recv().unwrap()).await;
+
+        guard.set_state(PowerState::SystemSleep, false);
+        assert!(processor.requests().has_inflight_work());
+        let mut drain_fut =
+            Box::pin(processor.drain_inflight(zx::MonotonicDuration::from_seconds(2)));
+        assert!(poll!(drain_fut.as_mut()).is_pending());
+
+        allow_in_tx.send(()).unwrap();
+        assert_eq!(req_b_task.await, Ok(()));
+        assert_eq!(drain_fut.await, Ok(()));
+
+        server_task.await;
+        hardware.join().unwrap();
     }
 }

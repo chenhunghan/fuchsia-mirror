@@ -38,7 +38,6 @@ fuchsia_driver_component("goldfish-display") {
   dml_label = ":goldfish-display-dml"
   component_name = "goldfish-display"
   deps = [ ":goldfish-display-driver" ]
-  info = "meta/goldfish-display-info.json"
 }
 
 fuchsia_driver_package("goldfish_display") {

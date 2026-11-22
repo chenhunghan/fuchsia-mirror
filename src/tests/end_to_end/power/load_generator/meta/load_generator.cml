@@ -7,12 +7,15 @@
         runner: "elf",
         binary: "bin/load_generator",
     },
-    config: {
-        load_pattern: {
+    use: [
+        {
+            config: "fuchsia.power.LoadPattern",
+            key: "load_pattern",
             type: "vector",
-            mutability: [ "parent" ],
             max_count: 100,
             element: { type: "uint64" },
+            availability: "transitional",
+            default: [],
         },
-    },
+    ],
 }

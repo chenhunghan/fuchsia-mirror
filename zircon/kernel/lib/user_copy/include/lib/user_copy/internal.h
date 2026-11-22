@@ -7,14 +7,7 @@
 #ifndef ZIRCON_KERNEL_LIB_USER_COPY_INCLUDE_LIB_USER_COPY_INTERNAL_H_
 #define ZIRCON_KERNEL_LIB_USER_COPY_INCLUDE_LIB_USER_COPY_INTERNAL_H_
 
-#include <stddef.h>
-#include <sys/types.h>
-
 #include <ktl/type_traits.h>
-
-// TODO(https://fxbug.dev/576430218): Remove once C++ callers of `validate_user_accessible_range`
-// are removed.
-extern "C" void rust_validate_user_accessible_range(vaddr_t* vaddr, size_t* len);
 
 namespace internal {
 
@@ -34,12 +27,6 @@ template <typename T>
 struct is_copy_allowed
     : ktl::disjunction<ktl::conjunction<ktl::is_trivial<T>, ktl::is_standard_layout<T>,
                                         ktl::has_unique_object_representations<T>>> {};
-
-// Ensure that all addresses in the range [vaddr, vaddr+len) are accessible to the user. If any
-// address in this range is not accessible to the user, `vaddr` and `len` are set to {0,0}.
-inline void validate_user_accessible_range(vaddr_t* vaddr, size_t* len) {
-  rust_validate_user_accessible_range(vaddr, len);
-}
 
 }  // namespace internal
 

@@ -582,12 +582,13 @@ Reboot the Target to the bootloader and re-run this command."
                     };
                     let (flash_res, handler_res) = futures::join!(
                         async {
-                            from_manifest(
+                            // Boxed to keep this future under clippy's `large_futures` limit.
+                            Box::pin(from_manifest(
                                 &self.ctx,
                                 event_tx,
                                 cmd.to_manifest(&self.ctx),
                                 &mut proxy,
-                            )
+                            ))
                             .await
                             .map_err(anyhow::Error::from)
                         },

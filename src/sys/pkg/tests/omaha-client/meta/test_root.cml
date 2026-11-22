@@ -13,7 +13,7 @@
         },
         {
             name: "http-client",
-            url: "fuchsia-pkg://fuchsia.com/omaha-client-integration-tests#meta/http-client.cm",
+            url: "http-client#meta/http-client.cm",
         },
         {
             name: "fake_cobalt",

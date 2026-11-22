@@ -6,7 +6,7 @@
 
 //! Kernel power management subsystem.
 
-#![cfg_attr(feature = "userspace", no_std)]
+#![cfg_attr(all(feature = "userspace", not(test)), no_std)]
 
 pub mod energy_model;
 mod energy_model_ffi;
@@ -28,10 +28,11 @@ pub type Utilization = ffl::FastFixed<i64, 31>;
 pub type Time = ffl::FastFixed<i64, 0>;
 
 pub use energy_model::{
-    CppPowerLevelController, EnergyModel, POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT, PowerDomain,
-    PowerDomainConfigFfi, PowerDomainSet, PowerLevel, PowerLevelTransition, PowerLevelType,
-    ProcessorPowerLevel, ProcessorPowerLevelFfi, ProcessorPowerLevelTransition, TransitionMatrix,
-    boot_boost_enabled, register_domains, set_rate_limits,
+    ActivePowerLevel, ActivePowerLevelConfig, CppPowerLevelController, EnergyModel, IdlePowerModel,
+    IdlePowerState, IdlePowerStateConfig, IdleStateFlags, POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT,
+    PowerDomain, PowerDomainConfig, PowerDomainSet, PowerLevelTransition,
+    ProcessorPowerLevelTransition, TransitionMatrix, boot_boost_enabled, register_domains,
+    set_rate_limits,
 };
 #[cfg(not(feature = "userspace"))]
 pub use pdev_power_level_controller::PDevPowerLevelController;

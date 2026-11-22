@@ -94,7 +94,7 @@ use crate::internal::multicast_forwarding::{
     MulticastForwardingBindingsTypes, MulticastForwardingDeviceContext, MulticastForwardingEvent,
     MulticastForwardingTimerId,
 };
-use crate::internal::path_mtu::{PmtuBindingsTypes, PmtuCache, PmtuTimerId};
+use crate::internal::path_mtu::{PmtuBindingsTypes, PmtuCache, PmtuHandler, PmtuTimerId};
 use crate::internal::raw::counters::RawIpSocketCounters;
 use crate::internal::raw::{RawIpSocketHandler, RawIpSocketMap, RawIpSocketsBindingsTypes};
 use crate::internal::reassembly::{
@@ -648,14 +648,14 @@ pub trait BaseTransportIpContext<I: IpExt, BC>: DeviceIdContext<AnyDevice> {
 /// A marker trait for the traits required by the transport layer from the IP
 /// layer.
 pub trait TransportIpContext<I: IpExt + FilterIpExt, BC: TxMetadataBindingsTypes>:
-    BaseTransportIpContext<I, BC> + IpSocketHandler<I, BC>
+    BaseTransportIpContext<I, BC> + IpSocketHandler<I, BC> + PmtuHandler<I, BC>
 {
 }
 
 impl<I, CC, BC> TransportIpContext<I, BC> for CC
 where
     I: IpExt + FilterIpExt,
-    CC: BaseTransportIpContext<I, BC> + IpSocketHandler<I, BC>,
+    CC: BaseTransportIpContext<I, BC> + IpSocketHandler<I, BC> + PmtuHandler<I, BC>,
     BC: TxMetadataBindingsTypes,
 {
 }

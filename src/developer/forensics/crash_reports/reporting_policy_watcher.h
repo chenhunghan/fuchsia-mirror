@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_REPORTING_POLICY_WATCHER_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_REPORTING_POLICY_WATCHER_H_
 
-#include <fuchsia/settings/cpp/fidl.h>
+#include <fidl/fuchsia.settings/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fit/function.h>
@@ -77,11 +77,15 @@ class StaticReportingPolicyWatcher : public ReportingPolicyWatcher {
 // assumed that the user's consent is undecided until re-connection.
 //
 // |fuchsia.settings.Privacy| is expected to be in |services_|.
-class UserReportingPolicyWatcher : public ReportingPolicyWatcher {
+class UserReportingPolicyWatcher : public ReportingPolicyWatcher,
+                                   public fidl::AsyncEventHandler<fuchsia_settings::Privacy> {
  public:
   UserReportingPolicyWatcher(async_dispatcher_t* dispatcher,
                              std::shared_ptr<sys::ServiceDirectory> services);
   ~UserReportingPolicyWatcher() override = default;
+
+  // |fidl::AsyncEventHandler<fuchsia_settings::Privacy>|
+  void on_fidl_error(fidl::UnbindInfo error) override;
 
  private:
   void Watch();
@@ -93,7 +97,7 @@ class UserReportingPolicyWatcher : public ReportingPolicyWatcher {
   async::TaskClosureMethod<UserReportingPolicyWatcher, &UserReportingPolicyWatcher::Watch>
       watch_task_{this};
 
-  fuchsia::settings::PrivacyPtr privacy_settings_;
+  fidl::Client<fuchsia_settings::Privacy> privacy_settings_;
 };
 
 }  // namespace crash_reports

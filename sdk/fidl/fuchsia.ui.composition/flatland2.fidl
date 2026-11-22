@@ -503,4 +503,30 @@ closed protocol Flatland2 {
         transform_id TransformId;
         content TransformContent:optional;
     });
+
+    /// Hints that upcoming presentations from this session are expected with
+    /// target `frame_interval`, and the first frame with such timing is
+    /// expected at `expected_present_time`.
+    ///
+    /// Unlike scene-graph commands (which take effect at
+    /// [`fuchsia.ui.composition/Flatland.Present`]), `NotifyExpectedPresent` is
+    /// an immediate advisory scheduling hint that may be sent ahead of
+    /// [`fuchsia.ui.composition/Flatland.Present`] (for example, to wake up a
+    /// variable-refresh-rate display panel out of idle) or immediately before
+    /// [`fuchsia.ui.composition/Flatland.Present`] when presentation cadence
+    /// changes.
+    ///
+    /// Refer to [`LayerProperties`] for the general safety and performance
+    /// semantics of hints: Scenic may arbitrate or ignore hints across
+    /// concurrent sessions, and rendering correctness does not depend on them.
+    strict NotifyExpectedPresent(table {
+        /// Monotonic timestamp (`CLOCK_MONOTONIC`) when the next frame is
+        /// expected to be presented. When omitted or non-positive, the expected
+        /// presentation time is unspecified.
+        1: expected_present_time zx.InstantMono;
+
+        /// Expected monotonic interval between upcoming frames. When omitted or
+        /// non-positive, the cadence is unspecified or unchanged.
+        2: frame_interval zx.DurationMono;
+    });
 };

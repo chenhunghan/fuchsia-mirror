@@ -74,7 +74,7 @@ fuchsia_test_component("process_unittests_component") {
   cm_label = ":process_unittests_manifest"
   deps = [
     ":unittests",
-    "//src/zircon/bin/zxsh:sh",
+    "//src/developer/zxsh:sh",
   ]
 }
 

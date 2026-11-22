@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""
+Standalone vendoring-only Bazel module for third-party source repositories
+materialized into //third_party/bazel_vendor/no_workspace by
+`//build/bazel/scripts/update_no_workspace_bazel_vendor_dir.py`.
+
+This module is not loaded during `fx build`. After adding or updating any
+dependency here, materialize the changes by running:
+
+    ./scripts/fuchsia-vendored-python build/bazel/scripts/update_no_workspace_bazel_vendor_dir.py
+
+See //manifests/third_party/README.md for details.
+"""
+
+module(
+    name = "fuchsia_no_workspace",
+    version = "1",
+)
+
+third_party = use_extension("//:extensions.bzl", "third_party")
+third_party.git_repository(
+    name = "luci-go",
+    commit = "08cf78a72edb46eb528fd9b223105276b4116a44",
+    remote = "https://fuchsia.googlesource.com/third_party/luci-go",
+    # Upstream OWNERS includes a deleted /tools/testing/resultdb/OWNERS path
+    # that fails Gerrit code-owners.
+    sparse_checkout_patterns = [
+        "/*",
+        "!/OWNERS",
+    ],
+)
+use_repo(third_party, "luci-go")

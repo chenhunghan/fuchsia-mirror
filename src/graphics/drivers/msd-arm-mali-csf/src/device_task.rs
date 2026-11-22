@@ -8,9 +8,10 @@ use fuchsia_async as fasync;
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
-type DeviceTaskCallback = Box<dyn FnOnce(Arc<RefCell<DeviceState>>) + Send>;
+type DeviceTaskCallback = Box<dyn FnOnce(Rc<RefCell<DeviceState>>) + Send>;
 
 // DeviceTask represents work that can be queued to the device thread for execution.
 pub struct DeviceTask {
@@ -22,7 +23,7 @@ impl DeviceTask {
         DeviceTask { callback }
     }
 
-    pub fn handle(self, device: Arc<RefCell<DeviceState>>) {
+    pub fn handle(self, device: Rc<RefCell<DeviceState>>) {
         (self.callback)(device)
     }
 }

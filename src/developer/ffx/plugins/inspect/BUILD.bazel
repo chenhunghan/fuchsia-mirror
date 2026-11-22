@@ -2,18 +2,117 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//src/developer/ffx/build:gn_ffx_test_data.bzl", "gn_ffx_test_data")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# Exposes the GN-built ffx-inspect subtool and metadata JSON to Bazel host
-# tests until //src/developer/ffx/plugins/inspect is migrated to Bazel.
-# @bazel2gn:skip
-gn_ffx_test_data(
-    name = "ffx_inspect_tool_test_data",
-    expected_files = [
-        "ffx-inspect",
-        "ffx-inspect.json",
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":ffx_inspect_test",
     ],
-    visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+    visibility = [
+        "//src/developer/ffx:__pkg__",
+        "//src/diagnostics:__pkg__",
+    ],
+)
+
+rustc_library(
+    name = "ffx_inspect_args",
+    srcs = ["src/args.rs"],
+    crate_root = "src/args.rs",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/diagnostics/iquery:lib_fdomain",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+rustc_library(
+    name = "ffx_inspect",
+    srcs = [
+        "src/accessor_provider.rs",
+        "src/apply_selectors/filter.rs",
+        "src/apply_selectors/mod.rs",
+        "src/apply_selectors/screen.rs",
+        "src/apply_selectors/terminal.rs",
+        "src/apply_selectors/test_utils.rs",
+        "src/lib.rs",
+        "src/tests/list.rs",
+        "src/tests/list_accessors.rs",
+        "src/tests/mod.rs",
+        "src/tests/selectors.rs",
+        "src/tests/show.rs",
+        "src/tests/utils.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":ffx_inspect_args",
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_fdomain",
+        "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust_fdomain",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
+        "//src/developer/ffx/lib/errors:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/diagnostics/iquery:lib_fdomain",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/fdomain/client",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:difference",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:termion",
+    ],
+)
+
+# LINT.IfChange
+# Needed for Honeydew's SDK inclusion
+#
+# TODO(b/330934833): Remove when IDK allows for `testonly` targets in dep
+# tree or when we can separate the concept of data_dep from host_test_data.
+idk_ffx_tool(
+    name = "ffx_inspect_tool",
+    testonly = False,
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-inspect",
+    visibility = [
+        "//src/developer/ffx/build/tests:__pkg__",
+        "//src/sys/pkg/tests/system-tests:__pkg__",
+    ],
+    deps = [
+        ":ffx_inspect",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_inspect_test",
+    crate = ":ffx_inspect",
+    deps = [
+        "//src/developer/ffx/lib/testing:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
 )

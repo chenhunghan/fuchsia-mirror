@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_debug")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "macros",
+    hdrs = [
+        "dlog.h",
+        "macros.h",
+        "utils.h",
+    ],
+    # In GN, MAGMA_DEBUG_INTERNAL_USE_ONLY is provided by :magma_util_config in public_configs.
+    # @bazel2gn:skip
+    defines = ["MAGMA_DEBUG_INTERNAL_USE_ONLY=1"] if is_debug else ["MAGMA_DEBUG_INTERNAL_USE_ONLY=0"],
+    includes = ["../../.."],
+    public_configs = [
+        ":magma_util_config",
+        "//src/graphics/lib/magma:magma_src_include_config",
+    ],
+    visibility = [
+        "//src/graphics/drivers:__subpackages__",
+        "//src/graphics/lib/magma/src/libmagma_virt:__pkg__",
+        "//src/graphics/magma:__subpackages__",
+        "//src/power/testing/system-integration/msd-arm-mali:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    # In GN, :macros depended on //src/graphics/magma/lib/magma/platform:logger,
+    # which is a pure forwarding group to :logger_header.
+    deps = ["//src/graphics/magma/lib/magma/platform:logger_header"],
+)
+
+fx_cc_library(
+    name = "status",
+    hdrs = ["status.h"],
+    includes = ["../../.."],
+    public_configs = ["//src/graphics/lib/magma:magma_src_include_config"],
+    visibility = [
+        "//src/graphics/magma/lib/magma/platform:__subpackages__",
+        "//src/graphics/magma/lib/magma_client/test_util:__pkg__",
+        "//src/graphics/magma/lib/magma_service/sys_driver:__pkg__",
+    ],
+    deps = ["//sdk/lib/magma_common"],
+)
+
+fx_cc_library(
+    name = "thread",
+    hdrs = ["thread.h"],
+    includes = ["../../.."],
+    public_configs = ["//src/graphics/lib/magma:magma_src_include_config"],
+    visibility = [
+        "//src/graphics/drivers/msd-arm-mali/src:__pkg__",
+        "//src/graphics/drivers/msd-intel-gen/src:__pkg__",
+        "//src/graphics/drivers/msd-vsi-vip/src:__pkg__",
+    ],
+    deps = ["//src/graphics/magma/lib/magma/platform:thread"],
+)
+
+# The short macros should only be used in leaf code that isn't included into
+# other consumers.
+fx_cc_library(
+    name = "short_macros",
+    hdrs = ["short_macros.h"],
+    visibility = [
+        "//src/graphics/drivers:__subpackages__",
+        "//src/graphics/lib/magma/src/libmagma:__pkg__",
+        "//src/graphics/lib/magma/src/libmagma_virt:__pkg__",
+        "//src/graphics/magma:__subpackages__",
+        "//src/power/testing/system-integration/msd-arm-mali:__subpackages__",
+    ],
+    deps = [":macros"],
+)

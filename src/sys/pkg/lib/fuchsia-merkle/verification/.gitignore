@@ -1,0 +1,3 @@
+# Local Lake build artifacts and on-the-fly Charon/Aeneas extraction overlay.
+.lake/
+.work/

@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 use crate::{
-    TestEnv, blob_written, compress_and_write_blob, get_and_verify_package,
-    get_and_verify_packages, get_missing_blobs,
+    TestEnv, blob_written, compress_and_write_blob, compress_and_write_blob_with_type,
+    get_and_verify_package, get_and_verify_packages, get_missing_blobs,
 };
 use assert_matches::assert_matches;
+use delivery_blob::DeliveryBlobType;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_pkg::{self as fpkg, BlobInfo, NeededBlobsMarker};
 use fidl_fuchsia_pkg_ext::{self as fpkg_ext, BlobId};
@@ -204,8 +205,10 @@ async fn unavailable_when_client_drops_needed_blobs_channel() {
     assert_eq!(get_fut.await.unwrap(), Err(Status::UNAVAILABLE));
 }
 
+#[test_case(DeliveryBlobType::Type1)]
+#[test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn handles_partially_written_pkg() {
+async fn handles_partially_written_pkg(delivery_blob_type: DeliveryBlobType) {
     let env = TestEnv::builder().build().await;
 
     let pkg = PackageBuilder::new("partially-written")
@@ -238,8 +241,7 @@ async fn handles_partially_written_pkg() {
     let dir = {
         let data = b"different contents";
         let hash = fuchsia_merkle::root_from_slice(data);
-        let compressed =
-            delivery_blob::Type1Blob::generate(data, delivery_blob::CompressionMode::Always);
+        let compressed = delivery_blob::generate(delivery_blob_type, data);
 
         let pkg_cache = env.client();
         let mut get =
@@ -566,10 +568,15 @@ async fn get_package_with_transitive_subpackage_as_content_blob() {
     let () = verify_superpackage_get(&superpackage, &[subpackage0, subpackage1]).await;
 }
 
-#[test_case(blobfs_ramdisk::Implementation::CppBlobfs; "cpp_blobfs")]
-#[test_case(blobfs_ramdisk::Implementation::Fxblob; "fxblob")]
+#[test_case(blobfs_ramdisk::Implementation::CppBlobfs, DeliveryBlobType::Type1; "cpp_blobfs_type1")]
+#[test_case(blobfs_ramdisk::Implementation::CppBlobfs, DeliveryBlobType::Type2; "cpp_blobfs_type2")]
+#[test_case(blobfs_ramdisk::Implementation::Fxblob, DeliveryBlobType::Type1; "fxblob_type1")]
+#[test_case(blobfs_ramdisk::Implementation::Fxblob, DeliveryBlobType::Type2; "fxblob_type2")]
 #[fuchsia::test]
-async fn get_with_specific_blobfs_implementation(blob_impl: blobfs_ramdisk::Implementation) {
+async fn get_with_specific_blobfs_implementation(
+    blob_impl: blobfs_ramdisk::Implementation,
+    delivery_blob_type: DeliveryBlobType,
+) {
     let env = TestEnv::builder().blobfs_impl(blob_impl).build().await;
     let initial_blobfs_blobs = env.blobfs.list_blobs().unwrap();
     let pkg = PackageBuilder::new("single-blob")
@@ -595,7 +602,9 @@ async fn get_with_specific_blobfs_implementation(blob_impl: blobfs_ramdisk::Impl
 
     let (meta_far, _) = pkg.contents();
     let meta_blob = needed_blobs.open_meta_blob().await.unwrap().unwrap().unwrap().into_proxy();
-    let () = compress_and_write_blob(&meta_far.contents, meta_blob).await.unwrap();
+    let () = compress_and_write_blob_with_type(delivery_blob_type, &meta_far.contents, meta_blob)
+        .await
+        .unwrap();
     let () = blob_written(&needed_blobs, meta_far.merkle).await;
 
     let [missing_blob]: [_; 1] = get_missing_blobs(&needed_blobs).await.try_into().unwrap();
@@ -606,7 +615,13 @@ async fn get_with_specific_blobfs_implementation(blob_impl: blobfs_ramdisk::Impl
         .unwrap()
         .unwrap()
         .into_proxy();
-    let () = compress_and_write_blob(b"content-blob-contents", content_blob).await.unwrap();
+    let () = compress_and_write_blob_with_type(
+        delivery_blob_type,
+        b"content-blob-contents",
+        content_blob,
+    )
+    .await
+    .unwrap();
     let () = blob_written(&needed_blobs, BlobId::from(missing_blob.blob_id).into()).await;
 
     let () = get_fut.await.unwrap().unwrap();
@@ -660,7 +675,8 @@ async fn get_with_retained_protection_refetches_blobs() {
     let () = get_fut.await.unwrap().unwrap();
     assert_matches!(
         pkg.verify_contents(&dir).await,
-        Err(fuchsia_pkg_testing::VerificationError::MissingFile{path}) if path == "blob-to-refetch"
+        Err(fuchsia_pkg_testing::VerificationError::EntryExistsButBlobMissing { path })
+            if path == "blob-to-refetch"
     );
     assert!(!blobfs.blob_present_and_up_to_date(&blob_hash).await);
 
@@ -795,8 +811,12 @@ async fn get_uses_open_packages_to_short_circuit() {
     );
 }
 
+#[test_case(DeliveryBlobType::Type1)]
+#[test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn bootfs_used_to_serve_package_directories_but_not_prevent_fetching() {
+async fn bootfs_used_to_serve_package_directories_but_not_prevent_fetching(
+    delivery_blob_type: DeliveryBlobType,
+) {
     let blob_content = b"base-blob-contents";
     let blob_hash = fuchsia_merkle::root_from_slice(blob_content);
     let base_package = PackageBuilder::new("a-base-package")
@@ -825,7 +845,7 @@ async fn bootfs_used_to_serve_package_directories_but_not_prevent_fetching() {
     let () = base_package.verify_contents(&pkg_dir).await.unwrap();
 
     // Blobs will be written to blobfs during resolution even if they are already in bootfs.
-    let compressed = delivery_blob::generate(delivery_blob::DeliveryBlobType::Type1, blob_content);
+    let compressed = delivery_blob::generate(delivery_blob_type, blob_content);
     let pkg_cache = env.client();
     let mut get = pkg_cache
         .get(

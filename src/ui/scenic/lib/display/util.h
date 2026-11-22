@@ -7,12 +7,13 @@
 
 #include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
+#include <fidl/fuchsia.images2/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 
 #include <cstdint>
 
 #include "src/ui/scenic/lib/allocation/id.h"
-#include "src/ui/scenic/lib/display/coordinator_proxy.h"
+#include "src/ui/scenic/lib/display/coordinator_proxy/coordinator_proxy.h"
 #include "src/ui/scenic/lib/display/fidl_id_types.h"
 
 namespace display {
@@ -57,6 +58,14 @@ inline WireBufferCollectionId ToDisplayFidlBufferCollectionId(
     allocation::GlobalBufferCollectionId global_buffer_collection_id) {
   return {.value = global_buffer_collection_id};
 }
+
+// Returns an image type that describes the tiling format used for a buffer with
+// this pixel format modifier. The values are display driver specific and not
+// documented in the display coordinator FIDL API.
+// TODO(https://fxbug.dev/42108519): Remove this when image type is removed from the display
+// coordinator API.
+uint32_t BufferCollectionPixelFormatToImageTilingType(
+    fuchsia_images2::PixelFormatModifier pixel_format_modifier);
 
 }  // namespace display
 

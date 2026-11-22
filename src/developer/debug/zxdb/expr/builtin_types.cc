@@ -201,8 +201,8 @@ fxl::RefPtr<BaseType> GetBuiltinUnsignedType(ExprLanguage lang, size_t byte_size
   }
 
   // No builtin, in this case just make up a type.
-  return fxl::MakeRefCounted<BaseType>(BaseType::kBaseTypeUnsigned, byte_size,
-                                       "nonstandard_unsigned");
+  return fxl::MakeRefCounted<BaseType>(BaseType::kBaseTypeUnsigned,
+                                       static_cast<uint32_t>(byte_size), "nonstandard_unsigned");
 }
 
 fxl::RefPtr<BaseType> GetBuiltinFloatType(ExprLanguage lang, size_t byte_size) {
@@ -228,7 +228,8 @@ fxl::RefPtr<BaseType> GetBuiltinFloatType(ExprLanguage lang, size_t byte_size) {
   }
 
   // No builtin, in this case just make up a type.
-  return fxl::MakeRefCounted<BaseType>(BaseType::kBaseTypeFloat, byte_size, "nonstandard_float");
+  return fxl::MakeRefCounted<BaseType>(BaseType::kBaseTypeFloat, static_cast<uint32_t>(byte_size),
+                                       "nonstandard_float");
 }
 
 }  // namespace zxdb

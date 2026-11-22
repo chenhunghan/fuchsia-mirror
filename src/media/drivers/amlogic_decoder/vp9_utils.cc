@@ -120,14 +120,14 @@ void SplitSuperframe(const uint8_t* data, uint32_t frame_size, std::vector<uint8
   }
 }
 
-fpromise::result<bool, fuchsia::media::StreamError> IsVp9KeyFrame(uint8_t frame_header_byte_0) {
+fpromise::result<bool, fuchsia_media::StreamError> IsVp9KeyFrame(uint8_t frame_header_byte_0) {
   // We could make a bit-shifter class, but ... not really parsing that much here...
   uint8_t byte_0_shifter = frame_header_byte_0;
   uint8_t frame_marker = byte_0_shifter >> 6;
   byte_0_shifter <<= 2;
   if (frame_marker != kVp9FrameMarker) {
     LOG(ERROR, "frame marker not 2");
-    return fpromise::error(fuchsia::media::StreamError::DECODER_DATA_PARSING);
+    return fpromise::error(fuchsia_media::StreamError::kDecoderDataParsing);
   }
   uint8_t profile_low_bit = byte_0_shifter >> 7;
   byte_0_shifter <<= 1;
@@ -139,7 +139,7 @@ fpromise::result<bool, fuchsia::media::StreamError> IsVp9KeyFrame(uint8_t frame_
     byte_0_shifter <<= 1;
     if (reserved_zero != 0) {
       LOG(ERROR, "reserved_zero not zero");
-      return fpromise::error(fuchsia::media::StreamError::DECODER_DATA_PARSING);
+      return fpromise::error(fuchsia_media::StreamError::kDecoderDataParsing);
     }
   }
 

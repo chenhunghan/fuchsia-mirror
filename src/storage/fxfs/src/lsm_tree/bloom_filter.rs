@@ -106,6 +106,9 @@ impl<V: FuzzyHash> BloomFilterReader<V> {
     /// range-based keys).
     pub fn maybe_contains(&self, value: &V) -> MaybeContainsKey {
         let hashes = value.fuzzy_hash();
+        if hashes.len() == 0 {
+            return MaybeContainsKey::Maybe;
+        }
         if hashes.len() > MAX_HASH_PARTITIONS {
             return MaybeContainsKey::RangeKeyTooLarge;
         }
@@ -313,41 +316,45 @@ mod tests {
     #[test]
     fn test_range_key() {
         let mut filter = BloomFilterWriter::new(0, 2);
-        filter.insert(&AllocatorKey { device_range: (0..2097152).into() });
-        filter.insert(&AllocatorKey { device_range: (4194304..4194816).into() });
+        filter.insert(&ObjectKey::extent(1, AttributeId::TEST_ID, 0..2097152));
+        filter.insert(&ObjectKey::extent(1, AttributeId::TEST_ID, 4194304..4194816));
         let filter = BloomFilterReader::from(filter);
 
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (0..512).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 0..512)),
             MaybeContainsKey::Maybe
         );
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (2096640..2097152).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 2096640..2097152)),
             MaybeContainsKey::Maybe
         );
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (2097152..2097664).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 2097152..2097664)),
             MaybeContainsKey::False
         );
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (3145216..3145728).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 3145216..3145728)),
             MaybeContainsKey::False
         );
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (4193792..4194816).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 4193792..4194816)),
             MaybeContainsKey::Maybe
         );
 
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (0..2097664).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 0..2097664)),
             MaybeContainsKey::Maybe
         );
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (2097152..4194816).into() }),
+            filter.maybe_contains(&ObjectKey::extent(1, AttributeId::TEST_ID, 2097152..4194816)),
             MaybeContainsKey::Maybe
         );
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (104857600..104858112).into() }),
+            filter.maybe_contains(&ObjectKey::extent(
+                1,
+                AttributeId::TEST_ID,
+                104857600..104858112
+            )),
             MaybeContainsKey::False
         );
     }
@@ -373,13 +380,17 @@ mod tests {
     #[test]
     fn test_excessive_partitions() {
         let mut filter = BloomFilterWriter::new(0, 1);
-        filter.insert(&AllocatorKey { device_range: (0..512).into() });
+        filter.insert(&ObjectKey::extent(1, AttributeId::TEST_ID, 0..512));
         let filter = BloomFilterReader::from(filter);
 
         // A range with > MAX_HASH_PARTITIONS partitions (e.g. 5 MiB = 5 partitions) that does not
         // match should defensively return RangeKeyTooLarge without panicking.
         assert_eq!(
-            filter.maybe_contains(&AllocatorKey { device_range: (104857600..110100480).into() }),
+            filter.maybe_contains(&ObjectKey::extent(
+                1,
+                AttributeId::TEST_ID,
+                104857600..110100480
+            )),
             MaybeContainsKey::RangeKeyTooLarge
         );
     }
@@ -457,6 +468,18 @@ mod tests {
         assert_eq!(
             filter.maybe_contains(&ObjectKey::extent(1, attr0, (10 * MIB)..(15 * MIB))),
             MaybeContainsKey::RangeKeyTooLarge
+        );
+    }
+
+    #[test]
+    fn test_empty_fuzzy_hash() {
+        // Keys with an empty `FuzzyHash` iterator (such as `AllocatorKey`, e.g. when opening an
+        // existing allocator layer file that still contains a bloom filter) must conservatively
+        // return `Maybe` rather than `False`.
+        let filter = BloomFilterReader::<AllocatorKey>::new_empty(16);
+        assert_eq!(
+            filter.maybe_contains(&AllocatorKey { device_range: (0..4096).into() }),
+            MaybeContainsKey::Maybe
         );
     }
 }

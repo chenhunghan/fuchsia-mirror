@@ -6,6 +6,7 @@
 #include <sys/mount.h>
 #include <sys/wait.h>
 
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -22,10 +23,32 @@ namespace {
 constexpr char PROCS_FILE[] = "cgroup.procs";
 constexpr char FREEZE_FILE[] = "cgroup.freeze";
 constexpr char EVENTS_FILE[] = "cgroup.events";
+constexpr char STAT_LOCAL_FILE[] = "cgroup.stat.local";
 
 std::string procs_path(const std::string& cgroup_path) { return cgroup_path + "/" + PROCS_FILE; }
 std::string freeze_path(const std::string& cgroup_path) { return cgroup_path + "/" + FREEZE_FILE; }
 std::string events_path(const std::string& cgroup_path) { return cgroup_path + "/" + EVENTS_FILE; }
+std::string stat_local_path(const std::string& cgroup_path) {
+  return cgroup_path + "/" + STAT_LOCAL_FILE;
+}
+
+int64_t GetFrozenUsec(const std::string& cgroup_path) {
+  std::ifstream stat_file(stat_local_path(cgroup_path));
+  if (!stat_file.is_open()) {
+    return -1;
+  }
+
+  std::string line;
+  while (std::getline(stat_file, line)) {
+    if (line.starts_with("frozen_usec ")) {
+      char* endptr = nullptr;
+      const char* start = line.c_str() + 12;
+      int64_t val = std::strtoll(start, &endptr, 10);
+      return (endptr != start) ? val : -1;
+    }
+  }
+  return -1;
+}
 
 bool IsCgroupFrozen(const std::string& cgroup_path) {
   std::ifstream events_file(events_path(cgroup_path));
@@ -316,6 +339,66 @@ TEST_F(CgroupFreezerTest, CheckStateInEventsFile) {
   EXPECT_TRUE(IsCgroupFrozen(test_cgroup_path()));
   ThawCgroup(test_cgroup_path());
   EXPECT_FALSE(IsCgroupFrozen(test_cgroup_path()));
+}
+
+TEST_F(CgroupFreezerTest, FrozenTimeInStatLocalFile) {
+  if (!test_helper::IsStarnix() && !test_helper::IsKernelVersionAtLeast(6, 18)) {
+    GTEST_SKIP() << "cgroup.stat.local requires Linux 6.18+";
+  }
+  EXPECT_EQ(GetFrozenUsec(test_cgroup_path()), 0);
+
+  FreezeCgroup(test_cgroup_path());
+  usleep(20000);
+  int64_t frozen_while_active = GetFrozenUsec(test_cgroup_path());
+  EXPECT_GT(frozen_while_active, 0);
+
+  ThawCgroup(test_cgroup_path());
+  int64_t frozen_after_thaw = GetFrozenUsec(test_cgroup_path());
+  EXPECT_GE(frozen_after_thaw, frozen_while_active);
+
+  usleep(20000);
+  EXPECT_EQ(GetFrozenUsec(test_cgroup_path()), frozen_after_thaw);
+}
+
+// A child inherits its parent's frozen state, and its frozen_usec must account for time spent
+// frozen via an ancestor exactly like time spent frozen via its own cgroup.freeze.
+TEST_F(CgroupFreezerTest, FrozenTimeInheritedFromParent) {
+  if (!test_helper::IsStarnix() && !test_helper::IsKernelVersionAtLeast(6, 18)) {
+    GTEST_SKIP() << "cgroup.stat.local requires Linux 6.18+";
+  }
+  std::string parent_cgroup = test_cgroup_path();
+  std::string child_cgroup = parent_cgroup + "/child";
+  CreateChildCgroup(child_cgroup);
+  EXPECT_EQ(GetFrozenUsec(child_cgroup), 0);
+
+  // Freezing only the parent starts the child's clock.
+  FreezeCgroup(parent_cgroup);
+  usleep(20000);
+  int64_t child_frozen_via_parent = GetFrozenUsec(child_cgroup);
+  EXPECT_GT(child_frozen_via_parent, 0);
+
+  // Writing 0 to the child's cgroup.freeze while the parent is frozen is a no-op: the child
+  // remains effectively frozen and keeps accruing time.
+  ThawCgroup(child_cgroup);
+  EXPECT_TRUE(IsCgroupFrozen(child_cgroup));
+  usleep(20000);
+  EXPECT_GT(GetFrozenUsec(child_cgroup), child_frozen_via_parent);
+
+  // Freezing the child itself while the parent is still frozen, then thawing the parent, must
+  // not reset or split the child's interval: it stays frozen and the counter keeps growing.
+  FreezeCgroup(child_cgroup);
+  int64_t child_frozen_before_parent_thaw = GetFrozenUsec(child_cgroup);
+  ThawCgroup(parent_cgroup);
+  EXPECT_TRUE(IsCgroupFrozen(child_cgroup));
+  usleep(20000);
+  EXPECT_GT(GetFrozenUsec(child_cgroup), child_frozen_before_parent_thaw);
+
+  // Thawing the child closes its interval; the counter then stops.
+  ThawCgroup(child_cgroup);
+  EXPECT_FALSE(IsCgroupFrozen(child_cgroup));
+  int64_t child_frozen_after_thaw = GetFrozenUsec(child_cgroup);
+  usleep(20000);
+  EXPECT_EQ(GetFrozenUsec(child_cgroup), child_frozen_after_thaw);
 }
 
 TEST_F(CgroupFreezerTest, FreezerState) {

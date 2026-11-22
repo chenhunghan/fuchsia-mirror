@@ -17,6 +17,8 @@
         bind: "meta/bind/tpm.bindbc",
     },
     capabilities: [],
-    use: [],
+    use: [
+        { service: "fuchsia.hardware.tpmimpl.Service" },
+    ],
     expose: [],
 }

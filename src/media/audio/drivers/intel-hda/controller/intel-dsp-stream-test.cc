@@ -4,7 +4,6 @@
 
 #include "intel-dsp-stream.h"
 
-#include <fuchsia/hardware/intelhda/codec/cpp/banjo.h>
 #include <lib/fidl/cpp/wire/connect_service.h>
 
 #include <optional>
@@ -42,8 +41,8 @@ class TestCodec : public codecs::IntelHDACodecDriverBase {
     return codecs::IntelHDACodecDriverBase::ActivateStream(stream);
   }
 
-  zx::result<> Bind(zx_device_t* codec_dev, const char* name) {
-    return codecs::IntelHDACodecDriverBase::Bind(codec_dev, name);
+  zx::result<> BindWithChannel(zx_device_t* codec_dev, zx::channel channel, const char* name) {
+    return codecs::IntelHDACodecDriverBase::BindWithChannel(codec_dev, std::move(channel), name);
   }
   void DeviceRelease() { codecs::IntelHDACodecDriverBase::DeviceRelease(); }
 };
@@ -92,7 +91,7 @@ class TestStream : public IntelDspStream {
 class FakeController;
 using FakeControllerType = ddk::Device<FakeController>;
 
-class FakeController : public FakeControllerType, public ddk::IhdaCodecProtocol<FakeController> {
+class FakeController : public FakeControllerType {
  public:
   explicit FakeController(zx_device_t* parent)
       : FakeControllerType(parent), loop_(&kAsyncLoopConfigNeverAttachToThread) {}
@@ -101,15 +100,8 @@ class FakeController : public FakeControllerType, public ddk::IhdaCodecProtocol<
   zx_status_t Bind() { return DdkAdd("fake-controller-device-test"); }
   void DdkRelease() { delete this; }
 
-  ihda_codec_protocol_t proto() const {
-    ihda_codec_protocol_t proto;
-    proto.ctx = const_cast<FakeController*>(this);
-    proto.ops = const_cast<ihda_codec_protocol_ops_t*>(&ihda_codec_protocol_ops_);
-    return proto;
-  }
-
-  // ZX_PROTOCOL_IHDA_CODEC Interface
-  zx_status_t IhdaCodecGetDriverChannel(zx::channel* out_channel) {
+  // Returns the codec driver channel, as the controller does through CodecService.
+  zx_status_t GetDriverChannel(zx::channel* out_channel) {
     zx::channel channel_local;
     zx::channel channel_remote;
     zx_status_t status = zx::channel::create(0, &channel_local, &channel_remote);
@@ -148,11 +140,12 @@ class SstStreamTest : public zxtest::Test {
     fake_controller_ = new FakeController(root_.get());
     ASSERT_OK(fake_controller_->Bind());  // fake_controller_ is owned by mock ddk.
     auto fake_controller_mock_device = root_->GetLatestChild();
-    fake_controller_mock_device->AddProtocol(ZX_PROTOCOL_IHDA_CODEC, fake_controller_->proto().ops,
-                                             fake_controller_->proto().ctx);
+    zx::channel codec_channel;
+    ASSERT_OK(fake_controller_->GetDriverChannel(&codec_channel));
 
     codec_ = fbl::AdoptRef(new TestCodec);
-    auto ret = codec_->Bind(fake_controller_mock_device, "test");
+    auto ret =
+        codec_->BindWithChannel(fake_controller_mock_device, std::move(codec_channel), "test");
     ASSERT_OK(ret.status_value());
     stream_ = fbl::AdoptRef(new TestStream);
     ASSERT_OK(codec_->ActivateStream(stream_));
@@ -298,10 +291,10 @@ TEST(SstStream, GetDaiFormats2) {
   FakeController* fake_controller = new FakeController(root.get());
   ASSERT_OK(fake_controller->Bind());
   auto fake_controller_mock_device = root->GetLatestChild();
-  fake_controller_mock_device->AddProtocol(ZX_PROTOCOL_IHDA_CODEC, fake_controller->proto().ops,
-                                           fake_controller->proto().ctx);
+  zx::channel codec_channel;
+  ASSERT_OK(fake_controller->GetDriverChannel(&codec_channel));
   fbl::RefPtr<TestCodec> codec = fbl::AdoptRef(new TestCodec);
-  auto ret = codec->Bind(fake_controller_mock_device, "test");
+  auto ret = codec->BindWithChannel(fake_controller_mock_device, std::move(codec_channel), "test");
   ASSERT_OK(ret.status_value());
   auto stream = fbl::AdoptRef(new TestStream2);
   ASSERT_OK(codec->ActivateStream(stream));

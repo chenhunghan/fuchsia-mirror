@@ -6,7 +6,7 @@ use crate::mm::MemoryManager;
 use crate::task::{AbstractUnixSocketNamespace, AbstractVsockSocketNamespace, CurrentTask};
 use crate::vfs::{FdTable, FsContext, FsNodeHandle, SharedFdTable, SharedFsContext};
 use fuchsia_rcu::RcuArc;
-use starnix_sync::{LockDepMutex, TaskFilesLock};
+use starnix_sync::{LockDepMutex, ProcPidDirectoryCacheLock, TaskFilesLock};
 use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
 use std::ops::Deref;
@@ -17,11 +17,21 @@ use std::sync::{Arc, OnceLock};
 /// This structure contains the state of a task that is only relevant while the task is running. It
 /// is dropped when the task enters an exited state.
 pub struct TaskRunningState {
-    /// A handle to the underlying Zircon thread object.
+    /// A handle to the Zircon thread that runs restricted-mode user code for this task.
     ///
-    /// Some tasks lack an underlying Zircon thread. These tasks are used internally by the
-    /// Starnix kernel to track background work, typically on a `kthread`.
+    /// Kernel threads (`kthread`) do not enter restricted mode and therefore lack a user
+    /// [`ZirconThread`]; see `Self::kernel_thread` instead.
     pub thread: OnceLock<ZirconThread>,
+
+    /// A handle to the Zircon thread that runs a Starnix kernel thread.
+    ///
+    /// Kernel threads block on Zircon objects and Rust synchronization primitives rather than on
+    /// Starnix waiters, so their `RunState` stays `Running` while they are idle. This handle is
+    /// only used to read the thread's scheduling state for reporting (see `Task::state_code`); it
+    /// is not used to schedule, signal or kick the thread.
+    ///
+    /// Set when the task is created, before it is published; `None` for user tasks.
+    pub(crate) kernel_thread: Option<zx::Thread>,
 
     /// The file descriptor table for this task.
     ///
@@ -49,7 +59,7 @@ pub struct TaskRunningState {
 
     /// The pid directory, so it doesn't have to be generated and thrown away on every access.
     /// See https://fxbug.dev/291962828 for details.
-    pub proc_pid_directory_cache: OnceLock<FsNodeHandle>,
+    pub proc_pid_directory_cache: LockDepMutex<Option<FsNodeHandle>, ProcPidDirectoryCacheLock>,
 }
 
 impl TaskRunningState {

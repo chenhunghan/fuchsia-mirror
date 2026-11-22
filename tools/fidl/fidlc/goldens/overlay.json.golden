@@ -27,7 +27,7 @@
         "OverlayStruct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 27,
         "column": 6,
         "length": 13
@@ -51,7 +51,7 @@
           },
           "name": "the_overlay",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 28,
             "column": 5,
             "length": 11
@@ -81,7 +81,7 @@
         "Pasta"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 7,
         "column": 6,
         "length": 5
@@ -105,7 +105,7 @@
           },
           "name": "sauce",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 8,
             "column": 5,
             "length": 5
@@ -135,7 +135,7 @@
         "Pizza"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 3,
         "column": 6,
         "length": 5
@@ -172,7 +172,7 @@
           },
           "name": "toppings",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 4,
             "column": 5,
             "length": 8
@@ -207,7 +207,7 @@
         "Overlay"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 16,
         "column": 6,
         "length": 7
@@ -231,7 +231,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 17,
             "column": 8,
             "length": 9
@@ -255,7 +255,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 18,
             "column": 8,
             "length": 22
@@ -292,7 +292,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 19,
             "column": 8,
             "length": 32
@@ -318,7 +318,7 @@
         "OverlayWithAttributes"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 32,
         "column": 6,
         "length": 21
@@ -329,7 +329,7 @@
           "name": "foo",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 31,
             "column": 1,
             "length": 4
@@ -354,7 +354,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 34,
             "column": 8,
             "length": 1
@@ -365,7 +365,7 @@
               "name": "bar",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
                 "line": 33,
                 "column": 5,
                 "length": 4
@@ -390,7 +390,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 36,
             "column": 8,
             "length": 1
@@ -401,7 +401,7 @@
               "name": "baz",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
                 "line": 35,
                 "column": 5,
                 "length": 4
@@ -428,7 +428,7 @@
         "PizzaOrPasta"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 11,
         "column": 6,
         "length": 12
@@ -453,7 +453,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 12,
             "column": 8,
             "length": 5
@@ -478,7 +478,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 13,
             "column": 8,
             "length": 5
@@ -504,7 +504,7 @@
         "ReverseOrdinalOverlay"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "line": 22,
         "column": 6,
         "length": 21
@@ -528,7 +528,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 24,
             "column": 8,
             "length": 5
@@ -552,7 +552,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "line": 23,
             "column": 8,
             "length": 6

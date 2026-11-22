@@ -81,6 +81,8 @@ fuchsia_cc_test(
     name = "pcf8563_test",
     size = "small",
     srcs = ["pcf8563-test.cc"],
+    # TODO(https://fxbug.dev/477786942): Fix -Wconversion warnings and remove.
+    copts = ["-Wno-conversion"],
     deps = [
         ":common",
         "@com_google_googletest//:gtest_main",

@@ -478,6 +478,18 @@ zx::result<fuchsia_hardware_pin::Configuration> GpioImplVisitor::ParsePinConfigu
     config.wake_vector(true);
   }
 
+  if (cfg_node.GetProperty<bool>(kPinInputEnable)) {
+    config.input_buffer_enabled(true);
+  }
+  if (cfg_node.GetProperty<bool>(kPinInputDisable)) {
+    if (config.input_buffer_enabled().has_value()) {
+      fdf::error("Pin controller config '{}' specifies input-enable and input-disable.",
+                 cfg_node.name());
+      return zx::error(ZX_ERR_INVALID_ARGS);
+    }
+    config.input_buffer_enabled(false);
+  }
+
   return zx::ok(config);
 }
 

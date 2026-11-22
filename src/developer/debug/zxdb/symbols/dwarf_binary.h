@@ -13,6 +13,9 @@
 
 namespace llvm {
 
+class DWARFContext;
+class DWARFDebugNames;
+
 namespace object {
 class Binary;
 class ObjectFile;
@@ -58,7 +61,7 @@ class DwarfBinary {
   // Returns underlying LLVM objects. May be null in tests since the mock won't have this. See the
   // class comment above.
   virtual llvm::object::ObjectFile* GetLLVMObjectFile() = 0;
-  virtual llvm::DWARFContext* GetLLVMContext() = 0;
+  virtual llvm::DWARFContext* GetLLVMContext() const = 0;
 
   // Returns the extent of the mapped segments in memory.
   virtual uint64_t GetMappedLength() const = 0;
@@ -108,6 +111,9 @@ class DwarfBinary {
   // Looks up a DIE reference by its 64-bit DWARF type signature (DW_FORM_ref_sig8 /
   // DW_AT_signature).
   virtual DwarfDieRef GetDieRefForSignature(uint64_t signature) const = 0;
+
+  // Returns the DWARF v5 .debug_names accelerator table, or nullptr if absent or empty.
+  virtual const llvm::DWARFDebugNames* GetDebugNames() const { return nullptr; }
 
   // Purges cached per-unit DIE arrays, line tables, type signature maps, and unit wrappers so
   // transient parse structures can be reclaimed and re-populated lazily on demand.

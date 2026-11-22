@@ -387,7 +387,7 @@ class DirectMemory {
   // argument: the caller must use Store<T> explicitly to avoid accidentally
   // using the wrong type since lots of integer types are silently coercible to
   // other ones.  (The caller doesn't need to supply the U template parameter.)
-  template <typename T, typename U>
+  template <typename T, std::convertible_to<T> U>
   bool Store(uintptr_t ptr, U value) {
     if (auto word = GetPointer<T>(ptr)) [[likely]] {
       *word = value;
@@ -400,7 +400,7 @@ class DirectMemory {
   // argument: the caller must use Store<T> explicitly to avoid accidentally
   // using the wrong type since lots of integer types are silently coercible to
   // other ones.  (The caller doesn't need to supply the U template parameter.)
-  template <typename T, typename U>
+  template <typename T, std::convertible_to<T> U>
   bool StoreAdd(uintptr_t ptr, U value) {
     if (auto word = GetPointer<T>(ptr)) [[likely]] {
       *word = *word + value;  // Don't assume T::operator+= works.

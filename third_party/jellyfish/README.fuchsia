@@ -1,17 +1,22 @@
 Name: jellyfish
 URL: https://github.com/jamesturk/jellyfish
+Version: v1.2.1
 Revision: 7d50927c7d63cf4ed8bb16286dd21e34f4bb5641
+Security Critical: no
+
 License: MIT
 License File: jellyfish/LICENSE
-Version: v1.2.1
+
 Description:
-jellyfish is a Python library supporting a number of fuzzy string matching
-metrics. It can be used to support suggestions for mistyped commands or
-related options in our tooling.
-Revision is from `git merge-base JIRI_HEAD origin/upstream/0.10.x`.
+  jellyfish is a Python library supporting a number of fuzzy string matching
+  metrics. It can be used to support suggestions for mistyped commands or
+  related options in our tooling.
+  Revision is from `git merge-base JIRI_HEAD origin/upstream/0.10.x`.
+
 Local Modifications:
-Added README.fuchsia.
-Added BUILD.gn.
-Added METADATA.textproto
-Added OWNERS
-Checked out tag v0.10.1.
+  Added README.fuchsia.
+  Added BUILD.gn.
+  Added METADATA.textproto
+  Added OWNERS
+  Added stubs/ with Fuchsia-authored mypy type stubs for jellyfish._jellyfish.
+  Checked out tag v0.10.1.

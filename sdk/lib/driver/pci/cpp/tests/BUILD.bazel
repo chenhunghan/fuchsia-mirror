@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":package"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "driver-pci-cpp-test",
+    srcs = ["pci-test.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_cpp_testing",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/async_patterns/testing/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/driver/fake-bti/cpp",
+        "//sdk/lib/driver/fake-resource/cpp",
+        "//sdk/lib/driver/pci/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+    ],
+)
+
+fx_unittest_package(
+    name = "package",
+    package_name = "driver-pci-cpp-test",
+    unit_tests = [":driver-pci-cpp-test"],
+)

@@ -31,7 +31,6 @@ rustc_test(
 # @bazel2gn:skip
 fx_unittest_package(
     name = "fable-lib-unit-tests",
-    package_name = "fable-lib-unit-tests",
     unit_tests = [":fable-lib_test"],
     visibility = ["//src/lib:__pkg__"],
 )

@@ -27,7 +27,6 @@ if (is_linux) {
 
   net_tools = [
     "netaddr",
-    "netcp",
     "netls",
     "netruncmd",
   ]
@@ -72,11 +71,7 @@ if (is_linux) {
       "--emulator.pb-path",
       rebase_path("$_out_dir/limited_netsvc_product_bundle", root_build_dir),
     ]
-    deps = [
-      "//tools/net/netutil",
-      "//tools/net/tftp",
-      "//tools/virtual_device:proto",
-    ]
+    deps = [ "//tools/virtual_device:proto" ]
     non_go_deps = [
       ":netsvc_user_tools",
       "image:host_test_data",

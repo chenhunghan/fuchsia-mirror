@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The test root component and the test package that runs it stay in GN
+# (above the sentinel in BUILD.gn), because the test package subpackages
+# //sdk/ctf/tests/fidl/fuchsia.settings/testing/realm-factory, which depends on
+# GN-only targets (such as //src/settings/service:setui_service_v2).
+
+fx_cc_test_binary(
+    name = "settings_test_bin",
+    srcs = ["privacy_test.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/ctf/tests/fidl/fuchsia.settings/testing/fidl:fuchsia.settings.test_hlcpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_hlcpp",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/testing/fidl:fidl_test_hlcpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "settings_test_bin_packaged",
+    testonly = True,
+    binary = ":settings_test_bin",
+    binary_name = "settings_test_bin",
+)
+
+fx_component_manifest(
+    name = "test-suite_manifest",
+    testonly = True,
+    component_name = "test-suite",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+        "//src/testing/realm_client:meta/realm_client.shard.cml",
+    ],
+    manifest = "meta/settings_test.cml",
+)
+
+fx_component(
+    name = "test-suite",
+    testonly = True,
+    compiled_manifest = ":test-suite_manifest",
+    deps = [":settings_test_bin_packaged"],
+)
+
+ctf_fx_package(
+    name = "fuchsia-settings-tests",
+    testonly = True,
+    components = [":test-suite"],
+)

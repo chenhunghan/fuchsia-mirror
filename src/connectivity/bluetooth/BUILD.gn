@@ -10,7 +10,6 @@ group("bluetooth") {
   deps = [
     ":tests",
     "core",
-    "examples",
     "hci",
     "lib",
     "profiles",
@@ -62,6 +61,7 @@ group("core-system") {
 
 bazel_test_suite("bazel_tests") {
   target_tests = [ "//src/connectivity/bluetooth:bluetooth_tests" ]
+  host_tests = [ "//src/connectivity/bluetooth:bluetooth_host_tests" ]
 }
 
 group("tests") {
@@ -69,7 +69,6 @@ group("tests") {
   deps = [
     ":bazel_tests",
     "core:tests",
-    "examples:tests",
     "hci:tests",
     "lib:tests",
     "profiles:tests",

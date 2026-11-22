@@ -63,7 +63,6 @@ fx_cc_binary(
 # @bazel2gn:skip
 fx_unittest_package(
     name = "callback_tests",
-    package_name = "callback_tests",
     unit_tests = [":callback_unittests"],
     visibility = ["//src/lib:__pkg__"],
 )

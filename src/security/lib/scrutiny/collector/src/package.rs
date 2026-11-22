@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use cm_fidl_analyzer::{PkgUrlMatch, match_absolute_pkg_urls};
 use directed_graph::DirectedGraph;
 use fidl::unpersist;
-use fidl_fuchsia_component_decl as fdecl;
+use fidl_fuchsia_component_decl_common as fdecl;
 use fuchsia_merkle::Hash;
 use fuchsia_url::fuchsia_pkg::{AbsoluteComponentUrl, AbsolutePackageUrl};
 use fuchsia_url::{PackageName, PackageVariant};
@@ -561,7 +561,7 @@ pub mod tests {
     use base64::engine::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use cm_rust::{ComponentDecl, NativeIntoFidl};
-    use fidl_fuchsia_component_decl as fdecl;
+    use fidl_fuchsia_component_decl_common as fdecl;
     use fuchsia_hash::{HASH_SIZE, Hash};
     use fuchsia_url::fuchsia_pkg::AbsolutePackageUrl;
     use fuchsia_url::{PackageName, PackageVariant};

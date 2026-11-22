@@ -7,6 +7,7 @@ package bazel2gn
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -28,7 +29,8 @@ const gnTestPackageNameSuffix = "-gn"
 // hand-written GN copy.
 func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 	var name, packageName, maxLogSeverity, minLogSeverity string
-	var unitTests *syntax.ListExpr
+	var parallel int64
+	var unitTests, resources *syntax.ListExpr
 	var visArg *syntax.BinaryExpr
 
 	for _, arg := range call.Args {
@@ -69,6 +71,11 @@ func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("fx_unittest_package min_log_severity: %v", err)
 			}
+		case "parallel":
+			parallel, err = parallelToGN(binaryExpr.Y)
+			if err != nil {
+				return nil, fmt.Errorf("fx_unittest_package parallel: %v; use # @bazel2gn:skip and write the GN copy by hand", err)
+			}
 		case "unit_tests":
 			listExpr, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.ListExpr)
 			if !ok {
@@ -88,6 +95,24 @@ func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 				return nil, errors.New("fx_unittest_package unit_tests must not be empty")
 			}
 			unitTests = &syntax.ListExpr{List: unskipped}
+		case "resources":
+			listExpr, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.ListExpr)
+			if !ok {
+				return nil, fmt.Errorf("expected list literal for fx_unittest_package resources, got %T", binaryExpr.Y)
+			}
+			var unskipped []syntax.Expr
+			for _, elm := range listExpr.List {
+				shouldSkip, err := hasSkipAnnotation(elm)
+				if err != nil {
+					return nil, fmt.Errorf("failed to check skip annotation: %v", err)
+				}
+				if !shouldSkip {
+					unskipped = append(unskipped, elm)
+				}
+			}
+			if len(unskipped) > 0 {
+				resources = &syntax.ListExpr{List: unskipped}
+			}
 		case "visibility":
 			visArg = binaryExpr
 		case "tags", "testonly":
@@ -116,7 +141,11 @@ func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 		// Like the Bazel macro, a single test binary gets a component named
 		// after the package. Unlike Bazel, the GN package name has a suffix, so
 		// set the component name explicitly.
-		depLines, err := exprToGN(unitTests, []transformer{bazelDepToGN})
+		combinedDeps := &syntax.ListExpr{List: slices.Clone(unitTests.List)}
+		if resources != nil {
+			combinedDeps.List = append(combinedDeps.List, resources.List...)
+		}
+		depLines, err := exprToGN(combinedDeps, []transformer{bazelDepToGN})
 		if err != nil {
 			return nil, fmt.Errorf("converting fx_unittest_package unit_tests: %v", err)
 		}
@@ -153,19 +182,31 @@ func fxUnittestPackageToGN(call *syntax.CallExpr) ([]string, error) {
 		packageBody = append(packageBody, "test_components = [")
 		packageBody = append(packageBody, indent(components, 1)...)
 		packageBody = append(packageBody, "]")
+		if resources != nil {
+			resLines, err := exprToGN(resources, []transformer{bazelDepToGN})
+			if err != nil {
+				return nil, fmt.Errorf("converting fx_unittest_package resources: %v", err)
+			}
+			resLines[0] = "deps = " + resLines[0]
+			packageBody = append(packageBody, resLines...)
+		}
 		ret = append(ret, fmt.Sprintf("fuchsia_test_package(%s) {", strconv.Quote(name)))
 	}
 	ret = append(ret, indent(packageBody, 1)...)
 
+	var specs []string
 	if maxLogSeverity != "" || minLogSeverity != "" {
-		specs := []string{"test_specs = {"}
-		specs = append(specs, indent(logSettingsToGN(maxLogSeverity, minLogSeverity), 1)...)
-		specs = append(specs, "}")
-		ret = append(ret, indent(specs, 1)...)
+		specs = append(specs, logSettingsToGN(maxLogSeverity, minLogSeverity)...)
+	}
+	if parallel > 0 {
+		specs = append(specs, fmt.Sprintf("parallel = %d", parallel))
+	}
+	if testSpecs := wrapTestSpecs(specs); len(testSpecs) > 0 {
+		ret = append(ret, indent(testSpecs, 1)...)
 	}
 
 	if visArg != nil {
-		lines, err := attrAssignmentToGN(visArg, "fx_unittest_package", nil /*compiledActionOutputs*/, false /*appendAspectHints*/, false /*hasWithUnitTests*/)
+		lines, err := attrAssignmentToGN(visArg, "fx_unittest_package", nil /*compiledActionOutputs*/, false /*appendDeps*/, false /*hasWithUnitTests*/)
 		if err != nil {
 			return nil, fmt.Errorf("converting fx_unittest_package visibility: %v", err)
 		}

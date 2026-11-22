@@ -6,8 +6,7 @@
 
 #include <mutex>
 
-#include <zxtest/zxtest.h>
-
+#include "../test/unittest.h"
 #include "weak.h"
 
 namespace LIBC_NAMESPACE_DECL {
@@ -17,7 +16,7 @@ namespace LIBC_NAMESPACE_DECL {
 
 namespace {
 
-class LibcTests : public zxtest::Test {
+class LibcTests : public LIBC_NAMESPACE::testing::Test {
  public:
   static inline bool gCalled = false;
   static inline bool gFakeLock = false;

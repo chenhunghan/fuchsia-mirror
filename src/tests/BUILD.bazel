@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/tests/diagnostics:tests",
+        # Emulator network isolation tests, for emulators with and without opt-in
+        # internet access.
+        "//src/tests/emulator_internet:tests",
+    ],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/tests/end_to_end/usb/lib/testusb:host_tests",
+        "//src/tests/fidl/dynsuite/channel_util:host_tests",
+    ],
+)

@@ -4,6 +4,10 @@
 
 import("//build/packages/prebuilt_package.gni")
 
+# This tool is used for development and debugging of Broadcom- and
+# Synaptics-based drivers. It is intended to be used by developers and is
+# usually not referenced by product or board targets.
+
 group("wl") {
   if (current_cpu == "arm64") {
     # This package is only supported for arm64.

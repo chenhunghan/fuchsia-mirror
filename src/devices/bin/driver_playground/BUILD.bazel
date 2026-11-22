@@ -2,9 +2,112 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":driver-playground-tests"],
+    visibility = ["//src/devices:__pkg__"],
+)
 
 exports_files(
     ["meta/driver_playground.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "src/playground.cc",
+        "src/playground_utils.cc",
+    ],
+    hdrs = [
+        "src/playground.h",
+        "src/playground_utils.h",
+    ],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio:fdio-spawn-actions",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.driver.playground:fuchsia.driver.playground_cpp",
+        "//src/devices/lib/log",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["src/main.cc"],
+    deps = [
+        ":lib",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "driver_playground_bin",
+    binary = ":bin",
+    binary_name = "driver_playground",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "driver_playground",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/driver_playground.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":driver_playground_bin"],
+)
+
+fx_package(
+    name = "pkg",
+    package_name = "driver_playground",
+    components = [":component"],
+    package_repository_name = "fuchsia.com",
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_test_binary(
+    name = "unit_tests",
+    srcs = ["src/tests.cc"],
+    deps = [
+        ":lib",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "driver-playground-tests",
+    unit_tests = [":unit_tests"],
 )

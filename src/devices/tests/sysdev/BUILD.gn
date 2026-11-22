@@ -32,6 +32,5 @@ fuchsia_driver_component("sysdev") {
   ]
   component_name = "sysdev"
   deps = [ ":sysdev-driver" ]
-  info = "meta/sysdev-info.json"
   manifest = "meta/sysdev.cml"
 }

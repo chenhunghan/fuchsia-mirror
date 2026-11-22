@@ -50,7 +50,7 @@ source_set("src") {
   public_deps = [
     "encoding:encoder",
     "fidl:fuchsia.feedback.internal_cpp",
-    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
+    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
     "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
     "//sdk/lib/async_patterns/cpp",
     "//sdk/lib/fit",
@@ -69,6 +69,7 @@ source_set("src") {
     "encoding:production",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/feedback_data:constants",
+    "//src/developer/forensics/utils:numbered_entries",
     "//src/developer/forensics/utils:purge_memory",
     "//src/developer/forensics/utils:vmo",
     "//src/lib/files",
@@ -96,9 +97,9 @@ source_set("reader") {
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/feedback_data:constants",
     "//src/developer/forensics/utils:logs",
+    "//src/developer/forensics/utils:numbered_entries",
     "//src/lib/files",
     "//src/lib/fsl",
-    "//src/lib/fxl",
     "//third_party/re2",
     "//zircon/system/ulib/trace",
   ]

@@ -6,16 +6,32 @@ load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
 )
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":realm_integration_tests_test"],
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)
 
 rustc_test(
     name = "realm_integration_test_bin",
     srcs = ["src/integration_test.rs"],
     crate_root = "src/integration_test.rs",
     edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//examples/components/routing/fidl:echo_rust",
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
@@ -29,11 +45,19 @@ rustc_test(
     ],
 )
 
+fx_packaged_binary(
+    name = "realm_integration_test_packaged_bin",
+    testonly = True,
+    binary = ":realm_integration_test_bin",
+    binary_name = "realm_integration_test_bin",
+)
+
 rustc_test(
     name = "realm_namespace_test_bin",
     srcs = ["src/namespace_test.rs"],
     crate_root = "src/namespace_test.rs",
     edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//examples/components/routing/fidl:echo_rust",
         "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
@@ -43,6 +67,13 @@ rustc_test(
     ],
 )
 
+fx_packaged_binary(
+    name = "realm_namespace_test_packaged_bin",
+    testonly = True,
+    binary = ":realm_namespace_test_bin",
+    binary_name = "realm_namespace_test_bin",
+)
+
 fx_component_manifest(
     name = "no_program-manifest",
     testonly = True,
@@ -50,8 +81,101 @@ fx_component_manifest(
     manifest = "meta/no_program.cml",
 )
 
+# `no_program` is in both test packages, so it also carries the package's
+# `data/placeholder_config` resource: `ctf_fx_package()` has no `resources`
+# that bazel2gn can translate.
 fx_component(
     name = "no_program",
     testonly = True,
     compiled_manifest = ":no_program-manifest",
+    deps = [":placeholder_data"],
+)
+
+# Retained in BUILD.gn above the sentinel because bazel2gn does not translate
+# component_config.
+# @bazel2gn:skip
+component_config(
+    name = "placeholder_data",
+    testonly = True,
+    srcs = ["configs/placeholder.json5"],
+    dest = "data/placeholder_config",
+)
+
+fx_component_manifest(
+    name = "realm_integration_test-manifest",
+    testonly = True,
+    component_name = "realm_integration_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/realm_integration_test.cml",
+)
+
+fx_test_component(
+    name = "realm_integration_test",
+    compiled_manifest = ":realm_integration_test-manifest",
+    deps = [":realm_integration_test_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "realm_namespace_test-manifest",
+    testonly = True,
+    component_name = "realm_namespace_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/realm_namespace_test.cml",
+)
+
+fx_test_component(
+    name = "realm_namespace_test",
+    compiled_manifest = ":realm_namespace_test-manifest",
+    deps = [":realm_namespace_test_packaged_bin"],
+)
+
+fx_package(
+    name = "realm_integration_tests",
+    components = [
+        ":no_program",
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    test_components = [
+        ":realm_integration_test",
+        ":realm_namespace_test",
+    ],
+)
+
+fx_test(
+    name = "realm_integration_tests_test",
+    # TODO(https://fxbug.dev/485919246): Flaky test disabled on coverage.
+    # Please fix the flake and remove the condition below.
+    # bazel2gn doesn't translate a `select()` here; GN's `tests` group in
+    # BUILD.gn leaves out the package on coverage builds instead.
+    # @bazel2gn:skip
+    build_only = select({
+        "//build/bazel/config/select/is_coverage:true": True,
+        "//conditions:default": False,
+    }),
+    package = ":realm_integration_tests",
+)
+
+ctf_fx_package(
+    name = "realm_integration_tests-ctf",
+    components = [
+        ":no_program",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    test_component_names = [
+        "realm_integration_test",
+        "realm_namespace_test",
+    ],
+    test_components = [
+        ":realm_integration_test",
+        ":realm_namespace_test",
+    ],
 )

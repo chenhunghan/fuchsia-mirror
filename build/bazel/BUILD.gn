@@ -73,8 +73,7 @@ group("tests") {
     "fuchsia_idk:tests",
     "rules/tests:bazel_tests",
     "scripts:tests",
-    "update-rustc-third-party:generate_crate_annotations_test($host_toolchain)",
-    "update-rustc-third-party:postprocess_crates_vendor_test($host_toolchain)",
+    "update-rustc-third-party:tests($host_toolchain)",
   ]
 }
 
@@ -263,6 +262,12 @@ generated_file("gn_build_variables_for_bazel") {
       type = "path"
       location = declaration
     },
+    {
+      name = "rust_bindgen_prefix"
+      value = rust_bindgen_prefix
+      type = "path"
+      location = declaration
+    },
   ]
 
   # LINT.ThenChange(//build/rust/config.gni)
@@ -431,6 +436,12 @@ generated_file("gn_build_variables_for_bazel") {
       type = "bool"
       location = declaration
     },
+    {
+      name = "rustc_version_string"
+      value = rustc_version_string
+      type = "string"
+      location = declaration
+    },
   ]
 
   # LINT.ThenChange(//build/rust/config.gni)
@@ -497,9 +508,15 @@ generated_file("gn_build_variables_for_bazel") {
 
   # LINT.ThenChange(//build/config/zircon/levels.gni:zx_assert_level)
 
-  # LINT.IfChange(clang_ml_inliner)
+  # LINT.IfChange(clang)
   declaration = "//build/config/clang/clang.gni"
   import(declaration)
+  _clang_toolchain_version = ""
+  if (clang_prefix == default_clang_prefix) {
+    _clang_version =
+        read_file("${clang_prefix}/../.versions/clang.cipd_version", "json")
+    _clang_toolchain_version = _clang_version.instance_id
+  }
   contents += [
     {
       name = "clang_ml_inliner"
@@ -507,9 +524,27 @@ generated_file("gn_build_variables_for_bazel") {
       type = "bool"
       location = declaration
     },
+    {
+      name = "clang_enable_error_reproducers"
+      value = clang_enable_error_reproducers
+      type = "bool"
+      location = declaration
+    },
+    {
+      name = "clang_embed_bitcode"
+      value = clang_embed_bitcode
+      type = "bool"
+      location = declaration
+    },
+    {
+      name = "clang_toolchain_version"
+      value = _clang_toolchain_version
+      type = "string"
+      location = declaration
+    },
   ]
 
-  # LINT.ThenChange(//build/config/clang/clang.gni:clang_ml_inliner)
+  # LINT.ThenChange(//build/config/clang/clang.gni:clang)
 
   # BEGIN sanitizer_default_options.gni
   # LINT.IfChange(sanitizer_default_options)
@@ -608,6 +643,132 @@ generated_file("gn_build_variables_for_bazel") {
   ]
 
   # LINT.ThenChange(//zircon/vdso/vdso.gni:exclude_testonly_syscalls)
+
+  # LINT.IfChange(enable_assembly_heapdump)
+  declaration = "//src/lib/assembly/platform_configuration/build/args.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "enable_assembly_heapdump"
+      value = enable_assembly_heapdump
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//src/lib/assembly/platform_configuration/build/args.gni)
+
+  # LINT.IfChange(deny_warnings)
+  declaration = "//build/config/deny_warnings.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "deny_warnings"
+      value = deny_warnings
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/deny_warnings.gni:deny_warnings)
+
+  # LINT.IfChange
+  declaration = "//build/config/enable_frame_pointers.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "enable_frame_pointers"
+      value = enable_frame_pointers
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/enable_frame_pointers.gni)
+
+  # LINT.IfChange
+  declaration = "//build/config/clang/call_graph_section.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "call_graph_section"
+      value = call_graph_section
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/clang/call_graph_section.gni)
+
+  # LINT.IfChange
+  declaration = "//build/config/clang/stack_clash_protection.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "stack_clash_protection"
+      value = stack_clash_protection
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/clang/stack_clash_protection.gni)
+
+  # LINT.IfChange
+  declaration = "//build/config/clang/time_trace.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "time_trace"
+      value = time_trace
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/clang/time_trace.gni)
+
+  # LINT.IfChange
+  declaration = "//build/toolchain/ccache.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "use_ccache"
+      value = use_ccache
+      type = "bool"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/toolchain/ccache.gni)
+
+  # LINT.IfChange
+  declaration = "//build/config/build_id.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "build_id_format"
+      value = build_id_format
+      type = "string"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/build_id.gni)
+
+  # LINT.IfChange(experimental_elf_page_size)
+  declaration = "//build/config/fuchsia/elf_page_size.gni"
+  import(declaration)
+  contents += [
+    {
+      name = "experimental_elf_page_size"
+      value = "${experimental_elf_page_size}"
+      type = "string"
+      location = declaration
+    },
+  ]
+
+  # LINT.ThenChange(//build/config/fuchsia/elf_page_size.gni:experimental_elf_page_size)
 }
 
 if (current_toolchain == default_toolchain) {

@@ -16,7 +16,6 @@ group("tests") {
   deps = [
     ":bazel_tests",
     "benchmarks:tests",
-    "bin:tests",
     "blackout:tests",
     "blobfs:tests",
     "conformance:tests",
@@ -65,4 +64,10 @@ group("host_tools") {
 bazel_test_suite("bazel_tests") {
   host_tests = [ "//src/storage:host_tests" ]
   target_tests = [ "//src/storage:target_tests" ]
+}
+
+# Storage Bazel tests that require Fxfs (cannot run on minfs).
+# Included in //bundles/buildbot/target_tests.gni (fxfs_required_target_tests).
+bazel_test_suite("bazel_fxfs_required_tests") {
+  target_tests = [ "//src/storage:fxfs_required_target_tests" ]
 }

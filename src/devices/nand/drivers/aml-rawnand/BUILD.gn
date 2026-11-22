@@ -33,7 +33,6 @@ driver_bind_rules("aml-rawnand-bind") {
 
 fuchsia_driver_component("aml-rawnand") {
   dml_label = ":aml-rawnand-dml"
-  info = "meta/aml-rawnand-info.json"
   component_name = "aml-rawnand"
   deps = [ ":aml-rawnand-driver" ]
 }

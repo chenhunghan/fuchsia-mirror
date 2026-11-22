@@ -160,7 +160,7 @@ graph.
   configurations.)
 * You are ephemerally building `tests` as part of the `universe` package set.
 
-### Package deployment options
+### Package deployment options {#package-deployment-options}
 
 The `--with` option has three variants related to how packages are deployed to a
 Fuchsia device: `--with-base`, `--with-cache`, and `--with` (implies
@@ -301,9 +301,9 @@ Note that the behavior of `fx build` remains unchanged.
 ### Iterating on cache packages {#iterate-cache-packages}
 
 Running `fx build` triggers a full system assembly in addition to compiling and
-publishing [cache packages](#package_deployment_options). If your workflow requires
-only iterating over rebuilding cache packages, running `fx build` can be excessive
-and cause slowdowns.
+publishing [cache packages](#package-deployment-options). If your workflow
+requires only iterating over rebuilding cache packages, running `fx build` can
+be excessive and cause slowdowns.
 
 For rebuilding cache packages, you can achieve faster build speed by replacing
 `fx build` with `fx publish cache`. Below is what it might look like in a typical
@@ -692,7 +692,7 @@ fx sync-to reset
 
 For more options, see the [`fx sync-to` reference][fx-sync-to-ref] page.
 
-### Defining persistent local build arguments
+### Defining persistent local build arguments {#defining-persistent-local-build-arguments}
 
 If you want to define build arguments that will be included whenever running
 `fx set`, add them to `$FUCHSIA_DIR/local/args.gn`. They will be appended to

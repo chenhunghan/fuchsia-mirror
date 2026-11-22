@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# This source set contains a broad variety of test-related classes.
+#
+# It intentionally includes every source_set defined in this file, to include
+# them in whole-tree compiles even if they have are no in-tree consumers.
+fx_cc_library(
+    name = "test",
+    testonly = True,
+    visibility = ["//src/media/audio/lib:__pkg__"],
+    deps = [
+        ":comparators",
+        ":constants",
+        ":test_fixture",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "constants",
+    testonly = True,
+    hdrs = ["constants.h"],
+    visibility = [
+        "//src/media/audio/audio_core/mixer:__pkg__",
+        "//src/media/audio/audio_core/testing/integration:__pkg__",
+    ],
+    deps = ["//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp"],
+)
+
+fx_cc_library(
+    name = "comparators",
+    testonly = True,
+    srcs = ["comparators.cc"],
+    hdrs = ["comparators.h"],
+    visibility = [
+        "//src/media/audio/audio_core/test/api:__pkg__",
+        "//src/media/audio/audio_core/testing/integration:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/media/audio/lib/analysis",
+        "//src/media/audio/lib/format",
+        "//zircon/system/ulib/fzl",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "test_fixture",
+    testonly = True,
+    srcs = ["test_fixture.cc"],
+    hdrs = ["test_fixture.h"],
+    visibility = [
+        "//src/media/audio/audio_core/test/hardware:__pkg__",
+        "//src/media/audio/audio_core/testing/integration:__pkg__",
+        "//src/media/audio/drivers/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/testing/loop_fixture",
+    ],
+    alwayslink = True,
+)

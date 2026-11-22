@@ -90,7 +90,7 @@ For more information, see the following sections:
 You can apply overrides by editing your `args.gn` file or using
 [`fx args`][fx-args-ref]. The following GN arguments are available:
 
-*   [`product_assembly_overrides_label`](#product-assembly-overrides-labe):
+*   [`product_assembly_overrides_label`](#product-assembly-overrides-label):
     Specifies a single override target for the main product assembly.
 *   [`product_assembly_overrides_contents`](#product-assembly-overrides-contents):
     Defines the overrides inline within `args.gn` for the main product assembly.
@@ -372,7 +372,7 @@ To append to a list instead of replacing it, see
 [Appending to lists with
 `__append_to_<key>`](#appending-to-lists-with-append-to-key).
 
-### Compiled packages and components
+### Compiled packages and components {:#compiled-packages-and-components}
 
 You can add developer-specified contents and CML shards to packages and
 components that are compiled by assembly.

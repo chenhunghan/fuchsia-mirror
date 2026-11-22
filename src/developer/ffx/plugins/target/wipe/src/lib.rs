@@ -12,6 +12,8 @@ use target_holders::moniker;
 use zx_status::Status;
 
 #[derive(FfxTool)]
+// Always targets a device; the proxy is deferred only to prompt before connecting.
+#[target(Required)]
 pub struct WipeTool {
     #[command]
     cmd: WipeCommand,

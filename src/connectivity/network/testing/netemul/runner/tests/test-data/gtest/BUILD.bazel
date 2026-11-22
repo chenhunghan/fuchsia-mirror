@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "meta/test-driver.cml",
+        "meta/test-root.cml",
+    ],
+    visibility = ["//src/connectivity/network/testing/netemul/runner/tests/test-data:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "gtest",
+    srcs = ["test.cc"],
+    visibility = ["//src/connectivity/network/testing/netemul/runner/tests/test-data:__pkg__"],
+    deps = ["//src/lib/fxl/test:gtest_main"],
+)

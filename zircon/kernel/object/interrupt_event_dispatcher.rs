@@ -5,8 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 use core::ffi::c_void;
-use core::ptr::NonNull;
 use debug::dprintf;
+use fbl::RefPtr;
 use zx_status::Status;
 use zx_types::{
     ZX_INTERRUPT_MODE_DEFAULT, ZX_INTERRUPT_MODE_EDGE_HIGH, ZX_INTERRUPT_MODE_EDGE_LOW,
@@ -18,7 +18,6 @@ use super::handle::KernelHandle;
 use super::interrupt_dispatcher::{
     INTERRUPT_ALLOW_ACK_WITHOUT_PORT_FOR_TEST, INTERRUPT_MASK_POSTWAIT, INTERRUPT_TIMESTAMP_MONO,
     INTERRUPT_UNMASK_PREWAIT, INTERRUPT_WAKE_VECTOR, InterruptDispatcher, InterruptKind,
-    WakeVectorDiagnostics,
 };
 use crate::counters::define_kcounter;
 #[cfg(target_arch = "aarch64")]
@@ -28,6 +27,7 @@ use crate::dev_interrupt::{
     get_interrupt_config, is_valid_interrupt, mask_interrupt, register_int_handler,
     remap_interrupt, unmask_interrupt,
 };
+use crate::wake_vector::Diagnostics;
 
 define_kcounter!(DISPATCHER_INTERRUPT_EVENT_CREATE_COUNT, "dispatcher.interrupt_event.create", Sum);
 define_kcounter!(
@@ -37,18 +37,13 @@ define_kcounter!(
 );
 
 /// Hardware IRQ interrupt dispatcher variant.
-#[repr(C)]
 pub struct InterruptEventDispatcher {
-    disp: NonNull<InterruptDispatcher>,
     vector: u32,
 }
 
 impl Drop for InterruptEventDispatcher {
     fn drop(&mut self) {
         DISPATCHER_INTERRUPT_EVENT_DESTROY_COUNT.add(1);
-        // SAFETY: `self.disp` points to the enclosing `InterruptDispatcher`, which is valid
-        // during `~InterruptDispatcher`.
-        unsafe { self.disp.as_ref() }.destroy_wake_event();
     }
 }
 
@@ -135,8 +130,9 @@ impl InterruptEventDispatcher {
         // Do not create a KernelHandle until all initialization has succeeded;
         // if an interrupt already exists on |vector| our on_zero_handles() would
         // tear down the existing interrupt when creation fails.
-        let disp = InterruptDispatcher::create_raw(interrupt_flags, options, |disp| {
-            Self::new(disp, vector);
+        let disp = InterruptDispatcher::create_raw(interrupt_flags, options, || {
+            DISPATCHER_INTERRUPT_EVENT_CREATE_COUNT.add(1);
+            InterruptKind::Event(Self { vector })
         })
         .ok_or(Status::NO_MEMORY)?;
 
@@ -148,7 +144,9 @@ impl InterruptEventDispatcher {
         let InterruptKind::Event(ev) = disp.state().kind() else {
             unreachable!();
         };
-        ev.register_interrupt_handler()?;
+        // SAFETY: `disp` remains alive until `on_zero_handles` / `destroy` calls
+        // `unregister_interrupt_handler` (and on error here, no handler was registered).
+        unsafe { ev.register_interrupt_handler(RefPtr::as_ptr(&disp)) }?;
 
         // TODO(https://fxbug.dev/348668110): Revisit this logging. Still needed?
         if (options & ZX_INTERRUPT_WAKE_VECTOR) != 0 {
@@ -169,27 +167,8 @@ impl InterruptEventDispatcher {
         Ok((handle, rights))
     }
 
-    // This override of WakeVector::GetDiagnostics (and the destructor of this class) is marked
-    // final to prevent further overrides. Because this method cannot be overridden further, it is
-    // safe for this class to initialize / destroy InterruptDispatcher::wake_event in the
-    // constructor / destructor. See lib/wake-vector.h for more details.
-    /// Populates wake vector diagnostics for this hardware interrupt.
-    pub fn get_diagnostics(&self, diagnostics_out: &mut WakeVectorDiagnostics) {
-        // SAFETY: `self.disp` points to the valid enclosing `InterruptDispatcher`.
-        let disp = unsafe { self.disp.as_ref() };
-        diagnostics_out.enabled = disp.is_wake_vector();
-        diagnostics_out.koid = disp.get_koid();
+    pub(super) fn fill_diagnostics(&self, diagnostics_out: &mut Diagnostics) {
         diagnostics_out.print_extra(format_args!("IRQ {}", self.vector));
-    }
-
-    #[allow(clippy::new_ret_no_self)]
-    fn new(disp: &InterruptDispatcher, vector: u32) {
-        // SAFETY: Called once during `InterruptDispatcher::create_raw` construction.
-        unsafe {
-            disp.init_kind(InterruptKind::Event(Self { disp: NonNull::from(disp), vector }));
-        }
-        DISPATCHER_INTERRUPT_EVENT_CREATE_COUNT.add(1);
-        disp.initialize_wake_event();
     }
 
     /// Masks the hardware interrupt vector.
@@ -211,13 +190,22 @@ impl InterruptEventDispatcher {
         }
     }
 
-    fn register_interrupt_handler(&self) -> Result<(), Status> {
-        // SAFETY: `self.disp` remains valid until `unregister_interrupt_handler` is called.
+    /// Registers `disp` as the hardware interrupt handler for `self.vector`.
+    ///
+    /// # Safety
+    ///
+    /// `disp` must point to a valid `InterruptDispatcher` that outlives any registration until
+    /// `unregister_interrupt_handler` is called.
+    unsafe fn register_interrupt_handler(
+        &self,
+        disp: *const InterruptDispatcher,
+    ) -> Result<(), Status> {
+        // SAFETY: `disp` remains valid until `unregister_interrupt_handler` is called.
         unsafe {
             register_int_handler(
                 self.vector,
                 InterruptHandler {
-                    cookie: self.disp.as_ptr().cast(),
+                    cookie: disp.cast_mut().cast(),
                     r#fn: Some({
                         extern "C" fn handler(cookie: *mut c_void) {
                             // SAFETY: `cookie` is a valid `*const InterruptDispatcher`.

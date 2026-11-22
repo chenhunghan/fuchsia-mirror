@@ -30,7 +30,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecFailCodec(const char *format, ...) override;
 
-  void onCoreCodecFailStream(fuchsia::media::StreamError error) override;
+  void onCoreCodecFailStream(fuchsia_media::StreamError error) override;
 
   void onCoreCodecResetStreamAfterCurrentFrame() override;
 

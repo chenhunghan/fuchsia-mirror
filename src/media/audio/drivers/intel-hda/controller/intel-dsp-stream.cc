@@ -33,7 +33,7 @@ void IntelDspStream::CreateRingBuffer(DaiChannel* channel, audio_fidl::wire::Dai
                                       ::fidl::ServerEnd<audio_fidl::RingBuffer> ring_buffer,
                                       DaiChannel::CreateRingBufferCompleter::Sync& completer) {
   // The DSP needs to coordinate with ring buffer commands. Set up an additional
-  // LLCPP server to intercept messages on the ring buffer channel.
+  // FIDL wire server to intercept messages on the ring buffer channel.
 
   auto endpoints = fidl::CreateEndpoints<audio_fidl::RingBuffer>();
   if (!endpoints.is_ok()) {

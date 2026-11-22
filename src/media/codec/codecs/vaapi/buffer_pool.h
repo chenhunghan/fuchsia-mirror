@@ -5,7 +5,6 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_VAAPI_BUFFER_POOL_H_
 #define SRC_MEDIA_CODEC_CODECS_VAAPI_BUFFER_POOL_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_buffer.h>
 
 #include <map>

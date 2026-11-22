@@ -23,8 +23,8 @@ use starnix_logging::{log_error, log_info, log_trace, track_stub};
 use starnix_syscalls::SyscallResult;
 use starnix_types::time::timeval_from_duration;
 use starnix_uapi::auth::{
-    CAP_SETGID, CAP_SETPCAP, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_RESOURCE,
-    CAP_SYS_TTY_CONFIG, Capabilities, Credentials, PTRACE_MODE_READ_REALCREDS, SecureBits,
+    CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN, CAP_SYS_NICE, CAP_SYS_RESOURCE, CAP_SYS_TTY_CONFIG,
+    Capabilities, Credentials, PTRACE_MODE_READ_REALCREDS,
 };
 use starnix_uapi::errors::{ENAMETOOLONG, Errno};
 use starnix_uapi::kcmp::KcmpResource;
@@ -40,15 +40,13 @@ use starnix_uapi::{
     __user_cap_data_struct, __user_cap_header_struct, _LINUX_CAPABILITY_VERSION_1,
     _LINUX_CAPABILITY_VERSION_2, _LINUX_CAPABILITY_VERSION_3, AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW,
     BPF_MAXINSNS, CLONE_ARGS_SIZE_VER0, CLONE_ARGS_SIZE_VER1, CLONE_ARGS_SIZE_VER2, CLONE_FILES,
-    CLONE_FS, CLONE_NEWNS, CLONE_NEWUTS, CLONE_SETTLS, CLONE_VFORK, NGROUPS_MAX, PR_CAP_AMBIENT,
-    PR_CAP_AMBIENT_CLEAR_ALL, PR_CAP_AMBIENT_IS_SET, PR_CAP_AMBIENT_LOWER, PR_CAP_AMBIENT_RAISE,
-    PR_CAPBSET_DROP, PR_CAPBSET_READ, PR_GET_CHILD_SUBREAPER, PR_GET_DUMPABLE, PR_GET_KEEPCAPS,
-    PR_GET_NAME, PR_GET_NO_NEW_PRIVS, PR_GET_PDEATHSIG, PR_GET_SECCOMP, PR_GET_SECUREBITS,
-    PR_GET_TIMERSLACK, PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE, PR_SET_KEEPCAPS, PR_SET_NAME,
-    PR_SET_NO_NEW_PRIVS, PR_SET_PDEATHSIG, PR_SET_PTRACER, PR_SET_SECCOMP, PR_SET_SECUREBITS,
-    PR_SET_TIMERSLACK, PR_SET_VMA, PR_SET_VMA_ANON_NAME, PRIO_PROCESS, PTRACE_ATTACH, PTRACE_SEIZE,
-    PTRACE_TRACEME, RUSAGE_CHILDREN, SCHED_ATTR_SIZE_VER0, SCHED_ATTR_SIZE_VER1,
-    SCHED_FLAG_KEEP_ALL, SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_KEEP_POLICY, SCHED_FLAG_RESET_ON_FORK,
+    CLONE_FS, CLONE_NEWNS, CLONE_NEWUTS, CLONE_SETTLS, CLONE_VFORK, NGROUPS_MAX,
+    PR_GET_CHILD_SUBREAPER, PR_GET_DUMPABLE, PR_GET_NAME, PR_GET_NO_NEW_PRIVS, PR_GET_PDEATHSIG,
+    PR_GET_SECCOMP, PR_GET_TIMERSLACK, PR_SET_CHILD_SUBREAPER, PR_SET_DUMPABLE, PR_SET_NAME,
+    PR_SET_NO_NEW_PRIVS, PR_SET_PDEATHSIG, PR_SET_PTRACER, PR_SET_SECCOMP, PR_SET_TIMERSLACK,
+    PR_SET_VMA, PR_SET_VMA_ANON_NAME, PRIO_PROCESS, PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_TRACEME,
+    RUSAGE_CHILDREN, SCHED_ATTR_SIZE_VER0, SCHED_ATTR_SIZE_VER1, SCHED_FLAG_KEEP_ALL,
+    SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_KEEP_POLICY, SCHED_FLAG_RESET_ON_FORK,
     SCHED_FLAG_UTIL_CLAMP, SCHED_FLAG_UTIL_CLAMP_MAX, SCHED_FLAG_UTIL_CLAMP_MIN,
     SCHED_RESET_ON_FORK, SECCOMP_FILTER_FLAG_LOG, SECCOMP_FILTER_FLAG_NEW_LISTENER,
     SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
@@ -130,8 +128,9 @@ pub fn do_clone(current_task: &mut CurrentTask, args: &clone_args) -> Result<pid
     current_task.ptrace().on_event(trace_kind, tid as u64);
 
     if args.flags & (CLONE_VFORK as u64) != 0 {
-        current_task.wait_for_execve(task_ref)?;
-        current_task.ptrace().on_event(PtraceOptions::TRACEVFORKDONE, tid as u64);
+        if current_task.wait_for_execve(task_ref).is_ok() {
+            current_task.ptrace().on_event(PtraceOptions::TRACEVFORKDONE, tid as u64);
+        }
     }
 
     Ok(tid)
@@ -420,7 +419,7 @@ pub fn sys_setuid(current_task: &CurrentTask, uid: uid_t) -> Result<(), Errno> {
         creds.saved_uid = uid;
     }
 
-    creds.update_capabilities_on_uid_change(&prev);
+    security::task_fix_setuid(current_task, &mut creds, &prev, security::SetuidFlags::Id)?;
     std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
@@ -459,9 +458,12 @@ pub fn sys_setfsuid(current_task: &CurrentTask, fsuid: uid_t) -> Result<uid_t, E
     if fsuid != u32::MAX && fsuid != prev_fsuid && new_uid_allowed(&current_task, fsuid) {
         let mut creds = Credentials::clone(&prev);
         creds.fsuid = fsuid;
-        creds.update_capabilities_on_fsuid_change(&prev);
-        std::mem::drop(prev);
-        current_task.set_creds(creds);
+        if security::task_fix_setuid(current_task, &mut creds, &prev, security::SetuidFlags::Fs)
+            .is_ok()
+        {
+            std::mem::drop(prev);
+            current_task.set_creds(creds);
+        }
     }
 
     Ok(prev_fsuid)
@@ -549,7 +551,7 @@ pub fn sys_setreuid(current_task: &CurrentTask, ruid: uid_t, euid: uid_t) -> Res
     }
     creds.fsuid = creds.euid;
 
-    creds.update_capabilities_on_uid_change(&prev);
+    security::task_fix_setuid(current_task, &mut creds, &prev, security::SetuidFlags::Re)?;
     std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
@@ -629,7 +631,7 @@ pub fn sys_setresuid(
         creds.saved_uid = suid;
     }
     creds.fsuid = creds.euid;
-    creds.update_capabilities_on_uid_change(&prev);
+    security::task_fix_setuid(current_task, &mut creds, &prev, security::SetuidFlags::Res)?;
     std::mem::drop(prev);
     current_task.set_creds(creds);
     Ok(())
@@ -1130,6 +1132,10 @@ pub fn sys_prctl(
     arg4: u64,
     arg5: u64,
 ) -> Result<SyscallResult, Errno> {
+    if let Some(result) = security::task_prctl(current_task, option, arg2, arg3, arg4, arg5)? {
+        return Ok(result);
+    }
+
     match option {
         PR_SET_VMA => {
             if arg2 != PR_SET_VMA_ANON_NAME as u64 {
@@ -1230,23 +1236,6 @@ pub fn sys_prctl(
             current_task.thread_group().write().allowed_ptracers = allowed_ptracers;
             Ok(().into())
         }
-        PR_GET_KEEPCAPS => {
-            Ok(current_task.current_creds().securebits.contains(SecureBits::KEEP_CAPS).into())
-        }
-        PR_SET_KEEPCAPS => {
-            if arg2 != 0 && arg2 != 1 {
-                return error!(EINVAL);
-            }
-            // Per PR_SET_KEEPCAPS(2const):
-            //   EPERM: The caller's SECBIT_KEEP_CAPS_LOCKED flag is set.
-            if current_task.current_creds().securebits.contains(SecureBits::KEEP_CAPS_LOCKED) {
-                return error!(EPERM);
-            }
-            let mut creds = Credentials::clone(&current_task.current_creds());
-            creds.securebits.set(SecureBits::KEEP_CAPS, arg2 != 0);
-            current_task.set_creds(creds);
-            Ok(().into())
-        }
         PR_SET_NO_NEW_PRIVS => {
             // If any args are set other than arg2 to 1, this should return einval
             if arg2 != 1 || arg3 != 0 || arg4 != 0 || arg5 != 0 {
@@ -1288,78 +1277,6 @@ pub fn sys_prctl(
         PR_SET_CHILD_SUBREAPER => {
             current_task.thread_group().write().is_child_subreaper = arg2 != 0;
             Ok(().into())
-        }
-        PR_GET_SECUREBITS => Ok(current_task.current_creds().securebits.bits().into()),
-        PR_SET_SECUREBITS => {
-            security::check_task_capable(current_task, CAP_SETPCAP)?;
-
-            // Observed: Linux returns EPERM (not EINVAL) when unrecognized bits are set in flags.
-            let flags = u32::try_from(arg2).map_err(|_| errno!(EPERM))?;
-            let securebits = SecureBits::from_bits(flags).ok_or_else(|| errno!(EPERM))?;
-
-            let mut creds = Credentials::clone(&current_task.current_creds());
-            creds.set_securebits(securebits)?;
-            current_task.set_creds(creds);
-            Ok(().into())
-        }
-        PR_CAPBSET_READ => {
-            let cap = Capabilities::try_from(arg2)?;
-            Ok(current_task.current_creds().cap_bounding.contains(cap).into())
-        }
-        PR_CAPBSET_DROP => {
-            let mut creds = Credentials::clone(&current_task.current_creds());
-            security::check_task_capable(current_task, CAP_SETPCAP)?;
-
-            creds.cap_bounding.remove(Capabilities::try_from(arg2)?);
-            current_task.set_creds(creds);
-            Ok(().into())
-        }
-        PR_CAP_AMBIENT => {
-            let operation = arg2 as u32;
-            let capability_arg = Capabilities::try_from(arg3)?;
-            if arg4 != 0 || arg5 != 0 {
-                return error!(EINVAL);
-            }
-
-            // TODO(security): We don't currently validate capabilities, but this should return an
-            // error if the capability_arg is invalid.
-            match operation {
-                PR_CAP_AMBIENT_RAISE => {
-                    let mut creds = Credentials::clone(&current_task.current_creds());
-                    if !(creds.cap_permitted.contains(capability_arg)
-                        && creds.cap_inheritable.contains(capability_arg))
-                    {
-                        return error!(EPERM);
-                    }
-                    if creds.securebits.contains(SecureBits::NO_CAP_AMBIENT_RAISE) {
-                        return error!(EPERM);
-                    }
-
-                    creds.cap_ambient.insert(capability_arg);
-                    current_task.set_creds(creds);
-                    Ok(().into())
-                }
-                PR_CAP_AMBIENT_LOWER => {
-                    let mut creds = Credentials::clone(&current_task.current_creds());
-                    creds.cap_ambient.remove(capability_arg);
-                    current_task.set_creds(creds);
-                    Ok(().into())
-                }
-                PR_CAP_AMBIENT_IS_SET => {
-                    Ok(current_task.current_creds().cap_ambient.contains(capability_arg).into())
-                }
-                PR_CAP_AMBIENT_CLEAR_ALL => {
-                    if arg3 != 0 {
-                        return error!(EINVAL);
-                    }
-
-                    let mut creds = Credentials::clone(&current_task.current_creds());
-                    creds.cap_ambient = Capabilities::empty();
-                    current_task.set_creds(creds);
-                    Ok(().into())
-                }
-                _ => error!(EINVAL),
-            }
         }
         PR_SET_TIMERSLACK => {
             current_task.write().set_timerslack_ns(arg2);
@@ -1915,6 +1832,19 @@ pub fn sys_unshare(current_task: &CurrentTask, flags: u32) -> Result<(), Errno> 
         return error!(EINVAL);
     }
 
+    // Implied flags (matching Linux's ksys_unshare in kernel/fork.c):
+    // CLONE_NEWNS implies CLONE_FS so that unsharing the mount namespace also unshares the
+    // filesystem context (cwd, root, umask).
+    let flags = if (flags & CLONE_NEWNS) != 0 { flags | CLONE_FS } else { flags };
+
+    // Validate capabilities before mutating any task state so that a permission error fails
+    // atomically without partially unsharing files or fs. This remains atomic only because none of
+    // the unshare steps below can fail; if a fallible step is added later, restructure this to
+    // stage new state before committing it.
+    if (flags & (CLONE_NEWNS | CLONE_NEWUTS)) != 0 {
+        security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
+    }
+
     if (flags & CLONE_FILES) != 0 {
         current_task.running_state().unshare_files(current_task);
     }
@@ -1924,12 +1854,10 @@ pub fn sys_unshare(current_task: &CurrentTask, flags: u32) -> Result<(), Errno> 
     }
 
     if (flags & CLONE_NEWNS) != 0 {
-        security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
         current_task.fs().unshare_namespace();
     }
 
     if (flags & CLONE_NEWUTS) != 0 {
-        security::check_task_capable(current_task, CAP_SYS_ADMIN)?;
         // Fork the UTS namespace.
         let mut task_state = current_task.write();
         let new_uts_ns = task_state.uts_ns.read().clone();
@@ -2216,7 +2144,7 @@ mod tests {
     use starnix_sync::Mutex;
     use starnix_syscalls::SUCCESS;
     use starnix_task_command::TaskCommand;
-    use starnix_uapi::auth::{CAP_DAC_OVERRIDE, Credentials};
+    use starnix_uapi::auth::{CAP_DAC_OVERRIDE, Credentials, SecureBits};
     use starnix_uapi::signals::SIGCHLD;
     use starnix_uapi::uapi::{kcmp_type_KCMP_SYSVSEM, kcmp_type_KCMP_TYPES, kcmp_type_KCMP_VM};
     use starnix_uapi::{SCHED_BATCH, SCHED_FIFO, SCHED_FLAG_KEEP_ALL, SCHED_NORMAL};
@@ -3420,18 +3348,8 @@ mod tests {
         });
 
         let mut builder = RoleOverrides::new();
-        builder.add_with_filters(
-            ".*",
-            "^RenderThread$",
-            None,
-            None,
-            None,
-            None,
-            Some((1, 1024)),
-            None,
-            "render_thread_boosted",
-        );
-        builder.add(".*", "^RenderThread$", None, "render_thread_default");
+        builder.add("render_thread_boosted").thread("^RenderThread$").uclamp_min((1, 1024));
+        builder.add("render_thread_default").thread("^RenderThread$");
         let overrides = builder.build().unwrap();
         let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
 
@@ -3566,5 +3484,61 @@ mod tests {
         .await;
         let _ = stop_tx.send(());
         server_thread.join().unwrap();
+    }
+
+    #[::fuchsia::test]
+    async fn test_unshare_newns_implies_fs() {
+        use starnix_uapi::file_mode::FileMode;
+
+        spawn_kernel_and_run(async |current_task| {
+            let child_task = current_task.clone_task_for_test(CLONE_FS as u64, Some(SIGCHLD));
+            assert!(Arc::ptr_eq(&current_task.fs(), &child_task.fs()));
+            assert!(current_task.has_shared_fs());
+            assert!(child_task.has_shared_fs());
+
+            sys_unshare(&child_task, CLONE_NEWNS).expect("sys_unshare(CLONE_NEWNS)");
+            assert!(!Arc::ptr_eq(&current_task.fs(), &child_task.fs()));
+            assert!(!current_task.has_shared_fs());
+            assert!(!child_task.has_shared_fs());
+            assert_ne!(current_task.fs().namespace().id, child_task.fs().namespace().id);
+
+            current_task.fs().set_umask(FileMode::from_bits(0o022));
+            child_task.fs().set_umask(FileMode::from_bits(0o077));
+            assert_eq!(
+                current_task.fs().set_umask(FileMode::from_bits(0o022)),
+                FileMode::from_bits(0o022)
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_unshare_fails_atomically() {
+        spawn_kernel_and_run(async |current_task| {
+            let unpriv_child =
+                current_task.clone_task_for_test((CLONE_FS | CLONE_FILES) as u64, Some(SIGCHLD));
+            assert!(Arc::ptr_eq(&current_task.fs(), &unpriv_child.fs()));
+            assert_eq!(current_task.files().id(), unpriv_child.files().id());
+
+            assert_eq!(sys_unshare(&unpriv_child, u32::MAX), error!(EINVAL));
+            assert!(Arc::ptr_eq(&current_task.fs(), &unpriv_child.fs()));
+            assert_eq!(current_task.files().id(), unpriv_child.files().id());
+
+            unpriv_child.set_creds(Credentials::with_ids(1, 1));
+            assert_eq!(
+                sys_unshare(&unpriv_child, CLONE_NEWNS | CLONE_FS | CLONE_FILES),
+                error!(EPERM)
+            );
+            assert!(Arc::ptr_eq(&current_task.fs(), &unpriv_child.fs()));
+            assert_eq!(current_task.files().id(), unpriv_child.files().id());
+
+            assert_eq!(
+                sys_unshare(&unpriv_child, CLONE_NEWUTS | CLONE_FS | CLONE_FILES),
+                error!(EPERM)
+            );
+            assert!(Arc::ptr_eq(&current_task.fs(), &unpriv_child.fs()));
+            assert_eq!(current_task.files().id(), unpriv_child.files().id());
+        })
+        .await;
     }
 }

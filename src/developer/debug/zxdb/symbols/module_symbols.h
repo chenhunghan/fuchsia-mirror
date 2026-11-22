@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "lib/fit/function.h"
+#include "src/developer/debug/zxdb/symbols/dwarf_debug_names.h"
 #include "src/developer/debug/zxdb/symbols/index_node.h"
 #include "src/developer/debug/zxdb/symbols/location.h"
 #include "src/developer/debug/zxdb/symbols/module_symbol_status.h"
@@ -20,6 +21,10 @@
 #include "src/lib/fxl/macros.h"
 #include "src/lib/fxl/memory/ref_counted.h"
 #include "src/lib/fxl/memory/weak_ptr.h"
+
+namespace llvm {
+class DWARFDebugNames;
+}  // namespace llvm
 
 namespace zxdb {
 
@@ -151,6 +156,21 @@ class ModuleSymbols : public fxl::RefCountedThreadSafe<ModuleSymbols> {
   // Return whether this module has been given the opportunity to include symbols from the binary
   // itself, such as PLT entries.
   virtual bool HasBinary() const = 0;
+
+  // Returns true if this module contains a DWARF v5 .debug_names accelerator table.
+  virtual bool HasDebugNames() const { return false; }
+
+  // Returns the DWARF v5 .debug_names accelerator table for this module, or nullptr if absent.
+  virtual const llvm::DWARFDebugNames* GetDebugNames() const { return nullptr; }
+
+  // Returns matching entries from the DWARF v5 .debug_names accelerator table, or an empty vector
+  // if absent.
+  virtual std::vector<DebugNamesEntry> FindDebugNamesEntries(std::string_view name) const {
+    return {};
+  }
+  virtual std::vector<DebugNamesEntry> FindDebugNamesPrefixEntries(std::string_view prefix) const {
+    return {};
+  }
 
   // Returns the 64-bit value from the .debug_addr section.
   //

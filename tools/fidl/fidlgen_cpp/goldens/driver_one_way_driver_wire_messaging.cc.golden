@@ -132,7 +132,7 @@ fdf::WireServer<::test_driveroneway::OneWay>::Handler fdf::WireServer<::test_dri
 
 ::fidl::internal::TransactionalRequest<::test_driveroneway::OneWay::Send>::TransactionalRequest(const ::test_driveroneway::wire::Payload& payload)
     : body(::test_driveroneway::wire::OneWaySendRequest{payload}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_driveroneway::kOneWay_Send_Ordinal, ::test_driveroneway::kOneWay_Send_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_driveroneway::kOneWay_Send_Ordinal, ::test_driveroneway::kOneWay_Send_DynamicFlags);
 }
 
 template <bool IsRecursive>

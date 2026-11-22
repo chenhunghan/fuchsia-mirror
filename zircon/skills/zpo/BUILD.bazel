@@ -14,32 +14,60 @@ load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 package(default_applicable_licenses = ["//:license"])
 
 _LIB_SRCS = [
+    "src/agent.rs",
+    "src/analysis.rs",
+    "src/attribution.rs",
+    "src/checkout.rs",
+    "src/cpu_profile.rs",
+    "src/derive.rs",
+    "src/device.rs",
+    "src/extensions.rs",
     "src/lib.rs",
+    "src/llm.rs",
     "src/model.rs",
     "src/proc.rs",
+    "src/profiles_file.rs",
+    "src/report.rs",
+    "src/report_html.rs",
+    "src/roles.rs",
+    "src/runner.rs",
+    "src/server.rs",
+    "src/stats.rs",
+    "src/summary.rs",
+    "src/tasks.rs",
+    "src/topology.rs",
     "src/tp/client.rs",
     "src/tp/mod.rs",
     "src/tp/queries.rs",
     "src/tp/session.rs",
+    "src/trace_context.rs",
+    "src/trace_db.rs",
+    "src/ui_daemon.rs",
+    "src/verdict.rs",
 ]
 
 _LIB_DEPS = [
     "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:chrono",
     "//third_party/rust_crates/vendor:glob",
     "//third_party/rust_crates/vendor:indexmap",
     "//third_party/rust_crates/vendor:regex-lite",
+    "//third_party/rust_crates/vendor:serde",
     "//third_party/rust_crates/vendor:serde_json",
     "//third_party/rust_crates/vendor:sha2",
-]
-
-_TEST_DEPS = [
     "//third_party/rust_crates/vendor:tempfile",
 ]
+
+_TEST_DEPS = []
 
 # zpo's logic, shared by the binary and the tests.
 rustc_library(
     name = "lib",
     srcs = _LIB_SRCS,
+    compile_data = [
+        "ui/index.html",
+        "ui/sw.js",
+    ],
     crate_name = "zpo",
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
@@ -54,7 +82,9 @@ rustc_binary_host_tool(
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     deps = [
         ":lib",
+        "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:serde_json",
     ],
 )
 
@@ -73,8 +103,10 @@ cipd_prebuilt_file(
     path = "//prebuilt/third_party/perfetto/trace_processor_shell/%s/trace_processor_shell" % build_config.host_tag,
 )
 
+# The rule and its output need different names, or Bazel warns that
+# zpo_trace_processor_shell is both a rule and a file.
 copy_file(
-    name = "zpo_trace_processor_shell",
+    name = "copy_zpo_trace_processor_shell",
     src = ":trace_processor_shell",
     out = "zpo_trace_processor_shell",
     is_executable = True,
@@ -84,8 +116,8 @@ copy_file(
 filegroup(
     name = "zpo_with_trace_processor",
     srcs = [
+        ":copy_zpo_trace_processor_shell",
         ":zpo",
-        ":zpo_trace_processor_shell",
     ],
 )
 
@@ -103,6 +135,7 @@ host_test_data_files(
 host_rustc_test(
     name = "e2e_test",
     srcs = [
+        "tests/core_tests.rs",
         "tests/e2e.rs",
         "tests/fxt_writer.rs",
     ],
@@ -111,6 +144,9 @@ host_rustc_test(
     test_data = [":e2e_test_data"],
     deps = [
         ":lib",
+        "//third_party/rust_crates/vendor:indexmap",
+        "//third_party/rust_crates/vendor:regex-lite",
+        "//third_party/rust_crates/vendor:serde_json",
         "//third_party/rust_crates/vendor:tempfile",
     ],
 )

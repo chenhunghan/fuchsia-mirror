@@ -2,9 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
-#include <fuchsia/media/cpp/fidl.h>
-#include <lib/fidl/cpp/clone.h>
 #include <lib/media/codec_impl/codec_impl.h>
 #include <lib/media/codec_impl/codec_port.h>
 #include <lib/media/codec_impl/decryptor_adapter.h>
@@ -20,8 +21,6 @@
 #include <safemath/safe_math.h>
 
 namespace {
-
-constexpr uint64_t kInputBufferConstraintsVersionOrdinal = 1;
 
 constexpr uint32_t kInputMinBufferCountForCamping = 1;
 constexpr uint32_t kInputMinBufferCountForDedicatedSlack = 2;
@@ -68,7 +67,7 @@ bool DecryptorAdapter::IsCoreCodecHwBased(CodecPort port) { return false; }
 bool DecryptorAdapter::IsSupportsMidStreamOutputConstraintsChange() { return false; }
 
 void DecryptorAdapter::CoreCodecInit(
-    const fuchsia::media::FormatDetails& initial_input_format_details) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
   zx_status_t result = input_processing_loop_.StartThread(
       "DecryptorAdapter::input_processing_thread_", &input_processing_thread_);
   if (result != ZX_OK) {
@@ -80,34 +79,29 @@ void DecryptorAdapter::CoreCodecInit(
 }
 
 void DecryptorAdapter::CoreCodecSetSecureMemoryMode(
-    CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode) {
+    CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode) {
   if (port == kInputPort) {
-    if (secure_memory_mode != fuchsia::mediacodec::SecureMemoryMode::OFF) {
+    if (secure_memory_mode != fuchsia_mediacodec::SecureMemoryMode::kOff) {
       events_->onCoreCodecFailCodec("Decryptors don't do secure input.");
       return;
     }
-    // Ignore OFF for input; that's what the code assumes elsewhere.
+    // Ignore kOff for input; that's what the code assumes elsewhere.
   } else {
     ZX_DEBUG_ASSERT(port == kOutputPort);
-    if (secure_memory_mode != fuchsia::mediacodec::SecureMemoryMode::OFF &&
-        secure_memory_mode != fuchsia::mediacodec::SecureMemoryMode::ON) {
+    if (secure_memory_mode != fuchsia_mediacodec::SecureMemoryMode::kOff &&
+        secure_memory_mode != fuchsia_mediacodec::SecureMemoryMode::kOn) {
       events_->onCoreCodecFailCodec("Unexpected output SecureMemoryMode (maybe DYNAMIC?)");
     }
-    secure_mode_ = (secure_memory_mode == fuchsia::mediacodec::SecureMemoryMode::ON);
+    secure_mode_ = (secure_memory_mode == fuchsia_mediacodec::SecureMemoryMode::kOn);
     if (inspect_properties_) {
       inspect_properties_->secure_mode.Set(secure_mode_);
     }
   }
 }
 
-fuchsia_sysmem2::BufferCollectionConstraints
-DecryptorAdapter::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+DecryptorAdapter::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
   fuchsia_sysmem2::BufferCollectionConstraints result;
-
-  // The CodecImpl won't hand us the sysmem token, so we shouldn't expect to have the token here.
-  ZX_DEBUG_ASSERT(!partial_settings.has_sysmem_token());
 
   // We also ask for some dedicated slack on input, since decryption involves some per-buffer
   // process hops per buffer.  Some slack should help avoid falling behind.
@@ -137,7 +131,7 @@ DecryptorAdapter::CoreCodecGetBufferCollectionConstraints2(
   // We don't have to fill out usage - CodecImpl takes care of that.
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
-  return result;
+  return CoreCodecGetBufferCollectionConstraints3Result{.constraints = std::move(result)};
 }
 
 void DecryptorAdapter::CoreCodecSetBufferCollectionInfo(
@@ -190,8 +184,8 @@ void DecryptorAdapter::CoreCodecStartStream() {
 }
 
 void DecryptorAdapter::CoreCodecQueueInputFormatDetails(
-    const fuchsia::media::FormatDetails& per_stream_override_format_details) {
-  QueueInputItem(CodecInputItem::FormatDetails(per_stream_override_format_details));
+    std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details) {
+  QueueInputItem(CodecInputItem::FormatDetails(std::move(per_stream_override_format_details)));
 }
 
 void DecryptorAdapter::CoreCodecQueueInputPacket(const CodecPacket* packet) {
@@ -325,39 +319,12 @@ void DecryptorAdapter::CoreCodecEnsureBuffersNotConfigured(CodecPort port) {
   }
 }
 
-std::unique_ptr<const fuchsia::media::StreamBufferConstraints>
-DecryptorAdapter::CoreCodecBuildNewInputConstraints() {
-  auto constraints = std::make_unique<fuchsia::media::StreamBufferConstraints>();
-  constraints->set_buffer_constraints_version_ordinal(kInputBufferConstraintsVersionOrdinal);
-  return constraints;
-}
-
-std::unique_ptr<const fuchsia::media::StreamOutputConstraints>
-DecryptorAdapter::CoreCodecBuildNewOutputConstraints(
-    uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-    bool buffer_constraints_action_required) {
-  auto config = std::make_unique<fuchsia::media::StreamOutputConstraints>();
-
-  config->set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-
-  auto* constraints = config->mutable_buffer_constraints();
-
-  // For the moment, there will be only one StreamOutputConstraints, and it'll
-  // need output buffers configured for it.
-  ZX_DEBUG_ASSERT(buffer_constraints_action_required);
-  config->set_buffer_constraints_action_required(buffer_constraints_action_required);
-  constraints->set_buffer_constraints_version_ordinal(
-      new_output_buffer_constraints_version_ordinal);
-
-  return config;
-}
-
-fuchsia::media::StreamOutputFormat DecryptorAdapter::CoreCodecGetOutputFormat(
+fuchsia_media::StreamOutputFormat DecryptorAdapter::CoreCodecGetOutputFormat2(
     uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
-  fuchsia::media::StreamOutputFormat result;
-  result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-  result.mutable_format_details()->set_format_details_version_ordinal(
-      new_output_format_details_version_ordinal);
+  fuchsia_media::StreamOutputFormat result;
+  result.stream_lifetime_ordinal() = stream_lifetime_ordinal;
+  result.format_details().emplace().format_details_version_ordinal() =
+      new_output_format_details_version_ordinal;
   return result;
 }
 
@@ -368,6 +335,35 @@ void DecryptorAdapter::CoreCodecMidStreamOutputBufferReConfigPrepare() {
 
 void DecryptorAdapter::CoreCodecMidStreamOutputBufferReConfigFinish() {
   // For this adapter, nothing to do here.
+}
+
+std::optional<fuchsia_media::StreamError> DecryptorAdapter::Decrypt(const EncryptionParams2& params,
+                                                                    const InputBuffer& input,
+                                                                    const OutputBuffer& output,
+                                                                    CodecPacket* output_packet) {
+  EncryptionParams hlcpp_params;
+  hlcpp_params.scheme = params.scheme;
+  hlcpp_params.key_id = params.key_id;
+  hlcpp_params.init_vector = params.init_vector;
+  if (params.pattern.has_value()) {
+    hlcpp_params.pattern = fidl::NaturalToHLCPP(fuchsia_media::EncryptionPattern(*params.pattern));
+  }
+  hlcpp_params.subsamples.reserve(params.subsamples.size());
+  for (const auto& entry : params.subsamples) {
+    hlcpp_params.subsamples.push_back(fidl::NaturalToHLCPP(fuchsia_media::SubsampleEntry(entry)));
+  }
+  auto hlcpp_result = Decrypt(hlcpp_params, input, output, output_packet);
+  if (!hlcpp_result.has_value()) {
+    return std::nullopt;
+  }
+  return fidl::HLCPPToNatural(std::move(*hlcpp_result));
+}
+
+std::optional<fuchsia::media::StreamError> DecryptorAdapter::Decrypt(const EncryptionParams& params,
+                                                                     const InputBuffer& input,
+                                                                     const OutputBuffer& output,
+                                                                     CodecPacket* output_packet) {
+  ZX_PANIC("DecryptorAdapter subclass must override Decrypt");
 }
 
 fuchsia_sysmem2::BufferMemoryConstraints DecryptorAdapter::GetSecureOutputMemoryConstraints2()
@@ -426,12 +422,12 @@ void DecryptorAdapter::ProcessInput() {
     }
 
     if (item.is_format_details()) {
-      if (!item.format_details().has_encrypted_format()) {
+      if (!item.format_details2().encrypted_format().has_value()) {
         events_->onCoreCodecFailCodec("InputFormatDetails does not include EncryptedFormat");
         return;
       }
 
-      if (!UpdateEncryptionParams(item.mutable_format_details().mutable_encrypted_format())) {
+      if (!UpdateEncryptionParams(item.format_details2().encrypted_format().value())) {
         events_->onCoreCodecFailCodec("Invalid EncryptedFormat");
       }
       continue;
@@ -541,32 +537,32 @@ void DecryptorAdapter::ProcessInput() {
   }
 }
 
-bool DecryptorAdapter::UpdateEncryptionParams(fuchsia::media::EncryptedFormat* encrypted_format) {
-  ZX_DEBUG_ASSERT(encrypted_format);
-  if (encrypted_format->has_scheme()) {
-    if (encryption_params_.scheme != encrypted_format->scheme()) {
-      encryption_params_.scheme = std::move(*encrypted_format->mutable_scheme());
+bool DecryptorAdapter::UpdateEncryptionParams(
+    const fuchsia_media::EncryptedFormat& encrypted_format) {
+  if (encrypted_format.scheme().has_value()) {
+    if (encryption_params_.scheme != *encrypted_format.scheme()) {
+      encryption_params_.scheme = *encrypted_format.scheme();
       if (inspect_properties_) {
         inspect_properties_->scheme.Set(encryption_params_.scheme);
       }
     }
   }
-  if (encrypted_format->has_key_id()) {
-    if (encryption_params_.key_id != encrypted_format->key_id()) {
-      encryption_params_.key_id = std::move(*encrypted_format->mutable_key_id());
+  if (encrypted_format.key_id().has_value()) {
+    if (encryption_params_.key_id != *encrypted_format.key_id()) {
+      encryption_params_.key_id = *encrypted_format.key_id();
       if (inspect_properties_) {
         inspect_properties_->key_id.Set(encryption_params_.key_id);
       }
     }
   }
-  if (encrypted_format->has_init_vector()) {
-    encryption_params_.init_vector = std::move(*encrypted_format->mutable_init_vector());
+  if (encrypted_format.init_vector().has_value()) {
+    encryption_params_.init_vector = *encrypted_format.init_vector();
   }
-  if (encrypted_format->has_pattern()) {
-    encryption_params_.pattern = encrypted_format->pattern();
+  if (encrypted_format.pattern().has_value()) {
+    encryption_params_.pattern = encrypted_format.pattern();
   }
-  if (encrypted_format->has_subsamples()) {
-    encryption_params_.subsamples = std::move(*encrypted_format->mutable_subsamples());
+  if (encrypted_format.subsamples().has_value()) {
+    encryption_params_.subsamples = *encrypted_format.subsamples();
   }
 
   return true;
@@ -582,7 +578,7 @@ CodecInputItem DecryptorAdapter::DequeueInputItem() {
   return to_ret;
 }
 
-void DecryptorAdapter::OnCoreCodecFailStream(fuchsia::media::StreamError error) {
+void DecryptorAdapter::OnCoreCodecFailStream(fuchsia_media::StreamError error) {
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
     is_stream_failed_ = true;

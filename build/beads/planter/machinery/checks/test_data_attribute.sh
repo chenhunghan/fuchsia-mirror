@@ -37,8 +37,10 @@ set -euo pipefail
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-python3 - "$WORKDIR" "$TARGET_DIR" "$TARGET_DIRS" <<'PYEOF'
+python3 - "$WORKDIR" "$TARGET_DIR" "$TARGET_DIRS" "$SCRIPT_DIR" <<'PYEOF'
+import ast
 import json
 import os
 import re
@@ -46,11 +48,15 @@ import subprocess
 import sys
 
 workdir = os.path.abspath(sys.argv[1])
-target_dirs = list(
-    dict.fromkeys(
-        d.strip().strip("/")
-        for d in re.split(r"[,\s]+", f"{sys.argv[2]} {sys.argv[3]}")
-        if d.strip().strip("/")
+sys.path.insert(0, os.path.abspath(sys.argv[4]))
+import planter_check_lib as pcl
+target_dirs = pcl.with_overlaid_target_dirs(
+    list(
+        dict.fromkeys(
+            d.strip().strip("/")
+            for d in re.split(r"[,\s]+", f"{sys.argv[2]} {sys.argv[3]}")
+            if d.strip().strip("/")
+        )
     )
 )
 
@@ -116,9 +122,24 @@ _GENERIC_SEGMENTS = {
 }
 
 
+# Add a staged destination path and its non-generic directory/segment tokens.
+def _add_dest_path_tokens(tokens, dd):
+    dd = dd.strip().strip("/")
+    if not dd:
+        return
+    tokens.add(dd)
+    parent = os.path.dirname(dd)
+    if parent and parent not in _GENERIC_SEGMENTS:
+        tokens.add(parent)
+    for seg in dd.split("/"):
+        if seg and seg not in _GENERIC_SEGMENTS:
+            tokens.add(seg)
+
+
 def host_test_data_info(pkg):
     if pkg not in _htd_cache:
         info = {}
+        dest_dirs = {}
         p = os.path.join(workdir, pkg, "BUILD.bazel")
         if os.path.isfile(p):
             t = open(p, encoding="utf-8").read()
@@ -128,24 +149,32 @@ def host_test_data_info(pkg):
                 if not nm:
                     continue
                 tokens = set()
+                dd = ""
                 dm = re.search(r'^\s+dest_dir\s*=\s*"([^"]+)"', blk, re.M)
                 if dm:
                     dd = dm.group(1).strip().strip("/")
-                    if dd:
-                        tokens.add(dd)
-                        parent = os.path.dirname(dd)
-                        if parent and parent not in _GENERIC_SEGMENTS:
-                            tokens.add(parent)
-                        for seg in dd.split("/"):
-                            if seg and seg not in _GENERIC_SEGMENTS:
-                                tokens.add(seg)
+                    _add_dest_path_tokens(tokens, dd)
+                fm_m = re.search(r"^\s+files_map\s*=\s*\{(.*?)\}", blk, re.M | re.S)
+                if fm_m:
+                    for dest_key, _ in re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', fm_m.group(1)):
+                        dclean = dest_key.strip().strip("/")
+                        _add_dest_path_tokens(tokens, os.path.dirname(dclean))
+                        dbase = os.path.basename(dclean)
+                        if dbase and dbase not in _GENERIC_SEGMENTS:
+                            tokens.add(dbase)
                 for src in list_attr(blk, "srcs") or []:
                     base = os.path.basename(src.split(":", 1)[-1]).strip()
                     if base and not tokens:
                         tokens.add(base)
                 info[nm.group(1)] = tokens
-        _htd_cache[pkg] = info
-    return _htd_cache[pkg]
+                dest_dirs[nm.group(1)] = dd
+        _htd_cache[pkg] = (info, dest_dirs)
+    return _htd_cache[pkg][0]
+
+
+def host_test_data_dest_dirs(pkg):
+    host_test_data_info(pkg)
+    return _htd_cache[pkg][1]
 
 
 def host_test_data_names(pkg):
@@ -168,41 +197,289 @@ def is_host_test_data_label(label, pkg):
     return parse_host_test_data_label(label, pkg) is not None
 
 
+_pkg_src_files_cache = {}
+
+
 # Read all non-BUILD source files in package `pkg` to verify test_data consumption.
+def package_source_files(pkg):
+    if pkg not in _pkg_src_files_cache:
+        files = []
+        root = os.path.join(workdir, pkg)
+        if os.path.isdir(root):
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [
+                    dn
+                    for dn in dirnames
+                    if not dn.startswith(".")
+                    and not os.path.isfile(os.path.join(dirpath, dn, "BUILD.bazel"))
+                ]
+                for fn in filenames:
+                    if fn in ("BUILD.bazel", "BUILD.gn", "BUILD"):
+                        continue
+                    fpath = os.path.join(dirpath, fn)
+                    try:
+                        files.append(open(fpath, encoding="utf-8", errors="ignore").read())
+                    except OSError:
+                        pass
+        _pkg_src_files_cache[pkg] = files
+    return _pkg_src_files_cache[pkg]
+
+
 def package_source_blob(pkg):
-    chunks = []
-    root = os.path.join(workdir, pkg)
-    if not os.path.isdir(root):
-        return ""
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [
-            dn
-            for dn in dirnames
-            if not dn.startswith(".")
-            and not os.path.isfile(os.path.join(dirpath, dn, "BUILD.bazel"))
-        ]
-        for fn in filenames:
-            if fn in ("BUILD.bazel", "BUILD.gn", "BUILD"):
+    return "\n".join(package_source_files(pkg))
+
+
+# Extract all Bazel target labels (`//...` or `:...`) assigned to `attr` in `block`,
+# including expressions using `+ select({...})`, while ignoring `#` comments and
+# `select({...})` condition-key labels.
+def _attr_labels(block, attr):
+    m = re.search(r"(?:^\s+|\(\s*|,\s*)" + re.escape(attr) + r"\s*=\s*", block, re.M)
+    if not m:
+        return []
+    scalar_attr = attr in ("crate", "actual")
+    depth = 0
+    list_depth = 0
+    in_str = False
+    str_start = -1
+    out = []
+    i = m.end()
+    while i < len(block):
+        ch = block[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
                 continue
-            fpath = os.path.join(dirpath, fn)
-            try:
-                chunks.append(open(fpath, encoding="utf-8", errors="ignore").read())
-            except OSError:
-                pass
-    return "\n".join(chunks)
+            if ch == '"':
+                if str_start >= 0 and (scalar_attr or list_depth > 0):
+                    lit = block[str_start:i]
+                    if lit.startswith(("//", ":")):
+                        out.append(lit)
+                in_str = False
+                str_start = -1
+        elif ch == "#":
+            nl = block.find("\n", i)
+            if nl < 0:
+                break
+            i = nl + 1
+            continue
+        else:
+            if depth == 0 and ch in (",", ")"):
+                break
+            if ch == '"':
+                in_str = True
+                str_start = i + 1
+            elif ch in "([{":
+                depth += 1
+                if ch == "[":
+                    list_depth += 1
+            elif ch in ")]}":
+                if depth == 0:
+                    break
+                if ch == "]" and list_depth > 0:
+                    list_depth -= 1
+                depth -= 1
+        i += 1
+    return out
+
+
+_pkg_rules_cache = {}
+_TOP_RULE_RE = re.compile(r"^([A-Za-z_]\w*)\(", re.M)
+_NON_TARGET_CALLS = {"load", "package", "exports_files"}
+_SKIP_DEP_PKG_PREFIXES = (
+    "third_party/",
+    "build/",
+    "sdk/fidl/",
+    "conditions",
+    "visibility",
+)
+_RUST_DEP_ATTRS = (
+    "deps",
+    "test_deps",
+    "args_deps",
+    "args_test_deps",
+    "plugin_deps",
+    "proc_macro_deps",
+)
+
+
+# Map target `name` -> rule call block for all top-level rules in `<pkg>/BUILD.bazel`.
+def _pkg_rule_blocks(pkg, fallback_text=None):
+    if pkg not in _pkg_rules_cache:
+        rules = {}
+        txt = fallback_text
+        if txt is None:
+            bz = os.path.join(workdir, pkg, "BUILD.bazel")
+            if os.path.isfile(bz):
+                try:
+                    txt = open(bz, encoding="utf-8", errors="ignore").read()
+                except OSError:
+                    txt = ""
+        if txt:
+            for rm in _TOP_RULE_RE.finditer(txt):
+                if rm.group(1) in _NON_TARGET_CALLS:
+                    continue
+                open_p = txt.find("(", rm.start())
+                if open_p < 0:
+                    continue
+                rblk = block_at(txt, open_p)
+                nm = re.search(r'(?:^\s+|\(\s*|,\s*)name\s*=\s*"([^"]+)"', rblk, re.M)
+                if nm and nm.group(1) not in rules:
+                    rules[nm.group(1)] = rblk
+        _pkg_rules_cache[pkg] = rules
+    return _pkg_rules_cache[pkg]
+
+
+# Resolve `tname` in `rules`, falling back to parent macro blocks (e.g. `ffx_plugin`)
+# for generated subtargets (`_args`, `_suite`, `_sub_command`).
+def _lookup_rule_block(rules, tname):
+    if tname in rules:
+        return rules[tname]
+    for suf in ("_args", "_suite", "_sub_command"):
+        if tname.endswith(suf) and len(tname) > len(suf):
+            base = tname[: -len(suf)]
+            if base in rules:
+                return rules[base]
+    return None
+
+
+# Parse a Bazel label into `(pkg, target_name)` relative to `cur_pkg`, skipping non-library
+# or external trees (`//third_party`, `//build`, `//sdk/fidl`).
+def _resolve_intree_label(label, cur_pkg):
+    lbl = label[1:] if label.startswith("@//") else label
+    if lbl.startswith(":"):
+        pkg, tname = cur_pkg, lbl[1:]
+    elif lbl.startswith("//"):
+        body = lbl[2:]
+        if ":" in body:
+            pkg, tname = body.split(":", 1)
+        else:
+            pkg = body.strip("/")
+            tname = os.path.basename(pkg)
+    else:
+        return None
+    pkg = pkg.strip("/")
+    if not pkg or pkg.startswith(_SKIP_DEP_PKG_PREFIXES):
+        return None
+    return pkg, tname
+
+
+# Collect direct in-tree Rust dependency packages (and one transitive hop) reachable from a
+# `host_rustc_test` block and its underlying `crate` target in package `d`.
+def _collect_test_dep_graph(test_block, d, fallback_text=None):
+    seed_labels = []
+    for attr in ("crate",) + _RUST_DEP_ATTRS:
+        seed_labels.extend(_attr_labels(test_block, attr))
+
+    local_seen = set()
+    queue = list(seed_labels)
+    direct_targets = []
+    local_rules = _pkg_rule_blocks(d, fallback_text=fallback_text)
+    while queue:
+        lbl = queue.pop()
+        resolved = _resolve_intree_label(lbl, d)
+        if not resolved:
+            continue
+        lpkg, ltname = resolved
+        if lpkg == d:
+            if ltname in local_seen:
+                continue
+            local_seen.add(ltname)
+            lblk = _lookup_rule_block(local_rules, ltname)
+            if lblk:
+                for attr in ("actual", "crate") + _RUST_DEP_ATTRS:
+                    queue.extend(_attr_labels(lblk, attr))
+        else:
+            direct_targets.append((lpkg, ltname))
+
+    direct_pkgs = []
+    hop2_by_pkg = {}
+    for dpkg, dtname in direct_targets:
+        if dpkg not in hop2_by_pkg:
+            direct_pkgs.append(dpkg)
+            hop2_by_pkg[dpkg] = set()
+        drules = _pkg_rule_blocks(dpkg)
+        seen_t = set()
+        tqueue = [dtname]
+        while tqueue:
+            cur_t = tqueue.pop()
+            if cur_t in seen_t:
+                continue
+            seen_t.add(cur_t)
+            dblk = _lookup_rule_block(drules, cur_t)
+            if not dblk:
+                continue
+            for actual_lbl in _attr_labels(dblk, "actual"):
+                ar = _resolve_intree_label(actual_lbl, dpkg)
+                if ar and ar[0] == dpkg:
+                    tqueue.append(ar[1])
+                elif ar and ar[0] != d:
+                    hop2_by_pkg[dpkg].add(ar[0])
+            for attr in ("deps", "args_deps", "plugin_deps", "proc_macro_deps"):
+                for dlbl in _attr_labels(dblk, attr):
+                    dr = _resolve_intree_label(dlbl, dpkg)
+                    if not dr:
+                        continue
+                    if dr[0] == dpkg:
+                        tqueue.append(dr[1])
+                    elif dr[0] != d:
+                        hop2_by_pkg[dpkg].add(dr[0])
+    return direct_pkgs, hop2_by_pkg
+
+
+_rs_shared_cache = {}
+
+
+# Check whether `caller_clean` consumes `tokens` through helper functions or constants
+# exposed by reachable in-tree Rust dependency packages.
+def _is_consumed_via_rust_deps(
+    caller_clean, direct_pkgs, hop2_by_pkg, tokens, lpkg="", htd_name=""
+):
+    if not caller_clean or not direct_pkgs:
+        return False
+    leaf = None
+    other_leaves = None
+    if lpkg and htd_name:
+        dest_dirs = host_test_data_dest_dirs(lpkg)
+        dd = dest_dirs.get(htd_name, "")
+        parent = os.path.dirname(dd) if dd else ""
+        cur_leaf = os.path.basename(dd) if dd else ""
+        if parent and cur_leaf:
+            sibs = {
+                os.path.basename(other_dd)
+                for other_dd in dest_dirs.values()
+                if other_dd
+                and os.path.dirname(other_dd) == parent
+                and os.path.basename(other_dd)
+            }
+            if len(sibs) >= 2 and cur_leaf in sibs:
+                leaf = cur_leaf
+                other_leaves = sibs - {cur_leaf}
+    return pcl.is_host_test_data_consumed_via_rust_deps(
+        workdir,
+        caller_clean,
+        direct_pkgs,
+        hop2_by_pkg,
+        tokens,
+        leaf=leaf,
+        other_leaves=other_leaves,
+        rs_cache=_rs_shared_cache,
+    )
 
 
 # Check that host_test_data targets listed in `test_data` of a host_rustc_test are actually
-# referenced by at least one source or test file in the package.
+# referenced by at least one source or test file in the package (directly or via helper
+# functions/constants in its reachable in-tree Rust library dependencies).
 def check_unused_host_test_data(text, d):
     src_blob = None
+    caller_clean = None
     for m in HOST_RUST_TEST_RE.finditer(text):
         block = block_at(text, m.end() - 1)
-        td_entries = list_attr(block, "test_data") or []
+        td_entries = _attr_labels(block, "test_data")
         if not td_entries:
             continue
         name_m = re.search(r'^\s+name\s*=\s*"([^"]+)"', block, re.M)
         name = name_m.group(1) if name_m else "?"
+        dep_graph = None
         unused = []
         for entry in td_entries:
             parsed = parse_host_test_data_label(entry, d)
@@ -214,8 +491,19 @@ def check_unused_host_test_data(text, d):
                 continue
             if src_blob is None:
                 src_blob = package_source_blob(d)
-            if not any(tok in src_blob for tok in tokens):
-                unused.append((entry, lpkg, htd_name))
+            if any(tok in src_blob for tok in tokens):
+                continue
+            if caller_clean is None:
+                caller_clean = pcl.strip_rust_comments(
+                    src_blob, blank_strings=False
+                )
+            if dep_graph is None:
+                dep_graph = _collect_test_dep_graph(block, d, fallback_text=text)
+            if _is_consumed_via_rust_deps(
+                caller_clean, dep_graph[0], dep_graph[1], tokens, lpkg, htd_name
+            ):
+                continue
+            unused.append((entry, lpkg, htd_name))
         if not unused:
             continue
         labels_desc = ", ".join(u[0] for u in unused)
@@ -234,8 +522,9 @@ def check_unused_host_test_data(text, d):
             text[: m.start()].count("\n") + 1,
             (
                 f'host_rustc_test(name = "{name}") specifies `test_data` entries '
-                f"({labels_desc}), but no source or test file in //{d} references or "
-                "consumes their staged test data paths."
+                f"({labels_desc}), but no source or test file in //{d} (directly or via "
+                "helper functions in its Rust library deps) references or consumes their "
+                "staged test data paths."
             ),
             (
                 f"Remove the unused `test_data` entry/attribute ({labels_desc}) from "
@@ -462,42 +751,7 @@ def git_lines(args):
 
 # Resolve the effective base revision for diffing task changes against pre-migration state.
 def resolve_change_base():
-    raw = (
-        os.environ.get("PLANTER_RESOLVED_CHANGE_BASE", "").strip()
-        or os.environ.get("PLANTER_CHANGE_BASE", "").strip()
-        or "HEAD"
-    )
-    m_jj = re.fullmatch(r"@(-*)", raw)
-    if m_jj:
-        raw = f"HEAD~{len(m_jj.group(1))}" if m_jj.group(1) else "HEAD"
-    subj = (git_lines(["log", "-1", "--format=%s", "HEAD"]) or [""])[0]
-    if subj.startswith(("[bazel_migration]", "[bazel2gn]", "[bazel]")):
-        parent_ok = bool(git_lines(["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"]))
-        if parent_ok:
-            head_files = git_lines(["diff", "--name-only", "HEAD~1", "HEAD"])
-            if not target_dirs or any(
-                f == td or f.startswith(td + "/") for td in target_dirs for f in head_files
-            ):
-                head_sha = (git_lines(["rev-parse", "HEAD"]) or [""])[0]
-                base_sha = (git_lines(["rev-parse", "--verify", "--quiet", raw]) or [""])[0]
-                origin_sha = (
-                    git_lines(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
-                    or [""]
-                )[0]
-                # Like planter_check_lib.resolve_change_base, never step back from a HEAD
-                # already merged on origin/main: its edits are pre-existing upstream code.
-                head_on_origin = bool(
-                    head_sha
-                    and origin_sha
-                    and (
-                        head_sha == origin_sha
-                        or (git_lines(["merge-base", origin_sha, head_sha]) or [""])[0]
-                        == head_sha
-                    )
-                )
-                if (raw == "HEAD" or base_sha == head_sha) and not head_on_origin:
-                    return "HEAD~1"
-    return raw
+    return pcl.resolve_change_base(workdir, target_dirs=target_dirs)
 
 
 # Blank out GN comments outside string literals while preserving line numbers and offsets.
@@ -858,44 +1112,341 @@ def check_runtime_test_data_path_probing(bazel_text, d, change_base):
         )
 
 
+_starlark_env_cache = {}
+
+
+# Evaluate simple Starlark constant, list, dict, string-op, and comprehension AST nodes.
+def _eval_starlark_expr(node, env):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return env.get(node.id)
+    if isinstance(node, (ast.List, ast.Tuple)):
+        out = []
+        for elt in node.elts:
+            val = _eval_starlark_expr(elt, env)
+            if isinstance(val, str):
+                out.append(val)
+            elif isinstance(val, list):
+                out.extend(x for x in val if isinstance(x, str))
+        return out
+    if isinstance(node, ast.Dict):
+        out = {}
+        for k_node, v_node in zip(node.keys, node.values):
+            if k_node is None:
+                continue
+            k_val = _eval_starlark_expr(k_node, env)
+            v_val = _eval_starlark_expr(v_node, env)
+            if isinstance(k_val, str):
+                out[k_val] = v_val if isinstance(v_val, str) else ""
+        return out
+    if isinstance(node, ast.BinOp):
+        left = _eval_starlark_expr(node.left, env)
+        right = _eval_starlark_expr(node.right, env)
+        if isinstance(node.op, ast.Add):
+            if isinstance(left, str) and isinstance(right, str):
+                return left + right
+            if isinstance(left, list) and isinstance(right, list):
+                return left + right
+        if isinstance(node.op, ast.BitOr):
+            if isinstance(left, dict) and isinstance(right, dict):
+                merged = dict(left)
+                merged.update(right)
+                return merged
+        if isinstance(node.op, ast.Mod) and isinstance(left, str):
+            sub = right if isinstance(right, str) else "__placeholder__"
+            try:
+                return left % sub
+            except TypeError:
+                return re.sub(r"%s", sub, left)
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id == "select" and node.args:
+            sel_dict = node.args[0]
+            if isinstance(sel_dict, ast.Dict):
+                merged_dict = {}
+                merged_list = []
+                saw_dict = False
+                for v_node in sel_dict.values:
+                    v_val = _eval_starlark_expr(v_node, env)
+                    if isinstance(v_val, dict):
+                        saw_dict = True
+                        merged_dict.update(v_val)
+                    elif isinstance(v_val, list):
+                        merged_list.extend(v_val)
+                return merged_dict if saw_dict else merged_list
+        if isinstance(node.func, ast.Attribute):
+            recv = _eval_starlark_expr(node.func.value, env)
+            args = [_eval_starlark_expr(a, env) for a in node.args]
+            if isinstance(recv, str) and all(isinstance(a, str) for a in args):
+                meth = node.func.attr
+                if meth == "removeprefix" and len(args) == 1:
+                    return recv[len(args[0]) :] if recv.startswith(args[0]) else recv
+                if meth == "removesuffix" and len(args) == 1:
+                    return (
+                        recv[: len(recv) - len(args[0])]
+                        if args[0] and recv.endswith(args[0])
+                        else recv
+                    )
+                if meth == "replace" and len(args) == 2:
+                    return recv.replace(args[0], args[1])
+                if meth in ("strip", "lstrip", "rstrip") and len(args) <= 1:
+                    return getattr(recv, meth)(*args)
+    if isinstance(node, ast.ListComp) and len(node.generators) == 1:
+        gen = node.generators[0]
+        if isinstance(gen.target, ast.Name) and not gen.ifs:
+            seq = _eval_starlark_expr(gen.iter, env)
+            if isinstance(seq, list):
+                out = []
+                for item in seq:
+                    sub_env = dict(env)
+                    sub_env[gen.target.id] = item
+                    val = _eval_starlark_expr(node.elt, sub_env)
+                    if isinstance(val, str):
+                        out.append(val)
+                return out
+    if isinstance(node, ast.DictComp) and len(node.generators) == 1:
+        gen = node.generators[0]
+        if isinstance(gen.target, ast.Name) and not gen.ifs:
+            seq = _eval_starlark_expr(gen.iter, env)
+            if isinstance(seq, list):
+                out = {}
+                for item in seq:
+                    sub_env = dict(env)
+                    sub_env[gen.target.id] = item
+                    k_val = _eval_starlark_expr(node.key, sub_env)
+                    v_val = _eval_starlark_expr(node.value, sub_env)
+                    if isinstance(k_val, str):
+                        out[k_val] = v_val if isinstance(v_val, str) else ""
+                return out
+    return None
+
+
+# Build a cached map of top-level Starlark variable bindings for `<pkg>/BUILD.bazel`.
+def _starlark_env_for_pkg(pkg, fallback_text=None):
+    if pkg and pkg in _starlark_env_cache:
+        return _starlark_env_cache[pkg]
+    txt = fallback_text
+    if txt is None and pkg is not None:
+        bz = os.path.join(workdir, pkg, "BUILD.bazel")
+        if os.path.isfile(bz):
+            try:
+                txt = open(bz, encoding="utf-8", errors="ignore").read()
+            except OSError:
+                txt = ""
+    env = {}
+    if txt:
+        try:
+            tree = ast.parse(txt)
+        except SyntaxError:
+            tree = None
+        if tree is not None:
+            for stmt in tree.body:
+                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+                    tgt = stmt.targets[0]
+                    if isinstance(tgt, ast.Name):
+                        val = _eval_starlark_expr(stmt.value, env)
+                        if val is not None:
+                            env[tgt.id] = val
+    if pkg:
+        _starlark_env_cache[pkg] = env
+    return env
+
+
+# Parse a Starlark rule call block into `(rule_name, evaluated_kwargs_dict)`.
+def _parse_rule_block_kwargs(blk, env):
+    try:
+        mod = ast.parse(blk.strip())
+    except SyntaxError:
+        return "", {}
+    if len(mod.body) != 1 or not isinstance(mod.body[0], ast.Expr):
+        return "", {}
+    call = mod.body[0].value
+    if not isinstance(call, ast.Call):
+        return "", {}
+    rname = call.func.id if isinstance(call.func, ast.Name) else ""
+    kwargs = {}
+    for kw in call.keywords:
+        if kw.arg:
+            val = _eval_starlark_expr(kw.value, env)
+            if val is not None:
+                kwargs[kw.arg] = val
+    return rname, kwargs
+
+
+# Parse an in-repo Bazel label into `(pkg, target_name)` relative to `cur_pkg`.
+def _parse_inrepo_bazel_label(label, cur_pkg):
+    lbl = label[1:] if label.startswith("@//") else label
+    if lbl.startswith(":"):
+        return cur_pkg, lbl[1:]
+    if lbl.startswith("//"):
+        body = lbl[2:]
+        if ":" in body:
+            pkg, tname = body.split(":", 1)
+        else:
+            pkg = body.strip("/")
+            tname = os.path.basename(pkg)
+        return pkg.strip("/"), tname
+    return None
+
+
+# Resolve staged artifact basenames produced by a `srcs` entry in `host_test_data_files`.
+def _resolve_bazel_src_staged_basenames(src_entry, cur_pkg, fallback_text=None):
+    names = set()
+    direct = os.path.basename(src_entry.split(":", 1)[-1].strip().rstrip("/"))
+    if direct:
+        names.add(direct)
+    if cur_pkg is None:
+        return names
+    parsed = _parse_inrepo_bazel_label(src_entry, cur_pkg)
+    seen = set()
+    while parsed and parsed not in seen and len(seen) < 4:
+        seen.add(parsed)
+        tpkg, tname = parsed
+        fb = fallback_text if tpkg == cur_pkg else None
+        rblk = _pkg_rule_blocks(tpkg, fallback_text=fb).get(tname)
+        if not rblk:
+            break
+        env = _starlark_env_for_pkg(tpkg, fallback_text=fb)
+        rkind, rkwargs = _parse_rule_block_kwargs(rblk, env)
+        if rkind == "alias":
+            actual = rkwargs.get("actual")
+            parsed = (
+                _parse_inrepo_bazel_label(actual, tpkg)
+                if isinstance(actual, str)
+                else None
+            )
+            continue
+        if rkind == "cipd_prebuilt_file":
+            out_or_path = rkwargs.get("out") or rkwargs.get("path")
+            if isinstance(out_or_path, str):
+                b = os.path.basename(out_or_path.strip().rstrip("/"))
+                if b:
+                    names.add(b)
+        elif rkind == "genrule":
+            outs = rkwargs.get("outs")
+            if isinstance(outs, list) and outs:
+                b = os.path.basename(outs[0].strip().rstrip("/"))
+                if b:
+                    names.add(b)
+        elif rkind in ("copy_file", "write_file"):
+            out_val = rkwargs.get("out")
+            if isinstance(out_val, str):
+                b = os.path.basename(out_val.strip().rstrip("/"))
+                if b:
+                    names.add(b)
+        for out_attr in ("output_name", "binary_name", "tool_output_name"):
+            oval = rkwargs.get(out_attr)
+            if isinstance(oval, str) and oval.strip():
+                ob = os.path.basename(oval.strip().rstrip("/"))
+                if ob:
+                    names.add(ob)
+                    if rkind in ("fx_cc_shared_library", "cc_shared_library"):
+                        names.add(f"lib{ob}.so")
+        if rkind in ("fx_cc_shared_library", "cc_shared_library"):
+            names.add(f"lib{tname}.so")
+        break
+    return names
+
+
 # Map each `test_data/<subdir>` destination of a host_test_data_map / host_test_data_files
 # rule block to the basenames it stages there.
-def host_test_data_dest_entries(rule_kind, blk):
+def host_test_data_dest_entries(rule_kind, blk, pkg="", pkg_text=None):
     dests = {}
+    env = _starlark_env_for_pkg(pkg, fallback_text=pkg_text)
+    _, kwargs = _parse_rule_block_kwargs(blk, env)
     if rule_kind == "host_test_data_map":
-        fm_m = re.search(r"^\s*files_map\s*=\s*\{(.*?)\}", blk, re.M | re.S)
-        if fm_m:
-            for dest_key, _ in re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', fm_m.group(1)):
-                parts = dest_key.strip("/").split("/")
-                if len(parts) >= 3 and parts[0] == "test_data":
-                    dests.setdefault(f"{parts[0]}/{parts[1]}", set()).add(parts[-1])
+        fmap = kwargs.get("files_map")
+        dest_keys = list(fmap.keys()) if isinstance(fmap, dict) else []
+        if not dest_keys:
+            fm_m = re.search(r"^\s*files_map\s*=\s*\{(.*?)\}", blk, re.M | re.S)
+            if fm_m:
+                dest_keys = [
+                    dk
+                    for dk, _ in re.findall(r'"([^"]+)"\s*:\s*"([^"]+)"', fm_m.group(1))
+                ]
+        for dest_key in dest_keys:
+            if dest_key.startswith(("//", "@", ":")):
+                continue
+            parts = dest_key.strip("/").split("/")
+            if len(parts) >= 3 and parts[0] == "test_data":
+                dests.setdefault(f"{parts[0]}/{parts[1]}", set()).add(parts[-1])
     else:
-        dm = re.search(r'^\s*dest_dir\s*=\s*"([^"]+)"', blk, re.M)
-        if dm:
-            parts = dm.group(1).strip("/").split("/")
-            if len(parts) >= 2 and parts[0] == "test_data":
-                names = dests.setdefault(f"{parts[0]}/{parts[1]}", set())
-                for src in list_attr(blk, "srcs") or []:
-                    bname = os.path.basename(src.split(":", 1)[-1]).strip()
-                    if bname:
-                        names.add(bname)
+        dd_val = kwargs.get("dest_dir")
+        if not isinstance(dd_val, str):
+            dm = re.search(r'^\s*dest_dir\s*=\s*"([^"]+)"', blk, re.M)
+            dd_val = dm.group(1) if dm else ""
+        parts = dd_val.strip("/").split("/") if dd_val else []
+        if len(parts) >= 2 and parts[0] == "test_data":
+            names = dests.setdefault(f"{parts[0]}/{parts[1]}", set())
+            srcs = kwargs.get("srcs")
+            if not isinstance(srcs, list):
+                srcs = list_attr(blk, "srcs") or []
+            for src in srcs:
+                for bname in _resolve_bazel_src_staged_basenames(
+                    src, pkg, fallback_text=pkg_text
+                ):
+                    names.add(bname)
     return dests
+
+
+GN_HOST_TEST_DATA_OUT_RE = re.compile(
+    r"^\$\{?root_out_dir\}?/(test_data/[^/\"${}]+)/(.+)$"
+)
+
+
+# Expand GN copy/host_test_data source placeholders (`{{source_file_part}}`,
+# `{{source_name_part}}`, `{{source_extension}}`) in an output filename pattern.
+def _expand_gn_source_output_basename(out_base, src_path):
+    src_base = os.path.basename(src_path.strip().rstrip("/"))
+    if not src_base or "$" in src_base or "{" in src_base or "}" in src_base:
+        return ""
+    dot = src_base.rfind(".")
+    if dot > 0:
+        src_name = src_base[:dot]
+        src_ext = src_base[dot + 1 :]
+    else:
+        src_name = src_base
+        src_ext = ""
+    expanded = (
+        out_base.replace("{{source_file_part}}", src_base)
+        .replace("{{source_name_part}}", src_name)
+        .replace("{{source_extension}}", src_ext)
+    )
+    if not expanded or "$" in expanded or "{" in expanded or "}" in expanded:
+        return ""
+    return expanded
+
+
+# Extract string literal sources from a GN `host_test_data` block (including `sources +=`
+# and local list variable references in the enclosing `BUILD.gn`).
+def _extract_gn_host_test_data_sources(blk, full_code):
+    src_lits = []
+    for sm in re.finditer(r"\bsources\s*\+?=\s*\[(.*?)\]", blk, re.S):
+        src_body = re.sub(r"get_label_info\([^)]*\)", "", sm.group(1))
+        src_lits.extend(re.findall(r'"([^"]+)"', src_body))
+    if not src_lits:
+        vm = re.search(r"\bsources\s*=\s*([A-Za-z_]\w*)\b", blk)
+        if vm:
+            vpat = r"\b" + re.escape(vm.group(1)) + r"\s*\+?=\s*\[(.*?)\]"
+            for lm in re.finditer(vpat, full_code, re.S):
+                lbody = re.sub(r"get_label_info\([^)]*\)", "", lm.group(1))
+                src_lits.extend(re.findall(r'"([^"]+)"', lbody))
+    return src_lits
 
 
 # Collect GN host_test_data staged basenames per destination directory across migrated
 # packages (current and change-base `BUILD.gn`).
 def _collect_gn_host_test_data_by_dest(pkgs, change_base):
     by_dest = {}
-    out_re = re.compile(
-        r"\$root_out_dir/(test_data/[^/\"{}]+)/(?:\{\{source_file_part\}\}|([^\"{}]+))"
-    )
     for pkg in pkgs:
         gn_path = os.path.join(workdir, pkg, "BUILD.gn")
         codes = []
         if os.path.isfile(gn_path):
             try:
                 codes.append(
-                    strip_gn_comments(open(gn_path, encoding="utf-8", errors="ignore").read())
+                    strip_gn_comments(
+                        open(gn_path, encoding="utf-8", errors="ignore").read()
+                    )
                 )
             except OSError:
                 pass
@@ -909,27 +1460,36 @@ def _collect_gn_host_test_data_by_dest(pkgs, change_base):
                 htd_name = m.group(2)
                 open_b = m.end() - 1
                 blk = code[open_b : gn_closing_brace(code, open_b) + 1]
-                outs = list_attr(blk, "outputs") or []
+                outs = [
+                    s
+                    for om in re.finditer(r"\boutputs\s*\+?=\s*\[([^\]]*)\]", blk, re.S)
+                    for s in re.findall(r'"([^"]+)"', om.group(1))
+                ]
+                src_lits = None
                 for out_str in outs:
-                    om = out_re.search(out_str)
+                    om = GN_HOST_TEST_DATA_OUT_RE.match(out_str.strip())
                     if not om:
                         continue
                     dest_dir = om.group(1).strip("/")
-                    explicit_file = om.group(2)
+                    rel_out = om.group(2).strip("/")
+                    out_base = os.path.basename(rel_out)
+                    if not out_base:
+                        continue
                     dest_map = by_dest.setdefault(dest_dir, {})
                     origin = f"//{pkg}:{htd_name}"
-                    if explicit_file:
-                        bname = os.path.basename(explicit_file.strip("/"))
+                    if "{{" not in out_base:
+                        if (
+                            "$" not in out_base
+                            and "{" not in out_base
+                            and "}" not in out_base
+                        ):
+                            dest_map.setdefault(out_base, origin)
+                        continue
+                    if src_lits is None:
+                        src_lits = _extract_gn_host_test_data_sources(blk, code)
+                    for s_lit in src_lits:
+                        bname = _expand_gn_source_output_basename(out_base, s_lit)
                         if bname:
-                            dest_map.setdefault(bname, origin)
-                        continue
-                    src_m = re.search(r"^\s*sources\s*=\s*\[(.*?)\]", blk, re.M | re.S)
-                    if not src_m:
-                        continue
-                    src_body = re.sub(r"get_label_info\([^)]*\)", "", src_m.group(1))
-                    for s_lit in re.findall(r'"([^"]+)"', src_body):
-                        bname = os.path.basename(s_lit.strip().rstrip("/"))
-                        if bname and not bname.startswith(("$", "{")):
                             dest_map.setdefault(bname, origin)
     return by_dest
 
@@ -947,7 +1507,10 @@ def _collect_bazel_host_test_data_by_dest(pkgs):
             continue
         for hm in HOST_TEST_DATA_RULE_RE.finditer(text):
             blk = block_at(text, hm.end() - 1)
-            for dest_dir, names in host_test_data_dest_entries(hm.group(1), blk).items():
+            entries = host_test_data_dest_entries(
+                hm.group(1), blk, pkg=pkg, pkg_text=text
+            )
+            for dest_dir, names in entries.items():
                 by_dest.setdefault(dest_dir, set()).update(names)
     return by_dest
 
@@ -963,7 +1526,9 @@ def check_omitted_host_test_data_entries(text, d, gn_by_dest, bazel_by_dest):
         blk = block_at(text, hm.end() - 1)
         nm = re.search(r'^\s+name\s*=\s*"([^"]+)"', blk, re.M)
         tname = nm.group(1) if nm else "?"
-        target_dests = set(host_test_data_dest_entries(rule_kind, blk))
+        target_dests = set(
+            host_test_data_dest_entries(rule_kind, blk, pkg=d, pkg_text=text)
+        )
         for dest_dir in sorted(target_dests):
             gn_entries = gn_by_dest.get(dest_dir, {})
             staged = bazel_by_dest.get(dest_dir, set())
@@ -971,7 +1536,7 @@ def check_omitted_host_test_data_entries(text, d, gn_by_dest, bazel_by_dest):
                 b
                 for b in sorted(gn_entries)
                 if b not in staged
-                and not re.search(r"\b" + re.escape(b) + r"\b", comments_blob)
+                and not re.search(r"(?<!\w)" + re.escape(b) + r"(?!\w)", comments_blob)
             ]
             if not missing:
                 continue
@@ -1003,12 +1568,9 @@ def check_omitted_host_test_data_entries(text, d, gn_by_dest, bazel_by_dest):
             )
 
 
-# Repo-relative paths changed since `change_base` (`$PLANTER_CHANGED_FILES` when set).
+# Repo-relative paths changed since `change_base` (`$PLANTER_CHANGED_FILES` when valid).
 def changed_files(change_base):
-    env_changed = os.environ.get("PLANTER_CHANGED_FILES")
-    if env_changed is not None:
-        return [l.strip() for l in env_changed.splitlines() if l.strip()]
-    return git_lines(["diff", "--name-only", change_base])
+    return pcl.changed_files(workdir, change_base, target_dirs=target_dirs)
 
 
 change_base = resolve_change_base()

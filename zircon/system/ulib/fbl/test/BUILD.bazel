@@ -1,0 +1,201 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rbe:rbe.bzl", "RBE_USE_LARGE_WORKER")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fbl-test"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":fbl-gmock-test_host_test",
+        ":fbl_host_test",
+    ],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): bazel2gn does not translate `includes` or
+# `exec_properties` on fx_cc_test_binary, so restore the GN equivalents by hand.
+# @bazel2gn:raw_attribute:include_dirs = [ "include" ]
+# @bazel2gn:raw_attribute:if (is_lto_variant || optimize == "size_lto" || optimize == "size_thinlto" || is_coverage) { _concurrent_jobs = concurrent_jobs.link_highmem configs += _concurrent_jobs.configs forward_variables_from(_concurrent_jobs.vars, "*") }
+fx_cc_test_binary(
+    name = "fbl",
+    srcs = [
+        "algorithm_tests.cc",
+        "array_tests.cc",
+        "bit_tests.cc",
+        "conditional_select_nospec_tests.cc",
+        "confine_array_index_tests.cc",
+        "enum_bits.cc",
+        "forward_tests.cc",
+        "hard_int_tests.cc",
+        "include/fbl/tests/intrusive_containers/associative_container_test_environment.h",
+        "include/fbl/tests/intrusive_containers/base_test_environments.h",
+        "include/fbl/tests/intrusive_containers/intrusive_doubly_linked_list_checker.h",
+        "include/fbl/tests/intrusive_containers/intrusive_hash_table_checker.h",
+        "include/fbl/tests/intrusive_containers/intrusive_singly_linked_list_checker.h",
+        "include/fbl/tests/intrusive_containers/intrusive_wavl_tree_checker.h",
+        "include/fbl/tests/intrusive_containers/objects.h",
+        "include/fbl/tests/intrusive_containers/ordered_associative_container_test_environment.h",
+        "include/fbl/tests/intrusive_containers/sequence_container_test_environment.h",
+        "include/fbl/tests/intrusive_containers/test_environment_utils.h",
+        "include/fbl/tests/intrusive_containers/test_thunks.h",
+        "include/fbl/tests/lfsr.h",
+        "inline_array_tests.cc",
+        "intrusive_container_node_tests.cc",
+        "intrusive_container_tests.cc",
+        "intrusive_doubly_linked_list_tests.cc",
+        "intrusive_hash_table_dll_tests.cc",
+        "intrusive_hash_table_sll_tests.cc",
+        "intrusive_singly_linked_list_tests.cc",
+        "intrusive_sized_doubly_linked_list_tests.cc",
+        "intrusive_sized_singly_linked_list_tests.cc",
+        "intrusive_wavl_tree_tests.cc",
+        "macro_tests.cc",
+        "no_destructor_tests.cc",
+        "packed_pointer_tests.cc",
+        "recycler_tests.cc",
+        "ref_ptr_tests.cc",
+        "string_buffer_tests.cc",
+        "string_printf_tests.cc",
+        "string_tests.cc",
+        "string_traits_tests.cc",
+        "strong_int_tests.cc",
+        "type_info_tests.cc",
+        "unaligned_tests.cc",
+        "unique_fd_tests.cc",
+        "vector_tests.cc",
+        "wavl_tree_augmented_invariant_observer_tests.cc",
+        "wavl_tree_best_node_observer_tests.cc",
+    ] + select({
+        # These tests won't run on the host. There are two primary reasons for this.
+        #
+        # First, Some of these tests (ref_counted_upgradeable and
+        # slab_allocator) need fbl::Mutex which currently isn't supported on
+        # the host.
+        #
+        # Second, some of these tests make use of the ASSERT_DEATH macro to
+        # ensure that certain actions result in program termination.  Again,
+        # this is not currently supported in the host test environment.
+        #
+        # See: TODO(https://fxbug.dev/42105920)
+        "@platforms//os:fuchsia": [
+            "alloc_checker_tests.cc",
+            "condition_variable_tests.cc",
+            "ref_counted_tests.cc",
+            "ref_counted_upgradeable_tests.cc",
+            "ring_buffer_tests.cc",
+            "slab_allocator_tests.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    defines = select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": ["FBL_TEST_ENABLE_WAVL_TREE_BALANCE_TEST=1"],
+    }),
+    # LTO OOMs and coverage mode times out on default RBE workers,
+    # so use large RBE workers.
+    # TODO(https://fxbug.dev/570694755): bazel2gn does not translate
+    # `exec_properties` on fx_cc_test_binary; restored via raw_attribute above.
+    # @bazel2gn:skip
+    exec_properties = RBE_USE_LARGE_WORKER,
+    gn_output_name = "fbl-test",
+    # TODO(https://fxbug.dev/570694755): bazel2gn does not translate `includes`
+    # on fx_cc_test_binary; restored via raw_attribute above.
+    # @bazel2gn:skip
+    includes = ["include"],
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/fdio",
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# These tests test compatibility with GMock. As such, they must use the GTest
+# runner instead of zxtest.
+fx_cc_test_binary(
+    name = "fbl-gmock-test",
+    srcs = ["ref_ptr_gmock_tests.cc"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+host_test(
+    name = "fbl-gmock-test_host_test",
+    binary = ":fbl-gmock-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test(
+    name = "fbl_host_test",
+    binary = ":fbl",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_packaged_binary(
+    name = "fbl-test_packaged_bin",
+    testonly = True,
+    binary = ":fbl",
+    binary_name = "fbl-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "fbl-test-manifest",
+    testonly = True,
+    component_name = "fbl-test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fbl-test.cml",
+)
+
+fx_test_component(
+    name = "fbl-test-component",
+    compiled_manifest = ":fbl-test-manifest",
+    deps = [":fbl-test_packaged_bin"],
+)
+
+fx_package(
+    name = "fbl-test-pkg",
+    package_name = "fbl-test",
+    testonly = True,
+    test_components = [":fbl-test-component"],
+)
+
+fx_test(
+    name = "fbl-test",
+    package = ":fbl-test-pkg",
+)

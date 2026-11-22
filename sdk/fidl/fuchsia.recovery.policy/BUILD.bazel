@@ -12,6 +12,5 @@ fidl_library(
         "device.fidl",
         "factoryreset.fidl",
     ],
-    enable_hlcpp = True,
     visibility = ["//visibility:public"],
 )

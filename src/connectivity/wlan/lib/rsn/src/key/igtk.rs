@@ -69,7 +69,6 @@ impl std::hash::Hash for Igtk {
 }
 
 impl Igtk {
-    #[allow(clippy::result_large_err, reason = "large Error enum")]
     pub fn from_kde(element: kde::Igtk, cipher: Cipher) -> Result<Self, Error> {
         let tk_len: usize =
             cipher.tk_bytes().ok_or(Error::IgtkHierarchyUnsupportedCipherError)?.into();

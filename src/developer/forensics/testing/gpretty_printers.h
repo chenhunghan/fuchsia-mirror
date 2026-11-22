@@ -5,8 +5,6 @@
 #ifndef SRC_DEVELOPER_FORENSICS_TESTING_GPRETTY_PRINTERS_H_
 #define SRC_DEVELOPER_FORENSICS_TESTING_GPRETTY_PRINTERS_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/mem/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
@@ -14,7 +12,6 @@
 #include <ostream>
 #include <string_view>
 
-#include <src/lib/fostr/fidl/fuchsia/mem/formatting.h>
 #include <src/lib/fostr/indent.h>
 
 #include "src/developer/forensics/crash_reports/filing_result.h"
@@ -24,7 +21,6 @@
 #include "src/developer/forensics/feedback/reboot_log/graceful_shutdown_info.h"
 #include "src/developer/forensics/feedback/stop_signals.h"
 #include "src/developer/forensics/utils/errors.h"
-#include "src/lib/fsl/vmo/strings.h"
 
 namespace fit {
 
@@ -213,52 +209,6 @@ inline void PrintTo(const GracefulShutdownAction action, std::ostream* os) {
 }  // namespace feedback
 
 }  // namespace forensics
-
-namespace fuchsia {
-namespace feedback {
-
-// Pretty-prints Attachment in gTest matchers instead of the default byte string in case of failed
-// expectations.
-inline void PrintTo(const Attachment& attachment, std::ostream* os) {
-  *os << fostr::Indent;
-  *os << fostr::NewLine << "key: " << attachment.key;
-  *os << fostr::NewLine << "value: ";
-  std::string value;
-  if (fsl::StringFromVmo(attachment.value, &value)) {
-    if (value.size() < 1024) {
-      *os << "'" << value << "'";
-    } else {
-      *os << "(string too long)" << attachment.value;
-    }
-  } else {
-    *os << attachment.value;
-  }
-  *os << fostr::Outdent;
-}
-
-// Pretty-prints Annotation in gTest matchers instead of the default byte string in case of failed
-// expectations.
-inline void PrintTo(const Annotation& annotation, std::ostream* os) {
-  *os << fostr::Indent;
-  *os << fostr::NewLine << "key: " << annotation.key;
-  *os << fostr::NewLine << "value: " << annotation.value;
-  *os << fostr::Outdent;
-}
-
-}  // namespace feedback
-
-namespace mem {
-
-// Pretty-prints string VMOs in gTest matchers instead of the default byte string in case of failed
-// expectations.
-inline void PrintTo(const Buffer& vmo, std::ostream* os) {
-  std::string value;
-  FX_CHECK(fsl::StringFromVmo(vmo, &value));
-  *os << "'" << value << "'";
-}
-
-}  // namespace mem
-}  // namespace fuchsia
 
 namespace zx {
 

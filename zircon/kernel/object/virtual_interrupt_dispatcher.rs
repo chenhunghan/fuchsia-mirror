@@ -4,21 +4,21 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use core::ptr::NonNull;
 use ksync::lock;
 use zx_status::Status;
 use zx_types::{
     ZX_INTERRUPT_TIMESTAMP_MONO, ZX_INTERRUPT_VIRTUAL, ZX_INTERRUPT_WAKE_VECTOR,
-    ZX_VIRTUAL_INTERRUPT_UNTRIGGERED, zx_rights_t, zx_time_t,
+    ZX_VIRTUAL_INTERRUPT_UNTRIGGERED, zx_koid_t, zx_rights_t, zx_time_t,
 };
 
 use super::DispatcherOps;
 use super::handle::KernelHandle;
 use super::interrupt_dispatcher::{
     INTERRUPT_TIMESTAMP_MONO, INTERRUPT_VIRTUAL, INTERRUPT_WAKE_VECTOR, InterruptDispatcher,
-    InterruptKind, PostAckState, WakeVectorDiagnostics,
+    InterruptKind, PostAckState,
 };
 use crate::counters::define_kcounter;
+use crate::wake_vector::Diagnostics;
 
 define_kcounter!(
     DISPATCHER_VIRTUAL_INTERRUPT_CREATE_COUNT,
@@ -32,19 +32,10 @@ define_kcounter!(
 );
 
 /// Virtual interrupt dispatcher variant triggered via `zx_interrupt_trigger`.
-#[repr(C)]
-pub struct VirtualInterruptDispatcher {
-    disp: NonNull<InterruptDispatcher>,
-}
+pub struct VirtualInterruptDispatcher;
 
 impl Drop for VirtualInterruptDispatcher {
     fn drop(&mut self) {
-        // SAFETY: `self.disp` points to the enclosing `InterruptDispatcher`, which is valid
-        // during `~InterruptDispatcher`.
-        let disp = unsafe { self.disp.as_ref() };
-        if disp.is_wake_vector() {
-            disp.destroy_wake_event();
-        }
         DISPATCHER_VIRTUAL_INTERRUPT_DESTROY_COUNT.add(1);
     }
 }
@@ -74,8 +65,9 @@ impl VirtualInterruptDispatcher {
         }
 
         // Attempt to construct the dispatcher.
-        let disp = InterruptDispatcher::create_raw(flags, options, |disp| {
-            Self::new(disp);
+        let disp = InterruptDispatcher::create_raw(flags, options, || {
+            DISPATCHER_VIRTUAL_INTERRUPT_CREATE_COUNT.add(1);
+            InterruptKind::Virtual(Self)
         })
         .ok_or(Status::NO_MEMORY)?;
         let new_handle = KernelHandle::new(disp);
@@ -84,28 +76,8 @@ impl VirtualInterruptDispatcher {
         Ok((new_handle, InterruptDispatcher::default_rights()))
     }
 
-    #[allow(clippy::new_ret_no_self)]
-    fn new(disp: &InterruptDispatcher) {
-        // SAFETY: Called once during `InterruptDispatcher::create_raw` construction.
-        unsafe {
-            disp.init_kind(InterruptKind::Virtual(Self { disp: NonNull::from(disp) }));
-        }
-        // Immediately after construction, virtual interrupt objects are always in the
-        // untriggered state. Make sure that our initial signal state reflects this.
-        disp.update_state(0, ZX_VIRTUAL_INTERRUPT_UNTRIGGERED);
-        DISPATCHER_VIRTUAL_INTERRUPT_CREATE_COUNT.add(1);
-        if disp.is_wake_vector() {
-            disp.initialize_wake_event();
-        }
-    }
-
-    /// Populates wake vector diagnostics for this virtual interrupt.
-    pub fn get_diagnostics(&self, diagnostics_out: &mut WakeVectorDiagnostics) {
-        // SAFETY: `self.disp` points to the valid enclosing `InterruptDispatcher`.
-        let disp = unsafe { self.disp.as_ref() };
-        diagnostics_out.enabled = disp.is_wake_vector();
-        diagnostics_out.koid = disp.get_koid();
-        diagnostics_out.print_extra(format_args!("VirtIRQ {}", disp.get_koid()));
+    pub(super) fn fill_diagnostics(&self, koid: zx_koid_t, diagnostics_out: &mut Diagnostics) {
+        diagnostics_out.print_extra(format_args!("VirtIRQ {koid}"));
     }
 
     /// Blocks until the virtual interrupt is triggered or destroyed, updating the

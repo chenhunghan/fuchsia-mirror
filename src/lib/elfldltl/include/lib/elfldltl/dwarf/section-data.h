@@ -99,7 +99,7 @@ class SectionData {
   // Returns std::nullopt if the buffer is too small.  The Elf template
   // parameter indicates the byte order used in the data unit.
   template <ElfApi Elf = Elf<>>
-  constexpr std::optional<uint64_t> read_offset(size_t pos = 0) {
+  constexpr std::optional<uint64_t> read_offset(size_t pos = 0) const {
     return ReadOffset<Elf>(format_, contents_.subspan(pos));
   }
 

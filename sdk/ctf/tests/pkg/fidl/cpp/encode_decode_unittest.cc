@@ -12,7 +12,6 @@
 
 #include <zxtest/zxtest.h>
 
-#include "fidl/test/unionmigration/cpp/fidl.h"
 #include "lib/fidl/cpp/event_sender.h"
 #include "lib/fidl/cpp/interface_ptr.h"
 #include "lib/fidl/cpp/internal/message_reader.h"

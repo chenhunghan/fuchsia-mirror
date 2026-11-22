@@ -16,6 +16,7 @@ use crate::jtrace::{TraceBufferType, jtrace_dump};
 use crate::kernel::mp::{MpIpi, MpIpiTarget, cpu_mask_t, cpu_num_to_mask, get_online_mask};
 use crate::kernel::thread::current_get_backtrace;
 use crate::kernel::types::AtomicCpuMask;
+use crate::platform_rs::debug::platform_serial_drain_tx;
 use crate::platform_rs::efi_bootbyte_set_reason;
 use crate::platform_rs::power::{PlatformHaltAction, ZirconCrashReason};
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -46,7 +47,11 @@ static HALTED_CPUS: AtomicCpuMask = AtomicCpuMask::new(0);
 /// back to the generic reset mechanisms. The reason has already been recorded
 /// at that point, so the next boot still honors it.
 fn reboot_with_reason(reason: u64) {
+    // Drain any output printed before invoking UEFI runtime services, and drain
+    // again afterwards in case `efi_bootbyte_set_reason` logged an error.
+    platform_serial_drain_tx();
     efi_bootbyte_set_reason(reason);
+    platform_serial_drain_tx();
     if let Some(config) = x86_get_microarch_config() {
         if let Some(reboot_reason) = config.reboot_reason {
             // SAFETY: `reboot_reason` is a static microarch configuration callback.
@@ -116,21 +121,9 @@ pub fn platform_halt_cpu() {
     HALTED_CPUS.fetch_or(cpu_num_to_mask(curr_cpu_num()), Ordering::SeqCst);
 }
 
-/// FFI trampoline for [`platform_halt_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_halt_cpu() {
-    platform_halt_cpu();
-}
-
 /// Returns true iff this platform supports [`platform_suspend_cpu`].
 pub fn platform_supports_suspend_cpu() -> bool {
     false
-}
-
-/// FFI trampoline for [`platform_supports_suspend_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_supports_suspend_cpu() -> bool {
-    platform_supports_suspend_cpu()
 }
 
 /// Suspends the calling CPU.
@@ -138,32 +131,14 @@ pub fn platform_suspend_cpu(_allow_domain: bool) -> Result<(), Status> {
     Err(Status::NOT_SUPPORTED)
 }
 
-/// FFI trampoline for [`platform_suspend_cpu`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_cpu(allow_domain: bool) -> Result<(), Status> {
-    platform_suspend_cpu(allow_domain)
-}
-
 /// Returns true iff this platform supports [`platform_suspend_system`].
 pub fn platform_supports_suspend_system() -> bool {
     false
 }
 
-/// FFI trampoline for [`platform_supports_suspend_system`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_supports_suspend_system() -> bool {
-    platform_supports_suspend_system()
-}
-
 /// Suspends the entire system from the boot CPU.
 pub fn platform_suspend_system() -> Result<(), Status> {
     Err(Status::NOT_SUPPORTED)
-}
-
-/// FFI trampoline for [`platform_suspend_system`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_system() -> Result<(), Status> {
-    platform_suspend_system()
 }
 
 // TODO(https://fxbug.dev/42180675): Refactor platform_panic_start.
@@ -186,12 +161,6 @@ pub fn platform_panic_start(halt_others: bool) {
     }
 }
 
-/// FFI trampoline for [`platform_panic_start`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_panic_start(halt_others: bool) {
-    platform_panic_start(halt_others);
-}
-
 /// Platform-specific actions to be taken in a halt situation.
 pub fn platform_specific_halt(
     suggested_action: PlatformHaltAction,
@@ -209,6 +178,7 @@ pub fn platform_specific_halt(
     match suggested_action {
         PlatformHaltAction::Shutdown => {
             if c"QEMU" == manufacturer() {
+                platform_serial_drain_tx();
                 // SAFETY: Writing to the QEMU debug exit port on a QEMU virtual machine to power
                 // off the guest.
                 unsafe {
@@ -259,14 +229,4 @@ pub fn platform_specific_halt(
     loop {
         x86_hlt();
     }
-}
-
-/// FFI trampoline for [`platform_specific_halt`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_specific_halt(
-    suggested_action: PlatformHaltAction,
-    reason: ZirconCrashReason,
-    halt_on_panic: bool,
-) -> ! {
-    platform_specific_halt(suggested_action, reason, halt_on_panic)
 }

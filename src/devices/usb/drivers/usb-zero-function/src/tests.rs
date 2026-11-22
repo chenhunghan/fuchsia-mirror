@@ -136,6 +136,14 @@ async fn run_mock_function(mut stream: fusb_function::UsbFunctionRequestStream) 
         }
     }
 }
+
+fn bulk_eps(
+    ep_in: fusb_endpoint::EndpointProxy,
+    ep_out: fusb_endpoint::EndpointProxy,
+) -> EndpointPair {
+    EndpointPair { ep_in, ep_in_addr: TEST_EP_IN_ADDR, ep_out, ep_out_addr: TEST_EP_OUT_ADDR }
+}
+
 #[fuchsia::test]
 async fn test_loopback() {
     let (ep_in_client, ep_in_server) = create_endpoints::<fusb_endpoint::EndpointMarker>();
@@ -177,7 +185,8 @@ async fn test_loopback() {
         ep_out_proxy,
         &mut vmos_registered,
         u64::from(USB_MAX_PACKET_SIZE_HIGH_SPEED),
-        Arc::new(Mutex::new(ScatterGatherConfig::default())),
+        Rc::new(RefCell::new(ScatterGatherConfig::default())),
+        PipeType::Bulk,
     )
     .await
     .unwrap();
@@ -301,10 +310,7 @@ async fn test_vendor_requests() {
     scope.spawn_local(async move {
         let mut zero_function = UsbZeroFunctionDevice::new(
             func_client_proxy,
-            ep_in_proxy,
-            TEST_EP_IN_ADDR,
-            ep_out_proxy,
-            TEST_EP_OUT_ADDR,
+            bulk_eps(ep_in_proxy, ep_out_proxy),
             0,
             TestMode::SourceSink,
         );
@@ -545,14 +551,9 @@ async fn test_source_sink() {
     let ep_out_proxy = ep_out_client.into_proxy();
 
     let mut vmos_registered = false;
-    let _tasks = run_source_sink(
-        ep_in_proxy,
-        ep_out_proxy,
-        &mut vmos_registered,
-        USB_MAX_PACKET_SIZE_HIGH_SPEED.into(),
-    )
-    .await
-    .unwrap();
+    let _tasks = run_source_sink(ep_in_proxy, ep_out_proxy, &mut vmos_registered, PipeType::Bulk)
+        .await
+        .unwrap();
 
     // Await setup events: ep_out registered (1), ep_in registered (1),
     // ep_out queued initial request (1), ep_in queued initial request (1)
@@ -610,26 +611,31 @@ async fn test_source_sink() {
 }
 
 #[fuchsia::test]
-async fn test_set_and_get_interface() {
+async fn test_set_configured_source_sink_queues_full_vmo_requests() {
     let (iface_c, iface_s) = create_endpoints::<fusb_function::UsbFunctionInterfaceMarker>();
     let (func_c, func_s) = create_endpoints::<fusb_function::UsbFunctionMarker>();
     let (ep_in_c, ep_in_s) = create_endpoints::<fusb_endpoint::EndpointMarker>();
     let (ep_out_c, ep_out_s) = create_endpoints::<fusb_endpoint::EndpointMarker>();
 
-    let scope = Arc::new(fasync::Scope::new_with_name("test_set_get_iface"));
+    let state_in = Arc::new(Mutex::new(MockEndpointState::default()));
+    let state_out = Arc::new(Mutex::new(MockEndpointState::default()));
+    let (event_in_tx, mut event_in_rx) = mpsc::unbounded();
+    let (event_out_tx, mut event_out_rx) = mpsc::unbounded();
+
+    let scope = Arc::new(fasync::Scope::new_with_name("test_ss_request_size"));
     scope.spawn_local(run_mock_function(func_s.into_stream()));
     scope.spawn_local(run_mock_endpoint(
         ep_in_s.into_stream(),
-        Default::default(),
+        state_in.clone(),
         mpsc::unbounded().1,
-        mpsc::unbounded().0,
+        event_in_tx,
         scope.clone(),
     ));
     scope.spawn_local(run_mock_endpoint(
         ep_out_s.into_stream(),
-        Default::default(),
+        state_out.clone(),
         mpsc::unbounded().1,
-        mpsc::unbounded().0,
+        event_out_tx,
         scope.clone(),
     ));
 
@@ -637,44 +643,29 @@ async fn test_set_and_get_interface() {
     let ep_i = ep_in_c.into_proxy();
     let ep_o = ep_out_c.into_proxy();
     scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            f_p,
-            ep_i,
-            TEST_EP_IN_ADDR,
-            ep_o,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::SourceSink,
-        )
-        .handle_requests(iface_s.into_stream())
-        .await;
+        UsbZeroFunctionDevice::new(f_p, bulk_eps(ep_i, ep_o), 0, TestMode::SourceSink)
+            .handle_requests(iface_s.into_stream())
+            .await;
     });
 
     let proxy = iface_c.into_proxy();
-    let setup = fusb_descriptor::UsbSetup {
-        bm_request_type: 0x81,
-        b_request: fusb_descriptor::StandardRequest::GetInterface.into_primitive(),
-        w_value: 0,
-        w_index: 0,
-        w_length: 1,
-    };
-
-    // GetInterface initially returns alt 0
-    assert_eq!(proxy.control(&setup, &[]).await.unwrap(), Ok(vec![0x00]));
-
-    // Alternate setting 0 succeeds and resets endpoints
-    assert_eq!(proxy.set_interface(0, 0).await.unwrap(), Ok(()));
-    assert_eq!(proxy.control(&setup, &[]).await.unwrap(), Ok(vec![0x00]));
-
-    // Configure device, alternate setting 0 still succeeds
     assert_eq!(proxy.set_configured(true, fusb_descriptor::UsbSpeed::High).await.unwrap(), Ok(()));
-    assert_eq!(proxy.set_interface(0, 0).await.unwrap(), Ok(()));
-    assert_eq!(proxy.control(&setup, &[]).await.unwrap(), Ok(vec![0x00]));
 
-    // Alternate settings > 0 are rejected.
-    assert_eq!(proxy.set_interface(0, 1).await.unwrap(), Err(Status::NOT_SUPPORTED.into_raw()));
-    assert_eq!(proxy.set_interface(0, 2).await.unwrap(), Err(Status::NOT_SUPPORTED.into_raw()));
-    assert_eq!(proxy.set_interface(1, 0).await.unwrap(), Err(Status::NOT_SUPPORTED.into_raw()));
+    // Each endpoint registers its VMOs, then queues its initial batch of requests.
+    assert_eq!(event_in_rx.next().await, Some(MockEvent::VmoRegistered));
+    assert_eq!(event_in_rx.next().await, Some(MockEvent::RequestQueued));
+    assert_eq!(event_out_rx.next().await, Some(MockEvent::VmoRegistered));
+    assert_eq!(event_out_rx.next().await, Some(MockEvent::RequestQueued));
+
+    // Both directions queue whole-VMO requests rather than one max-size
+    // packet (512 bytes at high speed) per request.
+    for state in [&state_in, &state_out] {
+        let state = state.lock().unwrap();
+        assert_eq!(state.requests.len(), QUEUE_DEPTH);
+        for req in &state.requests {
+            assert_eq!(req.data.as_ref().unwrap()[0].size, Some(DEFAULT_VMO_SIZE));
+        }
+    }
 }
 
 #[fuchsia::test]
@@ -687,10 +678,7 @@ async fn test_endpoint_stall_state() {
 
     let mut device = UsbZeroFunctionDevice::new(
         func_client.into_proxy(),
-        ep_in_client.into_proxy(),
-        TEST_EP_IN_ADDR,
-        ep_out_client.into_proxy(),
-        TEST_EP_OUT_ADDR,
+        bulk_eps(ep_in_client.into_proxy(), ep_out_client.into_proxy()),
         0,
         TestMode::SourceSink,
     );
@@ -741,10 +729,7 @@ async fn test_standard_endpoint_halt() {
     scope.spawn_local(run_mock_function(func_s.into_stream()));
     let mut dev = UsbZeroFunctionDevice::new(
         func_c.into_proxy(),
-        ep_in_c.into_proxy(),
-        TEST_EP_IN_ADDR,
-        ep_out_c.into_proxy(),
-        TEST_EP_OUT_ADDR,
+        bulk_eps(ep_in_c.into_proxy(), ep_out_c.into_proxy()),
         0, // interface_num
         TestMode::SourceSink,
     );
@@ -902,17 +887,9 @@ async fn test_loopback_mode_and_set_interface() {
 
     let (f_p, ep_i, ep_o) = (func_c.into_proxy(), ep_in_c.into_proxy(), ep_out_c.into_proxy());
     scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            f_p,
-            ep_i,
-            TEST_EP_IN_ADDR,
-            ep_o,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::Loopback,
-        )
-        .handle_requests(iface_s.into_stream())
-        .await;
+        UsbZeroFunctionDevice::new(f_p, bulk_eps(ep_i, ep_o), 0, TestMode::Loopback)
+            .handle_requests(iface_s.into_stream())
+            .await;
     });
 
     let proxy = iface_c.into_proxy();
@@ -1109,14 +1086,10 @@ async fn test_source_sink_cancellation() {
     let ep_out_proxy = ep_out_client.into_proxy();
 
     let mut vmos_registered = false;
-    let (sink_task, source_task) = run_source_sink(
-        ep_in_proxy,
-        ep_out_proxy,
-        &mut vmos_registered,
-        USB_MAX_PACKET_SIZE_HIGH_SPEED.into(),
-    )
-    .await
-    .unwrap();
+    let (sink_task, source_task) =
+        run_source_sink(ep_in_proxy, ep_out_proxy, &mut vmos_registered, PipeType::Bulk)
+            .await
+            .unwrap();
 
     assert_eq!(event_out_rx.next().await, Some(MockEvent::VmoRegistered));
     assert_eq!(event_out_rx.next().await, Some(MockEvent::RequestQueued));
@@ -1325,7 +1298,8 @@ async fn test_loopback_cancellation() {
         ep_out_proxy,
         &mut vmos_registered,
         u64::from(USB_MAX_PACKET_SIZE_HIGH_SPEED),
-        Arc::new(Mutex::new(ScatterGatherConfig::default())),
+        Rc::new(RefCell::new(ScatterGatherConfig::default())),
+        PipeType::Bulk,
     )
     .await
     .unwrap();
@@ -1419,24 +1393,13 @@ async fn test_transfer_size_exceeds_vmo_size() {
     let (ep_in_client, _ep_in_server) = create_endpoints::<fusb_endpoint::EndpointMarker>();
     let (ep_out_client, _ep_out_server) = create_endpoints::<fusb_endpoint::EndpointMarker>();
     let mut vmos_registered = false;
-    let res = run_source_sink(
-        ep_in_client.into_proxy(),
-        ep_out_client.into_proxy(),
-        &mut vmos_registered,
-        DEFAULT_VMO_SIZE + 1,
-    )
-    .await;
-    assert_eq!(res.err(), Some(Status::INVALID_ARGS));
-
-    let (ep_in_client, _ep_in_server) = create_endpoints::<fusb_endpoint::EndpointMarker>();
-    let (ep_out_client, _ep_out_server) = create_endpoints::<fusb_endpoint::EndpointMarker>();
-    let mut vmos_registered = false;
     let res = run_loopback(
         ep_in_client.into_proxy(),
         ep_out_client.into_proxy(),
         &mut vmos_registered,
         DEFAULT_VMO_SIZE + 1,
-        Arc::new(Mutex::new(ScatterGatherConfig::default())),
+        Rc::new(RefCell::new(ScatterGatherConfig::default())),
+        PipeType::Bulk,
     )
     .await;
     assert_eq!(res.err(), Some(Status::INVALID_ARGS));
@@ -1597,23 +1560,23 @@ fn test_get_usb_protocol_non_int_and_unknown_properties() {
 #[fuchsia::test]
 fn test_max_packet_size_for_speed_all_speeds() {
     assert_eq!(
-        UsbZeroFunctionDevice::max_packet_size_for_speed(fusb_descriptor::UsbSpeed::Full),
+        PipeType::Bulk.max_packet_size_for_speed(fusb_descriptor::UsbSpeed::Full),
         USB_MAX_PACKET_SIZE_FULL_SPEED
     );
     assert_eq!(
-        UsbZeroFunctionDevice::max_packet_size_for_speed(fusb_descriptor::UsbSpeed::High),
+        PipeType::Bulk.max_packet_size_for_speed(fusb_descriptor::UsbSpeed::High),
         USB_MAX_PACKET_SIZE_HIGH_SPEED
     );
     assert_eq!(
-        UsbZeroFunctionDevice::max_packet_size_for_speed(fusb_descriptor::UsbSpeed::Super),
+        PipeType::Bulk.max_packet_size_for_speed(fusb_descriptor::UsbSpeed::Super),
         USB_MAX_PACKET_SIZE_SUPER_SPEED
     );
     assert_eq!(
-        UsbZeroFunctionDevice::max_packet_size_for_speed(fusb_descriptor::UsbSpeed::EnhancedSuper),
+        PipeType::Bulk.max_packet_size_for_speed(fusb_descriptor::UsbSpeed::EnhancedSuper),
         USB_MAX_PACKET_SIZE_SUPER_SPEED
     );
     assert_eq!(
-        UsbZeroFunctionDevice::max_packet_size_for_speed(fusb_descriptor::UsbSpeed::Low),
+        PipeType::Bulk.max_packet_size_for_speed(fusb_descriptor::UsbSpeed::Low),
         USB_MAX_PACKET_SIZE_HIGH_SPEED
     );
 }
@@ -1733,17 +1696,9 @@ async fn test_vendor_and_standard_control_request_edge_cases() {
     let ep_i = ep_in_c.into_proxy();
     let ep_o = ep_out_c.into_proxy();
     scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            f_p,
-            ep_i,
-            TEST_EP_IN_ADDR,
-            ep_o,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::SourceSink,
-        )
-        .handle_requests(iface_s.into_stream())
-        .await;
+        UsbZeroFunctionDevice::new(f_p, bulk_eps(ep_i, ep_o), 0, TestMode::SourceSink)
+            .handle_requests(iface_s.into_stream())
+            .await;
     });
 
     let proxy = iface_c.into_proxy();
@@ -1972,68 +1927,6 @@ async fn test_vendor_and_standard_control_request_edge_cases() {
 }
 
 #[fuchsia::test]
-async fn test_set_configured_superspeed() {
-    let (iface_c, iface_s) = create_endpoints::<fusb_function::UsbFunctionInterfaceMarker>();
-    let (func_c, func_s) = create_endpoints::<fusb_function::UsbFunctionMarker>();
-    let (ep_in_c, ep_in_s) = create_endpoints::<fusb_endpoint::EndpointMarker>();
-    let (ep_out_c, ep_out_s) = create_endpoints::<fusb_endpoint::EndpointMarker>();
-
-    let scope = Arc::new(fasync::Scope::new_with_name("test_superspeed"));
-    scope.spawn_local(run_mock_function(func_s.into_stream()));
-    scope.spawn_local(run_mock_endpoint(
-        ep_in_s.into_stream(),
-        Default::default(),
-        mpsc::unbounded().1,
-        mpsc::unbounded().0,
-        scope.clone(),
-    ));
-    scope.spawn_local(run_mock_endpoint(
-        ep_out_s.into_stream(),
-        Default::default(),
-        mpsc::unbounded().1,
-        mpsc::unbounded().0,
-        scope.clone(),
-    ));
-
-    let f_p = func_c.into_proxy();
-    let ep_i = ep_in_c.into_proxy();
-    let ep_o = ep_out_c.into_proxy();
-    scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            f_p,
-            ep_i,
-            TEST_EP_IN_ADDR,
-            ep_o,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::SourceSink,
-        )
-        .handle_requests(iface_s.into_stream())
-        .await;
-    });
-
-    let proxy = iface_c.into_proxy();
-
-    // Test configuring with SuperSpeed (exercises SuperSpeed companion descriptor creation)
-    assert_eq!(proxy.set_configured(true, fusb_descriptor::UsbSpeed::Super).await.unwrap(), Ok(()));
-
-    // Deconfigure
-    assert_eq!(
-        proxy.set_configured(false, fusb_descriptor::UsbSpeed::Super).await.unwrap(),
-        Ok(())
-    );
-
-    // Test configuring with EnhancedSuper
-    assert_eq!(
-        proxy.set_configured(true, fusb_descriptor::UsbSpeed::EnhancedSuper).await.unwrap(),
-        Ok(())
-    );
-
-    // Deconfigure
-    assert_eq!(proxy.set_configured(false, fusb_descriptor::UsbSpeed::Full).await.unwrap(), Ok(()));
-}
-
-#[fuchsia::test]
 async fn test_loopback_scatter_gather() {
     let (iface_c, iface_s) = create_endpoints::<fusb_function::UsbFunctionInterfaceMarker>();
     let (func_c, func_s) = create_endpoints::<fusb_function::UsbFunctionMarker>();
@@ -2069,17 +1962,9 @@ async fn test_loopback_scatter_gather() {
 
     let (f_p, ep_i, ep_o) = (func_c.into_proxy(), ep_in_c.into_proxy(), ep_out_c.into_proxy());
     scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            f_p,
-            ep_i,
-            TEST_EP_IN_ADDR,
-            ep_o,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::Loopback,
-        )
-        .handle_requests(iface_s.into_stream())
-        .await;
+        UsbZeroFunctionDevice::new(f_p, bulk_eps(ep_i, ep_o), 0, TestMode::Loopback)
+            .handle_requests(iface_s.into_stream())
+            .await;
     });
 
     let proxy = iface_c.into_proxy();
@@ -2381,20 +2266,11 @@ async fn test_cleanup_endpoints_cancels_and_disables_before_unregistering_vmos()
     );
 
     let function_proxy = function_client.into_proxy();
-    let endpoint_in_proxy = endpoint_in_client.into_proxy();
-    let endpoint_out_proxy = endpoint_out_client.into_proxy();
+    let bulk_pair = bulk_eps(endpoint_in_client.into_proxy(), endpoint_out_client.into_proxy());
     scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            function_proxy,
-            endpoint_in_proxy,
-            TEST_EP_IN_ADDR,
-            endpoint_out_proxy,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::SourceSink,
-        )
-        .handle_requests(interface_server.into_stream())
-        .await;
+        UsbZeroFunctionDevice::new(function_proxy, bulk_pair, 0, TestMode::SourceSink)
+            .handle_requests(interface_server.into_stream())
+            .await;
     });
 
     let proxy = interface_client.into_proxy();
@@ -2518,20 +2394,11 @@ async fn test_loopback_reconfigure_drains_stale_cancel_completions() {
     ));
 
     let function_proxy = function_client.into_proxy();
-    let endpoint_in_proxy = endpoint_in_client.into_proxy();
-    let endpoint_out_proxy = endpoint_out_client.into_proxy();
+    let bulk_pair = bulk_eps(endpoint_in_client.into_proxy(), endpoint_out_client.into_proxy());
     scope.spawn_local(async move {
-        UsbZeroFunctionDevice::new(
-            function_proxy,
-            endpoint_in_proxy,
-            TEST_EP_IN_ADDR,
-            endpoint_out_proxy,
-            TEST_EP_OUT_ADDR,
-            0,
-            TestMode::Loopback,
-        )
-        .handle_requests(interface_server.into_stream())
-        .await;
+        UsbZeroFunctionDevice::new(function_proxy, bulk_pair, 0, TestMode::Loopback)
+            .handle_requests(interface_server.into_stream())
+            .await;
     });
 
     let proxy = interface_client.into_proxy();

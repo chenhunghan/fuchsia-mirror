@@ -31,10 +31,10 @@ fidl("fuchsia.posix.socket.packet") {
   sources = [ "socket.fidl" ]
   sdk_area = "Netstack"
   sdk_category = "prebuilt"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [
+    "//sdk/fidl/fuchsia.ebpf",
     "//sdk/fidl/fuchsia.net",
     "//sdk/fidl/fuchsia.posix",
     "//sdk/fidl/fuchsia.posix.socket",

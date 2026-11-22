@@ -12,7 +12,7 @@ declare_args() {
   # machine.
   #
   # IMPORTANT: This feature requires a version of Ninja that implements
-  # the `--jobserver` option. See https://fxbug.dev/42163397 for details.
+  # the `--jobserver-pool` option. See https://fxbug.dev/42163397 for details.
   #
   enable_jobserver = false
 }

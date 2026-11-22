@@ -10,9 +10,14 @@ use crate::fuchsia::pager::PagerBacked;
 use crate::fuchsia::volume::{FxVolumeAndRoot, MemoryPressureConfig};
 use crate::fuchsia::volumes_directory::VolumesDirectory;
 use anyhow::{Context, Error};
+use blob_pager_and_verifier::BlobPagerAndVerifier;
+use block_server::serve_device_mapper;
 use fidl::endpoints::create_proxy;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_memorypressure::WatcherProxy;
+use fidl_fuchsia_storage_block as fblock;
+use fidl_fuchsia_storage_mapping as fmapping;
+use fuchsia_component_client::connect_to_protocol_at_dir_svc;
 use fuchsia_sync::Mutex;
 use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem};
 use fxfs::fsck::errors::FsckIssue;
@@ -38,6 +43,7 @@ struct State {
     root: fio::DirectoryProxy,
     volumes_directory: Arc<VolumesDirectory>,
     mem_pressure_proxy: WatcherProxy,
+    blob_pager: Option<BlobPagerAndVerifier>,
 }
 
 pub struct TestFixture {
@@ -51,7 +57,6 @@ pub struct TestFixtureOptions {
     pub format: bool,
     pub hooks: Option<Arc<HooksHandle>>,
     pub allow_type3_blobs: bool,
-    pub use_driver_blob_paging: bool,
 }
 
 impl Default for TestFixtureOptions {
@@ -62,7 +67,6 @@ impl Default for TestFixtureOptions {
             format: true,
             hooks: None,
             allow_type3_blobs: false,
-            use_driver_blob_paging: false,
         }
     }
 }
@@ -226,10 +230,6 @@ impl TestFixture {
             (filesystem, vol, volumes_directory)
         };
 
-        if options.as_blob && options.use_driver_blob_paging {
-            volume.volume().set_use_driver_blob_paging(true);
-        }
-
         let (root, server_end) = create_proxy::<fio::DirectoryMarker>();
         volume.root().clone().serve(fio::PERM_READABLE | fio::PERM_WRITABLE, server_end);
 
@@ -238,6 +238,24 @@ impl TestFixture {
         volumes_directory
             .serve_volume(&volume, server_end, options.as_blob)
             .expect("serve_volume failed");
+
+        let blob_pager = if options.as_blob {
+            let (mapper_proxy, mapper_server_end) = create_proxy::<fblock::MapperMarker>();
+            let device = filesystem.device().clone();
+            volume.volume().scope().spawn(async move {
+                serve_device_mapper(device, mapper_server_end.into_stream()).await;
+            });
+            let mapping_provider =
+                connect_to_protocol_at_dir_svc::<fmapping::MappingProviderMarker>(&volume_out_dir)
+                    .expect("failed to connect to MappingProvider");
+            Some(
+                BlobPagerAndVerifier::new_with_cache_capacity(&mapping_provider, &mapper_proxy, 0)
+                    .await
+                    .expect("failed to create BlobPagerAndVerifier"),
+            )
+        } else {
+            None
+        };
 
         let encrypted = if options.encrypted { Some(crypt.clone()) } else { None };
         Self {
@@ -248,6 +266,7 @@ impl TestFixture {
                 root,
                 volumes_directory,
                 mem_pressure_proxy,
+                blob_pager,
             }),
             encrypted,
         }
@@ -347,6 +366,10 @@ impl TestFixture {
 
     pub fn memory_pressure_proxy(&self) -> &WatcherProxy {
         &self.state.as_ref().unwrap().mem_pressure_proxy
+    }
+
+    pub fn blob_pager(&self) -> Option<&BlobPagerAndVerifier> {
+        self.state.as_ref().unwrap().blob_pager.as_ref()
     }
 }
 

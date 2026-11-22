@@ -16,6 +16,7 @@
 #include <lib/fdf/cpp/dispatcher.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <zircon/listnode.h>
 
 #include <array>
@@ -27,8 +28,6 @@
 #include <usb/cdc.h>
 #include <usb/request-fidl.h>
 #include <usb/usb.h>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace usb_cdc_function {
 

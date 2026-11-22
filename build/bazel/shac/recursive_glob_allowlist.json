@@ -5,6 +5,7 @@
         "build/bazel/toolchains/clang/prebuilt_llvm.BUILD.bazel",
         "build/bazel/toolchains/linux_sysroot.bzl",
         "build/bazel/toplevel.BUILD.bazel",
+        "build/bazel/toplevel.REPO.bazel",
         "build/bazel_sdk/bazel_rules_fuchsia/common/BUILD.bazel",
         "build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/clang_utils.bzl",
         "build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/repository_utils.bzl",

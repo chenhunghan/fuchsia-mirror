@@ -1,9 +1,0 @@
-{
-    "short_description": "AMLogic display canvas driver",
-    "manufacturer": "AMLogic",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Display"
-    ]
-}

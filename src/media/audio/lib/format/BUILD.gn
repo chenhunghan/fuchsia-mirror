@@ -87,7 +87,7 @@ cc_test_executable("unittest-bin") {
     ":format",
     "//src/lib/fxl/test:gtest_main",
     "//src/zircon/lib/zircon",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
   testonly = true
   emit_tool_path = false
@@ -97,4 +97,7 @@ fuchsia_unittest_package("audio_lib_format_unittests") {
   package_name = "audio_lib_format_unittests-gn"
   component_name = "audio_lib_format_unittests"
   deps = [ ":unittest-bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }

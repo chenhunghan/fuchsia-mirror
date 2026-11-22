@@ -16,7 +16,7 @@
 #include <span>
 #include <string_view>
 
-#include "../asm-linkage.h"  // TODO(https://fxbug.dev/342469121): see below
+#include "../asm-linkage.h"  // TODO(https://fxbug.dev/349433421): see below
 #include "../zircon/vmar.h"
 #include "src/__support/macros/config.h"
 #include "stack-abi.h"
@@ -255,7 +255,7 @@ class ThreadStorage {
   // This acquires the information from the dynamic linker or from a static
   // PIE's own PT_TLS segment.
   static elfldltl::TlsLayout<> GetTlsLayout()
-      // TODO(https://fxbug.dev/342469121): This and InitializeTls only need
+      // TODO(https://fxbug.dev/349433421): This and InitializeTls only need
       // asm-linkage to be defined in a separate hermetic_source_set() that
       // allows the startup code to be shared between legacy and new
       // implementations.  When the legacy implementation is retired, these can
@@ -266,7 +266,7 @@ class ThreadStorage {
   // thread and that the space set aside for static TLS is all zero bytes now,
   // this will initialize all its PT_TLS segments properly.
   static void InitializeTls(std::span<std::byte> thread_block, size_t tp_offset)
-      // TODO(https://fxbug.dev/342469121): see above
+      // TODO(https://fxbug.dev/349433421): see above
       LIBC_ASM_LINKAGE_DECLARE(InitializeTls);
 
   PageRoundedSize stack_size_, guard_size_;

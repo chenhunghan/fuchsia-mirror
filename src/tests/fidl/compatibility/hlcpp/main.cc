@@ -377,8 +377,8 @@ class EchoServerApp : public Echo {
     }
   }
 
-  void EchoXunions(std::vector<AllTypesXunion> value, std::string forward_to_server,
-                   EchoXunionsCallback callback) override {
+  void EchoFlexibleUnions(std::vector<AllTypesFlexibleUnion> value, std::string forward_to_server,
+                          EchoFlexibleUnionsCallback callback) override {
     if (!forward_to_server.empty()) {
       EchoClientApp app;
       bool failed = false;
@@ -389,12 +389,13 @@ class EchoServerApp : public Echo {
       });
       app.Connect();
       bool called_back = false;
-      app.echo()->EchoXunions(std::move(value), "",
-                              [this, &called_back, &callback](std::vector<AllTypesXunion> resp) {
-                                called_back = true;
-                                callback(std::move(resp));
-                                loop_->Quit();
-                              });
+      app.echo()->EchoFlexibleUnions(
+          std::move(value), "",
+          [this, &called_back, &callback](std::vector<AllTypesFlexibleUnion> resp) {
+            called_back = true;
+            callback(std::move(resp));
+            loop_->Quit();
+          });
       while (!called_back && !failed) {
         loop_->Run();
       }
@@ -404,9 +405,9 @@ class EchoServerApp : public Echo {
     }
   }
 
-  void EchoXunionsWithError(std::vector<AllTypesXunion> value, default_enum err,
-                            std::string forward_to_server, RespondWith result_variant,
-                            EchoXunionsWithErrorCallback callback) override {
+  void EchoFlexibleUnionsWithError(std::vector<AllTypesFlexibleUnion> value, default_enum err,
+                                   std::string forward_to_server, RespondWith result_variant,
+                                   EchoFlexibleUnionsWithErrorCallback callback) override {
     if (!forward_to_server.empty()) {
       EchoClientApp app;
       bool failed = false;
@@ -417,9 +418,9 @@ class EchoServerApp : public Echo {
       });
       app.Connect();
       bool called_back = false;
-      app.echo()->EchoXunionsWithError(
+      app.echo()->EchoFlexibleUnionsWithError(
           std::move(value), std::move(err), "", result_variant,
-          [this, &called_back, &callback](Echo_EchoXunionsWithError_Result result) {
+          [this, &called_back, &callback](Echo_EchoFlexibleUnionsWithError_Result result) {
             called_back = true;
             callback(std::move(result));
             loop_->Quit();
@@ -429,11 +430,11 @@ class EchoServerApp : public Echo {
       }
       loop_->ResetQuit();
     } else {
-      Echo_EchoXunionsWithError_Result result;
+      Echo_EchoFlexibleUnionsWithError_Result result;
       if (result_variant == RespondWith::ERR) {
         result.set_err(err);
       } else {
-        result.set_response(Echo_EchoXunionsWithError_Response(std::move(value)));
+        result.set_response(Echo_EchoFlexibleUnionsWithError_Response(std::move(value)));
       }
       callback(std::move(result));
     }

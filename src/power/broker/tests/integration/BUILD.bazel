@@ -1,0 +1,94 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":power-broker-integration-test"],
+    visibility = ["//src/power:__pkg__"],
+)
+
+rustc_test(
+    name = "power_broker_test",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    # Device-packaged integration test depending on Fuchsia-only crates.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+        "//src/power/broker/client",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:futures-util",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":power_broker_test",
+    # Matches `program.binary` in meta/test-root.cml.
+    binary_name = "power_broker_test",
+)
+
+fx_component_manifest(
+    name = "test-root_manifest",
+    testonly = True,
+    component_name = "test-root",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/test-root.cml",
+)
+
+fx_test_component(
+    name = "test-root",
+    compiled_manifest = ":test-root_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "power-broker-integration-test",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//src/power/broker:component",
+    ],
+    test_components = [":test-root"],
+)
+
+fx_test(
+    name = "power-broker-integration-test",
+    package = ":package",
+)

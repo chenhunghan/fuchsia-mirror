@@ -160,6 +160,29 @@ class Escher final {
   bool allow_ycbcr() const { return device_->caps().allow_ycbcr; }
 
  private:
+  friend class impl::DescriptorSetAllocator;
+  friend class VulkanTester;
+
+  // The command buffer retirement half of `Cleanup()`, without storing pipeline
+  // cache data. Synchronously runs the `CommandBufferFinishedCallback` of each
+  // retired command buffer. Returns true if all pending command buffers are
+  // finished. A re-entrant call from inside a `CommandBufferFinishedCallback`
+  // does no work on the pool currently running `CommandBufferPool::Cleanup()`
+  // and returns false.
+  bool CleanupCommandBufferPools();
+
+  // Wait up to `timeout_nanoseconds` for the oldest pending command buffer
+  // across all command buffer pools. Returns true only when its fence has
+  // signaled (or its submission already failed), and false if no command buffer
+  // is pending, the oldest pending buffer has not been submitted, its pool is
+  // inside `CommandBufferPool::Cleanup()` (a re-entrant call from a
+  // `CommandBufferFinishedCallback`), `timeout_nanoseconds` elapses, or
+  // `vkWaitForFences()` returns an error such as `VK_ERROR_DEVICE_LOST`. Does not
+  // retire the buffer; call `CleanupCommandBufferPools()` or `Cleanup()`
+  // afterward to retire it and advance `last_finished_sequence_number()` before
+  // waiting again.
+  bool WaitOnOldestPendingCommandBuffer(uint64_t timeout_nanoseconds);
+
   VulkanDeviceQueuesPtr device_;
   VulkanContext vulkan_context_;
 

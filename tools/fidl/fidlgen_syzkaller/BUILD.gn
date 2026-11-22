@@ -17,6 +17,7 @@ if (is_host) {
     install_host_tool = true
   }
 
+  # LINT.IfChange(goldens)
   fidl_testdata_info_filtered = []
   foreach(info, fidl_testdata_info) {
     if (info.denylist + [ "fidlgen_syzkaller" ] - [ "fidlgen_syzkaller" ] ==
@@ -58,6 +59,8 @@ if (is_host) {
       ]
     }
   }
+
+  # LINT.ThenChange(BUILD.bazel:goldens)
 }
 
 group("tests") {

@@ -62,16 +62,20 @@ impl DynamicFileSource for MeminfoFile {
         let swap_total = 3 * mem_total / 4;
         let swap_free = swap_total.saturating_sub(swap_used);
 
-        writeln!(sink, "MemTotal:       {:8} kB", mem_total)?;
-        writeln!(sink, "MemFree:        {:8} kB", mem_free)?;
-        writeln!(sink, "MemAvailable:   {:8} kB", mem_available)?;
-        writeln!(sink, "Cached:         {:8} kB", userpager_total)?;
-        writeln!(sink, "SwapTotal:      {:8} kB", swap_total)?;
-        writeln!(sink, "SwapFree:       {:8} kB", swap_free)?;
-        writeln!(sink, "Active(anon):   {:8} kB", anonymous_total)?;
-        writeln!(sink, "Inactive(anon): {:8} kB", 0)?;
-        writeln!(sink, "Active(file):   {:8} kB", userpager_active)?;
-        writeln!(sink, "Inactive(file): {:8} kB", userpager_inactive)?;
+        sink.reserve(512);
+        write!(
+            sink,
+            "MemTotal:       {mem_total:8} kB\n\
+             MemFree:        {mem_free:8} kB\n\
+             MemAvailable:   {mem_available:8} kB\n\
+             Cached:         {userpager_total:8} kB\n\
+             SwapTotal:      {swap_total:8} kB\n\
+             SwapFree:       {swap_free:8} kB\n\
+             Active(anon):   {anonymous_total:8} kB\n\
+             Inactive(anon):        0 kB\n\
+             Active(file):   {userpager_active:8} kB\n\
+             Inactive(file): {userpager_inactive:8} kB\n",
+        )?;
 
         Ok(())
     }

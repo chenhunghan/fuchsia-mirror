@@ -129,7 +129,7 @@
     {
       "name": "test.driverhandle/DriverProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
         "line": 10,
         "column": 17,
         "length": 14
@@ -153,7 +153,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
                 "line": 9,
                 "column": 12,
                 "length": 8
@@ -161,7 +161,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 9,
             "column": 1,
             "length": 20
@@ -175,7 +175,7 @@
     {
       "name": "test.driverhandle/HandlesInProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
         "line": 24,
         "column": 17,
         "length": 17
@@ -199,7 +199,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
                 "line": 22,
                 "column": 12,
                 "length": 8
@@ -207,7 +207,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 22,
             "column": 1,
             "length": 20
@@ -221,27 +221,27 @@
               "type": "string",
               "value": {
                 "kind": "literal",
-                "value": "rust, cpp, hlcpp, dart",
-                "expression": "\"rust, cpp, hlcpp, dart\"",
+                "value": "rust, hlcpp, dart",
+                "expression": "\"rust, hlcpp, dart\"",
                 "literal": {
                   "kind": "string",
-                  "value": "rust, cpp, hlcpp, dart",
-                  "expression": "\"rust, cpp, hlcpp, dart\""
+                  "value": "rust, hlcpp, dart",
+                  "expression": "\"rust, hlcpp, dart\""
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
                 "line": 23,
                 "column": 20,
-                "length": 24
+                "length": 19
               }
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 23,
             "column": 1,
-            "length": 44
+            "length": 39
           }
         }
       ],
@@ -254,7 +254,7 @@
           "name": "SendHandles",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 25,
             "column": 12,
             "length": 11
@@ -290,7 +290,7 @@
         "ClientEndWrapper"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
         "line": 13,
         "column": 6,
         "length": 16
@@ -305,27 +305,27 @@
               "type": "string",
               "value": {
                 "kind": "literal",
-                "value": "rust, cpp, hlcpp, dart",
-                "expression": "\"rust, cpp, hlcpp, dart\"",
+                "value": "rust, hlcpp, dart",
+                "expression": "\"rust, hlcpp, dart\"",
                 "literal": {
                   "kind": "string",
-                  "value": "rust, cpp, hlcpp, dart",
-                  "expression": "\"rust, cpp, hlcpp, dart\""
+                  "value": "rust, hlcpp, dart",
+                  "expression": "\"rust, hlcpp, dart\""
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
                 "line": 12,
                 "column": 20,
-                "length": 24
+                "length": 19
               }
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 12,
             "column": 1,
-            "length": 44
+            "length": 39
           }
         }
       ],
@@ -349,7 +349,7 @@
           },
           "name": "value",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 14,
             "column": 5,
             "length": 5
@@ -381,7 +381,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
         "line": 25,
         "column": 24,
         "length": 160
@@ -405,7 +405,7 @@
           },
           "name": "t",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 26,
             "column": 9,
             "length": 1
@@ -435,7 +435,7 @@
         "ServerEndWrapper"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
         "line": 18,
         "column": 6,
         "length": 16
@@ -450,27 +450,27 @@
               "type": "string",
               "value": {
                 "kind": "literal",
-                "value": "rust, cpp, hlcpp, dart",
-                "expression": "\"rust, cpp, hlcpp, dart\"",
+                "value": "rust, hlcpp, dart",
+                "expression": "\"rust, hlcpp, dart\"",
                 "literal": {
                   "kind": "string",
-                  "value": "rust, cpp, hlcpp, dart",
-                  "expression": "\"rust, cpp, hlcpp, dart\""
+                  "value": "rust, hlcpp, dart",
+                  "expression": "\"rust, hlcpp, dart\""
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
                 "line": 17,
                 "column": 20,
-                "length": 24
+                "length": 19
               }
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 17,
             "column": 1,
-            "length": 44
+            "length": 39
           }
         }
       ],
@@ -494,7 +494,7 @@
           },
           "name": "value",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 19,
             "column": 5,
             "length": 5
@@ -530,7 +530,7 @@
         "t"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
         "line": 26,
         "column": 11,
         "length": 125
@@ -558,7 +558,7 @@
           },
           "name": "zircon_handle",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 27,
             "column": 16,
             "length": 13
@@ -585,7 +585,7 @@
           },
           "name": "fdf_handle",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/driver_handle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/driver_handle.test.fidl",
             "line": 28,
             "column": 16,
             "length": 10

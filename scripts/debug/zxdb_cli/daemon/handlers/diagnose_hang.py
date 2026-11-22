@@ -4,10 +4,10 @@
 
 import asyncio
 import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Final
 
 from daemon.handlers.handles import parse_handles_table_output
-from pydap.models import StackTraceArguments
 from shared.protocol.base import Response
 from shared.protocol.diagnose_hang import (
     COMMAND_NAME,
@@ -20,6 +20,7 @@ from zxdb_dap import (
     AsyncTaskNode,
     ZxdbAsyncBacktraceArguments,
     ZxdbConsoleCommandArguments,
+    ZxdbStackTraceArguments,
 )
 
 __all__ = [
@@ -34,6 +35,13 @@ if TYPE_CHECKING:
 
 _MAX_CLASSIFIED_FRAMES: Final[int] = 8
 _MS_PER_SECOND: Final[float] = 1000.0
+
+# Caller description for a frame without a symbol. `modules` is not
+# suggested here because it turns a weak attach into a strong one.
+_UNSYMBOLIZED_CALLER: Final[str] = (
+    "code without symbols (the binary on the device may not match the local"
+    " build, or its symbols are not in the symbol index)"
+)
 
 # Async task roots that group other tasks rather than being tasks themselves.
 _SCOPE_ROOT_NAMES: Final[frozenset[str]] = frozenset({"fdf::Dispatcher"})
@@ -102,16 +110,39 @@ def _match_frame_pattern(
 
 
 def _find_caller_frame(
-    frame_names: list[str],
+    frames: Sequence[Any],
     wrapper_patterns: tuple[str, ...],
     fallback: str,
     start_index: int = 0,
 ) -> str:
-    """Returns the first frame after start_index outside wrapper_patterns and the Zircon vDSO."""
+    """Returns the first frame after start_index outside wrapper_patterns and the Zircon vDSO.
+
+    Only the first _MAX_CLASSIFIED_FRAMES frames are searched.
+
+    The search stops at a frame with no symbol and reports
+    _UNSYMBOLIZED_CALLER. Such a frame is usually program code whose module
+    has no symbols loaded (for example, a binary that does not match the
+    local build), so the symbolized frames below it may not have made the
+    call. An unsymbolized last frame is skipped instead: it is the thread
+    entry or the unwinder's end marker.
+
+    Frames found by stack scanning are often not real return addresses, so
+    the search also stops at the first one.
+    """
     last_non_vdso = fallback
-    for fn in frame_names[start_index:]:
-        if not fn or "vdso" in fn.lower():
+    last_index = len(frames) - 1
+    for idx in range(start_index, min(len(frames), _MAX_CLASSIFIED_FRAMES)):
+        frame = frames[idx]
+        trust = getattr(frame, "trust", None)
+        if isinstance(trust, str) and trust.lower() == "scan":
+            break
+        fn = getattr(frame, "name", "") or ""
+        if "vdso" in fn.lower():
             continue
+        if not fn or fn.startswith("0x"):
+            if idx == last_index:
+                continue
+            return _UNSYMBOLIZED_CALLER
         if not any(p in fn for p in wrapper_patterns):
             return fn
         last_non_vdso = fn
@@ -139,7 +170,7 @@ def classify_thread_stack(
     if match := _match_frame_pattern(frame_names, _IPC_PATTERNS):
         idx, fname = match
         caller = _find_caller_frame(
-            frame_names, _IPC_PATTERNS, fname, start_index=idx + 1
+            frames, _IPC_PATTERNS, fname, start_index=idx + 1
         )
         return ClassifiedThread(
             thread_id=thread_id,
@@ -159,7 +190,7 @@ def classify_thread_stack(
     if match := _match_frame_pattern(frame_names, _LOCK_PATTERNS):
         idx, fname = match
         caller = _find_caller_frame(
-            frame_names, _LOCK_PATTERNS, fname, start_index=idx + 1
+            frames, _LOCK_PATTERNS, fname, start_index=idx + 1
         )
         return ClassifiedThread(
             thread_id=thread_id,
@@ -303,8 +334,10 @@ async def _collect_process_thread_stacks(
     for tid, t_name in threads_to_inspect:
         thread_names[tid] = t_name
         try:
-            st_resp = await daemon.dap_client.stack_trace(
-                StackTraceArguments(thread_id=tid)
+            # zxdb_stack_trace keeps zxdb's per-frame unwind trust, which
+            # _find_caller_frame uses to detect scanned frames.
+            st_resp = await daemon.dap_client.zxdb_stack_trace(
+                ZxdbStackTraceArguments(thread_id=tid)
             )
             thread_stacks[tid] = (
                 st_resp.body.stack_frames

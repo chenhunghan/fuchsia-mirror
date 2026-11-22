@@ -39,26 +39,8 @@ impl FfxMain for GenerateTool {
     type Error = fho::Error;
 
     async fn main(self, _writer: SimpleWriter) -> Result<()> {
-        let manifest_path = if self.cmd.target.is_dir() {
-            let pb = product_bundle::ProductBundle::try_load_from(&self.cmd.target)
-                .with_user_message(|| format!("Loading product bundle from {}", self.cmd.target))?;
-            match pb {
-                product_bundle::ProductBundle::V2(pb) => {
-                    let repo = pb
-                        .repositories
-                        .first()
-                        .user_message("Product bundle has no repositories")?;
-                    repo.ota_manifest_path.clone().user_message(
-                        "Product bundle repository does not specify ota_manifest_path",
-                    )?
-                }
-            }
-        } else {
-            self.cmd.target
-        };
-
-        let manifest_bytes = std::fs::read(&manifest_path)
-            .with_user_message(|| format!("Reading input manifest file: {manifest_path}"))?;
+        let manifest_bytes = product_bundle::load_ota_manifest(&self.cmd.target)
+            .with_user_message(|| format!("Loading OTA manifest from {}", self.cmd.target))?;
         let raw = update_package::signed_manifest::parse_raw(&manifest_bytes)
             .user_message("Parsing input signed manifest")?;
         let mut manifest = update_package::manifest::parse_ota_manifest(raw.manifest_payload)
@@ -127,9 +109,12 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use ring::signature::KeyPair as _;
+    use std::io::Write as _;
     use tempfile::NamedTempFile;
     use update_package::UpdateMode;
     use update_package::manifest::{Blob, OtaManifest};
+    use zip::write::SimpleFileOptions;
+    use zip::{CompressionMethod, ZipWriter};
 
     fn make_ota_manifest() -> OtaManifest {
         OtaManifest {
@@ -272,7 +257,7 @@ mod tests {
         let out_path = camino::Utf8PathBuf::try_from(out_file.path().to_path_buf()).unwrap();
 
         let cmd = GenerateCommand {
-            target: pb_dir,
+            target: pb_dir.clone(),
             output: out_path.clone(),
             blob_base_url: Some("blobs/2".to_string()),
             vbmeta: None,
@@ -292,6 +277,30 @@ mod tests {
         let mut expected = manifest;
         expected.blob_base_url = "blobs/2".to_string();
         assert_eq!(parsed, expected);
+
+        let zip_dir = tempfile::tempdir().unwrap();
+        let zip_path = camino::Utf8Path::from_path(zip_dir.path()).unwrap().join("pb.zip");
+        let mut archive = ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        archive.start_file("pb/product_bundle.json", options).unwrap();
+        archive.write_all(&std::fs::read(pb_dir.join("product_bundle.json")).unwrap()).unwrap();
+        archive.start_file("pb/repository/ota_manifest", options).unwrap();
+        archive.write_all(&in_bytes).unwrap();
+        archive.finish().unwrap();
+
+        let zip_cmd = GenerateCommand {
+            target: zip_path,
+            output: out_path.clone(),
+            blob_base_url: Some("blobs/zip".to_string()),
+            vbmeta: None,
+            zbi: None,
+            key: None,
+            key_signature: None,
+        };
+        let zip_writer = ffx_writer::SimpleWriter::new_test(&test_buffers);
+        GenerateTool { cmd: zip_cmd }.main(zip_writer).await.unwrap();
+        expected.blob_base_url = "blobs/zip".to_string();
+        assert_eq!(parse_and_verify(&std::fs::read(&out_path).unwrap()), expected);
     }
 
     #[fuchsia::test]

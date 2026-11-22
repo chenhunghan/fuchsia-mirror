@@ -34,61 +34,36 @@ executable("netsvc") {
     ":inet6",
     ":netsvc_common",
     ":netsvc_config",
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/fdio",
     "//src/sys/lib/stdout-to-debuglog/cpp",
-    "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/tftp",
     "//zircon/system/ulib/zx",
   ]
 
   # netsvc launches /boot/bin/sh for netruncmd.
-  data_deps = [ "//src/zircon/bin/zxsh:bin" ]
+  data_deps = [ "//src/developer/zxsh:bin" ]
 }
 
 source_set("args") {
   sources = [ "args.cc" ]
-  deps = [
-    ":netsvc_config",
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
-    "//sdk/lib/component/incoming/cpp",
-  ]
+  deps = [ ":netsvc_config" ]
 }
 
 source_set("netsvc_common") {
   sources = [
-    "board-info.cc",
     "debuglog.cc",
-    "file-api.cc",
     "netboot.cc",
-    "netcp.cc",
-    "tftp.cc",
   ]
   deps = [
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
     "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp",
-    "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
-    "//sdk/fidl/fuchsia.sysinfo:fuchsia.sysinfo_cpp",
-    "//sdk/fidl/fuchsia.system.state:fuchsia.system.state_cpp",
-    "//sdk/lib/async-default",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/fdio",
-    "//src/storage/gpt",
   ]
   public_deps = [
     ":inet6",
     "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
     "//src/bringup/lib/netboot",
     "//zircon/system/ulib/fbl",
-    "//zircon/system/ulib/fzl",
-    "//zircon/system/ulib/sync",
-    "//zircon/system/ulib/tftp",
     "//zircon/system/ulib/zx",
   ]
 }
@@ -97,25 +72,15 @@ test("netsvc-test") {
   sources = [
     "test/args-test.cc",
     "test/debuglog-test.cc",
-    "test/file-api-test.cc",
     "test/match-test.cc",
-    "test/netcp-test.cc",
+    "test/netifc-discover-test.cc",
   ]
   deps = [
     ":args",
     ":netifc-discover",
-    ":netsvc",
     ":netsvc_common",
     ":netsvc_config",
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
-    "//sdk/fidl/fuchsia.sysinfo:fuchsia.sysinfo_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/incoming/cpp",
-    "//sdk/lib/component/outgoing/cpp",
-    "//sdk/lib/fdio",
-    "//src/storage/lib/ramdevice_client/cpp",
-    "//zircon/system/ulib/zircon-internal",
     "//zircon/system/ulib/zx",
     "//zircon/system/ulib/zxtest",
   ]
@@ -127,9 +92,6 @@ fuchsia_test_component("netsvc-test-component") {
   deps = [
     ":netsvc-test",
     "//src/bringup/bin/device-name-provider:component",
-    "//src/devices/block/drivers/ramdisk",
-    "//src/devices/board/drivers/integration-test",
-    "//src/devices/bus/drivers/platform",
   ]
 }
 
@@ -198,15 +160,14 @@ source_set("netifc-discover") {
     "netifc-discover.h",
   ]
   deps = [
+    "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_cpp",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/fdio",
-    "//sdk/lib/fdio-caller",
-    "//src/devices/lib/client:device_topology",
-    "//src/lib/fsl",
     "//zircon/system/ulib/fbl",
   ]
   public_deps = [
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
     "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
     "//zircon/system/ulib/zx",
   ]

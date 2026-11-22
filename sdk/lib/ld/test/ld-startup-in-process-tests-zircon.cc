@@ -89,7 +89,8 @@ void LdStartupInProcessTests::Load(std::string_view raw_executable_name,
   ASSERT_NO_FATAL_FAILURE(LdsvcExpectNeeded());
 
   std::optional<LoadResult> result;
-  ASSERT_NO_FATAL_FAILURE(Load(GetInterp(executable_name, expected_config), result, test_vmar_));
+  ASSERT_NO_FATAL_FAILURE(Load(GetInterp(executable_name, expected_config), result,
+                               std::forward_as_tuple(test_vmar_), std::make_tuple()));
 
   entry_ = result->entry + result->loader.load_bias();
 

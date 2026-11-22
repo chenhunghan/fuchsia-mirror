@@ -17,8 +17,8 @@ pub(crate) mod prelude {
 
     #[allow(unused)]
     pub(crate) use crate::common::{
-        BoardConfigExt, ComponentConfigBuilderExt, ConfigurationBuilder, ConfigurationContext,
-        DefaultByBuildType, DefineSubsystemConfiguration, OptionDefaultByBuildTypeExt,
+        BoardConfigExt, ConfigurationBuilder, ConfigurationContext, DefaultByBuildType,
+        DefineSubsystemConfiguration, OptionDefaultByBuildTypeExt,
     };
 
     #[allow(unused)]

@@ -4,13 +4,30 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
+import("//zircon/kernel/kernel_rust_mod.gni")
+
+if (is_kernel) {
+  kernel_rust_mod("ubsan-rs") {
+    sources = [
+      "runtime.rs",
+      "runtime_ffi.rs",
+    ]
+    deps = [
+      "//src/lib/kprint",
+      "//src/lib/zr",
+      "//zircon/kernel/lib/boot-options:boot-options-rs",
+      "//zircon/kernel/lib/crashlog",
+      "//zircon/kernel/lib/libc:rust",
+    ]
+  }
+}
+
 source_set("runtime") {
   if (is_ubsan) {
-    sources = [ "runtime.cc" ]
+    sources = [ "runtime_ffi.cc" ]
     deps = [
       "//src/lib/ubsan-custom:handlers",
-      "//zircon/kernel/lib/boot-options",
-      "//zircon/kernel/lib/crashlog",
+      "//zircon/kernel/lib/ktl",
     ]
   }
 }

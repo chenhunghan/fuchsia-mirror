@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Linked into `display_unittests` and `display_death_unittests`
+# (//src/ui/scenic/lib/display/tests).
+source_set("unittests") {
+  testonly = true
+  sources = [
+    "check_config_cache_unittest.cc",
+    "coordinator_proxy_unittest.cc",
+    "display_equivalence_unittest.cc",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//src/lib/testing/loop_fixture:gtest",
+    "//src/ui/scenic/lib/display/coordinator_proxy",
+    "//src/ui/scenic/lib/display/tests:mocks",
+    "//src/ui/scenic/lib/types",
+    "//src/ui/scenic/lib/utils",
+    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/inspect",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+}
+
+source_set("death_unittests") {
+  testonly = true
+  sources = [ "coordinator_proxy_death_unittest.cc" ]
+  deps = [
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/testing/loop_fixture:gtest",
+    "//src/ui/scenic/lib/display/coordinator_proxy",
+    "//src/ui/scenic/lib/display/tests:mocks",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+}

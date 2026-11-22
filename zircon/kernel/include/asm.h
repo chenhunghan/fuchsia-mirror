@@ -26,12 +26,6 @@
 // for local or global functions
 #define END_FUNCTION(x) .cfi_endproc; .size x, . - x
 
-#define LOCAL_DATA(x) .type x,STT_OBJECT; x:
-#define DATA(x) .global x; .hidden x; LOCAL_DATA(x)
-
-// for local or global data
-#define END_DATA(x) .size x, . - x
-
 // Some DWARF constants for CFI description.
 #define DW_CFA_val_expression 0x16
 #define DW_OP_lit0            0x30

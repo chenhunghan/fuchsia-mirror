@@ -51,14 +51,14 @@ fx test -vo fidl-examples-domain-objects-cpp-test
   [Compiling FIDL][fidl-intro], the C++ bindings code for that library is
   generated under the original target name suffixed with `_cpp`:
 
-  ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/domain_objects/BUILD.gn" region_tag="binding-dep" adjust_indentation="auto" exclude_regexp="^$" %}
+  ```bazel
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/domain_objects/BUILD.bazel" region_tag="binding-dep" adjust_indentation="auto" exclude_regexp="^$" %}
   ```
 
   The `test` target looks like:
 
-  ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/domain_objects/BUILD.gn" region_tag="test" adjust_indentation="auto" highlight="9" %}
+  ```bazel
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/domain_objects/BUILD.bazel" region_tag="test" adjust_indentation="auto" highlight="9" %}
   ```
 
   Note the line which adds the dependency on the C++ bindings by referencing that
@@ -167,7 +167,7 @@ examples:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/domain_objects/main.cc" region_tag="natural-enums" adjust_indentation="auto" exclude_regexp="^TEST|^}" %}
 ```
 
-### Natural structs
+### Natural structs {#natural-structs}
 
 Natural structs are straightforward record objects that expose const and mutable
 accessors. Using the [`fuchsia.examples/Color`][fidl-file] FIDL type as an
@@ -187,7 +187,7 @@ Natural unions are sum types similar to `std::variant`. Using the strict
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/cpp/domain_objects/main.cc" region_tag="natural-unions" adjust_indentation="auto" exclude_regexp="^TEST|^}" %}
 ```
 
-### Natural tables
+### Natural tables {#natural-tables}
 
 Natural tables are record types where every field is optional. Using the
 [`fuchsia.examples/User`][fidl-file] FIDL type as an example:

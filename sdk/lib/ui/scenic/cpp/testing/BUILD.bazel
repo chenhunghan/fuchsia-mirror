@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library(
+    name = "testing",
+    srcs = [
+        "fake_flatland.cc",
+        "fake_flatland_types.cc",
+    ],
+    hdrs = [
+        "fake_flatland.h",
+        "fake_flatland_types.h",
+        "fake_focuser.h",
+        "fake_mouse_source.h",
+        "fake_touch_source.h",
+        "fake_view_ref_focused.h",
+    ],
+    api_area = "UI",
+    category = "partner",
+    idk_name = "scenic_cpp_testing",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    # Depends on Fuchsia-only Zircon and FIDL libraries.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.scenic.scheduling:fuchsia.scenic.scheduling_hlcpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_hlcpp",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+        "//sdk/lib/async",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+)

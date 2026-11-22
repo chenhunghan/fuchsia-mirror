@@ -100,6 +100,18 @@ tables_generator_tests_*.txt
 /third_party/acpica/src
 !/third_party/alacritty-migrating
 /third_party/alacritty-migrating/src
+!/third_party/android/
+/third_party/android/*
+!/third_party/android/platform/
+/third_party/android/platform/*
+!/third_party/android/platform/bootable/libbootloader
+/third_party/android/platform/bootable/libbootloader/src
+!/third_party/android/platform/packages/
+/third_party/android/platform/packages/*
+!/third_party/android/platform/packages/modules/
+/third_party/android/platform/packages/modules/*
+!/third_party/android/platform/packages/modules/Bluetooth
+/third_party/android/platform/packages/modules/Bluetooth/src
 !/third_party/android/platform/system/libufdt
 /third_party/android/platform/system/libufdt/src
 !/third_party/android/platform/system/tools/mkbootimg
@@ -198,16 +210,43 @@ tables_generator_tests_*.txt
 !/third_party/github.com/simdutf
 !/third_party/github.com/simdutf/simdutf
 /third_party/github.com/simdutf/simdutf/src
+!/third_party/pylibs/
+/third_party/pylibs/*
+!/third_party/pylibs/BUILD.gn
+!/third_party/pylibs/OWNERS
+!/third_party/pylibs/README.md
 !/third_party/pylibs/annotated_types
 /third_party/pylibs/annotated_types/src
+!/third_party/pylibs/astroid
+/third_party/pylibs/astroid/src
+!/third_party/pylibs/autoflake
+/third_party/pylibs/autoflake/src
 !/third_party/pylibs/coverage
 /third_party/pylibs/coverage/src
+!/third_party/pylibs/dill
+/third_party/pylibs/dill/src
+!/third_party/pylibs/isort
+/third_party/pylibs/isort/src
+!/third_party/pylibs/mccabe
+/third_party/pylibs/mccabe/src
 !/third_party/pylibs/mypy
 /third_party/pylibs/mypy/src
 !/third_party/pylibs/mypy_extensions
 /third_party/pylibs/mypy_extensions/src
+!/third_party/pylibs/platformdirs
+/third_party/pylibs/platformdirs/src
 !/third_party/pylibs/pydantic
 /third_party/pylibs/pydantic/src
+!/third_party/pylibs/pyflakes
+/third_party/pylibs/pyflakes/src
+!/third_party/pylibs/pylint
+/third_party/pylibs/pylint/src
+!/third_party/pylibs/pyserial
+/third_party/pylibs/pyserial/src
+!/third_party/pylibs/pyusb
+/third_party/pylibs/pyusb/src
+!/third_party/pylibs/tomlkit
+/third_party/pylibs/tomlkit/src
 !/third_party/pylibs/typing_extensions
 /third_party/pylibs/typing_extensions/src
 !/third_party/pylibs/typing_inspection
@@ -244,6 +283,7 @@ tables_generator_tests_*.txt
 /third_party/Vulkan-ValidationLayers/src
 !/third_party/tink-cc
 /third_party/tink-cc/src
+!/third_party/PyMonsoon
 
 /tmp/
 /vendor/
@@ -306,3 +346,6 @@ lcov.info
 
 # Jetski CLI workspace directory
 /.jetskicli/
+
+# Benchmarking outputs
+nohup.out

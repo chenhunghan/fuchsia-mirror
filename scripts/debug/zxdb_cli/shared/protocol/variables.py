@@ -4,7 +4,8 @@
 
 from typing import Any, ClassVar, Final, Literal
 
-from shared.protocol.base import BaseRequest
+from pydantic import Field
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "variables"
 
@@ -13,6 +14,6 @@ class VariablesRequest(BaseRequest[dict[str, Any]]):
     """Request variables for a frame in a thread."""
 
     command: Literal["variables"] = COMMAND_NAME
-    thread_id: int
+    thread_id: int = Field(validation_alias=THREAD_ID_ALIAS)
     frame_index: int = 0
     response_type: ClassVar[Any] = dict[str, Any]

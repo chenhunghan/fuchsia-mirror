@@ -66,11 +66,13 @@
 			pins = <GROUP4_PIN1>;
 			bias-pull-up;
 			drive-push-pull;
+			input-enable;
 		};
 
 		group5: group5 {
 			pins = <GROUP5_PIN1>;
 			function = "spi-bus";
+			input-disable;
 		};
 	};
 

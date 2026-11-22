@@ -17,7 +17,7 @@ use net_types::SpecifiedAddr;
 use net_types::ip::{Ip, IpInvariant, IpVersion, Ipv4, Ipv6};
 use netstack3_core::IpExt;
 use netstack3_core::ip::{
-    IpSockCreateAndSendError, IpSockSendError, RawIpSocketIcmpFilter, RawIpSocketIcmpFilterError,
+    IpSockCreateAndSendError, RawIpSocketIcmpFilter, RawIpSocketIcmpFilterError,
     RawIpSocketProtocol, RawIpSocketSendToError, RawIpSocketsBindingsContext,
     RawIpSocketsBindingsTypes, ReceivePacketError,
 };
@@ -1113,21 +1113,8 @@ impl IntoErrno for RawIpSocketSendToError {
             RawIpSocketSendToError::ProtocolRaw => fposix::Errno::Einval,
             RawIpSocketSendToError::MappedRemoteIp => fposix::Errno::Enetunreach,
             RawIpSocketSendToError::InvalidBody => fposix::Errno::Einval,
-            RawIpSocketSendToError::Ip(inner) => match inner {
-                // MTU errors result in `Emsgsize` for sendto, but `Einval` for
-                // send.
-                IpSockCreateAndSendError::Send(IpSockSendError::Mtu) => fposix::Errno::Emsgsize,
-                IpSockCreateAndSendError::Send(IpSockSendError::IllegalLoopbackAddress) => {
-                    fposix::Errno::Einval
-                }
-                IpSockCreateAndSendError::Send(IpSockSendError::BroadcastNotAllowed) => {
-                    fposix::Errno::Eacces
-                }
-                IpSockCreateAndSendError::Send(IpSockSendError::Unroutable(inner)) => {
-                    inner.to_errno()
-                }
-                IpSockCreateAndSendError::Create(inner) => inner.to_errno(),
-            },
+            RawIpSocketSendToError::Ip(IpSockCreateAndSendError::Send(inner)) => inner.to_errno(),
+            RawIpSocketSendToError::Ip(IpSockCreateAndSendError::Create(inner)) => inner.to_errno(),
             RawIpSocketSendToError::Zone(inner) => inner.to_errno(),
         }
     }
@@ -1146,6 +1133,7 @@ mod tests {
     use super::*;
 
     use ip_test_macro::ip_test;
+    use netstack3_core::ip::IpSockSendError;
     use packet_formats::ip::IpProto;
     use test_case::test_case;
 
@@ -1210,5 +1198,14 @@ mod tests {
     fn icmp_filter_from_none() {
         let core_filter: Option<RawIpSocketIcmpFilter<Ipv6>> = None;
         assert_eq!(core_filter.into_fidl().blocked_types, [0; 8])
+    }
+
+    #[test]
+    fn raw_send_error_mtu_to_errno() {
+        assert_eq!(
+            RawIpSocketSendToError::Ip(IpSockCreateAndSendError::Send(IpSockSendError::Mtu))
+                .to_errno(),
+            fposix::Errno::Emsgsize,
+        );
     }
 }

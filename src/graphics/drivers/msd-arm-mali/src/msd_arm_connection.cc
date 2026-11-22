@@ -4,7 +4,6 @@
 
 #include "src/graphics/drivers/msd-arm-mali/src/msd_arm_connection.h"
 
-#include <lib/magma/platform/platform_barriers.h>
 #include <lib/magma/platform/platform_logger.h>
 #include <lib/magma/platform/platform_semaphore.h>
 #include <lib/magma/platform/platform_trace.h>
@@ -12,6 +11,7 @@
 #include <lib/magma/util/short_macros.h>
 #include <lib/magma_service/msd_defs.h>
 #include <lib/magma_service/util/simple_allocator.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <zircon/compiler.h>
 
 #include <atomic>
@@ -107,8 +107,7 @@ bool MsdArmConnection::ExecuteAtom(
                   allocate_info->trim_level);
         return false;
       }
-      const uint64_t kMaxPagesAllowed =
-          (1ul << AddressSpace::kVirtualAddressSize) / magma::page_size();
+      const uint64_t kMaxPagesAllowed = max_jit_pages();
       if (kMaxPagesAllowed < allocate_info->va_page_count) {
         MAGMA_LOG(WARNING, "Client %" PRIu64 ": Set invalid VA page count %ld, max %ld", client_id_,
                   allocate_info->va_page_count, kMaxPagesAllowed);
@@ -143,10 +142,20 @@ bool MsdArmConnection::ExecuteAtom(
       }
       std::vector<magma_arm_jit_memory_allocate_info> infos(
           jit_info, jit_info + trailer->jit_memory_info_count);
+      const uint64_t kMaxJitPages = max_jit_pages();
       for (auto& info : infos) {
         if (info.version_number != 0) {
           MAGMA_LOG(WARNING, "Client %" PRIu64 ": Invalid JIT memory allocate version %d",
                     client_id_, info.version_number);
+          return false;
+        }
+        if (info.va_page_count > kMaxJitPages || info.committed_page_count > kMaxJitPages ||
+            info.extend_page_count > kMaxJitPages) {
+          MAGMA_LOG(WARNING,
+                    "Client %" PRIu64 ": Invalid JIT memory page counts (va %" PRIu64
+                    ", committed %" PRIu64 ", extend %" PRIu64 ", max %" PRIu64 ")",
+                    client_id_, info.va_page_count, info.committed_page_count,
+                    info.extend_page_count, kMaxJitPages);
           return false;
         }
       }
@@ -543,7 +552,7 @@ bool MsdArmConnection::UpdateCommittedMemory(GpuMapping* mapping) {
 
     // Ensure mapping isn't put into the page table until the cache flush
     // above completed.
-    magma::barriers::WriteBarrier();
+    WriteDataSynchronizationBarrier();
 
     uint64_t offset_in_mapping = (region.start() - mapping->page_offset()) * page_size;
 

@@ -112,7 +112,7 @@ The Rust and Go versions of these types will be similarly updated.
 The added logic should incur a negligible runtime cost, especially as it would
 be amortized over the lifetime of an individual process.
 
-## Security considerations
+## Security considerations {:#security-considerations}
 
 If a program already has a handle to a process, it can do and glean much more
 than the time at which that process started. Moreover, start time is already
@@ -145,7 +145,7 @@ complicated logic than dealing with the other two task types. Ultimately the
 extensions were decided against, as they would not meet a current need and
 would allow us to sidestep the need for task hierarchy walking.
 
-## Prior art and references
+## Prior art and references {:#prior-art-and-references}
 
 Linux:  [`/proc/[pid]/stat`](https://man7.org/linux/man-pages/man5/procfs.5.html) exposes `starttime`.
 FreeBSD: [`/proc/[pid]/status`](https://www.freebsd.org/cgi/man.cgi?query=procfs) exposes start time in a space-separated list of statistics.

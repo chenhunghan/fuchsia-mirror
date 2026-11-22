@@ -5,14 +5,13 @@
 
 import contextlib
 import io
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import action_diff
-import remotetool
-import reproxy_logs
 from api.log import log_pb2
+from build.rbe import action_diff, remotetool, reproxy_logs
 
 
 def add_output_file_digests_to_record(
@@ -626,6 +625,36 @@ class ActionDifferTests(unittest.TestCase):
             any(
                 check_messages[1] in line for line in root_causes[0].explanation
             )
+        )
+
+    @mock.patch.object(reproxy_logs, "parse_logs")
+    @mock.patch.object(remotetool, "configure")
+    def test_main_uses_configure_remotetool(
+        self, mock_configure: mock.Mock, mock_parse_logs: mock.Mock
+    ) -> None:
+        left = reproxy_logs.ReproxyLog(log_pb2.LogDump())
+        right = reproxy_logs.ReproxyLog(log_pb2.LogDump())
+        mock_parse_logs.return_value = [left, right]
+        mock_configure.return_value = remotetool.RemoteTool(
+            {
+                "service": "remotebuildexecution.googleapis.com:443",
+                "instance": "projects/profile-proj/instances/default",
+            }
+        )
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = action_diff.main(
+                [
+                    "--reproxy_logs",
+                    "left.rpl",
+                    "right.rpl",
+                    "--output_file",
+                    "out.o",
+                ]
+            )
+        self.assertEqual(rc, 0)
+        mock_configure.assert_called_once_with(
+            remotetool._REPROXY_CFG, env=os.environ
         )
 
 

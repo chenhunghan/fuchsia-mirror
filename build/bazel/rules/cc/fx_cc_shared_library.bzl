@@ -18,7 +18,7 @@ load(
     "@rules_cc//cc:cc_rules_extension_support.bzl",
     _cc_shared_library_for_inherit_attrs = "cc_shared_library",
 )
-load("@rules_cc//cc:defs.bzl", "cc_shared_library")
+load("@rules_cc//cc:defs.bzl", "cc_library", "cc_shared_library")
 load(
     "//build/bazel/rules/cc:instrumentation.bzl",
     "CC_INSTRUMENTATION_ATTRS",
@@ -57,7 +57,9 @@ def get_shared_library_name_and_soname(name, shared_lib_name = None):
 
 def _fx_cc_shared_library_impl(
         name,
-        public_configs,  # buildifier: disable=unused-variable - For GN conversion only.
+        shared_lib_name,
+        gn_public_configs,  # buildifier: disable=unused-variable - For GN conversion only.
+        gn_public_deps,  # buildifier: disable=unused-variable - For GN conversion only.
         build_flags,
         disable_build_flags,
         disable_instrumentation,
@@ -73,7 +75,7 @@ def _fx_cc_shared_library_impl(
 
     shared_lib_name, soname = get_shared_library_name_and_soname(
         name,
-        kwargs.get("shared_lib_name"),
+        shared_lib_name,
     )
 
     if transitive_features:
@@ -94,6 +96,19 @@ def _fx_cc_shared_library_impl(
 
     kwargs["shared_lib_name"] = shared_lib_name
     kwargs["features"] = features
+
+    # Always attach an empty private `cc_library` so omitted, empty, or
+    # conditional `select()` values resolving to `[]` never leave `deps` empty.
+    empty_dep_name = name + ".empty_dep"
+    cc_library(
+        name = empty_dep_name,
+        tags = kwargs.get("tags"),
+        target_compatible_with = kwargs.get("target_compatible_with"),
+        testonly = kwargs.get("testonly"),
+        visibility = ["//visibility:private"],
+    )
+    deps = kwargs.get("deps")
+    kwargs["deps"] = [":" + empty_dep_name] if deps == None else deps + [":" + empty_dep_name]
 
     wrapped_kwargs = wrap_cc_macro_args_with_build_flags(
         kwargs = kwargs,
@@ -131,8 +146,32 @@ fx_cc_shared_library = macro(
     implementation = _fx_cc_shared_library_impl,
     inherit_attrs = _cc_shared_library_for_inherit_attrs,
     attrs = {
-        "public_configs": attr.string_list(
-            doc = "Unused in Bazel, for GN conversion only.",
+        # Override the configurable `shared_lib_name` inherited from
+        # cc_shared_library(): symbolic macros see configurable values as
+        # select() objects, but shared_lib_name and soname must be known at
+        # loading time.
+        "shared_lib_name": attr.string(
+            doc = "The name of the output shared library file (including extension).",
+            default = "",
+            configurable = False,
+        ),
+        "gn_public_configs": attr.string_list(
+            doc = """Unused in Bazel, for GN conversion only.
+
+            Converted to GN `public_configs` of the `shared_library()`.
+            """,
+            default = [],
+        ),
+        "gn_public_deps": attr.string_list(
+            doc = """Unused in Bazel, for GN conversion only.
+
+            Converted to GN `public_deps` of the `shared_library()`, for
+            example to forward a headers target to GN dependents, which
+            include the library's headers through their dependency on the GN
+            `shared_library()`. Bazel dependents of a `cc_shared_library()`
+            can't get headers from it, and must depend on the headers
+            themselves.
+            """,
             default = [],
         ),
     } | CC_INSTRUMENTATION_ATTRS | BUILD_FLAGS_CC_MACRO_ATTRS | TRANSITIVE_FEATURES_ATTRS,

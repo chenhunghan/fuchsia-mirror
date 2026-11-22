@@ -316,10 +316,8 @@ launch applications).
 For more information on how to launch and use virtualization on Fuchsia, see
 [Getting Started with Fuchsia Virtualization][refer.virtualization_get_started].
 
-[define.type-2-hypervisor]:
-    https://en.wikipedia.org/wiki/Hypervisor#Classification
-[define.termina]:
-    https://chromium.googlesource.com/chromiumos/overlays/board-overlays/+/master/project-termina/
+[define.type-2-hypervisor]: https://en.wikipedia.org/wiki/Hypervisor#Classification
+[define.termina]: https://chromium.googlesource.com/chromiumos/overlays/board-overlays/+/master/project-termina/
 [define.product]: /docs/development/build/software_assembly/build_configuration.md
 [define.vmar]: /docs/reference/kernel_objects/vm_address_region.md
 [define.vmo]: /docs/reference/kernel_objects/vm_object.md
@@ -328,35 +326,22 @@ For more information on how to launch and use virtualization on Fuchsia, see
 [define.slat]: https://en.wikipedia.org/wiki/Second_Level_Address_Translation
 [example.pl011_cr_handler]:  https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/arm64/pl011.cc;l=52;drc=9fcf7ef29730fa8ecc2f1cdbe025bb3ab9741a90
 [example.register_sync_trap]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/arm64/pl011.cc;l=47
-[example.update_registers]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/arm64/vcpu.cc;l=56;drc=8c5ab55a0467643618ef12e0d2b987f9f3d24acd
+[example.update_registers]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/arm64/vcpu.cc;l=56;drc=8c5ab55a0467643618ef12e0d2b987f9f3d24acd
 
-[refer.linux_arm64_boot_protocol]:
-    https://www.kernel.org/doc/Documentation/arm/Booting
-[refer.linux_x64_boot_protocol]:
-    https://www.kernel.org/doc/Documentation/x86/boot.txt
-[refer.linux_zero_page]:
-    https://www.kernel.org/doc/Documentation/x86/zero-page.txt
-[refer.instruction_decode]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/x64/decode.cc;l=185;drc=f09260d405305bd46e76b6717ecd13b073e67fc6
-[refer.virtio]:
-    https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html
+[refer.linux_arm64_boot_protocol]: https://www.kernel.org/doc/Documentation/arm/Booting
+[refer.linux_x64_boot_protocol]: https://www.kernel.org/doc/Documentation/x86/boot.txt
+[refer.linux_zero_page]: https://www.kernel.org/doc/Documentation/x86/zero-page.txt
+[refer.instruction_decode]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/x64/decode.cc;l=185;drc=f09260d405305bd46e76b6717ecd13b073e67fc6
+[refer.virtio]: https://docs.oasis-open.org/virtio/virtio/v1.1/csprd01/virtio-v1.1-csprd01.html
 [refer.virtualization_get_started]: get_started.md
 
-[code.guest_config]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.virtualization/guest_config.fidl
-[code.hardware_fidl]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.virtualization.hardware/device.fidl
-[code.device_controller]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/controller/
-[code.device]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/device/
-[code.setup_acpi]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/x64/acpi.cc;l=114;drc=544ca58a71d461be5aa5afea58522234df6be33dø
-[code.vmm]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/
-[code.zircon_loader]:
-    https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/zbi/kernel.fidl;l=9-67;drc=14ae4735d15e85d0e2016acb1355102aad4dada1
+[code.guest_config]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.virtualization/guest_config.fidl
+[code.hardware_fidl]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.virtualization.hardware/device.fidl
+[code.device_controller]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/controller/
+[code.device]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/device/
+[code.setup_acpi]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/arch/x64/acpi.cc;l=114;drc=544ca58a71d461be5aa5afea58522234df6be33d
+[code.vmm]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/virtualization/bin/vmm/
+[code.zircon_loader]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/zbi/kernel.fidl;l=9-67;drc=14ae4735d15e85d0e2016acb1355102aad4dada1
 
 [image.mmio_bell]: images/mmio_bell_trap.png
 [image.mmio_sync]: images/mmio_sync_trap.png

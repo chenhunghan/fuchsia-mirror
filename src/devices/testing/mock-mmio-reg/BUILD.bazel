@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "mock-mmio-reg-zxtest",
+    hdrs = ["include/mock-mmio-reg/mock-mmio-reg.h"],
+    defines = ["MOCK_MMIO_REG_USE_ZXTEST"],
+    implementation_deps = [
+        "//sdk/lib/driver/mmio/cpp",
+        "//sdk/lib/driver/mmio/testing/cpp",
+    ],
+    includes = ["include"],
+    public_configs = [
+        ":headers.config",
+        ":zxtest-backend",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/camera/drivers/hw_accel/gdc:__pkg__",
+        "//src/camera/drivers/hw_accel/ge2d:__pkg__",
+        "//src/devices/nand/drivers/aml-rawnand/tests:__pkg__",
+        "//src/devices/power/drivers/aml-meson-power:__pkg__",
+        "//src/devices/testing/mock-mmio-reg/test:__pkg__",
+        "//src/devices/thermal/drivers/aml-thermal:__pkg__",
+        "//src/devices/thermal/drivers/aml-thermal-s905d2g-legacy:__pkg__",
+        "//src/media/audio/drivers/aml-g12-tdm/test:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+    deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/mmio-ptr",
+    ],
+)
+
+# The GN counterpart of this library is a hand-written internal-category
+# `sdk_source_set()` in BUILD.gn, because it is published to the internal IDK
+# (`@internal_sdk//pkg/mock-mmio-reg`) and `idk_cc_source_library()` only
+# supports the "partner" category.
+# LINT.IfChange(mock-mmio-reg)
+# @bazel2gn:skip
+fx_cc_library(
+    name = "mock-mmio-reg",
+    hdrs = ["include/mock-mmio-reg/mock-mmio-reg.h"],
+    includes = ["include"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/devices/testing/mock-mmio-reg/test:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/driver/mmio/cpp",
+        "//sdk/lib/driver/mmio/testing/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/mmio-ptr",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# LINT.ThenChange(//src/devices/testing/mock-mmio-reg/BUILD.gn:mock-mmio-reg)

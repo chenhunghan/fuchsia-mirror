@@ -314,10 +314,10 @@ class StrictUnion final {
 
   static StrictUnion WithField(int32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kField = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<StrictUnion> New();
@@ -356,7 +356,7 @@ class StrictUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -364,9 +364,9 @@ class StrictUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid);
   union {
     int32_t Field_;
   };
@@ -394,11 +394,11 @@ class FlexibleUnion final {
 
   static FlexibleUnion WithField(int32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kField = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<FlexibleUnion> New();
@@ -430,7 +430,7 @@ class FlexibleUnion final {
     return Field_;
   }
   FlexibleUnion& set_Field(int32_t value);
-  FlexibleUnion& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  FlexibleUnion& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::doccomments::FlexibleUnion::Tag Which() const {
     switch (tag_) {
@@ -444,7 +444,7 @@ class FlexibleUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -458,9 +458,9 @@ class FlexibleUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid);
   union {
     int32_t Field_;
     std::vector<uint8_t> unknown_data_;
@@ -718,7 +718,7 @@ struct Equality<::test::doccomments::Struct> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::doccomments::StrictUnion> : public std::true_type {};
+struct IsFidlUnion<::test::doccomments::StrictUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::doccomments::StrictUnion>
@@ -730,9 +730,9 @@ struct CodingTraits<std::unique_ptr<::test::doccomments::StrictUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::doccomments::StrictUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -762,7 +762,7 @@ struct Equality<::test::doccomments::StrictUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::doccomments::StrictUnion::Tag::Invalid):
         return true;
       case ::test::doccomments::StrictUnion::Tag::kField:
         return ::fidl::Equals(_lhs.Field_, _rhs.Field_);
@@ -773,7 +773,7 @@ struct Equality<::test::doccomments::StrictUnion> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::doccomments::FlexibleUnion> : public std::true_type {};
+struct IsFidlUnion<::test::doccomments::FlexibleUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::doccomments::FlexibleUnion>
@@ -785,9 +785,9 @@ struct CodingTraits<std::unique_ptr<::test::doccomments::FlexibleUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::doccomments::FlexibleUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -817,7 +817,7 @@ struct Equality<::test::doccomments::FlexibleUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::doccomments::FlexibleUnion::Tag::Invalid):
         return true;
       case ::test::doccomments::FlexibleUnion::Tag::kField:
         return ::fidl::Equals(_lhs.Field_, _rhs.Field_);

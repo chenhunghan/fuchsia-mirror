@@ -11,7 +11,10 @@ package(
 
 rustc_proc_macro(
     name = "derive_macros",
-    srcs = ["src/lib.rs"],
+    srcs = [
+        "src/lib.rs",
+        "src/permissions.rs",
+    ],
     crate_name = "selinux_policy_derive",
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",

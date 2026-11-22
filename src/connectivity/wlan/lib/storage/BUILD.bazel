@@ -2,11 +2,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 load("//third_party/cobalt:metrics_registry.bzl", "metrics_registry")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":wlan-storage-tests_test"],
+    visibility = ["//src/connectivity/wlan:__pkg__"],
+)
 
 rustc_library(
     name = "wlan-storage",
@@ -32,13 +49,10 @@ rustc_library(
     ],
 )
 
-# `wlan_storage_lib_test` and `wlan-storage-tests` remain in `BUILD.gn` above
-# the sentinel because `wlan-storage-tests` packages
-# `//src/sys/stash:stash_secure_v2` and `//src/sys/stash:stash_v2`, which are
-# not built by Bazel yet.
 rustc_test(
     name = "wlan-storage_test",
     crate = ":wlan-storage",
+    # Matches `program.binary` in meta/wlan_storage_lib_test.cml.
     crate_name = "wlan_storage_lib_test",
     deps = [
         "//src/connectivity/wlan/lib/ieee80211",
@@ -48,6 +62,47 @@ rustc_test(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:rand",
     ],
+)
+
+fx_packaged_binary(
+    name = "wlan-storage_test_packaged_bin",
+    testonly = True,
+    binary = ":wlan-storage_test",
+    binary_name = "wlan_storage_lib_test",
+)
+
+fx_component_manifest(
+    name = "wlan_storage_lib_test_manifest",
+    testonly = True,
+    component_name = "wlan_storage_lib_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/wlan_storage_lib_test.cml",
+)
+
+fx_test_component(
+    name = "wlan_storage_lib_test",
+    compiled_manifest = ":wlan_storage_lib_test_manifest",
+    deps = [":wlan-storage_test_packaged_bin"],
+)
+
+fx_package(
+    name = "wlan-storage-tests",
+    components = [
+        "//src/sys/stash:stash_secure_v2",
+        "//src/sys/stash:stash_v2",
+    ],
+    test_components = [":wlan_storage_lib_test"],
+    visibility = ["//src/connectivity/wlan:__pkg__"],
+)
+
+fx_test(
+    name = "wlan-storage-tests_test",
+    max_log_severity = "ERROR",
+    package = ":wlan-storage-tests",
 )
 
 rustc_library(

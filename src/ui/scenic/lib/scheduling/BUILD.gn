@@ -28,13 +28,13 @@ source_set("frame_scheduler") {
     "windowed_frame_predictor.h",
   ]
   deps = [
-    ":duration_predictors",
     ":frame_metrics_registry",
     "//src/lib/fxl",
     "//src/ui/scenic/lib/utils",
     "//zircon/system/ulib/inspect",
   ]
   public_deps = [
+    ":duration_predictors",
     ":frame_scheduler_interface",
     ":id",
     ":vsync_timing",
@@ -60,12 +60,12 @@ source_set("vsync_timing") {
     "vsync_timing.cc",
     "vsync_timing.h",
   ]
-  deps = [
+  deps = [ "//src/lib/fxl" ]
+  public_deps = [
+    ":duration_predictors",
     "//sdk/lib/syslog/cpp",
-    "//src/lib/fxl",
     "//zircon/system/ulib/zx",
   ]
-  public_deps = [ ":duration_predictors" ]
 }
 
 source_set("duration_predictors") {

@@ -1,0 +1,44 @@
+[package]
+name = "pest_stack_guard"
+description = "Internal native stack probing for pest"
+version = "1.0.1"
+edition = "2021"
+authors = ["Tomas Tauber <me@tomtau.be>"]
+homepage = "https://pest.rs/"
+repository = "https://github.com/pest-parser/pest_stack_guard"
+documentation = "https://docs.rs/pest_stack_guard"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+rust-version = "1.83"
+
+[features]
+stack-guard = ["dep:stacker", "dep:psm"]
+
+[dependencies]
+stacker = { version = "0.1.25", optional = true }
+psm = { version = "0.1.24", optional = true }
+
+# Keep these targets in sync with build.rs.
+[target.x86_64-unknown-linux-gnu.dependencies]
+stacker = "0.1.25"
+psm = "0.1.24"
+
+[target.aarch64-unknown-linux-gnu.dependencies]
+stacker = "0.1.25"
+psm = "0.1.24"
+
+[target.x86_64-apple-darwin.dependencies]
+stacker = "0.1.25"
+psm = "0.1.24"
+
+[target.aarch64-apple-darwin.dependencies]
+stacker = "0.1.25"
+psm = "0.1.24"
+
+[target.x86_64-pc-windows-msvc.dependencies]
+stacker = "0.1.25"
+psm = "0.1.24"
+
+[target.aarch64-pc-windows-msvc.dependencies]
+stacker = "0.1.25"
+psm = "0.1.24"

@@ -1,0 +1,121 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test", "wrap_host_rust_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":font_manifest_generator_bin_test",
+    ],
+    visibility = ["//src/fonts:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/571374004): Verify whether font_manifest_generator should use target_compatible_with (was not gated by if (is_host) in GN).
+rustc_binary(
+    name = "font_manifest_generator",
+    srcs = [
+        "src/constants.rs",
+        "src/fake_font_info_loader.rs",
+        "src/font_catalog.rs",
+        "src/font_db.rs",
+        "src/font_pkgs.rs",
+        "src/font_sets.rs",
+        "src/generator.rs",
+        "src/main.rs",
+        "src/merge.rs",
+        "src/product_config.rs",
+        "src/serde_ext.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/fonts/build:__pkg__",
+        "//src/fonts/collections:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.fonts:fuchsia.fonts_rust_common",
+        "//src/fonts/char_set",
+        "//src/fonts/font_info",
+        "//src/fonts/manifest",
+        "//src/lib/fuchsia-url",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:rayon",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:unicase",
+    ],
+)
+
+host_rustc_test(
+    name = "font_manifest_generator_bin_test",
+    crate = ":font_manifest_generator",
+    deps = [
+        "//src/lib/intl/unicode_utils/char_collection",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+# Must depend directly on these in order to have access to them in CQ
+# @bazel2gn:raw_attribute:data_deps = [ ":test_files" ]
+rustc_test(
+    name = "font_manifest_generator_integration_tests",
+    srcs = ["tests/tests.rs"],
+    crate_root = "tests/tests.rs",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+host_test_data_files(
+    name = "test_data",
+    testonly = True,
+    srcs = [
+        "tests/data/a.font_catalog.json",
+        "tests/data/a.font_pkgs.json",
+        "tests/data/b.font_catalog.json",
+        "tests/data/b.font_pkgs.json",
+        "tests/data/product_ab.fontcfg.json",
+        "tests/data/product_ab.local_fonts.json",
+        "tests/goldens/product_ab.font_manifest.json",
+    ],
+    dest_dir = "test_data/font_manifest_generator",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_test_data_files(
+    name = "test_generator",
+    testonly = True,
+    srcs = [":font_manifest_generator"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+wrap_host_rust_test(
+    name = "font_manifest_generator_integration_host_tests",
+    binary_name = "font_manifest_generator_integration_tests",
+    test_data = [
+        ":test_data",
+        ":test_generator",
+    ],
+)

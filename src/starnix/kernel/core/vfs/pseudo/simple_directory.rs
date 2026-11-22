@@ -13,10 +13,10 @@ use starnix_rcu::RcuReadScope;
 use starnix_sync::{LockDepMutex, SimpleDirectoryEntriesLock, allow_subclass};
 use starnix_uapi::auth::FsCred;
 use starnix_uapi::device_id::DeviceId;
-use starnix_uapi::errno;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::{FileMode, mode};
 use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::{errno, error};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -34,6 +34,9 @@ impl SimpleDirectoryMutator {
 
     pub fn node(&self, name: FsString, node: FsNodeHandle) {
         let mut state = self.directory.state.lock();
+        if state.removed {
+            return;
+        }
         let child_dir_and_handler = state.not_found_handler.and_then(|handler| {
             node.downcast_ops::<Arc<SimpleDirectory>>().cloned().map(|dir| (dir, handler))
         });
@@ -80,9 +83,10 @@ impl SimpleDirectoryMutator {
 
     // TODO: Figure out a better way to overload this function for &str and &FsStr.
     pub fn subdir2(&self, name: &FsStr, mode: u32, build_subdir: impl FnOnce(&Self)) {
-        let dir = self.directory.subdir(&self.fs, name, mode);
-        let mutator = SimpleDirectoryMutator::new(self.fs.clone(), dir);
-        build_subdir(&mutator);
+        if let Ok(dir) = self.directory.get_or_create_subdir(&self.fs, name, mode) {
+            let mutator = SimpleDirectoryMutator::new(self.fs.clone(), dir);
+            build_subdir(&mutator);
+        }
     }
 
     pub fn remove(&self, name: &FsStr) {
@@ -103,6 +107,67 @@ pub(crate) type NotFoundHandler = fn(&DirEntry, &FsStr) -> Errno;
 struct SimpleDirectoryState {
     entries: BTreeMap<FsString, FsNodeHandle>,
     not_found_handler: Option<NotFoundHandler>,
+    removed: bool,
+}
+
+impl SimpleDirectoryState {
+    fn try_insert(
+        &mut self,
+        fs: &FileSystemHandle,
+        name: &FsStr,
+        ops: impl Into<Box<dyn FsNodeOps>>,
+        info: FsNodeInfo,
+    ) -> Result<FsNodeHandle, Errno> {
+        if self.removed {
+            return error!(ENOENT);
+        }
+        if self.entries.contains_key(name) {
+            return error!(EEXIST);
+        }
+        let node = fs.create_node_and_allocate_node_id(ops, info);
+        self.entries.insert(name.into(), node.clone());
+        Ok(node)
+    }
+
+    fn create_subdir(
+        &mut self,
+        fs: &FileSystemHandle,
+        name: &FsStr,
+        mode: u32,
+    ) -> Result<Arc<SimpleDirectory>, Errno> {
+        let dir = Arc::new(SimpleDirectory {
+            state: LockDepMutex::new(SimpleDirectoryState {
+                entries: Default::default(),
+                not_found_handler: self.not_found_handler,
+                removed: false,
+            }),
+        });
+        self.try_insert(
+            fs,
+            name,
+            dir.clone(),
+            FsNodeInfo::new(mode!(IFDIR, mode), FsCred::root()),
+        )?;
+        Ok(dir)
+    }
+
+    fn get_or_create_subdir(
+        &mut self,
+        fs: &FileSystemHandle,
+        name: &FsStr,
+        mode: u32,
+    ) -> Result<Arc<SimpleDirectory>, Errno> {
+        if self.removed {
+            return error!(ENOENT);
+        }
+        if let Some(node) = self.entries.get(name) {
+            let dir = node.downcast_ops::<Arc<SimpleDirectory>>().ok_or_else(|| errno!(EEXIST))?;
+            debug_assert!(node.info().mode.is_dir());
+            Ok(dir.clone())
+        } else {
+            self.create_subdir(fs, name, mode)
+        }
+    }
 }
 
 /// Returns `ENOENT`, with context identifying the directory (via its [`DirEntry`] `Debug` form)
@@ -127,6 +192,7 @@ impl SimpleDirectory {
             state: LockDepMutex::new(SimpleDirectoryState {
                 entries: Default::default(),
                 not_found_handler: None,
+                removed: false,
             }),
         })
     }
@@ -150,8 +216,33 @@ impl SimpleDirectory {
         }
     }
 
+    /// Returns whether this directory has been removed from its parent directory.
+    pub fn is_removed(&self) -> bool {
+        self.state.lock().removed
+    }
+
+    fn mark_removed(node: FsNodeHandle) {
+        let mut stack: Vec<Arc<SimpleDirectory>> =
+            node.downcast_ops::<Arc<SimpleDirectory>>().cloned().into_iter().collect();
+        while let Some(dir) = stack.pop() {
+            let entries = {
+                let mut state = dir.state.lock();
+                state.removed = true;
+                std::mem::take(&mut state.entries)
+            };
+            stack.extend(
+                entries
+                    .into_values()
+                    .filter_map(|child| child.downcast_ops::<Arc<SimpleDirectory>>().cloned()),
+            );
+        }
+    }
+
     pub fn remove(&self, name: &FsStr) {
-        self.state.lock().entries.remove(name);
+        let removed = self.state.lock().entries.remove(name);
+        if let Some(removed) = removed {
+            Self::mark_removed(removed);
+        }
     }
 
     fn walk<'a>(self: &Arc<Self>, path: &'a FsStr) -> Option<(Arc<Self>, &'a FsStr)> {
@@ -186,60 +277,80 @@ impl SimpleDirectory {
         fs: &FileSystemHandle,
         callback: impl FnOnce(&SimpleDirectoryMutator),
     ) {
+        if self.is_removed() {
+            return;
+        }
         let mutator = SimpleDirectoryMutator::new(fs.clone(), self.clone());
         callback(&mutator);
     }
 
-    fn get_or_create_subdir_locked(
-        state: &mut SimpleDirectoryState,
+    fn get_or_create_subdir(
+        &self,
         fs: &FileSystemHandle,
         name: &FsStr,
         mode: u32,
-    ) -> Arc<SimpleDirectory> {
-        if let Some(node) = state.entries.get(name) {
-            assert!(node.info().mode == mode!(IFDIR, mode));
-            let dir =
-                node.downcast_ops::<Arc<SimpleDirectory>>().expect("subdir is a SimpleDirectory");
-            dir.clone()
-        } else {
-            let dir = Arc::new(SimpleDirectory {
-                state: LockDepMutex::new(SimpleDirectoryState {
-                    entries: Default::default(),
-                    not_found_handler: state.not_found_handler,
-                }),
-            });
-            let info = FsNodeInfo::new(mode!(IFDIR, mode), FsCred::root());
-            let node = fs.create_node_and_allocate_node_id(dir.clone(), info);
-            state.entries.insert(name.into(), node);
-            dir
-        }
+    ) -> Result<Arc<SimpleDirectory>, Errno> {
+        self.state.lock().get_or_create_subdir(fs, name, mode)
     }
 
     pub fn subdir(&self, fs: &FileSystemHandle, name: &FsStr, mode: u32) -> Arc<SimpleDirectory> {
-        let mut state = self.state.lock();
-        Self::get_or_create_subdir_locked(&mut state, fs, name, mode)
+        self.get_or_create_subdir(fs, name, mode).expect("subdir is a SimpleDirectory")
     }
 
-    /// Creates or looks up `subdir_name`, and creates or looks up `child_name` within it while
-    /// holding this directory's lock so the intermediate subdirectory cannot be removed
+    /// Creates a new subdirectory named `name`, or returns `EEXIST` if an entry with `name`
+    /// already exists or `ENOENT` if this directory has been removed.
+    pub fn create_subdir(
+        &self,
+        fs: &FileSystemHandle,
+        name: &FsStr,
+        mode: u32,
+    ) -> Result<Arc<SimpleDirectory>, Errno> {
+        self.state.lock().create_subdir(fs, name, mode)
+    }
+
+    /// Creates or looks up `subdir_name`, and creates a new `child_name` subdirectory within it
+    /// while holding this directory's lock so the intermediate subdirectory cannot be removed
     /// concurrently by [`Self::remove_from_subdir_if_empty`].
-    pub fn nested_subdir(
+    ///
+    /// Returns `EEXIST` if `child_name` already exists in `subdir_name` or if `subdir_name`
+    /// exists and is not a [`SimpleDirectory`], or `ENOENT` if this directory has been removed.
+    pub fn create_nested_subdir(
         &self,
         fs: &FileSystemHandle,
         subdir_name: &FsStr,
         subdir_mode: u32,
         child_name: &FsStr,
         child_mode: u32,
-    ) -> Arc<SimpleDirectory> {
+    ) -> Result<Arc<SimpleDirectory>, Errno> {
         let mut state = self.state.lock();
-        let subdir = Self::get_or_create_subdir_locked(&mut state, fs, subdir_name, subdir_mode);
+        let was_created = !state.entries.contains_key(subdir_name);
+        let subdir = state.get_or_create_subdir(fs, subdir_name, subdir_mode)?;
         // Safe because locking parent then child strictly follows the directory tree hierarchy.
         let _token = allow_subclass();
-        subdir.subdir(fs, child_name, child_mode)
+        subdir.create_subdir(fs, child_name, child_mode).inspect_err(|_| {
+            if was_created && let Some(removed) = state.entries.remove(subdir_name) {
+                Self::mark_removed(removed);
+            }
+        })
+    }
+
+    /// Creates a symlink named `name` pointing to `target`.
+    ///
+    /// Returns `EEXIST` if an entry with `name` already exists, or `ENOENT` if this directory has
+    /// been removed.
+    pub fn create_symlink(
+        self: &Arc<Self>,
+        fs: &FileSystemHandle,
+        name: &FsStr,
+        target: &FsStr,
+    ) -> Result<(), Errno> {
+        let (ops, info) = SymlinkNode::new(target, FsCred::root());
+        self.state.lock().try_insert(fs, name, ops, info)?;
+        Ok(())
     }
 
     /// Removes `child_name` from `subdir_name`, and removes `subdir_name` itself if it becomes
-    /// empty, atomically with respect to [`Self::nested_subdir`].
+    /// empty, atomically with respect to [`Self::create_nested_subdir`].
     pub fn remove_from_subdir_if_empty(&self, subdir_name: &FsStr, child_name: &FsStr) {
         let mut state = self.state.lock();
         let Some(subdir) = state
@@ -250,15 +361,23 @@ impl SimpleDirectory {
         else {
             return;
         };
-        let is_empty = {
+        let (removed_child, is_empty) = {
             // Safe because locking parent then child strictly follows the directory tree hierarchy.
             let _token = allow_subclass();
             let mut subdir_state = subdir.state.lock();
-            subdir_state.entries.remove(child_name);
-            subdir_state.entries.is_empty()
+            let removed_child = subdir_state.entries.remove(child_name);
+            let is_empty = subdir_state.entries.is_empty();
+            if is_empty {
+                subdir_state.removed = true;
+            }
+            (removed_child, is_empty)
         };
         if is_empty {
             state.entries.remove(subdir_name);
+        }
+        std::mem::drop(state);
+        if let Some(removed_child) = removed_child {
+            Self::mark_removed(removed_child);
         }
     }
 
@@ -525,6 +644,135 @@ mod tests {
                 errno!(ENOENT)
             );
             assert!(replaced_subdir.is_dead());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_simple_directory_create_rejects_duplicates() {
+        spawn_kernel_and_run(async |current_task| {
+            let fs = current_task.fs().root().entry.node.fs();
+            let dir = SimpleDirectory::new();
+
+            dir.create_subdir(&fs, "sub".into(), 0o755).expect("create_subdir");
+            assert_eq!(dir.create_subdir(&fs, "sub".into(), 0o755).err(), Some(errno!(EEXIST)));
+            assert_eq!(
+                dir.create_symlink(&fs, "sub".into(), "target".into()).err(),
+                Some(errno!(EEXIST))
+            );
+
+            dir.create_symlink(&fs, "link".into(), "target".into()).expect("create_symlink");
+            assert_eq!(
+                dir.create_symlink(&fs, "link".into(), "target2".into()).err(),
+                Some(errno!(EEXIST))
+            );
+            assert_eq!(dir.create_subdir(&fs, "link".into(), 0o755).err(), Some(errno!(EEXIST)));
+            assert_eq!(
+                dir.create_nested_subdir(&fs, "link".into(), 0o755, "child".into(), 0o755).err(),
+                Some(errno!(EEXIST))
+            );
+
+            dir.create_nested_subdir(&fs, "nested".into(), 0o755, "child".into(), 0o755)
+                .expect("create_nested_subdir");
+            assert_eq!(
+                dir.create_nested_subdir(&fs, "nested".into(), 0o755, "child".into(), 0o755).err(),
+                Some(errno!(EEXIST))
+            );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_simple_directory_create_under_removed_dir_returns_enoent() {
+        spawn_kernel_and_run(async |current_task| {
+            let fs = current_task.fs().root().entry.node.fs();
+            let dir = SimpleDirectory::new();
+
+            let sub = dir.create_subdir(&fs, "sub".into(), 0o755).expect("create_subdir");
+            let child = sub.create_subdir(&fs, "child".into(), 0o755).expect("create child");
+            dir.remove("sub".into());
+            assert!(sub.is_removed());
+            assert!(child.is_removed());
+            assert_eq!(
+                sub.create_subdir(&fs, "grandchild".into(), 0o755).err(),
+                Some(errno!(ENOENT))
+            );
+            assert_eq!(
+                sub.create_nested_subdir(&fs, "glue".into(), 0o755, "grandchild".into(), 0o755)
+                    .err(),
+                Some(errno!(ENOENT))
+            );
+            assert_eq!(
+                sub.create_symlink(&fs, "link".into(), "target".into()).err(),
+                Some(errno!(ENOENT))
+            );
+
+            let nested_child = dir
+                .create_nested_subdir(&fs, "nested".into(), 0o755, "child".into(), 0o755)
+                .expect("create_nested_subdir");
+            dir.remove_from_subdir_if_empty("nested".into(), "child".into());
+            assert!(dir.lookup("nested".into()).is_none());
+            assert!(nested_child.is_removed());
+            assert_eq!(
+                nested_child.create_subdir(&fs, "grandchild".into(), 0o755).err(),
+                Some(errno!(ENOENT))
+            );
+            dir.create_nested_subdir(&fs, "nested".into(), 0o755, "child".into(), 0o755)
+                .expect("create_nested_subdir after removal");
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_simple_directory_edit_on_removed_dir_is_noop() {
+        spawn_kernel_and_run(async |current_task| {
+            let fs = current_task.fs().root().entry.node.fs();
+            let dir = SimpleDirectory::new();
+
+            let sub = dir.create_subdir(&fs, "sub".into(), 0o755).expect("create_subdir");
+            dir.remove("sub".into());
+            assert!(sub.is_removed());
+
+            sub.edit(&fs, |mutator| {
+                mutator.subdir("child", 0o755, |_| {});
+                mutator.symlink("link".into(), "target".into());
+            });
+            assert!(sub.lookup("child".into()).is_none());
+            assert!(sub.lookup("link".into()).is_none());
+
+            // Also verify direct mutator operations after removal act as no-ops without panicking.
+            let mutator = SimpleDirectoryMutator::new(fs.clone(), sub.clone());
+            mutator.subdir("child2", 0o755, |_| {});
+            mutator.symlink("link2".into(), "target".into());
+            assert!(sub.lookup("child2".into()).is_none());
+            assert!(sub.lookup("link2".into()).is_none());
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_simple_directory_create_nested_subdir_preserves_existing_parent() {
+        spawn_kernel_and_run(async |current_task| {
+            let fs = current_task.fs().root().entry.node.fs();
+            let dir = SimpleDirectory::new();
+
+            let existing = dir.create_subdir(&fs, "existing".into(), 0o755).expect("create_subdir");
+            existing.create_subdir(&fs, "child".into(), 0o755).expect("create child");
+
+            assert_eq!(
+                dir.create_nested_subdir(&fs, "existing".into(), 0o755, "child".into(), 0o755)
+                    .err(),
+                Some(errno!(EEXIST))
+            );
+            assert!(dir.lookup("existing".into()).is_some());
+            assert!(!existing.is_removed());
+
+            dir.create_symlink(&fs, "link".into(), "target".into()).expect("create_symlink");
+            assert_eq!(
+                dir.create_nested_subdir(&fs, "link".into(), 0o755, "child".into(), 0o755).err(),
+                Some(errno!(EEXIST))
+            );
+            assert!(dir.lookup("link".into()).is_some());
         })
         .await;
     }

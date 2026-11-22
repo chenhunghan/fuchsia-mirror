@@ -3,14 +3,107 @@
 # found in the LICENSE file.
 
 import("//build/python/python_host_test.gni")
+import("//build/python/python_library.gni")
+import("//build/testing/host_test_data.gni")
 
 if (is_host) {
+  python_library("build_profile_procfs_pyz_lib") {
+    library_name = "build/profile"
+    source_root = "//build/profile"
+    sources = [ "procfs.py" ]
+    enable_mypy = false
+  }
+
+  python_library("build_scripts_lock_utils_pyz_lib") {
+    library_name = "build/scripts"
+    source_root = "//build/scripts"
+    sources = [ "lock_utils.py" ]
+    library_deps = [ ":build_profile_procfs_pyz_lib" ]
+    enable_mypy = false
+  }
+
+  python_host_test("builder_test") {
+    main_source = "builder_test.py"
+    sources = [
+      "__init__.py",
+      "builder.py",
+      "registry.py",
+      "test_utils.py",
+    ]
+    libraries = [ ":build_scripts_lock_utils_pyz_lib" ]
+  }
+
+  python_host_test("fx_builtins_test") {
+    main_source = "fx_builtins_test.py"
+    sources = [
+      "__init__.py",
+      "builder.py",
+      "fx_builtins.py",
+      "locator.py",
+      "metadata.py",
+      "registry.py",
+    ]
+    libraries = [ ":build_scripts_lock_utils_pyz_lib" ]
+    data_package_name = "data"
+    data_sources = [
+      "//tools/devshell/lib/agent_session_ids.txt",
+      "//tools/devshell/lib/agents.txt",
+      "//tools/devshell/lib/fx-optional-features.sh",
+      "//tools/devshell/lib/platform.sh",
+    ]
+  }
+
   python_host_test("locator_test") {
     main_source = "locator_test.py"
     sources = [
       "__init__.py",
       "locator.py",
       "registry.py",
+    ]
+  }
+
+  host_test_data("main_test_data") {
+    sources = [ "//scripts/fx" ]
+    outputs = [ "${target_out_dir}/main_test/test_data/fx" ]
+  }
+
+  python_host_test("main_test") {
+    main_source = "main_test.py"
+    sources = [
+      "__init__.py",
+      "builder.py",
+      "fx_builtins.py",
+      "locator.py",
+      "main.py",
+      "metadata.py",
+      "metrics.py",
+      "registry.py",
+      "test_utils.py",
+    ]
+    libraries = [ ":build_scripts_lock_utils_pyz_lib" ]
+    data_package_name = "data"
+    data_sources = [
+      "//tools/devshell/lib/agent_session_ids.txt",
+      "//tools/devshell/lib/agents.txt",
+      "//tools/devshell/lib/fx-optional-features.sh",
+      "//tools/devshell/lib/platform.sh",
+    ]
+    test_data_deps = [ ":main_test_data" ]
+  }
+
+  python_host_test("metrics_test") {
+    main_source = "metrics_test.py"
+    sources = [
+      "__init__.py",
+      "metadata.py",
+      "metrics.py",
+      "test_utils.py",
+    ]
+    data_package_name = "data"
+    data_sources = [
+      "//tools/devshell/lib/agent_session_ids.txt",
+      "//tools/devshell/lib/agents.txt",
+      "//tools/devshell/lib/fx-optional-features.sh",
     ]
   }
 
@@ -21,22 +114,16 @@ if (is_host) {
       "registry.py",
     ]
   }
-
-  python_host_test("builder_test") {
-    main_source = "builder_test.py"
-    sources = [
-      "__init__.py",
-      "builder.py",
-      "registry.py",
-    ]
-  }
 }
 
 group("tests") {
   testonly = true
   deps = [
     ":builder_test($host_toolchain)",
+    ":fx_builtins_test($host_toolchain)",
     ":locator_test($host_toolchain)",
+    ":main_test($host_toolchain)",
+    ":metrics_test($host_toolchain)",
     ":registry_test($host_toolchain)",
   ]
 }

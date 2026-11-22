@@ -23,29 +23,32 @@ import fidl_fuchsia_hwinfo as f_hwinfo
 import fidl_fuchsia_io as f_io
 import fuchsia_controller_py as fcp
 import fuchsia_inspect
-import honeydew.affordances.connectivity.wlan.core as wlan_core
 from honeydew import affordances_capable, errors
-from honeydew.affordances import location
-from honeydew.affordances.connectivity import netstack
-from honeydew.affordances.connectivity.bluetooth.gap import gap, gap_using_fc
-from honeydew.affordances.connectivity.bluetooth.le import le, le_using_fc
-from honeydew.affordances.connectivity.wlan import wlan_policy, wlan_policy_ap
-from honeydew.affordances.drivers import battery_manager
+from honeydew.affordances.connectivity.bluetooth.gap import gap
+from honeydew.affordances.connectivity.bluetooth.le import le
+from honeydew.affordances.connectivity.netstack import netstack
+from honeydew.affordances.connectivity.thread import thread
+from honeydew.affordances.connectivity.wlan.core import wlan_core
+from honeydew.affordances.connectivity.wlan.wlan_policy import wlan_policy
+from honeydew.affordances.connectivity.wlan.wlan_policy_ap import wlan_policy_ap
+from honeydew.affordances.drivers.battery_manager import battery_manager
 from honeydew.affordances.drivers.fake_battery import (
     fake_battery as fake_battery_affordance,
 )
-from honeydew.affordances.drivers.fake_battery import (
-    fake_battery_using_ffx,
+from honeydew.affordances.drivers.hardware.power import power as hardware_power
+from honeydew.affordances.hello_fuchsia import (
+    hello_fuchsia as hello_fuchsia_affordance,
 )
-from honeydew.affordances.drivers.hardware import power as hardware_power
+from honeydew.affordances.hello_fuchsia import (
+    hello_fuchsia_using_fc,
+    hello_fuchsia_using_ffx,
+)
+from honeydew.affordances.hello_fuchsia import types as hello_fuchsia_types
 from honeydew.affordances.hello_world import (
     hello_world as hello_world_affordance,
 )
-from honeydew.affordances.hello_world import (
-    hello_world_using_ffx,
-)
+from honeydew.affordances.location import location
 from honeydew.affordances.media import media as media_affordance
-from honeydew.affordances.media import media_using_fc
 from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller as system_power_state_controller_interface,
 )
@@ -53,38 +56,20 @@ from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller_using_starnix,
 )
 from honeydew.affordances.rtc import rtc as rtc_affordance
-from honeydew.affordances.rtc import rtc_using_fc
 from honeydew.affordances.session import session as session_affordance
-from honeydew.affordances.session import (
-    session_using_ffx,
-)
 from honeydew.affordances.starnix import errors as starnix_errors
 from honeydew.affordances.starnix import starnix as starnix_affordance
-from honeydew.affordances.starnix import (
-    starnix_using_ffx,
-)
 from honeydew.affordances.tracing import tracing as tracing_affordance
-from honeydew.affordances.tracing import (
-    tracing_using_fc,
-    tracing_using_ffx,
-)
 from honeydew.affordances.tracing import types as tracing_types
 from honeydew.affordances.ui.screenshot import (
     screenshot as screenshot_affordance,
 )
-from honeydew.affordances.ui.screenshot import (
-    screenshot_using_ffx,
-)
 from honeydew.affordances.ui.user_input import (
     user_input as user_input_affordance,
 )
-from honeydew.affordances.ui.user_input import (
-    user_input_using_fc,
-)
-from honeydew.affordances.virtual_audio import (
-    audio,
-    audio_using_fuchsia_controller,
-)
+from honeydew.affordances.usb import errors as usb_errors
+from honeydew.affordances.usb import usb as usb_affordance
+from honeydew.affordances.virtual_audio import audio
 from honeydew.auxiliary_devices.power_switch import (
     power_switch as power_switch_interface,
 )
@@ -93,14 +78,14 @@ from honeydew.auxiliary_devices.usb_power_hub import (
 )
 from honeydew.transports.fastboot import fastboot
 from honeydew.transports.ffx import errors as ffx_errors
-from honeydew.transports.ffx import ffx, ffx_with_monitor
+from honeydew.transports.ffx import ffx as ffx_transport
+from honeydew.transports.ffx import ffx_impl, ffx_with_monitor
 from honeydew.transports.ffx.config import FfxConfigData
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fc_transport,
 )
-from honeydew.transports.serial import serial as serial_transport_interface
-from honeydew.transports.serial import serial_using_unix_socket
+from honeydew.transports.serial import serial as serial_transport
 from honeydew.typing import custom_types
 from honeydew.utils import common, properties
 
@@ -134,6 +119,11 @@ _LOG_SEVERITIES: dict[custom_types.LEVEL, f_diagnostics_types.Severity] = {
     custom_types.LEVEL.ERROR: f_diagnostics_types.Severity.ERROR,
 }
 
+_CHECK_CONNECTIONS_TIMEOUT_SECS: int = 30
+# 30s (ffx) + 30s (fc) + 3 * 30s (adb retries) + 10s buffer.
+_HEALTH_CHECK_TIMEOUT_SECS: int = 160
+_RESOLVE_DEVICE_ADDRESS_MAX_ATTEMPTS = 3
+
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
@@ -144,6 +134,7 @@ class FuchsiaDevice(
     affordances_capable.FuchsiaDeviceClose,
     affordances_capable.InspectCapableDevice,
     affordances_capable.FuchsiaDeviceAddressChange,
+    affordances_capable.HealthCheckCapable,
 ):
     """Class that provides access to an assortment of capabilities available
     on a Fuchsia device.
@@ -168,6 +159,20 @@ class FuchsiaDevice(
                         },
                         ...
                     },
+                    "auxiliary_devices": {
+                        <auxiliary_device_name>: {
+                            "hardware": {
+                                <key>: <value>,
+                                ...
+                            },
+                            "implementation": {
+                                "module": <module_path>,
+                                "class": <class_name>,
+                            },
+                            ...
+                        },
+                        ...
+                    },
                 }
             Example:
                 {
@@ -178,7 +183,19 @@ class FuchsiaDevice(
                     },
                     "affordances": {
                         "tracing": {
-                            "implementation": "fuchsia-controller",
+                            "implementation": "ffx",
+                        },
+                    },
+                    "auxiliary_devices": {
+                        "power_switch": {
+                            "hardware": {
+                                "pdu_host": "10.0.0.1",
+                                "outlet": 1,
+                            },
+                            "implementation": {
+                                "module": "honeydew.auxiliary_devices.power_switch.power_switch_using_pdu",
+                                "class": "PowerSwitchUsingPdu",
+                            },
                         },
                     },
                 }
@@ -210,7 +227,6 @@ class FuchsiaDevice(
         ] = []
         self._on_device_address_change_fns: list[
             Callable[[custom_types.TargetAddr], None]
-            | Callable[[custom_types.TargetAddr], Awaitable[None]]
         ] = []
         self._on_device_suspend_fns: list[
             Callable[[], None] | Callable[[], Awaitable[None]]
@@ -223,11 +239,9 @@ class FuchsiaDevice(
         self._config: dict[str, Any] | None = config
         self._created_context = False
 
-        self._power_switch: power_switch_interface.PowerSwitch | None = None
-        self._power_switch_outlet: int | None = None
-
-        self._usb_power_hub: usb_power_hub_interface.UsbPowerHub | None = None
-        self._usb_power_hub_port: int | None = None
+        self._power_switch = power_switch_interface.PowerSwitch.from_config(
+            device_config=self._config,
+        )
 
         self._health_check_leg_statuses: list[str] = []
         self._current_health_check_leg: str | None = None
@@ -341,11 +355,11 @@ class FuchsiaDevice(
 
     # List all transports
     @properties.Transport
-    def ffx(self) -> ffx.FFX:
+    def ffx(self) -> ffx_transport.FFX:
         """Returns the FFX transport object.
 
         Returns:
-            FFX or FFXWithMonitor transport instance.
+            FfxImpl or FFXWithMonitor transport instance.
 
         Raises:
             FfxCommandError: Failed to instantiate.
@@ -360,19 +374,27 @@ class FuchsiaDevice(
             )
             if config_use_monitor_state is not None:
                 use_monitor_state = bool(config_use_monitor_state)
+        ffx_obj: ffx_transport.FFX
         if use_monitor_state:
-            return ffx_with_monitor.FFXWithMonitor(
+            ffx_obj = ffx_with_monitor.FFXWithMonitor(
                 target_name=self.device_name,
                 config_data=self._ffx_config_data,
                 target_addr=self._device_info.address,
                 device_address_change=self,
             )
-        return ffx.FFX(
-            target_name=self.device_name,
-            config_data=self._ffx_config_data,
-            target_addr=self._device_info.address,
-            device_address_change=self,
-        )
+        else:
+            ffx_obj = ffx_impl.FfxImpl(
+                target_name=self.device_name,
+                config_data=self._ffx_config_data,
+                target_addr=self._device_info.address,
+                device_address_change=self,
+            )
+        if isinstance(self._device_info.address, custom_types.UsbAddress):
+            self._device_info = dataclasses.replace(
+                self._device_info,
+                address=ffx_obj.get_target_address(),
+            )
+        return ffx_obj
 
     @properties.Transport
     def fuchsia_controller(
@@ -406,10 +428,7 @@ class FuchsiaDevice(
         Raises:
             FuchsiaDeviceError: Failed to instantiate.
         """
-        fastboot_node_id: str | None = (
-            self._device_info.fastboot_node_id
-            or self._device_info.serial_number
-        )
+        fastboot_node_id: str | None = self._device_info.serial_number
         if fastboot_node_id is None:
             try:
                 fastboot_node_id = self.ffx.serial_number
@@ -424,8 +443,8 @@ class FuchsiaDevice(
         if fastboot_node_id is None:
             raise errors.FuchsiaDeviceError(
                 f"Failed to get the fastboot node id of '{self.device_name}' as "
-                f"'fastboot_node_id' and 'serial_number' were not provided and "
-                f"could not be retrieved via FFX"
+                f"'serial_number' was not provided and could not be retrieved "
+                f"via FFX"
             )
 
         fastboot_obj: fastboot.Fastboot = fastboot.Fastboot(
@@ -437,7 +456,7 @@ class FuchsiaDevice(
         return fastboot_obj
 
     @properties.Transport
-    def serial(self) -> serial_transport_interface.Serial:
+    def serial(self) -> serial_transport.Serial:
         """Returns the Serial transport object.
 
         Returns:
@@ -448,11 +467,9 @@ class FuchsiaDevice(
                 "'serial_socket' arg need to be provided during the init to use Serial affordance"
             )
 
-        serial_obj: serial_transport_interface.Serial = (
-            serial_using_unix_socket.SerialUsingUnixSocket(
-                device_name=self.device_name,
-                socket_path=self._device_info.serial_socket,
-            )
+        serial_obj: serial_transport.Serial = serial_transport.Serial(
+            device_name=self.device_name,
+            socket_path=self._device_info.serial_socket,
         )
         return serial_obj
 
@@ -464,7 +481,7 @@ class FuchsiaDevice(
         Returns:
             session.Session object
         """
-        return session_using_ffx.SessionUsingFfx(
+        return session_affordance.Session(
             device_name=self.device_name,
             ffx=self.ffx,
             fuchsia_device_close=self,
@@ -477,7 +494,7 @@ class FuchsiaDevice(
         Returns:
             screenshot.Screenshot object
         """
-        return screenshot_using_ffx.ScreenshotUsingFfx(self.ffx)
+        return screenshot_affordance.Screenshot(self.ffx)
 
     @properties.Affordance
     def virtual_audio(self) -> audio.VirtualAudio:
@@ -495,12 +512,10 @@ class FuchsiaDevice(
         Returns:
             audio.VirtualAudio object
         """
-        return (
-            audio_using_fuchsia_controller.VirtualAudioUsingFuchsiaController(
-                device_name=self.device_name,
-                fuchsia_controller=self.fuchsia_controller,
-                ffx_transport=self.ffx,
-            )
+        return audio.VirtualAudio(
+            device_name=self.device_name,
+            fuchsia_controller=self.fuchsia_controller,
+            ffx_transport=self.ffx,
         )
 
     @properties.Affordance
@@ -510,7 +525,7 @@ class FuchsiaDevice(
         Returns:
             starnix.Starnix object
         """
-        return starnix_using_ffx.StarnixUsingFfx(
+        return starnix_affordance.Starnix(
             device_name=self.device_name,
             ffx=self.ffx,
             inspect=self,
@@ -523,7 +538,7 @@ class FuchsiaDevice(
         """Returns a SystemPowerStateController affordance object.
 
         Returns:
-            system_power_state_controller_interface.SystemPowerStateController object
+            system_power_state_controller_using_starnix.SystemPowerStateControllerUsingStarnix object
 
         Raises:
             errors.NotSupportedError: If Fuchsia device does not support Starnix
@@ -543,28 +558,24 @@ class FuchsiaDevice(
         Returns:
             rtc.Rtc object
         """
-        return rtc_using_fc.RtcUsingFc(
+        return rtc_affordance.Rtc(
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
         )
 
     @properties.Affordance
-    def tracing(self) -> tracing_affordance.Tracing:
+    def tracing(
+        self,
+    ) -> tracing_affordance.Tracing:
         """Returns a tracing affordance object.
 
         Returns:
             tracing.Tracing object
         """
-        impl = self._get_tracing_affordance_implementation()
-        if impl == tracing_types.Implementation.FFX:
-            return tracing_using_ffx.TracingUsingFfx(
-                device_name=self.device_name,
-                ffx_inst=self.ffx,
-                reboot_affordance=self,
-            )
-        return tracing_using_fc.TracingUsingFc(
+        self._get_tracing_affordance_implementation()
+        return tracing_affordance.Tracing(
             device_name=self.device_name,
-            fuchsia_controller=self.fuchsia_controller,
+            ffx_inst=self.ffx,
             reboot_affordance=self,
         )
 
@@ -575,7 +586,7 @@ class FuchsiaDevice(
         Returns:
             user_input.UserInput object
         """
-        return user_input_using_fc.UserInputUsingFc(
+        return user_input_affordance.UserInput(
             device_name=self.device_name,
             fuchsia_controller=self.fuchsia_controller,
             ffx_transport=self.ffx,
@@ -588,7 +599,7 @@ class FuchsiaDevice(
         Returns:
             Bluetooth LE object
         """
-        return le_using_fc.LEUsingFc(
+        return le.LE(
             device_name=self.device_name,
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
@@ -601,7 +612,7 @@ class FuchsiaDevice(
         Returns:
             Bluetooth Gap object
         """
-        return gap_using_fc.GapUsingFc(
+        return gap.Gap(
             device_name=self.device_name,
             fuchsia_controller=self.fuchsia_controller,
             reboot_affordance=self,
@@ -687,7 +698,7 @@ class FuchsiaDevice(
         Returns:
             fake_battery.FakeBattery object
         """
-        return fake_battery_using_ffx.FakeBatteryUsingFfx(
+        return fake_battery_affordance.FakeBattery(
             device_name=self.device_name,
             ffx=self.ffx,
         )
@@ -723,6 +734,21 @@ class FuchsiaDevice(
         )
 
     @properties.Affordance
+    def thread(self) -> thread.Thread:
+        """Returns a thread affordance object.
+
+        Returns:
+            thread.Thread object
+        """
+        return thread.Thread(
+            device_name=self.device_name,
+            ffx=self.ffx,
+            fuchsia_controller=self.fuchsia_controller,
+            reboot_affordance=self,
+            fuchsia_device_close=self,
+        )
+
+    @properties.Affordance
     def location(self) -> location.Location:
         """Returns a location affordance object.
 
@@ -744,7 +770,7 @@ class FuchsiaDevice(
         Returns:
             media.Media object
         """
-        return media_using_fc.MediaUsingFc(
+        return media_affordance.Media(
             device_name=self.device_name,
             fuchsia_controller=self.fuchsia_controller,
             ffx_transport=self.ffx,
@@ -757,9 +783,52 @@ class FuchsiaDevice(
         Returns:
             hello_world.HelloWorld object
         """
-        return hello_world_using_ffx.HelloWorldUsingFfx(
+        return hello_world_affordance.HelloWorld(
             device_name=self.device_name,
             ffx=self.ffx,
+        )
+
+    @properties.Affordance
+    def hello_fuchsia(self) -> hello_fuchsia_affordance.HelloFuchsia:
+        """Returns a HelloFuchsia affordance object.
+
+        Returns:
+            hello_fuchsia_using_fc.HelloFuchsiaUsingFc |
+            hello_fuchsia_using_ffx.HelloFuchsiaUsingFfx object
+        """
+        impl = self._get_hello_fuchsia_affordance_implementation()
+        if impl == hello_fuchsia_types.Implementation.FFX:
+            return hello_fuchsia_using_ffx.HelloFuchsiaUsingFfx(
+                device_name=self.device_name,
+                ffx=self.ffx,
+            )
+        return hello_fuchsia_using_fc.HelloFuchsiaUsingFc(
+            device_name=self.device_name,
+            fuchsia_controller=self.fuchsia_controller,
+        )
+
+    @properties.Affordance
+    def usb(self) -> usb_affordance.USB:
+        """Returns a USB affordance object.
+
+        Returns:
+            usb.USB object
+        """
+        serial: serial_transport.Serial | None = (
+            self.serial if self._device_info.serial_socket is not None else None
+        )
+        power_hub = usb_power_hub_interface.UsbPowerHub.from_config(
+            device_config=self._config,
+        )
+        return usb_affordance.USB(
+            device_name=self.device_name,
+            ffx=self.ffx,
+            fuchsia_controller=self.fuchsia_controller,
+            reboot_affordance=self,
+            device_address_change=self,
+            health_check=self,
+            serial=serial,
+            power_hub=power_hub,
         )
 
     # List all the public methods
@@ -777,16 +846,20 @@ class FuchsiaDevice(
         Raises:
             errors.HealthCheckError
         """
+        # `health_check()` can be re-entered when an outer health check leg
+        # triggers recovery (for example: `health_check()` ->
+        # `adb.check_connection()` -> `adb.run()` -> `_recover_adb_server()` ->
+        # `usb.after_connect()` -> `health_check()`). Save any in-progress outer
+        # leg state on the call stack and restore it in `finally` so the nested
+        # `health_check()` does not overwrite the outer call's leg tracking or
+        # error attribution.
+        prev_leg_statuses: list[str] = self._health_check_leg_statuses
+        prev_current_leg: str | None = self._current_health_check_leg
         self._health_check_leg_statuses = []
         self._current_health_check_leg = None
         try:
-            # TODO(b/421476805): Reduce the timeout back to 60 seconds once
-            # we're able to supply a configuration value for this. The timeout
-            # of 180 is picked to give a sufficiently large amount of time for
-            # devices in infrastructure that currently experience stalls during
-            # boot but eventually settle.
             with common.time_limit(
-                timeout=600,
+                timeout=_HEALTH_CHECK_TIMEOUT_SECS,
                 exception_message=f"Timeout occurred during the health check of '{self._device_info.name}'",
             ):
                 _LOGGER.info(
@@ -794,7 +867,7 @@ class FuchsiaDevice(
                     self.device_name,
                 )
 
-                self._check_connections()
+                self._check_connections(timeout=_CHECK_CONNECTIONS_TIMEOUT_SECS)
 
                 leg_summary: str = " ".join(self._health_check_leg_statuses)
                 _LOGGER.info(
@@ -806,9 +879,19 @@ class FuchsiaDevice(
             errors.HoneydewTimeoutError,
             errors.TransportConnectionError,
         ) as err:
+            try:
+                self.usb.get_diagnostic_info()
+            except errors.NotSupportedError:
+                pass
+            except usb_errors.UsbError as usb_err:
+                _LOGGER.warning("%s", usb_err)
             err_msg: str = self._format_health_check_error(err)
             _LOGGER.warning("%s", err_msg)
             raise errors.HealthCheckError(err_msg) from err
+        finally:
+            if prev_current_leg is not None:
+                self._health_check_leg_statuses = prev_leg_statuses
+                self._current_health_check_leg = prev_current_leg
 
     def _format_health_check_error(self, err: Exception) -> str:
         """Formats the error message for a failed health check."""
@@ -851,14 +934,14 @@ class FuchsiaDevice(
         self._current_health_check_leg = None
         self._health_check_leg_statuses.append(f"{leg_name}=ok({elapsed:.1f}s)")
 
-    def _check_connections(self) -> None:
+    def _check_connections(self, timeout: int) -> None:
         """Checks health of all device transports."""
         # Note - FFX is invoked first to verify connectivity
         with self._health_check_leg("ffx"):
-            self.ffx.check_connection()
+            self.ffx.check_connection(timeout=timeout)
 
         with self._health_check_leg("fc"):
-            self.fuchsia_controller.check_connection()
+            self.fuchsia_controller.check_connection(timeout=timeout)
 
     def get_inspect_data(
         self,
@@ -963,25 +1046,32 @@ class FuchsiaDevice(
             if inspect.isawaitable(res):
                 await res
 
+    @property
+    def power_switch(self) -> power_switch_interface.PowerSwitch | None:
+        """Power switch controlling this device, if one has been set."""
+        return self._power_switch
+
     def set_power_switch(
         self,
         power_switch: power_switch_interface.PowerSwitch,
-        outlet: int | None = None,
     ) -> None:
         """Set power switch for device.
 
+        Note: This is normally populated automatically during `__init__()` via
+        `PowerSwitch.from_config()` and does not need to be called manually.
+        Call this only to override the auto-configured implementation or inject a
+        custom/test instance at runtime.
+
         Args:
             power_switch: Implementation of PowerSwitch interface.
-            outlet (int | None): If required by power switch hardware, outlet on
-                power switch hardware where this fuchsia device is connected.
         """
         self._power_switch = power_switch
-        self._power_switch_outlet = outlet
 
     async def power_cycle(self) -> None:
         """Power cycle (power off, wait for delay, power on) the device.
 
-        Requires power switch to be set using `set_power_switch`.
+        Requires a configured power switch (populated automatically from device
+        config or set via `set_power_switch()`).
 
         Raises:
             NotSupportedError: If power switch is not set.
@@ -1012,11 +1102,11 @@ class FuchsiaDevice(
 
         _LOGGER.info("Powering off %s...", self.device_name)
         self.ffx.notify_intentional_disconnect()
-        self._power_switch.power_off(self._power_switch_outlet)
+        self._power_switch.power_off()
         self.wait_for_offline()
 
         _LOGGER.info("Powering on %s...", self.device_name)
-        self._power_switch.power_on(self._power_switch_outlet)
+        self._power_switch.power_on()
         await self.wait_for_online()
 
         await self.on_device_boot()
@@ -1026,6 +1116,9 @@ class FuchsiaDevice(
             level=custom_types.LEVEL.INFO,
         )
 
+    # TODO(b/582408121): Move to system_power_state_controller affordance and
+    # create system_power_state_controller_using_usb for current suspend-resume
+    # implementation in FuchsiaDevice.
     def register_on_device_suspend_fn(
         self,
         fn: Callable[[], None] | Callable[[], Awaitable[None]],
@@ -1037,6 +1130,9 @@ class FuchsiaDevice(
         """
         self._on_device_suspend_fns.append(fn)
 
+    # TODO(b/582408121): Move to system_power_state_controller affordance and
+    # create system_power_state_controller_using_usb for current suspend-resume
+    # implementation in FuchsiaDevice.
     def register_on_device_resume_fn(
         self,
         fn: Callable[[], None] | Callable[[], Awaitable[None]],
@@ -1048,83 +1144,46 @@ class FuchsiaDevice(
         """
         self._on_device_resume_fns.append(fn)
 
-    @property
-    def usb_power_hub(self) -> usb_power_hub_interface.UsbPowerHub | None:
-        """USB power hub controlling this device, if one has been set."""
-        return self._usb_power_hub
-
-    @property
-    def usb_power_hub_port(self) -> int | None:
-        """Port on the USB power hub where this device is connected, if any."""
-        return self._usb_power_hub_port
-
-    def set_usb_power_hub(
-        self,
-        usb_power_hub: usb_power_hub_interface.UsbPowerHub,
-        port: int | None = None,
-    ) -> None:
-        """Set USB power hub for device.
-
-        Args:
-            usb_power_hub: Implementation of UsbPowerHub interface.
-            port (int | None): If required by USB power hub hardware, port on
-                USB power hub hardware where this fuchsia device is connected.
-        """
-        self._usb_power_hub = usb_power_hub
-        self._usb_power_hub_port = port
-
+    # TODO(b/582408121): Move to system_power_state_controller affordance and
+    # create system_power_state_controller_using_usb for current suspend-resume
+    # implementation in FuchsiaDevice.
     async def suspend(self) -> None:
         """Suspend the device by disconnecting USB power.
 
-        Requires USB power hub to be set using set_usb_power_hub. This will
-        run all registered on_device_suspend_fns before disconnecting USB
-        power. Note that this does not guarantee the device actually
-        suspends, just that it will have the opportunity to.
+        Requires a configured USB power hub (populated automatically on
+        `FuchsiaDevice.usb` from device config or set via
+        `usb.set_power_hub()`). This will run all registered
+        on_device_suspend_fns before disconnecting USB power. Note that this does
+        not guarantee the device actually suspends, just that it will have the
+        opportunity to.
 
         Raises:
             NotSupportedError: If USB power hub not set.
         """
-        if self._usb_power_hub is None:
-            raise errors.NotSupportedError(
-                f"Cannot suspend '{self.device_name}': USB power hub is not configured. "
-                "Either call `set_usb_power_hub()` or ensure USB power hub details are provided in the testbed config."
-            )
-
         for fn in self._on_device_suspend_fns:
             res = fn()
             if inspect.isawaitable(res):
                 await res
 
-        _LOGGER.info("Disconnecting USB from %s...", self.device_name)
         self._pre_suspend_boot_id = await self.boot_id()
+        self.usb.disconnect()
 
-        self.fuchsia_controller.before_usb_disconnect()
-
-        self.ffx.notify_intentional_disconnect()
-        self._usb_power_hub.power_off(self._usb_power_hub_port)
-        self.wait_for_offline()
-
+    # TODO(b/582408121): Move to system_power_state_controller affordance and
+    # create system_power_state_controller_using_usb for current suspend-resume
+    # implementation in FuchsiaDevice.
     async def resume(self) -> None:
         """Resume the device by reconnecting USB power.
 
-        Requires USB power hub to be set using set_usb_power_hub. This will
-        run all registered on_device_resume_fns after reconnecting USB power.
+        Requires a configured USB power hub (populated automatically on
+        `FuchsiaDevice.usb` from device config or set via
+        `usb.set_power_hub()`). This will run all registered
+        on_device_resume_fns after reconnecting USB power.
 
         Raises:
             NotSupportedError: If USB power hub not set.
             FuchsiaDeviceError: If unexpected reboot detected.
         """
-        if self._usb_power_hub is None:
-            raise errors.NotSupportedError(
-                f"Cannot resume '{self.device_name}': USB power hub is not configured. "
-                "Either call `set_usb_power_hub()` or ensure USB power hub details are provided in the testbed config."
-            )
-
-        _LOGGER.info("Connecting USB to %s...", self.device_name)
-        self._usb_power_hub.power_on(self._usb_power_hub_port)
-        await self.wait_for_online()
-
-        self.fuchsia_controller.after_usb_reconnect()
+        self.usb.connect()
 
         post_resume_boot_id = await self.boot_id()
         if self._pre_suspend_boot_id != post_resume_boot_id:
@@ -1181,7 +1240,14 @@ class FuchsiaDevice(
         """
         self._on_device_close_fns.append(fn)
 
-    async def resolve_device_address(self) -> None:
+    # TODO(b/582408121): Kept synchronous so `USB.after_connect()` can call
+    # `resolve_device_address()` synchronously (required while `Adb` is
+    # synchronous and calls `USB` methods from `Adb.__init__()`). All registered
+    # callbacks (`FFX.update_target_address` and
+    # `FuchsiaController.update_target_address`) are synchronous. If `Adb` and
+    # `USB` are later converted to async, revisit whether this should also
+    # support async callbacks.
+    def resolve_device_address(self) -> None:
         """Resolves the target address of Fuchsia device."""
         # Step #1 - Get the target address of the Fuchsia device.
         if self._device_info.address is not None:
@@ -1212,9 +1278,7 @@ class FuchsiaDevice(
                     fn.__qualname__,
                     target_addr,
                 )
-                res = fn(target_addr)
-                if inspect.isawaitable(res):
-                    await res
+                fn(target_addr)
         except (errors.HoneydewError, ValueError) as err:
             raise errors.FuchsiaDeviceError(
                 f"Failed to resolve address for '{self.device_name}'"
@@ -1225,10 +1289,7 @@ class FuchsiaDevice(
 
     def register_for_on_device_address_change(
         self,
-        fn: (
-            Callable[[custom_types.TargetAddr], None]
-            | Callable[[custom_types.TargetAddr], Awaitable[None]]
-        ),
+        fn: Callable[[custom_types.TargetAddr], None],
     ) -> None:
         """Register a function that will be called when a device address is changed.
 
@@ -1281,19 +1342,24 @@ class FuchsiaDevice(
         _LOGGER.info("Snapshot file has been saved @ '%s'", snapshot_file_path)
         return snapshot_file_path
 
-    def wait_for_offline(self) -> None:
+    def wait_for_offline(self, timeout: float | None = None) -> None:
         """Wait for Fuchsia device to go offline.
+
+        Args:
+            timeout: Maximum time in seconds to wait for the device to go
+                offline. If None (default), waits indefinitely.
 
         Raises:
             errors.FuchsiaDeviceError: If device is not offline.
         """
         _LOGGER.info("Waiting for %s to go offline...", self.device_name)
         try:
-            self.ffx.wait_for_rcs_disconnection()
+            self.ffx.wait_for_rcs_disconnection(timeout=timeout)
             _LOGGER.info("%s is offline.", self.device_name)
         except (
             errors.DeviceNotConnectedError,
             ffx_errors.FfxCommandError,
+            ffx_errors.FfxTimeoutError,
         ) as err:
             raise errors.FuchsiaDeviceError(
                 f"'{self.device_name}' failed to go offline."
@@ -1317,14 +1383,38 @@ class FuchsiaDevice(
             else:
                 # If the device was not specified as an address, it may change
                 # addresses, so first wait for it by name, then update the
-                # address. This is the appropriate way when run locally,
-                # because in most environments the device may have a new
-                # address after reboots, so the target name is the stable
-                # query to use.
-                self.ffx.wait_for_rcs_connection(include_target_name=True)
-                # Now that we know that the device is available, find
-                # out and store its new target address.
-                await self.resolve_device_address()
+                # address. This is the appropriate way when run locally or over
+                # USB, where the device may have a new address after reboots.
+                # For USB targets, retry if the device goes offline between
+                # `wait_for_rcs_connection` and `resolve_device_address` (e.g.
+                # if `wait_for_rcs_connection` observed a dying pre-reboot
+                # instance during composite USB teardown).
+                max_attempts = (
+                    _RESOLVE_DEVICE_ADDRESS_MAX_ATTEMPTS
+                    if isinstance(
+                        self._device_info.address, custom_types.UsbAddress
+                    )
+                    else 1
+                )
+                for attempt in range(1, max_attempts + 1):
+                    self.ffx.wait_for_rcs_connection(include_target_name=True)
+                    try:
+                        self.resolve_device_address()
+                        break
+                    except errors.FuchsiaDeviceError as err:
+                        if attempt == max_attempts:
+                            raise errors.FuchsiaDeviceError(
+                                f"'{self.device_name}' failed to go online."
+                            ) from err
+                        _LOGGER.warning(
+                            "Failed to resolve address for %s on attempt %d/%d "
+                            "(device may still be shutting down or "
+                            "re-enumerating); retrying: %s",
+                            self.device_name,
+                            attempt,
+                            max_attempts,
+                            err,
+                        )
             _LOGGER.info("%s is online.", self.device_name)
         except (
             errors.DeviceNotConnectedError,
@@ -1672,4 +1762,32 @@ class FuchsiaDevice(
             raise errors.ConfigError(
                 f"Invalid value passed in config['affordances']['tracing']['implementation']. "
                 f"Valid values are: {list(map(str, tracing_types.Implementation))}"
+            ) from err
+
+    def _get_hello_fuchsia_affordance_implementation(
+        self,
+        should_exist: bool = False,
+    ) -> hello_fuchsia_types.Implementation:
+        """Parses the hello_fuchsia affordance config and returns which implementation to use."""
+        if self._config is None:
+            return hello_fuchsia_types.Implementation.FFX
+
+        hello_fuchsia_affordance_implementation: str | None = (
+            common.read_from_dict(
+                self._config,
+                key_path=("affordances", "hello_fuchsia", "implementation"),
+                should_exist=should_exist,
+            )
+        )
+        if hello_fuchsia_affordance_implementation is None:
+            return hello_fuchsia_types.Implementation.FFX
+
+        try:
+            return hello_fuchsia_types.Implementation(
+                hello_fuchsia_affordance_implementation
+            )
+        except ValueError as err:
+            raise errors.ConfigError(
+                f"Invalid value passed in config['affordances']['hello_fuchsia']['implementation']. "
+                f"Valid values are: {list(map(str, hello_fuchsia_types.Implementation))}"
             ) from err

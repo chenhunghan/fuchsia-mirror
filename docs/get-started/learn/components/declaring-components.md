@@ -278,19 +278,19 @@ on the length of the list.
 Update the program's dependencies in your `BUILD.gn` file:
 
 {% set gn_rust_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.bazel" region_tag="executable" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_rust_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.bazel" region_tag="component" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_cpp_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.bazel" region_tag="executable" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_cpp_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.bazel" region_tag="component" adjust_indentation="auto" %}
 {% endset %}
 
 * {Rust}
@@ -298,7 +298,7 @@ Update the program's dependencies in your `BUILD.gn` file:
   `echo-args/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 
   group("echo-args") {
     testonly = true
@@ -322,7 +322,7 @@ Update the program's dependencies in your `BUILD.gn` file:
   `echo-args/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 
   group("echo-args") {
     testonly = true

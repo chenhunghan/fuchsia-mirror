@@ -89,6 +89,7 @@ impl FsNodeOps for SysRqNode {
         _guard: &AppendLockWriteGuard<'_>,
         _node: &FsNode,
         _current_task: &CurrentTask,
+        _file: Option<&FileObject>,
         _length: u64,
     ) -> Result<(), Errno> {
         // This file doesn't store any contents, but userspace expects to truncate it on open.

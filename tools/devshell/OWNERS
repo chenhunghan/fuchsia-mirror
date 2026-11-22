@@ -44,7 +44,7 @@ per-file doc-checker.fx,mdlint.fx       = file: /tools/doc_checker/OWNERS
 
 per-file contrib/publish,contrib/publish.py,contrib/terminal.py,tests/subcommands/fx_publish_test.py=chandarren@google.com,aaronwood@google.com,etryzelaar@google.com
 
-per-file metrics,lib/metrics.sh,lib/metrics_custom_report.sh,tests/fx-internal/metrics_test = file: /src/lib/analytics/OWNERS
+per-file metrics,lib/metrics.sh,lib/metrics_custom_report.sh,tests/fx-internal/metrics_test,fx_cli/metrics.py,fx_cli/metrics_test.py = file: /src/lib/analytics/OWNERS
 
 per-file lib/fx-cmd-suggestions.py = chaselatta@google.com, djmurphy@google.com
 
@@ -64,3 +64,5 @@ per-file atomic-commit = lijiaming@google.com, olivernewman@google.com
 per-file set-device,unset-device,use,tests/subcommands/fx_set_device_test,tests/subcommands/fx_unset_device_test,tests/subcommands/fx_use_test = file: /src/developer/ffx/plugins/target/default/OWNERS
 
 per-file setup-firewall = awdavies@google.com
+
+per-file sync,tests/subcommands/fx_sync_test = file: /build/GIT_CLONE_FUCHSIA_OWNERS

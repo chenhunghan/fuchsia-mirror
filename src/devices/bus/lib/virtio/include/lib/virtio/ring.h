@@ -5,7 +5,7 @@
 #define SRC_DEVICES_BUS_LIB_VIRTIO_INCLUDE_LIB_VIRTIO_RING_H_
 
 #include <lib/dma-buffer/buffer.h>
-#include <lib/virtio/internal/barriers.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <zircon/types.h>
 
 #include <memory>
@@ -62,7 +62,7 @@ class Ring {
     ClearNoInterrupt();
     // Perform a memory barrier to ensure the load in HasWork does not get reordered before the
     // store in ClearNoInterrupt.
-    hw_mb();
+    DataMemoryBarrier();
     return HasWork();
   }
 
@@ -93,7 +93,7 @@ inline void Ring::IrqRingUpdate(T free_chain) {
   uint16_t i = ring_.last_used;
   // Read memory barrier before processing a descriptor chain. If we see an updated used->idx
   // we must see updated descriptor chains in the used ring.
-  hw_rmb();
+  ReadDataMemoryBarrier();
   for (; i != cur_idx; ++i) {
     // TRACEF("looking at idx %u\n", i);
 

@@ -1,0 +1,69 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    crate_name = "ctf_fuchsia_examples_rust_test",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_rust",
+        "//sdk/ctf/tests/examples/fidl/fuchsia.examples/testing/fidl:test.example_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/testing/realm_client/rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "ctf_fuchsia_examples_rust_test",
+)
+
+fx_component_manifest(
+    name = "test-suite_manifest",
+    testonly = True,
+    component_name = "test-suite",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+        "//src/testing/realm_client:meta/realm_client.shard.cml",
+    ],
+    manifest = "meta/test-suite.cml",
+)
+
+fx_component(
+    name = "test-suite",
+    testonly = True,
+    compiled_manifest = ":test-suite_manifest",
+    deps = [":bin_packaged"],
+)
+
+ctf_fx_package(
+    name = "fuchsia-examples-rust-tests",
+    testonly = True,
+    components = [":test-suite"],
+)

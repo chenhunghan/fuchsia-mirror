@@ -285,11 +285,11 @@ class SimpleUnion final {
   static SimpleUnion WithA(int32_t&&);
   static SimpleUnion WithB(float&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kA = 1,  // 0x1
     kB = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<SimpleUnion> New();
@@ -335,7 +335,7 @@ class SimpleUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -343,9 +343,9 @@ class SimpleUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid);
   union {
     int32_t a_;
     float b_;
@@ -606,7 +606,7 @@ struct Equality<::test::nullable::StructWithNullableStruct> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::nullable::SimpleUnion> : public std::true_type {};
+struct IsFidlUnion<::test::nullable::SimpleUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::nullable::SimpleUnion>
@@ -618,9 +618,9 @@ struct CodingTraits<std::unique_ptr<::test::nullable::SimpleUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::nullable::SimpleUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -650,7 +650,7 @@ struct Equality<::test::nullable::SimpleUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
         return true;
       case ::test::nullable::SimpleUnion::Tag::kA:
         return ::fidl::Equals(_lhs.a_, _rhs.a_);

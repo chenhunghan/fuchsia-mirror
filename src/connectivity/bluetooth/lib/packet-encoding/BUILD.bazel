@@ -34,6 +34,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "packet-encoding-tests",
-    package_name = "packet-encoding-tests",
     unit_tests = [":packet-encoding_test"],
 )

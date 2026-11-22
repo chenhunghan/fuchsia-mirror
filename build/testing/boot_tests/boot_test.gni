@@ -104,7 +104,7 @@ template("_boot_test") {
 
   _disabled = false
   if ((defined(invoker.disabled) && invoker.disabled) ||
-      (defined(invoker.environments) && invoker.environments == []) ||
+      (defined(invoker.build_only) && invoker.build_only) ||
       disable_boot_tests) {
     _disabled = true
   }
@@ -191,9 +191,17 @@ template("_boot_test") {
 # Parameters:
 #
 #  * environments
-#    - Required: A list of environments from those defined as `*_env` variables
-#      in //build/testing/environments.gni.
+#    - Required, unless `build_only` is true: A list of environments from
+#      those defined as `*_env` variables in //build/testing/environments.gni.
+#      Must not be empty; use `build_only` instead.
 #    - Type: list of strings
+#
+#
+#  * build_only
+#    - Optional: When true, the test is built but never run, and must not
+#      specify `environments`.
+#    - Type: boolean
+#    - Default: false
 #
 #  * zbi, ramdisk, qemu_kernel, dtbo, efi_disk
 #    - Optional: A label specifying a ZBI, QEMU kernel, dtbo, UEFI executable,
@@ -246,8 +254,15 @@ template("_boot_test") {
 #        - Type: string
 #
 template("boot_test") {
-  assert(defined(invoker.environments),
-         "boot_test(\"$target_name\") must define `environments`")
+  _build_only = defined(invoker.build_only) && invoker.build_only
+  if (_build_only) {
+    assert(
+        !defined(invoker.environments),
+        "boot_test(\"$target_name\") is build_only and must not define `environments`")
+  } else {
+    assert(defined(invoker.environments),
+           "boot_test(\"$target_name\") must define `environments`")
+  }
   assert(
       defined(invoker.zbi) || defined(invoker.ramdisk) ||
           defined(invoker.qemu_kernel) || defined(invoker.efi_disk) ||
@@ -440,7 +455,7 @@ template("boot_test") {
   # test for a target_cpu host in order to take advantage of KVM, etc.
   #
   # TODO(mcgrathr): No riscv64 hosts are available yet.
-  if (host_cpu != target_cpu && target_cpu != "riscv64") {
+  if (host_cpu != target_cpu && target_cpu != "riscv64" && !_build_only) {
     target_cpu_envs = []
     foreach(env, invoker.environments) {
       # Clear from any previous iteration.

@@ -62,7 +62,7 @@ template("devicetree_visitor") {
     }
 
     _version_script =
-        "//build/bazel_sdk/bazel_rules_fuchsia/fuchsia/private/visitor.ld"
+        "//build/bazel_sdk/fuchsia_rules_common/devicetree/visitor.ld"
     ldflags += [ "-Wl,--version-script=" +
                  rebase_path(_version_script, root_build_dir) ]
     metadata = {
@@ -85,10 +85,13 @@ template("devicetree_visitor") {
     forward_variables_from(invoker,
                            [
                              "check_includes",
-                             "sources",
+                             "defines",
                              "deps",
+                             "public",
                              "public_deps",
+                             "sources",
                              "testonly",
+                             "visibility",
                            ])
     if (defined(invoker.check_includes_strict)) {
       check_includes_strict = invoker.check_includes_strict
@@ -98,6 +101,16 @@ template("devicetree_visitor") {
         deps = []
       }
       deps += invoker.non_sdk_deps
+    }
+    if (defined(invoker.configs)) {
+      _filtered_configs =
+          filter_exclude(configs,
+                         default_shared_library_configs - invoker.configs)
+      _added_configs =
+          filter_exclude(invoker.configs - default_shared_library_configs,
+                         _filtered_configs)
+      configs = []
+      configs = _filtered_configs + _added_configs
     }
     configs += [ "//sdk/lib/driver/devicetree/visitors:static_visitor_config" ]
   }
@@ -202,4 +215,8 @@ template("devicetree_visitor_collection") {
       deps += [ "${label}_sdk" ]
     }
   }
+}
+
+set_defaults("devicetree_visitor") {
+  configs = default_shared_library_configs
 }

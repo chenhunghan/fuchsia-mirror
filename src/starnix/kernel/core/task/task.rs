@@ -5,7 +5,9 @@
 use crate::mm::{MemoryAccessor, MemoryAccessorExt, MemoryManager};
 use crate::mutable_state::{state_accessor, state_implementation};
 use crate::ptrace::{AtomicStopState, PtraceEventData, PtraceState, PtraceStatus, StopState};
-use crate::signals::{KernelSignal, SignalDetail, SignalInfo, SignalState};
+use crate::signals::{
+    DeliveryAction, KernelSignal, SignalDetail, SignalInfo, SignalState, action_for_signal,
+};
 use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
 use crate::task::run_state::RunState;
 use crate::task::tracing::ZirconIdentity;
@@ -28,7 +30,7 @@ use starnix_sync::{
 use starnix_task_command::TaskCommand;
 use starnix_types::arch::ArchWidth;
 use starnix_types::stats::TaskTimeStats;
-use starnix_uapi::auth::{CAP_SYS_PTRACE, Credentials, FsCred};
+use starnix_uapi::auth::{CAP_SYS_PTRACE, Credentials};
 use starnix_uapi::errors::Errno;
 use starnix_uapi::signals::{SIGCHLD, SIGKILL, SigSet, Signal, sigaltstack_contains_pointer};
 use starnix_uapi::user_address::{
@@ -422,11 +424,12 @@ impl TaskMutableState {
 
 #[apply(state_implementation!)]
 impl TaskMutableState<Base = Task> {
-    pub fn state_code(&self) -> TaskStateCode {
-        if !self.base.is_running() {
-            return TaskStateCode::Zombie;
-        }
-        self.run_state.state_code()
+    pub fn unrefined_state_code(&self) -> UnrefinedTaskStateCode {
+        UnrefinedTaskStateCode(if !self.base.is_running() {
+            TaskStateCode::Zombie
+        } else {
+            self.run_state.state_code()
+        })
     }
 
     /// Transitions the task to [`TaskLifecycleState::Exiting`], initiating the exit process.
@@ -540,10 +543,14 @@ impl TaskMutableState<Base = Task> {
         }
     }
 
-    /// Enqueues a signal at the back of the task's signal queue.
-    pub fn enqueue_signal(&mut self, signal: SignalInfo) {
-        self.signals.enqueue(signal);
-        self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
+    /// Enqueues a signal at the back of the task's signal queue, returning whether a new entry
+    /// was added.
+    pub fn enqueue_signal(&mut self, signal: SignalInfo) -> bool {
+        let enqueued = self.signals.enqueue(signal);
+        if enqueued {
+            self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
+        }
+        enqueued
     }
 
     /// Enqueues `signal` at the front of the task's signal queue.
@@ -683,7 +690,7 @@ impl TaskMutableState<Base = Task> {
             /* current_task = */ None,
             /* event = */ None,
         );
-        self.notify_signal_waiters(&SIGKILL);
+        self.signals.signal_wait.notify_all();
         self.thaw();
     }
 
@@ -720,17 +727,55 @@ impl TaskMutableState<Base = Task> {
             || self.base.thread_group().load_stopped().is_stopping_or_stopped()
     }
 
+    /// Removes all queued task-specific signals for which `predicate` returns `true` and updates
+    /// [`TaskFlags::SIGNALS_AVAILABLE`].
+    pub fn remove_signals_where<F>(&mut self, predicate: F)
+    where
+        F: Fn(&SignalInfo) -> bool,
+    {
+        self.signals.remove_where(predicate);
+        self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
+    }
+
+    /// Returns `true` if any signal queued for this task or its thread group passes `predicate`.
+    fn has_any_signal_where<F>(&self, predicate: F) -> bool
+    where
+        F: Fn(&SignalInfo) -> bool,
+    {
+        self.signals.iter_queued().any(&predicate)
+            || self.base.thread_group().has_signal_queued_where(&predicate)
+    }
+
+    /// Returns whether this task has a deliverable fatal signal pending or is already exiting.
+    pub fn has_fatal_signal_pending(&self) -> bool {
+        let thread_group = self.base.thread_group();
+        if !thread_group.is_running() || self.base.is_exitted() || self.signals.has_queued(SIGKILL)
+        {
+            return true;
+        }
+        if self.base.load_stopped().is_stopping_or_stopped()
+            || thread_group.load_stopped().is_stopping_or_stopped()
+            || self.is_frozen()
+            || self.is_ptraced()
+        {
+            return false;
+        }
+        let signal_mask = self.signal_mask();
+        self.has_any_signal_where(|siginfo| {
+            (!signal_mask.has_signal(siginfo.signal) || siginfo.force)
+                && !thread_group.ignores_signal(siginfo)
+                && action_for_signal(siginfo, thread_group.signal_actions.get(siginfo.signal))
+                    == DeliveryAction::Terminate
+        })
+    }
     /// Returns the next pending signal that passes `predicate`.
     fn take_next_signal_where<F>(&mut self, predicate: F) -> Option<SignalInfo>
     where
         F: Fn(&SignalInfo) -> bool,
     {
-        if let Some(signal) = self.signals.take_next_where(&predicate) {
-            self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
-            Some(signal)
-        } else {
-            self.base.thread_group().take_next_signal_where(&predicate)
-        }
+        let signal = self.signals.take_next_where(&predicate);
+        self.set_flags(TaskFlags::SIGNALS_AVAILABLE, self.signals.is_any_pending());
+        signal.or_else(|| self.base.thread_group().take_next_signal_where(&predicate))
     }
 
     /// Removes and returns the next pending `signal` for this task.
@@ -800,6 +845,11 @@ pub enum TaskLifecycleState {
     Exited(ZombieState),
     Reaped(ZombieState),
 }
+
+/// A task's run state read under the task mutable state lock, before refining blocked kernel
+/// threads via Zircon. Pass to [`Task::refine_state_code`] after releasing the lock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnrefinedTaskStateCode(TaskStateCode);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStateCode {
@@ -975,19 +1025,24 @@ pub struct CurrentTaskCredentialsWriteGuard {
 
 impl CurrentTaskCredentialsWriteGuard {
     pub fn update(self, current_task: &CurrentTask, creds: Arc<Credentials>) {
+        let fscred = creds.euid_as_fscred();
         self.persistent_info.creds.write(&self.lock).update(creds.clone());
         *current_task.current_creds.borrow_mut() = CurrentCreds::Cached(creds);
 
         // The /proc/pid directory's ownership is updated when the task's euid
         // or egid changes. See proc(5).
-        let maybe_node = current_task.running_state().proc_pid_directory_cache.get();
+        //
+        // procfs also refreshes the owner of /proc/pid nodes when they are stat'ed, but some
+        // ownership checks read the node's owner directly without refreshing it first, such as
+        // the O_NOATIME check on open(). Updating the cached node here keeps those checks
+        // correct for /proc/self after a task changes its own credentials.
+        let maybe_node = current_task.running_state().proc_pid_directory_cache.lock().clone();
         if let Some(node) = maybe_node {
-            let creds = current_task.real_creds().euid_as_fscred();
             // SAFETY: The /proc/pid directory held by `proc_pid_directory_cache` represents the
-            // current task. It's owner and group are supposed to track the current task's euid and
+            // current task. Its owner and group are supposed to track the current task's euid and
             // egid.
             unsafe {
-                node.force_chown(creds);
+                node.force_chown(fscred);
             }
         }
     }
@@ -1071,7 +1126,7 @@ pub struct Task {
     /// For vfork and clone() with CLONE_VFORK, this is set when the task exits or calls execve().
     /// It allows the calling task to block until the fork has been completed. Only populated
     /// when created with the CLONE_VFORK flag.
-    vfork_event: Option<Arc<zx::Event>>,
+    pub(super) vfork_event: Option<Arc<zx::Event>>,
 
     /// Variable that can tell you whether there are currently seccomp
     /// filters without holding a lock
@@ -1079,6 +1134,10 @@ pub struct Task {
 
     /// Tell you whether you are tracing syscall entry / exit without a lock.
     pub trace_syscalls: AtomicBool,
+
+    /// Whether this task has dequeued a stop signal and is acquiring the [`ThreadGroup`] write
+    /// lock to initiate group-stop.
+    pub(crate) stop_in_delivery: AtomicBool,
 }
 
 /// The decoded cross-platform parts we care about for page fault exception reports.
@@ -1242,6 +1301,8 @@ impl Task {
         seccomp_filters: SeccompFilterContainer,
         robust_list_head: RobustListHeadPtr,
         timerslack_ns: u64,
+        // The Zircon thread that runs this task when it is a kernel thread, `None` otherwise.
+        kernel_thread: Option<zx::Thread>,
     ) -> Arc<Self> {
         let pid = thread_group.leader.clone();
         Arc::new_cyclic(|weak_self| {
@@ -1253,6 +1314,7 @@ impl Task {
                 thread_group,
                 running_state: LockGuarded::new(RcuArc::new(Some(Arc::new(TaskRunningState {
                     thread: Default::default(),
+                    kernel_thread,
                     files: Some(files).into(),
                     mm: RcuArc::new(mm),
                     fs: SharedFsContext::new(fs),
@@ -1289,6 +1351,7 @@ impl Task {
                 persistent_info: TaskPersistentInfoState::new(tid, pid, command, creds),
                 seccomp_filter_state,
                 trace_syscalls: AtomicBool::new(false),
+                stop_in_delivery: AtomicBool::new(false),
             };
 
             #[cfg(any(test, debug_assertions))]
@@ -1462,18 +1525,6 @@ impl Task {
         };
     }
 
-    /// Blocks the caller until the task has exited or executed execve(). This is used to implement
-    /// vfork() and clone(... CLONE_VFORK, ...). The task must have created with CLONE_EXECVE.
-    pub fn wait_for_execve(&self, task_to_wait: Weak<Task>) -> Result<(), Errno> {
-        let event = task_to_wait.upgrade().and_then(|t| t.vfork_event.clone());
-        if let Some(event) = event {
-            event
-                .wait_one(zx::Signals::USER_0, zx::MonotonicInstant::INFINITE)
-                .map_err(|status| from_status_like_fdio!(status))?;
-        }
-        Ok(())
-    }
-
     /// If needed, clear the child tid for this task.
     ///
     /// Userspace can ask us to clear the child tid and issue a futex wake at
@@ -1561,10 +1612,6 @@ impl Task {
             .ok_or_else(|| errno!(EINVAL))?
             .get_runtime_info()
             .map_err(|status| from_status_like_fdio!(status))
-    }
-
-    pub fn real_fscred(&self) -> FsCred {
-        self.real_creds().as_fscred()
     }
 
     /// Interrupts the current task.
@@ -1687,7 +1734,36 @@ impl Task {
             return TaskStateCode::Zombie;
         }
 
-        self.read().state_code()
+        let state_code = self.read().unrefined_state_code();
+        self.refine_state_code(state_code)
+    }
+
+    /// Refines a state code read from the task's mutable state with the scheduling state of the
+    /// Zircon thread that runs a kernel thread. Must not be called with the task's state lock held.
+    ///
+    /// Kernel threads wait on Zircon objects and Rust synchronization primitives instead of Starnix
+    /// waiters, so their run state is `Running` even while they are blocked. Report them as
+    /// sleeping when Zircon says the thread is blocked or suspended, as Linux does for idle kernel
+    /// threads.
+    pub fn refine_state_code(&self, unrefined: UnrefinedTaskStateCode) -> TaskStateCode {
+        let state_code = unrefined.0;
+        if state_code != TaskStateCode::Running {
+            return state_code;
+        }
+        let Ok(running_state) = self.running_state() else {
+            return TaskStateCode::Zombie;
+        };
+        let Some(thread) = running_state.kernel_thread.as_ref() else {
+            return state_code;
+        };
+        match thread.info().map(|info| info.state) {
+            Ok(zx::ThreadState::Blocked(_)) | Ok(zx::ThreadState::Suspended) => {
+                TaskStateCode::Sleeping
+            }
+            // The thread exited after `running_state()` was read above.
+            Ok(zx::ThreadState::Dying) | Ok(zx::ThreadState::Dead) => TaskStateCode::Zombie,
+            _ => state_code,
+        }
     }
 
     pub fn time_stats(&self) -> TaskTimeStats {
@@ -1925,6 +2001,11 @@ mod test {
             assert!(!child_task.is_exitted());
             assert_eq!(child_task.exit_status(), None);
             assert!(child_task.zombie_state().is_none());
+            let unrefined_while_running = child_task.read().unrefined_state_code();
+            assert_eq!(
+                child_task.refine_state_code(unrefined_while_running),
+                TaskStateCode::Running
+            );
 
             // Transition to Exiting.
             child_task.write().set_exiting(ExitStatus::Exit(42));
@@ -1948,6 +2029,11 @@ mod test {
             assert!(child_task.is_exitted());
             assert_eq!(child_task.exit_status(), Some(ExitStatus::Exit(42)));
             assert!(child_task.zombie_state().is_some());
+            // A state code snapshotted as Running before the task exited is refined to Zombie.
+            assert_eq!(
+                child_task.refine_state_code(unrefined_while_running),
+                TaskStateCode::Zombie
+            );
 
             // Transition to Reaped.
             child_task.write().set_reaped();
@@ -2043,7 +2129,7 @@ mod test {
         use crate::task::{RoleOverrides, SchedulerManager};
 
         let mut builder = RoleOverrides::new();
-        builder.add("renamed-thread", "renamed-thread", None, "test-role");
+        builder.add("test-role").process("renamed-thread").thread("renamed-thread");
         let overrides = builder.build().unwrap();
 
         let scheduler_manager = SchedulerManager::new_for_tests(None, overrides);
@@ -2102,8 +2188,8 @@ mod test {
         });
 
         let mut builder = RoleOverrides::new();
-        builder.add("my-app", "my-app", None, "leader-role");
-        builder.add("my-app", "RenderThread", None, "render-role");
+        builder.add("leader-role").process("my-app").thread("my-app");
+        builder.add("render-role").process("my-app").thread("RenderThread");
         let overrides = builder.build().unwrap();
         let scheduler_manager = SchedulerManager::new_for_tests(Some(role_manager), overrides);
 
@@ -2138,7 +2224,7 @@ mod test {
         use crate::task::{RoleOverrides, SchedulerManager};
 
         let mut builder = RoleOverrides::new();
-        builder.add("renamed-thread", "renamed-thread", None, "test-role");
+        builder.add("test-role").process("renamed-thread").thread("renamed-thread");
         let overrides = builder.build().unwrap();
 
         let scheduler_manager = SchedulerManager::new_for_tests(None, overrides);

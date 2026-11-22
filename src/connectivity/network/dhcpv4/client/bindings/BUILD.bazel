@@ -1,0 +1,187 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/testing/expectation/rules:fx_test_component_with_expectations.bzl",
+    "fx_component_manifest_with_expectations",
+    "fx_test_component_with_expectations",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":dhcp-client-tests",
+        ":dhcp-client-tests-with-error-logs",
+    ],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_binary(
+    name = "dhcp_client",
+    srcs = [
+        "src/client.rs",
+        "src/inspect.rs",
+        "src/main.rs",
+        "src/packetsocket.rs",
+        "src/provider.rs",
+        "src/udpsocket.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:derivative"],
+    deps = [
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
+        "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/dhcpv4/client/core",
+        "//src/connectivity/network/dhcpv4/protocol",
+        "//src/connectivity/network/lib/diagnostics-traits",
+        "//src/connectivity/network/lib/sockaddr",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_posix_socket_ext",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:indexmap",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "dhcp_client_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":dhcp_client",
+    # Matches the binary path in meta/dhcp-client-test.cml.
+    crate_name = "dhcp_client_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/network/packet",
+    ],
+)
+
+fx_packaged_binary(
+    name = "dhcp_client_packaged",
+    binary = ":dhcp_client",
+    binary_name = "dhcp_client",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "dhcp-client",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/dhcp-client.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":dhcp_client_packaged"],
+)
+
+fx_packaged_binary(
+    name = "dhcp_client_test_packaged",
+    testonly = True,
+    binary = ":dhcp_client_test",
+    binary_name = "dhcp_client_bin_test",
+)
+
+fx_component_manifest_with_expectations(
+    name = "dhcp-client-test_manifest",
+    component_name = "dhcp-client-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/connectivity/network/tests/integration/common:client.shard",
+        "//src/lib/testing/expectation:meta/client.shard",
+    ],
+    manifest = "meta/dhcp-client-test.cml",
+)
+
+fx_test_component_with_expectations(
+    name = "dhcp-client-test-no-err-logs",
+    compiled_manifest = ":dhcp-client-test_manifest",
+    expectations = "expects/expectations.json5",
+    treatment_of_cases_with_error_logs = "SKIP_CASES_WITH_ERROR_LOGS",
+    deps = [":dhcp_client_test_packaged"],
+)
+
+fx_package(
+    name = "dhcp-client-tests-package",
+    package_name = "dhcp-client-tests",
+    subpackages = [
+        "//src/connectivity/network/netstack3:package-debug",
+        "//src/connectivity/network/testing/netemul/service:package",
+    ],
+    test_components = [":dhcp-client-test-no-err-logs"],
+)
+
+fx_test(
+    name = "dhcp-client-tests",
+    package = ":dhcp-client-tests-package",
+)
+
+fx_test_component_with_expectations(
+    name = "dhcp-client-test-with-err-logs",
+    compiled_manifest = ":dhcp-client-test_manifest",
+    expectations = "expects/expectations.json5",
+    treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS",
+    deps = [":dhcp_client_test_packaged"],
+)
+
+fx_package(
+    name = "dhcp-client-tests-with-error-logs-package",
+    package_name = "dhcp-client-tests-with-error-logs",
+    subpackages = [
+        "//src/connectivity/network/netstack3:package-debug",
+        "//src/connectivity/network/testing/netemul/service:package",
+    ],
+    test_components = [":dhcp-client-test-with-err-logs"],
+)
+
+fx_test(
+    name = "dhcp-client-tests-with-error-logs",
+    max_log_severity = "ERROR",
+    package = ":dhcp-client-tests-with-error-logs-package",
+)

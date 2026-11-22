@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fdomain-client-tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 rustc_library(
     name = "client",
@@ -83,4 +91,22 @@ rustc_library(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
     ],
+)
+
+rustc_test(
+    name = "client_test",
+    crate = ":client",
+    # Set a package-specific crate_name so the GN test binary does not collide in $root_out_dir.
+    crate_name = "fdomain_client_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fdomain/container",
+        "//src/lib/fuchsia",
+    ],
+)
+
+fx_unittest_package(
+    name = "fdomain-client-tests",
+    unit_tests = [":client_test"],
 )

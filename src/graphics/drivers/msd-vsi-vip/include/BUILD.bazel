@@ -14,7 +14,10 @@ fx_cc_library(
     ],
     includes = ["."],
     public_configs = [":msd_include_config"],
-    visibility = ["//src/graphics/drivers/msd-vsi-vip:__subpackages__"],
+    visibility = [
+        "//src/graphics/drivers/msd-vsi-vip:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
     deps = ["//sdk/lib/magma_common"],
     alwayslink = True,
 )

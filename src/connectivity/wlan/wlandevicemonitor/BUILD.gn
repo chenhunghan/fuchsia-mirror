@@ -80,6 +80,7 @@ rustc_binary("bin") {
   lint_config = "//build/config/rust/lints:clippy_warn_all"
   deps = [
     ":wlandevicemonitor_config",
+    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
     "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_rust",
     "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_rust",
@@ -119,6 +120,7 @@ rustc_test("wlandevicemonitor_bin_test") {
   edition = "2024"
   deps = [
            ":wlandevicemonitor_config",
+           "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
            "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
            "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_rust",
            "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service_rust",

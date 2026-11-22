@@ -31,7 +31,7 @@ async fn ffx_target_net_test() {
 
     // Manually resolve the target address for the emulator we just started. This prevents
     // falling back to default discovery, which could be ambiguous if other emulators are running.
-    emu.setup_fake_direct_connector(&fho_env).await.unwrap();
+    emu.setup_fake_target_connector(&fho_env).await.unwrap();
 
     let rcs = RemoteControlProxyHolder::try_from_env(&fho_env).await.expect("connect to rcs");
 

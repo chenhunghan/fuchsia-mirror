@@ -97,8 +97,7 @@ class ShareableProcessState : public fbl::RefCounted<ShareableProcessState> {
 
   FutexContext& futex_context() { return futex_context_; }
 
-  VmAspace* aspace() { return aspace_.get(); }
-  const VmAspace* aspace() const { return aspace_.get(); }
+  VmAspace* aspace() const { return aspace_.get(); }
 
  private:
   // The layout of the fields below is intended to eliminating padding.
@@ -111,5 +110,21 @@ class ShareableProcessState : public fbl::RefCounted<ShareableProcessState> {
   fbl::RefPtr<VmAspace> aspace_;
   FutexContext futex_context_;
 };
+
+// FFI shims used by the Rust ShareableProcessState facade (object/process_dispatcher.rs).
+extern "C" {
+ShareableProcessState* cpp_shareable_process_state_create();
+void* cpp_shareable_process_state_get_ref_counted(ShareableProcessState* state);
+void cpp_shareable_process_state_free(ShareableProcessState* state);
+bool cpp_shareable_process_state_increment_share_count(ShareableProcessState* state);
+void cpp_shareable_process_state_decrement_share_count(ShareableProcessState* state);
+bool cpp_shareable_process_state_initialize(ShareableProcessState* state, vaddr_t aspace_base,
+                                            size_t aspace_size, const char* aspace_name,
+                                            VmAspace::ShareOpt share_opt);
+uint64_t cpp_shareable_process_state_share_count(const ShareableProcessState* state);
+const HandleTable* cpp_shareable_process_state_handle_table(const ShareableProcessState* state);
+void* cpp_shareable_process_state_futex_context(const ShareableProcessState* state);
+VmAspace* cpp_shareable_process_state_aspace(const ShareableProcessState* state);
+}
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_SHAREABLE_PROCESS_STATE_H_

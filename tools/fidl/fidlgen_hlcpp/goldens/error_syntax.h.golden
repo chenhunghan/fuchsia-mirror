@@ -91,11 +91,11 @@ class ExampleUseOfErrorSyntax_CallWhichMayFail_Result final {
   static ExampleUseOfErrorSyntax_CallWhichMayFail_Result WithResponse(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Response&&);
   static ExampleUseOfErrorSyntax_CallWhichMayFail_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ExampleUseOfErrorSyntax_CallWhichMayFail_Result> New();
@@ -141,7 +141,7 @@ class ExampleUseOfErrorSyntax_CallWhichMayFail_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -170,9 +170,9 @@ class ExampleUseOfErrorSyntax_CallWhichMayFail_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid);
   union {
     ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Response response_;
     uint32_t err_;
@@ -287,7 +287,7 @@ struct Equality<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Re
   }
 };
 template <>
-struct IsFidlXUnion<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result> : public std::true_type {};
+struct IsFidlUnion<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result>
@@ -299,9 +299,9 @@ struct CodingTraits<std::unique_ptr<::test::errorsyntax::ExampleUseOfErrorSyntax
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -331,7 +331,7 @@ struct Equality<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Re
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
         return true;
       case ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);

@@ -19,42 +19,22 @@ pub fn merge(
     // might not merge records that come after that end point because the merger won't merge records
     // in the same layer
 
-    /*  Case 1: Disjoint
+    /*  Case 1: Disjoint or touching
      *    L:    |------------|
      *    R:                      |-----------|
+     *  or
+     *    L:    |------------|
+     *    R:                 |-----------|
+     *
+     *  Single-layer `merge_into` insertions and post-merge streams coalesce touching records via
+     *  `Coalesce` / `CoalescingIterator` rather than inside `MergeFn`.
      */
-    if left.key().device_range.end < right.key().device_range.start {
+    if left.key().device_range.end <= right.key().device_range.start {
         return MergeResult::EmitLeft;
     }
 
-    /*  Case 2: Touching
-     *    L:    |------------|
-     *    R:                 |-----------|
-     */
-    if left.key().device_range.end == right.key().device_range.start {
-        // We can only merge the range if the values are an exact match.
-        if *left.value() == *right.value() {
-            return MergeResult::Other {
-                emit: None,
-                left: Discard,
-                right: Replace(
-                    Item::new(
-                        AllocatorKey {
-                            device_range: Extent(
-                                left.key().device_range.start..right.key().device_range.end,
-                            ),
-                        },
-                        left.value().clone(),
-                    )
-                    .boxed(),
-                ),
-            };
-        } else {
-            return MergeResult::EmitLeft;
-        }
-    }
     if left.key().device_range.start == right.key().device_range.start {
-        /*  Case 3: Overlap with same start
+        /*  Case 2: Overlap with same start
          *    L:    |------------|
          *    R:    |-----------------|
          */
@@ -85,7 +65,7 @@ pub fn merge(
                 return MergeResult::Other { emit: None, left: Discard, right: Keep };
             }
 
-        /*  Case 4: Overlap with same start
+        /*  Case 3: Overlap with same start
          *    L:    |-----------------|
          *    R:    |------------|
          */
@@ -117,7 +97,7 @@ pub fn merge(
             }
         }
     }
-    /*  Case 5: Split off left prefix
+    /*  Case 4: Split off left prefix
      *    L:    |-----...
      *    R:         |-----...
      */
@@ -219,9 +199,35 @@ mod tests {
         test_merge(
             (0..100, AllocatorValue::Abs { count: 1, owner_object_id: 1 }),
             (100..200, AllocatorValue::Abs { count: 1, owner_object_id: 1 }),
-            &[(0..200, AllocatorValue::Abs { count: 1, owner_object_id: 1 })],
+            &[
+                (0..100, AllocatorValue::Abs { count: 1, owner_object_id: 1 }),
+                (100..200, AllocatorValue::Abs { count: 1, owner_object_id: 1 }),
+            ],
         )
         .await;
+
+        let val = AllocatorValue::Abs { count: 1, owner_object_id: 1 };
+        let tree = LSMTree::new(merge, None);
+        tree.insert(Item::new(AllocatorKey { device_range: (100..200).into() }, val.clone()))
+            .expect("insert error");
+        tree.seal();
+        tree.insert(Item::new(AllocatorKey { device_range: (0..100).into() }, val.clone()))
+            .expect("insert error");
+        let layer_set = tree.layer_set();
+        let mut merger = layer_set.merger();
+        let mut iter = merger
+            .query(Query::FullScan)
+            .await
+            .expect("seek failed")
+            .coalesce()
+            .await
+            .expect("coalesce failed");
+        assert_eq!(
+            iter.get(),
+            Some(ItemRef { key: &AllocatorKey { device_range: (0..200).into() }, value: &val })
+        );
+        iter.advance().await.expect("advance failed");
+        assert!(iter.get().is_none());
     }
 
     #[fuchsia::test]
@@ -444,6 +450,29 @@ mod tests {
             iter.advance().await.expect("advance failed");
             assert!(iter.get().is_none());
         }
+
+        // Three-way hole fill (`0..100` and `200..300`, then `100..200`) coalesces into `0..300`.
+        {
+            let tree = LSMTree::new(merge, None);
+            let val = AllocatorValue::Abs { count: 1, owner_object_id: 3 };
+            for range in [0..100, 200..300, 100..200] {
+                let key = AllocatorKey { device_range: range.into() };
+                tree.merge_into(
+                    Item::new(key.clone(), val.clone()),
+                    &key.lower_bound_for_merge_into(),
+                );
+            }
+            assert_eq!(tree.mutable_layer().len(), 1);
+            let layer_set = tree.layer_set();
+            let mut merger = layer_set.merger();
+            let mut iter = merger.query(Query::FullScan).await.expect("seek failed");
+            assert_eq!(
+                iter.get(),
+                Some(ItemRef { key: &AllocatorKey { device_range: (0..300).into() }, value: &val })
+            );
+            iter.advance().await.expect("advance failed");
+            assert!(iter.get().is_none());
+        }
     }
 
     #[fuchsia::test]
@@ -605,5 +634,80 @@ mod tests {
             &[(10..11, AllocatorValue::Abs { count: 1, owner_object_id: 1 })],
         )
         .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_full_range_query_does_not_reemit_coalesced_extents() {
+        let val = AllocatorValue::Abs { count: 1, owner_object_id: 1 };
+
+        // Touching extents across layers queried via Query::FullRange and Query::LimitedRange
+        // (OptimizedMerge), while still coalescing within a single mutable layer via `merge_into`.
+        let tree = LSMTree::new(merge, None);
+        let k2 = AllocatorKey { device_range: (512..1024).into() };
+        tree.merge_into(Item::new(k2.clone(), val.clone()), &k2.lower_bound_for_merge_into());
+        let k3 = AllocatorKey { device_range: (1024..1536).into() };
+        tree.merge_into(Item::new(k3.clone(), val.clone()), &k3.lower_bound_for_merge_into());
+        tree.seal();
+        let k1 = AllocatorKey { device_range: (0..512).into() };
+        tree.merge_into(Item::new(k1.clone(), val.clone()), &k1.lower_bound_for_merge_into());
+
+        let layer_set = tree.layer_set();
+        let search_key = AllocatorKey { device_range: (0..512).into() };
+        for query in [Query::FullRange(&search_key), Query::LimitedRange(&search_key)] {
+            let mut merger = layer_set.merger();
+            let mut iter = merger.query(query).await.expect("seek failed");
+            assert_eq!(iter.get().unwrap().key, &AllocatorKey { device_range: (0..512).into() });
+            iter.advance().await.expect("advance failed");
+            // 512..1024 and 1024..1536 were coalesced into 512..1536 within the older mutable
+            // layer via `merge_into`, and must not coalesce across layers with 0..512.
+            assert_eq!(iter.get().unwrap().key, &AllocatorKey { device_range: (512..1536).into() });
+            iter.advance().await.expect("advance failed");
+            assert!(iter.get().is_none());
+        }
+
+        // Overlapping extents that split into touching extents during advance.
+        let tree = LSMTree::new(merge, None);
+        tree.insert(Item::new(AllocatorKey { device_range: (4096..12288).into() }, val.clone()))
+            .expect("insert error");
+        tree.seal();
+        tree.insert(Item::new(AllocatorKey { device_range: (0..8192).into() }, val.clone()))
+            .expect("insert error");
+
+        let layer_set = tree.layer_set();
+        for query in [Query::FullRange(&search_key), Query::LimitedRange(&search_key)] {
+            let mut merger = layer_set.merger();
+            let mut iter = merger.query(query).await.expect("seek failed");
+            assert_eq!(iter.get().unwrap().key, &AllocatorKey { device_range: (0..8192).into() });
+            iter.advance().await.expect("advance failed");
+            assert_eq!(
+                iter.get().unwrap().key,
+                &AllocatorKey { device_range: (8192..12288).into() }
+            );
+            iter.advance().await.expect("advance failed");
+            assert!(iter.get().is_none());
+        }
+
+        // Three layers of touching extents: each extent is yielded once and never coalesced with
+        // an extent that has already been yielded.
+        let tree = LSMTree::new(merge, None);
+        tree.insert(Item::new(AllocatorKey { device_range: (1024..1536).into() }, val.clone()))
+            .expect("insert error");
+        tree.seal();
+        tree.insert(Item::new(AllocatorKey { device_range: (512..1024).into() }, val.clone()))
+            .expect("insert error");
+        tree.seal();
+        tree.insert(Item::new(AllocatorKey { device_range: (0..512).into() }, val))
+            .expect("insert error");
+
+        let layer_set = tree.layer_set();
+        for query in [Query::FullRange(&search_key), Query::LimitedRange(&search_key)] {
+            let mut merger = layer_set.merger();
+            let mut iter = merger.query(query).await.expect("seek failed");
+            for range in [0..512, 512..1024, 1024..1536] {
+                assert_eq!(iter.get().unwrap().key, &AllocatorKey { device_range: range.into() });
+                iter.advance().await.expect("advance failed");
+            }
+            assert!(iter.get().is_none());
+        }
     }
 }

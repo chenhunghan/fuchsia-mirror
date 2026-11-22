@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.adc",
+    src = "fuchsia.adc.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = [
+        "//sdk:__pkg__",
+        "//sdk/lib/driver/devicetree/visitors/drivers/iio/adc:__pkg__",
+        "//src/devices/adc/drivers/adc:__pkg__",
+        "//src/devices/board/drivers:__subpackages__",
+        "//src/devices/thermal/drivers/aml-thermistor:__pkg__",
+        "//src/ui/input/drivers/adc-buttons:__pkg__",
+    ],
+)

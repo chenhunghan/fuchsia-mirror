@@ -407,9 +407,9 @@ pressure without affecting host/guest performance too much.
 [PATCH v14 00/14 Multi-Gen LRU Framework]: https://lore.kernel.org/lkml/20220815071332.627393-1-yuzhao@google.com/T/
 [Virtio mem in Linux]: https://lwn.net/Articles/813638/
 [Balloon pressuring page cache]: https://lists.linuxfoundation.org/pipermail/virtualization/2020-February/045245.html
-[PAGE_REPORTING_MIN_ORDER]:https://lore.kernel.org/all/20210625014710.42954-1-gshan@redhat.com/T/
+[PAGE_REPORTING_MIN_ORDER]: https://lore.kernel.org/all/20210625014710.42954-1-gshan@redhat.com/T/
 [Constant balloon resizes cause many TLB shootdowns]: https://buganizer.corp.google.com/issues/202098603#comment26
-[Virtio Balloon. slides]:https://static.sched.com/hosted_files/kvmforum2020/8e/KVM%20Forum%202020%20Virtio-%28balloon%20pmem%20mem%29%20Managing%20Guest%20Memory.pdf
+[Virtio Balloon. slides]: https://static.sched.com/hosted_files/kvmforum2020/8e/KVM%20Forum%202020%20Virtio-%28balloon%20pmem%20mem%29%20Managing%20Guest%20Memory.pdf
 [Virtio Balloon. video]: https://youtu.be/Fq47WCCm-HM?t=199
 [Free page reporting: by Alexander Duyck ( Intel ). Slide 10]: https://static.sched.com/hosted_files/kvmforum2020/8e/KVM%20Forum%202020%20Virtio-(balloon%20pmem%20mem)%20Managing%20Guest%20Memory.pdf#10
 [Linux Page Cache Basics]: https://www.thomas-krenn.com/en/wiki/Linux_Page_Cache_Basics

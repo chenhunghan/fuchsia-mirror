@@ -19,7 +19,7 @@
 //                            uint64_t new_unsafe_sp);  // %r8
 FUNCTION(x86_64_context_switch)
     /* save the old context and restore the new */
-    /* This layout should match struct x86_64_context_switch_frame */
+    /* This layout should match X86ContextSwitchFrame in src/thread.rs */
     push_reg %rbx
     push_reg %rbp
     push_reg %r12

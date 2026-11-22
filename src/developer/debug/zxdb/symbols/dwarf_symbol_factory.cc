@@ -799,8 +799,9 @@ fxl::RefPtr<Symbol> DwarfSymbolFactory::DecodeEnum(const llvm::DWARFDie& die) co
   if (type)
     lazy_type = MakeLazy(type);
   const char* type_name_str = type_name ? *type_name : "";
-  auto result = fxl::MakeRefCounted<Enumeration>(type_name_str, std::move(lazy_type), *byte_size,
-                                                 is_signed, std::move(map));
+  auto result = fxl::MakeRefCounted<Enumeration>(type_name_str, std::move(lazy_type),
+                                                 static_cast<uint32_t>(*byte_size), is_signed,
+                                                 std::move(map));
   if (parent)
     result->set_parent(MakeUncachedLazy(parent));
   if (is_declaration)
@@ -1289,11 +1290,12 @@ llvm::Expected<llvm::DWARFAddressRangesVector> DwarfSymbolFactory::GetCodeRanges
   if (CompileUnit* skeleton_unit = delegate_->GetSkeletonCompileUnit()) {
     // This is a DWO object so we use the main binary's DWARF unit corresponding to this file to
     // look up the data.
-    return skeleton_unit->dwarf_unit()->GetLLVMUnit()->findRnglistFromIndex(index);
+    return skeleton_unit->dwarf_unit()->GetLLVMUnit()->findRnglistFromIndex(
+        static_cast<uint32_t>(index));
   }
 
   // This is not a DWO object and we use the current DIE's unit for all information.
-  return die.getDwarfUnit()->findRnglistFromIndex(index);
+  return die.getDwarfUnit()->findRnglistFromIndex(static_cast<uint32_t>(index));
 }
 
 std::optional<uint64_t> DwarfSymbolFactory::GetAddrFromFormValue(
@@ -1334,10 +1336,11 @@ std::optional<uint64_t> DwarfSymbolFactory::GetAddrFromIndex(const llvm::DWARFDi
   if (CompileUnit* skeleton_unit = delegate_->GetSkeletonCompileUnit()) {
     // This is a DWO object so we use the main binary's DWARF unit corresponding to this file to
     // look up the data.
-    addr = skeleton_unit->dwarf_unit()->GetLLVMUnit()->getAddrOffsetSectionItem(index);
+    addr = skeleton_unit->dwarf_unit()->GetLLVMUnit()->getAddrOffsetSectionItem(
+        static_cast<uint32_t>(index));
   } else {
     // Look up in the unit for this DIE.
-    addr = die.getDwarfUnit()->getAddrOffsetSectionItem(index);
+    addr = die.getDwarfUnit()->getAddrOffsetSectionItem(static_cast<uint32_t>(index));
   }
 
   if (!addr) {

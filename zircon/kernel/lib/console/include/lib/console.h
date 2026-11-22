@@ -82,17 +82,12 @@ extern "C" void cpp_console_unlock();
 /* panic shell api */
 extern "C" void rust_panic_shell_start();
 
-// Attempt to start the kernel shell.
-// Will return if shell is not started or if shell exits.
-extern "C" void rust_kernel_shell_init();
-
 // FFIs
 inline int console_run_script(const char* string) { return rust_console_run_script(string); }
 inline int console_run_script_locked(const char* string) {
   return rust_console_run_script_locked(string);
 }
 inline void panic_shell_start() { rust_panic_shell_start(); }
-inline void kernel_shell_init() { rust_kernel_shell_init(); }
 
 #else
 
@@ -100,7 +95,6 @@ inline void kernel_shell_init() { rust_kernel_shell_init(); }
 inline int console_run_script(const char* string) { return 0; }
 inline int console_run_script_locked(const char* string) { return 0; }
 inline void panic_shell_start() {}
-inline void kernel_shell_init() {}
 #endif  // CONSOLE_ENABLED
 
 #endif  // ZIRCON_KERNEL_LIB_CONSOLE_INCLUDE_LIB_CONSOLE_H_

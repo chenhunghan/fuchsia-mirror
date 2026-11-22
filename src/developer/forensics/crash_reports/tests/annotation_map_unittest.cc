@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/crash_reports/annotation_map.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -26,7 +26,7 @@ TEST(AnnotationMap, SetsCorrectly) {
       .Set("error-or-error", ErrorOrString(Error::kMissingValue))
       .Set("error-or-not-available", ErrorOrString(Error::kNotAvailableInProduct))
       .Set("error", Error::kMissingValue)
-      .Set(::fuchsia::feedback::Annotation{.key = "annotation", .value = "value"});
+      .Set(fuchsia_feedback::Annotation{{.key = "annotation", .value = "value"}});
 
   EXPECT_THAT(annotations.Raw(), UnorderedElementsAreArray({
                                      Pair("string", "value"),

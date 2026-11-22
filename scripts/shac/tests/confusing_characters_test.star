@@ -12,10 +12,13 @@ _RIGHT_QUOTE = "\u201d"
 _EN_DASH = "\u2013"
 _EM_DASH = "\u2014"
 
-def _finding(char, line, col, replacement):
+def _finding(char, name, line, col, replacement):
     return testing.finding(
         level = "warning",
-        message = "Avoid using confusing characters: %s" % char,
+        message = (
+            "Use ASCII %s instead of Unicode %s (%s), which looks " +
+            "similar and can break copy-pasted code or commands."
+        ) % (replacement, name, char),
         filepath = "foo.md",
         line = line,
         col = col,
@@ -28,8 +31,8 @@ def test_confusing_characters_smart_quotes():
         "foo.md": "ok\nsay %shi%s\n" % (_LEFT_QUOTE, _RIGHT_QUOTE),
     })
     asserts.eq(res.findings, (
-        _finding(_LEFT_QUOTE, 2, 5, "\""),
-        _finding(_RIGHT_QUOTE, 2, 10, "\""),
+        _finding(_LEFT_QUOTE, "left smart quote", 2, 5, "\""),
+        _finding(_RIGHT_QUOTE, "right smart quote", 2, 10, "\""),
     ))
     asserts.eq(res.files["foo.md"], "ok\nsay \"hi\"\n")
 
@@ -38,8 +41,8 @@ def test_confusing_characters_dashes():
         "foo.md": "a%sb\nc%sd\n" % (_EN_DASH, _EM_DASH),
     })
     asserts.eq(res.findings, (
-        _finding(_EN_DASH, 1, 2, "-"),
-        _finding(_EM_DASH, 2, 2, "-"),
+        _finding(_EN_DASH, "en-dash", 1, 2, "-"),
+        _finding(_EM_DASH, "em-dash", 2, 2, "-"),
     ))
     asserts.eq(res.files["foo.md"], "a-b\nc-d\n")
 

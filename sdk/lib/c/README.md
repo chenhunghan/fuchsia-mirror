@@ -256,7 +256,8 @@ retriggering the affected auto-rollers in [LUCI] once the change lands.
 
 The [`ld`](ld) subdirectory does not correspond to a public API per se, but
 instead contains code that works with the dynamic linking regimes provided by
-[`//sdk/lib/ld`](/sdk/lib/ld).  **TODO(https://fxbug.dev/342469121)**
+[`//sdk/lib/ld`](/sdk/lib/ld).  **TODO(https://fxbug.dev/492249787):** Document
+startup and runtime dynamic-linking integration once rollout completes.
 
 ---
 

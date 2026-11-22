@@ -21,7 +21,7 @@
         "Bits"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 3,
         "column": 6,
         "length": 4
@@ -45,7 +45,7 @@
         {
           "name": "A",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 4,
             "column": 5,
             "length": 1
@@ -74,7 +74,7 @@
         "Enum"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 6,
         "column": 6,
         "length": 4
@@ -85,7 +85,7 @@
         {
           "name": "A",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 7,
             "column": 5,
             "length": 1
@@ -105,7 +105,7 @@
         {
           "name": "B",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 8,
             "column": 5,
             "length": 1
@@ -132,7 +132,7 @@
     {
       "name": "test.newtype/Calculator",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 19,
         "column": 17,
         "length": 10
@@ -147,7 +147,7 @@
           "name": "Add",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 20,
             "column": 12,
             "length": 3
@@ -199,7 +199,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 20,
         "column": 16,
         "length": 48
@@ -222,7 +222,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 21,
             "column": 9,
             "length": 1
@@ -249,7 +249,7 @@
           },
           "name": "b",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 22,
             "column": 9,
             "length": 1
@@ -281,7 +281,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 23,
         "column": 12,
         "length": 33
@@ -304,7 +304,7 @@
           },
           "name": "sum",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 24,
             "column": 9,
             "length": 3
@@ -334,7 +334,7 @@
         "Struct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 10,
         "column": 6,
         "length": 6
@@ -357,7 +357,7 @@
           },
           "name": "foo",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 11,
             "column": 5,
             "length": 3
@@ -390,7 +390,7 @@
         "Table"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 13,
         "column": 6,
         "length": 5
@@ -417,7 +417,7 @@
         "Union"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 14,
         "column": 6,
         "length": 5
@@ -441,7 +441,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 15,
             "column": 8,
             "length": 1
@@ -467,7 +467,7 @@
     {
       "name": "test.newtype/Alias",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 17,
         "column": 7,
         "length": 5
@@ -498,7 +498,7 @@
     {
       "name": "test.newtype/NewAlias",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 37,
         "column": 6,
         "length": 8
@@ -527,7 +527,7 @@
     {
       "name": "test.newtype/NewBits",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 32,
         "column": 6,
         "length": 7
@@ -551,7 +551,7 @@
     {
       "name": "test.newtype/NewBoxedStruct",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 41,
         "column": 6,
         "length": 14
@@ -575,7 +575,7 @@
     {
       "name": "test.newtype/NewCliendEnd",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 52,
         "column": 6,
         "length": 12
@@ -601,7 +601,7 @@
     {
       "name": "test.newtype/NewEnum",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 33,
         "column": 6,
         "length": 7
@@ -625,7 +625,7 @@
     {
       "name": "test.newtype/NewServerEnd",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 51,
         "column": 6,
         "length": 12
@@ -651,7 +651,7 @@
     {
       "name": "test.newtype/NewServerEndOpt",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 53,
         "column": 6,
         "length": 15
@@ -677,7 +677,7 @@
     {
       "name": "test.newtype/NewStruct",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 34,
         "column": 6,
         "length": 9
@@ -701,7 +701,7 @@
     {
       "name": "test.newtype/NewStructWithAttr",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 45,
         "column": 6,
         "length": 17
@@ -725,7 +725,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
                 "line": 44,
                 "column": 6,
                 "length": 15
@@ -733,7 +733,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 44,
             "column": 1,
             "length": 21
@@ -758,7 +758,7 @@
     {
       "name": "test.newtype/NewTable",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 35,
         "column": 6,
         "length": 8
@@ -782,7 +782,7 @@
     {
       "name": "test.newtype/NewTableWithAttr",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 48,
         "column": 6,
         "length": 16
@@ -793,7 +793,7 @@
           "name": "nodoc",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
             "line": 47,
             "column": 1,
             "length": 6
@@ -818,7 +818,7 @@
     {
       "name": "test.newtype/NewUnion",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 36,
         "column": 6,
         "length": 8
@@ -842,7 +842,7 @@
     {
       "name": "test.newtype/NewVec",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/new_type.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/new_type.test.fidl",
         "line": 40,
         "column": 6,
         "length": 6

@@ -52,7 +52,10 @@ source_set("format2") {
     "sample_converter.h",
     "stream_converter.h",
   ]
-  configs += [ "//build/config:optimize_speed" ]
+  configs += [
+    "//build/config:optimize_speed",
+    "//build/config:fast-math",
+  ]
   deps = [ "//sdk/lib/syslog/cpp" ]
   visibility = [
     ":*",
@@ -68,7 +71,6 @@ source_set("format2") {
     "//sdk/lib/fit-promise",
     "//src/media/audio/lib/timeline",
   ]
-  configs += [ "//build/config:fast-math" ]
 }
 
 cc_test_executable("unittest-bin") {
@@ -82,7 +84,7 @@ cc_test_executable("unittest-bin") {
   deps = [
     ":format2",
     "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
   testonly = true
   emit_tool_path = false
@@ -92,4 +94,7 @@ fuchsia_unittest_package("audio_lib_format2_unittests") {
   package_name = "audio_lib_format2_unittests-gn"
   component_name = "audio_lib_format2_unittests"
   deps = [ ":unittest-bin" ]
+  test_specs = {
+    parallel = 4
+  }
 }

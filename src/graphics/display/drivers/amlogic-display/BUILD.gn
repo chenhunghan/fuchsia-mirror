@@ -30,6 +30,8 @@ source_set("common_srcs") {
   sources = [
     "board-resources.cc",
     "board-resources.h",
+    "capture-image-info.cc",
+    "capture-image-info.h",
     "capture.cc",
     "capture.h",
     "clock-regs.cc",
@@ -166,7 +168,6 @@ fuchsia_structured_config_cpp_elf_lib("structured-config") {
 
 fuchsia_driver_component("amlogic-display") {
   cm_label = ":amlogic-display-manifest"
-  info = "meta/amlogic-display-info.json"
   deps = [ ":amlogic-display-driver" ]
 }
 

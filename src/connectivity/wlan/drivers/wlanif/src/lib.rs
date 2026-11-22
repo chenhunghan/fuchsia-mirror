@@ -17,7 +17,7 @@ use zx::Status;
 
 struct WlanifDriver {
     _node: Arc<Mutex<Option<Node>>>,
-    mlme_handle: Mutex<Option<FullmacMlmeHandle>>,
+    mlme_handle: FullmacMlmeHandle,
     stop_called: Arc<Mutex<bool>>,
 }
 
@@ -93,23 +93,15 @@ impl Driver for WlanifDriver {
             }
         };
 
-        Ok(Self { _node: node, mlme_handle: Mutex::new(Some(mlme_handle)), stop_called })
+        Ok(Self { _node: node, mlme_handle, stop_called })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("wlanif driver stopping...");
         *self.stop_called.lock() = true;
-        if let Some(handle) = self.mlme_handle.lock().as_mut() {
-            handle.request_stop();
-        }
-    }
-}
-
-impl Drop for WlanifDriver {
-    fn drop(&mut self) {
-        if let Some(handle) = self.mlme_handle.lock().take() {
-            handle.delete();
-        }
+        let mut mlme_handle = self.mlme_handle;
+        mlme_handle.request_stop();
+        mlme_handle.delete();
     }
 }
 
@@ -236,7 +228,7 @@ mod tests {
                             wep_supported: false,
                             wpa1_supported: false,
                         };
-                        let _ = usme_proxy.start(generic_sme_server, &legacy_privacy_support);
+                        let _ = usme_proxy.start(generic_sme_server, &legacy_privacy_support, None);
                     }
                     fidl_fullmac::WlanFullmacImpl_Request::Query { responder } => {
                         self.state.lock().calls.push(FullmacCall::Query);

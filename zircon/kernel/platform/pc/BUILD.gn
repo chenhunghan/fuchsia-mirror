@@ -10,38 +10,19 @@ import("//zircon/kernel/kernel_rust_mod.gni")
 source_set("pc") {
   public_deps = [ ":headers" ]
 
-  sources = [
-    "dev-init.cc",
-    "efi_expected.cc",
-    "platform.cc",
-    "power.cc",
-    "timer.cc",
-    "uart.cc",
-  ]
-
   deps = [
     ":platform_pc",
-    "//sdk/lib/zbi-format",
-    "//zircon/kernel/arch/x86:headers",
     "//zircon/kernel/dev/hw_rng/intel_rng",
-    "//zircon/kernel/dev/interrupt",
-    "//zircon/kernel/lib/arch",
-    "//zircon/kernel/lib/efi",
-    "//zircon/kernel/lib/ktl",
-    "//zircon/kernel/lib/root_resource_filter",
-    "//zircon/kernel/phys/handoff",
-    "//zircon/kernel/platform:headers",
-    "//zircon/system/ulib/uart",
   ]
 }
 
 library_headers("headers") {
-  headers = []
-
-  public_deps = [
-    # <ktl/optional.h> in uart.h.
-    "//zircon/kernel/lib/ktl:headers",
+  headers = [
+    "platform/pc.h",
+    "platform/pc/timer.h",
   ]
+
+  public_deps = [ "//zircon/kernel/arch/x86:headers" ]
 }
 
 group("kernel-tests") {

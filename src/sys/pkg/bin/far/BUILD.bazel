@@ -30,7 +30,6 @@ fx_packaged_binary(
 
 fx_package(
     name = "far",
-    package_name = "far",
     resources = [":far_packaged_bin"],
     target_compatible_with = ["@platforms//os:fuchsia"],
 )

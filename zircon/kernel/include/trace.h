@@ -10,15 +10,12 @@
 
 #include <stdio.h>
 
-//#define __FUNC__ __PRETTY_FUNCTION__
 #define __FUNC__ __func__
 
 /* trace routines */
 #define TRACE_ENTRY printf("%s: entry\n", __FUNC__)
-#define TRACE_EXIT printf("%s: exit\n", __FUNC__)
 #define TRACE_ENTRY_OBJ printf("%s: entry obj %p\n", __FUNC__, this)
 #define TRACE_EXIT_OBJ printf("%s: exit obj %p\n", __FUNC__, this)
-#define TRACE printf("%s:%d\n", __FUNC__, __LINE__)
 #define TRACEF(str, x...)                           \
   do {                                              \
     printf("%s:%d: " str, __FUNC__, __LINE__, ##x); \
@@ -29,12 +26,6 @@
   do {                 \
     if (LOCAL_TRACE) { \
       TRACE_ENTRY;     \
-    }                  \
-  } while (0)
-#define LTRACE_EXIT    \
-  do {                 \
-    if (LOCAL_TRACE) { \
-      TRACE_EXIT;      \
     }                  \
   } while (0)
 #define LTRACE_ENTRY_OBJ \
@@ -48,12 +39,6 @@
     if (LOCAL_TRACE) {  \
       TRACE_EXIT_OBJ;   \
     }                   \
-  } while (0)
-#define LTRACE         \
-  do {                 \
-    if (LOCAL_TRACE) { \
-      TRACE;           \
-    }                  \
   } while (0)
 #define LTRACEF(x...)  \
   do {                 \

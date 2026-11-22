@@ -38,7 +38,7 @@ impl Driver for PowerRustDriver {
         Ok(Self { node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("PowerRustDriver::stop() was invoked. Use this function to do any cleanup needed.");
     }
 }

@@ -35,6 +35,13 @@ pub struct PageCache {
     tail: Option<SmmuPage>,
     cache_entries: u32,
     in_flight_pages: u32,
+    /// Test-only budget of pages this cache may still fetch from the PMM (`None` for no limit).
+    ///
+    /// Tests use it to inject allocation failures. It lives on the instance, not in a global, so
+    /// that a test can only ever affect the cache it created and never the page-table allocations
+    /// of a live driver running alongside the in-kernel unit tests.
+    #[cfg(ktest)]
+    test_alloc_budget: Option<u32>,
 }
 
 impl Default for PageCache {
@@ -46,7 +53,23 @@ impl Default for PageCache {
 impl PageCache {
     /// Creates an empty [`PageCache`] with no cached or in-flight pages.
     pub const fn new() -> Self {
-        Self { head: None, tail: None, cache_entries: 0, in_flight_pages: 0 }
+        Self {
+            head: None,
+            tail: None,
+            cache_entries: 0,
+            in_flight_pages: 0,
+            #[cfg(ktest)]
+            test_alloc_budget: None,
+        }
+    }
+
+    /// Limits the number of further pages this cache may fetch from the PMM to `budget`, after
+    /// which [`PageCache::get_page`] fails with `Status::NO_MEMORY` whenever it would need a
+    /// fresh page. `None` removes the limit. Pages served from the cache do not count.
+    #[cfg(ktest)]
+    #[inline]
+    pub fn set_test_alloc_budget(&mut self, budget: Option<u32>) {
+        self.test_alloc_budget = budget;
     }
 
     /// Returns the number of pages currently held in the free-list cache.
@@ -87,6 +110,13 @@ impl PageCache {
         }
 
         debug_assert_eq!(self.cache_entries, 0);
+        #[cfg(ktest)]
+        if let Some(budget) = self.test_alloc_budget.as_mut() {
+            if *budget == 0 {
+                return Err(Status::NO_MEMORY);
+            }
+            *budget -= 1;
+        }
         let page = SmmuEnv::alloc_page(PMM_ALLOC_FLAG_ANY)?;
         let page_vaddr = SmmuEnv::paddr_to_physmap(page.paddr());
         debug_assert_ne!(page_vaddr, 0);
@@ -103,6 +133,9 @@ impl PageCache {
         unsafe {
             zero_table_page(page_vaddr);
         }
+        // The `dsb sy` which ends this clean (on arm64) is relied on. The page is linked into a
+        // translation table by a later descriptor store, and the SMMU may walk into it as soon
+        // as that descriptor is in memory. It must find zeroes, not what the page held before.
         // SAFETY: `page_vaddr` is the physmap address of the page we just allocated.
         unsafe {
             SmmuEnv::clean_dcache_range(page_vaddr, PAGE_SIZE_USIZE);

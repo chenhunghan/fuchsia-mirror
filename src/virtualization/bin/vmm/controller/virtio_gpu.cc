@@ -45,12 +45,12 @@ zx_status_t VirtioGpu::Start(
     return status;
   }
 
-  fidl::ClientEnd<fuchsia_ui_input3::KeyboardListener> llcpp_keyboard_listener(
+  fidl::ClientEnd<fuchsia_ui_input3::KeyboardListener> wire_keyboard_listener(
       keyboard_listener.TakeChannel());
-  fidl::ServerEnd<fuchsia_ui_pointer::MouseSource> llcpp_mouse_source(mouse_source.TakeChannel());
+  fidl::ServerEnd<fuchsia_ui_pointer::MouseSource> wire_mouse_source(mouse_source.TakeChannel());
   return gpu_.sync()
-      ->Start(std::move(start_info), std::move(llcpp_keyboard_listener),
-              std::move(llcpp_mouse_source))
+      ->Start(std::move(start_info), std::move(wire_keyboard_listener),
+              std::move(wire_mouse_source))
       .status();
 }
 

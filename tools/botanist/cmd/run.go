@@ -5,6 +5,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -101,6 +102,13 @@ type RunCommand struct {
 	// process to exit cleanly after cancellation. If unset, defaults to
 	// defaultFFXMonitorExitTimeout in getFFXMonitorExitTimeout().
 	ffxMonitorExitTimeout time.Duration
+
+	// usbTargetDiscoverBackoff and usbTargetDiscoverTimeout override the retry
+	// interval and upper-bound timeout when polling for USB target discovery
+	// under force_ffx_usb. If unset, defaultUSBTargetDiscoverBackoff and
+	// defaultUSBTargetDiscoverTimeout are used.
+	usbTargetDiscoverBackoff time.Duration
+	usbTargetDiscoverTimeout time.Duration
 }
 
 func (*RunCommand) Name() string {
@@ -273,10 +281,38 @@ func (r *RunCommand) setupPackageServer(ctx context.Context) (*botanist.PackageS
 	return pkgSrv, nil
 }
 
-func (r *RunCommand) setupFFXUSBDriver(ctx context.Context, ffx *targets.FFXInstance, serialNum string) (func(), error) {
-	cleanup := func() {}
-	socketPath := filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), "ffx_usb_driver_socketpath")
-	logDir := filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), "ffx_usb_driver_logs")
+const (
+	defaultUSBTargetDiscoverBackoff = 500 * time.Millisecond
+	// Timeout for waiting for `ffx usb-driver` to start up, bind its Unix
+	// socket, and enumerate the USB VSOCK target. Arbitrarily chosen; the
+	// target has already booted and connected over SSH when `setupFFXUSBDriver`
+	// runs, so discovery normally completes within 1-2s, with headroom for
+	// host/USB bus scheduling load on Swarming bots.
+	defaultUSBTargetDiscoverTimeout = 30 * time.Second
+)
+
+func (r *RunCommand) setupFFXUSBDriver(ctx context.Context, dev *targets.Device) (func(), error) {
+	noop := func() {}
+	cleanup := noop
+	ffx := dev.GetFFX()
+	serialNum := dev.SerialNumber()
+	if s, ok := strings.CutPrefix(ffx.GetTarget(), "id:"); serialNum == "" && ok {
+		serialNum = s
+	}
+	if serialNum == "" {
+		return cleanup, fmt.Errorf("cannot enable force_ffx_usb for target %s without a serial number", dev.Nodename())
+	}
+	targetSpec := "id:" + serialNum
+	ffx.SetTarget(targetSpec)
+
+	socketPath, err := filepath.Abs(filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), "ffx_usb_driver_socketpath"))
+	if err != nil {
+		return cleanup, fmt.Errorf("failed to get abspath of ffx usb driver socket: %w", err)
+	}
+	logDir, err := filepath.Abs(filepath.Join(os.Getenv(testrunnerconstants.TestOutDirEnvKey), "ffx_usb_driver_logs"))
+	if err != nil {
+		return cleanup, fmt.Errorf("failed to get abspath of ffx usb driver log dir: %w", err)
+	}
 	if err := os.MkdirAll(logDir, os.ModePerm); err != nil {
 		return cleanup, fmt.Errorf("failed to create ffx usb driver log dir: %w", err)
 	}
@@ -289,12 +325,119 @@ func (r *RunCommand) setupFFXUSBDriver(ctx context.Context, ffx *targets.FFXInst
 		return ffx.USBDriver(processCtx, serialNum, logDir)
 	}, "ffx usb-driver")
 	// LINT.ThenChange(/tools/testing/tefmocheck/check-configs.yaml:ffx_usb_driver_failed)
-	return func() {
+	stopDriver := func() {
 		cleanup()
 		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 			logger.Errorf(ctx, "failed to remove ffx usb driver socket path: %s", err)
 		}
-	}, nil
+	}
+
+	timeout := cmp.Or(r.usbTargetDiscoverTimeout, defaultUSBTargetDiscoverTimeout)
+	discoverCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var usbAddr string
+	backoff := retry.NewConstantBackoff(cmp.Or(r.usbTargetDiscoverBackoff, defaultUSBTargetDiscoverBackoff))
+	if err := retry.Retry(discoverCtx, backoff, func() error {
+		entries, err := ffx.TargetList(discoverCtx, map[string]any{"connectivity.enable_usb": true}, "--no-mdns", "--allow-addrs", "usb", "--no-probe", targetSpec)
+		if err != nil {
+			return err
+		}
+		var found string
+		for _, e := range entries {
+			addr := e.USBAddress()
+			if addr == "" {
+				continue
+			}
+			if found != "" {
+				logger.Debugf(ctx, "multiple usb targets discovered for %s: %q and %q", targetSpec, found, addr)
+				return retry.Fatal(errors.New("multiple usb targets discovered for serial"))
+			}
+			found = addr
+		}
+		if found == "" {
+			return fmt.Errorf("usb target %s not discovered yet", targetSpec)
+		}
+		usbAddr = found
+		return nil
+	}, nil); err != nil {
+		stopDriver()
+		return noop, fmt.Errorf("discovering usb target %s: %w", targetSpec, err)
+	}
+	dev.SetUSBConfig(socketPath, usbAddr)
+	return stopDriver, nil
+}
+
+const defaultTargetIdentifyTimeout = 15 * time.Second
+
+// identifyTarget queries a booted target via `ffx target list <targetAddr>`
+// when its serial number or nodename is not statically known, recording any
+// discovered values on t.
+// Failures are logged and ignored so targets without RCS can still proceed.
+func identifyTarget(ctx context.Context, t targets.FuchsiaTarget, targetAddr string) {
+	ffx := t.GetFFX()
+	if (t.SerialNumber() != "" && t.Nodename() != "") || targetAddr == "" {
+		return
+	}
+	entries, err := ffx.TargetList(
+		ctx,
+		map[string]any{"discovery.timeout": defaultTargetIdentifyTimeout.Milliseconds()},
+		targetAddr,
+	)
+	if err != nil {
+		logger.Debugf(ctx, "unable to identify target %s (%s): %s", cmp.Or(t.Nodename(), "<unknown>"), targetAddr, err)
+		return
+	}
+	if len(entries) == 0 || entries[0].RCSState != "Y" {
+		logger.Debugf(ctx, "target %s (%s) RCS not ready during identification", cmp.Or(t.Nodename(), "<unknown>"), targetAddr)
+		return
+	}
+	if serial := entries[0].NormalizedSerial(); serial != "" && t.SerialNumber() == "" {
+		t.SetSerialNumber(serial)
+	}
+	// When queried by address, ffx may echo the address as the nodename.
+	if n := entries[0].NormalizedNodename(); n != "" && n != targetAddr && t.Nodename() == "" {
+		t.SetNodename(n)
+	}
+}
+
+// configureAndRegisterTarget sets the target specifier on t's FFXInstance and,
+// for force_ffx_usb devices, starts the ffx USB driver. With
+// use_serial_target_id, it also identifies other targets when needed, records
+// their addresses in $SHARED_DATA/targets.json (when shared_data is
+// configured), and targets them by `id:<serial>`, so strict-mode ffx commands
+// can resolve them without implicit discovery. It returns whether the target
+// uses force_ffx_usb and a function to call once the target is no longer in
+// use.
+func (r *RunCommand) configureAndRegisterTarget(ctx context.Context, t targets.FuchsiaTarget, addr net.IPAddr, experiments botanist.Experiments) (bool, func(), error) {
+	noop := func() {}
+	ffx := t.GetFFX()
+	dev, ok := t.(*targets.Device)
+	if !ok || !experiments.Contains(botanist.ForceFFXUSB) {
+		ffx.SetTarget(addr.String())
+		if experiments.Contains(botanist.UseSerialTargetID) {
+			identifyTarget(ctx, t, addr.String())
+			if err := targets.RegisterTargetAddress(t, addr.String()); err != nil {
+				return false, noop, fmt.Errorf("registering target %s: %w", t.Nodename(), err)
+			}
+			// Once the serial number and address are in the registry, strict-mode
+			// ffx can resolve `id:<serial>`, so target the device by its serial
+			// number. Targets without a serial number (e.g. user builds) or
+			// without a registry keep using the IP address.
+			if serial := t.SerialNumber(); serial != "" && t.GetSharedData() != "" {
+				ffx.SetTarget("id:" + serial)
+				logger.Infof(ctx, "targeting %s as id:%s (registered address %s)", cmp.Or(t.Nodename(), "<unknown>"), serial, addr.String())
+			} else {
+				logger.Infof(ctx, "targeting %s by IP address %s: serial number known: %t, shared_data set: %t", cmp.Or(t.Nodename(), "<unknown>"), addr.String(), serial != "", t.GetSharedData() != "")
+			}
+		}
+		return false, noop, nil
+	}
+
+	cleanupUSBDriver, err := r.setupFFXUSBDriver(ctx, dev)
+	if err != nil {
+		return true, noop, fmt.Errorf("failed to set up ffx usb driver: %w", err)
+	}
+	return true, cleanupUSBDriver, nil
 }
 
 func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFunc, eg *errgroup.Group, baseTargets []targets.Base, fuchsiaTargets []targets.FuchsiaTarget, primaryTarget targets.FuchsiaTarget, pkgSrv *botanist.PackageServer, testsPath string, experiments botanist.Experiments) {
@@ -344,6 +487,9 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 			targets.StopTargets(ctx, fuchsiaTargets)
 		}()
 
+		// Capture the primary target's statically known nodename before
+		// configureAndRegisterTarget can record a runtime-discovered one.
+		primaryNodename := primaryTarget.Nodename()
 		if r.expectsSSH {
 			for _, t := range fuchsiaTargets {
 				t := t
@@ -366,19 +512,11 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 				if err != nil {
 					return err
 				}
-				forceFFXUSB := false
-				if _, ok := t.(*targets.Device); !ok || !experiments.Contains(botanist.ForceFFXUSB) {
-					t.GetFFX().SetTarget(addr.String())
-				} else {
-					forceFFXUSB = true
-					// For devices, the ffx target has been set to the serial number
-					// already so use that.
-					cleanupUSBDriver, err := r.setupFFXUSBDriver(ctx, t.GetFFX(), strings.TrimPrefix(t.GetFFX().GetTarget(), "id:"))
-					if err != nil {
-						return fmt.Errorf("failed to set up ffx usb driver: %w", err)
-					}
-					defer cleanupUSBDriver()
+				forceFFXUSB, cleanupTarget, err := r.configureAndRegisterTarget(ctx, t, addr, experiments)
+				if err != nil {
+					return err
 				}
+				defer cleanupTarget()
 				if experiments.Contains(botanist.UseFFXRepository) {
 					repoName := "fuchsia-package-server"
 					pkgSrvPort, cleanupPkgServer, err := r.setupFFXPackageServer(ctx, t.GetFFX(), repoName)
@@ -506,15 +644,27 @@ func (r *RunCommand) dispatchTests(ctx context.Context, cancel context.CancelFun
 		}
 
 		// Create a testbed config file after starting targets and establishing
-		// target connectivity so IP addresses and USB driver configuration are
-		// populated.
+		// target connectivity so IP addresses, USB driver configuration, and
+		// runtime-discovered serial numbers are populated.
 		testbedConfig, testbedConfigPath, err := r.createTestbedConfig(baseTargets)
 		if err != nil {
 			return err
 		}
 		defer os.Remove(testbedConfigPath)
+		if experiments.Contains(botanist.UseSerialTargetID) {
+			for _, t := range fuchsiaTargets {
+				if t.SerialNumber() == "" {
+					logger.Infof(ctx, "serial number of target %s is unknown; omitting device_serial from testbed.json", cmp.Or(t.Nodename(), "<unknown>"))
+				}
+			}
+		}
 
-		err = r.runAgainstTarget(ctx, primaryTarget, testsPath, testbedConfig, testbedConfigPath)
+		// testrunner treats a FUCHSIA_NODENAME that is neither empty nor the
+		// emulator's as a physical device that DMC can power-cycle, and skips
+		// refreshing such a target's address on reconnect. A nodename
+		// discovered from the booted target says nothing about either, so
+		// pass only a statically known nodename.
+		err = r.runAgainstTarget(ctx, primaryTarget, primaryNodename, testsPath, testbedConfig, testbedConfigPath)
 		// Cancel ctx to notify other goroutines that this routine has completed.
 		// If another goroutine gets an error and the context is canceled, it
 		// should return nil so that we always prioritize the result from this
@@ -796,9 +946,11 @@ func (r *RunCommand) dumpSyslogOverSerial(ctx context.Context, socketPath string
 	return nil
 }
 
-func (r *RunCommand) runAgainstTarget(ctx context.Context, t targets.FuchsiaTarget, testsPath string, testbedConfig []any, testbedConfigPath string) error {
+// runAgainstTarget runs testrunner against t, exporting nodename as
+// FUCHSIA_NODENAME.
+func (r *RunCommand) runAgainstTarget(ctx context.Context, t targets.FuchsiaTarget, nodename, testsPath string, testbedConfig []any, testbedConfigPath string) error {
 	testrunnerEnv := map[string]string{
-		constants.NodenameEnvKey:                   t.Nodename(),
+		constants.NodenameEnvKey:                   nodename,
 		constants.SerialSocketEnvKey:               t.SerialSocketPath(),
 		constants.ECCableEnvKey:                    os.Getenv(constants.ECCableEnvKey),
 		constants.TestbedConfigEnvKey:              testbedConfigPath,

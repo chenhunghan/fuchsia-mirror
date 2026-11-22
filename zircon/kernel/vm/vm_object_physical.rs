@@ -197,15 +197,6 @@ impl VmObjectPhysical {
         unsafe { self.as_raw().byte_add(constants::kVmObjectPhysicalStateOffset).cast() }
     }
 
-    /// # Safety
-    ///
-    /// `raw` is null or points to a live `VmObjectPhysical` and carries one reference, which
-    /// passes to the returned `RefPtr`.
-    unsafe fn from_raw(raw: *mut phys_bindings::VmObjectPhysical) -> Option<RefPtr<Self>> {
-        // SAFETY: `raw` is null or points to a live `VmObjectPhysical` and carries one reference.
-        unsafe { RefPtr::try_from_raw(raw.cast::<Self>()) }
-    }
-
     /// Create a new physical VMO for the given physical region.
     pub fn create(base: PAddr, size: usize) -> Result<RefPtr<VmObjectPhysical>, Status> {
         let mut status: zx_status_t = 0;
@@ -213,8 +204,48 @@ impl VmObjectPhysical {
         let raw: *mut phys_bindings::VmObjectPhysical =
             unsafe { phys_bindings::cpp_vm_object_physical_create(base.0, size, &mut status) };
         Status::ok(status)?;
-        // SAFETY: `raw` is null or points to a live `VmObjectPhysical` and carries one reference.
-        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+        // SAFETY: on `ZX_OK`, `raw` points to a live `VmObjectPhysical` and carries one reference.
+        Ok(unsafe { RefPtr::from_raw(raw.cast::<Self>()) })
+    }
+
+    /// Sets the mapping cache policy for this physical VMO.
+    ///
+    /// # Safety
+    ///
+    /// Ensure `cache_policy` is appropriate for all future mappings of this VMO.
+    #[inline]
+    pub unsafe fn set_mapping_cache_policy(
+        &self,
+        cache_policy: ArchMmuFlags,
+    ) -> Result<(), Status> {
+        // SAFETY: `self.state_ptr()` points to an initialized `VmObjectPhysicalState`.
+        let state = unsafe { &*self.state_ptr() };
+        if (cache_policy & !(ZX_CACHE_POLICY_MASK as ArchMmuFlags)) != 0 {
+            return Err(Status::INVALID_ARGS);
+        }
+
+        ksync::lock!(let mut guard = state.lock_lock());
+
+        // If the cache policy is already configured on this VMO and matches
+        // the requested policy then this is a no-op. This is a common practice
+        // in the serialio and magma drivers, but may change.
+        // TODO: revisit this when we shake out more of the future DDK protocol.
+        if cache_policy == self.get_mapping_cache_policy_locked(guard.token()) {
+            return Ok(());
+        }
+
+        let child_list_guard = ChildListLockGuard::new();
+
+        // If this VMO is mapped already it is not safe to allow its caching policy to change.
+        if self.num_mappings_locked(guard.token()) != 0
+            || self.has_children_locked(child_list_guard.token())
+            || state.parent.is_some()
+        {
+            return Err(Status::BAD_STATE);
+        }
+
+        self.set_cache_policy_locked(guard.as_mut().token_mut(), cache_policy);
+        Ok(())
     }
 
     /// Converts a `RefPtr<VmObjectPhysical>` into a base `RefPtr<VmObject>`.
@@ -223,7 +254,7 @@ impl VmObjectPhysical {
         // SAFETY: `this.as_raw()` points to a live `VmObjectPhysical` with an active refcount.
         let raw_base = unsafe { phys_bindings::cpp_vm_object_physical_as_vm_object(this.as_raw()) };
         // SAFETY: `raw_base` points to a live `VmObject` whose reference count was owned by `this`.
-        unsafe { VmObject::from_raw(raw_base) }.expect("RefPtr guarantees this is non-null")
+        unsafe { RefPtr::from_raw(VmObject::ptr_from_raw(raw_base)) }
     }
 
     /// Cast a pointer to a VmObjectPhysical to its base VmObject.
@@ -520,46 +551,14 @@ pub unsafe extern "C" fn rust_vm_object_physical_state_lookup(
 
 /// # Safety
 ///
-/// The caller must ensure `state_ptr` points to an initialized `VmObjectPhysicalState`.
-/// The caller must ensure `vmo` points to a valid `VmObjectPhysical`.
-/// The caller must ensure `state_ptr` is `vmo`'s state.
+/// `cache_policy` must be appropriate for all future mappings of `vmo`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_vm_object_physical_set_mapping_cache_policy(
-    vmo: *mut VmObjectPhysical,
-    state_ptr: *const VmObjectPhysicalState,
+    vmo: &VmObjectPhysical,
     cache_policy: ArchMmuFlags,
 ) -> Result<(), Status> {
-    // SAFETY: The caller guarantees `state_ptr` points to an initialized `VmObjectPhysicalState`.
-    let state = unsafe { &*state_ptr };
-    if (cache_policy & !(ZX_CACHE_POLICY_MASK as ArchMmuFlags)) != 0 {
-        return Err(Status::INVALID_ARGS);
-    }
-
-    ksync::lock!(let mut guard = state.lock_lock());
-
-    // SAFETY: The caller guarantees `vmo` points to a valid VmObjectPhysical.
-    let vmo = unsafe { &*vmo };
-
-    // If the cache policy is already configured on this VMO and matches
-    // the requested policy then this is a no-op. This is a common practice
-    // in the serialio and magma drivers, but may change.
-    // TODO: revisit this when we shake out more of the future DDK protocol.
-    if cache_policy == vmo.get_mapping_cache_policy_locked(guard.token()) {
-        return Ok(());
-    }
-
-    let child_list_guard = ChildListLockGuard::new();
-
-    // If this VMO is mapped already it is not safe to allow its caching policy to change.
-    if vmo.num_mappings_locked(guard.token()) != 0
-        || vmo.has_children_locked(child_list_guard.token())
-        || state.parent.is_some()
-    {
-        return Err(Status::BAD_STATE);
-    }
-
-    vmo.set_cache_policy_locked(guard.as_mut().token_mut(), cache_policy);
-    Ok(())
+    // SAFETY: `cache_policy` is appropriate for all future mappings of `vmo`.
+    unsafe { vmo.set_mapping_cache_policy(cache_policy) }
 }
 
 /// # Safety

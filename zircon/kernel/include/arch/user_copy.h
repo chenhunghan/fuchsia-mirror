@@ -8,7 +8,6 @@
 #define ZIRCON_KERNEL_INCLUDE_ARCH_USER_COPY_H_
 
 #include <sys/types.h>
-#include <zircon/compiler.h>
 #include <zircon/types.h>
 
 #include <ktl/optional.h>

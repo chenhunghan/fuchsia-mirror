@@ -6,11 +6,13 @@
 """RBE profile dataclass, loaders, and subcommand CLI."""
 
 import dataclasses
+import fnmatch
 import json
 import os
+import pathlib
+import posixpath
 import sys
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any
 
 from build.python.modules.serialization import serialization
@@ -24,22 +26,74 @@ _ENV_CONTAINER_IMAGE = "FX_BUILD_INTERNAL_RBE_CONTAINER_IMAGE"
 _ENV_OS_FAMILY = "FX_BUILD_INTERNAL_RBE_OS_FAMILY"
 _ENV_WORKER_POOLS = "FX_BUILD_INTERNAL_RBE_WORKER_POOLS"
 _ENV_AUTH_TYPE = "FX_BUILD_INTERNAL_RBE_AUTH_TYPE"
-_ENV_PROFILE_NAME = "FX_BUILD_RBE_PROFILE"
+# Unlike ENV_PROFILE_NAME, this isn't in the @fuchsia_build_config repository
+# rule's `environ`, so exporting it to builds doesn't make Bazel re-run that
+# rule.
+_ENV_INTERNAL_PROFILE_NAME = "FX_BUILD_INTERNAL_RBE_PROFILE_NAME"
+# Lets users pick a profile for one command. Unlike the variables above, it's
+# not set by to_env_dict(), because the @fuchsia_build_config repository rule
+# re-runs whenever its value changes between Bazel commands.
+ENV_PROFILE_NAME = "FX_BUILD_RBE_PROFILE"
 # RBE_platform is read directly by reclient's rewrapper tool to select default platform properties.
 _ENV_RBE_PLATFORM = "RBE_platform"
 
 # Mandatory pool entries that must be present in worker_pools.
-_REQUIRED_WORKER_POOLS = {"default", "large"}
+_REQUIRED_WORKER_POOLS = frozenset({"default", "large"})
 
 # Path relative to fuchsia directory for RBE profiles directory
-_PROFILES_DIR = Path("build/rbe/profiles")
+_PROFILES_DIR = pathlib.Path("build/rbe/profiles")
 
 # Path relative to fuchsia directory for the active sticky RBE profile JSON config.
-_CONFIG_PATH = Path(".fx/config/rbe_profile.json")
+_CONFIG_PATH = pathlib.Path(".fx/config/rbe_profile.json")
 
 _JSONPrimitive = str | int | float | bool | None
 JSONValue = _JSONPrimitive | dict[str, Any] | list[Any]
 JSONObject = dict[str, JSONValue]
+
+
+def _has_glob_magic(part: str) -> bool:
+    """Returns True if a path segment contains fnmatch wildcard characters."""
+    return any(c in "*?[]" for c in part)
+
+
+def _normalize_posix_abspath(
+    path: pathlib.PurePosixPath,
+) -> pathlib.PurePosixPath:
+    """Lexically normalizes '.' and '..' segments in an absolute POSIX path."""
+    return pathlib.PurePosixPath(posixpath.normpath(str(path)))
+
+
+def _validate_remote_exec_root(
+    root: pathlib.PurePosixPath,
+) -> pathlib.PurePosixPath:
+    """Validates and normalizes an RbeProfile remote_exec_root path/pattern.
+
+    Args:
+        root: Configured remote execution workspace root path or fixed-depth
+            single-segment glob pattern.
+
+    Returns:
+        Lexically normalized PurePosixPath.
+
+    Raises:
+        ValueError: If `root` is not an absolute single-slash POSIX path,
+            contains `..` segments, or contains recursive `**` wildcards.
+    """
+    if not root.is_absolute() or root.parts[0] != "/":
+        raise ValueError(
+            f"remote_exec_root must be an absolute path, got '{root}'"
+        )
+    exec_root_parts = root.parts[1:]
+    if ".." in exec_root_parts:
+        raise ValueError(
+            f"remote_exec_root must not contain '..' segments, got '{root}'"
+        )
+    if any("**" in part for part in exec_root_parts):
+        raise ValueError(
+            "remote_exec_root does not support recursive '**' wildcards "
+            f"(only fixed-depth single-segment globs are allowed), got '{root}'"
+        )
+    return _normalize_posix_abspath(root)
 
 
 @dataclasses.dataclass
@@ -50,8 +104,10 @@ class RbeProfile:
         rbe_instance: The fully-qualified RBE instance name. Must match the
             standard format: `projects/{project_id}/instances/{instance_name}`
             (e.g., `projects/rbe-fuchsia-prod/instances/default`).
-        remote_exec_root: The root path of the execution workspace on remote
-            workers (typically `/b/f/w`).
+        remote_exec_root: The absolute root path (or fixed-depth single-segment
+            glob pattern, such as `/tmp/buildbox-*` or `/`) of the execution
+            workspace on remote workers (typically `/b/f/w`). Recursive `**`
+            wildcards are not supported.
         container_image: The fully-qualified Docker container image URI for
             the baseline remote execution environment (e.g. `docker://gcr.io/...`).
             Individual actions can override this per-action (in GN/Ninja via
@@ -72,7 +128,7 @@ class RbeProfile:
     """
 
     rbe_instance: str
-    remote_exec_root: Path
+    remote_exec_root: pathlib.PurePosixPath
     container_image: str
     # LINT.IfChange(rbe_worker_pools)
     worker_pools: dict[str, str]
@@ -86,6 +142,9 @@ class RbeProfile:
             raise ValueError(
                 f"rbe_instance must start with 'projects/', got '{self.rbe_instance}'"
             )
+        self.remote_exec_root = _validate_remote_exec_root(
+            self.remote_exec_root
+        )
         missing_pools = _REQUIRED_WORKER_POOLS - set(self.worker_pools.keys())
         if missing_pools:
             raise ValueError(
@@ -96,6 +155,73 @@ class RbeProfile:
                 raise ValueError(
                     f"worker_pools['{pool_name}'] must be a 'key=value' platform property string, got '{pool_spec}'"
                 )
+
+    @property
+    def remote_exec_root_has_wildcards(self) -> bool:
+        """Returns True if remote_exec_root contains any glob wildcards."""
+        return any(
+            _has_glob_magic(part) for part in self.remote_exec_root.parts[1:]
+        )
+
+    def _remote_exec_root_suffix(
+        self, path: pathlib.PurePath | str
+    ) -> tuple[str, ...] | None:
+        raw_path = pathlib.PurePosixPath(path)
+        if not raw_path.is_absolute() or raw_path.parts[0] != "/":
+            return None
+        norm_path = _normalize_posix_abspath(raw_path)
+        pattern_parts = self.remote_exec_root.parts[1:]
+        actual_parts = norm_path.parts[1:]
+        prefix_len = len(pattern_parts)
+        if len(actual_parts) < prefix_len:
+            return None
+        if not all(
+            fnmatch.fnmatchcase(actual, pat)
+            for actual, pat in zip(actual_parts[:prefix_len], pattern_parts)
+        ):
+            return None
+        return actual_parts[prefix_len:]
+
+    def matches_remote_exec_root(
+        self, actual_root: pathlib.PurePath | str
+    ) -> bool:
+        """Returns True if an observed worker root path matches remote_exec_root."""
+        return self._remote_exec_root_suffix(actual_root) == ()
+
+    def strip_remote_exec_root(
+        self, path: pathlib.PurePath | str
+    ) -> pathlib.PurePosixPath | None:
+        """Strips the remote_exec_root prefix from an absolute descendant path.
+
+        Returns the relative path under remote_exec_root if `path` is strictly
+        inside a directory matching `remote_exec_root`, or None otherwise.
+        """
+        suffix = self._remote_exec_root_suffix(path)
+        if not suffix:
+            return None
+        return pathlib.PurePosixPath(*suffix)
+
+    def format_remote_exec_root_mismatch(
+        self, actual_root: pathlib.PurePath | str
+    ) -> str:
+        """Formats an actionable error message when a worker root mismatches."""
+        return (
+            f"Remote worker execution root '{actual_root}' does not match "
+            f"remote_exec_root '{self.remote_exec_root}' configured in RBE "
+            f"profile '{self.profile_name}'.\n"
+            'Update "remote_exec_root" in your RBE profile JSON '
+            "(fixed-depth single-segment globs like '/tmp/buildbox-*' and '/' "
+            "are supported; recursive '**' wildcards are not supported)."
+        )
+
+    @property
+    def quota_project(self) -> str:
+        """Extracts the GCP project ID from rbe_instance, or empty string if not found."""
+        if self.rbe_instance.startswith("projects/"):
+            parts = self.rbe_instance.split("/")
+            if len(parts) >= 2:
+                return parts[1]
+        return ""
 
     def to_env_dict(self) -> dict[str, str]:
         """Serializes properties to standard environment variables for subprocesses."""
@@ -112,7 +238,7 @@ class RbeProfile:
             _ENV_OS_FAMILY: self.os_family,
             _ENV_WORKER_POOLS: json.dumps(self.worker_pools),
             _ENV_AUTH_TYPE: self.auth_type,
-            _ENV_PROFILE_NAME: self.profile_name,
+            _ENV_INTERNAL_PROFILE_NAME: self.profile_name,
             _ENV_RBE_PLATFORM: platform_spec,
         }
 
@@ -163,11 +289,11 @@ class RbeProfile:
             )
 
         auth_type = environ.get(_ENV_AUTH_TYPE, "google")
-        profile_name = environ.get(_ENV_PROFILE_NAME, "default")
+        profile_name = environ.get(_ENV_INTERNAL_PROFILE_NAME, "default")
 
         return cls(
             rbe_instance=rbe_instance,
-            remote_exec_root=Path(exec_root_str),
+            remote_exec_root=pathlib.PurePosixPath(exec_root_str),
             container_image=container_image,
             worker_pools=worker_pools,
             profile_name=profile_name,
@@ -177,7 +303,7 @@ class RbeProfile:
 
 
 def load(
-    fuchsia_dir: Path,
+    fuchsia_dir: pathlib.Path,
     environ: Mapping[str, str],
     name: str | None = None,
 ) -> RbeProfile:
@@ -195,7 +321,7 @@ def fake(**overrides: Any) -> RbeProfile:
     """Factory helper generating valid in-memory RbeProfile instances for tests."""
     defaults: dict[str, Any] = {
         "rbe_instance": "projects/fake-project/instances/fake-instance",
-        "remote_exec_root": Path("/fake/root"),
+        "remote_exec_root": pathlib.PurePosixPath("/fake/root"),
         "container_image": "docker://gcr.io/fake/image",
         "worker_pools": {
             "default": "Pool=fake-default-pool",
@@ -220,14 +346,16 @@ def fake(**overrides: Any) -> RbeProfile:
                 f"Unknown override '{k}'. Expected one of {valid_keys}"
             )
     defaults.update(overrides)
-    if isinstance(defaults["remote_exec_root"], str):
-        defaults["remote_exec_root"] = Path(defaults["remote_exec_root"])
+    if isinstance(defaults["remote_exec_root"], (str, pathlib.PurePath)):
+        defaults["remote_exec_root"] = pathlib.PurePosixPath(
+            defaults["remote_exec_root"]
+        )
     return RbeProfile(**defaults)
 
 
 _SPEC = service_profile.ServiceProfileSpec(
     service_name="rbe",
-    env_profile_var=_ENV_PROFILE_NAME,
+    env_profile_var=ENV_PROFILE_NAME,
     profiles_relpath=_PROFILES_DIR,
     config_relpath=_CONFIG_PATH,
     description="Manage RBE (Remote Build Execution) configuration profiles.",
@@ -235,9 +363,7 @@ _SPEC = service_profile.ServiceProfileSpec(
 
 _MANAGER = service_profile.ServiceProfileManager(RbeProfile, _SPEC)
 
-WorkspaceSymlink = service_profile.WorkspaceSymlink
 resolve_paths = _MANAGER.resolve_paths
-workspace_symlinks = _MANAGER.workspace_symlinks
 main = _MANAGER.main
 
 

@@ -61,8 +61,6 @@ _CODEC_IMPL_INTERNAL_HDRS = [
 
 _CODEC_IMPL_INTERNAL_IMPLEMENTATION_DEPS = [
     "@fuchsia_sdk//pkg/memory_barriers",
-    "@fuchsia_sdk//pkg/sys_cpp",
-    "@fuchsia_sdk//pkg/vfs_cpp",
     "@fuchsia_sdk//bind/fuchsia.sysmem.heap:fuchsia.sysmem.heap_cc",
 
     # Only for <ddk/debug.h>'s severity levels.
@@ -76,19 +74,22 @@ _CODEC_IMPL_INTERNAL_DEPS = [
     "//src/media/lib/blocking_mpsc_queue",
     "//src/media/lib/metrics:metrics_cc",
     "//zircon/system/ulib/closure-queue",
-    "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/sysmem-version",
     "//zircon/system/ulib/thread-safe-deleter",
     "//zircon/third_party/ulib/safemath",
+    "@fuchsia_sdk//fidl/fuchsia.io:fuchsia.io_cpp",
+    "@fuchsia_sdk//fidl/fuchsia.media.drm:fuchsia.media.drm_cpp",
     "@fuchsia_sdk//fidl/fuchsia.media.drm:fuchsia.media.drm_hlcpp",
     "@fuchsia_sdk//fidl/fuchsia.media:fuchsia.media_cpp",
     "@fuchsia_sdk//fidl/fuchsia.media:fuchsia.media_hlcpp",
+    "@fuchsia_sdk//fidl/fuchsia.mediacodec:fuchsia.mediacodec_cpp",
     "@fuchsia_sdk//fidl/fuchsia.mediacodec:fuchsia.mediacodec_hlcpp",
     "@fuchsia_sdk//fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
     "@fuchsia_sdk//pkg/async-cpp",
     "@fuchsia_sdk//pkg/async-loop-cpp",
     "@fuchsia_sdk//pkg/async-loop-default",
     "@fuchsia_sdk//pkg/driver_logging_cpp",
+    "@fuchsia_sdk//pkg/fbl_deprecated",
     "@fuchsia_sdk//pkg/fit",
     "@fuchsia_sdk//pkg/inspect",
     "@fuchsia_sdk//pkg/inspect_component_cpp",

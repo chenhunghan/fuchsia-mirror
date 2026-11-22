@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+extern crate fidl_fuchsia_developer_remotecontrol_common as fidl_fuchsia_developer_remotecontrol;
+
 pub use crate::desc::Description;
 use crate::emulator_watcher::EmulatorWatcher;
 use crate::error::Result;

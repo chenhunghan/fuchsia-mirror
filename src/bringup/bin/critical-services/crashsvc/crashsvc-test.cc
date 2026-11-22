@@ -12,17 +12,22 @@
 #include <lib/component/incoming/cpp/directory.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/fidl/cpp/wire/server.h>
+#include <lib/fit/defer.h>
 #include <lib/zx/event.h>
 #include <lib/zx/exception.h>
 #include <lib/zx/job.h>
+#include <lib/zx/pager.h>
+#include <lib/zx/port.h>
 #include <lib/zx/process.h>
 #include <lib/zx/result.h>
 #include <lib/zx/thread.h>
 #include <lib/zx/time.h>
 #include <lib/zx/vmar.h>
+#include <lib/zx/vmo.h>
 #include <threads.h>
 #include <zircon/syscalls/exception.h>
 #include <zircon/syscalls/object.h>
+#include <zircon/syscalls/port.h>
 
 #include <list>
 #include <memory>
@@ -233,13 +238,10 @@ class TestBase : public zxtest::Test, public loop_fixture::RealLoop {
   const zx::channel& exception_channel() const { return exception_channel_; }
   zx::channel& exception_channel() { return exception_channel_; }
 
- private:
-  static constexpr char kTaskName[] = "crashsvc-test";
-  static constexpr uint32_t kTaskNameLen = sizeof(kTaskName) - 1;
-
+ protected:
   // Creates a mini-process under |job_|.
-  void CreateMiniProcess(zx::process* process, zx::thread* thread,
-                         zx::channel* command_channel) const {
+  void CreateMiniProcess(zx::process* process, zx::thread* thread, zx::channel* command_channel,
+                         zx::vmar* vmar_out = nullptr) const {
     zx::vmar vmar;
     ASSERT_OK(zx::process::create(job(), kTaskName, kTaskNameLen, 0, process, &vmar));
     ASSERT_OK(zx::thread::create(*process, kTaskName, kTaskNameLen, 0, thread));
@@ -249,7 +251,14 @@ class TestBase : public zxtest::Test, public loop_fixture::RealLoop {
 
     ASSERT_OK(start_mini_process_etc(process->get(), thread->get(), vmar.get(), event.release(),
                                      true, command_channel->reset_and_get_address()));
+    if (vmar_out != nullptr) {
+      *vmar_out = std::move(vmar);
+    }
   }
+
+ private:
+  static constexpr char kTaskName[] = "crashsvc-test";
+  static constexpr uint32_t kTaskNameLen = sizeof(kTaskName) - 1;
 
   // Synchronously creates a process under |job_| that immediately crashes, by trapping or, with
   // |page_fault|, by reading address 0.
@@ -448,6 +457,104 @@ TEST_F(CrashsvcTest, ExceptionHookNotCalledForBacktraceRequests) {
 
   RunLoopUntilIdle();
   EXPECT_EQ(calls, 0);
+}
+
+TEST_F(CrashsvcTest, StalledBacktraceRequestDoesNotBlockHooks) {
+  zx::port port;
+  ASSERT_OK(zx::port::create(0, &port));
+  zx::pager pager;
+  ASSERT_OK(zx::pager::create(0, &pager));
+
+  const size_t page_size = zx_system_get_page_size();
+  constexpr uint64_t kPagerKey = 1;
+  zx::vmo pager_vmo;
+  ASSERT_OK(pager.create_vmo(0, port, kPagerKey, page_size, &pager_vmo));
+  // Ensure any blocked read on crashsvc-backtrace is aborted if an assertion returns early before
+  // |pager.supply_pages| runs, so joining the worker loop during teardown cannot hang.
+  auto detach_pager = fit::defer([&] { pager.detach_vmo(pager_vmo); });
+
+  std::vector<std::string> backtrace_hook_threads;
+  int exception_hook_calls = 0;
+  ASSERT_NO_FATAL_FAILURE(StartCrashsvc(
+      true,
+      [&backtrace_hook_threads](const zx::process& process, std::string_view thread_name) {
+        EXPECT_TRUE(process.is_valid());
+        backtrace_hook_threads.emplace_back(thread_name);
+        return thread_name.starts_with("fxfs-watchdog:");
+      },
+      [&exception_hook_calls](const zx::process& process, const zx_exception_report_t& report) {
+        EXPECT_TRUE(process.is_valid());
+        EXPECT_EQ(report.header.type, ZX_EXCP_FATAL_PAGE_FAULT);
+        exception_hook_calls++;
+        return ExceptionDisposition::kHandoffNoPrint;
+      }));
+
+  // Map an unpopulated read-only pager VMO at offset 0 into a non-watchdog process. elf_search
+  // reads the start of every non-writable offset-0 mapping to probe for ELF headers, stalling the
+  // background backtrace dump on |pager|.
+  zx::process stalled_process;
+  zx::thread stalled_thread;
+  zx::channel stalled_cmd;
+  zx::vmar stalled_vmar;
+  ASSERT_NO_FATAL_FAILURE(
+      CreateMiniProcess(&stalled_process, &stalled_thread, &stalled_cmd, &stalled_vmar));
+  constexpr std::string_view kStalledThread = "system-watchdog";
+  ASSERT_OK(
+      stalled_thread.set_property(ZX_PROP_NAME, kStalledThread.data(), kStalledThread.size()));
+  zx_vaddr_t mapped_addr = 0;
+  ASSERT_OK(stalled_vmar.map(ZX_VM_PERM_READ, 0, pager_vmo, 0, page_size, &mapped_addr));
+
+  ASSERT_OK(mini_process_cmd_send(stalled_cmd.get(), MINIP_CMD_BACKTRACE_REQUEST));
+  zx_port_packet_t packet = {};
+  RunLoopUntil([&] { return port.wait(zx::time::infinite_past(), &packet) == ZX_OK; });
+  ASSERT_EQ(packet.type, ZX_PKT_TYPE_PAGE_REQUEST);
+  ASSERT_EQ(packet.page_request.command, ZX_PAGER_VMO_READ);
+  EXPECT_STATUS(stalled_cmd.wait_one(ZX_CHANNEL_READABLE, zx::time::infinite_past(), nullptr),
+                ZX_ERR_TIMED_OUT);
+
+  // While the first dump is stalled on |pager|, a second non-watchdog backtrace request with the
+  // same unpopulated pager VMO must be skipped rather than queuing behind the stalled dump.
+  zx::process second_process;
+  zx::thread second_thread;
+  zx::channel second_cmd;
+  zx::vmar second_vmar;
+  ASSERT_NO_FATAL_FAILURE(
+      CreateMiniProcess(&second_process, &second_thread, &second_cmd, &second_vmar));
+  constexpr std::string_view kSecondThread = "second-non-watchdog";
+  ASSERT_OK(second_thread.set_property(ZX_PROP_NAME, kSecondThread.data(), kSecondThread.size()));
+  zx_vaddr_t second_mapped_addr = 0;
+  ASSERT_OK(second_vmar.map(ZX_VM_PERM_READ, 0, pager_vmo, 0, page_size, &second_mapped_addr));
+  ASSERT_OK(mini_process_cmd_send(second_cmd.get(), MINIP_CMD_BACKTRACE_REQUEST));
+  RunLoopUntil([&] {
+    return second_cmd.wait_one(ZX_CHANNEL_READABLE, zx::time::infinite_past(), nullptr) == ZX_OK;
+  });
+  ASSERT_OK(mini_process_cmd_read_reply(second_cmd.get(), nullptr));
+
+  // Both storage-watchdog hooks (backtrace_request_hook and exception_hook) must still run
+  // promptly on crashsvc's dispatcher while the first dump remains stalled.
+  ASSERT_NO_FATAL_FAILURE(GenerateBacktraceRequest("fxfs-watchdog:Write-60s"));
+  ASSERT_NO_FATAL_FAILURE(AnalyzeCrash(/*page_fault=*/true));
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(backtrace_hook_threads,
+            (std::vector<std::string>{"system-watchdog", "second-non-watchdog",
+                                      "fxfs-watchdog:Write-60s"}));
+  EXPECT_EQ(exception_hook_calls, 1);
+  EXPECT_EQ(stub_handler().exception_count(), 1);
+  EXPECT_STATUS(stalled_cmd.wait_one(ZX_CHANNEL_READABLE, zx::time::infinite_past(), nullptr),
+                ZX_ERR_TIMED_OUT);
+
+  // Supply a zeroed page so the stalled dump finishes cleanly and clears the in-flight gate.
+  zx::vmo zero_page;
+  ASSERT_OK(zx::vmo::create(page_size, 0, &zero_page));
+  ASSERT_OK(pager.supply_pages(pager_vmo, 0, page_size, zero_page, 0));
+  RunLoopUntil([&] {
+    return stalled_cmd.wait_one(ZX_CHANNEL_READABLE, zx::time::infinite_past(), nullptr) == ZX_OK;
+  });
+  ASSERT_OK(mini_process_cmd_read_reply(stalled_cmd.get(), nullptr));
+
+  ASSERT_NO_FATAL_FAILURE(GenerateBacktraceRequest("after-unblock"));
+  EXPECT_EQ(backtrace_hook_threads.back(), "after-unblock");
 }
 
 constexpr auto kExceptionHandlerTimeout = zx::sec(3);

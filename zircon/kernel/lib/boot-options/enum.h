@@ -49,7 +49,8 @@ inline constexpr auto Enum<FairPlacementAffinity> = [](auto&& Switch) {
   return Switch  //
       .Case("cluster", FairPlacementAffinity::kCluster)
       .Case("idle", FairPlacementAffinity::kIdle)
-      .Case("headroom", FairPlacementAffinity::kHeadroom);
+      .Case("headroom", FairPlacementAffinity::kHeadroom)
+      .Case("queue-time", FairPlacementAffinity::kQueueTime);
 };
 
 template <>
@@ -147,6 +148,15 @@ inline constexpr auto Enum<Arm64AlternateVbar> = [](auto&& Switch) {
       .Case("smccc10", Arm64AlternateVbar::kSmccc10);
 };
 
+template <>
+inline constexpr auto Enum<Arm64Atomics> = [](auto&& Switch) {
+  return Switch  //
+      .Case(Arm64AtomicsName(Arm64Atomics::kAuto), Arm64Atomics::kAuto)
+      .Case(Arm64AtomicsName(Arm64Atomics::kLlsc), Arm64Atomics::kLlsc)
+      .Case(Arm64AtomicsName(Arm64Atomics::kLse), Arm64Atomics::kLse)
+      .Case(Arm64AtomicsName(Arm64Atomics::kLseA55), Arm64Atomics::kLseA55);
+};
+
 #endif  // BOOT_OPTIONS_GENERATOR || defined(__x86_64__)
 
 #if BOOT_OPTIONS_GENERATOR || defined(__x86_64__)
@@ -165,19 +175,19 @@ inline constexpr auto Enum<IntelHwpPolicy> = [](auto&& Switch) {
 
 // Helpers for enum overrides.
 
-template <typename F, typename T>
+template <typename F>
 class EnumEnumerator {
  public:
-  EnumEnumerator(F call, T value) : call_(std::move(call)), value_(std::move(value)) {}
+  explicit EnumEnumerator(F call) : call_(std::move(call)) {}
 
-  constexpr EnumEnumerator& Case(std::string_view name, T value) {
+  template <typename T>
+  constexpr EnumEnumerator& Case(std::string_view name, T /*value*/) {
     call_(name);
     return *this;
   }
 
  private:
   F call_;
-  T value_;
 };
 
 template <typename T>
@@ -203,9 +213,8 @@ class EnumParser {
              static_cast<int>(name_.size()), name_.data(), this);
       printf("WARN: Valid choices are:");
       Enum<T>(EnumEnumerator{[](std::string_view name) {
-                               printf(" %.*s", static_cast<int>(name.size()), name.data());
-                             },
-                             *actual});
+        printf(" %.*s", static_cast<int>(name.size()), name.data());
+      }});
       printf("\n");
     }
     return actual == nullptr;
@@ -250,8 +259,8 @@ class EnumPrinter {
 
 // Deduction guides.
 
-template <typename F, typename T>
-EnumEnumerator(F, T) -> EnumEnumerator<F, T>;
+template <typename F>
+EnumEnumerator(F) -> EnumEnumerator<F>;
 
 template <typename T>
 EnumParser(std::string_view, T*) -> EnumParser<T>;

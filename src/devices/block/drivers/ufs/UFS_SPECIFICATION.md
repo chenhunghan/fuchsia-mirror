@@ -25,7 +25,7 @@ Fuchsia UFS driver.
 
 ## High-Level UFS Overview & Architecture
 
-Universal Flash Storage (UFS, JEDEC UFS 3.1/4.0 section 2) is a
+Universal Flash Storage (UFS, JEDEC UFS 4.0 sections 4 and 5) is a
 high-performance, low-power non-volatile storage standard for mobile and
 embedded systems. Unlike eMMC (which uses a shared, half-duplex parallel bus),
 UFS employs:
@@ -134,7 +134,7 @@ Header Segments (EHS) and data payloads:
 +---------------------------------------------------------------+
 ```
 
-#### Common UPIU Transaction Types (UFS 3.1/4.0 section 10.5.1)
+#### Common UPIU Transaction Types (UFS 4.0 section 10.5, Tables 10.1-10.2)
 
 | Type | Opcode | Direction | Description |
 | :--- | :---: | :---: | :--- |
@@ -220,7 +220,8 @@ health, geometry, and power states:
 ### Task Management Requests
 
 Task management UPIUs (UFS 3.1/4.0 section 10.7.6) are submitted via the UTP
-Task Management Request List (`UTMRD`, UFSHCI 3.0/4.0 section 5.5):
+Task Management Request List (`UTMRL` registers in UFSHCI 3.0/4.0 section 5.5;
+`UTMRD` layout in UFSHCI 3.0 section 6.2.1 / UFSHCI 4.0 section 6.3.1):
 
 - **`ABORT_TASK` (`0x01`)**: Aborts an individual outstanding UTRD transfer
   matching a specific `Task Tag`.
@@ -303,7 +304,7 @@ UFSHCI 3.0/4.0 section 5.6):
 +---------------------+---------+--------------------------------------------------+
 ```
 
-#### Link Startup & Gear Negotiation Sequence (UFS 3.1/4.0 section 7.4)
+#### Link Startup & Gear Negotiation Sequence (UFSHCI 3.0/4.0 sections 7.1.1 and 7.4)
 
 1. Issue `DME_LINKSTARTUP` (`0x16`) and verify `HCS.DP = 1` (Device Present).
 2. Read `PA_ConnectedTxDataLanes` (`0x1561`), `PA_ConnectedRxDataLanes`
@@ -385,8 +386,9 @@ In UFSHCI 3.0 (legacy single doorbell mode), all CPUs share a single 32-slot
 request list (`UTRLBA`) and a single 32-bit doorbell register (`UTRLDBR` at
 offset `0x58`).
 
-UFSHCI 4.0 introduces **Multi-Circular Queue (MCQ, UFSHCI 4.0 section 5.8 &
-6.4)** with independent Submission Queues (SQ) and Completion Queues (CQ):
+UFSHCI 4.0 introduces **Multi-Circular Queue (MCQ, UFSHCI 4.0 sections 4.4,
+5.2.2, 5.9, and 6.2)** with independent Submission Queues (SQ) and Completion
+Queues (CQ):
 
 ```
 +-------------------------------------------------------------------------------+

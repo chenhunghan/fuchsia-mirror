@@ -37,7 +37,7 @@ func TestReadDeviceConfig(t *testing.T) {
 			name:     "Success",
 			jsonData: "[{\"fastboot_sernum\":\"foo\"}]",
 			wantResult: &DeviceConfig{
-				FastbootSerial: "foo",
+				SerialNumber: "foo",
 			},
 		},
 	}

@@ -21,7 +21,6 @@ group("tests") {
     "bin:tests",
     "lib:tests",
     "tests/",
-    "tools:tests",
   ]
 }
 

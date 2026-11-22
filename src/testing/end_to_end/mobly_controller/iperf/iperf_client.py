@@ -4,9 +4,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Blanket ignores to enable mypy in Antlion
-# mypy: disable-error-code="no-untyped-def, attr-defined"
-
 import logging
 import os
 import subprocess
@@ -149,7 +146,7 @@ class IPerfClientOverSsh(IPerfClientBase):
         ssh_provider: SSHProvider,
         test_interface: str | None = None,
         sync_date: bool = True,
-    ):
+    ) -> None:
         self._ssh_provider = ssh_provider
         self._test_interface = test_interface
 

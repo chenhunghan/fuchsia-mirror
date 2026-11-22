@@ -5,13 +5,14 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_ANNOTATION_MAP_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_ANNOTATION_MAP_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <initializer_list>
 #include <map>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "src/developer/forensics/crash_reports/errors.h"
 #include "src/developer/forensics/utils/errors.h"
@@ -79,8 +80,8 @@ class AnnotationMap {
   }
 
   // FIDL annotations.
-  AnnotationMap& Set(const ::fuchsia::feedback::Annotation& annotation) {
-    data_[annotation.key] = annotation.value;
+  AnnotationMap& Set(const fuchsia_feedback::Annotation& annotation) {
+    data_[annotation.key()] = annotation.value();
     return *this;
   }
 
@@ -93,8 +94,8 @@ class AnnotationMap {
   }
 
   // Vectors of FIDL annotations.
-  AnnotationMap& Set(const std::vector<::fuchsia::feedback::Annotation>& annotations) {
-    for (const ::fuchsia::feedback::Annotation& annotation : annotations) {
+  AnnotationMap& Set(const std::vector<fuchsia_feedback::Annotation>& annotations) {
+    for (const fuchsia_feedback::Annotation& annotation : annotations) {
       Set(annotation);
     }
     return *this;

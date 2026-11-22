@@ -6,11 +6,14 @@
 #define SRC_DEVICES_TPM_DRIVERS_TPM_LPC_TPM_LPC_H_
 
 #include <fidl/fuchsia.hardware.tpmimpl/cpp/wire.h>
-#include <fuchsia/hardware/tpmimpl/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/inspect/cpp/inspect.h>
+#include <lib/sync/completion.h>
+
+#include <optional>
 
 #include <ddktl/device.h>
 #include <ddktl/unbind-txn.h>
@@ -26,14 +29,14 @@ namespace tpm::lpc {
 // unused IRQ being available on QEMU.
 class TpmLpc;
 using DeviceType = ddk::Device<TpmLpc, ddk::Messageable<fuchsia_hardware_tpmimpl::TpmImpl>::Mixin>;
-class TpmLpc : public DeviceType, public ddk::TpmImplProtocol<TpmLpc, ddk::base_protocol> {
+class TpmLpc : public DeviceType {
  public:
   explicit TpmLpc(zx_device_t* parent, acpi::Client acpi, fdf::MmioBuffer mmio)
       : DeviceType(parent),
         loop_(&kAsyncLoopConfigNeverAttachToThread),
         acpi_(std::move(acpi)),
         mmio_(std::move(mmio)) {}
-  virtual ~TpmLpc() = default;
+  ~TpmLpc() override;
 
   static zx_status_t Create(void* ctx, zx_device_t* dev);
   zx_status_t Bind(std::unique_ptr<TpmLpc>* dev);
@@ -41,19 +44,19 @@ class TpmLpc : public DeviceType, public ddk::TpmImplProtocol<TpmLpc, ddk::base_
 
   zx::result<> PerformTransfer(uint16_t address, fidl::VectorView<uint8_t>& buf, bool do_write);
 
-  // Setup the TPM FIDL Server.
-  void TpmImplConnectServer(zx::channel server);
-
   // FIDL methods.
   void Read(ReadRequestView request, ReadCompleter::Sync& completer) override;
   void Write(WriteRequestView request, WriteCompleter::Sync& completer) override;
 
  private:
+  void Shutdown();
+
   async::Loop loop_;
   acpi::Client acpi_;
   fdf::MmioBuffer mmio_;
   inspect::Inspector inspect_;
   fbl::Mutex device_lock_;
+  std::optional<component::OutgoingDirectory> outgoing_;
 };
 
 }  // namespace tpm::lpc

@@ -9,6 +9,8 @@
 
 #include <stdint.h>
 
+#include <string_view>
+
 // This file provides declarations for special types used by arm64.inc options.
 // See kernel/lib/boot-options/README.md for full details and constraints.
 // It should avoid other kernel header dependencies.
@@ -30,8 +32,30 @@ enum class Arm64AlternateVbar : uint8_t {
   kSmccc10,
 };
 
+enum class Arm64Atomics : uint8_t {
+  kAuto,
+  kLlsc,
+  kLse,
+  kLseA55,
+};
+
+constexpr std::string_view Arm64AtomicsName(Arm64Atomics value) {
+  switch (value) {
+    case Arm64Atomics::kAuto:
+      return "auto";
+    case Arm64Atomics::kLlsc:
+      return "llsc";
+    case Arm64Atomics::kLse:
+      return "lse";
+    case Arm64Atomics::kLseA55:
+      return "lse-a55";
+  }
+  return "unknown";
+}
+
 #define ARM64_OPTION_TYPES(OPTION_TYPE) \
   OPTION_TYPE(Arm64PhysPsciReset);      \
-  OPTION_TYPE(Arm64AlternateVbar);
+  OPTION_TYPE(Arm64AlternateVbar);      \
+  OPTION_TYPE(Arm64Atomics);
 
 #endif  // ZIRCON_KERNEL_LIB_BOOT_OPTIONS_INCLUDE_LIB_BOOT_OPTIONS_ARM64_H_

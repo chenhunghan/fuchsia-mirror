@@ -33,6 +33,7 @@ zx::result<> FakeBusDriver::Start(fdf::DriverContext context) {
   }
 
   upstream_.ConfigureDownstreamDevices();
+  upstream_.PublishDownstream();
   return zx::ok();
 }
 

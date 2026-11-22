@@ -23,25 +23,25 @@ namespace test = ::llcpptest_flexible_test;
 // the transport maximum in those cases.
 namespace {
 
-// The only difference between StrictUnboundedXUnion and StrictBoundedXUnion is that
-// StrictBoundedXUnion limits the vector payload length to 200 bytes. Therefore, by observing that
-// sizeof(fidl::WireResult<test::ReceiveStrictEnvelope::GetUnboundedXUnion>) is less than 200, we
+// The only difference between StrictUnboundedUnion and StrictBoundedUnion is that
+// StrictBoundedUnion limits the vector payload length to 200 bytes. Therefore, by observing that
+// sizeof(fidl::WireResult<test::ReceiveStrictEnvelope::GetUnboundedUnion>) is less than 200, we
 // can guarantee that the response storage is not inlined. Rather, it is allocated on the heap.
-static_assert(sizeof(fidl::WireResult<test::ReceiveStrictEnvelope::GetUnboundedXUnion>) < 200,
-              "Result of GetUnboundedXUnion should be stored as a pointer to heap allocation");
+static_assert(sizeof(fidl::WireResult<test::ReceiveStrictEnvelope::GetUnboundedUnion>) < 200,
+              "Result of GetUnboundedUnion should be stored as a pointer to heap allocation");
 
-// GetBoundedXUnion should be inlined, because it is smaller than 512, but bigger than 200, making
+// GetBoundedUnion should be inlined, because it is smaller than 512, but bigger than 200, making
 // the entire ResultOf object bigger than 200. The assertion triggers when the ResultOf object size
-// falls below 200, at which point we know it is physically incapable of holding a GetBoundedXUnion
+// falls below 200, at which point we know it is physically incapable of holding a GetBoundedUnion
 // inline, so probably used heap allocation. Here we are trying to test this without plumbing extra
 // flags which themselves need to be tested.
-static_assert(sizeof(fidl::WireResult<test::ReceiveStrictEnvelope::GetBoundedXUnion>) > 200,
-              "Result of GetBoundedXUnion should be inlined");
+static_assert(sizeof(fidl::WireResult<test::ReceiveStrictEnvelope::GetBoundedUnion>) > 200,
+              "Result of GetBoundedUnion should be inlined");
 
-// Implement a special server that returns xunion/tables with unknown ordinals.
+// Implement a special server that returns union/tables with unknown ordinals.
 // This is impossible to do when using the bindings normally. Here we use a normal server to
-// set a tag in the response xunion corresponding to the FIDL call, and intercept and rewrite
-// the xunion to an unknown ordinal using a special fidl::Transaction implementation.
+// set a tag in the response union corresponding to the FIDL call, and intercept and rewrite
+// the union to an unknown ordinal using a special fidl::Transaction implementation.
 class RewriteTransaction : public fidl::Transaction {
  public:
   std::unique_ptr<Transaction> TakeOwnership() override {
@@ -74,8 +74,8 @@ class RewriteTransaction : public fidl::Transaction {
 
     EXPECT_GE(indicator_msg_bytes.size(),
               sizeof(fidl::internal::TransactionalResponse<
-                     test::ReceiveFlexibleEnvelope::GetUnknownXUnionMoreHandles>));
-    // Determine if |indicator_msg| has a xunion or a table, by inspecting the first few bytes.
+                     test::ReceiveFlexibleEnvelope::GetUnknownUnionMoreHandles>));
+    // Determine if |indicator_msg| has a union or a table, by inspecting the first few bytes.
     auto maybe_vector = reinterpret_cast<const fidl_vector_t*>(indicator_msg_bytes.data() +
                                                                sizeof(fidl_message_header_t));
     if ((maybe_vector->count == 1 || maybe_vector->count == 2) &&
@@ -128,17 +128,17 @@ class RewriteTransaction : public fidl::Transaction {
       // Manually craft the actual response which has an unknown ordinal
       constexpr uint32_t kBadOrdinal = 0x8badf00d;
       static_assert(kBadOrdinal !=
-                    static_cast<uint32_t>(test::wire::FlexibleXUnion::Tag::kWantMoreThan30Bytes));
+                    static_cast<uint32_t>(test::wire::FlexibleUnion::Tag::kWantMoreThan30Bytes));
       static_assert(kBadOrdinal !=
-                    static_cast<uint32_t>(test::wire::FlexibleXUnion::Tag::kWantMoreThan4Handles));
+                    static_cast<uint32_t>(test::wire::FlexibleUnion::Tag::kWantMoreThan4Handles));
       auto real_response =
           reinterpret_cast<fidl_union_t*>(&real_msg_bytes[sizeof(fidl_message_header_t)]);
       real_response->tag = kBadOrdinal;
 
       auto indicator_response = reinterpret_cast<const fidl::internal::TransactionalResponse<
-          test::ReceiveFlexibleEnvelope::GetUnknownXUnionMoreHandles>*>(indicator_msg_bytes.data());
+          test::ReceiveFlexibleEnvelope::GetUnknownUnionMoreHandles>*>(indicator_msg_bytes.data());
       switch (indicator_response->body.xu.Which()) {
-        case test::wire::FlexibleXUnion::Tag::kWantMoreThan30Bytes: {
+        case test::wire::FlexibleUnion::Tag::kWantMoreThan30Bytes: {
           // Create a message with more bytes than expected
           constexpr uint32_t kUnknownBytes = 5000;
           constexpr uint32_t kUnknownHandles = 0;
@@ -152,7 +152,7 @@ class RewriteTransaction : public fidl::Transaction {
                  kUnknownBytes);
           break;
         }
-        case test::wire::FlexibleXUnion::Tag::kWantMoreThan4Handles: {
+        case test::wire::FlexibleUnion::Tag::kWantMoreThan4Handles: {
           // Create a message with more handles than expected
           constexpr uint32_t kUnknownBytes = 16;
           constexpr uint32_t kUnknownHandles = ZX_CHANNEL_MAX_MSG_HANDLES;
@@ -199,17 +199,17 @@ class RewriteTransaction : public fidl::Transaction {
 
 class Server : fidl::WireServer<test::ReceiveFlexibleEnvelope>, private async_wait_t {
  public:
-  void GetUnknownXUnionMoreBytes(GetUnknownXUnionMoreBytesCompleter::Sync& completer) override {
-    test::wire::FlexibleXUnion xunion;
+  void GetUnknownUnionMoreBytes(GetUnknownUnionMoreBytesCompleter::Sync& completer) override {
+    test::wire::FlexibleUnion flexible_union;
     fidl::Array<uint8_t, 30> array = {};
-    completer.Reply(test::wire::FlexibleXUnion::WithWantMoreThan30Bytes(
+    completer.Reply(test::wire::FlexibleUnion::WithWantMoreThan30Bytes(
         fidl::ObjectView<fidl::Array<uint8_t, 30>>::FromExternal(&array)));
   }
 
-  void GetUnknownXUnionMoreHandles(GetUnknownXUnionMoreHandlesCompleter::Sync& completer) override {
-    test::wire::FlexibleXUnion xunion;
+  void GetUnknownUnionMoreHandles(GetUnknownUnionMoreHandlesCompleter::Sync& completer) override {
+    test::wire::FlexibleUnion flexible_union;
     fidl::Array<zx::handle, 4> array = {};
-    completer.Reply(test::wire::FlexibleXUnion::WithWantMoreThan4Handles(
+    completer.Reply(test::wire::FlexibleUnion::WithWantMoreThan4Handles(
         fidl::ObjectView<fidl::Array<zx::handle, 4>>::FromExternal(&array)));
   }
 
@@ -320,15 +320,16 @@ class FlexibleEnvelopeTest : public ::testing::Test {
   fidl::ClientEnd<test::ReceiveFlexibleEnvelope> client_end_;
 };
 
-static_assert(fidl::internal::ClampedMessageSize<
-                  fidl::internal::TransactionalResponse<
-                      test::ReceiveFlexibleEnvelope::GetUnknownXUnionMoreBytes>,
-                  fidl::MessageDirection::kReceiving>() == ZX_CHANNEL_MAX_MSG_BYTES,
-              "Cannot assume any limit on byte size apart from the channel limit");
+static_assert(
+    fidl::internal::ClampedMessageSize<fidl::internal::TransactionalResponse<
+                                           test::ReceiveFlexibleEnvelope::GetUnknownUnionMoreBytes>,
+                                       fidl::MessageDirection::kReceiving>() ==
+        ZX_CHANNEL_MAX_MSG_BYTES,
+    "Cannot assume any limit on byte size apart from the channel limit");
 
 TEST_F(FlexibleEnvelopeTest, ReceiveUnknownVariantWithMoreBytes) {
   auto client = TakeClient();
-  auto result = client->GetUnknownXUnionMoreBytes();
+  auto result = client->GetUnknownUnionMoreBytes();
   EXPECT_TRUE(result.ok());
   ASSERT_EQ(result.status(), ZX_OK) << zx_status_get_string(result.status());
   ASSERT_TRUE(result.value().xu.IsUnknown());
@@ -336,13 +337,13 @@ TEST_F(FlexibleEnvelopeTest, ReceiveUnknownVariantWithMoreBytes) {
 
 static_assert(fidl::internal::ClampedHandleCount<
                   fidl::internal::TransactionalResponse<
-                      test::ReceiveFlexibleEnvelope::GetUnknownXUnionMoreHandles>,
+                      test::ReceiveFlexibleEnvelope::GetUnknownUnionMoreHandles>,
                   fidl::MessageDirection::kReceiving>() == ZX_CHANNEL_MAX_MSG_HANDLES,
               "Cannot assume any limit on handle count apart from the channel limit");
 
 TEST_F(FlexibleEnvelopeTest, ReceiveUnknownVariantWithMoreHandles) {
   auto client = TakeClient();
-  auto result = client->GetUnknownXUnionMoreHandles();
+  auto result = client->GetUnknownUnionMoreHandles();
   EXPECT_TRUE(result.ok());
   ASSERT_EQ(result.status(), ZX_OK) << zx_status_get_string(result.status());
   ASSERT_TRUE(result.value().xu.IsUnknown());
@@ -394,9 +395,9 @@ class FlexibleEnvelopeEventTest : public ::testing::Test {
 
   static constexpr uint32_t kBadOrdinal = 0x8badf00d;
   static_assert(kBadOrdinal !=
-                static_cast<uint32_t>(test::wire::FlexibleXUnion::Tag::kWantMoreThan30Bytes));
+                static_cast<uint32_t>(test::wire::FlexibleUnion::Tag::kWantMoreThan30Bytes));
   static_assert(kBadOrdinal !=
-                static_cast<uint32_t>(test::wire::FlexibleXUnion::Tag::kWantMoreThan4Handles));
+                static_cast<uint32_t>(test::wire::FlexibleUnion::Tag::kWantMoreThan4Handles));
 
  private:
   fidl::ClientEnd<test::ReceiveFlexibleEnvelope> client_end_;
@@ -445,16 +446,16 @@ struct MessageStorage {
 
 static_assert(
     fidl::internal::ClampedMessageSize<
-        fidl::internal::TransactionalEvent<test::ReceiveFlexibleEnvelope::OnUnknownXUnionMoreBytes>,
+        fidl::internal::TransactionalEvent<test::ReceiveFlexibleEnvelope::OnUnknownUnionMoreBytes>,
         fidl::MessageDirection::kReceiving>() == ZX_CHANNEL_MAX_MSG_BYTES,
     "Cannot assume any limit on byte size apart from the channel limit");
 
-TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownXUnionFieldWithMoreBytes) {
+TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownUnionFieldWithMoreBytes) {
   MessageStorage storage;
-  storage.Init<fidl::internal::TransactionalEvent<
-      test::ReceiveFlexibleEnvelope::OnUnknownXUnionMoreBytes>>();
+  storage.Init<
+      fidl::internal::TransactionalEvent<test::ReceiveFlexibleEnvelope::OnUnknownUnionMoreBytes>>();
 
-  // Manually craft a xunion response with an unknown ordinal that is larger
+  // Manually craft a union response with an unknown ordinal that is larger
   // than expected.
   auto* real_response = storage.Build<fidl_union_t>();
   real_response->tag = kBadOrdinal;
@@ -473,8 +474,8 @@ TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownXUnionFieldWithMoreBytes) {
    public:
     void NotImplemented_(const std::string& name) final { ADD_FAILURE() << "Unexpected " << name; }
 
-    void OnUnknownXUnionMoreBytes(
-        fidl::WireEvent<test::ReceiveFlexibleEnvelope::OnUnknownXUnionMoreBytes>* event) final {
+    void OnUnknownUnionMoreBytes(
+        fidl::WireEvent<test::ReceiveFlexibleEnvelope::OnUnknownUnionMoreBytes>* event) final {
       EXPECT_FALSE(event->is_want_more_than_30_bytes());
       EXPECT_FALSE(event->is_want_more_than_4_handles());
       EXPECT_TRUE(event->IsUnknown());
@@ -491,16 +492,16 @@ TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownXUnionFieldWithMoreBytes) {
 
 static_assert(fidl::internal::ClampedHandleCount<
                   fidl::internal::TransactionalEvent<
-                      test::ReceiveFlexibleEnvelope::OnUnknownXUnionMoreHandles>,
+                      test::ReceiveFlexibleEnvelope::OnUnknownUnionMoreHandles>,
                   fidl::MessageDirection::kReceiving>() == ZX_CHANNEL_MAX_MSG_HANDLES,
               "Cannot assume any limit on handle count apart from the channel limit");
 
-TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownXUnionFieldWithMoreHandles) {
+TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownUnionFieldWithMoreHandles) {
   MessageStorage storage;
   storage.Init<fidl::internal::TransactionalEvent<
-      test::ReceiveFlexibleEnvelope::OnUnknownXUnionMoreHandles>>();
+      test::ReceiveFlexibleEnvelope::OnUnknownUnionMoreHandles>>();
 
-  // Manually craft a xunion response with an unknown ordinal has more handles
+  // Manually craft a union response with an unknown ordinal has more handles
   // than expected.
   auto* real_response = storage.Build<fidl_union_t>();
   real_response->tag = kBadOrdinal;
@@ -520,8 +521,8 @@ TEST_F(FlexibleEnvelopeEventTest, ReceiveUnknownXUnionFieldWithMoreHandles) {
    public:
     void NotImplemented_(const std::string& name) final { ADD_FAILURE() << "Unexpected " << name; }
 
-    void OnUnknownXUnionMoreHandles(
-        fidl::WireEvent<test::ReceiveFlexibleEnvelope::OnUnknownXUnionMoreHandles>* event) final {
+    void OnUnknownUnionMoreHandles(
+        fidl::WireEvent<test::ReceiveFlexibleEnvelope::OnUnknownUnionMoreHandles>* event) final {
       EXPECT_FALSE(event->is_want_more_than_30_bytes());
       EXPECT_FALSE(event->is_want_more_than_4_handles());
       EXPECT_TRUE(event->IsUnknown());

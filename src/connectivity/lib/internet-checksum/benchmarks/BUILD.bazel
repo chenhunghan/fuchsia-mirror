@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "benchmarks-bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "internet_checksum_benchmarks",
+    edition = "2024",
+    deps = [
+        "//src/connectivity/lib/internet-checksum",
+        "//src/developer/fuchsia-criterion",
+    ],
+)
+
+fx_packaged_binary(
+    name = "benchmarks-bin_packaged",
+    testonly = True,
+    binary = ":benchmarks-bin",
+    binary_name = "internet_checksum_benchmarks",
+)
+
+fx_component_manifest(
+    name = "benchmarks-manifest",
+    testonly = True,
+    component_name = "internet_checksum_benchmarks",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/benchmarks.cml",
+)
+
+fx_component(
+    name = "benchmarks-component",
+    testonly = True,
+    compiled_manifest = ":benchmarks-manifest",
+    deps = [":benchmarks-bin_packaged"],
+)
+
+fx_package(
+    name = "benchmarks-pkg",
+    package_name = "internet_checksum_benchmarks",
+    testonly = True,
+    components = [":benchmarks-component"],
+)

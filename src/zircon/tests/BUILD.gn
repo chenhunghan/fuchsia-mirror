@@ -16,8 +16,6 @@ group("tests") {
     "processor:tests",
     "restricted-mode-shared:tests",
     "status:tests",
-    "stress-tests:tests",
-    "vmo:tests",
     "x86-umip:tests",
   ]
 }

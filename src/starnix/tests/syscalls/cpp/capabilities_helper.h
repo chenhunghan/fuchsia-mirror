@@ -4,6 +4,15 @@
 #ifndef SRC_STARNIX_TESTS_SYSCALLS_CPP_CAPABILITIES_HELPER_H_
 #define SRC_STARNIX_TESTS_SYSCALLS_CPP_CAPABILITIES_HELPER_H_
 
+#include <lib/fit/result.h>
+#include <stdint.h>
+#include <sys/types.h>
+
+#include <filesystem>
+#include <string>
+
+#include <gtest/gtest.h>
+
 namespace test_helper {
 
 // Drops all capabilities from the effective, permitted, and inheritable sets.
@@ -60,8 +69,28 @@ void SetCapabilityInheritable(int cap);
 // Sets a capability in the thread's ambient set.
 void SetCapabilityAmbient(int cap);
 
-// Sets a capability in the thread's bounding set.
-void SetCapabilityBounding(int cap);
+// Sets v2 `security.capability` with the given `permitted` and `inheritable` capability bitmasks
+// (and `VFS_CAP_FLAGS_EFFECTIVE` if `effective` is true) on `path`, returning the `setxattr`
+// result.
+int SetFileCapabilitiesV2(const std::filesystem::path& path, uint64_t permitted,
+                          uint64_t inheritable = 0, bool effective = true);
+
+// Attempts to set or unset a capability, returning `fit::ok()` on success or `fit::error(errno)`
+// on failure.
+fit::result<int> TrySetCapabilityEffective(int cap);
+fit::result<int> TrySetCapabilityPermitted(int cap);
+fit::result<int> TryUnsetCapabilityPermitted(int cap);
+fit::result<int> TrySetCapabilityAmbient(int cap);
+
+// Reads the maximum capability number supported by the running kernel from
+// `/proc/sys/kernel/cap_last_cap`, returning `fit::error(errno)` on read failure or
+// `fit::error(EINVAL)` if the file cannot be parsed.
+fit::result<int, int> GetLastCap();
+
+// Switches real, effective, and saved-set UIDs and GIDs to `uid` and `gid`, clearing any attached
+// supplementary groups and updating `PR_SET_KEEPCAPS` to match `keep_caps`.
+[[nodiscard]] ::testing::AssertionResult SwitchToUnprivilegedUser(uid_t uid, gid_t gid,
+                                                                  bool keep_caps = false);
 
 }  // namespace test_helper
 

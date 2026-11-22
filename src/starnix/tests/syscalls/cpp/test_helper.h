@@ -6,12 +6,16 @@
 
 #include <lib/fit/function.h>
 #include <lib/fit/result.h>
+#include <signal.h>
 #include <stdint.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <array>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -103,6 +107,11 @@ class ForkHelper {
   // the ForkHelper is destroyed.
   void KillChildrenOnDestroy();
 
+  // Sends SIGKILL to any remaining forked children, waits for all children, and returns
+  // testing::AssertionSuccess() if any already-exited children exited as expected and all
+  // remaining children were terminated by SIGKILL.
+  testing::AssertionResult KillChildren();
+
  private:
   std::vector<pid_t> child_pids_;
   bool wait_for_all_children_ = true;
@@ -139,14 +148,27 @@ class CloneHelper {
   static int doNothing(void *);
 
  private:
-  uint8_t *_childStack;
-  uint8_t *_childStackBegin;
+  struct ClonedAction {
+    std::function<void()> action;
+    bool flush_stdio = true;
+  };
+  static int LambdaWrapper(void *action_ptr);
+
+  uint8_t *_childStack = nullptr;
+  uint8_t *_childStackBegin = nullptr;
   static constexpr size_t _childStackSize = 0x5000;
+  std::vector<std::unique_ptr<ClonedAction>> actions_;
 };
 
 // Helper class to modify signal masks of processes
 class SignalMaskHelper {
  public:
+  SignalMaskHelper();
+  ~SignalMaskHelper();
+
+  SignalMaskHelper(const SignalMaskHelper &) = delete;
+  SignalMaskHelper &operator=(const SignalMaskHelper &) = delete;
+
   // Blocks the specified signal and saves the original signal mask
   // to _sigmaskCopy.
   void blockSignal(int signal);
@@ -161,8 +183,8 @@ class SignalMaskHelper {
   void restoreSigmask();
 
  private:
-  sigset_t _sigset;
   sigset_t _sigmaskCopy;
+  bool sigmask_saved_ = false;
 };
 
 class ScopedTempFD {
@@ -217,18 +239,83 @@ class ScopedTempSymlink {
 
 inline constexpr char kPerfEventParanoidPath[] = "/proc/sys/kernel/perf_event_paranoid";
 
-// Sets `perf_event_paranoid` to `value` while in scope, then restores the previous value.
-class ScopedPerfEventParanoid {
+// Saves the current contents of `path` (optionally writing `value` to `path`) and restores the
+// previous contents when destroyed.
+class ScopedSysctl {
  public:
-  explicit ScopedPerfEventParanoid(int value);
-  ~ScopedPerfEventParanoid();
+  // Sets `/proc/sys/kernel/perf_event_paranoid` to `value` while in scope, then restores the
+  // previous value.
+  static fit::result<int, ScopedSysctl> PerfEventParanoid(int value);
 
-  ScopedPerfEventParanoid(const ScopedPerfEventParanoid &) = delete;
-  ScopedPerfEventParanoid &operator=(const ScopedPerfEventParanoid &) = delete;
+  // Reads and saves the current contents of `path` without modifying it.
+  static fit::result<int, ScopedSysctl> Create(std::string path);
+
+  // Saves the current contents of `path` and writes `value`.
+  static fit::result<int, ScopedSysctl> Create(std::string path, std::string_view value);
+
+  ScopedSysctl() = default;
+  ~ScopedSysctl();
+
+  ScopedSysctl(const ScopedSysctl &) = delete;
+  ScopedSysctl &operator=(const ScopedSysctl &) = delete;
+  ScopedSysctl(ScopedSysctl &&other) noexcept;
+  ScopedSysctl &operator=(ScopedSysctl &&other) noexcept;
+
+  bool is_valid() const { return restore_; }
+  explicit operator bool() const { return is_valid(); }
+
+  // Restores the saved contents of `path` immediately if still active.
+  void Restore();
 
  private:
-  bool restore_ = false;
+  std::string path_;
   std::string previous_value_;
+  bool restore_ = false;
+};
+
+// Installs a signal action for `signum` and restores the previous action on destruction.
+class ScopedSigAction {
+ public:
+  ScopedSigAction(int signum, const struct sigaction &act);
+  ScopedSigAction(int signum, sighandler_t handler, int flags = 0);
+  ScopedSigAction(int signum, void (*sigaction_handler)(int, siginfo_t *, void *), int flags = 0);
+  ~ScopedSigAction();
+
+  ScopedSigAction(const ScopedSigAction &) = delete;
+  ScopedSigAction &operator=(const ScopedSigAction &) = delete;
+
+ private:
+  int signum_ = 0;
+  struct sigaction oldact_ = {};
+  bool active_ = false;
+};
+
+// RAII container for a pair of connected sockets created with `socketpair()`.
+class ScopedSocketPair {
+ public:
+  explicit ScopedSocketPair(int type = SOCK_STREAM);
+  static fit::result<int, ScopedSocketPair> Create(int domain, int type, int protocol = 0);
+
+  ScopedSocketPair(ScopedSocketPair &&) noexcept = default;
+  ScopedSocketPair &operator=(ScopedSocketPair &&) noexcept = default;
+  ScopedSocketPair(const ScopedSocketPair &) = delete;
+  ScopedSocketPair &operator=(const ScopedSocketPair &) = delete;
+
+  bool is_valid() const { return fds_[0].is_valid() && fds_[1].is_valid(); }
+  explicit operator bool() const { return is_valid(); }
+
+  int client_fd() const { return fds_[0].get(); }
+  int server_fd() const { return fds_[1].get(); }
+  fbl::unique_fd &operator[](size_t i) { return fds_.at(i); }
+  const fbl::unique_fd &operator[](size_t i) const { return fds_.at(i); }
+
+  auto begin() const { return fds_.begin(); }
+  auto end() const { return fds_.end(); }
+
+ private:
+  ScopedSocketPair(fbl::unique_fd fd0, fbl::unique_fd fd1) : fds_{std::move(fd0), std::move(fd1)} {}
+
+  std::array<fbl::unique_fd, 2> fds_;
 };
 
 #define HANDLE_EINTR(x)                                     \
@@ -266,7 +353,9 @@ struct MemoryMapping {
 };
 
 struct MemoryMappingExt : public MemoryMapping {
-  size_t rss;
+  size_t rss = 0;
+  size_t pss = 0;
+  size_t locked = 0;
   std::vector<std::string> vm_flags;
 
  public:
@@ -409,6 +498,7 @@ class ScopedMMap {
     return fit::ok(ScopedMMap(mapping, length));
   }
 
+  ScopedMMap() = default;
   ScopedMMap(const ScopedMMap &) = delete;
   ScopedMMap &operator=(const ScopedMMap &) = delete;
 
@@ -419,10 +509,13 @@ class ScopedMMap {
   ~ScopedMMap() { Unmap(); }
 
   ScopedMMap &operator=(ScopedMMap &&other) noexcept {
-    Unmap();
-    mapping_ = other.mapping_;
-    length_ = other.length_;
-    other.mapping_ = MAP_FAILED;
+    if (this != &other) {
+      Unmap();
+      mapping_ = other.mapping_;
+      length_ = other.length_;
+      other.mapping_ = MAP_FAILED;
+      other.length_ = 0;
+    }
     return *this;
   }
 
@@ -430,6 +523,7 @@ class ScopedMMap {
     if (is_valid()) {
       munmap(mapping_, length_);
       mapping_ = MAP_FAILED;
+      length_ = 0;
     }
   }
 
@@ -442,8 +536,8 @@ class ScopedMMap {
  private:
   explicit ScopedMMap(void *mapping, size_t length) : mapping_(mapping), length_(length) {}
 
-  void *mapping_;
-  size_t length_;
+  void *mapping_ = MAP_FAILED;
+  size_t length_ = 0;
 };
 
 // An RAII class that handles a mount. The container will ensure the
@@ -474,7 +568,10 @@ class ScopedMount {
   bool is_mounted_ = false;
 };
 
-std::optional<size_t> parse_field_in_kb(std::string_view value);
+// Reads `status_path` (e.g., `/proc/self/status`) and returns the value in KiB for `field_name`
+// (without trailing `:`).
+std::optional<size_t> GetStatusFieldInKb(const std::string &status_path,
+                                         std::string_view field_name);
 
 fit::result<int> SetCasefold(const std::string &path, bool enable = true);
 
@@ -521,9 +618,6 @@ std::string RandomHexString(size_t length);
 // Returns true if running with sysadmin capabilities.
 bool HasSysAdmin();
 
-// Returns true if running with the given capability.
-bool HasCapability(uint32_t cap);
-
 // Returns true if running on Starnix.  This is likely only necessary when there are known bugs.
 bool IsStarnix();
 
@@ -556,8 +650,9 @@ testing::AssertionResult WaitUntilZombie(pid_t target);
 // Extracts the task state (R, S, T, Z, etc.) from the contents of /proc/<pid>/task/<tid>/stat.
 std::optional<std::string_view> GetTaskState(std::string_view stat);
 
-// Loop until the target task's process state in /proc/<pid>/task/<tid>/stat satisfies the given
-// predicate function. The string passed to the predicate is the task state (R, S, T, Z, etc.).
+// Loop until the target task's process state in /proc/<pid>/stat (when pid == tid) or
+// /proc/<pid>/task/<tid>/stat satisfies the given predicate function. The string passed to the
+// predicate is the task state (R, S, T, Z, etc.).
 testing::AssertionResult WaitForTaskState(pid_t pid, pid_t tid,
                                           fit::function<bool(std::string_view)> predicate);
 

@@ -28,12 +28,12 @@ fidl_library(
         "//sdk/fidl/fuchsia.component",
         "//sdk/fidl/fuchsia.component.decl",
         "//sdk/fidl/fuchsia.component.runner",
-        "//sdk/fidl/fuchsia.component.sandbox",
         "//sdk/fidl/fuchsia.data",
         "//sdk/fidl/fuchsia.device.fs",
         "//sdk/fidl/fuchsia.io",
         "//sdk/fidl/fuchsia.logger",
         "//sdk/fidl/fuchsia.power.broker",
         "//sdk/fidl/fuchsia.url",
+        "//zircon/vdso/zx",
     ],
 )

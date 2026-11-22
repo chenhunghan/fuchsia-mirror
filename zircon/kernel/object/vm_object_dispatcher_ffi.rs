@@ -141,35 +141,3 @@ pub unsafe extern "C" fn rust_vm_object_dispatcher_set_name(
     let name_bytes = unsafe { zr::slice_from_raw_parts(name.cast(), len) };
     Status::result_into_raw(disp.set_name(name_bytes))
 }
-
-/// Creates a child VMO from C++.
-///
-/// # Safety
-///
-/// `out_child_vmo` must point to valid uninitialized memory for `RefPtr<VmObject>`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_vm_object_dispatcher_create_child(
-    disp: &VmObjectDispatcher,
-    options: u32,
-    offset: u64,
-    size: u64,
-    copy_name: bool,
-    out_child_vmo: *mut MaybeUninit<RefPtr<VmObject>>,
-) -> zx_status_t {
-    match disp.create_child(options, offset, size, copy_name) {
-        Ok(child_vmo) => {
-            // SAFETY: Caller guarantees `out_child_vmo` points to valid uninitialized memory.
-            unsafe {
-                (*out_child_vmo).write(child_vmo);
-            }
-            ZX_OK
-        }
-        Err(status) => status.into_raw(),
-    }
-}
-
-/// Returns the stream size of `disp` from C++.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_vm_object_dispatcher_get_stream_size(disp: &VmObjectDispatcher) -> u64 {
-    disp.get_stream_size()
-}

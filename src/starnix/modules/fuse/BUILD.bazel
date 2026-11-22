@@ -25,7 +25,6 @@ rustc_library(
         "//src/starnix/lib/starnix_syscalls",
         "//src/starnix/lib/starnix_types",
         "//src/starnix/lib/starnix_uapi",
-        "//src/starnix/lib/syncio",
         "//third_party/rust_crates/vendor:bitflags",
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:zerocopy",

@@ -15,6 +15,7 @@
 #include <kernel/mp.h>
 #include <kernel/mutex.h>
 #include <kernel/spinlock.h>
+#include <kernel/thread.h>
 #include <ktl/atomic.h>
 #include <ktl/bit.h>
 #include <lockdep/guard.h>

@@ -1,4 +1,4 @@
-# Driver Manifest Language (DML) Reference
+# Driver Manifest Language (DML) reference
 
 This document provides a comprehensive reference for the **Driver Manifest Language (DML)** in
 Fuchsia's [Driver Framework v2 (DFv2)][dfv2].
@@ -32,7 +32,7 @@ The official schema for DML manifests is checked in at
 
 ---
 
-## 2. Driver Manifest vs Board Manifest
+## 2. Driver manifest vs board manifest
 
 DML supports two categories of manifests:
 
@@ -46,9 +46,9 @@ DML supports two categories of manifests:
 
 ---
 
-## 3. Syntax Reference
+## 3. Syntax reference
 
-### 3.1 Top-Level Properties
+### 3.1 Top-level properties
 
 ```json5
 {
@@ -92,7 +92,7 @@ DML supports two categories of manifests:
 
 ---
 
-### 3.2 The `program` Section
+### 3.2 The program section
 
 The `program` section defines driver execution parameters and bind rules for standalone (non-composite) drivers.
 
@@ -103,10 +103,10 @@ The `program` section defines driver execution parameters and bind rules for sta
 | `compat` | string | Path to DFv1 compatibility driver shared library (e.g. `"driver/sample_compat.so"`). |
 | `colocate` | string or boolean | Whether to colocate the driver in its parent driver host (`"true"` or `true`). |
 | `default_dispatcher_opts` | array of string | Options for the driver's default dispatcher (e.g. `["allow_sync_calls"]`). |
-| `bind` / `requirements` | object | Structured bind block for standalone drivers (see [Hardware Bus Blocks](#4-hardware-bus-blocks)). Note: string bind paths are not allowed in DML. |
+| `bind` / `requirements` | object | Structured bind block for standalone drivers (see [Hardware bus blocks](#4-hardware-bus-blocks)). Note: string bind paths are not allowed in DML. |
 | `driver_name` | string | Driver name override (primarily used in board manifests). |
 
-#### Example: Standalone Driver `program` Block
+#### Example: Standalone driver program block
 
 ```json5
 program: {
@@ -126,7 +126,7 @@ program: {
 
 ---
 
-### 3.3 The `use` Section
+### 3.3 The use section
 
 The `use` section serves a dual purpose:
 
@@ -143,9 +143,9 @@ The `use` section serves a dual purpose:
 | `availability` | string | `"required"` (default) or `"optional"`. Generates `optional parent "<name>"` in bind rules. |
 | `transport` | string | Service transport: `"Zircon"`, `"Driver"`, or `"Banjo"`. |
 | `generate_bind_rule` | boolean | Defaults to `true`. If set to `false`, the capability is consumed via CML without generating a composite parent bind node. |
-| `bind` / `requirements` | object | Inline bind rules for this parent node (see [Hardware Bus Blocks](#4-hardware-bus-blocks)). |
+| `bind` / `requirements` | object | Inline bind rules for this parent node (see [Hardware bus blocks](#4-hardware-bus-blocks)). |
 
-#### Special Handling for Initialization Steps
+#### Special handling for initialization steps
 
 Services representing platform init steps (such as `fuchsia.gpio.Init` and `fuchsia.pwm.Init`) are automatically detected:
 
@@ -154,7 +154,7 @@ Services representing platform init steps (such as `fuchsia.gpio.Init` and `fuch
 
 ---
 
-### 3.4 The `capabilities` and `expose` Sections
+### 3.4 The capabilities and expose sections
 
 #### Capabilities
 
@@ -213,11 +213,11 @@ expose: [
 
 ---
 
-### 3.5 Board Manifest Top-Level Sections
+### 3.5 Board manifest top-level sections
 
 Board manifests (compiled with `dmlc compile-board`) configure the platform bus and topology:
 
-#### `children`
+#### children
 
 Declares devices published to the platform bus:
 
@@ -237,7 +237,7 @@ children: [
 ]
 ```
 
-#### `offer`
+#### offer
 
 Routes capabilities between parent controllers and child drivers with hardware constraints:
 
@@ -256,7 +256,7 @@ offer: [
 ]
 ```
 
-##### Userspace Interrupt Controllers
+##### Userspace interrupt controllers
 
 When a platform device consumes an interrupt managed by a userspace interrupt controller driver (rather than the kernel interrupt controller directly), two `offer` entries are required:
 
@@ -290,7 +290,7 @@ offer: [
 ]
 ```
 
-#### `metadata_mappings`
+#### metadata_mappings
 
 Aggregates child device constraints into unified FIDL metadata:
 
@@ -315,11 +315,11 @@ metadata_mappings: [
 
 ---
 
-## 4. Hardware Bus Blocks
+## 4. Hardware bus blocks {:#4-hardware-bus-blocks}
 
 DML provides structured blocks for major hardware interconnects and discovery protocols.
 
-### 4.1 Platform Bus & Devicetree
+### 4.1 Platform bus & devicetree
 
 Platform devices match on Vendor ID (VID), Product ID (PID), Device ID (DID), or Devicetree `compatible` strings:
 
@@ -341,7 +341,7 @@ fuchsia.BIND_PLATFORM_DEV_DID == fuchsia.platform.BIND_PLATFORM_DEV_DID.GPIO;
 fuchsia.COMPATIBLE == "fuchsia,gpio-buttons";
 ```
 
-### 4.2 PCI Bus
+### 4.2 PCI bus
 
 PCI devices match on PCI vendor, device, class, subclass, interface, revision, or topology:
 
@@ -375,7 +375,7 @@ fuchsia.BIND_PCI_REVISION == 0x04;
 fuchsia.BIND_PCI_TOPO == 0x05;
 ```
 
-### 4.3 USB Bus
+### 4.3 USB bus
 
 USB interfaces and devices match on USB vendor, product, class, subclass, protocol, and interface number:
 
@@ -405,7 +405,7 @@ fuchsia.BIND_USB_PROTOCOL == 0;
 fuchsia.BIND_USB_INTERFACE_NUMBER == 1;
 ```
 
-### 4.4 ACPI Bus
+### 4.4 ACPI bus
 
 ACPI devices match on Hardware ID (`hid`), Compatible ID (`first_cid`), or ACPI Bus Type:
 
@@ -429,11 +429,11 @@ fuchsia.BIND_ACPI_BUS_TYPE == fuchsia.acpi.BIND_ACPI_BUS_TYPE.PCI;
 
 ---
 
-## 5. Composite Binding Rules & Parent Matching
+## 5. Composite binding rules & parent matching
 
 Composite drivers require binding to multiple parent devices (e.g. a platform device, plus GPIO pins, plus I2C buses).
 
-### 5.1 Primary Parent Node
+### 5.1 Primary parent node
 
 Designate the primary parent with `primary: true` in its `use` entry:
 
@@ -473,7 +473,7 @@ optional parent "mic-mute" {
 
 Note: If a driver is a composite driver, specifying bind rules under `program.bind` is forbidden. Place all bind rules in the corresponding `use` entries instead.
 
-### 5.2 Parent Node Matching (`match_name: true`)
+### 5.2 Parent node matching (match_name: true)
 
 When a driver connects to multiple parents of the same service type (e.g. multiple GPIO pins or ADCs), specify `match_name: true` inside the parent's `bind` block. `dmlc` will automatically emit a rule matching the parent's topological node name (`fuchsia.NAME`):
 
@@ -498,7 +498,7 @@ parent "volume-up" {
 }
 ```
 
-### 5.3 Parent Grouping
+### 5.3 Parent grouping
 
 If multiple `use` entries reference the same parent `name` (for example, one for a Banjo interface and another for a FIDL service or init step), `dmlc` automatically groups them into a single parent specification:
 
@@ -527,9 +527,9 @@ parent "gpio-init" {
 
 ---
 
-## 6. Conditional Branching and Array Acceptance
+## 6. Conditional branching and array acceptance
 
-### 6.1 Array Acceptance (`accept`)
+### 6.1 Array acceptance (accept)
 
 To match against any one of multiple acceptable values, pass an array instead of a single scalar. `dmlc` will generate an `accept <property> { ... }` block in bind rules.
 
@@ -554,7 +554,7 @@ accept fuchsia.BIND_PCI_DID {
 
 Works for `compat`, `vid`, `pid`, `did`, PCI properties, USB properties, ACPI `hid`, and custom rules.
 
-### 6.2 Conditional Branching (`one_of`)
+### 6.2 Conditional branching (one_of)
 
 When matching logic requires branching across different buses or device generations, use `one_of`. `dmlc` inspects each branch's trigger conditions and compiles them into `if ... else if ... else ...` statements.
 
@@ -601,7 +601,7 @@ Supported trigger properties in `one_of` include:
 * `usb.vid`, `usb.pid`, `usb.class`
 * Custom `rules` keys (e.g. `fuchsia.BIND_AUTOBIND`)
 
-### 6.3 Inequality Constraints
+### 6.3 Inequality constraints
 
 To require that a property does *not* equal a value, specify `{ "neq": <value> }` in `rules`:
 
@@ -621,11 +621,11 @@ fuchsia.BIND_COMPOSITE != 1;
 
 ---
 
-## 7. Real-World Before / After Examples
+## 7. Real-world before / after examples
 
-### Example 1: Standalone USB Mass Storage Driver
+### Example 1: Standalone USB mass storage driver
 
-#### Before: Separate Files
+#### Before: Separate files
 
 `meta/usb_mass_storage.cml`:
 
@@ -666,7 +666,7 @@ fuchsia.BIND_USB_SUBCLASS == fuchsia.usb.massstorage.BIND_USB_SUBCLASS.SCSI;
 fuchsia.BIND_USB_PROTOCOL == fuchsia.usb.massstorage.BIND_USB_PROTOCOL.BULK_ONLY;
 ```
 
-#### After: Unified `meta/usb_mass_storage.dml`
+#### After: Unified meta/usb_mass_storage.dml
 
 ```json5
 {
@@ -697,9 +697,9 @@ fuchsia.BIND_USB_PROTOCOL == fuchsia.usb.massstorage.BIND_USB_PROTOCOL.BULK_ONLY
 
 ---
 
-### Example 2: Composite Buttons Driver
+### Example 2: Composite buttons driver
 
-#### Before: Separate Files
+#### Before: Separate files
 
 `meta/buttons.cml`:
 
@@ -752,7 +752,7 @@ optional parent "volume-up" {
 }
 ```
 
-#### After: Unified `meta/buttons.dml`
+#### After: Unified meta/buttons.dml
 
 ```json5
 {

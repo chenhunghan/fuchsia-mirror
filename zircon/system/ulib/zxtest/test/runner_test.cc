@@ -592,6 +592,27 @@ void TestDriverImplFatalFailureEndsTest() {
                 "TestDriverImpl::HadAnyFailures should return true after a fatal failure.\n");
 }
 
+void TestDriverImplSkipAfterFailure() {
+  TestDriverImpl driver;
+  Assertion assertion("desc", "A", "A", "B", "B",
+                      {.filename = kFileName, .line_number = kLineNumber},
+                      /*is_fatal*/ false, zxtest::Runner::GetInstance()->GetScopedTraces());
+
+  driver.Reset();
+  driver.Skip();
+  ZX_ASSERT_MSG(driver.Status() == internal::TestStatus::kSkipped,
+                "TestDriverImpl::Status should be kSkipped after a skip.\n");
+
+  driver.Reset();
+  driver.OnAssertion(assertion);
+  driver.Skip();
+  ZX_ASSERT_MSG(!driver.Continue(), "TestDriverImpl::Continue should return false after a skip.\n");
+  ZX_ASSERT_MSG(driver.IsSkipped(), "TestDriverImpl::IsSkipped should return true after a skip.\n");
+  ZX_ASSERT_MSG(
+      driver.Status() == internal::TestStatus::kFailed,
+      "TestDriverImpl::Status should stay kFailed after a skip that follows a failure.\n");
+}
+
 void TestDriverImplNonFatalFailureDoesNotEndTest() {
   TestDriverImpl driver;
   Assertion assertion("desc", "A", "A", "B", "B",
@@ -644,6 +665,62 @@ void TestDriverImplResetOnTestCompletion() {
                   complete_fn.name);
     ZX_ASSERT_MSG(driver.HadAnyFailures(), "%s should not reset on test completion.\n",
                   complete_fn.name);
+  }
+}
+
+void TestDriverImplNonFatalFailureAfterFatalFailure() {
+  TestDriverImpl driver;
+  Assertion fatal("desc", "A", "A", "B", "B", {.filename = kFileName, .line_number = kLineNumber},
+                  /*is_fatal*/ true, zxtest::Runner::GetInstance()->GetScopedTraces());
+  Assertion non_fatal("desc", "A", "A", "B", "B",
+                      {.filename = kFileName, .line_number = kLineNumber},
+                      /*is_fatal*/ false, zxtest::Runner::GetInstance()->GetScopedTraces());
+
+  driver.OnAssertion(fatal);
+  driver.OnAssertion(non_fatal);
+  ZX_ASSERT_MSG(!driver.Continue(),
+                "TestDriverImpl::Continue should return false after a fatal failure, even after a "
+                "later non-fatal failure.\n");
+}
+
+void TestDriverImplResetOnTestCaseEnd() {
+  for (bool skip : {true, false}) {
+    TestDriverImpl driver;
+    Assertion fatal("desc", "A", "A", "B", "B", {.filename = kFileName, .line_number = kLineNumber},
+                    /*is_fatal*/ true, zxtest::Runner::GetInstance()->GetScopedTraces());
+    int first_counter = 0;
+    int second_counter = 0;
+
+    // SetUpTestSuite skips or fails fatally, so its tests don't run.
+    TestCase first_case(
+        kTestCaseName,
+        [&] {
+          if (skip) {
+            driver.Skip();
+          } else {
+            driver.OnAssertion(fatal);
+          }
+        },
+        Test::TearDownTestSuite);
+    ZX_ASSERT(first_case.RegisterTest(kTestName,
+                                      {.filename = kFileName, .line_number = kLineNumber},
+                                      FakeTest::MakeFactory(&first_counter)));
+
+    TestCase second_case(kTestCaseName2, Test::SetUpTestSuite, Test::TearDownTestSuite);
+    ZX_ASSERT(second_case.RegisterTest(kTestName,
+                                       {.filename = kFileName, .line_number = kLineNumber},
+                                       FakeTest::MakeFactory(&second_counter)));
+
+    first_case.Run(&driver, &driver);
+    second_case.Run(&driver, &driver);
+
+    ZX_ASSERT_MSG(first_counter == 0, "Test ran after SetUpTestSuite %s.\n",
+                  skip ? "skipped" : "failed");
+    ZX_ASSERT_MSG(second_counter == 1,
+                  "Test in next test case didn't run after SetUpTestSuite %s.\n",
+                  skip ? "skipped" : "failed");
+    ZX_ASSERT_MSG(driver.HadAnyFailures() == !skip,
+                  "TestDriverImpl::HadAnyFailures should not be affected by test case end.\n");
   }
 }
 
@@ -739,6 +816,46 @@ void RunnerOptionsParseFromCmdLineErrors() {
   ZX_ASSERT_MSG(!errors.empty(), "Runner::Options::FromArgs should return error.\n.");
 }
 
+void RunnerOptionsParseFromCmdLineHelpNoValue() {
+  // Like a real argv, the array ends with a null pointer not counted in argc.
+  const char* kArgs[] = {"mybin", "-h", nullptr};
+
+  std::vector<std::string> errors;
+  Runner::Options options =
+      Runner::Options::FromArgs(std::size(kArgs) - 1, const_cast<char**>(kArgs), &errors);
+
+  ZX_ASSERT_MSG(errors.empty(), "Runner::Options::FromArgs returned errors.\n");
+  ZX_ASSERT_MSG(options.help, "Runner::Options::help not parsed correctly.\n");
+}
+
+void RunnerOptionsParseFromCmdLineOutputNoValue() {
+  for (const char* flag : {"-o", "--gtest_output"}) {
+    const char* kArgs[] = {"mybin", flag, nullptr};
+
+    std::vector<std::string> errors;
+    Runner::Options options =
+        Runner::Options::FromArgs(std::size(kArgs) - 1, const_cast<char**>(kArgs), &errors);
+
+    ZX_ASSERT_MSG(!errors.empty(), "Runner::Options::FromArgs should return error for %s.\n", flag);
+    ZX_ASSERT_MSG(options.help, "Runner::Options::help should be set for %s.\n", flag);
+  }
+}
+
+void RunnerRunAllTestsExitStatusForOptions() {
+  const char* kHelpArgs[] = {"mybin", "--help", nullptr};
+  ZX_ASSERT_MSG(RunAllTests(std::size(kHelpArgs) - 1, const_cast<char**>(kHelpArgs)) == 0,
+                "RunAllTests should return zero for --help.\n");
+
+  const char* kBadArgs[] = {"mybin", "--gtest_repeat=0", nullptr};
+  ZX_ASSERT_MSG(RunAllTests(std::size(kBadArgs) - 1, const_cast<char**>(kBadArgs)) != 0,
+                "RunAllTests should return nonzero for a bad option.\n");
+
+  const char* kUnrecognizedArgs[] = {"mybin", "--driver-flag", nullptr};
+  ZX_ASSERT_MSG(
+      RunAllTests(std::size(kUnrecognizedArgs) - 1, const_cast<char**>(kUnrecognizedArgs)) == 0,
+      "RunAllTests should return zero for an unrecognized option (and run tests).\n");
+}
+
 void FilterOpFilterEmptyMatchesAll() {
   constexpr char kPattern[] = "";
   FilterOp filter;
@@ -797,6 +914,37 @@ void FilterOpFilterCombined() {
                 "FilterOp failed to recognize first of multiple patterns.");
   ZX_ASSERT_MSG(!filter(kTestCaseName, kTestName2),
                 "FilterOp failed to recognize second of multiple patterns.");
+}
+
+void FilterOpFilterCombinedNoColon() {
+  for (const char* pattern : {"TestCase.*-TestCase.TestName2", "TestCase.Test?ame*-*2",
+                              "Other.*:TestCase.*-*2:Other.*"}) {
+    FilterOp filter;
+    filter.pattern = pattern;
+
+    ZX_ASSERT_MSG(filter(kTestCaseName, kTestName),
+                  "FilterOp \"%s\" failed to recognize positive pattern.", pattern);
+    ZX_ASSERT_MSG(!filter(kTestCaseName, kTestName2),
+                  "FilterOp \"%s\" failed to recognize negative pattern.", pattern);
+  }
+}
+
+void FilterOpFilterEmptyPositive() {
+  for (const char* pattern : {"-TestCase.TestName2", ":-TestCase.TestName2"}) {
+    FilterOp filter;
+    filter.pattern = pattern;
+
+    ZX_ASSERT_MSG(filter(kTestCaseName, kTestName),
+                  "FilterOp \"%s\" failed to match all with empty positive pattern.", pattern);
+    ZX_ASSERT_MSG(!filter(kTestCaseName, kTestName2),
+                  "FilterOp \"%s\" failed to recognize negative pattern.", pattern);
+  }
+
+  // A one-character positive pattern is not empty.
+  FilterOp filter;
+  filter.pattern = "X-TestCase.TestName2";
+  ZX_ASSERT_MSG(!filter(kTestCaseName, kTestName),
+                "FilterOp failed to apply one-character positive pattern.");
 }
 
 }  // namespace test

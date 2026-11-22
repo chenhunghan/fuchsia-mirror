@@ -8,6 +8,7 @@
 #include <fidl/fuchsia.ui.composition/cpp/fidl.h>
 #include <fidl/fuchsia.ui.display.singleton/cpp/fidl.h>
 #include <fidl/fuchsia.ui.focus/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input.internal/cpp/fidl.h>
 #include <fidl/fuchsia.ui.input/cpp/fidl.h>
 #include <fidl/fuchsia.ui.input3/cpp/fidl.h>
 #include <fidl/fuchsia.ui.pointerinjector/cpp/fidl.h>
@@ -52,6 +53,13 @@ int run_test_ui_stack(int argc, const char** argv) {
 
   config.use_scene_owner = true;
   config.accessibility_owner = ui_testing::UITestRealm::AccessibilityOwnerType::FAKE;
+  if (test_ui_stack_config.renderer() == "null") {
+    config.renderer = ui_testing::UITestRealm::RendererType::NULL_RENDERER;
+  } else if (test_ui_stack_config.renderer() == "vulkan") {
+    config.renderer = ui_testing::UITestRealm::RendererType::VULKAN;
+  } else {
+    FX_LOGS(FATAL) << "Unsupported renderer: " << test_ui_stack_config.renderer();
+  }
   config.display_rotation = test_ui_stack_config.display_rotation();
   config.device_pixel_ratio = std::stof(test_ui_stack_config.device_pixel_ratio());
   config.suspend_enabled = test_ui_stack_config.suspend_enabled();
@@ -99,6 +107,8 @@ int run_test_ui_stack(int argc, const char** argv) {
                                                                realm_exposed_services.get());
   AddPublicService<fuchsia_ui_display_singleton::Info>(context.get(), realm_exposed_services.get());
   AddPublicService<fuchsia_ui_display_singleton::VsyncSource>(context.get(),
+                                                              realm_exposed_services.get());
+  AddPublicService<fuchsia_ui_input_internal::InputOwnership>(context.get(),
                                                               realm_exposed_services.get());
 
   // Helper services.

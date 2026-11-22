@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <lib/fit/defer.h>
 #include <net/ethernet.h>
+#include <net/if.h>
 #include <netinet/icmp6.h>
 #include <netinet/in.h>
 #include <netinet/ip_icmp.h>
@@ -86,118 +87,92 @@ INSTANTIATE_TEST_SUITE_P(
     });
 
 TEST(UnixSocket, ReadAfterClose) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
-  ASSERT_EQ(1, write(fds[0], "0", 1));
-  ASSERT_EQ(0, close(fds[0]));
+  ASSERT_EQ(1, write(fds[0].get(), "0", 1));
+  ASSERT_EQ(0, fds[0].reset());
   char buf[1];
-  ASSERT_EQ(1, read(fds[1], buf, 1));
+  ASSERT_EQ(1, read(fds[1].get(), buf, 1));
   ASSERT_EQ('0', buf[0]);
-  ASSERT_EQ(0, read(fds[1], buf, 1));
-  close(fds[1]);
+  ASSERT_EQ(0, read(fds[1].get(), buf, 1));
 }
 
 TEST(UnixSocket, ReadAfterCloseDgram) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(SOCK_DGRAM);
+  ASSERT_TRUE(fds);
+  int flags = fcntl(fds[1].get(), F_GETFL, 0);
+  ASSERT_EQ(0, fcntl(fds[1].get(), F_SETFL, flags | O_NONBLOCK));
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, fds));
-  int flags = fcntl(fds[1], F_GETFL, 0);
-  ASSERT_EQ(0, fcntl(fds[1], F_SETFL, flags | O_NONBLOCK));
-
-  ASSERT_EQ(1, write(fds[0], "0", 1));
-  ASSERT_EQ(0, close(fds[0]));
+  ASSERT_EQ(1, write(fds[0].get(), "0", 1));
+  ASSERT_EQ(0, fds[0].reset());
   char buf[1];
-  ASSERT_EQ(1, read(fds[1], buf, 1));
+  ASSERT_EQ(1, read(fds[1].get(), buf, 1));
   ASSERT_EQ('0', buf[0]);
-  ASSERT_THAT(read(fds[1], buf, 1), SyscallFailsWithErrno(EAGAIN));
-  close(fds[1]);
+  ASSERT_THAT(read(fds[1].get(), buf, 1), SyscallFailsWithErrno(EAGAIN));
 }
 
 TEST_P(ParameterizedUnixSocketTest, ReadAfterReadShutdown) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(GetSocketType());
+  ASSERT_TRUE(fds);
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, GetSocketType(), 0, fds));
-  ASSERT_EQ(1, write(fds[0], "0", 1));
-  ASSERT_EQ(0, shutdown(fds[1], SHUT_RD));
+  ASSERT_EQ(1, write(fds[0].get(), "0", 1));
+  ASSERT_EQ(0, shutdown(fds[1].get(), SHUT_RD));
   char buf[1];
-  ASSERT_EQ(1, read(fds[1], buf, 1));
+  ASSERT_EQ(1, read(fds[1].get(), buf, 1));
   ASSERT_EQ('0', buf[0]);
-  ASSERT_EQ(0, read(fds[1], buf, 1));
-  close(fds[0]);
-  close(fds[1]);
+  ASSERT_EQ(0, read(fds[1].get(), buf, 1));
 }
 
 TEST_P(ParameterizedUnixSocketTest, PeerWriteAfterReadShutdown) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(GetSocketType());
+  ASSERT_TRUE(fds);
+  ASSERT_EQ(0, shutdown(fds[1].get(), SHUT_RD));
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, GetSocketType(), 0, fds));
-  ASSERT_EQ(0, shutdown(fds[1], SHUT_RD));
-
-  auto old_handler = signal(SIGPIPE, SIG_IGN);
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(EPIPE));
-  signal(SIGPIPE, old_handler);
-
-  close(fds[0]);
-  close(fds[1]);
+  test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(EPIPE));
 }
 
 TEST(UnixSocket, PeerWriteAfterCloseStream) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
+  fds[1].reset();
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
-  close(fds[1]);
-
-  auto old_handler = signal(SIGPIPE, SIG_IGN);
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(EPIPE));
-  signal(SIGPIPE, old_handler);
-
-  close(fds[0]);
+  test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(EPIPE));
 }
 
 TEST(UnixSocket, PeerWriteAfterCloseDgram) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(SOCK_DGRAM);
+  ASSERT_TRUE(fds);
+  fds[1].reset();
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, fds));
-  close(fds[1]);
-
-  auto old_handler = signal(SIGPIPE, SIG_IGN);
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(ECONNREFUSED));
-  signal(SIGPIPE, old_handler);
-
-  close(fds[0]);
+  test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(ECONNREFUSED));
 }
 
 TEST(UnixSocket, PeerWriteAfterCloseDgramTwice) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(SOCK_DGRAM);
+  ASSERT_TRUE(fds);
+  fds[1].reset();
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, fds));
-  close(fds[1]);
-
-  auto old_handler = signal(SIGPIPE, SIG_IGN);
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(ECONNREFUSED));
+  test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(ECONNREFUSED));
 
   // Second write should return ENOTCONN because the socket was disconnected
   // by the first failed write.
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(ENOTCONN));
-  signal(SIGPIPE, old_handler);
-
-  close(fds[0]);
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(ENOTCONN));
 }
 
 TEST(UnixSocket, PeerWriteAfterShutdownAndCloseDgram) {
-  int fds[2];
+  test_helper::ScopedSocketPair fds(SOCK_DGRAM);
+  ASSERT_TRUE(fds);
+  ASSERT_EQ(0, shutdown(fds[1].get(), SHUT_RD));
+  fds[1].reset();
 
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_DGRAM, 0, fds));
-  ASSERT_EQ(0, shutdown(fds[1], SHUT_RD));
-  close(fds[1]);
-
-  auto old_handler = signal(SIGPIPE, SIG_IGN);
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(ECONNREFUSED));
-  ASSERT_THAT(write(fds[0], "0", 1), SyscallFailsWithErrno(ENOTCONN));
-  signal(SIGPIPE, old_handler);
-
-  close(fds[0]);
+  test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(ECONNREFUSED));
+  ASSERT_THAT(write(fds[0].get(), "0", 1), SyscallFailsWithErrno(ENOTCONN));
 }
 
 TEST(UnixSocket, UnconnectedShutdownStream) {
@@ -247,28 +222,26 @@ TEST(UnixSocket, DatagramDisconnectAfUnspec) {
 }
 
 TEST(UnixSocket, HupEvent) {
-  int fds[2];
-
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
   int epfd = epoll_create1(0);
   ASSERT_LT(-1, epfd);
   epoll_event ev = {EPOLLIN, {.u64 = 42}};
-  ASSERT_EQ(0, epoll_ctl(epfd, EPOLL_CTL_ADD, fds[0], &ev));
+  ASSERT_EQ(0, epoll_ctl(epfd, EPOLL_CTL_ADD, fds[0].get(), &ev));
 
   epoll_event outev = {0, {.u64 = 0}};
 
   int no_ready = epoll_wait(epfd, &outev, 1, 0);
   ASSERT_EQ(0, no_ready);
 
-  close(fds[1]);
+  fds[1].reset();
 
   no_ready = epoll_wait(epfd, &outev, 1, 0);
   ASSERT_EQ(1, no_ready);
   ASSERT_EQ(EPOLLIN | EPOLLHUP, outev.events);
   ASSERT_EQ(42ul, fbl::UnalignedLoad<uint64_t>(&outev.data.u64));
 
-  close(fds[0]);
   close(epfd);
 }
 
@@ -315,42 +288,42 @@ TEST(UnixSocket, PeerNameAfterPeerClosed) {
 }
 
 TEST(UnixSocket, ReadConnReset) {
-  int fds[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
-  ASSERT_EQ(1, write(fds[1], "A", 1));
-  ASSERT_EQ(1, write(fds[0], "B", 1));
-  ASSERT_EQ(0, close(fds[0]));
+  ASSERT_EQ(1, write(fds[1].get(), "A", 1));
+  ASSERT_EQ(1, write(fds[0].get(), "B", 1));
+  ASSERT_EQ(0, fds[0].reset());
   char buf[1];
-  ASSERT_EQ(1, read(fds[1], buf, 1));
+  ASSERT_EQ(1, read(fds[1].get(), buf, 1));
   ASSERT_EQ('B', buf[0]);
-  ASSERT_EQ(-1, read(fds[1], buf, 1));
+  ASSERT_EQ(-1, read(fds[1].get(), buf, 1));
   EXPECT_EQ(errno, ECONNRESET);
 }
 
 TEST(UnixSocket, ReadConnResetEmptyBuffer) {
-  int fds[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
-  ASSERT_EQ(1, write(fds[1], "A", 1));
-  ASSERT_EQ(0, close(fds[0]));
+  ASSERT_EQ(1, write(fds[1].get(), "A", 1));
+  ASSERT_EQ(0, fds[0].reset());
   char buf[1];
-  ASSERT_EQ(0, read(fds[1], buf, 0));
+  ASSERT_EQ(0, read(fds[1].get(), buf, 0));
 }
 
 TEST(UnixSocket, ReadConnResetAndShutdown) {
-  int fds[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
-  ASSERT_EQ(1, write(fds[1], "A", 1));
-  ASSERT_EQ(1, write(fds[0], "B", 1));
-  ASSERT_EQ(0, close(fds[0]));
-  ASSERT_EQ(0, shutdown(fds[1], SHUT_RD));
+  ASSERT_EQ(1, write(fds[1].get(), "A", 1));
+  ASSERT_EQ(1, write(fds[0].get(), "B", 1));
+  ASSERT_EQ(0, fds[0].reset());
+  ASSERT_EQ(0, shutdown(fds[1].get(), SHUT_RD));
 
   char buf[1];
-  ASSERT_EQ(1, read(fds[1], buf, 1));
+  ASSERT_EQ(1, read(fds[1].get(), buf, 1));
   ASSERT_EQ('B', buf[0]);
-  ASSERT_EQ(-1, read(fds[1], buf, 1));
+  ASSERT_EQ(-1, read(fds[1].get(), buf, 1));
   EXPECT_EQ(errno, ECONNRESET);
 }
 
@@ -385,15 +358,15 @@ TEST(UnixSocket, BigWrite) {
     send_mem[i] = 0xff & random();
   }
 
-  int fds[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds)) << strerror(errno);
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
   read_info_spec read_info;
   read_info.mem = new unsigned char[write_size];
   bzero(read_info.mem, sizeof(unsigned char) * write_size);
   ASSERT_TRUE(read_info.mem != nullptr);
   read_info.length = write_size;
-  read_info.fd = fds[1];
+  read_info.fd = fds[1].get();
   read_info.bytes_read = 0;
 
   pthread_t read_thread;
@@ -401,15 +374,12 @@ TEST(UnixSocket, BigWrite) {
   size_t write_count = 0;
   while (write_count < write_size) {
     size_t to_send = write_size - write_count;
-    ssize_t bytes_read = write(fds[0], send_mem + write_count, to_send);
+    ssize_t bytes_read = write(fds[0].get(), send_mem + write_count, to_send);
     ASSERT_LT(-1, bytes_read) << strerror(errno);
     write_count += bytes_read;
   }
 
   ASSERT_EQ(0, pthread_join(read_thread, nullptr)) << strerror(errno);
-
-  close(fds[0]);
-  close(fds[1]);
 
   ASSERT_EQ(write_count, read_info.bytes_read);
   ASSERT_EQ(0, memcmp(send_mem, read_info.mem, sizeof(unsigned char) * write_size));
@@ -582,8 +552,8 @@ TEST_F(UnixSocketTest, ImmediatePeercredCheck) {
 }
 
 TEST(UnixSocket, SendZeroFds) {
-  int fds[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
   char data[] = "a";
   struct iovec iov[] = {{
@@ -602,11 +572,11 @@ TEST(UnixSocket, SendZeroFds) {
       .cmsg_level = SOL_SOCKET,
       .cmsg_type = SCM_RIGHTS,
   };
-  ASSERT_EQ(sendmsg(fds[0], &msg, 0), 1);
+  ASSERT_EQ(sendmsg(fds[0].get(), &msg, 0), 1);
 
   memset(data, 0, sizeof(data));
   memset(buf, 0, sizeof(buf));
-  ASSERT_EQ(recvmsg(fds[1], &msg, 0), 1);
+  ASSERT_EQ(recvmsg(fds[1].get(), &msg, 0), 1);
   EXPECT_EQ(data[0], 'a');
   EXPECT_EQ(msg.msg_controllen, 0u);
   EXPECT_EQ(msg.msg_flags, 0);
@@ -614,8 +584,8 @@ TEST(UnixSocket, SendZeroFds) {
 
 #if defined(__NR_memfd_create)
 TEST(UnixSocket, SendMemFd) {
-  int fds[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+  test_helper::ScopedSocketPair fds(SOCK_STREAM);
+  ASSERT_TRUE(fds);
 
   int memfd = static_cast<int>(syscall(__NR_memfd_create, "test_memfd", 0));
 
@@ -640,11 +610,11 @@ TEST(UnixSocket, SendMemFd) {
   memmove(CMSG_DATA(cmsg), &memfd, sizeof(int));
   msg.msg_controllen = cmsg->cmsg_len;
 
-  ASSERT_EQ(sendmsg(fds[0], &msg, 0), 1);
+  ASSERT_EQ(sendmsg(fds[0].get(), &msg, 0), 1);
 
   memset(data, 0, sizeof(data));
   memset(buf, 0, sizeof(buf));
-  ASSERT_EQ(recvmsg(fds[1], &msg, 0), 1);
+  ASSERT_EQ(recvmsg(fds[1].get(), &msg, 0), 1);
   EXPECT_EQ(data[0], '\0');
   EXPECT_GT(msg.msg_controllen, 0u);
   EXPECT_EQ(msg.msg_flags, 0);
@@ -652,9 +622,8 @@ TEST(UnixSocket, SendMemFd) {
 #endif  // defined(__NR_memfd_create)
 
 TEST(UnixSocket, ScmRightsTruncation) {
-  int sv_raw[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw));
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   constexpr int kSendFdCount = 4;
   fbl::unique_fd send_fds[kSendFdCount];
@@ -732,9 +701,8 @@ class CmsgAlignmentTest : public testing::TestWithParam<int> {};
 TEST_P(CmsgAlignmentTest, ScmRightsFollowedByCredentials) {
   const int num_fds = GetParam();
 
-  int sv_raw[2];
-  ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw));
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   int one = 1;
   ASSERT_THAT(setsockopt(sv[1].get(), SOL_SOCKET, SO_PASSCRED, &one, sizeof(one)),
@@ -823,9 +791,8 @@ TEST_P(CmsgAlignmentTest, ScmRightsFollowedByCredentials) {
 INSTANTIATE_TEST_SUITE_P(UnixSocket, CmsgAlignmentTest, testing::Values(1, 2, 3));
 
 TEST(UnixSocket, StreamPasscredCoalescing) {
-  int sv_raw[2];
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw), SyscallSucceeds());
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   int one = 1;
   ASSERT_THAT(setsockopt(sv[1].get(), SOL_SOCKET, SO_PASSCRED, &one, sizeof(one)),
@@ -909,9 +876,8 @@ TEST(UnixSocket, StreamPasscredCoalescing) {
 }
 
 TEST(UnixSocket, StreamChunkedSendmsgRetainsCredentials) {
-  int sv_raw[2];
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw), SyscallSucceeds());
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   int sndbuf = 4096;
   ASSERT_THAT(setsockopt(sv[0].get(), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)),
@@ -1042,9 +1008,8 @@ TEST(UnixSocket, StreamChunkedSendmsgRetainsCredentials) {
 }
 
 TEST(UnixSocket, StreamChunkedWriteDoesNotLeakImplicitCredentials) {
-  int sv_raw[2];
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw), SyscallSucceeds());
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   int sndbuf = 4096;
   ASSERT_THAT(setsockopt(sv[0].get(), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)),
@@ -1153,9 +1118,8 @@ TEST(UnixSocket, FailedListenDoesNotCorruptPeercred) {
   EXPECT_EQ(cred.gid, static_cast<gid_t>(-1));
 
   // 2. Failed listen() on a connected socket from another process must not overwrite SO_PEERCRED.
-  int sv_raw[2];
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw), SyscallSucceeds());
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess(
@@ -1172,11 +1136,47 @@ TEST(UnixSocket, FailedListenDoesNotCorruptPeercred) {
   }
 }
 
+// Returns true if an LSM that may report peer labels via `SO_PEERSEC` is enabled.
+bool HasPeerLabelingLsm() {
+  std::ifstream lsm_file("/sys/kernel/security/lsm");
+  std::string lsms;
+  if (!std::getline(lsm_file, lsms)) {
+    return false;
+  }
+  lsms = "," + lsms + ",";
+  for (const char* lsm : {",selinux,", ",apparmor,", ",smack,"}) {
+    if (lsms.find(lsm) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// If no LSM provides peer labels then Linux fails `SO_PEERSEC` with `ENOPROTOOPT`, rather than
+// reporting an empty label.
+TEST(UnixSocket, PeerSecWithoutLsm) {
+  if (HasPeerLabelingLsm()) {
+    GTEST_SKIP() << "Requires that no LSM provides peer labels.";
+  }
+
+  for (int type : {SOCK_STREAM, SOCK_SEQPACKET}) {
+    SCOPED_TRACE(fxl::StringPrintf("type: %d", type));
+    test_helper::ScopedSocketPair sv(type);
+    ASSERT_TRUE(sv);
+
+    for (const auto& fd : sv) {
+      char label[256] = {};
+      socklen_t label_len = sizeof(label);
+      EXPECT_THAT(getsockopt(fd.get(), SOL_SOCKET, SO_PEERSEC, label, &label_len),
+                  SyscallFailsWithErrno(ENOPROTOOPT));
+    }
+  }
+}
+
 TEST(UnixSocket, MultipleCredentialsCmsgsDeduplicated) {
   for (int sock_type : {SOCK_STREAM, SOCK_DGRAM}) {
-    int sv_raw[2];
-    ASSERT_THAT(socketpair(AF_UNIX, sock_type, 0, sv_raw), SyscallSucceeds());
-    fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+    test_helper::ScopedSocketPair sv(sock_type);
+    ASSERT_TRUE(sv);
 
     auto send_two_creds = [&]() {
       char payload = 'a';
@@ -1300,9 +1300,8 @@ TEST(UnixSocket, WriteBeforeAcceptPreservesCredentials) {
 }
 
 TEST(UnixSocket, StreamWaitAllPasscred) {
-  int sv_raw[2];
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, sv_raw), SyscallSucceeds());
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_STREAM);
+  ASSERT_TRUE(sv);
 
   int sndbuf = 4096;
   ASSERT_THAT(setsockopt(sv[0].get(), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)),
@@ -1428,9 +1427,8 @@ TEST(UnixSocket, StreamWaitAllPasscred) {
 }
 
 TEST(UnixSocket, DatagramBlockingSendmsgRetainsCredentials) {
-  int sv_raw[2];
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_DGRAM, 0, sv_raw), SyscallSucceeds());
-  fbl::unique_fd sv[2] = {fbl::unique_fd(sv_raw[0]), fbl::unique_fd(sv_raw[1])};
+  test_helper::ScopedSocketPair sv(SOCK_DGRAM);
+  ASSERT_TRUE(sv);
 
   int sndbuf = 4096;
   ASSERT_THAT(setsockopt(sv[0].get(), SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)),
@@ -1572,16 +1570,9 @@ TEST(Socket, SocketCookie) {
   EXPECT_NE(cookie1, cookie2);
 }
 
-class SocketFault : public FaultTest, public testing::WithParamInterface<std::pair<int, int>> {
+class LoopbackSocketBase {
  protected:
-  void SetUp() override {
-    const auto [type, protocol] = GetParam();
-
-    // TODO(https://fxbug.dev/317285180) don't skip on baseline
-    if (type == SOCK_DGRAM && protocol == IPPROTO_ICMP && getuid() != 0) {
-      GTEST_SKIP() << "Ping sockets require root.";
-    }
-
+  void SetUpLoopbackSockets(int type, int protocol) {
     sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_addr = {htonl(INADDR_LOOPBACK)},
@@ -1614,16 +1605,10 @@ class SocketFault : public FaultTest, public testing::WithParamInterface<std::pa
     }
   }
 
-  void TearDown() override {
+  void TearDownLoopbackSockets() {
     send_fd_.reset();
     recv_fd_.reset();
     listen_fd_.reset();
-  }
-
-  void SetRecvFdNonBlocking() {
-    int flags = fcntl(recv_fd_.get(), F_GETFL, 0);
-    ASSERT_GE(flags, 0) << strerror(errno);
-    ASSERT_EQ(fcntl(recv_fd_.get(), F_SETFL, flags | O_NONBLOCK), 0) << strerror(errno);
   }
 
   fbl::unique_fd recv_fd_;
@@ -1631,14 +1616,39 @@ class SocketFault : public FaultTest, public testing::WithParamInterface<std::pa
   fbl::unique_fd send_fd_;
 };
 
+class SocketFault : public FaultTest,
+                    public LoopbackSocketBase,
+                    public testing::WithParamInterface<std::pair<int, int>> {
+ protected:
+  void SetUp() override {
+    const auto [type, protocol] = GetParam();
+
+    // TODO(https://fxbug.dev/317285180) don't skip on baseline
+    if (type == SOCK_DGRAM && protocol == IPPROTO_ICMP && getuid() != 0) {
+      GTEST_SKIP() << "Ping sockets require root.";
+    }
+
+    ASSERT_NO_FATAL_FAILURE(SetUpLoopbackSockets(type, protocol));
+  }
+
+  void TearDown() override { TearDownLoopbackSockets(); }
+
+  void SetRecvFdNonBlocking() {
+    int flags = fcntl(recv_fd_.get(), F_GETFL, 0);
+    ASSERT_GE(flags, 0) << strerror(errno);
+    ASSERT_EQ(fcntl(recv_fd_.get(), F_SETFL, flags | O_NONBLOCK), 0) << strerror(errno);
+  }
+};
+
 // Test sending a packet from invalid memory.
-TEST_P(SocketFault, Write) {
-  EXPECT_EQ(write(send_fd_.get(), faulting_ptr_, kFaultingSize_), -1);
-  EXPECT_EQ(errno, EFAULT);
+TEST_P(SocketFault, WriteFromInvalidAddressFails) {
+  for (void* ptr : {faulting_ptr_, reinterpret_cast<void*>(0x1000)}) {
+    EXPECT_THAT(write(send_fd_.get(), ptr, kFaultingSize_), SyscallFailsWithErrno(EFAULT));
+  }
 }
 
 // Test receiving a packet to invalid memory.
-TEST_P(SocketFault, Read) {
+TEST_P(SocketFault, ReadIntoInvalidAddressFails) {
   // First send a valid message that we can read.
   //
   // We send an ICMP message since this test is generic over UDP/TCP/ICMP.
@@ -1647,22 +1657,24 @@ TEST_P(SocketFault, Read) {
   constexpr icmphdr kSendIcmp = {
       .type = ICMP_ECHO,
   };
-  ASSERT_EQ(write(send_fd_.get(), &kSendIcmp, sizeof(kSendIcmp)),
-            static_cast<ssize_t>(sizeof(kSendIcmp)));
-
-  pollfd p = {
-      .fd = recv_fd_.get(),
-      .events = POLLIN,
-  };
-  ASSERT_EQ(poll(&p, 1, -1), 1);
-  ASSERT_EQ(p.revents, POLLIN);
-
   static_assert(kFaultingSize_ >= sizeof(kSendIcmp));
-  EXPECT_EQ(read(recv_fd_.get(), faulting_ptr_, sizeof(kSendIcmp)), -1);
-  EXPECT_EQ(errno, EFAULT);
+
+  for (void* ptr : {faulting_ptr_, reinterpret_cast<void*>(0x1000)}) {
+    ASSERT_EQ(write(send_fd_.get(), &kSendIcmp, sizeof(kSendIcmp)),
+              static_cast<ssize_t>(sizeof(kSendIcmp)));
+
+    pollfd p = {
+        .fd = recv_fd_.get(),
+        .events = POLLIN,
+    };
+    ASSERT_EQ(poll(&p, 1, -1), 1);
+    ASSERT_EQ(p.revents, POLLIN);
+
+    EXPECT_THAT(read(recv_fd_.get(), ptr, sizeof(kSendIcmp)), SyscallFailsWithErrno(EFAULT));
+  }
 }
 
-TEST_P(SocketFault, ReadV) {
+TEST_P(SocketFault, ReadVIntoInvalidAddressFails) {
   // First send a valid message that we can read.
   //
   // We send an ICMP message since this test is generic over UDP/TCP/ICMP.
@@ -1723,7 +1735,7 @@ TEST_P(SocketFault, ReadV) {
   }
 }
 
-TEST_P(SocketFault, WriteV) {
+TEST_P(SocketFault, WriteVFromInvalidAddressFails) {
   icmphdr kSendIcmp = {
       .type = ICMP_ECHO,
   };
@@ -1779,10 +1791,176 @@ TEST_P(SocketFault, SendmsgENOBUFS) {
   ASSERT_EQ(errno, ENOBUFS);
 }
 
+class InetLoopbackSocketTest : public LoopbackSocketBase, public testing::TestWithParam<int> {
+ protected:
+  void SetUp() override { ASSERT_NO_FATAL_FAILURE(SetUpLoopbackSockets(GetParam(), 0)); }
+
+  void TearDown() override { TearDownLoopbackSockets(); }
+};
+
+TEST_P(InetLoopbackSocketTest, SendmsgSolSocketCmsg) {
+  auto send_cmsg = [&](int cmsg_type, const void* data, size_t data_len) -> ssize_t {
+    char payload = 'a';
+    iovec iov = {.iov_base = &payload, .iov_len = sizeof(payload)};
+    std::vector<char> cmsg_buf(CMSG_SPACE(data_len), 0);
+    msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cmsg_buf.data(),
+        .msg_controllen = cmsg_buf.size(),
+    };
+    cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = cmsg_type;
+    cmsg->cmsg_len = CMSG_LEN(data_len);
+    if (data_len > 0) {
+      std::memcpy(CMSG_DATA(cmsg), data, data_len);
+    }
+    return sendmsg(send_fd_.get(), &msg, 0);
+  };
+
+  auto expect_recv_without_cmsg = [&]() {
+    char recv_buf = 0;
+    iovec recv_iov = {.iov_base = &recv_buf, .iov_len = sizeof(recv_buf)};
+    char recv_cmsg_buf[CMSG_SPACE(sizeof(struct ucred))] = {};
+    msghdr recv_msg = {
+        .msg_iov = &recv_iov,
+        .msg_iovlen = 1,
+        .msg_control = recv_cmsg_buf,
+        .msg_controllen = sizeof(recv_cmsg_buf),
+    };
+    ASSERT_THAT(recvmsg(recv_fd_.get(), &recv_msg, 0), SyscallSucceedsWithValue(1));
+    EXPECT_EQ('a', recv_buf);
+    EXPECT_EQ(0u, recv_msg.msg_controllen);
+  };
+
+  // 1. SOL_SOCKET / SCM_RIGHTS with a valid open file descriptor (as used by LTP recvmsg01) is
+  // silently ignored on AF_INET sockets.
+  const int valid_fd = send_fd_.get();
+  ASSERT_THAT(send_cmsg(SCM_RIGHTS, &valid_fd, sizeof(valid_fd)), SyscallSucceedsWithValue(1));
+  ASSERT_NO_FATAL_FAILURE(expect_recv_without_cmsg());
+
+  // 2. SOL_SOCKET / SCM_RIGHTS with an invalid file descriptor (-1) is also ignored without
+  // inspecting the payload on AF_INET sockets.
+  constexpr int kInvalidFd = -1;
+  ASSERT_THAT(send_cmsg(SCM_RIGHTS, &kInvalidFd, sizeof(kInvalidFd)), SyscallSucceedsWithValue(1));
+  ASSERT_NO_FATAL_FAILURE(expect_recv_without_cmsg());
+
+  // 3. SOL_SOCKET / SCM_CREDENTIALS (both with a forged ucred payload and an empty payload) is
+  // ignored without validating credentials on AF_INET sockets.
+  constexpr struct ucred kForgedCred = {.pid = 0, .uid = 65534, .gid = 65534};
+  ASSERT_THAT(send_cmsg(SCM_CREDENTIALS, &kForgedCred, sizeof(kForgedCred)),
+              SyscallSucceedsWithValue(1));
+  ASSERT_NO_FATAL_FAILURE(expect_recv_without_cmsg());
+
+  ASSERT_THAT(send_cmsg(SCM_CREDENTIALS, nullptr, 0), SyscallSucceedsWithValue(1));
+  ASSERT_NO_FATAL_FAILURE(expect_recv_without_cmsg());
+
+  // 4. Unrecognized SOL_SOCKET cmsg_type values (such as SCM_SECURITY or an unknown type) are
+  // rejected with EINVAL.
+  constexpr int kScmSecurity = 0x03;
+  for (int bad_type : {kScmSecurity, 0xdead}) {
+    EXPECT_THAT(send_cmsg(bad_type, &valid_fd, sizeof(valid_fd)), SyscallFailsWithErrno(EINVAL));
+  }
+
+  // 5. When an ignored SCM_RIGHTS or SCM_CREDENTIALS precedes another cmsghdr in the same msghdr,
+  // subsequent control messages are still processed rather than skipped.
+  for (int ignored_type : {SCM_RIGHTS, SCM_CREDENTIALS}) {
+    char payload = 'a';
+    iovec iov = {.iov_base = &payload, .iov_len = sizeof(payload)};
+    std::vector<char> cmsg_buf(CMSG_SPACE(sizeof(valid_fd)) + CMSG_SPACE(sizeof(valid_fd)), 0);
+    msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cmsg_buf.data(),
+        .msg_controllen = cmsg_buf.size(),
+    };
+    cmsghdr* first = CMSG_FIRSTHDR(&msg);
+    ASSERT_NE(first, nullptr);
+    first->cmsg_level = SOL_SOCKET;
+    first->cmsg_type = ignored_type;
+    first->cmsg_len = CMSG_LEN(sizeof(valid_fd));
+    std::memcpy(CMSG_DATA(first), &valid_fd, sizeof(valid_fd));
+
+    cmsghdr* second = CMSG_NXTHDR(&msg, first);
+    ASSERT_NE(second, nullptr);
+    second->cmsg_level = SOL_SOCKET;
+    second->cmsg_type = 0xdead;
+    second->cmsg_len = CMSG_LEN(sizeof(valid_fd));
+    std::memcpy(CMSG_DATA(second), &valid_fd, sizeof(valid_fd));
+
+    EXPECT_THAT(sendmsg(send_fd_.get(), &msg, 0), SyscallFailsWithErrno(EINVAL));
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(SocketFault, SocketFault,
                          testing::Values(std::make_pair(SOCK_DGRAM, 0),
                                          std::make_pair(SOCK_DGRAM, IPPROTO_ICMP),
                                          std::make_pair(SOCK_STREAM, 0)));
+INSTANTIATE_TEST_SUITE_P(InetLoopbackSocketTest, InetLoopbackSocketTest,
+                         testing::Values(SOCK_DGRAM, SOCK_STREAM),
+                         [](const testing::TestParamInfo<InetLoopbackSocketTest::ParamType>& info) {
+                           return info.param == SOCK_STREAM ? "SOCK_STREAM" : "SOCK_DGRAM";
+                         });
+
+TEST(NetlinkSocket, SendmsgSolSocketCmsg) {
+  fbl::unique_fd fd(socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  test_helper::NetlinkEncoder encoder(RTM_GETLINK, NLM_F_REQUEST | NLM_F_DUMP);
+  ifinfomsg ifi = {.ifi_family = AF_UNSPEC};
+  encoder.Write(ifi);
+  iovec iov = {};
+  encoder.Finalize(iov);
+
+  auto send_cmsg = [&](int cmsg_type, const void* data, size_t data_len) -> ssize_t {
+    std::vector<char> cmsg_buf(CMSG_SPACE(data_len), 0);
+    msghdr msg = {
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = cmsg_buf.data(),
+        .msg_controllen = cmsg_buf.size(),
+    };
+    cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = cmsg_type;
+    cmsg->cmsg_len = CMSG_LEN(data_len);
+    if (data_len > 0) {
+      std::memcpy(CMSG_DATA(cmsg), data, data_len);
+    }
+    return sendmsg(fd.get(), &msg, 0);
+  };
+
+  // 1. AF_NETLINK rejects SOL_SOCKET / SCM_RIGHTS with EINVAL rather than ignoring it.
+  const int valid_fd = fd.get();
+  EXPECT_THAT(send_cmsg(SCM_RIGHTS, &valid_fd, sizeof(valid_fd)), SyscallFailsWithErrno(EINVAL));
+
+  // 2. AF_NETLINK validates SOL_SOCKET / SCM_CREDENTIALS: a truncated payload fails with EINVAL,
+  // unprivileged credential forgery fails with EPERM, and the caller's own credentials succeed.
+  EXPECT_THAT(send_cmsg(SCM_CREDENTIALS, nullptr, 0), SyscallFailsWithErrno(EINVAL));
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([&]() {
+    test_helper::DropAllCapabilities();
+    const struct ucred forged_cred = {
+        .pid = getppid(),
+        .uid = getuid(),
+        .gid = getgid(),
+    };
+    EXPECT_THAT(send_cmsg(SCM_CREDENTIALS, &forged_cred, sizeof(forged_cred)),
+                SyscallFailsWithErrno(EPERM));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  const struct ucred self_cred = {
+      .pid = getpid(),
+      .uid = getuid(),
+      .gid = getgid(),
+  };
+  EXPECT_THAT(send_cmsg(SCM_CREDENTIALS, &self_cred, sizeof(self_cred)),
+              SyscallSucceedsWithValue(static_cast<ssize_t>(iov.iov_len)));
+}
+
 class SndRcvBufSockOpt : public testing::TestWithParam<int> {};
 
 // This test asserts that the value of SO_RCVBUF and SO_SNDBUF are doubled on
@@ -2561,16 +2739,13 @@ TEST(GetsockoptTruncationTest, RcvTimeo) {
 class ScmCredentialsTest : public testing::Test {
  protected:
   void SetUp() override {
-    int tmp[2];
     int one = 1;
 
     if (geteuid() != 0 && !test_helper::HasCapabilityEffective(CAP_SYS_ADMIN)) {
       GTEST_SKIP() << "Test requires root or CAP_SYS_ADMIN to setresuid/setresgid";
     }
 
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, tmp));
-    sv_[0].reset(tmp[0]);
-    sv_[1].reset(tmp[1]);
+    ASSERT_TRUE(sv_);
     setsockopt(sv_[1].get(), SOL_SOCKET, SO_PASSCRED, &one, sizeof(one));
 
     memset(cmsgbuf_, 0, sizeof(cmsgbuf_));
@@ -2591,61 +2766,52 @@ class ScmCredentialsTest : public testing::Test {
     bool has_cap_setgid = false;
   };
 
-  struct Outcome {
-    bool success = false;
-    int error;
-  };
-
   void TestForgery(std::optional<pid_t> forged_pid, uid_t forged_uid, gid_t forged_gid,
-                   SenderCredentials sender, Caps caps, Outcome expected_outcome) {
+                   SenderCredentials sender, Caps caps, fit::result<int> expected_result) {
     test_helper::ForkHelper helper;
-    helper.RunInForkedProcess([this, forged_pid, forged_uid, forged_gid, sender, caps,
-                               expected_outcome] {
-      ASSERT_EQ(0, prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0));
+    helper.RunInForkedProcess(
+        [this, forged_pid, forged_uid, forged_gid, sender, caps, expected_result] {
+          ASSERT_EQ(0, prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0));
 
-      ASSERT_THAT(setresgid(sender.gid, sender.egid, sender.sgid), SyscallSucceeds());
-      ASSERT_THAT(setresuid(sender.uid, sender.euid, sender.suid), SyscallSucceeds());
+          ASSERT_THAT(setresgid(sender.gid, sender.egid, sender.sgid), SyscallSucceeds());
+          ASSERT_THAT(setresuid(sender.uid, sender.euid, sender.suid), SyscallSucceeds());
 
-      if (caps.has_cap_sys_admin) {
-        test_helper::SetCapabilityEffective(CAP_SYS_ADMIN);
-      } else {
-        test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
-      }
+          if (caps.has_cap_sys_admin) {
+            test_helper::SetCapabilityEffective(CAP_SYS_ADMIN);
+          } else {
+            test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+          }
 
-      if (caps.has_cap_setuid) {
-        test_helper::SetCapabilityEffective(CAP_SETUID);
-      } else {
-        test_helper::UnsetCapabilityEffective(CAP_SETUID);
-      }
+          if (caps.has_cap_setuid) {
+            test_helper::SetCapabilityEffective(CAP_SETUID);
+          } else {
+            test_helper::UnsetCapabilityEffective(CAP_SETUID);
+          }
 
-      if (caps.has_cap_setgid) {
-        test_helper::SetCapabilityEffective(CAP_SETGID);
-      } else {
-        test_helper::UnsetCapabilityEffective(CAP_SETGID);
-      }
+          if (caps.has_cap_setgid) {
+            test_helper::SetCapabilityEffective(CAP_SETGID);
+          } else {
+            test_helper::UnsetCapabilityEffective(CAP_SETGID);
+          }
 
-      struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg_);
-      cmsg->cmsg_level = SOL_SOCKET;
-      cmsg->cmsg_type = SCM_CREDENTIALS;
-      cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
+          struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg_);
+          cmsg->cmsg_level = SOL_SOCKET;
+          cmsg->cmsg_type = SCM_CREDENTIALS;
+          cmsg->cmsg_len = CMSG_LEN(sizeof(struct ucred));
 
-      struct ucred cred;
-      cred.pid = forged_pid.value_or(getpid());
-      cred.uid = forged_uid;
-      cred.gid = forged_gid;
+          struct ucred cred;
+          cred.pid = forged_pid.value_or(getpid());
+          cred.uid = forged_uid;
+          cred.gid = forged_gid;
 
-      fbl::UnalignedStore(CMSG_DATA(cmsg), cred);
+          fbl::UnalignedStore(CMSG_DATA(cmsg), cred);
 
-      if (expected_outcome.success) {
-        EXPECT_THAT(sendmsg(sv_[0].get(), &msg_, 0), SyscallSucceeds());
-      } else {
-        EXPECT_THAT(sendmsg(sv_[0].get(), &msg_, 0), SyscallFailsWithErrno(expected_outcome.error));
-      }
-    });
+          EXPECT_THAT(sendmsg(sv_[0].get(), &msg_, 0), SyscallMatchesResult(expected_result));
+        });
     ASSERT_TRUE(helper.WaitForChildren());
   }
 
-  fbl::unique_fd sv_[2] = {};
+  test_helper::ScopedSocketPair sv_;
   char data_[1] = {'x'};
   struct iovec iov_ = {.iov_base = data_, .iov_len = 1};
   char cmsgbuf_[CMSG_SPACE(sizeof(struct ucred))] = {};
@@ -2658,10 +2824,10 @@ TEST_F(ScmCredentialsTest, PidForgeryRequiresCapSysAdmin) {
       .uid = 100, .euid = 100, .suid = 100, .gid = 200, .egid = 200, .sgid = 200};
 
   // PID mismatch rejected
-  TestForgery(1, 100, 200, sender, no_caps, {.error = EPERM});
+  TestForgery(1, 100, 200, sender, no_caps, fit::error(EPERM));
 
   // PID mismatch allowed by CAP_SYS_ADMIN
-  TestForgery(1, 100, 200, sender, {.has_cap_sys_admin = true}, {.success = true});
+  TestForgery(1, 100, 200, sender, {.has_cap_sys_admin = true}, fit::ok());
 }
 
 TEST_F(ScmCredentialsTest, ZombiePidForgeryFails) {
@@ -2682,10 +2848,10 @@ TEST_F(ScmCredentialsTest, ZombiePidForgeryFails) {
   EXPECT_EQ(pfd.revents, POLLIN);
 
   // Without CAP_SYS_ADMIN, it should fail with EPERM (forgery not allowed).
-  TestForgery(zombie_pid, 100, 200, sender, no_caps, {.error = EPERM});
+  TestForgery(zombie_pid, 100, 200, sender, no_caps, fit::error(EPERM));
 
   // With CAP_SYS_ADMIN, it fails with ESRCH because the process is a zombie.
-  TestForgery(zombie_pid, 100, 200, sender, {.has_cap_sys_admin = true}, {.error = ESRCH});
+  TestForgery(zombie_pid, 100, 200, sender, {.has_cap_sys_admin = true}, fit::error(ESRCH));
 
   ASSERT_TRUE(helper.WaitForChildren());
 }
@@ -2696,15 +2862,15 @@ TEST_F(ScmCredentialsTest, ForgeryUid) {
       .uid = 100, .euid = 101, .suid = 102, .gid = 200, .egid = 200, .sgid = 200};
 
   // UID mismatch (matches none of ruid, euid, suid) rejected
-  TestForgery(std::nullopt, 103, 200, sender, no_caps, {.error = EPERM});
+  TestForgery(std::nullopt, 103, 200, sender, no_caps, fit::error(EPERM));
 
   // UID mismatch allowed by CAP_SETUID
-  TestForgery(std::nullopt, 103, 200, sender, {.has_cap_setuid = true}, {.success = true});
+  TestForgery(std::nullopt, 103, 200, sender, {.has_cap_setuid = true}, fit::ok());
 
   // Success if at least one UID matches
-  TestForgery(std::nullopt, 100, 200, sender, no_caps, {.success = true});
-  TestForgery(std::nullopt, 101, 200, sender, no_caps, {.success = true});
-  TestForgery(std::nullopt, 102, 200, sender, no_caps, {.success = true});
+  TestForgery(std::nullopt, 100, 200, sender, no_caps, fit::ok());
+  TestForgery(std::nullopt, 101, 200, sender, no_caps, fit::ok());
+  TestForgery(std::nullopt, 102, 200, sender, no_caps, fit::ok());
 }
 
 TEST_F(ScmCredentialsTest, ForgeryGid) {
@@ -2713,15 +2879,15 @@ TEST_F(ScmCredentialsTest, ForgeryGid) {
       .uid = 100, .euid = 100, .suid = 100, .gid = 200, .egid = 201, .sgid = 202};
 
   // GID mismatch (matches none of rgid, egid, sgid) rejected
-  TestForgery(std::nullopt, 100, 203, sender, no_caps, {.error = EPERM});
+  TestForgery(std::nullopt, 100, 203, sender, no_caps, fit::error(EPERM));
 
   // GID mismatch allowed by CAP_SETGID
-  TestForgery(std::nullopt, 100, 203, sender, {.has_cap_setgid = true}, {.success = true});
+  TestForgery(std::nullopt, 100, 203, sender, {.has_cap_setgid = true}, fit::ok());
 
   // Success if at least one GID matches
-  TestForgery(std::nullopt, 100, 200, sender, no_caps, {.success = true});
-  TestForgery(std::nullopt, 100, 201, sender, no_caps, {.success = true});
-  TestForgery(std::nullopt, 100, 202, sender, no_caps, {.success = true});
+  TestForgery(std::nullopt, 100, 200, sender, no_caps, fit::ok());
+  TestForgery(std::nullopt, 100, 201, sender, no_caps, fit::ok());
+  TestForgery(std::nullopt, 100, 202, sender, no_caps, fit::ok());
 }
 
 TEST(SocketCrossFamilyTest, CrossFamilyBindConnectSendto) {
@@ -2893,12 +3059,10 @@ TEST(SocketCrossFamilyTest, CrossFamilyBindConnectSendto) {
                 SyscallFailsWithErrno(EINVAL));
 
     // Connected AF_UNIX SOCK_STREAM still rejects sendto with a destination address with EISCONN.
-    int stream_fds[2] = {-1, -1};
-    ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, stream_fds), SyscallSucceeds());
-    fbl::unique_fd s0(stream_fds[0]);
-    fbl::unique_fd s1(stream_fds[1]);
-    EXPECT_THAT(sendto(s0.get(), buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&addr_unix),
-                       addr_unix_long_len),
+    test_helper::ScopedSocketPair stream_socks(SOCK_STREAM);
+    ASSERT_TRUE(stream_socks);
+    EXPECT_THAT(sendto(stream_socks[0].get(), buf, sizeof(buf), 0,
+                       reinterpret_cast<sockaddr*>(&addr_unix), addr_unix_long_len),
                 SyscallFailsWithErrno(EISCONN));
 
     // Unconnected AF_UNIX SOCK_STREAM rejects cross-family bind and connect with EINVAL,
@@ -2920,10 +3084,9 @@ TEST(SocketCrossFamilyTest, CrossFamilyBindConnectSendto) {
 }
 
 TEST(UnixSocket, SendmsgCmsgLenExceedsControllenAtGuardPage) {
-  int fds[2] = {-1, -1};
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), SyscallSucceeds());
-  fbl::unique_fd sender(fds[0]);
-  fbl::unique_fd receiver(fds[1]);
+  test_helper::ScopedSocketPair fds(SOCK_DGRAM);
+  ASSERT_TRUE(fds);
+  fbl::unique_fd& sender = fds[0];
 
   const size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
   void* mapping =
@@ -2980,11 +3143,310 @@ TEST(SocketTest, ExtremeSndbufAndRcvbufValuesDoNotOverflow) {
     }
   };
 
-  int unix_pair[2] = {-1, -1};
-  ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, unix_pair), SyscallSucceeds());
-  fbl::unique_fd unix_peer(unix_pair[1]);
-  check_socket(fbl::unique_fd(unix_pair[0]));
+  test_helper::ScopedSocketPair unix_pair(SOCK_STREAM);
+  ASSERT_TRUE(unix_pair);
+  check_socket(std::move(unix_pair[0]));
   check_socket(fbl::unique_fd(socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE)));
+}
+
+TEST(SocketTest, SockoptNegativeOptlen) {
+  for (int domain : {AF_INET, AF_UNIX}) {
+    SCOPED_TRACE(domain);
+    fbl::unique_fd fd(socket(domain, SOCK_STREAM, 0));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    const socklen_t negative_optlens[] = {
+        static_cast<socklen_t>(-1),
+        static_cast<socklen_t>(std::numeric_limits<int32_t>::min()),
+    };
+    for (socklen_t bad_len : negative_optlens) {
+      int val = 1;
+      EXPECT_THAT(setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &val, bad_len),
+                  SyscallFailsWithErrno(EINVAL));
+
+      socklen_t len = bad_len;
+      EXPECT_THAT(getsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &val, &len),
+                  SyscallFailsWithErrno(EINVAL));
+    }
+  }
+}
+
+TEST(SocketTest, SockoptHugeOptlen) {
+  // Passing `INT32_MAX` (~2 GiB) for `optlen` must not trigger unbounded kernel allocations
+  // (https://fxbug.dev/375491719, https://fxbug.dev/375504915).
+  constexpr socklen_t kMaxPositiveOptlen =
+      static_cast<socklen_t>(std::numeric_limits<int32_t>::max());
+
+  for (int domain : {AF_INET, AF_UNIX}) {
+    SCOPED_TRACE(domain);
+    fbl::unique_fd fd(socket(domain, SOCK_STREAM, 0));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    EXPECT_THAT(setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, nullptr, kMaxPositiveOptlen),
+                SyscallFailsWithErrno(EFAULT));
+
+    socklen_t null_len = kMaxPositiveOptlen;
+    EXPECT_THAT(getsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, nullptr, &null_len),
+                SyscallFailsWithErrno(EFAULT));
+
+    std::vector<uint8_t> page_buf(getpagesize(), 0);
+    constexpr int kExpected = 1;
+    std::memcpy(page_buf.data(), &kExpected, sizeof(kExpected));
+    EXPECT_THAT(setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, page_buf.data(), kMaxPositiveOptlen),
+                SyscallSucceeds());
+
+    int actual = -1;
+    socklen_t actual_len = kMaxPositiveOptlen;
+    ASSERT_THAT(getsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &actual, &actual_len),
+                SyscallSucceeds());
+    EXPECT_EQ(actual_len, sizeof(actual));
+    EXPECT_EQ(actual, kExpected);
+  }
+}
+
+void CheckSendtoAndSendmsgTooLarge(int fd, const struct sockaddr* addr, socklen_t addr_len,
+                                   void* fault_buf, size_t too_large_len) {
+  ASSERT_THAT(sendto(fd, fault_buf, too_large_len, 0, addr, addr_len),
+              SyscallFailsWithErrno(EMSGSIZE));
+
+  struct iovec iov[2] = {
+      {.iov_base = fault_buf, .iov_len = too_large_len / 2},
+      {.iov_base = fault_buf, .iov_len = too_large_len - (too_large_len / 2)},
+  };
+  struct msghdr msg = {};
+  msg.msg_name = const_cast<struct sockaddr*>(addr);
+  msg.msg_namelen = addr_len;
+  msg.msg_iov = iov;
+  msg.msg_iovlen = 2;
+  ASSERT_THAT(sendmsg(fd, &msg, 0), SyscallFailsWithErrno(EMSGSIZE));
+}
+
+void CheckDatagramPayloadTooLarge(int domain, int protocol, const struct sockaddr* addr,
+                                  socklen_t addr_len, void* fault_buf, size_t too_large_len) {
+  fbl::unique_fd fd(socket(domain, SOCK_DGRAM, protocol));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  ASSERT_NO_FATAL_FAILURE(
+      CheckSendtoAndSendmsgTooLarge(fd.get(), addr, addr_len, fault_buf, too_large_len));
+
+  ASSERT_THAT(connect(fd.get(), addr, addr_len), SyscallSucceeds());
+  ASSERT_THAT(send(fd.get(), fault_buf, too_large_len, 0), SyscallFailsWithErrno(EMSGSIZE));
+  ASSERT_THAT(write(fd.get(), fault_buf, too_large_len), SyscallFailsWithErrno(EMSGSIZE));
+}
+
+TEST(SocketTest, UdpPayloadTooLargeRejectsBeforeFault) {
+  constexpr size_t kMaxIpPayloadLen = std::numeric_limits<uint16_t>::max();
+  constexpr size_t kTooLargeLen = kMaxIpPayloadLen + size_t{1};
+  void* fault_buf = mmap(nullptr, kTooLargeLen, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(fault_buf, MAP_FAILED) << strerror(errno);
+  auto unmap = fit::defer([&] { munmap(fault_buf, kTooLargeLen); });
+
+  sockaddr_in addr4 = {
+      .sin_family = AF_INET,
+      .sin_port = htons(12345),
+      .sin_addr = {.s_addr = htonl(INADDR_LOOPBACK)},
+  };
+  sockaddr_in6 addr6 = {
+      .sin6_family = AF_INET6,
+      .sin6_port = htons(12345),
+      .sin6_addr = IN6ADDR_LOOPBACK_INIT,
+  };
+  struct {
+    int domain;
+    const sockaddr* addr;
+    socklen_t addr_len;
+    size_t max_payload;
+  } udp_cases[] = {
+      // Max IPv4 UDP payload: 65535 - 20 (IPv4) - 8 (UDP) = 65507.
+      {
+          .domain = AF_INET,
+          .addr = reinterpret_cast<const sockaddr*>(&addr4),
+          .addr_len = sizeof(addr4),
+          .max_payload = 65507,
+      },
+      // Max IPv6 UDP payload: 65535 - 8 (UDP) = 65527 (Payload Length excludes the 40B IPv6
+      // header).
+      {
+          .domain = AF_INET6,
+          .addr = reinterpret_cast<const sockaddr*>(&addr6),
+          .addr_len = sizeof(addr6),
+          .max_payload = 65527,
+      },
+  };
+  for (const auto& c : udp_cases) {
+    SCOPED_TRACE(c.domain);
+    fbl::unique_fd fd(socket(c.domain, SOCK_DGRAM, IPPROTO_UDP));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    EXPECT_THAT(sendto(fd.get(), fault_buf, c.max_payload, 0, c.addr, c.addr_len),
+                SyscallFailsWithErrno(EFAULT));
+
+    EXPECT_THAT(sendto(fd.get(), fault_buf, kMaxIpPayloadLen, 0, c.addr, c.addr_len),
+                SyscallFailsWithErrno(EMSGSIZE));
+    EXPECT_THAT(sendto(fd.get(), fault_buf, kTooLargeLen, 0, c.addr, c.addr_len),
+                SyscallFailsWithErrno(EMSGSIZE));
+
+    // Also verify default protocol `0` resolves to UDP for the pre-check.
+    fbl::unique_fd default_proto_fd(socket(c.domain, SOCK_DGRAM, 0));
+    ASSERT_TRUE(default_proto_fd.is_valid()) << strerror(errno);
+    EXPECT_THAT(sendto(default_proto_fd.get(), fault_buf, c.max_payload + 1, 0, c.addr, c.addr_len),
+                SyscallFailsWithErrno(EMSGSIZE));
+    default_proto_fd.reset();
+    fd.reset();
+
+    CheckDatagramPayloadTooLarge(c.domain, IPPROTO_UDP, c.addr, c.addr_len, fault_buf,
+                                 c.max_payload + 1);
+  }
+}
+
+TEST(SocketTest, PingPayloadTooLargeRejectsBeforeFault) {
+  constexpr size_t kMaxPingPrecheckLen = std::numeric_limits<uint16_t>::max();
+  constexpr size_t kTooLargeLen = kMaxPingPrecheckLen + size_t{1};
+  void* fault_buf = mmap(nullptr, kTooLargeLen, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(fault_buf, MAP_FAILED) << strerror(errno);
+  auto unmap = fit::defer([&] { munmap(fault_buf, kTooLargeLen); });
+
+  IcmpPingGidOverride gid_range;
+  if (gid_range.can_override()) {
+    gid_t gid = getegid();
+    gid_range.Set(gid, gid);
+  } else if (test_helper::IsStarnix()) {
+    FAIL() << "Expected writable " << IcmpPingGidOverride::FILE_NAME << " on Starnix";
+  }
+
+  sockaddr_in addr4 = {
+      .sin_family = AF_INET,
+      .sin_port = 0,
+      .sin_addr = {.s_addr = htonl(INADDR_LOOPBACK)},
+  };
+  sockaddr_in6 addr6 = {
+      .sin6_family = AF_INET6,
+      .sin6_port = 0,
+      .sin6_addr = IN6ADDR_LOOPBACK_INIT,
+  };
+  struct {
+    int domain;
+    int protocol;
+    const sockaddr* addr;
+    socklen_t addr_len;
+  } icmp_cases[] = {
+      {
+          .domain = AF_INET,
+          .protocol = IPPROTO_ICMP,
+          .addr = reinterpret_cast<const sockaddr*>(&addr4),
+          .addr_len = sizeof(addr4),
+      },
+      {
+          .domain = AF_INET6,
+          .protocol = IPPROTO_ICMPV6,
+          .addr = reinterpret_cast<const sockaddr*>(&addr6),
+          .addr_len = sizeof(addr6),
+      },
+  };
+  size_t tested_icmp = 0;
+  for (const auto& c : icmp_cases) {
+    SCOPED_TRACE(c.domain);
+    fbl::unique_fd probe(socket(c.domain, SOCK_DGRAM, c.protocol));
+    if (!test_helper::IsStarnix() && !probe.is_valid() &&
+        (errno == EACCES || errno == EPERM || errno == EPROTONOSUPPORT)) {
+      continue;
+    }
+    ASSERT_TRUE(probe.is_valid()) << strerror(errno);
+    ++tested_icmp;
+
+    // Both Linux `ping_common_sendmsg()` and Starnix pre-check `len > 0xFFFF`
+    // before reading the user buffer, so `0xFFFF` faults before returning.
+    EXPECT_THAT(sendto(probe.get(), fault_buf, kMaxPingPrecheckLen, 0, c.addr, c.addr_len),
+                SyscallFailsWithErrno(EFAULT));
+    probe.reset();
+
+    CheckDatagramPayloadTooLarge(c.domain, c.protocol, c.addr, c.addr_len, fault_buf, kTooLargeLen);
+  }
+  if (tested_icmp == 0) {
+    GTEST_SKIP() << "ICMP ping sockets are not permitted in this environment";
+  }
+}
+
+TEST(SocketTest, RawPayloadTooLargeRejectsBeforeFault) {
+  if (!test_helper::HasCapability(CAP_NET_RAW)) {
+    GTEST_SKIP() << "Need CAP_NET_RAW to test SOCK_RAW sockets";
+  }
+
+  constexpr size_t kMaxRawPrecheckLen = std::numeric_limits<uint16_t>::max();
+  constexpr size_t kTooLargeLen = kMaxRawPrecheckLen + size_t{1};
+  void* fault_buf = mmap(nullptr, kTooLargeLen, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(fault_buf, MAP_FAILED) << strerror(errno);
+  auto unmap = fit::defer([&] { munmap(fault_buf, kTooLargeLen); });
+
+  sockaddr_in addr4 = {
+      .sin_family = AF_INET,
+      .sin_port = 0,
+      .sin_addr = {.s_addr = htonl(INADDR_LOOPBACK)},
+  };
+  sockaddr_in6 addr6 = {
+      .sin6_family = AF_INET6,
+      .sin6_port = 0,
+      .sin6_addr = IN6ADDR_LOOPBACK_INIT,
+  };
+  struct {
+    int domain;
+    const sockaddr* addr;
+    socklen_t addr_len;
+    size_t max_payload;
+  } raw_cases[] = {
+      {
+          .domain = AF_INET,
+          .addr = reinterpret_cast<const sockaddr*>(&addr4),
+          .addr_len = sizeof(addr4),
+          // Without IP_HDRINCL, kernel adds a 20-byte IPv4 header: 65535 - 20 = 65515.
+          .max_payload = kMaxRawPrecheckLen - 20,
+      },
+      {
+          .domain = AF_INET6,
+          .addr = reinterpret_cast<const sockaddr*>(&addr6),
+          .addr_len = sizeof(addr6),
+          .max_payload = kMaxRawPrecheckLen,
+      },
+  };
+  for (const auto& c : raw_cases) {
+    SCOPED_TRACE(c.domain);
+    fbl::unique_fd fd(socket(c.domain, SOCK_RAW, IPPROTO_UDP));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    EXPECT_THAT(sendto(fd.get(), fault_buf, c.max_payload, 0, c.addr, c.addr_len),
+                SyscallFailsWithErrno(EFAULT));
+    CheckSendtoAndSendmsgTooLarge(fd.get(), c.addr, c.addr_len, fault_buf, kTooLargeLen);
+  }
+}
+
+TEST(SocketTest, PacketPayloadTooLargeRejectsBeforeFault) {
+  if (!test_helper::HasCapability(CAP_NET_RAW)) {
+    GTEST_SKIP() << "Need CAP_NET_RAW to test AF_PACKET sockets";
+  }
+
+  unsigned int lo_index = if_nametoindex("lo");
+  ASSERT_NE(lo_index, 0u) << strerror(errno);
+
+  // Larger than both Zircon channel limit (64 KiB) and Linux loopback MTU + L2 header.
+  constexpr size_t kTooLargeLen = size_t{128} * 1024;
+  void* fault_buf = mmap(nullptr, kTooLargeLen, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT_NE(fault_buf, MAP_FAILED) << strerror(errno);
+  auto unmap = fit::defer([&] { munmap(fault_buf, kTooLargeLen); });
+
+  sockaddr_ll addr = {
+      .sll_family = AF_PACKET,
+      .sll_protocol = htons(ETH_P_IP),
+      .sll_ifindex = static_cast<int>(lo_index),
+  };
+
+  for (int type : {SOCK_RAW, SOCK_DGRAM}) {
+    SCOPED_TRACE(type);
+    fbl::unique_fd fd(socket(AF_PACKET, type, 0));
+    ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+    CheckSendtoAndSendmsgTooLarge(fd.get(), reinterpret_cast<sockaddr*>(&addr), sizeof(addr),
+                                  fault_buf, kTooLargeLen);
+  }
 }
 
 }  // namespace

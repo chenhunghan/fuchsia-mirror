@@ -14,13 +14,12 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import cl_utils
-import fuchsia
-from build.rbe import rbe_profile
+from build.auth import auth_env
+from build.rbe import cl_utils, fuchsia, rbe_profile, reclient
 
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
@@ -249,6 +248,7 @@ class RemoteTool(object):
     def run(
         self,
         args: Sequence[str],
+        env: Mapping[str, str],
         show_command: bool = False,
         **kwargs: Any,
     ) -> cl_utils.SubprocessResult:
@@ -256,6 +256,7 @@ class RemoteTool(object):
 
         Args:
           args: remotetool command-line arguments
+          env: environment variable mapping.
           show_command: if True, print the full remotetool command before executing.
           **kwargs: additional arguments forwarded to cl_utils.subprocess_call.
 
@@ -264,19 +265,22 @@ class RemoteTool(object):
         """
         service = self.config["service"]
         instance = self.config["instance"]
+        # Note: service and instance default to the active RBE profile, and can be
+        # overridden by explicit flags in `args` (which are appended after `auto_args`).
         auto_args = [
             f"--service={service}",
             f"--instance={instance}",
         ]
 
-        # Infra builds use GCE credentials instead of ADC.
-        gce_creds = os.environ.get("RBE_use_gce_credentials", None)
-        if gce_creds:
-            auto_args.append(f"--use_gce_credentials={gce_creds}")
+        resolved_env = auth_env.resolve_rbe_auth_env(
+            env=env, fuchsia_dir=PROJECT_ROOT
+        )
+        if auth_env.is_loas(resolved_env):
+            auto_args.extend(reclient.gcert_auth_flags())
+        elif auth_env.is_machine(resolved_env):
+            auto_args.extend(reclient.gce_auth_flags())
         else:
-            # Developers will use application-default-credentials for now.
-            # This could change to a different credential helper in the future.
-            auto_args.append("--use_application_default_credentials=true")
+            auto_args.extend(reclient.adc_auth_flags())
 
         command = [
             str(PROJECT_ROOT_REL / _HOST_REMOTETOOL),
@@ -303,6 +307,7 @@ class RemoteTool(object):
         args = ["--operation", "show_action", "--digest", digest]
         final_kwargs = kwargs
         final_kwargs["quiet"] = True
+        final_kwargs.setdefault("env", os.environ)
         return self.run(args, **final_kwargs)
 
     def show_action(self, digest: str, **kwargs: Any) -> ShowActionResult:
@@ -362,6 +367,7 @@ class RemoteTool(object):
         ]
         final_kwargs = kwargs
         final_kwargs["quiet"] = True
+        final_kwargs.setdefault("env", os.environ)
         return self.run(args, **final_kwargs)
 
     def download_dir(
@@ -388,12 +394,16 @@ class RemoteTool(object):
         ]
         final_kwargs = kwargs
         final_kwargs["quiet"] = True
+        final_kwargs.setdefault("env", os.environ)
         return self.run(args, **final_kwargs)
 
 
-def configure_remotetool(cfg: Path | None = None) -> RemoteTool:
+def configure(
+    cfg: Path | None,
+    env: Mapping[str, str],
+) -> RemoteTool:
     """Configures a RemoteTool instance dynamically, prioritizing profiles."""
-    prof = rbe_profile.load(PROJECT_ROOT, os.environ)
+    prof = rbe_profile.load(PROJECT_ROOT, env)
     service = "remotebuildexecution.googleapis.com:443"
 
     if cfg is not None and cfg.is_file():
@@ -415,10 +425,10 @@ def configure_remotetool(cfg: Path | None = None) -> RemoteTool:
     )
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     try:
-        rtool = configure_remotetool(_REPROXY_CFG)
-        result = rtool.run(argv, show_command=True, quiet=False)
+        rtool = configure(_REPROXY_CFG, env=env)
+        result = rtool.run(argv, env=env, show_command=True, quiet=False)
         return result.returncode
     except subprocess.CalledProcessError as e:
         # The underlying tool already prints its own error messages to stderr.
@@ -427,4 +437,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

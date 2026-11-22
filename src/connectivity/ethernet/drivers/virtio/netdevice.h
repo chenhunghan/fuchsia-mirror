@@ -12,6 +12,7 @@
 #include <lib/sync/cpp/completion.h>
 #include <lib/virtio/device.h>
 #include <lib/virtio/ring.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -28,7 +29,6 @@
 #include <virtio/net.h>
 
 #include "src/connectivity/network/drivers/network-device/device/public/locks.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace virtio {
 

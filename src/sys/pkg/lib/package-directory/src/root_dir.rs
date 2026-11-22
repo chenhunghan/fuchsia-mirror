@@ -453,7 +453,7 @@ mod tests {
     use std::io::Cursor;
 
     struct TestEnv {
-        _blobfs_fake: FakeBlobfs,
+        blobfs_fake: FakeBlobfs,
         root_dir: Arc<RootDir<blobfs::Client>>,
     }
 
@@ -478,7 +478,7 @@ mod tests {
             }
 
             let root_dir = RootDir::new(blobfs_client, metafar_blob.merkle).await.unwrap();
-            (Self { _blobfs_fake: blobfs_fake, root_dir: root_dir.clone() }, root_dir)
+            (Self { blobfs_fake, root_dir: root_dir.clone() }, root_dir)
         }
 
         async fn new() -> (Self, fio::DirectoryProxy) {
@@ -748,6 +748,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fuchsia_fs::file::read(&proxy).await.unwrap(), b"blob-contents".to_vec());
+    }
+
+    #[fuchsia::test]
+    async fn root_dir_open_non_meta_file_missing_blob() {
+        let (env, root_dir) = TestEnv::new().await;
+        let hash = *env.root_dir.non_meta_files.get("resource").unwrap();
+        env.blobfs_fake.delete_blob(hash);
+
+        assert_matches!(
+            fuchsia_fs::directory::open_file(&root_dir, "resource", fio::PERM_READABLE).await,
+            Err(fuchsia_fs::node::OpenError::OpenError(zx::Status::IO_DATA_INTEGRITY))
+        );
+        assert_matches!(
+            fuchsia_fs::directory::open_file(&root_dir, "missing", fio::PERM_READABLE).await,
+            Err(fuchsia_fs::node::OpenError::OpenError(zx::Status::NOT_FOUND))
+        );
     }
 
     #[fuchsia::test]

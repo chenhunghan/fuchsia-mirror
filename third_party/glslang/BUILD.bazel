@@ -1,0 +1,135 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:defs.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+py_binary(
+    name = "build_info_script",
+    srcs = ["src/build_info.py"],
+    main = "src/build_info.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+genrule(
+    name = "glslang_build_info",
+    srcs = [
+        "src/CHANGES.md",
+        "src/build_info.h.tmpl",
+    ],
+    outs = ["include/glslang/build_info.h"],
+    cmd = "$(location :build_info_script) $$(dirname $(location src/CHANGES.md)) -i $(location src/build_info.h.tmpl) -o $@",
+    tools = [":build_info_script"],
+)
+
+_GLSLANG_COPTS = [
+    "-Wno-conversion",
+    "-Wno-deprecated-copy",
+    "-Wno-extra-semi",
+    "-Wno-ignored-qualifiers",
+    "-Wno-implicit-fallthrough",
+    "-Wno-inconsistent-missing-override",
+    "-Wno-missing-field-initializers",
+    "-Wno-newline-eof",
+    "-Wno-sign-compare",
+    "-Wno-suggest-destructor-override",
+    "-Wno-suggest-override",
+    "-Wno-unknown-warning-option",
+    "-Wno-unused-but-set-variable",
+    "-Wno-unused-function",
+    "-Wno-unused-variable",
+]
+
+fx_cc_library(
+    name = "glslang_default_resource_limits_sources",
+    srcs = ["src/glslang/ResourceLimits/ResourceLimits.cpp"],
+    hdrs = [
+        "src/glslang/Include/ResourceLimits.h",
+        "src/glslang/Include/visibility.h",
+        "src/glslang/Public/ResourceLimits.h",
+    ],
+    copts = _GLSLANG_COPTS,
+    includes = ["src"],
+    visibility = ["//:__subpackages__"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "glslang_sources",
+    srcs = [
+        "src/SPIRV/GlslangToSpv.cpp",
+        "src/SPIRV/InReadableOrder.cpp",
+        "src/SPIRV/Logger.cpp",
+        "src/SPIRV/SpvBuilder.cpp",
+        "src/SPIRV/SpvPostProcess.cpp",
+        "src/SPIRV/SpvTools.cpp",
+        "src/SPIRV/disassemble.cpp",
+        "src/SPIRV/doc.cpp",
+        "src/glslang/GenericCodeGen/CodeGen.cpp",
+        "src/glslang/GenericCodeGen/Link.cpp",
+        "src/glslang/HLSL/hlslAttributes.cpp",
+        "src/glslang/HLSL/hlslGrammar.cpp",
+        "src/glslang/HLSL/hlslOpMap.cpp",
+        "src/glslang/HLSL/hlslParseHelper.cpp",
+        "src/glslang/HLSL/hlslParseables.cpp",
+        "src/glslang/HLSL/hlslScanContext.cpp",
+        "src/glslang/HLSL/hlslTokenStream.cpp",
+        "src/glslang/MachineIndependent/Constant.cpp",
+        "src/glslang/MachineIndependent/InfoSink.cpp",
+        "src/glslang/MachineIndependent/Initialize.cpp",
+        "src/glslang/MachineIndependent/IntermTraverse.cpp",
+        "src/glslang/MachineIndependent/Intermediate.cpp",
+        "src/glslang/MachineIndependent/ParseContextBase.cpp",
+        "src/glslang/MachineIndependent/ParseHelper.cpp",
+        "src/glslang/MachineIndependent/PoolAlloc.cpp",
+        "src/glslang/MachineIndependent/RemoveTree.cpp",
+        "src/glslang/MachineIndependent/Scan.cpp",
+        "src/glslang/MachineIndependent/ShaderLang.cpp",
+        "src/glslang/MachineIndependent/SpirvIntrinsics.cpp",
+        "src/glslang/MachineIndependent/SymbolTable.cpp",
+        "src/glslang/MachineIndependent/Versions.cpp",
+        "src/glslang/MachineIndependent/attribute.cpp",
+        "src/glslang/MachineIndependent/glslang_tab.cpp",
+        "src/glslang/MachineIndependent/intermOut.cpp",
+        "src/glslang/MachineIndependent/iomapper.cpp",
+        "src/glslang/MachineIndependent/limits.cpp",
+        "src/glslang/MachineIndependent/linkValidate.cpp",
+        "src/glslang/MachineIndependent/parseConst.cpp",
+        "src/glslang/MachineIndependent/preprocessor/Pp.cpp",
+        "src/glslang/MachineIndependent/preprocessor/PpAtom.cpp",
+        "src/glslang/MachineIndependent/preprocessor/PpContext.cpp",
+        "src/glslang/MachineIndependent/preprocessor/PpScanner.cpp",
+        "src/glslang/MachineIndependent/preprocessor/PpTokens.cpp",
+        "src/glslang/MachineIndependent/propagateNoContraction.cpp",
+        "src/glslang/MachineIndependent/reflection.cpp",
+        "src/glslang/OSDependent/Unix/ossource.cpp",
+    ],
+    hdrs = glob([
+        "src/SPIRV/*.h",
+        "src/SPIRV/*.hpp11",
+        "src/glslang/**/*.h",
+    ]) + [
+        ":glslang_build_info",
+    ],
+    copts = _GLSLANG_COPTS,
+    defines = [
+        "ENABLE_HLSL=1",
+        "ENABLE_OPT=1",
+        "ENABLE_SPIRV=1",
+        "GLSLANG_OSINCLUDE_UNIX",
+    ],
+    includes = [
+        "include",
+        "src",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "@spirv_tools//:spirv_tools",
+        "@spirv_tools//:spirv_tools_opt",
+    ],
+    alwayslink = True,
+)

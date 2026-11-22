@@ -4,7 +4,6 @@
 
 #include "pciroot.h"
 
-#include <fidl/fuchsia.hardware.pci/cpp/wire.h>
 #include <fuchsia/hardware/pciroot/c/banjo.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/zx/bti.h>
@@ -13,16 +12,16 @@
 #include <lib/zx/resource.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
-#include <stdint.h>
 #include <zircon/errors.h>
 #include <zircon/rights.h>
 #include <zircon/status.h>
 #include <zircon/syscalls/iommu.h>
 #include <zircon/syscalls/types.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 
-namespace fpci = fuchsia_hardware_pci::wire;
 namespace board_virt {
 
 zx_status_t VirtPciroot::PcirootGetBti(uint32_t bdf, uint32_t index, zx::bti* bti) {
@@ -46,7 +45,7 @@ zx_status_t VirtPciroot::PcirootGetPciPlatformInfo(pci_platform_info_t* info) {
     return status;
   }
 
-  // bus-pci takes ownership of the handles in legacy_irqs_list, so duplicate owned_interrupts_.
+  // Callers take ownership of the handles in legacy_irqs_list, so duplicate owned_interrupts_.
   std::vector<zx::interrupt> dup_interrupts;
   dup_interrupts.reserve(owned_interrupts_.size());
   for (const auto& irq : owned_interrupts_) {
@@ -81,7 +80,8 @@ zx::result<> VirtPciroot::CreateInterrupts() {
     zx::interrupt interrupt;
     zx_status_t status = zx::interrupt::create(irq_resource_,
                                                /*vector=*/kVirtPcieIrqBase + vector_offset,
-                                               /*options=*/0, /*result=*/&interrupt);
+                                               /*options=*/kVirtPcieIrqOptions,
+                                               /*result=*/&interrupt);
     if (status != ZX_OK) {
       return zx::error(status);
     }
@@ -91,11 +91,13 @@ zx::result<> VirtPciroot::CreateInterrupts() {
 
   // All QEMU devices are plugged into the root port and use a pre-defined pin swizzle.
   for (uint8_t device_id = 0; device_id < DEVICES_PER_BUS; device_id++) {
-    pci_irq_routing_entry_t entry = {.port_device_id = PCI_IRQ_ROUTING_NO_PARENT,
-                                     .port_function_id = PCI_IRQ_ROUTING_NO_PARENT,
-                                     .device_id = device_id};
+    pci_irq_routing_entry_t entry = {
+        .port_device_id = PCI_IRQ_ROUTING_NO_PARENT,
+        .port_function_id = PCI_IRQ_ROUTING_NO_PARENT,
+        .device_id = device_id,
+    };
     for (uint32_t pin = 0; pin < PINS_PER_FUNCTION; pin++) {
-      entry.pins[pin] = kVirtPcieIrqBase + ((pin + device_id) % PINS_PER_FUNCTION);
+      entry.pins[pin] = kVirtPcieIrqBase + ((pin + device_id) % kVirtPcieIrqCount);
     }
     irq_routing_entries_.push_back(entry);
   }

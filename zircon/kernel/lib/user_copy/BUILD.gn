@@ -49,7 +49,6 @@ kernel_rust_mod("user-copy-rs") {
   source_root = "src/mod.rs"
   sources = [
     "src/internal.rs",
-    "src/internal_ffi.rs",
     "src/mod.rs",
     "src/user_iovec.rs",
     "src/user_ptr.rs",

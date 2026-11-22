@@ -73,6 +73,5 @@ fx_component(
 
 fx_package(
     name = "hw-info-shell",
-    package_name = "hw-info-shell",
     components = [":hw-info-shell_component"],
 )

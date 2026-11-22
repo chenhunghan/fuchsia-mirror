@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
 import("//build/host.gni")
 import("//build/testing/golden_files.gni")
 import("//src/tests/fidl/conformance_suite/gidl-conformance-suite.gni")
@@ -18,7 +19,7 @@ conformance_golden_items = [
     extension = "cc"
   },
   {
-    language = "llcpp"
+    language = "cpp_wire"
     extension = "cc"
   },
   {
@@ -71,11 +72,15 @@ golden_files("gidl_golden_tests") {
 
 # LINT.ThenChange(BUILD.bazel)
 
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//tools/fidl/gidl/empty_test:rust_empty_gidl_tests" ]
+}
+
 group("tests") {
   testonly = true
 
   deps = [
+    ":bazel_tests",
     ":gidl_golden_tests",
-    "empty_test:tests",
   ]
 }

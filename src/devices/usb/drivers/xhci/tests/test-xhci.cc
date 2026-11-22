@@ -20,14 +20,18 @@ zx::result<> UsbXhci::TestInit(void* test_harness) {
   return Init(ddk_fake::CreateBufferFactory());
 }
 
-zx::result<> UsbXhci::Start(fdf::DriverContext context) { return zx::ok(); }
+zx::result<> UsbXhci::Start(fdf::DriverContext context) {
+  config_ = context.take_config<xhci_config::Config>();
+  incoming_ = context.take_incoming();
+  return zx::ok();
+}
 
 void UsbXhci::Stop(fdf::StopCompleter completer) { completer(zx::ok()); }
 
 void UsbXhci::AbortPendingCommands() {}
 
 UsbXhci::~UsbXhci() {
-  device_state_.reset();
+  (void)TakeAllDeviceStates();
   interrupters_.reset();
 }
 

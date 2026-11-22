@@ -8,6 +8,14 @@
         event_code: 81,
     },
     {
+        name: "Erofs",
+        process: [],
+        vmo: [
+            "starnix:erofs",
+        ],
+        event_code: 89,
+    },
+    {
         name: "StarnixKernel",
         process: [
             "starnix_kernel.cm",

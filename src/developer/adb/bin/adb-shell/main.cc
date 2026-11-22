@@ -12,10 +12,9 @@
 #include "adb-shell.h"
 
 int main(int argc, char** argv) {
-  fuchsia_logging::LogSettingsBuilder builder;
-  builder.WithTags({"adb"}).BuildAndInitialize();
-
   async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+  fuchsia_logging::LogSettingsBuilder builder;
+  builder.WithTags({"adb"}).WithDispatcher(loop.dispatcher()).BuildAndInitialize();
 
   zx::result svc = component::OpenServiceRoot();
   if (svc.is_error()) {

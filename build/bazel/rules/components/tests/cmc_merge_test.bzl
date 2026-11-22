@@ -135,16 +135,14 @@ _fx_manifest_no_merge_test = analysistest.make(
 # not override `is_coverage` / `is_profile` while `//build/bazel:current_platform`
 # (used by top-level build aspects) still resolves cleanly.
 _TEST_PLATFORM = str(Label("//build/bazel/rules/components/tests:flagless_fuchsia_x64_platform"))
-_IS_COVERAGE_FLAG = str(Label("//build/bazel/config/variables:is_coverage"))
-_IS_PROFILE_FLAG = str(Label("//build/bazel/config/variables:is_profile"))
+_ENABLED_FEATURES_FLAG = str(Label("@fuchsia_rules_common//build_flags:enabled_features"))
 
 _fx_manifest_coverage_merge_test = analysistest.make(
     _fx_manifest_debugdata_merge_test_impl,
     attrs = _DEBUGDATA_TEST_ATTRS,
     config_settings = {
         "//command_line_option:platforms": _TEST_PLATFORM,
-        _IS_COVERAGE_FLAG: True,
-        _IS_PROFILE_FLAG: False,
+        _ENABLED_FEATURES_FLAG: ["coverage"],
     },
 )
 
@@ -153,12 +151,11 @@ _fx_manifest_profile_merge_test = analysistest.make(
     attrs = _DEBUGDATA_TEST_ATTRS,
     config_settings = {
         "//command_line_option:platforms": _TEST_PLATFORM,
-        _IS_COVERAGE_FLAG: False,
-        _IS_PROFILE_FLAG: True,
+        _ENABLED_FEATURES_FLAG: ["profile"],
     },
 )
 
-def cmc_merge_test_suite(name, visibility = None):
+def cmc_merge_test_suite(name, visibility = None, extra_build_only_tests = []):
     """Defines analysis tests for `cmc_merge`.
 
     Args:
@@ -250,7 +247,7 @@ def cmc_merge_test_suite(name, visibility = None):
     native.filegroup(
         name = "build_only_tests",
         testonly = True,
-        srcs = [":compiled_merged_manifest"],
+        srcs = [":compiled_merged_manifest"] + extra_build_only_tests,
         visibility = visibility,
     )
 

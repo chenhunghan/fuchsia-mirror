@@ -4,8 +4,10 @@
 
 import argparse
 from dataclasses import dataclass
+from dataclasses import field
 from datetime import datetime
 import enum
+import json
 import os
 import pathlib
 import re
@@ -18,6 +20,12 @@ import termout
 import selection_action
 
 LOG_TO_STDOUT_OPTION = "-"
+DEPRECATED_FLAGS = {
+    "--use-test-pilot",
+}
+REMOVED_FLAGS = {
+    "--no-use-test-pilot",
+}
 
 
 class PrevOption(enum.StrEnum):
@@ -116,7 +124,8 @@ class Flags:
     enable_debug_adapter: bool
     debug_adapter_port: int | None
     agent_debugging_mode: bool
-    use_test_pilot: bool
+    profiler: bool
+    profiler_config: str | None
     extra_args: typing.List[str]
     env: typing.List[str]
     allow_temporary_package_server: bool
@@ -143,6 +152,11 @@ class Flags:
     summary_to_stdout: bool
     agent_output: bool
     save_log_path_to_file: str | None = None
+
+    # Extra `ffx profiler attach` / `ffx profiler stop` arguments loaded from
+    # --profiler-config by validate(). (`list` is shadowed by the --list field.)
+    profiler_attach_args: typing.List[str] = field(default_factory=lambda: [])
+    profiler_stop_args: typing.List[str] = field(default_factory=lambda: [])
 
     def validate(self) -> None:
         """Validate incoming flags, raising an exception on failure.
@@ -177,6 +191,14 @@ class Flags:
             raise FlagError("--agent-output is incompatible with --style")
         if self.device and self.host:
             raise FlagError("--device is incompatible with --host")
+        if self.host and (self.e2e or self.only_e2e):
+            raise FlagError(
+                "--host excludes E2E tests; omit --host when passing --e2e or --only-e2e"
+            )
+        if self.device and (self.e2e or self.only_e2e):
+            raise FlagError(
+                "--device excludes E2E tests; omit --device when passing --e2e or --only-e2e"
+            )
         if self.status_delay < 0.005:
             raise FlagError("--status-delay must be at least 0.005 (5ms)")
         if self.timeout and self.timeout < 0:
@@ -222,6 +244,66 @@ class Flags:
             )
         if self.replay_speed <= 0:
             raise FlagError("--replay-speed must be a positive number")
+
+        if self.profiler:
+            if self.host:
+                raise FlagError(
+                    "--profiler is not supported with host tests (--host)."
+                )
+            if (
+                self.list
+                or self.list_runtime_deps
+                or self.show_affected_tests
+                or self.previous is not None
+            ):
+                raise FlagError(
+                    "--profiler is incompatible with --list, --list-runtime-deps, --show-affected-tests, and --previous."
+                )
+            # TODO(https://fxbug.dev/535175455): Support profiling multiple iterations (--count > 1).
+            if self.count > 1:
+                raise FlagError(
+                    "--profiler can only profile a single test execution"
+                    " (https://fxbug.dev/535175455); use --count 1."
+                )
+            if self.debugger_will_attach():
+                raise FlagError(
+                    "--profiler is incompatible with --break-on-failure and --breakpoint."
+                )
+            if self.profiler_config is not None:
+                try:
+                    profiler_config = json.loads(
+                        pathlib.Path(self.profiler_config).read_text()
+                    )
+                except (OSError, ValueError) as e:
+                    raise FlagError(
+                        f"Failed to read --profiler-config {self.profiler_config}: {e}"
+                    )
+                if not isinstance(profiler_config, dict) or not set(
+                    profiler_config
+                ) <= {"attach", "stop"}:
+                    raise FlagError(
+                        '--profiler-config must be a JSON object with only "attach" and/or "stop" keys.'
+                    )
+                for key, value in profiler_config.items():
+                    if not isinstance(value, list) or not all(
+                        isinstance(arg, str) for arg in value
+                    ):
+                        raise FlagError(
+                            f'--profiler-config "{key}" must be a list of strings.'
+                        )
+                lifecycle_flags = {
+                    "--duration",
+                    "--abort",
+                    "--background",
+                    "--on-boot",
+                } & {arg for value in profiler_config.values() for arg in value}
+                if lifecycle_flags:
+                    flags_str = ", ".join(sorted(lifecycle_flags))
+                    raise FlagError(
+                        f"--profiler-config cannot include {flags_str}; fx test manages the session lifecycle."
+                    )
+                self.profiler_attach_args = profiler_config.get("attach", [])
+                self.profiler_stop_args = profiler_config.get("stop", [])
 
         if not termout.is_valid() and self.status:
             raise FlagError(
@@ -360,6 +442,13 @@ def parse_args(
             cli_args[:extra_index],
             cli_args[extra_index + 1 :],
         )
+
+    for arg in cli_args:
+        if arg in DEPRECATED_FLAGS:
+            print(f"WARNING: {arg} is deprecated.", file=sys.stderr)
+        elif arg in REMOVED_FLAGS:
+            raise argparse.ArgumentError(None, f"{arg} has been removed.")
+    cli_args = [arg for arg in cli_args if arg not in DEPRECATED_FLAGS]
 
     show_advanced_help = "--help-advanced" in cli_args
 
@@ -502,14 +591,14 @@ def parse_args(
         "--host",
         action="store_true",
         default=False,
-        help="Only run host tests. The opposite of `--device`",
+        help="Only run host tests (excludes E2E tests). The opposite of `--device`",
     )
     selection.add_argument(
         "-d",
         "--device",
         action="store_true",
         default=False,
-        help="Only run device tests. The opposite of `--host`",
+        help="Only run device tests (excludes E2E tests). The opposite of `--host`",
     )
     selection.add_argument(
         "--exact",
@@ -768,6 +857,25 @@ def parse_args(
         default=False,
     )
     execution.add_argument(
+        "--profiler",
+        action="store_true",
+        help="""Profile the selected test with the CPU profiler (`ffx profiler`). Requires selecting
+        exactly one device or e2e test. Wraps the test run between `ffx profiler attach
+        --background` (attaching to the test's component URL for device tests, or `--system-wide`
+        for e2e tests) and `ffx profiler stop --print-stats`, which writes profile.pb to the
+        current directory by default. Use --profiler-config to customize either command.""",
+        default=False,
+    )
+    execution.add_argument(
+        "--profiler-config",
+        metavar="PATH",
+        help="""JSON file with extra arguments for --profiler, keyed by `ffx profiler` subcommand,
+        e.g. {"attach": ["--sample-period-us", "1000"], "stop": ["--output-format", "perfetto",
+        "--output", "my_test.pftrace"]}. Only read when --profiler is set, so it can live in
+        ~/.fxtestrc.""",
+        default=None,
+    )
+    execution.add_argument(
         "--allow-temporary-package-server",
         action=argparse.BooleanOptionalAction,
         help=adv_help(
@@ -798,15 +906,6 @@ def parse_args(
         action=argparse.BooleanOptionalAction,
         help="Perform preflight device reachability and emulator checks before running tests. Use --no-preflight to skip these checks for faster startup when the device is already running. Default is True.",
         default=True,
-    )
-
-    execution.add_argument(
-        "--use-test-pilot",
-        action=argparse.BooleanOptionalAction,
-        help=adv_help(
-            """Run test components using test-pilot. Note: this flag is experimental"""
-        ),
-        default=False,
     )
 
     output = parser.add_argument_group("Output Options")

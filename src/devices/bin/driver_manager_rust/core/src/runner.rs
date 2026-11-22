@@ -9,7 +9,6 @@ use driver_manager_types::{
 use fidl_fuchsia_component as fcomponent;
 use fidl_fuchsia_component_decl as fdecl;
 use fidl_fuchsia_component_runner as frunner;
-use fidl_fuchsia_component_sandbox as fsandbox;
 use fidl_fuchsia_process as fprocess;
 use fuchsia_async as fasync;
 use fuchsia_component::server::{ServiceFs, ServiceObjLocal};
@@ -67,7 +66,7 @@ impl Runner {
         url: &str,
         collection_name: &str,
         offers: &[NodeOffer],
-        dictionary_ref: Option<fsandbox::DictionaryRef>,
+        dictionary_ref: Option<zx::EventPair>,
         skip_injected_offers: bool,
         controller: fidl::endpoints::ServerEnd<fcomponent::ControllerMarker>,
     ) -> Result<(fprocess::HandleInfo, StartRequestReceiver), zx::Status> {
@@ -104,7 +103,7 @@ impl Runner {
 
         let create_child_args = fcomponent::CreateChildArgs {
             dynamic_offers: Some(dynamic_offers),
-            dictionary: dictionary_ref,
+            additional_inputs: dictionary_ref,
             controller: Some(controller),
             ..Default::default()
         };

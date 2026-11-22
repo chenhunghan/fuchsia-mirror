@@ -560,7 +560,7 @@ impl Driver for MyDriver {
         Ok(Self { wake_lease: Mutex::new(None) })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 
     async fn system_suspend(&self) -> Result<(), DriverError> {
         // Dispatchers are paused and active callbacks have finished; place hardware in low-power mode.

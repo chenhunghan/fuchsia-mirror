@@ -152,6 +152,18 @@ func TestMakeShards(t *testing.T) {
 		},
 		Tags: []string{},
 	}
+	aemuEnv := build.Environment{
+		Dimensions: build.DimensionSet{"device_type": "AEMU"},
+		Tags:       []string{},
+	}
+	// aemuInternetEnv only differs from aemuEnv in emulator internet access.
+	aemuInternetEnv := build.Environment{
+		Dimensions: build.DimensionSet{"device_type": "AEMU"},
+		Emulator: build.EmulatorInfo{
+			AllowInternet: true,
+		},
+		Tags: []string{},
+	}
 
 	basicOpts := &ShardOptions{
 		Tags:       []string{},
@@ -238,6 +250,32 @@ func TestMakeShards(t *testing.T) {
 		// later in main.go.
 		expected := []*Shard{fuchsiaShard(env5, 1, 2), fuchsiaShard(env6, 3)}
 		assertEqual(t, expected, actual)
+	})
+
+	t.Run("tests requesting emulator internet access are sharded separately", func(t *testing.T) {
+		actual, err := MakeShards(
+			[]build.TestSpec{spec(1, aemuEnv), spec(2, aemuInternetEnv), spec(3, aemuEnv), spec(4, aemuInternetEnv, aemuEnv)},
+			nil,
+			basicOpts,
+			make(map[string]metadata.TestMetadata),
+		)
+		if err != nil {
+			t.Fatalf("MakeShards failed: %s", err)
+		}
+		// Tests that request internet access must never share a shard (and
+		// therefore a Swarming task and emulator) with tests that don't.
+		expected := []*Shard{fuchsiaShard(aemuEnv, 1, 3, 4), fuchsiaShard(aemuInternetEnv, 2, 4)}
+		assertEqual(t, expected, actual)
+		if environmentName(aemuEnv) == environmentName(aemuInternetEnv) {
+			t.Errorf("expected internet and non-internet environments to have different names, both are %q", environmentName(aemuEnv))
+		}
+		// `aemu_internet_env` in //build/testing/environments.gni also sets
+		// the emulator name to "internet", which shouldn't be repeated.
+		gnInternetEnv := aemuInternetEnv
+		gnInternetEnv.Emulator.Name = "internet"
+		if got, want := environmentName(gnInternetEnv), "AEMU-internet"; got != want {
+			t.Errorf("environmentName(%+v) = %q, want %q", gnInternetEnv.Emulator, got, want)
+		}
 	})
 
 	t.Run("metadata is added to tests", func(t *testing.T) {
@@ -393,6 +431,80 @@ func TestMakeShards(t *testing.T) {
 			isolateShard(fuchsiaShard(env2, 4), 2),
 		}
 		assertEqual(t, expected, actual)
+	})
+
+	t.Run("perf tests are in separate shards", func(t *testing.T) {
+		perf := func(test build.TestSpec) build.TestSpec {
+			test.Test.ProducesPerfResults = true
+			return test
+		}
+		specs := []build.TestSpec{perf(spec(1, env1)), spec(2, env1), perf(spec(3, env1))}
+		// The isolated perf test is in its own perf shard.
+		specs[2].Test.Isolated = true
+		specs[2].ExpectsSSH = false
+
+		withPerf := func(s *Shard) *Shard {
+			for i := range s.Tests {
+				s.Tests[i].Test.ProducesPerfResults = true
+			}
+			s.Name = PerfShardPrefix + s.Name
+			s.IsPerf = true
+			return s
+		}
+		isolatedPerfShard := withPerf(fuchsiaShard(env1, 3))
+		isolatedPerfShard.Name = fmt.Sprintf("%s-%s", isolatedPerfShard.Name, normalizeTestName(isolatedPerfShard.Tests[0].Test.Name))
+		isolatedPerfShard.Tests[0].Test.Isolated = true
+		isolatedPerfShard.ExpectsSSH = false
+
+		opts := *basicOpts
+		opts.SeparatePerfShards = true
+		actual, err := MakeShards(specs, nil, &opts, make(map[string]metadata.TestMetadata))
+		if err != nil {
+			t.Fatalf("MakeShards failed: %s", err)
+		}
+		assertEqual(t, []*Shard{withPerf(fuchsiaShard(env1, 1)), fuchsiaShard(env1, 2), isolatedPerfShard}, actual)
+
+		// Without SeparatePerfShards, perf tests are grouped with other tests.
+		actual, err = MakeShards(specs, nil, basicOpts, make(map[string]metadata.TestMetadata))
+		if err != nil {
+			t.Fatalf("MakeShards failed: %s", err)
+		}
+		sharedShard := fuchsiaShard(env1, 1, 2)
+		sharedShard.Tests[0].Test.ProducesPerfResults = true
+		isolatedShard := fuchsiaShard(env1, 3)
+		isolatedShard.Name = fmt.Sprintf("%s-%s", isolatedShard.Name, normalizeTestName(isolatedShard.Tests[0].Test.Name))
+		isolatedShard.Tests[0].Test.ProducesPerfResults = true
+		isolatedShard.Tests[0].Test.Isolated = true
+		isolatedShard.ExpectsSSH = false
+		assertEqual(t, []*Shard{sharedShard, isolatedShard}, actual)
+	})
+
+	t.Run("perf shards with product bundles and boot tests", func(t *testing.T) {
+		pbSpec := spec(1, env1)
+		pbSpec.ProductBundle = "pb"
+		pbSpec.Test.ProducesPerfResults = true
+		bootSpec := spec(2, env1)
+		bootSpec.IsBootTest = true
+		bootSpec.Test.ProducesPerfResults = true
+		opts := *basicOpts
+		opts.SeparatePerfShards = true
+		actual, err := MakeShards([]build.TestSpec{pbSpec, bootSpec}, nil, &opts, nil)
+		if err != nil {
+			t.Fatalf("MakeShards failed: %s", err)
+		}
+
+		pbShard := fuchsiaShard(env1, 1)
+		pbShard.Name = PerfShardPrefix + environmentName(env1) + "-pb"
+		pbShard.ProductBundle = "pb"
+		pbShard.IsPerf = true
+		pbShard.Tests[0].ProductBundle = "pb"
+		pbShard.Tests[0].Test.ProducesPerfResults = true
+		bootShard := fuchsiaShard(env1, 2)
+		bootShard.Name = fmt.Sprintf("%s%s-%s", PerfShardPrefix, environmentName(env1), normalizeTestName(bootShard.Tests[0].Test.Name))
+		bootShard.IsBootTest = true
+		bootShard.IsPerf = true
+		bootShard.Tests[0].Test.ProducesPerfResults = true
+		assertEqual(t, []*Shard{pbShard, bootShard}, actual)
 	})
 
 	t.Run("values from test-list.json are copied over", func(t *testing.T) {

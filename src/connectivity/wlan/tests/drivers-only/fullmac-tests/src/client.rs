@@ -85,10 +85,12 @@ async fn setup_connected_to_open_bss(
         };
 
         let (mut connect_txn_event_stream, _) = futures::join!(client_fut, driver_fut);
-        assert_matches!(connect_txn_event_stream.next().await,
-        Some(Ok(fidl_sme::ConnectTransactionEvent::OnConnectResult { result })) =>  {
-            assert_eq!(result.code, fidl_ieee80211::StatusCode::Success);
-        });
+        assert_matches!(
+            connect_txn_event_stream.next().await,
+            Some(Ok(fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. })) => {
+                assert_eq!(result.code, fidl_ieee80211::StatusCode::Success);
+            }
+        );
 
         // Don't include setup requests in request stream history().
         fullmac_driver.request_stream.clear_history();
@@ -252,7 +254,7 @@ async fn test_open_connect_request_success() {
 
         // Returns the Connect result code.
         assert_matches!(connect_txn_event,
-            fidl_sme::ConnectTransactionEvent::OnConnectResult { result } => {
+            fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. } => {
                 result
             }
         )
@@ -351,7 +353,7 @@ async fn test_open_connect_request_error() {
 
         // Returns the Connect result code.
         assert_matches!(connect_txn_event,
-            fidl_sme::ConnectTransactionEvent::OnConnectResult { result } => {
+            fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. } => {
                 result
             }
         )
@@ -453,7 +455,7 @@ async fn test_wpa2_connect_request_success() {
 
         // Returns the Connect result code.
         assert_matches!(connect_txn_event,
-            fidl_sme::ConnectTransactionEvent::OnConnectResult { result } => {
+            fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. } => {
                 result
             }
         )
@@ -647,7 +649,7 @@ async fn test_wpa3_connect_success() {
 
         // Returns the Connect result code.
         assert_matches!(connect_txn_event,
-            fidl_sme::ConnectTransactionEvent::OnConnectResult { result } => {
+            fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. } => {
                 result
             }
         )
@@ -936,7 +938,7 @@ async fn test_sme_disconnect() {
 
     assert_matches!(
         connect_txn_event_stream.next().await,
-        Some(Ok(fidl_sme::ConnectTransactionEvent::OnDisconnect { info })) => {
+        Some(Ok(fidl_sme::ConnectTransactionEvent::OnDisconnect { info, .. })) => {
             assert!(!info.is_sme_reconnecting);
             assert_eq!(info.disconnect_source,
                 fidl_sme::DisconnectSource::User(fidl_sme::UserDisconnectReason::FidlStopClientConnectionsRequest));
@@ -950,7 +952,7 @@ async fn test_remote_deauth() {
 
     fullmac_driver
         .ifc_proxy
-        .deauth_ind(&fidl_fullmac::WlanFullmacImplIfcDeauthIndRequest {
+        .deauth_ind(fidl_fullmac::WlanFullmacImplIfcDeauthIndRequest {
             peer_sta_address: Some(COMPATIBLE_OPEN_BSS.bssid.to_array()),
             reason_code: Some(fidl_ieee80211::ReasonCode::UnspecifiedReason),
             locally_initiated: Some(false),
@@ -976,7 +978,8 @@ async fn test_remote_deauth() {
                     mlme_event_name: fidl_sme::DisconnectMlmeEventName::DeauthenticateIndication,
                     reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason
                 }),
-            }
+            },
+            ..
         }))
     );
 }
@@ -988,7 +991,7 @@ async fn test_remote_disassoc_then_reconnect() {
 
     fullmac_driver
         .ifc_proxy
-        .disassoc_ind(&fidl_fullmac::WlanFullmacImplIfcDisassocIndRequest {
+        .disassoc_ind(fidl_fullmac::WlanFullmacImplIfcDisassocIndRequest {
             peer_sta_address: Some(COMPATIBLE_OPEN_BSS.bssid.to_array()),
             reason_code: Some(fidl_ieee80211::ReasonCode::ReasonInactivity),
             locally_initiated: Some(false),
@@ -1024,7 +1027,8 @@ async fn test_remote_disassoc_then_reconnect() {
                     mlme_event_name: fidl_sme::DisconnectMlmeEventName::DisassociateIndication,
                     reason_code: fidl_ieee80211::ReasonCode::ReasonInactivity,
                 }),
-            }
+            },
+            ..
         }))
     );
 
@@ -1056,7 +1060,8 @@ async fn test_remote_disassoc_then_reconnect() {
                 code: fidl_ieee80211::StatusCode::Success,
                 is_credential_rejected: false,
                 is_reconnect: true,
-            }
+            },
+            ..
         }))
     );
 }

@@ -205,10 +205,22 @@ pub struct RawDeliveryCommand {
     /// Used by child delivery commands to specify the target slice in the child VMO.
     pub child_target_offset: u64,
     pub child_length: u32,
-    pub padding: [u32; 5],
+    pub padding_0: u32,
+
+    /// Optional Fuchsia trace flow ID (`0` when unset) linking driver delivery to verification.
+    pub trace_flow_id: u64,
+    pub padding: [u32; 2],
 }
 
 const _: () = assert!(std::mem::size_of::<RawDeliveryCommand>() == 64);
+
+impl RawDeliveryCommand {
+    /// Attaches a Fuchsia trace flow ID to `self`.
+    pub fn with_trace_flow_id(mut self, trace_flow_id: u64) -> Self {
+        self.trace_flow_id = trace_flow_id;
+        self
+    }
+}
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum DeliveryCommand {
@@ -219,8 +231,8 @@ pub enum DeliveryCommand {
         key: u64,
         /// The logical byte offset of this data chunk in the target VMO.
         target_offset: u64,
-        /// The length of the data chunk in bytes. Must be a multiple of the blob's
-        /// `read_alignment` (or page-aligned for the final chunk of the blob).
+        /// The length of the data chunk in bytes. Must be a multiple of the verifier's read size
+        /// (or page-aligned for the final chunk of the blob).
         length: u32,
         /// The offset in this delivery queue where this data chunk resides.
         offset: u32,
@@ -233,11 +245,10 @@ pub enum DeliveryCommand {
         offset: u32,
         /// The length of the Merkle leaf data in bytes.
         length: u32,
-        /// The byte alignment (a multiple of the 8 KiB Merkle leaf size) used to configure
-        /// `ReadSizedMerkleVerifier` for this blob.
-        // This is needed per blob because compressed blobs adjust their verification alignment to
-        // their compression chunk size, and the verifier requires incoming `DeliveryCommand::Data`
-        // chunks to align to multiples of this value (except for the final chunk at EOF).
+        /// The initial file's delivery read alignment in bytes (a multiple of the 8 KiB Merkle
+        /// leaf size). The verifier chooses a `ReadSizedMerkleVerifier` read size compatible with
+        /// both this alignment and any chunk size used if the blob is later overwritten in a
+        /// different compression format.
         read_alignment: u32,
     },
     /// Informs the verifier that a parent blob chunk has been read and decompressed into the
@@ -292,7 +303,9 @@ impl From<DeliveryCommand> for RawDeliveryCommand {
                 offset,
                 child_target_offset: 0,
                 child_length: 0,
-                padding: [0; 5],
+                padding_0: 0,
+                trace_flow_id: 0,
+                padding: [0; 2],
             },
             DeliveryCommand::RegisterBlob { key, offset, length, read_alignment } => {
                 RawDeliveryCommand {
@@ -304,7 +317,9 @@ impl From<DeliveryCommand> for RawDeliveryCommand {
                     offset,
                     child_target_offset: 0,
                     child_length: 0,
-                    padding: [0; 5],
+                    padding_0: 0,
+                    trace_flow_id: 0,
+                    padding: [0; 2],
                 }
             }
             DeliveryCommand::ChildData {
@@ -324,7 +339,9 @@ impl From<DeliveryCommand> for RawDeliveryCommand {
                 offset,
                 child_target_offset,
                 child_length,
-                padding: [0; 5],
+                padding_0: 0,
+                trace_flow_id: 0,
+                padding: [0; 2],
             },
             DeliveryCommand::ChildInlineTail {
                 parent_byte_offset,
@@ -340,7 +357,9 @@ impl From<DeliveryCommand> for RawDeliveryCommand {
                 offset: 0,
                 child_target_offset,
                 child_length: tail_length,
-                padding: [0; 5],
+                padding_0: 0,
+                trace_flow_id: 0,
+                padding: [0; 2],
             },
         }
     }
@@ -470,5 +489,15 @@ mod tests {
             extent_count: 0,
         };
         assert!(MappingCommand::try_from(raw).is_err());
+    }
+
+    #[test]
+    fn test_raw_delivery_command_trace_flow_id() {
+        let cmd = DeliveryCommand::Data { key: 7, target_offset: 4096, length: 8192, offset: 4096 };
+        let raw = RawDeliveryCommand::from(cmd);
+        assert_eq!(raw.trace_flow_id, 0);
+        let raw_with_flow = raw.with_trace_flow_id(0x1234_5678_9abc_def0);
+        assert_eq!(raw_with_flow.trace_flow_id, 0x1234_5678_9abc_def0);
+        assert_eq!(DeliveryCommand::try_from(raw_with_flow).unwrap(), cmd);
     }
 }

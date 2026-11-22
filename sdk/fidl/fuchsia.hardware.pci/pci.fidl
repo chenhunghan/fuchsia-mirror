@@ -8,7 +8,8 @@ using zx;
 const MAX_CAPABILITIES uint32 = 32;
 const MAX_EXT_CAPABILITIES uint32 = 32;
 
-// Per the PCI specification.
+/// Per the PCI specification.
+const BASE_CONFIG_SIZE uint32 = 256;
 const EXTENDED_CONFIG_SIZE uint32 = 4096;
 /// Legacy interrupt pins INTA through INTD.
 const LEGACY_INTERRUPT_COUNT uint8 = 4;

@@ -277,7 +277,7 @@ scaling to a global open-source project. We could also have selected a different
 decision-making mechanism that balanced more towards consensus or more towards
 authority.
 
-## Prior art and references
+## Prior art and references {#prior-art-and-references}
 
 There is a good deal of prior art about decision-making processes for
 open-source projects. This proposal is strongly influenced by the following

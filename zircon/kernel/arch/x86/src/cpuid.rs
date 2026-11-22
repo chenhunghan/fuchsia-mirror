@@ -430,10 +430,10 @@ impl CpuId for RealCpuId {
 
 /// Test parsing of cpuid values.
 #[cfg(ktest)]
-#[unittest::suite(name = "cpuid_rust")]
+#[unittest::suite(name = "cpuid")]
 pub mod tests {
     use kprint::kprintln;
-    use unittest::{expect_eq, expect_false, expect_true};
+    use unittest::{expect_eq, expect_true};
 
     /// Static CPUID register snapshot for a test processor.
     #[derive(Clone, Copy)]
@@ -804,70 +804,89 @@ pub mod tests {
     pub static CPU_ID_CELERON_J3455: FakeCpuId = FakeCpuId::new(&TEST_DATA_CELERON_J3455);
     pub static CPU_ID_EPYC_7B13: FakeCpuId = FakeCpuId::new(&TEST_DATA_EPYC_7B13);
 
-    /// Parse feature flags and logical processor counts from static CPUID data.
-    #[test]
-    fn test_feature_flags() {
-        for cpu in [
-            &CPU_ID_CORE_I5_6260U,
-            &CPU_ID_XEON_2690V4,
-            &CPU_ID_CELERON_J3455,
-            &CPU_ID_THREAD_RIPPER_2970WX,
-            &CPU_ID_AMD_A4_9120C,
-            &CPU_ID_EPYC_7B13,
-        ] {
-            let data = cpu.data;
-            let features = cpu.read_features();
+    /// Returns whether `cpu` reports every feature in its test data and none of its missing
+    /// features, logging each mismatch.
+    fn features_match(cpu: &FakeCpuId) -> bool {
+        let data = cpu.data;
+        let features = cpu.read_features();
+        let mut ok = true;
 
-            // Features we know this processor has.
-            for &feature in data.features {
-                let result = features.has_feature(feature);
-                if !result {
-                    kprintln!(
-                        "Missing Feature: set:{} reg:{} bit:{}",
-                        feature.leaf as usize,
-                        feature.reg,
-                        feature.bit,
-                    );
-                }
-                expect_true!(result);
-            }
-
-            // Some features we know it doesn't.
-            for &feature in data.missing_features {
-                let result = features.has_feature(feature);
-                if result {
-                    kprintln!(
-                        "Extra Feature: set:{} reg:{} bit:{}",
-                        feature.leaf as usize,
-                        feature.reg,
-                        feature.bit,
-                    );
-                }
-                expect_false!(result);
+        // Features we know this processor has.
+        for &feature in data.features {
+            if !features.has_feature(feature) {
+                kprintln!(
+                    "Missing Feature: set:{} reg:{} bit:{}",
+                    feature.leaf as usize,
+                    feature.reg,
+                    feature.bit,
+                );
+                ok = false;
             }
         }
 
-        expect_eq!(32, CPU_ID_XEON_2690V4.read_features().max_logical_processors_in_package());
-        expect_eq!(
-            48,
-            CPU_ID_THREAD_RIPPER_2970WX.read_features().max_logical_processors_in_package()
-        );
+        // Some features we know it doesn't.
+        for &feature in data.missing_features {
+            if features.has_feature(feature) {
+                kprintln!(
+                    "Extra Feature: set:{} reg:{} bit:{}",
+                    feature.leaf as usize,
+                    feature.reg,
+                    feature.bit,
+                );
+                ok = false;
+            }
+        }
+        ok
     }
 
-    /// Parse manufacturer vendor strings and leaf bounds from static CPUID data.
+    /// Parse feature flags from static Intel data.
     #[test]
-    fn test_manufacturer_info() {
-        let intel = CPU_ID_XEON_2690V4.read_manufacturer_info();
-        expect_true!(&intel.manufacturer_id() == b"GenuineIntel");
-        expect_eq!(Manufacturer::Intel, intel.manufacturer());
-        expect_eq!(20usize, intel.highest_cpuid_leaf());
-        expect_eq!(0x8000_0008usize, intel.highest_extended_cpuid_leaf());
+    fn test_intel_feature_flags() {
+        for cpu in [&CPU_ID_CORE_I5_6260U, &CPU_ID_XEON_2690V4, &CPU_ID_CELERON_J3455] {
+            expect_true!(features_match(cpu));
+        }
+    }
 
-        let amd = CPU_ID_THREAD_RIPPER_2970WX.read_manufacturer_info();
-        expect_true!(&amd.manufacturer_id() == b"AuthenticAMD");
-        expect_eq!(Manufacturer::Amd, amd.manufacturer());
-        expect_eq!(13usize, amd.highest_cpuid_leaf());
-        expect_eq!(0x8000_001Fusize, amd.highest_extended_cpuid_leaf());
+    /// Parse feature flags from static AMD data.
+    #[test]
+    fn test_amd_feature_flags() {
+        for cpu in [&CPU_ID_THREAD_RIPPER_2970WX, &CPU_ID_AMD_A4_9120C, &CPU_ID_EPYC_7B13] {
+            expect_true!(features_match(cpu));
+        }
+    }
+
+    /// Parse maximum logical processors from Intel static data.
+    #[test]
+    fn test_intel_max_logical_processors() {
+        let features = CPU_ID_XEON_2690V4.read_features();
+        expect_eq!(32, features.max_logical_processors_in_package());
+    }
+
+    /// Parse maximum logical processors from AMD static data.
+    #[test]
+    fn test_amd_max_logical_processors() {
+        let features = CPU_ID_THREAD_RIPPER_2970WX.read_features();
+        expect_eq!(48, features.max_logical_processors_in_package());
+    }
+
+    /// Parse manufacturer info from Intel static data.
+    #[test]
+    fn test_intel_manufacturer_info() {
+        let info = CPU_ID_XEON_2690V4.read_manufacturer_info();
+        expect_true!(&info.manufacturer_id() == b"GenuineIntel");
+        expect_eq!(Manufacturer::Intel, info.manufacturer());
+        expect_eq!(20usize, info.highest_cpuid_leaf());
+        expect_eq!(0x8000_0008usize, info.highest_extended_cpuid_leaf());
+    }
+
+    /// Parse manufacturer info from AMD static data.
+    #[test]
+    fn test_amd_manufacturer_info() {
+        let info = CPU_ID_THREAD_RIPPER_2970WX.read_manufacturer_info();
+        expect_true!(&info.manufacturer_id() == b"AuthenticAMD");
+        expect_eq!(Manufacturer::Amd, info.manufacturer());
+        expect_eq!(13usize, info.highest_cpuid_leaf());
+        expect_eq!(0x8000_001Fusize, info.highest_extended_cpuid_leaf());
 
         let other = ManufacturerInfo::new(
             Registers { reg: [0x5, 0x3332_3130, 0x3b3a_3938, 0x3736_3534] },
@@ -879,27 +898,13 @@ pub mod tests {
         expect_eq!(0x8000_0001usize, other.highest_extended_cpuid_leaf());
     }
 
-    /// Decode processor family, model, and stepping across extended family/model regimes.
+    /// Parse processor id from Intel static data.
     #[test]
-    fn test_processor_id_decoding() {
-        let xeon = CPU_ID_XEON_2690V4.read_processor_id();
-        expect_eq!(6, xeon.family());
-        expect_eq!(79, xeon.model());
-        expect_eq!(1, xeon.stepping());
-
-        // Pulled from a Pixelbook 'Google Eve rev8'
-        let mut eve_regs = Registers::default();
-        eve_regs.reg[Registers::EAX] = 0x806e9;
-        let eve = ProcessorId::new(eve_regs);
-        expect_eq!(eve.signature(), 0x806e9);
-        expect_eq!(eve.family(), 6);
-        expect_eq!(eve.model(), 0x8e);
-        expect_eq!(eve.stepping(), 9);
-
-        let amd = CPU_ID_THREAD_RIPPER_2970WX.read_processor_id();
-        expect_eq!(0x17, amd.family());
-        expect_eq!(0x8, amd.model());
-        expect_eq!(0x2, amd.stepping());
+    fn test_intel_processor_id() {
+        let proc = CPU_ID_XEON_2690V4.read_processor_id();
+        expect_eq!(6, proc.family());
+        expect_eq!(79, proc.model());
+        expect_eq!(1, proc.stepping());
 
         let mut legacy_regs = Registers::default();
         legacy_regs.reg[Registers::EAX] = 0x00ff_0523;
@@ -908,5 +913,28 @@ pub mod tests {
         expect_eq!(legacy.family(), 5);
         expect_eq!(legacy.model(), 2);
         expect_eq!(legacy.stepping(), 3);
+    }
+
+    /// Parse processor id from AMD static data.
+    #[test]
+    fn test_amd_processor_id() {
+        let proc = CPU_ID_THREAD_RIPPER_2970WX.read_processor_id();
+        expect_eq!(0x17, proc.family());
+        expect_eq!(0x8, proc.model());
+        expect_eq!(0x2, proc.stepping());
+    }
+
+    /// Parse processor id from Eve static data.
+    #[test]
+    fn test_eve_processor_id() {
+        // Pulled from a Pixelbook 'Google Eve rev8'
+        let mut regs = Registers::default();
+        regs.reg[Registers::EAX] = 0x806e9;
+        let id = ProcessorId::new(regs);
+
+        expect_eq!(id.signature(), 0x806e9);
+        expect_eq!(id.family(), 6);
+        expect_eq!(id.model(), 0x8e);
+        expect_eq!(id.stepping(), 9);
     }
 }

@@ -72,4 +72,7 @@ struct arch_thread {
   x86_debug_state_t debug_state;
 };
 
+static_assert(sizeof(arch_thread) == 1152);
+static_assert(alignof(arch_thread) == 64);
+
 #endif  // ZIRCON_KERNEL_ARCH_X86_INCLUDE_ARCH_ARCH_THREAD_H_

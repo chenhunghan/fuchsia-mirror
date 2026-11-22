@@ -49,6 +49,7 @@ pub use counters::{
     ResourceCounterContext,
 };
 pub use data_structures::token_bucket::TokenBucket;
+pub use data_structures::vec_set::VecSet;
 pub use device::address::{
     AssignedAddrIpExt, IpAddressId, IpDeviceAddr, IpDeviceAddressIdContext, Ipv4DeviceAddr,
     Ipv6DeviceAddr, WeakIpAddressId,

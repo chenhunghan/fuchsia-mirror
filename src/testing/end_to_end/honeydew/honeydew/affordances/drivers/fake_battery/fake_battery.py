@@ -1,19 +1,125 @@
 # Copyright 2026 The Fuchsia Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-"""Abstract base class for FakeBattery affordance."""
+"""FakeBattery affordance implementation using FFX."""
 
-import abc
+import logging
 
+from honeydew import errors
 from honeydew.affordances import affordance
 from honeydew.affordances.drivers.battery_manager.utils import types
+from honeydew.affordances.drivers.fake_battery import (
+    errors as fake_battery_errors,
+)
+from honeydew.transports.ffx import errors as ffx_errors
+from honeydew.transports.ffx import ffx as ffx_transport
+from honeydew.transports.ffx import types as ffx_types
+
+_LOGGER: logging.Logger = logging.getLogger(__name__)
+
+_TOOL_URL: str = "fuchsia-pkg://fuchsia.com/fake_battery_cli_pkg"
+_REQUIRED_CAPABILITY: str = "test.hardwarepowercontrol.Service"
+_DEFAULT_MONIKER: str = "fake-battery"
 
 
 class FakeBattery(affordance.Affordance):
-    """Abstract base class for FakeBattery affordance to inspect and control the
-    simulated battery and power source states on the fake-battery driver."""
+    """FakeBattery affordance implementation using FFX component explore to invoke
+    the fake-battery-cli tool.
 
-    @abc.abstractmethod
+    Args:
+        device_name: Device name.
+        ffx: FFX transport instance.
+    """
+
+    def __init__(
+        self,
+        device_name: str,
+        ffx: ffx_transport.FFX,
+    ) -> None:
+        self._device_name: str = device_name
+        self._ffx: ffx_transport.FFX = ffx
+        self._moniker: str = _DEFAULT_MONIKER
+
+        self.verify_supported()
+
+    def verify_supported(self) -> None:
+        """Verifies that the FakeBattery affordance is supported on the target device.
+
+        Raises:
+            NotSupportedError: If fake-battery driver is not found on the device.
+        """
+        try:
+            output = self._ffx.run(
+                ["component", "capability", _REQUIRED_CAPABILITY],
+                machine=ffx_types.MachineFormat.RAW,
+            )
+            if _REQUIRED_CAPABILITY not in output:
+                raise errors.NotSupportedError(
+                    f"Capability '{_REQUIRED_CAPABILITY}' not supported on {self._device_name}"
+                )
+            self._moniker = self._parse_moniker_from_capability_output(output)
+        except ffx_errors.FfxCommandError as err:
+            raise errors.NotSupportedError(
+                f"FakeBattery affordance not supported on {self._device_name}"
+            ) from err
+
+    def _parse_moniker_from_capability_output(self, output: str) -> str:
+        """Parses the active fake-battery driver moniker from capability output."""
+        for line in output.splitlines():
+            line = line.strip()
+            if (
+                f"declared capability `{_REQUIRED_CAPABILITY}`" in line
+                and "devfs_driver" not in line
+            ):
+                parts = line.split("`")
+                if len(parts) >= 2 and parts[1] != _REQUIRED_CAPABILITY:
+                    return parts[1]
+            if (
+                f"exposed capability `{_REQUIRED_CAPABILITY}`" in line
+                or f"exposed `{_REQUIRED_CAPABILITY}`" in line
+            ):
+                parts = line.split("`")
+                if len(parts) >= 2 and parts[1] != _REQUIRED_CAPABILITY:
+                    return parts[1]
+        return _DEFAULT_MONIKER
+
+    def _run_tool_command(self, cmd_args: list[str]) -> str:
+        """Executes fake-battery-cli inside the driver component namespace.
+
+        Args:
+            cmd_args: List of command line arguments for the tool.
+
+        Returns:
+            Output from the tool.
+
+        Raises:
+            FakeBatteryCommandError: If the command fails to execute.
+        """
+        command_str = " ".join(cmd_args)
+        _LOGGER.debug(
+            "Executing fake-battery-cli command on %s (%s): %s",
+            self._device_name,
+            self._moniker,
+            command_str,
+        )
+        try:
+            return self._ffx.run(
+                [
+                    "component",
+                    "explore",
+                    self._moniker,
+                    "--tools",
+                    _TOOL_URL,
+                    "-c",
+                    command_str,
+                ],
+                machine=ffx_types.MachineFormat.RAW,
+            )
+        except ffx_errors.FfxCommandError as err:
+            raise fake_battery_errors.FakeBatteryCommandError(
+                f"Command '{command_str}' failed on {self._device_name}: {err}"
+            ) from err
+
     def set(
         self,
         level: float | None = None,
@@ -53,8 +159,62 @@ class FakeBattery(affordance.Affordance):
             FakeBatteryCommandError: If the fake-battery-cli command fails.
             ValueError: If level is invalid or no parameters are provided.
         """
+        if (
+            level is None
+            and source is None
+            and voltage_mv is None
+            and current_ua is None
+            and temp_mc is None
+            and health is None
+            and remaining_uah is None
+            and full_capacity_uah is None
+            and time_remaining_sec is None
+            and cycle_count is None
+        ):
+            raise ValueError(
+                "At least one parameter must be provided to set() fake battery state."
+            )
 
-    @abc.abstractmethod
+        if level is not None and not (0.0 <= level <= 100.0):
+            raise ValueError(
+                f"Level percent must be between 0.0 and 100.0, got {level}"
+            )
+
+        cmd_args: list[str] = ["fake-battery-cli", "set"]
+
+        if level is not None:
+            cmd_args.extend(["--level", str(level)])
+        if source is not None:
+            source_str = (
+                source.name.lower()
+                if isinstance(source, types.PowerSourceType)
+                else str(source).lower()
+            )
+            cmd_args.extend(["--source", source_str])
+        if voltage_mv is not None:
+            cmd_args.extend(["--voltage-mv", str(voltage_mv)])
+        if current_ua is not None:
+            cmd_args.extend(["--current-ua", str(current_ua)])
+        if temp_mc is not None:
+            cmd_args.extend(["--temp-mc", str(temp_mc)])
+        if health is not None:
+            health_str = (
+                health.name.lower()
+                if isinstance(health, types.HealthStatus)
+                else str(health).lower()
+            )
+            cmd_args.extend(["--health", health_str])
+        if remaining_uah is not None:
+            cmd_args.extend(["--remaining-uah", str(remaining_uah)])
+        if full_capacity_uah is not None:
+            cmd_args.extend(["--full-capacity-uah", str(full_capacity_uah)])
+        if time_remaining_sec is not None:
+            cmd_args.extend(["--time-remaining-sec", str(time_remaining_sec)])
+        if cycle_count is not None:
+            cmd_args.extend(["--cycle-count", str(cycle_count)])
+
+        return self._run_tool_command(cmd_args)
+
     def get(self) -> str:
         """Queries and displays current fake battery telemetry from the driver.
 
@@ -64,8 +224,8 @@ class FakeBattery(affordance.Affordance):
         Raises:
             FakeBatteryCommandError: If the fake-battery-cli command fails.
         """
+        return self._run_tool_command(["fake-battery-cli", "get"])
 
-    @abc.abstractmethod
     def set_level(self, level: float) -> str:
         """Sets the battery charge level percentage.
 
@@ -75,8 +235,8 @@ class FakeBattery(affordance.Affordance):
         Returns:
             Command output string.
         """
+        return self.set(level=level)
 
-    @abc.abstractmethod
     def set_charging(
         self,
         source: types.PowerSourceType | str = types.PowerSourceType.AC,
@@ -93,8 +253,13 @@ class FakeBattery(affordance.Affordance):
         Returns:
             Command output string.
         """
+        curr = abs(current_ua) if current_ua is not None else None
+        return self.set(
+            source=source,
+            voltage_mv=voltage_mv,
+            current_ua=curr,
+        )
 
-    @abc.abstractmethod
     def set_discharging(
         self,
         current_ua: int | None = None,
@@ -109,8 +274,13 @@ class FakeBattery(affordance.Affordance):
         Returns:
             Command output string.
         """
+        curr = -abs(current_ua) if current_ua is not None else None
+        return self.set(
+            source="none",
+            voltage_mv=voltage_mv,
+            current_ua=curr,
+        )
 
-    @abc.abstractmethod
     def set_health(self, health: types.HealthStatus | str) -> str:
         """Sets the battery health state.
 
@@ -120,8 +290,8 @@ class FakeBattery(affordance.Affordance):
         Returns:
             Command output string.
         """
+        return self.set(health=health)
 
-    @abc.abstractmethod
     def set_temperature(self, temp_mc: int) -> str:
         """Sets the battery temperature.
 
@@ -131,3 +301,4 @@ class FakeBattery(affordance.Affordance):
         Returns:
             Command output string.
         """
+        return self.set(temp_mc=temp_mc)

@@ -14,34 +14,79 @@
 //! Objects). If a process shares a memory region with another process, that other process (which
 //! may be compromised or untrusted) can modify the memory concurrently at any time.
 //!
-//! In Rust, creating a standard reference (`&[u8]` or `&mut [u8]`) over memory that can be
-//! modified concurrently by another party is **Undefined Behavior (UB)**. The Rust compiler
-//! assumes that the data behind a shared reference (`&T`) is immutable and cannot change
-//! unexpectedly, allowing it to perform optimizations that assume stability. If the memory changes
-//! concurrently, these assumptions are violated.
+//! In Rust and LLVM's memory model, two distinct pitfalls arise when interacting with
+//! concurrently-modifiable shared memory:
+//! 1. Creating a standard Rust reference (`&[u8]` or `&mut [u8]`) over memory that can be modified
+//!    concurrently by another party is **Undefined Behavior (UB)**. The Rust compiler assumes that
+//!    the data behind a shared reference (`&T`) is immutable and cannot change unexpectedly,
+//!    allowing optimizations that assume stability.
+//! 2. Even with raw pointers, plain `std::ptr::copy_nonoverlapping` or `std::ptr::read_unaligned`
+//!    allows LLVM optimization passes (`MemCpyOpt`, `SROA`, dead-store elimination, or load
+//!    rematerialization) to elide a staging copy and re-fetch directly from the shared region after
+//!    validation (a compiler-introduced Time-of-Check to Time-of-Use bug), or to propagate `undef`
+//!    assumptions past the copy.
 //!
-//! To avoid UB, we must avoid creating standard Rust references to concurrently-modifiable shared
-//! memory. Instead, we must treat the shared memory as raw pointers.
+//! [`PtrByteSlice`] and [`MutPtrByteSlice`] wrap raw pointers and provide a safe API tailored to
+//! each access pattern:
+//! 1. **Bulk copies and fills** (`copy_to_slice`, `to_vec`, `append_to`, `copy_from_slice`,
+//!    `copy_from_ptr_slice`, `fill`): perform `std::ptr::copy_nonoverlapping` or
+//!    `std::ptr::write_bytes` (preserving platform-optimized `memcpy`/`memset` throughput) followed
+//!    by a zero-instruction inline-assembly compiler barrier on the destination pointer. Because
+//!    the `asm!` block omits `nomem` and `readonly`, LLVM treats the destination buffer as both
+//!    read and modified by opaque assembly, preventing `MemCpyOpt`/`SROA` forwarding back to the
+//!    shared source, dead-store elimination, and `undef` propagation.
+//! 2. **Single typed accesses** (`read`, `write`): perform `std::ptr::read_volatile` and
+//!    `std::ptr::write_volatile` through a `#[repr(C, packed)]` wrapper, emitting single unaligned
+//!    loads/stores without byte-tearing and preventing load rematerialization or store elimination.
+//!    Reads require `T: Copy + FromBytes` so any byte pattern is valid; writes require
+//!    `T: Copy + IntoBytes + Immutable` so uninitialized padding bytes are never exposed.
+//! 3. **In-place typed iterators** (`iter_as`, `iter_as_mut`, `ElemMut`): perform plain aligned
+//!    `std::ptr::read` / `std::ptr::write` for single-pass in-place processing (such as checksums
+//!    or encryption) so hot loops retain full auto-vectorization and register allocation. They do
+//!    not freeze values against concurrent modification; callers needing TOCTOU protection should
+//!    copy data into private memory first or use [`PtrByteSlice::read`].
 //!
-//! [`PtrByteSlice`] and [`MutPtrByteSlice`] wrap these raw pointers and provide a safe API to:
-//! 1.  **Copy data out** of the shared region into private, allocator-managed memory (e.g., via
-//!     `copy_to_slice` or `to_vec`). Once copied, the private data is safe from concurrent
-//!     modification and can be safely represented as standard Rust slices.
-//! 2.  **Perform structured access** (e.g., via `iter_as` or `iter_as_mut`) only when the
-//!     underlying types guarantee that arbitrary byte patterns are valid (via `FromBytes`) and we
-//!     accept that the values might change (though we must still be careful about Time-of-Check to
-//!     Time-of-Use (TOCTOU) vulnerabilities).
-//!
-//! By removing direct access to the underlying slice (i.e., not providing `as_slice` or
-//! `as_mut_slice` methods), this crate enforces that helper components must copy data into trusted
-//! buffers before operating on it, ensuring both memory safety (no UB) and robustness against
-//! concurrent modification.
-//!
-//! This crate does nothing to prevent data races; responsibility for handling data races lies
-//! elsewhere.
+//! Callers remain responsible for higher-level synchronization and TOCTOU validation.
 
 use std::marker::PhantomData;
-use zerocopy::FromBytes;
+use zerocopy::{FromBytes, Immutable, IntoBytes};
+
+/// Wrapper with 1-byte alignment so `std::ptr::read_volatile` and `std::ptr::write_volatile` can
+/// access arbitrarily aligned `T` values as a single volatile load or store.
+#[repr(C, packed)]
+struct Unaligned<T>(T);
+
+/// Zero-instruction compiler barrier over memory reachable through `ptr` (emits no CPU fence
+/// instructions and constrains only the compiler).
+///
+/// Omitting `nomem` and `readonly` forces LLVM to treat memory reachable via `ptr` as both read
+/// and potentially modified (`ModRef`), preventing dead-store elimination of the preceding copy or
+/// fill, preventing `MemCpyOpt`/`SROA` from forwarding later reads back to an untrusted shared
+/// source, and acting as a memory-level `freeze` on the destination buffer.
+#[inline(always)]
+fn compiler_barrier(ptr: *mut u8) {
+    // In normal (LLVM) builds, `std::sync::atomic::compiler_fence` is insufficient because LLVM's
+    // `BasicAliasAnalysis` treats a `fence` as `NoModRef` on non-escaped local allocations (like a
+    // local staging buffer or freshly allocated `Vec`), allowing `MemCpyOpt` and `SROA` to optimize
+    // right past it; passing `ptr` as an operand to `asm!` forces LLVM to treat the destination
+    // buffer itself as `ModRef`.
+    #[cfg(not(miri))]
+    {
+        // SAFETY: The inline assembly contains only a comment and executes no instructions, so it
+        // never dereferences `ptr` and preserves all registers and flags.
+        unsafe {
+            std::arch::asm!("/* {0} */", in(reg) ptr, options(nostack, preserves_flags));
+        }
+    }
+    // Under `#[cfg(miri)]`, Miri rejects inline `asm!` as unsupported, and because Miri interprets
+    // unoptimized MIR directly without running LLVM passes (`MemCpyOpt`, `SROA`, DSE), the `asm!`
+    // clobber isn't needed.
+    #[cfg(miri)]
+    {
+        let _ = ptr;
+        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// A read-only view of a raw pointer byte slice, providing a safe API.
 #[derive(Debug, Copy, Clone)]
@@ -55,7 +100,10 @@ impl<'a> PtrByteSlice<'a> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `slice` is valid for reads for the lifetime `'a`.
+    /// The caller must ensure that for the lifetime `'a`:
+    /// - `slice` is valid for reads.
+    /// - `slice` does not alias or overlap with any active [`MutPtrByteSlice`] (other than one
+    ///   immutably borrowed for `'a`, as in [`MutPtrByteSlice::as_ptr_slice`]).
     pub unsafe fn new(slice: *const [u8]) -> Self {
         Self { slice, _marker: PhantomData }
     }
@@ -72,17 +120,23 @@ impl<'a> PtrByteSlice<'a> {
 
     /// Reads a copy of a value of type `T` from the start of the slice.
     ///
-    /// The read is performed unaligned, so the slice does not need to be aligned to `T`.
+    /// The read is performed as an unaligned volatile load, so the slice does not need to be
+    /// aligned to `T` and the compiler will not elide or rematerialize the load from shared memory.
+    #[inline]
     pub fn read<T: Copy + FromBytes>(&self) -> Option<T> {
         let size = std::mem::size_of::<T>();
         if size > self.len() {
             return None;
         }
-        let ptr = self.slice as *const T;
-        // SAFETY: `self.slice` points to valid memory of `self.len()` bytes.
-        // We verified that `size` is within bounds.
-        // We use read_unaligned so alignment is not required.
-        unsafe { Some(std::ptr::read_unaligned(ptr)) }
+        let ptr = self.as_ptr().cast::<Unaligned<T>>();
+        // SAFETY:
+        // - `self.as_ptr()` is valid for reads of `size` (`<= self.len()`) bytes (guaranteed by
+        //   `Self::new` and the bounds check above).
+        // - `Unaligned<T>` is `#[repr(C, packed)]`, so its alignment is 1 and
+        //   `size_of::<Unaligned<T>>() == size_of::<T>()`, making `read_volatile` valid at any
+        //   alignment.
+        // - `T: FromBytes` guarantees that any byte pattern is a valid `T`.
+        unsafe { Some(std::ptr::read_volatile(ptr).0) }
     }
 
     /// Copies the contents of this slice into a safe Rust mutable slice.
@@ -90,16 +144,21 @@ impl<'a> PtrByteSlice<'a> {
     /// # Panics
     ///
     /// Panics if `dest` is smaller than `self.len()`.
+    #[inline]
     pub fn copy_to_slice(&self, dest: &mut [u8]) {
-        assert!(dest.len() >= self.len());
+        let len = self.len();
+        assert!(dest.len() >= len);
+        if len == 0 {
+            return;
+        }
         // SAFETY:
-        // - `self.slice` is valid for reads of `self.len()` bytes (guaranteed by `Self::new`
-        //   safety contract).
-        // - `dest` is valid for writes of `self.len()` bytes (ensured by the assert).
+        // - `self.as_ptr()` is valid for reads of `len` bytes (guaranteed by `Self::new`).
+        // - `dest` is valid for writes of `len` bytes (ensured by the assert).
         // - The memory regions do not overlap because `dest` is an exclusive Rust reference.
         unsafe {
-            std::ptr::copy_nonoverlapping(self.slice as *const u8, dest.as_mut_ptr(), self.len());
+            std::ptr::copy_nonoverlapping(self.as_ptr(), dest.as_mut_ptr(), len);
         }
+        compiler_barrier(dest.as_mut_ptr());
     }
 
     /// Copies the contents of this slice into `dest` starting at byte offset `vmo_offset` within
@@ -166,37 +225,54 @@ impl<'a> PtrByteSlice<'a> {
 
     /// Allocates a new heap Vector and copies the contents into it.
     /// Bypasses zero-initialization using raw pointer copies.
+    #[inline]
     pub fn to_vec(&self) -> Vec<u8> {
-        let mut vec = Vec::with_capacity(self.len());
-        // SAFETY: The memory is guaranteed to be valid for reads up to `self.len()`
-        // for the lifetime of this pointer slice.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.slice as *const u8, vec.as_mut_ptr(), self.len());
-            vec.set_len(self.len());
+        let len = self.len();
+        let mut vec = Vec::with_capacity(len);
+        if len > 0 {
+            // SAFETY:
+            // - `self.as_ptr()` is valid for reads of `len` bytes (guaranteed by `Self::new`).
+            // - `vec` has capacity `>= len`, does not overlap `self`, and `copy_nonoverlapping`
+            //   initializes `0..len`, satisfying `Vec::set_len`.
+            unsafe {
+                std::ptr::copy_nonoverlapping(self.as_ptr(), vec.as_mut_ptr(), len);
+                compiler_barrier(vec.as_mut_ptr());
+                vec.set_len(len);
+            }
         }
         vec
     }
 
     /// Appends the contents of this slice to the given vector, expanding its capacity if needed.
     /// Bypasses zero-initialization using raw pointer copies.
+    #[inline]
     pub fn append_to(&self, vec: &mut Vec<u8>) {
+        let len = self.len();
+        if len == 0 {
+            return;
+        }
         let old_len = vec.len();
-        let new_len = old_len + self.len();
-        vec.reserve(self.len());
+        let new_len = old_len + len;
+        vec.reserve(len);
         // SAFETY:
-        // - We reserved enough capacity in `vec` to fit `self.len()` more bytes.
-        // - `dest_ptr` points to the unused capacity.
-        // - `self.slice` is valid for reads of `self.len()` bytes.
-        // - The source and destination do not overlap because `vec` is owned and allocated
-        //   separately.
+        // - `vec.reserve(len)` ensures at least `len` bytes of spare capacity, so `dest_ptr` is in
+        //   bounds of `vec`'s allocation and valid for writes of `len` bytes.
+        // - `self.as_ptr()` is valid for reads of `len` bytes (`Self::new`).
+        // - Source and destination do not overlap because `vec` owns its heap allocation
+        //   exclusively.
+        // - `copy_nonoverlapping` initializes `old_len..new_len`, satisfying `Vec::set_len`.
         unsafe {
             let dest_ptr = vec.as_mut_ptr().add(old_len);
-            std::ptr::copy_nonoverlapping(self.slice as *const u8, dest_ptr, self.len());
+            std::ptr::copy_nonoverlapping(self.as_ptr(), dest_ptr, len);
+            compiler_barrier(dest_ptr);
             vec.set_len(new_len);
         }
     }
 
     /// Returns an iterator over read-only typed elements `T`.
+    ///
+    /// Performs plain aligned reads intended for single-pass in-place processing (such as checksums
+    /// or encryption) rather than freezing values against concurrent mutation.
     ///
     /// # Panics
     ///
@@ -240,7 +316,10 @@ impl<'a> MutPtrByteSlice<'a> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `slice` is valid for reads and writes for the lifetime `'a`.
+    /// The caller must ensure that for the lifetime `'a`:
+    /// - `slice` is valid for reads and writes.
+    /// - `slice` does not alias or overlap with any other active `MutPtrByteSlice` or
+    ///   [`PtrByteSlice`].
     pub unsafe fn new(slice: *mut [u8]) -> Self {
         Self { slice, _marker: PhantomData }
     }
@@ -257,33 +336,34 @@ impl<'a> MutPtrByteSlice<'a> {
 
     /// Reads a copy of a value of type `T` from the start of the slice.
     ///
-    /// The read is performed unaligned, so the slice does not need to be aligned to `T`.
+    /// The read is performed as an unaligned volatile load, so the slice does not need to be
+    /// aligned to `T` and the compiler will not elide or rematerialize the load from shared memory.
+    #[inline]
     pub fn read<T: Copy + FromBytes>(&self) -> Option<T> {
-        let size = std::mem::size_of::<T>();
-        if size > self.len() {
-            return None;
-        }
-        let ptr = self.slice as *const T;
-        // SAFETY: `self.slice` points to valid memory of `self.len()` bytes.
-        // We verified that `size` is within bounds.
-        // We use read_unaligned so alignment is not required.
-        unsafe { Some(std::ptr::read_unaligned(ptr)) }
+        self.as_ptr_slice().read()
     }
 
     /// Writes a value of type `T` to the start of the slice.
     ///
-    /// The write is performed unaligned, so the slice does not need to be aligned to `T`.
-    pub fn write<T: Copy + FromBytes>(&mut self, val: T) -> Option<()> {
+    /// The write is performed as an unaligned volatile store, so the slice does not need to be
+    /// aligned to `T` and the compiler will not eliminate the write to shared memory.
+    #[inline]
+    pub fn write<T: Copy + IntoBytes + Immutable>(&mut self, val: T) -> Option<()> {
         let size = std::mem::size_of::<T>();
         if size > self.len() {
             return None;
         }
-        let ptr = self.slice as *mut T;
-        // SAFETY: `self.slice` points to valid memory of `self.len()` bytes.
-        // We verified that `size` is within bounds.
-        // We use write_unaligned so alignment is not required.
+        let ptr = self.as_mut_ptr().cast::<Unaligned<T>>();
+        // SAFETY:
+        // - `self.as_mut_ptr()` is valid for writes of `size` (`<= self.len()`) bytes (guaranteed
+        //   by `Self::new` and the bounds check above).
+        // - `Unaligned<T>` is `#[repr(C, packed)]`, so its alignment is 1 and
+        //   `size_of::<Unaligned<T>>() == size_of::<T>()`, making `write_volatile` valid at any
+        //   alignment.
+        // - `T: IntoBytes + Immutable` guarantees `val` has no uninitialized padding bytes or
+        //   interior mutability.
         unsafe {
-            std::ptr::write_unaligned(ptr, val);
+            std::ptr::write_volatile(ptr, Unaligned(val));
         }
         Some(())
     }
@@ -293,16 +373,9 @@ impl<'a> MutPtrByteSlice<'a> {
     /// # Panics
     ///
     /// Panics if `dest` is smaller than `self.len()`.
+    #[inline]
     pub fn copy_to_slice(&self, dest: &mut [u8]) {
-        assert!(dest.len() >= self.len());
-        // SAFETY:
-        // - `self.slice` is valid for reads of `self.len()` bytes (guaranteed by `Self::new`
-        //   safety contract).
-        // - `dest` is valid for writes of `self.len()` bytes (ensured by the assert).
-        // - The memory regions do not overlap because `dest` is an exclusive Rust reference.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.slice as *mut u8, dest.as_mut_ptr(), self.len());
-        }
+        self.as_ptr_slice().copy_to_slice(dest);
     }
 
     /// Copies the contents of another read-only pointer slice into this mutable slice.
@@ -310,16 +383,23 @@ impl<'a> MutPtrByteSlice<'a> {
     /// # Panics
     ///
     /// Panics if the lengths of the slices do not match.
+    #[inline]
     pub fn copy_from_ptr_slice(&mut self, src: PtrByteSlice<'_>) {
         assert_eq!(self.len(), src.len());
-        // SAFETY:
-        // - `self.slice` is valid for writes of `self.len()` bytes.
-        // - `src` is valid for reads of `src.len()` (which equals `self.len()`) bytes.
-        // - They do not overlap because `self` (mutable) and `src` (immutable) cannot alias
-        //   under Rust's borrowing rules.
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), self.slice as *mut u8, self.len());
+        let len = self.len();
+        if len == 0 {
+            return;
         }
+        // SAFETY:
+        // - `self.as_mut_ptr()` is valid for writes of `len` bytes (`Self::new`).
+        // - `src.as_ptr()` is valid for reads of `len` (`== src.len()`) bytes (`PtrByteSlice::new`).
+        // - The memory regions do not overlap because `Self::new` and `PtrByteSlice::new` require
+        //   that an active `MutPtrByteSlice` does not overlap with any other active `PtrByteSlice`
+        //   or `MutPtrByteSlice`, and `&mut self` prevents `src` from being borrowed from `self`.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.as_mut_ptr(), len);
+        }
+        compiler_barrier(self.as_mut_ptr());
     }
 
     /// Copies the contents of a standard safe slice into this mutable slice.
@@ -327,15 +407,21 @@ impl<'a> MutPtrByteSlice<'a> {
     /// # Panics
     ///
     /// Panics if the lengths of the slices do not match.
+    #[inline]
     pub fn copy_from_slice(&mut self, src: &[u8]) {
         assert_eq!(self.len(), src.len());
-        // SAFETY:
-        // - `self.slice` is valid for writes of `self.len()` bytes.
-        // - `src` is valid for reads of `src.len()` bytes.
-        // - They do not overlap because `src` is an exclusive Rust reference.
-        unsafe {
-            std::ptr::copy_nonoverlapping(src.as_ptr(), self.slice as *mut u8, self.len());
+        let len = self.len();
+        if len == 0 {
+            return;
         }
+        // SAFETY:
+        // - `self.as_mut_ptr()` is valid for writes of `len` bytes (`Self::new`).
+        // - `src` is valid for reads of `len` bytes and cannot overlap `self` (`src` is an
+        //   immutable Rust reference while `self` is mutated).
+        unsafe {
+            std::ptr::copy_nonoverlapping(src.as_ptr(), self.as_mut_ptr(), len);
+        }
+        compiler_barrier(self.as_mut_ptr());
     }
 
     /// Copies the contents of this slice into `dest` starting at byte offset `vmo_offset` within
@@ -358,16 +444,24 @@ impl<'a> MutPtrByteSlice<'a> {
     }
 
     /// Fills the slice with the given byte value.
+    #[inline]
     pub fn fill(&mut self, val: u8) {
-        // SAFETY: `self.slice` is valid for writes of `self.len()` bytes.
-        unsafe {
-            std::ptr::write_bytes(self.slice as *mut u8, val, self.len());
+        let len = self.len();
+        if len == 0 {
+            return;
         }
+        // SAFETY: `self.as_mut_ptr()` is valid for writes of `len` bytes (`Self::new`).
+        unsafe {
+            std::ptr::write_bytes(self.as_mut_ptr(), val, len);
+        }
+        compiler_barrier(self.as_mut_ptr());
     }
 
     /// Returns a read-only view of this slice.
     pub fn as_ptr_slice(&self) -> PtrByteSlice<'_> {
-        // SAFETY: `self.slice` is valid for reads (since it is valid for writes) for `'a`.
+        // SAFETY: `self.slice` is valid for reads for the borrow's lifetime (since it is valid for
+        // writes for `'a`), `&self` prevents mutation through `self` for that lifetime, and
+        // `Self::new` guarantees no other active `MutPtrByteSlice` overlaps `self.slice`.
         unsafe { PtrByteSlice::new(self.slice as *const [u8]) }
     }
 
@@ -433,43 +527,28 @@ impl<'a> MutPtrByteSlice<'a> {
 
     /// Allocates a new heap Vector and copies the contents into it.
     /// Bypasses zero-initialization using raw pointer copies.
+    #[inline]
     pub fn to_vec(&self) -> Vec<u8> {
-        let mut vec = Vec::with_capacity(self.len());
-        // SAFETY: The memory is guaranteed to be valid for reads up to `self.len()`
-        // for the lifetime of this pointer slice.
-        unsafe {
-            std::ptr::copy_nonoverlapping(self.slice as *mut u8, vec.as_mut_ptr(), self.len());
-            vec.set_len(self.len());
-        }
-        vec
+        self.as_ptr_slice().to_vec()
     }
 
     /// Appends the contents of this slice to the given vector, expanding its capacity if needed.
     /// Bypasses zero-initialization using raw pointer copies.
+    #[inline]
     pub fn append_to(&self, vec: &mut Vec<u8>) {
-        let old_len = vec.len();
-        let new_len = old_len + self.len();
-        vec.reserve(self.len());
-        // SAFETY:
-        // - We reserved enough capacity in `vec` to fit `self.len()` more bytes.
-        // - `dest_ptr` points to the unused capacity.
-        // - `self.slice` is valid for reads of `self.len()` bytes.
-        // - The source and destination do not overlap because `vec` is owned and allocated
-        //   separately.
-        unsafe {
-            let dest_ptr = vec.as_mut_ptr().add(old_len);
-            std::ptr::copy_nonoverlapping(self.slice as *mut u8, dest_ptr, self.len());
-            vec.set_len(new_len);
-        }
+        self.as_ptr_slice().append_to(vec);
     }
 
     /// Returns an iterator over mutable typed elements `T`.
+    ///
+    /// Performs plain aligned accesses intended for single-pass in-place processing (such as
+    /// encryption) rather than freezing values against concurrent mutation.
     ///
     /// # Panics
     ///
     /// Panics if the slice is not aligned to `T` or if its length in bytes is not a multiple of
     /// `size_of::<T>()`.
-    pub fn iter_as_mut<T: Copy + FromBytes>(&mut self) -> IterAsMut<'_, T> {
+    pub fn iter_as_mut<T>(&mut self) -> IterAsMut<'_, T> {
         let size = std::mem::size_of::<T>();
         let align = std::mem::align_of::<T>();
         assert!(size > 0, "Chunk size must be greater than 0");
@@ -645,7 +724,8 @@ impl<'a, T: Copy + FromBytes> Iterator for IterAs<'a, T> {
             // bounds of the allocation.
             self.ptr = unsafe { self.ptr.add(1) };
             // SAFETY: The pointer is guaranteed to be valid and aligned for `T` since alignment
-            // was verified when the iterator was created.
+            // was verified when the iterator was created, and `T: FromBytes` guarantees any byte
+            // pattern is valid.
             Some(unsafe { std::ptr::read(current) })
         }
     }
@@ -665,7 +745,7 @@ pub struct IterAsMut<'a, T> {
     _marker: PhantomData<&'a mut T>,
 }
 
-impl<'a, T: Copy + FromBytes> Iterator for IterAsMut<'a, T> {
+impl<'a, T> Iterator for IterAsMut<'a, T> {
     type Item = ElemMut<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -686,7 +766,7 @@ impl<'a, T: Copy + FromBytes> Iterator for IterAsMut<'a, T> {
     }
 }
 
-impl<T: Copy + FromBytes> ExactSizeIterator for IterAsMut<'_, T> {}
+impl<T> ExactSizeIterator for IterAsMut<'_, T> {}
 
 /// A mutable typed element of a pointer slice.
 pub struct ElemMut<'a, T> {
@@ -707,17 +787,21 @@ impl<T: Copy + FromBytes> ElemMut<'_, T> {
     /// Since alignment and validity were verified once when the iterator was created,
     /// this access is safe and fast.
     pub fn read(&self) -> T {
-        // SAFETY: The pointer is guaranteed to be valid and aligned.
+        // SAFETY: The pointer is guaranteed to be valid and aligned, and `T: FromBytes` guarantees
+        // any byte pattern is valid.
         unsafe { std::ptr::read(self.ptr) }
     }
+}
 
+impl<T: Copy + IntoBytes + Immutable> ElemMut<'_, T> {
     /// Writes a value to the element.
     ///
     /// Since alignment and validity were verified once when the iterator was created,
     /// this access is safe and fast.
     pub fn write(&self, val: T) {
-        // SAFETY: The pointer is guaranteed to be valid and aligned.
-        unsafe { std::ptr::write(self.ptr, val) }
+        // SAFETY: The pointer is guaranteed to be valid and aligned, and `T: IntoBytes +
+        // Immutable` guarantees `val` has no uninitialized padding bytes or interior mutability.
+        unsafe { std::ptr::write(self.ptr, val) };
     }
 }
 
@@ -833,9 +917,8 @@ impl std::io::Read for PtrByteSlice<'_> {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use zerocopy::IntoBytes;
 
-    #[derive(Copy, Clone, Debug, FromBytes, IntoBytes)]
+    #[derive(Copy, Clone, Debug, FromBytes, IntoBytes, Immutable)]
     #[repr(C, align(4))]
     struct Aligned4(u32);
 
@@ -963,6 +1046,12 @@ mod tests {
         let mut sub = slice.subslice_mut(1..8);
         sub.write(Aligned4(0xabcdef01)).unwrap();
         assert_eq!(sub.read::<Aligned4>().unwrap().0, 0xabcdef01);
+
+        // Test ElemMut read and write via iter_as_mut
+        let mut elems = slice.iter_as_mut::<Aligned4>();
+        let elem = elems.next().unwrap();
+        elem.write(Aligned4(0x99887766));
+        assert_eq!(elem.read().0, 0x99887766);
     }
 
     #[test]
@@ -1021,5 +1110,116 @@ mod tests {
         let mut mut_ptr_slice = MutPtrByteSlice::from(&mut dst_bytes[..]);
         mut_ptr_slice.copy_from_vmo(&vmo, 8).unwrap();
         assert_eq!(dst_bytes, src_bytes);
+    }
+
+    #[test]
+    fn test_unaligned_slice_copies_and_fills() {
+        let mut backing1 = [0xA5_u8; 128];
+        let mut backing2 = [0x5A_u8; 128];
+        let src = [0x42_u8; 32];
+
+        // SAFETY: Both backing arrays are 128-byte local arrays valid for 128 bytes.
+        let mut s1 = unsafe {
+            MutPtrByteSlice::new(std::ptr::slice_from_raw_parts_mut(backing1.as_mut_ptr(), 128))
+        };
+        let mut s2 = unsafe {
+            MutPtrByteSlice::new(std::ptr::slice_from_raw_parts_mut(backing2.as_mut_ptr(), 128))
+        };
+
+        // Unaligned subslice fill
+        s1.subslice_mut(3..35).fill(0x7F);
+        assert_eq!(&backing1[3..35], &[0x7F_u8; 32]);
+        assert_eq!(backing1[2], 0xA5);
+        assert_eq!(backing1[35], 0xA5);
+
+        // Unaligned copy_from_slice
+        s1.subslice_mut(5..37).copy_from_slice(&src);
+        assert_eq!(&backing1[5..37], &[0x42_u8; 32]);
+        assert_eq!(backing1[4], 0x7F);
+
+        // Unaligned copy_to_slice
+        let mut dest = [0u8; 32];
+        s1.as_ptr_slice().subslice(5..37).copy_to_slice(&mut dest);
+        assert_eq!(&dest[..], &src[..]);
+
+        // Unaligned copy_from_ptr_slice between distinct non-overlapping slices
+        s2.subslice_mut(7..39).copy_from_ptr_slice(s1.as_ptr_slice().subslice(5..37));
+        assert_eq!(&backing2[7..39], &[0x42_u8; 32]);
+        assert_eq!(backing2[6], 0x5A);
+        assert_eq!(backing2[39], 0x5A);
+    }
+
+    #[test]
+    fn test_zst_and_empty_slices() {
+        let mut slice = MutPtrByteSlice::from(&mut [][..]);
+        assert_eq!(slice.read::<()>(), Some(()));
+        assert_eq!(slice.write(()), Some(()));
+        slice.fill(0);
+        slice.copy_from_slice(&[]);
+        slice.copy_from_ptr_slice(PtrByteSlice::from(&[][..]));
+        let mut vec = Vec::new();
+        slice.append_to(&mut vec);
+        assert!(vec.is_empty());
+        assert!(slice.to_vec().is_empty());
+    }
+
+    #[test]
+    fn test_read_write_various_sizes_and_alignments() {
+        fn check<T: Copy + PartialEq + std::fmt::Debug + FromBytes + IntoBytes + Immutable>(
+            val: T,
+        ) {
+            const BUF_LEN: usize = 96;
+            const GUARD: usize = 16;
+            const CANARY: u8 = 0xD7;
+            #[repr(C, align(16))]
+            struct Buf([u8; BUF_LEN]);
+
+            let size = std::mem::size_of::<T>();
+            for off in 0..16 {
+                let mut buf = Buf([CANARY; BUF_LEN]);
+                let mut slice = MutPtrByteSlice::from(&mut buf.0[..]);
+                let mut sub = slice.subslice_mut(GUARD + off..GUARD + off + size);
+                assert_eq!(sub.write(val), Some(()));
+                assert_eq!(sub.read::<T>(), Some(val), "mismatch at off={off}, size={size}");
+                assert!(
+                    buf.0[..GUARD + off].iter().all(|&b| b == CANARY),
+                    "leading guard clobbered for off={off}, size={size}"
+                );
+                assert!(
+                    buf.0[GUARD + off + size..].iter().all(|&b| b == CANARY),
+                    "trailing guard clobbered for off={off}, size={size}"
+                );
+            }
+        }
+
+        check(());
+        check(0xA5_u8);
+        check(0x1234_u16);
+        check([0x11_u8, 0x22, 0x33]);
+        check(0x1234_5678_u32);
+        check(0x0123_4567_89AB_CDEF_u64);
+        check([0x77_u8; 12]);
+        check(0x0123_4567_89AB_CDEF_FEDC_BA98_7654_3210_u128);
+        check([0x3A_u8; 24]);
+    }
+
+    #[test]
+    fn test_write_only_type() {
+        #[derive(Copy, Clone, Debug, PartialEq, IntoBytes, Immutable)]
+        #[repr(transparent)]
+        struct WriteOnlyFlag(bool);
+
+        let mut bytes = [0u8; 8];
+        // SAFETY: `bytes` is an 8-byte local array, valid for a mutable slice of 8 bytes.
+        let mut slice = unsafe {
+            MutPtrByteSlice::new(std::ptr::slice_from_raw_parts_mut(bytes.as_mut_ptr(), 8))
+        };
+        assert_eq!(slice.write(WriteOnlyFlag(true)), Some(()));
+        assert_eq!(bytes[0], 1);
+
+        let mut elems = slice.iter_as_mut::<WriteOnlyFlag>();
+        let elem = elems.next().unwrap();
+        elem.write(WriteOnlyFlag(false));
+        assert_eq!(bytes[0], 0);
     }
 }

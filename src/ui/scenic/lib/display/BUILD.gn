@@ -6,6 +6,7 @@ source_set("types") {
   sources = [
     "fidl_id_types.h",
     "fidl_typedefs.h",
+    "typedefs.h",
   ]
 
   public_deps = [
@@ -20,8 +21,6 @@ source_set("display") {
   sources = [
     "color_converter.cc",
     "color_converter.h",
-    "coordinator_proxy.cc",
-    "coordinator_proxy.h",
     "display.cc",
     "display.h",
     "display_coordinator_listener.cc",
@@ -30,11 +29,6 @@ source_set("display") {
     "display_manager.h",
     "display_power_manager.cc",
     "display_power_manager.h",
-    "internal/check_config_cache.h",
-    "internal/display_equivalence.h",
-    "internal/layer.cc",
-    "internal/layer.h",
-    "internal/layer_equivalence.h",
     "util.cc",
     "util.h",
     "vsync_source.cc",
@@ -45,6 +39,8 @@ source_set("display") {
 
   public_deps = [
     ":types",
+    "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
     "//sdk/fidl/fuchsia.ui.display.color:fuchsia.ui.display.color_cpp",
     "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_cpp",
     "//sdk/lib/async:async-cpp",
@@ -52,6 +48,7 @@ source_set("display") {
     "//sdk/lib/sys/cpp",
     "//src/lib/fsl",
     "//src/lib/fxl",
+    "//src/ui/scenic/lib/display/coordinator_proxy",
     "//src/ui/scenic/lib/utils",
     "//third_party/glm",
     "//zircon/system/ulib/fbl",

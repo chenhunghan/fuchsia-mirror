@@ -553,7 +553,7 @@ A system tracing IOB may use a configuration like the following:
   - Usage: Lock-free ring buffer for high rate trace events. Tolerant to data
     loss in circular buffer mode.
 
-### System Logging
+### System logging {#system-logging}
 
 IOBs are intended to provide the foundation for safer, more efficient system
 logging by supporting the following:

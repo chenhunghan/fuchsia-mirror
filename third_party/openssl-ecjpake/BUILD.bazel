@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":openssl-ecjpake_tests"],
+)
+
+# LINT.IfChange(openssl-ecjpake_warnings)
+# Suppress warnings in upstream code that are triggered by Fuchsia compilation
+# flags.
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "openssl-ecjpake_warnings",
+    cflags = ["-Wno-conversion"],
+)
+# LINT.ThenChange(BUILD.gn:openssl-ecjpake_warnings)
+
+fx_cc_library(
+    name = "openssl-ecjpake",
+    srcs = [
+        "src/ecjpake.c",
+        "src/ecjpake_err.c",
+    ],
+    hdrs = ["src/openssl/ecjpake.h"],
+    build_flags = [":openssl-ecjpake_warnings"],
+    includes = [
+        "src",
+        "src/openssl",
+    ],
+    public_configs = [":openssl-ecjpake_config"],
+    visibility = ["//third_party/openweave-core/src/include:__pkg__"],
+    deps = ["//third_party/boringssl"],
+    alwayslink = True,
+)
+
+# LINT.IfChange(openssl-ecjpake_test_config)
+# Suppress warnings in upstream code that are triggered by Fuchsia compilation
+# flags.
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "openssl-ecjpake_test_config",
+    testonly = True,
+    cflags = [
+        "-Wno-error=sign-compare",
+        "-Wno-conversion",
+        "-Wno-incompatible-pointer-types-discards-qualifiers",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:openssl-ecjpake_test_config)
+
+fx_cc_test_binary(
+    name = "openssl-ecjpake_test",
+    srcs = ["src/ecjpaketest.c"],
+    aspect_hints = ["//src/sys/testing/elftest"],
+    build_flags = [":openssl-ecjpake_test_config"],
+    deps = [
+        ":openssl-ecjpake",
+        "//third_party/boringssl",
+    ],
+)
+
+fx_unittest_package(
+    name = "openssl-ecjpake_tests",
+    unit_tests = [":openssl-ecjpake_test"],
+)

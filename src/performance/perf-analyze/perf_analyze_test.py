@@ -186,6 +186,25 @@ class PerfAnalyzeTest(unittest.TestCase):
         output = stdout.getvalue().strip()
         self.assertIn("mock-analyze\tMock analyze plugin", output)
 
+    def test_default_list_plugins_includes_critical_path(self) -> None:
+        """Tests that default plugin registration includes critical-path."""
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            exit_code = main(["analyze", "--list-plugins"])
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        for expected_plugin in (
+            "app-launch",
+            "binder",
+            "cpu",
+            "critical-path",
+        ):
+            self.assertIn(
+                expected_plugin,
+                output,
+                msg=f"default --list-plugins output missing {expected_plugin!r}: {output!r}",
+            )
+
     def test_analyze_plugin_routing(self) -> None:
         """Tests routing and execution of an analyze plugin."""
         plugins = [MockAnalyzePlugin()]

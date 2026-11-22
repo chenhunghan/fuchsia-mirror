@@ -68,8 +68,7 @@ pub static mut arm64_isa_features: u32 = 0;
 pub static arm64_sve_features: AtomicU32 = AtomicU32::new(0);
 
 /// Whether FEAT_PMUv3 is implemented.
-#[unsafe(no_mangle)]
-pub static mut feat_pmuv3_enabled: bool = false;
+pub(super) static mut FEAT_PMUV3_ENABLED: bool = false;
 
 /// MMU features.
 #[unsafe(no_mangle)]
@@ -104,9 +103,9 @@ pub static mut arm64_cache_features: Arm64CacheFeatures = Arm64CacheFeatures {
 #[unsafe(no_mangle)]
 pub static mut arm64_dcache_size: u32 = 32;
 
-/// MPIDR_EL1, read as a plain `u64`: only Aff0-Aff3 and bit 0 are used, and
+/// MPIDR_EL1, read as a plain `u64`: only Aff0-Aff3, bit 0 and the MT bit (24) are used, and
 /// `MultiprocessorAffinityRegister::from` would debug-assert the RES1 bit 31.
-pub(super) const MPIDR_EL1_RAW: SysReg<spec::MPIDR_EL1, u64> = SysReg::new();
+pub const MPIDR_EL1_RAW: SysReg<spec::MPIDR_EL1, u64> = SysReg::new();
 
 /// `MPIDR_MT` from `<arch/arm64/mp.h>`, which is defined as `(0x1ULL < 24)`: a comparison, so 1.
 const MPIDR_MT: u64 = 1;
@@ -304,8 +303,7 @@ unsafe fn arm64_dump_cache_info(cpu: cpu_num_t) {
 }
 
 /// Returns the microarchitecture that a MIDR_EL1 value names.
-#[unsafe(no_mangle)]
-pub extern "C" fn midr_to_microarch(midr: u64) -> arm64_microarch {
+pub(super) fn midr_to_microarch(midr: u64) -> arm64_microarch {
     let midr = MainIdRegister::from(midr);
     let implementer = midr.implementer();
     let partnum = midr.part_num();
@@ -514,8 +512,7 @@ fn arm64_sve_feature_test(feature: u32) -> bool {
 }
 
 /// Returns true if the current CPU is the first member of a cluster according to MPIDR.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_feature_current_is_first_in_cluster() -> bool {
+pub(super) fn arm64_feature_current_is_first_in_cluster() -> bool {
     let mpidr = MPIDR_EL1_RAW.read();
 
     // Note: this test is not strictly correct, since the affinity fields really do not encode the
@@ -536,8 +533,7 @@ pub extern "C" fn arm64_feature_current_is_first_in_cluster() -> bool {
 ///
 /// Each CPU calls this as it starts, before anything reads its cache info, and CPU 0 calls it
 /// before any other CPU starts.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_feature_init() {
+pub(super) unsafe fn arm64_feature_init() {
     // set up some global constants based on the boot cpu
     let cpu = arch_curr_cpu_num();
     if cpu == 0 {
@@ -765,7 +761,7 @@ pub unsafe extern "C" fn arm64_feature_init() {
         // Check if FEAT_PMUv3 is enabled.
         let pmu_version = ID_AA64DFR0_EL1.read().pmu_ver();
         // SAFETY: Nothing else accesses the feature globals now; see above.
-        unsafe { feat_pmuv3_enabled = pmu_version > 0b0000 && pmu_version < 0b1111 };
+        unsafe { FEAT_PMUV3_ENABLED = pmu_version > 0b0000 && pmu_version < 0b1111 };
 
         let mmfr4 = ID_AA64MMFR4_EL1.read();
 
@@ -904,8 +900,7 @@ fn print_isa_features() {
 /// # Safety
 ///
 /// The calling CPU has finished `arm64_feature_init`, and the call stays on that CPU.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_feature_debug(full: bool) {
+pub(super) unsafe fn arm64_feature_debug(full: bool) {
     print_cpu_info();
 
     if full {
@@ -974,8 +969,7 @@ pub unsafe extern "C" fn arm64_feature_debug(full: bool) {
 }
 
 /// Writes the name of the calling CPU's core to `stream`.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_print_midr_cpu_name(stream: &mut FILE) {
+pub fn arm64_print_midr_cpu_name(stream: &mut FILE) {
     let midr = MIDR_EL1.read().bits();
     let _ = midr_to_core_string(midr, stream);
 }

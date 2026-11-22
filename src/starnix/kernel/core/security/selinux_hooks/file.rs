@@ -10,7 +10,7 @@ use super::{
     FileObjectOpenState, FileObjectState, FsNodeSidAndClass, NO_PERMISSIONS, NonPrivateFsNode,
     PermissionFlags, build_permission_check, check_permission, check_permissions,
     common_fs_node_permissions_from_flags, current_task_state, fs_node_effective_sid_and_class,
-    has_file_ioctl_permission, has_file_permissions, is_internal_operation, permissions_from_flags,
+    has_file_ioctl_permission, has_file_permissions, is_internal_operation,
 };
 use crate::bpf::fs::BpfHandle;
 use crate::mm::{Mapping, MappingNameRef, MappingOptions, ProtectionFlags};
@@ -223,7 +223,7 @@ pub(in crate::security) fn check_file_ioctl_access(
             current_task,
             subject_sid,
             file,
-            &[CommonFsNodePermission::GetAttr],
+            CommonFsNodePermission::GetAttr,
             current_task.into(),
         ),
         FS_IOC_SETFLAGS | FS_IOC_SETVERSION => has_file_permissions(
@@ -231,7 +231,7 @@ pub(in crate::security) fn check_file_ioctl_access(
             current_task,
             subject_sid,
             file,
-            &[CommonFsNodePermission::SetAttr],
+            CommonFsNodePermission::SetAttr,
             current_task.into(),
         ),
         FIONBIO | FIOASYNC => has_file_permissions(
@@ -273,7 +273,7 @@ pub(in crate::security) fn check_file_lock_access(
         current_task,
         subject_sid,
         file,
-        &[CommonFsNodePermission::Lock],
+        CommonFsNodePermission::Lock,
         current_task.into(),
     )
 }
@@ -304,7 +304,7 @@ pub(in crate::security) fn check_file_fcntl_access(
                 current_task,
                 subject_sid,
                 file,
-                &[CommonFsNodePermission::Write],
+                CommonFsNodePermission::Write,
                 current_task.into(),
             )
         }
@@ -420,7 +420,7 @@ pub(in crate::security) fn mmap_file(
             &current_task,
             current_sid,
             file,
-            &[CommonFsNodePermission::Map],
+            CommonFsNodePermission::Map,
             current_task.into(),
         )?;
     }
@@ -480,7 +480,6 @@ fn file_map_prot_check(
     }
 
     if let Some(fs_node) = fs_node {
-        let node_class = fs_node_effective_sid_and_class(fs_node).class;
         let flags = {
             let mut flags: PermissionFlags = prot.into();
             // After mapping a file into memory you can read its content, so
@@ -494,14 +493,13 @@ fn file_map_prot_check(
             }
             flags
         };
-        let permissions = permissions_from_flags(flags, node_class);
         let current_sid = current_task_state(current_task).current_sid;
         has_fs_node_permissions(
             &build_permission_check(current_task, security_server),
             current_task,
             current_sid,
             fs_node,
-            &permissions,
+            flags,
             current_task.into(),
         )?;
     }

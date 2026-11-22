@@ -15,6 +15,8 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace {
 
@@ -203,21 +205,26 @@ zx::result<> OutgoingDirectory::AddServiceAt(ServiceInstanceHandler handler, std
   }
 
   std::string fullpath = MakePath({path, service, instance});
+  // Members added so far by this call. If a later member fails, only these are
+  // removed again, so a failed call never alters an instance that was already
+  // published (e.g. a duplicate AddService fails with ZX_ERR_ALREADY_EXISTS and
+  // leaves the existing instance intact).
+  std::vector<std::string_view> added_members;
   for (auto& [member_name, member_handler] : handlers) {
     zx::result<> result = AddUnmanagedProtocolAt(std::move(member_handler), fullpath, member_name);
     if (result.is_error()) {
-      // If we encounter an error with any of the instance members, scrub entire
-      // directory entry.
-      for (auto& [member_name_2, member_handler_2] : handlers) {
-        // It's possible that we'll get an error from this call if we hit an
-        // error before attempting to add everything in our list. The error is
-        // harmless, so we ignore the return value.
-        zx::result<> result_2 = RemoveUnmanagedProtocolAt(fullpath, member_name_2);
-        (void)result_2;
+      for (std::string_view added_member : added_members) {
+        // The member was added by this call, so removing it cannot fail.
+        [[maybe_unused]] zx::result<> removed = RemoveUnmanagedProtocolAt(fullpath, added_member);
+        ZX_DEBUG_ASSERT(removed.is_ok());
       }
-      inner().registered_handlers_.erase(fullpath);
+      if (auto it = inner().registered_handlers_.find(fullpath);
+          it != inner().registered_handlers_.end() && it->second.empty()) {
+        inner().registered_handlers_.erase(it);
+      }
       return result;
     }
+    added_members.push_back(member_name);
   }
 
   return zx::ok();

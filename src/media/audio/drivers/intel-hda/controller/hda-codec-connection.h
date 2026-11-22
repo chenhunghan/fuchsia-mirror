@@ -6,8 +6,8 @@
 #define SRC_MEDIA_AUDIO_DRIVERS_INTEL_HDA_CONTROLLER_HDA_CODEC_CONNECTION_H_
 
 #include <fidl/fuchsia.hardware.intel.hda/cpp/wire.h>
-#include <fuchsia/hardware/intelhda/codec/c/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/device.h>
 #include <lib/zircon-internal/thread_annotations.h>
@@ -16,6 +16,7 @@
 #include <string.h>
 
 #include <memory>
+#include <optional>
 
 #include <fbl/mutex.h>
 #include <fbl/ref_counted.h>
@@ -82,12 +83,25 @@ class HdaCodecConnection : public fbl::RefCounted<HdaCodecConnection>,
   static constexpr size_t PROP_COUNT = 3;
 
   static zx_protocol_device_t CODEC_DEVICE_THUNKS;
-  static ihda_codec_protocol_ops_t CODEC_PROTO_THUNKS;
+
+  // Serves fuchsia.hardware.intel.hda/CodecDevice to codec drivers through CodecService. Its
+  // GetChannel returns the codec driver channel, unlike the devfs server, which returns the user
+  // channel.
+  class CodecDriverServer : public fidl::WireServer<fuchsia_hardware_intel_hda::CodecDevice> {
+   public:
+    explicit CodecDriverServer(HdaCodecConnection* codec) : codec_(codec) {}
+    void GetChannel(GetChannelCompleter::Sync& completer) override;
+
+   private:
+    HdaCodecConnection* const codec_;
+  };
 
   HdaCodecConnection(IntelHDAController& controller, uint8_t codec_id);
   ~HdaCodecConnection() override { ZX_DEBUG_ASSERT(state_ == State::SHUT_DOWN); }
 
   zx_status_t PublishDevice();
+  // Serves CodecService on a new outgoing directory, on loop_.
+  zx::result<fidl::ClientEnd<fuchsia_io::Directory>> ServeOutgoing();
   void GetChannelSignalled(async_dispatcher_t* dispatcher, async::WaitBase* wait,
                            zx_status_t status, const zx_packet_signal_t* signal);
   void GetDispatcherChannelSignalled(async_dispatcher_t* dispatcher, async::WaitBase* wait,
@@ -100,8 +114,8 @@ class HdaCodecConnection : public fbl::RefCounted<HdaCodecConnection>,
   zx_status_t ParseVidDid(const CodecResponse& resp);
   zx_status_t ParseRevisionId(const CodecResponse& resp);
 
-  // ZX_PROTOCOL_IHDA_CODEC Interface
-  zx_status_t CodecGetDispatcherChannel(zx_handle_t* remote_endpoint_out);
+  // Returns the codec driver channel used by IntelHDACodecDriverBase.
+  zx::result<zx::channel> CodecGetDispatcherChannel();
 
   // Thunks for interacting with clients and codec drivers.
   void GetChannel(GetChannelCompleter::Sync& completer) override;
@@ -151,6 +165,10 @@ class HdaCodecConnection : public fbl::RefCounted<HdaCodecConnection>,
   static ProbeCommandListEntry PROBE_COMMANDS[];
 
   async::Loop loop_;
+  // Accessed only on loop_.
+  CodecDriverServer codec_driver_server_{this};
+  fidl::ServerBindingGroup<fuchsia_hardware_intel_hda::CodecDevice> codec_driver_bindings_;
+  std::optional<component::OutgoingDirectory> outgoing_;
 };
 
 }  // namespace audio::intel_hda

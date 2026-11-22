@@ -8,6 +8,8 @@
 #include <lib/zx/vmo.h>
 #include <stdio.h>
 
+#include <fbl/algorithm.h>
+
 CodecBuffer::CodecBuffer(uint32_t buffer_index, size_t size_bytes)
     : buffer_index_(buffer_index), size_bytes_(size_bytes) {}
 
@@ -15,7 +17,11 @@ uint32_t CodecBuffer::buffer_index() const { return buffer_index_; }
 
 CodecBuffer::~CodecBuffer() {
   if (base_) {
-    zx_status_t res = zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(base_), size_bytes_);
+    const uintptr_t page_size = zx_system_get_page_size();
+    const uintptr_t aligned_addr = fbl::round_down(reinterpret_cast<uintptr_t>(base_), page_size);
+    const size_t len =
+        fbl::round_up(reinterpret_cast<uintptr_t>(base_) + size_bytes_, page_size) - aligned_addr;
+    const zx_status_t res = zx::vmar::root_self()->unmap(aligned_addr, len);
     if (res != ZX_OK) {
       FX_PLOGS(FATAL, res) << "Failed to unmap " << size_bytes_ << " byte buffer vmo";
     }
@@ -45,14 +51,21 @@ bool CodecBuffer::CreateFromVmoInternal(zx::vmo vmo, uint32_t vmo_usable_start,
   if (need_write) {
     options |= ZX_VM_PERM_WRITE;
   }
+  const uint64_t page_size = zx_system_get_page_size();
+  const uint64_t adjusted_vmo_offset =
+      fbl::round_down(static_cast<uint64_t>(vmo_usable_start), page_size);
+  const size_t len =
+      fbl::round_up(static_cast<uint64_t>(vmo_usable_start) + vmo_usable_size, page_size) -
+      adjusted_vmo_offset;
+
   uintptr_t tmp;
-  zx_status_t status =
-      zx::vmar::root_self()->map(options, 0, vmo, vmo_usable_start, vmo_usable_size, &tmp);
+  const zx_status_t status =
+      zx::vmar::root_self()->map(options, 0, vmo, adjusted_vmo_offset, len, &tmp);
   if (status != ZX_OK) {
     FX_PLOGS(WARNING, status) << "CodecBuffer::CreateFromVmoInternal failed to map VMO";
     return false;
   }
-  base_ = reinterpret_cast<uint8_t*>(tmp);
+  base_ = reinterpret_cast<uint8_t*>(tmp + (vmo_usable_start % page_size));
   vmo_ = std::move(vmo);
   is_physically_contiguous_ = is_physically_contiguous;
   return true;

@@ -9,6 +9,7 @@
 #include <lib/fit/defer.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <lib/sync/completion.h>
+#include <lib/zx/clock.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,8 @@
 #include <zircon/threads.h>
 #include <zircon/types.h>
 
+#include <algorithm>
+#include <limits>
 #include <mutex>
 
 #include <hwreg/bitfields.h>
@@ -37,31 +40,46 @@ constexpr size_t kMaxNamespacesToBind = 4;
 // c.f. NVMe Base Specification 2.0, section 3.1.3.8 "AQA - Admin Queue Attributes"
 constexpr size_t kAdminQueueMaxEntries = 4096;
 
-// TODO(https://fxbug.dev/42053036): Consider using interrupt vector - dedicated interrupt (and IO
-// thread) per namespace/queue.
+constexpr uint32_t kDefaultResetWaitMs = 5000;
+constexpr uint32_t kMinResetWaitMs = 500;
+constexpr uint32_t kMaxResetWaitMs = 30000;
+constexpr zx::duration kAdminCommandLogInterval = zx::sec(10);
+
+static uint32_t GetControllerTimeoutMs(const CapabilityReg& caps_reg) {
+  const uint32_t cap_timeout_ms = caps_reg.timeout_ms();
+  if (cap_timeout_ms == 0) {
+    return kDefaultResetWaitMs;
+  }
+  return std::clamp(cap_timeout_ms, kMinResetWaitMs, kMaxResetWaitMs);
+}
+
+// TODO(https://fxbug.dev/42053036): Consider using dedicated interrupt (and IO thread) per
+// namespace/queue.
 int Nvme::IrqLoop() {
   while (true) {
     zx_status_t status = irq_.wait(nullptr);
     if (status != ZX_OK) {
       if (status == ZX_ERR_CANCELED) {
-        fdf::debug("Interrupt cancelled. Exiting IRQ loop.");
+        fdf::info("Interrupt cancelled. Exiting IRQ loop.");
       } else {
         fdf::error("Failed to wait for interrupt: {}", zx_status_get_string(status));
       }
       break;
     }
 
-    // The interrupt mask register should only be used when not using MSI-X.
+    interrupt_count_property_.Add(1);
+
+    // The interrupt mask registers must only be accessed when not using MSI-X (NVMe Base Spec 2.0,
+    // sections 3.1.3.3 and 3.1.3.4). Per section 7.5.1.1, leave the vector masked until IoLoop()
+    // drains completions and updates CQHDBL so pin-based INTx cannot immediately re-assert.
     if (irq_mode_ != fuchsia_hardware_pci::InterruptMode::kMsiX) {
-      InterruptReg::MaskSet().FromValue(1).WriteTo(&*mmio_);
+      std::lock_guard<std::mutex> lock(legacy_irq_lock_);
+      InterruptReg::MaskSet().FromValue(uint32_t{1} << io_irq_vector_).WriteTo(&*mmio_);
+      legacy_irq_masked_ = true;
+      ++legacy_irq_mask_gen_;
     }
 
     sync_completion_signal(&io_signal_);
-
-    if (irq_mode_ != fuchsia_hardware_pci::InterruptMode::kMsiX) {
-      // Unmask the interrupt.
-      InterruptReg::MaskClear().FromValue(1).WriteTo(&*mmio_);
-    }
   }
   return thrd_success;
 }
@@ -70,6 +88,9 @@ zx::result<Completion> Nvme::DoAdminCommandSync(Submission& submission,
                                                 std::optional<zx::unowned_vmo> admin_data) {
   zx_status_t status;
   std::lock_guard<std::mutex> lock(admin_lock_);
+  if (driver_shutdown_.load(std::memory_order_relaxed) || !admin_queue_) {
+    return zx::error(ZX_ERR_CANCELED);
+  }
 
   uint64_t data_size = 0;
   if (admin_data.has_value()) {
@@ -79,46 +100,55 @@ zx::result<Completion> Nvme::DoAdminCommandSync(Submission& submission,
       return zx::error(status);
     }
   }
-  status = admin_queue_->Submit(submission, admin_data, 0, data_size, nullptr);
-  if (status != ZX_OK) {
-    fdf::error("Failed to submit admin command: {}", zx_status_get_string(status));
-    return zx::error(status);
-  }
 
-  zx::duration total_wait = zx::msec(0);
+  zx::result<uint16_t> submit_result = admin_queue_->Submit(submission, admin_data, 0, data_size);
+  if (submit_result.is_error()) {
+    fdf::error("Failed to submit admin command: {}", submit_result.status_string());
+    return submit_result.take_error();
+  }
+  const uint16_t cid = submit_result.value();
+
+  const zx::time start = zx::clock::get_monotonic();
+  zx::time next_log_time = start + kAdminCommandLogInterval;
   while (true) {
-    Completion* completion;
+    Completion* completion = nullptr;
     status = admin_queue_->CheckForNewCompletion(&completion);
     if (status == ZX_ERR_SHOULD_WAIT) {
-      if (total_wait >= zx::sec(10)) {  // Wait for up to 10 seconds for an admin command.
-        fdf::error("Timed out waiting for admin command: {}", zx_status_get_string(status));
-        return zx::error(status);
+      const zx::time now = zx::clock::get_monotonic();
+      if (now >= next_log_time) {
+        fdf::error("Still waiting after {} s for admin command completion (cid={})...",
+                   (now - start).to_secs(), cid);
+        next_log_time = now + kAdminCommandLogInterval;
       }
 
-      // Wait and check for command completion again.
-      const zx::duration incremental_wait = zx::msec(1);
-      zx::nanosleep(zx::deadline_after(incremental_wait));
-      total_wait += incremental_wait;
+      zx::nanosleep(zx::deadline_after(zx::msec(1)));
       continue;
     }
 
-    auto ring_completion_doorbell = fit::defer([&] { admin_queue_->RingCompletionDb(); });
+    // Copy the CQE before ringing CQHDBL, which releases the slot back to controller DMA.
+    const Completion cqe = *completion;
+    admin_queue_->RingCompletionDb();
 
     if (status != ZX_OK) {
-      fdf::error("Failed to check completion of admin command: {}", zx_status_get_string(status));
-      return zx::error(status);
+      fdf::warn("Ignoring invalid admin completion ({}) while waiting for cid={}.",
+                zx_status_get_string(status), cid);
+      continue;
     }
 
-    if (completion->status_code_type() == StatusCodeType::kGeneric &&
-        completion->status_code() == 0) {
-      fdf::trace("Completed admin command OK.");
-    } else {
-      fdf::error("Completed admin command ERROR: status type={:01x}, status={:02x}",
-                 static_cast<uint32_t>(completion->status_code_type()), completion->status_code());
-      return zx::error(ZX_ERR_IO);
+    if (cqe.command_id() != cid) {
+      fdf::warn("Ignoring mismatched admin completion cid={} (expected cid={}).", cqe.command_id(),
+                cid);
+      continue;
     }
 
-    return zx::ok(*completion);
+    if (cqe.status_code_type() == StatusCodeType::kGeneric && cqe.status_code() == 0) {
+      fdf::trace("Completed admin command (cid={}) OK.", cid);
+      return zx::ok(cqe);
+    }
+
+    fdf::error("Completed admin command (cid={}) ERROR: status type={:01x}, status={:02x}", cid,
+               static_cast<uint32_t>(cqe.status_code_type()), cqe.status_code());
+    return zx::error(ZX_ERR_IO);
   }
 }
 
@@ -139,7 +169,7 @@ void Nvme::ProcessIoSubmissions() {
       case block_server::Operation::Tag::Flush: {
         NvmIoFlushSubmission submission;
         submission.namespace_id = io_cmd->namespace_id;
-        status = io_queue_->Submit(submission, std::nullopt, 0, 0, io_cmd);
+        status = io_queue_->Submit(submission, std::nullopt, 0, 0, io_cmd).status_value();
         break;
       }
       case block_server::Operation::Tag::Read:
@@ -159,8 +189,10 @@ void Nvme::ProcessIoSubmissions() {
           submission.set_force_unit_access(true);
         }
 
-        status = io_queue_->Submit(submission, zx::unowned_vmo(io_cmd->vmo->get()), vmo_offset,
-                                   block_count * io_cmd->block_size_bytes, io_cmd);
+        status = io_queue_
+                     ->Submit(submission, zx::unowned_vmo(io_cmd->vmo->get()), vmo_offset,
+                              block_count * io_cmd->block_size_bytes, io_cmd)
+                     .status_value();
         break;
       }
       default:
@@ -182,7 +214,7 @@ void Nvme::ProcessIoSubmissions() {
       default:
         fdf::error("Failed to submit transaction (command {}): {}",
                    static_cast<const void*>(io_cmd), zx_status_get_string(status));
-        io_cmd->Complete(ZX_ERR_INTERNAL);
+        io_cmd->Complete(status == ZX_ERR_INVALID_ARGS ? ZX_ERR_INVALID_ARGS : ZX_ERR_INTERNAL);
         break;
     }
   }
@@ -228,7 +260,7 @@ void Nvme::ProcessIoCompletions() {
 
 int Nvme::IoLoop() {
   while (true) {
-    if (driver_shutdown_) {  // Check this outside of io_signal_ wait-reset below to avoid deadlock.
+    if (driver_shutdown_.load(std::memory_order_acquire)) {
       fdf::debug("IO thread exiting.");
       break;
     }
@@ -238,10 +270,29 @@ int Nvme::IoLoop() {
       fdf::error("Failed to wait for sync completion: {}", zx_status_get_string(status));
       break;
     }
+    if (driver_shutdown_.load(std::memory_order_acquire)) {
+      fdf::debug("IO thread exiting.");
+      break;
+    }
     sync_completion_reset(&io_signal_);
 
-    // process completion messages
+    bool was_masked = false;
+    uint64_t mask_gen = 0;
+    if (irq_mode_ != fuchsia_hardware_pci::InterruptMode::kMsiX) {
+      std::lock_guard<std::mutex> lock(legacy_irq_lock_);
+      was_masked = legacy_irq_masked_;
+      mask_gen = legacy_irq_mask_gen_;
+    }
+
+    // Process completion messages and ring CQHDBL before unmasking non-MSI-X interrupts.
     ProcessIoCompletions();
+    if (was_masked) {
+      std::lock_guard<std::mutex> lock(legacy_irq_lock_);
+      if (legacy_irq_masked_ && legacy_irq_mask_gen_ == mask_gen) {
+        InterruptReg::MaskClear().FromValue(uint32_t{1} << io_irq_vector_).WriteTo(&*mmio_);
+        legacy_irq_masked_ = false;
+      }
+    }
 
     // process work queue
     ProcessIoSubmissions();
@@ -250,13 +301,18 @@ int Nvme::IoLoop() {
 }
 
 void Nvme::QueueIoCommand(IoCommand* io_cmd) {
+  bool shutdown = false;
   {
     std::lock_guard<std::mutex> lock(commands_lock_);
-    if (driver_shutdown_) {
-      io_cmd->Complete(ZX_ERR_PEER_CLOSED);
-      return;
+    if (driver_shutdown_.load(std::memory_order_relaxed)) {
+      shutdown = true;
+    } else {
+      list_add_tail(&pending_commands_, &io_cmd->node);
     }
-    list_add_tail(&pending_commands_, &io_cmd->node);
+  }
+  if (shutdown) {
+    io_cmd->Complete(ZX_ERR_PEER_CLOSED);
+    return;
   }
 
   sync_completion_signal(&io_signal_);
@@ -265,8 +321,11 @@ void Nvme::QueueIoCommand(IoCommand* io_cmd) {
 void Nvme::Stop(fdf::StopCompleter completer) {
   fdf::debug("Preparing to stop driver.");
 
+  // Tear down hardware and complete/cancel all in-flight and queued requests before waiting for
+  // BlockServer sessions to terminate so a wedged controller cannot hang StopBlockServer().
+  PerformTeardown();
+
   if (namespaces_.empty()) {
-    PerformTeardown();
     completer(zx::ok());
     return;
   }
@@ -281,9 +340,8 @@ void Nvme::Stop(fdf::StopCompleter completer) {
   auto ctx = std::make_shared<Context>(namespaces_.size(), std::move(completer));
 
   for (auto& ns : namespaces_) {
-    ns->StopBlockServer([this, ctx]() {
+    ns->StopBlockServer([ctx]() {
       if (ctx->pending_count.fetch_sub(1) == 1) {
-        PerformTeardown();
         ctx->completer(zx::ok());
       }
     });
@@ -292,13 +350,43 @@ void Nvme::Stop(fdf::StopCompleter completer) {
 
 Nvme::~Nvme() { PerformTeardown(); }
 
-void Nvme::PerformTeardown() {
-  {
-    std::lock_guard<std::mutex> lock(commands_lock_);
-    driver_shutdown_ = true;
+static zx_status_t WaitForReset(bool desired_ready_state, const CapabilityReg& caps_reg,
+                                fdf::MmioBuffer* mmio) {
+  const uint32_t timeout_ms = GetControllerTimeoutMs(caps_reg);
+  const zx::time start = zx::clock::get_monotonic();
+  zx::time next_log_time = start + zx::msec(timeout_ms);
+  while (true) {
+    ControllerStatusReg csts = ControllerStatusReg::Get().ReadFrom(mmio);
+    // Per NVMe Base Spec 2.0 section 3.1.3.6, CSTS.CFS clears alongside CSTS.RDY -> 0 during
+    // controller reset; only abort early on CFS when waiting for the controller to become ready.
+    if (desired_ready_state && csts.controller_fatal_status()) {
+      fdf::error("Controller reported fatal status (CSTS.CFS=1) while waiting for ready state.");
+      return ZX_ERR_IO;
+    }
+    if (csts.ready() == desired_ready_state) {
+      fdf::debug("Controller reached ready state {} (took {} ms).", desired_ready_state,
+                 (zx::clock::get_monotonic() - start).to_msecs());
+      return ZX_OK;
+    }
+    const zx::time now = zx::clock::get_monotonic();
+    if (now >= next_log_time) {
+      fdf::error("Still waiting after {} ms for controller ready state {}...",
+                 (now - start).to_msecs(), desired_ready_state);
+      next_log_time = now + zx::msec(timeout_ms);
+    }
+    zx::nanosleep(zx::deadline_after(zx::msec(1)));
   }
-  if (pci_.is_valid()) {
-    pci_.SetBusMastering(false);
+}
+
+void Nvme::PerformTeardown() {
+  if (torn_down_) {
+    return;
+  }
+  torn_down_ = true;
+
+  {
+    std::scoped_lock lock(admin_lock_, commands_lock_);
+    driver_shutdown_.store(true, std::memory_order_release);
   }
   if (irq_.is_valid()) {
     irq_.destroy();  // Make irq_.wait() in IrqLoop() return ZX_ERR_CANCELED.
@@ -313,31 +401,82 @@ void Nvme::PerformTeardown() {
     io_thread_started_ = false;
   }
 
-  // Error out any pending commands
-  // TODO(https://fxbug.dev/510806838): We also need to error out any commands which were already
-  // submitted to the device (which this driver currently does not keep track of).
+  // Harvest any completions the controller already posted before shutting it down.
+  if (io_queue_) {
+    ProcessIoCompletions();
+  }
+
+  if (mmio_.has_value()) {
+    const CapabilityReg caps_reg = CapabilityReg::Get().ReadFrom(&*mmio_);
+    ControllerConfigReg cc = ControllerConfigReg::Get().ReadFrom(&*mmio_);
+    ControllerStatusReg csts = ControllerStatusReg::Get().ReadFrom(&*mmio_);
+    if (cc.enabled() && csts.ready() && !csts.controller_fatal_status()) {
+      // NVMe Base Spec 2.0 section 7.6.2: issue normal shutdown notification and wait for
+      // CSTS.SHST == kComplete prior to disabling the controller and bus mastering.
+      cc.set_shutdown_notification(ControllerConfigReg::ShutdownNotification::kNormal)
+          .WriteTo(&*mmio_);
+      const uint32_t timeout_ms = GetControllerTimeoutMs(caps_reg);
+      const zx::time start = zx::clock::get_monotonic();
+      zx::time next_log_time = start + zx::msec(timeout_ms);
+      while (true) {
+        csts = ControllerStatusReg::Get().ReadFrom(&*mmio_);
+        if (csts.shutdown_status() == ControllerStatusReg::ShutdownStatus::kComplete ||
+            csts.controller_fatal_status()) {
+          break;
+        }
+        const zx::time now = zx::clock::get_monotonic();
+        if (now >= next_log_time) {
+          fdf::error("Still waiting after {} ms for controller shutdown completion...",
+                     (now - start).to_msecs());
+          next_log_time = now + zx::msec(timeout_ms);
+        }
+        zx::nanosleep(zx::deadline_after(zx::msec(1)));
+      }
+    }
+
+    cc = ControllerConfigReg::Get().ReadFrom(&*mmio_);
+    csts = ControllerStatusReg::Get().ReadFrom(&*mmio_);
+    if (cc.enabled() || csts.ready()) {
+      cc.set_shutdown_notification(ControllerConfigReg::ShutdownNotification::kNone)
+          .set_enabled(0)
+          .WriteTo(&*mmio_);
+      (void)WaitForReset(/*desired_ready_state=*/false, caps_reg, &*mmio_);
+    }
+  }
+
+  // Configuring MSI/MSI-X in the PCI bus driver also enables bus mastering prior to
+  // SetBusMastering(true), so disable bus mastering whenever interrupts were configured as well.
+  if (bus_master_enabled_ || irq_mode_ != fuchsia_hardware_pci::InterruptMode::kDisabled) {
+    zx_status_t status = SetBusMastering(false);
+    if (status != ZX_OK) {
+      fdf::error("Failed to disable PCI bus mastering during teardown: {}",
+                 zx_status_get_string(status));
+    }
+    bus_master_enabled_ = false;
+  }
+
+  // Controller is disabled (CSTS.RDY=0) and PCI bus mastering has been turned off; unpin and fail
+  // all remaining in-flight transactions.
+  if (io_queue_) {
+    io_queue_->CancelAll([](IoCommand* io_cmd) { io_cmd->Complete(ZX_ERR_PEER_CLOSED); });
+  }
+  {
+    std::lock_guard<std::mutex> lock(admin_lock_);
+    if (admin_queue_) {
+      admin_queue_->CancelAll(nullptr);
+    }
+  }
+
+  // Drain pending (not yet submitted) commands outside commands_lock_.
+  list_node_t local_pending = LIST_INITIAL_VALUE(local_pending);
   {
     std::lock_guard<std::mutex> lock(commands_lock_);
-    IoCommand* io_cmd;
-    while ((io_cmd = list_remove_head_type(&pending_commands_, IoCommand, node)) != nullptr) {
-      io_cmd->Complete(ZX_ERR_PEER_CLOSED);
-    }
+    list_move(&pending_commands_, &local_pending);
   }
-}
-
-static zx_status_t WaitForReset(bool desired_ready_state, fdf::MmioBuffer* mmio) {
-  constexpr int kResetWaitMs = 5000;
-  int ms_remaining = kResetWaitMs;
-  while (ControllerStatusReg::Get().ReadFrom(mmio).ready() != desired_ready_state) {
-    if (ms_remaining-- == 0) {
-      fdf::error("Timed out waiting for controller ready state {}: ", desired_ready_state);
-      return ZX_ERR_TIMED_OUT;
-    }
-    zx::nanosleep(zx::deadline_after(zx::msec(1)));
+  IoCommand* io_cmd;
+  while ((io_cmd = list_remove_head_type(&local_pending, IoCommand, node)) != nullptr) {
+    io_cmd->Complete(ZX_ERR_PEER_CLOSED);
   }
-  fdf::debug("Controller reached ready state {} (took {} ms).", desired_ready_state,
-             kResetWaitMs - ms_remaining);
-  return ZX_OK;
 }
 
 static zx_status_t CheckMinMaxSize(const std::string& name, size_t our_size, size_t min_size,
@@ -454,14 +593,51 @@ static void PopulateControllerInspect(const IdentifyController& identify,
   inspector->emplace(std::move(controller));
 }
 
+zx_status_t Nvme::ConfigureInterrupt() {
+  // Explicitly request 2 MSI-X vectors first so Admin CQ (queue 0, vector 0) and IO CQ (queue 1,
+  // vector 1) do not share vector 0 (avoiding shared-vector hazards and virtualized NVMe
+  // live-migration vector-0 filtering), without letting ConfigureInterruptMode(2) downgrade a
+  // 1-vector MSI-X device to 2-vector MSI. Fall back to 1 shared vector (MSI-X, MSI, or legacy)
+  // when 2 MSI-X vectors are unavailable.
+  zx_status_t status = SetInterruptMode(fuchsia_hardware_pci::InterruptMode::kMsiX, 2);
+  if (status == ZX_OK) {
+    irq_mode_ = fuchsia_hardware_pci::InterruptMode::kMsiX;
+    io_irq_vector_ = 1;
+  } else {
+    zx::result<fuchsia_hardware_pci::InterruptMode> mode = ConfigureInterruptMode(1);
+    if (mode.is_error()) {
+      fdf::error("Failed to configure interrupt: {}", mode.status_string());
+      return mode.status_value();
+    }
+    irq_mode_ = *mode;
+    io_irq_vector_ = 0;
+  }
+  fdf::info("Configured interrupt mode {} with IO IRQ vector {}.", static_cast<uint8_t>(irq_mode_),
+            io_irq_vector_);
+  inspect_node_.RecordUint("interrupt_mode", static_cast<uint8_t>(irq_mode_));
+  inspect_node_.RecordUint("io_irq_vector", io_irq_vector_);
+
+  zx::result<zx::interrupt> irq = MapInterrupt(io_irq_vector_);
+  if (irq.is_error()) {
+    fdf::error("Failed to map interrupt vector {}: {}", io_irq_vector_, irq.status_string());
+    return irq.status_value();
+  }
+  irq_ = std::move(*irq);
+  return ZX_OK;
+}
+
 zx_status_t Nvme::Init() {
-  list_initialize(&pending_commands_);
+  {
+    std::lock_guard<std::mutex> lock(commands_lock_);
+    list_initialize(&pending_commands_);
+  }
 
   VersionReg version_reg = VersionReg::Get().ReadFrom(&*mmio_);
   CapabilityReg caps_reg = CapabilityReg::Get().ReadFrom(&*mmio_);
 
   if (component_inspector_) {
     inspect_node_ = component_inspector_->root().CreateChild("nvme");
+    interrupt_count_property_ = inspect_node_.CreateUint("interrupt_count", 0);
     PopulateVersionInspect(version_reg, &inspect_node_, &component_inspector_->inspector());
     PopulateCapabilitiesInspect(caps_reg, version_reg, &inspect_node_,
                                 &component_inspector_->inspector());
@@ -475,14 +651,37 @@ zx_status_t Nvme::Init() {
     return status;
   }
 
-  if (ControllerStatusReg::Get().ReadFrom(&*mmio_).ready()) {
-    fdf::debug("Controller is already enabled. Resetting it.");
-    ControllerConfigReg::Get().ReadFrom(&*mmio_).set_enabled(0).WriteTo(&*mmio_);
-    status = WaitForReset(/*desired_ready_state=*/false, &*mmio_);
-    if (status != ZX_OK) {
-      return status;
-    }
+  if (!caps_reg.nvm_command_set_support()) {
+    fdf::error("Controller does not support the NVM command set (CAP.CSS).");
+    return ZX_ERR_NOT_SUPPORTED;
   }
+
+  // Disable/reset the controller before enabling PCI bus mastering or unmasking interrupts so a
+  // controller left active by firmware cannot DMA into reclaimed memory or fire stale interrupts.
+  ControllerConfigReg initial_cc = ControllerConfigReg::Get().ReadFrom(&*mmio_);
+  ControllerStatusReg initial_csts = ControllerStatusReg::Get().ReadFrom(&*mmio_);
+  if (initial_csts.ready() || initial_cc.enabled()) {
+    fdf::debug("Controller is already enabled. Resetting it.");
+    initial_cc.set_shutdown_notification(ControllerConfigReg::ShutdownNotification::kNone)
+        .set_enabled(0)
+        .WriteTo(&*mmio_);
+  }
+  status = WaitForReset(/*desired_ready_state=*/false, caps_reg, &*mmio_);
+  if (status != ZX_OK) {
+    return status;
+  }
+
+  status = ConfigureInterrupt();
+  if (status != ZX_OK) {
+    return status;
+  }
+
+  status = SetBusMastering(true);
+  if (status != ZX_OK) {
+    fdf::error("Failed to enable bus mastering: {}", zx_status_get_string(status));
+    return status;
+  }
+  bus_master_enabled_ = true;
 
   // Set up admin submission and completion queues.
   zx::result admin_queue =
@@ -492,27 +691,30 @@ zx_status_t Nvme::Init() {
     fdf::error("Failed to set up admin queue: {}", admin_queue.status_string());
     return admin_queue.status_value();
   }
-  admin_queue_ = std::move(*admin_queue);
+  {
+    std::lock_guard<std::mutex> lock(admin_lock_);
+    admin_queue_ = std::move(*admin_queue);
 
-  // Configure the admin queue.
-  AdminQueueAttributesReg::Get()
-      .ReadFrom(&*mmio_)
-      .set_completion_queue_size(admin_queue_->completion().entry_count() - 1)
-      .set_submission_queue_size(admin_queue_->submission().entry_count() - 1)
-      .WriteTo(&*mmio_);
+    // Configure the admin queue without reading stale hardware values.
+    AdminQueueAttributesReg::Get()
+        .FromValue(0)
+        .set_completion_queue_size(admin_queue_->completion().entry_count() - 1)
+        .set_submission_queue_size(admin_queue_->submission().entry_count() - 1)
+        .WriteTo(&*mmio_);
 
-  AdminQueueAddressReg::CompletionQueue()
-      .ReadFrom(&*mmio_)
-      .set_addr(admin_queue_->completion().GetDeviceAddress())
-      .WriteTo(&*mmio_);
-  AdminQueueAddressReg::SubmissionQueue()
-      .ReadFrom(&*mmio_)
-      .set_addr(admin_queue_->submission().GetDeviceAddress())
-      .WriteTo(&*mmio_);
+    AdminQueueAddressReg::CompletionQueue()
+        .FromValue(0)
+        .set_addr(admin_queue_->completion().GetDeviceAddress())
+        .WriteTo(&*mmio_);
+    AdminQueueAddressReg::SubmissionQueue()
+        .FromValue(0)
+        .set_addr(admin_queue_->submission().GetDeviceAddress())
+        .WriteTo(&*mmio_);
+  }
 
   fdf::debug("Enabling controller.");
   ControllerConfigReg::Get()
-      .ReadFrom(&*mmio_)
+      .FromValue(0)
       .set_controller_ready_independent_of_media(0)
       // Queue entry sizes are powers of two.
       .set_io_completion_queue_entry_size(__builtin_ctzl(sizeof(Completion)))
@@ -525,7 +727,7 @@ zx_status_t Nvme::Init() {
       .set_enabled(1)
       .WriteTo(&*mmio_);
 
-  status = WaitForReset(/*desired_ready_state=*/true, &*mmio_);
+  status = WaitForReset(/*desired_ready_state=*/true, caps_reg, &*mmio_);
   if (status != ZX_OK) {
     return status;
   }
@@ -607,8 +809,13 @@ zx_status_t Nvme::Init() {
   if (identify->max_data_transfer == 0) {
     max_data_transfer_bytes_ = 0;
   } else {
-    max_data_transfer_bytes_ =
-        caps_reg.memory_page_size_min_bytes() * (1 << identify->max_data_transfer);
+    const uint32_t shift =
+        12 + static_cast<uint32_t>(caps_reg.memory_page_size_min()) + identify->max_data_transfer;
+    if (shift >= 32) {
+      max_data_transfer_bytes_ = std::numeric_limits<uint32_t>::max();
+    } else {
+      max_data_transfer_bytes_ = uint32_t{1} << shift;
+    }
   }
   atomic_write_unit_normal_ = identify->atomic_write_unit_normal + 1;
   atomic_write_unit_power_fail_ = identify->atomic_write_unit_power_fail + 1;
@@ -629,9 +836,11 @@ zx_status_t Nvme::Init() {
     }
   }
 
-  PopulateControllerInspect(*identify, max_data_transfer_bytes_, atomic_write_unit_normal_,
-                            atomic_write_unit_power_fail_, volatile_write_cache_present,
-                            volatile_write_cache_enabled_, &inspect_node_, &inspect());
+  if (component_inspector_) {
+    PopulateControllerInspect(*identify, max_data_transfer_bytes_, atomic_write_unit_normal_,
+                              atomic_write_unit_power_fail_, volatile_write_cache_present,
+                              volatile_write_cache_enabled_, &inspect_node_, &inspect());
+  }
 
   // Set feature (number of queues) to 1 IO submission queue and 1 IO completion queue.
   SetIoQueueCountSubmission set_queue_count;
@@ -657,7 +866,7 @@ zx_status_t Nvme::Init() {
       .set_queue_size(io_queue_->completion().entry_count() - 1)
       .set_contiguous(true)
       .set_interrupt_en(true)
-      .set_interrupt_vector(0);
+      .set_interrupt_vector(static_cast<uint16_t>(io_irq_vector_));
   create_iocq.data_pointer[0] = io_queue_->completion().GetDeviceAddress();
   completion = DoAdminCommandSync(create_iocq);
   if (completion.is_error()) {
@@ -706,7 +915,37 @@ zx_status_t Nvme::Init() {
   return ZX_OK;
 }
 
-zx::result<fit::function<void()>> Nvme::InitResources() {
+zx_status_t Nvme::SetInterruptMode(fuchsia_hardware_pci::InterruptMode mode,
+                                   uint32_t requested_irq_count) {
+  return pci_.SetInterruptMode(mode, requested_irq_count);
+}
+
+zx::result<fuchsia_hardware_pci::InterruptMode> Nvme::ConfigureInterruptMode(uint32_t irq_count) {
+  fuchsia_hardware_pci::InterruptMode mode = fuchsia_hardware_pci::InterruptMode::kDisabled;
+  zx_status_t status = pci_.ConfigureInterruptMode(irq_count, &mode);
+  if (status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok(mode);
+}
+
+zx::result<zx::interrupt> Nvme::MapInterrupt(uint32_t which_irq) {
+  zx::interrupt interrupt;
+  zx_status_t status = pci_.MapInterrupt(which_irq, &interrupt);
+  if (status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok(std::move(interrupt));
+}
+
+zx_status_t Nvme::SetBusMastering(bool enabled) {
+  if (!pci_.is_valid()) {
+    return ZX_OK;
+  }
+  return pci_.SetBusMastering(enabled);
+}
+
+zx::result<> Nvme::InitResources() {
   zx::result<fdf::Pci> pci = fdf::Pci::Connect(incoming_, fdf::Pci::kFragmentName);
   if (pci.is_error()) {
     fdf::error("Failed to connect to PCI: {}", pci.status_string());
@@ -723,32 +962,12 @@ zx::result<fit::function<void()>> Nvme::InitResources() {
   }
   mmio_ = std::move(mmio);
 
-  status = pci_.ConfigureInterruptMode(1, &irq_mode_);
-  if (status != ZX_OK) {
-    fdf::error("Failed to configure interrupt: {}", zx_status_get_string(status));
-    return zx::error(status);
-  }
-  fdf::debug("Interrupt mode: {}", static_cast<uint8_t>(irq_mode_));
-
-  status = pci_.MapInterrupt(0, &irq_);
-  if (status != ZX_OK) {
-    fdf::error("Failed to map interrupt: {}", zx_status_get_string(status));
-    return zx::error(status);
-  }
-
-  status = pci_.SetBusMastering(true);
-  if (status != ZX_OK) {
-    fdf::error("Failed to enable bus mastering: {}", zx_status_get_string(status));
-    return zx::error(status);
-  }
-  auto release = [this] { pci_.SetBusMastering(false); };
-
   status = pci_.GetBti(0, &bti_);
   if (status != ZX_OK) {
     fdf::error("Failed to get BTI handle: {}", zx_status_get_string(status));
     return zx::error(status);
   }
-  return zx::ok(std::move(release));
+  return zx::ok();
 }
 
 zx::result<> Nvme::Start(fdf::DriverContext context) {
@@ -756,11 +975,10 @@ zx::result<> Nvme::Start(fdf::DriverContext context) {
   node_name_ = context.node_name();
   node_token_ = context.take_node_token();
 
-  zx::result<fit::function<void()>> release = InitResources();
-  if (release.is_error()) {
-    return release.take_error();
+  zx::result<> resources = InitResources();
+  if (resources.is_error()) {
+    return resources.take_error();
   }
-  auto cleanup = fit::defer([&] { (*release)(); });
 
   auto [controller_client_end, controller_server_end] =
       fidl::Endpoints<fuchsia_driver_framework::NodeController>::Create();
@@ -798,7 +1016,6 @@ zx::result<> Nvme::Start(fdf::DriverContext context) {
     return zx::error(status);
   }
 
-  cleanup.cancel();
   return zx::ok();
 }
 

@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use core::marker::PhantomData;
+use core::marker::{PhantomData, PhantomPinned};
 use core::pin::Pin;
 use core::ptr::addr_of_mut;
-use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
+use pin_init::{PinInit, pin_data, pin_init};
 
 use crate::{ExclusiveLockPolicy, LockPolicy, RawLock, RawSharedLock};
 use lockdep::LockClass;
@@ -15,8 +15,13 @@ type ReadPolicy<L> = <L as RawSharedLock>::SharedPolicy;
 
 /// A priority-inheriting reader-writer lock.
 ///
-/// `L` is the raw reader-writer lock type (e.g. the kernel's `RawBrwLockPi`). There is no default,
-/// since the kernel's `RawBrwLockPi` is not part of this crate.
+/// `L` is the raw reader-writer lock type (e.g. the kernel's `TrackedBrwLockPi`). There is no
+/// default, since the kernel's `TrackedBrwLockPi` is not part of this crate.
+///
+/// Note: unlike kernel `Mutex`, `BrwLock` does not synchronize teardown against an in-flight
+/// release, so the enclosing object's lifetime must be managed externally (for example via
+/// `fbl::RefPtr`) rather than via a reference count protected solely by this lock so that the
+/// lock remains live until every read and write guard drop returns.
 #[repr(transparent)]
 #[pin_data]
 pub struct BrwLockPi<Class: LockClass, L: RawSharedLock> {
@@ -41,7 +46,7 @@ impl<Class: LockClass, L: RawSharedLock> BrwLockPi<Class, L> {
     }
 
     /// Acquire the read lock and return a stack-pinned validation guard.
-    #[inline]
+    #[inline(always)]
     pub fn read_lock(
         &self,
     ) -> impl PinInit<BrwLockPiReadGuard<'_, Class, L>, core::convert::Infallible> {
@@ -49,7 +54,7 @@ impl<Class: LockClass, L: RawSharedLock> BrwLockPi<Class, L> {
     }
 
     /// Acquire the write lock and return a stack-pinned validation guard.
-    #[inline]
+    #[inline(always)]
     pub fn write_lock(
         &self,
     ) -> impl PinInit<BrwLockPiWriteGuard<'_, Class, L>, core::convert::Infallible>
@@ -68,40 +73,54 @@ impl<Class: LockClass, L: RawSharedLock> BrwLockPi<Class, L> {
 
 /// A validation guard representing reader lock ownership and active list participation.
 #[repr(C)]
-#[pin_data(PinnedDrop)]
 pub struct BrwLockPiReadGuard<'a, Class: LockClass, L: RawSharedLock> {
     lock: &'a BrwLockPi<Class, L>,
-    #[pin]
     state: <ReadPolicy<L> as LockPolicy<L>>::GuardState,
     token: crate::LockToken<'a, Class>,
+    _pin: PhantomPinned,
 }
 
 impl<'a, Class: LockClass, L: RawSharedLock> BrwLockPiReadGuard<'a, Class, L> {
     /// Creates a new stack-pinned validation guard initialization block.
+    #[inline(always)]
     pub fn new(lock: &'a BrwLockPi<Class, L>) -> impl PinInit<Self, core::convert::Infallible> {
         const {
             lockdep::validate_lock_flags(Class::FLAGS);
         }
-        // SAFETY: The closure correctly initializes all fields of the allocated
-        // `BrwLockPiReadGuard` and satisfies all safety requirements of `pin_init_from_closure`.
+        BrwLockPiReadGuardInit { lock }
+    }
+
+    /// Initializes an uninitialized pinned `this` slot in place.
+    ///
+    /// # Safety
+    ///
+    /// `this` must be valid for writes of `Self`, properly aligned, and pinned in memory until its
+    /// destructor completes.
+    #[inline(always)]
+    unsafe fn init_slot(
+        this: *mut Self,
+        lock: &'a BrwLockPi<Class, L>,
+    ) -> Result<(), core::convert::Infallible> {
+        // SAFETY: `this` is valid for writes and properly aligned per `# Safety`, so each field
+        // projection is valid and non-overlapping. `acquire` is called with `&mut *state_addr`
+        // pinned in place, after which the read lock is held for `'a`, justifying `LockToken::new`.
         unsafe {
-            pin_init::pin_init_from_closure(
-                move |this: *mut Self| -> Result<(), core::convert::Infallible> {
-                    let lock_addr = addr_of_mut!((*this).lock);
-                    core::ptr::write(lock_addr, lock);
+            let lock_addr = addr_of_mut!((*this).lock);
+            core::ptr::write(lock_addr, lock);
 
-                    let state_addr = addr_of_mut!((*this).state);
-                    core::ptr::write(state_addr, Default::default());
+            let state_addr = addr_of_mut!((*this).state);
+            core::ptr::write(state_addr, Default::default());
 
-                    <ReadPolicy<L> as LockPolicy<L>>::acquire(&lock.lock, &mut *state_addr, ());
+            <ReadPolicy<L> as LockPolicy<L>>::acquire(&lock.lock, &mut *state_addr, ());
 
-                    let token_addr = addr_of_mut!((*this).token);
-                    core::ptr::write(token_addr, crate::LockToken::new());
+            let token_addr = addr_of_mut!((*this).token);
+            core::ptr::write(token_addr, crate::LockToken::new());
 
-                    Ok(())
-                },
-            )
+            let pin_addr = addr_of_mut!((*this)._pin);
+            core::ptr::write(pin_addr, PhantomPinned);
         }
+
+        Ok(())
     }
 
     /// Returns a shared reference to the lock proof `LockToken`.
@@ -131,15 +150,35 @@ impl<'a, Class: LockClass, L: RawSharedLock> BrwLockPiReadGuard<'a, Class, L> {
     }
 }
 
-#[pinned_drop]
-impl<'a, Class: LockClass, L: RawSharedLock> PinnedDrop for BrwLockPiReadGuard<'a, Class, L> {
-    fn drop(self: Pin<&mut Self>) {
-        // SAFETY: `get_unchecked_mut` is safe because we do not move the fields out of Pin.
-        // `release` is safe because the read lock was acquired when creating this guard,
-        // and we are releasing it with the same pinned state.
+struct BrwLockPiReadGuardInit<'a, Class: LockClass, L: RawSharedLock> {
+    lock: &'a BrwLockPi<Class, L>,
+}
+
+// SAFETY: `BrwLockPiReadGuard::init_slot` initializes all fields of `BrwLockPiReadGuard` in place.
+unsafe impl<'a, Class: LockClass, L: RawSharedLock>
+    PinInit<BrwLockPiReadGuard<'a, Class, L>, core::convert::Infallible>
+    for BrwLockPiReadGuardInit<'a, Class, L>
+{
+    #[inline(always)]
+    unsafe fn __pinned_init(
+        self,
+        slot: *mut BrwLockPiReadGuard<'a, Class, L>,
+    ) -> Result<(), core::convert::Infallible> {
+        // SAFETY: Forwarded from `PinInit::__pinned_init`.
+        unsafe { BrwLockPiReadGuard::init_slot(slot, self.lock) }
+    }
+}
+
+// Not `#[pin_data(PinnedDrop)]`, whose generated `Drop` is not `#[inline]`.
+impl<'a, Class: LockClass, L: RawSharedLock> Drop for BrwLockPiReadGuard<'a, Class, L> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // SAFETY: A guard is `!Unpin` (`_pin: PhantomPinned`) and is only created pinned in place
+        // by `new`, and `self` is not moved after it is dropped. `release` is safe because the
+        // read lock was acquired when creating this guard (or reacquired by `call_unlocked`) with
+        // the same pinned `self.state`.
         unsafe {
-            let me = self.get_unchecked_mut();
-            <ReadPolicy<L> as LockPolicy<L>>::release(&me.lock.lock, &mut me.state);
+            <ReadPolicy<L> as LockPolicy<L>>::release(&self.lock.lock, &mut self.state);
         }
     }
 }
@@ -155,12 +194,14 @@ pub struct BrwLockPiWriteGuard<
     lock: &'a BrwLockPi<Class, L>,
     state: P::GuardState,
     token: crate::LockToken<'a, Class>,
+    _pin: PhantomPinned,
 }
 
 impl<'a, Class: LockClass, L: RawSharedLock, P: ExclusiveLockPolicy<L>>
     BrwLockPiWriteGuard<'a, Class, L, P>
 {
     /// Creates a new stack-pinned validation guard initialization block.
+    #[inline(always)]
     pub fn new(lock: &'a BrwLockPi<Class, L>) -> impl PinInit<Self, core::convert::Infallible>
     where
         P: ExclusiveLockPolicy<L, AcquireArgs = ()>,
@@ -172,26 +213,44 @@ impl<'a, Class: LockClass, L: RawSharedLock, P: ExclusiveLockPolicy<L>>
                 "Externally ordered lock policies require a nestable lock class"
             );
         }
-        // SAFETY: The closure correctly initializes all fields of the allocated
-        // `BrwLockPiWriteGuard` and satisfies all safety requirements of `pin_init_from_closure`.
+        BrwLockPiWriteGuardInit { lock, _policy: PhantomData }
+    }
+
+    /// Initializes an uninitialized pinned `this` slot in place.
+    ///
+    /// # Safety
+    ///
+    /// `this` must be valid for writes of `Self`, properly aligned, and pinned in memory until its
+    /// destructor completes.
+    #[inline(always)]
+    unsafe fn init_slot(
+        this: *mut Self,
+        lock: &'a BrwLockPi<Class, L>,
+    ) -> Result<(), core::convert::Infallible>
+    where
+        P: ExclusiveLockPolicy<L, AcquireArgs = ()>,
+    {
+        // SAFETY: `this` is valid for writes and properly aligned per `# Safety`, so each field
+        // projection is valid and non-overlapping. `acquire` is called with `&mut *state_addr`
+        // pinned in place, after which the write lock is held for `'a`, justifying
+        // `LockToken::new`.
         unsafe {
-            pin_init::pin_init_from_closure(
-                move |this: *mut Self| -> Result<(), core::convert::Infallible> {
-                    let lock_addr = addr_of_mut!((*this).lock);
-                    core::ptr::write(lock_addr, lock);
+            let lock_addr = addr_of_mut!((*this).lock);
+            core::ptr::write(lock_addr, lock);
 
-                    let state_addr = addr_of_mut!((*this).state);
-                    core::ptr::write(state_addr, Default::default());
+            let state_addr = addr_of_mut!((*this).state);
+            core::ptr::write(state_addr, Default::default());
 
-                    P::acquire(&lock.lock, &mut *state_addr, ());
+            P::acquire(&lock.lock, &mut *state_addr, ());
 
-                    let token_addr = addr_of_mut!((*this).token);
-                    core::ptr::write(token_addr, crate::LockToken::new());
+            let token_addr = addr_of_mut!((*this).token);
+            core::ptr::write(token_addr, crate::LockToken::new());
 
-                    Ok(())
-                },
-            )
+            let pin_addr = addr_of_mut!((*this)._pin);
+            core::ptr::write(pin_addr, PhantomPinned);
         }
+
+        Ok(())
     }
 
     /// Returns a shared reference to the lock proof `LockToken`.
@@ -230,10 +289,36 @@ impl<'a, Class: LockClass, L: RawSharedLock, P: ExclusiveLockPolicy<L>>
     }
 }
 
+struct BrwLockPiWriteGuardInit<
+    'a,
+    Class: LockClass,
+    L: RawSharedLock,
+    P: ExclusiveLockPolicy<L, AcquireArgs = ()>,
+> {
+    lock: &'a BrwLockPi<Class, L>,
+    _policy: PhantomData<fn() -> P>,
+}
+
+// SAFETY: `BrwLockPiWriteGuard::init_slot` initializes all fields of `BrwLockPiWriteGuard` in
+// place.
+unsafe impl<'a, Class: LockClass, L: RawSharedLock, P: ExclusiveLockPolicy<L, AcquireArgs = ()>>
+    PinInit<BrwLockPiWriteGuard<'a, Class, L, P>, core::convert::Infallible>
+    for BrwLockPiWriteGuardInit<'a, Class, L, P>
+{
+    #[inline(always)]
+    unsafe fn __pinned_init(
+        self,
+        slot: *mut BrwLockPiWriteGuard<'a, Class, L, P>,
+    ) -> Result<(), core::convert::Infallible> {
+        // SAFETY: Forwarded from `PinInit::__pinned_init`.
+        unsafe { BrwLockPiWriteGuard::init_slot(slot, self.lock) }
+    }
+}
+
 impl<'a, Class: LockClass, L: RawSharedLock, P: ExclusiveLockPolicy<L>> Drop
     for BrwLockPiWriteGuard<'a, Class, L, P>
 {
-    #[inline]
+    #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: A guard is only created pinned, by `new`, and `self` is not moved after it is
         // dropped. `release` is safe because the write lock was acquired when creating this guard,
@@ -288,6 +373,23 @@ mod tests {
 
     #[test]
     fn test_brwlock_projections() {
+        // Compile-time check that `BrwLockPiReadGuard`, `BrwLockPiWriteGuard`, and the
+        // `#[ksync::guarded]` wrapper guards do not implement `Unpin`.
+        trait AmbiguousIfUnpin<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfUnpin<()> for T {}
+        impl<T: ?Sized + Unpin> AmbiguousIfUnpin<u8> for T {}
+
+        <crate::BrwLockPiReadGuard<'static, DatabaseLockClass, RawBrwLockPi> as AmbiguousIfUnpin<
+            _,
+        >>::check();
+        <crate::BrwLockPiWriteGuard<'static, DatabaseLockClass, RawBrwLockPi> as AmbiguousIfUnpin<
+            _,
+        >>::check();
+        <DatabaseLockReadGuard<'static> as AmbiguousIfUnpin<_>>::check();
+        <DatabaseLockWriteGuard<'static> as AmbiguousIfUnpin<_>>::check();
+
         stack_pin_init!(let db = pin_init!(Database {
             lock <- BrwLockPi::init(),
             data: Vec::new().into(),

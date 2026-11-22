@@ -108,7 +108,7 @@ std::string FormatMessageWithKvps(const LogMessage& message) {
 
 }  // namespace
 
-fpromise::result<fuchsia::logger::LogMessage, std::string> ToFidlLogMessage(
+fpromise::result<fuchsia_logger::LogMessage, std::string> ToFidlLogMessage(
     const LogMessage& message) {
   std::vector<std::string> tags;
   tags.reserve(message.tags.len + 1);
@@ -124,7 +124,7 @@ fpromise::result<fuchsia::logger::LogMessage, std::string> ToFidlLogMessage(
   if (!moniker_tag.empty() && moniker_tag != "." && !has_moniker_tag) {
     tags.insert(tags.begin(), std::string(moniker_tag));
   }
-  fuchsia::logger::LogMessage ret = {
+  fuchsia_logger::LogMessage ret{{
       .pid = message.pid,
       .tid = message.tid,
       .time = zx::time_boot(message.timestamp),
@@ -132,7 +132,7 @@ fpromise::result<fuchsia::logger::LogMessage, std::string> ToFidlLogMessage(
       .dropped_logs = static_cast<uint32_t>(message.dropped),
       .tags = std::move(tags),
       .msg = FormatMessageWithKvps(message),
-  };
+  }};
   return fpromise::ok(std::move(ret));
 }
 

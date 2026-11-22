@@ -24,7 +24,7 @@ async fn verify_ethernet() {
 
     // Make sure there is no existing ethernet device.
     let client = netdevice_helper::create_client(
-        ctx.devfs(),
+        ctx.test_ns_prefix(),
         fidl_fuchsia_net::MacAddress { octets: CLIENT_MAC_ADDR.to_array() },
     )
     .await;
@@ -40,7 +40,7 @@ async fn verify_ethernet() {
     );
     loop {
         let client = netdevice_helper::create_client(
-            helper.devfs(),
+            helper.test_ns_prefix(),
             fidl_fuchsia_net::MacAddress { octets: CLIENT_MAC_ADDR.to_array() },
         )
         .await;

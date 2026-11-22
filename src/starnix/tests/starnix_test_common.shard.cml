@@ -78,7 +78,6 @@
             protocol: [
                 "fuchsia.buildinfo.Provider",
                 "fuchsia.diagnostics.ArchiveAccessor",
-                "fuchsia.diagnostics.LogStream",
                 "fuchsia.feedback.CrashReporter",
                 "fuchsia.kernel.Stats",
                 "fuchsia.kernel.VmexResource",

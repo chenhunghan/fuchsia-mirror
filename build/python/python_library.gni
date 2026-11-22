@@ -22,16 +22,34 @@ import("//build/python/python_validator.gni")
 #
 #   library_name (optional)
 #     Name of the library, Python scripts can import this library by this name.
+#     Cannot be used with `imports`.
 #     Type: string
 #     Default: ${target_name}
 #
 #   source_root (optional)
 #     Path to root of the package, where __init__.py is.
+#     Cannot be used with `imports`.
 #     Type: path
 #     Default: current directory
 #
+#   imports (optional)
+#     Directories, relative to the current directory, to add to the import
+#     path, like `imports` of Bazel's `py_library()`. When set, `sources` are
+#     relative to the current directory, and each source is importable by its
+#     path relative to the closest directory in `imports` that contains it.
+#     Sources outside of all `imports` are importable by their path relative to
+#     the root of the Fuchsia source tree, which is also on the import path in
+#     Bazel. For example, with `imports = [ "src" ]`, `src/foo/__init__.py` is
+#     imported as `foo`, and with `imports = [ ".." ]` in `//a/b/BUILD.gn`,
+#     `__init__.py` is imported as `b`.
+#
+#     Data sources and stubs are placed in the top-level package of the first
+#     source that is in a package directory (e.g. `foo` in the example above).
+#     Type: list(path)
+#
 #   sources (required)
-#     List of sources for this python library, relative to source_root.
+#     List of sources for this python library, relative to source_root, or to
+#     the current directory when `imports` is set.
 #     Type: list(path)
 #
 #   data_sources (optional)
@@ -110,12 +128,40 @@ template("python_library") {
     _data_package_name = invoker.data_package_name
   }
 
+  _package_dir = get_label_info(":$target_name", "dir")
+  not_needed([ "_package_dir" ])
+  if (defined(invoker.imports)) {
+    assert(!defined(invoker.source_root) && !defined(invoker.library_name),
+           "python_library(\"$target_name\"): `imports` cannot be used with " +
+               "`source_root` or `library_name`, sources are relative to " +
+               "the current directory and import paths come from `imports`")
+    _imports = []
+    _extra_python_dirs = []
+    foreach(import_dir, invoker.imports) {
+      _imports += [ rebase_path(import_dir, root_build_dir) ]
+
+      # List directories outside of //out as additional source roots for
+      # Python IDE tooling, see `extra_python_dirs` below.
+      _abs_import_dir = get_path_info(import_dir, "abspath")
+      if (string_replace(_abs_import_dir, "//out", "") == _abs_import_dir) {
+        _extra_python_dirs += [ rebase_path(import_dir, root_build_dir) ]
+      }
+    }
+  }
+
   # Add the sources from the invoker
   if (defined(invoker.source_root)) {
     _source_root = invoker.source_root
   } else {
-    _source_root = get_label_info(":$target_name", "dir")
+    _source_root = _package_dir
   }
+  if (!defined(invoker.imports)) {
+    _library_name = target_name
+    if (defined(invoker.library_name)) {
+      _library_name = invoker.library_name
+    }
+  }
+
   _full_source_paths = []
   foreach(source, invoker.sources) {
     _full_source_paths += [ _source_root + "/" + source ]
@@ -140,11 +186,6 @@ template("python_library") {
     _enable_mypy = invoker.enable_mypy
   }
 
-  _library_name = target_name
-  if (defined(invoker.library_name)) {
-    _library_name = invoker.library_name
-  }
-
   group_with_inputs(_labels.input_group) {
     forward_variables_from(invoker,
                            [
@@ -159,12 +200,19 @@ template("python_library") {
       deps += invoker.deps
     }
 
-    source_root = _source_root
     metadata = {
       library_info = [
         {
-          library_name = _library_name
-          source_root = rebase_path(source_root, root_build_dir)
+          if (defined(_imports)) {
+            # Read by `library_source_destinations()` in
+            # //build/python/package_python_binary.py.
+            imports = _imports
+            package_dir = rebase_path(_package_dir, root_build_dir)
+            repo_root = rebase_path("//", root_build_dir)
+          } else {
+            library_name = _library_name
+            source_root = rebase_path(_source_root, root_build_dir)
+          }
           sources = invoker.sources
           data_package_name = _data_package_name
           data_sources = _full_data_source_paths
@@ -190,9 +238,12 @@ template("python_library") {
       # The main case where sources inside //out are needed is for fidling,
       # which is handled by fidl_python_output metadata keys in the FIDL build
       # rules.
-      if (string_replace(source_root, "//out", "") == source_root) {
+      if (defined(_extra_python_dirs)) {
+        extra_python_dirs = _extra_python_dirs
+      } else if (string_replace(_source_root, "//out", "") == _source_root) {
         # Get the directory where the source_root exists.
-        extra_python_dirs = [ rebase_path(source_root + "/..", root_build_dir) ]
+        extra_python_dirs =
+            [ rebase_path(_source_root + "/..", root_build_dir) ]
       }
 
       # Collect library_info from any libraries that are needed.

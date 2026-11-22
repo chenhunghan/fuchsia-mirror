@@ -231,7 +231,7 @@ cc_test_executable("cobalt_app_unittests") {
     "//sdk/fidl/fuchsia.cobalt:fuchsia.cobalt_hlcpp",
     "//sdk/lib/inspect/component/cpp",
     "//sdk/lib/inspect/testing/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/cobalt/bin/testing:fake_clock_lib",
     "//src/cobalt/bin/testing:fake_http_loader",
     "//src/lib/cobalt/cpp:metric_event_builder",

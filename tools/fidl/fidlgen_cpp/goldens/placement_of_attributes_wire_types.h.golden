@@ -214,7 +214,7 @@ class ExampleUnion {
   ExampleUnion(ExampleUnion&&) = default;
   ExampleUnion& operator=(ExampleUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kVariant = 1,  // 0x1
   };
 
@@ -231,7 +231,7 @@ class ExampleUnion {
   ::test_placementofattributes::wire::ExampleUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kVariant = 1,  // 0x1
   };

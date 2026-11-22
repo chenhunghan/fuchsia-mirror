@@ -47,10 +47,6 @@ fn default_parameters() -> configuration::ServerParameters {
             pool_range_start: Ipv4Addr::UNSPECIFIED,
             pool_range_stop: Ipv4Addr::UNSPECIFIED,
         },
-        permitted_macs: dhcpv4::configuration::PermittedMacs(vec![]),
-        static_assignments: dhcpv4::configuration::StaticAssignments(
-            std::collections::hash_map::HashMap::new(),
-        ),
         arp_probe: false,
         bound_device_names: vec![],
     }
@@ -765,8 +761,6 @@ mod tests {
                 pool_range_start: std_ip_v4!("192.168.0.0"),
                 pool_range_stop: std_ip_v4!("192.168.0.0"),
             },
-            permitted_macs: dhcpv4::configuration::PermittedMacs(vec![]),
-            static_assignments: dhcpv4::configuration::StaticAssignments(HashMap::new()),
             arp_probe: false,
             bound_device_names: vec![DEFAULT_DEVICE_NAME.to_string()],
         }

@@ -8,7 +8,6 @@
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_CHANNEL_DISPATCHER_H_
 
 #include <lib/object-constants.h>
-#include <stdint.h>
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
@@ -22,26 +21,13 @@ DECLARE_PEERED_DISPATCHER_RUST_PROTOS(ChannelDispatcher, rust_channel_dispatcher
 extern "C" {
 zx_status_t cpp_channel_dispatcher_create(
     void* holder, ffi::Uninitialized<KernelHandle<ChannelDispatcher>>* handle_out);
-void rust_channel_dispatcher_get_message_counts(const ChannelDispatcher* disp, uint64_t* current,
-                                                uint64_t* max);
 }  // extern "C"
 
 class ChannelDispatcher final : public Dispatcher {
  public:
-  struct MessageCounts {
-    uint64_t current;
-    uint64_t max;
-  };
-
   ~ChannelDispatcher() final;
 
   DECLARE_PEERED_DISPATCHER_RUST_METHODS(rust_channel_dispatcher, ZX_OBJ_TYPE_CHANNEL, true)
-
-  MessageCounts get_message_counts() const {
-    MessageCounts counts{};
-    rust_channel_dispatcher_get_message_counts(this, &counts.current, &counts.max);
-    return counts;
-  }
 
  protected:
   Lock<CriticalMutex>* get_lock() const final;

@@ -20,7 +20,7 @@ impl Driver for DriverServeFidl {
         Ok(Self { _node: node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("DriverServeFidl stopped");
     }
 }

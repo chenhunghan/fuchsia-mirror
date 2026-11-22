@@ -61,9 +61,13 @@ source_set("common") {
   public_deps = []
   public_deps += [
     "//src/connectivity/wlan/drivers/lib/macaddr",
-    "//zircon/system/ulib/fbl",
     "//zircon/system/ulib/zx",
   ]
+  if (false) {
+    public_deps += []
+  } else {
+    public_deps += [ "//zircon/system/ulib/fbl" ]
+  }
   if (is_fuchsia) {
     public_deps += [
       "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",

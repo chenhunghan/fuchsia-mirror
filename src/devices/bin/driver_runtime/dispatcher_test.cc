@@ -6,6 +6,7 @@
 
 #include <lib/async/cpp/irq.h>
 #include <lib/async/cpp/wait.h>
+#include <lib/async/receiver.h>
 #include <lib/async/sequence_id.h>
 #include <lib/async/task.h>
 #include <lib/driver/outgoing/cpp/outgoing_directory.h>
@@ -391,6 +392,154 @@ TEST_F(DispatcherTest, SyncDispatcherDisallowsParallelCallbacksReentrant) {
     fdf_handle_close(local[i].channel);
     fdf_handle_close(remote[i]);
   }
+}
+
+// Stress tests that a synchronized dispatcher never executes two callbacks concurrently, while it
+// simultaneously receives inlined driver transport calls from multiple client threads, and port
+// wakeups (waits, irqs and tasks) on its port loop.
+TEST_F(DispatcherTest, SyncDispatcherMutualExclusionStress) {
+  constexpr uint32_t kNumClients = 4;
+  constexpr uint32_t kNumMessagesPerClient = 2000;
+  constexpr uint32_t kNumPortWakeups = 1000;
+
+  const void* server_driver = CreateFakeDriver();
+  fdf_dispatcher_t* server;
+  ASSERT_NO_FATAL_FAILURE(CreateDispatcher(0, __func__, "", server_driver, &server));
+  async_dispatcher_t* server_async = fdf_dispatcher_get_async_dispatcher(server);
+
+  // Tracks how many callbacks are currently executing on |server|.
+  std::atomic<uint32_t> in_callback = 0;
+  std::atomic_bool concurrent_callbacks = false;
+  auto run_callback = [&]() {
+    if (in_callback.fetch_add(1) != 0) {
+      concurrent_callbacks = true;
+    }
+    // Widen the window in which a concurrent callback could be observed.
+    for (volatile uint32_t i = 0; i < 200; i = i + 1) {
+    }
+    in_callback.fetch_sub(1);
+  };
+
+  // Driver transport: each client writes to its own channel, which is read by |server|.
+  std::vector<fdf::Channel> client_channels;
+  std::vector<fdf::Channel> server_channels;
+  for (uint32_t i = 0; i < kNumClients; i++) {
+    auto channels = fdf::ChannelPair::Create(0);
+    ASSERT_OK(channels.status_value());
+    client_channels.push_back(std::move(channels->end0));
+    server_channels.push_back(std::move(channels->end1));
+  }
+  std::atomic<uint32_t> num_messages_read = 0;
+  libsync::Completion all_messages_read;
+  std::vector<std::unique_ptr<fdf::ChannelRead>> channel_reads;
+  for (uint32_t i = 0; i < kNumClients; i++) {
+    channel_reads.push_back(std::make_unique<fdf::ChannelRead>(
+        server_channels[i].get(), 0,
+        [&](fdf_dispatcher_t* dispatcher, fdf::ChannelRead* channel_read, zx_status_t status) {
+          if (status != ZX_OK) {
+            return;
+          }
+          run_callback();
+          fdf::UnownedChannel channel(channel_read->channel());
+          auto read = channel->Read(0);
+          ASSERT_OK(read.status_value());
+          if (num_messages_read.fetch_add(1) + 1 == kNumClients * kNumMessagesPerClient) {
+            all_messages_read.Signal();
+          }
+          ASSERT_OK(channel_read->Begin(dispatcher));
+        }));
+    ASSERT_OK(channel_reads.back()->Begin(server));
+  }
+
+  // Port wakeups on |server|'s own port loop.
+  zx::event event;
+  ASSERT_OK(zx::event::create(0, &event));
+  std::atomic<uint32_t> num_waits = 0;
+  async::Wait wait(event.get(), ZX_USER_SIGNAL_0, 0,
+                   [&](async_dispatcher_t* dispatcher, async::Wait* wait, zx_status_t status,
+                       const zx_packet_signal_t* signal) {
+                     if (status != ZX_OK) {
+                       return;
+                     }
+                     run_callback();
+                     event.signal(ZX_USER_SIGNAL_0, 0);
+                     num_waits++;
+                     wait->Begin(dispatcher);
+                   });
+  ASSERT_OK(wait.Begin(server_async));
+
+  zx::interrupt irq_object;
+  ASSERT_OK(zx::interrupt::create(zx::resource(0), 0, ZX_INTERRUPT_VIRTUAL, &irq_object));
+  std::atomic<uint32_t> num_irqs = 0;
+  async::Irq irq(irq_object.get(), 0,
+                 [&](async_dispatcher_t* dispatcher, async::Irq* irq, zx_status_t status,
+                     const zx_packet_interrupt_t* interrupt) {
+                   if (status != ZX_OK) {
+                     return;
+                   }
+                   run_callback();
+                   irq_object.ack();
+                   num_irqs++;
+                 });
+  ASSERT_OK(irq.Begin(server_async));
+
+  std::atomic<uint32_t> num_tasks = 0;
+
+  std::vector<std::thread> threads;
+  for (uint32_t i = 0; i < kNumClients; i++) {
+    // CreateFakeDriver is not thread-safe, so grab the driver from the main thread.
+    threads.emplace_back([&, i, driver = CreateFakeDriver()]() {
+      // Use a different driver, so that the writes can be inlined into |server|.
+      thread_context::PushDriver(driver);
+      auto pop_driver = fit::defer([]() { thread_context::PopDriver(); });
+      fdf::Arena arena('TEST');
+      for (uint32_t j = 0; j < kNumMessagesPerClient; j++) {
+        ASSERT_OK(client_channels[i]
+                      .Write(0, arena, nullptr, 0, cpp20::span<zx_handle_t>())
+                      .status_value());
+      }
+    });
+  }
+  threads.emplace_back([&]() {
+    for (uint32_t i = 0; i < kNumPortWakeups; i++) {
+      ASSERT_OK(event.signal(0, ZX_USER_SIGNAL_0));
+      ASSERT_OK(irq_object.trigger(0, zx::time_boot()));
+      ASSERT_OK(async::PostTask(server_async, [&] {
+        run_callback();
+        num_tasks++;
+      }));
+    }
+  });
+
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  ASSERT_OK(all_messages_read.Wait(zx::time::infinite()));
+
+  // Waits, irqs and channel reads must be cancelled from the dispatcher's thread. As tasks are run
+  // in order, this also waits for all previously posted tasks to complete.
+  libsync::Completion cleanup_completion;
+  ASSERT_OK(async::PostTask(server_async, [&] {
+    for (auto& channel_read : channel_reads) {
+      channel_read->Cancel();
+    }
+    wait.Cancel();
+    ASSERT_OK(irq.Cancel());
+    cleanup_completion.Signal();
+  }));
+  ASSERT_OK(cleanup_completion.Wait(zx::time::infinite()));
+  WaitUntilIdle(server);
+
+  EXPECT_FALSE(concurrent_callbacks);
+  EXPECT_EQ(num_messages_read, kNumClients * kNumMessagesPerClient);
+  EXPECT_EQ(num_tasks, kNumPortWakeups);
+  EXPECT_GT(num_waits, 0u);
+  EXPECT_GT(num_irqs, 0u);
+
+  driver_runtime::DumpState state;
+  server->GetDispatcher()->Dump(&state);
+  // At least some of the driver transport calls should have been inlined on the client threads.
+  EXPECT_GT(state.debug_stats.num_inlined_requests, 0u);
 }
 
 //
@@ -4347,4 +4496,131 @@ TEST_F(DispatcherTest, ShutdownDriverWhileSuspendedCancelsSleepAndWakeQueues) {
 
   g_suspend_completion = nullptr;
   g_resume_requested = nullptr;
+}
+
+namespace {
+
+void VerifyWakeVectorExecutesBeforeNonWakeWaitOnResume(fdf_dispatcher_t* dispatcher,
+                                                       const void* fake_driver) {
+  async_dispatcher_t* async_dispatcher = fdf_dispatcher_get_async_dispatcher(dispatcher);
+  ASSERT_NOT_NULL(async_dispatcher);
+
+  zx::event wake_event;
+  ASSERT_OK(zx::event::create(0, &wake_event));
+  zx::event non_wake_event;
+  ASSERT_OK(zx::event::create(0, &non_wake_event));
+
+  ASSERT_OK(fdf_dispatcher_register_wake_vector(dispatcher, wake_event.get(), ZX_USER_SIGNAL_0));
+
+  struct ResumeRequester : public fdf_env_resume_requester_t {
+    libsync::Completion requested;
+  };
+  ResumeRequester requester{};
+  requester.handler = [](fdf_env_resume_requester_t* r) -> zx_status_t {
+    static_cast<ResumeRequester*>(r)->requested.Signal();
+    return ZX_OK;
+  };
+  fdf_env_register_resume_requester(fake_driver, &requester);
+  auto clear_requester =
+      fit::defer([fake_driver]() { fdf_env_register_resume_requester(fake_driver, nullptr); });
+
+  struct SuspendCompleter : public fdf_env_suspend_completer_t {
+    libsync::Completion completed;
+  };
+  SuspendCompleter completer{};
+  completer.handler = [](fdf_env_suspend_completer_t* c) {
+    static_cast<SuspendCompleter*>(c)->completed.Signal();
+  };
+  fdf_env_driver_suspend(fake_driver, &completer);
+  ASSERT_OK(completer.completed.Wait(zx::time::infinite()));
+
+  fbl::Mutex order_lock;
+  std::vector<std::string_view> execution_order;
+  libsync::Completion wake_done;
+  libsync::Completion non_wake_done;
+
+  async::WaitOnce wake_wait(wake_event.get(), ZX_USER_SIGNAL_0);
+  ASSERT_OK(
+      wake_wait.Begin(async_dispatcher, [&](async_dispatcher_t* d, async::WaitOnce* w,
+                                            zx_status_t status, const zx_packet_signal_t* signal) {
+        ASSERT_OK(status);
+        {
+          fbl::AutoLock lock(&order_lock);
+          execution_order.push_back("wake");
+        }
+        wake_done.Signal();
+      }));
+
+  async::WaitOnce non_wake_wait(non_wake_event.get(), ZX_USER_SIGNAL_0);
+  ASSERT_OK(non_wake_wait.Begin(async_dispatcher,
+                                [&](async_dispatcher_t* d, async::WaitOnce* w, zx_status_t status,
+                                    const zx_packet_signal_t* signal) {
+                                  ASSERT_OK(status);
+                                  {
+                                    fbl::AutoLock lock(&order_lock);
+                                    execution_order.push_back("non_wake");
+                                  }
+                                  non_wake_done.Signal();
+                                }));
+
+  // Trigger the wake vector while suspended so its callback is queued in wake_queue_.
+  ASSERT_OK(wake_event.signal(0, ZX_USER_SIGNAL_0));
+  ASSERT_OK(requester.requested.Wait(zx::time::infinite()));
+
+  // Park the backing port loop thread so that a non-wake wait packet enters the kernel port ahead
+  // of the dispatch wakeup queued by fdf_env_driver_resume().
+  struct ParkReceiver : public async_receiver_t {
+    libsync::Completion entered;
+    libsync::Completion release;
+  };
+  ParkReceiver park_receiver{};
+  park_receiver.state = ASYNC_STATE_INIT;
+  park_receiver.handler = [](async_dispatcher_t* d, async_receiver_t* receiver, zx_status_t status,
+                             const zx_packet_user_t* data) {
+    auto* self = static_cast<ParkReceiver*>(receiver);
+    self->entered.Signal();
+    self->release.Wait();
+  };
+  ASSERT_OK(async_queue_packet(async_dispatcher, &park_receiver, nullptr));
+  ASSERT_OK(park_receiver.entered.Wait(zx::time::infinite()));
+
+  ASSERT_OK(non_wake_event.signal(0, ZX_USER_SIGNAL_0));
+  fdf_env_driver_resume(fake_driver);
+  park_receiver.release.Signal();
+
+  ASSERT_OK(wake_done.Wait(zx::time::infinite()));
+  ASSERT_OK(non_wake_done.Wait(zx::time::infinite()));
+
+  {
+    fbl::AutoLock lock(&order_lock);
+    ASSERT_EQ(execution_order.size(), 2u);
+    EXPECT_EQ(execution_order[0], "wake");
+    EXPECT_EQ(execution_order[1], "non_wake");
+  }
+
+  ASSERT_OK(fdf_dispatcher_unregister_wake_vector(dispatcher, wake_event.get(), ZX_USER_SIGNAL_0));
+}
+
+}  // namespace
+
+TEST_F(DispatcherTest, WakeVectorExecutesBeforeNonWakeWaitOnResumeAllowSyncCalls) {
+  const void* fake_driver = CreateFakeDriver();
+  fdf_dispatcher_t* dispatcher;
+  ASSERT_NO_FATAL_FAILURE(CreateDispatcher(FDF_DISPATCHER_OPTION_ALLOW_SYNC_CALLS, __func__, "",
+                                           fake_driver, &dispatcher));
+  ASSERT_NO_FATAL_FAILURE(
+      VerifyWakeVectorExecutesBeforeNonWakeWaitOnResume(dispatcher, fake_driver));
+}
+
+TEST_F(DispatcherTest, WakeVectorExecutesBeforeNonWakeWaitOnResumeNoThreadMigration) {
+  constexpr std::string_view kRole = "fuchsia.test.wake_order_no_sync";
+  ASSERT_OK(fdf_env_set_scheduler_role_opts(kRole.data(), kRole.size(),
+                                            FDF_SCHEDULER_ROLE_OPTION_NO_SYNC_CALLS));
+
+  const void* fake_driver = CreateFakeDriver();
+  fdf_dispatcher_t* dispatcher;
+  ASSERT_NO_FATAL_FAILURE(CreateDispatcher(FDF_DISPATCHER_OPTION_NO_THREAD_MIGRATION, __func__,
+                                           kRole, fake_driver, &dispatcher));
+  ASSERT_NO_FATAL_FAILURE(
+      VerifyWakeVectorExecutesBeforeNonWakeWaitOnResume(dispatcher, fake_driver));
 }

@@ -15,9 +15,8 @@ class CodecAdapterFfmpegDecoder : public CodecAdapterSW<AvCodecContext::AVFrameP
   CodecAdapterFfmpegDecoder(std::mutex& lock, CodecAdapterEvents* codec_adapter_events);
   ~CodecAdapterFfmpegDecoder();
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
 
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
@@ -27,7 +26,7 @@ class CodecAdapterFfmpegDecoder : public CodecAdapterSW<AvCodecContext::AVFrameP
   // Loops for the lifetime of a stream.
   void ProcessInputLoop() override;
 
-  std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) override;
 
   void CleanUpAfterStream() __TA_EXCLUDES(lock_) override;
@@ -36,8 +35,8 @@ class CodecAdapterFfmpegDecoder : public CodecAdapterSW<AvCodecContext::AVFrameP
   static void FfmpegFreeBufferCallback(void* ctx, uint8_t* base);
 
   // Allocates buffer for a frame for ffmpeg.
-  int GetBuffer(const AvCodecContext::FrameBufferRequest& decoded_output_info,
-                AVCodecContext* avcodec_context, AVFrame* frame, int flags);
+  int GetBuffer(const AvCodecContext::FrameBufferRequest& decoded_output_info, AVFrame* frame,
+                int flags) __TA_EXCLUDES(lock_);
 
   // Decodes frames until the decoder is empty.
   void DecodeFrames();

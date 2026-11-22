@@ -9,10 +9,8 @@
 use anyhow::{Result, anyhow};
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, VsockAddr, connect, socket};
 use rand::{RngExt as _, distr};
-use std::fs::File;
-use std::io::{BufRead, ErrorKind, Write};
+use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
 
 // Provides access to ffx_config properties.
 pub mod config;
@@ -64,22 +62,6 @@ pub fn split_once(text: &str, pattern: &str) -> Result<(String, String)> {
     Ok((first.to_string(), second.to_string()))
 }
 
-/// A utility function to dump the contents of a file to the terminal.
-pub fn dump_log_to_out<W: Write>(log: &PathBuf, out: &mut W) -> Result<()> {
-    let mut out_handle = std::io::BufWriter::new(out);
-    let mut buf = Vec::with_capacity(64);
-    let mut buf_reader = std::io::BufReader::new(File::open(log)?);
-    while let Ok(len) = buf_reader.read_until(b'\n', &mut buf) {
-        if len == 0 {
-            break;
-        }
-        out_handle.write_all(&buf)?;
-        buf.clear();
-        out_handle.flush()?;
-    }
-    Ok(())
-}
-
 fn connect_with_cid_port(cid: u32, port: u32) -> std::io::Result<()> {
     let addr = VsockAddr::new(cid, port);
     #[cfg(not(target_os = "macos"))]
@@ -122,7 +104,7 @@ pub fn find_unused_vsock_cid() -> Result<u32> {
                         _ => {}
                     }
                 }
-                eprintln!("Unexpected error: {err:?}")
+                log::warn!("Unexpected error checking vsock CID {cid}: {err:?}")
             }
         };
     }

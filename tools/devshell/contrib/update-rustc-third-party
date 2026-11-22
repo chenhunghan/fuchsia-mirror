@@ -212,7 +212,10 @@ prepare_bazel_workspace "${bazel_workspace}"
 # script's docstring for details.
 "${FUCHSIA_DIR}/scripts/fuchsia-vendored-python" \
   "${FUCHSIA_DIR}/build/bazel/update-rustc-third-party/postprocess_crates_vendor.py" \
-  --search-dir="${VENDOR_DIR}" \
+  --search-dir \
+  "${VENDOR_DIR}" \
+  "${FUCHSIA_DIR}/third_party/rust_crates/forks" \
+  "${FUCHSIA_DIR}/third_party/rust_crates/intree" \
   --fuchsia-dir="${FUCHSIA_DIR}"
 
 # Restore files for unchanged directories.

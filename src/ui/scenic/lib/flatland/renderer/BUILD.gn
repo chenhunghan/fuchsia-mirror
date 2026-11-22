@@ -2,6 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+source_set("omitted_layer_tracker") {
+  public = [ "omitted_layer_tracker.h" ]
+  public_deps = [
+    "//sdk/lib/syslog/cpp",
+    "//zircon/system/ulib/zx",
+  ]
+}
+
 # Keep the renderer source set separate from the rest of Flatland
 # due to its dependencies on Escher which we do not want exposed.
 source_set("renderer") {
@@ -15,11 +23,13 @@ source_set("renderer") {
   ]
 
   public_deps = [
+    ":omitted_layer_tracker",
     "//src/lib/fidl/contrib/fpromise",
     "//src/ui/lib/escher/geometry:escher_geometry",
     "//src/ui/scenic/lib/flatland:flatland_types",
     "//src/ui/scenic/lib/flatland:image_formats",
     "//src/ui/scenic/lib/flatland/buffers",
+    "//src/ui/scenic/lib/flatland/image_import",
     "//third_party/glm",
   ]
 

@@ -78,25 +78,26 @@ enum FullmacDriverEvent {
     Stop,
     OnScanResult { result: fidl_mlme::ScanResult },
     OnScanEnd { end: fidl_mlme::ScanEnd },
-    OnScheduledScanMatchesAvailable { txn_id: u64 },
+    OnScheduledScanMatchesAvailable { txn_id: u64, wake_lease: Option<zx::EventPair> },
     OnScheduledScanStoppedByFirmware { txn_id: u64 },
     ConnectConf { resp: fidl_mlme::ConnectConfirm },
     RoamConf { conf: fidl_mlme::RoamConfirm },
-    RoamStartInd { ind: fidl_mlme::RoamStartIndication },
-    RoamResultInd { ind: fidl_mlme::RoamResultIndication },
+    RoamStartInd { ind: fidl_mlme::RoamStartIndication, wake_lease: Option<zx::EventPair> },
+    RoamResultInd { ind: fidl_mlme::RoamResultIndication, wake_lease: Option<zx::EventPair> },
     AuthInd { ind: fidl_mlme::AuthenticateIndication },
     DeauthConf { resp: fidl_mlme::DeauthenticateConfirm },
-    DeauthInd { ind: fidl_mlme::DeauthenticateIndication },
+    DeauthInd { ind: fidl_mlme::DeauthenticateIndication, wake_lease: Option<zx::EventPair> },
     AssocInd { ind: fidl_mlme::AssociateIndication },
     DisassocConf { resp: fidl_mlme::DisassociateConfirm },
-    DisassocInd { ind: fidl_mlme::DisassociateIndication },
+    DisassocInd { ind: fidl_mlme::DisassociateIndication, wake_lease: Option<zx::EventPair> },
     StartConf { resp: fidl_mlme::StartConfirm },
     StopConf { resp: fidl_mlme::StopConfirm },
     EapolConf { resp: fidl_mlme::EapolConfirm },
     OnChannelSwitch { resp: fidl_internal::ChannelSwitchInfo },
+    OnMichaelMicFailure { ind: fidl_mlme::MichaelMicFailureIndication },
     SignalReport { ind: fidl_internal::SignalReportIndication },
-    OnRssiThresholdBreached { cur_rssi_dbm: i8 },
-    EapolInd { ind: fidl_mlme::EapolIndication },
+    OnRssiThresholdBreached { cur_rssi_dbm: i8, wake_lease: Option<zx::EventPair> },
+    EapolInd { ind: fidl_mlme::EapolIndication, wake_lease: Option<zx::EventPair> },
     OnPmkAvailable { info: fidl_mlme::PmkInfo },
     SaeHandshakeInd { ind: fidl_mlme::SaeHandshakeIndication },
     SaeFrameRx { frame: fidl_mlme::SaeFrame },
@@ -300,6 +301,7 @@ async fn start<D: DeviceOps + Send + 'static>(
     let fidl_sme::UsmeBootstrapRequest::Start {
         generic_sme_server,
         legacy_privacy_support,
+        network_identifier_redaction,
         responder,
         ..
     } = usme_bootstrap_stream
@@ -307,6 +309,9 @@ async fn start<D: DeviceOps + Send + 'static>(
         .await
         .ok_or(FullmacMlmeError::UsmeBootstrapStreamTerminated)?
         .map_err(FullmacMlmeError::UsmeBootstrapStreamFailed)?;
+
+    // Install the redactor before the SME can format any network identifiers.
+    wlan_sme::install_network_identifier_redaction(network_identifier_redaction.as_deref());
 
     let inspect_vmo =
         inspector.duplicate_vmo().ok_or(FullmacMlmeError::FailedToDuplicateInspectVmo)?;
@@ -559,6 +564,7 @@ mod tests {
                 Some(usme_bootstrap_proxy.start(
                     generic_sme_server_end,
                     &fidl_sme::LegacyPrivacySupport { wep_supported: false, wpa1_supported: false },
+                    None,
                 ))
             } else {
                 None

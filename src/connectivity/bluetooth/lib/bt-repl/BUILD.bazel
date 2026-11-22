@@ -27,9 +27,10 @@ rustc_library(
     edition = "2024",
     visibility = ["//src/connectivity/bluetooth:__subpackages__"],
     deps = [
+        "//src/lib/line-editor",
         "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bstr",
         "//third_party/rust_crates/vendor:futures",
-        "//third_party/rust_crates/vendor:rustyline",
     ],
 )
 
@@ -43,6 +44,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "bt-repl-tests",
-    package_name = "bt-repl-tests",
     unit_tests = [":bt_repl_lib_test"],
 )

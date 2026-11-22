@@ -28,6 +28,18 @@
 
 namespace media_audio {
 
+// Half-amplitude (-6.02 dB) cutoff frequency for the ultrasound high-pass filter.
+// With a 28-frame side_length Hann-windowed sinc filter at 96 kHz, the transition
+// band spans 20 kHz to 26 kHz, achieving > 43.9 dB stopband attenuation at <= 20 kHz
+// (> 50 dB at <= 19 kHz) and unity passband (+-0.06 dB) at >= 26 kHz.
+inline constexpr int32_t kUltrasoundMinFrequencyHz = 23000;
+
+// Half-amplitude (-6.02 dB) cutoff frequency ceiling for the audio low-pass filter.
+// With a 28-frame side_length Hann-windowed sinc filter at 96 kHz, the transition
+// band spans 20 kHz to 26 kHz, achieving > 43.9 dB stopband attenuation at >= 26 kHz
+// (> 50 dB at >= 27 kHz).
+inline constexpr int32_t kAudioMaxFrequencyHz = 23000;
+
 // `CoefficientTable` is a shim around `std::vector` that maps indices into a physical addressing
 // scheme that is most optimal with respect to how this table is typically accessed. More
 // specifically, they are most commonly accessed with an integral stride (that is `1 << frac_bits`
@@ -149,11 +161,14 @@ class LinearFilterCoefficientTable {
   static std::unique_ptr<CoefficientTable> Create(Inputs);
 };
 
-// "Fractional-delay" sinc-based resampler with integrated low-pass filter.
+// "Fractional-delay" sinc-based resampler with integrated low-pass or unity-rate high-pass filter.
 class SincFilterCoefficientTable {
  public:
   static constexpr int32_t kSideTaps = 13;
   static constexpr int64_t kFracSideLength = (kSideTaps + 1) << Fixed::Format::FractionalBits;
+  static constexpr int32_t kHighPassSideTaps = 27;
+  static constexpr int64_t kFracHighPassSideLength = (kHighPassSideTaps + 1)
+                                                     << Fixed::Format::FractionalBits;
 
   // 27.5:1 allows 192 KHz to be downsampled to 6980 Hz with all taps engaged (i.e. at full
   // quality). It also allows 192:1 downsampling filters to have at least 2 tap lengths of quality.
@@ -167,14 +182,27 @@ class SincFilterCoefficientTable {
     int64_t side_length;
     int32_t num_frac_bits;
     double rate_conversion_ratio;
+    bool high_pass = false;
 
     bool operator<(const Inputs& rhs) const {
-      return std::tie(side_length, num_frac_bits, rate_conversion_ratio) <
-             std::tie(rhs.side_length, rhs.num_frac_bits, rhs.rate_conversion_ratio);
+      return std::tie(side_length, num_frac_bits, rate_conversion_ratio, high_pass) <
+             std::tie(rhs.side_length, rhs.num_frac_bits, rhs.rate_conversion_ratio, rhs.high_pass);
     }
   };
 
-  static inline Fixed Length(int32_t source_frame_rate, int32_t dest_frame_rate) {
+  static Fixed Length(int32_t source_frame_rate, int32_t dest_frame_rate, bool high_pass = false,
+                      bool low_pass = false) {
+    FX_CHECK(!(high_pass && low_pass));
+    if (high_pass) {
+      FX_CHECK(source_frame_rate == dest_frame_rate);
+      return Fixed::FromRaw(kFracHighPassSideLength);
+    }
+    if (low_pass) {
+      FX_CHECK(source_frame_rate > 2 * kAudioMaxFrequencyHz);
+      if (dest_frame_rate > 2 * kAudioMaxFrequencyHz) {
+        return std::max(Fixed::FromRaw(kFracHighPassSideLength), Length(source_frame_rate, 48000));
+      }
+    }
     int64_t filter_length = kFracSideLength;
     if (source_frame_rate > dest_frame_rate) {
       filter_length =
@@ -194,10 +222,45 @@ class SincFilterCoefficientTable {
         .side_length = Length(source_rate, dest_rate).raw_value(),
         .num_frac_bits = kPtsFractionalBits,
         .rate_conversion_ratio = static_cast<double>(dest_rate) / static_cast<double>(source_rate),
+        .high_pass = false,
     };
   }
 
-  // Creates windowed-sinc FIR filter with band-limited frame-rate conversion.
+  static Inputs MakeHighPassInputs(int32_t source_rate,
+                                   int32_t cutoff_hz = kUltrasoundMinFrequencyHz,
+                                   int64_t side_length = kFracHighPassSideLength,
+                                   int32_t num_frac_bits = kPtsFractionalBits) {
+    FX_CHECK(cutoff_hz > 0 && 2 * static_cast<int64_t>(cutoff_hz) < source_rate);
+    return Inputs{
+        .side_length = side_length,
+        .num_frac_bits = num_frac_bits,
+        .rate_conversion_ratio =
+            2.0 * static_cast<double>(cutoff_hz) / static_cast<double>(source_rate),
+        .high_pass = true,
+    };
+  }
+
+  // Creates inputs for a low-pass windowed-sinc filter. For dest rates above 2 * cutoff_hz
+  // (e.g. 96 kHz -> 96 kHz or 96 kHz -> 48 kHz), this clamps bandwidth to cutoff_hz (23 kHz).
+  // For dest rates <= 2 * cutoff_hz (e.g. 16 kHz), the dest Nyquist rate governs downsampling.
+  static Inputs MakeLowPassInputs(int32_t source_rate, int32_t dest_rate,
+                                  int32_t cutoff_hz = kAudioMaxFrequencyHz,
+                                  std::optional<int64_t> side_length = std::nullopt,
+                                  int32_t num_frac_bits = kPtsFractionalBits) {
+    FX_CHECK(cutoff_hz > 0 && 2 * static_cast<int64_t>(cutoff_hz) < source_rate);
+    const double effective_dest_rate =
+        std::min(static_cast<double>(dest_rate), 2.0 * static_cast<double>(cutoff_hz));
+    return Inputs{
+        .side_length = side_length.value_or(Length(source_rate, dest_rate, /*high_pass=*/false,
+                                                   /*low_pass=*/true)
+                                                .raw_value()),
+        .num_frac_bits = num_frac_bits,
+        .rate_conversion_ratio = effective_dest_rate / static_cast<double>(source_rate),
+        .high_pass = false,
+    };
+  }
+
+  // Creates a low-pass or high-pass windowed-sinc FIR filter.
   static std::unique_ptr<CoefficientTable> Create(Inputs);
 };
 
@@ -206,6 +269,8 @@ struct PrebuiltSincFilterCoefficientTable {
   int32_t source_rate;
   int32_t dest_rate;
   cpp20::span<const float> table;
+  bool high_pass = false;
+  bool low_pass = false;
 };
 
 // The list of prebuilt coefficient tables.

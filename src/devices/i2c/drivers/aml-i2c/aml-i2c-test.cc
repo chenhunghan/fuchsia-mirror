@@ -7,6 +7,7 @@
 #include <fidl/fuchsia.hardware.amlogic.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.i2c.businfo/cpp/wire.h>
 #include <fidl/fuchsia.hardware.i2cimpl/cpp/driver/wire.h>
+#include <lib/driver/fake-mmio-reg/cpp/fake-mmio-reg.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/driver/testing/cpp/driver_test.h>
@@ -18,7 +19,6 @@
 #include <span>
 #include <vector>
 
-#include <fake-mmio-reg/fake-mmio-reg.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -175,7 +175,7 @@ class FakeAmlI2cController {
            (static_cast<uint64_t>(reg_values_[(offset / sizeof(uint32_t)) + 1]) << 32);
   }
 
-  ddk_fake::FakeMmioRegRegion mmio_;
+  fake_mmio::FakeMmioRegRegion mmio_;
   uint32_t reg_values_[8]{};
   zx::unowned_interrupt irq_;
   std::vector<Transfer> transfers_;

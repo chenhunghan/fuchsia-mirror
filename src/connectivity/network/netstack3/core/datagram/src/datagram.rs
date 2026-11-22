@@ -182,7 +182,11 @@ impl PendingDatagramSocketError {
     pub fn from_hard_icmp(err: IcmpErrorCode) -> Option<Self> {
         match err {
             IcmpErrorCode::V4(v4_err) => match v4_err {
-                Icmpv4ErrorCode::DestUnreachable(code, _) => match code {
+                Icmpv4ErrorCode::DestUnreachable {
+                    code,
+                    message: _,
+                    original_packet_length: _,
+                } => match code {
                     Icmpv4DestUnreachableCode::DestPortUnreachable => Some(Self::PortUnreachable),
                     Icmpv4DestUnreachableCode::DestProtocolUnreachable => {
                         Some(Self::ProtocolUnreachable)

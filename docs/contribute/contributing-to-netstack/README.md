@@ -102,7 +102,7 @@ include a comment with both a quote and citation of the relevant portion(s) of
 the document near the implementation. The quote lets readers know why something
 is being done and the citation allows a reader to get more context.
 
-### Error Messages
+### Error messages {:#error-messages}
 
 As with code comments, consider the future reader of the error messages emitted
 by your code. Ensure that your error messages are actionable. For example, avoid
@@ -129,7 +129,7 @@ define the following test classes:
 Consider the following guidelines when writing tests:
 
 1. **Always add tests** for new features or bug fixes.
-1. Consider the guidelines in [Error Messages](#Error-Messages) when writing
+1. Consider the guidelines in [Error messages](#error-messages) when writing
    test assertions.
 1. Tests must be **deterministic**. Threaded or time-dependent code, Random
    Number Generators (RNGs), and cross-component communication are common
@@ -323,5 +323,5 @@ If you're working on changes that affect `fdio`, add:
 [gtest_test_flags]: https://github.com/google/googletest/blob/main/docs/advanced.md#repeating-the-tests
 [`fuchsia_async::Executor::new_with_fake_time`]: https://fuchsia.googlesource.com/fuchsia/+/a874276/src/lib/fuchsia-async/src/executor.rs#345
 [fake-clock]: https://fuchsia.googlesource.com/fuchsia/+/a874276/src/lib/fake-clock
-[determinism]: /docs/contribute/testing/best-practices.md#write_reproducible_deterministic_tests
+[determinism]: /docs/contribute/testing/best-practices.md#write-reproducible-deterministic-tests
 [netemul-owners]: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/src/connectivity/network/tests/integration/common/OWNERS

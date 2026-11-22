@@ -624,6 +624,24 @@ TEST(ZxTestCAssertionTest, AssertNoFatalFailureWithFailure) {
   TEST_CHECKPOINT();
 }
 
+static void HelperFnSkip(void) { ZXTEST_SKIP("Skipped in helper."); }
+
+TEST(ZxTestCAssertionTest, AssertNoFatalFailureWithSkip) {
+  TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, NO_ERRORS | SKIPPED,
+                   "Failed to end test execution without a failure on helper skip.");
+  ASSERT_NO_FATAL_FAILURE(HelperFnSkip());
+  TEST_CHECKPOINT();
+}
+
+TEST(ZxTestCAssertionTest, ExpectNoFatalFailureWithSkip) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS | SKIPPED, "Helper skip was a failure.");
+  EXPECT_NO_FATAL_FAILURE(HelperFnSkip());
+  ZX_ASSERT_MSG(!CURRENT_TEST_HAS_FATAL_FAILURE(), "Helper skip was a fatal failure.");
+  EXPECT_NO_FATAL_FAILURE(HelperFnSkip());
+  EXPECT_NO_FAILURES(HelperFnSkip());
+  TEST_CHECKPOINT();
+}
+
 TEST(ZxTestCAssertionTest, AssertTrueCoerceTypeToBoolFailure) {
   TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, HAS_ERRORS, "Failed to identify false.");
   int a = 0;
@@ -675,6 +693,7 @@ TEST(ZxTestCAssertionTest, FunctionPointerNull) {
 }
 
 TEST(ZxTestCAssertionTest, PromoteLiteralIntegersOnComp) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Failed to compare mixed integer types.");
   int32_t a = -1;
   int64_t b = 2;
   int16_t c = -1;
@@ -686,11 +705,11 @@ TEST(ZxTestCAssertionTest, PromoteLiteralIntegersOnComp) {
   uint16_t h = 1;
 
   // Signed to wider ints.
-  ASSERT_EQ(a, b);
+  ASSERT_NE(a, b);
   ASSERT_GE(b, a);
   ASSERT_LE(a, b);
   ASSERT_GT(b, c);
-  ASSERT_LT(b, a);
+  ASSERT_LT(a, b);
   ASSERT_GT(b, d);
 
   // Signed comparison with literals.
@@ -713,6 +732,7 @@ TEST(ZxTestCAssertionTest, PromoteLiteralIntegersOnComp) {
   ASSERT_LE(f, 2);
   ASSERT_GT(g, 2);
   ASSERT_GE(g, 3);
+  TEST_CHECKPOINT();
 }
 
 TEST(ZxTestCAssertionTest, PrintfLikeDescs) {
@@ -937,4 +957,20 @@ TEST(ZxTestCAssertionTest, ScopedTrace) {
   TEST_EXPECTATION(CHECKPOINT_NOT_REACHED, HAS_ERRORS, "Failure should have happened.");
   SCOPED_TRACE("This is a trace.");
   FAIL();
+}
+
+TEST(ZxTestCAssertionTest, CompareInCommonType) {
+  TEST_EXPECTATION(CHECKPOINT_REACHED, NO_ERRORS, "Values were not compared in their common type.");
+  const uint64_t big = (uint64_t)1 << 32;
+  EXPECT_NE(0, big);
+  EXPECT_NE(big, 0);
+  EXPECT_LT(0, big);
+  EXPECT_GT(big, 0);
+  EXPECT_TRUE(0.5);
+  EXPECT_FALSE(0.0);
+  char str[] = "abc";
+  EXPECT_STREQ("abc", str);
+  EXPECT_STREQ(str, "abc");
+  EXPECT_SUBSTR(str, "b");
+  TEST_CHECKPOINT();
 }

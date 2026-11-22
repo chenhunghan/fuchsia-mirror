@@ -231,6 +231,22 @@ When editing any Fuchsia documentation file, enforce the following standards:
     - [Hash verification failure](#hash-verification-failure)
     ```
 
+### 11. Images & Alt Text
+
+- **Require descriptive alt text**: Follow the [alt text guidelines][alt-text]
+  for both Markdown images and HTML `<img>` `alt` attributes. Reject or replace:
+    - Placeholders (`drawing`, `image`, `diagram`, `screenshot`), filenames
+      (`page_fault.png`), or identifiers (`delivery_blob`).
+    - Type-only phrases (`"Image of a flowchart"`). Naming the image type is
+      fine when followed by a description (`"A flowchart showing the boot
+      process"`).
+- **Titles and decorative images**: A title (`![alt](image.png "Title")`) does
+  not replace alt text. Empty `alt=""` is valid only for a decorative icon next
+  to text that conveys the same information.
+- **Inspect before writing**: Open the image file before suggesting alt text.
+  Never guess from the filename; if you cannot view the image, flag it without
+  proposing replacement text.
+
 ## Editing Workflow
 
 1.  **Back Up Target Document**: Before making any edits, copy the original
@@ -258,6 +274,7 @@ When editing any Fuchsia documentation file, enforce the following standards:
       `posix-terminal`.
     - Code blocks without empty lines before or after them.
     - Passive voice, future tense ("will"), or third-person phrasing.
+    - Missing or non-descriptive image alt text (see section 11).
 
 3.  **Apply Copyediting Changes**:
     - Do NOT edit, reformat, or wrap text in top-level YAML frontmatter.
@@ -283,6 +300,8 @@ When editing any Fuchsia documentation file, enforce the following standards:
     - Convert inline links to reference links at the end of the file (do NOT add
       `{:.external}` to reference link definitions).
     - Update shell code blocks to `posix-terminal` syntax.
+    - Replace non-descriptive image alt text after inspecting the image file
+      (see section 11).
 
 4.  **Validate & Review**:
     - Verify line lengths (all prose <= 80 chars).
@@ -302,3 +321,5 @@ When editing any Fuchsia documentation file, enforce the following standards:
     the user about the existence of the backup copy in the `/tmp` directory and
     provide instructions on how to recover the original target document if
     desired (for example, `cp /tmp/<backup_file> <target_doc_path>`).
+
+[alt-text]: /docs/contribute/docs/adding-diagrams.md#alt-text

@@ -11,16 +11,16 @@
 #include <lib/memalloc/range.h>
 #include <lib/zbitl/error-stdio.h>
 #include <lib/zbitl/view.h>
+#include <stdio.h>
 #include <string.h>
 
 #include <ktl/algorithm.h>
 #include <ktl/optional.h>
 #include <ktl/string_view.h>
 #include <ktl/utility.h>
+#include <phys/allocation/zbitl.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
-#include <phys/symbolize.h>
-#include <phys/zbitl-allocation.h>
+#include <phys/runtime/symbolize.h>
 #include <pretty/cpp/sizes.h>
 
 #include <ktl/enforce.h>
@@ -101,7 +101,7 @@ void KernelStorage::Init(Zbi zbi) {
   // This marks just the decompression (or copying) time.
   decompress_end_ts_ = arch::EarlyTicks::Get();
 
-  debugf("%s: STORAGE_KERNEL decompressed %s -> %s\n", ProgramName(),
+  printf("%s: STORAGE_KERNEL decompressed %s -> %s\n", ProgramName(),
          pretty::FormattedBytes(item_->header->length).c_str(),
          pretty::FormattedBytes(storage_size).c_str());
 
@@ -117,7 +117,7 @@ void KernelStorage::Init(Zbi zbi) {
 
 KernelStorage::Bootfs KernelStorage::GetKernelPackage() const {
   ktl::string_view package_name = BootOptions::Get()->select.data();
-  debugf("%s: Finding kernel package %.*s...\n", gSymbolize->name(),
+  printf("%s: Finding kernel package %.*s...\n", gSymbolize->name(),
          static_cast<int>(package_name.size()), package_name.data());
   auto result = root().subdir(package_name);
   if (result.is_error()) {

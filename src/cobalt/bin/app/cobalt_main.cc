@@ -120,19 +120,27 @@ std::string ReadBoardName(const std::shared_ptr<sys::ServiceDirectory>& services
 }
 
 // Replaces the UTC clock installed in the process' namespace with a fake one
-// that is always "logging quality." This is intended to simulate a synchronized clock in
-// test environments without network and should not be used outside of tests.
-void ReplaceRuntimeClock() {
+// that is always "logging quality." If `fuchsia.time.Maintenance` is available
+// in `services`, uses the writable UTC clock it provides so tests can control
+// time deterministically; otherwise creates a local clock initialized to the
+// current time. This is intended to simulate a synchronized clock in test
+// environments without network and should not be used outside of tests.
+void ReplaceRuntimeClock(const std::shared_ptr<sys::ServiceDirectory>& services) {
   zx::clock current_clock(zx_utc_reference_get());
-  zx::time start_time;
-  current_clock.read(start_time.get_address());
-
   zx::clock replacement;
-  zx_clock_create_args_v1_t clock_args{.backstop_time = start_time.get()};
-  zx::clock::create(0u, &clock_args, &replacement);
-  zx::clock::update_args update_args;
-  update_args.set_value(start_time);
-  replacement.update(update_args);
+
+  fuchsia::time::MaintenanceSyncPtr maintenance;
+  services->Connect<fuchsia::time::Maintenance>(maintenance.NewRequest());
+  if (maintenance->GetWritableUtcClock(&replacement) != ZX_OK || !replacement.is_valid()) {
+    zx::time start_time;
+    current_clock.read(start_time.get_address());
+
+    zx_clock_create_args_v1_t clock_args{.backstop_time = start_time.get()};
+    zx::clock::create(0u, &clock_args, &replacement);
+    zx::clock::update_args update_args;
+    update_args.set_value(start_time);
+    replacement.update(update_args);
+  }
 
   if (const zx_status_t status =
           replacement.signal(/*clear_mask=*/0,
@@ -271,16 +279,16 @@ int main(int argc, const char** argv) {
                 << ", test_only_use_fake_clock=" << use_fake_clock
                 << ", test_dont_backfill_empty_reports=" << test_dont_backfill_empty_reports << ".";
 
+  auto context = sys::ComponentContext::CreateAndServeOutgoingDirectory();
+
   if (use_fake_clock) {
     FX_LOGS(WARNING) << "Using a fake clock. This should only be enabled in tests.";
-    ReplaceRuntimeClock();
+    ReplaceRuntimeClock(context->svc());
   }
 
   if (test_dont_backfill_empty_reports) {
     FX_LOGS(WARNING) << "Not backfilling empty reports. This should only be enabled in tests.";
   }
-
-  auto context = sys::ComponentContext::CreateAndServeOutgoingDirectory();
 
   inspect::ComponentInspector inspector(loop.dispatcher(), {});
   inspector.Health().StartingUp();

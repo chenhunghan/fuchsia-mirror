@@ -145,7 +145,7 @@ fn f2fs_reader_fuzzer(bytes: &[u8]) {
                 if let Ok(entries) = futures::executor::block_on(reader.readdir(target_inode)) {
                     for _ in entries {}
                 }
-                if let Ok(symlink) = reader.read_symlink(&_inode) {
+                if let Ok(symlink) = futures::executor::block_on(reader.read_symlink(&_inode)) {
                     let _ = symlink;
                 }
 

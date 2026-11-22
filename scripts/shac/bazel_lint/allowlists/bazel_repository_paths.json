@@ -267,13 +267,6 @@
             ]
         },
         {
-            "path": "src/lib/vmo_store/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "vmo_store"
-            ]
-        },
-        {
             "path": "src/media/codec/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009",
             "targets": [
@@ -395,17 +388,18 @@
             ]
         },
         {
+            "path": "src/tests/fidl/compatibility/cpp_wire/BUILD.bazel",
+            "bug": "https://fxbug.dev/570203009",
+            "targets": [
+                "cpp_wire",
+                "legacy_llcpp_package"
+            ]
+        },
+        {
             "path": "src/tests/fidl/compatibility/hlcpp/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009",
             "targets": [
                 "hlcpp"
-            ]
-        },
-        {
-            "path": "src/tests/fidl/compatibility/llcpp/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "llcpp"
             ]
         },
         {
@@ -500,20 +494,6 @@
             "bug": "https://fxbug.dev/570203009",
             "targets": [
                 "my_driver_rust"
-            ]
-        },
-        {
-            "path": "zircon/system/ulib/fbl/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "fbl"
-            ]
-        },
-        {
-            "path": "zircon/system/ulib/fzl/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "fzl"
             ]
         }
     ]

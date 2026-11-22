@@ -11,18 +11,11 @@ library_headers("headers") {
   headers = [ "lib/heap.h" ]
 }
 
-library_headers("headers.internal") {
-  visibility = [ "./*" ]
-
-  headers = [ "lib/heap_internal.h" ]
-}
-
 source_set("heap") {
   public_deps = [ ":headers" ]
 
   sources = [ "cxx_allocator.cc" ]
   deps = [
-    "cmpctmalloc",
     "//zircon/kernel/lib/instrumentation:headers",
     "//zircon/kernel/phys/handoff:headers",
   ]

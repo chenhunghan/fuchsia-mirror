@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "growable_slab.h"
+#include <lib/vmo_store/growable_slab.h>
 
 #include <ostream>
 #include <unordered_map>

@@ -49,8 +49,8 @@ class ArmDevicetreeSmmuItemTest
   static void SetUpTestSuite() { Mixin::SetUpTestSuite(); }
   static void TearDownTestSuite() { Mixin::TearDownTestSuite(); }
 
-  static void CheckSmmuItem(const zbi_dcfg_arm_smmu_driver_t& item,
-                            const zbi_dcfg_arm_smmu_driver_t& expected) {
+  static void CheckSmmuItem(const zbi_dcfg_arm_smmu_v2_driver_t& item,
+                            const zbi_dcfg_arm_smmu_v2_driver_t& expected) {
     EXPECT_EQ(expected.mmio_phys, item.mmio_phys);
     EXPECT_EQ(expected.mmio_phys, item.mmio_phys);
     EXPECT_EQ(expected.num_context_banks_override, item.num_context_banks_override);
@@ -70,7 +70,8 @@ class ArmDevicetreeSmmuItemTest
     return fit::success(std::move(loaded_dtb).value());
   }
 
-  void DoBasicTest(const char* dt_name, std::vector<const zbi_dcfg_arm_smmu_driver_t*> expected) {
+  void DoBasicTest(const char* dt_name,
+                   std::vector<const zbi_dcfg_arm_smmu_v2_driver_t*> expected) {
     DTResult maybe_devtree = LoadDevicetree(dt_name);
     ASSERT_TRUE(maybe_devtree.is_ok(), "%s", maybe_devtree.error_value().c_str());
 
@@ -89,15 +90,16 @@ class ArmDevicetreeSmmuItemTest
 
     size_t found{0};
     for (auto [header, payload] : image) {
-      if (header->type == ZBI_TYPE_KERNEL_DRIVER && header->extra == ZBI_KERNEL_DRIVER_ARM_SMMU) {
-        const zbi_dcfg_arm_smmu_driver_t* items =
-            reinterpret_cast<const zbi_dcfg_arm_smmu_driver_t*>(payload.data());
-        const size_t avail = payload.size_bytes() / sizeof(zbi_dcfg_arm_smmu_driver_t);
+      if (header->type == ZBI_TYPE_KERNEL_DRIVER &&
+          header->extra == ZBI_KERNEL_DRIVER_ARM_SMMU_V2) {
+        const zbi_dcfg_arm_smmu_v2_driver_t* items =
+            reinterpret_cast<const zbi_dcfg_arm_smmu_v2_driver_t*>(payload.data());
+        const size_t avail = payload.size_bytes() / sizeof(zbi_dcfg_arm_smmu_v2_driver_t);
 
         for (size_t i = 0; i < avail; ++i) {
           ASSERT_LT(found, expected.size());
-          const zbi_dcfg_arm_smmu_driver_t& item = items[i];
-          const zbi_dcfg_arm_smmu_driver_t& e = *expected[found++];
+          const zbi_dcfg_arm_smmu_v2_driver_t& item = items[i];
+          const zbi_dcfg_arm_smmu_v2_driver_t& e = *expected[found++];
           CheckSmmuItem(item, e);
         }
       }
@@ -108,7 +110,7 @@ class ArmDevicetreeSmmuItemTest
 
 // Test a basic SMMU description, similar to what we would expect to see in the field.
 TEST_F(ArmDevicetreeSmmuItemTest, Simple) {
-  constexpr zbi_dcfg_arm_smmu_driver_t kExpected{
+  constexpr zbi_dcfg_arm_smmu_v2_driver_t kExpected{
       .mmio_phys = 0x4e54000,
       .num_context_banks_override = 4,
       .num_smr_override = 8,
@@ -132,7 +134,7 @@ TEST_F(ArmDevicetreeSmmuItemTest, Simple) {
 // Test a SMMU description which contains nothing but the MMIO register address.
 // We should see defaults (zero) for everything else we parse.
 TEST_F(ArmDevicetreeSmmuItemTest, Defaults) {
-  constexpr zbi_dcfg_arm_smmu_driver_t kExpected{
+  constexpr zbi_dcfg_arm_smmu_v2_driver_t kExpected{
       .mmio_phys = 0x4e54000,
       .num_context_banks_override = 0,
       .num_smr_override = 0,
@@ -150,7 +152,7 @@ TEST_F(ArmDevicetreeSmmuItemTest, Defaults) {
 // entries than should be possible given the limits of the fixed structure size.  We expect the
 // vectors to be truncated to hold the max that they can.
 TEST_F(ArmDevicetreeSmmuItemTest, Overflow) {
-  constexpr zbi_dcfg_arm_smmu_driver_t kExpected{
+  constexpr zbi_dcfg_arm_smmu_v2_driver_t kExpected{
       .mmio_phys = 0x4e54000,
       .num_context_banks_override = 0,
       .num_smr_override = 0,
@@ -252,7 +254,7 @@ TEST_F(ArmDevicetreeSmmuItemTest, Overflow) {
 // array as the positions of the interrupt numbers in the array is important (it
 // defines which context banks they apply to in SMMUv2.
 TEST_F(ArmDevicetreeSmmuItemTest, BadIrqIndex) {
-  constexpr zbi_dcfg_arm_smmu_driver_t kExpected{
+  constexpr zbi_dcfg_arm_smmu_v2_driver_t kExpected{
       .mmio_phys = 0x4e54000,
       .num_context_banks_override = 0,
       .num_smr_override = 0,
@@ -275,7 +277,7 @@ TEST_F(ArmDevicetreeSmmuItemTest, BadIrqIndex) {
 
 // Test a situation where we expect to have multiple SMMUs in the same devicetree.
 TEST_F(ArmDevicetreeSmmuItemTest, Multi) {
-  constexpr zbi_dcfg_arm_smmu_driver_t kFirst{
+  constexpr zbi_dcfg_arm_smmu_v2_driver_t kFirst{
       .mmio_phys = 0x4e54000,
       .num_context_banks_override = 4,
       .num_smr_override = 8,
@@ -293,7 +295,7 @@ TEST_F(ArmDevicetreeSmmuItemTest, Multi) {
       .handoff_smrs{0x00020420},
   };
 
-  constexpr zbi_dcfg_arm_smmu_driver_t kSecond{
+  constexpr zbi_dcfg_arm_smmu_v2_driver_t kSecond{
       .mmio_phys = 0xabcd000,
       .num_context_banks_override = 7,
       .num_smr_override = 0x17,

@@ -71,7 +71,6 @@ fuchsia_driver_component("rndis-function") {
   component_name = "rndis-function"
   dml_label = ":rndis-function-dml"
   deps = [ ":rndis-function-driver" ]
-  info = "meta/rndis-function-info.json"
 }
 
 fuchsia_driver_package("package") {

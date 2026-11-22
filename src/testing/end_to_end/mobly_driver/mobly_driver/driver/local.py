@@ -7,7 +7,7 @@ import os
 import time
 from copy import deepcopy
 from datetime import timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 
 import yaml
 from mobly import keys
@@ -339,7 +339,7 @@ class LocalDriver(base.BaseDriver):
         elif self._params_path:
             config = api_mobly.get_config_with_test_params(config, test_params)
 
-        return yaml.dump(config)
+        return cast(str, yaml.dump(config))
 
     def teardown(
         self,

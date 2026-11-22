@@ -1,0 +1,99 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":network-tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/network/testing/netemul/network-context/lib:network_service",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "network_context",
+)
+
+fx_component_manifest(
+    name = "network-context_manifest",
+    component_name = "network-context",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/network-context.cml",
+)
+
+fx_component(
+    name = "network-context",
+    compiled_manifest = ":network-context_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "network-context",
+    components = [":network-context"],
+    visibility = ["//src/connectivity/network/testing/netemul/service:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "network-test_manifest",
+    testonly = True,
+    component_name = "network-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/connectivity/network/tun/network-tun:meta/network-tun-test.shard",
+        "//src/sys/test_runners/gtest:default",
+    ],
+    manifest = "meta/network-test.cml",
+)
+
+fx_test_component(
+    name = "network-test",
+    compiled_manifest = ":network-test_manifest",
+    deps = [
+        "//src/connectivity/network/testing/netemul/network-context/lib:network_test_bin_packaged",
+    ],
+)
+
+fx_package(
+    name = "network-tests_package",
+    package_name = "network-tests",
+    testonly = True,
+    subpackages = ["//src/connectivity/network/tun/network-tun"],
+    test_components = [":network-test"],
+)
+
+fx_test(
+    name = "network-tests",
+    package = ":network-tests_package",
+)

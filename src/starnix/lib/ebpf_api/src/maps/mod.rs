@@ -12,8 +12,8 @@ mod lpm_trie;
 mod ring_buffer;
 mod vmar;
 
-pub use ring_buffer::RINGBUF_SIGNAL;
-pub(crate) use ring_buffer::{RingBuffer, RingBufferWakeupPolicy};
+pub(crate) use ring_buffer::RingBufferWakeupPolicy;
+pub use ring_buffer::{RINGBUF_SIGNAL, RingBufferReservations};
 
 use ebpf::{BpfValue, EbpfBufferPtr, MapFlags, MapReference, MapSchema};
 use fidl_fuchsia_ebpf as febpf;
@@ -179,6 +179,14 @@ trait MapImpl: Send + Sync + Debug {
     fn ringbuf_reserve(&self, _size: u32, _flags: u64) -> Result<usize, MapError> {
         Err(MapError::InvalidParam)
     }
+
+    fn ringbuf_submit(&self, _addr: usize, _flags: RingBufferWakeupPolicy) {
+        unreachable!("ringbuf_submit called on non-ringbuf map");
+    }
+
+    fn ringbuf_discard(&self, _addr: usize, _flags: RingBufferWakeupPolicy) {
+        unreachable!("ringbuf_discard called on non-ringbuf map");
+    }
 }
 
 /// A BPF map. This is a hashtable that can be accessed both by BPF programs and userspace.
@@ -186,9 +194,7 @@ trait MapImpl: Send + Sync + Debug {
 pub struct Map {
     pub schema: MapSchema,
 
-    // The impl because it's required for some map implementations need to be
-    // pinned, particularly ring buffers.
-    map_impl: Pin<Box<dyn MapImpl + Sync>>,
+    map_impl: Box<dyn MapImpl>,
 }
 
 /// Maps are normally kept pinned in memory since linked eBPF programs store direct pointers to
@@ -332,6 +338,14 @@ impl Map {
         self.map_impl.ringbuf_reserve(size, flags)
     }
 
+    pub(crate) fn ringbuf_submit(&self, addr: usize, flags: RingBufferWakeupPolicy) {
+        self.map_impl.ringbuf_submit(addr, flags);
+    }
+
+    pub(crate) fn ringbuf_discard(&self, addr: usize, flags: RingBufferWakeupPolicy) {
+        self.map_impl.ringbuf_discard(addr, flags);
+    }
+
     pub fn uses_locks(&self) -> bool {
         self.schema.map_type != bpf_map_type_BPF_MAP_TYPE_ARRAY
     }
@@ -377,15 +391,17 @@ const SK_STORAGE_MAX_ENTRIES: u32 = 8192;
 fn create_map_impl(
     schema: &MapSchema,
     vmo: impl Into<VmoOrName>,
-) -> Result<Pin<Box<dyn MapImpl>>, MapError> {
+) -> Result<Box<dyn MapImpl>, MapError> {
     // The list of supported maps should be kept in sync with the enum values in
     // `fuchsia.ebpf.MapType`.
     match schema.map_type {
         // LINT.IfChange(supported_maps)
-        bpf_map_type_BPF_MAP_TYPE_ARRAY => Ok(Box::pin(array::Array::new(schema, vmo)?)),
-        bpf_map_type_BPF_MAP_TYPE_HASH => Ok(Box::pin(hashmap::HashMap::new(schema, vmo)?)),
-        bpf_map_type_BPF_MAP_TYPE_RINGBUF => Ok(ring_buffer::RingBuffer::new(schema, vmo)?),
-        bpf_map_type_BPF_MAP_TYPE_LPM_TRIE => Ok(Box::pin(lpm_trie::LpmTrie::new(schema, vmo)?)),
+        bpf_map_type_BPF_MAP_TYPE_ARRAY => Ok(Box::new(array::Array::new(schema, vmo)?)),
+        bpf_map_type_BPF_MAP_TYPE_HASH => Ok(Box::new(hashmap::HashMap::new(schema, vmo)?)),
+        bpf_map_type_BPF_MAP_TYPE_RINGBUF => {
+            Ok(Box::new(ring_buffer::RingBuffer::new(schema, vmo)?))
+        }
+        bpf_map_type_BPF_MAP_TYPE_LPM_TRIE => Ok(Box::new(lpm_trie::LpmTrie::new(schema, vmo)?)),
         bpf_map_type_BPF_MAP_TYPE_SK_STORAGE => {
             if schema.key_size != 4 || schema.max_entries != 0 {
                 return Err(MapError::InvalidParam);
@@ -399,26 +415,26 @@ fn create_map_impl(
                 value_size: schema.value_size,
                 flags: MapFlags::NoPrealloc,
             };
-            Ok(Box::pin(hashmap::HashMap::new(&schema, vmo)?))
+            Ok(Box::new(hashmap::HashMap::new(&schema, vmo)?))
         }
 
         // These types are in use, but not yet implemented. Incorrectly use Array or Hash for
         // these
         bpf_map_type_BPF_MAP_TYPE_DEVMAP_HASH => {
             track_stub!(TODO("https://fxbug.dev/323847465"), "BPF_MAP_TYPE_DEVMAP_HASH");
-            Ok(Box::pin(hashmap::HashMap::new(schema, vmo)?))
+            Ok(Box::new(hashmap::HashMap::new(schema, vmo)?))
         }
         bpf_map_type_BPF_MAP_TYPE_PERCPU_HASH => {
             track_stub!(TODO("https://fxbug.dev/323847465"), "BPF_MAP_TYPE_PERCPU_HASH");
-            Ok(Box::pin(hashmap::HashMap::new(schema, vmo)?))
+            Ok(Box::new(hashmap::HashMap::new(schema, vmo)?))
         }
         bpf_map_type_BPF_MAP_TYPE_PERCPU_ARRAY => {
             track_stub!(TODO("https://fxbug.dev/323847465"), "BPF_MAP_TYPE_PERCPU_ARRAY");
-            Ok(Box::pin(array::Array::new(schema, vmo)?))
+            Ok(Box::new(array::Array::new(schema, vmo)?))
         }
         bpf_map_type_BPF_MAP_TYPE_LRU_HASH => {
             track_stub!(TODO("https://fxbug.dev/323847465"), "BPF_MAP_TYPE_LRU_HASH");
-            Ok(Box::pin(hashmap::HashMap::new(schema, vmo)?))
+            Ok(Box::new(hashmap::HashMap::new(schema, vmo)?))
         }
         // LINT.ThenChange(:fidl_map_types)
 

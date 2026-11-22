@@ -13,7 +13,7 @@
         { protocol: "fuchsia.driver.development.Manager" },
         { protocol: "fuchsia.driver.registrar.DriverRegistrar" },
         {
-            protocol: "fuchsia.component.sandbox.CapabilityStore",
+            protocol: "fuchsia.component.runtime.Capabilities",
             from: "framework",
         },
         { protocol: "fuchsia.diagnostics.ArchiveAccessor" },

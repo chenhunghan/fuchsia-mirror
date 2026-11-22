@@ -9,12 +9,6 @@ import("//build/zircon/migrated_targets.gni")
 
 _is_phys = toolchain_environment == "kernel.phys"
 
-# These both work together and must be presented in this order (for BFD ld).
-_phys_linker_scripts = [
-  "//zircon/kernel/phys/phys-end.ld",
-  "//zircon/kernel/phys/phys.ld",
-]
-
 phys_toolchain = "//zircon/kernel/phys:kernel.phys_$current_cpu"
 
 # Build an executable for the phys environment.
@@ -87,10 +81,8 @@ template("phys_executable") {
                                "emulator_support_aib",
                              ])
       deps += [ "//zircon/kernel/phys:phys_executable.deps" ]
-      inputs += _phys_linker_scripts
-      foreach(ldscript, _phys_linker_scripts) {
-        ldflags += [ "-Wl,-T," + rebase_path(ldscript, root_build_dir) ]
-      }
+      inputs += [ "//zircon/kernel/phys/phys.ld" ]
+      ldflags += [ "-Wl,-T," + rebase_path(inputs[0], root_build_dir) ]
     }
 
     # This is the main target of the template, a raw binary load image file.

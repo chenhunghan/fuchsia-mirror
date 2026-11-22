@@ -13,21 +13,25 @@
     capabilities: [
         { protocol: "fuchsia.component.Binder" },
     ],
+
+    // [START config]
+    use: [
+        // The greeting to log.
+        {
+            config: "fuchsia.example.config.Greeting",
+            key: "greeting",
+            type: "string",
+            max_size: 512,
+            availability: "transitional",
+            default: "World",
+        },
+    ],
+
+    // [END config]
     expose: [
         {
             protocol: "fuchsia.component.Binder",
             from: "self",
         },
     ],
-
-    // [START config]
-    config: {
-        greeting: {
-            type: "string",
-            max_size: 512,
-            mutability: [ "parent" ],
-        },
-    },
-
-    // [END config]
 }

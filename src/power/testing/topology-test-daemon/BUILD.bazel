@@ -2,9 +2,80 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/topology-test-daemon.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "src/main.rs",
+        "src/topology_test_daemon.rs",
+    ],
+    binary_name = "topology_test_daemon",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
+        "//sdk/fidl/fuchsia.power.topology.test:fuchsia.power.topology.test_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/power/testing/topology-test-daemon/power-element-runner/fidl:test.powerelementrunner_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "topology_test_daemon",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "topology-test-daemon",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/topology-test-daemon.cml",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    visibility = [
+        "//src/power/bench/power_framework:__pkg__",
+        "//src/power/testing/topology-test-daemon/tests:__pkg__",
+    ],
+    deps = [
+        ":bin_packaged",
+        "//src/power/testing/topology-test-daemon/power-element-runner:component",
+    ],
 )

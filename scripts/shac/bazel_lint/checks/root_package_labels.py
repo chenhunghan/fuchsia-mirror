@@ -114,7 +114,9 @@ class RootPackageLabelsCheck(BazelCheck):
         suggested_label, target_dir = _get_correct_label(label)
         msg = (
             f"Disallowed workspace root package label: `{label}`. "
-            f"Use `{suggested_label}` instead, and add a `BUILD.bazel` file to `//{target_dir}` if needed."
+            f"Use `{suggested_label}` instead, and add a `BUILD.bazel` file to `//{target_dir}` if needed. "
+            "If a third-party directory outside the Git repository (that cannot easily be edited) "
+            "has no `BUILD.bazel` file, this may be a valid case for an exception."
         )
         fc.report_string(
             msg,

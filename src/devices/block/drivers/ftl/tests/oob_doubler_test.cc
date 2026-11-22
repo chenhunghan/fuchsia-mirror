@@ -61,6 +61,7 @@ TEST(OobDoublerTest, QueryDisabled) {
   nand_info_t info;
   size_t op_size;
   doubler.Query(&info, &op_size);
+  EXPECT_FALSE(doubler.active());
   EXPECT_EQ(kPageSize, info.page_size);
   EXPECT_EQ(ftl::OobDoubler::kThreshold, info.oob_size);
   EXPECT_EQ(kBlockSize, info.pages_per_block);
@@ -76,6 +77,7 @@ TEST(OobDoublerTest, QueryEnabled) {
   nand_info_t info;
   size_t op_size;
   doubler.Query(&info, &op_size);
+  EXPECT_TRUE(doubler.active());
   EXPECT_EQ(kPageSize * 2, info.page_size);
   EXPECT_EQ(kOobSize * 2, info.oob_size);
   EXPECT_EQ(kBlockSize / 2, info.pages_per_block);

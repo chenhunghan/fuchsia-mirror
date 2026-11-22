@@ -1,9 +1,0 @@
-{
-    "short_description": "Example of a DFv2 driver built with the SDK",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "DriverFramework"
-    ]
-}

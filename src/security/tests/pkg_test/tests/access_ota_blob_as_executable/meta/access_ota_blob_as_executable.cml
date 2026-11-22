@@ -62,17 +62,13 @@
         },
         {
             name: "http-client",
-            url: "#meta/http-client.cm",
+            url: "http-client#meta/http-client.cm",
         },
 
         // Production package delivery components.
         {
             name: "pkg-cache",
             url: "#meta/pkg-cache.cm",
-        },
-        {
-            name: "pkg-cache-config",
-            url: "#meta/pkg-cache-config.cm",
         },
         {
             name: "pkg-resolver",
@@ -150,12 +146,8 @@
     ],
     offer: [
         {
-            config: [
-                "fuchsia.pkgcache.AllPackagesExecutable",
-                "fuchsia.pkgcache.EnableUpgradablePackages",
-                "fuchsia.pkgcache.RequireSystemImage",
-            ],
-            from: "#pkg-cache-config",
+            config: "fuchsia.pkgcache.UseDriverBlobPaging",
+            from: "#fshost_config",
             to: "#pkg-cache",
         },
         {
@@ -166,7 +158,6 @@
                 "fuchsia.pkgcache.BlobNetworkBodyTimeoutSeconds",
                 "fuchsia.pkgcache.BlobNetworkHeaderTimeoutSeconds",
                 "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
-                "fuchsia.pkgcache.UseDriverBlobPaging",
             ],
             from: "void",
             to: "#pkg-cache",
@@ -236,12 +227,19 @@
             to: "#pkg-cache",
         },
         {
+            protocol: "fuchsia.fxfs.BlobCreator",
+            from: "#fshost",
+            to: "#pkg-cache",
+        },
+        {
             protocol: [
-                "fuchsia.fxfs.BlobCreator",
                 "fuchsia.fxfs.BlobReader",
+                "fuchsia.storage.block.Mapper",
+                "fuchsia.storage.mapping.MappingProvider",
             ],
             from: "#fshost",
             to: "#pkg-cache",
+            availability: "optional",
         },
         {
             protocol: [

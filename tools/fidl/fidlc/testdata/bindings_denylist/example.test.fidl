@@ -9,24 +9,24 @@ using test.dependent;
 @bindings_deny_list("there_are_no_bindings_with_this_name")
 const AllBindings uint32 = 0;
 
-@bindings_denylist("cpp, dart, hlcpp, llcpp, python, rust")
+@bindings_denylist("cpp, dart, hlcpp, python, rust")
 type OnlySyzkaller = strict bits {
     A = 1;
 };
 
-@bindings_denylist("cpp, hlcpp, llcpp, python, rust, syzkaller")
+@bindings_denylist("cpp, hlcpp, python, rust, syzkaller")
 type OnlyDart = strict enum {
     A = 1;
 };
 
-@bindings_denylist("cpp, dart, hlcpp, llcpp, rust, syzkaller")
+@bindings_denylist("cpp, dart, hlcpp, rust, syzkaller")
 type OnlyPython = table {};
 
-@bindings_denylist("cpp, dart, hlcpp, llcpp, python, syzkaller")
+@bindings_denylist("cpp, dart, hlcpp, python, syzkaller")
 type OnlyRust = table {};
 
-@bindings_denylist("cpp, dart, hlcpp, python, rust, syzkaller")
-type OnlyLlcpp = strict union {
+@bindings_denylist("dart, hlcpp, python, rust, syzkaller")
+type OnlyCpp = strict union {
     1: x uint32;
 };
 
@@ -36,13 +36,13 @@ type OnlyLlcpp = strict union {
 @bindings_denylist("dart, python, rust, syzkaller")
 closed protocol OnlyCppAndDeps {};
 
-@bindings_denylist("cpp, dart, llcpp, python, rust, syzkaller")
+@bindings_denylist("cpp, dart, python, rust, syzkaller")
 service OnlyHlcpp {};
 
 // This exists to test that when a particular method is denied to a binding,
 // it's anonymous message body structs are also omitted.
 closed protocol DenyEachBinding {
-    @bindings_denylist("cpp, hlcpp, llcpp")
+    @bindings_denylist("cpp, hlcpp")
     strict OnlyDenyCpp(struct {
         a bool;
     }) -> (struct {
@@ -80,7 +80,7 @@ closed protocol DenyEachBinding {
 
 // None of the "ShouldNeverAppear..." types/methods should appear in any bindings, as they are
 // children of parent declarations that are denylisted.
-@bindings_denylist("cpp, dart, hlcpp, llcpp, python, rust, syzkaller")
+@bindings_denylist("cpp, dart, hlcpp, python, rust, syzkaller")
 closed protocol Denied {
     strict ShouldNeverAppearInAnyBinding(struct {
         should_never_appear_in_any_binding_1 struct {
@@ -96,7 +96,7 @@ closed protocol Denied {
 };
 
 closed protocol Allowed {
-    @bindings_denylist("cpp, dart, hlcpp, llcpp, python, rust, syzkaller")
+    @bindings_denylist("cpp, dart, hlcpp, python, rust, syzkaller")
     strict Denied() -> (struct {
         should_never_appear_in_any_binding_4 struct {
             a bool;
@@ -110,7 +110,7 @@ closed protocol Allowed {
     }) error uint32;
 };
 
-@bindings_denylist("cpp, dart, hlcpp, llcpp, python, rust, syzkaller")
+@bindings_denylist("cpp, dart, hlcpp, python, rust, syzkaller")
 type DeniedAnonymous = struct {
     should_never_appear_in_any_binding_7 struct {
         a bool;
@@ -126,7 +126,7 @@ type DeniedAnonymous = struct {
 // Even though this ContainsAllowed protocol is denylisted for all bindings, the one composed from
 // the imported library into ImportsSameNameContext below should still appear in generated bindings.
 // This means that all generated bindings should have an "AlwaysAppearsInImportingLibrary" method.
-@bindings_denylist("cpp, dart, hlcpp, llcpp, python, rust, syzkaller")
+@bindings_denylist("cpp, dart, hlcpp, python, rust, syzkaller")
 closed protocol ContainsAllowed {};
 
 // This declaration should still appear in generated bindings, even though an identically name

@@ -906,4 +906,103 @@ TEST_F(MdnsTransceiverTests, ReplaceInterfaceWithPendingInboundRetry) {
   EXPECT_EQ(0u, wait_for_inbound_count);
 }
 
+class MdnsTransceiverMediaFilterTests : public MdnsTransceiverTests,
+                                        public ::testing::WithParamInterface<Media> {
+ public:
+  MdnsTransceiverMediaFilterTests() { transceiver_.SetEnabledMedia(GetParam()); }
+};
+
+TEST_P(MdnsTransceiverMediaFilterTests, StartsOnlyMatchingMedia) {
+  using fuchsia::hardware::network::PortClass;
+  RunLoopUntilIdle();
+
+  const std::vector<PortClass> wired_classes = {
+      PortClass::ETHERNET,
+      PortClass::PPP,
+      PortClass::BRIDGE,
+      PortClass::VIRTUAL,
+  };
+  const std::vector<PortClass> wireless_classes = {
+      PortClass::WLAN_CLIENT,
+      PortClass::WLAN_AP,
+  };
+  const std::vector<PortClass>& disallowed_classes =
+      GetParam() == Media::kWired ? wireless_classes : wired_classes;
+  const std::vector<PortClass>& allowed_classes =
+      GetParam() == Media::kWired ? wired_classes : wireless_classes;
+
+  uint64_t next_id = 1;
+  for (PortClass port_class : disallowed_classes) {
+    const uint64_t id = next_id++;
+    SCOPED_TRACE(id);
+
+    fuchsia::net::interfaces::Properties props;
+    ASSERT_OK(properties_.Clone(&props));
+    props.set_id(id);
+    props.set_port_class(fuchsia::net::interfaces::PortClass::WithDevice(PortClass(port_class)));
+
+    ASSERT_TRUE(fake_watcher_impl_.CompleteWatchCallback(
+        fuchsia::net::interfaces::Event::WithAdded(std::move(props))));
+    RunLoopUntilIdle();
+
+    EXPECT_FALSE(transceiver_.HasInterfaces());
+
+    fuchsia::net::interfaces::Properties offline;
+    offline.set_id(id);
+    offline.set_online(false);
+    ASSERT_TRUE(fake_watcher_impl_.CompleteWatchCallback(
+        fuchsia::net::interfaces::Event::WithChanged(std::move(offline))));
+    RunLoopUntilIdle();
+
+    fuchsia::net::interfaces::Properties online;
+    online.set_id(id);
+    online.set_online(true);
+    ASSERT_TRUE(fake_watcher_impl_.CompleteWatchCallback(
+        fuchsia::net::interfaces::Event::WithChanged(std::move(online))));
+    RunLoopUntilIdle();
+
+    EXPECT_FALSE(transceiver_.HasInterfaces());
+
+    fuchsia::net::interfaces::Properties addresses_change;
+    addresses_change.set_id(id);
+    addresses_change.set_addresses(Addresses2());
+    ASSERT_TRUE(fake_watcher_impl_.CompleteWatchCallback(
+        fuchsia::net::interfaces::Event::WithChanged(std::move(addresses_change))));
+    RunLoopUntilIdle();
+
+    EXPECT_FALSE(transceiver_.HasInterfaces());
+    EXPECT_EQ(0, link_change_notifications_);
+  }
+
+  for (PortClass port_class : allowed_classes) {
+    const uint64_t id = next_id++;
+    SCOPED_TRACE(id);
+
+    fuchsia::net::interfaces::Properties props;
+    ASSERT_OK(properties_.Clone(&props));
+    props.set_id(id);
+    props.set_port_class(fuchsia::net::interfaces::PortClass::WithDevice(PortClass(port_class)));
+
+    ASSERT_TRUE(fake_watcher_impl_.CompleteWatchCallback(
+        fuchsia::net::interfaces::Event::WithAdded(std::move(props))));
+    RunLoopUntilIdle();
+
+    EXPECT_TRUE(transceiver_.HasInterfaces());
+    for (const inet::IpAddress& addr : {v4_address1_, v6_address1_}) {
+      MdnsInterfaceTransceiver* t = transceiver_.GetInterfaceTransceiver(addr);
+      ASSERT_NE(t, nullptr);
+      EXPECT_EQ(id, t->id());
+    }
+
+    ASSERT_TRUE(fake_watcher_impl_.CompleteWatchCallback(
+        fuchsia::net::interfaces::Event::WithRemoved(uint64_t(id))));
+    RunLoopUntilIdle();
+
+    EXPECT_FALSE(transceiver_.HasInterfaces());
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(MediaFilter, MdnsTransceiverMediaFilterTests,
+                         ::testing::Values(Media::kWired, Media::kWireless));
+
 }  // namespace mdns::test

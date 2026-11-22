@@ -4,6 +4,7 @@
 @available(added=11)
 library fuchsia.posix.socket.packet;
 
+using fuchsia.ebpf;
 using fuchsia.net;
 using fuchsia.posix;
 using fuchsia.posix.socket;
@@ -227,17 +228,14 @@ closed protocol Socket {
         flags fuchsia.posix.socket.SendMsgFlags;
     }) -> () error fuchsia.posix.Errno;
 
-    /// Attaches the specified eBPF filter. The filter is assumed to be verified with 2 arguments
-    ///  1. Pointer to the packet of size 0, i.e. not accessed directly (only using cBPF packet
-    ///     load instructions).
-    ///  2. Packet size (BPF_LOAD).
-    /// Helper functions and maps are not supported.
+    /// Attaches the specified eBPF filter. The filter is assumed to be verified as
+    /// a `BPF_PROG_TYPE_SOCKET_FILTER`.
     // TODO(https://fxbug.dev/370043219): The assumptions above are valid currently because
     // fuchsia.posix.socket.packet is routed only to Starnix, but that may change in the future.
     // Figure out a better mechanism for permissions.
     @available(added=HEAD)
-    strict AttachBpfFilterUnsafe(resource struct {
-        code vector<uint64>:4096;
+    strict AttachBpfFilter(resource struct {
+        program fuchsia.ebpf.VerifiedProgram;
     }) -> () error fuchsia.posix.Errno;
 };
 

@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":lib_test"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+py_library(
+    name = "dataparse",
+    srcs = [
+        "__init__.py",
+        "dataparse.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//scripts/fxtest/python:__pkg__"],
+)
+
+host_py_test(
+    name = "lib_test",
+    srcs = ["tests/dataparse_test.py"],
+    main = "tests/dataparse_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_args = ["-v"],
+    deps = [":dataparse"],
+)

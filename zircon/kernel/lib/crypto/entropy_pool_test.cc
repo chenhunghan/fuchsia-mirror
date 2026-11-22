@@ -148,7 +148,7 @@ UNITTEST("AddEntropy update contents.", AddEntropyUpdatesThePool)
 UNITTEST("AddEntropyFromDigest update contents.", AddEntropyFromDigestUpdatesThePool)
 UNITTEST("AddEntropyFromDifferentDigests generates different contents.",
          AddEntropyFromDifferentDigests)
-UNITTEST("Move shreds contents.", DestructorCleansUpContents)
-UNITTEST("Destructor shreds contents.", MoveCleansUpContents)
+UNITTEST("Destructor shreds contents.", DestructorCleansUpContents)
+UNITTEST("Move shreds contents.", MoveCleansUpContents)
 UNITTEST_END_TESTCASE(crypto_entropy_pool_tests, "crypto_entropy_pool",
                       "Validate security properties of entropy pool.")

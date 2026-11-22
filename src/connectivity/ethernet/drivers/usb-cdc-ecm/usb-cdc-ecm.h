@@ -18,6 +18,9 @@
 #include <lib/zx/event.h>
 #include <zircon/compiler.h>
 
+#include <atomic>
+
+#include <fbl/condition_variable.h>
 #include <fbl/mutex.h>
 #include <usb/usb.h>
 
@@ -45,12 +48,15 @@ class UsbCdcEcm : public fdf::DriverBase2, public ddk::EthernetImplProtocol<UsbC
                                    size_t data_size);
   void EthernetImplGetBti(zx::bti* bti) { bti->reset(); }
 
+  uint32_t us_bps() const { return us_bps_.load(std::memory_order_relaxed); }
+  uint32_t ds_bps() const { return ds_bps_.load(std::memory_order_relaxed); }
+
  private:
   // Name of the child node this driver publishes the EthernetImpl protocol on.
   static constexpr std::string_view kChildNodeName = "usb-cdc-ecm";
 
-  // Parses the USB descriptors, allocates the transfer buffers and starts the interrupt handler
-  // thread. Invoked from Start().
+  // Parses the USB descriptors and allocates the transfer buffers. Invoked from Start(), which
+  // starts the interrupt handler only after everything else has succeeded.
   zx_status_t Init();
 
   // The scheduled interrupt task re-schedules itself unless canceled or other terminal error.
@@ -65,7 +71,9 @@ class UsbCdcEcm : public fdf::DriverBase2, public ddk::EthernetImplProtocol<UsbC
   // interrupt is ignored.
   void HandleInterrupt(usb::Request<void>& request);
 
-  void InterruptComplete(usb_request_t* request) { int_event_.signal(0, ZX_USER_SIGNAL_0); }
+  void InterruptComplete(usb_request_t* request);
+  // Decrements in_flight_requests_ and returns stop_completer_ once the count reaches zero.
+  std::optional<fdf::StopCompleter> TakeStopCompleterOnLastRequestLocked() __TA_REQUIRES(&mutex_);
 
   zx_status_t SetPacketFilterMode(uint16_t mode, bool on);
 
@@ -96,8 +104,8 @@ class UsbCdcEcm : public fdf::DriverBase2, public ddk::EthernetImplProtocol<UsbC
 
   // Connection attributes
   bool online_ __TA_GUARDED(ethernet_mutex_) = false;
-  uint32_t ds_bps_ = 0;
-  uint32_t us_bps_ = 0;
+  std::atomic<uint32_t> ds_bps_ = 0;
+  std::atomic<uint32_t> us_bps_ = 0;
 
   // Interrupt handling
   std::optional<EcmEndpoint> int_endpoint_;
@@ -111,6 +119,12 @@ class UsbCdcEcm : public fdf::DriverBase2, public ddk::EthernetImplProtocol<UsbC
   usb::RequestPool<void> tx_request_pool_ TA_GUARDED(mutex_);
   eth::BorrowedOperationQueue<> pending_tx_queue_ TA_GUARDED(mutex_);
   bool unbound_ __TA_GUARDED(&mutex_) = false;
+  size_t in_flight_requests_ __TA_GUARDED(&mutex_) = 0;
+  size_t rx_requeues_in_progress_ __TA_GUARDED(&mutex_) = 0;
+  fbl::ConditionVariable rx_requeues_done_;
+  size_t tx_completions_in_progress_ __TA_GUARDED(&mutex_) = 0;
+  fbl::ConditionVariable tx_completions_done_;
+  std::optional<fdf::StopCompleter> stop_completer_ __TA_GUARDED(&mutex_);
   uint64_t tx_endpoint_delay_;
 
   size_t parent_req_size_;

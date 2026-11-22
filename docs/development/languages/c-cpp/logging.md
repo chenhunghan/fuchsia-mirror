@@ -2,7 +2,7 @@
 
 This document explains how to get started with syslogger APIs.
 
-### Component manifest dependency
+### Component manifest dependency {:#component-manifest-dependency}
 
 Ensure that your component has the required capabilities to log by including the
 following in your component manifest:

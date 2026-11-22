@@ -16,7 +16,7 @@
 
 namespace magma {
 
-// This wrapper gates access to the llcpp client, to ensure that all messages sent
+// This wrapper gates access to the FIDL wire client, to ensure that all messages sent
 // are subject to flow control.
 class PrimaryWrapper : public fidl::WireAsyncEventHandler<fuchsia_gpu_magma::Primary> {
  public:

@@ -39,23 +39,6 @@
 		reg = <0x00 0xff63c000 0x00 0x2000 0x00 0xff620000 0x00 0x10000 0x00 0xffd18000 0x00 0x1000>;
 	};
 
-	cpu-power-elements {
-
-		cpu-element {
-
-			power-levels {
-
-				off-level {
-					level = <0x00>;
-				};
-
-				on-level {
-					level = <0x01>;
-				};
-			};
-		};
-	};
-
 	cpus {
 		#address-cells = <0x02>;
 		#size-cells = <0x00>;
@@ -318,41 +301,6 @@
 			pid = <0x06>;
 			size = <0x00 0x00>;
 			vid = <0x05>;
-		};
-	};
-
-	sag-power-elements {
-
-		application-activity-element {
-
-			power-levels {
-
-				active-level {
-					level = <0x01>;
-				};
-
-				inactive-level {
-					level = <0x00>;
-				};
-			};
-		};
-
-		execution-state-element {
-
-			power-levels {
-
-				active-level {
-					level = <0x02>;
-				};
-
-				inactive-level {
-					level = <0x00>;
-				};
-
-				suspending-level {
-					level = <0x01>;
-				};
-			};
 		};
 	};
 

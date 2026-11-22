@@ -4,6 +4,7 @@
 
 import("//build/components/fuchsia_unittest_package.gni")
 
+# LINT.IfChange
 config("re2_config") {
   include_dirs = [ "src" ]
 }
@@ -116,6 +117,8 @@ group("re2") {
     "//third_party/abseil-cpp/absl/strings",
   ]
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 source_set("testing") {
   testonly = true

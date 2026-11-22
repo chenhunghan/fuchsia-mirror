@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN's library_name = "bluetooth_utils_lib" and source_root = "bluetooth_utils_lib"
+# are matched here by srcs under bluetooth_utils_lib/ and imports = ["."].
+# Enable mypy on the generated python_library for GN consumers.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "bluetooth_utils",
+    testonly = True,
+    srcs = [
+        "bluetooth_utils_lib/__init__.py",
+        "bluetooth_utils_lib/bluetooth_utils.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/tests/end_to_end/connectivity/bluetooth/profiles/gap:__pkg__",
+        "//src/tests/end_to_end/connectivity/bluetooth/profiles/le:__pkg__",
+        "//src/tests/end_to_end/connectivity/bluetooth/smoke:__pkg__",
+    ],
+)

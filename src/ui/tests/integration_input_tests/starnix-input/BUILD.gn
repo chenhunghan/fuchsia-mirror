@@ -26,6 +26,7 @@ cc_test_executable("starnix-touch-test-bin") {
     "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
     "//sdk/fidl/fuchsia.element:fuchsia.element_cpp",
+    "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_cpp",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
     "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
     "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp",
@@ -34,6 +35,7 @@ cc_test_executable("starnix-touch-test-bin") {
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
     "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_cpp",
     "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_cpp",
+    "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_cpp",
     "//sdk/fidl/fuchsia.ui.pointer:fuchsia.ui.pointer_cpp",
     "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_cpp",
     "//sdk/lib/sys/component/cpp/testing:cpp",
@@ -56,6 +58,7 @@ cc_test_executable("starnix-mouse-test-bin") {
     "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
     "//sdk/fidl/fuchsia.element:fuchsia.element_cpp",
+    "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_cpp",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
     "//sdk/fidl/fuchsia.process:fuchsia.process_cpp",
     "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp",
@@ -64,6 +67,7 @@ cc_test_executable("starnix-mouse-test-bin") {
     "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_cpp",
     "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_cpp",
     "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_cpp",
+    "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_cpp",
     "//sdk/fidl/fuchsia.ui.pointer:fuchsia.ui.pointer_cpp",
     "//sdk/fidl/fuchsia.ui.test.input:fuchsia.ui.test.input_cpp",
     "//sdk/lib/sys/component/cpp/testing:cpp",
@@ -130,12 +134,8 @@ fuchsia_test_package("starnix-input-integration-tests") {
       max_severity = "ERROR"
     }
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
   }
 }

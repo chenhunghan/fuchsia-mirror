@@ -12,6 +12,7 @@
 #endif
 
 #include <algorithm>
+#include <cstdlib>
 #include <initializer_list>
 #include <iterator>
 #include <string_view>
@@ -37,8 +38,13 @@ inline std::string GetTestBinaryPath(std::string_view bin) {
 #if defined(__Fuchsia__)
   return std::string("/pkg/data/") + std::string(bin);
 #else
-  // host tests will be invoked from the build directory.
-  return std::string("../../src/lib/elflib/test_data/") + std::string(bin);
+  // Bazel runs host_test from runtime_dir ("test_data/elflib"); GN's host_test
+  // wrapper sets ELFLIB_TEST_DATA_DIR to the toolchain-scoped $root_out_dir path.
+  const char* dir = std::getenv("ELFLIB_TEST_DATA_DIR");
+  if (dir == nullptr) {
+    dir = "test_data/elflib";
+  }
+  return std::string(dir) + "/" + std::string(bin);
 #endif
 }
 
@@ -668,6 +674,27 @@ TEST(ElfLib, GetSharedObjectDependencies) {
   EXPECT_EQ(object_vec[0], "libclang_rt.scudo.so");
   EXPECT_EQ(object_vec[1], "libfdio.so");
   EXPECT_EQ(object_vec[2], "libc.so");
+}
+
+TEST(ElfLib, GetSegmentDataBounds) {
+  TestData t(/*with_symbols=*/true);
+  std::unique_ptr<ElfLib> elf = ElfLib::Create(t.Data(), t.Size());
+  ASSERT_NE(elf.get(), nullptr);
+
+  const size_t segment_count = elf->GetSegmentHeaders().size();
+  ASSERT_GT(segment_count, 0u);
+
+  ElfLib::MemoryRegion valid_segment = elf->GetSegmentData(0);
+  EXPECT_NE(valid_segment.ptr, nullptr);
+  EXPECT_GT(valid_segment.size, 0u);
+
+  ElfLib::MemoryRegion boundary_segment = elf->GetSegmentData(segment_count);
+  EXPECT_EQ(boundary_segment.ptr, nullptr);
+  EXPECT_EQ(boundary_segment.size, 0u);
+
+  ElfLib::MemoryRegion past_end_segment = elf->GetSegmentData(segment_count + 1);
+  EXPECT_EQ(past_end_segment.ptr, nullptr);
+  EXPECT_EQ(past_end_segment.size, 0u);
 }
 
 }  // namespace

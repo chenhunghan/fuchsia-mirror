@@ -291,6 +291,8 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
 
     def test_zxdb_stack_trace_invalid_unwinder(self) -> None:
         with self.assertRaises(ValidationError):
+            # Deliberately invalid, to test validation.
+            # pyrefly: ignore[bad-argument-type]
             ZxdbStackTraceArguments(thread_id=5678, unwinder="invalid")
 
     async def test_threads_response_process_id(self) -> None:
@@ -498,6 +500,8 @@ class TestZxdbDapMixin(unittest.IsolatedAsyncioTestCase):
 
     def test_zxdb_pause_invalid_args(self) -> None:
         with self.assertRaises(ValueError):
+            # Deliberately invalid, to test validation.
+            # pyrefly: ignore[bad-argument-type]
             ZxdbPauseArguments(process_id=None)
 
     def test_zxdb_process_stopped_event(self) -> None:

@@ -4,7 +4,7 @@
 
 #include "src/developer/forensics/utils/utc_clock_ready_watcher.h"
 
-#include <fuchsia/time/cpp/fidl.h>
+#include <fidl/fuchsia.time/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 namespace forensics {
@@ -12,7 +12,7 @@ namespace forensics {
 UtcClockReadyWatcher::UtcClockReadyWatcher(async_dispatcher_t* dispatcher,
                                            zx::unowned_clock clock_handle)
     : wait_for_logging_quality_clock_(this, clock_handle->get_handle(),
-                                      fuchsia::time::SIGNAL_UTC_CLOCK_LOGGING_QUALITY,
+                                      fuchsia_time::kSignalUtcClockLoggingQuality,
                                       /*options=*/0) {
   if (const zx_status_t status = wait_for_logging_quality_clock_.Begin(dispatcher);
       status != ZX_OK) {

@@ -235,6 +235,8 @@ class DEVTEN : public hwreg::RegisterBase<DEVTEN, uint32_t> {
   DEF_BIT(14, L1WKUPEVTEN);
   DEF_BIT(13, StopOnDisconnectEn);
   DEF_BIT(12, VENDEVTSTRCVDEN);
+  DEF_BIT(11, EVNTOVERFLOWEN);
+  DEF_BIT(10, CMDCMPLTEN);
   DEF_BIT(9, ERRTICERREVTEN);
   DEF_BIT(8, L1SUSPEN);
   DEF_BIT(7, SOFTEVTEN);
@@ -378,6 +380,11 @@ class DEPCMD : public hwreg::RegisterBase<DEPCMD, uint32_t> {
   DEF_BIT(10, CMDACT);
   DEF_BIT(8, CMDIOC);
   DEF_FIELD(3, 0, CMDTYP);
+
+  // Bit 11 serves as ClearPendIN for DEPCSTALL commands (Synopsys STAR 9000614252).
+  uint32_t CLEARPENDIN() const { return HIPRI_FORCERM(); }
+  DEPCMD& set_CLEARPENDIN(uint32_t val) { return set_HIPRI_FORCERM(val); }
+
   static auto Get(uint32_t index) { return hwreg::RegisterAddr<DEPCMD>(0xc80c + index * 0x10); }
 
   // Command Types

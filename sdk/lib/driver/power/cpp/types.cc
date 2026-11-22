@@ -290,8 +290,11 @@ zx::result<PowerElementConfiguration> PowerElementConfiguration::FromFidl(
     }
   }
 
-  return zx::ok(PowerElementConfiguration{.element{std::move(element.value())},
-                                          .dependencies{std::move(dependencies)}});
+  return zx::ok(PowerElementConfiguration{
+      .element{std::move(element.value())},
+      .dependencies{std::move(dependencies)},
+      .initial_level = src.initial_level(),
+  });
 }
 
 zx::result<PowerElementConfiguration> PowerElementConfiguration::FromFidl(
@@ -316,8 +319,16 @@ zx::result<PowerElementConfiguration> PowerElementConfiguration::FromFidl(
     }
   }
 
-  return zx::ok(PowerElementConfiguration{.element{std::move(element.value())},
-                                          .dependencies{std::move(dependencies)}});
+  std::optional<uint8_t> initial_level;
+  if (src.has_initial_level()) {
+    initial_level = src.initial_level();
+  }
+
+  return zx::ok(PowerElementConfiguration{
+      .element{std::move(element.value())},
+      .dependencies{std::move(dependencies)},
+      .initial_level = initial_level,
+  });
 }
 
 ParentElement ParentElement::WithSag(SagElement sag) {

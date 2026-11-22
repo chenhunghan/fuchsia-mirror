@@ -36,7 +36,7 @@ internal code search.
 
 ![Coverage dashboard screenshot](absolute.png)
 
-## Incremental test coverage
+## Incremental test coverage {#incremental-test-coverage}
 
 Incremental test coverage is shown in the context of a change on the
 [Gerrit code review web UI][gerrit]. Incremental coverage shows, specifically in
@@ -204,7 +204,7 @@ the test every time you save your code.
   fx -i coverage --lcov-output-path $FUCHSIA_DIR/lcov.info hello-world-rust-tests
   ```
 
-## End-to-end (E2E) tests exclusion
+## End-to-end (E2E) tests exclusion {#end-to-end-e2e-tests-exclusion}
 
 Only unit tests and hermetic integration tests are considered reliable sources
 of test coverage. No test coverage is collected or presented for E2E tests.
@@ -243,7 +243,7 @@ infrequently:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="build/config/BUILDCONFIG.gn" region_tag="e2e_test_libs" adjust_indentation="auto" %}
 ```
 
-## Limitations
+## Limitations {#limitations}
 
 Currently, test coverage is collected only if:
 
@@ -252,7 +252,7 @@ Currently, test coverage is collected only if:
   not yet supported ([tracking bug](https://fxbug.dev/42109476)).
 - The test runs on qemu. Testing on hardware is not yet supported.
 - The test runs as part of the `core` product configuration.
-- End-to-end (e2e) tests are [not supported](#end-to-end_e2e_tests_exclusion).
+- End-to-end (e2e) tests are [not supported](#end-to-end-e2e-tests-exclusion).
 
 On that last note, e2e tests exercise a lot of code throughout the system, but
 they do so in a manner that's inconsistent between runs (or "flaky"). To achieve
@@ -261,7 +261,7 @@ using unit tests and integration tests.
 
 ### Experimental features
 
-By default, [incremental coverage](#incremental_test_coverage) is only collected
+By default, [incremental coverage](#incremental-test-coverage) is only collected
 in `core.x64`. To collect combined coverage for your change in both `core.x64`
 and `core.arm64`, follow these steps:
 

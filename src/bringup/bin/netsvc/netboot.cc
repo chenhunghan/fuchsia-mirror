@@ -5,22 +5,15 @@
 #include "src/bringup/bin/netsvc/netboot.h"
 
 #include <assert.h>
-#include <errno.h>
-#include <fidl/fuchsia.boot/cpp/wire.h>
 #include <fidl/fuchsia.hardware.power.statecontrol/cpp/wire.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/netboot/netboot.h>
 #include <stdio.h>
 #include <string.h>
-#include <threads.h>
-#include <zircon/processargs.h>
 #include <zircon/syscalls.h>
 
 #include "src/bringup/bin/netsvc/inet6.h"
-#include "src/bringup/bin/netsvc/netcp.h"
 #include "src/bringup/bin/netsvc/netsvc.h"
-
-bool xfer_active = false;
 
 namespace {
 
@@ -37,10 +30,6 @@ namespace statecontrol = fuchsia_hardware_power_statecontrol;
 }  // namespace
 
 void netboot_advertise(const char* nodename) {
-  // Don't advertise if a transfer is active.
-  if (xfer_active)
-    return;
-
   struct {
     netboot_message_header_t hdr;
     char data[MAX_ADVERTISE_DATA_LEN];
@@ -59,95 +48,6 @@ void netboot_advertise(const char* nodename) {
 }
 
 namespace {
-
-void nb_open(const char* filename, uint32_t cookie, uint32_t arg, const ip6_addr_t* saddr,
-             uint16_t sport, uint16_t dport) {
-  netboot_message_header_t m;
-  m.magic = NETBOOT_MAGIC;
-  m.cookie = cookie;
-  m.cmd = NETBOOT_COMMAND_ACK;
-  m.arg = netcp_open(filename, arg, nullptr);
-  udp6_send(&m, sizeof(m), saddr, sport, dport, false);
-}
-
-struct netfilemsg {
-  netboot_message_header_t hdr;
-  uint8_t data[1024];
-};
-
-void nb_read(uint32_t cookie, uint32_t arg, const ip6_addr_t* saddr, uint16_t sport,
-             uint16_t dport) {
-  static netfilemsg m = {
-      .hdr =
-          {
-              .magic = NETBOOT_MAGIC,
-              .cookie = 0,
-              .cmd = NETBOOT_COMMAND_ACK,
-              .arg = 0,
-          },
-      .data = {},
-  };
-  static size_t msg_size = 0;
-  static uint32_t blocknum = static_cast<uint32_t>(-1);
-  if (arg == blocknum) {
-    // Request to resend last message, verify that the cookie is unchanged
-    if (cookie != m.hdr.cookie) {
-      m.hdr.arg = -EIO;
-      m.hdr.cookie = cookie;
-      msg_size = sizeof(m.hdr);
-    }
-  } else if (arg == 0 || arg == blocknum + 1) {
-    ssize_t result = netcp_read(&m.data, sizeof(m.data));
-    if (result < 0) {
-      m.hdr.arg = static_cast<uint32_t>(result);
-      msg_size = sizeof(m.hdr);
-    } else {
-      // Note that the response does not use actual size as the argument,
-      // it matches the *requested* size. Actual size can be determined by
-      // the packet size.
-      m.hdr.arg = arg;
-      msg_size = sizeof(m.hdr) + result;
-    }
-    m.hdr.cookie = cookie;
-    blocknum = arg;
-  } else {
-    // Ignore bogus read requests -- host will timeout if they're confused
-    return;
-  }
-  udp6_send(&m, msg_size, saddr, sport, dport, false);
-}
-
-void nb_write(const char* data, size_t len, uint32_t cookie, uint32_t arg, const ip6_addr_t* saddr,
-              uint16_t sport, uint16_t dport) {
-  static netboot_message_header_t m = {
-      .magic = NETBOOT_MAGIC,
-      .cookie = 0,
-      .cmd = NETBOOT_COMMAND_ACK,
-      .arg = 0,
-  };
-  static uint32_t blocknum = static_cast<uint32_t>(-1);
-  if (arg == blocknum) {
-    // Request to repeat last write, verify that cookie is unchanged
-    if (cookie != m.cookie) {
-      m.arg = -EIO;
-    }
-  } else if (arg == 0 || arg == blocknum + 1) {
-    ssize_t result = netcp_write(data, len);
-    m.arg = static_cast<uint32_t>(result > 0 ? 0 : result);
-    blocknum = arg;
-  }
-  m.cookie = cookie;
-  udp6_send(&m, sizeof(m), saddr, sport, dport, false);
-}
-
-void nb_close(uint32_t cookie, const ip6_addr_t* saddr, uint16_t sport, uint16_t dport) {
-  netboot_message_header_t m;
-  m.magic = NETBOOT_MAGIC;
-  m.cookie = cookie;
-  m.cmd = NETBOOT_COMMAND_ACK;
-  m.arg = netcp_close();
-  udp6_send(&m, sizeof(m), saddr, sport, dport, false);
-}
 
 zx_status_t reboot() {
   zx::result client_end = component::Connect<statecontrol::Admin>();
@@ -323,19 +223,6 @@ void netboot_recv(void* data, size_t len, bool is_mcast, const ip6_addr_t* daddr
         netboot_run_cmd(msg_data);
         return;
       }
-      break;
-    case NETBOOT_COMMAND_OPEN:
-      nb_open(msg_data, msg_header.cookie, msg_header.arg, saddr, sport, dport);
-      break;
-    case NETBOOT_COMMAND_READ:
-      nb_read(msg_header.cookie, msg_header.arg, saddr, sport, dport);
-      break;
-    case NETBOOT_COMMAND_WRITE:
-      len--;  // NB NUL-terminator is not part of the data
-      nb_write(msg_data, len, msg_header.cookie, msg_header.arg, saddr, sport, dport);
-      break;
-    case NETBOOT_COMMAND_CLOSE:
-      nb_close(msg_header.cookie, saddr, sport, dport);
       break;
     default:
       // If the bootloader is enabled, then let it have a crack at the

@@ -1,0 +1,4 @@
+# Bazel owners may differ from //build owners so do not inherit.
+set noparent
+
+file:/build/bazel/BAZEL_OWNERS

@@ -205,8 +205,8 @@ integer), and this is expected to make no difference.
 ## Security
 
 No impact on security.
-See [Alternative: Identifying Protocol and
-Method](#alternate_identifiying-protocol-and-method) for a security
+See [Alternative: Identifying protocol and
+method](#alternative-identifying-protocol-and-method) for a security
 motivated use case whose performance could be improved with another scheme.
 
 ## Testing
@@ -214,7 +214,7 @@ motivated use case whose performance could be improved with another scheme.
 Unit testing for ordinal calculation.
 Follows similar pattern to [RFC-0020: Interface Ordinal Hashing](/docs/contribute/governance/rfcs/0020_interface_ordinal_hashing.md).
 
-## Alternative: Identifying Protocol and Method
+## Alternative: Identifying protocol and method {#alternative-identifying-protocol-and-method}
 
 We envision sandboxing services that would shield another service from
 unauthorized use, i.e., a sort of firewall for FIDL messages.

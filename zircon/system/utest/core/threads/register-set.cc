@@ -73,12 +73,14 @@ void general_regs_fill_test_values(zx_thread_state_general_regs_t* regs) {
   // instructions "msr nzcv, REG" and "mrs REG, nzcv".
   regs->cpsr = 0xf0000000;
   regs->tpidr = 0;
+  regs->pc = 0x0;
 
 #elif defined(__riscv)
 
   // spin_with_general_regs needs t0 for its final jump, so it doesn't have the
   // arbitrary value set generically above.
   regs->t0 = reinterpret_cast<uintptr_t>(spin_address);
+  regs->pc = 0x0;
 
 #endif
 }

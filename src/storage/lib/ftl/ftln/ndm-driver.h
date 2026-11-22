@@ -31,6 +31,10 @@ constexpr int kFalse = 0;
 // Initialization should not alter the contents of the volume.
 constexpr uint32_t kReadOnlyInit = (1 << 8);  // Matches FSF_READ_ONLY_INIT.
 
+// Number of page reads that a block can receive, by default, before its data is moved elsewhere to
+// avoid read-disturb errors.
+constexpr uint32_t kDefaultReadWearLimit = 1000000;  // Matches SLC_NAND_RC_LIMIT.
+
 // Options for a device to be created. All sizes are in bytes.
 struct VolumeOptions {
   uint32_t num_blocks;
@@ -133,6 +137,16 @@ class __EXPORT NdmBaseDriver : public NdmDriver {
   // Deletes the underlying NDM volume.
   bool RemoveNdmVolume();
 
+  // Sets the number of page reads that a block can receive before its data is
+  // moved elsewhere to avoid read-disturb errors. The FTL counts one read for
+  // each page that it requests from this driver, so a driver that performs more
+  // than one read of the underlying device per requested page should lower the
+  // limit accordingly. A value of 0 selects the default (kDefaultReadWearLimit).
+  // This must be called before CreateNdmVolume() to have any effect, and it is
+  // not part of the data saved to the volume.
+  void set_read_wear_limit(uint32_t limit) { read_wear_limit_ = limit; }
+  uint32_t read_wear_limit() const { return read_wear_limit_; }
+
   // Saves and restores bad block data for volume extension.
   bool SaveBadBlockData();
   bool RestoreBadBlockData();
@@ -170,6 +184,7 @@ class __EXPORT NdmBaseDriver : public NdmDriver {
  private:
   ndm* ndm_ = nullptr;
   bool volume_data_saved_ = false;
+  uint32_t read_wear_limit_ = 0;
   const FtlLogger logger_;
 };
 

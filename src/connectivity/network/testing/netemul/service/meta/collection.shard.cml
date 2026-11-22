@@ -1,0 +1,89 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    collections: [
+        // Managed realms are created in a collection hosted by the test
+        // component rather than inside `netemul-sandbox` because
+        // `netemul-sandbox` is a subpackage and would otherwise resolve child
+        // URLs against its own package instead of the test package.
+        {
+            name: "netemul",
+            environment: "#netemul_env",
+            durability: "transient",
+        },
+    ],
+    offer: [
+        {
+            protocol: [
+                "fuchsia.process.Launcher",
+                "fuchsia.tracing.provider.Registry",
+            ],
+            from: "parent",
+            to: "#netemul",
+        },
+        {
+            storage: [
+                "cache",
+                "data",
+                "tmp",
+            ],
+            from: "parent",
+            to: "#netemul",
+        },
+
+        // `RealmBuilder` opens `#realm_builder_server` via the same
+        // `fuchsia.component.Realm` capability it uses to populate `#netemul`,
+        // so `#realm_builder_server` must also be a child of this realm. Route
+        // its required capabilities manually instead of including
+        // `sys/component/realm_builder.shard.cml` because includers declare
+        // `#realm_builder_server` with different URLs
+        // (`netemul-sandbox#meta/realm_builder_server.cm` in the client shard
+        // versus `#meta/realm_builder_server.cm` in unit tests) and route
+        // `fuchsia.component.Realm` differently (offered to `#sandbox` versus
+        // used directly).
+        {
+            dictionary: "diagnostics",
+            from: "parent",
+            to: [
+                "#netemul",
+                "#realm_builder_server",
+            ],
+        },
+        {
+            storage: "data",
+            from: "parent",
+            to: "#realm_builder_server",
+        },
+    ],
+    environments: [
+        // Extend `realm` so component URLs in managed realms resolve against
+        // the test package, and register `#realm_builder_server`'s runner and
+        // resolver to support RealmBuilder's generated manifests and local
+        // components. A custom environment (and `#netemul` collection) is
+        // needed instead of the SDK's `#realm_builder_env` so we can configure
+        // the extended stop timeout below.
+        {
+            name: "netemul_env",
+            extends: "realm",
+            runners: [
+                {
+                    runner: "realm_builder",
+                    from: "#realm_builder_server",
+                },
+            ],
+            resolvers: [
+                {
+                    resolver: "realm_builder_resolver",
+                    from: "#realm_builder_server",
+                    scheme: "realm-builder",
+                },
+            ],
+
+            // Prevent timing flakiness in CQ by setting a 10min stop timeout,
+            // so tests that exercise lifecycle control can check for clean
+            // exit.
+            __stop_timeout_ms: 600000,
+        },
+    ],
+}

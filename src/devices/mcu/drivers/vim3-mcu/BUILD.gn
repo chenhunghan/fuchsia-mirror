@@ -67,7 +67,6 @@ fuchsia_driver_component("vim3-mcu") {
   dml_label = ":vim3-mcu-dml"
   component_name = "vim3-mcu"
   deps = [ ":vim3-mcu-driver" ]
-  info = "meta/vim3-mcu-info.json"
 }
 
 fuchsia_driver_package("package") {

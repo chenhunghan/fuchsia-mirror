@@ -53,13 +53,33 @@ exit {exit_code}
                 "//prebuilt/foo/bar.bin",
                 "--output-file",
                 str(out_file),
-            ]
+            ],
+            {},
         )
         self.assertEqual(rc, 0)
         self.assertEqual(
             self.args_log.read_text().strip(),
             "fetch-package prebuilt/foo/bar.bin",
         )
+        self.assertTrue(out_file.is_file())
+        self.assertEqual(out_file.read_text(), "binary-content")
+
+    def test_fuchsia_dir_from_env(self) -> None:
+        prebuilt_file = self.fuchsia_dir / "prebuilt" / "foo" / "bar.bin"
+        prebuilt_file.parent.mkdir(parents=True, exist_ok=True)
+        prebuilt_file.write_text("binary-content")
+
+        out_file = self.root / "bazel-out" / "bar.bin"
+        rc = fetch_cipd_prebuilt.main(
+            [
+                "--path",
+                str(Path("prebuilt") / "foo" / "bar.bin"),
+                "--output-file",
+                str(out_file),
+            ],
+            {"FUCHSIA_DIR": str(self.fuchsia_dir)},
+        )
+        self.assertEqual(rc, 0)
         self.assertTrue(out_file.is_file())
         self.assertEqual(out_file.read_text(), "binary-content")
 
@@ -79,7 +99,8 @@ exit {exit_code}
                 "prebuilt/drivers/bundle",
                 "--output-dir",
                 str(out_dir),
-            ]
+            ],
+            {},
         )
         self.assertEqual(rc, 0)
         self.assertEqual(
@@ -109,7 +130,8 @@ exit {exit_code}
                 "src/not_prebuilt/bar.bin",
                 "--output-file",
                 str(out_file),
-            ]
+            ],
+            {},
         )
         self.assertNotEqual(rc, 0)
         self.assertFalse(self.args_log.exists())
@@ -125,7 +147,8 @@ exit {exit_code}
                 "prebuilt/foo/bar.bin",
                 "--output-file",
                 str(out_file),
-            ]
+            ],
+            {},
         )
         self.assertEqual(rc, 2)
         self.assertFalse(out_file.exists())
@@ -142,7 +165,8 @@ exit {exit_code}
                 "prebuilt/foo/bar.bin",
                 "--output-file",
                 str(out_file),
-            ]
+            ],
+            {},
         )
         self.assertEqual(rc, 1)
 

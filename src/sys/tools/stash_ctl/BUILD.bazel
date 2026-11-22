@@ -2,6 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load(
@@ -27,6 +32,17 @@ rustc_binary(
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
     ],
+)
+
+fx_packaged_binary(
+    name = "stash_ctl_packaged_bin",
+    binary = ":bin",
+    binary_name = "stash_ctl",
+)
+
+fx_package(
+    name = "stash_ctl",
+    resources = [":stash_ctl_packaged_bin"],
 )
 
 rustc_test(

@@ -63,6 +63,26 @@ impl RwQueue {
         }
     }
 
+    fn cancel_read(&self, event: &Arc<InterruptibleEvent>) {
+        self.inner.lock().cancel_read(event);
+
+        // SAFETY: Paired with `self.tracer.lock_shared()` in `Self::read`.
+        #[cfg(any(test, debug_assertions))]
+        unsafe {
+            self.tracer.unlock_shared();
+        }
+    }
+
+    fn cancel_write(&self, event: &Arc<InterruptibleEvent>) {
+        self.inner.lock().cancel_write(event);
+
+        // SAFETY: Paired with `self.tracer.lock_exclusive()` in `Self::write`.
+        #[cfg(any(test, debug_assertions))]
+        unsafe {
+            self.tracer.unlock_exclusive();
+        }
+    }
+
     #[track_caller]
     pub fn read<'a>(&'a self, current_task: &CurrentTask) -> Result<RwQueueReadGuard<'a>, Errno> {
         let token = self.tracking.acquire();
@@ -80,7 +100,7 @@ impl RwQueue {
             std::mem::drop(inner);
 
             current_task.block_until(guard, zx::MonotonicInstant::INFINITE).map_err(|e| {
-                self.inner.lock().remove_waiter(&event);
+                self.cancel_read(&event);
                 e
             })?;
         }
@@ -104,7 +124,7 @@ impl RwQueue {
             std::mem::drop(inner);
 
             current_task.block_until(guard, zx::MonotonicInstant::INFINITE).map_err(|e| {
-                self.inner.lock().remove_waiter(&event);
+                self.cancel_write(&event);
                 e
             })?;
         }
@@ -118,7 +138,7 @@ const READY: usize = 0;
 /// The queue has exactly one writer.
 const WRITER: usize = 0b01;
 
-/// Each writer in the queue increments the state by this amount.
+/// Each reader in the queue increments the state by this amount.
 const READER: usize = 0b10;
 
 /// A writer is currently running.
@@ -126,7 +146,7 @@ fn has_writer(state: usize) -> bool {
     state & WRITER != 0
 }
 
-/// At elast one reader is currently running.
+/// At least one reader is currently running.
 fn has_reader(state: usize) -> bool {
     state >= READER
 }
@@ -227,11 +247,33 @@ impl RwQueueInner {
         debug_assert_consistent(self.state);
     }
 
-    fn remove_waiter(&mut self, event: &Arc<InterruptibleEvent>) {
+    fn remove_waiter(&mut self, event: &Arc<InterruptibleEvent>) -> bool {
+        let len_before = self.waiters.len();
         self.waiters.retain(|waiter| {
             let (Waiter::Reader(other) | Waiter::Writer(other)) = waiter;
             !Arc::ptr_eq(event, other)
         });
+        self.waiters.len() != len_before
+    }
+
+    fn cancel_read(&mut self, event: &Arc<InterruptibleEvent>) {
+        if !self.remove_waiter(event) {
+            // The event was already removed from the queue, so we're already holding a read lock.
+            // We should unlock to avoid leaving the queue locked.
+            self.unlock_read();
+        }
+    }
+
+    fn cancel_write(&mut self, event: &Arc<InterruptibleEvent>) {
+        if !self.remove_waiter(event) {
+            // The event was already removed from the queue, so we're already holding a write lock.
+            // We should unlock to avoid leaving the queue locked.
+            self.unlock_write();
+        } else if has_reader(self.state) {
+            // Readers may be blocked in the queue behind the writer we just removed. We should
+            // wake them up.
+            self.notify_next();
+        }
     }
 }
 
@@ -301,12 +343,13 @@ use tracing_mutex as _;
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::task::Kernel;
     use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
+    use crate::task::{Kernel, TaskFlags};
     use crate::testing::*;
     use futures::executor::block_on;
     use futures::future::join_all;
     use starnix_sync::lock_ordering;
+    use starnix_uapi::errno;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Barrier;
@@ -489,6 +532,128 @@ mod test {
             }
 
             block_on(join_all(threads)).into_iter().for_each(|r| r.expect("failed to join thread"));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_cancel_read() {
+        let mut inner = RwQueueInner::default();
+        assert!(inner.try_write());
+
+        let reader1 = InterruptibleEvent::new();
+        let reader2 = InterruptibleEvent::new();
+        let writer2 = InterruptibleEvent::new();
+        inner.waiters.push_back(Waiter::Reader(reader1.clone()));
+        inner.waiters.push_back(Waiter::Reader(reader2.clone()));
+        inner.waiters.push_back(Waiter::Writer(writer2));
+
+        // Cancelling a reader while still in the queue simply removes it.
+        inner.cancel_read(&reader1);
+        assert_eq!(inner.state, WRITER);
+        assert_eq!(inner.waiters.len(), 2);
+
+        // Unlocking pops `reader2` and transfers a read lock to it.
+        inner.unlock_write();
+        assert_eq!(inner.state, READER);
+        assert_eq!(inner.waiters.len(), 1);
+
+        // Cancelling `reader2` after `notify_next()` must release its read lock and wake
+        // `writer2`.
+        inner.cancel_read(&reader2);
+        assert_eq!(inner.state, WRITER);
+        assert!(inner.waiters.is_empty());
+    }
+
+    #[::fuchsia::test]
+    fn test_cancel_write() {
+        let mut inner = RwQueueInner::default();
+        assert!(inner.try_read());
+
+        let writer1 = InterruptibleEvent::new();
+        let reader2 = InterruptibleEvent::new();
+        inner.waiters.push_back(Waiter::Writer(writer1.clone()));
+        inner.waiters.push_back(Waiter::Reader(reader2));
+
+        // Cancelling a queued writer while a reader is active wakes readers queued behind it.
+        inner.cancel_write(&writer1);
+        assert_eq!(inner.state, 2 * READER);
+        assert!(inner.waiters.is_empty());
+
+        inner.unlock_read();
+        inner.unlock_read();
+        assert_eq!(inner.state, READY);
+
+        // While a writer holds the lock, cancelling a second queued writer must not wake a reader
+        // queued behind it until the active writer unlocks.
+        assert!(inner.try_write());
+        let writer2 = InterruptibleEvent::new();
+        let reader3 = InterruptibleEvent::new();
+        inner.waiters.push_back(Waiter::Writer(writer2.clone()));
+        inner.waiters.push_back(Waiter::Reader(reader3));
+
+        inner.cancel_write(&writer2);
+        assert_eq!(inner.state, WRITER);
+        assert_eq!(inner.waiters.len(), 1);
+
+        inner.unlock_write();
+        assert_eq!(inner.state, READER);
+        assert!(inner.waiters.is_empty());
+
+        // Cancelling a writer after `notify_next()` popped it must release its write lock and
+        // wake the next waiter.
+        let writer3 = InterruptibleEvent::new();
+        let reader4 = InterruptibleEvent::new();
+        inner.waiters.push_back(Waiter::Writer(writer3.clone()));
+        inner.waiters.push_back(Waiter::Reader(reader4));
+
+        inner.unlock_read();
+        assert_eq!(inner.state, WRITER);
+        assert_eq!(inner.waiters.len(), 1);
+
+        inner.cancel_write(&writer3);
+        assert_eq!(inner.state, READER);
+        assert!(inner.waiters.is_empty());
+    }
+
+    #[::fuchsia::test]
+    async fn test_interrupted_read_and_write() {
+        lock_ordering! {
+            Unlocked => TestLevel
+        }
+
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let queue = Arc::new(RwQueue::new::<TestLevel>());
+            let barrier = Arc::new(Barrier::new(2));
+
+            let write_guard = queue.write(current_task).expect("shouldn't be interrupted");
+
+            let queue_clone = Arc::clone(&queue);
+            let barrier_clone = Arc::clone(&barrier);
+            let (thread, req) = SpawnRequestBuilder::new()
+                .with_sync_closure(move |task: &CurrentTask| {
+                    task.write().set_flags(TaskFlags::WORK_CANCELLED, true);
+                    assert_eq!(queue_clone.read(task).err(), Some(errno!(EINTR)));
+                    assert_eq!(queue_clone.write(task).err(), Some(errno!(EINTR)));
+                    task.write().set_flags(TaskFlags::WORK_CANCELLED, false);
+
+                    barrier_clone.wait();
+                    barrier_clone.wait();
+
+                    // Re-acquiring on the same thread verifies `tracer` was unlocked on `EINTR`.
+                    let read_guard = queue_clone.read(task).expect("should acquire read");
+                    std::mem::drop(read_guard);
+                    let write_guard = queue_clone.write(task).expect("should acquire write");
+                    std::mem::drop(write_guard);
+                })
+                .build_with_async_result();
+            kernel.kthreads.spawner().spawn_from_request(req);
+
+            barrier.wait();
+            std::mem::drop(write_guard);
+            barrier.wait();
+            block_on(thread).expect("failed to join thread");
         })
         .await;
     }

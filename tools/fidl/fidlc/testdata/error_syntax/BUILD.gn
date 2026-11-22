@@ -4,12 +4,16 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 fidl_golden_library("test.errorsyntax.parent") {
   sources = [ "parent.test.fidl" ]
+  excluded_checks = [ "string-bounds-not-specified" ]
 }
 
 fidl_golden_library("test.errorsyntax") {
   experimental_flags = [ "output_index_json" ]
   sources = [ "child.test.fidl" ]
   public_deps = [ ":test.errorsyntax.parent" ]
+  excluded_checks = [ "string-bounds-not-specified" ]
 }
+# LINT.ThenChange(BUILD.bazel)

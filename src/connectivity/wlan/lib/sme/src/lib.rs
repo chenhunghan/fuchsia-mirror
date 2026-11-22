@@ -23,6 +23,7 @@ pub mod test_utils;
 use fidl_fuchsia_wlan_common as fidl_common;
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_mlme::{self as fidl_mlme, MlmeEvent};
+use fidl_fuchsia_wlan_sme as fidl_sme;
 use fidl_fuchsia_wlan_stats as fidl_stats;
 use futures::channel::mpsc;
 use thiserror::Error;
@@ -44,6 +45,34 @@ impl Config {
     pub fn with_wpa1(mut self) -> Self {
         self.wpa1_supported = true;
         self
+    }
+}
+
+/// Installs the process-global redactor requested by wlandevicemonitor, so that the MAC 
+/// addresses,BSSIDs and SSIDs the SME formats in logs and Inspect are redacted the same way 
+/// as in other components.
+///
+/// The redactor is process-global, so this affects every SME in the driver host. It must be
+/// called before the SME starts formatting identifiers. Unknown redaction modes mask
+/// identifiers rather than leaving them unredacted.
+pub fn install_network_identifier_redaction(
+    redaction: Option<&fidl_sme::NetworkIdentifierRedaction>,
+) {
+    let Some(redaction) = redaction else {
+        return;
+    };
+    redactor::set_masking_redactor();
+    match redaction {
+        fidl_sme::NetworkIdentifierRedaction::Masked(fidl_sme::Masked) => {}
+        fidl_sme::NetworkIdentifierRedaction::Salted(salt) => {
+            if redactor::set_salted_redactor(*salt).is_err() {
+                // Another SME in this driver host already installed the salted redactor.
+                log::debug!("Salted redactor already installed");
+            }
+        }
+        _ => {
+            log::warn!("Unknown network identifier redaction mode; masking identifiers");
+        }
     }
 }
 
@@ -212,6 +241,7 @@ fn mlme_event_name(event: &MlmeEvent) -> &str {
         MlmeEvent::StartConf { .. } => "StartConf",
         MlmeEvent::StopConf { .. } => "StopConf",
         MlmeEvent::EapolConf { .. } => "EapolConf",
+        MlmeEvent::OnMichaelMicFailure { .. } => "OnMichaelMicFailure",
         MlmeEvent::SignalReport { .. } => "SignalReport",
         MlmeEvent::OnRssiThresholdBreached { .. } => "OnRssiThresholdBreached",
         MlmeEvent::EapolInd { .. } => "EapolInd",
@@ -223,6 +253,20 @@ fn mlme_event_name(event: &MlmeEvent) -> &str {
         MlmeEvent::OnWmmStatusResp { .. } => "OnWmmStatusResp",
         MlmeEvent::OnScheduledScanMatchesAvailable { .. } => "OnScheduledScanMatchesAvailable",
         MlmeEvent::OnScheduledScanStoppedByFirmware { .. } => "OnScheduledScanStoppedByFirmware",
+    }
+}
+
+/// Safely log SecAssocUpdates without printing private information.
+pub(crate) fn sec_assoc_update_name(update: &wlan_rsn::rsna::SecAssocUpdate) -> &'static str {
+    use wlan_rsn::rsna::SecAssocUpdate;
+    match update {
+        SecAssocUpdate::TxEapolKeyFrame { .. } => "TxEapolKeyFrame",
+        SecAssocUpdate::Key(_) => "Key",
+        SecAssocUpdate::Status(_) => "Status",
+        SecAssocUpdate::TxSaeFrame(_) => "TxSaeFrame",
+        SecAssocUpdate::SaeAuthStatus(_) => "SaeAuthStatus",
+        SecAssocUpdate::ScheduleSaeTimeout(_) => "ScheduleSaeTimeout",
+        SecAssocUpdate::TxOwePublicKey { .. } => "TxOwePublicKey",
     }
 }
 

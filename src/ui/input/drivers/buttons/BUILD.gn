@@ -42,7 +42,6 @@ fuchsia_driver_component("buttons") {
     "//src/ui/input/drivers",
   ]
   deps = [ ":buttons-driver" ]
-  info = "meta/buttons-info.json"
 }
 
 fuchsia_structured_config_cpp_elf_lib("buttons-config") {

@@ -4,6 +4,7 @@
 
 #include "environment_status.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -34,6 +35,13 @@ constexpr BotInfo kBotEnvironments[] = {{"TEST_ONLY_ENV", "test-only"},
 // TODO(fxr/126204): Remove this when better alternative is available
 constexpr BotInfo kBotBuilder{"USER", "builder"};
 
+// Environment variables that AI agents set for the tools they invoke. The build generates these
+// lists from //tools/devshell/lib/agents.txt and //tools/devshell/lib/agent_session_ids.txt.
+constexpr const char* kAgentEnvironments[] = {
+#include "src/lib/analytics/cpp/core_dev_tools/agent_environments.inc"
+#include "src/lib/analytics/cpp/core_dev_tools/agent_session_id_environments.inc"
+};
+
 }  // namespace
 
 bool IsRunByBot() { return GetBotInfo().IsRunByBot(); }
@@ -52,6 +60,13 @@ BotInfo GetBotInfo() {
   }
 
   return {};
+}
+
+bool IsRunByAgent() {
+  return std::ranges::any_of(kAgentEnvironments, [](const char* name) {
+    const char* value = std::getenv(name);
+    return value && value[0] != '\0';
+  });
 }
 
 bool BotInfo::IsRunByBot() const { return environment != nullptr; }

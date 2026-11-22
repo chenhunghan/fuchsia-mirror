@@ -70,7 +70,6 @@ fuchsia_driver_component("netdevice-migration") {
   ]
   component_name = "netdevice-migration"
   deps = [ ":netdevice-migration-driver" ]
-  info = "meta/netdevice-migration-info.json"
   manifest = "meta/netdevice-migration.cml"
 }
 

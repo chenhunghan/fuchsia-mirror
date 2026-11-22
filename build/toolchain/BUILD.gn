@@ -4,6 +4,11 @@
 
 import("//build/toolchain/clang_toolchain_suite.gni")
 
+group("tests") {
+  testonly = true
+  deps = [ "stack_usage_check:tests" ]
+}
+
 clang_host_toolchain_suite("host_x64") {
   toolchain_cpu = "x64"
 }

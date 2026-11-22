@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/fidl/fidlc/testdata:fidl_golden_library.bzl", "fidl_golden_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fidl_golden_library(
+    name = "test.aliases",
+    srcs = ["example.test.fidl"],
+    excluded_checks = [
+        "invalid-case-for-decl-name",
+        "invalid-copyright-for-platform-source-library",
+        "string-bounds-not-specified",
+        "vector-bounds-not-specified",
+    ],
+    experimental_flags = ["output_index_json"],
+    deps = [":test.someotherlibrary"],
+)
+
+fidl_golden_library(
+    name = "test.someotherlibrary",
+    srcs = ["someotherlibrary.test.fidl"],
+    excluded_checks = ["invalid-copyright-for-platform-source-library"],
+)
+# LINT.ThenChange(BUILD.gn)

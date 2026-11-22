@@ -5,14 +5,16 @@
 #ifndef SRC_DEVICES_BOARD_LIB_ACPI_TEST_MOCK_PCI_H_
 #define SRC_DEVICES_BOARD_LIB_ACPI_TEST_MOCK_PCI_H_
 
-#include <fuchsia/hardware/pciroot/cpp/banjo.h>
-
 #include <vector>
+
+#include <acpica/acpi.h>
+
+#include "src/devices/board/lib/acpi/pci.h"
 
 namespace acpi::test {
 
-// Returns the list of pci_bdf_t passed to pci_init().
-std::vector<pci_bdf_t> GetAcpiBdfs();
+// Returns the list of BDFs passed to pci_init().
+std::vector<ACPI_PCI_ID> GetAcpiBdfs();
 }  // namespace acpi::test
 
 #endif  // SRC_DEVICES_BOARD_LIB_ACPI_TEST_MOCK_PCI_H_

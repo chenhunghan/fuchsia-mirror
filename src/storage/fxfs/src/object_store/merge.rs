@@ -21,26 +21,7 @@ fn merge_extents(
     left_value: &ExtentValue,
     right_value: &ExtentValue,
 ) -> MergeResult<ObjectKey, ObjectValue> {
-    // For now, we don't support/expect two extents with the same key in one layer.
-    // One reason you can't merge deleted extents in non-adjacent layers is because you
-    // can't decide which layer the merge should end up in.
-    //
-    // Consider this scenario:
-    //   |X-X-X|
-    //      |a-a-a|
-    //         |X-X-X|
-    // If you merge the deleted extents here, you might end up with:
-    //   |X-X-X-X-X-X|
-    //      |a-a-a|
-    // which is clearly incorrect.
     debug_assert!(right.layer_index != left.layer_index);
-
-    if let (ExtentValue::None, ExtentValue::None) = (left_value, right_value) {
-        if (left.layer_index as i32 - right.layer_index as i32).abs() == 1 {
-            // Two deletions in adjacent layers can be merged.
-            return merge_deleted_extents(object_id, attribute_id, left_key, right_key);
-        }
-    }
 
     if left_key.end <= right_key.start {
         // Extents don't overlap.
@@ -113,33 +94,6 @@ fn merge_extents(
     }
 }
 
-// Assumes that the two extents to be merged are on adjacent layers (i.e. layers N, N+1).
-fn merge_deleted_extents(
-    object_id: u64,
-    attribute_id: AttributeId,
-    left_key: &Extent,
-    right_key: &Extent,
-) -> MergeResult<ObjectKey, ObjectValue> {
-    if left_key.end < right_key.start {
-        // The extents are not adjacent or overlapping.
-        return MergeResult::EmitLeft;
-    }
-    // Both of these are deleted extents which are either adjacent or overlapping, which means
-    // we can coalesce the records.
-    if left_key.end >= right_key.end {
-        // The left deletion eclipses the right, so just keep the left.
-        return MergeResult::Other { emit: None, left: Keep, right: Discard };
-    }
-    MergeResult::Other {
-        emit: None,
-        left: Discard,
-        right: Replace(Box::new(Item::new(
-            ObjectKey::extent(object_id, attribute_id, left_key.start..right_key.end),
-            ObjectValue::deleted_extent(),
-        ))),
-    }
-}
-
 /// Merge function for items in the object store.
 ///
 /// The most interesting behaviour in this merge function is how extents are handled. Since extents
@@ -155,17 +109,9 @@ fn merge_deleted_extents(
 ///
 /// Merged    |a-a-a-a|c|   |b-b-b|d-d-d|
 ///
-/// Adjacent or overlapping extent deletions in two adjacent layers can be merged into single
-/// records (since they do not have a physical offset, so there's no need to keep the physical
-/// extents contiguous). We can't merge deletions from non-adjacent layers, since that would
-/// cause issues in situations like this:
-///
-/// Layer 0         |X-X-X|
-/// Layer 1   |a-a-a-a-a-a|
-/// Layer 2   |X-X-X|
-///
-/// Merging the two deletions in layers 0 and 2 would either result in the middle extent being
-/// fully occluded or not at all (depending on whether we replaced on the left or right layer).
+/// `Merger` emits non-overlapping segments without coalescing across layers; single-layer
+/// `merge_into` insertions and compaction streams coalesce adjacent compatible records via
+/// `Coalesce` / `CoalescingIterator`.
 pub fn merge(
     left: &MergeLayerIterator<'_, ObjectKey, ObjectValue>,
     right: &MergeLayerIterator<'_, ObjectKey, ObjectValue>,
@@ -245,15 +191,25 @@ pub fn merge(
 mod tests {
     use super::merge;
     use crate::checksum::Checksums;
-    use crate::lsm_tree::types::{Item, LayerIterator, MergeableKey, Value};
-    use crate::lsm_tree::{LSMTree, Query};
+    use crate::lsm_tree::persistent_layer::{
+        BloomFilterOptions, PersistentLayer, PersistentLayerWriter,
+    };
+    use crate::lsm_tree::types::{
+        Item, LayerIterator, LayerWriter, MaybeContainsKey, MergeableKey, Value,
+    };
+    use crate::lsm_tree::{LSMTree, LockedLayer, Query};
     use crate::object_store::extent::MIN_BLOCK_SIZE;
     use crate::object_store::extent_record::ExtentValue;
     use crate::object_store::object_record::{
         AttributeKey, BytesAndNodes, ObjectKey, ObjectValue, PosixOwner, Timestamp,
     };
+    use crate::object_store::tree::MajorCompactable;
     use crate::object_store::{AttributeId, ProjectId, VOLUME_DATA_KEY_ID};
+    use crate::testing::fake_object::{FakeObject, FakeObjectHandle};
+    use crate::testing::writer::Writer;
     use anyhow::Error;
+    use std::sync::Arc;
+    use storage_units::BlockSize;
 
     async fn test_merge<K: MergeableKey, V: Value + PartialEq>(
         tree: &LSMTree<K, V>,
@@ -640,7 +596,8 @@ mod tests {
     async fn test_merge_deleted_extents_new_layer_joins_two_deletions() -> Result<(), Error> {
         // Old layer:  [----]    [----]
         // New layer:       [----]
-        // Merged:     [--------------]
+        // Merger:     [----][---][---]
+        // Coalesced:  [--------------]
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
         let tree = LSMTree::new(merge, None);
@@ -667,10 +624,18 @@ mod tests {
         let layer_set = tree.layer_set();
         let mut merger = layer_set.merger();
         let mut iter = merger.query(Query::FullScan).await?;
-        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
-        iter.advance().await?;
+        for range in [0..512, 512..1024, 1024..1536] {
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, range));
+            assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
+            iter.advance().await?;
+        }
         assert!(iter.get().is_none());
+
+        let mut coalesced = merger.query(Query::FullScan).await?.coalesce().await?;
+        assert_eq!(coalesced.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
+        assert_eq!(coalesced.get().unwrap().value, &ObjectValue::deleted_extent());
+        coalesced.advance().await?;
+        assert!(coalesced.get().is_none());
         Ok(())
     }
 
@@ -678,7 +643,8 @@ mod tests {
     async fn test_merge_deleted_extents_new_layer_joined_by_old_deletion() -> Result<(), Error> {
         // Old layer:       [----]
         // New layer:  [----]    [----]
-        // Merged:     [--------------]
+        // Merger:     [----][---][---]
+        // Coalesced:  [--------------]
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
         let tree = LSMTree::new(merge, None);
@@ -705,10 +671,18 @@ mod tests {
         let layer_set = tree.layer_set();
         let mut merger = layer_set.merger();
         let mut iter = merger.query(Query::FullScan).await?;
-        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
-        iter.advance().await?;
+        for range in [0..512, 512..1024, 1024..1536] {
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, range));
+            assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
+            iter.advance().await?;
+        }
         assert!(iter.get().is_none());
+
+        let mut coalesced = merger.query(Query::FullScan).await?.coalesce().await?;
+        assert_eq!(coalesced.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
+        assert_eq!(coalesced.get().unwrap().value, &ObjectValue::deleted_extent());
+        coalesced.advance().await?;
+        assert!(coalesced.get().is_none());
         Ok(())
     }
 
@@ -734,10 +708,18 @@ mod tests {
         let layer_set = tree.layer_set();
         let mut merger = layer_set.merger();
         let mut iter = merger.query(Query::FullScan).await?;
-        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
-        iter.advance().await?;
+        for range in [0..512, 512..1536] {
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, range));
+            assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
+            iter.advance().await?;
+        }
         assert!(iter.get().is_none());
+
+        let mut coalesced = merger.query(Query::FullScan).await?.coalesce().await?;
+        assert_eq!(coalesced.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
+        assert_eq!(coalesced.get().unwrap().value, &ObjectValue::deleted_extent());
+        coalesced.advance().await?;
+        assert!(coalesced.get().is_none());
         Ok(())
     }
 
@@ -762,10 +744,18 @@ mod tests {
         let layer_set = tree.layer_set();
         let mut merger = layer_set.merger();
         let mut iter = merger.query(Query::FullScan).await?;
-        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
-        iter.advance().await?;
+        for range in [0..1024, 1024..1536] {
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, range));
+            assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
+            iter.advance().await?;
+        }
         assert!(iter.get().is_none());
+
+        let mut coalesced = merger.query(Query::FullScan).await?.coalesce().await?;
+        assert_eq!(coalesced.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
+        assert_eq!(coalesced.get().unwrap().value, &ObjectValue::deleted_extent());
+        coalesced.advance().await?;
+        assert!(coalesced.get().is_none());
         Ok(())
     }
 
@@ -773,7 +763,8 @@ mod tests {
     async fn test_merge_deleted_extents_new_layer_contained_in_old() -> Result<(), Error> {
         // Old layer:  [--------------]
         // New layer:       [----]
-        // Merged:     [--------------]
+        // Merger:     [----][---][---]
+        // Coalesced:  [--------------]
         let object_id = 0;
         let attr_id = AttributeId::TEST_ID;
         let tree = LSMTree::new(merge, None);
@@ -795,10 +786,18 @@ mod tests {
         let layer_set = tree.layer_set();
         let mut merger = layer_set.merger();
         let mut iter = merger.query(Query::FullScan).await?;
-        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
-        assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
-        iter.advance().await?;
+        for range in [0..512, 512..1024, 1024..1536] {
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, range));
+            assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
+            iter.advance().await?;
+        }
         assert!(iter.get().is_none());
+
+        let mut coalesced = merger.query(Query::FullScan).await?.coalesce().await?;
+        assert_eq!(coalesced.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
+        assert_eq!(coalesced.get().unwrap().value, &ObjectValue::deleted_extent());
+        coalesced.advance().await?;
+        assert!(coalesced.get().is_none());
         Ok(())
     }
 
@@ -998,6 +997,50 @@ mod tests {
         let mut iter = merger.query(Query::FullScan).await?;
         assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..2048));
         assert_eq!(iter.get().unwrap().value, &ObjectValue::deleted_extent());
+        iter.advance().await?;
+        assert!(iter.get().is_none());
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_merge_contiguous_raw_extent_into_preserves_left_offset() -> Result<(), Error> {
+        let object_id = 0;
+        let attr_id = AttributeId::TEST_ID;
+        let tree = LSMTree::<ObjectKey, ObjectValue>::new(merge, None);
+
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 0..1024),
+            ObjectValue::Extent(ExtentValue::new_raw(50000, VOLUME_DATA_KEY_ID)),
+        ))?;
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 1024..2048),
+            ObjectValue::Extent(ExtentValue::new_raw(90000, VOLUME_DATA_KEY_ID)),
+        ))?;
+
+        let key = ObjectKey::extent(object_id, attr_id, 1024..1536);
+        tree.merge_into(
+            Item::new(
+                key.clone(),
+                ObjectValue::Extent(ExtentValue::new_raw(51024, VOLUME_DATA_KEY_ID)),
+            ),
+            &key.key_for_merge_into(),
+        );
+        assert_eq!(tree.mutable_layer().len(), 2);
+
+        let layer_set = tree.layer_set();
+        let mut merger = layer_set.merger();
+        let mut iter = merger.query(Query::FullScan).await?;
+        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..1536));
+        assert_eq!(
+            iter.get().unwrap().value,
+            &ObjectValue::Extent(ExtentValue::new_raw(50000, VOLUME_DATA_KEY_ID))
+        );
+        iter.advance().await?;
+        assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 1536..2048));
+        assert_eq!(
+            iter.get().unwrap().value,
+            &ObjectValue::Extent(ExtentValue::new_raw(90512, VOLUME_DATA_KEY_ID))
+        );
         iter.advance().await?;
         assert!(iter.get().is_none());
         Ok(())
@@ -1719,5 +1762,402 @@ mod tests {
         let mut merger = layer_set.merger();
         let iter = merger.query(Query::FullScan).await.unwrap();
         assert!(iter.get().is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_range_query_does_not_reemit_deleted_extents() -> Result<(), Error> {
+        let object_id = 1;
+        let attr_id = AttributeId::TEST_ID;
+        let search_key = ObjectKey::extent(object_id, attr_id, 0..512);
+
+        // Touching deletions across layers queried via Query::FullRange and Query::LimitedRange,
+        // while coalescing adjacent deletions within a single mutable layer via `merge_into`.
+        let tree = LSMTree::new(merge, None);
+        let k2 = ObjectKey::extent(object_id, attr_id, 512..1024);
+        tree.merge_into(
+            Item::new(k2.clone(), ObjectValue::deleted_extent()),
+            &k2.key_for_merge_into(),
+        );
+        let k3 = ObjectKey::extent(object_id, attr_id, 1024..1536);
+        tree.merge_into(
+            Item::new(k3.clone(), ObjectValue::deleted_extent()),
+            &k3.key_for_merge_into(),
+        );
+        tree.seal();
+        let k1 = ObjectKey::extent(object_id, attr_id, 0..512);
+        tree.merge_into(
+            Item::new(k1.clone(), ObjectValue::deleted_extent()),
+            &k1.key_for_merge_into(),
+        );
+
+        let layer_set = tree.layer_set();
+        for query in [Query::FullRange(&search_key), Query::LimitedRange(&search_key)] {
+            let mut merger = layer_set.merger();
+            let mut iter = merger.query(query).await?;
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 0..512));
+            iter.advance().await?;
+            assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, 512..1536));
+            iter.advance().await?;
+            assert!(iter.get().is_none());
+        }
+
+        // Overlapping deletions across layers (both layer orders) must split without re-emitting
+        // the already-yielded prefix.
+        for (older, newer, expected) in
+            [(0..1024, 512..1536, [0..512, 512..1536]), (512..1536, 0..1024, [0..1024, 1024..1536])]
+        {
+            let tree = LSMTree::new(merge, None);
+            tree.insert(Item::new(
+                ObjectKey::extent(object_id, attr_id, older),
+                ObjectValue::deleted_extent(),
+            ))
+            .expect("insert error");
+            tree.seal();
+            tree.insert(Item::new(
+                ObjectKey::extent(object_id, attr_id, newer),
+                ObjectValue::deleted_extent(),
+            ))
+            .expect("insert error");
+
+            let layer_set = tree.layer_set();
+            for query in [Query::FullRange(&search_key), Query::LimitedRange(&search_key)] {
+                let mut merger = layer_set.merger();
+                let mut iter = merger.query(query).await?;
+                for range in expected.clone() {
+                    assert_eq!(
+                        iter.get().unwrap().key,
+                        &ObjectKey::extent(object_id, attr_id, range)
+                    );
+                    iter.advance().await?;
+                }
+                assert!(iter.get().is_none());
+            }
+        }
+
+        // Three layers of touching deletions.
+        let tree = LSMTree::new(merge, None);
+        for range in [1024..1536, 512..1024] {
+            tree.insert(Item::new(
+                ObjectKey::extent(object_id, attr_id, range),
+                ObjectValue::deleted_extent(),
+            ))
+            .expect("insert error");
+            tree.seal();
+        }
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 0..512),
+            ObjectValue::deleted_extent(),
+        ))
+        .expect("insert error");
+
+        let layer_set = tree.layer_set();
+        for query in [Query::FullRange(&search_key), Query::LimitedRange(&search_key)] {
+            let mut merger = layer_set.merger();
+            let mut iter = merger.query(query).await?;
+            for range in [0..512, 512..1024, 1024..1536] {
+                assert_eq!(iter.get().unwrap().key, &ObjectKey::extent(object_id, attr_id, range));
+                iter.advance().await?;
+            }
+            assert!(iter.get().is_none());
+        }
+        Ok(())
+    }
+
+    async fn write_persistent_layer_with_num_items(
+        items: &[Item<ObjectKey, ObjectValue>],
+        num_items: usize,
+    ) -> LockedLayer<ObjectKey, ObjectValue> {
+        let object = Arc::new(FakeObject::new());
+        let write_handle = FakeObjectHandle::new(object.clone());
+        let mut writer = PersistentLayerWriter::<_, ObjectKey, ObjectValue>::new(
+            Writer::new(&write_handle).await,
+            Some(BloomFilterOptions { num_items }),
+            BlockSize::SIZE_512B,
+        )
+        .await
+        .expect("PersistentLayerWriter::new failed");
+        for item in items {
+            writer.write(item.as_item_ref()).await.expect("write failed");
+        }
+        writer.complete().await.expect("complete failed");
+        let layer = PersistentLayer::open(FakeObjectHandle::new(object))
+            .await
+            .expect("open persistent layer failed");
+        LockedLayer::from(layer)
+    }
+
+    async fn write_persistent_layer(
+        items: Vec<Item<ObjectKey, ObjectValue>>,
+    ) -> LockedLayer<ObjectKey, ObjectValue> {
+        write_persistent_layer_with_num_items(&items, 1024).await
+    }
+
+    #[fuchsia::test]
+    async fn test_compaction_coalesces_extents() -> Result<(), Error> {
+        let object_id = 1;
+        let attr_id = AttributeId::TEST_ID;
+        let bucket = BlockSize::SIZE_1MIB.get();
+        let empty_bucket_deletion_key =
+            ObjectKey::extent(object_id, attr_id, bucket..(bucket + 4096));
+
+        // Base layer kept during minor compaction: contains data in 0..1MiB and 4MiB..6MiB, and
+        // nothing in 1MiB..4MiB. Retry if the random per-layer Bloom seed happens to hit a ~0.1%
+        // false positive on `empty_bucket_deletion_key`.
+        let kept_items = vec![
+            Item::new(
+                ObjectKey::extent(object_id, attr_id, 0..4096),
+                ObjectValue::Extent(ExtentValue::new_raw(65536, VOLUME_DATA_KEY_ID)),
+            ),
+            Item::new(
+                ObjectKey::extent(object_id, attr_id, (4 * bucket)..(5 * bucket + 4096)),
+                ObjectValue::Extent(ExtentValue::new_raw(4 * bucket, VOLUME_DATA_KEY_ID)),
+            ),
+        ];
+        let kept_layer = loop {
+            let layer = write_persistent_layer(kept_items.clone()).await;
+            if layer.maybe_contains_key(&empty_bucket_deletion_key) == MaybeContainsKey::False {
+                break layer;
+            }
+        };
+
+        // Build 3 layers to compact:
+        // - Deletions (bucket - 8192)..(bucket - 4096) in L2 and (bucket - 4096)..bucket in L0
+        //   are separated by an intermediate layer L1, yet both overlap the kept 0..1MiB bucket
+        //   and must coalesce into (bucket - 8192)..bucket.
+        // - Touching deletion bucket..(bucket + 4096) in L0 is inserted via `merge_into` (like
+        //   `trim_some`): `merge_into` must NOT coalesce it across the 1MiB bucket boundary, so
+        //   `minor_iter` elides it via the Bloom filter before `CoalescingIterator` runs.
+        // - Contiguous `Raw` and `Overwrite` extents within a 1MiB bucket coalesce across layers,
+        //   while non-contiguous `device_offset`, different `key_id`, mixed modes, and `Cow`
+        //   extents remain separate.
+        let tree = LSMTree::new(merge, None);
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, (bucket - 8192)..(bucket - 4096)),
+            ObjectValue::deleted_extent(),
+        ))?;
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 16384..20480),
+            ObjectValue::Extent(ExtentValue::new_raw(1048576 + 4096, VOLUME_DATA_KEY_ID)),
+        ))?;
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 32768..36864),
+            ObjectValue::Extent(ExtentValue::initialized_overwrite_extent(
+                2097152,
+                VOLUME_DATA_KEY_ID,
+            )),
+        ))?;
+        tree.seal();
+
+        // Intermediate layer L1 with an unrelated record so L0 and L2 are non-adjacent.
+        tree.insert(Item::new(
+            ObjectKey::attribute(object_id, attr_id, AttributeKey::Attribute),
+            ObjectValue::attribute(bucket, false),
+        ))?;
+        tree.seal();
+
+        for range in [(bucket - 4096)..bucket, bucket..(bucket + 4096)] {
+            let key = ObjectKey::extent(object_id, attr_id, range);
+            let lower_bound = key.key_for_merge_into();
+            tree.merge_into(Item::new(key, ObjectValue::deleted_extent()), &lower_bound);
+        }
+        // Contiguous Raw extent right before 16384..20480.
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 12288..16384),
+            ObjectValue::Extent(ExtentValue::new_raw(1048576, VOLUME_DATA_KEY_ID)),
+        ))?;
+        // Discontiguous Raw extent at 20480..24576 (device_offset jumps).
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 20480..24576),
+            ObjectValue::Extent(ExtentValue::new_raw(1048576 + 16384, VOLUME_DATA_KEY_ID)),
+        ))?;
+        // Contiguous Overwrite extent right after 32768..36864.
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 36864..40960),
+            ObjectValue::Extent(ExtentValue::initialized_overwrite_extent(
+                2097152 + 4096,
+                VOLUME_DATA_KEY_ID,
+            )),
+        ))?;
+        // Contiguous Cow extents at 49152..53248 and 53248..57344 must NOT coalesce.
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 49152..53248),
+            ObjectValue::Extent(ExtentValue::with_checksum(
+                3145728,
+                Checksums::fletcher(vec![1]),
+                VOLUME_DATA_KEY_ID,
+            )),
+        ))?;
+        tree.insert(Item::new(
+            ObjectKey::extent(object_id, attr_id, 53248..57344),
+            ObjectValue::Extent(ExtentValue::with_checksum(
+                3145728 + 4096,
+                Checksums::fletcher(vec![2]),
+                VOLUME_DATA_KEY_ID,
+            )),
+        ))?;
+        // Deletions within 4MiB..5MiB coalesce into one 1MiB deletion, while 5MiB..6MiB stays
+        // separate at the 1MiB FuzzyHash bucket boundary.
+        for range in [
+            (4 * bucket)..(4 * bucket + 4096),
+            (4 * bucket + 4096)..(5 * bucket),
+            (5 * bucket)..(6 * bucket),
+        ] {
+            let key = ObjectKey::extent(object_id, attr_id, range);
+            let lower_bound = key.key_for_merge_into();
+            tree.merge_into(Item::new(key, ObjectValue::deleted_extent()), &lower_bound);
+        }
+
+        let layer_set = tree.layer_set();
+        let mut merger = layer_set.merger();
+        let mut minor = LSMTree::<ObjectKey, ObjectValue>::minor_iter(
+            merger.query(Query::FullScan).await?,
+            vec![kept_layer],
+        )
+        .await?;
+        let mut minor_items = Vec::new();
+        while let Some(item) = minor.get() {
+            minor_items.push(item.cloned());
+            minor.advance().await?;
+        }
+        drop(minor);
+        assert_eq!(
+            minor_items,
+            vec![
+                Item::new(
+                    ObjectKey::attribute(object_id, attr_id, AttributeKey::Attribute),
+                    ObjectValue::attribute(bucket, false),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, 12288..20480),
+                    ObjectValue::Extent(ExtentValue::new_raw(1048576, VOLUME_DATA_KEY_ID)),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, 20480..24576),
+                    ObjectValue::Extent(ExtentValue::new_raw(1048576 + 16384, VOLUME_DATA_KEY_ID)),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, 32768..40960),
+                    ObjectValue::Extent(ExtentValue::initialized_overwrite_extent(
+                        2097152,
+                        VOLUME_DATA_KEY_ID,
+                    )),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, 49152..53248),
+                    ObjectValue::Extent(ExtentValue::with_checksum(
+                        3145728,
+                        Checksums::fletcher(vec![1]),
+                        VOLUME_DATA_KEY_ID,
+                    )),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, 53248..57344),
+                    ObjectValue::Extent(ExtentValue::with_checksum(
+                        3145728 + 4096,
+                        Checksums::fletcher(vec![2]),
+                        VOLUME_DATA_KEY_ID,
+                    )),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, (bucket - 8192)..bucket),
+                    ObjectValue::deleted_extent(),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, (4 * bucket)..(5 * bucket)),
+                    ObjectValue::deleted_extent(),
+                ),
+                Item::new(
+                    ObjectKey::extent(object_id, attr_id, (5 * bucket)..(6 * bucket)),
+                    ObjectValue::deleted_extent(),
+                ),
+            ]
+        );
+
+        // Major compaction drops all deleted extents and coalesces the live Raw and Overwrite
+        // extents identically.
+        let mut major =
+            LSMTree::<ObjectKey, ObjectValue>::major_iter(merger.query(Query::FullScan).await?)
+                .await?;
+        let mut major_items = Vec::new();
+        while let Some(item) = major.get() {
+            major_items.push(item.cloned());
+            major.advance().await?;
+        }
+        assert_eq!(major_items, minor_items[..minor_items.len() - 3]);
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_extent_coalescing_splits_at_bucket_boundaries() -> Result<(), Error> {
+        let object_id = 1;
+        let attr_id = AttributeId::TEST_ID;
+        let bucket = BlockSize::SIZE_1MIB.get();
+        let chunk = 64 * 1024;
+        let tree = LSMTree::new(merge, None);
+
+        // Merge 4 MiB of 64 KiB contiguous `Raw` writes (`0..4 MiB`) and 4 MiB of 64 KiB
+        // contiguous `Overwrite` writes (`4 MiB..8 MiB`). Each 1 MiB `FuzzyHash` bucket should
+        // coalesce its 16 chunks into a single 1 MiB extent without crossing bucket boundaries.
+        for offset in (0..(4 * bucket)).step_by(chunk as usize) {
+            let key = ObjectKey::extent(object_id, attr_id, offset..(offset + chunk));
+            let lower_bound = key.key_for_merge_into();
+            tree.merge_into(
+                Item::new(
+                    key,
+                    ObjectValue::Extent(ExtentValue::new_raw(bucket + offset, VOLUME_DATA_KEY_ID)),
+                ),
+                &lower_bound,
+            );
+        }
+        for offset in ((4 * bucket)..(8 * bucket)).step_by(chunk as usize) {
+            let key = ObjectKey::extent(object_id, attr_id, offset..(offset + chunk));
+            let lower_bound = key.key_for_merge_into();
+            tree.merge_into(
+                Item::new(
+                    key,
+                    ObjectValue::Extent(ExtentValue::initialized_overwrite_extent(
+                        bucket + offset,
+                        VOLUME_DATA_KEY_ID,
+                    )),
+                ),
+                &lower_bound,
+            );
+        }
+
+        let layer_set = tree.layer_set();
+        assert_eq!(layer_set.sum_len(), 8);
+        let mut merger = layer_set.merger();
+        let mut compacted =
+            LSMTree::<ObjectKey, ObjectValue>::major_iter(merger.query(Query::FullScan).await?)
+                .await?;
+        let mut items = Vec::new();
+        while let Some(item) = compacted.get() {
+            items.push(item.cloned());
+            compacted.advance().await?;
+        }
+        assert_eq!(items.len(), 8);
+        for (i, item) in items.iter().enumerate() {
+            let i = i as u64;
+            assert_eq!(
+                item.key,
+                ObjectKey::extent(object_id, attr_id, (i * bucket)..((i + 1) * bucket))
+            );
+        }
+
+        // Write a persistent layer sized with `layer_set.sum_len()` (just like `tree::flush`).
+        // Because every extent spans at most 1 `FuzzyHash` bucket, `maybe_contains_key` checks
+        // them normally (never `RangeKeyTooLarge`) and the 8-item Bloom filter is not saturated.
+        let layer = write_persistent_layer_with_num_items(&items, layer_set.sum_len()).await;
+        for item in &items {
+            assert_eq!(layer.maybe_contains_key(&item.key), MaybeContainsKey::Maybe);
+        }
+        let false_positives = (0..64u64)
+            .filter(|i| {
+                let key = ObjectKey::extent(999, attr_id, (i * bucket)..((i + 1) * bucket));
+                layer.maybe_contains_key(&key) != MaybeContainsKey::False
+            })
+            .count();
+        assert!(false_positives <= 4, "unexpectedly high false positives: {false_positives}/64");
+        Ok(())
     }
 }

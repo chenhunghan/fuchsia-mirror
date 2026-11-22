@@ -13,7 +13,7 @@ use cm_rust::{
     UseServiceDecl, UseSource, UseStorageDecl,
 };
 use cm_types::{Name, Path, RelativePath};
-use fidl_fuchsia_sys2 as fsys;
+use fidl_fuchsia_sys2_common as fsys;
 use from_enum::FromEnum;
 use moniker::{ChildName, ExtendedMoniker, Moniker};
 use std::fmt;
@@ -590,6 +590,17 @@ pub enum ComponentCapability {
     Config(Name),
 }
 
+// `ComponentCapability` is retained across capability sources in component sandboxes; `Config`
+// stores only `Name` so `ComponentCapability` stays bounded by `OfferDecl`'s size.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<ComponentCapability>() <= 88);
+};
+#[cfg(all(target_pointer_width = "64", fuchsia_api_level_at_least = "HEAD"))]
+const _: () = {
+    assert!(std::mem::size_of::<ComponentCapability>() == 88);
+};
+
 #[cfg(feature = "serde")]
 mod serde_config_name {
     use cm_types::Name;
@@ -860,7 +871,7 @@ pub type BuiltinCapabilities = Vec<CapabilityDecl>;
 mod tests {
     use super::*;
     use cm_rust::StorageDirectorySource;
-    use fidl_fuchsia_component_decl as fdecl;
+    use fidl_fuchsia_component_decl_common as fdecl;
 
     #[test]
     fn capability_type_name() {

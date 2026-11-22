@@ -6,19 +6,28 @@ load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
+    "fx_test_component",
 )
 load(
     "//build/bazel/rules/components:structured_config.bzl",
     "fuchsia_structured_config_rust_lib",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":debug-dash-launcher-unittests"],
+    visibility = ["//src/sys:__pkg__"],
+)
 
 exports_files(
     [
@@ -94,19 +103,57 @@ rustc_binary(
     ],
 )
 
-# `debug-dash-launcher-unittests` remains in BUILD.gn above the bazel2gn
-# sentinel because it packages `//src/bringup/bin/ptysvc:component` (which is
-# GN-only). `meta/debug_dash_launcher_unittests.cml` expects
+# `meta/debug_dash_launcher_unittests.cml` expects
 # `bin/debug_dash_launcher_bin_test`.
 rustc_test(
     name = "bin_test",
     build_flags = ["//build/config/rust:bootfs"],
     crate = ":bin",
     crate_name = "debug_dash_launcher_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//third_party/rust_crates/vendor:assert_matches",
         "//third_party/rust_crates/vendor:tempfile",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged_bin",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "debug_dash_launcher_bin_test",
+)
+
+fx_component_manifest(
+    name = "debug-dash-launcher-unittests_manifest",
+    testonly = True,
+    component_name = "debug-dash-launcher-unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/debug_dash_launcher_unittests.cml",
+)
+
+fx_test_component(
+    name = "debug-dash-launcher-unittests_component",
+    compiled_manifest = ":debug-dash-launcher-unittests_manifest",
+    test_type = "system",
+    deps = [":bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "debug-dash-launcher-unittests_package",
+    package_name = "debug-dash-launcher-unittests",
+    components = ["//src/bringup/bin/ptysvc:component"],
+    test_components = [":debug-dash-launcher-unittests_component"],
+)
+
+fx_test(
+    name = "debug-dash-launcher-unittests",
+    package = ":debug-dash-launcher-unittests_package",
 )
 
 fx_packaged_binary(

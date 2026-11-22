@@ -75,7 +75,7 @@ std::string CanonicalizeSettingName(const std::string& input) {
   std::string output;
   output.reserve(input.size());
   for (char c : input)
-    output.push_back(tolower(c));
+    output.push_back(static_cast<char>(tolower(static_cast<unsigned char>(c))));
   return output;
 }
 

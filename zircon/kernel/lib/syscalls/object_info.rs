@@ -4,16 +4,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::arch_rs::max_num_cpus;
 use crate::kernel::mp::is_cpu_online;
 use crate::kernel::percpu::PerCpu;
 use crate::kernel::scheduler::get_projected_cpu_stats;
 use crate::object::{
-    BusTransactionInitiatorDispatcher, ClockDispatcher, Dispatcher, HandleValue,
-    InterruptDispatcher, IoBufferDispatcher, JobDispatcher, MsiDispatcher, ProcessDispatcher,
-    ResourceDispatcher, SocketDispatcher, StreamDispatcher, ThreadDispatcher, TimerDispatcher,
-    VcpuDispatcher, VmAddressRegionDispatcher, VmObjectDispatcher, VmarMapsInfoWriter,
-    VmoInfoWriter, get_vmar_maps, validate_ranged_resource,
+    BusTransactionInitiatorDispatcher, ClockDispatcher, Dispatcher, DispatcherOps, HandleValue,
+    InterruptDispatcher, IoBufferDispatcher, JobDispatcher, JobEnumerator, MsiDispatcher,
+    ProcessDispatcher, ProcessState, ResourceDispatcher, SocketDispatcher, StreamDispatcher,
+    ThreadDispatcher, TimerDispatcher, VcpuDispatcher, VmAddressRegionDispatcher,
+    VmObjectDispatcher, VmarMapsInfoWriter, VmoInfoWriter, get_vmar_maps, validate_ranged_resource,
 };
 use crate::user_copy::UserOutPtr;
 use crate::vm::memory_stats::{
@@ -84,6 +83,79 @@ impl<T: MapsInfoVersion + IntoBytes + Immutable> VmarMapsInfoWriter
 
     fn add_offset(&mut self, offset: usize) {
         self.base_offset += offset;
+    }
+}
+
+/// Gathers the koids of a job's descendants.
+struct SimpleJobEnumerator {
+    /// Whether to record child job koids (`true`) or child process koids (`false`).
+    jobs: bool,
+    /// Destination user buffer for recorded koids.
+    ptr: UserOutPtr<zx_koid_t>,
+    /// Maximum number of koids that fit in `ptr`.
+    max: usize,
+
+    /// Number of koids copied to `ptr` so far.
+    count: usize,
+    /// Total number of matching koids visited so far.
+    avail: usize,
+}
+
+impl SimpleJobEnumerator {
+    /// If `jobs` is true, only records job koids; otherwise, only
+    /// records process koids.
+    fn new(ptr: UserOutPtr<zx_koid_t>, max: usize, jobs: bool) -> Self {
+        Self { jobs, ptr, max, count: 0, avail: 0 }
+    }
+
+    /// Returns the total number of matching koids visited.
+    fn get_avail(&self) -> usize {
+        self.avail
+    }
+
+    /// Returns the number of koids written to user memory.
+    fn get_count(&self) -> usize {
+        self.count
+    }
+
+    /// Counts `koid` as available and copies it to user memory if space remains.
+    fn record_koid(&mut self, koid: zx_koid_t) -> bool {
+        self.avail += 1;
+        if self.count < self.max {
+            // Accumulating batches could perform fewer user copies.
+            if self.ptr.element_offset(self.count).copy_to_user(&koid).is_err() {
+                return false;
+            }
+            self.count += 1;
+        }
+        true
+    }
+}
+
+impl JobEnumerator for SimpleJobEnumerator {
+    fn on_job(&mut self, job: &JobDispatcher) -> bool {
+        if !self.jobs {
+            return true;
+        }
+        self.record_koid(job.get_koid())
+    }
+
+    fn on_process(&mut self, proc: &ProcessDispatcher) -> bool {
+        if self.jobs {
+            return true;
+        }
+        // Hide any processes that are both still in the INITIAL state, and have a handle count of
+        // 0. Such processes have not yet had their zx_process_create call complete yet, and making
+        // it visible and allowing handles to be constructed via object_get_child, could spuriously
+        // destroy it. Once a process either has a handle, or has left the initial state, handles
+        // can freely be constructed since any additional on_zero_handles invocations will be
+        // idempotent.
+        // TODO(https://fxbug.dev/42175105): Consider whether long term needing to allow multiple
+        // on_zero_handles transitions is the correct strategy.
+        if proc.process_state() == ProcessState::Initial && proc.current_handle_count() == 0 {
+            return true;
+        }
+        self.record_koid(proc.get_koid())
     }
 }
 
@@ -366,12 +438,13 @@ pub fn sys_object_get_info(
                 ZX_RIGHT_ENUMERATE,
             )?;
             // Don't recurse; we only want the job's direct children.
-            let max =
-                if buffer_size == 0 { 0 } else { buffer_size / core::mem::size_of::<zx_koid_t>() };
+            let max = buffer_size / core::mem::size_of::<zx_koid_t>();
             let is_jobs = topic == ZX_INFO_JOB_CHILDREN;
-            let (count, avail_count) =
-                job.enumerate_children(buffer.reinterpret(), max, is_jobs)?;
-            actual_avail_result(count, avail_count, actual, avail)?;
+            let mut sje = SimpleJobEnumerator::new(buffer.reinterpret(), max, is_jobs);
+            if !job.enumerate_children(&mut sje) {
+                return Err(Status::INVALID_ARGS);
+            }
+            actual_avail_result(sje.get_count(), sje.get_avail(), actual, avail)?;
             Ok(())
         }
         ZX_INFO_THREAD => single_record_info!(ThreadDispatcher, get_info_for_userspace),
@@ -409,7 +482,7 @@ pub fn sys_object_get_info(
                 } else if let Some(process) = dispatcher.downcast::<ProcessDispatcher>() {
                     process.get_runtime_stats()
                 } else if let Some(thread) = dispatcher.downcast::<ThreadDispatcher>() {
-                    thread.get_runtime_stats()
+                    thread.get_compensated_task_runtime_stats().into()
                 } else {
                     return Err(Status::WRONG_TYPE);
                 };
@@ -536,7 +609,7 @@ pub fn sys_object_get_info(
         ZX_INFO_CPU_STATS => {
             validate_ranged_resource(handle, ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_INFO_BASE, 1)?;
 
-            let num_cpus = max_num_cpus() as usize;
+            let num_cpus = PerCpu::processor_count();
             let num_space_for = buffer_size / core::mem::size_of::<zx_info_cpu_stats_t>();
             let num_to_copy = num_cpus.min(num_space_for);
             // build an alias to the output buffer that is in units of the cpu stat structure
@@ -587,7 +660,7 @@ pub fn sys_object_get_info(
 
             if buffer.is_null() && avail.is_null() && !actual.is_null() {
                 // Optimization for callers which call twice, the first time just to know the size.
-                return actual.write(up.handle_table().handle_count() as usize);
+                return actual.write(process.handle_table().handle_count() as usize);
             }
             let handle_info = process.handle_table().get_handle_info()?;
 

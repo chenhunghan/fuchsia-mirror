@@ -6,7 +6,6 @@
 
 #include "vm/vm_cow_pages_ffi.h"
 
-#include <assert.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
@@ -37,11 +36,6 @@ FFI_ALWAYS_INLINE void* cpp_vm_cow_pages_get_ref_counted(const VmCowPages* cow) 
 }
 
 FFI_ALWAYS_INLINE void cpp_vm_cow_pages_free(VmCowPages* cow) { delete cow; }
-
-FFI_ALWAYS_INLINE VmCowPages* cpp_vm_cow_pages_debug_get_parent(VmCowPages* cow) {
-  auto parent = cow->DebugGetParent();
-  return fbl::ExportToRawPtr(&parent);
-}
 
 FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_dedup_zero_page(VmCowPages* cow, vm_page_t* page,
                                                         uint64_t offset) {
@@ -74,12 +68,6 @@ FFI_ALWAYS_INLINE DiscardableVmoTracker* cpp_vm_cow_pages_discardable_tracker(
   return cow->discardable_tracker_.get();
 }
 
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_debug_lookup_readable(
-    VmCowPages* cow, VmCowRange range, void* ctx, cpp_vm_cow_pages_lookup_readable_fn callback) {
-  return cow->DebugLookupReadable(
-      range, [ctx, callback](uint64_t offset, paddr_t pa) { return callback(ctx, offset, pa); });
-}
-
 FFI_ALWAYS_INLINE void* cpp_vm_cow_pages_get_lock(const VmCowPages* cow) { return cow->lock(); }
 
 FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_call_lookup_fn(void* lookup_fn, uint64_t offset,
@@ -95,16 +83,6 @@ FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_call_dirty_range_fn(void* dirty_r
       range_offset, range_len, range_is_zero);
 }
 
-FFI_ALWAYS_INLINE void cpp_vm_cow_pages_deferred_ops_init_page_source_lock(
-    ffi::Uninitialized<DeferredPageSourceLock>* lock_storage, VmCowPages* cow) {
-  cow->InitDeferredPageSourceLock(lock_storage);
-}
-
-FFI_ALWAYS_INLINE void cpp_vm_cow_pages_deferred_ops_destroy_page_source_lock(
-    DeferredPageSourceLock* lock_storage) {
-  ktl::destroy_at(lock_storage);
-}
-
 // The range is passed as (offset, len) rather than a VmCowRange by value: Clang lowers the 2-field
 // struct to {i64, i64} while rustc emits [2 x i64], and the mismatch stops ThinLTO from inlining
 // this shim on x86_64.
@@ -114,90 +92,16 @@ FFI_ALWAYS_INLINE void cpp_vm_cow_pages_range_change_update_cow_children(
   VmCowPages::RangeChangeUpdateCowChildren(VmCowPages::LockedPtr(cow), VmCowRange(offset, len), op);
 }
 
-FFI_ALWAYS_INLINE void cpp_vm_cow_pages_lookup_cursor_destroy(
-    VmCowPagesLookupCursorResult* cursor) {
-  ktl::destroy_at(cursor);
+FFI_ALWAYS_INLINE void cpp_vm_cow_pages_resize_update_child_limits(VmCowPages* cow, uint64_t s) {
+  cow->ResizeUpdateChildLimits(s);
 }
 
-FFI_ALWAYS_INLINE VmCowPages::LookupCursor* cpp_vm_cow_pages_lookup_cursor_result_value(
-    VmCowPagesLookupCursorResult* cursor) {
-  DEBUG_ASSERT(cursor->result.is_ok());
-  if (!cursor->result.is_ok()) {
-    __builtin_unreachable();
-  }
-  return &*cursor->result;
-}
-
-FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_lookup_cursor_lock_is_held(
-    const VmCowPagesLookupCursorResult* cursor) {
-  DEBUG_ASSERT(cursor->result.is_ok());
-  if (!cursor->result.is_ok()) {
-    __builtin_unreachable();
-  }
-  return cursor->result->lock_ref().lock().IsHeld();
-}
-
-FFI_ALWAYS_INLINE void cpp_vm_cow_pages_lookup_cursor_disable_mark_accessed(
-    VmCowPages::LookupCursor* cursor) {
-  cursor->DisableMarkAccessed();
-}
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_lookup_cursor_require_owned_page(
-    VmCowPages::LookupCursor* cursor, bool will_write, uint64_t max_request_pages,
-    VmCowPages::DeferredOps* deferred, MultiPageRequest* page_request, vm_page_t** out_page,
-    bool* out_writable) TA_NO_THREAD_SAFETY_ANALYSIS {
-  auto result = cursor->RequireOwnedPage(will_write, max_request_pages, *deferred, page_request);
-  if (unlikely(result.is_error())) {
-    return result.error_value();
-  }
-  *out_page = result->page;
-  *out_writable = result->writable;
-  return ZX_OK;
-}
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_lookup_cursor_require_page(
-    VmCowPages::LookupCursor* cursor, bool will_write, uint64_t max_request_pages,
-    VmCowPages::DeferredOps* deferred, MultiPageRequest* page_request, vm_page_t** out_page,
-    bool* out_writable) TA_NO_THREAD_SAFETY_ANALYSIS {
-  __UNINITIALIZED auto result =
-      cursor->RequirePage(will_write, max_request_pages, *deferred, page_request);
-  if (unlikely(result.is_error())) {
-    return result.error_value();
-  }
-  *out_page = result->page;
-  *out_writable = result->writable;
-  return ZX_OK;
-}
-
-FFI_ALWAYS_INLINE vm_page_t* cpp_vm_cow_pages_lookup_cursor_maybe_page(
-    VmCowPages::LookupCursor* cursor, bool will_write) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return cursor->MaybePage(will_write);
-}
-
-FFI_ALWAYS_INLINE uint64_t cpp_vm_cow_pages_lookup_cursor_skip_missing_pages(
-    VmCowPages::LookupCursor* cursor) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return cursor->SkipMissingPages();
-}
-
-FFI_ALWAYS_INLINE uint64_t cpp_vm_cow_pages_lookup_cursor_if_exist_pages(
-    VmCowPages::LookupCursor* cursor, bool will_write, uint64_t max_pages,
-    paddr_t* paddrs) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return cursor->IfExistPages(will_write, max_pages, paddrs);
-}
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_add_new_pages_locked(
-    VmCowPages* cow, uint64_t start_offset, VmPageDoublyLinkedList* pages,
-    VmCowPages::CanOverwriteSlot overwrite, bool zero,
-    VmCowPages::DeferredOps* deferred) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return cow->AddNewPagesLocked(start_offset, pages, overwrite, zero, deferred);
-}
-
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_zero_pages_locked(
-    VmCowPages* cow, VmCowRange range, bool dirty_track, VmCowPages::DeferredOps* deferred,
-    MultiPageRequest* page_request, uint64_t* out_zeroed_bytes) TA_NO_THREAD_SAFETY_ANALYSIS {
-  auto [status, zeroed_bytes] = cow->ZeroPagesLocked(range, dirty_track, *deferred, page_request);
-  *out_zeroed_bytes = zeroed_bytes;
-  return status;
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_cow_pages_replace_page_locked(
+    VmCowPages* cow, vm_page_t* before_page, uint64_t offset, bool with_loaned,
+    vm_page_t** after_page, void* deferred,
+    AnonymousPageRequest* page_request) TA_NO_THREAD_SAFETY_ANALYSIS {
+  return cow->ReplacePageLocked(before_page, offset, with_loaned, after_page,
+                                *static_cast<VmCowPages::DeferredOps*>(deferred), page_request);
 }
 
 FFI_ALWAYS_INLINE zx_status_t
@@ -205,14 +109,6 @@ cpp_vm_cow_pages_supply_pages_locked(VmCowPages* cow, VmCowRange range, VmPageSp
                                      SupplyOptions options, VmCowPages::DeferredOps* deferred,
                                      MultiPageRequest* page_request) TA_NO_THREAD_SAFETY_ANALYSIS {
   return cow->SupplyPagesLocked(range, pages, options, *deferred, page_request);
-}
-
-FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_can_borrow(const VmCowPages* cow) {
-  return cow->can_borrow();
-}
-
-FFI_ALWAYS_INLINE bool cpp_vm_cow_pages_can_evict(const VmCowPages* cow) {
-  return cow->can_evict();
 }
 
 FFI_ALWAYS_INLINE VmCowPages* cpp_vm_cow_pages_upgrade_from_raw(VmCowPages* cow) {
@@ -251,14 +147,6 @@ FFI_ALWAYS_INLINE void* cpp_priority_changer_lock(const PriorityChanger* pc)
 
 FFI_ALWAYS_INLINE void cpp_vm_cow_pages_debug_dump_reclaim_counters() {
   VmCowPages::DebugDumpReclaimCounters();
-}
-
-FFI_ALWAYS_INLINE PageSourceType cpp_vm_cow_pages_page_source_type(const VmCowPages* cow) {
-  return cow->page_source_type();
-}
-
-FFI_ALWAYS_INLINE PageSource* cpp_vm_cow_pages_page_source(const VmCowPages* cow) {
-  return cow->page_source_.get();
 }
 
 FFI_ALWAYS_INLINE VmObjectPaged* cpp_vm_cow_pages_get_paged_backlink_locked(const VmCowPages* cow)

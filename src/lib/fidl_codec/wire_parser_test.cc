@@ -797,12 +797,12 @@ TEST_DECODE_WIRE(ArrayStruct2, ArrayStruct2,
                  std::array{SmallUnevenStructFromVals(1, 2), SmallUnevenStructFromVals(2, 4),
                             SmallUnevenStructFromVals(3, 6)})
 
-// Union and XUnion tests
+// Strict and flexible union tests
 
 namespace {
 
 using isu = test::fidlcodec::examples::IntStructUnion;
-using xisu = test::fidlcodec::examples::IntStructXunion;
+using xisu = test::fidlcodec::examples::IntStructFlexibleUnion;
 using u8u16struct = test::fidlcodec::examples::U8U16UnionStructType;
 
 template <class T>
@@ -841,10 +841,21 @@ u8u16struct GetU8U16UnionStruct(int8_t i) {
   return s;
 }
 
+std::string IntVariantFieldPretty(const std::string& name, int u) {
+  const size_t line_length = std::string("  isu: test.fidlcodec.examples/").size() + name.size() +
+                             std::string(" = { variant_i: int32 = ").size() +
+                             std::to_string(u).size() + std::string(" }").size();
+  if (line_length > 80) {
+    return "  isu: #gre#test.fidlcodec.examples/" + name + "#rst# = {\n    " +
+           ValueToPretty("variant_i", "int32", u) + "\n  }\n";
+  }
+  return "  isu: #gre#test.fidlcodec.examples/" + name + "#rst# = { " +
+         ValueToPretty("variant_i", "int32", u) + " }\n";
+}
+
 std::string IntUnionIntPretty(const std::string& name, int u, int v) {
   std::string result = "{\n";
-  result += "  isu: #gre#test.fidlcodec.examples/" + name + "#rst# = { " +
-            ValueToPretty("variant_i", "int32", u) + " }\n";
+  result += IntVariantFieldPretty(name, u);
   result += "  " + ValueToPretty("i", "int32", v) + "\n";
   result += "}";
   return result;
@@ -868,8 +879,7 @@ std::string StructUnionIntPretty(const std::string& name, const char* u1, const 
 std::string IntIntUnionPretty(const std::string& name, int v, int u) {
   std::string result = "{\n";
   result += "  " + ValueToPretty("i", "int32", v) + "\n";
-  result += "  isu: #gre#test.fidlcodec.examples/" + name + "#rst# = { " +
-            ValueToPretty("variant_i", "int32", u) + " }\n";
+  result += IntVariantFieldPretty(name, u);
   result += "}";
   return result;
 }
@@ -953,29 +963,30 @@ TEST_DECODE_WIRE(NullableUnionIntFirstStruct, NullableUnionIntFirst,
                  IntStructUnionPretty("IntStructUnion", 1, "harpo", "chico"), 1,
                  GetStructUnionPtr<isu>("harpo", "chico"))
 
-TEST_DECODE_WIRE(XUnionInt, XUnion, R"({"isu":{"variant_i":"42"}, "i" : "1"})",
-                 IntUnionIntPretty("IntStructXunion", 42, 1), GetIntUnion<xisu>(42), 1)
+TEST_DECODE_WIRE(FlexibleUnionInt, FlexibleUnion, R"({"isu":{"variant_i":"42"}, "i" : "1"})",
+                 IntUnionIntPretty("IntStructFlexibleUnion", 42, 1), GetIntUnion<xisu>(42), 1)
 
-TEST_DECODE_WIRE(XUnionStruct, XUnion,
+TEST_DECODE_WIRE(FlexibleUnionStruct, FlexibleUnion,
                  R"({"isu":{"variant_tss":{"value1":"harpo","value2":"chico"}}, "i":"1"})",
-                 StructUnionIntPretty("IntStructXunion", "harpo", "chico", 1),
+                 StructUnionIntPretty("IntStructFlexibleUnion", "harpo", "chico", 1),
                  GetStructUnion<xisu>("harpo", "chico"), 1)
 
-TEST_DECODE_WIRE(NullableXUnionInt, NullableXUnion, R"({"isu":{"variant_i":"42"}, "i" : "1"})",
-                 IntUnionIntPretty("IntStructXunion", 42, 1), GetIntUnionPtr<xisu>(42), 1)
+TEST_DECODE_WIRE(NullableFlexibleUnionInt, NullableFlexibleUnion,
+                 R"({"isu":{"variant_i":"42"}, "i" : "1"})",
+                 IntUnionIntPretty("IntStructFlexibleUnion", 42, 1), GetIntUnionPtr<xisu>(42), 1)
 
-TEST_DECODE_WIRE(NullableXUnionStruct, NullableXUnion,
+TEST_DECODE_WIRE(NullableFlexibleUnionStruct, NullableFlexibleUnion,
                  R"({"isu":{"variant_tss":{"value1":"harpo","value2":"chico"}}, "i":"1"})",
-                 StructUnionIntPretty("IntStructXunion", "harpo", "chico", 1),
+                 StructUnionIntPretty("IntStructFlexibleUnion", "harpo", "chico", 1),
                  GetStructUnionPtr<xisu>("harpo", "chico"), 1)
 
-TEST_DECODE_WIRE(NullableXUnionIntFirstInt, NullableXUnionIntFirst,
+TEST_DECODE_WIRE(NullableFlexibleUnionIntFirstInt, NullableFlexibleUnionIntFirst,
                  R"({"i" : "1", "isu":{"variant_i":"42"}})",
-                 IntIntUnionPretty("IntStructXunion", 1, 42), 1, GetIntUnionPtr<xisu>(42))
+                 IntIntUnionPretty("IntStructFlexibleUnion", 1, 42), 1, GetIntUnionPtr<xisu>(42))
 
-TEST_DECODE_WIRE(NullableXUnionIntFirstStruct, NullableXUnionIntFirst,
+TEST_DECODE_WIRE(NullableFlexibleUnionIntFirstStruct, NullableFlexibleUnionIntFirst,
                  R"({"i": "1", "isu":{"variant_tss":{"value1":"harpo","value2":"chico"}}})",
-                 IntStructUnionPretty("IntStructXunion", 1, "harpo", "chico"), 1,
+                 IntStructUnionPretty("IntStructFlexibleUnion", 1, "harpo", "chico"), 1,
                  GetStructUnionPtr<xisu>("harpo", "chico"))
 
 TEST_DECODE_WIRE(
@@ -1051,7 +1062,7 @@ namespace {
 
 using uuu = test::fidlcodec::examples::U8U16Union;
 using uuur = test::fidlcodec::examples::U8U16UnionReserved;
-using uux = test::fidlcodec::examples::U8U16Xunion;
+using uuf = test::fidlcodec::examples::U8U16FlexibleUnion;
 
 template <class T>
 T GetUInt8Union(uint8_t i) {
@@ -1100,13 +1111,14 @@ TEST_DECODE_WIRE(ShortUnionReserved16, ShortUnionReserved,
                  ShortUnionPretty("U8U16UnionReserved", "variant_u16", "uint16", 1024, 1),
                  GetUInt16Union<uuur>(1024), 1)
 
-TEST_DECODE_WIRE(ShortXUnion8, ShortXUnion, R"({"u":{"variant_u8":"16"}, "i":"1"})",
-                 ShortUnionPretty("U8U16Xunion", "variant_u8", "uint8", 16, 1),
-                 GetUInt8Union<uux>(16), 1)
+TEST_DECODE_WIRE(ShortFlexibleUnion8, ShortFlexibleUnion, R"({"u":{"variant_u8":"16"}, "i":"1"})",
+                 ShortUnionPretty("U8U16FlexibleUnion", "variant_u8", "uint8", 16, 1),
+                 GetUInt8Union<uuf>(16), 1)
 
-TEST_DECODE_WIRE(ShortXUnion16, ShortXUnion, R"({"u":{"variant_u16":"1024"}, "i":"1"})",
-                 ShortUnionPretty("U8U16Xunion", "variant_u16", "uint16", 1024, 1),
-                 GetUInt16Union<uux>(1024), 1)
+TEST_DECODE_WIRE(ShortFlexibleUnion16, ShortFlexibleUnion,
+                 R"({"u":{"variant_u16":"1024"}, "i":"1"})",
+                 ShortUnionPretty("U8U16FlexibleUnion", "variant_u16", "uint16", 1024, 1),
+                 GetUInt16Union<uuf>(1024), 1)
 
 // Enum Tests
 
@@ -1665,8 +1677,7 @@ TEST_F(WireParserTest, BadSchemaPrintHex) {
   ],
   "external_struct_declarations": [],
   "table_declarations": [],
-  "union_declarations": [],
-  "xunion_declarations": []
+  "union_declarations": []
 })FIDL";
   LibraryReadError err;
   LibraryLoader loader;

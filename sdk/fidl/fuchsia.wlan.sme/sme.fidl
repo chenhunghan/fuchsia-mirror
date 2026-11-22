@@ -4,6 +4,7 @@
 @available(added=HEAD)
 library fuchsia.wlan.sme;
 
+using fuchsia.power.system;
 using fuchsia.wlan.common;
 using fuchsia.wlan.ieee80211 as ieee80211;
 using fuchsia.wlan.internal;
@@ -67,6 +68,8 @@ type DisconnectMlmeEventName = strict enum {
     ROAM_REQUEST = 6;
     // Roam confirmation reported failure (or was malformed), causing the disconnect.
     ROAM_CONFIRMATION = 7;
+    /// Two Michael MIC failures within 60 seconds triggered TKIP countermeasures.
+    MICHAEL_MIC_FAILURE_INDICATION = 8;
 };
 
 type DisconnectSource = strict union {
@@ -207,19 +210,25 @@ type DisconnectInfo = struct {
 
 closed protocol ConnectTransaction {
     /// Return the result of the initial connection request or later SME-initiated reconnection.
-    strict -> OnConnectResult(struct {
+    strict -> OnConnectResult(resource struct {
         result ConnectResult;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     /// Notify that the client has disconnected. If DisconnectInfo indicates that SME is
     /// attempting to reconnect by itself, there's not need for caller to intervene for now.
-    strict -> OnDisconnect(struct {
+    strict -> OnDisconnect(resource struct {
         info DisconnectInfo;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     /// Report the result of a roam attempt.
-    strict -> OnRoamResult(struct {
+    strict -> OnRoamResult(resource struct {
         result RoamResult;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     /// Give an update of the latest signal report.
@@ -228,8 +237,10 @@ closed protocol ConnectTransaction {
     });
 
     /// Report that the monitored RSSI crossed a configured threshold.
-    strict -> OnRssiThresholdBreached(struct {
+    strict -> OnRssiThresholdBreached(resource struct {
         cur_rssi_dbm int8;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 
     /// Give an update of the channel switching.
@@ -245,6 +256,8 @@ closed protocol ScheduledScanTransaction {
     /// and all results have been sent for that individual scan.
     strict -> OnScheduledScanMatchesAvailable(resource struct {
         scan_results zx.Handle:VMO;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        wake_lease fuchsia.power.system.LeaseToken:optional;
     });
 };
 
@@ -371,7 +384,7 @@ closed protocol ClientSme {
 
 type ApConfig = struct {
     ssid ieee80211.Ssid;
-    password vector<uint8>:64;
+    authentication fuchsia.wlan.internal.Authentication;
     radio_cfg RadioConfig;
 };
 
@@ -438,10 +451,32 @@ type LegacyPrivacySupport = struct {
     wpa1_supported bool;
 };
 
+/// Size in bytes of the per-boot salt used to redact network identifiers.
+/// Matches `fuchsia.diagnostics/SALT_SIZE`.
+const NETWORK_IDENTIFIER_SALT_SIZE uint32 = 32;
+
+/// How the SME redacts network identifiers (MAC addresses, BSSIDs and SSIDs)
+/// in its logs and Inspect.
+type NetworkIdentifierRedaction = flexible union {
+    /// Identifiers are masked: MAC addresses and BSSIDs keep their OUI and the
+    /// remaining octets are zeroed, and SSIDs are replaced by an all-zero
+    /// digest. Used when redaction is enabled but no salt is available.
+    1: masked struct {};
+    /// Identifiers are replaced by hashes keyed by this per-boot salt, so the
+    /// same identifier is redacted identically by every component.
+    2: salted array<uint8, NETWORK_IDENTIFIER_SALT_SIZE>;
+};
+
 closed protocol UsmeBootstrap {
     strict Start(resource struct {
         generic_sme_server server_end:GenericSme;
+        /// Platform configuration values for the SME, which runs in the WLAN
+        /// driver host and cannot read component configuration directly, are
+        /// passed from wlandevicemonitor here.
         legacy_privacy_support LegacyPrivacySupport;
+        /// How the SME redacts network identifiers. Absent when redaction is
+        /// disabled, in which case identifiers are logged unredacted.
+        network_identifier_redaction NetworkIdentifierRedaction:optional;
     }) -> (resource struct {
         inspect_vmo zx.Handle:VMO;
     });

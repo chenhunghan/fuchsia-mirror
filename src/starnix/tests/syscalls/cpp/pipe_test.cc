@@ -248,16 +248,11 @@ TEST(PipeTest, OpenFifoRo_NotBlocking) {
   ASSERT_TRUE(fifo.is_valid());
 }
 
-void on_alarm(int) {}
-
 TEST(PipeTest, OpenFifoBlock) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
     std::string path = CreateNewFifo();
-    struct sigaction act;
-    act.sa_handler = on_alarm;
-    act.sa_flags = 0;
-    sigaction(SIGALRM, &act, nullptr);
+    test_helper::ScopedSigAction scoped_alarm(SIGALRM, [](int) {});
     alarm(1);
     int fd = open(path.c_str(), O_RDONLY);
     ASSERT_EQ(fd, -1);
@@ -588,22 +583,19 @@ TEST(PipeTest, SpliceValidationAndRlimitFsize) {
   // 1. Non-null offset pointers on non-pipe non-seekable descriptors (such as sockets) must return
   // EFAULT for unmapped pointers and EINVAL for valid pointers, rather than ESPIPE.
   {
-    int sock_fds[2];
-    SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
-    fbl::unique_fd sock_rd(sock_fds[0]);
-    fbl::unique_fd sock_wr(sock_fds[1]);
+    test_helper::ScopedSocketPair socks(SOCK_STREAM);
     test_helper::ScopedPipe pipe(O_NONBLOCK);
 
     loff_t valid_offset = 0;
     loff_t* bad_offset = reinterpret_cast<loff_t*>(0x1);
 
-    EXPECT_THAT(splice(sock_rd.get(), &valid_offset, pipe.WriteSide().get(), nullptr, 4, 0),
+    EXPECT_THAT(splice(socks.client_fd(), &valid_offset, pipe.WriteSide().get(), nullptr, 4, 0),
                 SyscallFailsWithErrno(EINVAL));
-    EXPECT_THAT(splice(sock_rd.get(), bad_offset, pipe.WriteSide().get(), nullptr, 4, 0),
+    EXPECT_THAT(splice(socks.client_fd(), bad_offset, pipe.WriteSide().get(), nullptr, 4, 0),
                 SyscallFailsWithErrno(EFAULT));
-    EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, sock_wr.get(), &valid_offset, 4, 0),
+    EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, socks.server_fd(), &valid_offset, 4, 0),
                 SyscallFailsWithErrno(EINVAL));
-    EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, sock_wr.get(), bad_offset, 4, 0),
+    EXPECT_THAT(splice(pipe.ReadSide().get(), nullptr, socks.server_fd(), bad_offset, 4, 0),
                 SyscallFailsWithErrno(EFAULT));
   }
 
@@ -628,9 +620,8 @@ TEST(PipeTest, SpliceValidationAndRlimitFsize) {
     test_helper::ForkHelper helper;
     helper.RunInForkedProcess([] {
       static volatile sig_atomic_t sigxfsz_count = 0;
-      struct sigaction sa = {};
-      sa.sa_handler = [](int) { sigxfsz_count = sigxfsz_count + 1; };
-      SAFE_SYSCALL(sigaction(SIGXFSZ, &sa, nullptr));
+      test_helper::ScopedSigAction scoped_sigxfsz(SIGXFSZ,
+                                                  [](int) { sigxfsz_count = sigxfsz_count + 1; });
 
       test_helper::ScopedTempFD temp_file;
       ASSERT_TRUE(temp_file.is_valid());
@@ -850,37 +841,32 @@ TEST(PipeTest, ZeroLengthIoAndSplicePrecedence) {
 }
 
 TEST(PipeTest, SpliceNonblockSocketEndpoint) {
-  int sock_fds[2];
-  SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
-  fbl::unique_fd sock_rd(sock_fds[0]);
-  fbl::unique_fd sock_wr(sock_fds[1]);
+  test_helper::ScopedSocketPair socks(SOCK_STREAM);
 
   test_helper::ScopedPipe pipe;
 
   // SPLICE_F_NONBLOCK must make splice from an empty blocking socket return EAGAIN immediately
   // without mutating the socket's O_NONBLOCK flag.
-  EXPECT_THAT(splice(sock_rd.get(), nullptr, pipe.WriteSide().get(), nullptr, 4, SPLICE_F_NONBLOCK),
-              SyscallFailsWithErrno(EAGAIN));
-  EXPECT_EQ(fcntl(sock_rd.get(), F_GETFL) & O_NONBLOCK, 0);
+  EXPECT_THAT(
+      splice(socks.client_fd(), nullptr, pipe.WriteSide().get(), nullptr, 4, SPLICE_F_NONBLOCK),
+      SyscallFailsWithErrno(EAGAIN));
+  EXPECT_EQ(fcntl(socks.client_fd(), F_GETFL) & O_NONBLOCK, 0);
 
   // O_NONBLOCK on the pipe write end must also make splice from an empty blocking socket return
   // EAGAIN immediately even when SPLICE_F_NONBLOCK is not passed, without mutating the socket's
   // O_NONBLOCK flag.
   test_helper::ScopedPipe nb_pipe(O_NONBLOCK);
-  EXPECT_THAT(splice(sock_rd.get(), nullptr, nb_pipe.WriteSide().get(), nullptr, 4, 0),
+  EXPECT_THAT(splice(socks.client_fd(), nullptr, nb_pipe.WriteSide().get(), nullptr, 4, 0),
               SyscallFailsWithErrno(EAGAIN));
-  EXPECT_EQ(fcntl(sock_rd.get(), F_GETFL) & O_NONBLOCK, 0);
+  EXPECT_EQ(fcntl(socks.client_fd(), F_GETFL) & O_NONBLOCK, 0);
 }
 
 TEST(PipeTest, SpliceFromSocketReaderClosesMidFlight) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
-    signal(SIGPIPE, SIG_IGN);
+    test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
 
-    int sock_fds[2];
-    SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
-    fbl::unique_fd sock_rd(sock_fds[0]);
-    fbl::unique_fd sock_wr(sock_fds[1]);
+    test_helper::ScopedSocketPair socks(SOCK_STREAM);
 
     test_helper::ScopedPipe pipe;
 
@@ -890,14 +876,14 @@ TEST(PipeTest, SpliceFromSocketReaderClosesMidFlight) {
     ASSERT_EQ(write(pipe.WriteSide().get(), fill.data(), fill.size()), page_size);
 
     const char payload[] = "data";
-    ASSERT_EQ(write(sock_wr.get(), payload, 4), 4);
+    ASSERT_EQ(write(socks.server_fd(), payload, 4), 4);
 
     std::thread closer([&pipe]() {
       usleep(20000);
       pipe.ReadSide().reset();
     });
 
-    EXPECT_THAT(splice(sock_rd.get(), nullptr, pipe.WriteSide().get(), nullptr, 4, 0),
+    EXPECT_THAT(splice(socks.client_fd(), nullptr, pipe.WriteSide().get(), nullptr, 4, 0),
                 SyscallFailsWithErrno(EPIPE));
     closer.join();
   });
@@ -907,7 +893,7 @@ TEST(PipeTest, SpliceFromSocketReaderClosesMidFlight) {
 TEST(PipeTest, TeeAndSplicePipeToPipeEdgeCases) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
-    signal(SIGPIPE, SIG_IGN);
+    test_helper::ScopedSigAction ignore_sigpipe(SIGPIPE, SIG_IGN);
 
     test_helper::ScopedPipe pipe_a;
     test_helper::ScopedPipe pipe_b(O_NONBLOCK);
@@ -942,14 +928,12 @@ TEST(PipeTest, SpliceEofPipeToClosedSocket) {
   test_helper::ScopedPipe pipe;
   pipe.WriteSide().reset();
 
-  int sock_fds[2];
-  SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM, 0, sock_fds));
-  close(sock_fds[0]);
-  fbl::unique_fd sock_wr(sock_fds[1]);
+  test_helper::ScopedSocketPair socks(SOCK_STREAM);
+  socks[0].reset();
 
   // Splicing from an empty pipe with no writers (EOF) returns 0 immediately without invoking
   // write() on the closed destination socket.
-  EXPECT_EQ(splice(pipe.ReadSide().get(), nullptr, sock_wr.get(), nullptr, 16, 0), 0);
+  EXPECT_EQ(splice(pipe.ReadSide().get(), nullptr, socks.server_fd(), nullptr, 16, 0), 0);
 }
 
 TEST(PipeTest, SpliceConcurrentWithReaderPreservesFifoWithoutDuplicates) {

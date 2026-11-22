@@ -24,7 +24,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/component-info.json"
 }
 
 fuchsia_structured_config_cpp_elf_lib("component-config") {
@@ -54,7 +53,6 @@ fuchsia_driver_component("component-suspend-disabled") {
     ":bind",
     ":driver",
   ]
-  info = "meta/component-info.json"
 }
 
 fuchsia_driver_package("pkg") {

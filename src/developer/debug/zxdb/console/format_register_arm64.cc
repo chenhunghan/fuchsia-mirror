@@ -101,7 +101,7 @@ std::vector<OutputBuffer> FormatDBGBCR(const debug::RegisterValue& reg, TextFore
   row.reserve(3);
   row.emplace_back(debug::RegisterIDToString(reg.id), color);
 
-  uint64_t value = reg.GetValue();
+  uint64_t value = static_cast<uint64_t>(reg.GetValue());
   row.emplace_back(to_hex_string(value, 8), color);
 
   row.emplace_back(fxl::StringPrintf("E=%d, PMC=%d, BAS=%d, HMC=%d, SSC=%d, LBN=%d, BT=%d",
@@ -118,7 +118,7 @@ std::vector<OutputBuffer> FormatDBGWCR(const debug::RegisterValue& reg, TextFore
   row.reserve(3);
   row.emplace_back(debug::RegisterIDToString(reg.id), color);
 
-  uint32_t value = reg.GetValue();
+  uint32_t value = static_cast<uint32_t>(reg.GetValue());
   row.emplace_back(to_hex_string(value, 8), color);
 
   row.emplace_back(

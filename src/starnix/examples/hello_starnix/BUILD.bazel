@@ -60,7 +60,6 @@ fx_component(
 
 fx_package(
     name = "hello_starnix",
-    package_name = "hello_starnix",
     components = [":component"],
 )
 
@@ -73,7 +72,7 @@ rustc_binary(
     deps = [
         "//src/lib/diagnostics/reader/rust",
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/lib/component-events",
         "//third_party/rust_crates/vendor:assert_matches",
         "//third_party/rust_crates/vendor:futures",

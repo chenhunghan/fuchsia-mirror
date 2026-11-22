@@ -13,7 +13,7 @@ fx_cc_library(
         "completion.cc",
         "completion_wrapper.cc",
     ],
-    copts = ["-D_ALL_SOURCE"],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    configs = ["//build/config:all_source"],
     implementation_deps = [
         "//zircon/system/ulib/sync",
         "//zircon/system/ulib/sync:sync-cpp",

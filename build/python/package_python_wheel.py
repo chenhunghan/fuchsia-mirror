@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import package_python_binary
 from depfile import DepFile
 
 
@@ -70,14 +71,28 @@ def main() -> int:
         str, list[str]
     ] = collections.defaultdict(list)
     for lib_info in infos:
-        lib_name = lib_info["library_name"]
-        dest_lib_dir = staged_dir / lib_name.replace(".", os.sep)
+        if "imports" in lib_info:
+            # Libraries with `imports` are staged like Bazel imports them, see
+            # `library_source_destinations()`.
+            lib_name = package_python_binary.library_package_dir(lib_info)
+            dest_lib_dir = staged_dir / lib_name
+            source_destinations = tuple(
+                (Path(src), staged_dir / rel_dest)
+                for src, rel_dest in package_python_binary.library_source_destinations(
+                    lib_info
+                )
+            )
+        else:
+            lib_name = lib_info["library_name"]
+            dest_lib_dir = staged_dir / lib_name.replace(".", os.sep)
+            src_root = Path(lib_info["source_root"])
+            source_destinations = tuple(
+                (src_root / src, dest_lib_dir / src)
+                for src in lib_info["sources"]
+            )
         dest_lib_dir.mkdir(parents=True, exist_ok=True)
 
-        src_root = Path(lib_info["source_root"])
-        for src in lib_info["sources"]:
-            src_path = src_root / src
-            dest_path = dest_lib_dir / src
+        for src_path, dest_path in source_destinations:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src_path, dest_path)
             inputs.append(str(src_path))

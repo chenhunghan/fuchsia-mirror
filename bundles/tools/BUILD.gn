@@ -16,7 +16,7 @@ group("tools") {
     "//src/graphics/display:tools",
     "//src/graphics/lib/magma:magma-tools",
     "//src/graphics/magma/tools",
-    "//src/performance/memory/thrasher",
+    "//src/memory/thrasher",
     "//src/performance/trace",
     "//src/power/testing/fake-battery/tool:package",
     "//src/recovery/factory_reset:tools",

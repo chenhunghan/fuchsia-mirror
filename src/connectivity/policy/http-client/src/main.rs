@@ -13,12 +13,12 @@ use fuchsia_hyper as fhyper;
 use fuchsia_inspect as finspect;
 use futures::StreamExt;
 use futures::prelude::*;
-use http_body_util::{BodyStream, Full};
+use http_body_util::{BodyDataStream, Full};
 use http_client_config::Config;
 use hyper::header::{AUTHORIZATION, COOKIE, HeaderName, PROXY_AUTHORIZATION, WWW_AUTHENTICATE};
 
 pub type Body = Full<hyper::body::Bytes>;
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, warn};
 use std::str::FromStr as _;
 
 mod pkg;
@@ -81,6 +81,32 @@ fn redirect_info(
     }
 }
 
+async fn write_body_to_socket(
+    tx: zx::Socket,
+    body: impl hyper::body::Body<Data = hyper::body::Bytes, Error: std::fmt::Debug>,
+) {
+    // Use an async socket wrapper so backpressure yields to the single-threaded
+    // executor instead of blocking all HTTP clients in synchronous wait_one.
+    let mut tx = fasync::Socket::from_socket(tx);
+    let mut hyper_body = std::pin::pin!(BodyDataStream::new(body));
+    while let Some(chunk) = hyper_body.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                warn!("Error reading response body frame: {error:?}");
+                return;
+            }
+        };
+        if let Err(error) = tx.write_all(&chunk).await {
+            // zx::Status::PEER_CLOSED maps to ConnectionAborted; client dropping early is normal.
+            if error.kind() != std::io::ErrorKind::ConnectionAborted {
+                error!("tx.write_all() failed: {error:?}");
+            }
+            return;
+        }
+    }
+}
+
 async fn to_success_response(
     current_url: &hyper::Uri,
     current_method: &hyper::Method,
@@ -116,47 +142,7 @@ async fn to_success_response(
         ..Default::default()
     };
 
-    let _ = scope.spawn(async move {
-        let mut hyper_body = BodyStream::new(hyper_response.into_body());
-        while let Some(frame) = hyper_body.next().await {
-            if let Ok(frame) = frame {
-              if let Ok(chunk) = frame.into_data() {
-                let mut offset: usize = 0;
-                while offset < chunk.len() {
-                    let pending = match tx.wait_one(
-                        zx::Signals::SOCKET_PEER_CLOSED | zx::Signals::SOCKET_WRITABLE,
-                        zx::MonotonicInstant::INFINITE,
-                    ).to_result() {
-                        Err(status) => {
-                            error!("tx.wait() failed - status: {}", status);
-                            return;
-                        }
-                        Ok(pending) => pending,
-                    };
-                    if pending.contains(zx::Signals::SOCKET_PEER_CLOSED) {
-                        info!("tx.wait() saw signal SOCKET_PEER_CLOSED");
-                        return;
-                    }
-                    assert!(pending.contains(zx::Signals::SOCKET_WRITABLE));
-                    let written = match tx.write(&chunk[offset..]) {
-                        Err(status) => {
-                            // Because of the wait above, we shouldn't ever see SHOULD_WAIT here, but to avoid
-                            // brittle-ness, continue and wait again in that case.
-                            if status == zx::Status::SHOULD_WAIT {
-                                error!("Saw SHOULD_WAIT despite waiting first - expected now? - continuing");
-                                continue;
-                            }
-                            info!("tx.write() failed - status: {}", status);
-                            return;
-                        }
-                        Ok(written) => written,
-                    };
-                    offset += written;
-                }
-              }
-            }
-        }
-    });
+    let _ = scope.spawn(write_body_to_socket(tx, hyper_response.into_body()));
 
     response
 }
@@ -571,6 +557,8 @@ pub async fn main() -> Result<(), anyhow::Error> {
 mod tests {
     use super::*;
     use hyper::header::{CONTENT_TYPE, HeaderMap, HeaderValue, LOCATION};
+    use std::pin::pin;
+    use std::task::Poll;
 
     #[test]
     fn test_is_cross_origin() {
@@ -719,5 +707,92 @@ mod tests {
         // Invalid URL characters = Block redirect
         let loc = hyper::header::HeaderValue::from_bytes(b"https://\xffinvalid.com").unwrap();
         assert_eq!(calculate_redirect(&old_url, &loc), None);
+    }
+
+    const STALLED_BODY_SIZE_BYTES: usize = 512 * 1024;
+
+    async fn read_socket_to_end(socket: zx::Socket) -> Vec<u8> {
+        let mut async_socket = fasync::Socket::from_socket(socket);
+        let mut buffer = Vec::new();
+        let _ = async_socket.read_to_end(&mut buffer).await.expect("read response body");
+        buffer
+    }
+
+    fn spawn_stalled_writer(
+        executor: &mut fasync::TestExecutor,
+        scope: &vfs::execution_scope::ExecutionScope,
+        body: Vec<u8>,
+    ) -> zx::Socket {
+        let body_len = body.len();
+        let (tx, rx) = zx::Socket::create_stream();
+        let buffer_capacity = rx.info().expect("socket info").rx_buf_max;
+        assert!(
+            body_len > buffer_capacity,
+            "test body ({body_len}) must exceed Zircon socket buffer ({buffer_capacity})"
+        );
+
+        let _ = scope.spawn(write_body_to_socket(tx, Full::new(body.into())));
+
+        // Drive the spawned body writer until it fills the Zircon socket buffer
+        // and yields Poll::Pending waiting for SOCKET_WRITABLE.
+        assert_eq!(executor.run_until_stalled(&mut pin!(scope.wait())), Poll::Pending);
+        assert_eq!(rx.info().expect("socket info").rx_buf_available, buffer_capacity);
+
+        rx
+    }
+
+    #[fuchsia::test]
+    fn stalled_socket_writer_yields_to_executor() {
+        let mut executor = fasync::TestExecutor::new();
+        let scope = vfs::execution_scope::ExecutionScope::new();
+        let expected_body: Vec<u8> =
+            (0..STALLED_BODY_SIZE_BYTES).map(|index| (index % 251) as u8).collect();
+
+        let response_socket = spawn_stalled_writer(&mut executor, &scope, expected_body.clone());
+
+        // While the first reader keeps its socket open and unread, a second
+        // writer on the same single-threaded executor completes cleanly.
+        let small_bytes = b"second response".as_slice();
+        let (tx, rx) = zx::Socket::create_stream();
+        let _ = scope.spawn(write_body_to_socket(tx, Full::new(small_bytes.into())));
+        let mut drain_small = pin!(read_socket_to_end(rx));
+        assert_eq!(executor.run_until_stalled(&mut drain_small), Poll::Ready(small_bytes.to_vec()));
+
+        let mut drain_large = pin!(read_socket_to_end(response_socket));
+        assert_eq!(executor.run_until_stalled(&mut drain_large), Poll::Ready(expected_body));
+        assert_eq!(executor.run_until_stalled(&mut pin!(scope.wait())), Poll::Ready(()));
+    }
+
+    #[fuchsia::test]
+    fn stalled_socket_writer_exits_on_peer_closed() {
+        let mut executor = fasync::TestExecutor::new();
+        let scope = vfs::execution_scope::ExecutionScope::new();
+        let response_socket =
+            spawn_stalled_writer(&mut executor, &scope, vec![0xAB; STALLED_BODY_SIZE_BYTES]);
+
+        drop(response_socket);
+        assert_eq!(executor.run_until_stalled(&mut pin!(scope.wait())), Poll::Ready(()));
+    }
+
+    #[fuchsia::test]
+    fn socket_writer_skips_trailers_and_stops_on_body_error() {
+        let mut executor = fasync::TestExecutor::new();
+        let (tx, rx) = zx::Socket::create_stream();
+        let body = http_body_util::StreamBody::new(futures::stream::iter([
+            Ok(hyper::body::Frame::data(hyper::body::Bytes::from_static(b"pre"))),
+            Ok(hyper::body::Frame::trailers(HeaderMap::new())),
+            Ok(hyper::body::Frame::data(hyper::body::Bytes::from_static(b"fix"))),
+            Err("body stream error"),
+            Ok(hyper::body::Frame::data(hyper::body::Bytes::from_static(b"suffix"))),
+        ]));
+
+        assert_eq!(
+            executor.run_until_stalled(&mut pin!(write_body_to_socket(tx, body))),
+            Poll::Ready(())
+        );
+        assert_eq!(
+            executor.run_until_stalled(&mut pin!(read_socket_to_end(rx))),
+            Poll::Ready(b"prefix".to_vec())
+        );
     }
 }

@@ -36,7 +36,7 @@
             },
         },
         {
-            name: "aml-gpu",
+            name: "register-reset",
             service: "fuchsia.hardware.registers.Service",
             from: "#register-controller-1000",
             to: "#gpu-ffe40000",

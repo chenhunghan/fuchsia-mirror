@@ -437,6 +437,11 @@ pub struct ChildPolicyAllowlists {
     /// Absolute monikers of component instances allowed to have the
     /// `on_terminate=REBOOT` in their `children` declaration.
     pub reboot_on_terminate: Vec<AllowlistEntry>,
+
+    /// Optional allowlist of root-reachable static component instances allowed
+    /// to have `startup=EAGER` in their `children` declaration. When `None`,
+    /// `eager` startup is not restricted by policy.
+    pub eager_startup: Option<Vec<AllowlistEntry>>,
 }
 
 /// The available capability sources for capability allow lists. This is a strict
@@ -941,7 +946,11 @@ impl TryFrom<component_internal::SecurityPolicy> for SecurityPolicy {
 
         let child_policy = if let Some(child_policy) = &security_policy.child_policy {
             let reboot_on_terminate = parse_allowlist_entries(&child_policy.reboot_on_terminate)?;
-            ChildPolicyAllowlists { reboot_on_terminate }
+            let eager_startup = match &child_policy.eager_startup {
+                Some(entries) => Some(parse_allowlist_entries(&Some(entries.clone()))?),
+                None => None,
+            };
+            ChildPolicyAllowlists { reboot_on_terminate, eager_startup }
         } else {
             ChildPolicyAllowlists::default()
         };
@@ -1202,6 +1211,7 @@ mod tests {
                         ]), ..Default::default()}),
                     child_policy: Some(component_internal::ChildPolicyAllowlists {
                         reboot_on_terminate: Some(vec!["/something/important".to_string()]),
+                        eager_startup: Some(vec!["/core/eager_daemon".to_string()]),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -1337,6 +1347,9 @@ mod tests {
                         reboot_on_terminate: vec![
                             AllowlistEntryBuilder::new().exact("something").exact("important").build(),
                         ],
+                        eager_startup: Some(vec![
+                            AllowlistEntryBuilder::new().exact("core").exact("eager_daemon").build(),
+                        ]),
                     },
                 }),
                 num_threads: 24,

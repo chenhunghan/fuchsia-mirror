@@ -2,11 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":unittests_host_test",
+    ],
+    visibility = ["//src/lib/analytics:__pkg__"],
+)
+
+fx_cc_library(
     name = "metric_properties",
     srcs = [
         "metric_properties.cc",
@@ -16,10 +28,32 @@ cc_library(
         "metric_properties.h",
         "optional_path.h",
     ],
-    visibility = ["//visibility:public"],
+    visibility = ["//src/lib/analytics/cpp/core_dev_tools:__pkg__"],
     deps = [
         "//sdk/lib/syslog/cpp",
         "//src/lib/files",
         "//src/lib/fxl",
     ],
+)
+
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = [
+        "metric_properties_unittest.cc",
+        "optional_path_unittest.cc",
+    ],
+    gn_output_name = "analytics_cpp_metric_properties_unittests",
+    deps = [
+        ":metric_properties",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+host_test(
+    name = "unittests_host_test",
+    binary = ":unittests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_args = ["env HOME=/tmp"],
 )

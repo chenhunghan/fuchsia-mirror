@@ -5,6 +5,8 @@
 #include "src/graphics/display/lib/fake-display-stack/fake-display.h"
 
 #include <fidl/fuchsia.sysmem2/cpp/wire.h>
+#include <fidl/fuchsia.sysmem2/cpp/wire_test_base.h>
+#include <lib/async-loop/testing/cpp/real_loop.h>
 #include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/driver/testing/cpp/scoped_global_logger.h>
 #include <lib/fpromise/result.h>
@@ -59,6 +61,7 @@
 #include "src/graphics/display/lib/api-types/cpp/pixel-format.h"
 #include "src/graphics/display/lib/api-types/cpp/rectangle.h"
 #include "src/graphics/display/lib/fake-display-stack/fake-sysmem-device-hierarchy.h"
+#include "src/graphics/display/lib/fake-display-stack/image-info.h"
 #include "src/lib/testing/predicates/status.h"
 
 namespace fake_display {
@@ -1196,6 +1199,41 @@ TEST_F(FakeDisplayWithoutCaptureRealSysmemTest, StartCapture) {
 TEST_F(FakeDisplayWithoutCaptureRealSysmemTest, ReleaseCapture) {
   static constexpr display::DriverCaptureImageId kFakeCaptureId(1);
   EXPECT_STATUS(fake_display_->ReleaseCapture(kFakeCaptureId), zx::error(ZX_ERR_NOT_SUPPORTED));
+}
+
+class FailingWaitBufferCollection
+    : public fidl::testing::WireTestBase<fuchsia_sysmem2::BufferCollection> {
+ public:
+  void CheckAllBuffersAllocated(CheckAllBuffersAllocatedCompleter::Sync& completer) override {
+    completer.Reply(fit::ok());
+  }
+
+  void WaitForAllBuffersAllocated(WaitForAllBuffersAllocatedCompleter::Sync& completer) override {
+    completer.Reply(fit::error(fuchsia_sysmem2::wire::Error::kNoMemory));
+  }
+
+  void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
+    ADD_FAILURE() << "Unexpected call to " << name;
+  }
+};
+
+class SysmemBufferInfoTest : public testing::Test, public loop_fixture::RealLoop {
+ protected:
+  fdf_testing::ScopedGlobalLogger logger_;
+};
+
+TEST_F(SysmemBufferInfoTest, GetSysmemMetadataWaitForAllBuffersAllocatedError) {
+  FailingWaitBufferCollection failing_collection;
+  auto [collection_client, collection_server] =
+      fidl::Endpoints<fuchsia_sysmem2::BufferCollection>::Create();
+  fidl::BindServer(dispatcher(), std::move(collection_server), &failing_collection);
+
+  fidl::WireSyncClient<fuchsia_sysmem2::BufferCollection> sync_client(std::move(collection_client));
+  PerformBlockingWork([&] {
+    zx::result<SysmemBufferInfo> result =
+        SysmemBufferInfo::GetSysmemMetadata(sync_client, /*buffer_index=*/0);
+    EXPECT_STATUS(result, zx::error(ZX_ERR_INTERNAL));
+  });
 }
 
 }  // namespace

@@ -1020,7 +1020,7 @@ impl super::Station for ClientSme {
                     }
                 }
             }
-            fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable { txn_id } => {
+            fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable { txn_id, .. } => {
                 self.scan_sched.on_scheduled_scan_matches_available(
                     txn_id,
                     &self.context.inspect,
@@ -1789,7 +1789,10 @@ mod tests {
             result: fidl_mlme::ScanResult { txn_id: 1, timestamp_nanos: 1000, bss: bss.into() },
         });
 
-        sme.on_mlme_event(fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable { txn_id: 1 });
+        sme.on_mlme_event(fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable {
+            txn_id: 1,
+            wake_lease: None,
+        });
 
         assert_matches!(
             session_event_stream.try_next(),
@@ -1844,7 +1847,10 @@ mod tests {
         sme.on_mlme_event(fidl_mlme::MlmeEvent::OnScanResult {
             result: fidl_mlme::ScanResult { txn_id: 1, timestamp_nanos: 1000, bss: bss1.into() },
         });
-        sme.on_mlme_event(fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable { txn_id: 1 });
+        sme.on_mlme_event(fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable {
+            txn_id: 1,
+            wake_lease: None,
+        });
 
         // Verify session 1 receives results
         assert_matches!(

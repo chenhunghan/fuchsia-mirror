@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/486509630): Clean up "libs" library and folder.
+# GN's explicit library_name = "libs" and source_root = "//src/testing/end_to_end/libs"
+# are the python_library defaults, matched here by name = "libs" and imports = [".."].
+# TODO(https://fxbug.dev/570694755): Verify whether libs should use target_compatible_with (was not gated by if (is_host) in GN).
+# Keep mypy in GN so GN-only consumers that run mypy (e.g. mobly_controller/*)
+# still get type information from this library.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "libs",
+    srcs = [
+        "__init__.py",
+        "commands/__init__.py",
+        "commands/command.py",
+        "commands/date.py",
+        "commands/ip.py",
+        "commands/journalctl.py",
+        "commands/nmcli.py",
+        "commands/pgrep.py",
+        "commands/route.py",
+        "commands/shell.py",
+        "commands/tcpdump.py",
+        "errors.py",
+        "exception_utils.py",
+        "ip_utils.py",
+        "net.py",
+        "proc/__init__.py",
+        "proc/job.py",
+        "proc/runner.py",
+        "ssh/__init__.py",
+        "ssh/connection.py",
+        "ssh/formatter.py",
+        "ssh/provider.py",
+        "ssh/settings.py",
+        "types.py",
+        "validation.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/connectivity/policy/tests/e2e:__subpackages__",
+        "//src/connectivity/wlan/tests/wlancfg:__subpackages__",
+        "//src/testing/end_to_end/libs:__subpackages__",
+        "//src/testing/end_to_end/mobly_base_tests:__subpackages__",
+        "//src/testing/end_to_end/mobly_controller:__subpackages__",
+        "//src/testing/end_to_end/mobly_driver:__subpackages__",
+    ],
+)

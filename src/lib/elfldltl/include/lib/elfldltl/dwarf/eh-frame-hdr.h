@@ -5,6 +5,7 @@
 #ifndef SRC_LIB_ELFLDLTL_INCLUDE_LIB_ELFLDLTL_DWARF_EH_FRAME_HDR_H_
 #define SRC_LIB_ELFLDLTL_INCLUDE_LIB_ELFLDLTL_DWARF_EH_FRAME_HDR_H_
 
+#include <algorithm>
 #include <compare>
 #include <ios>
 #include <iterator>
@@ -50,8 +51,10 @@ struct EhFrameHdrEncoding {
 // It can be used as `auto [pc, fde]` in for loops.
 template <typename SizeType>
 struct EhFrameHdrEntry {
+  constexpr bool operator==(const EhFrameHdrEntry& other) const = default;
   constexpr auto operator<=>(const EhFrameHdrEntry& other) const = default;
-  constexpr auto operator<=>(SizeType other) const { return pc <=> other.pc; }
+  constexpr bool operator==(SizeType other) const { return pc == other; }
+  constexpr auto operator<=>(SizeType other) const { return pc <=> other; }
 
   SizeType pc = 0, fde = 0;
 };
@@ -108,11 +111,11 @@ class EhFrameHdr {
       return pos_ <=> other.pos_;
     }
 
-    constexpr const value_type& operator*() const { return entry_; }
+    constexpr value_type operator*() const { return entry_; }
 
     constexpr const value_type* operator->() const { return &entry_; }
 
-    constexpr const value_type& operator[](ptrdiff_t n) const { return *(*this + n); }
+    constexpr value_type operator[](ptrdiff_t n) const { return *(*this + n); }
 
     constexpr iterator& operator++() {  // prefix
       *this += 1;
@@ -138,8 +141,8 @@ class EhFrameHdr {
 
     constexpr iterator& operator+=(ptrdiff_t n) {
       const size_t table_end_pos = hdr_->fde_table_.size_bytes();
-      const ptrdiff_t distance = n * hdr_->entry_size_;
-      if (distance < 0 ? static_cast<size_t>(-distance) < pos_
+      const ptrdiff_t distance = n * static_cast<ptrdiff_t>(hdr_->entry_size_);
+      if (distance < 0 ? static_cast<size_t>(-distance) > pos_
                        : (static_cast<size_t>(distance) > table_end_pos ||
                           table_end_pos - pos_ <= static_cast<size_t>(distance))) {
         // This either reaches the end exactly or is invalid, which we make
@@ -170,6 +173,9 @@ class EhFrameHdr {
 
     constexpr ptrdiff_t operator-(const iterator& other) const {
       assert(other.hdr_ == hdr_);
+      if (hdr_->entry_size_ == 0) [[unlikely]] {
+        return 0;
+      }
       const ptrdiff_t distance =
           (static_cast<ptrdiff_t>(pos_) - static_cast<ptrdiff_t>(other.pos_));
       return distance / hdr_->entry_size_;
@@ -179,7 +185,7 @@ class EhFrameHdr {
     friend EhFrameHdr;
 
     constexpr iterator(const EhFrameHdr& hdr, size_t pos) : hdr_(&hdr), pos_(pos) {
-      assert(hdr_->fde_table_.size_bytes() % hdr_->entry_size_ == 0);
+      assert(hdr_->entry_size_ == 0 || hdr_->fde_table_.size_bytes() % hdr_->entry_size_ == 0);
       if (pos_ < hdr_->fde_table_.size_bytes()) {
         Decode();
       }
@@ -201,6 +207,7 @@ class EhFrameHdr {
         // will work the same as either signed or unsigned.  Pro forma no-op to
         // use the signed value as unsigned.
         pc->ptr = std::bit_cast<uint64_t>(pc->sptr);
+        fde->ptr = std::bit_cast<uint64_t>(fde->sptr);
       }
       switch (EncodedPtr::Modifier(hdr_->encoding_.fde_table)) {
         case EncodedPtr::kAbs:
@@ -246,8 +253,7 @@ class EhFrameHdr {
   constexpr size_t size_bytes() const {
     return sizeof(encoding_) +  //
            EncodedPtr::EncodedSize(encoding_.eh_frame_ptr, kAddressSize) +
-           EncodedPtr::EncodedSize(encoding_.fde_count, kAddressSize) +
-           EncodedPtr::EncodedSize(encoding_.fde_table, kAddressSize) +  //
+           EncodedPtr::EncodedSize(encoding_.fde_count, kAddressSize) +  //
            fde_table_.size_bytes();
   }
 
@@ -265,7 +271,7 @@ class EhFrameHdr {
   constexpr iterator end() const { return {*this, fde_table_.size_bytes()}; }
   constexpr iterator cend() const { return end(); }
 
-  constexpr const value_type& operator[](size_t idx) { return begin()[idx]; }
+  constexpr value_type operator[](size_t idx) const { return begin()[idx]; }
 
   // This just does simple binary search.  Note that entries identify only the
   // FDE's starting PC and not its PC limit, so this will "find" the last FDE
@@ -275,7 +281,11 @@ class EhFrameHdr {
   // within that module's vaddr bounds, so only PCs off the end of the last FDE
   // in alignment fill or code lacking CFI would "wrongly" report that FDE.)
   constexpr iterator find(address_size_type pc) const {
-    return std::lower_bound(begin(), end(), pc);
+    if (empty()) {
+      return end();
+    }
+    iterator it = std::ranges::upper_bound(*this, pc, {}, &value_type::pc);
+    return it == begin() ? end() : it - 1;
   }
 
   // This is the vaddr of the start of the .eh_frame table.  This is not really

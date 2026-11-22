@@ -14,3 +14,15 @@ test_suite(
         "//src/intl/strings_to_json:strings_to_json_bin_test",
     ],
 )
+
+alias(
+    name = "icudtl",
+    actual = "//src/lib/icu:icudtl",
+    visibility = ["//:__subpackages__"],
+)
+
+alias(
+    name = "icudtl_root",
+    actual = "//src/lib/icu:icudtl_root",
+    visibility = ["//:__subpackages__"],
+)

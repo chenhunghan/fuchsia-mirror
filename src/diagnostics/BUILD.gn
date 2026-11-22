@@ -37,7 +37,6 @@ group("tests") {
     "log_listener:tests",
     "persistence:tests",
     "sampler:tests",
-    "tests",
     "tools:tests($host_toolchain)",
     "triage:tests",
     "validator:tests",
@@ -45,7 +44,6 @@ group("tests") {
     "//sdk/lib/diagnostics:tests",
     "//sdk/lib/inspect:tests",
     "//sdk/lib/syslog:tests",
-    "//src/developer/ffx/plugins/inspect:tests($host_toolchain)",
     "//src/developer/ffx/plugins/log:tests($host_toolchain)",
     "//src/lib/diagnostics:tests",
   ]

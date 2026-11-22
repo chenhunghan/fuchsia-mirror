@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Third-party license targets (per README.fuchsia) are Bazel-only and have no GN equivalent.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:MIT"],
+    license_text = "src/LICENSE",
+)
+
+# GN python_library() lists py.typed in sources rather than data.
+# @bazel2gn:raw_attribute:sources += [ "src/pydantic/py.typed" ]
+py_library(
+    name = "pydantic",
+    srcs = [
+        "src/pydantic/__init__.py",
+        "src/pydantic/_internal/__init__.py",
+        "src/pydantic/_internal/_config.py",
+        "src/pydantic/_internal/_core_metadata.py",
+        "src/pydantic/_internal/_core_utils.py",
+        "src/pydantic/_internal/_dataclasses.py",
+        "src/pydantic/_internal/_decorators.py",
+        "src/pydantic/_internal/_decorators_v1.py",
+        "src/pydantic/_internal/_discriminated_union.py",
+        "src/pydantic/_internal/_docs_extraction.py",
+        "src/pydantic/_internal/_fields.py",
+        "src/pydantic/_internal/_forward_ref.py",
+        "src/pydantic/_internal/_generate_schema.py",
+        "src/pydantic/_internal/_generics.py",
+        "src/pydantic/_internal/_git.py",
+        "src/pydantic/_internal/_import_utils.py",
+        "src/pydantic/_internal/_internal_dataclass.py",
+        "src/pydantic/_internal/_known_annotated_metadata.py",
+        "src/pydantic/_internal/_mock_val_ser.py",
+        "src/pydantic/_internal/_model_construction.py",
+        "src/pydantic/_internal/_namespace_utils.py",
+        "src/pydantic/_internal/_repr.py",
+        "src/pydantic/_internal/_schema_gather.py",
+        "src/pydantic/_internal/_schema_generation_shared.py",
+        "src/pydantic/_internal/_serializers.py",
+        "src/pydantic/_internal/_signature.py",
+        "src/pydantic/_internal/_typing_extra.py",
+        "src/pydantic/_internal/_utils.py",
+        "src/pydantic/_internal/_validate_call.py",
+        "src/pydantic/_internal/_validators.py",
+        "src/pydantic/_migration.py",
+        "src/pydantic/alias_generators.py",
+        "src/pydantic/aliases.py",
+        "src/pydantic/annotated_handlers.py",
+        "src/pydantic/class_validators.py",
+        "src/pydantic/color.py",
+        "src/pydantic/config.py",
+        "src/pydantic/dataclasses.py",
+        "src/pydantic/datetime_parse.py",
+        "src/pydantic/decorator.py",
+        "src/pydantic/deprecated/__init__.py",
+        "src/pydantic/deprecated/class_validators.py",
+        "src/pydantic/deprecated/config.py",
+        "src/pydantic/deprecated/copy_internals.py",
+        "src/pydantic/deprecated/decorator.py",
+        "src/pydantic/deprecated/json.py",
+        "src/pydantic/deprecated/parse.py",
+        "src/pydantic/deprecated/tools.py",
+        "src/pydantic/env_settings.py",
+        "src/pydantic/error_wrappers.py",
+        "src/pydantic/errors.py",
+        "src/pydantic/experimental/__init__.py",
+        "src/pydantic/experimental/arguments_schema.py",
+        "src/pydantic/experimental/missing_sentinel.py",
+        "src/pydantic/experimental/pipeline.py",
+        "src/pydantic/fields.py",
+        "src/pydantic/functional_serializers.py",
+        "src/pydantic/functional_validators.py",
+        "src/pydantic/generics.py",
+        "src/pydantic/json.py",
+        "src/pydantic/json_schema.py",
+        "src/pydantic/main.py",
+        "src/pydantic/mypy.py",
+        "src/pydantic/networks.py",
+        "src/pydantic/parse.py",
+        "src/pydantic/plugin/__init__.py",
+        "src/pydantic/plugin/_loader.py",
+        "src/pydantic/plugin/_schema_validator.py",
+        "src/pydantic/root_model.py",
+        "src/pydantic/schema.py",
+        "src/pydantic/tools.py",
+        "src/pydantic/type_adapter.py",
+        "src/pydantic/types.py",
+        "src/pydantic/typing.py",
+        "src/pydantic/utils.py",
+        "src/pydantic/validate_call_decorator.py",
+        "src/pydantic/validators.py",
+        "src/pydantic/version.py",
+        "src/pydantic/warnings.py",
+    ],
+    # Non-.py files (py.typed) are passed via data in Bazel and added to GN sources via raw_attribute.
+    # @bazel2gn:skip
+    data = ["src/pydantic/py.typed"],
+    imports = ["src"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/debug/zxdb_cli/shared:__pkg__",
+        "//src/lib/debug/dap/python:__pkg__",
+    ],
+    deps = [
+        "//prebuilt/third_party/pydantic-core:pydantic_core",
+        "//third_party/pylibs/annotated_types",
+        "//third_party/pylibs/typing_extensions",
+        "//third_party/pylibs/typing_inspection",
+    ],
+)

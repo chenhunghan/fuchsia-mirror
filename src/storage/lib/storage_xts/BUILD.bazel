@@ -3,31 +3,74 @@
 # found in the LICENSE file.
 
 load("//build/bazel/config/derived:compilation_modes.bzl", "is_debug")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-# @bazel2gn:raw_attribute:if (!is_debug) { configs -= [ "//build/config:default_optimize" ] configs += [ "//build/config:optimize_speed", "//build/config/lto:lto-if-compatible" ] }
+test_suite(
+    name = "tests",
+    tests = [":storage-xts-test"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":storage_xts_host_test"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+# Default optimizations are for size, but that has a noticeable impact on speed.
+# TODO(https://fxbug.dev/566966051): Switch to disable_build_flags once Rust
+# targets support it.
+# @bazel2gn:raw_attribute:if (!is_debug) { configs -= [ "//build/config:default_optimize" ] }
 rustc_library(
     name = "storage_xts",
     srcs = ["src/lib.rs"],
+    build_flags = [] if is_debug else [
+        "//build/config:optimize_speed",
+        "//build/config/lto:lto-if-compatible",
+    ],
     edition = "2024",
-    # Default optimizations are for size, but that has a noticeable impact on
-    # speed.
-    rustc_flags = [] if is_debug else [
-        "-Copt-level=3",
-    ],  # @bazel2gn:skip
-    test_deps = ["//third_party/rust_crates/vendor:test-case"],
     visibility = [
         "//src/storage/fvm:__pkg__",
         "//src/storage/fxfs/crypto:__pkg__",
         "//vendor/google:__subpackages__",
     ],
-    with_host_unit_tests = True,
     deps = [
         "//src/storage/lib/ptr_slice",
         "//third_party/rust_crates/vendor:cipher",
         "//third_party/rust_crates/vendor:static_assertions",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
+)
+
+# Match library optimization flags (GN previously forwarded configs to the
+# implicit unit test target).
+# TODO(https://fxbug.dev/566966051): Switch to disable_build_flags once Rust
+# targets support it.
+# @bazel2gn:raw_attribute:if (!is_debug) { configs -= [ "//build/config:default_optimize" ] }
+rustc_test(
+    name = "storage_xts_test",
+    build_flags = [] if is_debug else [
+        "//build/config:optimize_speed",
+        "//build/config/lto:lto-if-compatible",
+    ],
+    crate = ":storage_xts",
+    tags = ["manual"],
+    deps = ["//third_party/rust_crates/vendor:test-case"],
+)
+
+wrap_host_rust_test(
+    name = "storage_xts_host_test",
+    binary_name = "storage_xts_test",
+)
+
+fx_unittest_package(
+    name = "storage-xts-test",
+    unit_tests = [":storage_xts_test"],
 )

@@ -11,12 +11,15 @@
 #include <fidl/fuchsia.hardware.pin/cpp/wire.h>
 #include <fidl/fuchsia.hardware.powerdomain/cpp/wire.h>
 #include <fidl/fuchsia.hardware.reset/cpp/wire.h>
+#include <lib/async/cpp/task.h>
 #include <lib/driver/component/cpp/driver_base2.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/component/cpp/health_alert_latch.h>
 #include <lib/driver/metadata/cpp/metadata_server.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
+#include <lib/inspect/component/cpp/component.h>
+#include <lib/inspect/cpp/inspect.h>
 #include <lib/zx/event.h>
 #include <lib/zx/interrupt.h>
 #include <lib/zx/port.h>
@@ -47,14 +50,19 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   static constexpr std::string_view kReasonTransactionTimeout = "I2C_TRANSACTION_TIMEOUT";
   static constexpr std::string_view kReasonSclStuckLow = "I2C_SCL_STUCK_LOW";
   static constexpr std::string_view kReasonUnclockedMmioRead = "I2C_UNCLOCKED_MMIO_READ";
+  // Powering up the controller failed.
   static constexpr std::string_view kReasonResumeFailed = "I2C_RESUME_FAILED";
+  // A power domain, clock, reset, or pin-state release call failed during power-down or rollback.
+  static constexpr std::string_view kReasonPowerReleaseFailed = "I2C_POWER_RELEASE_FAILED";
 
   // Health diagnostic keys.
+  // Whether the controller is currently powered (runtime resumed).
   static constexpr std::string_view kDiagResourcesEnabled = "resources_enabled";
   static constexpr std::string_view kDiagTimeoutCount = "timeout_count";
   static constexpr std::string_view kDiagTxAbortCount = "tx_abort_count";
   static constexpr std::string_view kDiagLastAbortSource = "last_abort_source";
   static constexpr std::string_view kDiagResumeFailureCount = "resume_failure_count";
+  static constexpr std::string_view kDiagPowerReleaseFailureCount = "power_release_failure_count";
   static constexpr std::string_view kDiagUnclockedReadCount = "unclocked_read_count";
   static constexpr std::string_view kDiagCompType = "comp_type";
   static constexpr std::string_view kDiagExpectedCompType = "expected_comp_type";
@@ -76,7 +84,7 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
                     fdf::ResumeCompleter completer) override;
   // fdf::DriverBase2 health hook. kPing reports the latched fault set and lifetime counters
   // without touching hardware; kFast additionally samples status registers when the controller is
-  // powered.
+  // powered. Neither powers the controller up.
   void HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
                    HealthCheckCompleter completer) override;
 
@@ -91,16 +99,34 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
 
  protected:
   static constexpr zx::duration kTransferTimeout = zx::sec(1);
+  // How long the controller stays powered after the last transaction before it is runtime
+  // suspended.
+  static constexpr zx::duration kAutosuspendDelay = zx::msec(200);
 
   zx::duration transfer_timeout() const { return transfer_timeout_; }
   void set_transfer_timeout(zx::duration timeout) { transfer_timeout_ = timeout; }
   fdf::HealthAlertLatch& health_latch() { return health_latch_; }
+
+  // Changes the runtime PM autosuspend delay. `zx::duration::infinite()` disables autosuspend. If
+  // the controller is currently powered and idle, the autosuspend timer is re-armed with the new
+  // delay.
+  void set_autosuspend_delay(zx::duration delay);
+
+  // Whether the controller is currently runtime powered (power domain, clocks and the interrupt
+  // controller vote are held).
+  bool powered() const { return powered_; }
+
+  const inspect::Inspector& inspector_for_testing() const { return inspector_.value().inspector(); }
 
  private:
   bool HasLatchedCondition(std::string_view reason_code) const;
   std::vector<fuchsia_driver_framework::HealthDiagnosticItem> BuildCommonDiagnostics() const;
   void RecordTimeout(std::string_view reason);
   void RaiseSclStuckLow(uint32_t raw_intr_stat);
+  // Latches I2C_RESUME_FAILED for a failed power-up.
+  void RecordPowerUpFailure(std::string_view reason);
+  // Latches I2C_POWER_RELEASE_FAILED for a failed power-down or power-up rollback.
+  void RecordPowerReleaseFailure(std::string_view reason);
 
   struct ReadOp {
     std::span<uint8_t> data;
@@ -194,6 +220,51 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   // Runs the prepared ops on the bus. On success returns whether the controller disabled cleanly
   // afterwards (false means EnableAndWait(false) timed out and I2C_DISABLE_TIMEOUT is latched).
   zx::result<bool> ExecuteTransact();
+  // Waits for the bus, then runs the transaction prepared by `PrepareOps()` on the powered
+  // controller. Returns the result of ExecuteTransact().
+  zx::result<bool> RunTransaction(uint16_t address);
+
+  // Runtime power management.
+  //
+  // The controller is powered on demand by `Transact()` and powered off `autosuspend_delay_` after
+  // the last transaction. While powered off, the controller registers must not be accessed.
+  //
+  // Power-up order: power domain -> interrupt controller vote -> registers clock (pclk) -> bus
+  // clock (ic_clk) -> reset deassert -> default pin state -> `HostInit()`. Rolls back on failure.
+  // Power-down order: quiesce the controller -> bus clock -> registers clock -> sleep pin state (if
+  // the board provides one) -> reset assert -> interrupt controller vote -> power domain. Once
+  // quiesced, every resource is released without retries (except that the power domain is not
+  // disabled if a clock Disable failed) and the controller is considered unpowered even if a
+  // release fails; failures remain latched in `HealthCheck()` as `I2C_POWER_RELEASE_FAILED`.
+
+  // The resources acquired so far by a power-up, in power-up order.
+  enum class PowerStage {
+    kOff,
+    kPowerDomain,
+    kIrqController,
+    kRegistersClock,
+    kBusClock,
+    kReset,
+  };
+
+  // Cancels any pending autosuspend and, unless the controller is already powered, powers it up.
+  zx::result<> PowerUp();
+  zx::result<> PowerDown();
+  zx::result<> AcquireResources(PowerStage& stage, std::string_view& failed_action);
+  // Releases the resources acquired up to `stage` in reverse order and selects the sleep pin state,
+  // continuing past failures except that the power domain is not disabled if disabling a clock
+  // failed. Returns the first error and records its description in `failed_action`.
+  zx::result<> ReleaseResources(PowerStage stage, std::string_view& failed_action);
+  // (Re-)arms the autosuspend timer if the controller is powered.
+  void ScheduleAutosuspend();
+  void OnAutosuspendTimeout();
+  void QuiesceController();
+  static constexpr std::string_view kDefaultPinState = "default";
+  static constexpr std::string_view kSleepPinState = "sleep";
+  // Selects the given pin state if the board provides pin states. A missing "sleep" state is
+  // expected and only requested once.
+  zx::result<> SelectPinState(std::string_view state);
+  void InitInspect();
 
   virtual zx::result<fdf::MmioBuffer> MapMmio(fdf::PDev& pdev);
 
@@ -222,23 +293,48 @@ class DwI2c : public fdf::DriverBase2, public fdf::WireServer<fuchsia_hardware_i
   std::optional<fdf::StopCompleter> completer_;
   fdf_metadata::MetadataServer<fuchsia_hardware_i2c_businfo::I2CBusMetadata> metadata_server_;
   bool send_restart_ = false;
-  bool resources_enabled_ = false;
-
-  uint64_t timeout_count_ = 0;
-  uint64_t tx_abort_count_ = 0;
-  uint32_t last_abort_source_ = 0;
-  uint64_t resume_failure_count_ = 0;
-  uint64_t unclocked_read_count_ = 0;
-  fdf::HealthAlertLatch health_latch_{*this};
-
+  // Runtime PM state below is only accessed on the driver's default (synchronized) dispatcher:
+  // Transact(), the autosuspend task, SystemSuspend()/SystemResume(), Stop() and the lazy Inspect
+  // callback (the inspector is served on that dispatcher) all run there.
+  // True while this driver holds its power domain, clock and interrupt controller votes. The
+  // provider keeps a single reference count per resource, so votes are only ever taken or released
+  // when this changes.
+  bool powered_ = false;
+  zx::duration autosuspend_delay_ = kAutosuspendDelay;
+  async::TaskClosureMethod<DwI2c, &DwI2c::OnAutosuspendTimeout> autosuspend_task_{this};
   fidl::WireSyncClient<fuchsia_hardware_clock::Clock> clock_bus_;
   fidl::WireSyncClient<fuchsia_hardware_clock::Clock> clock_regs_;
   fidl::WireSyncClient<fuchsia_hardware_reset::Reset> reset_;
   fidl::WireSyncClient<fuchsia_hardware_powerdomain::Domain> powerdomain_;
-  // Present when the board provides pin states for this controller. The pin configuration (e.g.
-  // the IP type selection of a shared I/O block) can be lost when the power domain is turned off,
-  // so the default state is selected again on resume.
-  std::optional<fidl::WireSyncClient<fuchsia_hardware_pin::PinStates>> pin_states_;
+  // Vote on the power domain of the interrupt controller (interrupt aggregator) that aggregates our
+  // interrupt, which loses its mask state when its domain collapses. Optional: not valid when the
+  // interrupt is not routed through such a controller or the controller does not offer the vote.
+  fidl::WireSyncClient<fuchsia_hardware_powerdomain::Domain> irq_controller_domain_;
+  // Valid when the board provides pin states for this controller. The pin configuration (e.g. the
+  // IP type selection of a shared I/O block) can be lost when the power domain is turned off, so
+  // the default state is selected again on every power-up.
+  fidl::WireSyncClient<fuchsia_hardware_pin::PinStates> pin_states_;
+  // Cleared once the pin controller reports that it has no "sleep" state.
+  bool has_sleep_pin_state_ = true;
+
+  uint64_t timeout_count_ = 0;
+  uint64_t tx_abort_count_ = 0;
+  uint32_t last_abort_source_ = 0;
+  uint64_t unclocked_read_count_ = 0;
+  fdf::HealthAlertLatch health_latch_{*this};
+
+  // Runtime PM statistics, exported to Inspect and HealthCheck diagnostics.
+  uint64_t power_up_count_ = 0;
+  uint64_t power_down_count_ = 0;
+  uint64_t power_up_failures_ = 0;
+  uint64_t power_down_failures_ = 0;
+
+  std::optional<inspect::ComponentInspector> inspector_;
+  // Declared last so that destroying `runtime_pm_node_` unregisters its lazy callback (which
+  // captures `this` and reads the state above) before any other member is destroyed; the underlying
+  // `inspect::Inspector` root is shared with `DriverBase2::health_check_inspector_` and outlives
+  // `DwI2c` members.
+  inspect::LazyNode runtime_pm_node_;
 };
 
 }  // namespace dw_i2c

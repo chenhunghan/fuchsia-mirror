@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "collection_sc",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":config_lib",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "collection_sc",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "collection_sc",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/collection_sc.cml",
+)
+
+# we just want ScopedInstance from fuchsia-component-test, not RealmBuilder
+fx_component(
+    name = "component",
+    testonly = True,
+    check_includes = False,
+    compiled_manifest = ":manifest",
+    visibility = ["//src/lib/fuchsia-component-test/tests:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "config_lib",
+    cm_label = ":manifest",
+)

@@ -107,9 +107,21 @@ class Bus : public fdf::DriverBase2,
   async_dispatcher_t* binding_dispatcher() override { return dispatcher_; }
 
   // fidl::WireServer<fuchsia_hardware_pci::Debug> implementation
-  void GetDevices(GetDevicesCompleter::Sync& completer) final;
-  void GetHostBridgeInfo(GetHostBridgeInfoCompleter::Sync& completer) final;
+  void GetRootInfo(GetRootInfoCompleter::Sync& completer) final;
+  void GetDevices(GetDevicesRequestView request, GetDevicesCompleter::Sync& completer) final;
   void ReadBar(ReadBarRequestView request, ReadBarCompleter::Sync& completer) final;
+
+  // Serves one enumeration of the bus's devices. Each iterator tracks its own position so
+  // concurrent enumerations don't interfere.
+  class DeviceIterator : public fidl::WireServer<PciFidl::DeviceIterator> {
+   public:
+    explicit DeviceIterator(Bus* bus) : bus_(bus) {}
+    void GetNext(GetNextCompleter::Sync& completer) final;
+
+   private:
+    Bus* const bus_;
+    std::optional<PciFidl::wire::Bdf> last_bdf_;
+  };
 
  protected:
   // These are used by the derived TestBus class.
@@ -149,6 +161,11 @@ class Bus : public fdf::DriverBase2,
 
   void Teardown();
 
+  // Replies with the next batch of devices after |last_bdf| and advances it. Returns true when
+  // the batch is empty and enumeration is complete.
+  bool NextDevices(std::optional<PciFidl::wire::Bdf>* last_bdf,
+                   DeviceIterator::GetNextCompleter::Sync& completer) __TA_EXCLUDES(devices_lock_);
+
   // members
   // TODO(https://fxbug.dev/582472845): Remove the intermediate "bus" node once
   // pciroot-banjo-adapter is removed.
@@ -172,6 +189,7 @@ class Bus : public fdf::DriverBase2,
   SharedIrqMap shared_irqs_ __TA_GUARDED(devices_lock_);
 
   fidl::ServerBindingGroup<fuchsia_hardware_pci::Debug> bindings_;
+  fidl::ServerBindingGroup<fuchsia_hardware_pci::DeviceIterator> iterator_bindings_;
 };
 
 }  // namespace pci

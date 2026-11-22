@@ -13,11 +13,31 @@
             "enabled": true
         },
         {
+            "name": "inspect_gn_deps",
+            "description": "Batch-inspects one or more GN package directories in a single call (expanding foreach loops and local list vars): maps direct GN deps/test_deps/third_party crates to Bazel labels, flags external BUILD.bazel targets or exports_files() needing visibility/export updates, lists host-constrained direct deps (requiring HOST_OS_CONSTRAINTS) and missing Bazel packages, and locates the nearest ancestor BUILD.bazel test_suite.",
+            "script_file": "inspect_gn_deps.sh",
+            "allowed_roles": [
+                "coder",
+                "reviewer",
+                "evolver"
+            ],
+            "enabled": true
+        },
+        {
             "name": "run_checks",
             "description": "Runs the checks in checks/manifest.json exactly the way planter runs them after the coder reports (same scripts, environment, parsing and severities) and prints the findings; exits 1 if any ERROR or WARNING would send the change back. --skip-build runs only the static checks (seconds); a run without it also builds, after waiting for a machinery evolution in progress. --only NAMES runs a subset, --json prints the findings array.",
             "script_file": "run_checks.sh",
             "allowed_roles": [
                 "coder"
+            ],
+            "enabled": true
+        },
+        {
+            "name": "lint_machinery_scripts",
+            "description": "Statically audits checks/*.sh, checks/*.py, tools/*.sh, and JSON manifests in $PLANTER_PROJECT_DIR for shell/Python syntax errors, undefined Python names in inline heredocs, and module-level use-before-assignment without running builds.",
+            "script_file": "lint_machinery_scripts.sh",
+            "allowed_roles": [
+                "evolver"
             ],
             "enabled": true
         }

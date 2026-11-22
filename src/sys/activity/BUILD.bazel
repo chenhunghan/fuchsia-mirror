@@ -95,7 +95,6 @@ fx_component(
 
 fx_package(
     name = "activity",
-    package_name = "activity",
     components = [":activity-component"],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

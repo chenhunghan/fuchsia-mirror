@@ -23,7 +23,19 @@ exports_files(
 test_suite(
     name = "target_tests",
     tests = [
+        "//src/ui/bin/brightness_manager:tests",
+        "//src/ui/bin/scene_manager:tests",
+        "//src/ui/bin/text:tests",
+        "//src/ui/bin/virtual_keyboard_manager/tests",
+        "//src/ui/input/lib/hid-input-report:tests",
+        "//src/ui/input/lib/hid-parser/test:tests",
+        "//src/ui/input/lib/injector/tests",
+        "//src/ui/lib/debug_telemetry:tests",
+        # TODO(https://fxbug.dev/584843931): //src/ui/lib/diagnostic_overlay:tests runs from BUILD.gn until //src/lib/vulkan has a Ninja edge for Bazel builds.
         "//src/ui/lib/focus_chain_provider:tests",
+        "//src/ui/lib/input_pipeline:tests",
+        "//src/ui/lib/scene_management:tests",
+        "//src/ui/testing/input_helper:tests",
         "//src/ui/tools/print-input-report:tests",
     ],
 )

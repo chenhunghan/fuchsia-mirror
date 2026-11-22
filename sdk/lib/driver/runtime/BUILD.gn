@@ -124,7 +124,7 @@ sdk_source_set("driver_runtime_env") {
     "//src/devices/bin/driver_runtime/*",
     "//src/devices/tee/drivers/optee:*",
     "//src/tests/benchmarks/fidl/driver_cpp:*",
-    "//src/tests/benchmarks/fidl/driver_llcpp:*",
+    "//src/tests/benchmarks/fidl/driver_cpp_wire:*",
   ]
   public_deps = [
     ":driver_runtime",
@@ -147,7 +147,7 @@ sdk_source_set("driver_runtime_env_cpp") {
     "//src/connectivity/*",
     "//src/devices/*",
     "//src/tests/benchmarks/fidl/driver_cpp:*",
-    "//src/tests/benchmarks/fidl/driver_llcpp:*",
+    "//src/tests/benchmarks/fidl/driver_cpp_wire:*",
     "//src/virtualization/*",
   ]
   public_deps = [
@@ -171,7 +171,7 @@ sdk_source_set("driver_runtime_testing") {
     "//sdk/lib/driver/testing/*",
     "//src/devices/bin/driver_runtime/*",
     "//src/tests/benchmarks/fidl/driver_cpp/*",
-    "//src/tests/benchmarks/fidl/driver_llcpp/*",
+    "//src/tests/benchmarks/fidl/driver_cpp_wire/*",
   ]
   public_deps = [
     ":driver_runtime",

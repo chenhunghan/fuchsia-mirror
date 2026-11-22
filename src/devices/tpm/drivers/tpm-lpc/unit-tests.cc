@@ -3,8 +3,9 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.hardware.tpmimpl/cpp/wire.h>
-#include <fuchsia/hardware/tpmimpl/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/component/incoming/cpp/protocol.h>
+#include <lib/component/incoming/cpp/service.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/zx/vmo.h>
@@ -63,13 +64,13 @@ class TpmLpcTest : public zxtest::Test {
 TEST_F(TpmLpcTest, TestTpmRead) {
   ASSERT_NO_FATAL_FAILURE(CreateDevice());
 
-  fidl::ClientEnd<fuchsia_hardware_tpmimpl::TpmImpl> client_end;
-  auto server = fidl::CreateEndpoints(&client_end);
-  ASSERT_TRUE(server.is_ok());
-  fidl::WireSyncClient client{std::move(client_end)};
-
-  ddk::TpmImplProtocolClient proto(fake_root_->GetLatestChild());
-  proto.ConnectServer(server->TakeChannel());
+  auto client_end = component::ConnectAt<fuchsia_hardware_tpmimpl::TpmImpl>(
+      fake_root_->GetLatestChild()->outgoing(),
+      std::string("svc/").append(
+          component::MakeServiceMemberPath<fuchsia_hardware_tpmimpl::Service::Device>(
+              component::kDefaultInstance)));
+  ASSERT_OK(client_end.status_value());
+  fidl::WireSyncClient client{std::move(*client_end)};
 
   std::vector<uint8_t> expected{0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -87,13 +88,13 @@ TEST_F(TpmLpcTest, TestTpmRead) {
 TEST_F(TpmLpcTest, TestTpmWrite) {
   ASSERT_NO_FATAL_FAILURE(CreateDevice());
 
-  fidl::ClientEnd<fuchsia_hardware_tpmimpl::TpmImpl> client_end;
-  auto server = fidl::CreateEndpoints(&client_end);
-  ASSERT_TRUE(server.is_ok());
-  fidl::WireSyncClient client{std::move(client_end)};
-
-  ddk::TpmImplProtocolClient proto(fake_root_->GetLatestChild());
-  proto.ConnectServer(server->TakeChannel());
+  auto client_end = component::ConnectAt<fuchsia_hardware_tpmimpl::TpmImpl>(
+      fake_root_->GetLatestChild()->outgoing(),
+      std::string("svc/").append(
+          component::MakeServiceMemberPath<fuchsia_hardware_tpmimpl::Service::Device>(
+              component::kDefaultInstance)));
+  ASSERT_OK(client_end.status_value());
+  fidl::WireSyncClient client{std::move(*client_end)};
 
   std::vector<uint8_t> expected{0xFF, 0xFF, 0xFF, 0xFF};
   auto write = client->Write(0, fuchsia_hardware_tpmimpl::wire::RegisterAddress::kTpmSts,

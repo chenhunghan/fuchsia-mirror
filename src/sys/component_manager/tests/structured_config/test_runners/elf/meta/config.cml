@@ -2,8 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 {
-    config: {
-        my_flag: { type: "bool" },
-        my_uint8: { type: "uint8" },
-    },
+    use: [
+        {
+            config: "fuchsia.config.MyFlag",
+            key: "my_flag",
+            type: "bool",
+            availability: "transitional",
+            default: true,
+        },
+        {
+            config: "fuchsia.config.MyUint8",
+            key: "my_uint8",
+            type: "uint8",
+            availability: "transitional",
+            default: 255,
+        },
+    ],
 }

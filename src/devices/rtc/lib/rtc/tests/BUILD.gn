@@ -8,8 +8,8 @@ import("//build/test.gni")
 group("tests") {
   testonly = true
   deps = [
-    ":rtc-lib-llcpp-test",
     ":rtc-lib-test",
+    ":rtc-lib-wire-test",
   ]
 }
 
@@ -26,17 +26,17 @@ fuchsia_unittest_package("rtc-lib-test") {
   deps = [ ":rtc-lib-test-bin" ]
 }
 
-test("rtc-lib-llcpp-test-bin") {
-  output_name = "rtc-lib-llcpp-test"
-  sources = [ "rtc_llcpp_unittest.cc" ]
+test("rtc-lib-wire-test-bin") {
+  output_name = "rtc-lib-wire-test"
+  sources = [ "rtc_wire_unittest.cc" ]
   deps = [
     "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_cpp",
-    "//src/devices/rtc/lib/rtc:rtc_llcpp",
+    "//src/devices/rtc/lib/rtc:rtc_wire",
     "//src/devices/testing/mock-ddk",
     "//zircon/system/ulib/zxtest",
   ]
 }
 
-fuchsia_unittest_package("rtc-lib-llcpp-test") {
-  deps = [ ":rtc-lib-llcpp-test-bin" ]
+fuchsia_unittest_package("rtc-lib-wire-test") {
+  deps = [ ":rtc-lib-wire-test-bin" ]
 }

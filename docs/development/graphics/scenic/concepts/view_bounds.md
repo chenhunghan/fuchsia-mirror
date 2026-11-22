@@ -3,29 +3,27 @@
 - [Introduction](#introduction)
 
 - [Concepts](#concepts)
-  - [Setting View Bounds](#setting-view-bounds)
-    - [Bound Extent and Insets](#bound-extent-and-insets)
+  - [Setting view bounds](#setting-view-bounds)
+    - [Bound extent and insets](#bound-extent-and-insets)
     - [Example](#example-1)
-  - [Coordinate System](#coordinate-system)
+  - [Coordinate system](#coordinate-system)
     - [Example](#example-2)
-  - [Centering Geometry](#centering-geometry)
-  - [Debug Wireframe Rendering](#debug-wireframe-rendering)
-  - [Ray Casting and Hit Testing](#ray-casting-and-hit-testing)
-    - [The Hit Ray](#the-hit-ray)
+  - [Centering geometry](#centering-geometry)
+  - [Debug wireframe rendering](#debug-wireframe-rendering)
+  - [Ray casting and hit testing](#ray-casting-and-hit-testing)
+    - [The hit ray](#the-hit-ray)
     - [Rules](#rules)
-    - [Edge Cases](#edge-cases)
-    - [Pixel Offsets](#pixel-offsets)
-      - [Example](#example-3)
+    - [Edge cases](#edge-cases)
 
-# Introduction
+## Introduction {#introduction}
 
 This is a guide that explains how view bounds and clipping work in Scenic. This
 guide explains how to set view bounds, how to interpret what the commands are
 doing, and the effects that the view bounds have on existing Scenic subsystems.
 
-# Concepts
+## Concepts {#concepts}
 
-## Setting View Bounds {#setting-view-bounds}
+### Setting view bounds {#setting-view-bounds}
 
 An embedder must create a pair of tokens for a view and view holder, and must
 also allocate space within its view for the embedded view holder to be laid out.
@@ -36,7 +34,7 @@ the view itself is created and linked to the ViewHolder, so you do not have to
 worry about the order in which you do your setup. The bounds themselves are set
 by specifying their minimum and maximum points (xyz) in 3D space.
 
-### Bound Extent and Insets {#bound-extent-and-insets}
+#### Bound extent and insets {#bound-extent-and-insets}
 
 The `bounding_box` property in `ViewProperties` struct set is used to set the
 bounds of a view. The minimum and maximum bounds represent the minimum and
@@ -54,7 +52,7 @@ but anything drawn outside of
 may be obscured by its ancestor view. The reason for obscuring, and the rules
 surrounding it, is specific to each product.
 
-### Example {#example-1}
+#### Example {#example-1}
 
 ```cpp
 // Create a pair of tokens to register a view and view holder in
@@ -75,7 +73,7 @@ The above code creates a View and ViewHolder pair whose bounds start at `(0,
 0, -200)` and extend out to `(500, 500, 0)`. The bounds themselves are always
 axis-aligned.
 
-## Coordinate System {#coordinate-system}
+### Coordinate system {#coordinate-system}
 
 The 3D system of Scenic consists of a number of coordinate spaces. They can
 roughly be categorized as: Layer Space, World Space and Local space. A spatial
@@ -89,14 +87,14 @@ All Scenic coordinate systems are right handed.
 
 ![Coordinate Spaces Diagram](/docs/development/graphics/scenic/meta/coordinate_spaces.svg)
 
-#### Layer Space (Screen Space)
+##### Layer space (screen space)
 
 Layer Space is a 2D coordinate space corresponding to an area on the screen.
 - Origin: Top left corner, X-axis pointing to the right and Y-axis pointing down. Axis-aligned
     with display.
 - Dimensions: Typically equal to the display dimensions (a full screen layer).
 
-#### Camera Transform
+##### Camera transform
 
 The camera transform matrix transforms a coordinate from World Space to Layer
 Space.
@@ -121,13 +119,13 @@ Finally, a clip space transform might be applied that scales and translates the
 
 [^1]: A better solution for handling magnification would have been to simply insert a scale node into the graph and then manipulate that directly. This approach caused some issues with applications being confused about how big they are and how much memory they should allocate (because metrics events are issued with scaling), and the clip space transform was introduced as a workaround. And because input is currently handled in camera space, this comes with the unfortunate side effect that swipe gestures can appear smaller under magnification.
 
-#### World Space
+##### World space
 
 World Space is where the Scene Graph's root view is positioned, and also where
 the camera is positioned. The entire Scene Graph is thus embedded in this space,
 and how we relate Camera Space to the scene is defined in this space.
 
-#### Transform Nodes
+##### Transform nodes
 
 Each node in the Scene Graph has a Local Space associated with it. This space is
 defined by that node's transformation matrix, which transforms a coordinate from
@@ -150,7 +148,7 @@ can then write the full transform as:
 parent_local_point = translation matrix * rotation_matrix * scale_matrix * local_point
 ```
 
-### Example
+#### Example
 
 We have a Scene Graph made up of two nodes, Node1 and Node2.
 Node1 is a child of Node2, and P1 is a point in Node1's Local Space,
@@ -160,7 +158,7 @@ To get the World Space coordinates of P1 you then combine, in order, the transfo
 p1_world_position = (translation_node2 * rotation_node2 * scale_node2) * (translation_node1 * rotation_node1 * scale_node1) * p1_local_position
 ```
 
-#### Local Space (Scenic View Space) [^2]
+##### Local space (Scenic view space) [^2]
 
 Since not every Session has full knowledge of the full Scene Graph they instead
 all act in the local coordinate space of their View. This is the space a Session
@@ -175,7 +173,7 @@ delivered in.
 
 [^2]: Not to be confused with the View Space from the common Model-View-Projection notation of 3D graphics, which we here called Camera Space.
 
-### View Bounds
+#### View bounds
 
 View bounds are specified in local coordinates, and their World Space position
 is determined by the global transform of the view node.
@@ -184,9 +182,9 @@ Input coordinates originate from Layer Space, which usually corresponds to pixel
 coordinates with an origin at the upper left of the screen. The input system
 works with the compositor and camera to map from input device coordinates to
 World Space by way of
-[Ray Casting and Hit Testing](#ray-casting-and-hit-testing).
+[Ray casting and hit testing](#ray-casting-and-hit-testing).
 
-### Example {#example-2}
+#### Example {#example-2}
 
 ```cpp
 // Create a view and view-holder token pair.
@@ -210,7 +208,7 @@ Space bounds min and max of `(100, 100, 200)` and `(600, 600, 400)`
 respectively. However, the view itself doesn’t see these world-space bounds, and
 only deals with its bounds in its own Local Space.
 
-## Centering Geometry {#centering-geometry}
+### Centering geometry {#centering-geometry}
 
 The center of mass for a piece of geometry such as a `RoundedRectangle` is its
 center, whereas for a view, the center of mass for its bounds is its minimum
@@ -222,7 +220,7 @@ bounds.
 
 ![Centering Geometry Diagram](/docs/development/graphics/scenic/meta/scenic_centering_geometry.png)
 
-## Debug Wireframe Rendering {#debug-wireframe-rendering}
+### Debug wireframe rendering {#debug-wireframe-rendering}
 
 To help with debugging view bounds, you can render the edges of the bounds in
 wire-frame mode to see where exactly your view is located in World Space. This
@@ -251,15 +249,15 @@ struct SetViewHolderBoundsColorCmd {
 };
 ```
 
-## Ray Casting and Hit Testing {#ray-casting-and-hit-testing}
+### Ray casting and hit testing {#ray-casting-and-hit-testing}
 
 Hit testing by ray casting maps Layer Space coordinates to scene geometry and
 coordinates. Ultimately, inputs are delivered to views with View-local
-coordinates. As described in the [Coordinate System](#coordinate-system)
+coordinates. As described in the [Coordinate system](#coordinate-system)
 section, View-local coordinates are determined by the global transform of the
 View node, which maps from World Space to Local Space.
 
-### The Hit Ray {#the-hit-ray}
+#### The hit ray {#the-hit-ray}
 
 When injecting touch input events we need to know two things: 1. Which client(s)
 are we sending the input event to? 2. What is the coordinate of the input event
@@ -288,7 +286,7 @@ origin, with Z at 0 and direction `(0, 0, 1)`, towards the scene.
 In World Space then, the hit ray described above originates at `(x, y, -1000)`
 with direction `(0, 0, 1000)`.
 
-### Rules {#rules}
+#### Rules {#rules}
 
 When performing hit tests, Scenic runs tests against the bounds of a `ViewNode`
 before determining whether the ray should continue checking children of that
@@ -310,14 +308,14 @@ In debug mode, a null bounding box will trigger an `FXL_DCHECK` in the
 `escher::BoundingBox` class stating that the bounding box dimensions need to be
 greater than or equal to 2.
 
-### Edge Cases {#edge-cases}
+#### Edge cases {#edge-cases}
 
 Situations where a ray is perpendicular to a side of a bounding box and just
 grazes its edge will not count as a hit. Since the six planes that constitute
 the bounding box are themselves the clip planes, it follows that anything that
 is directly on a clip plane would also get clipped.
 
-### Collisions {#collisions}
+#### Collisions {#collisions}
 
 A collision occurs when a ray cast detects two or more hits at the same
 distance. A collision indicates that hittable targets are overlapping and

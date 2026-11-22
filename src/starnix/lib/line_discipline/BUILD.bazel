@@ -3,8 +3,21 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":line_discipline_scenarios_tests",
+        ":line_discipline_tests",
+    ],
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
 
 rustc_library(
     name = "line_discipline",
@@ -130,7 +143,11 @@ genrule(
     # The traces are checked-in sources, not build outputs. Genrule commands
     # run from the execution root, where this package's sources are under
     # package_name().
-    cmd = "python3 $(location testing/trace_generator.py) --generate-rs --output $@ --trace-dir " + package_name() + "/testing/generated --names " + " ".join(_SCENARIOS),
+    cmd = "$(location @prebuilt_python//:python3) $(location testing/trace_generator.py) --generate-rs --output $@ --trace-dir " + package_name() + "/testing/generated --names " + " ".join(_SCENARIOS),
+    tools = [
+        "@prebuilt_python//:python3",
+        "@prebuilt_python//:runtime_files",
+    ],
 )
 
 rustc_test(
@@ -145,4 +162,14 @@ rustc_test(
         ":line_discipline",
         "//third_party/rust_crates/vendor:test-case",
     ],
+)
+
+fx_unittest_package(
+    name = "line_discipline_tests",
+    unit_tests = [":line_discipline_test"],
+)
+
+fx_unittest_package(
+    name = "line_discipline_scenarios_tests",
+    unit_tests = [":line_discipline_scenarios_test"],
 )

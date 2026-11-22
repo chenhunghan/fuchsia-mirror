@@ -6,9 +6,9 @@ import("//build/components.gni")
 import("//build/rust/rustc_test.gni")
 
 # The library is defined in BUILD.bazel. Its unit tests stay in GN because
-# rust-http-sse-tests uses GN-only //src/connectivity/network/dns:component,
+# rust-http-sse-tests uses GN-only //src/connectivity/network/dns:package,
 # //src/connectivity/network/netstack3:package-for-tests,
-# //src/connectivity/policy/http-client:component, and
+# //src/connectivity/policy/http-client:package, and
 # //src/sys/pkg/testing:fake-ssl-certs.
 rustc_test("http_sse_test") {
   output_name = "http_sse_lib_test"
@@ -50,11 +50,13 @@ fuchsia_unittest_package("rust-http-sse-tests") {
   manifest = "meta/http-sse-lib-test.cml"
   deps = [
     ":http_sse_test",
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/sys/pkg/testing:fake-ssl-certs",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
 }
 
 group("tests") {

@@ -28,7 +28,7 @@ UnionSize8Alignment4::UnionSize8Alignment4(UnionSize8Alignment4&& other) : tag_(
     case ::test::unionsandwich::UnionSize8Alignment4::Tag::kVariant:
       variant_ = std::move(other.variant_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
       break;
   }
 }
@@ -41,7 +41,7 @@ UnionSize8Alignment4& UnionSize8Alignment4::operator=(UnionSize8Alignment4&& oth
       case ::test::unionsandwich::UnionSize8Alignment4::Tag::kVariant:
         variant_ = std::move(other.variant_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
         break;
     }
   }
@@ -64,10 +64,10 @@ void UnionSize8Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &variant_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -76,11 +76,11 @@ void UnionSize8Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
           &variant_,
           encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -89,18 +89,18 @@ void UnionSize8Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void UnionSize8Alignment4::Decode(::fidl::Decoder* _decoder, UnionSize8Alignment4* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::unionsandwich::UnionSize8Alignment4::Tag::kVariant: {
@@ -140,15 +140,15 @@ void UnionSize8Alignment4::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid);
 }
 
-void UnionSize8Alignment4::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void UnionSize8Alignment4::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
         break;
       case ::test::unionsandwich::UnionSize8Alignment4::Tag::kVariant:
         new (&variant_) uint32_t();
@@ -215,7 +215,7 @@ UnionSize12Alignment4::UnionSize12Alignment4(UnionSize12Alignment4&& other) : ta
       new (&variant_)::std::array<uint8_t, 6>();
       variant_ = std::move(other.variant_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
       break;
   }
 }
@@ -229,7 +229,7 @@ UnionSize12Alignment4& UnionSize12Alignment4::operator=(UnionSize12Alignment4&& 
         new (&variant_)::std::array<uint8_t, 6>();
         variant_ = std::move(other.variant_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
         break;
     }
   }
@@ -252,10 +252,10 @@ void UnionSize12Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::std::array<uint8_t, 6>>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &variant_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -264,11 +264,11 @@ void UnionSize12Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
           &variant_,
           encoder->Alloc(::fidl::EncodingInlineSize<::std::array<uint8_t, 6>, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -277,18 +277,18 @@ void UnionSize12Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void UnionSize12Alignment4::Decode(::fidl::Decoder* _decoder, UnionSize12Alignment4* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::unionsandwich::UnionSize12Alignment4::Tag::kVariant: {
@@ -332,15 +332,15 @@ void UnionSize12Alignment4::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid);
 }
 
-void UnionSize12Alignment4::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void UnionSize12Alignment4::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
         break;
       case ::test::unionsandwich::UnionSize12Alignment4::Tag::kVariant:
         new (&variant_)::std::array<uint8_t, 6>();
@@ -441,7 +441,7 @@ UnionSize24Alignment8::UnionSize24Alignment8(UnionSize24Alignment8&& other) : ta
       new (&variant_)::test::unionsandwich::StructSize16Alignment8();
       variant_ = std::move(other.variant_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
       break;
   }
 }
@@ -455,7 +455,7 @@ UnionSize24Alignment8& UnionSize24Alignment8::operator=(UnionSize24Alignment8&& 
         new (&variant_)::test::unionsandwich::StructSize16Alignment8();
         variant_ = std::move(other.variant_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
         break;
     }
   }
@@ -478,10 +478,10 @@ void UnionSize24Alignment8::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::test::unionsandwich::StructSize16Alignment8>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &variant_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -490,11 +490,11 @@ void UnionSize24Alignment8::Encode(::fidl::Encoder* encoder, size_t offset,
           &variant_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::unionsandwich::StructSize16Alignment8, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -503,18 +503,18 @@ void UnionSize24Alignment8::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void UnionSize24Alignment8::Decode(::fidl::Decoder* _decoder, UnionSize24Alignment8* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::unionsandwich::UnionSize24Alignment8::Tag::kVariant: {
@@ -558,15 +558,15 @@ void UnionSize24Alignment8::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid);
 }
 
-void UnionSize24Alignment8::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void UnionSize24Alignment8::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
         break;
       case ::test::unionsandwich::UnionSize24Alignment8::Tag::kVariant:
         new (&variant_)::test::unionsandwich::StructSize16Alignment8();
@@ -633,7 +633,7 @@ UnionSize36Alignment4::UnionSize36Alignment4(UnionSize36Alignment4&& other) : ta
       new (&variant_)::std::array<uint8_t, 32>();
       variant_ = std::move(other.variant_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
       break;
   }
 }
@@ -647,7 +647,7 @@ UnionSize36Alignment4& UnionSize36Alignment4::operator=(UnionSize36Alignment4&& 
         new (&variant_)::std::array<uint8_t, 32>();
         variant_ = std::move(other.variant_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
         break;
     }
   }
@@ -670,10 +670,10 @@ void UnionSize36Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::std::array<uint8_t, 32>>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &variant_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -682,11 +682,11 @@ void UnionSize36Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
           &variant_,
           encoder->Alloc(::fidl::EncodingInlineSize<::std::array<uint8_t, 32>, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -695,18 +695,18 @@ void UnionSize36Alignment4::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void UnionSize36Alignment4::Decode(::fidl::Decoder* _decoder, UnionSize36Alignment4* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::unionsandwich::UnionSize36Alignment4::Tag::kVariant: {
@@ -750,15 +750,15 @@ void UnionSize36Alignment4::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid);
 }
 
-void UnionSize36Alignment4::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void UnionSize36Alignment4::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
         break;
       case ::test::unionsandwich::UnionSize36Alignment4::Tag::kVariant:
         new (&variant_)::std::array<uint8_t, 32>();

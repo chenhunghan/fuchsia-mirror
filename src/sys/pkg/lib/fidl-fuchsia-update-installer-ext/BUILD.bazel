@@ -23,12 +23,10 @@ rustc_library(
         "//vendor/google:__subpackages__",
     ],
     deps = [
-        "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_rust",
-        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+        "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_rust_common",
         "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/rust
         "//src/lib/fdomain/client",
         "//src/lib/fidl/rust/fidl",
-        "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
         "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_fdomain",
         "//src/sys/pkg/lib/event-queue",
         "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
@@ -41,7 +39,16 @@ rustc_library(
         "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:thiserror",
         "//third_party/rust_crates/vendor:typed-builder",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
+            "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust",
+        ],
+        "//conditions:default": [
+            "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_common",
+            "//src/sys/pkg/fidl/fuchsia.update.installer:fuchsia.update.installer_rust_common",
+        ],
+    }),
 )
 
 rustc_test(

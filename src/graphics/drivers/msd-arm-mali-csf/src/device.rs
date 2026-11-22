@@ -11,13 +11,12 @@ use fdf_component::DriverError;
 use fidl_next_fuchsia_hardware_platform_device as fpdev;
 use futures::StreamExt;
 use mmio::{ReadableRegister, WritableRegister};
-use std::cell::RefCell;
-use std::sync::Mutex;
+use std::cell::{Cell, RefCell};
 
 use mmio::region::MmioRegion;
 use mmio::vmo::VmoMemory;
 
-use std::sync::Arc;
+use std::rc::Rc;
 
 pub struct DeviceState {
     pub reset_signaller: CompletionEvent,
@@ -46,7 +45,7 @@ impl DeviceState {
         }
     }
 
-    async fn gpu_irq_task(state: Arc<RefCell<Self>>, gpu_irq: zx::Interrupt) {
+    async fn gpu_irq_task(state: Rc<RefCell<Self>>, gpu_irq: zx::Interrupt) {
         let mut gpu_irq = std::pin::pin!(fuchsia_async::OnInterrupt::new(gpu_irq));
         while let Some(_) = gpu_irq.next().await {
             state.borrow_mut().handle_gpu_irq((*gpu_irq).as_ref());
@@ -70,7 +69,7 @@ impl DeviceState {
         }
     }
 
-    async fn mmu_irq_task(state: Arc<RefCell<Self>>, irq: zx::Interrupt) {
+    async fn mmu_irq_task(state: Rc<RefCell<Self>>, irq: zx::Interrupt) {
         let mut irq = std::pin::pin!(fuchsia_async::OnInterrupt::new(irq));
         while let Some(_) = irq.next().await {
             state.borrow_mut().handle_mmu_irq((*irq).as_ref());
@@ -100,7 +99,7 @@ impl DeviceState {
         }
     }
 
-    async fn job_irq_task(state: Arc<RefCell<Self>>, irq: zx::Interrupt) {
+    async fn job_irq_task(state: Rc<RefCell<Self>>, irq: zx::Interrupt) {
         let mut irq = std::pin::pin!(fuchsia_async::OnInterrupt::new(irq));
         while let Some(_) = irq.next().await {
             state.borrow_mut().handle_job_irq((*irq).as_ref());
@@ -153,7 +152,7 @@ impl DeviceState {
         let port = zx::Port::create_with_opts(zx::PortOptions::BIND_TO_INTERRUPT);
         let mut executor = fuchsia_async::LocalExecutorBuilder::new().port(port).build();
 
-        let state = Arc::new(RefCell::new(state));
+        let state = Rc::new(RefCell::new(state));
 
         // Run the handling of the IRQ.
         let scope = fuchsia_async::Scope::new();
@@ -319,8 +318,8 @@ impl DeviceInterrupts {
 
 pub struct DeviceClient {
     pub device_task_sender: DeviceTaskSender,
-    // This has Mutex<Option<>> so it can be taken and joined.
-    pub device_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
+    // This has Cell<Option<>> so it can be taken and joined.
+    pub device_thread: Cell<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl DeviceClient {
@@ -334,7 +333,7 @@ impl DeviceClient {
             })
             .unwrap();
 
-        DeviceClient { device_task_sender, device_thread: Mutex::new(Some(device_thread)) }
+        DeviceClient { device_task_sender, device_thread: Cell::new(Some(device_thread)) }
     }
 }
 

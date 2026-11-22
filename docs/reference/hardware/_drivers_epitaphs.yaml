@@ -752,3 +752,9 @@
   available_in_git: 'd8017642d9519c967bf52d41ca3d71bec1ecc0f2'
   areas: ['Telephony']
   path: '/src/connectivity/telephony/drivers/qmi-usb-transport'
+- short_description: 'FreeBSD Intel ethernet driver'
+  deletion_reason: 'Hardware is not actively supported'
+  gerrit_change_id: '1955675'
+  available_in_git: '4806a52ab13e78c437c22d1a5142859dd9b98559'
+  areas: ['Connectivity', 'Ethernet']
+  path: '/zircon/third_party/dev/ethernet/e1000'

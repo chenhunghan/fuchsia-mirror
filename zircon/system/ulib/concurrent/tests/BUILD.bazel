@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Explicit `tests` lists are needed because this directory defines both Fuchsia
+# and host test suites; bazel2gn does not support `test_suite`.
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":concurrent-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# @bazel2gn:skip
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":concurrent-test_host_test"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "concurrent-test",
+    srcs = [
+        "chainlock.cc",
+        "copy.cc",
+        "seqlock.cc",
+    ],
+    # TODO(https://fxbug.dev/570694755): seqlock.cc includes <zircon/syscalls.h>
+    # unconditionally even though its zx_clock_get_monotonic() calls are guarded
+    # by `#if defined(__Fuchsia__)`, and //zircon/system/public is missing
+    # transitive headers of <zircon/syscalls.h> (such as <zircon/string_view.h>)
+    # in Bazel.
+    # @bazel2gn:skip
+    copts = select({
+        "//build/bazel/platforms:is_host_os": ["-DZIRCON_SYSCALLS_H_"],
+        "//conditions:default": [],
+    }),
+    gn_output_name = "libconcurrent-test",
+    deps = [
+        "//zircon/system/ulib/concurrent",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+host_test(
+    name = "concurrent-test_host_test",
+    binary = ":concurrent-test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_unittest_package(
+    name = "concurrent-test-pkg",
+    package_name = "concurrent-test",
+    unit_tests = [":concurrent-test"],
+)

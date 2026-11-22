@@ -17,7 +17,7 @@ After publishing your prebuilt package to CIDP,
 to ensure that the content of the package is available to Fuchsia's
 continuous integration (CI) and Fuchsia developers.
 
-## Prerequisites
+## Prerequisites {#prerequisites}
 
 If you plan on using a Fuchsia archive
 ([FAR](/docs/development/source_code/archive_format.md)) to publish your prebuilt

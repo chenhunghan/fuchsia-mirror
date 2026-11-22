@@ -24,6 +24,7 @@
 #include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
 #include <kernel/mutex.h>
+#include <ktl/utility.h>
 #include <vm/compressor.h>
 #include <vm/continuous_attribution_tracker.h>
 #include <vm/page_source.h>
@@ -125,7 +126,7 @@ enum class VmCowReclaimFailure : uint8_t {
 using VmCowReclaimResult = fit::result<VmCowReclaimFailure, VmCowReclaimSuccess>;
 
 enum class PageSourceType : uint8_t {
-  // The VmCowPages is not directly backed by a page_source_.
+  // The VmCowPages is not directly backed by a page_source().
   Anonymous = 0,
   // The VmCowPages is directly backed by a contiguous page source. That has the following
   // implications:
@@ -145,27 +146,20 @@ using AttributionTracker = StubContinuousAttributionTracker;
 #endif  // EXPERIMENTAL_CONTINUOUS_PER_VMO_ATTRIBUTION_ENABLED
 
 class ScopedPageFreedList;
-// Holds the page source lock (and a RefPtr keeping the PageSource alive) on behalf of the Rust
-// VmCowPages::DeferredOps. See the |page_source_lock| field comment on DeferredOps in
-// vm_cow_pages.rs.
-// TODO(https://fxbug.dev/531878739): Remove once the page source lock walk is ported to Rust.
-struct DeferredPageSourceLock {
-  DeferredPageSourceLock() = default;
-  ~DeferredPageSourceLock();
-  ktl::optional<ktl::pair<Guard<Mutex>, fbl::RefPtr<PageSource>>> lock;
-};
 
 extern "C" void cpp_vm_cow_pages_free(VmCowPages* cow);
 extern "C" void* cpp_vm_cow_pages_state(VmCowPages* cow);
-extern "C" __PURE PageSourceType cpp_vm_cow_pages_page_source_type(const VmCowPages* cow);
 extern "C" __PURE DiscardableVmoTracker* cpp_vm_cow_pages_discardable_tracker(
     const VmCowPages* cow);
-extern "C" __PURE PageSource* cpp_vm_cow_pages_page_source(const VmCowPages* cow);
-extern "C" void cpp_vm_cow_pages_deferred_ops_init_page_source_lock(
-    ffi::Uninitialized<DeferredPageSourceLock>* lock_storage, VmCowPages* cow);
 extern "C" void cpp_vm_cow_pages_range_change_update_cow_children(VmCowPages* cow, uint64_t offset,
                                                                   uint64_t len,
                                                                   VmObject::RangeChangeOp op);
+extern "C" void cpp_vm_cow_pages_resize_update_child_limits(VmCowPages* cow, uint64_t s);
+// |deferred| is a VmCowPages::DeferredOps*, which cannot be named before VmCowPages is defined.
+extern "C" zx_status_t cpp_vm_cow_pages_replace_page_locked(VmCowPages* cow, vm_page_t* before_page,
+                                                            uint64_t offset, bool with_loaned,
+                                                            vm_page_t** after_page, void* deferred,
+                                                            AnonymousPageRequest* page_request);
 extern "C" void rust_scoped_page_freed_list_init(ScopedPageFreedList* list);
 extern "C" void rust_scoped_page_freed_list_destroy(ScopedPageFreedList* list);
 extern "C" void rust_scoped_page_freed_list_free_pages(ScopedPageFreedList* list,
@@ -202,14 +196,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   Lock<CriticalMutex>* lock() const TA_RET_CAP(lock_) { return &lock_; }
   Lock<CriticalMutex>& lock_ref() const TA_RET_CAP(lock_) { return lock_; }
 
-  uint64_t lock_order() const {
-#if (LOCK_DEP_ENABLED_FEATURE_LEVEL > 0)
-    return lock_order_;
-#endif
-    // When the lock order isn't in use just return a garbage value, whatever is calculated using it
-    // will get thrown away regardless.
-    return 0;
-  }
+  uint64_t lock_order() const;
 
   // Similar to LockedPtr, but holds a RefPtr instead of a raw pointer.
   class LockedRefPtr {
@@ -255,7 +242,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   // Creates a copy-on-write clone with the desired parameters. This can fail due to various
   // internal states not being correct.
-  zx::result<LockedRefPtr> CreateCloneLocked(SnapshotType type, bool require_unidirection,
+  zx::result<LockedRefPtr> CreateCloneLocked(SnapshotType type, bool require_unidirectional,
                                              VmCowRange range, DeferredOps& ops) TA_REQ(lock());
 
   // VmCowPages are initially created in the Init state and need to be transitioned to Alive prior
@@ -297,13 +284,13 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
     return !!(options() & VmCowPagesOptions::kUserPagerBackedRoot);
   }
 
-  bool is_parent_hidden_locked() const TA_REQ(lock()) { return parent_ && parent_->is_hidden(); }
+  bool is_parent_hidden_locked() const TA_REQ(lock());
 
   bool has_no_children_locked() const TA_REQ(lock());
 
   bool is_discardable() const { return !!discardable_tracker_; }
 
-  bool can_evict() const { return page_source_ && page_source_->properties().is_user_pager; }
+  bool can_evict() const;
 
   bool can_root_source_evict() const {
     bool result = is_root_source_preserving_page_content();
@@ -318,31 +305,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // site.
   // Aside from the general borrowing in the PhysicalPageBorrowingConfig being turned on and
   // off, the ability to borrow is constant over the lifetime of the VmCowPages.
-  bool can_borrow() const {
-    // TODO(dustingreen): Or rashaeqbal@.  We can only borrow while the page is not dirty.
-    // Currently we enforce this by checking ShouldTrapDirtyTransitions() below and leaning on the
-    // fact that !ShouldTrapDirtyTransitions() dirtying isn't implemented yet.  We currently evict
-    // to reclaim instead of replacing the page, and we can't evict a dirty page since the contents
-    // would be lost.  Option 1: When a loaned page is about to become dirty, we could replace it
-    // with a non-loaned page.  Option 2: When reclaiming a loaned page we could replace instead of
-    // evicting (this may be simpler).
-
-    // Currently there needs to be a page source for any borrowing to be possible, due to
-    // requirements of a backlink and other assumptions in the VMO code. Returning early here in the
-    // absence of a page source simplifies the rest of the logic.
-    if (!page_source_) {
-      return false;
-    }
-
-    bool source_is_suitable = page_source_->properties().is_user_pager;
-
-    // Avoid borrowing and trapping dirty transitions overlapping for now; nothing really stops
-    // these from being compatible AFAICT - we're just avoiding overlap of these two things until
-    // later.
-    bool overlapping_with_other_features = page_source_->ShouldTrapDirtyTransitions();
-
-    return source_is_suitable && !overlapping_with_other_features;
-  }
+  bool can_borrow() const;
 
   // In addition to whether a VmCowPages is allowed, for correctness reasons, to borrow pages there
   // are other, potentially variable, factors that influence whether it's considered a good idea for
@@ -365,11 +328,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   }
 
   // Returns whether this cow pages node is dirty tracked.
-  bool is_dirty_tracked() const {
-    // Pager-backed VMOs require dirty tracking either if they are directly backed by the pager,
-    // i.e. the root VMO.
-    return page_source_ && page_source_->properties().is_user_pager;
-  }
+  bool is_dirty_tracked() const;
 
   // If true this node, and all nodes in this hierarchy, are using parent content markers to
   // indicate when a leaf node may need to walk up the tree to find content.
@@ -406,13 +365,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // The modified state is only supported for root pager-backed VMOs, and will get queried (and
   // possibly reset) on the next QueryPagerVmoStatsLocked() call. Although the modified state is
   // only tracked for the root VMO.
-  void mark_modified_locked() TA_REQ(lock()) {
-    if (!is_dirty_tracked()) {
-      return;
-    }
-    DEBUG_ASSERT(page_source_type() == PageSourceType::UserPager);
-    set_pager_stats_modified_locked(true);
-  }
+  void mark_modified_locked() TA_REQ(lock());
 
   bool is_high_memory_priority_locked() const TA_REQ(lock());
 
@@ -432,15 +385,10 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   void DetachSource();
 
-  ktl::optional<zx_koid_t> GetPageSourceKoid() const {
-    if (!page_source_) {
-      return ktl::nullopt;
-    }
-    return page_source_->GetProviderKoid();
-  }
+  ktl::optional<zx_koid_t> GetPageSourceKoid() const;
 
   // Resizes the range of this cow pages. |size| must be a multiple of the page size.
-  zx_status_t Resize(uint64_t size);
+  zx_status_t Resize(uint64_t size) TA_EXCL(lock());
 
   // See VmObject::Lookup
   zx_status_t LookupLocked(VmCowRange range, VmObject::LookupFunction lookup_fn) TA_REQ(lock());
@@ -452,15 +400,9 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // caller.
   // Ranges of length zero are considered invalid and will return ZX_ERR_INVALID_ARGS. The lookup_fn
   // can terminate iteration early by returning ZX_ERR_STOP.
-  using LookupReadableFunction =
-      fit::inline_function<zx_status_t(uint64_t offset, paddr_t pa), 4 * sizeof(void*)>;
+  using LookupReadableFunction = VmObject::LookupFunction;
   zx_status_t LookupReadableLocked(VmCowRange range, LookupReadableFunction lookup_fn)
       TA_REQ(lock());
-
-  // This function merely calls |LookupReadableLocked| with the lock held. Note that there is no way
-  // non-test code can use this function in a correct way due to its internal locking.
-  zx_status_t DebugLookupReadable(VmCowRange range, LookupReadableFunction lookup_fn)
-      TA_EXCL(lock());
 
   // See VmObject::TakePages
   //
@@ -526,9 +468,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   }
   static bool is_page_clean(const vm_page_t* page) {
     return DirtyState(page->object.dirty_state) == DirtyState::Clean;
-  }
-  static bool is_page_awaiting_clean(const vm_page_t* page) {
-    return DirtyState(page->object.dirty_state) == DirtyState::AwaitingClean;
   }
   static bool is_page_reclaimable(const vm_page_t* page) {
     return PageQueues::IsPageReclaimable(page);
@@ -628,7 +567,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // For consistency if there is a parent or a backing page source, such that the range would not
   // explicitly copy-on-write the zero page then this will fail. Use ZeroPagesLocked for an
   // operation that is guaranteed to succeed, but may not release memory.
-  zx_status_t DecommitRange(VmCowRange range);
+  zx_status_t DecommitRange(VmCowRange range) TA_EXCL(lock());
 
   // After successful completion the range of pages will all read as zeros. The mechanism used to
   // achieve this is not guaranteed to decommit, but it will try to.
@@ -649,7 +588,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   //  range.
   ktl::pair<zx_status_t, uint64_t> ZeroPagesLocked(VmCowRange range, bool dirty_track,
                                                    DeferredOps& deferred,
-                                                   MultiPageRequest* page_request) TA_REQ(lock());
+                                                   MultiPageRequest& page_request) TA_REQ(lock());
 
   // Attempts to commit a range of pages. This has three kinds of return status
   //  ZX_OK => The whole range was successfully committed and |len| will be written to
@@ -661,7 +600,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   //  * => Any other error, the number of pages committed is undefined.
   // The |offset| and |len| are assumed to be page aligned and within the range of |size_|.
   zx_status_t CommitRangeLocked(VmCowRange range, DeferredOps& deferred, uint64_t* committed_len,
-                                MultiPageRequest* page_request) TA_REQ(lock());
+                                MultiPageRequest& page_request) TA_REQ(lock());
 
   // Increases the pin count of the range of pages given by |offset| and |len|. The full range must
   // already be committed and this either pins all pages in the range, or pins no pages and returns
@@ -837,7 +776,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   // Returns the parent of this cow pages, may be null. Generally the parent should never be
   // directly accessed externally, but this exposed specifically for tests.
-  fbl::RefPtr<VmCowPages> DebugGetParent();
+  fbl::RefPtr<VmCowPages> DebugGetParent() const TA_EXCL(lock());
 
   // Unlocked wrapper around ReplacePageLocked, exposed for the physical page provider to cancel
   // loans with.
@@ -857,11 +796,9 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   zx_status_t EvictLoanedPage(vm_page_t* page, uint64_t offset);
 
   // Potentially transitions from Alive->Dead if the cow pages is unreachable (i.e. has no
-  // paged_ref_ and no children). Used by the VmObjectPaged when it unlinks the paged_ref_, but
-  // prior to dropping the RefPtr, giving the VmCowPages a chance to transition.
-  // If a VmCowPages is returned then this is a parent that needs to have MaybeDeadTransition called
-  // on it.
-  fbl::RefPtr<VmCowPages> MaybeDeadTransition();
+  // paged_ref_ and no children), iteratively transitioning any newly unreachable ancestors. Used by
+  // VmObjectPaged when it unlinks the paged_ref_, prior to dropping the RefPtr.
+  void MaybeDeadTransition();
 
   // Helper to allocate a new page for the VMO, filling out the page request if necessary.
   zx_status_t AllocPage(vm_page_t** page, AnonymousPageRequest* page_request);
@@ -914,15 +851,16 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   friend class PriorityChanger;
   friend void ::cpp_vm_cow_pages_free(VmCowPages*);
   friend void* ::cpp_vm_cow_pages_state(VmCowPages* cow);
-  // Trailing return type: `PageSourceType ::cpp_...` would parse as a qualified name.
-  friend auto ::cpp_vm_cow_pages_page_source_type(const VmCowPages* cow) -> PageSourceType;
   friend DiscardableVmoTracker* ::cpp_vm_cow_pages_discardable_tracker(const VmCowPages* cow);
-  friend PageSource* ::cpp_vm_cow_pages_page_source(const VmCowPages* cow);
-  friend void ::cpp_vm_cow_pages_deferred_ops_init_page_source_lock(
-      ffi::Uninitialized<DeferredPageSourceLock>* lock_storage, VmCowPages* cow);
   friend void ::cpp_vm_cow_pages_range_change_update_cow_children(VmCowPages* cow, uint64_t offset,
                                                                   uint64_t len,
                                                                   VmObject::RangeChangeOp op);
+  friend void ::cpp_vm_cow_pages_resize_update_child_limits(VmCowPages* cow, uint64_t s);
+  friend zx_status_t(::cpp_vm_cow_pages_replace_page_locked)(VmCowPages* cow,
+                                                             vm_page_t* before_page,
+                                                             uint64_t offset, bool with_loaned,
+                                                             vm_page_t** after_page, void* deferred,
+                                                             AnonymousPageRequest* page_request);
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmCowPages);
 
@@ -1012,11 +950,20 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
            life_cycle_locked() == LifeCycle::Alive;
   }
 
-  // Transitions from Alive->Dead, freeing pages and cleaning up state. Responsibility of the caller
-  // to validate that it is correct to be doing this transition. If there is a parent_ then |parent|
-  // is locked pointer to it and |sibling| must be as documented in |RemoveChildLocked|
-  // Might return its parent_ RefPtr, which the caller must check if a dead transition is needed and
-  // then release the RefPtr.
+  // Fast path for transitioning a root VmCowPages (with no parent_) from Alive->Dead without
+  // allocating parent/sibling LockedPtrs or returning a deferred parent RefPtr.
+  void DeadTransitionRootLocked() TA_REQ(lock());
+
+  // Outlined slow paths for MaybeDeadTransition when |parent_| is non-null.
+  __NO_INLINE void MaybeDeadTransitionWithParent(Guard<CriticalMutex>::Adoptable adopt);
+  fbl::RefPtr<VmCowPages> MaybeDeadTransitionWithParentSingle(Guard<CriticalMutex>::Adoptable adopt,
+                                                              bool* out_retry);
+
+  // Transitions a child VmCowPages (with non-null |parent_|) from Alive->Dead, freeing pages and
+  // cleaning up state. Responsibility of the caller to validate that it is correct to be doing this
+  // transition. |parent| must be a locked pointer to |parent_| and |sibling| must be as documented
+  // in |RemoveChildLocked|. Returns its former |parent_| RefPtr, which the caller must check if a
+  // dead transition is needed and then release the RefPtr.
   fbl::RefPtr<VmCowPages> DeadTransitionLocked(const LockedPtr& parent, const LockedPtr& sibling)
       TA_REQ(lock());
 
@@ -1024,24 +971,16 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   bool is_hidden() const;
   bool can_decommit_zero_pages() const;
 
-  PageSourceType page_source_type() const {
-    if (!page_source_) {
-      return PageSourceType::Anonymous;
-    }
-    if (page_source_->properties().is_user_pager) {
-      return PageSourceType::UserPager;
-    }
-    return PageSourceType::Contiguous;
-  }
+  PageSourceType page_source_type() const;
 
   // Returns whether or not performing a bidirectional clone would result in a valid tree structure.
   // This does not perform checks on whether there are pinned pages, or if a bidirectional clone
   // would semantically make sense. Additionally the target |parent| for the new node should be
-  // passed in, which may or may not be the same as |parent_|.
+  // passed in, which may or may not be the same as |parent_locked()|.
   bool can_bidirectional_clone_locked(const LockedPtr& parent) const TA_REQ(lock()) {
     // If the immediate node has a page source of any kind then bidirectional cloning is not
     // possible. A page source is otherwise permitted in the tree.
-    if (page_source_) {
+    if (page_source()) {
       return false;
     }
 
@@ -1054,7 +993,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
     // If there is a parent then either that parent is hidden, or the parent is the root of the
     // tree. This forbids creating a bi-directional clone at the end of chain of unidirectional
     // clones.
-    if (parent && parent.locked().parent_ && !parent->is_hidden()) {
+    if (parent && parent.locked().parent_locked() && !parent->is_hidden()) {
       return false;
     }
 
@@ -1071,18 +1010,12 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
     // Any parent must not be hidden. This transitively ensures that there is a never a
     // unidirectional clone anywhere below a hidden parent.
-    if (parent_ && is_parent_hidden_locked()) {
+    if (is_parent_hidden_locked()) {
       return false;
     }
 
     return true;
   }
-
-  // See |ForEveryOwnedHierarchyPageInRange|. Each entry given to `T` is constant and may not be
-  // modified in any way.
-  template <typename T>
-  zx_status_t ForEveryOwnedHierarchyPageInRangeLocked(T func, uint64_t offset, uint64_t size,
-                                                      const LockedPtr& parent) const TA_REQ(lock());
 
   // See |ForEveryOwnedHierarchyPageInRange|. Each entry given to `T` is a VmPageOrMarkerRef, which
   // supports limited mutation.
@@ -1151,9 +1084,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   zx_status_t ReplaceReferenceWithPageLocked(VmPageOrMarkerRef page_or_mark, uint64_t offset,
                                              AnonymousPageRequest* page_request) TA_REQ(lock());
 
-  zx_status_t AllocateCopyPage(paddr_t parent_paddr, VmPageDoublyLinkedList* alloc_list,
-                               AnonymousPageRequest* request, vm_page_t** clone);
-
   // Helper for allocating and initializing a loaned page.
   template <typename F>
   zx::result<vm_page_t*> AllocLoanedPage(F allocated);
@@ -1167,31 +1097,27 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // Helper for removing a page from the PageQueues and adding to a deferred ops for later freeing.
   void RemovePageLocked(vm_page_t* page, DeferredOps& ops) TA_REQ(lock());
 
-  // Helper class for managing a two part add page transaction. This object allows adding a page to
+  // Helper class for managing a two-part add page transaction. This object allows adding a page to
   // be split into a check and allocation, which can fail, with the final insertion, which cannot
   // fail.
+  //
+  // The transaction state lives in Rust (vm_cow_pages.rs); this is a thin wrapper over Rust-owned
+  // storage so that C++ callers can hold one across a Begin*/Complete pair.
   class AddPageTransaction {
    public:
-    AddPageTransaction(VmPageOrMarkerRef slot, uint64_t offset, CanOverwriteSlot overwrite)
-        : slot_(slot), offset_(offset), overwrite_(overwrite) {}
-    AddPageTransaction(AddPageTransaction&& other)
-        : slot_(other.slot_), offset_(other.offset_), overwrite_(other.overwrite_) {
-      other.slot_ = VmPageOrMarkerRef();
-    }
-    ~AddPageTransaction() { DEBUG_ASSERT(!slot_); }
+    AddPageTransaction(AddPageTransaction&& other);
+    ~AddPageTransaction();
     AddPageTransaction(const AddPageTransaction&) = delete;
     AddPageTransaction& operator=(const AddPageTransaction&) = delete;
     AddPageTransaction& operator=(AddPageTransaction&&) = delete;
 
-    void Cancel(VmPageList& pl);
-    VmPageOrMarker Complete(VmPageOrMarker p);
-    uint64_t offset() const { return offset_; }
-    CanOverwriteSlot overwrite() const { return overwrite_; }
-
    private:
-    VmPageOrMarkerRef slot_;
-    const uint64_t offset_;
-    const CanOverwriteSlot overwrite_;
+    friend VmCowPages;
+    // Leaves |storage_| uninitialized; only the Begin* forwarders construct one, and they always
+    // have it initialized by Rust before it is destroyed.
+    AddPageTransaction() = default;
+
+    [[maybe_unused]] OpaqueStorage<16, 8> storage_;
   };
 
   // Performs initial checks and slot allocations for inserting a new page at the specified
@@ -1200,8 +1126,8 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // |overwrite| controls how the function handles pre-existing content at |offset|. If |overwrite|
   // does not permit replacing the content, ZX_ERR_ALREADY_EXISTS will be returned.
   //
-  // On success the returned |AddPageTransaction| *must* be used in a call to either
-  // |CompleteAddPageLocked|, |CompleteAddNewPageLocked| or |CancelAddPageLocked|.
+  // On success the returned |AddPageTransaction| *must* be used in a call to
+  // |CompleteAddPageLocked| (or cancelled from Rust).
   //
   // No other |page_list_| operations should be performed until the transaction is complete, and
   // starting or ending a transaction should be assumed to invalidate any page_list_ iterators or
@@ -1231,24 +1157,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   [[nodiscard]] VmPageOrMarker CompleteAddPageLocked(AddPageTransaction& transaction,
                                                      VmPageOrMarker&& p, DeferredOps* deferred)
       TA_REQ(lock());
-
-  // Similar to |CompleteAddPageLocked| except a |vm_page_t| is provided that is assumed to not yet
-  // be in the |OBJECT| state, this page may also be optionally zeroed.
-  [[nodiscard]] VmPageOrMarker CompleteAddNewPageLocked(AddPageTransaction& transaction,
-                                                        vm_page_t* page, bool zero,
-                                                        DeferredOps* deferred) TA_REQ(lock());
-
-  // Cancels an add page transaction and potentially frees the unused slot. It is required to call
-  // this, instead of dropping an |AddPageTransaction| to ensure the page list does not gather empty
-  // nodes. If the transaction was created with |BeginAddPageWithSlotLocked| then it is the
-  // responsibility of the caller to know whether their slot might still be valid or not after
-  // cancelling. Once cancelled the transaction must not have another further complete or cancel
-  // calls against it.
-  void CancelAddPageLocked(AddPageTransaction& transaction) TA_REQ(lock());
-
-  // Helper for checking the |overwrite| conditions on a given slot.
-  zx_status_t CheckOverwriteConditionsLocked(uint64_t offset, const VmPageOrMarker& slot,
-                                             CanOverwriteSlot overwrite) TA_REQ(lock());
 
   // Add a page to the object at |offset|. This is just a wrapper around performing
   // |BeginAddPageLocked| and then |CompleteAddPageLocked|, with error handling to perform a free of
@@ -1306,38 +1214,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // ignored, and if there is content then this will still return what would be used to re-populate
   // that slot.
   PageLookup FindInitialPageContentLocked(uint64_t offset) TA_REQ(lock());
-
-  // Helper function that 'forks' a page into |offset| of the current node, which must be a visible
-  // node. If this function successfully inserts the page, it returns ZX_OK and populates
-  // |out_page|. |page_request| must be provided and if ZX_ERR_SHOULD_WAIT is returned then this
-  // indicates a transient allocation failure that should be resolved by waiting on the page_request
-  // and retrying.
-  //
-  // The source page that is being forked has already been calculated - it is |page|, which
-  // is currently in |page_owner| at offset |owner_offset|. |page_owner| must be a hidden node.
-  //
-  // This function is responsible for ensuring that COW clones never result in worse memory
-  // consumption than simply creating a new VMO and memcpying the content. If |page| is not shared
-  // at all, then this function assumes it is only accessible to this node. In that case |page| is
-  // removed from |page_owner| and migrated into this node. Forking the page in that case would just
-  // make |page| inaccessible, leaving |page| committed for no benefit.
-  //
-  // To handle memory allocation failure, this function allocates a slot in this node for the page
-  // before modifying the source page or page list in |page_owner|. If that allocation fails, then
-  // these are not altered.
-  //
-  // |page| must not be the zero-page, as there is no need to do the complex page fork logic to
-  // reduce memory consumption in that case.
-  zx_status_t CloneCowPageLocked(uint64_t offset, VmPageDoublyLinkedList* alloc_list,
-                                 VmCowPages* page_owner, vm_page_t* page, uint64_t owner_offset,
-                                 DeferredOps& deferred, AnonymousPageRequest* page_request,
-                                 vm_page_t** out_page) TA_REQ(lock()) TA_REQ(page_owner->lock());
-
-  zx_status_t ForkMarkerLocked(uint64_t offset, VmPageDoublyLinkedList* alloc_list,
-                               VmCowPages* marker_owner, VmPageOrMarkerRef marker,
-                               uint64_t owner_offset, DeferredOps& deferred,
-                               AnonymousPageRequest* page_request, vm_page_t** out_page)
-      TA_REQ(lock()) TA_REQ(marker_owner->lock());
 
   // Helper function for reducing the share count of content in a hidden node, and freeing it if it
   // is no longer referenced.
@@ -1432,6 +1308,10 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
     ReleaseOwnedPagesRangeLocked(start, size_locked() - start, parent, freed_list);
   }
 
+  // Fast path for releasing all owned pages of a root VmCowPages (with no parent_).
+  __ALWAYS_INLINE void ReleaseAllOwnedPagesRootLocked(ScopedPageFreedList& freed_list)
+      TA_REQ(lock());
+
   // Similar to |ReleaseOwnedPagesLocked|, but only releases the specified range, and as such
   // provides no guarantee on the value of |parent_limit_|, with respect to |offset|, requiring the
   // caller to handle any issues with potential visibility into the parent range and content that
@@ -1447,9 +1327,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // the two vmos are in a valid state and can continue being used, but the parent must be retained
   // and cannot be deleted.
   bool MergeContentWithChildLocked() TA_REQ(lock());
-
-  // Moves an existing page to the wired queue as a consequence of the page being pinned.
-  void MoveToPinnedLocked(vm_page_t* page, uint64_t offset) TA_REQ(lock());
 
   // Updates the page queue of an existing non-pinned page, moving it to whichever queue is
   // appropriate.
@@ -1475,8 +1352,9 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // Helper to invalidate any DIRTY requests in the specified range by spuriously resolving them.
   void InvalidateDirtyRequestsLocked(uint64_t offset, uint64_t len) TA_REQ(lock());
 
-  // Helper to invalidate any READ requests in the specified range by spuriously resolving them.
-  void InvalidateReadRequestsLocked(uint64_t offset, uint64_t len) TA_REQ(lock());
+  // Updates direct children's parent limits after a shrinking Resize drops lock().
+  // TODO(https://fxbug.dev/531878739): Remove once TreeWalkCursor is ported to Rust.
+  void ResizeUpdateChildLimits(uint64_t s) TA_EXCL(lock());
 
   // Removes the specified child from this objects |children_list_| and performs any hierarchy
   // updates that need to happen as a result. This does not modify the |parent_| member of the
@@ -1485,7 +1363,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   // If |removed| has a sibling to its right (i.e. next in the children_list_) then |sibling| must
   // be a locked pointer to it. The exception being if this is a hidden node with two children, in
   // which case if |removed| is the right child then |sibling| should be set to the left child.
-  void RemoveChildLocked(VmCowPages* removed, const LockedPtr& sibling) TA_REQ(lock())
+  __NO_INLINE void RemoveChildLocked(VmCowPages* removed, const LockedPtr& sibling) TA_REQ(lock())
       TA_REQ(removed->lock());
 
   // Inserts a newly created VmCowPages into this hierarchy as a child of this VmCowPages.
@@ -1497,10 +1375,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   void ReplaceChildLocked(VmCowPages* old, VmCowPages* new_child) TA_REQ(lock());
 
   void DropChildLocked(VmCowPages* c) TA_REQ(lock());
-
-  // Helper to check whether the requested range for LockRangeLocked() / TryLockRangeLocked() /
-  // UnlockRangeLocked() is valid.
-  bool IsLockRangeValidLocked(VmCowRange range) const TA_REQ(lock());
 
   // If page is still at offset, replace it with a different page.  If with_loaned is true, replace
   // with a loaned page.  If with_loaned is false, replace with a non-loaned page and a page_request
@@ -1536,29 +1410,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   // Internal helper for discarding a VMO. Will discard if VMO is unlocked returning the count.
   zx::result<uint64_t> DiscardPagesLocked(DeferredOps& deferred) TA_REQ(lock());
-
-  // Specialized internal version of ZeroPagesLocked that only operates for
-  // pager-backed VMOs backed by non-user pagers.
-  void ZeroPagesContiguous(VmCowRange range) TA_REQ(lock());
-
-  // Specialized internal version of ZeroPagesLocked that only operates for a
-  // VMO where there is no direct page_source_.
-  ktl::pair<zx_status_t, uint64_t> ZeroPagesNoDirectPageSourceLocked(VmCowRange range,
-                                                                     DeferredOps& deferred,
-                                                                     MultiPageRequest* page_request)
-      TA_REQ(lock());
-
-  // Specialized internal version of ZeroPagesLocked that only operates for a VMO with a user pager.
-  // |dirty_track| can be set to |true| if any zeroes inserted are to be treated as Dirty, otherwise
-  // they are not dirty tracked.
-  //
-  // Returns the number of bytes that were actually zeroed, which may be
-  // nonzero even if the returned status != ZX_OK.
-  ktl::pair<zx_status_t, uint64_t> ZeroPagesDirectUserPagerLocked(VmCowRange range,
-                                                                  bool dirty_track,
-                                                                  DeferredOps& deferred,
-                                                                  MultiPageRequest* page_request)
-      TA_REQ(lock());
 
   // Applies the specific operation to all mappings in the given range against descendants/cow
   // children. The operation is not applied for this object. Only the DeferredOps is expected to
@@ -1613,14 +1464,13 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   static constexpr uint64_t kLockOrderDelta = 3;
   static constexpr uint64_t kLockOrderRoot = UINT64_MAX - kLockOrderDelta;
   static constexpr uint64_t kLockOrderFirstAnon = UINT64_MAX / 2;
-  // As lock orders are only validated when lockdep is enabled, the storage is only defined if
-  // lockdep is enabled.
-#if (LOCK_DEP_ENABLED_FEATURE_LEVEL > 0)
-  const uint64_t lock_order_;
-#endif
 
-  // parent pointer (may be null)
-  fbl::RefPtr<VmCowPages> parent_ TA_GUARDED(lock());
+  // Parent of this node (may be null). The reference itself is owned by the Rust state.
+  VmCowPages* parent_locked() const TA_REQ(lock());
+  fbl::RefPtr<VmCowPages> take_parent_locked() TA_REQ(lock());
+  void set_parent_locked(fbl::RefPtr<VmCowPages> parent) TA_REQ(lock());
+  // The page source, if any.
+  PageSource* page_source() const;
 
   // list of every child
   fbl::TaggedDoublyLinkedList<VmCowPages*, internal::ChildListTag> children_list_
@@ -1640,9 +1490,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   class TreeWalkCursor;
   fbl::TaggedDoublyLinkedList<TreeWalkCursor*, RootListTag> root_cursor_list_ TA_GUARDED(lock());
   fbl::TaggedDoublyLinkedList<TreeWalkCursor*, CurListTag> cur_cursor_list_ TA_GUARDED(lock());
-
-  // The page source, if any.
-  const fbl::RefPtr<PageSource> page_source_;
 
   VmPageList& page_list_locked() TA_REQ(lock());
   const VmPageList& page_list_locked() const TA_REQ(lock());
@@ -1674,7 +1521,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
     Dead,
   };
 
-  void set_size_locked(uint64_t v) TA_REQ(lock());
   uint64_t parent_offset_locked() const TA_REQ(lock());
   void set_parent_offset_locked(uint64_t v) TA_REQ(lock());
   uint64_t parent_limit_locked() const TA_REQ(lock());
@@ -1684,7 +1530,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 
   uint32_t children_list_len_locked() const TA_REQ(lock());
   void set_children_list_len_locked(uint32_t v) TA_REQ(lock());
-  void set_pinned_page_count_locked(uint64_t v) TA_REQ(lock());
   void set_reclamation_event_count_locked(uint64_t v) TA_REQ(lock());
   int64_t high_priority_count_locked() const TA_REQ(lock());
   void set_high_priority_count_locked(int64_t v) TA_REQ(lock());
@@ -1695,11 +1540,6 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
   bool ever_pinned() const;
   bool ever_pinned_locked() const TA_REQ(lock());
   void set_ever_pinned_locked(bool v) TA_REQ(lock());
-  // Constructs |lock_storage|, acquiring the page source lock of the root of this hierarchy if it
-  // has a page source. Called from the Rust DeferredOps constructor.
-  // TODO(https://fxbug.dev/531878739): Remove once the page source lock walk is ported to Rust.
-  void InitDeferredPageSourceLock(ffi::Uninitialized<DeferredPageSourceLock>* lock_storage)
-      TA_EXCL(lock());
 };
 
 // Implements a cursor that allows for retrieving successive pages over a range in a VMO. The
@@ -1710,7 +1550,7 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 // explicitly, how many queries have been done, and the methods do not return errors if more slots
 // are queried than was originally requested in the range. They will, however, assert and panic.
 //
-// There are three controls provided by this object.
+// There are two controls provided by this object.
 //
 //   Zero forks: By default new zero pages will be considered zero forks and added to the zero page
 //   scanner list, this can be disabled with |DisableZeroFork|.
@@ -1718,18 +1558,16 @@ class VmCowPages final : public fbl::ContainableBaseClasses<
 //   Access time: By default pages that are returned will be considered accessed. This can be
 //   changed with |DisableMarkAccessed|.
 //
-//   Allocation lists: By default pages will be acquired from the pmm as needed. An allocation list
-//   can be given use |GiveAllocList|.
-//
 // The VMO lock *must* be held contiguously from the call to GetLookupCursorLocked over the entire
 // usage of this object. Callers can assume that for any vm_page_t* that is returned that the lock
 // of the owner of that page is held up until the next operation performed on the cursor.
+//
+// The cursor state and implementation live in Rust (vm_cow_pages.rs); this is a thin wrapper over
+// Rust-owned storage for the callers that are still C++, and only has the methods they use. As the
+// Rust cursor is address sensitive this cannot be copied or moved, and is constructed in place.
 class VmCowPages::LookupCursor {
  public:
-  ~LookupCursor() {
-    InvalidateCursor();
-    DEBUG_ASSERT(!alloc_list_);
-  }
+  ~LookupCursor();
 
   // Convenience struct holding the return result of the Require* methods.
   struct RequireResult {
@@ -1756,37 +1594,10 @@ class VmCowPages::LookupCursor {
                                              DeferredOps& deferred, MultiPageRequest* page_request)
       TA_REQ(lock());
 
-  // Returned page will only be read from. This can return zero pages or pages from a parent VMO.
-  // A DeferredOps is required to be passed in, even though a Read does not ever directly generate
-  // any deferred actions, to enforce the requirement that all operations on a pager backed VMO are
-  // serialized with the paged_vmo_lock. Having to present a DeferredOps here is a simple way to
-  // ensure this lock is held.
-  zx::result<RequireResult> RequireReadPage(uint64_t max_request_pages, DeferredOps& deferred,
-                                            MultiPageRequest* page_request) TA_REQ(lock());
-
   // Returned page will be readable or writable based on the |will_write| flag.
   zx::result<RequireResult> RequirePage(bool will_write, uint64_t max_request_pages,
                                         DeferredOps& deferred, MultiPageRequest* page_request)
-      TA_REQ(lock()) {
-    // Being writable implies owning the page, so forward to the correct operation.
-    if (will_write) {
-      return RequireOwnedPage(true, max_request_pages, deferred, page_request);
-    }
-    return RequireReadPage(max_request_pages, deferred, page_request);
-  }
-
-  // The IfExistPages methods is intended to be cheaper than the Require* methods and to allow for
-  // performing actions if pages already exist, without performing allocations. As a result this
-  // may fail to return pages in scenarios that Require* methods would, and in general are allowed
-  // to always fail for any reason.
-  // These methods cannot generate page requests and will not perform allocations or otherwise
-  // mutate the VMO contents and will not update the access time of the pages.
-
-  // Walks up to |max_pages| from the current offset, filling in |paddrs| as long as there are
-  // actual pages and, if |will_write| is true, that they can be written to. The return value is
-  // the number of contiguous pages found and filled into |paddrs|, and the cursor is incremented
-  // by that many pages.
-  uint64_t IfExistPages(bool will_write, uint64_t max_pages, paddr_t* paddrs) TA_REQ(lock());
+      TA_REQ(lock());
 
   // Checks the current slot for a page and returns it. This does not return zero pages and, due to
   // the lack of taking a page request, will not perform copy-on-write allocations or dirty
@@ -1794,268 +1605,38 @@ class VmCowPages::LookupCursor {
   // The internal cursor is always incremented regardless of the return value.
   vm_page_t* MaybePage(bool will_write) TA_REQ(lock());
 
-  // Has similar properties of |MaybePage|, except it returns how many times in a row |MaybePage|
-  // would have returned a nullptr. Regardless of the return value of this method, it is not
-  // guaranteed that the next call to |MaybePage| will not be a nullptr. The cursor is incremented
-  // by the number of pages returned.
-  uint64_t SkipMissingPages() TA_REQ(lock());
-
-  // Provides a list of pages that can be used to service any allocations. This is useful if you
-  // know you will be looking up multiple absent pages and want to avoid repeatedly hitting the pmm
-  // for single pages.
-  // If a list is provided then ClearAllocList must be called prior to the cursor being destroyed.
-  void GiveAllocList(VmPageDoublyLinkedList* alloc_list) {
-    DEBUG_ASSERT(alloc_list);
-    alloc_list_ = alloc_list;
-  }
-
-  // Clears any remaining allocation list. This does not free any remaining pages, and it is the
-  // callers responsibility to check the list and free any pages.
-  void ClearAllocList() {
-    DEBUG_ASSERT(alloc_list_);
-    alloc_list_ = nullptr;
-  }
-
   // Disables placing newly allocated zero pages in the zero fork list.
-  void DisableZeroFork() { zero_fork_ = false; }
+  void DisableZeroFork();
 
   // Indicates that any existing pages that are returned should not be considered accessed and have
   // their accessed times updated.
-  void DisableMarkAccessed() { mark_accessed_ = false; }
+  void DisableMarkAccessed();
 
   // Exposed for lock assertions.
-  Lock<CriticalMutex>* lock() const TA_RET_CAP(target_->lock_ref()) { return target_->lock(); }
-  Lock<CriticalMutex>& lock_ref() const TA_RET_CAP(target_->lock_ref()) {
-    return target_->lock_ref();
+  Lock<CriticalMutex>* lock() const TA_RET_CAP(target()->lock_ref()) { return target()->lock(); }
+  Lock<CriticalMutex>& lock_ref() const TA_RET_CAP(target()->lock_ref()) {
+    return target()->lock_ref();
   }
 
-  LookupCursor(LookupCursor& other) = delete;
-  LookupCursor(LookupCursor&& other) = default;
+  LookupCursor(const LookupCursor&) = delete;
+  LookupCursor(LookupCursor&&) = delete;
+  LookupCursor& operator=(const LookupCursor&) = delete;
+  LookupCursor& operator=(LookupCursor&&) = delete;
 
-  LookupCursor(VmCowPages* target, VmCowRange range)
-      : target_(target),
-        offset_(range.offset),
-        end_offset_(range.end()),
-        target_directly_backed_by_user_pager_(target->page_source_type() ==
-                                              PageSourceType::UserPager),
-        zero_fork_(!target_directly_backed_by_user_pager_ && target->can_decommit_zero_pages()) {}
+  // The lock of |target| must be held from construction until the cursor is destroyed.
+  LookupCursor(VmCowPages* target, VmCowRange range);
 
  private:
-  // Note: Some of these methods are marked __ALWAYS_INLINE as doing so has a dramatic performance
-  // improvement, and is worth the increase in code size. Due to gcc limitations to mark them
-  // __ALWAYS_INLINE they need to be declared here in the header.
+  // The target the cursor was constructed with.
+  VmCowPages* target() const;
 
-  // Increments the cursor to the next offset. Doing so may invalidate the cursor and requiring
-  // recalculating.
-  __ALWAYS_INLINE void IncrementCursor() TA_REQ(lock()) {
-    offset_ += kPageSize;
-    if (offset_ == owner_info_.visible_end) {
-      // Have reached either the end of the valid iteration range, or the end of the visible portion
-      // of the owner. In the latter case we invalidate the cursor as we need to walk up the
-      // hierarchy again to find the next owner that applies to this slot.
-      // In the case where we have reached the end of the range, i.e. offset_ is also equal to
-      // end_offset_, there is nothing we need to do, but to ensure that an error is generated if
-      // the user incorrectly attempts to get another page we also invalidate the owner.
-      InvalidateCursor();
-    } else {
-      // Increment the owner offset and step the page list cursor to the next slot.
-      owner_info_.owner_offset += kPageSize;
-      owner_info_.cursor.step();
-      owner_cursor_ = owner_info_.cursor.current_ref();
-
-      // When iterating, it's possible that we need to find a new owner even before we hit the
-      // visible_end. This happens since even if we have no content at our cursor, we might have a
-      // parent with content, and the visible_end is tracking the range visible in us from the
-      // target and does not imply we have all the content.
-      // Consider a simple hierarchy where the root has a page in slot 1, [.P.], then its child has
-      // a page in slot 0 [P...] and then its child, the target, has no pages [...] A cursor on this
-      // range will initially find the owner as this middle object, and a visible length of 3 pages.
-      // However, when we step the cursor we clearly need to then walk up to our parent to get the
-      // page. In this case we would ideally walk up to the parent, if there is one, and check for
-      // content, or if no parent keep returning empty slots. Unfortunately once the cursor returns
-      // a nullptr we cannot know where the next content might be. To make things simpler we just
-      // invalidate owner if we hit this case and re-walk from the bottom again.
-      // Whether or not a parent might have content is a combination of
-      //  1. There must be a parent and the offset within the parent limit
-      //  2. Either the slot is empty, meaning we see the parent, and the node does not use parent
-      //     content markers. Or there is a parent content marker.
-      auto can_see_parent = [&]() TA_REQ(lock()) -> bool {
-        if (!owner_info_.owner.locked_or(target_).parent_) {
-          return false;
-        }
-        if (owner_info_.owner_offset >=
-            owner_info_.owner.locked_or(target_).parent_limit_locked()) {
-          return false;
-        }
-        if (owner_info_.owner.locked_or(target_).node_has_parent_content_markers()) {
-          return owner_cursor_->IsParentContent();
-        }
-        return owner_cursor_->IsEmpty();
-      };
-      if (!owner_cursor_ || can_see_parent()) {
-        InvalidateCursor();
-      }
-    }
-  }
-
-  // Increments the current offset by the given delta, but invalidates the cursor itself requiring
-  // it to be recalculated next time EstablishCursor is called.
-  void IncrementOffsetAndInvalidateCursor(uint64_t delta);
-
-  // Returns whether the cursor is currently valid or needs to be re-calculated.
-  bool IsCursorValid() const { return is_valid_; }
-
-  // Calculates the current cursor, finding the correct owner, owner offset etc. There is always an
-  // owner and this process can never fail.
-  void EstablishCursor() TA_REQ(lock());
-
-  // Returns true if target_ is the owner.
-  bool TargetIsOwner() const { return !owner_info_.owner; }
-
-  // Invalidates the owner, so that the next page will have to perform the lookup again, walking up
-  // the hierarchy if needed.
-  void InvalidateCursor() {
-    // Mark the cursor as invalid, but do not drop the owner lock. This ensures that the up until
-    // the next page lookup is performed the lock for the owner of the page most recently returned
-    // remains held.
-    is_valid_ = false;
-  }
-
-  // Helpers for querying the state of the cursor.
-  bool CursorIsPage() const { return owner_cursor_ && owner_cursor_->IsPage(); }
-  bool CursorIsMarker() const { return owner_cursor_ && owner_cursor_->IsMarker(); }
-  bool CursorIsEmpty() const { return !owner_cursor_ || owner_cursor_->IsEmpty(); }
-  bool CursorIsParentContent() const { return owner_cursor_ && owner_cursor_->IsParentContent(); }
-  bool CursorIsReference() const { return owner_cursor_ && owner_cursor_->IsReference(); }
-  // Checks if the cursor is exactly at a sentinel, and not generally inside an interval.
-  bool CursorIsIntervalZero() const { return owner_cursor_ && owner_cursor_->IsIntervalZero(); }
-
-  // Checks if the cursor, as determined by the current offset and not the literal
-  // owner_info_.cursor, is in a zero interval.
-  bool CursorIsInIntervalZero() const TA_REQ(lock()) {
-    return CursorIsIntervalZero() ||
-           owner_info_.owner.locked_or(target_).page_list_locked().IsOffsetInZeroInterval(
-               owner_info_.owner_offset);
-  }
-
-  // The cursor can be considered to have content of zero if either it points at a zero marker, or
-  // the cursor itself is empty and content is initially zero. Content is initially zero if either
-  // there isn't a page source, or the offset is in a zero interval.
-  // If a page source is not a user pager then we could consider it to be zero, except we
-  // would not necessarily be able to fork that zero page to create an owned/writable page. In
-  // practice this case only exists for contiguous VMOs, and the way they are used makes optimizing
-  // to return the zero page in the case of reads not beneficial.
-  bool CursorIsContentZero() const TA_REQ(lock());
-
-  // A usable page is either just any page, if not writing, or if writing, a page that is owned by
-  // the target and doesn't need any dirty transitions. i.e., a page that is ready to use right now.
-  bool CursorIsUsablePage(bool writing) {
-    return CursorIsPage() && (!writing || (TargetIsOwner() && !TargetDirtyTracked()));
-  }
-
-  // Determines whether the zero content at the current cursor should be supplied as dirty or not.
-  // This is only allowed to be called if CursorIsContentZero is true.
-  bool TargetZeroContentSupplyDirty(bool writing) const TA_REQ(lock());
-
-  // Returns whether the target is tracking the dirtying of content with dirty pages and dirty
-  // transitions.
-  bool TargetDirtyTracked() const { return target_directly_backed_by_user_pager_; }
-
-  // Turns the supplied page into a result. Does not increment the cursor. |in_target| specifies
-  // whether the page is known to be in target_ or in some parent object.
-  RequireResult PageAsResultNoIncrement(vm_page_t* page, bool in_target);
-
-  // Turns the current cursor, which must be a page, into a result and handles any access time
-  // updating. Increments the cursor.
-  __ALWAYS_INLINE RequireResult CursorAsResult() TA_REQ(lock()) {
-    if (mark_accessed_) {
-      Pmm::Node().GetPageQueues()->MarkAccessed(owner_cursor_->Page());
-    }
-    // Inform PageAsResult whether the owner is the target_, but otherwise let it calculate the
-    // actual writability of the page.
-    RequireResult result = PageAsResultNoIncrement(owner_cursor_->Page(), TargetIsOwner());
-    IncrementCursor();
-    return result;
-  }
-
-  // Allocates a new page for the target that is a copy of the provided |source| page. On success
-  // page is inserted into target at the current offset_ and the cursor is incremented.
-  zx::result<RequireResult> TargetAllocateCopyPageAsResult(vm_page_t* source,
-                                                           DirtyState dirty_state,
-                                                           VmCowPages::DeferredOps& deferred,
-                                                           AnonymousPageRequest* page_request)
-      TA_REQ(lock());
-
-  // Attempts to turn the current cursor, which must be a reference, into a page.
-  zx_status_t CursorReferenceToPage(AnonymousPageRequest* page_request) TA_REQ(lock());
-
-  // Helpers for generating read or dirty requests for the given maximal range.
-  zx_status_t ReadRequest(uint64_t max_request_pages, PageRequest* page_request) TA_REQ(lock());
-  zx_status_t DirtyRequest(uint64_t max_request_pages, LazyPageRequest* page_request)
-      TA_REQ(lock());
-
-  // Target always exists. This is provided in the constructor and will always be non-null.
-  VmCowPages* const target_;
-
-  // The current offset_ in target_. This will always be <= end_offset_ and is only allowed to
-  // increase. The validity of this range is checked prior to construction by GetLookupCursor
-  uint64_t offset_ = 0;
-
-  // The offset_ in target_ at which the cursor ceases being valid. The end_offset_ itself will
-  // never be used as a valid offset_. VMOs are designed such that the end of a VMO+1 will not
-  // overflow.
-  const uint64_t end_offset_;
-
-  // Captures information about the cursor owner. The different fields can be interpreted as
-  // follows.
-  //
-  // owner_info_.cursor:
-  // Cursor in the page list of the current owner_info_.owner or target_, depending on who owns the
-  // page. Is only valid if is_valid_ is true. This is used to efficiently pull contiguous pages in
-  // the owner and the current() value of it is cached in owner_cursor_.
-  //
-  // owner_info_.owner:
-  // Represents the current owner of owner_cursor_/owner_info_.cursor. Can be non-null while
-  // owner_info_.cursor is null to indicate a lack of content, although in this case the
-  // owner can also be assumed to be the root. If owner_info_.owner is null while is_valid_ is true,
-  // target_ is the owner of the cursor.
-  //
-  // owner_info_.owner_offset:
-  // The offset_ normalized to the current owner. This is equal to offset_ when TargetIsOwner().
-  //
-  // owner_info_.visible_end:
-  // Tracks the offset in target_ at which the current owner_info_.cursor becomes invalid. This
-  // range essentially means that no VMO between target_ and owner_info_.owner had any content, and
-  // so the cursor in owner is free to walk contiguous pages up to this point. This does not mean
-  // that there is no content in the parent_ of the owner, and so even if owner_info_.visible_end is
-  // not reached, if an empty slot is found the parent_ must then be checked. See IncrementCursor
-  // for more details.
-  PageLookup owner_info_;
-
-  // This is a cache of owner_info_.cursor.current()
-  VmPageOrMarkerRef owner_cursor_;
-
-  // Value of target_->page_source_type() == PageSourceType::UserPager cached on
-  // creation as there is spare padding space to store it here, and needed to retrieve this value to
-  // initialize zero_fork_ anyway.
-  const bool target_directly_backed_by_user_pager_;
-
-  // Tracks whether zero forks should be tracked and placed in the corresponding page queue. This is
-  // initialized to true if it's legal to place pages in the zero fork queue, which requires that
-  // target_ not be pager backed.
-  bool zero_fork_ = false;
-
-  // Whether existing pages should be have their access time updated when they are returned.
-  bool mark_accessed_ = true;
-
-  // Whether the cursor is valid. The owner_info_ can only be used if is_valid_ is true, otherwise
-  // it needs to be computed with EstablishCursor().
-  bool is_valid_ = false;
-
-  // Optional allocation list that will be used for any page allocations.
-  VmPageDoublyLinkedList* alloc_list_ = nullptr;
-
-  friend VmCowPages;
+  // Storage for the Rust LookupCursor, whose size depends on whether its LockedPtr carries lockdep
+  // state.
+#if defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL >= 2
+  [[maybe_unused]] OpaqueStorage<160, 8> storage_;
+#else
+  [[maybe_unused]] OpaqueStorage<112, 8> storage_;
+#endif
 };
 
 class ScopedPageFreedList {
@@ -2114,9 +1695,9 @@ class VmCowPages::DeferredOps {
   const VmCowPages* self() const;
 
 #if defined(LOCK_DEP_ENABLED_FEATURE_LEVEL) && LOCK_DEP_ENABLED_FEATURE_LEVEL >= 2
-  [[maybe_unused]] OpaqueStorage<136, 8> storage_{};
+  [[maybe_unused]] OpaqueStorage<128, 8> storage_{};
 #else
-  [[maybe_unused]] OpaqueStorage<104, 8> storage_{};
+  [[maybe_unused]] OpaqueStorage<88, 8> storage_{};
 #endif
 };
 
@@ -2134,7 +1715,7 @@ class VmCowPages::DeferredOps {
 // * Handles traversing up the VmCowPages hierarchy to ensure that high priority status is
 // propagated.
 //
-// Callers should prefer |VmMapping::SetMemoryPriorityLocked|,
+// Callers should prefer |VmMapping::set_memory_priority_locked|,
 // |VmMapping::set_memory_priority_default_locked_object|, or
 // |VmMapping::set_memory_priority_high_already_positive_locked_object|, if applicable.
 //
@@ -2234,15 +1815,35 @@ class PriorityChanger {
   ktl::optional<VmCowPages::DeferredOps> root_deferred_;
 };
 
+// What the Rust LookupCursor Require* methods return to the C++ LookupCursor: a
+// zx::result<RequireResult> flattened so that it is returned in two registers. |page| and
+// |writable| are only meaningful if |status| is ZX_OK.
+//
+// |page| is a uintptr_t and not a vm_page_t*: on x86-64 Clang lowers a {pointer, integer} struct to
+// `{ ptr, i64 }` and rustc lowers the Rust mirror to `{ i64, i64 }`, and the mismatch stops
+// cross-language inlining of the rust_vm_cow_pages_lookup_cursor_require_* trampolines.
+// TODO(https://fxbug.dev/537458631): Make this a vm_page_t* once cross-language inlining works.
+struct VmCowPagesLookupCursorRequireResult {
+  uintptr_t page;
+  zx_status_t status;
+  bool writable;
+};
+
+// What rust_vm_cow_pages_zero_pages_locked returns to VmCowPages::ZeroPagesLocked: a
+// ktl::pair<zx_status_t, uint64_t> flattened so that it is returned in two registers.
+struct VmCowPagesZeroPagesResult {
+  zx_status_t status;
+  uint64_t zeroed_len;
+};
+
 extern "C" {
 void rust_vm_cow_pages_state_init(void* storage, uint32_t pmm_alloc_flags, uint32_t options,
-                                  uint64_t size);
+                                  uint64_t size, PageSource* page_source, uint64_t lock_order);
 void rust_vm_cow_pages_destruct(void* storage);
 void rust_vm_cow_pages_assert_canary(const VmCowPages* cow);
 __PURE uint32_t rust_vm_cow_pages_pmm_alloc_flags(const VmCowPages* cow);
 __PURE uint32_t rust_vm_cow_pages_options(const VmCowPages* cow);
 __PURE uint64_t rust_vm_cow_pages_size_locked(const VmCowPages* cow);
-void rust_vm_cow_pages_set_size_locked(const VmCowPages* cow, uint64_t v);
 __PURE uint64_t rust_vm_cow_pages_parent_offset_locked(const VmCowPages* cow);
 void rust_vm_cow_pages_set_parent_offset_locked(const VmCowPages* cow, uint64_t v);
 __PURE uint64_t rust_vm_cow_pages_parent_limit_locked(const VmCowPages* cow);
@@ -2255,7 +1856,6 @@ __PURE uint64_t rust_vm_cow_pages_heap_allocation_bytes_locked(const VmCowPages*
 __PURE uint32_t rust_vm_cow_pages_children_list_len_locked(const VmCowPages* cow);
 void rust_vm_cow_pages_set_children_list_len_locked(const VmCowPages* cow, uint32_t v);
 __PURE uint64_t rust_vm_cow_pages_pinned_page_count_locked(const VmCowPages* cow);
-void rust_vm_cow_pages_set_pinned_page_count_locked(const VmCowPages* cow, uint64_t v);
 __PURE uint64_t rust_vm_cow_pages_reclamation_event_count_locked(const VmCowPages* cow);
 void rust_vm_cow_pages_set_reclamation_event_count_locked(const VmCowPages* cow, uint64_t v);
 __PURE int64_t rust_vm_cow_pages_high_priority_count_locked(const VmCowPages* cow);
@@ -2277,7 +1877,6 @@ __PURE bool rust_vm_cow_pages_is_hidden(const VmCowPages* cow);
 __PURE bool rust_vm_cow_pages_can_decommit_zero_pages(const VmCowPages* cow);
 zx_status_t rust_vm_cow_pages_query_pager_vmo_stats_locked(const VmCowPages* cow, bool reset,
                                                            zx_pager_vmo_stats_t* stats);
-void rust_vm_cow_pages_move_to_pinned_locked(VmCowPages* cow, vm_page_t* page, uint64_t offset);
 void rust_vm_cow_pages_move_to_not_pinned_locked(VmCowPages* cow, vm_page_t* page, uint64_t offset);
 void rust_vm_cow_pages_set_not_pinned_locked(VmCowPages* cow, vm_page_t* page, uint64_t offset);
 void rust_vm_cow_pages_update_dirty_state_locked(VmCowPages* cow, vm_page_t* page, uint64_t offset,
@@ -2311,9 +1910,6 @@ zx_status_t rust_vm_cow_pages_alloc_uninitialized_page(VmCowPages* cow, vm_page_
                                                        AnonymousPageRequest* page_request);
 zx_status_t rust_vm_cow_pages_alloc_page(VmCowPages* cow, vm_page_t** page,
                                          AnonymousPageRequest* page_request);
-zx_status_t rust_vm_cow_pages_allocate_copy_page(VmCowPages* cow, paddr_t parent_paddr,
-                                                 VmPageDoublyLinkedList* alloc_list,
-                                                 AnonymousPageRequest* request, vm_page_t** clone);
 void rust_vm_cow_pages_initialize_vm_page(vm_page_t* page);
 zx_status_t rust_vm_cow_pages_make_page_from_reference(VmCowPages* cow,
                                                        VmPageOrMarkerRef page_or_mark,
@@ -2334,10 +1930,106 @@ void rust_vm_cow_pages_range_change_update_locked(const VmCowPages* cow, VmCowRa
 void rust_vm_cow_pages_range_change_update_mappings_locked(const VmCowPages* cow,
                                                            VmObjectPaged* paged, VmCowRange range,
                                                            VmObject::RangeChangeOp op);
+// AddPageTransaction is a private member of VmCowPages, so it crosses the FFI boundary as void*;
+// the private forwarders below pass the object's address. |out_transaction| is always initialized
+// on return (to an inert transaction on failure) so that the C++ AddPageTransaction destructor is
+// well defined on every path.
+zx_status_t rust_vm_cow_pages_begin_add_page_with_slot_locked(
+    VmCowPages* cow, uint64_t offset, VmPageOrMarkerRef slot,
+    VmCowPages::CanOverwriteSlot overwrite, void* out_transaction);
+zx_status_t rust_vm_cow_pages_begin_add_page_locked(VmCowPages* cow, uint64_t offset,
+                                                    VmCowPages::CanOverwriteSlot overwrite,
+                                                    void* out_transaction);
+void rust_vm_cow_pages_add_page_transaction_move(void* dst, void* src);
+void rust_vm_cow_pages_add_page_transaction_destroy(void* transaction);
+void rust_vm_cow_pages_complete_add_page_locked(VmCowPages* cow, void* transaction,
+                                                VmPageOrMarker* p,
+                                                VmCowPages::DeferredOps* deferred,
+                                                VmPageOrMarker* out_old);
+// The range is passed as two scalars and not as a VmCowRange because Clang and rustc lower a
+// by-value VmCowRange to different LLVM types on x86-64, stopping cross-language inlining.
+// TODO(https://fxbug.dev/537458631): Pass a VmCowRange once cross-language inlining works.
+void rust_vm_cow_pages_lookup_cursor_init(VmCowPages::LookupCursor* cursor, VmCowPages* target,
+                                          uint64_t offset, uint64_t len);
+void rust_vm_cow_pages_lookup_cursor_destroy(VmCowPages::LookupCursor* cursor);
+__PURE VmCowPages* rust_vm_cow_pages_lookup_cursor_target(const VmCowPages::LookupCursor* cursor);
+VmCowPagesLookupCursorRequireResult rust_vm_cow_pages_lookup_cursor_require_owned_page(
+    VmCowPages::LookupCursor* cursor, bool will_write, uint64_t max_request_pages,
+    VmCowPages::DeferredOps* deferred, MultiPageRequest* page_request);
+VmCowPagesLookupCursorRequireResult rust_vm_cow_pages_lookup_cursor_require_page(
+    VmCowPages::LookupCursor* cursor, bool will_write, uint64_t max_request_pages,
+    VmCowPages::DeferredOps* deferred, MultiPageRequest* page_request);
+vm_page_t* rust_vm_cow_pages_lookup_cursor_maybe_page(VmCowPages::LookupCursor* cursor,
+                                                      bool will_write);
+void rust_vm_cow_pages_lookup_cursor_disable_zero_fork(VmCowPages::LookupCursor* cursor);
+void rust_vm_cow_pages_lookup_cursor_disable_mark_accessed(VmCowPages::LookupCursor* cursor);
+zx_status_t rust_vm_cow_pages_add_new_page_locked(VmCowPages* cow, uint64_t offset, vm_page_t* page,
+                                                  VmCowPages::CanOverwriteSlot overwrite,
+                                                  VmPageOrMarker* released_page, bool zero,
+                                                  VmCowPages::DeferredOps* deferred);
+zx_status_t rust_vm_cow_pages_add_new_pages_locked(VmCowPages* cow, uint64_t start_offset,
+                                                   VmPageDoublyLinkedList* pages,
+                                                   VmCowPages::CanOverwriteSlot overwrite,
+                                                   bool zero, VmCowPages::DeferredOps* deferred);
+zx_status_t rust_vm_cow_pages_decommit_range(VmCowPages* cow, VmCowRange range);
+void rust_vm_cow_pages_get_attributed_memory_in_range_locked(
+    const VmCowPages* cow, VmCowRange range, VmCowPages::AttributionCounts* out_counts);
+uint8_t rust_vm_cow_pages_page_would_read_zero_locked(VmCowPages* cow, uint64_t page_offset);
+zx_status_t rust_vm_cow_pages_lookup_readable_locked(VmCowPages* cow, VmCowRange range,
+                                                     void* lookup_fn);
+zx_status_t rust_vm_cow_pages_prepare_for_write_locked(VmCowPages* cow, VmCowRange range,
+                                                       LazyPageRequest* page_request,
+                                                       uint64_t* dirty_len_out);
+zx_status_t rust_vm_cow_pages_fail_page_requests_locked(VmCowPages* cow, VmCowRange range,
+                                                        zx_status_t error_status);
+zx_status_t rust_vm_cow_pages_writeback_begin_locked(VmCowPages* cow, VmCowRange range,
+                                                     bool is_zero_range);
+zx_status_t rust_vm_cow_pages_writeback_end_locked(VmCowPages* cow, VmCowRange range);
+void rust_vm_cow_pages_detach_source(VmCowPages* cow);
+zx_status_t rust_vm_cow_pages_unmap_and_free_pages_locked(VmCowPages* cow, uint64_t offset,
+                                                          uint64_t len,
+                                                          VmCowPages::DeferredOps* deferred,
+                                                          uint64_t* out_freed_count);
+zx_status_t rust_vm_cow_pages_pin_range_locked(VmCowPages* cow, VmCowRange range);
+void rust_vm_cow_pages_unpin_locked(VmCowPages* cow, VmCowRange range,
+                                    VmCowPages::DeferredOps* deferred);
+zx_status_t rust_vm_cow_pages_lock_range_locked(VmCowPages* cow, VmCowRange range,
+                                                zx_vmo_lock_state_t* lock_state_out);
+zx_status_t rust_vm_cow_pages_try_lock_range_locked(VmCowPages* cow, VmCowRange range);
+zx_status_t rust_vm_cow_pages_unlock_range_locked(VmCowPages* cow, VmCowRange range);
+__PURE uint64_t rust_vm_cow_pages_lock_order(const VmCowPages* cow);
+__PURE VmCowPages* rust_vm_cow_pages_parent_locked(const VmCowPages* cow);
+VmCowPages* rust_vm_cow_pages_take_parent_locked(VmCowPages* cow);
+void rust_vm_cow_pages_set_parent_locked(VmCowPages* cow, VmCowPages* parent);
+__PURE bool rust_vm_cow_pages_is_parent_hidden_locked(const VmCowPages* cow);
+__PURE PageSource* rust_vm_cow_pages_page_source(const VmCowPages* cow);
+__PURE PageSourceType rust_vm_cow_pages_page_source_type(const VmCowPages* cow);
+__PURE bool rust_vm_cow_pages_can_evict(const VmCowPages* cow);
+__PURE bool rust_vm_cow_pages_can_borrow(const VmCowPages* cow);
+__PURE bool rust_vm_cow_pages_is_dirty_tracked(const VmCowPages* cow);
+void rust_vm_cow_pages_mark_modified_locked(VmCowPages* cow);
+VmCowPages* rust_vm_cow_pages_debug_get_parent(const VmCowPages* cow);
+zx_koid_t rust_vm_cow_pages_get_page_source_koid(const VmCowPages* cow);
+uint32_t rust_vm_cow_pages_debug_lookup_depth_locked(const VmCowPages* cow);
+void rust_vm_cow_pages_release_owned_pages_range_locked(VmCowPages* cow, uint64_t offset,
+                                                        uint64_t len, VmCowPages* parent,
+                                                        ScopedPageFreedList* freed_list);
+void rust_vm_cow_pages_invalidate_dirty_requests_locked(VmCowPages* cow, uint64_t offset,
+                                                        uint64_t len);
+zx_status_t rust_vm_cow_pages_commit_range_locked(VmCowPages* cow, VmCowRange range,
+                                                  VmCowPages::DeferredOps* deferred,
+                                                  uint64_t* committed_len,
+                                                  MultiPageRequest* page_request);
+zx_status_t rust_vm_cow_pages_resize(VmCowPages* cow, uint64_t s);
+VmCowPagesZeroPagesResult rust_vm_cow_pages_zero_pages_locked(VmCowPages* cow, VmCowRange range,
+                                                              bool dirty_track,
+                                                              VmCowPages::DeferredOps* deferred,
+                                                              MultiPageRequest* page_request);
 }
 
 // VmPageOrMarkerRef is passed by value to Rust (`rust_vm_cow_pages_make_page_from_reference`,
-// `rust_vm_cow_pages_replace_reference_with_page_locked`) as a single pointer register.
+// `rust_vm_cow_pages_replace_reference_with_page_locked`,
+// `rust_vm_cow_pages_begin_add_page_with_slot_locked`) as a single pointer register.
 static_assert(ktl::is_trivially_copyable_v<VmPageOrMarkerRef> &&
               ktl::is_trivially_destructible_v<VmPageOrMarkerRef> &&
               sizeof(VmPageOrMarkerRef) == sizeof(VmPageOrMarker*) &&
@@ -2358,7 +2050,6 @@ inline void VmCowPages::set_children_list_len_locked(uint32_t v) {
   rust_vm_cow_pages_set_children_list_len_locked(this, v);
 }
 inline uint64_t VmCowPages::size_locked() const { return rust_vm_cow_pages_size_locked(this); }
-inline void VmCowPages::set_size_locked(uint64_t v) { rust_vm_cow_pages_set_size_locked(this, v); }
 inline uint64_t VmCowPages::parent_offset_locked() const {
   return rust_vm_cow_pages_parent_offset_locked(this);
 }
@@ -2394,9 +2085,6 @@ inline void VmCowPages::set_root_parent_offset_locked(uint64_t v) {
 }
 inline uint64_t VmCowPages::pinned_page_count_locked() const {
   return rust_vm_cow_pages_pinned_page_count_locked(this);
-}
-inline void VmCowPages::set_pinned_page_count_locked(uint64_t v) {
-  rust_vm_cow_pages_set_pinned_page_count_locked(this, v);
 }
 inline uint64_t VmCowPages::ReclamationEventCountLocked() const {
   return rust_vm_cow_pages_reclamation_event_count_locked(this);
@@ -2447,9 +2135,6 @@ inline bool VmCowPages::can_decommit_zero_pages() const {
 }
 inline zx_status_t VmCowPages::QueryPagerVmoStatsLocked(bool reset, zx_pager_vmo_stats_t* stats) {
   return rust_vm_cow_pages_query_pager_vmo_stats_locked(this, reset, stats);
-}
-inline void VmCowPages::MoveToPinnedLocked(vm_page_t* page, uint64_t offset) {
-  rust_vm_cow_pages_move_to_pinned_locked(this, page, offset);
 }
 inline void VmCowPages::MoveToNotPinnedLocked(vm_page_t* page, uint64_t offset) {
   rust_vm_cow_pages_move_to_not_pinned_locked(this, page, offset);
@@ -2524,11 +2209,6 @@ inline zx_status_t VmCowPages::AllocUninitializedPage(vm_page_t** page,
 inline zx_status_t VmCowPages::AllocPage(vm_page_t** page, AnonymousPageRequest* page_request) {
   return rust_vm_cow_pages_alloc_page(this, page, page_request);
 }
-inline zx_status_t VmCowPages::AllocateCopyPage(paddr_t parent_paddr,
-                                                VmPageDoublyLinkedList* alloc_list,
-                                                AnonymousPageRequest* request, vm_page_t** clone) {
-  return rust_vm_cow_pages_allocate_copy_page(this, parent_paddr, alloc_list, request, clone);
-}
 inline zx_status_t VmCowPages::MakePageFromReference(VmPageOrMarkerRef page_or_mark,
                                                      AnonymousPageRequest* page_request) {
   return rust_vm_cow_pages_make_page_from_reference(this, page_or_mark, page_request);
@@ -2560,6 +2240,207 @@ inline void VmCowPages::RangeChangeUpdateLocked(VmCowRange range, RangeChangeOp 
 inline void VmCowPages::RangeChangeUpdateMappingsLocked(VmObjectPaged& paged, VmCowRange range,
                                                         RangeChangeOp op) {
   rust_vm_cow_pages_range_change_update_mappings_locked(this, &paged, range, op);
+}
+inline VmCowPages::AddPageTransaction::AddPageTransaction(AddPageTransaction&& other) {
+  rust_vm_cow_pages_add_page_transaction_move(this, &other);
+}
+inline VmCowPages::AddPageTransaction::~AddPageTransaction() {
+  rust_vm_cow_pages_add_page_transaction_destroy(this);
+}
+inline VmCowPages::LookupCursor::LookupCursor(VmCowPages* target, VmCowRange range) {
+  rust_vm_cow_pages_lookup_cursor_init(this, target, range.offset, range.len);
+}
+inline VmCowPages::LookupCursor::~LookupCursor() { rust_vm_cow_pages_lookup_cursor_destroy(this); }
+inline zx::result<VmCowPages::LookupCursor::RequireResult>
+VmCowPages::LookupCursor::RequireOwnedPage(bool will_write, uint64_t max_request_pages,
+                                           DeferredOps& deferred, MultiPageRequest* page_request) {
+  DEBUG_ASSERT(page_request);
+  const VmCowPagesLookupCursorRequireResult result =
+      rust_vm_cow_pages_lookup_cursor_require_owned_page(this, will_write, max_request_pages,
+                                                         &deferred, page_request);
+  if (result.status != ZX_OK) {
+    return zx::error(result.status);
+  }
+  return zx::ok(RequireResult{reinterpret_cast<vm_page_t*>(result.page), result.writable});
+}
+inline zx::result<VmCowPages::LookupCursor::RequireResult> VmCowPages::LookupCursor::RequirePage(
+    bool will_write, uint64_t max_request_pages, DeferredOps& deferred,
+    MultiPageRequest* page_request) {
+  DEBUG_ASSERT(page_request);
+  const VmCowPagesLookupCursorRequireResult result = rust_vm_cow_pages_lookup_cursor_require_page(
+      this, will_write, max_request_pages, &deferred, page_request);
+  if (result.status != ZX_OK) {
+    return zx::error(result.status);
+  }
+  return zx::ok(RequireResult{reinterpret_cast<vm_page_t*>(result.page), result.writable});
+}
+inline vm_page_t* VmCowPages::LookupCursor::MaybePage(bool will_write) {
+  return rust_vm_cow_pages_lookup_cursor_maybe_page(this, will_write);
+}
+inline void VmCowPages::LookupCursor::DisableZeroFork() {
+  rust_vm_cow_pages_lookup_cursor_disable_zero_fork(this);
+}
+inline void VmCowPages::LookupCursor::DisableMarkAccessed() {
+  rust_vm_cow_pages_lookup_cursor_disable_mark_accessed(this);
+}
+inline VmCowPages* VmCowPages::LookupCursor::target() const {
+  return rust_vm_cow_pages_lookup_cursor_target(this);
+}
+inline zx::result<VmCowPages::AddPageTransaction> VmCowPages::BeginAddPageWithSlotLocked(
+    uint64_t offset, VmPageOrMarkerRef slot, CanOverwriteSlot overwrite) {
+  __UNINITIALIZED AddPageTransaction transaction;
+  zx_status_t status = rust_vm_cow_pages_begin_add_page_with_slot_locked(this, offset, slot,
+                                                                         overwrite, &transaction);
+  if (unlikely(status != ZX_OK)) {
+    return zx::error(status);
+  }
+  return zx::ok(ktl::move(transaction));
+}
+inline zx::result<VmCowPages::AddPageTransaction> VmCowPages::BeginAddPageLocked(
+    uint64_t offset, CanOverwriteSlot overwrite) {
+  __UNINITIALIZED AddPageTransaction transaction;
+  zx_status_t status =
+      rust_vm_cow_pages_begin_add_page_locked(this, offset, overwrite, &transaction);
+  if (unlikely(status != ZX_OK)) {
+    return zx::error(status);
+  }
+  return zx::ok(ktl::move(transaction));
+}
+inline VmPageOrMarker VmCowPages::CompleteAddPageLocked(AddPageTransaction& transaction,
+                                                        VmPageOrMarker&& p, DeferredOps* deferred) {
+  VmPageOrMarker old = VmPageOrMarker::Empty();
+  rust_vm_cow_pages_complete_add_page_locked(this, &transaction, &p, deferred, &old);
+  return old;
+}
+inline zx_status_t VmCowPages::AddNewPageLocked(uint64_t offset, vm_page_t* page,
+                                                CanOverwriteSlot overwrite,
+                                                VmPageOrMarker* released_page, bool zero,
+                                                DeferredOps* deferred) {
+  return rust_vm_cow_pages_add_new_page_locked(this, offset, page, overwrite, released_page, zero,
+                                               deferred);
+}
+inline zx_status_t VmCowPages::AddNewPagesLocked(uint64_t start_offset,
+                                                 VmPageDoublyLinkedList* pages,
+                                                 CanOverwriteSlot overwrite, bool zero,
+                                                 DeferredOps* deferred) {
+  return rust_vm_cow_pages_add_new_pages_locked(this, start_offset, pages, overwrite, zero,
+                                                deferred);
+}
+inline zx_status_t VmCowPages::DecommitRange(VmCowRange range) {
+  return rust_vm_cow_pages_decommit_range(this, range);
+}
+inline VmCowPages::AttributionCounts VmCowPages::GetAttributedMemoryInRangeLocked(
+    VmCowRange range) const {
+  AttributionCounts counts;
+  rust_vm_cow_pages_get_attributed_memory_in_range_locked(this, range, &counts);
+  return counts;
+}
+inline bool VmCowPages::PageWouldReadZeroLocked(uint64_t page_offset) {
+  return rust_vm_cow_pages_page_would_read_zero_locked(this, page_offset) != 0;
+}
+inline zx_status_t VmCowPages::LookupReadableLocked(VmCowRange range,
+                                                    LookupReadableFunction lookup_fn) {
+  return rust_vm_cow_pages_lookup_readable_locked(this, range, &lookup_fn);
+}
+inline zx_status_t VmCowPages::PrepareForWriteLocked(VmCowRange range,
+                                                     LazyPageRequest* page_request,
+                                                     uint64_t* dirty_len_out) {
+  return rust_vm_cow_pages_prepare_for_write_locked(this, range, page_request, dirty_len_out);
+}
+inline zx_status_t VmCowPages::FailPageRequestsLocked(VmCowRange range, zx_status_t error_status) {
+  return rust_vm_cow_pages_fail_page_requests_locked(this, range, error_status);
+}
+inline zx_status_t VmCowPages::WritebackBeginLocked(VmCowRange range, bool is_zero_range) {
+  return rust_vm_cow_pages_writeback_begin_locked(this, range, is_zero_range);
+}
+inline zx_status_t VmCowPages::WritebackEndLocked(VmCowRange range) {
+  return rust_vm_cow_pages_writeback_end_locked(this, range);
+}
+inline void VmCowPages::DetachSource() { rust_vm_cow_pages_detach_source(this); }
+inline zx::result<uint64_t> VmCowPages::UnmapAndFreePagesLocked(uint64_t offset, uint64_t len,
+                                                                DeferredOps& deferred) {
+  uint64_t freed_count = 0;
+  zx_status_t status =
+      rust_vm_cow_pages_unmap_and_free_pages_locked(this, offset, len, &deferred, &freed_count);
+  if (unlikely(status != ZX_OK)) {
+    return zx::error(status);
+  }
+  return zx::ok(freed_count);
+}
+inline zx_status_t VmCowPages::PinRangeLocked(VmCowRange range) {
+  return rust_vm_cow_pages_pin_range_locked(this, range);
+}
+inline void VmCowPages::UnpinLocked(VmCowRange range, DeferredOps* deferred) {
+  rust_vm_cow_pages_unpin_locked(this, range, deferred);
+}
+inline zx_status_t VmCowPages::LockRangeLocked(VmCowRange range,
+                                               zx_vmo_lock_state_t* lock_state_out) {
+  return rust_vm_cow_pages_lock_range_locked(this, range, lock_state_out);
+}
+inline zx_status_t VmCowPages::TryLockRangeLocked(VmCowRange range) {
+  return rust_vm_cow_pages_try_lock_range_locked(this, range);
+}
+inline zx_status_t VmCowPages::UnlockRangeLocked(VmCowRange range) {
+  return rust_vm_cow_pages_unlock_range_locked(this, range);
+}
+inline uint64_t VmCowPages::lock_order() const { return rust_vm_cow_pages_lock_order(this); }
+inline VmCowPages* VmCowPages::parent_locked() const {
+  return rust_vm_cow_pages_parent_locked(this);
+}
+inline fbl::RefPtr<VmCowPages> VmCowPages::take_parent_locked() {
+  return fbl::ImportFromRawPtr(rust_vm_cow_pages_take_parent_locked(this));
+}
+inline void VmCowPages::set_parent_locked(fbl::RefPtr<VmCowPages> parent) {
+  rust_vm_cow_pages_set_parent_locked(this, fbl::ExportToRawPtr(&parent));
+}
+inline bool VmCowPages::is_parent_hidden_locked() const {
+  return rust_vm_cow_pages_is_parent_hidden_locked(this);
+}
+inline PageSource* VmCowPages::page_source() const { return rust_vm_cow_pages_page_source(this); }
+inline PageSourceType VmCowPages::page_source_type() const {
+  return rust_vm_cow_pages_page_source_type(this);
+}
+inline bool VmCowPages::can_evict() const { return rust_vm_cow_pages_can_evict(this); }
+inline bool VmCowPages::can_borrow() const { return rust_vm_cow_pages_can_borrow(this); }
+inline bool VmCowPages::is_dirty_tracked() const {
+  return rust_vm_cow_pages_is_dirty_tracked(this);
+}
+inline void VmCowPages::mark_modified_locked() { rust_vm_cow_pages_mark_modified_locked(this); }
+inline fbl::RefPtr<VmCowPages> VmCowPages::DebugGetParent() const {
+  return fbl::ImportFromRawPtr(rust_vm_cow_pages_debug_get_parent(this));
+}
+inline ktl::optional<zx_koid_t> VmCowPages::GetPageSourceKoid() const {
+  const zx_koid_t koid = rust_vm_cow_pages_get_page_source_koid(this);
+  if (koid == ZX_KOID_INVALID) {
+    return ktl::nullopt;
+  }
+  return koid;
+}
+inline uint32_t VmCowPages::DebugLookupDepthLocked() const {
+  return rust_vm_cow_pages_debug_lookup_depth_locked(this);
+}
+inline void VmCowPages::ReleaseOwnedPagesRangeLocked(uint64_t offset, uint64_t len,
+                                                     const LockedPtr& parent,
+                                                     ScopedPageFreedList& freed_list) {
+  rust_vm_cow_pages_release_owned_pages_range_locked(this, offset, len, parent.get(), &freed_list);
+}
+inline void VmCowPages::InvalidateDirtyRequestsLocked(uint64_t offset, uint64_t len) {
+  rust_vm_cow_pages_invalidate_dirty_requests_locked(this, offset, len);
+}
+inline zx_status_t VmCowPages::CommitRangeLocked(VmCowRange range, DeferredOps& deferred,
+                                                 uint64_t* committed_len,
+                                                 MultiPageRequest& page_request) {
+  return rust_vm_cow_pages_commit_range_locked(this, range, &deferred, committed_len,
+                                               &page_request);
+}
+inline zx_status_t VmCowPages::Resize(uint64_t size) {
+  return rust_vm_cow_pages_resize(this, size);
+}
+inline ktl::pair<zx_status_t, uint64_t> VmCowPages::ZeroPagesLocked(
+    VmCowRange range, bool dirty_track, DeferredOps& deferred, MultiPageRequest& page_request) {
+  const VmCowPagesZeroPagesResult result =
+      rust_vm_cow_pages_zero_pages_locked(this, range, dirty_track, &deferred, &page_request);
+  return {result.status, result.zeroed_len};
 }
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_COW_PAGES_H_

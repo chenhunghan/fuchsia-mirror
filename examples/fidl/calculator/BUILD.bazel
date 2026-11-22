@@ -1,0 +1,87 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        ":calculator-example-cpp",
+        ":calculator-example-rust",
+        ":calculator-example-rust-next",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)
+
+# This component combines the calculator_server & client components into one
+# realm with all necessary routing.
+fx_component_manifest(
+    name = "calculator_realm_manifest",
+    component_name = "calculator_realm",
+    manifest = "realm/meta/realm.cml",
+)
+
+fx_component(
+    name = "calculator_realm",
+    compiled_manifest = ":calculator_realm_manifest",
+)
+
+# An input file with commands for the calculator client.
+resource(
+    name = "input",
+    src = "input.txt",
+    dest = "data/input.txt",
+)
+
+fx_package(
+    name = "calculator-example-rust",
+    components = [
+        ":calculator_realm",
+        "//examples/fidl/calculator/rust/client:component",
+        "//examples/fidl/calculator/rust/server:component",
+    ],
+    resources = [":input"],
+)
+
+fx_package(
+    name = "calculator-example-rust-next",
+    components = [
+        ":calculator_realm",
+        "//examples/fidl/calculator/rust_next/client:component",
+        "//examples/fidl/calculator/rust_next/server:component",
+    ],
+    resources = [":input"],
+)
+
+fx_package(
+    name = "calculator-example-cpp",
+    components = [
+        ":calculator_realm",
+        "//examples/fidl/calculator/cpp/client:component",
+        "//examples/fidl/calculator/cpp/server:component",
+    ],
+    resources = [":input"],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        "//examples/fidl/calculator/cpp/client:calculator-client-cpp-parser-unittests",
+        "//examples/fidl/calculator/cpp/integration_test:calculator-integration-test-cpp",
+        "//examples/fidl/calculator/rust/client:calculator-client-rust-unittests",
+        "//examples/fidl/calculator/rust/server:calculator-server-rust-unittests",
+        "//examples/fidl/calculator/rust_next/client:calculator-client-rust-next-unittests",
+        "//examples/fidl/calculator/rust_next/server:calculator-server-rust-next-unittests",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)

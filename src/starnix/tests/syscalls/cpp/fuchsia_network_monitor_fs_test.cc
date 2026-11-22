@@ -69,22 +69,36 @@ TEST_F(NmfsTest, NmfsCoreNetworkFileWriteFailure) {
   // The name of the file must be an unsigned integer.
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/test",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "File name must be parseable as an unsigned integer, was string");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/test",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "File name must be parseable as an unsigned integer, was float");
 
@@ -96,211 +110,270 @@ TEST_F(NmfsTest, NmfsCoreNetworkFileWriteFailure) {
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Version must match a currently supported version");
+
+  // V1 is no longer supported.
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "version": "V1",
+    "netid": 1,
+    "mark": 56,
+    "handle": 78,
+    "dnsv4": [],
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "Version V1 is no longer supported");
 
   // The netid must match the integer provided for the file name.
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 2,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Network id must match the name of the file");
 
   // The netid must be a non-negative integer.
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1.0,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Network id must be parseable as an unsigned integer, was float");
 
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": -1,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Network id must be parseable as an unsigned integer, was negative");
 
   // The mark must be a non-negative integer.
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56.0,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Mark must be parseable as an unsigned integer, was float");
 
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": -56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Mark must be parseable as an unsigned integer, was negative");
 
   // The handle must be a non-negative integer.
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78.0,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Handle must be parseable as an unsigned integer, was float");
 
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": -78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Handle must be parseable as an unsigned integer, was negative");
 
   // The DNS fields must be arrays with correctly formatted addresses.
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": ["foo"],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "DNS v4 addresses must be in the proper format");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": ["foo"]
+    "dnsv6": ["foo"],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "DNS v6 addresses must be in the proper format");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": "192.0.2.0",
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "DNS v4 addresses must be provided in an array");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": "2001:db8::"
+    "dnsv6": "2001:db8::",
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "DNS v6 addresses must be provided in an array");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": ["192.0.2.0"]
+    "dnsv6": ["192.0.2.0"],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "DNS v4 addresses must be present in the v6 address list");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 1,
     "mark": 56,
     "handle": 78,
     "dnsv4": ["2001:db8::"],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "DNS v6 addresses must be present in the v4 address list");
 
-  // All fields must be provided.
-  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
-                         R"({
-    "netid": 1,
-    "mark": 56,
-    "handle": 78,
-    "dnsv4": [],
-    "dnsv6": []
-})",
-                         "All fields must be provided in JSON, missing version");
-  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
-                         R"({
-    "version": "V1",
-    "mark": 56,
-    "handle": 78,
-    "dnsv4": [],
-    "dnsv6": []
-})",
-                         "All fields must be provided in JSON, missing netid");
-  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
-                         R"({
-    "version": "V1",
-    "netid": 1,
-    "handle": 78,
-    "dnsv4": [],
-    "dnsv6": []
-})",
-                         "All fields must be provided in JSON, missing mark");
-  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
-                         R"({
-    "version": "V1",
-    "netid": 1,
-    "mark": 56,
-    "dnsv4": [],
-    "dnsv6": []
-})",
-                         "All fields must be provided in JSON, missing handle");
-  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
-                         R"({
-    "version": "V1",
-    "netid": 1,
-    "mark": 56,
-    "handle": 78,
-    "dnsv6": []
-})",
-                         "All fields must be provided in JSON, missing dnsv4");
-  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
-                         R"({
-    "version": "V1",
-    "netid": 1,
-    "mark": 56,
-    "handle": 78,
-    "dnsv4": []
-})",
-                         "All fields must be provided in JSON, missing dnsv6");
-}
-
-TEST_F(NmfsTest, NmfsV2NetworkFileWriteFailure) {
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
     "version": "V2",
@@ -310,7 +383,12 @@ TEST_F(NmfsTest, NmfsV2NetworkFileWriteFailure) {
     "dnsv4": [],
     "dnsv6": [],
     "transports": 0,
-    "capabilities": []
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Transport list must be provided in an array");
 
@@ -323,11 +401,112 @@ TEST_F(NmfsTest, NmfsV2NetworkFileWriteFailure) {
     "dnsv4": [],
     "dnsv6": [],
     "transports": [],
-    "capabilities": 0
+    "capabilities": 0,
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
 })",
                          "Capabilities list must be provided in an array");
 
   // All fields must be provided.
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "netid": 1,
+    "mark": 56,
+    "handle": 78,
+    "dnsv4": [],
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "All fields must be provided in JSON, missing version");
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "version": "V2",
+    "mark": 56,
+    "handle": 78,
+    "dnsv4": [],
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "All fields must be provided in JSON, missing netid");
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "version": "V2",
+    "netid": 1,
+    "handle": 78,
+    "dnsv4": [],
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "All fields must be provided in JSON, missing mark");
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "version": "V2",
+    "netid": 1,
+    "mark": 56,
+    "dnsv4": [],
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "All fields must be provided in JSON, missing handle");
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "version": "V2",
+    "netid": 1,
+    "mark": 56,
+    "handle": 78,
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "All fields must be provided in JSON, missing dnsv4");
+  ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
+                         R"({
+    "version": "V2",
+    "netid": 1,
+    "mark": 56,
+    "handle": 78,
+    "dnsv4": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
+})",
+                         "All fields must be provided in JSON, missing dnsv6");
   ExpectFileWriteFailure("/tmp/fuchsia_network_monitor/1",
                          R"({
     "version": "V2",
@@ -372,7 +551,7 @@ TEST_F(NmfsTest, NmfsV2NetworkFileWriteFailure) {
     "dnsv6": [],
     "transports": [],
     "capabilities": [],
-    "addrv6": false,
+    "addrv4": false,
     "addrv6": false,
     "defaultv4": false,
     "defaultv6": false
@@ -455,12 +634,19 @@ TEST_F(NmfsTest, NmfsCannotCreateDir) {
 TEST_F(NmfsTest, NmfsNetworkFileWriteSuccessNoAddresses) {
   ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/3",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 3,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "test",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
   })",
                          "All JSON fields must be provided with proper formatting");
   // File output should be able to be rewritten to the file without formatting changes.
@@ -474,12 +660,19 @@ TEST_F(NmfsTest, NmfsNetworkFileWriteSuccessNoAddresses) {
 TEST_F(NmfsTest, NmfsNetworkFileWriteSuccessV4Addresses) {
   ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/4",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 4,
     "mark": 56,
     "handle": 78,
     "dnsv4": ["192.0.2.0", "192.0.2.1"],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "test",
+    "addrv4": true,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
   })",
                          "All JSON fields must be provided with proper formatting");
   // File output should be able to be rewritten to the file without formatting changes.
@@ -493,12 +686,19 @@ TEST_F(NmfsTest, NmfsNetworkFileWriteSuccessV4Addresses) {
 TEST_F(NmfsTest, NmfsNetworkFileWriteSuccessV6Addresses) {
   ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/5",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 5,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": ["2001:db8::", "2001:db8::1"]
+    "dnsv6": ["2001:db8::", "2001:db8::1"],
+    "transports": [],
+    "capabilities": [],
+    "name": "test",
+    "addrv4": false,
+    "addrv6": true,
+    "defaultv4": false,
+    "defaultv6": false
   })",
                          "All JSON fields must be provided with proper formatting");
   // File output should be able to be rewritten to the file without formatting changes.
@@ -520,12 +720,19 @@ TEST_F(NmfsTest, NmfsDefaultNetworkFile) {
   // Create the network and set it as the default.
   ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/6",
                          R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 6,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "test",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
   })",
                          "All JSON fields must be provided with proper formatting");
   EXPECT_FALSE(files::WriteFile("/tmp/fuchsia_network_monitor/default", "9999"))
@@ -655,12 +862,19 @@ TEST_F(NmfsTest, NmfsPermissionsAndCapabilities) {
     test_helper::UnsetCapabilityEffective(CAP_NET_ADMIN);
     // File creation should fail with EPERM because we lack CAP_NET_ADMIN capability.
     EXPECT_FALSE(files::WriteFile("/tmp/fuchsia_network_monitor/9", R"({
-      "version": "V1",
+      "version": "V2",
       "netid": 9,
       "mark": 56,
       "handle": 78,
       "dnsv4": [],
-      "dnsv6": []
+      "dnsv6": [],
+      "transports": [],
+      "capabilities": [],
+      "name": "test",
+      "addrv4": false,
+      "addrv6": false,
+      "defaultv4": false,
+      "defaultv6": false
     })"));
     EXPECT_EQ(errno, EPERM);
   });
@@ -668,12 +882,19 @@ TEST_F(NmfsTest, NmfsPermissionsAndCapabilities) {
 
   // Creation should succeed with CAP_NET_ADMIN.
   ExpectFileWriteSuccess("/tmp/fuchsia_network_monitor/9", R"({
-    "version": "V1",
+    "version": "V2",
     "netid": 9,
     "mark": 56,
     "handle": 78,
     "dnsv4": [],
-    "dnsv6": []
+    "dnsv6": [],
+    "transports": [],
+    "capabilities": [],
+    "name": "test",
+    "addrv4": false,
+    "addrv6": false,
+    "defaultv4": false,
+    "defaultv6": false
   })",
                          "Creation should succeed with CAP_NET_ADMIN");
 

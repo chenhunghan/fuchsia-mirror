@@ -5,6 +5,7 @@
 #ifndef LIB_MEDIA_AUDIO_CPP_TYPES_H_
 #define LIB_MEDIA_AUDIO_CPP_TYPES_H_
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <fuchsia/media/cpp/fidl.h>
 
 #include <cstdint>
@@ -13,11 +14,15 @@ namespace media {
 
 // Returns the size in bytes of samples of the specified format.
 uint32_t BytesPerSample(fuchsia::media::AudioSampleFormat format);
+uint32_t BytesPerSample(fuchsia_media::AudioSampleFormat format);
 
 // Creates an |AudioStreamType| for LPCM audio. |channel_count| may not be zero.
 fuchsia::media::AudioStreamType CreateAudioStreamType(
     fuchsia::media::AudioSampleFormat sample_format, uint32_t channel_count,
     uint32_t frames_per_second);
+fuchsia_media::AudioStreamType CreateAudioStreamType(fuchsia_media::AudioSampleFormat sample_format,
+                                                     uint32_t channel_count,
+                                                     uint32_t frames_per_second);
 
 }  // namespace media
 

@@ -88,7 +88,7 @@ class WlanPolicyTests(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     async def test_ap_auto_connect(self) -> None:
         """Verify Fuchsia can auto-connect to a saved network."""
         if not self.openwrt_ap and not self.access_point:
-            raise signals.TestSkip("Access point required for this test")
+            raise signals.TestError("Access point required for this test")
 
         test_ssid = AccessPointConfig.random_string()
         if self.openwrt_ap:

@@ -12,4 +12,4 @@ readonly script_dir="${script%/*}"
 # Get path to python interpreter.
 source "$script_dir"/common-setup.sh
 
-exec "$python" -S "$script_dir"/build_summary.py --format=json "$@"
+exec env PYTHONPATH="$default_project_root" "$python" -S "$script_dir"/build_summary.py --format=json "$@"

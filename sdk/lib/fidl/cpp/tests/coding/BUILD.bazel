@@ -7,9 +7,6 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
-# Preserve original GN output_name so GN does not emit a top-level phony alias
-# that collides with fuchsia_unittest_package("fidl_cpp_natural_coding_tests") on incremental builds.
-# @bazel2gn:raw_attribute:output_name="fidl_cpp_natural_coding_tests"
 fx_cc_test_binary(
     name = "fidl_cpp_natural_coding_tests_bin",
     srcs = [

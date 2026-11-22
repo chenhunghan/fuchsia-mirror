@@ -13,6 +13,5 @@ group("tests") {
     "oneshot-sync:tests",
     "pcap:tests",
     "sockaddr:tests",
-    "udp_serde:tests",
   ]
 }

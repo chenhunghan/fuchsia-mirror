@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = [
+        "//sdk/lib:__pkg__",
+        "//sdk/lib/fidl_driver/tests:__pkg__",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_cpp_natural_conversion_tests_bin",
+    srcs = ["conversion_test.cc"],
+    deps = [
+        "//sdk/lib/fidl_driver/tests/coding:test.driver.coding_cpp",
+        "//src/devices/bin/driver_runtime:driver_runtime_impl",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_driver_cpp_natural_conversion_tests",
+    unit_tests = [":fidl_driver_cpp_natural_conversion_tests_bin"],
+)

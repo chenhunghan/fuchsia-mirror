@@ -143,6 +143,10 @@ class Pool {
     return Init(ranges, std::make_index_sequence<N>(), default_min_addr, default_max_addr);
   }
 
+  // Ultimately deferred to as the actual initialization routine.
+  fit::result<fit::failed> InitInternal(std::span<internal::RangeIterationContext> state,
+                                        uint64_t min_addr, uint64_t max_addr);
+
   using iterator = typename List::const_iterator;
   using const_iterator = iterator;
 
@@ -293,16 +297,12 @@ class Pool {
     static NodeState& node_state(Range& element) { return static_cast<Node&>(element).node_; }
   };
 
-  // Ultimately deferred to as the actual initialization routine.
-  fit::result<fit::failed> Init(std::span<internal::RangeIterationContext> state, uint64_t min_addr,
-                                uint64_t max_addr);
-
   template <size_t... I>
   fit::result<fit::failed> Init(std::array<std::span<Range>, sizeof...(I)> ranges,
                                 std::index_sequence<I...> seq, uint64_t min_addr,
                                 uint64_t max_addr) {
     std::array state{internal::RangeIterationContext(ranges[I])...};
-    return Init({state}, min_addr, max_addr);
+    return InitInternal({state}, min_addr, max_addr);
   }
 
   // Similar semantics to Allocate(), FindAllocatable() is its main allocation

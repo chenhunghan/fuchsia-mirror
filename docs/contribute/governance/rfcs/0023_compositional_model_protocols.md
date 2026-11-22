@@ -18,7 +18,7 @@ We propose the following changes:
 * Binding authors **must avoid subsumption** (e.g. "is-a" hierarchy, inheritance, subtyping)
   when representing composed protocols in target languages.
 
-## Motivation
+## Motivation {#motivation}
 
 The contextual baggage that comes with the term **interface** are things such as method
 overloading, constructors and destructors, an object model as recipient of messages, and so on.
@@ -39,7 +39,8 @@ the syntax by replacing the keyword `interface` by the keyword `protocol`.
 Additionally, the "is-a" relationship implied by borrowing inheritance syntax is unsound,
 and leads to incorrect expectations.
 (For clarity, FIDL does not provide such inheritance semantics, but the syntax suggests as much.)
-See the ["Is A" Relationship Considered Harmful](#is-a-relationship-considered-harmful)
+See the ["Is a" relationship considered
+harmful](#is-a-relationship-considered-harmful)
 section for more details.
 
 ## Design
@@ -91,7 +92,7 @@ Absent from this model are more complex interactions, such as three-way handshak
 **SYN**/**SYN-ACK**/**ACK** of TCP.
 We consider this to be out of scope, and unlikely to be covered by future refinements to the model.
 
-### Compositional Model
+### Compositional model {#compositional-model}
 
 Today, a protocol can both define interactions, as well as extend one or more protocols.
 The resulting protocol (the "composed protocol") carries all interactions defined directly,
@@ -111,7 +112,7 @@ However, whether `Method1` and `Method2` were defined in `Child` as a result of 
 or directly, is not carried to language-specific backends, i.e. this is not represented
 in the JSON IR.
 
-### "Is A" Relationship Considered Harmful
+### "Is a" relationship considered harmful {#is-a-relationship-considered-harmful}
 
 Since protocols can carry requests in both directions, having a subtyping relationship
 requires more care.
@@ -134,7 +135,7 @@ Instead, we will be looking to support specific protocol annotations such as "on
 to server interactions" to support and allow "is a" relationships.
 When this occurs, such relationships would carry to the JSON IR for the use of backends.
 
-### Reliance on "Is A" Relationship Today
+### Reliance on "is a" relationship today {#reliance-on-is-a-relationship-today}
 
 Looking at a concrete example, the [fuchsia.media] library composes various protocols together.
 In particular:
@@ -171,10 +172,11 @@ In a subsequent proposal, we expect to introduce attributes, or new keywords, to
 this directionality constraint, and based on this, provide "is a" relationships in bindings.
 Before such a proposal, we cannot provide better support as part of the FIDL toolchain.
 
-### Syntactic Changes
+### Syntactic changes {#syntactic-changes}
 
 > During the design phase, several different alternatives were proposed,
-> see [Drawbacks, Alternatives, and Unknowns, below](#drawbacks_alternatives_and-unknowns)
+> see [Drawbacks, Alternatives, and Unknowns,
+> below](#drawbacks-alternatives-and-unknowns)
 
 An extended protocol, using the accepted syntax, looks like:
 
@@ -298,7 +300,7 @@ This is not a goal of this proposal, does not regress the status quo, and arguab
 
 Testing of this change can be done entirely with unit tests, at the `fidlc` level.
 
-## Drawbacks, alternatives, and unknowns
+## Drawbacks, alternatives, and unknowns {#drawbacks-alternatives-and-unknowns}
 
 The following sections record alternate syntax proposed during the design phase.
 

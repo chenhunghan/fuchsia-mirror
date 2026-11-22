@@ -1,0 +1,16 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/lib/fostr/build:fostr_fidl.bzl", "fostr_fidl")
+
+package(default_applicable_licenses = ["//:license"])
+
+fostr_fidl(
+    name = "fuchsia.net",
+    fidl_target = "//sdk/fidl/fuchsia.net",
+    visibility = [
+        "//src/connectivity/network/mdns/service:__pkg__",
+        "//src/lib/fostr/fidl/fuchsia.net.mdns:__pkg__",
+    ],
+)

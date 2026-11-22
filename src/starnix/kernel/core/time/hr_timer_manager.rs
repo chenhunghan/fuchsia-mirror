@@ -76,16 +76,12 @@ fn wait_signaled_sync(event: &zx::Event) -> zx::WaitResult {
             "wait_signaled_sync: not signaled yet. Report to `componentid:1408151`: result={result:?}",
             // LINT.ThenChange(//tools/testing/tefmocheck/string_in_log_check.go:hrtimer_wait_signaled_sync_tefmo)
         );
-        if !logged {
-            #[cfg(all(target_os = "fuchsia", not(doc)))]
-            ::debug::backtrace_request_all_threads();
-            logged = true;
-        }
+        logged = true;
     }
 }
 
 /// A macro that waits on a future, but if the future takes longer than
-/// `TIMEOUT_SECONDS`, we log a warning and a stack trace.
+/// `TIMEOUT_SECONDS`, we log a warning.
 macro_rules! log_long_op {
     ($fut:expr) => {{
         use futures::FutureExt;
@@ -106,10 +102,6 @@ macro_rules! log_long_op {
                     // Check logs for a `kBadState` status reported from the hrtimer driver.
                     log_warn!("unexpected blocking: long-running async op at {}:{}. Report to `componentId:1408151`",
                         file!(), line!());
-                    if !logged {
-                        #[cfg(all(target_os = "fuchsia", not(doc)))]
-                        ::debug::backtrace_request_all_threads();
-                    }
                     logged = true;
                 }
             }
@@ -603,7 +595,7 @@ impl HrTimerManager {
 
         let closure = async move |current_task: &CurrentTask| {
             let current_thread = std::thread::current();
-            // Helps find the thread in backtraces, see wait_signaled_sync.
+            // Helps identify the thread in logs.
             log_info!(
                 "hr_timer_manager thread: {:?} ({:?})",
                 current_thread.name(),
@@ -795,7 +787,6 @@ impl HrTimerManager {
     ) -> Result<()> {
         // The values assigned to the counter are arbitrary, but unique for each assignment.
         // This should give us hints as to where any deadlocks might occur if they do.
-        // We also take stack traces, but stack traces do not capture async stacks presently.
         self.lock().debug_start_stage_counter = 1005;
         ftrace::instant!("alarms", "watch_new_hrtimer_loop:init", ftrace::Scope::Process);
         defer! {

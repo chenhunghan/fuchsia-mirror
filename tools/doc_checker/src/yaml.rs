@@ -8,9 +8,9 @@
 use self::toc_checker::Toc;
 use crate::link_checker::{
     LinkReference, PUBLISHED_DOCS_HOST, check_external_links, do_check_link, do_in_tree_check,
-    is_intree_link,
+    is_intree_link, slugify_anchor,
 };
-use crate::path_ext::{DocPathExt, normalize_path};
+use crate::path_ext::{DocPathExt, is_reference_path, normalize_path};
 use crate::{
     DocCheckError, DocCheckerArgs, DocLine, DocYamlCheck, ExemptionSet, ReachabilityGraph,
 };
@@ -215,6 +215,7 @@ pub(crate) struct YamlChecker {
     check_external_links: bool,
     allow_fuchsia_src_links: bool,
     reference_docs_root: Option<PathBuf>,
+    reference_folder: PathBuf,
     external_links: Vec<LinkReference>,
     problems: Vec<(PathBuf, ProblemEntry)>,
     tools: HashSet<String>,
@@ -408,6 +409,7 @@ impl YamlChecker {
                                 &self.project,
                                 &dest_url,
                                 self.allow_fuchsia_src_links,
+                                &self.reference_folder,
                                 LinkContext::Content(external_links),
                             ) {
                                 errors.push(err);
@@ -518,6 +520,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                 ),
                 Some("_drivers_areas.yaml") => check_drivers_areas(filename, yaml_value),
                 Some("_drivers_epitaphs.yaml") => check_drivers_epitaphs(filename, yaml_value),
@@ -529,6 +532,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                     &mut self.external_links,
                 ),
                 Some("_metadata.yaml") => check_metadata(
@@ -538,6 +542,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                     &mut self.external_links,
                 ),
                 Some("_problems.yaml") => {
@@ -555,6 +560,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                 ),
                 Some("_rfcs.yaml") => check_rfcs(filename, yaml_value),
                 Some("_roadmap.yaml") => check_roadmap(
@@ -564,6 +570,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                     &mut self.external_links,
                 ),
                 Some("_supported_cpu_architecture.yaml") => {
@@ -575,6 +582,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                     &mut self.external_links,
                 ),
                 Some("_toc.yaml") => toc_checker::check_toc(
@@ -584,6 +592,7 @@ impl DocYamlCheck for YamlChecker {
                     filename,
                     yaml_value,
                     self.allow_fuchsia_src_links,
+                    &self.reference_folder,
                 ),
                 Some("_tools.yaml") => {
                     let (entries, errors) = check_tools(
@@ -592,6 +601,7 @@ impl DocYamlCheck for YamlChecker {
                         filename,
                         yaml_value,
                         self.allow_fuchsia_src_links,
+                        &self.reference_folder,
                         &mut self.external_links,
                     );
                     if let Some(entries) = entries {
@@ -659,11 +669,11 @@ impl DocYamlCheck for YamlChecker {
                 // remove paths to markdown
                 if let Some(path_list) = toc.get_paths() {
                     for p in path_list {
-                        if is_external_path(&p) {
+                        if is_external_path(&p, &self.reference_folder) {
                             if let Some(reference_root) = &self.reference_docs_root {
-                                if p.starts_with("/reference") {
-                                    let rel_path =
-                                        p.strip_prefix("/reference/").unwrap_or(p.as_str());
+                                if let Some(rel_path) =
+                                    reference_rel_path(&p, &self.reference_folder)
+                                {
                                     traversal.check_markdown_target(
                                         reference_root,
                                         rel_path,
@@ -673,7 +683,7 @@ impl DocYamlCheck for YamlChecker {
                                 }
                             }
                             if self.check_external_links {
-                                if p.starts_with("/reference") {
+                                if is_reference_path(&p, &self.reference_folder) {
                                     external_links.push(LinkReference {
                                         link: format!("https://{}{}", PUBLISHED_DOCS_HOST, p),
                                         location: DocLine {
@@ -716,8 +726,8 @@ impl DocYamlCheck for YamlChecker {
                     // All includes are /docs/... so just append the root.
                     let additional_paths = includes
                         .iter()
-                        //Ignoring yaml included from /reference.
-                        .filter(|p| !p.starts_with("/reference"))
+                        // Ignore yaml included from the configured reference folder.
+                        .filter(|p| !is_reference_path(p, &self.reference_folder))
                         .map(|p| self.root_dir.join(p.strip_prefix('/').unwrap_or(p.as_str())))
                         .filter(|p| {
                             if p == &current_yaml.included_file {
@@ -741,12 +751,9 @@ impl DocYamlCheck for YamlChecker {
                     if let Some(reference_root) = &self.reference_docs_root {
                         let ref_additional_paths = includes
                             .iter()
-                            //Only process /reference.
-                            .filter(|p| p.starts_with("/reference"))
-                            .map(|p| {
-                                reference_root
-                                    .join(p.strip_prefix("/reference/").unwrap_or(p.as_str()))
-                            })
+                            // Only process includes under the configured reference folder.
+                            .filter_map(|p| reference_rel_path(p, &self.reference_folder))
+                            .map(|rel_path| reference_root.join(rel_path))
                             .filter(|p| {
                                 if p == &current_yaml.included_file {
                                     traversal.errors.push(DocCheckError::new_error(
@@ -826,11 +833,11 @@ impl TocTraversal<'_> {
     fn check_markdown_target(
         &mut self,
         base_dir: &Path,
-        rel_path: &str,
+        rel_path: impl AsRef<Path>,
         p: &str,
         current_yaml: &IncludedYaml,
     ) {
-        let mut file_path = base_dir.join(rel_path);
+        let mut file_path = base_dir.join(rel_path.as_ref());
         if path_helper::is_dir(&file_path) {
             file_path.push("README.md");
         }
@@ -863,19 +870,28 @@ impl TocTraversal<'_> {
     }
 }
 
-fn is_external_path(p: &str) -> bool {
-    // treat reference docs as external
-    p.starts_with("/reference")
-        || p.starts_with("https://")
+/// Returns `p` relative to `reference_folder` after normalization, or `None` if `p` is not
+/// under `reference_folder`.
+fn reference_rel_path(p: &str, reference_folder: &Path) -> Option<PathBuf> {
+    let normalized = normalize_path(Path::new(p)).ok()?;
+    normalized.strip_prefix(reference_folder).ok().map(Path::to_path_buf)
+}
+
+fn is_external_path(p: &str, reference_folder: &Path) -> bool {
+    // Treat reference docs as external. Check the cheap prefixes first so they
+    // short-circuit before is_reference_path normalizes the path.
+    p.starts_with("https://")
         || p.starts_with("http://")
         || p.starts_with("//")
+        || is_reference_path(p, reference_folder)
 }
 
 /// Where a YAML link appears, which decides how in-tree and external targets are treated.
 pub(crate) enum LinkContext<'a> {
     /// Navigation entries (`_toc.yaml`, `_redirects.yaml`, `_deprecated-docs.yaml`): in-tree
-    /// targets must be under the docs folder, under `/reference`, or one of the root files
-    /// published alongside the docs; external links are accepted without being queued.
+    /// targets must be under the docs folder, under the configured reference folder, or one of
+    /// the root files published alongside the docs; external links are accepted without being
+    /// queued.
     Navigation,
     /// Content fields (`_glossary.yaml`, `_metadata.yaml`, `_roadmap.yaml`, and the markdown
     /// text fields of `_problems.yaml` and `_tools.yaml`): any existing in-tree target is
@@ -890,9 +906,9 @@ const ROOT_DOC_FILES: [&str; 2] = ["/CONTRIBUTING.md", "/CODE_OF_CONDUCT.md"];
 ///
 /// Runs the shared link pipeline: URL policy checks (`do_check_link`), in-tree
 /// resolution (`is_intree_link`), and on-disk verification (`do_in_tree_check`).
-/// `/reference` targets are published from generated docs, so they are never
-/// checked on disk; see [`LinkContext`] for how each context treats them and
-/// external links.
+/// Targets under the configured reference folder are published from generated docs,
+/// so they are never checked on disk; see [`LinkContext`] for how each context treats
+/// them and external links.
 pub(crate) fn check_yaml_link(
     doc_line: &DocLine,
     root_dir: &Path,
@@ -900,12 +916,13 @@ pub(crate) fn check_yaml_link(
     project: &str,
     link: &str,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     context: LinkContext<'_>,
 ) -> Result<(), DocCheckError> {
-    do_check_link(doc_line, link, project, allow_fuchsia_src_links)?;
+    do_check_link(doc_line, link, project, allow_fuchsia_src_links, reference_folder)?;
 
     match is_intree_link(project, root_dir, docs_folder, link) {
-        Ok(Some(in_tree_path)) if in_tree_path.starts_with("/reference") => {
+        Ok(Some(in_tree_path)) if is_reference_path(&in_tree_path, reference_folder) => {
             if let LinkContext::Content(external_links) = context {
                 // Queue the published location: the normalized path (is_intree_link strips
                 // the anchor and query) plus the link's own anchor or query, if any.
@@ -930,18 +947,19 @@ pub(crate) fn check_yaml_link(
                     doc_line.line_num,
                     doc_line.file_name.clone(),
                     &format!(
-                        "in-tree link to {} must be in '{}' or '/reference' directory",
+                        "in-tree link to {} must be in '{}' or '{}' directory",
                         link,
                         docs_prefix.display(),
+                        reference_folder.display(),
                     ),
                 ));
             }
             do_in_tree_check(doc_line, root_dir, docs_folder, link, &in_tree_path).map(|_| ())
         }
-        Ok(None) if is_external_path(link) => {
+        Ok(None) if is_external_path(link, reference_folder) => {
             if let LinkContext::Content(external_links) = context {
                 external_links.push(LinkReference {
-                    link: normalize_external_link(link),
+                    link: normalize_external_link(link, reference_folder),
                     location: doc_line.clone(),
                 });
             }
@@ -970,6 +988,7 @@ fn validate_deprecation_entry(
     filename: &Path,
     allow_fuchsia_src_links: bool,
     docs_prefix: &Path,
+    reference_folder: &Path,
 ) -> Vec<DocCheckError> {
     let mut errors = vec![];
     let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
@@ -993,13 +1012,14 @@ fn validate_deprecation_entry(
         ));
     } else {
         let path_buf = PathBuf::from(&entry.from);
-        if !path_buf.starts_with(docs_prefix) && !path_buf.starts_with("/reference") {
+        if !path_buf.starts_with(docs_prefix) && !is_reference_path(&path_buf, reference_folder) {
             errors.push(DocCheckError::new_error(
                 doc_line.line_num,
                 doc_line.file_name.clone(),
                 &format!(
-                    "Deprecation 'from' path must start with '{}' or '/reference': {}",
+                    "Deprecation 'from' path must start with '{}' or '{}': {}",
                     docs_prefix.display(),
+                    reference_folder.display(),
                     entry.from
                 ),
             ));
@@ -1023,6 +1043,7 @@ fn validate_deprecation_entry(
         project,
         &entry.to,
         allow_fuchsia_src_links,
+        reference_folder,
         LinkContext::Navigation,
     ) {
         errors.push(err);
@@ -1040,6 +1061,7 @@ fn check_deprecated_docs(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
 ) -> Option<Vec<DocCheckError>> {
     let result = serde_yaml::from_value::<Deprecations>(yaml_value.clone());
     match result {
@@ -1059,6 +1081,7 @@ fn check_deprecated_docs(
                         filename,
                         allow_fuchsia_src_links,
                         &docs_prefix,
+                        reference_folder,
                     )
                 })
                 .collect();
@@ -1192,6 +1215,7 @@ fn validate_redirect_to(
     project: &str,
     allow_fuchsia_src_links: bool,
     docs_prefix: &Path,
+    reference_folder: &Path,
     doc_line: &DocLine,
 ) -> Option<DocCheckError> {
     let err = |msg: String| {
@@ -1200,7 +1224,9 @@ fn validate_redirect_to(
     if entry.to.trim().is_empty() {
         return err("Redirect 'to' path cannot be empty".to_string());
     }
-    if entry.to.contains('*') || (!is_external_path(&entry.to) && entry.to.contains('?')) {
+    if entry.to.contains('*')
+        || (entry.to.contains('?') && !is_external_path(&entry.to, reference_folder))
+    {
         return err(format!(
             "Wildcards ('*' or '?') are not supported in redirect 'to' path: {}",
             entry.to
@@ -1235,22 +1261,29 @@ fn validate_redirect_to(
                 entry.from, entry.to
             ));
         }
-        if let Err(e) = do_check_link(doc_line, link_to_check, project, allow_fuchsia_src_links) {
+        if let Err(e) = do_check_link(
+            doc_line,
+            link_to_check,
+            project,
+            allow_fuchsia_src_links,
+            reference_folder,
+        ) {
             return Some(e);
         }
         return match is_intree_link(project, root_dir, docs_folder, link_to_check) {
             Ok(Some(in_tree_path))
-                if link_to_check.starts_with("/reference")
-                    && in_tree_path.starts_with("/reference") =>
+                if is_reference_path(link_to_check, reference_folder)
+                    && is_reference_path(&in_tree_path, reference_folder) =>
             {
                 None
             }
             Ok(Some(in_tree_path)) => {
                 if !in_tree_path.starts_with(docs_prefix) {
                     return err(format!(
-                        "in-tree link to {} must be in '{}' or '/reference' directory",
+                        "in-tree link to {} must be in '{}' or '{}' directory",
                         entry.to,
                         docs_prefix.display(),
+                        reference_folder.display(),
                     ));
                 }
                 let abs_path =
@@ -1261,7 +1294,7 @@ fn validate_redirect_to(
                     None
                 }
             }
-            Ok(None) if is_external_path(link_to_check) => None,
+            Ok(None) if is_external_path(link_to_check, reference_folder) => None,
             Ok(None) => err(format!("invalid path {}", entry.to)),
             Err(e) => err(format!("Error checking path {}: {e}", entry.to)),
         };
@@ -1274,6 +1307,7 @@ fn validate_redirect_to(
         project,
         &rewritten_to,
         allow_fuchsia_src_links,
+        reference_folder,
         LinkContext::Navigation,
     )
     .err()
@@ -1289,6 +1323,7 @@ fn validate_redirect_entry(
     allow_fuchsia_src_links: bool,
     docs_prefix: &Path,
     expected_from_dir: &Path,
+    reference_folder: &Path,
 ) -> Vec<DocCheckError> {
     let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
     let mut errors = Vec::new();
@@ -1312,6 +1347,7 @@ fn validate_redirect_entry(
         project,
         allow_fuchsia_src_links,
         docs_prefix,
+        reference_folder,
         &doc_line,
     ) {
         errors.push(err);
@@ -1327,6 +1363,7 @@ fn check_redirects(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
 ) -> Option<Vec<DocCheckError>> {
     let result = serde_yaml::from_value::<Redirects>(yaml_value.clone());
     match result {
@@ -1355,6 +1392,7 @@ fn check_redirects(
                     allow_fuchsia_src_links,
                     &docs_prefix,
                     &expected_from_dir,
+                    reference_folder,
                 ));
             }
             if errors.is_empty() { None } else { Some(errors) }
@@ -1662,23 +1700,6 @@ fn validate_glossary(filename: &Path, terms: &[GlossaryTerm], errors: &mut Vec<D
     }
 }
 
-/// Converts a glossary term into an anchor slug matching DevSite HTML anchor conventions
-/// (lowercase, non-alphanumeric characters replaced with hyphens, trimmed).
-fn slugify_glossary_term(term: &str) -> String {
-    let mut slug = String::with_capacity(term.len());
-    let mut prev_was_hyphen = false;
-    for c in term.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c.to_ascii_lowercase());
-            prev_was_hyphen = false;
-        } else if !prev_was_hyphen {
-            slug.push('-');
-            prev_was_hyphen = true;
-        }
-    }
-    slug.trim_matches('-').to_string()
-}
-
 /// Returns the anchor of a link that points at another glossary term, or `None`
 /// if the link points somewhere else.
 ///
@@ -1704,11 +1725,11 @@ fn validate_glossary_links(
     filename: &Path,
     terms: &[GlossaryTerm],
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
     errors: &mut Vec<DocCheckError>,
 ) {
-    let term_slugs: HashSet<String> =
-        terms.iter().map(|t| slugify_glossary_term(&t.term)).collect();
+    let term_slugs: HashSet<String> = terms.iter().map(|t| slugify_anchor(&t.term)).collect();
     let exact_terms: HashSet<String> =
         terms.iter().map(|t| t.term.trim().to_ascii_lowercase()).collect();
 
@@ -1745,6 +1766,7 @@ fn validate_glossary_links(
                     project,
                     link,
                     allow_fuchsia_src_links,
+                    reference_folder,
                     LinkContext::Content(external_links),
                 ) {
                     errors.push(err);
@@ -1761,6 +1783,7 @@ fn check_glossary(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
 ) -> Option<Vec<DocCheckError>> {
     let (items, errors) = parse_entries::<GlossaryTerm>(filename, yaml_value);
@@ -1774,6 +1797,7 @@ fn check_glossary(
             filename,
             &terms,
             allow_fuchsia_src_links,
+            reference_folder,
             external_links,
             &mut errs,
         );
@@ -1781,8 +1805,8 @@ fn check_glossary(
     if errs.is_empty() { None } else { Some(errs) }
 }
 
-fn normalize_external_link(p: &str) -> String {
-    if p.starts_with("/reference") {
+fn normalize_external_link(p: &str, reference_folder: &Path) -> String {
+    if is_reference_path(p, reference_folder) {
         format!("https://{}{}", PUBLISHED_DOCS_HOST, p)
     } else if p.starts_with("//") {
         format!("https:{}", p)
@@ -1798,6 +1822,7 @@ fn check_metadata(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
 ) -> Option<Vec<DocCheckError>> {
     let result = serde_yaml::from_value::<Metadata>(yaml_value.clone());
@@ -1865,6 +1890,7 @@ fn check_metadata(
                     project,
                     &guide.url,
                     allow_fuchsia_src_links,
+                    reference_folder,
                     LinkContext::Content(external_links),
                 ) {
                     errors.push(err);
@@ -2044,6 +2070,7 @@ fn check_roadmap(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
 ) -> Option<Vec<DocCheckError>> {
     let (items, errors) = parse_entries::<RoadmapEntry>(filename, yaml_value);
@@ -2074,6 +2101,7 @@ fn check_roadmap(
                     project,
                     link.as_str(),
                     allow_fuchsia_src_links,
+                    reference_folder,
                     LinkContext::Content(external_links),
                 ) {
                     errs.push(err);
@@ -2141,11 +2169,15 @@ fn queue_external_link(
     link: &str,
     project: &str,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
 ) -> Result<(), DocCheckError> {
     let doc_line = DocLine { line_num: 1, file_name: filename.to_path_buf() };
-    do_check_link(&doc_line, link, project, allow_fuchsia_src_links)?;
-    external_links.push(LinkReference { link: normalize_external_link(link), location: doc_line });
+    do_check_link(&doc_line, link, project, allow_fuchsia_src_links, reference_folder)?;
+    external_links.push(LinkReference {
+        link: normalize_external_link(link, reference_folder),
+        location: doc_line,
+    });
     Ok(())
 }
 
@@ -2155,6 +2187,7 @@ fn check_supported_sys_config(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
 ) -> Option<Vec<DocCheckError>> {
     let (items, errors) = parse_entries::<SysConfigEntry>(filename, yaml_value);
@@ -2202,6 +2235,7 @@ fn check_supported_sys_config(
                         link,
                         project,
                         allow_fuchsia_src_links,
+                        reference_folder,
                         external_links,
                     ) {
                         errs.push(err);
@@ -2236,6 +2270,7 @@ fn check_tools(
     filename: &Path,
     yaml_value: &Value,
     allow_fuchsia_src_links: bool,
+    reference_folder: &Path,
     external_links: &mut Vec<LinkReference>,
 ) -> (Option<Vec<ToolsEntry>>, Option<Vec<DocCheckError>>) {
     let (items, errors) = parse_entries::<ToolsEntry>(filename, yaml_value);
@@ -2263,6 +2298,7 @@ fn check_tools(
                             link_str,
                             project,
                             allow_fuchsia_src_links,
+                            reference_folder,
                             external_links,
                         ) {
                             errs.push(err);
@@ -2355,6 +2391,7 @@ pub fn register_yaml_checks(
         check_external_links: opt.check_external_links,
         allow_fuchsia_src_links: opt.allow_fuchsia_src_links,
         reference_docs_root: opt.reference_docs_root.clone(),
+        reference_folder: opt.reference_folder.clone(),
         external_links: vec![],
         problems: vec![],
         tools: HashSet::new(),
@@ -2370,7 +2407,7 @@ pub fn register_yaml_checks(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ErrorLevel;
+    use crate::{DEFAULT_REFERENCE_FOLDER, ErrorLevel};
 
     #[test]
     fn test_check_rfc_areas() -> Result<()> {
@@ -2462,6 +2499,7 @@ mod test {
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -2503,6 +2541,7 @@ mod test {
                 &checker.project,
                 test_path,
                 checker.allow_fuchsia_src_links,
+                &checker.reference_folder,
                 LinkContext::Navigation,
             );
             assert_eq!(actual_result.err(), expected_result, "link: {test_path}");
@@ -2520,6 +2559,7 @@ mod test {
                     &checker.project,
                     link,
                     checker.allow_fuchsia_src_links,
+                    &checker.reference_folder,
                     LinkContext::Navigation,
                 )
                 .err(),
@@ -2537,6 +2577,7 @@ mod test {
                     &checker.project,
                     link,
                     checker.allow_fuchsia_src_links,
+                    &checker.reference_folder,
                     LinkContext::Content(&mut external_links),
                 )
                 .err(),
@@ -2564,6 +2605,7 @@ mod test {
                     &checker.project,
                     link,
                     checker.allow_fuchsia_src_links,
+                    &checker.reference_folder,
                     LinkContext::Content(&mut external_links),
                 )
                 .err(),
@@ -2644,6 +2686,7 @@ mod test {
             &PathBuf::from(filename),
             &yaml_value,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut vec![],
         );
         assert!(result.is_some());
@@ -2675,6 +2718,7 @@ mod test {
             &PathBuf::from(filename),
             &external_link_yaml,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         );
         assert!(result.is_none());
@@ -2717,6 +2761,7 @@ redirects:
             &filename,
             &yaml_value,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
         );
 
         assert!(result.is_some());
@@ -2765,7 +2810,15 @@ redirects:
             "#,
         )?;
         assert_eq!(
-            check_redirects(&root_dir, &docs_folder, project, &filename, &valid_yaml, false,),
+            check_redirects(
+                &root_dir,
+                &docs_folder,
+                project,
+                &filename,
+                &valid_yaml,
+                false,
+                Path::new(DEFAULT_REFERENCE_FOLDER),
+            ),
             None
         );
 
@@ -2818,9 +2871,16 @@ redirects:
             "#,
         )?;
 
-        let errors =
-            check_redirects(&root_dir, &docs_folder, project, &filename, &invalid_yaml, false)
-                .expect("Expected redirect validation errors");
+        let errors = check_redirects(
+            &root_dir,
+            &docs_folder,
+            project,
+            &filename,
+            &invalid_yaml,
+            false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
+        )
+        .expect("Expected redirect validation errors");
         let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
 
         assert_eq!(
@@ -2853,6 +2913,60 @@ redirects:
     }
 
     #[test]
+    fn test_check_redirects_rejects_parent_traversal_targets() -> Result<()> {
+        // An absolute root so the assertions below can prove it is never echoed.
+        let root_dir = PathBuf::from("/path/to/fuchsia");
+        let docs_folder = PathBuf::from("docs");
+        let project = "fuchsia";
+        let filename = PathBuf::from("_redirects.yaml");
+
+        // `..` in a Gerrit-style or root-relative target, wildcard or not, is rejected by path
+        // normalization before the target is joined onto root_dir and probed on disk.
+        let yaml_value: Value = serde_yaml::from_str(
+            r#"
+redirects:
+- from: /docs/old_escape_gerrit/...
+  to: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../../../../etc/passwd...
+- from: /docs/old_escape_docs_main/...
+  to: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../src/...
+- from: /docs/old_escape_slash/...
+  to: /docs/../../../../etc/passwd...
+- from: /docs/old_file_escape.md
+  to: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../../../../etc/passwd
+            "#,
+        )?;
+
+        let errors = check_redirects(
+            &root_dir,
+            &docs_folder,
+            project,
+            &filename,
+            &yaml_value,
+            false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
+        )
+        .expect("Expected traversal targets to be rejected");
+        let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
+
+        assert_eq!(
+            messages,
+            vec![
+                "Error checking path https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../../../../etc/passwd...: Cannot normalize /docs/../../../../etc/passwd, references parent beyond root.",
+                "in-tree link to https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../src/... must be in '/docs' or '/reference' directory",
+                "Error checking path /docs/../../../../etc/passwd...: Cannot normalize /docs/../../../../etc/passwd, references parent beyond root.",
+                "Error checking path https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/docs/../../../../etc/passwd: Cannot normalize /docs/../../../../etc/passwd, references parent beyond root.",
+            ]
+        );
+        // No message reveals whether the host path exists or where the checkout lives.
+        assert!(
+            messages.iter().all(|m| !m.contains("Directory:") && !m.contains("/path/to/fuchsia")),
+            "{messages:?}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn test_check_deprecated_docs() -> Result<()> {
         let checker = YamlChecker {
             root_dir: PathBuf::from("."),
@@ -2861,6 +2975,7 @@ redirects:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -2891,6 +3006,7 @@ included:
             &filename,
             &yaml_value,
             checker.allow_fuchsia_src_links,
+            &checker.reference_folder,
         );
         assert!(result.is_none());
 
@@ -2914,6 +3030,7 @@ included:
             &filename,
             &invalid_yaml,
             checker.allow_fuchsia_src_links,
+            &checker.reference_folder,
         );
         assert!(result.is_some());
         let errors = result.unwrap();
@@ -2947,6 +3064,7 @@ included:
             &filename,
             &wildcard_yaml,
             checker.allow_fuchsia_src_links,
+            &checker.reference_folder,
         );
         assert!(result.is_some());
         let errors = result.unwrap();
@@ -3033,6 +3151,7 @@ included:
             &filename,
             &yaml_value,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut vec![],
         );
 
@@ -3065,6 +3184,7 @@ included:
             &filename,
             &external_link_yaml,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         );
         assert!(result.is_none());
@@ -3088,6 +3208,7 @@ included:
             &filename,
             &policy_yaml,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         )
         .expect("invalid gerrit project must be rejected");
@@ -3135,8 +3256,15 @@ included:
         )?;
 
         let root_dir = PathBuf::from(".");
-        let (_tools, errors) =
-            check_tools(&root_dir, "fuchsia", &filename, &yaml_value, false, &mut vec![]);
+        let (_tools, errors) = check_tools(
+            &root_dir,
+            "fuchsia",
+            &filename,
+            &yaml_value,
+            false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
+            &mut vec![],
+        );
 
         assert!(errors.is_some());
         let errors = errors.unwrap();
@@ -3166,6 +3294,7 @@ included:
             &filename,
             &external_link_yaml,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         );
         assert!(errors.is_none());
@@ -3183,8 +3312,15 @@ included:
 "#,
         )?;
         let mut external_links = vec![];
-        let (_tools, errors) =
-            check_tools(&root_dir, "fuchsia", &filename, &policy_yaml, false, &mut external_links);
+        let (_tools, errors) = check_tools(
+            &root_dir,
+            "fuchsia",
+            &filename,
+            &policy_yaml,
+            false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
+            &mut external_links,
+        );
         let errors = errors.expect("fuchsia-src link must be rejected");
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
@@ -3288,6 +3424,7 @@ guides:
             &filename,
             &valid_yaml,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut vec![],
         );
         assert!(result.is_none());
@@ -3326,6 +3463,7 @@ guides:
             &filename,
             &invalid_yaml,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut vec![],
         );
         assert!(result.is_some());
@@ -3366,6 +3504,7 @@ guides:
             &filename,
             &invalid_fields_yaml,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut vec![],
         );
         assert!(result.is_some());
@@ -3406,6 +3545,7 @@ guides:
             &filename,
             &invalid_path_yaml,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut vec![],
         );
         assert!(result.is_some());
@@ -3449,6 +3589,7 @@ guides:
             &filename,
             &external_link_yaml,
             allow_fuchsia_src_links,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         );
         assert!(result.is_none());
@@ -3482,6 +3623,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3526,6 +3668,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3594,6 +3737,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::from(["ToolA".to_string()]),
@@ -3646,6 +3790,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3683,6 +3828,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3734,6 +3880,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3770,6 +3917,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3854,6 +4002,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -3988,6 +4137,7 @@ guides:
             check_external_links: false,
             allow_fuchsia_src_links: false,
             reference_docs_root: None,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
             external_links: vec![],
             problems: vec![],
             tools: HashSet::new(),
@@ -4079,6 +4229,7 @@ guides:
             &filename,
             &valid_yaml,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         );
         assert!(errors.is_none());
@@ -4122,6 +4273,7 @@ guides:
             &filename,
             &invalid_yaml,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         )
         .expect("should produce findings");
@@ -4186,6 +4338,7 @@ guides:
             &filename,
             &yaml_value,
             false,
+            Path::new(DEFAULT_REFERENCE_FOLDER),
             &mut external_links,
         )
         .expect("should produce findings for invalid links");
@@ -4233,6 +4386,155 @@ guides:
             "Expected all glossary link findings to be errors, but found: {:?}",
             errors
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_yaml_custom_reference_folder() -> Result<()> {
+        let custom_ref = Path::new("/api_docs");
+        let root_dir = PathBuf::from("/some/root");
+        let docs_folder = PathBuf::from("docs");
+        let doc_line = DocLine { line_num: 1, file_name: PathBuf::from("_redirects.yaml") };
+
+        // 1. check_yaml_link honors custom reference_folder and keeps component boundaries.
+        let mut external_links = vec![];
+        assert_eq!(
+            check_yaml_link(
+                &doc_line,
+                &root_dir,
+                &docs_folder,
+                "fuchsia",
+                "/api_docs/fidl/fuchsia.io.md#protocol",
+                false,
+                custom_ref,
+                LinkContext::Content(&mut external_links),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            external_links.iter().map(|l| l.link.as_str()).collect::<Vec<_>>(),
+            ["https://fuchsia.dev/api_docs/fidl/fuchsia.io.md#protocol"]
+        );
+
+        for rejected in ["/reference/missing.md", "/api_docs_extra/missing.md"] {
+            let err = check_yaml_link(
+                &doc_line,
+                &root_dir,
+                &docs_folder,
+                "fuchsia",
+                rejected,
+                false,
+                custom_ref,
+                LinkContext::Navigation,
+            )
+            .expect_err("non-configured reference path must be rejected in navigation");
+            assert_eq!(
+                err.message,
+                format!("in-tree link to {rejected} must be in '/docs' or '/api_docs' directory")
+            );
+        }
+
+        // 2. check_redirects honors custom reference_folder on both single and wildcard targets.
+        let redirects_yaml: Value = serde_yaml::from_str(
+            r#"
+redirects:
+- from: /docs/old.md
+  to: /api_docs/new.md
+- from: /docs/old_dir/...
+  to: /api_docs/...
+- from: /docs/old2.md
+  to: /reference/old.md
+"#,
+        )?;
+        let redirect_errors = check_redirects(
+            &root_dir,
+            &docs_folder,
+            "fuchsia",
+            Path::new("_redirects.yaml"),
+            &redirects_yaml,
+            false,
+            custom_ref,
+        )
+        .expect("default /reference target must fail when configured to /api_docs");
+        assert_eq!(redirect_errors.len(), 1, "{redirect_errors:?}");
+        assert_eq!(
+            redirect_errors[0].message,
+            "in-tree link to /reference/old.md must be in '/docs' or '/api_docs' directory"
+        );
+
+        // 3. check_deprecated_docs honors custom reference_folder on 'from' and 'to'.
+        let dep_yaml: Value = serde_yaml::from_str(
+            r#"
+included:
+- from: /api_docs/old.md
+  to: /api_docs/new.md
+- from: /reference/old.md
+  to: /api_docs/new.md
+"#,
+        )?;
+        let dep_errors = check_deprecated_docs(
+            &root_dir,
+            &docs_folder,
+            "fuchsia",
+            Path::new("_deprecated-docs.yaml"),
+            &dep_yaml,
+            false,
+            custom_ref,
+        )
+        .expect("default /reference 'from' must fail when configured to /api_docs");
+        assert_eq!(dep_errors.len(), 1, "{dep_errors:?}");
+        assert_eq!(
+            dep_errors[0].message,
+            "Deprecation 'from' path must start with '/docs' or '/api_docs': /reference/old.md"
+        );
+
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_yaml_post_check_custom_reference_folder() -> Result<()> {
+        // post_check resolves paths and includes under custom reference_folder against
+        // reference_docs_root.
+        let custom_ref = Path::new("/api_docs");
+        let temp_root = std::env::temp_dir()
+            .join(format!("doc_checker_yaml_custom_ref_{}", std::process::id()));
+        let docs_dir = temp_root.join("docs");
+        let ref_root = temp_root.join("generated_ref");
+        std::fs::create_dir_all(&docs_dir)?;
+        std::fs::create_dir_all(ref_root.join("sub"))?;
+
+        let root_toc = docs_dir.join("_toc.yaml");
+        let ref_toc = ref_root.join("_toc.yaml");
+        let ref_index = ref_root.join("index.md");
+        let ref_sub = ref_root.join("sub").join("page.md");
+        std::fs::write(
+            &root_toc,
+            "toc:\n- path: /api_docs/index.md\n  title: API\n- include: /api_docs/_toc.yaml\n",
+        )?;
+        std::fs::write(&ref_toc, "toc:\n- path: /api_docs/sub/page.md\n  title: Page\n")?;
+        std::fs::write(&ref_index, "# API\n")?;
+        std::fs::write(&ref_sub, "# Page\n")?;
+
+        let checker = YamlChecker {
+            root_dir: temp_root.clone(),
+            docs_folder: PathBuf::from("docs"),
+            project: "fuchsia".to_string(),
+            check_external_links: false,
+            allow_fuchsia_src_links: false,
+            reference_docs_root: Some(ref_root),
+            reference_folder: custom_ref.to_path_buf(),
+            external_links: vec![],
+            problems: vec![],
+            tools: HashSet::new(),
+            tools_entries: vec![],
+            reachability_graph: Default::default(),
+            exemption_set: Default::default(),
+            allow_unreferenced_hidden: false,
+        };
+        let post_result = checker.post_check(&[ref_index, ref_sub], &[root_toc, ref_toc]).await;
+        std::fs::remove_dir_all(&temp_root)?;
+        assert_eq!(post_result?, None);
 
         Ok(())
     }

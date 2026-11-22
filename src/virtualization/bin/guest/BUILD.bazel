@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":guest_tests"],
+    visibility = ["//src/virtualization:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "guest",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/virtualization/lib/cli:guest_cli",
+        "//src/virtualization/lib/cli/args:guest_cli_args",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN test binary name from `rustc_binary("bin")` with `output_name = "guest"`.
+    crate_name = "guest_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "guest_tests",
+    unit_tests = [":bin_test"],
+)

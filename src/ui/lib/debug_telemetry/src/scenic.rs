@@ -23,7 +23,17 @@ const MIN_SCENIC_FPS_WINDOW_NS: i64 = 100_000_000;
 const MAX_SCENIC_FPS_WINDOW_NS: i64 = 2_500_000_000;
 const INITIAL_EMPTY_BACKOFF_NS: i64 = 1_000_000_000;
 const MAX_EMPTY_BACKOFF_NS: i64 = 60_000_000_000;
+const NANOSECONDS_PER_SECOND_U64: u64 = 1_000_000_000;
 const NANOSECONDS_PER_SECOND_F64: f64 = 1_000_000_000.0;
+
+fn batch_retrieval_timeout_seconds(timeout: zx::MonotonicDuration) -> i64 {
+    let Ok(nanos) = u64::try_from(timeout.into_nanos()) else {
+        return SCENIC_BATCH_RETRIEVAL_TIMEOUT_SECS;
+    };
+    let ceil_seconds =
+        i64::try_from(nanos.div_ceil(NANOSECONDS_PER_SECOND_U64)).unwrap_or(i64::MAX);
+    ceil_seconds.max(SCENIC_BATCH_RETRIEVAL_TIMEOUT_SECS)
+}
 
 /// Snapshot of Scenic's rendered frame counter and recent frame rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -178,6 +188,20 @@ impl ScenicCollector {
             previous_sample: None,
             last_fps: None,
         }
+    }
+
+    /// Overrides the per-snapshot `ArchiveReader` timeout (`250ms` by default).
+    ///
+    /// When `timeout` exceeds the default 1-second Archivist batch retrieval timeout, the batch
+    /// retrieval timeout is raised (rounding up to whole seconds) so the server does not cut off
+    /// snapshots before `timeout` elapses.
+    pub fn with_timeout(mut self, timeout: zx::MonotonicDuration) -> Self {
+        if let Some(reader) = &mut self.reader {
+            reader
+                .with_batch_retrieval_timeout_seconds(batch_retrieval_timeout_seconds(timeout))
+                .with_timeout(timeout);
+        }
+        self
     }
 
     fn handle_failed_or_empty_snapshot(&mut self, gate_now_ns: i64) {

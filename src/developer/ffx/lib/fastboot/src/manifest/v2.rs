@@ -4,8 +4,8 @@
 
 use crate::common::crypto::unlock_device;
 use crate::common::{
-    Boot, Flash, Unlock, finish, flash_bootloader, flash_product, is_locked, lock_device,
-    verify_hardware,
+    Boot, Flash, Unlock, check_skip_partitions, finish, flash_bootloader, flash_product,
+    flashed_partition_count, is_locked, lock_device, verify_hardware,
 };
 use crate::error::FfxFastbootError;
 use crate::file_resolver::FileResolver;
@@ -39,6 +39,10 @@ impl Flash for FlashManifest {
             Some(res) => res,
             None => return Err(FfxFastbootError::MissingProduct(cmd.product.clone())),
         };
+        check_skip_partitions(product, &cmd.skip_partitions)?;
+        if !cmd.skip_partitions.is_empty() {
+            log::info!("Skipping partitions: {:?}", cmd.skip_partitions);
+        }
         if product.requires_unlock && is_locked(fastboot_interface).await? {
             if self.credentials.len() == 0 {
                 return Err(FfxFastbootError::MissingCredentials);
@@ -50,7 +54,7 @@ impl Flash for FlashManifest {
         messenger
             .send(Event::FlashProduct {
                 product_name: product.name.clone(),
-                partition_count: product.bootloader_partitions.len() + product.partitions.len(),
+                partition_count: flashed_partition_count(product, &cmd),
             })
             .await?;
         let set_active_performed =
@@ -385,5 +389,114 @@ mod test {
         assert_eq!(state.set_actives, vec!["a".to_string()]);
         assert_eq!(state.continue_boots, 1);
         Ok(())
+    }
+
+    /// Flashes a product with a slotted bootloader partition, slotted and unslotted product
+    /// partitions, and `skip_partitions`.
+    ///
+    /// # Returns
+    ///
+    /// The flash result, the names of the partitions flashed, the partition count reported to
+    /// the UI, and the number of bootloader reboots.
+    async fn flash_with_skip_partitions(
+        skip_partitions: &[&str],
+    ) -> (std::result::Result<(), FfxFastbootError>, Vec<String>, Option<usize>, usize) {
+        let tmp_img_files = [(); 4].map(|_| NamedTempFile::new().expect("tmp access failed"));
+        let paths = tmp_img_files
+            .iter()
+            .map(|tmp| tmp.path().to_str().expect("non-unicode tmp path"))
+            .collect::<Vec<&str>>();
+        let manifest = json!({
+            "hw_revision": "zedboot",
+            "products": [
+                {
+                    "name": "zedboot",
+                    "bootloader_partitions": [["fake_firmware_a", paths[0]]],
+                    "partitions": [
+                        ["zircon_a", paths[1]],
+                        ["zircon_b", paths[2]],
+                        ["fvm", paths[3]]
+                    ],
+                    "oem_files": []
+                }
+            ]
+        });
+        let v: FlashManifest = from_str(&manifest.to_string()).expect("parse manifest");
+        let (state, mut proxy) = setup();
+        {
+            let mut state = state.lock().unwrap();
+            state.set_var(IS_USERSPACE_VAR.to_string(), "no".to_string());
+            state.set_var(REVISION_VAR.to_string(), "zedboot".to_string());
+            state.set_var(MAX_DOWNLOAD_SIZE_VAR.to_string(), "8192".to_string());
+        }
+
+        let (client, mut server) = mpsc::channel(100);
+        let result = v
+            .flash(
+                &client,
+                &mut TestResolver::new(),
+                &mut proxy,
+                ManifestParams {
+                    product: "zedboot".to_string(),
+                    skip_partitions: skip_partitions.iter().map(|s| s.to_string()).collect(),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await;
+        drop(client);
+
+        let mut flashed = vec![];
+        let mut partition_count = None;
+        while let Some(event) = server.recv().await {
+            match event {
+                Event::FlashPartition { partition_name } => flashed.push(partition_name),
+                Event::FlashProduct { partition_count: count, .. } => partition_count = Some(count),
+                _ => {}
+            }
+        }
+        let bootloader_reboots = state.lock().unwrap().bootloader_reboots;
+        (result, flashed, partition_count, bootloader_reboots)
+    }
+
+    #[fuchsia::test]
+    async fn test_skip_partitions_flashes_others() {
+        let (result, flashed, partition_count, bootloader_reboots) =
+            flash_with_skip_partitions(&["zircon"]).await;
+        result.expect("flash");
+        assert_eq!(flashed, vec!["fake_firmware_a", "fvm"]);
+        assert_eq!(partition_count, Some(2));
+        assert_eq!(bootloader_reboots, 1);
+    }
+
+    #[fuchsia::test]
+    async fn test_skip_all_bootloader_partitions_skips_bootloader_reboot() {
+        let (result, flashed, partition_count, bootloader_reboots) =
+            flash_with_skip_partitions(&["fake_firmware", "fvm"]).await;
+        result.expect("flash");
+        assert_eq!(flashed, vec!["zircon_a", "zircon_b"]);
+        assert_eq!(partition_count, Some(2));
+        assert_eq!(bootloader_reboots, 0);
+    }
+
+    #[fuchsia::test]
+    async fn test_skip_partition_with_slot_suffix_fails() {
+        let (result, flashed, _, _) = flash_with_skip_partitions(&["fvm", "zircon_b"]).await;
+        assert!(matches!(
+            result,
+            Err(FfxFastbootError::SlottedSkipPartition { name, base_name })
+                if name == "zircon_b" && base_name == "zircon"
+        ));
+        assert!(flashed.is_empty());
+    }
+
+    #[fuchsia::test]
+    async fn test_unknown_skip_partition_fails() {
+        let (result, flashed, _, _) = flash_with_skip_partitions(&["fvm", "modem"]).await;
+        assert!(matches!(
+            result,
+            Err(FfxFastbootError::UnknownSkipPartition { name, .. }) if name == "modem"
+        ));
+        assert!(flashed.is_empty());
     }
 }

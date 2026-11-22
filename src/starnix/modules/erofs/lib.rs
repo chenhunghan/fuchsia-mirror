@@ -79,6 +79,10 @@ impl FileSystemOps for ErofsFileSystem {
         "erofs".into()
     }
 
+    fn is_storage_backed(&self) -> bool {
+        true
+    }
+
     fn uses_external_node_ids(&self) -> bool {
         true
     }
@@ -532,7 +536,7 @@ pub fn new_fs(
         })?;
 
     let (remotefs, root_node, info, node_id) =
-        RemoteFs::new(root_client.into_channel(), fio::PERM_READABLE, "erofs")?;
+        RemoteFs::new(root_client.into_channel(), fio::PERM_READABLE, &options, "erofs")?;
 
     let fs =
         FileSystem::new(kernel, CacheMode::Cached(kernel.fs_cache_config()), remotefs, options)?;

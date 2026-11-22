@@ -95,7 +95,7 @@ Here are explanations for some high level decisions made around Flatland API:
     clients about an illegal operation. The Flatland channel is closed following
     this.
 * Flatland expects clients to define and keep track of [unique resource
-  identifiers](/docs/development/api/fidl.md#client-assigned_identifiers). Type
+  identifiers](/docs/development/api/fidl.md#client-assigned-identifiers). Type
   safety is enforced by the structs defined around these identifiers, such as
   TransformId and ContentId.
 * Flatland uses hanging-gets to notify clients about changes in the link
@@ -192,9 +192,9 @@ without affecting each other’s work.
 
 Flatland users are isolated from each other. Each of them connect to Scenic
 through their own channels. [Unique resource
-identifiers](/docs/development/api/fidl.md#client-assigned_identifiers) are defined
-only within the scope of their channel. They can only target the portion of the
-screen that is defined by their parent Flatland session.
+identifiers](/docs/development/api/fidl.md#client-assigned-identifiers) are
+defined only within the scope of their channel. They can only target the portion
+of the screen that is defined by their parent Flatland session.
 
 Each error case causes Flatland channel closure. In these error states, it is
 not clear what should be drawn on the screen, so we don’t see any point to allow
@@ -227,7 +227,7 @@ feedback, bugs and lessons when making design decisions.
   clients. However, there are some negatives about mapping each comment as a
   method. This design prevents batching until [support for multiple messages in
   single
-  write](/docs/contribute/governance/rfcs/0010_channel_iovec.md#support_for_multiple_messages_in_single_write)
+  write](/docs/contribute/governance/rfcs/0010_channel_iovec.md#support-for-multiple-messages-in-single-write)
   becomes available. However, we don’t expect the clients to manipulate the
   scene graph often and don’t consider this costly.
 

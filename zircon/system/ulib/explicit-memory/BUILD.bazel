@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_static_library_zx.bzl", "fx_cc_static_library_zx")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_static_library_zx(
+    name = "explicit-memory",
+    srcs = ["bytes.c"],
+    hdrs = ["include/explicit-memory/bytes.h"],
+    # `zx_library()` in GN always adds `"include"` to `include_dirs`, and its
+    # `zircon_toolchain != false` branch rejects `includes` as unused.
+    # TODO(https://fxbug.dev/456186319): Remove once `zx_library.gni` handles
+    # `includes` in `zircon_toolchain != false`.
+    # @bazel2gn:skip
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//zircon/system/ulib/fbl:headers"],
+)
+
+rustc_library(
+    name = "explicit-memory-rs",
+    srcs = ["bytes.rs"],
+    crate_name = "explicit_memory",
+    crate_root = "bytes.rs",
+    edition = "2024",
+    link_deps = [":explicit-memory"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//third_party/rust_crates/vendor:zerocopy"],
+)

@@ -17,7 +17,7 @@
 
 #include "src/lib/files/scoped_temp_dir.h"
 
-namespace forensics::testing {
+namespace forensics {
 
 // Manages creating and destroying directories in the calling processes namespace.
 class ScopedMemFsManager {
@@ -69,6 +69,6 @@ class ScopedMemFsManager {
   std::unordered_map<std::string, std::unique_ptr<files::ScopedTempDirAt>> bindings_;
 };
 
-}  // namespace forensics::testing
+}  // namespace forensics
 
 #endif  // SRC_DEVELOPER_FORENSICS_TESTING_SCOPED_MEMFS_MANAGER_H_

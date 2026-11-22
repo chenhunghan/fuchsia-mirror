@@ -61,52 +61,19 @@
     {
       "name": "test.foreigntypeinresponseusedthroughcompose/Top",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
-        "line": 8,
+        "filename": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
+        "line": 5,
         "column": 17,
         "length": 3
       },
       "deprecated": false,
-      "maybe_attributes": [
-        {
-          "name": "bindings_denylist",
-          "arguments": [
-            {
-              "name": "value",
-              "type": "string",
-              "value": {
-                "kind": "literal",
-                "value": "cpp",
-                "expression": "\"cpp\"",
-                "literal": {
-                  "kind": "string",
-                  "value": "cpp",
-                  "expression": "\"cpp\""
-                }
-              },
-              "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
-                "line": 7,
-                "column": 20,
-                "length": 5
-              }
-            }
-          ],
-          "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
-            "line": 7,
-            "column": 1,
-            "length": 25
-          }
-        }
-      ],
       "openness": "closed",
       "composed_protocols": [
         {
           "name": "test.middle/Middle",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
-            "line": 9,
+            "filename": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
+            "line": 6,
             "column": 13,
             "length": 18
           },
@@ -120,7 +87,7 @@
           "name": "GetFoo",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
             "line": 6,
             "column": 12,
             "length": 6
@@ -159,7 +126,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
         "line": 6,
         "column": 25,
         "length": 43
@@ -183,7 +150,7 @@
           },
           "name": "foo",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
             "line": 7,
             "column": 9,
             "length": 3

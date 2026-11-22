@@ -48,25 +48,16 @@ pub unsafe extern "C" fn rust_kernel_mapped_vmo_drop_in_place(this: *mut KernelM
 /// - `this` must point to a `KernelMappedVmo` constructed by `rust_kernel_mapped_vmo_new` and not
 ///   aliased for the duration of the call.
 /// - `vmo` must be a valid `VmObject` pointer exported from C++ via `fbl::ExportToRawPtr`.
-/// - If `name_len > 0`, `name` must point to `name_len` valid bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_kernel_mapped_vmo_init(
     this: &mut KernelMappedVmo,
     vmo: *mut VmObject,
     offset: usize,
     size: usize,
-    name: *const c_char,
-    name_len: usize,
 ) -> Result<(), Status> {
     // SAFETY: Caller guarantees `vmo` is an owned reference exported from `fbl::RefPtr<VmObject>`.
     let vmo = unsafe { VmObject::from_raw(VmObject::cast_raw(vmo)) }.expect("vmo must not be null");
-    let name_slice = if name.is_null() || name_len == 0 {
-        &[]
-    } else {
-        // SAFETY: Caller guarantees `name` points to `name_len` valid bytes.
-        unsafe { core::slice::from_raw_parts(name.cast::<u8>(), name_len) }
-    };
-    this.init(vmo, offset, size, name_slice)
+    this.init(vmo, offset, size)
 }
 
 /// Publishes `this` VMO to userland as a read-only handle using the given name and stream size.

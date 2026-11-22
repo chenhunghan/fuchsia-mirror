@@ -1,0 +1,13 @@
+{
+    "divergences": [
+        {
+            "scenario_glob": "*",
+            "step_op": "get_capabilities",
+            "field": "result.capabilities",
+            "linux_expected": 511,
+            "starnix_expected": 23,
+            "bug_url": "https://fxbug.dev/583190446",
+            "reason": "Starnix USBDEVFS_GET_CAPABILITIES reports CAP_ZERO_PACKET | CAP_BULK_CONTINUATION | CAP_NO_PACKET_SIZE_LIM | CAP_REAP_AFTER_DISCONNECT (23 / 0x17), whereas Linux 6.6.13 dummy_hcd also advertises optional CAP_BULK_SCATTER_GATHER | CAP_MMAP | CAP_DROP_PRIVILEGES | CAP_CONNINFO_EX | CAP_SUSPEND (511 / 0x1ff)"
+        }
+    ]
+}

@@ -27,10 +27,7 @@ rustc_test(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
-        # GN depends on the `:fuchsia-component-test` group (which bundles
-        # `:includes` and `realm_builder_server_component`); Bazel depends on
-        # the Rust library target directly.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/lib/fuchsia-sync",
         "//src/lib/fuchsia-url",

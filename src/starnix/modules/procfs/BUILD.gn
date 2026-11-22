@@ -50,7 +50,6 @@ rustc_library("procfs") {
     "cgroups.rs",
     "config_gz.rs",
     "cpuinfo.rs",
-    "device_tree.rs",
     "devices.rs",
     "filesystems.rs",
     "fs.rs",
@@ -121,7 +120,6 @@ rustc_test("procfs_test") {
     "cgroups.rs",
     "config_gz.rs",
     "cpuinfo.rs",
-    "device_tree.rs",
     "devices.rs",
     "filesystems.rs",
     "fs.rs",
@@ -182,6 +180,7 @@ rustc_test("procfs_test") {
          [
            "//src/lib/fuchsia",
            "//third_party/rust_crates:assert_matches",
+           "//third_party/rust_crates:test-case",
          ]
   lint_config = "//src/starnix/config:starnix_clippy_lints_test"
   exclude_toolchain_tags = [

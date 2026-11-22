@@ -12,7 +12,7 @@ type TableWithEmptyStruct = table {
     1: s EmptyStruct;
 };
 
-type XUnionWithEmptyStruct = flexible union {
+type FlexibleUnionWithEmptyStruct = flexible union {
     1: s EmptyStruct;
 };
 
@@ -26,8 +26,8 @@ type StructWithOptionals = struct {
     s2 box<EmptyStruct>;
     t TableWithEmptyStruct;
     // nullable tables are not allowed.
-    xu XUnionWithEmptyStruct;
-    xu2 XUnionWithEmptyStruct:optional;
+    xu FlexibleUnionWithEmptyStruct;
+    xu2 FlexibleUnionWithEmptyStruct:optional;
     u UnionWithEmptyStruct;
     u2 UnionWithEmptyStruct:optional;
 };

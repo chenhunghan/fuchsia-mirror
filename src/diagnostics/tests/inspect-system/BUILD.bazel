@@ -2,15 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
-load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
 test_suite(
     name = "tests",
-    tests = [],  # Include all tests in the package.
+    tests = [
+        ":inspect-system-tests",
+        ":unittests",
+    ],
     visibility = ["//src/diagnostics:__pkg__"],
 )
 
@@ -42,12 +59,40 @@ rustc_binary(
     ],
 )
 
-# Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN
-# fuchsia_unittest_package wired alongside bazel_test_suite fails core.x64-asan
-# testsharder ("some shard names are repeated: affected:AEMU") when
-# use_test_pilot = true sets os = "linux" on the GN test;
-# TODO(https://fxbug.dev/570694755).
-# @bazel2gn:skip
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "inspect_system",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "inspect-system",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/inspect_system.cml",
+)
+
+fx_test_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    test_type = "system",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "inspect-system-tests",
+    test_components = [":component"],
+)
+
+# Run with `fx test inspect-system-tests`.
+fx_test(
+    name = "inspect-system-tests",
+    package = ":package",
+)
+
 rustc_test(
     name = "bin_test",
     crate = ":bin",
@@ -56,12 +101,6 @@ rustc_test(
 )
 
 # Run with `fx test inspect-system-unittests`
-# Needs reviewer attention (bazel2gn skip): Keeping the dual-built GN
-# fuchsia_unittest_package wired alongside bazel_test_suite fails core.x64-asan
-# testsharder ("some shard names are repeated: affected:AEMU") when
-# use_test_pilot = true sets os = "linux" on the GN test;
-# TODO(https://fxbug.dev/570694755).
-# @bazel2gn:skip
 fx_unittest_package(
     name = "unittests",
     package_name = "inspect-system-unittests",

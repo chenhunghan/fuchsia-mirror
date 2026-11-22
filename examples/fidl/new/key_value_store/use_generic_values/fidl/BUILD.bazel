@@ -19,11 +19,5 @@ fidl_library(
     srcs = ["key_value_store.test.fidl"],
     # TODO(https://fxbug.dev/381096879): Fix lint warnings and remove.
     excluded_checks = ["wrong-prefix-for-platform-source-library"],
-    visibility = [
-        "//examples/fidl/new/key_value_store/use_generic_values/rust/client:__pkg__",
-        "//examples/fidl/new/key_value_store/use_generic_values/rust/server:__pkg__",
-        "//examples/fidl/new/key_value_store/use_generic_values/rust_next/client:__pkg__",
-        "//examples/fidl/new/key_value_store/use_generic_values/rust_next/server:__pkg__",
-        "//examples/fidl/new/key_value_store/use_generic_values/test:__pkg__",
-    ],
+    visibility = ["//examples/fidl/new/key_value_store/use_generic_values:__subpackages__"],
 )

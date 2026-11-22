@@ -6,7 +6,17 @@
 ### Test expected behavior of optional features library
 
 BT_FILE_DEPS=(
+  "build/profile/procfs.py"
+  "build/scripts/lock_utils.py"
   "scripts/fx"
+  "tools/devshell/fx_cli/__init__.py"
+  "tools/devshell/fx_cli/builder.py"
+  "tools/devshell/fx_cli/fx_builtins.py"
+  "tools/devshell/fx_cli/locator.py"
+  "tools/devshell/fx_cli/main.py"
+  "tools/devshell/fx_cli/metadata.py"
+  "tools/devshell/fx_cli/metrics.py"
+  "tools/devshell/fx_cli/registry.py"
   "tools/devshell/lib/fx-cmd-locator.sh"
   "tools/devshell/lib/fx-optional-features.sh"
   "tools/devshell/lib/generate-ssh-config.sh"
@@ -27,6 +37,9 @@ BT_SET_UP() {
 TEST_disable_feature() {
   local valid_feature="myfeature"
   cat >> "${BT_TEMP_DIR}/tools/devshell/lib/fx-optional-features.sh" <<EOF
+    _FX_OPTIONAL_FEATURES_SPEC=(
+      "${valid_feature}|enabled|Test feature"
+    )
     list_optional_features() {
       echo "${valid_feature}"
     }
@@ -60,6 +73,9 @@ EOF
 TEST_enable_feature() {
   local valid_feature="myfeature"
   cat >> "${BT_TEMP_DIR}/tools/devshell/lib/fx-optional-features.sh" <<EOF
+    _FX_OPTIONAL_FEATURES_SPEC=(
+      "${valid_feature}|disabled|Test feature"
+    )
     list_optional_features() {
       echo "${valid_feature}"
     }
@@ -106,6 +122,10 @@ TEST_features_are_valid() {
 
 TEST_get_fx_flags_non_default_features() {
   cat >> "${BT_TEMP_DIR}/tools/devshell/lib/fx-optional-features.sh" <<EOF
+    _FX_OPTIONAL_FEATURES_SPEC=(
+      "feature1|enabled|Feature 1"
+      "feature2|disabled|Feature 2"
+    )
     list_optional_features() {
       echo "feature1" "feature2"
     }
@@ -134,4 +154,37 @@ EOF
 
   BT_EXPECT_EQ "$(${fx} --disable=feature1 --enable=feature2 ${cmd})" "--disable=feature1 --enable=feature2"
 }
+
+TEST_python_optional_features_meta_matches_bash() {
+  local features_sh="${BT_TEMP_DIR}/tools/devshell/lib/fx-optional-features.sh"
+  source "${features_sh}"
+
+  local bash_summary=""
+  local f default_str help_text
+  for f in $(list_optional_features); do
+    if is_feature_enabled_by_default "${f}"; then
+      default_str="True"
+    else
+      default_str="False"
+    fi
+    help_text="$(help_optional_feature "${f}")"
+    bash_summary+="${f}|${default_str}"$'\n'"${help_text}"$'\n'
+  done
+
+  local py_summary
+  py_summary="$(
+    PYTHONPATH="${BT_TEMP_DIR}/tools/devshell/fx_cli" python3 -c '
+import pathlib
+import sys
+import fx_builtins
+for feat in fx_builtins.load_optional_features_meta(pathlib.Path(sys.argv[1])):
+    print(f"{feat.name}|{feat.default_enabled}")
+    for line in feat.description:
+        print(f"            {line}")
+' "${BT_TEMP_DIR}"
+  )"$'\n'
+
+  BT_EXPECT_EQ "${py_summary}" "${bash_summary}"
+}
+
 BT_RUN_TESTS "$@"

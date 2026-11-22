@@ -819,7 +819,7 @@ in the `Request` handler. Client code does not need to be soft transitioned
 since the generated proxy will always implement all methods.
 
 For methods annotated with the `@transitional` attribute,  the `ProxyInterface`
-trait for [asynchronous clients](#protocols-client-asynchronous}) provides
+trait for [asynchronous clients](#protocols-client-asynchronous) provides
 default implementations that call `unimplemented!()`. As noted earlier, this has
 no effect on the `Proxy` type, which always implements all the trait's methods.
 However, it can help for soft transitions when the `ProxyInterface` trait is

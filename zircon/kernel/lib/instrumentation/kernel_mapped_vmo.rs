@@ -56,7 +56,6 @@ impl KernelMappedVmo {
         vmo: RefPtr<VmObject>,
         offset: usize,
         size: usize,
-        name: &[u8],
     ) -> Result<(), Status> {
         assert!(offset.is_multiple_of(page::SIZE));
         let size = page::round_up(size);
@@ -64,7 +63,7 @@ impl KernelMappedVmo {
             PinnedVmObject::create(vmo, offset as u64, size as u64, /*write=*/ true)?;
         let root_vmar = VmAspace::kernel_aspace().root_vmar().expect("kernel root vmar");
         let pinned_vmo = self.pinned_vmo.vmo().expect("pinned vmo").clone();
-        let map_result = root_vmar.create_vm_mapping(
+        let map_result = root_vmar.create_vm_mapping_no_overwrite(
             0,
             size,
             0,
@@ -72,7 +71,6 @@ impl KernelMappedVmo {
             pinned_vmo,
             offset as u64,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            name,
         )?;
         self.mapping = Some(map_result.mapping);
         self.mapping.as_ref().unwrap().map_range(0, size, true, false)
@@ -133,7 +131,7 @@ mod tests {
 
         let mut mapped = KernelMappedVmo::new();
         let stream_size = 128;
-        unwrap_ok!(mapped.init(vmo.clone(), page::SIZE, stream_size, b"test-kernel-mapped-vmo"));
+        unwrap_ok!(mapped.init(vmo.clone(), page::SIZE, stream_size));
 
         let base = mapped.base_locking().0;
         expect_ne!(base, 0usize);
@@ -178,10 +176,7 @@ mod tests {
         let vmo = VmObjectPaged::into_vm_object(paged);
 
         let mut mapped = KernelMappedVmo::new();
-        expect_err!(
-            mapped.init(vmo.clone(), page::SIZE, page::SIZE, b"test-out-of-range"),
-            Status::OUT_OF_RANGE
-        );
+        expect_err!(mapped.init(vmo.clone(), page::SIZE, page::SIZE), Status::OUT_OF_RANGE);
         expect_true!(mapped.mapping.is_none());
         expect_true!(mapped.pinned_vmo.vmo().is_none());
         drop(mapped);

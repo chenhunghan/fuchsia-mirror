@@ -140,6 +140,7 @@ impl DriverTestRealmBuilder for RealmBuilder {
                     "fuchsia.driver.registrar.DriverRegistrar",
                 ))
                 .capability(Capability::protocol_by_name("fuchsia.driver.test.Realm"))
+                .capability(Capability::protocol_by_name("fuchsia.driver.token.NodeBusTopology"))
                 .from(&driver_realm)
                 .to(Ref::parent()),
         )

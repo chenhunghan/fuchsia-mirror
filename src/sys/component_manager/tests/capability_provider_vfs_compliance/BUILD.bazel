@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component_manifest",
@@ -16,6 +17,12 @@ load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "vfs_compliance_test_realm.shard",
+    shard = "vfs_compliance_test_realm.shard.cml",
+    visibility = ["//:__subpackages__"],
+)
 
 rustc_test(
     name = "integration_test_bin",

@@ -14,7 +14,7 @@
 #include <ktl/byte.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
-#include <phys/allocation.h>
+#include <phys/allocation/allocation.h>
 #include <phys/handoff/handoff.h>
 
 // The name of the kernel ZBI within a kernel package.

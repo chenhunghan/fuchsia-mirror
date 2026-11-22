@@ -104,6 +104,7 @@ rustc_library("fuchsia-hyper") {
     "//third_party/rust_crates:hyper",
     "//third_party/rust_crates:hyper-rustls",
     "//third_party/rust_crates:hyper-util",
+    "//third_party/rust_crates:log",
     "//third_party/rust_crates:rustls",
     "//third_party/rust_crates:socket2",
     "//third_party/rust_crates:tokio",
@@ -112,6 +113,8 @@ rustc_library("fuchsia-hyper") {
   if (is_fuchsia) {
     deps += [
       "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
+      "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
+      "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
       "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
       "//sdk/rust/zx",
       "//src/lib/fdio/rust:fdio",
@@ -126,7 +129,6 @@ rustc_library("fuchsia-hyper") {
   } else {
     deps += [
       "//src/developer/ffx/lib/netext:lib",
-      "//third_party/rust_crates:log",
       "//third_party/rust_crates:rustls-native-certs",
     ]
   }
@@ -153,6 +155,7 @@ rustc_test("fuchsia_hyper_lib_test") {
     "//third_party/rust_crates:hyper",
     "//third_party/rust_crates:hyper-rustls",
     "//third_party/rust_crates:hyper-util",
+    "//third_party/rust_crates:log",
     "//third_party/rust_crates:rustls",
     "//third_party/rust_crates:socket2",
     "//third_party/rust_crates:tokio",
@@ -161,6 +164,8 @@ rustc_test("fuchsia_hyper_lib_test") {
   if (is_fuchsia) {
     deps += [
       "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
+      "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
+      "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
       "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
       "//sdk/rust/zx",
       "//src/lib/fdio/rust:fdio",
@@ -175,7 +180,6 @@ rustc_test("fuchsia_hyper_lib_test") {
   } else {
     deps += [
       "//src/developer/ffx/lib/netext:lib",
-      "//third_party/rust_crates:log",
       "//third_party/rust_crates:rustls-native-certs",
     ]
   }

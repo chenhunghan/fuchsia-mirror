@@ -86,5 +86,5 @@ impl Driver for TestDriver {
         Ok(Self { _node: node, _scope: scope })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }

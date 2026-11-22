@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 #include <fake_codec_adapter.h>
-#include <fuchsia/media/cpp/fidl.h>
-#include <fuchsia/mediacodec/cpp/fidl.h>
-#include <fuchsia/sysmem/cpp/fidl.h>
-#include <fuchsia/sysmem2/cpp/fidl_test_base.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem2/cpp/fidl.h>
+#include <fidl/fuchsia.sysmem2/cpp/test_base.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/sync/cpp/completion.h>
@@ -33,37 +34,38 @@ constexpr uint64_t kOutputBufferSize = 256ULL * 144 * 4;
 constexpr uint32_t kTestPacketValidLengthBytes = 16;
 constexpr zx::duration kWaitTimeout = zx::sec(30);
 
-void PopulateTestBufferSettings(fuchsia::sysmem2::BufferMemorySettings* buffer_settings,
+void PopulateTestBufferSettings(fuchsia_sysmem2::BufferMemorySettings* buffer_settings,
                                 uint64_t size_bytes) {
-  buffer_settings->set_size_bytes(size_bytes);
-  buffer_settings->set_raw_vmo_size(size_bytes);
-  buffer_settings->set_is_physically_contiguous(false);
-  buffer_settings->set_is_secure(false);
-  buffer_settings->set_coherency_domain(fuchsia::sysmem2::CoherencyDomain::CPU);
-  buffer_settings->mutable_heap()->set_heap_type("fuchsia.sysmem.HeapType.SYSTEM_RAM").set_id(0);
+  buffer_settings->size_bytes() = size_bytes;
+  buffer_settings->raw_vmo_size() = size_bytes;
+  buffer_settings->is_physically_contiguous() = false;
+  buffer_settings->is_secure() = false;
+  buffer_settings->coherency_domain() = fuchsia_sysmem2::CoherencyDomain::kCpu;
+  auto& heap = buffer_settings->heap().emplace();
+  heap.heap_type() = "fuchsia.sysmem.HeapType.SYSTEM_RAM";
+  heap.id() = 0;
 }
 
 auto CreateDecoderParams() {
-  fuchsia::mediacodec::CreateDecoder_Params params;
-
-  params.mutable_input_details()->set_format_details_version_ordinal(0);
+  fuchsia_mediacodec::CreateDecoderParams params;
+  params.input_details().emplace().format_details_version_ordinal() = 0;
   return params;
 }
 
 auto CreateStreamBufferPartialSettings(
-    uint64_t buffer_lifetime_ordinal, const fuchsia::media::StreamBufferConstraints& constraints,
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token) {
-  fuchsia::media::StreamBufferPartialSettings settings;
-  settings.set_buffer_lifetime_ordinal(buffer_lifetime_ordinal)
-      .set_buffer_constraints_version_ordinal(constraints.buffer_constraints_version_ordinal())
-      .set_sysmem2_token(std::move(token));
+    uint64_t buffer_lifetime_ordinal, const fuchsia_media::StreamBufferConstraints& constraints,
+    fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token) {
+  fuchsia_media::StreamBufferPartialSettings settings;
+  settings.buffer_lifetime_ordinal() = buffer_lifetime_ordinal;
+  settings.buffer_constraints_version_ordinal() = constraints.buffer_constraints_version_ordinal();
+  settings.sysmem2_token() = std::move(token);
   return settings;
 }
 
 auto CreateValidInputBufferCollectionConstraints() {
   fuchsia_sysmem2::BufferCollectionConstraints result;
   result.usage().emplace().cpu() =
-      fuchsia::sysmem::cpuUsageRead | fuchsia::sysmem::cpuUsageReadOften;
+      fuchsia_sysmem2::kCpuUsageRead | fuchsia_sysmem2::kCpuUsageReadOften;
   result.min_buffer_count_for_camping() = kInputMinBufferCountForCamping;
   // Must emplace the buffer_memory_constraints here, as enforced by CodecImpl.  Leaving all
   // buffer_memory_constraints fields default is fine.
@@ -74,7 +76,7 @@ auto CreateValidInputBufferCollectionConstraints() {
 auto CreateValidOutputBufferCollectionConstraints() {
   fuchsia_sysmem2::BufferCollectionConstraints result;
   result.usage().emplace().cpu() =
-      fuchsia::sysmem::cpuUsageWrite | fuchsia::sysmem::cpuUsageWriteOften;
+      fuchsia_sysmem2::kCpuUsageWrite | fuchsia_sysmem2::kCpuUsageWriteOften;
   result.min_buffer_count_for_camping() = kOutputBufferCount;
   auto& bmc = result.buffer_memory_constraints().emplace();
   bmc.min_size_bytes() = kOutputBufferSize;
@@ -83,121 +85,196 @@ auto CreateValidOutputBufferCollectionConstraints() {
 }
 
 auto CreateInputPacket() {
-  fuchsia::media::Packet input_packet;
-  input_packet.mutable_header()->set_buffer_lifetime_ordinal(1).set_packet_index(0);
-  input_packet.set_buffer_index(0)
-      .set_stream_lifetime_ordinal(1)
-      .set_start_offset(0)
-      .set_valid_length_bytes(kTestPacketValidLengthBytes);
+  fuchsia_media::Packet input_packet;
+  auto& header = input_packet.header().emplace();
+  header.buffer_lifetime_ordinal() = 1;
+  header.packet_index() = 0;
+  input_packet.buffer_index() = 0;
+  input_packet.stream_lifetime_ordinal() = 1;
+  input_packet.start_offset() = 0;
+  input_packet.valid_length_bytes() = kTestPacketValidLengthBytes;
   return input_packet;
 }
 
-class TestBufferCollection : public fuchsia::sysmem2::testing::BufferCollection_TestBase {
+class TestStreamProcessorHandler : public fidl::AsyncEventHandler<fuchsia_media::StreamProcessor> {
  public:
-  TestBufferCollection() : binding_(this) {}
+  fit::function<void(fuchsia_media::StreamBufferConstraints)> on_input_constraints;
+  fit::function<void(fuchsia_media::StreamOutputConstraints)> on_output_constraints;
+  fit::function<void(fuchsia_media::StreamOutputFormat)> on_output_format;
+  fit::function<void(fuchsia_media::Packet, bool, bool)> on_output_packet;
+  fit::function<void(fuchsia_media::PacketHeader)> on_free_input_packet;
+  fit::function<void(uint64_t, fuchsia_media::StreamError)> on_stream_failed;
+  fit::function<void(fidl::UnbindInfo)> on_fidl_error_cb;
 
-  void Bind(fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollection> request) {
-    binding_.Bind(std::move(request));
+  void OnInputConstraints(
+      fidl::Event<fuchsia_media::StreamProcessor::OnInputConstraints>& event) override {
+    if (on_input_constraints) {
+      on_input_constraints(std::move(event.input_constraints()));
+    }
   }
-  void NotImplemented_(const std::string& name) override {}
+  void OnOutputConstraints(
+      fidl::Event<fuchsia_media::StreamProcessor::OnOutputConstraints>& event) override {
+    if (on_output_constraints) {
+      on_output_constraints(std::move(event.output_config()));
+    }
+  }
+  void OnOutputFormat(fidl::Event<fuchsia_media::StreamProcessor::OnOutputFormat>& event) override {
+    if (on_output_format) {
+      on_output_format(std::move(event.output_format()));
+    }
+  }
+  void OnOutputPacket(fidl::Event<fuchsia_media::StreamProcessor::OnOutputPacket>& event) override {
+    if (on_output_packet) {
+      on_output_packet(std::move(event.output_packet()), event.error_detected_before(),
+                       event.error_detected_during());
+    }
+  }
+  void OnFreeInputPacket(
+      fidl::Event<fuchsia_media::StreamProcessor::OnFreeInputPacket>& event) override {
+    if (on_free_input_packet) {
+      on_free_input_packet(std::move(event.free_input_packet()));
+    }
+  }
+  void OnStreamFailed(fidl::Event<fuchsia_media::StreamProcessor::OnStreamFailed>& event) override {
+    if (on_stream_failed) {
+      on_stream_failed(event.stream_lifetime_ordinal(), event.error());
+    }
+  }
+  void on_fidl_error(fidl::UnbindInfo error) override {
+    if (on_fidl_error_cb) {
+      on_fidl_error_cb(error);
+    }
+  }
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_media::StreamProcessor> metadata) override {}
+};
 
-  void WaitForAllBuffersAllocated(WaitForAllBuffersAllocatedCallback callback) override {
-    wait_callback_ = std::move(callback);
+class TestStreamProcessor {
+ public:
+  TestStreamProcessorHandler& events() { return handler_; }
+
+  fidl::ServerEnd<fuchsia_media::StreamProcessor> NewRequest(async_dispatcher_t* dispatcher) {
+    auto endpoints = fidl::CreateEndpoints<fuchsia_media::StreamProcessor>();
+    ZX_ASSERT(endpoints.is_ok());
+    client_.Bind(std::move(endpoints->client), dispatcher, &handler_);
+    return std::move(endpoints->server);
   }
-  void CheckAllBuffersAllocated(CheckAllBuffersAllocatedCallback callback) override {
-    fuchsia::sysmem2::BufferCollection_CheckAllBuffersAllocated_Result result;
-    result.set_response({});
-    callback(std::move(result));
+
+  fidl::Client<fuchsia_media::StreamProcessor>& client() { return client_; }
+
+  void Unbind() { client_ = {}; }
+
+ private:
+  // Handler must outlive client_.
+  TestStreamProcessorHandler handler_;
+  fidl::Client<fuchsia_media::StreamProcessor> client_;
+};
+
+class TestBufferCollection : public fidl::testing::TestBase<fuchsia_sysmem2::BufferCollection> {
+ public:
+  explicit TestBufferCollection(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
+
+  void Bind(fidl::ServerEnd<fuchsia_sysmem2::BufferCollection> request) {
+    binding_.emplace(dispatcher_, std::move(request), this, fidl::kIgnoreBindingClosure);
+  }
+  void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {}
+  void handle_unknown_method(
+      fidl::UnknownMethodMetadata<fuchsia_sysmem2::BufferCollection> metadata,
+      fidl::UnknownMethodCompleter::Sync& completer) override {}
+
+  void WaitForAllBuffersAllocated(WaitForAllBuffersAllocatedCompleter::Sync& completer) override {
+    wait_completer_ = completer.ToAsync();
+  }
+  void CheckAllBuffersAllocated(CheckAllBuffersAllocatedCompleter::Sync& completer) override {
+    completer.Reply(fit::ok());
   }
   void FailAllocation() {
-    WaitForAllBuffersAllocatedCallback callback;
-    callback.swap(wait_callback_);
-
-    fuchsia::sysmem2::BufferCollection_WaitForAllBuffersAllocated_Result result;
-    result.set_err(fuchsia::sysmem2::Error::CONSTRAINTS_INTERSECTION_EMPTY);
-    callback(std::move(result));
+    auto completer = std::move(wait_completer_);
+    wait_completer_.reset();
+    completer->Reply(fit::error(fuchsia_sysmem2::Error::kConstraintsIntersectionEmpty));
   }
   void CompleteAllocation(uint32_t buffer_count, uint64_t size_bytes) {
-    WaitForAllBuffersAllocatedCallback callback;
-    callback.swap(wait_callback_);
+    auto completer = std::move(wait_completer_);
+    wait_completer_.reset();
 
-    fuchsia::sysmem2::BufferCollectionInfo info;
-    PopulateTestBufferSettings(info.mutable_settings()->mutable_buffer_settings(), size_bytes);
+    fuchsia_sysmem2::BufferCollectionInfo info;
+    PopulateTestBufferSettings(&info.settings().emplace().buffer_settings().emplace(), size_bytes);
+    info.buffers().emplace();
     for (uint32_t i = 0; i < buffer_count; ++i) {
       zx::vmo vmo;
       ZX_ASSERT(zx::vmo::create(size_bytes, 0, &vmo) == ZX_OK);
-      fuchsia::sysmem2::VmoBuffer vmo_buffer;
-      vmo_buffer.set_vmo(std::move(vmo));
-      vmo_buffer.set_vmo_usable_start(0);
-      info.mutable_buffers()->push_back(std::move(vmo_buffer));
+      fuchsia_sysmem2::VmoBuffer vmo_buffer;
+      vmo_buffer.vmo() = std::move(vmo);
+      vmo_buffer.vmo_usable_start() = 0;
+      info.buffers()->push_back(std::move(vmo_buffer));
     }
 
-    fuchsia::sysmem2::BufferCollection_WaitForAllBuffersAllocated_Response response;
-    response.set_buffer_collection_info(std::move(info));
-    fuchsia::sysmem2::BufferCollection_WaitForAllBuffersAllocated_Result result;
-    result.set_response(std::move(response));
-    callback(std::move(result));
+    fuchsia_sysmem2::BufferCollectionWaitForAllBuffersAllocatedResponse response;
+    response.buffer_collection_info() = std::move(info);
+    completer->Reply(fit::ok(std::move(response)));
   }
 
-  bool is_waiting() const { return !!wait_callback_; }
+  bool is_waiting() const { return wait_completer_.has_value(); }
 
  private:
-  fidl::Binding<fuchsia::sysmem2::BufferCollection> binding_;
-  WaitForAllBuffersAllocatedCallback wait_callback_;
+  async_dispatcher_t* dispatcher_;
+  std::optional<WaitForAllBuffersAllocatedCompleter::Async> wait_completer_;
+  std::optional<fidl::ServerBinding<fuchsia_sysmem2::BufferCollection>> binding_;
 };
 
-class TestAllocator : public fuchsia::sysmem2::testing::Allocator_TestBase {
+class TestAllocator : public fidl::testing::TestBase<fuchsia_sysmem2::Allocator> {
  public:
-  TestAllocator() : binding_(this) {}
+  explicit TestAllocator(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {}
 
-  void Bind(fidl::InterfaceRequest<fuchsia::sysmem2::Allocator> request) {
-    binding_.Bind(std::move(request));
+  void Bind(fidl::ServerEnd<fuchsia_sysmem2::Allocator> request) {
+    binding_.emplace(dispatcher_, std::move(request), this, fidl::kIgnoreBindingClosure);
   }
-  void BindSharedCollection(
-      ::fuchsia::sysmem2::AllocatorBindSharedCollectionRequest request) override {
-    auto col = std::make_unique<TestBufferCollection>();
-    col->Bind(std::move(*request.mutable_buffer_collection_request()));
+  void BindSharedCollection(BindSharedCollectionRequest& request,
+                            BindSharedCollectionCompleter::Sync& completer) override {
+    auto col = std::make_unique<TestBufferCollection>(dispatcher_);
+    col->Bind(std::move(request.buffer_collection_request().value()));
     collections_.push_back(std::move(col));
   }
 
-  void SetDebugClientInfo(::fuchsia::sysmem2::AllocatorSetDebugClientInfoRequest request) override {
-  }
+  void SetDebugClientInfo(SetDebugClientInfoRequest& request,
+                          SetDebugClientInfoCompleter::Sync& completer) override {}
 
-  void GetVmoInfo(::fuchsia::sysmem2::AllocatorGetVmoInfoRequest request,
-                  GetVmoInfoCallback callback) override {
+  void GetVmoInfo(GetVmoInfoRequest& request, GetVmoInfoCompleter::Sync& completer) override {
     uint64_t vmo_size = 0;
-    ZX_ASSERT(request.vmo().get_size(&vmo_size) == ZX_OK);
-    fuchsia::sysmem2::Allocator_GetVmoInfo_Response response;
-    response.set_buffer_collection_id(1);
-    response.set_buffer_index(0);
-    response.set_constraints_ok(true);
-    if (request.has_vmo_settings_to_check()) {
-      response.set_vmo_settings_match(true);
+    ZX_ASSERT(request.vmo()->get_size(&vmo_size) == ZX_OK);
+    fuchsia_sysmem2::AllocatorGetVmoInfoResponse response;
+    response.buffer_collection_id() = 1;
+    response.buffer_index() = 0;
+    response.constraints_ok() = true;
+    if (request.vmo_settings_to_check().has_value()) {
+      response.vmo_settings_match() = true;
     }
-    PopulateTestBufferSettings(response.mutable_single_buffer_settings()->mutable_buffer_settings(),
-                               vmo_size);
-    callback(fuchsia::sysmem2::Allocator_GetVmoInfo_Result::WithResponse(std::move(response)));
+    PopulateTestBufferSettings(
+        &response.single_buffer_settings().emplace().buffer_settings().emplace(), vmo_size);
+    completer.Reply(fit::ok(std::move(response)));
   }
 
-  void NotImplemented_(const std::string& name) override {
+  void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
     // Unexpected.
     ZX_PANIC("NotImplemented_(): %s", name.c_str());
+  }
+  void handle_unknown_method(fidl::UnknownMethodMetadata<fuchsia_sysmem2::Allocator> metadata,
+                             fidl::UnknownMethodCompleter::Sync& completer) override {
+    ZX_PANIC("handle_unknown_method(): %lu", static_cast<unsigned long>(metadata.method_ordinal));
   }
 
   TestBufferCollection& collection(size_t index = 0) { return *collections_.at(index); }
   size_t collection_count() const { return collections_.size(); }
 
  private:
-  fidl::Binding<fuchsia::sysmem2::Allocator> binding_;
-
+  async_dispatcher_t* dispatcher_;
   std::vector<std::unique_ptr<TestBufferCollection>> collections_;
+  std::optional<fidl::ServerBinding<fuchsia_sysmem2::Allocator>> binding_;
 };
 
 class CodecImplFailures : public gtest::RealLoopFixture {
  public:
-  using StreamProcessorPtr = ::fuchsia::media::StreamProcessorPtr;
-
-  void TearDown() override { token_request_ = nullptr; }
+  void TearDown() override { token_request_.reset(); }
 
   virtual std::unique_ptr<FakeCodecAdapter> CreateCodecAdapter() {
     auto codec_adapter = std::make_unique<FakeCodecAdapter>(codec_impl_->lock(), codec_impl_.get());
@@ -205,14 +282,15 @@ class CodecImplFailures : public gtest::RealLoopFixture {
     return codec_adapter;
   }
 
-  void Create(fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request,
+  void Create(fidl::ServerEnd<fuchsia_media::StreamProcessor> request,
               fit::function<void(FakeCodecAdapter*)> configure_adapter = nullptr) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::Allocator> sysmem;
-    sysmem_request_ = sysmem.NewRequest();
+    auto sysmem_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::Allocator>();
+    ZX_ASSERT(sysmem_endpoints.is_ok());
+    sysmem_request_ = std::move(sysmem_endpoints->server);
 
-    codec_impl_ = std::make_unique<CodecImpl>(
-        fidl::ClientEnd<fuchsia_sysmem2::Allocator>(sysmem.TakeChannel()), nullptr, dispatcher(),
-        CreateDecoderParams(), std::move(request));
+    codec_impl_ =
+        std::make_unique<CodecImpl>(std::move(sysmem_endpoints->client), nullptr, dispatcher(),
+                                    CreateDecoderParams(), std::move(request));
 
     auto codec_adapter = CreateCodecAdapter();
     if (configure_adapter) {
@@ -271,8 +349,8 @@ class CodecImplFailures : public gtest::RealLoopFixture {
   }
 
   // Just cache this request so that we can have a valid sysmem handle
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::Allocator>> sysmem_request_;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>> token_request_;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::Allocator>> sysmem_request_;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> token_request_;
 
   bool error_handler_ran_ = false;
   std::unique_ptr<CodecImpl> codec_impl_;
@@ -280,25 +358,28 @@ class CodecImplFailures : public gtest::RealLoopFixture {
 };
 
 TEST_F(CodecImplFailures, InputBufferCollectionConstraintsCpuUsage) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
-    // Setting write usage on input buffers is invalid and will result in codec
-    // failure
-    buffer_collection_constraints.usage()->cpu() =
-        fuchsia::sysmem::cpuUsageWrite | fuchsia::sysmem::cpuUsageWriteOften;
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   std::move(buffer_collection_constraints));
+        auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
+        // Setting write usage on input buffers is invalid and will result in codec
+        // failure
+        buffer_collection_constraints.usage()->cpu() =
+            fuchsia_sysmem2::kCpuUsageWrite | fuchsia_sysmem2::kCpuUsageWriteOften;
+        codec_adapter_->SetBufferCollectionConstraints(kInputPort,
+                                                       std::move(buffer_collection_constraints));
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  Create(processor.NewRequest());
+  Create(processor.NewRequest(dispatcher()));
 
   RunLoopUntil([this]() { return error_handler_ran_; });
   ASSERT_TRUE(error_handler_ran_);
@@ -307,79 +388,88 @@ TEST_F(CodecImplFailures, InputBufferCollectionConstraintsCpuUsage) {
 // TODO(https://fxbug.dev/577201084): Remove once API level 33 is retired and v1 token support is
 // removed.
 TEST_F(CodecImplFailures, InputBufferCollectionConstraintsCpuUsageV1Token) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
-    // Setting write usage on input buffers is invalid and will result in codec
-    // failure
-    buffer_collection_constraints.usage()->cpu() =
-        fuchsia::sysmem::cpuUsageWrite | fuchsia::sysmem::cpuUsageWriteOften;
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   std::move(buffer_collection_constraints));
+        auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
+        // Setting write usage on input buffers is invalid and will result in codec
+        // failure
+        buffer_collection_constraints.usage()->cpu() =
+            fuchsia_sysmem2::kCpuUsageWrite | fuchsia_sysmem2::kCpuUsageWriteOften;
+        codec_adapter_->SetBufferCollectionConstraints(kInputPort,
+                                                       std::move(buffer_collection_constraints));
 
-    fuchsia::media::StreamBufferPartialSettings settings;
-    settings.set_buffer_lifetime_ordinal(1)
-        .set_buffer_constraints_version_ordinal(
-            input_constraints.buffer_constraints_version_ordinal())
-        .set_sysmem_token(
-            fidl::InterfaceHandle<fuchsia::sysmem::BufferCollectionToken>(token.TakeChannel()));
-    processor->SetInputBufferPartialSettings(std::move(settings));
-  };
+        fuchsia_media::StreamBufferPartialSettings settings;
+        settings.buffer_lifetime_ordinal() = 1;
+        settings.buffer_constraints_version_ordinal() =
+            input_constraints.buffer_constraints_version_ordinal();
+        settings.sysmem_token() = fidl::ClientEnd<fuchsia_sysmem::BufferCollectionToken>(
+            token_endpoints->client.TakeChannel());
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = std::move(settings)}});
+      };
 
-  Create(processor.NewRequest());
+  Create(processor.NewRequest(dispatcher()));
 
   RunLoopUntil([this]() { return error_handler_ran_; });
   ASSERT_TRUE(error_handler_ran_);
 }
 
 TEST_F(CodecImplFailures, InputBufferCollectionConstraintsMinBufferCount) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
-    // No buffers required for camping would be less than the minimum for the
-    // server
-    buffer_collection_constraints.min_buffer_count_for_camping() = 0;
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   std::move(buffer_collection_constraints));
+        auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
+        // No buffers required for camping would be less than the minimum for the
+        // server
+        buffer_collection_constraints.min_buffer_count_for_camping() = 0;
+        codec_adapter_->SetBufferCollectionConstraints(kInputPort,
+                                                       std::move(buffer_collection_constraints));
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  Create(processor.NewRequest());
+  Create(processor.NewRequest(dispatcher()));
 
   RunLoopUntil([this]() { return error_handler_ran_; });
   ASSERT_TRUE(error_handler_ran_);
 }
 
 TEST_F(CodecImplFailures, InputBufferCollectionSysmemFailure) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  Create(processor.NewRequest());
+  Create(processor.NewRequest(dispatcher()));
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   RunLoopUntil([&allocator] {
     return allocator.collection_count() >= 1 && allocator.collection(0).is_waiting();
@@ -394,25 +484,28 @@ TEST_F(CodecImplFailures, InputBufferCollectionSysmemFailure) {
 }
 
 TEST_F(CodecImplFailures, InputBufferCollectionSysmemFailureDuringDestruction) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  Create(processor.NewRequest());
+  Create(processor.NewRequest(dispatcher()));
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   RunLoopUntil([&allocator] {
     return allocator.collection_count() >= 1 && allocator.collection(0).is_waiting();
@@ -423,7 +516,7 @@ TEST_F(CodecImplFailures, InputBufferCollectionSysmemFailureDuringDestruction) {
   // Fail allocation and immediately destroy CodecImpl and close processor client.
   allocator.collection(0).FailAllocation();
   codec_impl_ = nullptr;
-  processor = nullptr;
+  processor.Unbind();
 
   // Run remaining loop tasks to ensure any pending FIDL error handlers on shared_fidl_thread
   // execute safely without Use-After-Free or misaligned address crashes.
@@ -431,42 +524,48 @@ TEST_F(CodecImplFailures, InputBufferCollectionSysmemFailureDuringDestruction) {
 }
 
 TEST_F(CodecImplFailures, OutputPacketOnFirstBufferAddInNonDynamicMode) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request;
 
   std::atomic<bool> output_packet_emitted = false;
   bool client_received_output_packet = false;
   CodecPacket* first_recycled_packet = nullptr;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    output_token_request = token.NewRequest();
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        output_token_request = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kOutputPort,
-                                                   CreateValidOutputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kOutputPort, CreateValidOutputBufferCollectionConstraints());
 
-    processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-        1, output_constraints.buffer_constraints(), std::move(token)));
-  };
+        (void)processor.client()->SetOutputBufferPartialSettings(
+            {{.output_settings = CreateStreamBufferPartialSettings(
+                  1, output_constraints.buffer_constraints().value(),
+                  std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputPacket = [&](fuchsia::media::Packet packet, bool error_before,
-                                          bool error_during) {
+  processor.events().on_output_packet = [&](fuchsia_media::Packet packet, bool error_before,
+                                            bool error_during) {
     client_received_output_packet = true;
   };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
 
     adapter->SetOnRecycleOutputPacket([&](CodecPacket* packet) {
@@ -487,10 +586,10 @@ TEST_F(CodecImplFailures, OutputPacketOnFirstBufferAddInNonDynamicMode) {
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   // Complete input buffer allocation.
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
@@ -499,7 +598,7 @@ TEST_F(CodecImplFailures, OutputPacketOnFirstBufferAddInNonDynamicMode) {
   // QueueInputPacket starts the stream; since IsCoreCodecRequiringOutputConfigForFormatDetection()
   // is true by default, StartNewStream sends OnOutputConstraints (with PausedOutput) and waits for
   // output configuration.
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
 
   // Wait for output buffer collection to start waiting, then complete allocation.
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
@@ -514,7 +613,7 @@ TEST_F(CodecImplFailures, OutputPacketOnFirstBufferAddInNonDynamicMode) {
   ASSERT_FALSE(client_received_output_packet);
 
   // Now send CompleteOutputBufferPartialSettings so PausedOutput unpauses and delivers the packet.
-  processor->CompleteOutputBufferPartialSettings(1);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 1}});
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] { return error_handler_ran_ || client_received_output_packet; }, kWaitTimeout));
   ASSERT_FALSE(error_handler_ran_);
@@ -525,9 +624,8 @@ TEST_F(CodecImplFailures, OutputPacketOnFirstBufferAddInNonDynamicMode) {
 }
 
 TEST_F(CodecImplFailures, OutputPacketWithOldOrdinalWhenPortDeconfigured) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request;
 
   CodecPacket* saved_output_packet = nullptr;
   const CodecBuffer* saved_output_buffer = nullptr;
@@ -538,16 +636,19 @@ TEST_F(CodecImplFailures, OutputPacketWithOldOrdinalWhenPortDeconfigured) {
   std::atomic<bool> old_packet_emitted_after_deconfig = false;
   std::atomic<bool> old_packet_recycled_back = false;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
   // A real client responds to every action-required OnOutputConstraints by configuring new output
   // buffers. In this test, we only configure output buffers for the first OnOutputConstraints and
@@ -555,23 +656,27 @@ TEST_F(CodecImplFailures, OutputPacketWithOldOrdinalWhenPortDeconfigured) {
   // (is_port_configured_[kOutputPort] == false, buffer_lifetime_ordinal_[kOutputPort] == 2) while
   // we verify that a late output packet from ordinal 1 is cleanly recycled back without crashing.
   bool sent_output_settings = false;
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    if (!sent_output_settings) {
-      sent_output_settings = true;
-      fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-      output_token_request = token.NewRequest();
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        if (!sent_output_settings) {
+          sent_output_settings = true;
+          auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+          ZX_ASSERT(token_endpoints.is_ok());
+          output_token_request = std::move(token_endpoints->server);
 
-      codec_adapter_->SetBufferCollectionConstraints(
-          kOutputPort, CreateValidOutputBufferCollectionConstraints());
+          codec_adapter_->SetBufferCollectionConstraints(
+              kOutputPort, CreateValidOutputBufferCollectionConstraints());
 
-      processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-          1, output_constraints.buffer_constraints(), std::move(token)));
-    } else {
-      second_output_constraints_received = true;
-    }
-  };
+          (void)processor.client()->SetOutputBufferPartialSettings(
+              {{.output_settings = CreateStreamBufferPartialSettings(
+                    1, output_constraints.buffer_constraints().value(),
+                    std::move(token_endpoints->client))}});
+        } else {
+          second_output_constraints_received = true;
+        }
+      };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
     adapter->SetOnStartStream([&] { stream_started = true; });
 
@@ -599,20 +704,20 @@ TEST_F(CodecImplFailures, OutputPacketWithOldOrdinalWhenPortDeconfigured) {
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   // Complete input buffer allocation.
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
 
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
 
   // Complete output buffer allocation and CompleteOutputBufferPartialSettings(1).
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
-  processor->CompleteOutputBufferPartialSettings(1);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 1}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] { return error_handler_ran_ || (saved_output_buffer != nullptr && stream_started); },
@@ -660,27 +765,30 @@ TEST_F(CodecImplFailures, OutputPacketWithOldOrdinalWhenPortDeconfigured) {
 }
 
 TEST_F(CodecImplFailures, RemoveBufferInNonDynamicModeForActiveOrdinalFails) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-    // Calling RemoveBuffer on the active buffer_lifetime_ordinal (1) when in non-dynamic buffer
-    // mode must fail the protocol check at RemoveBufferInternal.
-    fuchsia::media::StreamProcessorRemoveBufferRequest remove_request;
-    remove_request.set_port(fuchsia::media::Port::INPUT)
-        .set_buffer_lifetime_ordinal(1)
-        .set_buffer_index(0);
-    processor->RemoveBuffer(std::move(remove_request), [](auto) {});
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+        // Calling RemoveBuffer on the active buffer_lifetime_ordinal (1) when in non-dynamic buffer
+        // mode must fail the protocol check at RemoveBufferInternal.
+        fuchsia_media::StreamProcessorRemoveBufferRequest remove_request;
+        remove_request.port() = fuchsia_media::Port::kInput;
+        remove_request.buffer_lifetime_ordinal() = 1;
+        remove_request.buffer_index() = 0;
+        processor.client()->RemoveBuffer(std::move(remove_request)).Then([](auto&) {});
+      };
 
-  Create(processor.NewRequest());
+  Create(processor.NewRequest(dispatcher()));
 
   RunLoopUntil([this] { return error_handler_ran_; });
   ASSERT_TRUE(error_handler_ran_);
@@ -688,11 +796,9 @@ TEST_F(CodecImplFailures, RemoveBufferInNonDynamicModeForActiveOrdinalFails) {
 
 TEST_F(CodecImplFailures,
        OutputPacketWithOldOrdinalDeliveredWithEnableOldOutputBuffersAndRemoveBuffer) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request_1;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request_2;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request_1;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request_2;
 
   CodecPacket* saved_output_packet = nullptr;
   const CodecBuffer* saved_output_buffer = nullptr;
@@ -700,52 +806,60 @@ TEST_F(CodecImplFailures,
   std::atomic<bool> stream_started = false;
   std::atomic<bool> remove_buffer_called = false;
   bool second_output_constraints_received = false;
-  fuchsia::media::StreamOutputConstraints second_output_constraints;
+  fuchsia_media::StreamOutputConstraints second_output_constraints;
   std::atomic<bool> old_packet_emitted_after_deconfig = false;
   std::atomic<bool> old_packet_recycled_back = false;
   bool client_received_old_output_packet = false;
   bool remove_buffer_completed = false;
   bool remove_buffer_completed_before_output_packet = false;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
   bool sent_first_output_settings = false;
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    if (!sent_first_output_settings) {
-      sent_first_output_settings = true;
-      fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-      output_token_request_1 = token.NewRequest();
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        if (!sent_first_output_settings) {
+          sent_first_output_settings = true;
+          auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+          ZX_ASSERT(token_endpoints.is_ok());
+          output_token_request_1 = std::move(token_endpoints->server);
 
-      codec_adapter_->SetBufferCollectionConstraints(
-          kOutputPort, CreateValidOutputBufferCollectionConstraints());
+          codec_adapter_->SetBufferCollectionConstraints(
+              kOutputPort, CreateValidOutputBufferCollectionConstraints());
 
-      processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-          1, output_constraints.buffer_constraints(), std::move(token)));
-    } else {
-      second_output_constraints = std::move(output_constraints);
-      second_output_constraints_received = true;
-    }
-  };
+          (void)processor.client()->SetOutputBufferPartialSettings(
+              {{.output_settings = CreateStreamBufferPartialSettings(
+                    1, output_constraints.buffer_constraints().value(),
+                    std::move(token_endpoints->client))}});
+        } else {
+          second_output_constraints = std::move(output_constraints);
+          second_output_constraints_received = true;
+        }
+      };
 
-  processor.events().OnOutputPacket = [&](fuchsia::media::Packet packet, bool error_before,
-                                          bool error_during) {
-    if (packet.header().buffer_lifetime_ordinal() == 1) {
+  processor.events().on_output_packet = [&](fuchsia_media::Packet packet, bool error_before,
+                                            bool error_during) {
+    if (packet.header()->buffer_lifetime_ordinal() == 1) {
       remove_buffer_completed_before_output_packet = remove_buffer_completed;
       client_received_old_output_packet = true;
-      processor->RecycleOutputPacket(std::move(*packet.mutable_header()));
+      (void)processor.client()->RecycleOutputPacket(
+          {{.available_output_packet = std::move(packet.header().value())}});
     }
   };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
     adapter->SetIsCoreCodecHwBased(kInputPort, true);
     adapter->SetIsCoreCodecHwBased(kOutputPort, true);
@@ -773,22 +887,22 @@ TEST_F(CodecImplFailures,
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
-  processor->EnableOldOutputBuffers();
+  (void)processor.client()->EnableOldOutputBuffers();
 
   // Complete input buffer allocation.
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
 
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
 
   // Complete first output buffer allocation and CompleteOutputBufferPartialSettings(1).
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
-  processor->CompleteOutputBufferPartialSettings(1);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 1}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] { return error_handler_ran_ || (saved_output_buffer != nullptr && stream_started); },
@@ -814,11 +928,16 @@ TEST_F(CodecImplFailures,
   ASSERT_FALSE(error_handler_ran_);
 
   // Client requests RemoveBuffer on ordinal 1 buffer 0 to be notified when removal completes.
-  fuchsia::media::StreamProcessorRemoveBufferRequest remove_request;
-  remove_request.set_port(fuchsia::media::Port::OUTPUT)
-      .set_buffer_lifetime_ordinal(1)
-      .set_buffer_index(0);
-  processor->RemoveBuffer(std::move(remove_request), [&](auto) { remove_buffer_completed = true; });
+  fuchsia_media::StreamProcessorRemoveBufferRequest remove_request;
+  remove_request.port() = fuchsia_media::Port::kOutput;
+  remove_request.buffer_lifetime_ordinal() = 1;
+  remove_request.buffer_index() = 0;
+  processor.client()
+      ->RemoveBuffer(std::move(remove_request))
+      .Then([&](fidl::Result<fuchsia_media::StreamProcessor::RemoveBuffer>& result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        remove_buffer_completed = true;
+      });
   RunLoopUntilIdle();
   ASSERT_FALSE(error_handler_ran_);
   ASSERT_FALSE(remove_buffer_completed);
@@ -839,13 +958,16 @@ TEST_F(CodecImplFailures,
 
   // Now configure ordinal 3 output buffers and CompleteOutputBufferPartialSettings(3) to unpause
   // output.
-  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token_2;
-  output_token_request_2 = token_2.NewRequest();
-  processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-      3, second_output_constraints.buffer_constraints(), std::move(token_2)));
+  auto token_2_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+  ZX_ASSERT(token_2_endpoints.is_ok());
+  output_token_request_2 = std::move(token_2_endpoints->server);
+  (void)processor.client()->SetOutputBufferPartialSettings(
+      {{.output_settings = CreateStreamBufferPartialSettings(
+            3, second_output_constraints.buffer_constraints().value(),
+            std::move(token_2_endpoints->client))}});
 
   WaitForAndCompleteCollectionAllocation(allocator, 2, kOutputBufferCount, kOutputBufferSize);
-  processor->CompleteOutputBufferPartialSettings(3);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 3}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] {
@@ -865,7 +987,7 @@ TEST_F(CodecImplFailures,
 
 TEST_F(CodecImplFailures,
        DynamicRemoveBufferRetainsUntilRemoveStartedChildVmoDuringCoreCodecRemoveBuffer) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
   CodecPacket* saved_output_packet = nullptr;
   const CodecBuffer* saved_output_buffer = nullptr;
@@ -878,45 +1000,48 @@ TEST_F(CodecImplFailures,
   bool remove_buffer_completed = false;
   bool remove_buffer_completed_before_output_packet = false;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
-    zx::vmo input_vmo;
-    ASSERT_EQ(zx::vmo::create(kInputBufferSize, 0, &input_vmo), ZX_OK);
-    fuchsia::media::StreamProcessorAddBufferRequest add_input;
-    add_input.set_port(fuchsia::media::Port::INPUT)
-        .set_buffer_constraints_version_ordinal(
-            input_constraints.buffer_constraints_version_ordinal())
-        .set_buffer_lifetime_ordinal(1)
-        .set_buffer_index(0)
-        .set_buffer(std::move(input_vmo));
-    processor->AddBuffer(std::move(add_input));
-    processor->QueueInputPacket(CreateInputPacket());
-  };
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
+        zx::vmo input_vmo;
+        ASSERT_EQ(zx::vmo::create(kInputBufferSize, 0, &input_vmo), ZX_OK);
+        fuchsia_media::StreamProcessorAddBufferRequest add_input;
+        add_input.port() = fuchsia_media::Port::kInput;
+        add_input.buffer_constraints_version_ordinal() =
+            input_constraints.buffer_constraints_version_ordinal();
+        add_input.buffer_lifetime_ordinal() = 1;
+        add_input.buffer_index() = 0;
+        add_input.buffer() = std::move(input_vmo);
+        (void)processor.client()->AddBuffer(std::move(add_input));
+        (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
+      };
 
-  processor.events().OnOutputConstraints = [this, &processor](auto output_constraints) {
-    codec_adapter_->SetBufferCollectionConstraints(kOutputPort,
-                                                   CreateValidOutputBufferCollectionConstraints());
-    zx::vmo output_vmo;
-    ASSERT_EQ(zx::vmo::create(kOutputBufferSize, 0, &output_vmo), ZX_OK);
-    fuchsia::media::StreamProcessorAddBufferRequest add_output;
-    add_output.set_port(fuchsia::media::Port::OUTPUT)
-        .set_buffer_constraints_version_ordinal(
-            output_constraints.buffer_constraints().buffer_constraints_version_ordinal())
-        .set_buffer_lifetime_ordinal(1)
-        .set_buffer_index(0)
-        .set_buffer(std::move(output_vmo));
-    processor->AddBuffer(std::move(add_output));
-  };
+  processor.events().on_output_constraints =
+      [this, &processor](fuchsia_media::StreamOutputConstraints output_constraints) {
+        codec_adapter_->SetBufferCollectionConstraints(
+            kOutputPort, CreateValidOutputBufferCollectionConstraints());
+        zx::vmo output_vmo;
+        ASSERT_EQ(zx::vmo::create(kOutputBufferSize, 0, &output_vmo), ZX_OK);
+        fuchsia_media::StreamProcessorAddBufferRequest add_output;
+        add_output.port() = fuchsia_media::Port::kOutput;
+        add_output.buffer_constraints_version_ordinal() =
+            output_constraints.buffer_constraints()->buffer_constraints_version_ordinal();
+        add_output.buffer_lifetime_ordinal() = 1;
+        add_output.buffer_index() = 0;
+        add_output.buffer() = std::move(output_vmo);
+        (void)processor.client()->AddBuffer(std::move(add_output));
+      };
 
-  processor.events().OnOutputPacket = [&](fuchsia::media::Packet packet, bool error_before,
-                                          bool error_during) {
+  processor.events().on_output_packet = [&](fuchsia_media::Packet packet, bool error_before,
+                                            bool error_during) {
     remove_buffer_completed_before_output_packet = remove_buffer_completed;
     client_received_output_packet = true;
-    processor->RecycleOutputPacket(std::move(*packet.mutable_header()));
+    (void)processor.client()->RecycleOutputPacket(
+        {{.available_output_packet = std::move(packet.header().value())}});
   };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
     adapter->SetOnStartStream([&] { stream_started = true; });
 
@@ -945,10 +1070,10 @@ TEST_F(CodecImplFailures,
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] { return error_handler_ran_ || (saved_output_buffer != nullptr && stream_started); },
@@ -956,11 +1081,16 @@ TEST_F(CodecImplFailures,
   ASSERT_FALSE(error_handler_ran_);
 
   // Remove the active output buffer via StreamProcessor.RemoveBuffer.
-  fuchsia::media::StreamProcessorRemoveBufferRequest remove_request;
-  remove_request.set_port(fuchsia::media::Port::OUTPUT)
-      .set_buffer_lifetime_ordinal(1)
-      .set_buffer_index(0);
-  processor->RemoveBuffer(std::move(remove_request), [&](auto) { remove_buffer_completed = true; });
+  fuchsia_media::StreamProcessorRemoveBufferRequest remove_request;
+  remove_request.port() = fuchsia_media::Port::kOutput;
+  remove_request.buffer_lifetime_ordinal() = 1;
+  remove_request.buffer_index() = 0;
+  processor.client()
+      ->RemoveBuffer(std::move(remove_request))
+      .Then([&](fidl::Result<fuchsia_media::StreamProcessor::RemoveBuffer>& result) {
+        EXPECT_TRUE(result.is_ok()) << result.error_value();
+        remove_buffer_completed = true;
+      });
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil([&] { return error_handler_ran_ || remove_buffer_called; },
                                         kWaitTimeout));
@@ -991,11 +1121,9 @@ TEST_F(CodecImplFailures,
 }
 
 TEST_F(CodecImplFailures, OutputPacketQueuedDuringPausedOutputShortCircuitedOnOutputReconfig) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request_1;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request_2;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request_1;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request_2;
 
   CodecPacket* saved_output_packet_1 = nullptr;
   const CodecBuffer* saved_output_buffer_1 = nullptr;
@@ -1005,42 +1133,50 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringPausedOutputShortCircuitedOnOu
   std::atomic<uint32_t> packet_1_recycle_count = 0;
   bool client_received_ordinal_1_packet = false;
   bool client_received_ordinal_3_packet = false;
-  fuchsia::media::StreamOutputConstraints initial_output_constraints;
+  fuchsia_media::StreamOutputConstraints initial_output_constraints;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    initial_output_constraints = std::move(output_constraints);
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    output_token_request_1 = token.NewRequest();
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        initial_output_constraints = std::move(output_constraints);
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        output_token_request_1 = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kOutputPort,
-                                                   CreateValidOutputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kOutputPort, CreateValidOutputBufferCollectionConstraints());
 
-    processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-        1, initial_output_constraints.buffer_constraints(), std::move(token)));
-  };
+        (void)processor.client()->SetOutputBufferPartialSettings(
+            {{.output_settings = CreateStreamBufferPartialSettings(
+                  1, initial_output_constraints.buffer_constraints().value(),
+                  std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputPacket = [&](fuchsia::media::Packet packet, bool error_before,
-                                          bool error_during) {
-    if (packet.header().buffer_lifetime_ordinal() == 1) {
+  processor.events().on_output_packet = [&](fuchsia_media::Packet packet, bool error_before,
+                                            bool error_during) {
+    if (packet.header()->buffer_lifetime_ordinal() == 1) {
       client_received_ordinal_1_packet = true;
-    } else if (packet.header().buffer_lifetime_ordinal() == 3) {
+    } else if (packet.header()->buffer_lifetime_ordinal() == 3) {
       client_received_ordinal_3_packet = true;
-      processor->RecycleOutputPacket(std::move(*packet.mutable_header()));
+      (void)processor.client()->RecycleOutputPacket(
+          {{.available_output_packet = std::move(packet.header().value())}});
     }
   };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
 
     adapter->SetOnRecycleOutputPacket([&](CodecPacket* packet) {
@@ -1069,15 +1205,15 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringPausedOutputShortCircuitedOnOu
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
 
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
 
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
 
@@ -1095,13 +1231,16 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringPausedOutputShortCircuitedOnOu
   // is true), and when CompleteOutputBufferPartialSettings(3) unpauses output_queue_, the queued
   // closure must short-circuit and recycle ordinal 1's packet exactly once without delivering
   // OnOutputPacket for ordinal 1 to the client.
-  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token_2;
-  output_token_request_2 = token_2.NewRequest();
-  processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-      3, initial_output_constraints.buffer_constraints(), std::move(token_2)));
+  auto token_2_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+  ZX_ASSERT(token_2_endpoints.is_ok());
+  output_token_request_2 = std::move(token_2_endpoints->server);
+  (void)processor.client()->SetOutputBufferPartialSettings(
+      {{.output_settings = CreateStreamBufferPartialSettings(
+            3, initial_output_constraints.buffer_constraints().value(),
+            std::move(token_2_endpoints->client))}});
 
   WaitForAndCompleteCollectionAllocation(allocator, 2, kOutputBufferCount, kOutputBufferSize);
-  processor->CompleteOutputBufferPartialSettings(3);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 3}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] {
@@ -1129,11 +1268,9 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringPausedOutputShortCircuitedOnOu
 }
 
 TEST_F(CodecImplFailures, OutputPacketQueuedDuringMidStreamFormatChangeNonDynamicBuffers) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request_1;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request_2;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request_1;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request_2;
 
   CodecPacket* saved_output_packet_1 = nullptr;
   const CodecBuffer* saved_output_buffer_1 = nullptr;
@@ -1143,7 +1280,7 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringMidStreamFormatChangeNonDynami
   std::atomic<uint32_t> packet_1_post_emit_recycle_count = 0;
   bool client_received_ordinal_1_packet = false;
   bool client_received_ordinal_3_packet = false;
-  fuchsia::media::StreamOutputConstraints initial_output_constraints;
+  fuchsia_media::StreamOutputConstraints initial_output_constraints;
 
   std::atomic<bool> stream_started = false;
   std::atomic<bool> re_config_prepare_entered = false;
@@ -1152,43 +1289,51 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringMidStreamFormatChangeNonDynami
   std::atomic<bool> closed_buffer_lifetime_ordinal_1 = false;
   uint32_t output_constraints_count = 0;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    ++output_constraints_count;
-    initial_output_constraints = std::move(output_constraints);
-    if (output_constraints_count == 1) {
-      fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-      output_token_request_1 = token.NewRequest();
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        ++output_constraints_count;
+        initial_output_constraints = std::move(output_constraints);
+        if (output_constraints_count == 1) {
+          auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+          ZX_ASSERT(token_endpoints.is_ok());
+          output_token_request_1 = std::move(token_endpoints->server);
 
-      codec_adapter_->SetBufferCollectionConstraints(
-          kOutputPort, CreateValidOutputBufferCollectionConstraints());
+          codec_adapter_->SetBufferCollectionConstraints(
+              kOutputPort, CreateValidOutputBufferCollectionConstraints());
 
-      processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-          1, initial_output_constraints.buffer_constraints(), std::move(token)));
-    }
-  };
+          (void)processor.client()->SetOutputBufferPartialSettings(
+              {{.output_settings = CreateStreamBufferPartialSettings(
+                    1, initial_output_constraints.buffer_constraints().value(),
+                    std::move(token_endpoints->client))}});
+        }
+      };
 
-  processor.events().OnOutputPacket = [&](fuchsia::media::Packet packet, bool error_before,
-                                          bool error_during) {
-    if (packet.header().buffer_lifetime_ordinal() == 1) {
+  processor.events().on_output_packet = [&](fuchsia_media::Packet packet, bool error_before,
+                                            bool error_during) {
+    if (packet.header()->buffer_lifetime_ordinal() == 1) {
       client_received_ordinal_1_packet = true;
-    } else if (packet.header().buffer_lifetime_ordinal() == 3) {
+    } else if (packet.header()->buffer_lifetime_ordinal() == 3) {
       client_received_ordinal_3_packet = true;
-      processor->RecycleOutputPacket(std::move(*packet.mutable_header()));
+      (void)processor.client()->RecycleOutputPacket(
+          {{.available_output_packet = std::move(packet.header().value())}});
     }
   };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(false);
 
     adapter->SetOnStartStream([&] { stream_started = true; });
@@ -1234,18 +1379,18 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringMidStreamFormatChangeNonDynami
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
 
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
 
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
-  processor->CompleteOutputBufferPartialSettings(1);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 1}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] {
@@ -1308,13 +1453,16 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringMidStreamFormatChangeNonDynami
 
   // Complete the mid-stream output buffer reconfiguration to ordinal 3 so that subsequent output
   // packet delivery on ordinal 3 can be verified.
-  fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token_2;
-  output_token_request_2 = token_2.NewRequest();
-  processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-      3, initial_output_constraints.buffer_constraints(), std::move(token_2)));
+  auto token_2_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+  ZX_ASSERT(token_2_endpoints.is_ok());
+  output_token_request_2 = std::move(token_2_endpoints->server);
+  (void)processor.client()->SetOutputBufferPartialSettings(
+      {{.output_settings = CreateStreamBufferPartialSettings(
+            3, initial_output_constraints.buffer_constraints().value(),
+            std::move(token_2_endpoints->client))}});
 
   WaitForAndCompleteCollectionAllocation(allocator, 2, kOutputBufferCount, kOutputBufferSize);
-  processor->CompleteOutputBufferPartialSettings(3);
+  (void)processor.client()->CompleteOutputBufferPartialSettings({{.buffer_lifetime_ordinal = 3}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] {
@@ -1343,40 +1491,48 @@ TEST_F(CodecImplFailures, OutputPacketQueuedDuringMidStreamFormatChangeNonDynami
 }
 
 TEST_F(CodecImplFailures, RecycleOutputPacketWhileQueued) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request;
 
   CodecPacket* saved_output_packet = nullptr;
   const CodecBuffer* saved_output_buffer = nullptr;
   std::atomic<bool> packet_emitted = false;
   zx_status_t channel_epitaph = ZX_OK;
 
-  processor.set_error_handler([&](zx_status_t status) { channel_epitaph = status; });
-
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
-
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
-
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
+  processor.events().on_fidl_error_cb = [&](fidl::UnbindInfo error) {
+    channel_epitaph = error.status();
   };
 
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    output_token_request = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kOutputPort,
-                                                   CreateValidOutputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-        1, output_constraints.buffer_constraints(), std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        output_token_request = std::move(token_endpoints->server);
+
+        codec_adapter_->SetBufferCollectionConstraints(
+            kOutputPort, CreateValidOutputBufferCollectionConstraints());
+
+        (void)processor.client()->SetOutputBufferPartialSettings(
+            {{.output_settings = CreateStreamBufferPartialSettings(
+                  1, output_constraints.buffer_constraints().value(),
+                  std::move(token_endpoints->client))}});
+      };
+
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
 
     adapter->SetOnRecycleOutputPacket([&](CodecPacket* packet) {
@@ -1398,14 +1554,14 @@ TEST_F(CodecImplFailures, RecycleOutputPacketWhileQueued) {
     });
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil([&] { return error_handler_ran_ || packet_emitted.load(); },
@@ -1418,9 +1574,11 @@ TEST_F(CodecImplFailures, RecycleOutputPacketWhileQueued) {
   // delivered to the client via OnOutputPacket) is a client protocol error and must fail the
   // channel cleanly without crashing or tripping assertions when output_queue_ drains during
   // shutdown.
-  fuchsia::media::PacketHeader bad_recycle;
-  bad_recycle.set_buffer_lifetime_ordinal(1).set_packet_index(0);
-  processor->RecycleOutputPacket(std::move(bad_recycle));
+  fuchsia_media::PacketHeader bad_recycle;
+  bad_recycle.buffer_lifetime_ordinal() = 1;
+  bad_recycle.packet_index() = 0;
+  (void)processor.client()->RecycleOutputPacket(
+      {{.available_output_packet = std::move(bad_recycle)}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [&] { return error_handler_ran_ && !codec_impl_ && channel_epitaph != ZX_OK; },
@@ -1429,9 +1587,8 @@ TEST_F(CodecImplFailures, RecycleOutputPacketWhileQueued) {
 }
 
 TEST_F(CodecImplFailures, FailStreamWhilePausedOutputShortCircuitsQueuedPacket) {
-  StreamProcessorPtr processor;
-  std::optional<fidl::InterfaceRequest<fuchsia::sysmem2::BufferCollectionToken>>
-      output_token_request;
+  TestStreamProcessor processor;
+  std::optional<fidl::ServerEnd<fuchsia_sysmem2::BufferCollectionToken>> output_token_request;
 
   CodecPacket* saved_output_packet = nullptr;
   const CodecBuffer* saved_output_buffer = nullptr;
@@ -1441,45 +1598,51 @@ TEST_F(CodecImplFailures, FailStreamWhilePausedOutputShortCircuitsQueuedPacket) 
   bool client_received_output_packet = false;
   bool stream_failed_seen = false;
 
-  processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputConstraints = [&](auto output_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    output_token_request = token.NewRequest();
+  processor.events().on_output_constraints =
+      [&](fuchsia_media::StreamOutputConstraints output_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        output_token_request = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kOutputPort,
-                                                   CreateValidOutputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kOutputPort, CreateValidOutputBufferCollectionConstraints());
 
-    processor->SetOutputBufferPartialSettings(CreateStreamBufferPartialSettings(
-        1, output_constraints.buffer_constraints(), std::move(token)));
-  };
+        (void)processor.client()->SetOutputBufferPartialSettings(
+            {{.output_settings = CreateStreamBufferPartialSettings(
+                  1, output_constraints.buffer_constraints().value(),
+                  std::move(token_endpoints->client))}});
+      };
 
-  processor.events().OnOutputFormat = [&](fuchsia::media::StreamOutputFormat output_format) {
+  processor.events().on_output_format = [&](fuchsia_media::StreamOutputFormat output_format) {
     client_received_output_format = true;
   };
 
-  processor.events().OnOutputPacket = [&](fuchsia::media::Packet output_packet,
-                                          bool error_detected_before, bool error_detected_during) {
-    client_received_output_packet = true;
-  };
+  processor.events().on_output_packet =
+      [&](fuchsia_media::Packet output_packet, bool error_detected_before,
+          bool error_detected_during) { client_received_output_packet = true; };
 
-  processor.events().OnStreamFailed = [&](uint64_t stream_lifetime_ordinal,
-                                          fuchsia::media::StreamError error) {
+  processor.events().on_stream_failed = [&](uint64_t stream_lifetime_ordinal,
+                                            fuchsia_media::StreamError error) {
     EXPECT_EQ(stream_lifetime_ordinal, 1u);
-    EXPECT_EQ(error, fuchsia::media::StreamError::DECODER_DATA_PARSING);
+    EXPECT_EQ(error, fuchsia_media::StreamError::kDecoderDataParsing);
     stream_failed_seen = true;
   };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetSupportsDynamicBuffers(true);
 
     adapter->SetOnRecycleOutputPacket([&](CodecPacket* packet) {
@@ -1500,16 +1663,16 @@ TEST_F(CodecImplFailures, FailStreamWhilePausedOutputShortCircuitsQueuedPacket) 
     });
   });
 
-  processor->EnableOnStreamFailed();
+  (void)processor.client()->EnableOnStreamFailed();
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
-  processor->QueueInputPacket(CreateInputPacket());
+  (void)processor.client()->QueueInputPacket({{.packet = CreateInputPacket()}});
   WaitForAndCompleteCollectionAllocation(allocator, 1, kOutputBufferCount, kOutputBufferSize);
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil([&] { return error_handler_ran_ || packet_emitted.load(); },
@@ -1525,7 +1688,7 @@ TEST_F(CodecImplFailures, FailStreamWhilePausedOutputShortCircuitsQueuedPacket) 
   // or OnOutputPacket to the client.
   std::thread([this] {
     static_cast<CodecAdapterEvents*>(codec_impl_.get())
-        ->onCoreCodecFailStream(fuchsia::media::StreamError::DECODER_DATA_PARSING);
+        ->onCoreCodecFailStream(fuchsia_media::StreamError::kDecoderDataParsing);
   }).join();
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
@@ -1545,7 +1708,9 @@ TEST_F(CodecImplFailures, FailStreamWhilePausedOutputShortCircuitsQueuedPacket) 
 
   // Also verify that closing the failed stream from the client succeeds cleanly (exercising
   // idempotent SetFutureDiscarded()).
-  processor->CloseCurrentStream(1, false, false);
+  (void)processor.client()->CloseCurrentStream({{.stream_lifetime_ordinal = 1,
+                                                 .release_input_buffers = false,
+                                                 .release_output_buffers = false}});
   RunLoopUntilIdle();
   ASSERT_FALSE(error_handler_ran_);
 
@@ -1554,27 +1719,30 @@ TEST_F(CodecImplFailures, FailStreamWhilePausedOutputShortCircuitsQueuedPacket) 
 }
 
 TEST_F(CodecImplFailures, QueueInputPacketOutOfBoundsFailsAndShutsDownCleanly) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
 
-  processor.events().OnInputConstraints = [&](auto input_constraints) {
-    fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-    token_request_ = token.NewRequest();
+  processor.events().on_input_constraints =
+      [&](fuchsia_media::StreamBufferConstraints input_constraints) {
+        auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+        ZX_ASSERT(token_endpoints.is_ok());
+        token_request_ = std::move(token_endpoints->server);
 
-    codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                   CreateValidInputBufferCollectionConstraints());
+        codec_adapter_->SetBufferCollectionConstraints(
+            kInputPort, CreateValidInputBufferCollectionConstraints());
 
-    processor->SetInputBufferPartialSettings(
-        CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-  };
+        (void)processor.client()->SetInputBufferPartialSettings(
+            {{.input_settings = CreateStreamBufferPartialSettings(
+                  1, input_constraints, std::move(token_endpoints->client))}});
+      };
 
-  Create(processor.NewRequest(), [&](FakeCodecAdapter* adapter) {
+  Create(processor.NewRequest(dispatcher()), [&](FakeCodecAdapter* adapter) {
     adapter->SetIsCoreCodecRequiringOutputConfigForFormatDetection(false);
   });
 
-  TestAllocator allocator;
+  TestAllocator allocator(dispatcher());
   ASSERT_TRUE(sysmem_request_.has_value());
   allocator.Bind(std::move(sysmem_request_.value()));
-  sysmem_request_ = nullptr;
+  sysmem_request_.reset();
 
   WaitForAndCompleteCollectionAllocation(allocator, 0, kInputMinBufferCountForCamping,
                                          kInputBufferSize);
@@ -1582,10 +1750,10 @@ TEST_F(CodecImplFailures, QueueInputPacketOutOfBoundsFailsAndShutsDownCleanly) {
   // Queue an input packet whose start_offset + valid_length_bytes exceeds kInputBufferSize.
   // QueueInputPacket_StreamControl must reject the packet before marking codec_packet busy or
   // attaching buffer_keep_alive_, failing the channel and allowing CodecImpl to shut down cleanly.
-  fuchsia::media::Packet bad_packet = CreateInputPacket();
-  bad_packet.set_start_offset(kInputBufferSize - 16);
-  bad_packet.set_valid_length_bytes(32);
-  processor->QueueInputPacket(std::move(bad_packet));
+  fuchsia_media::Packet bad_packet = CreateInputPacket();
+  bad_packet.start_offset() = kInputBufferSize - 16;
+  bad_packet.valid_length_bytes() = 32;
+  (void)processor.client()->QueueInputPacket({{.packet = std::move(bad_packet)}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil([this] { return error_handler_ran_; }, kWaitTimeout));
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil([this] { return !codec_impl_; }, kWaitTimeout));
@@ -1595,15 +1763,15 @@ class FakeCodecAdapterWithFormatTracking : public FakeCodecAdapter {
  public:
   using FakeCodecAdapter::FakeCodecAdapter;
 
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override {
-    last_format_details_ = fidl::Clone(per_stream_override_format_details);
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override {
+    last_format_details_ = *per_stream_override_format_details;
     call_count_++;
   }
 
   bool IsCoreCodecRequiringOutputConfigForFormatDetection() override { return false; }
 
-  std::optional<fuchsia::media::FormatDetails> last_format_details_;
+  std::optional<fuchsia_media::FormatDetails> last_format_details_;
   std::atomic<int> call_count_{0};
 };
 
@@ -1616,39 +1784,41 @@ class CodecImplFormatTrackingFailures : public CodecImplFailures {
     return codec_adapter;
   }
 
-  void ConfigureInputBuffers(StreamProcessorPtr& processor) {
-    processor.events().OnInputConstraints = [this, &processor](auto input_constraints) {
-      fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken> token;
-      token_request_ = token.NewRequest();
+  void ConfigureInputBuffers(TestStreamProcessor& processor) {
+    processor.events().on_input_constraints =
+        [this, &processor](fuchsia_media::StreamBufferConstraints input_constraints) {
+          auto token_endpoints = fidl::CreateEndpoints<fuchsia_sysmem2::BufferCollectionToken>();
+          ZX_ASSERT(token_endpoints.is_ok());
+          token_request_ = std::move(token_endpoints->server);
 
-      auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
-      codec_adapter_->SetBufferCollectionConstraints(kInputPort,
-                                                     std::move(buffer_collection_constraints));
+          auto buffer_collection_constraints = CreateValidInputBufferCollectionConstraints();
+          codec_adapter_->SetBufferCollectionConstraints(kInputPort,
+                                                         std::move(buffer_collection_constraints));
 
-      processor->SetInputBufferPartialSettings(
-          CreateStreamBufferPartialSettings(1, input_constraints, std::move(token)));
-    };
+          (void)processor.client()->SetInputBufferPartialSettings(
+              {{.input_settings = CreateStreamBufferPartialSettings(
+                    1, input_constraints, std::move(token_endpoints->client))}});
+        };
 
-    processor.events().OnFreeInputPacket = [this](fuchsia::media::PacketHeader free_input_packet) {
-      free_input_packet_count_++;
-    };
+    processor.events().on_free_input_packet =
+        [this](fuchsia_media::PacketHeader free_input_packet) { free_input_packet_count_++; };
 
-    Create(processor.NewRequest());
+    Create(processor.NewRequest(dispatcher()));
 
-    allocator_ = std::make_unique<TestAllocator>();
+    allocator_ = std::make_unique<TestAllocator>(dispatcher());
     ASSERT_TRUE(sysmem_request_.has_value());
     allocator_->Bind(std::move(sysmem_request_.value()));
-    sysmem_request_ = nullptr;
+    sysmem_request_.reset();
 
     WaitForAndCompleteCollectionAllocation(*allocator_, 0, kInputMinBufferCountForCamping,
                                            kInputBufferSize);
   }
 
-  static void QueueInputPacket(StreamProcessorPtr& processor,
+  static void QueueInputPacket(TestStreamProcessor& processor,
                                uint64_t stream_lifetime_ordinal = 1) {
     auto packet = CreateInputPacket();
-    packet.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-    processor->QueueInputPacket(std::move(packet));
+    packet.stream_lifetime_ordinal() = stream_lifetime_ordinal;
+    (void)processor.client()->QueueInputPacket({{.packet = std::move(packet)}});
   }
 
   int free_input_packet_count() const { return free_input_packet_count_; }
@@ -1659,14 +1829,15 @@ class CodecImplFormatTrackingFailures : public CodecImplFailures {
 };
 
 TEST_F(CodecImplFormatTrackingFailures, IdenticalFormatDetailsSucceeds) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
   ConfigureInputBuffers(processor);
 
   // Call QueueInputFormatDetails with version ordinal 0 and same content (empty).
-  fuchsia::media::FormatDetails details;
-  details.set_format_details_version_ordinal(0);
+  fuchsia_media::FormatDetails details;
+  details.format_details_version_ordinal() = 0;
 
-  processor->QueueInputFormatDetails(1, std::move(details));
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 1, .format_details = std::move(details)}});
   QueueInputPacket(processor);
 
   auto* tracking_adapter = static_cast<FakeCodecAdapterWithFormatTracking*>(codec_adapter_);
@@ -1679,11 +1850,12 @@ TEST_F(CodecImplFormatTrackingFailures, IdenticalFormatDetailsSucceeds) {
   ASSERT_EQ(tracking_adapter->last_format_details_->format_details_version_ordinal(), 0u);
 
   // Call QueueInputFormatDetails with version ordinal 1 (greater than 0).
-  fuchsia::media::FormatDetails details2;
-  details2.set_format_details_version_ordinal(1);
-  details2.set_mime_type("video/h264");
+  fuchsia_media::FormatDetails details2;
+  details2.format_details_version_ordinal() = 1;
+  details2.mime_type() = "video/h264";
 
-  processor->QueueInputFormatDetails(1, std::move(details2));
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 1, .format_details = std::move(details2)}});
   QueueInputPacket(processor);
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [this] { return error_handler_ran_ || free_input_packet_count() == 2; }, kWaitTimeout));
@@ -1695,11 +1867,12 @@ TEST_F(CodecImplFormatTrackingFailures, IdenticalFormatDetailsSucceeds) {
   ASSERT_EQ(tracking_adapter->last_format_details_->mime_type(), "video/h264");
 
   // Call QueueInputFormatDetails with version ordinal 1 and identical content.
-  fuchsia::media::FormatDetails details3;
-  details3.set_format_details_version_ordinal(1);
-  details3.set_mime_type("video/h264");
+  fuchsia_media::FormatDetails details3;
+  details3.format_details_version_ordinal() = 1;
+  details3.mime_type() = "video/h264";
 
-  processor->QueueInputFormatDetails(1, std::move(details3));
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 1, .format_details = std::move(details3)}});
   QueueInputPacket(processor);
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [this] { return error_handler_ran_ || free_input_packet_count() == 3; }, kWaitTimeout));
@@ -1710,11 +1883,12 @@ TEST_F(CodecImplFormatTrackingFailures, IdenticalFormatDetailsSucceeds) {
   // Call QueueInputFormatDetails with version ordinal 1 but different content (mime type).
   // Currently CodecImpl logs an ERROR without failing the channel and still forwards the updated
   // format details.
-  fuchsia::media::FormatDetails details4;
-  details4.set_format_details_version_ordinal(1);
-  details4.set_mime_type("video/vp9");
+  fuchsia_media::FormatDetails details4;
+  details4.format_details_version_ordinal() = 1;
+  details4.mime_type() = "video/vp9";
 
-  processor->QueueInputFormatDetails(1, std::move(details4));
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 1, .format_details = std::move(details4)}});
   QueueInputPacket(processor);
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [this] { return error_handler_ran_ || free_input_packet_count() == 4; }, kWaitTimeout));
@@ -1727,10 +1901,11 @@ TEST_F(CodecImplFormatTrackingFailures, IdenticalFormatDetailsSucceeds) {
 
   // Start a new stream (stream_lifetime_ordinal 3) with version ordinal 0 (dropping back to the
   // initial ordinal across a stream switch).
-  fuchsia::media::FormatDetails details5;
-  details5.set_format_details_version_ordinal(0);
+  fuchsia_media::FormatDetails details5;
+  details5.format_details_version_ordinal() = 0;
 
-  processor->QueueInputFormatDetails(3, std::move(details5));
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 3, .format_details = std::move(details5)}});
   QueueInputPacket(processor, 3);
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil(
       [this] { return error_handler_ran_ || free_input_packet_count() == 5; }, kWaitTimeout));
@@ -1739,17 +1914,18 @@ TEST_F(CodecImplFormatTrackingFailures, IdenticalFormatDetailsSucceeds) {
   ASSERT_EQ(tracking_adapter->call_count_.load(), 5);
   ASSERT_TRUE(tracking_adapter->last_format_details_.has_value());
   ASSERT_EQ(tracking_adapter->last_format_details_->format_details_version_ordinal(), 0u);
-  ASSERT_FALSE(tracking_adapter->last_format_details_->has_mime_type());
+  ASSERT_FALSE(tracking_adapter->last_format_details_->mime_type().has_value());
 }
 
 TEST_F(CodecImplFormatTrackingFailures, DecreasingFormatDetailsVersionFails) {
-  StreamProcessorPtr processor;
+  TestStreamProcessor processor;
   ConfigureInputBuffers(processor);
 
   // First call with version 1 (greater than 0)
-  fuchsia::media::FormatDetails details1;
-  details1.set_format_details_version_ordinal(1);
-  processor->QueueInputFormatDetails(1, std::move(details1));
+  fuchsia_media::FormatDetails details1;
+  details1.format_details_version_ordinal() = 1;
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 1, .format_details = std::move(details1)}});
   QueueInputPacket(processor);
 
   auto* tracking_adapter = static_cast<FakeCodecAdapterWithFormatTracking*>(codec_adapter_);
@@ -1759,9 +1935,10 @@ TEST_F(CodecImplFormatTrackingFailures, DecreasingFormatDetailsVersionFails) {
   ASSERT_EQ(tracking_adapter->call_count_.load(), 1);
 
   // Second call with version 0 (less than 1)
-  fuchsia::media::FormatDetails details2;
-  details2.set_format_details_version_ordinal(0);
-  processor->QueueInputFormatDetails(1, std::move(details2));
+  fuchsia_media::FormatDetails details2;
+  details2.format_details_version_ordinal() = 0;
+  (void)processor.client()->QueueInputFormatDetails(
+      {{.stream_lifetime_ordinal = 1, .format_details = std::move(details2)}});
 
   ASSERT_TRUE(RunLoopWithTimeoutOrUntil([this] { return error_handler_ran_; }, kWaitTimeout));
   ASSERT_TRUE(error_handler_ran_);

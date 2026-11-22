@@ -1,0 +1,14 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_fuchsia_package.gni")
+
+# The package is defined as `fx_package` in BUILD.bazel. This GN wrapper
+# stays because `//src/memory/stacktrack:stacktrack` and the
+# `subpackages` of `//src/memory/stacktrack/example` still
+# depend on `:collector` in GN.
+bazel_fuchsia_package("collector") {
+  bazel_config = "fuchsia_platform"
+  package_name = "stacktrack-collector"
+}

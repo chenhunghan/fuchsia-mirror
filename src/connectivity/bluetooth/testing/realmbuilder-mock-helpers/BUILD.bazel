@@ -26,9 +26,7 @@ rustc_library(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN depends on the default :fuchsia-component-test group; Bazel depends
-        # on the Rust library directly.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/storage/lib/vfs/rust:vfs",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",

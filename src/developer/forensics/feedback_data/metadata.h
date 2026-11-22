@@ -25,7 +25,7 @@ class Metadata {
  public:
   Metadata(async_dispatcher_t* dispatcher, timekeeper::Clock* clock,
            UtcClockReadyWatcherBase* utc_clock_ready_watcher, RedactorBase* redactor,
-           bool is_first_instance, const std::set<std::string>& default_snapshot_annotations,
+           const std::set<std::string>& default_snapshot_annotations,
            const feedback::AttachmentKeys& attachment_allowlist);
 
   // Return a JSON metadata string.

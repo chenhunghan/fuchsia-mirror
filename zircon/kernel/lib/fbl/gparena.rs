@@ -14,6 +14,7 @@ use crate::vm::vm_object::VmObject;
 use crate::vm::vm_object_paged::VmObjectPaged;
 use core::ffi::c_void;
 use core::marker::PhantomData;
+use core::mem::DropGuard;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -528,12 +529,11 @@ impl<const PERSIST_SIZE: usize, const OBJECT_SIZE: usize> GPArena<PERSIST_SIZE, 
             .map_err(|_| Status::NO_MEMORY)?;
 
         // The VMAR's parent holds a ref, so it won't be destroyed automatically when we return.
-        let vmar_for_cleanup = vmar.clone();
-        let mut destroy_vmar = zr::defer(move || {
-            let _ = vmar_for_cleanup.destroy();
+        let vmar = DropGuard::new(vmar, |vmar| {
+            let _ = vmar.destroy();
         });
 
-        let map_result = vmar.create_vm_mapping(
+        let map_result = vmar.create_vm_mapping_no_overwrite(
             0, // mapping_offset
             mem_sz,
             0, // align_pow2
@@ -541,7 +541,6 @@ impl<const PERSIST_SIZE: usize, const OBJECT_SIZE: usize> GPArena<PERSIST_SIZE, 
             vmo.clone(),
             0, // vmo_offset
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            b"gparena",
         )?;
 
         let Some(end) = map_result.base.checked_add(mem_sz) else {
@@ -549,7 +548,7 @@ impl<const PERSIST_SIZE: usize, const OBJECT_SIZE: usize> GPArena<PERSIST_SIZE, 
         };
 
         let base_ptr = ptr::with_exposed_provenance_mut::<u8>(map_result.base);
-        *this.vmar = Some(vmar);
+        *this.vmar = Some(DropGuard::dismiss(vmar));
         *this.mapping = Some(map_result.mapping);
         *this.vmo = Some(vmo);
         *this.start = base_ptr;
@@ -560,8 +559,6 @@ impl<const PERSIST_SIZE: usize, const OBJECT_SIZE: usize> GPArena<PERSIST_SIZE, 
 
         debug_assert!(page::is_page_rounded(map_result.base));
         debug_assert!(page::is_page_rounded(*this.end));
-
-        destroy_vmar.cancel();
 
         Ok(())
     }

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <bit>
 #include <cassert>
+#include <concepts>
 #include <limits>
 #include <optional>
 #include <span>
@@ -23,6 +24,10 @@
 
 namespace elfldltl {
 
+// This is used as a template template parameter in load.h (which see).
+template <ElfApi Elf>
+using PhdrFromElf = Elf::Phdr;
+
 // Read program headers from an ELF file using the File API (see memory.h),
 // given its file header (Ehdr) already read and validated.
 //
@@ -32,90 +37,92 @@ namespace elfldltl {
 // forwarded to File::ReadArrayFromFile; see memory.h for API details.
 //
 // All the template parameters are normally deduced, including the Elf layout
-// to use based on the Ehdr type used for the last argument.
-template <class Diagnostics, class Ehdr,
-          ReadArrayFromFileAllocator<typename Ehdr::ElfLayout::Phdr, uint32_t> Allocator>
-constexpr auto ReadPhdrsFromFile(
-    Diagnostics& diagnostics,
-    CanReadArrayFromFile<typename Ehdr::ElfLayout::Phdr, Allocator,
-                         typename Ehdr::ElfLayout::size_type> auto& file,
-    Allocator&& allocator, const Ehdr& ehdr) {
-  using namespace std::literals::string_view_literals;
+// to use based on the Ehdr type used for the last argument.  This is a
+// captureless lambda rather than a template function so that it can be used as
+// a non-type template parameter to WithLoadHeadersFromFile (see load.h).
+constexpr auto ReadPhdrsFromFile =
+    []<class Diagnostics, class Ehdr,
+       ReadArrayFromFileAllocator<typename Ehdr::ElfLayout::Phdr, uint32_t> Allocator>(
+        Diagnostics& diagnostics,
+        CanReadArrayFromFile<typename Ehdr::ElfLayout::Phdr, Allocator,
+                             typename Ehdr::ElfLayout::size_type> auto& file,
+        Allocator&& allocator, const Ehdr& ehdr) {
+      using namespace std::literals::string_view_literals;
 
-  using Elf = Ehdr::ElfLayout;
-  using size_type = Elf::size_type;
-  using Phdr = Elf::Phdr;
-  using Shdr = Elf::Shdr;
+      using Elf = Ehdr::ElfLayout;
+      using size_type = Elf::size_type;
+      using Phdr = Elf::Phdr;
+      using Shdr = Elf::Shdr;
 
-  const size_type phoff = ehdr.phoff;
-  auto read_phdrs = [&](size_t phnum) {
-    auto result = file.template ReadArrayFromFile<Phdr>(  //
-        phoff, std::forward<Allocator>(allocator), phnum);
-    if (!result) {
-      diagnostics.FormatError("cannot read program headers from ELF file"sv, FileOffset{phoff});
-    }
-    return result;
-  };
-  using Result = std::decay_t<decltype(read_phdrs(0).value())>;
-  using OptionalResult = std::optional<Result>;
-  static_assert(std::is_same_v<OptionalResult, decltype(read_phdrs(0))>);
+      const size_type phoff = ehdr.phoff;
+      auto read_phdrs = [&](size_t phnum) {
+        auto result = file.template ReadArrayFromFile<Phdr>(  //
+            phoff, std::forward<Allocator>(allocator), phnum);
+        if (!result) {
+          diagnostics.FormatError("cannot read program headers from ELF file"sv, FileOffset{phoff});
+        }
+        return result;
+      };
+      using Result = std::decay_t<decltype(read_phdrs(0).value())>;
+      using OptionalResult = std::optional<Result>;
+      static_assert(std::same_as<OptionalResult, decltype(read_phdrs(0))>);
 
-  // An empty phdr table is not an error, just an empty result.
-  if (ehdr.phnum == 0) [[unlikely]] {
-    return OptionalResult(Result());
-  }
+      // An empty phdr table is not an error, just an empty result.
+      if (ehdr.phnum == 0) [[unlikely]] {
+        return OptionalResult(Result());
+      }
 
-  // Validate the Ehdr fields related to the phdr.
+      // Validate the Ehdr fields related to the phdr.
 
-  if (ehdr.phentsize != sizeof(Phdr)) [[unlikely]] {
-    diagnostics.FormatError("e_phentsize has unexpected value"sv, ehdr.phentsize());
-    return OptionalResult();
-  }
+      if (ehdr.phentsize != sizeof(Phdr)) [[unlikely]] {
+        diagnostics.FormatError("e_phentsize has unexpected value"sv, ehdr.phentsize());
+        return OptionalResult();
+      }
 
-  if (phoff < sizeof(Ehdr)) [[unlikely]] {
-    diagnostics.FormatError("e_phoff overlaps with ELF file header"sv, FileOffset{phoff});
-    return OptionalResult();
-  }
+      if (phoff < sizeof(Ehdr)) [[unlikely]] {
+        diagnostics.FormatError("e_phoff overlaps with ELF file header"sv, FileOffset{phoff});
+        return OptionalResult();
+      }
 
-  if (phoff % alignof(Phdr) != 0) [[unlikely]] {
-    diagnostics.FormatError("e_phoff has insufficient alignment"sv, FileOffset{phoff});
-    return OptionalResult();
-  }
+      if (phoff % alignof(Phdr) != 0) [[unlikely]] {
+        diagnostics.FormatError("e_phoff has insufficient alignment"sv, FileOffset{phoff});
+        return OptionalResult();
+      }
 
-  // Things look valid, so find the count.  Usually it's directly in the field.
-  if (ehdr.phnum != Elf::Ehdr::kPnXnum) [[likely]] {
-    return read_phdrs(ehdr.phnum);
-  }
+      // Things look valid, so find the count.  Usually it's directly in the field.
+      if (ehdr.phnum != Elf::Ehdr::kPnXnum) [[likely]] {
+        return read_phdrs(ehdr.phnum);
+      }
 
-  // This is the marker that the count might exceed 16 bits.  In that case,
-  // it's instead stored in the special stub section header at index 0.
-  // This is the only time the section header table is used at runtime,
-  // and there are still no actual sections (index 0 is always a stub).
+      // This is the marker that the count might exceed 16 bits.  In that case,
+      // it's instead stored in the special stub section header at index 0.
+      // This is the only time the section header table is used at runtime,
+      // and there are still no actual sections (index 0 is always a stub).
 
-  if (ehdr.shnum == 0) [[unlikely]] {
-    diagnostics.FormatError("PN_XNUM with no section headers"sv);
-    return OptionalResult();
-  }
+      if (ehdr.shnum == 0) [[unlikely]] {
+        diagnostics.FormatError("PN_XNUM with no section headers"sv);
+        return OptionalResult();
+      }
 
-  if (ehdr.shentsize != sizeof(Shdr)) [[unlikely]] {
-    diagnostics.FormatError("e_shentsize has unexpected value"sv, ehdr.shentsize());
-    return OptionalResult();
-  }
+      if (ehdr.shentsize != sizeof(Shdr)) [[unlikely]] {
+        diagnostics.FormatError("e_shentsize has unexpected value"sv, ehdr.shentsize());
+        return OptionalResult();
+      }
 
-  const size_type shoff = ehdr.shoff;
-  if (shoff < sizeof(Ehdr)) [[unlikely]] {
-    diagnostics.FormatError("e_shoff overlaps with ELF file header"sv, FileOffset{shoff});
-    return OptionalResult();
-  }
+      const size_type shoff = ehdr.shoff;
+      if (shoff < sizeof(Ehdr)) [[unlikely]] {
+        diagnostics.FormatError("e_shoff overlaps with ELF file header"sv, FileOffset{shoff});
+        return OptionalResult();
+      }
 
-  if (auto read_shdr = file.template ReadFromFile<Shdr>(shoff)) [[likely]] {
-    const Shdr& shdr = *read_shdr;
-    return read_phdrs(shdr.info);
-  }
+      if (auto read_shdr = file.template ReadFromFile<Shdr>(shoff)) [[likely]] {
+        const Shdr& shdr = *read_shdr;
+        return read_phdrs(shdr.info);
+      }
 
-  diagnostics.FormatError("cannot read section header 0 from ELF file"sv, FileOffset{shoff});
-  return OptionalResult();
-}
+      diagnostics.FormatError("cannot read section header 0 from ELF file"sv, FileOffset{shoff});
+      return OptionalResult();
+    };
 
 // elfldltl::DecodePhdrs does a single-pass decoding of a program
 // header table by statically combining multiple "observer" objects.  Various

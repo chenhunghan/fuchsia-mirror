@@ -353,28 +353,28 @@ mod tests {
     use assert_matches::assert_matches;
     use async_test_helpers::run_while;
     use async_utils::PollExt;
-    use bt_channel_test_support::{Transport, create_test_channels};
+    use bt_channel_test_support::Transport;
     use bt_rfcomm::ServerChannel;
     use bt_rfcomm::profile::build_rfcomm_protocol;
     use diagnostics_assertions::assert_data_tree;
     use fidl::endpoints::{ControlHandle, create_proxy, create_proxy_and_stream};
-    use fidl_fuchsia_bluetooth as bt;
     use fidl_fuchsia_bluetooth_bredr as bredr;
     use fidl_fuchsia_bluetooth_hfp::{
         CallManagerMarker, CallManagerRequest, CallManagerRequestStream,
     };
     use fidl_fuchsia_power_battery as fpower;
     use fuchsia_async as fasync;
-    use fuchsia_bluetooth::types::Uuid;
+    use fuchsia_bluetooth::types::{Channel, Uuid};
     use futures::{SinkExt, TryStreamExt};
     use std::collections::HashSet;
     use std::pin::pin;
     use test_battery_manager::TestBatteryManager;
     use test_case::test_case;
+    use test_profile_server::TestProfileServer;
 
     use crate::peer::PeerRequest;
     use crate::peer::fake::PeerFake;
-    use crate::profile::test_server::{LocalProfileTestServer, setup_profile_and_test_server};
+    use crate::profile::test_server::setup_profile_and_test_server;
 
     #[fuchsia::test(allow_stalls = false)]
     async fn profile_error_propagates_error_from_hfp_run() {
@@ -442,7 +442,7 @@ mod tests {
         let _hfp_task = fasync::Task::local(hfp.run());
 
         // Setup profile, then connect RFCOMM channel.
-        let _server = profile_server_init_and_peer_handling(server, true, transport)
+        let (_server, _channel) = profile_server_init_and_peer_handling(server, true, transport)
             .await
             .expect("peer setup to complete");
 
@@ -486,17 +486,15 @@ mod tests {
         let _hfp_task = fasync::Task::local(hfp.run());
 
         // Setup profile, then connect RFCOMM channel.
-        let server = exec
+        let (mut server, chan) = exec
             .run_singlethreaded(profile_server_init_and_peer_handling(server, false, transport))
             .unwrap();
+        assert!(chan.is_none());
 
         // Peer Connected notification occurs after channel is connected.
         let call_manager = call_manager_init_and_peer_handling(stream);
         let mut call_manager = pin!(call_manager);
         assert!(exec.run_until_stalled(&mut call_manager).is_pending());
-
-        let (client_chan, _server_chan) = create_test_channels(transport);
-        let chan = bredr::Channel::try_from(client_chan).unwrap();
 
         // Random RFCOMM protocol.
         let proto: Vec<bredr::ProtocolDescriptor> =
@@ -504,12 +502,7 @@ mod tests {
                 .iter()
                 .map(Into::into)
                 .collect();
-        server
-            .receiver
-            .as_ref()
-            .unwrap()
-            .connected(&bt::PeerId { value: 1 }, chan, &proto)
-            .expect("succeed");
+        let _server_chan = server.send_connected_with_transport(PeerId(1), proto, transport);
         assert!(exec.run_until_stalled(&mut call_manager).is_ready());
     }
 
@@ -543,7 +536,7 @@ mod tests {
         let _hfp_task = fasync::Task::local(hfp.run());
 
         // Setup profile, then connect RFCOMM channel.
-        let _server = profile_server_init_and_peer_handling(server, true, transport)
+        let (_server, _channel) = profile_server_init_and_peer_handling(server, true, transport)
             .await
             .expect("peer setup to complete");
 
@@ -590,7 +583,7 @@ mod tests {
         let _hfp_task = fasync::Task::local(hfp.run());
 
         // Setup profile, then connect RFCOMM channel.
-        let _server = profile_server_init_and_peer_handling(server, true, transport)
+        let (_server, _channel) = profile_server_init_and_peer_handling(server, true, transport)
             .await
             .expect("peer setup to complete");
 
@@ -647,10 +640,10 @@ mod tests {
 
         let hfp_fut = pin!(hfp.run());
         // Complete registration by the peer.
-        let ((), hfp_fut) = run_while(&mut exec, hfp_fut, server.complete_registration());
+        let ((), hfp_fut) = run_while(&mut exec, hfp_fut, server.expect_search_and_advertise());
 
         // Send an AudioGateway service found
-        let audio_gateway_service_class_attrs = &[bredr::Attribute {
+        let audio_gateway_service_class_attrs = vec![bredr::Attribute {
             id: Some(bredr::ATTR_SERVICE_CLASS_ID_LIST),
             element: Some(bredr::DataElement::Sequence(vec![
                 Some(Box::new(bredr::DataElement::Uuid(
@@ -670,11 +663,8 @@ mod tests {
             ..Default::default()
         }];
 
-        let service_found_fut = server.results.as_ref().unwrap().service_found(
-            &PeerId(1).into(),
-            None,
-            audio_gateway_service_class_attrs,
-        );
+        let service_found_fut =
+            server.send_service_found(PeerId(1), None, audio_gateway_service_class_attrs);
 
         let (result, _hfp_fut) = run_while(&mut exec, hfp_fut, service_found_fut);
         result.expect("service_found should complete with success");
@@ -706,11 +696,11 @@ mod tests {
     ///
     /// Returns Ok(()) when all expected messages have been handled normally.
     async fn profile_server_init_and_peer_handling(
-        mut server: LocalProfileTestServer,
+        mut server: TestProfileServer,
         connect_from_search: bool,
         transport: Transport,
-    ) -> Result<LocalProfileTestServer, anyhow::Error> {
-        server.complete_registration().await;
+    ) -> Result<(TestProfileServer, Option<Channel>), anyhow::Error> {
+        server.expect_search_and_advertise().await;
         // Random RFCOMM protocol.
         let proto: Vec<bredr::ProtocolDescriptor> =
             build_rfcomm_protocol(ServerChannel::try_from(10).unwrap())
@@ -719,32 +709,17 @@ mod tests {
                 .collect();
 
         // Send search result
-        server
-            .results
-            .as_ref()
-            .unwrap()
-            .service_found(&bt::PeerId { value: 1 }, Some(&proto), &[])
-            .await?;
+        server.send_service_found(PeerId(1), Some(proto), vec![]).await?;
 
-        match server.stream.next().await {
-            Some(Ok(bredr::ProfileRequest::Connect { peer_id, connection: _, responder })) => {
-                assert_eq!(peer_id, bt::PeerId { value: 1 });
-                if connect_from_search {
-                    let (client_chan, server_chan) = create_test_channels(transport);
-                    server.connections.push(server_chan);
-                    let chan = bredr::Channel::try_from(client_chan).unwrap();
-
-                    responder.send(Ok(chan)).expect("successfully send connection response");
-                } else {
-                    responder
-                        .send(Err(fidl_fuchsia_bluetooth::ErrorCode::Failed))
-                        .expect("successfully send connection failure");
-                }
-            }
-            r => panic!("{:?}", r),
-        }
+        let req = server.expect_connect_request().await.assert_peer(PeerId(1));
+        let chan = if connect_from_search {
+            Some(req.accept_with_transport(transport))
+        } else {
+            req.reject(fidl_fuchsia_bluetooth::ErrorCode::Failed);
+            None
+        };
         info!("profile server done");
-        Ok(server)
+        Ok((server, chan))
     }
 
     #[fuchsia::test(allow_stalls = false)]

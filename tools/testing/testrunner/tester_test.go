@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 
 	"go.fuchsia.dev/fuchsia/tools/botanist"
 	botanistconstants "go.fuchsia.dev/fuchsia/tools/botanist/constants"
+	"go.fuchsia.dev/fuchsia/tools/botanist/targets"
 	"go.fuchsia.dev/fuchsia/tools/build"
 	"go.fuchsia.dev/fuchsia/tools/integration/testsharder"
 	"go.fuchsia.dev/fuchsia/tools/integration/testsharder/metadata"
@@ -471,6 +473,49 @@ func TestSubprocessTester(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("mounts usb_socket_path from testbed config when sandboxing", func(t *testing.T) {
+		tbConfigPath := filepath.Join(tmpDir, "testbed_config.json")
+		usbSocketPath := filepath.Join(tmpDir, "ffx_usb_driver_socketpath")
+		serialSocketPath := filepath.Join(tmpDir, "serial_socket")
+		sshKeyPath := filepath.Join(tmpDir, "ssh_key")
+		tbJSON := fmt.Sprintf(`[{"serial_socket":%q,"ssh_key":%q,"usb_socket_path":%q}]`, serialSocketPath, sshKeyPath, usbSocketPath)
+		if err := os.WriteFile(tbConfigPath, []byte(tbJSON), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(botanistconstants.TestbedConfigEnvKey, tbConfigPath)
+
+		runner := &fakeCmdRunner{}
+		oldNewRunner := newRunner
+		t.Cleanup(func() { newRunner = oldNewRunner })
+		newRunner = func(dir string, env []string) cmdRunner { return runner }
+
+		tester := SubprocessTester{
+			localOutputDir: tmpDir,
+			testRuns:       make(map[string]subprocessTestRun),
+			sProps:         &sandboxingProps{nsjailPath: "./fake_nsjail"},
+		}
+		test := testsharder.Test{Test: build.Test{Path: "uninstrumented_test"}}
+		outDir := filepath.Join(tmpDir, "usb_mount_out")
+		if err := tester.SetupTest(context.Background(), test); err != nil {
+			t.Fatalf("tester.SetupTest failed: %v", err)
+		}
+		if _, err := tester.Test(context.Background(), test, io.Discard, io.Discard, outDir); err != nil {
+			t.Fatalf("tester.Test failed: %v", err)
+		}
+
+		wantUSBMount := fmt.Sprintf("%s:%s", usbSocketPath, usbSocketPath)
+		foundWritableUSBMount := false
+		for i := 0; i+1 < len(runner.lastCmd); i++ {
+			if runner.lastCmd[i] == "--bindmount" && runner.lastCmd[i+1] == wantUSBMount {
+				foundWritableUSBMount = true
+				break
+			}
+		}
+		if !foundWritableUSBMount {
+			t.Errorf("expected writable --bindmount %s in nsjail command, got %v", wantUSBMount, runner.lastCmd)
+		}
+	})
 }
 
 type fakeDataSinkCopier struct {
@@ -714,7 +759,7 @@ func TestFFXTester(t *testing.T) {
 // Creates pair of ReadWriteClosers that mimics the relationship between serial
 // and socket i/o. Implemented with in-memory pipes, the input of one can
 // synchronously by read as the output of the other.
-func serialAndSocket() (socketConn, socketConn) {
+func serialAndSocket() (*joinedPipeEnds, *joinedPipeEnds) {
 	rSerial, wSocket := io.Pipe()
 	rSocket, wSerial := io.Pipe()
 	serial := &joinedPipeEnds{rSerial, wSerial}
@@ -906,12 +951,10 @@ func TestSerialTester(t *testing.T) {
 			tester := FuchsiaSerialTester{socket: socket}
 			expectedCmd := tc.expectedCmd
 
-			if tc.wantRetry {
-				oldNewTestStartedContext := newTestStartedContext
-				defer func() {
-					newTestStartedContext = oldNewTestStartedContext
-				}()
-			}
+			oldNewTestStartedContext := newTestStartedContext
+			defer func() {
+				newTestStartedContext = oldNewTestStartedContext
+			}()
 			var fakeTestStartedContext fakeContext
 			fakeTestStartedCancel := func() {}
 			newTestStartedContext = func(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -990,6 +1033,9 @@ func TestSerialTester(t *testing.T) {
 				if gotErr := r.err != nil; gotErr != tc.wantErr {
 					t.Errorf("test got err: %s, want err: %t", r.err, tc.wantErr)
 				}
+				if tc.wantErr && (!errors.Is(r.err, io.EOF) || !isConnectionError(r.err)) {
+					t.Errorf("test got err: %v (%T), want connectionError wrapping io.EOF", r.err, r.err)
+				}
 				if !tc.wantErr && r.result == nil {
 					t.Error("got nil test result")
 				}
@@ -1003,6 +1049,361 @@ func TestSerialTester(t *testing.T) {
 			}
 		})
 	}
+}
+
+type matchNotifyWriter struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	target  string
+	once    sync.Once
+	matched chan struct{}
+}
+
+func (w *matchNotifyWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buf.Write(p)
+	if strings.Contains(w.buf.String(), w.target) {
+		w.once.Do(func() {
+			close(w.matched)
+		})
+	}
+	return n, err
+}
+
+func handshakeMockSerialConn(ctx context.Context, conn net.Conn, testerReady <-chan struct{}) error {
+	if _, err := iomisc.ReadUntilMatchString(ctx, conn, "\r\n"); err != nil {
+		return fmt.Errorf("reading initial prompt trigger: %w", err)
+	}
+	if _, err := io.WriteString(conn, "$ "); err != nil {
+		return fmt.Errorf("writing console prompt: %w", err)
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-testerReady:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if _, err := io.WriteString(conn, "[driver_manager.cm] INFO: Bootup completed\n"); err != nil {
+				return fmt.Errorf("writing bootup completed: %w", err)
+			}
+		}
+	}
+}
+
+func TestSerialTesterMidTestEOFAndReconnect(t *testing.T) {
+	cases := []struct {
+		name        string
+		test        testsharder.Test
+		expectedCmd string
+		startedStr  string
+		passStr     string
+	}{
+		{
+			name: "runtests",
+			test: testsharder.Test{
+				Test: build.Test{
+					Name: "myfoo",
+					Path: "foo",
+				},
+			},
+			expectedCmd: "runtests foo\r\n",
+			startedStr:  runtests.StartedSignature + "myfoo",
+			passStr:     runtests.SuccessSignature + "myfoo",
+		},
+		{
+			name: "run-test-suite",
+			test: testsharder.Test{
+				Test: build.Test{
+					Name:       "fuchsia-boot:///myfoo#meta/bar.cm",
+					PackageURL: "fuchsia-boot:///myfoo#meta/bar.cm",
+				},
+			},
+			expectedCmd: "run-test-suite --filter-ansi fuchsia-boot:///myfoo#meta/bar.cm\r\n",
+			startedStr:  "Running test 'fuchsia-boot:///myfoo#meta/bar.cm'",
+			passStr:     "fuchsia-boot:///myfoo#meta/bar.cm completed with result: PASSED",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+
+			// Use a short directory name instead of t.TempDir() to stay well below
+			// Unix domain socket sun_path limits (103 chars on macOS, 107 on Linux).
+			sockDir, err := os.MkdirTemp("", "mux-")
+			if err != nil {
+				t.Fatalf("os.MkdirTemp() failed: %v", err)
+			}
+			t.Cleanup(func() { os.RemoveAll(sockDir) })
+			sockPath := filepath.Join(sockDir, "s")
+			listener, err := net.Listen("unix", sockPath)
+			if err != nil {
+				t.Fatalf("net.Listen(%q) failed: %v", sockPath, err)
+			}
+			defer listener.Close()
+
+			const partialLine = "partial test output before _mux disconnect\n"
+			stdout1 := &matchNotifyWriter{
+				target:  partialLine,
+				matched: make(chan struct{}),
+			}
+
+			testerReady := make(chan struct{})
+			handshakeDone := make(chan error, 1)
+			test2Done := make(chan struct{})
+			serverErrCh := make(chan error, 1)
+
+			serveConn1 := func() error {
+				conn1, err := listener.Accept()
+				if err != nil {
+					err = fmt.Errorf("Accept(conn1) failed: %w", err)
+					handshakeDone <- err
+					return err
+				}
+				// Close mock _mux socket mid-test without emitting pass signature.
+				defer conn1.Close()
+				if err := handshakeMockSerialConn(ctx, conn1, testerReady); err != nil {
+					handshakeDone <- err
+					return err
+				}
+				handshakeDone <- nil
+
+				if _, err := iomisc.ReadUntilMatchString(ctx, conn1, tc.expectedCmd); err != nil {
+					return fmt.Errorf("conn1 reading test command: %w", err)
+				}
+				if _, err := io.WriteString(conn1, tc.startedStr+"\n"+partialLine); err != nil {
+					return fmt.Errorf("conn1 writing partial output: %w", err)
+				}
+				select {
+				case <-stdout1.matched:
+					return nil
+				case <-ctx.Done():
+					return fmt.Errorf("timed out waiting for partial output to reach stdout1: %w", ctx.Err())
+				}
+			}
+			serveConn2 := func() error {
+				conn2, err := listener.Accept()
+				if err != nil {
+					return nil
+				}
+				defer conn2.Close()
+
+				if _, err := io.WriteString(conn2, "$ "); err != nil {
+					return fmt.Errorf("conn2 writing cursor: %w", err)
+				}
+				if _, err := iomisc.ReadUntilMatchString(ctx, conn2, tc.expectedCmd); err != nil {
+					return fmt.Errorf("conn2 reading test command: %w", err)
+				}
+				if _, err := io.WriteString(conn2, tc.startedStr+"\n"+tc.passStr+"\n"); err != nil {
+					return fmt.Errorf("conn2 writing test pass output: %w", err)
+				}
+				select {
+				case <-test2Done:
+				case <-ctx.Done():
+				}
+				return nil
+			}
+			go func() {
+				if err := serveConn1(); err != nil {
+					serverErrCh <- err
+					return
+				}
+				serverErrCh <- serveConn2()
+			}()
+
+			tester, err := NewFuchsiaSerialTester(ctx, sockPath)
+			if err != nil {
+				close(testerReady)
+				t.Fatalf("NewFuchsiaSerialTester() failed: %v", err)
+			}
+			defer tester.Close()
+			close(testerReady)
+			if err := <-handshakeDone; err != nil {
+				t.Fatalf("mock _mux handshake failed: %v", err)
+			}
+
+			// 1. Mid-test _mux EOF must return a non-nil connectionError wrapping io.EOF
+			// (and nil TestDetails), rather than err == nil with a misleading test FAIL result.
+			res1, err1 := tester.Test(ctx, tc.test, stdout1, io.Discard, "unused-out-dir")
+			if !errors.Is(err1, io.EOF) || !isConnectionError(err1) {
+				t.Errorf("Test() after mid-test _mux EOF returned err=%v (%T), res=%+v; want connectionError wrapping io.EOF", err1, err1, res1)
+			}
+			if res1 != nil {
+				t.Errorf("Test() after mid-test _mux EOF returned non-nil TestDetails (status=%q); want nil", res1.Status)
+			}
+
+			// 2. Reconnect() must re-dial the Unix socket path so a subsequent Test() succeeds
+			// instead of failing with write: broken pipe.
+			if err := tester.Reconnect(ctx); err != nil {
+				t.Errorf("Reconnect() returned error: %v", err)
+			}
+
+			res2, err2 := tester.Test(ctx, tc.test, io.Discard, io.Discard, "unused-out-dir")
+			close(test2Done)
+			if err2 != nil {
+				t.Errorf("Test() after Reconnect() returned error: %v; want nil", err2)
+			}
+			if res2 == nil {
+				t.Errorf("Test() after Reconnect() returned nil TestDetails; want status=%q", runtests.TestSuccess)
+			} else if res2.Status != runtests.TestSuccess {
+				t.Errorf("Test() after Reconnect() status = %q, want %q", res2.Status, runtests.TestSuccess)
+			}
+
+			listener.Close()
+			if err := <-serverErrCh; err != nil {
+				t.Errorf("mock _mux server error: %v", err)
+			}
+		})
+	}
+}
+
+type onEOFSocket struct {
+	socketConn
+	onEOF func()
+}
+
+func (s *onEOFSocket) Read(p []byte) (int, error) {
+	n, err := s.socketConn.Read(p)
+	if errors.Is(err, io.EOF) && s.onEOF != nil {
+		s.onEOF()
+	}
+	return n, err
+}
+
+func TestSerialTesterReconnectErrors(t *testing.T) {
+	ctx := context.Background()
+	test := testsharder.Test{Test: build.Test{Name: "myfoo", Path: "foo"}}
+
+	t.Run("write failure on closed socket", func(t *testing.T) {
+		// Write failure in serial.RunCommands (e.g. socket closed between tests)
+		// must return a connectionError so testrunner attempts Reconnect().
+		serial, socket := serialAndSocket()
+		serial.Close()
+		socket.Close()
+		tester := &FuchsiaSerialTester{socket: socket}
+		if res, err := tester.Test(ctx, test, io.Discard, io.Discard, "unused-out-dir"); res != nil || !isConnectionError(err) {
+			t.Errorf("Test() on closed socket = (%v, %v), want (nil, connectionError)", res, err)
+		}
+	})
+
+	t.Run("mid-test ECONNRESET returns connectionError", func(t *testing.T) {
+		serial, socket := serialAndSocket()
+		defer serial.Close()
+		defer socket.Close()
+
+		tester := &FuchsiaSerialTester{socket: socket}
+		go func() {
+			expectedCmd := "\r\nruntests foo\r\n"
+			buf := make([]byte, len(expectedCmd))
+			if _, err := io.ReadFull(serial, buf); err != nil {
+				return
+			}
+			if _, err := io.WriteString(serial, runtests.StartedSignature+test.Name+"\n"); err != nil {
+				return
+			}
+			// Second write completes only once Test() reads from socket in TestPassed.
+			_, _ = io.WriteString(serial, "running before reset\n")
+			_ = serial.w.CloseWithError(syscall.ECONNRESET)
+		}()
+		res, err := tester.Test(ctx, test, io.Discard, io.Discard, "unused-out-dir")
+		if res != nil || !isConnectionError(err) || !errors.Is(err, syscall.ECONNRESET) {
+			t.Errorf("Test() after mid-test ECONNRESET = (%v, %v), want (nil, connectionError wrapping ECONNRESET)", res, err)
+		}
+	})
+
+	t.Run("canceled context before start", func(t *testing.T) {
+		// Canceled context must return context.Canceled rather than connectionError
+		// or a failed TestDetails, both in Test() (even with nil socket) and Reconnect().
+		canceledCtx, cancel := context.WithCancel(ctx)
+		cancel()
+		serial, socket := serialAndSocket()
+		defer serial.Close()
+		defer socket.Close()
+		tester := &FuchsiaSerialTester{
+			socket:           socket,
+			serialSocketPath: filepath.Join(t.TempDir(), "nonexistent.sock"),
+		}
+		if res, err := tester.Test(canceledCtx, test, io.Discard, io.Discard, "unused-out-dir"); res != nil || !errors.Is(err, context.Canceled) || isConnectionError(err) {
+			t.Errorf("Test() with canceled ctx before start = (%v, %v), want (nil, context.Canceled) and not connectionError", res, err)
+		}
+		nilSocketTester := &FuchsiaSerialTester{}
+		if res, err := nilSocketTester.Test(canceledCtx, test, io.Discard, io.Discard, "unused-out-dir"); res != nil || !errors.Is(err, context.Canceled) || isConnectionError(err) {
+			t.Errorf("Test() with canceled ctx and nil socket = (%v, %v), want (nil, context.Canceled) and not connectionError", res, err)
+		}
+		if err := tester.Reconnect(canceledCtx); !errors.Is(err, context.Canceled) {
+			t.Errorf("Reconnect() with canceled ctx = %v, want context.Canceled", err)
+		}
+	})
+
+	t.Run("canceled mid-test on EOF", func(t *testing.T) {
+		// Mid-test cancellation while socket closes concurrently must return
+		// context.Canceled rather than connectionError{io.EOF} or a test failure.
+		// Uses fakeContext (whose Done channel never closes) and onEOFSocket so
+		// context cancellation is set inside Read right as io.EOF is returned,
+		// deterministically exercising handleReadErr's ctx.Err() precedence.
+		serial, socket := serialAndSocket()
+		defer serial.Close()
+		defer socket.Close()
+		var midCtx fakeContext
+		tester := &FuchsiaSerialTester{
+			socket: &onEOFSocket{
+				socketConn: socket,
+				onEOF:      func() { midCtx.SetErr(context.Canceled) },
+			},
+		}
+		go func() {
+			expectedCmd := "\r\nruntests foo\r\n"
+			cmdBuf := make([]byte, len(expectedCmd))
+			if _, err := io.ReadFull(serial, cmdBuf); err != nil {
+				return
+			}
+			if _, err := io.WriteString(serial, runtests.StartedSignature+test.Name+"\n"); err != nil {
+				return
+			}
+			// Second write completes only once Test() reads from socket in TestPassed.
+			_, _ = io.WriteString(serial, "running before cancel\n")
+			serial.Close()
+		}()
+		res, err := tester.Test(&midCtx, test, io.Discard, io.Discard, "unused-out-dir")
+		if res != nil || !errors.Is(err, context.Canceled) || isConnectionError(err) {
+			t.Errorf("Test() canceled mid-test = (%v, %v), want (nil, context.Canceled) and not connectionError", res, err)
+		}
+	})
+
+	t.Run("empty serialSocketPath", func(t *testing.T) {
+		serial, socket := serialAndSocket()
+		defer serial.Close()
+		defer socket.Close()
+		tester := &FuchsiaSerialTester{socket: socket}
+		if err := tester.Reconnect(ctx); err == nil {
+			t.Error("Reconnect() with empty serialSocketPath returned nil, want error")
+		}
+	})
+
+	t.Run("failed reconnect leaves Close and Test safe", func(t *testing.T) {
+		serial, socket := serialAndSocket()
+		defer serial.Close()
+		defer socket.Close()
+		tester := &FuchsiaSerialTester{
+			socket:           socket,
+			serialSocketPath: filepath.Join(t.TempDir(), "nonexistent.sock"),
+		}
+		if err := tester.Reconnect(ctx); err == nil {
+			t.Error("Reconnect() to nonexistent socket returned nil, want error")
+		}
+		if err := tester.Close(); err != nil {
+			t.Errorf("Close() after failed Reconnect() returned error: %v", err)
+		}
+		res, err := tester.Test(ctx, test, io.Discard, io.Discard, "unused-out-dir")
+		if res != nil || !isConnectionError(err) {
+			t.Errorf("Test() after failed Reconnect() = (%v, %v), want (nil, connectionError)", res, err)
+		}
+	})
 }
 
 func longKernelLog(numChars int) string {
@@ -1413,5 +1814,233 @@ func TestProcessTestResult(t *testing.T) {
 	tcSkipped := testDetails.Cases[2]
 	if tcSkipped.FailureReason != nil {
 		t.Errorf("skipped case got FailureReason %v, want nil", tcSkipped.FailureReason)
+	}
+}
+
+type reconnectTestTarget struct {
+	fuchsiaTarget
+	ffxInstance *targets.FFXInstance
+	ipv6Addr    *net.IPAddr
+	nodename    string
+	serialNum   string
+}
+
+func (t *reconnectTestTarget) GetFFX() *targets.FFXInstance { return t.ffxInstance }
+func (t *reconnectTestTarget) GetSharedData() string        { return t.ffxInstance.SharedData() }
+func (t *reconnectTestTarget) Nodename() string             { return t.nodename }
+func (t *reconnectTestTarget) SerialNumber() string         { return t.serialNum }
+func (t *reconnectTestTarget) IPv6() (*net.IPAddr, error)   { return t.ipv6Addr, nil }
+
+// newReconnectHarness returns an FFXTester for an emulator-like target whose
+// address changes to fe80::2%qemu on reconnect, along with the target's
+// FFXInstance. The first ffxTesterReconnect call fails so that Reconnect
+// re-resolves the address.
+func newReconnectHarness(t *testing.T) (*ffxutil.FFXInstance, *reconnectTestTarget, *FFXTester) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv(botanistconstants.NodenameEnvKey, targets.DefaultEmulatorNodename)
+	t.Setenv(botanistconstants.DeviceAddrEnvKey, "")
+	t.Setenv(botanistconstants.IPv4AddrEnvKey, "")
+	t.Setenv(botanistconstants.IPv6AddrEnvKey, "")
+	t.Setenv(botanistconstants.TestbedConfigEnvKey, "")
+
+	ffxPath := filepath.Join(tmpDir, "ffx")
+	if err := os.WriteFile(ffxPath, []byte("#!/bin/bash\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshKeys := ffxutil.SSHInfo{
+		SshPriv: filepath.Join(tmpDir, "privKey"),
+		SshPub:  filepath.Join(tmpDir, "pubKey"),
+	}
+	realFFX, err := ffxutil.NewFFXInstance(t.Context(), ffxPath, tmpDir, nil, "", &sshKeys, filepath.Join(tmpDir, "out"), ffxutil.UseFFXStrict)
+	if err != nil {
+		t.Fatalf("NewFFXInstance failed: %s", err)
+	}
+	realFFX.SetTarget("fe80::1%qemu")
+
+	target := &reconnectTestTarget{
+		ffxInstance: &targets.FFXInstance{
+			FFXInstance: realFFX,
+			Experiments: botanist.GetExperiments([]string{string(botanist.UseSerialTargetID)}),
+		},
+		ipv6Addr:  &net.IPAddr{IP: net.ParseIP("fe80::2"), Zone: "qemu"},
+		nodename:  targets.DefaultEmulatorNodename,
+		serialNum: "EM-REBOOT1",
+	}
+	tester := &FFXTester{
+		ffx:    &ffxutil.MockFFXInstance{},
+		target: target,
+	}
+
+	oldReconnect := ffxTesterReconnect
+	t.Cleanup(func() { ffxTesterReconnect = oldReconnect })
+	calls := 0
+	ffxTesterReconnect = func(_ *FFXTester, _ context.Context) error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("initial reconnect failure")
+		}
+		return nil
+	}
+	return realFFX, target, tester
+}
+
+func TestFFXTesterReconnect_UpdatesRegisteredTargets(t *testing.T) {
+	peer := ffxutil.RegisteredTarget{Nodename: "fuchsia-peer-1", ID: "PEER-001", Address: "192.168.42.10"}
+	for _, tc := range []struct {
+		name      string
+		nodename  string
+		serialNum string
+		existing  []ffxutil.RegisteredTarget
+		want      []ffxutil.RegisteredTarget
+		// noExperiment disables use_serial_target_id.
+		noExperiment bool
+		// ffxTarget is the target's ffx target before reconnecting, or empty
+		// for its IP address.
+		ffxTarget string
+		// wantTarget is the target's ffx target after reconnecting.
+		wantTarget string
+	}{
+		{
+			// configureAndRegisterTarget targets devices with a serial number
+			// by `id:<serial>`.
+			name:      "updates_matching_target_and_preserves_peers",
+			nodename:  targets.DefaultEmulatorNodename,
+			serialNum: "EM-REBOOT1",
+			ffxTarget: "id:EM-REBOOT1",
+			existing: []ffxutil.RegisteredTarget{
+				peer,
+				{Nodename: targets.DefaultEmulatorNodename, ID: "EM-REBOOT1", Address: "fe80::1%qemu"},
+			},
+			want: []ffxutil.RegisteredTarget{
+				peer,
+				{Nodename: targets.DefaultEmulatorNodename, ID: "EM-REBOOT1", Address: "fe80::2%qemu"},
+			},
+			// A target addressed by serial number keeps that target, and ffx
+			// finds the new address through the registry.
+			wantTarget: "id:EM-REBOOT1",
+		},
+		{
+			// Without the experiment, the target keeps its IP address target
+			// and the registry is left alone.
+			name:         "without_experiment_repoints_target",
+			nodename:     targets.DefaultEmulatorNodename,
+			serialNum:    "EM-REBOOT1",
+			existing:     []ffxutil.RegisteredTarget{peer},
+			want:         []ffxutil.RegisteredTarget{peer},
+			noExperiment: true,
+			wantTarget:   "fe80::2%qemu",
+		},
+		{
+			// Without the experiment, a target addressed as `id:<serial>`
+			// (as force_ffx_usb devices are) is still pointed at the new IP
+			// address.
+			name:         "without_experiment_repoints_id_target",
+			nodename:     targets.DefaultEmulatorNodename,
+			serialNum:    "EM-REBOOT1",
+			existing:     []ffxutil.RegisteredTarget{peer},
+			want:         []ffxutil.RegisteredTarget{peer},
+			noExperiment: true,
+			ffxTarget:    "id:EM-REBOOT1",
+			wantTarget:   "fe80::2%qemu",
+		},
+		{
+			name:       "unidentifiable_target_not_registered",
+			existing:   []ffxutil.RegisteredTarget{peer},
+			want:       []ffxutil.RegisteredTarget{peer},
+			wantTarget: "fe80::2%qemu",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			realFFX, target, tester := newReconnectHarness(t)
+			target.nodename = tc.nodename
+			target.serialNum = tc.serialNum
+			if tc.noExperiment {
+				target.ffxInstance.Experiments = nil
+			}
+			if tc.ffxTarget != "" {
+				realFFX.SetTarget(tc.ffxTarget)
+			}
+			if err := realFFX.RegisterTargets(tc.existing); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := tester.Reconnect(t.Context()); err != nil {
+				t.Fatalf("Reconnect() unexpected error: %s", err)
+			}
+			if got := target.GetFFX().GetTarget(); got != tc.wantTarget {
+				t.Errorf("Reconnect() target.GetFFX().GetTarget() = %q, want %q", got, tc.wantTarget)
+			}
+			got, err := realFFX.LoadRegisteredTargets()
+			if err != nil {
+				t.Fatalf("LoadRegisteredTargets() failed: %s", err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("LoadRegisteredTargets() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestProcessTestResultRunnerFormat(t *testing.T) {
+	for _, tc := range []struct {
+		desc       string
+		runner     string
+		caseName   string
+		wantFormat string
+		wantSuite  string
+		wantCase   string
+	}{
+		{"gtest", "gtest_runner", "MySuite.MyCase", "GoogleTest", "MySuite", "MyCase"},
+		{"gtest variant", "zxtest_runner", "Inst/MySuite.MyCase/0", "GoogleTest", "Inst/MySuite", "MyCase/0"},
+		{"rust", "rust_test_runner", "tests::my_test", "Rust", "tests", "my_test"},
+		{"go", "go_test_runner", "TestFoo/sub", "Go", "", "TestFoo/sub"},
+		{"unknown runner", "elf_test_runner", "MySuite.MyCase", "FTF", "", "MySuite.MyCase"},
+		{"no runner", "", "MySuite.MyCase", "FTF", "", "MySuite.MyCase"},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			envelope := ffxutil.TestRunResultEnvelope{
+				Data: ffxutil.TestRunResult{
+					Suites: []ffxutil.SuiteResult{{
+						Outcome: ffxutil.TestPassed,
+						Name:    "fuchsia-pkg://foo#meta/bar.cm",
+						Runner:  tc.runner,
+						Cases:   []ffxutil.CaseResult{{Outcome: ffxutil.TestPassed, Name: tc.caseName}},
+					}},
+				},
+				SchemaID: "https://fuchsia.dev/schema/ffx_test/run_summary-8d1dd964.json",
+			}
+			envelopeBytes, err := json.Marshal(envelope)
+			if err != nil {
+				t.Fatalf("failed to marshal envelope: %s", err)
+			}
+			if err := os.WriteFile(filepath.Join(tmpDir, "run_summary.json"), envelopeBytes, 0o644); err != nil {
+				t.Fatalf("failed to write run_summary.json: %s", err)
+			}
+			runResult, err := ffxutil.GetRunResult(tmpDir)
+			if err != nil {
+				t.Fatalf("ffxutil.GetRunResult failed: %s", err)
+			}
+			test := testsharder.Test{Test: build.Test{PackageURL: "fuchsia-pkg://foo#meta/bar.cm"}}
+
+			testDetails, err := processTestResult(runResult, test, 5*time.Second, false)
+			if err != nil {
+				t.Fatalf("processTestResult failed: %s", err)
+			}
+
+			if testDetails.Runner != tc.runner {
+				t.Errorf("got runner %q, want %q", testDetails.Runner, tc.runner)
+			}
+			if len(testDetails.Cases) != 1 {
+				t.Fatalf("got %d test cases, want 1", len(testDetails.Cases))
+			}
+			got := testDetails.Cases[0]
+			if got.Format != tc.wantFormat || got.SuiteName != tc.wantSuite || got.CaseName != tc.wantCase || got.DisplayName != tc.caseName {
+				t.Errorf("got (format, suite, case, display) = (%q, %q, %q, %q), want (%q, %q, %q, %q)",
+					got.Format, got.SuiteName, got.CaseName, got.DisplayName,
+					tc.wantFormat, tc.wantSuite, tc.wantCase, tc.caseName)
+			}
+		})
 	}
 }

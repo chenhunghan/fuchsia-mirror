@@ -3,10 +3,10 @@
 // found in the LICENSE file.
 
 #include <fidl/fuchsia.hardware.pci/cpp/wire.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/driver/mmio/cpp/mmio-buffer.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zx/result.h>
 #include <zircon/errors.h>
 #include <zircon/process.h>

@@ -2,7 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_build_action.gni")
 import("//build/bazel/bazel_host_tool.gni")
 
 if (is_host) {
@@ -11,20 +10,7 @@ if (is_host) {
     bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/testgen"
     install_host_tool = true
   }
-
   # TODO(127883): Add a golden file test for the helptext.
-
-  bazel_build_action("integration_test_goldens") {
-    testonly = true
-    bazel_target = ":integration_test_goldens"
-    bazel_config = "host"
-    copy_outputs = [
-      {
-        bazel = "{{BAZEL_TARGET_OUT_DIR}}/{{BAZEL_TARGET_NAME}}.verified"
-        ninja = "$target_name.verified"
-      },
-    ]
-  }
 }
 
 group("host") {
@@ -35,8 +21,6 @@ group("host") {
 group("integration_test_tests") {
   testonly = true
   deps = [
-    ":integration_test_goldens($host_toolchain)",
-
     # Ensure the generated test builds and passes.
     "testdata/goldens/integration_test/tests",
   ]

@@ -80,6 +80,10 @@ type PowerDependency = table {
 type PowerElementConfiguration = table {
     1: element PowerElement;
     2: dependencies vector<PowerDependency>:MAX_DEPENDENCIES;
+    /// Optional initial power level from `element.levels`. When non-zero,
+    /// helpers such as `fdf_power` acquire an initial lease at this level
+    /// atomically during `Topology.AddElement`.
+    3: initial_level uint8;
 };
 
 const MAX_POWER_ELEMENTS uint16 = 32;

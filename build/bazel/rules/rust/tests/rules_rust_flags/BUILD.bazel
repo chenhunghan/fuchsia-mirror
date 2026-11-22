@@ -1,0 +1,271 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tests for Fuchsia's patched `@rules_rust` toolchain, Clippy, rust_test, and rustdoc flags."""
+
+load(
+    "@rules_rust//rust:defs.bzl",
+    "rust_clippy_test",
+    "rust_doc",
+    "rust_doc_test",
+    "rust_library",
+    "rust_lint_config",
+    "rust_stdlib_filegroup",
+    "rust_test",
+)
+load("@rules_rust//rust:toolchain.bzl", "rust_toolchain")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "define_and_wrap_host_rust_test")
+load(
+    ":rules_rust_flags_test.bzl",
+    "rules_rust_flags_analysis_test_suite",
+    "write_text_file",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":wrapped_crate_keep_files_test",
+        ":wrapped_crate_replace_files_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+rules_rust_flags_analysis_test_suite(
+    name = "analysis_tests",
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Package-local suite grouping all Bazel tests for direct `fx bazel test` runs.
+# `:clippy_override_test` (`RunEnvironmentInfo` is not forwarded by `host_test`)
+# and `:remap_flags_rust_doc_test` (stages compiler toolchains in `runfiles`)
+# run in CI at build time via `:build_only_tests` rather than `tests.json`.
+test_suite(
+    name = "bazel_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":analysis_tests",
+        ":clippy_override_test",
+        ":host_tests",
+        ":remap_flags_rust_doc_test",
+    ],
+)
+
+filegroup(
+    name = "build_only_tests",
+    testonly = True,
+    srcs = [
+        ":clippy_override_checks",
+        ":remap_flags_rust_doc",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Synthetic Rust toolchain used only by `analysistest` targets via `--extra_toolchains`.
+write_text_file(
+    name = "mock_rustc_bin",
+    filename = "mock_rustc",
+)
+
+write_text_file(
+    name = "mock_rustdoc_bin",
+    filename = "mock_rustdoc",
+)
+
+write_text_file(
+    name = "mock_clippy_bin",
+    filename = "mock_clippy",
+)
+
+write_text_file(
+    name = "mock_std_rlib",
+    filename = "libstd-mock.rlib",
+)
+
+rust_stdlib_filegroup(
+    name = "mock_rust_std",
+    srcs = [":mock_std_rlib"],
+)
+
+rust_toolchain(
+    name = "mock_rust_toolchain_impl",
+    binary_ext = "",
+    clippy_driver = ":mock_clippy_bin",
+    default_edition = "2024",
+    dylib_ext = ".so",
+    exec_triple = "x86_64-unknown-linux-gnu",
+    extra_exec_rustc_flags = ["--cfg=from_extra_exec_rustc_flags"],
+    extra_exec_rustc_flags_for_crate_types = {
+        "proc-macro": ["--cfg=exec_proc_macro_flag"],
+    },
+    extra_rustc_flags = ["--cfg=from_extra_rustc_flags"],
+    extra_rustc_flags_feature = "opt_out_extra_flags",
+    extra_rustc_flags_for_crate_types = {
+        "proc-macro": ["--cfg=non_exec_proc_macro_flag"],
+        "rlib": ["--cfg=non_exec_rlib_flag"],
+    },
+    rust_doc = ":mock_rustdoc_bin",
+    rust_std = ":mock_rust_std",
+    rustc = ":mock_rustc_bin",
+    staticlib_ext = ".a",
+    stdlib_linkflags = [],
+    target_triple = "x86_64-unknown-linux-gnu",
+)
+
+toolchain(
+    name = "mock_rust_toolchain",
+    toolchain = ":mock_rust_toolchain_impl",
+    toolchain_type = "@rules_rust//rust:toolchain_type",
+)
+
+# End-to-end Clippy execution test: target response files and rustc_flags must
+# override both `lint_config` and fallback `-Dwarnings`.
+rust_lint_config(
+    name = "deny_unused_lints",
+    clippy = {
+        "redundant_clone": "deny",
+    },
+    rustc = {
+        "unused_variables": "deny",
+    },
+)
+
+write_text_file(
+    name = "clippy_override_allow_unused_rsp",
+    content = "-Aunused_variables\n",
+    filename = "clippy_override_allow_unused.rsp",
+)
+
+rust_library(
+    name = "clippy_override_lib",
+    srcs = ["lib_clippy_override.rs"],
+    edition = "2024",
+    lint_config = ":deny_unused_lints",
+    rustc_flags = ["-Aclippy::redundant_clone"],
+    rustc_flags_files = [":clippy_override_allow_unused_rsp"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rust_library(
+    name = "clippy_default_dwarnings_override_lib",
+    srcs = ["lib_clippy_override.rs"],
+    edition = "2024",
+    rustc_flags = ["-Aclippy::redundant_clone"],
+    rustc_flags_files = [":clippy_override_allow_unused_rsp"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rust_clippy_test(
+    name = "clippy_override_test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    targets = [
+        ":clippy_default_dwarnings_override_lib",
+        ":clippy_override_lib",
+    ],
+)
+
+filegroup(
+    name = "clippy_override_checks",
+    testonly = True,
+    srcs = [":clippy_override_test"],
+    output_group = "clippy_checks",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# End-to-end rust_test(crate = ...) execution tests:
+# - Default preserves crate's target rustc_flags_files and rustc_env_files.
+# - replace_crate_rustc_flags_files = True swaps them for the test's own files.
+write_text_file(
+    name = "lib_target_cfg_rsp",
+    cfgs = ["lib_target_cfg"],
+    content = "--cfg=lib_target_cfg\n",
+    filename = "lib_target_cfg.rsp",
+)
+
+write_text_file(
+    name = "lib_target_env",
+    content = "LIB_TARGET_ENV=from_crate\n",
+    filename = "lib_target.env",
+)
+
+write_text_file(
+    name = "lib_replacement_cfg_rsp",
+    cfgs = [
+        "lib_target_cfg",
+        "expect_replaced_env",
+    ],
+    content = "--cfg=lib_target_cfg\n--cfg=expect_replaced_env\n",
+    filename = "lib_replacement_cfg.rsp",
+)
+
+write_text_file(
+    name = "lib_replacement_env",
+    content = "LIB_TARGET_ENV=from_replacement\n",
+    filename = "lib_replacement.env",
+)
+
+rust_library(
+    name = "wrapped_crate_lib",
+    srcs = ["lib_wrapped_test.rs"],
+    edition = "2024",
+    rustc_env_files = [":lib_target_env"],
+    rustc_flags_files = [":lib_target_cfg_rsp"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+define_and_wrap_host_rust_test(
+    name = "wrapped_crate_keep_files_test",
+    crate = ":wrapped_crate_lib",
+    replace_crate_rustc_flags_files = False,
+    rust_test_rule = rust_test,
+    visibility = None,
+)
+
+define_and_wrap_host_rust_test(
+    name = "wrapped_crate_replace_files_test",
+    crate = ":wrapped_crate_lib",
+    replace_crate_rustc_flags_files = True,
+    rust_test_rule = rust_test,
+    rustc_env_files = [":lib_replacement_env"],
+    rustc_flags_files = [":lib_replacement_cfg_rsp"],
+    visibility = None,
+)
+
+# End-to-end rust_doc and rust_doc_test with an all-filtered @param_file
+# containing both --remap-path-scope and --remap-path-prefix flags.
+write_text_file(
+    name = "all_filtered_remap_flags_rsp",
+    content = "\n".join([
+        "--remap-path-scope=macro,debuginfo,coverage,object",
+        "--remap-path-prefix==../..",
+        "--remap-path-prefix=.=../..",
+        "",
+    ]),
+    filename = "all_filtered_remap_flags.rsp",
+)
+
+rust_library(
+    name = "remap_flags_doc_lib",
+    srcs = ["lib_rustdoc_remap.rs"],
+    crate_name = "rules_rust_doc_demo",
+    default_rustc_flags_files = [":all_filtered_remap_flags_rsp"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rust_doc(
+    name = "remap_flags_rust_doc",
+    crate = ":remap_flags_doc_lib",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+rust_doc_test(
+    name = "remap_flags_rust_doc_test",
+    crate = ":remap_flags_doc_lib",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

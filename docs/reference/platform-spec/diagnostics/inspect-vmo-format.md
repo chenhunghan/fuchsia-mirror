@@ -176,7 +176,6 @@ Each type interprets the payload differently, as follows:
 * [FREE](#free)
 * [RESERVED](#reserved)
 * [HEADER](#header)
-* [Common VALUE fields](#value)
 * [NODE\_VALUE](#node)
 * [INT\_VALUE](#numeric)
 * [UINT\_VALUE](#numeric)

@@ -25,7 +25,7 @@ For more information, see
 [RFC-0129](/docs/contribute/governance/rfcs/0129_python_in_fuchsia.md) and
 [Build system policies](/docs/development/build/gn_concepts/policies.md#python-scripts-as-build-actions).
 
-## Refinements
+## Refinements {#refinements}
 
 The following refinements we make to the Google Python style guide are largely
 choices between variations. For example, if the style guide says you may do A,

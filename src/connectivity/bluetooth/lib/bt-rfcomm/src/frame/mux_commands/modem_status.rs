@@ -161,11 +161,11 @@ impl Encodable for ModemStatusParams {
         buf[1] = status_signals_field.0;
 
         // (Optional) Break signal. E/A = 1 since last octet. Set break value.
-        if self.break_value.is_some() {
+        if let Some(break_value) = self.break_value {
             let mut break_value_field = ModemStatusBreakField(0);
             break_value_field.set_ea_bit(true);
             break_value_field.set_contains_break_value(true);
-            break_value_field.set_break_value(self.break_value.unwrap());
+            break_value_field.set_break_value(break_value);
             buf[2] = break_value_field.0;
         }
 

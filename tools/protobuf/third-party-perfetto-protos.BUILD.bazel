@@ -62,6 +62,7 @@ _PROTOS = [
     "protos/perfetto/config/inode_file/inode_file_config.proto",
     "protos/perfetto/config/interceptor_config.proto",
     "protos/perfetto/config/interceptors/console_config.proto",
+    "protos/perfetto/config/linux/cgroup_config.proto",
     "protos/perfetto/config/linux/journald_config.proto",
     "protos/perfetto/config/power/android_power_config.proto",
     "protos/perfetto/config/priority_boost/priority_boost_config.proto",
@@ -85,6 +86,7 @@ _PROTOS = [
     "protos/perfetto/protovm/vm_program.proto",
     "protos/perfetto/trace/perfetto_trace.proto",
     "protos/third_party/android/frameworks/native/tracing/frameworks_native_trace_packet.proto",
+    "protos/third_party/pprof/profile.proto",
 ]
 
 # @fuchsia_perfetto_protos is a workspace-level repository for

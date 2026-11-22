@@ -28,6 +28,19 @@ impl<'a, Class> LockToken<'a, Class> {
         Self { _marker: PhantomData }
     }
 
+    /// Creates an inactive token placeholder for storage inside an empty or adoptable guard slot.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that no `&LockToken` or `&mut LockToken` reference to this token is
+    /// ever exposed while a mutual exclusion lock of class `Class` is not held by the current
+    /// thread, and that whenever a reference is exposed, any borrows derived from `'a` remain
+    /// valid for their full lifetime.
+    #[inline]
+    pub(crate) unsafe fn inactive() -> Self {
+        Self { _marker: PhantomData }
+    }
+
     /// Reborrows this exclusive lock token with its lifetime shortened to the borrow duration `'b`.
     #[inline]
     pub fn reborrow<'b>(&'b mut self) -> &'b mut LockToken<'b, Class> {

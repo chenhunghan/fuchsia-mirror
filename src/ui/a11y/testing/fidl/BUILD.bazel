@@ -8,7 +8,6 @@ package(default_applicable_licenses = ["//:license"])
 
 fidl_library(
     name = "test.accessibility",
-    testonly = True,
     srcs = ["magnifier.test.fidl"],
     enable_hlcpp = True,
     visibility = ["//src/ui:__subpackages__"],

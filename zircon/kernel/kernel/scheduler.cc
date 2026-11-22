@@ -9,10 +9,6 @@
 #include <assert.h>
 #include <debug.h>
 #include <inttypes.h>
-#include <lib/arch/intrin.h>
-#include <lib/kconcurrent/chainlock.h>
-#include <lib/kconcurrent/chainlock_transaction.h>
-#include <lib/sched/affine.h>
 #include <lib/zircon-internal/macros.h>
 #include <platform.h>
 #include <stdio.h>
@@ -23,7 +19,6 @@
 
 #include <arch/interrupt.h>
 #include <arch/ops.h>
-#include <arch/thread.h>
 #include <kernel/cpu.h>
 #include <kernel/ffi.h>
 #include <kernel/lockdep.h>
@@ -31,32 +26,9 @@
 #include <kernel/percpu.h>
 #include <kernel/scheduler_state.h>
 #include <kernel/thread.h>
-#include <ktl/algorithm.h>
-#include <ktl/forward.h>
-#include <ktl/limits.h>
-#include <ktl/new.h>
-#include <ktl/span.h>
-#include <ktl/tuple.h>
 #include <ktl/utility.h>
-#include <object/process_dispatcher.h>
-#include <object/thread_dispatcher.h>
-#include <vm/vm.h>
 
 #include <ktl/enforce.h>
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_dump_active(const Thread* thread,
-                                              FILE* output_target) TA_NO_THREAD_SAFETY_ANALYSIS {
-  fprintf(output_target, "thread: pid=%lu tid=%lu\n", thread->pid(), thread->tid());
-  const ThreadDispatcher* user_thread = thread->user_thread();
-  if (user_thread != nullptr) {
-    const ProcessDispatcher* process = user_thread->process();
-    char name[ZX_MAX_NAME_LEN]{};
-    [[maybe_unused]] zx_status_t status = process->get_name(name);
-    DEBUG_ASSERT(status == ZX_OK);
-    fprintf(output_target, "process: name=%s\n", name);
-  }
-}
 
 Scheduler* Scheduler::Get() { return Get(arch_curr_cpu_num()); }
 
@@ -77,7 +49,7 @@ zx::result<cpu_mask_t> Scheduler::UpdatePowerLevel(uint32_t domain_id, uint64_t 
   {
     Scheduler* scheduler = Get();
     Guard<MonitoredSpinLock, IrqSave> guard{&scheduler->queue_lock_, SOURCE_TAG};
-    const PowerDomainSet& power_domain_set = scheduler->power_state_.power_domain_set();
+    const PowerDomainSet& power_domain_set = scheduler->rust_tail_.power_state.power_domain_set();
     domain = fbl::RefPtr{power_domain_set.FindByDomainId(domain_id)};
   }
 
@@ -90,7 +62,7 @@ zx::result<cpu_mask_t> Scheduler::UpdatePowerLevel(uint32_t domain_id, uint64_t 
     return zx::error(ZX_ERR_NOT_FOUND);
   }
 
-  ktl::optional<uint8_t> power_level = domain->model().FindPowerLevel(interface, arg);
+  ktl::optional<uint8_t> power_level = domain->model().FindActivePowerLevel(interface, arg);
   if (!power_level.has_value()) {
     return zx::error(ZX_ERR_NOT_FOUND);
   }
@@ -106,26 +78,6 @@ zx::result<cpu_mask_t> Scheduler::UpdatePowerLevel(uint32_t domain_id, uint64_t 
   }
 
   return zx::ok(cpus_to_reschedule_mask);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE Scheduler* cpp_scheduler_get(cpu_num_t cpu) { return Scheduler::Get(cpu); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE cpu_stats* cpp_get_cpu_stats(cpu_num_t cpu_num) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &percpu::Get(cpu_num).stats;
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint64_t cpp_scheduler_power_state_active_power_coefficient_nw(
-    const Scheduler* sched) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.active_power_coefficient_nw();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint64_t cpp_scheduler_power_level_control_max_idle_power_coefficient_nw(
-    const Scheduler* sched) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.max_idle_power_coefficient_nw();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -153,88 +105,6 @@ FFI_ALWAYS_INLINE void cpp_scheduler_unlock_queue_irq_restore(Scheduler* sched, 
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_update_runtime_stats(Thread* thread, int32_t state) {
-  thread->UpdateRuntimeStats(static_cast<thread_state>(state));
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE int32_t cpp_thread_get_disposition(const Thread* thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return static_cast<int32_t>(thread->disposition());
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_power_level_control_is_enabled(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.is_enabled();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_power_state_scheduler_control_enabled(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.scheduler_control_enabled();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_power_state_is_serving(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.is_serving();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_power_state_is_valid_active_power_level(
-    const Scheduler* sched, uint8_t power_level) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.IsValidActivePowerLevel(power_level);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE cpu_mask_t cpp_scheduler_power_state_domain_cpus(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.domain()->cpus();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SchedProcessingRate cpp_scheduler_power_state_target_processing_rate(
-    const Scheduler* sched) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.target_processing_rate();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SchedProcessingRate cpp_scheduler_power_state_preceding_target_processing_rate(
-    const Scheduler* sched) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.preceding_target_processing_rate();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_power_state_has_preceding_target_power_level(
-    const Scheduler* sched) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.has_preceding_target_power_level();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const power_management::PowerLevel*
-cpp_scheduler_power_state_find_active_power_level_for_rate(
-    const Scheduler* sched, SchedProcessingRate rate) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.domain()->model().FindActivePowerLevelForRate(rate);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint8_t
-cpp_power_level_get_level(const power_management::PowerLevel* power_level) {
-  return power_level->level();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE bool cpp_scheduler_power_state_request_transition(
-    Scheduler* sched, cpu_num_t cpu, uint8_t power_level,
-    power_management::PowerLevelUpdateRequest* out_req) TA_NO_THREAD_SAFETY_ANALYSIS {
-  const ktl::optional<power_management::PowerLevelUpdateRequest> request =
-      sched->power_state_.RequestTransition(cpu, power_level);
-  *out_req = request.value_or(power_management::PowerLevelUpdateRequest{});
-  return request.has_value();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 // Posts |req| to the power domain controller of |sched|, temporarily releasing
 // queue_lock_ around the post (which may acquire other CPUs' queue locks).
 // Must be called with queue_lock_ held and interrupts disabled; queue_lock_ is
@@ -243,12 +113,12 @@ FFI_ALWAYS_INLINE cpu_mask_t cpp_scheduler_power_state_post_update_request(
     Scheduler* sched,
     const power_management::PowerLevelUpdateRequest* req) TA_NO_THREAD_SAFETY_ANALYSIS {
   // Latch a reference to the domain's controller while queue_lock_ is still
-  // held. power_state_ is guarded by queue_lock_, and a concurrent
+  // held. power_state is guarded by queue_lock_, and a concurrent
   // ExchangePowerDomainSet on another CPU could otherwise replace or clear the
   // domain while the lock is dropped below. Only the controller is needed to
   // post the request.
   fbl::RefPtr<power_management::PowerLevelController> controller =
-      sched->power_state_.domain()->controller();
+      sched->rust_tail_.power_state.domain()->controller();
   DEBUG_ASSERT(controller != nullptr);
 
   cpu_mask_t cpus_to_reschedule_mask = 0;
@@ -272,93 +142,7 @@ FFI_ALWAYS_INLINE cpu_mask_t cpp_scheduler_power_state_post_update_request(
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t cpp_scheduler_power_state_update_active_power_level(
-    Scheduler* sched, uint8_t power_level,
-    SchedProcessingRate* out_active_rate) TA_NO_THREAD_SAFETY_ANALYSIS {
-  const zx::result result = sched->power_state_.UpdateActivePowerLevel(power_level);
-  if (result.is_ok()) {
-    *out_active_rate = sched->power_state_.active_processing_rate();
-    return ZX_OK;
-  }
-  return result.status_value();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_call_context_switch_fn_locked(Thread* thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  thread->CallContextSwitchFnLocked();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE VmAspace* cpp_thread_get_aspace(Thread* thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return thread->aspace();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_vmm_context_switch(VmAspace* old_aspace, VmAspace* new_aspace) {
-  vmm_context_switch(old_aspace, new_aspace);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_arch_context_switch(Thread* current_thread,
-                                               Thread* next_thread) TA_NO_THREAD_SAFETY_ANALYSIS {
-  arch_context_switch(current_thread, next_thread);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_thread_signal_check_restartable_sequence_if_needed(Thread* thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  thread->SignalCheckRestartableSequenceIfNeeded();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SchedulerQueueState* cpp_thread_get_queue_state(Thread* thread)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &thread->scheduler_queue_state();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const CpuSearchSet::Entry* cpp_get_cpu_search_set_entries(cpu_num_t cpu) {
-  return percpu::Get(cpu).search_set.const_iterator().data();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE size_t cpp_get_cpu_search_set_count(cpu_num_t cpu) {
-  return percpu::Get(cpu).search_set.const_iterator().size();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE size_t cpp_scheduler_get_power_domain_set_count(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.power_domain_set().count();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint64_t cpp_scheduler_lookup_power_cost(
-    const Scheduler* sched, cpu_num_t cpu, SchedProcessingRate rate) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.power_domain_set().LookupPowerCost(cpu, rate);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SchedUtilization cpp_scheduler_lookup_total_normalized_utilization(
-    const Scheduler* sched, cpu_num_t cpu) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.power_domain_set().LookupTotalNormalizedUtilization(cpu);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SchedUtilization cpp_scheduler_power_level_control_update_normalized_utilization(
-    Scheduler* sched, SchedUtilization delta) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.UpdateUtilization(delta);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE uint32_t cpp_scheduler_power_level_control_domain_id(const Scheduler* sched)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.domain()->id();
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SchedUtilization cpp_scheduler_power_level_control_total_normalized_utilization(
-    const Scheduler* sched) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return sched->power_state_.total_normalized_utilization();
+FFI_ALWAYS_INLINE void cpp_current_mono_time_and_boot_ticks(
+    Scheduler::SchedMonoTimeAndBootTicks* out) {
+  *out = Scheduler::CurrentMonoTimeAndBootTicks();
 }

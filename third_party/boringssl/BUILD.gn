@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_shared_library.gni")
 import("//build/dist/resource.gni")
 import("BUILD.generated.gni")
 import("BUILD.generated_tests.gni")
@@ -66,7 +67,16 @@ foreach(lib_type, lib_types) {
   # LINT.IfChange(crypto_targets)
   # Bazel's header-only crypto-headers has no GN equivalent: GN dependents get
   # the headers from :boringssl_config.
-  target("${lib_type}_library", "crypto-${lib_type}") {
+  if (lib_type == "shared") {
+    _crypto_target_type = "bazel_shared_library"
+  } else {
+    _crypto_target_type = "${lib_type}_library"
+  }
+
+  target(_crypto_target_type, "crypto-${lib_type}") {
+    if (lib_type == "shared") {
+      bazel_target = ":crypto_gn_outputs"
+    }
     if (default_library_type == "${lib_type}_library") {
       output_name = "crypto"
     }
@@ -88,6 +98,10 @@ foreach(lib_type, lib_types) {
       # performance is significantly worse, impacting pave and boot times on
       # debug builds. See
       # https://fxbug.dev/42133086.
+      #
+      # Removing default_optimize also drops LTO and the size-tuned ML inliner
+      # in compilation modes that enable them. BUILD.bazel mirrors this with
+      # "-fno-lto" and features = [ "-ml_inliner" ].
       configs -= [ "//build/config:default_optimize" ]
       configs += [ "//build/config:optimize_speed" ]
 
@@ -125,6 +139,10 @@ foreach(lib_type, lib_types) {
       # boringssl should always be optimized for speed because otherwise
       # performance is significantly
       # worse, impacting pave and boot times on debug builds (https://fxbug.dev/42133086)
+      #
+      # Removing default_optimize also drops LTO and the size-tuned ML inliner
+      # in compilation modes that enable them. BUILD.bazel mirrors this with
+      # "-fno-lto" and features = [ "-ml_inliner" ].
       configs -= [ "//build/config:default_optimize" ]
       configs += [ "//build/config:optimize_speed" ]
     }

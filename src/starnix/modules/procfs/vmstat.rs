@@ -49,15 +49,15 @@ impl DynamicFileSource for VmStatFile {
         let nr_inactive_file = userpager_total.saturating_sub(userpager_active);
 
         // Only fields required so far are written. Add more fields as needed.
-        writeln!(sink, "workingset_refault_file {}", 0)?;
-        writeln!(sink, "nr_inactive_file {}", nr_inactive_file)?;
-        writeln!(sink, "nr_active_file {}", nr_active_file)?;
-        writeln!(
+        let pgscan_kswapd = VM_STAT_HACK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        write!(
             sink,
-            "pgscan_kswapd {}",
-            VM_STAT_HACK_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            "workingset_refault_file 0\n\
+             nr_inactive_file {nr_inactive_file}\n\
+             nr_active_file {nr_active_file}\n\
+             pgscan_kswapd {pgscan_kswapd}\n\
+             pgscan_direct 0\n",
         )?;
-        writeln!(sink, "pgscan_direct {}", 0)?;
 
         Ok(())
     }

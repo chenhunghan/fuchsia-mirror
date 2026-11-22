@@ -354,7 +354,7 @@ template("libc_source_set") {
         if (defined(invoker.non_test_deps)) {
           deps += invoker.non_test_deps
         }
-        deps += [ "$libc:libc_source_set.deps" ]
+        deps += [ "$libc:libc_non_test.deps" ]
         if (basic_abi && !is_kernel && !_diagnose_libzircon_refs) {
           deps += [
             "//src/zircon/lib/zircon:hermetic_source_set-underscores-rewrite",
@@ -504,8 +504,15 @@ template("libc_test") {
       deps += [ "$libc:gtest" ]
       assert_no_deps += [ "//zircon/system/ulib/zxtest/*" ]
     } else {
+      # Unit test binaries must not link production non-test libc objects.
+      # This is only enforced for zxtest unit tests; gtest-based tests are
+      # standalone test executables that link against the platform runtime
+      # (e.g. libfdio.so), which depends on the sysroot libc.so.
+      assert_no_deps += [
+        "$libc:libc_non_test.deps",
+        "//third_party/googletest/*",
+      ]
       deps += [ "$libc:zxtest" ]
-      assert_no_deps += [ "//third_party/googletest/*" ]
     }
   }
 }
@@ -585,8 +592,8 @@ variant_replaces_allocator = toolchain_variant.tags + [ "replaces-allocator" ] -
 #     - Type: list(label)
 #
 #   * allow_fini, allow_init, basic_abi, configs, global_symbols,
-#     non_test_deps, remove_configs, testonly_deps, testonly_public_deps,
-#     undefined_symbols
+#     libc_deps, libc_public_deps, non_test_deps, remove_configs,
+#     testonly_deps, testonly_public_deps, undefined_symbols
 #     - Optional: See libc_source_set().  If $global_symbols is omitted
 #     and $basic_abi is true, then it defaults to $functions.
 #
@@ -661,6 +668,8 @@ template("llvm_libc_source_set") {
                              "defines",
                              "global_symbols",
                              "include_dirs",
+                             "libc_deps",
+                             "libc_public_deps",
                              "local_sources",
                              "non_test_deps",
                              "non_test_vars",
@@ -831,8 +840,9 @@ template("llvm_libc_source_set") {
 #     - Type: list(label_without_toolchain)
 #
 #   * testonly_deps
-#     - Optional: A list of labels used *only* for testonly versions of code
-#       under test.  These are dependencies of the testonly target.
+#     - Optional: A list of llvm_libc_source_set() or llvm_libc_group() labels
+#       used only in testonly and unittests builds, omitted from the non-test
+#       group.
 #     - Type: list(label_without_toolchain)
 #
 #   * visibility

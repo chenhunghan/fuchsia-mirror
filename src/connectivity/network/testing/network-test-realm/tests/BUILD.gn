@@ -54,30 +54,17 @@ fuchsia_test_component("network-test-realm-integration-test") {
 }
 
 package_deps = [
-  # used as test stubs for testing start-stub, stop-stub, and poll-udp.
-  "unreliable-echo:unreliable-echo-v4",
-  "unreliable-echo:unreliable-echo-v6",
-
-  # netemul-sandbox is used to create hermetic test realms.
-  "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
-  # controller is used to interact with the Network Test Realm.
-  "//src/connectivity/network/testing/network-test-realm/service:controller",
-
   # expectations comparer
   "//src/lib/testing/expectation:expectation_comparer",
 ]
 
 package_subpackages = [
-  "//src/connectivity/network/dhcpv4/client/bindings:package",
-  "//src/connectivity/network/dhcpv4/server:package",
-
-  # `package-conformance` is launched inside the hermetic network realm by
-  # `controller`.
-  "//src/connectivity/network/netstack3:package-conformance",
-
   # `package-debug` corresponds to a Netstack3 instance configured by netemul.
   "//src/connectivity/network/netstack3:package-debug",
+
+  # netemul-sandbox is used to create hermetic test realms.
+  "//src/connectivity/network/testing/netemul/service:package",
+  "//src/connectivity/network/testing/network-test-realm/service:network-test-realm",
 ]
 
 name = "network-test-realm-integration-test"

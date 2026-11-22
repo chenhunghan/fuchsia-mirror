@@ -9,46 +9,24 @@
 #include "src/developer/debug/shared/logging/logging.h"
 #include "src/lib/fxl/strings/string_printf.h"
 
-namespace {
-// Searches for the current user name in the given string and replaces it with a literal "$USER".
-// If not present, returns the input string unmodified.
-std::string ObfuscateUser(const std::string& string) {
+namespace zxdb {
+
+std::string ObfuscateUser(std::string_view input) {
   const char* username = std::getenv("USER");
-
-  if (!username) {
-    // If the username is not set in the environment, give up.
-    return string;
+  if (!username || username[0] == '\0') {
+    return std::string(input);
   }
 
-  size_t pos = string.find(username);
-  const size_t username_len = strlen(username);
-
-  std::string ret = string;
-  while (pos < ret.size()) {
-    std::string to_end;
-    size_t replace_end = pos + username_len;
-
-    // We have to special case the username being followed immediately by an escaped double-quote,
-    // which will be treated as the end of the string by std::string::replace below. We don't want
-    // to lose the rest of the string, so it's saved in a temporary.
-    if (replace_end < ret.size() && ret[replace_end] == '\"') {
-      to_end = ret.substr(replace_end);
-    }
-
-    ret.replace(pos, replace_end, "$USER");
-
-    if (!to_end.empty()) {
-      ret.append(to_end);
-    }
-
-    pos = ret.find(username);
+  constexpr std::string_view kReplacement = "$USER";
+  const std::string_view username_sv(username);
+  std::string ret(input);
+  size_t pos = ret.find(username_sv);
+  while (pos != std::string::npos) {
+    ret.replace(pos, username_sv.size(), kReplacement);
+    pos = ret.find(username_sv, pos + kReplacement.size());
   }
-
   return ret;
 }
-}  // namespace
-
-namespace zxdb {
 
 // AnalyticsEvent ----------------------------------------------------------------------------------
 AnalyticsEvent::AnalyticsEvent(const std::string& name, const std::string& session_id)
@@ -62,6 +40,11 @@ AnalyticsEvent::AnalyticsEvent(const std::string& name, const std::string& sessi
 // SessionStarted ----------------------------------------------------------------------------------
 SessionStarted::SessionStarted(const std::string& session_id)
     : AnalyticsEvent("session_started", session_id) {}
+
+void SessionStarted::SetRunByAgent(bool run_by_agent) {
+  // This name is consistent with the parameter that ffx reports.
+  SetParameter("is_agent_env", run_by_agent);
+}
 
 SessionConnected::SessionConnected(const std::string& session_id)
     : AnalyticsEvent("session_connected", session_id) {}
@@ -152,4 +135,5 @@ void ConsoleType::SetConsoleType(Type type) {
   }
   SetParameter("type", console_type_string);
 }
+
 }  // namespace zxdb

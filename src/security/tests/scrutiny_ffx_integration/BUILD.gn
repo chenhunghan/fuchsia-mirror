@@ -9,6 +9,8 @@ import("//build/testing/host_test_data.gni")
 if (is_fuchsia) {
   bazel_product_bundle("product_bundle") {
     testonly = true
+    generate_image_metadata = false
+    generate_size_report = false
     product_bundle_name = "scrutiny_ffx_integration_test"
     bazel_product_bundle_target = ":product_bundle"
     bazel_product_image_target = ":main_image"

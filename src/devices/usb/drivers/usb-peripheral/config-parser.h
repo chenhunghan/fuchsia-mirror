@@ -37,6 +37,7 @@ constexpr uint8_t kTestMask        = 1 << 5;
 constexpr uint8_t kVsockBridgeMask = 1 << 6;
 // clang-format on
 
+// LINT.IfChange
 // A PID lookup table for each supported function, or combination of functions.
 const std::map<uint8_t, uint16_t> kPidLookup = {
     {kCdcMask, GOOGLE_USB_CDC_PID},
@@ -52,9 +53,16 @@ const std::map<uint8_t, uint16_t> kPidLookup = {
     {kAdbMask | kVsockBridgeMask, GOOGLE_USB_ADB_AND_VSOCK_BRIDGE_PID},
     {kCdcMask | kVsockBridgeMask, GOOGLE_USB_CDC_AND_VSOCK_BRIDGE_PID},
     {kCdcMask | kFastbootMask, GOOGLE_USB_CDC_AND_FASTBOOT_PID},
+    {kFastbootMask | kVsockBridgeMask, GOOGLE_USB_FASTBOOT_AND_VSOCK_BRIDGE_PID},
     {kCdcMask | kAdbMask | kVsockBridgeMask, GOOGLE_USB_CDC_AND_ADB_AND_VSOCK_BRIDGE_PID},
     {kCdcMask | kAdbMask | kFastbootMask, GOOGLE_USB_CDC_AND_ADB_AND_FASTBOOT_PID},
+    {kCdcMask | kFastbootMask | kVsockBridgeMask, GOOGLE_USB_CDC_AND_FASTBOOT_AND_VSOCK_BRIDGE_PID},
 };
+// LINT.ThenChange(
+//   //src/devices/usb/bin/usb-cli/src/config.rs,
+//   //src/devices/usb/lib/usb/include/usb/peripheral.h,
+//   //src/tests/end_to_end/usb/lib/fuchsia_usb_pids.json,
+// )
 
 constexpr std::string_view kDefaultSerialNumber = "0123456789ABCDEF";
 constexpr std::string_view kManufacturer = "Zircon";

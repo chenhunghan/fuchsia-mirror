@@ -323,22 +323,16 @@ async fn run_all_futures() -> Result<(), Error> {
     };
     let power_manager = Arc::new(DevicePowerManager::new(proxies));
     // Register for suspend/resume notifications
-    let (initial_wake_lease, suspend_blocker_requests) = if cfg.power_framework_enabled {
-        let (suspend_blocker_client, suspend_blocker_requests) =
-            fidl::endpoints::create_request_stream::<fsystem::SuspendBlockerMarker>();
-        let lease = match power_manager
-            .register_suspend_blocker(suspend_blocker_client, "wlancfg-suspend-blocker")
-            .await
-        {
-            Ok(lease) => Some(lease),
+    let init_suspend_blocker = if cfg.power_framework_enabled {
+        match power_manager.register_suspend_blocker("wlancfg-suspend-blocker").await {
+            Ok(blocker) => Some(blocker),
             Err(e) => {
                 warn!("Failed to register suspend blocker: {:?}", e);
                 None
             }
-        };
-        (lease, Some(suspend_blocker_requests))
+        }
     } else {
-        (None, None)
+        None
     };
 
     let monitor_svc = fuchsia_component::client::connect_to_protocol::<DeviceMonitorMarker>()
@@ -495,14 +489,14 @@ async fn run_all_futures() -> Result<(), Error> {
         run_regulatory_manager(iface_manager.clone(), regulatory_sender, power_manager.clone());
 
     let suspend_blocker_fut: future::LocalBoxFuture<'static, Result<(), Error>> =
-        if let Some(requests) = suspend_blocker_requests {
-            Box::pin(phy_manager::serve_suspend_blocker(phy_manager.clone(), requests))
+        if let Some(blocker) = init_suspend_blocker {
+            Box::pin(phy_manager::serve_suspend_blocker(
+                phy_manager.clone(),
+                blocker.into_stream_dropping_init_lease(),
+            ))
         } else {
             Box::pin(future::ready(Ok(())))
         };
-
-    // We're initialized now, we can stop keeping the system awake
-    drop(initial_wake_lease);
 
     let mut telemetry_fut = pin!(telemetry_fut.map(Ok));
     let main_fut = async {

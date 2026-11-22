@@ -1,4 +1,12 @@
 Name: bazel_tools~remote_coverage_tools_extension~remote_coverage_tools
-License File: ../../../../LICENSE
-Description: Stubbed Bazel coverage tool
+URL: https://github.com/bazelbuild/bazel
+Version: v2.9
+Revision: aab349130118497d86bc79e3f735f026d3c36e7d38529063e91da1c29cc2ea47
+Security Critical: no
+First Party: yes
 
+License: BSD-2-Clause
+License File: ../../../../LICENSE
+
+Description:
+  Stubbed Bazel coverage tool

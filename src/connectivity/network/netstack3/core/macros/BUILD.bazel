@@ -8,6 +8,13 @@ load("//build/bazel/rules/rust:rustc_proc_macro.bzl", "rustc_proc_macro")
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":netstack3-macros-test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
 rustc_proc_macro(
     name = "netstack3-macros",
     srcs = ["src/lib.rs"],

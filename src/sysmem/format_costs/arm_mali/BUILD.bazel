@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# the binary expects a single arg which is the path of the output file
+rustc_binary(
+    name = "generate_format_costs_arm_mali",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    # Restrict to host as this binary is only invoked as a compiled_action tool.
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    # Keep intra-package visibility explicit so bazel2gn emits `visibility = [ ":*" ]`.
+    visibility = [":__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_rust_common",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_rust_common",
+        "//src/lib/fidl/rust/fidl",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+    ],
+)
+
+# these format_costs are not strictly required to be included via assembly tool,
+# but the sysmem tests rely on these or similar format costs for the tests to
+# pass
+compiled_action(
+    name = "arm_mali",
+    outs = [
+        # TODO(https://fxbug.dev/584376026): Remove path_overwrite once GN
+        # consumers (//build/assembly/board_input_bundle.gni and
+        # //src/sysmem/server/BUILD.gn) no longer look up $target_out_dir.
+        "arm_mali.format_costs_persistent_fidl",  # @bazel2gn:path_overwrite:$target_out_dir/arm_mali.format_costs_persistent_fidl
+    ],
+    args = [
+        "--output",
+        "$(location :arm_mali.format_costs_persistent_fidl)",
+    ],
+    tool = ":generate_format_costs_arm_mali",
+    visibility = [
+        "//boards:__subpackages__",
+        "//src/sysmem:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)

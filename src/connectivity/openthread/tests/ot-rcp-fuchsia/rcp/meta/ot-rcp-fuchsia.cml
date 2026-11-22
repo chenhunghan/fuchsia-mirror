@@ -12,6 +12,11 @@
     ],
     use: [
         {
+            // The simulated medium the radio transmits into. Required: the RCP does not serve
+            // fuchsia.lowpan.spinel.Service until it has attached.
+            protocol: "test.lowpan.rfsim.Medium",
+        },
+        {
             // Selects the RCP's EUI-64 and log tag. Required: the parent (e.g. a netemul or
             // RealmBuilder test) picks a distinct value for each RCP it runs.
             config: "fuchsia.openthread.rcp.NodeId",

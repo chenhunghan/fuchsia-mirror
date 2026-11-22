@@ -99,7 +99,6 @@ fuchsia_unittest_package("cqhci-test") {
 fuchsia_driver_component("cqhci") {
   component_name = "cqhci"
   dml_label = ":cqhci-dml"
-  info = "meta/cqhci-info.json"
   deps = [
     ":bind",
     ":driver",

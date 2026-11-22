@@ -138,10 +138,14 @@ void DisplayManager::OnDisplaysChanged(fidl::VectorView<WireDisplayInfo> added,
       const WireDisplayMode& mode = display_info.modes[mode_index];
       std::vector<fuchsia_images2::PixelFormat> pixel_formats(display_info.pixel_format.begin(),
                                                               display_info.pixel_format.end());
+      std::optional<fuchsia_hardware_display_types::VrrConfig> vrr_config;
+      if (mode_index < display_info.mode_vrr_configs.size()) {
+        vrr_config = fidl::ToNatural(display_info.mode_vrr_configs[mode_index]);
+      }
 
       default_display_ = std::make_unique<Display>(
           display_info.id, mode, display_info.horizontal_size_mm, display_info.vertical_size_mm,
-          display_info.max_layer_count, std::move(pixel_formats));
+          display_info.max_layer_count, std::move(pixel_formats), std::move(vrr_config));
       UpdateDisplayOwnershipEvent();
 
       if (display_available_cb_) {

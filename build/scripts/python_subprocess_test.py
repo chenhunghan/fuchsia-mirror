@@ -77,11 +77,27 @@ class PythonSubprocessTest(unittest.TestCase):
         )
         self.assertEqual(env["PYTHONPYCACHEPREFIX"], "/custom/cache")
 
+    def test_cmd_basic(self) -> None:
+        self.assertEqual(
+            python_subprocess.cmd(
+                self.source_dir, pathlib.Path("script.py"), "arg1", "arg2"
+            ),
+            [
+                "env",
+                f"PYTHONPATH={self.source_dir}",
+                str(python_subprocess.PYTHON_BIN),
+                "-S",
+                "script.py",
+                "arg1",
+                "arg2",
+            ],
+        )
+
     def test_prepare_cmd_and_env_prepends_binary_and_flag(self) -> None:
-        cmd, env = python_subprocess._prepare_cmd_and_env(
+        cmd, env = python_subprocess.cmd_and_env(
             cmd=["script.py", "arg1"],
             source_dir=self.source_dir,
-            base_env={},
+            env={},
         )
         self.assertEqual(
             cmd, [str(python_subprocess.PYTHON_BIN), "-S", "script.py", "arg1"]
@@ -90,10 +106,10 @@ class PythonSubprocessTest(unittest.TestCase):
 
     def test_prepare_cmd_and_env_retains_existing_binary(self) -> None:
         input_cmd = [str(python_subprocess.PYTHON_BIN), "-S", "-u", "script.py"]
-        cmd, env = python_subprocess._prepare_cmd_and_env(
+        cmd, env = python_subprocess.cmd_and_env(
             cmd=input_cmd,
             source_dir=self.source_dir,
-            base_env={},
+            env={},
         )
         self.assertEqual(cmd, input_cmd)
 
@@ -101,10 +117,10 @@ class PythonSubprocessTest(unittest.TestCase):
         self,
     ) -> None:
         input_cmd = [str(python_subprocess.PYTHON_BIN), "script.py"]
-        cmd, env = python_subprocess._prepare_cmd_and_env(
+        cmd, env = python_subprocess.cmd_and_env(
             cmd=input_cmd,
             source_dir=self.source_dir,
-            base_env={},
+            env={},
         )
         self.assertEqual(
             cmd, [str(python_subprocess.PYTHON_BIN), "-S", "script.py"]
@@ -116,10 +132,10 @@ class PythonSubprocessTest(unittest.TestCase):
             "universal_newlines": True,
             "timeout": 5.0,
         }
-        cmd, env = python_subprocess._prepare_cmd_and_env(
+        cmd, env = python_subprocess.cmd_and_env(
             cmd=["script.py"],
             source_dir=self.source_dir,
-            base_env={},
+            env={},
             popen_kwargs=popen_kwargs,
         )
         self.assertNotIn("text", popen_kwargs)
@@ -128,10 +144,10 @@ class PythonSubprocessTest(unittest.TestCase):
 
     def test_prepare_cmd_and_env_merges_popen_env(self) -> None:
         popen_kwargs = {"env": {"EXTRA": "VALUE"}}
-        cmd, env = python_subprocess._prepare_cmd_and_env(
+        cmd, env = python_subprocess.cmd_and_env(
             cmd=["script.py"],
             source_dir=self.source_dir,
-            base_env={},
+            env={},
             popen_kwargs=popen_kwargs,
         )
         self.assertEqual(env["EXTRA"], "VALUE")
@@ -139,10 +155,10 @@ class PythonSubprocessTest(unittest.TestCase):
 
     def test_prepare_cmd_and_env_ignores_none_env(self) -> None:
         popen_kwargs = {"env": None}
-        cmd, env = python_subprocess._prepare_cmd_and_env(
+        cmd, env = python_subprocess.cmd_and_env(
             cmd=["script.py"],
             source_dir=self.source_dir,
-            base_env={"USER": "test"},
+            env={"USER": "test"},
             popen_kwargs=popen_kwargs,
         )
         self.assertEqual(env["USER"], "test")
@@ -159,7 +175,9 @@ class PythonSubprocessTest(unittest.TestCase):
         self, mock_run: mock.Mock
     ) -> None:
         output = python_subprocess.check_output(
-            cmd=["helper.py"],
+            cmd=python_subprocess.cmd(
+                self.source_dir, pathlib.Path("helper.py")
+            ),
             source_dir=self.source_dir,
             base_env={"USER": "test"},
             timeout=10.0,
@@ -167,7 +185,13 @@ class PythonSubprocessTest(unittest.TestCase):
         )
         self.assertEqual(output, "result")
         mock_run.assert_called_once_with(
-            [str(python_subprocess.PYTHON_BIN), "-S", "helper.py"],
+            [
+                "env",
+                f"PYTHONPATH={self.source_dir}",
+                str(python_subprocess.PYTHON_BIN),
+                "-S",
+                "helper.py",
+            ],
             text=True,
             timeout=10.0,
             stdout=subprocess.PIPE,
@@ -188,14 +212,23 @@ class PythonSubprocessTest(unittest.TestCase):
     )
     def test_run_invokes_run(self, mock_run: mock.Mock) -> None:
         proc = python_subprocess.run(
-            cmd=["helper.py", "--check"],
+            cmd=python_subprocess.cmd(
+                self.source_dir, pathlib.Path("helper.py"), "--check"
+            ),
             source_dir=self.source_dir,
             base_env={"USER": "test"},
             check=True,
         )
         self.assertEqual(proc.stdout, "out")
         mock_run.assert_called_once_with(
-            [str(python_subprocess.PYTHON_BIN), "-S", "helper.py", "--check"],
+            [
+                "env",
+                f"PYTHONPATH={self.source_dir}",
+                str(python_subprocess.PYTHON_BIN),
+                "-S",
+                "helper.py",
+                "--check",
+            ],
             text=True,
             check=True,
             env={

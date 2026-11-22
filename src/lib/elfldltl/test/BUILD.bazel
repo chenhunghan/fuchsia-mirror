@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "static-pie.headers",
+    hdrs = ["fuchsia-static-pie.h"],
+    include_dir = ".",
+    visibility = ["//visibility:private"],
+)
+
+fx_cc_library(
+    name = "test-data",
+    testonly = True,
+    hdrs = ["test-data.h"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)

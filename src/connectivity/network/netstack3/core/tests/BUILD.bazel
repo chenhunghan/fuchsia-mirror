@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The threading tests take a long time to run, and exceed the capabilities of
+# Fuchsia's coverage builders in CI.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS + select({
+        "//build/bazel/config/select/is_coverage:true": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    tests = [":netstack3_core_threading_test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/540947935): Investigate and resolve root cause for the
+# need to suppress LSan.
+# TODO(https://fxbug.dev/565437401): Replace with
+# `link_deps = ["//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS"]` once
+# sanitizer_default_options works with enabled sanitizer features in Bazel.
+# @bazel2gn:raw_attribute:deps += [ "//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS" ]
+host_rustc_test(
+    name = "netstack3_core_threading_test",
+    srcs = [
+        "threading/device_socket.rs",
+        "threading/lib.rs",
+        "threading/sndbuf.rs",
+        "threading/tcp.rs",
+    ],
+    build_flags = [
+        "//build/config/rust/lints:deny_unused_results",
+        # The loom crate documentation recommends compiling with optimizations since
+        # the number of iterations can be large enough to make tests unreasonably
+        # slow otherwise.
+        "//build/config:optimize_moderate",
+    ],
+    crate_root = "threading/lib.rs",
+    edition = "2024",
+    # TODO(https://fxbug.dev/565437401): Remove once
+    # `//build/config/sanitizers:suppress-lsan.DO-NOT-USE-THIS` works in Bazel.
+    # @bazel2gn:skip
+    features = [
+        "-asan",
+        "-hwasan",
+        "-lsan",
+    ],
+    proc_macro_deps = [
+        "//src/connectivity/lib/ip-test-macro",
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/netstack3/core:netstack3-core-loom",
+        "//src/connectivity/network/netstack3/core/base:netstack3-base-loom",
+        "//src/connectivity/network/netstack3/core/ip:netstack3-ip-loom",
+        "//src/connectivity/network/netstack3/core/tcp:netstack3-tcp-loom",
+        "//src/lib/network/packet",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:loom",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

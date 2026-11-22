@@ -29,7 +29,6 @@ if (is_host) {
   group("tests") {
     testonly = true
     public_deps = [
-      "fuchsia_async_extension/tests",
       "fuchsia_base_test/tests",
       "mobly_logger_extension:tests",
     ]

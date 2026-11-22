@@ -13,8 +13,10 @@ use crate::arch_rs::arm64::{
     cpu_num_to_mpidr, device_memory_barrier, isb, thread_memory_barrier, wfi,
 };
 use crate::arch_rs::cache::arch_clean_cache_range;
-use crate::arch_rs::{Iframe, curr_cpu_num, disable_ints, ints_disabled, max_num_cpus};
-use crate::dev_interrupt::{MAX_INTERRUPTS, MAX_MSI_IRQS};
+use crate::arch_rs::{
+    Iframe, InterruptDisableGuard, curr_cpu_num, disable_ints, ints_disabled, max_num_cpus,
+};
+use crate::dev_interrupt::{INTERRUPT_VALID_KERNEL, MAX_INTERRUPTS, MAX_MSI_IRQS};
 use crate::gic_common::{ARM_GIC_SGI_FLAG_NS, GICV3, GICV4, register_sgi_handler};
 use crate::kernel::mp::{
     MpIpi, SMP_MAX_CPUS, mbx_generic_irq, mbx_interrupt_irq, mbx_reschedule_irq,
@@ -143,6 +145,122 @@ static LPI_HANDLERS: KCell<[InterruptHandler; MAX_LPIS as usize], GicLpiHandlerL
 /// with `init`.
 static LPI_ALLOC: LazyInit<Pow2RangeAllocator<TrackedMutex>> = LazyInit::uninit();
 
+/// Explicit vector reservation bitmask for non-kernel SGIs (INTIDs 8-15).
+///
+/// Userspace interrupt allocation via `zx_interrupt_create` is strictly restricted to vectors set
+/// in this bitmask. Currently, only SGI 13 (allocated for hardware doorbells) is permitted.
+const GIC_RESERVED_SGIS: u32 = 1 << 13;
+
+/// Returns the bitmask of SGIs (within bits 0..16) reserved for kernel IPIs for a given
+/// `ipi_base` (`MpIpi::Generic..=MpIpi::Halt` at `ipi_base`), plus the architectural lower half
+/// `0..8`.
+const fn kernel_ipi_sgi_mask_for(ipi_base: u32) -> u32 {
+    let dynamic_ipis = match 0xfu32.checked_shl(ipi_base) {
+        Some(v) => v & 0xffff,
+        None => 0,
+    };
+    0xff | dynamic_ipis
+}
+
+/// Returns the bitmask of non-kernel SGIs eligible for userspace reservation for a given
+/// `ipi_base`, excluding any kernel IPI vectors.
+const fn reserved_user_sgis_for(ipi_base: u32) -> u32 {
+    GIC_RESERVED_SGIS & !kernel_ipi_sgi_mask_for(ipi_base)
+}
+
+fn kernel_ipi_sgi_mask() -> u32 {
+    kernel_ipi_sgi_mask_for(IPI_BASE.load(Ordering::Relaxed))
+}
+
+fn reserved_user_sgis() -> u32 {
+    reserved_user_sgis_for(IPI_BASE.load(Ordering::Relaxed))
+}
+
+// ============================================================================
+// Non-Kernel SGI (Software Generated Interrupt) & Doorbell Mechanics
+// ============================================================================
+//
+// In ARM GICv3 architecture, INTIDs 0-15 are banked per-CPU Software Generated
+// Interrupts (SGIs). Zircon partitions these vectors into two domains:
+//
+// 1. Kernel IPIs (INTIDs 0-7):
+//    Reserved exclusively for kernel inter-processor interrupts (Generic,
+//    Reschedule, Interrupt, Halt). These vectors can only be registered during
+//    early kernel initialization (via `rust_arm_gicv3_init_post_vm` with
+//    `INTERRUPT_VALID_KERNEL`) and are strictly prohibited from userspace
+//    allocation.
+//
+// 2. Platform / Hardware Reserved SGIs (INTIDs 8-15):
+//    Available for secure-world / platform hardware doorbells. To prevent
+//    unauthorized drivers from allocating arbitrary SGIs, Zircon requires
+//    explicit vector reservation via `GIC_RESERVED_SGIS`. Only vectors
+//    explicitly present in `GIC_RESERVED_SGIS` (specifically SGI 13 for
+//    hardware doorbells) are permitted for userspace interrupt creation via
+//    `zx_interrupt_create`. All other SGIs (8-12, 14-15) are strictly rejected
+//    with `Status::INVALID_ARGS`.
+//
+// ----------------------------------------------------------------------------
+// CPU Delivery & Multi-Core Redistribution Mechanics
+// ----------------------------------------------------------------------------
+//
+// Secure EL1 payloads use non-secure SGIs to signal hardware doorbells to the
+// non-secure operating system (Zircon). The hardware delivery path operates
+// as follows:
+//
+// a) Synchronous SMC Execution Context:
+//    Secure payloads execute when invoked via a Secure Monitor Call (SMC)
+//    instruction or secure interrupt. SMCs issued by non-secure driver threads
+//    execute synchronously on the physical core running the calling thread. The
+//    CPU takes an exception into EL3 (Secure Monitor), which context-switches
+//    directly to Secure EL1 on that identical core.
+//
+// b) Local Core Targeting via ICC_ASGI1R_EL1:
+//    When the secure world completes an operation and needs to notify the host,
+//    it formats an SGI descriptor targeting the calling core and writes to
+//    `ICC_ASGI1R_EL1` (Alias Software Generated Interrupt Group 1 Register).
+//    In ARM GICv3, `ICC_ASGI1R_EL1` allows Secure EL1 to generate a Non-Secure
+//    Group 1 interrupt targeted to a specific PE interface.
+//
+// c) Multi-Core Redistributor Enablement (GICR_ISENABLER0):
+//    Because non-secure driver threads in Zircon may be scheduled across any
+//    online CPU core, the SMC may originate from any core. In GICv3, SGIs are
+//    banked per-core in each CPU's Redistributor (GICR). Therefore, when a
+//    driver unmasks an SGI via `zx_interrupt_create()`, `gic_set_enable()`
+//    unmasks the SGI in `GICR_ISENABLER0(cpu)` across ALL currently active,
+//    awake cores (`SgiState::active_cpus`) under `GicSgiLock` and synchronizes
+//    via `GICR_CTLR_RWP`.
+//
+// d) Secondary Core Boot & Resume Synchronization:
+//    `SgiState::enabled_sgis` records all enabled non-kernel SGIs. When CPUs
+//    boot, come online via PSCI, or resume from idle suspend, `init_percpu()`
+//    reads `enabled_sgis` under `GicSgiLock`, unmasks those SGIs in its local
+//    `GICR_ISENABLER0(cpu)` waiting for RWP, and marks the CPU active in
+//    `active_cpus`.
+//
+// e) Core Offlining & Suspend Safety:
+//    Before a CPU's redistributor is put to sleep in `shutdown_cpu()` or
+//    `suspend_cpu()`, the CPU removes itself from `SgiState::active_cpus` under
+//    `GicSgiLock` so concurrent `gic_set_enable()` or `configure()` calls on
+//    other CPUs never touch a sleeping redistributor.
+// ============================================================================
+
+crate::ksync_kernel::declare_singleton_spinlock!(
+    /// Serializes cross-CPU non-kernel SGI enable/configuration updates against per-CPU
+    /// redistributor online, offline, and suspend/resume transitions.
+    GicSgiLock
+);
+
+/// Cross-CPU state for reserved non-kernel SGIs (INTIDs 8-15), guarded by `GicSgiLock`.
+struct SgiState {
+    /// Bitmask of non-kernel SGIs (bits 8..15) currently enabled by platform/userspace drivers.
+    enabled_sgis: u32,
+    /// Bitmask of CPUs whose redistributors are currently awake and initialized.
+    active_cpus: cpu_mask_t,
+}
+
+static SGI_STATE: KCell<SgiState, GicSgiLock> =
+    KCell::new(SgiState { enabled_sgis: 0, active_cpus: 0 });
+
 /// Returns a bank covering the distributor registers, accessed 32 bits at a time.
 fn gicd_bank() -> MmioBank<u32, RwSafe> {
     let base = GICD_BASE.load(Ordering::Relaxed);
@@ -170,7 +288,7 @@ fn gicr_bank(cpu: cpu_num_t) -> MmioBank<u32, RwSafe> {
     debug_assert!(cpu < max_num_cpus());
     let stride = GICR_STRIDE.load(Ordering::Relaxed) as usize;
     // SAFETY: `GICR_BASE` is mapped in `gic_init` with room for `max_num_cpus()` strides, and
-    // every caller passes either the current CPU or CPU 0, both below `max_num_cpus()`. The
+    // every caller passes a CPU index below `max_num_cpus()` (verified by `debug_assert!`). The
     // mapping remains valid for the lifetime of the kernel.
     let ptr = unsafe { MmioPtr::<u32, RwSafe>::new(base.byte_add(stride * cpu as usize)) };
     MmioBank::new(ptr, stride)
@@ -373,12 +491,43 @@ fn gicr_wait_for_rwp(cpu: cpu_num_t) {
 fn gic_set_enable(vector: u32, enable: bool) {
     let reg = vector / 32;
     let mask = 1u32 << (vector % 32);
-    if vector < 32 {
+    if vector < 16 {
+        if (reserved_user_sgis() & mask) != 0 {
+            // Reserved non-kernel SGIs (8-15): Cross-CPU doorbell vectors.
+            ksync::lock!(let mut guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let state = unsafe { SGI_STATE.get_mut(guard.as_mut().token_mut()) };
+            if enable {
+                state.enabled_sgis |= mask;
+            } else {
+                state.enabled_sgis &= !mask;
+            }
+
+            // Unmask/mask across active, awake CPUs only. Offline or suspended CPUs will
+            // configure their redistributor upon boot/resume in `init_percpu()`.
+            let offset = if enable { regs::gicr_isenabler0() } else { regs::gicr_icenabler0() };
+            let active_cpus = state.active_cpus;
+            for cpu in 0..max_num_cpus() {
+                if (active_cpus & cpu_num_to_mask(cpu)) != 0 {
+                    gicr_write32(cpu, offset, mask);
+                    gicr_wait_for_rwp(cpu);
+                }
+            }
+        } else {
+            // Kernel IPIs: Per-CPU local interrupts affecting caller CPU only.
+            let cpu_id = curr_cpu_num();
+            let offset = if enable { regs::gicr_isenabler0() } else { regs::gicr_icenabler0() };
+            gicr_write32(cpu_id, offset, mask);
+            gicr_wait_for_rwp(cpu_id);
+        }
+    } else if vector < 32 {
+        // PPIs (16-31): Per-CPU local interrupts affecting caller CPU only.
         let cpu_id = curr_cpu_num();
         let offset = if enable { regs::gicr_isenabler0() } else { regs::gicr_icenabler0() };
         gicr_write32(cpu_id, offset, mask);
         gicr_wait_for_rwp(cpu_id);
     } else {
+        // SPIs (32+): Global shared peripheral interrupts via Distributor.
         let offset = if enable { regs::gicd_isenabler(reg) } else { regs::gicd_icenabler(reg) };
         gicd_write32(offset, mask);
         gicd_wait_for_rwp();
@@ -517,23 +666,28 @@ fn gic_init_percpu_lpi(cpu: cpu_num_t, init: PercpuInit) {
 }
 
 /// Maps a physical region into the kernel address space, returning its virtual address.
-fn map_region(phys_base: u64, size: usize, name: &[u8]) -> Result<*mut c_void, Status> {
-    let mut ptr: *mut c_void = core::ptr::null_mut();
+///
+/// # Safety
+///
+/// `[phys_base, phys_base + size)` rounded up to page boundaries is a physical range for which
+/// `ARCH_MMU_FLAG_UNCACHED_DEVICE` is appropriate for all mappings, and creating a read-write
+/// kernel mapping of it is sound.
+unsafe fn map_region(phys_base: u64, size: usize, name: &[u8]) -> Result<*mut c_void, Status> {
     let aspace = VmAspace::kernel_aspace();
-    // SAFETY: `ptr` is a valid out parameter and the requested region is a device aperture
-    // handed to us by the boot loader.
-    unsafe {
+    // SAFETY: The caller guarantees that uncached-device is appropriate for all mappings of the
+    // physical range, and that creating this mapping is sound.
+    let base = unsafe {
         aspace.alloc_physical(
             name,
             size,
-            &mut ptr,
+            None,
             page::SHIFT as u8,
             PAddr(phys_base as usize),
             0,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE | ARCH_MMU_FLAG_UNCACHED_DEVICE,
-        )?;
-    }
-    Ok(ptr)
+        )?
+    };
+    Ok(core::ptr::with_exposed_provenance_mut(base))
 }
 
 /// Allocates a size-aligned `ITS_TABLE_SIZE` table, fills it with `fill` and cleans it to memory,
@@ -658,7 +812,9 @@ fn gic_init_its(gicd_typer: u32) {
         return;
     }
 
-    let gits_base = match map_region(gits_phys, regs::GITS_REG_SIZE, b"gits") {
+    // SAFETY: Uncached-device is appropriate for all mappings of the ITS registers, and creating
+    // a read-write kernel mapping of them is sound.
+    let gits_base = match unsafe { map_region(gits_phys, regs::GITS_REG_SIZE, b"gits") } {
         Ok(ptr) => ptr,
         Err(status) => {
             dprintf!(
@@ -875,7 +1031,10 @@ fn gic_init() -> Result<(), Status> {
     let gicr_offset = GICR_OFFSET.load(Ordering::Relaxed);
 
     // map in the distributor registers
-    let gicd_base = match map_region(gic_mmio_phys + gicd_offset, regs::GICD_REG_SIZE, b"gicd") {
+    // SAFETY: Uncached-device is appropriate for all mappings of the distributor registers, and
+    // creating a read-write kernel mapping of them is sound.
+    let gicd = unsafe { map_region(gic_mmio_phys + gicd_offset, regs::GICD_REG_SIZE, b"gicd") };
+    let gicd_base = match gicd {
         Ok(ptr) => ptr,
         Err(status) => {
             kprint!("GICv3: failed to map distributor registers");
@@ -909,7 +1068,10 @@ fn gic_init() -> Result<(), Status> {
 
     // map in the redistributor registers
     let redistributer_size = max_num_cpus() as usize * gicr_stride as usize;
-    let gicr_base = match map_region(gic_mmio_phys + gicr_offset, redistributer_size, b"gicr") {
+    // SAFETY: Uncached-device is appropriate for all mappings of the redistributor registers, and
+    // creating a read-write kernel mapping of them is sound.
+    let gicr = unsafe { map_region(gic_mmio_phys + gicr_offset, redistributer_size, b"gicr") };
+    let gicr_base = match gicr {
         Ok(ptr) => ptr,
         Err(status) => {
             kprint!("GICv3: failed to map redistributor registers");
@@ -1088,6 +1250,11 @@ fn gic_init_percpu_early(init: PercpuInit) {
     }
     gicr_wait_for_rwp(cpu);
 
+    // redistributor config: configure default unmasked priority (0xa0) for SGIs and PPIs.
+    for n in 0..8 {
+        gicr_write32(cpu, regs::gicr_ipriorityr(n), 0xa0a0a0a0);
+    }
+
     gic_init_percpu_lpi(cpu, init);
 
     // enable system register interface
@@ -1181,7 +1348,12 @@ impl InterruptControllerOps for Gicv3 {
         }
 
         let reg = 1u32 << (vector.0 % 32);
-        gicd_write32(regs::gicd_icactiver(vector.0 / 32), reg);
+        if vector.0 < 32 {
+            let _irqd = InterruptDisableGuard::new();
+            gicr_write32(curr_cpu_num(), regs::gicr_icactiver0(), reg);
+        } else {
+            gicd_write32(regs::gicd_icactiver(vector.0 / 32), reg);
+        }
 
         Ok(())
     }
@@ -1194,13 +1366,37 @@ impl InterruptControllerOps for Gicv3 {
     ) -> Result<(), Status> {
         ltracef!("vector {}, trigger mode {}, polarity {}\n", vector.0, tm.string(), pol.string());
 
-        if vector.0 <= 15 || vector.0 >= GIC_MAX_INT.load(Ordering::Relaxed) {
+        if vector.0 >= GIC_MAX_INT.load(Ordering::Relaxed) {
+            return Err(Status::INVALID_ARGS);
+        }
+
+        if vector.0 < 16 && (reserved_user_sgis() & (1u32 << vector.0)) == 0 {
             return Err(Status::INVALID_ARGS);
         }
 
         if pol != InterruptPolarity::High {
             // TODO: polarity should actually be configure through a GPIO controller
             return Err(Status::NOT_SUPPORTED);
+        }
+
+        if vector.0 < 16 {
+            // SGIs are fixed edge-triggered in GICv3 hardware.
+            if tm != InterruptTriggerMode::Edge {
+                return Err(Status::NOT_SUPPORTED);
+            }
+            let clear_mask = 1u32 << vector.0;
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let state = unsafe { SGI_STATE.get(guard.token()) };
+            if (state.enabled_sgis & clear_mask) == 0 {
+                let active_cpus = state.active_cpus;
+                for cpu in 0..max_num_cpus() {
+                    if (active_cpus & cpu_num_to_mask(cpu)) != 0 {
+                        gicr_write32(cpu, regs::gicr_icpendr0(), clear_mask);
+                    }
+                }
+            }
+            return Ok(());
         }
 
         // TODO(https://fxbug.dev/537888583): Unlike the GICv2 driver, this read-modify-write of
@@ -1247,14 +1443,28 @@ impl InterruptControllerOps for Gicv3 {
         Err(Status::NOT_SUPPORTED)
     }
 
-    fn is_valid(&self, vector: InterruptVector, _flags: u32) -> bool {
-        vector.0 < GIC_MAX_INT.load(Ordering::Relaxed)
+    fn is_valid(&self, vector: InterruptVector, flags: u32) -> bool {
+        if vector.0 >= GIC_MAX_INT.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        if vector.0 < 16 {
+            // INTIDs 0-7 (plus `MpIpi::Generic..=MpIpi::Halt` at `IPI_BASE`) are reserved for
+            // kernel IPIs. Non-kernel SGIs (8-15) are allowed for userspace only if explicitly
+            // reserved in `GIC_RESERVED_SGIS` and not colliding with `IPI_BASE`.
+            if (flags & INTERRUPT_VALID_KERNEL) != 0 {
+                return (kernel_ipi_sgi_mask() & (1u32 << vector.0)) != 0;
+            }
+            return (reserved_user_sgis() & (1u32 << vector.0)) != 0;
+        }
+
+        true
     }
 
     fn base_vector(&self) -> InterruptVector {
-        // ARM Generic Interrupt Controller v3&4 chapter 2.2
-        // INTIDs 0-15 are local CPU interrupts
-        InterruptVector(16)
+        // INTIDs 0-7 are reserved for kernel IPIs.
+        // INTIDs 8-15 are non-kernel SGIs available for platform and driver doorbells.
+        InterruptVector(8)
     }
 
     fn max_vector(&self) -> InterruptVector {
@@ -1290,6 +1500,19 @@ impl InterruptControllerOps for Gicv3 {
         let _ = self.unmask(InterruptVector(MpIpi::Reschedule as u32 + ipi_base));
         let _ = self.unmask(InterruptVector(MpIpi::Interrupt as u32 + ipi_base));
         let _ = self.unmask(InterruptVector(MpIpi::Halt as u32 + ipi_base));
+
+        // Unmask any non-kernel SGIs (8-15) that have been enabled by userspace/platform drivers.
+        // Local redistributor priority (GICR_IPRIORITYR) was already blanketed with 0xa0a0a0a0
+        // in `gic_init_percpu_early`.
+        let cpu = curr_cpu_num();
+        ksync::lock!(let mut guard = GicSgiLock::lock());
+        // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+        let state = unsafe { SGI_STATE.get_mut(guard.as_mut().token_mut()) };
+        if state.enabled_sgis != 0 {
+            gicr_write32(cpu, regs::gicr_isenabler0(), state.enabled_sgis);
+            gicr_wait_for_rwp(cpu);
+        }
+        state.active_cpus |= cpu_num_to_mask(cpu);
     }
 
     fn handle_irq(&self, frame: &mut Iframe) {
@@ -1375,6 +1598,16 @@ impl InterruptControllerOps for Gicv3 {
         debug_assert!(curr_cpu_num() == BOOT_CPU_ID || !is_spi_enabled());
         // TODO(maniscalco): If/when we start using LPIs, make sure none are targeted at this CPU.
 
+        // Remove from active SGI redistributor mask before disabling/putting redistributor to
+        // sleep so concurrent `gic_set_enable` calls do not access a sleeping redistributor.
+        {
+            let cpu = curr_cpu_num();
+            ksync::lock!(let mut guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            unsafe { SGI_STATE.get_mut(guard.as_mut().token_mut()) }.active_cpus &=
+                !cpu_num_to_mask(cpu);
+        }
+
         // Disable group 1 interrupts at the CPU interface.
         regs::write_igrpen(0);
 
@@ -1440,12 +1673,21 @@ impl InterruptControllerOps for Gicv3 {
     fn suspend_cpu(&self) -> Result<(), Status> {
         debug_assert!(ints_disabled());
 
+        let cpu = curr_cpu_num();
+        {
+            ksync::lock!(let mut guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            unsafe { SGI_STATE.get_mut(guard.as_mut().token_mut()) }.active_cpus &=
+                !cpu_num_to_mask(cpu);
+        }
+
         // |resume_cpu| reinitializes this CPU's redistributor, which masks all SGIs and PPIs (see
         // |gic_init_percpu_early|).  Save which ones are enabled so that |resume_cpu| can restore
         // them.  Otherwise, per-CPU interrupts enabled outside of this driver (e.g. the
         // hypervisor's maintenance interrupt) would be left masked after resuming.
-        let cpu = curr_cpu_num();
-        let enables = gicr_read32(cpu, regs::gicr_isenabler0());
+        // Reserved non-kernel SGIs are excluded because their authoritative enable state is
+        // tracked globally in `SGI_STATE` and restored by `init_percpu`.
+        let enables = gicr_read32(cpu, regs::gicr_isenabler0()) & !reserved_user_sgis();
         SAVED_SGI_PPI_ENABLES[cpu as usize].store(enables, Ordering::Relaxed);
 
         gic_redistributor_sleep(true);
@@ -1793,13 +2035,229 @@ pub unsafe extern "C" fn rust_arm_gicv3_init_late(_config: &DcfgArmGicV3Driver) 
 #[cfg(ktest)]
 #[unittest::suite(name = "gicv3")]
 mod tests {
-    use crate::arch_rs::InterruptDisableGuard;
     use crate::pdev_interrupt::is_interrupt_registered;
-    use unittest::{assert_true, expect_eq, expect_ok, expect_true};
+    use unittest::{assert_true, expect_eq, expect_err, expect_false, expect_ok, expect_true};
 
     /// Returns true if `vector` (an SGI or PPI) is pending on `cpu`.
     fn is_sgi_ppi_pending(cpu: cpu_num_t, vector: u32) -> bool {
         (gicr_read32(cpu, regs::gicr_ispendr0()) & (1u32 << vector)) != 0
+    }
+
+    /// Verifies SGI vector reservation and `configure` constraints on GICv3.
+    #[test]
+    fn test_reserved_sgi_validation_and_configure() {
+        // Pure mask helper assertions for both standard IPI_BASE (0) and virtualized IPI_BASE (12).
+        expect_eq!(kernel_ipi_sgi_mask_for(0), 0x00ff);
+        expect_eq!(reserved_user_sgis_for(0), 1 << 13);
+        expect_eq!(kernel_ipi_sgi_mask_for(12), 0xf0ff);
+        expect_eq!(reserved_user_sgis_for(12), 0);
+        expect_eq!(kernel_ipi_sgi_mask_for(32), 0x00ff);
+
+        if GICR_BASE.load(Ordering::Relaxed).is_null() {
+            kprintln!("GICv3 is not in use, skipping test");
+            return true;
+        }
+
+        expect_eq!(GICV3_DRIVER.base_vector().0, 8);
+
+        // Kernel IPIs (0..8): rejected for userspace, accepted with INTERRUPT_VALID_KERNEL.
+        for vec in 0..8 {
+            expect_false!(GICV3_DRIVER.is_valid(InterruptVector(vec), 0));
+            expect_true!(GICV3_DRIVER.is_valid(InterruptVector(vec), INTERRUPT_VALID_KERNEL));
+            expect_err!(
+                GICV3_DRIVER.configure(
+                    InterruptVector(vec),
+                    InterruptTriggerMode::Edge,
+                    InterruptPolarity::High
+                ),
+                Status::INVALID_ARGS
+            );
+        }
+
+        // Unreserved SGIs (8..12): rejected for both userspace and kernel IPI registration.
+        for vec in [8, 9, 10, 11] {
+            expect_false!(GICV3_DRIVER.is_valid(InterruptVector(vec), 0));
+            expect_false!(GICV3_DRIVER.is_valid(InterruptVector(vec), INTERRUPT_VALID_KERNEL));
+            expect_err!(
+                GICV3_DRIVER.configure(
+                    InterruptVector(vec),
+                    InterruptTriggerMode::Edge,
+                    InterruptPolarity::High
+                ),
+                Status::INVALID_ARGS
+            );
+        }
+
+        if (reserved_user_sgis() & (1 << 13)) != 0 {
+            for vec in [12, 14, 15] {
+                expect_false!(GICV3_DRIVER.is_valid(InterruptVector(vec), 0));
+                expect_false!(GICV3_DRIVER.is_valid(InterruptVector(vec), INTERRUPT_VALID_KERNEL));
+                expect_err!(
+                    GICV3_DRIVER.configure(
+                        InterruptVector(vec),
+                        InterruptTriggerMode::Edge,
+                        InterruptPolarity::High
+                    ),
+                    Status::INVALID_ARGS
+                );
+            }
+
+            // Reserved SGI 13: accepted for userspace, rejected for kernel IPI registration.
+            expect_true!(GICV3_DRIVER.is_valid(InterruptVector(13), 0));
+            expect_false!(GICV3_DRIVER.is_valid(InterruptVector(13), INTERRUPT_VALID_KERNEL));
+            expect_err!(
+                GICV3_DRIVER.configure(
+                    InterruptVector(13),
+                    InterruptTriggerMode::Level,
+                    InterruptPolarity::High
+                ),
+                Status::NOT_SUPPORTED
+            );
+            expect_err!(
+                GICV3_DRIVER.configure(
+                    InterruptVector(13),
+                    InterruptTriggerMode::Edge,
+                    InterruptPolarity::Low
+                ),
+                Status::NOT_SUPPORTED
+            );
+            if !is_interrupt_registered(13) {
+                expect_ok!(GICV3_DRIVER.configure(
+                    InterruptVector(13),
+                    InterruptTriggerMode::Edge,
+                    InterruptPolarity::High
+                ));
+            }
+        }
+    }
+
+    /// Verifies that suspend_cpu/resume_cpu synchronize reserved SGI enable state from `SGI_STATE`.
+    #[test]
+    fn test_suspend_resume_syncs_reserved_sgi_enables() {
+        if GICR_BASE.load(Ordering::Relaxed).is_null() {
+            kprintln!("GICv3 is not in use, skipping test");
+            return true;
+        }
+        if (reserved_user_sgis() & (1 << 13)) == 0 {
+            kprintln!("SGI 13 is reserved for kernel IPIs on this platform, skipping test");
+            return true;
+        }
+        if is_interrupt_registered(13) {
+            kprintln!("SGI 13 is already registered by a driver, skipping test");
+            return true;
+        }
+
+        let mask = 1u32 << 13;
+        let _irqd = InterruptDisableGuard::new();
+        let cpu = curr_cpu_num();
+        let cpu_bit = cpu_num_to_mask(cpu);
+
+        // Enable SGI 13 across active CPUs, then suspend and resume: bit 13 must stay enabled.
+        expect_ok!(GICV3_DRIVER.unmask(InterruptVector(13)));
+        // When running under EL3 firmware that leaves SGIs 8-15 in Secure Group 0/1S (such as
+        // generic QEMU TF-A with `-machine secure=true`), Non-secure accesses to bit 13 of
+        // GICR_ISENABLER0 are RAZ/WI. Verify GICR_ISENABLER0 hardware state whenever firmware
+        // delegates SGI 13 to Non-secure Group 1, and always verify SGI_STATE transitions.
+        let hw_ns_accessible = (gicr_read32(cpu, regs::gicr_isenabler0()) & mask) != 0;
+        let state_after_unmask = {
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let s = unsafe { SGI_STATE.get(guard.token()) };
+            (s.enabled_sgis, s.active_cpus)
+        };
+        if hw_ns_accessible {
+            for c in 0..max_num_cpus() {
+                if (state_after_unmask.1 & cpu_num_to_mask(c)) != 0 {
+                    expect_true!((gicr_read32(c, regs::gicr_isenabler0()) & mask) != 0);
+                }
+            }
+        }
+        // Configuring an already-enabled SGI must succeed without disturbing its enable state.
+        expect_ok!(GICV3_DRIVER.configure(
+            InterruptVector(13),
+            InterruptTriggerMode::Edge,
+            InterruptPolarity::High
+        ));
+
+        let suspend1 = GICV3_DRIVER.suspend_cpu();
+        let active_while_suspended = {
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            unsafe { SGI_STATE.get(guard.token()) }.active_cpus
+        };
+        let saved_while_suspended = SAVED_SGI_PPI_ENABLES[cpu as usize].load(Ordering::Relaxed);
+        let resume1 = GICV3_DRIVER.resume_cpu();
+        let hw_enabled_after_resume1 = (gicr_read32(cpu, regs::gicr_isenabler0()) & mask) != 0;
+        let state_after_resume1 = {
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let s = unsafe { SGI_STATE.get(guard.token()) };
+            (s.enabled_sgis, s.active_cpus)
+        };
+
+        // Suspend again, disable SGI 13 while this CPU is suspended (simulating another CPU
+        // closing the interrupt handle), then resume: bit 13 must remain disabled after resume.
+        let suspend2 = GICV3_DRIVER.suspend_cpu();
+        expect_ok!(GICV3_DRIVER.mask(InterruptVector(13)));
+        let resume2 = GICV3_DRIVER.resume_cpu();
+        let hw_enabled_after_resume2 = (gicr_read32(cpu, regs::gicr_isenabler0()) & mask) != 0;
+        let state_after_resume2 = {
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let s = unsafe { SGI_STATE.get(guard.token()) };
+            (s.enabled_sgis, s.active_cpus)
+        };
+
+        // Symmetric transition: suspend while SGI 13 is disabled, enable SGI 13 while this CPU
+        // is suspended (simulating another CPU opening the interrupt handle), then resume: bit 13
+        // must become enabled on this CPU upon resume, and then clean up with mask(13).
+        let suspend3 = GICV3_DRIVER.suspend_cpu();
+        expect_ok!(GICV3_DRIVER.unmask(InterruptVector(13)));
+        let resume3 = GICV3_DRIVER.resume_cpu();
+        let hw_enabled_after_resume3 = (gicr_read32(cpu, regs::gicr_isenabler0()) & mask) != 0;
+        let state_after_resume3 = {
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let s = unsafe { SGI_STATE.get(guard.token()) };
+            (s.enabled_sgis, s.active_cpus)
+        };
+        expect_ok!(GICV3_DRIVER.mask(InterruptVector(13)));
+        let state_after_cleanup = {
+            ksync::lock!(let guard = GicSgiLock::lock());
+            // SAFETY: `guard` holds `GicSgiLock`, which guards `SGI_STATE`.
+            let s = unsafe { SGI_STATE.get(guard.token()) };
+            (s.enabled_sgis, s.active_cpus)
+        };
+        for c in 0..max_num_cpus() {
+            if (state_after_cleanup.1 & cpu_num_to_mask(c)) != 0 {
+                expect_false!((gicr_read32(c, regs::gicr_isenabler0()) & mask) != 0);
+            }
+        }
+
+        expect_eq!(state_after_unmask.0 & mask, mask);
+        expect_eq!(state_after_unmask.1 & cpu_bit, cpu_bit);
+        expect_ok!(suspend1);
+        expect_eq!(active_while_suspended & cpu_bit, 0);
+        expect_eq!(saved_while_suspended & mask, 0);
+        expect_ok!(resume1);
+        expect_eq!(state_after_resume1.0 & mask, mask);
+        expect_eq!(state_after_resume1.1 & cpu_bit, cpu_bit);
+        if hw_ns_accessible {
+            expect_true!(hw_enabled_after_resume1);
+        }
+        expect_ok!(suspend2);
+        expect_ok!(resume2);
+        expect_eq!(state_after_resume2.0 & mask, 0);
+        expect_eq!(state_after_resume2.1 & cpu_bit, cpu_bit);
+        expect_false!(hw_enabled_after_resume2);
+        expect_ok!(suspend3);
+        expect_ok!(resume3);
+        expect_eq!(state_after_resume3.0 & mask, mask);
+        expect_eq!(state_after_resume3.1 & cpu_bit, cpu_bit);
+        if hw_ns_accessible {
+            expect_true!(hw_enabled_after_resume3);
+        }
+        expect_eq!(state_after_cleanup.0 & mask, 0);
     }
 
     /// Verifies that suspend_cpu/resume_cpu do not discard a pending IPI.

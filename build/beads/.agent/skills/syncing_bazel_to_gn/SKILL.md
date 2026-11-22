@@ -17,8 +17,8 @@ rare that you need to automatically sync host tool targets to GN with
 
 ## Steps
 
-Use [`bazel2gn`](../../../../../tools/bazel2gn/README.md) to automatically sync
-the Bazel targets to GN:
+Use [`bazel2gn`](../../../../tools/bazel2gn/README.md) to automatically sync the
+Bazel targets to GN:
 
 1.  **Sync targets:**
 
@@ -68,16 +68,31 @@ annotate the variable with `# @bazel2gn:transformer=deps` or `#
 verbatim and skips the label and path rewrites it applies to target attributes.
 Add the annotation even if the list doesn't need rewriting today, so a later dep
 that does need it is still translated. See `@bazel2gn:transformer` in the
-[`bazel2gn` README](../../../../../tools/bazel2gn/README.md).
+[`bazel2gn` README](../../../../tools/bazel2gn/README.md).
 
 ## Third-Party Dependency Translation
 
 `bazel2gn` automatically translates Bazel external repository targets (such as
 `@com_google_googletest//:gtest`, `@re2//:re2`, `@boringssl//:crypto`) to their
 equivalent GN labels according to
-[`//build/tools/bazel2gn/third_party_target_map.json`](../../../../../tools/bazel2gn/third_party_target_map.json).
+[`//build/tools/bazel2gn/third_party_target_map.json`](../../../../tools/bazel2gn/third_party_target_map.json).
 
 If an external repository dependency (starting with `@`) is not in this mapping,
 `bazel2gn` will print a warning to `stderr` and append an inline `#
 BAZEL2GN_WARNING: Unknown Bazel repository name` comment to the generated GN
 line.
+
+## C++ Header Dependencies (`deps`, `implementation_deps`) and `check_includes_strict`
+
+- `deps` in Bazel C++ library rules maps to `public_deps` in GN, and
+  `implementation_deps` maps to `deps`.
+- Under GN's `check_includes_strict = true`, `public_deps` does not allow
+  downstream GN consumers to `#include` transitive headers without declaring a
+  direct dependency on the target providing the header.
+- If unmigrated GN consumers fail `check_includes_strict` because they rely on
+  headers re-exported through a library's `public_deps`, add (with a `TODO`)
+  until those GN consumers are fixed or migrated:
+
+  ```python
+  # @bazel2gn:raw_attribute:check_includes_strict = false
+  ```

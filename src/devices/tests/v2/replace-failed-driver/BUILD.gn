@@ -46,7 +46,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/info.json"
 }
 
 fuchsia_driver_component("replacement-component") {
@@ -57,7 +56,6 @@ fuchsia_driver_component("replacement-component") {
     ":replacement-bind",
     ":replacement-driver",
   ]
-  info = "meta/info.json"
 }
 
 group("tests") {

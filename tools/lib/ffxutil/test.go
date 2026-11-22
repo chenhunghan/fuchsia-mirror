@@ -91,6 +91,7 @@ type SuiteResult struct {
 	DurationMilliseconds int64                       `json:"duration_milliseconds"`
 	Artifacts            map[string]ArtifactMetadata `json:"artifacts"`
 	ArtifactDir          string                      `json:"artifact_dir"`
+	Runner               string                      `json:"runner,omitempty"`
 }
 
 // ArtifactMetadata is metadata tied to an artifact.

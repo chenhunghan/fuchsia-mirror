@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from daemon_manager import (
@@ -93,6 +95,31 @@ class TestDaemonManager(unittest.IsolatedAsyncioTestCase):
         self.spawned_processes.append(proc)
         return proc
 
+    def _make_mock_uds_connection(
+        self, response: dict[str, Any] | bytes = b'{"success": true}\n'
+    ) -> tuple[AsyncMock, MagicMock]:
+        """Creates a mock reader and writer pair simulating a UDS response."""
+        mock_reader = AsyncMock()
+        mock_writer = MagicMock()
+        mock_writer.drain = AsyncMock()
+        mock_writer.wait_closed = AsyncMock()
+        if isinstance(response, bytes):
+            mock_reader.readline.return_value = response
+        else:
+            mock_reader.readline.return_value = (
+                json.dumps(response).encode("utf-8") + b"\n"
+            )
+        return mock_reader, mock_writer
+
+    def _make_mock_popen(
+        self, pid: int = 12345, poll_return: int | None = None
+    ) -> MagicMock:
+        """Creates a mock subprocess.Popen instance."""
+        proc = MagicMock(spec=subprocess.Popen)
+        proc.pid = pid
+        proc.poll.return_value = poll_return
+        return proc
+
     @patch("daemon_manager.manager.UDS_PATH")
     @patch("asyncio.open_unix_connection")
     async def test_connect_to_running_daemon_success(
@@ -100,14 +127,10 @@ class TestDaemonManager(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Tests that connect_to_running_daemon succeeds silently when UDS responds success."""
         mock_uds_path.exists.return_value = True
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.drain = AsyncMock()
-        mock_writer.wait_closed = AsyncMock()
+        mock_reader, mock_writer = self._make_mock_uds_connection(
+            {"success": True}
+        )
         mock_connect.return_value = (mock_reader, mock_writer)
-
-        mock_reader.readline.return_value = b'{"success": true}\n'
 
         manager = DaemonManager(socket_path=mock_uds_path, port=1234)
         await manager.connect_to_running_daemon()
@@ -122,16 +145,10 @@ class TestDaemonManager(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Tests that connect_to_running_daemon raises DaemonConnectionError when daemon returns success=False."""
         mock_uds_path.exists.return_value = True
-
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.drain = AsyncMock()
-        mock_writer.wait_closed = AsyncMock()
-        mock_connect.return_value = (mock_reader, mock_writer)
-
-        mock_reader.readline.return_value = (
-            b'{"success": false, "message": "Connect failed"}\n'
+        mock_reader, mock_writer = self._make_mock_uds_connection(
+            {"success": False, "message": "Connect failed"}
         )
+        mock_connect.return_value = (mock_reader, mock_writer)
 
         manager = DaemonManager(socket_path=mock_uds_path, port=1234)
         with self.assertRaises(DaemonConnectionError) as ctx:
@@ -337,19 +354,15 @@ class TestDaemonManager(unittest.IsolatedAsyncioTestCase):
         """Tests starting a new daemon process successfully."""
         mock_uds_path.exists.return_value = False
 
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        mock_proc.poll.return_value = None
-
+        mock_proc = self._make_mock_popen()
         mock_spawn_fn = Mock(return_value=mock_proc)
 
-        mock_reader = AsyncMock()
-        mock_writer = MagicMock()
-        mock_writer.drain = AsyncMock()
-        mock_writer.wait_closed = AsyncMock()
+        mock_reader, mock_writer = self._make_mock_uds_connection(
+            {"success": True}
+        )
         mock_open_connection.return_value = (mock_reader, mock_writer)
 
         mock_handshake.return_value = True
-        mock_reader.readline.return_value = b'{"success": true}\n'
 
         manager = DaemonManager(
             socket_path=mock_uds_path,

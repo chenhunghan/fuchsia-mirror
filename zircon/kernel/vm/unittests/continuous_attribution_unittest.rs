@@ -24,8 +24,8 @@ mod tests {
         change_vmo_high_priority_count, make_committed_pager_vmo,
         make_partially_committed_pager_vmo,
     };
+    use core::mem::DropGuard;
     use core::num::NonZeroI64;
-    use core::pin::Pin;
     use fbl::{RefPtr, Vector};
     use kprint::kprintln;
     use ksync::lock;
@@ -277,18 +277,30 @@ mod tests {
     ///
     /// Directly calls the lower-level interface, as opposed to the method on VmObject. The
     /// attribution for the higher-level method is incomplete.
-    fn zero_first_page(cow_pages: &VmCowPages) -> (Result<(), Status>, u64) {
+    ///
+    /// # Safety
+    ///
+    /// * `cow_pages` must be `LifeCycle::Alive` and not a hidden node.
+    /// * The caller must not hold any `VmCowPages` lock or spinlock and must be in a blockable
+    ///   thread context with no active `ChainLockTransaction`.
+    unsafe fn zero_first_page(cow_pages: &VmCowPages) -> (Result<(), Status>, u64) {
         stack_pin_init!(let page_request = MultiPageRequest::new());
         stack_pin_init!(let deferred = DeferredOps::new(cow_pages));
-        lock!(let guard = cow_pages.lock());
+        lock!(let mut guard = cow_pages.lock());
 
-        cow_pages.zero_pages_locked(
-            guard.token(),
-            VmCowRange::new(0, PAGE_SIZE),
-            /*dirty_track=*/ false,
-            deferred.as_mut(),
-            page_request.as_mut(),
-        )
+        // SAFETY: The token is that of `guard`, which holds the lock of `cow_pages`. `0` and
+        // `PAGE_SIZE` are page-aligned, `deferred` was constructed for `cow_pages`, and
+        // `page_request` is newly initialized with no active request. Per `# Safety`, `cow_pages`
+        // is alive and not hidden and the conditions for acquiring ancestor locks hold.
+        unsafe {
+            cow_pages.zero_pages_locked(
+                guard.as_mut().token_mut(),
+                VmCowRange::new(0, PAGE_SIZE),
+                /*dirty_track=*/ false,
+                deferred.as_mut(),
+                page_request.as_ref(),
+            )
+        }
     }
 
     /// Test that zeroing an anonymous VMO decreases the populated slots count.
@@ -310,7 +322,8 @@ mod tests {
         expect_eq!(2u32, cow_pages.debug_get_populated_slots_count());
 
         // Clear out one page, so that afterwards the VMO will only have one populated page.
-        let (status, zeroed_bytes) = zero_first_page(&cow_pages);
+        // SAFETY: `cow_pages` is the live non-hidden backing node of `vmo`, and no locks are held.
+        let (status, zeroed_bytes) = unsafe { zero_first_page(&cow_pages) };
         expect_eq!(PAGE_SIZE, zeroed_bytes);
         expect_ok!(status);
 
@@ -335,7 +348,8 @@ mod tests {
         expect_eq!(2u32, cow_pages.debug_get_populated_slots_count());
 
         // Clear out one page, so that afterwards the VMO will only have one populated page.
-        let (status, zeroed_bytes) = zero_first_page(&cow_pages);
+        // SAFETY: `cow_pages` is the live non-hidden backing node of `vmo`, and no locks are held.
+        let (status, zeroed_bytes) = unsafe { zero_first_page(&cow_pages) };
         expect_eq!(PAGE_SIZE, zeroed_bytes);
         expect_ok!(status);
 
@@ -374,7 +388,9 @@ mod tests {
         expect_eq!(2u32, child_cow_pages.debug_get_populated_slots_count());
 
         // Clear out one page, so that afterwards the VMO will only have one populated page.
-        let (status, zeroed_bytes) = zero_first_page(&child_cow_pages);
+        // SAFETY: `child_cow_pages` is the live non-hidden backing node of `child`, and no locks
+        // are held.
+        let (status, zeroed_bytes) = unsafe { zero_first_page(&child_cow_pages) };
         expect_eq!(PAGE_SIZE, zeroed_bytes);
         expect_ok!(status);
 
@@ -649,7 +665,8 @@ mod tests {
         // Remove the remaining share count for the first page, which will trigger the hidden parent
         // to remove the content from its local page list. Zeroing pages calls
         // DecrementCowContentShareCount, which is what we're interested in tracking.
-        let (status, zeroed_bytes) = zero_first_page(&vmo_cow);
+        // SAFETY: `vmo_cow` is the live non-hidden backing node of `vmo`, and no locks are held.
+        let (status, zeroed_bytes) = unsafe { zero_first_page(&vmo_cow) };
         expect_eq!(PAGE_SIZE, zeroed_bytes);
         expect_ok!(status);
 
@@ -762,40 +779,34 @@ mod tests {
         expect_eq!(1u32, vmo_cow.debug_get_populated_slots_count());
 
         {
-            // The list has to stay borrowed by `add_new_pages_locked` below, so it cannot be moved
-            // into a `zr::defer` closure; use an explicit guard instead.
-            struct CleanupList<'a> {
-                list: Pin<&'a mut VmPageDoublyLinkedList>,
-            }
-
-            impl Drop for CleanupList<'_> {
-                fn drop(&mut self) {
-                    // SAFETY: `add_new_pages_locked` takes ownership of the pages it consumed
-                    // regardless of its return value, so whatever remains on the list is still a
-                    // set of valid allocated PMM pages that have not been freed.
-                    unsafe {
-                        pmm::free_list(self.list.as_mut());
-                    }
-                }
-            }
-
             stack_pin_init!(let deferred = DeferredOps::new(&vmo_cow));
-            lock!(let guard = vmo_cow.lock());
+            lock!(let mut guard = vmo_cow.lock());
 
             stack_pin_init!(let list = VmPageDoublyLinkedList::new());
             let count: usize = 3;
             assert_ok!(pmm::alloc_pages(count, 0, list.as_mut()));
-            let mut cleanup = CleanupList { list };
+            let mut list = DropGuard::new(list, |list| {
+                // SAFETY: `add_new_pages_locked` takes ownership of the pages it consumed
+                // regardless of its return value, so whatever remains on the list is still a set
+                // of valid allocated PMM pages that have not been freed.
+                unsafe {
+                    pmm::free_list(list);
+                }
+            });
 
             expect_err!(
-                vmo_cow.add_new_pages_locked(
-                    guard.token(),
-                    0,
-                    cleanup.list.as_mut(),
-                    CanOverwriteSlot::Empty,
-                    /*zero=*/ true,
-                    deferred.as_mut(),
-                ),
+                // SAFETY: `list` holds freshly allocated `ALLOC`-state pages exclusively
+                // owned by this test and not in any page queue.
+                unsafe {
+                    vmo_cow.add_new_pages_locked(
+                        guard.as_mut().token_mut(),
+                        0,
+                        list.as_mut(),
+                        CanOverwriteSlot::Empty,
+                        /*zero=*/ true,
+                        Some(deferred.as_mut()),
+                    )
+                },
                 Status::ALREADY_EXISTS
             );
         }

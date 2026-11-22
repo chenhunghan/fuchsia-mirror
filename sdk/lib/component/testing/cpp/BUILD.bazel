@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Test helpers for unit tests of code written against the new C++ FIDL bindings
+# (`//sdk/lib/fidl/cpp`) and `//sdk/lib/component`. In-tree only; not part of
+# the SDK.
+fx_cc_library(
+    name = "cpp",
+    testonly = True,
+    srcs = ["service_directory_provider.cc"],
+    hdrs = ["service_directory_provider.h"],
+    includes = ["../../../.."],
+    public_configs = ["//sdk/config"],  # For bazel2gn.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/vfs/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "service_directory_provider_test_bin",
+    srcs = ["service_directory_provider_test.cc"],
+    gn_output_name = "service_directory_provider_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":cpp",
+        "//examples/fidl/fuchsia.examples:fuchsia.examples_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fidl/cpp",
+        "//sdk/lib/fit",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/lib/testing/predicates",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "component_testing_cpp_tests",
+    unit_tests = [":service_directory_provider_test_bin"],
+    visibility = ["//sdk/lib:__pkg__"],
+)

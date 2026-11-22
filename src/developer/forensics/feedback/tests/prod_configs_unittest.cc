@@ -33,8 +33,6 @@ TEST_F(ProdConfigTest, DefaultSnapshot) {
                                                "build.compilation-mode",
                                                "build.latest-commit-date",
                                                "build.product",
-                                               "build.version",
-                                               "build.version.previous-boot",
                                                "build.platform.utc-backstop",
                                                "build.platform.version",
                                                "build.platform.version.previous-boot",

@@ -59,14 +59,14 @@ if (is_fuchsia) {
     edition = "2024"
     source_root = "duplicate_allocations.rs"
     sources = [ source_root ]
-    deps = [ "//src/performance/memory/heapdump/instrumentation" ]
+    deps = [ "//src/memory/heapdump/instrumentation" ]
   }
 
   fuchsia_package_with_single_component("duplicate_allocations") {
     testonly = true
     manifest = "meta/duplicates.cml"
     deps = [ ":duplicate_allocations_bin" ]
-    subpackages = [ "//src/performance/memory/heapdump/collector" ]
+    subpackages = [ "//src/memory/heapdump/collector" ]
   }
 }
 

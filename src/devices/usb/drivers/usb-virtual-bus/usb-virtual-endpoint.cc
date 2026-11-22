@@ -4,6 +4,8 @@
 
 #include "src/devices/usb/drivers/usb-virtual-bus/usb-virtual-endpoint.h"
 
+#include <optional>
+
 #include <fbl/auto_lock.h>
 
 #include "src/devices/usb/drivers/usb-virtual-bus/usb-virtual-bus.h"
@@ -20,9 +22,14 @@ size_t GetLength(RequestVariant& req) {
              : std::get<Request>(req).request()->header.length;
 }
 
-fdescriptor::UsbSetup GetSetup(RequestVariant& req) {
+std::optional<fdescriptor::UsbSetup> GetSetup(RequestVariant& req) {
   if (std::holds_alternative<usb::FidlRequest>(req)) {
-    return *std::get<usb::FidlRequest>(req)->information()->control()->setup();
+    auto& freq = std::get<usb::FidlRequest>(req);
+    if (!freq->information().has_value() || !freq->information()->control().has_value() ||
+        !freq->information()->control()->setup().has_value()) {
+      return std::nullopt;
+    }
+    return *freq->information()->control()->setup();
   }
 
   usb_setup_t setup = std::get<Request>(req).request()->setup;
@@ -43,25 +50,54 @@ zx::result<void*> UsbEpServer::GetBuffer(RequestVariant& req) {
     return zx::ok(buffer);
   }
 
-  auto& fidl_req = std::get<usb::FidlRequest>(req);
-  if (!fidl_req->data().has_value() || fidl_req->data()->empty() ||
-      !(*fidl_req->data())[0].buffer().has_value()) {
+  auto& freq = std::get<usb::FidlRequest>(req);
+  if (!freq->data().has_value() || freq->data()->empty()) {
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
-  auto& request_buffer = (*fidl_req->data())[0].buffer();
-  const auto& buffer_type = request_buffer->Which();
+  if (freq->data()->size() != 1) {
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
+  }
+  auto& region = (*freq->data())[0];
+  if (!region.buffer().has_value() || !region.size().has_value()) {
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  const uint64_t offset = region.offset().value_or(0);
+  const uint64_t size = *region.size();
+  uint64_t end = 0;
+  if (add_overflow(offset, size, &end)) {
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
+  }
+
+  const auto buffer_type = region.buffer()->Which();
   switch (buffer_type) {
     case fuchsia_hardware_usb_request::Buffer::Tag::kVmoId: {
-      auto it = registered_vmos_.find(request_buffer->vmo_id().value());
+      if (!region.buffer()->vmo_id().has_value()) {
+        return zx::error(ZX_ERR_INVALID_ARGS);
+      }
+      auto it = registered_vmos_.find(region.buffer()->vmo_id().value());
       if (it == registered_vmos_.end()) {
-        fdf::error("Failed to find registered VMO {}", request_buffer->vmo_id().value());
+        fdf::error("Failed to find registered VMO {}", region.buffer()->vmo_id().value());
         return zx::error(ZX_ERR_NOT_FOUND);
       }
-      fidl_req.add_shared_context(it->second);
-      return zx::ok(reinterpret_cast<void*>(it->second->addr));
+      if (end > it->second->size) {
+        return zx::error(ZX_ERR_OUT_OF_RANGE);
+      }
+      freq.add_shared_context(it->second);
+      return zx::ok(reinterpret_cast<uint8_t*>(it->second->addr) + offset);
     }
-    case fuchsia_hardware_usb_request::Buffer::Tag::kData:
-      return zx::ok(request_buffer->data()->data());
+    case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
+      if (!region.buffer()->data().has_value()) {
+        return zx::error(ZX_ERR_INVALID_ARGS);
+      }
+      auto& data_vec = region.buffer()->data().value();
+      if (data_vec.size() < end) {
+        if (end > fuchsia_hardware_usb_request::kMaxTransferSize) {
+          return zx::error(ZX_ERR_OUT_OF_RANGE);
+        }
+        data_vec.resize(static_cast<size_t>(end));
+      }
+      return zx::ok(data_vec.data() + offset);
+    }
     default:
       fdf::error("{}: Unknown buffer type {}", __func__, static_cast<uint32_t>(buffer_type));
       return zx::error(ZX_ERR_NOT_SUPPORTED);
@@ -131,8 +167,9 @@ void UsbEpServer::RegisterVmos(RegisterVmosRequest& request,
   {
     fbl::AutoLock lock(&lock_);
     for (const auto& info : request.vmo_ids()) {
-      ZX_ASSERT(info.id());
-      ZX_ASSERT(info.size());
+      if (!info.id().has_value() || !info.size().has_value() || *info.size() == 0) {
+        continue;
+      }
       auto id = *info.id();
       auto size = *info.size();
 
@@ -210,7 +247,7 @@ void UsbEpServer::RequestComplete(zx_status_t status, size_t actual, RequestVari
   }
 
   auto& freq = std::get<usb::FidlRequest>(request);
-  auto defer_completion = *freq->defer_completion();
+  auto defer_completion = freq->defer_completion().value_or(false);
   auto fidl_req = freq.take_request();
 
   std::vector<fuchsia_hardware_usb_endpoint::Completion> completions;
@@ -219,6 +256,9 @@ void UsbEpServer::RequestComplete(zx_status_t status, size_t actual, RequestVari
 
   {
     fbl::AutoLock lock(&lock_);
+    if (!binding_) {
+      return;
+    }
 
     completions_.emplace_back(std::move(fuchsia_hardware_usb_endpoint::Completion()
                                             .request(std::move(fidl_req))
@@ -228,17 +268,13 @@ void UsbEpServer::RequestComplete(zx_status_t status, size_t actual, RequestVari
       return;
     }
 
-    if (binding_) {
-      binding = binding_;
-      completions.swap(completions_);
-    }
+    binding = binding_;
+    completions.swap(completions_);
   }
 
-  if (binding) {
-    auto result = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
-    if (result.is_error()) {
-      fdf::error("Error sending event: {}", result.error_value().status_string());
-    }
+  auto result = fidl::SendEvent(*binding)->OnCompletion(std::move(completions));
+  if (result.is_error()) {
+    fdf::error("Error sending event: {}", result.error_value().status_string());
   }
 }
 
@@ -311,10 +347,12 @@ void UsbVirtualEp::ProcessRequests() {
 
     // Transfer data (No locks held here)
     const size_t to_do = std::min(host_current_req->todo(), device_current_req->todo());
-    if (is_out()) {
-      std::memcpy(device_current_req->ptr(), host_current_req->ptr(), to_do);
-    } else {
-      std::memcpy(host_current_req->ptr(), device_current_req->ptr(), to_do);
+    if (to_do > 0) {
+      if (is_out()) {
+        std::memcpy(device_current_req->ptr(), host_current_req->ptr(), to_do);
+      } else {
+        std::memcpy(host_current_req->ptr(), device_current_req->ptr(), to_do);
+      }
     }
 
     // Complete requests
@@ -398,7 +436,12 @@ void UsbVirtualEp::HandleControl(RequestVariant req) {
     return;
   }
 
-  fdescriptor::UsbSetup setup = GetSetup(req);
+  std::optional<fdescriptor::UsbSetup> maybe_setup = GetSetup(req);
+  if (!maybe_setup.has_value()) {
+    host_.RequestComplete(ZX_ERR_INVALID_ARGS, 0, req);
+    return;
+  }
+  fdescriptor::UsbSetup setup = *maybe_setup;
 
   fdf::debug("{} type: 0x{:02X} req: {} value: {} index: {} length: {}", __func__,
              setup.bm_request_type(), setup.b_request(), setup.w_value(), setup.w_index(),
@@ -413,6 +456,10 @@ void UsbVirtualEp::HandleControl(RequestVariant req) {
   const bool is_in = usb_request_is_in(setup.bm_request_type());
   std::vector<uint8_t> write(0);
   if (!is_in && setup.w_length() > 0) {
+    if (GetLength(req) < setup.w_length()) {
+      host_.RequestComplete(ZX_ERR_BUFFER_TOO_SMALL, 0, req);
+      return;
+    }
     zx::result<void*> result;
     {
       fbl::AutoLock lock(&host_.lock());
@@ -442,6 +489,10 @@ void UsbVirtualEp::HandleControl(RequestVariant req) {
           host_.RequestComplete(ZX_ERR_NO_MEMORY, 0, req);
           return;
         }
+        if (result->read().empty()) {
+          host_.RequestComplete(ZX_OK, 0, req);
+          return;
+        }
 
         if (std::holds_alternative<usb::FidlRequest>(req) &&
             !std::get<usb::FidlRequest>(req)->data()) {
@@ -464,6 +515,10 @@ void UsbVirtualEp::HandleControl(RequestVariant req) {
         if (buffer.is_error()) {
           fdf::error("Failed to get buffer pointer {}", buffer);
           host_.RequestComplete(buffer.error_value(), 0, req);
+          return;
+        }
+        if (result->read().size() > GetLength(req)) {
+          host_.RequestComplete(ZX_ERR_BUFFER_TOO_SMALL, 0, req);
           return;
         }
         std::memcpy(*buffer, result->read().data(), result->read().size());

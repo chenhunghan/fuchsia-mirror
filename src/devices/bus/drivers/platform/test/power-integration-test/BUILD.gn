@@ -52,7 +52,6 @@ fuchsia_cc_driver("test-power-integration-board-driver") {
 
 fuchsia_driver_component("test-power-integration-board") {
   deps = [ ":test-power-integration-board-driver" ]
-  info = "meta/test-power-integration-board-info.json"
   manifest = "meta/test-power-board.cml"
 }
 
@@ -115,14 +114,12 @@ fuchsia_driver_component("test-power-child") {
   dml_label = ":test-power-child-dml"
   component_name = "test-power-child"
   deps = [ ":test-power-child-driver" ]
-  info = "meta/test-power-child-info.json"
 }
 
 fuchsia_driver_component("test-power-parent") {
   dml_label = ":test-power-parent-dml"
   component_name = "test-power-parent"
   deps = [ ":test-power-parent-driver" ]
-  info = "meta/test-power-parent-info.json"
 }
 
 fidl("fuchsia.test.drivers.power") {

@@ -663,9 +663,7 @@ impl SuspendResumeManager {
         res: frunner::ManagerSuspendContainerResponse,
     ) {
         let wake_time = zx::BootInstant::get();
-        // The "0" here is to mimic the expected power management success string,
-        // while we don't have IRQ numbers to report.
-        let resume_reason = res.resume_reason.clone().map(|s| format!("0 {}", s));
+        let resume_reason = res.resume_reason.as_deref().map(format_resume_reason);
         log_info!("Resuming from container suspension: {:?}", resume_reason);
         let mut state = self.lock();
         state.update_suspend_stats(|suspend_stats| {
@@ -749,6 +747,24 @@ pub trait OnWakeOps: Send + Sync {
     /// - `baton_lease`: the wake lease is provided if `on_wake` has critical
     ///   work to do and needs to prevent suspend.
     fn on_wake(&self, current_task: &CurrentTask, baton_lease: &zx::NullableHandle);
+}
+
+/// Formats the runner's resume reason in the Linux `/sys/kernel/wakeup_reasons/last_resume_reason`
+/// format: one `<irq> <name>` line per wake source.
+///
+/// The runner reports the names of all wake sources that fired, separated by commas. Linux
+/// reports each wake source on its own line, and Android parses the file line by line, so a
+/// single comma-separated line is treated as one unknown wake source.
+///
+/// Starnix has no IRQ numbers for wakes, so "0" is reported to mimic the expected success format.
+fn format_resume_reason(reason: &str) -> String {
+    reason
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| format!("0 {name}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Creates a proxy between `remote_channel` and the returned `zx::Channel`.
@@ -1010,6 +1026,19 @@ mod test {
     use fuchsia_async as fasync;
     use fuchsia_inspect as inspect;
     use futures::StreamExt;
+
+    #[::fuchsia::test]
+    fn test_format_resume_reason_single() {
+        assert_eq!(format_resume_reason("wake-alarms"), "0 wake-alarms");
+    }
+
+    #[::fuchsia::test]
+    fn test_format_resume_reason_multiple_one_per_line() {
+        assert_eq!(
+            format_resume_reason("wake-alarms,netstack-wake-group"),
+            "0 wake-alarms\n0 netstack-wake-group"
+        );
+    }
 
     #[::fuchsia::test]
     fn test_counter_zero_initialization() {

@@ -1,0 +1,19 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//src/sys/test_runners/rust/default.shard.cml",
+        "//src/ui/lib/diagnostic_overlay/meta/client.shard.cml",
+        "syslog/client.shard.cml",
+        "vulkan/client.shard.cml",
+    ],
+    program: {
+        binary: "bin/diagnostic_overlay_vulkan_test",
+
+        // Run Mesa Lavapipe rasterization synchronously on the submit thread to avoid a
+        // use-after-free race in Fuchsia's LP_FENCE_TYPE_ZIRCON_HANDLE lp_fence_wait when
+        // vkCmdBlitImage submits >4 (MAX_SCENES) regions.
+        environ: [ "LP_NUM_THREADS=0" ],
+    },
+}

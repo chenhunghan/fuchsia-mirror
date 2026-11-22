@@ -21,7 +21,10 @@ ImagePtr NaiveImage::AdoptVkImage(ResourceManager* image_owner, ImageInfo info, 
   FX_CHECK(mem);
 
   // Check image memory requirements before binding the image to memory.
-  auto mem_requirements = image_owner->vk_device().getImageMemoryRequirements(vk_image);
+  const auto mem_requirements = [&] {
+    TRACE_DURATION("gfx", "vkGetImageMemoryRequirements");
+    return image_owner->vk_device().getImageMemoryRequirements(vk_image);
+  }();
 
   auto size_required = mem_requirements.size;
   auto alignment_required = mem_requirements.alignment;
@@ -45,13 +48,28 @@ ImagePtr NaiveImage::AdoptVkImage(ResourceManager* image_owner, ImageInfo info, 
     return nullptr;
   }
 
-  auto bind_result = image_owner->vk_device().bindImageMemory(vk_image, mem->base(), mem->offset());
+  const auto bind_result = [&] {
+    TRACE_DURATION("gfx", "vkBindImageMemory");
+    return image_owner->vk_device().bindImageMemory(vk_image, mem->base(), mem->offset());
+  }();
   if (bind_result != vk::Result::eSuccess) {
     FX_LOGS(ERROR) << "vkBindImageMemory failed: " << vk::to_string(bind_result);
     return nullptr;
   }
 
   return fxl::AdoptRef(new NaiveImage(image_owner, info, vk_image, mem, initial_layout));
+}
+
+ImagePtr NaiveImage::AdoptBoundVkImage(ResourceManager* image_owner, ImageInfo info,
+                                       vk::Image image, GpuMemPtr mem,
+                                       vk::ImageLayout initial_layout) {
+  TRACE_DURATION("gfx", "escher::NaiveImage::AdoptBoundVkImage");
+  FX_CHECK(image_owner);
+  FX_CHECK(image_owner->vk_device());
+  FX_CHECK(image);
+  FX_CHECK(mem);
+  FX_CHECK(mem->base());
+  return fxl::AdoptRef(new NaiveImage(image_owner, info, image, std::move(mem), initial_layout));
 }
 
 NaiveImage::NaiveImage(ResourceManager* image_owner, ImageInfo info, vk::Image image, GpuMemPtr mem,
@@ -62,7 +80,10 @@ NaiveImage::NaiveImage(ResourceManager* image_owner, ImageInfo info, vk::Image i
            static_cast<bool>(info.memory_flags & vk::MemoryPropertyFlagBits::eLazilyAllocated));
 }
 
-NaiveImage::~NaiveImage() { vulkan_context().device.destroyImage(vk()); }
+NaiveImage::~NaiveImage() {
+  TRACE_DURATION("gfx", "vkDestroyImage");
+  vulkan_context().device.destroyImage(vk());
+}
 
 vk::DeviceSize NaiveImage::GetDeviceMemoryCommitment() {
   if (is_transient()) {

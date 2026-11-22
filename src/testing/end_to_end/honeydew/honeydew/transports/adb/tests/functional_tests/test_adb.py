@@ -5,6 +5,7 @@
 """Mobly test for ADB transport."""
 
 import pathlib
+import re
 
 import fuchsia_base_test
 from honeydew.device_classes import android_device
@@ -39,7 +40,9 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
     def test_verify_supported_and_check_connection(self) -> None:
         """Test case for ADB.verify_supported() and check_connection()."""
         self.adb.verify_supported()
-        self.adb.check_connection()
+        self.adb.check_connection(
+            timeout=adb_transport._DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS
+        )
 
     async def test_adb_server_log_collected(self) -> None:
         """Verifies adb_server_N_log.txt is created in artifacts dir."""
@@ -63,19 +66,45 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
         serial = self.dut.ffx.serial_number
         asserts.assert_regex(output, rf"{serial}\s+device\b")
 
+    async def test_restart_server(self) -> None:
+        """Test case for ADB.restart_server()."""
+        log_dir = pathlib.Path(self.log_path) / "adb"
+        logs_before = set(log_dir.glob("adb_server_*_log.txt"))
+
+        self.adb.restart_server()
+
+        # Each isolated server run writes its own adb_server_N_log.txt, so a
+        # new log file shows that a new server process was started.
+        logs_after = set(log_dir.glob("adb_server_*_log.txt"))
+        asserts.assert_true(
+            logs_after - logs_before,
+            f"Expected a new adb_server log in {log_dir} after restart_server()",
+        )
+        output = self.adb.run(["devices", "-l"], include_serial=False)
+        # On TCP targets, `adb devices` lists `<host>:<port>`, not the
+        # hardware serial.
+        serial = self.adb.serial_number
+        # The serial can be a bracketed IPv6 `[host]:port`, so escape it.
+        asserts.assert_regex(output, rf"{re.escape(serial)}\s+device\b")
+        output = self.adb.run(["shell", 'echo "hello"'])
+        asserts.assert_in("hello", output)
+
     async def test_adb_shell(self) -> None:
         """Test case for ADB.run(["shell", ...])."""
         output = self.adb.run(["shell", 'echo "hello"'])
         asserts.assert_in("hello", output)
 
     async def test_adb_root_unroot(self) -> None:
-        """Test case for ADB root(), unroot(), is_root, and use_adb_root()."""
+        """Test case for ADB root(), unroot(), verify_root(), is_rootable(), and use_adb_root()."""
+        asserts.assert_true(
+            self.adb.is_rootable(), "Expected a debuggable (rootable) build"
+        )
         try:
             # Ensure we start as non-root
             self.adb.unroot()
             self.adb.su_unroot()
             asserts.assert_false(
-                self.adb.is_root, "Expected is_root to be False"
+                self.adb.verify_root(), "Expected adbd to not be root"
             )
             output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=2000(shell)", output)
@@ -84,7 +113,9 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
 
             # Switch to root
             self.adb.root()
-            asserts.assert_true(self.adb.is_root, "Expected is_root to be True")
+            asserts.assert_true(
+                self.adb.verify_root(), "Expected adbd to be root"
+            )
             output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=0(root)", output)
             output = self.adb.run(["shell", 'echo "hello"'])
@@ -93,7 +124,7 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
             # Switch back to non-root
             self.adb.unroot()
             asserts.assert_false(
-                self.adb.is_root, "Expected is_root to be False"
+                self.adb.verify_root(), "Expected adbd to not be root"
             )
             output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=2000(shell)", output)
@@ -103,7 +134,7 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
             # Test synchronous use_adb_root context manager
             with self.adb.use_adb_root():
                 asserts.assert_true(
-                    self.adb.is_root, "Expected is_root to be True"
+                    self.adb.verify_root(), "Expected adbd to be root"
                 )
                 output = self.adb.run(["shell", "id"])
                 asserts.assert_in("uid=0(root)", output)
@@ -111,7 +142,7 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
                 asserts.assert_in("hello", output)
 
             asserts.assert_false(
-                self.adb.is_root, "Expected is_root to be False"
+                self.adb.verify_root(), "Expected adbd to not be root"
             )
             output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=2000(shell)", output)
@@ -121,7 +152,7 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
             # Test asynchronous use_adb_root context manager
             async with self.adb.use_adb_root():
                 asserts.assert_true(
-                    self.adb.is_root, "Expected is_root to be True"
+                    self.adb.verify_root(), "Expected adbd to be root"
                 )
                 output = self.adb.run(["shell", "id"])
                 asserts.assert_in("uid=0(root)", output)
@@ -129,7 +160,7 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
                 asserts.assert_in("hello", output)
 
             asserts.assert_false(
-                self.adb.is_root, "Expected is_root to be False"
+                self.adb.verify_root(), "Expected adbd to not be root"
             )
             output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=2000(shell)", output)
@@ -209,6 +240,11 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
             )
             output = self.adb.run(["shell", "id"])
             asserts.assert_in("uid=0(root)", output)
+            # su_root only wraps shell commands; adbd itself is still not root.
+            asserts.assert_false(
+                self.adb.verify_root(),
+                "Expected adbd to not be root while only su_root is enabled",
+            )
             output = self.adb.run(["shell", 'echo "hello"'])
             asserts.assert_in("hello", output)
 
@@ -249,8 +285,10 @@ class AdbTest(fuchsia_base_test.FuchsiaBaseTest):
 
     async def test_android_reboot(self) -> None:
         """Test case for ensuring ADB transport works after rebooting via Android."""
+        self.dut.ffx.notify_intentional_disconnect()
         self.adb.run(["reboot"])
 
+        self.dut.wait_for_offline()
         await self.dut.wait_for_online()
         await self.dut.on_device_boot()
 

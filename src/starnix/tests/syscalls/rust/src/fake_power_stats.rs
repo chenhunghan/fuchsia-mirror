@@ -8,10 +8,26 @@ use anyhow::Error;
 use fidl_fuchsia_hardware_power_stats as fpowerstats;
 use fuchsia_component::server::ServiceFs;
 use futures::{StreamExt as _, TryStreamExt as _};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-/// Residency reported for each entity.
-fn reports() -> Vec<fpowerstats::Stats> {
+/// Number of `GetStats` calls served so far.
+static GET_STATS_CALLS: AtomicU32 = AtomicU32::new(0);
+
+/// Residency reported for each entity, after `get_stats_calls` `GetStats` calls.
+fn reports(get_stats_calls: u32) -> Vec<fpowerstats::Stats> {
     vec![
+        // The entry count lets the test tell whether two reads were served by the same
+        // `GetStats` reply.
+        fpowerstats::Stats {
+            entity: "lpcm_get_stats_calls".to_string(),
+            state_residency_data: vec![fpowerstats::StateResidency {
+                id: 0,
+                name: "0".to_string(),
+                entry_count: get_stats_calls,
+                total_time_ms: 0,
+                last_entry_timestamp_ms: 0,
+            }],
+        },
         fpowerstats::Stats {
             entity: "lpcm_gmc0".to_string(),
             state_residency_data: vec![
@@ -161,7 +177,7 @@ async fn main() -> Result<(), Error> {
                 .try_for_each(|request| async move {
                     match request {
                         fpowerstats::DeviceRequest::GetEntities { responder } => {
-                            let entities: Vec<_> = reports()
+                            let entities: Vec<_> = reports(0)
                                 .into_iter()
                                 .map(|stats| fpowerstats::Entity {
                                     name: stats.entity,
@@ -178,7 +194,8 @@ async fn main() -> Result<(), Error> {
                             responder.send(&entities)?;
                         }
                         fpowerstats::DeviceRequest::GetStats { responder } => {
-                            responder.send(&reports())?;
+                            let calls = GET_STATS_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+                            responder.send(&reports(calls))?;
                         }
                         _ => {}
                     }

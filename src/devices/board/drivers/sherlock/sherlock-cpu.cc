@@ -12,7 +12,6 @@
 #include <bind/fuchsia/amlogic/platform/cpp/bind.h>
 #include <bind/fuchsia/cpp/bind.h>
 #include <bind/fuchsia/google/platform/cpp/bind.h>
-#include <bind/fuchsia/thermal/cpp/bind.h>
 #include <soc/aml-common/aml-cpu-metadata.h>
 #include <soc/aml-t931/t931-hw.h>
 
@@ -71,16 +70,15 @@ zx_status_t Sherlock::CpuInit() {
   auto aml_cpu_legacy_thermal_node = fuchsia_driver_framework::ParentSpec2{{
       .bind_rules =
           {
-              fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL,
-                                      bind_fuchsia_thermal::BIND_PROTOCOL_DEVICE),
+              fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE,
+                                      fuchsia_hardware_thermal::Service::Name),
               fdf::MakeAcceptBindRule(
                   bind_fuchsia::PLATFORM_DEV_DID,
                   bind_fuchsia_amlogic_platform::BIND_PLATFORM_DEV_DID_THERMAL_PLL),
           },
       .properties =
           {
-              fdf::MakeProperty2(bind_fuchsia::PROTOCOL,
-                                 bind_fuchsia_thermal::BIND_PROTOCOL_DEVICE),
+              fdf::MakeProperty2(bind_fuchsia::SERVICE, fuchsia_hardware_thermal::Service::Name),
               fdf::MakeProperty2(bind_fuchsia::PLATFORM_DEV_DID,
                                  bind_fuchsia_amlogic_platform::BIND_PLATFORM_DEV_DID_THERMAL_PLL),
           },

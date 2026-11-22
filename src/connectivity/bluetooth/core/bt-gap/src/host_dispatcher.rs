@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error, anyhow, format_err};
-use async_helpers::hanging_get::asynchronous as hanging_get;
+use async_utils::hanging_get::server as hanging_get;
 use fidl::endpoints::{Proxy, ServerEnd};
 use fidl_fuchsia_bluetooth::{Appearance, DeviceClass};
 use fidl_fuchsia_bluetooth_bredr::ProfileMarker;
@@ -38,12 +38,25 @@ use std::task::{Context, Poll, Waker};
 use zx::{AsHandleRef, MonotonicDuration};
 
 use crate::host_device::{HostDevice, HostListener};
+use crate::services::host_watcher;
 use crate::services::pairing::pairing_dispatcher::{PairingDispatcher, PairingDispatcherHandle};
 use crate::store::stash::Stash;
 use crate::watch_peers::PeerWatcher;
 use crate::{build_config, generic_access_service, types};
 
 pub use fidl_fuchsia_device::DEFAULT_DEVICE_NAME;
+
+type WatchPeersNotifyFn = fn(&HashMap<PeerId, Peer>, PeerWatcher) -> bool;
+type WatchPeersBroker =
+    hanging_get::HangingGet<HashMap<PeerId, Peer>, PeerWatcher, WatchPeersNotifyFn>;
+pub type WatchPeersSubscriber =
+    hanging_get::Subscriber<HashMap<PeerId, Peer>, PeerWatcher, WatchPeersNotifyFn>;
+
+type WatchHostsNotifyFn = fn(&Vec<HostInfo>, sys::HostWatcherWatchResponder) -> bool;
+type WatchHostsBroker =
+    hanging_get::HangingGet<Vec<HostInfo>, sys::HostWatcherWatchResponder, WatchHostsNotifyFn>;
+pub type WatchHostsSubscriber =
+    hanging_get::Subscriber<Vec<HostInfo>, sys::HostWatcherWatchResponder, WatchHostsNotifyFn>;
 
 /// Policies for HostDispatcher::set_name
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -576,11 +589,8 @@ struct HostDispatcherState {
 
     pairing_dispatcher: Option<PairingDispatcherHandle>,
 
-    watch_peers_publisher: hanging_get::Publisher<HashMap<PeerId, Peer>>,
-    watch_peers_registrar: hanging_get::SubscriptionRegistrar<PeerWatcher>,
-
-    watch_hosts_publisher: hanging_get::Publisher<Vec<HostInfo>>,
-    watch_hosts_registrar: hanging_get::SubscriptionRegistrar<sys::HostWatcherWatchResponder>,
+    watch_peers_broker: WatchPeersBroker,
+    watch_hosts_broker: WatchHostsBroker,
 
     // Pending requests to obtain a Host.
     host_requests: Slab<Waker>,
@@ -721,7 +731,6 @@ impl HostDispatcherState {
         // The HostInfo::active field for the active host must be filled in later.
         let active_id = self.active_id;
 
-        // Wait for the hanging get watcher to update so we can linearize updates
         let current_hosts: Vec<HostInfo> = self
             .host_devices
             .values()
@@ -734,14 +743,7 @@ impl HostDispatcherState {
                 info
             })
             .collect();
-        let mut publisher = self.watch_hosts_publisher.clone();
-        fasync::Task::spawn(async move {
-            publisher
-                .set(current_hosts)
-                .await
-                .expect("Fatal error: Host Watcher HangingGet unreachable");
-        })
-        .detach();
+        self.watch_hosts_broker.new_publisher().set(current_hosts);
     }
 
     /// Returns a future that re-enables connectability on `host_id` if policy
@@ -779,11 +781,15 @@ impl HostDispatcher {
         stash: Stash,
         inspect: inspect::Node,
         gas_channel_sender: mpsc::Sender<LocalServiceRequest>,
-        watch_peers_publisher: hanging_get::Publisher<HashMap<PeerId, Peer>>,
-        watch_peers_registrar: hanging_get::SubscriptionRegistrar<PeerWatcher>,
-        watch_hosts_publisher: hanging_get::Publisher<Vec<HostInfo>>,
-        watch_hosts_registrar: hanging_get::SubscriptionRegistrar<sys::HostWatcherWatchResponder>,
     ) -> HostDispatcher {
+        let watch_peers_broker = hanging_get::HangingGet::new(
+            HashMap::new(),
+            PeerWatcher::observe as WatchPeersNotifyFn,
+        );
+        let watch_hosts_broker = hanging_get::HangingGet::new(
+            Vec::new(),
+            host_watcher::observe_hosts as WatchHostsNotifyFn,
+        );
         let hd = HostDispatcherState {
             active_id: None,
             host_devices: HashMap::new(),
@@ -798,10 +804,8 @@ impl HostDispatcher {
             discoverable: DiscoverableState::NotDiscoverable,
             suppress_connections: SuppressConnectionsState::NotSuppressed,
             pairing_dispatcher: None,
-            watch_peers_publisher,
-            watch_peers_registrar,
-            watch_hosts_publisher,
-            watch_hosts_registrar,
+            watch_peers_broker,
+            watch_hosts_broker,
             host_requests: Slab::new(),
             inspect: HostDispatcherInspect::new(inspect),
         };
@@ -1376,61 +1380,39 @@ impl HostDispatcher {
         self.stash().store_bond(bond_data)
     }
 
-    pub fn on_device_updated(&self, peer: Peer) -> impl Future<Output = ()> + use<> {
+    pub fn on_device_updated(&self, peer: Peer) {
         let update_peer = peer.clone();
 
-        let mut publisher = {
-            let mut state = self.state.write();
+        let mut state = self.state.write();
 
-            let node = state.inspect.peers().create_child(unique_name("peer_"));
-            let peer = Inspectable::new(peer, node);
-            let _drop_old_value = state.peers.insert(peer.id.clone(), peer);
-            state.inspect.peer_count.set(state.peers.len() as u64);
-            state.watch_peers_publisher.clone()
-        };
+        let node = state.inspect.peers().create_child(unique_name("peer_"));
+        let peer = Inspectable::new(peer, node);
+        let _drop_old_value = state.peers.insert(peer.id.clone(), peer);
+        state.inspect.peer_count.set(state.peers.len() as u64);
+        state.watch_peers_broker.new_publisher().update(move |peers| {
+            let _ = peers.get_or_insert_with(HashMap::new).insert(update_peer.id, update_peer);
+            true
+        });
+    }
 
-        // Wait for the hanging get watcher to update so we can linearize updates
-        async move {
-            publisher
-                .update(move |peers| {
-                    let _ = peers.insert(update_peer.id, update_peer);
-                    true
-                })
-                .await
-                .expect("Fatal error: Peer Watcher HangingGet unreachable")
+    pub fn on_device_removed(&self, id: PeerId) {
+        let mut state = self.state.write();
+        if let Some(removed) = state.peers.remove(&id) {
+            inspect_log!(state.inspect.evicted_peers, peer: removed);
         }
+        state.inspect.peer_count.set(state.peers.len() as u64);
+        state.watch_peers_broker.new_publisher().update(move |peers| {
+            // Updated if we actually removed something.
+            peers.as_mut().is_some_and(|p| p.remove(&id).is_some())
+        });
     }
 
-    pub fn on_device_removed(&self, id: PeerId) -> impl Future<Output = ()> + use<> {
-        let mut publisher = {
-            let mut state = self.state.write();
-            if let Some(removed) = state.peers.remove(&id) {
-                inspect_log!(state.inspect.evicted_peers, peer: removed);
-            }
-            state.inspect.peer_count.set(state.peers.len() as u64);
-            state.watch_peers_publisher.clone()
-        };
-
-        // Wait for the hanging get watcher to update so we can linearize updates
-        async move {
-            publisher
-                .update(move |peers| {
-                    // Updated if we actually removed something.
-                    peers.remove(&id).is_some()
-                })
-                .await
-                .expect("Fatal error: Peer Watcher HangingGet unreachable")
-        }
+    pub fn watch_peers(&self) -> WatchPeersSubscriber {
+        self.state.write().watch_peers_broker.new_subscriber()
     }
 
-    pub async fn watch_peers(&self) -> hanging_get::Subscriber<PeerWatcher> {
-        let mut registrar = self.state.write().watch_peers_registrar.clone();
-        registrar.new_subscriber().await.expect("Fatal error: Peer Watcher HangingGet unreachable")
-    }
-
-    pub async fn watch_hosts(&self) -> hanging_get::Subscriber<sys::HostWatcherWatchResponder> {
-        let mut registrar = self.state.write().watch_hosts_registrar.clone();
-        registrar.new_subscriber().await.expect("Fatal error: Host Watcher HangingGet unreachable")
+    pub fn watch_hosts(&self) -> WatchHostsSubscriber {
+        self.state.write().watch_hosts_broker.new_subscriber()
     }
 
     async fn spawn_gas_proxy(&self, gatt_server_proxy: Server_Proxy) -> Result<(), Error> {
@@ -1885,13 +1867,15 @@ async fn init_host(path: &str, node: inspect::Node, proxy: HostProxy) -> Result<
 }
 
 impl HostListener for HostDispatcher {
-    type PeerUpdatedFut = BoxFuture<'static, ()>;
+    type PeerUpdatedFut = future::Ready<()>;
     fn on_peer_updated(&mut self, peer: Peer) -> Self::PeerUpdatedFut {
-        self.on_device_updated(peer).boxed()
+        self.on_device_updated(peer);
+        future::ready(())
     }
-    type PeerRemovedFut = BoxFuture<'static, ()>;
+    type PeerRemovedFut = future::Ready<()>;
     fn on_peer_removed(&mut self, id: PeerId) -> Self::PeerRemovedFut {
-        self.on_device_removed(id).boxed()
+        self.on_device_removed(id);
+        future::ready(())
     }
     type HostBondFut = BoxFuture<'static, Result<(), anyhow::Error>>;
     fn on_new_host_bond(&mut self, data: BondingData) -> Self::HostBondFut {
@@ -2047,12 +2031,7 @@ pub(crate) mod test {
         RejectPeers(HashSet<PeerId>),
     }
 
-    pub(crate) fn make_test_dispatcher(
-        watch_peers_publisher: hanging_get::Publisher<HashMap<PeerId, Peer>>,
-        watch_peers_registrar: hanging_get::SubscriptionRegistrar<PeerWatcher>,
-        watch_hosts_publisher: hanging_get::Publisher<Vec<HostInfo>>,
-        watch_hosts_registrar: hanging_get::SubscriptionRegistrar<sys::HostWatcherWatchResponder>,
-    ) -> HostDispatcher {
+    pub(crate) fn make_simple_test_dispatcher() -> HostDispatcher {
         let (gas_channel_sender, _ignored_gas_task_req_stream) = mpsc::channel(0);
         HostDispatcher::new(
             Appearance::Display,
@@ -2060,35 +2039,7 @@ pub(crate) mod test {
             Stash::in_memory_mock(),
             fuchsia_inspect::Node::default(),
             gas_channel_sender,
-            watch_peers_publisher,
-            watch_peers_registrar,
-            watch_hosts_publisher,
-            watch_hosts_registrar,
         )
-    }
-
-    pub(crate) fn make_simple_test_dispatcher() -> HostDispatcher {
-        let watch_peers_broker = hanging_get::HangingGetBroker::new(
-            HashMap::new(),
-            |_, _| true,
-            hanging_get::DEFAULT_CHANNEL_SIZE,
-        );
-        let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-            Vec::new(),
-            |_, _| true,
-            hanging_get::DEFAULT_CHANNEL_SIZE,
-        );
-
-        let dispatcher = make_test_dispatcher(
-            watch_peers_broker.new_publisher(),
-            watch_peers_broker.new_registrar(),
-            watch_hosts_broker.new_publisher(),
-            watch_hosts_broker.new_registrar(),
-        );
-
-        let watchers_fut = join(watch_peers_broker.run(), watch_hosts_broker.run()).map(|_| ());
-        fasync::Task::spawn(watchers_fut).detach();
-        dispatcher
     }
 
     #[derive(Default)]

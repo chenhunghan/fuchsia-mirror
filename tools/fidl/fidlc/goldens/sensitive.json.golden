@@ -26,7 +26,7 @@
         "ContainerWithPropagation"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 23,
         "column": 6,
         "length": 24
@@ -49,7 +49,7 @@
           },
           "name": "unannotated_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 24,
             "column": 5,
             "length": 17
@@ -77,7 +77,7 @@
           },
           "name": "sensitive_struct_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 25,
             "column": 5,
             "length": 22
@@ -105,7 +105,7 @@
           },
           "name": "sensitive_table_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 26,
             "column": 5,
             "length": 21
@@ -133,7 +133,7 @@
           },
           "name": "sensitive_union_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 27,
             "column": 5,
             "length": 21
@@ -163,7 +163,7 @@
         "Empty"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 6,
         "column": 6,
         "length": 5
@@ -188,7 +188,7 @@
         "NonSensitiveStruct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 30,
         "column": 6,
         "length": 18
@@ -211,7 +211,7 @@
           },
           "name": "sensitive_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 32,
             "column": 5,
             "length": 15
@@ -222,7 +222,7 @@
               "name": "sensitive",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
                 "line": 31,
                 "column": 5,
                 "length": 10
@@ -251,7 +251,7 @@
           },
           "name": "sensitive_struct_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 33,
             "column": 5,
             "length": 22
@@ -281,7 +281,7 @@
         "SensitiveStruct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 9,
         "column": 6,
         "length": 15
@@ -292,7 +292,7 @@
           "name": "sensitive",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 8,
             "column": 1,
             "length": 10
@@ -316,7 +316,7 @@
           },
           "name": "field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 10,
             "column": 5,
             "length": 5
@@ -349,7 +349,7 @@
         "NonSensitiveTable"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 36,
         "column": 6,
         "length": 17
@@ -373,7 +373,7 @@
           },
           "name": "sensitive_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 38,
             "column": 8,
             "length": 15
@@ -384,7 +384,7 @@
               "name": "sensitive",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
                 "line": 37,
                 "column": 5,
                 "length": 10
@@ -410,7 +410,7 @@
           },
           "name": "sensitive_struct_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 39,
             "column": 8,
             "length": 22
@@ -436,7 +436,7 @@
         "SensitiveTable"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 14,
         "column": 6,
         "length": 14
@@ -447,7 +447,7 @@
           "name": "sensitive",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 13,
             "column": 1,
             "length": 10
@@ -472,7 +472,7 @@
           },
           "name": "field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 15,
             "column": 8,
             "length": 5
@@ -500,7 +500,7 @@
         "NonSensitiveUnion"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 42,
         "column": 6,
         "length": 17
@@ -524,7 +524,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 44,
             "column": 8,
             "length": 15
@@ -535,7 +535,7 @@
               "name": "sensitive",
               "arguments": [],
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
                 "line": 43,
                 "column": 5,
                 "length": 10
@@ -561,7 +561,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 45,
             "column": 8,
             "length": 22
@@ -588,7 +588,7 @@
         "SensitiveUnion"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
         "line": 19,
         "column": 6,
         "length": 14
@@ -599,7 +599,7 @@
           "name": "sensitive",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 18,
             "column": 1,
             "length": 10
@@ -624,7 +624,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/sensitive.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/sensitive.test.fidl",
             "line": 20,
             "column": 8,
             "length": 5

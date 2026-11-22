@@ -17,13 +17,8 @@ from honeydew.affordances.ui.screenshot import (
 )
 from honeydew.affordances.ui.screenshot.types import ScreenshotImage
 from honeydew.affordances.ui.user_input import types as ui_types
-from honeydew.affordances.ui_navigation import (
-    BlackScreenUiAutomatorError,
-    UiAutomatorRetriableTaskError,
-    UiNavigation,
-    UnknownStateUiAutomatorError,
-    ui_navigation,
-)
+from honeydew.affordances.ui_navigation import errors as ui_navigation_errors
+from honeydew.affordances.ui_navigation import ui_navigation
 from honeydew.device_classes.android_device import AndroidDevice
 from honeydew.fuchsia_device.fuchsia_device import FuchsiaDevice
 from honeydew.transports.adb import adb as adb_transport
@@ -267,14 +262,16 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             missing_apk = pathlib.Path(tmp_dir) / "missing.apk"
             with self.assertRaises(errors.NotSupportedError):
-                UiNavigation(self.mock_adb, self.device, apk_path=missing_apk)
+                ui_navigation.UiNavigation(
+                    self.mock_adb, self.device, apk_path=missing_apk
+                )
 
             existing_apk = pathlib.Path(tmp_dir) / "uiautomator.apk"
             existing_apk.write_bytes(b"apk")
-            nav = UiNavigation(
+            nav = ui_navigation.UiNavigation(
                 self.mock_adb, self.device, apk_path=existing_apk
             )
-            self.assertIsInstance(nav, UiNavigation)
+            self.assertIsInstance(nav, ui_navigation.UiNavigation)
 
     async def test_run_uiautomator_task_fails_fast_on_not_supported_error(
         self,
@@ -417,7 +414,9 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(res, "done")
             self.assertEqual(calls, 2)
             mock_ui_dev.services.stop_all.assert_called_once_with()
-            self.mock_adb.check_connection.assert_called_once_with()
+            self.mock_adb.check_connection.assert_called_once_with(
+                timeout=adb_transport._DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS
+            )
             self.mock_adb.run.assert_any_call(
                 ["install", "-d", "-g", "-r", "/tmp/uiautomator.apk"]
             )
@@ -533,7 +532,9 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
             autospec=True,
             side_effect=fake_run_uiautomator,
         ):
-            with self.assertRaises(UiAutomatorRetriableTaskError) as ctx:
+            with self.assertRaises(
+                ui_navigation_errors.UiAutomatorRetriableTaskError
+            ) as ctx:
                 await self.device.ui_navigation.wait_for_idle_screen()
             self.assertIn("didn't settle", str(ctx.exception))
 
@@ -552,7 +553,9 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
                 return_value=True,
             ),
         ):
-            with self.assertRaises(UiAutomatorRetriableTaskError) as ctx:
+            with self.assertRaises(
+                ui_navigation_errors.UiAutomatorRetriableTaskError
+            ) as ctx:
                 await self.device.ui_navigation.wait_for_idle_screen()
             self.assertIn("Handled unexpected screen", str(ctx.exception))
 
@@ -575,7 +578,9 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
                 return_value=True,
             ),
         ):
-            with self.assertRaises(UiAutomatorRetriableTaskError) as ctx:
+            with self.assertRaises(
+                ui_navigation_errors.UiAutomatorRetriableTaskError
+            ) as ctx:
                 await self.device.ui_navigation.wait_for_idle_screen()
             self.assertIn("Dismissed blocking dialog", str(ctx.exception))
 
@@ -599,7 +604,9 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
                 return_value=False,
             ),
         ):
-            with self.assertRaises(UnknownStateUiAutomatorError):
+            with self.assertRaises(
+                ui_navigation_errors.UnknownStateUiAutomatorError
+            ):
                 await self.device.ui_navigation.wait_for_idle_screen()
             mock_ui.press.assert_called_with(uiautomator.KeyEvent.KEYCODE_HOME)
 
@@ -622,7 +629,7 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
                 invocations += 1
                 try:
                     await callback(mock_ui_device)
-                except UiAutomatorRetriableTaskError:
+                except ui_navigation_errors.UiAutomatorRetriableTaskError:
                     pass
 
         with (
@@ -658,9 +665,13 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
             "sleep_for_duration",
             new_callable=mock.AsyncMock,
         ):
-            with self.assertRaises(BlackScreenUiAutomatorError) as ctx:
+            with self.assertRaises(
+                ui_navigation_errors.BlackScreenUiAutomatorError
+            ) as ctx:
                 await self.device.ui_navigation.wait_for_idle_screen()
-            self.assertIsInstance(ctx.exception, UnknownStateUiAutomatorError)
+            self.assertIsInstance(
+                ctx.exception, ui_navigation_errors.UnknownStateUiAutomatorError
+            )
             self.assertEqual(
                 self.device.ui_navigation._consecutive_black_screen_count, 10
             )
@@ -766,7 +777,7 @@ class UiNavigationTest(unittest.IsolatedAsyncioTestCase):
     def test_ui_navigation_affordance_methods(self) -> None:
         """Verifies UiNavigation affordance methods delegate properly."""
         nav = self.device.ui_navigation
-        self.assertIsInstance(nav, UiNavigation)
+        self.assertIsInstance(nav, ui_navigation.UiNavigation)
         self.assertIs(nav.adb, self.mock_adb)
         self.mock_adb.verify_supported.assert_called()
 

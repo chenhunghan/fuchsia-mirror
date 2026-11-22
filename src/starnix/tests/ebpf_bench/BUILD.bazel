@@ -14,7 +14,10 @@ rustc_binary(
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
     deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/rust/zx",
         "//src/developer/fuchsia-criterion",
+        "//src/lib/fuchsia-component",
         "//src/starnix/lib/ebpf",
         "//src/starnix/lib/ebpf_api",
         "//src/starnix/lib/ebpf_loader",

@@ -8,12 +8,31 @@ use crate::object::{
     Dispatcher, HandleValue, JobDispatcher, ProcessDispatcher, SuspendTokenDispatcher,
     ThreadDispatcher,
 };
+use crate::user_copy::UserInPtr;
+use core::mem::MaybeUninit;
 use debug::ltracef;
 use syscalls_macro::syscall;
 use zx_status::Status;
-use zx_types::{ZX_RIGHT_DESTROY, ZX_RIGHT_WRITE, ZX_TASK_RETCODE_SYSCALL_KILL};
+use zx_types::{ZX_MAX_NAME_LEN, ZX_RIGHT_DESTROY, ZX_RIGHT_WRITE, ZX_TASK_RETCODE_SYSCALL_KILL};
 
 const LOCAL_TRACE: u32 = 0;
+
+/// Copies a required task name from user memory into `buf`, rejecting null pointers.
+///
+/// Unlike [`UserInPtr::copy_user_string`], which allows `(nullptr, 0)` for syscalls with optional
+/// names (such as `zx_resource_create`), task-creation syscalls require a non-null `name_ptr` even
+/// when `name_len == 0`.
+#[inline]
+pub(super) fn copy_user_name(
+    name_ptr: UserInPtr<u8>,
+    name_len: usize,
+    buf: &mut [MaybeUninit<u8>; ZX_MAX_NAME_LEN],
+) -> Result<&[u8], Status> {
+    if name_ptr.is_null() {
+        return Err(Status::INVALID_ARGS);
+    }
+    name_ptr.copy_user_string(name_len, buf)
+}
 
 #[syscall]
 pub fn sys_task_kill(handle: HandleValue) -> Result<(), Status> {

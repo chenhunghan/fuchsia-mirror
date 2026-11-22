@@ -103,4 +103,25 @@ TEST(PXAtests, Read) {
   EXPECT_EQ(uint8_t{'\r'}, driver.Read());
 }
 
+TEST(PXAtests, TxDrained) {
+  SimpleTestDriver driver(kTestConfig);
+
+  driver.io()
+      .mock()
+      // Init()
+      .ExpectWrite(uint8_t{0b0100'0000}, 1)  // IER
+      .ExpectWrite(uint8_t{0b0000'1111}, 2)  // FCR
+      .ExpectWrite(uint8_t{0b0000'0011}, 4)  // MCR
+      .ExpectRead(uint8_t{0b1110'0001}, 2)   // IIR
+      // TxDrained()
+      .ExpectRead(uint8_t{0b0000'0000}, 5)   // LineStatus (THRE and TEMT clear)
+      .ExpectRead(uint8_t{0b0010'0000}, 5)   // LineStatus (THRE set, TEMT clear)
+      .ExpectRead(uint8_t{0b0110'0000}, 5);  // LineStatus (THRE and TEMT set)
+
+  driver.Init();
+  EXPECT_FALSE(driver.TxDrained());
+  EXPECT_FALSE(driver.TxDrained());
+  EXPECT_TRUE(driver.TxDrained());
+}
+
 }  // namespace

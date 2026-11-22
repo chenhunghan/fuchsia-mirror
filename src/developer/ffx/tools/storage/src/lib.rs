@@ -22,6 +22,8 @@ pub struct StorageCommand {
 }
 
 #[derive(FfxTool)]
+// Every subcommand requires one of the deferred target proxies.
+#[target(Required)]
 pub struct StorageTool {
     #[command]
     cmd: StorageCommand,

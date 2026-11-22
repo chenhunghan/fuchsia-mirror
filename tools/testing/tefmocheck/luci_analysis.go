@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 
@@ -27,6 +28,10 @@ const (
 	// maxStabilityRequestBytes guards against piping pathologically large
 	// requests into `rdb rpc`.
 	maxStabilityRequestBytes = 1 << 20 // 1 MiB
+
+	// maxStabilityBatchSize is the maximum number of test variants allowed per
+	// LUCI Analysis QueryStability RPC request.
+	maxStabilityBatchSize = 100
 
 	defaultRPCTimeout = 15 * time.Second
 
@@ -67,17 +72,17 @@ func LoadExonerationConfig(path string) (*ExonerationConfig, error) {
 }
 
 // ApplyStabilityExoneration queries LUCI Analysis QueryStability for failing
-// tests in summary and updates summary in place (attaching dry-run tags when
-// cfg.DryRun is true, or marking unstable failures EXONERATED when false).
-func ApplyStabilityExoneration(ctx context.Context, cfg *ExonerationConfig, summary *runtests.TestSummary, checkTests []runtests.TestDetails) error {
-	if cfg == nil || summary == nil || len(summary.Tests) == 0 {
+// tests in outputs.TestSummary and updates it in place (attaching dry-run tags
+// when cfg.DryRun is true, or marking unstable failures EXONERATED when false).
+func ApplyStabilityExoneration(ctx context.Context, cfg *ExonerationConfig, outputs *TestingOutputs) error {
+	if cfg == nil || outputs == nil || outputs.TestSummary == nil || len(outputs.TestSummary.Tests) == 0 {
 		return nil
 	}
-	// TODO(b/575894983): Revisit including tefmocheck checks in stability
-	// exoneration once the tefmocheck ResultDB migration finishes.
-	if hasBlockingCheckFailure(checkTests) {
+	if isMultipliedShard(outputs.SwarmingSummary) {
 		return nil
 	}
+
+	summary := outputs.TestSummary
 
 	failedTargets, testIDs := collectFailedTargetsAndTestIDs(summary.Tests)
 	if len(testIDs) == 0 {
@@ -87,9 +92,7 @@ func ApplyStabilityExoneration(ctx context.Context, cfg *ExonerationConfig, summ
 		return nil
 	}
 
-	rpcCtx, cancelRPC := context.WithTimeout(ctx, defaultRPCTimeout)
-	defer cancelRPC()
-	unstable, err := queryStability(rpcCtx, cfg, testIDs)
+	unstable, err := queryStability(ctx, cfg, testIDs)
 	if err != nil {
 		return err
 	}
@@ -98,53 +101,35 @@ func ApplyStabilityExoneration(ctx context.Context, cfg *ExonerationConfig, summ
 	return nil
 }
 
-// hasBlockingCheckFailure reports whether RunChecks emitted a shard-level
-// failure mode without a companion PASS flake entry.
-func hasBlockingCheckFailure(checkTests []runtests.TestDetails) bool {
-	if len(checkTests) == 0 {
-		return false
-	}
-	passed := make(map[string]bool)
-	failed := make(map[string]bool)
-	for _, ct := range checkTests {
-		if ct.Status == runtests.TestSuccess {
-			passed[ct.Name] = true
-		} else if runtests.IsFailure(ct.Status) && ct.Status != runtests.TestExonerated {
-			failed[ct.Name] = true
-		}
-	}
-	for name := range failed {
-		if !passed[name] {
-			return true
-		}
-	}
-	return false
-}
-
 // isExonerableStatus excludes INFRA_FAIL (bot/harness failures surfaced as
 // purple builds) and already-exonerated results.
 func isExonerableStatus(status runtests.TestStatus) bool {
 	return runtests.IsFailure(status) && status != runtests.TestExonerated && status != runtests.TestInfraFailure
 }
 
+func isMultipliedShard(s *SwarmingTaskSummary) bool {
+	return s != nil && s.Results != nil && strings.HasPrefix(s.Results.Name, runtests.MultipliedShardPrefix)
+}
+
+func hasTestTag(tags []build.TestTag, key, value string) bool {
+	for _, tag := range tags {
+		if tag.Key == key && tag.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
 // shouldExcludeTarget reports entries that disqualify all runs of t.Name from
 // exoneration (synthetic tefmocheck entries, recovered retries/multiplied
-// passes, infra failures, and suite setup/teardown crashes).
-// See TODO(b/575894983) in ApplyStabilityExoneration regarding tefmocheck entries.
+// passes, infra failures, multiplied runs, and suite setup/teardown crashes).
 func shouldExcludeTarget(t *runtests.TestDetails) bool {
 	return t.IsTestingFailureMode ||
 		t.Status == runtests.TestSuccess ||
 		t.Status == runtests.TestInfraFailure ||
+		hasTestTag(t.Tags, runtests.MultipliedRunTagKey, "true") ||
 		(t.SetupSucceeded != nil && !*t.SetupSucceeded) ||
 		(t.TeardownSucceeded != nil && !*t.TeardownSucceeded)
-}
-
-// testIsInScope excludes non-exonerable statuses and targets disqualified by
-// shouldExcludeTarget.
-func testIsInScope(t *runtests.TestDetails) bool {
-	return t.Status != runtests.TestSkipped &&
-		t.Status != runtests.TestExonerated &&
-		!shouldExcludeTarget(t)
 }
 
 func caseIsInScope(tc *runtests.TestCaseResult) bool {
@@ -188,15 +173,16 @@ func collectFailedTargetsAndTestIDs(tests []runtests.TestDetails) (map[string]bo
 		t := &tests[i]
 		if shouldExcludeTarget(t) {
 			excludedTargets[t.Name] = true
+			delete(idsByTarget, t.Name)
 			continue
 		}
-		if excludedTargets[t.Name] || !testIsInScope(t) {
+		if excludedTargets[t.Name] || !isExonerableStatus(t.Status) {
 			continue
 		}
 		// TODO(b/527958872): Drop legacy flat IDs (t.Name and LegacyTestCaseID)
 		// once structured test IDs are fully rolled out in ResultDB. Sending
-		// both IDs caps QueryStability's 100-variant per-RPC limit at 50
-		// failing test cases per shard; dropping legacy IDs raises it to 100.
+		// both IDs doubles the number of variants queried across 100-variant
+		// QueryStability batches.
 		if len(t.Cases) == 0 {
 			addValidID(t.Name, structuredDetailTestID(t))
 			addValidID(t.Name, t.Name)
@@ -207,7 +193,7 @@ func collectFailedTargetsAndTestIDs(tests []runtests.TestDetails) (map[string]bo
 			tc := &t.Cases[j]
 			if caseIsInScope(tc) {
 				addValidID(t.Name, structuredCaseTestID(scheme, t, tc))
-				addValidID(t.Name, resultdb.LegacyTestCaseID(t.Name, tc.SuiteName, tc.CaseName))
+				addValidID(t.Name, resultdb.LegacyTestCaseIDForCase(t, tc))
 			}
 		}
 	}
@@ -216,9 +202,6 @@ func collectFailedTargetsAndTestIDs(tests []runtests.TestDetails) (map[string]bo
 	var testIDs []string
 	seenIDs := make(map[string]bool)
 	for name, ids := range idsByTarget {
-		if excludedTargets[name] {
-			continue
-		}
 		failedTargets[name] = true
 		for _, id := range ids {
 			if !seenIDs[id] {
@@ -260,44 +243,49 @@ func queryStability(ctx context.Context, cfg *ExonerationConfig, testIDs []strin
 		variant = &analysispb.Variant{Def: cfg.Variant}
 	}
 
-	positions := make([]*analysispb.QueryTestVariantStabilityRequest_TestVariantPosition, len(testIDs))
-	for i, id := range testIDs {
-		positions[i] = &analysispb.QueryTestVariantStabilityRequest_TestVariantPosition{
-			TestId:  id,
-			Variant: variant,
-			Sources: sources,
-		}
-	}
-
-	reqBytes, err := protojson.Marshal(&analysispb.QueryTestVariantStabilityRequest{
-		Project:      cfg.Project,
-		TestVariants: positions,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshaling QueryStability request: %w", err)
-	}
-	if len(reqBytes) > maxStabilityRequestBytes {
-		return nil, fmt.Errorf("QueryStability request size %d bytes exceeds %d byte limit", len(reqBytes), maxStabilityRequestBytes)
-	}
-
 	runRPC := cfg.RunRdbRPC
 	if runRPC == nil {
 		runRPC = defaultRunRdbRPC
 	}
-	respBytes, err := runRPC(ctx, cfg.LUCIAnalysisHost, reqBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	var parsed analysispb.QueryTestVariantStabilityResponse
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(respBytes, &parsed); err != nil {
-		return nil, fmt.Errorf("unmarshaling QueryStability response: %w", err)
-	}
 
 	unstable := make(map[string]*analysispb.TestVariantStabilityAnalysis)
-	for _, tv := range parsed.GetTestVariants() {
-		if tv.GetFailureRate().GetIsMet() || tv.GetFlakeRate().GetIsMet() {
-			unstable[tv.GetTestId()] = tv
+	for batchIDs := range slices.Chunk(testIDs, maxStabilityBatchSize) {
+		positions := make([]*analysispb.QueryTestVariantStabilityRequest_TestVariantPosition, len(batchIDs))
+		for i, id := range batchIDs {
+			positions[i] = &analysispb.QueryTestVariantStabilityRequest_TestVariantPosition{
+				TestId:  id,
+				Variant: variant,
+				Sources: sources,
+			}
+		}
+
+		reqBytes, err := protojson.Marshal(&analysispb.QueryTestVariantStabilityRequest{
+			Project:      cfg.Project,
+			TestVariants: positions,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("marshaling QueryStability request: %w", err)
+		}
+		if len(reqBytes) > maxStabilityRequestBytes {
+			return nil, fmt.Errorf("QueryStability request size %d bytes exceeds %d byte limit", len(reqBytes), maxStabilityRequestBytes)
+		}
+
+		rpcCtx, cancelRPC := context.WithTimeout(ctx, defaultRPCTimeout)
+		respBytes, err := runRPC(rpcCtx, cfg.LUCIAnalysisHost, reqBytes)
+		cancelRPC()
+		if err != nil {
+			return nil, err
+		}
+
+		var parsed analysispb.QueryTestVariantStabilityResponse
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(respBytes, &parsed); err != nil {
+			return nil, fmt.Errorf("unmarshaling QueryStability response: %w", err)
+		}
+
+		for _, tv := range parsed.GetTestVariants() {
+			if tv.GetFailureRate().GetIsMet() || tv.GetFlakeRate().GetIsMet() {
+				unstable[tv.GetTestId()] = tv
+			}
 		}
 	}
 	return unstable, nil
@@ -336,7 +324,7 @@ func applyVerdict(dryRun bool, status *runtests.TestStatus, explanation *string,
 func applyStabilityVerdicts(dryRun bool, tests []runtests.TestDetails, failedTargets map[string]bool, unstable map[string]*analysispb.TestVariantStabilityAnalysis) {
 	for i := range tests {
 		t := &tests[i]
-		if !failedTargets[t.Name] || !testIsInScope(t) {
+		if !failedTargets[t.Name] || !isExonerableStatus(t.Status) {
 			continue
 		}
 
@@ -358,7 +346,7 @@ func applyStabilityVerdicts(dryRun bool, tests []runtests.TestDetails, failedTar
 				continue
 			}
 			if caseIsInScope(tc) {
-				if tv := cmp.Or(unstable[structuredCaseTestID(scheme, t, tc)], unstable[resultdb.LegacyTestCaseID(t.Name, tc.SuiteName, tc.CaseName)]); tv != nil {
+				if tv := cmp.Or(unstable[structuredCaseTestID(scheme, t, tc)], unstable[resultdb.LegacyTestCaseIDForCase(t, tc)]); tv != nil {
 					matchedCases++
 					applyVerdict(dryRun, &tc.Status, &tc.ExonerationExplanation, &tc.Tags, tv)
 					continue

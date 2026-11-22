@@ -1,0 +1,113 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":resource-usage-benchmarks-netstack3_test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_binary(
+    name = "resource_usage_benchmark",
+    testonly = True,
+    srcs = [
+        "src/interfaces.rs",
+        "src/main.rs",
+        "src/paced_traffic.rs",
+        "src/sockets.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust",
+        "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/packet",
+        "//src/performance/lib/fuchsiaperf",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:humansize",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+fx_packaged_binary(
+    name = "resource_usage_benchmark_packaged_bin",
+    testonly = True,
+    binary = ":resource_usage_benchmark",
+    binary_name = "resource_usage_benchmark",
+)
+
+cml_shard(
+    name = "meta/common.shard",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//src/connectivity/network/tests/integration/common:client.shard",
+    ],
+    shard = "meta/common.shard.cml",
+)
+
+fx_component_manifest(
+    name = "resource-usage-benchmark-netstack3_manifest",
+    testonly = True,
+    component_name = "resource-usage-benchmark-netstack3",
+    includes = [":meta/common.shard"],
+    manifest = "meta/resource-usage-benchmark-netstack3.cml",
+)
+
+fx_test_component(
+    name = "resource-usage-benchmark-netstack3",
+    compiled_manifest = ":resource-usage-benchmark-netstack3_manifest",
+    deps = [
+        ":resource_usage_benchmark_packaged_bin",
+        "//src/sys/stash:stash_secure_v2",
+    ],
+)
+
+fx_package(
+    name = "resource-usage-benchmarks-netstack3",
+    subpackages = [
+        "//src/connectivity/network/netstack3:package-for-tests",
+        "//src/connectivity/network/testing/netemul/service:package",
+    ],
+    test_components = [":resource-usage-benchmark-netstack3"],
+)
+
+fx_test(
+    name = "resource-usage-benchmarks-netstack3_test",
+    package = ":resource-usage-benchmarks-netstack3",
+)

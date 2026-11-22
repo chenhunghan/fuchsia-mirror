@@ -18,9 +18,3 @@ static FLOW_ID_GENERATOR: AtomicU64 = AtomicU64::new(FIRST_KERNEL_FLOW_ID);
 pub fn generate() -> u64 {
     FLOW_ID_GENERATOR.fetch_add(1, Ordering::Relaxed)
 }
-
-/// Generates globally unique 64-bit flow IDs for tracing (C-exported).
-#[unsafe(no_mangle)]
-pub extern "C" fn flow_id_generate() -> u64 {
-    generate()
-}

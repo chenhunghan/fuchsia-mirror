@@ -21,13 +21,13 @@
     ],
     offer: [
         {
-            name: "pwm-ffd1b000",
+            name: "pwm",
             service: "fuchsia.pwm.Init",
             from: "#pwm-init",
             to: "#mmc-ffe03000",
         },
         {
-            name: "gpio-sdio-reset",
+            name: "gpio-reset",
             service: "fuchsia.hardware.gpio.Service",
             from: "#gpio-controller-ff634400",
             to: "#mmc-ffe03000",
@@ -94,7 +94,7 @@
             constraints: { clock_id: 65548 },
         },
         {
-            name: "gpio-emmc-reset",
+            name: "gpio-reset",
             service: "fuchsia.hardware.gpio.Service",
             from: "#gpio-controller-ff634400",
             to: "#mmc-ffe07000",

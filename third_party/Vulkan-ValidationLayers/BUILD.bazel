@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "layer_common",
+    srcs = [
+        "src/layers/utils/vk_layer_extension_utils.cpp",
+        "src/layers/vulkan/generated/error_location_helper.cpp",
+        "src/layers/vulkan/generated/vk_dispatch_table_helper.cpp",
+    ],
+    hdrs = glob(["src/layers/**/*.h"]),
+    copts = ["-Wno-extra-semi"],
+    includes = [
+        "src/layers",
+        "src/layers/error_message",
+        "src/layers/external",
+        "src/layers/utils",
+        "src/layers/vulkan",
+        "src/layers/vulkan/generated",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//third_party/Vulkan-Headers:vulkan_headers",
+        "//third_party/Vulkan-Utility-Libraries:vulkan_layer_settings",
+    ],
+)

@@ -40,23 +40,22 @@ tests = [
   {
     label = "dhcpv6-client"
     err_logs = true
-    package_deps = [ "//src/connectivity/network/dhcpv6/client:component" ]
+    subpackages = [ "//src/connectivity/network/dhcpv6/client:package" ]
   },
   {
     label = "dns"
     err_logs = true
     package_deps = [
-      "//src/connectivity/network/dhcpv6/client:component",
-      "//src/connectivity/network/dns:component_with_fake_time",
-      "//src/connectivity/policy/netcfg:component",
-      "//src/connectivity/policy/socket-proxy:component",
-      "//src/connectivity/policy/tests/integration:netcfg-netemul-configs",
       "//src/lib/fake-clock/svc",
       "//src/sys/stash:stash_secure_v2",
     ]
     subpackages = [
       "//src/connectivity/network/dhcpv4/client/bindings:package",
       "//src/connectivity/network/dhcpv4/server:package",
+      "//src/connectivity/network/dhcpv6/client:package",
+      "//src/connectivity/network/dns:package_with_fake_time",
+      "//src/connectivity/policy/netcfg:package-for-tests",
+      "//src/connectivity/policy/socket-proxy:package",
     ]
   },
   {
@@ -89,13 +88,13 @@ tests = [
     label = "product-flow"
     err_logs = true
     package_deps = [
-      "//src/connectivity/network/dns:component_with_fake_time",
       "//src/lib/fake-clock/svc",
       "//src/sys/stash:stash_secure_v2",
     ]
     subpackages = [
       "//src/connectivity/network/dhcpv4/client/bindings:package",
       "//src/connectivity/network/dhcpv4/server:package",
+      "//src/connectivity/network/dns:package_with_fake_time",
     ]
   },
   {
@@ -120,14 +119,14 @@ tests = [
 common_package_deps = [
   # Expectation comparer used by all tests.
   "//src/lib/testing/expectation:expectation_comparer",
-
-  # netemul-sandbox is used to create hermetic test realms.
-  "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
 ]
 
 common_subpackages = [
   # Netstack3 is commonly under test.
   "//src/connectivity/network/netstack3:package-for-tests",
+
+  # netemul-sandbox is used to create hermetic test realms.
+  "//src/connectivity/network/testing/netemul/service:package",
 ]
 
 non_log_less_subpackages =

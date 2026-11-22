@@ -7,8 +7,15 @@ load(
     "starnix_sync_detect_lock_dep_cycles",
 )
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":starnix_sync-tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
 
 rustc_library(
     name = "starnix_sync",
@@ -100,4 +107,9 @@ rustc_test(
         "//third_party/rust_crates/vendor:smallvec",
         "//third_party/rust_crates/vendor:test-case",
     ],
+)
+
+fx_unittest_package(
+    name = "starnix_sync-tests",
+    unit_tests = [":starnix_sync_lib_test"],
 )

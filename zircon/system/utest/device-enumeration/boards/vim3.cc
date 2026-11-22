@@ -24,7 +24,7 @@ TEST_F(DeviceEnumerationTest, Vim3DeviceTreeTest) {
       "clock-controller-ff63c000.clocks",
       "clock-controller-ff63c000.clocks.clock-init",
       "display-ff900000",
-      "ethernet-phy-ff634000.aml-ethernet.dwmac-ff3f0000.dwmac.Designware-MAC.network-device",
+      "ethernet-phy-ff634000.aml-ethernet.dwmac-ff3f0000.dwmac.Designware-MAC",
       "ethernet-phy-ff634000.aml-ethernet.dwmac-ff3f0000.dwmac.eth_phy.phy_null_device",
 #if !USE_VIM3_DML
       "fuchsia-sysmem",
@@ -58,7 +58,7 @@ TEST_F(DeviceEnumerationTest, Vim3DeviceTreeTest) {
       "usb-phy-ffe09000.aml_usb_phy",
       "usb-phy-ffe09000.aml_usb_phy.dwc2-phy",
       "usb-ff400000.dwc2",
-      "usb-ff400000.dwc2.usb-peripheral.function-000.usb-cdc-netdev.network-device",
+      "usb-ff400000.dwc2.usb-peripheral.function-000.usb-cdc-netdev",
       "usb-phy-ffe09000.aml_usb_phy.xhci",
       "power-controller.power-impl.power-core.power-0",
       "power-controller.power-impl.power-core.power-0.cpu-controller-0",

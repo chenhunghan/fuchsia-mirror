@@ -12,6 +12,7 @@ group("tests") {
 
   deps = [
     ":args_test($host_toolchain)",
+    ":bazel_tests_test($host_toolchain)",
     ":config_test($host_toolchain)",
     ":console_test($host_toolchain)",
     ":debugger_test($host_toolchain)",
@@ -34,6 +35,7 @@ group("tests") {
 if (is_host) {
   binary_sources = [
     "args.py",
+    "bazel_tests.py",
     "config.py",
     "console.py",
     "debugger.py",
@@ -53,6 +55,7 @@ if (is_host) {
 
   binary_deps = [
     "dataparse",
+    "//build/python/modules/bazel_labels",
     "//scripts/debug/zxdb_cli/daemon:install",
     "//scripts/debug/zxdb_cli/daemon_manager",
     "//scripts/fxtest/scripts:install",
@@ -81,6 +84,7 @@ if (is_host) {
 
   main_module_tests = [
     "args",
+    "bazel_tests",
     "config",
     "console",
     "debugger",

@@ -2,19 +2,45 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//src/developer/ffx/build:gn_ffx_test_data.bzl", "gn_ffx_test_data")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
 
 package(default_applicable_licenses = ["//:license"])
 
-# Exposes the GN-built ffx-product-bundle subtool and metadata JSON to Bazel
-# host tests until //src/developer/ffx/plugins/product_bundle is migrated to
-# Bazel.
-# @bazel2gn:skip
-gn_ffx_test_data(
-    name = "ffx_product_bundle_tool_test_data",
-    expected_files = [
-        "ffx-product-bundle",
-        "ffx-product-bundle.json",
+ffx_plugin(
+    name = "ffx_product_bundle",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
     ],
-    visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/plugins/product_bundle/bisect:ffx_product_bundle_bisect",
+        "//src/developer/ffx/plugins/product_bundle/create:ffx_product_bundle_create",
+    ],
+    sdk_category = "partner",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx/frontends/ffx:__pkg__"],
 )
+
+# LINT.IfChange(ffx_product_bundle_tool)
+# When used in the build, this separate subtool version is used to avoid
+# its build steps depending on all of ffx.
+# Avoid instrumenting this target as it has a large negative impact on
+# performance.
+# TODO(https://fxbug.dev/576944236): Disable instrumentation (asan, coverage,
+# profile) for this tool once Rust rules support it in Bazel.
+idk_ffx_tool(
+    name = "ffx_product_bundle_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-product-bundle",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":ffx_product_bundle_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(//src/developer/ffx/plugins/product_bundle/BUILD.gn:ffx_product_bundle_tool)

@@ -55,7 +55,7 @@ var (
 
 func isLinuxResourceBinaryRule(rule string) bool {
 	switch rule {
-	case "cc_binary", "fx_cc_binary", "fx_cc_test_binary", "rustc_binary", "rust_binary":
+	case "cc_binary", "fx_cc_binary", "fx_cc_test_binary", "vulkan_executable", "vulkan_test", "rustc_binary", "rust_binary":
 		return true
 	default:
 		return false
@@ -87,7 +87,11 @@ func hasRawOutputNameAttr(rawAttrs []string) bool {
 //     consumers in the file, so Linux-only `configs` / `sources` are not
 //     evaluated in Fuchsia or host toolchains.
 func resolveLinuxResourceTargets(f *syntax.File) error {
-	gnBins, err := indexGNBinaries(f)
+	return resolveLinuxResourceTargetsWithConfig(f, nil)
+}
+
+func resolveLinuxResourceTargetsWithConfig(f *syntax.File, cfg *Config) error {
+	gnBins, err := indexGNBinariesWithConfig(f, cfg)
 	if err != nil {
 		return err
 	}
@@ -174,7 +178,7 @@ func resolveLinuxResourceTargets(f *syntax.File) error {
 		if !ok {
 			continue
 		}
-		if fn.Name == "linux_resource" || fn.Name == "package" || bazelRuleToGNTemplate[fn.Name] == noGNEquivalent {
+		if fn.Name == "linux_resource" || fn.Name == "package" || cfg.isNoGNEquivalent(fn.Name) {
 			continue
 		}
 		var binName string

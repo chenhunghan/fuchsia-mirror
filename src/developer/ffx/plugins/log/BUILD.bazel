@@ -2,12 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
 load("//src/developer/ffx/build:gn_ffx_test_data.bzl", "gn_ffx_test_data")
 
 package(default_applicable_licenses = ["//:license"])
 
-exports_files(
-    ["data/config.json"],
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":ffx_log_test"],
     visibility = ["//src/developer/ffx:__pkg__"],
 )
 
@@ -21,4 +26,73 @@ gn_ffx_test_data(
         "ffx-log.json",
     ],
     visibility = ["//src/developer/ffx/build/tests:__pkg__"],
+)
+
+ffx_plugin(
+    name = "ffx_log",
+    srcs = [
+        "src/condition_variable.rs",
+        "src/error.rs",
+        "src/lib.rs",
+        "src/mutex.rs",
+        "src/testing_utils.rs",
+        "src/transactional_symbolizer.rs",
+    ],
+    args_deps = ["//src/diagnostics/lib/log-command:log-command_fdomain"],
+    args_srcs = ["src/args.rs"],
+    config_data = ["data/config.json"],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:derivative"],
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = ["//src/developer/ffx:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_fdomain",
+        "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust_fdomain",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/symbol-index:lib",
+        "//src/developer/ffx/lib/target/connector:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/plugins/log/command_output",
+        "//src/diagnostics/lib/log-command:log-command_fdomain",
+        "//src/lib/agents:lib",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:pin-project",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tokio",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_log_test",
+    crate = ":ffx_log",
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust",
+        "//sdk/fidl/fuchsia.diagnostics.host:fuchsia.diagnostics.host_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/developer/ffx/lib/target:lib",
+        "//src/lib/diagnostics/log/encoding/rust",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-sync",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
 )

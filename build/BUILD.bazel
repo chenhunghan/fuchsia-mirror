@@ -18,14 +18,20 @@ test_suite(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         ":shac_test",
+        "//build/assembly/tools/assembly_config:host_tests",
         "//build/assembly/tools/generate_assembly_scrutiny_configs:host_tests",
+        "//build/assembly/tools/mos_tool:host_tests",
         "//build/bazel/scripts:fetch_cipd_prebuilt_test",
         "//build/bazel/scripts:generate_fx_host_tool_test",
         "//build/go:verify_golden_go_proto_file_test",
+        "//build/resultstore:host_tests",
+        "//build/scripts:host_tests",
         "//build/sdk/generate_version_history:generate_version_history_unittest",
+        "//build/testing/formal_verification:host_tests",
         "//build/tracer:action_tracer_test",
         "//build/tracer:output_cacher_test",
         "//build/tracer:restat_cacher_test",
+        "//build/tui:host_tests",
     ],
 )
 

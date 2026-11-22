@@ -8,6 +8,7 @@
 #include <zircon/syscalls.h>
 
 #include <atomic>
+#include <cmath>
 #include <thread>
 
 #include <fbl/string_printf.h>
@@ -25,6 +26,7 @@
 #include "src/media/audio/lib/clock/testing/clock_test.h"
 #include "src/media/audio/lib/clock/utils.h"
 #include "src/media/audio/lib/format/constants.h"
+#include "src/media/audio/lib/processing/filter.h"
 #include "src/media/audio/lib/processing/gain.h"
 #include "src/media/audio/lib/timeline/timeline_rate.h"
 
@@ -193,6 +195,251 @@ TEST_F(MixStageTest, AddInputMixerSelection) {
                                                                Mixer::Resampler::SampleAndHold));
   ValidateIsPointSampler(fixed_device_mix_stage->AddInput(custom_same_rate, std::nullopt,
                                                           Mixer::Resampler::SampleAndHold));
+}
+
+namespace {
+
+class SineStream : public ReadableStream {
+ public:
+  SineStream(const Format& format, std::shared_ptr<Clock> clock, double freq_hz)
+      : ReadableStream("SineStream", format),
+        clock_(std::move(clock)),
+        freq_hz_(freq_hz),
+        timeline_function_(fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(
+            TimelineRate(Fixed(format.frames_per_second()).raw_value(), zx::sec(1).to_nsecs())))) {}
+
+  TimelineFunctionSnapshot ref_time_to_frac_presentation_frame() const override {
+    auto [timeline_function, generation] = timeline_function_->get();
+    return {.timeline_function = timeline_function, .generation = generation};
+  }
+  std::shared_ptr<Clock> reference_clock() override { return clock_; }
+
+ protected:
+  std::optional<Buffer> ReadLockImpl(ReadLockContext& ctx, Fixed frame,
+                                     int64_t frame_count) override {
+    const int32_t channels = format().channels();
+    buffer_.resize(frame_count * channels);
+    double omega = 2.0 * M_PI * freq_hz_ / static_cast<double>(format().frames_per_second());
+    for (int64_t i = 0; i < frame_count; ++i) {
+      const float val =
+          static_cast<float>(std::cos(omega * static_cast<double>(frame.Floor() + i)));
+      for (int32_t ch = 0; ch < channels; ++ch) {
+        buffer_[i * channels + ch] = val;
+      }
+    }
+    return MakeUncachedBuffer(frame, frame_count, buffer_.data(), StreamUsageMask(), 0.0f);
+  }
+  void TrimImpl(Fixed frame) override {}
+
+ private:
+  std::shared_ptr<Clock> clock_;
+  double freq_hz_;
+  fbl::RefPtr<VersionedTimelineFunction> timeline_function_;
+  std::vector<float> buffer_;
+};
+
+}  // namespace
+
+// Verifies MixStage with HighPassWindowedSinc rejects invalid rates and filters audible tones.
+TEST_F(MixStageTest, AddInputHighPassWindowedSinc) {
+  const Format k96kFormat =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 1,
+                         .frames_per_second = 96000,
+                     })
+          .take_value();
+
+  // Mismatched frame rates and rates <= 2 * kUltrasoundMinFrequencyHz must be rejected.
+  const Format kFormat48k =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 1,
+                         .frames_per_second = 48000,
+                     })
+          .take_value();
+  const Format kFormat44k =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 1,
+                         .frames_per_second = 44100,
+                     })
+          .take_value();
+  EXPECT_EQ(Mixer::Select(kFormat48k.stream_type(), k96kFormat.stream_type(),
+                          Mixer::Resampler::HighPassWindowedSinc),
+            nullptr);
+  EXPECT_EQ(Mixer::Select(kFormat44k.stream_type(), kFormat44k.stream_type(),
+                          Mixer::Resampler::HighPassWindowedSinc),
+            nullptr);
+
+  auto timeline_96k = fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(
+      TimelineRate(Fixed(k96kFormat.frames_per_second()).raw_value(), zx::sec(1).to_nsecs())));
+
+  auto adjustable_device_clock = context().clock_factory()->CreateDeviceAdjustable(
+      clock::AdjustableCloneOfMonotonic(), Clock::kMonotonicDomain + 1);
+  auto adjustable_stage = std::make_shared<MixStage>(k96kFormat, kBlockSizeFrames, timeline_96k,
+                                                     adjustable_device_clock);
+
+  auto fixed_device_clock = context().clock_factory()->CreateDeviceFixed(clock::CloneOfMonotonic(),
+                                                                         Clock::kMonotonicDomain);
+  auto fixed_stage =
+      std::make_shared<MixStage>(k96kFormat, kBlockSizeFrames, timeline_96k, fixed_device_clock);
+
+  auto adjustable_client = std::make_shared<PacketQueue>(
+      k96kFormat, timeline_96k,
+      context().clock_factory()->CreateClientAdjustable(clock::AdjustableCloneOfMonotonic()));
+  auto custom_client = std::make_shared<PacketQueue>(
+      k96kFormat, timeline_96k,
+      context().clock_factory()->CreateClientFixed(clock::CloneOfMonotonic()));
+
+  // Verify filter width under both WithAdjustments and WithMicroSRC modes
+  auto mixer_adj = adjustable_stage->AddInput(adjustable_client, std::nullopt,
+                                              Mixer::Resampler::HighPassWindowedSinc);
+  ASSERT_THAT(mixer_adj, ::testing::NotNull());
+  EXPECT_EQ(mixer_adj->pos_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracHighPassSideLength - 1));
+
+  auto mixer_micro_src =
+      fixed_stage->AddInput(custom_client, std::nullopt, Mixer::Resampler::HighPassWindowedSinc);
+  ASSERT_THAT(mixer_micro_src, ::testing::NotNull());
+  EXPECT_EQ(mixer_micro_src->pos_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracHighPassSideLength - 1));
+
+  // Verify filtering of 1 kHz tone (attenuated) and 28 kHz tone (passed)
+  auto stage_for_filtering =
+      std::make_shared<MixStage>(k96kFormat, kBlockSizeFrames, timeline_96k, fixed_device_clock);
+  auto stream_1k = std::make_shared<SineStream>(k96kFormat, fixed_device_clock, 1000.0);
+  stage_for_filtering->AddInput(stream_1k, std::nullopt, Mixer::Resampler::HighPassWindowedSinc);
+
+  {
+    // Prime the filter by reading initial frames (transient response from silence)
+    stage_for_filtering->ReadLock(rlctx, Fixed(0), 100).reset();
+
+    // Now read steady-state frames
+    auto buf_1k = stage_for_filtering->ReadLock(rlctx, Fixed(100), 200);
+    ASSERT_TRUE(buf_1k);
+    const float* payload_1k = reinterpret_cast<const float*>(buf_1k->payload());
+    float max_1k = 0.0f;
+    for (int64_t i = 0; i < buf_1k->length(); ++i) {
+      max_1k = std::max(max_1k, std::abs(payload_1k[i]));
+    }
+    EXPECT_LT(max_1k, 1e-4f);
+  }
+
+  stage_for_filtering->RemoveInput(*stream_1k);
+
+  auto stream_28k = std::make_shared<SineStream>(k96kFormat, fixed_device_clock, 28000.0);
+  stage_for_filtering->AddInput(stream_28k, std::nullopt, Mixer::Resampler::HighPassWindowedSinc);
+
+  {
+    // Prime the filter for 28 kHz
+    stage_for_filtering->ReadLock(rlctx, Fixed(300), 100).reset();
+
+    auto buf_28k = stage_for_filtering->ReadLock(rlctx, Fixed(400), 200);
+    ASSERT_TRUE(buf_28k);
+    const float* payload_28k = reinterpret_cast<const float*>(buf_28k->payload());
+    float max_28k = 0.0f;
+    for (int64_t i = 0; i < buf_28k->length(); ++i) {
+      max_28k = std::max(max_28k, std::abs(payload_28k[i]));
+    }
+    EXPECT_GT(max_28k, 0.95f);
+  }
+}
+
+// Verifies MixStage with LowPassWindowedSinc rejects invalid source rates and filters ultrasound.
+TEST_F(MixStageTest, AddInputLowPassWindowedSinc) {
+  const Format k96kFormat =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 1,
+                         .frames_per_second = 96000,
+                     })
+          .take_value();
+  const Format kFormat48k =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 1,
+                         .frames_per_second = 48000,
+                     })
+          .take_value();
+  const Format kFormat44k =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 1,
+                         .frames_per_second = 44100,
+                     })
+          .take_value();
+
+  // Source rates <= 2 * kAudioMaxFrequencyHz (46 kHz) must be rejected.
+  EXPECT_EQ(Mixer::Select(kFormat44k.stream_type(), kFormat44k.stream_type(),
+                          Mixer::Resampler::LowPassWindowedSinc),
+            nullptr);
+  EXPECT_EQ(Mixer::Select(kFormat44k.stream_type(), kFormat48k.stream_type(),
+                          Mixer::Resampler::LowPassWindowedSinc),
+            nullptr);
+
+  auto timeline_96k = fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(
+      TimelineRate(Fixed(k96kFormat.frames_per_second()).raw_value(), zx::sec(1).to_nsecs())));
+  auto timeline_48k = fbl::MakeRefCounted<VersionedTimelineFunction>(TimelineFunction(
+      TimelineRate(Fixed(kFormat48k.frames_per_second()).raw_value(), zx::sec(1).to_nsecs())));
+
+  auto fixed_device_clock = context().clock_factory()->CreateDeviceFixed(clock::CloneOfMonotonic(),
+                                                                         Clock::kMonotonicDomain);
+  auto stage_96k =
+      std::make_shared<MixStage>(k96kFormat, kBlockSizeFrames, timeline_96k, fixed_device_clock);
+  auto stage_48k =
+      std::make_shared<MixStage>(kFormat48k, kBlockSizeFrames, timeline_48k, fixed_device_clock);
+
+  auto custom_client = std::make_shared<PacketQueue>(
+      k96kFormat, timeline_96k,
+      context().clock_factory()->CreateClientFixed(clock::CloneOfMonotonic()));
+
+  auto mixer_96k =
+      stage_96k->AddInput(custom_client, std::nullopt, Mixer::Resampler::LowPassWindowedSinc);
+  ASSERT_THAT(mixer_96k, ::testing::NotNull());
+  EXPECT_EQ(mixer_96k->pos_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracHighPassSideLength - 1));
+
+  auto mixer_48k =
+      stage_48k->AddInput(custom_client, std::nullopt, Mixer::Resampler::LowPassWindowedSinc);
+  ASSERT_THAT(mixer_48k, ::testing::NotNull());
+  EXPECT_EQ(mixer_48k->pos_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracHighPassSideLength - 1));
+
+  // Verify filtering of 1 kHz tone (passed) and 28 kHz tone (attenuated).
+  auto stage_for_filtering =
+      std::make_shared<MixStage>(k96kFormat, kBlockSizeFrames, timeline_96k, fixed_device_clock);
+  auto stream_1k = std::make_shared<SineStream>(k96kFormat, fixed_device_clock, 1000.0);
+  stage_for_filtering->AddInput(stream_1k, std::nullopt, Mixer::Resampler::LowPassWindowedSinc);
+
+  {
+    stage_for_filtering->ReadLock(rlctx, Fixed(0), 100).reset();
+    auto buf_1k = stage_for_filtering->ReadLock(rlctx, Fixed(100), 200);
+    ASSERT_TRUE(buf_1k);
+    const float* payload_1k = reinterpret_cast<const float*>(buf_1k->payload());
+    float max_1k = 0.0f;
+    for (int64_t i = 0; i < buf_1k->length(); ++i) {
+      max_1k = std::max(max_1k, std::abs(payload_1k[i]));
+    }
+    EXPECT_GT(max_1k, 0.95f);
+  }
+
+  stage_for_filtering->RemoveInput(*stream_1k);
+
+  auto stream_28k = std::make_shared<SineStream>(k96kFormat, fixed_device_clock, 28000.0);
+  stage_for_filtering->AddInput(stream_28k, std::nullopt, Mixer::Resampler::LowPassWindowedSinc);
+
+  {
+    stage_for_filtering->ReadLock(rlctx, Fixed(300), 100).reset();
+    auto buf_28k = stage_for_filtering->ReadLock(rlctx, Fixed(400), 200);
+    ASSERT_TRUE(buf_28k);
+    const float* payload_28k = reinterpret_cast<const float*>(buf_28k->payload());
+    float max_28k = 0.0f;
+    for (int64_t i = 0; i < buf_28k->length(); ++i) {
+      max_28k = std::max(max_28k, std::abs(payload_28k[i]));
+    }
+    EXPECT_LT(max_28k, 0.002f);
+  }
 }
 
 // TODO(https://fxbug.dev/42127037): Verify we can read from mix stages with unaligned frames.

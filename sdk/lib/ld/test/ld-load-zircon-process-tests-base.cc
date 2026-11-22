@@ -74,9 +74,7 @@ zx::channel LdLoadZirconProcessTestsBase::Start(bool custom_bootstrap) {
   uintptr_t sp;
   std::optional<size_t> bootstrap_stack_size = stack_size_;
   if (!bootstrap_stack_size) {
-    // TODO(https://fxbug.dev/479521328): stack use too big for procargs piddly
-    // default bootstrap_stack_size = bootstrap.GetStackSize();
-    bootstrap_stack_size = 64 << 10;
+    bootstrap_stack_size = bootstrap().GetStackSize();
   }
 
   const size_t page_size = zx_system_get_page_size();

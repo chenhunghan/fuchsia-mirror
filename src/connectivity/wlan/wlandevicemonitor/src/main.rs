@@ -78,6 +78,10 @@ async fn main() -> Result<(), Error> {
     // clients, we could simplify the design of the component by serving only one client at a time.
     const MAX_CONCURRENT: usize = 1000;
     let ifaces_wrapper = device::IfaceWrapper::new(&ifaces, &ifaces_tree);
+
+    // The redaction mode and salt are fixed for the boot, so fetch them once here and pass them to
+    // every SME at interface creation.
+    let network_identifier_redaction = service::network_identifier_redaction(&cfg).await;
     let fidl_fut = fs.map(Ok).try_for_each_concurrent(MAX_CONCURRENT, {
         // Rebind these variables to borrows so the borrows can be moved into the FnMut.
         let phys = &phys;
@@ -87,6 +91,7 @@ async fn main() -> Result<(), Error> {
         let new_iface_sink = &new_iface_sink;
         let iface_counter = &iface_counter;
         let cfg = &cfg;
+        let network_identifier_redaction = network_identifier_redaction.as_ref();
         move |mut s: fidl_svc::DeviceMonitorRequestStream| async move {
             while let Ok(Some(request)) = s.try_next().await {
                 service::handle_monitor_request(
@@ -98,6 +103,7 @@ async fn main() -> Result<(), Error> {
                     new_iface_sink,
                     iface_counter,
                     cfg,
+                    network_identifier_redaction,
                 )
                 .await?
             }

@@ -19,9 +19,8 @@ group("tests") {
 # they use starnix_linux_executable, test_type = "starnix", subpackages
 # (//src/starnix/kernel:starnix_kernel_package,
 # //src/starnix/containers/debian:debian_package),
-# package_resolution_timeout_secs, and unmigrated GN dependencies
-# (//src/starnix/config:starnix.profiles,
-# //src/starnix/containers/debian:container_resources).
+# package_resolution_timeout_secs, and unmigrated GN dependency
+# //src/starnix/containers/debian:container_resources.
 rustc_test("bootreason_test") {
   testonly = true
   edition = "2024"
@@ -45,7 +44,7 @@ fuchsia_test_component("bootreason_integration_test") {
   manifest = "meta/integration_test.cml"
   deps = [
     ":bootreason_test",
-    "//src/starnix/config:starnix.profiles",
+    "//src/starnix/config:starnix_profiles_resource",
   ]
   test_type = "starnix"
 }

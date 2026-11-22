@@ -17,7 +17,7 @@ the language that Fuchsia uses to describe interprocess communication (IPC)
 protocols of components that run on Fuchsia. For more information on FIDL, see
 [FIDL overview](/docs/concepts/fidl/overview.md).
 
-## Distributing components through packages
+## Distributing components through packages {:#distributing-components-through-packages}
 
 In Fuchsia, components and their dependent files and images are often
 distributed through packages which is the unit of distribution in Fuchsia.

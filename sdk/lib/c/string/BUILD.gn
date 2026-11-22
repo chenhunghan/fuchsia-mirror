@@ -13,14 +13,15 @@ llvm_libc_group("string") {
     ":pure-no-compiler",
   ]
 
-  # TODO(https://fxbug.dev/42053650): not yet using the llvm-libc versions of these
+  # TODO(https://fxbug.dev/42141211): not yet using the llvm-libc versions of
+  # these
   non_test_deps = [
     "//zircon/third_party/ulib/musl/src/string:strerror_r",
     "//zircon/third_party/ulib/musl/src/string:strsignal",
     "//zircon/third_party/ulib/musl/src/string:strverscmp",
   ]
 
-  # TODO(https://fxbug.dev/42053650): but run their tests in preparation
+  # TODO(https://fxbug.dev/42141211): but run their tests in preparation
   testonly_deps = [ ":strsignalerror" ]
 }
 
@@ -172,7 +173,7 @@ foreach(funcs,
       visibility = [
         ":*",
 
-        # TODO(https://fxbug.dev/568268077): llvm-libc function performance for
+        # TODO(https://fxbug.dev/567650599): llvm-libc function performance for
         # the kernel configs on each machine.
         "//zircon/kernel/lib/libc/string/*",
       ]
@@ -314,7 +315,8 @@ llvm_libc_source_set("impure") {
     "strtok",
     "strtok_r",
 
-    # TODO(https://fxbug.dev/42053650): the llvm-libc versions of these are problematic
+    # TODO(https://fxbug.dev/42141211): the llvm-libc versions of these are
+    # problematic
     #"strerror",
     #"strerror_r",
     #"strsignal",

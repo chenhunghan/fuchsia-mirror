@@ -10,9 +10,10 @@
 //!
 //! # Architecture
 //!
-//! 1. **Boot Argument Check**: Checks `fuchsia.boot.Arguments` for `dev.fdomain.uart`
-//!    (defaults to disabled; opt-in via `dev.fdomain.uart=true`) and `dev.fdomain.uart.baud`
-//!    (defaults to `1000000`).
+//! 1. **Boot Argument Check**: Reads structured configuration capabilities
+//!    `fuchsia.dev.fdomain.uart` (defaults to disabled; opt-in via boot argument
+//!    `dev.fdomain.uart=true`) and `fuchsia.dev.fdomain.uart.baud` (defaults to
+//!    `1000000`).
 //! 2. **Device Discovery**: Scans `/dev/class/serial`, preferring `Class::Generic`
 //!    ports over `Class::Console` ports, and configures 8N1 at the target baud rate.
 //! 3. **Handshake**: Runs `TargetHandshake` supporting `ProtocolId::ResendSP`
@@ -39,6 +40,7 @@ use crate::serial::{
     run_target_handshake_with_initial_data, writer_task,
 };
 pub use error::Result;
+use fdomain_uart_driver_config::Config;
 use fidl_fuchsia_developer_remotecontrol_connector::{ConnectorMarker, ConnectorProxy};
 use fidl_fuchsia_hardware_serial::DeviceProxy;
 use fuchsia_component::client::connect_to_protocol;
@@ -59,41 +61,16 @@ const DEFAULT_BAUD_RATE: u32 = 1_000_000;
 /// Delay before attempting to reopen the serial device after an I/O error or disconnect.
 const RETRY_DELAY: Duration = Duration::from_secs(1);
 
-/// Queries `fuchsia.boot.Arguments` to check whether the driver is enabled via
-/// [`BOOT_ARG_ENABLED`], defaulting to `false` when unset or if the protocol is unavailable.
-async fn is_enabled() -> bool {
-    if let Ok(args) = connect_to_protocol::<fidl_fuchsia_boot::ArgumentsMarker>() {
-        match args.get_bool(BOOT_ARG_ENABLED, false).await {
-            Ok(val) => val,
-            Err(e) => {
-                warn!("Failed to get {} boot arg: {:?}", BOOT_ARG_ENABLED, e);
-                false
-            }
-        }
-    } else {
-        warn!("Failed to connect to fuchsia.boot.Arguments");
-        false
-    }
-}
-
-/// Reads the configured UART baud rate from `fuchsia.boot.Arguments` ([`BOOT_ARG_BAUD_RATE`]),
-/// falling back to [`DEFAULT_BAUD_RATE`] when unset, zero, or unparseable.
-async fn read_baud_rate() -> u32 {
-    let Ok(args) = connect_to_protocol::<fidl_fuchsia_boot::ArgumentsMarker>() else {
-        warn!("Failed to connect to fuchsia.boot.Arguments to get baud rate");
+/// Parses the configured UART baud rate from `baud_rate` ([`BOOT_ARG_BAUD_RATE`]),
+/// falling back to [`DEFAULT_BAUD_RATE`] when empty, zero, or unparseable.
+fn parse_baud_rate(baud_rate: &str) -> u32 {
+    if baud_rate.is_empty() {
         return DEFAULT_BAUD_RATE;
-    };
-    match args.get_string(BOOT_ARG_BAUD_RATE).await {
-        Ok(Some(value)) => match value.parse::<u32>() {
-            Ok(baud) if baud > 0 => baud,
-            _ => {
-                warn!("Failed to parse {} '{}', using default", BOOT_ARG_BAUD_RATE, value);
-                DEFAULT_BAUD_RATE
-            }
-        },
-        Ok(None) => DEFAULT_BAUD_RATE,
-        Err(e) => {
-            warn!("Failed to get {} boot arg: {:?}", BOOT_ARG_BAUD_RATE, e);
+    }
+    match baud_rate.parse::<u32>() {
+        Ok(baud) if baud > 0 => baud,
+        _ => {
+            warn!("Failed to parse {} '{}', using default", BOOT_ARG_BAUD_RATE, baud_rate);
             DEFAULT_BAUD_RATE
         }
     }
@@ -248,14 +225,15 @@ async fn run_driver_iteration(
 /// `fuchsia.developer.remotecontrol.connector.Connector` protocol fails.
 pub async fn run_driver() -> Result<()> {
     info!("Starting FDomain UART Driver");
-    if !is_enabled().await {
+    let config = Config::take_from_startup_handle();
+    if !config.enabled {
         info!(
             "FDomain UART Driver is disabled by boot argument '{}'. Sleeping forever.",
             BOOT_ARG_ENABLED
         );
         futures::future::pending::<()>().await;
     }
-    let baud_rate = read_baud_rate().await;
+    let baud_rate = parse_baud_rate(&config.baud_rate);
     let rcs_connector = connect_to_protocol::<ConnectorMarker>()
         .map_err(|e| TargetDriverError::RcsConnect(format!("{e:#}")))?;
     let mut is_initial_start = true;
@@ -359,5 +337,21 @@ mod tests {
             negotiate_session(&mock, &mut is_initial_start, &remaining).await.unwrap();
         assert_eq!(proto, ProtocolId::ResendSP);
         assert_eq!(sid, session_2);
+    }
+
+    #[fuchsia::test]
+    fn test_parse_baud_rate_empty_returns_default() {
+        assert_eq!(parse_baud_rate(""), DEFAULT_BAUD_RATE);
+    }
+
+    #[fuchsia::test]
+    fn test_parse_baud_rate_valid_returns_parsed_value() {
+        assert_eq!(parse_baud_rate("115200"), 115_200);
+    }
+
+    #[fuchsia::test]
+    fn test_parse_baud_rate_invalid_or_zero_returns_default() {
+        assert_eq!(parse_baud_rate("0"), DEFAULT_BAUD_RATE);
+        assert_eq!(parse_baud_rate("invalid"), DEFAULT_BAUD_RATE);
     }
 }

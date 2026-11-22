@@ -23,6 +23,7 @@
 #include "src/developer/forensics/feedback/namespace_init.h"
 #include "src/developer/forensics/feedback/reboot_log/reboot_log.h"
 #include "src/developer/forensics/feedback/redactor_factory.h"
+#include "src/developer/forensics/feedback_data/constants.h"
 #include "src/developer/forensics/utils/cobalt/logger.h"
 #include "src/developer/forensics/utils/component/component.h"
 #include "src/developer/forensics/utils/storage_size.h"
@@ -76,7 +77,7 @@ int main() {
   // snapshot exclusion config.
   const std::optional<SnapshotExclusionConfig> snapshot_exclusion_config =
       GetSnapshotExclusionConfig();
-  if (!snapshot_config) {
+  if (!snapshot_exclusion_config) {
     FX_LOGS(FATAL) << "Failed to get config for snapshot exclusion";
     return EXIT_FAILURE;
   }
@@ -94,12 +95,13 @@ int main() {
     MoveFile(/*from=*/kLegacyCurrentGracefulRebootReasonFile,
              /*to=*/kLegacyPreviousGracefulRebootReasonFile);
     MoveFile(/*from=*/kCurrentGracefulShutdownInfoFile, /*to=*/kPreviousGracefulShutdownInfoFile);
-    MoveFile(/*from=*/kCurrentSystemTimePath, /*to=*/kPreviousSystemTimePath);
+    MoveFileWithFallback(/*from=*/feedback_data::kCurrentUtcBootDifferencePath,
+                         /*legacy_from=*/feedback_data::kLegacyCurrentUtcBootDifferencePath,
+                         /*to=*/feedback_data::kPreviousUtcBootDifferencePath);
+    files::DeletePath(kLegacyBuildVersionPath, /*recursive=*/false);
     files::DeletePath(kLegacyDiskBackedLogsMetadataPath, /*recursive=*/false);
+    files::DeletePath(kLegacySystemTimePath, /*recursive=*/false);
     MoveAndRecordBootId(uuid::Generate());
-    if (std::string build_version; files::ReadFileToString(kBuildVersionPath, &build_version)) {
-      MoveAndRecordBuildVersion(build_version, kPreviousBuildVersionPath, kCurrentBuildVersionPath);
-    }
 
     if (std::string build_platform_version;
         files::ReadFileToString(kBuildPlatformVersionPath, &build_platform_version)) {
@@ -119,16 +121,23 @@ int main() {
   std::unique_ptr<RedactorBase> redactor =
       RedactorFromConfig(component.InspectRoot(), feedback_config->build_type_config);
 
+  std::optional<zx::time_boot> last_log_timestamp;
+  if (component.IsFirstInstance()) {
+    last_log_timestamp =
+        CreatePreviousLogsFile(cobalt.get(), feedback_config->persisted_logs_total_size);
+  }
+
   RebootLog reboot_log = RebootLog::ParseRebootLog(
       "/boot/log/last-panic.txt", kPreviousGracefulShutdownInfoFile,
-      kLegacyPreviousGracefulRebootReasonFile, kPreviousSystemTimePath, kPreviousBootKernelLogPath,
+      kLegacyPreviousGracefulRebootReasonFile, last_log_timestamp, kPreviousBootKernelLogPath,
       kFinalShutdownInfoPath, TestAndSetNotAFdr(),
       feedback_config->supports_user_initiated_poweroffs, component.IsFirstInstance(),
       redactor.get());
 
-  if (component.IsFirstInstance()) {
-    CreatePreviousLogsFile(cobalt.get(), feedback_config->persisted_logs_total_size,
-                           reboot_log.GetFinalShutdownInfo().Uptime());
+  // Skip the delta if the uptime came from the logs because it would always be 0.
+  if (component.IsFirstInstance() && !reboot_log.IsUptimeFromLogs()) {
+    LogPreviousBootLogLastTimestampDelta(cobalt.get(), last_log_timestamp,
+                                         reboot_log.GetFinalShutdownInfo().Uptime());
   }
 
   std::optional<std::string> local_device_id_path = kDeviceIdPath;
@@ -152,9 +161,7 @@ int main() {
       fidl::ServerEnd<fuchsia_process_lifecycle::Lifecycle>(std::move(lifecycle_channel)),
       std::move(redactor),
       MainService::Options{
-          local_device_id_path, kCurrentGracefulShutdownInfoFile, kCurrentSystemTimePath,
-          /*enable_periodic_system_time_writes=*/feedback_config->disk_endurance ==
-              DiskEndurance::kHigh,
+          local_device_id_path, kCurrentGracefulShutdownInfoFile,
           LastReboot::Options{
               .is_first_instance = component.IsFirstInstance(),
               .reboot_log = std::move(reboot_log),
@@ -176,7 +183,6 @@ int main() {
           FeedbackData::Options{
               .snapshot_config = *snapshot_config,
               .snapshot_exclusion_config = *snapshot_exclusion_config,
-              .is_first_instance = component.IsFirstInstance(),
               .limit_inspect_data = feedback_config->build_type_config.enable_limit_inspect_data,
               .delete_previous_boot_logs_time = delete_previous_boot_logs_time,
               .root_job = GetRootJobForInspect(),

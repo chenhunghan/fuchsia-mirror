@@ -9,6 +9,8 @@
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/syscalls/exception.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <utility>
 
 #include "src/developer/debug/debug_agent/align.h"
@@ -30,7 +32,7 @@
 #include "src/developer/debug/shared/zx_status.h"
 #include "src/lib/fxl/strings/string_printf.h"
 
-#if defined(__linux__)
+#ifdef __linux__
 #include "src/developer/debug/debug_agent/linux_utils.h"
 #endif
 
@@ -153,11 +155,11 @@ debug::Status DebuggedProcess::Init(DebuggedProcessCreateInfo create_info) {
   // Update module list.
   module_list_.Update(process_handle());
 
-#if defined(__linux__)
-  dl_debug_addr_ = linux::GetLdSoDebugAddress(koid());
+#ifdef __linux__
+  dl_debug_addr_ = linux::GetLdSoDebugAddress(static_cast<pid_t>(koid()));
   if (dl_debug_addr_) {
     DEBUG_LOG(Process) << "Got ld.so debug address = " << std::hex << dl_debug_addr_;
-    if (uint64_t bp_addr = linux::GetLdSoBreakpointAddress(koid())) {
+    if (uint64_t bp_addr = linux::GetLdSoBreakpointAddress(static_cast<pid_t>(koid()))) {
       DEBUG_LOG(Process) << "Got ld.so breakpoint address = " << std::hex << bp_addr;
       loader_breakpoint_ = std::make_unique<Breakpoint>(debug_agent_, true);
       if (auto err = loader_breakpoint_->SetSettings("Internal shared library load breakpoint",
@@ -275,11 +277,14 @@ std::vector<DebuggedThread*> DebuggedProcess::GetThreads() const {
   return threads;
 }
 
-void DebuggedProcess::PopulateCurrentThreads() {
+void DebuggedProcess::PopulateCurrentThreads(zx_koid_t running_thread_koid) {
+  // DebugAgent::OnProcessChanged only passes a valid running_thread_koid when populating a newly
+  // created DebuggedProcess. Every child thread is newly discovered on that path, so the duplicate
+  // check below never skips running_thread_koid.
   for (auto& thread : process_handle_->GetChildThreads()) {
     // We should never populate the same thread twice.
     zx_koid_t thread_koid = thread->GetKoid();
-    if (threads_.find(thread_koid) != threads_.end())
+    if (threads_.contains(thread_koid))
       continue;
 
     auto new_thread = std::make_unique<DebuggedThread>(debug_agent_, this, std::move(thread));
@@ -287,12 +292,17 @@ void DebuggedProcess::PopulateCurrentThreads() {
     threads_.emplace(thread_koid, std::move(new_thread));
 
     // Notify the client.
-    new_thread_ptr->SendThreadNotification();
+    if (running_thread_koid != ZX_KOID_INVALID && thread_koid == running_thread_koid) {
+      new_thread_ptr->SendRunningThreadNotification();
+    } else {
+      new_thread_ptr->SendThreadNotification();
+    }
   }
 }
 
 std::vector<debug_ipc::ThreadRecord> DebuggedProcess::GetThreadRecords() const {
   std::vector<debug_ipc::ThreadRecord> result;
+  result.reserve(threads_.size());
   for (const auto& pair : threads_)
     result.push_back(pair.second->GetThreadRecord(debug_ipc::ThreadRecord::StackAmount::kMinimal));
   return result;
@@ -385,9 +395,11 @@ void DebuggedProcess::UnregisterBreakpoint(Breakpoint* bp, uint64_t address) {
 
   switch (bp->settings().type) {
     case debug_ipc::BreakpointType::kSoftware:
-      return UnregisterSoftwareBreakpoint(bp, address);
+      UnregisterSoftwareBreakpoint(bp, address);
+      return;
     case debug_ipc::BreakpointType::kHardware:
-      return UnregisterHardwareBreakpoint(bp, address);
+      UnregisterHardwareBreakpoint(bp, address);
+      return;
     case debug_ipc::BreakpointType::kReadWrite:
     case debug_ipc::BreakpointType::kWrite:
       FX_NOTREACHED() << "Watchpoints are unregistered through UnregisterWatchpoint.";
@@ -423,9 +435,8 @@ debug::Status DebuggedProcess::RegisterWatchpoint(Breakpoint* bp,
 
     watchpoints_[range] = std::move(watchpoint);
     return debug::Status();
-  } else {
-    return it->second->RegisterBreakpoint(bp);
   }
+  return it->second->RegisterBreakpoint(bp);
 }
 
 void DebuggedProcess::UnregisterWatchpoint(Breakpoint* bp, const debug::AddressRange& range) {
@@ -479,7 +490,7 @@ void DebuggedProcess::OnBreakpointFinishedSteppingOver() {
     // We need to do this *after* starting the following breakpoint, because otherwise we introduce
     // a window where threads are unsuspeded between breakpoints.
     auto prev_ticket = step_over_queue_.front();
-    auto post_execute_breakpoint = fit::defer([prev_ticket = std::move(prev_ticket)]() {
+    auto post_execute_breakpoint = fit::defer([prev_ticket = std::move(prev_ticket)] {
       if (!prev_ticket.is_valid())
         return;
 
@@ -515,11 +526,14 @@ void DebuggedProcess::OnProcessTerminated() {
 
 void DebuggedProcess::OnThreadStarting(std::unique_ptr<ExceptionHandle> exception) {
   auto thread_handle = exception->GetThreadHandle();
+  if (!thread_handle) {
+    return;
+  }
   zx_koid_t thread_id = thread_handle->GetKoid();
   DEBUG_LOG(Process) << LogPreamble(this) << "Thread starting with koid " << thread_id;
 
-  if (threads_.find(thread_id) != threads_.end()) {
-    // This is possible when `DebugAgent::AttachToExistingProcess` in the following order:
+  if (threads_.contains(thread_id)) {
+    // This is possible when DebugAgent::AttachToExistingProcess runs in the following order:
     //   - We create an exception channel.
     //   - A thread starts and the notification is delivered to the exception channel,
     //     but we haven't got a chance to look into it.
@@ -530,15 +544,26 @@ void DebuggedProcess::OnThreadStarting(std::unique_ptr<ExceptionHandle> exceptio
   }
 
   auto new_thread = std::make_unique<DebuggedThread>(debug_agent_, this, std::move(thread_handle));
+  DebuggedThread* thread = new_thread.get();
+  threads_.emplace(thread_id, std::move(new_thread));
 
   if (suspend_new_threads_) {
-    new_thread->ClientSuspend(true);
+    // Acquire the suspend token while the thread is held in the start exception, release the
+    // exception, and wait strictly for the suspended signal so the thread record reflects
+    // suspension rather than a stale exception block.
+    thread->ClientSuspend(false);
+    exception.reset();
+    if (!thread->thread_handle().WaitForSuspensionSignal(
+            DebuggedThread::DefaultSuspendDeadline())) {
+      DEBUG_LOG(Process) << LogPreamble(this) << "Thread " << thread_id
+                         << " did not reach suspended state before deadline.";
+    }
+    thread->SendThreadNotification();
+  } else {
+    // Queue the running notification before closing the start exception on return so the client
+    // learns about the thread before it resumes execution.
+    thread->SendRunningThreadNotification();
   }
-
-  // Notify the client.
-  new_thread->SendThreadNotification();
-
-  threads_.emplace(thread_id, std::move(new_thread));
 }
 
 void DebuggedProcess::OnThreadExiting(std::unique_ptr<ExceptionHandle> exception) {
@@ -590,7 +615,7 @@ void DebuggedProcess::OnException(std::unique_ptr<ExceptionHandle> exception) {
 void DebuggedProcess::OnProcessStarting(std::unique_ptr<ProcessHandle> new_process_handle) {
   // This is called only on Linux when we observe a fork. Fuchsia new processes are detected by
   // the job.
-#if defined(__linux__)
+#ifdef __linux__
   // The new process will be a copy of the current one, including all software breakpoints
   // installed in this one. In response to this notification, we will either resume and detach from
   // the forked process (in which case we better not leave those software breakpoint instructions
@@ -631,7 +656,7 @@ void DebuggedProcess::OnWriteMemory(const debug_ipc::WriteMemoryRequest& request
   if (debug::Status status = process_handle_->WriteMemory(request.address, request.data.data(),
                                                           request.data.size(), &actual);
       status.has_error()) {
-    reply->status = status;
+    reply->status = std::move(status);
   } else if (actual != request.data.size()) {
     // Convert partial writes to errors.
     reply->status = debug::Status("Partial write of " + std::to_string(actual) +
@@ -693,8 +718,8 @@ void DebuggedProcess::SetStdout(OwnedStdioHandle handle) {
   stdout_ = std::make_unique<BufferedStdioHandle>(std::move(handle));
   // We bind |this| into the callbacks. This is OK because the DebuggedProcess
   // owns both sockets, meaning that it's assured to outlive the sockets.
-  stdout_->set_data_available_callback([this]() { OnStdout(false); });
-  stdout_->set_error_callback([this]() { OnStdout(true); });
+  stdout_->set_data_available_callback([this] { OnStdout(false); });
+  stdout_->set_error_callback([this] { OnStdout(true); });
   if (!stdout_->Start()) {
     LOGS(Warn) << "Could not listen on stdout for process " << process_handle_->GetName();
     stdout_.reset();
@@ -703,8 +728,8 @@ void DebuggedProcess::SetStdout(OwnedStdioHandle handle) {
 
 void DebuggedProcess::SetStderr(OwnedStdioHandle handle) {
   stderr_ = std::make_unique<BufferedStdioHandle>(std::move(handle));
-  stderr_->set_data_available_callback([this]() { OnStderr(false); });
-  stderr_->set_error_callback([this]() { OnStderr(true); });
+  stderr_->set_data_available_callback([this] { OnStderr(false); });
+  stderr_->set_error_callback([this] { OnStderr(true); });
   if (!stderr_->Start()) {
     LOGS(Warn) << "Could not listen on stderr for process " << process_handle_->GetName();
     stderr_.reset();
@@ -723,7 +748,7 @@ void DebuggedProcess::OnStdout(bool close) {
   FX_DCHECK(!data.empty());
   DEBUG_LOG(Process) << LogPreamble(this)
                      << "Got stdout: " << std::string(data.data(), data.size());
-  SendIO(debug_ipc::NotifyIO::Type::kStdout, std::move(data));
+  SendIO(debug_ipc::NotifyIO::Type::kStdout, data);
 }
 
 void DebuggedProcess::OnStderr(bool close) {
@@ -738,7 +763,7 @@ void DebuggedProcess::OnStderr(bool close) {
   FX_DCHECK(!data.empty());
   DEBUG_LOG(Process) << LogPreamble(this)
                      << "Got stderr: " << std::string(data.data(), data.size());
-  SendIO(debug_ipc::NotifyIO::Type::kStderr, std::move(data));
+  SendIO(debug_ipc::NotifyIO::Type::kStderr, data);
 }
 
 void DebuggedProcess::SendIO(debug_ipc::NotifyIO::Type type, const std::vector<char>& data) {
@@ -746,11 +771,9 @@ void DebuggedProcess::SendIO(debug_ipc::NotifyIO::Type type, const std::vector<c
   auto it = data.begin();
   size_t size = data.size();
   while (size > 0) {
-    size_t chunk_size = size;
-    if (chunk_size >= debug_ipc::NotifyIO::kMaxDataSize)
-      chunk_size = debug_ipc::NotifyIO::kMaxDataSize;
+    size_t chunk_size = std::min<size_t>(size, debug_ipc::NotifyIO::kMaxDataSize);
 
-    auto end = it + chunk_size;
+    auto end = it + static_cast<std::ptrdiff_t>(chunk_size);
     std::string msg(it, end);
 
     it = end;
@@ -790,9 +813,8 @@ debug::Status DebuggedProcess::RegisterSoftwareBreakpoint(Breakpoint* bp, uint64
 
     software_breakpoints_[address] = std::move(breakpoint);
     return debug::Status();
-  } else {
-    return found->second->RegisterBreakpoint(bp);
   }
+  return found->second->RegisterBreakpoint(bp);
 }
 
 void DebuggedProcess::UnregisterSoftwareBreakpoint(Breakpoint* bp, uint64_t address) {
@@ -818,9 +840,8 @@ debug::Status DebuggedProcess::RegisterHardwareBreakpoint(Breakpoint* bp, uint64
 
     hardware_breakpoints_[address] = std::move(breakpoint);
     return debug::Status();
-  } else {
-    return found->second->RegisterBreakpoint(bp);
   }
+  return found->second->RegisterBreakpoint(bp);
 }
 
 void DebuggedProcess::UnregisterHardwareBreakpoint(Breakpoint* bp, uint64_t address) {

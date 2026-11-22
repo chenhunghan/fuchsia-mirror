@@ -43,6 +43,7 @@ fuchsia_cc_driver("dwmac-driver") {
     "//sdk/lib/driver/component/cpp",
     "//sdk/lib/driver/mmio/cpp",
     "//sdk/lib/driver/platform-device/cpp",
+    "//sdk/lib/memory_barriers",
     "//src/devices/lib/driver",
     "//src/devices/lib/driver:driver_runtime",
     "//src/lib/ddk",
@@ -59,7 +60,6 @@ fuchsia_cc_driver("dwmac-driver") {
 fuchsia_driver_component("dwmac") {
   component_name = "dwmac"
   deps = [ ":dwmac-driver" ]
-  info = "meta/dwmac-info.json"
   dml_label = ":dwmac-dml"
 }
 

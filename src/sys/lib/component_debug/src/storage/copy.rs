@@ -107,11 +107,8 @@ mod test {
             // Serve the root directory
             // Rewind on root directory should succeed
             let request = root_dir.try_next().await;
-            if let Ok(Some(fio::DirectoryRequest::Open { path, flags, object, .. })) = request {
-                if path == "from_local" {
-                    assert!(flags.intersects(fio::Flags::FLAG_MAYBE_CREATE));
-                    setup_fake_file_from_local(node_to_file(object.into()));
-                } else if path == "from_device" {
+            if let Ok(Some(fio::DirectoryRequest::Open { path, object, .. })) = request {
+                if path == "from_device" {
                     setup_fake_file_from_device(node_to_file(object.into()));
                 } else {
                     panic!("incorrect path: {}", path);
@@ -123,55 +120,39 @@ mod test {
         .detach();
     }
 
-    fn setup_fake_file_from_local(mut file: fio::FileRequestStream) {
-        fuchsia_async::Task::local(async move {
-            // Serve the root directory
-            // Truncating the file should succeed
-            let request = file.try_next().await;
-            if let Ok(Some(fio::FileRequest::Resize { length, responder })) = request {
-                assert_eq!(length, 0);
-                responder.send(Ok(())).unwrap();
-            } else {
-                panic!("did not get resize request: {:?}", request)
-            }
-
-            // Writing the file should succeed
-            let request = file.try_next().await;
-            if let Ok(Some(fio::FileRequest::Write { data, responder })) = request {
-                assert_eq!(data, EXPECTED_DATA);
-                responder.send(Ok(data.len() as u64)).unwrap();
-            } else {
-                panic!("did not get write request: {:?}", request)
-            }
-
-            // Closing file should succeed
-            let request = file.try_next().await;
-            if let Ok(Some(fio::FileRequest::Close { responder })) = request {
-                responder.send(Ok(())).unwrap();
-            } else {
-                panic!("did not get close request: {:?}", request)
-            }
-        })
-        .detach();
-    }
-
     fn setup_fake_file_from_device(mut file: fio::FileRequestStream) {
         fuchsia_async::Task::local(async move {
-            // Serve the root directory
-            // Reading the file should succeed
+            // Getting the file size should succeed
             let request = file.try_next().await;
-            if let Ok(Some(fio::FileRequest::Read { responder, .. })) = request {
-                responder.send(Ok(&EXPECTED_DATA)).unwrap();
+            if let Ok(Some(fio::FileRequest::GetAttributes { query, responder })) = request {
+                assert!(query.contains(fio::NodeAttributesQuery::CONTENT_SIZE));
+                let immutable_attributes = fio::ImmutableNodeAttributes {
+                    content_size: Some(EXPECTED_DATA.len() as u64),
+                    ..Default::default()
+                };
+                responder
+                    .send(Ok((&fio::MutableNodeAttributes::default(), &immutable_attributes)))
+                    .unwrap();
             } else {
-                panic!("did not get read request: {:?}", request)
+                panic!("did not get get_attributes request: {:?}", request)
             }
 
-            // Reading the file should not return any more data
+            // Reading the file should succeed
             let request = file.try_next().await;
-            if let Ok(Some(fio::FileRequest::Read { responder, .. })) = request {
+            if let Ok(Some(fio::FileRequest::ReadAt { offset, responder, .. })) = request {
+                assert_eq!(offset, 0);
+                responder.send(Ok(&EXPECTED_DATA)).unwrap();
+            } else {
+                panic!("did not get read_at request: {:?}", request)
+            }
+
+            // Reading past the end of the file should not return any more data
+            let request = file.try_next().await;
+            if let Ok(Some(fio::FileRequest::ReadAt { offset, responder, .. })) = request {
+                assert_eq!(offset, EXPECTED_DATA.len() as u64);
                 responder.send(Ok(&[])).unwrap();
             } else {
-                panic!("did not get read request: {:?}", request)
+                panic!("did not get read_at request: {:?}", request)
             }
 
             // Closing file should succeed

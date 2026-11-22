@@ -245,7 +245,7 @@ WithErrorSyntax_ResponseAsStruct_Result::WithErrorSyntax_ResponseAsStruct_Result
     case ::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid):
       break;
   }
 }
@@ -262,7 +262,7 @@ WithErrorSyntax_ResponseAsStruct_Result& WithErrorSyntax_ResponseAsStruct_Result
       case ::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid):
         break;
     }
   }
@@ -290,10 +290,10 @@ void WithErrorSyntax_ResponseAsStruct_Result::Encode(::fidl::Encoder* encoder, s
       if (::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_ResponseAsStruct_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -302,21 +302,21 @@ void WithErrorSyntax_ResponseAsStruct_Result::Encode(::fidl::Encoder* encoder, s
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_ResponseAsStruct_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -325,11 +325,11 @@ void WithErrorSyntax_ResponseAsStruct_Result::Encode(::fidl::Encoder* encoder, s
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -338,18 +338,18 @@ void WithErrorSyntax_ResponseAsStruct_Result::Encode(::fidl::Encoder* encoder, s
 }
 
 void WithErrorSyntax_ResponseAsStruct_Result::Decode(::fidl::Decoder* _decoder, WithErrorSyntax_ResponseAsStruct_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::kResponse: {
@@ -408,15 +408,15 @@ void WithErrorSyntax_ResponseAsStruct_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid);
 }
 
-void WithErrorSyntax_ResponseAsStruct_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void WithErrorSyntax_ResponseAsStruct_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::Invalid):
         break;
       case ::test::protocols::WithErrorSyntax_ResponseAsStruct_Result::Tag::kResponse:
         new (&response_) ::test::protocols::WithErrorSyntax_ResponseAsStruct_Response();
@@ -479,7 +479,7 @@ WithErrorSyntax_ErrorAsPrimitive_Result::WithErrorSyntax_ErrorAsPrimitive_Result
     case ::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid):
       break;
   }
 }
@@ -496,7 +496,7 @@ WithErrorSyntax_ErrorAsPrimitive_Result& WithErrorSyntax_ErrorAsPrimitive_Result
       case ::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid):
         break;
     }
   }
@@ -524,10 +524,10 @@ void WithErrorSyntax_ErrorAsPrimitive_Result::Encode(::fidl::Encoder* encoder, s
       if (::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -536,21 +536,21 @@ void WithErrorSyntax_ErrorAsPrimitive_Result::Encode(::fidl::Encoder* encoder, s
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -559,11 +559,11 @@ void WithErrorSyntax_ErrorAsPrimitive_Result::Encode(::fidl::Encoder* encoder, s
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -572,18 +572,18 @@ void WithErrorSyntax_ErrorAsPrimitive_Result::Encode(::fidl::Encoder* encoder, s
 }
 
 void WithErrorSyntax_ErrorAsPrimitive_Result::Decode(::fidl::Decoder* _decoder, WithErrorSyntax_ErrorAsPrimitive_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::kResponse: {
@@ -642,15 +642,15 @@ void WithErrorSyntax_ErrorAsPrimitive_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid);
 }
 
-void WithErrorSyntax_ErrorAsPrimitive_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void WithErrorSyntax_ErrorAsPrimitive_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::Invalid):
         break;
       case ::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Result::Tag::kResponse:
         new (&response_) ::test::protocols::WithErrorSyntax_ErrorAsPrimitive_Response();
@@ -714,7 +714,7 @@ WithErrorSyntax_ErrorAsEnum_Result::WithErrorSyntax_ErrorAsEnum_Result(WithError
       new (&err_) ::test::protocols::ErrorEnum();
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid):
       break;
   }
 }
@@ -732,7 +732,7 @@ WithErrorSyntax_ErrorAsEnum_Result& WithErrorSyntax_ErrorAsEnum_Result::operator
         new (&err_) ::test::protocols::ErrorEnum();
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid):
         break;
     }
   }
@@ -760,10 +760,10 @@ void WithErrorSyntax_ErrorAsEnum_Result::Encode(::fidl::Encoder* encoder, size_t
       if (::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_ErrorAsEnum_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -772,21 +772,21 @@ void WithErrorSyntax_ErrorAsEnum_Result::Encode(::fidl::Encoder* encoder, size_t
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_ErrorAsEnum_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<::test::protocols::ErrorEnum>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -795,11 +795,11 @@ void WithErrorSyntax_ErrorAsEnum_Result::Encode(::fidl::Encoder* encoder, size_t
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocols::ErrorEnum, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -808,18 +808,18 @@ void WithErrorSyntax_ErrorAsEnum_Result::Encode(::fidl::Encoder* encoder, size_t
 }
 
 void WithErrorSyntax_ErrorAsEnum_Result::Decode(::fidl::Decoder* _decoder, WithErrorSyntax_ErrorAsEnum_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::kResponse: {
@@ -882,15 +882,15 @@ void WithErrorSyntax_ErrorAsEnum_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid);
 }
 
-void WithErrorSyntax_ErrorAsEnum_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void WithErrorSyntax_ErrorAsEnum_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::Invalid):
         break;
       case ::test::protocols::WithErrorSyntax_ErrorAsEnum_Result::Tag::kResponse:
         new (&response_) ::test::protocols::WithErrorSyntax_ErrorAsEnum_Response();
@@ -959,7 +959,7 @@ WithErrorSyntax_HandleInResult_Result::WithErrorSyntax_HandleInResult_Result(Wit
     case ::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid):
       break;
   }
 }
@@ -976,7 +976,7 @@ WithErrorSyntax_HandleInResult_Result& WithErrorSyntax_HandleInResult_Result::op
       case ::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid):
         break;
     }
   }
@@ -1004,10 +1004,10 @@ void WithErrorSyntax_HandleInResult_Result::Encode(::fidl::Encoder* encoder, siz
       if (::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_HandleInResult_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1016,21 +1016,21 @@ void WithErrorSyntax_HandleInResult_Result::Encode(::fidl::Encoder* encoder, siz
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocols::WithErrorSyntax_HandleInResult_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1039,11 +1039,11 @@ void WithErrorSyntax_HandleInResult_Result::Encode(::fidl::Encoder* encoder, siz
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -1052,18 +1052,18 @@ void WithErrorSyntax_HandleInResult_Result::Encode(::fidl::Encoder* encoder, siz
 }
 
 void WithErrorSyntax_HandleInResult_Result::Decode(::fidl::Decoder* _decoder, WithErrorSyntax_HandleInResult_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::kResponse: {
@@ -1122,15 +1122,15 @@ void WithErrorSyntax_HandleInResult_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid);
 }
 
-void WithErrorSyntax_HandleInResult_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void WithErrorSyntax_HandleInResult_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::Invalid):
         break;
       case ::test::protocols::WithErrorSyntax_HandleInResult_Result::Tag::kResponse:
         new (&response_) ::test::protocols::WithErrorSyntax_HandleInResult_Response();
@@ -1915,7 +1915,7 @@ TheUnion::TheUnion(TheUnion&& other) : tag_(other.tag_) {
     case ::test::protocols::TheUnion::Tag::kV:
       v_ = std::move(other.v_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -1932,7 +1932,7 @@ TheUnion& TheUnion::operator=(TheUnion&& other) {
       case ::test::protocols::TheUnion::Tag::kV:
         v_ = std::move(other.v_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -1959,10 +1959,10 @@ void TheUnion::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &v_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1971,11 +1971,11 @@ void TheUnion::Encode(::fidl::Encoder* encoder, size_t offset,
         &v_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocols::TheUnion::Tag::kUnknown: {
@@ -1989,18 +1989,18 @@ void TheUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void TheUnion::Decode(::fidl::Decoder* _decoder, TheUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocols::TheUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocols::TheUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocols::TheUnion::Tag::kV: {
@@ -2008,7 +2008,7 @@ void TheUnion::Decode(::fidl::Decoder* _decoder, TheUnion* value, size_t offset)
       break;
     }
     default: {
-  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
   break;
@@ -2037,7 +2037,7 @@ TheUnion& TheUnion::set_v(uint32_t value) {
   v_ = std::move(value);
   return *this;
 }
-TheUnion& TheUnion::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+TheUnion& TheUnion::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -2048,22 +2048,22 @@ void TheUnion::Destroy() {
     case ::test::protocols::TheUnion::Tag::kV:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocols::TheUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocols::TheUnion::Tag::Invalid);
 }
 
-void TheUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void TheUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocols::TheUnion::Tag::Invalid):
         break;
       case ::test::protocols::TheUnion::Tag::kV:
         new (&v_) uint32_t();

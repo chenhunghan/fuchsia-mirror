@@ -78,9 +78,6 @@ fuchsia_cc_test(
     srcs = [
         "integration-test.cc",
     ],
-    copts = [
-        "-Wno-vla-cxx-extension",
-    ],
     deps = [
         "//zircon/system/ulib/ddk-platform-defs",
         "@com_google_googletest//:gtest",

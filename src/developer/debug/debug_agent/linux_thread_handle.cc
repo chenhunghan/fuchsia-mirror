@@ -33,6 +33,11 @@ bool LinuxThreadHandle::WaitForSuspension(TickTimePoint deadline) const {
   return true;
 }
 
+bool LinuxThreadHandle::WaitForSuspensionSignal(TickTimePoint) const {
+  // Linux suspensions are synchronous so we never need to wait for one.
+  return true;
+}
+
 debug_ipc::ThreadRecord LinuxThreadHandle::GetThreadRecord(zx_koid_t process_koid) const {
   DEBUG_LOG(Thread) << "LinuxThreadHandle::GetThreadRecord";
   auto map = linux::GetStatus(task_->pid());

@@ -24,18 +24,43 @@ library_headers("range.headers") {
 
 kernel_bindgen_crate("bindings") {
   visibility = [ ":*" ]
-  headers = [ "include/lib/memalloc/range.h" ]
-  non_rust_deps = [ ":range.headers" ]
+  headers = [
+    "include/lib/memalloc/pool.h",
+    "include/lib/memalloc/range.h",
+    "pool-ffi.h",
+  ]
+  non_rust_deps = [
+    ":headers",
+    ":range.headers",
+  ]
   cpp = true
   layout_tests = false
   explicit_padding = false
   use_core = true
   raw_lines = [ "#![no_std]" ]
   type_allowlist = [
+    "memalloc::Pool",
+    "memalloc::PoolIteratorState",
     "memalloc::Range",
     "memalloc::Type",
+    "memalloc::internal::RangeIterationContext",
   ]
-  var_allowlist = [ "memalloc::kMinAllocatedTypeValue" ]
+  opaque_types = [
+    "memalloc::Pool",
+    "memalloc::PoolIteratorState",
+    "memalloc::internal::RangeIterationContext",
+  ]
+  type_blocklist = [ "memalloc::Pool_.*" ]
+  var_allowlist = [
+    "memalloc::Pool_kBookkeepingChunkSize",
+    "memalloc::Pool_kDefaultMaxAddr",
+    "memalloc::Pool_kDefaultMinAddr",
+    "memalloc::kMinAllocatedTypeValue",
+  ]
+  additional_bindgen_flags = [
+    "--ignore-methods",
+    "--no-recursive-allowlist",
+  ]
   rustified_enum = [ "memalloc::Type" ]
   notice_year = 2026
   expect_lints = [
@@ -82,17 +107,32 @@ rustc_library("memalloc-rs") {
 
   sources = [
     "src/lib.rs",
+    "src/pool.rs",
     "src/range.rs",
     "src/testing.rs",
   ]
   deps = [
     ":bindings",
+    ":memalloc",
     "//sdk/rust/zbi",
     "//src/lib/zr",
     "//third_party/rust_crates:paste",
+    "//third_party/rust_crates:pin-init",
   ]
+  test_deps = [ ":pool-test-ffi" ]
 
-  with_unit_tests = true
+  with_unit_tests = "host"
+}
+
+if (is_host) {
+  static_library("pool-test-ffi") {
+    testonly = true
+    sources = [
+      "pool-test-ffi.cc",
+      "pool-test-ffi.h",
+    ]
+    deps = [ ":memalloc" ]
+  }
 }
 
 static_library("memalloc") {
@@ -102,6 +142,8 @@ static_library("memalloc") {
 
   sources = [
     "algorithm.cc",
+    "pool-ffi.cc",
+    "pool-ffi.h",
     "pool.cc",
   ]
 

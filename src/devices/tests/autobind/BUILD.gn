@@ -44,7 +44,6 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("component") {
   component_name = "test-autobind"
   deps = [ ":driver" ]
-  info = "meta/component-info.json"
   manifest = "meta/component.cml"
 }
 

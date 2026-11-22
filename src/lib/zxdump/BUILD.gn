@@ -303,6 +303,7 @@ zx_library("zxdump") {
   includes = [ "include" ]
   visibility = [
     ":*",
+    "//src/developer/debug/zxdb/client:*",
     "//src/performance/cpu_profiler:*",
   ]
   public_deps = [

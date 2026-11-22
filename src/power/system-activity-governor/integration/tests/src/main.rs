@@ -111,7 +111,9 @@ async fn test_activity_governor_returns_expected_power_elements() -> Result<()> 
     Ok(())
 }
 
-async fn create_suspend_topology(realm: &RealmProxyClient) -> Result<Arc<PowerElementContext>> {
+async fn create_suspend_topology(
+    realm: &RealmProxyClient,
+) -> Result<(fbroker::TopologyProxy, Arc<PowerElementContext>)> {
     let topology = realm.connect_to_protocol::<fbroker::TopologyMarker>().await?;
     let activity_governor = realm.connect_to_protocol::<fsystem::ActivityGovernorMarker>().await?;
     let power_elements = activity_governor.get_power_elements().await?;
@@ -141,15 +143,18 @@ async fn create_suspend_topology(realm: &RealmProxyClient) -> Result<Arc<PowerEl
     })
     .detach();
 
-    Ok(suspend_controller)
+    Ok((topology, suspend_controller))
 }
 
+/// Acquires a lease on `controller` at `level` over an already-connected
+/// `topology` channel. Reuse the connection rather than reconnecting per call:
+/// post-resume callers must reach Power Broker within SAG's 100 ms Suspending
+/// hold window, and opening a new protocol connection adds routing latency.
 async fn lease(
-    realm: &RealmProxyClient,
+    topology: &fbroker::TopologyProxy,
     controller: &PowerElementContext,
     level: u8,
 ) -> Result<fbroker::LeaseToken> {
-    let topology = realm.connect_to_protocol::<fbroker::TopologyMarker>().await?;
     let (client_token, server_token) = fbroker::LeaseToken::create();
     topology
         .lease(fbroker::LeaseSchema {
@@ -281,8 +286,8 @@ async fn test_activity_governor_increments_suspend_success_on_application_activi
     assert_eq!(None, current_stats.last_time_in_suspend);
     assert_eq!(Some(0), current_stats.total_time_in_suspend);
 
-    let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let (topology, suspend_controller) = create_suspend_topology(&realm).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
 
@@ -366,7 +371,7 @@ async fn test_activity_governor_increments_suspend_success_on_application_activi
         .unwrap();
 
     // Take a lease to prevent the system from suspending again before we can check Inspect.
-    let keep_awake_lease = lease(&realm, &suspend_controller, 1).await?;
+    let keep_awake_lease = lease(&topology, &suspend_controller, 1).await?;
 
     let current_stats = stats.watch().await?;
     assert_eq!(Some(1), current_stats.success_count);
@@ -587,8 +592,8 @@ async fn test_activity_governor_increments_fail_count_on_suspend_error() -> Resu
         .unwrap()
         .unwrap();
 
-    let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let (topology, suspend_controller) = create_suspend_topology(&realm).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
 
@@ -751,8 +756,8 @@ async fn test_activity_governor_suspends_successfully_after_failure() -> Result<
         .unwrap()
         .unwrap();
 
-    let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let (topology, suspend_controller) = create_suspend_topology(&realm).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
 
@@ -1340,7 +1345,7 @@ async fn test_element_info_provider() -> Result<()> {
         .unwrap()
         .unwrap();
 
-    let suspend_controller = create_suspend_topology(&realm).await?;
+    let (topology, suspend_controller) = create_suspend_topology(&realm).await?;
 
     let element_info_provider = realm
         .connect_to_service_instance::<fbroker::ElementInfoProviderServiceMarker>(
@@ -1448,7 +1453,7 @@ async fn test_element_info_provider() -> Result<()> {
 
     // Trigger "boot complete" logic.
     let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
 
     assert_eq!(aa_status.watch_power_level().await?.unwrap(), 1);
     let () = boot_control.set_boot_complete().await.expect("SetBootComplete should have succeeded");
@@ -1476,7 +1481,7 @@ async fn test_element_info_provider() -> Result<()> {
         .unwrap();
 
     // Raise Execution State to Active then drop to trigger a suspend.
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
     assert_eq!(es_status.watch_power_level().await?.unwrap(), 2);
     drop(suspend_lease);
 
@@ -1499,7 +1504,7 @@ async fn test_element_info_provider() -> Result<()> {
         .unwrap();
 
     // Raise Execution State to Active then drop to trigger a suspend.
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
     assert_eq!(es_status.watch_power_level().await?.unwrap(), 2);
     drop(suspend_lease);
 
@@ -1908,7 +1913,7 @@ async fn test_activity_governor_add_application_activity_dependency() -> Result<
     //  3. Confirm that Execution State is at Active.
     //  4. Drop the lease.
     //  5. Confirm that a suspend call is issued.
-    let test_element_lease = self::lease(&realm, &test_element, 1).await?;
+    let test_element_lease = self::lease(&topology, &test_element, 1).await?;
     assert_eq!(status_client.watch_power_level().await?.unwrap(), 1);
 
     {
@@ -2643,7 +2648,8 @@ async fn test_activity_governor_cpu_element_allows_leases_during_boot() -> Resul
     );
 
     assert_eq!(0u8, cpu_driver_power_level.get());
-    let _cpu_lease = lease(&realm, &cpu_driver_controller, 1).await.unwrap();
+    let topology = realm.connect_to_protocol::<fbroker::TopologyMarker>().await?;
+    let _cpu_lease = lease(&topology, &cpu_driver_controller, 1).await?;
     assert_eq!(1u8, cpu_driver_power_level.get());
     Ok(())
 }
@@ -4455,8 +4461,8 @@ async fn test_activity_governor_reports_on_suspend_blocker_stall(
         .await?
         .map_err(|e| anyhow::anyhow!("Register failed: {:?}", e))?;
 
-    let suspend_controller = create_suspend_topology(&realm).await?;
-    let suspend_lease = lease(&realm, &suspend_controller, 1).await?;
+    let (topology, suspend_controller) = create_suspend_topology(&realm).await?;
+    let suspend_lease = lease(&topology, &suspend_controller, 1).await?;
 
     let (terminal_client, mut terminal_stream) =
         fidl::endpoints::create_request_stream::<fstatecontrol::TerminalStateWatcherMarker>();
@@ -5122,7 +5128,7 @@ async fn test_no_suspend_loop_files_report() -> Result<()> {
     let suspend_device = realm.connect_to_protocol::<tsc::DeviceMarker>().await?;
     set_up_default_suspender(&suspend_device).await;
 
-    let _suspend_controller = create_suspend_topology(&realm).await?;
+    let (_topology, _suspend_controller) = create_suspend_topology(&realm).await?;
 
     let element_info_provider = realm
         .connect_to_service_instance::<fbroker::ElementInfoProviderServiceMarker>(
@@ -6299,8 +6305,8 @@ async fn test_post_resume_boost_hold_and_early_resuspend_cancellation() -> Resul
     let stats = realm.connect_to_protocol::<fsuspend::StatsMarker>().await?;
     let _ = stats.watch().await?;
 
-    let suspend_controller = create_suspend_topology(&realm).await?;
-    let initial_lease = lease(&realm, &suspend_controller, 1).await?;
+    let (topology, suspend_controller) = create_suspend_topology(&realm).await?;
+    let initial_lease = lease(&topology, &suspend_controller, 1).await?;
 
     {
         let boot_control = realm.connect_to_protocol::<fsystem::BootControlMarker>().await?;
@@ -6363,7 +6369,7 @@ async fn test_post_resume_boost_hold_and_early_resuspend_cancellation() -> Resul
         .await?
         .expect("resume failed");
 
-    let keep_awake_lease = lease(&realm, &suspend_controller, 1).await?;
+    let keep_awake_lease = lease(&topology, &suspend_controller, 1).await?;
     let current_stats = stats.watch().await?;
     assert_eq!(Some(1), current_stats.success_count);
 
@@ -6457,7 +6463,7 @@ async fn test_post_resume_boost_hold_and_early_resuspend_cancellation() -> Resul
         .await?
         .expect("resume failed");
 
-    let keep_awake_lease_2 = lease(&realm, &suspend_controller, 1).await?;
+    let keep_awake_lease_2 = lease(&topology, &suspend_controller, 1).await?;
     let current_stats = stats.watch().await?;
     assert_eq!(Some(2), current_stats.success_count);
 

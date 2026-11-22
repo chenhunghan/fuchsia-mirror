@@ -526,6 +526,53 @@ class ApiMoblyTest(unittest.TestCase):
                     ],
                 },
             ),
+            param(
+                "success_valid_controllers_usb_socket_path",
+                override_args={
+                    "mobly_controllers": [
+                        {
+                            "type": "FuchsiaDevice",
+                            "nodename": "fuchsia_usb",
+                            "device_usb": "usb:cid:7",
+                            "usb_socket_path": "/tmp/ffx_usb_driver_socketpath",
+                        },
+                        {
+                            "type": "FuchsiaDevice",
+                            "nodename": "fuchsia_ip",
+                        },
+                    ],
+                },
+                expected_config_obj={
+                    "MoblyParams": {"LogPath": "output_path"},
+                    "TestBeds": [
+                        {
+                            "Controllers": {
+                                "FuchsiaDevice": [
+                                    {
+                                        "honeydew_config": {
+                                            "transports": {
+                                                "ffx": {
+                                                    "path": "/ffx/path",
+                                                    "subtools_search_path": "subtools/search/path",
+                                                    "usb_socket_path": "/tmp/ffx_usb_driver_socketpath",
+                                                }
+                                            }
+                                        },
+                                        "nodename": "fuchsia_usb",
+                                        "device_usb": "usb:cid:7",
+                                    },
+                                    {
+                                        "honeydew_config": _HONEYDEW_CONFIG,
+                                        "nodename": "fuchsia_ip",
+                                    },
+                                ]
+                            },
+                            "Name": "tb_name",
+                            "TestParams": {},
+                        }
+                    ],
+                },
+            ),
         ]
     )
     def test_new_testbed_config(

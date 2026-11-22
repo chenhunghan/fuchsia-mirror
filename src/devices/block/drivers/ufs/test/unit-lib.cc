@@ -14,10 +14,14 @@ namespace ufs {
 ufs_mock_device::UfsMockDevice *TestUfs::mock_device_;
 bool TestUfs::supports_power_down_suspend_ = false;
 bool TestUfs::supports_runtime_power_management_ = false;
+uint32_t TestUfs::uic_command_timeout_usec_ = kUicTimeoutUsec;
+HostControllerCallback TestUfs::startup_host_controller_callback_;
 
 void UfsTest::InitMockDevice() {
   TestUfs::SetSupportsPowerDownSuspend(false);
   TestUfs::SetSupportsRuntimePowerManagement(false);
+  TestUfs::SetUicCommandTimeoutUsec(kUicTimeoutUsec);
+  TestUfs::SetStartupHostControllerCallback(nullptr);
   std::unique_ptr<zx::interrupt> irq = std::make_unique<zx::interrupt>();
   driver_test().RunInEnvironmentTypeContext([&](Environment &env) {
     env.pci_server().CreateBar(0, RegisterMap::kRegisterSize, /*is_mmio=*/true);
@@ -73,6 +77,7 @@ void UfsTest::StartDriver(bool supply_power_framework) {
     fake_config.enable_auto_hibernate() = true;
     fake_config.auto_hibernate_timer_us() = 1000;
     fake_config.link_idle_ahit_multiplier() = 2;
+    fake_config.command_timeout_sec() = static_cast<uint32_t>(kCommandTimeout.to_secs());
     args.config(fake_config.ToVmo());
     if (power_args.has_value()) {
       args.power_element_args(std::move(power_args.value()));
@@ -91,6 +96,17 @@ void UfsTest::StartDriver(bool supply_power_framework) {
   dut_ = driver_test().driver();
 }
 
+void UfsTest::StopDriverAndResetHooks() {
+  if (!driver_stopped_) {
+    EXPECT_OK(driver_test_.StopDriver());
+    driver_stopped_ = true;
+  }
+  driver_test_.ShutdownAndDestroyDriver();
+  dut_ = nullptr;
+  mock_device_.GetRegisterMmioProcessor().Reset();
+  mock_device_.GetUicCmdProcessor().Reset();
+}
+
 void UfsTest::SetUp() {
   InitMockDevice();
   StartDriver(/*supply_power_framework=*/false);
@@ -105,6 +121,8 @@ void UfsTest::TearDown() {
   }
   TestUfs::SetSupportsPowerDownSuspend(false);
   TestUfs::SetSupportsRuntimePowerManagement(false);
+  TestUfs::SetUicCommandTimeoutUsec(kUicTimeoutUsec);
+  TestUfs::SetStartupHostControllerCallback(nullptr);
   mock_device_.GetRegisterMmioProcessor().Reset();
   mock_device_.GetUicCmdProcessor().Reset();
   mock_device_.GetTransferRequestProcessor().Reset();

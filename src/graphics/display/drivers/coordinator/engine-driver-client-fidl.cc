@@ -243,4 +243,14 @@ zx::result<> EngineDriverClientFidl::SetMinimumRgb(uint8_t minimum_rgb) {
   return zx::ok();
 }
 
+void EngineDriverClientFidl::NotifyExpectedPresent(display::DisplayId display_id,
+                                                   zx::time_monotonic expected_present_time,
+                                                   zx::duration frame_interval) {
+  fdf::Arena arena(kArenaTag);
+  fidl::OneWayStatus fidl_transport_status = fidl_engine_.buffer(arena)->NotifyExpectedPresent(
+      display_id.ToFidl(), expected_present_time, frame_interval.get());
+  ZX_ASSERT_MSG(fidl_transport_status.ok(), "FIDL error calling NotifyExpectedPresent: %s",
+                fidl_transport_status.FormatDescription().c_str());
+}
+
 }  // namespace display_coordinator

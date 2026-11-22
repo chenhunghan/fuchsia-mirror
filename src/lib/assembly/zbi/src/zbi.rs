@@ -6,7 +6,7 @@ use anyhow::{Context, Error, Result, anyhow};
 use assembly_constants::BootfsDestination;
 use assembly_tool::Tool;
 use camino::{Utf8Path, Utf8PathBuf};
-use image_assembly_config::BoardDriverArguments;
+use image_assembly_config::{DriverBoardInfo, PlatformId};
 use log::debug;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -26,7 +26,8 @@ pub struct ZbiBuilder {
     bootfs_files: BTreeMap<String, Utf8PathBuf>,
     bootargs: Vec<String>,
     cmdline: Vec<String>,
-    board_driver_arguments: Option<BoardDriverArguments>,
+    platform_id: Option<PlatformId>,
+    driver_board_info: Option<DriverBoardInfo>,
 
     // A ramdisk to add to the ZBI.
     ramdisk: Option<Utf8PathBuf>,
@@ -53,7 +54,8 @@ impl ZbiBuilder {
             bootfs_files: BTreeMap::default(),
             bootargs: Vec::default(),
             cmdline: Vec::default(),
-            board_driver_arguments: None,
+            platform_id: None,
+            driver_board_info: None,
             ramdisk: None,
             zbi_extra_items: None,
             devicetree: None,
@@ -103,9 +105,14 @@ impl ZbiBuilder {
         self.cmdline.push(arg.to_string());
     }
 
-    /// Add optional board driver arguments to be added as ZBI items.
-    pub fn set_board_driver_arguments(&mut self, args: BoardDriverArguments) {
-        self.board_driver_arguments = Some(args);
+    /// Set the optional `ZBI_TYPE_PLATFORM_ID` payload to add to the ZBI.
+    pub fn set_platform_id(&mut self, platform_id: PlatformId) {
+        self.platform_id = Some(platform_id);
+    }
+
+    /// Set the optional `ZBI_TYPE_DRV_BOARD_INFO` payload to add to the ZBI.
+    pub fn set_driver_board_info(&mut self, board_info: DriverBoardInfo) {
+        self.driver_board_info = Some(board_info);
     }
 
     /// Add a ramdisk to the ZBI.
@@ -143,26 +150,26 @@ impl ZbiBuilder {
             .map_err(|e| Error::new(e).context("failed to create the additional boot args"))?;
         self.write_boot_args(&mut additional_boot_args)?;
 
-        let (platform_id_path, board_info_path) =
-            if let Some(BoardDriverArguments { vendor_id, product_id, revision, ref name }) =
-                self.board_driver_arguments
-            {
+        let platform_id_path =
+            if let Some(PlatformId { vendor_id, product_id, ref name }) = self.platform_id {
                 let platform_id = new_platform_id(vendor_id, product_id, name)?;
-                let board_info = zbi::BoardInfo { revision };
-
                 let platform_id_path = gendir.as_ref().join("platform_id.bin");
-                let board_info_path = gendir.as_ref().join("board_info.bin");
-
                 std::fs::write(&platform_id_path, platform_id.as_bytes())
-                    .with_context(|| format!("writing platform_id to: {}", platform_id_path))?;
-
-                std::fs::write(&board_info_path, board_info.as_bytes())
-                    .with_context(|| format!("writing board_info to: {}", platform_id_path))?;
-
-                (Some(platform_id_path), Some(board_info_path))
+                    .with_context(|| format!("writing platform_id to: {platform_id_path}"))?;
+                Some(platform_id_path)
             } else {
-                (None, None)
+                None
             };
+
+        let board_info_path = if let Some(DriverBoardInfo { revision }) = self.driver_board_info {
+            let board_info = zbi::BoardInfo { revision };
+            let board_info_path = gendir.as_ref().join("board_info.bin");
+            std::fs::write(&board_info_path, board_info.as_bytes())
+                .with_context(|| format!("writing board_info to: {board_info_path}"))?;
+            Some(board_info_path)
+        } else {
+            None
+        };
 
         // Create the BootFS manifest file that lists all the files to insert
         // into BootFS.
@@ -593,7 +600,41 @@ mod tests {
     }
 
     #[test]
-    fn zbi_args_with_board_driver_args() {
+    fn zbi_args_with_platform_id_only() {
+        let tools = FakeToolProvider::default();
+        let zbi_tool = tools.get_tool("zbi").unwrap();
+        let mut builder = ZbiBuilder::new(zbi_tool);
+        builder.set_kernel("path/to/kernel");
+        builder.set_output_manifest("path/to/manifest");
+        let args = builder
+            .build_zbi_args(
+                "bootfs",
+                None::<String>,
+                Some("gen/platform_id_path"),
+                None::<String>,
+                "output",
+            )
+            .unwrap();
+        assert_eq!(
+            args,
+            [
+                "--type=container",
+                "path/to/kernel",
+                "--type=cmdline",
+                "--type=platform_id",
+                "gen/platform_id_path",
+                "--files",
+                "bootfs",
+                "--output",
+                "output",
+                "--json-output",
+                "path/to/manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn zbi_args_with_platform_id_and_driver_board_info() {
         let tools = FakeToolProvider::default();
         let zbi_tool = tools.get_tool("zbi").unwrap();
         let mut builder = ZbiBuilder::new(zbi_tool);
@@ -626,5 +667,83 @@ mod tests {
                 "path/to/manifest",
             ]
         );
+    }
+
+    #[test]
+    fn build_with_platform_id_only() {
+        let gendir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .unwrap()
+            .join("zbi_build_with_platform_id_only");
+        let _ = std::fs::remove_dir_all(&gendir);
+        std::fs::create_dir_all(&gendir).unwrap();
+
+        let tools = FakeToolProvider::default();
+        let zbi_tool = tools.get_tool("zbi").unwrap();
+        let mut builder = ZbiBuilder::new(zbi_tool);
+        builder.set_kernel("path/to/kernel");
+        builder.set_platform_id(PlatformId {
+            vendor_id: 1,
+            product_id: 2,
+            name: "test-board".into(),
+        });
+
+        let output_path = gendir.join("fuchsia.zbi");
+        builder.build(&gendir, &output_path).unwrap();
+
+        let zbi_args = &tools.log().commands.borrow()[0].args;
+        assert_eq!(
+            zbi_args,
+            &[
+                "--type=container",
+                "path/to/kernel",
+                "--type=cmdline",
+                "--type=platform_id",
+                gendir.join("platform_id.bin").as_str(),
+                "--files",
+                gendir.join("bootfs_files.list").as_str(),
+                "--output",
+                output_path.as_str(),
+            ]
+        );
+        assert!(!gendir.join("platform_id.bin").exists());
+        assert!(!gendir.join("board_info.bin").exists());
+        let _ = std::fs::remove_dir_all(&gendir);
+    }
+
+    #[test]
+    fn build_with_driver_board_info_only() {
+        let gendir = Utf8PathBuf::from_path_buf(std::env::temp_dir())
+            .unwrap()
+            .join("zbi_build_with_driver_board_info_only");
+        let _ = std::fs::remove_dir_all(&gendir);
+        std::fs::create_dir_all(&gendir).unwrap();
+
+        let tools = FakeToolProvider::default();
+        let zbi_tool = tools.get_tool("zbi").unwrap();
+        let mut builder = ZbiBuilder::new(zbi_tool);
+        builder.set_kernel("path/to/kernel");
+        builder.set_driver_board_info(DriverBoardInfo { revision: 7 });
+
+        let output_path = gendir.join("fuchsia.zbi");
+        builder.build(&gendir, &output_path).unwrap();
+
+        let zbi_args = &tools.log().commands.borrow()[0].args;
+        assert_eq!(
+            zbi_args,
+            &[
+                "--type=container",
+                "path/to/kernel",
+                "--type=cmdline",
+                "--type=drv_board_info",
+                gendir.join("board_info.bin").as_str(),
+                "--files",
+                gendir.join("bootfs_files.list").as_str(),
+                "--output",
+                output_path.as_str(),
+            ]
+        );
+        assert!(!gendir.join("platform_id.bin").exists());
+        assert!(!gendir.join("board_info.bin").exists());
+        let _ = std::fs::remove_dir_all(&gendir);
     }
 }

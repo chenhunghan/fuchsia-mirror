@@ -682,6 +682,14 @@ mod tests {
         async fn read_tree(&self, name: &str) -> Result<Self, ReaderError> {
             self.children.get(name).cloned().ok_or(ReaderError::FailedToLoadTree(name.to_string()))
         }
+
+        async fn blob_names(&self) -> Result<Vec<String>, ReaderError> {
+            ReadableTree::blob_names(&self.inspector).await
+        }
+
+        async fn read_blob(&self, name: &str) -> Result<SnapshotSource, ReaderError> {
+            ReadableTree::read_blob(&self.inspector, name).await
+        }
     }
 
     const FAKE_TIMEOUT: Duration = Duration::from_secs(2);

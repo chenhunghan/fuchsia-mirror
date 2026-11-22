@@ -639,32 +639,21 @@ mod tests {
     }
 
     async fn lib_so(name: &str) -> String {
-        #[cfg(feature = "variant_coverage")]
-        let path = async {
-            // The path could be either lib/coverage or lib/coverage-rust, look for something
-            // that begins with coverage
-            let (client, server) = endpoints::create_proxy::<fio::DirectoryMarker>();
-            fdio::open("/pkg/lib", fio::PERM_READABLE, server.into_channel()).unwrap();
-            for entry in fuchsia_fs::directory::readdir(&client).await.unwrap() {
-                let dir = entry.name;
-                if dir.starts_with("coverage") {
-                    return format!("lib/{dir}/{name}");
+        let pkg_lib = std::path::Path::new("/pkg/lib");
+        if pkg_lib.join(name).exists() {
+            return format!("lib/{name}");
+        }
+        if let Ok(entries) = std::fs::read_dir(pkg_lib) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join(name).exists() {
+                    if let Some(dir) = entry.file_name().to_str() {
+                        return format!("lib/{dir}/{name}");
+                    }
                 }
             }
-            panic!("no coverage dir found");
         }
-        .await;
-        #[cfg(feature = "variant_asan")]
-        let path = format!("lib/asan-ubsan/{name}");
-        #[cfg(feature = "variant_hwasan")]
-        let path = format!("lib/hwasan-ubsan/{name}");
-        #[cfg(not(any(
-            feature = "variant_asan",
-            feature = "variant_hwasan",
-            feature = "variant_coverage"
-        )))]
-        let path = format!("lib/{name}");
-        path
+        format!("lib/{name}")
     }
 
     unsafe extern "C" {

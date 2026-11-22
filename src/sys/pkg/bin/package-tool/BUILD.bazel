@@ -18,7 +18,11 @@ rustc_binary_host_tool(
     edition = "2024",
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//build/bazel/rules/packages:__pkg__"],
+    visibility = [
+        "//build/bazel/rules/packages:__pkg__",
+        "//src/starnix/containers/debian:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
     deps = [
         "//src/lib/fuchsia",
         "//src/sys/pkg/lib/package-tool",

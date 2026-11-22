@@ -38,10 +38,7 @@ fuchsia_unittest_component("loopback-socket-benchmarks-with-netstack3") {
 
 fuchsia_unittest_component("loopback-socket-benchmarks-with-fake-netstack") {
   manifest = "meta/loopback-socket-benchmarks-with-fake-netstack.cml"
-  deps = [
-    ":loopback_socket_benchmarks",
-    "//src/connectivity/network/tests/benchmarks/fake-netstack",
-  ]
+  deps = [ ":loopback_socket_benchmarks" ]
 }
 
 fuchsia_test_package("loopback-socket-benchmarks-tests") {
@@ -49,7 +46,10 @@ fuchsia_test_package("loopback-socket-benchmarks-tests") {
     ":loopback-socket-benchmarks-with-netstack3",
     ":loopback-socket-benchmarks-with-fake-netstack",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/network/tests/benchmarks/fake-netstack:package",
+  ]
 }
 
 fuchsia_unittest_component(

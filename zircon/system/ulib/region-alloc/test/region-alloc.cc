@@ -13,6 +13,11 @@
 #include <region-alloc/region-alloc.h>
 #include <zxtest/zxtest.h>
 
+#if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer) || \
+    __has_feature(hwaddress_sanitizer)
+#include <sanitizer/lsan_interface.h>
+#endif
+
 #include "common.h"
 
 namespace {
@@ -613,6 +618,75 @@ TEST(RegionAllocCppApiTestCase, InvalidRegionContainedByFromPool) {
 
 TEST(RegionAllocCppApiTestCase, InvalidRegionContainedByFromHeap) {
   ASSERT_NO_FAILURES(InvalidRegionContainedByHelper(TestFlavor::UseHeap));
+}
+
+// Destroying a RegionAllocator while allocated regions are still in flight must
+// assert (even when debug asserts are disabled) rather than leaving dangling
+// owner pointers.
+void DestroyWithAllocatedRegionHelper(TestFlavor flavor) {
+  auto destroy_with_live_region = [flavor]() {
+#if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer) || \
+    __has_feature(hwaddress_sanitizer)
+    // Disable LSan for this thread; it is expected to leak on crash because
+    // zxtest terminates the crashing thread without unwinding destructors.
+    __lsan::ScopedDisabler _;
+#endif
+    RegionAllocator::Region::UPtr region;
+    {
+      RegionAllocator::RegionPool::RefPtr pool;
+      if (flavor == TestFlavor::UsePool) {
+        pool = RegionAllocator::RegionPool::Create(REGION_POOL_MAX_SIZE);
+        if (pool == nullptr) {
+          return;
+        }
+      }
+      RegionAllocator alloc(std::move(pool));
+      if (alloc.AddRegion({.base = 0x1000, .size = 0x1000}) != ZX_OK) {
+        return;
+      }
+      if (alloc.GetRegion(0x100, region) != ZX_OK || region == nullptr) {
+        return;
+      }
+      // `alloc` is destroyed here while `region` is still alive.
+    }
+    // If `~RegionAllocator()` did not assert, avoid dereferencing the
+    // dangling `owner_` pointer in `RegionDeleter` so `ASSERT_DEATH` fails
+    // instead of false-passing on a subsequent UAF crash.
+    [[maybe_unused]] const RegionAllocator::Region* leaked = region.release();
+  };
+  ASSERT_DEATH(
+      destroy_with_live_region,
+      "RegionAllocator should have asserted when destroyed with allocated regions in flight");
+}
+
+TEST(RegionAllocCppApiTestCase, DestroyWithAllocatedRegionFromPool) {
+  ASSERT_NO_FAILURES(DestroyWithAllocatedRegionHelper(TestFlavor::UsePool));
+}
+
+TEST(RegionAllocCppApiTestCase, DestroyWithAllocatedRegionFromHeap) {
+  ASSERT_NO_FAILURES(DestroyWithAllocatedRegionHelper(TestFlavor::UseHeap));
+}
+
+TEST(RegionAllocCppApiTestCase, DestroyPoolWithAllocatedRegion) {
+  auto destroy_pool_with_live_region = []() {
+#if __has_feature(address_sanitizer) || __has_feature(leak_sanitizer) || \
+    __has_feature(hwaddress_sanitizer)
+    // Disable LSan for this thread; it is expected to leak on crash because
+    // zxtest terminates the crashing thread without unwinding destructors.
+    __lsan::ScopedDisabler _;
+#endif
+    auto pool = RegionAllocator::RegionPool::Create(REGION_POOL_MAX_SIZE);
+    if (pool == nullptr) {
+      return;
+    }
+    [[maybe_unused]] RegionAllocator::Region* leaked = pool->New(nullptr);
+    if (leaked == nullptr) {
+      return;
+    }
+    // `pool` is destroyed here while `leaked` is still allocated from it.
+  };
+  ASSERT_DEATH(destroy_pool_with_live_region,
+               "RegionPool should have asserted when destroyed with regions still allocated");
 }
 
 }  // namespace

@@ -8,6 +8,7 @@ use fidl::endpoints;
 use fidl_fuchsia_wlan_common::WlanMacRole;
 use fidl_fuchsia_wlan_device_service::DeviceMonitorProxy;
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
+use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_sme as fidl_sme;
 use ieee80211::Ssid;
 
@@ -56,9 +57,19 @@ pub async fn start(
     channel: u8,
     band: fidl_ieee80211::WlanBand,
 ) -> Result<fidl_sme::StartApResultCode, Error> {
+    let authentication = if target_pwd.is_empty() {
+        fidl_internal::Authentication { protocol: fidl_internal::Protocol::Open, credentials: None }
+    } else {
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(target_pwd),
+            ))),
+        }
+    };
     let config = fidl_sme::ApConfig {
         ssid: target_ssid.into(),
-        password: target_pwd,
+        authentication,
         radio_cfg: fidl_sme::RadioConfig {
             phy: fidl_ieee80211::WlanPhyType::Ht,
             primary: wlan_common::channel::Channel::new(
@@ -145,9 +156,22 @@ mod tests {
         let target_ssid = Ssid::try_from(ssid).unwrap();
         let target_password = password.as_bytes().to_vec();
 
+        let authentication = if target_password.is_empty() {
+            fidl_internal::Authentication {
+                protocol: fidl_internal::Protocol::Open,
+                credentials: None,
+            }
+        } else {
+            fidl_internal::Authentication {
+                protocol: fidl_internal::Protocol::Wpa2Personal,
+                credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                    fidl_internal::WpaCredentials::Passphrase(target_password.clone()),
+                ))),
+            }
+        };
         let config = fidl_sme::ApConfig {
             ssid: target_ssid.to_vec(),
-            password: target_password.to_vec(),
+            authentication,
             radio_cfg: fidl_sme::RadioConfig {
                 phy: fidl_ieee80211::WlanPhyType::Ht,
                 primary: wlan_common::channel::Channel::new(

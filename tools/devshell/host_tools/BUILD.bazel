@@ -11,7 +11,10 @@ test_suite(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//tools/devshell/fx_cli:builder_test",
+        "//tools/devshell/fx_cli:fx_builtins_test",
         "//tools/devshell/fx_cli:locator_test",
+        "//tools/devshell/fx_cli:main_test",
+        "//tools/devshell/fx_cli:metrics_test",
         "//tools/devshell/fx_cli:registry_test",
         "//tools/devshell/host_tools/get_main_pb_path:get_main_pb_path_test",
         "//tools/devshell/host_tools/get_src_dir:get_src_dir_test",

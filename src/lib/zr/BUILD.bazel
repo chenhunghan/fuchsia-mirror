@@ -12,6 +12,7 @@ package(default_applicable_licenses = ["//:license"])
 rustc_library(
     name = "zr",
     srcs = [
+        "src/assert.rs",
         "src/defer.rs",
         "src/inline_fn.rs",
         "src/lib.rs",
@@ -24,6 +25,7 @@ rustc_library(
         "src/string.rs",
     ],
     edition = "2024",
+    proc_macro_deps = ["//src/lib/zr/macro:zr-macro"],
     visibility = [
         "//src/lib/ksync:__pkg__",
         "//src/lib/lockdep/rust:__pkg__",

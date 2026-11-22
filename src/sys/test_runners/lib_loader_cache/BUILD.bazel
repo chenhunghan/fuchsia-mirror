@@ -22,7 +22,6 @@ package(default_applicable_licenses = ["//:license"])
 
 rustc_binary(
     name = "bin",
-    testonly = True,
     srcs = [
         "src/loader_cache.rs",
         "src/main.rs",
@@ -63,14 +62,12 @@ rustc_test(
 
 fx_packaged_binary(
     name = "bin_packaged_bin",
-    testonly = True,
     binary = ":bin",
     binary_name = "lib_loader_runner_cache",
 )
 
 fx_component_manifest(
     name = "lib_loader_runner_cache_cmp-manifest",
-    testonly = True,
     component_name = "lib_loader_runner_cache",
     includes = ["//sdk/lib/syslog:client.shard"],
     manifest = "meta/lib_loader_runner_cache.cml",
@@ -78,7 +75,6 @@ fx_component_manifest(
 
 fx_component(
     name = "lib_loader_runner_cache_cmp",
-    testonly = True,
     compiled_manifest = ":lib_loader_runner_cache_cmp-manifest",
     visibility = [
         "//src/sys/test_manager:__pkg__",

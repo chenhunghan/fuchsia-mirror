@@ -95,15 +95,6 @@ class VmPageOrMarker {
     return Pmm::Node().IndexToPage(raw_);
   }
 
-  // Returns the paddr_t of the underlying vm_page*. Is only valid to call if `IsPage` is true. Can
-  // be more efficient than performing |Page()->paddr()| as it saves a memory de-reference.
-  paddr_t PageAsPaddr() const {
-    DEBUG_ASSERT(IsPage());
-    // Do not need to mask any bits out of raw_, since Page has 0's for the type anyway.
-    static_assert(kPageType == 0);
-    return Pmm::Node().IndexToPaddr(raw_);
-  }
-
   ReferenceValue Reference() const {
     DEBUG_ASSERT(IsReference());
     return ReferenceValue(raw_ & ~BIT_MASK32(ReferenceValue::kAlignBits));
@@ -248,67 +239,6 @@ class VmPageOrMarker {
     NumSentinels,
   };
 
-  // The remaining bits of an interval type store any information specific to the type of interval
-  // being tracked. The ZeroRange class is defined here to group together the encoding of these bits
-  // specific to IntervalType::Zero.
-  class ZeroRange {
-   public:
-    // This is the same as kIntervalBits. Equality is asserted later where kIntervalBits is defined.
-    static constexpr int kAlignBits = 7;
-
-    explicit constexpr ZeroRange(uint32_t val) : value_(val) {
-      DEBUG_ASSERT((value_ & BIT_MASK32(kAlignBits)) == 0);
-    }
-    // The various dirty states that a zero interval can be in. Refer to VmCowPages::DirtyState for
-    // an explanation of the states. Note that an AwaitingClean state is not encoded in the interval
-    // state bits. This information is instead stored using the AwaitingCleanLength for convenience,
-    // where a non-zero length indicates that the interval is AwaitingClean. Doing this affords
-    // more convenient splitting and merging of intervals.
-    enum class DirtyState : uint32_t {
-      Untracked = 0,
-      Clean,
-      Dirty,
-      NumStates,
-    };
-
-    uint32_t value() const { return value_; }
-
-    // For zero range tracking, we also need to track dirty state information, and if the interval
-    // is AwaitingClean, the length that is AwaitingClean.
-    static constexpr uint64_t kDirtyStateBits = VM_PAGE_OBJECT_DIRTY_STATE_BITS;
-    static_assert(static_cast<uint32_t>(DirtyState::NumStates) <= (1 << kDirtyStateBits));
-    static constexpr int kDirtyStateShift = kAlignBits;
-    DirtyState GetDirtyState() const {
-      return static_cast<DirtyState>((value_ & (BIT_MASK32(kDirtyStateBits) << kDirtyStateShift)) >>
-                                     kDirtyStateShift);
-    }
-
-    static constexpr uint64_t kAwaitingCleanLengthShift = kAlignBits + kDirtyStateBits;
-    // Assert that we are not overlapping with the dirty state bits.
-    static_assert(kAwaitingCleanLengthShift >= kDirtyStateShift + kDirtyStateBits);
-    static_assert(kAwaitingCleanLengthShift <= kPageShift);
-
-    // The AwaitingCleanLength will always be a page-aligned length, so we can mask out the low
-    // kPageShift bits and store only the upper bits.
-    void SetAwaitingCleanLength(uint64_t len) {
-      DEBUG_ASSERT(len == 0 || GetDirtyState() == DirtyState::Dirty);
-      DEBUG_ASSERT(IS_ROUNDED(len, kPageSize));
-      len = (len >> kPageShift) << kAwaitingCleanLengthShift;
-      // Clear the old value.
-      value_ &= BIT_MASK32(kAwaitingCleanLengthShift);
-      // Set the new value.
-      value_ |= static_cast<uint32_t>(len);
-    }
-    uint64_t GetAwaitingCleanLength() const {
-      uint64_t len = value_ & ~BIT_MASK32(kAwaitingCleanLengthShift);
-      return (len >> kAwaitingCleanLengthShift) << kPageShift;
-    }
-
-   private:
-    uint32_t value_;
-  };
-  using IntervalDirtyState = ZeroRange::DirtyState;
-
   // Getters and setters for the interval type.
   bool IsIntervalStart() const {
     return IsInterval() && GetIntervalSentinel() == SentinelType::Start;
@@ -318,39 +248,6 @@ class VmPageOrMarker {
     return IsInterval() && GetIntervalSentinel() == SentinelType::Slot;
   }
   bool IsIntervalZero() const { return IsInterval() && GetIntervalType() == IntervalType::Zero; }
-
-  // Getters and setter for the zero interval type.
-  bool IsZeroIntervalClean() const {
-    DEBUG_ASSERT(IsIntervalZero());
-    return ZeroRange(raw_ & ~BIT_MASK32(kIntervalBits)).GetDirtyState() ==
-           ZeroRange::DirtyState::Clean;
-  }
-  bool IsZeroIntervalDirty() const {
-    DEBUG_ASSERT(IsIntervalZero());
-    return ZeroRange(raw_ & ~BIT_MASK32(kIntervalBits)).GetDirtyState() ==
-           ZeroRange::DirtyState::Dirty;
-  }
-  bool IsZeroIntervalUntracked() const {
-    DEBUG_ASSERT(IsIntervalZero());
-    return ZeroRange(raw_ & ~BIT_MASK32(kIntervalBits)).GetDirtyState() ==
-           ZeroRange::DirtyState::Untracked;
-  }
-  ZeroRange::DirtyState GetZeroIntervalDirtyState() const {
-    DEBUG_ASSERT(IsIntervalZero());
-    return ZeroRange(raw_ & ~BIT_MASK32(kIntervalBits)).GetDirtyState();
-  }
-  void SetZeroIntervalAwaitingCleanLength(uint64_t len) {
-    DEBUG_ASSERT(IsIntervalZero());
-    DEBUG_ASSERT(IsIntervalStart() || IsIntervalSlot());
-    auto interval = ZeroRange(raw_ & ~BIT_MASK32(kIntervalBits));
-    interval.SetAwaitingCleanLength(len);
-    raw_ = (raw_ & BIT_MASK32(kIntervalBits)) | interval.value();
-  }
-  uint64_t GetZeroIntervalAwaitingCleanLength() const {
-    DEBUG_ASSERT(IsIntervalZero());
-    DEBUG_ASSERT(IsIntervalStart() || IsIntervalSlot());
-    return ZeroRange(raw_ & ~BIT_MASK32(kIntervalBits)).GetAwaitingCleanLength();
-  }
 
  private:
   explicit VmPageOrMarker(uint32_t raw) : raw_(raw) {}
@@ -392,8 +289,6 @@ class VmPageOrMarker {
     return static_cast<IntervalType>((raw_ & (BIT_MASK(kIntervalTypeBits) << kIntervalTypeShift)) >>
                                      kIntervalTypeShift);
   }
-  static constexpr uint64_t kIntervalBits = kTypeBits + kIntervalSentinelBits + kIntervalTypeBits;
-  static_assert(ZeroRange::kAlignBits == kIntervalBits);
 
   uint32_t GetType() const { return raw_ & BIT_MASK(kTypeBits); }
 
@@ -464,12 +359,6 @@ class VmPageOrMarkerRef {
     DEBUG_ASSERT(!content.IsEmpty());
     DEBUG_ASSERT(page_or_marker_);
     return page_or_marker_->Swap(ktl::move(content));
-  }
-
-  // Forward dirty state updates as an allowed mutation.
-  void SetZeroIntervalAwaitingCleanLength(uint64_t len) {
-    DEBUG_ASSERT(page_or_marker_);
-    page_or_marker_->SetZeroIntervalAwaitingCleanLength(len);
   }
 
   uint32_t GetMarkerShareCount() {
@@ -709,19 +598,8 @@ class VMPLCursor : private btree::BTree<uint64_t, VmPlnOwner>::iterator {
  public:
   VMPLCursor() : index_(kPageFanOut) {}
 
-  // See VMPLCursor::current.
-  VmPageOrMarkerRef current_ref() const {
-    if (valid()) {
-      auto [node_offset, node] = get();
-      return VmPageOrMarkerRef(&node->pages_[index_]);
-    }
-    return VmPageOrMarkerRef(nullptr);
-  }
-
   // Retrieve the current VmPageOrMarker pointed at by the cursor. This will be a nullptr if the
   // cursor is no longer valid. The slot pointed at may itself be empty.
-  // Note that it is up to the caller to know the offset, which it can track by remembering how
-  // many |step|s it has done.
   const VmPageOrMarker* current() const {
     if (valid()) {
       auto [node_offset, node] = get();
@@ -730,20 +608,8 @@ class VMPLCursor : private btree::BTree<uint64_t, VmPlnOwner>::iterator {
     return nullptr;
   }
 
-  // Move the cursor to the next entry. The next entry can then be retrieved by calling |current|,
-  // and if there is no next entry then current will return a nullptr.
-  void step() {
-    if (valid()) {
-      index_++;
-      if (index_ == kPageFanOut) {
-        inc_node();
-      }
-    }
-  }
-
   // Calls the provided callback of type [](const VmPageOrMarker*)->zx_status_t on every entry as
-  // long as they are contiguous. This is equivalent a loop calling |step| and |current|, but can
-  // produce more optimal code gen with the internal loop.
+  // long as they are contiguous.
   // The callback can return ZX_ERR_NEXT to continue, ZX_ERR_STOP to cease iteration gracefully, or
   // any other status to terminate with that status code.
   template <typename F>
@@ -1218,14 +1084,6 @@ class VmPageList final {
   static constexpr uint64_t MAX_SIZE =
       ROUNDDOWN(UINT64_MAX, VmPageListNode::kPageFanOut* kPageSize);
 
-  // Add a sparse zero interval spanning the range [start_offset, end_offset) with the specified
-  // dirty_state. The specified range must be previously unpopulated. This will try to merge the new
-  // zero interval with existing intervals to the left and/or right, if the dirty_state allows it.
-  zx_status_t AddZeroInterval(uint64_t start_offset, uint64_t end_offset,
-                              VmPageOrMarker::IntervalDirtyState dirty_state) {
-    return AddZeroIntervalInternal(start_offset, end_offset, dirty_state, 0);
-  }
-
   // Populates individual interval slots in the range [start_offset, end_offset) that falls inside a
   // sparse interval. The intent of this function is to allow the caller to prepare the range for
   // overwriting (replacing with pages) by populating the required slots upfront, so that slot
@@ -1238,44 +1096,8 @@ class VmPageList final {
   // populated/split from.
   void ReturnIntervalSlot(uint64_t offset);
 
-  // Clips an interval from the start by len, i.e. moves the start from interval_start to
-  // interval_start + len. The total length of the interval must be larger than len.
-  zx_status_t ClipIntervalStart(uint64_t interval_start, uint64_t len);
-
-  // Clips an interval from the end by len, i.e. moves the end from interval_end to
-  // interval_end - len. The total length of the interval must be larger than len.
-  zx_status_t ClipIntervalEnd(uint64_t interval_end, uint64_t len);
-
   // Returns true if the specified offset falls in a sparse zero interval.
   bool IsOffsetInZeroInterval(uint64_t offset) const;
-
-  // Replace an existing page at offset with a zero interval, and return the released page. The
-  // caller takes ownership of the released page and is responsible for freeing it.
-  vm_page_t* ReplacePageWithZeroInterval(uint64_t offset,
-                                         VmPageOrMarker::IntervalDirtyState dirty_state);
-
-  // Overwrite a zero interval either fully or partially with a new zero interval, breaking off the
-  // old interval into two if required. old_start_offset and old_end_offset specify the start and
-  // end sentinels of the old interval that is being overwritten; either one of these or both can be
-  // specified, with the other set to UINT64_MAX. The new zero interval that overwrites the old
-  // spans [new_start_offset, new_end_offset] with its state set to new_dirty_state.
-  //  - For full overwrites, both old_start_offset and old_end_offset must be provided, and should
-  //  be equal to new_start_offset and new_end_offset respectively. At the end of the call, the old
-  //  interval will have been completely replaced by the new one.
-  //  - For partial overwrites from the start, old_start_offset must be provided and be equal to
-  //  new_start_offset, and old_end_offset must be UINT64_MAX. At the end of this call, the start of
-  //  the old interval will have been overwritten by the new interval, with the remainder of the old
-  //  interval now starting at |new_end_offset + kPageSize|.
-  //  - For partial overwrites from the end, old_end_offset must be provided and be equal to
-  //  new_end_offset, and old_start_offset must be UINT64_MAX. At the end of this call, the end of
-  //  the old interval will have been overwritten by the new interval, with the remainder of the old
-  //  interval now ending at |new_start_offset - kPageSize|.
-  //  - Partial overwrites in the middle are not allowed. In other words, either old_start_offset
-  //  must be the same as new_start_offset, or old_end_offset must be the same as new_end_offset, or
-  //  both.
-  zx_status_t OverwriteZeroInterval(uint64_t old_start_offset, uint64_t old_end_offset,
-                                    uint64_t new_start_offset, uint64_t new_end_offset,
-                                    VmPageOrMarker::IntervalDirtyState new_dirty_state);
 
  private:
   static uint64_t NodeOffset(uint64_t offset) { return VmPageListNode::NodeOffset(offset); }
@@ -1299,14 +1121,6 @@ class VmPageList final {
     }
     return node->IsOffsetInInterval(obj_offset, offset);
   }
-
-  // Internal helper for AddZeroInterval.
-  // |replace_existing_slot| can optionally be set to true if a zero interval spanning a single page
-  // is being added, and the slot at that offset is already populated (but Empty) and can be reused.
-  zx_status_t AddZeroIntervalInternal(uint64_t start_offset, uint64_t end_offset,
-                                      VmPageOrMarker::IntervalDirtyState dirty_state,
-                                      uint64_t awaiting_clean_len,
-                                      bool replace_existing_slot = false);
 
   // Internal helper for LookupOrAllocate.
   VmPageOrMarker* LookupOrAllocateInternal(uint64_t offset);

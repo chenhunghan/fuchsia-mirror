@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+import("//build/toolchain/toolchain_environment.gni")
+import("//build/zircon/zircon_cpu.gni")
+
+library_headers("headers") {
+  headers = [
+    "phys/allocation/$zircon_cpu/bounds.h",
+    "phys/allocation/allocation.h",
+    "phys/allocation/bounds.h",
+    "phys/allocation/new.h",
+    "phys/allocation/zbitl.h",
+  ]
+
+  public_deps = [
+    "//zircon/kernel/lib/ktl",
+    "//zircon/kernel/lib/libc",
+
+    # <phys/allocation/allocation.h> has #include <lib/memalloc/pool.h>.
+    # <phys/allocation/allocation.h> has #include <lib/memalloc/range.h>.
+    "//zircon/kernel/phys/lib/memalloc:headers",
+
+    # <phys/allocation/allocation.h> has #include <fbl/alloc_checker.h>.
+    "//zircon/system/ulib/fbl",
+
+    # <phys/allocation/allocation.h> and <phys/allocation/zbitl.h>
+    # have #include <lib/fit/result.h>.
+    "//zircon/system/ulib/zx",
+
+    # <phys/allocation/new.h> has #include <lib/trivial-allocator/new.h>.
+    "//src/lib/trivial-allocator",
+
+    # <phys/allocation/zbitl.h> has #include
+    # <lib/zbitl/storage-traits.h>.
+    "//src/lib/zbitl",
+  ]
+}
+
+static_library("allocation") {
+  complete_static_lib = true
+
+  public_deps = [ ":headers" ]
+
+  sources = [ "zbitl-allocation.cc" ]
+  deps = [
+    "//zircon/kernel/phys/lib/memalloc",
+    "//zircon/system/ulib/fbl",
+  ]
+
+  if (!is_efi_toolchain) {
+    sources += [
+      "allocation-init.cc",
+      "allocation.cc",
+    ]
+    deps += [ "//zircon/kernel/phys/address-space:headers" ]
+  }
+}

@@ -51,13 +51,13 @@ TEST(RestartRead, ReadFromPipeRestarts) {
   child_wrote_data = false;
   parent_read_started = false;
 
+  // Install the signal handlers before forking so `sig_handler_child` remains installed in the
+  // child process until `_exit()`, and both handlers are restored in the parent after `ForkHelper`
+  // reaps the child. The `SA_RESTART` flag tells the kernel to restart any interrupted syscalls
+  // that support being restarted.
+  test_helper::ScopedSigAction parent_sigusr1(SIGUSR1, sig_handler, SA_RESTART);
+  test_helper::ScopedSigAction child_sigusr2(SIGUSR2, sig_handler_child, SA_RESTART);
   test_helper::ForkHelper helper;
-  // Install the signal handler that will interrupt the read syscall. The `SA_RESTART` flag tells
-  // the kernel to restart any interrupted syscalls that support being restarted.
-  struct sigaction sa = {};
-  sa.sa_sigaction = sig_handler;
-  sa.sa_flags = SA_SIGINFO | SA_RESTART;
-  ASSERT_EQ(sigaction(SIGUSR1, &sa, nullptr), 0);
 
   // Create the pipe that will be used to communicate with the child process.
   int pipefd[2];
@@ -67,13 +67,6 @@ TEST(RestartRead, ReadFromPipeRestarts) {
 
   child_pid = helper.RunInForkedProcess([&] {
     // Child process.
-
-    // Install a signal handler that will write the expected payload to the parent when signaled by
-    // the parent.
-    struct sigaction sa = {};
-    sa.sa_sigaction = sig_handler_child;
-    sa.sa_flags = SA_SIGINFO | SA_RESTART;
-    ASSERT_EQ(sigaction(SIGUSR2, &sa, nullptr), 0);
 
     // Send a series of signals to the parent process, which should continue to interrupt the
     // parent's read syscall until the payload is written.

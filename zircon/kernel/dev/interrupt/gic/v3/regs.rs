@@ -187,6 +187,16 @@ pub(super) fn gicr_icpendr0() -> Offset<u32, RwSafe> {
     Offset::new(GICR_SGI_BASE + 0x0280)
 }
 
+/// GICR_ICACTIVER0: Interrupt Clear-Active Register 0 for SGIs and PPIs.
+pub(super) fn gicr_icactiver0() -> Offset<u32, RwSafe> {
+    Offset::new(GICR_SGI_BASE + 0x0380)
+}
+
+/// GICR_IPRIORITYR<n>: Interrupt Priority Registers for SGIs and PPIs.
+pub(super) fn gicr_ipriorityr(n: u32) -> Offset<u32, RwSafe> {
+    Offset::new(GICR_SGI_BASE + 0x0400 + (n as usize) * 4)
+}
+
 /// GICR_IGRPMOD0: Interrupt Group Modifier Register 0 for SGIs and PPIs.
 pub(super) fn gicr_igrpmod0() -> Offset<u32, RwSafe> {
     Offset::new(GICR_SGI_BASE + 0x0d00)

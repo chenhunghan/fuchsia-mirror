@@ -199,17 +199,15 @@ class DeviceInfo:
         serial_number: Device serial number.
         address: Target address of the device (IP or USB).
         serial_socket: Device serial socket path.
-        fastboot_node_id: Fastboot node ID.
     """
 
     name: str
     serial_number: str | None = None
     address: TargetAddr | None = None
     serial_socket: str | None = None
-    fastboot_node_id: str | None = None
 
     def __post_init__(self) -> None:
-        for attr in ("serial_number", "serial_socket", "fastboot_node_id"):
+        for attr in ("serial_number", "serial_socket"):
             val = getattr(self, attr)
             if isinstance(val, str):
                 cleaned = val.strip()
@@ -231,8 +229,7 @@ class DeviceInfo:
         return (
             f"name={self.name}, "
             f"address={self.address}, "
-            f"serial_socket={self.serial_socket}, "
-            f"fastboot_node_id={self.fastboot_node_id}"
+            f"serial_socket={self.serial_socket}"
         )
 
 

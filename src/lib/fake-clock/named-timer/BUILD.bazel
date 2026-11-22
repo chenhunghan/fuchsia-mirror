@@ -48,7 +48,7 @@ rustc_library(
 
 fx_cc_library(
     name = "named-timer-headers",
-    srcs = ["named_timer.h"],
+    hdrs = ["named_timer.h"],
     visibility = ["//src/lib/fake-clock/lib:__pkg__"],
     alwayslink = True,
 )
@@ -79,7 +79,6 @@ rustc_test(
 
 fx_unittest_package(
     name = "named-timer-test",
-    package_name = "named-timer-test",
     unit_tests = [":named-timer_test"],
     visibility = ["//visibility:private"],
 )

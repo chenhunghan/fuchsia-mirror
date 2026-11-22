@@ -680,6 +680,11 @@ type Enum struct {
 	// The primitive subtype underlying the Enum.
 	Subtype fidlgen.PrimitiveSubtype
 
+	// Strict gives whether the enum is strict (i.e., whether its members
+	// exhaustively enumerate its valid values). A flexible enum may take on
+	// any value of its subtype.
+	Strict bool
+
 	// Members is the list of member values of the enum.
 	Members []EnumMember
 }
@@ -700,6 +705,7 @@ func newEnum(enum fidlgen.Enum) (*Enum, error) {
 	e := &Enum{
 		decl:    newDecl(enum),
 		Subtype: enum.Type,
+		Strict:  enum.IsStrict(),
 	}
 	for _, member := range enum.Members {
 		val := getConstantValue(member.Value, TypeKindInteger)

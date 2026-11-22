@@ -1,9 +1,0 @@
-{
-    "short_description": "Test driver that forwards metadata using the //src/lib/ddktl library",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "DriverFramework"
-    ]
-}

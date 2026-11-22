@@ -5,7 +5,10 @@
 #include <fcntl.h>
 #include <lib/fit/defer.h>
 #include <poll.h>
+#include <signal.h>
+#include <sys/epoll.h>
 #include <sys/mount.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
 #include <sys/syscall.h>
@@ -15,16 +18,20 @@
 #include <zircon/compiler.h>
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <fbl/unique_fd.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <linux/capability.h>
 #include <linux/fuse.h>
@@ -32,6 +39,7 @@
 
 #include "src/lib/fxl/strings/string_printf.h"
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
+#include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
 #ifndef FUSE_SUPER_MAGIC
@@ -59,6 +67,7 @@ class FuseTest : public ::testing::Test {
 
   void TearDown() override {
     if (base_dir_) {
+      EXPECT_TRUE(fork_helper_.KillChildren());
       if (umount2(GetMountDir().c_str(), MNT_DETACH) != 0) {
         FAIL() << "Unable to umount: " << strerror(errno);
       }
@@ -75,7 +84,7 @@ class FuseTest : public ::testing::Test {
     }
   }
 
-  std::string GetMountDir() { return *base_dir_ + "/merge"; }
+  std::string GetMountDir() { return base_dir_->path() + "/merge"; }
 
   testing::AssertionResult MkDir(const std::string& directory) {
     if (mkdir(directory.c_str(), 0700) != 0) {
@@ -91,18 +100,18 @@ class FuseTest : public ::testing::Test {
              << "Unable to find fuse binary at: " << GetOverlayFsPath() << "(set OVERLAYFS_PATH)";
     }
 
-    std::string base_dir = "/tmp/fuse_base_dir_XXXXXX";
-    if (mkdtemp(const_cast<char*>(base_dir.c_str())) == nullptr) {
+    test_helper::ScopedTempDir base_dir;
+    if (base_dir.path().empty()) {
       return testing::AssertionFailure()
              << "Unable to create temporary directory: " << strerror(errno);
     }
-    std::string lowerdir = base_dir + "/lower";
+    std::string lowerdir = base_dir.path() + "/lower";
     OK_OR_RETURN(MkDir(lowerdir));
-    std::string upperdir = base_dir + "/upper";
+    std::string upperdir = base_dir.path() + "/upper";
     OK_OR_RETURN(MkDir(upperdir));
-    std::string workdir = base_dir + "/work";
+    std::string workdir = base_dir.path() + "/work";
     OK_OR_RETURN(MkDir(workdir));
-    std::string mergedir = base_dir + "/merge";
+    std::string mergedir = base_dir.path() + "/merge";
     OK_OR_RETURN(MkDir(mergedir));
     std::string witness_name = "witness";
     {
@@ -124,7 +133,7 @@ class FuseTest : public ::testing::Test {
     if (child_pid <= 0) {
       return testing::AssertionFailure() << "Unable to fork to start the fuse server process";
     }
-    base_dir_ = base_dir;
+    base_dir_ = std::move(base_dir);
 
     std::string witness = mergedir + "/" + witness_name;
     for (int i = 0; i < 100 && access(witness.c_str(), R_OK) != 0; ++i) {
@@ -137,7 +146,7 @@ class FuseTest : public ::testing::Test {
   }
 
   test_helper::ForkHelper fork_helper_;
-  std::optional<std::string> base_dir_;
+  std::optional<test_helper::ScopedTempDir> base_dir_;
 };
 
 class Node {
@@ -371,21 +380,21 @@ class FuseServer {
     HANDLE_EINTR(poll(fds, 2, -1));
 
     bool continue_server_processing = true;
-    if (fds[0].revents & POLLIN) {
-      // When the poll event came from the fuse_fd_, process it normally.
-      continue_server_processing = true;
-      EXPECT_TRUE(ReadRequest(&buffer));
-      EXPECT_TRUE(HandleFuseMessage(buffer));
-    } else if (fds[0].revents & POLLERR) {
+    if (fds[0].revents & POLLERR) {
       // POLLERR on the fuse_fd_ is semi-expected when the file descriptor has been closed, for
       // instance when the kernel unmounts the backing directory. This is exercised specifically
       // in the InvalidateMountDir test case, which implicitly unmounts the backing dir.
       continue_server_processing = false;
+    } else if (fds[0].revents & POLLIN) {
+      // When the poll event came from the fuse_fd_, process it normally.
+      continue_server_processing = true;
+      EXPECT_TRUE(ReadRequest(&buffer));
+      EXPECT_TRUE(HandleFuseMessage(buffer));
     } else if (fds[1].revents & POLLIN) {
       // If the poll event came from interrupt_pipe_, then it's a signal to flush any remaining
       // requests from the FUSE node and complete the server loop;
       continue_server_processing = false;
-      while (poll(&fds[0], 1, 0) > 0) {
+      while (poll(&fds[0], 1, 0) > 0 && !(fds[0].revents & POLLERR) && (fds[0].revents & POLLIN)) {
         if (!ReadRequest(&buffer))
           break;
         EXPECT_TRUE(HandleFuseMessage(buffer));
@@ -511,6 +520,15 @@ class FuseServer {
         OK_OR_RETURN(HandleGetAttr(node, in_header, &getattr_in));
         break;
       }
+      case FUSE_SETATTR: {
+        if (message.size() < sizeof(fuse_in_header) + sizeof(fuse_setattr_in)) {
+          return WriteDataFreeResponse(in_header, -EINVAL);
+        }
+        struct fuse_setattr_in setattr_in = {};
+        memcpy(&setattr_in, in_payload, sizeof(setattr_in));
+        OK_OR_RETURN(HandleSetAttr(node, in_header, &setattr_in));
+        break;
+      }
       case FUSE_LOOKUP: {
         OK_OR_RETURN(HandleLookup(node, in_header, reinterpret_cast<const char*>(in_payload)));
         break;
@@ -562,8 +580,11 @@ class FuseServer {
         OK_OR_RETURN(HandleRelease(node, in_header, &release_in));
         break;
       }
-      case FUSE_GETXATTR: {
-        OK_OR_RETURN(WriteDataFreeResponse(in_header, -ENOSYS));
+      case FUSE_GETXATTR:
+      case FUSE_SETXATTR:
+      case FUSE_REMOVEXATTR:
+      case FUSE_LISTXATTR: {
+        OK_OR_RETURN(HandleXAttr(node, in_header));
         break;
       }
       case FUSE_BATCH_FORGET:
@@ -592,6 +613,15 @@ class FuseServer {
         const char* name = reinterpret_cast<const char*>(in_payload) + sizeof(rename_in);
         const char* target_name = name + strlen(name) + 1;
         OK_OR_RETURN(HandleRename(node, in_header, &rename_in, name, target_name));
+        break;
+      }
+      case FUSE_FALLOCATE: {
+        if (message.size() < sizeof(fuse_in_header) + sizeof(fuse_fallocate_in)) {
+          return WriteDataFreeResponse(in_header, -EINVAL);
+        }
+        struct fuse_fallocate_in fallocate_in = {};
+        memcpy(&fallocate_in, in_payload, sizeof(fallocate_in));
+        OK_OR_RETURN(HandleFallocate(node, in_header, &fallocate_in));
         break;
       }
       default:
@@ -626,6 +656,17 @@ class FuseServer {
   virtual testing::AssertionResult HandleGetAttr(const std::shared_ptr<Node>& node,
                                                  const struct fuse_in_header& in_header,
                                                  const struct fuse_getattr_in* getattr_in) {
+    fuse_attr_out attr_out = {};
+    node->PopulateAttr(attr_out);
+    return WriteStructResponse(in_header, attr_out);
+  }
+
+  virtual testing::AssertionResult HandleSetAttr(const std::shared_ptr<Node>& node,
+                                                 const struct fuse_in_header& in_header,
+                                                 const struct fuse_setattr_in* setattr_in) {
+    if ((setattr_in->valid & FATTR_SIZE) != 0) {
+      node->SetSize(setattr_in->size);
+    }
     fuse_attr_out attr_out = {};
     node->PopulateAttr(attr_out);
     return WriteStructResponse(in_header, attr_out);
@@ -710,6 +751,17 @@ class FuseServer {
                                                  const struct fuse_in_header& in_header,
                                                  const struct fuse_release_in* release_in) {
     return WriteAckResponse(in_header);
+  }
+
+  virtual testing::AssertionResult HandleXAttr(const std::shared_ptr<Node>& node,
+                                               const struct fuse_in_header& in_header) {
+    return WriteDataFreeResponse(in_header, -ENOSYS);
+  }
+
+  virtual testing::AssertionResult HandleFallocate(const std::shared_ptr<Node>& node,
+                                                   const struct fuse_in_header& in_header,
+                                                   const struct fuse_fallocate_in* fallocate_in) {
+    return WriteDataFreeResponse(in_header, -ENOSYS);
   }
 
   virtual testing::AssertionResult HandleRename(const std::shared_ptr<Node>& source_dir_node,
@@ -937,24 +989,24 @@ class FuseServerTest : public ::testing::Test {
     server_thread_.join();
 
     // Finally, we can gracefully unmount the FUSE server.
-    if (umount2(mount_dir_->c_str(), MNT_DETACH) != 0) {
+    if (umount2(mount_dir_->path().c_str(), MNT_DETACH) != 0) {
       FAIL() << "Unable to umount: " << strerror(errno);
     }
     mount_dir_.reset();
   }
 
  protected:
-  std::string GetMountDir() { return *mount_dir_; }
+  std::string GetMountDir() { return mount_dir_->path(); }
 
   testing::AssertionResult Mount(std::shared_ptr<FuseServer> server) {
-    std::string mount_dir = "/tmp/fuse_mount_dir_XXXXXX";
-    if (mkdtemp(const_cast<char*>(mount_dir.c_str())) == nullptr) {
+    test_helper::ScopedTempDir mount_dir;
+    if (mount_dir.path().empty()) {
       return testing::AssertionFailure()
              << "Unable to create temporary directory: " << strerror(errno);
     }
 
-    OK_OR_RETURN(server->Mount(mount_dir));
-    mount_dir_ = mount_dir;
+    OK_OR_RETURN(server->Mount(mount_dir.path()));
+    mount_dir_ = std::move(mount_dir);
     server_ = std::move(server);
 
     server_thread_ = std::thread([this] {
@@ -966,7 +1018,7 @@ class FuseServerTest : public ::testing::Test {
   }
 
  private:
-  std::optional<std::string> mount_dir_;
+  std::optional<test_helper::ScopedTempDir> mount_dir_;
   std::shared_ptr<FuseServer> server_;
   std::thread server_thread_;
 };
@@ -986,7 +1038,7 @@ TEST_F(FuseTest, Mount) { ASSERT_TRUE(Mount()); }
 TEST_F(FuseTest, Stats) {
   ASSERT_TRUE(Mount());
   std::string mounted_witness = GetMountDir() + "/witness";
-  std::string original_witness = *base_dir_ + "/lower/witness";
+  std::string original_witness = base_dir_->path() + "/lower/witness";
   fbl::unique_fd fd(open(mounted_witness.c_str(), O_RDONLY));
   ASSERT_TRUE(fd.is_valid());
   struct stat mounted_stats;
@@ -1442,14 +1494,85 @@ TEST_F(FuseServerTest, NoReqsUntilInitResponse) {
 }
 
 TEST_F(FuseServerTest, OpenAndClose) {
-  std::shared_ptr<FuseServer> server(new FuseServer());
+  class AsyncReleaseServer : public FuseServer {
+   public:
+    bool flush_called() const { return flush_called_.load(std::memory_order_relaxed); }
+
+    bool forget_called() {
+      std::lock_guard guard(mtx_);
+      return forget_called_;
+    }
+
+    fuse_in_header WaitForRelease() {
+      std::unique_lock guard(mtx_);
+      cv_.wait(guard, [&]() { return release_hdr_.has_value(); });
+      return *release_hdr_;
+    }
+
+    void WaitForForget() {
+      std::unique_lock guard(mtx_);
+      cv_.wait(guard, [&]() { return forget_called_; });
+    }
+
+    testing::AssertionResult CompleteRelease(const fuse_in_header& in_header) {
+      return WriteAckResponse(in_header);
+    }
+
+   protected:
+    testing::AssertionResult HandleFlush(const std::shared_ptr<Node>& node,
+                                         const struct fuse_in_header& in_header,
+                                         const struct fuse_flush_in* flush_in) override {
+      flush_called_.store(true, std::memory_order_relaxed);
+      return WriteAckResponse(in_header);
+    }
+
+    testing::AssertionResult HandleRelease(const std::shared_ptr<Node>& node,
+                                           const struct fuse_in_header& in_header,
+                                           const struct fuse_release_in* release_in) override {
+      // Defer replying to FUSE_RELEASE until after close() has returned on the
+      // client thread to verify that FUSE_RELEASE is dispatched asynchronously.
+      std::lock_guard guard(mtx_);
+      release_hdr_ = in_header;
+      cv_.notify_all();
+      return testing::AssertionSuccess();
+    }
+
+    testing::AssertionResult HandleForget(const struct fuse_in_header& in_header,
+                                          const struct fuse_forget_in* forget_in) override {
+      std::lock_guard guard(mtx_);
+      forget_called_ = true;
+      cv_.notify_all();
+      return testing::AssertionSuccess();
+    }
+
+   private:
+    std::atomic<bool> flush_called_ = false;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::optional<fuse_in_header> release_hdr_;
+    bool forget_called_ = false;
+  };
+
+  auto server = std::make_shared<AsyncReleaseServer>();
   ASSERT_TRUE(server->fs().AddFileAtRoot("file"));
   ASSERT_TRUE(Mount(server));
 
   std::string filename = GetMountDir() + "/file";
-  fbl::unique_fd fd(open(filename.c_str(), O_RDWR | O_CREAT));
+  fbl::unique_fd fd(open(filename.c_str(), O_RDWR));
   ASSERT_TRUE(fd.is_valid()) << strerror(errno);
-  fd.reset();
+  ASSERT_THAT(unlink(filename.c_str()), SyscallSucceeds());
+  ASSERT_THAT(close(fd.release()), SyscallSucceeds());
+  EXPECT_TRUE(server->flush_called());
+
+  fuse_in_header release_hdr = server->WaitForRelease();
+  // Drain the FUSE queue with a synchronous getattr on the mount root and
+  // verify that FUSE_FORGET is not queued before FUSE_RELEASE completes.
+  struct stat s;
+  ASSERT_THAT(stat(GetMountDir().c_str(), &s), SyscallSucceeds());
+  EXPECT_FALSE(server->forget_called());
+
+  ASSERT_TRUE(server->CompleteRelease(release_hdr));
+  server->WaitForForget();
 }
 
 TEST_F(FuseServerTest, HeaderLengthUnderflow) {
@@ -1569,6 +1692,7 @@ class CountingFuseServer : public FuseServer {
   uint64_t NonRootGetAttrCount() {
     return calls_to_non_root_getattr_.load(std::memory_order_relaxed);
   }
+  uint64_t XAttrCount() { return calls_to_xattr_.load(std::memory_order_relaxed); }
 
  protected:
   testing::AssertionResult HandleLookup(const std::shared_ptr<Node>& node,
@@ -1594,11 +1718,18 @@ class CountingFuseServer : public FuseServer {
     return FuseServer::HandleGetAttr(node, in_header, getattr_in);
   }
 
+  testing::AssertionResult HandleXAttr(const std::shared_ptr<Node>& node,
+                                       const struct fuse_in_header& in_header) override {
+    calls_to_xattr_.fetch_add(1, std::memory_order_relaxed);
+    return FuseServer::HandleXAttr(node, in_header);
+  }
+
  private:
   int access_reply_;
   std::atomic_uint64_t calls_to_lookup_ = 0;
   std::atomic_uint64_t calls_to_access_ = 0;
   std::atomic_uint64_t calls_to_non_root_getattr_ = 0;
+  std::atomic_uint64_t calls_to_xattr_ = 0;
 };
 
 struct PermissionCheckTestCase {
@@ -1895,6 +2026,32 @@ INSTANTIATE_TEST_SUITE_P(
         // |FUSE_POSIX_ACL| init flag.
         BypassAccessTestCase{
             .want_init_flags = FUSE_POSIX_ACL, .access_reply = 0, .max_access_count = 0}));
+
+TEST_F(FuseServerTest, BypassUnsupportedXAttr) {
+  constexpr char kAttrName[] = "user.test";
+  constexpr char kAttrValue[] = "value";
+
+  auto server = std::make_shared<CountingFuseServer>(/* want_init_flags= */ 0,
+                                                     /* access_reply= */ 0);
+  ASSERT_TRUE(server->fs().AddFileAtRoot("somefile1"));
+  ASSERT_TRUE(server->fs().AddFileAtRoot("somefile2"));
+  ASSERT_TRUE(Mount(server));
+
+  server->WaitForInit();
+  EXPECT_EQ(server->XAttrCount(), 0u);
+
+  const std::string file1 = GetMountDir() + "/somefile1";
+  const std::string file2 = GetMountDir() + "/somefile2";
+
+  for (const std::string& file : {file1, file1, file2}) {
+    EXPECT_THAT(getxattr(file.c_str(), kAttrName, nullptr, 0), SyscallFailsWithErrno(EOPNOTSUPP));
+    EXPECT_THAT(setxattr(file.c_str(), kAttrName, kAttrValue, sizeof(kAttrValue), 0),
+                SyscallFailsWithErrno(EOPNOTSUPP));
+    EXPECT_THAT(removexattr(file.c_str(), kAttrName), SyscallFailsWithErrno(EOPNOTSUPP));
+    EXPECT_THAT(listxattr(file.c_str(), nullptr, 0), SyscallFailsWithErrno(EOPNOTSUPP));
+    EXPECT_EQ(server->XAttrCount(), 4u);
+  }
+}
 
 enum class ExpectedGetAttrBehaviour {
   kNone,
@@ -2301,6 +2458,10 @@ TEST_F(FuseServerTest, InvalidateMountDir) {
   });
   const std::string node_path = child_mount_dir + "/node";
   ASSERT_NO_FATAL_FAILURE(TestOpenWithFlags(node_path, O_RDONLY));
+  // Synchronize with child_server so that the asynchronous FUSE_RELEASE from
+  // closing the file in TestOpenWithFlags is drained before triggering the
+  // implicit unmount below.
+  ASSERT_NO_FATAL_FAILURE(TestStat(node_path));
 
   // The following open operation will trigger a revalidation on the child
   // mount directory which will fail because we update the generation. This
@@ -2758,4 +2919,577 @@ TEST_F(FuseServerTest, ConcurrentLazyUnmountDuringLookupAndEscape) {
     ASSERT_EQ(umount2(mount_dir.c_str(), MNT_DETACH), 0) << strerror(errno);
     ASSERT_EQ(umount2(mount_dir.c_str(), MNT_DETACH), 0) << strerror(errno);
   }
+}
+
+TEST_F(FuseServerTest, EpollDevFuse) {
+  test_helper::ScopedTempDir temp_dir;
+  std::string mount_dir = temp_dir.path() + "/mnt";
+  ASSERT_EQ(mkdir(mount_dir.c_str(), 0700), 0) << strerror(errno);
+
+  fbl::unique_fd fuse_fd(open("/dev/fuse", O_RDWR | O_CLOEXEC));
+  if (!fuse_fd.is_valid() && (errno == ENOENT || errno == ENODEV)) {
+    GTEST_SKIP() << "/dev/fuse is not available";
+  }
+  ASSERT_TRUE(fuse_fd.is_valid()) << strerror(errno);
+
+  fbl::unique_fd epfd(epoll_create1(EPOLL_CLOEXEC));
+  ASSERT_TRUE(epfd.is_valid()) << strerror(errno);
+
+  struct stat stat_buffer = {};
+  ASSERT_EQ(stat(mount_dir.c_str(), &stat_buffer), 0) << strerror(errno);
+  std::string options = fxl::StringPrintf("fd=%i,rootmode=%o,user_id=%u,group_id=%u", fuse_fd.get(),
+                                          stat_buffer.st_mode & S_IFMT, getuid(), getgid());
+  ASSERT_EQ(mount("fuse", mount_dir.c_str(), "fuse", 0, options.c_str()), 0) << strerror(errno);
+  auto cleanup = fit::defer([&]() { umount2(mount_dir.c_str(), MNT_DETACH); });
+
+  struct epoll_event ev = {
+      .events = EPOLLIN,
+      .data = {.fd = fuse_fd.get()},
+  };
+  ASSERT_EQ(epoll_ctl(epfd.get(), EPOLL_CTL_ADD, fuse_fd.get(), &ev), 0) << strerror(errno);
+
+  // Trigger a lookup on a background thread in case the kernel defers queueing FUSE_INIT until
+  // the first filesystem access.
+  std::thread trigger_thread([&]() {
+    struct stat st = {};
+    stat((mount_dir + "/probe").c_str(), &st);
+  });
+  auto join_trigger = fit::defer([&]() {
+    fuse_fd.reset();
+    if (trigger_thread.joinable()) {
+      trigger_thread.join();
+    }
+  });
+
+  struct epoll_event out_ev = {};
+  ASSERT_EQ(HANDLE_EINTR(epoll_wait(epfd.get(), &out_ev, 1, 5000)), 1) << strerror(errno);
+  EXPECT_NE(out_ev.events & EPOLLIN, 0u);
+  EXPECT_EQ(out_ev.data.fd, fuse_fd.get());
+
+  std::vector<uint8_t> req_buf(FUSE_MIN_READ_BUFFER * 2);
+  ssize_t read_len = read(fuse_fd.get(), req_buf.data(), req_buf.size());
+  ASSERT_GE(read_len, static_cast<ssize_t>(sizeof(fuse_in_header) + sizeof(fuse_init_in)))
+      << strerror(errno);
+
+  fuse_in_header in_header = {};
+  memcpy(&in_header, req_buf.data(), sizeof(in_header));
+  ASSERT_EQ(in_header.opcode, static_cast<uint32_t>(FUSE_INIT));
+
+  struct {
+    fuse_out_header header;
+    fuse_init_out init_out;
+  } init_reply = {
+      .header =
+          {
+              .len = sizeof(init_reply),
+              .error = 0,
+              .unique = in_header.unique,
+          },
+      .init_out =
+          {
+              .major = FUSE_KERNEL_VERSION,
+              .minor = FUSE_KERNEL_MINOR_VERSION,
+          },
+  };
+  ASSERT_EQ(write(fuse_fd.get(), &init_reply, sizeof(init_reply)),
+            static_cast<ssize_t>(sizeof(init_reply)))
+      << strerror(errno);
+
+  // Wait for the subsequent request from the probe thread via epoll_wait and reject it with ENOENT.
+  out_ev = {};
+  ASSERT_EQ(HANDLE_EINTR(epoll_wait(epfd.get(), &out_ev, 1, 5000)), 1) << strerror(errno);
+  EXPECT_NE(out_ev.events & EPOLLIN, 0u);
+
+  read_len = read(fuse_fd.get(), req_buf.data(), req_buf.size());
+  ASSERT_GE(read_len, static_cast<ssize_t>(sizeof(fuse_in_header))) << strerror(errno);
+  memcpy(&in_header, req_buf.data(), sizeof(in_header));
+
+  fuse_out_header err_reply = {
+      .len = sizeof(fuse_out_header),
+      .error = -ENOENT,
+      .unique = in_header.unique,
+  };
+  ASSERT_EQ(write(fuse_fd.get(), &err_reply, sizeof(err_reply)),
+            static_cast<ssize_t>(sizeof(err_reply)))
+      << strerror(errno);
+
+  trigger_thread.join();
+
+  ev.events = EPOLLIN | EPOLLOUT;
+  ASSERT_EQ(epoll_ctl(epfd.get(), EPOLL_CTL_MOD, fuse_fd.get(), &ev), 0) << strerror(errno);
+  ASSERT_EQ(epoll_ctl(epfd.get(), EPOLL_CTL_DEL, fuse_fd.get(), nullptr), 0) << strerror(errno);
+}
+
+TEST_F(FuseServerTest, FallocateEnosysTranslatesAndShortCircuitsToEopnotsupp) {
+  class EnosysFallocateServer : public CountingFuseServer {
+   public:
+    EnosysFallocateServer() : CountingFuseServer(0, 0) {}
+
+    uint64_t FallocateCount() const { return fallocate_count_.load(std::memory_order_relaxed); }
+
+   protected:
+    testing::AssertionResult HandleFallocate(
+        const std::shared_ptr<Node>& node, const struct fuse_in_header& in_header,
+        const struct fuse_fallocate_in* fallocate_in) override {
+      fallocate_count_.fetch_add(1, std::memory_order_relaxed);
+      return WriteDataFreeResponse(in_header, -ENOSYS);
+    }
+
+   private:
+    std::atomic_uint64_t fallocate_count_ = 0;
+  };
+
+  auto server = std::make_shared<EnosysFallocateServer>();
+  std::shared_ptr<File> file = server->fs().AddFileAtRoot("file");
+  file->SetPermissions(0666);
+  ASSERT_TRUE(Mount(server));
+
+  std::string file_path = GetMountDir() + "/file";
+  fbl::unique_fd fd(open(file_path.c_str(), O_RDWR));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  EXPECT_EQ(fallocate(fd.get(), 0, 0, 4096), -1);
+  EXPECT_EQ(errno, EOPNOTSUPP);
+  EXPECT_EQ(server->FallocateCount(), 1u);
+
+  // Subsequent calls must short-circuit in the kernel without another FUSE_FALLOCATE round-trip.
+  EXPECT_EQ(fallocate(fd.get(), 0, 0, 4096), -1);
+  EXPECT_EQ(errno, EOPNOTSUPP);
+  EXPECT_EQ(server->FallocateCount(), 1u);
+}
+
+TEST_F(FuseServerTest, FallocateExtendsSizeAndRespectsKeepSize) {
+  static constexpr uint64_t kExpectedFh = 0x4242;
+
+  class FallocateServer : public CountingFuseServer {
+   public:
+    FallocateServer() : CountingFuseServer(0, 0) {}
+
+    uint64_t FallocateCount() const { return fallocate_count_.load(std::memory_order_relaxed); }
+    uint64_t LastFh() const { return last_fh_.load(std::memory_order_relaxed); }
+    uint32_t LastMode() const { return last_mode_.load(std::memory_order_relaxed); }
+
+   protected:
+    testing::AssertionResult HandleOpen(const std::shared_ptr<Node>& node,
+                                        const struct fuse_in_header& in_header,
+                                        const struct fuse_open_in* open_in) override {
+      struct fuse_open_out open_out = {};
+      open_out.fh = kExpectedFh;
+      return WriteStructResponse(in_header, open_out);
+    }
+
+    testing::AssertionResult HandleFallocate(
+        const std::shared_ptr<Node>& node, const struct fuse_in_header& in_header,
+        const struct fuse_fallocate_in* fallocate_in) override {
+      fallocate_count_.fetch_add(1, std::memory_order_relaxed);
+      last_fh_.store(fallocate_in->fh, std::memory_order_relaxed);
+      last_mode_.store(fallocate_in->mode, std::memory_order_relaxed);
+      if ((fallocate_in->mode & FALLOC_FL_KEEP_SIZE) == 0) {
+        uint64_t end = fallocate_in->offset + fallocate_in->length;
+        fuse_attr_out attr_out = {};
+        node->PopulateAttr(attr_out);
+        if (end > attr_out.attr.size) {
+          node->SetSize(end);
+        }
+      }
+      return WriteAckResponse(in_header);
+    }
+
+   private:
+    std::atomic_uint64_t fallocate_count_ = 0;
+    std::atomic_uint64_t last_fh_ = 0;
+    std::atomic_uint32_t last_mode_ = 0;
+  };
+
+  auto server = std::make_shared<FallocateServer>();
+  server->fs().RootDir()->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  server->fs().RootDir()->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+  std::shared_ptr<File> file = server->fs().AddFileAtRoot("file");
+  file->SetPermissions(0666);
+  file->SetEntryValidDuration(std::numeric_limits<uint64_t>::max());
+  file->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+  ASSERT_TRUE(Mount(server));
+
+  std::string file_path = GetMountDir() + "/file";
+  fbl::unique_fd fd(open(file_path.c_str(), O_RDWR));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  struct stat st = {};
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_size, 0);
+
+  // Invalid zero length must fail before reaching the FUSE server.
+  EXPECT_EQ(fallocate(fd.get(), 0, 0, 0), -1);
+  EXPECT_EQ(errno, EINVAL);
+  EXPECT_EQ(server->FallocateCount(), 0u);
+
+  // Default mode (0) extends file size and invalidates cached attributes.
+  ASSERT_EQ(fallocate(fd.get(), 0, 0, 8192), 0) << strerror(errno);
+  EXPECT_EQ(server->FallocateCount(), 1u);
+  EXPECT_EQ(server->LastFh(), kExpectedFh);
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_size, 8192);
+
+  // FALLOC_FL_KEEP_SIZE preserves st_size, but still invalidates cached attributes such as
+  // st_blocks.
+  const uint64_t getattr_count = server->NonRootGetAttrCount();
+  ASSERT_EQ(fallocate(fd.get(), FALLOC_FL_KEEP_SIZE, 8192, 4096), 0) << strerror(errno);
+  EXPECT_EQ(server->FallocateCount(), 2u);
+  EXPECT_EQ(server->LastFh(), kExpectedFh);
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_size, 8192);
+  EXPECT_GT(server->NonRootGetAttrCount(), getattr_count);
+
+  // Punching a hole and zeroing a range are sent to the FUSE server with their mode bits.
+  ASSERT_EQ(fallocate(fd.get(), FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096), 0)
+      << strerror(errno);
+  EXPECT_EQ(server->FallocateCount(), 3u);
+  EXPECT_EQ(server->LastMode(), static_cast<uint32_t>(FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE));
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_size, 8192);
+
+  ASSERT_EQ(fallocate(fd.get(), FALLOC_FL_ZERO_RANGE, 8192, 4096), 0) << strerror(errno);
+  EXPECT_EQ(server->FallocateCount(), 4u);
+  EXPECT_EQ(server->LastMode(), static_cast<uint32_t>(FALLOC_FL_ZERO_RANGE));
+  ASSERT_EQ(fstat(fd.get(), &st), 0) << strerror(errno);
+  EXPECT_EQ(st.st_size, 12288);
+
+  // Modes that FUSE does not support fail without reaching the FUSE server.
+  EXPECT_EQ(fallocate(fd.get(), FALLOC_FL_COLLAPSE_RANGE, 0, 4096), -1);
+  EXPECT_EQ(errno, EOPNOTSUPP);
+  EXPECT_EQ(server->FallocateCount(), 4u);
+}
+
+TEST_F(FuseServerTest, FallocateAndFtruncateRlimitFsize) {
+  class RlimitServer : public FuseServer {
+   public:
+    uint64_t FallocateCount() const { return fallocate_count_.load(std::memory_order_relaxed); }
+
+   protected:
+    testing::AssertionResult HandleFallocate(
+        const std::shared_ptr<Node>& node, const struct fuse_in_header& in_header,
+        const struct fuse_fallocate_in* fallocate_in) override {
+      fallocate_count_.fetch_add(1, std::memory_order_relaxed);
+      if ((fallocate_in->mode & FALLOC_FL_KEEP_SIZE) == 0) {
+        uint64_t end = fallocate_in->offset + fallocate_in->length;
+        fuse_attr_out attr_out = {};
+        node->PopulateAttr(attr_out);
+        if (end > attr_out.attr.size) {
+          node->SetSize(end);
+        }
+      }
+      return WriteAckResponse(in_header);
+    }
+
+   private:
+    std::atomic_uint64_t fallocate_count_ = 0;
+  };
+
+  static std::atomic_size_t sigxfsz_count = 0;
+  sigxfsz_count.store(0, std::memory_order_relaxed);
+
+  struct sigaction sa = {};
+  sa.sa_handler = +[](int) { sigxfsz_count.fetch_add(1, std::memory_order_relaxed); };
+  sigemptyset(&sa.sa_mask);
+  struct sigaction old_sa = {};
+  ASSERT_EQ(sigaction(SIGXFSZ, &sa, &old_sa), 0) << strerror(errno);
+  auto restore_sig = fit::defer([&] { sigaction(SIGXFSZ, &old_sa, nullptr); });
+
+  struct rlimit old_limit = {};
+  ASSERT_EQ(getrlimit(RLIMIT_FSIZE, &old_limit), 0) << strerror(errno);
+  auto with_fsize_limit = [&](rlim_t soft_limit, auto fn) {
+    struct rlimit limit = {.rlim_cur = soft_limit, .rlim_max = old_limit.rlim_max};
+    EXPECT_EQ(setrlimit(RLIMIT_FSIZE, &limit), 0);
+    auto restore = fit::defer([&] {
+      int saved_errno = errno;
+      EXPECT_EQ(setrlimit(RLIMIT_FSIZE, &old_limit), 0);
+      errno = saved_errno;
+    });
+    return fn();
+  };
+
+  auto server = std::make_shared<RlimitServer>();
+  std::shared_ptr<File> file = server->fs().AddFileAtRoot("file");
+  file->SetSize(4096);
+  file->SetPermissions(0666);
+  ASSERT_TRUE(Mount(server));
+
+  std::string file_path = GetMountDir() + "/file";
+  fbl::unique_fd fd(open(file_path.c_str(), O_RDWR));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+
+  // Ranges within the current size, FALLOC_FL_KEEP_SIZE, and unsupported modes do not raise
+  // SIGXFSZ.
+  EXPECT_EQ(with_fsize_limit(1024, [&] { return fallocate(fd.get(), 0, 0, 2048); }), 0)
+      << strerror(errno);
+  EXPECT_EQ(
+      with_fsize_limit(1024, [&] { return fallocate(fd.get(), FALLOC_FL_KEEP_SIZE, 4096, 4096); }),
+      0)
+      << strerror(errno);
+  EXPECT_EQ(with_fsize_limit(1024,
+                             [&] {
+                               return fallocate(fd.get(),
+                                                FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE, 4096,
+                                                4096);
+                             }),
+            0)
+      << strerror(errno);
+  EXPECT_EQ(with_fsize_limit(
+                1024, [&] { return fallocate(fd.get(), FALLOC_FL_COLLAPSE_RANGE, 4096, 4096); }),
+            -1);
+  EXPECT_EQ(errno, EOPNOTSUPP);
+  EXPECT_EQ(sigxfsz_count.load(std::memory_order_relaxed), 0u);
+  EXPECT_EQ(server->FallocateCount(), 3u);
+
+  // Growing past RLIMIT_FSIZE fails with EFBIG, raises SIGXFSZ, and does not reach the daemon.
+  EXPECT_EQ(with_fsize_limit(1024, [&] { return fallocate(fd.get(), 0, 4096, 4096); }), -1);
+  EXPECT_EQ(errno, EFBIG);
+  EXPECT_EQ(sigxfsz_count.load(std::memory_order_relaxed), 1u);
+  EXPECT_EQ(
+      with_fsize_limit(1024, [&] { return fallocate(fd.get(), FALLOC_FL_ZERO_RANGE, 4096, 4096); }),
+      -1);
+  EXPECT_EQ(errno, EFBIG);
+  EXPECT_EQ(sigxfsz_count.load(std::memory_order_relaxed), 2u);
+  EXPECT_EQ(server->FallocateCount(), 3u);
+
+  // Shrinking above RLIMIT_FSIZE succeeds, while growing past RLIMIT_FSIZE fails with EFBIG.
+  EXPECT_EQ(with_fsize_limit(1024, [&] { return ftruncate(fd.get(), 2048); }), 0)
+      << strerror(errno);
+  EXPECT_EQ(sigxfsz_count.load(std::memory_order_relaxed), 2u);
+  EXPECT_EQ(with_fsize_limit(1024, [&] { return ftruncate(fd.get(), 3072); }), -1);
+  EXPECT_EQ(errno, EFBIG);
+  EXPECT_EQ(sigxfsz_count.load(std::memory_order_relaxed), 3u);
+}
+
+TEST_F(FuseServerTest, TruncateNonRegularFileFailsWithoutSetAttr) {
+  class Fifo : public Node {
+   public:
+    explicit Fifo(uint64_t id) : Node(S_IFIFO, id) {}
+  };
+
+  class SetAttrCountingServer : public FuseServer {
+   public:
+    uint64_t SetAttrCount() const { return setattr_count_.load(std::memory_order_relaxed); }
+
+   protected:
+    testing::AssertionResult HandleSetAttr(const std::shared_ptr<Node>& node,
+                                           const struct fuse_in_header& in_header,
+                                           const struct fuse_setattr_in* setattr_in) override {
+      setattr_count_.fetch_add(1, std::memory_order_relaxed);
+      return FuseServer::HandleSetAttr(node, in_header, setattr_in);
+    }
+
+   private:
+    std::atomic_uint64_t setattr_count_ = 0;
+  };
+
+  auto server = std::make_shared<SetAttrCountingServer>();
+  std::shared_ptr<Fifo> fifo =
+      server->fs().AddNodeAt<Fifo>(server->fs().RootDir(), "fifo",
+                                   [](uint64_t nodeid) { return std::make_shared<Fifo>(nodeid); });
+  // Include setuid/setgid bits to verify VFS rejects non-regular files before stripping privileges
+  // or checking RLIMIT_FSIZE.
+  fifo->SetPermissions(S_ISUID | S_ISGID | 0666);
+  ASSERT_TRUE(Mount(server));
+
+  struct rlimit old_limit = {};
+  ASSERT_EQ(getrlimit(RLIMIT_FSIZE, &old_limit), 0) << strerror(errno);
+  struct rlimit low_limit = {.rlim_cur = 1024, .rlim_max = old_limit.rlim_max};
+  ASSERT_EQ(setrlimit(RLIMIT_FSIZE, &low_limit), 0) << strerror(errno);
+  auto restore_limit = fit::defer([&] { EXPECT_EQ(setrlimit(RLIMIT_FSIZE, &old_limit), 0); });
+
+  std::string fifo_path = GetMountDir() + "/fifo";
+  EXPECT_EQ(truncate(fifo_path.c_str(), 4096), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  fbl::unique_fd fd(open(fifo_path.c_str(), O_RDWR | O_NONBLOCK));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+  EXPECT_EQ(ftruncate(fd.get(), 4096), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  EXPECT_EQ(server->SetAttrCount(), 0u);
+}
+
+TEST_F(FuseServerTest, PassthroughFallocate) {
+  class PassthroughFallocateServer : public PassthroughMmapServer {
+   public:
+    void SetBackingFd(std::shared_ptr<Node> node, int fd) {
+      std::lock_guard guard(backing_mu_);
+      backing_fds_[node] = fd;
+    }
+
+    uint64_t FallocateCount() const { return fallocate_count_.load(std::memory_order_relaxed); }
+
+    testing::AssertionResult HandleGetAttr(const std::shared_ptr<Node>& node,
+                                           const struct fuse_in_header& in_header,
+                                           const struct fuse_getattr_in* getattr_in) override {
+      {
+        std::lock_guard guard(backing_mu_);
+        auto it = backing_fds_.find(node);
+        if (it != backing_fds_.end()) {
+          struct stat st = {};
+          if (fstat(it->second, &st) == 0) {
+            node->SetSize(static_cast<uint64_t>(st.st_size));
+          }
+        }
+      }
+      return PassthroughMmapServer::HandleGetAttr(node, in_header, getattr_in);
+    }
+
+    testing::AssertionResult HandleFallocate(
+        const std::shared_ptr<Node>& node, const struct fuse_in_header& in_header,
+        const struct fuse_fallocate_in* fallocate_in) override {
+      fallocate_count_.fetch_add(1, std::memory_order_relaxed);
+      int backing_fd = -1;
+      {
+        std::lock_guard guard(backing_mu_);
+        auto it = backing_fds_.find(node);
+        if (it != backing_fds_.end()) {
+          backing_fd = it->second;
+        }
+      }
+      if (backing_fd >= 0) {
+        if (fallocate(backing_fd, static_cast<int>(fallocate_in->mode),
+                      static_cast<off_t>(fallocate_in->offset),
+                      static_cast<off_t>(fallocate_in->length)) != 0) {
+          return WriteDataFreeResponse(in_header, -errno);
+        }
+        return WriteAckResponse(in_header);
+      }
+      return WriteDataFreeResponse(in_header, -ENOSYS);
+    }
+
+   private:
+    std::mutex backing_mu_;
+    std::unordered_map<std::shared_ptr<Node>, int> backing_fds_ __TA_GUARDED(backing_mu_);
+    std::atomic_uint64_t fallocate_count_ = 0;
+  };
+
+  auto server = std::make_shared<PassthroughFallocateServer>();
+  std::shared_ptr<File> pt_file = server->fs().AddFileAtRoot("passthrough_file");
+  ASSERT_TRUE(pt_file);
+  pt_file->SetSize(0);
+  pt_file->SetPermissions(0666);
+  pt_file->SetAttrValidDuration(std::numeric_limits<uint64_t>::max());
+
+  ASSERT_TRUE(Mount(server));
+  server->WaitForInit();
+  if (!server->kernel_supports_passthrough()) {
+    GTEST_SKIP() << "FUSE passthrough is not supported by the kernel";
+  }
+
+  char backing_path[] = "/tmp/fuse_falloc_backing_XXXXXX";
+  int backing_fd_raw = mkstemp(backing_path);
+  ASSERT_GE(backing_fd_raw, 0) << strerror(errno);
+  fbl::unique_fd backing_fd(backing_fd_raw);
+  unlink(backing_path);
+
+  int passthrough_id =
+      ioctl(server->fuse_fd().get(), FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2, &backing_fd_raw);
+  ASSERT_GT(passthrough_id, 0) << strerror(errno);
+  server->SetPassthrough(pt_file, static_cast<uint32_t>(passthrough_id));
+  server->SetBackingFd(pt_file, backing_fd.get());
+
+  std::string pt_path = GetMountDir() + "/passthrough_file";
+  fbl::unique_fd pt_client_fd(open(pt_path.c_str(), O_RDWR));
+  ASSERT_TRUE(pt_client_fd.is_valid()) << strerror(errno);
+
+  ASSERT_EQ(fallocate(pt_client_fd.get(), 0, 0, 16384), 0) << strerror(errno);
+  ASSERT_EQ(fallocate(pt_client_fd.get(), FALLOC_FL_KEEP_SIZE, 16384, 8192), 0) << strerror(errno);
+  // fallocate is not passed through; the daemon updates the backing file.
+  EXPECT_EQ(server->FallocateCount(), 2u);
+
+  struct stat backing_st = {};
+  ASSERT_EQ(fstat(backing_fd.get(), &backing_st), 0) << strerror(errno);
+  EXPECT_EQ(backing_st.st_size, 16384);
+
+  struct stat fuse_st = {};
+  ASSERT_EQ(fstat(pt_client_fd.get(), &fuse_st), 0) << strerror(errno);
+  EXPECT_EQ(fuse_st.st_size, 16384);
+}
+
+TEST_F(FuseServerTest, FtruncateSendsFileHandle) {
+  class FtruncateServer : public PassthroughMmapServer {
+   public:
+    void SetRejectSetAttr(bool reject) { reject_setattr_.store(reject, std::memory_order_relaxed); }
+    uint32_t LastValidFlags() const { return last_valid_.load(std::memory_order_relaxed); }
+    uint64_t LastFh() const { return last_fh_.load(std::memory_order_relaxed); }
+
+    testing::AssertionResult HandleSetAttr(const std::shared_ptr<Node>& node,
+                                           const struct fuse_in_header& in_header,
+                                           const struct fuse_setattr_in* setattr_in) override {
+      last_valid_.store(setattr_in->valid, std::memory_order_relaxed);
+      last_fh_.store(setattr_in->fh, std::memory_order_relaxed);
+      if (reject_setattr_.load(std::memory_order_relaxed)) {
+        return WriteDataFreeResponse(in_header, -EPERM);
+      }
+      return PassthroughMmapServer::HandleSetAttr(node, in_header, setattr_in);
+    }
+
+   private:
+    std::atomic_bool reject_setattr_ = false;
+    std::atomic_uint32_t last_valid_ = 0;
+    std::atomic_uint64_t last_fh_ = 0;
+  };
+
+  auto server = std::make_shared<FtruncateServer>();
+  std::shared_ptr<File> non_pt_file = server->fs().AddFileAtRoot("non_pt_file");
+  ASSERT_TRUE(non_pt_file);
+  non_pt_file->SetSize(4096);
+  non_pt_file->SetPermissions(0666);
+
+  std::shared_ptr<File> pt_file = server->fs().AddFileAtRoot("pt_file");
+  ASSERT_TRUE(pt_file);
+  pt_file->SetSize(4096);
+  pt_file->SetPermissions(0666);
+
+  ASSERT_TRUE(Mount(server));
+  server->WaitForInit();
+
+  // 1. Non-passthrough ftruncate must pass FATTR_SIZE | FATTR_FH and open_out.fh, while
+  // path-based truncate must omit FATTR_FH.
+  std::string non_pt_path = GetMountDir() + "/non_pt_file";
+  fbl::unique_fd non_pt_fd(open(non_pt_path.c_str(), O_RDWR));
+  ASSERT_TRUE(non_pt_fd.is_valid()) << strerror(errno);
+  ASSERT_EQ(ftruncate(non_pt_fd.get(), 1024), 0) << strerror(errno);
+  EXPECT_EQ(server->LastValidFlags() & (FATTR_SIZE | FATTR_FH),
+            static_cast<uint32_t>(FATTR_SIZE | FATTR_FH));
+  EXPECT_GT(server->LastFh(), 0u);
+  ASSERT_EQ(truncate(non_pt_path.c_str(), 2048), 0) << strerror(errno);
+  EXPECT_EQ(server->LastValidFlags() & (FATTR_SIZE | FATTR_FH), static_cast<uint32_t>(FATTR_SIZE));
+
+  if (!server->kernel_supports_passthrough()) {
+    return;
+  }
+
+  // 2. Passthrough ftruncate is sent to the daemon without resizing the backing file directly.
+  char backing_path[] = "/tmp/fuse_ftrunc_backing_XXXXXX";
+  int backing_fd_raw = mkstemp(backing_path);
+  ASSERT_GE(backing_fd_raw, 0) << strerror(errno);
+  fbl::unique_fd backing_fd(backing_fd_raw);
+  unlink(backing_path);
+  ASSERT_EQ(ftruncate(backing_fd.get(), 4096), 0) << strerror(errno);
+
+  int passthrough_id =
+      ioctl(server->fuse_fd().get(), FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2, &backing_fd_raw);
+  ASSERT_GT(passthrough_id, 0) << strerror(errno);
+  server->SetPassthrough(pt_file, static_cast<uint32_t>(passthrough_id));
+
+  std::string pt_path = GetMountDir() + "/pt_file";
+  fbl::unique_fd pt_fd(open(pt_path.c_str(), O_RDWR));
+  ASSERT_TRUE(pt_fd.is_valid()) << strerror(errno);
+
+  server->SetRejectSetAttr(true);
+  EXPECT_EQ(ftruncate(pt_fd.get(), 0), -1);
+  EXPECT_EQ(errno, EPERM);
+  struct stat backing_st = {};
+  ASSERT_EQ(fstat(backing_fd.get(), &backing_st), 0) << strerror(errno);
+  EXPECT_EQ(backing_st.st_size, 4096);
+
+  server->SetRejectSetAttr(false);
+  ASSERT_EQ(ftruncate(pt_fd.get(), 512), 0) << strerror(errno);
+  EXPECT_EQ(server->LastValidFlags() & (FATTR_SIZE | FATTR_FH),
+            static_cast<uint32_t>(FATTR_SIZE | FATTR_FH));
+  ASSERT_EQ(fstat(backing_fd.get(), &backing_st), 0) << strerror(errno);
+  EXPECT_EQ(backing_st.st_size, 4096);
 }

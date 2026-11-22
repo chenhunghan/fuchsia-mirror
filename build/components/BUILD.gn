@@ -10,8 +10,8 @@ rustc_binary("test_component_host_helper") {
   edition = "2024"
   name = "test_component_host_helper"
   deps = [
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+    "//sdk/fidl/fuchsia.data:fuchsia.data_rust_common",
     "//src/lib/fidl/rust/fidl",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:clap",
@@ -38,4 +38,26 @@ python_binary("component_creation_wrapper") {
     "//build/python/modules/depfile",
     "//build/python/modules/distribution_manifest",
   ]
+}
+
+# Deprecated: Use configuration capabilities instead of packaged .cvf value
+# files (https://fxbug.dev/575878080). Do not add new entries to this allowlist.
+group("deprecated_structured_config_values_allowlist") {
+  visibility = [
+    "//sdk/lib/sys/component/cpp/tests:*",
+    "//src/developer/ffx/plugins/component/create/tests/structured_config:*",
+    "//src/developer/ffx/plugins/component/run/tests/structured_config:*",
+    "//src/lib/assembly/structured_config/tests/repackaging_pass:*",
+    "//src/security/lib/scrutiny/tests/structured_config:*",
+    "//src/sys/component_manager/tests/structured_config/bad_values:*",
+    "//src/sys/component_manager/tests/structured_config/parent_overrides:*",
+    "//src/sys/component_manager/tests/structured_config/split_values_and_manifests:*",
+  ]
+}
+
+# Deprecated: Use CML defaults or static config capability components instead of
+# fuchsia_structured_config_values2 (https://fxbug.dev/575932542). Do not add
+# new entries to this allowlist.
+group("deprecated_structured_config_values2_allowlist") {
+  visibility = [ "//src/sys/component_manager/tests/structured_config/capabilities/config_capability_values:*" ]
 }

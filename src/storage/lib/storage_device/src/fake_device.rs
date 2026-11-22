@@ -20,6 +20,9 @@ pub enum Op {
 
 pub trait Observer: Send + Sync {
     fn barrier(&self) {}
+
+    /// Called after `len` bytes have been written at `offset`.
+    fn write(&self, _offset: u64, _len: usize) {}
 }
 
 #[derive(Debug, Default, Clone)]
@@ -172,6 +175,11 @@ impl Device for FakeDevice {
         for block in first_block..first_block + size / self.allocator.block_size() {
             inner.blocks_written_since_last_barrier.push(block)
         }
+        // Drop the lock before calling out to the observer, so that it can't deadlock.
+        drop(inner);
+        if let Some(observer) = &self.observer {
+            observer.write(offset as u64, size);
+        }
         Ok(())
     }
 
@@ -261,11 +269,50 @@ impl Drop for FakeDevice {
 
 #[cfg(test)]
 mod tests {
-    use super::FakeDevice;
+    use super::{FakeDevice, Observer};
     use crate::Device;
     use block_protocol::{WriteFlags, WriteOptions};
+    use fuchsia_sync::Mutex;
+    use std::sync::{Arc, OnceLock, Weak};
 
     const TEST_DEVICE_BLOCK_SIZE: usize = 512;
+
+    #[fuchsia::test]
+    async fn test_observer_write() {
+        struct WriteObserver {
+            device: Arc<OnceLock<Weak<FakeDevice>>>,
+            events: Arc<Mutex<Vec<(u64, usize)>>>,
+        }
+
+        impl Observer for WriteObserver {
+            fn write(&self, offset: u64, len: usize) {
+                self.events.lock().push((offset, len));
+                // `FakeDevice` must release its internal lock before calling the observer so
+                // taking a snapshot from the observer callback cannot deadlock.
+                let device = self.device.get().unwrap().upgrade().unwrap();
+                let _ = device.snapshot().expect("snapshot failed");
+            }
+        }
+
+        let device_cell = Arc::new(OnceLock::new());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut device = FakeDevice::new(16, TEST_DEVICE_BLOCK_SIZE as u32);
+        device.set_observer(Box::new(WriteObserver {
+            device: device_cell.clone(),
+            events: events.clone(),
+        }));
+        let device = Arc::new(device);
+        device_cell.set(Arc::downgrade(&device)).ok().unwrap();
+
+        let mut buffer = device.allocate_buffer(2 * TEST_DEVICE_BLOCK_SIZE).await;
+        buffer.fill(0x5a);
+        device.write(TEST_DEVICE_BLOCK_SIZE as u64, buffer.as_ref()).await.expect("write failed");
+
+        assert_eq!(
+            *events.lock(),
+            vec![(TEST_DEVICE_BLOCK_SIZE as u64, 2 * TEST_DEVICE_BLOCK_SIZE)]
+        );
+    }
 
     #[fuchsia::test(threads = 10)]
     async fn test_discard_random_with_barriers() {

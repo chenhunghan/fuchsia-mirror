@@ -13,10 +13,11 @@
 //! crate, so the fake's behavior is faithful to the production code.
 
 use anyhow::{Context, Result};
+use fidl_fuchsia_time_alarms as ffta;
 use fuchsia_component::server::ServiceFs;
+use fuchsia_runtime as fxr;
 use futures::StreamExt;
 use std::rc::Rc;
-use {fidl_fuchsia_time_alarms as ffta, fuchsia_runtime as fxr};
 
 // This is the production alarms crate.
 use alarms;
@@ -56,6 +57,7 @@ async fn main() -> Result<()> {
                 proxy,
                 inspector.root().create_child("wake_alarms"),
                 utc_clock,
+                None,
             ))
         })?;
     fs.for_each_concurrent(/*limit=*/ None, move |connection| {

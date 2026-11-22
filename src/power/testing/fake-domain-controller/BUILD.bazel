@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    crate_name = "fake_domain_controller",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
+        "//sdk/fidl/fuchsia.power.cpu:fuchsia.power.cpu_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# @bazel2gn:raw_attribute:output_name = "fake_domain_controller_bin_test"
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fake_domain_controller",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "fake-domain-controller",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/fake_domain_controller.cml",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    visibility = ["//src/power/testing/fake-domain-controller/tests:__pkg__"],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "fake-domain-controller",
+    testonly = True,
+    components = [":component"],
+)
+
+fx_unittest_package(
+    name = "fake-domain-controller-unittests",
+    unit_tests = [":bin_test"],
+)

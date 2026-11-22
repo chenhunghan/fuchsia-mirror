@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@io_bazel_rules_go//proto:compiler.bzl", "go_proto_compiler")
+load("@io_bazel_rules_go//proto:def.bzl", "go_proto_library")
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+proto_library(
+    name = "analysis_proto",
+    srcs = [
+        "common.proto",
+        "sources.proto",
+        "test_variants.proto",
+    ],
+    strip_import_prefix = "/third_party/luci-go",
+    deps = [
+        "@com_google_protobuf//:timestamp_proto",
+    ],
+)
+
+go_proto_compiler(
+    name = "protoc-gen-go",
+    plugin = "//third_party/golibs/vendor/google.golang.org/protobuf/cmd/protoc-gen-go",
+)
+
+# TODO: Sync back go_library to GN (b/540745047)
+# @bazel2gn:skip
+go_proto_library(
+    name = "analysis_proto_go",
+    compilers = [":protoc-gen-go"],
+    importpath = "go.chromium.org/luci/analysis/proto/v1",
+    proto = ":analysis_proto",
+    target_compatible_with = HOST_CONSTRAINTS,
+    visibility = [
+        "//tools/testing/tefmocheck:__pkg__",
+    ],
+    deps = [
+        "//third_party/golibs/vendor/google.golang.org/protobuf/reflect/protoreflect",
+        "//third_party/golibs/vendor/google.golang.org/protobuf/runtime/protoimpl",
+        "//third_party/golibs/vendor/google.golang.org/protobuf/types/known/timestamppb",
+    ],
+)

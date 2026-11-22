@@ -28,7 +28,7 @@ rustc_library(
         "//sdk/lib/c/test/sanitizer:__pkg__",
         "//src/bringup:__subpackages__",
         "//src/lib/fuchsia-runtime:__pkg__",
-        "//src/performance:__subpackages__",
+        "//src/memory:__subpackages__",
         "//src/starnix/kernel/core:__pkg__",
     ],
     deps = ["//sdk/rust/zx"],

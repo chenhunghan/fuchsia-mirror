@@ -1,3 +1,4 @@
+# LINT.IfChange
 _fi-0001.md
 _fi-0002.md
 _fi-0003.md
@@ -221,3 +222,4 @@ _fi-0223.md
 _fi-0224.md
 _fi-0225.md
 _fi-0226.md
+# LINT.ThenChange(//docs/reference/fidl/language/BUILD.bazel:error_catalog)

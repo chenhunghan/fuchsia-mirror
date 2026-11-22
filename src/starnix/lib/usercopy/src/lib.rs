@@ -408,7 +408,8 @@ impl Usercopy {
     /// # Safety
     ///
     /// Only one of `source`/`dest` may be an address to a buffer owned by user/restricted-mode
-    /// (`ret_dest` indicates whether the user-owned buffer is `dest` when `true`).
+    /// (`ret_dest` indicates whether the user-owned buffer is `dest` when `true`), and when
+    /// `count > 0` that address must not be below `self.restricted_address_range.start`.
     /// The other must be a valid Starnix/normal-mode buffer that will never cause a fault
     /// when the first `count` bytes are read/written.
     pub unsafe fn raw_hermetic_copy(
@@ -418,6 +419,8 @@ impl Usercopy {
         count: usize,
         ret_dest: bool,
     ) -> usize {
+        let faultable_addr = if ret_dest { dest as usize } else { source as usize };
+        debug_assert!(count == 0 || faultable_addr >= self.restricted_address_range.start);
         #[allow(clippy::undocumented_unsafe_blocks, reason = "2024 edition migration")]
         unsafe {
             do_hermetic_copy(hermetic_copy, dest as usize, source as usize, count, ret_dest)
@@ -1124,6 +1127,7 @@ mod test {
         assert_eq!(result, 0);
         assert_eq!(source, [0]);
     }
+
     struct MappedPageUsercopy {
         usercopy: Usercopy,
         addr: usize,

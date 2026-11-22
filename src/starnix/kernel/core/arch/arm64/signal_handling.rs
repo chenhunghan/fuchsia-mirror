@@ -50,9 +50,8 @@ pub const SIG_STACK_SIZE: usize = std::mem::size_of::<SignalStackFrame>();
 
 impl SignalStackFrame {
     pub fn new(
-        task: &Task,
         arch_width: ArchWidth,
-        registers: &mut RegisterState<RegisterStorageEnum>,
+        registers: &RegisterState<RegisterStorageEnum>,
         extended_pstate: &ArchExtendedPstateStorage,
         signal_state: &SignalState,
         siginfo: &SignalInfo,
@@ -112,17 +111,6 @@ impl SignalStackFrame {
             context64.write_to_prefix(&mut context).unwrap();
         }
 
-        let vdso_sigreturn_offset = if arch_width.is_arch32() {
-            task.kernel().vdso_arch32.as_ref().unwrap().sigreturn_offset
-        } else {
-            task.kernel().vdso.sigreturn_offset
-        };
-        let sigreturn_addr = task.mm()?.state.read().vdso_base.ptr() as u64 + vdso_sigreturn_offset;
-        registers.r[30] = sigreturn_addr;
-        if arch_width.is_arch32() {
-            registers.r[14] = registers.r[30];
-        }
-
         Ok(SignalStackFrame { context, siginfo_bytes: siginfo.as_siginfo_bytes(arch_width)? })
     }
 
@@ -148,6 +136,26 @@ impl SignalStackFrame {
 
     fn get_ucontext32(&self) -> &uapi::arch32::ucontext {
         uapi::arch32::ucontext::ref_from_prefix(&self.context).unwrap().0
+    }
+}
+
+pub fn sigreturn_address(task: &Task, arch_width: ArchWidth) -> Result<u64, Errno> {
+    let vdso_sigreturn_offset = if arch_width.is_arch32() {
+        task.kernel().vdso_arch32.as_ref().unwrap().sigreturn_offset
+    } else {
+        task.kernel().vdso.sigreturn_offset
+    };
+    Ok(task.mm()?.vdso_base().ptr() as u64 + vdso_sigreturn_offset)
+}
+
+pub fn set_sigreturn_register(
+    arch_width: ArchWidth,
+    registers: &mut RegisterState<RegisterStorageEnum>,
+    sigreturn_addr: u64,
+) {
+    registers.r[30] = sigreturn_addr;
+    if arch_width.is_arch32() {
+        registers.r[14] = sigreturn_addr;
     }
 }
 
@@ -467,6 +475,7 @@ mod tests {
     use crate::testing::spawn_kernel_and_run;
     use extended_pstate::ExtendedPstateState;
     use starnix_uapi::signals::SIGUSR1;
+    use std::sync::Arc;
 
     fn sample_qregs() -> [u128; 32] {
         let mut qregs = [0u128; 32];
@@ -879,9 +888,8 @@ mod tests {
             let signal_state = SignalState::default();
             let siginfo = SignalInfo::kernel(SIGUSR1);
             let frame = SignalStackFrame::new(
-                &current_task.task,
                 ArchWidth::Arch64,
-                &mut current_task.thread_state.registers,
+                &current_task.thread_state.registers,
                 &current_task.thread_state.extended_pstate,
                 &signal_state,
                 &siginfo,
@@ -922,9 +930,8 @@ mod tests {
             let signal_state = SignalState::default();
             let siginfo = SignalInfo::kernel(SIGUSR1);
             let frame = SignalStackFrame::new(
-                &current_task.task,
                 ArchWidth::Arch64,
-                &mut current_task.thread_state.registers,
+                &current_task.thread_state.registers,
                 &current_task.thread_state.extended_pstate,
                 &signal_state,
                 &siginfo,
@@ -1035,9 +1042,8 @@ mod tests {
             let signal_state = SignalState::default();
             let siginfo = SignalInfo::kernel(SIGUSR1);
             let frame = SignalStackFrame::new(
-                &current_task.task,
                 ArchWidth::Arch64,
-                &mut current_task.thread_state.registers,
+                &current_task.thread_state.registers,
                 &current_task.thread_state.extended_pstate,
                 &signal_state,
                 &siginfo,
@@ -1286,5 +1292,30 @@ mod tests {
             get_pstate_extended_data(&ArchExtendedPstateStorage::State64(Box::new(sve_pstate)))
                 .expect("get_pstate_extended_data");
         assert_eq!(parse_pstate_extended_data(&sve_data, &mut restored32), error!(EINVAL));
+    }
+
+    #[::fuchsia::test]
+    async fn test_sigreturn_address_without_mm_lock() {
+        spawn_kernel_and_run(async |current_task| {
+            let mm = Arc::clone(current_task.mm().expect("task has mm"));
+            let vdso_base = UserAddress::from_ptr(0x1234_0000);
+            mm.set_vdso_base(vdso_base);
+
+            // Hold `mm.state` exclusively to prove `sigreturn_address` reads `vdso_base` without
+            // acquiring the mm lock.
+            let _state_write_guard = mm.state.write();
+
+            let sigreturn_addr = sigreturn_address(&current_task.task, ArchWidth::Arch64)
+                .expect("sigreturn_address should succeed");
+            set_sigreturn_register(
+                ArchWidth::Arch64,
+                &mut current_task.thread_state.registers,
+                sigreturn_addr,
+            );
+
+            let expected = vdso_base.ptr() as u64 + current_task.kernel().vdso.sigreturn_offset;
+            assert_eq!(current_task.thread_state.registers.r[30], expected);
+        })
+        .await;
     }
 }

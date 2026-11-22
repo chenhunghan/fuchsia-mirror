@@ -417,6 +417,11 @@ pub fn compile_driver(args: &CompileDriverArgs, year: &str) -> Result<(), anyhow
                 cml_obj.insert("config".to_string(), config.clone());
             }
         }
+        if let Some(facets) = &driver_dml.facets {
+            if let Some(cml_obj) = cml.as_object_mut() {
+                cml_obj.insert("facets".to_string(), facets.clone());
+            }
+        }
 
         let cml_code = serde_json::to_string_pretty(&cml)?;
         let json5_code = crate::cml_generator::json_to_json5(&cml_code);
@@ -1186,6 +1191,76 @@ mod tests {
         assert!(!cc_content.contains("sample_bind_parser.h"));
         let h_content = std::fs::read_to_string(&h_path).unwrap();
         assert!(h_content.contains("struct SampleMetadata {"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_compile_driver_facets() {
+        let temp_dir = std::env::temp_dir().join("test_temp_compile_driver_facets");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let dml_with_facets = r#"{
+            name: "sample_facets_driver",
+            facets: {
+                "fuchsia.dash.launcher-tool-urls": [
+                    "fuchsia-pkg://fuchsia.com/sample-tool",
+                ],
+            },
+        }"#;
+
+        let dml_path = temp_dir.join("with_facets.dml");
+        std::fs::write(&dml_path, dml_with_facets).unwrap();
+
+        let cml_path = temp_dir.join("with_facets.cml");
+        let args = CompileDriverArgs {
+            input_file: dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: Some(cml_path.to_str().unwrap().to_string()),
+            bind_output: None,
+            namespace: None,
+        };
+
+        compile_driver(&args, "2026").unwrap();
+
+        let cml_content = std::fs::read_to_string(&cml_path).unwrap();
+        let parsed_cml: Value = serde_json5::from_str(&cml_content).unwrap();
+        assert_eq!(
+            parsed_cml.get("facets"),
+            Some(&serde_json::json!({
+                "fuchsia.dash.launcher-tool-urls": [
+                    "fuchsia-pkg://fuchsia.com/sample-tool"
+                ]
+            }))
+        );
+
+        let dml_without_facets = r#"{
+            name: "plain_driver",
+        }"#;
+
+        let no_facets_dml_path = temp_dir.join("without_facets.dml");
+        std::fs::write(&no_facets_dml_path, dml_without_facets).unwrap();
+
+        let no_facets_cml_path = temp_dir.join("without_facets.cml");
+        let no_facets_args = CompileDriverArgs {
+            input_file: no_facets_dml_path.to_str().unwrap().to_string(),
+            h_output: None,
+            cc_output: None,
+            rs_output: None,
+            cml_output: Some(no_facets_cml_path.to_str().unwrap().to_string()),
+            bind_output: None,
+            namespace: None,
+        };
+
+        compile_driver(&no_facets_args, "2026").unwrap();
+
+        let no_facets_cml_content = std::fs::read_to_string(&no_facets_cml_path).unwrap();
+        let parsed_no_facets_cml: Value = serde_json5::from_str(&no_facets_cml_content).unwrap();
+        assert!(parsed_no_facets_cml.get("facets").is_none());
+        assert!(!no_facets_cml_content.contains("facets:"));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

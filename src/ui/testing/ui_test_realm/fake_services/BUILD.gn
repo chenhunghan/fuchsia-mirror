@@ -28,7 +28,6 @@
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 executable("setui_accessibility_bin") {
-  testonly = true
   sources = [ "setui_accessibility.cc" ]
   output_name = "setui_accessibility"
   deps = [
@@ -40,13 +39,11 @@ executable("setui_accessibility_bin") {
 }
 
 fuchsia_component_manifest("setui_accessibility_manifest") {
-  testonly = true
   component_name = "setui_accessibility"
   manifest = "meta/setui_accessibility.cml"
 }
 
 fuchsia_component("setui_accessibility") {
-  testonly = true
   cm_label = ":setui_accessibility_manifest"
   visibility = [
     ":*",

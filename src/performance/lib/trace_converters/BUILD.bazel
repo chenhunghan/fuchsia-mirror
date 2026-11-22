@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":trace_converter_tests_test"],
+    visibility = ["//src/performance:__pkg__"],
+)
+
+fx_cc_library(
+    name = "chromium",
+    srcs = ["chromium_exporter.cc"],
+    hdrs = ["chromium_exporter.h"],
+    implementation_deps = [
+        "//src/lib/fxl",
+        "//third_party/github.com/simdutf/simdutf",
+    ],
+    visibility = [
+        "//src/performance/trace:__pkg__",
+        "//src/performance/trace2json:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//third_party/rapidjson",
+        "//zircon/system/ulib/trace-reader",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "chromium_unittests",
+    srcs = ["chromium_exporter_unittest.cc"],
+    gn_output_name = "chromium_exporter_unittests",
+    deps = [
+        ":chromium",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "chromium_unittests_packaged_bin",
+    testonly = True,
+    binary = ":chromium_unittests",
+    binary_name = "chromium_exporter_unittests",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "chromium_unittests_manifest",
+    testonly = True,
+    component_name = "trace_converter_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/chromium_unittests.cml",
+)
+
+fx_test_component(
+    name = "chromium_unittests_component",
+    compiled_manifest = ":chromium_unittests_manifest",
+    deps = [":chromium_unittests_packaged_bin"],
+)
+
+fx_package(
+    name = "trace_converter_tests",
+    test_components = [":chromium_unittests_component"],
+)
+
+fx_test(
+    name = "trace_converter_tests_test",
+    package = ":trace_converter_tests",
+)

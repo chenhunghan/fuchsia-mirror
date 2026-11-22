@@ -9,19 +9,17 @@
 #include <assert.h>
 #include <lib/arch/riscv64/paging-traits.h>
 #include <platform.h>
+#include <string.h>
 #include <trace.h>
 #include <zircon/errors.h>
 #include <zircon/types.h>
 
 #include <arch/mp.h>
-#include <arch/mp_unplug_event.h>
 #include <arch/ops.h>
 #include <arch/riscv64.h>
 #include <arch/riscv64/mmu.h>
-#include <dev/interrupt.h>
-#include <fbl/alloc_checker.h>
 #include <hwreg/array.h>
-#include <kernel/ffi.h>
+#include <kernel/thread.h>
 #include <ktl/type_traits.h>
 #include <ktl/unique_ptr.h>
 #include <lk/init.h>
@@ -222,13 +220,15 @@ zx_status_t riscv64_start_cpu(cpu_num_t cpu_num, uint32_t hart_id) {
   DEBUG_ASSERT(cpu_num > 0 && cpu_num < SMP_MAX_CPUS && hart_id != riscv64_boot_hart_id());
 
   // Allocate the thread and its stack.
-  ktl::unique_ptr<Thread> thread;
+  struct ThreadDeleter {
+    void operator()(Thread* t) const { rust_thread_delete(t); }
+  };
+  ktl::unique_ptr<Thread, ThreadDeleter> thread;
   {
     char thread_name[ZX_MAX_NAME_LEN];
     snprintf(thread_name, sizeof(thread_name), "Start CPU %u hart %u", cpu_num, hart_id);
-    fbl::AllocChecker ac;
-    thread = fbl::make_unique_checked<Thread>(ac, thread_name);
-    if (!ac.check()) {
+    thread.reset(rust_thread_create_empty_named(thread_name, strlen(thread_name)));
+    if (!thread) {
       return ZX_ERR_NO_MEMORY;
     }
   }

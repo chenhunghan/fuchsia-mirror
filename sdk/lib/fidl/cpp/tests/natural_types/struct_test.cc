@@ -269,7 +269,7 @@ TEST(Struct, MemcpyCompatibility) {
   static_assert(!IsMemcpyCompatible<test_types::StrictBits>);
   static_assert(!IsMemcpyCompatible<test_types::StrictEnum>);
   static_assert(!IsMemcpyCompatible<test_types::Uint64Table>);
-  static_assert(!IsMemcpyCompatible<test_types::TestNonResourceXUnion>);
+  static_assert(!IsMemcpyCompatible<test_types::TestNonResourceUnion>);
 }
 
 TEST(Struct, Traits) {

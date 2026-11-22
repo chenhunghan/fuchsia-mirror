@@ -625,16 +625,16 @@ For more information on the `ffx driver` command, see
 
 <!-- Reference links -->
 
-[composite-node-concepts]: /docs/concepts/drivers/drivers_and_nodes.md#composite_nodes
+[composite-node-concepts]: /docs/concepts/drivers/drivers_and_nodes.md#composite-nodes
 [composite-node-spec]: /docs/glossary#composite-node-specification
 [composite-node]: /docs/glossary#composite-node
 [composite-driver]: /docs/glossary#composite-driver
 [driver-bindings]: /docs/development/drivers/concepts/device_driver_model/driver-binding.md
 [driver-concepts]: /docs/concepts/drivers/README.md
-[node-properties]: /docs/concepts/drivers/drivers_and_nodes.md#node_attributes
+[node-properties]: /docs/concepts/drivers/drivers_and_nodes.md#node-attributes
 [board-driver]: /docs/glossary#board-driver
-[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
-[driver-index]: /docs/concepts/drivers/driver_framework.md#driver_index
+[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver-manager
+[driver-index]: /docs/concepts/drivers/driver_framework.md#driver-index
 [virtio-input-bind]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/ui/input/drivers/virtio/meta/virtio_input.bind
 [ticket-01]: https://g-issues.fuchsia.dev/issues/42058532
 [bind-rules-tutorial]: /docs/development/drivers/tutorials/bind-rules-tutorial.md

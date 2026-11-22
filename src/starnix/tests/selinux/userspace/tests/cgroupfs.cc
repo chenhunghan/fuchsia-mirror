@@ -17,7 +17,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "cgroupfs_policy"; }
+extern std::string GetTestPolicyName() { return "cgroupfs_policy"; }
 
 namespace {
 

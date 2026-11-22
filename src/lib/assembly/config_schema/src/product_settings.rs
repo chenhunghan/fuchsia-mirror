@@ -263,6 +263,7 @@ pub enum StarnixFileOperation {
     Overwrite(#[schemars(schema_with = "path_schema")] Utf8PathBuf),
     Create(#[schemars(schema_with = "path_schema")] Utf8PathBuf),
     Remove,
+    Mkdir,
 }
 
 impl WalkPaths for StarnixFileOperation {
@@ -273,7 +274,7 @@ impl WalkPaths for StarnixFileOperation {
     ) -> anyhow::Result<()> {
         match self {
             Self::Overwrite(path) | Self::Create(path) => found(path, dest, FileType::Unknown),
-            Self::Remove => Ok(()),
+            Self::Remove | Self::Mkdir => Ok(()),
         }
     }
 }

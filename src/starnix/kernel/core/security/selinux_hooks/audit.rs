@@ -279,10 +279,15 @@ impl Display for Auditable<'_> {
                 write!(f, " path={}", hex_escape(&file.name.path_escaping_chroot()))
             }
             Auditable::FileSystem(fs) => {
-                write!(f, " dev={}", hex_escape(&fs.options.source))
+                let dev: &[u8] = if fs.options.source.is_empty() {
+                    fs.name()
+                } else {
+                    fs.options.source.as_ref()
+                };
+                write!(f, " dev={}", hex_escape(dev))
             }
             Auditable::FsNode(node) => {
-                write!(f, " ino={} dev={}", node.ino, hex_escape(&node.fs().options.source))
+                write!(f, " ino={}{}", node.ino, Auditable::FileSystem(&node.fs()))
             }
             Auditable::IoctlCommand(ioctl) => {
                 write!(f, " ioctlcmd={:#x}", ioctl)

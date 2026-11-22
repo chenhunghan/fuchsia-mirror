@@ -47,6 +47,7 @@ def _json_format(ctx):
         "*.json",
         "*.config",
         "!/third_party/**",
+        "!/src/testing/loadbench/data/**",
         "!*.golden.json",
         "!*_pb2.json",
         "!*.sh.config",

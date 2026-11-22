@@ -30,13 +30,13 @@ by `fx set [....] --with //src/lib/diagnostics/hierarchy/rust:tests`.
 
 ## Benchmarking
 
-Benchmarks for `diagnostics_hierarchy` are available in the `rust_inspect_benchmarks`
-package.
+Benchmarks for `diagnostics_hierarchy` are available in the
+`diagnostics-hierarchy-benchmarks` package.
 
 One way to run the benchmarks is with the following command:
 
 ```
-$ fx run-e2e-tests rust_inspect_benchmarks_test
+$ fx test --e2e --outdir="out/test_out" --timestamp-artifacts diagnostics-hierarchy-rust-benchmark
 ```
 
 It is possible to run the benchmarks in a fast "unit test mode" with
@@ -45,7 +45,7 @@ iterations without collecting performance results, which can be useful
 for checking that the tests don't fail:
 
 ```
-$ fx shell run rust_inspect_benchmarks --benchmark writer
+$ fx test fuchsia-pkg://fuchsia.com/diagnostics-hierarchy-benchmarks#meta/hierarchy.cm
 ```
 
 You'll need to include `//src/lib/diagnostics/hierarchy/rust:benchmarks` in your

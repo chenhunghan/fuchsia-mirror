@@ -48,7 +48,6 @@ rustc_library(
     ],
     deps = [
         ":measure_fuchsia_pkg",
-        "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
         "//sdk/rust/zx-types",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-url",
@@ -65,12 +64,15 @@ rustc_library(
         "//third_party/rust_crates/vendor:typed-builder",
     ] + select({
         "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
             "//sdk/rust/zx-status",
             "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
             "//src/storage/lib/blob_writer:blob-writer",
             "//src/sys/pkg/lib/fuchsia-pkg",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_common",
+        ],
     }),
 )
 
@@ -80,14 +82,11 @@ host_rustc_test(
     crate = ":fidl-fuchsia-pkg-ext",
     edition = "2024",
     visibility = ["//visibility:public"],
+    # The tests that use Fuchsia-only crates are only built for Fuchsia, by
+    # `:fidl-fuchsia-pkg-ext_test` in BUILD.gn.
     deps = [
-        "//sdk/rust/zx-status",
         "//src/lib/fidl/rust/fidl",
-        "//src/lib/fuchsia",
-        "//src/lib/fuchsia-async",
-        "//src/sys/pkg/lib/fuchsia-pkg",
         "//third_party/rust_crates/vendor:assert_matches",
-        "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:serde_json",
     ],
 )

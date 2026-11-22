@@ -197,6 +197,16 @@ impl MockInlineEncryptionServer {
 }
 
 impl finlineencryption::DriverDeviceServerHandler for MockInlineEncryptionServer {
+    async fn get_properties(
+        &mut self,
+        responder: fidl_next::Responder<
+            finlineencryption::driver_device::GetProperties,
+            DriverChannel,
+        >,
+    ) {
+        responder.respond(&finlineencryption::ControllerProperties::default()).await.ok();
+    }
+
     async fn program_key_slot(
         &mut self,
         _request: fidl_next::Request<

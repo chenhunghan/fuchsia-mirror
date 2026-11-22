@@ -19,8 +19,6 @@ class Graph;
 
 extern "C" {
 
-zx_status_t rust_system_topology_initialize_system_topology(const zbi_topology_node_t* nodes,
-                                                            size_t count);
 zx_status_t rust_system_topology_graph_initialize(system_topology::Graph* graph,
                                                   const zbi_topology_node_t* nodes, size_t count);
 void rust_system_topology_graph_destroy(system_topology::Graph* graph);
@@ -54,20 +52,6 @@ using IterableProcessors = ktl::span<Node* const>;
 // system.
 class Graph {
  public:
-  // Initializes the system topology Graph instance from the given flat
-  // topology. Performs validation on the flat topology before updating the
-  // system graph with the unflattened data. If validation fails an error is
-  // returned the system graph is left unmodified in its original state.
-  //
-  // Note that there is no explicit synchronization protecting concurrent
-  // access to the system topology. It is expected to be initialized once at
-  // early boot and then remain static and read-only. Relaxing this constraint
-  // is possible by adding internal synchronization.
-  //
-  // Returns ZX_ERR_NO_MEMORY if dynamic memory allocation fails.
-  // Returns ZX_ERR_INVALID_ARGS if validation of the flat topology fails.
-  static zx_status_t InitializeSystemTopology(const zbi_topology_node_t* nodes, size_t count);
-
   // Initializes the given topology Graph instance from the given flat
   // topology. Performs validation on the flat topology before updating the
   // |graph| with the unflattened data. If validation fails an error is
@@ -115,7 +99,7 @@ class Graph {
   }
 
   // Returns an immutable reference to the system topology graph. This may be
-  // called after the graph is initialized by Graph::InitializeSystemTopology.
+  // called after the graph is initialized by Rust's Graph::initialize_system_topology.
   static const Graph& GetSystemTopology() { return *rust_system_topology_get_system_topology(); }
 
   void Dump() const;

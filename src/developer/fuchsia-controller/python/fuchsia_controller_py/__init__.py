@@ -214,7 +214,7 @@ class Context:
     """
 
     _handle: fuchsia_controller_internal.InternalHandle | None
-    _directory: IsolateDir
+    _directory: IsolateDir | None
 
     def __init__(
         self,
@@ -224,6 +224,53 @@ class Context:
     ) -> None:
         if isolate_dir is None:
             isolate_dir = IsolateDir()
+        self._create(config, isolate_dir, target, strict=False)
+
+    @classmethod
+    def strict(
+        cls,
+        config: dict[str, Any],
+        target: str | None = None,
+    ) -> Self:
+        """Creates a context that runs in ffx strict mode, as `ffx --strict` does.
+
+        The context uses only `config`, with no isolate directory, and resolves
+        target names and serial numbers (`id:<serial>`) from the target
+        registry instead of discovering them. Environment variable and
+        disallowed macro expansions (e.g. `$HOME`) in `config` values are
+        rejected.
+
+        Args:
+            config: ffx configuration as a dictionary of dotted keys and/or
+                nested dictionaries. Must set `shared_data` or
+                `target.registered_targets` when connecting to a symbolic target
+                (nodename or `id:<serial>`), and must set a non-empty `ssh.priv`
+                when connecting to an IP address target. Must not also specify
+                `target` / `target.default` if `target` is provided.
+            target: The target to connect to. If `None`, uses `target.default`
+                from `config`, or creates a local/testing context if unset.
+
+        Raises:
+            TypeError: `config` is missing or not a dictionary.
+            RuntimeError: `config` is missing required settings, contains
+                invalid or conflicting values, uses disallowed variable
+                expansions, or specifies a target when `target` is also given.
+        """
+        context = cls.__new__(cls)
+        context._create(config, None, target, strict=True)
+        return context
+
+    def _create(
+        self,
+        config: dict[str, Any] | None,
+        isolate_dir: IsolateDir | None,
+        target: str | None,
+        strict: bool,
+    ) -> None:
+        if strict and config is None:
+            raise TypeError("`config` is required for a strict context")
+        if config is not None and not isinstance(config, dict):
+            raise TypeError("`config` must be a dictionary")
         if target is not None:
             if config is not None:
                 maybe_target = None
@@ -240,16 +287,12 @@ class Context:
                         f"Context `target` parameter set to '{target}', but "
                         f"config also contains 'target' / 'target.default' value set to '{maybe_target}'. You must only specify one"
                     )
-            config = dict(config) if config else {}
-            config["target.default"] = target
-        if config is not None:
-            if not isinstance(config, dict):
-                raise TypeError("`config` must be a dictionary")
-            config_json = json.dumps(config)
-        else:
-            config_json = None
+            config = (config or {}) | {"target.default": target}
+        config_json = json.dumps(config) if config is not None else None
         self._handle = fuchsia_controller_internal.context_create(
-            config_json, isolate_dir.directory()
+            config_json,
+            isolate_dir.directory() if isolate_dir is not None else None,
+            strict,
         )
         self._directory = isolate_dir
 
@@ -272,12 +315,14 @@ class Context:
             offline,
         )
 
-    def config_get_string(self, key: str) -> str:
+    def config_get_string(self, key: str) -> str | None:
         """Looks up a string from the context's config environment.
 
-        This is the same config that ffx uses. If there is an IsolateDir in use,
-        then the config will be derived from there, else it will be
-        autodetected using the same mechanism as ffx.
+        This is the same config that ffx uses. For a strict context, only the
+        explicit config passed to `Context.strict` (plus ffx defaults without
+        variable expansion) is consulted. Otherwise, if there is an IsolateDir
+        in use, the config is derived from there, else it is autodetected using
+        the same mechanism as ffx.
 
         Returns:
             The string value iff the key points to an existing value in the

@@ -13,8 +13,9 @@
 #include "src/developer/adb/third_party/adb/adb-protocol.h"
 
 int main(int argc, char** argv) {
+  async::Loop main_loop{&kAsyncLoopConfigNeverAttachToThread};
   fuchsia_logging::LogSettingsBuilder log_builder;
-  log_builder.WithTags({"adb"}).BuildAndInitialize();
+  log_builder.WithTags({"adb"}).WithDispatcher(main_loop.dispatcher()).BuildAndInitialize();
 
   auto config = adb_config::Config::TakeFromStartupHandle();
   if (config.is_recovery()) {
@@ -28,7 +29,6 @@ int main(int argc, char** argv) {
     return status;
   }
 
-  async::Loop main_loop{&kAsyncLoopConfigNeverAttachToThread};
   component::OutgoingDirectory outgoing(main_loop.dispatcher());
   adb::StateControllerServer state_controller;
   if (zx::result result = outgoing.AddUnmanagedProtocol<fuchsia_hardware_adb::StateController>(

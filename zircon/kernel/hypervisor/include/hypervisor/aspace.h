@@ -29,14 +29,12 @@ void rust_guest_physical_aspace_destroy(hypervisor::GuestPhysicalAspace* gpa);
 size_t rust_guest_physical_aspace_size(const hypervisor::GuestPhysicalAspace* gpa);
 ArchVmAspace* rust_guest_physical_aspace_arch_aspace(hypervisor::GuestPhysicalAspace* gpa);
 VmAddressRegion* rust_guest_physical_aspace_root_vmar(const hypervisor::GuestPhysicalAspace* gpa);
-bool rust_guest_physical_aspace_is_mapped(const hypervisor::GuestPhysicalAspace* gpa,
-                                          zx_gpaddr_t guest_paddr);
 zx_status_t rust_guest_physical_aspace_map_interrupt_controller(
-    hypervisor::GuestPhysicalAspace* gpa, zx_gpaddr_t guest_paddr, zx_paddr_t host_paddr,
+    const hypervisor::GuestPhysicalAspace* gpa, zx_gpaddr_t guest_paddr, zx_paddr_t host_paddr,
     size_t len);
-zx_status_t rust_guest_physical_aspace_unmap_range(hypervisor::GuestPhysicalAspace* gpa,
+zx_status_t rust_guest_physical_aspace_unmap_range(const hypervisor::GuestPhysicalAspace* gpa,
                                                    zx_gpaddr_t guest_paddr, size_t len);
-zx_status_t rust_guest_physical_aspace_page_fault(hypervisor::GuestPhysicalAspace* gpa,
+zx_status_t rust_guest_physical_aspace_page_fault(const hypervisor::GuestPhysicalAspace* gpa,
                                                   zx_gpaddr_t guest_paddr);
 }  // extern "C"
 
@@ -99,17 +97,15 @@ class GuestPhysicalAspace {
     return fbl::ImportFromRawPtr(rust_guest_physical_aspace_root_vmar(this));
   }
 
-  bool IsMapped(zx_gpaddr_t guest_paddr) const {
-    return rust_guest_physical_aspace_is_mapped(this, guest_paddr);
-  }
-  zx::result<> MapInterruptController(zx_gpaddr_t guest_paddr, zx_paddr_t host_paddr, size_t len) {
+  zx::result<> MapInterruptController(zx_gpaddr_t guest_paddr, zx_paddr_t host_paddr,
+                                      size_t len) const {
     return zx::make_result(
         rust_guest_physical_aspace_map_interrupt_controller(this, guest_paddr, host_paddr, len));
   }
-  zx::result<> UnmapRange(zx_gpaddr_t guest_paddr, size_t len) {
+  zx::result<> UnmapRange(zx_gpaddr_t guest_paddr, size_t len) const {
     return zx::make_result(rust_guest_physical_aspace_unmap_range(this, guest_paddr, len));
   }
-  zx::result<> PageFault(zx_gpaddr_t guest_paddr) {
+  zx::result<> PageFault(zx_gpaddr_t guest_paddr) const {
     return zx::make_result(rust_guest_physical_aspace_page_fault(this, guest_paddr));
   }
 

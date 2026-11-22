@@ -25,7 +25,6 @@ exports_files(
 
 rustc_binary(
     name = "bin",
-    testonly = True,
     srcs = [
         "src/main.rs",
         "src/test.rs",
@@ -55,14 +54,12 @@ rustc_binary(
 
 fx_packaged_binary(
     name = "bin_packaged_bin",
-    testonly = True,
     binary = ":bin",
     binary_name = "stress_test_runner",
 )
 
 fx_component_manifest(
     name = "manifest",
-    testonly = True,
     component_name = "stress-test-runner",
     includes = ["//sdk/lib/syslog:client.shard"],
     manifest = "meta/stress-test-runner.cml",
@@ -70,7 +67,6 @@ fx_component_manifest(
 
 fx_component(
     name = "stress-test-runner-cmp",
-    testonly = True,
     compiled_manifest = ":manifest",
     deps = [":bin_packaged_bin"],
 )

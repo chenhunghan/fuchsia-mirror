@@ -150,32 +150,36 @@ Create the following file and directory structure in the new project directory:
 
 Add the following build rules to your `BUILD.gn` file to build and package the server component:
 
-{% set gn_rust_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/rust/echo_server/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
-{% endset %}
-
-{% set gn_rust_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/rust/echo_server/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
-{% endset %}
-
-{% set gn_cpp_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/cpp/echo_server/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
-{% endset %}
-
-{% set gn_cpp_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/cpp/echo_server/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
-{% endset %}
-
 * {Rust}
 
   `echo-server/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/rust/echo_server/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  import("//build/components.gni")
+  import("//build/rust/rustc_binary.gni")
 
-  {{ gn_rust_binary|replace("echo_server_rust","echo-server")|replace("//examples/components/routing/fidl","//vendor/fuchsia-codelab/echo-fidl")|trim() }}
+  rustc_binary("bin") {
+    output_name = "echo-server"
+    edition = "2024"
 
-  {{ gn_rust_component|replace("echo_server_component","component")|trim() }}
+    deps = [
+      "//src/lib/diagnostics/inspect/runtime/rust",
+      "//src/lib/diagnostics/inspect/rust",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-component",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:futures",
+      "//vendor/fuchsia-codelab/echo-fidl:echo_rust",
+    ]
+
+    sources = [ "src/main.rs" ]
+  }
+
+  fuchsia_component("component") {
+    component_name = "echo_server"
+    manifest = "meta/echo_server.cml"
+    deps = [ ":bin" ]
+  }
 
   fuchsia_package("echo-server") {
     package_name = "echo-server"
@@ -188,11 +192,27 @@ Add the following build rules to your `BUILD.gn` file to build and package the s
   `echo-server/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/cpp/echo_server/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  import("//build/components.gni")
 
-  {{ gn_cpp_binary|replace("echo_server_cpp","echo-server")|replace("//examples/components/routing/fidl","//vendor/fuchsia-codelab/echo-fidl")|trim() }}
+  executable("bin") {
+    output_name = "echo-server"
+    sources = [ "main.cc" ]
 
-  {{ gn_cpp_component|replace("echo_server_component","component")|trim() }}
+    deps = [
+      "//sdk/lib/async-loop:async-loop-cpp",
+      "//sdk/lib/async-loop:async-loop-default",
+      "//sdk/lib/inspect/component/cpp",
+      "//sdk/lib/sys/cpp",
+      "//sdk/lib/syslog/cpp",
+      "//vendor/fuchsia-codelab/echo-fidl:echo_cpp",
+    ]
+  }
+
+  fuchsia_component("component") {
+    component_name = "echo_server"
+    manifest = "meta/echo_server.cml"
+    deps = [ ":bin" ]
+  }
 
   fuchsia_package("echo-server") {
     package_name = "echo-server"
@@ -357,32 +377,34 @@ Create the following file and directory structure in the new project directory:
 
 Add the following build rules to your `BUILD.gn` file to build and package the client component:
 
-{% set gn_rust_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/rust/echo_client/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
-{% endset %}
-
-{% set gn_rust_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/rust/echo_client/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
-{% endset %}
-
-{% set gn_cpp_binary %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/cpp/echo_client/BUILD.gn" region_tag="executable" adjust_indentation="auto" %}
-{% endset %}
-
-{% set gn_cpp_component %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/cpp/echo_client/BUILD.gn" region_tag="component" adjust_indentation="auto" %}
-{% endset %}
-
 * {Rust}
 
   `echo-client/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/rust/echo_client/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  import("//build/components.gni")
+  import("//build/rust/rustc_binary.gni")
 
-  {{ gn_rust_binary|replace("echo_client_rust","echo-client")|replace("//examples/components/routing/fidl","//vendor/fuchsia-codelab/echo-fidl")|trim() }}
+  rustc_binary("bin") {
+    output_name = "echo-client"
+    edition = "2024"
 
-  {{ gn_rust_component|replace("echo_client_component","component")|trim() }}
+    deps = [
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-component",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:log",
+      "//vendor/fuchsia-codelab/echo-fidl:echo_rust",
+    ]
+
+    sources = [ "src/main.rs" ]
+  }
+
+  fuchsia_component("component") {
+    component_name = "echo_client"
+    manifest = "meta/echo_client.cml"
+    deps = [ ":bin" ]
+  }
 
   fuchsia_package("echo-client") {
     package_name = "echo-client"
@@ -395,11 +417,27 @@ Add the following build rules to your `BUILD.gn` file to build and package the c
   `echo-client/BUILD.gn`:
 
   ```gn
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/routing/cpp/echo_client/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  import("//build/components.gni")
 
-  {{ gn_cpp_binary|replace("echo_client_cpp","echo-client")|replace("//examples/components/routing/fidl","//vendor/fuchsia-codelab/echo-fidl")|trim() }}
+  executable("bin") {
+    output_name = "echo-client"
+    sources = [ "main.cc" ]
 
-  {{ gn_cpp_component|replace("echo_client_component","component")|trim() }}
+    deps = [
+      "//sdk/lib/async-loop:async-loop-cpp",
+      "//sdk/lib/async-loop:async-loop-default",
+      "//sdk/lib/component/incoming/cpp",
+      "//sdk/lib/sys/cpp",
+      "//sdk/lib/syslog/cpp",
+      "//vendor/fuchsia-codelab/echo-fidl:echo_cpp",
+    ]
+  }
+
+  fuchsia_component("component") {
+    component_name = "echo_client"
+    manifest = "meta/echo_client.cml"
+    deps = [ ":bin" ]
+  }
 
   fuchsia_package("echo-client") {
     package_name = "echo-client"

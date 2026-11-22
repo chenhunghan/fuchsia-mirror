@@ -232,7 +232,7 @@ pub fn apic_io_init_safe(io_apic_descs: &[IoApicDescriptor], overrides: &[IoApic
     // Allocate windows to their control pages
     for (i, desc) in io_apic_descs.iter().enumerate() {
         let paddr = desc.paddr;
-        let mut vaddr: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut vaddr_page_base: usize = 0;
         let paddr_page_base = paddr & !page::MASK;
 
         // An IO APIC cannot cross a page boundary.
@@ -248,7 +248,7 @@ pub fn apic_io_init_safe(io_apic_descs: &[IoApicDescriptor], overrides: &[IoApic
                 // page base.
                 let existing_page_base =
                     unsafe { box_uninit[j].assume_init_ref() }.vaddr & !page::MASK;
-                vaddr = existing_page_base as *mut core::ffi::c_void;
+                vaddr_page_base = existing_page_base;
                 found_existing = true;
                 break;
             }
@@ -270,13 +270,14 @@ pub fn apic_io_init_safe(io_apic_descs: &[IoApicDescriptor], overrides: &[IoApic
 
             let kernel_aspace = VmAspace::kernel_aspace();
 
-            // SAFETY: The physical range is valid, aligned, and dedicated to the IO APIC.
-            unsafe {
+            // SAFETY: The cache policy in the flags is appropriate for all mappings of the
+            // physical range, and creating this mapping is sound.
+            vaddr_page_base = unsafe {
                 kernel_aspace
                     .alloc_physical(
                         b"ioapic",
                         page::SIZE,
-                        &mut vaddr,
+                        None,
                         page::SHIFT as u8,
                         crate::kernel::types::PAddr(paddr_page_base),
                         0,
@@ -284,12 +285,12 @@ pub fn apic_io_init_safe(io_apic_descs: &[IoApicDescriptor], overrides: &[IoApic
                             | ARCH_MMU_FLAG_PERM_WRITE
                             | ARCH_MMU_FLAG_UNCACHED_DEVICE,
                     )
-                    .expect("Failed to allocate physical memory for ioapic");
-            }
+                    .expect("Failed to allocate physical memory for ioapic")
+            };
         }
 
         // Offset from the base of the mapped in page to the actual IO APIC base.
-        let final_vaddr = (vaddr as usize) + (paddr - paddr_page_base);
+        let final_vaddr = vaddr_page_base + (paddr - paddr_page_base);
 
         let bank = unsafe { bank_for_ioapic(final_vaddr) };
         let ver = read_reg(&bank, IO_APIC_REG_VER);
@@ -308,13 +309,21 @@ pub fn apic_io_init_safe(io_apic_descs: &[IoApicDescriptor], overrides: &[IoApic
             max_redirection_entry = (IO_APIC_NUM_REDIRECTIONS - 1) as u8;
         }
 
-        box_uninit[i].write(IoApic {
-            desc: desc.clone(),
-            vaddr: final_vaddr,
-            version,
-            max_redirection_entry,
-            saved_rtes: core::cell::UnsafeCell::new([0; IO_APIC_NUM_REDIRECTIONS]),
-        });
+        let slot = box_uninit[i].as_mut_ptr();
+        // Fails to compile if a field is added to `IoApic` without a write below.
+        let _ = |io_apic: &IoApic| {
+            let IoApic { desc: _, vaddr: _, version: _, max_redirection_entry: _, saved_rtes: _ } =
+                io_apic;
+        };
+        // SAFETY: `slot` is aligned and valid for writes, and all-zero bytes are a valid
+        // `UnsafeCell<[u64; IO_APIC_NUM_REDIRECTIONS]>`.
+        unsafe {
+            (&raw mut (*slot).desc).write(desc.clone());
+            (&raw mut (*slot).vaddr).write(final_vaddr);
+            (&raw mut (*slot).version).write(version);
+            (&raw mut (*slot).max_redirection_entry).write(max_redirection_entry);
+            (&raw mut (*slot).saved_rtes).write_bytes(0, 1);
+        }
 
         // Cleanout the redirection entries.
         for j in 0..=max_redirection_entry {

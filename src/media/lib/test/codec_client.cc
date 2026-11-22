@@ -216,19 +216,9 @@ void CodecClient::Start() {
       const zx_status_t dup_status =
           all_input_buffers_.at(i)->vmo().duplicate(ZX_RIGHT_SAME_RIGHTS, &dup_vmo);
       ZX_ASSERT(dup_status == ZX_OK);
-      fuchsia::media::StreamProcessorAddBufferRequest add_request;
-      add_request.set_port(fuchsia::media::Port::INPUT);
-      add_request.set_buffer_constraints_version_ordinal(
-          input_constraints_->buffer_constraints_version_ordinal());
-      add_request.set_buffer_lifetime_ordinal(kInputBufferLifetimeOrdinal);
-      add_request.set_buffer_index(i);
-      add_request.set_buffer(std::move(dup_vmo));
-      PostToFidlThread([this, add_request = std::move(add_request)]() mutable {
-        if (!codec_) {
-          return;
-        }
-        codec_->AddBuffer(std::move(add_request));
-      });
+      PostAddBuffer(fuchsia::media::Port::INPUT,
+                    input_constraints_->buffer_constraints_version_ordinal(),
+                    kInputBufferLifetimeOrdinal, i, std::move(dup_vmo));
     }
   }
 
@@ -682,6 +672,7 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
     uint32_t old_output_buffer_count;
     uint64_t old_output_buffer_lifetime_ordinal;
     uint64_t new_output_buffer_lifetime_ordinal;
+    std::vector<std::unique_ptr<CodecBuffer>> old_output_buffers;
     {  // scope lock
       std::unique_lock<std::mutex> lock(lock_);
 
@@ -699,7 +690,8 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
 
       old_output_buffer_count = static_cast<uint32_t>(all_output_buffers_.size());
       old_output_buffer_lifetime_ordinal = current_output_buffer_lifetime_ordinal_;
-      // Free the old output buffers, if any.
+      // Free the old output buffers outside the lock below, if any.
+      old_output_buffers = std::move(all_output_buffers_);
       all_output_buffers_.clear();
 
       // Here is where we snap which exact constraints version we'll actually
@@ -720,6 +712,7 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
       new_output_buffer_lifetime_ordinal = next_output_buffer_lifetime_ordinal_;
       next_output_buffer_lifetime_ordinal_ += 2;
     }  // ~lock
+    old_output_buffers.clear();
 
     //
     // Tell the server about output settings.
@@ -751,34 +744,35 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
     }
 
     std::vector<zx::vmo> dup_vmos;
+    if (dynamic_buffer_count.has_value()) {
+      dup_vmos.reserve(packet_count);
+    }
+    std::vector<std::unique_ptr<CodecBuffer>> new_output_buffers;
+    new_output_buffers.reserve(packet_count);
+    for (uint32_t i = 0; i < packet_count; i++) {
+      if (dynamic_buffer_count.has_value()) {
+        zx::vmo dup_vmo;
+        const zx_status_t dup_status =
+            buffer_collection_info.buffers().at(i).vmo().duplicate(ZX_RIGHT_SAME_RIGHTS, &dup_vmo);
+        ZX_ASSERT(dup_status == ZX_OK);
+        dup_vmos.push_back(std::move(dup_vmo));
+      }
+      std::unique_ptr<CodecBuffer> buffer = CodecBuffer::CreateFromVmo(
+          i, std::move(*buffer_collection_info.mutable_buffers()->at(i).mutable_vmo()),
+          static_cast<uint32_t>(buffer_collection_info.buffers()[i].vmo_usable_start()),
+          static_cast<uint32_t>(buffer_collection_info.settings().buffer_settings().size_bytes()),
+          true, buffer_collection_info.settings().buffer_settings().is_physically_contiguous());
+      if (!buffer) {
+        FX_LOGS(FATAL) << "CodecBuffer::CreateFromVmo() failed (output)";
+      }
+      ZX_ASSERT(new_output_buffers.size() == i);
+      new_output_buffers.push_back(std::move(buffer));
+    }
+
     bool is_caught_up = false;
     // Configure tracking for output buffers.
     {  // scope lock
       std::lock_guard<std::mutex> lock(lock_);
-
-      all_output_buffers_.reserve(packet_count);
-      if (dynamic_buffer_count.has_value()) {
-        dup_vmos.reserve(packet_count);
-      }
-      for (uint32_t i = 0; i < packet_count; i++) {
-        if (dynamic_buffer_count.has_value()) {
-          zx::vmo dup_vmo;
-          const zx_status_t dup_status = buffer_collection_info.buffers().at(i).vmo().duplicate(
-              ZX_RIGHT_SAME_RIGHTS, &dup_vmo);
-          ZX_ASSERT(dup_status == ZX_OK);
-          dup_vmos.push_back(std::move(dup_vmo));
-        }
-        std::unique_ptr<CodecBuffer> buffer = CodecBuffer::CreateFromVmo(
-            i, std::move(*buffer_collection_info.mutable_buffers()->at(i).mutable_vmo()),
-            static_cast<uint32_t>(buffer_collection_info.buffers()[i].vmo_usable_start()),
-            static_cast<uint32_t>(buffer_collection_info.settings().buffer_settings().size_bytes()),
-            true, buffer_collection_info.settings().buffer_settings().is_physically_contiguous());
-        if (!buffer) {
-          FX_LOGS(FATAL) << "CodecBuffer::Allocate() failed (output)";
-        }
-        ZX_ASSERT(all_output_buffers_.size() == i);
-        all_output_buffers_.push_back(std::move(buffer));
-      }
 
       current_output_buffer_lifetime_ordinal_ = new_output_buffer_lifetime_ordinal;
 
@@ -801,6 +795,8 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
         // !output_constraints_action_pending_.
         FX_LOGS(DEBUG) << "output_constraints_action_pending_ = false, because client "
                           "caught up";
+        ZX_ASSERT(all_output_buffers_.empty());
+        all_output_buffers_ = std::move(new_output_buffers);
         is_caught_up = true;
         output_constraints_action_pending_ = false;
         // Because this was true for at least pending config reason which we
@@ -821,7 +817,7 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
                           "has sent yet another action-required output constraints";
         ZX_ASSERT(output_constraints_action_pending_);
         ZX_ASSERT(output_pending_);
-        all_output_buffers_.clear();
+        ZX_ASSERT(all_output_buffers_.empty());
       }
     }  // ~lock
 
@@ -848,19 +844,9 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
     // We're ready to receive output.
     if (dynamic_buffer_count.has_value()) {
       for (uint32_t i = 0; i < packet_count; ++i) {
-        fuchsia::media::StreamProcessorAddBufferRequest add_request;
-        add_request.set_port(fuchsia::media::Port::OUTPUT);
-        add_request.set_buffer_constraints_version_ordinal(
-            buffer_constraints.buffer_constraints_version_ordinal());
-        add_request.set_buffer_lifetime_ordinal(new_output_buffer_lifetime_ordinal);
-        add_request.set_buffer_index(i);
-        add_request.set_buffer(std::move(dup_vmos.at(i)));
-        PostToFidlThread([this, add_request = std::move(add_request)]() mutable {
-          if (!codec_) {
-            return;
-          }
-          codec_->AddBuffer(std::move(add_request));
-        });
+        PostAddBuffer(fuchsia::media::Port::OUTPUT,
+                      buffer_constraints.buffer_constraints_version_ordinal(),
+                      new_output_buffer_lifetime_ordinal, i, std::move(dup_vmos.at(i)));
       }
     } else {
       PostToFidlThread([this, output_buffer_lifetime_ordinal = new_output_buffer_lifetime_ordinal] {
@@ -877,6 +863,24 @@ std::unique_ptr<CodecOutput> CodecClient::BlockingGetEmittedOutput() {
       });
     }
   }
+}
+
+void CodecClient::PostAddBuffer(fuchsia::media::Port port,
+                                uint64_t buffer_constraints_version_ordinal,
+                                uint64_t buffer_lifetime_ordinal, uint32_t buffer_index,
+                                zx::vmo buffer) {
+  fuchsia::media::StreamProcessorAddBufferRequest add_request;
+  add_request.set_port(port);
+  add_request.set_buffer_constraints_version_ordinal(buffer_constraints_version_ordinal);
+  add_request.set_buffer_lifetime_ordinal(buffer_lifetime_ordinal);
+  add_request.set_buffer_index(buffer_index);
+  add_request.set_buffer(std::move(buffer));
+  PostToFidlThread([this, add_request = std::move(add_request)]() mutable {
+    if (!codec_) {
+      return;
+    }
+    codec_->AddBuffer(std::move(add_request));
+  });
 }
 
 bool CodecClient::ConfigurePortBufferCollection(

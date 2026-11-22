@@ -614,7 +614,8 @@ zx::result<> Sysmem::Initialize(const CreateArgs& create_args) {
     snapshot_annotation_register_.emplace(loop_dispatcher());
     auto service_directory = sys::ServiceDirectory::CreateFromNamespace();
     snapshot_annotation_register_->SetServiceDirectory(service_directory, loop_dispatcher());
-    metrics_.metrics_buffer().SetServiceDirectory(service_directory);
+    metrics_.metrics_buffer().SetServiceDirectory(
+        fidl::ClientEnd<fuchsia_io::Directory>(service_directory->CloneChannel().TakeChannel()));
     metrics_.LogUnusedPageCheck(sysmem_metrics::UnusedPageCheckMetricDimensionEvent_Connectivity);
   });
 

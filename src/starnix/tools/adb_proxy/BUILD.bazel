@@ -2,6 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:defs.bzl", "rustc_binary", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
@@ -33,4 +42,23 @@ rustc_binary(
         "//src/lib/fuchsia",
         "//third_party/rust_crates/vendor:anyhow",
     ],
+)
+
+fx_packaged_binary(
+    name = "adb_proxy_packaged_bin",
+    binary = ":bin",
+    binary_name = "adb_proxy",
+)
+
+fx_component_manifest(
+    name = "adb_proxy_manifest",
+    component_name = "adb_proxy",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/adb_proxy.cml",
+)
+
+fx_component(
+    name = "adb_proxy_component",
+    compiled_manifest = ":adb_proxy_manifest",
+    deps = [":adb_proxy_packaged_bin"],
 )

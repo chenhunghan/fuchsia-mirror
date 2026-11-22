@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Error};
+use anyhow::{Error, format_err};
 use bitfield::bitfield;
 use std::cmp::min;
 use std::collections::VecDeque;
@@ -113,7 +113,7 @@ impl RtpPacketBuilder for SbcRtpPacketBuilder {
             packets.push(self.build_packet());
         }
         self.frames.push_back(frame);
-        self.samples = self.samples + samples;
+        self.samples = self.samples.wrapping_add(samples);
         if self.frames.len() == Self::MAX_FRAMES_PER_PACKET {
             packets.push(self.build_packet());
         }
@@ -140,6 +140,11 @@ impl AacRtpPacketBuilder {
 
 impl RtpPacketBuilder for AacRtpPacketBuilder {
     fn add_frame(&mut self, mut frame: Vec<u8>, samples: u32) -> Result<Vec<Vec<u8>>, Error> {
+        let Some(mux_element_space) =
+            self.max_packet_size.checked_sub(RTP_HEADER_LEN).filter(|&s| s > 0)
+        else {
+            return Err(format_err!("Media packet too large for RTP max size"));
+        };
         let mut header = RtpHeader([0; RTP_HEADER_LEN]);
         header.set_version(RTP_VERSION);
         header.set_payload_type(RTP_PAYLOAD_DYNAMIC);
@@ -147,7 +152,6 @@ impl RtpPacketBuilder for AacRtpPacketBuilder {
         let mut left = frame.len();
         let mut packets = Vec::new();
         while left > 0 {
-            let mux_element_space = self.max_packet_size - RTP_HEADER_LEN;
             header.set_sequence_number(self.next_sequence);
             // RFC 3016: If the end of this frame will be included, set the marker to 1
             if left <= mux_element_space {
@@ -371,5 +375,16 @@ mod tests {
 
         assert_eq!(expected.len(), result.len());
         assert_eq!(expected, &result[0..expected.len()]);
+    }
+
+    #[test]
+    fn aac_packet_builder_small_max_packet_size_errors() {
+        // Exactly RTP_HEADER_LEN leaves 0 bytes for payload and must return an error instead of looping.
+        let mut builder_exact = AacRtpPacketBuilder::new(RTP_HEADER_LEN);
+        assert!(builder_exact.add_frame(vec![0xf0], 1).is_err());
+
+        // Smaller than RTP_HEADER_LEN must return an error instead of panicking on underflow.
+        let mut builder_under = AacRtpPacketBuilder::new(RTP_HEADER_LEN - 4);
+        assert!(builder_under.add_frame(vec![0xf0], 1).is_err());
     }
 }

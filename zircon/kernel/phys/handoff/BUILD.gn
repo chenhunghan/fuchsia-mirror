@@ -5,9 +5,10 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/cpp/library_headers.gni")
+import("//build/rust/rustc_bindgen.gni")
 import("//build/toolchain/toolchain_environment.gni")
 import("//build/zircon/zircon_cpu.gni")
-import("//zircon/kernel/kernel_bindgen_crate.gni")
+import("//zircon/kernel/kernel_rust_crate.gni")
 
 library_headers("headers") {
   headers = [
@@ -66,18 +67,19 @@ source_set("handoff") {
   public_deps = [ ":headers" ]
 }
 
-kernel_bindgen_crate("handoff-rs") {
-  crate_name = "handoff"
+rustc_bindgen("handoff-rs.bindgen") {
+  visibility = [ ":*" ]
+  output_name = "handoff_bindings.rs"
 
   notice_year = "2026"
 
   cpp = true
   headers = [
+    "include/phys/handoff/boot-constants.h",
     "include/phys/handoff/handoff.h",
     "include/phys/handoff/zircon-abi-spec.h",
   ]
-  non_rust_deps = [ ":handoff" ]
-  deps = [ "//src/lib/stdbind:stdbind-rs" ]
+  deps = [ ":handoff" ]
 
   # The layout of PhysHandoff is compilation-dependent and very load-bearing,
   # so these tests represent an important regression stop against drift.
@@ -90,6 +92,7 @@ kernel_bindgen_crate("handoff-rs") {
   function_blocklist = [ ".*" ]
 
   type_allowlist = [
+    "BootConstants",
     "PhysHandoff",
 
     # ZirconAbiSpec::Stack is used by //zircon/kernel/lib/thread-stack, whose
@@ -98,7 +101,8 @@ kernel_bindgen_crate("handoff-rs") {
     "ZirconAbiSpec::Stack",
   ]
   type_blocklist = [
-    "stdbind::optional",  # Ready-made bindings swapped in instead
+    "arch::EarlyTicks",  # Provided by //zircon/kernel/lib/arch:arch-rs
+    "stdbind::optional(_.*)?",  # Ready-made bindings swapped in instead
   ]
 
   # This is a ktl::string_view that only physboot uses.
@@ -114,37 +118,68 @@ kernel_bindgen_crate("handoff-rs") {
   # Always better.
   rustified_enum = [ ".*" ]
 
-  expect_lints = [
-    "non_camel_case_types",
-    "non_upper_case_globals",
-  ]
+  auto_derive_traits = [ [
+        "PhysElfImage_Info",
+        [
+          "Debug",
+          "Copy",
+          "Clone",
+        ],
+      ] ]
 
   raw_lines = [
-    "#![no_std]",
-    "",
+    "use libarch::EarlyTicks as arch_EarlyTicks;",
     "use stdbind::Optional as stdbind_optional;",
   ]
 
-  if (is_kernel) {
-    raw_lines += [
-      "",
-      "unsafe extern \"C\" { fn cpp_phys_handoff_get() -> *const PhysHandoff; }",
-      "",
-      "impl PhysHandoff {",
-      "    pub fn get() -> &'static Self { ",
-      "        // Safety: This pointer is set before the kernel proper boots.",
-      "        unsafe { cpp_phys_handoff_get().as_ref_unchecked() } ",
-      "    }",
-      "}",
-    ]
-  }
-
   replacements = [
+    # PhysVmObject::Name is zero-initialized on construction (`Name name{};`).
+    [
+      "pub type PhysVmObject_Name = __BindgenOpaqueArray<\\[u8; ([0-9]+)usize\\]>;",
+      "pub type PhysVmObject_Name = [u8; \\1];",
+    ],
+
+    # Wrap opaque C++ blobs (such as std::optional unions and padding) in
+    # MaybeUninit so forming shared references is sound even when trailing or
+    # disengaged bytes are uninitialized.
+    [
+      "#\\[derive\\(PartialEq, Eq, Copy, Clone, Debug, Hash\\)\\]\n#\\[repr\\(([^\n]+)\\)\\]\npub struct (__BindgenOpaqueArray[0-9]*)<T>\\(pub T\\);\nimpl<T: Copy \\+ Default, const N: usize> Default for __BindgenOpaqueArray[0-9]*<\\[T; N\\]> \\{\n    fn default\\(\\) -> Self \\{\n        Self\\(\\[<T as Default>::default\\(\\); N\\]\\)\n    \\}\n\\}",
+      "#[derive(Debug, Copy, Clone)]\n#[repr(\\1)]\npub struct \\2<T: ::core::marker::Copy>(::core::mem::MaybeUninit<T>);\nimpl<T: ::core::marker::Copy> Default for \\2<T> {\n    fn default() -> Self {\n        Self(::core::mem::MaybeUninit::zeroed())\n    }\n}",
+    ],
+    [
+      "pub _bindgen_opaque_blob: \\[([^;]+); ([0-9]+usize)\\],",
+      "pub _bindgen_opaque_blob: [::core::mem::MaybeUninit<\\1>; \\2],",
+    ],
+
+    # `crypto::global_prng::EarlyBootSeed` moves out of `entropy_pool` in place
+    # during early boot.
+    [
+      "pub entropy_pool: (__BindgenOpaqueArray[0-9]*<[^>]+>),",
+      "pub entropy_pool: ::core::cell::UnsafeCell<\\1>,",
+    ],
+
     # Drop "k" prefixes since that's a C++-ism that doesn't help with
     # readability on the Rust side.
     [
       "\bk([A-Z0-9])",
       "\\1",
     ],
+  ]
+}
+
+kernel_rust_crate("handoff-rs") {
+  crate_name = "handoff"
+  _bindgen_outputs = get_target_outputs(":handoff-rs.bindgen")
+  source_root = "handoff.rs"
+  sources = [ "handoff.rs" ] + _bindgen_outputs
+  inputs = _bindgen_outputs
+  rustenv = [ "HANDOFF_BINDINGS_RS=" +
+              rebase_path(_bindgen_outputs[0], root_build_dir) ]
+  deps = [
+    ":handoff-rs.bindgen",
+    "//src/lib/stdbind:stdbind-rs",
+    "//src/lib/zr",
+    "//zircon/kernel/bin/rustenv_path",
+    "//zircon/kernel/lib/arch:arch-rs",
   ]
 }

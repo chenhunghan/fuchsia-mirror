@@ -53,7 +53,7 @@
 #define PDEV_DID_RAM_DISK               0x2D  // RAM disk device
 #define PDEV_DID_RAM_NAND               0x2E  // RAM disk for nand devices
 // #define PDEV_DID_VIRTUAL_AUDIO_LEGACY was 0x2F  // Legacy virtual audio for test
-#define PDEV_DID_BT_HCI_EMULATOR        0x30  // Bluetooth HCI emulator for test
+// #define PDEV_DID_BT_HCI_EMULATOR was 0x30  // Bluetooth HCI emulator for test
 #define PDEV_DID_POWER_CORE             0x31  // Power core
 #define PDEV_DID_DEVICETREE_NODE        0x32  // Node published by devicetree driver
 #define PDEV_DID_FAKE_BATTERY           0x33  // Fake battery for test
@@ -194,6 +194,7 @@
 #define PDEV_PID_BCM4356            0x01
 #define PDEV_PID_BCM43458           0x02
 #define PDEV_PID_BCM4359            0x03
+#define PDEV_PID_BCM4390B1          0x04
 #define PDEV_PID_BCM4381A1          0xBA
 
 #define PDEV_DID_BCM_WIFI           0x01

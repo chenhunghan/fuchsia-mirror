@@ -12,6 +12,7 @@ use crate::vm::pmm_node::PmmOptDelayReuse;
 use crate::vm::vm::oom_ktrace_duration;
 use crate::vm::{pmm, scanner};
 use anonymous_page_request_bindings as bindings;
+use core::mem::DropGuard;
 use core::sync::atomic::{AtomicBool, Ordering};
 use debug::dprintf;
 use zx_status::Status;
@@ -106,8 +107,8 @@ impl AnonymousPageRequest {
         let _memory_stall = ScopedMemoryStall::new();
 
         // Once we return, clear the `active` flag.
-        let _defer = zr::defer(|| {
-            self.active = false;
+        let _defer = DropGuard::new(&mut self.active, |active| {
+            *active = false;
         });
 
         // This should only ever end up waiting momentarily until reclamation catches up. As such if

@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/hardware/pciroot/c/banjo.h>
 #include <inttypes.h>
 #include <lib/ddk/debug.h>
 #include <limits.h>
@@ -93,7 +92,7 @@ zx_status_t publish_acpi_devices(acpi::Manager* manager, zx_device_t* platform_b
   result = manager->PublishDevices(platform_bus, fdf::Dispatcher::GetCurrent()->async_dispatcher());
 
   // Now walk the ACPI namespace looking for devices we understand, and publish
-  // them.  For now, publish only the first PCI bus we encounter.
+  // them.
   // TODO(https://fxbug.dev/42158465): remove this when all drivers are removed from the x86 board
   // driver.
   acpi::status<> acpi_status =

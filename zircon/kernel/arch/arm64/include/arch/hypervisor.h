@@ -107,7 +107,7 @@ class AutoGich {
   ~AutoGich();
 
  private:
-  AutoPreemptDisabler apd_;
+  AutoPreemptDisabler apd_{AutoPreemptDisabler::Defer};
   IchState* ich_state_;
   interrupt_saved_state_t int_state_;
 };
@@ -138,8 +138,8 @@ class Vcpu {
   void Migrate(Thread* thread, Thread::MigrateStage stage)
       TA_REQ(chainlock_transaction_token, thread->get_lock());
 
-  // See the comment in arch/x86/include/arch/hypervisor.h:Vcpu for why it is OK
-  // to disable static analysis here.
+  // See the comment on `Vcpu::thread_is_our_thread` in arch/x86/hypervisor/vcpu.rs
+  // for why it is OK to disable static analysis here.
   bool ThreadIsOurThread(Thread* thread) const TA_NO_THREAD_SAFETY_ANALYSIS {
     // TODO(https://fxbug.dev/355287217): Remove workaround for const/volatile qualified atomic_ref.
     return thread == ktl::atomic_ref<Thread*>{const_cast<Vcpu*>(this)->thread_}.load(

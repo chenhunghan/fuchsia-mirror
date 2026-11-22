@@ -71,8 +71,8 @@ bitfield! {
 
 impl TypeField {
     fn command_type(&self) -> Result<MuxCommandMarker, FrameParseError> {
-        MuxCommandMarker::try_from(self.command_type_raw())
-            .or(Err(FrameParseError::UnsupportedMuxCommandType(self.command_type_raw())))
+        let raw = self.command_type_raw();
+        MuxCommandMarker::try_from(raw).map_err(|_| FrameParseError::UnsupportedMuxCommandType(raw))
     }
 
     fn command_response(&self) -> CommandResponse {
@@ -265,28 +265,36 @@ impl Decodable for MuxCommand {
         const MAX_LENGTH_OCTETS: usize = 8;
         let mut length: u64 = 0;
         let mut num_length_octets: usize = 0;
+        let mut found_last_length_octet = false;
 
-        for i in MUX_COMMAND_LENGTH_IDX..buf.len() {
-            let length_field = LengthField(buf[i]);
+        for &byte in &buf[MUX_COMMAND_LENGTH_IDX..] {
+            let length_field = LengthField(byte);
             let length_octet: u64 = length_field.length().into();
             length |= length_octet << (MUX_COMMAND_LENGTH_SHIFT * num_length_octets);
             num_length_octets += 1;
 
             // A set EA bit indicates last octet of the length.
             if length_field.ea_bit() {
+                found_last_length_octet = true;
                 break;
             }
 
-            if num_length_octets > MAX_LENGTH_OCTETS {
+            // Additional length octets would overflow the u64 payload length.
+            if num_length_octets >= MAX_LENGTH_OCTETS {
                 return Err(FrameParseError::InvalidFrame);
             }
+        }
+
+        if !found_last_length_octet {
+            return Err(FrameParseError::BufferTooSmall);
         }
 
         // Validate that the buffer is large enough given the variable length.
         // 1 byte for Type field, `num_length_octets` bytes for the length field, and `length`
         // bytes for the data.
         let header_len = 1 + num_length_octets;
-        let calculated_buf_size: u64 = header_len as u64 + length;
+        let calculated_buf_size =
+            (header_len as u64).checked_add(length).ok_or(FrameParseError::InvalidFrame)?;
         if (buf.len() as u64) < calculated_buf_size {
             return Err(FrameParseError::BufferTooSmall);
         }
@@ -330,7 +338,7 @@ impl Encodable for MuxCommand {
         buf[MUX_COMMAND_LENGTH_IDX..length_end_idx].copy_from_slice(&length_octets);
 
         // Payload of the MuxCommand.
-        self.params.encode(&mut buf[length_end_idx..])?;
+        self.params.encode(&mut buf[length_end_idx..length_end_idx + length])?;
 
         Ok(())
     }
@@ -626,5 +634,85 @@ mod tests {
         let multi_octet_length = 0b100000001100001001000;
         let expected = [0b10010000, 0b01100000, 0b10000001];
         assert_eq!(length_to_ea_format(multi_octet_length), expected);
+    }
+
+    #[test]
+    fn test_decode_mux_command_one_byte_buf() {
+        let buf = [0b10100001]; // Type field only, missing length octet.
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_decode_mux_command_truncated_length_without_ea_bit() {
+        // FlowControlOn with 1 length octet, EA = 0 (unterminated length field).
+        let buf = [0b10100001, 0b00000000];
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::BufferTooSmall));
+
+        // Test command with 2 length octets, both EA = 0 (unterminated length field).
+        let buf = [0b00100011, 0b00000000, 0b00000000];
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::BufferTooSmall));
+
+        // FlowControlOn with 7 length octets, all EA = 0 (still below MAX_LENGTH_OCTETS,
+        // but EOF before terminator).
+        let buf = [0b10100001, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_decode_mux_command_exact_max_length_octets() {
+        // 8 length octets encoding length = 0 (last octet has EA = 1).
+        let buf = [0b10100001, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        let expected = MuxCommand {
+            params: MuxCommandParams::FlowControlOn(FlowControlParams {}),
+            command_response: CommandResponse::Response,
+        };
+        assert_eq!(MuxCommand::decode(&buf[..]).unwrap(), expected);
+
+        // 8 length octets encoding length = 1 for Test command (0x02 = length 1, EA = 0).
+        let buf = [0b00100011, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0xAB];
+        let expected = MuxCommand {
+            params: MuxCommandParams::Test(TestCommandParams { test_pattern: vec![0xAB] }),
+            command_response: CommandResponse::Command,
+        };
+        assert_eq!(MuxCommand::decode(&buf[..]).unwrap(), expected);
+
+        // 8 length octets encoding max 56-bit length ((1 << 56) - 1) must not overflow/panic.
+        let buf = [0b00100011, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFE, 0xFF];
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::BufferTooSmall));
+    }
+
+    #[test]
+    fn test_decode_mux_command_eight_length_octets_without_ea_bit_is_invalid() {
+        // 8 length octets where the 8th octet still has EA = 0 implies >= 9 octets.
+        let buf = [0b10100001, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::InvalidFrame));
+    }
+
+    #[test]
+    fn test_decode_mux_command_nine_length_octets_with_ea_bit_set_is_invalid() {
+        // 9 length octets with EA = 1 on the 9th octet exceeds MAX_LENGTH_OCTETS (8).
+        let buf = [0b10100001, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
+        assert_matches!(MuxCommand::decode(&buf[..]), Err(FrameParseError::InvalidFrame));
+    }
+
+    #[test]
+    fn test_encode_mux_command_oversized_buffer_preserves_trailing_bytes() {
+        const SENTINEL: u8 = 0xAA;
+        let command = MuxCommand {
+            params: MuxCommandParams::Test(TestCommandParams {
+                test_pattern: vec![0x11, 0x22, 0x33],
+            }),
+            command_response: CommandResponse::Command,
+        };
+        let cmd_len = command.encoded_len();
+        let mut exact_cmd_buf = vec![0; cmd_len];
+        assert!(command.encode(&mut exact_cmd_buf[..]).is_ok());
+
+        let mut oversized_cmd_buf = vec![SENTINEL; cmd_len + 5];
+        assert!(command.encode(&mut oversized_cmd_buf[..]).is_ok());
+        assert_eq!(&oversized_cmd_buf[..cmd_len], &exact_cmd_buf[..]);
+        assert_eq!(&oversized_cmd_buf[cmd_len..], &[SENTINEL; 5]);
+
+        assert_eq!(MuxCommand::decode(&exact_cmd_buf[..]).unwrap(), command);
     }
 }

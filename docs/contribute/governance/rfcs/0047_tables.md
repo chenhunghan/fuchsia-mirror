@@ -144,7 +144,7 @@ class SampleTable {
 
 ### Style Guide
 
-#### Should I use a struct or a table?
+#### Should I use a struct or a table? {#should-i-use-a-struct-or-a-table}
 
 Structs and tables provide semantically similar notions,
 and it can seem complicated deciding which to prefer.

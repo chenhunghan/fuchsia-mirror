@@ -36,7 +36,7 @@ Note that during tests storage capabilities may be created that do not match
 these behaviors. For example, an integration test may provide a `data`
 capability that is wiped between test cases.
 
-### `data`
+### data {#data}
 
 Storage capabilities named "data" are intended to store general purpose
 persistent data.
@@ -46,7 +46,7 @@ will not be deleted by the system. Components must be conservative in their use
 of `data` because the contract does not let system delete files when the
 limited disk space is exhausted. In many cases using `cache` is preferable.
 
-### `cache`
+### cache
 
 Storage capabilities named "cache" are intended to store data that could be
 discarded or regenerated if necessary. For example, a downloaded picture that
@@ -56,7 +56,7 @@ Files stored in `cache` are usually persisted between different runs of same
 component instance but this is not guaranteed. Files may be deleted by the
 system at any time, even while the component is running.
 
-### `tmp`
+### tmp
 
 Storage capabilities named "tmp" are intended to store temporary or intermediate
 data.

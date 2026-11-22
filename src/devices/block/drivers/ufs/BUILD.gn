@@ -69,11 +69,11 @@ _common_deps = [
   "//sdk/lib/driver/platform-device/cpp/",
   "//sdk/lib/driver/power/cpp",
   "//sdk/lib/driver/runtime:driver_runtime_cpp",
+  "//sdk/lib/memory_barriers",
   "//src/devices/block/lib/common",
   "//src/devices/block/lib/scsi",
   "//src/devices/lib/dma-buffer",
   "//src/devices/lib/driver:driver_runtime",
-  "//src/lib/ddk:ddk-hw-headers",
   "//zircon/kernel/lib/arch:headers",
   "//zircon/system/ulib/fzl",
   "//zircon/system/ulib/hwreg",
@@ -137,14 +137,12 @@ fuchsia_driver_component("ufs-pci") {
   component_name = "ufs-pci"
   dml_label = ":ufs-pci-dml"
   deps = [ ":ufs-pci-driver" ]
-  info = "meta/ufs-info.json"
 }
 
 fuchsia_driver_component("ufs-pdev") {
   component_name = "ufs-pdev"
   cm_label = ":ufs-pdev-manifest"
   deps = [ ":ufs-pdev-driver" ]
-  info = "meta/ufs-info.json"
 }
 
 fuchsia_structured_config_cpp_elf_lib("ufs-config") {
@@ -175,7 +173,6 @@ fuchsia_driver_component("ufs-rust-pci") {
     ":ufs-pci-bind",
     ":ufs_rust",
   ]
-  info = "meta/ufs-info.json"
 }
 
 fuchsia_driver_package("ufs-rust-pci-package") {
@@ -196,11 +193,10 @@ fuchsia_driver_component("ufs-rust-pdev") {
     ":ufs-pdev-bind",
     ":ufs_rust",
   ]
-  info = "meta/ufs-info.json"
 }
 
-# Shared by both `ufs-rust-pdev` and `ufs-rust-pci` (whose config blocks must
-# stay identical).
+# Both `ufs-rust-pdev` and `ufs-rust-pci` include `meta/ufs-rust.shard.cml`,
+# so they share this structured config library.
 fuchsia_structured_config_rust_lib("ufs_rust_config") {
   cm_label = ":ufs-rust-pdev-manifest"
 }
@@ -301,8 +297,12 @@ fuchsia_rust_driver("ufs_rust") {
     "src/descriptors.rs",
     "src/device_manager.rs",
     "src/dma_buffer.rs",
+    "src/inspect.rs",
     "src/lib.rs",
+    "src/power.rs",
+    "src/power_worker.rs",
     "src/query.rs",
+    "src/quirks.rs",
     "src/registers.rs",
     "src/request_list.rs",
     "src/rpmb.rs",
@@ -327,12 +327,16 @@ fuchsia_rust_driver("ufs_rust") {
     "//sdk/fidl/fuchsia.hardware.scsi:fuchsia.hardware.scsi_rust",
     "//sdk/fidl/fuchsia.hardware.ufs:fuchsia.hardware.ufs_rust",
     "//sdk/fidl/fuchsia.hardware.ufs.phy:fuchsia.hardware.ufs.phy_rust",
+    "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
     "//sdk/fidl/fuchsia.scheduler:fuchsia.scheduler_rust",
     "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
     "//sdk/lib/driver/component/rust",
     "//sdk/lib/driver/mmio/rust:mmio",
+    "//sdk/lib/driver/power/rust",
     "//sdk/lib/scheduler/rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/runtime/rust",
     "//src/lib/diagnostics/inspect/rust",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-async",

@@ -1,7 +1,9 @@
 {
   "name": "symbolize",
   "description": "symbolize backtraces in markup format",
-  "examples": [],
+  "examples": [
+    "Symbolize piped logs:\n  cat raw_log.txt | ffx debug symbolize\n\nPass flags to the underlying symbolizer:\n  ffx debug symbolize -- -s /path/to/symbols --verbose\n\nShow underlying symbolizer help:\n  ffx debug symbolize -- --help"
+  ],
   "flags": [
     {
       "kind": "Switch",
@@ -28,7 +30,9 @@
       "hidden": false
     }
   ],
-  "notes": [],
+  "notes": [
+    "Parses logs from stdin and converts symbolizer markup into human-readable\nstack traces using local or remote debug symbols.\n\nBy default, passes --prettify-backtrace and --omit-module-lines to the\nunderlying symbolizer. Use --no-prettify to disable.\n\nArguments starting with '-' for the symbolizer must follow '--'.\nTo see available symbolizer flags, run: `ffx debug symbolize -- --help`"
+  ],
   "commands": [],
   "positionals": [
     {

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 
 #include <mutex>
 #include <utility>
@@ -15,27 +15,24 @@
 
 namespace {
 
-fuchsia::media::FormatDetails MakeValidAacEncoderFormatDetails() {
-  fuchsia::media::PcmFormat2 pcm;
-  pcm.set_pcm_mode(fuchsia::media::AudioPcmMode2::LINEAR);
-  pcm.set_bits_per_sample(16);
-  pcm.set_frames_per_second(48000);
-  pcm.set_channel_map({fuchsia::media::AudioChannelId2::FL});
+fuchsia_media::FormatDetails MakeValidAacEncoderFormatDetails() {
+  fuchsia_media::PcmFormat2 pcm;
+  pcm.pcm_mode() = fuchsia_media::AudioPcmMode2::kLinear;
+  pcm.bits_per_sample() = 16;
+  pcm.frames_per_second() = 48000;
+  pcm.channel_map() = {fuchsia_media::AudioChannelId2::kFl};
 
-  fuchsia::media::AacEncoderSettings aac_settings;
-  aac_settings.aot = fuchsia::media::AacAudioObjectType::MPEG4_AAC_LC;
-  aac_settings.channel_mode = fuchsia::media::AacChannelMode::MONO;
-  aac_settings.bit_rate = fuchsia::media::AacBitRate::WithConstant(
-      fuchsia::media::AacConstantBitRate{.bit_rate = 64000});
-  aac_settings.transport = fuchsia::media::AacTransport::WithRaw(fuchsia::media::AacTransportRaw{});
+  fuchsia_media::AacEncoderSettings aac_settings(
+      fuchsia_media::AacTransport::WithRaw(fuchsia_media::AacTransportRaw{}),
+      fuchsia_media::AacChannelMode::kMono,
+      fuchsia_media::AacBitRate::WithConstant(fuchsia_media::AacConstantBitRate(64000)),
+      fuchsia_media::AacAudioObjectType::kMpeg4AacLc);
 
-  fuchsia::media::EncoderSettings encoder_settings;
-  encoder_settings.set_aac(std::move(aac_settings));
-
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(0);
-  format_details.set_pcm_format(std::move(pcm));
-  format_details.set_encoder_settings(std::move(encoder_settings));
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal() = 0;
+  format_details.pcm_format() = std::move(pcm);
+  format_details.encoder_settings() =
+      fuchsia_media::EncoderSettings::WithAac(std::move(aac_settings));
   return format_details;
 }
 
@@ -45,7 +42,7 @@ TEST(CodecAdapterAacEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   CodecAdapterAacEncoder encoder(lock, &events);
 
   auto format_details = MakeValidAacEncoderFormatDetails();
-  encoder.CoreCodecInit(format_details);
+  encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   // Stream 1: Queue EndOfStream immediately without any FormatDetails or Packet.
@@ -59,7 +56,8 @@ TEST(CodecAdapterAacEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   // Stream 2: Queue FormatDetails and a partial input packet (16 bytes < 2048-byte AAC chunk size)
   // so stream_->chunk_input_stream buffers partial bytes, then stop stream without EOS.
   encoder.CoreCodecStartStream();
-  encoder.CoreCodecQueueInputFormatDetails(format_details);
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events.WaitForOutputConstraintsChangeCount(1);
   encoder.CoreCodecMidStreamOutputBufferReConfigFinish();
 
@@ -74,12 +72,11 @@ TEST(CodecAdapterAacEncoderTest, EmptyStreamEndOfStreamAndPostStopOutputConstrai
   EXPECT_EQ(events.fail_codec_count(), 0u);
   encoder.CoreCodecStopStream();
 
-  // Between streams: CoreCodecGetBufferCollectionConstraints2(kOutputPort) must succeed using
+  // Between streams: CoreCodecGetBufferCollectionConstraints3(kOutputPort) must succeed using
   // format_configuration_->recommended_output_buffer_size even after stream_ was reset.
-  fuchsia::media::StreamBufferConstraints stream_constraints;
-  fuchsia::media::StreamBufferPartialSettings partial_settings;
-  auto constraints = encoder.CoreCodecGetBufferCollectionConstraints2(
-      kOutputPort, stream_constraints, partial_settings);
+  auto constraints_result = encoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+  ASSERT_TRUE(constraints_result.has_value());
+  const auto& constraints = constraints_result->constraints;
   ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
   // kFdkMaxOutBytesPerChannel (6144 / 8 = 768) * 1 channel = 768 bytes.
   EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 768u);
@@ -101,7 +98,7 @@ TEST(CodecAdapterAacEncoderTest, QueuedPacketAndEosIgnoredAfterFormatDetailsFail
   CodecAdapterAacEncoder encoder(lock, &events);
 
   auto valid_format_details = MakeValidAacEncoderFormatDetails();
-  encoder.CoreCodecInit(valid_format_details);
+  encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(valid_format_details));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   encoder.CoreCodecStartStream();
@@ -109,9 +106,10 @@ TEST(CodecAdapterAacEncoderTest, QueuedPacketAndEosIgnoredAfterFormatDetailsFail
   // Queue invalid FormatDetails (missing encoder_settings) followed immediately by an input packet,
   // EndOfStream, and a trailing input packet on input_processing_loop_ before CoreCodecStopStream()
   // is called.
-  fuchsia::media::FormatDetails invalid_format_details = MakeValidAacEncoderFormatDetails();
-  invalid_format_details.clear_encoder_settings();
-  encoder.CoreCodecQueueInputFormatDetails(invalid_format_details);
+  fuchsia_media::FormatDetails invalid_format_details = MakeValidAacEncoderFormatDetails();
+  invalid_format_details.encoder_settings().reset();
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(invalid_format_details));
 
   auto input_buffers = Buffers({4096, 4096});
   auto input_packets = Packets(2);
@@ -146,7 +144,7 @@ TEST(CodecAdapterAacEncoderTest, StopAndMidStreamFormatFailureWhileOutputReconfi
   CodecAdapterAacEncoder encoder(lock, &events);
 
   auto format_details_v0 = MakeValidAacEncoderFormatDetails();
-  encoder.CoreCodecInit(format_details_v0);
+  encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details_v0));
   ASSERT_EQ(events.fail_codec_count(), 0u);
 
   auto input_buffers = Buffers({4096, 4096});
@@ -164,7 +162,8 @@ TEST(CodecAdapterAacEncoderTest, StopAndMidStreamFormatFailureWhileOutputReconfi
   // without calling CoreCodecMidStreamOutputBufferReConfigFinish(), then stop the stream.
   // CoreCodecStopStream() must unblock the waiting ProcessInput() call without deadlocking.
   encoder.CoreCodecStartStream();
-  encoder.CoreCodecQueueInputFormatDetails(format_details_v0);
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details_v0));
   events.WaitForOutputConstraintsChangeCount(1);
   encoder.CoreCodecQueueInputPacket(input_packet_0);
   encoder.CoreCodecQueueInputEndOfStream();
@@ -178,12 +177,14 @@ TEST(CodecAdapterAacEncoderTest, StopAndMidStreamFormatFailureWhileOutputReconfi
   // ProcessInput() must reset output_reconfig_pending_ on failure so the trailing Packet + EOS
   // do not hang waiting on reconfig_cond_.
   encoder.CoreCodecStartStream();
-  encoder.CoreCodecQueueInputFormatDetails(format_details_v0);
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details_v0));
   events.WaitForOutputConstraintsChangeCount(2);
 
   auto format_details_v1 = MakeValidAacEncoderFormatDetails();
-  format_details_v1.set_format_details_version_ordinal(1);
-  encoder.CoreCodecQueueInputFormatDetails(format_details_v1);
+  format_details_v1.format_details_version_ordinal() = 1;
+  encoder.CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details_v1));
   encoder.CoreCodecQueueInputPacket(input_packet_1);
   encoder.CoreCodecQueueInputEndOfStream();
 
@@ -203,12 +204,13 @@ TEST(CodecAdapterAacEncoderTest, BytesPerSampleValidation) {
     CodecAdapterAacEncoder encoder(lock, &events);
 
     auto format_details = MakeValidAacEncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bytes_per_sample(4);
-    encoder.CoreCodecInit(format_details);
+    format_details.pcm_format()->bytes_per_sample() = 4;
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     ASSERT_EQ(events.fail_codec_count(), 0u);
 
     encoder.CoreCodecStartStream();
-    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events.WaitForOutputConstraintsChangeCount(1);
     EXPECT_EQ(events.fail_codec_count(), 1u);
     encoder.CoreCodecStopStream();
@@ -221,15 +223,112 @@ TEST(CodecAdapterAacEncoderTest, BytesPerSampleValidation) {
     CodecAdapterAacEncoder encoder(lock, &events);
 
     auto format_details = MakeValidAacEncoderFormatDetails();
-    format_details.mutable_pcm_format()->set_bytes_per_sample(2);
-    encoder.CoreCodecInit(format_details);
+    format_details.pcm_format()->bytes_per_sample() = 2;
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     ASSERT_EQ(events.fail_codec_count(), 0u);
 
     encoder.CoreCodecStartStream();
-    encoder.CoreCodecQueueInputFormatDetails(format_details);
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events.WaitForOutputConstraintsChangeCount(1);
     EXPECT_EQ(events.fail_codec_count(), 0u);
     encoder.CoreCodecStopStream();
+  }
+}
+
+TEST(CodecAdapterAacEncoderTest, ChannelMapValidation) {
+  {
+    // Empty channel_map is rejected.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterAacEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidAacEncoderFormatDetails();
+    format_details.pcm_format()->channel_map().emplace();
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(),
+              "Input to aac encoder must be complete uncompressed pcm.");
+    encoder.CoreCodecStopStream();
+  }
+
+  {
+    // 2-channel input with MONO channel_mode is rejected.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterAacEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidAacEncoderFormatDetails();
+    format_details.pcm_format()->channel_map() = {fuchsia_media::AudioChannelId2::kFl,
+                                                  fuchsia_media::AudioChannelId2::kFr};
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(),
+              "Input channel count does not match AAC encoder channel_mode.");
+    encoder.CoreCodecStopStream();
+  }
+
+  {
+    // 1-channel input with STEREO channel_mode is rejected.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterAacEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidAacEncoderFormatDetails();
+    format_details.encoder_settings()->aac()->channel_mode() =
+        fuchsia_media::AacChannelMode::kStereo;
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 1u);
+    EXPECT_EQ(events.last_fail_message(),
+              "Input channel count does not match AAC encoder channel_mode.");
+    encoder.CoreCodecStopStream();
+  }
+
+  {
+    // 2-channel input with STEREO channel_mode succeeds and sizes output buffers for 2 channels.
+    std::mutex lock;
+    FakeCodecAdapterEvents events;
+    CodecAdapterAacEncoder encoder(lock, &events);
+
+    auto format_details = MakeValidAacEncoderFormatDetails();
+    format_details.pcm_format()->channel_map() = {fuchsia_media::AudioChannelId2::kFl,
+                                                  fuchsia_media::AudioChannelId2::kFr};
+    format_details.encoder_settings()->aac()->channel_mode() =
+        fuchsia_media::AacChannelMode::kStereo;
+    encoder.CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    ASSERT_EQ(events.fail_codec_count(), 0u);
+
+    encoder.CoreCodecStartStream();
+    encoder.CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
+    events.WaitForOutputConstraintsChangeCount(1);
+    EXPECT_EQ(events.fail_codec_count(), 0u);
+    encoder.CoreCodecStopStream();
+
+    auto constraints_result = encoder.CoreCodecGetBufferCollectionConstraints3(kOutputPort);
+    ASSERT_TRUE(constraints_result.has_value());
+    const auto& constraints = constraints_result->constraints;
+    ASSERT_TRUE(constraints.buffer_memory_constraints().has_value());
+    // kFdkMaxOutBytesPerChannel (6144 / 8 = 768) * 2 channels = 1536 bytes.
+    EXPECT_EQ(constraints.buffer_memory_constraints()->min_size_bytes(), 1536u);
   }
 }
 

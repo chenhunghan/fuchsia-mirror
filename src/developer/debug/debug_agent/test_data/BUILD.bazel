@@ -1,0 +1,260 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Targets meant for helping zxdb development. See README.md
+
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Test .so ---------------------------------------------------------------------
+
+stamp_group(
+    name = "debug_so",
+    testonly = True,
+    stamp = "debug_so.stamp",
+    deps = [
+        ":debug_agent_test_loadable_module",
+        ":debug_agent_test_so",
+    ],
+)
+
+fx_cc_library(
+    name = "debug_agent_test_so_lib",
+    testonly = True,
+    srcs = ["breakpoint_test_so.cc"] + select({
+        "@platforms//cpu:x86_64": ["x64_write_register_test_so.cc"],
+        "//conditions:default": [],
+    }),
+    hdrs = ["test_so_symbols.h"],
+    # TODO(https://fxbug.dev/42180987): workaround for toolchain issues, see bug
+    implementation_deps = ["//build/config/fuchsia:uses-outline-atomics-fxbug98632"],
+    alwayslink = True,
+)
+
+fx_cc_shared_library(
+    name = "debug_agent_test_so",
+    testonly = True,
+    gn_public_deps = [":debug_agent_test_so_lib"],
+    deps = [":debug_agent_test_so_lib"],
+)
+
+fx_cc_binary(
+    name = "debug_agent_test_loadable_module",
+    testonly = True,
+    gn_output_name = "debug_agent_test_so",
+    linkopts = ["-Wl,-soname,debug_agent_test_so.so"],
+    linkshared = True,
+    deps = [":debug_agent_test_so_lib"],
+)
+
+# Bazel fx_cc_binary(linkshared = True) ignores gn_output_name and produces
+# libdebug_agent_test_loadable_module.so, while load_so_exe dlopen()s
+# "debug_agent_test_so.so". Stage a Bazel copy under that filename.
+# @bazel2gn:skip
+copy_file(
+    name = "debug_agent_test_so_file",
+    testonly = True,
+    src = ":debug_agent_test_loadable_module",
+    out = "debug_agent_test_so.so",
+)
+
+# Test Executables -------------------------------------------------------------
+
+stamp_group(
+    name = "test_executables",
+    testonly = True,
+    stamp = "test_executables.stamp",
+    deps = [
+        ":breakpoint_test_exe",
+        ":load_so_exe",
+        ":multithreaded_breakpoint_test_exe",
+        ":watchpoint_test_exe",
+    ] + select({
+        # Currently only implemented for x64.
+        "@platforms//cpu:x86_64": [":write_register_test_exe"],
+        "//conditions:default": [],
+    }),
+)
+
+# Preserve GN dependency on shared_library(":debug_agent_test_so"), which
+# propagates headers via public_deps in GN while Bazel uses dynamic_deps + deps.
+# @bazel2gn:raw_attribute:deps = [ ":debug_agent_test_so" ]
+fx_cc_test_binary(
+    name = "breakpoint_test_exe",
+    srcs = ["breakpoint_test_exe.cc"],
+    # TODO(https://fxbug.dev/570694755): Support dynamic_deps on fx_cc_test_binary in bazel2gn.
+    # @bazel2gn:skip
+    dynamic_deps = [":debug_agent_test_so"],
+    # TODO(https://fxbug.dev/570694755): Propagate CcInfo from fx_cc_shared_library.
+    # @bazel2gn:skip
+    deps = [":debug_agent_test_so_lib"],
+)
+
+# Preserve GN `data_deps = [ ":debug_agent_test_loadable_module" ]` while Bazel
+# depends on `:debug_agent_test_so_file` so `debug_agent_test_so.so` is staged.
+# @bazel2gn:raw_attribute:data_deps = [ ":debug_agent_test_loadable_module" ]
+fx_cc_binary(
+    name = "load_so_exe",
+    testonly = True,
+    srcs = ["load_so.cc"],
+    # This must use the loadable module because it's loaded dynamically.
+    # @bazel2gn:skip
+    data = [":debug_agent_test_so_file"],
+    visibility = ["//src/developer/debug/debug_agent:__pkg__"],
+)
+
+# Preserve GN dependency on shared_library(":debug_agent_test_so"), which
+# propagates headers via public_deps in GN while Bazel uses dynamic_deps + deps.
+# @bazel2gn:raw_attribute:deps = [ ":debug_agent_test_so" ]
+fx_cc_test_binary(
+    name = "multithreaded_breakpoint_test_exe",
+    srcs = ["multithreaded_breakpoint_test_exe.cc"],
+    # TODO(https://fxbug.dev/570694755): Support dynamic_deps on fx_cc_test_binary in bazel2gn.
+    # @bazel2gn:skip
+    dynamic_deps = [":debug_agent_test_so"],
+    # TODO(https://fxbug.dev/570694755): Propagate CcInfo from fx_cc_shared_library.
+    # @bazel2gn:skip
+    deps = [":debug_agent_test_so_lib"],
+)
+
+fx_cc_test_binary(
+    name = "watchpoint_test_exe",
+    srcs = ["watchpoint_test_exe.cc"],
+)
+
+# Preserve GN dependency on shared_library(":debug_agent_test_so"), which
+# propagates headers via public_deps in GN while Bazel uses dynamic_deps + deps.
+# @bazel2gn:raw_attribute:deps = [ ":debug_agent_test_so" ]
+fx_cc_test_binary(
+    name = "write_register_test_exe",
+    srcs = ["x64_write_register_test_exe.cc"],
+    # TODO(https://fxbug.dev/570694755): Support dynamic_deps on fx_cc_test_binary in bazel2gn.
+    # @bazel2gn:skip
+    dynamic_deps = [":debug_agent_test_so"],
+    target_compatible_with = ["@platforms//cpu:x86_64"],
+    # TODO(https://fxbug.dev/570694755): Propagate CcInfo from fx_cc_shared_library.
+    # @bazel2gn:skip
+    deps = [":debug_agent_test_so_lib"],
+)
+
+# Helper Executables -----------------------------------------------------------
+
+stamp_group(
+    name = "helper_executables",
+    stamp = "helper_executables.stamp",
+    visibility = ["//src/developer/debug/debug_agent:__pkg__"],
+    deps = [
+        ":backtrace_request",
+        ":debug_test_false",
+        ":debug_test_true",
+        ":hw_watchpointer",
+        ":limbo_caller",
+        ":multi_threaded",
+        ":printer",
+        ":test_suite",
+        ":thread_signals",
+    ],
+)
+
+fx_cc_binary(
+    name = "backtrace_request",
+    srcs = ["backtrace_request.cc"],
+    deps = [
+        "//src/lib/debug:backtrace-request",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_binary(
+    name = "debug_test_true",
+    srcs = ["true.c"],
+)
+
+fx_cc_binary(
+    name = "debug_test_false",
+    srcs = ["false.c"],
+)
+
+fx_cc_binary(
+    name = "test_suite",
+    srcs = [
+        "test_suite.cc",
+        "test_suite_helpers.cc",
+        "test_suite_helpers.h",
+    ],
+    # NOTE: The 'test_suite' executable will launch '/pkg/bin/hw_watchpointer'
+    # at runtime!
+    data = [":hw_watchpointer"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/developer/debug/shared",
+        "//src/lib/files",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_binary(
+    name = "hw_watchpointer",
+    srcs = ["hw_watchpointer.cc"],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/developer/debug/shared",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_binary(
+    name = "multi_threaded",
+    srcs = ["multi_threaded.cc"],
+    # Enables thrd_create_with_name in <threads.h>.
+    defines = ["_ALL_SOURCE"],
+    deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_binary(
+    name = "printer",
+    srcs = ["printer.cc"],
+)
+
+fx_cc_binary(
+    name = "thread_signals",
+    srcs = ["thread_signals.cc"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_binary(
+    name = "limbo_caller",
+    srcs = ["limbo_caller.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.exception:fuchsia.exception_hlcpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl",
+        "//zircon/system/ulib/zx",
+    ],
+)

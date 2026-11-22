@@ -36,28 +36,114 @@ fi
 
 export FUCHSIA_DIR
 export FUCHSIA_OUT_DIR="${FUCHSIA_OUT_DIR:-${FUCHSIA_DIR}/out}"
+# Clear inherited Python runtime overrides before setting PYTHONPATH so
+# vendored Python scripts run cleanly even when fx is invoked from an
+# external Python environment (e.g. a Bazel py_test or virtualenv).
+unset PYTHONHOME
+unset PYTHONSAFEPATH
 export PYTHONPATH="${FUCHSIA_DIR}"
 
-# For all fx commands, we recommend pointing Python's cache dir outside of
-# the source tree, so that it is possible to mount the source tree read-only.
-# Honor PYTHONPYCACHEPREFIX from the user's environment over the defaults
-# chosen here.
-# Reasonable choices include: $HOME/.cache/__pycache__
-if [[ -z "${PYTHONPYCACHEPREFIX:-}" ]]; then
-  if [[ -f "${FUCHSIA_DIR}/.fx-build-dir" ]]; then
-    # If there is a build-dir, use it.  This will be cleaned by 'fx clean'.
-    _fx_build_dir="$(<"${FUCHSIA_DIR}/.fx-build-dir")"
-    if [[ "${_fx_build_dir:0:1}" != "/" ]]; then
-      _fx_build_dir="${FUCHSIA_DIR}/${_fx_build_dir}"
-    fi
-    export PYTHONPYCACHEPREFIX="${_fx_build_dir}/__pycache__"
-    unset _fx_build_dir
+# Normalizes a build directory path by trimming whitespace, stripping trailing
+# slashes, expanding checkout-relative paths (including GN-style "//" paths) to
+# absolute paths prefixed with $FUCHSIA_DIR, and reducing empty/root paths to "".
+#
+# Calling conventions:
+#   _fx-normalize-build-dir <out_variable_name> <path>  # assigns to named variable
+#   _fx-normalize-build-dir <path>                     # prints to stdout
+function _fx-normalize-build-dir {
+  local -i __fx_nbd_has_out_var=0
+  local __fx_nbd_out_var=""
+  local __fx_nbd_dir=""
+  if [[ $# -ge 2 ]]; then
+    __fx_nbd_has_out_var=1
+    __fx_nbd_out_var="$1"
+    __fx_nbd_dir="${2:-}"
   else
-    # Without a build-dir, use the out/ dir as a fallback.
-    # This location has the benefit of cache-sharing across all build dirs.
-    export PYTHONPYCACHEPREFIX="${FUCHSIA_OUT_DIR}/__pycache__"
+    __fx_nbd_dir="${1:-}"
   fi
-fi
+
+  # Trim leading and trailing whitespace.
+  __fx_nbd_dir="${__fx_nbd_dir#"${__fx_nbd_dir%%[![:space:]]*}"}"
+  __fx_nbd_dir="${__fx_nbd_dir%"${__fx_nbd_dir##*[![:space:]]}"}"
+
+  # Strip trailing slashes (also turns "/", "//", etc. into "").
+  __fx_nbd_dir="${__fx_nbd_dir%"${__fx_nbd_dir##*[!/]}"}"
+
+  if [[ "${__fx_nbd_dir}" == //* ]]; then
+    # Strip leading slashes for GN-style source-relative paths.
+    __fx_nbd_dir="${__fx_nbd_dir#"${__fx_nbd_dir%%[!/]*}"}"
+    __fx_nbd_dir="${FUCHSIA_DIR}/${__fx_nbd_dir}"
+  elif [[ -n "${__fx_nbd_dir}" && "${__fx_nbd_dir:0:1}" != "/" ]]; then
+    __fx_nbd_dir="${FUCHSIA_DIR}/${__fx_nbd_dir}"
+  fi
+
+  if [[ -n "${__fx_nbd_dir}" ]]; then
+    while [[ "${__fx_nbd_dir}" == *//* ]]; do
+      __fx_nbd_dir="${__fx_nbd_dir//\/\///}"
+    done
+    __fx_nbd_dir="${__fx_nbd_dir%"${__fx_nbd_dir##*[!/]}"}"
+  fi
+
+  if [[ ${__fx_nbd_has_out_var} -eq 1 ]]; then
+    if [[ -n "${__fx_nbd_out_var}" ]]; then
+      printf -v "${__fx_nbd_out_var}" "%s" "${__fx_nbd_dir}"
+    fi
+  else
+    printf "%s\n" "${__fx_nbd_dir}"
+  fi
+}
+
+# Resolves and normalizes the active build directory candidate in priority order:
+#   1. $_FX_BUILD_DIR (e.g. from `fx --dir <dir>`)
+#   2. $FUCHSIA_BUILD_DIR (e.g. exported in environment)
+#   3. $FUCHSIA_DIR/.fx-build-dir
+#
+# Calling conventions:
+#   _fx-resolve-build-dir-candidate [out_variable_name]
+#
+# Returns 0 on success with the normalized absolute path set (or printed).
+# Returns 1 if no candidate produces a non-empty normalized path.
+function _fx-resolve-build-dir-candidate {
+  local -i __fx_rbd_has_out_var=0
+  local __fx_rbd_out_var=""
+  if [[ $# -ge 1 ]]; then
+    __fx_rbd_has_out_var=1
+    __fx_rbd_out_var="$1"
+  fi
+  local __fx_rbd_normalized=""
+  if [[ -n "${_FX_BUILD_DIR:-}" ]]; then
+    _fx-normalize-build-dir __fx_rbd_normalized "${_FX_BUILD_DIR}"
+  fi
+  if [[ -z "${__fx_rbd_normalized}" && -n "${FUCHSIA_BUILD_DIR:-}" ]]; then
+    _fx-normalize-build-dir __fx_rbd_normalized "${FUCHSIA_BUILD_DIR}"
+  fi
+  if [[ -z "${__fx_rbd_normalized}" && -f "${FUCHSIA_DIR}/.fx-build-dir" ]]; then
+    _fx-normalize-build-dir __fx_rbd_normalized "$(<"${FUCHSIA_DIR}/.fx-build-dir")"
+  fi
+
+  if [[ -z "${__fx_rbd_normalized}" ]]; then
+    if [[ ${__fx_rbd_has_out_var} -eq 1 ]]; then
+      if [[ -n "${__fx_rbd_out_var}" ]]; then
+        printf -v "${__fx_rbd_out_var}" "%s" ""
+      fi
+    fi
+    return 1
+  fi
+  if [[ ${__fx_rbd_has_out_var} -eq 1 ]]; then
+    if [[ -n "${__fx_rbd_out_var}" ]]; then
+      printf -v "${__fx_rbd_out_var}" "%s" "${__fx_rbd_normalized}"
+    fi
+  else
+    printf "%s\n" "${__fx_rbd_normalized}"
+  fi
+  return 0
+}
+
+# For all fx commands, point Python's cache dir outside of the source tree
+# (allowing it to be mounted read-only) and share bytecode across all build dirs.
+# Honor PYTHONPYCACHEPREFIX from the user's environment over the default chosen here.
+# Reasonable choices include: $HOME/.cache/__pycache__
+export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-${FUCHSIA_OUT_DIR}/_build_caches/__pycache__}"
 
 # shellcheck source=/dev/null
 source "${devshell_lib_dir}/platform.sh"
@@ -69,8 +155,6 @@ source "${devshell_lib_dir}/fx-optional-features.sh"
 source "${devshell_lib_dir}/generate-ssh-config.sh"
 # shellcheck source=/dev/null
 source "${devshell_lib_dir}/is_invoked_by_agent.sh"
-# shellcheck source=/dev/null
-[[ ! -f "${devshell_lib_dir}/credentials.sh" ]] || source "${devshell_lib_dir}/credentials.sh"
 unset devshell_lib_dir
 
 # Subcommands can use this directory to cache artifacts and state that should
@@ -414,8 +498,7 @@ function fx-regenerator {
       break
     fi
   done
-  PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX}" \
-    "${wrapper[@]}" \
+  "${wrapper[@]}" \
     "${FUCHSIA_DIR}/build/regenerator" \
     --fuchsia-dir="${FUCHSIA_DIR}" \
     --fuchsia-build-dir="${FUCHSIA_BUILD_DIR}" \
@@ -432,20 +515,27 @@ function fx-gn-args {
 }
 
 function fx-build-config-load {
-  # Paths are relative to FUCHSIA_DIR unless they're absolute paths.
-  if [[ "${FUCHSIA_BUILD_DIR:0:1}" != "/" ]]; then
-    FUCHSIA_BUILD_DIR="${FUCHSIA_DIR}/${FUCHSIA_BUILD_DIR}"
+  if [[ -z "${FUCHSIA_BUILD_DIR:-}" ]]; then
+    fx-error "Build directory missing or removed. (<unset>)"
+    fx-error "run \"fx set\", or specify a build dir with --dir or \"fx use\""
+    return 1
   fi
 
-  if [[ ! -f "${FUCHSIA_BUILD_DIR}/fx.config" ]]; then
-    if [[ ! -f "${FUCHSIA_BUILD_DIR}/args.gn" ]]; then
-      fx-error "Build directory missing or removed. (${FUCHSIA_BUILD_DIR})"
+  local candidate
+  _fx-normalize-build-dir candidate "${FUCHSIA_BUILD_DIR}"
+
+  if [[ ! -f "${candidate}/fx.config" ]]; then
+    if [[ ! -f "${candidate}/args.gn" ]]; then
+      fx-error "Build directory missing or removed. (${candidate})"
       fx-error "run \"fx set\", or specify a build dir with --dir or \"fx use\""
       return 1
     fi
 
+    export FUCHSIA_BUILD_DIR="${candidate}"
     fx-gen || return 1
   fi
+
+  export FUCHSIA_BUILD_DIR="${candidate}"
 
   # shellcheck source=/dev/null
   if ! source "${FUCHSIA_BUILD_DIR}/fx.config"; then
@@ -489,31 +579,35 @@ function fx-fail-if-device-specified {
   fi
 }
 
-# Sets FUCHSIA_BUILD_DIR once, to an absolute path.
+# Resolves FUCHSIA_BUILD_DIR to an absolute path, prioritizing _FX_BUILD_DIR (--dir).
 function fx-build-dir-if-present {
-  if [[ -n "${FUCHSIA_BUILD_DIR:-}" ]]; then
-    # already set by this function earlier
-    return 0
-  elif [[ -n "${_FX_BUILD_DIR:-}" ]]; then
-    export FUCHSIA_BUILD_DIR="${_FX_BUILD_DIR}"
-    # This can be set by --dir.
-    # Unset to prevent subprocess from acting on it again.
-    unset _FX_BUILD_DIR
-  else
-    if [[ ! -f "${FUCHSIA_DIR}/.fx-build-dir" ]]; then
-      return 1
-    fi
-
-    # .fx-build-dir contains $FUCHSIA_BUILD_DIR
-    FUCHSIA_BUILD_DIR="$(<"${FUCHSIA_DIR}/.fx-build-dir")"
-    if [[ -z "${FUCHSIA_BUILD_DIR}" ]]; then
-      return 1
-    fi
-    # Paths are relative to FUCHSIA_DIR unless they're absolute paths.
-    if [[ "${FUCHSIA_BUILD_DIR:0:1}" != "/" ]]; then
-      FUCHSIA_BUILD_DIR="${FUCHSIA_DIR}/${FUCHSIA_BUILD_DIR}"
-    fi
+  local candidate
+  if ! _fx-resolve-build-dir-candidate candidate; then
+    return 1
   fi
+  unset _FX_BUILD_DIR
+  export FUCHSIA_BUILD_DIR="${candidate}"
+  return 0
+}
+
+# Validates that a build directory is configured and contains args.gn,
+# setting FUCHSIA_BUILD_DIR only on success.
+function fx-build-dir-require {
+  local candidate
+  if ! _fx-resolve-build-dir-candidate candidate; then
+    fx-error "No build directory found."
+    fx-error "Run \"fx set\" to create a new build directory, or specify one with --dir"
+    return 1
+  fi
+
+  if [[ ! -f "${candidate}/args.gn" ]]; then
+    fx-error "Build directory missing or removed. (${candidate})"
+    fx-error "run \"fx set\", or specify a build dir with --dir or \"fx use\""
+    return 1
+  fi
+
+  unset _FX_BUILD_DIR
+  export FUCHSIA_BUILD_DIR="${candidate}"
   return 0
 }
 
@@ -528,7 +622,7 @@ function fx-config-read {
 
   # LINT.IfChange(build_lock)
   _FX_LOCK_FILE="${FUCHSIA_BUILD_DIR}.build_lock"
-  # LINT.ThenChange(//build/scripts/main_build.py:build_lock)
+  # LINT.ThenChange(//build/scripts/lock_utils.py:build_lock)
 }
 
 # Evaluates $@ if $FUCHSIA_NODENAME or $FUCHSIA_DEVICE_ADDR have been set by the
@@ -571,9 +665,18 @@ function fx-if-target-set-by-env {
 function fx-change-build-dir {
   local build_dir="$1"
 
+  # Normalize the build directory path, then strip the ${FUCHSIA_DIR}/ prefix
+  # so that .fx-build-dir stores a clean checkout-relative path.
+  _fx-normalize-build-dir build_dir "${build_dir}"
+  build_dir="${build_dir#"${FUCHSIA_DIR}/"}"
+
   local -r tempfile="$(mktemp)"
   echo "${build_dir}" > "${tempfile}"
   mv -f "${tempfile}" "${FUCHSIA_DIR}/.fx-build-dir"
+
+  # Clear cached FUCHSIA_BUILD_DIR and _FX_BUILD_DIR so fx-config-read / fx-build-dir-if-present
+  # updates FUCHSIA_BUILD_DIR from the new .fx-build-dir.
+  unset FUCHSIA_BUILD_DIR _FX_BUILD_DIR
 
   # Now update the environment and root-symlinked build artifacts to reflect
   # the change.
@@ -675,6 +778,7 @@ function get-device-raw {
   echo "${device}"
 }
 
+# LINT.IfChange
 function is-valid-device {
   local device="$1"
   if [[ -n "${device}" ]] \
@@ -687,6 +791,7 @@ function is-valid-device {
     return 1
   fi
 }
+# LINT.ThenChange(//tools/devshell/fx_cli/main.py)
 
 # Shared among a few subcommands to configure and identify a remote forward
 # target for a device.
@@ -951,11 +1056,11 @@ function fx-target-finder-resolve {
     fx-error "Invalid arguments to fx-target-finder-resolve: [$*]"
     return 1
   fi
-  ffx target list --format addresses "$1"
+  ffx target list --format addresses --allow-addrs ip "$1"
 }
 
 function fx-target-finder-list {
-  ffx target list --format addresses
+  ffx target list --format addresses --allow-addrs ip
 }
 
 function fx-target-finder-info {
@@ -963,7 +1068,7 @@ function fx-target-finder-info {
 }
 
 function fx-target-ssh-address {
-  ffx target list --format addresses
+  ffx target list --format addresses --allow-addrs ip
 }
 
 function multi-device-fail {
@@ -1089,41 +1194,56 @@ function get-device-addr-url {
 # Args:
 #   $1: The fx command name.
 function _fx-command-resolve {
-  local -r command_name="$1"
-  local dispatch_info dispatch_rc
-  dispatch_info="$(resolve_fx_command_dispatch "${command_name}")"
-  dispatch_rc=$?
-  if [[ ${dispatch_rc} -eq 2 ]]; then
-    exit 2
-  elif [[ ${dispatch_rc} -ne 0 ]]; then
-    fx-error "Unknown command ${command_name}"
-    exit 1
-  fi
-  local -a df
-  mapfile -t df <<< "${dispatch_info}"
-  local d_kind="${df[0]:-}"
-  local d_vendor="${df[1]:-}"
-  local d_target="${df[2]:-}"
-  local d_script_or_path="${df[3]:-}"
-  local d_inject="${df[4]:-1}"
-  local raw_command_path=""
-  if [[ "${d_kind}" == "registered" ]]; then
-    fx-ensure-registered-host-tool "${command_name}" "${d_vendor}" "${d_target}" "${d_script_or_path}" || exit $?
-    raw_command_path="$(_find_registered_executable_from_entry "${command_name}" "${d_target}" "${d_script_or_path}" "${d_vendor}")" || {
+  local -r command_name="${1:-}"
+  local d_kind="" d_inject=1
+  local _fx_resolved_exec=""
+  if _fx_registry_log_enabled || _maybe_is_registered_host_tool "${command_name}"; then
+    local dispatch_info dispatch_rc=0
+    dispatch_info="$(resolve_fx_command_dispatch "${command_name}")" || dispatch_rc=$?
+    if [[ ${dispatch_rc} -eq 2 ]]; then
+      exit 2
+    elif [[ ${dispatch_rc} -ne 0 ]]; then
       fx-error "Unknown command ${command_name}"
       exit 1
-    }
-    if [[ -n "${raw_command_path}" ]]; then
-      mapfile -t _fx_command_resolve_result <<< "${raw_command_path}"
+    fi
+    local -a df
+    mapfile -t df <<< "${dispatch_info}"
+    d_kind="${df[0]:-}"
+    local d_vendor="${df[1]:-}"
+    local d_target="${df[2]:-}"
+    local d_script_or_path="${df[3]:-}"
+    d_inject="${df[4]:-1}"
+    if [[ "${d_kind}" == "registered" ]]; then
+      fx-ensure-registered-host-tool "${command_name}" "${d_vendor}" "${d_target}" "${d_script_or_path}" || exit $?
+      local raw_command_path=""
+      raw_command_path="$(_find_registered_executable_from_entry "${command_name}" "${d_target}" "${d_script_or_path}" "${d_vendor}")" || {
+        fx-error "Unknown command ${command_name}"
+        exit 1
+      }
+      if [[ -n "${raw_command_path}" ]]; then
+        mapfile -t _fx_command_resolve_result <<< "${raw_command_path}"
+      else
+        _fx_command_resolve_result=()
+      fi
     else
-      _fx_command_resolve_result=()
+      _resolve_exec_from_path "${d_script_or_path}" || {
+        fx-error "Unknown command ${command_name}"
+        exit 1
+      }
     fi
   else
-    raw_command_path="$(find_exec_from_path "${d_script_or_path}")" || {
+    _resolve_unregistered_executable "${command_name}" || {
       fx-error "Unknown command ${command_name}"
       exit 1
     }
-    read -r -a _fx_command_resolve_result <<< "${raw_command_path}"
+  fi
+
+  if [[ "${d_kind}" != "registered" ]]; then
+    if [[ -n "${_fx_resolved_exec}" && -x "${_fx_resolved_exec}" ]]; then
+      _fx_command_resolve_result=("${_fx_resolved_exec}")
+    else
+      IFS=$' \t\r\n' read -r -a _fx_command_resolve_result <<< "${_fx_resolved_exec}"
+    fi
   fi
   if [[ ${#_fx_command_resolve_result[@]} -eq 0 || ! -x "${_fx_command_resolve_result[0]}" ]]; then
     fx-error "Unknown command ${command_name}"
@@ -1131,7 +1251,9 @@ function _fx-command-resolve {
   fi
 
   _fx_command_inject_prebuilt_paths="${d_inject}"
-  _fx_command_child_path="$(_fx_compute_command_path "${d_inject}" "${PATH}")"
+  local _fx_computed_path=""
+  _fx_compute_command_path_into_var "${d_inject}" "${PATH}"
+  _fx_command_child_path="${_fx_computed_path}"
 }
 
 function fx-command-run {
@@ -1140,8 +1262,7 @@ function fx-command-run {
   local _fx_command_child_path
   _fx-command-resolve "$1"
   shift
-  env \
-    FX_CALLER="$0" \
+  FX_CALLER="$0" \
     FX_INJECT_PREBUILT_PATHS="${_fx_command_inject_prebuilt_paths}" \
     PATH="${_fx_command_child_path}" \
     "${_fx_command_resolve_result[@]}" "$@"
@@ -1153,11 +1274,10 @@ function fx-command-exec {
   local _fx_command_child_path
   _fx-command-resolve "$1"
   shift
-  exec env \
-    FX_CALLER="$0" \
+  FX_CALLER="$0" \
     FX_INJECT_PREBUILT_PATHS="${_fx_command_inject_prebuilt_paths}" \
     PATH="${_fx_command_child_path}" \
-    "${_fx_command_resolve_result[@]}" "$@"
+    exec "${_fx_command_resolve_result[@]}" "$@"
 }
 
 function fx-print-command-help {
@@ -1216,8 +1336,7 @@ function fx-standard-switches {
 function fx-uuid {
   # Emit a uuid string, same as the `uuidgen` tool.
   # Using Python avoids requiring a separate tool.
-  env "PYTHONPYCACHEPREFIX=${PYTHONPYCACHEPREFIX}" \
-  "${PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())'
+  "${PREBUILT_PYTHON3}" -B -S -c 'import uuid; print(uuid.uuid4())'
 }
 
 function fx-choose-build-concurrency {
@@ -1240,6 +1359,9 @@ function fx-cpu-count {
 }
 
 
+# Deprecated (unused in-tree): `fx build` now acquires `_FX_LOCK_FILE` via
+# `fcntl.flock` in `//build/scripts/lock_utils.py` (`main_build.py`), which is
+# not mutually exclusive with `shlock`.
 # Use a lock file around a command if possible.
 # Print a message if the lock isn't immediately entered,
 # and block until it is.
@@ -1322,6 +1444,9 @@ function fx-run-build-command {
   fi
   if [[ "${FX_BUILD_DRY_RUN}" == "1" ]]; then
     args+=("--dry-run")
+  fi
+  if [[ -n "${FX_BUILD_AUTH_MODE:-}" ]]; then
+    args+=("--auth-mode=${FX_BUILD_AUTH_MODE}")
   fi
   FX_BUILD_STATUS="${FX_BUILD_STATUS:-1}"
   if [[ "${FX_BUILD_STATUS}" == "0" || ! -t 1 || "${TERM}" == "dumb" ]] || is_invoked_by_agent; then

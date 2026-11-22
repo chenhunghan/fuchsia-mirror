@@ -648,7 +648,7 @@ void handle_unknown_method(
 [composite-node-spec]: /docs/development/drivers/developer_guide/create-a-composite-node.md#what-is-a-composite-node-specification
 [dfv2-driver-transport]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/transport/driver/v2/
 [dfv2-zircon-transport]: https://cs.opensource.google/fuchsia/fuchsia/+/main:examples/drivers/transport/zircon/v2/
-[transport-examples]: /docs/development/drivers/developer_guide/driver-examples.md#transport_examples
+[transport-examples]: /docs/development/drivers/developer_guide/driver-examples.md#transport-examples
 [capabilities]: /docs/concepts/components/v2/capabilities/README.md
 [compat-device-server]: /docs/development/drivers/migration/set-up-compat-device-server.md#set-up-the-compat-device-server
 [offer-compat-device-server]: /docs/development/drivers/migration/set-up-compat-device-server.md#offer-the-compat-device-server-to-the-target-child-node

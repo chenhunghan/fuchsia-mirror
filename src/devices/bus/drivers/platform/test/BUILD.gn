@@ -135,7 +135,6 @@ fuchsia_driver_component("test-board") {
   testonly = true
   component_name = "test-board"
   deps = [ ":test-board-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 driver_bind_rules("test-gpio-bind") {
@@ -170,7 +169,6 @@ fuchsia_driver_component("test-gpio") {
   testonly = true
   component_name = "test-gpio"
   deps = [ ":test-gpio-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 driver_bind_rules("test-interrupt-controller-bind") {
@@ -204,7 +202,6 @@ fuchsia_driver_component("test-interrupt-controller") {
   testonly = true
   component_name = "test-interrupt-controller"
   deps = [ ":test-interrupt-controller-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 driver_bind_rules("test-power-bind") {
@@ -240,7 +237,6 @@ fuchsia_driver_component("test-power") {
   testonly = true
   component_name = "test-power"
   deps = [ ":test-power-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 driver_bind_rules("test-spi-bind") {
@@ -277,7 +273,6 @@ fuchsia_driver_component("test-spi") {
   testonly = true
   component_name = "test-spi"
   deps = [ ":test-spi-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 fuchsia_driver_dml("test-composite-node-spec-dml") {
@@ -317,7 +312,6 @@ fuchsia_driver_component("test-composite-node-spec") {
   dml_label = ":test-composite-node-spec-dml"
   component_name = "test-composite-node-spec"
   deps = [ ":test-composite-node-spec-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 simple_drivers = [
@@ -359,7 +353,6 @@ foreach(driver, simple_drivers) {
     testonly = true
     component_name = "test-$driver"
     deps = [ ":test-$driver-driver" ]
-    info = "meta/test-driver-info.json"
     manifest = "meta/test-$driver.cml"
   }
 }
@@ -425,7 +418,6 @@ fuchsia_driver_component("test-bti-board") {
   testonly = true
   component_name = "test-bti-board"
   deps = [ ":test-bti-board-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 driver_bind_rules("test-bti-bind") {
@@ -463,7 +455,6 @@ fuchsia_driver_component("test-bti") {
   testonly = true
   component_name = "test-bti"
   deps = [ ":test-bti-driver" ]
-  info = "meta/test-driver-info.json"
 }
 
 test("platform-bus-bti") {

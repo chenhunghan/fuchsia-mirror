@@ -91,6 +91,52 @@ pub fn handle_request_stream(
                             .await
                     });
                 }
+                #[cfg(fuchsia_api_level_at_least = "HEAD")]
+                TreeRequest::ListBlobChildNames { tree_iterator, .. } => {
+                    let request_stream = tree_iterator.into_stream();
+                    let inspector = inspector.clone();
+                    scope.spawn(async move {
+                        match inspector.blob_names().await {
+                            Ok(values) => {
+                                if let Err(err) =
+                                    run_tree_name_iterator_server(values, request_stream).await
+                                {
+                                    warn!(err:?; "failed to run blob tree name iterator server");
+                                }
+                            }
+                            Err(err) => {
+                                warn!(err:?; "failed to read blob names");
+                            }
+                        }
+                    });
+                }
+                #[cfg(fuchsia_api_level_at_least = "HEAD")]
+                TreeRequest::OpenBlobChild { child_name, responder } => {
+                    let vmo_result = match settings {
+                        TreeServerSendPreference::DeepCopy => inspector.copy_blob_vmo(&child_name),
+                        TreeServerSendPreference::Live => inspector.duplicate_blob_vmo(&child_name),
+                        TreeServerSendPreference::Frozen { ref on_failure } => {
+                            match inspector.frozen_blob_vmo_copy(&child_name) {
+                                Ok(vmo) => Ok(vmo),
+                                Err(err @ fuchsia_inspect::Error::VmoMissing) => Err(err),
+                                Err(err) => match **on_failure {
+                                    TreeServerSendPreference::DeepCopy => {
+                                        inspector.copy_blob_vmo(&child_name)
+                                    }
+                                    TreeServerSendPreference::Live => {
+                                        inspector.duplicate_blob_vmo(&child_name)
+                                    }
+                                    _ => Err(err),
+                                },
+                            }
+                        }
+                    };
+                    let response = vmo_result.map_err(|err| match err {
+                        fuchsia_inspect::Error::VmoMissing => zx::Status::NOT_FOUND.into_raw(),
+                        _ => zx::Status::UNAVAILABLE.into_raw(),
+                    });
+                    responder.send(response)?;
+                }
                 TreeRequest::_UnknownMethod { ordinal, method_type, .. } => {
                     warn!(ordinal, method_type:?; "Unknown request");
                 }
@@ -191,9 +237,13 @@ async fn run_tree_name_iterator_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    use assert_matches::assert_matches;
     use diagnostics_assertions::{assert_data_tree, assert_json_diff};
     use fidl_fuchsia_inspect::{TreeNameIteratorMarker, TreeNameIteratorProxy, TreeProxy};
     use fuchsia_async::DurationExt;
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    use fuchsia_inspect::reader::ReaderError;
     use fuchsia_inspect::reader::{DiagnosticsHierarchy, PartialNodeHierarchy, read_with_timeout};
     use std::sync::Arc;
 
@@ -436,6 +486,133 @@ mod tests {
                 status: "ok",
             },
         });
+    }
+
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    #[fuchsia::test]
+    async fn list_blob_child_names() -> Result<(), Error> {
+        let inspector = test_inspector();
+        inspector.root().record_blob_property("events", 16, |blob| {
+            blob.write_at(0, b"hello").unwrap();
+        });
+
+        let (_server, tree) = spawn_server_proxy(inspector, TreeServerSendPreference::default());
+
+        // Lazy children and blob children are listed in their respective iterators.
+        let (child_iter, server_end) = fidl::endpoints::create_proxy::<TreeNameIteratorMarker>();
+        tree.list_child_names(server_end)?;
+        verify_iterator(child_iter, vec!["lazy-0".to_string()]).await?;
+
+        let (blob_iter, server_end) = fidl::endpoints::create_proxy::<TreeNameIteratorMarker>();
+        tree.list_blob_child_names(server_end)?;
+        verify_iterator(blob_iter, vec!["events-1".to_string()]).await?;
+
+        assert_eq!(tree.blob_names().await?, vec!["events-1".to_string()]);
+        Ok(())
+    }
+
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    #[fuchsia::test]
+    async fn open_blob_child_send_preferences() -> Result<(), Error> {
+        let inspector = Inspector::default();
+        let blob = inspector.root().create_blob_property("events", 16);
+        blob.write_at(0, b"initial_payload!").unwrap();
+
+        let (_s1, tree_cow) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::default());
+        let (_s2, tree_copy) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::DeepCopy);
+        let (_s3, tree_live) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::Live);
+
+        let cow_vmo = tree_cow.read_blob("events-0").await?;
+        let copy_vmo = tree_copy.open_blob_child("events-0").await?.expect("open_blob_child copy");
+        let live_vmo = tree_live.open_blob_child("events-0").await?.expect("open_blob_child live");
+
+        for vmo in [&cow_vmo, &copy_vmo, &live_vmo] {
+            assert!(!vmo.basic_info()?.rights.contains(zx::Rights::WRITE));
+        }
+
+        // Mutate the blob after opening the VMO handles.
+        blob.write_at(0, b"updated_payload!").unwrap();
+
+        let mut payload = [0u8; 16];
+        cow_vmo.read(&mut payload, 32)?;
+        assert_eq!(&payload, b"initial_payload!");
+
+        copy_vmo.read(&mut payload, 32)?;
+        assert_eq!(&payload, b"initial_payload!");
+
+        live_vmo.read(&mut payload, 32)?;
+        assert_eq!(&payload, b"updated_payload!");
+
+        Ok(())
+    }
+
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    #[fuchsia::test]
+    async fn open_blob_child_not_found() -> Result<(), Error> {
+        let inspector = Inspector::default();
+        let (_s1, tree_cow) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::default());
+        let (_s2, tree_copy) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::DeepCopy);
+        let (_s3, tree_live) = spawn_server_proxy(inspector, TreeServerSendPreference::Live);
+
+        for tree in [&tree_cow, &tree_copy, &tree_live] {
+            assert_eq!(
+                tree.open_blob_child("missing-0").await?,
+                Err(zx::Status::NOT_FOUND.into_raw())
+            );
+        }
+
+        assert_matches!(
+            tree_cow.read_blob("missing-0").await,
+            Err(ReaderError::FailedToLoadBlob(name)) if name == "missing-0"
+        );
+
+        Ok(())
+    }
+
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    #[fuchsia::test]
+    async fn open_blob_child_unavailable_when_contended() -> Result<(), Error> {
+        let inspector = Inspector::default();
+        let blob = inspector.root().create_blob_property("events", 16);
+
+        let (_s1, tree_cow) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::default());
+        let (_s2, tree_copy) =
+            spawn_server_proxy(inspector.clone(), TreeServerSendPreference::DeepCopy);
+        let (_s3, tree_live) = spawn_server_proxy(inspector, TreeServerSendPreference::Live);
+
+        let (locked_tx, locked_rx) = futures::channel::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer_thread = std::thread::spawn(move || {
+            let _ = blob.atomic_write(|_| {
+                locked_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            blob
+        });
+        locked_rx.await?;
+
+        for tree in [&tree_cow, &tree_copy, &tree_live] {
+            assert_eq!(
+                tree.open_blob_child("events-0").await?,
+                Err(zx::Status::UNAVAILABLE.into_raw())
+            );
+        }
+
+        assert_matches!(
+            tree_cow.read_blob("events-0").await,
+            Err(ReaderError::Vmo(zx::Status::UNAVAILABLE))
+        );
+
+        release_tx.send(())?;
+        let _blob = writer_thread.join().expect("writer thread panicked");
+
+        Ok(())
     }
 
     async fn verify_iterator(

@@ -414,10 +414,8 @@ def _zither_kernel_sources_impl(
     # Work around Bazel symbolic macro naming limitations. See _zither_c_family_library_impl().
     output_dir = paths.join(zither_target + ".out", output_dir)
 
-    """Implementation of the _zither_kernel_sources() macro."""
     generated_files = [
         paths.join(output_dir, output_namespace, "category.inc"),
-        paths.join(output_dir, output_namespace, "kernel.inc"),
         paths.join(output_dir, output_namespace, "kernel_wrappers.rs"),
         paths.join(output_dir, output_namespace, "syscall_numbers.rs"),
         paths.join(output_dir, output_namespace, "syscall_sigs.rs"),

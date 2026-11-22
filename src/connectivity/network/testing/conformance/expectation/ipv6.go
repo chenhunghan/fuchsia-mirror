@@ -91,7 +91,15 @@ var ipv6Expectations map[AnvlCaseNumber]outcome.Outcome = map[AnvlCaseNumber]out
 	{8, 13}: Pass,
 	{8, 14}: Pass,
 	{8, 15}: Fail,
-	{8, 16}: Fail,
+	// Skip IPV6-8.16 to prevent cross-test contamination into IPV6-8.17 and
+	// IPV6-8.18. IPV6-8.16 sends a valid 24-byte initial fragment followed by an
+	// oversized final fragment (offset=8190, len=17 -> 65,537 bytes > 65,535),
+	// expecting ICMPv6 Parameter Problem Code 0 (currently unsupported). Per
+	// RFC 8200 Section 4.5, discarding the oversized fragment leaves the initial
+	// fragment cached for 60s; because ANVL draws Fragment Identification values
+	// from an 8-bit pool (1..255) without resetting the DUT between cases,
+	// IPV6-8.17 and IPV6-8.18 collide ~1/255 runs and fail.
+	{8, 16}: Skip,
 	{8, 17}: Pass,
 	{8, 18}: Pass,
 	{8, 19}: Fail,

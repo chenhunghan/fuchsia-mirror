@@ -43,6 +43,8 @@ impl Drop for LockedBlobGuard<'_> {
 /// Even when the underlying VMO is padded up to the next 4 KiB page boundary, all reads,
 /// writes, and snapshots strictly enforce the requested `payload_size`.
 ///
+/// The content of this property type is opaque to the diagnostics and forensics systems.
+///
 /// NOTE: do not rely on PartialEq implementation for true comparison.
 /// Instead leverage the reader.
 ///
@@ -304,12 +306,15 @@ mod tests {
             // self-deadlock inside atomic_write.
             assert_eq!(blob.payload_capacity(), 32);
 
-            // Concurrent copy_blob_vmo_data from another thread returns None via try_lock()
-            // instead of blocking while atomic_write holds the blob lock.
+            // Concurrent copy_blob_vmo_data from another thread returns ExpectedLockState(false)
+            // via try_lock() instead of blocking while atomic_write holds the blob lock.
             // ASAN builders panic on this if from the same thread.
             std::thread::scope(|s| {
                 s.spawn(|| {
-                    assert!(inspector.copy_blob_vmo_data("ring-0").is_none());
+                    assert_eq!(
+                        inspector.copy_blob_vmo_data("ring-0"),
+                        Err(Error::ExpectedLockState(false))
+                    );
                 });
             });
         })
@@ -373,16 +378,26 @@ mod tests {
         blob.atomic_write(|_| {
             std::thread::scope(|s| {
                 s.spawn(|| {
-                    assert!(inspector.duplicate_blob_vmo("events-0").is_none());
-                    assert!(matches!(
+                    assert_eq!(
+                        inspector.duplicate_blob_vmo("events-0"),
+                        Err(Error::ExpectedLockState(false))
+                    );
+                    assert_eq!(
                         inspector.frozen_blob_vmo_copy("events-0"),
                         Err(Error::ExpectedLockState(false))
-                    ));
-                    assert!(inspector.copy_blob_vmo("events-0").is_none());
+                    );
+                    assert_eq!(
+                        inspector.copy_blob_vmo("events-0"),
+                        Err(Error::ExpectedLockState(false))
+                    );
                 });
             });
         })
         .unwrap();
+
+        assert_eq!(inspector.duplicate_blob_vmo("missing-0"), Err(Error::VmoMissing));
+        assert_eq!(inspector.frozen_blob_vmo_copy("missing-0"), Err(Error::VmoMissing));
+        assert_eq!(inspector.copy_blob_vmo("missing-0"), Err(Error::VmoMissing));
 
         let state = inspector.state().unwrap();
         let blob_arc = state.try_lock().unwrap().blobs().get("events-0").unwrap().clone();

@@ -231,6 +231,7 @@ mod tests {
             let added_displays = &[display::Info {
                 id: display_types::DisplayId { value: 42 },
                 modes: vec![],
+                mode_vrr_configs: vec![],
                 pixel_format: vec![],
                 manufacturer_name: "Test double".to_string(),
                 monitor_name: "Display #1".to_string(),

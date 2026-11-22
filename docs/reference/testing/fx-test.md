@@ -149,7 +149,7 @@ This command is resilient to corrupt or incomplete log files,
 so it should still work even if you terminate the `fx test` command
 running the tests.
 
-### Basic test debugging
+### Basic test debugging {:#basic-test-debugging}
 
 `fx test` integrates with `zxdb` to provide a simple and easy way to debug your
 test failures, without needing to recompile anything. Pass `--break-on-failure`
@@ -294,8 +294,9 @@ modification. Test rebuilding works as follows (with overrides listed inline).
 The following options affect which tests are selected by `fx test` and how
 selections are applied.
 
-**`--host`** and **`--device`** select only host or device tests
-respectively. This is a global setting and they cannot be combined.
+**`--host`** and **`--device`** select only pure host or on-device tests
+respectively (excluding E2E tests). This is a global setting and they cannot be
+combined with each other or with `--e2e` / `--only-e2e`.
 
 **`--[no-]e2e`** controls whether to run end-to-end (E2E) tests.
 E2E tests are not run by default because they have the potential
@@ -376,7 +377,7 @@ moniker, so they are easier to visually inspect.**
 - **Failing tests terminate following failure without waiting**
   - Use `--break-on-failure` to catch failing tests with [zxdb][zxdb-docs].
   - Use `--breakpoint=<location>` to install breakpoints at specific
-    [locations][#basic-test-debugging].
+    [locations][basic-test-debugging].
 
   Note that using the `--breakpoint` option will significantly slow down your
   tests. It is highly recommended to only use this option in conjunction with
@@ -516,3 +517,4 @@ alias testlog='cat `fx test -pr path` | gunzip | jq -C | less -R'
 [trf-docs]: /docs/development/testing/components/test_runner_framework.md
 [zxdb-docs]: /docs/development/debugger/commands.md
 [zxdb-testing-docs]: /docs/development/debugger/tests.md
+[basic-test-debugging]: #basic-test-debugging

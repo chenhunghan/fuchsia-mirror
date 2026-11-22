@@ -37,4 +37,5 @@ python_binary("fidl_coverage_py_bin") {
     "//sdk/ctf:*",
   ]
   deps = [ "//build/python/modules/depfile" ]
+  enable_mypy = false
 }

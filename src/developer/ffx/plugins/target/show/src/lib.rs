@@ -8,7 +8,7 @@ use fdomain_fuchsia_feedback::{DeviceIdProviderProxy, LastRebootInfoProviderProx
 use fdomain_fuchsia_hwinfo::{Architecture, BoardProxy, DeviceProxy, ProductProxy};
 use fdomain_fuchsia_update_channel as fupdate_channel;
 use fdomain_fuchsia_update_channelcontrol::ChannelControlProxy;
-use ffx_target;
+use ffx_target::TargetConnector;
 use ffx_target_show_args as args;
 use ffx_writer::{ToolIO, VerifiedMachineWriter};
 use fho::{Deferred, FfxMain, FfxTool, FhoEnvironment, deferred};
@@ -16,8 +16,7 @@ use netext::ScopedSocketAddr;
 use show::{
     AddressData, BoardData, BuildData, DeviceData, ProductData, TargetShowInfo, UpdateData,
 };
-use target_behavior::DirectConnector;
-use target_holders::{RemoteControlProxyHolder, moniker};
+use target_holders::{RemoteControlProxyHolder, moniker, target_interface};
 
 mod show;
 
@@ -77,7 +76,7 @@ pub enum ShowError {
 
     #[exit_with_code(1)]
     #[error("Failed to resolve target connection resolution: {0}")]
-    TargetResolution(#[source] target_behavior::TargetResolutionError),
+    TargetResolution(#[source] ffx_target::TargetResolutionError),
 
     #[exit_with_code(1)]
     #[error("Failed to establish target connection: {0}")]
@@ -105,7 +104,8 @@ impl ShowTool {
         self,
         writer: &mut VerifiedMachineWriter<TargetShowInfo>,
     ) -> Result<(), ShowError> {
-        let connector = target_behavior::target_interface(&self.fho_env).behavior()?;
+        let target_env = target_interface(&self.fho_env);
+        let connector = target_env.init(self.fho_env.environment_context());
         // To add more show information, add a gather_*_show(*) call to this list
         // and add the result to the TargetShowInfo struct below.
         let (target, board, device, product, update, build) = futures::try_join!(
@@ -131,7 +131,7 @@ impl ShowTool {
     }
 }
 
-async fn gather_target_info_direct(
+async fn gather_target_info(
     connection: &ffx_target::Connection,
 ) -> Result<Option<AddressData>, ShowError> {
     // If we've gotten a connection, we must have an address we connected to
@@ -154,12 +154,12 @@ async fn gather_target_info_direct(
 async fn gather_target_show(
     rcs_proxy: RemoteControlProxyHolder,
     fho_env: &FhoEnvironment,
-    connector: DirectConnector,
+    connector: &TargetConnector,
     last_reboot_info_proxy: Deferred<LastRebootInfoProviderProxy>,
 ) -> Result<TargetData, ShowError> {
     let host = rcs_proxy.identify_host().await?.map_err(ShowError::RcsHostIdentification)?;
     let name = host.nodename;
-    let ssh_address = gather_target_info_direct(
+    let ssh_address = gather_target_info(
         &*connector
             .resolution()
             .await
@@ -351,6 +351,7 @@ mod tests {
     };
     use fdomain_fuchsia_intl::RegulatoryDomain;
     use fdomain_fuchsia_update_channelcontrol::ChannelControlRequest;
+    use ffx_target::setup_fake_resolution;
     use ffx_writer::{Format, TestBuffers};
     use serde_json::Value;
     use std::sync::Arc;
@@ -462,9 +463,9 @@ mod tests {
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
-            target_behavior::setup_fake_resolution(None).await,
+        let target_env = target_interface(&fho_env);
+        target_env.set_connector_for_test(TargetConnector::from_resolution_for_test(
+            setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
             cmd: args::TargetShow { ..Default::default() },
@@ -642,9 +643,9 @@ mod tests {
         let mut output =
             VerifiedMachineWriter::<TargetShowInfo>::new_test(Some(Format::JsonPretty), &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
-            target_behavior::setup_fake_resolution(None).await,
+        let target_env = target_interface(&fho_env);
+        target_env.set_connector_for_test(TargetConnector::from_resolution_for_test(
+            setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
             cmd: args::TargetShow { ..Default::default() },
@@ -688,75 +689,15 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn test_show_cmd_impl_direct_connection() {
-        let env = ffx_config::test_env().build().expect("test env");
-        let client = fdomain_local::local_client_empty();
-        let buffers = TestBuffers::default();
-        let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
-        let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
-            target_behavior::setup_fake_resolution(None).await,
-        ));
-        let tool = ShowTool {
-            cmd: args::TargetShow { ..Default::default() },
-            fho_env,
-            rcs_proxy: testing_lib::setup_fake_rcs(
-                Arc::clone(&client),
-                testing_lib::FakeRcsConfig::default(),
-            )
-            .into(),
-            channel_provider_proxy: Deferred::from_output(Ok(setup_fake_channel_provider_server(
-                Arc::clone(&client),
-            ))),
-            channel_control_proxy: Deferred::from_output(Ok(setup_fake_channel_control_server(
-                Arc::clone(&client),
-            ))),
-            board_proxy: Deferred::from_output(Ok(setup_fake_board_server(Arc::clone(&client)))),
-            device_proxy: Deferred::from_output(Ok(setup_fake_device_server(Arc::clone(&client)))),
-            product_proxy: Deferred::from_output(Ok(setup_fake_product_server(Arc::clone(
-                &client,
-            )))),
-            build_info_proxy: Deferred::from_output(Ok(setup_fake_build_info_server(Arc::clone(
-                &client,
-            )))),
-            device_id_proxy: Deferred::from_output(Ok(setup_fake_device_id_server(Arc::clone(
-                &client,
-            )))),
-            last_reboot_info_proxy: Deferred::from_output(Ok(setup_fake_last_reboot_info_server(
-                Arc::clone(&client),
-            ))),
-        };
-        tool.main(output).await.expect("show tool main");
-        // Convert to a readable string instead of using a byte string and comparing that. Unless
-        // you can read u8 arrays well, this helps debug the output.
-        let (stdout, _stderr) = buffers.into_strings();
-        // Test line by line so it is easier to debug:
-        let mut lineno = 0;
-        let mut expected_iter = TEST_OUTPUT_HUMAN.lines().into_iter();
-        for actual in stdout.lines() {
-            lineno += 1;
-            if let Some(expected) = expected_iter.next() {
-                assert_eq!(
-                    actual, expected,
-                    "line {lineno} actual != expected {actual} vs. {expected}"
-                )
-            }
-        }
-        let remaining: Vec<&str> = expected_iter.collect();
-        assert!(remaining.is_empty(), "Missing lines from actual input: {remaining:?}");
-    }
-
-    #[fuchsia::test]
     async fn test_show_rcs_host_identification_error() {
         let env = ffx_config::test_env().build().expect("test env");
         let client = fdomain_local::local_client_empty();
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
-            target_behavior::setup_fake_resolution(None).await,
+        let target_env = target_interface(&fho_env);
+        target_env.set_connector_for_test(TargetConnector::from_resolution_for_test(
+            setup_fake_resolution(None).await,
         ));
 
         let rcs_proxy = testing_lib::setup_fake_rcs(
@@ -816,9 +757,9 @@ mod tests {
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
-            target_behavior::setup_fake_resolution(None).await,
+        let target_env = target_interface(&fho_env);
+        target_env.set_connector_for_test(TargetConnector::from_resolution_for_test(
+            setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
             cmd: args::TargetShow::default(),
@@ -860,9 +801,9 @@ mod tests {
         let buffers = TestBuffers::default();
         let output = VerifiedMachineWriter::<TargetShowInfo>::new_test(None, &buffers);
         let fho_env = FhoEnvironment::new_with_args(&env.context, &["some", "test"]);
-        let target_env = target_behavior::target_interface(&fho_env);
-        target_env.set_behavior_for_test(DirectConnector::from_resolution_for_test(
-            target_behavior::setup_fake_resolution(None).await,
+        let target_env = target_interface(&fho_env);
+        target_env.set_connector_for_test(TargetConnector::from_resolution_for_test(
+            setup_fake_resolution(None).await,
         ));
         let tool = ShowTool {
             cmd: args::TargetShow::default(),

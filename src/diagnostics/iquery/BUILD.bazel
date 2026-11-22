@@ -1,0 +1,149 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+_IQUERY_SRCS = [
+    "src/commands/list.rs",
+    "src/commands/list_accessors.rs",
+    "src/commands/mod.rs",
+    "src/commands/selectors.rs",
+    "src/commands/show.rs",
+    "src/commands/types.rs",
+    "src/commands/utils.rs",
+    "src/lib.rs",
+    "src/text_formatter.rs",
+    "src/types.rs",
+] + select({
+    "@platforms//os:fuchsia": [
+        "src/command_line.rs",
+        "src/commands/target.rs",
+    ],
+    "//conditions:default": [],
+})
+
+# @bazel2gn:transformer=deps
+_PLATFORM_DEPS = select({
+    "@platforms//os:fuchsia": [
+        "//src/lib/diagnostics/reader/rust",
+    ],
+    "//conditions:default": [],
+})
+
+# Unrolls GN `template("iquery_lib")` into `lib`.
+# Visibility preserves the explicit narrow GN visibility scope.
+rustc_library(
+    name = "lib",
+    srcs = _IQUERY_SRCS,
+    crate_name = "iquery",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:derivative"],
+    visibility = [
+        "//src/developer/ffx/plugins/inspect:__subpackages__",
+        "//src/diagnostics/iquery:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_flex",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_flex",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_flex",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_flex",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/fdomain/client:flex_fidl",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component_debug",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:either",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ] + _PLATFORM_DEPS,
+)
+
+# Unrolls GN `template("iquery_lib")` into `lib_fdomain`.
+# Visibility preserves the explicit narrow GN visibility scope.
+rustc_library(
+    name = "lib_fdomain",
+    srcs = _IQUERY_SRCS,
+    crate_features = ["fdomain"],
+    crate_name = "iquery_fdomain",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:derivative"],
+    visibility = [
+        "//src/developer/ffx/plugins/inspect:__subpackages__",
+        "//src/diagnostics/iquery:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.developer.remotecontrol:fuchsia.developer.remotecontrol_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain_flex",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain_flex",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/selectors",
+        "//src/lib/fdomain/client:flex_fdomain",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-fs:fuchsia-fs_fdomain",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:either",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:thiserror",
+    ] + _PLATFORM_DEPS,
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "iquery",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//src/diagnostics:__pkg__"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.diagnostics.system:fuchsia.diagnostics.system_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # crate_name sets GN output_name to iquery_lib_test to avoid colliding with
+    # generic lib_test binary in ${root_out_dir}.
+    crate_name = "iquery_lib_test",
+    deps = [
+        "//src/diagnostics/iquery/test_support:iquery_test_support",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

@@ -49,7 +49,8 @@ class GuestDispatcher final : public Dispatcher {
  private:
   friend zx_status_t cpp_guest_dispatcher_create(
       Guest* guest_raw, ffi::Uninitialized<KernelHandle<GuestDispatcher>>* guest_handle_out);
-  explicit GuestDispatcher(ktl::unique_ptr<Guest> guest);
+  // Passes ownership of `guest` to the Rust `GuestDispatcherState`.
+  explicit GuestDispatcher(Guest* guest);
 
   OpaqueStorage<kGuestDispatcherStateSize, kGuestDispatcherStateAlign> opaque_storage_;
 };

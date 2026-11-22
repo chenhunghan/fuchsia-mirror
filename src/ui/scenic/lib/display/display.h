@@ -8,11 +8,13 @@
 #include <fidl/fuchsia.hardware.display.types/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.display/cpp/fidl.h>
 #include <fidl/fuchsia.images2/cpp/fidl.h>
+#include <fidl/fuchsia.ui.display.singleton/cpp/fidl.h>
 #include <lib/fit/function.h>
 #include <lib/zx/event.h>
 #include <zircon/types.h>
 
 #include <cstdint>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -30,7 +32,8 @@ class Display {
  public:
   Display(WireDisplayId id, const WireDisplayMode& mode, uint32_t width_in_mm,
           uint32_t height_in_mm, uint32_t max_layer_count,
-          std::vector<fuchsia_images2::PixelFormat> pixel_formats);
+          std::vector<fuchsia_images2::PixelFormat> pixel_formats,
+          std::optional<fuchsia_hardware_display_types::VrrConfig> vrr_config = std::nullopt);
   Display(WireDisplayId id, uint32_t width_in_px, uint32_t height_in_px, uint32_t max_layer_count);
   virtual ~Display() = default;
 
@@ -44,7 +47,7 @@ class Display {
   using DPRCallback = fit::function<void(const glm::vec2& dpr)>;
   void SetDPRCallback(DPRCallback callback) { dpr_callback_ = std::move(callback); }
 
-  std::shared_ptr<const scheduling::VsyncTiming> vsync_timing() { return vsync_timing_; }
+  std::shared_ptr<const scheduling::VsyncTiming> vsync_timing() const { return vsync_timing_; }
 
   // Claiming a display means that no other display renderer can use it.
   bool is_claimed() const { return claimed_; }
@@ -75,6 +78,12 @@ class Display {
 
   uint32_t maximum_refresh_rate_in_millihertz() const { return mode_.refresh_rate_millihertz; }
 
+  zx::duration vsync_period() const { return vsync_period_; }
+
+  const std::optional<fuchsia_ui_display_singleton::VrrConfig>& vrr_config() const {
+    return vrr_config_;
+  }
+
   uint32_t max_layer_count() const { return max_layer_count_; }
 
   // Event signaled by `DisplayManager` and `ViewTree` when ownership changes.
@@ -94,9 +103,9 @@ class Display {
   std::unordered_map<VsyncCallbackId, VsyncCallback> vsync_callbacks_;
   DPRCallback dpr_callback_;
 
-  // The maximum vsync interval we would ever expect.
+  // The maximum vsync interval we would ever expect on a fixed-rate or emulator display.
   static constexpr zx::duration kMaximumVsyncInterval = zx::msec(100);
-  // 240Hz should be fast enough for anybody.
+  // 240Hz should be fast enough for anybody when clamping empirical fixed-rate deltas.
   static constexpr zx::duration kMinimumVsyncInterval = zx::usec(/*1000000/240=*/4167);
 
   const display::DisplayId display_id_;
@@ -104,6 +113,8 @@ class Display {
   const uint32_t width_in_mm_;
   const uint32_t height_in_mm_;
   const uint32_t max_layer_count_;
+  const zx::duration vsync_period_;
+  const std::optional<fuchsia_ui_display_singleton::VrrConfig> vrr_config_;
   // `device_pixel_ratio_` may be written from `FlatlandDisplay` thread and read by
   // `SingletonDisplay` service running on the main thread.
   std::atomic<glm::vec2> device_pixel_ratio_;

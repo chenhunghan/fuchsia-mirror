@@ -2,6 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.io/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fdio/directory.h>
 #include <stdio.h>
 
@@ -40,7 +44,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     cond_.notify_all();
   }
 
-  void onCoreCodecFailStream(fuchsia::media::StreamError error) override {
+  void onCoreCodecFailStream(fuchsia_media::StreamError error) override {
     printf("Got onCoreCodecFailStream %d\n", static_cast<int>(error));
     fflush(stdout);
 
@@ -55,9 +59,10 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     {
       std::lock_guard lock(lock_);
       // Test a representative value.
-      output_constraints_ = codec_adapter_->CoreCodecGetBufferCollectionConstraints2(
-          CodecPort::kOutputPort, fuchsia::media::StreamBufferConstraints(),
-          fuchsia::media::StreamBufferPartialSettings());
+      auto output_constraints_result =
+          codec_adapter_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kOutputPort);
+      ZX_ASSERT(output_constraints_result.has_value());
+      output_constraints_ = std::move(output_constraints_result->constraints);
       EXPECT_TRUE(*output_constraints_.buffer_memory_constraints()->cpu_domain_supported());
       EXPECT_EQ(kBearVideoWidth,
                 output_constraints_.image_format_constraints()->at(0).required_min_size()->width());
@@ -83,13 +88,13 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     // lambda rather than skipping `output_packets_done_.push_back` / `cond_.notify_all()` below
     // (which would deadlock `WaitForOutputPacketCount` on the main test thread).
     [&]() {
-      auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
-      ASSERT_TRUE(output_format.has_format_details());
-      ASSERT_TRUE(output_format.format_details().has_image_format());
-      const auto &image_format = output_format.format_details().image_format();
-      ASSERT_TRUE(image_format.has_size());
+      auto output_format = codec_adapter_->CoreCodecGetOutputFormat2(1u, 1u);
+      ASSERT_TRUE(output_format.format_details().has_value());
+      ASSERT_TRUE(output_format.format_details()->image_format().has_value());
+      const auto &image_format = output_format.format_details()->image_format().value();
+      ASSERT_TRUE(image_format.size().has_value());
       // Test a representative value.
-      EXPECT_EQ(kBearVideoWidth, image_format.size().width);
+      EXPECT_EQ(kBearVideoWidth, image_format.size()->width());
     }();
 
     std::lock_guard lock(lock_);
@@ -149,9 +154,10 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     cond_.wait(lock, [&]() { return buffer_initialization_completed_; });
 
     // Set the codec output format to the linear format
-    auto output_constraints = codec_adapter_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kOutputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto output_constraints_result =
+        codec_adapter_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kOutputPort);
+    ASSERT_TRUE(output_constraints_result.has_value());
+    auto &output_constraints = output_constraints_result->constraints;
     fuchsia_sysmem2::BufferCollectionInfo buffer_collection;
     buffer_collection.settings().emplace().image_format_constraints() =
         output_constraints.image_format_constraints()->at(0);
@@ -211,18 +217,20 @@ class H264VaapiTestFixture : public ::testing::Test {
   void TearDown() override { vaDefaultStubSetReturn(); }
 
   void CodecAndStreamInit() {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(1);
-    format_details.set_mime_type("video/h264");
-    decoder_->CoreCodecInit(format_details);
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(1);
+    format_details.mime_type("video/h264");
+    decoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
 
-    auto input_constraints = decoder_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto input_constraints_result =
+        decoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+    ASSERT_TRUE(input_constraints_result.has_value());
+    auto &input_constraints = input_constraints_result->constraints;
     EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     decoder_->CoreCodecStartStream();
-    decoder_->CoreCodecQueueInputFormatDetails(format_details);
+    decoder_->CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   }
 
   void CodecStreamStop() {
@@ -275,16 +283,17 @@ class H264VaapiTestFixture : public ::testing::Test {
 TEST_F(H264VaapiTestFixture, MimeTypeMismatchFailure) {
   constexpr uint64_t kExpectedNumOfCodecFailures = 1u;
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(1);
-  format_details.set_mime_type("video/h264");
-  decoder_->CoreCodecInit(format_details);
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal(1);
+  format_details.mime_type("video/h264");
+  decoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   decoder_->CoreCodecStartStream();
 
-  fuchsia::media::FormatDetails format_details_mismatch;
-  format_details_mismatch.set_format_details_version_ordinal(1);
-  format_details_mismatch.set_mime_type("video/vp9");
-  decoder_->CoreCodecQueueInputFormatDetails(format_details_mismatch);
+  fuchsia_media::FormatDetails format_details_mismatch;
+  format_details_mismatch.format_details_version_ordinal(1);
+  format_details_mismatch.mime_type("video/vp9");
+  decoder_->CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(format_details_mismatch));
 
   events_.SetBufferInitializationCompleted();
   events_.WaitForCodecFailure(kExpectedNumOfCodecFailures);
@@ -374,46 +383,65 @@ TEST(H264Vaapi, CodecDescriptions) {
 // Test that we can connect using the CodecFactory.
 TEST(H264Vaapi, Init) {
   EXPECT_TRUE(VADisplayWrapper::InitializeSingletonForTesting());
-  fidl::InterfaceRequest<fuchsia::io::Directory> directory_request;
+  auto [svc_client, svc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
   async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
 
-  auto codec_services = sys::ServiceDirectory::CreateWithRequest(&directory_request);
+  auto codec_factory_client_end =
+      component::ConnectAt<fuchsia_mediacodec::CodecFactory>(svc_client);
+  ASSERT_TRUE(codec_factory_client_end.is_ok());
+  fidl::SyncClient<fuchsia_mediacodec::CodecFactory> codec_factory(
+      std::move(*codec_factory_client_end));
 
-  std::thread codec_thread([directory_request = std::move(directory_request)]() mutable {
+  std::thread codec_thread([svc_server = std::move(svc_server)]() mutable {
     CodecRunnerApp<CodecAdapterVaApiDecoder, NoAdapter> runner_app;
     runner_app.Init();
-    fidl::InterfaceHandle<fuchsia::io::Directory> outgoing_directory;
-    EXPECT_EQ(ZX_OK,
-              runner_app.component_context()->outgoing()->Serve(outgoing_directory.NewRequest()));
-    EXPECT_EQ(ZX_OK, fdio_open3_at(outgoing_directory.channel().get(), "svc",
-                                   uint64_t{fuchsia::io::PERM_READABLE},
-                                   directory_request.TakeChannel().release()));
+    auto [outgoing_client, outgoing_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    EXPECT_EQ(ZX_OK, runner_app.outgoing().Serve(std::move(outgoing_server)).status_value());
+    EXPECT_EQ(ZX_OK, fdio_open3_at(outgoing_client.channel().get(), "svc",
+                                   uint64_t{fuchsia_io::kPermReadable},
+                                   svc_server.TakeChannel().release()));
     runner_app.Run();
   });
 
-  fuchsia::mediacodec::CodecFactorySyncPtr codec_factory;
-  codec_services->Connect(codec_factory.NewRequest());
-  fuchsia::media::StreamProcessorPtr stream_processor;
-  fuchsia::mediacodec::CreateDecoder_Params params;
-  fuchsia::media::FormatDetails input_details;
-  input_details.set_mime_type("video/h264");
-  params.set_input_details(std::move(input_details));
-  params.set_require_hw(true);
-  EXPECT_EQ(ZX_OK, codec_factory->CreateDecoder(std::move(params), stream_processor.NewRequest()));
+  auto [processor_client_end, processor_server_end] =
+      fidl::Endpoints<fuchsia_media::StreamProcessor>::Create();
 
-  stream_processor.set_error_handler([&](zx_status_t status) {
-    loop.Quit();
-    EXPECT_TRUE(false);
-  });
+  fuchsia_mediacodec::CreateDecoderParams params;
+  fuchsia_media::FormatDetails input_details;
+  input_details.mime_type("video/h264");
+  params.input_details(std::move(input_details));
+  params.require_hw(true);
+  EXPECT_TRUE(
+      codec_factory->CreateDecoder({std::move(params), std::move(processor_server_end)}).is_ok());
 
-  stream_processor.events().OnInputConstraints =
-      [&](fuchsia::media::StreamBufferConstraints constraints) {
-        loop.Quit();
-        stream_processor.Unbind();
-      };
+  class EventHandler : public fidl::AsyncEventHandler<fuchsia_media::StreamProcessor> {
+   public:
+    explicit EventHandler(async::Loop &loop) : loop_(loop) {}
+
+    void OnInputConstraints(
+        fidl::Event<fuchsia_media::StreamProcessor::OnInputConstraints> &event) override {
+      loop_.Quit();
+    }
+
+    void on_fidl_error(fidl::UnbindInfo error) override {
+      loop_.Quit();
+      ADD_FAILURE() << error;
+    }
+
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_media::StreamProcessor> metadata) override {}
+
+   private:
+    async::Loop &loop_;
+  };
+
+  EventHandler event_handler(loop);
+  fidl::Client<fuchsia_media::StreamProcessor> stream_processor(std::move(processor_client_end),
+                                                                loop.dispatcher(), &event_handler);
 
   loop.Run();
-  codec_factory.Unbind();
+  stream_processor = {};
+  codec_factory = {};
 
   codec_thread.join();
 }

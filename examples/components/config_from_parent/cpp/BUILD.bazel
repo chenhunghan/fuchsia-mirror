@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "config_from_parent_example_cpp",
+    deps = [
+        ":example_config",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "config_from_parent_example_cpp",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "config_example",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/config_example.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//examples/components/config_from_parent/integration_test:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "cpp_config_from_parent_example",
+    components = [":component"],
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "example_config",
+    cm_label = ":manifest",
+)

@@ -147,6 +147,12 @@ std::string AudioPerformance::MixerConfig::ToStringForCreate() const {
     case Resampler::WindowedSinc:
       sampler_ch = 'W';
       break;
+    case Resampler::HighPassWindowedSinc:
+      sampler_ch = 'H';
+      break;
+    case Resampler::LowPassWindowedSinc:
+      sampler_ch = 'L';
+      break;
     case Resampler::Default:
       FX_LOGS(FATAL) << "Profiler should specify the Resampler exactly";
       return "";
@@ -187,6 +193,12 @@ std::string AudioPerformance::MixerConfig::ToPerftestFormat() const {
       break;
     case Resampler::WindowedSinc:
       sampler = "WindowedSinc";
+      break;
+    case Resampler::HighPassWindowedSinc:
+      sampler = "HighPassWindowedSinc";
+      break;
+    case Resampler::LowPassWindowedSinc:
+      sampler = "LowPassWindowedSinc";
       break;
     case Resampler::Default:
       FX_LOGS(FATAL) << "Profiler should specify the Resampler exactly";
@@ -276,7 +288,8 @@ void AudioPerformance::DisplayMixerCreationLegend() {
   printf("\n    Elapsed time in microseconds for a Mixer object to be created\n");
   printf(
       "\n    For mixer configuration R-fff.IO ssssss:dddddd, where:\n"
-      "\t      R: Resampler type - [P]oint, [W]indowed Sinc\n"
+      "\t      R: Resampler type - [P]oint, [W]indowed Sinc, [H]igh-Pass Windowed Sinc,\n"
+      "\t          [L]ow-Pass Windowed Sinc\n"
       "\t    fff: Format - un8, i16, i24, f32\n"
       "\t      I: Input channels (one-digit number)\n"
       "\t      O: Output channels (one-digit number)\n"
@@ -350,7 +363,8 @@ void AudioPerformance::DisplayMixingLegend() {
          kMixLength.to_msecs());
   printf(
       "\n    For mixer configuration R-fff.IO ssssss:dddddd GA, where:\n"
-      "\t      R: Resampler type - [P]oint, [W]indowed Sinc\n"
+      "\t      R: Resampler type - [P]oint, [W]indowed Sinc, [H]igh-Pass Windowed Sinc,\n"
+      "\t          [L]ow-Pass Windowed Sinc\n"
       "\t    fff: Format - un8, i16, i24, f32\n"
       "\t      I: Input channels (one-digit number)\n"
       "\t      O: Output channels (one-digit number)\n"

@@ -67,7 +67,6 @@ fuchsia_package("codec_factory") {
 # Codec factory package dedicated for testing.
 # It may contain codec components that are not yet fully released.
 fuchsia_package("codec_factory_for_test") {
-  testonly = true
   deps = [
     # TODO(https://fxbug.dev/42077655): move cvsd and lc3 to `sw_codecs` when
     # ready for prod and make available based on product requirements.
@@ -82,7 +81,6 @@ fuchsia_package("codec_factory_for_test") {
 }
 
 export_fuchsia_package_to_bazel("codec_factory_for_test.bazel_input") {
-  testonly = true
   package = ":codec_factory_for_test"
 }
 

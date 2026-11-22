@@ -5,6 +5,7 @@
 import("//build/components.gni")
 import("//build/rust/rustc_binary.gni")
 import("//build/tools/gzip/gzip.gni")
+import("//sdk/lib/c/experimental.gni")
 import("//src/starnix/build/args.gni")
 
 group("kernel") {
@@ -97,6 +98,14 @@ rustc_binary("starnix_kernel_bin") {
     configs += _concurrent_jobs.configs
     forward_variables_from(_concurrent_jobs.vars, "*")
   }
+
+  # TODO(https://fxbug.dev/492249787): Remove once new libc rollout is complete.
+  deps += experimental_libc_deps
+
+  # The kernel uses libtrace-engine.so. A second, static trace engine would
+  # attribute trace events from Linux tasks to the kernel's own process, as it
+  # uses zx_process_self().
+  assert_no_deps = [ "//zircon/system/ulib/trace-engine:trace-engine-static" ]
 }
 
 # Components
@@ -149,9 +158,15 @@ fuchsia_package("starnix_kernel_package") {
     ":starnix_kernel",
     "//src/starnix/containers:default_init",
   ]
+
+  # TODO(https://fxbug.dev/492249787): Remove once new libc rollout is complete.
+  forward_variables_from(experimental_libc_package_args, "*")
 }
 
 fuchsia_unittest_package("starnix_kernel_bin-tests") {
   deps = [ ":starnix_kernel_bin_test" ]
   manifest = "meta/starnix_kernel_bin_tests.cml"
+
+  # TODO(https://fxbug.dev/492249787): Remove once new libc rollout is complete.
+  forward_variables_from(experimental_libc_package_args, "*")
 }

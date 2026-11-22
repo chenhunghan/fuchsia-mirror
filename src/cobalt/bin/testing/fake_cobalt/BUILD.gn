@@ -6,7 +6,6 @@ import("//build/bazel/bazel_test_suite.gni")
 import("//build/components.gni")
 
 fuchsia_package("fake_cobalt") {
-  testonly = true
   deps = [ ":component_v2" ]
 }
 
@@ -87,13 +86,11 @@ rustc_test("bin_test") {
 }
 
 fuchsia_component_manifest("component_v2_manifest") {
-  testonly = true
   component_name = "fake_cobalt"
   manifest = "meta/fake_cobalt.cml"
 }
 
 fuchsia_component("component_v2") {
-  testonly = true
   cm_label = ":component_v2_manifest"
   deps = [ ":bin" ]
 }

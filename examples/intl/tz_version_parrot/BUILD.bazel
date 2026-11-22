@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Locally packaged TZData resource
+resource(
+    name = "tz_version_parrot_resources",
+    srcs = ["newer_revision.txt"],
+    outputs = ["data/{{source_file_part}}"],
+    visibility = [
+        "//examples/intl/tz_version_parrot/cpp:__pkg__",
+        "//examples/intl/tz_version_parrot/rust:__pkg__",
+    ],
+)

@@ -101,7 +101,9 @@ void TouchSourceV2::QueueEvent(fuchsia_ui_pointer::TouchEvent event) {
   ++total_events_created_;
   event_buffer_.push_back(
       EventWithStamp{.event = std::move(event), .stamp = total_events_created_});
-  FlushPendingEvents();
+  if (!in_batch()) {
+    FlushPendingEvents();
+  }
 }
 
 void TouchSourceV2::FlushPendingEvents() {

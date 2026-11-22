@@ -340,11 +340,9 @@ rustc_library(
         "//src/connectivity/lib/net-types",
         "//src/connectivity/network/netlink",
         "//src/connectivity/wlan/wlanix:fuchsia.wlan.wlanix_rust",
-        "//src/lib/debug/rust",
         "//src/lib/diagnostics/data/rust",
         "//src/lib/diagnostics/inspect/rust:fuchsia-inspect",
         "//src/lib/diagnostics/log/encoding/rust",
-        "//src/lib/diagnostics/log/message/rust",
         "//src/lib/elf_parse",
         "//src/lib/fdio/rust:fdio",
         "//src/lib/fidl/rust/fidl",
@@ -363,8 +361,8 @@ rustc_library(
         "//src/lib/replace-with",
         "//src/lib/trace/rust:trace",
         "//src/lib/trace/rust:trace-observer",
+        "//src/memory/attribution/server",
         "//src/performance/lib/fxt/rust",
-        "//src/performance/memory/attribution/server",
         "//src/starnix/lib/atomic_bitflags",
         "//src/starnix/lib/crash_throttling",
         "//src/starnix/lib/devicetree",
@@ -407,7 +405,6 @@ rustc_library(
         "//src/storage/lib/block_client/rust:block-client",
         "//src/storage/lib/sync_io_client",
         "//src/storage/lib/vfs/rust:vfs",
-        "//src/sys/lib/moniker",
         "//src/sys/time/timekeeper/pretty:time_pretty",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:assert_matches",
@@ -436,7 +433,6 @@ rustc_library(
         "//third_party/rust_crates/vendor:regex-lite",
         "//third_party/rust_crates/vendor:rustc-hash",
         "//third_party/rust_crates/vendor:scopeguard",
-        "//third_party/rust_crates/vendor:serde",
         "//third_party/rust_crates/vendor:slab",
         "//third_party/rust_crates/vendor:smallvec",
         "//third_party/rust_crates/vendor:static_assertions",
@@ -447,9 +443,8 @@ rustc_library(
     ],
 )
 
-# In GN, //src/starnix/kernel/vdso and //src/storage/ext4/tests:test_img are
-# resource() targets propagated to starnix_core_tests through deps.
-# @bazel2gn:raw_attribute:deps += [ "//src/starnix/kernel/vdso", "//src/storage/ext4/tests:test_img" ]
+# The test binary and package are only built with Bazel.
+# @bazel2gn:skip
 rustc_test(
     name = "starnix_core_test",
     crate = ":core",
@@ -461,8 +456,8 @@ rustc_test(
     edition = "2024",
     # Linking the lib tests requires a lot of memory.
     # Notes: if (is_asan || target_cpu == "riscv64"), linking is known to
-    # OOM on n2-standard-2.
-    # For other configurations, building on n2-standard-8 is significantly
+    # OOM on default RBE workers.
+    # For other configurations, building on large RBE workers is significantly
     # faster due to the memory usage.
     exec_properties = RBE_USE_LARGE_WORKER,
     link_deps = ["//src/starnix/kernel/syscall_loop:module_changes_breakpoint"],
@@ -487,8 +482,6 @@ rustc_test(
     ],
 )
 
-# LINT.IfChange
-# Hand-maintained in BUILD.gn above the sentinel while GN consumers remain.
 # @bazel2gn:skip
 fuchsia_package_resource_group(
     name = "test_files",
@@ -501,6 +494,7 @@ fuchsia_package_resource_group(
     dest = "data",
 )
 
+# @bazel2gn:skip
 fx_packaged_binary(
     name = "starnix_core_test_packaged_bin",
     testonly = True,
@@ -508,6 +502,7 @@ fx_packaged_binary(
     binary_name = "starnix_core_lib_test",
 )
 
+# @bazel2gn:skip
 fx_component_manifest(
     name = "starnix_core_tests-manifest",
     testonly = True,
@@ -520,6 +515,7 @@ fx_component_manifest(
     manifest = "meta/starnix_core_tests.cml",
 )
 
+# @bazel2gn:skip
 fx_test_component(
     name = "starnix_core_tests-component",
     compiled_manifest = ":starnix_core_tests-manifest",
@@ -533,16 +529,17 @@ fx_test_component(
     ],
 )
 
+# @bazel2gn:skip
 fx_package(
     name = "starnix_core_tests-package",
     package_name = "starnix_core_tests",
     test_components = [":starnix_core_tests-component"],
 )
 
+# @bazel2gn:skip
 fx_test(
     name = "starnix_core_tests",
     # Tests exercise failure cases, so ERROR logs are expected.
     max_log_severity = "ERROR",
     package = ":starnix_core_tests-package",
 )
-# LINT.ThenChange(BUILD.gn)

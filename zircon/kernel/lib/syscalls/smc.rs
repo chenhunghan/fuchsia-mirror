@@ -32,12 +32,32 @@ mod arch {
     use crate::arch_rs::arm64::smccc::{ArmSmcccResult, arm_smccc_smc};
     use crate::counters::define_kcounter;
     use boot_options::BootOptions;
+    use core::pin::Pin;
+    use ksync::KMutex;
+    use lazy_init::{LazyInit, NoCheck};
+    use pin_init::pin_init;
 
     define_kcounter!(ARM_SMCCC_FAST_CALLS, "arm_smccc.fast_calls", Sum);
     define_kcounter!(ARM_SMCCC_YIELDING_CALLS, "arm_smccc.yielding_calls", Sum);
     define_kcounter!(ARM_SMCCC_QCOM_INTERRUPTED, "arm_smccc.qcom.interrupted", Sum);
 
-    crate::ksync_kernel::declare_singleton_mutex!(QcomSmcLock);
+    #[ksync::guarded]
+    struct QcomSmcLock {
+        #[mutex]
+        lock: KMutex<crate::ksync_kernel::TrackedMutex>,
+    }
+
+    static QCOM_SMC_LOCK: LazyInit<QcomSmcLock, NoCheck> = LazyInit::uninit();
+
+    fn qcom_smc_lock_init(_level: init::LkInitLevel) {
+        // SAFETY: lk init hooks run once during single-threaded early boot before `smc_call` can
+        // be invoked.
+        unsafe {
+            let _ = Pin::static_ref(&QCOM_SMC_LOCK)
+                .init_pin(pin_init!(QcomSmcLock { lock <- KMutex::init() }));
+        }
+    }
+    init::lk_init_hook!(qcom_smc_lock, qcom_smc_lock_init, init::LK_INIT_LEVEL_EARLIEST);
 
     pub fn smc_call(params: &zx_smc_parameters_t) -> Result<zx_smc_result_t, Status> {
         let client_and_secure_os_id =
@@ -60,7 +80,9 @@ mod arch {
         } else {
             ARM_SMCCC_YIELDING_CALLS.add(1);
             if BootOptions::get().arm64_smccc_qcom {
-                ksync::lock!(QcomSmcLock::Get().lock());
+                // SAFETY: `QCOM_SMC_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before
+                // `smc_call` can be invoked.
+                ksync::lock!(unsafe { QCOM_SMC_LOCK.get_unchecked() }.lock_lock());
                 let mut current_result = arm_smccc_smc(
                     params.func_id,
                     params.arg1,

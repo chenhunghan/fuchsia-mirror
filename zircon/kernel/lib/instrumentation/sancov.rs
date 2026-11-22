@@ -71,22 +71,14 @@ pub(super) fn init_sancov(
     let guards_count = guards.len();
     let vmo = VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, data_size(guards_count) as u64);
     assert!(vmo.is_ok());
-    let status = pc_vmo.init(
-        VmObjectPaged::into_vm_object(vmo.unwrap()),
-        0,
-        data_size(guards_count),
-        b"sancov-pc-table",
-    );
+    let status =
+        pc_vmo.init(VmObjectPaged::into_vm_object(vmo.unwrap()), 0, data_size(guards_count));
     assert!(status.is_ok());
 
     let vmo = VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, data_size(guards_count) as u64);
     assert!(vmo.is_ok());
-    let status = counts_vmo.init(
-        VmObjectPaged::into_vm_object(vmo.unwrap()),
-        0,
-        data_size(guards_count),
-        b"sancov-pc-counts-table",
-    );
+    let status =
+        counts_vmo.init(VmObjectPaged::into_vm_object(vmo.unwrap()), 0, data_size(guards_count));
     assert!(status.is_ok());
 
     // SAFETY: `pc_vmo.init` and `counts_vmo.init` succeeded above, mapping at least

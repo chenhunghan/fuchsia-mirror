@@ -88,11 +88,9 @@ rustc_library("runtime_capabilities") {
   ]
   deps = []
   deps += [
-    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
     "//sdk/rust/zx-status",
-    "//src/lib/fidl/rust/fidl",
     "//src/lib/from-enum",
     "//src/lib/fuchsia-sync",
     "//src/sys/component_manager/lib/router_error",
@@ -102,12 +100,16 @@ rustc_library("runtime_capabilities") {
     "//third_party/rust_crates:flyweights",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:itertools",
+    "//third_party/rust_crates:smallbox",
     "//third_party/rust_crates:thiserror",
   ]
   if (is_fuchsia) {
     deps += [
       "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+      "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
       "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
       "//src/lib/fuchsia-async",
       "//src/storage/lib/vfs/rust:vfs",
       "//third_party/rust_crates:log",
@@ -155,11 +157,9 @@ rustc_test("runtime_capabilities_test") {
   ]
   deps = []
   deps += [
-    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
-    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
     "//sdk/rust/zx-status",
-    "//src/lib/fidl/rust/fidl",
     "//src/lib/from-enum",
     "//src/lib/fuchsia-sync",
     "//src/sys/component_manager/lib/router_error",
@@ -169,12 +169,16 @@ rustc_test("runtime_capabilities_test") {
     "//third_party/rust_crates:flyweights",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:itertools",
+    "//third_party/rust_crates:smallbox",
     "//third_party/rust_crates:thiserror",
   ]
   if (is_fuchsia) {
     deps += [
       "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+      "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
       "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
       "//src/lib/fuchsia-async",
       "//src/storage/lib/vfs/rust:vfs",
       "//third_party/rust_crates:log",

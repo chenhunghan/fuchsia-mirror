@@ -10,6 +10,7 @@ test_suite(
     name = "developer_host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
+        "//src/developer/fuchsia-controller:lib_test",
         "//src/developer/lib/credentials:lib_test",
         "//src/developer/lib/uart_fpl:uart_fpl_host_test",
     ],
@@ -18,8 +19,14 @@ test_suite(
 test_suite(
     name = "developer_target_tests",
     tests = [
+        "//src/developer/adb/bin/adb:tests",
+        "//src/developer/adb/bin/adb-file-sync:tests",
+        "//src/developer/adb/bin/adb-shell:tests",
+        "//src/developer/console/test:tests",
         "//src/developer/hw_info:tests",
+        "//src/developer/process_explorer/tests",
         "//src/developer/remote-control/identify-host:tests",
+        "//src/developer/zxsh:tests",
     ],
 )
 
@@ -27,6 +34,7 @@ test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/developer/forensics/crasher/cpp:tests",
         "//src/developer/forensics/crasher/rust:rust_crasher_tests",
     ],
 )

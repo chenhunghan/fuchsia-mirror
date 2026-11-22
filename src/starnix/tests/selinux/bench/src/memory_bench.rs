@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! Memory benchmark measuring net heap bytes retained by [`selinux::SecurityServer`] after loading
+//! `aosp_sepolicy`. See `//src/starnix/tests/selinux/bench/README.md` for details.
+
 use std::fs::File;
 use std::io::Write;
 

@@ -629,6 +629,23 @@ async def _console_event_loop(
                             event_id_to_build[next_event.id] = (
                                 next_event.parent or next_event.id
                             )
+                        if (
+                            next_event.parent in active_build_ids
+                            and not flags.quiet
+                        ):
+                            # A build may need several `fx build` invocations
+                            # (e.g. Bazel targets can't share one with GN
+                            # targets), so echo each one as it starts. Limit
+                            # the length to avoid scrolling multiple pages.
+                            lines_to_print.append(
+                                statusinfo.ellipsize(
+                                    statusinfo.green_highlight(
+                                        f"> {next_event.payload.program_execution.to_formatted_command_line()}",
+                                        style=flags.style,
+                                    ),
+                                    width=80 * 5,  # Approximately 5 lines
+                                ),
+                            )
                         styled_name = statusinfo.highlight(
                             "Building...", style=flags.style
                         )
@@ -663,11 +680,11 @@ async def _console_event_loop(
                         expected_child_tasks=group.queued_events or 0,
                         hide_children=group.hide_children,
                     )
-                elif next_event.payload.build_targets:
+                elif (targets := next_event.payload.build_targets) is not None:
                     if next_event.starting and next_event.id is not None:
                         active_build_ids.add(next_event.id)
                     styled_name = statusinfo.highlight(
-                        f"Refreshing {len(next_event.payload.build_targets)} targets",
+                        f"Refreshing {len(targets)} target{'s' if len(targets) != 1 else ''}",
                         style=flags.style,
                     )
                     state.active_durations[next_event.id] = DurationInfo(
@@ -802,29 +819,15 @@ async def _console_event_loop(
                     )
                     lines_to_print.append(f"\nPlan to run {label}{suffix}")
             elif (
-                next_event.payload.build_targets is not None and not flags.quiet
-            ):
+                targets := next_event.payload.build_targets
+            ) is not None and not flags.quiet:
                 # Print the number of targets we are refreshing.
                 label = statusinfo.highlight(
-                    f"{len(next_event.payload.build_targets)} targets",
+                    f"{len(targets)} target{'s' if len(targets) != 1 else ''}",
                     style=flags.style,
                 )
                 lines_to_print.append(
                     f"\n{statusinfo.green('Refreshing', style=flags.style)} {label}"
-                )
-                # Also output the command line used for fx build up to a limit,
-                # to avoid scrolling multiple pages.
-                out_dir_string = (
-                    f"--dir {state.exec_env.out_dir} " if state.exec_env else ""
-                )
-                lines_to_print.append(
-                    statusinfo.ellipsize(
-                        statusinfo.green_highlight(
-                            f"> fx {out_dir_string}build {' '.join(next_event.payload.build_targets)}",
-                            style=flags.style,
-                        ),
-                        width=80 * 5,  # Approximately 5 lines
-                    ),
                 )
             elif next_event.payload.test_group is not None:
                 # Let the user know we intend to run a number of tests.

@@ -354,10 +354,13 @@ raw byte-oriented serial links:
   control socket health, or `ffx uart doctor --fix` to automatically clean up
   and repair issues.
 * **Permission Denied opening `/dev/ttyUSB0`**: Ensure your user account is in
-  the `dialout` group (`id $USER`), and verify device permissions.
+  the `dialout` group (`id $USER`), and verify device permissions
+  (`ls -l /dev/ttyUSB*`).
 * **Device Busy (`EWOULDBLOCK` / `EAGAIN` during `connect`)**: Another process
-  holds an exclusive lock on the TTY device. Verify that no other serial
-  terminal programs (e.g., `minicom`, `screen`, `picocom`) are open on the port.
+  holds an exclusive lock on the TTY device. Check for processes holding the
+  port open with `lsof /dev/ttyUSB0` or `fuser -v /dev/ttyUSB0`, and verify that
+  no other serial terminal programs (e.g., `minicom`, `screen`, `picocom`) are
+  open on the port.
 * **Handshake Timeout during `connect` or `probe`**: Check that the physical
   TX/RX lines are wired correctly, the bootloader UART mux and clock are
   configured for 1,000,000 baud, and the target booted with

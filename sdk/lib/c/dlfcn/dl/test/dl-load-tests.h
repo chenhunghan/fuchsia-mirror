@@ -36,9 +36,9 @@ using TestTypes = ::testing::Types<
 #ifdef __Fuchsia__
     dl::testing::DlImplLoadZirconTests,
 #endif
-// TODO(https://fxbug.dev/324650368): Test fixtures currently retrieve files
-// from different prefixed locations depending on the platform. Find a way
-// to use a singular API to return the prefixed path specific to the platform so
+// TODO(https://fxbug.dev/356458230): Test fixtures currently retrieve files
+// from different prefixed locations depending on the platform. Find a way to
+// use a singular API to return the prefixed path specific to the platform so
 // that the TestPosix fixture can run on Fuchsia as well.
 #ifndef __Fuchsia__
     // libdl's POSIX test fixture can also be tested on Fuchsia and is included

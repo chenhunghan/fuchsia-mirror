@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"go.fuchsia.dev/fuchsia/tools/build"
+	"go.fuchsia.dev/fuchsia/tools/integration/testsharder/metadata"
 	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
 )
 
@@ -793,6 +794,11 @@ func TestApplyModifiers(t *testing.T) {
 		return s
 	}
 
+	perfShard := func(s *Shard) *Shard {
+		s.IsPerf = true
+		return s
+	}
+
 	testCases := []struct {
 		name      string
 		shards    []*Shard
@@ -855,6 +861,45 @@ func TestApplyModifiers(t *testing.T) {
 					),
 				),
 				shardWithModify(shard(env2, "linux", 1, 2, 3), makeModifyDetails(2, StopOnSuccess, false, 0, 1, 2)),
+			},
+		},
+		{
+			name: "default max attempts doesn't affect perf shard",
+			shards: []*Shard{
+				perfShard(shard(env1, "fuchsia", 1, 2, 3)),
+				shard(env2, "linux", 1, 2, 3),
+			},
+			modifiers: []ModifierMatch{
+				{Modifier: TestModifier{Name: "*", TotalRuns: -1, MaxAttempts: 2}},
+			},
+			expected: []*Shard{
+				perfShard(
+					shardWithModify(
+						shard(env1, "fuchsia", 1, 2, 3), makeModifyDetails(1, StopOnSuccess, false, 0, 1, 2),
+					),
+				),
+				shardWithModify(shard(env2, "linux", 1, 2, 3), makeModifyDetails(2, StopOnSuccess, false, 0, 1, 2)),
+			},
+		},
+		{
+			name: "explicit max attempts doesn't affect perf shard but total runs does",
+			shards: []*Shard{
+				perfShard(shard(env1, "fuchsia", 1, 2, 3)),
+			},
+			modifiers: []ModifierMatch{
+				makeModifierMatch(1, env1, false, 3, -1),
+				makeModifierMatch(2, env1, false, 0, 5),
+			},
+			expected: []*Shard{
+				perfShard(
+					shardWithModify(
+						shard(env1, "fuchsia", 1, 2, 3),
+						append(
+							makeModifyDetails(1, StopOnSuccess, false, 0),
+							makeModifyDetails(5, StopOnFailure, false, 1)...,
+						),
+					),
+				),
 			},
 		},
 		{
@@ -1030,7 +1075,7 @@ func TestPartitionShards(t *testing.T) {
 			partitionFunc: func(t Test) bool {
 				return t.Affected
 			},
-			expectedPartition1: []*Shard{},
+			expectedPartition1: nil,
 			expectedPartition2: []*Shard{
 				shard(env1, "fuchsia", 1, 2, 3),
 				shard(env2, "linux", 1, 2, 3),
@@ -1050,7 +1095,7 @@ func TestPartitionShards(t *testing.T) {
 				affectedShard(env1, "fuchsia", 1, 2, 3),
 				affectedShard(env2, "linux", 1, 2, 3),
 			},
-			expectedPartition2: []*Shard{},
+			expectedPartition2: nil,
 		},
 	}
 
@@ -1074,16 +1119,30 @@ func TestMarkShardsSkipped(t *testing.T) {
 	env2 := build.Environment{
 		Dimensions: build.DimensionSet{"device_type": "NUC"},
 	}
+	testMeta := metadata.TestMetadata{
+		Owners:      []string{"owner@google.com"},
+		ComponentID: 1478143,
+	}
+
+	shardForSkip := func(env build.Environment, os string, ids ...int) *Shard {
+		s := shardWithMetadata(env, os, testMeta, ids...)
+		for i := range s.Tests {
+			s.Tests[i].SourceLabel = "//src/sys:foo_test"
+		}
+		return s
+	}
 
 	summary := func(os string, ids ...int) runtests.TestSummary {
 		var s runtests.TestSummary
 		for _, id := range ids {
-			test := makeTest(id, os)
+			test := makeTestWithMetadata(id, os, testMeta)
 			s.Tests = append(s.Tests, runtests.TestDetails{
-				Name:    test.Name,
-				GNLabel: test.Label,
-				Status:  runtests.TestSkipped,
-				Tags:    test.Tags,
+				Name:        test.Name,
+				GNLabel:     test.Label,
+				SourceLabel: "//src/sys:foo_test",
+				Status:      runtests.TestSkipped,
+				Tags:        test.Tags,
+				Metadata:    testMeta,
 			})
 		}
 		return s
@@ -1111,19 +1170,19 @@ func TestMarkShardsSkipped(t *testing.T) {
 		{
 			name: "shards are skipped correctly",
 			shards: []*Shard{
-				shard(env1, "fuchsia", 1, 2, 3),
-				shard(env2, "linux", 1, 2, 3),
+				shardForSkip(env1, "fuchsia", 1, 2, 3),
+				shardForSkip(env2, "linux", 1, 2, 3),
 			},
 			expected: []*Shard{
-				skippedShard(shard(env1, "fuchsia", 1, 2, 3), summary("fuchsia", 1, 2, 3)),
-				skippedShard(shard(env2, "linux", 1, 2, 3), summary("linux", 1, 2, 3)),
+				skippedShard(shardForSkip(env1, "fuchsia", 1, 2, 3), summary("fuchsia", 1, 2, 3)),
+				skippedShard(shardForSkip(env2, "linux", 1, 2, 3), summary("linux", 1, 2, 3)),
 			},
 		},
 		{
 			name: "skipping an affected test throws an error",
 			shards: []*Shard{
-				shardWithAffected(shard(env1, "fuchsia", 1, 2, 3), 0),
-				shard(env2, "linux", 1, 2, 3),
+				shardWithAffected(shardForSkip(env1, "fuchsia", 1, 2, 3), 0),
+				shardForSkip(env2, "linux", 1, 2, 3),
 			},
 			err: errSkippedAffectedTest,
 		},
@@ -1140,6 +1199,50 @@ func TestMarkShardsSkipped(t *testing.T) {
 			assertEqual(t, tc.expected, got)
 		})
 	}
+}
+
+func TestAddSummariesToShards(t *testing.T) {
+	env := build.Environment{
+		Dimensions: build.DimensionSet{"device_type": "QEMU"},
+	}
+	testMeta := metadata.TestMetadata{
+		Owners:      []string{"owner@google.com"},
+		ComponentID: 1478143,
+	}
+	tags := []build.TestTag{{Key: "os", Value: "fuchsia"}}
+	makeInput := func() *Shard {
+		s := shardWithMetadata(env, "fuchsia", testMeta, 1, 2)
+		for i := range s.Tests {
+			s.Tests[i].SourceLabel = "//src/sys:foo_test"
+			s.Tests[i].Tags = tags
+		}
+		return s
+	}
+
+	wantShard := makeInput()
+	wantShard.SummaryIfSkipped = runtests.TestSummary{
+		Tests: []runtests.TestDetails{
+			{
+				Name:        "fuchsia-pkg://fuchsia.com/test1",
+				GNLabel:     "//src/sys:foo_test(//build/toolchain/fuchsia:x64)",
+				SourceLabel: "//src/sys:foo_test",
+				Status:      runtests.TestSkipped,
+				Tags:        tags,
+				Metadata:    testMeta,
+			},
+			{
+				Name:        "fuchsia-pkg://fuchsia.com/test2",
+				GNLabel:     "//src/sys:foo_test(//build/toolchain/fuchsia:x64)",
+				SourceLabel: "//src/sys:foo_test",
+				Status:      runtests.TestSkipped,
+				Tags:        tags,
+				Metadata:    testMeta,
+			},
+		},
+	}
+
+	got := AddSummariesToShards([]*Shard{makeInput()})
+	assertEqual(t, []*Shard{wantShard}, got)
 }
 
 // assertShardsContainTests checks that the input shards are the same as

@@ -384,7 +384,7 @@ class UnionSmallArray {
   UnionSmallArray(UnionSmallArray&&) = default;
   UnionSmallArray& operator=(UnionSmallArray&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kA = 1,  // 0x1
   };
 
@@ -407,7 +407,7 @@ class UnionSmallArray {
   ::test_arrays::wire::UnionSmallArray::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kA = 1,  // 0x1
   };
@@ -427,7 +427,7 @@ class UnionLargeArray {
   UnionLargeArray(UnionLargeArray&&) = default;
   UnionLargeArray& operator=(UnionLargeArray&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kA = 1,  // 0x1
   };
 
@@ -450,7 +450,7 @@ class UnionLargeArray {
   ::test_arrays::wire::UnionLargeArray::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kA = 1,  // 0x1
   };

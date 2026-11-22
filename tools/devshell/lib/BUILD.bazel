@@ -8,10 +8,14 @@ exports_files(
     [
         "agent_session_ids.txt",
         "agents.txt",
+        "fx-optional-features.sh",
+        "platform.sh",
     ],
     visibility = [
         "//scripts/lib/agents:__pkg__",
         "//src/lib/agents:__pkg__",
+        "//src/lib/analytics/cpp/core_dev_tools:__pkg__",
+        "//tools/devshell/fx_cli:__pkg__",
         "//tools/lib/agents:__pkg__",
     ],
 )

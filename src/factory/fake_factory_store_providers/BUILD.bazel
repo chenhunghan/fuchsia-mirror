@@ -3,10 +3,6 @@
 # found in the LICENSE file.
 
 load(
-    "@fuchsia_rules_common//packages:resources.bzl",
-    "resource",
-)
-load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
@@ -17,11 +13,18 @@ load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
+load("//build/bazel/rules/packages:resources.bzl", "resource")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fake_factory_store_providers_tests_test"],
+    visibility = ["//src/factory:__pkg__"],
+)
 
 rustc_binary(
     name = "bin",
@@ -132,7 +135,6 @@ fx_component(
 
 fx_package(
     name = "fake_factory_store_providers",
-    package_name = "fake_factory_store_providers",
     components = [
         ":fake_alpha_comp",
         ":fake_cast_comp",
@@ -148,6 +150,7 @@ rustc_test(
     srcs = ["tests/fake_factory_store_providers_test.rs"],
     crate_root = "tests/fake_factory_store_providers_test.rs",
     edition = "2024",
+    tags = ["manual"],
     deps = [
         "//sdk/fidl/fuchsia.factory:fuchsia.factory_rust",
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
@@ -159,46 +162,17 @@ rustc_test(
     ],
 )
 
-# @bazel2gn:skip
 resource(
-    name = "test_alpha_config",
-    src = "testdata/test_alpha.config",
-    dest = "data/test_alpha.config",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "test_cast_config",
-    src = "testdata/test_cast.config",
-    dest = "data/test_cast.config",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "test_misc_config",
-    src = "testdata/test_misc.config",
-    dest = "data/test_misc.config",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "test_playready_config",
-    src = "testdata/test_playready.config",
-    dest = "data/test_playready.config",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "test_weave_config",
-    src = "testdata/test_weave.config",
-    dest = "data/test_weave.config",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "test_widevine_config",
-    src = "testdata/test_widevine.config",
-    dest = "data/test_widevine.config",
+    name = "test_fake_factory_store_providers_config",
+    srcs = [
+        "testdata/test_alpha.config",
+        "testdata/test_cast.config",
+        "testdata/test_misc.config",
+        "testdata/test_playready.config",
+        "testdata/test_weave.config",
+        "testdata/test_widevine.config",
+    ],
+    outputs = ["data/{{source_file_part}}"],
 )
 
 fx_packaged_binary(
@@ -226,12 +200,8 @@ fx_test_component(
     deps = [":fake_factory_store_providers_test_packaged_bin"],
 )
 
-# GN copy is hand-written in BUILD.gn because bazel2gn doesn't translate
-# `resources` on an fx_package with test_components.
-# @bazel2gn:skip
 fx_package(
-    name = "fake_factory_store_providers_tests_package",
-    package_name = "fake_factory_store_providers_tests",
+    name = "fake_factory_store_providers_tests",
     components = [
         ":fake_alpha_comp",
         ":fake_cast_comp",
@@ -240,18 +210,11 @@ fx_package(
         ":fake_weave_comp",
         ":fake_widevine_comp",
     ],
-    resources = [
-        ":test_alpha_config",
-        ":test_cast_config",
-        ":test_misc_config",
-        ":test_playready_config",
-        ":test_weave_config",
-        ":test_widevine_config",
-    ],
+    resources = [":test_fake_factory_store_providers_config"],
     test_components = [":fake_factory_store_providers_tests_component"],
 )
 
 fx_test(
-    name = "fake_factory_store_providers_tests",
-    package = ":fake_factory_store_providers_tests_package",
+    name = "fake_factory_store_providers_tests_test",
+    package = ":fake_factory_store_providers_tests",
 )

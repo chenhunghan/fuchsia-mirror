@@ -83,7 +83,6 @@ fuchsia_driver_component("driver") {
     ":fuchsia_driver",
     ":gdc_bind",
   ]
-  info = "meta/driver-info.json"
 }
 
 fuchsia_driver_package("gdc") {

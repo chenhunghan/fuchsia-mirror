@@ -17,7 +17,7 @@ use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::borrow::Cow;
-use std::cmp::max;
+use std::cmp::{Reverse, max};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
@@ -859,9 +859,10 @@ impl Broker {
         claims_to_drop
     }
 
-    /// Drops a slice of deactivating claims, downgrading any dropped claims that have superseded
-    /// lower-level dependencies in the topology, looping to a fixed point. Updates required levels
-    /// of affected elements, and vacates any leases whose remaining claims have all been dropped.
+    /// Drops a slice of deactivating claims, downgrading each dropped claim to the highest-priority
+    /// dependency it supersedes ([`dependency_supersedes`]) that its lease still needs, if any,
+    /// looping to a fixed point. Updates required levels of affected elements, and vacates any
+    /// leases whose remaining claims have all been dropped.
     fn drop_deactivating_claims(&mut self, claims: &[(Dependency, LeaseID)]) {
         let mut elements_to_update = HashSet::new();
         let mut leases_to_check = HashSet::new();
@@ -880,6 +881,7 @@ impl Broker {
                 if let Some(fallback_dep) =
                     self.catalog.claim_superseded_lower_dependency_on_drop(dep, *lease_id)
                 {
+                    debug_assert!(claim_priority(&fallback_dep) < claim_priority(dep));
                     downgraded.push((fallback_dep, *lease_id));
                 }
                 leases_to_check.insert(*lease_id);
@@ -1233,9 +1235,7 @@ impl Broker {
                 }
             }
 
-            let deps_claimed = self
-                .catalog
-                .filter_out_redundant_dependencies(candidates.into_iter().sorted().collect());
+            let deps_claimed = filter_out_redundant_dependencies(candidates.into_iter().collect());
 
             for dep in deps_claimed {
                 if self.catalog.is_claim_deactivating(&dep, *lease_id) {
@@ -1320,7 +1320,7 @@ pub struct Lease {
 impl Lease {
     fn new(targets: Vec<ElementLevel>, lease_control: zx::Koid) -> Self {
         // A lease claims one root dependency per element, at the highest level it demands (see
-        // Catalog::filter_out_redundant_dependencies), and Inspect keys a lease record by element.
+        // filter_out_redundant_dependencies), and Inspect keys a lease record by element.
         // Collapse targets the same way so that each one maps to exactly one claim and one record.
         let mut collapsed: Vec<ElementLevel> = Vec::new();
         for target in targets {
@@ -1331,6 +1331,37 @@ impl Lease {
         }
         Lease { id: LeaseID(lease_control.raw_koid()), targets: collapsed }
     }
+}
+
+/// Returns the `(dependent, requires)` element pair connected by `dep`.
+///
+/// Kept private to `broker.rs` alongside [`claim_priority`] and [`dependency_supersedes`] because
+/// this priority is specific to how `Catalog` collapses and downgrades lease claims, rather than
+/// an intrinsic ordering on [`Dependency`].
+fn dependency_element_pair(dep: &Dependency) -> (Option<ElementID>, ElementID) {
+    (dep.dependent.as_ref().map(|d| d.element_id), dep.requires.element_id)
+}
+
+/// Priority of `dep` among dependencies connecting the same `(dependent, requires)` element pair:
+/// higher `requires.level` wins, breaking ties on higher `dependent.level`.
+fn claim_priority(dep: &Dependency) -> (IndexedPowerLevel, Option<IndexedPowerLevel>) {
+    (dep.requires.level, dep.dependent.as_ref().map(|d| d.level))
+}
+
+/// Returns true if `a` and `b` connect the same `(dependent, requires)` element pair and `a` has
+/// strictly higher [`claim_priority`] than `b`.
+fn dependency_supersedes(a: &Dependency, b: &Dependency) -> bool {
+    dependency_element_pair(a) == dependency_element_pair(b)
+        && claim_priority(a) > claim_priority(b)
+}
+
+/// Sorts `dependencies` by `(dependent_id, requires_id)` and descending [`claim_priority`], then
+/// deduplicates each element pair to keep only its highest-priority dependency.
+fn filter_out_redundant_dependencies(mut dependencies: Vec<Dependency>) -> Vec<Dependency> {
+    dependencies
+        .sort_unstable_by_key(|dep| (dependency_element_pair(dep), Reverse(claim_priority(dep))));
+    dependencies.dedup_by(|a, b| dependency_element_pair(a) == dependency_element_pair(b));
+    dependencies
 }
 
 /// Manages the power topology, leases, and claims (`pending` <-> `active` -> `deactivating` ->
@@ -1374,18 +1405,14 @@ impl Catalog {
         }
     }
 
-    /// Returns an iterator over all claimed dependencies where `element_id` is the required
-    /// element, including root dependencies.
-    ///
-    /// Prefer this over `Topology::dependencies_for_required_element`, which only covers the
-    /// topology graph and therefore omits lease targets.
+    /// Returns an iterator over all dependencies in the topology graph where `element_id` is the
+    /// required element, chained with claimed root dependencies on `element_id`.
     fn all_dependencies_for_required_element(
         &self,
         element_id: ElementID,
     ) -> impl Iterator<Item = &Dependency> {
-        self.topology.dependencies_for_required_element(element_id).chain(
-            self.root_deps_by_required_element.get(&element_id).into_iter().flat_map(|d| d.iter()),
-        )
+        self.topology
+            .all_dependencies_for_required_element(element_id, &self.root_deps_by_required_element)
     }
 
     /// Returns the leases with a claim on a dependency that involves the `removed_element_id` that will
@@ -1510,7 +1537,7 @@ impl Catalog {
     /// such as the removed dependency itself, but still reaches the redundant one, an open lease
     /// claims it now, so that the element it requires is not lowered further than it needs to be.
     /// If the lease is powering down, dropping the removed claim downgrades it to any superseded
-    /// lower dependency in the topology.
+    /// lower-priority dependency in the topology.
     ///
     /// Returns the pending claims of the open leases, some of which may now be ready to be
     /// activated, as they could have been waiting for the removed dependency to be satisfied, or
@@ -1549,10 +1576,10 @@ impl Catalog {
                 }
             }
 
-            let needed: HashSet<Dependency> = self
-                .filter_out_redundant_dependencies(reachable.into_iter().sorted().collect())
-                .into_iter()
-                .collect();
+            let needed: HashSet<Dependency> =
+                filter_out_redundant_dependencies(reachable.into_iter().collect())
+                    .into_iter()
+                    .collect();
 
             for dep in &removed_subgraph {
                 if self.lease_dependencies.get(lease_id).is_some_and(|deps| deps.contains(dep))
@@ -1630,33 +1657,6 @@ impl Catalog {
             .unwrap_or(minimum_level)
     }
 
-    /// Given a set of dependencies, filter out any redundant dependencies.
-    /// A dependency is redundant if there exists another dependency between
-    /// the *same pair of elements* at an *equal or higher level*.
-    fn filter_out_redundant_dependencies(
-        &self,
-        mut dependencies: Vec<Dependency>,
-    ) -> Vec<Dependency> {
-        let mut essential_deps: Vec<Dependency> = Vec::new();
-        let mut observed_pairs: HashSet<(Option<ElementID>, ElementID)> = HashSet::new();
-        dependencies.sort_unstable_by_key(|dep| {
-            (
-                dep.dependent.as_ref().map(|d| d.element_id),
-                dep.requires.element_id,
-                std::cmp::Reverse(dep.requires.level),
-                std::cmp::Reverse(dep.dependent.as_ref().map(|d| d.level)),
-            )
-        });
-        for dep in dependencies {
-            let element_pair =
-                (dep.dependent.as_ref().map(|d| d.element_id), dep.requires.element_id);
-            if observed_pairs.insert(element_pair) {
-                essential_deps.push(dep);
-            }
-        }
-        essential_deps
-    }
-
     /// Creates a new lease named `lease_name` for the given targets along with all
     /// claims necessary to satisfy this lease and adds them as pending claims.
     /// Returns the new lease and the Vec of dependencies claimed.
@@ -1688,7 +1688,7 @@ impl Catalog {
             dependencies.extend(self.topology.all_direct_and_indirect_dependencies(target));
         }
         // Filter dependencies down to only the essential (i.e. non-redundant) dependencies.
-        let deps_claimed = self.filter_out_redundant_dependencies(dependencies);
+        let deps_claimed = filter_out_redundant_dependencies(dependencies);
         for dep in &deps_claimed {
             self.add_pending_claim(dep.clone(), lease.id);
         }
@@ -1896,10 +1896,13 @@ impl Catalog {
         }
     }
 
-    /// When an enforced claim `dep` (`B@k ==> C@m`) is dropped for `lease_id`, checks if
+    /// When an enforced claim `dropped_dep` (`B@k ==> C@m`) is dropped for `lease_id`, checks if
     /// `lease_id` still holds an enforced claim requiring `B` at some level `B@j` that has a
-    /// lower-level dependency `B@i ==> C@n` (`i <= j`) in the topology (which was previously
-    /// filtered out as redundant with `dep`). If so, claims `B@i ==> C@n` in `deactivating`.
+    /// topology dependency `B@i ==> C@n` (`i <= j`) superseded by `dropped_dep`
+    /// ([`dependency_supersedes`]). If so, claims the highest-priority such edge in `deactivating`.
+    /// Because `dependency_supersedes(dropped_dep, fallback)` implies
+    /// `claim_priority(&fallback) < claim_priority(dropped_dep)`, repeated fallbacks strictly
+    /// decrease in [`claim_priority`] and always terminate.
     fn claim_superseded_lower_dependency_on_drop(
         &mut self,
         dropped_dep: &Dependency,
@@ -1919,22 +1922,19 @@ impl Catalog {
             .map(|d| d.requires.level)
             .max()?;
 
-        // Highest direct dependency from `dependent.element_id` (at <= max_enforced_dependent_level)
-        // to `dropped_dep.requires.element_id` still present in the topology.
+        // Highest-priority direct dependency from `dependent.element_id` (at <=
+        // max_enforced_dependent_level) to `dropped_dep.requires.element_id` that was superseded
+        // by `dropped_dep`.
         let fallback_dep = self
             .topology
             .dependencies_for_dependent_element(dependent.element_id)
-            .filter(|d| {
-                d.requires.element_id == dropped_dep.requires.element_id
-                    && *d != dropped_dep
-                    && (d.requires.level < dropped_dep.requires.level
-                        || d.dependent.as_ref().map(|dep| dep.level)
-                            < dropped_dep.dependent.as_ref().map(|dep| dep.level))
-                    && d.dependent
-                        .as_ref()
-                        .is_some_and(|dep| max_enforced_dependent_level.satisfies(dep.level))
+            .filter(|candidate| {
+                dependency_supersedes(dropped_dep, candidate)
+                    && candidate.dependent.as_ref().is_some_and(|candidate_dep| {
+                        max_enforced_dependent_level.satisfies(candidate_dep.level)
+                    })
             })
-            .max_by_key(|d| (d.requires.level, d.dependent.as_ref().map(|dep| dep.level)))
+            .max_by_key(|candidate| claim_priority(candidate))
             .cloned()?;
 
         // Check whether this lease already has an enforced claim from `dependent.element_id`
@@ -2282,6 +2282,7 @@ mod tests {
     const ZERO: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(0);
     const ONE: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(1);
     const TWO: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(2);
+    const THREE: IndexedPowerLevel = IndexedPowerLevel::from_same_level_and_index(3);
 
     type InnerBroker = super::Broker;
 
@@ -2346,7 +2347,7 @@ mod tests {
                     .extend(broker.catalog.topology.all_direct_and_indirect_dependencies(target));
             }
         }
-        let needed = broker.catalog.filter_out_redundant_dependencies(reachable);
+        let needed = filter_out_redundant_dependencies(reachable);
         needed.contains(dep)
     }
 
@@ -2468,8 +2469,7 @@ mod tests {
                 if active_satisfied {
                     let has_enforced_edge = broker
                         .catalog
-                        .topology
-                        .dependencies_for_required_element(parent_dep.requires.element_id)
+                        .all_dependencies_for_required_element(parent_dep.requires.element_id)
                         .any(|enforced_dep| {
                             enforced_dep
                                 .dependent
@@ -3093,14 +3093,97 @@ mod tests {
         assert_eq!(broker.get_required_level(&element_a), Some(OFF));
     }
 
+    #[fuchsia::test]
+    fn test_claim_priority() {
+        let element_b = ElementID::new(2);
+        let element_c = ElementID::new(3);
+        let b1_c2 = create_test_dependency(element_b, 1, element_c, 2);
+        let b2_c1 = create_test_dependency(element_b, 2, element_c, 1);
+        let b2_c2 = create_test_dependency(element_b, 2, element_c, 2);
+        let root_c1 = Dependency::new_root(ElementLevel { element_id: element_c, level: ONE });
+        let root_c2 = Dependency::new_root(ElementLevel { element_id: element_c, level: TWO });
+
+        // `requires.level` takes precedence over `dependent.level` on crossed edges, and equal
+        // `requires.level` breaks ties on `dependent.level`.
+        assert!(claim_priority(&b1_c2) > claim_priority(&b2_c1));
+        assert!(claim_priority(&b2_c2) > claim_priority(&b1_c2));
+        assert!(claim_priority(&root_c2) > claim_priority(&root_c1));
+    }
+
+    #[fuchsia::test]
+    fn test_dependency_supersedes() {
+        let element_a = ElementID::new(1);
+        let element_b = ElementID::new(2);
+        let element_c = ElementID::new(3);
+        let b1_c2 = create_test_dependency(element_b, 1, element_c, 2);
+        let b2_c1 = create_test_dependency(element_b, 2, element_c, 1);
+        let b2_c2 = create_test_dependency(element_b, 2, element_c, 2);
+        let a1_c1 = create_test_dependency(element_a, 1, element_c, 1);
+        let b1_a1 = create_test_dependency(element_b, 1, element_a, 1);
+        let root_b1 = Dependency::new_root(ElementLevel { element_id: element_b, level: ONE });
+        let root_c1 = Dependency::new_root(ElementLevel { element_id: element_c, level: ONE });
+        let root_c2 = Dependency::new_root(ElementLevel { element_id: element_c, level: TWO });
+
+        // `requires.level` wins on crossed edges, `dependent.level` breaks ties, and `supersedes`
+        // is irreflexive.
+        assert!(
+            dependency_supersedes(&b1_c2, &b2_c1),
+            "higher requires.level must win on crossed edges"
+        );
+        assert!(
+            !dependency_supersedes(&b2_c1, &b1_c2),
+            "lower requires.level must not supersede on crossed edges"
+        );
+        assert!(!dependency_supersedes(&b1_c2, &b1_c2), "supersedes must be irreflexive");
+        assert!(
+            dependency_supersedes(&b2_c2, &b1_c2),
+            "higher dependent.level must break requires.level ties"
+        );
+        assert!(
+            !dependency_supersedes(&b1_c2, &b2_c2),
+            "lower dependent.level must not supersede tied requires.level"
+        );
+        assert!(dependency_supersedes(&b2_c2, &b2_c1), "strictly higher edge must supersede");
+
+        // Root dependencies on the same element compare by `requires.level`.
+        assert!(
+            dependency_supersedes(&root_c2, &root_c1),
+            "higher root requires.level must supersede"
+        );
+        assert!(
+            !dependency_supersedes(&root_c1, &root_c2),
+            "lower root requires.level must not supersede"
+        );
+        assert!(!dependency_supersedes(&root_c2, &root_c2), "root supersedes must be irreflexive");
+
+        // Edges with different `(dependent_id, requires_id)` pairs never supersede one another.
+        assert!(
+            !dependency_supersedes(&root_c2, &b2_c1),
+            "root dependency must not supersede non-root dependency"
+        );
+        assert!(
+            !dependency_supersedes(&b2_c2, &root_c1),
+            "non-root dependency must not supersede root dependency"
+        );
+        assert!(
+            !dependency_supersedes(&root_c2, &root_b1),
+            "roots on different elements must not supersede"
+        );
+        assert!(
+            !dependency_supersedes(&b2_c2, &a1_c1),
+            "different dependent elements must not supersede"
+        );
+        assert!(
+            !dependency_supersedes(&b2_c2, &b1_a1),
+            "different required elements must not supersede"
+        );
+    }
+
     // When a lease's dependencies include several between the same pair of elements, only the
-    // one at the highest level should be kept. Dependencies between different pairs should all
-    // be kept, even where one appears to subsume another transitively.
+    // highest-priority one should be kept. Dependencies between different pairs should all be
+    // kept, even where one appears to subsume another transitively.
     #[fuchsia::test]
     fn test_filter_out_redundant_dependencies() {
-        let inspect = fuchsia_inspect::Inspector::default();
-        let broker = Broker::new(inspect.root().create_child("test"));
-
         let element_a = ElementID::new(1);
         let element_b = ElementID::new(2);
         let element_c = ElementID::new(3);
@@ -3113,23 +3196,21 @@ mod tests {
         //  A     B
         //  1 ==> 1 (redundant with A@2=>B@2)
         //  2 ==> 2
-        let essential_deps = broker
-            .catalog
-            .filter_out_redundant_dependencies(vec![dep_a_1_b_1.clone(), dep_a_2_b_2.clone()]);
+        let essential_deps =
+            filter_out_redundant_dependencies(vec![dep_a_1_b_1.clone(), dep_a_2_b_2.clone()]);
         assert_eq!(essential_deps, vec![dep_a_2_b_2.clone()]);
 
         //  A     B     C
         //  1 ========> 1 (not redundant, not between same elements)
         //  2 ==> 2
-        let essential_deps = broker
-            .catalog
-            .filter_out_redundant_dependencies(vec![dep_a_1_c_1.clone(), dep_a_2_b_2.clone()]);
+        let essential_deps =
+            filter_out_redundant_dependencies(vec![dep_a_1_c_1.clone(), dep_a_2_b_2.clone()]);
         assert_eq!(essential_deps, vec![dep_a_2_b_2.clone(), dep_a_1_c_1.clone()]);
 
         //  A     B     C
         //  1 ==> 1 ==> 1 (not redundant, A@2=>C@2 cannot satisfy B@1=>C@1, not between same elements)
         //  2 ========> 2
-        let essential_deps = broker.catalog.filter_out_redundant_dependencies(vec![
+        let essential_deps = filter_out_redundant_dependencies(vec![
             dep_a_1_b_1.clone(),
             dep_b_1_c_1.clone(),
             dep_a_2_c_2.clone(),
@@ -3137,6 +3218,32 @@ mod tests {
         assert_eq!(
             essential_deps,
             vec![dep_a_1_b_1.clone(), dep_a_2_c_2.clone(), dep_b_1_c_1.clone()]
+        );
+
+        // Crossed non-monotonic edges between the same elements keep the higher `requires.level`
+        // (`A@1 => B@2` supersedes `A@2 => B@1`), breaking ties on `dependent.level` (`A@2 => B@2`
+        // supersedes `A@1 => B@2`).
+        let dep_a_1_b_2 = create_test_dependency(element_a, 1, element_b, 2);
+        let dep_a_2_b_1 = create_test_dependency(element_a, 2, element_b, 1);
+        assert_eq!(
+            filter_out_redundant_dependencies(vec![dep_a_2_b_1.clone(), dep_a_1_b_2.clone()]),
+            vec![dep_a_1_b_2.clone()]
+        );
+        assert_eq!(
+            filter_out_redundant_dependencies(vec![
+                dep_a_1_b_2.clone(),
+                dep_a_2_b_2.clone(),
+                dep_a_2_b_1,
+            ]),
+            vec![dep_a_2_b_2]
+        );
+
+        // Root dependencies on the same element collapse to the highest required level.
+        let root_c1 = Dependency::new_root(ElementLevel { element_id: element_c, level: ONE });
+        let root_c2 = Dependency::new_root(ElementLevel { element_id: element_c, level: TWO });
+        assert_eq!(
+            filter_out_redundant_dependencies(vec![root_c1, root_c2.clone()]),
+            vec![root_c2]
         );
     }
 
@@ -6980,8 +7087,10 @@ mod tests {
                 0
             );
             // The dependency of the other element is not affected.
-            let topology = &broker.catalog.topology;
-            assert_eq!(topology.dependencies_for_required_element(element_b).count(), 1 - index);
+            assert_eq!(
+                broker.catalog.all_dependencies_for_required_element(element_b).count(),
+                1 - index
+            );
         }
         let topology = &broker.catalog.topology;
         assert!(topology.get_removable_dependencies_for_required_element(element_b).is_empty());
@@ -8205,6 +8314,146 @@ mod tests {
         broker.update_current_level(element_b, ZERO);
         assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
         broker.update_current_level(element_c, ZERO);
+        assert_lease_cleaned_up(&broker.catalog, lease.id);
+    }
+
+    #[fuchsia::test]
+    fn test_drop_lease_with_non_monotonic_level_dependencies() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2], vec![]).expect("add_element C failed");
+        let token_c = register_token(&mut broker, element_c);
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2, 3], vec![]).expect("add_element B failed");
+        let token_b = register_token(&mut broker, element_b);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+
+        // Non-monotonic level dependencies between B and C (`B@3 ==> C@2` > `B@1 ==> C@2` >
+        // `B@2 ==> C@1`).
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 2);
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 1);
+        add_level_dependency(&mut broker, element_b, 3, &token_c, 2);
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 2);
+
+        let lease_1 = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "lease_a")
+            .expect("acquire lease_a failed");
+        let lease_2 = broker
+            .acquire_lease(element_b, THREE, zx::Koid::from_raw(2), "lease_b")
+            .expect("acquire lease_b failed");
+
+        broker.update_current_level(element_c, TWO);
+        broker.update_current_level(element_b, THREE);
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease_1.id), Some(LeaseStatus::Satisfied));
+        assert_eq!(broker.get_lease_status(lease_2.id), Some(LeaseStatus::Satisfied));
+
+        // Dropping `lease_1` while `lease_2` holds `B@3 ==> C@2` active downgrades `lease_1`'s
+        // `B@1 ==> C@2` claim once to `B@2 ==> C@1`, then drops `B@2 ==> C@1` without cycling back
+        // to `B@1 ==> C@2`, leaving only `A@ON ==> B@2` deactivating on `lease_1`.
+        broker.drop_lease(lease_1.id).expect("drop_lease lease_a failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(
+            broker.catalog.deactivating_for_lease(lease_1.id),
+            vec![(
+                Dependency {
+                    dependent: Some(ElementLevel { element_id: element_a, level: ON }),
+                    requires: ElementLevel { element_id: element_b, level: TWO },
+                },
+                lease_1.id,
+            )]
+        );
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_b), Some(THREE));
+        assert_eq!(broker.get_required_level(&element_c), Some(TWO));
+
+        broker.update_current_level(element_a, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_lease_cleaned_up(&broker.catalog, lease_1.id);
+
+        broker.drop_lease(lease_2.id).expect("drop_lease lease_b failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_c), Some(TWO));
+
+        broker.update_current_level(element_b, ZERO);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+        broker.update_current_level(element_c, ZERO);
+        broker.catalog.assert_claims_consistent();
+        assert_lease_cleaned_up(&broker.catalog, lease_2.id);
+    }
+
+    // Pins existing downgrade behavior when removing non-monotonic dependencies during power-down:
+    // while `B` is held at `3`, removing dependencies from `B` to `C` steps `C`'s required level
+    // down through the highest-priority remaining edge `B` still satisfies (`B@1 ==> C@3` ->
+    // `B@3 ==> C@2` -> `B@2 ==> C@1`), never dropping `C` to `0` early.
+    #[fuchsia::test]
+    fn test_remove_dependency_on_powering_down_lease_with_non_monotonic_dependencies() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut broker = Broker::new(inspect.root().create_child("test"));
+
+        let element_c =
+            broker.add_element("C", 0, vec![0, 1, 2, 3], vec![]).expect("add_element C failed");
+        let token_c = register_token(&mut broker, element_c);
+        let element_b =
+            broker.add_element("B", 0, vec![0, 1, 2, 3], vec![]).expect("add_element B failed");
+        let token_b = register_token(&mut broker, element_b);
+        let (element_a, _token_a) = add_binary_element(&mut broker, "A");
+
+        // Priority order: `B@1 ==> C@3` > `B@3 ==> C@2` > `B@2 ==> C@1` when `A@ON ==> B@3` is
+        // leased.
+        add_level_dependency(&mut broker, element_b, 1, &token_c, 3);
+        add_level_dependency(&mut broker, element_b, 3, &token_c, 2);
+        add_level_dependency(&mut broker, element_b, 2, &token_c, 1);
+        add_level_dependency(&mut broker, element_a, ON.level, &token_b, 3);
+
+        let lease = broker
+            .acquire_lease(element_a, ON, zx::Koid::from_raw(1), "lease_a")
+            .expect("acquire lease_a failed");
+        broker.update_current_level(element_c, THREE);
+        broker.update_current_level(element_b, THREE);
+        broker.update_current_level(element_a, ON);
+        assert_eq!(broker.get_lease_status(lease.id), Some(LeaseStatus::Satisfied));
+
+        // Drop `lease` while `A` stays ON so `A@ON ==> B@3` and `B@1 ==> C@3` remain deactivating.
+        broker.drop_lease(lease.id).expect("drop_lease failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_a), Some(OFF));
+        assert_eq!(broker.get_required_level(&element_b), Some(THREE));
+        assert_eq!(broker.get_required_level(&element_c), Some(THREE));
+
+        // Removing `B@1 ==> C@3` while `B` is still required at `3` has two qualifying candidates
+        // (`B@3 ==> C@2` and `B@2 ==> C@1`); `max_by_key(claim_priority)` must pick `B@3 ==> C@2`,
+        // holding `C` at `2`.
+        remove_level_dependency(&mut broker, element_b, 1, &token_c, 3)
+            .expect("remove_dependency B@1==>C@3 failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(TWO));
+        broker.update_current_level(element_c, TWO);
+        broker.catalog.assert_claims_consistent();
+
+        // Removing `B@3 ==> C@2` next must downgrade to `B@2 ==> C@1`, holding `C` at `1` until
+        // `B` powers down below `2`.
+        remove_level_dependency(&mut broker, element_b, 3, &token_c, 2)
+            .expect("remove_dependency B@3==>C@2 failed");
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+
+        broker.update_current_level(element_c, ONE);
+        broker.catalog.assert_claims_consistent();
+        broker.update_current_level(element_a, OFF);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_b), Some(ZERO));
+        assert_eq!(broker.get_required_level(&element_c), Some(ONE));
+
+        broker.update_current_level(element_b, ZERO);
+        broker.catalog.assert_claims_consistent();
+        assert_eq!(broker.get_required_level(&element_c), Some(ZERO));
+        broker.update_current_level(element_c, ZERO);
+        broker.catalog.assert_claims_consistent();
         assert_lease_cleaned_up(&broker.catalog, lease.id);
     }
 }

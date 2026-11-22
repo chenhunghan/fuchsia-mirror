@@ -34,13 +34,10 @@ import("//zircon/kernel/phys/qemu.gni")
 _AIB_TOOLS_DEPS = [
   # The tools need to build the AIBs and platform_artifacts containers
   "//build/assembly/tools/assembly:bazel_input($host_toolchain)",
-  "//build/assembly/tools/assembly_config:bazel_input($host_toolchain)",
 
   # Tools included by the AIBs.
-  "//build/bazel/target_tests:font_manifest_generator_bazel_input($host_toolchain)",
   "//src/storage/bin/fvm:bazel_input($host_toolchain)",
   "//src/storage/blobfs/tools:bazel_input($host_toolchain)",
-  "//src/storage/fxfs/fxfs_pbtool:bazel_input($host_toolchain)",
   "//zircon/tools/zbi:bazel_input($host_toolchain)",
 ]
 
@@ -281,9 +278,9 @@ fuchsia_package("embeddable_userdebug.bootfs_files_package") {
     "//src/bringup/bin/dlog:bootfs",
     "//src/bringup/bin/waitfor:bootfs",
     "//src/developer/forensics/crasher/cpp:bootfs",
+    "//src/developer/zxsh:bootfs",
     "//src/zircon/bin/kcounter:bootfs",
   ]
-  deps += [ "//src/zircon/bin/zxsh:bootfs" ]
 }
 
 export_fuchsia_package_to_bazel(
@@ -502,18 +499,6 @@ export_fuchsia_package_to_bazel("lspci.bootfs_files_package.bazel_input") {
   package = ":lspci.bootfs_files_package"
 }
 
-group("ufsutil") {
-  deps = [ ":ufsutil.bootfs_files_package.bazel_input" ]
-}
-
-fuchsia_package("ufsutil.bootfs_files_package") {
-  deps = [ "//src/devices/block/bin/ufsutil:bootfs" ]
-}
-
-export_fuchsia_package_to_bazel("ufsutil.bootfs_files_package.bazel_input") {
-  package = ":ufsutil.bootfs_files_package"
-}
-
 group("spmi-ctl") {
   deps = [ ":spmi-ctl.bootfs_files_package.bazel_input" ]
 }
@@ -588,7 +573,7 @@ group("virtcon") {
 }
 
 group("devscreen") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/ui/bin/devscreen" ]
+  deps = []
 }
 
 group("netsvc") {
@@ -664,9 +649,7 @@ group("core_realm") {
 }
 
 group("heapdump_global_collector") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/performance/memory/heapdump/collector",
-  ]
+  deps = [ "//bundles/assembly/bazel_inputs/src/memory/heapdump/collector" ]
 }
 
 group("core_realm_networking") {
@@ -709,7 +692,6 @@ group("core_realm_eng") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/connectivity/wlan/wlancfg/tool:donut",
     "//bundles/assembly/bazel_inputs/src/devices/bin/driver_debug",
-    "//bundles/assembly/bazel_inputs/src/storage/bin:fs_realm_tools",
     "//bundles/assembly/bazel_inputs/src/storage/fs_realm",
     "//bundles/assembly/bazel_inputs/src/sys/tools/debug-dash-launcher",
   ]
@@ -791,13 +773,16 @@ group("mdns_fuchsia_device_wired_service") {
   deps = []
 }
 
+group("mdns_wired_only") {
+  deps = []
+}
+
 group("core_realm_development_access_rcs_usb") {
   deps = [ "//bundles/assembly/bazel_inputs/src/developer/remote-control/usb:usb-vsock-package" ]
 }
 
 group("development_support_tools_connectivity_networking") {
   deps = [
-    "//bundles/assembly/bazel_inputs/src/connectivity/network/mdns/util:mdns-util",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/net-cli",
     "//bundles/assembly/bazel_inputs/third_party/iperf:iperf3_pkg",
     "//bundles/assembly/bazel_inputs/third_party/tcpdump",
@@ -817,11 +802,11 @@ group("development_support_tools_connectivity_thread") {
 }
 
 group("radar_proxy_with_injector") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/devices/radar/bin/radar-proxy:radar-proxy-with-injector" ]
+  deps = []
 }
 
 group("radar_proxy_without_injector") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/devices/radar/bin/radar-proxy:radar-proxy-without-injector" ]
+  deps = []
 }
 
 group("no_remote_feedback_id") {
@@ -871,7 +856,6 @@ group("standard_eng") {
   testonly = true
   deps = [
     "//bundles/assembly/bazel_inputs/src/developer/process_explorer:process_explorer_package",
-    "//bundles/assembly/bazel_inputs/src/devices/bin/driver_playground:pkg",
     "//bundles/assembly/bazel_inputs/src/power/metrics-logger:metrics-logger-pkg",
   ]
 }
@@ -891,7 +875,7 @@ group("memory_monitor") {
 group("memory_monitor_with_memory_sampler") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/memory/legacy/monitor:monitor_with_memory_sampler",
-    "//bundles/assembly/bazel_inputs/src/performance/memory/sampler:memory_sampler",
+    "//bundles/assembly/bazel_inputs/src/memory/sampler:memory_sampler",
   ]
 }
 
@@ -900,7 +884,7 @@ group("memory_monitor_critical_reports") {
 }
 
 group("memory_monitor2") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/performance/memory/attribution/monitor" ]
+  deps = [ "//bundles/assembly/bazel_inputs/src/memory/attribution/monitor" ]
 }
 
 group("memory_monitor_page_refaults") {
@@ -1067,7 +1051,6 @@ group("tracing") {
 group("testing_support") {
   testonly = true
   deps = [
-    ":testing_support.bootfs_files_package.bazel_input",
     "//bundles/assembly/bazel_inputs/src/connectivity/network/testing/netemul/runner:package",
     "//bundles/assembly/bazel_inputs/src/lib/fuchsia-component-test/realm_builder_server:pkg",
     "//bundles/assembly/bazel_inputs/src/performance/cpu_profiler",
@@ -1095,22 +1078,9 @@ group("testing_support") {
   ]
 }
 
-fuchsia_package("testing_support.bootfs_files_package") {
-  testonly = true
-  deps = [ "//src/tests/microbenchmarks/config:bootfs" ]
-}
-
-export_fuchsia_package_to_bazel(
-    "testing_support.bootfs_files_package.bazel_input") {
-  testonly = true
-  package = ":testing_support.bootfs_files_package"
-}
-
 group("camera") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/camera/bin/device:camera_device",
-    "//bundles/assembly/bazel_inputs/src/camera/bin/device_watcher:camera_device_watcher",
-  ]
+  deps =
+      [ "//bundles/assembly/bazel_inputs/src/camera/bin/device:camera_device" ]
 }
 
 group("factory_data") {
@@ -1380,11 +1350,7 @@ group("virtual_audio_legacy_util") {
 }
 
 group("audio_legacy_driver_tools") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio-codec-ctl",
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/audio-driver-ctl",
-    "//bundles/assembly/bazel_inputs/src/media/audio/tools/dsputil",
-  ]
+  deps = []
 }
 
 group("audio_driver_development_tools") {
@@ -1470,7 +1436,6 @@ icu_aib_bazel_inputs("ui_eng") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/ui/bin/scene_manager",
     "//bundles/assembly/bazel_inputs/src/ui/bin/text:text_manager",
-    "//bundles/assembly/bazel_inputs/src/ui/bin/virtual_keyboard_manager",
     "//bundles/assembly/bazel_inputs/src/ui/scenic:scenic_pkg",
   ]
 }
@@ -1482,7 +1447,6 @@ icu_aib_bazel_inputs("ui_eng_dso") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/ui/bin/scene_manager:scene_manager_dso",
     "//bundles/assembly/bazel_inputs/src/ui/bin/text:text_manager",
-    "//bundles/assembly/bazel_inputs/src/ui/bin/virtual_keyboard_manager",
     "//bundles/assembly/bazel_inputs/src/ui/scenic:scenic_pkg_dso",
   ]
 }
@@ -1494,7 +1458,6 @@ icu_aib_bazel_inputs("ui_user_and_userdebug") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/ui/bin/scene_manager",
     "//bundles/assembly/bazel_inputs/src/ui/bin/text:text_manager",
-    "//bundles/assembly/bazel_inputs/src/ui/bin/virtual_keyboard_manager",
     "//bundles/assembly/bazel_inputs/src/ui/scenic:scenic_pkg",
   ]
 }
@@ -1506,7 +1469,6 @@ icu_aib_bazel_inputs("ui_userdebug_dso") {
   deps = [
     "//bundles/assembly/bazel_inputs/src/ui/bin/scene_manager:scene_manager_dso",
     "//bundles/assembly/bazel_inputs/src/ui/bin/text:text_manager",
-    "//bundles/assembly/bazel_inputs/src/ui/bin/virtual_keyboard_manager",
     "//bundles/assembly/bazel_inputs/src/ui/scenic:scenic_pkg_dso",
   ]
 }
@@ -1524,9 +1486,7 @@ group("ui_package_eng_userdebug_with_synthetic_device_support") {
 }
 
 group("fan") {
-  deps = [
-    "//bundles/assembly/bazel_inputs/src/devices/thermal/bin/fan-controller",
-  ]
+  deps = []
 }
 
 group("battery_manager") {
@@ -1580,7 +1540,6 @@ group("power_framework_testing_sag") {
     "//bundles/assembly/bazel_inputs/src/power/system-activity-governor:config-wait-for-token",
     "//bundles/assembly/bazel_inputs/src/power/system-activity-governor/fake:package",
     "//bundles/assembly/bazel_inputs/src/power/testing/fake-shutdown-shim:package",
-    "//bundles/assembly/bazel_inputs/src/power/testing/fake-suspend:fake-suspend-pkg",
   ]
 }
 
@@ -1716,7 +1675,7 @@ group("zoneinfo") {
 }
 
 group("factory_reset") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/recovery/factory_reset:factory_reset_pkg" ]
+  deps = []
 }
 
 group("factory_reset_tee") {
@@ -1749,8 +1708,10 @@ group("session_manager_disable_pkg_cache") {
   deps = []
 }
 
+# Kept empty because `group("platform_inputs")` depends on `:${aib}` for every
+# entry in `platform_aib_names`.
 group("gnss") {
-  deps = [ "//bundles/assembly/bazel_inputs/src/connectivity/location/gnss:gnss_service" ]
+  deps = []
 }
 
 group("resources") {

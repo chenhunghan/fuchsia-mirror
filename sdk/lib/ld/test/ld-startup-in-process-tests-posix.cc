@@ -155,7 +155,7 @@ void LdStartupInProcessTests::Load(std::string_view raw_executable_name) {
     ASSERT_NO_FATAL_FAILURE(open_file(interp, ld_startup_fd));
 
     std::optional<LoadResult> result;
-    ASSERT_NO_FATAL_FAILURE(Load(ld_startup_fd, result));
+    ASSERT_NO_FATAL_FAILURE(Load(ld_startup_fd, result, std::make_tuple(), std::make_tuple()));
 
     // Stash the dynamic linker's entry point.
     entry_ = result->entry + result->loader.load_bias();
@@ -169,7 +169,8 @@ void LdStartupInProcessTests::Load(std::string_view raw_executable_name) {
 
   // Now load the executable.
   std::optional<LoadResult> result;
-  ASSERT_NO_FATAL_FAILURE(Load(std::exchange(executable_fd, {}), result));
+  ASSERT_NO_FATAL_FAILURE(
+      Load(std::exchange(executable_fd, {}), result, std::make_tuple(), std::make_tuple()));
 
   // Set AT_PHDR and AT_PHNUM for where the phdrs were loaded.
   std::span phdrs = result->phdrs;

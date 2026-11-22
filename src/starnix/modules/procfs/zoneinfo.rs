@@ -66,16 +66,19 @@ impl DynamicFileSource for ZoneInfoFile {
         };
 
         // Only required fields are written. Add more fields as needed.
-        writeln!(sink, "Node 0, zone   Normal")?;
-        writeln!(sink, "  per-node stats")?;
-        writeln!(sink, "      nr_inactive_file {}", nr_inactive_file)?;
-        writeln!(sink, "      nr_active_file {}", nr_active_file)?;
-        writeln!(sink, "  pages free     {}", free)?;
-        writeln!(sink, "        min      {}", pages_min)?;
-        writeln!(sink, "        low      {}", pages_low)?;
-        writeln!(sink, "        high     {}", pages_high)?;
-        writeln!(sink, "        present  {}", present)?;
-        writeln!(sink, "  pagesets")?;
+        write!(
+            sink,
+            "Node 0, zone   Normal\n\
+             \x20 per-node stats\n\
+             \x20     nr_inactive_file {nr_inactive_file}\n\
+             \x20     nr_active_file {nr_active_file}\n\
+             \x20 pages free     {free}\n\
+             \x20       min      {pages_min}\n\
+             \x20       low      {pages_low}\n\
+             \x20       high     {pages_high}\n\
+             \x20       present  {present}\n\
+             \x20 pagesets\n",
+        )?;
 
         Ok(())
     }

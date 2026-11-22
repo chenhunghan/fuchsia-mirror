@@ -43,7 +43,10 @@ constexpr uint16_t kBulkMaxPacket = 512;
 
 constexpr size_t kAdbHeaderSize = 24;
 constexpr uint32_t kAdbCommandConnect = 0x4e584e43;  // "CNXN"
+constexpr uint32_t kAdbCommandAuth = 0x48545541;     // "AUTH"
+constexpr uint32_t kAdbCommandStls = 0x534c5453;     // "STLS"
 constexpr uint32_t kAdbProtocolVersionMin = 0x01000000;
+constexpr uint32_t kMaxAdbPayload = 1024 * 1024;
 
 constexpr char kDeviceName[] = "usb-adb-function";
 
@@ -72,9 +75,14 @@ enum class State : uint8_t {
   // - A fadb::Device client calls StopAdb().
   // - A UsbAdbImpl client closes their channel.
   // - usb-peripheral calls SetConfigured(false).
-  // - The host sends an adb CNXN after the device has already sent data in this
-  //   session, meaning the host started a new adb session without a USB
-  //   disconnect (e.g. its adb server was restarted mid-transfer).
+  // - The host sends an adb CNXN during an existing host session (e.g. because
+  //   its adb server was restarted) while data is in flight in either
+  //   direction: the client holds part of a bulk OUT packet or hasn't read
+  //   everything the host sent, or data for the previous session is being
+  //   sent, which the new host connection may already be reading. This
+  //   includes the client's answer to a previous CNXN that it hasn't sent yet.
+  //   (If nothing is in flight, we reset the session in place and remain in
+  //   kOnline.)
   // - Stop gets called.
   //
   // ... we disable endpoints, cancel in-flight requests, and move to
@@ -161,12 +169,9 @@ class UsbAdbDevice : public fdf::DriverBase2,
     uint32_t data_check;
     uint32_t magic;
 
-    // FromVaddr reads the header information out of a DMA payload pointed at by the given vaddr and
-    // fixes up the endianness of all fields.
-    static AdbHeader FromVaddr(const zx_vaddr_t vaddr) {
-      auto* bytes = reinterpret_cast<const uint8_t*>(vaddr);
-      zx_cache_flush(bytes, kAdbHeaderSize, ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE);
-
+    // FromBytes reads the header information out of a byte buffer and fixes up the endianness of
+    // all fields.
+    static AdbHeader FromBytes(const uint8_t* bytes) {
       AdbHeader header;
 
       std::memcpy(&header.command, bytes + 0, sizeof(uint32_t));
@@ -183,6 +188,14 @@ class UsbAdbDevice : public fdf::DriverBase2,
       header.magic = le32toh(header.magic);
 
       return header;
+    }
+
+    // FromVaddr reads the header information out of a DMA payload pointed at by the given vaddr and
+    // fixes up the endianness of all fields.
+    static AdbHeader FromVaddr(const zx_vaddr_t vaddr) {
+      auto* bytes = reinterpret_cast<const uint8_t*>(vaddr);
+      zx_cache_flush(bytes, kAdbHeaderSize, ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE);
+      return FromBytes(bytes);
     }
   };
 
@@ -209,6 +222,16 @@ class UsbAdbDevice : public fdf::DriverBase2,
   // packet header sent as its own USB packet, either alone or after whole packets of an interrupted
   // transfer.
   bool IsAdbConnect(const fendpoint::Completion& completion);
+
+  // Tracks adb packet boundaries in a stream of transfers, which may split or coalesce packets.
+  // Returns how many payload bytes of the current packet remain after |data|. A header split across
+  // two transfers can't be parsed; tracking then resumes at the next transfer that starts with a
+  // header.
+  static size_t PayloadRemainingAfter(size_t remaining, const uint8_t* data, size_t length);
+
+  // Tracks the outgoing adb packet stream while online, and returns true if |data| belongs to the
+  // previous host session after an in-place session reset, and must not reach the new one.
+  bool IsStaleTx(const std::vector<uint8_t>& data);
 
   fidl::SyncClient<fuchsia_hardware_usb_function::UsbFunction> function_;
   // Owning ServerBinding for USB function interface.
@@ -286,6 +309,7 @@ class UsbAdbDevice : public fdf::DriverBase2,
 
   bool bulk_in_cancelled_ = false;
   bool bulk_out_cancelled_ = false;
+  zx_status_t disable_endpoints_status_ = ZX_OK;
   bool pending_reconfigure_ = false;
   bool reset_usb_on_stop_ = false;
   bool usb_disconnect_observed_ = false;
@@ -299,6 +323,17 @@ class UsbAdbDevice : public fdf::DriverBase2,
   // means the host started a new adb session without a USB disconnect. Data queued before the host
   // sends anything (e.g. written by a client while offline) does not count.
   bool host_session_started_ = false;
+
+  // Remaining payload bytes expected on bulk OUT for the current ADB packet already delivered to
+  // the UsbAdbImpl client via Receive(). When non-zero, the client's packet reader is mid-packet.
+  size_t rx_remaining_payload_bytes_ = 0;
+
+  // Remaining payload bytes expected from the UsbAdbImpl client via QueueTx() for the current
+  // outgoing ADB packet.
+  size_t tx_remaining_payload_bytes_ = 0;
+
+  // True after an in-place CNXN reset until the client answers the CNXN (see IsStaleTx()).
+  bool awaiting_new_session_tx_ = false;
 
   bool CancelAllCompleted() const { return bulk_in_cancelled_ && bulk_out_cancelled_; }
   bool AllRequestsReturned() {

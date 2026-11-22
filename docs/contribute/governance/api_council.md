@@ -55,7 +55,7 @@ software ecosystem around the Fuchsia operating system. Fostering a healthy
 ecosystem requires balancing many concerns, including growing the ecosystem and
 guiding the ecosystem towards particular outcomes.
 
-### Values
+### Values {#values}
 
 The ecosystem has many participants who play many different roles. Ideally, we
 would be able to design APIs that meet the needs of everyone in the ecosystem
@@ -198,7 +198,7 @@ a whole makes decisions by *rough consensus*, as assessed by the chair.
 
 The council has two major functions: API review and API calibration.
 
-### API review
+### API review {#api-review}
 
 Every change to the Fuchsia API Surface requires approval from a council member.
 A change in a particular functional area should typically be approved by the

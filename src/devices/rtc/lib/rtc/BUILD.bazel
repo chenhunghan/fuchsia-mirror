@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_source_library_zx(
+    name = "rtc",
+    srcs = ["librtc.c"],
+    hdrs = ["include/librtc.h"],
+    includes = ["include"],
+    visibility = [
+        "//src/devices/rtc/drivers/intel-rtc:__pkg__",
+        "//src/devices/rtc/lib/rtc/tests:__pkg__",
+    ],
+    deps = ["//zircon/system/public"],
+)
+
+fx_cc_source_library_zx(
+    name = "rtc_wire",
+    srcs = ["librtc_wire.cc"],
+    hdrs = ["include/librtc_wire.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_cpp",
+    ],
+    includes = ["include"],
+    visibility = [
+        "//src/devices/rtc/drivers/intel-rtc:__pkg__",
+        "//src/devices/rtc/drivers/pl031-rtc:__pkg__",
+        "//src/devices/rtc/lib/rtc/tests:__pkg__",
+    ],
+)
+
+rustc_library(
+    name = "fuchsia_rtc",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = ["//src/devices/rtc/drivers/goldfish-rtc:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.rtc:fuchsia.hardware.rtc_rust_next",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "fuchsia_rtc_test",
+    crate = ":fuchsia_rtc",
+)
+
+fx_unittest_package(
+    name = "fuchsia-rtc-test",
+    unit_tests = [":fuchsia_rtc_test"],
+    visibility = ["//src/devices:__pkg__"],
+)

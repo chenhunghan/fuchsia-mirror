@@ -448,7 +448,7 @@ void UnitIndexer::AddEntryToIndex(uint32_t index_me, IndexNode* root) {
       AddStandaloneEntryToIndex(index_me, root);
       return;
     }
-    cur = unit_.GetIndexForLLVMDie(die);
+    cur = static_cast<uint32_t>(unit_.GetIndexForLLVMDie(die));
 
     if (indexable_[index_me].name().empty()) {
       // When there's no name, take the name from the declaration.
@@ -605,7 +605,7 @@ bool UnitIndexer::GetAbstractOriginIndex(uint32_t source, uint32_t* abstract_ori
   if (ao.getDwarfUnit() != unit_.GetLLVMUnit())
     return false;  // Different compilation unit.
 
-  *abstract_origin_index = unit_.GetIndexForLLVMDie(ao);
+  *abstract_origin_index = static_cast<uint32_t>(unit_.GetIndexForLLVMDie(ao));
   return true;
 }
 
@@ -632,8 +632,8 @@ void RecursiveFindExact(const IndexNode* node, const Identifier& input, size_t i
 }  // namespace
 
 void Index::CreateIndex(DwarfBinary& binary, int32_t dwo_index, bool force_slow_path) {
-  size_t unit_count = binary.GetNormalUnitCount();
-  for (size_t i = 0; i < unit_count; i++) {
+  uint32_t unit_count = binary.GetNormalUnitCount();
+  for (uint32_t i = 0; i < unit_count; i++) {
     UnitIndex unit_index(false, i);
     if (auto unit_ref_ptr = binary.GetUnitAtIndex(unit_index))
       IndexCompileUnit(*unit_ref_ptr, dwo_index, unit_index, force_slow_path);
@@ -642,14 +642,52 @@ void Index::CreateIndex(DwarfBinary& binary, int32_t dwo_index, bool force_slow_
   // Index any DWO units. .dwo files store their units in a separate DWARF section. Normally there
   // will either be many normal units and no DWO units, or no normal units and exactly one DWO unit.
   // But this loops over all of both for generality.
-  size_t dwo_unit_count = binary.GetDWOUnitCount();
-  for (size_t i = 0; i < dwo_unit_count; i++) {
+  uint32_t dwo_unit_count = binary.GetDWOUnitCount();
+  for (uint32_t i = 0; i < dwo_unit_count; i++) {
     UnitIndex unit_index(true, i);
     if (auto unit_ref_ptr = binary.GetUnitAtIndex(unit_index))
       IndexCompileUnit(*unit_ref_ptr, dwo_index, unit_index, force_slow_path);
   }
 
   IndexFileNames();
+}
+
+void Index::IndexSourceFiles(DwarfBinary& binary) {
+  // Populate the source file mapping directly from the compilation unit line tables without
+  // scanning debug information entries. Line table entries contain the file paths required for
+  // setting breakpoints by file and line. Evicting the decoded line table and DIE arrays ensures
+  // intermediate table representations do not remain resident in memory after indexing.
+  size_t unit_count = binary.GetNormalUnitCount();
+  for (size_t i = 0; i < unit_count; i++) {
+    IndexUnitSourceFiles(binary, UnitIndex(false, static_cast<uint32_t>(i)));
+  }
+
+  size_t dwo_unit_count = binary.GetDWOUnitCount();
+  for (size_t i = 0; i < dwo_unit_count; i++) {
+    IndexUnitSourceFiles(binary, UnitIndex(true, static_cast<uint32_t>(i)));
+  }
+
+  IndexFileNames();
+}
+
+void Index::IndexUnitSourceFiles(DwarfBinary& binary, UnitIndex unit_index) {
+  auto unit_ref_ptr = binary.GetUnitAtIndex(unit_index);
+  if (!unit_ref_ptr) {
+    return;
+  }
+
+  llvm::DWARFUnit* llvm_unit = unit_ref_ptr->GetLLVMUnit();
+  if (llvm_unit && llvm_unit->isTypeUnit()) {
+    return;
+  }
+
+  IndexCompileUnitSourceFiles(*unit_ref_ptr, unit_index);
+  if (llvm_unit) {
+    if (llvm::DWARFContext* context = binary.GetLLVMContext()) {
+      context->clearLineTableForUnit(llvm_unit);
+    }
+    llvm_unit->clear();
+  }
 }
 
 void Index::DumpFileIndex(std::ostream& out) const {
@@ -776,10 +814,9 @@ void Index::IndexCompileUnitSourceFiles(const DwarfUnit& unit, UnitIndex unit_in
   if (!line_table)
     return;  // No line table for this unit.
 
-  // This table is the size of the file name table (which confusingly counts from 0 up to the
-  // the "size"). Entries are set to 1 when we've added them to the index already.
-  std::vector<int> added_file;
-  added_file.resize(line_table->Prologue.FileNames.size() + 1, 0);
+  // This table is of the same size as the file name table (which confusingly counts from 0 up to
+  // the "size"). Entries are set to true when we've added them to the index already.
+  std::vector<bool> added_file(line_table->Prologue.FileNames.size() + 1, false);
 
   // We don't want to just add all the files from the line table to the index. The line table will
   // contain entries for every file referenced by the compilation unit, which includes declarations.
@@ -787,21 +824,19 @@ void Index::IndexCompileUnitSourceFiles(const DwarfUnit& unit, UnitIndex unit_in
   //
   // To get this, iterate through the unit's row table and collect all referenced file names.
   std::string file_name;
-  for (size_t i = 0; i < line_table->Rows.size(); i++) {
-    auto file_id = line_table->Rows[i].File;
-    if (file_id > added_file.size())
+  for (const auto& row : line_table->Rows) {
+    auto file_id = row.File;
+    if (file_id >= added_file.size() || added_file[file_id])
       continue;
+    added_file[file_id] = true;
 
-    if (!added_file[file_id]) {
-      added_file[file_id] = 1;
-      if (line_table->getFileNameByIndex(
-              file_id, "", llvm::DILineInfoSpecifier::FileLineInfoKind::RelativeFilePath,
-              file_name)) {
-        // The files here can contain relative components like "/foo/bar/../baz". This is OK because
-        // we want it to match other places in the symbol code that do a similar computation to get
-        // a file name.
-        files_[NormalizePath(file_name)].push_back(unit_index);
-      }
+    if (line_table->getFileNameByIndex(
+            file_id, "", llvm::DILineInfoSpecifier::FileLineInfoKind::RelativeFilePath,
+            file_name)) {
+      // The files here can contain relative components like "/foo/bar/../baz". This is OK because
+      // we want it to match other places in the symbol code that do a similar computation to get
+      // a file name.
+      files_[NormalizePath(file_name)].push_back(unit_index);
     }
   }
 }

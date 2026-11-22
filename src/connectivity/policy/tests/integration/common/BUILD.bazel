@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "policy_testing_common",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = [
+        "//src/connectivity/network/tests/integration/dns:__pkg__",
+        "//src/connectivity/policy/tests/integration/management:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
+        "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+        "//src/connectivity/network/testing/netemul/rust:lib",
+        "//src/connectivity/network/tests/integration/common:netstack_testing_common",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/network/fidl_fuchsia_net_routes_ext",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)

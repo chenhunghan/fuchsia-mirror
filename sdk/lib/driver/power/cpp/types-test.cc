@@ -597,15 +597,18 @@ TEST(TypesTest, PowerElementConfigurationFromNatural) {
        .parent = fuchsia_hardware_power::ParentElement::WithInstanceName("test parent element 2"),
        .level_deps = {{}}}};
 
-  fuchsia_hardware_power::PowerElementConfiguration fidl{
-      {.element = std::move(element),
-       .dependencies = {{std::move(dependency1), std::move(dependency2)}}}};
+  fuchsia_hardware_power::PowerElementConfiguration fidl{{
+      .element = std::move(element),
+      .dependencies = {{std::move(dependency1), std::move(dependency2)}},
+      .initial_level = 3,
+  }};
 
   zx::result config = PowerElementConfiguration::FromFidl(fidl);
   ASSERT_TRUE(config.is_ok()) << config.status_string();
   ASSERT_EQ(config->element.name, "test power element");
   ASSERT_TRUE(config->element.levels.empty());
   ASSERT_EQ(config->dependencies.size(), 2u);
+  ASSERT_EQ(config->initial_level, std::optional<uint8_t>{3});
 
   ASSERT_EQ(config->dependencies[0].child, "test child 1");
   ASSERT_EQ(config->dependencies[0].parent,
@@ -641,6 +644,7 @@ TEST(TypesTest, PowerElementConfigurationFromWire) {
                   .dependencies(
                       fidl::VectorView<fuchsia_hardware_power::wire::PowerDependency>::FromExternal(
                           dependencies))
+                  .initial_level(3)
                   .Build();
 
   zx::result config = PowerElementConfiguration::FromFidl(fidl);
@@ -648,6 +652,7 @@ TEST(TypesTest, PowerElementConfigurationFromWire) {
   ASSERT_EQ(config->element.name, "test power element");
   ASSERT_TRUE(config->element.levels.empty());
   ASSERT_EQ(config->dependencies.size(), 2u);
+  ASSERT_EQ(config->initial_level, std::optional<uint8_t>{3});
 
   ASSERT_EQ(config->dependencies[0].child, "test child 1");
   ASSERT_EQ(config->dependencies[0].parent,
@@ -705,6 +710,30 @@ TEST(TypesTest, PowerElementConfigurationFromWireMissingDependencies) {
   zx::result config = PowerElementConfiguration::FromFidl(fidl);
   ASSERT_TRUE(config.is_ok()) << config.status_string();
   ASSERT_TRUE(config->dependencies.empty());
+}
+
+// Verify `PowerElementConfiguration::FromFidl()` will succeed if initial_level is missing.
+TEST(TypesTest, PowerElementConfigurationFromNaturalMissingInitialLevel) {
+  fuchsia_hardware_power::PowerElement element{{.name = "test power element", .levels = {{}}}};
+
+  fuchsia_hardware_power::PowerElementConfiguration fidl{{.element = std::move(element)}};
+  zx::result config = PowerElementConfiguration::FromFidl(fidl);
+  ASSERT_TRUE(config.is_ok()) << config.status_string();
+  ASSERT_FALSE(config->initial_level.has_value());
+}
+
+// Verify `PowerElementConfiguration::FromFidl()` will succeed if initial_level is missing.
+TEST(TypesTest, PowerElementConfigurationFromWireMissingInitialLevel) {
+  fidl::Arena arena;
+  auto element =
+      fuchsia_hardware_power::wire::PowerElement::Builder(arena).name("test power element").Build();
+  auto fidl = fuchsia_hardware_power::wire::PowerElementConfiguration::Builder(arena)
+                  .element(element)
+                  .Build();
+
+  zx::result config = PowerElementConfiguration::FromFidl(fidl);
+  ASSERT_TRUE(config.is_ok()) << config.status_string();
+  ASSERT_FALSE(config->initial_level.has_value());
 }
 
 }  // namespace fdf_power::test

@@ -1,4 +1,4 @@
-<!--* freshness: { reviewed: '2026-10-12' } *-->
+<!--* freshness: { reviewed: '2026-10-22' } *-->
 
 # Zxdb Console Commands (`zxdb/console/commands`)
 
@@ -30,8 +30,9 @@ Public headers group verb records and helpers into these functional areas:
   `zxdb::GetStepiVerbRecord()`, `zxdb::GetNextVerbRecord()`,
   `zxdb::GetNextiVerbRecord()`, `zxdb::GetFinishVerbRecord()`, and
   `zxdb::GetUntilVerbRecord()`.
-- Breakpoint and watchpoint verbs (`verb_break.h`, `verb_watch.h`):
-  `zxdb::GetBreakVerbRecord()` and `zxdb::GetWatchVerbRecord()`.
+- Breakpoint, watchpoint, and tracepoint verbs (`verb_break.h`, `verb_watch.h`,
+  `verb_tracepoint.h`): `zxdb::GetBreakVerbRecord()`,
+  `zxdb::GetWatchVerbRecord()`, and `zxdb::GetTraceVerbRecord()`.
 - Stack, frame, and async backtrace verbs (`verb_backtrace.h`,
   `verb_async_backtrace.h`, `verb_down.h`, `verb_stack_data.h`,
   `verb_stack_usage.h`): `zxdb::GetBacktraceVerbRecord()`,

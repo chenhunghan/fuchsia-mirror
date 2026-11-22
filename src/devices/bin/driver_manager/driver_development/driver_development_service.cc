@@ -127,6 +127,7 @@ zx::result<fdd::wire::NodeInfo> CreateDeviceInfo(fidl::AnyArena& allocator,
 
   std::vector topo_path = node->GetBusTopology();
   device_info.bus_topology(fidl::ToWire(allocator, topo_path));
+  device_info.disambiguator(fidl::StringView(allocator, node->MakeDisambiguator()));
 
   return zx::ok(device_info.Build());
 }
@@ -565,7 +566,7 @@ void DriverDevelopmentService::RestartWithDictionaryAndPowerDependencies(
   }
 
   driver_runner_.RestartWithDictionaryAndPowerDependencies(
-      std::string(request->moniker.get()), fidl::ToNatural(std::move(request->dictionary)),
+      std::string(request->moniker.get()), std::move(request->dictionary),
       fidl::ToNatural(request->power_dependencies).value(),
       request->cpu_token_override.is_valid()
           ? std::make_optional(std::move(request->cpu_token_override))
@@ -657,6 +658,19 @@ void DriverDevelopmentService::RunHealthCheck(RunHealthCheckRequestView request,
         }
         fidl::Arena arena;
         completer.ReplySuccess(fidl::ToWire(arena, result.value()));
+      });
+}
+
+void DriverDevelopmentService::StartSuspendSession(StartSuspendSessionRequestView request,
+                                                   StartSuspendSessionCompleter::Sync& completer) {
+  driver_runner_.StartSuspendSession(
+      fidl::ToNatural(request->target), std::move(request->token),
+      [completer = completer.ToAsync()](zx::result<> result) mutable {
+        if (result.is_ok()) {
+          completer.ReplySuccess();
+        } else {
+          completer.ReplyError(result.error_value());
+        }
       });
 }
 

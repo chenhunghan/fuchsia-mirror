@@ -54,6 +54,15 @@ fit::result<ReaderError, ConcatenateResult> Concatenate(const std::string& logs_
                                                         StorageSize max_decompressed_size,
                                                         Decoder* decoder);
 
+// Returns the latest timestamp in the newest log file in |logs_dir| that has a timestamp, or
+// std::nullopt if no file has one.
+//
+// Messages aren't guaranteed to be in chronological order, so an older file may hold a slightly
+// later timestamp. This is much cheaper than Concatenate() when only an approximate last timestamp
+// is needed.
+std::optional<zx::time_boot> ApproximateLastTimestamp(const std::string& logs_dir,
+                                                      Decoder* decoder);
+
 }  // namespace system_log_recorder
 }  // namespace feedback_data
 }  // namespace forensics

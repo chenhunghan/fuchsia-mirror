@@ -1,0 +1,25 @@
+# Backward loop with a 17-instruction body running 5,000 iterations exceeds BPF_MAX_INSTS (65,536)
+# dynamic instructions along a single path in ~3,855 jumps (< MAX_JMP_SEQ = 8,192), hitting the
+# per-path depth limit.
+-- asm
+mov %r0, 0
+mov %r1, 0
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r1, 1
+add %r0, 1
+jne %r0, 5000, -17
+exit
+-- error
+verification complexity limit exceeded

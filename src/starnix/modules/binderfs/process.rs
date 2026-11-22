@@ -26,6 +26,7 @@ use starnix_sync::{
     BinderAvailableThreadsLock, BinderFreezeLevel, BinderProcessSharedMemoryLevel,
     BinderProcessStateLevel, BinderThreadPoolLevel, LockDepGuard, LockDepMutex,
 };
+use starnix_types::PAGE_SIZE;
 use starnix_types::ownership::{
     DropGuard, OwnedRef, Releasable, ReleaseGuard, Share, TempRef, WeakRef, release_after,
 };
@@ -541,9 +542,9 @@ impl AvailableThreads {
     /// May briefly block while acquiring the inner lock.
     ///
     /// # Concurrency Notes
-    /// - In [`BinderProcess::enqueue_command`], this is called while holding
-    ///   [`BinderProcess::state`] (where popping and locking a [`BinderThread`] is not allowed) to
-    ///   check whether a thread became available after
+    /// - In [`BinderProcess::enqueue_command`], which avoids locking [`BinderProcess::state`] on
+    ///   the fast path, this is called after locking [`BinderProcess::state`] on the fallback path
+    ///   to check whether a thread became available after
     ///   [`BinderProcess::try_enqueue_on_available_thread`] returned `Err`. Because
     ///   `BinderDriver::handle_thread_read` drops `thread_state` (which calls [`push`](Self::push))
     ///   before dropping `proc_state`, any `push` ordered before `BinderProcess::state` is
@@ -822,9 +823,10 @@ impl BinderProcess {
                 Err(returned_queued) => {
                     {
                         let mut state = self.lock();
-                        // We must not call try_enqueue_on_available_thread while holding
-                        // the state lock, because that function acquires thread locks,
-                        // which causes a lock inversion against thread_read.
+                        // Re-check `available_threads` under `state`: a worker may have pushed
+                        // itself in `handle_thread_read` (before releasing `proc_state`) after
+                        // `try_enqueue_on_available_thread` returned `Err`. Retrying after dropping
+                        // `state` keeps thread selection off the process lock.
                         if !self.available_threads.is_empty() {
                             queued = returned_queued;
                             continue;
@@ -923,30 +925,28 @@ impl BinderProcess {
     }
 
     /// Handle a binder thread's request to increment/decrement a strong/weak reference to a remote
-    /// binder object.
+    /// binder object. Records the affected objects in `actions`, which must be `release`d by the
+    /// caller without holding a lock on `BinderProcess`.
     pub fn handle_refcount_operation(
         &self,
         command: binder_driver_command_protocol,
         handle: Handle,
+        actions: &mut RefCountActions,
     ) -> Result<(), Errno> {
-        let mut actions = RefCountActions::default();
-        release_after!(actions, (), {
-            self.lock().handle_refcount_operation(command, handle, &mut actions)
-        })
+        self.lock().handle_refcount_operation(command, handle, actions)
     }
 
     /// Handle a binder thread's notification that it successfully incremented a strong/weak
     /// reference to a local (in-process) binder object. This is in response to a
-    /// `BR_ACQUIRE`/`BR_INCREFS` command.
+    /// `BR_ACQUIRE`/`BR_INCREFS` command. Records the affected objects in `actions`, which must be
+    /// `release`d by the caller without holding a lock on `BinderProcess`.
     pub fn handle_refcount_operation_done(
         &self,
         command: binder_driver_command_protocol,
         object: LocalBinderObject,
+        actions: &mut RefCountActions,
     ) -> Result<(), Errno> {
-        let mut actions = RefCountActions::default();
-        release_after!(actions, (), {
-            self.lock().handle_refcount_operation_done(command, object, &mut actions)
-        })
+        self.lock().handle_refcount_operation_done(command, object, actions)
     }
 
     /// Subscribe a process to the death of the owner of `handle`.
@@ -1243,14 +1243,36 @@ impl BinderProcess {
     }
 
     /// Map the external vmo into the driver address space, recording the userspace address.
-    pub fn map_external_vmo(&self, vmo: fidl::Vmo, mapped_address: u64) -> Result<(), Errno> {
+    ///
+    /// `mapped_size` is the number of bytes of the VMO, from its start, that the remote process
+    /// mapped at `mapped_address`. Buffers are only allocated in that part of the VMO. If it is
+    /// `None`, the remote process is trusted to have mapped the whole VMO.
+    pub fn map_external_vmo(
+        &self,
+        vmo: fidl::Vmo,
+        mapped_address: u64,
+        mapped_size: Option<u64>,
+    ) -> Result<(), Errno> {
         let mut shared_memory = self.shared_memory.lock();
         // Do not support mapping shared memory more than once.
         if shared_memory.is_some() {
             return error!(EINVAL);
         }
         let memory = MemoryObject::from(vmo);
-        let size = memory.get_size();
+        let vmo_size = memory.get_size();
+        let size = match mapped_size {
+            None => vmo_size,
+            Some(mapped_size) => {
+                // The remote process maps whole pages, within the VMO.
+                if mapped_size == 0 || mapped_size % *PAGE_SIZE != 0 || mapped_size > vmo_size {
+                    log_warn!(
+                        "Invalid binder mapping size {mapped_size} for a VMO of size {vmo_size}"
+                    );
+                    return error!(EINVAL);
+                }
+                mapped_size
+            }
+        };
         *shared_memory = Some(SharedMemory::map(&memory, mapped_address.into(), size as usize)?);
         Ok(())
     }
@@ -1395,6 +1417,59 @@ impl<'a> BinderProcessGuard<'a> {
     pub fn did_request_thread(&mut self) {
         self.thread_requested = true;
     }
+
+    /// Enqueues a batch of non-terminal commands (such as `IncRef`, `ReleaseRef`, `DecRef`) for the
+    /// process, consuming this lock guard.
+    ///
+    /// Unlike [`BinderProcess::enqueue_command`], which dispatches one command per available
+    /// thread, a single binder thread can drain an arbitrary number of non-terminal commands in one
+    /// `handle_thread_read` pass. Because both [`BinderAvailableThreadsLock`] and
+    /// `BinderThreadStateLock` sit strictly after [`BinderProcessStateLevel`] in the lock hierarchy
+    /// (and no thread can add itself to `available_threads` while the process lock is held),
+    /// candidate threads are popped and locked while still holding `self`: on a hit, `self` is
+    /// dropped right before pushing the batch onto that thread's queue; otherwise, the batch is
+    /// pushed onto `self.command_queue` directly without re-locking and process `POLLIN` waiters
+    /// are notified.
+    pub fn enqueue_non_terminal_commands(
+        mut self,
+        commands: smallvec::SmallVec<[QueuedCommand; 4]>,
+    ) {
+        if commands.is_empty() {
+            return;
+        }
+        let process = self.base;
+        for queued in &commands {
+            debug_assert!(!queued.command.is_terminal());
+            log_trace!(
+                "BinderProcess id={} enqueuing command {:?}",
+                process.identifier(),
+                queued.command
+            );
+        }
+        while let Some(weak_thread) = process.available_threads.pop() {
+            if let Some(thread) = weak_thread.upgrade() {
+                let mut thread_guard = thread.lock();
+                if thread_guard.is_available() {
+                    drop(self);
+                    for queued in &commands {
+                        log_trace!(
+                            "BinderThreadState id={} enqueuing command {:?}",
+                            thread_guard.tid,
+                            queued.command
+                        );
+                    }
+                    thread_guard.command_queue.push_back_batch(commands);
+                    return;
+                }
+            }
+        }
+        for queued in commands {
+            crate::trace::on_command_enqueued(&queued.command, queued.trace_id);
+            self.command_queue.push_back(queued);
+        }
+        drop(self);
+        process.process_waiters.notify_fd_events(starnix_uapi::vfs::FdEvents::POLLIN);
+    }
 }
 
 impl Releasable for BinderProcess {
@@ -1420,9 +1495,8 @@ impl Releasable for BinderProcess {
         for transaction in state.active_transactions.into_values() {
             transaction.release(&mut drop_actions);
         }
+        state.handles.release(&mut drop_actions);
         drop_actions.release(());
-
-        state.handles.release(());
 
         for thread in self.thread_pool.into_inner().into_values() {
             thread.release(context);
@@ -1446,12 +1520,10 @@ pub struct HandleTable {
 /// The HandleTable is released at the time the BinderProcess is released. At this moment, any
 /// reference to object owned by another BinderProcess need to be clean.
 impl Releasable for HandleTable {
-    type Context<'a> = ();
-    fn release<'a>(self, _: ()) {
+    type Context<'a> = &'a mut RefCountActions;
+    fn release<'a>(self, actions: &'a mut RefCountActions) {
         for (_, r) in self.table.into_iter() {
-            let mut actions = RefCountActions::default();
-            r.clean_refs(&mut actions);
-            actions.release(());
+            r.clean_refs(actions);
         }
     }
 }

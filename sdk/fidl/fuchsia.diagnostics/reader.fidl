@@ -189,7 +189,7 @@ closed(removed=18) open(added=18) protocol ArchiveAccessor {
 
     /// Stream diagnostics data directly to a socket.
     /// This is intended for host tools or components that prefer socket-based streaming.
-    @available(added=HEAD)
+    @available(added=NEXT)
     flexible StreamDiagnosticsToSocket(resource struct {
         stream_parameters StreamParameters;
         stream zx.Handle:<SOCKET, zx.Rights.WRITE | zx.Rights.WAIT>;

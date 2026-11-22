@@ -95,6 +95,8 @@
                 "fuchsia.scenic.FrameSchedulerMinPredictedFrameDurationInUs",
                 "fuchsia.scenic.ICanHazDisplayId",
                 "fuchsia.scenic.ICanHazDisplayMode",
+                "fuchsia.scenic.ImageImportPolicy",
+                "fuchsia.scenic.ImageImportWorkers",
                 "fuchsia.scenic.MaxDisplayHorizontalResolutionPx",
                 "fuchsia.scenic.MaxDisplayRefreshRateMillihertz",
                 "fuchsia.scenic.MaxDisplayVerticalResolutionPx",

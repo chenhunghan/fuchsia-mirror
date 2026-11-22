@@ -22,8 +22,6 @@ pub struct DriverState<OT> {
 
     pub detailed_logging: detailed_logging::DetailedLogging,
 
-    pub nat64: nat64::Nat64,
-
     pub dhcp_v6_pd: dhcpv6pd::DhcpV6Pd,
 
     pub border_agent: border_agent::BorderAgent,
@@ -265,7 +263,6 @@ impl<OT: ot::BackboneRouter> DriverState<OT> {
             srp_advertising_proxy: None,
             ot_ctl: ot_ctl::OtCtl::new(),
             detailed_logging: detailed_logging::DetailedLogging::new(),
-            nat64: nat64::Nat64::new(),
             dhcp_v6_pd: dhcpv6pd::DhcpV6Pd::default(),
             border_agent: border_agent::BorderAgent::new(),
             epskc: border_agent::Epskc::new(),

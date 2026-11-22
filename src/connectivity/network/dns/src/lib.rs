@@ -13,6 +13,7 @@ use trust_dns_proto::{Executor, Time};
 
 pub mod async_resolver;
 pub mod config;
+pub mod metrics_recorder;
 pub mod tcp;
 pub mod test_util;
 pub mod udp;

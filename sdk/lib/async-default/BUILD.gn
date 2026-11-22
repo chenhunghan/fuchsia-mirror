@@ -39,5 +39,6 @@ if (is_fuchsia) {
     visibility = [ "*" ]
     public_deps = [ "//sdk/lib/async" ]
     sdk = "shared"
+    bazel_target = ":async-default_gn_outputs"
   }
 }

@@ -1,0 +1,92 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":lowpan-integration-tests"],
+    visibility = ["//src/connectivity/lowpan:__pkg__"],
+)
+
+rustc_test(
+    name = "lowpan-integration-tests-bin",
+    srcs = [
+        "src/lib.rs",
+        "src/service_driver_interaction.rs",
+    ],
+    # Preserves the GN test binary name from `rustc_test(name = "lowpan_integration_tests")`.
+    crate_name = "lowpan_integration_tests",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.lowpan.device:fuchsia.lowpan.device_rust",
+        "//sdk/fidl/fuchsia.lowpan:fuchsia.lowpan_rust",
+        "//sdk/fidl/fuchsia.lowpan.test:fuchsia.lowpan.test_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lowpan-integration-tests-bin_packaged",
+    testonly = True,
+    binary = ":lowpan-integration-tests-bin",
+    binary_name = "lowpan_integration_tests",
+)
+
+fx_component_manifest(
+    name = "lowpan-integration-tests_manifest",
+    testonly = True,
+    component_name = "lowpan-integration-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/lowpan-integration-tests.cml",
+)
+
+fx_test_component(
+    name = "lowpan-integration-tests_component",
+    compiled_manifest = ":lowpan-integration-tests_manifest",
+    deps = [":lowpan-integration-tests-bin_packaged"],
+)
+
+fx_package(
+    name = "lowpan-integration-tests_package",
+    package_name = "lowpan-integration-tests",
+    components = [
+        "//src/connectivity/lowpan/drivers/lowpan-dummy-driver:lowpan-dummy-driver-cmp",
+        "//src/connectivity/lowpan/service:lowpanservice-cv2",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":lowpan-integration-tests_component"],
+)
+
+fx_test(
+    name = "lowpan-integration-tests",
+    max_log_severity = "WARN",
+    package = ":lowpan-integration-tests_package",
+)

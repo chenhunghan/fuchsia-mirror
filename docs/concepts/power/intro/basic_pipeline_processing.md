@@ -50,7 +50,7 @@ timeouts based on the arrival of new events. Use the helper by calling
 `AcquireWakeLease` instead of talking to the `ActivityGovernor` capability
 yourself.
 
-### Protocol interlocks
+### Protocol interlocks {:#protocol-interlocks}
 
 "Protocol interlocks" are an option if Driver X and Driver Y's protocol for
 event passing contains an acknowledgement or this acknowledgement is added.

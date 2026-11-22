@@ -62,7 +62,7 @@ including:
 To access an object within a namespace, you must already have another object
 in your possession.  A component typically receives channel handles for
 objects in the scope of its namespace during
-[Namespace Transfer](#namespace_transfer).
+[Namespace transfer](#namespace-transfer).
 
 You can also create new objects out of thin air by implementing the
 appropriate FIDL protocols.
@@ -112,7 +112,7 @@ the user.
 
 <!-- _TODO(jeffbrown): Document a specific strategy for how to present names._ -->
 
-### Object Relative Path Expressions
+### Object relative path expressions {:#object-relative-path-expressions}
 
 An object relative path expression is an object name or a `/`-delimited
 sequence of object names designating a sequence of nested objects to be
@@ -170,7 +170,7 @@ See [FIDL Protocols](/docs/concepts/fidl/overview.md).
 For example, `fdio` implements client-side interpretation of `..` paths
 in file manipulation APIs such as `open()`, `stat()`, `unlink()`, etc.
 
-## Namespace Transfer
+## Namespace transfer {:#namespace-transfer}
 
 When a component is started (e.g. its process is started), it receives a
 table that maps one or more namespace path prefixes to object handles.

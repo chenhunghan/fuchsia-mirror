@@ -4,11 +4,12 @@
 
 #include "src/devices/bin/driver_manager/dictionary_util.h"
 
-#include <fidl/fuchsia.component.sandbox/cpp/common_types_format.h>
-#include <fidl/fuchsia.component.sandbox/cpp/fidl.h>
+#include <fidl/fuchsia.component.runtime/cpp/common_types_format.h>
+#include <fidl/fuchsia.component.runtime/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/component/incoming/cpp/directory.h>
 #include <lib/component/incoming/cpp/directory_watcher.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fdio/directory.h>
 
 #include "src/devices/bin/driver_manager/async_sharder.h"
@@ -16,251 +17,328 @@
 
 namespace driver_manager {
 
-void DictionaryUtil::ImportDictionary(
-    fuchsia_component_sandbox::DictionaryRef dictionary,
-    fit::callback<void(zx::result<fuchsia_component_sandbox::NewCapabilityId>)> callback) {
-  ImportDictionaryWire(
-      fuchsia_component_sandbox::wire::DictionaryRef{.token = std::move(dictionary.token())},
-      std::move(callback));
+namespace {
+
+zx::result<fidl::ClientEnd<fuchsia_component_runtime::Capabilities>> ConnectToCapabilities() {
+  return component::Connect<fuchsia_component_runtime::Capabilities>();
 }
 
-void DictionaryUtil::ImportDictionaryWire(
-    fuchsia_component_sandbox::wire::DictionaryRef dictionary,
-    fit::callback<void(zx::result<fuchsia_component_sandbox::wire::NewCapabilityId>)> callback) {
-  fuchsia_component_sandbox::NewCapabilityId imported = cap_id_++;
-  store_
-      ->Import(imported,
-               fuchsia_component_sandbox::wire::Capability::WithDictionary(std::move(dictionary)))
-      .Then([imported, callback = std::move(callback)](
-                fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::Import>&
+}  // namespace
+
+zx::result<zx::eventpair> DuplicateEventpair(const zx::eventpair& handle) {
+  zx::eventpair duplicate;
+  if (zx_status_t status = handle.duplicate(ZX_RIGHT_SAME_RIGHTS, &duplicate); status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok(std::move(duplicate));
+}
+
+DictionaryUtil::DictionaryUtil(
+    fidl::ClientEnd<fuchsia_component_runtime::Capabilities> capabilities,
+    async_dispatcher_t* dispatcher, CapabilitiesConnector connector)
+    : capabilities_(std::move(capabilities), dispatcher),
+      connector_(connector ? std::move(connector) : CapabilitiesConnector(ConnectToCapabilities)),
+      dispatcher_(dispatcher) {}
+
+void DictionaryUtil::CopyDictionary(const zx::eventpair& dictionary,
+                                    fit::callback<void(zx::result<zx::eventpair>)> callback) {
+  zx::result source = DuplicateEventpair(dictionary);
+  if (source.is_error()) {
+    fdf_log::error("Failed to duplicate dictionary handle: {}", source.status_string());
+    callback(source.take_error());
+    return;
+  }
+  zx::eventpair copy, copy_peer;
+  if (zx_status_t status = zx::eventpair::create(0, &copy, &copy_peer); status != ZX_OK) {
+    callback(zx::error(status));
+    return;
+  }
+
+  capabilities_->DictionaryCopy(std::move(source.value()), std::move(copy_peer))
+      .Then([copy = std::move(copy), callback = std::move(callback)](
+                fidl::WireUnownedResult<fuchsia_component_runtime::Capabilities::DictionaryCopy>&
                     result) mutable {
         if (!result.ok()) {
-          fdf_log::warn("failed to call import dictionary ref {}", result.FormatDescription());
-          callback(zx::error(result.status()));
+          fdf_log::error("Failed to copy dictionary: {}", result.FormatDescription());
+          callback(zx::error(ZX_ERR_INTERNAL));
           return;
         }
         if (result->is_error()) {
-          fdf_log::warn("failed to import dictionary ref {}", result->error_value());
+          fdf_log::error("Failed to copy dictionary: {}", result->error_value());
           callback(zx::error(ZX_ERR_INTERNAL));
           return;
         }
-
-        callback(zx::ok(imported));
-      });
-}
-
-void DictionaryUtil::CopyExportDictionary(
-    fuchsia_component_sandbox::CapabilityId dictionary,
-    fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> callback) {
-  uint64_t dest = cap_id_++;
-  store_->DictionaryCopy(dictionary, dest)
-      .Then([this, callback = std::move(callback), dest](
-                fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::DictionaryCopy>&
-                    result) mutable {
-        if (!result.ok() || result->is_error()) {
-          fdf_log::error("Failed to copy dictionary. {}", result.FormatDescription());
-          callback(zx::error(ZX_ERR_INTERNAL));
-          return;
-        }
-
-        store_->Export(dest).Then(
-            [callback = std::move(callback)](
-                fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::Export>&
-                    result) mutable {
-              if (!result.ok() || result->is_error()) {
-                fdf_log::error("Failed to export dictionary. {}", result.FormatDescription());
-                callback(zx::error(ZX_ERR_INTERNAL));
-                return;
-              }
-
-              callback(zx::ok(fuchsia_component_sandbox::DictionaryRef{
-                  std::move(result->value()->capability.dictionary().token)}));
-            });
+        callback(zx::ok(std::move(copy)));
       });
 }
 
 void DictionaryUtil::DictionaryDirConnectorOpen(
-    fuchsia_component_sandbox::CapabilityId dictionary, std::string_view key,
+    const zx::eventpair& dictionary, std::string_view key,
     fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback) {
-  fuchsia_component_sandbox::NewCapabilityId dest = cap_id_++;
-  store_->DictionaryGet(dictionary, fidl::StringView::FromExternal(key), dest)
-      .Then([this, callback = std::move(callback), dest](
-                fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::DictionaryGet>&
+  zx::result dict_dup = DuplicateEventpair(dictionary);
+  if (dict_dup.is_error()) {
+    fdf_log::error("Failed to duplicate dictionary handle: {}", dict_dup.status_string());
+    callback(dict_dup.take_error());
+    return;
+  }
+  zx::eventpair cap, cap_peer;
+  if (zx_status_t status = zx::eventpair::create(0, &cap, &cap_peer); status != ZX_OK) {
+    callback(zx::error(status));
+    return;
+  }
+  capabilities_
+      ->DictionaryGet(std::move(dict_dup.value()), fidl::StringView::FromExternal(key),
+                      std::move(cap_peer))
+      .Then([this, key = std::string(key), callback = std::move(callback), cap = std::move(cap)](
+                fidl::WireUnownedResult<fuchsia_component_runtime::Capabilities::DictionaryGet>&
                     result) mutable {
         if (!result.ok()) {
-          fdf_log::error("Failed to get dictionary. {}", result.FormatDescription());
+          fdf_log::error("Failed to get '{}' from dictionary: {}", key, result.FormatDescription());
           callback(zx::error(ZX_ERR_INTERNAL));
           return;
         }
-
         if (result->is_error()) {
-          fdf_log::error("Failed to get dictionary. {}", result.value().error_value());
+          fdf_log::error("Failed to get '{}' from dictionary: {}", key, result->error_value());
           callback(zx::error(ZX_ERR_INTERNAL));
           return;
         }
 
-        store_->Export(dest).Then(
-            [this, callback = std::move(callback)](
-                fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::Export>&
-                    result) mutable {
-              if (!result.ok() || result->is_error()) {
-                fdf_log::error("Failed to export dictionary. {}", result.FormatDescription());
-                callback(zx::error(ZX_ERR_INTERNAL));
-                return;
-              }
-
-              auto cap = result->value();
-              if (cap->capability.is_dir_connector_router()) {
-                fidl::WireClient<fuchsia_component_sandbox::DirConnectorRouter>
-                    dir_connector_router_client(std::move(cap->capability.dir_connector_router()),
-                                                dispatcher_);
-
-                dir_connector_router_client->Route(fuchsia_component_sandbox::wire::RouteRequest{})
-                    .Then([this, callback = std::move(callback),
-                           dir_connector_router_client = std::move(dir_connector_router_client)](
-                              fidl::WireUnownedResult<
-                                  fuchsia_component_sandbox::DirConnectorRouter::Route>&
-                                  result) mutable {
-                      if (!result.ok() || result->is_error()) {
-                        fdf_log::error("Failed to route dir connector. {}",
-                                       result.FormatDescription());
-                        callback(zx::error(ZX_ERR_INTERNAL));
-                        return;
-                      }
-
-                      OpenDirConnector(std::move(result->value()->dir_connector()),
-                                       std::move(callback));
-                    });
-              } else if (cap->capability.is_dir_connector()) {
-                OpenDirConnector(std::move(cap->capability.dir_connector()), std::move(callback));
-              } else {
-                callback(zx::error(ZX_ERR_INTERNAL));
-              }
-            });
+        auto capability_type = result->value()->capability_type;
+        if (capability_type ==
+            fuchsia_component_runtime::wire::CapabilityType::kDirConnectorRouter) {
+          RouteDirConnectorRouter(std::move(cap), std::move(key), std::move(callback));
+        } else if (capability_type ==
+                   fuchsia_component_runtime::wire::CapabilityType::kDirConnector) {
+          OpenDirConnector(std::move(cap), std::move(callback));
+        } else {
+          fdf_log::error("Dictionary entry '{}' has unexpected type {}", key, capability_type);
+          callback(zx::error(ZX_ERR_WRONG_TYPE));
+        }
       });
 }
 
+void DictionaryUtil::RouteDirConnectorRouter(
+    zx::eventpair router, std::string key,
+    fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback) {
+  // Component manager serves each fuchsia.component.runtime.Capabilities connection one request at
+  // a time and waits for routes to finish before reading the next request. Routing on
+  // |capabilities_| would let a slow route stall every other dictionary operation, so each route
+  // gets its own connection.
+  zx::result client_end = connector_();
+  if (client_end.is_error()) {
+    fdf_log::error("Failed to connect to fuchsia.component.runtime.Capabilities to route '{}': {}",
+                   key, client_end.status_string());
+    callback(client_end.take_error());
+    return;
+  }
+  fidl::WireClient<fuchsia_component_runtime::Capabilities> route_client(
+      std::move(client_end.value()), dispatcher_);
+
+  zx::eventpair token, token_peer;
+  if (zx_status_t status = zx::eventpair::create(0, &token, &token_peer); status != ZX_OK) {
+    callback(zx::error(status));
+    return;
+  }
+  // The instance token identifies driver manager as the component the route is performed for.
+  route_client->InstanceTokenCreate(std::move(token_peer))
+      .Then(
+          [this, route_client = std::move(route_client), router = std::move(router),
+           token = std::move(token), key = std::move(key), callback = std::move(callback)](
+              fidl::WireUnownedResult<fuchsia_component_runtime::Capabilities::InstanceTokenCreate>&
+                  result) mutable {
+            if (!result.ok()) {
+              fdf_log::error("Failed to create an instance token to route '{}': {}", key,
+                             result.FormatDescription());
+              callback(zx::error(ZX_ERR_INTERNAL));
+              return;
+            }
+            if (result->is_error()) {
+              fdf_log::error("Failed to create an instance token to route '{}': {}", key,
+                             result->error_value());
+              callback(zx::error(ZX_ERR_INTERNAL));
+              return;
+            }
+
+            zx::eventpair connector, connector_peer;
+            if (zx_status_t status = zx::eventpair::create(0, &connector, &connector_peer);
+                status != ZX_OK) {
+              callback(zx::error(status));
+              return;
+            }
+            // An empty request makes the router use the request defined by its declaration.
+            route_client
+                ->DirConnectorRouterRoute(std::move(router),
+                                          fuchsia_component_runtime::wire::RouteRequest{},
+                                          std::move(token), std::move(connector_peer))
+                .Then([this, route_client = std::move(route_client),
+                       connector = std::move(connector), key = std::move(key),
+                       callback = std::move(callback)](
+                          fidl::WireUnownedResult<
+                              fuchsia_component_runtime::Capabilities::DirConnectorRouterRoute>&
+                              result) mutable {
+                  if (!result.ok()) {
+                    fdf_log::error("Failed to route '{}': {}", key, result.FormatDescription());
+                    callback(zx::error(ZX_ERR_INTERNAL));
+                    return;
+                  }
+                  if (result->is_error()) {
+                    fdf_log::error("Failed to route '{}': {}", key,
+                                   zx_status_get_string(result->error_value()));
+                    callback(zx::error(ZX_ERR_INTERNAL));
+                    return;
+                  }
+                  if (result->value()->response !=
+                      fuchsia_component_runtime::wire::RouterResponse::kSuccess) {
+                    fdf_log::warn("Routing '{}' did not produce a capability: {}", key,
+                                  result->value()->response);
+                    callback(zx::error(ZX_ERR_UNAVAILABLE));
+                    return;
+                  }
+                  OpenDirConnector(std::move(connector), std::move(callback));
+                });
+          });
+}
+
 void DictionaryUtil::CreateDictionaryWith(
-    std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
+    std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
         receivers,
-    fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)> callback) {
-  fuchsia_component_sandbox::NewCapabilityId dest = cap_id_++;
-  store_->DictionaryCreate(dest).Then(
-      [this, callback = std::move(callback), dest, receivers = std::move(receivers)](
-          fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::DictionaryCreate>&
-              result) mutable {
-        if (!result.ok() || result->is_error()) {
-          fdf_log::error("Failed to create dictionary. {}", result.FormatDescription());
+    fit::callback<void(zx::result<zx::eventpair>)> callback) {
+  zx::eventpair dest, dest_peer;
+  if (zx_status_t status = zx::eventpair::create(0, &dest, &dest_peer); status != ZX_OK) {
+    callback(zx::error(status));
+    return;
+  }
+  capabilities_->DictionaryCreate(std::move(dest_peer))
+      .Then([this, callback = std::move(callback), dest = std::move(dest),
+             receivers = std::move(receivers)](
+                fidl::WireUnownedResult<fuchsia_component_runtime::Capabilities::DictionaryCreate>&
+                    result) mutable {
+        if (!result.ok()) {
+          fdf_log::error("Failed to create dictionary: {}", result.FormatDescription());
+          callback(zx::error(ZX_ERR_INTERNAL));
+          return;
+        }
+        if (result->is_error()) {
+          fdf_log::error("Failed to create dictionary: {}", result->error_value());
           callback(zx::error(ZX_ERR_INTERNAL));
           return;
         }
 
+        // The sharder below would never complete without any shards.
+        if (receivers.empty()) {
+          callback(zx::ok(std::move(dest)));
+          return;
+        }
+
+        auto shared_dest = std::make_shared<zx::eventpair>(std::move(dest));
         std::shared_ptr<AsyncSharder> sharder = std::make_shared<AsyncSharder>(
-            receivers.size(), [callback = std::move(callback), dest](zx::result<> result) mutable {
+            receivers.size(),
+            [callback = std::move(callback), shared_dest](zx::result<> result) mutable {
               if (result.is_error()) {
                 callback(result.take_error());
                 return;
               }
-              callback(zx::ok(dest));
+              callback(zx::ok(std::move(*shared_dest)));
             });
 
         for (auto& [key, receiver] : receivers) {
-          fuchsia_component_sandbox::NewCapabilityId connector_dest = cap_id_++;
-          store_->DirConnectorCreate(connector_dest, std::move(receiver))
-              .Then(
-                  [this, dest, key, connector_dest, sharder](
-                      fidl::WireUnownedResult<
-                          fuchsia_component_sandbox::CapabilityStore::DirConnectorCreate>& result) {
-                    if (!result.ok() || result->is_error()) {
-                      fdf_log::error("Failed to create dir connector. {}",
-                                     result.FormatDescription());
-                      sharder->CompleteShardError(ZX_ERR_INTERNAL);
-                      return;
-                    }
+          zx::eventpair conn, conn_peer;
+          if (zx_status_t status = zx::eventpair::create(0, &conn, &conn_peer); status != ZX_OK) {
+            sharder->CompleteShardError(status);
+            continue;
+          }
+          capabilities_->DirConnectorCreate(std::move(conn_peer), std::move(receiver))
+              .Then([this, shared_dest, key, conn = std::move(conn),
+                     sharder](fidl::WireUnownedResult<
+                              fuchsia_component_runtime::Capabilities::DirConnectorCreate>&
+                                  result) mutable {
+                if (!result.ok()) {
+                  fdf_log::error("Failed to create dir connector: {}", result.FormatDescription());
+                  sharder->CompleteShardError(ZX_ERR_INTERNAL);
+                  return;
+                }
+                if (result->is_error()) {
+                  fdf_log::error("Failed to create dir connector: {}", result->error_value());
+                  sharder->CompleteShardError(ZX_ERR_INTERNAL);
+                  return;
+                }
 
-                    store_
-                        ->DictionaryInsert(dest,
-                                           fuchsia_component_sandbox::wire::DictionaryItem{
-                                               .key = fidl::StringView::FromExternal(key),
-                                               .value = connector_dest})
-                        .Then(
-                            [sharder](fidl::WireUnownedResult<
-                                      fuchsia_component_sandbox::CapabilityStore::DictionaryInsert>&
-                                          result) {
-                              if (!result.ok() || result->is_error()) {
-                                fdf_log::error("Failed to insert dictionary item. {}",
-                                               result.FormatDescription());
-                                sharder->CompleteShardError(ZX_ERR_INTERNAL);
-                                return;
-                              }
+                zx::result dest_dup = DuplicateEventpair(*shared_dest);
+                if (dest_dup.is_error()) {
+                  sharder->CompleteShardError(dest_dup.status_value());
+                  return;
+                }
 
-                              sharder->CompleteShard();
-                            });
-                  });
+                capabilities_
+                    ->DictionaryInsert(std::move(dest_dup.value()),
+                                       fidl::StringView::FromExternal(key), std::move(conn))
+                    .Then(
+                        [sharder,
+                         key](fidl::WireUnownedResult<
+                              fuchsia_component_runtime::Capabilities::DictionaryInsert>& result) {
+                          if (!result.ok()) {
+                            fdf_log::error("Failed to insert '{}' into dictionary: {}", key,
+                                           result.FormatDescription());
+                            sharder->CompleteShardError(ZX_ERR_INTERNAL);
+                            return;
+                          }
+                          if (result->is_error()) {
+                            fdf_log::error("Failed to insert '{}' into dictionary: {}", key,
+                                           result->error_value());
+                            sharder->CompleteShardError(ZX_ERR_INTERNAL);
+                            return;
+                          }
+
+                          sharder->CompleteShard();
+                        });
+              });
         }
       });
 }
 
 void DictionaryUtil::OpenDirConnector(
-    fuchsia_component_sandbox::wire::DirConnector connector,
+    zx::eventpair connector,
     fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback) {
-  fuchsia_component_sandbox::NewCapabilityId imported = cap_id_++;
-  store_
-      ->Import(imported,
-               fuchsia_component_sandbox::wire::Capability::WithDirConnector(std::move(connector)))
-      .Then([this, callback = std::move(callback),
-             imported](fidl::WireUnownedResult<fuchsia_component_sandbox::CapabilityStore::Import>&
-                           result) mutable {
-        if (!result.ok() || result->is_error()) {
-          fdf_log::error("Failed to import dir connector. {}", result.FormatDescription());
+  auto [client, server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  fidl::Arena arena;
+  capabilities_
+      ->DirConnectorOpen(
+          fuchsia_component_runtime::wire::CapabilitiesDirConnectorOpenRequest::Builder(arena)
+              .dir_connector(std::move(connector))
+              .channel(std::move(server))
+              .flags(fuchsia_io::Flags::kProtocolDirectory | fuchsia_io::kPermReadable)
+              .Build())
+      .Then([callback = std::move(callback), client = std::move(client)](
+                fidl::WireUnownedResult<fuchsia_component_runtime::Capabilities::DirConnectorOpen>&
+                    result) mutable {
+        if (!result.ok()) {
+          fdf_log::error("Failed to open dir connector: {}", result.FormatDescription());
+          callback(zx::error(ZX_ERR_INTERNAL));
+          return;
+        }
+        if (result->is_error()) {
+          fdf_log::error("Failed to open dir connector: {}", result->error_value());
           callback(zx::error(ZX_ERR_INTERNAL));
           return;
         }
 
-        auto [client, server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
-        fidl::Arena arena;
-        store_
-            ->DirConnectorOpen(
-                fuchsia_component_sandbox::wire::CapabilityStoreDirConnectorOpenRequest::Builder(
-                    arena)
-                    .id(imported)
-                    .server_end(std::move(server))
-                    .flags(fuchsia_io::Flags::kProtocolDirectory | fuchsia_io::kPermReadable)
-                    .Build())
-            .Then([callback = std::move(callback), client = std::move(client)](
-                      fidl::WireUnownedResult<
-                          fuchsia_component_sandbox::CapabilityStore::DirConnectorOpen>&
-                          result) mutable {
-              if (!result.ok() || result->is_error()) {
-                fdf_log::error("Failed to open dir connector. {}", result.FormatDescription());
-                callback(zx::error(ZX_ERR_INTERNAL));
-                return;
-              }
-
-              callback(zx::ok(std::move(client)));
-            });
+        callback(zx::ok(std::move(client)));
       });
 }
 
+// Component manager always provides |rights|. When the requester did not specify any flags it
+// passes PERM_READABLE | PERM_INHERIT_WRITE | PERM_INHERIT_EXECUTE, without a protocol, which
+// lets the server pick the protocol of the node being opened.
 void DirReceiverImpl::Receive(ReceiveRequestView request, ReceiveCompleter::Sync& completer) {
-  if (!request->has_subdir()) {
-    fdf_log::error("no subdir");
-    return;
-  }
-
-  if (request->subdir().get() == ".") {
+  if (request->path.empty() || request->path.get() == ".") {
     if (dir_infos_.size() != 1 || !dir_infos_[0].is_primary) {
       fdf_log::error("invalid subdir");
       return;
     }
 
     zx_handle_t directory = dir_infos_[0].dir.handle()->get();
-    zx_status_t status = fdio_open3_at(
-        directory, "/",
-        request->has_flags()
-            ? uint64_t{request->flags()}
-            : uint64_t{fuchsia_io::Flags::kProtocolDirectory | fuchsia_io::kPermReadable},
-        request->channel().release());
+    zx_status_t status = fdio_open3_at(directory, "/", uint64_t{request->rights},
+                                       request->channel.TakeChannel().release());
     if (status != ZX_OK) {
       fdf_log::error("Failed to open directory: {}", status);
     }
@@ -268,7 +346,7 @@ void DirReceiverImpl::Receive(ReceiveRequestView request, ReceiveCompleter::Sync
     return;
   }
 
-  auto subdir = std::string(request->subdir().get());
+  auto subdir = std::string(request->path.get());
   auto slash = subdir.find('/');
   if (slash == std::string::npos) {
     fdf_log::error("invalid subdir");
@@ -311,33 +389,12 @@ void DirReceiverImpl::Receive(ReceiveRequestView request, ReceiveCompleter::Sync
   // fidl::ClientEnd<fuchsia_io::Directory>,
   // but it seems to expect to connect directly to the protocol at the subdir.
   // (aka fidl::ClientEnd<user::Protocol>).
-  zx_status_t status =
-      fdio_open3_at(directory, new_subdir.c_str(),
-                    request->has_flags()
-                        ? uint64_t{request->flags()}
-                        : uint64_t{fuchsia_io::Flags::kProtocolService | fuchsia_io::kPermReadable},
-                    request->channel().release());
+  zx_status_t status = fdio_open3_at(directory, new_subdir.c_str(), uint64_t{request->rights},
+                                     request->channel.TakeChannel().release());
   if (status != ZX_OK) {
     fdf_log::error("Failed to open directory: {}", status);
     return;
   }
-}
-
-void DirReceiverImpl::handle_unknown_method(
-    fidl::UnknownMethodMetadata<fuchsia_component_sandbox::DirReceiver> metadata,
-    fidl::UnknownMethodCompleter::Sync& completer) {
-  std::string method_type;
-  switch (metadata.unknown_method_type) {
-    case fidl::UnknownMethodType::kOneWay:
-      method_type = "one-way";
-      break;
-    case fidl::UnknownMethodType::kTwoWay:
-      method_type = "two-way";
-      break;
-  };
-
-  fdf_log::warn("fuchsia_component_sandbox::DirReceiver received unknown {} method. Ordinal: {}",
-                method_type, metadata.method_ordinal);
 }
 
 }  // namespace driver_manager

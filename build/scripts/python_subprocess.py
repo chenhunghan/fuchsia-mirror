@@ -69,44 +69,88 @@ def _curate_python_env(
     return sub_env
 
 
-def _prepare_cmd_and_env(
+def cmd_and_env(
     cmd: Sequence[str],
     source_dir: pathlib.Path,
-    base_env: Mapping[str, str] | None = None,
+    env: Mapping[str, str],
     popen_kwargs: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, str]]:
     """Prepares command argv and environment for hermetic Python child execution.
 
+    Guarantees PYTHON_BIN and site-package isolation ("-S"), and prepends
+    source_dir to PYTHONPATH. Callers must explicitly provide the base env
+    mapping to ensure deterministic environment propagation.
+
     Args:
         cmd: Sequence of command string tokens to execute.
         source_dir: Root of the source tree (FUCHSIA_DIR).
-        base_env: Optional base environment mapping.
+        env: Base environment mapping to curate. Required without default to
+            prevent implicit reliance on ambient process environment state.
         popen_kwargs: Optional dictionary of keyword arguments for subprocess.
 
     Returns:
-        A tuple of (full_cmd_argv, env_dict).
+        A tuple of (full_cmd_argv, curated_env_dict).
     """
     bin_str = str(PYTHON_BIN)
-    if not cmd or cmd[0] != bin_str:
+    if not cmd:
+        full_cmd = [bin_str, "-S"]
+    elif cmd[0] == "env":
+        full_cmd = list(cmd)
+    elif cmd[0] != bin_str:
         full_cmd = [bin_str, "-S", *cmd]
     elif len(cmd) < 2 or cmd[1] != "-S":
         full_cmd = [bin_str, "-S", *cmd[1:]]
     else:
         full_cmd = list(cmd)
 
-    env = _curate_python_env(
+    curated_env = _curate_python_env(
         source_dir=source_dir,
-        base_env=base_env,
+        base_env=env,
     )
     if popen_kwargs is not None:
         ext_env = popen_kwargs.pop("env", None)
         if ext_env is not None:
-            env.update(ext_env)
+            curated_env.update(ext_env)
         # Guarantee text mode and prevent TypeError if callers pass text kwargs
         popen_kwargs.pop("text", None)
         popen_kwargs.pop("universal_newlines", None)
 
-    return full_cmd, env
+    return full_cmd, curated_env
+
+
+_prepare_cmd_and_env = cmd_and_env
+
+
+def cmd(
+    source_dir: pathlib.Path,
+    script: pathlib.Path,
+    *args: str,
+    base_env: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Constructs a self-contained command with hermetic PYTHONPATH and PYTHON_BIN.
+
+    Returns ['env', f'PYTHONPATH={pythonpath}', PYTHON_BIN, '-S', str(script), *args],
+    leveraging cmd_and_env() so the returned argv can be executed directly
+    by any subprocess runner or command-chain compositor without requiring
+    caller-managed environment setup.
+
+    Args:
+        source_dir: Root directory of the source checkout (FUCHSIA_DIR), used to
+            curate PYTHONPATH for in-tree first-party imports.
+        script: Path to the in-tree Python script to execute.
+        *args: Command-line argument string tokens passed to the script.
+        base_env: Optional base environment mapping. Defaults to an empty dict
+            to guarantee hermetic isolation from ambient process environment paths.
+
+    Returns:
+        A list of command tokens prefixed with 'env' and curated 'PYTHONPATH'.
+    """
+    clean_base = {} if base_env is None else base_env
+    full_cmd, env = cmd_and_env(
+        [str(script), *args], source_dir, env=clean_base
+    )
+    pythonpath = env["PYTHONPATH"]
+    return ["env", f"PYTHONPATH={pythonpath}", *full_cmd]
 
 
 def run(
@@ -136,10 +180,11 @@ def run(
         ValueError: If source_dir is empty.
         subprocess.CalledProcessError: If check=True is passed and the command fails.
     """
-    full_cmd, env = _prepare_cmd_and_env(
+    base = os.environ if base_env is None else base_env
+    full_cmd, env = cmd_and_env(
         cmd=cmd,
         source_dir=source_dir,
-        base_env=base_env,
+        env=base,
         popen_kwargs=popen_kwargs,
     )
     return subprocess.run(

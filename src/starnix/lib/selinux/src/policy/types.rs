@@ -72,6 +72,9 @@ pub type TypeSet = IdSet<TypeId>;
 
 impl Validate for TypeId {
     fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
+        // Validates that `self` is a defined primary type or attribute in `Types::by_id`.
+        // Fields that construct a `SecurityContext` and therefore require a concrete
+        // `TypeKind::Type` must call `Types::validate_concrete_type` instead.
         policy
             .types
             .get_by_id(*self)
@@ -236,10 +239,7 @@ impl Validate for Types {
         for item in self.ordered.iter() {
             match item.properties {
                 TypeKind::Alias => {
-                    let Some(target) = self.get_by_id(item.id) else {
-                        return Err(ValidateError::InvalidTypeAlias { id: item.id.as_u32() });
-                    };
-                    if target.properties != TypeKind::Type || item.bounds.is_some() {
+                    if self.validate_concrete_type(item.id).is_err() || item.bounds.is_some() {
                         return Err(ValidateError::InvalidTypeAlias { id: item.id.as_u32() });
                     }
                 }
@@ -261,6 +261,17 @@ impl Types {
     /// Maximum number of types permitted in a `typebounds` hierarchy (matching SELinux's
     /// `POLICYDB_BOUNDS_MAXDEPTH = 4`, i.e. up to 3 `typebounds` links).
     const MAX_TYPEBOUNDS_DEPTH: usize = 4;
+
+    /// Validates that `id` refers to a concrete type (`TypeKind::Type`), not a type attribute.
+    pub(super) fn validate_concrete_type(&self, id: TypeId) -> Result<(), ValidateError> {
+        let type_ = self
+            .get_by_id(id)
+            .ok_or_else(|| ValidateError::UnknownId { kind: "type", id: id.as_u32() })?;
+        if type_.properties == TypeKind::Attribute {
+            return Err(ValidateError::UnexpectedTypeAttribute { id: id.as_u32() });
+        }
+        Ok(())
+    }
 
     /// Recursively validates the `typebounds` chain starting at `initial_id`.
     fn validate_bounds(
@@ -294,11 +305,24 @@ impl Types {
         Some(&self.ordered[*index])
     }
 
-    pub fn get_by_name(&self, name: &[u8]) -> Option<&Type> {
+    fn get_entry_by_name(&self, name: &[u8]) -> Option<&Type> {
         let hash = hash_name(&self.hasher, name);
         let idx = self.by_name.find(hash, |&idx| self.ordered[idx].name.as_ref() == name)?;
-        let item = &self.ordered[*idx];
-        (item.properties != TypeKind::Attribute).then_some(item)
+        Some(&self.ordered[*idx])
+    }
+
+    pub fn get_by_name(&self, name: &[u8]) -> Option<&Type> {
+        self.get_entry_by_name(name).filter(|item| item.properties != TypeKind::Attribute)
+    }
+
+    #[cfg(test)]
+    pub(super) fn get_attribute_by_name(&self, name: &[u8]) -> Option<&Type> {
+        self.get_entry_by_name(name).filter(|item| item.properties == TypeKind::Attribute)
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_bounds_for_test(&mut self, id: TypeId, bounds: Option<TypeId>) {
+        self.ordered.iter_mut().find(|t| t.id == id).unwrap().bounds = bounds;
     }
 }
 
@@ -328,6 +352,7 @@ impl Parse for TypeAttributeMaps {
 mod tests {
     use super::*;
     use crate::policy::metadata::PolicyVersion;
+    use crate::policy::traits::HasPolicyId;
 
     #[test]
     fn test_types_lookup() {
@@ -679,6 +704,29 @@ mod tests {
         assert_eq!(
             type_bounded_by_attr.validate(&policy),
             Err(ValidateError::InvalidTypeBounds { id: 2 })
+        );
+    }
+
+    #[test]
+    fn test_validate_concrete_type_rejects_attribute() {
+        let policy_bytes =
+            include_bytes!("../../testdata/micro_policies/allow_a_t_b_attr_class0_perm0_policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
+
+        let concrete_id = policy.types().get_by_name(b"a_t").expect("look up a_t").id();
+        let attr_id = policy.types().get_attribute_by_name(b"b_attr").expect("look up b_attr").id();
+        let unknown_id = TypeId::for_test(999);
+
+        assert_eq!(concrete_id.validate(&policy), Ok(()));
+        assert_eq!(attr_id.validate(&policy), Ok(()));
+        assert_eq!(policy.types().validate_concrete_type(concrete_id), Ok(()));
+        assert_eq!(
+            policy.types().validate_concrete_type(attr_id),
+            Err(ValidateError::UnexpectedTypeAttribute { id: attr_id.as_u32() })
+        );
+        assert_eq!(
+            policy.types().validate_concrete_type(unknown_id),
+            Err(ValidateError::UnknownId { kind: "type", id: 999 })
         );
     }
 }

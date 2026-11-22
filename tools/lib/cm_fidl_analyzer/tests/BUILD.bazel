@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    tests = [":cm_fidl_analyzer_tests"],
+    visibility = ["//tools:__pkg__"],
+)
+
+host_rustc_test(
+    name = "cm_fidl_analyzer_tests",
+    srcs = [
+        "src/availability.rs",
+        "src/dictionary.rs",
+        "src/lib.rs",
+        "src/rights.rs",
+        "src/routing.rs",
+        "src/storage.rs",
+        "src/storage_admin.rs",
+    ],
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
+        "//sdk/fidl/fuchsia.component.internal:fuchsia.component.internal_rust_common",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust_common",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_common",
+        # Depend on zx-status crate instead of zx so that this builds for host.
+        "//sdk/rust/zx-status",
+        "//src/lib/fuchsia",
+        "//src/sys/component_manager/lib/router_error",
+        "//src/sys/lib/capability_source",
+        "//src/sys/lib/cm_config",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/cm_rust/testing",
+        "//src/sys/lib/cm_types",
+        "//src/sys/lib/component_id_index",
+        "//src/sys/lib/config_encoder",
+        "//src/sys/lib/moniker",
+        "//src/sys/lib/routing",
+        "//src/sys/lib/routing/testing:routing_test_helpers",
+        "//src/sys/lib/runtime_capabilities",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//tools/lib/cm_fidl_analyzer",
+    ],
+)

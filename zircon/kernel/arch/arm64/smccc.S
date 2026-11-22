@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 #include <lib/arch/asm.h>
-#include <arch/arm64/asm.h>
+#include <asm.h>
 #include <arch/asm_macros.h>
 
 #include "smccc.h"

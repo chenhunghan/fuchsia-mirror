@@ -207,6 +207,15 @@ TEST_F(ControllerTest, ReadCorpus) {
   EXPECT_EQ(live_corpus[0], input4);
   EXPECT_EQ(live_corpus[1], input3);
   EXPECT_EQ(live_corpus[2], input0);
+
+  // Errors from CorpusReader still complete the ReadCorpus FIDL response.
+  FakeCorpusReader error_reader(executor());
+  error_reader.set_error_after(1);
+  Bridge<> error_bridge;
+  controller->ReadCorpus(CorpusType::LIVE, error_reader.NewBinding(),
+                         error_bridge.completer.bind());
+  FUZZING_EXPECT_OK(ConsumeBridge(error_bridge));
+  RunUntilIdle();
 }
 
 TEST_F(ControllerTest, WriteDictionary) {

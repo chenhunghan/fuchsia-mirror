@@ -188,10 +188,10 @@ There are various specialized tests in Fuchsia:
 * [Kernel tests](#kernel-tests)
 * [Compatibility tests](#compatibility-tests)
 * [Performance tests](#performance-tests)
-* [Stress and longetivity tests](#stress-longetivity-tests)
+* [Stress and longevity tests](#stress-and-longevity-tests)
 * [Fuzzing](#fuzzing)
 
-### Kernel tests
+### Kernel tests {#kernel-tests}
 
 Testing the kernel deserves special attention because of the unique requirements
 and constraints that are involved. Tests for the kernel cover the kernel’s
@@ -219,12 +219,12 @@ code that compiles into the kernel image and runs in kernelspace. These tests
 are even more difficult to write and to troubleshoot, but have the most access
 to kernel internals, and can be run even when userspace bootstrapping is broken.
 This is sometimes necessary for testing. For instance,
-[`timer_tests.cc`][timer-tests] tests timer deadlines, which cannot be tested
+[`timer_tests.rs`][timer-tests] tests timer deadlines, which cannot be tested
 precisely just by exercising kernel APIs from userspace because the kernel
 reserves some [slack][timer-slack] in how it may coalesce timers set from
 userspace.
 
-### Compatibility tests
+### Compatibility tests {#compatibility-tests}
 
 Compatibility tests, sometimes known as conformance tests, extend the notion of
 correctness to meeting a given specification and complying with it over time. A
@@ -255,7 +255,7 @@ For example:
   [Inspect validator tests][inspect-validator] ensure binary-compatibility
   between all reader/writer implementations.
 
-### Performance tests
+### Performance tests {#performance-tests}
 
 Performance tests exercise a certain workload, such as a synthetic benchmark or
 a CUJ, and measure performance metrics such as time to completion or resource
@@ -279,7 +279,7 @@ For instance:
 - [Netstack benchmarks][netstack-benchmarks] test the network stack’s
   performance using micro-benchmarks for hot code.
 
-### Stress and longevity tests
+### Stress and longevity tests {#stress-and-longevity-tests}
 
 Stress tests exercise a system in ways that amount to exceptionally high load,
 but are otherwise expected within the system's contract. Their goal is to
@@ -307,7 +307,7 @@ See also:
 - [Stress tests][stress-tests]
 - [Rust stress test library][rust-stress-test-lib]
 
-### Fuzzing
+### Fuzzing {#fuzzing}
 
 Fuzzers are programs that attempt to produce valid interactions with the code
 under test that will result in an erroneous condition, such as a crash. Fuzzing
@@ -335,7 +335,7 @@ See also:
 [channel]: /docs/reference/kernel_objects/channel.md
 [continuous-integration]: https://martinfowler.com/articles/continuousIntegration.html
 [contract-test]: https://martinfowler.com/bliki/ContractTest.html
-[coverage-no-e2e]: /docs/contribute/testing/coverage.md#end-to-end_e2e_tests_exclusion
+[coverage-no-e2e]: /docs/contribute/testing/coverage.md#end-to-end-e2e-tests-exclusion
 [cpuperf]: /src/performance/cpuperf/README.md
 [ctf]: /sdk/ctf/README.md
 [dependency-injection]: https://en.m.wikipedia.org/wiki/Dependency_injection
@@ -374,7 +374,7 @@ See also:
 [run-test-component]: /docs/development/run/run-test-component.md
 [rust-stress-test-lib]: /docs/development/testing/rust_stress_test_library.md
 [sanitizers]: /docs/contribute/testing/sanitizers.md
-[sanitizers-supported-configs]: /docs/contribute/testing/sanitizers.md#supported_configurations
+[sanitizers-supported-configs]: /docs/contribute/testing/sanitizers.md#supported-configurations
 [stress-tests]: /docs/development/testing/stress_tests.md
 [syscalls]: /reference/syscalls
 [test-coverage]: /docs/contribute/testing/coverage.md
@@ -382,7 +382,7 @@ See also:
 [testing-integration]: /docs/development/testing/components/integration_testing.md
 [testing-v2]: /docs/development/testing/components/README.md
 [timer-slack]: /docs/concepts/kernel/timer_slack.md
-[timer-tests]: /zircon/kernel/tests/timer_tests.cc
+[timer-tests]: /zircon/kernel/tests/timer_tests.rs
 [timers-test]: https://fuchsia.googlesource.com/fuchsia/+/main/src/zircon/tests/timers/timers.cc
 [userboot]: /docs/concepts/process/userboot.md
 [utest-core]: /zircon/system/utest/core/README.md

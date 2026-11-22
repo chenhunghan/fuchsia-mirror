@@ -6,7 +6,6 @@
 #define SRC_MEDIA_AUDIO_DRIVERS_AML_G12_TDM_DAI_H_
 
 #include <fidl/fuchsia.hardware.audio/cpp/wire.h>
-#include <fuchsia/hardware/audio/cpp/banjo.h>
 #include <fuchsia/hardware/audio/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
@@ -35,14 +34,13 @@ using AmlG12TdmDaiDeviceType =
     ddk::Device<AmlG12TdmDai, ddk::Messageable<fuchsia_hardware_audio::DaiConnector>::Mixin>;
 
 class AmlG12TdmDai : public AmlG12TdmDaiDeviceType,
-                     public ddk::DaiProtocol<AmlG12TdmDai, ddk::base_protocol>,
+                     public ddk::internal::base_protocol,
                      public ::fuchsia::hardware::audio::RingBuffer,
                      public ::fuchsia::hardware::audio::Dai {
  public:
   AmlG12TdmDai(zx_device_t* parent, fdf::PDev pdev);
 
   void DdkRelease();
-  zx_status_t DaiConnect(zx::channel channel);
   zx_status_t InitPDev();
   void Shutdown();
 
@@ -51,7 +49,7 @@ class AmlG12TdmDai : public AmlG12TdmDaiDeviceType,
   void Stop(StopCallback callback) override;  // Protected for unit test.
 
  private:
-  // FIDL LLCPP method for fuchsia.hardware.audio.DaiConnector.
+  // FIDL wire method for fuchsia.hardware.audio.DaiConnector.
   void Connect(ConnectRequestView request, ConnectCompleter::Sync& completer) override;
 
   // FIDL HLCPP methods for fuchsia.hardware.audio.Dai.

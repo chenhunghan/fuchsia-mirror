@@ -76,8 +76,7 @@ fuchsia_package("subpackaged-component") {
 
 # TODO(https://fxbug.dev/564213227): Kept above the BAZEL2GN SENTINEL because
 # these test packages depend on GN-only
-# //src/storage/testing:storage_driver_test_realm and
-# //src/sys/pkg/bin/pkg-cache:production-component-and-config.
+# //src/storage/testing:storage_driver_test_realm.
 fuchsia_test_package("base-resolver-as-a-component-resolver-tests") {
   test_components = [ ":root" ]
   test_specs = {
@@ -90,7 +89,7 @@ fuchsia_test_package("base-resolver-as-a-component-resolver-tests") {
     ":integration-test",
     ":mock-component",
     ":mock-superpackage-component",
-    "//src/sys/pkg/bin/pkg-cache:production-component-and-config",
+    "//src/sys/pkg/bin/pkg-cache:component",
   ]
 
   subpackages = [ ":subpackaged-component" ]
@@ -108,7 +107,7 @@ fuchsia_test_package("base-resolver-as-a-component-resolver-tests-fxblob") {
     ":integration-test",
     ":mock-component",
     ":mock-superpackage-component",
-    "//src/sys/pkg/bin/pkg-cache:production-component-and-config",
+    "//src/sys/pkg/bin/pkg-cache:component",
   ]
 
   subpackages = [ ":subpackaged-component" ]

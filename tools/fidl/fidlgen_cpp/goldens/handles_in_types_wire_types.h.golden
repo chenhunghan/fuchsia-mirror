@@ -338,9 +338,9 @@ class UnionWithHandle {
   UnionWithHandle(UnionWithHandle&& other);
   UnionWithHandle& operator=(UnionWithHandle&& other);
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kH = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_handlesintypes::wire::UnionWithHandle::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -360,7 +360,7 @@ class UnionWithHandle {
   void _CloseHandles();
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kH = 1,  // 0x1
   };
@@ -380,8 +380,8 @@ class EmptyResourceUnion {
   EmptyResourceUnion(EmptyResourceUnion&& other);
   EmptyResourceUnion& operator=(EmptyResourceUnion&& other);
 
-  enum class Tag : fidl_xunion_tag_t {
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+  enum class Tag : fidl_union_tag_t {
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_handlesintypes::wire::EmptyResourceUnion::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -393,7 +393,7 @@ class EmptyResourceUnion {
   void _CloseHandles();
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
   };
   void _Move(EmptyResourceUnion&& other);

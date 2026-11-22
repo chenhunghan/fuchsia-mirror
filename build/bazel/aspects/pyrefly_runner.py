@@ -10,7 +10,7 @@ import os
 import pathlib
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 
 class _PyreflyOutputError(Exception):
@@ -42,7 +42,7 @@ def _format_pyrefly_errors(output: str) -> str | None:
     return "\n".join(lines) if lines else None
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--pyrefly",
@@ -110,8 +110,8 @@ def main(argv: Sequence[str]) -> int:
     cmd.extend(files_to_check)
 
     # Strip ambient PYTHONPATH so host packages never leak into type checking.
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
-    result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    clean_env = {k: v for k, v in env.items() if k != "PYTHONPATH"}
+    result = subprocess.run(cmd, env=clean_env, capture_output=True, text=True)
     if result.returncode != 0:
         stdout = result.stdout.strip()
         stderr = result.stderr.strip()
@@ -137,4 +137,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

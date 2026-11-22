@@ -35,15 +35,9 @@ import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-ENV_FX_INTERNAL_BAZEL_BESPROXY = "FX_INTERNAL_BAZEL_BESPROXY"
+from build.resultstore import rsclient
 
 _DEFAULT_FUCHSIA_DIR = Path(__file__).resolve().parent.parent.parent
-
-_PREBUILT_RSCLIENT_DIR = Path("prebuilt/rsclient")
-_BIN_DIR = Path("bin")
-
-_BUILDMINDER_WRAP_SH = Path("buildminder-wrap.sh")
-_BUILDMINDER_BIN = Path("buildminder")
 
 
 def _get_host_tag() -> str:
@@ -74,8 +68,8 @@ def _get_host_tag() -> str:
 
 def _rsclient_bin_dir(fuchsia_dir: Path, host_tag: str | None = None) -> Path:
     """Returns the prebuilt rsclient bin directory for the given host tag."""
-    tag = host_tag or _get_host_tag()
-    return fuchsia_dir / _PREBUILT_RSCLIENT_DIR / tag / _BIN_DIR
+    tag = host_tag if host_tag is not None else _get_host_tag()
+    return rsclient.bin_dir(fuchsia_dir, tag)
 
 
 def generate_buildminder_prefix(
@@ -86,8 +80,8 @@ def generate_buildminder_prefix(
 ) -> Iterable[str]:
     """Yields arguments for the buildminder-wrap.sh command prefix."""
     bin_dir = _rsclient_bin_dir(fuchsia_dir)
-    buildminder_wrap = bin_dir / _BUILDMINDER_WRAP_SH
-    buildminder = bin_dir / _BUILDMINDER_BIN
+    buildminder_wrap = bin_dir / rsclient.BUILDMINDER_WRAP_SH
+    buildminder = bin_dir / rsclient.BUILDMINDER_BIN
 
     yield str(buildminder_wrap)
     yield "--buildminder"
@@ -143,7 +137,7 @@ def buildminder_env(
         A new environment dictionary configured for Buildminder execution.
     """
     env = dict(base_env)
-    env[ENV_FX_INTERNAL_BAZEL_BESPROXY] = "1"
+    env[rsclient.ENV_FX_INTERNAL_BAZEL_BESPROXY] = "1"
 
     # Prepend fuchsia_dir to PYTHONPATH so child Python processes can import
     # build tools hermetically without breaking any existing PYTHONPATH entries.
@@ -205,7 +199,7 @@ def _parse_args(
     return parsed_args, extra_bm_options, wrapped_command
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     args, bm_options, command = _parse_args(argv)
     final_cmd = _compose_buildminder_command(
         command=command,
@@ -220,7 +214,7 @@ def main(argv: Sequence[str]) -> int:
             file=sys.stderr,
         )
     child_env = buildminder_env(
-        base_env=os.environ,
+        base_env=env,
         fuchsia_dir=args.fuchsia_dir,
         python_dir=Path(sys.executable).parent,
     )
@@ -229,4 +223,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

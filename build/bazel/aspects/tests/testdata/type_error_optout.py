@@ -3,6 +3,13 @@
 # found in the LICENSE file.
 """Fixture with a type error, verifying the tags = ["no-pyrefly"] opt-out."""
 
+import unittest
+
 
 def mistyped() -> int:
     return "not an int"
+
+
+class TypeErrorOptoutTest(unittest.TestCase):
+    def test_runs_despite_type_error(self) -> None:
+        self.assertEqual(mistyped(), "not an int")

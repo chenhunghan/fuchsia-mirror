@@ -2,13 +2,189 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/components:structured_config.bzl", "fuchsia_structured_config_rust_lib")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
 package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/connectivity/bluetooth:bluetooth_tests.
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":bt-a2dp-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
 
 exports_files(
     [
-        "meta/bt-a2dp-eager-with-audio-consumer.core_shard.cml",
-        "meta/bt-a2dp-eager.core_shard.cml",
         "meta/bt-a2dp-common.core_shard.cml",
+        "meta/bt-a2dp-eager.core_shard.cml",
+        "meta/bt-a2dp-eager-with-audio-consumer.core_shard.cml",
+        "meta/bt-a2dp-lazy.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+exports_files(
+    ["meta/bt-a2dp.shard.cml"],
+    visibility = ["//src/connectivity/bluetooth/tests/bt-manifest-integration-tests:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/avrcp_relay.rs",
+        "src/config.rs",
+        "src/encoding.rs",
+        "src/latm.rs",
+        "src/main.rs",
+        "src/media.rs",
+        "src/media/encoding_source.rs",
+        "src/media/encoding_source/audio_out_stream.rs",
+        "src/media/encoding_source/big_ben_stream.rs",
+        "src/media/offload_source.rs",
+        "src/media/player.rs",
+        "src/media/player_sink.rs",
+        "src/pcm_audio.rs",
+        "src/stream_controller.rs",
+        "src/volume_relay.rs",
+    ],
+    binary_name = "bt_a2dp",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":a2dp_profile_config",
+        "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust",
+        "//sdk/fidl/fuchsia.bluetooth.a2dp:fuchsia.bluetooth.a2dp_rust",
+        "//sdk/fidl/fuchsia.bluetooth.avrcp:fuchsia.bluetooth.avrcp_rust",
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.internal.a2dp:fuchsia.bluetooth.internal.a2dp_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_rust",
+        "//sdk/fidl/fuchsia.media.sessions2:fuchsia.media.sessions2_rust",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/async-helpers",
+        "//src/connectivity/bluetooth/lib/battery-client",
+        "//src/connectivity/bluetooth/lib/bt-a2dp",
+        "//src/connectivity/bluetooth/lib/bt-avdtp",
+        "//src/connectivity/bluetooth/lib/bt-metrics",
+        "//src/connectivity/bluetooth/lib/fuchsia-audio-codec",
+        "//src/connectivity/bluetooth/lib/fuchsia-audio-device",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/lib/profile-client",
+        "//src/lib/async-utils",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/derive",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl_table_validation",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bitfield",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:nom",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "bt_a2dp",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "bt-a2dp",
+    includes = [
+        "meta/bt-a2dp.shard.cml",
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/bt-a2dp.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "a2dp_profile_config",
+    cm_label = ":manifest",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/connectivity/bluetooth/profiles/tests/bt-a2dp-loopback:__pkg__",
+        "//src/connectivity/bluetooth/profiles/tests/bt-a2dp-source-integration-tests:__pkg__",
+    ],
+    deps = [":bin_packaged_bin"],
+)
+
+rustc_test(
+    name = "bt_a2dp_bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
+        "//src/connectivity/bluetooth/lib/async-helpers:async-test-helpers",
+        "//src/connectivity/bluetooth/lib/profile-client:test-profile-server",
+        "//src/connectivity/bluetooth/testing/bt-channel-test-support",
+        "//src/connectivity/bluetooth/testing/test-battery-manager",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures-test",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "bt-a2dp-tests",
+    unit_tests = [":bt_a2dp_bin_test"],
+)
+
+rustc_test(
+    name = "encoding_integration_bin",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    crate_features = ["test_encoding"],
+    # Sets the GN `output_name` to match `program.binary` in
+    # `meta/bt-a2dp-encoding-tests.cml`.
+    crate_name = "bt_a2dp_encoding_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
+        "//src/connectivity/bluetooth/lib/async-helpers:async-test-helpers",
+        "//src/connectivity/bluetooth/lib/profile-client:test-profile-server",
+        "//src/connectivity/bluetooth/testing/bt-channel-test-support",
+        "//src/connectivity/bluetooth/testing/test-battery-manager",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/test_util",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures-test",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
 )

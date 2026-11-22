@@ -6,7 +6,7 @@ use fdomain_fuchsia_kernel as fstats;
 use fdomain_fuchsia_power_metrics::{self as fmetrics, CpuLoad, Metric};
 use ffx_cpu_load_args as args_mod;
 use ffx_writer::{ToolIO, VerifiedMachineWriter};
-use fho::{FfxMain, FfxTool};
+use fho::{Deferred, FfxMain, FfxTool, deferred};
 use serde::Serialize;
 use target_holders::{RemoteControlProxyHolder, moniker};
 
@@ -53,8 +53,10 @@ pub struct CpuLoadTool {
     #[command]
     cmd: args_mod::CpuLoadCommand,
     rcs_proxy: RemoteControlProxyHolder,
-    #[with(moniker("/core/metrics-logger"))]
-    cpu_logger: fmetrics::RecorderProxy,
+    // Deferred so that `--duration`, which only needs fuchsia.kernel.Stats, works on
+    // products that do not include metrics-logger.
+    #[with(deferred(moniker("/core/metrics-logger")))]
+    cpu_logger: Deferred<fmetrics::RecorderProxy>,
 }
 
 fho::embedded_plugin!(CpuLoadTool);
@@ -68,6 +70,7 @@ impl FfxMain for CpuLoadTool {
         let CpuLoadTool { cmd, rcs_proxy, cpu_logger, .. } = self;
         match (cmd.subcommand, cmd.duration) {
             (Some(subcommand), None) => {
+                let cpu_logger = cpu_logger.await?;
                 match subcommand {
                     args_mod::SubCommand::Start(start_cmd) => start(cpu_logger, start_cmd).await?,
                     args_mod::SubCommand::Stop(_) => stop(cpu_logger).await?,
@@ -198,9 +201,11 @@ pub async fn stop(cpu_logger: fmetrics::RecorderProxy) -> fho::Result<()> {
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
+    use fdomain_client::fidl::ServerEnd;
     use fdomain_fuchsia_power_metrics::{self as fmetrics};
-    use futures::StreamExt;
+    use ffx_writer::TestBuffers;
     use futures::channel::mpsc;
+    use futures::{StreamExt, TryStreamExt};
     use std::time::Duration;
     use target_holders::{fake_async_proxy, fake_proxy};
 
@@ -260,6 +265,71 @@ mod tests {
             }
             e => panic!("Failed to get duration_request: {:?}", e),
         }
+    }
+
+    /// Confirms that `--duration` measures CPU load without connecting to metrics-logger, which
+    /// some products (e.g. userdebug builds) do not include.
+    #[fuchsia::test]
+    async fn test_duration_does_not_need_metrics_logger() {
+        let client = fdomain_local::local_client_empty();
+        let scope = fuchsia_async::Scope::new();
+        let scope_handle = scope.to_handle();
+
+        let mut capability_handlers = std::collections::HashMap::new();
+        capability_handlers.insert(
+            "svc/fuchsia.kernel.Stats".to_string(),
+            Box::new(move |server_channel| {
+                let mut stream =
+                    ServerEnd::<fstats::StatsMarker>::new(server_channel).into_stream();
+                scope_handle.spawn_local(async move {
+                    while let Ok(Some(req)) = stream.try_next().await {
+                        match req {
+                            fstats::StatsRequest::GetCpuLoad { responder, .. } => {
+                                responder.send(&[25.0, 50.0]).unwrap();
+                            }
+                            request => panic!("Unexpected request: {:?}", request),
+                        }
+                    }
+                });
+            }) as Box<dyn Fn(fdomain_client::Channel) + 'static>,
+        );
+        let rcs = testing_lib::setup_fake_rcs(
+            client,
+            testing_lib::FakeRcsConfig { capability_handlers, ..Default::default() },
+        );
+
+        let tool = CpuLoadTool {
+            cmd: args_mod::CpuLoadCommand { duration: Some(ONE_SEC), subcommand: None },
+            rcs_proxy: rcs.into(),
+            cpu_logger: Deferred::from_output(Err(fho::user_error!(
+                "metrics-logger should not be connected"
+            ))),
+        };
+        let buffers = TestBuffers::default();
+        let writer = VerifiedMachineWriter::new_test(None, &buffers);
+        tool.main(writer).await.unwrap();
+
+        assert_eq!(buffers.into_stdout_str(), "CPU 0: 25.00%\nCPU 1: 50.00%\nTotal: 75.00%\n");
+    }
+
+    /// Confirms that the start/stop subcommands report a missing metrics-logger.
+    #[fuchsia::test]
+    async fn test_subcommand_reports_missing_metrics_logger() {
+        let client = fdomain_local::local_client_empty();
+        let rcs = testing_lib::setup_fake_rcs(client, testing_lib::FakeRcsConfig::default());
+        let tool = CpuLoadTool {
+            cmd: args_mod::CpuLoadCommand {
+                duration: None,
+                subcommand: Some(args_mod::SubCommand::Stop(args_mod::StopCommand {})),
+            },
+            rcs_proxy: rcs.into(),
+            cpu_logger: Deferred::from_output(Err(fho::user_error!("no metrics-logger"))),
+        };
+        let buffers = TestBuffers::default();
+        let writer = VerifiedMachineWriter::new_test(None, &buffers);
+
+        let err = tool.main(writer).await.unwrap_err();
+        assert!(err.to_string().contains("no metrics-logger"), "unexpected error: {err}");
     }
 
     #[fuchsia::test]

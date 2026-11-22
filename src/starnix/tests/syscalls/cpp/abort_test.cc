@@ -50,11 +50,7 @@ TEST(AbortTest, AbortFromSighandler) {
   helper.ExpectSignal(SIGABRT);
   helper.OnlyWaitForForkedChildren();
   helper.RunInForkedProcess([] {
-    struct sigaction sa{};
-    sa.sa_handler = SigQuitHandler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    SAFE_SYSCALL(sigaction(SIGQUIT, &sa, nullptr));
+    test_helper::ScopedSigAction scoped_sigquit(SIGQUIT, SigQuitHandler);
     raise(SIGQUIT);
   });
   ASSERT_TRUE(helper.WaitForChildren());
@@ -73,16 +69,8 @@ TEST(AbortTest, AbortFromNestedSighandler) {
   helper.ExpectSignal(SIGABRT);
   helper.OnlyWaitForForkedChildren();
   helper.RunInForkedProcess([] {
-    struct sigaction sa{};
-    sa.sa_handler = SigUsr1Handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    SAFE_SYSCALL(sigaction(SIGUSR1, &sa, nullptr));
-
-    sa.sa_handler = SigUsr2Handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    SAFE_SYSCALL(sigaction(SIGUSR2, &sa, nullptr));
+    test_helper::ScopedSigAction scoped_sigusr1(SIGUSR1, SigUsr1Handler);
+    test_helper::ScopedSigAction scoped_sigusr2(SIGUSR2, SigUsr2Handler);
     raise(SIGUSR1);
   });
   ASSERT_TRUE(helper.WaitForChildren());

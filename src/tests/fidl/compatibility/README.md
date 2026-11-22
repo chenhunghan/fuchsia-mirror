@@ -77,7 +77,7 @@ calling the client back directly, the server sends the `EchoEvent()`.
 
 The code for the compatibility tests are located at
 `src/tests/fidl/compatibility`. It contains FIDL definitions and the server
-implementations for Dart, HLCPP, LLCPP, and Rust.
+implementations for Dart, HLCPP, C++ wire, and Rust.
 
 The test runner and all of the test server components are in a single package,
 `fuchsia-pkg://fuchsia.com/fidl-compatibility-test`.

@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <optional>
+#include <utility>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
@@ -86,6 +87,35 @@ view_tree::SubtreeHitTester GenerateHitTester(
                                    link_child_to_parent_transform_map);
   return std::move(snapshot->hit_tester);
 }
+
+namespace {
+
+struct TestView {
+  fuchsia_ui_views::ViewRefControl control_ref;
+  zx_koid_t koid = ZX_KOID_INVALID;
+  std::shared_ptr<UberStruct> uber_struct;
+};
+
+// Keeps `control_ref` in the returned struct so the `ViewRef` eventpair stays peered for the
+// lifetime of the test scope, and returns mutable `std::shared_ptr<UberStruct>` so callers can
+// configure or update hit and clip regions while `uber_structs` holds a `const` alias.
+TestView AddTestView(UberStruct::InstanceMap& uber_structs,
+                     const TransformGraph::TopologyVector& local_topology) {
+  FX_DCHECK(!local_topology.empty());
+  auto [control_ref, view_ref] = scenic::cpp::ViewRefPair::New();
+  const zx_koid_t koid = utils::ExtractKoid(view_ref);
+  auto uber_struct = std::make_shared<UberStruct>();
+  uber_struct->local_topology.assign(local_topology.begin(), local_topology.end());
+  uber_struct->view_ref = std::make_shared<const ViewRef>(std::move(view_ref));
+  uber_structs[local_topology[0].handle.GetInstanceId()] = uber_struct;
+  return {
+      .control_ref = std::move(control_ref),
+      .koid = koid,
+      .uber_struct = std::move(uber_struct),
+  };
+}
+
+}  // namespace
 
 TEST(GlobalTopologyDataTest, GlobalTopologyUnknownGraph) {
   TransformHandle unknown_handle = {1, 1};
@@ -1158,6 +1188,741 @@ TEST(GlobalTopologyDataTest, HitTest_NonRelevantClipRegions) {
         EXPECT_EQ(result.hits[0], view_ref_child_koid);
       }
     }
+  }
+}
+
+// Verifies that an embedded child View with a semantically invisible hit region does not expose
+// its parent View to semantic hit tests at points covered by the child.
+TEST(GlobalTopologyDataTest, HitTest_ChildSemanticallyInvisibleDoesNotExposeParent) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 1}, {link_2, 0}},
+      {{{2, 0}, 0}},
+  };
+
+  auto [control_ref_parent, parent_koid, parent_uber_struct] =
+      AddTestView(uber_structs, vectors[0]);
+  parent_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+  parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+  MakeLink(links, 2);
+  auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+  // Outside the child, the parent receives both regular and semantic hits.
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(parent_koid));
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+              ::testing::ElementsAre(parent_koid));
+
+  // Over the child, regular hit testing hits the child first while semantic hit testing does not
+  // fall through to the parent.
+  EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(child_koid, parent_koid));
+  EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+}
+
+// Verifies that a front-most sibling View with a semantically invisible hit region does not expose
+// an earlier sibling View or their shared parent View to semantic hit tests.
+TEST(GlobalTopologyDataTest, HitTest_SiblingSemanticallyInvisibleDoesNotExposeSiblingOrParent) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+  const auto link_3 = GetInternalLinkHandle(3);
+
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 2}, {link_2, 0}, {link_3, 0}},
+      {{{2, 0}, 0}},
+      {{{3, 0}, 0}},
+  };
+
+  auto [control_ref_parent, parent_koid, parent_uber_struct] =
+      AddTestView(uber_structs, vectors[0]);
+  parent_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 1, .height = 1});
+  parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  auto [control_ref_s1, s1_koid, s1_uber_struct] = AddTestView(uber_structs, vectors[1]);
+  s1_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  auto [control_ref_s2, s2_koid, s2_uber_struct] = AddTestView(uber_structs, vectors[2]);
+  s2_uber_struct->local_hit_regions_map[{3, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+  MakeLink(links, 2);
+  MakeLink(links, 3);
+  auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(s2_koid, s1_koid, parent_koid));
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+}
+
+// Verifies that a parent View's semantically invisible top overlay passes semantic hit tests
+// through to both an embedded child View and the parent's own lower transforms (such as Flutter's
+// `ExternalViewEmbedder` input interceptor transform).
+TEST(GlobalTopologyDataTest,
+     HitTest_ParentSemanticallyInvisibleOverlayExposesEmbeddedChildAndOwnLowerTransform) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 2}, {link_2, 0}, {{1, 1}, 0}},
+      {{{2, 0}, 0}},
+  };
+
+  auto [control_ref_parent, parent_koid, parent_uber_struct] =
+      AddTestView(uber_structs, vectors[0]);
+  parent_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+  parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+  parent_uber_struct->local_hit_regions_map[{1, 1}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+  auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  MakeLink(links, 2);
+  auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+  // Over the embedded child, regular hit testing hits the parent's shield on top, while semantic
+  // hit testing passes through the shield to hit the child and then the parent's lower transform.
+  EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(parent_koid, child_koid, parent_koid));
+  EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, true).hits,
+              ::testing::ElementsAre(child_koid, parent_koid));
+
+  // Outside the child, semantic hit testing still hits the parent's lower transform.
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(parent_koid, parent_koid));
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+              ::testing::ElementsAre(parent_koid));
+}
+
+// Verifies progressive subtree narrowing when a parent View's semantically invisible shield sits
+// above a descendant View that is also semantically invisible: the descendant narrows the search
+// further to its own subtree so lower ancestor backgrounds are not exposed.
+TEST(GlobalTopologyDataTest,
+     HitTest_ParentShieldOverSemanticallyInvisibleChildDoesNotExposeParentBackground) {
+  // Sub-case 1: 2-View topology `P_bg (kDefault) -> C (kSemanticallyInvisible) -> P_shield
+  // (kSemanticallyInvisible)`.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const auto link_2 = GetInternalLinkHandle(2);
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 2}, {link_2, 0}, {{1, 1}, 0}},
+        {{{2, 0}, 0}},
+    };
+
+    auto [control_ref_parent, parent_koid, parent_uber_struct] =
+        AddTestView(uber_structs, vectors[0]);
+    parent_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+    parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+        flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                            fuchsia_ui_composition::HitTestInteraction::kDefault)};
+    parent_uber_struct->local_hit_regions_map[{1, 1}] = {
+        flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                            fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+    child_uber_struct->local_hit_regions_map[{2, 0}] = {
+        flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                            fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    MakeLink(links, 2);
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid, child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(parent_koid));
+  }
+
+  // Sub-case 2: 3-View topology `C_bg (kDefault) -> G (kSemanticallyInvisible) -> P_shield
+  // (kSemanticallyInvisible)`.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const auto link_2 = GetInternalLinkHandle(2);
+    const auto link_3 = GetInternalLinkHandle(3);
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 2}, {link_2, 0}, {{1, 1}, 0}},
+        {{{2, 0}, 1}, {link_3, 0}},
+        {{{3, 0}, 0}},
+    };
+
+    auto [control_ref_parent, parent_koid, parent_uber_struct] =
+        AddTestView(uber_structs, vectors[0]);
+    parent_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+    parent_uber_struct->local_hit_regions_map[{1, 1}] = {
+        flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                            fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+    child_uber_struct->local_hit_regions_map[{2, 0}] = {
+        flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                            fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    auto [control_ref_grandchild, grandchild_koid, grandchild_uber_struct] =
+        AddTestView(uber_structs, vectors[2]);
+    grandchild_uber_struct->local_hit_regions_map[{3, 0}] = {
+        flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                            fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    MakeLink(links, 2);
+    MakeLink(links, 3);
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid, grandchild_koid, child_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid, child_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(child_koid));
+  }
+}
+
+// Verifies 3-level nested `P (kDefault) -> C -> G` behavior when `C` has semantically invisible
+// transforms behind or in front of `G`, and when both `C` and `G` are semantically invisible.
+TEST(GlobalTopologyDataTest, HitTest_NestedSemanticallyInvisibleViews) {
+  const auto link_2 = GetInternalLinkHandle(2);
+  const auto link_3 = GetInternalLinkHandle(3);
+
+  // Sub-case 1: `C` root is semantically invisible and `G` is default.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 1}, {link_2, 0}},
+        {{{2, 0}, 1}, {link_3, 0}},
+        {{{3, 0}, 0}},
+    };
+
+    auto [control_ref_p, p_koid, p_uber_struct] = AddTestView(uber_structs, vectors[0]);
+    p_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 1, .height = 1});
+    p_uber_struct->local_hit_regions_map[{1, 0}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    auto [control_ref_c, c_koid, c_uber_struct] = AddTestView(uber_structs, vectors[1]);
+    c_uber_struct->local_hit_regions_map[{2, 0}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    auto [control_ref_g, g_koid, g_uber_struct] = AddTestView(uber_structs, vectors[2]);
+    g_uber_struct->local_hit_regions_map[{3, 0}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    MakeLink(links, 2);
+    MakeLink(links, 3);
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+    EXPECT_THAT(hit_tester(p_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(g_koid, c_koid, p_koid));
+    EXPECT_THAT(hit_tester(p_koid, {0.5f, 0.5f}, true).hits, ::testing::ElementsAre(g_koid));
+  }
+
+  // Sub-case 2: `C` places a semantically invisible shield in front of `G` (`kDefault`), then
+  // Sub-case 3: `G` is also semantically invisible.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 1}, {link_2, 0}},
+        {{{2, 0}, 2}, {link_3, 0}, {{2, 1}, 0}},
+        {{{3, 0}, 0}},
+    };
+
+    auto [control_ref_p, p_koid, p_uber_struct] = AddTestView(uber_structs, vectors[0]);
+    p_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 1, .height = 1});
+    p_uber_struct->local_hit_regions_map[{1, 0}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    auto [control_ref_c, c_koid, c_uber_struct] = AddTestView(uber_structs, vectors[1]);
+    c_uber_struct->local_hit_regions_map[{2, 1}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    auto [control_ref_g, g_koid, g_uber_struct] = AddTestView(uber_structs, vectors[2]);
+    g_uber_struct->local_hit_regions_map[{3, 0}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    MakeLink(links, 2);
+    MakeLink(links, 3);
+    {
+      auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+      EXPECT_THAT(hit_tester(p_koid, {0.5f, 0.5f}, false).hits,
+                  ::testing::ElementsAre(c_koid, g_koid, p_koid));
+      EXPECT_THAT(hit_tester(p_koid, {0.5f, 0.5f}, true).hits, ::testing::ElementsAre(g_koid));
+    }
+
+    // Sub-case 3: Both `C` and `G` are semantically invisible.
+    c_uber_struct->local_hit_regions_map[{2, 0}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+    g_uber_struct->local_hit_regions_map[{3, 0}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+    {
+      auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+      EXPECT_THAT(hit_tester(p_koid, {0.5f, 0.5f}, false).hits,
+                  ::testing::ElementsAre(c_koid, g_koid, c_koid, p_koid));
+      EXPECT_THAT(hit_tester(p_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+    }
+  }
+}
+
+// Verifies that on a single transform, an overlapping `kDefault` hit region takes precedence over
+// `kSemanticallyInvisible` regardless of region order, while non-overlapping regions on the same
+// transform narrow only where `kSemanticallyInvisible` is hit alone.
+TEST(GlobalTopologyDataTest, HitTest_SameTransformOverlappingDefaultAndSemanticallyInvisible) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 1}, {link_2, 0}},
+      {{{2, 0}, 0}},
+  };
+
+  auto [control_ref_parent, parent_koid, parent_uber_struct] =
+      AddTestView(uber_structs, vectors[0]);
+  parent_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+  parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+  MakeLink(links, 2);
+
+  // Order 1: `{kSemanticallyInvisible, kDefault}` overlapping.
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible),
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault),
+  };
+  {
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+  }
+
+  // Order 2: `{kDefault, kSemanticallyInvisible}` overlapping.
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault),
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible),
+  };
+  {
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+  }
+
+  // Order 3: Non-overlapping `kSemanticallyInvisible` on the left and `kDefault` on the right.
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible),
+      flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault),
+  };
+  {
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+  }
+}
+
+// Verifies that semantically invisible regions outside their transform's clip region or finite
+// bounds do not narrow the hit test scope or block hits on the parent View.
+TEST(GlobalTopologyDataTest,
+     HitTest_OutOfClipAndNonIntersectingSemanticallyInvisibleDoesNotBlockParent) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 1}, {link_2, 0}},
+      {{{2, 0}, 0}},
+  };
+
+  auto [control_ref_parent, parent_koid, parent_uber_struct] =
+      AddTestView(uber_structs, vectors[0]);
+  parent_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 2});
+  parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 2},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+  child_uber_struct->local_clip_regions[{2, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 1, .height = 1});
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {flatland::HitRegion::Infinite(
+      fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+  MakeLink(links, 2);
+
+  // Sub-case 1: Infinite semantically invisible region clipped to `[0, 0, 1, 1]`.
+  {
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+    for (const glm::vec2 point : {glm::vec2{1.5f, 0.5f}, {0.5f, 1.5f}, {1.5f, 1.5f}}) {
+      SCOPED_TRACE(testing::Message() << "(" << point.x << ", " << point.y << ")");
+      EXPECT_THAT(hit_tester(parent_koid, point, false).hits, ::testing::ElementsAre(parent_koid));
+      EXPECT_THAT(hit_tester(parent_koid, point, true).hits, ::testing::ElementsAre(parent_koid));
+    }
+  }
+
+  // Sub-case 2: Finite semantically invisible region `[0, 0, 1, 1]` inside a `[0, 0, 2, 2]` clip.
+  child_uber_struct->local_clip_regions[{2, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 2});
+  child_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+  {
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 1.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 1.5f}, true).hits,
+                ::testing::ElementsAre(parent_koid));
+  }
+}
+
+// Verifies that anonymous and implicitly anonymous Views with semantically invisible hit regions
+// are ignored completely and do not block semantic hits on their named parent View.
+TEST(GlobalTopologyDataTest, HitTest_AnonymousSemanticallyInvisibleChildDoesNotBlockParent) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+  const auto link_3 = GetInternalLinkHandle(3);
+
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 1}, {link_2, 0}},
+      {{{2, 0}, 1}, {link_3, 0}},
+      {{{3, 0}, 0}},
+  };
+
+  auto [control_ref_parent, parent_koid, parent_uber_struct] =
+      AddTestView(uber_structs, vectors[0]);
+  parent_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 1, .height = 1});
+  parent_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  {
+    auto uber_struct = std::make_shared<UberStruct>();
+    uber_struct->local_topology.assign(vectors[1].begin(), vectors[1].end());
+    uber_struct->view_ref = nullptr;
+    uber_struct->local_hit_regions_map[{2, 0}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+    uber_structs[2] = std::move(uber_struct);
+  }
+
+  auto [control_ref_grandchild, grandchild_koid, grandchild_uber_struct] =
+      AddTestView(uber_structs, vectors[2]);
+  grandchild_uber_struct->local_hit_regions_map[{3, 0}] = {flatland::HitRegion::Infinite(
+      fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+  MakeLink(links, 2);
+  MakeLink(links, 3);
+  auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(parent_koid));
+  EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+              ::testing::ElementsAre(parent_koid));
+}
+
+// Verifies semantic hit scoping when `HitTest()` is invoked with a non-root `start_node`.
+TEST(GlobalTopologyDataTest, HitTest_StartNodeSubtreeWithSemanticallyInvisibleChild) {
+  UberStruct::InstanceMap uber_structs;
+  GlobalTopologyData::LinkTopologyMap links;
+
+  const auto link_2 = GetInternalLinkHandle(2);
+  const auto link_3 = GetInternalLinkHandle(3);
+  const auto link_4 = GetInternalLinkHandle(4);
+
+  // `A` embeds `B`; `B` embeds `C` (left half, semantically invisible) and `D` (right half,
+  // default), and places `B` shield `{2, 1}` (right half, semantically invisible) above `D`.
+  const TransformGraph::TopologyVector vectors[] = {
+      {{{1, 0}, 1}, {link_2, 0}},
+      {{{2, 0}, 3}, {link_3, 0}, {link_4, 0}, {{2, 1}, 0}},
+      {{{3, 0}, 0}},
+      {{{4, 0}, 0}},
+  };
+
+  auto [control_ref_a, a_koid, a_uber_struct] = AddTestView(uber_structs, vectors[0]);
+  a_uber_struct->local_clip_regions[{1, 0}] =
+      TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+  a_uber_struct->local_hit_regions_map[{1, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  auto [control_ref_b, b_koid, b_uber_struct] = AddTestView(uber_structs, vectors[1]);
+  b_uber_struct->local_hit_regions_map[{2, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 2, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+  b_uber_struct->local_hit_regions_map[{2, 1}] = {
+      flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+  auto [control_ref_c, c_koid, c_uber_struct] = AddTestView(uber_structs, vectors[2]);
+  c_uber_struct->local_hit_regions_map[{3, 0}] = {
+      flatland::HitRegion({.x = 0, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+  auto [control_ref_d, d_koid, d_uber_struct] = AddTestView(uber_structs, vectors[3]);
+  d_uber_struct->local_hit_regions_map[{4, 0}] = {
+      flatland::HitRegion({.x = 1, .y = 0, .width = 1, .height = 1},
+                          fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+  MakeLink(links, 2);
+  MakeLink(links, 3);
+  MakeLink(links, 4);
+  auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {});
+
+  // Over `C`, semantic hit testing returns empty whether starting at `B` or `A`.
+  EXPECT_THAT(hit_tester(b_koid, {0.5f, 0.5f}, false).hits, ::testing::ElementsAre(c_koid, b_koid));
+  EXPECT_THAT(hit_tester(b_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+  EXPECT_THAT(hit_tester(a_koid, {0.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(c_koid, b_koid, a_koid));
+  EXPECT_THAT(hit_tester(a_koid, {0.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+  // Over `D` and `B` shield `{2, 1}`, semantic hit testing exposes `D` and `B` without exposing
+  // `A`.
+  EXPECT_THAT(hit_tester(b_koid, {1.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(b_koid, d_koid, b_koid));
+  EXPECT_THAT(hit_tester(b_koid, {1.5f, 0.5f}, true).hits, ::testing::ElementsAre(d_koid, b_koid));
+  EXPECT_THAT(hit_tester(a_koid, {1.5f, 0.5f}, false).hits,
+              ::testing::ElementsAre(b_koid, d_koid, b_koid, a_koid));
+  EXPECT_THAT(hit_tester(a_koid, {1.5f, 0.5f}, true).hits, ::testing::ElementsAre(d_koid, b_koid));
+}
+
+// Models real multi-node Flatland local topologies (`child_transform_handle -> local_root_ ->
+// client_root`) so `GetViewStartIndex()` must walk `parent_indices` from client transforms up to
+// `local_topology[0]`. Covers an embedded child with semantically invisible client transforms,
+// `FlatlandAccessibilityView` (`root -> a11y_view -> highlight_view -> session_view`), and a
+// multi-hop parent shield over an embedded child View.
+TEST(GlobalTopologyDataTest,
+     HitTest_ClientRootTransformSemanticallyInvisibleMultiNodeLocalTopology) {
+  // Sub-case 1: Parent session embeds child session whose `client_root` and child overlay are
+  // semantically invisible.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const auto link_2 = GetInternalLinkHandle(2);
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 1}, {{1, 1}, 1}, {{1, 2}, 1}, {{1, 3}, 1}, {link_2, 0}},
+        {{{2, 0}, 1}, {{2, 1}, 1}, {{2, 2}, 1}, {{2, 3}, 0}},
+    };
+
+    auto [control_ref_parent, parent_koid, parent_uber_struct] =
+        AddTestView(uber_structs, vectors[0]);
+    parent_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+    parent_uber_struct->local_clip_regions[{1, 3}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 1, .height = 1});
+    parent_uber_struct->local_matrices[{1, 3}] = glm::translate(glm::mat3(), {1.f, 0.f});
+    parent_uber_struct->local_hit_regions_map[{1, 2}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[1]);
+    child_uber_struct->local_hit_regions_map[{2, 2}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+    child_uber_struct->local_hit_regions_map[{2, 3}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    MakeLink(links, 2);
+    auto hit_tester =
+        GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0}, {{{2, 0}, {1, 3}}});
+
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(child_koid, child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {1.5f, 0.5f}, true).hits, ::testing::IsEmpty());
+
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(parent_koid));
+  }
+
+  // Sub-case 2: `FlatlandAccessibilityView` (`root -> a11y_view -> highlight_view ->
+  // session_view`), where `a11y_view` sets `kSemanticallyInvisible` on its `client_root` `{2, 2}`
+  // and embeds `highlight_view` with empty hit regions (`{3, 2}`), which embeds `session_view`
+  // (`kDefault`) alongside a hit-region-free highlight transform `{3, 4}`.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const auto link_2 = GetInternalLinkHandle(2);
+    const auto link_3 = GetInternalLinkHandle(3);
+    const auto link_4 = GetInternalLinkHandle(4);
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 1}, {{1, 1}, 1}, {{1, 2}, 1}, {{1, 3}, 1}, {link_2, 0}},
+        {{{2, 0}, 1}, {{2, 1}, 1}, {{2, 2}, 1}, {{2, 3}, 1}, {link_3, 0}},
+        {{{3, 0}, 1}, {{3, 1}, 1}, {{3, 2}, 2}, {{3, 3}, 1}, {link_4, 0}, {{3, 4}, 0}},
+        {{{4, 0}, 1}, {{4, 1}, 1}, {{4, 2}, 0}},
+    };
+
+    auto [control_ref_root, root_koid, root_uber_struct] = AddTestView(uber_structs, vectors[0]);
+    root_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 10, .height = 10});
+    root_uber_struct->local_clip_regions[{1, 3}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 10, .height = 10});
+    root_uber_struct->local_hit_regions_map[{1, 2}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    auto [control_ref_accessibility, accessibility_koid, accessibility_uber_struct] =
+        AddTestView(uber_structs, vectors[1]);
+    accessibility_uber_struct->local_clip_regions[{2, 3}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 10, .height = 10});
+    accessibility_uber_struct->local_hit_regions_map[{2, 2}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    auto [control_ref_highlight, highlight_koid, highlight_uber_struct] =
+        AddTestView(uber_structs, vectors[2]);
+    highlight_uber_struct->local_clip_regions[{3, 3}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 5, .height = 5});
+    highlight_uber_struct->local_hit_regions_map[{3, 2}] = {};
+
+    auto [control_ref_session, session_koid, session_uber_struct] =
+        AddTestView(uber_structs, vectors[3]);
+    session_uber_struct->local_hit_regions_map[{4, 2}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    MakeLink(links, 2);
+    MakeLink(links, 3);
+    MakeLink(links, 4);
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0},
+                                        {{{2, 0}, {1, 3}}, {{3, 0}, {2, 3}}, {{4, 0}, {3, 3}}});
+
+    // `root` has a default hit region so the empty-space checks verify that `a11y_view` narrows
+    // semantic hit testing to its own subtree rather than falling through to `root`.
+    EXPECT_THAT(hit_tester(root_koid, {2.5f, 2.5f}, false).hits,
+                ::testing::ElementsAre(session_koid, accessibility_koid, root_koid));
+    EXPECT_THAT(hit_tester(root_koid, {2.5f, 2.5f}, true).hits,
+                ::testing::ElementsAre(session_koid));
+
+    EXPECT_THAT(hit_tester(root_koid, {7.5f, 7.5f}, false).hits,
+                ::testing::ElementsAre(accessibility_koid, root_koid));
+    EXPECT_THAT(hit_tester(root_koid, {7.5f, 7.5f}, true).hits, ::testing::IsEmpty());
+  }
+
+  // Sub-case 3: Multi-hop parent shield `{2, 5}` beneath a hit-region-free container `{2, 4}` on a
+  // later sibling branch of `{2, 2}` above an embedded `kDefault` child View `{3, 0}`. Embed
+  // `parent` under `root` `{1, 0}` so `transforms[scope_start] != root_transform` holds when
+  // starting at `root_koid` and `GetViewStartIndex()` must walk all four `parent_indices` hops from
+  // `{2, 5}` to `{2, 0}` instead of stopping above the child branch.
+  {
+    UberStruct::InstanceMap uber_structs;
+    GlobalTopologyData::LinkTopologyMap links;
+
+    const auto link_2 = GetInternalLinkHandle(2);
+    const auto link_3 = GetInternalLinkHandle(3);
+
+    const TransformGraph::TopologyVector vectors[] = {
+        {{{1, 0}, 1}, {{1, 1}, 1}, {{1, 2}, 1}, {{1, 3}, 1}, {link_2, 0}},
+        {{{2, 0}, 1}, {{2, 1}, 1}, {{2, 2}, 2}, {{2, 3}, 1}, {link_3, 0}, {{2, 4}, 1}, {{2, 5}, 0}},
+        {{{3, 0}, 1}, {{3, 1}, 1}, {{3, 2}, 0}},
+    };
+
+    auto [control_ref_root, root_koid, root_uber_struct] = AddTestView(uber_structs, vectors[0]);
+    root_uber_struct->local_clip_regions[{1, 0}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+    root_uber_struct->local_clip_regions[{1, 3}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+    root_uber_struct->local_hit_regions_map[{1, 2}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    auto [control_ref_parent, parent_koid, parent_uber_struct] =
+        AddTestView(uber_structs, vectors[1]);
+    parent_uber_struct->local_clip_regions[{2, 3}] =
+        TransformClipRegion({.x = 0, .y = 0, .width = 2, .height = 1});
+    parent_uber_struct->local_hit_regions_map[{2, 2}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+    parent_uber_struct->local_hit_regions_map[{2, 5}] = {flatland::HitRegion::Infinite(
+        fuchsia_ui_composition::HitTestInteraction::kSemanticallyInvisible)};
+
+    auto [control_ref_child, child_koid, child_uber_struct] = AddTestView(uber_structs, vectors[2]);
+    child_uber_struct->local_hit_regions_map[{3, 2}] = {
+        flatland::HitRegion::Infinite(fuchsia_ui_composition::HitTestInteraction::kDefault)};
+
+    MakeLink(links, 2);
+    MakeLink(links, 3);
+    auto hit_tester = GenerateHitTester(uber_structs, links, kLinkInstanceId, {1, 0},
+                                        {{{2, 0}, {1, 3}}, {{3, 0}, {2, 3}}});
+
+    EXPECT_THAT(hit_tester(root_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid, child_koid, parent_koid, root_koid));
+    EXPECT_THAT(hit_tester(root_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
+
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, false).hits,
+                ::testing::ElementsAre(parent_koid, child_koid, parent_koid));
+    EXPECT_THAT(hit_tester(parent_koid, {0.5f, 0.5f}, true).hits,
+                ::testing::ElementsAre(child_koid, parent_koid));
   }
 }
 

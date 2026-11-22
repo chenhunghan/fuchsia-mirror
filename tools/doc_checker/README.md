@@ -13,7 +13,7 @@ See more at <https://fuchsia.dev/fuchsia-src/contribute/docs/doc-checker>
 To reproduce the check run as a static check  for presubmits, Run:
 
 ```sh
-fx doc-checker  --local-links-only
+fx doc-checker
 ```
 
 To get JSON encoded format of the output use `--json`

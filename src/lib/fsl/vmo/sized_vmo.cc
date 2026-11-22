@@ -25,6 +25,17 @@ bool SizedVmo::FromTransport(fuchsia::mem::Buffer transport, SizedVmo* out) {
   return true;
 }
 
+bool SizedVmo::FromTransport(fuchsia_mem::Buffer transport, SizedVmo* out) {
+  FX_DCHECK(transport.vmo());
+
+  if (!IsSizeValid(transport.vmo(), transport.size())) {
+    return false;
+  }
+
+  *out = SizedVmo(std::move(transport.vmo()), transport.size());
+  return true;
+}
+
 bool SizedVmo::IsSizeValid(const zx::vmo& vmo, uint64_t size) {
   size_t vmo_size;
   zx_status_t zx_status = vmo.get_size(&vmo_size);
@@ -55,6 +66,17 @@ fuchsia::mem::Buffer SizedVmo::ToTransport() && {
   }
   result.vmo = std::move(vmo_);
   result.size = size_;
+  size_ = 0;
+  return result;
+}
+
+fuchsia_mem::Buffer SizedVmo::ToNaturalTransport() && {
+  fuchsia_mem::Buffer result;
+  if (!vmo_) {
+    return result;
+  }
+  result.vmo() = std::move(vmo_);
+  result.size() = size_;
   size_ = 0;
   return result;
 }

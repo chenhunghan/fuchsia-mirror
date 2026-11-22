@@ -433,7 +433,7 @@ and as we encourage more code to be developed outside of `fuchsia.git`.
 
 [RFC-0095]: /docs/contribute/governance/rfcs/0095_build_and_assemble_workstation_out_of_tree.md
 [RFC-0139]: /docs/contribute/governance/rfcs/0139_bazel_sdk.md
-[RFC-0148]: /docs/contribute/governance/rfcs/0148_ci_guidelines.md#consider_fast_roll_and_release_cadences
+[RFC-0148]: /docs/contribute/governance/rfcs/0148_ci_guidelines.md#consider-fast-roll-and-release-cadences
 [RFC-0165]: /docs/contribute/governance/rfcs/0165_sdk_categories.md
 [RFC-0220]: /docs/contribute/governance/rfcs/0220_the_future_of_in_tree_products.md
 

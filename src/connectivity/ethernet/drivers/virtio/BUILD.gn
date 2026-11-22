@@ -79,7 +79,6 @@ fuchsia_cc_driver("virtio_netdevice-driver") {
 fuchsia_driver_component("virtio_netdevice") {
   component_name = "virtio_netdevice"
   deps = [ ":virtio_netdevice-driver" ]
-  info = "meta/virtio_ethernet-info.json"
   manifest = "meta/virtio.cml"
 }
 

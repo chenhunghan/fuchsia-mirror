@@ -52,7 +52,8 @@ fn test_igmpv2_enable_disable_integration() {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         );

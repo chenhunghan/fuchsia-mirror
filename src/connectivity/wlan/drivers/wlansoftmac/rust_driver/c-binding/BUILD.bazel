@@ -2,23 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_rust//rust:defs.bzl", "rust_static_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", "rustc_staticlib")
 
 package(default_applicable_licenses = ["//:license"])
 
-exports_files(
-    ["bindings.h"],
-    visibility = ["//src/connectivity/wlan/drivers/wlansoftmac:__pkg__"],
-)
-
-rust_static_library(
+rustc_staticlib(
     name = "wlansoftmac-c",
     srcs = ["src/lib.rs"],
-    crate_root = "src/lib.rs",
     edition = "2024",
-    lint_config = "//build/config/rust/lints:clippy_warn_production",
-    rustc_flags = ["-Cpanic=abort"],
-    target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = ["//src/connectivity/wlan/drivers/wlansoftmac:__pkg__"],
     deps = [
         "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
@@ -35,4 +27,13 @@ rust_static_library(
         "//src/lib/fuchsia-async",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+# `rustc_staticlib` has no `hdrs` attribute, so the generated C header for
+# `:wlansoftmac-c` is exported from this target.
+fx_cc_library(
+    name = "wlansoftmac-c_headers",
+    hdrs = ["bindings.h"],
+    visibility = ["//src/connectivity/wlan/drivers/wlansoftmac:__pkg__"],
+    deps = [":wlansoftmac-c"],
 )

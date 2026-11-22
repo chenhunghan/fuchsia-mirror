@@ -208,7 +208,6 @@
                 "fuchsia.hardware.audio.StreamConfigConnectorOutputService",
                 "fuchsia.hardware.ax88179.Service",
                 "fuchsia.hardware.backlight.Service",
-                "fuchsia.hardware.bluetooth.EmulatorService",
                 "fuchsia.hardware.bluetooth.Service",
                 "fuchsia.hardware.camera.Service",
                 "fuchsia.hardware.clock.measure.Service",

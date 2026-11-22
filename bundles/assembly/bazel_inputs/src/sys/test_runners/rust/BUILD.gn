@@ -5,16 +5,13 @@
 import("//build/bazel/export_fuchsia_package_to_bazel.gni")
 
 export_fuchsia_package_to_bazel("rust-test-create-raw-processes-runner") {
-  testonly = true
   package = "//src/sys/test_runners/rust:rust-test-create-raw-processes-runner"
 }
 
 export_fuchsia_package_to_bazel("rust-test-next-vdso-runner") {
-  testonly = true
   package = "//src/sys/test_runners/rust:rust-test-next-vdso-runner"
 }
 
 export_fuchsia_package_to_bazel("rust-test-runner") {
-  testonly = true
   package = "//src/sys/test_runners/rust:rust-test-runner"
 }

@@ -2,7 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
+
+# Bluetooth host tests defined in Bazel, aggregated from package `:host_tests`
+# suites. These are exported to `fx test` and infra builders through
+# `:bazel_tests` in BUILD.gn.
+test_suite(
+    name = "bluetooth_host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/connectivity/bluetooth/lib/bt-rfcomm:host_tests",
+    ],
+)
 
 # Bluetooth device tests defined in Bazel, aggregated from the package
 # `:tests` suites. These are exported to `fx test` and infra builders through
@@ -12,6 +25,7 @@ test_suite(
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
         "//src/connectivity/bluetooth/core/bt-gap:tests",
+        "//src/connectivity/bluetooth/core/bt-init:tests",
         "//src/connectivity/bluetooth/examples/bt-device-id-client:tests",
         "//src/connectivity/bluetooth/examples/bt-fastpair-client:tests",
         "//src/connectivity/bluetooth/examples/bt-le-battery-monitor:tests",
@@ -25,17 +39,20 @@ test_suite(
         "//src/connectivity/bluetooth/lib/bt-avrcp-vol-control:tests",
         "//src/connectivity/bluetooth/lib/bt-fidl-mocks:tests",
         "//src/connectivity/bluetooth/lib/bt-gatt-fuchsia:tests",
+        "//src/connectivity/bluetooth/lib/bt-hfp:tests",
         "//src/connectivity/bluetooth/lib/bt-map:tests",
         "//src/connectivity/bluetooth/lib/bt-obex:tests",
         "//src/connectivity/bluetooth/lib/bt-obex/objects:tests",
         "//src/connectivity/bluetooth/lib/bt-repl:tests",
         "//src/connectivity/bluetooth/lib/bt-rfcomm:tests",
+        "//src/connectivity/bluetooth/lib/fuchsia-audio-dai:tests",
         "//src/connectivity/bluetooth/lib/fuchsia-audio-device:tests",
         "//src/connectivity/bluetooth/lib/fuchsia-bluetooth:tests",
         "//src/connectivity/bluetooth/lib/host-watcher:tests",
         "//src/connectivity/bluetooth/lib/packet-encoding:tests",
         "//src/connectivity/bluetooth/lib/profile-client:tests",
         "//src/connectivity/bluetooth/lib/vigil:tests",
+        "//src/connectivity/bluetooth/profiles/bt-a2dp:tests",
         "//src/connectivity/bluetooth/profiles/bt-avrcp:tests",
         "//src/connectivity/bluetooth/profiles/bt-avrcp-target:tests",
         "//src/connectivity/bluetooth/profiles/bt-device-id:tests",
@@ -45,13 +62,31 @@ test_suite(
         "//src/connectivity/bluetooth/profiles/bt-map-mce:tests",
         "//src/connectivity/bluetooth/profiles/bt-peripheral-hub:tests",
         "//src/connectivity/bluetooth/profiles/bt-rfcomm:tests",
+        "//src/connectivity/bluetooth/profiles/tests/bt-avrcp-integration-tests:tests",
+        "//src/connectivity/bluetooth/profiles/tests/bt-device-id-integration-tests:tests",
+        "//src/connectivity/bluetooth/profiles/tests/bt-hfp-audio-gateway-integration-tests:tests",
+        "//src/connectivity/bluetooth/profiles/tests/bt-rfcomm-integration-tests:tests",
         "//src/connectivity/bluetooth/sunstone/sunstone-fuchsia:sunstone-bt-host-tests",
         "//src/connectivity/bluetooth/sunstone/sunstone-fuchsia:sunstone-fuchsia-tests",
         "//src/connectivity/bluetooth/testing/bt-affordances/affordances:tests",
+        "//src/connectivity/bluetooth/testing/mock-piconet-server:tests",
         "//src/connectivity/bluetooth/testing/test-call-manager:tests",
         "//src/connectivity/bluetooth/testing/test-harness-tests:tests",
+        "//src/connectivity/bluetooth/testing/test-rfcomm-client:tests",
+        "//src/connectivity/bluetooth/tests/bt-manifest-integration-tests:tests",
+        "//src/connectivity/bluetooth/tools/bt-avdtp-tool:tests",
+        "//src/connectivity/bluetooth/tools/bt-avrcp-controller:tests",
+        "//src/connectivity/bluetooth/tools/bt-bredr-profile:tests",
+        "//src/connectivity/bluetooth/tools/bt-cli:tests",
+        "//src/connectivity/bluetooth/tools/bt-fct-hci:tests",
         "//src/connectivity/bluetooth/tools/bt-hfp-hf-tool:tests",
+        "//src/connectivity/bluetooth/tools/bt-le-broadcast-assistant:tests",
+        "//src/connectivity/bluetooth/tools/bt-le-central:tests",
+        "//src/connectivity/bluetooth/tools/bt-le-peripheral:tests",
+        "//src/connectivity/bluetooth/tools/bt-map-mce-tool:tests",
+        "//src/connectivity/bluetooth/tools/bt-rootcanal:tests",
         "//src/connectivity/bluetooth/tools/bt-snoop:bt-snoop-unittests",
         "//src/connectivity/bluetooth/tools/lib/pairing-delegate:tests",
+        "//src/connectivity/bluetooth/tools/tests/bt-tool-cli-tests:tests",
     ],
 )

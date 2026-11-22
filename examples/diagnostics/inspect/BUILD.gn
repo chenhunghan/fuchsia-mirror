@@ -16,6 +16,5 @@ group("hermetic_tests") {
   deps = [
     "codelab:hermetic_tests",
     "cpp:hermetic_tests",
-    "rust:hermetic_tests",
   ]
 }

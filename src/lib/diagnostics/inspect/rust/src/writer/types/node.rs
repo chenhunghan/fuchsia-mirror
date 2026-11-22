@@ -567,6 +567,8 @@ impl Node {
     }
 
     /// Add a byte vector property to this node.
+    ///
+    /// The content of this property type is opaque to the diagnostics and forensics systems.
     #[must_use]
     pub fn create_bytes<'a>(
         &self,
@@ -593,6 +595,8 @@ impl Node {
     }
 
     /// Creates and saves a bytes property for the lifetime of the node.
+    ///
+    /// The content of this property type is opaque to the diagnostics and forensics systems.
     pub fn record_bytes<'a>(&self, name: impl Into<Cow<'a, str>>, value: impl AsRef<[u8]>) {
         let property = self.create_bytes(name.into(), value);
         self.record(property);
@@ -604,6 +608,8 @@ impl Node {
     /// The underlying VMO allocation is automatically padded up to the next full 4 KiB page
     /// boundary if `32 + payload_size` is not already page-aligned, while read, write, and
     /// snapshot operations strictly enforce the requested `payload_size` boundary.
+    ///
+    /// The content of this property type is opaque to the diagnostics and forensics systems.
     #[must_use]
     pub fn create_blob_property<'a>(
         &self,
@@ -631,6 +637,8 @@ impl Node {
     /// Creates and keeps track of a `BlobProperty` with the given `name` and `payload_size`
     /// (in bytes, excluding the 32-byte `"BLOB"` header) for the lifetime of the node,
     /// invoking `initialize` to populate it.
+    ///
+    /// The content of this property type is opaque to the diagnostics and forensics systems.
     pub fn record_blob_property<'a, F>(
         &self,
         name: impl Into<Cow<'a, str>>,
@@ -1143,17 +1151,17 @@ mod tests {
             node.get_block::<_, inspect_format::Node>(|node_block| {
                 assert_eq!(node_block.child_count(), 0);
             });
-            assert!(inspector.copy_blob_vmo_data("recorded-0").is_none());
+            assert_eq!(inspector.copy_blob_vmo_data("recorded-0"), Err(crate::Error::VmoMissing));
 
             // Record a second blob property and let `node` drop out of scope.
             node.record_blob_property("recorded2", 16, |blob| {
                 blob.write_at(0, b"dropped").unwrap();
             });
-            assert!(inspector.copy_blob_vmo_data("recorded2-1").is_some());
+            assert!(inspector.copy_blob_vmo_data("recorded2-1").is_ok());
         }
 
         // Dropping `node` drops the recorded `BlobProperty` and removes it from `blobs`.
-        assert!(inspector.copy_blob_vmo_data("recorded2-1").is_none());
+        assert_eq!(inspector.copy_blob_vmo_data("recorded2-1"), Err(crate::Error::VmoMissing));
         let state = inspector.state().unwrap();
         let guard = state.try_lock().unwrap();
         assert!(guard.blobs().is_empty());

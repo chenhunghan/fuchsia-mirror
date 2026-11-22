@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use assert_matches::assert_matches;
+use blob_pager_and_verifier::BlobPagerAndVerifier;
 use diagnostics_assertions::assert_data_tree;
 use diagnostics_reader::ArchiveReader;
 use disk_builder::Disk;
@@ -20,6 +21,7 @@ use fidl_fuchsia_hardware_ramdisk as framdisk;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_security_keymint as fkeymint;
 use fidl_fuchsia_storage_block as fblock;
+use fidl_fuchsia_storage_mapping as fmapping;
 use fidl_fuchsia_storage_partitions as fpartitions;
 use fuchsia_async::{self as fasync, TimeoutExt as _};
 use fuchsia_component::client::{
@@ -28,6 +30,7 @@ use fuchsia_component::client::{
 use fuchsia_component_test::{Capability, ChildOptions, RealmBuilder, RealmInstance, Ref, Route};
 use fuchsia_driver_test::{DriverTestRealmBuilder, DriverTestRealmInstance};
 use futures::channel::mpsc;
+use futures::lock::Mutex as AsyncMutex;
 use futures::{FutureExt as _, StreamExt as _};
 use ramdevice_client::{RamdiskClient, RamdiskClientBuilder};
 use std::pin::pin;
@@ -70,6 +73,7 @@ pub fn round_down<
 pub struct TestFixtureBuilder {
     no_fuchsia_boot: bool,
     no_keymint: bool,
+    fxfs_blob: bool,
     disk: Option<Disk>,
     extra_disks: Vec<Disk>,
     fshost: fshost_testing::FshostBuilder,
@@ -81,10 +85,11 @@ pub struct TestFixtureBuilder {
 }
 
 impl TestFixtureBuilder {
-    pub fn new(fshost_component_name: &'static str) -> Self {
+    pub fn new(fshost_component_name: &'static str, fxfs_blob: bool) -> Self {
         Self {
             no_fuchsia_boot: false,
             no_keymint: false,
+            fxfs_blob,
             disk: None,
             extra_disks: Vec::new(),
             fshost: fshost_testing::FshostBuilder::new(fshost_component_name),
@@ -280,7 +285,6 @@ impl TestFixtureBuilder {
             builder
                 .add_route(
                     Route::new()
-                        .capability(Capability::protocol::<fboot::ArgumentsMarker>())
                         .capability(Capability::protocol::<fboot::ItemsMarker>())
                         .from(&mocks)
                         .to(&fshost),
@@ -361,6 +365,8 @@ impl TestFixtureBuilder {
             main_disk: None,
             crash_reports,
             execution_controller,
+            fxfs_blob: self.fxfs_blob,
+            blob_pager: AsyncMutex::new(None),
             torn_down: TornDown(false),
         };
 
@@ -424,6 +430,8 @@ pub struct TestFixture {
     pub main_disk: Option<Disk>,
     pub crash_reports: mpsc::Receiver<ffeedback::CrashReport>,
     pub execution_controller: fidl_fuchsia_component::ExecutionControllerProxy,
+    fxfs_blob: bool,
+    blob_pager: AsyncMutex<Option<Arc<BlobPagerAndVerifier>>>,
     torn_down: TornDown,
 }
 
@@ -467,22 +475,64 @@ impl TestFixture {
         assert_eq!(info_type, fs_type, "{:#08x} != {:#08x}", info_type, fs_type);
     }
 
+    pub async fn get_blob_vmo(&self, hash: &[u8; 32]) -> Result<zx::Vmo, zx::Status> {
+        if self.fxfs_blob {
+            let pager = {
+                let mut guard = self.blob_pager.lock().await;
+                match &*guard {
+                    Some(pager) => pager.clone(),
+                    None => {
+                        let mapping_provider =
+                            connect_to_protocol_at_dir_root::<fmapping::MappingProviderMarker>(
+                                self.realm.root.get_exposed_dir(),
+                            )
+                            .expect("failed to connect to MappingProvider");
+                        let mapper = connect_to_protocol_at_dir_root::<fblock::MapperMarker>(
+                            self.realm.root.get_exposed_dir(),
+                        )
+                        .expect("failed to connect to Mapper");
+                        guard
+                            .insert(Arc::new(
+                                BlobPagerAndVerifier::new(&mapping_provider, &mapper)
+                                    .await
+                                    .expect("failed to create BlobPagerAndVerifier"),
+                            ))
+                            .clone()
+                    }
+                }
+            };
+            pager.create_vmo(hash).await.map_err(|e| {
+                e.root_cause().downcast_ref::<zx::Status>().copied().unwrap_or(zx::Status::INTERNAL)
+            })
+        } else {
+            let reader = connect_to_protocol_at_dir_root::<BlobReaderMarker>(
+                self.realm.root.get_exposed_dir(),
+            )
+            .expect("failed to connect to the BlobReader");
+            reader
+                .get_vmo(hash)
+                .await
+                .expect("blob get_vmo fidl error")
+                .map_err(zx::Status::err_from_raw)
+        }
+    }
+
     pub async fn check_test_blob(&self) {
         with_timeout(
             async {
                 let expected_blob_hash = disk_builder::test_blob_hash();
-                let reader = connect_to_protocol_at_dir_root::<BlobReaderMarker>(
-                    self.realm.root.get_exposed_dir(),
-                )
-                .expect("failed to connect to the BlobReader");
-                let _vmo = reader
-                    .get_vmo(&expected_blob_hash.into())
-                    .await
-                    .expect("blob get_vmo fidl error")
-                    .unwrap_or_else(|e| match zx::Status::err_from_raw(e) {
-                        zx::Status::NOT_FOUND => panic!("Test blob not found - blobfs lost data!"),
-                        s => panic!("Error while opening test blob vmo: {s}"),
-                    });
+                let vmo =
+                    self.get_blob_vmo(&expected_blob_hash.into()).await.unwrap_or_else(
+                        |e| match e {
+                            zx::Status::NOT_FOUND => {
+                                panic!("Test blob not found - blobfs lost data!")
+                            }
+                            s => panic!("Error while opening test blob vmo: {s}"),
+                        },
+                    );
+                let mut buf = vec![0; disk_builder::TEST_BLOB_CONTENTS.len()];
+                vmo.read(&mut buf, 0).expect("reading test blob vmo failed");
+                assert_eq!(buf.as_slice(), &disk_builder::TEST_BLOB_CONTENTS);
             },
             "check_test_blob",
         )

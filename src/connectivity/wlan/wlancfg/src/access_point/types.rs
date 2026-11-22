@@ -6,6 +6,7 @@ use fidl_fuchsia_wlan_policy as fidl_policy;
 
 pub type NetworkIdentifier = crate::config_management::network_config::NetworkIdentifier;
 pub type SecurityType = crate::config_management::network_config::SecurityType;
+pub type Credential = crate::config_management::network_config::Credential;
 pub use ieee80211::Ssid;
 
 #[derive(Clone, Copy, Debug, PartialEq)]

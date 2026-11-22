@@ -38,7 +38,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -49,6 +48,7 @@
 #include <fbl/auto_lock.h>
 
 #include "src/graphics/display/drivers/amlogic-display/board-resources.h"
+#include "src/graphics/display/drivers/amlogic-display/capture-image-info.h"
 #include "src/graphics/display/drivers/amlogic-display/capture.h"
 #include "src/graphics/display/drivers/amlogic-display/hot-plug-detection.h"
 #include "src/graphics/display/drivers/amlogic-display/image-info.h"
@@ -81,13 +81,6 @@
 #include "src/lib/fxl/strings/string_printf.h"
 
 namespace amlogic_display {
-
-// Currently amlogic-display implementation uses pointers to ImageInfo as
-// handles to images, while handles to images are defined as a fixed-size
-// uint64_t in the banjo protocol. This works on platforms where uint64_t and
-// uintptr_t are equivalent but this may cause portability issues in the future.
-// TODO(https://fxbug.dev/42079128): Do not use pointers as handles.
-static_assert(std::is_same_v<uint64_t, uintptr_t>);
 
 namespace {
 
@@ -419,18 +412,25 @@ zx::result<display::DriverImageId> DisplayEngine::ImportImage(
                           static_cast<uint64_t>(format_modifier));
       return zx::error(ZX_ERR_INVALID_ARGS);
   }
-  // TODO(https://fxbug.dev/42079128): Using pointers as handles impedes portability of
-  // the driver. Do not use pointers as handles.
-  display::DriverImageId driver_image_id(reinterpret_cast<uint64_t>(import_info.get()));
   fbl::AutoLock lock(&image_mutex_);
-  imported_images_.push_back(std::move(import_info));
+  const display::DriverImageId driver_image_id = next_imported_image_id_++;
+  ZX_ASSERT(driver_image_id != display::kInvalidDriverImageId);
+  import_info->id = driver_image_id;
+  imported_images_.insert(std::move(import_info));
   return zx::ok(driver_image_id);
 }
 
 void DisplayEngine::ReleaseImage(display::DriverImageId image_id) {
   fbl::AutoLock lock(&image_mutex_);
-  auto info = reinterpret_cast<ImageInfo*>(image_id.value());
-  imported_images_.erase(*info);
+  if (imported_images_.erase(image_id) == nullptr) {
+    fdf::warn("Rejected request to release image with unknown ID: {}", image_id.value());
+  }
+}
+
+const ImageInfo* DisplayEngine::FindImportedImageForTesting(display::DriverImageId image_id) {
+  fbl::AutoLock lock(&image_mutex_);
+  auto it = imported_images_.find(image_id);
+  return it.IsValid() ? &(*it) : nullptr;
 }
 
 display::ConfigCheckResult DisplayEngine::CheckConfiguration(
@@ -523,6 +523,38 @@ display::ConfigCheckResult DisplayEngine::CheckConfiguration(
                 layer.image_source().x(), layer.image_source().y());
       return display::ConfigCheckResult::kUnsupportedConfig;
     }
+    // Validate that the image ID was previously imported and that its actual
+    // buffer dimensions match the layer's declared metadata.
+    if (layer.image_id() != display::kInvalidDriverImageId) {
+      bool image_is_afbc = false;
+      {
+        fbl::AutoLock image_lock(&image_mutex_);
+        auto image_it = imported_images_.find(layer.image_id());
+        if (image_it == imported_images_.end()) {
+          fdf::warn("CheckConfig failure: unknown image ID {}", layer.image_id().value());
+          return display::ConfigCheckResult::kInvalidConfig;
+        }
+        if (image_it->image_width !=
+                static_cast<uint32_t>(layer.image_metadata().dimensions().width()) ||
+            image_it->image_height !=
+                static_cast<uint32_t>(layer.image_metadata().dimensions().height())) {
+          fdf::warn("CheckConfig failure: image ID {} dimensions {}x{} do not match layer {}x{}",
+                    layer.image_id().value(), image_it->image_width, image_it->image_height,
+                    layer.image_metadata().dimensions().width(),
+                    layer.image_metadata().dimensions().height());
+          return display::ConfigCheckResult::kUnsupportedConfig;
+        }
+        image_is_afbc = image_it->is_afbc;
+      }
+      if (image_is_afbc) {
+        fbl::AutoLock capture_lock(&capture_mutex_);
+        if (current_capture_target_image_id_ != display::kInvalidDriverCaptureImageId) {
+          fdf::warn(
+              "CheckConfig failure: AFBC layers are not supported while display capture is active");
+          return display::ConfigCheckResult::kUnsupportedConfig;
+        }
+      }
+    }
   }
 
   return display::ConfigCheckResult::kOk;
@@ -538,6 +570,13 @@ void DisplayEngine::SubmitConfiguration(display::DisplayId display_id, display::
                       layers.size());
 
   if (!layers.empty()) {
+    fbl::AutoLock image_lock(&image_mutex_);
+    auto image_it = imported_images_.find(layers[0].image_id());
+    if (image_it == imported_images_.end()) {
+      fdf::error("SubmitConfiguration() used unknown image ID: {}", layers[0].image_id().value());
+      return;
+    }
+
     // Perform Vout modeset first.
     //
     // Setting up OSD may require Vout framebuffer information, which may be
@@ -560,20 +599,34 @@ void DisplayEngine::SubmitConfiguration(display::DisplayId display_id, display::
     if (!display_attached_ || display_id != display_id_) {
       return;
     }
-    // Since Amlogic does not support plug'n play (fixed display), there is no way
-    // a checked configuration could be invalid at this point.
-    video_input_unit_->FlipOnVsync(layers[0], display_mode, color_conversion, config_stamp);
+    const ImageInfo& image_info = *image_it;
+    {
+      fbl::AutoLock capture_lock(&capture_mutex_);
+      if (image_info.is_afbc &&
+          current_capture_target_image_id_ != display::kInvalidDriverCaptureImageId) {
+        fdf::error("Refusing to apply AFBC configuration while display capture is in progress");
+        return;
+      }
+      current_image_is_afbc_ = image_info.is_afbc;
+    }
+
+    video_input_unit_->FlipOnVsync(layers[0], image_info, display_mode, color_conversion,
+                                   config_stamp);
   } else {
     if (fully_initialized()) {
       {
         fbl::AutoLock lock2(&capture_mutex_);
-        if (current_capture_target_image_ != nullptr) {
+        if (current_capture_target_image_id_ != display::kInvalidDriverCaptureImageId) {
           // there's an active capture. stop it before disabling osd
           vpu_->CaptureDone();
-          current_capture_target_image_ = nullptr;
+          current_capture_target_image_id_ = display::kInvalidDriverCaptureImageId;
         }
       }
       video_input_unit_->DisableLayer(config_stamp);
+      {
+        fbl::AutoLock lock2(&capture_mutex_);
+        current_image_is_afbc_ = false;
+      }
     }
   }
 }
@@ -781,7 +834,7 @@ zx::result<display::DriverCaptureImageId> DisplayEngine::ImportImageForCapture(
 
   const fidl::WireSyncClient<fuchsia_sysmem2::BufferCollection>& collection =
       buffer_collections_.at(buffer_collection_id);
-  auto import_capture = std::make_unique<ImageInfo>();
+  auto import_capture = std::make_unique<CaptureImageInfo>();
   if (import_capture == nullptr) {
     return zx::error(ZX_ERR_NO_MEMORY);
   }
@@ -896,47 +949,46 @@ zx::result<display::DriverCaptureImageId> DisplayEngine::ImportImageForCapture(
       collection_info.settings().image_format_constraints().min_size().height;
   import_capture->image_width =
       collection_info.settings().image_format_constraints().min_size().width;
-  // TODO(https://fxbug.dev/42079128): Using pointers as handles impedes portability of
-  // the driver. Do not use pointers as handles.
-  display::DriverCaptureImageId driver_capture_image_id(
-      reinterpret_cast<uint64_t>(import_capture.get()));
-  imported_captures_.push_back(std::move(import_capture));
+
+  const display::DriverCaptureImageId driver_capture_image_id = next_imported_capture_image_id_++;
+  ZX_ASSERT(driver_capture_image_id != display::kInvalidDriverCaptureImageId);
+  import_capture->id = driver_capture_image_id;
+  imported_captures_.insert(std::move(import_capture));
 
   return zx::ok(driver_capture_image_id);
 }
 
 zx::result<> DisplayEngine::StartCapture(display::DriverCaptureImageId capture_image_id) {
+  fbl::AutoLock lock(&capture_mutex_);
+  if (current_capture_target_image_id_ != display::kInvalidDriverCaptureImageId) {
+    fdf::error("Failed to start capture while another capture is in progress");
+    return zx::error(ZX_ERR_SHOULD_WAIT);
+  }
+
+  // Confirm that the handle was previously imported (hence valid).
+  auto it = imported_captures_.find(capture_image_id);
+  if (it == imported_captures_.end()) {
+    fdf::error("Invalid capture image ID: {}", capture_image_id.value());
+    return zx::error(ZX_ERR_NOT_FOUND);
+  }
+
   if (!fully_initialized()) {
     fdf::error("Failed to start capture before initializing the display");
     return zx::error(ZX_ERR_SHOULD_WAIT);
   }
 
-  fbl::AutoLock lock(&capture_mutex_);
-  if (current_capture_target_image_ != nullptr) {
-    fdf::error("Failed to start capture while another capture is in progress");
-    return zx::error(ZX_ERR_SHOULD_WAIT);
+  if (current_image_is_afbc_) {
+    fdf::error("Display capture is not supported while displaying AFBC images");
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
 
-  // Confirm that the handle was previously imported (hence valid)
-  // TODO(https://fxbug.dev/42079128): This requires an enumeration over all the imported
-  // capture images for each StartCapture(). We should use hash maps to map
-  // handles (which shouldn't be pointers) to ImageInfo instead.
-  ImageInfo* info = reinterpret_cast<ImageInfo*>(capture_image_id.value());
-  uint8_t canvas_index = info->canvas_idx;
-  if (imported_captures_.find_if([canvas_index](const ImageInfo& info) {
-        return info.canvas_idx == canvas_index;
-      }) == imported_captures_.end()) {
-    // invalid handle
-    fdf::error("Invalid capture image ID: {}", capture_image_id);
-    return zx::error(ZX_ERR_NOT_FOUND);
-  }
-
+  const CaptureImageInfo& info = *it;
   // TODO(https://fxbug.dev/42082204): A valid canvas index can be zero.
-  ZX_DEBUG_ASSERT(info->canvas_idx > 0);
-  ZX_DEBUG_ASSERT(info->image_height > 0);
-  ZX_DEBUG_ASSERT(info->image_width > 0);
+  ZX_DEBUG_ASSERT(info.canvas_idx > 0);
+  ZX_DEBUG_ASSERT(info.image_height > 0);
+  ZX_DEBUG_ASSERT(info.image_width > 0);
 
-  auto status = vpu_->CaptureInit(info->canvas_idx, info->image_height, info->image_width);
+  auto status = vpu_->CaptureInit(info.canvas_idx, info.image_height, info.image_width);
   if (status != ZX_OK) {
     fdf::error("Failed to init capture: {}", zx::make_result(status));
     return zx::make_result(status);
@@ -947,25 +999,19 @@ zx::result<> DisplayEngine::StartCapture(display::DriverCaptureImageId capture_i
     fdf::error("Failed to start capture: {}", zx::make_result(status));
     return zx::make_result(status);
   }
-  current_capture_target_image_ = info;
+  current_capture_target_image_id_ = capture_image_id;
   return zx::ok();
 }
 
 zx::result<> DisplayEngine::ReleaseCapture(display::DriverCaptureImageId capture_image_id) {
   fbl::AutoLock lock(&capture_mutex_);
-  if (capture_image_id ==
-      display::DriverCaptureImageId(reinterpret_cast<uint64_t>(current_capture_target_image_))) {
+  if (capture_image_id != display::kInvalidDriverCaptureImageId &&
+      capture_image_id == current_capture_target_image_id_) {
     return zx::error(ZX_ERR_SHOULD_WAIT);
   }
 
-  // Find and erase previously imported capture
-  // TODO(https://fxbug.dev/42079128): This requires an enumeration over all the imported
-  // capture images for each StartCapture(). We should use hash maps to map
-  // handles (which shouldn't be pointers) to ImageInfo instead.
-  uint8_t canvas_index = reinterpret_cast<ImageInfo*>(capture_image_id.value())->canvas_idx;
-  if (imported_captures_.erase_if(
-          [canvas_index](const ImageInfo& i) { return i.canvas_idx == canvas_index; }) == nullptr) {
-    fdf::error("Tried to release non-existent capture image {}", canvas_index);
+  if (imported_captures_.erase(capture_image_id) == nullptr) {
+    fdf::error("Tried to release non-existent capture image with ID {}", capture_image_id.value());
     return zx::error(ZX_ERR_NOT_FOUND);
   }
 
@@ -1000,7 +1046,7 @@ void DisplayEngine::OnCaptureComplete() {
   }
   {
     fbl::AutoLock capture_lock(&capture_mutex_);
-    current_capture_target_image_ = nullptr;
+    current_capture_target_image_id_ = display::kInvalidDriverCaptureImageId;
   }
 }
 

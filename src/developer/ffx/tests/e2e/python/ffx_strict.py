@@ -41,21 +41,6 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         self.dut_name = self.dut.ffx.get_target_name()
         self.ssh_private_key: Optional[str] = None
 
-    # Return list of ["key=val"]
-    def _get_configs(self, keys: List[str]) -> List[str]:
-        outputs = []
-        for key in keys:
-            output = json.loads(
-                self.run_ffx(["config", "get", "-s", "first", key])
-            )
-            asserts.assert_true(
-                isinstance(output, Text),
-                f"Value for {key} is not a string: {output}",
-            )
-            output = output.strip().replace('"', "")
-            outputs.append(f"{key}={output}")
-        return outputs
-
     # Look up and store the user's private key
     def _get_ssh_private_key(self) -> None:
         if self.ssh_private_key:
@@ -79,7 +64,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         self.ssh_private_key = ssh_priv
 
     # Build the default configs passed to strict invocations of ffx
-    def _build_strict_configs(self, extra_configs: List[str]) -> List[str]:
+    def _build_strict_configs(self) -> List[str]:
         environ = os.environ
         configs: List[str] = []
         # Get output directory
@@ -117,7 +102,6 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
             configs.append(f"shared_data={self.dut.ffx.config.shared_data}")
         else:
             configs.append(f"shared_data={environ['FUCHSIA_TEST_OUTDIR']}/ffx")
-        configs.extend(extra_configs)
         return configs
 
     def _format_strict_config_args(self, configs: List[str]) -> List[str]:
@@ -128,10 +112,8 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         return args
 
     # Build the default config arguments passed to strict invocations of ffx
-    def _build_strict_config_args(self, extra_configs: List[str]) -> List[str]:
-        return self._format_strict_config_args(
-            self._build_strict_configs(extra_configs)
-        )
+    def _build_strict_config_args(self) -> List[str]:
+        return self._format_strict_config_args(self._build_strict_configs())
 
     # Run ffx --strict <cmd> with the specified configs, and
     # optionally with a target
@@ -159,7 +141,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         config_args: Optional[List[str]] = None,
     ) -> Tuple[int, str, str]:
         if config_args is None:
-            config_args = self._build_strict_config_args([])
+            config_args = self._build_strict_config_args()
         all_args = [
             "--strict",
             "--machine",
@@ -190,7 +172,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         self, cmd: List[str], target: Optional[str] = None
     ) -> Any:
         return self._run_strict_ffx_with_configs(
-            cmd, self._build_strict_config_args([]), target
+            cmd, self._build_strict_config_args(), target
         )
 
     def test_strict_errors_with_target_name(self) -> None:
@@ -238,7 +220,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         """Test `ffx --strict` will error out if $SHARED_DATA is required but not supplied"""
         strict_configs = [
             c
-            for c in self._build_strict_configs([])
+            for c in self._build_strict_configs()
             if not c.startswith("shared_data=")
         ]
         (_code, stdout, _stderr) = self._run_strict_ffx_unchecked(
@@ -260,7 +242,7 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
         """Test `ffx --strict` will use the value passed in for $SHARED_DATA"""
         strict_configs = [
             "shared_data=foo" if c.startswith("shared_data=") else c
-            for c in self._build_strict_configs([])
+            for c in self._build_strict_configs()
         ]
         (_code, stdout, _stderr) = self._run_strict_ffx_unchecked_with_format(
             ["config", "get", "monitor.pid_file"],
@@ -276,15 +258,10 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
 
     def test_target_list_strict_fails(self) -> None:
         """Test `ffx --strict target list` correctly reports RCS=N."""
-        emu_config = (
-            [f"emu.instance_dir={self.dut.ffx.config.emu_instance_dir}"]
-            if self.dut.ffx.config.emu_instance_dir
-            else self._get_configs(["emu.instance_dir"])
-        )
         # Ensure that we cannot find the ssh.priv file
         new_configs = [
             c + "NONEXISTENT" if c.startswith("ssh.priv=") else c
-            for c in self._build_strict_configs(emu_config)
+            for c in self._build_strict_configs()
         ]
         output = self._run_strict_ffx_with_configs(
             [
@@ -299,16 +276,11 @@ class FfxStrictTest(ffxtestcase.FfxTestCase):
 
     def test_target_list_strict_omitted_ssh_priv(self) -> None:
         """Test `ffx --strict target list` reports an error if ssh.priv is omitted."""
-        emu_config = (
-            [f"emu.instance_dir={self.dut.ffx.config.emu_instance_dir}"]
-            if self.dut.ffx.config.emu_instance_dir
-            else self._get_configs(["emu.instance_dir"])
-        )
         # Filter out ssh.priv completely
         new_config_args = self._format_strict_config_args(
             [
                 c
-                for c in self._build_strict_configs(emu_config)
+                for c in self._build_strict_configs()
                 if not c.startswith("ssh.priv=")
             ]
         )

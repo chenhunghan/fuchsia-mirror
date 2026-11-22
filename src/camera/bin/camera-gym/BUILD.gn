@@ -153,10 +153,16 @@ camera_gym_component("auto") {
   manifest = "meta/camera-gym.cml"
 }
 
+camera_gym_component("no_display") {
+  component_name = "camera-gym-no-display"
+  manifest = "meta/camera-gym-no-display.cml"
+}
+
 fuchsia_package("camera_gym_pkg") {
   package_name = "camera-gym"
   deps = [
     ":camera_gym_auto",
+    ":camera_gym_no_display",
     "controller_client:bin",
   ]
 }
@@ -165,7 +171,7 @@ cc_test_executable("camera_gym_test_bin") {
   testonly = true
   sources = [ "camera_gym_test.cc" ]
   deps = [
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/camera/bin/camera-gym:lib",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture:gtest",
@@ -182,7 +188,7 @@ cc_test_executable("stream_cycler_test_bin") {
   testonly = true
   sources = [ "stream_cycler_test.cc" ]
   deps = [
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/camera/bin/camera-gym:lib",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture:gtest",

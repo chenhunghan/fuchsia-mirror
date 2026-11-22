@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":f2fs-migrate-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_library(
+    name = "migrate",
+    srcs = [
+        "src/integration_test.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "f2fs_migrate",
+    edition = "2024",
+    deps = [
+        "//src/storage/f2fs_reader",
+        "//src/storage/fxfs:migration",
+        "//src/storage/fxfs/crypto",
+        "//src/storage/lib/fscrypt",
+        "//src/storage/lib/storage_device",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+rustc_test(
+    name = "migrate_test",
+    crate = ":migrate",
+    link_deps = ["//third_party/zstd"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.inlineencryption:fuchsia.hardware.inlineencryption_rust",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/storage/crypt/starnix:lib",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/fxfs/platform",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:zstd",
+    ],
+)
+
+fx_unittest_package(
+    name = "f2fs-migrate-tests",
+    resources = ["//src/storage/f2fs_reader/testdata:images"],
+    unit_tests = [":migrate_test"],
+)

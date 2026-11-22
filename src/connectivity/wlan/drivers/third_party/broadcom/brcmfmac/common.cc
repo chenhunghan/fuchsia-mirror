@@ -573,7 +573,10 @@ zx_status_t brcmf_c_preinit_dcmds(struct brcmf_if* ifp) {
               brcmf_fil_get_errstr(fw_err));
   }
   /* Enable tx beamforming, errors can be ignored (not supported) */
-  (void)brcmf_fil_iovar_int_set(ifp, "txbf", 1, nullptr);
+  err = brcmf_fil_iovar_int_set(ifp, "txbf", 1, nullptr);
+  if (err != ZX_OK) {
+    BRCMF_DBG(FIL, "Failed to set txbf (may not be supported): %s", zx_status_get_string(err));
+  }
 
   // Enable additional retries of association request at the firmware. This is a nice to have
   // feature. Ignore if the iovar fails.

@@ -13,6 +13,9 @@ import errno
 import io
 import json
 import os
+import runpy
+import select
+import sys
 import tempfile
 import unittest
 from typing import Any
@@ -445,6 +448,80 @@ MOCK_CONFIG2_DESC = bytes([
 # fmt: on
 
 
+def _fake_async_bulk_ioctl(
+    corrupt_in_data: bool = False,
+    urb_status: int = 0,
+    short_by: int = 0,
+    complete_urbs: bool = True,
+    return_discarded_urbs: bool = True,
+) -> collections.abc.Callable[[int, int, Any], int]:
+    """Returns a fake libc ioctl for testing the pipelined bulk transfers.
+
+    The fake answers configuration descriptor requests with MOCK_CONFIG2_DESC
+    and completes every URB as soon as it is submitted, with `urb_status` and
+    `short_by` bytes short. IN URBs are filled with the loopback pattern, or
+    with zeros if `corrupt_in_data` is True. If `complete_urbs` is False, URBs
+    only complete once they are discarded, and only if `return_discarded_urbs`
+    is True. Like the kernel, reaping with nothing completed fails with EAGAIN.
+    """
+    completed_urbs: collections.deque[Any] = collections.deque()
+    pending_urbs: dict[int, Any] = {}
+
+    def fake_ioctl(fd: int, request: int, arg_ptr: Any) -> int:
+        if request == ioctl.USBDEVFS_CONTROL:
+            ctrl = arg_ptr._obj
+            if ctrl.bRequestType & 0x80 and ctrl.bRequest == 0x06:
+                desc_type = (ctrl.wValue >> 8) & 0xFF
+                if desc_type == 0x02:
+                    to_copy = min(ctrl.wLength, len(MOCK_CONFIG2_DESC))
+                    buf = ctypes.cast(
+                        ctrl.data, ctypes.POINTER(ctypes.c_char * to_copy)
+                    )
+                    buf.contents.raw = MOCK_CONFIG2_DESC[:to_copy]
+                    return to_copy
+            return 0
+        if request == ioctl.USBDEVFS_SUBMITURB:
+            urb = arg_ptr._obj
+            if not complete_urbs:
+                pending_urbs[ctypes.addressof(urb)] = urb
+                return 0
+            urb.status = urb_status
+            urb.actual_length = urb.buffer_length - short_by
+            if urb.endpoint & 0x80:
+                in_buf = ctypes.cast(
+                    urb.buffer,
+                    ctypes.POINTER(ctypes.c_char * urb.buffer_length),
+                )
+                in_buf.contents.raw = (
+                    bytes(urb.buffer_length)
+                    if corrupt_in_data
+                    else bytes(
+                        j % ioctl._LOOPBACK_PATTERN_PERIOD
+                        for j in range(urb.buffer_length)
+                    )
+                )
+            completed_urbs.append(urb)
+            return 0
+        if request == ioctl.USBDEVFS_DISCARDURB:
+            urb = pending_urbs.pop(ctypes.addressof(arg_ptr._obj), None)
+            if urb is None:
+                ctypes.set_errno(errno.EINVAL)
+                return -1
+            if return_discarded_urbs:
+                urb.status = -errno.ECONNRESET
+                completed_urbs.append(urb)
+            return 0
+        if request == ioctl.USBDEVFS_REAPURBNDELAY:
+            if not completed_urbs:
+                ctypes.set_errno(errno.EAGAIN)
+                return -1
+            arg_ptr._obj.value = ctypes.addressof(completed_urbs.popleft())
+            return 0
+        return 0
+
+    return fake_ioctl
+
+
 class TestIoctlBackendLoopback(unittest.TestCase):
     """Tests for USBTestIoctlBackend loopback and descriptor parsing."""
 
@@ -525,6 +602,294 @@ class TestIoctlBackendLoopback(unittest.TestCase):
             self.assertEqual(res.status, TestStatus.PASS)
             self.assertEqual(res.iterations_completed, 1)
             self.assertEqual(res.bytes_transferred, 512 * 2)
+
+    def _run_fake_pipelined_bulk(
+        self,
+        fake_ioctl: collections.abc.Callable[[int, int, Any], int],
+        params: TestParams,
+        config_val: int,
+        use_out: bool,
+        use_in: bool,
+        verify_loopback: bool = False,
+        backend: ioctl.USBTestIoctlBackend | None = None,
+    ) -> tuple[ioctl.USBTestIoctlBackend, TestResult]:
+        """Runs run_pipelined_bulk on an open backend backed by `fake_ioctl`.
+
+        Reuses `backend` if given. select.poll is replaced by a poller that
+        always times out, so waiting for a URB that never completes returns
+        at once.
+        """
+        if backend is None:
+            backend = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+            backend._fd = 123
+            backend.is_open = True
+            backend.speed_name = "high"
+            backend.current_config = config_val
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.side_effect = fake_ioctl
+        mock_poller = MagicMock()
+        mock_poller.poll.return_value = []
+        with (
+            patch.object(backend, "get_configuration", return_value=config_val),
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch.object(select, "poll", return_value=mock_poller),
+        ):
+            res = backend.run_pipelined_bulk(
+                params,
+                config_val=config_val,
+                use_out=use_out,
+                use_in=use_in,
+                verify_loopback=verify_loopback,
+            )
+        return backend, res
+
+    def test_ioctl_run_pipelined_bulk_loopback_success(self) -> None:
+        # More iterations than the pipeline depth, so URBs are reused.
+        _, res = self._run_fake_pipelined_bulk(
+            _fake_async_bulk_ioctl(),
+            TestParams(iterations=20, length=512),
+            config_val=2,
+            use_out=True,
+            use_in=True,
+            verify_loopback=True,
+        )
+        self.assertEqual(res.status, TestStatus.PASS)
+        self.assertEqual(res.iterations_completed, 20)
+        self.assertEqual(res.bytes_transferred, 20 * 512 * 2)
+
+    def test_ioctl_run_pipelined_bulk_detects_loopback_corruption(
+        self,
+    ) -> None:
+        _, res = self._run_fake_pipelined_bulk(
+            _fake_async_bulk_ioctl(corrupt_in_data=True),
+            TestParams(iterations=20, length=512),
+            config_val=2,
+            use_out=True,
+            use_in=True,
+            verify_loopback=True,
+        )
+        self.assertEqual(res.status, TestStatus.FAIL)
+        self.assertIn("Loopback data corruption", res.error_message or "")
+        # The pattern starts with a zero byte, so the zeros differ at byte 1.
+        self.assertIn("at byte 1:", res.error_message or "")
+
+    def test_ioctl_run_pipelined_bulk_detects_reordered_packets(self) -> None:
+        fake_ioctl = _fake_async_bulk_ioctl()
+
+        def ioctl_swapping_packets(fd: int, request: int, arg_ptr: Any) -> int:
+            res = fake_ioctl(fd, request, arg_ptr)
+            if (
+                request == ioctl.USBDEVFS_SUBMITURB
+                and arg_ptr._obj.endpoint & 0x80
+            ):
+                # Swap the two 512-byte packets of each IN transfer.
+                urb = arg_ptr._obj
+                data = ctypes.string_at(urb.buffer, urb.buffer_length)
+                ctypes.memmove(
+                    urb.buffer, data[512:] + data[:512], urb.buffer_length
+                )
+            return res
+
+        _, res = self._run_fake_pipelined_bulk(
+            ioctl_swapping_packets,
+            TestParams(iterations=20, length=1024),
+            config_val=2,
+            use_out=True,
+            use_in=True,
+            verify_loopback=True,
+        )
+        self.assertEqual(res.status, TestStatus.FAIL)
+        self.assertIn("transfer 0 at byte 0:", res.error_message or "")
+
+    def test_ioctl_run_pipelined_bulk_unidirectional(self) -> None:
+        for use_out, use_in in ((True, False), (False, True)):
+            with self.subTest(use_out=use_out, use_in=use_in):
+                _, res = self._run_fake_pipelined_bulk(
+                    _fake_async_bulk_ioctl(),
+                    TestParams(iterations=20, length=512),
+                    config_val=1,
+                    use_out=use_out,
+                    use_in=use_in,
+                )
+                self.assertEqual(res.status, TestStatus.PASS)
+                self.assertEqual(res.iterations_completed, 20)
+                self.assertEqual(res.bytes_transferred, 20 * 512)
+
+    def test_ioctl_run_pipelined_bulk_reports_failed_and_short_urbs(
+        self,
+    ) -> None:
+        for fake_ioctl, message in (
+            (
+                _fake_async_bulk_ioctl(urb_status=-errno.EPROTO),
+                f"failed: status {-errno.EPROTO} "
+                f"({os.strerror(errno.EPROTO)})",
+            ),
+            (_fake_async_bulk_ioctl(short_by=1), "was short"),
+        ):
+            with self.subTest(message=message):
+                backend, res = self._run_fake_pipelined_bulk(
+                    fake_ioctl,
+                    TestParams(iterations=20, length=512),
+                    config_val=1,
+                    use_out=False,
+                    use_in=True,
+                )
+                self.assertEqual(res.status, TestStatus.FAIL)
+                self.assertIn(message, res.error_message or "")
+                self.assertEqual(backend._orphaned_urbs, {})
+
+    def test_ioctl_run_pipelined_bulk_clears_halt_before_release(
+        self,
+    ) -> None:
+        requests: list[int] = []
+        fake_ioctl = _fake_async_bulk_ioctl(urb_status=-errno.EPIPE)
+
+        def recording_ioctl(fd: int, request: int, arg_ptr: Any) -> int:
+            requests.append(request)
+            return fake_ioctl(fd, request, arg_ptr)
+
+        _, res = self._run_fake_pipelined_bulk(
+            recording_ioctl,
+            TestParams(iterations=20, length=512),
+            config_val=1,
+            use_out=False,
+            use_in=True,
+        )
+        self.assertEqual(res.status, TestStatus.FAIL)
+        # USBDEVFS_CLEAR_HALT only works while the interface is claimed.
+        self.assertIn(ioctl.USBDEVFS_CLEAR_HALT, requests)
+        self.assertLess(
+            requests.index(ioctl.USBDEVFS_CLEAR_HALT),
+            requests.index(ioctl.USBDEVFS_RELEASEINTERFACE),
+        )
+
+    def test_ioctl_run_pipelined_bulk_timeout_discards_in_flight_urbs(
+        self,
+    ) -> None:
+        backend, res = self._run_fake_pipelined_bulk(
+            _fake_async_bulk_ioctl(complete_urbs=False),
+            TestParams(iterations=20, length=512, timeout_ms=10),
+            config_val=1,
+            use_out=True,
+            use_in=False,
+        )
+        self.assertEqual(res.status, TestStatus.FAIL)
+        self.assertIn("Timed out", res.error_message or "")
+        self.assertEqual(res.iterations_completed, 0)
+        # Every in-flight URB was discarded and reaped, so none is kept.
+        self.assertEqual(backend._orphaned_urbs, {})
+
+    def _run_fake_pipelined_bulk_with_unreturned_urbs(
+        self,
+    ) -> ioctl.USBTestIoctlBackend:
+        """Runs a transfer that times out with 16 URBs that never come back."""
+        with self.assertLogs(ioctl._LOGGER, level="WARNING") as logs:
+            backend, res = self._run_fake_pipelined_bulk(
+                _fake_async_bulk_ioctl(
+                    complete_urbs=False, return_discarded_urbs=False
+                ),
+                TestParams(iterations=20, length=512, timeout_ms=10),
+                config_val=1,
+                use_out=True,
+                use_in=False,
+            )
+        self.assertEqual(res.status, TestStatus.FAIL)
+        self.assertIn("16 cancelled URBs were not returned", logs.output[0])
+        self.assertEqual(len(backend._orphaned_urbs), 16)
+        return backend
+
+    def test_ioctl_run_pipelined_bulk_keeps_unreturned_urb_buffers(
+        self,
+    ) -> None:
+        backend = self._run_fake_pipelined_bulk_with_unreturned_urbs()
+        # Closing the fd frees the URBs in the kernel, so their buffers can
+        # go too.
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.return_value = 0
+        with (
+            patch.object(ioctl, "_get_libc", return_value=mock_cdll),
+            patch("os.close"),
+        ):
+            backend.close()
+        self.assertEqual(backend._orphaned_urbs, {})
+
+    def test_ioctl_run_pipelined_bulk_ignores_late_cancelled_urbs(
+        self,
+    ) -> None:
+        backend = self._run_fake_pipelined_bulk_with_unreturned_urbs()
+        late_urbs = collections.deque(backend._orphaned_urbs)
+        fake_ioctl = _fake_async_bulk_ioctl()
+
+        def ioctl_with_late_urbs(fd: int, request: int, arg_ptr: Any) -> int:
+            # The URBs cancelled by the first transfer come back during the
+            # next one.
+            if request == ioctl.USBDEVFS_REAPURBNDELAY and late_urbs:
+                arg_ptr._obj.value = late_urbs.popleft()
+                return 0
+            return fake_ioctl(fd, request, arg_ptr)
+
+        _, res = self._run_fake_pipelined_bulk(
+            ioctl_with_late_urbs,
+            TestParams(iterations=20, length=512),
+            config_val=1,
+            use_out=True,
+            use_in=False,
+            backend=backend,
+        )
+        self.assertEqual(res.status, TestStatus.PASS)
+        self.assertEqual(res.iterations_completed, 20)
+        self.assertFalse(late_urbs)
+        self.assertEqual(backend._orphaned_urbs, {})
+
+    def test_ioctl_reap_urb_waits_until_a_urb_completes(self) -> None:
+        backend = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
+        backend._fd = 123
+        # Interrupted by a signal, then no URB has completed yet, then one has.
+        errnos = collections.deque([errno.EINTR, errno.EAGAIN, 0])
+
+        def fake_ioctl(fd: int, request: int, arg_ptr: Any) -> int:
+            self.assertEqual(request, ioctl.USBDEVFS_REAPURBNDELAY)
+            err = errnos.popleft()
+            if err:
+                ctypes.set_errno(err)
+                return -1
+            arg_ptr._obj.value = 0x1000
+            return 0
+
+        mock_cdll = MagicMock()
+        mock_cdll.ioctl.side_effect = fake_ioctl
+        mock_poller = MagicMock()
+        mock_poller.poll.return_value = [(123, select.POLLOUT)]
+        with patch.object(ioctl, "_get_libc", return_value=mock_cdll):
+            addr = backend._reap_urb(ctypes.c_void_p(), mock_poller, 100)
+        self.assertEqual(addr, 0x1000)
+        self.assertFalse(errnos)
+        # EINTR retries at once; only EAGAIN waits for a completion.
+        mock_poller.poll.assert_called_once_with(100)
+
+    def test_ioctl_run_pipelined_bulk_rejects_verify_without_loopback(
+        self,
+    ) -> None:
+        with self.assertRaises(ValueError):
+            self._run_fake_pipelined_bulk(
+                _fake_async_bulk_ioctl(),
+                TestParams(iterations=20, length=512),
+                config_val=1,
+                use_out=False,
+                use_in=True,
+                verify_loopback=True,
+            )
+
+    def test_ioctl_run_pipelined_bulk_rejects_no_direction(self) -> None:
+        with self.assertRaisesRegex(ValueError, "use_out or use_in"):
+            self._run_fake_pipelined_bulk(
+                _fake_async_bulk_ioctl(),
+                TestParams(iterations=20, length=512),
+                config_val=1,
+                use_out=False,
+                use_in=False,
+            )
 
     def test_ioctl_run_bulk_loopback_mismatch_failure(self) -> None:
         backend = ioctl.USBTestIoctlBackend("/dev/bus/usb/001/002")
@@ -1164,6 +1529,16 @@ class TestCLI(unittest.TestCase):
         with patch("sys.stderr"):
             exit_code = main(["-c", "0"])
         self.assertEqual(exit_code, 1)
+
+    def test_cli_direct_main_execution(self) -> None:
+        with (
+            patch.object(sys, "argv", [cli.__file__, "--help"]),
+            patch("sys.stdout", new_callable=io.StringIO) as mock_stdout,
+            self.assertRaises(SystemExit) as cm,
+        ):
+            runpy.run_path(cli.__file__, run_name="__main__")
+        self.assertEqual(cm.exception.code, 0)
+        self.assertIn("usage:", mock_stdout.getvalue())
 
 
 class TestUSBTestBackend(unittest.TestCase):

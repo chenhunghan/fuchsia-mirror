@@ -56,7 +56,14 @@ impl<E> Commit<E> {
 impl SerializedCommit {
     fn deserialize<E>(&self, config: &SaeConfiguration<E>) -> Result<Commit<E>, Error> {
         let fcg = (config.fcg)()?;
+        let order = fcg.order()?;
+        if self.scalar.len() != fcg.scalar_size()? {
+            bail!("Attempted to deserialize FCG scalar with invalid length");
+        }
         let scalar = Bignum::new_from_slice(&self.scalar[..])?;
+        if scalar.is_zero() || scalar.is_one() || scalar >= order {
+            bail!("Attempted to deserialize out-of-range FCG scalar");
+        }
         let element = match fcg.element_from_octets(&self.element)? {
             Some(element) => element,
             None => bail!("Attempted to deserialize invalid FCG element"),
@@ -123,8 +130,8 @@ impl<T> std::fmt::Debug for FrameResult<T> {
 }
 
 /// IEEE 802.11-2016 12.4.5.4
-/// Returns the calculated pairwise key and peer commit, or None if the given peer element is
-/// invalid.
+/// Returns the calculated pairwise key and peer commit, or Drop if the given peer scalar or
+/// element is invalid.
 fn process_commit<E>(
     config: &SaeConfiguration<E>,
     rand: &Bignum,
@@ -133,9 +140,21 @@ fn process_commit<E>(
     peer_element: &[u8],
 ) -> Result<FrameResult<(Commit<E>, Kck, Key)>, RejectReason> {
     let fcg = (config.fcg)()?;
+    let order = fcg.order()?;
+    let scalar_size = fcg.scalar_size()?;
+    if peer_scalar.len() != scalar_size {
+        warn!("SAE commit scalar has wrong number of octets");
+        return Ok(FrameResult::Drop);
+    }
+    let peer_scalar = Bignum::new_from_slice(peer_scalar)?;
+    // IEEE 802.11-2016 12.4.5.4: Verify that 1 < peer-commit-scalar < order.
+    if peer_scalar.is_zero() || peer_scalar.is_one() || peer_scalar >= order {
+        warn!("SAE commit scalar out of range");
+        return Ok(FrameResult::Drop);
+    }
     // Parse the peer element.
     let peer_commit = match fcg.element_from_octets(peer_element)? {
-        Some(element) => Commit { scalar: Bignum::new_from_slice(peer_scalar)?, element },
+        Some(element) => Commit { scalar: peer_scalar, element },
         None => return Ok(FrameResult::Drop),
     };
 
@@ -151,10 +170,7 @@ fn process_commit<E>(
     };
     let ctx = BignumCtx::new()?;
     let keyseed = config.params.hmac.hkdf_extract(&[0u8; 32][..], &k);
-    let sha_ctx = peer_commit
-        .scalar
-        .mod_add(&commit.scalar, &fcg.order()?, &ctx)?
-        .to_be_vec(fcg.scalar_size()?);
+    let sha_ctx = peer_commit.scalar.mod_add(&commit.scalar, &order, &ctx)?.to_be_vec(scalar_size);
     let q = config.params.hmac.bits();
     let kck_and_pmk =
         config.params.hmac.kdf_hash_length(&keyseed[..], "SAE KCK and PMK", &sha_ctx[..], q + 256);
@@ -727,6 +743,7 @@ mod test {
     use mundane::hash::Sha256;
     use std::convert::TryFrom;
     use std::sync::LazyLock;
+    use test_case::test_case;
 
     // IEEE Std 802.11-18/1104r0: "New Test Vectors for SAE" provides all of these values.
     // TEST_PWD is slightly modified by concatenating the password identifier field; IEEE Std
@@ -848,6 +865,92 @@ mod test {
         let result =
             process_commit(&config, &rand_a, &commit_a, &scalar_b[..], &element_b[..]).unwrap();
         assert_matches!(result, FrameResult::Drop);
+    }
+
+    fn p256_order() -> Bignum {
+        ecc::Group::new(TEST_GROUP).unwrap().order().unwrap()
+    }
+
+    fn padded_valid_scalar() -> Vec<u8> {
+        let mut scalar = vec![0u8];
+        scalar.extend_from_slice(&Vec::from_hex(TEST_SCALAR_B).unwrap());
+        scalar
+    }
+
+    #[test_case(vec![]; "empty")]
+    #[test_case(vec![0u8; 31]; "truncated")]
+    #[test_case(padded_valid_scalar(); "padded_valid_scalar")]
+    #[test_case(vec![0u8; 32]; "zero")]
+    #[test_case(Bignum::one().unwrap().to_be_vec(32); "one")]
+    #[test_case(p256_order().to_be_vec(32); "order")]
+    #[test_case(p256_order().add(Bignum::one().unwrap()).unwrap().to_be_vec(32); "order_plus_one")]
+    #[test_case(vec![0xff; 32]; "max_u256")]
+    fn process_commit_fails_out_of_range_or_malformed_peer_scalar(bad_scalar: Vec<u8>) {
+        let config = make_ecc_config();
+        let commit_a = make_commit(&config, TEST_SCALAR_A, TEST_ELEMENT_A);
+        let rand_a = Bignum::new_from_slice(&Vec::from_hex(TEST_RAND_A).unwrap()[..]).unwrap();
+        let element_b = Vec::from_hex(TEST_ELEMENT_B).unwrap();
+
+        let result =
+            process_commit(&config, &rand_a, &commit_a, &bad_scalar[..], &element_b[..]).unwrap();
+        assert_matches!(result, FrameResult::Drop);
+    }
+
+    #[test_case(Bignum::new_from_u64(2).unwrap().to_be_vec(32); "two")]
+    #[test_case(p256_order().sub(Bignum::one().unwrap()).unwrap().to_be_vec(32); "order_minus_one")]
+    fn process_commit_accepts_boundary_valid_peer_scalars(valid_scalar: Vec<u8>) {
+        let config = make_ecc_config();
+        let commit_a = make_commit(&config, TEST_SCALAR_A, TEST_ELEMENT_A);
+        let rand_a = Bignum::new_from_slice(&Vec::from_hex(TEST_RAND_A).unwrap()[..]).unwrap();
+        let element_b = Vec::from_hex(TEST_ELEMENT_B).unwrap();
+
+        let result =
+            process_commit(&config, &rand_a, &commit_a, &valid_scalar[..], &element_b[..]).unwrap();
+        assert_matches!(result, FrameResult::Proceed(_));
+    }
+
+    #[test]
+    fn committed_drops_unreduced_reflected_scalar_plus_order() {
+        let config = make_ecc_config();
+        let fcg = (config.fcg)().unwrap();
+        let order = fcg.order().unwrap();
+        let scalar_size = fcg.scalar_size().unwrap();
+
+        // Construct a valid local commit with small scalar = 5 (rand = 2, mask = 3) so that
+        // scalar + order < 2^256 still fits in 32 bytes while differing from commit.scalar.
+        let rand = Bignum::new_from_u64(2).unwrap();
+        let mask = Bignum::new_from_u64(3).unwrap();
+        let pwe = fcg.element_from_octets(&config.pwe).unwrap().unwrap();
+        let element = fcg.inverse_op(fcg.scalar_op(&mask, &pwe).unwrap()).unwrap();
+        let commit = Commit { scalar: Bignum::new_from_u64(5).unwrap(), element }
+            .serialize(&config)
+            .unwrap();
+
+        let unreduced_scalar = Bignum::new_from_u64(5).unwrap().add(order).unwrap();
+        assert_eq!(unreduced_scalar.len(), scalar_size);
+        let unreduced_scalar_bytes = unreduced_scalar.to_be_vec(scalar_size);
+        assert_ne!(unreduced_scalar_bytes, commit.scalar);
+        let reflected_element = commit.element.clone();
+
+        let (transition, sae_new) = State::new(SaeNew { config }).release_data();
+        let state = SaeHandshakeState::from(transition.to(SaeCommitted {
+            config: sae_new.config,
+            rand: rand.to_be_vec(scalar_size),
+            commit,
+            sync: 0,
+            anti_clogging_token: vec![],
+        }));
+
+        let forged_commit = CommitMsg {
+            group_id: 19,
+            scalar: &unreduced_scalar_bytes[..],
+            element: &reflected_element[..],
+            anti_clogging_token: None,
+        };
+        let mut sink = vec![];
+        let next_state = state.handle_commit(&mut sink, &forged_commit);
+        assert!(sink.is_empty());
+        assert!(matches!(next_state, SaeHandshakeState::SaeCommitted(_)));
     }
 
     #[test]

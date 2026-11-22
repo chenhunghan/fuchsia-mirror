@@ -19,7 +19,7 @@ import (
 const lateBootMessage = "we made it!"
 
 func TestQemuLauncherHandle(t *testing.T) {
-	launcher := &QemuLauncher{Pid: 4141, TmpDir: "/tmp/woof"}
+	launcher := &QemuLauncher{Pid: 4141, TmpDir: "/tmp/test-dir"}
 
 	handle, err := NewHandleWithData(HandleData{launcher: launcher})
 	if err != nil {
@@ -173,6 +173,27 @@ func TestQemuLauncherPrepare(t *testing.T) {
 		if bytes.Equal(getFileHash(t, path), origFileHashes[path]) {
 			t.Fatalf("File not updated after SSH key regeneration: %q", path)
 		}
+	}
+}
+
+func TestQemuLauncherPrepareFxfsSparse(t *testing.T) {
+	// Enable subprocess mocking
+	ExecCommand = mockCommand
+	defer func() { ExecCommand = exec.Command }()
+
+	for _, imagePath := range []string{"/path/to/fxfs.sparse.blk", "/path/to/fxfs.blk", "/path/to/storage-full.blk"} {
+		build, _ := newMockBuild()
+		build.(*mockBuild).paths["blk"] = imagePath
+		launcher := NewQemuLauncher(build)
+
+		if err := launcher.Prepare(); err != nil {
+			t.Fatalf("Error preparing launcher with %s: %s", imagePath, err)
+		}
+
+		if !fileExists(launcher.extendedBlk) {
+			t.Fatalf("expected extendedBlk %q to exist", launcher.extendedBlk)
+		}
+		launcher.Kill()
 	}
 }
 

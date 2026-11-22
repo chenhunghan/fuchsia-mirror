@@ -21,18 +21,18 @@
 #include <ktl/limits.h>
 #include <ktl/span.h>
 #include <ktl/type_traits.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
 #include <phys/boot-options.h>
-#include <phys/boot-shim/devicetree.h>
+#include <phys/linuxboot-runtime/devicetree.h>
+#include <phys/output/stdout.h>
+#include <phys/output/uart.h>
 #include <phys/runtime/main.h>
-#include <phys/uart/driver.h>
 
 #include "test-main.h"
 
-void PhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
+void CppPhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
   ArchSetUpCpu();
-  ApplyRelocations();
 
   // For testing purposes, we explicitly initialize the uart from the
   // devicetree before anything. There is no harm in reinitializing the
@@ -53,7 +53,8 @@ void PhysMain(void* flat_devicetree_blob, arch::EarlyTicks ticks) {
   EarlyBootZbiBytes early_zbi_bytes{chosen.ramdisk()};
   EarlyBootZbi early_zbi{&early_zbi_bytes};
   SetBootOptions(boot_options, early_zbi, chosen.cmdline().value_or(""));
-  SetUartConsole(boot_options.serial);
+  UartDriver& uart = SetUartDriver(boot_options.serial);
+  gPhysStdout.set_console(FILE{&uart});
   ArchSetUpZbi(early_zbi);
 
   // Early boot may have filled the screen with logs. Add a newline to

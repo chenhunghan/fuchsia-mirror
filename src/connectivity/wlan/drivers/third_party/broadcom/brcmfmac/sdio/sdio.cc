@@ -3276,6 +3276,22 @@ zx_status_t brcmf_sdio_load_files(brcmf_pub* drvr, bool reload) TA_NO_THREAD_SAF
   return ZX_OK;
 }
 
+// Called when a reload fails after the bus was reprobed. The firmware may already be running with
+// its out-of-band interrupt enabled, so reset the card to keep it quiet until the next attempt.
+static void brcmf_sdio_reload_failed(struct brcmf_sdio_dev* sdiod) {
+  std::lock_guard<std::mutex> guard(sdiod->drvr->fw_reloading);
+  // In any other state the bus is already down.
+  if (sdiod->state == BRCMF_SDIOD_DATA) {
+    brcmf_sdiod_change_state(sdiod, BRCMF_SDIOD_DOWN);
+  }
+  brcmf_sdio_reset(sdiod->bus);
+  zx_status_t status = brcmf_sdio_request_card_reset(sdiod);
+  if (status != ZX_OK) {
+    BRCMF_ERR("Failed to reset sdio after reload failure - error: %s",
+              zx_status_get_string(status));
+  }
+}
+
 zx_status_t brcmf_sdio_recovery(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY_ANALYSIS {
   struct brcmf_sdio_dev* sdiod = bus->bus_priv.sdio;
   struct brcmf_pub* drvr = sdiod->drvr;
@@ -3304,11 +3320,11 @@ zx_status_t brcmf_sdio_recovery(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY_ANALY
   // brcmf_sdio_load_files() will unlock drvr->fw_reloading.
   if ((error = brcmf_sdio_load_files(drvr, true)) != ZX_OK) {
     BRCMF_ERR("Failed to reload images - error: %s", zx_status_get_string(error));
-    return error;
-  }
-
-  if ((error = brcmf_bus_started(sdiod->drvr, true)) != ZX_OK) {
+  } else if ((error = brcmf_bus_started(sdiod->drvr, true)) != ZX_OK) {
     BRCMF_ERR("Initialization after bus started failed.");
+  }
+  if (error != ZX_OK) {
+    brcmf_sdio_reload_failed(sdiod);
     return error;
   }
 
@@ -3582,11 +3598,17 @@ static zx_status_t brcmf_sdio_probe_attach(struct brcmf_sdio* bus, bool reloadin
   zx_status_t err = ZX_OK;
   int reg_addr;
   uint16_t block_size;
+  uint16_t head_align = DMA_ALIGNMENT;
+  uint16_t sgentry_align = DMA_ALIGNMENT;
   uint32_t reg_val;
   uint32_t drivestrength;
   brcmf_mp_device* settings = nullptr;
   brcmf_sdio_pd* sdio_settings = nullptr;
   size_t hdrbuf_size;
+  struct brcmf_chip* ci = nullptr;
+  struct brcmf_chip* old_ci = nullptr;
+  struct brcmf_core* sdio_core = nullptr;
+  struct brcmf_core* cc_core = nullptr;
 
   sdiodev = bus->sdiodev;
   sdio_claim_host(sdiodev->func1);
@@ -3608,35 +3630,53 @@ static zx_status_t brcmf_sdio_probe_attach(struct brcmf_sdio* bus, bool reloadin
   if (err != ZX_OK || ((clkctl & ~SBSDIO_AVBITS) != BRCMF_INIT_CLKCTL1)) {
     BRCMF_ERR("ChipClkCSR access: err %s wrote 0x%02x read 0x%02x", zx_status_get_string(err),
               BRCMF_INIT_CLKCTL1, clkctl);
+    if (err == ZX_OK) {
+      err = ZX_ERR_IO_REFUSED;
+    }
     goto fail;
   }
 
-  err = brcmf_chip_attach(sdiodev, &brcmf_sdio_buscore_ops, &bus->ci);
+  // Stage the new chip and core pointers in locals until block-size and settings setup succeed, so
+  // an early failure on reload leaves the previous chip info in place for the rest of the driver.
+  err = brcmf_chip_attach(sdiodev, &brcmf_sdio_buscore_ops, &ci);
   if (err != ZX_OK) {
     BRCMF_ERR("brcmf_chip_attach failed: %s", zx_status_get_string(err));
-    bus->ci = NULL;
     goto fail;
   }
 
   /* Pick up the SDIO core info struct from chip.c */
-  bus->sdio_core = brcmf_chip_get_core(bus->ci, CHIPSET_SDIO_DEV_CORE);
-  if (!bus->sdio_core) {
+  sdio_core = brcmf_chip_get_core(ci, CHIPSET_SDIO_DEV_CORE);
+  if (!sdio_core) {
     BRCMF_ERR("call to brcmf_chip_get_core (SDIO_DEV_CORE) failed");
     err = ZX_ERR_INTERNAL;
     goto fail;
   }
 
   /* Pick up the CHIPCOMMON core info struct, for bulk IO in bcmsdh.c */
-  sdiodev->cc_core = brcmf_chip_get_core(bus->ci, CHIPSET_CHIPCOMMON_CORE);
-  if (!sdiodev->cc_core) {
+  cc_core = brcmf_chip_get_core(ci, CHIPSET_CHIPCOMMON_CORE);
+  if (!cc_core) {
     BRCMF_ERR("call to brcmf_chip_get_core (CHIPCOMMON_CORE) failed");
     err = ZX_ERR_INTERNAL;
     goto fail;
   }
 
+  err = sdio_get_block_size(&sdiodev->sdio_proto_fn2, &block_size);
+  if (err != ZX_OK) {
+    BRCMF_ERR("Failed to get block size: %s", zx_status_get_string(err));
+    goto fail;
+  }
+  BRCMF_INFO("Setting s/g entry alignment to block size %u", block_size);
+
   if (!reloading) {
     settings = static_cast<decltype(settings)>(calloc(1, sizeof(*settings)));
     sdio_settings = static_cast<decltype(sdio_settings)>(calloc(1, sizeof(*sdio_settings)));
+    if (!settings || !sdio_settings) {
+      BRCMF_ERR("failed to allocate device or SDIO parameters");
+      free(sdio_settings);
+      free(settings);
+      err = ZX_ERR_NO_MEMORY;
+      goto fail;
+    }
   } else {
     ZX_ASSERT(sdiodev->settings && sdiodev->settings->bus.sdio);
 
@@ -3651,26 +3691,7 @@ static zx_status_t brcmf_sdio_probe_attach(struct brcmf_sdio* bus, bool reloadin
     memset(settings, 0, sizeof(*settings));
   }
 
-  if (!settings) {
-    BRCMF_ERR("failed to allocate device parameters");
-    err = ZX_ERR_NO_MEMORY;
-    goto fail;
-  }
-  brcmf_get_module_param(BRCMF_BUS_TYPE_SDIO, bus->ci->chip, bus->ci->chiprev, settings);
-  sdiodev->settings = settings;
-
-  if (!sdio_settings) {
-    BRCMF_ERR("failed to allocate SDIO parameters");
-    err = ZX_ERR_NO_MEMORY;
-    goto fail;
-  }
-
-  err = sdio_get_block_size(&sdiodev->sdio_proto_fn2, &block_size);
-  if (err != ZX_OK) {
-    BRCMF_ERR("Failed to get block size: %s", zx_status_get_string(err));
-    goto fail;
-  }
-  BRCMF_INFO("Setting s/g entry alignment to block size %u", block_size);
+  brcmf_get_module_param(BRCMF_BUS_TYPE_SDIO, ci->chip, ci->chiprev, settings);
 
   // TODO(cphoenix): Do we really want to use default? (If so, delete =0 lines because calloc)
   sdio_settings->txglomsz = kMaxTxGlomFrames;
@@ -3678,20 +3699,19 @@ static zx_status_t brcmf_sdio_probe_attach(struct brcmf_sdio* bus, bool reloadin
   sdio_settings->sd_head_align = 0;         // Use default
   sdio_settings->drive_strength = 0;        // Use default
   sdio_settings->oob_irq_supported = true;  // TODO(cphoenix): Always?
-  sdiodev->settings->bus.sdio = sdio_settings;
+  settings->bus.sdio = sdio_settings;
+  sdiodev->settings = settings;
 
   /* platform specific configuration:
    *   alignments must be at least 4 bytes for ADMA
    */
-  bus->head_align = DMA_ALIGNMENT;
-  bus->sgentry_align = DMA_ALIGNMENT;
   if (sdiodev->settings->bus.sdio->sd_head_align > DMA_ALIGNMENT) {
     if (sdiodev->settings->bus.sdio->sd_head_align > std::numeric_limits<uint16_t>::max()) {
       BRCMF_ERR("brcmf_sdio_probe_attach error: sd_head_align invalid (overflow)");
       err = ZX_ERR_INTERNAL;
       goto fail;
     }
-    bus->head_align = static_cast<uint16_t>(sdiodev->settings->bus.sdio->sd_head_align);
+    head_align = static_cast<uint16_t>(sdiodev->settings->bus.sdio->sd_head_align);
   }
   if (sdiodev->settings->bus.sdio->sd_sgentry_align > DMA_ALIGNMENT) {
     if (sdiodev->settings->bus.sdio->sd_sgentry_align > std::numeric_limits<uint16_t>::max()) {
@@ -3699,11 +3719,23 @@ static zx_status_t brcmf_sdio_probe_attach(struct brcmf_sdio* bus, bool reloadin
       err = ZX_ERR_INTERNAL;
       goto fail;
     }
-    bus->sgentry_align = static_cast<uint16_t>(sdiodev->settings->bus.sdio->sd_sgentry_align);
+    sgentry_align = static_cast<uint16_t>(sdiodev->settings->bus.sdio->sd_sgentry_align);
   }
+  bus->head_align = head_align;
+  bus->sgentry_align = sgentry_align;
 
   sdiodev->txglom = bus->txglom;
   sdiodev->txglomsz = sdiodev->settings->bus.sdio->txglomsz;
+
+  // Commit chip and core pointers before hardware init, which reads bus->sdio_core and bus->ci.
+  old_ci = bus->ci;
+  bus->ci = ci;
+  ci = nullptr;
+  bus->sdio_core = sdio_core;
+  sdiodev->cc_core = cc_core;
+  if (old_ci) {
+    brcmf_chip_detach(old_ci);
+  }
 
   err = brcmf_sdio_kso_init(bus);
   if (err != ZX_OK) {
@@ -3789,6 +3821,9 @@ static zx_status_t brcmf_sdio_probe_attach(struct brcmf_sdio* bus, bool reloadin
   return err;
 
 fail:
+  if (ci) {
+    brcmf_chip_detach(ci);
+  }
   sdio_release_host(sdiodev->func1);
   BRCMF_DBG(TEMP, "* * FAIL");
   return err;
@@ -3865,6 +3900,7 @@ static zx_status_t brcmf_sdio_suspend(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY
     drvr->fw_reloading.unlock();
     return error;
   }
+  sdiod->suspended = true;
   return ZX_OK;
 }
 
@@ -3872,6 +3908,13 @@ static zx_status_t brcmf_sdio_resume(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY_
   struct brcmf_sdio_dev* sdiod = bus->bus_priv.sdio;
   zx_status_t error = ZX_OK;
   struct brcmf_pub* drvr = sdiod->drvr;
+
+  // Device::Reset resumes even if suspend failed or never ran. The reload below needs the card
+  // reset and drvr->fw_reloading held, so suspend first in that case.
+  if (!sdiod->suspended && (error = brcmf_sdio_suspend(bus)) != ZX_OK) {
+    return error;
+  }
+  sdiod->suspended = false;
 
   if ((error = brcmf_sdiod_probe(sdiod, true)) != ZX_OK) {
     BRCMF_ERR("Failed to probe sdio - error: %s", zx_status_get_string(error));
@@ -3883,11 +3926,11 @@ static zx_status_t brcmf_sdio_resume(struct brcmf_bus* bus) TA_NO_THREAD_SAFETY_
   // drvr->fw_reloading will be unlocked by brcmf_sdio_load_files.
   if ((error = brcmf_sdio_load_files(drvr, true)) != ZX_OK) {
     BRCMF_ERR("Failed to reload images - error: %s", zx_status_get_string(error));
-    return error;
-  }
-
-  if ((error = brcmf_bus_started(sdiod->drvr, true)) != ZX_OK) {
+  } else if ((error = brcmf_bus_started(sdiod->drvr, true)) != ZX_OK) {
     BRCMF_ERR("Initialization after bus started failed.");
+  }
+  if (error != ZX_OK) {
+    brcmf_sdio_reload_failed(sdiod);
     return error;
   }
 
@@ -4285,7 +4328,12 @@ struct brcmf_sdio* brcmf_sdio_probe(struct brcmf_sdio_dev* sdiodev, bool reloadi
   return bus;
 
 fail:
-  brcmf_sdio_remove(bus);
+  // On reload the bus is still in use by the rest of the driver, so leave it for driver shutdown
+  // to free.
+  if (!reloading) {
+    brcmf_sdio_remove(bus);
+    sdiodev->bus = nullptr;
+  }
   return NULL;
 }
 

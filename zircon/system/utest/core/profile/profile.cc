@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/boot-options/boot-options.h>
 #include <lib/fit/defer.h>
 #include <lib/standalone-test/standalone.h>
+#include <lib/zx/channel.h>
+#include <lib/zx/exception.h>
 #include <lib/zx/job.h>
 #include <lib/zx/pager.h>
 #include <lib/zx/profile.h>
@@ -11,15 +14,19 @@
 #include <lib/zx/result.h>
 #include <lib/zx/thread.h>
 #include <lib/zx/timer.h>
+#include <threads.h>
 #include <zircon/errors.h>
 #include <zircon/rights.h>
 #include <zircon/syscalls.h>
+#include <zircon/syscalls/exception.h>
 #include <zircon/syscalls/object.h>
 #include <zircon/syscalls/profile.h>
 #include <zircon/syscalls/resource.h>
 #include <zircon/syscalls/types.h>
+#include <zircon/threads.h>
 #include <zircon/time.h>
 
+#include <algorithm>
 #include <atomic>
 #include <thread>
 
@@ -691,6 +698,411 @@ TEST(SchedulerProfileTest, DeadlinePiUtilizationPanicRepro) {
   t2.join();
 
   EXPECT_FALSE(failed.load());
+}
+
+// Returns a profile that lets a thread run on every CPU. The fair starvation tests use it to undo
+// the affinity they give the thread that runs the tests.
+zx_profile_info_t MakeAllCpusProfile() {
+  const size_t num_cpus = GetCpuCount();
+  return MakeCpuMaskProfile(num_cpus >= ZX_CPU_SET_BITS_PER_WORD ? ~uint64_t{0}
+                                                                 : (uint64_t{1} << num_cpus) - 1);
+}
+
+// Resumes every exception that arrives on `exceptions` until `thread` has terminated. A fair
+// starvation report can still come after a test has stopped waiting for one. Standalone core
+// tests have no other exception handler, and an unhandled policy exception would terminate the
+// process instead of failing the test.
+void ResumeExceptionsUntilTerminated(const zx::channel& exceptions, const zx::thread& thread) {
+  for (;;) {
+    zx_wait_item_t items[] = {
+        {.handle = exceptions.get(), .waitfor = ZX_CHANNEL_READABLE, .pending = 0},
+        {.handle = thread.get(), .waitfor = ZX_THREAD_TERMINATED, .pending = 0},
+    };
+    ZX_ASSERT(zx::handle::wait_many(items, 2, zx::time::infinite()) == ZX_OK);
+    if (items[0].pending & ZX_CHANNEL_READABLE) {
+      zx_exception_info_t info = {};
+      zx::exception exception;
+      ZX_ASSERT(exceptions.read(0, &info, exception.reset_and_get_address(), sizeof(info), 1,
+                                nullptr, nullptr) == ZX_OK);
+      const uint32_t handled = ZX_EXCEPTION_STATE_HANDLED;
+      ZX_ASSERT(exception.set_property(ZX_PROP_EXCEPTION_STATE, &handled, sizeof(handled)) ==
+                ZX_OK);
+      continue;
+    }
+    if (items[1].pending & ZX_THREAD_TERMINATED) {
+      return;
+    }
+  }
+}
+
+// Blocks until `futex` is set with `SetAndWakeFutex`. The fair threads of the fair starvation
+// tests wait this way so that they are not runnable, and so not counted as starved, before the
+// test starts them.
+void WaitForFutex(const std::atomic<zx_futex_t>& futex) {
+  while (futex.load() == 0) {
+    zx_futex_wait(reinterpret_cast<const zx_futex_t*>(&futex), 0, ZX_HANDLE_INVALID,
+                  ZX_TIME_INFINITE);
+  }
+}
+
+void SetAndWakeFutex(std::atomic<zx_futex_t>& futex) {
+  futex.store(1);
+  zx_futex_wake(reinterpret_cast<const zx_futex_t*>(&futex), UINT32_MAX);
+}
+
+// Exercises the lockup detector's fair starvation check: a deadline thread that polls with yield
+// keeps a fair thread on the same CPU from running, the detector reports it, and raises a policy
+// exception on the polling thread.
+//
+// The check is off by default, so this test only runs when booted with:
+//   kernel.lockup-detector.fair-starvation-threshold-ms=<nonzero>
+//   kernel.lockup-detector.fair-starvation-exception=true
+TEST(SchedulerProfileTest, FairStarvationRaisesPolicyException) {
+  const BootOptions& boot_options = standalone::GetBootOptions();
+  if (boot_options.lockup_detector_fair_starvation_threshold_ms == 0 ||
+      !boot_options.lockup_detector_fair_starvation_exception ||
+      boot_options.lockup_detector_heartbeat_period_ms == 0) {
+    ZXTEST_SKIP("fair starvation detection is not enabled");
+  }
+  if (GetCpuCount() < 2) {
+    ZXTEST_SKIP("test requires two CPUs");
+  }
+
+  constexpr uint32_t kBusyCpu = 1;
+  constexpr uint64_t kBusyCpuMask = uint64_t{1} << kBusyCpu;
+  constexpr uint64_t kTestCpuMask = 1;
+
+  zx::result<zx::resource> profile_resource = GetSystemProfileResource();
+  ASSERT_OK(profile_resource.status_value());
+
+  // A deadline profile at 100% utilization and a fair profile, both pinned to the busy CPU, and
+  // a profile that keeps this thread off it.
+  zx_profile_info_t spinner_info = {};
+  spinner_info.flags = ZX_PROFILE_INFO_FLAG_DEADLINE | ZX_PROFILE_INFO_FLAG_CPU_MASK;
+  spinner_info.deadline_params = zx_sched_deadline_params_t{ZX_MSEC(2), ZX_MSEC(2), ZX_MSEC(2)};
+  spinner_info.cpu_affinity_mask.mask[0] = kBusyCpuMask;
+  zx_profile_info_t waiter_info = {};
+  waiter_info.flags = ZX_PROFILE_INFO_FLAG_PRIORITY | ZX_PROFILE_INFO_FLAG_CPU_MASK;
+  waiter_info.priority = ZX_PRIORITY_DEFAULT;
+  waiter_info.cpu_affinity_mask.mask[0] = kBusyCpuMask;
+  zx_profile_info_t test_info = MakeCpuMaskProfile(kTestCpuMask);
+  zx_profile_info_t all_cpus_info = MakeAllCpusProfile();
+
+  zx::profile spinner_profile, waiter_profile, test_profile, all_cpus_profile;
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &spinner_info, &spinner_profile));
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &waiter_info, &waiter_profile));
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &test_info, &test_profile));
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &all_cpus_info, &all_cpus_profile));
+  // This thread runs the rest of the tests too, so let it run anywhere again afterwards.
+  ASSERT_OK(zx::thread::self()->set_profile(test_profile, 0));
+  auto restore_affinity =
+      fit::defer([&] { ZX_ASSERT(zx::thread::self()->set_profile(all_cpus_profile, 0) == ZX_OK); });
+
+  struct State {
+    std::atomic<bool> spinner_go{false};
+    std::atomic<zx_futex_t> waiter_go{0};
+    std::atomic<bool> stop{false};
+  } state;
+
+  auto spinner_entry = [](void* arg) -> int {
+    auto* state = static_cast<State*>(arg);
+    while (!state->spinner_go.load()) {
+      zx::nanosleep(zx::deadline_after(zx::msec(1)));
+    }
+    while (!state->stop.load()) {
+      zx_thread_legacy_yield(0);
+    }
+    return 0;
+  };
+  auto waiter_entry = [](void* arg) -> int {
+    auto* state = static_cast<State*>(arg);
+    WaitForFutex(state->waiter_go);
+    return 0;
+  };
+
+  // The threads use `state`, so they are stopped and joined however the test ends. The spinner
+  // is stopped first: the waiter may not get to run until then. Exceptions are handled until
+  // the spinner is gone, because a report can still come after the test has given up on it.
+  zx::channel exception_channel;
+  thrd_t spinner, waiter;
+  ASSERT_EQ(thrd_success, thrd_create(&waiter, waiter_entry, &state));
+  auto join_waiter = fit::defer([&] {
+    SetAndWakeFutex(state.waiter_go);
+    ZX_ASSERT(thrd_join(waiter, nullptr) == thrd_success);
+  });
+  ASSERT_EQ(thrd_success, thrd_create(&spinner, spinner_entry, &state));
+  zx::unowned_thread spinner_thread{thrd_get_zx_handle(spinner)};
+  zx::unowned_thread waiter_thread{thrd_get_zx_handle(waiter)};
+  auto join_spinner = fit::defer([&] {
+    state.spinner_go.store(true);
+    state.stop.store(true);
+    if (exception_channel) {
+      ResumeExceptionsUntilTerminated(exception_channel, *spinner_thread);
+    }
+    ZX_ASSERT(thrd_join(spinner, nullptr) == thrd_success);
+  });
+
+  ASSERT_OK(spinner_thread->create_exception_channel(0, &exception_channel));
+  ASSERT_OK(spinner_thread->set_profile(spinner_profile, 0));
+  ASSERT_OK(waiter_thread->set_profile(waiter_profile, 0));
+
+  // Let any cool-down left on the busy CPU by an earlier test run out. During a cool-down the
+  // waiter would run and nothing would be reported.
+  zx::nanosleep(zx::deadline_after(
+      zx::msec(static_cast<int64_t>(boot_options.lockup_detector_fair_starvation_relief_ms)) +
+      zx::msec(100)));
+
+  // Start the spinner, then let the waiter become runnable behind it.
+  state.spinner_go.store(true);
+  zx::nanosleep(zx::deadline_after(zx::msec(50)));
+  SetAndWakeFutex(state.waiter_go);
+
+  // The detector needs the threshold plus up to two heartbeat periods to report.
+  const zx::duration timeout =
+      zx::msec(static_cast<int64_t>(boot_options.lockup_detector_fair_starvation_threshold_ms +
+                                    3 * boot_options.lockup_detector_heartbeat_period_ms)) +
+      zx::sec(5);
+  const zx_status_t wait_status =
+      exception_channel.wait_one(ZX_CHANNEL_READABLE, zx::deadline_after(timeout), nullptr);
+
+  // Read the exception and resume the thread, let both threads finish, then check the results.
+  zx_exception_info_t exception_info = {};
+  zx_exception_report_t report = {};
+  zx_status_t read_status = ZX_ERR_BAD_STATE;
+  zx_status_t report_status = ZX_ERR_BAD_STATE;
+  if (wait_status == ZX_OK) {
+    zx::exception exception;
+    read_status = exception_channel.read(0, &exception_info, exception.reset_and_get_address(),
+                                         sizeof(exception_info), 1, nullptr, nullptr);
+    report_status = spinner_thread->get_info(ZX_INFO_THREAD_EXCEPTION_REPORT, &report,
+                                             sizeof(report), nullptr, nullptr);
+    if (read_status == ZX_OK) {
+      const uint32_t handled = ZX_EXCEPTION_STATE_HANDLED;
+      EXPECT_OK(exception.set_property(ZX_PROP_EXCEPTION_STATE, &handled, sizeof(handled)));
+    }
+  }
+  join_spinner.call();
+  join_waiter.call();
+
+  ASSERT_OK(wait_status, "no exception was raised on the polling thread");
+  ASSERT_OK(read_status);
+  ASSERT_OK(report_status);
+  EXPECT_EQ(ZX_EXCP_POLICY_ERROR, exception_info.type);
+  EXPECT_EQ(ZX_EXCP_POLICY_CODE_SPIN_DETECTION, report.context.synth_code);
+  EXPECT_EQ(kBusyCpu, report.context.synth_data);
+}
+
+// Exercises the relief cool-down that follows a fair starvation report: fair threads on a CPU
+// held by a deadline thread get nothing before the report, a share of the CPU for the cool-down
+// after it, and nothing again once the cool-down ends, which leads to a second report. The
+// deadline thread's capacity and period are both `spinner_period`.
+//
+// The share is measured over the middle half of the cool-down, so the test is skipped unless
+// the cool-down is at least four relief windows long.
+//
+// The check is off by default, so this only runs when booted with:
+//   kernel.lockup-detector.fair-starvation-threshold-ms=<nonzero>
+//   kernel.lockup-detector.fair-starvation-exception=true
+//   kernel.lockup-detector.fair-starvation-relief-ms=<nonzero>
+void FairStarvationReliefCoolDown(zx_duration_t spinner_period) {
+  const BootOptions& boot_options = standalone::GetBootOptions();
+  if (boot_options.lockup_detector_fair_starvation_threshold_ms == 0 ||
+      !boot_options.lockup_detector_fair_starvation_exception ||
+      boot_options.lockup_detector_fair_starvation_relief_ms == 0 ||
+      boot_options.lockup_detector_heartbeat_period_ms == 0) {
+    ZXTEST_SKIP("fair starvation relief is not enabled");
+  }
+  if (GetCpuCount() < 2) {
+    ZXTEST_SKIP("test requires two CPUs");
+  }
+
+  constexpr uint64_t kBusyCpuMask = uint64_t{1} << 1;
+  constexpr uint64_t kTestCpuMask = 1;
+  const zx::duration relief =
+      zx::msec(static_cast<int64_t>(boot_options.lockup_detector_fair_starvation_relief_ms));
+  const zx::duration heartbeat =
+      zx::msec(static_cast<int64_t>(boot_options.lockup_detector_heartbeat_period_ms));
+  // The kernel raises a threshold that is shorter than the heartbeat period to it.
+  const zx::duration threshold = std::max(
+      zx::msec(static_cast<int64_t>(boot_options.lockup_detector_fair_starvation_threshold_ms)),
+      heartbeat);
+  const int64_t percent =
+      std::clamp<int64_t>(boot_options.lockup_detector_fair_starvation_relief_percent, 1, 50);
+  const int64_t window_ms = std::clamp<int64_t>(
+      static_cast<int64_t>(boot_options.lockup_detector_fair_starvation_relief_window_ms), 1, 1000);
+  if (relief < zx::msec(window_ms * 4)) {
+    ZXTEST_SKIP("the relief cool-down is shorter than four relief windows");
+  }
+
+  zx::result<zx::resource> profile_resource = GetSystemProfileResource();
+  ASSERT_OK(profile_resource.status_value());
+
+  zx_profile_info_t spinner_info = {};
+  spinner_info.flags = ZX_PROFILE_INFO_FLAG_DEADLINE | ZX_PROFILE_INFO_FLAG_CPU_MASK;
+  spinner_info.deadline_params =
+      zx_sched_deadline_params_t{spinner_period, spinner_period, spinner_period};
+  spinner_info.cpu_affinity_mask.mask[0] = kBusyCpuMask;
+  zx_profile_info_t worker_info = {};
+  worker_info.flags = ZX_PROFILE_INFO_FLAG_PRIORITY | ZX_PROFILE_INFO_FLAG_CPU_MASK;
+  worker_info.priority = ZX_PRIORITY_DEFAULT;
+  worker_info.cpu_affinity_mask.mask[0] = kBusyCpuMask;
+  zx_profile_info_t test_info = MakeCpuMaskProfile(kTestCpuMask);
+  zx_profile_info_t all_cpus_info = MakeAllCpusProfile();
+
+  zx::profile spinner_profile, worker_profile, test_profile, all_cpus_profile;
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &spinner_info, &spinner_profile));
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &worker_info, &worker_profile));
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &test_info, &test_profile));
+  ASSERT_OK(zx::profile::create(*profile_resource, 0u, &all_cpus_info, &all_cpus_profile));
+  // This thread runs the rest of the tests too, so let it run anywhere again afterwards.
+  ASSERT_OK(zx::thread::self()->set_profile(test_profile, 0));
+  auto restore_affinity =
+      fit::defer([&] { ZX_ASSERT(zx::thread::self()->set_profile(all_cpus_profile, 0) == ZX_OK); });
+
+  struct State {
+    std::atomic<bool> spinner_go{false};
+    std::atomic<zx_futex_t> worker_go{0};
+    std::atomic<bool> stop{false};
+    // When the worker first ran after it was started; 0 until then.
+    std::atomic<zx_time_t> worker_first_ran{0};
+  } state;
+
+  // Both threads are CPU-bound once started; neither makes a syscall in its loop.
+  auto spinner_entry = [](void* arg) -> int {
+    auto* state = static_cast<State*>(arg);
+    while (!state->spinner_go.load()) {
+      zx::nanosleep(zx::deadline_after(zx::msec(1)));
+    }
+    while (!state->stop.load()) {
+    }
+    return 0;
+  };
+  auto worker_entry = [](void* arg) -> int {
+    auto* state = static_cast<State*>(arg);
+    WaitForFutex(state->worker_go);
+    state->worker_first_ran.store(zx_clock_get_monotonic());
+    while (!state->stop.load()) {
+    }
+    return 0;
+  };
+
+  // The threads use `state`, so they are stopped and joined however the test ends. The spinner
+  // is stopped first: the worker may not get to run until then. Exceptions are handled until
+  // the spinner is gone, because a report can still come after the test has given up on it.
+  zx::channel exception_channel;
+  thrd_t spinner, worker;
+  ASSERT_EQ(thrd_success, thrd_create(&worker, worker_entry, &state));
+  auto join_worker = fit::defer([&] {
+    state.stop.store(true);
+    SetAndWakeFutex(state.worker_go);
+    ZX_ASSERT(thrd_join(worker, nullptr) == thrd_success);
+  });
+  ASSERT_EQ(thrd_success, thrd_create(&spinner, spinner_entry, &state));
+  zx::unowned_thread spinner_thread{thrd_get_zx_handle(spinner)};
+  zx::unowned_thread worker_thread{thrd_get_zx_handle(worker)};
+  auto join_spinner = fit::defer([&] {
+    state.spinner_go.store(true);
+    state.stop.store(true);
+    if (exception_channel) {
+      ResumeExceptionsUntilTerminated(exception_channel, *spinner_thread);
+    }
+    ZX_ASSERT(thrd_join(spinner, nullptr) == thrd_success);
+  });
+
+  ASSERT_OK(spinner_thread->create_exception_channel(0, &exception_channel));
+  ASSERT_OK(spinner_thread->set_profile(spinner_profile, 0));
+  ASSERT_OK(worker_thread->set_profile(worker_profile, 0));
+
+  auto worker_runtime = [&]() {
+    zx_info_thread_stats_t stats = {};
+    ZX_ASSERT(worker_thread->get_info(ZX_INFO_THREAD_STATS, &stats, sizeof(stats), nullptr,
+                                      nullptr) == ZX_OK);
+    return zx::duration(stats.total_runtime);
+  };
+  // Waits for a report's exception on the spinner and resumes it.
+  auto take_exception = [&](zx::duration timeout) {
+    zx_status_t status =
+        exception_channel.wait_one(ZX_CHANNEL_READABLE, zx::deadline_after(timeout), nullptr);
+    if (status != ZX_OK) {
+      return status;
+    }
+    zx_exception_info_t info = {};
+    zx::exception exception;
+    status = exception_channel.read(0, &info, exception.reset_and_get_address(), sizeof(info), 1,
+                                    nullptr, nullptr);
+    if (status != ZX_OK) {
+      return status;
+    }
+    const uint32_t handled = ZX_EXCEPTION_STATE_HANDLED;
+    return exception.set_property(ZX_PROP_EXCEPTION_STATE, &handled, sizeof(handled));
+  };
+
+  // Let any cool-down left on the busy CPU by an earlier test run out, so that this test starts
+  // with no relief in effect.
+  zx::nanosleep(zx::deadline_after(relief + zx::msec(100)));
+
+  // Start the spinner, then let the worker become runnable behind it.
+  state.spinner_go.store(true);
+  zx::nanosleep(zx::deadline_after(zx::msec(50)));
+  const zx::time worker_started = zx::clock::get_monotonic();
+  SetAndWakeFutex(state.worker_go);
+
+  const zx::duration report_timeout = threshold + heartbeat * 3 + zx::sec(5);
+  const zx_status_t first_status = take_exception(report_timeout);
+  const zx::time first_report = zx::clock::get_monotonic();
+
+  // Measure the worker's share over the middle of the cool-down.
+  zx::duration share_runtime, share_elapsed;
+  zx_status_t second_status = ZX_ERR_BAD_STATE;
+  zx::time second_report;
+  if (first_status == ZX_OK) {
+    zx::nanosleep(zx::deadline_after(relief / 4));
+    const zx::time share_start = zx::clock::get_monotonic();
+    const zx::duration runtime_start = worker_runtime();
+    zx::nanosleep(zx::deadline_after(relief / 2));
+    share_runtime = worker_runtime() - runtime_start;
+    share_elapsed = zx::clock::get_monotonic() - share_start;
+
+    // Once the cool-down ends the worker is starved again, which is reported again.
+    second_status = take_exception(relief + report_timeout);
+    second_report = zx::clock::get_monotonic();
+  }
+
+  join_spinner.call();
+  join_worker.call();
+
+  ASSERT_OK(first_status, "no report for the spinning deadline thread");
+  // No relief before the report: the worker first ran a full threshold or more after it was
+  // started. The worker records the time itself, so this does not depend on how quickly this
+  // thread is scheduled.
+  const zx::time worker_first_ran{state.worker_first_ran.load()};
+  ASSERT_NE(worker_first_ran.get(), 0, "the fair thread never ran");
+  EXPECT_GE((worker_first_ran - worker_started).to_msecs(), threshold.to_msecs(),
+            "the fair thread ran before the report");
+
+  // During the cool-down the worker gets about the configured share. The bounds are loose to
+  // tolerate emulators: at least a third of it, at most three times it.
+  const int64_t share_permille = share_runtime.to_usecs() * 1000 / share_elapsed.to_usecs();
+  printf("fair share during cool-down: %ld.%ld%% (configured %ld%%)\n", share_permille / 10,
+         share_permille % 10, percent);
+  EXPECT_GE(share_permille, percent * 10 / 3, "the fair thread got too little during cool-down");
+  EXPECT_LE(share_permille, percent * 10 * 3, "the fair thread got too much during cool-down");
+
+  ASSERT_OK(second_status, "no second report after the cool-down ended");
+  // The second report needs the cool-down to end and a full threshold of starvation after it:
+  // detection starts over when the cool-down ends.
+  EXPECT_GE((second_report - first_report).to_msecs(), (relief + threshold).to_msecs() - 100,
+            "the second report came too early");
+}
+
+TEST(SchedulerProfileTest, FairStarvationReliefCoolDown) {
+  ASSERT_NO_FATAL_FAILURE(FairStarvationReliefCoolDown(ZX_MSEC(2)));
+}
+
+// The deadline thread's time slices are several relief windows long, so fair threads only get
+// their share if the deadline thread is preempted at the end of each window.
+TEST(SchedulerProfileTest, FairStarvationReliefCoolDownLongSlices) {
+  ASSERT_NO_FATAL_FAILURE(FairStarvationReliefCoolDown(ZX_MSEC(100)));
 }
 
 }  // namespace

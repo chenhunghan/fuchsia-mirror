@@ -32,9 +32,10 @@ use packet_formats::icmp::ndp::{
 };
 use packet_formats::icmp::{
     self, IcmpDestUnreachable, IcmpEchoReply, IcmpEchoRequest, IcmpPacketBuilder, IcmpPacketRaw,
-    IcmpPacketTypeRaw as _, IcmpTimeExceeded, Icmpv4MessageType, Icmpv4PacketRaw,
-    Icmpv4ParameterProblem, Icmpv4Redirect, Icmpv4TimestampReply, Icmpv4TimestampRequest,
-    Icmpv6MessageType, Icmpv6PacketRaw, Icmpv6PacketTooBig, Icmpv6ParameterProblem,
+    IcmpPacketTypeRaw as _, IcmpSimpleErrorPacketBuilder, IcmpTimeExceeded, Icmpv4MessageType,
+    Icmpv4PacketRaw, Icmpv4ParameterProblem, Icmpv4Redirect, Icmpv4TimestampReply,
+    Icmpv4TimestampRequest, Icmpv6MessageType, Icmpv6PacketRaw, Icmpv6PacketTooBig,
+    Icmpv6ParameterProblem,
 };
 use packet_formats::igmp::messages::IgmpMembershipReportV3Builder;
 use packet_formats::igmp::{self, IgmpPacketBuilder};
@@ -1922,6 +1923,56 @@ impl<I: IpExt, M: IcmpMessage<I>> TransportPacketMut<I> for IcmpPacketBuilder<I,
     }
 }
 
+// These impls are required for `IcmpSimpleErrorPacketBuilder` to be a
+// `DynamicTransportSerializer` and mirror `IcmpPacketBuilder` with an ICMP
+// error message: there is no transport data and the ID is not rewritable, but
+// NAT may still rewrite the pseudo-header addresses.
+impl<I: IpExt, Inner> MaybeTransportPacket for Nested<Inner, IcmpSimpleErrorPacketBuilder<I>> {
+    fn transport_packet_data(&self) -> Option<TransportPacketData> {
+        None
+    }
+}
+
+impl<I: IpExt, Inner> MaybeTransportPacketMut<I>
+    for Nested<Inner, IcmpSimpleErrorPacketBuilder<I>>
+{
+    type TransportPacketMut<'a>
+        = &'a mut IcmpSimpleErrorPacketBuilder<I>
+    where
+        Inner: 'a;
+
+    fn transport_packet_mut(&mut self) -> Option<Self::TransportPacketMut<'_>> {
+        Some(self.outer_mut())
+    }
+}
+
+impl<I: IpExt, Inner> DynamicMaybeTransportPacketMut<I>
+    for Nested<Inner, IcmpSimpleErrorPacketBuilder<I>>
+{
+    fn dyn_transport_packet_mut(&mut self) -> Option<&mut dyn TransportPacketMut<I>> {
+        MaybeTransportPacketMut::transport_packet_mut(self).map(|x| x as _)
+    }
+}
+
+impl<I: IpExt, Inner> NotSegmentableTransportSerializer
+    for Nested<Inner, IcmpSimpleErrorPacketBuilder<I>>
+{
+}
+
+impl<I: IpExt> TransportPacketMut<I> for IcmpSimpleErrorPacketBuilder<I> {
+    fn set_src_port(&mut self, _id: NonZeroU16) {}
+
+    fn set_dst_port(&mut self, _id: NonZeroU16) {}
+
+    fn update_pseudo_header_src_addr(&mut self, _old: I::Addr, new: I::Addr) {
+        self.set_src_ip(new);
+    }
+
+    fn update_pseudo_header_dst_addr(&mut self, _old: I::Addr, new: I::Addr) {
+        self.set_dst_ip(new);
+    }
+}
+
 impl<Inner, I: IpExt> MaybeIcmpErrorPayload<I>
     for Nested<Inner, IcmpPacketBuilder<I, IcmpEchoRequest>>
 {
@@ -2136,18 +2187,14 @@ icmp_error_message!(Icmpv6ParameterProblem, Ipv6);
 icmp_error_message!(Icmpv6PacketTooBig, Ipv6);
 
 macro_rules! icmpv4_error_message {
-    ($message: ty) => {
-        impl<Inner: AsRef<[u8]>> MaybeIcmpErrorPayload<Ipv4>
-            for Nested<Inner, IcmpPacketBuilder<Ipv4, $message>>
-        {
+    ($builder: ty) => {
+        impl<Inner: AsRef<[u8]>> MaybeIcmpErrorPayload<Ipv4> for Nested<Inner, $builder> {
             fn icmp_error_payload(&self) -> Option<ParsedIcmpErrorPayload<Ipv4>> {
                 ParsedIcmpErrorPayload::parse_in_icmpv4_error(Buf::new(self.inner(), ..))
             }
         }
 
-        impl<Inner: BufferMut> MaybeIcmpErrorMut<Ipv4>
-            for Nested<Inner, IcmpPacketBuilder<Ipv4, $message>>
-        {
+        impl<Inner: BufferMut> MaybeIcmpErrorMut<Ipv4> for Nested<Inner, $builder> {
             type IcmpErrorMut<'a>
                 = &'a mut Self
             where
@@ -2158,17 +2205,13 @@ macro_rules! icmpv4_error_message {
             }
         }
 
-        impl<Inner: BufferMut> DynamicMaybeIcmpErrorMut<Ipv4>
-            for Nested<Inner, IcmpPacketBuilder<Ipv4, $message>>
-        {
+        impl<Inner: BufferMut> DynamicMaybeIcmpErrorMut<Ipv4> for Nested<Inner, $builder> {
             fn dyn_icmp_error_mut(&mut self) -> Option<&mut dyn DynamicIcmpErrorMut<Ipv4>> {
                 MaybeIcmpErrorMut::icmp_error_mut(self).map(|x| x as _)
             }
         }
 
-        impl<Inner: BufferMut> IcmpErrorMut<Ipv4>
-            for Nested<Inner, IcmpPacketBuilder<Ipv4, $message>>
-        {
+        impl<Inner: BufferMut> IcmpErrorMut<Ipv4> for Nested<Inner, $builder> {
             type InnerPacket<'a>
                 = Ipv4PacketRaw<&'a mut [u8]>
             where
@@ -2188,9 +2231,7 @@ macro_rules! icmpv4_error_message {
             }
         }
 
-        impl<Inner: BufferMut> DynamicIcmpErrorMut<Ipv4>
-            for Nested<Inner, IcmpPacketBuilder<Ipv4, $message>>
-        {
+        impl<Inner: BufferMut> DynamicIcmpErrorMut<Ipv4> for Nested<Inner, $builder> {
             fn dyn_recalculate_checksum(&mut self) -> bool {
                 self.recalculate_checksum()
             }
@@ -2202,15 +2243,16 @@ macro_rules! icmpv4_error_message {
     };
 }
 
-icmpv4_error_message!(IcmpDestUnreachable);
-icmpv4_error_message!(Icmpv4Redirect);
-icmpv4_error_message!(IcmpTimeExceeded);
-icmpv4_error_message!(Icmpv4ParameterProblem);
+icmpv4_error_message!(IcmpPacketBuilder<Ipv4, IcmpDestUnreachable>);
+icmpv4_error_message!(IcmpPacketBuilder<Ipv4, Icmpv4Redirect>);
+icmpv4_error_message!(IcmpPacketBuilder<Ipv4, IcmpTimeExceeded>);
+icmpv4_error_message!(IcmpPacketBuilder<Ipv4, Icmpv4ParameterProblem>);
+icmpv4_error_message!(IcmpSimpleErrorPacketBuilder<Ipv4>);
 
 macro_rules! icmpv6_error_message {
-    ($message: ty) => {
+    ($builder: ty) => {
         impl<Inner: Buffer> MaybeIcmpErrorPayload<Ipv6>
-            for Nested<TruncatingSerializer<Inner>, IcmpPacketBuilder<Ipv6, $message>>
+            for Nested<TruncatingSerializer<Inner>, $builder>
         {
             fn icmp_error_payload(&self) -> Option<ParsedIcmpErrorPayload<Ipv6>> {
                 ParsedIcmpErrorPayload::parse_in_icmpv6_error(Buf::new(self.inner().buffer(), ..))
@@ -2218,7 +2260,7 @@ macro_rules! icmpv6_error_message {
         }
 
         impl<Inner: BufferMut> MaybeIcmpErrorMut<Ipv6>
-            for Nested<TruncatingSerializer<Inner>, IcmpPacketBuilder<Ipv6, $message>>
+            for Nested<TruncatingSerializer<Inner>, $builder>
         {
             type IcmpErrorMut<'a>
                 = &'a mut Self
@@ -2231,7 +2273,7 @@ macro_rules! icmpv6_error_message {
         }
 
         impl<Inner: BufferMut> DynamicMaybeIcmpErrorMut<Ipv6>
-            for Nested<TruncatingSerializer<Inner>, IcmpPacketBuilder<Ipv6, $message>>
+            for Nested<TruncatingSerializer<Inner>, $builder>
         {
             fn dyn_icmp_error_mut(&mut self) -> Option<&mut dyn DynamicIcmpErrorMut<Ipv6>> {
                 MaybeIcmpErrorMut::icmp_error_mut(self).map(|x| x as _)
@@ -2239,7 +2281,7 @@ macro_rules! icmpv6_error_message {
         }
 
         impl<Inner: BufferMut> IcmpErrorMut<Ipv6>
-            for Nested<TruncatingSerializer<Inner>, IcmpPacketBuilder<Ipv6, $message>>
+            for Nested<TruncatingSerializer<Inner>, $builder>
         {
             type InnerPacket<'a>
                 = Ipv6PacketRaw<&'a mut [u8]>
@@ -2263,7 +2305,7 @@ macro_rules! icmpv6_error_message {
         }
 
         impl<Inner: BufferMut> DynamicIcmpErrorMut<Ipv6>
-            for Nested<TruncatingSerializer<Inner>, IcmpPacketBuilder<Ipv6, $message>>
+            for Nested<TruncatingSerializer<Inner>, $builder>
         {
             fn dyn_recalculate_checksum(&mut self) -> bool {
                 self.recalculate_checksum()
@@ -2276,10 +2318,11 @@ macro_rules! icmpv6_error_message {
     };
 }
 
-icmpv6_error_message!(IcmpDestUnreachable);
-icmpv6_error_message!(Icmpv6PacketTooBig);
-icmpv6_error_message!(IcmpTimeExceeded);
-icmpv6_error_message!(Icmpv6ParameterProblem);
+icmpv6_error_message!(IcmpPacketBuilder<Ipv6, IcmpDestUnreachable>);
+icmpv6_error_message!(IcmpPacketBuilder<Ipv6, Icmpv6PacketTooBig>);
+icmpv6_error_message!(IcmpPacketBuilder<Ipv6, IcmpTimeExceeded>);
+icmpv6_error_message!(IcmpPacketBuilder<Ipv6, Icmpv6ParameterProblem>);
+icmpv6_error_message!(IcmpSimpleErrorPacketBuilder<Ipv6>);
 
 impl<M: igmp::MessageType<EmptyBuf>> MaybeIcmpErrorMut<Ipv4>
     for InnerSerializer<IgmpPacketBuilder<EmptyBuf, M>, EmptyBuf>
@@ -2498,6 +2541,61 @@ impl<I: FilterIpExt, B: BufferMut> MaybeIcmpErrorMut<I> for RawIpBody<I, B> {
         )
     }
 }
+
+// The transport header and ICMP error views of a `RawIpBody` are parsed on
+// demand from its body, so they can't be handed out as references. Instead,
+// `RawIpBody` implements the dyn-compatible traits itself by reparsing the body
+// on every call.
+
+impl<I: IpExt, B: BufferMut> TransportPacketMut<I> for RawIpBody<I, B> {
+    fn set_src_port(&mut self, port: NonZeroU16) {
+        if let Some(mut packet) = self.transport_packet_mut() {
+            packet.set_src_port(port);
+        }
+    }
+
+    fn set_dst_port(&mut self, port: NonZeroU16) {
+        if let Some(mut packet) = self.transport_packet_mut() {
+            packet.set_dst_port(port);
+        }
+    }
+
+    fn update_pseudo_header_src_addr(&mut self, old: I::Addr, new: I::Addr) {
+        if let Some(mut packet) = self.transport_packet_mut() {
+            packet.update_pseudo_header_src_addr(old, new);
+        }
+    }
+
+    fn update_pseudo_header_dst_addr(&mut self, old: I::Addr, new: I::Addr) {
+        if let Some(mut packet) = self.transport_packet_mut() {
+            packet.update_pseudo_header_dst_addr(old, new);
+        }
+    }
+}
+
+impl<I: IpExt, B: BufferMut> DynamicMaybeTransportPacketMut<I> for RawIpBody<I, B> {
+    fn dyn_transport_packet_mut(&mut self) -> Option<&mut dyn TransportPacketMut<I>> {
+        if self.transport_packet_mut().is_some() { Some(self) } else { None }
+    }
+}
+
+impl<I: FilterIpExt, B: BufferMut> DynamicIcmpErrorMut<I> for RawIpBody<I, B> {
+    fn dyn_recalculate_checksum(&mut self) -> bool {
+        self.icmp_error_mut().is_some_and(|mut error| error.recalculate_checksum())
+    }
+
+    fn dyn_inner_packet(&mut self) -> Option<I::FilterIpPacketRaw<&mut [u8]>> {
+        self.icmp_error_mut()?.into_inner_packet()
+    }
+}
+
+impl<I: FilterIpExt, B: BufferMut> DynamicMaybeIcmpErrorMut<I> for RawIpBody<I, B> {
+    fn dyn_icmp_error_mut(&mut self) -> Option<&mut dyn DynamicIcmpErrorMut<I>> {
+        if self.icmp_error_mut().is_some() { Some(self) } else { None }
+    }
+}
+
+impl<I: IpExt, B: ParseBuffer> NotSegmentableTransportSerializer for RawIpBody<I, B> {}
 
 impl<I: IpExt, B: BufferMut + NetworkSerializer> Serializer<NetworkSerializationContext>
     for RawIpBody<I, B>
@@ -2979,6 +3077,16 @@ impl<'a> ParsedIcmpErrorMut<'a, Ipv6> {
 }
 
 impl<'a, I: FilterIpExt> ParsedIcmpErrorMut<'a, I> {
+    /// Like [`IcmpErrorMut::inner_packet`], but consumes `self` so the returned
+    /// packet borrows from the original buffer.
+    fn into_inner_packet(self) -> Option<I::FilterIpPacketRaw<&'a mut [u8]>> {
+        let Self { src_ip: _, dst_ip: _, mut message } = self;
+        let body = core::mem::take(message.message_body_mut());
+        Some(I::as_filter_packet_raw_owned(
+            I::PacketRaw::parse_mut(SliceBufViewMut::new(body), ()).ok()?,
+        ))
+    }
+
     fn parse_in_ip_packet<BV: BufferViewMut<&'a mut [u8]>>(
         src_ip: I::Addr,
         dst_ip: I::Addr,
@@ -3725,6 +3833,50 @@ pub mod testutil {
                 ))
             }
         }
+
+        pub(crate) struct Icmpv4SimpleDestUnreachableError;
+
+        impl IcmpErrorMessage<Ipv4> for Icmpv4SimpleDestUnreachableError {
+            type Serializer = Nested<Buf<Vec<u8>>, IcmpSimpleErrorPacketBuilder<Ipv4>>;
+
+            fn make_serializer(
+                src_ip: Ipv4Addr,
+                dst_ip: Ipv4Addr,
+                payload: Vec<u8>,
+            ) -> Self::Serializer {
+                IcmpSimpleErrorPacketBuilder::<Ipv4>::new_from_msg(
+                    src_ip,
+                    dst_ip,
+                    IcmpDestUnreachable::default(),
+                    Icmpv4DestUnreachableCode::DestHostUnreachable,
+                )
+                .wrap_body(Buf::new(payload, ..))
+            }
+        }
+
+        pub(crate) struct Icmpv6SimpleDestUnreachableError;
+
+        impl IcmpErrorMessage<Ipv6> for Icmpv6SimpleDestUnreachableError {
+            type Serializer =
+                Nested<TruncatingSerializer<Buf<Vec<u8>>>, IcmpSimpleErrorPacketBuilder<Ipv6>>;
+
+            fn make_serializer(
+                src_ip: Ipv6Addr,
+                dst_ip: Ipv6Addr,
+                payload: Vec<u8>,
+            ) -> Self::Serializer {
+                IcmpSimpleErrorPacketBuilder::<Ipv6>::new_from_msg(
+                    src_ip,
+                    dst_ip,
+                    IcmpDestUnreachable::default(),
+                    Icmpv6DestUnreachableCode::AddrUnreachable,
+                )
+                .wrap_body(TruncatingSerializer::new(
+                    Buf::new(payload, ..),
+                    TruncateDirection::DiscardBack,
+                ))
+            }
+        }
     }
 
     /// Creates a new `IpPacket` with the specified addresses and body.
@@ -3757,7 +3909,8 @@ mod tests {
     use crate::conntrack;
 
     use super::testutil::internal::{
-        IcmpErrorMessage, Icmpv4DestUnreachableError, Icmpv6DestUnreachableError, TestIpExt,
+        IcmpErrorMessage, Icmpv4DestUnreachableError, Icmpv4SimpleDestUnreachableError,
+        Icmpv6DestUnreachableError, Icmpv6SimpleDestUnreachableError, TestIpExt,
     };
     use super::*;
 
@@ -4718,6 +4871,8 @@ mod tests {
         [
             PhantomData::<Icmpv4DestUnreachableError>,
             PhantomData::<Icmpv6DestUnreachableError>,
+            PhantomData::<Icmpv4SimpleDestUnreachableError>,
+            PhantomData::<Icmpv6SimpleDestUnreachableError>,
         ],
         [
             TransportPacketDataProtocol::Udp,
@@ -4911,6 +5066,8 @@ mod tests {
         [
             PhantomData::<Icmpv4DestUnreachableError>,
             PhantomData::<Icmpv6DestUnreachableError>,
+            PhantomData::<Icmpv4SimpleDestUnreachableError>,
+            PhantomData::<Icmpv6SimpleDestUnreachableError>,
         ],
         [
             TransportPacketDataProtocol::Udp,
@@ -5248,5 +5405,97 @@ mod tests {
             cmp::min(packet_bytes.len(), meta.header_len() + TRANSPORT_HEADER_MAX_SIZE);
         assert_eq!(total_size, packet_bytes.len());
         assert_eq!(buf.as_ref(), &packet_bytes[..expected_len]);
+    }
+
+    #[test_matrix(
+        [
+            (
+                PhantomData::<Icmpv4SimpleDestUnreachableError>,
+                PhantomData::<Icmpv4DestUnreachableError>,
+            ),
+            (
+                PhantomData::<Icmpv6SimpleDestUnreachableError>,
+                PhantomData::<Icmpv6DestUnreachableError>,
+            ),
+        ],
+        [
+            TransportPacketDataProtocol::Udp,
+            TransportPacketDataProtocol::Tcp,
+            TransportPacketDataProtocol::IcmpEchoRequest,
+        ]
+    )]
+    fn icmp_simple_error_packet_builder_dyn_outer_and_inner_rewrite<
+        I: TestIpExt,
+        SimpleIE: IcmpErrorMessage<I>,
+        TypedIE: IcmpErrorMessage<I>,
+    >(
+        _icmp_errors: (PhantomData<SimpleIE>, PhantomData<TypedIE>),
+        proto: TransportPacketDataProtocol,
+    ) where
+        SimpleIE::Serializer: DynamicTransportSerializer<I>,
+    {
+        const LEN: usize = 64;
+        let payload_bytes = proto.make_ip_packet_with_ports_data::<I>(
+            I::SRC_IP,
+            I::DST_IP,
+            SRC_PORT,
+            DST_PORT,
+            &[0xAB; LEN],
+        );
+
+        let mut simple_serializer = SimpleIE::make_serializer(I::DST_IP, I::SRC_IP, payload_bytes);
+        {
+            let mut dyn_serializer = DynTransportSerializer::new(&mut simple_serializer);
+            let mut tx_packet =
+                TxPacket::<I, _>::new(I::DST_IP, I::SRC_IP, SimpleIE::proto(), &mut dyn_serializer);
+
+            assert_eq!(
+                tx_packet.maybe_icmp_error().icmp_error_payload(),
+                Some(ParsedIcmpErrorPayload {
+                    src_ip: I::SRC_IP,
+                    dst_ip: I::DST_IP,
+                    transport: proto.expected_transport_tuple(),
+                })
+            );
+
+            // Rewrite outer IP addresses so `IcmpSimpleErrorPacketBuilder` updates its
+            // pseudo-header addresses via `TransportPacketMut`.
+            tx_packet.set_src_addr(I::DST_IP_2);
+            tx_packet.set_dst_addr(I::SRC_IP_2);
+
+            // Rewrite inner quoted IP addresses via `DynamicIcmpErrorMut`.
+            let icmp_error = tx_packet.icmp_error_mut();
+            let icmp_error = icmp_error.icmp_error_mut().expect("ICMP error mut should be present");
+            {
+                let mut inner_packet =
+                    icmp_error.inner_packet().expect("inner IP packet should parse");
+                inner_packet.set_src_addr(I::SRC_IP_2);
+                inner_packet.set_dst_addr(I::DST_IP_2);
+            }
+            assert!(icmp_error.recalculate_checksum());
+        }
+
+        let expected_payload_bytes = proto.make_ip_packet_with_ports_data::<I>(
+            I::SRC_IP_2,
+            I::DST_IP_2,
+            SRC_PORT,
+            DST_PORT,
+            &[0xAB; LEN],
+        );
+        let expected_serializer =
+            TypedIE::make_serializer(I::DST_IP_2, I::SRC_IP_2, expected_payload_bytes).wrap_in(
+                I::PacketBuilder::new(I::DST_IP_2, I::SRC_IP_2, u8::MAX, TypedIE::proto()),
+            );
+
+        let actual_bytes = simple_serializer
+            .wrap_in(I::PacketBuilder::new(I::DST_IP_2, I::SRC_IP_2, u8::MAX, SimpleIE::proto()))
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .unwrap_b();
+        let expected_bytes = expected_serializer
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .unwrap_b();
+        assert_eq!(actual_bytes, expected_bytes);
     }
 }

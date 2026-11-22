@@ -45,7 +45,7 @@ impl Driver for DriverTransportChild {
         Ok(Self { node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!(
             "DriverTransportChild::stop() was invoked. Use this function to do any cleanup needed."
         );

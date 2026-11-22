@@ -13,17 +13,21 @@
 #include <fidl/fuchsia.hardware.power.statecontrol/cpp/wire_test_base.h>
 #include <fidl/fuchsia.paver/cpp/wire.h>
 #include <fidl/fuchsia.paver/cpp/wire_test_base.h>
+#include <fidl/fuchsia.storage.block/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/default.h>
 #include <lib/async/dispatcher.h>
 #include <lib/async_patterns/cpp/dispatcher_bound.h>
+#include <lib/component/incoming/cpp/clone.h>
 #include <lib/component/incoming/cpp/directory.h>
 #include <lib/component/incoming/cpp/protocol.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/fastboot/fastboot.h>
 #include <lib/fastboot/test/test-transport.h>
+#include <lib/fit/defer.h>
 
+#include <cstring>
 #include <future>
 #include <tuple>
 #include <unordered_map>
@@ -35,6 +39,7 @@
 #include <gtest/gtest.h>
 
 #include "src/lib/fxl/strings/string_printf.h"
+#include "src/storage/lib/block_server/fake_server.h"
 #include "src/storage/lib/vfs/cpp/managed_vfs.h"
 #include "src/storage/lib/vfs/cpp/pseudo_dir.h"
 #include "src/storage/lib/vfs/cpp/service.h"
@@ -1014,6 +1019,92 @@ TEST_F(FastbootRebootTest, RebootShutdownAction) {
     ASSERT_EQ(state().shutdown_action(), expected_action)
         << "wrong shutdown action for command " << command;
   }
+}
+
+TEST_F(FastbootRebootTest, RebootFastbootWritesBootloaderMessage) {
+  for (const uint32_t block_size : {512u, 4096u, 65536u}) {
+    const size_t vmo_size = std::max<size_t>(8192, static_cast<size_t>(block_size) * 2);
+    zx::vmo vmo;
+    ASSERT_EQ(zx::vmo::create(vmo_size, 0, &vmo), ZX_OK);
+    std::vector<uint8_t> initial(vmo_size, 0xAB);
+    ASSERT_EQ(vmo.write(initial.data(), 0, initial.size()), ZX_OK);
+
+    zx::vmo vmo_dup;
+    ASSERT_EQ(vmo.duplicate(ZX_RIGHT_SAME_RIGHTS, &vmo_dup), ZX_OK);
+    block_server::PartitionInfo info = {};
+    info.block_count = vmo_size / block_size;
+    info.block_size = block_size;
+    info.type_guid[0] = 1;
+    info.instance_guid[0] = 2;
+    info.name = "misc";
+    block_server::FakeServer block_server(info, std::move(vmo_dup));
+
+    fs::ManagedVfs misc_vfs(loop_.dispatcher());
+    auto misc_dir = fbl::MakeRefCounted<fs::PseudoDir>();
+    misc_dir->AddEntry(fidl::DiscoverableProtocolName<fuchsia_storage_block::Block>,
+                       fbl::MakeRefCounted<fs::Service>(
+                           [&block_server](fidl::ServerEnd<fuchsia_storage_block::Block> request) {
+                             block_server.Serve(std::move(request));
+                             return ZX_OK;
+                           }));
+    auto [misc_client, misc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    misc_vfs.ServeDirectory(misc_dir, std::move(misc_server));
+    auto shutdown_misc_vfs = fit::defer([&misc_vfs]() {
+      std::promise<zx_status_t> shutdown_promise;
+      misc_vfs.Shutdown(
+          [&shutdown_promise](zx_status_t status) { shutdown_promise.set_value(status); });
+      EXPECT_EQ(shutdown_promise.get_future().get(), ZX_OK);
+    });
+
+    zx::result svc_dup = component::Clone(svc_chan());
+    ASSERT_TRUE(svc_dup.is_ok()) << svc_dup.status_string();
+
+    Fastboot fastboot(0x40000, std::move(*svc_dup), std::move(misc_client));
+    TestTransport transport;
+    transport.AddInPacket("reboot-fastboot");
+    zx::result<> ret = fastboot.ProcessPacket(&transport);
+    ASSERT_TRUE(ret.is_ok()) << ret.status_string();
+    ASSERT_THAT(transport.GetOutPackets(), testing::ContainerEq(Packets{"OKAY"}));
+    ASSERT_EQ(state().shutdown_action(), ShutdownAction::kRebootToRecovery);
+
+    std::vector<uint8_t> written(4096, 0);
+    ASSERT_EQ(vmo.read(written.data(), 0, written.size()), ZX_OK);
+    const auto* command_ptr = reinterpret_cast<const char*>(written.data());
+    const auto* recovery_ptr = reinterpret_cast<const char*>(written.data() + 64);
+    EXPECT_EQ(std::string_view(command_ptr, strnlen(command_ptr, 32)), "boot-recovery");
+    EXPECT_EQ(std::string_view(recovery_ptr, strnlen(recovery_ptr, 768)), "recovery\n--fastboot\n");
+    // Bytes beyond the 2048-byte bootloader_message struct should remain untouched.
+    for (size_t i = 2048; i < written.size(); ++i) {
+      ASSERT_EQ(written[i], 0xABu) << "byte " << i << " clobbered for block_size=" << block_size;
+    }
+  }
+}
+
+TEST_F(FastbootRebootTest, RebootFastbootContinuesWhenStagedMiscTimesOut) {
+  // Keep `misc_server` open without serving requests to mirror fshost's StagedPublisher when misc
+  // is configured in fshost but no misc GPT partition exists on disk.
+  auto [misc_client, misc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+
+  Fastboot fastboot(0x40000, std::move(svc_chan()), std::move(misc_client));
+  TestTransport transport;
+  transport.AddInPacket("reboot-fastboot");
+  zx::result<> ret = fastboot.ProcessPacket(&transport);
+  ASSERT_TRUE(ret.is_ok()) << ret.status_string();
+  ASSERT_THAT(transport.GetOutPackets(), testing::ContainerEq(Packets{"OKAY"}));
+  ASSERT_EQ(state().shutdown_action(), ShutdownAction::kRebootToRecovery);
+}
+
+TEST_F(FastbootRebootTest, RebootFastbootContinuesWhenMiscDirClosed) {
+  auto [misc_client, misc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  misc_server.reset();
+
+  Fastboot fastboot(0x40000, std::move(svc_chan()), std::move(misc_client));
+  TestTransport transport;
+  transport.AddInPacket("reboot-fastboot");
+  zx::result<> ret = fastboot.ProcessPacket(&transport);
+  ASSERT_TRUE(ret.is_ok()) << ret.status_string();
+  ASSERT_THAT(transport.GetOutPackets(), testing::ContainerEq(Packets{"OKAY"}));
+  ASSERT_EQ(state().shutdown_action(), ShutdownAction::kRebootToRecovery);
 }
 
 TEST_F(FastbootFlashTest, UnknownOemCommand) {

@@ -53,7 +53,7 @@ class UnionSize8Alignment4 {
   UnionSize8Alignment4(UnionSize8Alignment4&&) = default;
   UnionSize8Alignment4& operator=(UnionSize8Alignment4&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kVariant = 1,  // 0x1
   };
 
@@ -70,7 +70,7 @@ class UnionSize8Alignment4 {
   ::test_unionsandwich::wire::UnionSize8Alignment4::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kVariant = 1,  // 0x1
   };
@@ -90,7 +90,7 @@ class UnionSize12Alignment4 {
   UnionSize12Alignment4(UnionSize12Alignment4&&) = default;
   UnionSize12Alignment4& operator=(UnionSize12Alignment4&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kVariant = 1,  // 0x1
   };
 
@@ -113,7 +113,7 @@ class UnionSize12Alignment4 {
   ::test_unionsandwich::wire::UnionSize12Alignment4::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kVariant = 1,  // 0x1
   };
@@ -133,7 +133,7 @@ class UnionSize24Alignment8 {
   UnionSize24Alignment8(UnionSize24Alignment8&&) = default;
   UnionSize24Alignment8& operator=(UnionSize24Alignment8&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kVariant = 1,  // 0x1
   };
 
@@ -156,7 +156,7 @@ class UnionSize24Alignment8 {
   ::test_unionsandwich::wire::UnionSize24Alignment8::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kVariant = 1,  // 0x1
   };
@@ -176,7 +176,7 @@ class UnionSize36Alignment4 {
   UnionSize36Alignment4(UnionSize36Alignment4&&) = default;
   UnionSize36Alignment4& operator=(UnionSize36Alignment4&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kVariant = 1,  // 0x1
   };
 
@@ -199,7 +199,7 @@ class UnionSize36Alignment4 {
   ::test_unionsandwich::wire::UnionSize36Alignment4::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kVariant = 1,  // 0x1
   };

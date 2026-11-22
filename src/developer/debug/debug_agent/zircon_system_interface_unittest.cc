@@ -4,6 +4,7 @@
 
 #include "src/developer/debug/debug_agent/zircon_system_interface.h"
 
+#include <memory>
 #include <string_view>
 
 #include <gtest/gtest.h>
@@ -45,8 +46,6 @@ bool FindProcess(const debug_ipc::ProcessTreeRecord& record, zx_koid_t koid_to_f
   }
   return false;
 }
-
-}  // namespace
 
 class ZirconSystemInterfaceTest : public debug::TestWithLoop, public debug::EventPairWatcher {
  public:
@@ -237,45 +236,54 @@ TEST_F(ZirconSystemInterfaceTest, ComponentEvents) {
   EXPECT_TRUE(zircon_component_manager->GetNonElfComponentInfo().empty());
 }
 
-TEST_F(ZirconSystemInterfaceTest, FilterMatchComponents) {
+TEST_F(ZirconSystemInterfaceTest, DelayedRuntimeDirServing) {
   ZirconSystemInterface system_interface;
+  ZirconComponentManager* zircon_component_manager = &system_interface.zircon_component_manager();
 
-  // Create a job tree like this:
-  // 1: root-job
-  //   2: child_job1 fake/moniker
-  //     ...
-  //   5: child_job2 other/moniker
-  //     ...
+  constexpr char kElfMoniker[] = "test_wrapper/test:test_root";
+  constexpr char kElfUrl[] = "fuchsia-pkg://fuchsia.com/crasher_test#meta/rust_crasher_test.cm";
+  constexpr zx_koid_t kExpectedKoid = 42;
 
-  constexpr zx_koid_t kRootJobKoid = 1;
-  constexpr zx_koid_t kChildJob1Koid = 2;
-  constexpr zx_koid_t kChildJob2Koid = 5;
+  auto helper = std::make_shared<testing::RuntimeDirHelper>();
+  helper->AddJobIdFile(kExpectedKoid);
+  helper->Start(loop().dispatcher());
 
-  auto& parent_jobs = system_interface.parent_jobs_;
-  parent_jobs.insert({kChildJob1Koid, kRootJobKoid});
-  parent_jobs.insert({kChildJob2Koid, kRootJobKoid});
+  // Component manager dispatches DebugStarted before a cold test runner begins serving the
+  // component's runtime directory. Serve the directory endpoint after more than one second to
+  // verify ReadElfJobId waits long enough for cold runner startup.
+  auto [runtime_client, runtime_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
 
-  auto& component_info = system_interface.zircon_component_manager().running_component_info_;
-  component_info.insert(
-      {kChildJob1Koid, {"fake/moniker", "fuchsia-pkg://fuchsia.com/component1#meta/component.cm"}});
-  component_info.insert(
-      {kChildJob2Koid,
-       {"other/moniker", "fuchsia-pkg://fuchsia.com/some_other#meta/other_component.cm"}});
+  fuchsia_component::EventHeader header;
+  header.component_url(kElfUrl);
+  header.moniker(kElfMoniker);
+  header.event_type(fuchsia_component::EventType::kDebugStarted);
 
-  system_interface.zircon_component_manager().SetReadyCallback([&]() { loop().QuitNow(); });
+  fuchsia_component::Event event;
+  event.header() = std::move(header);
+
+  zx::eventpair left, right;
+  ASSERT_EQ(zx_eventpair_create(0, left.reset_and_get_address(), right.reset_and_get_address()),
+            ZX_OK);
+
+  fuchsia_component::DebugStartedPayload payload;
+  payload.runtime_dir() = std::move(runtime_client);
+  payload.break_on_start() = std::move(right);
+  event.payload() = fuchsia_component::EventPayload::WithDebugStarted(std::move(payload));
+
+  zircon_component_manager->OnComponentEvent(std::move(event));
+
+  loop().PostTimer(FROM_HERE, 1200, [helper, server = std::move(runtime_server)] mutable {
+    helper->ServeScopedDirectory(kExpectedKoid, std::move(server));
+  });
+
+  debug::MessageLoop::WatchHandle handle;
+  loop().WatchEventPair(left.get(), this, &handle);
   loop().Run();
 
-  debug_ipc::Filter filter{.type = debug_ipc::Filter::Type::kComponentName,
-                           .pattern = "component.cm"};
-  auto components = system_interface.GetComponentManager().FindComponentInfo(kChildJob1Koid);
-  EXPECT_EQ(components.size(), 1u);
-  EXPECT_TRUE(debug_ipc::FilterMatches(filter, "", components));
-
-  filter = {.type = debug_ipc::Filter::Type::kComponentUrl,
-            .pattern = "fuchsia-pkg://fuchsia.com/some_other#meta/other_component.cm"};
-  components = system_interface.GetComponentManager().FindComponentInfo(kChildJob2Koid);
-  EXPECT_EQ(components.size(), 1u);
-  EXPECT_TRUE(debug_ipc::FilterMatches(filter, "", components));
+  const auto& info = system_interface.GetComponentManager().FindComponentInfo(kExpectedKoid);
+  ASSERT_EQ(info.size(), 1u);
+  EXPECT_EQ(info[0].moniker, kElfMoniker);
+  EXPECT_EQ(info[0].url, kElfUrl);
 }
 
 TEST_F(ZirconSystemInterfaceTest, FilterMatchComponentsNonElf) {
@@ -317,6 +325,58 @@ TEST_F(ZirconSystemInterfaceTest, FilterMatchComponentsNonElf) {
   url_filter.pattern = kUrl;
 
   EXPECT_TRUE(debug_ipc::FilterMatches(url_filter, "", component_info));
+}
+
+}  // namespace
+
+TEST_F(ZirconSystemInterfaceTest, FilterMatchComponents) {
+  ZirconSystemInterface system_interface;
+
+  // Create a job tree like this:
+  // 1: root-job
+  //   2: child_job1 fake/moniker
+  //     ...
+  //   5: child_job2 other/moniker
+  //     ...
+
+  constexpr zx_koid_t kRootJobKoid = 1;
+  constexpr zx_koid_t kChildJob1Koid = 2;
+  constexpr zx_koid_t kChildJob2Koid = 5;
+
+  auto& parent_jobs = system_interface.parent_jobs_;
+  parent_jobs.insert({kChildJob1Koid, kRootJobKoid});
+  parent_jobs.insert({kChildJob2Koid, kRootJobKoid});
+
+  auto& component_info = system_interface.zircon_component_manager().running_component_info_;
+  component_info.insert({kChildJob1Koid,
+                         {
+                             .moniker = "fake/moniker",
+                             .url = "fuchsia-pkg://fuchsia.com/component1#meta/component.cm",
+                         }});
+  component_info.insert({kChildJob2Koid,
+                         {
+                             .moniker = "other/moniker",
+                             .url = "fuchsia-pkg://fuchsia.com/some_other#meta/other_component.cm",
+                         }});
+
+  system_interface.zircon_component_manager().SetReadyCallback([&]() { loop().QuitNow(); });
+  loop().Run();
+
+  debug_ipc::Filter filter{
+      .type = debug_ipc::Filter::Type::kComponentName,
+      .pattern = "component.cm",
+  };
+  auto components = system_interface.GetComponentManager().FindComponentInfo(kChildJob1Koid);
+  EXPECT_EQ(components.size(), 1u);
+  EXPECT_TRUE(debug_ipc::FilterMatches(filter, "", components));
+
+  filter = {
+      .type = debug_ipc::Filter::Type::kComponentUrl,
+      .pattern = "fuchsia-pkg://fuchsia.com/some_other#meta/other_component.cm",
+  };
+  components = system_interface.GetComponentManager().FindComponentInfo(kChildJob2Koid);
+  EXPECT_EQ(components.size(), 1u);
+  EXPECT_TRUE(debug_ipc::FilterMatches(filter, "", components));
 }
 
 }  // namespace debug_agent

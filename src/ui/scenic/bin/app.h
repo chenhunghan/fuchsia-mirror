@@ -27,6 +27,7 @@
 #include "src/ui/scenic/lib/flatland/flatland_factory.h"
 #include "src/ui/scenic/lib/flatland/flatland_manager.h"
 #include "src/ui/scenic/lib/flatland/flatland_presenter_impl.h"
+#include "src/ui/scenic/lib/flatland/image_import/image_importer_impl.h"
 #include "src/ui/scenic/lib/flatland/link_system.h"
 #include "src/ui/scenic/lib/flatland/trusted_flatland_factory.h"
 #include "src/ui/scenic/lib/flatland/uber_struct_system.h"
@@ -113,6 +114,11 @@ class App {
   scheduling::DefaultFrameScheduler frame_scheduler_;
 
   RendererType renderer_type_;
+  // Parsed in `App::App()` so a malformed policy fails fast at Scenic startup,
+  // and logged by `LogConfig()`.
+  // TODO(https://fxbug.dev/580156981): Pass to `ImageImporterImpl` in
+  // `InitializeGraphics()`.
+  const flatland::ImageImporterImpl::Config image_importer_config_;
   std::optional<display::DisplayManager> display_manager_;
   // Callbacks registered in `singleton_display_service_` and `view_tree_snapshotter_`
   // invoke member functions on `input_ownership_evaluator_`, so it must be declared

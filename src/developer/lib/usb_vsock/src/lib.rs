@@ -13,87 +13,161 @@ pub use connection::*;
 pub use packet::*;
 pub use transport::MpscTransport;
 
-/// Protocol version. This can be extracted from the payload of the sync packet
-/// and will determine what features a connection supports.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+/// Protocol version. This determines what features a connection supports.
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum ProtocolVersion {
     /// Protocol version 0
     V0,
     /// Protocol version 1
     V1,
-    /// Protocol version 2 with a random 32-bit integer nonce
-    V2(u32),
+    /// Protocol version 2
+    V2,
 }
 
 impl ProtocolVersion {
     /// The latest protocol version.
-    pub const LATEST: ProtocolVersion = ProtocolVersion::V2(0);
-
-    /// Magic sent in the sync packet of the USB protocol.
-    ///
-    /// The format is a byte string of the form `vsock:0`, where the 0 indicates
-    /// protocol version 0, and we expect the reply sync packet to have the
-    /// exact same contents. As we version the protocol this may increment.
-    ///
-    /// In version 2, the format is `vsock:2:<nonce>` where `<nonce>` is a random
-    /// 32-bit unsigned integer (in hexadecimal).
-    ///
-    /// To document the semantics, let's say this header were "vsock:3". The device
-    /// could reply with a lower number, say "vsock:1". This is the device
-    /// requesting a downgrade, and if we accept we send the final sync with
-    /// "vsock:1". Otherwise we hang up.
-    pub fn magic(&self) -> Vec<u8> {
-        match self {
-            ProtocolVersion::V0 => b"vsock:0".to_vec(),
-            ProtocolVersion::V1 => b"vsock:1".to_vec(),
-            ProtocolVersion::V2(nonce) => format!("vsock:2:{nonce:x}").into_bytes(),
-        }
-    }
-
-    /// Derive the protocol version from the magic sent in the sync packet.
-    pub fn from_magic(magic: &[u8]) -> Option<ProtocolVersion> {
-        if magic == b"vsock:0" {
-            Some(ProtocolVersion::V0)
-        } else if magic == b"vsock:1" {
-            Some(ProtocolVersion::V1)
-        } else if let Some(rest) = magic.strip_prefix(b"vsock:2:") {
-            let s = std::str::from_utf8(rest).ok()?;
-            let nonce = u32::from_str_radix(s, 16).ok()?;
-            Some(ProtocolVersion::V2(nonce))
-        } else {
-            None
-        }
-    }
-
-    /// Given `self` is the protocol version the target prefers and
-    /// `host_version` is the protocol version sent in the magic as the host
-    /// connects, find the protocol version that should be sent in the reply
-    /// magic and used for the connection. If `None`, negotiation has broken
-    /// down.
-    pub fn negotiate(&self, host_version: &ProtocolVersion) -> Option<ProtocolVersion> {
-        match (self, host_version) {
-            (ProtocolVersion::V2(_), ProtocolVersion::V2(nonce)) => {
-                Some(ProtocolVersion::V2(*nonce))
-            }
-            (ProtocolVersion::V2(_), ProtocolVersion::V1)
-            | (ProtocolVersion::V1, ProtocolVersion::V2(_))
-            | (ProtocolVersion::V1, ProtocolVersion::V1) => Some(ProtocolVersion::V1),
-            (ProtocolVersion::V0, _) | (_, ProtocolVersion::V0) => Some(ProtocolVersion::V0),
-        }
-    }
+    pub const LATEST: ProtocolVersion = ProtocolVersion::V2;
 
     /// Whether we support the pause protocol message.
     pub(crate) fn has_pause_packets(&self) -> bool {
-        matches!(self, ProtocolVersion::V1 | ProtocolVersion::V2(_))
+        matches!(self, ProtocolVersion::V1 | ProtocolVersion::V2)
+    }
+
+    fn as_u32(&self) -> u32 {
+        match self {
+            ProtocolVersion::V0 => 0,
+            ProtocolVersion::V1 => 1,
+            ProtocolVersion::V2 => 2,
+        }
     }
 }
 
 impl std::fmt::Display for ProtocolVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProtocolVersion::V0 => write!(f, "0"),
-            ProtocolVersion::V1 => write!(f, "1"),
-            ProtocolVersion::V2(nonce) => write!(f, "2:{nonce:x}"),
+        write!(f, "{}", self.as_u32())
+    }
+}
+
+/// Magic payload of a sync packet, encoding a known protocol version and an
+/// optional 32-bit nonce.
+///
+/// The format is `vsock:0` for version 0, `vsock:1` for version 1, and
+/// `vsock:2:<nonce>` (with `<nonce>` as a 32-bit unsigned integer in
+/// hexadecimal) for version 2.
+///
+/// A nonce of `0` in version 2 (`vsock:2:0`) indicates a reset (for example,
+/// when the target does not recognize a newer host protocol's magic format and
+/// requests that the host reset and downgrade to version 2).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct SyncMagic {
+    version: ProtocolVersion,
+    nonce: Option<u32>,
+}
+
+impl SyncMagic {
+    /// Construct a [`SyncMagic`] for protocol version 0 (`vsock:0`).
+    pub fn v0() -> Self {
+        Self { version: ProtocolVersion::V0, nonce: None }
+    }
+
+    /// Construct a [`SyncMagic`] for protocol version 1 (`vsock:1`).
+    pub fn v1() -> Self {
+        Self { version: ProtocolVersion::V1, nonce: None }
+    }
+
+    /// Construct a [`SyncMagic`] for protocol version 2 with a non-zero
+    /// session nonce (`vsock:2:<nonce>`).
+    pub fn v2(nonce: std::num::NonZeroU32) -> Self {
+        Self { version: ProtocolVersion::V2, nonce: Some(nonce.get()) }
+    }
+
+    /// Construct a reset [`SyncMagic`] for protocol version 2 (`vsock:2:0`).
+    pub fn v2_reset() -> Self {
+        Self { version: ProtocolVersion::V2, nonce: Some(0) }
+    }
+
+    /// Construct a [`SyncMagic`] for [`ProtocolVersion::LATEST`] with a
+    /// non-zero session nonce.
+    pub fn latest(nonce: std::num::NonZeroU32) -> Self {
+        Self::v2(nonce)
+    }
+
+    /// Construct a reset [`SyncMagic`] for [`ProtocolVersion::LATEST`].
+    pub fn latest_reset() -> Self {
+        Self::v2_reset()
+    }
+
+    /// Returns `true` if this sync magic requests a reset (i.e. has a nonce of `0`).
+    pub fn is_reset(&self) -> bool {
+        self.nonce == Some(0)
+    }
+
+    /// Encode this sync magic into its wire byte representation.
+    pub fn magic(&self) -> Vec<u8> {
+        match self.nonce {
+            Some(nonce) => format!("vsock:{}:{nonce:x}", self.version).into_bytes(),
+            None => format!("vsock:{}", self.version).into_bytes(),
+        }
+    }
+
+    /// Derive a [`SyncMagic`] from the magic bytes sent in a sync packet.
+    ///
+    /// Returns `None` if the magic is malformed or for an unknown protocol
+    /// version.
+    pub fn from_magic(magic: &[u8]) -> Option<Self> {
+        if magic == b"vsock:0" {
+            Some(Self { version: ProtocolVersion::V0, nonce: None })
+        } else if magic == b"vsock:1" {
+            Some(Self { version: ProtocolVersion::V1, nonce: None })
+        } else if let Some(rest) = magic.strip_prefix(b"vsock:2:") {
+            let s = std::str::from_utf8(rest).ok()?;
+            if s.is_empty() || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let nonce = u32::from_str_radix(s, 16).ok()?;
+            Some(Self { version: ProtocolVersion::V2, nonce: Some(nonce) })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the [`ProtocolVersion`] encoded in this sync magic.
+    pub fn version(&self) -> ProtocolVersion {
+        self.version
+    }
+
+    /// Returns the non-zero session nonce carried in this sync magic, or `None`
+    /// if the version does not use nonces or this is a reset magic.
+    pub fn nonce(&self) -> Option<std::num::NonZeroU32> {
+        self.nonce.and_then(std::num::NonZeroU32::new)
+    }
+
+    /// Given `self` is a non-reset magic sent by the host as it connects and
+    /// `supported` is the highest [`ProtocolVersion`] the target supports,
+    /// return the negotiated [`ProtocolVersion`] and the [`SyncMagic`] to send
+    /// in reply (preserving the host's nonce when applicable).
+    ///
+    /// Returns `None` if `self` is a reset magic (`is_reset()`).
+    pub fn negotiate(&self, supported: ProtocolVersion) -> Option<(ProtocolVersion, SyncMagic)> {
+        if self.is_reset() {
+            return None;
+        }
+        if self.version == ProtocolVersion::V0 || supported == ProtocolVersion::V0 {
+            Some((ProtocolVersion::V0, SyncMagic::v0()))
+        } else if self.version == ProtocolVersion::V1 || supported == ProtocolVersion::V1 {
+            Some((ProtocolVersion::V1, SyncMagic::v1()))
+        } else {
+            let nonce = self.nonce()?;
+            Some((ProtocolVersion::V2, SyncMagic::v2(nonce)))
+        }
+    }
+}
+
+impl std::fmt::Display for SyncMagic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.nonce {
+            Some(nonce) => write!(f, "{}:{nonce:x}", self.version),
+            None => write!(f, "{}", self.version),
         }
     }
 }
@@ -159,67 +233,90 @@ mod tests {
 
     #[test]
     fn test_protocol_version_magic_roundtrip() {
-        let v0 = ProtocolVersion::V0;
+        let nz = |n| std::num::NonZeroU32::new(n).unwrap();
+
+        let v0 = SyncMagic::v0();
         assert_eq!(v0.magic(), b"vsock:0");
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:0"), Some(v0));
+        assert_eq!(SyncMagic::from_magic(b"vsock:0"), Some(v0));
+        assert_eq!(v0.version(), ProtocolVersion::V0);
+        assert_eq!(v0.nonce(), None);
+        assert!(!v0.is_reset());
 
-        let v1 = ProtocolVersion::V1;
+        let v1 = SyncMagic::v1();
         assert_eq!(v1.magic(), b"vsock:1");
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:1"), Some(v1));
+        assert_eq!(SyncMagic::from_magic(b"vsock:1"), Some(v1));
+        assert_eq!(v1.version(), ProtocolVersion::V1);
+        assert_eq!(v1.nonce(), None);
+        assert!(!v1.is_reset());
 
-        let v2_zero = ProtocolVersion::V2(0);
+        let v2_zero = SyncMagic::v2_reset();
         assert_eq!(v2_zero.magic(), b"vsock:2:0");
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:2:0"), Some(v2_zero));
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:0"), Some(v2_zero));
+        assert_eq!(v2_zero.version(), ProtocolVersion::V2);
+        assert_eq!(v2_zero.nonce(), None);
+        assert!(v2_zero.is_reset());
 
-        let v2 = ProtocolVersion::V2(0xdeadbeef);
+        let v2 = SyncMagic::v2(nz(0xdeadbeef));
         assert_eq!(v2.magic(), b"vsock:2:deadbeef");
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:2:deadbeef"), Some(v2));
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:deadbeef"), Some(v2));
+        assert_eq!(v2.nonce(), Some(nz(0xdeadbeef)));
+        assert!(!v2.is_reset());
 
         // Also test parsing with upper case / padded hex
-        assert_eq!(
-            ProtocolVersion::from_magic(b"vsock:2:DEADBEEF"),
-            Some(ProtocolVersion::V2(0xdeadbeef))
-        );
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:2:00000001"), Some(ProtocolVersion::V2(1)));
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:DEADBEEF"), Some(SyncMagic::v2(nz(0xdeadbeef))));
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:00000001"), Some(SyncMagic::v2(nz(1))));
 
-        // Invalid magics
-        assert_eq!(ProtocolVersion::from_magic(b""), None);
-        assert_eq!(ProtocolVersion::from_magic(b"vsock"), None);
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:3"), None);
-        assert_eq!(ProtocolVersion::from_magic(b"vsock:2:invalid"), None);
+        // Invalid or unknown magics
+        assert_eq!(SyncMagic::from_magic(b""), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:3"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:9999:1234abcd"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:0:1"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:1:1"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:2"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:invalid"), None);
+        assert_eq!(SyncMagic::from_magic(b"vsock:2:+1"), None);
     }
 
     #[test]
     fn test_protocol_version_negotiate() {
-        let target_v2 = ProtocolVersion::V2(0);
-        let host_v2 = ProtocolVersion::V2(0x12345678);
-        assert_eq!(target_v2.negotiate(&host_v2), Some(ProtocolVersion::V2(0x12345678)));
-        assert_eq!(target_v2.negotiate(&ProtocolVersion::V1), Some(ProtocolVersion::V1));
-        assert_eq!(target_v2.negotiate(&ProtocolVersion::V0), Some(ProtocolVersion::V0));
+        let nz = |n| std::num::NonZeroU32::new(n).unwrap();
+        let host_v2 = SyncMagic::v2(nz(0x12345678));
+        let host_v2_reset = SyncMagic::v2_reset();
+        let host_v1 = SyncMagic::v1();
+        let host_v0 = SyncMagic::v0();
 
-        let target_v1 = ProtocolVersion::V1;
-        assert_eq!(target_v1.negotiate(&host_v2), Some(ProtocolVersion::V1));
-        assert_eq!(target_v1.negotiate(&ProtocolVersion::V1), Some(ProtocolVersion::V1));
-        assert_eq!(target_v1.negotiate(&ProtocolVersion::V0), Some(ProtocolVersion::V0));
+        assert_eq!(host_v2_reset.negotiate(ProtocolVersion::V2), None);
+        assert_eq!(
+            host_v2.negotiate(ProtocolVersion::V2),
+            Some((ProtocolVersion::V2, SyncMagic::v2(nz(0x12345678))))
+        );
+        assert_eq!(host_v1.negotiate(ProtocolVersion::V2), Some((ProtocolVersion::V1, host_v1)));
+        assert_eq!(host_v0.negotiate(ProtocolVersion::V2), Some((ProtocolVersion::V0, host_v0)));
 
-        let target_v0 = ProtocolVersion::V0;
-        assert_eq!(target_v0.negotiate(&host_v2), Some(ProtocolVersion::V0));
-        assert_eq!(target_v0.negotiate(&ProtocolVersion::V1), Some(ProtocolVersion::V0));
-        assert_eq!(target_v0.negotiate(&ProtocolVersion::V0), Some(ProtocolVersion::V0));
+        assert_eq!(host_v2.negotiate(ProtocolVersion::V1), Some((ProtocolVersion::V1, host_v1)));
+        assert_eq!(host_v1.negotiate(ProtocolVersion::V1), Some((ProtocolVersion::V1, host_v1)));
+        assert_eq!(host_v0.negotiate(ProtocolVersion::V1), Some((ProtocolVersion::V0, host_v0)));
+
+        assert_eq!(host_v2.negotiate(ProtocolVersion::V0), Some((ProtocolVersion::V0, host_v0)));
+        assert_eq!(host_v1.negotiate(ProtocolVersion::V0), Some((ProtocolVersion::V0, host_v0)));
+        assert_eq!(host_v0.negotiate(ProtocolVersion::V0), Some((ProtocolVersion::V0, host_v0)));
     }
 
     #[test]
     fn test_protocol_version_features() {
         assert!(!ProtocolVersion::V0.has_pause_packets());
         assert!(ProtocolVersion::V1.has_pause_packets());
-        assert!(ProtocolVersion::V2(0).has_pause_packets());
-        assert!(ProtocolVersion::V2(0xabcdef).has_pause_packets());
+        assert!(ProtocolVersion::V2.has_pause_packets());
     }
 
     #[test]
     fn test_protocol_version_display() {
+        let nz = |n| std::num::NonZeroU32::new(n).unwrap();
         assert_eq!(format!("{}", ProtocolVersion::V0), "0");
         assert_eq!(format!("{}", ProtocolVersion::V1), "1");
-        assert_eq!(format!("{}", ProtocolVersion::V2(0x1a2b)), "2:1a2b");
+        assert_eq!(format!("{}", ProtocolVersion::V2), "2");
+        assert_eq!(format!("{}", SyncMagic::v2(nz(0x1a2b))), "2:1a2b");
     }
 }

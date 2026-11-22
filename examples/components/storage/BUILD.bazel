@@ -61,6 +61,7 @@ rustc_test(
     crate = ":bin",
     # Sets the GN output_name to match meta/storage_example_unittests.cml's program.binary.
     crate_name = "storage_example_bin_test",
+    tags = ["manual"],
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",

@@ -8,7 +8,6 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_SYS_TYPES_H_
 #define ZIRCON_KERNEL_INCLUDE_SYS_TYPES_H_
 
-#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -19,6 +18,5 @@ typedef uintptr_t vaddr_t;
 typedef uintptr_t paddr_t;
 
 typedef intptr_t ssize_t;
-#define SSIZE_MAX INTPTR_MAX
 
 #endif  // ZIRCON_KERNEL_INCLUDE_SYS_TYPES_H_

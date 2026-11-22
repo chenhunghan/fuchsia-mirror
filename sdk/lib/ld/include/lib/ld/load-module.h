@@ -10,7 +10,9 @@
 
 #include <cassert>
 #include <compare>
+#include <concepts>
 #include <functional>
+#include <type_traits>
 
 #include "decoded-module.h"
 #include "tls.h"
@@ -38,38 +40,30 @@ class LoadModuleRef;
 // ld::DecodedModule.  The ld::LoadModule object itself holds little more than
 // the module name.  A mutable decoded module object can be modified via the
 // `decoded()` accessor.
-template <typename DecodedStorage>
+template <DecodedModuleStorage DecodedStorage>
 class LoadModule {
  private:
-  static_assert(!std::is_const_v<DecodedStorage>);
-
   // Determine whether the template parameter is derived from an instantiation
   // of ld::DecodedModule<...>.  If not, it must be some pointer-like type.
-  static constexpr bool kDecodedDirect = []() -> bool {
-    if constexpr (std::is_class_v<DecodedStorage>) {
-      return std::is_base_of_v<DecodedModuleBase, DecodedStorage>;
-    }
-    return false;
-  }();
+  static constexpr bool kDecodedDirect = std::derived_from<DecodedStorage, DecodedModuleBase>;
 
-  // This is a static method so it can easily be called from both const and
-  // non-const overloads of decoded(), below, where Storage will be const
-  // DecodedStorage or DecodedStorage respectively.  It's also used to deduce
-  // the underlying Decoded type, whether direct or pointed-to.
-  template <class Storage>
-  static constexpr auto& GetDecodedRef(Storage& storage) {
-    if constexpr (kDecodedDirect) {
-      return storage;
-    } else {
-      return *storage;
-    }
-  }
+  // Deref<T>::type is the pointed-to type for a pointer-like type, or the
+  // type itself for a DecodedModule type.
+  template <class Ptr>
+  struct Deref {
+    using type = std::remove_reference_t<decltype(*std::declval<Ptr&>())>;
+  };
+  template <class T>
+    requires std::derived_from<T, DecodedModuleBase>
+  struct Deref<T> {
+    using type = T;
+  };
 
  public:
   // In the simple case, this will be the same as the template parameter.  But
   // if the template parameter is pointer-like, this is the pointed-to type,
   // which might be const.
-  using Decoded = std::remove_reference_t<decltype(GetDecodedRef(std::declval<DecodedStorage&>()))>;
+  using Decoded = Deref<DecodedStorage>::type;
 
   // For convenience alias all the interesting types from Decoded.
   using Elf = Decoded::Elf;
@@ -186,17 +180,23 @@ class LoadModule {
   }
 
   // Access the underlying DecodedModule object.  This must not be called if
-  // HasDecoded() returns false.  There are both const and mutable overloads
-  // for this.  But note that Decoded might be a const type itself when the
-  // template parameter is a pointer-like type, in which case decoded() always
-  // returns a const reference even when called on a mutable LoadModule.
-  constexpr Decoded& decoded() { return GetDecodedRef(decoded_); }
-  constexpr const Decoded& decoded() const { return GetDecodedRef(decoded_); }
+  // HasDecoded() returns false.  This returns a const reference when called
+  // on a const object.  But note that Decoded might be a const type itself
+  // when the template parameter is a pointer-like type, in which case
+  // decoded() always returns a const reference even when called on a mutable
+  // LoadModule.
+  constexpr auto& decoded(this auto& self) {
+    if constexpr (kDecodedDirect) {
+      return self.decoded_;
+    } else {
+      return *self.decoded_;
+    }
+  }
 
   // When Decoded is mutable and uses AbiModuleInline::kYes, EmplaceModule(..)
   // just constructs Module{...}).
-  template <typename... Args, bool CanEmplace = Decoded::kModuleInline && kMutableDecoded,
-            typename = std::enable_if_t<CanEmplace>>
+  template <typename... Args>
+    requires(Decoded::kModuleInline && kMutableDecoded)
   constexpr void EmplaceModule(uint32_t modid, Args&&... args) {
     decoded().EmplaceModule(modid, std::forward<Args>(args)...);
     SetAbiName();
@@ -205,8 +205,8 @@ class LoadModule {
   // When Decoded is mutable and uses AbiModuleInline::kNo, then calling
   // NewModule(a..., c...)  does new (a...) Module{c...}.  The last argument in
   // a... must be a fbl::AllocChecker that indicates whether `new` succeeded.
-  template <typename... Args, bool CanNew = !Decoded::kModuleInline && kMutableDecoded,
-            typename = std::enable_if_t<CanNew>>
+  template <typename... Args>
+    requires(!Decoded::kModuleInline && kMutableDecoded)
   constexpr void NewModule(uint32_t modid, Args&&... args) {
     decoded().NewModule(modid, std::forward<Args>(args)...);
     SetAbiName();
@@ -226,8 +226,9 @@ class LoadModule {
 
   constexpr const LoadInfo& load_info() const { return decoded().load_info(); }
 
-  template <bool RI = Decoded::kRelocInfo, typename = std::enable_if_t<RI>>
-  constexpr const RelocationInfo& reloc_info() const {
+  constexpr const RelocationInfo& reloc_info() const
+    requires Decoded::kRelocInfo
+  {
     return decoded().reloc_info();
   }
 
@@ -242,8 +243,9 @@ class LoadModule {
   // decoding and choosing load address, module() will be updated via
   // ld::SetModuleVaddrBounds.  In other cases, a derived class must implement
   // load_bias() itself.
-  template <bool M = kMutableDecoded, typename = std::enable_if_t<M>>
-  constexpr size_type load_bias() const {
+  constexpr size_type load_bias() const
+    requires kMutableDecoded
+  {
     return module().link_map.addr;
   }
 
@@ -255,8 +257,9 @@ class LoadModule {
   // just so that it's nonzero to indicate the module has a PT_TLS at all.  The
   // derived class must define tls_module_id() itself to return the real TLS
   // module ID it assigns and stores elsewhere.
-  template <bool M = kMutableDecoded, typename = std::enable_if_t<M>>
-  constexpr size_type tls_module_id() const {
+  constexpr size_type tls_module_id() const
+    requires kMutableDecoded
+  {
     return module().tls_modid;
   }
 

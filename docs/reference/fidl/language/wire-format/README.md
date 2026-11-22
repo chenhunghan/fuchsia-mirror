@@ -19,7 +19,7 @@ Objects are stored in **traversal order**, and are subject to **padding**.
 
 ![Diagram showing message structure with in-line primary object followed by out-of-line secondary objects in traversal order.](images/objorder.png)
 
-### Primary and Secondary Objects
+### Primary and secondary objects {#primary-and-secondary-objects}
 
 The first object is called the **primary object**.
 It is a structure of fixed size whose type and size are known from the
@@ -298,7 +298,7 @@ Vectors are denoted as follows:
 Strings are implemented as a vector of `uint8` bytes, with the constraint
 that the bytes MUST be valid UTF-8.
 
-### Structures
+### Structures {#structures}
 
 A structure contains a sequence of typed fields.
 
@@ -451,7 +451,7 @@ Having `num_bytes` and `num_handles` allows us to skip unknown envelope content.
 `num_bytes` will always be a multiple of 8 because out-of-line objects are
 8 byte aligned.
 
-### Tables
+### Tables {#tables}
 
 *   Record type consisting of the number of elements and a pointer.
 *   Pointer points to an array of envelopes, each of which contains one element.
@@ -470,7 +470,7 @@ The following example shows how tables are laid out according to their fields.
 
 ![Diagram showing memory layout of a table with envelopes pointing to elements.](images/tables.png)
 
-### Unions
+### Unions {#unions}
 
 *   Record type consisting of an ordinal and an envelope.
 *   Ordinal indicates member selection, and is represented with a **uint64**.
@@ -615,7 +615,7 @@ The **body** contains the event arguments as if they were packed in a
 **struct**, just as with method result messages.
 Note that the body is padded to maintain 8-byte alignment.
 
-#### Epitaph (Control Message Ordinal 0xFFFFFFFFFFFFFFFF)
+#### Epitaph (control message ordinal 0xFFFFFFFFFFFFFFFF) {#epitaph}
 
 An epitaph is an event (txid zero) with ordinal **0xFFFFFFFFFFFFFFFF**. A server
 may send an epitaph as the last message prior to closing the connection, to
@@ -708,7 +708,7 @@ specifically `vector<T>`, `vector<T>:optional`, `vector<T>:N`,
 `vector<T>:<N, optional>`, `string`, `string:optional`, `string:N`, and
 `string:<N, optional>`.
 
-#### Padding
+#### Padding {#padding}
 
 The creator of a message must fill all alignment padding gaps with zeros.
 
@@ -765,7 +765,7 @@ followed by 32 out-of-line objects, such that a total of 33 levels are allowed
 [`//src/tests/fidl/conformance_suite/recursive_depth.gidl`](/src/tests/fidl/conformance_suite/recursive_depth.gidl)
 for further details.
 
-#### Validation
+#### Validation {#validation}
 
 The purpose of message validation is to discover wire format errors early before
 they have a chance to induce security or stability problems.

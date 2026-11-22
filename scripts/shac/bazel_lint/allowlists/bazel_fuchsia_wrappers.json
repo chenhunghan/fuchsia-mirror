@@ -75,10 +75,6 @@
             ]
         },
         {
-            "path": "build/bazel/rules/idk/private/idk_cc_prebuilt_library.bzl",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "build/bazel/toolchains/clang/prebuilt_llvm.BUILD.bazel",
             "bug": "https://fxbug.dev/570203009",
             "targets": [
@@ -254,13 +250,6 @@
             ]
         },
         {
-            "path": "src/connectivity/network/lib/udp_serde/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "udp_serde"
-            ]
-        },
-        {
             "path": "src/connectivity/wlan/drivers/lib-iwlwifi/fake-bti/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009",
             "targets": [
@@ -375,7 +364,6 @@
             "bug": "https://fxbug.dev/570203009",
             "targets": [
                 "common",
-                "perf_test",
                 "test_support",
                 "tests"
             ]
@@ -733,13 +721,6 @@
             ]
         },
         {
-            "path": "src/lib/vmo_store/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "vmo_store"
-            ]
-        },
-        {
             "path": "src/media/audio/drivers/lib/inspect/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009",
             "targets": [
@@ -829,16 +810,6 @@
             "bug": "https://fxbug.dev/570203009",
             "targets": [
                 "input-report-reader"
-            ]
-        },
-        {
-            "path": "src/zircon/lib/zircon/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "headers",
-                "zircon",
-                "zircon-headers",
-                "zircon.as-needed"
             ]
         },
         {
@@ -978,27 +949,6 @@
             "bug": "https://fxbug.dev/570203009",
             "targets": [
                 "ddk-platform-defs"
-            ]
-        },
-        {
-            "path": "zircon/system/ulib/fbl/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "fbl"
-            ]
-        },
-        {
-            "path": "zircon/system/ulib/fzl/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "fzl"
-            ]
-        },
-        {
-            "path": "zircon/system/ulib/tftp/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009",
-            "targets": [
-                "tftp"
             ]
         },
         {

@@ -1663,7 +1663,10 @@ zx_status_t OpteeClient::HandleRpcCommandWaitQueue(WaitQueueRpcMessage* message)
 
   switch (message->command()) {
     case WaitQueueRpcMessage::Command::kSleep: {
-      controller_->WaitQueueWait(message->key());
+      if (!controller_->WaitQueueWait(message->key())) {
+        message->set_return_code(TEEC_ERROR_CANCEL);
+        return ZX_ERR_CANCELED;
+      }
       break;
     }
     case WaitQueueRpcMessage::Command::kWakeUp: {

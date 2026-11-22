@@ -52,7 +52,7 @@ struct MemberOnlyAppearsInImportingLibrary;
 
 struct OnlyAppearsInImportingLibrary;
 
-class OnlyLlcpp;
+class OnlyCpp;
 
 class DenyEachBindingOnlyDenyDartResult;
 
@@ -104,16 +104,16 @@ struct OnlyAppearsInImportingLibrary {
   ::test_bindingsdenylist::wire::MemberOnlyAppearsInImportingLibrary member_only_appears_in_importing_library = {};
 };
 
-class OnlyLlcpp {
+class OnlyCpp {
  public:
-  OnlyLlcpp();
+  OnlyCpp();
 
-  OnlyLlcpp(const OnlyLlcpp&) = default;
-  OnlyLlcpp& operator=(const OnlyLlcpp&) = default;
-  OnlyLlcpp(OnlyLlcpp&&) = default;
-  OnlyLlcpp& operator=(OnlyLlcpp&&) = default;
+  OnlyCpp(const OnlyCpp&) = default;
+  OnlyCpp& operator=(const OnlyCpp&) = default;
+  OnlyCpp(OnlyCpp&&) = default;
+  OnlyCpp& operator=(OnlyCpp&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kX = 1,  // 0x1
   };
 
@@ -121,22 +121,22 @@ class OnlyLlcpp {
 
   bool is_x() const;
 
-  static OnlyLlcpp WithX(uint32_t val);
+  static OnlyCpp WithX(uint32_t val);
 
   uint32_t& x();
 
   const uint32_t& x() const;
 
-  ::test_bindingsdenylist::wire::OnlyLlcpp::Tag Which() const;
+  ::test_bindingsdenylist::wire::OnlyCpp::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kX = 1,  // 0x1
   };
 
   static void SizeAndOffsetAssertionHelper();
-  ::test_bindingsdenylist::wire::OnlyLlcpp::Ordinal ordinal_;
+  ::test_bindingsdenylist::wire::OnlyCpp::Ordinal ordinal_;
   FIDL_ALIGNDECL
   ::fidl::UntypedEnvelope envelope_;
 };
@@ -152,7 +152,7 @@ class DenyEachBindingOnlyDenyDartResult {
   DenyEachBindingOnlyDenyDartResult(DenyEachBindingOnlyDenyDartResult&&) = default;
   DenyEachBindingOnlyDenyDartResult& operator=(DenyEachBindingOnlyDenyDartResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -178,7 +178,7 @@ class DenyEachBindingOnlyDenyDartResult {
   ::test_bindingsdenylist::wire::DenyEachBindingOnlyDenyDartResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -201,7 +201,7 @@ class DenyEachBindingOnlyDenyPythonResult {
   DenyEachBindingOnlyDenyPythonResult(DenyEachBindingOnlyDenyPythonResult&&) = default;
   DenyEachBindingOnlyDenyPythonResult& operator=(DenyEachBindingOnlyDenyPythonResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -227,7 +227,7 @@ class DenyEachBindingOnlyDenyPythonResult {
   ::test_bindingsdenylist::wire::DenyEachBindingOnlyDenyPythonResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -250,7 +250,7 @@ class DenyEachBindingOnlyDenyRustResult {
   DenyEachBindingOnlyDenyRustResult(DenyEachBindingOnlyDenyRustResult&&) = default;
   DenyEachBindingOnlyDenyRustResult& operator=(DenyEachBindingOnlyDenyRustResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -276,7 +276,7 @@ class DenyEachBindingOnlyDenyRustResult {
   ::test_bindingsdenylist::wire::DenyEachBindingOnlyDenyRustResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -299,7 +299,7 @@ class DenyEachBindingOnlyDenySyzkallerResult {
   DenyEachBindingOnlyDenySyzkallerResult(DenyEachBindingOnlyDenySyzkallerResult&&) = default;
   DenyEachBindingOnlyDenySyzkallerResult& operator=(DenyEachBindingOnlyDenySyzkallerResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -325,7 +325,7 @@ class DenyEachBindingOnlyDenySyzkallerResult {
   ::test_bindingsdenylist::wire::DenyEachBindingOnlyDenySyzkallerResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -664,7 +664,7 @@ struct ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyApp
 };
 
 template <>
-struct TypeTraits<::test_bindingsdenylist::wire::OnlyLlcpp> {
+struct TypeTraits<::test_bindingsdenylist::wire::OnlyCpp> {
   static constexpr uint32_t kMaxNumHandles = 0;
   static constexpr uint32_t kMaxDepth = 1;
   static constexpr uint32_t kPrimarySize = 16;
@@ -675,26 +675,26 @@ struct TypeTraits<::test_bindingsdenylist::wire::OnlyLlcpp> {
 };
 
 template <>
-struct IsFidlType<::test_bindingsdenylist::wire::OnlyLlcpp> : public std::true_type {};
+struct IsFidlType<::test_bindingsdenylist::wire::OnlyCpp> : public std::true_type {};
 template <>
-struct IsWire<::test_bindingsdenylist::wire::OnlyLlcpp> : public std::true_type {};
+struct IsWire<::test_bindingsdenylist::wire::OnlyCpp> : public std::true_type {};
 template <>
-struct IsUnion<::test_bindingsdenylist::wire::OnlyLlcpp> : public std::true_type {};
+struct IsUnion<::test_bindingsdenylist::wire::OnlyCpp> : public std::true_type {};
 
 template <typename Constraint, bool IsRecursive>
-struct ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyLlcpp, Constraint, IsRecursive> {
+struct ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyCpp, Constraint, IsRecursive> {
   static constexpr size_t kInlineSize = 16;
   static constexpr bool kIsMemcpyCompatible = false;
 
-  static void Encode(internal::WireEncoder* encoder, ::test_bindingsdenylist::wire::OnlyLlcpp* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
+  static void Encode(internal::WireEncoder* encoder, ::test_bindingsdenylist::wire::OnlyCpp* value, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
 
   static void Decode(internal::WireDecoder* decoder, ::fidl::internal::WirePosition position, RecursionDepth<IsRecursive> recursion_depth);
 };
 
 // Top-level union.
 template <bool IsRecursive>
-struct ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyLlcpp, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
-    : public ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyLlcpp, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
+struct ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyCpp, ::fidl::internal::WireCodingConstraintEmpty, IsRecursive>
+    : public ::fidl::internal::WireCodingTraits<::test_bindingsdenylist::wire::OnlyCpp, ::fidl::internal::WireCodingConstraintUnion<false>, IsRecursive> {};
 
 template <>
 struct TypeTraits<::test_bindingsdenylist::wire::DenyEachBindingOnlyDenyDartResult> {

@@ -53,12 +53,6 @@ pub struct BoardFilesystemConfig {
     #[serde(default)]
     pub block_devices: Vec<BlockDeviceConfig>,
 
-    /// DEPRECATED. Do not use.
-    /// TODO(https://fxbug.dev/394968352): Remove once prebuilt board configs
-    /// have rolled and no longer contain this field.
-    #[serde(default, skip_serializing_if = "crate::is_default")]
-    pub watch_deprecated_v1_drivers: bool,
-
     /// DEPRECATED.  Use GptMode::AllowMultiple.
     #[serde(default)]
     pub gpt_all: bool,
@@ -465,7 +459,7 @@ pub enum FlexibleSize {
 }
 
 /// The parameters describing how to create an Fxfs image.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
 #[serde(deny_unknown_fields, default)]
 pub struct Fxfs {
     /// If `target_size` bytes is set, the raw image will be set to exactly this
@@ -489,27 +483,6 @@ pub struct Fxfs {
     /// How blobs should be formatted in the base fxfs image during assembly.
     #[serde(skip_serializing_if = "crate::is_default")]
     pub blob_format: FxfsBlobFormat,
-
-    /// If set, pkg-cache acts as the blob pager and the block driver services page-in requests.
-    #[serde(skip_serializing_if = "is_true")]
-    pub use_driver_blob_paging: bool,
-}
-
-fn is_true(b: &bool) -> bool {
-    *b
-}
-
-impl Default for Fxfs {
-    fn default() -> Self {
-        Self {
-            size_bytes: None,
-            size_checker_maximum_bytes: None,
-            blob_maximum_bytes: None,
-            data_maximum_bytes: None,
-            blob_format: FxfsBlobFormat::default(),
-            use_driver_blob_paging: true,
-        }
-    }
 }
 
 /// The parameters describing how to create a FVM image.

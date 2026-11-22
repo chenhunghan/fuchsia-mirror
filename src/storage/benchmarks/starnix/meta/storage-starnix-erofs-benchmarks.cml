@@ -27,10 +27,6 @@
             environment: "#debian_container_env",
         },
         {
-            name: "erofs",
-            url: "erofs#meta/erofs.cm",
-        },
-        {
             name: "test_fxblob",
             url: "#meta/test_fxblob.cm",
         },
@@ -56,8 +52,8 @@
             to: "#kernel",
         },
         {
-            protocol: [ "fuchsia.erofs.Erofs" ],
-            from: "#erofs",
+            protocol: [ "fuchsia.storage.mapping.FileMapper" ],
+            from: "#test_fxblob",
             to: "#kernel",
         },
         {

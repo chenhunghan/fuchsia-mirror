@@ -18,9 +18,8 @@
 
 namespace adb_file_sync {
 
-zx_status_t AdbFileSync::StartService(adb_file_sync_config::Config config) {
+zx_status_t AdbFileSync::StartService(adb_file_sync_config::Config config, async::Loop& loop) {
   FX_LOGS(DEBUG) << "Starting ADB File Sync Service";
-  async::Loop loop{&kAsyncLoopConfigNeverAttachToThread};
   AdbFileSync file_sync(std::move(config), loop.dispatcher());
 
   auto endpoints = fidl::CreateEndpoints<fuchsia_sys2::RealmQuery>();

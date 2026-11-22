@@ -7,11 +7,15 @@
                 "third_party",
                 "thirdparty",
                 "vendor",
+                "third_party/bazel_vendor/bazel_sdk_in_tree",
+                "third_party/bazel_vendor/bazel_sdk_oot",
+                "third_party/bazel_vendor/fuchsia_in_tree",
                 "third_party/pylibs",
                 "third_party/golibs/vendor",
                 "third_party/dart-pkg/pub"
             ],
             "exceptions": [
+                "third_party/bazel_vendor",
                 "third_party/golibs",
                 "third_party/rust_crates",
                 "third_party/dart-pkg"

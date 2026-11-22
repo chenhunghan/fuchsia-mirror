@@ -6,11 +6,10 @@
 
 #include <lib/arch/intrin.h>
 
+#include <arch/arch_ops.h>
 #include <arch/arm64/smccc.h>
-#include <arch/interrupt.h>
 #include <dev/power/motmot/init.h>
 #include <dev/power/motmot/motmot_ffi.h>
-#include <dev/psci.h>
 #include <kernel/ffi.h>
 
 extern "C" {

@@ -998,6 +998,13 @@ mod tests {
     use std::str::from_utf8;
     use tempfile::TempDir;
 
+    /// Returns the directory containing the test data, which the test runner
+    /// stages in the current directory.
+    fn test_data_dir() -> Utf8PathBuf {
+        let cwd = Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap()).unwrap();
+        cwd.join("make-fuchsia-vol_test_data")
+    }
+
     fn compare_golden(test_data_dir: &Utf8Path, image_path: &Utf8Path) {
         let image = std::fs::read(&image_path).expect("Unable to read image");
         let file =
@@ -1042,12 +1049,7 @@ mod tests {
             std::fs::write(dir.join(format!("placeholder.{}", i)), vec![i; 8192]).unwrap();
         }
 
-        let current_exe = std::env::current_exe().unwrap();
-
-        let test_data_dir = Utf8PathBuf::from_path_buf(
-            current_exe.parent().unwrap().join("make-fuchsia-vol_test_data"),
-        )
-        .unwrap();
+        let test_data_dir = test_data_dir();
 
         {
             let f = File::create(test_data_dir.join("product_bundles.json")).unwrap();
@@ -1094,6 +1096,8 @@ mod tests {
                 dir.join("placeholder.10").as_str(),
                 "--fuchsia-build-dir",
                 test_data_dir.as_str(),
+                "--mkfs-msdosfs",
+                test_data_dir.join("mkfs-msdosfs").as_str(),
                 "--product-bundle-name",
                 "my-product-bundle",
             ],
@@ -1113,12 +1117,7 @@ mod tests {
             std::fs::write(dir.join(format!("placeholder.{}", i)), vec![i; 8192]).unwrap();
         }
 
-        let current_exe = std::env::current_exe().unwrap();
-
-        let test_data_dir = Utf8PathBuf::from_path_buf(
-            current_exe.parent().unwrap().join("make-fuchsia-vol_test_data"),
-        )
-        .unwrap();
+        let test_data_dir = test_data_dir();
 
         const IMAGE_SIZE: usize = 67108864;
 
@@ -1159,6 +1158,8 @@ mod tests {
                 dir.join("placeholder.10").as_str(),
                 "--fuchsia-build-dir",
                 test_data_dir.as_str(),
+                "--mkfs-msdosfs",
+                test_data_dir.join("mkfs-msdosfs").as_str(),
                 "--product-bundle",
                 test_data_dir.as_str(),
             ],
@@ -1181,12 +1182,7 @@ mod tests {
             std::fs::write(dir.join(format!("placeholder.{}", i)), vec![i; 8192]).unwrap();
         }
 
-        let current_exe = std::env::current_exe().unwrap();
-
-        let test_data_dir = Utf8PathBuf::from_path_buf(
-            current_exe.parent().unwrap().join("make-fuchsia-vol_test_data"),
-        )
-        .unwrap();
+        let test_data_dir = test_data_dir();
 
         const IMAGE_SIZE: usize = 67108864;
 
@@ -1227,6 +1223,8 @@ mod tests {
                 dir.join("placeholder.10").as_str(),
                 "--fuchsia-build-dir",
                 test_data_dir.as_str(),
+                "--mkfs-msdosfs",
+                test_data_dir.join("mkfs-msdosfs").as_str(),
                 "--product-bundle",
                 test_data_dir.as_str(),
                 "--qemu-commandline",
@@ -1273,11 +1271,7 @@ mod tests {
     }
 
     fn write_test_v2_bundle(dir: &Utf8Path, include_fxfs: bool) {
-        let current_exe = std::env::current_exe().unwrap();
-        let test_data_dir = Utf8PathBuf::from_path_buf(
-            current_exe.parent().unwrap().join("make-fuchsia-vol_test_data"),
-        )
-        .unwrap();
+        let test_data_dir = test_data_dir();
         let mut pb: serde_json::Value =
             serde_json::from_reader(File::open(test_data_dir.join("product_bundle.json")).unwrap())
                 .unwrap();

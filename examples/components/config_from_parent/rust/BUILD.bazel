@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "config_from_parent_example_rust",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":example_config",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "config_from_parent_example_rust",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "config_example",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/config_example.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//examples/components/config_from_parent/integration_test:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "example_config",
+    cm_label = ":manifest",
+)

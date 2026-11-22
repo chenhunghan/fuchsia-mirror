@@ -1,46 +1,82 @@
-// Copyright 2020 The Fuchsia Authors. All rights reserved.
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 library fuchsia.hardware.usb.virtualbustest;
 
 using zx;
 
+/// The maximum size of data payload allowed for a single transfer in tests.
+const MAX_DATA_SIZE uint32 = 65536;
+
+/// Protocol for controlling the virtual bus tester from the host side.
 closed protocol BusTest {
+    /// Performs a control transfer.
+    ///
+    /// * error Returns a status code indicating success or failure.
     strict Control(struct {
+        /// Indicates direction of transfer (true if IN, false if OUT).
         is_in bool;
-        out_data vector<uint8>:MAX;
+        /// Data payload for OUT control transfers.
+        out_data vector<uint8>:MAX_DATA_SIZE;
     }) -> (struct {
-        in_data vector<uint8>:MAX;
+        /// Data payload returned by IN control transfers.
+        in_data vector<uint8>:MAX_DATA_SIZE;
     }) error zx.Status;
 
+    /// Performs a bulk OUT transfer.
+    ///
+    /// * error Returns a status code indicating success or failure.
     strict Out(struct {
-        data vector<uint8>:MAX;
+        /// Data to write to the device.
+        data vector<uint8>:MAX_DATA_SIZE;
     }) -> (struct {
+        /// Number of bytes actually written.
         actual uint64;
     }) error zx.Status;
 
+    /// Performs a bulk IN transfer.
+    ///
+    /// * error Returns a status code indicating success or failure.
     strict In(struct {
+        /// Number of bytes to read from the device.
         size uint64;
     }) -> (struct {
-        data vector<uint8>:MAX;
+        /// Data read from the device.
+        data vector<uint8>:MAX_DATA_SIZE;
     }) error zx.Status;
 };
 
+/// Protocol for setting up expectations on the virtual bus tester device side.
 closed protocol ExpectBusTest {
+    /// Configures the device to expect a control transfer.
+    ///
+    /// * error Returns a status code indicating success or failure.
     strict ExpectControl(struct {
+        /// Indicates direction of transfer (true if IN, false if OUT).
         is_in bool;
-        in_data vector<uint8>:MAX;
+        /// Expected data payload for OUT control transfers.
+        in_data vector<uint8>:MAX_DATA_SIZE;
     }) -> (struct {
-        out_data vector<uint8>:MAX;
+        /// Data payload to return for IN control transfers.
+        out_data vector<uint8>:MAX_DATA_SIZE;
     }) error zx.Status;
 
+    /// Configures the device to expect a bulk OUT transfer.
+    ///
+    /// * error Returns a status code indicating success or failure.
     strict ExpectOut() -> (struct {
-        data vector<uint8>:MAX;
+        /// Data received from the host OUT transfer.
+        data vector<uint8>:MAX_DATA_SIZE;
     }) error zx.Status;
 
+    /// Configures the device to expect a bulk IN transfer.
+    ///
+    /// * error Returns a status code indicating success or failure.
     strict ExpectIn(struct {
-        data vector<uint8>:MAX;
+        /// Data to return to the host IN transfer.
+        data vector<uint8>:MAX_DATA_SIZE;
     }) -> (struct {
+        /// Number of bytes actually read by the host.
         actual uint64;
     }) error zx.Status;
 
@@ -49,15 +85,19 @@ closed protocol ExpectBusTest {
     /// `Control()`.
     strict Sync() -> ();
 
+    /// Controls virtual bus connection state.
     strict Connect(struct {
+        /// Connection status (true for connected).
         connect bool;
     }) -> ();
 };
 
+/// Service exposing the BusTest interface.
 service BusTestService {
     device client_end:BusTest;
 };
 
+/// Service exposing the ExpectBusTest interface.
 service ExpectBusTestService {
     device client_end:ExpectBusTest;
 };

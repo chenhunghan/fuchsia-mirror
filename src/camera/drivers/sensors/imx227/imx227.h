@@ -7,8 +7,8 @@
 
 #include <fidl/fuchsia.hardware.clock/cpp/wire.h>
 #include <fidl/fuchsia.hardware.gpio/cpp/wire.h>
+#include <fidl/fuchsia.hardware.mipicsi/cpp/wire.h>
 #include <fuchsia/hardware/camera/sensor/cpp/banjo.h>
-#include <fuchsia/hardware/mipicsi/cpp/banjo.h>
 #include <lib/ddk/platform-defs.h>
 #include <lib/fpromise/result.h>
 
@@ -68,14 +68,15 @@ class Imx227Device : public DeviceType,
   Imx227Device(zx_device_t* device, fidl::ClientEnd<fuchsia_hardware_clock::Clock> clk24,
                fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_vana_enable,
                fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_vdig_enable,
-               fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_cam_rst)
+               fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_cam_rst,
+               fidl::ClientEnd<fuchsia_hardware_mipicsi::Device> mipi)
       : DeviceType(device),
         i2c_(device, "i2c"),
         gpio_vana_enable_(std::move(gpio_vana_enable)),
         gpio_vdig_enable_(std::move(gpio_vdig_enable)),
         gpio_cam_rst_(std::move(gpio_cam_rst)),
         clk24_(std::move(clk24)),
-        mipi_(device, "mipicsi") {}
+        mipi_(std::move(mipi)) {}
 
   static zx_status_t Create(zx_device_t* parent, std::unique_ptr<Imx227Device>* device_out);
   static zx_status_t CreateAndBind(void* ctx, zx_device_t* parent);
@@ -151,7 +152,7 @@ class Imx227Device : public DeviceType,
   fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio> gpio_vdig_enable_;
   fidl::WireSyncClient<fuchsia_hardware_gpio::Gpio> gpio_cam_rst_;
   fidl::WireSyncClient<fuchsia_hardware_clock::Clock> clk24_;
-  ddk::MipiCsiProtocolClient mipi_;
+  fidl::WireSyncClient<fuchsia_hardware_mipicsi::Device> mipi_;
 
   // Other
   zx_status_t InitPdev();

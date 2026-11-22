@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":zxtest_host_test"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+# GN's bootfs_test() expects the binary at test/zxtest-test via
+# distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/zxtest-test", root_build_dir) destination = "test/zxtest-test" label = get_label_info(":zxtest", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "zxtest",
+    srcs = [
+        "assertion_test.cc",
+        "event-broadcaster_test.cc",
+        "main.cc",
+        "parameterized-value_test.cc",
+        "prod_test.cc",
+        "reporter_test.cc",
+        "runner_test.cc",
+        "test-case_test.cc",
+        "test-info_test.cc",
+        "test-registry.h",
+        "test_test.cc",
+        "values_test.cc",
+    ] + select({
+        "@platforms//os:fuchsia": ["death-statement_test.cc"],
+        "//conditions:default": [],
+    }),
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+        "//conditions:default": [],
+    }),
+    gn_output_name = "zxtest-test",
+    deps = [
+        "//src/zircon/lib/zircon:headers",
+        "//zircon/system/ulib/zxtest",
+        "//zircon/system/ulib/zxtest:prod",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/fdio",
+            "//sdk/lib/fit",
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+host_test(
+    name = "zxtest_host_test",
+    binary = ":zxtest",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

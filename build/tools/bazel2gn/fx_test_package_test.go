@@ -116,6 +116,72 @@ fuchsia_test_package("foo-tests") {
 }`,
 		},
 		{
+			name: "test package with package validation opt-outs",
+			bazel: `fx_component_manifest(
+	name = "manifest",
+	manifest = "meta/foo.cml",
+)
+
+fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+	validate_elf_binaries = False,
+	validate_structured_config = False,
+)`,
+			wantGN: `fuchsia_component_manifest("manifest") {
+	manifest = "meta/foo.cml"
+}
+fuchsia_test_component("component") {
+	cm_label = ":manifest"
+}
+fuchsia_test_package("foo-tests") {
+	package_name = "foo-tests-gn"
+	test_components = [
+		":component",
+	]
+	disable_elf_binaries_checks = true
+	validate_structured_config = false
+}`,
+		},
+		{
+			name: "test package with explicit True package validations",
+			bazel: `fx_component_manifest(
+	name = "manifest",
+	manifest = "meta/foo.cml",
+)
+
+fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+	validate_elf_binaries = True,
+	validate_structured_config = True,
+)`,
+			wantGN: `fuchsia_component_manifest("manifest") {
+	manifest = "meta/foo.cml"
+}
+fuchsia_test_component("component") {
+	cm_label = ":manifest"
+}
+fuchsia_test_package("foo-tests") {
+	package_name = "foo-tests-gn"
+	test_components = [
+		":component",
+	]
+	disable_elf_binaries_checks = false
+	validate_structured_config = true
+}`,
+		},
+		{
 			name: "test package with components, subpackages and test specs",
 			bazel: `fx_test_component(
 	name = "test-component",
@@ -241,6 +307,67 @@ fuchsia_test_package("foo-tests") {
 	test_specs = {
 		build_only = true
 	}
+}`,
+		},
+		{
+			name: "fx_test parallel",
+			bazel: `fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+)
+
+fx_test(
+	name = "foo-test",
+	environments = ["//build/testing/environments:emu_env"],
+	package = ":foo-tests",
+	parallel = 4,
+)`,
+			wantGN: `fuchsia_test_component("component") {
+	cm_label = ":manifest"
+}
+fuchsia_test_package("foo-tests") {
+	package_name = "foo-tests-gn"
+	test_components = [
+		":component",
+	]
+	test_specs = {
+		environments = [
+			emu_env,
+		]
+		parallel = 4
+	}
+}`,
+		},
+		{
+			name: "fx_test parallel zero is omitted",
+			bazel: `fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+)
+
+fx_test(
+	name = "foo-test",
+	package = ":foo-tests",
+	parallel = 0,
+)`,
+			wantGN: `fuchsia_test_component("component") {
+	cm_label = ":manifest"
+}
+fuchsia_test_package("foo-tests") {
+	package_name = "foo-tests-gn"
+	test_components = [
+		":component",
+	]
 }`,
 		},
 		{
@@ -390,10 +517,10 @@ func TestFxTestPackageErrors(t *testing.T) {
 
 fx_package(
 	name = "foo-tests",
-	resources = [":data"],
+	tools = [":tool"],
 	test_components = [":component"],
 )`,
-			wantErr: `attribute "resources"`,
+			wantErr: `attribute "tools"`,
 		},
 		{
 			name: "test_components is not a list literal",
@@ -458,6 +585,34 @@ fx_test(
 	package = ":foo-tests",
 )`,
 			wantErr: `attribute "args" of fx_test`,
+		},
+		{
+			name: "non-boolean fx_package validate_elf_binaries",
+			bazel: `fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+	validate_elf_binaries = "no",
+)`,
+			wantErr: "validate_elf_binaries must be True or False",
+		},
+		{
+			name: "non-boolean fx_package validate_structured_config",
+			bazel: `fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+	validate_structured_config = "no",
+)`,
+			wantErr: "validate_structured_config must be True or False",
 		},
 		{
 			name: "non-boolean fx_test build_only",
@@ -637,6 +792,44 @@ fx_test(
 	test_type = "system",
 )`,
 			wantErr: `has test component "//other/pkg:component" from another package`,
+		},
+		{
+			name: "fx_test negative parallel",
+			bazel: `fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+)
+
+fx_test(
+	name = "foo-test",
+	package = ":foo-tests",
+	parallel = -1,
+)`,
+			wantErr: "parallel must be non-negative",
+		},
+		{
+			name: "fx_test non-integer parallel",
+			bazel: `fx_test_component(
+	name = "component",
+	compiled_manifest = ":manifest",
+)
+
+fx_package(
+	name = "foo-tests",
+	test_components = [":component"],
+)
+
+fx_test(
+	name = "foo-test",
+	package = ":foo-tests",
+	parallel = "4",
+)`,
+			wantErr: "expected an integer literal",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

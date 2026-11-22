@@ -89,6 +89,48 @@ TYPED_TEST(DlTests, ManyDeps) {
 
   EXPECT_EQ(RunFunction<int64_t>(sym.value()), kReturnValue);
 
+  // Opening shared DAG dependencies directly must retain edges to sibling
+  // dependencies that were already enqueued earlier in the same LinkingSession:
+  // b -> {a (13), c (2), d} and d -> {c (2), e (-18)}.
+  constexpr int64_t kReturnA = 13;
+  constexpr int64_t kReturnC = 2;
+  constexpr int64_t kReturnE = -18;
+  auto check_sym = [&](void* handle, const char* sym_name, int64_t expected) {
+    SCOPED_TRACE(sym_name);
+    auto sym_result = this->DlSym(handle, TestSym(sym_name).c_str());
+    ASSERT_TRUE(sym_result.is_ok()) << sym_result.error_value();
+    ASSERT_TRUE(sym_result.value());
+    EXPECT_EQ(RunFunction<int64_t>(sym_result.value()), expected);
+  };
+
+  auto check_missing_sym = [&](void* handle, const std::string& module_name, const char* sym_name) {
+    SCOPED_TRACE(sym_name);
+    const std::string sym = TestSym(sym_name);
+    auto sym_result = this->DlSym(handle, sym.c_str());
+    ASSERT_TRUE(sym_result.is_error());
+    EXPECT_THAT(sym_result.error_value().take_str(),
+                dl::testing::IsUndefinedSymbolErrMsg(sym, module_name));
+  };
+
+  auto open_b = this->DlOpen(kDepBFile.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+  ASSERT_TRUE(open_b.is_ok()) << open_b.error_value();
+  ASSERT_TRUE(open_b.value());
+  check_sym(open_b.value(), "a", kReturnA);
+  check_sym(open_b.value(), "c", kReturnC);
+  check_sym(open_b.value(), "e", kReturnE);
+  check_missing_sym(open_b.value(), kDepBFile, "f");
+
+  auto open_d = this->DlOpen(kDepDFile.c_str(), RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
+  ASSERT_TRUE(open_d.is_ok()) << open_d.error_value();
+  ASSERT_TRUE(open_d.value());
+  check_sym(open_d.value(), "c", kReturnC);
+  check_sym(open_d.value(), "e", kReturnE);
+  check_missing_sym(open_d.value(), kDepDFile, "a");
+  check_missing_sym(open_d.value(), kDepDFile, "b");
+  check_missing_sym(open_d.value(), kDepDFile, "f");
+
+  ASSERT_TRUE(this->DlClose(open_d.value()).is_ok());
+  ASSERT_TRUE(this->DlClose(open_b.value()).is_ok());
   ASSERT_TRUE(this->DlClose(open.value()).is_ok());
 }
 

@@ -385,6 +385,11 @@ class Flatland : public fidl::WireServer<fuchsia_ui_composition::Flatland>,
                        ResetLayerImageCompleter::Sync& completer) override;
   void ResetLayerImage(LayerId layer_id);
 
+  // |fuchsia_ui_composition::Flatland2|
+  void NotifyExpectedPresent(NotifyExpectedPresentRequestView request,
+                             NotifyExpectedPresentCompleter::Sync& completer) override;
+  void NotifyExpectedPresent(zx::time expected_present_time, zx::duration frame_interval);
+
   // Called just before the FIDL client receives the event of the same name, indicating that this
   // Flatland instance should allow a |additional_present_credits| calls to Present().
   void OnNextFrameBegin(uint32_t additional_present_credits,

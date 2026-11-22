@@ -159,7 +159,7 @@ fuchsia_test_package("storage-stress-tests") {
     }
     environments = [
       {
-        dimensions = qemu_env.dimensions
+        dimensions = emu_env.dimensions
         tags = [ "stress-tests" ]
       },
     ]
@@ -184,7 +184,7 @@ fuchsia_test_package("storage-stress-tests-short") {
     log_settings = {
       max_severity = "ERROR"
     }
-    environments = [ qemu_env ]
+    environments = [ emu_env ]
   }
 }
 

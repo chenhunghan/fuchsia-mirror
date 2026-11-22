@@ -233,7 +233,7 @@ def generate_honeydew_config() -> dict[str, Any]:
         }
         "affordances": {
             "tracing": {
-                "implementation": "fuchsia-controller"
+                "implementation": "ffx"
             }
         }
     }
@@ -261,3 +261,9 @@ def generate_honeydew_config() -> dict[str, Any]:
     honeydew_config["transports"]["ffx"].update(ffx_config)
 
     return honeydew_config
+
+
+# Allows running this file directly, e.g. as the main module of a Bazel
+# py_binary(). The GN python_binary() calls main() through its main_callable.
+if __name__ == "__main__":
+    main()

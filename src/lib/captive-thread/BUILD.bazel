@@ -76,13 +76,12 @@ fx_cc_binary(
         "//src/lib/captive-thread/testing:captive-thread-testing",
         "//src/lib/elfldltl:headers",  # @bazel2gn:path_overwrite://src/lib/elfldltl
         "//src/lib/fxl/test:gtest_main",
-        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+        "@com_google_googletest//:gtest",
     ],
 )
 
 fx_unittest_package(
     name = "captive-thread-tests",
-    package_name = "captive-thread-tests",
     unit_tests = [":captive-thread-unittests"],
     visibility = ["//visibility:private"],
 )

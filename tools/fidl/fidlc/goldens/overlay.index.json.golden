@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
       "data": "test.overlay",
       "start_offset": 8,
       "end_offset": 20
@@ -22,7 +22,7 @@
       "identifier": "test.overlay/OverlayStruct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "data": "OverlayStruct",
         "start_offset": 461,
         "end_offset": 474
@@ -32,7 +32,7 @@
           "name": "the_overlay",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "data": "the_overlay",
             "start_offset": 490,
             "end_offset": 501
@@ -43,7 +43,7 @@
             "type_identifier": "test.overlay/Overlay",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
               "data": "Overlay",
               "start_offset": 502,
               "end_offset": 509
@@ -57,7 +57,7 @@
       "identifier": "test.overlay/Pasta",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "data": "Pasta",
         "start_offset": 86,
         "end_offset": 91
@@ -67,7 +67,7 @@
           "name": "sauce",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "data": "sauce",
             "start_offset": 107,
             "end_offset": 112
@@ -83,7 +83,7 @@
       "identifier": "test.overlay/Pizza",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
         "data": "Pizza",
         "start_offset": 28,
         "end_offset": 33
@@ -93,7 +93,7 @@
           "name": "toppings",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/overlay.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/overlay.test.fidl",
             "data": "toppings",
             "start_offset": 49,
             "end_offset": 57

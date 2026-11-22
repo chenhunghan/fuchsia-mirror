@@ -226,7 +226,9 @@ def _fx_test_impl(ctx):
         ctx.attr.package[FuchsiaDebugSymbolInfo],
     ]
 
+# LINT.IfChange(fx_test_rule_kind)
 fx_test = rule(
+    # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:test_rule_kinds)
     doc = """Exposes the test components of a Fuchsia package to the Fuchsia test runners (`fx test` and infra).
 
     Every component in the `package`'s `test_components` becomes a separate

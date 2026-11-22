@@ -16,10 +16,14 @@ exports_files(
     [
         "test_files/1file.img",
         "test_files/dac_attributes.img",
+        "test_files/extents.img",
         "test_files/nest.img",
         "test_files/symlink.img",
     ],
-    visibility = ["//src/storage/ext4/lib/parser:__pkg__"],
+    visibility = [
+        "//src/storage/ext4/lib/parser:__pkg__",
+        "//src/storage/ext4/server:__pkg__",
+    ],
 )
 
 rustc_library(

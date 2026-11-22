@@ -237,6 +237,8 @@ pub struct DriverDml {
     #[serde(default)]
     pub config: Option<Value>,
     #[serde(default)]
+    pub facets: Option<Value>,
+    #[serde(default)]
     pub driver_configs: Vec<DriverConfigDef>,
     #[serde(default)]
     pub service_constraints: Vec<ServiceConstraintDef>,
@@ -329,6 +331,10 @@ pub fn capitalize(s: &str) -> String {
     }
 }
 
+pub fn to_pascal_case(s: &str) -> String {
+    s.split(['_', '-']).filter(|part| !part.is_empty()).map(capitalize).collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Schema {
     pub id: String,
@@ -341,19 +347,20 @@ impl Schema {
     /// Determines the name for the generated root metadata struct.
     ///
     /// Naming precedence:
-    /// 1. If the schema explicitly specifies a `title` property, use that title.
+    /// 1. If the schema has an explicit root name (from a JSON schema `title` or
+    ///    the last dot-separated segment of `driver_config`), use that name.
     /// 2. If there is only a single schema (`total_schemas == 1`), default to
-    ///    `<DriverName>Metadata` (preserving backwards compatibility).
-    /// 3. If there are multiple schemas and `title` is omitted, fall back to
-    ///    the capitalized last dot-separated segment of the schema `id`.
+    ///    `<PascalDriverName>Metadata` (preserving backwards compatibility).
+    /// 3. If there are multiple schemas and no explicit root name, fall back to
+    ///    the PascalCase last dot-separated segment of the schema `id`.
     pub fn root_struct_name(&self, normalized_driver_name: &str, total_schemas: usize) -> String {
         if self.root_layout.name != DEFAULT_ROOT_STRUCT_NAME {
             self.root_layout.name.clone()
         } else if total_schemas == 1 {
-            format!("{}Metadata", capitalize(normalized_driver_name))
+            format!("{}Metadata", to_pascal_case(normalized_driver_name))
         } else {
             let last_part = self.id.rsplit('.').next().unwrap_or(normalized_driver_name);
-            capitalize(last_part)
+            to_pascal_case(last_part)
         }
     }
 }
@@ -632,7 +639,9 @@ pub fn parse_driver_config_schema(config: &DriverConfigDef) -> Result<Schema, an
         }
     }
 
-    let root_name = DEFAULT_ROOT_STRUCT_NAME.to_string();
+    let last_segment = config.driver_config.rsplit('.').next().unwrap_or("");
+    let pascal = to_pascal_case(last_segment);
+    let root_name = if pascal.is_empty() { DEFAULT_ROOT_STRUCT_NAME.to_string() } else { pascal };
     let mut root_fields = Vec::new();
     let required_set: HashSet<&str> = config
         .required
@@ -1501,5 +1510,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parsed_enabled.disabled, Some(false));
+    }
+
+    #[test]
+    fn test_to_pascal_case() {
+        assert_eq!(to_pascal_case("dw_spi"), "DwSpi");
+        assert_eq!(to_pascal_case("my-hyphenated-driver"), "MyHyphenatedDriver");
+        assert_eq!(to_pascal_case("SpiBusMetadata"), "SpiBusMetadata");
+        assert_eq!(to_pascal_case("aml_meson_power"), "AmlMesonPower");
+        assert_eq!(to_pascal_case("mixed-snake_andCamel"), "MixedSnakeAndCamel");
+        assert_eq!(to_pascal_case("__leading--and__trailing--"), "LeadingAndTrailing");
+        assert_eq!(to_pascal_case(""), "");
+        assert_eq!(to_pascal_case("___---"), "");
+    }
+
+    #[test]
+    fn test_parse_driver_config_schema_root_struct_name() {
+        // Single-schema and multi-schema driver_config should use the PascalCase last segment.
+        let spi_config = DriverConfigDef {
+            driver_config: "fuchsia.hardware.spi.businfo.SpiBusMetadata".to_string(),
+            ..Default::default()
+        };
+        let spi_schema = parse_driver_config_schema(&spi_config).unwrap();
+        assert_eq!(spi_schema.root_layout.name, "SpiBusMetadata");
+        assert_eq!(spi_schema.root_struct_name("dw_spi", 1), "SpiBusMetadata");
+        assert_eq!(spi_schema.root_struct_name("dw_spi", 2), "SpiBusMetadata");
+
+        // Snake-case driver_config segment is converted to PascalCase.
+        let snake_config = DriverConfigDef {
+            driver_config: "fuchsia.test.my_driver_config".to_string(),
+            ..Default::default()
+        };
+        let snake_schema = parse_driver_config_schema(&snake_config).unwrap();
+        assert_eq!(snake_schema.root_layout.name, "MyDriverConfig");
+        assert_eq!(snake_schema.root_struct_name("my_driver", 1), "MyDriverConfig");
+        assert_eq!(snake_schema.root_struct_name("my_driver", 2), "MyDriverConfig");
+
+        // Empty driver_config falls back to DEFAULT_ROOT_STRUCT_NAME, then driver name / id.
+        let empty_config = DriverConfigDef { driver_config: String::new(), ..Default::default() };
+        let empty_schema = parse_driver_config_schema(&empty_config).unwrap();
+        assert_eq!(empty_schema.root_layout.name, DEFAULT_ROOT_STRUCT_NAME);
+        assert_eq!(empty_schema.root_struct_name("dw_spi", 1), "DwSpiMetadata");
+        assert_eq!(
+            empty_schema.root_struct_name("my-hyphenated-driver", 1),
+            "MyHyphenatedDriverMetadata"
+        );
+
+        // Multi-schema fallback without explicit root name uses PascalCase last segment of id.
+        let multi_fallback_schema = Schema {
+            id: "fuchsia.test.some_metadata".to_string(),
+            enums: HashMap::new(),
+            structs: HashMap::new(),
+            root_layout: StructDef { name: DEFAULT_ROOT_STRUCT_NAME.to_string(), fields: vec![] },
+        };
+        assert_eq!(multi_fallback_schema.root_struct_name("dw_spi", 2), "SomeMetadata");
+        assert_eq!(multi_fallback_schema.root_struct_name("dw_spi", 1), "DwSpiMetadata");
     }
 }

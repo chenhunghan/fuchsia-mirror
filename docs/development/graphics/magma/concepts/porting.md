@@ -334,7 +334,7 @@ the system driver using the Zircon DDK.
 <!-- Reference links -->
 
 [glossary.bootfs]: /docs/glossary/README.md#bootfs
-[paving]: /docs/development/build/fx.md#what-is-paving
+[paving]: /docs/development/build/fx.md
 [boarddriver]: /docs/development/drivers/concepts/device_driver_model/platform-bus.md
 [icdabi]: /docs/concepts/kernel/system.md#vulkan-icd
 [sysmem]: /docs/development/graphics/sysmem/concepts/sysmem.md
@@ -367,7 +367,7 @@ the system driver using the Zircon DDK.
 [loader-readme]: /src/graphics/bin/vulkan_loader/README.md
 [extmemoryspec]: https://www.khronos.org/registry/vulkan/specs/1.2-extensions/man/html/VK_FUCHSIA_external_memory.html
 [extsemaphorespec]: https://www.khronos.org/registry/vulkan/specs/1.2-extensions/man/html/VK_FUCHSIA_external_semaphore.html
-[package-deployment]: /docs/development/build/fx.md#package_deployment_options
+[package-deployment]: /docs/development/build/fx.md#package-deployment-options
 [sdk-get-started]: /docs/development/sdk/index.md
 [bazel]: https://bazel.build/
 [rules_foreign_cc]: https://github.com/bazelbuild/rules_foreign_cc

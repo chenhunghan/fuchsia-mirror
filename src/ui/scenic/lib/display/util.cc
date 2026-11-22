@@ -133,4 +133,19 @@ zx_status_t ImportImageForCapture(CoordinatorProxy& display_coordinator,
   return import_image_result.status_value();
 }
 
+uint32_t BufferCollectionPixelFormatToImageTilingType(
+    fuchsia_images2::PixelFormatModifier pixel_format_modifier) {
+  switch (pixel_format_modifier) {
+    case fuchsia_images2::PixelFormatModifier::kIntelI915XTiled:
+      return 1;  // `IMAGE_TILING_TYPE_X_TILED`
+    case fuchsia_images2::PixelFormatModifier::kIntelI915YTiled:
+      return 2;  // `IMAGE_TILING_TYPE_Y_LEGACY_TILED`
+    case fuchsia_images2::PixelFormatModifier::kIntelI915YfTiled:
+      return 3;  // `IMAGE_TILING_TYPE_YF_TILED`
+    case fuchsia_images2::PixelFormatModifier::kLinear:
+    default:
+      return fuchsia_hardware_display_types::kImageTilingTypeLinear;
+  }
+}
+
 }  // namespace display

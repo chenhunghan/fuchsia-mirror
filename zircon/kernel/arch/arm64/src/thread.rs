@@ -36,10 +36,9 @@ const LOCAL_TRACE: u32 = 0;
 /// Architecture-specific thread state (`struct arch_thread`).
 type ArchThread = arm64_thread_bindings::arch_thread;
 
-// `arch_thread` has `shadow_call_sp` only when the shadow call stack is on, as it is for kernel
-// Rust. CURRENT_MDSCR_OFFSET is 56 only with that field, so bindgen's libclang saw it on too.
+// `arch_thread` holds the `shadow_call_sp` that the assembly loads into x18, so kernel Rust must
+// have the shadow call stack on.
 zr::static_assert!(cfg!(sanitize = "shadow-call-stack"));
-zr::static_assert!(CURRENT_MDSCR_OFFSET == 56);
 
 // The assembly offsets are relative to `thread_pointer_location`, where TPIDR_EL1 points.
 zr::static_assert!(
@@ -98,8 +97,8 @@ pub(super) unsafe fn thread_arch_const(thread: *const Thread) -> *const ArchThre
 /// `arch_thread` only under its lock, except for the thread's own lock-free writes on user mode
 /// entry and return, in user copies, and to its EL0 thread pointers, which it makes only while it
 /// runs user code or is about to.
-pub(super) fn locked_thread_arch(guard: &ThreadLockGuard) -> *mut ArchThread {
-    // SAFETY: `ThreadLockGuard::lock`'s contract keeps the thread live while `guard` lives, and
+pub(super) fn locked_thread_arch(guard: &ThreadLockGuard<'_>) -> *mut ArchThread {
+    // SAFETY: `ThreadLockGuard::target`'s contract keeps the thread live while `guard` lives, and
     // `thread_arch` only offsets the pointer.
     unsafe { thread_arch(guard.thread()) }
 }
@@ -145,8 +144,6 @@ unsafe extern "C" {
         old_scsp: *mut *mut usize,
         new_scsp: *mut usize,
     );
-
-    fn cpp_with_frame_pointers() -> bool;
 }
 
 /// Points TPIDR_EL1 at `t`'s `thread_pointer_location`, which makes `t` the current thread.
@@ -335,12 +332,13 @@ unsafe fn arm64_context_switch_spec_mitigations(oldthread: *mut Thread, newthrea
 ///
 /// # Safety
 ///
-/// `oldthread` is the current thread and `newthread` a thread ready to run. Both point to live
-/// `Thread`s whose locks the caller holds. Interrupts are disabled.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_context_switch(oldthread: *mut c_void, newthread: *mut c_void) {
-    let oldthread: *mut Thread = oldthread.cast();
-    let newthread: *mut Thread = newthread.cast();
+/// The caller must ensure that interrupts are disabled on the calling CPU, `oldthread` and
+/// `newthread` are distinct (`oldthread != newthread`) live `Thread`s whose locks the caller holds
+/// (with no conflicting `ChainLockProof` or live borrow of `oldthread`'s lock-protected state),
+/// `oldthread` is the calling CPU's current thread, `newthread` is ready to run (not running on any
+/// CPU) with a valid initialized `ArchThread` (`sp`, `shadow_call_sp`, FPU, TPIDR, and debug
+/// state), and `newthread` remains live while installed as the calling CPU's current thread.
+pub unsafe fn arch_context_switch(oldthread: *mut Thread, newthread: *mut Thread) {
     ltracef!(
         "old {:p} ({}), new {:p} ({})\n",
         oldthread,
@@ -361,7 +359,8 @@ pub unsafe extern "C" fn arch_context_switch(oldthread: *mut c_void, newthread: 
     // SAFETY: The caller holds `newthread`'s lock, and `thread_arch` only offsets the pointer.
     unsafe { (*thread_arch(newthread)).current_percpu_ptr = arm64_read_percpu_ptr_for_thread() };
 
-    // SAFETY: The caller holds `oldthread`'s lock.
+    // SAFETY: The caller guarantees `oldthread` is valid and holds its lock with no conflicting
+    // `ChainLockProof` or live borrow of `oldthread`'s lock-protected state.
     if unsafe { !is_user_state_saved_locked(oldthread) } {
         // SAFETY: The caller guarantees both threads and holds their locks. `oldthread` is
         // running, so the user registers hold its state.
@@ -425,20 +424,18 @@ pub unsafe extern "C" fn arch_context_switch(oldthread: *mut c_void, newthread: 
 
 /// Prints `thread`'s saved stack pointer if it is not running.
 ///
-/// `Thread::Dump*DuringPanic` call this without the lock, as the C++ did; that read is best
-/// effort.
-///
 /// # Safety
 ///
-/// `thread` points to a live `Thread` whose lock the caller holds, shared or exclusive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_dump_thread(thread: *const c_void) {
-    let t: *const Thread = thread.cast();
-    // SAFETY: The caller guarantees `t` and holds its lock.
-    if unsafe { !is_running(t) } {
+/// `thread` must point to a valid, live, initialized [`Thread`]. The caller must either hold
+/// `thread`'s lock or be in a kernel panic, where the reads are best effort and may observe
+/// concurrent updates.
+pub unsafe fn arch_dump_thread(thread: *const Thread) {
+    // SAFETY: Caller guarantees `thread` is valid and either holds its lock or is in a panic.
+    if unsafe { !is_running(thread) } {
         dprintf!(INFO, "\tarch: ");
-        // SAFETY: As above, so nothing writes `t`'s saved `sp`.
-        dprintf!(INFO, "sp {:#x}\n", unsafe { (*thread_arch_const(t)).__bindgen_anon_1.sp });
+        // SAFETY: As above, so nothing writes `thread`'s saved `sp` (or reads are best effort in a
+        // panic).
+        dprintf!(INFO, "sp {:#x}\n", unsafe { (*thread_arch_const(thread)).__bindgen_anon_1.sp });
     }
 }
 
@@ -449,18 +446,15 @@ pub unsafe extern "C" fn arch_dump_thread(thread: *const c_void) {
 ///
 /// `thread` points to a live `Thread` whose lock the caller holds and which is blocked, so its
 /// `sp` points at the context switch frame its last switch away saved.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_thread_get_blocked_fp(thread: *mut c_void) -> usize {
-    let t: *mut Thread = thread.cast();
-    // SAFETY: `cpp_with_frame_pointers` takes no arguments and has no caller preconditions.
-    if !unsafe { cpp_with_frame_pointers() } {
+pub unsafe fn arch_thread_get_blocked_fp(thread: *const Thread) -> usize {
+    if !crate::arch_rs::with_frame_pointers() {
         return 0;
     }
 
-    // SAFETY: The caller guarantees `t`.
-    let frame = unsafe { arm64_get_context_switch_frame(t) };
-    // SAFETY: The caller guarantees that `t` is blocked, so `frame` is the frame its switch away
-    // saved, and the stack it lives on is not in use.
+    // SAFETY: The caller guarantees `thread`.
+    let frame = unsafe { arm64_get_context_switch_frame(thread) };
+    // SAFETY: The caller guarantees that `thread` is blocked, so `frame` is the frame its switch
+    // away saved, and the stack it lives on is not in use.
     unsafe { (*frame).r29 as usize }
 }
 
@@ -470,9 +464,9 @@ pub unsafe extern "C" fn arch_thread_get_blocked_fp(thread: *mut c_void) -> usiz
 ///
 /// `thread` points to a live `Thread` whose lock the caller holds.
 #[inline(always)]
-unsafe fn arm64_get_context_switch_frame(thread: *mut Thread) -> *mut Arm64ContextSwitchFrame {
+unsafe fn arm64_get_context_switch_frame(thread: *const Thread) -> *const Arm64ContextSwitchFrame {
     // SAFETY: The caller guarantees `thread` and holds its lock, so nothing writes `sp`.
-    with_exposed_provenance_mut(unsafe { (*thread_arch_const(thread)).__bindgen_anon_1.sp })
+    with_exposed_provenance(unsafe { (*thread_arch_const(thread)).__bindgen_anon_1.sp })
 }
 
 /// Saves the calling CPU's user-mode FPU state and thread pointers into `thread`.

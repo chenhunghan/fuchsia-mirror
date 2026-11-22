@@ -205,7 +205,7 @@ cc_test_executable("playback_integration_test_bin") {
     "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/sensors/playback/realm_factory/fidl:fuchsia.hardware.sensors.realm_cpp",

@@ -8,6 +8,7 @@
 
 use super::arch::arch_enter_uspace;
 use super::debugger::{arch_get_general_regs, arch_set_general_regs};
+use super::thread::{TPIDR_EL0, TPIDRRO_EL0, thread_arch};
 use super::{
     ARM32_BIT_MODE, ARM32_BIT_MODE_REGISTER_COUNT, ARM32_BIT_THUMB_MODE,
     ARM32_USER_RESTRICTED_VISIBLE_FLAGS, ARM64_USER_RESTRICTED_VISIBLE_FLAGS, Iframe, SyscallRegs,
@@ -29,13 +30,6 @@ pub type ArchSavedNormalState = arm64_restricted_bindings::ArchSavedNormalState;
 
 zr::static_assert!(core::mem::size_of::<ArchSavedNormalState>() == 16);
 zr::static_assert!(core::mem::align_of::<ArchSavedNormalState>() == 8);
-
-unsafe extern "C" {
-    fn cpp_arm64_get_tpidr_regs(tpidr_el0: *mut u64, tpidrro_el0: *mut u64);
-    fn cpp_arm64_set_tpidr_regs(tpidr_el0: u64, tpidrro_el0: u64);
-    fn cpp_arm64_enter_restricted_tpidr(tpidr_el0: u64, is_arm32: bool);
-    fn cpp_arm64_get_tpidr_el0() -> u64;
-}
 
 /// Validate that the restricted state is safe and well-formed before entering restricted mode.
 ///
@@ -109,10 +103,8 @@ pub fn dump(state: &zx_restricted_state_t) {
 /// [arm/sysreg]: TPIDR_EL0 / TPIDRRO_EL0
 pub fn save_state_pre_restricted_entry(state: &mut ArchSavedNormalState) {
     // Save the thread local storage register(s) from normal mode.
-    // SAFETY: Reads TPIDR_EL0 and TPIDRRO_EL0 for current thread.
-    unsafe {
-        cpp_arm64_get_tpidr_regs(&mut state.tpidr_el0, &mut state.tpidrro_el0);
-    }
+    state.tpidr_el0 = TPIDR_EL0.read();
+    state.tpidrro_el0 = TPIDRRO_EL0.read();
 }
 
 /// Enter user space in restricted mode using the provided restricted architectural state.
@@ -147,12 +139,15 @@ pub fn enter_restricted(state: &zx_restricted_state_t) -> ! {
     // Restore TPIDR_EL0 from restricted mode.
     // TODO(https://fxbug.dev/42076040): Eventually the TPIDR register should be
     // inside the iframe.
+    TPIDR_EL0.write(state.tpidr_el0);
     // Mirror to tpidrro_el0 when supporting aarch32.
     // This allows aarch32 userland to read TPIDRURO which is needed
     // by some libc implementations.
+    if is_arm32 {
+        TPIDRRO_EL0.write(state.tpidr_el0);
+    }
+
     // Load the new state and enter restricted mode.
-    // SAFETY: Takes plain values and only writes TPIDR_EL0 (and TPIDRRO_EL0).
-    unsafe { cpp_arm64_enter_restricted_tpidr(state.tpidr_el0, is_arm32) };
     // SAFETY: `iframe` is a local `Iframe` filled in above for the current thread. Interrupts are
     // disabled, as restricted mode transitions require and the `debug_assert!` above checks.
     unsafe { arch_enter_uspace(&iframe) }
@@ -186,10 +181,7 @@ pub fn save_restricted_syscall_state(state: &mut zx_restricted_state_t, regs: &S
     state.cpsr = regs.spsr as u32;
 
     // Save the thread local storage location in restricted mode.
-    // SAFETY: Reads TPIDR_EL0 register for current thread.
-    unsafe {
-        state.tpidr_el0 = cpp_arm64_get_tpidr_el0();
-    }
+    state.tpidr_el0 = TPIDR_EL0.read();
 }
 
 /// Save restricted mode architectural state upon returning from an interrupt or exception via
@@ -206,15 +198,21 @@ pub fn save_restricted_iframe_state(state: &mut zx_restricted_state_t, frame: &I
 /// Reads the current thread's general registers via `arch_get_general_regs` and stores them in
 /// `state`.
 ///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling thread (`current_get()`) is a live user `Thread` stopped in an exception with
+///   saved user state (and any non-null `suspended_general_regs` frame valid, writable, and
+///   unaliased for the duration of the call), making none of its lock-free `arch_thread` writes
+///   during the call.
+/// - No chain lock transaction is active on the calling CPU.
+///
 /// [arm/sysreg]: TPIDR_EL0
-pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
+pub unsafe fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
     let mut regs = zx_thread_state_general_regs_t::default();
-    // SAFETY: `regs` is a local. `current_get()` is the calling thread, so it is live and makes
-    // none of its lock-free `arch_thread` writes during the call. This runs only from the
-    // `kRestrictedModeVectoredException` case of `ExceptionHandlerIterator::Next`, inside the
-    // `ScopedThreadExceptionContext` that `dispatch_user_exception` sets up. That context saved
-    // this thread's user state, and its constructor took and released the thread lock, so no chain
-    // lock transaction is active.
+    // SAFETY: Caller guarantees `current_get()` is a live `Thread` stopped in an exception with
+    // saved user state, making none of its lock-free `arch_thread` writes during the call, with no
+    // active chain lock transaction, and `regs` is a stack local disjoint from the thread's state.
     let status = unsafe { arch_get_general_regs(current_get(), &mut regs) };
     debug_assert_eq!(status, Ok(()));
 
@@ -232,9 +230,24 @@ pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
     state.cpsr = regs.cpsr as u32;
 
     // Save the thread local storage location in restricted mode.
-    // SAFETY: Reads TPIDR_EL0 register for current thread.
+    state.tpidr_el0 = TPIDR_EL0.read();
+}
+
+/// Writes `TPIDR_EL0` and `TPIDRRO_EL0`, and the current thread's saved copies of them.
+#[inline(always)]
+fn set_tpidr_regs(tpidr_el0: u64, tpidrro_el0: u64) {
+    TPIDR_EL0.write(tpidr_el0);
+    TPIDRRO_EL0.write(tpidrro_el0);
+    // SAFETY: `current_get()` is the calling thread, and `thread_arch` only offsets the pointer.
+    let arch = unsafe { thread_arch(current_get()) };
+    // SAFETY: `arch` is the calling thread's `arch_thread`, live while the thread runs. These are
+    // its own lock-free writes to its EL0 thread pointers (see `locked_thread_arch`). Other CPUs
+    // reach these fields only while the thread is not running: when switching it in, and through
+    // `ThreadDispatcher`'s register state calls, which require it to be suspended or waiting for
+    // an exception response.
     unsafe {
-        state.tpidr_el0 = cpp_arm64_get_tpidr_el0();
+        (*arch).tpidr_el0 = tpidr_el0;
+        (*arch).tpidrro_el0 = tpidrro_el0;
     }
 }
 
@@ -243,8 +256,17 @@ pub fn save_restricted_exception_state(state: &mut zx_restricted_state_t) {
 /// Sets up the normal mode general registers with `context` and `reason` in `r[0]` and `r[1]`,
 /// restores `TPIDR_EL0` and `TPIDRRO_EL0`, and points the program counter `pc` to `vector_table`.
 ///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - The calling thread (`current_get()`) is a live user `Thread` stopped in an exception with
+///   saved user state (and any non-null `suspended_general_regs` frame valid, writable, and
+///   unaliased for the duration of the call), making none of its lock-free `arch_thread` writes
+///   during the call.
+/// - No chain lock transaction is active on the calling CPU.
+///
 /// [arm/sysreg]: TPIDR_EL0 / TPIDRRO_EL0
-pub fn redirect_restricted_exception_to_normal(
+pub unsafe fn redirect_restricted_exception_to_normal(
     arch_state: &ArchSavedNormalState,
     vector_table: usize,
     context: usize,
@@ -258,16 +280,13 @@ pub fn redirect_restricted_exception_to_normal(
     // Set the PC such that we return to the vector_table after entering normal mode.
     regs.pc = vector_table as u64;
 
-    // SAFETY: As for `save_restricted_exception_state`; `regs` is a local.
+    // SAFETY: Caller upholds the same preconditions as `save_restricted_exception_state`, and
+    // `regs` is a stack local disjoint from the thread's state.
     let status = unsafe { arch_set_general_regs(current_get(), &regs) };
     debug_assert_eq!(status, Ok(()));
 
     // Restore TPIDR_EL0 and TPIDRRO_EL0 registers from saved normal state and update thread state.
-    // SAFETY: The shim takes both values by value. It writes the EL0 thread pointer registers and
-    // the calling thread's copies of them in its `arch_thread`, which only that thread writes.
-    unsafe {
-        cpp_arm64_set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0);
-    }
+    set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0);
 }
 
 /// Enter user space in normal mode, restoring saved normal `TPIDR_EL0` and `TPIDRRO_EL0` registers
@@ -293,13 +312,11 @@ pub fn enter_full(
     // Set the ELR such that we return to the vector_table after entering normal
     // mode.
     iframe.elr = vector_table as u64;
-    // Load the new state and exit.
-    // Restore TPIDR_EL0 from saved normal state.
+    // Restore TPIDR_EL0 and TPIDRRO_EL0 from saved normal state.
     // TODO(https://fxbug.dev/42076040): Eventually the TPIDR register should be
     // inside the iframe.
-    // SAFETY: Takes plain values and only writes the TPIDR registers and the current thread's
-    // saved copies of them.
-    unsafe { cpp_arm64_set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0) };
+    set_tpidr_regs(arch_state.tpidr_el0, arch_state.tpidrro_el0);
+    // Load the new state and exit.
     // SAFETY: `iframe` is a local `Iframe` filled in above for the current thread. Interrupts are
     // disabled, as restricted mode transitions require and the `debug_assert!` above checks.
     unsafe { arch_enter_uspace(&iframe) }

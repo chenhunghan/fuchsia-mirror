@@ -199,6 +199,14 @@ pub enum KernelArg {
 
     /// Maximum size of the virtual kernel heap (if enabled).
     HeapMaxSizeMib(u64),
+
+    /// Sets the timeout (in seconds) after which a blocked user pager page fault is aborted with
+    /// `ZX_ERR_TIMED_OUT` (checked at each `kernel.userpager.overtime_wait_seconds` wakeup, which
+    /// defaults to 20s).
+    UserpagerOvertimeTimeoutSeconds(u64),
+
+    /// Target size in bytes for the persistent debuglog in persistent RAM (`ZBI_TYPE_NVRAM`).
+    PersistentDlogTargetSize(u32),
 }
 
 /// Options for zero page scanner configuration.
@@ -334,6 +342,12 @@ impl KernelArg {
             }
             Self::EnableVirtualHeap(b) => ("kernel.heap.enable-virtual", b.to_string()),
             Self::HeapMaxSizeMib(i) => ("kernel.heap.max-size-mb", i.to_string()),
+            Self::UserpagerOvertimeTimeoutSeconds(s) => {
+                ("kernel.userpager.overtime_timeout_seconds", s.to_string())
+            }
+            Self::PersistentDlogTargetSize(s) => {
+                ("kernel.persistent-dlog.target-size", s.to_string())
+            }
         };
         (key.to_string(), value)
     }
@@ -382,7 +396,9 @@ impl KernelArg {
             | Self::JitterentropyLl(_)
             | Self::JitterentropyEntropyPer1000Bytes(_)
             | Self::HeapMaxSizeMib(_)
-            | Self::PageScannerZeroPageScanCount(_) => {
+            | Self::PageScannerZeroPageScanCount(_)
+            | Self::UserpagerOvertimeTimeoutSeconds(_)
+            | Self::PersistentDlogTargetSize(_) => {
                 vec![format!("{}=*", key)]
             }
 
@@ -433,7 +449,9 @@ impl AddToImage for KernelArg {
             | Self::EnableVirtualHeap(_)
             | Self::HeapMaxSizeMib(_)
             | Self::JitterentropyEntropyPer1000Bytes(_) => true,
-            Self::OomExperimentalExpandMemoryStall(_) => false,
+            Self::OomExperimentalExpandMemoryStall(_)
+            | Self::UserpagerOvertimeTimeoutSeconds(_)
+            | Self::PersistentDlogTargetSize(_) => false,
         }
     }
     fn add_to_userdebug_images(&self) -> bool {

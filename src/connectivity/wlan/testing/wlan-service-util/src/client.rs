@@ -230,7 +230,7 @@ async fn handle_connect_transaction(
         .context("failed to receive connect result before the channel was closed")?
     {
         match evt {
-            fidl_sme::ConnectTransactionEvent::OnConnectResult { result } => {
+            fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. } => {
                 result_code = result.code;
             }
             other => {
@@ -1006,11 +1006,14 @@ mod tests {
         };
         let connect_transaction = responder.into_stream().control_handle();
         connect_transaction
-            .send_on_connect_result(&fidl_sme::ConnectResult {
-                code: connect_result,
-                is_credential_rejected: false,
-                is_reconnect: false,
-            })
+            .send_on_connect_result(
+                &fidl_sme::ConnectResult {
+                    code: connect_result,
+                    is_credential_rejected: false,
+                    is_reconnect: false,
+                },
+                None,
+            )
             .expect("failed to send OnConnectResult to ConnectTransaction");
     }
 

@@ -4,7 +4,6 @@
 
 #include "endpoint.h"
 
-#include <fuchsia/device/cpp/fidl.h>
 #include <fuchsia/hardware/network/cpp/fidl.h>
 #include <lib/fdio/directory.h>
 #include <lib/fdio/fd.h>
@@ -19,13 +18,10 @@
 
 #include "network_context.h"
 #include "src/lib/fostr/hex_dump.h"
-#include "src/lib/fxl/strings/join_strings.h"
 
 namespace netemul {
 
 namespace impl {
-
-static const char kNetworkDeviceFakeTopoPathRoot[] = "/netemul";
 
 class EndpointImpl : public data::Consumer {
  public:
@@ -46,11 +42,6 @@ class EndpointImpl : public data::Consumer {
                             const NetworkContext& context) = 0;
 
   virtual void SetLinkUp(bool up, fit::callback<void()> done) = 0;
-
-  virtual void ServeDevice(
-      ::fidl::InterfaceRequest<::fuchsia::hardware::network::Device> device) = 0;
-  virtual void ServeController(
-      fidl::InterfaceRequest<::fuchsia::device::Controller> controller) = 0;
 
   virtual void GetPort(fidl::InterfaceRequest<fuchsia::hardware::network::Port> port) = 0;
 
@@ -92,7 +83,7 @@ class EndpointImpl : public data::Consumer {
   fit::callback<void()> closed_callback_;
 };
 
-class NetworkDeviceImpl : public EndpointImpl, public fuchsia::device::Controller {
+class NetworkDeviceImpl : public EndpointImpl {
  public:
   explicit NetworkDeviceImpl(Endpoint::Config config) : EndpointImpl(std::move(config)) {}
 
@@ -154,18 +145,6 @@ class NetworkDeviceImpl : public EndpointImpl, public fuchsia::device::Controlle
     tun_port_->GetPort(std::move(port));
   }
 
-  void ServeDevice(::fidl::InterfaceRequest<::fuchsia::hardware::network::Device> device) override {
-    if (!tun_device_.is_bound()) {
-      return;
-    }
-    tun_device_->GetDevice(std::move(device));
-  }
-
-  void ServeController(
-      ::fidl::InterfaceRequest<::fuchsia::device::Controller> controller) override {
-    device_controller_bindings_.AddBinding(this, std::move(controller));
-  }
-
   void Consume(const void* data, size_t len) override {
     if (!tun_device_.is_bound()) {
       return;
@@ -192,43 +171,6 @@ class NetworkDeviceImpl : public EndpointImpl, public fuchsia::device::Controlle
 
   std::string GetName(uint32_t idx) override { return device_name_; }
 
-  /* fuchsia.device/Controller */
-
-  void ConnectToDeviceFidl(zx::channel server) override {}
-
-  void ConnectToController(
-      ::fidl::InterfaceRequest<::fuchsia::device::Controller> server) override {}
-
-  void Bind(std::string driver, BindCallback callback) override {
-    callback(fuchsia::device::Controller_Bind_Result::WithErr(ZX_ERR_NOT_SUPPORTED));
-  }
-
-  void Rebind(std::string driver, RebindCallback callback) override {
-    callback(fuchsia::device::Controller_Rebind_Result::WithErr(ZX_ERR_NOT_SUPPORTED));
-  }
-
-  void UnbindChildren(UnbindChildrenCallback callback) override {
-    callback(fuchsia::device::Controller_UnbindChildren_Result::WithErr(ZX_ERR_NOT_SUPPORTED));
-  }
-
-  void ScheduleUnbind(ScheduleUnbindCallback callback) override {
-    callback(fuchsia::device::Controller_ScheduleUnbind_Result::WithErr(ZX_ERR_NOT_SUPPORTED));
-  }
-
-  // Returns a fake topological path.
-  //
-  // Network devices in netemul are backed by network-tun, which does not provide
-  // fuchsia.device/Controller. We provide a fake implementation so netemul-backed
-  // devfs looks similar to the real one.
-  //
-  // This method is only implemented so network managers can successfully query
-  // a device's topological path.
-  void GetTopologicalPath(GetTopologicalPathCallback callback) override {
-    std::vector<std::string> parts = {kNetworkDeviceFakeTopoPathRoot, device_name_};
-    callback(fuchsia::device::Controller_GetTopologicalPath_Result::WithResponse(
-        fuchsia::device::Controller_GetTopologicalPath_Response(fxl::JoinStrings(parts, "/"))));
-  }
-
  private:
   void ListenForFrames() {
     if (!tun_device_.is_bound()) {
@@ -250,7 +192,6 @@ class NetworkDeviceImpl : public EndpointImpl, public fuchsia::device::Controlle
   std::string device_name_;
   fuchsia::net::tun::DevicePtr tun_device_;
   fuchsia::net::tun::PortPtr tun_port_;
-  fidl::BindingSet<fuchsia::device::Controller> device_controller_bindings_;
 };
 
 std::unique_ptr<EndpointImpl> MakeImpl(Endpoint::Config config) {
@@ -292,17 +233,6 @@ void Endpoint::SetLinkUp(bool up, Endpoint::SetLinkUpCallback callback) {
 
 void Endpoint::GetPort(fidl::InterfaceRequest<fuchsia::hardware::network::Port> port) {
   impl_->GetPort(std::move(port));
-}
-
-void Endpoint::GetProxy(fidl::InterfaceRequest<FProxy> proxy) {
-  proxy_bindings_.AddBinding(this, std::move(proxy), parent_->dispatcher());
-}
-
-void Endpoint::ServeController(::fidl::InterfaceRequest<::fuchsia::device::Controller> controller) {
-  impl_->ServeController(std::move(controller));
-}
-void Endpoint::ServeDevice(fidl::InterfaceRequest<fuchsia::hardware::network::Device> device) {
-  impl_->ServeDevice(std::move(device));
 }
 
 void Endpoint::Bind(fidl::InterfaceRequest<FEndpoint> req) {

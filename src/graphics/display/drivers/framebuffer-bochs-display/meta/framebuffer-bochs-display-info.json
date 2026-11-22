@@ -1,9 +1,0 @@
-{
-    "short_description": "PCI Bochs framebuffer display driver",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Display"
-    ]
-}

@@ -6,6 +6,9 @@
 
 #include <lib/syslog/cpp/macros.h>
 
+#include <optional>
+#include <unordered_set>
+
 #include "src/developer/debug/shared/string_util.h"
 #include "src/developer/debug/zxdb/common/ref_ptr_to.h"
 #include "src/developer/debug/zxdb/expr/builtin_types.h"
@@ -17,6 +20,8 @@
 #include "src/developer/debug/zxdb/symbols/code_block.h"
 #include "src/developer/debug/zxdb/symbols/collection.h"
 #include "src/developer/debug/zxdb/symbols/data_member.h"
+#include "src/developer/debug/zxdb/symbols/dwarf_debug_names.h"
+#include "src/developer/debug/zxdb/symbols/dwarf_tag.h"
 #include "src/developer/debug/zxdb/symbols/function.h"
 #include "src/developer/debug/zxdb/symbols/identifier.h"
 #include "src/developer/debug/zxdb/symbols/index.h"
@@ -26,8 +31,10 @@
 #include "src/developer/debug/zxdb/symbols/module_symbols.h"
 #include "src/developer/debug/zxdb/symbols/namespace.h"
 #include "src/developer/debug/zxdb/symbols/process_symbols.h"
+#include "src/developer/debug/zxdb/symbols/symbol_factory.h"
 #include "src/developer/debug/zxdb/symbols/target_symbols.h"
 #include "src/developer/debug/zxdb/symbols/template_parameter.h"
+#include "src/developer/debug/zxdb/symbols/variable.h"
 
 namespace zxdb {
 
@@ -118,12 +125,9 @@ VisitResult VisitVariableVector(const std::vector<LazySymbol>& vect,
   return VisitResult::kContinue;
 }
 
-FoundName FoundNameFromSymbolRef(const ModuleSymbols* module_symbols,
-                                 const FindNameOptions& options, const IndexNode::SymbolRef& ref) {
-  LazySymbol lazy_symbol = module_symbols->IndexSymbolRefToSymbol(ref);
-  if (!lazy_symbol)
+FoundName FoundNameFromSymbol(const Symbol* symbol, const FindNameOptions& options) {
+  if (!symbol)
     return FoundName();
-  const Symbol* symbol = lazy_symbol.Get();
 
   if (const Function* func = symbol->As<Function>()) {
     if (options.find_functions)
@@ -132,33 +136,46 @@ FoundName FoundNameFromSymbolRef(const ModuleSymbols* module_symbols,
   }
 
   if (const Variable* var = symbol->As<Variable>()) {
-    if (options.find_vars)
+    if (options.find_vars) {
+      if (var->parent()) {
+        fxl::RefPtr<Symbol> parent_sym = var->parent().Get();
+        if (parent_sym && parent_sym->As<CodeBlock>())
+          return FoundName();
+      }
       return FoundName(var);
+    }
     return FoundName();
   }
 
   if (const DataMember* dm = symbol->As<DataMember>()) {
-    FX_DCHECK(dm->is_external());  // Only static ("external") members should be in the index.
-    if (options.find_vars)
+    if (options.find_vars && dm->is_external())
       return FoundName(nullptr, FoundMember(nullptr, dm));
     return FoundName();
   }
 
   if (const Namespace* ns = symbol->As<Namespace>()) {
     if (options.find_namespaces)
-      return FoundName(FoundName::kNamespace, ns->GetFullName());
+      return FoundName(FoundName::kNamespace, ToParsedIdentifier(ns->GetIdentifier()));
     return FoundName();
   }
 
   if (const Type* type = symbol->As<Type>()) {
-    if (options.find_types)  // All types.
+    if (options.find_types)
       return FoundName(RefPtrTo(type));
-    if (options.find_type_defs && !type->is_declaration())  // Type definitions only.
+    if (options.find_type_defs && !type->is_declaration())
       return FoundName(RefPtrTo(type));
     return FoundName();
   }
 
   return FoundName();
+}
+
+FoundName FoundNameFromSymbolRef(const ModuleSymbols* module_symbols,
+                                 const FindNameOptions& options, const IndexNode::SymbolRef& ref) {
+  LazySymbol lazy_symbol = module_symbols->IndexSymbolRefToSymbol(ref);
+  if (!lazy_symbol)
+    return FoundName();
+  return FoundNameFromSymbol(lazy_symbol.Get(), options);
 }
 
 VisitResult GetNamesFromDieList(const ModuleSymbols* module_symbols, const FindNameOptions& options,
@@ -482,6 +499,367 @@ VisitResult FindMemberOn(const FindNameContext& context, const FindNameOptions& 
   return VisitResult::kContinue;
 }
 
+// Searches the accelerator table directly when available, bypassing the zxdb index.
+bool TagMatchesOptions(llvm::dwarf::Tag tag, const FindNameOptions& options) {
+  if (DwarfTagIsType(static_cast<DwarfTag>(tag))) {
+    return options.find_types || options.find_type_defs;
+  }
+  switch (tag) {
+    case llvm::dwarf::DW_TAG_subprogram:
+    case llvm::dwarf::DW_TAG_inlined_subroutine:
+      return options.find_functions;
+    case llvm::dwarf::DW_TAG_variable:
+    case llvm::dwarf::DW_TAG_constant:
+    case llvm::dwarf::DW_TAG_member:
+      return options.find_vars;
+    case llvm::dwarf::DW_TAG_namespace:
+      return options.find_namespaces;
+    default:
+      return false;
+  }
+}
+
+bool IsAnonymousComponent(const ParsedIdentifierComponent& comp) {
+  return comp.special() == SpecialIdentifier::kAnon ||
+         (comp.special() == SpecialIdentifier::kNone && comp.name().empty());
+}
+
+bool LeafComponentMatches(const ParsedIdentifierComponent& sym_leaf,
+                          const ParsedIdentifierComponent& target_leaf,
+                          FindNameOptions::HowMatch how) {
+  if (IsAnonymousComponent(target_leaf)) {
+    return IsAnonymousComponent(sym_leaf);
+  }
+  if (how == FindNameOptions::kPrefix) {
+    return debug::StringStartsWith(sym_leaf.GetName(false), target_leaf.GetName(false));
+  }
+  return sym_leaf == target_leaf;
+}
+
+// Verifies that after skipping skip_inner_scopes enclosing scope symbols such as namespace,
+// collection, or function, all remaining outer scope ancestors of symbol up to the unit root
+// are namespaces. Used by kAllNamespaces mode so relative lookups only implicitly traverse
+// outer namespaces, never enclosing classes or functions.
+bool OuterScopesAreNamespaces(const Symbol* symbol, size_t skip_inner_scopes) {
+  if (!symbol)
+    return false;
+
+  fxl::RefPtr<Symbol> cur = RefPtrTo(symbol);
+  while (cur->parent().is_valid()) {
+    cur = cur->parent().Get();
+    if (!cur || cur->tag() == DwarfTag::kCompileUnit || cur->tag() == DwarfTag::kTypeUnit ||
+        cur->tag() == DwarfTag::kSkeletonUnit)
+      break;
+
+    if (cur->As<Namespace>() || cur->As<Collection>() || cur->As<Function>()) {
+      if (skip_inner_scopes > 0) {
+        --skip_inner_scopes;
+      } else if (!cur->As<Namespace>()) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool ScopeMatchesTarget(const Symbol* symbol, const ParsedIdentifier& sym_scope,
+                        const ParsedIdentifier& target_scope) {
+  const auto& sym_comps = sym_scope.components();
+  const auto& target_comps = target_scope.components();
+
+  int sym_idx = static_cast<int>(sym_comps.size()) - 1;
+  int target_idx = static_cast<int>(target_comps.size()) - 1;
+
+  while (target_idx >= 0 && sym_idx >= 0) {
+    const auto& target_comp = target_comps[target_idx];
+    const auto& sym_comp = sym_comps[sym_idx];
+
+    if (IsAnonymousComponent(target_comp)) {
+      if (IsAnonymousComponent(sym_comp)) {
+        --target_idx;
+        --sym_idx;
+      } else {
+        return false;
+      }
+    } else if (IsAnonymousComponent(sym_comp)) {
+      --sym_idx;
+    } else if (target_comp == sym_comp) {
+      --target_idx;
+      --sym_idx;
+    } else {
+      return false;
+    }
+  }
+
+  if (target_idx >= 0)
+    return false;
+
+  if (target_scope.qualification() == IdentifierQualification::kGlobal) {
+    while (sym_idx >= 0) {
+      if (!IsAnonymousComponent(sym_comps[sym_idx]))
+        return false;
+      --sym_idx;
+    }
+    return true;
+  }
+
+  if (sym_idx >= 0) {
+    size_t matched_scopes = (sym_comps.size() - 1) - static_cast<size_t>(sym_idx);
+    return OuterScopesAreNamespaces(symbol, matched_scopes);
+  }
+  return true;
+}
+
+bool IdentifierMatchesTarget(const Symbol* symbol, const ParsedIdentifier& sym_id,
+                             const ParsedIdentifier& target, FindNameOptions::HowMatch how) {
+  if (target.components().empty() || sym_id.components().empty())
+    return false;
+  if (!LeafComponentMatches(sym_id.components().back(), target.components().back(), how))
+    return false;
+  return ScopeMatchesTarget(symbol, sym_id.GetScope(), target.GetScope());
+}
+
+bool SameSymbol(const Symbol* a, const Symbol* b) {
+  if (a == b)
+    return true;
+  if (!a || !b)
+    return false;
+  return a->GetDieRef().is_valid() && a->GetLazySymbol() == b->GetLazySymbol();
+}
+
+bool IsDuplicateFoundName(const std::vector<FoundName>& results, const FoundName& found) {
+  for (const auto& r : results) {
+    if (r.kind() != found.kind())
+      continue;
+    switch (r.kind()) {
+      case FoundName::kVariable:
+        if (SameSymbol(r.variable(), found.variable()))
+          return true;
+        break;
+      case FoundName::kMemberVariable:
+        if (SameSymbol(r.member().data_member(), found.member().data_member()))
+          return true;
+        break;
+      case FoundName::kFunction:
+        if (SameSymbol(r.function().get(), found.function().get()))
+          return true;
+        break;
+      case FoundName::kType:
+        if (SameSymbol(r.type().get(), found.type().get()))
+          return true;
+        break;
+      case FoundName::kNamespace:
+      case FoundName::kTemplate:
+        if (r.GetName() == found.GetName())
+          return true;
+        break;
+      default:
+        break;
+    }
+  }
+  return false;
+}
+
+std::vector<DebugNamesEntry> CollectTemplateEntries(
+    const ModuleSymbols* module_symbols, std::string_view leaf_name,
+    const std::vector<DebugNamesEntry>& base_entries) {
+  std::string prefix(leaf_name);
+  prefix.push_back('<');
+  std::vector<DebugNamesEntry> entries = module_symbols->FindDebugNamesPrefixEntries(prefix);
+  if (base_entries.empty()) {
+    return entries;
+  }
+  std::unordered_set<DwarfDieRef> seen;
+  seen.reserve(entries.size() + base_entries.size());
+  for (const auto& e : entries) {
+    seen.insert(e.die_ref);
+  }
+  for (const auto& e : base_entries) {
+    if (seen.insert(e.die_ref).second) {
+      entries.push_back(e);
+    }
+  }
+  return entries;
+}
+
+std::vector<DebugNamesEntry> CollectDebugNamesEntries(const FindNameOptions& options,
+                                                      const ModuleSymbols* module_symbols,
+                                                      const ParsedIdentifierComponent& leaf_comp) {
+  const std::string& leaf_name = leaf_comp.name();
+  if (options.how == FindNameOptions::kPrefix) {
+    return module_symbols->FindDebugNamesPrefixEntries(leaf_name);
+  }
+  std::vector<DebugNamesEntry> base_entries = module_symbols->FindDebugNamesEntries(leaf_name);
+  if (!leaf_comp.has_template()) {
+    return base_entries;
+  }
+  return CollectTemplateEntries(module_symbols, leaf_name, base_entries);
+}
+
+std::vector<ParsedIdentifier> BuildCandidateScopeTargets(const FindNameOptions& options,
+                                                         const ParsedIdentifier& current_scope,
+                                                         const ParsedIdentifier& looking_for,
+                                                         bool search_containing) {
+  std::vector<ParsedIdentifier> scope_targets;
+  if (looking_for.qualification() == IdentifierQualification::kGlobal ||
+      options.search_mode == FindNameOptions::kAllNamespaces) {
+    scope_targets.push_back(looking_for);
+    return scope_targets;
+  }
+
+  ParsedIdentifier cur = current_scope;
+  while (true) {
+    ParsedIdentifier target = cur;
+    target.Append(looking_for);
+    target.set_qualification(IdentifierQualification::kGlobal);
+    scope_targets.push_back(std::move(target));
+
+    if (!search_containing || cur.components().empty())
+      break;
+    cur = cur.GetScope();
+  }
+  return scope_targets;
+}
+
+struct CachedCandidate {
+  bool decoded = false;
+  fxl::RefPtr<Symbol> symbol;
+  ParsedIdentifier sym_id;
+  FoundName found;
+};
+
+const CachedCandidate& GetOrDecodeCandidate(const FindNameOptions& options,
+                                            const ModuleSymbols* module_symbols,
+                                            const DebugNamesEntry& entry, CachedCandidate* slot) {
+  if (slot->decoded)
+    return *slot;
+  slot->decoded = true;
+  if (!TagMatchesOptions(entry.tag, options))
+    return *slot;
+
+  LazySymbol lazy_symbol = module_symbols->GetSymbolFactory()->MakeLazy(entry.die_ref);
+  if (!lazy_symbol.is_valid())
+    return *slot;
+  const Symbol* symbol = lazy_symbol.Get();
+  slot->found = FoundNameFromSymbol(symbol, options);
+  if (slot->found.is_found()) {
+    slot->symbol = RefPtrTo(symbol);
+    slot->sym_id = ToParsedIdentifier(symbol->GetIdentifier());
+  }
+  return *slot;
+}
+
+struct CachedTemplateCandidate {
+  bool decoded = false;
+  fxl::RefPtr<Symbol> symbol;
+  ParsedIdentifier sym_scope;
+};
+
+struct TemplateCandidateSet {
+  std::vector<DebugNamesEntry> entries;
+  std::vector<CachedTemplateCandidate> cache;
+};
+
+TemplateCandidateSet InitTemplateCandidateSet(const ModuleSymbols* module_symbols,
+                                              std::string_view leaf_name,
+                                              const std::vector<DebugNamesEntry>& base_entries) {
+  TemplateCandidateSet set;
+  set.entries = CollectTemplateEntries(module_symbols, leaf_name, base_entries);
+  set.cache.resize(set.entries.size());
+  return set;
+}
+
+const CachedTemplateCandidate& GetOrDecodeTemplateCandidate(const ModuleSymbols* module_symbols,
+                                                            std::string_view leaf_name,
+                                                            const DebugNamesEntry& entry,
+                                                            CachedTemplateCandidate* slot) {
+  if (slot->decoded)
+    return *slot;
+  slot->decoded = true;
+  if (!DwarfTagIsType(static_cast<DwarfTag>(entry.tag)))
+    return *slot;
+
+  LazySymbol lazy_symbol = module_symbols->GetSymbolFactory()->MakeLazy(entry.die_ref);
+  if (!lazy_symbol.is_valid())
+    return *slot;
+  const Symbol* symbol = lazy_symbol.Get();
+  if (!symbol)
+    return *slot;
+
+  ParsedIdentifier sym_id = ToParsedIdentifier(symbol->GetIdentifier());
+  if (!sym_id.components().empty() && sym_id.components().back().has_template() &&
+      sym_id.components().back().name() == leaf_name) {
+    slot->symbol = RefPtrTo(symbol);
+    slot->sym_scope = sym_id.GetScope();
+  }
+  return *slot;
+}
+
+void MatchTemplateAtScope(const FindNameOptions& options, const ModuleSymbols* module_symbols,
+                          std::string_view leaf_name, const ParsedIdentifier& looking_for,
+                          const ParsedIdentifier& target, TemplateCandidateSet* template_set,
+                          std::vector<FoundName>* results) {
+  ParsedIdentifier target_scope = (options.search_mode == FindNameOptions::kAllNamespaces)
+                                      ? looking_for.GetScope()
+                                      : target.GetScope();
+
+  for (size_t i = 0; i < template_set->entries.size(); ++i) {
+    const auto& cand = GetOrDecodeTemplateCandidate(
+        module_symbols, leaf_name, template_set->entries[i], &template_set->cache[i]);
+    if (!cand.symbol || !ScopeMatchesTarget(cand.symbol.get(), cand.sym_scope, target_scope))
+      continue;
+
+    FoundName t_found(FoundName::kTemplate, looking_for);
+    if (!IsDuplicateFoundName(*results, t_found)) {
+      results->push_back(std::move(t_found));
+    }
+    return;
+  }
+}
+
+void FindInDebugNames(const FindNameOptions& options, const ModuleSymbols* module_symbols,
+                      const ParsedIdentifier& current_scope, const ParsedIdentifier& looking_for,
+                      bool search_containing, std::vector<FoundName>* results) {
+  if (looking_for.components().empty())
+    return;
+
+  const auto& leaf_comp = looking_for.components().back();
+  std::vector<DebugNamesEntry> entries =
+      CollectDebugNamesEntries(options, module_symbols, leaf_comp);
+  std::vector<CachedCandidate> candidate_cache(entries.size());
+  std::vector<ParsedIdentifier> scope_targets =
+      BuildCandidateScopeTargets(options, current_scope, looking_for, search_containing);
+  std::optional<TemplateCandidateSet> template_set;
+
+  for (const auto& target : scope_targets) {
+    for (size_t i = 0; i < entries.size(); ++i) {
+      const auto& cand =
+          GetOrDecodeCandidate(options, module_symbols, entries[i], &candidate_cache[i]);
+      if (!cand.symbol ||
+          !IdentifierMatchesTarget(cand.symbol.get(), cand.sym_id, target, options.how))
+        continue;
+
+      if (!IsDuplicateFoundName(*results, cand.found)) {
+        results->push_back(cand.found);
+        if (results->size() >= options.max_results)
+          return;
+      }
+    }
+
+    if (options.how == FindNameOptions::kExact && options.find_templates &&
+        !leaf_comp.has_template()) {
+      if (!template_set.has_value()) {
+        template_set = InitTemplateCandidateSet(module_symbols, leaf_comp.name(), entries);
+      }
+      MatchTemplateAtScope(options, module_symbols, leaf_comp.name(), looking_for, target,
+                           &*template_set, results);
+      if (results->size() >= options.max_results) {
+        return;
+      }
+    }
+  }
+}
+
 }  // namespace
 
 FindNameContext::FindNameContext(const ProcessSymbols* ps, const SymbolContext& symbol_context,
@@ -667,6 +1045,12 @@ void FindIndexedNameInModule(const FindNameOptions& options, const ModuleSymbols
              SymbolContext::ForRelativeAddresses(), InputLocation(ToIdentifier(looking_for)))) {
       results->emplace_back(loc.symbol().Get());
     }
+    return;
+  }
+
+  if (module_symbols->HasDebugNames()) {
+    FindInDebugNames(options, module_symbols, current_scope, looking_for, search_containing,
+                     results);
     return;
   }
 

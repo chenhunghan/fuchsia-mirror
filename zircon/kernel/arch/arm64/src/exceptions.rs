@@ -36,6 +36,7 @@ use zx_types::{
 };
 
 use super::mp::read_percpu_field;
+use super::registers::print_frame;
 use super::thread::{
     TPIDR_EL0, TPIDRRO_EL0, arch_reset_suspended_general_regs, arch_set_suspended_general_regs,
     thread_arch,
@@ -58,7 +59,7 @@ use crate::vm::fault::flag;
 const LOCAL_TRACE: u32 = 0;
 
 /// The arch-specific part of an exception's context (`struct arch_exception_context`).
-type ArchExceptionContext = arm64_mp_bindings::arch_exception_context;
+pub type ArchExceptionContext = arm64_mp_bindings::arch_exception_context;
 
 zr::static_assert!(size_of::<ArchExceptionContext>() == 32);
 zr::static_assert!(align_of::<ArchExceptionContext>() == 8);
@@ -68,21 +69,7 @@ const DFSC_ALIGNMENT_FAULT: u32 = 0b100001;
 const FAR_EL1: SysReg<spec::FAR_EL1, u64> = SysReg::new();
 const TPIDR_EL1: SysReg<spec::TPIDR_EL1, u64> = SysReg::new();
 
-unsafe extern "C" {
-    fn cpp_vmm_page_fault_handler(va: u64, flags: u32) -> Result<(), Status>;
-    fn cpp_arm64_print_frame(frame: *const Iframe);
-    fn cpp_arm64_set_crashlog_regs(
-        iframe: *mut Iframe,
-        esr: u32,
-        far: u64,
-        tpidr_el0: u64,
-        tpidr_el1: u64,
-        tpidrro_el0: u64,
-    );
-}
-
-/// Dispatches a user exception with `context` through the generic exception code, whose
-/// `ArchExceptionContext` is the opaque name of the same C struct.
+/// Dispatches a user exception with `context` through the generic exception code.
 ///
 /// # Safety
 ///
@@ -93,42 +80,7 @@ unsafe fn dispatch_user_exception(
     context: &ArchExceptionContext,
 ) -> Result<(), Status> {
     // SAFETY: The caller's guarantees are the callee's.
-    unsafe {
-        crate::object::dispatch_user_exception(exception_type, core::ptr::from_ref(context).cast())
-    }
-}
-
-/// Resolves a page fault at `va` through the VM, which may block.
-///
-/// Must stay out of line: under full LTO `vmm_page_fault_handler` otherwise inlines into
-/// `arm64_sync_exception`, whose frame is live under every IRQ and exception taken while the fault
-/// is handled with interrupts enabled.
-///
-/// # Safety
-///
-/// Interrupts are enabled, and the caller holds no spinlock.
-// TODO(https://fxbug.dev/537458631): Revisit once the C++ forwarders lose FFI_ALWAYS_INLINE.
-#[inline(never)]
-unsafe fn vmm_page_fault_handler(va: u64, flags: u32) -> Result<(), Status> {
-    // SAFETY: Both arguments are plain integers describing the fault. The caller guarantees the
-    // context the handler may block in.
-    unsafe { cpp_vmm_page_fault_handler(va, flags) }
-}
-
-/// Processes the current thread's pending signals, with `iframe` as its user registers.
-///
-/// Must stay out of line: under full LTO `Thread::Current::ProcessPendingSignals` otherwise inlines
-/// into the exception entry points, whose frames are live under every IRQ and exception taken while
-/// it runs with interrupts enabled.
-///
-/// # Safety
-///
-/// As for [`process_pending_signals`].
-// TODO(https://fxbug.dev/537458631): Revisit once the C++ forwarders lose FFI_ALWAYS_INLINE.
-#[inline(never)]
-unsafe fn process_pending_signals_out_of_line(iframe: *mut Iframe) {
-    // SAFETY: The caller's guarantees are the callee's.
-    unsafe { process_pending_signals(iframe.cast()) };
+    unsafe { crate::object::dispatch_user_exception(exception_type, context) }
 }
 
 /// Hex dumps `buf` to the console, labeling it with addresses from `disp_addr`.
@@ -151,12 +103,12 @@ const ALT_HEX_LEAD: &CStr = c"                                0x";
 ///
 /// `{:cs}{:x}` over this and `value` prints what `%#x` does, which kprint's `{:#x}` does not for
 /// zero (`0x0`), as two printf arguments, with no buffer and no `core::fmt`.
-fn alt_hex_prefix(value: impl Into<u64>) -> &'static CStr {
+pub fn alt_hex_prefix(value: impl Into<u64>) -> &'static CStr {
     if value.into() == 0 { c"" } else { c"0x" }
 }
 
 /// [`alt_hex_prefix`] for C's `%#<WIDTH>x`: the spaces that right-align the field come first.
-fn alt_hex_lead<const WIDTH: usize>(value: u64) -> &'static CStr {
+pub(super) fn alt_hex_lead<const WIDTH: usize>(value: u64) -> &'static CStr {
     const {
         assert!(WIDTH <= ALT_HEX_SPACES.to_bytes().len() + 1);
         assert!(WIDTH <= ALT_HEX_LEAD.to_bytes().len() + 1);
@@ -257,8 +209,11 @@ counters::define_kcounter!(EXCEPTIONS_MOPS, "exceptions.mops", Sum);
 ///
 /// # Safety
 ///
-/// `iframe` points to the exception frame that `exceptions.S` saved on the current stack.
-/// Interrupts are disabled, and this returns with them disabled.
+/// `iframe` points to the writable, unaliased user exception frame that `exceptions.S` saved on
+/// the current stack. Interrupts are disabled, and this returns with them disabled; once
+/// interrupts are enabled, the current CPU has a `THREAD_RUNNING` thread (`ConstructFirstThread`
+/// completed), blocking is permitted, and no spinlocks, thread/dispatcher/lockdep-tracked locks,
+/// or active `ChainLockTransaction` are held.
 unsafe fn try_dispatch_user_data_fault_exception(
     exception_type: zx_excp_type_t,
     iframe: *mut Iframe,
@@ -432,21 +387,21 @@ unsafe fn exception_die_halt(iframe: *mut Iframe, esr: u32, far: u64) -> ! {
         iss
     );
     kprint!("FAR {:cs}{:x}\n", alt_hex_prefix(far), far);
-    // SAFETY: The caller guarantees `iframe`, which the callee only reads.
-    unsafe { cpp_arm64_print_frame(iframe) };
-    // SAFETY: The callee stores the values in `g_crashlog`, which only a panicking CPU writes, and
-    // `platform_panic_start` has asked the other CPUs to halt. The frame stays live because this
-    // function does not return.
+    // SAFETY: The caller guarantees that `iframe` is the exception frame on the current stack. It
+    // stays live, and nothing writes it, while this thread runs here.
+    print_frame(unsafe { &*iframe });
+    // SAFETY: The caller guarantees `iframe` is null or points to a valid `Iframe` on the current
+    // stack, which stays live and unmutated because this function does not return.
     unsafe {
-        cpp_arm64_set_crashlog_regs(
-            iframe,
+        crate::crashlog::set_crashlog_regs(crate::arch_rs::crashlog::CrashlogRegs {
+            iframe: iframe.cast_const(),
             esr,
             far,
-            TPIDR_EL0.read(),
-            TPIDR_EL1.read(),
-            TPIDRRO_EL0.read(),
-        )
-    };
+            tpidr_el0: TPIDR_EL0.read(),
+            tpidr_el1: TPIDR_EL1.read(),
+            tpidrro_el0: TPIDRRO_EL0.read(),
+        });
+    }
 
     platform_halt(PlatformHaltAction::Halt, ZirconCrashReason::Panic);
 }
@@ -612,8 +567,10 @@ unsafe fn arm64_fpu_handler(iframe: *mut Iframe, exception_flags: u32, esr: u32)
 ///
 /// # Safety
 ///
-/// As for [`exception_die`]. Interrupts are disabled, and the caller holds no spinlock (see
-/// [`arm64_sync_exception`]).
+/// As for [`exception_die`] and [`arm64_sync_exception`]: interrupts are disabled, `iframe` is
+/// writable and unaliased, and on EL0 aborts the current CPU has a `THREAD_RUNNING` user thread
+/// with blocking permitted once interrupts are enabled and no spinlocks, lockdep-tracked locks,
+/// conflicting VM locks, or active `ChainLockTransaction` held.
 unsafe fn arm64_instruction_abort_handler(iframe: *mut Iframe, _exception_flags: u32, esr: u32) {
     let mut far = FAR_EL1.read();
     let ec = (esr >> 26) & 0x3f;
@@ -669,8 +626,11 @@ unsafe fn arm64_instruction_abort_handler(iframe: *mut Iframe, _exception_flags:
     } else {
         EXCEPTIONS_PAGE.add(1);
     }
-    // SAFETY: Interrupts are enabled, and the caller holds no spinlock.
-    let err = unsafe { vmm_page_fault_handler(far, pf_flags) };
+    // SAFETY: On an EL0 instruction abort, the current CPU has a running user `Thread` (with an
+    // attached user `VmAspace`), interrupts are enabled, blocking is permitted, and no spinlocks,
+    // disallowed lockdep-tracked locks, conflicting VM locks, or active `ChainLockTransaction` are
+    // held.
+    let err = unsafe { crate::vm::page_fault_handler(far as usize, pf_flags) };
     disable_ints();
     if err.is_ok() {
         return;
@@ -704,8 +664,11 @@ unsafe fn arm64_instruction_abort_handler(iframe: *mut Iframe, _exception_flags:
 ///
 /// # Safety
 ///
-/// As for [`exception_die`]. Interrupts are disabled, and the caller holds no spinlock (see
-/// [`arm64_sync_exception`]).
+/// As for [`exception_die`] and [`arm64_sync_exception`]: interrupts are disabled, `iframe` is
+/// writable and unaliased, and whenever `invoke_page_fault_handler` or EL0 exception dispatch runs,
+/// the current CPU has a `THREAD_RUNNING` thread (with an attached user `VmAspace` for user
+/// addresses), blocking is permitted once interrupts are enabled, and no spinlocks, disallowed
+/// lockdep-tracked locks, conflicting VM locks, or active `ChainLockTransaction` are held.
 unsafe fn arm64_data_abort_handler(iframe: *mut Iframe, _exception_flags: u32, esr: u32) {
     // read the FAR register
     let far = FAR_EL1.read();
@@ -810,8 +773,11 @@ unsafe fn arm64_data_abort_handler(iframe: *mut Iframe, _exception_flags: u32, e
         }
         debug_assert!(num_spinlocks_held() == 0);
         enable_ints();
-        // SAFETY: Interrupts are enabled, and the caller holds no spinlock.
-        err = unsafe { vmm_page_fault_handler(detag_ptr(far as usize) as u64, pf_flags) };
+        // SAFETY: The current CPU has a running `Thread` (with an attached user `VmAspace` for
+        // user addresses), interrupts are enabled, blocking is permitted, and the caller holds no
+        // spinlocks, disallowed lockdep-tracked locks, conflicting VM locks, or active
+        // `ChainLockTransaction`.
+        err = unsafe { crate::vm::page_fault_handler(detag_ptr(far as usize), pf_flags) };
         disable_ints();
         if err.is_ok() {
             return;
@@ -870,15 +836,17 @@ unsafe fn arm64_data_abort_handler(iframe: *mut Iframe, _exception_flags: u32, e
 ///
 /// # Safety
 ///
-/// `iframe` points to the exception frame that `exceptions.S` saved on the current stack, `esr`
-/// is ESR_EL1 for the exception, and `exception_flags` has `ARM64_EXCEPTION_FLAG_LOWER_EL` set
-/// if it was taken from EL0. Interrupts are disabled.
+/// `iframe` points to the writable, unaliased exception frame that `exceptions.S` saved on the
+/// current stack, `esr` is ESR_EL1 for the exception, and `exception_flags` has
+/// `ARM64_EXCEPTION_FLAG_LOWER_EL` set if it was taken from EL0. Interrupts are disabled at EL1
+/// with per-CPU state initialized.
 ///
-/// The page fault handler requires that no spinlock is held. As in the C++, that is an invariant
-/// of the callers, which only the abort handlers' `debug_assert!` checks: no kernel spinlock is
-/// held at EL0, and at EL1 the handler runs only while a user copy has `data_fault_resume` set,
-/// which the copy asserts with no spinlock held. A kernel fault nested inside that copy, such as
-/// in an IRQ handler, also reaches the handler.
+/// Whenever the exception came from EL0 or reaches the page fault handler via an EL1 user copy
+/// (`data_fault_resume` set with `ARM64_DFR_RUN_FAULT_HANDLER_BIT` or access fault), the current
+/// CPU has a `THREAD_RUNNING` thread (`ConstructFirstThread` completed, with an attached user
+/// `VmAspace` for user addresses), blocking is permitted once interrupts are enabled, and no
+/// spinlocks, thread/dispatcher locks, disallowed lockdep-tracked locks, conflicting VM locks, or
+/// active `ChainLockTransaction` are held.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arm64_sync_exception(iframe: *mut Iframe, exception_flags: u32, esr: u32) {
     let esr_reg = ExceptionSyndromeRegister::from(u64::from(esr));
@@ -976,7 +944,7 @@ pub unsafe extern "C" fn arm64_sync_exception(iframe: *mut Iframe, exception_fla
         // but the scheduler would have been invoked so it's fine.
         // SAFETY: The caller guarantees `iframe`, which holds the user registers since the
         // exception came from EL0, and interrupts are disabled.
-        unsafe { arch_iframe_process_pending_signals(iframe) };
+        unsafe { iframe_process_pending_signals(iframe) };
     }
 }
 
@@ -1006,15 +974,20 @@ pub unsafe extern "C" fn arm64_irq(iframe: *mut Iframe, exception_flags: u32) {
     }
 
     let mut state = IntHandlerSavedState::default();
-    int_handler_start(&mut state);
+    // SAFETY: This is the IRQ handler, running on the current thread with interrupts disabled,
+    // and `int_handler_finish` is called below with the same `state`.
+    unsafe { int_handler_start(&mut state) };
 
     EXCEPTIONS_IRQ.add(1);
     // SAFETY: The caller guarantees `iframe`, which the interrupt controller only passes to the
-    // handler it dispatches. The GIC drivers register the interrupt ops from DriverHandoffPostVm
-    // in lk_main, before Thread::Current::BecomeIdle first unmasks IRQs.
+    // handler it dispatches. The GIC drivers register the interrupt ops from
+    // `driver_handoff_post_vm` in `lk_main`, before `Thread::Current::BecomeIdle` first unmasks
+    // IRQs.
     unsafe { platform_irq(iframe) };
 
-    let do_preempt = int_handler_finish(&mut state);
+    // SAFETY: Pairs with the `int_handler_start` above; interrupts are still disabled, and no
+    // `PreemptDisabledToken` outlives the handler.
+    let do_preempt = unsafe { int_handler_finish(&mut state) };
 
     // preempt the thread if the interrupt has signaled it
     if do_preempt {
@@ -1026,7 +999,7 @@ pub unsafe extern "C" fn arm64_irq(iframe: *mut Iframe, exception_flags: u32) {
         cold_path();
         // SAFETY: The caller guarantees `iframe`, which holds the user registers since the IRQ
         // came from EL0, and interrupts are disabled.
-        unsafe { arch_iframe_process_pending_signals(iframe) };
+        unsafe { iframe_process_pending_signals(iframe) };
     }
 }
 
@@ -1053,8 +1026,9 @@ pub unsafe extern "C" fn arm64_invalid_exception(iframe: *mut Iframe, which: u32
     platform_panic_start();
 
     kprint!("invalid exception, which {:cs}{:x}\n", alt_hex_prefix(which), which);
-    // SAFETY: The caller guarantees `iframe`, which the callee only reads.
-    unsafe { cpp_arm64_print_frame(iframe) };
+    // SAFETY: The caller guarantees that `iframe` is the exception frame on the current stack. It
+    // stays live, and nothing writes it, while this thread runs here.
+    print_frame(unsafe { &*iframe });
 
     platform_halt(PlatformHaltAction::Halt, ZirconCrashReason::Panic);
 }
@@ -1082,10 +1056,27 @@ pub unsafe extern "C" fn arm64_unrestricted_arm32_exception(
         alt_hex_prefix(which),
         which
     );
-    // SAFETY: The caller guarantees `iframe`, which the callee only reads.
-    unsafe { cpp_arm64_print_frame(iframe) };
+    // SAFETY: The caller guarantees that `iframe` is the exception frame on the current stack. It
+    // stays live, and nothing writes it, while this thread runs here.
+    print_frame(unsafe { &*iframe });
 
     platform_halt(PlatformHaltAction::Halt, ZirconCrashReason::Panic);
+}
+
+/// Processes the current thread's pending signals on its way back to user mode.
+///
+/// # Safety
+///
+/// The caller must ensure all preconditions of [`process_pending_signals`] for
+/// [`GeneralRegsSource::Iframe`] and `iframe` (EL1, per-CPU state initialized,
+/// `ConstructFirstThread` completed with a `THREAD_RUNNING` thread, interrupts disabled, `iframe`
+/// valid/aligned/writable/unaliased on the current stack, blocking permitted, and no spinlocks,
+/// thread/dispatcher/lockdep-tracked locks, or active `ChainLockTransaction` held).
+#[inline(always)]
+unsafe fn iframe_process_pending_signals(iframe: *mut Iframe) {
+    debug_assert!(!iframe.is_null());
+    // SAFETY: Discharged by this function's `# Safety` contract.
+    unsafe { process_pending_signals(GeneralRegsSource::Iframe, iframe.cast()) };
 }
 
 /// Processes the current thread's pending signals on its way back to user mode.
@@ -1094,27 +1085,28 @@ pub unsafe extern "C" fn arm64_unrestricted_arm32_exception(
 ///
 /// # Safety
 ///
-/// `iframe` points to the current thread's user register frame: an exception frame from EL0, or
-/// the user-entry frame that `arch_prepare_uspace` built. Interrupts are disabled.
+/// Same preconditions as [`iframe_process_pending_signals`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arch_iframe_process_pending_signals(iframe: *mut Iframe) {
-    debug_assert!(!iframe.is_null());
-    // SAFETY: The caller's guarantees are the callee's.
-    unsafe { process_pending_signals_out_of_line(iframe) };
+    // SAFETY: Discharged by this function's `# Safety` contract.
+    unsafe { iframe_process_pending_signals(iframe) };
 }
 
 /// Dumps `context` to the console, with the bottom of the user stack if it is readable.
 ///
 /// # Safety
 ///
-/// `context.frame` is null or points to the current thread's exception frame. The caller may
-/// block and holds no spinlock and no lock that lockdep tracks, as `arch_copy_from_user` requires.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_dump_exception_context(context: &ArchExceptionContext) {
+/// The caller must ensure that:
+/// - The calling CPU is executing at EL1 with a constructed current `Thread`.
+/// - `context.frame` is null or points to the current thread's valid, aligned, initialized
+///   [`Iframe`] with no conflicting mutable references.
+/// - Blocking is permitted and no spinlocks or lockdep-tracked locks are held, as
+///   `arch_copy_from_user` requires.
+#[cold]
+#[inline(never)]
+pub unsafe fn arch_dump_exception_context(context: &ArchExceptionContext) {
     // Print the common fields first.
-    // SAFETY: `context` is a live reference, which the callee only reads. Its
-    // `ArchExceptionContext` is the opaque name of the same C struct.
-    unsafe { crate::object::dump_common_exception_context(core::ptr::from_ref(context).cast()) };
+    crate::object::dump_common_exception_context(context);
 
     // If we don't have a frame, there's nothing more we can print.
     if context.frame.is_null() {
@@ -1125,7 +1117,9 @@ pub unsafe extern "C" fn arch_dump_exception_context(context: &ArchExceptionCont
     // frame, which nothing writes while the thread runs this function.
     let frame = unsafe { &*context.frame.cast::<Iframe>() };
 
-    let esr = ExceptionSyndromeRegister::from(u64::from(context.esr));
+    let esr_raw = context.esr;
+    let far = context.far;
+    let esr = ExceptionSyndromeRegister::from(u64::from(esr_raw));
     let ec = esr.try_ec();
     let iss = esr.iss();
 
@@ -1137,10 +1131,10 @@ pub unsafe extern "C" fn arch_dump_exception_context(context: &ArchExceptionCont
                 "instruction abort: PC at {:cs}{:x}, address {:cs}{:x} IFSC {:cs}{:x} {:cs}\n",
                 alt_hex_prefix(frame.elr),
                 frame.elr,
-                alt_hex_prefix(context.far),
-                context.far,
-                alt_hex_prefix(context.esr & 0x3f),
-                context.esr & 0x3f,
+                alt_hex_prefix(far),
+                far,
+                alt_hex_prefix(esr_raw & 0x3f),
+                esr_raw & 0x3f,
                 if (ec as u32) & 1 != 0 { c"" } else { c"user " }
             );
         }
@@ -1149,8 +1143,8 @@ pub unsafe extern "C" fn arch_dump_exception_context(context: &ArchExceptionCont
                 "data abort: PC at {:cs}{:x}, address {:cs}{:x} {:cs}{:cs}\n",
                 alt_hex_prefix(frame.elr),
                 frame.elr,
-                alt_hex_prefix(context.far),
-                context.far,
+                alt_hex_prefix(far),
+                far,
                 if (ec as u32) & 1 != 0 { c"" } else { c"user " },
                 if iss & (1 << 6) != 0 { c"write" } else { c"read" }
             );
@@ -1158,8 +1152,7 @@ pub unsafe extern "C" fn arch_dump_exception_context(context: &ArchExceptionCont
         _ => {}
     }
 
-    // SAFETY: `frame` is live, as above, and the callee only reads it.
-    unsafe { cpp_arm64_print_frame(frame) };
+    print_frame(frame);
     let tpidr_el0 = TPIDR_EL0.read();
     let tpidrro_el0 = TPIDRRO_EL0.read();
     kprint!(
@@ -1192,13 +1185,15 @@ pub unsafe extern "C" fn arch_dump_exception_context(context: &ArchExceptionCont
 }
 
 /// Fills in the arch-specific part of `report` from `arch_context`.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_fill_in_exception_context(
+///
+/// # Safety
+///
+/// Unused on ARM64; marked `unsafe` to match [`crate::arch_rs::arch_fill_in_exception_context`].
+pub unsafe fn arch_fill_in_exception_context(
     arch_context: &ArchExceptionContext,
     report: &mut zx_exception_report_t,
 ) {
     let zx_context = &mut report.context;
-
     zx_context.synth_code = arch_context.user_synth_code;
     zx_context.synth_data = arch_context.user_synth_data;
     zx_context.arch.arm_64.esr = arch_context.esr;
@@ -1206,8 +1201,15 @@ pub extern "C" fn arch_fill_in_exception_context(
 }
 
 /// Dispatches a policy exception that a syscall raised.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_dispatch_user_policy_exception(
+///
+/// # Safety
+///
+/// The caller must ensure that the calling CPU is executing at EL1 with per-CPU state initialized
+/// and `ConstructFirstThread` completed (`THREAD_RUNNING` current thread), interrupts enabled,
+/// blocking permitted, and no spinlocks, thread lock, dispatcher locks, lockdep-tracked locks, or
+/// active `ChainLockTransaction` held. Any pre-installed `suspended_general_regs` on the current
+/// thread must point to a valid, writable, unaliased general-register frame.
+pub unsafe fn arch_dispatch_user_policy_exception(
     policy_exception_code: u32,
     policy_exception_data: u32,
 ) -> Result<(), Status> {
@@ -1218,8 +1220,8 @@ pub extern "C" fn arch_dispatch_user_policy_exception(
         user_synth_code: policy_exception_code,
         user_synth_data: policy_exception_data,
     };
-    // SAFETY: `context` is a live local with no frame. The dispatcher reads it only until it
-    // returns.
+    // SAFETY: `context` is a live local with a null `frame`, and the caller upholds all
+    // thread, interrupt, blocking, and lock preconditions of `dispatch_user_exception`.
     unsafe { dispatch_user_exception(ZX_EXCP_POLICY_ERROR, &context) }
 }
 
@@ -1230,8 +1232,8 @@ pub extern "C" fn arch_dispatch_user_policy_exception(
 ///
 /// As for [`arch_set_suspended_general_regs`], and `thread`'s debug state is the caller's too.
 /// `context.frame` is null or stays valid until [`arch_remove_exception_context`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_install_exception_context(
+#[must_use]
+pub unsafe fn arch_install_exception_context(
     thread: *mut c_void,
     context: &ArchExceptionContext,
 ) -> bool {
@@ -1260,8 +1262,7 @@ pub unsafe extern "C" fn arch_install_exception_context(
 /// # Safety
 ///
 /// As for [`arch_reset_suspended_general_regs`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_remove_exception_context(thread: *mut c_void) {
+pub unsafe fn arch_remove_exception_context(thread: *mut c_void) {
     // SAFETY: The caller's guarantees are the callee's.
     unsafe { arch_reset_suspended_general_regs(thread) };
 }

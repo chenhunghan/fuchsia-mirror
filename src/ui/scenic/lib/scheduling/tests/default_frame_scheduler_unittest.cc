@@ -32,7 +32,7 @@ class FrameSchedulerTest : public ::gtest::TestLoopFixture {
     // Needs to be big enough so that `FrameScheduler` can always fit a latch point
     // in the frame.
     const auto vsync_interval = zx::msec(100);
-    vsync_timing_->AddVsyncInterval(vsync_interval);
+    vsync_timing_->set_vsync_interval(vsync_interval);
     vsync_timing_->set_last_vsync_time(zx::time(0));
 
     scheduler_.Initialize(
@@ -459,7 +459,7 @@ TEST_F(FrameSchedulerTest, LongRenderTime_ShouldTriggerAReschedule_WithALatePres
 
   // Guarantee the vsync interval here is what we expect.
   zx::duration interval = zx::msec(100);
-  vsync_timing_->AddVsyncInterval(interval);
+  vsync_timing_->set_vsync_interval(interval);
   EXPECT_EQ(0, Now().get());
 
   // Schedule a frame
@@ -890,9 +890,9 @@ TEST_F(FrameSchedulerTest, ScheduleAsap_WhenNowExceedsPredictedTarget_ShouldClam
         presented_callback = std::move(callback);
       });
 
-  // Advance clock to a time past the next vsync.
-  // `vsync_interval` = 100ms. `last_vsync` = 0. `next_vsync` = 100ms.
-  // We advance to 120ms.
+  // Advance clock to a time past the next vsync (simulating an idle gap or delayed VSync).
+  // `vsync_interval` = 100ms. `last_vsync` = 0. `next_vsync` = 100ms (stale).
+  // We advance to 120ms, so the next projected vsync on the VSync grid is 200ms.
   zx::time past_vsync_time =
       vsync_timing_->last_vsync_time() + vsync_timing_->vsync_interval() + zx::msec(20);
   RunLoopUntil(past_vsync_time);
@@ -905,15 +905,17 @@ TEST_F(FrameSchedulerTest, ScheduleAsap_WhenNowExceedsPredictedTarget_ShouldClam
   // Trigger `MaybeRenderFrame`.
   RunLoopUntilIdle();
 
-  // Verify `target_presentation_time` was correctly picked as `next_vsync` (100ms).
-  // Even though we are at 120ms, the scheduler uses the known vsync timing.
-  zx::time expected_target = vsync_timing_->last_vsync_time() + vsync_timing_->vsync_interval();
+  // Verify `target_presentation_time` was projected forward onto the VSync grid (200ms >= now).
+  // Even though we are at 120ms, the scheduler projects forward using the known vsync timing
+  // rather than targeting the stale 100ms vsync in the past.
+  zx::time expected_target = vsync_timing_->last_vsync_time() + vsync_timing_->vsync_interval() * 2;
   EXPECT_EQ(captured_presentation_time, expected_target);
 
-  // Verify `wakeup_time` was clamped to `target_time` (since now=120 > target=100).
+  // Verify `wakeup_time` (and thus `latched_time`) was `now` (120ms <= target=200ms) rather than
+  // clamped backward to a past target.
   ASSERT_TRUE(presented_callback);
   presented_callback(CreateTimestamps());
-  EXPECT_EQ(captured_latched_time, expected_target);
+  EXPECT_EQ(captured_latched_time, past_vsync_time);
 }
 
 TEST_F(FrameSchedulerTest, ScheduleAsapWithFutureTime_ShouldScheduleForFuture) {
@@ -966,6 +968,230 @@ TEST_F(FrameSchedulerTest, ScheduleAsapWithZeroTime_ShouldScheduleASAP) {
   RunLoopUntilIdle();
   EXPECT_EQ(update_sessions_call_count_, 1u);
   EXPECT_TRUE(frame_presented_callback_.has_value());
+}
+
+TEST_F(FrameSchedulerTest,
+       ScheduleAsap_WhenPreviousFrameStillInFlight_ShouldRenderImmediatelyAfterPresentation) {
+  constexpr SessionId kSessionId = 1;
+
+  // Render frame 1 and leave it in flight.
+  ScheduleUpdate(kSessionId, Now(), /*squashable=*/true, /*schedule_asap=*/true);
+  RunLoopUntilIdle();
+  EXPECT_EQ(update_sessions_call_count_, 1u);
+  ASSERT_TRUE(frame_presented_callback_.has_value());
+
+  // Advance slightly and schedule frame 2 with `schedule_asap=true` while frame 1 is still in
+  // flight. Frame 2 will latch updates and then skip rendering until frame 1 completes.
+  RunLoopFor(zx::msec(5));
+  ScheduleUpdate(kSessionId, Now(), /*squashable=*/true, /*schedule_asap=*/true);
+  RunLoopUntilIdle();
+  EXPECT_EQ(update_sessions_call_count_, 2u);
+  EXPECT_EQ(cpu_work_done_count_, 1u);
+
+  // Completing frame 1 should reschedule the skipped ASAP frame to render immediately (`now`), not
+  // defer it to the next predicted latch point.
+  FireFramePresentedCallback();
+  RunLoopUntilIdle();
+  EXPECT_EQ(cpu_work_done_count_, 2u);
+  EXPECT_TRUE(frame_presented_callback_.has_value());
+}
+
+TEST_F(FrameSchedulerTest,
+       ScheduleAsap_FutureAsapUpdateOnOtherSession_ShouldNotForceImmediateWakeupForNormalSession) {
+  constexpr SessionId kAsapSessionId = 1;
+  constexpr SessionId kNormalSessionId = 2;
+  const zx::duration vsync_interval = vsync_timing_->vsync_interval();
+
+  // Session 1 schedules a future ASAP update (5 VSyncs out).
+  // Session 2 schedules a normal (non-ASAP) update for the next VSync.
+  ScheduleUpdate(kAsapSessionId, Now() + vsync_interval * 5, /*squashable=*/true,
+                 /*schedule_asap=*/true);
+  ScheduleUpdate(kNormalSessionId, Now() + vsync_interval, /*squashable=*/true,
+                 /*schedule_asap=*/false);
+
+  // Session 2's normal update should wait for its predicted latch point, not wake immediately at
+  // `Now() = 0` due to Session 1's `schedule_asap` flag.
+  RunLoopUntilIdle();
+  EXPECT_EQ(update_sessions_call_count_, 0u);
+  EXPECT_FALSE(frame_presented_callback_.has_value());
+
+  RunLoopUntil(Now() + vsync_interval);
+  EXPECT_EQ(update_sessions_call_count_, 1u);
+  EXPECT_TRUE(frame_presented_callback_.has_value());
+}
+
+TEST_F(FrameSchedulerTest,
+       ScheduleAsap_FutureTargetAt60FpsOn120HzDisplay_WakesAfterPrecedingVsyncWithoutEarlyPresent) {
+  class TrackingFramePredictor : public FramePredictor {
+   public:
+    TrackingFramePredictor(uint64_t* prediction_count, uint64_t* update_count,
+                           uint64_t* render_count)
+        : prediction_count_(prediction_count),
+          update_count_(update_count),
+          render_count_(render_count) {}
+    PredictedTimes GetPrediction(PredictionRequest request) const override {
+      ++(*prediction_count_);
+      const zx::time next_vsync =
+          ComputeNextVsyncTime(request.last_vsync_time, request.vsync_interval,
+                               std::max(request.now, request.requested_presentation_time));
+      // Simulate an unseeded 9ms frame duration (> 8.489ms 120Hz interval) that would otherwise
+      // wake before V_1 and cause an Early Present.
+      return {.latch_point_time = next_vsync - zx::msec(9), .presentation_time = next_vsync};
+    }
+    void ReportRenderDuration(zx::duration) override { ++(*render_count_); }
+    void ReportUpdateDuration(zx::duration) override { ++(*update_count_); }
+
+   private:
+    uint64_t* prediction_count_;
+    uint64_t* update_count_;
+    uint64_t* render_count_;
+  };
+
+  constexpr zx::duration k120HzInterval = zx::nsec(8'489'396);
+  auto vsync_timing = std::make_shared<VsyncTiming>();
+  vsync_timing->set_last_vsync_time(zx::time(0));
+  vsync_timing->set_vsync_interval(k120HzInterval);
+
+  uint64_t prediction_calls = 0;
+  uint64_t update_duration_reports = 0;
+  uint64_t render_duration_reports = 0;
+  DefaultFrameScheduler local_scheduler(std::make_unique<TrackingFramePredictor>(
+      &prediction_calls, &update_duration_reports, &render_duration_reports));
+
+  zx::time captured_presentation_time = zx::time(0);
+  zx::time captured_render_time = zx::time(0);
+  FramePresentedCallback presented_callback;
+  local_scheduler.Initialize(
+      vsync_timing, /*update_sessions*/ [](auto&, auto) {}, /*on_cpu_work_done*/ []() {},
+      /*on_frame_presented*/ [](auto, auto) {},
+      /*render_scheduled_frame*/
+      [&](auto, auto presentation_time, auto callback) {
+        captured_presentation_time = presentation_time;
+        captured_render_time = Now();
+        presented_callback = std::move(callback);
+      });
+
+  // At 60 fps on a 120 Hz TE display, no frame is in flight during [V_0, V_1], and the client
+  // submits the frame for V_2 at `now = 4ms` (before V_1).
+  RunLoopUntil(zx::time(0) + zx::msec(4));
+  const zx::time vsync_1 = zx::time(0) + k120HzInterval;
+  const zx::time vsync_2 = zx::time(0) + k120HzInterval * 2;
+  local_scheduler.ScheduleUpdateForSession(vsync_2, {1, 1}, /*squashable=*/true,
+                                           /*schedule_asap=*/true);
+
+  // Must NOT consult `FramePredictor` or wake before V_1 (which would Early Present on V_1).
+  EXPECT_EQ(prediction_calls, 0u);
+  RunLoopUntil(vsync_1);
+  EXPECT_FALSE(presented_callback);
+
+  // Should wake 1ms after V_1 (`V_1 + 1ms`), leaving full headroom for V_2.
+  const zx::time expected_wakeup = vsync_1 + zx::msec(1);
+  EXPECT_EQ(local_scheduler.next_wakeup(), expected_wakeup);
+  RunLoopUntil(expected_wakeup);
+  ASSERT_TRUE(presented_callback);
+  EXPECT_EQ(captured_presentation_time, vsync_2);
+  EXPECT_EQ(captured_render_time, expected_wakeup);
+
+  // Duration reports still seed `FramePredictor` for `GetFuturePresentationInfos()` / non-ASAP.
+  presented_callback(CreateTimestamps());
+  EXPECT_EQ(update_duration_reports, 1u);
+  EXPECT_EQ(render_duration_reports, 1u);
+}
+
+TEST_F(FrameSchedulerTest, NextWakeupReflectsPendingFrameRenderTask) {
+  EXPECT_FALSE(scheduler_.next_wakeup().has_value());
+
+  constexpr SessionId kSessionId = 1;
+  const zx::time future_time = Now() + vsync_timing_->vsync_interval() * 3;
+  ScheduleUpdate(kSessionId, future_time, /*squashable=*/true, /*schedule_asap=*/false);
+
+  const std::optional<zx::time> scheduled_wakeup = scheduler_.next_wakeup();
+  ASSERT_TRUE(scheduled_wakeup.has_value());
+  EXPECT_GT(*scheduled_wakeup, Now());
+  EXPECT_LT(*scheduled_wakeup, future_time);
+
+  RunLoopUntil(*scheduled_wakeup - zx::nsec(1));
+  EXPECT_EQ(update_sessions_call_count_, 0u);
+  EXPECT_EQ(scheduler_.next_wakeup(), scheduled_wakeup);
+
+  RunLoopUntil(*scheduled_wakeup);
+  EXPECT_EQ(update_sessions_call_count_, 1u);
+  EXPECT_FALSE(scheduler_.next_wakeup().has_value());
+
+  const zx::time later_time = Now() + vsync_timing_->vsync_interval() * 4;
+  ScheduleUpdate(kSessionId, later_time, /*squashable=*/true, /*schedule_asap=*/false);
+  const std::optional<zx::time> later_wakeup = scheduler_.next_wakeup();
+  ASSERT_TRUE(later_wakeup.has_value());
+
+  constexpr SessionId kSecondSessionId = 2;
+  const zx::time earlier_time = Now() + vsync_timing_->vsync_interval() * 2;
+  ScheduleUpdate(kSecondSessionId, earlier_time, /*squashable=*/true, /*schedule_asap=*/false);
+  const std::optional<zx::time> earlier_wakeup = scheduler_.next_wakeup();
+  ASSERT_TRUE(earlier_wakeup.has_value());
+  EXPECT_LT(*earlier_wakeup, *later_wakeup);
+}
+
+TEST_F(FrameSchedulerTest, VrrIdleGap_PreservesPeakTeGrid) {
+  constexpr SessionId kSessionId = 1;
+  constexpr zx::duration kPeakTePeriod = zx::nsec(8'489'396);
+  vsync_timing_->set_vsync_interval(kPeakTePeriod);
+  vsync_timing_->set_last_vsync_time(zx::time(0));
+
+  // Simulate a 60-period (~509ms) VRR self-refresh idle gap during which the display skipped
+  // intermediate VSync notifications while keeping its peak TE period unchanged.
+  const zx::time idle_exit_vsync = zx::time(0) + (kPeakTePeriod * 60);
+  RunLoopUntil(idle_exit_vsync);
+  vsync_timing_->set_last_vsync_time(idle_exit_vsync);
+  EXPECT_EQ(vsync_timing_->vsync_interval(), kPeakTePeriod);
+
+  zx::time scheduled_presentation_time{0};
+  DefaultFrameScheduler vrr_scheduler(std::make_unique<WindowedFramePredictor>(
+      /*min_predicted_frame_duration=*/zx::msec(0),
+      /*initial_render_duration_prediction=*/zx::msec(2),
+      /*initial_update_duration_prediction=*/zx::msec(1)));
+  vrr_scheduler.Initialize(
+      vsync_timing_,
+      /*update_sessions=*/[](auto&, auto) {},
+      /*on_cpu_work_done=*/[]() {},
+      /*on_frame_presented=*/[](auto, auto) {},
+      /*render_scheduled_frame=*/
+      [&scheduled_presentation_time](auto, zx::time presentation_time, auto) {
+        scheduled_presentation_time = presentation_time;
+      });
+
+  vrr_scheduler.ScheduleUpdateForSession(idle_exit_vsync, {kSessionId, 1}, /*squashable=*/true,
+                                         /*schedule_asap=*/false);
+  RunLoopFor(kPeakTePeriod);
+
+  // Target presentation time must land cleanly on the next 120Hz TE boundary after the idle gap.
+  EXPECT_EQ(scheduled_presentation_time, idle_exit_vsync + kPeakTePeriod);
+}
+
+TEST_F(FrameSchedulerTest, NotifyExpectedPresentGatesOnScheduleAsap) {
+  std::vector<std::pair<zx::time, zx::duration>> forwarded_hints;
+  DefaultFrameScheduler hint_scheduler(
+      std::make_unique<WindowedFramePredictor>(DefaultFrameScheduler::kMinPredictedFrameDuration,
+                                               DefaultFrameScheduler::kInitialRenderDuration,
+                                               DefaultFrameScheduler::kInitialUpdateDuration));
+  hint_scheduler.Initialize(
+      vsync_timing_,
+      /*update_sessions=*/[](auto&, auto) {},
+      /*on_cpu_work_done=*/[]() {},
+      /*on_frame_presented=*/[](auto, auto) {},
+      /*render_scheduled_frame=*/[](auto, auto, auto) {},
+      /*notify_expected_present=*/
+      [&forwarded_hints](zx::time expected_present_time, zx::duration frame_interval) {
+        forwarded_hints.emplace_back(expected_present_time, frame_interval);
+      });
+
+  hint_scheduler.NotifyExpectedPresent(/*session_id=*/1, zx::time(100'000'000), zx::nsec(8'333'333),
+                                       /*schedule_asap=*/false);
+  EXPECT_TRUE(forwarded_hints.empty());
+
+  hint_scheduler.NotifyExpectedPresent(/*session_id=*/2, zx::time(200'000'000),
+                                       zx::nsec(16'666'666), /*schedule_asap=*/true);
+  ASSERT_EQ(forwarded_hints.size(), 1u);
+  EXPECT_EQ(forwarded_hints[0], std::make_pair(zx::time(200'000'000), zx::nsec(16'666'666)));
 }
 
 }  // namespace

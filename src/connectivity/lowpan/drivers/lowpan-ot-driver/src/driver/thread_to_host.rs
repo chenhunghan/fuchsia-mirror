@@ -71,7 +71,7 @@ where
         }
 
         if flags.intersects(ot::ChangedFlags::NAT64_TRANSLATOR_STATE) {
-            self.on_nat64_translator_state_changed();
+            self.on_nat64_translator_state_changed().await;
         }
 
         {

@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/client.rs",
+        "src/context.rs",
+        "src/error.rs",
+        "src/image.rs",
+        "src/lib.rs",
+        "src/models.rs",
+        "src/tunnel.rs",
+    ],
+    crate_name = "ffx_gce",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx/tools/gce:__pkg__"],
+    deps = [
+        "//build/sdk/meta:rust",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/discovery:lib",
+        "//src/developer/ffx/lib/pkg",
+        "//src/developer/ffx/lib/port_picker:lib",
+        "//src/developer/ffx/lib/ssh:lib",
+        "//src/developer/ffx/lib/uefi_disk:lib",
+        "//src/developer/lib/credentials:lib",
+        "//src/lib/assembly/product_bundle",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-hyper",
+        "//src/lib/gcs",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:flate2",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:home",
+        "//third_party/rust_crates/vendor:http-body-util",
+        "//third_party/rust_crates/vendor:hyper",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:nix",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:tar",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tokio",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+host_rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Only used by bazel2gn to set GN output_name and avoid host_x64/lib_test collisions.
+    crate_name = "ffx_gce_lib_test",
+    deps = [
+        "//src/developer/ffx/lib/process:lib",
+        "//src/lib/fuchsia",
+    ],
+)

@@ -52,7 +52,7 @@ async fn read_factory_file(
 async fn get_zbi_serial_number() -> Result<String, Error> {
     let boot: ItemsProxy = connect_to_protocol::<ItemsMarker>()?;
 
-    let (vmo, sn_len) = boot.get(zbi::Type::SerialNumber.into(), 0).await?;
+    let (vmo, sn_len) = boot.get(zbi::Type::SERIAL_NUMBER.into(), 0).await?;
 
     if sn_len == 0 {
         return Err(anyhow::anyhow!("Serial number has length 0"));

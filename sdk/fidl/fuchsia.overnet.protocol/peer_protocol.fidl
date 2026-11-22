@@ -14,7 +14,7 @@ using fuchsia.io;
 const MAX_SERVICE_NAME_LENGTH uint64 = fuchsia.io.MAX_NAME_LENGTH;
 
 /// Peer-to-peer protocol between two Overnet nodes.
-/// Client QUIC connections send this xunion to servers over QUIC stream 0.
+/// Client QUIC connections send this union to servers over QUIC stream 0.
 @strict_audit(bug="https://fxbug.dev/467127620", state="PENDING_REVIEW")
 type PeerMessage = strict union {
     /// Request to create a channel to a service exported by this peer.

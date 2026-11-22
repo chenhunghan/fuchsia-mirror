@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-bredr-profile-unittests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/commands.rs",
+        "src/main.rs",
+        "src/types.rs",
+    ],
+    binary_name = "bt-bredr-profile",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.rfcomm.test:fuchsia.bluetooth.rfcomm.test_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/bt-repl",
+        "//src/connectivity/bluetooth/lib/bt-rfcomm",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/testing/test-rfcomm-client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "bt_bredr_profile_bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "bt-bredr-profile-unittests",
+    unit_tests = [":bt_bredr_profile_bin_test"],
+)

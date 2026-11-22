@@ -18,7 +18,6 @@ group("tests") {
   deps = [
     ":bazel_tests",
     "core:tests",
-    "ctor:tests",
     "debugger:tests",
     "device-enumeration:device-enumeration-tests",
     "dlopen-indirect-deps:tests",
@@ -26,8 +25,6 @@ group("tests") {
     "libc:tests",
     "psutils:tests",
     "pty:tests",
-    "stdio:stdio-test-package",
-    "sysconf:tests",
     "thread-safe-deleter:tests",
     "trace:tests",
   ]

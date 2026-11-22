@@ -18,6 +18,7 @@ rustc_binary_host_tool(
     ],
     edition = "2024",
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//vendor/google:__subpackages__"],
     deps = [
         "//build/sdk/meta:rust",
         "//src/lib/assembly/assembled_system",

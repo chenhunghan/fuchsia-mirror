@@ -9,6 +9,7 @@
 #include "src/ui/lib/escher/impl/vulkan_utils.h"
 #include "src/ui/lib/escher/resources/resource_recycler.h"
 #include "src/ui/lib/escher/util/image_utils.h"
+#include "src/ui/lib/escher/util/trace_macros.h"
 #include "src/ui/lib/escher/vk/color_space.h"
 
 #include <vulkan/vulkan.hpp>
@@ -86,7 +87,11 @@ Sampler::Sampler(ResourceRecycler* resource_recycler, vk::Format format, vk::Fil
 
     // Check chroma filter support.
     auto physical_device = resource_recycler->vulkan_context().physical_device;
-    auto format_properties = physical_device.getFormatProperties(format);
+    vk::FormatProperties format_properties;
+    {
+      TRACE_DURATION("gfx", "vkGetPhysicalDeviceFormatProperties");
+      format_properties = physical_device.getFormatProperties(format);
+    }
 
     vk::SamplerYcbcrConversionCreateInfo ycbcr_create_info;
     ycbcr_create_info.pNext = nullptr;
@@ -135,8 +140,11 @@ Sampler::Sampler(ResourceRecycler* resource_recycler, vk::Format format, vk::Fil
     }
     ycbcr_create_info.forceExplicitReconstruction = VK_FALSE;
 
-    ycbcr_conversion_ = ESCHER_CHECKED_VK_RESULT(device.createSamplerYcbcrConversionKHR(
-        ycbcr_create_info, nullptr, resource_recycler->vulkan_context().loader));
+    {
+      TRACE_DURATION("gfx", "vkCreateSamplerYcbcrConversionKHR");
+      ycbcr_conversion_ = ESCHER_CHECKED_VK_RESULT(device.createSamplerYcbcrConversionKHR(
+          ycbcr_create_info, nullptr, resource_recycler->vulkan_context().loader));
+    }
 
     is_immutable_ = true;
   }
@@ -163,15 +171,22 @@ Sampler::Sampler(ResourceRecycler* resource_recycler, vk::Format format, vk::Fil
   sampler_info.addressModeV = vk::SamplerAddressMode::eClampToEdge;
   sampler_info.addressModeW = vk::SamplerAddressMode::eClampToEdge;
 
-  sampler_ = ESCHER_CHECKED_VK_RESULT(vk_device().createSampler(sampler_info));
+  {
+    TRACE_DURATION("gfx", "vkCreateSampler");
+    sampler_ = ESCHER_CHECKED_VK_RESULT(vk_device().createSampler(sampler_info));
+  }
   FX_CHECK(sampler_);
 }
 
 Sampler::~Sampler() {
   // All VkSampler and VkImageView objects created using a VkSamplerYcbcrConversion
   // must be destroyed prior to destroying the conversion.
-  vk_device().destroySampler(sampler_);
+  {
+    TRACE_DURATION("gfx", "vkDestroySampler");
+    vk_device().destroySampler(sampler_);
+  }
   if (is_immutable_) {
+    TRACE_DURATION("gfx", "vkDestroySamplerYcbcrConversionKHR");
     vk_device().destroySamplerYcbcrConversionKHR(ycbcr_conversion_.conversion, nullptr,
                                                  vulkan_context().loader);
   }

@@ -23,6 +23,8 @@ set -euo pipefail
 #        inline unit tests are not enabled)
 #      * output_name = "<x>" or out = "<x>" when identical to target name (and
 #        unsupported output_name on go_binary / go_binary_host_tool)
+#      * package_name = "<x>" on fx_package, fx_unittest_package, or
+#        fx_bootfs_files_package when identical to target name
 #      * unsupported manifest attributes (`component_name`, `manifest`, `includes`,
 #        `restricted_features`) passed to `fx_component` or `fx_test_component`
 #        instead of `fx_component_manifest`
@@ -48,7 +50,11 @@ set -euo pipefail
 # 3. Flags drive-by edits to unrelated packages and shared Bazel rule/macro
 #    definitions (`build/bazel/rules/**`, `build/bazel/aspects/**`, etc.) outside
 #    PLANTER_TARGET_DIR / PLANTER_TARGET_DIRS (except centralized registration
-#    lists, ancestor BUILD.gn/BUILD.bazel test groups/suites, and dependency
+#    lists, ancestor BUILD.gn/BUILD.bazel test groups/suites, narrow collateral
+#    visibility or HOST_CONSTRAINTS -> HOST_OS_CONSTRAINTS updates on already-
+#    migrated direct/transitive upstream Bazel dependency packages, overlay
+#    *.BUILD.bazel and repository_rule .bzl files wired in toplevel.MODULE.bazel
+#    for external third_party submodules/trees used in scope, and dependency
 #    packages the change migrates: a new BUILD.bazel referenced, transitively,
 #    from a target package's BUILD.bazel, and the in-tree build of
 #    third_party/rust_crates: its BUILD files, Cargo.toml/Cargo.lock and compat/
@@ -60,12 +66,13 @@ set -euo pipefail
 #    depfile/deps $(location ...) substitutions, attr.output on GN-only forwarded
 #    attributes, missing explicit tool_output_name, and speculative auto-inference).
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
 CHANGE_BASE="${PLANTER_CHANGE_BASE:-HEAD}"
 
-python3 - "$WORKDIR" "$TARGET_DIRS" "$CHANGE_BASE" <<'PYEOF'
+python3 - "$WORKDIR" "$TARGET_DIRS" "$CHANGE_BASE" "$SCRIPT_DIR" <<'PYEOF'
 import ast
 import difflib
 import json
@@ -74,6 +81,9 @@ import re
 import shutil
 import subprocess
 import sys
+
+sys.path.insert(0, sys.argv[4])
+import planter_check_lib as pcl
 
 # Normalize target directory arguments, mapping '.' and empty entries to ''.
 def _normalize_target_dir(raw_dir: str) -> str:
@@ -84,28 +94,64 @@ def _normalize_target_dir(raw_dir: str) -> str:
     return "" if d == "." else d
 
 
+# Append overlaid `<dir>` paths for `build/secondary/<dir>` target arguments.
+def _with_overlaid_target_dirs(dirs):
+    out = []
+    for td in dirs:
+        if td and td not in out:
+            out.append(td)
+        if td.startswith("build/secondary/"):
+            overlaid = td[len("build/secondary/") :].strip("/")
+            if overlaid and overlaid not in out:
+                out.append(overlaid)
+    return out
+
+
 workdir = os.path.abspath(sys.argv[1])
 raw_dirs = sys.argv[2]
 change_base = sys.argv[3].strip() or "HEAD"
-target_dirs = [
-    norm_d
-    for d in re.split(r"[\s,]+", raw_dirs)
-    if (norm_d := _normalize_target_dir(d))
-]
-
-ALLOWED_GLOBAL_PREFIXES = (
-    "build/bazel2gn",
-    "build/tools/bazel2gn/",
-    "build/bazel/",
-    "build/bazel_sdk/",
-    "build/rust/",
-    "build/config/rust/lints/",
-    "bundles/assembly/",
-    "build/images/",
-    "sdk/history/",
+# Include both GN-overlay paths and upstream-relocated package directories in scope.
+target_dirs = pcl.with_relocated_target_dirs(
+    workdir,
+    _with_overlaid_target_dirs(
+        [
+            norm_d
+            for d in re.split(r"[\s,]+", raw_dirs)
+            if (norm_d := _normalize_target_dir(d))
+        ]
+    ),
 )
 
+# IMPORTANT: Agents must NEVER modify this list. Changes require explicit human
+# review and approval.
+ALLOWED_GLOBAL_PREFIXES = (
+    "bundles/assembly/",
+)
+
+# IMPORTANT: Agents must NEVER modify this list. Changes require explicit human
+# review and approval.
+ALLOWED_GLOBAL_FILES = (
+    # Top-level test registration and aggregation.
+    "tools/BUILD.gn",
+    "tools/BUILD.bazel",
+    "src/BUILD.gn",
+    # Fuchsia IDK atom, molecule, and test registration.
+    "sdk/BUILD.gn",
+    "sdk/BUILD.bazel",
+    "sdk/atom_lists.bzl",
+    "sdk/fidl/BUILD.gn",
+    "sdk/fidl/category_lists.bzl",
+)
+
+# IMPORTANT: Agents must NEVER modify this prefix. Changes require explicit
+# human review and approval.
 RUST_CRATES = "third_party/rust_crates/"
+
+# IMPORTANT: Agents must NEVER modify this list. Changes require explicit human
+# review and approval.
+ALLOWED_BAZEL_RULES_ALLOWLIST_FILES = (
+    "build/bazel/rules/rust/generate_unit_tests.bzl",
+)
 
 SHARED_BAZEL_RULE_PREFIXES = (
     "build/bazel/rules/",
@@ -218,78 +264,22 @@ def normalize_git_rev(rev: str) -> str:
     return rev
 
 
-# Advance change_base to merge-base(origin/main, HEAD) or HEAD~1 when HEAD was rebased
-# onto a newer origin/main after PLANTER_CHANGE_BASE was pinned.
+# Delegate change-base resolution to planter_check_lib so stacked prerequisite commits
+# on child subpackages are not conflated with the parent package's migration diff.
 def resolve_effective_change_base(raw_base: str) -> str:
-    base = normalize_git_rev(raw_base)
-    head_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-    parent_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"])
-    base_sha = git_out(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"])
-    origin_main = git_out(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
-    merge_base = (
-        git_out(["merge-base", origin_main, head_sha]) if (origin_main and head_sha) else ""
-    )
-    if (
-        base_sha
-        and merge_base
-        and base_sha != merge_base
-        and is_ancestor(base_sha, merge_base)
-    ):
-        base = merge_base
-        base_sha = merge_base
-    elif head_sha and base_sha and not is_ancestor(base_sha, head_sha):
-        base = merge_base or "HEAD~1"
-        base_sha = git_out(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"])
-    # Never step back to HEAD~1 when HEAD itself is already merged on origin/main.
-    head_on_origin = bool(origin_main and head_sha and is_ancestor(head_sha, origin_main))
-    head_subj = (git_lines(["log", "-1", "--format=%s", "HEAD"]) or [""])[0]
-    parent_subj = (git_lines(["log", "-1", "--format=%s", "HEAD~1"]) or [""])[0]
-    mig_prefixes = ("[bazel_migration]", "[bazel2gn]", "[bazel]")
-    if parent_sha and not head_on_origin and head_subj.startswith(mig_prefixes):
-        head_files = git_lines(["diff", "--name-only", "HEAD~1", "HEAD"])
-        if not target_dirs or any(
-            any(p == td or p.startswith(td + "/") for td in target_dirs) for p in head_files
-        ):
-            parent_on_origin = bool(origin_main and is_ancestor(parent_sha, origin_main))
-            head_cids = re.findall(
-                r"(?mi)^Change-Id:\s*(I[0-9a-f]+)",
-                git_out(["log", "-1", "--format=%B", "HEAD"]),
-            )
-            parent_cids = re.findall(
-                r"(?mi)^Change-Id:\s*(I[0-9a-f]+)",
-                git_out(["log", "-1", "--format=%B", "HEAD~1"]),
-            )
-            distinct_stack_cl = bool(
-                head_cids and parent_cids and head_cids[-1] != parent_cids[-1]
-            )
-            stack_files = (
-                git_lines(["diff", "--name-only", base_sha, "HEAD~1"])
-                if (base_sha and base_sha != parent_sha and is_ancestor(base_sha, parent_sha))
-                else []
-            )
-            stack_touches_tdirs = bool(target_dirs) and any(
-                any(p == td or p.startswith(td + "/") for td in target_dirs)
-                for p in stack_files
-            )
-            parent_is_upstream = not parent_subj.startswith(mig_prefixes)
-            if (
-                base == "HEAD"
-                or base_sha == head_sha
-                or (
-                    base_sha
-                    and base_sha != parent_sha
-                    and is_ancestor(base_sha, parent_sha)
-                    and (
-                        parent_is_upstream
-                        or not origin_main
-                        or parent_on_origin
-                        or distinct_stack_cl
-                        or not stack_touches_tdirs
-                    )
-                )
-            ):
-                return "HEAD~1"
-    return base
+    lib = globals().get("pcl")
+    if lib is None:
+        import sys as _sys
+
+        _checks_dir = os.path.join(
+            os.path.abspath(workdir), "build/beads/planter/machinery/checks"
+        )
+        if not os.path.isdir(_checks_dir):
+            _checks_dir = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else ""
+        if _checks_dir and _checks_dir not in _sys.path:
+            _sys.path.insert(0, _checks_dir)
+        import planter_check_lib as lib
+    return lib.resolve_change_base(workdir, raw_base, target_dirs=target_dirs)
 
 
 def _emit(findings, category, severity, file, line, message, remediation=""):
@@ -442,16 +432,174 @@ def is_same_third_party_scope(pkg_a: str, pkg_b: str) -> bool:
 
 
 def package_eliminated_gn_or_sentinel(pkg: str) -> bool:
-    gn_path = os.path.join(workdir, pkg, "BUILD.gn")
-    if not os.path.isfile(gn_path):
-        return True
-    if f"{pkg}/BUILD.gn" not in changed:
+    rel_candidates = [f"{pkg}/BUILD.gn"]
+    if not pkg.startswith("build/secondary/"):
+        rel_candidates.append(f"build/secondary/{pkg}/BUILD.gn")
+    for rel_gn in rel_candidates:
+        gn_path = os.path.join(workdir, rel_gn)
+        if not os.path.isfile(gn_path):
+            if rel_gn in changed:
+                return True
+            continue
+        if rel_gn not in changed:
+            continue
+        try:
+            with open(gn_path, encoding="utf-8") as f:
+                if "BAZEL2GN SENTINEL" not in f.read():
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+# Normalize legacy HOST_CONSTRAINTS identifier references to HOST_OS_CONSTRAINTS in an AST dump.
+def _dump_normalized_host_constraints(node: ast.AST) -> str:
+    return re.sub(
+        r"\bName\(id='HOST_CONSTRAINTS'",
+        "Name(id='HOST_OS_CONSTRAINTS'",
+        ast.dump(node),
+    )
+
+
+# Parse a BUILD.bazel file into collateral metadata, top-level assignments, and target
+# signatures so narrow compatibility/visibility updates can be verified structurally.
+def _parse_collateral_bazel_file(src: str, filename: str):
+    try:
+        tree = ast.parse(src, filename=filename)
+    except SyntaxError:
+        return None
+    meta_dumps: list[str] = []
+    assigns: list[tuple[str, ast.AST]] = []
+    targets = []
+    meta_calls = {"load", "package", "exports_files", "licenses", "test_suite"}
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+        ):
+            assigns.append((stmt.targets[0].id, stmt.value))
+            continue
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            return None
+        call = stmt.value
+        fn = (
+            call.func.id
+            if isinstance(call.func, ast.Name)
+            else (call.func.attr if isinstance(call.func, ast.Attribute) else "")
+        )
+        if not fn:
+            return None
+        if fn in meta_calls:
+            if fn != "load":
+                meta_dumps.append(ast.dump(call))
+            continue
+        t_name = ""
+        vis_dump = ""
+        tcw_node = None
+        other_kws: list[tuple[str, str]] = []
+        for kw in call.keywords:
+            if kw.arg is None:
+                other_kws.append(("", ast.dump(kw.value)))
+            elif kw.arg == "visibility":
+                vis_dump = ast.dump(kw.value)
+            elif kw.arg == "target_compatible_with":
+                tcw_node = kw.value
+            else:
+                if (
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
+                    t_name = kw.value.value
+                other_kws.append((kw.arg, ast.dump(kw.value)))
+        pos_dumps = [ast.dump(a) for a in call.args]
+        targets.append((fn, t_name, pos_dumps, sorted(other_kws), vis_dump, tcw_node))
+    return meta_dumps, assigns, targets
+
+
+_collateral_edit_cache: dict[str, bool] = {}
+
+
+# Check whether an already-existing non-target BUILD.bazel package only received narrow
+# collateral edits (HOST_CONSTRAINTS -> HOST_OS_CONSTRAINTS, visibility, exports_files,
+# package, or test_suite updates) without adding, removing, or rewriting targets.
+def _has_only_collateral_bazel_edits(pkg_dir: str) -> bool:
+    if not pkg_dir or pkg_dir in target_dirs:
+        return False
+    if pkg_dir in _collateral_edit_cache:
+        return _collateral_edit_cache[pkg_dir]
+    if not had_bazel_pkg_at_base(pkg_dir):
+        _collateral_edit_cache[pkg_dir] = False
+        return False
+    bfile = "BUILD.bazel"
+    base_src = git_out(["show", f"{change_base}:{pkg_dir}/{bfile}"])
+    if not base_src:
+        bfile = "BUILD"
+        base_src = git_out(["show", f"{change_base}:{pkg_dir}/{bfile}"])
+    cur_path = os.path.join(workdir, pkg_dir, bfile)
+    if not base_src or not os.path.isfile(cur_path):
+        _collateral_edit_cache[pkg_dir] = False
         return False
     try:
-        with open(gn_path, encoding="utf-8") as f:
-            return "BAZEL2GN SENTINEL" not in f.read()
+        with open(cur_path, encoding="utf-8") as f:
+            cur_src = f.read()
     except OSError:
+        _collateral_edit_cache[pkg_dir] = False
         return False
+    base_parsed = _parse_collateral_bazel_file(base_src, f"{pkg_dir}/{bfile}")
+    cur_parsed = _parse_collateral_bazel_file(cur_src, f"{pkg_dir}/{bfile}")
+    if not base_parsed or not cur_parsed:
+        _collateral_edit_cache[pkg_dir] = False
+        return False
+    base_meta, base_assigns, base_targets = base_parsed
+    cur_meta, cur_assigns, cur_targets = cur_parsed
+    if not base_targets or len(base_targets) != len(cur_targets):
+        _collateral_edit_cache[pkg_dir] = False
+        return False
+    if len(base_assigns) != len(cur_assigns):
+        _collateral_edit_cache[pkg_dir] = False
+        return False
+    saw_meaningful_change = base_meta != cur_meta
+    for (b_id, b_val), (c_id, c_val) in zip(base_assigns, cur_assigns):
+        if b_id != c_id:
+            _collateral_edit_cache[pkg_dir] = False
+            return False
+        b_dump, c_dump = ast.dump(b_val), ast.dump(c_val)
+        if b_dump != c_dump:
+            if (
+                "Name(id='HOST_CONSTRAINTS'" in b_dump
+                and _dump_normalized_host_constraints(b_val) == c_dump
+            ):
+                saw_meaningful_change = True
+            else:
+                _collateral_edit_cache[pkg_dir] = False
+                return False
+    for b_tgt, c_tgt in zip(base_targets, cur_targets):
+        b_fn, b_nm, b_pos, b_kws, b_vis, b_tcw = b_tgt
+        c_fn, c_nm, c_pos, c_kws, c_vis, c_tcw = c_tgt
+        if (b_fn, b_nm, b_pos, b_kws) != (c_fn, c_nm, c_pos, c_kws):
+            _collateral_edit_cache[pkg_dir] = False
+            return False
+        if b_vis != c_vis:
+            saw_meaningful_change = True
+        b_tcw_dump = ast.dump(b_tcw) if b_tcw is not None else ""
+        c_tcw_dump = ast.dump(c_tcw) if c_tcw is not None else ""
+        if b_tcw_dump != c_tcw_dump:
+            if (
+                b_tcw is not None
+                and c_tcw is not None
+                and "Name(id='HOST_CONSTRAINTS'" in b_tcw_dump
+                and _dump_normalized_host_constraints(b_tcw) == c_tcw_dump
+            ):
+                saw_meaningful_change = True
+            else:
+                _collateral_edit_cache[pkg_dir] = False
+                return False
+    _collateral_edit_cache[pkg_dir] = saw_meaningful_change
+    return saw_meaningful_change
 
 
 # Extract top-level target rule `name = "..."` definitions from Starlark text,
@@ -879,7 +1027,27 @@ newly_added_files = (
 def referenced_shared_configs():
     """Returns (allowed_gni_files, allowed_lint_pkgs) referenced by in-scope packages."""
     gni_files, lint_pkgs = set(), set()
-    for td in list(target_dirs) + sorted(dependency_dirs):
+    # Include in-scope ancestor packages modified in the same change so per-leaf
+    # passes on child packages retain `.gni` and `lint_config` references loaded by
+    # the migrated ancestor's `BUILD.bazel`.
+    ancestor_changed_pkgs = sorted(
+        {
+            os.path.dirname(p.strip("/"))
+            for p in changed
+            if os.path.basename(p.strip("/")) in ("BUILD.bazel", "BUILD.gn")
+            and os.path.dirname(p.strip("/"))
+            and any(
+                td.startswith(os.path.dirname(p.strip("/")) + "/")
+                for td in target_dirs
+            )
+        }
+    )
+    scan_dirs = list(
+        dict.fromkeys(
+            list(target_dirs) + sorted(dependency_dirs) + ancestor_changed_pkgs
+        )
+    )
+    for td in scan_dirs:
         try:
             with open(os.path.join(workdir, td, "BUILD.gn"), encoding="utf-8") as f:
                 gn_txt = f.read()
@@ -1203,21 +1371,76 @@ def is_relative_name_registration_edit(norm: str) -> bool:
     )
 
 
+# Normalize Starlark `load(...)` statements and AST body nodes for `HOST_CONSTRAINTS` ->
+# `HOST_OS_CONSTRAINTS` comparisons across both `BUILD.bazel` and `.bzl` macro files.
+def _normalize_starlark_host_os_ast(src: str, filename: str):
+    try:
+        tree = ast.parse(src, filename=filename)
+    except SyntaxError:
+        return None
+    loads: set[tuple[str, str, str]] = set()
+    body_dumps: list[str] = []
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "load"
+            and stmt.value.args
+            and isinstance(stmt.value.args[0], ast.Constant)
+            and isinstance(stmt.value.args[0].value, str)
+        ):
+            mod = stmt.value.args[0].value
+            norm_mod = mod
+            if re.fullmatch(r"//build/bazel/rules/[\w/]+:(?:defs|\w+)\.bzl", mod):
+                norm_mod = mod.rsplit(":", 1)[0] + ":*.bzl"
+            for arg in stmt.value.args[1:]:
+                if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
+                    return None
+                sym = arg.value
+                if mod == "@platforms//host:constraints.bzl" and sym == "HOST_CONSTRAINTS":
+                    loads.add(
+                        (
+                            "//build/bazel/platforms:constraints.bzl",
+                            "HOST_OS_CONSTRAINTS",
+                            "HOST_OS_CONSTRAINTS",
+                        )
+                    )
+                else:
+                    loads.add((norm_mod, sym, sym))
+            for kw in stmt.value.keywords:
+                if (
+                    not kw.arg
+                    or not isinstance(kw.value, ast.Constant)
+                    or not isinstance(kw.value.value, str)
+                ):
+                    return None
+                orig = kw.value.value
+                alias = (
+                    "HOST_OS_CONSTRAINTS"
+                    if kw.arg == "HOST_CONSTRAINTS"
+                    else kw.arg
+                )
+                if mod == "@platforms//host:constraints.bzl" and orig == "HOST_CONSTRAINTS":
+                    loads.add(
+                        (
+                            "//build/bazel/platforms:constraints.bzl",
+                            alias,
+                            "HOST_OS_CONSTRAINTS",
+                        )
+                    )
+                else:
+                    loads.add((norm_mod, alias, orig))
+            continue
+        body_dumps.append(_dump_normalized_host_constraints(stmt))
+    return loads, body_dumps
+
+
 # Allow collateral BUILD.bazel and .bzl rule/macro edits in upstream packages that
 # replace `@platforms//host:constraints.bzl` (`HOST_CONSTRAINTS`) with
 # `//build/bazel/platforms:constraints.bzl` (`HOST_OS_CONSTRAINTS`) (plus any
 # `defs.bzl` -> direct rule `.bzl` load cleanup required by `scripts/shac/bazel_lint`
 # on the modified file) so cross-compiled `host_linux_arm64` host tools build cleanly.
-HOST_OS_UPGRADE_LINE_RE = re.compile(
-    r'^(?:load\(\s*"(?:@platforms//host:constraints\.bzl|'
-    r"//build/bazel/platforms:constraints\.bzl|"
-    r'//build/bazel/rules/[\w/]+:(?:defs|\w+)\.bzl)"|'
-    r"target_compatible_with\s*=\s*HOST_(?:OS_)?CONSTRAINTS\s*,?$|"
-    r'"\w+"\s*,?$|'
-    r"\),?$)"
-)
-
-
 def is_host_os_constraints_upgrade_edit(norm: str) -> bool:
     if os.path.basename(norm) not in ("BUILD.bazel", "BUILD") and not norm.endswith(".bzl"):
         return False
@@ -1231,42 +1454,258 @@ def is_host_os_constraints_upgrade_edit(norm: str) -> bool:
         ):
             return False
         base_ref = "HEAD~1"
+    eff_base = base_ref
     diff = git_lines(["diff", "--unified=0", base_ref, "--", norm])
     if not diff and base_ref == "HEAD":
         diff = git_lines(["diff", "--unified=0", "HEAD~1", "HEAD", "--", norm])
+        eff_base = "HEAD~1"
     edited = _changed_code_lines(diff)
     if not edited or not any(
         "HOST_CONSTRAINTS" in ln or "HOST_OS_CONSTRAINTS" in ln for ln in edited
     ):
         return False
-    return all(HOST_OS_UPGRADE_LINE_RE.search(ln) for ln in edited)
+    base_src = git_out(["show", f"{eff_base}:{norm}"])
+    cur_abs = os.path.join(workdir, norm)
+    if not base_src or "HOST_CONSTRAINTS" not in base_src or not os.path.isfile(cur_abs):
+        return False
+    try:
+        with open(cur_abs, encoding="utf-8") as f:
+            cur_src = f.read()
+    except OSError:
+        return False
+    base_norm = _normalize_starlark_host_os_ast(base_src, norm)
+    cur_norm = _normalize_starlark_host_os_ast(cur_src, norm)
+    return bool(base_norm is not None and base_norm == cur_norm)
 
 
-# Check whether a shared .bzl rule file under build/bazel/rules/ only adds a required
-# bzl-load visibility([...]) entry not already covered by an existing prefix wildcard.
-def is_required_bzl_visibility_allowlist_edit(norm: str) -> bool:
+def is_allowed_bazel_rules_allowlist_removal(norm: str) -> bool:
+    """Only removing allowlist entries from build/bazel/rules/rust/generate_unit_tests.bzl is allowed."""
+    if norm not in ALLOWED_BAZEL_RULES_ALLOWLIST_FILES:
+        return False
     base_bzl = git_out(["show", f"{change_base}:{norm}"])
-    if not base_bzl or "visibility([" not in base_bzl:
+    if not base_bzl or not os.path.isfile(os.path.join(workdir, norm)):
         return False
     diff_lines = [
         dl
         for dl in git_lines(["diff", "--unified=0", change_base, "--", norm])
         if dl[:1] in ("+", "-") and not dl.startswith(("+++", "---"))
     ]
-    if not diff_lines or any(dl.startswith("-") for dl in diff_lines):
+    if not diff_lines:
+        return True
+    for dl in diff_lines:
+        body = dl[1:].strip()
+        if not body or body.startswith("#"):
+            continue
+        if dl.startswith("+"):
+            return False
+        if not re.fullmatch(r'"[^"]+"\s*(?::\s*True)?\s*,?', body):
+            return False
+    return True
+
+
+def is_minor_string_list_bzl_or_gni_edit(norm: str) -> bool:
+    """Allow only minor string-literal additions/removals in existing lists in .bzl/.gni files outside //build/."""
+    if not norm.endswith((".bzl", ".gni")) or norm.startswith(("build/", "zircon/vdso/")):
         return False
-    vis_m = re.search(r"\bvisibility\(\s*\[([^\]]*)\]\s*\)", base_bzl, re.S)
-    base_vis = re.findall(r'"//([^"]+)"', vis_m.group(1)) if vis_m else []
+    base_txt = git_out(["show", f"{change_base}:{norm}"])
+    if not base_txt or not os.path.isfile(os.path.join(workdir, norm)):
+        return False
+    diff_lines = [
+        dl
+        for dl in git_lines(["diff", "--unified=0", change_base, "--", norm])
+        if dl[:1] in ("+", "-") and not dl.startswith(("+++", "---"))
+    ]
+    if not diff_lines:
+        return True
+    for dl in diff_lines:
+        body = dl[1:].strip()
+        if not body or body.startswith("#"):
+            continue
+        if not re.fullmatch(r'"[^"]+"\s*,?', body):
+            return False
+    try:
+        with open(os.path.join(workdir, norm), encoding="utf-8") as f:
+            cur_txt = f.read()
+    except OSError:
+        return False
+    return "[" in base_txt and "]" in base_txt and "[" in cur_txt and "]" in cur_txt
+
+
+# Check whether an upstream transitive dependency package only received narrow
+# AST-verified collateral BUILD.bazel edits (visibility, test_suite, or HOST_OS_CONSTRAINTS).
+def is_collateral_upstream_bazel_update(pkg_dir: str) -> bool:
+    return bool(
+        pkg_dir
+        and pkg_dir in transitive_dep_pkgs
+        and _has_only_collateral_bazel_edits(pkg_dir)
+    )
+
+
+# Check whether an upstream BUILD.gn change is solely a bazel2gn post-sentinel sync of an
+# allowed collateral BUILD.bazel update in the same package.
+def is_collateral_upstream_gn_sync(pkg_dir: str) -> bool:
+    if not pkg_dir or pkg_dir in target_dirs:
+        return False
+    if not (
+        is_collateral_upstream_bazel_update(pkg_dir)
+        or is_host_os_constraints_upgrade_edit(f"{pkg_dir}/BUILD.bazel")
+        or (
+            pkg_dir in transitive_dep_pkgs
+            and is_collateral_existing_bazel_edit(pkg_dir)
+        )
+    ):
+        return False
+    gn_abs = os.path.join(workdir, pkg_dir, "BUILD.gn")
+    if not os.path.isfile(gn_abs):
+        return False
+    base_gn = git_out(["show", f"{change_base}:{pkg_dir}/BUILD.gn"])
+    if not base_gn and change_base != "HEAD~1":
+        base_gn = git_out(["show", f"HEAD~1:{pkg_dir}/BUILD.gn"])
+    try:
+        with open(gn_abs, encoding="utf-8") as f:
+            cur_gn = f.read()
+    except OSError:
+        return False
+    if "BAZEL2GN SENTINEL" not in base_gn or "BAZEL2GN SENTINEL" not in cur_gn:
+        return False
+    base_pre = re.split(r"(?m)^##\s*BAZEL2GN SENTINEL", base_gn, maxsplit=1)[0]
+    cur_pre = re.split(r"(?m)^##\s*BAZEL2GN SENTINEL", cur_gn, maxsplit=1)[0]
+    return base_pre == cur_pre
+
+
+# Collect Starlark file contents from in-scope migrated packages so load() and
+# external-repository references can be verified against the active migration scope.
+def _in_scope_starlark_texts() -> list[str]:
+    texts: list[str] = []
+    seen: set[str] = set()
+    in_scope = list(target_dirs) + sorted(dependency_dirs)
+    cand_rels = [f"{td}/BUILD.bazel" for td in in_scope if td] + [
+        p.strip("/")
+        for p in changed
+        if any(
+            p.strip("/") == td or p.strip("/").startswith(td + "/")
+            for td in in_scope
+        )
+        and (
+            os.path.basename(p) in ("BUILD.bazel", "BUILD")
+            or p.endswith(".bzl")
+        )
+    ]
+    for rel in cand_rels:
+        if rel in seen:
+            continue
+        seen.add(rel)
+        try:
+            with open(os.path.join(workdir, rel), encoding="utf-8") as f:
+                texts.append(f.read())
+        except OSError:
+            pass
+    return texts
+
+
+# Check whether any in-scope Starlark file loads the workspace `.bzl` file at `norm`.
+def _in_scope_loads_bzl(norm: str) -> bool:
+    for txt in _in_scope_starlark_texts():
+        for m in re.finditer(r'\bload\(\s*"(@?//[^"]+\.bzl)"', txt):
+            lbl_rel = m.group(1).lstrip("@")[2:].replace(":", "/").strip("/")
+            if lbl_rel == norm:
+                return True
+    return False
+
+
+# Extract string constants from a top-level Starlark `visibility([...])` call node.
+def _extract_bzl_visibility_list(stmt):
+    if not (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Name)
+        and stmt.value.func.id == "visibility"
+        and len(stmt.value.args) == 1
+        and not stmt.value.keywords
+        and isinstance(stmt.value.args[0], ast.List)
+    ):
+        return None
+    out: list[str] = []
+    for elt in stmt.value.args[0].elts:
+        if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+            return None
+        out.append(elt.value)
+    return out
+
+
+# Check whether an in-tree `.bzl` rule/macro file only adds required bzl-load
+# `visibility([...])` entries for in-scope packages not already covered by a prefix.
+def is_required_bzl_visibility_allowlist_edit(norm: str) -> bool:
+    if not norm.endswith(".bzl") or norm.startswith("third_party/"):
+        return False
+    if not is_shared_bazel_rule_file(norm):
+        if "/private/" in f"/{norm}" or not _in_scope_loads_bzl(norm):
+            return False
+    base_bzl = git_out(["show", f"{change_base}:{norm}"])
+    if not base_bzl or "visibility(" not in base_bzl:
+        return False
+    try:
+        with open(os.path.join(workdir, norm), encoding="utf-8") as f:
+            cur_bzl = f.read()
+        base_tree = ast.parse(base_bzl, filename=norm)
+        cur_tree = ast.parse(cur_bzl, filename=norm)
+    except (OSError, SyntaxError):
+        return False
+    base_comments = [
+        ln.strip() for ln in base_bzl.splitlines() if ln.strip().startswith("#")
+    ]
+    cur_comments = [
+        ln.strip() for ln in cur_bzl.splitlines() if ln.strip().startswith("#")
+    ]
+    if base_comments != cur_comments or len(base_tree.body) != len(cur_tree.body):
+        return False
+    base_vis = None
+    cur_vis = None
+    for b_st, c_st in zip(base_tree.body, cur_tree.body):
+        b_v = _extract_bzl_visibility_list(b_st)
+        c_v = _extract_bzl_visibility_list(c_st)
+        if b_v is not None and c_v is not None and base_vis is None:
+            base_vis, cur_vis = b_v, c_v
+            continue
+        if ast.dump(b_st) != ast.dump(c_st):
+            return False
+    if base_vis is None or cur_vis is None:
+        return False
+    base_set = set(base_vis)
+    cur_set = set(cur_vis)
+    if not base_set.issubset(cur_set):
+        return False
+    if len(cur_vis) - len(base_vis) != len(cur_set - base_set):
+        return False
+    added_entries = [e for e in cur_vis if e not in base_set]
+    if not added_entries:
+        return False
+    base_exact = {
+        e[2:].strip("/")
+        for e in base_vis
+        if e.startswith("//") and not e.endswith("/...")
+    }
     base_prefixes = [
-        v[:-4].strip("/") for v in base_vis if v.endswith("/...")
+        e[2:-4].strip("/")
+        for e in base_vis
+        if e.startswith("//") and e.endswith("/...")
     ]
     in_scope = list(target_dirs) + sorted(dependency_dirs)
-    for dl in diff_lines:
-        m = re.fullmatch(r'\+\s*"//([^"]+?)(?:/\.\.\.)?",?', dl.strip())
+    for raw_entry in added_entries:
+        entry = raw_entry.strip()
+        if entry in ("//...", "//visibility:public", "public", "private"):
+            return False
+        m = re.fullmatch(r"//(.+?)(?:/\.\.\.)?", entry)
         if not m:
             return False
         added_pkg = m.group(1).strip("/")
-        if not any(added_pkg == td or added_pkg.startswith(td + "/") for td in in_scope):
+        if not added_pkg or added_pkg == "..." or ":" in added_pkg:
+            return False
+        if not any(
+            added_pkg == td or added_pkg.startswith(td + "/") for td in in_scope
+        ):
+            return False
+        if not entry.endswith("/...") and added_pkg in base_exact:
             return False
         if any(
             not pref or added_pkg == pref or added_pkg.startswith(pref + "/")
@@ -1274,6 +1713,179 @@ def is_required_bzl_visibility_allowlist_edit(norm: str) -> bool:
         ):
             return False
     return True
+
+
+# Parse `new_local_repository` declarations in `build/bazel/toplevel.MODULE.bazel`,
+# mapping checkout-relative `build_file` path -> `(repo_name, repo_path)`.
+def _module_local_repo_overlays() -> dict[str, tuple[str, str]]:
+    mod_path = os.path.join(workdir, "build", "bazel", "toplevel.MODULE.bazel")
+    try:
+        with open(mod_path, encoding="utf-8") as f:
+            mod_src = f.read()
+        tree = ast.parse(mod_src, filename="build/bazel/toplevel.MODULE.bazel")
+    except (OSError, SyntaxError):
+        return {}
+    overlays: dict[str, tuple[str, str]] = {}
+    for stmt in tree.body:
+        if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+            continue
+        call = stmt.value
+        if not (
+            isinstance(call.func, ast.Name)
+            and call.func.id == "new_local_repository"
+        ):
+            continue
+        kws = {
+            kw.arg: kw.value.value.strip()
+            for kw in call.keywords
+            if kw.arg in ("name", "build_file", "path")
+            and isinstance(kw.value, ast.Constant)
+            and isinstance(kw.value.value, str)
+        }
+        rname = kws.get("name", "")
+        bfile = kws.get("build_file", "")
+        rpath = kws.get("path", "").strip("/")
+        if not (rname and bfile and rpath):
+            continue
+        bf_rel = bfile.lstrip("@")
+        if not bf_rel.startswith("//"):
+            continue
+        bf_rel = bf_rel[2:].replace(":", "/").strip("/")
+        if bf_rel:
+            overlays[bf_rel] = (rname, rpath)
+    return overlays
+
+
+# Verify that `c_list` only appends existing files under `repo_path` to `b_list`.
+def _check_overlay_file_list_growth(
+    b_list: ast.List, c_list: ast.List, repo_path: str
+) -> tuple[bool, int]:
+    b_items: list[str] = []
+    c_items: list[str] = []
+    for src_nodes, dst in ((b_list.elts, b_items), (c_list.elts, c_items)):
+        for elt in src_nodes:
+            if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+                return False, 0
+            dst.append(elt.value)
+    b_set = set(b_items)
+    c_set = set(c_items)
+    if not b_set.issubset(c_set):
+        return False, 0
+    if len(c_items) - len(b_items) != len(c_set - b_set):
+        return False, 0
+    for rel_f in c_set - b_set:
+        clean_f = rel_f.strip()
+        if (
+            not clean_f
+            or clean_f.startswith("/")
+            or ".." in clean_f.split("/")
+            or not os.path.isfile(os.path.join(workdir, repo_path, clean_f))
+        ):
+            return False, 0
+    return True, len(c_items) - len(b_items)
+
+
+# Extract `(fn_name, srcs_list_node, non_srcs_signature)` for `exports_files` / `filegroup`.
+def _overlay_export_call_parts(stmt):
+    if not (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Call)
+        and isinstance(stmt.value.func, ast.Name)
+        and stmt.value.func.id in ("exports_files", "filegroup")
+    ):
+        return None
+    call = stmt.value
+    fn = call.func.id
+    if (
+        fn == "exports_files"
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.List)
+    ):
+        if any(kw.arg == "srcs" for kw in call.keywords):
+            return None
+        sig = [(kw.arg, ast.dump(kw.value)) for kw in call.keywords]
+        return fn, call.args[0], sig
+    if call.args:
+        return None
+    srcs_node = None
+    sig = []
+    for kw in call.keywords:
+        if kw.arg == "srcs" and isinstance(kw.value, ast.List) and srcs_node is None:
+            srcs_node = kw.value
+        else:
+            sig.append((kw.arg, ast.dump(kw.value)))
+    if srcs_node is None:
+        return None
+    return fn, srcs_node, sig
+
+
+# Check whether an in-tree `new_local_repository` overlay `build_file` referenced by an
+# in-scope package only adds existing repository source files to `exports_files`/`filegroup`.
+def is_local_repo_overlay_export_edit(norm: str) -> bool:
+    overlay = _module_local_repo_overlays().get(norm)
+    if overlay is None:
+        return False
+    repo_name, repo_path = overlay
+    repo_ref_re = re.compile(r"@@?" + re.escape(repo_name) + r"//")
+    if not any(repo_ref_re.search(txt) for txt in _in_scope_starlark_texts()):
+        return False
+    base_src = git_out(["show", f"{change_base}:{norm}"])
+    if not base_src:
+        return False
+    try:
+        with open(os.path.join(workdir, norm), encoding="utf-8") as f:
+            cur_src = f.read()
+        base_tree = ast.parse(base_src, filename=norm)
+        cur_tree = ast.parse(cur_src, filename=norm)
+    except (OSError, SyntaxError):
+        return False
+    base_comments = [
+        ln.strip() for ln in base_src.splitlines() if ln.strip().startswith("#")
+    ]
+    cur_comments = [
+        ln.strip() for ln in cur_src.splitlines() if ln.strip().startswith("#")
+    ]
+    if base_comments != cur_comments or len(base_tree.body) != len(cur_tree.body):
+        return False
+    total_added = 0
+    for b_st, c_st in zip(base_tree.body, cur_tree.body):
+        if ast.dump(b_st) == ast.dump(c_st):
+            continue
+        if (
+            isinstance(b_st, ast.Assign)
+            and isinstance(c_st, ast.Assign)
+            and len(b_st.targets) == 1
+            and len(c_st.targets) == 1
+            and isinstance(b_st.targets[0], ast.Name)
+            and isinstance(c_st.targets[0], ast.Name)
+            and b_st.targets[0].id == c_st.targets[0].id
+            and isinstance(b_st.value, ast.List)
+            and isinstance(c_st.value, ast.List)
+        ):
+            ok, n_add = _check_overlay_file_list_growth(
+                b_st.value, c_st.value, repo_path
+            )
+            if not ok:
+                return False
+            total_added += n_add
+            continue
+        b_parts = _overlay_export_call_parts(b_st)
+        c_parts = _overlay_export_call_parts(c_st)
+        if (
+            b_parts
+            and c_parts
+            and b_parts[0] == c_parts[0]
+            and b_parts[2] == c_parts[2]
+        ):
+            ok, n_add = _check_overlay_file_list_growth(
+                b_parts[1], c_parts[1], repo_path
+            )
+            if not ok:
+                return False
+            total_added += n_add
+            continue
+        return False
+    return total_added > 0
 
 
 # Check whether `norm` belongs to the split that owners_allowlist_scope
@@ -1345,10 +1957,425 @@ def is_owners_scoped_allowlist_split(norm: str) -> bool:
     return False
 
 
+# Check whether a shared `.bzl` rule or macro file already referenced an in-scope
+# migrated package at `change_base` (either directly via `//<pkg>` or through a
+# `@gn_targets//.../<pkg>` `bazel_input_*` bridge that must be cut over to Bazel).
+def _shared_bzl_references_in_scope_at_base(norm: str) -> bool:
+    base_txt = git_out(["show", f"{change_base}:{norm}"])
+    if not base_txt:
+        return False
+    in_scope = list(target_dirs) + sorted(dependency_dirs)
+    for td in in_scope:
+        pat = (
+            r'(?:@@?gn_targets//(?:(?:toolchain_[^\s"\':/]+|obj)/)?|@?//)'
+            + re.escape(td)
+            + r'(?=[:"/\s\'])'
+        )
+        if re.search(pat, base_txt):
+            return True
+    return False
+
+
+# Allow surgical updates to build-infrastructure verification test sources (such as
+# moving a migrated subtool out of a GN-bridged runfiles check list under
+# `<area>/build/tests/**`) when an in-scope package cuts over a pre-existing
+# `gn_ffx_test_data` / `@gn_targets` bridge stub in `BUILD.bazel` to native Bazel.
+def is_gn_bridge_cutover_verification_test_edit(norm: str) -> bool:
+    if not norm.endswith((".go", ".py", ".rs", ".sh")):
+        return False
+    full_norm = os.path.join(workdir, norm)
+    if not os.path.isfile(full_norm):
+        return False
+    owner_pkg = os.path.dirname(norm).strip("/")
+    while owner_pkg and not os.path.isfile(os.path.join(workdir, owner_pkg, "BUILD.bazel")):
+        parent = os.path.dirname(owner_pkg).strip("/")
+        if parent == owner_pkg:
+            owner_pkg = ""
+            break
+        owner_pkg = parent
+    if not owner_pkg or not re.search(r"(?:^|/)build/tests?(?:/|$)", owner_pkg):
+        return False
+    in_scope = list(target_dirs) + sorted(dependency_dirs)
+    if not in_scope:
+        return False
+    base_ref = change_base
+    if not git_lines(["ls-tree", "--name-only", base_ref, "--", norm]):
+        if base_ref == "HEAD~1" or not git_lines(
+            ["ls-tree", "--name-only", "HEAD~1", "--", norm]
+        ):
+            return False
+        base_ref = "HEAD~1"
+    try:
+        with open(os.path.join(workdir, owner_pkg, "BUILD.bazel"), encoding="utf-8") as f:
+            owner_bz_txt = f.read()
+    except OSError:
+        return False
+    rel_src = os.path.relpath(norm, owner_pkg).replace("\\", "/")
+    if rel_src not in owner_bz_txt:
+        return False
+    matched_tds = [
+        td
+        for td in in_scope
+        if re.search(r"//" + re.escape(td) + r'(?=[:"/\s\'])', owner_bz_txt)
+    ]
+    if not matched_tds:
+        return False
+    bridge_re = re.compile(r"\bgn_ffx_test_data\b|@gn_targets//")
+    cutover_tds = []
+    for td in matched_tds:
+        td_bz_rel = f"{td}/BUILD.bazel"
+        base_td_bz = git_out(["show", f"{base_ref}:{td_bz_rel}"])
+        if not base_td_bz or not bridge_re.search(base_td_bz):
+            continue
+        try:
+            with open(os.path.join(workdir, td_bz_rel), encoding="utf-8") as f:
+                cur_td_bz = f.read()
+        except OSError:
+            continue
+        if not bridge_re.search(cur_td_bz):
+            cutover_tds.append((base_td_bz, cur_td_bz))
+    if not cutover_tds:
+        return False
+    diff = git_lines(["diff", "--unified=0", base_ref, "--", norm])
+    if not diff and base_ref == "HEAD":
+        diff = git_lines(["diff", "--unified=0", "HEAD~1", "HEAD", "--", norm])
+    removed = [
+        ln[1:].strip()
+        for ln in diff
+        if ln.startswith("-") and not ln.startswith("---") and ln[1:].strip()
+    ]
+    added = [
+        ln[1:].strip()
+        for ln in diff
+        if ln.startswith("+") and not ln.startswith("+++") and ln[1:].strip()
+    ]
+    if not (removed or added) or len(removed) + len(added) > 20:
+        return False
+    ignored_vals = {"2021", "2024", "0.1.0", "partner", "internal", "host-tools"}
+    cutover_tokens: set[str] = set()
+    for base_td_bz, cur_td_bz in cutover_tds:
+        for tok in re.findall(r'"([A-Za-z0-9_.-]+)"', base_td_bz + "\n" + cur_td_bz):
+            if len(tok) >= 3 and tok not in ignored_vals:
+                cutover_tokens.add(tok)
+    if not cutover_tokens:
+        return False
+    combined = "\n".join(removed + added)
+    if not any(f'"{tok}"' in combined for tok in cutover_tokens):
+        return False
+
+    def _strip_cutover_literals(lines: list[str]) -> str:
+        blob = "\n".join(lines)
+        for tok in sorted(cutover_tokens, key=len, reverse=True):
+            blob = blob.replace(f'"{tok}"', "")
+        return re.sub(r"[,\s]+", "", blob)
+
+    return _strip_cutover_literals(removed) == _strip_cutover_literals(added)
+
+
+# Convert a root-workspace Starlark label (`//pkg:file` or `@//pkg:file`) to a
+# repository-relative file path.
+def _workspace_label_to_rel_path(raw_label: str) -> str:
+    lbl = (raw_label or "").strip()
+    while lbl.startswith("@"):
+        lbl = lbl[1:]
+    if not lbl.startswith("//"):
+        return ""
+    body = lbl[2:]
+    if ":" in body:
+        pkg, target = body.split(":", 1)
+    else:
+        pkg = body.strip("/")
+        target = os.path.basename(pkg)
+    return "/".join(p for p in (pkg.strip("/"), target.strip("/")) if p)
+
+
+# Collect external repository names (`@<repo>//...`) referenced in non-visibility
+# attributes of in-scope migrated BUILD.bazel files.
+def collect_in_scope_external_repos() -> set[str]:
+    repo_re = re.compile(r"(?<![A-Za-z0-9_.:/\-])@@?([A-Za-z0-9_.\-]+)//")
+    repos: set[str] = set()
+    for pkg in dict.fromkeys(list(target_dirs) + sorted(dependency_dirs)):
+        bz_path = os.path.join(workdir, pkg, "BUILD.bazel")
+        try:
+            with open(bz_path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            continue
+        try:
+            tree = ast.parse(text, filename=f"{pkg}/BUILD.bazel")
+            scan_items: list[str] = []
+            for stmt in tree.body:
+                if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                    is_load = (
+                        isinstance(stmt.value.func, ast.Name)
+                        and stmt.value.func.id == "load"
+                    )
+                    for kw in stmt.value.keywords:
+                        if kw.arg in ("visibility", "default_visibility"):
+                            continue
+                        for sub in ast.walk(kw.value):
+                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                                scan_items.append(sub.value)
+                    for idx, pos_arg in enumerate(stmt.value.args):
+                        if is_load and idx > 0:
+                            continue
+                        for sub in ast.walk(pos_arg):
+                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                                scan_items.append(sub.value)
+                elif isinstance(stmt, ast.Assign):
+                    for sub in ast.walk(stmt.value):
+                        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                            scan_items.append(sub.value)
+        except SyntaxError:
+            scan_items = [re.sub(r"#[^\n]*", "", text)]
+        for item in scan_items:
+            for m in repo_re.finditer(item):
+                repos.add(m.group(1))
+    return repos
+
+
+# Check whether a third_party/<project> path is an external gitlink submodule or
+# contains nested Bazel package markers that block direct workspace file exports.
+def _is_blocked_third_party_source_tree(tp_rel: str) -> bool:
+    parts = [p for p in (tp_rel or "").strip("/").split("/") if p]
+    if len(parts) < 2 or parts[0] != "third_party":
+        return False
+    if parts[1] in ("rust_crates", "bazel_vendor"):
+        return False
+    proj_rel = f"third_party/{parts[1]}"
+    prefixes = ["/".join(parts[:idx]) for idx in range(2, len(parts) + 1)]
+    src_sub = f"{proj_rel}/src"
+    if src_sub not in prefixes:
+        prefixes.append(src_sub)
+    for pref in prefixes:
+        if git_out(["ls-tree", "HEAD", "--", pref]).startswith("160000 "):
+            return True
+        if os.path.exists(os.path.join(workdir, pref, ".git")):
+            return True
+    markers = ("BUILD", "BUILD.bazel", "WORKSPACE", "WORKSPACE.bazel", "MODULE.bazel")
+    proj_abs = os.path.join(workdir, proj_rel)
+    if not os.path.isdir(proj_abs):
+        return False
+    for root, dirs, files in os.walk(proj_abs):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        if os.path.abspath(root) == os.path.abspath(proj_abs):
+            continue
+        if any(m in files for m in markers):
+            return True
+    return False
+
+
+# Validate that an overlay *.BUILD.bazel / *.BUILD file only exposes checked-in
+# files or header-only C/C++ interfaces without compiling sources.
+def _is_file_export_overlay_build_file(norm: str) -> bool:
+    if not norm or not norm.endswith((".BUILD.bazel", ".BUILD")):
+        return False
+    full_p = os.path.join(workdir, norm)
+    try:
+        with open(full_p, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=norm)
+    except (OSError, SyntaxError):
+        return False
+    allowed_meta = (
+        "load",
+        "package",
+        "licenses",
+        "license",
+        "exports_files",
+        "filegroup",
+        "alias",
+    )
+    header_cc_rules = ("cc_library", "fx_cc_library", "fx_cc_library_headers")
+    saw_export = False
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue
+        if isinstance(stmt, ast.Assign):
+            if any(isinstance(sub, ast.Call) for sub in ast.walk(stmt.value)):
+                return False
+            continue
+        if not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+        ):
+            return False
+        fn_name = stmt.value.func.id
+        if fn_name in allowed_meta:
+            if fn_name in ("exports_files", "filegroup", "alias"):
+                saw_export = True
+            continue
+        if fn_name in header_cc_rules and _is_header_only_cc_call(stmt.value):
+            saw_export = True
+            continue
+        return False
+    return saw_export
+
+
+# Validate that a .bzl file loaded via use_repo_rule() in toplevel.MODULE.bazel
+# defines only repository_rule() helpers without target rule() or macro() defs.
+def _is_repo_rule_only_bzl(norm: str) -> tuple[bool, set[str]]:
+    if not norm or not norm.endswith(".bzl") or norm.startswith(SHARED_BAZEL_RULE_PREFIXES):
+        return False, set()
+    full_p = os.path.join(workdir, norm)
+    try:
+        with open(full_p, encoding="utf-8") as f:
+            tree = ast.parse(f.read(), filename=norm)
+    except (OSError, SyntaxError):
+        return False, set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in ("rule", "macro")
+        ):
+            return False, set()
+    saw_repo_rule = False
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
+            continue
+        if isinstance(stmt, ast.FunctionDef):
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            if (
+                isinstance(stmt.value.func, ast.Name)
+                and stmt.value.func.id in ("load", "visibility")
+            ):
+                continue
+            return False, set()
+        if isinstance(stmt, ast.Assign):
+            if (
+                isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name)
+                and stmt.value.func.id == "repository_rule"
+            ):
+                saw_repo_rule = True
+                continue
+            if any(isinstance(sub, ast.Call) for sub in ast.walk(stmt.value)):
+                return False, set()
+            continue
+        return False, set()
+    if not saw_repo_rule:
+        return False, set()
+    tp_re = re.compile(r"(?:^|/|//)(third_party/[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*)")
+    tp_paths: set[str] = set()
+    for sub in ast.walk(tree):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            for m in tp_re.finditer(sub.value):
+                tp_paths.add(m.group(1))
+    return True, tp_paths
+
+
+# Collect overlay *.BUILD.bazel files and use_repo_rule() .bzl files wired in
+# build/bazel/toplevel.MODULE.bazel for external third_party repositories consumed
+# by in-scope migrated packages.
+def collect_in_scope_module_repo_files() -> set[str]:
+    used_repos = collect_in_scope_external_repos()
+    if not used_repos:
+        return set()
+    mod_path = os.path.join(workdir, "build", "bazel", "toplevel.MODULE.bazel")
+    try:
+        with open(mod_path, encoding="utf-8") as f:
+            mod_tree = ast.parse(f.read(), filename="build/bazel/toplevel.MODULE.bazel")
+    except (OSError, SyntaxError):
+        return set()
+    repo_rule_bzl_by_var: dict[str, str] = {}
+    for stmt in mod_tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+            and stmt.value.func.id == "use_repo_rule"
+            and stmt.value.args
+            and isinstance(stmt.value.args[0], ast.Constant)
+            and isinstance(stmt.value.args[0].value, str)
+        ):
+            bzl_rel = _workspace_label_to_rel_path(stmt.value.args[0].value)
+            if bzl_rel.endswith(".bzl"):
+                repo_rule_bzl_by_var[stmt.targets[0].id] = bzl_rel
+    tp_re = re.compile(r"(?:^|/|//)(third_party/[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)*)")
+    allowed_files: set[str] = set()
+    for stmt in mod_tree.body:
+        if not (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Name)
+        ):
+            continue
+        call = stmt.value
+        fn_id = call.func.id
+        kw_strs: dict[str, str] = {}
+        call_tp_paths: set[str] = set()
+        for kw in call.keywords:
+            if kw.arg and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                kw_strs[kw.arg] = kw.value.value
+            for sub in ast.walk(kw.value):
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    for m in tp_re.finditer(sub.value):
+                        call_tp_paths.add(m.group(1))
+        if kw_strs.get("name") not in used_repos:
+            continue
+        bf_rel = _workspace_label_to_rel_path(kw_strs.get("build_file", ""))
+        if fn_id in repo_rule_bzl_by_var:
+            bzl_rel = repo_rule_bzl_by_var[fn_id]
+            ok_bzl, bzl_tp_paths = _is_repo_rule_only_bzl(bzl_rel)
+            if not ok_bzl:
+                continue
+            if not any(
+                _is_blocked_third_party_source_tree(tp)
+                for tp in (call_tp_paths | bzl_tp_paths)
+            ):
+                continue
+            if bf_rel and not _is_file_export_overlay_build_file(bf_rel):
+                continue
+            allowed_files.add(bzl_rel)
+            if bf_rel:
+                allowed_files.add(bf_rel)
+        elif fn_id in ("new_local_repository", "local_repository"):
+            repo_path = kw_strs.get("path", "")
+            if (
+                repo_path
+                and _is_blocked_third_party_source_tree(repo_path)
+                and bf_rel
+                and _is_file_export_overlay_build_file(bf_rel)
+            ):
+                allowed_files.add(bf_rel)
+    for rel_f in list(allowed_files):
+        host_pkg = os.path.dirname(rel_f)
+        host_bz = f"{host_pkg}/BUILD.bazel"
+        if host_pkg and host_bz in changed and is_exports_files_only_bazel_pkg(host_pkg):
+            allowed_files.add(host_bz)
+    return allowed_files
+
+
+in_scope_module_repo_files = collect_in_scope_module_repo_files()
+
+
 def is_allowed_scope(path: str) -> bool:
+    norm = path.strip("/")
+    if norm.startswith("zircon/vdso/"):
+        return False
+    # Allow //docs/ includecode repoints that follow a BUILD.gn region moved to BUILD.bazel.
+    if pcl.is_includecode_repoint_edit(workdir, change_base, norm):
+        return True
+    if norm.startswith("build/"):
+        if norm.startswith("build/beads/"):
+            return True
+        if norm.startswith("build/secondary/"):
+            pass
+        elif norm in ALLOWED_BAZEL_RULES_ALLOWLIST_FILES:
+            return is_allowed_bazel_rules_allowlist_removal(norm)
+        else:
+            return False
+    if norm in ALLOWED_GLOBAL_FILES:
+        return True
+    if norm.endswith((".bzl", ".gni")):
+        if not is_minor_string_list_bzl_or_gni_edit(norm):
+            return False
     if not target_dirs:
         return True
-    norm = path.strip("/")
     pkg_dir = os.path.dirname(norm)
     for td in list(target_dirs) + sorted(dependency_dirs):
         if norm == td or norm.startswith(td + "/"):
@@ -1366,15 +2393,19 @@ def is_allowed_scope(path: str) -> bool:
         return True
     if is_owners_scoped_allowlist_split(norm):
         return True
+    if is_gn_bridge_cutover_verification_test_edit(norm):
+        return True
+    if norm in in_scope_module_repo_files:
+        return True
     if is_shared_bazel_rule_file(norm):
-        base_txt = "\n".join(git_lines(["show", f"{change_base}:{norm}"]))
-        in_scope = list(target_dirs) + sorted(dependency_dirs)
-        if base_txt and any(
-            re.search(r"//"+ re.escape(td) + r'(?=[:"/\s\'])', base_txt)
-            for td in in_scope
-        ):
+        if _shared_bzl_references_in_scope_at_base(norm):
             return True
         return is_required_bzl_visibility_allowlist_edit(norm)
+    if (
+        is_required_bzl_visibility_allowlist_edit(norm)
+        or is_local_repo_overlay_export_edit(norm)
+    ):
+        return True
     if (
         os.path.basename(norm) in ("BUILD.bazel", "BUILD", "BUILD.gn")
         or norm.endswith((".bzl", ".gni", ".cml"))
@@ -1402,6 +2433,12 @@ def is_allowed_scope(path: str) -> bool:
                             return False
                 except OSError:
                     pass
+        return True
+    if os.path.basename(norm) in ("BUILD.bazel", "BUILD") and is_collateral_upstream_bazel_update(
+        pkg_dir
+    ):
+        return True
+    if os.path.basename(norm) == "BUILD.gn" and is_collateral_upstream_gn_sync(pkg_dir):
         return True
     if is_relocated_in_scope_cml(norm):
         return True
@@ -1443,19 +2480,7 @@ def is_allowed_scope(path: str) -> bool:
     for prefix in ALLOWED_GLOBAL_PREFIXES:
         if norm.startswith(prefix):
             return True
-    if norm in (
-        "build/BUILD.gn",
-        "build/BUILD.bazel",
-        "tools/BUILD.gn",
-        "tools/BUILD.bazel",
-        "src/BUILD.gn",
-        "src/BUILD.bazel",
-        "sdk/BUILD.gn",
-        "sdk/BUILD.bazel",
-        "sdk/atom_lists.bzl",
-        "sdk/fidl/BUILD.gn",
-        "sdk/fidl/category_lists.bzl",
-    ):
+    if norm in ALLOWED_GLOBAL_FILES:
         return True
     # Allow ancestor BUILD.gn / BUILD.bazel files of a collateral-modified package
     # (e.g. wiring a pre-existing test in a dependency package into its ancestor
@@ -1468,7 +2493,10 @@ def is_allowed_scope(path: str) -> bool:
                 ch_pkg
                 and ch_pkg.startswith(pkg_dir + "/")
                 and os.path.basename(ch_norm) in ("BUILD.gn", "BUILD.bazel")
-                and references_in_scope_package_at_base(ch_norm)
+                and (
+                    references_in_scope_package_at_base(ch_norm)
+                    or is_collateral_upstream_bazel_update(ch_pkg)
+                )
             ):
                 return True
     # Build files under bundles/ wire migrated targets and tests into CQ (test groups,
@@ -1481,15 +2509,11 @@ def is_allowed_scope(path: str) -> bool:
     return is_rust_crates_build_file(norm)
 
 
-RUST_CRATES = "third_party/rust_crates/"
-
-
 def is_rust_crates_build_file(norm: str) -> bool:
     """The in-tree build of the vendored Rust crates, which migrations may fix.
 
-    Their build files (generated from crate annotations under build/bazel/, already
-    allowed), Cargo.toml/Cargo.lock, and compat/ shims are maintained in-tree. Vendored
-    crate sources are not.
+    Their build files, Cargo.toml/Cargo.lock, and compat/ shims are maintained in-tree.
+    Vendored crate sources are not.
     """
     if not norm.startswith(RUST_CRATES):
         return False
@@ -1503,48 +2527,107 @@ findings = []
 
 for path in sorted(changed):
     if not is_allowed_scope(path):
-        if is_shared_bazel_rule_file(path.strip("/")):
-            if path.strip("/") == "build/bazel/debug_symbols/aspects.bzl":
-                shared_rem = (
-                    f"Revert '{path}' (`git checkout {change_base} -- {path}`). When "
-                    "`export_last_build_debug_symbols` fails because an assembled "
-                    "`fx_package` packages a binary that depends on a `rustc_dylib` "
-                    "(`rust_dylib_library`), do not edit `build/bazel/debug_symbols/aspects.bzl`; "
-                    "instead remove the assembled `fx_package` target from the package's "
-                    "`BUILD.bazel`, keep `fuchsia_package` above `## BAZEL2GN SENTINEL` in "
-                    "`BUILD.gn` (while keeping `fx_component`, `fx_component_manifest`, and "
-                    "`fx_packaged_binary` in `BUILD.bazel`), keep its "
-                    "`//bundles/assembly/bazel_inputs/<dir>` bridge in "
-                    "`bundles/assembly/BUILD.bazel` and `bundles/assembly/bazel_inputs/BUILD.gn`, "
-                    "and remove the package target from `Bazel-Migration-Target:` footers and "
-                    "commit-body migration claims."
-                )
-            else:
-                shared_rem = (
-                    f"Revert '{path}' (`git checkout {change_base} -- {path}`). If a migrated "
-                    "target calls a legacy host-tool macro (`go_binary_host_tool`, "
-                    "`py_binary_host_tool`) and fails visibility on "
-                    "`//build/bazel/versioning:is_api_level_PLATFORM`, add `\"//<dir>:__pkg__\"` "
-                    "to `is_api_level_PLATFORM`'s `visibility` list in "
-                    "'build/bazel/versioning/BUILD.bazel' instead of editing "
-                    f"'{path}'. If a target passes a redundant or unsupported attribute (such as "
-                    "`output_name` matching `name` on `go_binary_host_tool`), omit or fix the "
-                    "attribute in the target's BUILD.bazel."
-                )
+        norm = path.strip("/")
+        if norm.startswith("zircon/vdso/"):
             _emit(
                 findings,
-                "out_of_scope_package_modified",
+                "zircon_vdso_modification_forbidden",
                 "error",
                 path,
                 1,
                 (
-                    f"File '{path}' is a shared Bazel rule or macro definition outside the "
-                    f"assigned target directory scope ({', '.join(target_dirs)}). Package "
-                    "migrations must never modify shared rules or macros under '//build/bazel/' "
-                    "(such as loading private rule definitions, wrapping macros, editing debug "
-                    "symbol aspects, or adding custom attributes)."
+                    f"Planter must not modify files under '//zircon/vdso/' ('{path}'). "
+                    "Changes to '//zircon/vdso/' are disallowed in Planter migrations."
                 ),
-                shared_rem,
+                (
+                    f"Revert '{path}' (`git checkout {change_base} -- {path}`). If this migration "
+                    "cannot proceed without modifying '//zircon/vdso/', abort the migration by "
+                    "setting `macro_change_needed: true` and `macro_handoff_markdown` in "
+                    "`CoderReport` and returning `modified_files: []`."
+                ),
+            )
+        elif norm.startswith("build/config/"):
+            _emit(
+                findings,
+                "build_config_modification_forbidden",
+                "error",
+                path,
+                1,
+                (
+                    f"Planter must not modify files under '//build/config/' ('{path}'). "
+                    "Needing to modify '//build/config/' during a migration should be rare, and "
+                    "Planter does not handle it well, which can lead to lots of dispute comments. "
+                    "If a human tells Planter to continue, Planter should separate '//build/config/' "
+                    "changes into a separate CL and not treat them as a migration."
+                ),
+                (
+                    f"Revert '{path}' (`git checkout {change_base} -- {path}` or `rm -f {path}`). "
+                    "If this migration genuinely requires changes under '//build/config/', abort "
+                    "the migration by setting `macro_change_needed: true` and "
+                    "`macro_handoff_markdown` in `CoderReport` and returning `modified_files: []`."
+                ),
+            )
+        elif norm.startswith("build/bazel/rules/"):
+            allowlist_desc = ", ".join(
+                f"'{p}'" for p in ALLOWED_BAZEL_RULES_ALLOWLIST_FILES
+            )
+            _emit(
+                findings,
+                "bazel_rules_modification_forbidden",
+                "error",
+                path,
+                1,
+                (
+                    f"Planter must not modify files in 'build/bazel/rules/' ('{path}') except "
+                    f"removing allowlist entries from {allowlist_desc}."
+                ),
+                (
+                    f"Revert '{path}' (`git checkout {change_base} -- {path}` or `rm -f {path}`). "
+                    "If this migration requires adding or modifying a Bazel rule or macro, set "
+                    "`macro_change_needed: true` and `macro_handoff_markdown` in `CoderReport` and "
+                    "abort the migration (`modified_files: []`)."
+                ),
+            )
+        elif norm.startswith("build/") and not norm.startswith(("build/beads/", "build/secondary/")):
+            allowlist_desc = ", ".join(
+                f"'{p}'" for p in ALLOWED_BAZEL_RULES_ALLOWLIST_FILES
+            )
+            _emit(
+                findings,
+                "build_directory_modification_forbidden",
+                "error",
+                path,
+                1,
+                (
+                    f"Planter must not modify files under '//build/' ('{path}') except "
+                    f"'//build/beads/**' and removing allowlist entries from "
+                    f"{allowlist_desc}."
+                ),
+                (
+                    f"Revert '{path}' (`git checkout {change_base} -- {path}` or `rm -f {path}`). "
+                    "If this migration cannot proceed without modifying '//build/', set "
+                    "`macro_change_needed: true` and `macro_handoff_markdown` in `CoderReport` and "
+                    "abort the migration (`modified_files: []`)."
+                ),
+            )
+        elif norm.endswith((".bzl", ".gni")) and not is_minor_string_list_bzl_or_gni_edit(norm):
+            _emit(
+                findings,
+                "macro_or_rule_modification_forbidden",
+                "error",
+                path,
+                1,
+                (
+                    f"Planter must not add or modify macros or rules in '.bzl' or '.gni' files "
+                    f"('{path}'); only minor string-literal additions or removals in existing "
+                    "lists in '.bzl'/'.gni' files outside '//build/' are permitted."
+                ),
+                (
+                    f"Revert '{path}' (`git checkout {change_base} -- {path}` or `rm -f {path}`). "
+                    "If this migration requires modifying or adding a macro or rule, set "
+                    "`macro_change_needed: true` and `macro_handoff_markdown` in `CoderReport` and "
+                    "abort the migration (`modified_files: []`)."
+                ),
             )
         else:
             out_msg = (
@@ -1717,6 +2800,7 @@ def _is_ancillary_only_bazel_edit(norm: str) -> bool:
         or is_test_suite_only_bazel_package(pkg)
         or is_surgical_upstream_dep_repair(norm)
         or is_collateral_existing_bazel_edit(pkg)
+        or is_collateral_upstream_bazel_update(pkg)
         or is_host_os_constraints_upgrade_edit(norm)
     ):
         return True
@@ -1793,7 +2877,13 @@ def check_cl_scoping_guidelines():
         norm = p.strip("/")
         if norm.startswith(ALLOWED_GLOBAL_PREFIXES) or norm.startswith(("bundles/", RUST_CRATES)):
             continue
-        if is_host_os_constraints_upgrade_edit(norm):
+        if (
+            is_host_os_constraints_upgrade_edit(norm)
+            or is_required_bzl_visibility_allowlist_edit(norm)
+            or is_local_repo_overlay_export_edit(norm)
+        ):
+            continue
+        if norm in in_scope_module_repo_files:
             continue
         pkg = os.path.dirname(norm)
         if pkg and is_test_suite_only_bazel_package(pkg):
@@ -1801,7 +2891,10 @@ def check_cl_scoping_guidelines():
         if os.path.basename(norm) in ("BUILD.bazel", "BUILD.gn") and (
             is_exports_files_only_bazel_pkg(pkg)
             or is_collateral_existing_bazel_edit(pkg)
+            or is_collateral_upstream_bazel_update(pkg)
         ):
+            continue
+        if os.path.basename(norm) == "BUILD.gn" and is_collateral_upstream_gn_sync(pkg):
             continue
         added_lines += count_authored_added_lines(norm)
     anchor = f"{target_dirs[0]}/BUILD.bazel" if target_dirs else f"{sorted(migrated_pkgs)[0]}/BUILD.bazel"
@@ -2064,8 +3157,13 @@ def check_idk_atom_allowlists():
                 "in `sdk/atom_lists.bzl` (`verify_target_is_in_allowlist` fails loading)."
             )
             rem = (
-                f'Add `"{atom_label}"` (kept sorted) to {target_list_desc} in '
-                "`sdk/atom_lists.bzl`."
+                f'Edit `{workdir}/sdk/atom_lists.bzl` in place using `edit_file` with that '
+                f'exact absolute filesystem path or via `python3` in `run_command` (never '
+                f'pass a relative path or `//sdk/atom_lists.bzl` to `write_file`, which '
+                f'triggers a spurious `write_file` permission error outside the target '
+                f'directory) to add `"{atom_label}"` (kept sorted) to {target_list_desc}. '
+                f'Do not dispute `missing_idk_atom_allowlist` unless the mount itself '
+                f'fails with `workspace_write_error`.'
             )
             _emit(
                 findings,
@@ -2079,6 +3177,750 @@ def check_idk_atom_allowlists():
 
 
 check_idk_atom_allowlists()
+
+
+# Collect package directories registered for multi-host (including host_arm64_toolchain)
+# cross-compilation in CQ via bundles/infra/test/BUILD.gn (`_all_host_tools`).
+def load_cross_compiled_host_tool_pkgs() -> set[str]:
+    infra_gn = os.path.join(workdir, "bundles/infra/test/BUILD.gn")
+    if not os.path.isfile(infra_gn):
+        return set()
+    try:
+        with open(infra_gn, encoding="utf-8") as f:
+            infra_txt = re.sub(r"#[^\n]*", "", f.read())
+    except OSError:
+        return set()
+    m_all = re.search(r"\b_all_host_tools\s*=\s*\[([^\]]*)\]", infra_txt)
+    if not m_all:
+        return set()
+    pkgs: set[str] = set()
+    expand_ffx_bins = False
+    for raw_pkg, raw_tgt in re.findall(r'"//([^":\s]+)(?::([^"\s]+))?"', m_all.group(1)):
+        clean_pkg = raw_pkg.strip("/")
+        if clean_pkg == "src/developer/ffx/tools" and raw_tgt == "bins":
+            expand_ffx_bins = True
+        elif clean_pkg:
+            pkgs.add(clean_pkg)
+    if expand_ffx_bins:
+        ffx_tools_gn = os.path.join(workdir, "src/developer/ffx/tools/BUILD.gn")
+        try:
+            with open(ffx_tools_gn, encoding="utf-8") as f:
+                tools_txt = re.sub(r"#[^\n]*", "", f.read())
+            m_tools = re.search(r"\b_tools\s*=\s*\[([^\]]*)\]", tools_txt)
+            if m_tools:
+                for entry in re.findall(r'"([^"]+)"', m_tools.group(1)):
+                    stem = entry.split(":", 1)[0].strip("/")
+                    if entry.startswith("//"):
+                        pkgs.add(entry[2:].split(":", 1)[0].strip("/"))
+                    elif stem:
+                        pkgs.add(f"src/developer/ffx/tools/{stem}")
+        except OSError:
+            pass
+    return pkgs
+
+
+# Evaluate string label constants in a BUILD.bazel attribute expression (excluding exec-only
+# attributes like proc_macro_deps) for transitive target-platform compatibility checks.
+def _eval_bazel_dep_labels(node: ast.AST, env: dict[str, list[str]]) -> list[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, (ast.List, ast.Tuple)):
+        out: list[str] = []
+        for elt in node.elts:
+            out.extend(_eval_bazel_dep_labels(elt, env))
+        return out
+    if isinstance(node, ast.Name) and node.id in env:
+        return list(env[node.id])
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _eval_bazel_dep_labels(node.left, env) + _eval_bazel_dep_labels(node.right, env)
+    out = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+            out.append(sub.value)
+    return out
+
+
+# Flag migrated cross-compiled host tools (`idk_*_host_tool`, `idk_ffx_tool`, `idk_host_tool`,
+# `bazel_ffx_tool` / `bazel_host_tool` bridges, and tools in `//bundles/infra/test:host_tools`
+# built for `host_linux_arm64` on arm64 CQ builders) when any non-exec transitive in-tree Bazel
+# dependency or macro still pins `HOST_CONSTRAINTS` (`x86_64`).
+def check_cross_compiled_host_tool_deps():
+    cross_pkgs = load_cross_compiled_host_tool_pkgs()
+    pkg_graph_cache = {}
+    exec_only_rule_names = {"rustc_proc_macro", "rust_proc_macro"}
+    dep_kw_names = (
+        "deps",
+        "implementation_deps",
+        "public_deps",
+        "non_test_deps",
+        "link_deps",
+        "embed",
+        "library",
+        "args_deps",
+        "plugin_deps",
+        "crate",
+    )
+    tool_rules = {
+        "cc_binary_host_tool",
+        "ffx_tool",
+        "fx_cc_binary",
+        "go_binary",
+        "go_binary_host_tool",
+        "idk_cc_binary_host_tool",
+        "idk_ffx_tool",
+        "idk_go_binary_host_tool",
+        "idk_host_tool",
+        "idk_rustc_binary_host_tool",
+        "py_binary_host_tool",
+        "py_zipapp_binary",
+        "rustc_binary",
+        "rustc_binary_host_tool",
+    }
+    idk_host_rules = {
+        "idk_cc_binary_host_tool",
+        "idk_ffx_tool",
+        "idk_go_binary_host_tool",
+        "idk_host_tool",
+        "idk_rustc_binary_host_tool",
+    }
+
+    reg_txt_cache: dict[str, str] = {}
+
+    def is_cross_compiled_pkg_in_gn(p_dir: str, gn_clean_txt: str) -> bool:
+        if p_dir in cross_pkgs:
+            return True
+        if gn_clean_txt and re.search(
+            r"\b(?:sdk_atom|sdk_host_tool)\s*\(|\bhost_arm64_toolchain\b", gn_clean_txt
+        ):
+            return True
+        leaf = os.path.basename(p_dir)
+        for reg_rel, allow_rel_leaf in (
+            ("bundles/infra/test/BUILD.gn", False),
+            ("src/developer/ffx/tools/BUILD.gn", p_dir.startswith("src/developer/ffx/tools/")),
+            ("sdk/BUILD.gn", False),
+            ("sdk/atom_lists.bzl", False),
+        ):
+            if reg_rel not in reg_txt_cache:
+                reg_path = os.path.join(workdir, reg_rel)
+                try:
+                    reg_txt_cache[reg_rel] = re.sub(
+                        r"#[^\n]*",
+                        "",
+                        open(reg_path, encoding="utf-8", errors="ignore").read(),
+                    )
+                except OSError:
+                    reg_txt_cache[reg_rel] = ""
+            reg_txt = reg_txt_cache[reg_rel]
+            if not reg_txt:
+                continue
+            if re.search(r'"//' + re.escape(p_dir) + r'(?=[":])', reg_txt):
+                return True
+            if allow_rel_leaf and re.search(
+                r'"' + re.escape(leaf) + r'(?=[":])', reg_txt
+            ):
+                return True
+        return False
+
+    bzl_hc_cache: dict[tuple[str, str], tuple[str, list[str]]] = {}
+
+    def inspect_workspace_bzl(
+        bzl_rel: str,
+        sym: str = "",
+        _seen: frozenset[tuple[str, str]] = frozenset(),
+    ) -> tuple[str, list[str]]:
+        cache_key = (bzl_rel, sym)
+        if cache_key in bzl_hc_cache:
+            return bzl_hc_cache[cache_key]
+        if cache_key in _seen:
+            return "", []
+        cand_rel = bzl_rel
+        cur_sym = sym
+        bad_bzl = ""
+        injected_deps: list[str] = []
+        seen_hops = set(_seen)
+        for _ in range(4):
+            hop_key = (cand_rel, cur_sym)
+            if hop_key in seen_hops:
+                break
+            seen_hops.add(hop_key)
+            cand_abs = os.path.join(workdir, cand_rel)
+            if not os.path.isfile(cand_abs):
+                break
+            try:
+                with open(cand_abs, encoding="utf-8", errors="ignore") as bf:
+                    bzl_txt = bf.read()
+            except OSError:
+                break
+            clean_bzl = re.sub(r"#[^\n]*", "", bzl_txt)
+            try:
+                bzl_ast = ast.parse(bzl_txt, filename=cand_abs)
+            except SyntaxError:
+                bzl_ast = None
+            target_nodes = None
+            bzl_loads: dict[str, tuple[str, str]] = {}
+            called_ext_syms: list[str] = []
+            if bzl_ast is not None and cur_sym:
+                alias_map: dict[str, str] = {}
+                defs_by_name: dict[str, list[ast.AST]] = {}
+                for st in bzl_ast.body:
+                    if (
+                        isinstance(st, ast.Expr)
+                        and isinstance(st.value, ast.Call)
+                        and isinstance(st.value.func, ast.Name)
+                        and st.value.func.id == "load"
+                        and st.value.args
+                        and isinstance(st.value.args[0], ast.Constant)
+                        and isinstance(st.value.args[0].value, str)
+                    ):
+                        raw_ld = st.value.args[0].value
+                        if raw_ld.startswith(":"):
+                            pkg_p = os.path.dirname(cand_rel).strip("/")
+                            ld_rel = (
+                                f"{pkg_p}/{raw_ld[1:].lstrip('/')}"
+                                if pkg_p
+                                else raw_ld[1:].lstrip("/")
+                            )
+                        else:
+                            m_ld = re.match(r"^@?//([^:]+):(.+\.bzl)$", raw_ld)
+                            ld_rel = (
+                                f"{m_ld.group(1).strip('/')}/{m_ld.group(2).lstrip('/')}"
+                                if m_ld
+                                else ""
+                            )
+                        if ld_rel:
+                            for l_arg in st.value.args[1:]:
+                                if isinstance(l_arg, ast.Constant) and isinstance(
+                                    l_arg.value, str
+                                ):
+                                    bzl_loads[l_arg.value] = (ld_rel, l_arg.value)
+                            for l_kw in st.value.keywords:
+                                if (
+                                    l_kw.arg
+                                    and isinstance(l_kw.value, ast.Constant)
+                                    and isinstance(l_kw.value.value, str)
+                                ):
+                                    bzl_loads[l_kw.arg] = (ld_rel, l_kw.value.value)
+                    elif isinstance(st, ast.FunctionDef):
+                        defs_by_name.setdefault(st.name, []).append(st)
+                    elif isinstance(st, ast.Assign):
+                        for tgt in st.targets:
+                            if isinstance(tgt, ast.Name):
+                                if isinstance(st.value, ast.Name):
+                                    alias_map[tgt.id] = st.value.id
+                                else:
+                                    defs_by_name.setdefault(tgt.id, []).append(st)
+                resolved_sym = cur_sym
+                seen_aliases: set[str] = set()
+                while resolved_sym in alias_map and resolved_sym not in seen_aliases:
+                    seen_aliases.add(resolved_sym)
+                    resolved_sym = alias_map[resolved_sym]
+                if resolved_sym not in defs_by_name and resolved_sym in bzl_loads:
+                    cand_rel, cur_sym = bzl_loads[resolved_sym]
+                    continue
+                if resolved_sym in defs_by_name:
+                    target_nodes = []
+                    queue = [resolved_sym]
+                    visited_syms = {resolved_sym}
+                    while queue:
+                        s_nm = queue.pop()
+                        for d_node in defs_by_name.get(s_nm, ()):
+                            target_nodes.append(d_node)
+                            for sub_n in ast.walk(d_node):
+                                if (
+                                    isinstance(sub_n, ast.Name)
+                                    and sub_n.id in defs_by_name
+                                    and sub_n.id not in visited_syms
+                                ):
+                                    visited_syms.add(sub_n.id)
+                                    queue.append(sub_n.id)
+                                elif (
+                                    isinstance(sub_n, ast.Call)
+                                    and isinstance(sub_n.func, ast.Name)
+                                    and sub_n.func.id in bzl_loads
+                                    and sub_n.func.id not in called_ext_syms
+                                ):
+                                    called_ext_syms.append(sub_n.func.id)
+            scan_roots = (
+                target_nodes
+                if target_nodes is not None
+                else ([bzl_ast] if bzl_ast is not None else [])
+            )
+            if "@platforms//host:constraints.bzl" in clean_bzl:
+                if bzl_ast is not None:
+                    bzl_hc_vars: set[str] = set()
+                    for st in bzl_ast.body:
+                        if (
+                            isinstance(st, ast.Expr)
+                            and isinstance(st.value, ast.Call)
+                            and isinstance(st.value.func, ast.Name)
+                            and st.value.func.id == "load"
+                            and st.value.args
+                            and isinstance(st.value.args[0], ast.Constant)
+                            and st.value.args[0].value
+                            == "@platforms//host:constraints.bzl"
+                        ):
+                            for l_arg in st.value.args[1:]:
+                                if (
+                                    isinstance(l_arg, ast.Constant)
+                                    and l_arg.value == "HOST_CONSTRAINTS"
+                                ):
+                                    bzl_hc_vars.add("HOST_CONSTRAINTS")
+                            for l_kw in st.value.keywords:
+                                if (
+                                    l_kw.arg
+                                    and isinstance(l_kw.value, ast.Constant)
+                                    and l_kw.value.value == "HOST_CONSTRAINTS"
+                                ):
+                                    bzl_hc_vars.add(l_kw.arg)
+
+                    def _expr_uses_hc(node):
+                        if node is None or isinstance(node, ast.Compare):
+                            return False
+                        if isinstance(node, ast.Name):
+                            return node.id in bzl_hc_vars
+                        return any(
+                            _expr_uses_hc(ch) for ch in ast.iter_child_nodes(node)
+                        )
+
+                    if bzl_hc_vars:
+                        changed_hc = True
+                        while changed_hc:
+                            changed_hc = False
+                            for st in bzl_ast.body:
+                                if isinstance(st, ast.Assign) and _expr_uses_hc(
+                                    st.value
+                                ):
+                                    for tgt in st.targets:
+                                        if (
+                                            isinstance(tgt, ast.Name)
+                                            and tgt.id not in bzl_hc_vars
+                                        ):
+                                            bzl_hc_vars.add(tgt.id)
+                                            changed_hc = True
+                            for r_node in scan_roots:
+                                for st in ast.walk(r_node):
+                                    if isinstance(st, ast.Assign) and _expr_uses_hc(
+                                        st.value
+                                    ):
+                                        for tgt in st.targets:
+                                            if (
+                                                isinstance(tgt, ast.Name)
+                                                and tgt.id not in bzl_hc_vars
+                                            ):
+                                                bzl_hc_vars.add(tgt.id)
+                                                changed_hc = True
+                                            elif (
+                                                isinstance(tgt, ast.Subscript)
+                                                and isinstance(tgt.slice, ast.Constant)
+                                                and tgt.slice.value
+                                                == "target_compatible_with"
+                                            ):
+                                                bad_bzl = cand_rel
+                        for r_node in scan_roots:
+                            if bad_bzl:
+                                break
+                            for sub in ast.walk(r_node):
+                                if isinstance(sub, ast.Call):
+                                    if any(
+                                        kw.arg in ("target_compatible_with", "default")
+                                        and _expr_uses_hc(kw.value)
+                                        for kw in sub.keywords
+                                    ):
+                                        bad_bzl = cand_rel
+                                        break
+                                    if (
+                                        isinstance(sub.func, ast.Attribute)
+                                        and sub.func.attr == "setdefault"
+                                        and len(sub.args) >= 2
+                                        and isinstance(sub.args[0], ast.Constant)
+                                        and sub.args[0].value == "target_compatible_with"
+                                        and _expr_uses_hc(sub.args[1])
+                                    ):
+                                        bad_bzl = cand_rel
+                                        break
+                                elif isinstance(sub, ast.FunctionDef) and any(
+                                    _expr_uses_hc(d)
+                                    for d in list(sub.args.defaults)
+                                    + list(sub.args.kw_defaults)
+                                ):
+                                    bad_bzl = cand_rel
+                                    break
+                elif re.search(
+                    r"\b(?:target_compatible_with|default)\s*=\s*(?![^\n,)]*!=)[^\n,)]*\bHOST_CONSTRAINTS\b",
+                    clean_bzl,
+                ):
+                    bad_bzl = cand_rel
+            if bzl_ast is not None:
+                top_consts: dict[str, list[str]] = {}
+                for st in bzl_ast.body:
+                    if isinstance(st, ast.Assign):
+                        vals = [
+                            c.value
+                            for c in ast.walk(st.value)
+                            if isinstance(c, ast.Constant) and isinstance(c.value, str)
+                        ]
+                        for tgt in st.targets:
+                            if isinstance(tgt, ast.Name):
+                                top_consts[tgt.id] = vals
+                fn_roots = (
+                    [n for n in scan_roots if isinstance(n, ast.FunctionDef)]
+                    if target_nodes is not None
+                    else [st for st in bzl_ast.body if isinstance(st, ast.FunctionDef)]
+                )
+                for st in fn_roots:
+                    for sub in ast.walk(st):
+                        if not isinstance(sub, ast.Call):
+                            continue
+                        for kw in sub.keywords:
+                            if kw.arg not in dep_kw_names:
+                                continue
+                            for item in ast.walk(kw.value):
+                                cands = []
+                                if isinstance(item, ast.Constant) and isinstance(
+                                    item.value, str
+                                ):
+                                    cands.append(item.value)
+                                elif isinstance(item, ast.Name) and item.id in top_consts:
+                                    cands.extend(top_consts[item.id])
+                                for s in cands:
+                                    norm_s = re.sub(r"^@@?//", "//", s.strip())
+                                    if (
+                                        norm_s.startswith("//")
+                                        and not norm_s.startswith(
+                                            ("//third_party/", "//build/")
+                                        )
+                                        and " " not in norm_s
+                                        and norm_s not in injected_deps
+                                    ):
+                                        injected_deps.append(norm_s)
+            if target_nodes is not None and called_ext_syms:
+                frozen_seen = frozenset(seen_hops)
+                for c_sym in called_ext_syms:
+                    sub_bad, sub_deps = inspect_workspace_bzl(
+                        *bzl_loads[c_sym], _seen=frozen_seen
+                    )
+                    if not bad_bzl and sub_bad:
+                        bad_bzl = sub_bad
+                    for d_s in sub_deps:
+                        if d_s not in injected_deps:
+                            injected_deps.append(d_s)
+            if bad_bzl:
+                break
+            if (
+                bzl_ast is None
+                and "def " not in clean_bzl
+                and "macro(" not in clean_bzl
+                and "rule(" not in clean_bzl
+            ):
+                m_fwd = re.search(r'load\(\s*"//([^":]+):([^"]+\.bzl)"', clean_bzl)
+                if m_fwd:
+                    cand_rel = (
+                        f"{m_fwd.group(1).strip('/')}/{m_fwd.group(2).lstrip('/')}"
+                    )
+                    continue
+            break
+        if not _seen:
+            bzl_hc_cache[cache_key] = (bad_bzl, injected_deps)
+        return bad_bzl, injected_deps
+
+    def parse_pkg_targets(p_dir: str):
+        if p_dir in pkg_graph_cache:
+            return pkg_graph_cache[p_dir]
+        bz_p = os.path.join(workdir, p_dir, "BUILD.bazel")
+        if not os.path.isfile(bz_p):
+            bz_p = os.path.join(workdir, p_dir, "BUILD")
+            if not os.path.isfile(bz_p):
+                pkg_graph_cache[p_dir] = {}
+                return {}
+        try:
+            with open(bz_p, encoding="utf-8", errors="ignore") as f:
+                txt = f.read()
+            p_tree = ast.parse(txt, filename=f"{p_dir}/BUILD.bazel")
+        except (OSError, SyntaxError):
+            pkg_graph_cache[p_dir] = {}
+            return {}
+        env: dict[str, list[str]] = {}
+        hc_vars: set[str] = set()
+        loaded_bzl_by_sym: dict[str, tuple[str, str]] = {}
+        for s_node in p_tree.body:
+            if (
+                isinstance(s_node, ast.Assign)
+                and len(s_node.targets) == 1
+                and isinstance(s_node.targets[0], ast.Name)
+            ):
+                v_name = s_node.targets[0].id
+                env[v_name] = _eval_bazel_dep_labels(s_node.value, env)
+                if any(
+                    isinstance(n, ast.Name) and n.id == "HOST_CONSTRAINTS"
+                    for n in ast.walk(s_node.value)
+                ):
+                    hc_vars.add(v_name)
+            elif (
+                isinstance(s_node, ast.Expr)
+                and isinstance(s_node.value, ast.Call)
+                and isinstance(s_node.value.func, ast.Name)
+                and s_node.value.func.id == "load"
+                and s_node.value.args
+                and isinstance(s_node.value.args[0], ast.Constant)
+                and isinstance(s_node.value.args[0].value, str)
+            ):
+                m_bzl = re.match(
+                    r"^@?//([^:]+):(.+\.bzl)$", s_node.value.args[0].value
+                )
+                if m_bzl:
+                    b_rel = f"{m_bzl.group(1).strip('/')}/{m_bzl.group(2).lstrip('/')}"
+                    for l_arg in s_node.value.args[1:]:
+                        if isinstance(l_arg, ast.Constant) and isinstance(
+                            l_arg.value, str
+                        ):
+                            loaded_bzl_by_sym[l_arg.value] = (b_rel, l_arg.value)
+                    for l_kw in s_node.value.keywords:
+                        if l_kw.arg:
+                            orig_sym = (
+                                l_kw.value.value
+                                if isinstance(l_kw.value, ast.Constant)
+                                and isinstance(l_kw.value.value, str)
+                                else l_kw.arg
+                            )
+                            loaded_bzl_by_sym[l_kw.arg] = (b_rel, orig_sym)
+        tgts = {}
+        for s_node in p_tree.body:
+            if not (
+                isinstance(s_node, ast.Expr)
+                and isinstance(s_node.value, ast.Call)
+                and isinstance(s_node.value.func, ast.Name)
+            ):
+                continue
+            r_fn = s_node.value.func.id
+            is_exec_rule = r_fn in exec_only_rule_names
+            kws = {kw.arg: kw.value for kw in s_node.value.keywords if kw.arg}
+            nm = kws.get("name")
+            if not (isinstance(nm, ast.Constant) and isinstance(nm.value, str)):
+                continue
+            dep_lbls: list[str] = []
+            uses_hc = False
+            macro_bzl = ""
+            if not is_exec_rule:
+                if r_fn in loaded_bzl_by_sym:
+                    macro_bzl, bzl_deps = inspect_workspace_bzl(
+                        *loaded_bzl_by_sym[r_fn]
+                    )
+                    dep_lbls.extend(bzl_deps)
+                for d_attr in dep_kw_names:
+                    if d_attr in kws:
+                        dep_lbls.extend(_eval_bazel_dep_labels(kws[d_attr], env))
+                tcw_val = kws.get("target_compatible_with")
+                uses_hc = bool(
+                    tcw_val is not None
+                    and any(
+                        isinstance(n, ast.Name)
+                        and (n.id == "HOST_CONSTRAINTS" or n.id in hc_vars)
+                        for n in ast.walk(tcw_val)
+                    )
+                )
+            tgts[nm.value] = (
+                r_fn,
+                dep_lbls,
+                uses_hc,
+                macro_bzl,
+                getattr(s_node, "lineno", 1),
+            )
+        pkg_graph_cache[p_dir] = tgts
+        return tgts
+
+    for rel_p, _ in bazel_files:
+        p_dir = os.path.dirname(rel_p).strip("/")
+        if p_dir == "build/bazel/bazel_idk/tests":
+            continue
+        cur_gn_path = os.path.join(workdir, p_dir, "BUILD.gn") if p_dir else ""
+        if (
+            cur_gn_path
+            and not os.path.isfile(cur_gn_path)
+            and not p_dir.startswith("build/secondary/")
+        ):
+            sec_cur_gn = os.path.join(
+                workdir, "build", "secondary", p_dir, "BUILD.gn"
+            )
+            if os.path.isfile(sec_cur_gn):
+                cur_gn_path = sec_cur_gn
+        gn_clean = ""
+        if cur_gn_path and os.path.isfile(cur_gn_path):
+            try:
+                with open(cur_gn_path, encoding="utf-8", errors="ignore") as gf:
+                    gn_clean = re.sub(r"#[^\n]*", "", gf.read())
+            except OSError:
+                gn_clean = ""
+        pkg_is_cross = is_cross_compiled_pkg_in_gn(p_dir, gn_clean)
+        bridged_by_bt: dict[str, tuple[str, str]] = {}
+        if pkg_is_cross and gn_clean:
+            for m_br in re.finditer(
+                r'\b(bazel_ffx_tool|bazel_host_tool|bazel_py_host_tool)\(\s*"([^"]+)"\s*\)\s*\{([^}]*)\}',
+                gn_clean,
+            ):
+                tmpl_name, gn_tname, body_txt = (
+                    m_br.group(1),
+                    m_br.group(2),
+                    m_br.group(3),
+                )
+                m_bt = re.search(r'\bbazel_target\s*=\s*"([^"]+)"', body_txt)
+                if m_bt:
+                    bt_name = m_bt.group(1).strip().split(":")[-1]
+                    if bt_name.endswith("_versioned"):
+                        bt_name = bt_name[: -len("_versioned")]
+                else:
+                    bt_name = gn_tname
+                bridged_by_bt.setdefault(bt_name, (tmpl_name, gn_tname))
+
+        base_bz = git_out(["show", f"{change_base}:{rel_p}"])
+        base_flat = re.sub(r"\s+", "", base_bz)
+        base_gn_raw = ""
+        if p_dir and bridged_by_bt:
+            base_gn_raw = git_out(["show", f"{change_base}:{p_dir}/BUILD.gn"])
+            if not base_gn_raw and not p_dir.startswith("build/secondary/"):
+                base_gn_raw = git_out(
+                    ["show", f"{change_base}:build/secondary/{p_dir}/BUILD.gn"]
+                )
+        base_gn_clean = re.sub(r"#[^\n]*", "", base_gn_raw) if base_gn_raw else ""
+        try:
+            with open(os.path.join(workdir, rel_p), encoding="utf-8") as f:
+                cur_src = f.read()
+            cur_tree = ast.parse(cur_src, filename=rel_p)
+        except (OSError, SyntaxError):
+            continue
+        for stmt in cur_tree.body:
+            if not (
+                isinstance(stmt, ast.Expr)
+                and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Name)
+            ):
+                continue
+            r_fn = stmt.value.func.id
+            if r_fn in exec_only_rule_names:
+                continue
+            t_nm = ""
+            for kw in stmt.value.keywords:
+                if (
+                    kw.arg == "name"
+                    and isinstance(kw.value, ast.Constant)
+                    and isinstance(kw.value.value, str)
+                ):
+                    t_nm = kw.value.value
+            if not t_nm:
+                continue
+            is_bridged = t_nm in bridged_by_bt
+            if (
+                r_fn not in idk_host_rules
+                and not (pkg_is_cross and r_fn in tool_rules)
+                and not is_bridged
+            ):
+                continue
+            seg = ast.get_source_segment(cur_src, stmt) or ""
+            bridged_gn_tname = bridged_by_bt[t_nm][1] if is_bridged else ""
+            bridge_was_at_base = bool(
+                bridged_gn_tname
+                and re.search(
+                    rf'\b(?:bazel_ffx_tool|bazel_host_tool|bazel_py_host_tool)\s*\(\s*"{re.escape(bridged_gn_tname)}"\s*\)',
+                    base_gn_clean,
+                )
+            )
+            if seg and re.sub(r"\s+", "", seg) in base_flat and (
+                not is_bridged or bridge_was_at_base
+            ):
+                continue
+            queue = [(p_dir, t_nm)]
+            seen = set()
+            legacy_hits: list[tuple[str, str]] = []
+            legacy_bzls: list[str] = []
+            while queue and len(seen) < 4000:
+                cur_p, cur_t = queue.pop(0)
+                p_tgts = parse_pkg_targets(cur_p)
+                resolved_t = cur_t
+                if resolved_t not in p_tgts:
+                    for suf in (
+                        "_suite",
+                        "_args",
+                        "_sub_command",
+                        "_config",
+                        "_versioned",
+                        "_metadata",
+                        "_test_data",
+                    ):
+                        if resolved_t.endswith(suf) and resolved_t[: -len(suf)] in p_tgts:
+                            resolved_t = resolved_t[: -len(suf)]
+                            break
+                if (cur_p, resolved_t) in seen or resolved_t not in p_tgts:
+                    continue
+                seen.add((cur_p, resolved_t))
+                t_rule, d_lbls, uses_hc, macro_bzl, _ = p_tgts[resolved_t]
+                if t_rule in exec_only_rule_names:
+                    continue
+                if uses_hc and (cur_p, resolved_t) != (p_dir, t_nm):
+                    if (cur_p, resolved_t) not in legacy_hits:
+                        legacy_hits.append((cur_p, resolved_t))
+                if macro_bzl and macro_bzl not in legacy_bzls:
+                    legacy_bzls.append(macro_bzl)
+                for raw_d in d_lbls:
+                    norm_d = re.sub(r"^@@?//", "//", raw_d.strip())
+                    if norm_d.startswith(":"):
+                        queue.append((cur_p, norm_d[1:]))
+                    elif norm_d.startswith("//") and not norm_d.startswith(
+                        "//third_party/"
+                    ):
+                        dep_p, _, dep_t = norm_d[2:].partition(":")
+                        dep_p = dep_p.strip("/")
+                        dep_t = dep_t or dep_p.rsplit("/", 1)[-1]
+                        if dep_p and dep_t:
+                            queue.append((dep_p, dep_t))
+            if legacy_hits or legacy_bzls:
+                shown_items = [f"`{bp}`" for bp in legacy_bzls] + [
+                    f"`//{hp}:{ht}`" for hp, ht in legacy_hits[:5]
+                ]
+                shown = ", ".join(shown_items)
+                if len(legacy_hits) > 5:
+                    shown += f" (+{len(legacy_hits) - 5} more)"
+                files_str = ", ".join(
+                    dict.fromkeys(
+                        [f"`{bp}`" for bp in legacy_bzls]
+                        + [f"`{hp}/BUILD.bazel`" for hp, _ in legacy_hits]
+                    )
+                )
+                msg = (
+                    f"Cross-compiled host target `//{p_dir}:{t_nm}` ({r_fn}) depends on "
+                    f"already-migrated upstream Bazel target(s) or macro(s) {shown} that "
+                    "still set `target_compatible_with = HOST_CONSTRAINTS` "
+                    "(`@platforms//cpu:x86_64`), which fails "
+                    "`--platforms=//build/bazel/platforms:host_linux_arm64` on arm64 CQ "
+                    "builders."
+                )
+                rem = (
+                    f"In {files_str}, replace "
+                    '`load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")` and '
+                    "`target_compatible_with = HOST_CONSTRAINTS` with "
+                    '`load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")` '
+                    "and `target_compatible_with = HOST_OS_CONSTRAINTS` (keeping all other "
+                    "attributes, macros, and targets in those files unchanged, running "
+                    "`fx bazel2gn -d <pkg>` to sync any dual-built upstream `BUILD.gn` below "
+                    "`## BAZEL2GN SENTINEL` without other `BUILD.gn` edits, and omitting "
+                    "collateral packages from `Bazel-Migration-Target:` and `Also migrated "
+                    "in this change:`; narrow `HOST_CONSTRAINTS` -> `HOST_OS_CONSTRAINTS` "
+                    "collateral updates on already-migrated upstream `BUILD.bazel` and `.bzl` "
+                    "files are exempt from the 5-directory CL scope limit, pre-existing "
+                    "upstream `test_deps` checks, and upstream `:all` builds), then verify "
+                    "with `fx bazel build --config=host "
+                    f"--platforms=//build/bazel/platforms:host_linux_arm64 //{p_dir}:{t_nm}`."
+                )
+                _emit(
+                    findings,
+                    "transitive_legacy_host_constraints",
+                    "error",
+                    rel_p,
+                    getattr(stmt, "lineno", 1),
+                    msg,
+                    rem,
+                )
+
+
+check_cross_compiled_host_tool_deps()
 
 for rel_path, full_path in bazel_files:
     try:
@@ -2130,6 +3972,10 @@ for rel_path, full_path in bazel_files:
         return re.sub(r"\s+", "", attr_snippet) in b_flat
 
     base_gn_lines = git_lines(["show", f"{change_base}:{pkg_dir}/BUILD.gn"])
+    if not base_gn_lines and pkg_dir and not pkg_dir.startswith("build/secondary/"):
+        base_gn_lines = git_lines(
+            ["show", f"{change_base}:build/secondary/{pkg_dir}/BUILD.gn"]
+        )
     base_gn_text = "\n".join(base_gn_lines)
     src_lines = source.splitlines()
 
@@ -2137,13 +3983,21 @@ for rel_path, full_path in bazel_files:
     # so unit-test rustc_test targets can be checked for `crate = ":<lib>"` reuse and
     # valid bazel2gn test output_name disambiguation.
     pkg_rustc_libs = {}
+    pkg_rust_crate_names = {}
     for stmt_node in ast.walk(tree):
         if isinstance(stmt_node, ast.Call) and isinstance(stmt_node.func, ast.Name):
-            if stmt_node.func.id in (
+            fn_id = stmt_node.func.id
+            if fn_id in (
                 "rustc_library",
                 "rustc_proc_macro",
                 "rustc_cdylib",
                 "fuchsia_rust_dso",
+                "rustc_binary",
+                "rustc_binary_host_tool",
+                "idk_rustc_binary_host_tool",
+                "ffx_plugin",
+                "ffx_tool",
+                "idk_ffx_tool",
             ):
                 l_name, l_crate = "", ""
                 for kw in stmt_node.keywords:
@@ -2152,7 +4006,15 @@ for rel_path, full_path in bazel_files:
                     elif kw.arg == "crate_name" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                         l_crate = kw.value.value
                 if l_name:
-                    pkg_rustc_libs[l_name] = (l_crate or l_name).replace("-", "_")
+                    norm_crate = (l_crate or l_name).replace("-", "_")
+                    pkg_rust_crate_names[l_name] = norm_crate
+                    if fn_id in (
+                        "rustc_library",
+                        "rustc_proc_macro",
+                        "rustc_cdylib",
+                        "fuchsia_rust_dso",
+                    ):
+                        pkg_rustc_libs[l_name] = norm_crate
 
     # Extract non-directive comment lines (with 1-based line numbers) preceding a target call.
     def preceding_comment_lines(lineno: int):
@@ -2171,16 +4033,52 @@ for rel_path, full_path in bazel_files:
             break
         return list(reversed(comments))
 
-    # Check that unit-test rustc_test targets use `crate = ":<lib>"` and omit `crate_name`,
+    # Check whether a target call has a preceding `# @bazel2gn:skip` directive.
+    def has_target_bazel2gn_skip(call_node) -> bool:
+        idx = getattr(call_node, "lineno", 1) - 2
+        while idx >= 0:
+            s_line = src_lines[idx].strip()
+            if not s_line:
+                idx -= 1
+                continue
+            if s_line.startswith("#"):
+                if "@bazel2gn:skip" in s_line:
+                    return True
+                idx -= 1
+                continue
+            break
+        return False
+
+    # Check that unit-test rustc_test / host_rustc_test targets use `crate = ":<lib>"` and
+    # omit `crate_name` when not synced to GN (renaming generic test targets directly),
     # except when GN `non_test_deps` swaps a dependency for a `testutils` variant (in which
-    # case a standalone `rustc_test` with a concise justifying comment above it is required).
+    # case a standalone test with a concise justifying comment above it is required).
     def check_rustc_test_crate_reuse(call_node, r_name, t_name, k_map):
-        """Verify unit-test rustc_test targets use `crate = ":<lib>"` or concisely document standalone testutils deps."""
-        if r_name != "rustc_test" or not t_name:
+        """Verify unit-test rustc_test/host_rustc_test targets use `crate = ":<lib>"` and valid `crate_name`."""
+        if r_name not in ("rustc_test", "host_rustc_test") or not t_name:
             return
         kw_names = {kw.arg for kw in call_node.keywords if kw.arg}
         lib_stem = t_name[:-len("_test")] if t_name.endswith("_test") else ""
         has_matching_lib = bool(lib_stem and lib_stem in pkg_rustc_libs)
+        gn_path = os.path.join(workdir, pkg_dir, "BUILD.gn")
+        if (
+            not os.path.isfile(gn_path)
+            and pkg_dir
+            and not pkg_dir.startswith("build/secondary/")
+        ):
+            sec_gn_path = os.path.join(
+                workdir, "build", "secondary", pkg_dir, "BUILD.gn"
+            )
+            if os.path.isfile(sec_gn_path):
+                gn_path = sec_gn_path
+        has_gn_sentinel = False
+        if os.path.isfile(gn_path):
+            try:
+                with open(gn_path, encoding="utf-8") as gf:
+                    has_gn_sentinel = "BAZEL2GN SENTINEL" in gf.read()
+            except OSError:
+                has_gn_sentinel = False
+        is_synced_to_gn = has_gn_sentinel and not has_target_bazel2gn_skip(call_node)
         if (
             "srcs" in kw_names
             and has_matching_lib
@@ -2207,16 +4105,16 @@ for rel_path, full_path in bazel_files:
             )
             if needs_standalone:
                 if not has_justification:
-                    _emit(findings, "rustc_test_missing_standalone_comment", "error", rel_path, srcs_line, f"Target '{t_name}' (rustc_test) is not attached to `:{lib_stem}` via "
+                    _emit(findings, "rustc_test_missing_standalone_comment", "error", rel_path, srcs_line, f"Target '{t_name}' ({r_name}) is not attached to `:{lib_stem}` via "
                             "`crate` (because unit tests require a `testutils` dependency variant), "
-                            "but lacks a comment above `rustc_test` justifying why `crate` cannot "
+                            f"but lacks a comment above `{r_name}` justifying why `crate` cannot "
                             "be used.", f"Add a concise comment immediately above `{t_name}` in '{rel_path}' "
                             f"explaining why it cannot attach to `:{lib_stem}` via `crate` "
                             "(because unit tests require the `testutils` dependency variant), "
                             "without adding boilerplate about `rustc_test(crate = ...)` inheriting "
                             "`deps` or GN `non_test_deps`.")
                 elif verbose_line is not None:
-                    _emit(findings, "rustc_test_verbose_standalone_comment", "error", rel_path, verbose_line, f"Comment above standalone '{t_name}' (rustc_test) includes "
+                    _emit(findings, "rustc_test_verbose_standalone_comment", "error", rel_path, verbose_line, f"Comment above standalone '{t_name}' ({r_name}) includes "
                             "unnecessary rule-mechanics or GN-comparison boilerplate "
                             "(`rustc_test(crate = ...)` inheriting `deps` / GN `non_test_deps`).", f"Trim the comment above `{t_name}` in '{rel_path}' so it states only "
                             f"the target-specific reason `crate = \":{lib_stem}\"` cannot be used "
@@ -2224,21 +4122,17 @@ for rel_path, full_path in bazel_files:
                             "remove the clause about Bazel `rustc_test(crate = ...)` inheriting "
                             "`deps` or GN `non_test_deps`.")
             else:
-                _emit(findings, "rustc_test_repeats_library_srcs", "error", rel_path, srcs_line, f"Target '{t_name}' (rustc_test) repeats `srcs` (and library features/deps) "
+                _emit(findings, "rustc_test_repeats_library_srcs", "error", rel_path, srcs_line, f"Target '{t_name}' ({r_name}) repeats `srcs` (and library features/deps) "
                         f"instead of referencing sibling library `:{lib_stem}` via `crate` "
-                        "(`bazel2gn` natively supports `crate = \":<lib>\"` on `rustc_test` and "
+                        f"(`bazel2gn` natively supports `crate = \":<lib>\"` on `{r_name}` and "
                         "inlines the crate's `srcs`, `edition`, `deps`, and `proc_macro_deps` into "
                         "the generated GN `rustc_test`).", f"Set `crate = \":{lib_stem}\"` on '{t_name}' and remove `srcs`, "
                         "`edition`, `crate_name`, any `deps`/`proc_macro_deps`/`crate_features` "
                         f"already inherited from `:{lib_stem}`, any single-use `_<LIB>_*` "
                         "variables, and any comment claiming `bazel2gn` requires `srcs`/`deps` "
-                        f"on `rustc_test`, then re-run `fx bazel2gn -d {pkg_dir}`.")
+                        f"on `{r_name}`, then re-run `fx bazel2gn -d {pkg_dir}`.")
         if "crate_name" in k_map and ("crate" in kw_names or has_matching_lib):
             c_name, c_line = k_map["crate_name"]
-            gn_path = os.path.join(workdir, pkg_dir, "BUILD.gn")
-            has_gn_sentinel = os.path.isfile(gn_path) and "BAZEL2GN SENTINEL" in open(
-                gn_path, encoding="utf-8"
-            ).read()
             norm_t = t_name.replace("-", "_")
             norm_c = c_name.replace("-", "_")
             crate_kw = next(
@@ -2253,52 +4147,146 @@ for rel_path, full_path in bazel_files:
             )
             lib_crate_name = pkg_rustc_libs.get(crate_kw, "")
             base_gn_norm = base_gn_text.replace("-", "_")
-            # bazel2gn maps rustc_test `crate_name` to GN `output_name`. Allow a non-default
-            # test crate_name (distinct from the library crate_name itself) when preserving a
-            # base BUILD.gn custom test name/output_name or disambiguating the GN test binary
-            # in a dual-build package.
+            # bazel2gn maps rustc_test/host_rustc_test `crate_name` to GN `output_name`.
+            # Allow a non-default test crate_name ONLY when the test target is synced to GN
+            # and either preserves a base BUILD.gn custom test name/output_name or
+            # disambiguates the GN test binary in a dual-build package.
             valid_gn_test_output_name = (
-                norm_c != norm_t
+                is_synced_to_gn
+                and norm_c != norm_t
                 and norm_c != lib_crate_name
                 and (
                     f'"{norm_c}"' in base_gn_norm
-                    or (
-                        has_gn_sentinel
-                        and norm_c.endswith(
-                            ("_test", "_tests", "_unittests", "_lib_test", "_bin_test")
-                        )
+                    or norm_c.endswith(
+                        ("_test", "_tests", "_unittests", "_lib_test", "_bin_test")
                     )
                 )
             )
             if not valid_gn_test_output_name and not is_preexisting_target_attr(r_name, t_name, f'crate_name="{c_name}"'):
-                _emit(findings, "redundant_default_attribute", "error", rel_path, c_line, f"Target '{t_name}' (rustc_test) specifies `crate_name = \"{c_name}\"`, "
-"which is unnecessary on a crate unit test (unless setting a distinct "
-                        "`<crate>_test` binary `output_name` for `bazel2gn`).", f"Remove `crate_name` from `{t_name}` in '{rel_path}' (or set it to "
-                        f"`\"{lib_crate_name or norm_t}_test\"` only when `bazel2gn` must emit a "
-                        "disambiguated GN `output_name`).")
+                if not is_synced_to_gn:
+                    effective_lib_crate = (
+                        lib_crate_name
+                        or pkg_rust_crate_names.get(crate_kw, "")
+                        or crate_kw.replace("-", "_")
+                    )
+                    t_stem = norm_t
+                    for sfx in (
+                        "_lib_test",
+                        "_bin_test",
+                        "_dylib_test",
+                        "_host_test",
+                        "_unittests",
+                        "_tests",
+                        "_test",
+                    ):
+                        if t_stem.endswith(sfx) and len(t_stem) > len(sfx):
+                            t_stem = t_stem[: -len(sfx)]
+                            break
+                    is_generic_t = t_stem in (
+                        "lib",
+                        "bin",
+                        "main",
+                        "test",
+                        "tests",
+                        "unittests",
+                    )
+                    fallback_stem = effective_lib_crate or t_stem
+                    if fallback_stem in (
+                        "lib",
+                        "bin",
+                        "main",
+                        "test",
+                        "tests",
+                        "unittests",
+                    ):
+                        fallback_stem = (
+                            os.path.basename(pkg_dir).replace("-", "_")
+                            or fallback_stem
+                        )
+                    new_t_name = (
+                        c_name
+                        if norm_c != norm_t and norm_c != effective_lib_crate
+                        else (
+                            fallback_stem
+                            if fallback_stem.endswith(
+                                ("_test", "_tests", "_unittests")
+                            )
+                            else f"{fallback_stem}_test"
+                        )
+                    )
+                    remed = (
+                        f"Remove `crate_name = \"{c_name}\"` (and any comment about GN "
+                        f"`output_name`) from `{r_name}` in '{rel_path}'"
+                    )
+                    if new_t_name != t_name and (
+                        is_generic_t
+                        or (norm_c != norm_t and norm_c != effective_lib_crate)
+                    ):
+                        remed += (
+                            f", rename the target directly to `name = \"{new_t_name}\"` to "
+                            "avoid a generic test binary name, and update any referencing "
+                            f"`test_suite` or wrapper targets to `:{new_t_name}`."
+                        )
+                    else:
+                        remed += "."
+                    _emit(
+                        findings,
+                        "redundant_default_attribute",
+                        "error",
+                        rel_path,
+                        c_line,
+                        f"Target '{t_name}' ({r_name}) is not synced to GN, so setting "
+                        f"`crate_name = \"{c_name}\"` is ignored when `crate` is set and "
+                        "does not change the Bazel test target or binary name.",
+                        remed,
+                    )
+                else:
+                    _emit(findings, "redundant_default_attribute", "error", rel_path, c_line, f"Target '{t_name}' ({r_name}) specifies `crate_name = \"{c_name}\"`, "
+                            "which is unnecessary on a crate unit test (unless setting a distinct "
+                            "`<crate>_test` binary `output_name` for `bazel2gn`).", f"Remove `crate_name` from `{t_name}` in '{rel_path}' (or set it to "
+                            f"`\"{lib_crate_name or norm_t}_test\"` only when `bazel2gn` must emit a "
+                            "disambiguated GN `output_name`).")
         elif "crate_name" in k_map:
-            # A standalone rustc_test (no `crate`, no sibling library) already gets
+            # A standalone rustc_test/host_rustc_test (no `crate`, no sibling library) already gets
             # name.replace("-", "_") as its crate and GN output name in both builds.
             c_name, c_line = k_map["crate_name"]
-            if c_name.replace("-", "_") == t_name.replace("-", "_") and not is_preexisting_target_attr(
+            if (
+                c_name.replace("-", "_") == t_name.replace("-", "_") or not is_synced_to_gn
+            ) and not is_preexisting_target_attr(
                 r_name, t_name, f'crate_name="{c_name}"'
             ):
-                _emit(findings, "redundant_default_attribute", "error", rel_path, c_line, f"Target '{t_name}' (rustc_test) specifies `crate_name = \"{c_name}\"`, which is "
-                        "already the default derived from `name` (with `-` replaced by `_`) in both rules_rust "
-                        "and GN, so bazel2gn only emits a redundant `output_name`.", f"Remove `crate_name` from `{t_name}` in '{rel_path}' and re-run "
-                        f"`fx bazel2gn -d {pkg_dir}`.")
-        if "crate" in kw_names and "edition" in k_map and not is_preexisting_target_attr(r_name, t_name, "edition="):
+                _emit(findings, "redundant_default_attribute", "error", rel_path, c_line, f"Target '{t_name}' ({r_name}) specifies `crate_name = \"{c_name}\"`, which is "
+                        "unnecessary (either identical to `name` or on a target not synced to GN).", f"Remove `crate_name` from `{t_name}` in '{rel_path}' (renaming `name` directly if "
+                        f"needed) and re-run `fx bazel2gn -d {pkg_dir}` if dual-building.")
+        if ("crate_name" not in k_map or not is_synced_to_gn) and not is_preexisting_target_attr(r_name, t_name):
+            for cm_line, cm_txt in preceding_comment_lines(getattr(call_node, "lineno", 1)):
+                if "crate_name" in cm_txt and "output_name" in cm_txt:
+                    _emit(
+                        findings,
+                        "stale_test_crate_name_comment",
+                        "error",
+                        rel_path,
+                        cm_line,
+                        f"Target '{t_name}' ({r_name}) has a comment claiming `crate_name` is "
+                        "needed for a GN `output_name`, but the target is not synced to GN or "
+                        "does not set `crate_name`.",
+                        f"Remove the stale `crate_name` / `output_name` comment on line {cm_line} "
+                        f"above `{t_name}` in '{rel_path}'.",
+                    )
+                    break
+        if r_name in ("rustc_test", "host_rustc_test") and "crate" in kw_names and "edition" in k_map and not is_preexisting_target_attr(r_name, t_name, "edition="):
             ed_val, ed_line = k_map["edition"]
-            _emit(findings, "redundant_default_attribute", "error", rel_path, ed_line, f"Target '{t_name}' (rustc_test) sets `edition = \"{ed_val}\"` next to `crate`, but both "
+            _emit(findings, "redundant_default_attribute", "error", rel_path, ed_line, f"Target '{t_name}' ({r_name}) sets `edition = \"{ed_val}\"` next to `crate`, but both "
                     "rules_rust and bazel2gn take `edition` from the crate and ignore it on the test.", f"Remove `edition` from `{t_name}` in '{rel_path}' (bazel2gn output does not change).")
         if (
-            "crate" in kw_names
+            is_synced_to_gn
+            and "crate" in kw_names
             and "crate_name" in k_map
             and not preceding_comment_lines(k_map["crate_name"][1])
             and not is_preexisting_target_attr(r_name, t_name, f'crate_name="{k_map["crate_name"][0]}"')
         ):
             c_name, c_line = k_map["crate_name"]
-            _emit(findings, "rustc_test_crate_name_missing_comment", "warning", rel_path, c_line, f"Target '{t_name}' (rustc_test) sets `crate_name = \"{c_name}\"` next to `crate`. "
+            _emit(findings, "rustc_test_crate_name_missing_comment", "warning", rel_path, c_line, f"Target '{t_name}' ({r_name}) sets `crate_name = \"{c_name}\"` next to `crate`. "
                     "rules_rust ignores it there; it only sets the GN `output_name` bazel2gn emits, which "
                     "readers can't tell from BUILD.bazel.", f"Add a short comment above `crate_name` in `{t_name}` saying what needs the GN binary "
                     f"name `{c_name}` (e.g. the `.cml` `program.binary`, or avoiding a `lib_test` collision).")
@@ -2375,6 +4363,49 @@ for rel_path, full_path in bazel_files:
                 idx -= 1
                 continue
             break
+
+    def check_rustc_staticlib_raw_public(call_node, r_name, t_name):
+        """Flag `# @bazel2gn:raw_attribute:public` on newly added or converted rustc_staticlib targets."""
+        if r_name != "rustc_staticlib" or not t_name:
+            return
+        raw_pub_re = re.compile(r"#\s*@bazel2gn:raw_attribute:\s*public\b")
+        start_ln = getattr(call_node, "lineno", 1)
+        end_ln = getattr(call_node, "end_lineno", start_ln)
+        candidate_lines = list(range(start_ln, min(end_ln, len(src_lines)) + 1))
+        idx = start_ln - 2
+        while idx >= 0:
+            s_line = src_lines[idx].strip()
+            if not s_line:
+                idx -= 1
+                continue
+            if s_line.startswith("#"):
+                candidate_lines.append(idx + 1)
+                idx -= 1
+                continue
+            break
+        for ln_no in sorted(set(candidate_lines)):
+            s_line = src_lines[ln_no - 1].strip()
+            if not raw_pub_re.search(s_line):
+                continue
+            if is_preexisting_target_attr(r_name, t_name) and (
+                re.sub(r"\s+", "", s_line) in base_bazel_flat
+            ):
+                continue
+            _emit(
+                findings,
+                "rustc_staticlib_raw_public_annotation",
+                "error",
+                rel_path,
+                ln_no,
+                f"Target '{t_name}' (rustc_staticlib) uses `# @bazel2gn:raw_attribute:public` "
+                "(and/or `compile_data` for C headers), which does not expose C headers to "
+                "Bazel dependents (`rust_static_library`'s `CcInfo` carries no headers).",
+                f"Remove `# @bazel2gn:raw_attribute:public` and `compile_data` on `{t_name}` "
+                f"in '{rel_path}', add a companion header-only `fx_cc_library` target "
+                f"`{t_name}_headers` (`hdrs = [...]`, `deps = [\":{t_name}\"]`), point C++ "
+                f"consumers at `:{t_name}_headers`, and re-run `fx bazel2gn -d {pkg_dir}` if "
+                "dual-building.",
+            )
 
 
     # Flag TODO comments missing the required fxbug.dev link format.
@@ -2530,8 +4561,9 @@ for rel_path, full_path in bazel_files:
                     f"declare a standalone `rustc_test(name = \"{t_name}_test\", "
                     f"crate = \":{t_name}\", deps = [...])` or `host_rustc_test(name = "
                     f"\"{t_name}_test\", crate = \":{t_name}\", deps = [...])` target "
-                    "instead (setting `crate_name = \"<crate>_lib_test\"` when `name` is "
-                    "generic like `lib_test`).",
+                    "instead (naming the target `\"<crate>_lib_test\"` directly when not "
+                    "synced to GN, or setting `crate_name = \"<crate>_lib_test\"` when "
+                    "synced to GN under a generic `lib_test` name).",
                 )
 
     # Check for rustc_check_cfg_build_flags(cfgs = ["test"]) in packages with no tests.
@@ -2944,32 +4976,52 @@ for rel_path, full_path in bazel_files:
                     names.add(f"{m_t.group(1)}_test")
         return names
 
-    # Check host platform constraint conventions (HOST_OS_CONSTRAINTS vs HOST_CONSTRAINTS,
-    # rejecting unsupported target_compatible_with on host-only symbolic macros, and
-    # preserving `if (is_host)` guards on migrated targets).
+    # Check host platform constraint conventions (rejecting unsupported
+    # target_compatible_with on host-only symbolic macros, and preserving
+    # `if (is_host)` guards on migrated targets).
     def check_host_constraints_parity(tree_node, gn_text):
         """Verify host-only targets use HOST_OS_CONSTRAINTS and preserve GN is_host guards."""
         cur_gn_path = os.path.join(workdir, pkg_dir, "BUILD.gn")
+        if (
+            not os.path.isfile(cur_gn_path)
+            and pkg_dir
+            and not pkg_dir.startswith("build/secondary/")
+        ):
+            sec_gn_path = os.path.join(
+                workdir, "build", "secondary", pkg_dir, "BUILD.gn"
+            )
+            if os.path.isfile(sec_gn_path):
+                cur_gn_path = sec_gn_path
         is_dual_build_pkg = False
         if os.path.isfile(cur_gn_path):
             try:
-                is_dual_build_pkg = "## BAZEL2GN SENTINEL" in open(
-                    cur_gn_path, encoding="utf-8", errors="ignore"
-                ).read()
+                with open(cur_gn_path, encoding="utf-8", errors="ignore") as gf:
+                    is_dual_build_pkg = "## BAZEL2GN SENTINEL" in gf.read()
             except OSError:
                 pass
-        # Legacy wrapper macros that forward **kwargs (such as host_go_test -> go_test and
-        # legacy_host_py_test -> py_binary) accept/require target_compatible_with for host
-        # constraint parity; symbolic macros that drop/omit target_compatible_with are caught
-        # dynamically below.
-        forbid_tcw_macros = {
-            "ffx_plugin",
-            "idk_ffx_tool",
-            "host_rustc_test",
-            "wrap_host_rust_test",
-            "host_cc_test",
-            "host_shac_test",
-        } | resolve_workspace_forbid_tcw_macros(tree_node)
+        # Host-tool macros (`ffx_tool`, `*_binary_host_tool`) inherit or declare
+        # `target_compatible_with` and accept `HOST_OS_CONSTRAINTS` on call sites,
+        # whereas `forbid_tcw_macros` reject `target_compatible_with`.
+        accept_tcw_host_macros = {
+            "cc_binary_host_tool",
+            "ffx_tool",
+            "go_binary_host_tool",
+            "host_py_test",
+            "py_binary_host_tool",
+            "py_zipapp_binary",
+            "rustc_binary_host_tool",
+        }
+        forbid_tcw_macros = (
+            {
+                "ffx_plugin",
+                "idk_ffx_tool",
+                "host_rustc_test",
+                "wrap_host_rust_test",
+                "host_cc_test",
+                "host_shac_test",
+            }
+            | resolve_workspace_forbid_tcw_macros(tree_node)
+        ) - accept_tcw_host_macros
 
         for stmt_node in tree_node.body:
             if not (
@@ -2982,18 +5034,7 @@ for rel_path, full_path in bazel_files:
             seg = ast.get_source_segment(source, stmt_node) or ""
             if seg and re.sub(r"\s+", "", seg) in base_bazel_flat:
                 continue
-            if (
-                call_n.func.id == "load"
-                and call_n.args
-                and isinstance(call_n.args[0], ast.Constant)
-                and call_n.args[0].value == "@platforms//host:constraints.bzl"
-            ):
-                _emit(findings, "disallowed_host_constraints", "error", rel_path, getattr(stmt_node, "lineno", 1), f"'{rel_path}' loads `@platforms//host:constraints.bzl` (`HOST_CONSTRAINTS`), "
-                        "which must not be used when migrating host targets.", f"Replace `load(\"@platforms//host:constraints.bzl\", \"HOST_CONSTRAINTS\")` "
-                        "and `target_compatible_with = HOST_CONSTRAINTS` in "
-                        f"'{rel_path}' with `load(\"//build/bazel/platforms:constraints.bzl\", "
-                        "\"HOST_OS_CONSTRAINTS\")` and `target_compatible_with = HOST_OS_CONSTRAINTS`.")
-            elif call_n.func.id in forbid_tcw_macros:
+            if call_n.func.id in forbid_tcw_macros:
                 t_name = ""
                 tcw_line = 0
                 for kw in call_n.keywords:
@@ -3057,6 +5098,12 @@ for rel_path, full_path in bazel_files:
             "py_library",
             "py_binary",
         }
+        # py_zipapp_binary and py_binary_host_tool are not converted by bazel2gn,
+        # so they are checked only for stale target_compatible_with TODOs/comments.
+        non_convertible_python_host_rules = {
+            "py_zipapp_binary",
+            "py_binary_host_tool",
+        }
         false_not_wrapped_re = re.compile(
             r"(?:did\s+not|does\s+not|was\s+not|not)\s+"
             r"(?:wrap\w*|gat\w*|guard\w*)[^\n]*\bis_host\b"
@@ -3068,11 +5115,13 @@ for rel_path, full_path in bazel_files:
                 isinstance(stmt_node, ast.Expr)
                 and isinstance(stmt_node.value, ast.Call)
                 and isinstance(stmt_node.value.func, ast.Name)
-                and stmt_node.value.func.id in convertible_host_tcw_rules
+                and stmt_node.value.func.id
+                in (convertible_host_tcw_rules | non_convertible_python_host_rules)
             ):
                 continue
             call_n = stmt_node.value
             r_id = call_n.func.id
+            is_convertible_rule = r_id in convertible_host_tcw_rules
             call_seg = ast.get_source_segment(source, stmt_node) or ""
             if "@platforms//os:fuchsia" in call_seg:
                 continue
@@ -3129,7 +5178,17 @@ for rel_path, full_path in bazel_files:
             unwrapped_kw_comments = " ".join(
                 txt.lstrip("#").strip() for _, txt in ordered_kw_comments
             )
-            is_host_in_gn = file_is_host_only or (t_name in host_guarded_names)
+            is_python_rule = r_id in (
+                "py_library",
+                "py_binary",
+                "py_zipapp_binary",
+                "py_binary_host_tool",
+            )
+            is_host_in_gn = (
+                file_is_host_only
+                or (t_name in host_guarded_names)
+                or (is_python_rule and (not is_convertible_rule or not is_dual_build_pkg))
+            )
             has_false_tgt_comment = is_host_in_gn and bool(
                 false_not_wrapped_re.search(unwrapped_tgt_comments)
             )
@@ -3137,7 +5196,7 @@ for rel_path, full_path in bazel_files:
                 false_not_wrapped_re.search(unwrapped_kw_comments)
             )
             has_false_comment = has_false_tgt_comment or has_false_kw_comment
-            if has_attr_skip:
+            if is_convertible_rule and has_attr_skip:
                 _emit(
                     findings,
                     "skipped_host_os_constraints",
@@ -3178,43 +5237,79 @@ for rel_path, full_path in bazel_files:
                     rep_line = ordered_kw_comments[0][0]
                 else:
                     rep_line = kw_start
+                if r_id == "py_zipapp_binary":
+                    false_comment_msg = (
+                        f"Python target '{t_name}' ({r_id}) in '{rel_path}' has a redundant "
+                        "comment/TODO questioning `target_compatible_with`; Python is not "
+                        "supported on Fuchsia, and `py_zipapp_binary` defaults "
+                        "`target_compatible_with` to `HOST_OS_CONSTRAINTS`."
+                    )
+                    false_comment_rem = (
+                        f"Remove the stale `target_compatible_with` TODO/comment (and "
+                        f"redundant `target_compatible_with = HOST_OS_CONSTRAINTS`) on "
+                        f"'{t_name}' in '{rel_path}'."
+                    )
+                elif r_id == "py_binary_host_tool":
+                    false_comment_msg = (
+                        f"Python target '{t_name}' ({r_id}) in '{rel_path}' has a redundant "
+                        "comment/TODO questioning `target_compatible_with`; Python is not "
+                        f"supported on Fuchsia, so `{r_id}` targets are always host-only "
+                        "(`target_compatible_with = HOST_OS_CONSTRAINTS`)."
+                    )
+                    false_comment_rem = (
+                        f"Remove the stale `target_compatible_with` TODO/comment on "
+                        f"'{t_name}' in '{rel_path}' while keeping "
+                        "`target_compatible_with = HOST_OS_CONSTRAINTS`."
+                    )
+                else:
+                    false_comment_msg = (
+                        f"Python target '{t_name}' ({r_id}) in '{rel_path}' has a redundant "
+                        f"comment/TODO questioning `target_compatible_with`; Python is not "
+                        f"supported on Fuchsia, so `{r_id}` targets are always host-only "
+                        "(`target_compatible_with = HOST_OS_CONSTRAINTS`)."
+                        if is_python_rule and not (file_is_host_only or t_name in host_guarded_names)
+                        else f"Target '{t_name}' ({r_id}) in '{rel_path}' has a comment/TODO "
+                        f"claiming `{t_name}` was not gated by `is_host` in GN, whereas "
+                        f"`{pkg_dir}/BUILD.gn` already restricted it to host (`assert(is_host)` "
+                        "or `if (is_host)`)."
+                    )
+                    false_comment_rem = (
+                        f"Remove the stale `target_compatible_with` TODO/comment on '{t_name}' "
+                        f"in '{rel_path}' while keeping `target_compatible_with = "
+                        "HOST_OS_CONSTRAINTS` synced without `# @bazel2gn:skip`."
+                    )
                 _emit(
                     findings,
                     "skipped_host_os_constraints",
                     "error",
                     rel_path,
                     rep_line,
-                    (
-                        f"Target '{t_name}' ({r_id}) in '{rel_path}' has a comment/TODO "
-                        f"claiming `{t_name}` was not gated by `is_host` in GN, whereas "
-                        f"`{pkg_dir}/BUILD.gn` already restricted it to host (`assert(is_host)` "
-                        "or `if (is_host)`)."
-                    ),
-                    (
-                        f"Remove the stale `target_compatible_with` TODO/comment on '{t_name}' "
-                        f"in '{rel_path}' while keeping `target_compatible_with = "
-                        "HOST_OS_CONSTRAINTS` synced without `# @bazel2gn:skip`."
-                    ),
+                    false_comment_msg,
+                    false_comment_rem,
                 )
 
         if not host_guarded_names:
             return
+        # Omit py_zipapp_binary and host_py_test: both default target_compatible_with
+        # to HOST_OS_CONSTRAINTS internally.
         host_lib_bin_rules = {
             "rustc_library",
             "rustc_binary",
+            "rustc_binary_host_tool",
+            "ffx_tool",
             "fx_cc_library",
             "fx_cc_binary",
             "fx_cc_test_binary",
             "cc_library",
             "cc_binary",
+            "cc_binary_host_tool",
             "go_library",
             "go_binary",
             "go_binary_host_tool",
             "py_library",
             "py_binary",
+            "py_binary_host_tool",
         }
-        if "host_py_test" not in forbid_tcw_macros:
-            host_lib_bin_rules.add("host_py_test")
         if is_dual_build_pkg:
             host_lib_bin_rules.add("idk_go_binary_host_tool")
         for stmt_node in tree_node.body:
@@ -3250,318 +5345,97 @@ for rel_path, full_path in bazel_files:
                         f"HOST_OS_CONSTRAINTS` on '{t_name}' in '{rel_path}', then "
                         f"re-run `fx bazel2gn -d {pkg_dir}` if dual-building.")
 
-    # Check that host tools bridged into GN via `bazel_ffx_tool` or `bazel_host_tool` AND
-    # cross-compiled for `host_arm64_toolchain` (`//build/bazel/platforms:host_linux_arm64`)
-    # via `//bundles/infra/test:host_tools` (`//src/developer/ffx/tools:bins`) or the IDK
-    # (`//sdk:host_tools_for_configured_host_cpus` / `sdk_atom` / `sdk_host_tool`) do not
-    # depend transitively on Bazel targets constrained to `HOST_CONSTRAINTS` (`cpu:x86_64`).
-    def is_cross_compiled_arm64_host_tool_pkg(p_dir: str, gn_clean_txt: str) -> bool:
-        if re.search(r"\b(?:sdk_atom|sdk_host_tool)\s*\(|\bhost_arm64_toolchain\b", gn_clean_txt):
-            return True
-        leaf = os.path.basename(p_dir)
-        for reg_rel, allow_rel_leaf in (
-            ("bundles/infra/test/BUILD.gn", False),
-            ("src/developer/ffx/tools/BUILD.gn", p_dir.startswith("src/developer/ffx/tools/")),
-            ("src/developer/ffx/config.gni", False),
-            ("sdk/BUILD.gn", False),
-        ):
-            reg_path = os.path.join(workdir, reg_rel)
-            try:
-                reg_txt = re.sub(
-                    r"#[^\n]*", "", open(reg_path, encoding="utf-8", errors="ignore").read()
-                )
-            except OSError:
-                continue
-            if re.search(r'"//' + re.escape(p_dir) + r'(?=[":])', reg_txt):
-                return True
-            if allow_rel_leaf and re.search(r'"' + re.escape(leaf) + r'(?=[":])', reg_txt):
-                return True
-        return False
+    # Extract GN target names guarded solely by `if (is_fuchsia)` or `assert(is_fuchsia)`.
+    def _find_gn_is_fuchsia_targets(gn_src):
+        """Return target names restricted to Fuchsia by `if` or `assert` guards in GN."""
+        if not gn_src:
+            return set()
+        cleaned = "\n".join(
+            ln for ln in gn_src.splitlines() if not ln.lstrip().startswith("#")
+        )
+        fuchsia_cond_pat = (
+            r"(?:is_fuchsia|!\s*is_host|current_toolchain\s*==\s*fuchsia_toolchain"
+            r"|current_toolchain\s*!=\s*host_toolchain)"
+        )
+        assert_re = re.compile(
+            r"^\s*assert\s*\(\s*" + fuchsia_cond_pat + r"\b(?:\s*\)|\s*,)"
+        )
+        target_re = re.compile(r'\b[A-Za-z_]\w*\(\s*"([^"]+)"\s*\)\s*\{')
+        target_counts = {}
+        for m_all in target_re.finditer(cleaned):
+            nm = m_all.group(1)
+            target_counts[nm] = target_counts.get(nm, 0) + 1
+        depth = 0
+        for ln in cleaned.splitlines():
+            if depth == 0 and assert_re.match(ln):
+                return set(target_counts)
+            depth += ln.count("{") - ln.count("}")
+            if depth < 0:
+                depth = 0
+        names = set()
+        if_re = re.compile(r"\bif\s*\(\s*" + fuchsia_cond_pat + r"\s*\)\s*\{")
+        for m_f in if_re.finditer(cleaned):
+            b_depth, idx = 1, m_f.end()
+            while idx < len(cleaned) and b_depth > 0:
+                if cleaned[idx] == "{":
+                    b_depth += 1
+                elif cleaned[idx] == "}":
+                    b_depth -= 1
+                idx += 1
+            blk = cleaned[m_f.end() : max(m_f.end(), idx - 1)]
+            for m_t in target_re.finditer(blk):
+                if target_counts.get(m_t.group(1), 0) == 1:
+                    names.add(m_t.group(1))
+        for m_t in target_re.finditer(cleaned):
+            b_depth, idx = 1, m_t.end()
+            while idx < len(cleaned) and b_depth > 0:
+                if cleaned[idx] == "{":
+                    b_depth += 1
+                elif cleaned[idx] == "}":
+                    b_depth -= 1
+                idx += 1
+            blk = cleaned[m_t.end() : max(m_t.end(), idx - 1)]
+            t_depth = 0
+            for ln in blk.splitlines():
+                if t_depth == 0 and assert_re.match(ln):
+                    if target_counts.get(m_t.group(1), 0) == 1:
+                        names.add(m_t.group(1))
+                    break
+                t_depth += ln.count("{") - ln.count("}")
+                if t_depth < 0:
+                    t_depth = 0
+        return names
 
-    def check_host_tool_transitive_constraints(tree_node):
-        """Verify cross-compiled bridged host tools do not depend on HOST_CONSTRAINTS targets."""
-        cur_gn_path = os.path.join(workdir, pkg_dir, "BUILD.gn")
-        if not os.path.isfile(cur_gn_path):
-            return
-        try:
-            cur_gn_src = open(cur_gn_path, encoding="utf-8", errors="ignore").read()
-        except OSError:
-            return
-        gn_clean = re.sub(r"#[^\n]*", "", cur_gn_src)
-        if not is_cross_compiled_arm64_host_tool_pkg(pkg_dir, gn_clean):
-            return
-        bridged_targets = []
-        for m_br in re.finditer(
-            r'\b(bazel_ffx_tool|bazel_host_tool)\(\s*"([^"]+)"\s*\)\s*\{([^}]*)\}',
-            gn_clean,
-        ):
-            tmpl_name, gn_tname, body_txt = m_br.group(1), m_br.group(2), m_br.group(3)
-            m_bt = re.search(r'\bbazel_target\s*=\s*"([^"]+)"', body_txt)
-            if m_bt:
-                raw_bt = m_bt.group(1).strip()
-                bt_name = raw_bt.split(":")[-1]
-                if bt_name.endswith("_versioned"):
-                    bt_name = bt_name[: -len("_versioned")]
-            else:
-                bt_name = gn_tname
-            bridged_targets.append((tmpl_name, gn_tname, bt_name))
-        if not bridged_targets:
-            return
-
-        pkg_cache = {}
-        bzl_macro_cache = {}
-        # Exclude `proc_macro_deps` and procedural macro rules: Bazel transitions
-        # procedural macros to the `exec` configuration rather than the cross-compiled
-        # `host_linux_arm64` target configuration, so `HOST_CONSTRAINTS` on proc-macro
-        # crates and their exec-only helpers does not block target cross-compilation.
-        exec_only_rule_names = {"rustc_proc_macro", "rust_proc_macro"}
-        dep_kw_names = {
-            "deps",
-            "implementation_deps",
-            "public_deps",
-            "non_test_deps",
-            "link_deps",
-            "args_deps",
-            "plugin_deps",
-            "crate",
-        }
-
-        # Inspect a workspace .bzl file for @platforms//host:constraints.bzl usage
-        # and target-configured workspace dependency labels injected by its macros.
-        def inspect_workspace_bzl(bzl_rel):
-            if bzl_rel in bzl_macro_cache:
-                return bzl_macro_cache[bzl_rel]
-            bzl_abs = os.path.join(workdir, bzl_rel)
-            if not os.path.isfile(bzl_abs):
-                bzl_macro_cache[bzl_rel] = (False, [])
-                return False, []
-            try:
-                bzl_src = open(bzl_abs, encoding="utf-8", errors="ignore").read()
-                bzl_ast = ast.parse(bzl_src, filename=bzl_abs)
-            except Exception:
-                bzl_macro_cache[bzl_rel] = (False, [])
-                return False, []
-            uses_host_cpu = False
-            top_consts = {}
-            for st in bzl_ast.body:
-                if (
-                    isinstance(st, ast.Expr)
-                    and isinstance(st.value, ast.Call)
-                    and isinstance(st.value.func, ast.Name)
-                    and st.value.func.id == "load"
-                    and st.value.args
-                    and isinstance(st.value.args[0], ast.Constant)
-                    and st.value.args[0].value == "@platforms//host:constraints.bzl"
-                ):
-                    uses_host_cpu = bool(re.search(r"\bHOST_CONSTRAINTS\b", bzl_src))
-                elif isinstance(st, ast.Assign):
-                    vals = [
-                        c.value
-                        for c in ast.walk(st.value)
-                        if isinstance(c, ast.Constant) and isinstance(c.value, str)
-                    ]
-                    for tgt in st.targets:
-                        if isinstance(tgt, ast.Name):
-                            top_consts[tgt.id] = vals
-            injected_deps = []
-            for st in bzl_ast.body:
-                if not isinstance(st, ast.FunctionDef):
-                    continue
-                for sub in ast.walk(st):
-                    if not isinstance(sub, ast.Call):
-                        continue
-                    for kw in sub.keywords:
-                        if kw.arg not in dep_kw_names:
-                            continue
-                        for item in ast.walk(kw.value):
-                            cands = []
-                            if isinstance(item, ast.Constant) and isinstance(item.value, str):
-                                cands.append(item.value)
-                            elif isinstance(item, ast.Name) and item.id in top_consts:
-                                cands.extend(top_consts[item.id])
-                            for s in cands:
-                                if (
-                                    s.startswith("//")
-                                    and not s.startswith(("//third_party/", "//build/"))
-                                    and " " not in s
-                                    and s not in injected_deps
-                                ):
-                                    injected_deps.append(s)
-            bzl_macro_cache[bzl_rel] = (uses_host_cpu, injected_deps)
-            return uses_host_cpu, injected_deps
-
-        # Parse top-level target calls, macro loads, and dependency edges in <p_dir>/BUILD.bazel.
-        def parse_pkg_targets(p_dir):
-            if p_dir in pkg_cache:
-                return pkg_cache[p_dir]
-            bz_file = os.path.join(workdir, p_dir, "BUILD.bazel")
-            if not os.path.isfile(bz_file):
-                pkg_cache[p_dir] = {}
-                return {}
-            try:
-                bz_src = open(bz_file, encoding="utf-8", errors="ignore").read()
-                bz_ast = ast.parse(bz_src, filename=bz_file)
-            except Exception:
-                pkg_cache[p_dir] = {}
-                return {}
-            sym_to_bzl = {}
-            pkg_vars = {}
-            for st in bz_ast.body:
-                if (
-                    isinstance(st, ast.Expr)
-                    and isinstance(st.value, ast.Call)
-                    and isinstance(st.value.func, ast.Name)
-                    and st.value.func.id == "load"
-                    and st.value.args
-                    and isinstance(st.value.args[0], ast.Constant)
-                    and isinstance(st.value.args[0].value, str)
-                ):
-                    mod_s = st.value.args[0].value
-                    if mod_s.startswith("//") and mod_s.endswith(".bzl"):
-                        b_pkg, _, b_file = mod_s[2:].partition(":")
-                        bzl_rel = f"{b_pkg.strip('/')}/{b_file.lstrip('/')}" if b_file else ""
-                        if bzl_rel:
-                            for a in st.value.args[1:]:
-                                if isinstance(a, ast.Constant) and isinstance(a.value, str):
-                                    sym_to_bzl[a.value] = bzl_rel
-                            for kw in st.value.keywords:
-                                if kw.arg:
-                                    sym_to_bzl[kw.arg] = bzl_rel
-                elif isinstance(st, ast.Assign):
-                    vals = [
-                        c.value
-                        for c in ast.walk(st.value)
-                        if isinstance(c, ast.Constant) and isinstance(c.value, str)
-                    ]
-                    for tgt in st.targets:
-                        if isinstance(tgt, ast.Name):
-                            pkg_vars[tgt.id] = vals
-            res = {}
-            for st in bz_ast.body:
-                if not (
-                    isinstance(st, ast.Expr)
-                    and isinstance(st.value, ast.Call)
-                    and isinstance(st.value.func, ast.Name)
-                ):
-                    continue
-                c_node = st.value
-                r_id = c_node.func.id
-                is_exec_rule = r_id in exec_only_rule_names
-                t_nm = ""
-                t_deps = []
-                has_host_cpu_tcw = False
-                macro_bzl = ""
-                if not is_exec_rule and r_id in sym_to_bzl:
-                    bzl_bad, bzl_deps = inspect_workspace_bzl(sym_to_bzl[r_id])
-                    if bzl_bad:
-                        macro_bzl = sym_to_bzl[r_id]
-                    t_deps.extend(bzl_deps)
-                for kw in c_node.keywords:
-                    if (
-                        kw.arg == "name"
-                        and isinstance(kw.value, ast.Constant)
-                        and isinstance(kw.value.value, str)
-                    ):
-                        t_nm = kw.value.value
-                    elif not is_exec_rule and kw.arg in dep_kw_names:
-                        for sub in ast.walk(kw.value):
-                            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                                t_deps.append(sub.value)
-                            elif isinstance(sub, ast.Name) and sub.id in pkg_vars:
-                                t_deps.extend(pkg_vars[sub.id])
-                    elif not is_exec_rule and kw.arg == "target_compatible_with":
-                        tcw_txt = ast.get_source_segment(bz_src, kw.value) or ""
-                        if re.search(r"\bHOST_CONSTRAINTS\b", tcw_txt):
-                            has_host_cpu_tcw = True
-                if t_nm:
-                    res[t_nm] = (getattr(st, "lineno", 1), has_host_cpu_tcw, macro_bzl, t_deps)
-            pkg_cache[p_dir] = res
-            return res
-
-        local_tgts = parse_pkg_targets(pkg_dir)
-        for tmpl_name, gn_tname, bt_name in bridged_targets:
-            if bt_name not in local_tgts:
-                continue
-            bt_line = local_tgts[bt_name][0]
-            visited = set()
-            queue = [(pkg_dir, bt_name)]
-            bad_bzls = []
-            bad_labels = []
-            while queue:
-                cur_p, cur_t = queue.pop(0)
-                p_tgts = parse_pkg_targets(cur_p)
-                resolved_t = cur_t if cur_t in p_tgts else ""
-                if not resolved_t:
-                    for suf in ("_args", "_sub_command", "_versioned"):
-                        if cur_t.endswith(suf) and cur_t[: -len(suf)] in p_tgts:
-                            resolved_t = cur_t[: -len(suf)]
-                            break
-                if not resolved_t or (cur_p, resolved_t) in visited:
-                    continue
-                visited.add((cur_p, resolved_t))
-                _, is_bad_tcw, m_bzl, dep_list = p_tgts[resolved_t]
-                if m_bzl and m_bzl not in bad_bzls:
-                    bad_bzls.append(m_bzl)
-                if is_bad_tcw and (cur_p, resolved_t) != (pkg_dir, bt_name):
-                    lbl_s = f"//{cur_p}:{resolved_t}"
-                    if lbl_s not in bad_labels:
-                        bad_labels.append(lbl_s)
-                for d_lbl in dep_list:
-                    if d_lbl.startswith(":"):
-                        queue.append((cur_p, d_lbl[1:]))
-                    elif d_lbl.startswith("//") and not d_lbl.startswith("//third_party/"):
-                        dep_p, _, dep_t = d_lbl[2:].partition(":")
-                        dep_p = dep_p.strip("/")
-                        dep_t = dep_t or os.path.basename(dep_p)
-                        queue.append((dep_p, dep_t))
-            if bad_bzls or bad_labels:
-                all_items = [f"'{b}'" for b in bad_bzls] + [f"`{lbl}`" for lbl in bad_labels]
-                sample = ", ".join(all_items[:6])
-                more = f" (and {len(all_items) - 6} more)" if len(all_items) > 6 else ""
-                full_list = ", ".join(bad_bzls + bad_labels)
-                msg = (
-                    f"Target '{bt_name}' in '{rel_path}' is bridged into `{pkg_dir}/BUILD.gn` "
-                    f"via `{tmpl_name}(\"{gn_tname}\")`, which cross-compiles for "
-                    "`//build/bazel/platforms:host_linux_arm64`, but its transitive Bazel "
-                    f"dependency/macro closure uses `HOST_CONSTRAINTS` "
-                    f"(`@@platforms//cpu:x86_64`): {sample}{more}."
-                )
-                rem = (
-                    f"In all blocking collateral `.bzl` and `BUILD.bazel` files ({full_list}), "
-                    'replace `load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")` '
-                    "and `target_compatible_with = HOST_CONSTRAINTS` with "
-                    '`load("//build/bazel/platforms:constraints.bzl", '
-                    '"HOST_OS_CONSTRAINTS")` and `target_compatible_with = '
-                    "HOST_OS_CONSTRAINTS` (updating any pre-existing `*:defs.bzl` load to its "
-                    "direct rule `.bzl` file if required by `bazel_shac_lint`, making no other "
-                    "edits to those files or their `BUILD.gn` files, and omitting collateral "
-                    "packages from `Bazel-Migration-Target:` and `Also migrated in this "
-                    "change:`)."
-                )
-                _emit(
-                    findings,
-                    "host_tool_transitive_host_constraints",
-                    "error",
-                    rel_path,
-                    bt_line,
-                    msg,
-                    rem,
-                )
-
-    # Check that device-only rustc_test sets target_compatible_with = ["@platforms//os:fuchsia"]
-    # (tags = ["manual"] is no substitute; migration_sanity unnecessary_manual_tag allows it on
-    # a rustc_test only when a Fuchsia test package wraps it or the package is Bazel-only) so
-    # host wildcard builds/tests skip incompatible targets cleanly and bazel2gn emits
-    # `if (is_fuchsia)`.
+    # Check that Fuchsia-guarded binaries and device-only rustc_test targets set
+    # target_compatible_with = ["@platforms//os:fuchsia"] (do not require it on binaries
+    # that were unguarded in BUILD.gn, since Bazel propagates platform incompatibility
+    # transitively from Fuchsia-only deps and explicit constraints make bazel2gn wrap the
+    # generated GN binary in an unrequested `if (is_fuchsia)` block).
     def check_fuchsia_only_rust_bin_and_test_attrs(tree_node, gn_text):
-        """Verify Fuchsia-only rustc_test targets set required constraints."""
+        """Verify Fuchsia-guarded binary and device rustc_test targets set constraints."""
+        prev_gn = gn_text
+        if "## BAZEL2GN SENTINEL" in prev_gn or not prev_gn:
+            _gn_rel = f"{pkg_dir}/BUILD.gn" if pkg_dir else "BUILD.gn"
+            for fallback_ref in ("HEAD~1", "origin/main"):
+                cand_gn = "\n".join(
+                    git_lines(["show", f"{fallback_ref}:{_gn_rel}"])
+                )
+                if cand_gn and "## BAZEL2GN SENTINEL" not in cand_gn:
+                    prev_gn = cand_gn
+                    break
+                if cand_gn and not prev_gn:
+                    prev_gn = cand_gn
+        fuchsia_guarded_names = _find_gn_is_fuchsia_targets(prev_gn)
         fuchsia_only_deps = {
+            "//sdk/lib/component/incoming/cpp",
+            "//sdk/lib/fdio",
             "//sdk/rust/zx",
             "//src/lib/fdio/rust",
             "//src/lib/fuchsia",
             "//src/lib/fuchsia-component",
             "//src/lib/fuchsia-runtime",
             "//src/zircon/lib/zircon",
+            "//zircon/system/ulib/zx",
         }
         packaged_bins = set()
         host_wrapped_tests = set()
@@ -3618,7 +5492,14 @@ for rel_path, full_path in bazel_files:
                 continue
             c_node = stmt_n.value
             r_id = c_node.func.id
-            if r_id not in ("rustc_binary", "rust_binary", "rustc_test", "rust_test"):
+            if r_id not in (
+                "fx_cc_binary",
+                "cc_binary",
+                "rustc_binary",
+                "rust_binary",
+                "rustc_test",
+                "rust_test",
+            ):
                 continue
             seg = ast.get_source_segment(source, stmt_n) or ""
             if seg and re.sub(r"\s+", "", seg) in base_bazel_flat:
@@ -3661,6 +5542,38 @@ for rel_path, full_path in bazel_files:
                 continue
             eff_deps = own_deps | crate_deps.get(crate_ref, set())
             target_only_used = sorted(eff_deps & fuchsia_only_deps)
+            if r_id in ("fx_cc_binary", "cc_binary", "rustc_binary", "rust_binary"):
+                if (
+                    t_name in fuchsia_guarded_names
+                    and t_name in packaged_bins
+                    and target_only_used
+                    and not bool(tcw_vals & {"HOST_OS_CONSTRAINTS", "HOST_CONSTRAINTS"})
+                    and "@platforms//os:fuchsia" not in tcw_vals
+                    and "manual" not in tags_vals
+                ):
+                    dep_str = ", ".join(f"`{d}`" for d in target_only_used)
+                    msg = (
+                        f"Target '{t_name}' ({r_id}) in '{rel_path}' was guarded by "
+                        f"`if (is_fuchsia)` or `assert(is_fuchsia)` in BUILD.gn and "
+                        f"depends on Fuchsia-only libraries ({dep_str}) without "
+                        '`target_compatible_with = ["@platforms//os:fuchsia"]`.'
+                    )
+                    rem = (
+                        'Add `target_compatible_with = ["@platforms//os:fuchsia"]` '
+                        f'to `{r_id}(name = "{t_name}")` in \'{rel_path}\' (do not add '
+                        '`tags = ["manual"]`) and re-run '
+                        f"`fx bazel2gn -d {pkg_dir}` if `{pkg_dir}/BUILD.gn` has a "
+                        "`## BAZEL2GN SENTINEL`."
+                    )
+                    _emit(
+                        findings,
+                        "missing_fuchsia_binary_constraints",
+                        "error",
+                        rel_path,
+                        getattr(c_node, "lineno", 1),
+                        msg,
+                        rem,
+                    )
             if r_id in ("rustc_test", "rust_test"):
                 if (
                     t_name in host_wrapped_tests
@@ -4119,7 +6032,6 @@ for rel_path, full_path in bazel_files:
     check_redundant_forwarding_alias(tree, base_gn_text)
     check_commented_out_deps(tree)
     check_host_constraints_parity(tree, base_gn_text)
-    check_host_tool_transitive_constraints(tree)
     check_fuchsia_only_rust_bin_and_test_attrs(tree, base_gn_text)
     check_unsupported_fx_component_attrs(tree)
     check_disabled_symbolic_macro_attrs(tree)
@@ -4205,7 +6117,8 @@ for rel_path, full_path in bazel_files:
         # On rustc_binary, bazel2gn maps crate_name to GN output_name, so crate_name is intentional when output_name is needed.
         check_rustc_test_crate_reuse(node, rule_name, target_name, kw_map)
         check_rustc_test_raw_output_name(node, rule_name, target_name)
-        if "crate_name" in kw_map and target_name and rule_name not in ("rustc_binary", "rustc_test"):
+        check_rustc_staticlib_raw_public(node, rule_name, target_name)
+        if "crate_name" in kw_map and target_name and rule_name not in ("rustc_binary", "rustc_test", "host_rustc_test"):
             c_name, lineno = kw_map["crate_name"]
             if (
                 c_name == target_name or c_name == target_name.replace("-", "_")
@@ -4270,6 +6183,47 @@ for rel_path, full_path in bazel_files:
                     "from BUILD.bazel and re-run `fx bazel2gn` if dual-building.",
                 )
 
+        # 3a2. Redundant `"-Cpanic=abort"` in `rustc_flags` on Fuchsia Rust targets
+        #      (already enabled by default via `//build/config/rust:panic_abort`).
+        if (
+            rule_name.startswith("rustc_")
+            and rule_name not in ("rustc_binary_host_tool", "idk_rustc_binary_host_tool")
+            and "-Cpanic=abort" not in base_gn_text
+            and not is_preexisting_target_attr(rule_name, target_name, '"-Cpanic=abort"')
+        ):
+            tcw_kw = next((kw for kw in node.keywords if kw.arg == "target_compatible_with"), None)
+            tcw_seg = (ast.get_source_segment(source, tcw_kw) or "") if tcw_kw else ""
+            is_host_only_tcw = any(
+                h in tcw_seg
+                for h in ("HOST_OS_CONSTRAINTS", "is_host_os", "@platforms//os:linux", "@platforms//os:macos")
+            )
+            if not is_host_only_tcw:
+                for kw in node.keywords:
+                    if kw.arg != "rustc_flags":
+                        continue
+                    panic_lineno = next(
+                        (
+                            getattr(sub, "lineno", kw.lineno)
+                            for sub in ast.walk(kw.value)
+                            if isinstance(sub, ast.Constant) and sub.value == "-Cpanic=abort"
+                        ),
+                        None,
+                    )
+                    if panic_lineno is not None:
+                        _emit(
+                            findings,
+                            "redundant_default_attribute",
+                            "error",
+                            rel_path,
+                            panic_lineno,
+                            f"Target '{target_name}' ({rule_name}) specifies redundant "
+                            '`"-Cpanic=abort"` in `rustc_flags`, which Fuchsia\'s Rust toolchain '
+                            "already applies by default (`//build/config/rust:panic_abort`).",
+                            "Remove `\"-Cpanic=abort\"` from `rustc_flags` (and drop `rustc_flags` "
+                            f"if empty) on `{target_name}` in '{rel_path}' and re-run "
+                            f"`fx bazel2gn -d {pkg_dir}` if dual-building.",
+                        )
+
         # 3b. Redundant output_name / gn_output_name / out matching name (or unsupported output_name on go_binary / fx_cc_*)
         for out_attr in ("output_name", "gn_output_name", "out"):
             if out_attr not in kw_map:
@@ -4290,6 +6244,32 @@ for rel_path, full_path in bazel_files:
             elif out_attr == "output_name" and rule_name in ("fx_cc_binary", "fx_cc_test_binary", "fx_cc_test"):
                 _emit(findings, "unsupported_cc_output_name_attribute", "error", rel_path, lineno, f"Target '{target_name}' ({rule_name}) specifies `output_name = \"{out_val}\"`, "
                         f"which is not a valid attribute on `{rule_name}`; use `gn_output_name = \"{out_val}\"` instead.", f"Replace `output_name = \"{out_val}\"` with `gn_output_name = \"{out_val}\"` on `{target_name}` in '{rel_path}' and re-run `fx bazel2gn`.")
+            elif out_attr == "gn_output_name" and package_eliminated_gn_or_sentinel(pkg_dir):
+                _emit(
+                    findings,
+                    "redundant_default_attribute",
+                    "error",
+                    rel_path,
+                    lineno,
+                    f"Target '{target_name}' ({rule_name}) specifies `gn_output_name = \"{out_val}\"`, "
+                    f"which is unused in Bazel and only affects `bazel2gn` output, while `{pkg_dir}/BUILD.gn` "
+                    "has no `## BAZEL2GN SENTINEL`.",
+                    f"Remove `gn_output_name = \"{out_val}\"` from `{target_name}` in '{rel_path}' "
+                    "(use `binary_name` on `fx_packaged_binary` when customizing the packaged binary path).",
+                )
+
+        # Redundant package_name matching name on Fuchsia package macros.
+        if (
+            rule_name in ("fx_package", "fx_unittest_package", "fx_bootfs_files_package")
+            and "package_name" in kw_map
+            and target_name
+        ):
+            pkg_name, lineno = kw_map["package_name"]
+            if pkg_name == target_name and not is_preexisting_target_attr(
+                rule_name, target_name, f'package_name="{pkg_name}"'
+            ):
+                _emit(findings, "redundant_default_attribute", "error", rel_path, lineno, f"Target '{target_name}' ({rule_name}) specifies redundant `package_name = \"{pkg_name}\"`, "
+                        "which is already the default derived from `name`.", "Remove `package_name` from BUILD.bazel and re-run `fx bazel2gn` if dual-building.")
 
         # 3c. Legacy host-tool macros (go_binary_host_tool, py_binary_host_tool) require
         #     caller package visibility on //build/bazel/versioning:is_api_level_PLATFORM.
@@ -4398,6 +6378,10 @@ for rel_path, full_path in bazel_files:
     #    without LINT.IfChange / LINT.ThenChange(<manifest>) when <manifest> remains in the tree.
     pkg_dir = os.path.dirname(rel_path)
     base_gn_lines = git_lines(["show", f"{change_base}:{pkg_dir}/BUILD.gn"])
+    if not base_gn_lines and pkg_dir and not pkg_dir.startswith("build/secondary/"):
+        base_gn_lines = git_lines(
+            ["show", f"{change_base}:build/secondary/{pkg_dir}/BUILD.gn"]
+        )
     base_gn_text = "\n".join(base_gn_lines)
     if base_gn_text and not (pkg_dir not in target_dirs and base_bazel_flat):
         for m in re.finditer(r'\bread_file\(\s*"([^"]+)"\s*,\s*"json"\s*\)', base_gn_text):
@@ -4422,6 +6406,152 @@ for rel_path, full_path in bazel_files:
                         f"`# LINT.ThenChange({manifest_rel_pkg})`.", f"Wrap the expanded file list in '{rel_path}' with `# LINT.IfChange` and "
                         f"`# LINT.ThenChange({manifest_rel_pkg})` (or remove '{manifest_repo_rel}' if "
                         "no script or tool uses it anymore).")
+
+    # 5a. Enforce in-tree //build/bazel/rules/packages:resources.bzl wrapper macros and
+    #     GN-compatible sources + outputs = [".../{{source_file_part}}"] on resource().
+    def _check_in_tree_resource_rules(
+        st_tree, st_src, st_rel, p_dir, gn_base_txt, bz_base_flat
+    ):
+        if st_rel.startswith(("build/bazel/", "build/bazel_sdk/")):
+            return
+        in_tree_res_bzl = "build/bazel/rules/packages/resources.bzl"
+        if not os.path.isfile(os.path.join(workdir, in_tree_res_bzl)):
+            return
+        res_macros = {
+            "resource",
+            "fuchsia_package_resource",
+            "resource_group",
+            "fuchsia_package_resource_group",
+            "resource_tree",
+            "fuchsia_package_resource_collection",
+        }
+        gn_placeholder_outputs = {}
+        if gn_base_txt:
+            gn_clean = re.sub(r"#[^\n]*", "", gn_base_txt)
+            for gm in re.finditer(
+                r'\bresource\(\s*"([^"$]+)"\s*\)\s*\{([^}]*)\}', gn_clean
+            ):
+                r_name, r_body = gm.group(1), gm.group(2)
+                om = re.search(
+                    r'\boutputs\s*=\s*\[\s*"([^"]*\{\{source_(?:file|name)_part\}\}[^"]*)"\s*\]',
+                    r_body,
+                )
+                if om:
+                    gn_placeholder_outputs[r_name] = om.group(1)
+
+        for stmt in getattr(st_tree, "body", ()):
+            if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
+                continue
+            call = stmt.value
+            fn_name = call.func.id if isinstance(call.func, ast.Name) else ""
+            seg = ast.get_source_segment(st_src, stmt) or ""
+            is_preexisting_stmt = bool(
+                seg and re.sub(r"\s+", "", seg) in bz_base_flat
+            )
+            if is_preexisting_stmt:
+                continue
+            if (
+                fn_name == "load"
+                and call.args
+                and isinstance(call.args[0], ast.Constant)
+                and isinstance(call.args[0].value, str)
+            ):
+                mod_lbl = call.args[0].value.lstrip("@")
+                if mod_lbl == "fuchsia_rules_common//packages:resources.bzl":
+                    loaded_res = []
+                    for a in call.args[1:]:
+                        if (
+                            isinstance(a, ast.Constant)
+                            and isinstance(a.value, str)
+                            and a.value in res_macros
+                        ):
+                            loaded_res.append(a.value)
+                    for kw in call.keywords:
+                        if (
+                            kw.arg
+                            and isinstance(kw.value, ast.Constant)
+                            and isinstance(kw.value.value, str)
+                            and kw.value.value in res_macros
+                        ):
+                            loaded_res.append(kw.value.value)
+                    if loaded_res:
+                        syms_str = ", ".join(f"`{s}`" for s in loaded_res)
+                        msg = (
+                            f"'{st_rel}' loads package resource macro(s) {syms_str} from "
+                            f"`{call.args[0].value}` instead of the in-tree "
+                            "`//build/bazel/rules/packages:resources.bzl` wrapper."
+                        )
+                        rem = (
+                            f"Replace `{call.args[0].value}` in '{st_rel}' with "
+                            "`//build/bazel/rules/packages:resources.bzl` (using `sources` and "
+                            "`outputs = [\".../{{source_file_part}}\"]` on `resource()` when "
+                            "matching GN `resource()` targets), then re-run "
+                            f"`fx bazel2gn -d {p_dir}` if dual-building."
+                        )
+                        _emit(
+                            findings,
+                            "unwrapped_external_language_rule",
+                            "error",
+                            st_rel,
+                            stmt.lineno,
+                            msg,
+                            rem,
+                        )
+            elif fn_name in ("resource", "fuchsia_package_resource"):
+                kws = {
+                    kw.arg: kw.value
+                    for kw in call.keywords
+                    if kw.arg is not None
+                }
+                t_name = (
+                    kws["name"].value
+                    if "name" in kws
+                    and isinstance(kws["name"], ast.Constant)
+                    and isinstance(kws["name"].value, str)
+                    else ""
+                )
+                src_val = (
+                    kws["src"].value
+                    if "src" in kws
+                    and isinstance(kws["src"], ast.Constant)
+                    and isinstance(kws["src"].value, str)
+                    else ""
+                )
+                dest_val = (
+                    kws["dest"].value
+                    if "dest" in kws
+                    and isinstance(kws["dest"], ast.Constant)
+                    and isinstance(kws["dest"].value, str)
+                    else ""
+                )
+                if t_name in gn_placeholder_outputs and src_val and dest_val:
+                    out_pat = gn_placeholder_outputs[t_name]
+                    msg = (
+                        f"Target '{t_name}' ({fn_name}) in '{st_rel}' uses `src` and explicit "
+                        f'`dest = "{dest_val}"` instead of the GN-compatible `sources` + '
+                        f'`outputs = ["{out_pat}"]` form from '
+                        "`//build/bazel/rules/packages:resources.bzl`, causing `bazel2gn` to "
+                        "replace `{{source_file_part}}` with a literal filename in `BUILD.gn`."
+                    )
+                    rem = (
+                        f"Load `{fn_name}` from `//build/bazel/rules/packages:resources.bzl`, "
+                        f'replace `src = "{src_val}"` and `dest = "{dest_val}"` on '
+                        f"'{t_name}' with `sources = [\"{src_val}\"]` and "
+                        f'`outputs = ["{out_pat}"]`, and re-run `fx bazel2gn -d {p_dir}`.'
+                    )
+                    _emit(
+                        findings,
+                        "unwrapped_external_language_rule",
+                        "error",
+                        st_rel,
+                        stmt.lineno,
+                        msg,
+                        rem,
+                    )
+
+    _check_in_tree_resource_rules(
+        tree, source, rel_path, pkg_dir, base_gn_text, base_bazel_flat
+    )
 
     # 7. @bazel2gn:path_overwrite hygiene: reject multi-label overwrites, reject real
     #    Bazel targets (including same-package fidl_library targets for missing
@@ -4587,10 +6717,12 @@ for rel_path, full_path in bazel_files:
         "fx_test",
         "fx_test_component",
         "fx_unittest_component",
+        "golden_test",
         "host_cc_test",
         "host_py_test",
         "host_shac_test",
         "host_test",
+        "py_zipapp_binary",
         "test_suite",
         "wrap_host_rust_test",
     }
@@ -4853,40 +6985,168 @@ for rel_path, full_path in bazel_files:
             bz_pkg, has_colon, bz_target = bz_label[2:].partition(":")
             bz_pkg = bz_pkg.strip("/")
             bz_target = bz_target or os.path.basename(bz_pkg)
-            # Legitimate real-target overwrites:
-            # 1) Explicit target in the same package when GN uses the package-default label //<pkg>
-            #    and //<pkg> is not a pure forwarding group to :<bz_target>
-            # 2) Same-package C/C++ library for a GN-only *_static wrapper (not a missing FIDL *_rust_next binding)
-            # 3) Package-local forwarding group("...") in BUILD.gn that forwards to //<bz_pkg>
-            # 4) A cc_link_stub_from_ifs_file target in //<bz_pkg> whose ifs_file lives in
-            #    the overwritten GN target's package
-            def _is_ifs_link_stub_for_gn_label(stub_pkg: str, stub_name: str, gn_lbl: str) -> bool:
+            # Reject substituting a cc_link_stub_from_ifs_file ABI stub via path_overwrite
+            # for a real GN shared library (which omits the runtime .so from Bazel packages).
+            def _inspect_ifs_link_stub_overwrite(
+                stub_pkg: str, stub_name: str, gn_lbl: str
+            ):
+                import ast as _ast
+
                 if not gn_lbl.startswith("//"):
-                    return False
-                gn_pkg = gn_lbl[2:].split(":", 1)[0].strip("/")
-                if not gn_pkg:
-                    return False
+                    return None
+                gn_pkg_raw, gn_has_colon, gn_t_raw = gn_lbl[2:].partition(":")
+                gn_pkg = gn_pkg_raw.strip("/")
+                gn_target = (
+                    gn_t_raw.strip() if gn_has_colon else os.path.basename(gn_pkg)
+                )
+                if not gn_pkg or not gn_target or gn_pkg == stub_pkg:
+                    return None
                 stub_bz = os.path.join(workdir, stub_pkg, "BUILD.bazel")
                 if not os.path.isfile(stub_bz):
-                    return False
+                    return None
                 try:
                     with open(stub_bz, encoding="utf-8") as sf:
                         stub_txt = sf.read()
                 except OSError:
-                    return False
-                return (
-                    "cc_link_stub_from_ifs_file" in stub_txt
-                    and f'name = "{stub_name}"' in stub_txt
-                    and f'"//{gn_pkg}:' in stub_txt
+                    return None
+                is_ifs_stub = False
+                try:
+                    stub_tree = _ast.parse(stub_txt, filename=stub_bz)
+                    for node in _ast.walk(stub_tree):
+                        if not isinstance(node, _ast.Call):
+                            continue
+                        fn_name = (
+                            node.func.id
+                            if isinstance(node.func, _ast.Name)
+                            else (
+                                node.func.attr
+                                if isinstance(node.func, _ast.Attribute)
+                                else ""
+                            )
+                        )
+                        if fn_name not in (
+                            "cc_link_stub_from_ifs_file",
+                            "link_stub_from_ifs_file",
+                        ):
+                            continue
+                        for kw in node.keywords:
+                            if (
+                                kw.arg == "name"
+                                and isinstance(kw.value, _ast.Constant)
+                                and kw.value.value == stub_name
+                            ):
+                                is_ifs_stub = True
+                                break
+                        if is_ifs_stub:
+                            break
+                except SyntaxError:
+                    is_ifs_stub = (
+                        "cc_link_stub_from_ifs_file" in stub_txt
+                        and f'name = "{stub_name}"' in stub_txt
+                    )
+                if not is_ifs_stub:
+                    return None
+                gn_file = os.path.join(workdir, gn_pkg, "BUILD.gn")
+                if os.path.isfile(gn_file):
+                    try:
+                        with open(gn_file, encoding="utf-8") as gf:
+                            gn_txt = gf.read()
+                        if re.search(
+                            r'\bifs_shared_library\(\s*"'
+                            + re.escape(gn_target)
+                            + r'"\s*\)',
+                            gn_txt,
+                        ):
+                            return None
+                    except OSError:
+                        pass
+                real_bz_exists = False
+                real_bz_path = os.path.join(workdir, gn_pkg, "BUILD.bazel")
+                if os.path.isfile(real_bz_path):
+                    try:
+                        with open(real_bz_path, encoding="utf-8") as rf:
+                            real_bz_txt = rf.read()
+                        real_tree = _ast.parse(real_bz_txt, filename=real_bz_path)
+                        for node in _ast.walk(real_tree):
+                            if not isinstance(node, _ast.Call):
+                                continue
+                            for kw in node.keywords:
+                                if (
+                                    kw.arg == "name"
+                                    and isinstance(kw.value, _ast.Constant)
+                                    and kw.value.value == gn_target
+                                ):
+                                    real_bz_exists = True
+                                    break
+                            if real_bz_exists:
+                                break
+                    except (OSError, SyntaxError):
+                        pass
+                canonical_bz = (
+                    f"//{gn_pkg}"
+                    if gn_target == os.path.basename(gn_pkg)
+                    else f"//{gn_pkg}:{gn_target}"
                 )
+                return (gn_pkg, gn_target, canonical_bz, real_bz_exists)
 
-            is_missing_fidl_binding = bool(re.search(r":.+_(?:rust_next|rust|cpp|hlcpp|banjo)\b", gl))
+            ifs_stub_match = _inspect_ifs_link_stub_overwrite(bz_pkg, bz_target, gl)
+            if ifs_stub_match is not None:
+                gn_pkg_m, gn_target_m, canonical_bz_m, real_bz_exists = ifs_stub_match
+                ifs_msg = (
+                    f"Line {lineno} of '{rel_path}' substitutes ABI-only link stub "
+                    f"`\"{bz_label}\"` (`cc_link_stub_from_ifs_file`) for `{gl}` via "
+                    "`# @bazel2gn:path_overwrite:`. `cc_link_stub_from_ifs_file` links "
+                    "against an `.ifs` symbol stub without packaging the runtime `.so`, "
+                    "causing Bazel test packages and components to fail at runtime even "
+                    "though `fx bazel build` and GN succeed."
+                )
+                if real_bz_exists:
+                    ifs_rem = (
+                        f"Replace `\"{bz_label}\"` on line {lineno} of '{rel_path}' "
+                        f"with `\"{canonical_bz_m}\"` (removing "
+                        f"`# @bazel2gn:path_overwrite:{gl}`) and re-run "
+                        f"`fx bazel2gn -d {pkg_dir}` so Bazel links and packages the "
+                        "real shared library."
+                    )
+                else:
+                    ifs_rem = (
+                        f"Do not substitute `{bz_label}` (`cc_link_stub_from_ifs_file`) "
+                        f"for `{gl}`. If a prerequisite change migrating "
+                        f"`//{gn_pkg_m}:{gn_target_m}` is available (e.g. in Task Notes "
+                        "or `refs/planter/composite/`), restack `HEAD` onto it and "
+                        f"depend on `\"{canonical_bz_m}\"` directly without "
+                        f"`# @bazel2gn:path_overwrite:`; otherwise leave '{pkg_dir}' "
+                        f"unmigrated as blocked on `//{gn_pkg_m}:{gn_target_m}`."
+                    )
+                _emit(
+                    findings,
+                    "ifs_link_stub_substituted_for_shared_library",
+                    "error",
+                    rel_path,
+                    lineno,
+                    ifs_msg,
+                    ifs_rem,
+                )
+                continue
+
+            # Legitimate real-target overwrites:
+            # 1) Explicit target in the same package when GN uses the package-default label //<pkg>
+            #    and //<pkg> is not a pure forwarding group to :<bz_target>
+            # 2) Same-package C/C++ library for a GN-only *_static wrapper (not a missing FIDL *_rust_next binding),
+            #    or a Bazel `<stem>_cc` bind C++ library (`fuchsia_bind_cc_library`) mapped to GN `<stem>_cpp`
+            # 3) Package-local forwarding group("...") in BUILD.gn that forwards to //<bz_pkg>
+            is_bind_cc_to_cpp = (
+                bz_target.endswith("_cc")
+                and gl == f"//{bz_pkg}:{bz_target[:-3]}_cpp"
+            )
+            is_missing_fidl_binding = (
+                bool(re.search(r":.+_(?:rust_next|rust|cpp|hlcpp|banjo)\b", gl))
+                and not is_bind_cc_to_cpp
+            )
             related = False
             if gl == f"//{bz_pkg}" and has_colon:
                 related = True
             elif gl.startswith(f"//{bz_pkg}:") and not is_missing_fidl_binding:
-                related = True
-            elif _is_ifs_link_stub_for_gn_label(bz_pkg, bz_target, gl):
                 related = True
             elif gl.startswith(":"):
                 gn_local = gl[1:]
@@ -6352,6 +8612,89 @@ for cand_rel in (
 if not buildifier_bin:
     buildifier_bin = shutil.which("buildifier")
 
+# Check whether `scripts/shac/starlark.star` promotes `w_cat` on `fname` to `error`
+# (`load` everywhere, plus `module-docstring` on exported `build/bazel_sdk/**/*.bzl`).
+def _is_shac_error_buildifier_lint(fname: str, w_cat: str) -> bool:
+    if w_cat == "load":
+        return True
+    norm = fname.strip("/")
+    return (
+        w_cat == "module-docstring"
+        and norm.startswith("build/bazel_sdk/")
+        and norm.endswith(".bzl")
+    )
+
+
+# Collect `(category, message)` warning counts already present on `fname` at `change_base`
+# so collateral edits to pre-existing Starlark files do not fail on pre-existing non-error
+# lint notices (such as missing docstrings on shared `.bzl` rule files).
+def _preexisting_buildifier_warning_counts(fname: str) -> dict[tuple[str, str], int]:
+    norm = fname.strip("/")
+    if not norm or norm in newly_added_files or not buildifier_bin:
+        return {}
+    try:
+        show_proc = subprocess.run(
+            ["git", "-C", workdir, "show", f"{change_base}:{norm}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if show_proc.returncode != 0 or not show_proc.stdout:
+            return {}
+        b_proc = subprocess.run(
+            [
+                buildifier_bin,
+                "-lint=warn",
+                "-format=json",
+                "-mode=check",
+                f"-path={norm}",
+            ],
+            input=show_proc.stdout,
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        b_data = json.loads(b_proc.stdout) if b_proc.stdout.strip() else None
+        if not isinstance(b_data, dict):
+            return {}
+        counts: dict[tuple[str, str], int] = {}
+        for bf in b_data.get("files", []):
+            for bw in bf.get("warnings", []):
+                key = (
+                    bw.get("category", "buildifier_lint"),
+                    (bw.get("message") or "").strip(),
+                )
+                counts[key] = counts.get(key, 0) + 1
+        return counts
+    except Exception:
+        return {}
+
+
+# Check whether a pre-existing `.bzl` file outside `build/bazel_sdk/` already lacked a
+# module docstring at `change_base` (used by the AST fallback when buildifier is absent).
+def _had_missing_module_docstring_at_base(rel: str) -> bool:
+    norm = rel.strip("/")
+    if not norm or norm in newly_added_files or norm.startswith("build/bazel_sdk/"):
+        return False
+    try:
+        show_proc = subprocess.run(
+            ["git", "-C", workdir, "show", f"{change_base}:{norm}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        if show_proc.returncode != 0 or not show_proc.stdout:
+            return False
+        base_tree = ast.parse(show_proc.stdout, filename=norm)
+        return bool(base_tree.body and ast.get_docstring(base_tree, clean=False) is None)
+    except Exception:
+        return False
+
+
 buildifier_ran = False
 if buildifier_bin and starlark_rels:
     try:
@@ -6379,7 +8722,13 @@ if buildifier_bin and starlark_rels:
                     is_autogen = bool(re.search(r"AUTO-GENERATED|DO NOT EDIT", head_txt, re.I))
                 except Exception:
                     pass
-                for w in file_res.get("warnings", []):
+                raw_warnings = file_res.get("warnings", [])
+                base_warn_counts = (
+                    _preexisting_buildifier_warning_counts(fname)
+                    if raw_warnings
+                    else {}
+                )
+                for w in raw_warnings:
                     w_cat = w.get("category", "buildifier_lint")
                     if w_cat == "module-docstring" and is_autogen:
                         continue
@@ -6387,12 +8736,22 @@ if buildifier_bin and starlark_rels:
                     # GN-compatible form), which buildifier may still report: accept it.
                     if (
                         w_cat == "module-docstring"
-                        and re.search(r"#\s*buildifier:\s*disable=module-docstring", head_txt_full(fname))
+                        and re.search(
+                            r"#\s*buildifier:\s*disable=module-docstring",
+                            head_txt_full(fname),
+                        )
                         and bzl_imported_by_gn(fname)
                     ):
                         continue
                     w_line = w.get("start", {}).get("line", 1) or 1
                     w_msg = (w.get("message") or "").strip()
+                    w_key = (w_cat, w_msg)
+                    if (
+                        not _is_shac_error_buildifier_lint(fname, w_cat)
+                        and base_warn_counts.get(w_key, 0) > 0
+                    ):
+                        base_warn_counts[w_key] -= 1
+                        continue
                     if w_cat == "module-docstring" and bzl_imported_by_gn(fname):
                         rem = GN_SHARED_DOCSTRING_REMEDIATION.format(f=fname)
                     elif w_cat == "module-docstring":
@@ -6426,6 +8785,8 @@ if not buildifier_ran:
         if re.search(r"#\s*buildifier:\s*disable=module-docstring", src) and bzl_imported_by_gn(rel):
             continue
         if tree.body and ast.get_docstring(tree, clean=False) is None:
+            if _had_missing_module_docstring_at_base(rel):
+                continue
             if bzl_imported_by_gn(rel):
                 fallback_rem = GN_SHARED_DOCSTRING_REMEDIATION.format(f=rel)
             else:

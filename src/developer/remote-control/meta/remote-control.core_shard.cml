@@ -115,8 +115,11 @@
             subdir: "serial",
         },
         {
-            protocol: "fuchsia.boot.Arguments",
-            from: "parent",
+            config: [
+                "fuchsia.dev.fdomain.uart",
+                "fuchsia.dev.fdomain.uart.baud",
+            ],
+            from: "parent/boot_args",
             to: "#fdomain-uart-driver",
         },
     ],

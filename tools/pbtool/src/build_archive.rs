@@ -207,6 +207,7 @@ impl GenerateBuildArchive {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let images_manifest_path = self.out_dir.join("images.json");
         images_manifest.write_old(images_manifest_path).context("Writing images manifest")?;

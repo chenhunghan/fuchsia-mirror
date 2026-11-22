@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Bazel license() metadata has no GN counterpart.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:Apache-2.0"],
+    license_text = "src/LICENSE",
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether snippet-uiautomator_testonly should use target_compatible_with (was not gated by if (is_host) in GN).
+py_library(
+    name = "snippet-uiautomator_testonly",
+    srcs = [
+        "src/snippet_uiautomator/__init__.py",
+        "src/snippet_uiautomator/byselector.py",
+        "src/snippet_uiautomator/configurator.py",
+        "src/snippet_uiautomator/constants.py",
+        "src/snippet_uiautomator/errors.py",
+        "src/snippet_uiautomator/uiautomator.py",
+        "src/snippet_uiautomator/uidevice.py",
+        "src/snippet_uiautomator/uiobject2.py",
+        "src/snippet_uiautomator/uiwatcher.py",
+        "src/snippet_uiautomator/utils.py",
+    ],
+    imports = ["src"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/end_to_end/honeydew:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether snippet-uiautomator should use target_compatible_with (was not gated by if (is_host) in GN).
+alias(
+    name = "snippet-uiautomator",
+    testonly = True,
+    actual = ":snippet-uiautomator_testonly",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//vendor/google:__subpackages__"],
+)

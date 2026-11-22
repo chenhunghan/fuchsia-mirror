@@ -5,8 +5,8 @@
 #ifndef SRC_DEVICES_NAND_DRIVERS_SKIP_BLOCK_SKIP_BLOCK_H_
 #define SRC_DEVICES_NAND_DRIVERS_SKIP_BLOCK_SKIP_BLOCK_H_
 
+#include <fidl/fuchsia.hardware.badblock/cpp/wire.h>
 #include <fidl/fuchsia.hardware.skipblock/cpp/wire.h>
-#include <fuchsia/hardware/badblock/cpp/banjo.h>
 #include <fuchsia/hardware/nand/cpp/banjo.h>
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/component/cpp/driver_base2.h>
@@ -76,7 +76,7 @@ class SkipBlock : public fdf::DriverBase2,
                                       zx::vmo* vmo) TA_REQ(lock_);
 
   ddk::NandProtocolClient nand_ __TA_GUARDED(lock_);
-  ddk::BadBlockProtocolClient bad_block_ __TA_GUARDED(lock_);
+  fidl::WireSyncClient<fuchsia_hardware_badblock::BadBlock> bad_block_ __TA_GUARDED(lock_);
   LogicalToPhysicalMap block_map_ __TA_GUARDED(lock_);
   fbl::Mutex lock_;
   nand_info_t nand_info_;

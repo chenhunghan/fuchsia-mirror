@@ -96,12 +96,12 @@ struct ExceptionEventStatus {
 
 constexpr uint8_t kExceededWriteBoosterBufferLifeTime = 0x0b;
 
-// UFS Specification Version 3.1, section 6.4 "Reference Clock".
+// UFS 3.1 section 6.4 / UFS 4.0 section 6.4 and section 14.3, Table 14.28 (bRefClkFreq).
 enum AttributeReferenceClock {
   k19_2MHz = 0x0,
   k26MHz = 0x1,
   k38_4MHz = 0x2,
-  kObsolete = 0x3,
+  kObsolete = 0x3,  // Obsolete in UFS 3.1; 52 MHz (default) in UFS 4.0 Table 14.28.
 };
 
 class ReadAttributeUpiu : public QueryReadRequestUpiu {

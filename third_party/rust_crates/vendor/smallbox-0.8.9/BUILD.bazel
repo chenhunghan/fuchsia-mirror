@@ -29,6 +29,7 @@ package_info(
 license(
     name = "license",
     license_kinds = ["@rules_license//licenses/spdx:MIT"],
+    license_text = "LICENCE",
 )
 
 rust_library(

@@ -1,0 +1,50 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":zxdb_dap_mixin_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# Enable mypy for the dual-built GN target so GN consumers that run mypy (e.g.
+# //scripts/debug/zxdb_cli/daemon:daemon_lib) still receive type information.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "zxdb_dap",
+    srcs = [
+        "zxdb_dap/__init__.py",
+        "zxdb_dap/models.py",
+        "zxdb_dap/zxdb_dap_mixin.py",
+    ],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/debug/zxdb_cli/daemon:__pkg__",
+        "//scripts/debug/zxdb_cli/shared:__pkg__",
+        "//src/developer/debug/e2e_tests/dap_integration_tests:__pkg__",
+    ],
+    deps = ["//src/lib/debug/dap/python:lib"],
+)
+
+host_py_test(
+    name = "zxdb_dap_mixin_test",
+    srcs = ["tests/zxdb_dap_mixin_test.py"],
+    main = "tests/zxdb_dap_mixin_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    # In Bazel, unlike GN, Python binaries are not zipped, so pydantic_core's
+    # DSO stays in runfiles via //third_party/pylibs/pydantic without a
+    # separate test_data target. Original GN comment:
+    # Explicitly depend on pydantic-core's test_data. This is to ensure that the
+    # module's DSO is bundled together with our test so the top-level pydantic
+    # module loads correctly.
+    deps = [":zxdb_dap"],
+)

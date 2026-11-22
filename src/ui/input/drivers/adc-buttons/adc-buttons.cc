@@ -52,8 +52,7 @@ fuchsia_input::ConsumerControlButton ConvertConsumerControlButton(
   }
 }
 
-fuchsia_buttons::AdcButtonsMetadata ConvertMetadata(
-    const adc_buttons::Adc_buttonsMetadata& parsed) {
+fuchsia_buttons::AdcButtonsMetadata ConvertMetadata(const adc_buttons::AdcButtonsMetadata& parsed) {
   fuchsia_buttons::AdcButtonsMetadata metadata;
 
   if (parsed.polling_rate_usec.has_value()) {
@@ -159,7 +158,7 @@ zx::result<> AdcButtons::Start(fdf::DriverContext context) {
                  metadata_result, dict_result);
       return metadata_result.take_error();
     }
-    auto parsed = adc_buttons::Adc_buttonsMetadata::Parse(dict_result.value());
+    auto parsed = adc_buttons::AdcButtonsMetadata::Parse(dict_result.value());
     if (!parsed.has_value()) {
       fdf::error("Failed to parse AdcButtonsMetadata from Dictionary");
       return zx::error(ZX_ERR_INTERNAL);

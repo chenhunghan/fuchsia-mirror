@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include <string>
+#include <utility>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -353,9 +354,10 @@ class SyslogAccessTest : public ::testing::TestWithParam<std::tuple<bool, bool, 
         GetParam();
 
     EXPECT_THAT(prctl(PR_SET_SECUREBITS, SECBIT_KEEP_CAPS), SyscallSucceeds());
-    ASSERT_TRUE(
-        files::ReadFileToString("/proc/sys/kernel/dmesg_restrict", &previous_dmesg_restrict_));
-    ASSERT_TRUE(files::WriteFile("/proc/sys/kernel/dmesg_restrict", dmesg_restrict_ ? "1" : "0"));
+    auto sysctl = test_helper::ScopedSysctl::Create("/proc/sys/kernel/dmesg_restrict",
+                                                    dmesg_restrict_ ? "1" : "0");
+    ASSERT_THAT(sysctl, SyscallResultIsOk());
+    dmesg_restrict_sysctl_ = std::move(sysctl.value());
     if (!is_root_) {
       EXPECT_THAT(seteuid(1), SyscallSucceeds());
     }
@@ -388,7 +390,7 @@ class SyslogAccessTest : public ::testing::TestWithParam<std::tuple<bool, bool, 
     test_helper::SetCapabilityEffective(CAP_SYS_ADMIN);
     test_helper::SetCapabilityEffective(CAP_DAC_OVERRIDE);
     test_helper::SetCapabilityEffective(CAP_DAC_READ_SEARCH);
-    EXPECT_TRUE(files::WriteFile("/proc/sys/kernel/dmesg_restrict", previous_dmesg_restrict_));
+    dmesg_restrict_sysctl_.Restore();
     EXPECT_THAT(prctl(PR_SET_SECUREBITS, 0), SyscallSucceeds());
   }
 
@@ -401,7 +403,7 @@ class SyslogAccessTest : public ::testing::TestWithParam<std::tuple<bool, bool, 
 
  private:
   bool skipped_ = false;
-  std::string previous_dmesg_restrict_;
+  test_helper::ScopedSysctl dmesg_restrict_sysctl_;
 };
 
 TEST_P(SyslogAccessTest, ProcKmsgRead) {
@@ -508,21 +510,13 @@ TEST_P(SyslogAccessTest, DevKmsgTrunc) {
 }
 
 TEST_P(SyslogAccessTest, SyslogActionClose) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CLOSE, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CLOSE, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_CLOSE, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionOpen) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_OPEN, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_OPEN, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_OPEN, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionRead) {
@@ -537,14 +531,9 @@ TEST_P(SyslogAccessTest, SyslogActionRead) {
       EXPECT_THAT(write(dev_kmsg_.get(), write_buf, strlen(write_buf)), SyscallSucceeds());
     } while (usleep(100000) == 0);
   });
-  bool expect_allowed = has_cap_syslog_;
   char read_buf[4096];
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_READ, read_buf, sizeof(read_buf)), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_READ, read_buf, sizeof(read_buf)),
-                SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_READ, read_buf, sizeof(read_buf)),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
   EXPECT_THAT(kill(writing_child, SIGKILL), SyscallSucceeds());
   ASSERT_TRUE(fork_helper.WaitForChildren());
 }
@@ -552,77 +541,45 @@ TEST_P(SyslogAccessTest, SyslogActionRead) {
 TEST_P(SyslogAccessTest, SyslogActionReadAll) {
   bool expect_allowed = has_cap_syslog_ || !dmesg_restrict_;
   char read_buf[4096];
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_READ_ALL, read_buf, sizeof(read_buf)), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_READ_ALL, read_buf, sizeof(read_buf)),
-                SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_READ_ALL, read_buf, sizeof(read_buf)),
+              SyscallSucceedsOrFailsWithErrno(expect_allowed, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionReadClear) {
-  bool expect_allowed = has_cap_syslog_;
   char read_buf[4096];
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_READ_CLEAR, read_buf, sizeof(read_buf)), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_READ_CLEAR, read_buf, sizeof(read_buf)),
-                SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_READ_CLEAR, read_buf, sizeof(read_buf)),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionClear) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CLEAR, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CLEAR, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_CLEAR, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionConsoleOff) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_OFF, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_OFF, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_OFF, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionConsoleOn) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_ON, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_ON, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_ON, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionConsoleLevel) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, 0, 7), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, 0, 7), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, 0, 7),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionSizeUnread) {
-  bool expect_allowed = has_cap_syslog_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_UNREAD, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_UNREAD, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_UNREAD, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(has_cap_syslog_, EPERM));
 }
 
 TEST_P(SyslogAccessTest, SyslogActionSizeBuffer) {
   bool expect_allowed = has_cap_syslog_ || !dmesg_restrict_;
-  if (expect_allowed) {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_BUFFER, 0, 0), SyscallSucceeds());
-  } else {
-    EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_BUFFER, 0, 0), SyscallFailsWithErrno(EPERM));
-  }
+  EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_BUFFER, 0, 0),
+              SyscallSucceedsOrFailsWithErrno(expect_allowed, EPERM));
 }
 
 INSTANTIATE_TEST_SUITE_P(SyslogAccessTestAll, SyslogAccessTest,

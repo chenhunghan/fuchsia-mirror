@@ -10,13 +10,14 @@ use fbl::{Canary, RefPtr};
 use ksync::{KMutex, guarded};
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
-use zx_types::{ZX_DEFAULT_BTI_RIGHTS, ZX_OBJ_TYPE_BTI, zx_info_bti_t, zx_rights_t};
+use zx_types::{
+    ZX_DEFAULT_BTI_RIGHTS, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_BTI, zx_info_bti_t, zx_rights_t,
+};
 
-use super::bti::Bti;
 use super::bus_transaction_initiator_dispatcher_ffi::cpp_bus_transaction_initiator_dispatcher_create;
-use super::iommu::Iommu;
 use super::pinned_memory_token_dispatcher::PinnedMemoryTokenDispatcher;
 use super::{IOMMU_FLAG_PERM_WRITE, KernelHandle};
+use crate::iommu::{Bti, Iommu};
 use crate::vm::pinned_vm_object::PinnedVmObject;
 use crate::vm::vm_object::VmObject;
 
@@ -39,8 +40,8 @@ pub struct BusTransactionInitiatorDispatcherState {
     /// Magic canary value validating structural integrity.
     canary: Canary<{ fbl::magic(b"BTID") }>,
 
-    /// Reference to the underlying C++ `iommu::Bti` object (not protected by lock).
-    bti: RefPtr<Bti>,
+    /// Underlying `Bti` (not protected by lock).
+    bti: Bti,
 
     #[guarded_by(lock)]
     zero_handles: bool,
@@ -54,37 +55,20 @@ impl BusTransactionInitiatorDispatcherState {
     /// Initializes the `BusTransactionInitiatorDispatcherState`.
     pub fn init(
         _dispatcher: *const BusTransactionInitiatorDispatcher,
-        bti: RefPtr<Bti>,
+        bti: &Bti,
     ) -> impl PinInit<Self, core::convert::Infallible> {
         DISPATCHER_BTI_CREATE_COUNT.add(1);
         pin_init!(Self {
             canary: Canary::new(),
-            bti,
+            bti: bti.clone(),
             zero_handles: false.into(),
             lock <- KMutex::init(),
         })
     }
 
-    /// Returns a reference to the underlying `Bti` facade object.
-    fn bti(&self) -> &RefPtr<Bti> {
+    /// Returns a reference to the underlying `Bti`.
+    fn bti(&self) -> &Bti {
         &self.bti
-    }
-
-    /// Marks the dispatcher as having zero handles.
-    fn set_zero_handles(&self) {
-        ksync::lock!(let mut guard = self.lock_lock());
-        // Prevent new pinning from happening. The Dispatcher will stick around
-        // until all of the PMTs are closed.
-        *guard.as_mut().fields_mut().zero_handles = true;
-    }
-
-    /// Returns whether this dispatcher has hit zero handles.
-    fn zero_handles_locked(
-        &self,
-        token: &ksync::LockToken<'_, BusTransactionInitiatorDispatcherStateLockClass>,
-    ) -> bool {
-        // SAFETY: `token` proves that `self.lock` is held.
-        unsafe { *self.zero_handles.get(token) }
     }
 }
 
@@ -106,21 +90,31 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 impl BusTransactionInitiatorDispatcher {
     /// Creates a new BusTransactionInitiatorDispatcher and returns its kernel handle and rights.
     pub fn create(iommu: &Iommu, bti_id: u64) -> Result<(KernelHandle<Self>, zx_rights_t), Status> {
-        // SAFETY: `iommu` points to a valid `Iommu`, and the FFI function initializes `handle`
-        // on success.
+        let bti = iommu.create_bti(bti_id)?;
+        // SAFETY: `cpp_bus_transaction_initiator_dispatcher_create` initializes `out` on `ZX_OK`;
+        // on any other status, no dispatcher has been constructed, `bti` has not been retained,
+        // and `out` is left uninitialized.
         let handle = unsafe {
-            KernelHandle::create(|out| {
-                cpp_bus_transaction_initiator_dispatcher_create(iommu as *const Iommu, bti_id, out)
-            })
-        }?;
-        Ok((handle, ZX_DEFAULT_BTI_RIGHTS))
+            KernelHandle::create(|out| cpp_bus_transaction_initiator_dispatcher_create(&bti, out))
+        };
+        match handle {
+            Ok(handle) => Ok((handle, ZX_DEFAULT_BTI_RIGHTS)),
+            Err(status) => {
+                // The driver's BTI exists but no dispatcher ever will, so nothing retained `bti`
+                // or will call `on_zero_handles`. Tell it what the dispatcher would have told it
+                // when its last handle closed: otherwise it stays registered with its IOMMU,
+                // holding its stream IDs, and every later attempt to create a BTI for them fails.
+                bti.on_dispatcher_zero_handles();
+                Err(status)
+            }
+        }
     }
 
     /// Pins the given VMO range and returns a `PinnedMemoryTokenDispatcher` representing the
     /// pinned range.
     ///
     /// Returns `ZX_ERR_INVALID_ARGS` if `offset` or `size` are not page-aligned or `size == 0`.
-    /// Returns `ZX_ERR_INVALID_ARGS` if `perms` is not suitable to pass to the `Iommu::map()`
+    /// Returns `ZX_ERR_INVALID_ARGS` if `perms` is not suitable to pass to the [`Bti::map`]
     /// interface.
     /// Returns `ZX_ERR_BAD_STATE` if this BTI has hit zero handles or if the underlying driver is
     /// in a fault state.
@@ -131,6 +125,7 @@ impl BusTransactionInitiatorDispatcher {
         size: u64,
         perms: u32,
     ) -> Result<(KernelHandle<PinnedMemoryTokenDispatcher>, zx_rights_t), Status> {
+        self.state().canary.assert();
         debug_assert!(page::is_aligned(offset as usize));
         debug_assert!(page::is_aligned(size as usize));
 
@@ -149,7 +144,7 @@ impl BusTransactionInitiatorDispatcher {
         // state, user-mode driver code is expected to take the steps to stop their
         // DMA, and then call `zx_bti_release_quarantine` before proceeding to pin new
         // memory.
-        if self.zero_handles_locked(guard.token()) || self.bti().in_fault_state() {
+        if *guard.fields().zero_handles || self.bti().in_fault_state() {
             return Err(Status::BAD_STATE);
         }
 
@@ -157,8 +152,9 @@ impl BusTransactionInitiatorDispatcher {
         PinnedMemoryTokenDispatcher::create(bti_ref, pinned_vmo, perms)
     }
 
-    /// Returns a reference to the underlying `Bti` facade object.
-    pub fn bti(&self) -> &RefPtr<Bti> {
+    /// Returns a reference to the underlying `Bti`.
+    pub fn bti(&self) -> &Bti {
+        self.state().canary.assert();
         self.state().bti()
     }
 
@@ -169,22 +165,26 @@ impl BusTransactionInitiatorDispatcher {
     /// size of 2MB will return at most two physically-contiguous runs. If the size were 2.5MB, it
     /// will return at most three physically-contiguous runs.
     pub fn minimum_contiguity(&self) -> u64 {
+        self.state().canary.assert();
         self.bti().minimum_contiguity()
     }
 
     /// Returns the total size of the address space in bytes (`u64::MAX` if 2^64).
     pub fn aspace_size(&self) -> u64 {
+        self.state().canary.assert();
         self.bti().aspace_size()
     }
 
     /// Returns the current total count of active and quarantined PMTs.
     pub fn pmo_count(&self) -> u64 {
+        self.state().canary.assert();
         self.bti().pmo_count()
     }
 
     /// Returns the count of quarantined PMTs.
     pub fn quarantine_count(&self) -> u64 {
-        self.bti().quarantine_count()
+        self.state().canary.assert();
+        self.bti().quarantine_count() as u64
     }
 
     /// Releases all quarantined PMTs.
@@ -192,25 +192,35 @@ impl BusTransactionInitiatorDispatcher {
     /// The memory pins are released and the VMO references are dropped, so the underlying VMOs may
     /// be immediately destroyed, and the underlying physical memory may be reallocated.
     pub fn release_quarantine(&self) {
-        self.bti().release_quarantine();
+        self.state().canary.assert();
+        // `self.state().lock` (`TrackedCriticalMutex`, disables preemption) is held across the
+        // driver call to serialize against `on_zero_handles`; lock ordering is strictly
+        // `dispatcher -> driver`, and any hardware sync inside is bounded by driver timeouts.
+        ksync::lock!(let guard = self.state().lock_lock());
+        // If all handles have already closed (`on_zero_handles` won the race),
+        // ignore this late call: the driver BTI has already handled zero-handles
+        // teardown or orphaning and reported any permanently leaked pages.
+        if !*guard.fields().zero_handles {
+            self.bti().release_quarantine();
+        }
     }
 
     /// Called when the handle count drops to zero.
     pub fn on_zero_handles(&self) {
-        self.state().set_zero_handles();
+        self.state().canary.assert();
+        // Held across `on_dispatcher_zero_handles` under the same `dispatcher -> driver` lock
+        // order as `release_quarantine` and `pin`.
+        ksync::lock!(let mut guard = self.state().lock_lock());
+        debug_assert!(!*guard.fields().zero_handles);
+        // Prevent new pinning or quarantine releases from happening. The
+        // Dispatcher will stick around until all of the PMTs are closed.
+        *guard.as_mut().fields_mut().zero_handles = true;
         self.bti().on_dispatcher_zero_handles();
-    }
-
-    /// Returns whether this dispatcher has hit zero handles.
-    fn zero_handles_locked(
-        &self,
-        token: &ksync::LockToken<'_, BusTransactionInitiatorDispatcherStateLockClass>,
-    ) -> bool {
-        self.state().zero_handles_locked(token)
     }
 
     /// Returns the information for `zx_object_get_info(ZX_INFO_BTI, ...)`.
     pub fn get_info(&self) -> zx_info_bti_t {
+        self.state().canary.assert();
         // TODO(johngro): Consider refactoring this so that the GetInfo operation can
         // be made in an atomic fashion.
         zx_info_bti_t {
@@ -219,5 +229,19 @@ impl BusTransactionInitiatorDispatcher {
             pmo_count: self.pmo_count(),
             quarantine_count: self.quarantine_count(),
         }
+    }
+
+    /// Sets the debug name of this BTI.
+    pub fn set_name(&self, name: &[u8]) -> Result<(), Status> {
+        self.state().canary.assert();
+        self.bti().set_name(name);
+        Ok(())
+    }
+
+    /// Gets the debug name of this BTI.
+    pub fn get_name(&self, out_name: &mut [u8; ZX_MAX_NAME_LEN]) -> Result<(), Status> {
+        self.state().canary.assert();
+        self.bti().get_name(out_name);
+        Ok(())
     }
 }

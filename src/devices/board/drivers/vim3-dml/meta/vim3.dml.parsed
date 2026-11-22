@@ -1,0 +1,3132 @@
+platform_bus_nodes {
+  "adc-9000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3122435773
+    mmios {
+      mmio {
+        base = 0xff809000
+        length = 0x1000
+        name = "adc"
+      }
+      mmio {
+        base = 0xff800000
+        length = 0x1000
+        name = "ao"
+      }
+    }
+    irq {
+      number = 232
+      mode = EDGE_HIGH
+      name = "saradc"
+    }
+    metadata {
+      id = "fuchsia.hardware.adcimpl.Metadata"
+      data {
+        provider = 0
+        channels[].channel = 2
+        channels[].id = 2510304494
+        channels[].name = "adc-2"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-saradc" }
+  }
+
+  "adc-buttons" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1411392393
+    metadata {
+      id = "fuchsia.buttons.AdcButtonsMetadata"
+      data {
+        polling_rate_usec = 20000
+        buttons[].types = ["FUNCTION"]
+        buttons[].button_config.adc.channel_idx = 2
+        buttons[].button_config.adc.release_threshold = 1000
+        buttons[].button_config.adc.press_threshold = 70
+      }
+    }
+    property { fuchsia.COMPATIBLE = "fuchsia,adc-buttons" }
+  }
+
+  "arm-mali-0" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1329828876
+    mmios {
+      mmio {
+        base = 0xffe40000
+        length = 0x40000
+        name = "mali"
+      }
+    }
+    irq {
+      number = 194
+      mode = LEVEL_HIGH
+      name = "gpu"
+    }
+    irq {
+      number = 193
+      mode = LEVEL_HIGH
+      name = "mmu"
+    }
+    irq {
+      number = 192
+      mode = LEVEL_HIGH
+      name = "job"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 10
+      name = "mali"
+    }
+    property { fuchsia.COMPATIBLE = "arm,mali-gpu" }
+  }
+
+  "audio-controller-ff642000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 530743963
+    mmios {
+      mmio {
+        base = 0xff642000
+        length = 0x2000
+        name = "audio"
+      }
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 3
+      name = "audio"
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,audio-controller" }
+  }
+
+  "bt-uart-ffd24000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 4058353671
+    mmios {
+      mmio {
+        base = 0xffd24000
+        length = 0x18
+      }
+    }
+    irq {
+      number = 58
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "primary"
+    }
+    metadata {
+      id = "fuchsia.hardware.serial.SerialPortInfo"
+      data {
+        serial_class = BluetoothHci
+        serial_vid = 6
+        serial_pid = 3
+      }
+    }
+    boot_metadata {
+      zbi_type = 1128353133
+      zbi_extra = 0
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,bt-uart" }
+  }
+
+  "canvas-ff638000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1967393931
+    mmios {
+      mmio {
+        base = 0xff638000
+        length = 0x2000
+        name = "canvas"
+      }
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 12
+      name = "canvas"
+    }
+    metadata {
+      id = "fuchsia.hardware.amlogiccanvas.Metadata"
+      data {
+        provider = 0
+        consumers[].id = 2498619139
+        consumers[].name = "display-ff900000"
+        consumers[].id = 1048052044
+        consumers[].name = "video-decoder-ffd00000"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,canvas" }
+  }
+
+  "clock-controller-ff63c000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3650398947
+    mmios {
+      mmio {
+        base = 0xff63c000
+        length = 0x2000
+        name = "hhi"
+      }
+      mmio {
+        base = 0xff620000
+        length = 0x10000
+        name = "apb"
+      }
+      mmio {
+        base = 0xffd18000
+        length = 0x1000
+        name = "msr"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.clockimpl.ClockIdsMetadata"
+      data {
+        provider = 0
+        clock_nodes[].clock_id = 65547
+        clock_nodes[].id = 2471190723
+        clock_nodes[].name = "clock-gate"
+        clock_nodes[].clock_id = 131074
+        clock_nodes[].id = 3466513172
+        clock_nodes[].name = "clock-pll"
+        clock_nodes[].clock_id = 65537
+        clock_nodes[].id = 1493004734
+        clock_nodes[].name = "sys-cpu-div16"
+        clock_nodes[].clock_id = 1048576
+        clock_nodes[].id = 838844261
+        clock_nodes[].name = "sys-cpu-big-clk"
+        clock_nodes[].clock_id = 65540
+        clock_nodes[].id = 139909118
+        clock_nodes[].name = "sys-cpub-div16"
+        clock_nodes[].clock_id = 1048577
+        clock_nodes[].id = 3291017047
+        clock_nodes[].name = "sys-cpu-little-clk"
+        clock_nodes[].clock_id = 65536
+        clock_nodes[].id = 331230792
+        clock_nodes[].name = "sys-pll-div16"
+        clock_nodes[].clock_id = 65539
+        clock_nodes[].id = 3377990936
+        clock_nodes[].name = "sys-pllb-div16"
+        clock_nodes[].clock_id = 65548
+        clock_nodes[].id = 2461821341
+        clock_nodes[].name = "clock-gate"
+        clock_nodes[].clock_id = 65543
+        clock_nodes[].id = 3228785569
+        clock_nodes[].name = "clock-dos"
+        clock_nodes[].clock_id = 65541
+        clock_nodes[].id = 2134980478
+        clock_nodes[].name = "clock-dos-vdec"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.clockimpl.InitMetadata"
+      data {
+        steps.0 = 0x20002: Disable
+        steps.1 = 0x20002: RateHz(768000000)
+        steps.2 = 0x20002: Enable
+        steps.3 = 0x20001: Disable
+        steps.4 = 0x20001: RateHz(100000000)
+        steps.5 = 0x20001: Enable
+        steps.6 = 0x10008: Enable
+        steps.7 = 0x10009: Enable
+        steps.8 = 0x1000d: Enable
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,g12b-clk" }
+  }
+
+  "cpu-controller-0" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 428967849
+    mmios {
+      mmio {
+        base = 0xff800000
+        length = 0x1000
+        name = "control"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.amlogic.metadata.CpuMetadata"
+      data {
+        performance_domains.0.id = 1
+        performance_domains.0.core_count = 4
+        performance_domains.0.relative_performance = 255
+        performance_domains.0.name = "a311d-arm-a73"
+        performance_domains.1.id = 2
+        performance_domains.1.core_count = 2
+        performance_domains.1.relative_performance = 112
+        performance_domains.1.name = "a311d-arm-a53"
+        operating_points.0.freq_hz = 1000000000
+        operating_points.0.volt_uv = 731000
+        operating_points.0.pd_id = 1
+        operating_points.1.freq_hz = 1200000000
+        operating_points.1.volt_uv = 751000
+        operating_points.1.pd_id = 1
+        operating_points.2.freq_hz = 1398000000
+        operating_points.2.volt_uv = 771000
+        operating_points.2.pd_id = 1
+        operating_points.3.freq_hz = 1512000000
+        operating_points.3.volt_uv = 771000
+        operating_points.3.pd_id = 1
+        operating_points.4.freq_hz = 1608000000
+        operating_points.4.volt_uv = 781000
+        operating_points.4.pd_id = 1
+        operating_points.5.freq_hz = 1704000000
+        operating_points.5.volt_uv = 791000
+        operating_points.5.pd_id = 1
+        operating_points.6.freq_hz = 1800000000
+        operating_points.6.volt_uv = 831000
+        operating_points.6.pd_id = 1
+        operating_points.7.freq_hz = 1908000000
+        operating_points.7.volt_uv = 861000
+        operating_points.7.pd_id = 1
+        operating_points.8.freq_hz = 2016000000
+        operating_points.8.volt_uv = 911000
+        operating_points.8.pd_id = 1
+        operating_points.9.freq_hz = 2208000000
+        operating_points.9.volt_uv = 1011000
+        operating_points.9.pd_id = 1
+        operating_points.10.freq_hz = 1000000000
+        operating_points.10.volt_uv = 761000
+        operating_points.10.pd_id = 2
+        operating_points.11.freq_hz = 1200000000
+        operating_points.11.volt_uv = 781000
+        operating_points.11.pd_id = 2
+        operating_points.12.freq_hz = 1398000000
+        operating_points.12.volt_uv = 811000
+        operating_points.12.pd_id = 2
+        operating_points.13.freq_hz = 1512000000
+        operating_points.13.volt_uv = 861000
+        operating_points.13.pd_id = 2
+        operating_points.14.freq_hz = 1608000000
+        operating_points.14.volt_uv = 901000
+        operating_points.14.pd_id = 2
+        operating_points.15.freq_hz = 1704000000
+        operating_points.15.volt_uv = 951000
+        operating_points.15.pd_id = 2
+        operating_points.16.freq_hz = 1800000000
+        operating_points.16.volt_uv = 1001000
+        operating_points.16.pd_id = 2
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,cpu" }
+  }
+
+  "display-ff900000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3982401893
+    mmios {
+      mmio {
+        base = 0xff900000
+        length = 0x40000
+        name = "vpu"
+      }
+      mmio {
+        base = 0xffd073c0
+        length = 0x40
+        name = "dsi-top"
+      }
+      mmio {
+        base = 0xff644000
+        length = 0x2000
+        name = "dsi-phy"
+      }
+      mmio {
+        base = 0xffd07000
+        length = 0x1000
+        name = "dsi-controller"
+      }
+      mmio {
+        base = 0xff63c000
+        length = 0x2000
+        name = "hhi"
+      }
+      mmio {
+        base = 0xff800000
+        length = 0x1000
+        name = "always-on-rti"
+      }
+      mmio {
+        base = 0xffd01000
+        length = 0x100
+        name = "ee-reset"
+      }
+      mmio {
+        base = 0xff634400
+        length = 0x400
+        name = "gpio-mux"
+      }
+      mmio {
+        base = 0xff600000
+        length = 0x8000
+        name = "hdmitx-controller"
+      }
+      mmio {
+        base = 0xff608000
+        length = 0x8000
+        name = "hdmitx-top"
+      }
+    }
+    irq {
+      number = 35
+      mode = EDGE_HIGH
+      name = "viu1-vsync"
+    }
+    irq {
+      number = 121
+      mode = EDGE_HIGH
+      name = "rdma-done"
+    }
+    irq {
+      number = 118
+      mode = EDGE_HIGH
+      name = "vdin1-write-done"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 13
+    }
+    smc {
+      base = 2
+      count = 1
+      exclusive = false
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,display" }
+  }
+
+  "dt-root" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1508159440
+    property { fuchsia.COMPATIBLE = "fuchsia,dummy-dt-root" }
+  }
+
+  "dwmac-ff3f0000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3031464799
+    mmios {
+      mmio {
+        base = 0xff3f0000
+        length = 0x10000
+        name = "dwmac"
+      }
+    }
+    irq {
+      number = 40
+      mode = LEVEL_HIGH
+      name = "dwmac"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 1
+      name = "dwmac"
+    }
+    boot_metadata {
+      zbi_type = 1128353133
+      zbi_extra = 0
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-dwmac" }
+  }
+
+  "ethernet-phy-ff634000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 998300204
+    mmios {
+      mmio {
+        base = 0xff634000
+        length = 0x1000
+        name = "eth"
+      }
+      mmio {
+        base = 0xff63c000
+        length = 0x2000
+        name = "eth-pll"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.ethernet.board.Metadata"
+      data {
+        provider = 0
+        consumers[].id = 1244539516
+        consumers[].name = "eth-board"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,ethernet-phy" }
+  }
+
+  "gpio-buttons" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3425963318
+    metadata {
+      id = "fuchsia.buttons.GpioButtonsMetadata"
+      data {
+        buttons[].type.direct = true
+        buttons[].gpio_a_index = 0
+        buttons[].id = "POWER"
+        gpios[].type.interrupt = true
+        gpios[].flags = 128
+      }
+    }
+    property { fuchsia.COMPATIBLE = "fuchsia,gpio-buttons" }
+  }
+
+  "gpio-controller-20" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 2164391206
+    metadata {
+      id = "fuchsia.hardware.pinimpl.Metadata"
+      data {
+        provider = 0
+        pins[].controller = "gpio-controller-20"
+        pins[].pin = 0
+        pins[].name = "gpio-lcd-reset"
+        pins[].id = 3804523753
+        device_pin_states = []
+      }
+    }
+    property { fuchsia.COMPATIBLE = "ti,tca6408a" }
+  }
+
+  "gpio-controller-ff634400" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1517285659
+    mmios {
+      mmio {
+        base = 0xff634400
+        length = 0x400
+        name = "gpio"
+      }
+      mmio {
+        base = 0xff800000
+        length = 0x1000
+        name = "gpio-ao"
+      }
+      mmio {
+        base = 0xffd00000
+        length = 0x10000
+        name = "gpio-interrupt"
+      }
+    }
+    irq {
+      number = 96
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "0"
+    }
+    irq {
+      number = 97
+      mode = EDGE_HIGH
+      name = "1"
+    }
+    irq {
+      number = 98
+      mode = EDGE_HIGH
+      name = "2"
+    }
+    irq {
+      number = 99
+      mode = EDGE_HIGH
+      name = "3"
+    }
+    irq {
+      number = 100
+      mode = EDGE_HIGH
+      name = "4"
+    }
+    irq {
+      number = 101
+      mode = EDGE_HIGH
+      name = "5"
+    }
+    irq {
+      number = 102
+      mode = EDGE_HIGH
+      name = "6"
+    }
+    irq {
+      number = 103
+      mode = EDGE_HIGH
+      name = "7"
+    }
+    metadata {
+      id = "fuchsia.hardware.pinimpl.Metadata"
+      data {
+        provider = 0
+        pins[].pin = 67
+        pins[].name = "gpio-tdm-a-sclk"
+        pins[].id = 2836729542
+        pins[].pin = 17
+        pins[].name = "gpio-tdm-b-sclk"
+        pins[].id = 1636608341
+        pins[].pin = 92
+        pins[].name = "power"
+        pins[].id = 3535698779
+        pins[].controller = "gpio-controller-ff634400"
+        pins[].pin = 78
+        pins[].name = "gpio-hdmi-hotplug-detect"
+        pins[].pull = "Down"
+        pins[].buffer_mode = "Input"
+        pins[].id = 3019923861
+        pins[].pin = 14
+        pins[].name = "gpio-int"
+        pins[].id = 1132267691
+        pins[].pin = 80
+        pins[].name = "GPIO_HEADER_PIN_37"
+        pins[].id = 3479037873
+        pins[].pin = 73
+        pins[].name = "gpio-bt"
+        pins[].id = 3522287472
+        pins[].pin = 62
+        pins[].name = "gpio-reset"
+        pins[].id = 880033702
+        pins[].pin = 44
+        pins[].name = "gpio-reset"
+        pins[].id = 534211362
+        pins[].pin = 93
+        pins[].name = "gpio-int"
+        pins[].pull = "Up"
+        pins[].buffer_mode = "Input"
+        pins[].id = 2407591238
+        pins[].pin = 63
+        pins[].function = 0
+        pins[].pull = "None"
+        pins[].id = 3302626382
+        pins[].name = "gpio-oob"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 67
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 3000
+        device_pin_states[].states[].pins[].pin = 66
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 3000
+        device_pin_states[].states[].pins[].pin = 65
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 3000
+        device_pin_states[].states[].pins[].pin = 64
+        device_pin_states[].states[].pins[].call.pin_config.function = 2
+        device_pin_states[].states[].pins[].pin = 17
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 3000
+        device_pin_states[].states[].pins[].pin = 18
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 3000
+        device_pin_states[].states[].pins[].pin = 19
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 3000
+        device_pin_states[].states[].pins[].pin = 20
+        device_pin_states[].states[].pins[].call.pin_config.function = 2
+        device_pin_states[].id = 1542559044
+        device_pin_states[].name = "audio-controller-ff642000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 68
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 69
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 70
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 71
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].id = 2761656116
+        device_pin_states[].name = "bt-uart-ffd24000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 92
+        device_pin_states[].states[].pins[].call.pin_config.function = 0
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.wake_vector = true
+        device_pin_states[].id = 2338689707
+        device_pin_states[].name = "gpio-buttons"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 0
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 1
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 2
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 3
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 4
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 5
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 6
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 7
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 8
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 9
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 10
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 11
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 12
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].states[].pins[].pin = 13
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 2500
+        device_pin_states[].id = 569884433
+        device_pin_states[].name = "ethernet-phy-ff634000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 87
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 88
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].id = 2558564416
+        device_pin_states[].name = "i2c-5000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 31
+        device_pin_states[].states[].pins[].call.pin_config.function = 2
+        device_pin_states[].states[].pins[].pin = 30
+        device_pin_states[].states[].pins[].call.pin_config.function = 2
+        device_pin_states[].id = 3294647863
+        device_pin_states[].name = "i2c-1c000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 72
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].id = 1322232701
+        device_pin_states[].name = "pwm-init"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 99
+        device_pin_states[].states[].pins[].call.pin_config.function = 3
+        device_pin_states[].states[].pins[].pin = 99
+        device_pin_states[].states[].pins[].call.buffer_mode = "OutputLow"
+        device_pin_states[].id = 3922473234
+        device_pin_states[].name = "pwm_a-regulator"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 98
+        device_pin_states[].states[].pins[].call.pin_config.function = 3
+        device_pin_states[].states[].pins[].pin = 98
+        device_pin_states[].states[].pins[].call.buffer_mode = "OutputLow"
+        device_pin_states[].id = 3408689181
+        device_pin_states[].name = "pwm_a0_d-regulator"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 32
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 33
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 34
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 35
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 36
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 37
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 38
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 39
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 40
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 42
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 45
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 46
+        device_pin_states[].states[].pins[].call.buffer_mode = "OutputHigh"
+        device_pin_states[].id = 1215453094
+        device_pin_states[].name = "mmc-ffe07000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 48
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 49
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 50
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 51
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 52
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].pin = 53
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].id = 597357864
+        device_pin_states[].name = "mmc-ffe05000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 56
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 4000
+        device_pin_states[].states[].pins[].pin = 57
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 4000
+        device_pin_states[].states[].pins[].pin = 58
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 4000
+        device_pin_states[].states[].pins[].pin = 59
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 4000
+        device_pin_states[].states[].pins[].pin = 60
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 4000
+        device_pin_states[].states[].pins[].pin = 61
+        device_pin_states[].states[].pins[].call.pin_config.function = 1
+        device_pin_states[].states[].pins[].call.pin_config.pull = "None"
+        device_pin_states[].states[].pins[].call.pin_config.drive_strength_ua = 4000
+        device_pin_states[].id = 2556823210
+        device_pin_states[].name = "mmc-ffe03000"
+        device_pin_states[].states[].name = "default"
+        device_pin_states[].states[].pins[].pin = 22
+        device_pin_states[].states[].pins[].call.buffer_mode = "OutputHigh"
+        device_pin_states[].id = 1344096315
+        device_pin_states[].name = "usb-phy-ffe09000"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-gpio" }
+  }
+
+  "gpu-ffe40000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 584700629
+    mmios {
+      mmio {
+        base = 0xffe40000
+        length = 0x40000
+        name = "mali"
+      }
+      mmio {
+        base = 0xff63c000
+        length = 0x2000
+        name = "hiu"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,gpu" }
+  }
+
+  "hrtimer-0" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 538226353
+    mmios {
+      mmio {
+        base = 0xffd00000
+        length = 0x10000
+        name = "timer"
+      }
+    }
+    irq {
+      number = 42
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-a"
+    }
+    irq {
+      number = 43
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-b"
+    }
+    irq {
+      number = 38
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-c"
+    }
+    irq {
+      number = 61
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-d"
+    }
+    irq {
+      number = 92
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-f"
+    }
+    irq {
+      number = 93
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-g"
+    }
+    irq {
+      number = 94
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-h"
+    }
+    irq {
+      number = 95
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "timer-i"
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,hrtimer" }
+  }
+
+  "i2c-1c000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3222665378
+    mmios {
+      mmio {
+        base = 0xffd1c000
+        length = 0x20
+        name = "i2c"
+      }
+    }
+    irq {
+      number = 71
+      mode = EDGE_HIGH
+      name = "primary"
+    }
+    metadata {
+      id = "fuchsia.hardware.i2c.businfo.I2CBusMetadata"
+      data {
+        provider = 1
+        channels = []
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-axg-i2c" }
+  }
+
+  "i2c-5000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 711041103
+    mmios {
+      mmio {
+        base = 0xff805000
+        length = 0x20
+        name = "i2c"
+      }
+    }
+    irq {
+      number = 227
+      mode = EDGE_HIGH
+      name = "primary"
+    }
+    metadata {
+      id = "fuchsia.hardware.i2c.businfo.I2CBusMetadata"
+      data {
+        provider = 0
+        channels[].address = 32
+        channels[].id = 2653770334
+        channels[].name = "gpio-controller-20"
+        channels[].address = 24
+        channels[].id = 3045554473
+        channels[].name = "khadas-mcu-18"
+        channels[].address = 81
+        channels[].id = 4283496137
+        channels[].name = "rtc-51"
+        channels[].address = 34
+        channels[].id = 3696434687
+        channels[].name = "fusb302-22"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-axg-i2c" }
+  }
+
+  "interrupt-controller-ffc01000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 574219092
+    property { fuchsia.COMPATIBLE = "arm,gic-400" }
+  }
+
+  "khadas-mcu-18" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 980323565
+    property { fuchsia.COMPATIBLE = "khadas,vim3-mcu" }
+  }
+
+  "mmc-ffe03000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 4036268533
+    mmios {
+      mmio {
+        base = 0xffe03000
+        length = 0x2000
+        name = "sdio"
+      }
+    }
+    irq {
+      number = 221
+      mode = EDGE_HIGH
+      name = "sdio"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 7
+    }
+    metadata {
+      id = "fuchsia.hardware.sdio.Metadata"
+      data {
+        provider = 0
+        functions[].function = 1
+        functions[].id = 1219881386
+        functions[].name = "sdio-function-1"
+        functions[].function = 2
+        functions[].id = 1203103767
+        functions[].name = "sdio-function-2"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.sdmmc.SdmmcMetadata"
+      data {
+        max_frequency = 100000000
+        removable = true
+        use_fidl = false
+        instance_identifier = "mmc@ffe03000"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-axg-mmc" }
+  }
+
+  "mmc-ffe05000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 920542163
+    mmios {
+      mmio {
+        base = 0xffe05000
+        length = 0x2000
+        name = "sdcard"
+      }
+    }
+    irq {
+      number = 222
+      mode = EDGE_HIGH
+      name = "sdcard"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 8
+    }
+    metadata {
+      id = "fuchsia.hardware.sdmmc.SdmmcMetadata"
+      data {
+        max_frequency = 50000000
+        removable = true
+        use_fidl = false
+        instance_identifier = "mmc@ffe05000"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-axg-mmc" }
+  }
+
+  "mmc-ffe07000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 276954513
+    mmios {
+      mmio {
+        base = 0xffe07000
+        length = 0x2000
+        name = "emmc"
+      }
+    }
+    irq {
+      number = 223
+      mode = EDGE_HIGH
+      name = "emmc"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 9
+    }
+    metadata {
+      id = "fuchsia.hardware.sdmmc.SdmmcMetadata"
+      data {
+        max_frequency = 120000000
+        speed_capabilities = SdmmcHostPrefs(DISABLE_HS400)
+        removable = false
+        use_fidl = true
+        instance_identifier = "mmc@ffe07000"
+      }
+    }
+    boot_metadata {
+      zbi_type = 1414680685
+      zbi_extra = 0
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-axg-mmc" }
+  }
+
+  "nna-ff100000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 271341874
+    mmios {
+      mmio {
+        base = 0xff100000
+        length = 0x30000
+        name = "nna"
+      }
+      mmio {
+        base = 0xff63c000
+        length = 0x2000
+        name = "hiu"
+      }
+      mmio {
+        base = 0xff800000
+        length = 0x1000
+        name = "power"
+      }
+      mmio {
+        base = 0xff63c000
+        length = 0x1000
+        name = "memory-pd"
+      }
+      mmio {
+        base = 0xff000000
+        length = 0x100000
+        name = "sram"
+      }
+    }
+    irq {
+      number = 179
+      mode = LEVEL_HIGH
+      name = "nna"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 11
+      name = "nna"
+    }
+    metadata {
+      id = "0"
+      data {
+        sram_base = 0xff000000
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,nna" }
+  }
+
+  "power-controller" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 3931309397
+    metadata {
+      id = "fuchsia.hardware.power.DomainMetadata"
+      data {
+        provider = 0
+        domains[].domain = 0
+        domains[].id = 3565553762
+        domains[].name = "power-01"
+        domains[].domain = 1
+        domains[].id = 3548776143
+        domains[].name = "power-02"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,power" }
+  }
+
+  "pwm-ffd1b000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1629126523
+    mmios {
+      mmio {
+        base = 0xffd1b000
+        length = 0x1000
+        name = "pwm_ab"
+      }
+      mmio {
+        base = 0xffd1a000
+        length = 0x1000
+        name = "pwm_cd"
+      }
+      mmio {
+        base = 0xffd19000
+        length = 0x1000
+        name = "pwm_ef"
+      }
+      mmio {
+        base = 0xff807000
+        length = 0x1000
+        name = "ao_pwm_ab"
+      }
+      mmio {
+        base = 0xff802000
+        length = 0x1000
+        name = "ao_pwm_cd"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.pwm.PwmChannelsMetadata"
+      data {
+        provider = 0
+        channels[].channel = 4
+        channels[].period_ns = 0
+        channels[].id = 31951016
+        channels[].name = "pwm"
+        channels[].channel = 0
+        channels[].period_ns = 1250
+        channels[].id = 2150604597
+        channels[].name = "pwm"
+        channels[].channel = 9
+        channels[].period_ns = 1250
+        channels[].id = 1110518600
+        channels[].name = "pwm"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-ee-pwm" }
+  }
+
+  "pwm_a-regulator" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 464954313
+    metadata {
+      id = "fuchsia.hardware.vreg.VregMetadata"
+      data {
+        vreg_name = "vreg-pwm-big"
+        min_voltage_uv = 690000
+        voltage_step_uv = 1000
+        num_steps = 361
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.vreg.Metadata"
+      data {
+        provider = 0
+        vregs[].id = 46925823
+        vregs[].name = "vreg-pwm-big"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,pwm-regulator" }
+  }
+
+  "pwm_a0_d-regulator" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 2753552672
+    metadata {
+      id = "fuchsia.hardware.vreg.VregMetadata"
+      data {
+        vreg_name = "vreg-pwm-little"
+        min_voltage_uv = 690000
+        voltage_step_uv = 1000
+        num_steps = 361
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.vreg.Metadata"
+      data {
+        provider = 0
+        vregs[].id = 2902143980
+        vregs[].name = "vreg-pwm-little"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,pwm-regulator" }
+  }
+
+  "register-controller-1000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 2925574243
+    mmios {
+      mmio {
+        base = 0xffd01000
+        length = 0x100
+        name = "registers"
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.registers.Metadata"
+      data {
+        provider = 0
+        registers[].mmio_id = 0
+        registers[].masks[].offset = 64
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 1048576
+        registers[].masks[].offset = 128
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 1048576
+        registers[].masks[].offset = 72
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 16384
+        registers[].masks[].offset = 136
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 16384
+        registers[].id = 1850188664
+        registers[].name = "gpu-ffe40000"
+        registers[].mmio_id = 0
+        registers[].masks[].offset = 136
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 4096
+        registers[].id = 3938305065
+        registers[].name = "nna-ff100000"
+        registers[].mmio_id = 0
+        registers[].masks[].offset = 8
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 65540
+        registers[].masks[].offset = 132
+        registers[].masks[].size = 4
+        registers[].masks[].mask = 196608
+        registers[].id = 3843439973
+        registers[].name = "usb-phy-ffe09000"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "fuchsia,registers" }
+  }
+
+  "rtc-51" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 152906853
+    property { fuchsia.COMPATIBLE = "nxp,pcf8563" }
+  }
+
+  "suspend" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 2968375139
+    property { fuchsia.COMPATIBLE = "generic,suspend" }
+  }
+
+  "temperature-sensor-ff634800" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1768249302
+    mmios {
+      mmio {
+        base = 0xff634800
+        length = 0x80
+        name = "pll"
+      }
+      mmio {
+        base = 0xff800268
+        length = 0x4
+        name = "trim"
+      }
+    }
+    irq {
+      number = 67
+      mode = EDGE_HIGH
+      name = "thermal"
+    }
+    metadata {
+      id = "fuchsia.hardware.trippoint.TripDeviceMetadata"
+      data {
+        critical_temp_celsius = 101
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,g12a-thermal" }
+  }
+
+  "temperature-sensor-ff634c00" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1780179219
+    mmios {
+      mmio {
+        base = 0xff634c00
+        length = 0x80
+        name = "ddr"
+      }
+      mmio {
+        base = 0xff800230
+        length = 0x4
+        name = "trim"
+      }
+    }
+    irq {
+      number = 68
+      mode = EDGE_HIGH
+      name = "thermal"
+    }
+    metadata {
+      id = "fuchsia.hardware.trippoint.TripDeviceMetadata"
+      data {
+        critical_temp_celsius = 110
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,g12a-thermal" }
+  }
+
+  "usb-ff400000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 582249092
+    mmios {
+      mmio {
+        base = 0xff400000
+        length = 0x100000
+        name = "usb-ff400000"
+      }
+    }
+    irq {
+      number = 63
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "primary"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 4
+    }
+    metadata {
+      id = "fuchsia.hardware.usb.dwc2.Metadata"
+      data {
+        dma_burst_len = Incr8
+        usb_turnaround_time = 9
+        rx_fifo_size = 256
+        nptx_fifo_size = 32
+        tx_fifo_sizes = [128, 4, 128, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      }
+    }
+    boot_metadata {
+      zbi_type = 1128353133
+      zbi_extra = 0
+    }
+    boot_metadata {
+      zbi_type = 1313624659
+      zbi_extra = 0
+    }
+    property { fuchsia.COMPATIBLE = "snps,dwc2" }
+  }
+
+  "usb-ff500000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 648552861
+    mmios {
+      mmio {
+        base = 0xff500000
+        length = 0x100000
+        name = "usb-ff500000"
+      }
+    }
+    irq {
+      number = 62
+      mode = EDGE_HIGH
+      wake_vector = true
+      name = "primary"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 6
+    }
+    property { fuchsia.COMPATIBLE = "generic-xhci" }
+  }
+
+  "usb-phy-ffe09000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 735095942
+    mmios {
+      mmio {
+        base = 0xffe09000
+        length = 0x2000
+        name = "usb-ctrl"
+      }
+      mmio {
+        base = 0xff636000
+        length = 0x2000
+        name = "usb2-phy"
+      }
+      mmio {
+        base = 0xff63a000
+        length = 0x2000
+        name = "usb2-otg-phy"
+      }
+      mmio {
+        base = 0xff646000
+        length = 0x2000
+        name = "usb3-phy"
+      }
+    }
+    irq {
+      number = 48
+      mode = EDGE_HIGH
+      name = "primary"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 5
+      name = "usb-phy-ffe09000"
+    }
+    metadata {
+      id = "fuchsia.hardware.usb.phy.AmlUsbPhyConfig"
+      data {
+        phy_type = "G12_B"
+        usb_phy_modes[].protocol = "USB_2_0"
+        usb_phy_modes[].dr_mode = "HOST"
+        usb_phy_modes[].is_otg_capable = false
+        usb_phy_modes[].protocol = "USB_2_0"
+        usb_phy_modes[].dr_mode = "PERIPHERAL"
+        usb_phy_modes[].is_otg_capable = true
+        usb_phy_modes[].protocol = "USB_3_0"
+        usb_phy_modes[].dr_mode = "HOST"
+        usb_phy_modes[].is_otg_capable = false
+      }
+    }
+    metadata {
+      id = "fuchsia.hardware.usb.phy.Metadata"
+      data {
+        provider = 0
+        phys[].did = 5
+        phys[].id = 3029628427
+        phys[].name = "dwc2-phy"
+        phys[].did = 31
+        phys[].id = 1159642622
+        phys[].name = "xhci"
+      }
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,g12b-usb-phy" }
+  }
+
+  "video-decoder-ffd00000" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 1598718096
+    mmios {
+      mmio {
+        base = 0xffd01000
+        length = 0x1000
+        name = "cbus-reset"
+      }
+      mmio {
+        base = 0xffd06000
+        length = 0x1000
+        name = "cbus-demux"
+      }
+      mmio {
+        base = 0xffd0e000
+        length = 0x1000
+        name = "cbus-parser"
+      }
+      mmio {
+        base = 0xff620000
+        length = 0x10000
+        name = "dos"
+      }
+      mmio {
+        base = 0xff63c000
+        length = 0x1000
+        name = "hiu"
+      }
+      mmio {
+        base = 0xff800000
+        length = 0x1000
+        name = "aobus"
+      }
+      mmio {
+        base = 0xff638000
+        length = 0x2000
+        name = "dmc"
+      }
+    }
+    irq {
+      number = 55
+      mode = EDGE_HIGH
+      name = "demux"
+    }
+    irq {
+      number = 64
+      mode = EDGE_HIGH
+      name = "parser"
+    }
+    irq {
+      number = 75
+      mode = EDGE_HIGH
+      name = "dos-mbox-0"
+    }
+    irq {
+      number = 76
+      mode = EDGE_HIGH
+      name = "dos-mbox-1"
+    }
+    bti {
+      iommu_id = 0
+      bti_id = 2
+      name = "vdec"
+    }
+    property { fuchsia.COMPATIBLE = "amlogic,g12b-vdec" }
+  }
+
+  "wifi" {
+    vid = GENERIC (0)
+    did = DEVICETREE (50)
+    instance_id = 120087624
+    metadata {
+      id = "fuchsia.wlan.broadcom.WifiConfig"
+      data {
+        oob_irq_mode = 8
+        clm_needed = false
+        iovar_table.0 = Command(cmd=86, val=0)
+        cc_table = ["WW:0", "AU:0", "CA:0", "US:0", "GB:0", "BE:0", "BG:0", "CZ:0", "DK:0", "DE:0", "EE:0", "IE:0", "GR:0", "ES:0", "FR:0", "HR:0", "IT:0", "CY:0", "LV:0", "LT:0", "LU:0", "HU:0", "MT:0", "NL:0", "AT:0", "PL:0", "PT:0", "RO:0", "SI:0", "SK:0", "FI:0", "SE:0", "EL:0", "IS:0", "LI:0", "TR:0", "CH:0", "NO:0", "JP:0", ":0"]
+      }
+    }
+    property { fuchsia.COMPATIBLE = "broadcom,bcm4359" }
+  }
+
+}
+
+board_child_nodes {
+}
+
+composite_node_specs {
+  "adc-9000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3122435773])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-g12a-saradc"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3122435773 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-saradc" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-g12a-saradc" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "adc-buttons" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1411392393])
+        Accept(fuchsia.COMPATIBLE, ["fuchsia,adc-buttons"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1411392393 }
+        property { fuchsia.COMPATIBLE = "fuchsia,adc-buttons" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "fuchsia,adc-buttons" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.adc.Service"])
+        Accept(fuchsia.ID, [2510304494])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.adc.Service" }
+        property { fuchsia.hardware.adc.Service = "fuchsia.hardware.adc.Service.ZirconTransport" }
+        property { fuchsia.NAME = "adc-2" }
+      }
+    }
+  }
+
+  "arm-mali-0" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1329828876])
+        Accept(fuchsia.COMPATIBLE, ["arm,mali-gpu"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1329828876 }
+        property { fuchsia.COMPATIBLE = "arm,mali-gpu" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "arm,mali-gpu" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpu.mali.Service"])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpu.mali.Service" }
+        property { fuchsia.hardware.gpu.mali.Service = "fuchsia.hardware.gpu.mali.Service.DriverTransport" }
+        property { fuchsia.NAME = "mali" }
+      }
+    }
+  }
+
+  "audio-controller-ff642000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [530743963])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,audio-controller"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 530743963 }
+        property { fuchsia.COMPATIBLE = "amlogic,audio-controller" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,audio-controller" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_INIT_STEP, [1229671491])
+      }
+      properties {
+        property { fuchsia.BIND_INIT_STEP = 1229671491 }
+        property { fuchsia.NAME = "clock-init" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [2471190723])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "clock-gate" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [3466513172])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "clock-pll" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [2836729542])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-tdm-a-sclk" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [1636608341])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-tdm-b-sclk" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [1542559044])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "bt-uart-ffd24000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [4058353671])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,bt-uart"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 4058353671 }
+        property { fuchsia.COMPATIBLE = "amlogic,bt-uart" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,bt-uart" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [2761656116])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_INIT_STEP, [5068624])
+      }
+      properties {
+        property { fuchsia.BIND_INIT_STEP = 5068624 }
+        property { fuchsia.NAME = "pwm" }
+      }
+    }
+  }
+
+  "canvas-ff638000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1967393931])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,canvas"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1967393931 }
+        property { fuchsia.COMPATIBLE = "amlogic,canvas" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,canvas" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "clock-controller-ff63c000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3650398947])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,g12b-clk"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3650398947 }
+        property { fuchsia.COMPATIBLE = "amlogic,g12b-clk" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,g12b-clk" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "cpu-controller-0" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [428967849])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,cpu"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 428967849 }
+        property { fuchsia.COMPATIBLE = "amlogic,cpu" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,cpu" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [1493004734])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "sys-cpu-div16" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [838844261])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "sys-cpu-big-clk" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [139909118])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "sys-cpub-div16" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [3291017047])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "sys-cpu-little-clk" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [331230792])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "sys-pll-div16" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [3377990936])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "sys-pllb-div16" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.power.Service"])
+        Accept(fuchsia.ID, [3565553762])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.power.Service" }
+        property { fuchsia.hardware.power.Service = "fuchsia.hardware.power.Service.ZirconTransport" }
+        property { fuchsia.NAME = "power-01" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.power.Service"])
+        Accept(fuchsia.ID, [3548776143])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.power.Service" }
+        property { fuchsia.hardware.power.Service = "fuchsia.hardware.power.Service.ZirconTransport" }
+        property { fuchsia.NAME = "power-02" }
+      }
+    }
+  }
+
+  "display-ff900000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3982401893])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,display"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3982401893 }
+        property { fuchsia.COMPATIBLE = "amlogic,display" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,display" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.amlogiccanvas.Service"])
+        Accept(fuchsia.ID, [2498619139])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.amlogiccanvas.Service" }
+        property { fuchsia.hardware.amlogiccanvas.Service = "fuchsia.hardware.amlogiccanvas.Service.ZirconTransport" }
+        property { fuchsia.NAME = "canvas" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [3804523753])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-lcd-reset" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [3019923861])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-hdmi-hotplug-detect" }
+      }
+    }
+  }
+
+  "dt-root" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1508159440])
+        Accept(fuchsia.COMPATIBLE, ["fuchsia,dummy-dt-root"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1508159440 }
+        property { fuchsia.COMPATIBLE = "fuchsia,dummy-dt-root" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "fuchsia,dummy-dt-root" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "dwmac-ff3f0000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3031464799])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-g12a-dwmac"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3031464799 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-dwmac" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-g12a-dwmac" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.ethernet.board.Service"])
+        Accept(fuchsia.ID, [1244539516])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.ethernet.board.Service" }
+        property { fuchsia.hardware.ethernet.board.Service = "fuchsia.hardware.ethernet.board.Service.ZirconTransport" }
+        property { fuchsia.NAME = "eth-board" }
+      }
+    }
+  }
+
+  "ethernet-phy-ff634000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [998300204])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,ethernet-phy"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 998300204 }
+        property { fuchsia.COMPATIBLE = "amlogic,ethernet-phy" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,ethernet-phy" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [1132267691])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-int" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [569884433])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "fusb302-22" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [2407591238])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-int" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.i2c.Service"])
+        Accept(fuchsia.ID, [3696434687])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.i2c.Service" }
+        property { fuchsia.hardware.i2c.Service = "fuchsia.hardware.i2c.Service.ZirconTransport" }
+        property { fuchsia.NAME = "i2c" }
+      }
+    }
+  }
+
+  "gpio-buttons" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3425963318])
+        Accept(fuchsia.COMPATIBLE, ["fuchsia,gpio-buttons"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3425963318 }
+        property { fuchsia.COMPATIBLE = "fuchsia,gpio-buttons" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "fuchsia,gpio-buttons" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [3535698779])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "power" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [2338689707])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "gpio-controller-20" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [2164391206])
+        Accept(fuchsia.COMPATIBLE, ["ti,tca6408a"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 2164391206 }
+        property { fuchsia.COMPATIBLE = "ti,tca6408a" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "ti,tca6408a" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.i2c.Service"])
+        Accept(fuchsia.ID, [2653770334])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.i2c.Service" }
+        property { fuchsia.hardware.i2c.Service = "fuchsia.hardware.i2c.Service.ZirconTransport" }
+        property { fuchsia.NAME = "i2c" }
+      }
+    }
+  }
+
+  "gpio-controller-ff634400" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1517285659])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-g12a-gpio"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1517285659 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-gpio" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-g12a-gpio" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "gpu-ffe40000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [584700629])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,gpu"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 584700629 }
+        property { fuchsia.COMPATIBLE = "amlogic,gpu" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,gpu" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.registers.Service"])
+        Accept(fuchsia.ID, [1850188664])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.registers.Service" }
+        property { fuchsia.hardware.registers.Service = "fuchsia.hardware.registers.Service.ZirconTransport" }
+        property { fuchsia.NAME = "register-reset" }
+      }
+    }
+  }
+
+  "hrtimer-0" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [538226353])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,hrtimer"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 538226353 }
+        property { fuchsia.COMPATIBLE = "amlogic,hrtimer" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,hrtimer" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "i2c-1c000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3222665378])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-axg-i2c"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3222665378 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-axg-i2c" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-axg-i2c" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [3294647863])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "i2c-5000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [711041103])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-axg-i2c"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 711041103 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-axg-i2c" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-axg-i2c" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [2558564416])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "interrupt-controller-ffc01000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [574219092])
+        Accept(fuchsia.COMPATIBLE, ["arm,gic-400"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 574219092 }
+        property { fuchsia.COMPATIBLE = "arm,gic-400" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "arm,gic-400" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "khadas-mcu-18" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [980323565])
+        Accept(fuchsia.COMPATIBLE, ["khadas,vim3-mcu"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 980323565 }
+        property { fuchsia.COMPATIBLE = "khadas,vim3-mcu" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "khadas,vim3-mcu" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.i2c.Service"])
+        Accept(fuchsia.ID, [3045554473])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.i2c.Service" }
+        property { fuchsia.hardware.i2c.Service = "fuchsia.hardware.i2c.Service.ZirconTransport" }
+        property { fuchsia.NAME = "i2c" }
+      }
+    }
+  }
+
+  "mmc-ffe03000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [4036268533])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-axg-mmc"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 4036268533 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-axg-mmc" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-axg-mmc" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [880033702])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-reset" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [2556823210])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_INIT_STEP, [5068624])
+      }
+      properties {
+        property { fuchsia.BIND_INIT_STEP = 5068624 }
+        property { fuchsia.NAME = "pwm" }
+      }
+    }
+  }
+
+  "mmc-ffe05000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [920542163])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-axg-mmc"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 920542163 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-axg-mmc" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-axg-mmc" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [597357864])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "mmc-ffe07000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [276954513])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-axg-mmc"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 276954513 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-axg-mmc" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-axg-mmc" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [2461821341])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "clock-gate" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [534211362])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-reset" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [1215453094])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+  }
+
+  "nna-ff100000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [271341874])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,nna"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 271341874 }
+        property { fuchsia.COMPATIBLE = "amlogic,nna" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,nna" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.registers.Service"])
+        Accept(fuchsia.ID, [3938305065])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.registers.Service" }
+        property { fuchsia.hardware.registers.Service = "fuchsia.hardware.registers.Service.ZirconTransport" }
+        property { fuchsia.NAME = "register-reset" }
+      }
+    }
+  }
+
+  "parent" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [3479037873])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-header-pin-37" }
+      }
+    }
+  }
+
+  "power-controller" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [3931309397])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,power"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 3931309397 }
+        property { fuchsia.COMPATIBLE = "amlogic,power" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,power" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.vreg.Service"])
+        Accept(fuchsia.ID, [46925823])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.vreg.Service" }
+        property { fuchsia.hardware.vreg.Service = "fuchsia.hardware.vreg.Service.ZirconTransport" }
+        property { fuchsia.NAME = "vreg-pwm-big" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.vreg.Service"])
+        Accept(fuchsia.ID, [2902143980])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.vreg.Service" }
+        property { fuchsia.hardware.vreg.Service = "fuchsia.hardware.vreg.Service.ZirconTransport" }
+        property { fuchsia.NAME = "vreg-pwm-little" }
+      }
+    }
+  }
+
+  "pwm-ffd1b000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1629126523])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,meson-g12a-ee-pwm"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1629126523 }
+        property { fuchsia.COMPATIBLE = "amlogic,meson-g12a-ee-pwm" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,meson-g12a-ee-pwm" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "pwm-init" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [3522287472])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-bt" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [1322232701])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pwm.Service"])
+        Accept(fuchsia.ID, [31951016])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pwm.Service" }
+        property { fuchsia.hardware.pwm.Service = "fuchsia.hardware.pwm.Service.ZirconTransport" }
+        property { fuchsia.NAME = "pwm" }
+      }
+    }
+  }
+
+  "pwm_a-regulator" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [464954313])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,pwm-regulator"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 464954313 }
+        property { fuchsia.COMPATIBLE = "amlogic,pwm-regulator" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,pwm-regulator" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [3922473234])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pwm.Service"])
+        Accept(fuchsia.ID, [2150604597])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pwm.Service" }
+        property { fuchsia.hardware.pwm.Service = "fuchsia.hardware.pwm.Service.ZirconTransport" }
+        property { fuchsia.NAME = "pwm" }
+      }
+    }
+  }
+
+  "pwm_a0_d-regulator" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [2753552672])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,pwm-regulator"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 2753552672 }
+        property { fuchsia.COMPATIBLE = "amlogic,pwm-regulator" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,pwm-regulator" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [3408689181])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pwm.Service"])
+        Accept(fuchsia.ID, [1110518600])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pwm.Service" }
+        property { fuchsia.hardware.pwm.Service = "fuchsia.hardware.pwm.Service.ZirconTransport" }
+        property { fuchsia.NAME = "pwm" }
+      }
+    }
+  }
+
+  "register-controller-1000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [2925574243])
+        Accept(fuchsia.COMPATIBLE, ["fuchsia,registers"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 2925574243 }
+        property { fuchsia.COMPATIBLE = "fuchsia,registers" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "fuchsia,registers" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "rtc-51" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [152906853])
+        Accept(fuchsia.COMPATIBLE, ["nxp,pcf8563"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 152906853 }
+        property { fuchsia.COMPATIBLE = "nxp,pcf8563" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "nxp,pcf8563" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.i2c.Service"])
+        Accept(fuchsia.ID, [4283496137])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.i2c.Service" }
+        property { fuchsia.hardware.i2c.Service = "fuchsia.hardware.i2c.Service.ZirconTransport" }
+        property { fuchsia.NAME = "i2c" }
+      }
+    }
+  }
+
+  "suspend" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [2968375139])
+        Accept(fuchsia.COMPATIBLE, ["generic,suspend"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 2968375139 }
+        property { fuchsia.COMPATIBLE = "generic,suspend" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "generic,suspend" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+  }
+
+  "temperature-sensor-ff634800" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1768249302])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,g12a-thermal"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1768249302 }
+        property { fuchsia.COMPATIBLE = "amlogic,g12a-thermal" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,g12a-thermal" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_INIT_STEP, [1229671491])
+      }
+      properties {
+        property { fuchsia.BIND_INIT_STEP = 1229671491 }
+        property { fuchsia.NAME = "clock-init" }
+      }
+    }
+  }
+
+  "temperature-sensor-ff634c00" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1780179219])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,g12a-thermal"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1780179219 }
+        property { fuchsia.COMPATIBLE = "amlogic,g12a-thermal" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,g12a-thermal" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_INIT_STEP, [1229671491])
+      }
+      properties {
+        property { fuchsia.BIND_INIT_STEP = 1229671491 }
+        property { fuchsia.NAME = "clock-init" }
+      }
+    }
+  }
+
+  "usb-ff400000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [582249092])
+        Accept(fuchsia.COMPATIBLE, ["snps,dwc2"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 582249092 }
+        property { fuchsia.COMPATIBLE = "snps,dwc2" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "snps,dwc2" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.usb.phy.Service"])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [5])
+        Accept(fuchsia.ID, [3029628427])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.usb.phy.Service" }
+        property { fuchsia.hardware.usb.phy.Service = "fuchsia.hardware.usb.phy.Service.ZirconTransport" }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = 5 }
+        property { fuchsia.NAME = "dwc2-phy" }
+      }
+    }
+  }
+
+  "usb-ff500000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [648552861])
+        Accept(fuchsia.COMPATIBLE, ["generic-xhci"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 648552861 }
+        property { fuchsia.COMPATIBLE = "generic-xhci" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "generic-xhci" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.usb.phy.Service"])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [31])
+        Accept(fuchsia.ID, [1159642622])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.usb.phy.Service" }
+        property { fuchsia.hardware.usb.phy.Service = "fuchsia.hardware.usb.phy.Service.ZirconTransport" }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = 31 }
+        property { fuchsia.NAME = "xhci" }
+      }
+    }
+  }
+
+  "usb-phy-ffe09000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [735095942])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,g12b-usb-phy"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 735095942 }
+        property { fuchsia.COMPATIBLE = "amlogic,g12b-usb-phy" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,g12b-usb-phy" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_INIT_STEP, [1229671491])
+      }
+      properties {
+        property { fuchsia.BIND_INIT_STEP = 1229671491 }
+        property { fuchsia.NAME = "clock-init" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.pin.PinStatesService"])
+        Accept(fuchsia.ID, [1344096315])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.pin.PinStatesService" }
+        property { fuchsia.hardware.pin.PinStatesService = "fuchsia.hardware.pin.PinStatesService.ZirconTransport" }
+        property { fuchsia.NAME = "pin-states-0" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.registers.Service"])
+        Accept(fuchsia.ID, [3843439973])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.registers.Service" }
+        property { fuchsia.hardware.registers.Service = "fuchsia.hardware.registers.Service.ZirconTransport" }
+        property { fuchsia.NAME = "register-reset" }
+      }
+    }
+  }
+
+  "video-decoder-ffd00000" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [1598718096])
+        Accept(fuchsia.COMPATIBLE, ["amlogic,g12b-vdec"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 1598718096 }
+        property { fuchsia.COMPATIBLE = "amlogic,g12b-vdec" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "amlogic,g12b-vdec" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.amlogiccanvas.Service"])
+        Accept(fuchsia.ID, [1048052044])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.amlogiccanvas.Service" }
+        property { fuchsia.hardware.amlogiccanvas.Service = "fuchsia.hardware.amlogiccanvas.Service.ZirconTransport" }
+        property { fuchsia.NAME = "canvas" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [3228785569])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "clock-dos" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.clock.Service"])
+        Accept(fuchsia.ID, [2134980478])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.clock.Service" }
+        property { fuchsia.hardware.clock.Service = "fuchsia.hardware.clock.Service.ZirconTransport" }
+        property { fuchsia.NAME = "clock-dos-vdec" }
+      }
+    }
+  }
+
+  "wifi" {
+    parent {
+      bind_rules {
+        Accept(fuchsia.BIND_PROTOCOL, [PDEV (85)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_VID, [GENERIC (0)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_DID, [DEVICETREE (50)])
+        Accept(fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID, [120087624])
+        Accept(fuchsia.COMPATIBLE, ["broadcom,bcm4359"])
+      }
+      properties {
+        property { fuchsia.BIND_PROTOCOL = PDEV (85) }
+        property { fuchsia.BIND_PLATFORM_DEV_VID = GENERIC (0) }
+        property { fuchsia.BIND_PLATFORM_DEV_DID = DEVICETREE (50) }
+        property { fuchsia.BIND_PLATFORM_DEV_INSTANCE_ID = 120087624 }
+        property { fuchsia.COMPATIBLE = "broadcom,bcm4359" }
+        property { fuchsia.devicetree.FIRST_COMPATIBLE = "broadcom,bcm4359" }
+        property { fuchsia.Service = "fuchsia.hardware.platform.device.Service" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.gpio.Service"])
+        Accept(fuchsia.ID, [3302626382])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.gpio.Service" }
+        property { fuchsia.hardware.gpio.Service = "fuchsia.hardware.gpio.Service.ZirconTransport" }
+        property { fuchsia.NAME = "gpio-oob" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.sdio.Service"])
+        Accept(fuchsia.BIND_SDIO_FUNCTION, [1])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.sdio.Service" }
+        property { fuchsia.hardware.sdio.Service = "fuchsia.hardware.sdio.Service.ZirconTransport" }
+        property { fuchsia.BIND_SDIO_FUNCTION = 1 }
+        property { fuchsia.NAME = "sdio-function-1" }
+      }
+    }
+    parent {
+      bind_rules {
+        Accept(fuchsia.Service, ["fuchsia.hardware.sdio.Service"])
+        Accept(fuchsia.BIND_SDIO_FUNCTION, [2])
+      }
+      properties {
+        property { fuchsia.Service = "fuchsia.hardware.sdio.Service" }
+        property { fuchsia.hardware.sdio.Service = "fuchsia.hardware.sdio.Service.ZirconTransport" }
+        property { fuchsia.BIND_SDIO_FUNCTION = 2 }
+        property { fuchsia.NAME = "sdio-function-2" }
+      }
+    }
+  }
+
+}
+
+iommus {
+}

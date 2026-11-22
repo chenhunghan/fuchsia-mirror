@@ -14,7 +14,6 @@ use std::ops::Deref;
 use std::sync::{Arc, Weak};
 
 use starnix_core::task::{CgroupOps, CgroupRoot, CurrentTask};
-use starnix_core::vfs::pseudo::simple_file::BytesFile;
 use starnix_core::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
@@ -31,9 +30,10 @@ use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::{errno, error, mode};
 
 use crate::DirectoryNodes;
+use crate::controllers::{ControllersFile, SubtreeControlFile};
 use crate::cpuset::CpusetCpusFile;
 use crate::events::EventsFile;
-use crate::freeze::FreezeFile;
+use crate::freeze::{FreezeFile, StatLocalFile};
 use crate::fs::CgroupVersion;
 use crate::kill::KillFile;
 use crate::procs::ControlGroupNode;
@@ -42,6 +42,7 @@ const CONTROLLERS_FILE: &str = "cgroup.controllers";
 const PROCS_FILE: &str = "cgroup.procs";
 const FREEZE_FILE: &str = "cgroup.freeze";
 const EVENTS_FILE: &str = "cgroup.events";
+const STAT_LOCAL_FILE: &str = "cgroup.stat.local";
 const KILL_FILE: &str = "cgroup.kill";
 const TYPE_FILE: &str = "cgroup.type";
 const SUBTREE_CONTROL_FILE: &str = "cgroup.subtree_control";
@@ -95,14 +96,14 @@ impl CgroupDirectory {
                 interface_files.insert(
                     CONTROLLERS_FILE.into(),
                     fs.create_node_and_allocate_node_id(
-                        BytesFile::new_node(b"".to_vec()),
+                        ControllersFile::new_node(self.cgroup.clone()),
                         FsNodeInfo::new(mode!(IFREG, 0o444), FsCred::root()),
                     ),
                 );
                 interface_files.insert(
                     SUBTREE_CONTROL_FILE.into(),
                     fs.create_node_and_allocate_node_id(
-                        BytesFile::new_node(b"".to_vec()),
+                        SubtreeControlFile::new_node(self.cgroup.clone()),
                         FsNodeInfo::new(mode!(IFREG, 0o644), FsCred::root()),
                     ),
                 );
@@ -160,7 +161,7 @@ impl CgroupDirectory {
                     (
                         CONTROLLERS_FILE.into(),
                         fs.create_node_and_allocate_node_id(
-                            BytesFile::new_node(b"".to_vec()),
+                            ControllersFile::new_node(cgroup.clone()),
                             FsNodeInfo::new(mode!(IFREG, 0o444), owner.clone()),
                         ),
                     ),
@@ -175,6 +176,13 @@ impl CgroupDirectory {
                         EVENTS_FILE.into(),
                         fs.create_node_and_allocate_node_id(
                             EventsFile::new_node(cgroup.clone()),
+                            FsNodeInfo::new(mode!(IFREG, 0o444), owner.clone()),
+                        ),
+                    ),
+                    (
+                        STAT_LOCAL_FILE.into(),
+                        fs.create_node_and_allocate_node_id(
+                            StatLocalFile::new_node(cgroup.clone()),
                             FsNodeInfo::new(mode!(IFREG, 0o444), owner.clone()),
                         ),
                     ),
@@ -198,10 +206,7 @@ impl CgroupDirectory {
                     (
                         SUBTREE_CONTROL_FILE.into(),
                         fs.create_node_and_allocate_node_id(
-                            StubBytesFile::new_node_with_data(
-                                bug_ref!("https://fxbug.dev/489194399"),
-                                b"".to_vec(),
-                            ),
+                            SubtreeControlFile::new_node(cgroup.clone()),
                             FsNodeInfo::new(mode!(IFREG, 0o644), owner.clone()),
                         ),
                     ),

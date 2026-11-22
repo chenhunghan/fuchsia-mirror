@@ -14,8 +14,7 @@ fx_cc_binary(
         "stress_test.h",
         "vmstress.cc",
     ],
-    # GN uses the //build/config:all_source config to define _ALL_SOURCE.
-    copts = ["-D_ALL_SOURCE"],  # @bazel2gn:raw_overwrite:[ "//build/config:all_source" ]
+    build_flags = ["//build/config:all_source"],
     disable_build_flags = select({
         "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
     }),

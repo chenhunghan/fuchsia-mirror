@@ -2,9 +2,17 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":blob-writer-unittests"],
+    visibility = ["//src/storage:__pkg__"],
+)
 
 rustc_library(
     name = "blob-writer",
@@ -38,5 +46,33 @@ rustc_library(
         "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_unittest_package(
+    name = "blob-writer-unittests",
+    unit_tests = [":blob-writer_test"],
+)
+
+rustc_test(
+    name = "blob-writer-test",
+    srcs = ["tests/lib.rs"],
+    crate_root = "tests/lib.rs",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":blob-writer",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+        "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
+        "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
+        "//src/storage/lib/blob_pager_and_verifier",
+        "//src/storage/lib/delivery_blob",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/lib/ramdevice_client/rust:ramdevice_client",
+        "//src/sys/pkg/lib/fuchsia-merkle",
+        "//third_party/rust_crates/vendor:rand",
     ],
 )

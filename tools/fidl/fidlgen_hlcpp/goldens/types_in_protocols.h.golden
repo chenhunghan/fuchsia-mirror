@@ -277,11 +277,11 @@ class Union final {
 
   static Union WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
   kUnknown = 0,
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Union> New();
@@ -307,7 +307,7 @@ class Union final {
     return b_;
   }
   Union& set_b(bool value);
-  Union& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  Union& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::typesinprotocols::Union::Tag Which() const {
 
@@ -323,7 +323,7 @@ class Union final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -337,9 +337,9 @@ class Union final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Union::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Union::Tag::Invalid);
   union {
     bool b_;
     std::vector<uint8_t> unknown_data_;
@@ -433,11 +433,11 @@ class ResourceUnion final {
 
   static ResourceUnion WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
   kUnknown = 0,
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ResourceUnion> New();
@@ -463,7 +463,7 @@ class ResourceUnion final {
     return b_;
   }
   ResourceUnion& set_b(bool value);
-  ResourceUnion& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles);
+  ResourceUnion& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles);
 
   ::test::typesinprotocols::ResourceUnion::Tag Which() const {
 
@@ -479,7 +479,7 @@ class ResourceUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -499,9 +499,9 @@ class ResourceUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::ResourceUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::ResourceUnion::Tag::Invalid);
   union {
     bool b_;
     ::fidl::UnknownData unknown_data_;
@@ -961,11 +961,11 @@ class Protocol_ErrorBasic_Result final {
   static Protocol_ErrorBasic_Result WithResponse(::test::typesinprotocols::Basic&&);
   static Protocol_ErrorBasic_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorBasic_Result> New();
@@ -1013,7 +1013,7 @@ class Protocol_ErrorBasic_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1041,9 +1041,9 @@ class Protocol_ErrorBasic_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorBasic_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorBasic_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::Basic response_;
     uint32_t err_;
@@ -1070,11 +1070,11 @@ class Protocol_ErrorCompound_Result final {
   static Protocol_ErrorCompound_Result WithResponse(::test::typesinprotocols::Compound&&);
   static Protocol_ErrorCompound_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorCompound_Result> New();
@@ -1122,7 +1122,7 @@ class Protocol_ErrorCompound_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1150,9 +1150,9 @@ class Protocol_ErrorCompound_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorCompound_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorCompound_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::Compound response_;
     uint32_t err_;
@@ -1179,11 +1179,11 @@ class Protocol_ErrorArrayBasic_Result final {
   static Protocol_ErrorArrayBasic_Result WithResponse(::test::typesinprotocols::ArrayBasic&&);
   static Protocol_ErrorArrayBasic_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorArrayBasic_Result> New();
@@ -1231,7 +1231,7 @@ class Protocol_ErrorArrayBasic_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1259,9 +1259,9 @@ class Protocol_ErrorArrayBasic_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayBasic_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayBasic_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::ArrayBasic response_;
     uint32_t err_;
@@ -1288,11 +1288,11 @@ class Protocol_ErrorArrayCompound_Result final {
   static Protocol_ErrorArrayCompound_Result WithResponse(::test::typesinprotocols::ArrayCompound&&);
   static Protocol_ErrorArrayCompound_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorArrayCompound_Result> New();
@@ -1340,7 +1340,7 @@ class Protocol_ErrorArrayCompound_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1368,9 +1368,9 @@ class Protocol_ErrorArrayCompound_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayCompound_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayCompound_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::ArrayCompound response_;
     uint32_t err_;
@@ -1397,11 +1397,11 @@ class Protocol_ErrorVectorBasic_Result final {
   static Protocol_ErrorVectorBasic_Result WithResponse(::test::typesinprotocols::VectorBasic&&);
   static Protocol_ErrorVectorBasic_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorVectorBasic_Result> New();
@@ -1449,7 +1449,7 @@ class Protocol_ErrorVectorBasic_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1477,9 +1477,9 @@ class Protocol_ErrorVectorBasic_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorBasic_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorBasic_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::VectorBasic response_;
     uint32_t err_;
@@ -1506,11 +1506,11 @@ class Protocol_ErrorVectorCompound_Result final {
   static Protocol_ErrorVectorCompound_Result WithResponse(::test::typesinprotocols::VectorCompound&&);
   static Protocol_ErrorVectorCompound_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorVectorCompound_Result> New();
@@ -1558,7 +1558,7 @@ class Protocol_ErrorVectorCompound_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1586,9 +1586,9 @@ class Protocol_ErrorVectorCompound_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorCompound_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorCompound_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::VectorCompound response_;
     uint32_t err_;
@@ -1615,11 +1615,11 @@ class Protocol_ErrorVectorOptional_Result final {
   static Protocol_ErrorVectorOptional_Result WithResponse(::test::typesinprotocols::VectorOptional&&);
   static Protocol_ErrorVectorOptional_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorVectorOptional_Result> New();
@@ -1667,7 +1667,7 @@ class Protocol_ErrorVectorOptional_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1695,9 +1695,9 @@ class Protocol_ErrorVectorOptional_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorOptional_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorOptional_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::VectorOptional response_;
     uint32_t err_;
@@ -1724,11 +1724,11 @@ class Protocol_ErrorArrayVectorNested_Result final {
   static Protocol_ErrorArrayVectorNested_Result WithResponse(::test::typesinprotocols::ArrayVectorNested&&);
   static Protocol_ErrorArrayVectorNested_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorArrayVectorNested_Result> New();
@@ -1776,7 +1776,7 @@ class Protocol_ErrorArrayVectorNested_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1804,9 +1804,9 @@ class Protocol_ErrorArrayVectorNested_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::ArrayVectorNested response_;
     uint32_t err_;
@@ -1835,11 +1835,11 @@ class Protocol_ErrorResource_Result final {
   static Protocol_ErrorResource_Result WithResponse(::test::typesinprotocols::Resource&&);
   static Protocol_ErrorResource_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<Protocol_ErrorResource_Result> New();
@@ -1887,7 +1887,7 @@ class Protocol_ErrorResource_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1915,9 +1915,9 @@ class Protocol_ErrorResource_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorResource_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorResource_Result::Tag::Invalid);
   union {
     ::test::typesinprotocols::Resource response_;
     uint32_t err_;
@@ -3243,7 +3243,7 @@ struct Equality<::test::typesinprotocols::Table> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Union> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Union> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Union>
@@ -3255,9 +3255,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Union>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Union>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -3287,7 +3287,7 @@ struct Equality<::test::typesinprotocols::Union> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Union::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Union::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Union::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -3338,7 +3338,7 @@ struct Equality<::test::typesinprotocols::ResourceTable> {
 };
 
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::ResourceUnion> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::ResourceUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::ResourceUnion>
@@ -3350,9 +3350,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::ResourceUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::ResourceUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -3382,7 +3382,7 @@ struct Equality<::test::typesinprotocols::ResourceUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::ResourceUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::ResourceUnion::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::ResourceUnion::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -3962,7 +3962,7 @@ struct Equality<::test::typesinprotocols::Resource> {
 #endif  // __Fuchsia__
 
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorBasic_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorBasic_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorBasic_Result>
@@ -3974,9 +3974,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorBasi
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorBasic_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4006,7 +4006,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorBasic_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorBasic_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorBasic_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorBasic_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4019,7 +4019,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorBasic_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorCompound_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorCompound_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorCompound_Result>
@@ -4031,9 +4031,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorComp
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorCompound_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4063,7 +4063,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorCompound_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorCompound_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorCompound_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorCompound_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4076,7 +4076,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorCompound_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorArrayBasic_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorArrayBasic_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorArrayBasic_Result>
@@ -4088,9 +4088,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorArra
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorArrayBasic_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4120,7 +4120,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorArrayBasic_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayBasic_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayBasic_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorArrayBasic_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4133,7 +4133,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorArrayBasic_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorArrayCompound_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorArrayCompound_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorArrayCompound_Result>
@@ -4145,9 +4145,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorArra
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorArrayCompound_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4177,7 +4177,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorArrayCompound_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayCompound_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayCompound_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorArrayCompound_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4190,7 +4190,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorArrayCompound_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorVectorBasic_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorVectorBasic_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorVectorBasic_Result>
@@ -4202,9 +4202,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorVect
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorVectorBasic_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4234,7 +4234,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorVectorBasic_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorBasic_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorBasic_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorVectorBasic_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4247,7 +4247,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorVectorBasic_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorVectorCompound_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorVectorCompound_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorVectorCompound_Result>
@@ -4259,9 +4259,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorVect
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorVectorCompound_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4291,7 +4291,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorVectorCompound_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorCompound_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorCompound_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorVectorCompound_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4304,7 +4304,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorVectorCompound_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorVectorOptional_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorVectorOptional_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorVectorOptional_Result>
@@ -4316,9 +4316,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorVect
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorVectorOptional_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4348,7 +4348,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorVectorOptional_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorOptional_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorVectorOptional_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorVectorOptional_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4361,7 +4361,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorVectorOptional_Result> {
     }
 };
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result>
@@ -4373,9 +4373,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorArra
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4405,7 +4405,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -4420,7 +4420,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorArrayVectorNested_Result
 #ifdef __Fuchsia__
 
 template <>
-struct IsFidlXUnion<::test::typesinprotocols::Protocol_ErrorResource_Result> : public std::true_type {};
+struct IsFidlUnion<::test::typesinprotocols::Protocol_ErrorResource_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::typesinprotocols::Protocol_ErrorResource_Result>
@@ -4432,9 +4432,9 @@ struct CodingTraits<std::unique_ptr<::test::typesinprotocols::Protocol_ErrorReso
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::typesinprotocols::Protocol_ErrorResource_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -4464,7 +4464,7 @@ struct Equality<::test::typesinprotocols::Protocol_ErrorResource_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::typesinprotocols::Protocol_ErrorResource_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::typesinprotocols::Protocol_ErrorResource_Result::Tag::Invalid):
         return true;
       case ::test::typesinprotocols::Protocol_ErrorResource_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);

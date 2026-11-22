@@ -36,7 +36,6 @@ fidl("fuchsia.net.name") {
   ]
   sdk_area = "Netstack"
   sdk_category = "prebuilt"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

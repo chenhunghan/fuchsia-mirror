@@ -5,7 +5,6 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_PACKET_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_PACKET_H_
 
-#include <fuchsia/media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_buffer.h>
 #include <stdint.h>
 

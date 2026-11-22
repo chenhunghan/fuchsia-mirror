@@ -78,6 +78,9 @@ struct UsbPolicySharedStateInner {
 /// A thread-safe wrapper around `UsbPolicySharedStateInner` that encapsulates locking.
 struct UsbPolicySharedState {
     inner: std::sync::Mutex<UsbPolicySharedStateInner>,
+    /// Serializes ConnectCable, DisconnectCable, and the scheduled reconnect so their
+    /// `set_connected` calls don't interleave.
+    cable_op_lock: futures::lock::Mutex<()>,
     serial_number: String,
 }
 
@@ -98,8 +101,13 @@ impl UsbPolicySharedState {
                 usb_power_debug_override: None,
                 charger_debug_override: None,
             }),
+            cable_op_lock: futures::lock::Mutex::new(()),
             serial_number,
         }
+    }
+
+    pub async fn lock_cable_ops(&self) -> futures::lock::MutexGuard<'_, ()> {
+        self.cable_op_lock.lock().await
     }
 
     pub fn get_serial_number(&self) -> String {
@@ -388,16 +396,20 @@ async fn handle_set_configuration(
     Ok(())
 }
 
+/// Disconnects Type-C CC lines and, when `duration > 0`, arms a wake alarm to reconnect them.
+///
+/// A failed `DisconnectCable` leaves any pending reconnect and its pending `wait=true` reply in
+/// place.
 async fn handle_disconnect_cable(
     duration: i64,
+    wait: bool,
     shared_state: &Arc<UsbPolicySharedState>,
-) -> Result<(), zx::Status> {
-    if duration < 0 {
+) -> Result<Option<futures::channel::oneshot::Receiver<Result<(), zx::Status>>>, zx::Status> {
+    if duration < 0 || (wait && duration == 0) {
         return Err(zx::Status::INVALID_ARGS);
     }
 
-    // Cancel any previously scheduled reconnect alarm before disconnecting or arming a new one.
-    shared_state.cancel_pending_reconnect();
+    let _cable_op_guard = shared_state.lock_cable_ops().await;
 
     let usb_power_debug = get_usb_power_debug_device(shared_state).await?;
     let charger_debug = get_charger_debug_device(shared_state).await;
@@ -412,8 +424,9 @@ async fn handle_disconnect_cable(
             .await
             .map_err(|_| zx::Status::INTERNAL)?
             .map_err(|_| zx::Status::INTERNAL)?;
+        shared_state.cancel_pending_reconnect();
         set_charger_cable_connected(charger_debug.as_ref(), false).await;
-        return Ok(());
+        return Ok(None);
     }
 
     let alarms_proxy = shared_state.get_wake_alarms()?;
@@ -429,10 +442,10 @@ async fn handle_disconnect_cable(
         "usb-policy-reconnect",
     );
 
-    // Wait until the alarm is armed before disconnecting USB so that an unavailable WakeAlarms
-    // service (which is pipelined and only surfaces PEER_CLOSED when `set_and_wait` is awaited)
-    // does not drop the caller's USB session without a wake timer. `alarm` only completes first
-    // if SetAndWait failed or the alarm already fired.
+    // Wait until the alarm is armed before disconnecting USB. WakeAlarms is pipelined, so an
+    // unavailable service only surfaces PEER_CLOSED once SetAndWait is awaited, and without this
+    // wait the caller's USB session would drop with no wake timer. `alarm` only completes first if
+    // SetAndWait failed or the alarm already fired.
     let setup_wait = fuchsia_async::OnSignals::new(&setup_done, zx::Signals::EVENT_SIGNALED);
     let early_lease = futures::select! {
         _ = setup_wait.fuse() => None,
@@ -458,50 +471,63 @@ async fn handle_disconnect_cable(
         let _ = alarms_proxy.cancel("usb-policy-reconnect");
         return Err(e);
     }
+    // Cancel the previous reconnect only now, so a failed setup leaves it in place. WakeAlarms
+    // alarm IDs are scoped to a connection and get_wake_alarms() opens a new connection per call,
+    // so cancelling the previous alarm doesn't cancel the one armed above. The test override
+    // shares one connection, so the tests don't cover this.
+    shared_state.cancel_pending_reconnect();
     set_charger_cable_connected(charger_debug.as_ref(), false).await;
     drop(setup_lease);
 
+    let (completion_tx, completion_rx) = futures::channel::oneshot::channel();
     let state_for_task = shared_state.clone();
     let reconnect_task = fuchsia_async::Task::local(async move {
         let alarm_res = match early_lease {
             Some(lease) => Ok(Ok(lease)),
             None => alarm.await,
         };
+        let _cable_op_guard = state_for_task.lock_cable_ops().await;
         state_for_task.clear_pending_reconnect_alarms();
 
-        match alarm_res {
+        let completion_res = match alarm_res {
             Ok(Ok(alarm_wake_lease)) => {
                 set_charger_cable_connected(charger_debug.as_ref(), true).await;
-                if let Err(e) = usb_power_debug
+                let res = usb_power_debug
                     .set_connected(true, Some(alarm_wake_lease))
                     .await
                     .map_err(|_| zx::Status::INTERNAL)
-                    .and_then(|r| r.map_err(|_| zx::Status::INTERNAL))
-                {
+                    .and_then(|r| r.map_err(|_| zx::Status::INTERNAL));
+                if let Err(e) = res {
                     warn!("Scheduled wake alarm cable reconnect failed: {:?}", e);
                 }
+                res
             }
             Ok(Err(ftalarms::WakeAlarmsError::Dropped)) => {
                 warn!("WakeAlarms.SetAndWait was dropped/cancelled");
+                Err(zx::Status::CANCELED)
             }
             Ok(Err(e)) => {
                 warn!("WakeAlarms.SetAndWait returned error: {:?}", e);
                 set_charger_cable_connected(charger_debug.as_ref(), true).await;
                 let _ = usb_power_debug.set_connected(true, None).await;
+                Err(zx::Status::INTERNAL)
             }
             Err(e) => {
                 warn!("WakeAlarms.SetAndWait FIDL error: {:?}", e);
                 set_charger_cable_connected(charger_debug.as_ref(), true).await;
                 let _ = usb_power_debug.set_connected(true, None).await;
+                Err(zx::Status::INTERNAL)
             }
-        }
+        };
+        let _ = completion_tx.send(completion_res);
     });
 
     shared_state.set_pending_reconnect(reconnect_task, alarms_proxy);
-    Ok(())
+    Ok(wait.then_some(completion_rx))
 }
 
 async fn handle_connect_cable(shared_state: &Arc<UsbPolicySharedState>) -> Result<(), zx::Status> {
+    let _cable_op_guard = shared_state.lock_cable_ops().await;
     let usb_power_debug = get_usb_power_debug_device(shared_state).await.inspect_err(|e| {
         warn!("ConnectCable: failed to connect to USB power debug service: {:?}", e);
     })?;
@@ -524,11 +550,6 @@ async fn handle_connect_cable(shared_state: &Arc<UsbPolicySharedState>) -> Resul
         }
     };
 
-    // Only cancel a pending `DisconnectCable(duration > 0)` reconnect once we are about to
-    // reconnect, so a failure above leaves the armed fallback reconnect (and its wake lease) in
-    // place.
-    shared_state.cancel_pending_reconnect();
-
     set_charger_cable_connected(charger_debug.as_ref(), true).await;
     usb_power_debug
         .set_connected(true, wake_lease)
@@ -541,6 +562,10 @@ async fn handle_connect_cable(shared_state: &Arc<UsbPolicySharedState>) -> Resul
             warn!("ConnectCable: SetConnected(true) returned error: {:?}", e);
             zx::Status::INTERNAL
         })?;
+
+    // Cancel any pending reconnect only after SetConnected(true) succeeds, so a failure leaves the
+    // armed fallback reconnect and its pending `wait=true` reply in place.
+    shared_state.cancel_pending_reconnect();
     Ok(())
 }
 
@@ -548,6 +573,10 @@ async fn run_configuration_server(
     mut stream: usb_policy::ConfigurationRequestStream,
     shared_state: Arc<UsbPolicySharedState>,
 ) {
+    // Run `wait=true` replies off the request loop so the same connection can still handle
+    // ConnectCable or DisconnectCable, and dropping this scope on client close drops only the
+    // pending replies, not the reconnect task in shared state.
+    let wait_scope = fuchsia_async::Scope::new();
     while let Some(request_result) = stream.next().await {
         match request_result {
             Ok(request) => match request {
@@ -588,12 +617,24 @@ async fn run_configuration_server(
                         }
                     }
                 },
-                usb_policy::ConfigurationRequest::DisconnectCable { duration, responder } => {
-                    match handle_disconnect_cable(duration, &shared_state).await {
-                        Ok(()) => {
+                usb_policy::ConfigurationRequest::DisconnectCable { duration, wait, responder } => {
+                    match handle_disconnect_cable(duration, wait, &shared_state).await {
+                        Ok(None) => {
                             if let Err(e) = responder.send(Ok(())) {
                                 warn!("Failed to send DisconnectCable response: {:?}", e);
                             }
+                        }
+                        Ok(Some(completion_rx)) => {
+                            wait_scope.spawn_local(async move {
+                                let result = match completion_rx.await {
+                                    Ok(Ok(())) => Ok(()),
+                                    Ok(Err(status)) => Err(status.into_raw()),
+                                    Err(_) => Err(zx::Status::CANCELED.into_raw()),
+                                };
+                                if let Err(e) = responder.send(result) {
+                                    warn!("Failed to send DisconnectCable response: {:?}", e);
+                                }
+                            });
                         }
                         Err(status) => {
                             if let Err(e) = responder.send(Err(status.into_raw())) {
@@ -1166,9 +1207,13 @@ mod tests {
             events
         });
 
-        assert_eq!(config_proxy.disconnect_cable(0).await?, Ok(()));
+        assert_eq!(config_proxy.disconnect_cable(0, false).await?, Ok(()));
         assert_eq!(
-            config_proxy.disconnect_cable(-1).await?,
+            config_proxy.disconnect_cable(-1, false).await?,
+            Err(zx::Status::INVALID_ARGS.into_raw())
+        );
+        assert_eq!(
+            config_proxy.disconnect_cable(0, true).await?,
             Err(zx::Status::INVALID_ARGS.into_raw())
         );
         assert_eq!(usb_power_debug_events_task.await, vec![(false, false)]);
@@ -1229,7 +1274,7 @@ mod tests {
         });
 
         let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
-        assert_eq!(config_proxy.disconnect_cable(duration_nanos).await?, Ok(()));
+        assert_eq!(config_proxy.disconnect_cable(duration_nanos, false).await?, Ok(()));
 
         // Simulate debug-dash-launcher / sshd killing usb-cli when the USB link drops.
         drop(config_proxy);
@@ -1263,7 +1308,7 @@ mod tests {
 
         let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
         assert_eq!(
-            config_proxy.disconnect_cable(duration_nanos).await?,
+            config_proxy.disconnect_cable(duration_nanos, false).await?,
             Err(zx::Status::UNAVAILABLE.into_raw())
         );
 
@@ -1325,7 +1370,7 @@ mod tests {
         });
 
         let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
-        assert_eq!(config_proxy.disconnect_cable(duration_nanos).await?, Ok(()));
+        assert_eq!(config_proxy.disconnect_cable(duration_nanos, false).await?, Ok(()));
 
         // Simulate late hrtimer failure after setup_done was already signaled.
         let _ = alarm_err_tx.send(());
@@ -1415,7 +1460,7 @@ mod tests {
         // Arm a pending reconnect alarm via DisconnectCable(duration > 0), then cancel it via
         // ConnectCable().
         let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
-        assert_eq!(config_proxy.disconnect_cable(duration_nanos).await?, Ok(()));
+        assert_eq!(config_proxy.disconnect_cable(duration_nanos, false).await?, Ok(()));
         assert_eq!(config_proxy.connect_cable().await?, Ok(()));
 
         let (held_responder, cancelled_alarm_id) = alarms_events_task.await;
@@ -1524,12 +1569,12 @@ mod tests {
         });
 
         // 1. Indefinite disconnect (`duration == 0`) followed by explicit `connect_cable()`.
-        assert_eq!(config_proxy.disconnect_cable(0).await?, Ok(()));
+        assert_eq!(config_proxy.disconnect_cable(0, false).await?, Ok(()));
         assert_eq!(config_proxy.connect_cable().await?, Ok(()));
 
         // 2. Timed disconnect (`duration > 0`) followed by wake-alarm reconnect.
         let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
-        assert_eq!(config_proxy.disconnect_cable(duration_nanos).await?, Ok(()));
+        assert_eq!(config_proxy.disconnect_cable(duration_nanos, false).await?, Ok(()));
         let _ = alarm_fire_tx.send(());
 
         assert_eq!(
@@ -1549,6 +1594,719 @@ mod tests {
                 ChargerDebugCall::ClearControl(expected_options),
             ]
         );
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_wait_blocks_until_reconnect_completes()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let (alarm_fire_tx, alarm_fire_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            if let Some(Ok(ftalarms::WakeAlarmsRequest::SetAndWait {
+                mode,
+                alarm_id,
+                responder,
+                ..
+            })) = alarms_stream.next().await
+            {
+                assert_eq!(alarm_id, "usb-policy-reconnect");
+                if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                    let _ = done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                }
+                let _ = alarm_fire_rx.await;
+                let (lease_client, _lease_server) = zx::EventPair::create();
+                let _ = responder.send(Ok(lease_client));
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let (reconnect_seen_tx, reconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let (reconnect_reply_tx, reconnect_reply_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            let mut reconnect_seen_tx = Some(reconnect_seen_tx);
+            let mut reconnect_reply_rx = Some(reconnect_reply_rx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                if !connected {
+                    let _ = responder.send(Ok(()));
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    if let Some(tx) = reconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(rx) = reconnect_reply_rx.take() {
+                        let _ = rx.await;
+                    }
+                    let _ = responder.send(Ok(()));
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let mut disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+
+        // Drive until SetConnected(false) has completed, verifying DisconnectCable(wait=true) is
+        // still pending while the alarm has not fired.
+        disconnect_seen_rx.await?;
+        assert!((&mut disconnect_fut).now_or_never().is_none());
+
+        // Fire the alarm and confirm DisconnectCable still waits until SetConnected(true) replies.
+        let _ = alarm_fire_tx.send(());
+        reconnect_seen_rx.await?;
+        assert!((&mut disconnect_fut).now_or_never().is_none());
+
+        let _ = reconnect_reply_tx.send(());
+        assert_eq!(disconnect_fut.await?, Ok(()));
+        assert_eq!(usb_power_debug_events_task.await, vec![(false, false), (true, true)]);
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_wait_cancelled_by_connect_cable()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let alarms_task = fuchsia_async::Task::local(async move {
+            let mut held_responder = None;
+            while let Some(Ok(req)) = alarms_stream.next().await {
+                match req {
+                    ftalarms::WakeAlarmsRequest::SetAndWait {
+                        mode, alarm_id, responder, ..
+                    } => {
+                        assert_eq!(alarm_id, "usb-policy-reconnect");
+                        if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                            let _ =
+                                done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                        }
+                        held_responder = Some(responder);
+                    }
+                    ftalarms::WakeAlarmsRequest::Cancel { alarm_id, .. } => {
+                        assert_eq!(alarm_id, "usb-policy-reconnect");
+                        if let Some(r) = held_responder.take() {
+                            let _ = r.send(Err(ftalarms::WakeAlarmsError::Dropped));
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                let _ = responder.send(Ok(()));
+                if !connected {
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        disconnect_seen_rx.await?;
+
+        // A ConnectCable on the same channel must not deadlock behind the waiting DisconnectCable,
+        // and must cancel the pending waiter with ZX_ERR_CANCELED.
+        assert_eq!(config_proxy.connect_cable().await?, Ok(()));
+        assert_eq!(disconnect_fut.await?, Err(zx::Status::CANCELED.into_raw()));
+        assert_eq!(usb_power_debug_events_task.await, vec![(false, false), (true, false)]);
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_wait_survives_client_drop()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task = fuchsia_async::Task::local(run_configuration_server(
+            config_stream,
+            shared_state.clone(),
+        ));
+
+        let (alarm_fire_tx, alarm_fire_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            if let Some(Ok(ftalarms::WakeAlarmsRequest::SetAndWait {
+                mode,
+                alarm_id,
+                responder,
+                ..
+            })) = alarms_stream.next().await
+            {
+                assert_eq!(alarm_id, "usb-policy-reconnect");
+                if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                    let _ = done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                }
+                let _ = alarm_fire_rx.await;
+                let (lease_client, _lease_server) = zx::EventPair::create();
+                let _ = responder.send(Ok(lease_client));
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                let _ = responder.send(Ok(()));
+                if !connected {
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        disconnect_seen_rx.await?;
+
+        // Drop the waiting client and proxy and confirm the server task exits while the scheduled
+        // reconnect still runs to completion.
+        drop(disconnect_fut);
+        drop(config_proxy);
+        server_task.await;
+
+        let _ = alarm_fire_tx.send(());
+        assert_eq!(usb_power_debug_events_task.await, vec![(false, false), (true, true)]);
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_wait_returns_error_on_late_alarm_error()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let (alarm_err_tx, alarm_err_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            if let Some(Ok(ftalarms::WakeAlarmsRequest::SetAndWait {
+                mode,
+                alarm_id,
+                responder,
+                ..
+            })) = alarms_stream.next().await
+            {
+                assert_eq!(alarm_id, "usb-policy-reconnect");
+                if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                    let _ = done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                }
+                let _ = alarm_err_rx.await;
+                let _ = responder.send(Err(ftalarms::WakeAlarmsError::Internal));
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                let _ = responder.send(Ok(()));
+                if !connected {
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        disconnect_seen_rx.await?;
+
+        let _ = alarm_err_tx.send(());
+        assert_eq!(disconnect_fut.await?, Err(zx::Status::INTERNAL.into_raw()));
+        assert_eq!(usb_power_debug_events_task.await, vec![(false, false), (true, false)]);
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_wait_returns_error_on_reconnect_failure()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let (alarm_fire_tx, alarm_fire_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            if let Some(Ok(ftalarms::WakeAlarmsRequest::SetAndWait {
+                mode,
+                alarm_id,
+                responder,
+                ..
+            })) = alarms_stream.next().await
+            {
+                assert_eq!(alarm_id, "usb-policy-reconnect");
+                if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                    let _ = done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                }
+                let _ = alarm_fire_rx.await;
+                let (lease_client, _lease_server) = zx::EventPair::create();
+                let _ = responder.send(Ok(lease_client));
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                if !connected {
+                    let _ = responder.send(Ok(()));
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    let _ =
+                        responder.send(Err(fidl_fuchsia_hardware_power_source::Error::Internal));
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        disconnect_seen_rx.await?;
+
+        let _ = alarm_fire_tx.send(());
+        assert_eq!(disconnect_fut.await?, Err(zx::Status::INTERNAL.into_raw()));
+        assert_eq!(usb_power_debug_events_task.await, vec![(false, false), (true, true)]);
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_wait_cancelled_by_second_disconnect_cable()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let (alarm2_fire_tx, alarm2_fire_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            let mut alarm2_fire_rx = Some(alarm2_fire_rx);
+            let mut held_responders = std::collections::VecDeque::new();
+            let mut set_count = 0usize;
+            let mut alarm2_task = None;
+            while let Some(Ok(req)) = alarms_stream.next().await {
+                match req {
+                    ftalarms::WakeAlarmsRequest::SetAndWait {
+                        mode, alarm_id, responder, ..
+                    } => {
+                        assert_eq!(alarm_id, "usb-policy-reconnect");
+                        if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                            let _ =
+                                done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                        }
+                        set_count += 1;
+                        held_responders.push_back(responder);
+                        if set_count == 2
+                            && let Some(rx) = alarm2_fire_rx.take()
+                        {
+                            let fire_responder = held_responders.pop_back();
+                            let cancel_responder = held_responders.pop_front();
+                            held_responders = cancel_responder.into_iter().collect();
+                            if let Some(r) = fire_responder {
+                                alarm2_task = Some(fuchsia_async::Task::local(async move {
+                                    let _ = rx.await;
+                                    let (lease_client, _lease_server) = zx::EventPair::create();
+                                    let _ = r.send(Ok(lease_client));
+                                }));
+                            }
+                        }
+                    }
+                    ftalarms::WakeAlarmsRequest::Cancel { alarm_id, .. } => {
+                        assert_eq!(alarm_id, "usb-policy-reconnect");
+                        if let Some(r) = held_responders.pop_front() {
+                            let _ = r.send(Err(ftalarms::WakeAlarmsError::Dropped));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(task) = alarm2_task {
+                task.await;
+            }
+        });
+
+        let (first_disconnect_seen_tx, first_disconnect_seen_rx) =
+            futures::channel::oneshot::channel::<()>();
+        let (second_disconnect_seen_tx, second_disconnect_seen_rx) =
+            futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut first_disconnect_seen_tx = Some(first_disconnect_seen_tx);
+            let mut second_disconnect_seen_tx = Some(second_disconnect_seen_tx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                let _ = responder.send(Ok(()));
+                if !connected {
+                    if let Some(tx) = first_disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    } else if let Some(tx) = second_disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let first_disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        first_disconnect_seen_rx.await?;
+
+        // A second DisconnectCable on the same channel must not deadlock behind the waiting
+        // DisconnectCable, and must cancel the first waiter with ZX_ERR_CANCELED.
+        let second_disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        second_disconnect_seen_rx.await?;
+        assert_eq!(first_disconnect_fut.await?, Err(zx::Status::CANCELED.into_raw()));
+
+        let _ = alarm2_fire_tx.send(());
+        assert_eq!(second_disconnect_fut.await?, Ok(()));
+        assert_eq!(
+            usb_power_debug_events_task.await,
+            vec![(false, false), (false, false), (true, true)]
+        );
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_disconnect_cable_setup_failure_preserves_pending_wait()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let (alarm1_fire_tx, alarm1_fire_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            let mut alarm1_fire_rx = Some(alarm1_fire_rx);
+            let mut set_count = 0usize;
+            let mut alarm1_task = None;
+            while let Some(Ok(req)) = alarms_stream.next().await {
+                match req {
+                    ftalarms::WakeAlarmsRequest::SetAndWait {
+                        mode, alarm_id, responder, ..
+                    } => {
+                        assert_eq!(alarm_id, "usb-policy-reconnect");
+                        set_count += 1;
+                        if set_count == 1 {
+                            if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                                let _ = done_event
+                                    .signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                            }
+                            if let Some(rx) = alarm1_fire_rx.take() {
+                                alarm1_task = Some(fuchsia_async::Task::local(async move {
+                                    let _ = rx.await;
+                                    let (lease_client, _lease_server) = zx::EventPair::create();
+                                    let _ = responder.send(Ok(lease_client));
+                                }));
+                            }
+                        } else {
+                            // Fail the second SetAndWait during setup before NotifySetupDone.
+                            let _ = responder.send(Err(ftalarms::WakeAlarmsError::Internal));
+                        }
+                    }
+                    ftalarms::WakeAlarmsRequest::Cancel { .. } => {
+                        panic!("failing setup must not cancel active reconnect alarm");
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(task) = alarm1_task {
+                task.await;
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                let _ = responder.send(Ok(()));
+                if !connected {
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    break;
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let mut first_disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        disconnect_seen_rx.await?;
+
+        // A failing DisconnectCable during setup must return an error without cancelling the
+        // existing active wait.
+        assert_eq!(
+            config_proxy.disconnect_cable(duration_nanos, true).await?,
+            Err(zx::Status::INTERNAL.into_raw())
+        );
+        assert!((&mut first_disconnect_fut).now_or_never().is_none());
+
+        let _ = alarm1_fire_tx.send(());
+        assert_eq!(first_disconnect_fut.await?, Ok(()));
+        assert_eq!(usb_power_debug_events_task.await, vec![(false, false), (true, true)]);
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_configuration_server_connect_cable_failure_preserves_pending_wait()
+    -> anyhow::Result<()> {
+        let (usb_power_debug_proxy, mut usb_power_debug_stream) =
+            fidl::endpoints::create_proxy_and_stream::<fusb_power::DebugMarker>();
+        let (alarms_proxy, mut alarms_stream) =
+            fidl::endpoints::create_proxy_and_stream::<ftalarms::WakeAlarmsMarker>();
+
+        let shared_state = Arc::new(UsbPolicySharedState::new());
+        shared_state.set_usb_power_debug_for_test(usb_power_debug_proxy);
+        shared_state.set_wake_alarms_for_test(alarms_proxy);
+
+        let (config_proxy, config_stream) =
+            fidl::endpoints::create_proxy_and_stream::<usb_policy::ConfigurationMarker>();
+        let server_task =
+            fuchsia_async::Task::local(run_configuration_server(config_stream, shared_state));
+
+        let (alarm_fire_tx, alarm_fire_rx) = futures::channel::oneshot::channel::<()>();
+        let alarms_task = fuchsia_async::Task::local(async move {
+            let mut alarm_fire_rx = Some(alarm_fire_rx);
+            let mut alarm_task = None;
+            while let Some(Ok(req)) = alarms_stream.next().await {
+                match req {
+                    ftalarms::WakeAlarmsRequest::SetAndWait {
+                        mode, alarm_id, responder, ..
+                    } => {
+                        assert_eq!(alarm_id, "usb-policy-reconnect");
+                        if let ftalarms::SetMode::NotifySetupDone(done_event) = mode {
+                            let _ =
+                                done_event.signal(zx::Signals::NONE, zx::Signals::EVENT_SIGNALED);
+                        }
+                        if let Some(rx) = alarm_fire_rx.take() {
+                            alarm_task = Some(fuchsia_async::Task::local(async move {
+                                let _ = rx.await;
+                                let (lease_client, _lease_server) = zx::EventPair::create();
+                                let _ = responder.send(Ok(lease_client));
+                            }));
+                        }
+                    }
+                    ftalarms::WakeAlarmsRequest::Cancel { .. } => {
+                        panic!("failing ConnectCable must not cancel active reconnect alarm");
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(task) = alarm_task {
+                task.await;
+            }
+        });
+
+        let (disconnect_seen_tx, disconnect_seen_rx) = futures::channel::oneshot::channel::<()>();
+        let usb_power_debug_events_task = fuchsia_async::Task::local(async move {
+            let mut events = Vec::new();
+            let mut disconnect_seen_tx = Some(disconnect_seen_tx);
+            let mut reconnect_attempts = 0usize;
+            while let Some(Ok(fusb_power::DebugRequest::SetConnected {
+                connected,
+                wake_lease,
+                responder,
+            })) = usb_power_debug_stream.next().await
+            {
+                events.push((connected, wake_lease.is_some()));
+                if !connected {
+                    let _ = responder.send(Ok(()));
+                    if let Some(tx) = disconnect_seen_tx.take() {
+                        let _ = tx.send(());
+                    }
+                } else {
+                    reconnect_attempts += 1;
+                    if reconnect_attempts == 1 {
+                        // Fail the manual ConnectCable attempt.
+                        let _ = responder
+                            .send(Err(fidl_fuchsia_hardware_power_source::Error::Internal));
+                    } else {
+                        let _ = responder.send(Ok(()));
+                        break;
+                    }
+                }
+            }
+            events
+        });
+
+        let duration_nanos = zx::MonotonicDuration::from_seconds(5).into_nanos();
+        let mut disconnect_fut = config_proxy.disconnect_cable(duration_nanos, true);
+        disconnect_seen_rx.await?;
+
+        // A failing ConnectCable must return an error without cancelling the pending wait or alarm.
+        assert_eq!(config_proxy.connect_cable().await?, Err(zx::Status::INTERNAL.into_raw()));
+        assert!((&mut disconnect_fut).now_or_never().is_none());
+
+        let _ = alarm_fire_tx.send(());
+        assert_eq!(disconnect_fut.await?, Ok(()));
+        assert_eq!(
+            usb_power_debug_events_task.await,
+            vec![(false, false), (true, false), (true, true)]
+        );
+        drop(config_proxy);
+        server_task.await;
+        alarms_task.await;
         Ok(())
     }
 

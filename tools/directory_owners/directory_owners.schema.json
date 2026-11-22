@@ -1,0 +1,79 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Directory Owners Output",
+    "description": "Schema for the aggregated directory_owners.json output file.",
+    "type": "object",
+    "required": [
+        "directories",
+        "version"
+    ],
+    "properties": {
+        "directories": {
+            "type": "object",
+            "description": "Maps forward-slash repository-relative directory paths (\"\" for the checkout root) to their Google Issue Tracker component_id and proximity-ranked list of owners.",
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "component_id": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "The Google Issue Tracker component ID resolved from the nearest METADATA.textproto file in this directory or an ancestor."
+                    },
+                    "owners": {
+                        "type": "array",
+                        "minItems": 1,
+                        "description": "Proximity-ordered list of structured owners for this directory.",
+                        "items": {
+                            "type": "object",
+                            "required": [
+                                "email",
+                                "tier",
+                                "owners_step",
+                                "include_depth",
+                                "dir_distance",
+                                "owners_file"
+                            ],
+                            "properties": {
+                                "email": {
+                                    "type": "string",
+                                    "description": "Owner email address declared in owners_file."
+                                },
+                                "tier": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "1-based sequential ownership tier ranked by proximity, advancing without gaps for each (owners_step, include_depth) level that contributes at least one novel owner."
+                                },
+                                "owners_step": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "description": "1-based index of the non-root ancestor OWNERS file that contributed at least one novel owner when walking up from the directory."
+                                },
+                                "include_depth": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Breadth-first include or file: hop count from the ancestor OWNERS file at owners_step (0 for direct owners, 1+ for included files)."
+                                },
+                                "dir_distance": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Number of directory hops up from the directory to the ancestor OWNERS file at owners_step (0 for the directory itself)."
+                                },
+                                "owners_file": {
+                                    "type": "string",
+                                    "description": "Forward-slash repository-relative path to the OWNERS file where email was declared."
+                                }
+                            },
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "version": {
+            "type": "integer",
+            "minimum": 1
+        }
+    },
+    "additionalProperties": false
+}

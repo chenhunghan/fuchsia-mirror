@@ -4,6 +4,7 @@
 
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/fit/defer.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/trace/event.h>
 
 #include <vector>
@@ -89,7 +90,7 @@ void Dwc3::HandleEpEvent(uint32_t event) {
         if (ep0_.state == Ep0::State::Setup) {
           EpSetStall(ep0_.out, true);
         } else {
-          Ep0EndAndStall(ep0_.out);
+          Ep0EndAndStall();
           Ep0QueueSetup();
         }
         break;
@@ -169,24 +170,37 @@ void Dwc3::HandleEvent(uint32_t event) {
     }
     case DEVT_REMOTE_WAKEUP:
       fdf::debug("DEVT_REMOTE_WAKEUP");
+      if (device_state_ == fuchsia_hardware_usb_policy::DeviceState::kSuspended) {
+        SetDeviceState(pre_suspend_state_);
+      }
       break;
     case DEVT_HIBERNATE_REQUEST:
       fdf::debug("DEVT_HIBERNATE_REQUEST");
       break;
-    case DEVT_SUSPEND_ENTRY:
+    case DEVT_SUSPEND_ENTRY: {
       fdf::debug("DEVT_SUSPEND_ENTRY");
+      const uint32_t link_state = DEVT_LINK_STATE_CHANGE_STATE(info);
+      if (link_state == DSTS::USBLNKST_U3 &&
+          device_state_ != fuchsia_hardware_usb_policy::DeviceState::kNotAttached &&
+          device_state_ != fuchsia_hardware_usb_policy::DeviceState::kAttached &&
+          device_state_ != fuchsia_hardware_usb_policy::DeviceState::kSuspended) {
+        SetDeviceState(fuchsia_hardware_usb_policy::DeviceState::kSuspended);
+      }
       break;
+    }
     case DEVT_SOF:
       fdf::debug("DEVT_SOF");
       break;
     case DEVT_ERRATIC_ERROR:
-      fdf::debug("DEVT_ERRATIC_ERROR");
+      fdf::error("DEVT_ERRATIC_ERROR");
+      metrics_.RecordEvent("USB Erratic Error");
       break;
     case DEVT_COMMAND_COMPLETE:
       fdf::debug("DEVT_COMMAND_COMPLETE");
       break;
     case DEVT_EVENT_BUF_OVERFLOW:
-      fdf::debug("DEVT_EVENT_BUF_OVERFLOW");
+      fdf::error("DEVT_EVENT_BUF_OVERFLOW");
+      metrics_.RecordEvent("Event Buffer Overflow");
       break;
     case DEVT_VENDOR_TEST_LMP:
       fdf::debug("DEVT_VENDOR_TEST_LMP");
@@ -240,32 +254,63 @@ void Dwc3::HandleIrq(async_dispatcher_t* dispatcher, async::IrqBase* irq, zx_sta
 
   auto* mmio = get_mmio();
 
+  uint32_t event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT();
+  if (event_bytes < sizeof(uint32_t) || event_fifo_.TotalSlots() == 0) {
+    metrics_.IncrementUnhandledIrqCount();
+    if (irq_.is_valid()) {
+      irq_.ack();
+    }
+    return;
+  }
+
+  // Mask event interrupts while draining the event ring per the Synopsys DWC3 Databook.
+  GEVNTSIZ::Get(0).ReadFrom(mmio).set_EVNTINTRPTMASK(1).WriteTo(mmio);
+
   uint32_t total_processed = 0;
-  uint32_t event_bytes;
-  while ((event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT()) > 0) {
-    uint32_t event_count = event_bytes / sizeof(uint32_t);
+  while (is_active() && event_bytes >= sizeof(uint32_t)) {
+    const uint32_t event_count = std::min<uint32_t>(
+        event_bytes / sizeof(uint32_t), static_cast<uint32_t>(event_fifo_.TotalSlots()));
+    const uint32_t ack_bytes = event_count * sizeof(uint32_t);
     total_processed += event_count;
-    for (uint32_t event : event_fifo_.Read(event_count)) {
+    std::vector<uint32_t> events = event_fifo_.Read(event_count);
+    event_fifo_.Advance(event_count);
+    // Order the event_fifo_.Read() DMA buffer loads before the GEVNTCOUNT MMIO write below that
+    // releases these ring slots back to the DWC3 DMA engine.
+    ReadDataMemoryBarrier();
+
+    // Acknowledge the consumed bytes in GEVNTCOUNT with EVNT_HANDLER_BUSY=0 immediately after
+    // copying them out of the ring so the controller can reuse those ring slots during event
+    // dispatch without overflowing the event buffer, while keeping the hardware busy latch set.
+    GEVNTCOUNT::Get(0).FromValue(0).set_EVNT_HANDLER_BUSY(0).set_EVNTCOUNT(ack_bytes).WriteTo(mmio);
+
+    for (uint32_t event : events) {
+      if (!is_active()) {
+        break;
+      }
       HandleEvent(event);
     }
 
-    event_fifo_.Advance(event_count);
-    // acknowledge the events we have processed
-    GEVNTCOUNT::Get(0)
-        .FromValue(0)
-        .set_EVNT_HANDLER_BUSY(1)
-        .set_EVNTCOUNT(event_bytes)
-        .WriteTo(mmio);
-  }
-  if (total_processed == 0) {
-    metrics_.IncrementUnhandledIrqCount();
+    event_bytes = is_active() ? GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT() : 0;
   }
   metrics_.UpdateMaxEventBatch(total_processed);
 
   // Flush any pending completions to the endpoints' fidl channels all at once
   // per IRQ.
   for (auto& uep : user_endpoints_) {
-    uep.server->SendCompletions();
+    if (uep.server.has_value()) {
+      uep.server->SendCompletions();
+    }
+  }
+
+  if (is_active()) {
+    GEVNTSIZ::Get(0).ReadFrom(mmio).set_EVNTINTRPTMASK(0).WriteTo(mmio);
+    if (interrupt_moderation_ != 0) {
+      // Clear the write-1-to-clear EVNT_HANDLER_BUSY hardware latch and reload DEVIMOD(0) so the
+      // hardware interrupt-moderation down-counter (IMODC) cannot wedge if new events arrived while
+      // draining the ring.
+      GEVNTCOUNT::Get(0).FromValue(0).set_EVNT_HANDLER_BUSY(1).set_EVNTCOUNT(0).WriteTo(mmio);
+      DEVIMOD::Get(0).FromValue(0).set_IMODI(interrupt_moderation_).WriteTo(mmio);
+    }
   }
 
   // Acknowledge the interrupt after clearing pending events to avoid immediately
@@ -296,24 +341,33 @@ void Dwc3::StartEvents() {
 
   auto* mmio = get_mmio();
 
-  // set event buffer pointer and size
-  // keep interrupts masked until we are ready
+  // Keep event interrupts masked while programming the event buffer address, count, and enabled
+  // device events.
   zx_paddr_t paddr = event_fifo_.GetPhys();
   ZX_ASSERT(paddr != 0);
 
+  GEVNTSIZ::Get(0).FromValue(0).set_EVENTSIZ(kBufferSize).set_EVNTINTRPTMASK(1).WriteTo(mmio);
   GEVNTADR::Get(0).FromValue(0).set_EVNTADR(paddr).WriteTo(mmio);
-  GEVNTSIZ::Get(0).FromValue(0).set_EVENTSIZ(kBufferSize).set_EVNTINTRPTMASK(0).WriteTo(mmio);
-  GEVNTCOUNT::Get(0).FromValue(0).set_EVNTCOUNT(0).set_EVNT_HANDLER_BUSY(1).WriteTo(mmio);
+  GEVNTCOUNT::Get(0)
+      .FromValue(0)
+      .set_EVNTCOUNT(0)
+      .set_EVNT_HANDLER_BUSY(interrupt_moderation_ != 0 ? 1 : 0)
+      .WriteTo(mmio);
 
   // enable events
   DEVTEN::Get()
       .FromValue(0)
+      .set_EVNTOVERFLOWEN(1)
+      .set_ERRTICERREVTEN(1)
       .set_L1SUSPEN(1)
       .set_U3L2L1SuspEn(1)
+      .set_WKUPEVTEN(1)
       .set_CONNECTDONEEVTEN(1)
       .set_USBRSTEVTEN(1)
       .set_DISSCONNEVTEN(1)
       .WriteTo(mmio);
+
+  GEVNTSIZ::Get(0).FromValue(0).set_EVENTSIZ(kBufferSize).set_EVNTINTRPTMASK(0).WriteTo(mmio);
 }
 
 void Dwc3::StopEvents() {
@@ -341,18 +395,21 @@ void Dwc3::StopEvents() {
 
   std::vector<uint32_t> pending_events;
   uint32_t event_bytes;
-  while ((event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT()) > 0) {
-    const uint32_t event_count = event_bytes / sizeof(uint32_t);
-    if (event_fifo_.TotalSlots() > 0) {
+  while ((event_bytes = GEVNTCOUNT::Get(0).ReadFrom(mmio).EVNTCOUNT()) >= sizeof(uint32_t)) {
+    const uint32_t max_slots = static_cast<uint32_t>(event_fifo_.TotalSlots());
+    const uint32_t event_count = max_slots > 0
+                                     ? std::min<uint32_t>(event_bytes / sizeof(uint32_t), max_slots)
+                                     : static_cast<uint32_t>(event_bytes / sizeof(uint32_t));
+    const uint32_t ack_bytes = event_count * sizeof(uint32_t);
+    if (max_slots > 0) {
       const std::vector<uint32_t> batch = event_fifo_.Read(event_count);
       pending_events.insert(pending_events.end(), batch.begin(), batch.end());
       event_fifo_.Advance(event_count);
+      // Order the event_fifo_.Read() DMA buffer loads before the GEVNTCOUNT MMIO write below that
+      // releases these ring slots back to the DWC3 DMA engine.
+      ReadDataMemoryBarrier();
     }
-    GEVNTCOUNT::Get(0)
-        .FromValue(0)
-        .set_EVNT_HANDLER_BUSY(1)
-        .set_EVNTCOUNT(event_bytes)
-        .WriteTo(mmio);
+    GEVNTCOUNT::Get(0).FromValue(0).set_EVNT_HANDLER_BUSY(0).set_EVNTCOUNT(ack_bytes).WriteTo(mmio);
   }
 
   for (auto it = pending_events.rbegin(); it != pending_events.rend(); ++it) {

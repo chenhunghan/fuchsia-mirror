@@ -2,16 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use bt_repl::{CommandSource, Commands, gen_commands};
 use fidl_fuchsia_bluetooth_avrcp::AvcPanelCommand;
-use rustyline::completion::Completer;
-use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
-use rustyline::{Context, Helper};
-use std::borrow::Cow::{self, Borrowed, Owned};
-use std::fmt;
-use std::str::FromStr;
 
 macro_rules! gen_avc_commands {
 ($name:ident {
@@ -32,74 +24,6 @@ macro_rules! gen_avc_commands {
                 _ => None
             }
         }
-    }
-}
-
-/// Macro to generate a command enum and its impl.
-macro_rules! gen_commands {
-    ($(#[$meta:meta])* $name:ident {
-        $($variant:ident = ($val:expr, [$($arg:expr),*], $help:expr)),*,
-    }) => {
-        /// Enum of all possible commands
-        $(#[$meta])*
-        #[derive(PartialEq)]
-        pub enum $name {
-            $($variant),*
-        }
-
-        impl $name {
-            /// Returns a list of the string representations of all variants
-            pub fn variants() -> Vec<String> {
-                vec![$($val.to_string(),)*]
-            }
-
-            pub fn arguments(&self) -> &'static str {
-                match self {
-                    $(
-                        $name::$variant => concat!($("<", $arg, "> ",)*)
-                    ),*
-                }
-            }
-
-            /// Help string for a given variant. The format is "command <arg>.. -- help message"
-            pub fn cmd_help(&self) -> &'static str {
-                match self {
-                    $(
-                        $name::$variant => concat!($val, " ", $("<", $arg, "> ",)* "-- ", $help)
-                    ),*
-                }
-            }
-
-            /// Multiline help string for `$name` including usage of all variants.
-            pub fn help_msg() -> String {
-                let command_help = concat!($(
-                    "\t", $val, " ", $("<", $arg, "> ",)* "-- ", $help, "\n"
-                ),*);
-
-                format!("Commands:\n{}\nAVC keys:\n\tkey {}\n", command_help, AVC_COMMAND_LONG_VARIANTS.join("\n\tkey "))
-            }
-
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                match *self {
-                    $($name::$variant => write!(f, $val)),* ,
-                }
-            }
-        }
-
-        impl FromStr for $name {
-            type Err = ();
-
-            fn from_str(s: &str) -> Result<$name, ()> {
-                match s {
-                    $($val => Ok($name::$variant)),* ,
-                    _ => Err(()),
-                }
-            }
-        }
-
     }
 }
 
@@ -167,147 +91,147 @@ gen_avc_commands! {
     }
 }
 
-// `Cmd` is the declarative specification of all commands that bt-cli accepts.
+// `Cmd` is the declarative specification of all commands that bt-avrcp-controller accepts.
 gen_commands! {
-    #[derive(Debug)]
-    Cmd {
-        AvcCommand = ("key", ["command"], "send an AVC passthrough keypress event"),
-        ChangePath = ("change-path",
+    pub enum Cmd {
+        AvcCommand = (
+            "key",
+            [],
+            ["command"],
+            "send an AVC passthrough keypress event",
+        ),
+        ChangePath = (
+            "change-path",
+            [],
             ["folder_uid"],
-            "Navigates one folder down if folder_uid is specified. Special value \"..\" or \"up\" navigates one folder up to the parent folder instead."),
-        GetVirtualFileSystem =  ("get-file-system", ["start_index", "end_index", "attributes"],
-            "Get media player virtual file system items from target. Note that `attributes` is a comma-separated attribute IDs. Use special keyword \"ALL\" to specify all attributes. Leave empty to specify no attributes. Example: `<command> <start_index> <end_index> 1,2,3` OR `<command> <start_index> <end_index> ALL`"),
-        GetMediaAttributes = ("get-media", [], "gets currently playing media attributes"),
-        GetMediaPlayerList =  ("get-media-players", ["start_index", "end_index"], "Get list of media players from target"),
-        GetNowPlaying =  ("get-now-playing", ["start_index", "end_index", "attributes"],
-            "Get now playing list from target. Note that `attributes` is a comma-separated attribute IDs. Use special keyword \"ALL\" to specify all attributes. Leave empty to specify no attributes. Example: `<command> <start_index> <end_index> 1,2,3` OR `<command> <start_index> <end_index> ALL`"),
-        GetPlayStatus = ("get-play-status", [], "gets the status of the currently playing media at the TG"),
-        GetPlayerApplicationSettings = ("get-player-application-settings",
+            "Navigates one folder down if folder_uid is specified. \
+             Special value \"..\" or \"up\" navigates one folder up to the parent folder instead.",
+        ),
+        GetVirtualFileSystem = (
+            "get-file-system",
+            [],
+            ["start_index", "end_index", "attributes"],
+            "Get media player virtual file system items from target. \
+             Note that `attributes` is a comma-separated attribute IDs. \
+             Use special keyword \"ALL\" to specify all attributes. \
+             Leave empty to specify no attributes. \
+             Example: `<command> <start_index> <end_index> 1,2,3` OR \
+             `<command> <start_index> <end_index> ALL`",
+        ),
+        GetMediaAttributes = (
+            "get-media",
+            [],
+            [],
+            "gets currently playing media attributes",
+        ),
+        GetMediaPlayerList = (
+            "get-media-players",
+            [],
+            ["start_index", "end_index"],
+            "Get list of media players from target",
+        ),
+        GetNowPlaying = (
+            "get-now-playing",
+            [],
+            ["start_index", "end_index", "attributes"],
+            "Get now playing list from target. \
+             Note that `attributes` is a comma-separated attribute IDs. \
+             Use special keyword \"ALL\" to specify all attributes. \
+             Leave empty to specify no attributes. \
+             Example: `<command> <start_index> <end_index> 1,2,3` OR \
+             `<command> <start_index> <end_index> ALL`",
+        ),
+        GetPlayStatus = (
+            "get-play-status",
+            [],
+            [],
+            "gets the status of the currently playing media at the TG",
+        ),
+        GetPlayerApplicationSettings = (
+            "get-player-application-settings",
+            [],
             ["Optional: id1 id2 ..."],
-            "Gets currently set attribute values if ids are specified. Otherwise, all possible attribute values on the TG."),
-        PlayVirtualFileSystem =  ("play-file", ["uid" ],
-            "Play an item from the TG's virtual file system."),
-        PlayNowPlaying =  ("play-now-playing", ["uid" ],
-            "Play an item from the TG's now playing list."),
-        SetPlayerApplicationSettings = ("set-player-application-settings", [],
-            "Sets player application settings with a default Equalizer=Off setting."),
-        SupportedEvents = ("get-supported-events", [], "gets the supported events of the target"),
-        SendRawVendorCommand = ("send-raw-vendor-command", ["pdu_id", "payload"], "send a raw vendor AVC command"),
-        SetBrowsedPlayer =  ("set-browsed-player", ["player_id"], "Sets the browsed player by the specified player ID"),
-        SetVolume =  ("set-volume", ["volume"], "send a set absolute volume command (0-127)"),
-        IsConnected = ("connection-status", [], "checks if the current device is current connected via control channel and browse channel"),
-        Help = ("help", [], "This message"),
-        Exit = ("exit", [], "Close REPL"),
-        Quit = ("quit", [], "Close REPL"),
+            "Gets currently set attribute values if ids are specified. \
+             Otherwise, all possible attribute values on the TG.",
+        ),
+        PlayVirtualFileSystem = (
+            "play-file",
+            [],
+            ["uid"],
+            "Play an item from the TG's virtual file system.",
+        ),
+        PlayNowPlaying = (
+            "play-now-playing",
+            [],
+            ["uid"],
+            "Play an item from the TG's now playing list.",
+        ),
+        SetPlayerApplicationSettings = (
+            "set-player-application-settings",
+            [],
+            [],
+            "Sets player application settings with a default Equalizer=Off setting.",
+        ),
+        SupportedEvents = (
+            "get-supported-events",
+            [],
+            [],
+            "gets the supported events of the target",
+        ),
+        SendRawVendorCommand = (
+            "send-raw-vendor-command",
+            [],
+            ["pdu_id", "payload"],
+            "send a raw vendor AVC command",
+        ),
+        SetBrowsedPlayer = (
+            "set-browsed-player",
+            [],
+            ["player_id"],
+            "Sets the browsed player by the specified player ID",
+        ),
+        SetVolume = (
+            "set-volume",
+            [],
+            ["volume"],
+            "send a set absolute volume command (0-127)",
+        ),
+        IsConnected = (
+            "connection-status",
+            [],
+            [],
+            "checks if the current device is current connected \
+             via control channel and browse channel",
+        ),
     }
 }
 
-/// CmdHelper provides completion, hints, and highlighting for bt-cli
-pub struct CmdHelper {}
-
-impl CmdHelper {
-    pub fn new() -> CmdHelper {
-        CmdHelper {}
-    }
+/// Help footer listing supported AVC key names for `key`.
+pub fn avc_keys_help() -> String {
+    format!("AVC keys:\n\tkey {}", AVC_COMMAND_LONG_VARIANTS.join("\n\tkey "))
 }
 
-impl Completer for CmdHelper {
-    type Candidate = String;
-
-    fn complete(
-        &self,
-        line: &str,
-        _pos: usize,
-        _ctx: &Context<'_>,
-    ) -> Result<(usize, Vec<String>), ReadlineError> {
-        let components: Vec<_> = line.trim_start().split_whitespace().collect();
-
-        // Check whether we have entered a command and either whitespace or a partial argument.
-        // If yes, complete arguments; if no, complete commands
-        let mut variants = Vec::new();
-        // Check whether we have entered a command and either whitespace or a partial argument.
-        // If yes, complete arguments; if no, complete commands
-        let should_complete_arguments = (components.len() == 1 && line.ends_with(" "))
-            || (components.len() == 2 && !line.ends_with(" "));
-        if should_complete_arguments {
-            let command = components[0].trim();
-            let partial_argument = components.get(1).unwrap_or(&"");
-            let mut candidates = vec![];
-            if command == "key" {
-                // connect and device have 'id|addr' arguments
-                // can match against peer identifier or address
-                for key in AVC_COMMAND_LONG_VARIANTS {
-                    if key.starts_with(partial_argument) {
-                        candidates.push(format!("{} {}", command, key));
-                    }
-                }
-                for key in AVC_COMMAND_SHORT_VARIANTS {
-                    if key.starts_with(partial_argument) {
-                        candidates.push(format!("{} {}", command, key));
-                    }
+/// Creates the [`CommandSource`] for `bt-avrcp-controller`, providing first-argument
+/// completion for `key` (`Cmd::AvcCommand`) against long and short AVC key names.
+pub fn command_source() -> impl CommandSource {
+    Commands::<Cmd>::new().with_arg_completer(|cmd, partial_arg| {
+        let mut candidates = Vec::new();
+        if cmd == Cmd::AvcCommand {
+            for key in AVC_COMMAND_LONG_VARIANTS.iter().chain(AVC_COMMAND_SHORT_VARIANTS.iter()) {
+                if key.starts_with(partial_arg) && !candidates.iter().any(|c| c == key) {
+                    candidates.push((*key).to_string());
                 }
             }
-            Ok((0, candidates))
-        } else {
-            for variant in Cmd::variants() {
-                if variant.starts_with(line) {
-                    variants.push(variant)
-                }
-            }
-            Ok((0, variants))
         }
-    }
-}
-
-impl Hinter for CmdHelper {
-    type Hint = String;
-
-    /// CmdHelper provides hints for commands with arguments
-    fn hint(&self, line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        let needs_space = !line.ends_with(" ");
-        line.trim()
-            .parse::<Cmd>()
-            .map(|cmd| format!("{}{}", if needs_space { " " } else { "" }, cmd.arguments(),))
-            .ok()
-    }
-}
-
-impl Highlighter for CmdHelper {
-    /// CmdHelper provides highlights for commands with hints
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        if hint.trim().is_empty() {
-            Borrowed(hint)
-        } else {
-            Owned(format!("\x1b[90m{}\x1b[0m", hint))
-        }
-    }
-}
-
-impl Validator for CmdHelper {}
-
-/// CmdHelper can be used as an `Editor` helper for entering input commands
-impl Helper for CmdHelper {}
-
-#[cfg(test)]
-impl CmdHelper {
-    fn complete(&self, line: &str, pos: usize) -> Result<(usize, Vec<String>), ReadlineError> {
-        let history = rustyline::history::DefaultHistory::new();
-        let ctx = Context::new(&history);
-        Completer::complete(self, line, pos, &ctx)
-    }
-}
-
-/// Represents either continuation or breaking out of a read-evaluate-print loop.
-pub enum ReplControl {
-    Break,
-    Continue,
+        candidates
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
+    #[fuchsia::test]
     fn test_avc_match_string() {
         assert_eq!(Some(AvcPanelCommand::Up), avc_match_string("up"));
         assert_eq!(Some(AvcPanelCommand::Up), avc_match_string("UP"));
@@ -321,42 +245,26 @@ mod tests {
         assert_eq!(Some(AvcPanelCommand::ChannelUp), avc_match_string("channelup"));
     }
 
-    #[test]
+    #[fuchsia::test]
     fn test_completer() {
-        let cmdhelper = CmdHelper::new();
-        assert!(cmdhelper.complete("ke", 0).unwrap().1.contains(&"key".to_string()));
-        assert!(cmdhelper.complete("get", 0).unwrap().1.contains(&"get-media".to_string()));
-        assert!(cmdhelper.complete("key ex", 0).unwrap().1.contains(&"key exit".to_string()));
-        assert!(
-            cmdhelper.complete("conne", 0).unwrap().1.contains(&"connection-status".to_string())
-        );
-        assert!(
-            cmdhelper
-                .complete("send-ra", 0)
-                .unwrap()
-                .1
-                .contains(&"send-raw-vendor-command".to_string())
-        );
-        assert!(
-            cmdhelper.complete("get-s", 0).unwrap().1.contains(&"get-supported-events".to_string())
-        );
-        assert!(
-            cmdhelper.complete("get-play-", 0).unwrap().1.contains(&"get-play-status".to_string())
-        );
-        assert!(
-            cmdhelper
-                .complete("get-playe", 0)
-                .unwrap()
-                .1
-                .contains(&"get-player-application-settings".to_string())
-        );
-        assert!(
-            cmdhelper
-                .complete("set", 0)
-                .unwrap()
-                .1
-                .contains(&"set-player-application-settings".to_string())
-        );
-        assert!(cmdhelper.complete("set-v", 0).unwrap().1.contains(&"set-volume".to_string()));
+        let source = command_source();
+        let names = source.command_names();
+        assert!(names.contains(&"key".to_string()));
+        assert!(names.contains(&"get-media".to_string()));
+        assert!(names.contains(&"connection-status".to_string()));
+        assert!(names.contains(&"send-raw-vendor-command".to_string()));
+        assert!(names.contains(&"get-supported-events".to_string()));
+        assert!(names.contains(&"get-play-status".to_string()));
+        assert!(names.contains(&"get-player-application-settings".to_string()));
+        assert!(names.contains(&"set-player-application-settings".to_string()));
+        assert!(names.contains(&"set-volume".to_string()));
+
+        let key_candidates = source.complete_argument("key", "ex");
+        assert!(key_candidates.contains(&"exit".to_string()));
+        assert!(key_candidates.contains(&"ex".to_string()));
+        assert_eq!(source.complete_argument("key", "up"), vec!["up".to_string()]);
+
+        assert!(source.complete_argument("get-media", "ex").is_empty());
+        assert!(avc_keys_help().starts_with("AVC keys:\n\tkey select"));
     }
 }

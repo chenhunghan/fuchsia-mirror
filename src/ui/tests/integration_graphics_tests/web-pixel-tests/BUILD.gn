@@ -66,12 +66,8 @@ fuchsia_test_package("web_runner_pixel_test") {
       max_severity = "ERROR"
     }
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
   }
 }

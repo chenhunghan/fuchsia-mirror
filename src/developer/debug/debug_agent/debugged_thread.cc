@@ -10,6 +10,7 @@
 #include <zircon/syscalls/debug.h>
 #include <zircon/syscalls/exception.h>
 
+#include <algorithm>
 #include <memory>
 
 #include "src/developer/debug/debug_agent/arch.h"
@@ -118,20 +119,25 @@ void DebuggedThread::OnException(std::unique_ptr<ExceptionHandle> exception_hand
 
   switch (type) {
     case debug_ipc::ExceptionType::kSingleStep:
-      return HandleSingleStep(&exception, *regs);
+      HandleSingleStep(&exception, *regs);
+      return;
     case debug_ipc::ExceptionType::kSoftwareBreakpoint:
-      return HandleSoftwareBreakpoint(&exception, *regs);
+      HandleSoftwareBreakpoint(&exception, *regs);
+      return;
     case debug_ipc::ExceptionType::kHardwareBreakpoint:
-      return HandleHardwareBreakpoint(&exception, *regs);
+      HandleHardwareBreakpoint(&exception, *regs);
+      return;
     case debug_ipc::ExceptionType::kWatchpoint:
-      return HandleWatchpoint(&exception, *regs);
+      HandleWatchpoint(&exception, *regs);
+      return;
     case debug_ipc::ExceptionType::kNone:
     case debug_ipc::ExceptionType::kLast:
       break;
     // TODO(donosoc): Should synthetic be general or invalid?
     case debug_ipc::ExceptionType::kSynthetic:
     default:
-      return HandleGeneralException(&exception, *regs);
+      HandleGeneralException(&exception, *regs);
+      return;
   }
 
   FX_NOTREACHED() << "Invalid exception notification type: "
@@ -514,8 +520,8 @@ std::vector<debug::RegisterValue> DebuggedThread::WriteRegisters(
   debug::RegisterID rip_id =
       GetSpecialRegisterID(arch::GetCurrentArch(), debug::SpecialRegisterType::kIP);
 
-  auto ip = std::find_if(regs.begin(), regs.end(),
-                         [rip_id](const debug::RegisterValue& rv) { return rv.id == rip_id; });
+  auto ip = std::ranges::find_if(
+      regs, [rip_id](const debug::RegisterValue& rv) { return rv.id == rip_id; });
 
   if (ip != regs.end()) {
     auto current_registers = thread_handle_->GetGeneralRegisters();
@@ -536,6 +542,19 @@ void DebuggedThread::SendThreadNotification() const {
   DEBUG_LOG(Thread) << ThreadPreamble(this) << "Sending starting notification.";
   debug_ipc::NotifyThreadStarting notify;
   notify.record = GetThreadRecord(debug_ipc::ThreadRecord::StackAmount::kMinimal);
+  notify.timestamp = GetNowTimestamp();
+
+  debug_agent_->SendNotification(notify);
+}
+
+void DebuggedThread::SendRunningThreadNotification() const {
+  DEBUG_LOG(Thread) << ThreadPreamble(this) << "Sending running starting notification.";
+  debug_ipc::NotifyThreadStarting notify;
+  notify.record.id = {.process = process_->koid(), .thread = koid()};
+  notify.record.name = thread_handle_->GetName();
+  notify.record.state = debug_ipc::ThreadRecord::State::kRunning;
+  notify.record.blocked_reason = debug_ipc::ThreadRecord::BlockedReason::kNotBlocked;
+  notify.record.stack_amount = debug_ipc::ThreadRecord::StackAmount::kNone;
   notify.timestamp = GetNowTimestamp();
 
   debug_agent_->SendNotification(notify);
@@ -564,7 +583,7 @@ DebuggedThread::OnStop DebuggedThread::UpdateForSoftwareBreakpoint(
   }
 
   if (SoftwareBreakpoint* found_bp = process_->FindSoftwareBreakpoint(breakpoint_address)) {
-#if defined(__linux__)
+#ifdef __linux__
     // OnLinux, the loader breakpoint is a software breakpoint we inserted. Special-case this.
     if (found_bp->IsInternalLdSoBreakpoint()) {
       if (process_->HandleLoaderBreakpoint(breakpoint_address)) {

@@ -4,8 +4,8 @@
 
 from typing import Any, ClassVar, Final, Literal
 
-from pydantic import BaseModel, ConfigDict
-from shared.protocol.base import BaseRequest
+from pydantic import BaseModel, ConfigDict, Field
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "console"
 
@@ -23,6 +23,8 @@ class ConsoleRequest(BaseRequest[ConsoleResponse]):
 
     command: Literal["console"] = COMMAND_NAME
     input: str
-    thread_id: int | None = None
+    thread_id: int | None = Field(
+        default=None, validation_alias=THREAD_ID_ALIAS
+    )
     frame_index: int = 0
     response_type: ClassVar[Any] = ConsoleResponse

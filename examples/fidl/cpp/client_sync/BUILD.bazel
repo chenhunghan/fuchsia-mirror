@@ -9,6 +9,7 @@ load(
     "fx_component",
     "fx_component_manifest",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 
 # [END imports]
@@ -56,3 +57,16 @@ fx_component(
     deps = [":bin_packaged"],
 )
 # [END component]
+
+# [START package]
+# C++ sync client and server example package
+fx_package(
+    name = "echo-cpp-client-sync",
+    components = [
+        ":echo-client",
+        "//examples/fidl/cpp/server:echo-server",
+        "//examples/fidl/echo-realm:echo_realm",
+    ],
+    visibility = ["//examples/fidl/cpp:__pkg__"],
+)
+# [END package]

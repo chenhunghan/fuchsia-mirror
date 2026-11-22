@@ -172,8 +172,12 @@ impl<'a, T: AsRef<[u8]> + ?Sized>
                     // HACK: iproute2 sends invalid RTM_GETLINK message, where
                     // the header is limited to the
                     // interface family (1 byte) and 3 bytes of padding.
+                    // Some netlink clients also send just the 1-byte `struct
+                    // rtgenmsg` without padding, which Linux accepts.
                     Err(e) => {
-                        if buf.inner().len() == 4 && message_type == RTM_GETLINK {
+                        if (buf.inner().len() == 4 || buf.inner().len() == 1)
+                            && message_type == RTM_GETLINK
+                        {
                             let mut msg = LinkMessage::default();
                             msg.header.interface_family = buf.inner()[0].into();
                             msg

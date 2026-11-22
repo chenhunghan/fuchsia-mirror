@@ -78,12 +78,8 @@ fuchsia_test_package("factory-reset-handler-test") {
   ]
   test_specs = {
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
 
     # Scene Manager variant emits errors from failing to connecting to

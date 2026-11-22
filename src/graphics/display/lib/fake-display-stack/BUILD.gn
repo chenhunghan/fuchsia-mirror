@@ -74,6 +74,8 @@ test("fake-display-unittests-bin") {
   deps = [
     ":fake-display-stack",
     ":fake-sysmem-device-hierarchy",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_testing",
+    "//sdk/lib/async-loop-testing/cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",
     "//third_party/googletest:gmock",
@@ -155,6 +157,11 @@ source_set("fake-sysmem-device-hierarchy") {
     "//sdk/lib/component/outgoing/cpp",
     "//src/devices/testing/mock-ddk",
     "//src/sysmem/server:sysmem_common_srcs",
+
+    # sysmem_common_srcs leaves the choice of image-format implementation to
+    # the binaries that include it. The display stack uses the C++
+    # implementation.
+    "//zircon/system/ulib/image-format",
   ]
   deps = [
     "//sdk/lib/async:async-cpp",

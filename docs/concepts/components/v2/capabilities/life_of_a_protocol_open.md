@@ -18,7 +18,7 @@ At a high level these steps are:
 -   Component manager [binds to the component providing the protocol][binding]
     and connects the `Open` request to it
 
-## Constructing a component's namespace
+## Constructing a component's namespace {:#constructing-a-components-namespace}
 
 A [_namespace_][namespaces] is a set of directories that are offered to a
 component when it is started. Each directory is associated with a file system
@@ -72,7 +72,7 @@ handle for the parent directory. In this example, this means that a handle for
 `/example/data` will appear in the namespace, whereas if this path was used for
 a protocol capability `/example` would appear in the namespace.
 
-## A component opens a protocol
+## A component opens a protocol {:#a-component-opens-a-protocol}
 
 When a component wants to open a protocol it creates a new channel pair, and
 sends one end of this pair via an `Open` request over a channel in its
@@ -86,7 +86,7 @@ manager, it is component manager that will receive the server end of the new
 channel via the `Open` request sent by the component. Component manager then
 must identify the component providing the protocol over this channel.
 
-## The `Open` triggers capability routing
+## The Open triggers capability routing {:#the-open-triggers-capability-routing}
 
 To determine the component that provides the protocol over the channel,
 component manager must walk the tree of components, following `offer` and
@@ -208,7 +208,7 @@ protocol. It will start at `D`'s parent, `C`, and from there:
 Now that the provider component has been found, component manager can attempt to
 hand off the channel it received via the `Open` request.
 
-## Binding to a component and sending a protocol channel
+## Binding to a component and sending a protocol channel {:#binding-to-a-component-and-sending-a-protocol-channel}
 
 With the provider found the client component is now bound to the provider. This
 will cause the component to start running if it is currently stopped.
@@ -245,7 +245,7 @@ updates could break this chain at runtime, and it's entirely possible a
 component that claims to provide a capability in its manifest will fail to do so
 when run.
 
-### Offered vs ambient capabilities
+### Offered vs ambient capabilities {:#offered-vs-ambient-capabilities}
 
 Some capabilities are provided by the component framework itself, and can be
 directly used by (or will be implicitly provided to) components without their

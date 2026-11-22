@@ -3,12 +3,10 @@
 # found in the LICENSE file.
 
 misleading_characters = {
-    # smart quotes are misleading
-    r"“": '"',
-    r"”": '"',
-    # en and em dashes are misleading
-    r"–": "-",
-    r"—": "-",
+    "\u201c": ("left smart quote", '"'),
+    "\u201d": ("right smart quote", '"'),
+    "\u2013": ("en-dash", "-"),
+    "\u2014": ("em-dash", "-"),
 }
 
 _MISLEADING_CHARS_RE = "|".join(misleading_characters.keys())
@@ -22,8 +20,12 @@ def confusing_characters(ctx):
         for num, line in meta.affected_lines():
             for match in ctx.re.allmatches(_MISLEADING_CHARS_RE, line):
                 c = match.groups[0]
+                name, replacement = misleading_characters[c]
                 ctx.emit.finding(
-                    message = "Avoid using confusing characters: {}".format(c),
+                    message = (
+                        "Use ASCII {} instead of Unicode {} ({}), which looks " +
+                        "similar and can break copy-pasted code or commands."
+                    ).format(replacement, name, c),
                     level = "warning",
                     filepath = path,
                     line = num,
@@ -31,5 +33,5 @@ def confusing_characters(ctx):
                     # Columns are byte offsets, and all the misleading
                     # characters are multibyte in UTF-8.
                     end_col = match.offset + 1 + len(c),
-                    replacements = [misleading_characters[c]],
+                    replacements = [replacement],
                 )

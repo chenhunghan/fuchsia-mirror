@@ -133,6 +133,10 @@ class Device : public fidl::WireServer<fuchsia_hardware_pci::Device> {
   // @return A zx_status_t indicating success or failure of the operation.
   zx_status_t SetBusMastering(bool enabled) __TA_REQUIRES(dev_lock_);
 
+  // Publishes the device's child node, service instance, and composite spec once configuration
+  // has succeeded.
+  zx_status_t Publish() __TA_EXCLUDES(dev_lock_);
+
   // Requests a device unplug itself from its UpstreamNode and the Bus list.
   virtual void Unplug() __TA_EXCLUDES(dev_lock_);
   // TODO(cja): port void SetQuirksDone() __TA_REQUIRES(dev_lock_) { quirks_done_ = true; }

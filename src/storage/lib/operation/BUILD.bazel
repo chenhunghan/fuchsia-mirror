@@ -2,32 +2,64 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+fx_cc_library(
     name = "operation",
     srcs = [
         "operation.cc",
-        "unbuffered_operations_builder.cc",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "unbuffered_operations_builder.cc",
+        ],
+        "//conditions:default": [],
+    }),
     hdrs = [
         "operation.h",
         "operation_tree.h",
-        "unbuffered_operation.h",
-        "unbuffered_operations_builder.h",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "unbuffered_operation.h",
+            "unbuffered_operations_builder.h",
+        ],
+        "//conditions:default": [],
+    }),
+    implementation_deps = select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/fit",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//build/bazel/platforms:is_fuchsia_platform": [
+            "//sdk/lib/fdio",
+        ],
+        "//build/bazel/platforms:is_fuchsia_with_sdk_rules": [
+            # Bazel targets built with SDK rules (at an SDK API level rather
+            # than PLATFORM) cannot build //sdk/lib/fdio's transitive
+            # //sdk/lib/zxio dep and must use @fuchsia_sdk//pkg/fdio instead;
+            # GN only builds platform targets and uses //sdk/lib/fdio.
+            # @bazel2gn:skip
+            "@fuchsia_sdk//pkg/fdio",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/storage/blobfs:__subpackages__",
+        "//src/storage/f2fs/test:__pkg__",
+        "//src/storage/lib:__subpackages__",
+        "//src/storage/minfs:__pkg__",
     ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
+        "//sdk/lib/stdcompat",
         "//src/storage/lib/range",
         "//zircon/third_party/ulib/safemath",
-        "@fuchsia_sdk//pkg/fdio",
-        "@fuchsia_sdk//pkg/fit",
-        "@fuchsia_sdk//pkg/stdcompat",
-        "@fuchsia_sdk//pkg/zx",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }),
+    alwayslink = True,
 )

@@ -1281,12 +1281,6 @@ TEST(PtraceTest, PtraceEventStopWithSignalExit) {
       << " WTERMSIG(status) == " << WTERMSIG(status);
 }
 
-namespace {
-void GrandchildWithSigsuspendSigaction(int, siginfo_t *, void *) {
-  // NOP
-}
-}  // namespace
-
 // Test that traced child correctly resumes when signal needs to be delivered
 // because of a temporary mask.
 TEST(PtraceTest, GrandchildWithSigsuspend) {
@@ -1303,13 +1297,7 @@ TEST(PtraceTest, GrandchildWithSigsuspend) {
     ASSERT_EQ(0, sigemptyset(&child_mask));
     ASSERT_EQ(0, sigaddset(&child_mask, SIGCHLD));
 
-    sigset_t empty_mask;
-    ASSERT_EQ(0, sigemptyset(&empty_mask));
-    struct sigaction sa = {};
-    struct sigaction oldact = {};
-    sa.sa_sigaction = GrandchildWithSigsuspendSigaction;
-    sa.sa_mask = empty_mask;
-    ASSERT_EQ(0, sigaction(SIGCHLD, &sa, &oldact));
+    test_helper::ScopedSigAction scoped_sigchld(SIGCHLD, [](int) {});
     pid_t my_pid = getpid();
     ASSERT_EQ(0, sigprocmask(SIG_BLOCK, &child_mask, &old_mask));
     pid_t gc_pid = fork();
@@ -1727,30 +1715,22 @@ class SoftwareBreakpointTest : public ::testing::Test {
   // records the signal code and status. The old signal handler is saved and restored by
   // `RestoreSignalAction`.
   void CreatePipeAndSetSignalAction(int signum) {
-    ASSERT_TRUE(old_signum_and_sa_ == std::nullopt) << "Signal action already set";
+    ASSERT_FALSE(scoped_sigaction_.has_value()) << "Signal action already set";
 
     SAFE_SYSCALL(pipe2(pipefds_, O_CLOEXEC));
     pipe_write_fd_ = pipefds_[1];
 
-    struct sigaction new_sa, old_sa;
-    new_sa.sa_sigaction = [](int, siginfo_t *info, void *) {
-      ASSERT_THAT(write(pipe_write_fd_, ".", 1), SyscallSucceedsWithValue(1));
-      signal_code_ = info->si_code;
-      signal_status_ = info->si_status;
-    };
-    new_sa.sa_flags = SA_SIGINFO | SA_RESTART;
-
-    SAFE_SYSCALL(sigaction(signum, &new_sa, &old_sa));
-    old_signum_and_sa_ = std::make_pair(signum, old_sa);
+    scoped_sigaction_.emplace(
+        signum,
+        [](int, siginfo_t *info, void *) {
+          ASSERT_THAT(write(pipe_write_fd_, ".", 1), SyscallSucceedsWithValue(1));
+          signal_code_ = info->si_code;
+          signal_status_ = info->si_status;
+        },
+        SA_RESTART);
   }
 
-  void RestoreSignalAction() {
-    if (old_signum_and_sa_) {
-      auto [signum, sa] = old_signum_and_sa_.value();
-      SAFE_SYSCALL(sigaction(signum, &sa, nullptr));
-      old_signum_and_sa_.reset();
-    }
-  }
+  void RestoreSignalAction() { scoped_sigaction_.reset(); }
 
   void ClosePipe() {
     if (pipefds_[0] != -1) {
@@ -1781,7 +1761,7 @@ class SoftwareBreakpointTest : public ::testing::Test {
   pid_t child_pid_;
 
   std::optional<sigset_t> old_sigmask_;
-  std::optional<std::pair<int, struct sigaction>> old_signum_and_sa_;
+  std::optional<test_helper::ScopedSigAction> scoped_sigaction_;
   int pipefds_[2] = {-1, -1};
 };
 
@@ -2738,6 +2718,78 @@ TEST(PtraceTest, AttachAllowedWithCapSysPtrace) {
 
     ASSERT_THAT(ptrace(PTRACE_DETACH, parent_pid, nullptr, nullptr), SyscallSucceeds());
   });
+}
+
+void VerifyTraceeWaitidUid(pid_t tid, uid_t expected_uid) {
+  ASSERT_THAT(ptrace(PTRACE_SEIZE, tid, nullptr, nullptr), SyscallSucceeds());
+  ASSERT_THAT(ptrace(PTRACE_INTERRUPT, tid, nullptr, nullptr), SyscallSucceeds());
+
+  siginfo_t si = {};
+  ASSERT_THAT(waitid(P_PID, tid, &si, WSTOPPED | __WALL), SyscallSucceeds());
+  EXPECT_EQ(si.si_signo, SIGCHLD);
+  EXPECT_EQ(si.si_pid, tid);
+  EXPECT_EQ(si.si_uid, expected_uid);
+
+  ASSERT_THAT(ptrace(PTRACE_DETACH, tid, nullptr, nullptr), SyscallSucceeds());
+}
+
+TEST(PtraceTest, WaitidReportsPerThreadTraceeRealUid) {
+  if (!test_helper::HasCapability(CAP_SETUID) ||
+      !test_helper::HasCapabilityPermitted(CAP_SYS_PTRACE)) {
+    GTEST_SKIP() << "Needs CAP_SETUID and CAP_SYS_PTRACE capabilities.";
+  }
+
+  constexpr uid_t kLeaderUid = 1001;
+  constexpr uid_t kWorkerUid = 1002;
+
+  test_helper::ScopedPipe tid_pipe;
+  test_helper::ScopedPipe exit_pipe;
+
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  pid_t child_pid = helper.RunInForkedProcess([&] {
+    tid_pipe.ReadSide().reset();
+    exit_pipe.WriteSide().reset();
+    SAFE_SYSCALL(prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0));
+
+    test_helper::Rendezvous worker_ready = test_helper::MakeRendezvous();
+    pid_t worker_tid = 0;
+    std::thread worker([&, poker = std::move(worker_ready.poker)]() mutable {
+      worker_tid = static_cast<pid_t>(SAFE_SYSCALL(syscall(SYS_gettid)));
+      // Call the kernel syscall directly; libc's setuid() wrapper syncs UIDs across all threads.
+      SAFE_SYSCALL(syscall(SYS_setuid, kWorkerUid));
+      poker.poke();
+
+      char c = 0;
+      ASSERT_THAT(HANDLE_EINTR(read(exit_pipe.ReadSide().get(), &c, 1)),
+                  SyscallSucceedsWithValue(0));
+    });
+
+    worker_ready.holder.hold();
+    SAFE_SYSCALL(syscall(SYS_setuid, kLeaderUid));
+    ASSERT_THAT(HANDLE_EINTR(write(tid_pipe.WriteSide().get(), &worker_tid, sizeof(worker_tid))),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(sizeof(worker_tid))));
+    tid_pipe.WriteSide().reset();
+
+    char c = 0;
+    ASSERT_THAT(HANDLE_EINTR(read(exit_pipe.ReadSide().get(), &c, 1)), SyscallSucceedsWithValue(0));
+    worker.join();
+  });
+
+  tid_pipe.WriteSide().reset();
+  exit_pipe.ReadSide().reset();
+
+  pid_t worker_tid = 0;
+  ASSERT_THAT(HANDLE_EINTR(read(tid_pipe.ReadSide().get(), &worker_tid, sizeof(worker_tid))),
+              SyscallSucceedsWithValue(static_cast<ssize_t>(sizeof(worker_tid))));
+  ASSERT_GT(worker_tid, 0);
+
+  ASSERT_NO_FATAL_FAILURE(VerifyTraceeWaitidUid(child_pid, kLeaderUid));
+  ASSERT_NO_FATAL_FAILURE(VerifyTraceeWaitidUid(worker_tid, kWorkerUid));
+
+  exit_pipe.WriteSide().reset();
+  EXPECT_TRUE(helper.WaitForChildren());
 }
 
 class PtraceThreadTracerTest : public ::testing::Test {

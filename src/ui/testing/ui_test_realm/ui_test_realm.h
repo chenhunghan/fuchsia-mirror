@@ -9,6 +9,7 @@
 #include <lib/sys/component/cpp/testing/realm_builder_types.h>
 #include <lib/sys/cpp/service_directory.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 
@@ -49,6 +50,15 @@ class UITestRealm {
     REAL = 2,
   };
 
+  enum class RendererType : uint8_t {
+    // Send all rendering operations to void. Prefer for tests that do not
+    // inspect rendered pixel output.
+    NULL_RENDERER = 1,
+
+    // Use Vulkan for rendering.
+    VULKAN = 2,
+  };
+
   struct Config {
     // Specifies whether scene manager owns the root of the scene.
     // If false, then no scene owner will be present in the test realm.
@@ -71,6 +81,9 @@ class UITestRealm {
     // Specifies the entity that owns accessibility in the test realm, if any.
     // If std::nullopt, then no a11y services will be present in the test realm.
     std::optional<AccessibilityOwnerType> accessibility_owner;
+
+    // Renderer used by Scenic.
+    RendererType renderer = RendererType::VULKAN;
 
     // List of ui services required by components in the client subrealm.
     // UITestManager will route these services from the ui layer component to the

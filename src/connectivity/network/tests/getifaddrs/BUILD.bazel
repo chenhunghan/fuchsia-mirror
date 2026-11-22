@@ -1,0 +1,99 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":getifaddrs-tests"],
+    visibility = ["//src/connectivity/network/tests:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "test",
+    srcs = ["getifaddrs_test.cc"],
+    # TODO(https://fxbug.dev/570694755): In BUILD.gn, group("tests") listed
+    # `:getifaddrs-test($host_toolchain)`, which resolved to
+    # `fuchsia_test_component("getifaddrs-test")` rather than `test("test")`
+    # since https://fxrev.dev/660946; the unwired Linux host build fails on
+    # undeclared `if_nameindex` (`<linux/if.h>` vs `<net/if.h>`). Add a
+    # `host_test` once `getifaddrs_test.cc` compiles on Linux again.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/connectivity/network/tests:os",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_packaged",
+    testonly = True,
+    binary = ":test",
+    binary_name = "getifaddrs-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "test-driver_manifest",
+    testonly = True,
+    component_name = "test-driver",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/test-driver.cml",
+)
+
+fx_component(
+    name = "test-driver",
+    testonly = True,
+    compiled_manifest = ":test-driver_manifest",
+    deps = [":test_packaged"],
+)
+
+fx_component_manifest(
+    name = "getifaddrs-test_manifest",
+    testonly = True,
+    component_name = "getifaddrs-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/connectivity/network/testing/netemul/runner:default.shard",
+    ],
+    manifest = "meta/getifaddrs-test.cml",
+)
+
+fx_test_component(
+    name = "getifaddrs-test",
+    compiled_manifest = ":getifaddrs-test_manifest",
+)
+
+fx_package(
+    name = "getifaddrs-tests_package",
+    package_name = "getifaddrs-tests",
+    components = [":test-driver"],
+    subpackages = ["//src/connectivity/network/testing/netemul/configurable-netstack"],
+    test_components = [":getifaddrs-test"],
+)
+
+fx_test(
+    name = "getifaddrs-tests",
+    package = ":getifaddrs-tests_package",
+)

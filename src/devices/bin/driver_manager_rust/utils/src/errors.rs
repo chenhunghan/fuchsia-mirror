@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fidl_fuchsia_component_sandbox as fsandbox;
+use fidl_fuchsia_component_runtime as fruntime;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -13,21 +13,29 @@ pub enum UtilsError {
     UnexpectedCapabilityType(String, String),
     #[error("Unexpected routed type")]
     UnexpectedRoutedType,
-    #[error("Sandbox error: {0}")]
-    SandboxError(String),
+    #[error("fuchsia.component.runtime.Capabilities error: {0:?}")]
+    Capabilities(fruntime::CapabilitiesError),
+    #[error("Router error: {0:?}")]
+    Router(fruntime::RouterError),
+    #[error("The handle does not reference a usable dictionary: {0:?}")]
+    InvalidDictionary(fruntime::CapabilitiesError),
+    #[error("Routing {0} did not produce a capability")]
+    Unavailable(String),
+    #[error("Failed to connect to fuchsia.component.runtime.Capabilities: {0}")]
+    Connect(String),
     #[error("zx error: {0}")]
-    ZxStatus(zx::Status),
+    ZxStatus(#[from] zx::Status),
 }
 
-impl From<fsandbox::CapabilityStoreError> for UtilsError {
-    fn from(err: fsandbox::CapabilityStoreError) -> Self {
-        UtilsError::SandboxError(format!("CapabilityStoreError: {:?}", err))
+impl From<fruntime::CapabilitiesError> for UtilsError {
+    fn from(err: fruntime::CapabilitiesError) -> Self {
+        UtilsError::Capabilities(err)
     }
 }
 
-impl From<fsandbox::RouterError> for UtilsError {
-    fn from(err: fsandbox::RouterError) -> Self {
-        UtilsError::SandboxError(format!("RouterError: {:?}", err))
+impl From<fruntime::RouterError> for UtilsError {
+    fn from(err: fruntime::RouterError) -> Self {
+        UtilsError::Router(err)
     }
 }
 

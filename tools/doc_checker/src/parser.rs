@@ -23,9 +23,39 @@ pub(crate) fn element_from_event<'a>(
     let element = match event {
         // Start indicates the start of a Tag.
         Start(Tag::Heading { .. }) => {
+            let exact_line_num =
+                doc_context.file_text[..range.start].bytes().filter(|&b| b == b'\n').count() + 1;
+            doc_context.line_num = exact_line_num;
             let mut element = parse_tag_element(event, doc_context);
-            // update the line number in doc_context, returning the line_number of the element.
-            element.set_line_num(update_line_number(doc_context, span, newlines));
+            if let Element::Block(
+                Tag::Heading { ref mut id, .. },
+                ref mut elements,
+                ref mut doc_line,
+            ) = element
+            {
+                doc_line.line_num = exact_line_num;
+                for child in elements.iter_mut() {
+                    child.set_line_num(exact_line_num);
+                }
+                // Extract explicit anchors by hand: heading attributes are not enabled, and
+                // pulldown's attribute syntax does not accept DevSite's `{:#id}` form. Read the
+                // heading's source rather than its text events, which drop Markdown such as `__`
+                // inside an anchor, after removing an ATX closing sequence or setext underline.
+                let source = if span.trim_start().starts_with('#') {
+                    span.trim_end().trim_end_matches('#')
+                } else {
+                    span.trim_end().rsplit_once('\n').map_or("", |(content, _)| content)
+                };
+                if let Some((_, inner)) =
+                    source.trim_end().strip_suffix('}').and_then(|s| s.rsplit_once('{'))
+                {
+                    let inner = inner.trim().strip_prefix(':').unwrap_or(inner).trim();
+                    if inner.starts_with('#') {
+                        *id = Some(CowStr::Boxed(inner.to_string().into_boxed_str()));
+                    }
+                }
+            }
+            doc_context.line_num = exact_line_num + newlines.max(1);
             element
         }
         Start(Tag::Paragraph) => {

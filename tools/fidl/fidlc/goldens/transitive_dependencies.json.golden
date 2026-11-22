@@ -45,45 +45,12 @@
         "Baz"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
-        "line": 8,
+        "filename": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+        "line": 5,
         "column": 6,
         "length": 3
       },
       "deprecated": false,
-      "maybe_attributes": [
-        {
-          "name": "bindings_denylist",
-          "arguments": [
-            {
-              "name": "value",
-              "type": "string",
-              "value": {
-                "kind": "literal",
-                "value": "cpp",
-                "expression": "\"cpp\"",
-                "literal": {
-                  "kind": "string",
-                  "value": "cpp",
-                  "expression": "\"cpp\""
-                }
-              },
-              "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
-                "line": 7,
-                "column": 20,
-                "length": 5
-              }
-            }
-          ],
-          "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
-            "line": 7,
-            "column": 1,
-            "length": 25
-          }
-        }
-      ],
       "members": [
         {
           "type": {
@@ -102,8 +69,8 @@
           },
           "name": "g",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
-            "line": 9,
+            "filename": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+            "line": 6,
             "column": 5,
             "length": 1
           },

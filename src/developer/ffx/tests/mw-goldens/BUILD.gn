@@ -95,8 +95,6 @@ if (has_board) {
 
     # Only test on linux. Also check for has_board, since this test
     # cannot run on a configuration without a board.
-    # TODO(b/287779902) Also check that dual mode as subtools aren't enabled,
-    # because that produces an incomplete SDK.
     if (is_linux) {
       deps = [ ":ffx-golden-mw-list" ]
     }

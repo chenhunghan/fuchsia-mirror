@@ -58,9 +58,6 @@ rustc_binary(
     ],
 )
 
-# Kept in BUILD.gn above the sentinel because bazel2gn does not translate
-# resource() targets.
-# @bazel2gn:skip
 resource(
     name = "test_images",
     src = "testdata/simple_super.img.zstd",

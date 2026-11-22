@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/icu:third_party_icu_headers.bzl", "third_party_icu_headers")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":tz-version-parrot-cpp_test"],
+)
+
+# [START icudata_library]
+third_party_icu_headers(
+    name = "icu_headers",
+    headers = [
+        "third_party/icu/source/common/unicode/utypes.h",
+        "third_party/icu/source/i18n/unicode/timezone.h",
+    ],
+)
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["test.cc"],
+    gn_output_name = "tz_version_parrot_cpp",
+    deps = [
+        ":icu_headers",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/icu_data/cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+# [END icudata_library]
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "tz_version_parrot_cpp",
+)
+
+fx_component_manifest(
+    name = "tz_version_parrot_cpp_manifest",
+    testonly = True,
+    component_name = "tz_version_parrot_cpp",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/tz_version_parrot.cml",
+)
+
+# Depends on `tzdata-icu-44-le` which is a system capability.
+fx_test_component(
+    name = "tz_version_parrot_cpp",
+    compiled_manifest = ":tz_version_parrot_cpp_manifest",
+    test_type = "system",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "tz-version-parrot-cpp",
+    resources = [
+        "//examples/intl/tz_version_parrot:tz_version_parrot_resources",
+        # [START icudata_resource]
+        "//src/intl:icudtl",
+        # [END icudata_resource]
+    ],
+    test_components = [":tz_version_parrot_cpp"],
+)
+
+fx_test(
+    name = "tz-version-parrot-cpp_test",
+    package = ":tz-version-parrot-cpp",
+)

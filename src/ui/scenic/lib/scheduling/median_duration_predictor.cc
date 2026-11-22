@@ -38,4 +38,11 @@ void MedianDurationPredictor::InsertNewMeasurement(zx::duration duration) {
   prediction_ = sort_buffer[middle_index];
 }
 
+void MedianDurationPredictor::Reset(zx::duration initial_prediction) {
+  window_.fill(initial_prediction);
+  index_ = 0;
+  num_measurements_ = 0;
+  prediction_ = initial_prediction;
+}
+
 }  // namespace scheduling

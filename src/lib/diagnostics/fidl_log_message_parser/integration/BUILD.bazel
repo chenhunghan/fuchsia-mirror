@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fidl_log_message_parser-integration-test_test"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_log_message_parser_test_bin",
+    srcs = ["test.cc"],
+    # TODO(https://fxbug.dev/570694755): test.cc uses angled workspace-root
+    # `#include <src/...>`, which GN resolves via root `-I.` while Bazel only
+    # adds `-iquote .`.
+    copts = ["-I."],
+    # Uses Fuchsia-only FIDL bindings (<fidl/fuchsia.diagnostics/cpp/fidl.h>,
+    # <fidl/fuchsia.logger/cpp/fidl.h>) and //sdk/lib/component/incoming/cpp.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/diagnostics/fidl_log_message_parser",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fidl_log_message_parser_test_bin_packaged",
+    testonly = True,
+    binary = ":fidl_log_message_parser_test_bin",
+    binary_name = "fidl_log_message_parser_test_bin",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "component",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/test_component.cml",
+)
+
+fx_test_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    deps = [":fidl_log_message_parser_test_bin_packaged"],
+)
+
+fx_package(
+    name = "fidl_log_message_parser-integration-test",
+    testonly = True,
+    test_components = [":component"],
+)
+
+fx_test(
+    name = "fidl_log_message_parser-integration-test_test",
+    max_log_severity = "ERROR",
+    package = ":fidl_log_message_parser-integration-test",
+)

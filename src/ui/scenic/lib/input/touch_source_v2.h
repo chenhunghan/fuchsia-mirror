@@ -47,6 +47,7 @@ class TouchSourceV2 : public TouchSourceBase,
   // |TouchSourceBase|
   void CloseChannel(zx_status_t epitaph) override;
   void PushEvent(StreamId stream_id, AugmentedTouchEvent event) override;
+  void FlushPendingEvents() override;
 
  private:
   struct EventWithStamp {
@@ -55,7 +56,6 @@ class TouchSourceV2 : public TouchSourceBase,
   };
 
   void QueueEvent(fuchsia_ui_pointer::TouchEvent event);
-  void FlushPendingEvents();
 
   fidl::ServerBinding<fuchsia_ui_pointer::TouchSourceV2> binding_;
 

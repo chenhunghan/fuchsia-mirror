@@ -21,7 +21,7 @@ TEST(PrintTest, Int32) {
 }
 
 TEST(PrintTest, Uint64) {
-  int64_t a = 0;
+  uint64_t a = 0;
 
   ASSERT_EQ(a, 0);
 }

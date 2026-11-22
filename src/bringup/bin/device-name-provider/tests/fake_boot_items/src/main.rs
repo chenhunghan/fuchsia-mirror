@@ -33,7 +33,7 @@ async fn handle_items_request(mut stream: ItemsRequestStream) {
     while let Some(event) = stream.try_next().await.expect("failed to serve items service") {
         match event {
             ItemsRequest::Get { type_, extra, responder } => {
-                let (result, len) = if type_ != zbi::Type::DrvMacAddress as u32 || extra != 0 {
+                let (result, len) = if type_ != zbi::Type::DRV_MAC_ADDRESS.as_raw() || extra != 0 {
                     (None, 0)
                 } else {
                     let vmo = zx::Vmo::create(6).unwrap();

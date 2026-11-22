@@ -94,10 +94,10 @@ success("Uint64Uint32Uint16Uint8") {
     },
 }
 
-success("InlineXUnionInStruct") {
-    value = TestInlineXUnionInStruct{
+success("InlineUnionInStruct") {
+    value = TestInlineUnionInStruct{
         before: "before",
-        xu: SampleXUnion{
+        xu: SampleUnion{
             u: 0xdeadbeef,
         },
         after: "after",
@@ -107,7 +107,7 @@ success("InlineXUnionInStruct") {
             0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "before" length
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // "before" presence
 
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00, // num bytes + num handles + inlined
 
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "after" length
@@ -122,10 +122,10 @@ success("InlineXUnionInStruct") {
     },
 }
 
-success("OptionalXUnionInStructAbsent") {
-    value = TestOptionalXUnionInStruct{
+success("OptionalUnionInStructAbsent") {
+    value = TestOptionalUnionInStruct{
         before: "before",
-        // no SampleXUnion
+        // no SampleUnion
         after: "after",
     },
     bytes = {
@@ -133,7 +133,7 @@ success("OptionalXUnionInStructAbsent") {
             0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "before" length
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // "before" presence
 
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // num bytes + num handles + not inlined
 
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "after" length
@@ -148,10 +148,10 @@ success("OptionalXUnionInStructAbsent") {
     },
 }
 
-success("OptionalXUnionInStructPresent") {
-    value = TestOptionalXUnionInStruct{
+success("OptionalUnionInStructPresent") {
+    value = TestOptionalUnionInStruct{
         before: "before",
-        xu: SampleXUnion{
+        xu: SampleUnion{
             u: 0xdeadbeef,
         },
         after: "after",
@@ -161,7 +161,7 @@ success("OptionalXUnionInStructPresent") {
             0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "before" length
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // "before" presence
 
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00, // num bytes + num handles + inlined
 
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "after" length
@@ -176,14 +176,14 @@ success("OptionalXUnionInStructPresent") {
     },
 }
 
-decode_failure("OptionalXUnionInStructPresentInvalidNumBytes") {
-    type = TestOptionalXUnionInStruct,
+decode_failure("OptionalUnionInStructPresentInvalidNumBytes") {
+    type = TestOptionalUnionInStruct,
     bytes = {
         v2 = [
             0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "before" length
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // "before" presence
 
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // num bytes (invalid) + num handles + not inlined
 
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "after" length
@@ -192,8 +192,8 @@ decode_failure("OptionalXUnionInStructPresentInvalidNumBytes") {
             // secondary object 1: "before"
             'b', 'e', 'f', 'o', 'r', 'e', 0x00, 0x00,
 
-            // secondary object 2: xunion content
-            0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00, // xunion envelope content (0xdeadbeef) + padding
+            // secondary object 2: union content
+            0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x00, 0x00, // union envelope content (0xdeadbeef) + padding
 
             // secondary object 3: "after"
             'a', 'f', 't', 'e', 'r', 0x00, 0x00, 0x00,
@@ -202,14 +202,14 @@ decode_failure("OptionalXUnionInStructPresentInvalidNumBytes") {
     err = INVALID_NUM_BYTES_IN_ENVELOPE,
 }
 
-decode_failure("OptionalXUnionInStructPresentInvalidNumHandles") {
-    type = TestOptionalXUnionInStruct,
+decode_failure("OptionalUnionInStructPresentInvalidNumHandles") {
+    type = TestOptionalUnionInStruct,
     bytes = {
         v2 = [
             0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "before" length
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // "before" presence
 
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0xef, 0xbe, 0xad, 0xde, 0x01, 0x00, 0x01, 0x00, // num bytes + num handles (invalid) + inlined
 
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // "after" length
@@ -225,11 +225,11 @@ decode_failure("OptionalXUnionInStructPresentInvalidNumHandles") {
     err = INVALID_NUM_HANDLES_IN_ENVELOPE,
 }
 
-success("XUnionInTableXUnionAbsent") {
-    value = TestXUnionInTable{
-        value: XUnionInTable{
+success("UnionInTableUnionAbsent") {
+    value = TestUnionInTable{
+        value: UnionInTable{
             before: "before",
-            // no SampleXUnion
+            // no SampleUnion
             after: "after",
         },
     },
@@ -242,7 +242,7 @@ success("XUnionInTableXUnionAbsent") {
             // secondary object 1: vector data
             // vector[0]: envelope<string before>
             0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
-            // vector[1]: envelope<SampleXUnion xu>
+            // vector[1]: envelope<SampleUnion xu>
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // zero envelope
             // vector[2]: envelope<string after>
             0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
@@ -264,11 +264,11 @@ success("XUnionInTableXUnionAbsent") {
     },
 }
 
-success("XUnionInTableXUnionPresent") {
-    value = TestXUnionInTable{
-        value: XUnionInTable{
+success("UnionInTableUnionPresent") {
+    value = TestUnionInTable{
+        value: UnionInTable{
             before: "before",
-            xu: SampleXUnion{
+            xu: SampleUnion{
                 u: 0xdeadbeef,
             },
             after: "after",
@@ -283,7 +283,7 @@ success("XUnionInTableXUnionPresent") {
             // secondary object 1: vector data
             // vector[0]: envelope<string before>
             0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
-            // vector[1]: envelope<SampleXUnion xu>
+            // vector[1]: envelope<SampleUnion xu>
             0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
             // vector[2]: envelope<string after>
             0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
@@ -295,8 +295,8 @@ success("XUnionInTableXUnionPresent") {
             // secondary object 3: "before"
             'b', 'e', 'f', 'o', 'r', 'e', 0x00, 0x00, // "before"
 
-            // secondary object 4: xunion
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            // secondary object 4: union
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00, // value + num handles + inlined
 
             // secondary object 5: "after" length + pointer
@@ -309,8 +309,8 @@ success("XUnionInTableXUnionPresent") {
     },
 }
 
-decode_failure("XUnionInTableXUnionPresentInvalidNumBytes") {
-    type = TestXUnionInTable,
+decode_failure("UnionInTableUnionPresentInvalidNumBytes") {
+    type = TestUnionInTable,
     bytes = {
         v2 = [
             // primary object
@@ -320,7 +320,7 @@ decode_failure("XUnionInTableXUnionPresentInvalidNumBytes") {
             // secondary object 1: vector data
             // vector[0]: envelope<string before>
             0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
-            // vector[1]: envelope<SampleXUnion xu>
+            // vector[1]: envelope<SampleUnion xu>
             0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size (invalid) + handle count
             // vector[2]: envelope<string after>
             0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // size + handle count
@@ -332,8 +332,8 @@ decode_failure("XUnionInTableXUnionPresentInvalidNumBytes") {
             // secondary object 3: "before"
             'b', 'e', 'f', 'o', 'r', 'e', 0x00, 0x00, // "before"
 
-            // secondary object 4: xunion
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // xunion discriminator + padding
+            // secondary object 4: union
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // union discriminator + padding
             0xef, 0xbe, 0xad, 0xde, 0x00, 0x00, 0x01, 0x00, // value + num handles + inlined
 
             // secondary object 5: "after" length + pointer
@@ -347,9 +347,9 @@ decode_failure("XUnionInTableXUnionPresentInvalidNumBytes") {
     err = INVALID_NUM_BYTES_IN_ENVELOPE,
 }
 
-success("StrictXUnion") {
-    value = TestStrictXUnionInStruct{
-        xu: SampleStrictXUnion{
+success("StrictUnion") {
+    value = TestStrictUnionInStruct{
+        xu: SampleStrictUnion{
             u: 0xdeadbeef,
         },
     },
@@ -516,10 +516,10 @@ success("Optionals") {
         t: TableWithEmptyStruct{
             s: EmptyStruct{},
         },
-        xu: XUnionWithEmptyStruct{
+        xu: FlexibleUnionWithEmptyStruct{
             s: EmptyStruct{},
         },
-        xu2: XUnionWithEmptyStruct{
+        xu2: FlexibleUnionWithEmptyStruct{
             s: EmptyStruct{},
         },
         u: UnionWithEmptyStruct{
@@ -535,9 +535,9 @@ success("Optionals") {
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // EmptyStruct? present
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // TableWithEmptyStruct length 1
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //   present
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // XUnionWithEmptyStruct ordinal
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // FlexibleUnionWithEmptyStruct ordinal
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, //   value, 0 handles, inline
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // XUnionWithEmptyStruct? ordinal
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // FlexibleUnionWithEmptyStruct? ordinal
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, //   value, 0 handles, inline
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // UnionWithEmptyStruct ordinal
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, //   value, 0 handles, inline

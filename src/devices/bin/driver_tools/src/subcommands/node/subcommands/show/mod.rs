@@ -23,6 +23,7 @@ use std::io::Write;
 pub struct NodeDetails {
     pub name: String,
     pub moniker: String,
+    pub disambiguator: String,
     pub owner: String,
     pub state: String,
     pub host_koid: String,
@@ -170,9 +171,12 @@ fn make_node_details(node: fdd::NodeInfo) -> NodeDetails {
         })
         .collect();
 
+    let disambiguator = node.disambiguator.unwrap_or_default();
+
     NodeDetails {
         name: name.to_string(),
         moniker,
+        disambiguator,
         owner,
         state,
         host_koid: node.driver_host_koid.map(|k| format!("{}", k)).unwrap_or_default(),
@@ -219,6 +223,8 @@ fn print_table(node: fdd::NodeInfo, with_style: bool, writer: &mut dyn Write) ->
     let (_, name) = moniker.rsplit_once('.').unwrap_or(("", &moniker));
     let (state, owner) =
         common::get_state_and_owner(node.quarantined, &node.bound_driver_url, with_style);
+
+    let disambiguator = node.disambiguator.unwrap_or_default();
 
     let bus_topo = node
         .bus_topology
@@ -305,6 +311,7 @@ fn print_table(node: fdd::NodeInfo, with_style: bool, writer: &mut dyn Write) ->
 
     table.add_row(row!(r->"Name:", name));
     table.add_row(row!(r->"Moniker:", moniker));
+    table.add_row(row!(r->"Disambiguator:", disambiguator));
     let topo_path = node.topological_path.unwrap_or_default();
     table.add_row(row!(r->"Topological Path:", topo_path));
     table.add_row(row!(r->"Owner:", owner));
@@ -349,4 +356,44 @@ fn print_table(node: fdd::NodeInfo, with_style: bool, writer: &mut dyn Write) ->
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_node_info() -> fdd::NodeInfo {
+        fdd::NodeInfo {
+            moniker: Some("dev.sys.platform.pci".to_string()),
+            bound_driver_url: Some("fuchsia-boot:///pci#meta/pci.cm".to_string()),
+            quarantined: Some(false),
+            bus_topology: Some(vec![fdf::BusInfo {
+                bus: Some(fdf::BusType::Pci),
+                address: Some(fdf::DeviceAddress::ArrayIntValue(vec![0x00, 0x1f, 0x00])),
+                address_stability: Some(fdf::DeviceAddressStability::Stable),
+                ..Default::default()
+            }]),
+            disambiguator: Some("fedcba9876543210".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_make_node_details_populates_disambiguator() {
+        let details = make_node_details(sample_node_info());
+        assert_eq!(details.moniker, "dev.sys.platform.pci");
+        assert_eq!(details.disambiguator, "fedcba9876543210");
+        assert_eq!(details.bus_topology.len(), 1);
+    }
+
+    #[fuchsia::test]
+    fn test_print_table_includes_disambiguator() {
+        let mut output = Vec::new();
+        print_table(sample_node_info(), false, &mut output).unwrap();
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("Disambiguator:"), "{}", rendered);
+        assert!(rendered.contains("fedcba9876543210"), "{}", rendered);
+        assert!(rendered.contains("Bus Topology:"), "{}", rendered);
+        assert!(!rendered.contains("Bus Path:"), "{}", rendered);
+    }
 }

@@ -2,9 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-inspect-tests"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fuchsia-inspect_host_test"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
 
 alias(
     name = "rust",
@@ -96,4 +112,15 @@ rustc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+fx_unittest_package(
+    name = "fuchsia-inspect-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":fuchsia-inspect_test"],
+)
+
+wrap_host_rust_test(
+    name = "fuchsia-inspect_host_test",
+    binary_name = "fuchsia-inspect_test",
 )

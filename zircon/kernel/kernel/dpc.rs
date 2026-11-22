@@ -14,7 +14,7 @@ use crate::kernel::percpu::PerCpu;
 use crate::kernel::scheduler_state::SchedulerStateBaseProfile;
 use crate::kernel::thread::{
     AutoPreemptDisabler, DEFAULT_PRIORITY, HIGH_PRIORITY, ThreadLockGuard, ThreadPtr,
-    create_with_priority,
+    create_with_priority, thread_lock_guard,
 };
 use crate::kernel::types::{INVALID_CPU, cpu_num_t, cpu_num_to_mask};
 use crate::platform_rs::timer::{DurationMono, InstantMono};
@@ -26,7 +26,7 @@ use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, S
 use ksync::{KMutex, LockToken, PhantomMutex};
 use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
-use zx_types::{ZX_MAX_NAME_LEN, zx_instant_mono_t, zx_status_t};
+use zx_types::{ZX_MAX_NAME_LEN, zx_status_t};
 
 const DPC_THREAD_PRIORITY: i32 = HIGH_PRIORITY;
 
@@ -393,15 +393,17 @@ impl DpcRunner {
     pub fn init_for_current_cpu(&'static self) {
         if cfg!(debug_assertions) {
             let current_thread = crate::kernel::thread::current_get();
-            // SAFETY: `current_thread` is a valid, non-null pointer to the running `Thread`,
-            // no chain lock transaction is active on this CPU, and the guard is stack-pinned
-            // and dropped immediately.
-            ksync::lock!(let guard = unsafe {
-                ThreadLockGuard::lock(
-                    current_thread,
-                    crate::clt_tag!("DpcRunner::InitForCurrentCpu"),
-                )
-            });
+            thread_lock_guard!(
+                guard,
+                // SAFETY: `current_thread` is the live running `Thread` (stays live past this
+                // scope), no chain lock transaction is active on this CPU, and we do not block.
+                unsafe {
+                    ThreadLockGuard::target(
+                        current_thread,
+                        crate::clt_tag!("DpcRunner::InitForCurrentCpu"),
+                    )
+                }
+            );
             let mask = guard.scheduler_state().hard_affinity();
             debug_assert!(mask.count_ones() == 1, "mask {mask:#x}");
         }
@@ -570,28 +572,7 @@ fn dpc_init(_level: init::LkInitLevel) {
 
 init::lk_init_hook!(dpc, dpc_init, init::LK_INIT_LEVEL_THREADING);
 
-// FFI entry points for C++ callers in `<kernel/dpc.h>`.
-
-/// Initializes `runner` for the current CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_dpc_runner_init_for_current_cpu(runner: &'static DpcRunner) {
-    runner.init_for_current_cpu();
-}
-
-/// Shuts down `runner`, waiting up to `deadline` for its worker threads to join.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_dpc_runner_shutdown(
-    runner: &DpcRunner,
-    deadline: zx_instant_mono_t,
-) -> zx_status_t {
-    Status::result_into_raw(runner.shutdown(InstantMono(deadline)))
-}
-
-/// Moves queued `Dpc`s from `source` to `runner`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_dpc_runner_transition_off_cpu(runner: &DpcRunner, source: &DpcRunner) {
-    runner.transition_off_cpu(source);
-}
+// FFI entry point for C++ callers in `<kernel/dpc.h>`.
 
 /// Enqueues `dpc` onto the current CPU's `DpcRunner` in queue `queue_type`.
 ///

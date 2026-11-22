@@ -13,7 +13,6 @@
 #include "src/developer/forensics/feedback/reboot_log/graceful_shutdown_info.h"
 #include "src/developer/forensics/feedback/reboot_log/hw_shutdown_reason.h"
 #include "src/developer/forensics/feedback/reboot_log/zircon_shutdown_reason.h"
-#include "src/developer/forensics/feedback/system_time_tracker.h"
 #include "src/developer/forensics/feedback_data/constants.h"
 #include "src/developer/forensics/utils/redact/redactor.h"
 #include "src/lib/files/file.h"
@@ -352,7 +351,7 @@ void PersistDlog(const std::optional<std::string>& dlog, RedactorBase* redactor,
 RebootLog RebootLog::ParseRebootLog(const std::string& zircon_reboot_log_path,
                                     const std::string& graceful_shutdown_info_path,
                                     const std::string& legacy_graceful_reboot_log_path,
-                                    const std::string& previous_system_time_path,
+                                    const std::optional<zx::time_boot> last_log_timestamp,
                                     const std::string& previous_boot_kernel_log_path,
                                     const std::string& final_shutdown_info_path,
                                     const bool not_a_fdr,
@@ -363,7 +362,8 @@ RebootLog RebootLog::ParseRebootLog(const std::string& zircon_reboot_log_path,
     if (files::ReadFileToString(final_shutdown_info_path, &content)) {
       // We shouldn't need the reboot log after the first component instance because it's only
       // used for reboot reports.
-      return RebootLog(FinalShutdownInfo::FromJson(content), /*reboot_log_str=*/"");
+      return RebootLog(FinalShutdownInfo::FromJson(content), /*reboot_log_str=*/"",
+                       /*uptime_from_logs=*/false);
     }
   }
 
@@ -376,22 +376,28 @@ RebootLog RebootLog::ParseRebootLog(const std::string& zircon_reboot_log_path,
   ExtractZirconRebootInfo(zircon_reboot_log_path, &hw_reason, &zircon_reason, &zircon_reboot_log,
                           &last_boot_uptime, &last_boot_runtime, &critical_process);
 
-  std::optional<zx::duration> fallback_uptime;
-  std::optional<zx::duration> fallback_runtime;
-
-  if (!last_boot_uptime.has_value() && !last_boot_runtime.has_value()) {
-    if (const std::optional<SystemTime> system_time =
-            GetPreviousSystemTime(previous_system_time_path);
-        system_time.has_value()) {
-      last_boot_uptime = system_time->uptime;
-      last_boot_runtime = system_time->runtime;
-      fallback_uptime = system_time->uptime;
-      fallback_runtime = system_time->runtime;
-    }
-  }
-
   const std::optional<GracefulShutdownInfo> graceful_info =
       ExtractGracefulShutdownInfo(graceful_shutdown_info_path, legacy_graceful_reboot_log_path);
+
+  std::optional<zx::duration> fallback_uptime;
+  std::optional<zx::duration> fallback_runtime;
+  bool uptime_from_logs = false;
+
+  if (!last_boot_uptime.has_value() && !last_boot_runtime.has_value()) {
+    if (graceful_info.has_value() &&
+        (graceful_info->uptime.has_value() || graceful_info->runtime.has_value())) {
+      last_boot_uptime = graceful_info->uptime;
+      last_boot_runtime = graceful_info->runtime;
+      fallback_uptime = graceful_info->uptime;
+      fallback_runtime = graceful_info->runtime;
+    } else if (last_log_timestamp.has_value()) {
+      // The last persisted log message precedes the reboot, so its timestamp only approximates the
+      // uptime, and the logs don't contain the runtime.
+      last_boot_uptime = zx::duration(last_log_timestamp->get());
+      fallback_uptime = last_boot_uptime;
+      uptime_from_logs = true;
+    }
+  }
 
   FinalShutdownInfo final_shutdown_info = FinalShutdownInfo::MakeFinalShutdownInfo(
       hw_reason, zircon_reason, graceful_info, not_a_fdr, supports_user_initiated_poweroffs,
@@ -413,11 +419,14 @@ RebootLog RebootLog::ParseRebootLog(const std::string& zircon_reboot_log_path,
     }
   }
 
-  return RebootLog(final_shutdown_info, reboot_log);
+  return RebootLog(final_shutdown_info, reboot_log, uptime_from_logs);
 }
 
-RebootLog::RebootLog(FinalShutdownInfo final_shutdown_info, std::string reboot_log_str)
-    : final_shutdown_info_(std::move(final_shutdown_info)), reboot_log_str_(reboot_log_str) {}
+RebootLog::RebootLog(FinalShutdownInfo final_shutdown_info, std::string reboot_log_str,
+                     const bool uptime_from_logs)
+    : final_shutdown_info_(std::move(final_shutdown_info)),
+      reboot_log_str_(std::move(reboot_log_str)),
+      uptime_from_logs_(uptime_from_logs) {}
 
 }  // namespace feedback
 }  // namespace forensics

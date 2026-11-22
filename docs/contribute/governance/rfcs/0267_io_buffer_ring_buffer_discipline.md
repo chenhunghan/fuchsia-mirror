@@ -16,7 +16,7 @@ concern but not the primary focus of this RFC.
 ## Summary
 
 One of the primary use cases for introducing IO Buffers was to support
-[more efficient logging](0218_io_buffer.md#system_logging). This RFC introduces
+[more efficient logging](0218_io_buffer.md#system-logging). This RFC introduces
 a new ring buffer discipline with the goal of improving CPU usage and scheduling
 pressure by the logging system.
 

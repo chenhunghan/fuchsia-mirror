@@ -14,7 +14,10 @@
 #include <zircon/status.h>
 
 #include <algorithm>
+#include <atomic>
 #include <future>
+#include <optional>
+#include <thread>
 #include <vector>
 
 #include <fbl/ref_ptr.h>
@@ -51,6 +54,14 @@ class VmoFile final : public fs::VmoFile {
   explicit VmoFile(zx::vmo vmo)
       : fs::VmoFile(std::move(vmo), kMaxBlobImageSize, /*writable*/ true) {}
 
+  /// Returns a future that resolves as soon as the next Sync operation begins.
+  std::future<void> GetSyncStartedFuture() {
+    std::promise<void> promise;
+    std::future<void> future = promise.get_future();
+    sync_started_ = std::move(promise);
+    return future;
+  }
+
   /// Returns a promise that the next Sync operation will resolve with the given value.
   std::promise<zx_status_t> GetSyncPromise() {
     std::promise<zx_status_t> promise;
@@ -67,10 +78,15 @@ class VmoFile final : public fs::VmoFile {
   }
 
   void Sync(SyncCallback closure) final {
+    if (sync_started_) {
+      sync_started_->set_value();
+      sync_started_.reset();
+    }
     closure(sync_future_ ? sync_future_->get() : ZX_OK);
     sync_future_.reset();
   }
 
+  std::optional<std::promise<void>> sync_started_;
   std::optional<std::future<zx_status_t>> sync_future_;
 
  protected:
@@ -209,6 +225,10 @@ class FastbootFlashBlobTest : public FastbootDownloadTest {
   }
 
   fidl::ClientEnd<fio::Directory> TakeSvcClient() { return std::move(svc_client_); }
+
+  std::future<void> GetSyncStartedFuture() {
+    return recovery_server_->image_file_->GetSyncStartedFuture();
+  }
 
   std::promise<zx_status_t> GetSyncPromise() {
     return recovery_server_->image_file_->GetSyncPromise();
@@ -592,6 +612,37 @@ TEST_F(FastbootFlashBlobTest, SyncErrorDoesNotPreventRebootMoreThanOnce) {
   ret = fastboot.ProcessPacket(&transport);
   ASSERT_TRUE(ret.is_ok()) << ret.status_string();
   ASSERT_TRUE(shutdown_called());
+}
+
+TEST_F(FastbootFlashBlobTest, DestructorJoinsPendingSync) {
+  std::future<void> sync_started = GetSyncStartedFuture();
+  std::promise<zx_status_t> sync_promise = GetSyncPromise();
+  std::promise<void> destroy_entering;
+  std::atomic<bool> destroyed = false;
+
+  const std::vector<uint8_t> image = SparseImageBuilder(kBlockSize).FillChunk(1, 0xFF).Build();
+  std::thread worker([this, &image, &sync_started, &destroy_entering, &destroyed]() {
+    {
+      Fastboot fastboot(kMaxDownloadSize, TakeSvcClient());
+      DownloadData(fastboot, image);
+
+      TestTransport transport;
+      transport.AddInPacket("flash:blob");
+      zx::result ret = fastboot.ProcessPacket(&transport);
+      EXPECT_TRUE(ret.is_ok()) << ret.status_string();
+
+      sync_started.wait();
+      destroy_entering.set_value();
+    }
+    destroyed.store(true);
+  });
+
+  destroy_entering.get_future().wait();
+  EXPECT_FALSE(destroyed.load());
+
+  sync_promise.set_value(ZX_ERR_IO);
+  worker.join();
+  EXPECT_TRUE(destroyed.load());
 }
 
 }  // namespace

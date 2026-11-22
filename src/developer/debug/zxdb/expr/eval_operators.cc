@@ -921,7 +921,17 @@ void EvalBinaryOperator(const fxl::RefPtr<EvalContext>& context, const ExprValue
           IMPLEMENT_UNARY_INTEGER_OP(!, uint8_t, uint16_t, uint32_t, uint64_t);
           break;
         case MathRealm::kFloat:
-          IMPLEMENT_UNARY_FLOAT_OP(!);
+          switch (value.data().size()) {
+            case sizeof(float):
+              result = ExprValue(value.GetAs<float>() == 0.0f);
+              break;
+            case sizeof(double):
+              result = ExprValue(value.GetAs<double>() == 0.0);
+              break;
+            default:
+              result = Err("Unsupported size for unary operator '%s'.", op_token.value().c_str());
+              break;
+          }
           break;
       }
       break;

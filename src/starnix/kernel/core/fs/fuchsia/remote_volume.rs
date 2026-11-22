@@ -4,6 +4,7 @@
 
 use crate::fs::fuchsia::RemoteFs;
 use crate::task::CurrentTask;
+use crate::task::container_namespace::NamespaceNodePurpose;
 use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
 use crate::vfs::{
     CacheMode, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsStr, RenameContext,
@@ -45,6 +46,10 @@ impl<I: SyncIo> FileSystemOps for RemoteVolume<I> {
 
     fn name(&self) -> &'static FsStr {
         "remotevol".into()
+    }
+
+    fn is_storage_backed(&self) -> bool {
+        true
     }
 
     fn uses_external_node_ids(&self) -> bool {
@@ -316,7 +321,12 @@ pub fn new_remote_vol(
 
     let open_flags =
         fio::PERM_READABLE | fio::Flags::FLAG_MAYBE_CREATE | fio::Flags::PROTOCOL_DIRECTORY;
-    let (root, subdir) = kernel.open_ns_dir(key_location, open_flags)?;
+    let (root, subdir) = kernel.open_ns_dir(
+        current_task,
+        key_location,
+        open_flags,
+        NamespaceNodePurpose::VolumeKeys,
+    )?;
 
     let open_rights = fio::PERM_READABLE | fio::PERM_WRITABLE;
     let subdir = if subdir.is_empty() { ".".to_string() } else { subdir };
@@ -414,7 +424,7 @@ pub fn new_remote_vol(
     let rights = fio::PERM_READABLE | fio::PERM_WRITABLE;
 
     let (remotefs, root_node, info, node_id) =
-        RemoteFs::new(root.into_channel(), rights, "remotevol")?;
+        RemoteFs::new(root.into_channel(), rights, &options, "remotevol")?;
 
     let use_remote_ids = remotefs.use_remote_ids();
     let remotevol = RemoteVolume { remotefs, exposed_dir_proxy, crypt_service };
@@ -450,9 +460,13 @@ mod test {
         let device = fixture.fs().device();
 
         let crashed_device = spawn_kernel_and_run(async move |current_task| {
-            let (remotefs, root_node, info, node_id) =
-                RemoteFs::new(client, fio::PERM_READABLE | fio::PERM_WRITABLE, "remotevol")
-                    .expect("RemoteFs::new failed");
+            let (remotefs, root_node, info, node_id) = RemoteFs::new(
+                client,
+                fio::PERM_READABLE | fio::PERM_WRITABLE,
+                &FileSystemOptions::default(),
+                "remotevol",
+            )
+            .expect("RemoteFs::new failed");
             let remotevol = RemoteVolume {
                 remotefs,
                 exposed_dir_proxy: fio::DirectorySynchronousProxy::new(zx::Channel::create().0),

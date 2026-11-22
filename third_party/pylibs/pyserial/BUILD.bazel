@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Third-party license metadata is Bazel-only; GN tracks licensing via README.fuchsia.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:BSD-3-Clause"],
+    license_text = "src/LICENSE.txt",
+)
+
+py_library(
+    name = "pyserial",
+    srcs = [
+        "src/serial/__init__.py",
+        "src/serial/__main__.py",
+        "src/serial/rfc2217.py",
+        "src/serial/rs485.py",
+        "src/serial/serialposix.py",
+        "src/serial/serialutil.py",
+        "src/serial/serialwin32.py",
+        "src/serial/threaded/__init__.py",
+        "src/serial/tools/__init__.py",
+        "src/serial/tools/hexlify_codec.py",
+        "src/serial/tools/list_ports.py",
+        "src/serial/tools/list_ports_common.py",
+        "src/serial/tools/list_ports_linux.py",
+        "src/serial/tools/list_ports_osx.py",
+        "src/serial/tools/list_ports_posix.py",
+        "src/serial/tools/list_ports_windows.py",
+        "src/serial/tools/miniterm.py",
+        "src/serial/urlhandler/__init__.py",
+        "src/serial/urlhandler/protocol_alt.py",
+        "src/serial/urlhandler/protocol_cp2110.py",
+        "src/serial/urlhandler/protocol_hwgrep.py",
+        "src/serial/urlhandler/protocol_loop.py",
+        "src/serial/urlhandler/protocol_rfc2217.py",
+        "src/serial/urlhandler/protocol_socket.py",
+        "src/serial/urlhandler/protocol_spy.py",
+        "src/serial/win32.py",
+    ],
+    imports = ["src"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

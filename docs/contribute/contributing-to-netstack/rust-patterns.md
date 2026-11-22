@@ -5,7 +5,10 @@ This document enumerates patterns that the netstack team has found to produce:
 - Code that is more resilient to behavior change at a distance.
 - Code that is more easily reviewed with less "working memory".
 
-These guidelines are considered additive to the [Rust API rubric][api-rust].
+These guidelines are considered additive to the
+[Google Rust Style Guide][google-rust-style] and the
+[Rust API rubric][api-rust]. Where this document conflicts with the Google Rust
+Style Guide, the Google Rust Style Guide takes precedence.
 
 The patterns suggested here provide centralized guidance and knowledge.
 Contributions of all types - edits, additions, removals, etc. - are
@@ -65,11 +68,11 @@ assert_eq!(n, payload.len());
 let _: Foo = foo::do_work(foo, bar, baz);
 
 // When destructuring tuples, type the fields not in use.
-let (foo, _) : (_, Bar) = foo::foo_and_bar();
+let (foo, _): (_, Bar) = foo::foo_and_bar();
 
 // When destructuring named structs, no annotations are necessary, the field's
 // type is encoded by the struct.
-let Foo{ fi, fo: _ } =  foo::do_work(foo, bar, baz);
+let Foo { fi, fo: _ } = foo::do_work(foo, bar, baz);
 
 // Encode the most specific type possible.
 let _: Option<_> = foo.maybe_get_trait_impl(); // Can't name opaque type.
@@ -78,7 +81,7 @@ let _: Option<usize> = foo.maybe_get_len(); // Can name concrete type.
 // Use best judgement for unwieldy concrete types.
 // If the type expands to formatted code that would span >= 5 lines of type
 // annotation, use best judgement to cut off the signature.
-let _: futures::future::Ready<Result<Buffer<_>>, anyhow::Error> = y();
+let _: futures::future::Ready<Result<Buffer<_>, anyhow::Error>> = y();
 // Prefer to specify if only a couple of levels of nesting and < 5 lines.
 let _: Result<
     Result<(bool, usize), fidl_fuchsia_net_interfaces_admin::AddressRemovalError>,
@@ -123,8 +126,8 @@ fn controller_do_work_errors() { /* ... */ }
 
 Test support functions should be in a module named `testutil`. If the module is
 meant for use in-crate only, it should be declared `pub(crate)` and
-`#[cfg(test)]`. This module should not contain any `#[test]` functions. If tests
-are needed for the functionality in the `testutil` module, a sub-module called
+`#[cfg(test)]`. This module should not contain any test functions. If tests are
+needed for the functionality in the `testutil` module, a sub-module called
 `tests` should be created (i.e., `testutil::tests`).
 
 ### Prefer panics
@@ -142,137 +145,86 @@ relying on external factors for backtraces.
 
 The following rules apply to styling imports.
 
-Employ one `use` statement per crate or direct child module. Combine children of
-those into the same use statement.
-
-```rust
-use child_mod::{Foo, Bar};
-use futures::{
-    stream::{self, futures_unordered::FuturesUnordered},
-    Future, Stream,
-};
-```
-
 Always alias imported-but-not-referenced traits to `_`. It avoids cluttering the
 namespace and informs the reader that the identifier is not referenced.
 
 ```rust
-use futures::FutureExt as _;
+fn do_async_work() {
+    use futures::FutureExt as _;
+    /* ... */
+}
 ```
 
-Avoid bringing symbols from other crates into the scope. Especially if things
-all have similar names. Exceptions apply for widely used, self-explanatory `std`
-types like `HashMap`, `HashSet`, etc.
-
-Importing symbols from the same crate is always allowed, including to follow the
-pattern of declaring crate-local `Error` and `Result` types.
-
-Some crates rely heavily on external types. If usage is expected to be
-ubiquitous throughout the crate, it's acceptable to import those types as a
-means to reduce verbosity, as long as it doesn't introduce ambiguity.
+When multiple crates define similarly named types (such as IP address types
+across crates), or when referencing `fidl_fuchsia_*` FIDL types, qualify the
+external types with their module or crate alias instead of importing them
+unqualified:
 
 ```rust
-// DON'T. Parsing this module quickly grows out of hand since it's hard to make
-// sense where types are coming from.
+// DON'T. Importing similarly named types from multiple crates makes it hard to
+// make sense of where types are coming from.
 mod confusing_mod {
-    use packet_formats::IpAddress;
     use crate::IpAddr;
     use fidl_fuchsia_net::Ipv4Address;
+    use net_types::ip::Ipv4Addr;
 }
 
-// DO. Import only types from this crate.
+// DO. Qualify similarly named external types and FIDL types.
 mod happy_mod {
     use crate::IpAddress;
+    use fidl_fuchsia_net as fnet;
 
     fn foo() -> packet_formats::IpAddress { /* .. */ }
     fn bar() -> IpAddress { /* .. */ }
-    fn baz() -> fidl_fuchsia_net::Ipv4Address { /* .. */ }
+    fn baz() -> fnet::Ipv4Address { /* .. */ }
 }
 ```
 
-Some well-known crates have adopted aliases or alias formation rules. Those are:
+Some well-known crates have adopted aliases or alias formation rules when
+qualifying modules or disambiguating types:
 
 - `fuchsia_async` may be aliased to `fasync`.
 - `fidl_fuchsia_*` prefixes may be aliased to `f*`, e.g.:
   - `use fidl_fuchsia_net_interfaces_admin as fnet_interfaces_admin;`
   - `use fidl_fuchsia_net_routes as fnet_routes;`
 
-Importing `*` is strongly discouraged. Tests modules that import from `super`
-are acceptable exceptions; it is assumed that a test module will use most if not
-all symbols declared in its parent.
-
-Importing types in function bodies is always allowed, since it's easy to reason
-locally about where the types come from.
-
-```rust
-fn do_stuff() {
-    use some::deeply::nested::{Foo, bar::Bar};
-    let x = Foo::new();
-    let y = Bar::new();
-    /* ... */
-}
-```
-
 ## Prefer exhaustive matches
 
-Match exhaustively whenever possible, avoiding [catch-all patterns]. Matching
-exhaustively provides more local context during reviews, acts as a prompt to
-revisit when the enumeration is updated, and requires more explicit forms to
-drop information.
+Match exhaustively on exhaustive enums whenever possible, avoiding
+[catch-all patterns]. Matching exhaustively provides more local context during
+reviews, acts as a prompt to revisit when the enumeration is updated, and
+requires more explicit forms to drop information. (For `#[non_exhaustive]`
+enums, follow the [Google Rust Style Guide][non-exhaustive-enum-matching].)
 
 Some patterns implicitly defeat exhaustive matches. We should use them with
 care:
 
-- Avoid `if let` patterns, since that's effectively a non-exhaustive match. We
-  carve out the exception to allow binding to the `Some` value of an
-  `Option<T>`, since it's a well known type and the `None` variant doesn't carry
-  any information. Note that if `T` is an enum, `if let Some(Foo::Variant)` is
-  not a valid use of the exception, since it sidesteps an exhaustive match on
-  `T`.
+- Use `if let` and `let ... else` with care. While `if let` or `let ... else` is
+  appropriate when the caller genuinely only cares about a single variant and all
+  other cases are safely ignored or early-returned, avoid using it as a shortcut
+  on exhaustive enums where variants represent distinct states or outcomes that
+  require conscious handling. In those cases, prefer `match` to provide local
+  context and ensure new variants added in the future are audited. Binding to the
+  `Some` value of an `Option<T>` is an accepted use of `if let`, but nested
+  matches like `if let Some(Foo::Variant) = opt` should still be evaluated for
+  whether all variants of `Foo` ought to be handled explicitly.
 - Avoid methods on enum receivers that indicate variants without matching, e.g.:
   - `is_foo(&self) -> bool` enum methods like [`Result::is_ok`] or
   [`Option::is_none`].
   - `foo(self) -> Option<T>` enum methods like [`Result::ok`], which serve as
   single-variant extraction helpers that are easy to miss in review.
 
-Rust provides the [`non_exhaustive`] attribute which defeats the intent of
-matching exhaustively, and `flexible` FIDL types are annotated with that
-attribute. When dealing with such types, attempting to match exhaustively is
-prone to becoming stale - the type can evolve without breaking the code - and
-should, thus, be avoided.
-
 ```rust
-// Don't attempt to match exhaustively, exhaustive enumeration is prone to
-// becoming stale and misleading future readers if `Foo` takes more variants.
-fn bad_flexible_match(foo: fidl_foo::FlexibleFoo) {
+// Match exhaustively on regular enums without a catch-all arm.
+fn strict_match(foo: StrictFoo) {
     match foo {
-        fidl_foo::FlexibleFoo::Bar => { /* ... */ },
-        foo @ fidl_foo::FlexibleFoo::Baz |
-        foo => panic!("unexpected foo {:?}", foo)
-    }
-}
-
-// Use the catch-all pattern instead when the type is non_exhaustive.
-fn good_flexible_match(foo: fidl_foo::FlexibleFoo) {
-    match foo {
-        fidl_foo::FlexibleFoo::Bar => { /* ... */ },
-        foo => panic!("unexpected foo {:?}", foo)
-    }
-}
-
-// Note that if the type was not marked non_exhaustive we'd prefer to match
-// exhaustively.
-fn strict_match(foo: fidl_foo::StrictFoo) {
-    match foo {
-        fidl_foo::StrictFoo::Bar => { /* ... */ },
-        foo @ fidl_foo::StrictFoo::Baz |
-        foo @ fidl_foo::StrictFoo::Boo => panic!("unexpected foo {:?}", foo)
+        StrictFoo::Bar => { /* ... */ }
+        foo @ StrictFoo::Baz | foo @ StrictFoo::Boo => {
+            panic!("unexpected foo {foo:?}")
+        }
     }
 }
 ```
-
-> TODO(https://github.com/rust-lang/rust/issues/89554): Revisit `non_exhaustive`
-guidance once `non_exhaustive_omitted_patterns` lint is stabilized.
 
 ## Avoid default type parameters
 
@@ -406,10 +358,12 @@ Things to keep in mind:
   being discussed does not merit encoding as a pattern.
 
 [api-rust]: /docs/development/api/rust.md
+[google-rust-style]: https://google.github.io/styleguide/rustguide.html
+[non-exhaustive-enum-matching]: https://google.github.io/styleguide/rustguide.html#non-exhaustive-enum-matching
 [unused-results]: https://doc.rust-lang.org/rustc/lints/listing/allowed-by-default.html#unused-results
 [unused-results-explanation]: https://doc.rust-lang.org/rustc/lints/listing/allowed-by-default.html#explanation-31
 [Netstack team]: /src/connectivity/network/OWNERS
-[discussion groups]: /docs/contribute/community/get-involved.md#join_a_discussion_group
+[discussion groups]: /docs/contribute/community/get-involved.md#join-a-mailing-list
 [rust_test_result]: https://doc.rust-lang.org/edition-guide/rust-2018/error-handling-and-panics/question-mark-in-main-and-tests.html
 [rust_backtrace_stabilize]: https://github.com/rust-lang/rust/pull/72981
 [rust_backtrace_disabled]: https://cs.opensource.google/fuchsia/fuchsia/+/main:third_party/rust_crates/Cargo.toml;l=308-309;drc=fb9288396656bf5c9174d39238acc183fa0c4882
@@ -419,5 +373,4 @@ Things to keep in mind:
 [`Result::is_ok`]: https://doc.rust-lang.org/std/result/enum.Result.html#method.is_ok
 [`Result::ok`]: https://doc.rust-lang.org/std/result/enum.Result.html#method.ok
 [`Option::is_none`]: https://doc.rust-lang.org/std/option/enum.Option.html#method.is_none
-[`non_exhaustive`]: https://doc.rust-lang.org/reference/attributes/type_system.html#the-non_exhaustive-attribute
 [catch-all patterns]: https://doc.rust-lang.org/book/ch06-02-match.html#catch-all-patterns-and-the-_-placeholder

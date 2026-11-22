@@ -146,16 +146,17 @@ impl ExceptionDispatcher {
     ///
     /// # Safety
     ///
-    /// `context` must point to a valid, initialized `arch_exception_context_t`.
+    /// The caller must ensure that if `context.frame` is non-null, it points to a valid, aligned,
+    /// initialized, live `Iframe` with no conflicting mutable references for the duration of the
+    /// call.
     pub unsafe fn build_arch_report(
         exception_type: u32,
-        context: *const ArchExceptionContext,
+        context: &ArchExceptionContext,
     ) -> zx_exception_report_t {
         let mut report = zx_exception_report_t::new_zeroed();
         report.header.size = core::mem::size_of::<zx_exception_report_t>() as u32;
         report.header.type_ = exception_type;
-        // SAFETY: Caller guarantees `context` points to a valid `arch_exception_context_t`, and
-        // `report` is a valid writable local.
+        // SAFETY: Discharged by this function's `# Safety` contract for `context.frame`.
         unsafe {
             arch_fill_in_exception_context(context, &mut report);
         }

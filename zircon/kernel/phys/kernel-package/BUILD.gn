@@ -17,8 +17,9 @@ library_headers("headers") {
     # #include <lib/zbitl/view.h>
     "//src/lib/zbitl:headers",
 
-    # <phys/kernel-package/kernel-package.h> has #include <phys/allocation.h>
-    "//zircon/kernel/phys:allocation",
+    # <phys/kernel-package/kernel-package.h> has #include
+    # <phys/allocation/allocation.h>
+    "//zircon/kernel/phys/allocation:headers",
 
     # <phys/kernel-package/kernel-package.h> has #include
     # <phys/handoff/handoff.h>
@@ -33,10 +34,8 @@ static_library("kernel-package") {
 
   sources = [ "kernel-package.cc" ]
   deps = [
-    "..:stdio",
-    "..:symbolize",
-    "..:zbitl-allocation",
-    "../runtime:headers",
+    "../allocation",
+    "../runtime",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/libc",
     "//zircon/system/ulib/pretty",

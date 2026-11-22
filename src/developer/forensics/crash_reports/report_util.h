@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_REPORT_UTIL_H_
 #define SRC_DEVELOPER_FORENSICS_CRASH_REPORTS_REPORT_UTIL_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 
 #include <optional>
@@ -33,7 +33,7 @@ AnnotationMap GetReportAnnotations(Product product, const AnnotationMap& annotat
 //
 // * Some attachments are report-specific, e.g., Dart exception stack trace.
 // * Adds any attachments from |report|.
-fpromise::result<Report> MakeReport(fuchsia::feedback::CrashReport input_report,
+fpromise::result<Report> MakeReport(fuchsia_feedback::CrashReport input_report,
                                     const ProgramShortname& program_shortname, ReportId report_id,
                                     const std::string& snapshot_uuid,
                                     const feedback::Annotations& snapshot_annotations,

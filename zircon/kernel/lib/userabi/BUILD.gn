@@ -28,7 +28,6 @@ static_library("userabi") {
       "//zircon/kernel/lib/init",
       "//zircon/kernel/lib/instrumentation",
       "//zircon/kernel/lib/page",
-      "//zircon/kernel/phys/handoff",
       "//zircon/system/ulib/zircon-internal",
     ]
   }
@@ -57,6 +56,7 @@ kernel_rust_mod("userabi-rs") {
     "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/libc:rust",
     "//zircon/kernel/lib/page:page-rs",
+    "//zircon/kernel/phys/handoff:handoff-rs",
     "//zircon/system/ulib/affine/rust:affine",
     "//zircon/system/ulib/fbl/rust:fbl",
   ]
@@ -72,16 +72,9 @@ library_headers("headers") {
     "lib/userabi/vdso-constants.h",
     "lib/userabi/vdso.h",
   ]
-  public_deps = [
-    # <lib/userabi/userboot.h> has #include <vm/handoff-end.h> ->
-    # <phys/handoff/handoff.h>.
-    "//zircon/kernel/phys/handoff",
-  ]
   if (is_kernel) {
-    public_deps += [
-      # <lib/userabi/userboot.h> has #include <vm/handoff-end.h>, and
-      # <lib/userabi/vdso.h> has #include <vm/vm_address_region.h> and
-      # #include <vm/vm_object.h>.
+    public_deps = [
+      # <lib/userabi/vdso.h> has #include <vm/vm_object.h>.
       "//zircon/kernel/vm:headers",
     ]
   } else {

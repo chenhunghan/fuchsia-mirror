@@ -85,7 +85,6 @@ fuchsia_driver_component("platform-bus") {
   ]
   cm_label = ":manifest"
   deps = [ ":platform-bus-driver" ]
-  info = "meta/platform-bus-info.json"
 }
 
 fuchsia_driver_package("package") {

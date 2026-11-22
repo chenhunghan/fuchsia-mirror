@@ -9,7 +9,7 @@ use crate::v2::{CanonicalizeError, Canonicalizer, ProductBundleV2, RelativizeErr
 
 use anyhow::{Context as _, Result, anyhow};
 use assembled_system::Image;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use fuchsia_repo::repository::FileSystemRepository;
 use rayon::prelude::*;
 use sdk_metadata::{Envelope, VirtualDevice, VirtualDeviceManifest, VirtualDeviceV1};
@@ -790,6 +790,108 @@ pub fn load_virtual_devices(
     Ok(load_vd_with(source.as_ref().as_str(), vd_path, true, &HttpGcsFetcher::default())?.1)
 }
 
+fn relative_ota_manifest_path(reader: impl BufRead) -> Result<Utf8PathBuf> {
+    let ProductBundle::V2(bundle) = try_load_product_bundle(reader)?;
+    let repository =
+        bundle.repositories.first().ok_or_else(|| anyhow!("Product bundle has no repositories"))?;
+    let raw_path = repository
+        .ota_manifest_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("Product bundle repository does not specify ota_manifest_path"))?;
+    anyhow::ensure!(
+        !is_gcs_uri(raw_path),
+        "ota_manifest_path must be relative to product bundle: {raw_path}"
+    );
+    let mut normalized = Utf8PathBuf::new();
+    for component in raw_path.components() {
+        match component {
+            Utf8Component::Normal(part) => normalized.push(part),
+            Utf8Component::CurDir => {}
+            Utf8Component::Prefix(_) | Utf8Component::RootDir | Utf8Component::ParentDir => {
+                anyhow::bail!("ota_manifest_path escapes product bundle directory: {raw_path}");
+            }
+        }
+    }
+    anyhow::ensure!(!normalized.as_str().is_empty(), "ota_manifest_path cannot be empty");
+    Ok(normalized)
+}
+
+fn load_ota_manifest_from_zip<R: Read + Seek>(mut archive: ZipArchive<R>) -> Result<Vec<u8>> {
+    let manifest_name = archive
+        .file_names()
+        .find_map(|entry| match entry {
+            Ok(name) if name == "product_bundle.json" || name.ends_with("/product_bundle.json") => {
+                Some(name.into_owned())
+            }
+            _ => None,
+        })
+        .ok_or(ProductBundleLoadError::NotFoundInZip)?;
+    let parent_prefix = manifest_name.strip_suffix("product_bundle.json").ok_or_else(|| {
+        ProductBundleLoadError::MalformedZip("product_bundle.json path missing suffix".to_string())
+    })?;
+    let rel_path = {
+        let pb_entry = archive.by_name(&manifest_name).map_err(ProductBundleLoadError::Zip)?;
+        relative_ota_manifest_path(std::io::BufReader::new(pb_entry))?
+    };
+    let entry_path = normalize_zip_path(Utf8Path::new(parent_prefix)).join(&rel_path);
+    let mut buffer = Vec::new();
+    archive.by_name(entry_path.as_str())?.read_to_end(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn load_ota_manifest_with(source: &Utf8Path, fetcher: &impl GcsFetcher) -> Result<Vec<u8>> {
+    if is_gcs_uri(source) {
+        let location = GcsLocation::parse(source)?;
+        if location.is_zip() {
+            return load_ota_manifest_from_zip(open_zip(GcsRangeReader::new(fetcher, location)?)?);
+        }
+        let is_explicit_bundle = source.as_str().ends_with('/')
+            || location.object.is_empty()
+            || location.object == "product_bundle.json"
+            || location.object.ends_with("/product_bundle.json");
+        let (base_dir, pb_object) = location.directory_manifest();
+        let pb_bytes = match fetcher.fetch(&location.bucket, &pb_object, None) {
+            Ok((_, bytes)) => bytes,
+            Err(_) if !is_explicit_bundle => {
+                return Ok(fetcher.fetch(&location.bucket, &location.object, None)?.1);
+            }
+            Err(error) => return Err(ProductBundleLoadError::Gcs(error).into()),
+        };
+        let rel_path = relative_ota_manifest_path(pb_bytes.as_slice())?;
+        let manifest_location = GcsLocation::parse(join_gcs_uri(&base_dir, &rel_path))?;
+        return Ok(fetcher.fetch(&manifest_location.bucket, &manifest_location.object, None)?.1);
+    }
+    let bundle_dir = if source.file_name() == Some("product_bundle.json") {
+        let parent = source.parent().filter(|p| !p.as_str().is_empty());
+        Some(parent.unwrap_or_else(|| Utf8Path::new(".")))
+    } else {
+        source.is_dir().then_some(source)
+    };
+    if let Some(directory) = bundle_dir {
+        let pb_path = directory.join("product_bundle.json");
+        let pb_file =
+            File::open(&pb_path).map_err(|e| ProductBundleLoadError::OpenFile(pb_path, e))?;
+        let rel_path = relative_ota_manifest_path(std::io::BufReader::new(pb_file))?;
+        let canon_dir = directory.canonicalize_utf8()?;
+        let canon_manifest = canon_dir.join(&rel_path).canonicalize_utf8()?;
+        anyhow::ensure!(
+            canon_manifest.starts_with(&canon_dir),
+            "ota_manifest_path escapes product bundle directory: {rel_path}"
+        );
+        return Ok(std::fs::read(&canon_manifest)?);
+    }
+    if source.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("zip")) {
+        return load_ota_manifest_from_zip(open_zip(File::open(source)?)?);
+    }
+    Ok(std::fs::read(source)?)
+}
+
+/// Load raw signed OTA manifest bytes from a local or `gs://` [`ProductBundle`] (directory or
+/// `.zip` archive) or from a direct local or `gs://` OTA manifest path.
+pub fn load_ota_manifest(source: impl AsRef<Utf8Path>) -> Result<Vec<u8>> {
+    load_ota_manifest_with(source.as_ref(), &HttpGcsFetcher::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1521,6 +1623,69 @@ mod tests {
             )?,
             Utf8PathBuf::from("system_a/zbi")
         );
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    fn test_load_ota_manifest() -> Result<()> {
+        let mut bundle = make_sample_pbv2("generic-x64", None);
+        let empty_bundle = serde_json::to_vec(&bundle)?;
+        bundle["repositories"] = json!([{"name": "f", "metadata_path": "r", "blobs_path": "b", "ota_manifest_path": "r/m"}]);
+        let manifest = b"signed-ota-manifest".to_vec();
+        let mut archive = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let mut store = std::collections::HashMap::new();
+        let stored = FileOptions::default().compression_method(CompressionMethod::Stored);
+        for (entry, data) in [
+            ("pb/a/zbi", vec![0xAB; 512 * 1024]),
+            ("pb/r/m", manifest.clone()),
+            ("pb/product_bundle.json", serde_json::to_vec(&bundle)?),
+        ] {
+            archive.start_file(entry, stored)?;
+            archive.write_all(&data)?;
+            store.insert(entry, data);
+        }
+        store.insert("r/pb.zip", archive.finish()?.into_inner());
+        store.insert("direct/m", manifest.clone());
+        store.insert("empty/product_bundle.json", empty_bundle);
+
+        for uri in ["gs://b/pb", "gs://b/pb/", "gs://b/r/pb.zip", "gs://b/direct/m"] {
+            assert_eq!(load_ota_manifest_with(uri.into(), &store)?, manifest);
+        }
+        assert_eq!(
+            load_ota_manifest_with("gs://b/pb/product_bundle.json".into(), &store)?,
+            manifest
+        );
+        assert!(load_ota_manifest_with("gs://b/empty".into(), &store).is_err());
+        assert!(load_ota_manifest_with("gs://b/missing".into(), &store).is_err());
+
+        let temp_dir = TempDir::new()?;
+        let root = Utf8Path::from_path(temp_dir.path()).unwrap();
+        fs::create_dir_all(root.join("pb/r"))?;
+        fs::write(root.join("pb/r/m"), &manifest)?;
+        fs::write(root.join("pb/product_bundle.json"), &store["pb/product_bundle.json"])?;
+        fs::write(root.join("pb.zip"), &store["r/pb.zip"])?;
+        for rel in ["pb", "pb/product_bundle.json", "pb.zip", "pb/r/m"] {
+            assert_eq!(load_ota_manifest(root.join(rel))?, manifest);
+        }
+
+        let secret_path = root.join("secret");
+        fs::write(&secret_path, b"outside-bundle")?;
+        for bad_ota_path in [secret_path.as_str(), "../secret", "gs://b/direct/m"] {
+            let mut bad_bundle = bundle.clone();
+            bad_bundle["repositories"][0]["ota_manifest_path"] = json!(bad_ota_path);
+            let bad_dir = root.join("bad_pb");
+            fs::create_dir_all(&bad_dir)?;
+            fs::write(bad_dir.join("product_bundle.json"), serde_json::to_vec(&bad_bundle)?)?;
+            assert!(load_ota_manifest(&bad_dir).is_err());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&secret_path, root.join("pb/r/symlink_escape"))?;
+            let mut link_bundle = bundle;
+            link_bundle["repositories"][0]["ota_manifest_path"] = json!("r/symlink_escape");
+            fs::write(root.join("pb/product_bundle.json"), serde_json::to_vec(&link_bundle)?)?;
+            assert!(load_ota_manifest(root.join("pb")).is_err());
+        }
         Ok(())
     }
 }

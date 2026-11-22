@@ -36,7 +36,7 @@ The following are considered to be good properties for the build:
 These are ideals.
 We aim to meet these ideals and measure our progress against these measures.
 
-## Python scripts as build actions
+## Python scripts as build actions {:#python-scripts-as-build-actions}
 
 Python scripts may be used as build actions.
 

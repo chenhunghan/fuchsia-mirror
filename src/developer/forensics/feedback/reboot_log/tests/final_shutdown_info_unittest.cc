@@ -4,7 +4,8 @@
 
 #include "src/developer/forensics/feedback/reboot_log/final_shutdown_info.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/natural_ostream.h>
 
 #include <limits>
 
@@ -37,7 +38,7 @@ TEST(FinalShutdownInfoTest, Cold) {
 
   EXPECT_FALSE(final_shutdown_info->IsCrash());
   EXPECT_EQ(final_shutdown_info->ToCobaltLastRebootReason(), cobalt::LastRebootReason::kCold);
-  EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(), fuchsia::feedback::RebootReason::COLD);
+  EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(), fuchsia_feedback::RebootReason::kCold);
   EXPECT_EQ(final_shutdown_info->ToGracefulShutdownAction(), GracefulShutdownAction::kPoweroff);
 }
 
@@ -52,7 +53,7 @@ TEST(FinalShutdownInfoTest, Spontaneous) {
             "fuchsia-spontaneous-reboot");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "device");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::BRIEF_POWER_LOSS);
+            fuchsia_feedback::RebootReason::kBriefPowerLoss);
 }
 
 TEST(FinalShutdownInfoTest, BriefPowerLoss) {
@@ -66,7 +67,7 @@ TEST(FinalShutdownInfoTest, BriefPowerLoss) {
             "fuchsia-brief-power-loss");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "device");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::BRIEF_POWER_LOSS);
+            fuchsia_feedback::RebootReason::kBriefPowerLoss);
 }
 
 TEST(FinalShutdownInfoTest, HardReset) {
@@ -80,7 +81,7 @@ TEST(FinalShutdownInfoTest, HardReset) {
             "fuchsia-hard-reset");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "device");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::BRIEF_POWER_LOSS);
+            fuchsia_feedback::RebootReason::kBriefPowerLoss);
 }
 
 TEST(FinalShutdownInfoTest, SpontaneousDuringShutdown) {
@@ -100,7 +101,7 @@ TEST(FinalShutdownInfoTest, SpontaneousDuringShutdown) {
             "fuchsia-hard-reset-during-shutdown");
   EXPECT_EQ(final_shutdown_info.ToCrashProgramName(), "device");
   EXPECT_EQ(final_shutdown_info.ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::SPONTANEOUS_REBOOT_DURING_SHUTDOWN);
+            fuchsia_feedback::RebootReason::kSpontaneousRebootDuringShutdown);
   EXPECT_EQ(final_shutdown_info.ToGracefulShutdownAction(),
             GracefulShutdownAction::kRebootToBootloader);
   EXPECT_EQ(final_shutdown_info.ToSnapshotAnnotationGracefulAction(),
@@ -118,7 +119,7 @@ TEST(FinalShutdownInfoTest, KernelPanic) {
             "fuchsia-kernel-panic");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "kernel");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::KERNEL_PANIC);
+            fuchsia_feedback::RebootReason::kKernelPanic);
 }
 
 TEST(FinalShutdownInfoTest, OOM) {
@@ -132,7 +133,7 @@ TEST(FinalShutdownInfoTest, OOM) {
             "fuchsia-oom");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "system");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::SYSTEM_OUT_OF_MEMORY);
+            fuchsia_feedback::RebootReason::kSystemOutOfMemory);
 }
 
 TEST(FinalShutdownInfoTest, HardwareWatchdogTimeout) {
@@ -146,7 +147,7 @@ TEST(FinalShutdownInfoTest, HardwareWatchdogTimeout) {
             "fuchsia-hw-watchdog-timeout");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "device");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::HARDWARE_WATCHDOG_TIMEOUT);
+            fuchsia_feedback::RebootReason::kHardwareWatchdogTimeout);
 }
 
 TEST(FinalShutdownInfoTest, UserHardReset) {
@@ -160,7 +161,7 @@ TEST(FinalShutdownInfoTest, UserHardReset) {
   EXPECT_EQ(final_shutdown_info->ToCobaltLastRebootReason(),
             cobalt::LastRebootReason::kUserHardReset);
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::USER_HARD_RESET);
+            fuchsia_feedback::RebootReason::kUserHardReset);
 }
 
 TEST(FinalShutdownInfoTest, SoftwareWatchdogTimeout) {
@@ -174,7 +175,7 @@ TEST(FinalShutdownInfoTest, SoftwareWatchdogTimeout) {
             "fuchsia-sw-watchdog-timeout");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "system");
   EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::SOFTWARE_WATCHDOG_TIMEOUT);
+            fuchsia_feedback::RebootReason::kSoftwareWatchdogTimeout);
 }
 
 TEST(FinalShutdownInfoTest, Brownout) {
@@ -186,7 +187,7 @@ TEST(FinalShutdownInfoTest, Brownout) {
   EXPECT_EQ(final_shutdown_info->ToCrashSignature(SpontaneousRebootReason::kSpontaneous),
             "fuchsia-brownout");
   EXPECT_EQ(final_shutdown_info->ToCrashProgramName(), "device");
-  EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(), fuchsia::feedback::RebootReason::BROWNOUT);
+  EXPECT_EQ(final_shutdown_info->ToFidlRebootReason(), fuchsia_feedback::RebootReason::kBrownout);
 }
 
 TEST(FinalShutdownInfoTest, RootJobTerminationNoCriticalProcess) {
@@ -199,7 +200,7 @@ TEST(FinalShutdownInfoTest, RootJobTerminationNoCriticalProcess) {
             "fuchsia-root-job-termination");
   EXPECT_EQ(final_shutdown_info.ToCrashProgramName(), "system");
   EXPECT_EQ(final_shutdown_info.ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::ROOT_JOB_TERMINATION);
+            fuchsia_feedback::RebootReason::kRootJobTermination);
 }
 
 TEST(FinalShutdownInfoTest, RootJobTerminationWithCriticalProcess) {
@@ -214,14 +215,14 @@ TEST(FinalShutdownInfoTest, RootJobTerminationWithCriticalProcess) {
             "fuchsia-reboot-critical_process-terminated");
   EXPECT_EQ(final_shutdown_info.ToCrashProgramName(), "system");
   EXPECT_EQ(final_shutdown_info.ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::ROOT_JOB_TERMINATION);
+            fuchsia_feedback::RebootReason::kRootJobTermination);
 }
 
 struct GracefulNoReportTestParams {
   std::string test_name;
   std::vector<GracefulShutdownReason> reasons;
   cobalt::LastRebootReason expected_cobalt_reason;
-  fuchsia::feedback::RebootReason expected_fidl_reboot_reason;
+  fuchsia_feedback::RebootReason expected_fidl_reboot_reason;
 };
 
 class FinalShutdownInfoGracefulNoReportTest
@@ -236,49 +237,49 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulNoReportTe
                                      GracefulShutdownReason::kNetstackMigration,
                                  },
                                  cobalt::LastRebootReason::kSystemUpdate,
-                                 fuchsia::feedback::RebootReason::SYSTEM_UPDATE,
+                                 fuchsia_feedback::RebootReason::kSystemUpdate,
                              },
                              {
                                  "UserRequest",
                                  {GracefulShutdownReason::kUserRequest},
                                  cobalt::LastRebootReason::kUserRequest,
-                                 fuchsia::feedback::RebootReason::USER_REQUEST,
+                                 fuchsia_feedback::RebootReason::kUserRequest,
                              },
                              {
                                  "SystemUpdate",
                                  {GracefulShutdownReason::kSystemUpdate},
                                  cobalt::LastRebootReason::kSystemUpdate,
-                                 fuchsia::feedback::RebootReason::SYSTEM_UPDATE,
+                                 fuchsia_feedback::RebootReason::kSystemUpdate,
                              },
                              {
                                  "ZbiSwap",
                                  {GracefulShutdownReason::kZbiSwap},
                                  cobalt::LastRebootReason::kZbiSwap,
-                                 fuchsia::feedback::RebootReason::ZBI_SWAP,
+                                 fuchsia_feedback::RebootReason::kZbiSwap,
                              },
                              {
                                  "GracefulFdr",
                                  {GracefulShutdownReason::kFdr},
                                  cobalt::LastRebootReason::kFactoryDataReset,
-                                 fuchsia::feedback::RebootReason::FACTORY_DATA_RESET,
+                                 fuchsia_feedback::RebootReason::kFactoryDataReset,
                              },
                              {
                                  "NetstackMigration",
                                  {GracefulShutdownReason::kNetstackMigration},
                                  cobalt::LastRebootReason::kNetstackMigration,
-                                 fuchsia::feedback::RebootReason::NETSTACK_MIGRATION,
+                                 fuchsia_feedback::RebootReason::kNetstackMigration,
                              },
                              {
                                  "AndroidNoReason",
                                  {GracefulShutdownReason::kAndroidNoReason},
                                  cobalt::LastRebootReason::kAndroidNoReason,
-                                 fuchsia::feedback::RebootReason::ANDROID_NO_REASON,
+                                 fuchsia_feedback::RebootReason::kAndroidNoReason,
                              },
                              {
                                  "BatteryDrained",
                                  {GracefulShutdownReason::kBatteryDrained},
                                  cobalt::LastRebootReason::kBatteryDrained,
-                                 fuchsia::feedback::RebootReason::BATTERY_DRAINED,
+                                 fuchsia_feedback::RebootReason::kBatteryDrained,
                              },
                          })),
                          [](const testing::TestParamInfo<GracefulNoReportTestParams>& info) {
@@ -302,7 +303,7 @@ struct GracefulTestParams {
   std::string test_name;
   std::vector<GracefulShutdownReason> reasons;
   cobalt::LastRebootReason expected_cobalt_reason;
-  std::optional<fuchsia::feedback::RebootReason> expected_fidl_reboot_reason;
+  std::optional<fuchsia_feedback::RebootReason> expected_fidl_reboot_reason;
   std::string expected_crash_signature;
   std::string expected_crash_program_name;
 };
@@ -334,7 +335,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "HighTemperature",
                                   {GracefulShutdownReason::kHighTemperature},
                                   cobalt::LastRebootReason::kHighTemperature,
-                                  fuchsia::feedback::RebootReason::HIGH_TEMPERATURE,
+                                  fuchsia_feedback::RebootReason::kHighTemperature,
                                   "fuchsia-shutdown-high-temperature",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -342,7 +343,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "SessionFailure",
                                   {GracefulShutdownReason::kSessionFailure},
                                   cobalt::LastRebootReason::kSessionFailure,
-                                  fuchsia::feedback::RebootReason::SESSION_FAILURE,
+                                  fuchsia_feedback::RebootReason::kSessionFailure,
                                   "fuchsia-session-failure",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -350,7 +351,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "SysmgrFailure",
                                   {GracefulShutdownReason::kSysmgrFailure},
                                   cobalt::LastRebootReason::kSysmgrFailure,
-                                  fuchsia::feedback::RebootReason::SYSMGR_FAILURE,
+                                  fuchsia_feedback::RebootReason::kSysmgrFailure,
                                   "fuchsia-sysmgr-failure",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -358,7 +359,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "CriticalComponentFailure",
                                   {GracefulShutdownReason::kCriticalComponentFailure},
                                   cobalt::LastRebootReason::kCriticalComponentFailure,
-                                  fuchsia::feedback::RebootReason::CRITICAL_COMPONENT_FAILURE,
+                                  fuchsia_feedback::RebootReason::kCriticalComponentFailure,
                                   "fuchsia-critical-component-failure",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -366,7 +367,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "CriticalDriverFailure",
                                   {GracefulShutdownReason::kCriticalDriverFailure},
                                   cobalt::LastRebootReason::kCriticalDriverFailure,
-                                  fuchsia::feedback::RebootReason::CRITICAL_DRIVER_FAILURE,
+                                  fuchsia_feedback::RebootReason::kCriticalDriverFailure,
                                   "fuchsia-critical-driver-failure",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -374,7 +375,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "RetrySystemUpdate",
                                   {GracefulShutdownReason::kRetrySystemUpdate},
                                   cobalt::LastRebootReason::kRetrySystemUpdate,
-                                  fuchsia::feedback::RebootReason::RETRY_SYSTEM_UPDATE,
+                                  fuchsia_feedback::RebootReason::kRetrySystemUpdate,
                                   "fuchsia-retry-system-update",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -382,7 +383,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "OOM",
                                   {GracefulShutdownReason::kOutOfMemory},
                                   cobalt::LastRebootReason::kSystemOutOfMemory,
-                                  fuchsia::feedback::RebootReason::SYSTEM_OUT_OF_MEMORY,
+                                  fuchsia_feedback::RebootReason::kSystemOutOfMemory,
                                   "fuchsia-oom",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -390,7 +391,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "AndroidUnexpectedReason",
                                   {GracefulShutdownReason::kAndroidUnexpectedReason},
                                   cobalt::LastRebootReason::kAndroidUnexpectedReason,
-                                  fuchsia::feedback::RebootReason::ANDROID_UNEXPECTED_REASON,
+                                  fuchsia_feedback::RebootReason::kAndroidUnexpectedReason,
                                   "fuchsia-shutdown-android-unexpected-reason",
                                   /*expected_crash_program_name=*/"android",
                               },
@@ -398,7 +399,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "AndroidRescueParty",
                                   {GracefulShutdownReason::kAndroidRescueParty},
                                   cobalt::LastRebootReason::kAndroidRescueParty,
-                                  fuchsia::feedback::RebootReason::ANDROID_RESCUE_PARTY,
+                                  fuchsia_feedback::RebootReason::kAndroidRescueParty,
                                   "fuchsia-shutdown-android-rescue-party",
                                   /*expected_crash_program_name=*/"android",
                               },
@@ -406,7 +407,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "AndroidCriticalProcessFailure",
                                   {GracefulShutdownReason::kAndroidCriticalProcessFailure},
                                   cobalt::LastRebootReason::kAndroidCriticalProcessFailure,
-                                  fuchsia::feedback::RebootReason::ANDROID_CRITICAL_PROCESS_FAILURE,
+                                  fuchsia_feedback::RebootReason::kAndroidCriticalProcessFailure,
                                   "fuchsia-shutdown-android-critical-process-failure",
                                   /*expected_crash_program_name=*/"android",
                               },
@@ -414,7 +415,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "UserRequestDeviceStuck",
                                   {GracefulShutdownReason::kUserRequestDeviceStuck},
                                   cobalt::LastRebootReason::kUserRequestDeviceStuck,
-                                  fuchsia::feedback::RebootReason::USER_REQUEST_DEVICE_STUCK,
+                                  fuchsia_feedback::RebootReason::kUserRequestDeviceStuck,
                                   "fuchsia-shutdown-user-request-device-stuck",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -422,7 +423,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "SuspensionFailure",
                                   {GracefulShutdownReason::kSuspensionFailure},
                                   cobalt::LastRebootReason::kSuspensionFailure,
-                                  fuchsia::feedback::RebootReason::SUSPENSION_FAILURE,
+                                  fuchsia_feedback::RebootReason::kSuspensionFailure,
                                   "fuchsia-shutdown-suspension-failure",
                                   /*expected_crash_program_name=*/"system",
                               },
@@ -430,7 +431,7 @@ INSTANTIATE_TEST_SUITE_P(WithVariousReasons, FinalShutdownInfoGracefulTest,
                                   "PowerLevelTransitionStuck",
                                   {GracefulShutdownReason::kPowerLevelTransitionStuck},
                                   cobalt::LastRebootReason::kPowerLevelTransitionStuck,
-                                  fuchsia::feedback::RebootReason::POWER_LEVEL_TRANSITION_STUCK,
+                                  fuchsia_feedback::RebootReason::kPowerLevelTransitionStuck,
                                   "fuchsia-shutdown-power-level-transition-stuck",
                                   /*expected_crash_program_name=*/"system",
                               }})),
@@ -467,7 +468,7 @@ TEST(FinalShutdownInfoGracefulTest, InferredFdr) {
   EXPECT_EQ(final_shutdown_info.ToCobaltLastRebootReason(),
             cobalt::LastRebootReason::kFactoryDataReset);
   EXPECT_EQ(final_shutdown_info.ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::FACTORY_DATA_RESET);
+            fuchsia_feedback::RebootReason::kFactoryDataReset);
 }
 
 TEST(FinalShutdownInfoTest, InferredFdr_Cold) {
@@ -481,7 +482,7 @@ TEST(FinalShutdownInfoTest, InferredFdr_Cold) {
   EXPECT_EQ(final_shutdown_info.ToCobaltLastRebootReason(),
             cobalt::LastRebootReason::kFactoryDataReset);
   EXPECT_EQ(final_shutdown_info.ToFidlRebootReason(),
-            fuchsia::feedback::RebootReason::FACTORY_DATA_RESET);
+            fuchsia_feedback::RebootReason::kFactoryDataReset);
 }
 
 TEST(FinalShutdownInfoTest, GracefulOnCold) {

@@ -7,7 +7,7 @@ use crate::error::{ComponentInstanceError, RoutingError};
 use crate::policy::GlobalPolicyChecker;
 use async_trait::async_trait;
 use capability_source::CapabilitySource;
-use fidl_fuchsia_component_runtime::RouteRequest;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
 use moniker::ExtendedMoniker;
 use router_error::RouterError;
 use runtime_capabilities::{CapabilityBound, Routable, Router, WeakInstanceToken};

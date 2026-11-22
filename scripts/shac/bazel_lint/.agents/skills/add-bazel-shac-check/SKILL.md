@@ -192,10 +192,18 @@ use the `bazel_<check_name>` prefix, whereas files under `checks/` use
 `<check_name>`):
 
 1.  `scripts/shac/bazel_lint/checks/<check_name>.py`: Implement the
-    `@register_check` class with `name = "bazel_<check_name>"`. Optionally, add
-    implementation documentation, explanations, or caveats in
-    `scripts/shac/bazel_lint/checks/<check_name>.md` (the same base name) and
-    reference it from the docstring at the top of `<check_name>.py`.
+    `@register_check` class with `name = "bazel_<check_name>"`.
+    * When a check enforces multiple lint conditions, performs multi-pass
+      analysis (such as in `check_module()`), or exceeds ~100 lines, include a
+      high-level overview in the module docstring at the top of
+      `<check_name>.py` (or in `scripts/shac/bazel_lint/checks/<check_name>.md`
+      referenced from the module docstring) summarizing each condition enforced
+      and the analysis passes/data flow. For simpler checks, `<check_name>.md`
+      is optional for additional explanations or caveats.
+    * For multi-pass or non-trivial checks, add brief inline comments before
+      each pass and before non-trivial `if`, `elif`, and `else` blocks
+      explaining what invariant, AST pattern, or exemption each branch checks
+      and why.
 2.  `scripts/shac/bazel_lint/checks/__init__.py`: Import `<check_name>` in
     alphabetical order.
 3.  `scripts/shac/bazel.star`:

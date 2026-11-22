@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Export tests to the ancestor test_suite.
+test_suite(
+    name = "tests",
+    tests = [":audio_lib_analysis_unittests"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "analysis",
+    srcs = ["analysis.cc"],
+    hdrs = [
+        "analysis.h",
+        "dropout.h",
+        "generators.h",
+        "glitch.h",
+    ],
+    implementation_deps = [
+        "//zircon/system/ulib/fbl",
+    ],
+    # Uses Zircon/FIDL headers and //src/media/audio/lib/wav, which are Fuchsia-only.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/media/audio:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/media/audio/lib/format",
+        "//src/media/audio/lib/wav",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "unittest-bin",
+    srcs = [
+        "analysis_unittest.cc",
+        "dropout_unittest.cc",
+        "generators_unittest.cc",
+        "glitch_unittest.cc",
+    ],
+    gn_output_name = "audio_lib_analysis_unittests",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":analysis",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/zircon/lib/zircon",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_lib_analysis_unittests",
+    # TODO(https://fxbug.dev/570694755): Map fx_unittest_package environments to GN test_specs in bazel2gn.
+    # @bazel2gn:skip
+    environments = ["//build/testing/environments:emu_env"],
+    parallel = 4,
+    unit_tests = [":unittest-bin"],
+)

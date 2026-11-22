@@ -52,7 +52,7 @@ host_rustc_test(
         # These dependencies are host-only and will cause assertion failures
         # if evaluated for target toolchains.
         "//src/developer/ffx/config:lib",
-        "//src/developer/ffx/lib/target/behavior:lib",
+        "//src/developer/ffx/lib/target:lib",
         "//src/lib/fdomain/client",
         "//src/lib/fdomain/local",
         "//src/lib/fuchsia",

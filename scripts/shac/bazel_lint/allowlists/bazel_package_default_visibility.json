@@ -494,10 +494,6 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "src/devices/board/drivers/qemu-arm64/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "src/devices/board/drivers/sherlock/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009"
         },
@@ -854,10 +850,6 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "src/lib/vmo_store/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "src/media/audio/drivers/aml-g12-pdm/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009"
         },
@@ -1026,10 +1018,6 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "src/tests/fidl/compatibility/llcpp/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "src/tests/fidl/compatibility/rust/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009"
         },
@@ -1130,10 +1118,6 @@
         },
         {
             "path": "tools/fidl/fidl_ir/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "zircon/system/ulib/fzl/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009"
         },
         {

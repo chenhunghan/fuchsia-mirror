@@ -369,7 +369,7 @@ After you receive a final status from the Eng Council, do the following:
 1. Upload a patch to your change with the updates to the RFC files.
 
    Note: For more information on creating a patch, see
-   [Create and upload a patch](/docs/development/source_code/contribute_changes.md#create_and_upload_a_patch).
+   [Create and upload a patch](/docs/development/source_code/contribute_changes.md#create-a-change-in-gerrit).
 
 1. Once approved, work with your facilitator to submit your RFC. Specifically,
    your facilitator must +2 the CL.

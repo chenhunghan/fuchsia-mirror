@@ -4,21 +4,24 @@
 
 #include "thermal_test_control.h"
 
-#include <lib/sys/cpp/component_context.h>
-#include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
+#include <zircon/assert.h>
 
-ClientStateWatcher::ClientStateWatcher()
-    : watcher_binding_(this), hanging_get_(nullptr), pending_client_state_(0) {}
+#include <utility>
 
-void ClientStateWatcher::Bind(fidl::InterfaceRequest<fuchsia::thermal::ClientStateWatcher> watcher,
-                              fit::function<void(zx_status_t)> error_handler) {
-  watcher_binding_.Bind(std::move(watcher));
-  watcher_binding_.set_error_handler(std::move(error_handler));
-}
+ClientStateWatcher::ClientStateWatcher(async_dispatcher_t* dispatcher,
+                                       fidl::ServerEnd<fuchsia_thermal::ClientStateWatcher> watcher,
+                                       fit::function<void(fidl::UnbindInfo)> close_handler)
+    : pending_client_state_(0),
+      watcher_binding_(dispatcher, std::move(watcher), this, std::move(close_handler)) {}
 
-void ClientStateWatcher::Watch(fuchsia::thermal::ClientStateWatcher::WatchCallback callback) {
-  hanging_get_ = std::move(callback);
+void ClientStateWatcher::Watch(WatchCompleter::Sync& completer) {
+  if (hanging_get_.has_value()) {
+    FX_LOGS(WARNING) << "Watch called while a Watch is already pending; closing watcher";
+    completer.Close(ZX_ERR_BAD_STATE);
+    return;
+  }
+  hanging_get_ = completer.ToAsync();
   MaybeSendThermalState();
 }
 
@@ -31,60 +34,60 @@ void ClientStateWatcher::SetThermalState(uint64_t thermal_state) {
 
 void ClientStateWatcher::MaybeSendThermalState() {
   if (hanging_get_ && pending_client_state_) {
-    hanging_get_(*pending_client_state_);
-    hanging_get_ = nullptr;
+    hanging_get_->Reply(*pending_client_state_);
+    hanging_get_.reset();
 
     client_thermal_state_ = *pending_client_state_;
     pending_client_state_.reset();
   }
 }
 
-ThermalTestControl::ThermalTestControl(std::unique_ptr<sys::ComponentContext> context)
-    : context_(std::move(context)),
-      client_state_connector_binding_(this),
-      test_controller_binding_(this) {
+ThermalTestControl::ThermalTestControl(async_dispatcher_t* dispatcher) : dispatcher_(dispatcher) {
   FX_LOGS(INFO) << "Creating ThermalTestControl";
+}
 
-  fidl::InterfaceRequestHandler<fuchsia::thermal::ClientStateConnector> connector_handler =
-      [&](fidl::InterfaceRequest<fuchsia::thermal::ClientStateConnector> request) {
-        client_state_connector_binding_.Bind(std::move(request));
-      };
-  context_->outgoing()->AddPublicService(std::move(connector_handler));
+fidl::ProtocolHandler<fuchsia_thermal::ClientStateConnector>
+ThermalTestControl::connector_handler() {
+  return client_state_connector_bindings_.CreateHandler(this, dispatcher_,
+                                                        fidl::kIgnoreBindingClosure);
+}
 
-  fidl::InterfaceRequestHandler<::test::thermal::ClientStateControl> test_control_handler =
-      [&](fidl::InterfaceRequest<::test::thermal::ClientStateControl> request) {
-        test_controller_binding_.Bind(std::move(request));
-      };
-  context_->outgoing()->AddPublicService(std::move(test_control_handler));
+fidl::ProtocolHandler<test_thermal::ClientStateControl> ThermalTestControl::control_handler() {
+  return test_controller_bindings_.CreateHandler(this, dispatcher_, fidl::kIgnoreBindingClosure);
 }
 
 void ThermalTestControl::Connect(
-    std::string client_type, fidl::InterfaceRequest<fuchsia::thermal::ClientStateWatcher> watcher) {
+    fidl::Server<fuchsia_thermal::ClientStateConnector>::ConnectRequest& request,
+    fidl::Server<fuchsia_thermal::ClientStateConnector>::ConnectCompleter::Sync& completer) {
+  const std::string& client_type = request.client_type();
   FX_LOGS(TRACE) << "client_type=" << client_type;
 
   ZX_ASSERT(!IsClientTypeConnectedInternal(client_type));
 
-  watchers_[client_type] = std::make_unique<ClientStateWatcher>();
-  watchers_[client_type]->Bind(std::move(watcher), [&, client_type](zx_status_t status) {
-    ZX_ASSERT(watchers_.erase(client_type) == 1);
-  });
+  watchers_[client_type] = std::make_unique<ClientStateWatcher>(
+      dispatcher_, std::move(request.watcher()),
+      [this, client_type](fidl::UnbindInfo info) { ZX_ASSERT(watchers_.erase(client_type) == 1); });
 }
 
-void ThermalTestControl::IsClientTypeConnected(std::string client_type,
-                                               IsClientTypeConnectedCallback callback) {
-  callback(IsClientTypeConnectedInternal(client_type));
+void ThermalTestControl::IsClientTypeConnected(
+    fidl::Server<test_thermal::ClientStateControl>::IsClientTypeConnectedRequest& request,
+    fidl::Server<test_thermal::ClientStateControl>::IsClientTypeConnectedCompleter::Sync&
+        completer) {
+  completer.Reply(IsClientTypeConnectedInternal(request.client_type()));
 }
 
-void ThermalTestControl::SetThermalState(std::string client_type, uint64_t state,
-                                         SetThermalStateCallback callback) {
-  FX_LOGS(TRACE) << "client_type=" << client_type << " state=" << state;
+void ThermalTestControl::SetThermalState(
+    fidl::Server<test_thermal::ClientStateControl>::SetThermalStateRequest& request,
+    fidl::Server<test_thermal::ClientStateControl>::SetThermalStateCompleter::Sync& completer) {
+  const std::string& client_type = request.client_type();
+  FX_LOGS(TRACE) << "client_type=" << client_type << " state=" << request.state();
 
   ZX_ASSERT(IsClientTypeConnectedInternal(client_type));
 
-  watchers_[client_type]->SetThermalState(state);
-  callback();
+  watchers_[client_type]->SetThermalState(request.state());
+  completer.Reply();
 }
 
-bool ThermalTestControl::IsClientTypeConnectedInternal(std::string client_type) {
+bool ThermalTestControl::IsClientTypeConnectedInternal(const std::string& client_type) const {
   return watchers_.find(client_type) != watchers_.end();
 }

@@ -9,7 +9,10 @@ import("//src/ui/lib/escher/build_args.gni")
 
 group("tests") {
   testonly = true
-  deps = [ ":escher_tests" ]
+  deps = [
+    ":escher_fatal_tests",
+    ":escher_tests",
+  ]
 }
 
 config("use_runtime_glsl_config") {
@@ -205,8 +208,6 @@ template("escher_library") {
       "impl/uniform_buffer_pool.h",
       "impl/vulkan_utils.cc",
       "impl/vulkan_utils.h",
-      "renderer/batch_gpu_downloader.cc",
-      "renderer/batch_gpu_downloader.h",
       "renderer/batch_gpu_uploader.cc",
       "renderer/batch_gpu_uploader.h",
       "renderer/buffer_cache.cc",
@@ -229,8 +230,6 @@ template("escher_library") {
       "resources/resource_recycler.cc",
       "resources/resource_recycler.h",
       "resources/resource_type_info.h",
-      "shape/mesh_spec.cc",
-      "shape/mesh_spec.h",
       "third_party/granite/vk/command_buffer.cc",
       "third_party/granite/vk/command_buffer.h",
       "third_party/granite/vk/command_buffer_pipeline_state.cc",

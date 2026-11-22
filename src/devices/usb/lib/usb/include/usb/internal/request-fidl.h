@@ -12,8 +12,9 @@
 //   1. DFv2 runtime using the comapt shim. To link against the compat shim, build with
 //      -DDFV2_COMPAT_LOGGING.
 //   2. DFv1 runtime using the DDK. To use link against the DDK, build with -DDFV1_LOGGING.
-//   3. (default) DFv2 runtime using the native DFv2 logging runtime. With Neither flag in effect,
-//      link against the native DFv2 runtime.
+//   3. Non-driver component runtime using syslog. Build with -DSYSLOG_LOGGING.
+//   4. (default) DFv2 runtime using the native DFv2 logging runtime. With none of the above flags
+//      in effect, link against the native DFv2 runtime.
 //
 // If building against the SDK, the binary must be linked against the native DFv2 logging runtime as
 // neither the DDK nor compat shim are baked into the SDK.
@@ -22,6 +23,37 @@
 #elif defined(DFV1_LOGGING)
 #include <lib/ddk/debug.h>  // nogncheck
 #define FDF_LOG(args, ...) zxlogf(args, __VA_ARGS__)
+#elif defined(SYSLOG_LOGGING)
+#include <lib/syslog/cpp/macros.h>  // nogncheck
+#include <zircon/compiler.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <string>
+
+namespace usb::internal {
+
+inline std::string FormatSyslogPrintf(const char* fmt, ...) __PRINTFLIKE(1, 2);
+inline std::string FormatSyslogPrintf(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  va_list args_copy;
+  va_copy(args_copy, args);
+  const int len = std::vsnprintf(nullptr, 0, fmt, args);
+  va_end(args);
+  if (len <= 0) {
+    va_end(args_copy);
+    return {};
+  }
+  std::string out(static_cast<size_t>(len), '\0');
+  std::vsnprintf(out.data(), out.size() + 1, fmt, args_copy);
+  va_end(args_copy);
+  return out;
+}
+
+}  // namespace usb::internal
+
+#define FDF_LOG(severity, ...) FX_LOGS(severity) << ::usb::internal::FormatSyslogPrintf(__VA_ARGS__)
 #else
 #include "sdk/lib/driver/logging/cpp/logger.h"  // nogncheck
 #endif
@@ -717,7 +749,6 @@ class FidlRequest {
       uint64_t pages = USB_ROUNDUP(page_length, kPageSize) / kPageSize;
 
       std::unique_ptr<zx_paddr_t[]> paddrs{new zx_paddr_t[pages]};
-      const size_t sub_offset = reg_offset & (kPageSize - 1);
       const size_t pin_offset = page_offset;
       const size_t pin_length = pages * kPageSize;
 
@@ -730,11 +761,8 @@ class FidlRequest {
         return status;
       }
 
-      // Account for the initial misalignment if any
-      paddrs.get()[0] += sub_offset;
-
       pinned_vmos_[idx].pmt = pmt;
-      pinned_vmos_[idx].phys_list = paddrs.release();
+      pinned_vmos_[idx].page_list = paddrs.release();
       pinned_vmos_[idx].phys_count = pages;
     }
 
@@ -778,7 +806,7 @@ class FidlRequest {
         zx_status_t status = zx_pmt_unpin(pinned.pmt);
         ZX_DEBUG_ASSERT(status == ZX_OK);
       }
-      delete[] pinned.phys_list;
+      delete[] pinned.page_list;
     }
     shared_contexts_.clear();
     return ZX_OK;
@@ -789,7 +817,7 @@ class FidlRequest {
   // Gets a PhysIterType for the buffer at request.data()->at(idx). PhysIterTypes return a
   // std::pair<zx_paddr_t, size_t> on iteration. For template specialization, see the public
   // headers outside the internal namespace.
-  PhysIterType phys_iter(size_t idx, size_t max_length) const;
+  zx::result<PhysIterType> phys_iter(size_t idx, size_t max_length) const;
 
   fuchsia_hardware_usb_request::Request* operator->() {
     _length.reset();
@@ -891,7 +919,7 @@ class FidlRequest {
 
   struct pinned_vmo_t {
     zx_handle_t pmt;
-    uint64_t* phys_list;
+    uint64_t* page_list;
     size_t phys_count;
     // mapped: only used for fuchsia_hardware_usb_request::Buffer::Tag::kData.
     MappedVmo mapped;

@@ -4,8 +4,8 @@
 
 #include "src/developer/forensics/crash_reports/report_util.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/mem/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 #include <zircon/errors.h>
@@ -49,12 +49,12 @@ const char kProcessKoidKey[] = "crash.process.koid";
 const char kThreadKoidKey[] = "crash.thread.koid";
 
 std::pair<bool, std::optional<std::string>> ParseDartModules(
-    const fuchsia::mem::Buffer& stack_trace) {
-  if (!stack_trace.vmo.is_valid()) {
+    const fuchsia_mem::Buffer& stack_trace) {
+  if (!stack_trace.vmo().is_valid()) {
     return {false, std::nullopt};
   }
 
-  std::string text_stack_trace(stack_trace.size, '\0');
+  std::string text_stack_trace(stack_trace.size(), '\0');
 
   if (!fsl::StringFromVmo(stack_trace, &text_stack_trace)) {
     FX_LOGS(ERROR) << "Failed to read Dart stack trace vmo";
@@ -64,55 +64,56 @@ std::pair<bool, std::optional<std::string>> ParseDartModules(
   return ParseDartModulesFromStackTrace(text_stack_trace);
 }
 
-void ExtractAnnotationsAndAttachments(fuchsia::feedback::CrashReport report,
+void ExtractAnnotationsAndAttachments(fuchsia_feedback::CrashReport report,
                                       AnnotationMap* annotations,
-                                      std::map<std::string, fuchsia::mem::Buffer>* attachments,
-                                      std::optional<fuchsia::mem::Buffer>* minidump) {
+                                      std::map<std::string, fuchsia_mem::Buffer>* attachments,
+                                      std::optional<fuchsia_mem::Buffer>* minidump) {
   // Default annotations common to all crash reports.
-  if (report.has_annotations()) {
-    annotations->Set(report.annotations());
+  if (report.annotations().has_value()) {
+    annotations->Set(*report.annotations());
   }
 
-  if (report.has_program_uptime()) {
-    annotations->Set(kProgramUptimeMillisKey, zx::duration(report.program_uptime()).to_msecs());
+  if (report.program_uptime().has_value()) {
+    annotations->Set(kProgramUptimeMillisKey, zx::duration(*report.program_uptime()).to_msecs());
   }
 
-  if (report.has_event_id()) {
-    annotations->Set(kEventIdKey, report.event_id());
+  if (report.event_id().has_value()) {
+    annotations->Set(kEventIdKey, *report.event_id());
   }
 
-  if (report.has_crash_signature()) {
-    annotations->Set(kCrashSignatureKey, report.crash_signature());
+  if (report.crash_signature().has_value()) {
+    annotations->Set(kCrashSignatureKey, *report.crash_signature());
   }
 
-  if (report.has_is_fatal()) {
-    annotations->Set(kIsFatalKey, report.is_fatal());
+  if (report.is_fatal().has_value()) {
+    annotations->Set(kIsFatalKey, *report.is_fatal());
   }
 
-  if (report.has_weight()) {
-    annotations->Set(kWeightKey, report.weight());
+  if (report.weight().has_value()) {
+    annotations->Set(kWeightKey, *report.weight());
   }
 
   // Dart-specific annotations.
-  if (report.has_specific_report() && report.specific_report().is_dart()) {
+  if (report.specific_report().has_value() && report.specific_report()->dart().has_value()) {
     annotations->Set(kDartTypeKey, kDartTypeValue);
 
-    const ::fuchsia::feedback::RuntimeCrashReport& dart_report = report.specific_report().dart();
-    if (dart_report.has_exception_type()) {
-      annotations->Set(kDartExceptionRuntimeTypeKey, dart_report.exception_type());
+    const fuchsia_feedback::RuntimeCrashReport& dart_report =
+        report.specific_report()->dart().value();
+    if (dart_report.exception_type().has_value()) {
+      annotations->Set(kDartExceptionRuntimeTypeKey, *dart_report.exception_type());
     } else {
       FX_LOGS(WARNING) << "no Dart exception type to attach to crash report";
     }
 
-    if (dart_report.has_exception_message()) {
-      annotations->Set(kDartExceptionMessageKey, dart_report.exception_message());
+    if (dart_report.exception_message().has_value()) {
+      annotations->Set(kDartExceptionMessageKey, *dart_report.exception_message());
     } else {
       FX_LOGS(WARNING) << "no Dart exception message to attach to crash report";
     }
 
-    if (dart_report.has_exception_stack_trace()) {
+    if (dart_report.exception_stack_trace().has_value()) {
       if (const auto [is_unsymbolicated, dart_modules] =
-              ParseDartModules(dart_report.exception_stack_trace());
+              ParseDartModules(*dart_report.exception_stack_trace());
           dart_modules.has_value()) {
         annotations->Set(kDartModulesKey, *dart_modules);
       } else if (is_unsymbolicated) {
@@ -122,69 +123,69 @@ void ExtractAnnotationsAndAttachments(fuchsia::feedback::CrashReport report,
   }
 
   // FuchsiaTextBacktrace-specific annotations.
-  if (report.has_specific_report() && report.specific_report().is_text_backtrace()) {
-    const ::fuchsia::feedback::TextBacktraceCrashReport& text_backtrace_report =
-        report.specific_report().text_backtrace();
-    if (text_backtrace_report.has_process_name()) {
-      annotations->Set(kProcessNameKey, text_backtrace_report.process_name());
+  if (report.specific_report().has_value() &&
+      report.specific_report()->text_backtrace().has_value()) {
+    const fuchsia_feedback::TextBacktraceCrashReport& text_backtrace_report =
+        report.specific_report()->text_backtrace().value();
+    if (text_backtrace_report.process_name().has_value()) {
+      annotations->Set(kProcessNameKey, *text_backtrace_report.process_name());
     }
-    if (text_backtrace_report.has_process_koid()) {
-      annotations->Set(kProcessKoidKey, text_backtrace_report.process_koid());
+    if (text_backtrace_report.process_koid().has_value()) {
+      annotations->Set(kProcessKoidKey, *text_backtrace_report.process_koid());
     }
-    if (text_backtrace_report.has_thread_name()) {
-      annotations->Set(kThreadNameKey, text_backtrace_report.thread_name());
+    if (text_backtrace_report.thread_name().has_value()) {
+      annotations->Set(kThreadNameKey, *text_backtrace_report.thread_name());
     }
-    if (text_backtrace_report.has_thread_koid()) {
-      annotations->Set(kThreadKoidKey, text_backtrace_report.thread_koid());
+    if (text_backtrace_report.thread_koid().has_value()) {
+      annotations->Set(kThreadKoidKey, *text_backtrace_report.thread_koid());
     }
   }
 
   // Native-specific annotations.
-  if (report.has_specific_report() && report.specific_report().is_native()) {
-    const ::fuchsia::feedback::NativeCrashReport& native_report = report.specific_report().native();
-    if (native_report.has_process_name()) {
-      annotations->Set(kProcessNameKey, native_report.process_name());
+  if (report.specific_report().has_value() && report.specific_report()->native().has_value()) {
+    const fuchsia_feedback::NativeCrashReport& native_report =
+        report.specific_report()->native().value();
+    if (native_report.process_name().has_value()) {
+      annotations->Set(kProcessNameKey, *native_report.process_name());
     }
-    if (native_report.has_process_koid()) {
-      annotations->Set(kProcessKoidKey, native_report.process_koid());
+    if (native_report.process_koid().has_value()) {
+      annotations->Set(kProcessKoidKey, *native_report.process_koid());
     }
-    if (native_report.has_thread_name()) {
-      annotations->Set(kThreadNameKey, native_report.thread_name());
+    if (native_report.thread_name().has_value()) {
+      annotations->Set(kThreadNameKey, *native_report.thread_name());
     }
-    if (native_report.has_thread_koid()) {
-      annotations->Set(kThreadKoidKey, native_report.thread_koid());
+    if (native_report.thread_koid().has_value()) {
+      annotations->Set(kThreadKoidKey, *native_report.thread_koid());
     }
 
     // TODO(https://fxbug.dev/42144363): add module annotations from minidump.
   }
 
   // Default attachments common to all crash reports.
-  if (report.has_attachments()) {
-    for (::fuchsia::feedback::Attachment& attachment : *(report.mutable_attachments())) {
-      (*attachments)[attachment.key] = std::move(attachment.value);
+  if (report.attachments().has_value()) {
+    for (fuchsia_feedback::Attachment& attachment : *report.attachments()) {
+      (*attachments)[attachment.key()] = std::move(attachment.value());
     }
   }
 
   // Native-specific attachment (minidump).
-  if (report.has_specific_report() && report.specific_report().is_native()) {
-    ::fuchsia::feedback::NativeCrashReport& native_report =
-        report.mutable_specific_report()->native();
-    if (native_report.has_minidump()) {
-      *minidump = std::move(*native_report.mutable_minidump());
+  if (report.specific_report().has_value() && report.specific_report()->native().has_value()) {
+    fuchsia_feedback::NativeCrashReport& native_report = report.specific_report()->native().value();
+    if (native_report.minidump().has_value()) {
+      *minidump = std::move(*native_report.minidump());
     } else {
       // We don't want to overwrite the client-provided signature.
-      if (!report.has_crash_signature()) {
+      if (!report.crash_signature().has_value()) {
         annotations->Set(kCrashSignatureKey, "fuchsia-no-minidump");
       }
     }
   }
 
   // Dart-specific attachment (text stack trace).
-  if (report.has_specific_report() && report.specific_report().is_dart()) {
-    ::fuchsia::feedback::RuntimeCrashReport& dart_report = report.mutable_specific_report()->dart();
-    if (dart_report.has_exception_stack_trace()) {
-      (*attachments)[kDartExceptionStackTraceKey] =
-          std::move(*dart_report.mutable_exception_stack_trace());
+  if (report.specific_report().has_value() && report.specific_report()->dart().has_value()) {
+    fuchsia_feedback::RuntimeCrashReport& dart_report = report.specific_report()->dart().value();
+    if (dart_report.exception_stack_trace().has_value()) {
+      (*attachments)[kDartExceptionStackTraceKey] = std::move(*dart_report.exception_stack_trace());
     } else {
       FX_LOGS(WARNING) << "no Dart exception stack trace to attach to crash report";
       annotations->Set(kCrashSignatureKey, "fuchsia-no-dart-stack-trace");
@@ -192,12 +193,12 @@ void ExtractAnnotationsAndAttachments(fuchsia::feedback::CrashReport report,
   }
 
   // FuchsiaTextBacktrace-specific attachment.
-  if (report.has_specific_report() && report.specific_report().is_text_backtrace()) {
-    ::fuchsia::feedback::TextBacktraceCrashReport& text_backtrace_report =
-        report.mutable_specific_report()->text_backtrace();
-    if (text_backtrace_report.has_fuchsia_backtrace()) {
-      (*attachments)[kBacktraceFilenameKey] =
-          std::move(*text_backtrace_report.mutable_fuchsia_backtrace());
+  if (report.specific_report().has_value() &&
+      report.specific_report()->text_backtrace().has_value()) {
+    fuchsia_feedback::TextBacktraceCrashReport& text_backtrace_report =
+        report.specific_report()->text_backtrace().value();
+    if (text_backtrace_report.fuchsia_backtrace().has_value()) {
+      (*attachments)[kBacktraceFilenameKey] = std::move(*text_backtrace_report.fuchsia_backtrace());
     } else {
       FX_LOGS(WARNING) << "no text backtrace to attach to crash report";
       annotations->Set(kCrashSignatureKey, "fuchsia-no-fuchsia-text-backtrace");
@@ -278,20 +279,21 @@ AnnotationMap GetReportAnnotations(const feedback::Annotations& snapshot_annotat
   return added_annotations;
 }
 
-fpromise::result<Report> MakeReport(fuchsia::feedback::CrashReport report,
+fpromise::result<Report> MakeReport(fuchsia_feedback::CrashReport report,
                                     const ProgramShortname& program_shortname,
                                     const ReportId report_id, const std::string& snapshot_uuid,
                                     const feedback::Annotations& snapshot_annotations,
                                     const std::optional<timekeeper::time_utc>& current_time,
                                     Product product, const bool is_hourly_report) {
-  const std::string program_name = report.program_name();
+  FX_CHECK(report.program_name().has_value());
+  const std::string program_name = *report.program_name();
 
   AnnotationMap annotations = {
       {feedback::kDebugReportUuid, uuid::Generate()},
       {feedback::kOSNameKey, "Fuchsia"},
   };
-  std::map<std::string, fuchsia::mem::Buffer> attachments;
-  std::optional<fuchsia::mem::Buffer> minidump;
+  std::map<std::string, fuchsia_mem::Buffer> attachments;
+  std::optional<fuchsia_mem::Buffer> minidump;
 
   // Optional annotations and attachments filled by the client.
   ExtractAnnotationsAndAttachments(std::move(report), &annotations, &attachments, &minidump);

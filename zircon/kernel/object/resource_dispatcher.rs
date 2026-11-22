@@ -5,7 +5,8 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
-use crate::ksync_kernel::{TrackedCriticalMutex, TrackedMutex, declare_singleton_critical_mutex};
+use crate::ksync_kernel::{TrackedCriticalMutex, TrackedMutex};
+use core::convert::Infallible;
 #[cfg(console_enabled)]
 use core::ffi::CStr;
 use core::mem::MaybeUninit;
@@ -17,7 +18,8 @@ use fbl::{
 use init::LkInitLevel;
 #[cfg(console_enabled)]
 use kprint::kprintln;
-use ksync::{KCell, KMutex, LockToken, PhantomMutex, guarded, kcell_init, lock};
+use ksync::{KCell, KMutex, KMutexGuard, LockToken, PhantomMutex, guarded, kcell_init, lock};
+use lazy_init::{LazyInit, NoCheck};
 use object_constants_rs::{
     kResourceDispatcherStateAlign, kResourceDispatcherStateOffset, kResourceDispatcherStateSize,
 };
@@ -113,7 +115,7 @@ impl ResourceStorage {
     /// Returns a reference to the global static storage.
     fn get() -> &'static Self {
         // SAFETY: `STATIC_STORAGE` is initialized during early boot via `lk_init_hook` at
-        // `LK_INIT_LEVEL_PLATFORM_EARLY`, before any concurrent access or dispatcher creation.
+        // `LK_INIT_LEVEL_EARLIEST`, before any concurrent access or dispatcher creation.
         unsafe { &*ptr::addr_of!(STATIC_STORAGE).cast::<ResourceStorage>() }
     }
 
@@ -132,7 +134,29 @@ impl ResourceStorage {
 // list. Shared allocations will check that no exclusive reservation exists, but then release the
 // region back to the allocator. Likewise, exclusive allocations will check to ensure that the
 // region has not already been allocated as a shared region by checking the static resource list.
-declare_singleton_critical_mutex!(ResourcesLock);
+#[guarded]
+struct ResourcesMutex {
+    #[mutex]
+    lock: KMutex<TrackedCriticalMutex>,
+}
+
+type ResourcesLock = ResourcesMutexLockClass;
+
+static RESOURCES_LOCK: LazyInit<ResourcesMutex, NoCheck> = LazyInit::uninit();
+
+impl ResourcesLock {
+    #[inline]
+    fn get() -> &'static KMutex<Self, TrackedCriticalMutex> {
+        // SAFETY: `RESOURCES_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` before any
+        // `ResourceDispatcher` or `ResourceStorage` access.
+        &unsafe { RESOURCES_LOCK.get_unchecked() }.lock
+    }
+
+    #[inline]
+    fn lock() -> impl PinInit<KMutexGuard<'static, Self, TrackedCriticalMutex>, Infallible> {
+        Self::get().lock()
+    }
+}
 
 // A single global list is used for all resources so that root and hypervisor resources can still
 // be tracked, and filtering can be done via client tools/commands when displaying the list is
@@ -142,20 +166,19 @@ static mut STATIC_STORAGE: MaybeUninit<ResourceStorage> = MaybeUninit::uninit();
 // Global region pool shared across all region allocators, allocated on first use.
 static REGION_POOL: KCell<Option<RefPtr<RegionPool>>, ResourcesLock> = KCell::new(None);
 
-/// Initializes `STATIC_STORAGE` during early boot before secondary CPUs or threads are started.
+/// Initializes `RESOURCES_LOCK` and `STATIC_STORAGE` during early boot before secondary CPUs or
+/// threads are started.
 fn init_resource_storage(_level: LkInitLevel) {
     // SAFETY: Called once during single-threaded early boot before any other CPUs or threads exist.
     unsafe {
+        let Ok(()) = Pin::static_ref(&RESOURCES_LOCK)
+            .init_pin(pin_init!(ResourcesMutex { lock <- KMutex::init() }));
         let storage = &mut *ptr::addr_of_mut!(STATIC_STORAGE);
-        let _ = storage.write_pin_init(ResourceStorage::init());
+        let Ok(_) = storage.write_pin_init(ResourceStorage::init());
     }
 }
 
-init::lk_init_hook!(
-    init_resource_storage,
-    init_resource_storage,
-    init::LK_INIT_LEVEL_PLATFORM_EARLY
-);
+init::lk_init_hook!(init_resource_storage, init_resource_storage, init::LK_INIT_LEVEL_EARLIEST);
 
 /// Returns the global region pool, creating it on first use.
 fn get_region_pool(token: &mut LockToken<'_, ResourcesLock>) -> Result<RefPtr<RegionPool>, Status> {

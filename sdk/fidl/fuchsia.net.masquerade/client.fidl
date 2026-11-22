@@ -18,20 +18,9 @@ type Error = enum {
     /// One or more of the configuration fields was invalid (e.g. `src_if` is 0).
     INVALID_ARGUMENTS = 1;
 
-    /// The provided `src_if` was not found.
-    NOT_FOUND = 2;
-
     /// The provided `src_subnet`/`output_interface` pair already exist in the Nat
     /// rules.
-    ALREADY_EXISTS = 3;
-
-    /// The call to `fuchsia.net.filter.deprecated.Filter::UpdateNatRules`
-    /// returned `BadRule`.
-    BAD_RULE = 4;
-
-    /// The attempt to update the Nat rules failed with `GenerationMismatch` too
-    /// many times.
-    RETRY_EXCEEDED = 5;
+    ALREADY_EXISTS = 2;
 };
 
 /// Control provides a IP masquerade instance.

@@ -16089,4 +16089,41 @@ TEST_F(Flatland2Test, LayerMutatorsLeaveDirtySignalClear) {
   RunLoopUntilIdle();
 }
 
+TEST_F(Flatland2Test, NotifyExpectedPresentFailsWhenDisabled) {
+  std::optional<std::string> error_log;
+  auto flatland = FlatlandTest::CreateFlatland();
+  flatland->SetErrorReporter(std::make_unique<TestErrorReporter>(error_log));
+
+  flatland->NotifyExpectedPresent(zx::time(100'000'000), zx::nsec(8'333'333));
+  ASSERT_TRUE(error_log.has_value());
+  Present(flatland, false);
+}
+
+TEST_F(Flatland2Test, NotifyExpectedPresentForwardsHintsAndSanitizesNegativeValues) {
+  std::optional<std::string> error_log;
+  FlatlandConfig config;
+  config.schedule_asap = true;
+  auto flatland = CreateFlatland2(config, &error_log);
+
+  // Consume initial dirty flag.
+  Present(flatland, true);
+  EXPECT_TRUE(uber_struct_system_->MustRecomputeSceneState());
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+
+  EXPECT_CALL(*mock_flatland_presenter_,
+              NotifyExpectedPresent(flatland->GetSessionId(), zx::time(555'000'000),
+                                    zx::nsec(8'333'333), /*schedule_asap=*/true))
+      .Times(1);
+  flatland->NotifyExpectedPresent(zx::time(555'000'000), zx::nsec(8'333'333));
+
+  EXPECT_CALL(*mock_flatland_presenter_,
+              NotifyExpectedPresent(flatland->GetSessionId(), zx::time(0), zx::duration(0),
+                                    /*schedule_asap=*/true))
+      .Times(1);
+  flatland->NotifyExpectedPresent(zx::time(-10), zx::nsec(-5));
+
+  EXPECT_FALSE(error_log.has_value());
+  EXPECT_FALSE(uber_struct_system_->MustRecomputeSceneState());
+}
+
 }  // namespace flatland::test

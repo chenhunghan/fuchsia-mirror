@@ -2,9 +2,316 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [
+        ":auto-brightness_tests",
+        ":brightness_manager_tests_test",
+        ":library_tests",
+        ":test-helpers-tests",
+    ],
+    visibility = ["//src/ui:__pkg__"],
+)
 
 exports_files(
     ["meta/brightness_manager.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/backlight.rs",
+        "src/lib.rs",
+        "src/sensor.rs",
+    ],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:derivative",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.backlight:fuchsia.hardware.backlight_rust",
+        "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust",
+        "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Disambiguates the GN test binary output name in ${root_out_dir}.
+    crate_name = "brightness_manager_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":test-helpers",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures-util",
+    ],
+)
+
+fx_unittest_package(
+    name = "library_tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":lib_test"],
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether bin should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/control.rs",
+        "src/main.rs",
+        "src/sender_channel.rs",
+    ],
+    binary_name = "brightness_manager",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":brightness_manager_config",
+        ":lib",
+        "//sdk/fidl/fuchsia.ui.brightness:fuchsia.ui.brightness_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/watch_handler",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:splines",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Preserves the GN `rustc_binary(name = "brightness_manager", with_unit_tests = true)` test binary name.
+    crate_name = "brightness_manager_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fidl/rust/fidl"],
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether auto-brightness_bin should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+rustc_binary(
+    name = "auto-brightness_bin",
+    srcs = [
+        "src/auto-brightness.rs",
+        "src/led.rs",
+    ],
+    binary_name = "auto_brightness",
+    crate_root = "src/auto-brightness.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    # Pre-existing bitrot in unwired GN binary: src/led.rs imports LightMarker only for #[cfg(test)].
+    rustc_flags = ["-Aunused-imports"],  # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.hardware.light:fuchsia.hardware.light_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+    ],
+)
+
+rustc_test(
+    name = "auto-brightness_bin_test",
+    crate = ":auto-brightness_bin",
+    rustc_flags = ["-Aunused-imports"],  # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:futures"],
+)
+
+fx_packaged_binary(
+    name = "auto-brightness_bin_packaged",
+    binary = ":auto-brightness_bin",
+    binary_name = "auto_brightness",
+)
+
+fx_component_manifest(
+    name = "auto-brightness_manifest",
+    component_name = "auto-brightness",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/auto-brightness.cml",
+)
+
+fx_component(
+    name = "auto-brightness_component",
+    compiled_manifest = ":auto-brightness_manifest",
+    deps = [":auto-brightness_bin_packaged"],
+)
+
+fx_unittest_package(
+    name = "auto-brightness_tests",
+    unit_tests = [":auto-brightness_bin_test"],
+)
+
+rustc_library(
+    name = "test-helpers",
+    testonly = True,
+    srcs = ["src/test_helpers.rs"],
+    crate_root = "src/test_helpers.rs",
+    edition = "2024",
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+rustc_test(
+    name = "test-helpers_test",
+    crate = ":test-helpers",
+    # Preserves the GN `rustc_library("test-helpers", with_unit_tests = true)` test binary name.
+    crate_name = "test_helpers_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_package(
+    name = "test-helpers-tests",
+    unit_tests = [":test-helpers_test"],
+)
+
+fx_component_manifest(
+    name = "brightness_manager_manifest",
+    component_name = "brightness_manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/brightness_manager.cml",
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "brightness_manager",
+)
+
+fx_component(
+    name = "brightness_manager_component",
+    compiled_manifest = ":brightness_manager_manifest",
+    deps = [":bin_packaged"],
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "brightness_manager_config",
+    cm_label = ":brightness_manager_manifest",
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "brightness_manager_bin_test",
+)
+
+fx_component_manifest(
+    name = "brightness_manager_test_driver_manifest",
+    testonly = True,
+    component_name = "brightness_manager_test_driver",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/brightness_manager_test_driver.cml",
+)
+
+fx_component(
+    name = "brightness_manager_test_driver",
+    testonly = True,
+    compiled_manifest = ":brightness_manager_test_driver_manifest",
+    deps = [":bin_test_packaged"],
+)
+
+fx_component_manifest(
+    name = "brightness_manager_test_manifest",
+    testonly = True,
+    component_name = "brightness_manager_test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/brightness_manager_test.cml",
+)
+
+fx_test_component(
+    name = "brightness_manager_test",
+    compiled_manifest = ":brightness_manager_test_manifest",
+)
+
+# Needs reviewer attention (bazel2gn skip): meta/brightness_manager_test.cml
+# hardcodes absolute
+# fuchsia-pkg://fuchsia.com/brightness_manager_tests#meta/brightness_manager_test_driver.cm,
+# which fails hermetic package resolution when bazel2gn renames the GN test
+# package to brightness_manager_tests-gn; TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+fx_package(
+    name = "brightness_manager_tests",
+    components = [":brightness_manager_test_driver"],
+    test_components = [":brightness_manager_test"],
+)
+
+# Needs reviewer attention (bazel2gn skip): meta/brightness_manager_test.cml
+# hardcodes absolute
+# fuchsia-pkg://fuchsia.com/brightness_manager_tests#meta/brightness_manager_test_driver.cm,
+# which fails hermetic package resolution when bazel2gn renames the GN test
+# package to brightness_manager_tests-gn; TODO(https://fxbug.dev/570694755).
+# @bazel2gn:skip
+fx_test(
+    name = "brightness_manager_tests_test",
+    package = ":brightness_manager_tests",
 )

@@ -218,7 +218,7 @@ class TestDapFramework(unittest.IsolatedAsyncioTestCase):
             def kill(self) -> None:
                 pass
 
-        self.framework.proc = FakeProc()  # type: ignore
+        self.framework.proc = FakeProc()
 
         # Start the server log task
         self.framework._server_log_task = asyncio.create_task(

@@ -2,20 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fho::{FhoEnvironment, TryFromEnv};
+use crate::target_interface;
+use fho::{FhoEnvironment, TargetNeed, TryFromEnv};
 use std::net::SocketAddr;
 use std::ops::Deref;
-use target_behavior::target_interface;
 
 /// Holder struct for the target's SshAddr.
 #[derive(Debug, Clone)]
 pub struct SshAddrHolder(SocketAddr);
 
 impl TryFromEnv for SshAddrHolder {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
-        let connector = target_env.init_connection_behavior(env.environment_context()).await?;
+        let connector = target_env.init(env.environment_context());
         let addr = connector
             .resolution()
             .await

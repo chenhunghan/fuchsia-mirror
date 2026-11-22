@@ -20,20 +20,21 @@
 
 #include <ktl/tuple.h>
 #include <ktl/utility.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
+#include <phys/allocation/new.h>
 #include <phys/boot-options.h>
-#include <phys/elf-image.h>
+#include <phys/elf/image.h>
 #include <phys/handoff-prep/handoff-prep.h>
 #include <phys/handoff/boot-constants.h>
 #include <phys/handoff/handoff.h>
 #include <phys/kernel-package/kernel-package.h>
-#include <phys/log/log.h>
-#include <phys/new.h>
+#include <phys/output/log.h>
+#include <phys/output/stdout.h>
+#include <phys/output/uart.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
-#include <phys/symbolize.h>
-#include <phys/uart/driver.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
 
 #include <ktl/enforce.h>
 
@@ -71,7 +72,7 @@ void FindTestRamReservation(RamReservation& ram) {
         if (pool.UpdateRamSubranges(memalloc::Type::kTestRamReserve, aligned_start, ram.size)
                 .is_ok()) {
           ram.paddr = aligned_start;
-          debugf("%s: kernel.test.ram.reserve carve-out: [%#" PRIx64 ", %#" PRIx64 ")\n",
+          printf("%s: kernel.test.ram.reserve carve-out: [%#" PRIx64 ", %#" PRIx64 ")\n",
                  ProgramName(), aligned_start, aligned_end);
           return;
         }
@@ -245,7 +246,7 @@ void HandoffPrep::SetInstrumentation() {
 
   // LlvmProfdata reads the running executable's own instrumentation
   // sections.
-  const ElfImage& self = gSymbolize->self();
+  const ElfImage& self = Self();
   LlvmProfdata profdata;
   ZX_DEBUG_ASSERT(self.build_id());
   profdata.Init(self.build_id()->desc);
@@ -410,13 +411,11 @@ void HandoffPrep::FinishVm() {
   handoff_ranges = ktl::span(handoff_ranges.begin(), it);
   handoff()->memory = handoff()->memory.subspan(0, handoff_ranges.size());
 
-  if (BootOptions::Get()->phys_verbose) {
-    printf("%s: Kernel VM handoff:\n", ProgramName());
-    handoff()->LogVm(ProgramName());
+  printf("%s: Kernel VM handoff:\n", ProgramName());
+  handoff()->LogVm(ProgramName());
 
-    printf("%s: Physical memory handed off to the kernel:\n", ProgramName());
-    memalloc::PrintRanges(handoff_ranges, ProgramName());
-  }
+  printf("%s: Physical memory handed off to the kernel:\n", ProgramName());
+  memalloc::PrintRanges(handoff_ranges, ProgramName());
 }
 
 BootOptions& HandoffPrep::SetBootOptions(const BootOptions& boot_options) {
@@ -508,7 +507,7 @@ PhysElfImage HandoffPrep::MakePhysElfImage(KernelStorage::Bootfs::iterator file,
       .vmar = {.size = elf.vaddr_size()},
       .info = {
           .relative_entry_point = elf.entry(),
-          .stack_size = elf.stack_size(),
+          .stack_size = stdbind::optional<size_t>{elf.stack_size()},
       }};
 
   fbl::AllocChecker ac;
@@ -556,8 +555,8 @@ PhysElfImage HandoffPrep::MakePhysElfImage(KernelStorage::Bootfs::iterator file,
   SetInstrumentation();
 
   // This transfers the log, so logging after this is not preserved.
-  // Extracting the log buffer will automatically detach it from stdout.
   // TODO(mcgrathr): Rename to physboot.log with some prefix.
+  gPhysStdout.clear_log();
   PublishLog("i/logs/physboot", ktl::move(*ktl::exchange(gLog, nullptr)));
 
   ZirconAbi abi = ConstructKernelAddressSpace(uart);
@@ -573,9 +572,9 @@ PhysElfImage HandoffPrep::MakePhysElfImage(KernelStorage::Bootfs::iterator file,
 
   // One last log before the next line where we effectively disable logging
   // altogether.
-  debugf("%s: Handing off at physical load address %#" PRIxPTR ", entry %p...\n",
+  printf("%s: Handing off at physical load address %#" PRIxPTR ", entry %p...\n",
          gSymbolize->name(), kernel_.physical_load_address(), abi_spec_->entry);
-  debugf("%s: (gdb) add-symbol-file kernel_%.*s/vmzircon %#" PRIxPTR "\n", gSymbolize->name(),
+  printf("%s: (gdb) add-symbol-file kernel_%.*s/vmzircon %#" PRIxPTR "\n", gSymbolize->name(),
          static_cast<int>(kMachineFileName.size()), kMachineFileName.data(),
          abi_spec_->text_start.address());
 

@@ -251,7 +251,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_foreigntypeinresponseusedthroughcompose::Top::GetFoo>::TransactionalResponse(const ::test_bottom::wire::Foo& foo)
     : body(::fidl::WireResponse<::test_foreigntypeinresponseusedthroughcompose::Top::GetFoo>(foo)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_foreigntypeinresponseusedthroughcompose::kTop_GetFoo_Ordinal, ::test_foreigntypeinresponseusedthroughcompose::kTop_GetFoo_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_foreigntypeinresponseusedthroughcompose::kTop_GetFoo_Ordinal, ::test_foreigntypeinresponseusedthroughcompose::kTop_GetFoo_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_foreigntypeinresponseusedthroughcompose::Top::GetFoo>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_foreigntypeinresponseusedthroughcompose::kTop_GetFoo_Ordinal, ::test_foreigntypeinresponseusedthroughcompose::kTop_GetFoo_DynamicFlags);

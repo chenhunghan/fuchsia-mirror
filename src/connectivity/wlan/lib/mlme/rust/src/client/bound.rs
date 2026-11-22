@@ -375,6 +375,7 @@ impl<'a, D: DeviceOps> BoundClient<'a, D> {
                     dst_addr: dst_addr.to_array(),
                     data: eapol_frame.to_vec(),
                 },
+                wake_lease: None,
             })
             .map_err(|e| e.into())
     }
@@ -514,6 +515,7 @@ impl<'a, D: DeviceOps> BoundClient<'a, D> {
                     reason_code,
                     locally_initiated: locally_initiated.0,
                 },
+                wake_lease: None,
             })
             .unwrap_or_else(|e| error!("error sending MLME-DEAUTHENTICATE.indication: {}", e));
     }
@@ -532,6 +534,7 @@ impl<'a, D: DeviceOps> BoundClient<'a, D> {
                     reason_code,
                     locally_initiated: locally_initiated.0,
                 },
+                wake_lease: None,
             })
             .unwrap_or_else(|e| error!("error sending MLME-DISASSOCIATE.indication: {}", e));
     }

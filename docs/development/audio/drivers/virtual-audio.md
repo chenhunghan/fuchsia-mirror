@@ -42,7 +42,7 @@ Key capabilities include:
 * **Audio Device Registry integration:** Serves as the primary mock and test
   driver for the Audio Device Registry service.
 
-### Legacy virtual audio driver (`virtual-audio-legacy`)
+### Legacy virtual audio driver (virtual-audio-legacy) {:#legacy-virtual-audio-driver-virtual-audio-legacy}
 
 The legacy virtual audio driver is implemented using the legacy DDK (DFv1) and
 provides virtual devices implementing deprecated audio protocols:

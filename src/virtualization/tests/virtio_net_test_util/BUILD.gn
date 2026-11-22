@@ -47,14 +47,12 @@ rustc_binary("virtio_net_test_util") {
   if (is_fuchsia) {
     deps = [
       "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
-      "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
       "//sdk/rust/zx",
       "//src/connectivity/lib/network-device/rust",
-      "//src/lib/fdio/rust:fdio",
       "//src/lib/fidl/rust/fidl",
       "//src/lib/fuchsia",
       "//src/lib/fuchsia-async",
-      "//src/lib/fuchsia-fs",
+      "//src/lib/fuchsia-component",
       "//src/lib/network/fidl_fuchsia_net_ext",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:clap",

@@ -5,7 +5,7 @@ library llcpptest.flexible.test;
 
 using zx;
 
-type FlexibleXUnion = flexible resource union {
+type FlexibleUnion = flexible resource union {
     1: want_more_than_30_bytes array<uint8, 30>;
     2: want_more_than_4_handles array<zx.Handle:optional, 4>;
 };
@@ -17,20 +17,20 @@ type FlexibleTable = resource table {
     2: want_more_than_4_handles_at_ordinal_4 array<zx.Handle:optional, 4>;
 };
 
-/// The server will be implemented manually to purposefully return xunion/tables
+/// The server will be implemented manually to purposefully return union/tables
 /// with an unknown ordinal.
 closed protocol ReceiveFlexibleEnvelope {
-    /// Receive a xunion with an unknown ordinal (suppose coming from a newer
+    /// Receive a union with an unknown ordinal (suppose coming from a newer
     /// server) which contains more bytes than the current max message size.
-    strict GetUnknownXUnionMoreBytes() -> (resource struct {
-        xu FlexibleXUnion;
+    strict GetUnknownUnionMoreBytes() -> (resource struct {
+        xu FlexibleUnion;
     });
 
-    /// Receive a xunion with an unknown ordinal (suppose coming from a newer
+    /// Receive a union with an unknown ordinal (suppose coming from a newer
     /// server) which contains more handles than the current max message handle
     /// count.
-    strict GetUnknownXUnionMoreHandles() -> (resource struct {
-        xu FlexibleXUnion;
+    strict GetUnknownUnionMoreHandles() -> (resource struct {
+        xu FlexibleUnion;
     });
 
     /// Receive a table with an unknown ordinal (suppose coming from a newer
@@ -46,14 +46,14 @@ closed protocol ReceiveFlexibleEnvelope {
         t FlexibleTable;
     });
 
-    /// Receive a xunion with an unknown ordinal (suppose coming from a newer
+    /// Receive a union with an unknown ordinal (suppose coming from a newer
     /// server) which contains more bytes than the current max message size.
-    strict -> OnUnknownXUnionMoreBytes(FlexibleXUnion);
+    strict -> OnUnknownUnionMoreBytes(FlexibleUnion);
 
-    /// Receive a xunion with an unknown ordinal (suppose coming from a newer
+    /// Receive a union with an unknown ordinal (suppose coming from a newer
     /// server) which contains more handles than the current max message handle
     /// count.
-    strict -> OnUnknownXUnionMoreHandles(FlexibleXUnion);
+    strict -> OnUnknownUnionMoreHandles(FlexibleUnion);
 
     /// Receive a table with an unknown ordinal (suppose coming from a newer
     /// server) which contains more bytes than the current max message size.
@@ -65,24 +65,24 @@ closed protocol ReceiveFlexibleEnvelope {
     strict -> OnUnknownTableMoreHandles(FlexibleTable);
 };
 
-type StrictBoundedXUnion = strict union {
+type StrictBoundedUnion = strict union {
     1: v vector<uint8>:200;
 };
 
-type StrictUnboundedXUnion = strict union {
+type StrictUnboundedUnion = strict union {
     1: v vector<uint8>;
 };
 
 // TODO(yifeit): Test strict tables once they are supported in fidlc.
 
-/// Test that the response to GetBoundedXUnion could be allocated on the stack,
-/// while that to GetUnboundedXUnion is allocated on the heap, through
+/// Test that the response to GetBoundedUnion could be allocated on the stack,
+/// while that to GetUnboundedUnion is allocated on the heap, through
 /// compile-time assertions.
 closed protocol ReceiveStrictEnvelope {
-    strict GetBoundedXUnion() -> (struct {
-        xu StrictBoundedXUnion;
+    strict GetBoundedUnion() -> (struct {
+        xu StrictBoundedUnion;
     });
-    strict GetUnboundedXUnion() -> (struct {
-        xu StrictUnboundedXUnion;
+    strict GetUnboundedUnion() -> (struct {
+        xu StrictUnboundedUnion;
     });
 };

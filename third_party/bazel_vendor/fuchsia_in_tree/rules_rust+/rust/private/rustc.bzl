@@ -862,7 +862,11 @@ def collect_inputs(
     if build_env_file:
         build_env_files = list(build_env_files)
         build_env_files.append(build_env_file)
-    compile_inputs = depset(build_env_files + lint_files, transitive = [build_script_compile_inputs, compile_inputs])
+    crate_default_rustc_flags_files = getattr(crate_info, "default_rustc_flags_files", [])
+    crate_rustc_flags_files = getattr(crate_info, "rustc_flags_files", [])
+    default_rustc_flags_files = crate_default_rustc_flags_files if crate_default_rustc_flags_files else getattr(files, "default_rustc_flags_files", [])
+    rustc_flags_files = crate_rustc_flags_files if crate_rustc_flags_files else getattr(files, "rustc_flags_files", [])
+    compile_inputs = depset(build_env_files + lint_files + default_rustc_flags_files + rustc_flags_files, transitive = [build_script_compile_inputs, compile_inputs])
     return compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs
 
 def _will_emit_object_file(emit):
@@ -1450,7 +1454,8 @@ def construct_arguments(
                 env["CARGO_BIN_EXE_" + env_basename] = dep_crate_info.output.short_path
 
     # Add environment variables from the Rust toolchain.
-    env.update(toolchain.env)
+    if _use_toolchain_extra_flags(ctx, toolchain, getattr(crate_info, "disable_extra_rustc_flags", False)):
+        env.update(toolchain.env)
 
     # Update environment with user provided variables.
     if skip_expanding_rustc_env:
@@ -1495,7 +1500,7 @@ def construct_arguments(
     # Fuchsia: Only extract `-Zallow-features=` when there is a feature config
     # to merge it with. Otherwise, pass toolchain-wide `-Zallow-features=`
     # through unchanged, as rules_rust <= 0.69 did, so that it is enforced.
-    extra_rustc_flags = collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type)
+    extra_rustc_flags = collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type, disable_extra_rustc_flags = getattr(crate_info, "disable_extra_rustc_flags", False))
     if getattr(ctx.attr, "unstable_rust_features_config", None):
         extra_rustc_flags = _extract_allowed_unstable_features_from_flags(
             extra_rustc_flags,
@@ -1508,6 +1513,26 @@ def construct_arguments(
         # require_explicit_unstable_features makes no sense when all features are allowed anyway
         if require_explicit_unstable_features:
             process_wrapper_flags.add("--require-explicit-unstable-features", "true")
+
+    # Response files containing surviving toolchain/macro defaults when
+    # `extra_rustc_flags_feature` is disabled on a target. Emitted before
+    # `extra_rustc_flags` (CLI `//rust/settings:extra_rustc_flag*` and
+    # `unstable_rust_features_config`) and `rust_flags` (`lint_config`) so
+    # CLI overrides, allowed unstable features, and target lint allowances
+    # still win. Passing `File` objects via `Args.add_all(format_each = "@%s")`
+    # instead of `$(location ...)` strings in `rustc_flags` lets Bazel's path
+    # mapping (`--experimental_output_paths=strip`) rewrite `@bazel-out/<cfg>/...`
+    # at execution time while keeping `supports-path-mapping` enabled.
+    default_rustc_flags_files = getattr(crate_info, "default_rustc_flags_files", None)
+    if not default_rustc_flags_files:
+        default_rustc_flags_files = [
+            f
+            for t in getattr(attr, "default_rustc_flags_files", [])
+            for f in t[DefaultInfo].files.to_list()
+        ]
+    if default_rustc_flags_files:
+        rustc_flags.add_all(default_rustc_flags_files, format_each = "@%s")
+
     rustc_flags.add_all(extra_rustc_flags, map_each = map_flag)
 
     if is_no_std(ctx, toolchain, crate_info.is_test):
@@ -1550,6 +1575,20 @@ def construct_arguments(
                     flag = map_flag(flag)
                 if flag != None:
                     rustc_flags.add(flag)
+
+    # Response files containing target-specific flags, emitted after
+    # `rust_flags` (`lint_config`) so they override `lint_config` defaults,
+    # and before `authored_rustc_flags` (`rustc_flags`) so explicit target
+    # flags still win. Passed as `File` objects to preserve path mapping.
+    rustc_flags_files = getattr(crate_info, "rustc_flags_files", None)
+    if not rustc_flags_files:
+        rustc_flags_files = [
+            f
+            for t in getattr(attr, "rustc_flags_files", [])
+            for f in t[DefaultInfo].files.to_list()
+        ]
+    if rustc_flags_files:
+        rustc_flags.add_all(rustc_flags_files, format_each = "@%s")
 
     # Add target specific flags last, so they can override previous flags
     authored_rustc_flags = getattr(attr, "rustc_flags", [])
@@ -1600,7 +1639,21 @@ def construct_arguments(
 
     return args, env
 
-def collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type):
+def is_extra_rustc_flags_disabled(ctx, toolchain):
+    """Returns True if toolchain-level extra flags and `env` are disabled via `ctx.disabled_features`.
+
+    Note: This only gates `toolchain.extra_rustc_flags`, `toolchain.extra_exec_rustc_flags`,
+    `toolchain.extra_rustc_flags_for_crate_types`,
+    `toolchain.extra_exec_rustc_flags_for_crate_types`, and `toolchain.env`, not
+    command-line `//rust/settings:extra_rustc_flags` build settings.
+    """
+    feature = getattr(toolchain, "extra_rustc_flags_feature", "")
+    return bool(feature) and feature in ctx.disabled_features
+
+def _use_toolchain_extra_flags(ctx, toolchain, disable_extra_rustc_flags = False):
+    return not disable_extra_rustc_flags and not is_extra_rustc_flags_disabled(ctx, toolchain)
+
+def collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type, disable_extra_rustc_flags = False):
     """Gather all 'extra' rustc flags from the target's attributes and toolchain.
 
     Args:
@@ -1608,18 +1661,23 @@ def collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type):
         toolchain (rust_toolchain): The current Rust toolchain.
         crate_root (File): The root file of the crate.
         crate_type (str): The crate type.
+        disable_extra_rustc_flags (bool): Whether toolchain extra flags are disabled.
 
     Returns:
         List[str]: Extra rustc flags.
     """
     flags = []
 
-    if crate_type in toolchain.extra_rustc_flags_for_crate_types.keys():
-        flags.extend(toolchain.extra_rustc_flags_for_crate_types[crate_type])
-
     is_exec = is_exec_configuration(ctx)
-
-    flags.extend(toolchain.extra_exec_rustc_flags if is_exec else toolchain.extra_rustc_flags)
+    if _use_toolchain_extra_flags(ctx, toolchain, disable_extra_rustc_flags):
+        crate_type_flags_map = (
+            getattr(toolchain, "extra_exec_rustc_flags_for_crate_types", {})
+            if is_exec
+            else toolchain.extra_rustc_flags_for_crate_types
+        )
+        if crate_type in crate_type_flags_map:
+            flags.extend(crate_type_flags_map[crate_type])
+        flags.extend(toolchain.extra_exec_rustc_flags if is_exec else toolchain.extra_rustc_flags)
 
     if hasattr(ctx.attr, "_extra_rustc_flags") and not is_exec:
         flags.extend(ctx.attr._extra_rustc_flags[ExtraRustcFlagsInfo].extra_rustc_flags)

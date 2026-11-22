@@ -16,7 +16,7 @@
 
 #include <ktl/optional.h>
 #include <ktl/span.h>
-#include <phys/allocation.h>
+#include <phys/allocation/allocation.h>
 
 // BootZbi represents a bootable ZBI and manages the memory allocation and ZBI
 // protocol details for getting its kernel image and data ZBI in place and
@@ -81,7 +81,7 @@ class BootZbi {
   // Log the address and size details.  This is meant to be nearly the very
   // last thing done before Boot(), perhaps before final handoff details that
   // render it impossible to print later.
-  void Log();
+  void Log(const char* program_name);
 
   // Boot into the kernel loaded by Load(), which must have been called first.
   // This cannot fail and never returns.  If the optional pointer argument is
@@ -129,8 +129,8 @@ class BootZbi {
   }
 
  protected:
-  void LogAddresses() const;
-  static void LogBoot(uint64_t entry);
+  void LogAddresses(const char* program_name) const;
+  static void LogBoot(const char* program_name, uint64_t entry);
 
   bool FixedKernelOverlapsData(uint64_t kernel_load_address) const;
 

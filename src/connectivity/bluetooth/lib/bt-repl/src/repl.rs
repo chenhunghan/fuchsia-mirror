@@ -3,12 +3,11 @@
 // found in the LICENSE file.
 
 use anyhow::{Error, format_err};
+use bstr::{BStr, ByteSlice as _, ByteVec as _};
 use futures::channel::mpsc;
 use futures::executor::block_on;
 use futures::{Sink, SinkExt, Stream, StreamExt};
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
+use line_editor::{ColumnWidth, Config, DEFAULT_COLUMN_COUNT, Editor, ReadlineError};
 use std::future::Future;
 use std::io::{self, Write};
 use std::pin::pin;
@@ -112,18 +111,22 @@ where
     H: ReplHandler,
 {
     let source = Arc::new(source);
-    let config = Config::builder()
-        .auto_add_history(true)
-        .history_ignore_space(true)
-        .completion_type(CompletionType::List)
-        .edit_mode(EditMode::Emacs)
-        .build();
-    let mut editor: Editor<ReplHelper<S>, DefaultHistory> = Editor::with_config(config)?;
-    editor.set_helper(Some(ReplHelper::new(source.clone())));
+    let mut editor = Editor::with_config(
+        Config::default().with_column_width(ColumnWidth::Fixed(DEFAULT_COLUMN_COUNT)),
+    );
+    ReplHelper::new(source.clone()).install(&mut editor);
 
     let (input_thread, lines, acks) = spawn_input_thread(prompt, editor);
     dispatch_loop(&*source, &mut handler, lines, acks, &mut io::stdout()).await;
     input_thread.join().map_err(|_| format_err!("REPL input thread panicked"))?
+}
+
+/// Adds `line` to `editor`'s history if it is non-empty and does not start with
+/// whitespace (matching `history_ignore_space` behavior).
+fn record_history(editor: &mut Editor, line: &BStr) {
+    if !line.is_empty() && !line.starts_with(b" ") && !line.starts_with(b"\t") {
+        let _ = editor.add_history(line);
+    }
 }
 
 /// Spawns a thread that reads lines with `editor` and sends them to the
@@ -132,9 +135,9 @@ where
 ///
 /// The thread exits when the user presses Ctrl-C or Ctrl-D, when reading
 /// fails, or when either channel is closed.
-fn spawn_input_thread<S: CommandSource>(
+fn spawn_input_thread(
     prompt: &'static str,
-    mut editor: Editor<ReplHelper<S>, DefaultHistory>,
+    mut editor: Editor,
 ) -> (thread::JoinHandle<Result<(), Error>>, mpsc::Receiver<String>, mpsc::Sender<()>) {
     let (mut line_sender, line_receiver) = mpsc::channel(0);
     let (ack_sender, mut ack_receiver) = mpsc::channel(0);
@@ -144,6 +147,8 @@ fn spawn_input_thread<S: CommandSource>(
             loop {
                 match editor.readline(prompt) {
                     Ok(line) => {
+                        record_history(&mut editor, line.as_bstr());
+                        let line = Vec::from(line).into_string_lossy();
                         if line_sender.send(line).await.is_err() {
                             return Ok(());
                         }
@@ -274,6 +279,7 @@ fn write_line<W: Write>(out: &mut W, text: &str) {
 
 #[cfg(test)]
 mod tests {
+    use bstr::BString;
     use futures::stream;
 
     use super::*;
@@ -487,5 +493,21 @@ mod tests {
              help <[command]> -- Print help for all commands, or for a single command\n"
         );
         assert_eq!(outcome.ack_count, 6);
+    }
+
+    #[fuchsia::test]
+    fn record_history_ignores_empty_and_leading_space_lines() {
+        let mut editor = Editor::new();
+        record_history(&mut editor, BStr::new(""));
+        record_history(&mut editor, BStr::new(" secret"));
+        record_history(&mut editor, BStr::new("\tsecret"));
+        record_history(&mut editor, BStr::new("ping"));
+        record_history(&mut editor, BStr::new("ping"));
+        record_history(&mut editor, BStr::new("echo hello"));
+
+        assert_eq!(
+            editor.history().entries(),
+            &[BString::from("ping"), BString::from("echo hello")]
+        );
     }
 }

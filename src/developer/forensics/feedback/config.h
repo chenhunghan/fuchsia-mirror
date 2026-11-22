@@ -58,6 +58,14 @@ struct SnapshotExclusionConfig {
   std::set<std::string> excluded_annotations;
 };
 
+// Returns whether Feedback retains the logs of more than one previous boot. If it does, logs are
+// stored in /cache and share a size budget. If it doesn't, the previous boot logs are stored
+// uncompressed in /tmp and do NOT share a size budget with the current boot.
+//
+// TODO(https://fxbug.dev/540147629): Implement once Feedback supports retaining more than one
+// previous boot.
+constexpr bool UsesMultiPreviousBootLogs() { return false; }
+
 // This should match FeedbackInternalConfig in
 // //src/lib/assembly/platform_configuration/src/subsystems/forensics.rs.
 struct FeedbackConfig {

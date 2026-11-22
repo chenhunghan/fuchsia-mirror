@@ -1725,3 +1725,41 @@ fn test_get_region_pointer_aligned() {
     assert_eq!(r.base() % ptr_size, 0);
     assert_eq!(r.size(), 100);
 }
+
+#[cfg(panic = "abort")]
+fn destroy_with_allocated_region_helper(flavor: TestFlavor) {
+    stack_pin_init!(let alloc = RegionAllocator::init());
+    if flavor == TestFlavor::UsePool {
+        let pool = RegionPool::create(REGION_POOL_MAX_SIZE).unwrap();
+        alloc.set_region_pool(pool).unwrap();
+    }
+    alloc.add_region(RegionSpan { base: 0x1000, size: 0x1000 }, AllowOverlap::No).unwrap();
+    // Leak the region handle so `allocated_regions_by_base` still retains the in-flight entry when
+    // `alloc` drops, without risking a UAF in `Region::recycle` if `drop` fails to abort.
+    core::mem::forget(alloc.get_region(0x100, 1).unwrap());
+    // `alloc` is dropped here while the leaked region is still tracked as allocated.
+}
+
+#[cfg(panic = "abort")]
+#[test]
+#[should_panic(expected = "RegionAllocator destroyed with 1 allocated regions still in flight")]
+fn test_destroy_with_allocated_region_from_pool() {
+    destroy_with_allocated_region_helper(TestFlavor::UsePool);
+}
+
+#[cfg(panic = "abort")]
+#[test]
+#[should_panic(expected = "RegionAllocator destroyed with 1 allocated regions still in flight")]
+fn test_destroy_with_allocated_region_from_heap() {
+    destroy_with_allocated_region_helper(TestFlavor::UseHeap);
+}
+
+#[cfg(panic = "abort")]
+#[test]
+#[should_panic(expected = "RegionPool destroyed with 1 regions still allocated")]
+fn test_destroy_pool_with_allocated_region() {
+    let pool = RegionPool::create(REGION_POOL_MAX_SIZE).unwrap();
+    // Allocate a raw Region slot directly from the pool's slab allocator and leak it so `pool` is
+    // dropped with `obj_count() == 1`, directly exercising `RegionPool::drop`.
+    let _leaked = pool.allocator.alloc_raw().unwrap();
+}

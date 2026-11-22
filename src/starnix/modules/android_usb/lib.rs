@@ -147,7 +147,7 @@ impl BytesFileOps for CcToggleEnableSysfsFile {
         let (method, result) = if enable {
             ("ConnectCable", proxy.connect_cable(zx::MonotonicInstant::INFINITE))
         } else {
-            ("DisconnectCable", proxy.disconnect_cable(0, zx::MonotonicInstant::INFINITE))
+            ("DisconnectCable", proxy.disconnect_cable(0, false, zx::MonotonicInstant::INFINITE))
         };
         match result {
             Ok(Ok(())) => {}
@@ -206,13 +206,13 @@ pub fn usb_device_init(kernel: &Arc<Kernel>) -> Result<Device, Errno> {
         Some(registry.objects.platform_device()),
         platform_bus,
         build_device_directory,
-    );
+    )?;
     let i2c_6 = registry.add_bus_device(
         "i2c-6".into(),
         Some(hsi2c),
         i2c_bus.clone(),
         build_device_directory,
-    );
+    )?;
     registry.add_bus_device("i2c-max77759tcpc".into(), Some(i2c_6), i2c_bus, |device, dir| {
         build_device_directory(device, dir);
         dir.entry(
@@ -220,7 +220,7 @@ pub fn usb_device_init(kernel: &Arc<Kernel>) -> Result<Device, Errno> {
             BytesFile::new_node(CcToggleEnableSysfsFile::new()),
             mode!(IFREG, 0o644),
         );
-    });
+    })?;
 
     let kernel_clone = Arc::clone(kernel);
     let device_clone = device.clone();
@@ -438,7 +438,8 @@ mod tests {
             let mut requests = Vec::new();
             while let Some(Ok(req)) = config_stream.next().await {
                 match req {
-                    ConfigurationRequest::DisconnectCable { duration, responder } => {
+                    ConfigurationRequest::DisconnectCable { duration, wait, responder } => {
+                        assert!(!wait);
                         requests.push((false, duration));
                         let _ = responder.send(Ok(()));
                     }

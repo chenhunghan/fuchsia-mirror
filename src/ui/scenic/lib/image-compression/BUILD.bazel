@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["image_compression.cc"],
+    hdrs = ["image_compression.h"],
+    implementation_deps = [
+        "//src/lib/fsl",
+        "//third_party/libpng",
+    ],
+    # Uses Zircon VMOs and Fuchsia-only inspect/sys deps.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/ui/scenic/lib/image-compression/tests:__pkg__",
+        "//src/ui/scenic/lib/screenshot:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.compression.internal:fuchsia.ui.compression.internal_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "image-compression",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "image-compression",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    component_name = "image-compression",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/image_compression.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/ui/scenic:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "image-compression",
+    components = [":component"],
+)

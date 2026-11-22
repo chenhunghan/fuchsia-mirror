@@ -166,4 +166,4 @@ two drawbacks to this approach:
 None
 
 <!-- xrefs -->
-[using-atomics]: /docs/contribute/governance/rfcs/0012_zircon_discardable_memory.md#faster_locking_api_with_atomics
+[using-atomics]: /docs/contribute/governance/rfcs/0012_zircon_discardable_memory.md#faster-locking-api-with-atomics

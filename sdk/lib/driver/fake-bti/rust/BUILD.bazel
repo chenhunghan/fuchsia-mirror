@@ -1,0 +1,63 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fake_bti_rust_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_library(
+    name = "ffi-bridge",
+    srcs = [
+        "ffi.cc",
+        "ffi.h",
+    ],
+    implementation_deps = ["//sdk/lib/driver/fake-bti/cpp"],
+    visibility = ["//visibility:private"],
+    alwayslink = True,
+)
+
+# ffi-bridge is C++, so Rust binaries that link fake_bti in GN need the C++
+# standard library linked dynamically; Bazel's C++ toolchain handles this
+# automatically via link_deps.
+# @bazel2gn:raw_attribute:public_configs = [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_library(
+    name = "rust",
+    srcs = [
+        "src/ffi.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "fake_bti",
+    edition = "2024",
+    link_deps = [":ffi-bridge"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+# ffi-bridge is C++, so the GN test binary needs the C++ standard library
+# linked dynamically.
+# @bazel2gn:raw_attribute:configs += [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_test(
+    name = "fake_bti_lib_test",
+    crate = ":rust",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "fake_bti_rust_tests",
+    unit_tests = [":fake_bti_lib_test"],
+)

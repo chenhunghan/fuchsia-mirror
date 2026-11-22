@@ -14,7 +14,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "mmap_policy"; }
+extern std::string GetTestPolicyName() { return "mmap_policy"; }
 
 namespace {
 

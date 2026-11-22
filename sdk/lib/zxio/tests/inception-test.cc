@@ -456,39 +456,6 @@ TEST(CreateWithAllocator, SynchronousDatagramSocket) {
   control_loop.Shutdown();
 }
 
-TEST(CreateWithAllocator, DatagramSocket) {
-  auto [socket_client, socket_server] =
-      fidl::Endpoints<fuchsia_posix_socket::DatagramSocket>::Create();
-
-  zx::socket socket, peer;
-  ASSERT_OK(zx::socket::create(ZX_SOCKET_DATAGRAM, &socket, &peer));
-
-  auto allocator = [](zxio_object_type_t type, zxio_storage_t** out_storage, void** out_context) {
-    if (type != ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET) {
-      return ZX_ERR_NOT_SUPPORTED;
-    }
-    *out_storage = new zxio_storage_t;
-    *out_context = *out_storage;
-    return ZX_OK;
-  };
-
-  async::Loop control_loop(&kAsyncLoopConfigNoAttachToCurrentThread);
-  zxio_tests::DatagramSocketServer server(std::move(socket));
-  fidl::BindServer(control_loop.dispatcher(), std::move(socket_server), &server);
-  control_loop.StartThread("datagram_socket_control_thread");
-
-  void* context = nullptr;
-  ASSERT_OK(zxio_create_with_allocator(socket_client.TakeChannel(), allocator, &context));
-  ASSERT_NE(context, nullptr);
-
-  std::unique_ptr<zxio_storage_t> storage(static_cast<zxio_storage_t*>(context));
-  zxio_t* zxio = &(storage->io);
-
-  ASSERT_OK(zxio_close(zxio));
-  zxio_destroy(zxio);
-  control_loop.Shutdown();
-}
-
 TEST(CreateWithAllocator, StreamSocket) {
   auto [socket_client, socket_server] =
       fidl::Endpoints<fuchsia_posix_socket::StreamSocket>::Create();

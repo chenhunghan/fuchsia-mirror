@@ -159,11 +159,11 @@ developers who experience performance issues while using uncached mappings
 should consider this approach.
 
 [address-spaces]: /docs/concepts/memory/address_spaces.md
-[driver-host]: /docs/concepts/drivers/driver_framework.md#driver_host
+[driver-host]: /docs/concepts/drivers/driver_framework.md#driver-host
 [vmo]: /docs/reference/kernel_objects/vm_object.md
 [mmu]: https://en.wikipedia.org/wiki/Memory_management_unit
 [mmio]: https://en.wikipedia.org/wiki/Memory-mapped_I/O
-[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
+[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver-manager
 [driver-binding]: /docs/concepts/drivers/driver_binding.md
 [vmar]: /docs/reference/kernel_objects/vm_address_region.md
 [pci-getbar]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.hardware.pci/pci.fidl;l=339
@@ -176,5 +176,5 @@ should consider this approach.
 [driver-framework]: /docs/concepts/drivers/driver_framework.md
 [zx-vmo-read]: /reference/syscalls/vmo_read.md
 [zx-vmo-write]: /reference/syscalls/vmo_write.md
-[root-vmar]: /docs/concepts/memory/address_spaces.md#vmars_mappings_and_vmos
+[root-vmar]: /docs/concepts/memory/address_spaces.md#vmars-mappings-and-vmos
 [lib-mmio]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/mmio/cpp/include/lib/mmio/mmio.h

@@ -55,38 +55,8 @@ fn deserialize_prefixes<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum PrefixesOrLegacyPrebuilt {
-        Prefixes(Vec<String>),
-        // TODO(b/571444259): Remove once prebuilt/starnix/internal/iris (iris_memory_buckets.json5)
-        // and vendor/google-smart/bin/memory/smart_display_memory_buckets.json roll.
-        LegacyPrebuilt(String),
-    }
-    match PrefixesOrLegacyPrebuilt::deserialize(deserializer)? {
-        PrefixesOrLegacyPrebuilt::Prefixes(prefixes) => validate_prefixes(prefixes),
-        PrefixesOrLegacyPrebuilt::LegacyPrebuilt(s) => match s.as_str() {
-            "" => Ok(vec![]),
-            "android_(aidl|hidl).*" => {
-                Ok(vec!["android_aidl".to_string(), "android_hidl".to_string()])
-            }
-            other => {
-                let mut prefixes = Vec::new();
-                for branch in other.split('|') {
-                    let branch = branch.strip_suffix(".*").unwrap_or(branch);
-                    let branch = branch.strip_suffix("t?").unwrap_or(branch);
-                    let unescaped = branch.replace(r"\.", ".");
-                    if unescaped.contains(['(', ')', '[', ']', '*', '+', '?', '^', '$', '\\']) {
-                        return Err(serde::de::Error::custom(format!(
-                            "expected an array of prefix strings, found unsupported regex string '{other}'"
-                        )));
-                    }
-                    prefixes.push(unescaped);
-                }
-                validate_prefixes(prefixes)
-            }
-        },
-    }
+    let prefixes = Vec::<String>::deserialize(deserializer)?;
+    validate_prefixes(prefixes)
 }
 
 /// Sets the default order to the maximum u64, to indicate that this bucket should
@@ -316,5 +286,32 @@ mod tests {
             },
         ]);
         assert_eq!(output, expected_output);
+    }
+
+    #[test]
+    fn test_deserialize_prefixes_validation() {
+        let empty_prefix = json!({
+            "name": "bucket",
+            "process": [""],
+            "vmo": [],
+            "event_code": 1,
+        });
+        assert!(serde_json::from_value::<MemoryBucket>(empty_prefix).is_err());
+
+        let non_ascii_prefix = json!({
+            "name": "bucket",
+            "process": ["non_ascii_é"],
+            "vmo": [],
+            "event_code": 1,
+        });
+        assert!(serde_json::from_value::<MemoryBucket>(non_ascii_prefix).is_err());
+
+        let legacy_string = json!({
+            "name": "bucket",
+            "process": "legacy_string",
+            "vmo": "",
+            "event_code": 1,
+        });
+        assert!(serde_json::from_value::<MemoryBucket>(legacy_string).is_err());
     }
 }

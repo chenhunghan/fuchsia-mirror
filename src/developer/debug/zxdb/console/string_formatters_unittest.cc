@@ -12,9 +12,9 @@ std::vector<uint8_t> CreateData(size_t length) {
   std::vector<uint8_t> data;
   data.reserve(length);
   // So that we get the number backwards (0x0102...).
-  uint8_t base = length;
+  uint8_t base = static_cast<uint8_t>(length);
   for (size_t i = 0; i < length; i++) {
-    data.emplace_back(base - i);
+    data.emplace_back(static_cast<uint8_t>(base - i));
   }
   return data;
 }

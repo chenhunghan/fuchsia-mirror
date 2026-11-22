@@ -40,7 +40,7 @@ FFI_ALWAYS_INLINE zx_signals_t cpp_dispatcher_raise_signals_locked(
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_dispatcher_notify_observers_locked(
     Dispatcher* disp, zx_signals_t signals, void* queue_to_own) TA_NO_THREAD_SAFETY_ANALYSIS {
-  disp->NotifyObserversLocked(signals, static_cast<OwnedWaitQueue*>(queue_to_own));
+  disp->NotifyObserversLocked(signals, queue_to_own);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -155,51 +155,6 @@ FFI_ALWAYS_INLINE zx_status_t cpp_dispatcher_make_port_observer(Dispatcher* disp
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_signals_t cpp_dispatcher_poll_signals(const Dispatcher* disp) {
   return disp->PollSignals();
-}
-
-namespace {
-
-class CallbackSignalObserver final : public SignalObserver {
- public:
-  using OnMatchFn = void (*)(const void* ctx, zx_signals_t signals);
-  using OnCancelFn = void (*)(const void* ctx, zx_signals_t signals);
-  using MatchesKeyFn = bool (*)(const void* ctx, const void* port, uint64_t key);
-
-  CallbackSignalObserver(const void* ctx, OnMatchFn on_match, OnCancelFn on_cancel,
-                         MatchesKeyFn matches_key)
-      : ctx_(ctx), on_match_(on_match), on_cancel_(on_cancel), matches_key_(matches_key) {}
-
-  void OnMatch(zx_signals_t signals, OwnedWaitQueue* queue_to_own) override {
-    on_match_(ctx_, signals);
-  }
-
-  void OnCancel(zx_signals_t signals) override { on_cancel_(ctx_, signals); }
-
-  bool MatchesKey(const void* port, uint64_t key) override { return matches_key_(ctx_, port, key); }
-
- private:
-  const void* ctx_;
-  OnMatchFn on_match_;
-  OnCancelFn on_cancel_;
-  MatchesKeyFn matches_key_;
-};
-
-static_assert(sizeof(CallbackSignalObserver) <= 80);
-static_assert(alignof(CallbackSignalObserver) <= 8);
-
-}  // namespace
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE SignalObserver* cpp_callback_signal_observer_init(
-    void* storage, const void* ctx, CallbackSignalObserver::OnMatchFn on_match,
-    CallbackSignalObserver::OnCancelFn on_cancel,
-    CallbackSignalObserver::MatchesKeyFn matches_key) {
-  return new (storage) CallbackSignalObserver(ctx, on_match, on_cancel, matches_key);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_callback_signal_observer_destroy(SignalObserver* observer) {
-  static_cast<CallbackSignalObserver*>(observer)->~CallbackSignalObserver();
 }
 
 }  // extern "C"

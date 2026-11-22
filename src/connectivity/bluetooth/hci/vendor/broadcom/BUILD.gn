@@ -85,7 +85,6 @@ fuchsia_cc_driver("bt-hci-broadcom-driver") {
 fuchsia_driver_component("bt-hci-broadcom") {
   component_name = "bt-hci-broadcom"
   deps = [ ":bt-hci-broadcom-driver" ]
-  info = "meta/bt-hci-broadcom-info.json"
   manifest = "meta/broadcom.cml"
 }
 

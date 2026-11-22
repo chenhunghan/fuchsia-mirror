@@ -12,11 +12,20 @@
             rules: { "fuchsia.BIND_NAND_CLASS": "fuchsia.nand.BIND_NAND_CLASS.PARTMAP" },
         },
     },
+    capabilities: [
+        { service: "fuchsia.hardware.badblock.Service" },
+    ],
     use: [
         {
             name: "partition_map",
             service: "fuchsia.boot.metadata.PartitionMap",
             generate_bind_rule: false,
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.badblock.Service",
+            from: "self",
         },
     ],
 }

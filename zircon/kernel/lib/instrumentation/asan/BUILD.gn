@@ -8,16 +8,41 @@ import("//build/config/compiler_config.gni")
 import("//build/zircon/zircon_cpu.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
+_asan_config = [ "//build/config/sanitizers:asan" ]
+_toolchain_configs = toolchain_variant.configs
+is_asan = _toolchain_configs + _asan_config - _asan_config != _toolchain_configs
+
 if (is_kernel) {
   kernel_rust_mod("asan-rs") {
-    sources = [
-      "asan.rs",
-      "asan_ffi.rs",
-    ]
+    sources = [ "asan.rs" ]
     deps = [ "//src/lib/zr" ]
+    if (is_asan) {
+      sources += [
+        "asan_init.rs",
+        "asan_internal.rs",
+        "asan_poisoning.rs",
+        "asan_stubs.rs",
+      ]
+      if (zircon_cpu == "x86") {
+        sources += [ "asan_init_x86.rs" ]
+      } else if (zircon_cpu == "arm64") {
+        sources += [ "asan_init_arm64.rs" ]
+      } else if (zircon_cpu == "riscv64") {
+        assert(false, "KASAN is not yet supported on riscv64")
+      } else {
+        assert(false, "unsupported zircon_cpu: $zircon_cpu")
+      }
+      deps += [
+        "//src/lib/kprint",
+        "//zircon/kernel/lib/counters:counters-rs",
+        "//zircon/kernel/lib/init:init_rust",
+        "//zircon/kernel/lib/page:page-rs",
+      ]
+    }
   }
 }
 
+# LINT.IfChange
 # 1 shadow byte covers 2^3 bytes.
 asan_mapping_scale = 3
 
@@ -32,69 +57,13 @@ asan_mapping_scale = 3
 # shadow_addr = asan_mapping_offset + (address >> asan_mapping_scale)
 asan_mapping_offset = "0xdffffff000000000"
 
-_asan_config = [ "//build/config/sanitizers:asan" ]
-_sancov_config = [ "//build/config/sanitiziers:sancov" ]
-_toolchain_configs = toolchain_variant.configs
-is_asan = _toolchain_configs + _asan_config - _asan_config != _toolchain_configs
-is_sancov =
-    _toolchain_configs + _sancov_config - _sancov_config != _toolchain_configs
+# LINT.ThenChange(asan.rs)
 
-source_set("asan") {
-  if (is_asan) {
-    # The support code doesn't get compiled with instrumentation itself.
-    # Disabling it on the command-line not only saves adding NO_ASAN
-    # annotations to each function, but covers inline functions from shared
-    # header files that shouldn't all be annotated for their other callers.
-    # The former could be addressed via `#pragma clang attribute`, but the
-    # latter cannot be.
-    configs -= [ _asan_config ]
-    sources = []  # TODO(https://fxbug.dev/42105185): setup code, diagnostic
-                  # code, etc.
+group("asan") {
+  if (is_kernel) {
     deps = [
-      ":stubs",
+      ":asan-rs",
       "..:headers",
-    ]
-  }
-
-  if (is_sancov) {
-    # We don't care about collecting coverage for asan checks.
-    configs -= [ _sancov_config ]
-  }
-}
-
-if (is_asan) {
-  source_set("stubs") {
-    # The actual instrumentation stubs called by compiler-generated calls all
-    # over also disable frame pointers to minimize their overhead.  All the
-    # hot paths from instrumented code should be here.  The cold paths taken
-    # from these calls when there is an actual error should be out of line in
-    # other files not in this source_set().
-    visibility = [ ":*" ]
-    configs -= [
-      _asan_config,
-      "//build/config:frame_pointers",
-    ]
-
-    if (is_sancov) {
-      # We don't care about collecting coverage for asan stubs.
-      configs -= [ _sancov_config ]
-    }
-
-    configs += [
-      ":kasan-defines",
-      "//build/config:frame_pointers",
-    ]
-    sources = [
-      "asan-init.cc",
-      "asan-poisoning.cc",
-      "asan-stubs.cc",
-    ]
-    sources += [ "asan-init-$zircon_cpu.cc" ]
-    deps = [
-      "..:headers",
-      "//zircon/kernel/lib/counters",
-      "//zircon/kernel/lib/init",
-      "//zircon/kernel/vm:headers",
     ]
   }
 }

@@ -4,6 +4,7 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 fidl_golden_library("test.transitivedependencies") {
   sources = [ "top.test.fidl" ]
   experimental_flags = [ "output_index_json" ]
@@ -11,13 +12,17 @@ fidl_golden_library("test.transitivedependencies") {
     ":test.bottom",
     ":test.middle",
   ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
 
 fidl_golden_library("test.middle") {
   sources = [ "middle.test.fidl" ]
   public_deps = [ ":test.bottom" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
 
 fidl_golden_library("test.bottom") {
   sources = [ "bottom.test.fidl" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
+# LINT.ThenChange(BUILD.bazel)

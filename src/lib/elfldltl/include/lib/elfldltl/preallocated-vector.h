@@ -5,12 +5,14 @@
 #ifndef SRC_LIB_ELFLDLTL_INCLUDE_LIB_ELFLDLTL_PREALLOCATED_VECTOR_H_
 #define SRC_LIB_ELFLDLTL_INCLUDE_LIB_ELFLDLTL_PREALLOCATED_VECTOR_H_
 
+#include <algorithm>
 #include <cassert>
 #include <new>
 #include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 namespace elfldltl {
 
@@ -42,22 +44,45 @@ class PreallocatedVector {
 
   constexpr PreallocatedVector() = default;
 
-  constexpr PreallocatedVector(PreallocatedVector&&) noexcept = default;
+  constexpr PreallocatedVector(PreallocatedVector&& other) noexcept
+      : size_(std::exchange(other.size_, 0)), storage_(other.storage_) {
+    if constexpr (N == std::dynamic_extent) {
+      other.storage_ = {};
+    }
+  }
 
   template <size_t OtherN>
   constexpr explicit PreallocatedVector(PreallocatedVector<T, OtherN>&& other) noexcept
-      : PreallocatedVector(other.storage_) {
+      : size_(std::exchange(other.size_, 0)), storage_(other.storage_) {
     static_assert(N == std::dynamic_extent || OtherN == N);
+    if constexpr (OtherN == std::dynamic_extent) {
+      other.storage_ = {};
+    }
   }
 
   constexpr explicit PreallocatedVector(std::span<T, N> storage) : storage_(storage) {}
 
-  constexpr PreallocatedVector& operator=(PreallocatedVector&&) noexcept = default;
+  constexpr PreallocatedVector& operator=(PreallocatedVector&& other) noexcept {
+    if (this != &other) {
+      clear();
+      size_ = std::exchange(other.size_, 0);
+      storage_ = other.storage_;
+      if constexpr (N == std::dynamic_extent) {
+        other.storage_ = {};
+      }
+    }
+    return *this;
+  }
 
   template <size_t OtherN>
   constexpr PreallocatedVector& operator=(PreallocatedVector<T, OtherN>&& other) noexcept {
     static_assert(N == std::dynamic_extent || OtherN == N);
-    *this = PreallocatedVector(other.storage_);
+    clear();
+    size_ = std::exchange(other.size_, 0);
+    storage_ = other.storage_;
+    if constexpr (OtherN == std::dynamic_extent) {
+      other.storage_ = {};
+    }
     return *this;
   }
 
@@ -121,17 +146,19 @@ class PreallocatedVector {
     }
   }
 
-  constexpr iterator erase(iterator pos) { return erase(pos, pos); }
+  constexpr iterator erase(iterator pos) { return erase(pos, std::next(pos)); }
 
-  constexpr iterator erase(const_iterator pos) { return erase(pos, pos); }
+  constexpr iterator erase(const_iterator pos) { return erase(pos, std::next(pos)); }
 
   constexpr iterator erase(iterator first, iterator last) {
-    iterator out = first;
-    for (iterator in = std::next(last); in != end(); ++in) {
-      *out++ = std::move(*in);
-    }
-    while (out != end()) {
-      pop_back();
+    if (first != last) {
+      iterator out = first;
+      for (iterator in = last; in != end(); ++in) {
+        *out++ = std::move(*in);
+      }
+      while (out != end()) {
+        pop_back();
+      }
     }
     return first;
   }
@@ -164,8 +191,8 @@ class PreallocatedVector {
     // Default-construct the new elements.
     size_t old_size = size_;
     size_ = new_size;
-    for (auto& elt : std::span(data(), capacity()).subspan(old_size)) {
-      new (&elt) T();
+    for (auto& elt : as_span().subspan(old_size)) {
+      new (std::addressof(elt)) T();
     }
     return true;
   }
@@ -255,18 +282,35 @@ class PreallocatedVector {
   template <typename OtherT, size_t OtherN>
   friend class PreallocatedVector;
 
-  // Return it+count after increasing size by count and moving all the
-  // elements at [it, it+count) up.
+  // Return the mutable iterator corresponding to `it` after increasing size by
+  // `count`, shifting existing elements at `[it, end())` up by `count` slots,
+  // and leaving `[it, it + count)` as uninitialized storage ready for
+  // placement new.
   constexpr iterator MoveElements(const_iterator it, size_t count) {
-    iterator ret = begin() + (it - cbegin());
-    for (iterator write = (end() - 1 + count); write - count >= ret; write--) {
-      *write = std::move(*(write - count));
+    const size_t pos = static_cast<size_t>(it - cbegin());
+    const size_t old_size = size_;
+    assert(pos <= old_size);
+    if (count == 0) {
+      return begin() + pos;
     }
 
-    // Now advance end() to include the new slots.
-    size_ += count;
+    T* raw = storage_.data();
+    for (size_t src = old_size; src-- > pos;) {
+      const size_t dst = src + count;
+      if (dst >= old_size) {
+        new (std::addressof(raw[dst])) T(std::move(raw[src]));
+      } else {
+        raw[dst] = std::move(raw[src]);
+      }
+    }
 
-    return ret;
+    const size_t destroy_end = std::min(pos + count, old_size);
+    for (size_t i = pos; i < destroy_end; ++i) {
+      raw[i].~T();
+    }
+
+    size_ += count;
+    return begin() + pos;
   }
 
   size_t size_ = 0;

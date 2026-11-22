@@ -76,7 +76,6 @@ fuchsia_component_manifest("generic-suspend-manifest") {
 fuchsia_driver_component("generic-suspend") {
   cm_label = ":generic-suspend-manifest"
   deps = [ ":generic-suspend-driver" ]
-  info = "meta/generic-suspend-info.json"
 }
 
 # Both driver variants declare their config via
@@ -120,7 +119,6 @@ fuchsia_cc_driver("generic-suspend-driver-with-fake-syscall") {
 fuchsia_driver_component("generic-suspend-with-fake-syscall") {
   testonly = true
   deps = [ ":generic-suspend-driver-with-fake-syscall" ]
-  info = "meta/generic-suspend-info.json"
   manifest = "meta/generic-suspend-with-fake-syscall.cml"
 }
 

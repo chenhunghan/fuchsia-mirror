@@ -26,7 +26,7 @@ pub use args_info::{
     CliArgsInfo, ErrorCodeInfo, FlagInfo, FlagKind, Optionality, PositionalInfo, SubCommandInfo,
 };
 
-pub use ffx::{FFX_WRAPPER_INVOKE, Ffx, FfxCommandLine, check_strict_constraints};
+pub use ffx::{FFX_WRAPPER_INVOKE, Ffx, FfxCommandLine, TargetNeed, check_strict_constraints};
 pub use ffx_command_error::{
     Error, FfxContext, NonFatalError, Result, bug, exit_with_code, return_bug, return_user_error,
     user_error,

@@ -50,6 +50,8 @@ if (is_kernel) {
       "kernel_mapped_vmo.rs",
       "memory_profile.rs",
       "mod.rs",
+      "profile.rs",
+      "profile_ffi.rs",
       "sancov.rs",
       "sancov_ffi.rs",
       "vmo.rs",
@@ -57,6 +59,7 @@ if (is_kernel) {
     ]
     deps = [
       "asan:asan-rs",
+      "ubsan:ubsan-rs",
       "//sdk/rust/zx-status",
       "//sdk/rust/zx-types",
       "//src/lib/kprint",
@@ -83,22 +86,19 @@ if (is_kernel) {
     public = [ "private.h" ]
     public_deps = [
       ":instrumentation-rs",
+      "//src/lib/llvm-profdata",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/vm:headers",
     ]
   }
 
   source_set("profile") {
-    sources = [ "profile.cc" ]
+    sources = [ "profile_ffi.cc" ]
     deps = [
       ":headers",
       ":private",
       "//src/lib/llvm-profdata",
       "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/page",
-      "//zircon/kernel/object",
-      "//zircon/kernel/phys/handoff",
-      "//zircon/kernel/vm:headers",
     ]
     defines = []
     if (is_pecoff) {

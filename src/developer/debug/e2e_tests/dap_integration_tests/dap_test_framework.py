@@ -21,6 +21,7 @@ from typing import (
     Optional,
 )
 
+import portpicker
 from async_utils.command import (
     AsyncCommand,
     StderrEvent,
@@ -28,7 +29,6 @@ from async_utils.command import (
     TerminationEvent,
 )
 from ffx_cmd.lib import FfxCmd
-from portpicker import portpicker
 from pydap.client import READER_STOPPED_EVENT
 from pydap.dap_types import DapBaseModel
 from pydap.models import (

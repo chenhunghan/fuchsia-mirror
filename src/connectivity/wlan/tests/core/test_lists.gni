@@ -34,14 +34,14 @@ core_tests_for_presubmit_no_shield_box = [
 # code that changes frequently or tests that provide broad WLAN code coverage
 # should go here, but most tests should likely go into `tests_for_postsubmit`.
 core_tests_for_wlan_presubmit =
-    [ "//src/connectivity/wlan/tests/core:wlan_driver_restart_test" ]
+    [ "//src/connectivity/wlan/tests/core:driver_restart_test" ]
 
 # These tests run in blocking CI (~once per hour).
 core_tests_for_postsubmit = [
   "//src/connectivity/wlan/tests/core:connect_to_ap_test",
   "//src/connectivity/wlan/tests/core:firmware_power_modes_test",
   "//src/connectivity/wlan/tests/core:sar_setting_test",
-  "//src/connectivity/wlan/tests/core:wlan_scan_test",
+  "//src/connectivity/wlan/tests/core:scan_test",
 ]
 
 # If you're writing a new test, add it to FYI first until it has a sufficient
@@ -69,6 +69,12 @@ core_tests_for_fyi_iperf_attenuator = [
   "//src/connectivity/wlan/tests/core:rvr_test_2g_rx",
   "//src/connectivity/wlan/tests/core:rvr_test_5g_tx",
   "//src/connectivity/wlan/tests/core:rvr_test_5g_rx",
+]
+
+core_tests_for_fyi_performance = [
+  "//src/connectivity/wlan/tests/core:firmware_power_modes_test",
+  "//src/connectivity/wlan/tests/core:scan_test",
+  "//src/connectivity/wlan/tests/core:throughput_odpm_test",
 ]
 
 # Tests longer than ~20 minutes consume significant resources and significantly

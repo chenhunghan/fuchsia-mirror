@@ -6,10 +6,15 @@ use async_trait::async_trait;
 use fuchsia_async::TimeoutExt;
 use fuchsia_async::net::TcpStream;
 
-use futures::{AsyncReadExt, AsyncWriteExt, TryFutureExt};
+use futures::io::BufReader;
+use futures::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, TryFutureExt};
 use std::net;
 
 const FETCH_TIMEOUT: zx::MonotonicDuration = zx::MonotonicDuration::from_seconds(10);
+/// Maximum number of bytes to read when parsing the HTTP status line.
+/// Standard HTTP status lines are ~20-40 bytes; 1024 bytes provides generous
+/// headroom while preventing unbounded memory consumption.
+const STATUS_LINE_MAX_BYTES: u64 = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
@@ -34,11 +39,17 @@ pub enum FetchError {
     #[error("timed out reading response from TCP stream")]
     ReadTcpStreamTimeout,
     #[error("failed to parse string from UTF-8 bytes")]
-    ParseUtf8(#[from] std::string::FromUtf8Error),
+    ParseUtf8(#[from] std::str::Utf8Error),
     #[error("response header malformed: {first_line}")]
     MalformedHeader { first_line: String },
     #[error("failed to parse status code")]
     ParseStatusCode(#[source] std::num::ParseIntError),
+}
+
+impl From<std::string::FromUtf8Error> for FetchError {
+    fn from(err: std::string::FromUtf8Error) -> Self {
+        Self::ParseUtf8(err.utf8_error())
+    }
 }
 
 impl FetchError {
@@ -116,13 +127,22 @@ async fn fetch<FA: FetchAddr + std::marker::Sync>(
         .await?;
 
     let mut bytes = Vec::new();
-    let _: usize = stream
-        .read_to_end(&mut bytes)
+    // Wrap stream in BufReader and take at most STATUS_LINE_MAX_BYTES.
+    // The stream is dropped at the end of this statement, closing the TCP connection.
+    let _: usize = BufReader::new(stream)
+        .take(STATUS_LINE_MAX_BYTES)
+        .read_until(b'\n', &mut bytes)
         .map_err(FetchError::ReadTcpStream)
         .on_timeout(timeout, || Err(FetchError::ReadTcpStreamTimeout))
         .await?;
-    let resp = String::from_utf8(bytes)?;
-    let first_line = resp.split("\r\n").next().expect("split always returns at least one item");
+    // A missing LF means the status line was cut short by EOF or STATUS_LINE_MAX_BYTES.
+    // Per RFC 9112 section 2.2, accept a bare LF and ignore a preceding CR.
+    let Some(line) = bytes.strip_suffix(b"\n") else {
+        return Err(FetchError::MalformedHeader {
+            first_line: String::from_utf8_lossy(&bytes).into_owned(),
+        });
+    };
+    let first_line = std::str::from_utf8(line.strip_suffix(b"\r").unwrap_or(line))?;
     if let [http, code, ..] = first_line.split(' ').collect::<Vec<_>>().as_slice() {
         if !http.starts_with("HTTP/") {
             return Err(FetchError::MalformedHeader { first_line: first_line.to_string() });
@@ -180,18 +200,16 @@ mod test {
     use super::*;
 
     use anyhow::Context;
+    use assert_matches::assert_matches;
     use std::net::{Ipv4Addr, SocketAddr};
-    use std::pin::pin;
 
     use fuchsia_async::net::TcpListener;
-    use futures::future::Fuse;
-    use futures::io::BufReader;
-    use futures::{AsyncBufReadExt, FutureExt, StreamExt};
+    use futures::StreamExt;
     use test_case::test_case;
 
-    fn server(
-        code: u16,
-    ) -> anyhow::Result<(SocketAddr, Fuse<impl futures::Future<Output = Vec<String>>>)> {
+    fn server_with_data(
+        data: Vec<u8>,
+    ) -> anyhow::Result<(SocketAddr, impl futures::Future<Output = Vec<String>>)> {
         let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0);
         let listener = TcpListener::bind(&addr).context("binding TCP")?;
         let addr = listener.local_addr()?;
@@ -219,51 +237,190 @@ mod test {
                     }
                     request.push(s.trim().to_string());
                 }
-                let data = format!("HTTP/1.1 {} OK\r\n\r\n", code);
-                stream
-                    .write_all(data.as_bytes())
-                    .on_timeout(timeout, || panic!("timeout waiting to write response"))
-                    .await
-                    .expect("reply to request");
+                let mut stream = stream.into_inner();
+                if !data.is_empty() {
+                    stream
+                        .write_all(&data)
+                        .on_timeout(timeout, || panic!("timeout waiting to write response"))
+                        .await
+                        .expect("reply to request");
+                }
                 request
             } else {
                 Vec::new()
             }
-        }
-        .fuse();
+        };
 
         Ok((addr, server_fut))
     }
 
-    #[test_case("http://reachability.test/", 200; "base path 200")]
-    #[test_case("http://reachability.test/path/", 200; "sub path 200")]
-    #[test_case("http://reachability.test/", 400; "base path 400")]
-    #[test_case("http://reachability.test/path/", 400; "sub path 400")]
+    #[derive(Clone, Copy, Debug)]
+    enum HttpStatus {
+        Ok,
+        NoContent,
+        BadRequest,
+        NotFound,
+    }
+
+    impl HttpStatus {
+        const fn code_and_reason(self) -> (u16, &'static str) {
+            match self {
+                Self::Ok => (200, "OK"),
+                Self::NoContent => (204, "No Content"),
+                Self::BadRequest => (400, "Bad Request"),
+                Self::NotFound => (404, "Not Found"),
+            }
+        }
+
+        const fn code(self) -> u16 {
+            let (code, _reason) = self.code_and_reason();
+            code
+        }
+
+        fn response_bytes(self) -> Vec<u8> {
+            let (code, reason) = self.code_and_reason();
+            format!("HTTP/1.1 {code} {reason}\r\n\r\n").into_bytes()
+        }
+    }
+
+    fn server(
+        status: HttpStatus,
+    ) -> anyhow::Result<(SocketAddr, impl futures::Future<Output = Vec<String>>)> {
+        server_with_data(status.response_bytes())
+    }
+
+    #[test_case("http://reachability.test/", HttpStatus::Ok; "base path 200")]
+    #[test_case("http://reachability.test/path/", HttpStatus::Ok; "sub path 200")]
+    #[test_case("http://reachability.test/", HttpStatus::NoContent; "base path 204")]
+    #[test_case("http://reachability.test/", HttpStatus::BadRequest; "base path 400")]
+    #[test_case("http://reachability.test/path/", HttpStatus::BadRequest; "sub path 400")]
+    #[test_case("http://reachability.test/", HttpStatus::NotFound; "base path 404")]
     #[fuchsia::test]
-    async fn test_fetch(url_str: &'static str, code: u16) -> anyhow::Result<()> {
+    async fn test_fetch(url_str: &'static str, status: HttpStatus) -> anyhow::Result<()> {
         let url = url::Url::parse(url_str)?;
-        let (addr, server_fut) = server(code)?;
+        let (addr, server_fut) = server(status)?;
         let domain = url.host().expect("no host").to_string();
         let path = url.path().to_string();
 
-        let mut fetch_fut = pin!(fetch("", &domain, &path, &addr).fuse());
+        let (result, request) = futures::join!(fetch("", &domain, &path, &addr), server_fut);
 
-        let mut server_fut = pin!(server_fut);
-
-        let mut request = None;
-        let result = loop {
-            futures::select! {
-                req = server_fut => request = Some(req),
-                result = fetch_fut => break result
-            };
-        };
-
-        assert!(result.is_ok(), "Expected OK, got: {result:?}");
-        assert_eq!(result.ok(), Some(code));
-        let request = request.expect("no request body");
+        assert_eq!(result.expect("fetch failed"), status.code());
         assert!(request.contains(&format!("HEAD {path} HTTP/1.1")));
         assert!(request.contains(&format!("host: {domain}")));
 
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_fetch_large_body_connection_held_open() -> anyhow::Result<()> {
+        let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0);
+        let listener = TcpListener::bind(&addr).context("binding TCP")?;
+        let addr = listener.local_addr()?;
+
+        let server_fut = async move {
+            let timeout = zx::MonotonicInstant::after(FETCH_TIMEOUT);
+            let mut incoming = listener.accept_stream();
+            let (stream, _addr) = incoming
+                .next()
+                .on_timeout(timeout, || panic!("timeout waiting for connection"))
+                .await
+                .expect("connection stream")
+                .expect("accept incoming TCP connection");
+            let mut stream = BufReader::new(stream);
+            let mut request = Vec::new();
+            loop {
+                let mut s = String::new();
+                let _: usize = stream
+                    .read_line(&mut s)
+                    .on_timeout(timeout, || panic!("timeout waiting to read data"))
+                    .await
+                    .expect("read data");
+                if s == "\r\n" {
+                    break;
+                }
+                request.push(s.trim().to_string());
+            }
+            let mut stream = stream.into_inner();
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 1000000\r\n\r\n")
+                .on_timeout(timeout, || panic!("timeout waiting to write response"))
+                .await
+                .expect("reply to request");
+
+            let large_body = vec![b'a'; 64 * 1024];
+            let _ = stream.write_all(&large_body).await;
+
+            // Hold the connection open until the client drops its stream.
+            let mut buf = [0u8; 1];
+            match stream
+                .read(&mut buf)
+                .on_timeout(timeout, || panic!("timeout waiting for client to close"))
+                .await
+            {
+                Ok(0) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) => {}
+                res => panic!("unexpected result waiting for client close: {res:?}"),
+            }
+
+            request
+        };
+
+        let (result, request) =
+            futures::join!(fetch("", "reachability.test", "/", &addr), server_fut);
+
+        assert_eq!(result.expect("fetch failed"), 204);
+        assert!(request.contains(&"HEAD / HTTP/1.1".to_string()));
+        assert!(request.contains(&"host: reachability.test".to_string()));
+
+        Ok(())
+    }
+
+    #[test_case(b"HTTP/1.1 204 No Content\r\n", 204; "crlf")]
+    #[test_case(b"HTTP/1.1 204 No Content\n", 204; "bare-lf")]
+    #[fuchsia::test]
+    async fn test_fetch_status_line_formats(data: &[u8], expected_code: u16) -> anyhow::Result<()> {
+        let (addr, server_fut) = server_with_data(data.to_vec())?;
+        let (result, _) = futures::join!(fetch("", "reachability.test", "/", &addr), server_fut);
+        assert_eq!(result.expect("fetch failed"), expected_code);
+        Ok(())
+    }
+
+    #[test_case(b""; "empty")]
+    #[test_case(b"HTTP/1.1 200 OK"; "missing-newline")]
+    #[test_case(b"INVALID/1.1 200 OK\r\n"; "invalid-protocol")]
+    #[fuchsia::test]
+    async fn test_fetch_malformed_header(data: &[u8]) -> anyhow::Result<()> {
+        let (addr, server_fut) = server_with_data(data.to_vec())?;
+        let (result, _) = futures::join!(fetch("", "reachability.test", "/", &addr), server_fut);
+        assert_matches!(result, Err(FetchError::MalformedHeader { .. }));
+        Ok(())
+    }
+
+    #[test_case(STATUS_LINE_MAX_BYTES, Ok(204); "at-max-bytes")]
+    #[test_case(STATUS_LINE_MAX_BYTES + 1, Err(()); "one-byte-over-max")]
+    #[test_case(STATUS_LINE_MAX_BYTES * 2, Err(()); "oversized")]
+    #[fuchsia::test]
+    async fn test_fetch_status_line_length_limit(
+        total_bytes: u64,
+        expected: Result<u16, ()>,
+    ) -> anyhow::Result<()> {
+        let prefix = "HTTP/1.1 204 ";
+        let suffix = "\r\n";
+        let fill = (total_bytes as usize) - prefix.len() - suffix.len();
+        let data = format!("{prefix}{}{suffix}", "A".repeat(fill)).into_bytes();
+
+        let (addr, server_fut) = server_with_data(data)?;
+        let (result, _) = futures::join!(fetch("", "reachability.test", "/", &addr), server_fut);
+        match expected {
+            Ok(code) => assert_eq!(result.expect("fetch failed"), code),
+            Err(()) => {
+                assert_matches!(result, Err(FetchError::MalformedHeader { .. }));
+            }
+        }
         Ok(())
     }
 }

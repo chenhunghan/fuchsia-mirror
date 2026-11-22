@@ -318,7 +318,7 @@ When properly accessed using the provided syscalls, clock observations will be
 "multi-observer" consistent, meaning the properties such as monotonicity and
 continuity will be consistent across a set of observations made by multiple
 observers _if those observations have an established order_. See
-[here](/docs/contribute/governance/rfcs/0266_memory_mappable_kernel_clocks.md#Consistency)
+[here](/docs/contribute/governance/rfcs/0266_memory_mappable_kernel_clocks.md#consistency)
 for details.
 
 #### Clock mapping representation in `zx_info_maps_t` and `zx_info_vmos_t` structures

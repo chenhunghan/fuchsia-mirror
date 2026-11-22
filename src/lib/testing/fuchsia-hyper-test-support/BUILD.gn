@@ -8,7 +8,7 @@ import("//build/rust/rustc_test.gni")
 
 # The library and its host unit test are defined in BUILD.bazel. The Fuchsia
 # unit test package stays in GN because it uses GN-only
-# //src/connectivity/network/dns:component and
+# //src/connectivity/network/dns:package and
 # //src/connectivity/network/netstack3:package-for-tests.
 rustc_test("fuchsia-hyper-test-support_test") {
   output_name = "fuchsia_hyper_test_support_lib_test"
@@ -37,11 +37,11 @@ rustc_test("fuchsia-hyper-test-support_test") {
 }
 
 fuchsia_unittest_package("fuchsia-hyper-test-support-tests") {
-  deps = [
-    ":fuchsia-hyper-test-support_test",
-    "//src/connectivity/network/dns:component",
+  deps = [ ":fuchsia-hyper-test-support_test" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 
   manifest = "meta/fuchsia_hyper_test_support_lib_test.cml"
 }

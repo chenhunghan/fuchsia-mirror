@@ -4,13 +4,8 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-#include <arch/arm64/asm.h>
 #include <arch/arm64/mmu.h>
 #include <lib/arch/asm.h>
-
-#ifndef __has_feature
-#define __has_feature(x) 0
-#endif
 
 //
 // Register use:
@@ -147,11 +142,9 @@ resume_context          .req x24
   cbnz resume_context,.Lresume
 
   // We're booting up rather than resuming from suspend.
-  // x0 points to the arm64_sp_info struct for this CPU, passed through PSCI_CPU_ON.
-#if __has_feature(shadow_call_stack)
-  ldr shadow_call_sp, [x0] // arm64_sp_info.shadow_call_sp
-#endif
-  add x1, x0, #32 // compute the top of the structure for TPIDR (see secondary.cc)
+  // x0 points to the Arm64SpInfo struct for this CPU, passed through PSCI_CPU_ON.
+  ldr shadow_call_sp, [x0] // Arm64SpInfo.shadow_call_sp
+  add x1, x0, #32 // compute the top of the structure for TPIDR (see src/secondary.rs)
   msr tpidr_el1, x1
 
   // SP will start at the bottom of this structure growing down.

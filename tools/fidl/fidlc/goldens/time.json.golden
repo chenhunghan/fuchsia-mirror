@@ -134,7 +134,7 @@
         "AllInstants"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
         "line": 5,
         "column": 6,
         "length": 11
@@ -162,7 +162,7 @@
           },
           "name": "monotonic",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 6,
             "column": 5,
             "length": 9
@@ -194,7 +194,7 @@
           },
           "name": "boot",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 7,
             "column": 5,
             "length": 4
@@ -226,7 +226,7 @@
           },
           "name": "monotonic_ticks",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 8,
             "column": 5,
             "length": 15
@@ -258,7 +258,7 @@
           },
           "name": "boot_ticks",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 9,
             "column": 5,
             "length": 10
@@ -291,7 +291,7 @@
         "ComplexInstants"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
         "line": 12,
         "column": 6,
         "length": 15
@@ -333,7 +333,7 @@
           },
           "name": "monotonic",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 13,
             "column": 8,
             "length": 9
@@ -375,7 +375,7 @@
           },
           "name": "boot",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 14,
             "column": 8,
             "length": 4
@@ -417,7 +417,7 @@
           },
           "name": "monotonic_ticks",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 15,
             "column": 8,
             "length": 15
@@ -459,7 +459,7 @@
           },
           "name": "boot_ticks",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/time.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/time.test.fidl",
             "line": 16,
             "column": 8,
             "length": 10

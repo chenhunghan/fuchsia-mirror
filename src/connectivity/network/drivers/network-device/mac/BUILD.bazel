@@ -1,0 +1,131 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":network-device-mac-lib-test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+_MAC_SRCS = [
+    "log.h",
+    "mac_interface.cc",
+]
+
+_MAC_HDRS = [
+    "mac_interface.h",
+    "public/network_mac.h",
+]
+
+fx_cc_library(
+    name = "mac_driver",
+    srcs = _MAC_SRCS,
+    hdrs = _MAC_HDRS,
+    defines = [
+        "_ALL_SOURCE",
+        "NETDEV_DRIVER",
+    ],
+    visibility = ["//src/connectivity/network/drivers/network-device/device:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/fidl",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "mac",
+    srcs = _MAC_SRCS,
+    hdrs = _MAC_HDRS,
+    defines = ["_ALL_SOURCE"],
+    visibility = [
+        "//src/connectivity/network/drivers/network-device/device:__pkg__",
+        "//src/connectivity/network/tun/network-tun:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/fidl",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/network/drivers/network-device/log",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)
+
+_TEST_UTIL_SRCS = ["test_util.cc"]
+
+_TEST_UTIL_HDRS = ["test_util.h"]
+
+fx_cc_library(
+    name = "test_util_driver",
+    testonly = True,
+    srcs = _TEST_UTIL_SRCS,
+    hdrs = _TEST_UTIL_HDRS,
+    defines = [
+        "_ALL_SOURCE",
+        "NETDEV_DRIVER",
+    ],
+    visibility = ["//src/connectivity/network/drivers/network-device:__pkg__"],
+    deps = [
+        ":mac_driver",
+        "//sdk/lib/driver/logging/cpp",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "test_util",
+    testonly = True,
+    srcs = _TEST_UTIL_SRCS,
+    hdrs = _TEST_UTIL_HDRS,
+    defines = ["_ALL_SOURCE"],
+    visibility = ["//src/connectivity/network/drivers/network-device/device:__pkg__"],
+    deps = [
+        ":mac",
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "test_bin",
+    srcs = ["network_mac-test.cc"],
+    gn_output_name = "network-device-mac-lib-test",
+    tags = ["manual"],
+    deps = [
+        ":mac",
+        ":test_util",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_unittest_package(
+    name = "network-device-mac-lib-test",
+    max_log_severity = "ERROR",
+    unit_tests = [":test_bin"],
+)

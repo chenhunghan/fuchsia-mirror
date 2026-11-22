@@ -31,7 +31,6 @@ fidl("fuchsia.recovery") {
   sources = [ "factory_reset.fidl" ]
   sdk_area = "Unknown"
   sdk_category = "partner"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [ "//zircon/vdso/zx" ]

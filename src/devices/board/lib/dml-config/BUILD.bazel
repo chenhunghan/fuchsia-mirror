@@ -3,20 +3,62 @@
 # found in the LICENSE file.
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_binary", "rustc_library")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":dml-config-unittests"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":dml-config_host_test"],
+    visibility = ["//src/devices:__pkg__"],
+)
 
 fidl_library(
     name = "fuchsia.board.dml.config",
     srcs = ["fidl/config.fidl"],
+    # Unused rust_next bindings fail to compile on host because transitive dep
+    # //sdk/fidl/fuchsia.driver.metadata uses zx.Status without the `fuchsia` feature.
+    # @bazel2gn:skip
+    enable_rust_next = False,
     visibility = [
         "//src/devices:__subpackages__",
         "//vendor/google:__subpackages__",
     ],
     deps = ["//sdk/fidl/fuchsia.driver.metadata"],
+)
+
+fx_component_manifest(
+    name = "board-config-manifest",
+    component_name = "board-config",
+    manifest = "meta/board_config.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "board_structured_config",
+    cm_label = ":board-config-manifest",
 )
 
 rustc_library(
@@ -27,7 +69,6 @@ rustc_library(
         "src/parser.rs",
     ],
     edition = "2024",
-    target_compatible_with = HOST_OS_CONSTRAINTS,  # @bazel2gn:skip
     visibility = [
         "//src/devices:__subpackages__",
         "//vendor/google:__subpackages__",
@@ -41,17 +82,7 @@ rustc_library(
         "//third_party/rust_crates/vendor:phf",
     ] + select({
         "@platforms//os:fuchsia": [
-            # This target is only built on host in Bazel (via
-            # `target_compatible_with` above) because `:board_structured_config`
-            # does not have a Bazel target yet. However, `bazel2gn` needs this
-            # branch to generate the `if (is_fuchsia)` deps in BUILD.gn, and
-            # Bazel's `genquery` still requires every label in `select()` to
-            # resolve to an existing Bazel target.
-            #
-            # The placeholder `filegroup` target below exists solely for
-            # `@bazel2gn:path_overwrite`; remove it once structured config is
-            # supported in Bazel.
-            ":board_structured_config",  # @bazel2gn:path_overwrite::board_structured_config
+            ":board_structured_config",
             "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
             "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
             "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_next",
@@ -84,8 +115,39 @@ rustc_binary(
     ],
 )
 
-# @bazel2gn:skip
-filegroup(name = "board_structured_config")
+rustc_test(
+    name = "dml-config_test",
+    srcs = [
+        "src/dump.rs",
+        "src/lib.rs",
+        "src/parser.rs",
+    ],
+    crate_name = "dml_config_lib_test",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":board_structured_config",
+        ":fuchsia.board.dml.config_rust_common",
+        "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust_next",
+        "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_rust_common",
+        "//sdk/fidl/fuchsia.hardware.platform.bus:fuchsia.hardware.platform.bus_rust_next",
+        "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_rust_next",
+        "//sdk/lib/driver/runtime/rust/fidl",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:phf",
+    ],
+)
+
+fx_unittest_package(
+    name = "dml-config-unittests",
+    unit_tests = [":dml-config_test"],
+)
 
 host_rustc_test(
     name = "dml-config_host_test",

@@ -25,8 +25,6 @@ switch, so the Mobly config must provide `serial_socket`.
 
 import contextlib
 import logging
-import os
-import tempfile
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -34,13 +32,11 @@ from typing import Any
 import fuchsia_base_test
 from honeydew import errors as honeydew_errors
 from honeydew.device_classes import android_device
-from honeydew.transports.ffx.types import MachineFormat
 from mobly import asserts, expects, records, signals, test_runner
 from usb_lib import sysfs_usb
 from usb_lib.sysfs_usb import find_host_device
 from usb_lib.usb_cli_diag import (
-    USB_CLI_END_TOKENS,
-    find_diag_problems,
+    find_dut_diag_problems,
     get_endpoint_bytes,
     get_endpoint_types,
     parse_dwc3_endpoints,
@@ -54,6 +50,11 @@ from usb_lib.usb_config import (
     parse_get_config,
     set_usb_config,
 )
+from usb_lib.usb_traffic import (
+    DEFAULT_TRANSFER_SIZE_BYTES,
+    check_adb_traffic,
+    check_cdc_traffic,
+)
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -64,13 +65,6 @@ _RECONNECT_TIMEOUT_SEC = 60
 # How long to keep retrying `usb-cli get-config`. The serial console can drop
 # output for a while, e.g. while Android boots and floods it with logs.
 _GET_CONFIG_TIMEOUT_SEC = 60.0
-# Timeout of every traffic command. A stuck endpoint fails rather than hangs.
-_COMMAND_TIMEOUT_SEC = 60.0
-_TRANSFER_SIZE_BYTES = 5 * 1024 * 1024
-
-# `/tmp` is an in-memory tmpfs, so ADB transfers don't hit flash storage.
-_ADB_REMOTE_PATH = "/tmp/usb_config_switch_test.bin"
-_ADB_ECHO_TOKEN = "usb_config_switch_test"
 
 
 @contextlib.contextmanager
@@ -229,7 +223,7 @@ class UsbConfigSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
                     log_status_on_failure=False,
                     disable_controlmaster=True,
                 )
-                self.dut.fuchsia_controller.after_usb_reconnect()
+                self.dut.usb.after_connect()
             if "adb" in config:
                 self.dut.adb.check_connection(
                     timeout=_RECONNECT_TIMEOUT_SEC, attempts=1
@@ -251,10 +245,10 @@ class UsbConfigSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
             self._check_host_interfaces(config)
         if "cdc" in config:
             with _expect_no_raises(f"[{label}] CDC traffic"):
-                self._check_cdc_traffic()
+                check_cdc_traffic(self.dut)
         if "adb" in config:
             with _expect_no_raises(f"[{label}] ADB traffic"):
-                self._check_adb_traffic()
+                check_adb_traffic(self.dut)
         # Last, so the rings have just carried traffic.
         with _expect_no_raises(f"[{label}] usb-cli diag"):
             self._check_diag(config)
@@ -297,52 +291,6 @@ class UsbConfigSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
             time.sleep(0.5)
         asserts.assert_equal(actual, expected, "class/subclass/protocol")
 
-    def _check_cdc_traffic(self) -> None:
-        """Pulls `_TRANSFER_SIZE_BYTES` from the DUT over SSH, i.e. CDC.
-
-        DWC3 endpoints are directional (even = OUT, odd = IN) and CDC's
-        Interrupt endpoint is IN, so only Bulk IN endpoints can be reassigned
-        from Interrupt; the SSH request exercises Bulk OUT.
-        """
-        output = self.dut.ffx.run(
-            ["target", "ssh", f'printf "X%{_TRANSFER_SIZE_BYTES - 2}sX" ""'],
-            timeout=_COMMAND_TIMEOUT_SEC,
-            log_output=False,
-            machine=MachineFormat.RAW,
-            disable_controlmaster=True,
-        )
-        asserts.assert_equal(len(output), _TRANSFER_SIZE_BYTES, "bytes")
-
-    def _check_adb_traffic(self) -> None:
-        """Round-trips `_TRANSFER_SIZE_BYTES` of random data over ADB."""
-        output = self._adb("shell", "echo", _ADB_ECHO_TOKEN)
-        asserts.assert_in(_ADB_ECHO_TOKEN, output, "adb shell echo")
-        payload = os.urandom(_TRANSFER_SIZE_BYTES)
-        with tempfile.TemporaryDirectory() as tmp:
-            sent = os.path.join(tmp, "sent.bin")
-            received = os.path.join(tmp, "received.bin")
-            with open(sent, "wb") as f:
-                f.write(payload)
-            try:
-                self._adb("push", "-Z", sent, _ADB_REMOTE_PATH)
-                self._adb("pull", "-Z", _ADB_REMOTE_PATH, received)
-            finally:
-                with contextlib.suppress(honeydew_errors.HoneydewError):
-                    self._adb("shell", "rm", "-f", _ADB_REMOTE_PATH)
-            with open(received, "rb") as f:
-                data = f.read()
-            asserts.assert_equal(
-                len(data), len(payload), "Pulled file size mismatch"
-            )
-            asserts.assert_true(
-                data == payload, "The pulled file contents differ"
-            )
-
-    def _adb(self, *args: str) -> str:
-        return self.dut.adb.run(
-            list(args), timeout=_COMMAND_TIMEOUT_SEC, attempts=1
-        )
-
     def _check_diag(self, config: list[str]) -> None:
         """Checks that `usb-cli diag` shows no errors or stuck endpoints."""
         problems = self._run_diag(",".join(config), over_ssh="cdc" in config)
@@ -367,17 +315,8 @@ class UsbConfigSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
 
         Also logs the DWC3 endpoint types.
         """
-        output = self._usb_cli_diag(over_ssh)
-        problems = find_diag_problems(output)
-        if problems:
-            # Inspect reads the TRBs one by one while the hardware completes
-            # them, so a single read can be torn. Only trust a repeat.
-            time.sleep(1)
-            output = self._usb_cli_diag(over_ssh)
-            problems = find_diag_problems(output)
+        problems, output = find_dut_diag_problems(self.dut, over_ssh=over_ssh)
         self._log_endpoint_types(label, output)
-        if problems:
-            _LOGGER.warning("usb-cli diag output: %s", output)
         return problems
 
     def _log_endpoint_types(self, label: str, output: str) -> None:
@@ -406,7 +345,7 @@ class UsbConfigSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
         self._triggers += [
             f"{name} in {label}"
             for name, carried in exposed.items()
-            if carried >= _TRANSFER_SIZE_BYTES
+            if carried >= DEFAULT_TRANSFER_SIZE_BYTES
         ]
         _LOGGER.info(
             "[%s] DWC3 endpoint types: %s. Bulk, but Interrupt when first "
@@ -418,33 +357,6 @@ class UsbConfigSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
                 for name, carried in exposed.items()
             )
             or "none",
-        )
-
-    def _usb_cli_diag(self, over_ssh: bool) -> str:
-        """Runs `usb-cli diag` over SSH if `over_ssh`, else over serial.
-
-        Falls back to serial if SSH fails.
-        """
-        if over_ssh:
-            try:
-                # SSH is faster, and kernel logs don't get mixed in.
-                return self.dut.ffx.run(
-                    ["target", "ssh", "usb-cli diag"],
-                    timeout=_COMMAND_TIMEOUT_SEC,
-                    log_output=False,
-                    machine=MachineFormat.RAW,
-                    disable_controlmaster=True,
-                )
-            except honeydew_errors.HoneydewError as e:
-                # E.g. a CDC endpoint is stuck. Serial doesn't use USB.
-                _LOGGER.warning(
-                    "usb-cli diag over SSH failed, so using serial: %s", e
-                )
-        return self.dut.serial.send_and_recv(
-            cmd="usb-cli diag",
-            stop_tokens=USB_CLI_END_TOKENS,
-            timeout_sec=_COMMAND_TIMEOUT_SEC,
-            log_output=False,
         )
 
 

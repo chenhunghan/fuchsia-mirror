@@ -145,6 +145,7 @@ TEST_F(DisplayEngineEventsFidlTest, OnDisplayAddedWithPreferredModes) {
         EXPECT_EQ(fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
                   display_info.preferred_modes[3].flags);
 
+        EXPECT_THAT(display_info.preferred_mode_vrr_configs, ::testing::IsEmpty());
         EXPECT_THAT(display_info.edid_bytes, ::testing::IsEmpty());
         EXPECT_THAT(display_info.pixel_formats, ::testing::IsEmpty());
       });

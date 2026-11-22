@@ -71,7 +71,7 @@ source_set("source") {
     "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp_hlcpp_conversion",
     "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_hlcpp_conversion",
 
-    # The LLCPP bindings for fuchsia.hardware.camera is used by
+    # The C++ wire bindings for fuchsia.hardware.camera is used by
     # controller_device.h
     "//sdk/fidl/fuchsia.hardware.camera:fuchsia.hardware.camera_cpp",
     "//sdk/lib/async:async-cpp",

@@ -4,9 +4,9 @@
 
 from typing import Any, ClassVar, Final, Literal
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydap.dap_types import Source
-from shared.protocol.base import BaseRequest
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 from zxdb_dap import UnwinderType
 
 
@@ -46,7 +46,9 @@ class StackTraceRequest(
     """Request stack trace for a thread or all threads in a process."""
 
     command: Literal["stack-trace"] = COMMAND_NAME
-    thread_id: int | None = None
+    thread_id: int | None = Field(
+        default=None, validation_alias=THREAD_ID_ALIAS
+    )
     pid: int | None = None
     raw: bool = False
     force_remote_unwind: bool = False

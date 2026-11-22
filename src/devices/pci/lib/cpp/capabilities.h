@@ -234,6 +234,27 @@ inline std::optional<ExtCapabilityHdr> ReadExtCapability(const Config& cfg, uint
   };
 }
 
+inline std::optional<uint16_t> FindExtCapability(const Config& cfg, ExtCapability::Id id) {
+  uint16_t cap_offset = kPcieExtCapBasePtr;
+  // Bounded by kMaxExtCapabilities (the maximum number of 4-byte aligned extended capabilities
+  // in 3840 bytes) to guard against capability pointer cycles.
+  for (size_t i = 0; i < kMaxExtCapabilities && cap_offset != 0; ++i) {
+    if (cap_offset < kPcieExtCapPtrMinValid || cap_offset > kPcieExtCapPtrMaxValid) {
+      return std::nullopt;
+    }
+    auto hdr = ReadExtCapability(cfg, cap_offset);
+    if (!hdr.has_value() || (hdr->id == std::to_underlying(ExtCapability::Id::kNull) &&
+                             hdr->version == 0 && hdr->ptr == 0)) {
+      return std::nullopt;
+    }
+    if (hdr->id == std::to_underlying(id)) {
+      return cap_offset;
+    }
+    cap_offset = hdr->ptr;
+  }
+  return std::nullopt;
+}
+
 }  // namespace pci
 
 #endif  // SRC_DEVICES_PCI_LIB_CPP_CAPABILITIES_H_

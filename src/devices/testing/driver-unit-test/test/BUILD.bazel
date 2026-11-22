@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":logger-unit-test-pkg"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "logger-unit",
+    srcs = ["logger-test.cc"],
+    gn_output_name = "logger-unit-test",
+    deps = [
+        "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fidl",
+        "//src/devices/testing/driver-unit-test",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "logger-unit-test-pkg",
+    package_name = "logger-unit-test",
+    unit_tests = [":logger-unit"],
+)

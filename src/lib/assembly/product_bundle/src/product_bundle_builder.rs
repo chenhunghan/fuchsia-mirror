@@ -793,6 +793,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_path)),
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
 
         let product_bundle_path = tempdir.join("pb");
@@ -865,6 +866,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_path)),
             system_release_info: release_info,
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
 
         // Construct the PB.
@@ -964,6 +966,7 @@ mod test {
             partitions_config: Some(DirectoryPathBuf::new(partitions_path.to_path_buf())),
             system_release_info: release_info,
             platform_tools: vec![],
+            delivery_blob_type: None,
         }
     }
 

@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":ffx_tool_echo_lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    # This is named as such to avoid a conflict with an existing ffx echo command.
+    crate_name = "ffx_tool_echo",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/developer/ffx/fidl:fuchsia.developer.ffx_rust_fdomain",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+# LINT.IfChange
+ffx_tool(
+    name = "ffx_echo",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-echo",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_tool_echo_lib_test",
+    crate = ":lib",
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fuchsia",
+    ],
+)

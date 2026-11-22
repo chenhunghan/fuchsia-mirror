@@ -6,6 +6,7 @@
 
 #include "src/ui/lib/escher/impl/vulkan_utils.h"
 #include "src/ui/lib/escher/util/image_utils.h"
+#include "src/ui/lib/escher/util/trace_macros.h"
 
 #include <vulkan/vulkan.hpp>
 
@@ -66,7 +67,16 @@ class VmaImage : public escher::Image {
         allocator_(allocator),
         allocation_(allocation) {}
 
-  ~VmaImage() { vmaDestroyImage(allocator_, vk(), allocation_); }
+  ~VmaImage() override {
+    // The inner `vkDestroyImage` slice keeps VMA image teardown visible to searches for that name,
+    // as in `NaiveImage`; it also covers the memory free inside `vmaDestroyImage()`, so it is
+    // nearly as long as the outer slice.
+    TRACE_DURATION("gfx", "vmaDestroyImage");
+    {
+      TRACE_DURATION("gfx", "vkDestroyImage");
+      vmaDestroyImage(allocator_, vk(), allocation_);
+    }
+  }
 
   // |Image|
   vk::DeviceSize GetDeviceMemoryCommitment() override {
@@ -104,7 +114,23 @@ VmaGpuAllocator::VmaGpuAllocator(const VulkanContext& context)
   vmaCreateAllocator(&allocatorInfo, &allocator_);
 }
 
-VmaGpuAllocator::~VmaGpuAllocator() { vmaDestroyAllocator(allocator_); }
+VmaGpuAllocator::~VmaGpuAllocator() {
+  // `VmaGpuMem`, `VmaBuffer`, and `VmaImage` hold the raw `allocator_` handle and pass it to VMA
+  // when destroyed, so `allocator_` must not be destroyed while any of them are alive. VMA only
+  // asserts this when `NDEBUG` is undefined; abort in all build modes rather than allow a
+  // use-after-free.
+  const VkPhysicalDeviceMemoryProperties* memory_properties = nullptr;
+  vmaGetMemoryProperties(allocator_, &memory_properties);
+  VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+  vmaGetHeapBudgets(allocator_, budgets);
+  uint64_t live_allocations = 0;
+  for (uint32_t i = 0; i < memory_properties->memoryHeapCount; ++i) {
+    live_allocations += budgets[i].statistics.allocationCount;
+  }
+  FX_CHECK(live_allocations == 0) << "VmaGpuAllocator destroyed with " << live_allocations
+                                  << " live allocations";
+  vmaDestroyAllocator(allocator_);
+}
 
 GpuMemPtr VmaGpuAllocator::AllocateMemory(vk::MemoryRequirements reqs,
                                           vk::MemoryPropertyFlags flags) {

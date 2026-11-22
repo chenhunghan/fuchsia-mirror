@@ -45,8 +45,27 @@ def workspace_should_exclude_file(path: str) -> bool:
     # Don't symlink the .git or .jj directories as well.
     if path.startswith((".jiri", ".fx", ".git", ".jj")):
         return True
-    # Don't symlink the convenience symlinks from the Fuchsia source tree
-    if path in ("bazel-bin", "bazel-out", "bazel-repos", "bazel-workspace"):
+    # LINT.IfChange(convenience_symlinks)
+    # Don't symlink the convenience symlinks created by //build/regenerator.py
+    # in the Fuchsia source tree (created after generate_fuchsia_workspace(),
+    # so including them invalidates generated-info.json on the next regeneration
+    # and forces a full Bazel server restart and external repo re-fetch).
+    if path in (
+        "bazel-bin",
+        "bazel-out",
+        "bazel-repos",
+        "bazel-workspace",
+        "compile_commands.json",
+        "rust-project.json",
+        "pyrightconfig.base.json",
+    ):
+        return True
+    # LINT.ThenChange(//build/regenerator.py:convenience_symlinks)
+    # Don't symlink go.mod or go.sum created by `fx setup-go`
+    # (//tools/devshell/contrib/setup-go) in the Fuchsia source tree. They are
+    # gitignored IDE symlinks pointing to //third_party/golibs and would
+    # otherwise invalidate generated-info.json on subsequent regenerations.
+    if path in ("go.mod", "go.sum"):
         return True
     return False
 
@@ -415,6 +434,11 @@ def record_fuchsia_workspace(
     generated.record_symlink(
         "workspace/BUILD.bazel",
         fuchsia_dir / "build" / "bazel" / "toplevel.BUILD.bazel",
+    )
+
+    generated.record_symlink(
+        "workspace/REPO.bazel",
+        fuchsia_dir / "build" / "bazel" / "toplevel.REPO.bazel",
     )
 
     # Generate top-level symlinks
@@ -1568,6 +1592,40 @@ def _extract_variant_and_subpath(dest: str, prefix: str) -> tuple[str, str]:
     return variant, subpath
 
 
+# Variant names that have `@@//build/bazel/toolchains/clang:<variant>_variant`
+# alias targets.
+# LINT.IfChange(sysroot_variants)
+_BAZEL_CLANG_SYSROOT_VARIANTS = frozenset(
+    {
+        "asan",
+        "asan-sancov",
+        "asan-ubsan",
+        "coverage",
+        "coverage-rust",
+        "hwasan",
+        "hwasan-ubsan",
+        "profile",
+        "profile-rust",
+        "ubsan",
+        "ubsan-sancov",
+    }
+)
+# LINT.ThenChange(//build/bazel/toolchains/clang/BUILD.bazel:sysroot_variants)
+
+# Temporarily skip the 4 sysroot variants added in
+# //sdk/lib/c/sysroot_entries.gni whose
+# `@@//build/bazel/toolchains/clang:<variant>_variant` aliases are wired in a
+# follow-up commit; this special case will be removed by that commit.
+_PENDING_BAZEL_CLANG_SYSROOT_VARIANTS = frozenset(
+    {
+        "coverage-cts",
+        "heapdump",
+        "profile-use",
+        "profile-use-rust",
+    }
+)
+
+
 def _generate_sysroot_dist_targets(
     dist_files: dict[str, tuple[str, str]],
     debug_files: dict[str, str],
@@ -1593,6 +1651,14 @@ def _generate_sysroot_dist_targets(
     for variant in sorted(dist_files.keys()):
         if variant not in debug_files:
             continue
+        if variant and variant not in _BAZEL_CLANG_SYSROOT_VARIANTS:
+            if variant in _PENDING_BAZEL_CLANG_SYSROOT_VARIANTS:
+                continue
+            raise ValueError(
+                f"Unmapped sysroot variant {variant!r}; add it to "
+                f"_BAZEL_CLANG_SYSROOT_VARIANTS and "
+                f"//build/bazel/toolchains/clang/BUILD.bazel"
+            )
         variant_suffix = variant if variant else "novariant"
         target_name = f"sysroot_library_dist.{variant_suffix}"
         stripped_file, subpath = dist_files[variant]
@@ -1613,7 +1679,7 @@ def _generate_sysroot_dist_targets(
                 )"""
             )
         )
-        # LINT.IfChange(sysroot_variants)
+        # LINT.IfChange
         if variant:
             select_entries[
                 f"@@//build/bazel/toolchains/clang:{variant}_variant"

@@ -8,15 +8,11 @@
 #include <arch/asm_macros.h>
 #include <arch/regs.h>
 #include <asm.h>
-#include <zircon/compiler.h>
 
-// void arm64_uspace_entry(iframe_t* iframe, vaddr_t kstack) __NO_RETURN;
-// optionally vaddr_t scsp
+// void arm64_uspace_entry(iframe_t* iframe, vaddr_t kstack, vaddr_t scsp) __NO_RETURN;
 FUNCTION(arm64_uspace_entry)
     mrs x16, tpidr_el1
-#if __has_feature(shadow_call_stack)
     str x2, [x16, CURRENT_SCSP_OFFSET]
-#endif
     ldr x16, [x16, CURRENT_MDSCR_OFFSET]
     msr mdscr_el1, x16
 

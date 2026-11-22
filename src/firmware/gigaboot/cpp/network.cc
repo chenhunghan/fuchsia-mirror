@@ -14,6 +14,9 @@ namespace gigaboot {
 
 namespace {
 
+constexpr int kLinkRetries = 10;
+constexpr size_t kLinkRetryDelayUs = 500'000;
+
 // Given an efi_mac_addr, return a 6 byte octet "real" MAC address.
 MacAddr MacAddrFromEfiMacAddr(efi_mac_addr const& addr) {
   MacAddr eth;
@@ -105,6 +108,10 @@ uint16_t CalculateChecksum(std::span<const uint8_t> data, uint64_t start) {
 
 fit::result<efi_status, EthernetAgent> EthernetAgent::Create() {
   EfiProtocolPtr<efi_managed_network_protocol> mnp = FindNetworkIntf();
+  for (int i = 0; !mnp && i < kLinkRetries; i++) {
+    gEfiSystemTable->BootServices->Stall(kLinkRetryDelayUs);
+    mnp = FindNetworkIntf();
+  }
   if (!mnp) {
     return fit::error(EFI_NO_MEDIA);
   }

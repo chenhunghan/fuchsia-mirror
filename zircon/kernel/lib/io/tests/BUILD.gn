@@ -4,12 +4,16 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-source_set("tests") {
+import("//zircon/kernel/kernel_rust_mod.gni")
+
+kernel_rust_mod("tests") {
   testonly = true
-  sources = [ "io_tests.cc" ]
+  sources = [ "io_tests.rs" ]
   deps = [
-    "//zircon/kernel/lib/io:headers",
-    "//zircon/kernel/lib/unittest",
-    "//zircon/system/ulib/zircon-internal",
+    "//src/lib/kprint",
+    "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/lib/arch:arch-rs",
+    "//zircon/kernel/lib/io:io-rs",
   ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }

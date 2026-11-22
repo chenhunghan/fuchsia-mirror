@@ -13,9 +13,6 @@
 
 #define MAXSIZE 1024
 
-#define TFTP_DEFAULT_BLOCK_SZ 1024
-#define TFTP_DEFAULT_WINDOW_SZ 256
-
 typedef struct {
   netboot_message_header_t hdr;
   uint8_t data[MAXSIZE];
@@ -37,13 +34,11 @@ typedef struct device_info {
   uint16_t bootloader_port;
 } device_info_t;
 
-extern uint16_t tftp_block_size, tftp_window_size;
-
 // Handle netboot command line options.
 int netboot_handle_getopt(int argc, char* const* argv);
 int netboot_handle_custom_getopt(int argc, char* const* argv, const struct option* custom_opts,
                                  bool (*opt_callback)(int ch, int argc, char* const* argv));
-void netboot_usage(bool show_tftp_opts);
+void netboot_usage(void);
 
 // Returns whether discovery should continue or not.
 typedef bool (*on_device_cb)(device_info_t* device, void* cookie);

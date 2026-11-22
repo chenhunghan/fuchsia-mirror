@@ -35,7 +35,8 @@ pub enum DecodeError {
     ParserError(#[from] ParseError),
 }
 
-pub type MessageParser = message::MessageParser;
+#[derive(Default)]
+pub struct MessageParser(message::ffi::FfiMessageParser);
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fuchsia_new_message_parser() -> *mut MessageParser {
@@ -130,7 +131,7 @@ fn fuchsia_decode_log_messages_to_struct_internal<'a>(
     let mut current_slice = buf.as_ref();
     let formatter = CPPMessageFormatter(allocator);
     loop {
-        let (data, remaining) = parser.parse_next(current_slice, &formatter)?;
+        let (data, remaining) = parser.0.parse_next(current_slice, &formatter)?;
 
         if let Some(data) = data {
             messages.push(data);

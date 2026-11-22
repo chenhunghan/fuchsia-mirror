@@ -28,8 +28,6 @@ driver_manager
 ?fxfs-crypt
 gpio
 ?gpt2
-?hid
-?hid-input-report
 i2c
 kernel-args-forwarder
 ?memfs

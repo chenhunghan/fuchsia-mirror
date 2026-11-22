@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
       "data": "test.struct",
       "start_offset": 36,
       "end_offset": 47
@@ -22,7 +22,7 @@
       "identifier": "test.struct/BasicStruct",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
         "data": "BasicStruct",
         "start_offset": 137,
         "end_offset": 148
@@ -32,7 +32,7 @@
           "name": "x",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
             "data": "x",
             "start_offset": 164,
             "end_offset": 165
@@ -45,7 +45,7 @@
           "name": "y",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
             "data": "y",
             "start_offset": 178,
             "end_offset": 179
@@ -61,7 +61,7 @@
       "identifier": "test.struct/Simple",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
         "data": "Simple",
         "start_offset": 55,
         "end_offset": 61
@@ -71,7 +71,7 @@
           "name": "f1",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
             "data": "f1",
             "start_offset": 77,
             "end_offset": 79
@@ -84,7 +84,7 @@
           "name": "f2",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/struct.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/struct.test.fidl",
             "data": "f2",
             "start_offset": 91,
             "end_offset": 93

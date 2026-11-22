@@ -1,0 +1,18 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.nordic.platform",
+    src = "fuchsia.nordic.platform.bind",
+    category = "partner",
+    visibility = [
+        "//src/connectivity/openthread/drivers/ot-radio:__pkg__",
+        "//src/devices/board/drivers/nelson:__pkg__",
+        "//src/devices/board/drivers/sherlock:__pkg__",
+    ],
+)

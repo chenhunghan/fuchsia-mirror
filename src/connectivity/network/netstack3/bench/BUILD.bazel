@@ -8,6 +8,13 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [":netstack3-benchmarks-test"],
+    visibility = ["//src/connectivity/network/netstack3:__pkg__"],
+)
+
 rustc_binary(
     name = "netstack3-benchmarks",
     testonly = True,
@@ -44,5 +51,4 @@ rustc_test(
 fx_unittest_package(
     name = "netstack3-benchmarks-test",
     unit_tests = [":netstack3-benchmarks_test"],
-    visibility = ["//src/connectivity/network:__pkg__"],
 )

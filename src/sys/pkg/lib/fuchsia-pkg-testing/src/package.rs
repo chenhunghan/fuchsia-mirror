@@ -353,7 +353,12 @@ async fn read_file(dir: &fio::DirectoryProxy, path: &str) -> Result<Vec<u8>, Ver
                 fio::FileEvent::OnOpen_ { s, info } => {
                     match Status::ok(s) {
                         Err(Status::NOT_FOUND) => {
-                            Err(VerificationError::MissingFile { path: path.to_owned() })
+                            Err(VerificationError::MissingEntry { path: path.to_owned() })
+                        }
+                        Err(Status::IO_DATA_INTEGRITY) => {
+                            Err(VerificationError::EntryExistsButBlobMissing {
+                                path: path.to_owned(),
+                            })
                         }
                         Err(status) => {
                             Err(format_err!("unable to open {:?}: {:?}", path, status).into())
@@ -382,11 +387,16 @@ async fn read_file(dir: &fio::DirectoryProxy, path: &str) -> Result<Vec<u8>, Ver
                     panic!("unknown file event {ordinal}")
                 }
             },
-            // If not found, Open3 will send an epitaph when closing the channel.
+            // On error, Open3 sends an epitaph when closing the channel.
             Err(fidl::Error::ClientChannelClosed { epitaph, .. })
                 if epitaph == zx::Status::NOT_FOUND =>
             {
-                return Err(VerificationError::MissingFile { path: path.to_owned() });
+                return Err(VerificationError::MissingEntry { path: path.to_owned() });
+            }
+            Err(fidl::Error::ClientChannelClosed { epitaph, .. })
+                if epitaph == zx::Status::IO_DATA_INTEGRITY =>
+            {
+                return Err(VerificationError::EntryExistsButBlobMissing { path: path.to_owned() });
             }
             Err(other_e) => {
                 return Err(
@@ -499,9 +509,14 @@ pub enum VerificationError {
         /// Path to the extra file.
         path: String,
     },
-    /// The directory is not serving a particular file that it should be serving.
-    MissingFile {
-        /// Path to the missing file.
+    /// The directory does not have an entry for a file that should be in the package.
+    MissingEntry {
+        /// Path to the missing entry.
+        path: String,
+    },
+    /// The directory has an entry for the file, but its backing blob is missing.
+    EntryExistsButBlobMissing {
+        /// Path to the file with a missing blob.
         path: String,
     },
     /// The actual merkle of the file does not match the merkle listed in the meta FAR.
@@ -1011,7 +1026,7 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn test_verify_contents_rejects_missing_blob() -> Result<(), Error> {
+    async fn test_verify_contents_rejects_missing_entry() -> Result<(), Error> {
         let pkg = Package::identity().await?;
         let pkg_dir = make_this_package_dir()?;
 
@@ -1024,9 +1039,40 @@ mod tests {
 
         assert_matches!(
             pkg.verify_contents(&pkg_dir_proxy).await,
-            Err(VerificationError::MissingFile{ref path}) if path == "bin/fuchsia_pkg_testing_lib_test");
+            Err(VerificationError::MissingEntry { ref path })
+                if path == "bin/fuchsia_pkg_testing_lib_test"
+        );
 
         Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_verify_contents_rejects_entry_exists_but_blob_missing() {
+        let pkg = PackageBuilder::new("test")
+            .add_resource_at("missing-blob", "contents".as_bytes())
+            .build()
+            .await
+            .unwrap();
+
+        let (proxy, mut stream) =
+            fidl::endpoints::create_proxy_and_stream::<fio::DirectoryMarker>();
+        let server = async move {
+            match stream.next().await {
+                Some(Ok(fio::DirectoryRequest::Open { path, object, .. })) => {
+                    assert_eq!(path, "missing-blob");
+                    fidl::endpoints::ServerEnd::<fio::FileMarker>::new(object)
+                        .close_with_epitaph(Status::IO_DATA_INTEGRITY)
+                        .unwrap();
+                }
+                other => panic!("unexpected request: {other:?}"),
+            }
+        };
+
+        let (result, ()) = join!(pkg.verify_contents(&proxy), server);
+        assert_matches!(
+            result,
+            Err(VerificationError::EntryExistsButBlobMissing { ref path }) if path == "missing-blob"
+        );
     }
 
     #[fuchsia::test]

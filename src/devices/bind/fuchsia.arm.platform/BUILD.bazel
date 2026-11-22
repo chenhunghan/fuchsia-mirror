@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.arm.platform",
+    src = "fuchsia.arm.platform.bind",
+    api_area = "Unknown",
+    category = "partner",
+    visibility = [
+        "//sdk:__pkg__",
+        "//src/camera/drivers/hw_accel/gdc:__pkg__",
+        "//src/devices/board/drivers:__subpackages__",
+        "//src/graphics/drivers/aml-gpu:__pkg__",
+        "//src/graphics/drivers/msd-arm-mali:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+)

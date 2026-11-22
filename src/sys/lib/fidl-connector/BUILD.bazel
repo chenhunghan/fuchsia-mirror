@@ -14,13 +14,7 @@ rustc_library(
     srcs = ["src/lib.rs"],
     crate_name = "fidl_connector",
     edition = "2024",
-    visibility = [
-        "//src/lib/fuchsia-hyper:__pkg__",
-        "//src/session/bin/element_manager:__pkg__",
-        "//src/sys/lib/elf_runner:__pkg__",
-        "//src/sys/pkg/bin/pkg-cache:__pkg__",
-        "//src/sys/pkg/lib/omaha-client-fuchsia:__pkg__",
-    ],
+    visibility = ["//:__subpackages__"],
     deps = [
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-component",

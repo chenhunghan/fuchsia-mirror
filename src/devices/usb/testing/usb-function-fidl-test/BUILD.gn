@@ -1,0 +1,216 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
+import("//build/rust/rustc_library.gni")
+
+rustc_library("usb-function-fidl-test") {
+  name = "usb_function_fidl_test"
+  edition = "2024"
+  testonly = true
+  sources = [
+    "src/lib.rs",
+    "src/mock.rs",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.function:fuchsia.hardware.usb.function_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.request:fuchsia.hardware.usb.request_rust",
+    "//sdk/rust/zx",
+    "//src/lib/diagnostics/reader/rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+}
+
+rustc_binary("usb_function_fidl_test_bin") {
+  testonly = true
+  edition = "2024"
+  source_root = "src/main.rs"
+  sources = [ "src/main.rs" ]
+  deps = [
+    ":usb-function-fidl-test",
+    "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_rust",
+    "//sdk/fidl/fuchsia.hardware.usb.function:fuchsia.hardware.usb.function_rust",
+    "//sdk/lib/driver_test_realm/realm_builder/rust",
+    "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-component-test",
+    "//src/lib/fuchsia-runtime",
+    "//third_party/rust_crates:anyhow",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
+  ]
+}
+
+fuchsia_test_component("usb-function-fidl-test-component") {
+  component_name = "usb-function-fidl-test"
+  manifest = "meta/usb-function-fidl-test.cml"
+  deps = [ ":usb_function_fidl_test_bin" ]
+}
+
+template("fake_usb_peripheral_config") {
+  _usb_vid = 0
+  if (defined(invoker.usb_vid)) {
+    _usb_vid = invoker.usb_vid
+  }
+
+  _usb_pid = 0
+  if (defined(invoker.usb_pid)) {
+    _usb_pid = invoker.usb_pid
+  }
+
+  _cml_target = "${target_name}_cml"
+  _generated_cml = "${target_gen_dir}/${target_name}.cml"
+
+  generated_file(_cml_target) {
+    testonly = true
+    visibility = [ ":*" ]
+    outputs = [ _generated_cml ]
+    output_conversion = "json"
+    contents = {
+      capabilities = [
+        {
+          config = "fuchsia.usb.test.UsbClass"
+          type = "uint8"
+          value = invoker.usb_class
+        },
+        {
+          config = "fuchsia.usb.test.UsbSubclass"
+          type = "int16"
+          value = invoker.usb_subclass
+        },
+        {
+          config = "fuchsia.usb.test.UsbProtocol"
+          type = "int16"
+          value = invoker.usb_protocol
+        },
+        {
+          config = "fuchsia.usb.test.UsbVid"
+          type = "uint16"
+          value = _usb_vid
+        },
+        {
+          config = "fuchsia.usb.test.UsbPid"
+          type = "uint16"
+          value = _usb_pid
+        },
+      ]
+      expose = [
+        {
+          config = [
+            "fuchsia.usb.test.UsbClass",
+            "fuchsia.usb.test.UsbSubclass",
+            "fuchsia.usb.test.UsbProtocol",
+            "fuchsia.usb.test.UsbVid",
+            "fuchsia.usb.test.UsbPid",
+          ]
+          from = "self"
+        },
+      ]
+    }
+  }
+
+  fuchsia_component(target_name) {
+    testonly = true
+    visibility = [ ":*" ]
+    component_name = "fake-usb-peripheral-config"
+    manifest = _generated_cml
+    manifest_deps = [ ":${_cml_target}" ]
+  }
+}
+
+template("usb_function_fidl_test_package") {
+  config_target = "${target_name}-peripheral-config-values"
+
+  fake_usb_peripheral_config(config_target) {
+    forward_variables_from(invoker,
+                           [
+                             "usb_class",
+                             "usb_subclass",
+                             "usb_protocol",
+                             "usb_vid",
+                             "usb_pid",
+                           ])
+  }
+
+  fuchsia_test_package(target_name) {
+    test_components = [ ":usb-function-fidl-test-component" ]
+    deps = [
+      ":${config_target}",
+      "//sdk/lib/driver_test_realm:driver_manager_test",
+      "//sdk/lib/driver_test_realm:fake_resolver",
+      "//src/devices/misc/drivers/test-parent",
+      "//src/devices/usb/testing/usb-function-fidl-test/fake-usb-peripheral",
+      invoker.driver_dep,
+    ]
+    test_specs = {
+      log_settings = {
+        max_severity = "ERROR"
+      }
+    }
+  }
+}
+
+usb_function_fidl_test_package("usb-cdc-function-fidl-test") {
+  usb_class = 2
+  usb_subclass = 6
+  usb_protocol = 0
+  driver_dep = "//src/connectivity/ethernet/drivers/usb-cdc-function"
+}
+
+usb_function_fidl_test_package("usb-adb-function-fidl-test") {
+  usb_class = 255
+  usb_subclass = 66
+  usb_protocol = 1
+  driver_dep = "//src/developer/adb/drivers/usb-adb-function"
+}
+
+usb_function_fidl_test_package("usb-rndis-function-fidl-test") {
+  usb_class = 239
+  usb_subclass = 4
+  usb_protocol = 1
+  driver_dep = "//src/connectivity/ethernet/drivers/rndis-function"
+}
+
+usb_function_fidl_test_package("usb-vsock-function-fidl-test") {
+  usb_class = 255
+  usb_subclass = 67
+  usb_protocol = 0
+  driver_dep = "//src/developer/remote-control/usb/vsock-usb"
+}
+
+usb_function_fidl_test_package("usb-fastboot-function-fidl-test") {
+  usb_class = 255
+  usb_subclass = 66
+  usb_protocol = 3
+  driver_dep = "//src/firmware/drivers/usb-fastboot-function:component"
+}
+
+usb_function_fidl_test_package("usb-zero-function-fidl-test") {
+  usb_class = 255
+  usb_subclass = 0
+  usb_protocol = 1
+  driver_dep = "//src/devices/usb/drivers/usb-zero-function"
+}
+
+group("tests") {
+  testonly = true
+  deps = [
+    ":usb-adb-function-fidl-test",
+    ":usb-cdc-function-fidl-test",
+    ":usb-fastboot-function-fidl-test",
+    ":usb-rndis-function-fidl-test",
+    ":usb-vsock-function-fidl-test",
+    ":usb-zero-function-fidl-test",
+  ]
+}

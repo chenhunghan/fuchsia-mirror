@@ -15,27 +15,13 @@
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
-#include <vm/handoff-end.h>
 
-// Called at the end of the boot process in the main kernel initialization sequence.
-void userboot_init(HandoffEnd handoff_end);
+class VmObject;
 
 __BEGIN_CDECLS
 
-void rust_userboot_init(HandoffEnd* handoff_end);
-
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE void cpp_boot_options_show(bool defaults, FILE* out);
-
-#if ENABLE_ENTROPY_COLLECTOR_TEST
-FFI_ALWAYS_INLINE bool cpp_entropy_was_lost();
-FFI_ALWAYS_INLINE VmObject* cpp_entropy_vmo();
-FFI_ALWAYS_INLINE size_t cpp_entropy_vmo_stream_size();
-#endif
-
-#if defined(__aarch64__) && ZX_DEBUG_ASSERT_IMPLEMENTED
-FFI_ALWAYS_INLINE void cpp_arm64_print_midr_cpu_name(FILE* out);
-#endif
 
 __END_CDECLS
 

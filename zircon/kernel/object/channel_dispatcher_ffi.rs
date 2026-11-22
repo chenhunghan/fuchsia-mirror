@@ -27,15 +27,3 @@ crate::object::dispatcher::impl_peered_dispatcher_state_init!(
     ChannelDispatcher,
     ChannelDispatcherState,
 );
-
-/// Retrieves message counts for diagnostics.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_channel_dispatcher_get_message_counts(
-    disp: &ChannelDispatcher,
-    current: &mut u64,
-    max: &mut u64,
-) {
-    let (cur, mx) = disp.get_message_counts();
-    *current = cur as u64;
-    *max = mx;
-}

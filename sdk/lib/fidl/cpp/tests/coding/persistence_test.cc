@@ -92,10 +92,10 @@ TEST(Unpersist, NaturalUnion) {
   // clang-format on
   EXPECT_EQ(bytes.size(), 24U);
 
-  fit::result result = ::fidl::Unpersist<test_types::TestStrictXUnion>(cpp20::span(bytes));
+  fit::result result = ::fidl::Unpersist<test_types::TestStrictUnion>(cpp20::span(bytes));
   ASSERT_TRUE(result.is_ok(), "Error during unpersist: %s",
               result.error_value().FormatDescription().c_str());
-  test_types::TestStrictXUnion& obj = result.value();
+  test_types::TestStrictUnion& obj = result.value();
 
   // Check decoded value.
   EXPECT_TRUE(obj.primitive().has_value());
@@ -103,7 +103,7 @@ TEST(Unpersist, NaturalUnion) {
 }
 
 TEST(Persist, NaturalUnion) {
-  const auto obj = test_types::TestStrictXUnion::WithPrimitive(42);
+  const auto obj = test_types::TestStrictUnion::WithPrimitive(42);
 
   fit::result result = ::fidl::Persist(obj);
   ASSERT_TRUE(result.is_ok(), "Error during persist: %s",

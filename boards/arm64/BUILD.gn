@@ -15,13 +15,11 @@ assert(current_cpu == "arm64",
        "The arm64 board can only be defined in an arm64 toolchain.")
 
 bazel_board_configuration("arm64") {
-  testonly = true
   bazel_board_configuration_target = "//boards/arm64"
   deps = [ ":arm64.bazel_input" ]
 }
 
 group("arm64.bazel_input") {
-  testonly = true
   deps = [
     ":arm64_bibs.bazel_input",
     ":main_bundle.bazel_inputs",
@@ -58,9 +56,9 @@ board_input_bundle("main_bundle") {
       driver_components = [ "meta/ahci.cm" ]
     },
     {
-      package_target = "//src/devices/board/drivers/qemu-arm64:package"
+      package_target = "//src/devices/board/drivers/virt:package"
       package_set = "bootfs"
-      driver_components = [ "meta/qemu-arm64.cm" ]
+      driver_components = [ "meta/virt.cm" ]
     },
     {
       package_target = "//src/devices/rtc/drivers/pl031-rtc:package"

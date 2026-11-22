@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+py_library(
+    name = "fuchsia_async_extension",
+    srcs = ["__init__.py"],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/developer/fuchsia-controller:__subpackages__",
+        "//src/testing/end_to_end:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = ["//third_party/mobly:mobly_no_testonly"],
+)

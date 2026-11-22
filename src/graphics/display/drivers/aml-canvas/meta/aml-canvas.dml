@@ -9,7 +9,39 @@
         default_dispatcher_scheduler_role: "fuchsia.graphics.display.drivers.aml-canvas.device",
     },
     capabilities: [
-        { service: "fuchsia.hardware.amlogiccanvas.Service" },
+        {
+            service: "fuchsia.hardware.amlogiccanvas.Service",
+            metadata: {
+                id: "fuchsia.hardware.amlogiccanvas.Metadata",
+                schema: {
+                    $schema: "http://json-schema.org/draft-07/schema#",
+                    title: "CanvasMetadata",
+                    type: "object",
+                    properties: {
+                        consumers: {
+                            type: "array",
+                            items: { $ref: "#/definitions/CanvasConsumer" },
+                        },
+                    },
+                    definitions: {
+                        CanvasConsumer: {
+                            type: "object",
+                            properties: {
+                                id: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                name: { type: "string" },
+                            },
+                            required: [
+                                "id",
+                                "name",
+                            ],
+                        },
+                    },
+                },
+            },
+        },
     ],
     use: [
         {

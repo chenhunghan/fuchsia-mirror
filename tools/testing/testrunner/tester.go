@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.fuchsia.dev/fuchsia/tools/botanist"
@@ -436,10 +438,11 @@ func (t *SubprocessTester) Test(ctx context.Context, test testsharder.Test, stdo
 			// Mount the actual config.
 			testCmdBuilder.MountPoints = append(testCmdBuilder.MountPoints, &MountPt{Src: testbedConfigPath})
 
-			// Mount the SSH keys and serial sockets for each target in the testbed.
+			// Mount the SSH keys and serial/USB sockets for each target in the testbed.
 			type targetInfo struct {
-				SerialSocket string `json:"serial_socket"`
-				SSHKey       string `json:"ssh_key"`
+				SerialSocket  string `json:"serial_socket"`
+				SSHKey        string `json:"ssh_key"`
+				USBSocketPath string `json:"usb_socket_path"`
 			}
 			b, err := os.ReadFile(testbedConfigPath)
 			if err != nil {
@@ -451,17 +454,20 @@ func (t *SubprocessTester) Test(ctx context.Context, test testsharder.Test, stdo
 				testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
 				return testResult, nil
 			}
-			serialSockets := make(map[string]struct{})
+			writableSockets := make(map[string]struct{})
 			sshKeys := make(map[string]struct{})
 			for _, config := range testbedConfig {
 				if config.SSHKey != "" {
 					sshKeys[config.SSHKey] = struct{}{}
 				}
 				if config.SerialSocket != "" {
-					serialSockets[config.SerialSocket] = struct{}{}
+					writableSockets[config.SerialSocket] = struct{}{}
+				}
+				if config.USBSocketPath != "" {
+					writableSockets[config.USBSocketPath] = struct{}{}
 				}
 			}
-			for socket := range serialSockets {
+			for socket := range writableSockets {
 				absSocketPath, err := filepath.Abs(socket)
 				if err != nil {
 					testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
@@ -836,6 +842,24 @@ func (t *FFXTester) Reconnect(ctx context.Context) error {
 			break
 		}
 	}
+	// Botanist runs testrunner in-process, so also point the target's own
+	// FFXInstance at the new address; later ffx calls made through it would
+	// otherwise still use the stale one. With use_serial_target_id, update the
+	// target's registry entry instead for a target addressed as `id:<serial>`,
+	// since ffx finds its new address there. t.ffx is a copy of the target's
+	// FFXInstance, so it is addressed the same way.
+	if targetFFX := t.target.GetFFX(); targetFFX != nil {
+		if targetFFX.Experiments.Contains(botanist.UseSerialTargetID) {
+			if err := targets.RegisterTargetAddress(t.target, addr.String()); err != nil {
+				return fmt.Errorf("updating registered target: %w", err)
+			}
+			if strings.HasPrefix(targetFFX.GetTarget(), "id:") {
+				logger.Infof(ctx, "updated the registered address of %s to %s", targetFFX.GetTarget(), addr.String())
+				return ffxTesterReconnect(t, ctx)
+			}
+		}
+		targetFFX.SetTarget(addr.String())
+	}
 	t.ffx.SetTarget(addr.String())
 	return ffxTesterReconnect(t, ctx)
 }
@@ -990,6 +1014,7 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 	}
 	testResult.FailureReason = failureReason(testResult.Status, test.Timeout)
 	testResult.Tags = append(testResult.Tags, build.TestTag{Key: "test_outcome", Value: suiteResult.Outcome})
+	testResult.Runner = suiteResult.Runner
 
 	var suiteArtifacts []string
 	var stdioPath string
@@ -1015,8 +1040,14 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 	testResult.OutputFiles = suiteArtifacts
 	testResult.OutputDir = suiteArtifactDir
 
+	caseNames := make([]string, len(suiteResult.Cases))
+	for i, testCase := range suiteResult.Cases {
+		caseNames[i] = testCase.Name
+	}
+	caseFormat, splitSuiteNames, splitCaseNames := runtests.CaseNamesForRunner(suiteResult.Runner, caseNames)
+
 	var cases []runtests.TestCaseResult
-	for _, testCase := range suiteResult.Cases {
+	for i, testCase := range suiteResult.Cases {
 		var status runtests.TestStatus
 		switch testCase.Outcome {
 		case ffxutil.TestPassed:
@@ -1052,10 +1083,11 @@ func processTestResult(runResult *ffxutil.TestRunResult, test testsharder.Test, 
 		}
 		cases = append(cases, runtests.TestCaseResult{
 			DisplayName:   testCase.Name,
-			CaseName:      testCase.Name,
+			SuiteName:     splitSuiteNames[i],
+			CaseName:      splitCaseNames[i],
 			Status:        status,
 			FailureReason: failureReason(status, test.Timeout, caseStderr),
-			Format:        "FTF",
+			Format:        caseFormat,
 			OutputFiles:   artifacts,
 			OutputDir:     testCaseArtifactDir,
 			Tags:          []build.TestTag{{Key: "test_outcome", Value: testCase.Outcome}},
@@ -1377,7 +1409,9 @@ type socketConn interface {
 
 // FuchsiaSerialTester executes fuchsia tests over serial.
 type FuchsiaSerialTester struct {
-	socket socketConn
+	mu               sync.Mutex
+	socket           socketConn
+	serialSocketPath string
 }
 
 // NewFuchsiaSerialTester creates a tester that runs tests over serial.
@@ -1399,7 +1433,10 @@ func NewFuchsiaSerialTester(ctx context.Context, serialSocketPath string) (Teste
 	if _, err := iomisc.ReadUntilMatchString(startedCtx, socket, "[driver_manager.cm] INFO: Bootup completed"); err != nil {
 		logger.Debugf(ctx, "%s", err)
 	}
-	return &FuchsiaSerialTester{socket: socket}, nil
+	return &FuchsiaSerialTester{
+		socket:           socket,
+		serialSocketPath: serialSocketPath,
+	}, nil
 }
 
 func (t *FuchsiaSerialTester) SetupTest(_ context.Context, _ testsharder.Test) error {
@@ -1559,12 +1596,25 @@ func (r *parseOutKernelReader) lineWithoutKernelLog(line []byte, isTruncated boo
 	return line
 }
 
+func isSerialDisconnectErr(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, net.ErrClosed)
+}
+
 func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, stdout, _ io.Writer, _ string) (*runtests.TestDetails, error) {
 	testResult := BaseTestResultFromTest(test)
 	command, err := commandForTest(&test, true, test.Timeout)
 	if err != nil {
 		testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
 		return testResult, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	socket := t.socket
+	t.mu.Unlock()
+	if socket == nil {
+		return nil, connectionError{errors.New("serial socket is not connected")}
 	}
 	logger.Debugf(ctx, "starting: %s", command)
 
@@ -1578,8 +1628,8 @@ func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, s
 	// that indicate the test completed, then the startedReader will consume the bytes needed for detecting
 	// completion. Thus we save the last read from the socket and replay it when searching for completion.
 	// lastWrite := &lastWriteSaver{}
-	t.socket.SetIOTimeout(testStartedTimeout)
-	reader := io.TeeReader(t.socket, &lastWrite)
+	socket.SetIOTimeout(testStartedTimeout)
+	reader := io.TeeReader(socket, &lastWrite)
 	commandStarted := false
 
 	startedStr := runtests.StartedSignature + test.Name
@@ -1590,8 +1640,11 @@ func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, s
 
 	var readErr error
 	for i := 0; i < startSerialCommandMaxAttempts; i++ {
-		if err := serial.RunCommands(ctx, t.socket, []serial.Command{{Cmd: command}}); err != nil {
-			return nil, fmt.Errorf("failed to write to serial socket: %w", err)
+		if err := serial.RunCommands(ctx, socket, []serial.Command{{Cmd: command}}); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, connectionError{fmt.Errorf("failed to write to serial socket: %w", err)}
 		}
 		startedCtx, cancel := newTestStartedContext(ctx)
 		_, readErr = iomisc.ReadUntilMatchString(startedCtx, reader, startedStr)
@@ -1599,6 +1652,10 @@ func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, s
 		if readErr == nil {
 			commandStarted = true
 			break
+		} else if ctx.Err() != nil {
+			return nil, ctx.Err()
+		} else if isSerialDisconnectErr(readErr) {
+			return nil, connectionError{fmt.Errorf("serial socket disconnected before test started: %w", readErr)}
 		} else if errors.Is(readErr, startedCtx.Err()) {
 			logger.Warningf(ctx, "test not started after timeout")
 		} else {
@@ -1613,12 +1670,27 @@ func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, s
 		return nil, err
 	}
 
-	t.socket.SetIOTimeout(test.Timeout + 30*time.Second)
+	socket.SetIOTimeout(test.Timeout + 30*time.Second)
 	testOutputReader := io.TeeReader(
 		// See comment above lastWrite declaration.
-		&parseOutKernelReader{ctx: ctx, reader: io.MultiReader(&lastWrite, t.socket)},
+		&parseOutKernelReader{ctx: ctx, reader: io.MultiReader(&lastWrite, socket)},
 		// Writes to stdout as it reads from the above reader.
 		stdout)
+
+	handleReadErr := func(err error) (*runtests.TestDetails, error) {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if isSerialDisconnectErr(err) {
+			// EOF, reset, or closed socket indicates that serial has become
+			// disconnected. That is unlikely to be caused by this test; return
+			// a connectionError so testrunner can reconnect and retry rather
+			// than blaming the test.
+			return nil, connectionError{err}
+		}
+		testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
+		return testResult, nil
+	}
 
 	if test.PackageURL != "" {
 		// The test was ran with the "run-test-suite" tool, parse the result.
@@ -1632,9 +1704,7 @@ func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, s
 		res_dnf := test.PackageURL + " completed with result: DID_NOT_FINISH"
 		match, err := iomisc.ReadUntilMatchString(ctx, testOutputReader, res_success, res_failed, res_inconclusive, res_timed_out, res_errored, res_skipped, res_canceled, res_dnf)
 		if err != nil {
-			err = fmt.Errorf("unable to derive test result from run-test-suite output: %w", err)
-			testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
-			return testResult, nil
+			return handleReadErr(fmt.Errorf("unable to derive test result from run-test-suite output: %w", err))
 		}
 
 		if match == res_success {
@@ -1660,15 +1730,8 @@ func (t *FuchsiaSerialTester) Test(ctx context.Context, test testsharder.Test, s
 	}
 
 	if success, err := runtests.TestPassed(ctx, testOutputReader, test.Name); err != nil {
-		testResult.FailureReason = runtests.FailureReasonFromMessage(err.Error())
-		return testResult, nil
+		return handleReadErr(err)
 	} else if !success {
-		if errors.Is(err, io.EOF) {
-			// EOF indicates that serial has become disconnected. That is
-			// unlikely to be caused by this test and we're unlikely to be able
-			// to keep running tests.
-			return nil, err
-		}
 		testResult.FailureReason = runtests.FailureReasonFromMessage("test failed")
 		return testResult, nil
 	}
@@ -1688,14 +1751,40 @@ func (t *FuchsiaSerialTester) RunSnapshot(_ context.Context, _ string) error {
 	return nil
 }
 
-func (t *FuchsiaSerialTester) Reconnect(_ context.Context) error {
+func (t *FuchsiaSerialTester) Reconnect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if t.serialSocketPath == "" {
+		return errors.New("cannot reconnect: serial socket path is not set")
+	}
+	if err := t.Close(); err != nil {
+		logger.Debugf(ctx, "failed to close serial socket before reconnect: %s", err)
+	}
+	socket, err := serial.NewSocket(ctx, t.serialSocketPath)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("failed to reconnect to serial socket: %w", err)
+	}
+	t.mu.Lock()
+	t.socket = socket
+	t.mu.Unlock()
 	return nil
 }
 
-// Close terminates the underlying Serial socket connection. The object is no
-// longer usable after calling this method.
+// Close terminates the underlying Serial socket connection. Subsequent Test
+// calls require Reconnect to re-establish the socket.
 func (t *FuchsiaSerialTester) Close() error {
-	return t.socket.Close()
+	t.mu.Lock()
+	socket := t.socket
+	t.socket = nil
+	t.mu.Unlock()
+	if socket == nil {
+		return nil
+	}
+	return socket.Close()
 }
 
 func commandForTest(test *testsharder.Test, useSerial bool, timeout time.Duration) ([]string, error) {

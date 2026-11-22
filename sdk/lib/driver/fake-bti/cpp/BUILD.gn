@@ -46,6 +46,7 @@ sdk_source_set("cpp") {
     ":*",
     "//sdk/lib/driver/fake-bti/rust:*",
     "//sdk/lib/driver/fake-platform-device/cpp:*",
+    "//sdk/lib/driver/pci/cpp/tests:*",
     "//sdk/lib/driver/platform-device/cpp/tests:*",
     "//src/connectivity/*",
     "//src/devices/*",

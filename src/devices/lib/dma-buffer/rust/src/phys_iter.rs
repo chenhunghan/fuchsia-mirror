@@ -17,14 +17,12 @@ use zx::system_get_page_size;
 #[derive(Debug, Clone)]
 pub struct PhysIter<'a> {
     chunk_list: &'a [zx_paddr_t],
-    buf_length: usize,
     max_length: usize,
     chunk_size: usize,
     merge: bool,
     chunk_index: usize,
     offset_in_chunk: usize,
-    current: Option<(zx_paddr_t, usize)>,
-    iterated_bytes: usize,
+    remaining: usize,
 }
 
 impl<'a> PhysIter<'a> {
@@ -33,8 +31,10 @@ impl<'a> PhysIter<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `chunk_list` is empty, `buf_length == 0`, or
-    /// `chunk_list.len() > 1 && vmo_offset >= system_get_page_size() as usize`.
+    /// Panics if `chunk_list` is empty, `buf_length == 0`,
+    /// `chunk_list.len() > 1 && vmo_offset >= system_get_page_size() as usize`, `buf_length`
+    /// exceeds the capacity of `chunk_list` when `chunk_list.len() > 1`, or any offset/physical
+    /// address addition overflows `usize`.
     pub fn new(chunk_list: &'a [zx_paddr_t], vmo_offset: usize, buf_length: usize) -> Self {
         Self::new_with_options(
             chunk_list,
@@ -52,7 +52,9 @@ impl<'a> PhysIter<'a> {
     /// # Panics
     ///
     /// Panics if `chunk_list` is empty, `buf_length == 0`, `chunk_size` is not a non-zero power
-    /// of two, or `chunk_list.len() > 1 && vmo_offset >= chunk_size`.
+    /// of two, `chunk_list.len() > 1 && vmo_offset >= chunk_size`, `buf_length` exceeds the
+    /// capacity of `chunk_list` when `chunk_list.len() > 1`, or any offset/physical address
+    /// addition overflows `usize`.
     pub fn new_with_options(
         chunk_list: &'a [zx_paddr_t],
         chunk_size: usize,
@@ -69,46 +71,32 @@ impl<'a> PhysIter<'a> {
             "vmo_offset must be less than chunk_size when chunk_list has multiple entries"
         );
 
-        let max_length = if max_length == 0 { usize::MAX } else { max_length };
+        let end_offset =
+            vmo_offset.checked_add(buf_length).expect("vmo_offset + buf_length overflow");
+        if chunk_list.len() == 1 {
+            let _ = chunk_list[0].checked_add(end_offset).expect("physical address range overflow");
+        } else {
+            let used_chunks = end_offset.div_ceil(chunk_size);
+            assert!(used_chunks <= chunk_list.len(), "buf_length exceeds chunk_list capacity");
+            for &paddr in &chunk_list[..used_chunks - 1] {
+                let _ =
+                    paddr.checked_add(chunk_size).expect("chunk physical address range overflow");
+            }
+            let last_chunk_end = end_offset - (used_chunks - 1) * chunk_size;
+            let _ = chunk_list[used_chunks - 1]
+                .checked_add(last_chunk_end)
+                .expect("chunk physical address range overflow");
+        }
 
-        let mut iter = Self {
+        Self {
             chunk_list,
-            buf_length,
-            max_length,
+            max_length: if max_length == 0 { usize::MAX } else { max_length },
             chunk_size,
             merge,
             chunk_index: 0,
             offset_in_chunk: vmo_offset,
-            current: None,
-            iterated_bytes: 0,
-        };
-        let first_addr = chunk_list[0] + vmo_offset;
-        let first_size = iter.boundary_truncate();
-        iter.current = Some((first_addr, first_size));
-        iter
-    }
-
-    fn boundary_truncate(&self) -> usize {
-        let end_of_buffer = self.buf_length - self.iterated_bytes;
-        if self.chunk_list.len() == 1 {
-            return self.max_length.min(end_of_buffer);
+            remaining: buf_length,
         }
-
-        let mut end_of_chunk = self.chunk_size - self.offset_in_chunk;
-
-        if self.merge {
-            let mut idx = self.chunk_index;
-            while end_of_chunk < self.max_length
-                && end_of_chunk < end_of_buffer
-                && idx + 1 < self.chunk_list.len()
-                && self.chunk_list[idx] + self.chunk_size == self.chunk_list[idx + 1]
-            {
-                end_of_chunk += self.chunk_size;
-                idx += 1;
-            }
-        }
-
-        self.max_length.min(end_of_chunk.min(end_of_buffer))
     }
 }
 
@@ -116,27 +104,37 @@ impl Iterator for PhysIter<'_> {
     type Item = (zx_paddr_t, usize);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let (cur_addr, cur_size) = self.current?;
-        let item = (cur_addr, cur_size);
-
-        self.iterated_bytes += cur_size;
-        if self.iterated_bytes == self.buf_length {
-            self.current = None;
-            return Some(item);
+        if self.remaining == 0 {
+            return None;
         }
 
-        let next_addr = if self.chunk_list.len() == 1 {
-            cur_addr + cur_size
+        let addr = self.chunk_list[self.chunk_index] + self.offset_in_chunk;
+        let seg_len = if self.chunk_list.len() == 1 {
+            self.remaining.min(self.max_length)
         } else {
-            let next_offset = self.offset_in_chunk + cur_size;
-            self.chunk_index += next_offset / self.chunk_size;
-            self.offset_in_chunk = next_offset % self.chunk_size;
-            self.chunk_list[self.chunk_index] + self.offset_in_chunk
+            let mut avail = self.chunk_size - self.offset_in_chunk;
+            let mut idx = self.chunk_index;
+            if self.merge {
+                while avail < self.remaining && avail < self.max_length {
+                    if self.chunk_list[idx] + self.chunk_size != self.chunk_list[idx + 1] {
+                        break;
+                    }
+                    avail = avail.saturating_add(self.chunk_size);
+                    idx += 1;
+                }
+            }
+            avail.min(self.remaining).min(self.max_length)
         };
 
-        let next_size = self.boundary_truncate();
-        self.current = Some((next_addr, next_size));
-        Some(item)
+        self.remaining -= seg_len;
+        if self.chunk_list.len() == 1 {
+            self.offset_in_chunk += seg_len;
+        } else if self.remaining > 0 {
+            let next_offset = self.offset_in_chunk + seg_len;
+            self.chunk_index += next_offset / self.chunk_size;
+            self.offset_in_chunk = next_offset % self.chunk_size;
+        }
+        Some((addr, seg_len))
     }
 }
 
@@ -411,5 +409,63 @@ mod tests {
         );
         let actual: Vec<_> = iter.collect();
         assert_eq!(actual, expected);
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "buf_length exceeds chunk_list capacity")]
+    fn test_phys_iter_panics_on_out_of_bounds_multi_chunk_buf_length() {
+        let _ = PhysIter::new_with_options(
+            &[PAGE_SIZE, 2 * PAGE_SIZE],
+            PAGE_SIZE,
+            0,
+            2 * PAGE_SIZE + 1,
+            usize::MAX,
+            false,
+        );
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "buf_length exceeds chunk_list capacity")]
+    fn test_phys_iter_panics_on_out_of_bounds_multi_chunk_with_offset() {
+        let _ = PhysIter::new_with_options(
+            &[PAGE_SIZE, 2 * PAGE_SIZE, 3 * PAGE_SIZE],
+            PAGE_SIZE,
+            PAGE_SIZE - 5,
+            2 * PAGE_SIZE + 6,
+            usize::MAX,
+            true,
+        );
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "overflow")]
+    fn test_phys_iter_panics_on_vmo_offset_plus_buf_length_overflow() {
+        let _ =
+            PhysIter::new_with_options(&[PAGE_SIZE], PAGE_SIZE, 16, usize::MAX, usize::MAX, false);
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "overflow")]
+    fn test_phys_iter_panics_on_first_paddr_overflow() {
+        let _ = PhysIter::new_with_options(&[usize::MAX - 3], PAGE_SIZE, 8, 8, usize::MAX, false);
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "overflow")]
+    fn test_phys_iter_panics_on_single_chunk_end_paddr_overflow() {
+        let _ = PhysIter::new_with_options(&[usize::MAX - 15], PAGE_SIZE, 0, 32, usize::MAX, false);
+    }
+
+    #[fuchsia::test]
+    #[should_panic(expected = "overflow")]
+    fn test_phys_iter_panics_on_multi_chunk_paddr_overflow() {
+        let _ = PhysIter::new_with_options(
+            &[usize::MAX - 100, PAGE_SIZE],
+            PAGE_SIZE,
+            0,
+            2 * PAGE_SIZE,
+            usize::MAX,
+            true,
+        );
     }
 }

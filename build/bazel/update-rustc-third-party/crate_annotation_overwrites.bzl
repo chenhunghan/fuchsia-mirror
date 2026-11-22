@@ -41,7 +41,7 @@ _TOKIO_HOST_FEATURES = [
 
 _TOKIO_HOST_DEPS = [
     "//third_party/rust_crates/ask2patch/memchr",
-    "//third_party/rust_crates/forks/libc-0.2.190:libc",
+    "//third_party/rust_crates/forks/libc-0.2.191:libc",
     "//third_party/rust_crates/vendor/bytes-1.12.1:bytes",
     "//third_party/rust_crates/vendor/mio-1.2.4:mio",
     "//third_party/rust_crates/vendor/num_cpus-1.17.0:num_cpus",
@@ -195,6 +195,24 @@ CRATE_ANNOTATION_OVERWRITES = {
         ),
     ],
     "libc": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
+        ),
+    ],
+    "pest_stack_guard": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
+        ),
+    ],
+    "psm": [
+        crate.annotation(
+            version = "*",
+            gen_build_script = False,
+        ),
+    ],
+    "stacker": [
         crate.annotation(
             version = "*",
             gen_build_script = False,

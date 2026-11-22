@@ -51,6 +51,21 @@ void MoveFile(const std::string& from, const std::string& to) {
   }
 }
 
+void MoveFileWithFallback(const std::string& from, const std::string& legacy_from,
+                          const std::string& to) {
+  if (files::IsFile(from)) {
+    MoveFile(from, to);
+
+    // Delete any stale legacy file so it is not orphaned.
+    if (!files::DeletePath(legacy_from, /*recursive=*/false)) {
+      FX_LOGS(ERROR) << "Failed to delete " << legacy_from;
+    }
+    return;
+  }
+
+  MoveFile(/*from=*/legacy_from, to);
+}
+
 bool TestAndSetNotAFdr(const std::string& not_a_fdr_file) {
   if (files::IsFile(not_a_fdr_file)) {
     return true;
@@ -63,9 +78,10 @@ bool TestAndSetNotAFdr(const std::string& not_a_fdr_file) {
   return false;
 }
 
-void CreatePreviousLogsFile(cobalt::Logger* cobalt, const StorageSize max_decompressed_size,
-                            const std::optional<zx::duration> last_boot_uptime,
-                            const std::string& dir, const std::string& write_path) {
+std::optional<zx::time_boot> CreatePreviousLogsFile(cobalt::Logger* cobalt,
+                                                    const StorageSize max_decompressed_size,
+                                                    const std::string& dir,
+                                                    const std::string& write_path) {
   // We read the set of /cache files into a single /tmp file.
   //
   // |max_decompressed_size| is typically overkill for a |decoder|'s preallocations because the log
@@ -79,12 +95,12 @@ void CreatePreviousLogsFile(cobalt::Logger* cobalt, const StorageSize max_decomp
           feedback_data::system_log_recorder::Concatenate(dir, max_decompressed_size, &decoder);
   if (result.is_error()) {
     FX_LOGS(WARNING) << "Could not concatenate log files";
-    return;
+    return std::nullopt;
   }
 
   if (!files::WriteFile(write_path, result->logs)) {
     FX_LOGS(WARNING) << "Could not write the log file: " << write_path;
-    return;
+    return result->last_timestamp;
   }
 
   FX_LOGS(INFO) << fxl::StringPrintf(
@@ -93,15 +109,6 @@ void CreatePreviousLogsFile(cobalt::Logger* cobalt, const StorageSize max_decomp
 
   cobalt->LogCount(feedback_data::system_log_recorder::ToCobalt(decoder.GetEncodingVersion()),
                    (uint64_t)(result->compression_ratio * 100));
-
-  if (result->last_timestamp.has_value() && last_boot_uptime.has_value()) {
-    const int64_t delta_ms =
-        (zx::time_boot(last_boot_uptime->get()) - *result->last_timestamp).to_msecs();
-
-    cobalt->LogEvent(cobalt::Event(
-        cobalt::EventType::kInteger, cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
-        {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, delta_ms));
-  }
 
   if (result->is_at_capacity) {
     cobalt->LogEvent(
@@ -126,6 +133,23 @@ void CreatePreviousLogsFile(cobalt::Logger* cobalt, const StorageSize max_decomp
 
   // Clean up the /cache files now that they have been concatenated into a single /tmp file.
   files::DeletePath(dir, /*recursive=*/true);
+
+  return result->last_timestamp;
+}
+
+void LogPreviousBootLogLastTimestampDelta(cobalt::Logger* cobalt,
+                                          const std::optional<zx::time_boot> last_log_timestamp,
+                                          const std::optional<zx::duration> last_boot_uptime) {
+  if (!last_log_timestamp.has_value() || !last_boot_uptime.has_value()) {
+    return;
+  }
+
+  const int64_t delta_ms =
+      (zx::time_boot(last_boot_uptime->get()) - *last_log_timestamp).to_msecs();
+
+  cobalt->LogEvent(cobalt::Event(
+      cobalt::EventType::kInteger, cobalt_registry::kPreviousBootLogLastTimestampDeltaMetricId,
+      {cobalt_registry::FeedbackMetricDimensionProvider::Feedback}, delta_ms));
 }
 
 void MoveAndRecordBootId(const std::string& new_boot_id, const std::string& previous_boot_id_path,

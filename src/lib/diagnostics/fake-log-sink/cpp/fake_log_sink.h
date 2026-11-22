@@ -7,11 +7,10 @@
 
 #include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/diagnostics/reader/cpp/logs.h>
+#include <lib/syslog/cpp/log_level.h>
 
 #include <optional>
 #include <vector>
-
-#include <sdk/lib/syslog/cpp/log_level.h>
 
 namespace fuchsia_logging {
 namespace internal {

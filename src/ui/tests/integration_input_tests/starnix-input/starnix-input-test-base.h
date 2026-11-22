@@ -8,11 +8,14 @@
 #include <fidl/fuchsia.component.decl/cpp/fidl.h>
 #include <fidl/fuchsia.component/cpp/fidl.h>
 #include <fidl/fuchsia.element/cpp/fidl.h>
+#include <fidl/fuchsia.input.injection/cpp/fidl.h>
 #include <fidl/fuchsia.kernel/cpp/fidl.h>
 #include <fidl/fuchsia.process/cpp/fidl.h>
 #include <fidl/fuchsia.tracing.provider/cpp/fidl.h>
 #include <fidl/fuchsia.ui.display.singleton/cpp/fidl.h>
+#include <fidl/fuchsia.ui.input.internal/cpp/fidl.h>
 #include <fidl/fuchsia.ui.input/cpp/fidl.h>
+#include <fidl/fuchsia.ui.test.input/cpp/fidl.h>
 #include <lib/sys/component/cpp/testing/realm_builder.h>
 #include <lib/zx/socket.h>
 #include <lib/zx/time.h>
@@ -27,7 +30,9 @@ namespace starnix_input_test {
 using component_testing::ChildRef;
 using component_testing::Directory;
 using component_testing::ParentRef;
+using component_testing::Protocol;
 using component_testing::Route;
+using component_testing::VoidRef;
 
 // Alias for Component child name as provided to Realm Builder.
 using ChildName = std::string;
@@ -41,6 +46,12 @@ struct StdIOSocket {
 };
 
 class StarnixInputTestBase : public ui_testing::PortableUITest {
+ public:
+  explicit StarnixInputTestBase(bool direct_input_mode = false)
+      : direct_input_mode_(direct_input_mode) {}
+
+  bool direct_input_mode() const { return direct_input_mode_; }
+
  protected:
   struct EvDevPacket {
     // The event timestamp received by Starnix, from Fuchsia.
@@ -60,6 +71,10 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
     realm_event_handler_.Stop();
     ui_testing::PortableUITest::TearDown();
   }
+
+  // Starnix input tests exercise input routing and do not inspect rendered
+  // pixel output, so use Scenic's null renderer to avoid Vulkan setup/teardown.
+  std::string renderer() override { return "null"; }
 
   // Launches `input_dump.cc`, connecting its `stdout` to `out_socket`.
   // Then waits for `input_dump.cc` to report that it is ready to receive
@@ -176,7 +191,7 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
   }
 
   std::vector<Route> GetTestRoutes() override {
-    return {
+    std::vector<Route> routes = {
         // Route global capabilities from parent to the Debian realm.
         {.capabilities = {Proto<fuchsia_kernel::VmexResource>(), Proto<fuchsia_sysmem::Allocator>(),
                           Proto<fuchsia_sysmem2::Allocator>(),
@@ -210,6 +225,41 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
          .source = ChildRef{kDebianRealm},
          .targets = {ParentRef()}},
     };
+
+    if (direct_input_mode_) {
+      routes.push_back({
+          .capabilities = {Proto<fuchsia_ui_input_internal::InputOwnership>()},
+          .source = ui_testing::PortableUITest::kTestUIStackRef,
+          .targets = {ChildRef{kDebianRealm}},
+      });
+      routes.push_back({
+          .capabilities = {Protocol{
+              .name = fidl::DiscoverableProtocolName<fuchsia_input_injection::InputDeviceRegistry>,
+              .type = fuchsia::component::decl::DependencyType::WEAK,
+          }},
+          .source = ChildRef{kDebianRealm},
+          .targets = {ui_testing::PortableUITest::kTestUIStackRef},
+      });
+    } else {
+      routes.push_back({
+          .capabilities = {Protocol{
+              .name = fidl::DiscoverableProtocolName<fuchsia_ui_input_internal::InputOwnership>,
+              .availability = fuchsia::component::decl::Availability::OPTIONAL,
+          }},
+          .source = VoidRef{},
+          .targets = {ChildRef{kDebianRealm}},
+      });
+      routes.push_back({
+          .capabilities = {Protocol{
+              .name = fidl::DiscoverableProtocolName<fuchsia_input_injection::InputDeviceRegistry>,
+              .availability = fuchsia::component::decl::Availability::OPTIONAL,
+          }},
+          .source = VoidRef{},
+          .targets = {ui_testing::PortableUITest::kTestUIStackRef},
+      });
+    }
+
+    return routes;
   }
 
   // Reads a single piece of data from `input_dump.cc`, via `out_socket`.
@@ -221,7 +271,7 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
   // until the calling code has read the response that `input_dump.cc`
   // sent for the first event.
   std::string BlockingReadFromInputDump(zx::socket& out_socket) {
-    std::string buf(relay_api::kMaxPacketLen * relay_api::kDownUpNumPackets, '\0');
+    std::string buf(relay_api::kMaxPacketLen * relay_api::kMaxBatchPackets, '\0');
     size_t n_read{};
     zx_status_t res{};
     zx_signals_t actual_signals;
@@ -252,6 +302,7 @@ class StarnixInputTestBase : public ui_testing::PortableUITest {
   //   duration of the test
   RealmEventHandler realm_event_handler_;
   fidl::Client<fuchsia_component::Realm> realm_client_;
+  bool direct_input_mode_ = false;
 };
 
 }  // namespace starnix_input_test

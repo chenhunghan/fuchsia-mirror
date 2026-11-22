@@ -19,9 +19,6 @@ extern crate alloc;
 
 #[path = "."]
 mod internal {
-    #[macro_use]
-    pub(super) mod path_mtu;
-
     pub(super) mod api;
     pub(super) mod base;
     pub(super) mod counters;
@@ -33,6 +30,7 @@ mod internal {
     pub(super) mod ipv6;
     pub(super) mod local_delivery;
     pub(super) mod multicast_forwarding;
+    pub(super) mod path_mtu;
     pub(super) mod raw;
     pub(super) mod reassembly;
     pub(super) mod routing;
@@ -151,9 +149,21 @@ pub mod icmp {
 /// Marker traits controlling IP context behavior.
 pub mod marker {
     pub use crate::internal::base::{UseIpSocketContextBlanket, UseTransportIpContextBlanket};
+    pub use crate::internal::path_mtu::UsePmtuHandlerBlanket;
     pub use crate::internal::socket::{
         OptionDelegationMarker, UseDeviceIpSocketHandlerBlanket, UseIpSocketHandlerBlanket,
     };
+}
+
+/// Path MTU Discovery.
+pub mod path_mtu {
+    pub use crate::internal::path_mtu::pmtu_from_icmp_error;
+
+    /// Path MTU Discovery test utilities.
+    #[cfg(any(test, feature = "testutils"))]
+    pub mod testutil {
+        pub use crate::internal::path_mtu::testutil::new_pmtu_error;
+    }
 }
 
 /// Neighbor Unreachability Detection.
@@ -261,7 +271,7 @@ pub use internal::gso::{
 pub use internal::local_delivery::{
     IpHeaderInfo, LocalDeliveryPacketInfo, ReceiveIpPacketMeta, TransparentLocalDelivery,
 };
-pub use internal::path_mtu::{PmtuCache, PmtuContext, PmtuDstAddr, PmtuSrcAddr};
+pub use internal::path_mtu::{PmtuCache, PmtuContext, PmtuDstAddr, PmtuHandler, PmtuSrcAddr};
 pub use internal::reassembly::{FragmentContext, FragmentTimerId, IpPacketFragmentCache};
 pub use internal::routing::rules::{
     Rule, RuleAction, RuleMatcher, RulesTable, TrafficOriginMatcher,

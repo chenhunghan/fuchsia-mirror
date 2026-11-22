@@ -40,7 +40,7 @@ ffx_plugin(
         "//src/lib/assembly/container",
         "//src/lib/fdomain/client",
         "//src/lib/fidl/rust/fidl",
-        "//src/performance/memory/attribution/processing",
+        "//src/memory/attribution/processing",
         "//src/storage/fxfs/platform:constants",
         # prettytable-rs is a fork outside vendor/; GN reaches it through
         # the //third_party/rust_crates:prettytable-rs alias group.

@@ -6,17 +6,19 @@
 
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
-load("@rules_cc//cc:defs.bzl", "cc_import", "cc_shared_library")
+load("@rules_cc//cc:defs.bzl", "cc_import")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
-load("//build/bazel/rules:zx_library.bzl", "apply_common_zx_library_modifications")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
 load(
     "//build/bazel/rules/cc:shared_library.bzl",
     "generate_companion_files_for_shared_library",
     "get_library_info_for_static_library",
+    "shared_library_gn_outputs",
     "verify_public_symbols",
 )
+load("//build/bazel/rules/cc:zx_library_utils.bzl", "apply_common_zx_library_modifications")
 load(
     ":cc_verification.bzl",
     "create_verify_no_duplicate_files_target",
@@ -133,6 +135,11 @@ def _idk_cc_prebuilt_library_impl(
         visibility,
         friend,  # buildifier: disable=unused-variable - For GN conversion only.
         public_configs,  # buildifier: disable=unused-variable - For GN conversion only.
+        # TODO(https://fxbug.dev/421888626): Determine whether `build_flags` and
+        # `disable_build_flags` should be passed to all `fx_cc_*` targets, and
+        # do the same for the other such attributes added to the `fx_cc_*` macros.
+        build_flags,
+        disable_build_flags,
         ldflags = [],  # buildifier: disable=unused-variable - For GN conversion only.
         inputs = [],  # buildifier: disable=unused-variable - For GN conversion only.
         version_script = "",
@@ -224,6 +231,8 @@ def _idk_cc_prebuilt_library_impl(
     # want to dynamically link against libc++.so because we let clients bring
     # their own toolchain, which might have a different C++ Standard Library or
     # a different C++ ABI entirely.
+    # TODO(https://fxbug.dev/421888626): Do we need to assert that `build_flags`
+    # and `disable_build_flags` do not have conflicting flags?
     if libcxx_linkage == "none":
         # Adding this linker flag keeps us honest about not committing to a
         # specific C++ ABI. If this flag is causing your library to not
@@ -232,13 +241,9 @@ def _idk_cc_prebuilt_library_impl(
         # precompiled. If you do require precompilation, you probably need to
         # find a way not to depend on dynamically linking C++ symbols because C++
         # does not have a sufficiently stable ABI for the purposes of our SDK.
-        # TODO(https://fxbug.dev/421888626): Apply the equivalent of GN's
-        # `//build/config/fuchsia:no_cpp_standard_library`.
-        pass
+        libcxx_build_flags = ["//build/config/fuchsia:no_cpp_standard_library"]
     elif libcxx_linkage == "static":
-        # TODO(https://fxbug.dev/421888626): Apply the equivalent of GN's
-        # `//build/config/fuchsia:static_cpp_standard_library`.
-        pass
+        libcxx_build_flags = ["//build/config/fuchsia:static_cpp_standard_library"]
     else:
         fail("`libcxx_linkage` ('%s') must be 'none' or 'static'." % libcxx_linkage)
 
@@ -247,8 +252,9 @@ def _idk_cc_prebuilt_library_impl(
         # the exported `cc_shared_library`, rather than the `fx_cc_library()`,
         # which will not be a shared library.
         # Give the `fx_cc_library()` a different name to make the base name
-        # available for the imported library.
-        fx_cc_library_name = "%s_impl" % name
+        # available for the imported library. `.inner_impl` is chosen to avoid
+        # conflicts with `<name>_impl` targets in the same package.
+        fx_cc_library_name = "%s.inner_impl" % name
 
         # The `fx_cc_library()` is not a shared object. Prevent use.
         fx_cc_library_visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"]
@@ -279,6 +285,8 @@ def _idk_cc_prebuilt_library_impl(
         deps = deps_for_bazel_library,
         implementation_deps = implementation_deps,
         includes = [include_base],
+        build_flags = build_flags,
+        disable_build_flags = disable_build_flags,
         testonly = testonly,
         visibility = fx_cc_library_visibility,
         **kwargs
@@ -293,20 +301,20 @@ def _idk_cc_prebuilt_library_impl(
 
         shared_lib_name = "lib%s.so" % output_name
 
-        user_link_flags = ["-Wl,-soname=%s" % shared_lib_name]
+        user_link_flags = []
         additional_linker_inputs = []
         if version_script:
             user_link_flags.append("-Wl,--version-script=$(location %s)" % version_script)
             additional_linker_inputs.append(version_script)
 
-        # TODO(https://fxbug.dev/421888626): Determine whether to use
-        # `fx_cc_shared_library()` here.
-        cc_shared_library(
+        fx_cc_shared_library(
             name = exported_target_name,
-            shared_lib_name = "lib%s.so" % output_name,
+            shared_lib_name = shared_lib_name,
             deps = [":%s" % fx_cc_library_name],
             user_link_flags = user_link_flags,
             additional_linker_inputs = additional_linker_inputs,
+            build_flags = libcxx_build_flags + (build_flags or []),
+            disable_build_flags = disable_build_flags,
             testonly = testonly,
             # Only the IDK atom target should depend on this target.
             visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"],
@@ -328,10 +336,16 @@ def _idk_cc_prebuilt_library_impl(
         # available to in-tree dependents of the `cc_import()`, as they are for
         # the `cc_library()`. The `deps` must be filtered to avoid leaking the
         # static libraries that are already linked into the shared library.
+        # TODO(https://fxbug.dev/579938526): Determine if there is a better way
+        # to handle this.
         filtered_public_deps_target_name = name + "_filtered_public_deps"
         _shared_library_filtered_public_deps(
             name = filtered_public_deps_target_name,
-            deps = deps_for_bazel_library,
+            # TODO(https://fxbug.dev/584497272): Fix indirect dependencies on
+            # shared object files and remove `runtime_deps`. Currently, it is
+            # incorrectly exposing public headers from those deps to in-tree
+            # consumers of this library.
+            deps = deps_for_bazel_library + runtime_deps,
             testonly = testonly,
             visibility = ["//visibility:private"],
         )
@@ -355,6 +369,14 @@ def _idk_cc_prebuilt_library_impl(
             testonly = testonly,
             # Required for tests using `create_test_atom_info()`.
             visibility = ["//build/bazel/bazel_idk/tests:__subpackages__"],
+        )
+
+        # The files used by the GN `bazel_shared_library` support to import this
+        # library into the GN graph. See //build/bazel/bazel_shared_library.gni.
+        shared_library_gn_outputs(
+            name = name + "_gn_outputs",
+            prebuilt_library = ":%s" % underlying_library_info_target_name,
+            testonly = testonly,
         )
     elif prebuilt_library_type == "static":
         # Create the exportable static library. This generates the `.a` file
@@ -499,6 +521,7 @@ def _idk_cc_prebuilt_library_impl(
         api_area = api_area,
         api_file_path = api_path,
         api_contents_map = api_contents_map,
+        no_headers = no_headers,
         files_map = idk_files_map,
         deps = atom_idk_deps,
         underlying_library = ":%s" % underlying_library_info_target_name,
@@ -783,6 +806,8 @@ def _idk_cc_shared_library_zx_impl(
 
     idk_cc_shared_library(
         name = name,
+        # Always use `"static"` linkage as GN's `zx_library()` did.
+        libcxx_linkage = "static",
         **kwargs
     )
 
@@ -834,6 +859,8 @@ GN equivalent: `deps`.""",
         ),
         # zx libraries always use "include" (the default) as the include base. Do not inherit.
         "include_base": None,
+        # zx libraries always use "static" C++ standard library linkage. Do not inherit.
+        "libcxx_linkage": None,
     },
 )
 
@@ -846,6 +873,14 @@ def _idk_cc_static_library_zx_impl(
 
     idk_cc_static_library(
         name = name,
+        # Always use `"static"` linkage as GN's `zx_library()` did.
+        # TODO(https://fxbug.dev/421888626): Is this really necessary? GN's
+        # `zx_library()` and `sdk_static_library()` have set it and supported
+        # it, respectively, but is there any impact? Currently, the
+        # `_idk_cc_prebuilt_library()` implementation only passes it to
+        # `fx_cc_shared_library()`.a if not, remove this attribute from static
+        # library macros and the corresponding GN template.
+        libcxx_linkage = "static",
         **kwargs
     )
 
@@ -897,5 +932,7 @@ GN equivalent: `deps`.""",
         ),
         # zx libraries always use "include" (the default) as the include base. Do not inherit.
         "include_base": None,
+        # zx libraries always use "static" C++ standard library linkage. Do not inherit.
+        "libcxx_linkage": None,
     },
 )

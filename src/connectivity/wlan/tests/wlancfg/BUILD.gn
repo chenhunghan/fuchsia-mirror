@@ -50,7 +50,8 @@ python_mobly_test("connection_stress_test") {
   main_source = "//src/connectivity/wlan/tests/wlancfg/ConnectionStressTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
-    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
+    "//src/testing/end_to_end/mobly_controller/legacy_access_point",
+    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
   ]
 }
 
@@ -70,8 +71,8 @@ python_mobly_test("policy_scan_test") {
   ]
 }
 
-python_mobly_test("wlan_misc_scenario_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/WlanMiscScenarioTest.py"
+python_mobly_test("misc_scenario_test") {
+  main_source = "//src/connectivity/wlan/tests/wlancfg/MiscScenarioTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
     "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
@@ -93,9 +94,8 @@ python_mobly_test("regulatory_compliance_test") {
       [ "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test" ]
 }
 
-python_mobly_test("wlan_target_security_test") {
-  main_source =
-      "//src/connectivity/wlan/tests/wlancfg/WlanTargetSecurityTest.py"
+python_mobly_test("target_security_test") {
+  main_source = "//src/connectivity/wlan/tests/wlancfg/TargetSecurityTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
     "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
@@ -113,9 +113,9 @@ python_mobly_test("vape_interop_test") {
   timeout_secs = 600
 }
 
-python_mobly_test("wlan_policy_initiated_roam_test") {
+python_mobly_test("policy_initiated_roam_test") {
   main_source =
-      "//src/connectivity/wlan/tests/wlancfg/WlanPolicyInitiatedRoamTest.py"
+      "//src/connectivity/wlan/tests/wlancfg/PolicyInitiatedRoamTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
     "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
@@ -165,8 +165,9 @@ python_mobly_test("channel_switch_test_with_soft_ap") {
   test_cases = [ "re:.*with_soft_ap.*" ]
 }
 
-python_mobly_test("wlan_wireless_network_management_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/WlanWirelessNetworkManagementTest.py"
+python_mobly_test("wireless_network_management_test") {
+  main_source =
+      "//src/connectivity/wlan/tests/wlancfg/WirelessNetworkManagementTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_python",
@@ -174,9 +175,9 @@ python_mobly_test("wlan_wireless_network_management_test") {
   ]
 }
 
-python_mobly_test("wlan_bss_transition_management_test") {
+python_mobly_test("bss_transition_management_test") {
   main_source =
-      "//src/connectivity/wlan/tests/wlancfg/WlanBssTransitionManagementTest.py"
+      "//src/connectivity/wlan/tests/wlancfg/BssTransitionManagementTest.py"
   libraries = [
     "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
     "//sdk/fidl/fuchsia.wlan.common:fuchsia.wlan.common_python",
@@ -185,7 +186,7 @@ python_mobly_test("wlan_bss_transition_management_test") {
 }
 
 python_mobly_test("reboot_soft_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/WlanRebootTest.py"
+  main_source = "//src/connectivity/wlan/tests/wlancfg/RebootTest.py"
   libraries = [
     "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
     "//src/testing/end_to_end/honeydew",
@@ -195,9 +196,8 @@ python_mobly_test("reboot_soft_test") {
   test_cases = [ "re:test_soft_reboot_.*" ]
 }
 
-# Requires a PDU-equipped testbed.
 python_mobly_test("reboot_hard_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/WlanRebootTest.py"
+  main_source = "//src/connectivity/wlan/tests/wlancfg/RebootTest.py"
   libraries = [
     "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
     "//src/testing/end_to_end/honeydew",
@@ -205,6 +205,65 @@ python_mobly_test("reboot_hard_test") {
     "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
   ]
   test_cases = [ "re:test_hard_reboot_.*" ]
+}
+
+python_mobly_test("suspend_resume_test") {
+  main_source = "//src/connectivity/wlan/tests/wlancfg/SuspendResumeTest.py"
+  libraries = [
+    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
+    "//src/testing/end_to_end/honeydew",
+    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
+    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
+  ]
+}
+
+_wmm_common_libraries = [
+  "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
+  "//src/connectivity/wlan/tests/wlancfg/wmm_testing",
+  "//src/testing/end_to_end/honeydew",
+  "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
+  "//src/testing/end_to_end/mobly_controller/iperf",
+  "//src/testing/end_to_end/mobly_controller/legacy_access_point",
+  "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
+]
+
+_wmm_two_station_test_cases = [
+  "test_wfa_traffic_diff_two_stations_staut_BE_secondary_VI_BE",
+  "test_wfa_traffic_diff_two_stations_staut_VI_secondary_BE",
+  "test_wfa_traffic_diff_two_stations_staut_BK_secondary_BE_BK",
+  "test_wfa_traffic_diff_two_stations_staut_VI_secondary_VO_VI",
+  "test_wfa_acm_bit_on_VI",
+  "test_wfa_ac_param_degrade_VI",
+]
+
+python_mobly_test("wmm_single_station_test") {
+  main_source = "//src/connectivity/wlan/tests/wlancfg/WmmTest.py"
+  package_deps = [ "//third_party/iperf:iperf3_pkg" ]
+  libraries = _wmm_common_libraries
+  test_cases =
+      [ "re:(?!(" + string_join("|", _wmm_two_station_test_cases) + ")\$).*" ]
+}
+
+# Requires a second station and custom configuration. There are no available
+# testbeds to support this topology. This will remain an at-desk test until an
+# infra-hosted testbed matching this topology is supported.
+python_mobly_test("wmm_two_station_test") {
+  main_source = "//src/connectivity/wlan/tests/wlancfg/WmmTest.py"
+  package_deps = [ "//third_party/iperf:iperf3_pkg" ]
+  libraries = _wmm_common_libraries
+  test_cases = _wmm_two_station_test_cases
+}
+
+python_mobly_test("security_type_test") {
+  main_source = "//src/connectivity/wlan/tests/wlancfg/SecurityTypeTest.py"
+  libraries = [
+    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
+    "//src/testing/end_to_end/honeydew",
+    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
+    "//src/testing/end_to_end/mobly_controller/legacy_access_point",
+    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
+  ]
+  timeout_secs = 480
 }
 
 # This is a helper group so developers can easily add all tests to their build.
@@ -264,52 +323,16 @@ group("tests_for_release_testing") {
     # otherwise.
     ":regulatory_compliance_test",
 
-    # WlanPolicyInitiatedRoamTest should not be run as part of standard
+    # PolicyInitiatedRoamTest should not be run as part of standard
     # automation. The production wlancfg roaming policy for smart displays
     # explicitly prevents frequent roaming, making the test non-deterministic.
     # RoamRequestTest is the stable alternative.
     # See b/540853000 for details.
-    ":wlan_policy_initiated_roam_test",
-    ":wmm_test",
-  ]
-}
+    ":policy_initiated_roam_test",
 
-python_mobly_test("suspend_resume_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/SuspendResumeTest.py"
-  libraries = [
-    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
-    "//src/testing/end_to_end/honeydew",
-    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
-    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
+    # WmmTest requires manual wmm_test_params configuration, and
+    # wmm_two_station_test additionally requires two DUTs.
+    ":wmm_single_station_test",
+    ":wmm_two_station_test",
   ]
-}
-
-python_mobly_test("wmm_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/WlanWmmTest.py"
-
-  # Requires a second station and custom configuration. There are no available
-  # testbeds to support this topology. This will remain an at-desk test until an
-  # infra-hosted testbed matching this topology is supported.
-  package_deps = [ "//third_party/iperf:iperf3_pkg" ]
-  libraries = [
-    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
-    "//src/connectivity/wlan/tests/wlancfg/wmm_testing",
-    "//src/testing/end_to_end/honeydew",
-    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
-    "//src/testing/end_to_end/mobly_controller/iperf",
-    "//src/testing/end_to_end/mobly_controller/legacy_access_point",
-    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
-  ]
-}
-
-python_mobly_test("security_type_test") {
-  main_source = "//src/connectivity/wlan/tests/wlancfg/SecurityTypeTest.py"
-  libraries = [
-    "//sdk/fidl/fuchsia.wlan.policy:fuchsia.wlan.policy_python",
-    "//src/testing/end_to_end/honeydew",
-    "//src/testing/end_to_end/mobly_base_tests:fuchsia_wlan_base_test",
-    "//src/testing/end_to_end/mobly_controller/legacy_access_point",
-    "//src/testing/end_to_end/mobly_controller/openwrt_access_point:openwrt_access_point",
-  ]
-  timeout_secs = 480
 }

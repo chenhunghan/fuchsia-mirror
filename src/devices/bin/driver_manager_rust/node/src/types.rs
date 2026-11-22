@@ -7,7 +7,7 @@ use crate::serve::{
     ComponentRunnerComponentControllerServerBinding, DriverHostClientBinding, NodeServerBinding,
 };
 use driver_manager_types::NodeType;
-use fidl_fuchsia_component_sandbox::CapabilityId;
+use fuchsia_component::runtime::Dictionary;
 use std::rc::Weak;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,10 +111,10 @@ pub enum NodeDictionary {
 
     // Node specific dictionary that contains offers that the node provides that are type
     // |DictionaryOffer|
-    Standard(CapabilityId),
+    Standard(Dictionary),
 
     // Passed down the node tree to children, as it contains non-driver protocol
     // capabilities for testing (the ones injected in offer_injection). This is only used for
     // system testing at the moment through |restart_with_dictionary|.
-    Subtree(CapabilityId),
+    Subtree(Dictionary),
 }

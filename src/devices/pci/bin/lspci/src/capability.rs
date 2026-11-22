@@ -3,9 +3,6 @@
 // found in the LICENSE file.
 use crate::util::is_set;
 use bitfield::bitfield;
-use fidl_fuchsia_hardware_pci::{
-    Capability as FidlCapability, ExtendedCapability as FidlExtCapability,
-};
 use std::fmt;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Ref};
 
@@ -104,23 +101,28 @@ impl<'a> fmt::Display for Capability<'a> {
 }
 
 impl<'a> Capability<'a> {
-    pub fn new(capability: &'a FidlCapability, config: &'a [u8]) -> Self {
-        Capability {
-            offset: capability.offset as usize,
-            config,
-            cap_type: CapabilityType::from(capability.id),
-        }
+    pub fn new(id: u8, offset: usize, config: &'a [u8]) -> Self {
+        Capability { offset, config, cap_type: CapabilityType::from(id) }
+    }
+
+    // Returns the config space starting at this capability, or an empty slice if the
+    // capability's offset lies outside of it.
+    fn body(&self) -> &'a [u8] {
+        self.config.get(self.offset..).unwrap_or(&[])
     }
 
     fn msi(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // MSI: Enable+ Count=1/1 Maskable- 64bit+
         // Address: 00000000fee00698  Data: 0000
-        let control = MsiControl(
-            ((self.config[self.offset + 3] as u16) << 8) | self.config[self.offset + 2] as u16,
-        );
+        let (Some(&lo), Some(&hi)) =
+            (self.config.get(self.offset + 2), self.config.get(self.offset + 3))
+        else {
+            return write!(f, "MSI");
+        };
+        let control = MsiControl(((hi as u16) << 8) | lo as u16);
         write!(
             f,
-            "MSI: Enable{} Count={}/{} Maskable{} 64bit{}\n",
+            "MSI: Enable{} Count={}/{} Maskable{} 64bit{}",
             is_set(control.enable()),
             msi_mms_to_value(control.mms_enabled()),
             msi_mms_to_value(control.mms_capable()),
@@ -129,30 +131,28 @@ impl<'a> Capability<'a> {
         )?;
 
         if control.can_be_64bit() {
-            let (msi, _) = Ref::<_, Msi64Capability>::from_prefix(
-                &self.config[self.offset..self.config.len()],
-            )
-            .unwrap();
+            let Ok((msi, _)) = Ref::<_, Msi64Capability>::from_prefix(self.body()) else {
+                return Ok(());
+            };
             write!(
                 f,
-                "\t\tAddress: {:#010x} {:#08x} Data: {:#06x}",
+                "\n\t\tAddress: {:#010x} {:#08x} Data: {:#06x}",
                 { msi.address_upper },
                 { msi.address },
                 { msi.data }
             )
         } else {
-            let (msi, _) = Ref::<_, Msi32Capability>::from_prefix(
-                &self.config[self.offset..self.config.len()],
-            )
-            .unwrap();
-            write!(f, "\t\tAddress: {:#010x} Data: {:#06x}", { msi.address }, { msi.data })
+            let Ok((msi, _)) = Ref::<_, Msi32Capability>::from_prefix(self.body()) else {
+                return Ok(());
+            };
+            write!(f, "\n\t\tAddress: {:#010x} Data: {:#06x}", { msi.address }, { msi.data })
         }
     }
 
     fn msi_x(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (msix, _) =
-            Ref::<_, MsixCapability>::from_prefix(&self.config[self.offset..self.config.len()])
-                .unwrap();
+        let Ok((msix, _)) = Ref::<_, MsixCapability>::from_prefix(self.body()) else {
+            return write!(f, "MSI-X");
+        };
         let control = MsixControl(msix.control);
         let table = MsixBarField(msix.table);
         let pba = MsixBarField(msix.pba);
@@ -170,10 +170,9 @@ impl<'a> Capability<'a> {
     }
 
     fn pci_express(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (pcie, _) = Ref::<_, PciExpressCapability>::from_prefix(
-            &self.config[self.offset..self.config.len()],
-        )
-        .unwrap();
+        let Ok((pcie, _)) = Ref::<_, PciExpressCapability>::from_prefix(self.body()) else {
+            return write!(f, "Express");
+        };
         // PCIe Base Specification v4 section 7.5.3
         let pcie_capabilities = PcieCapabilitiesField(pcie.pcie_capabilities);
         let dev_type = PcieDevicePortType::from(pcie_capabilities.device_type());
@@ -195,7 +194,10 @@ impl<'a> Capability<'a> {
     }
 
     fn vendor(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Vendor Specific Information: Len={:#2x}", self.config[self.offset + 2])
+        match self.config.get(self.offset + 2) {
+            Some(len) => write!(f, "Vendor Specific Information: Len={:#2x}", len),
+            None => write!(f, "Vendor Specific Information"),
+        }
     }
 }
 
@@ -448,11 +450,8 @@ pub struct ExtendedCapability {
 }
 
 impl ExtendedCapability {
-    pub fn new(capability: &FidlExtCapability) -> Self {
-        ExtendedCapability {
-            offset: capability.offset as usize,
-            cap_type: ExtendedCapabilityType::from(capability.id),
-        }
+    pub fn new(id: u16, offset: usize) -> Self {
+        ExtendedCapability { offset, cap_type: ExtendedCapabilityType::from(id) }
     }
 }
 
@@ -534,19 +533,39 @@ mod tests {
 
     #[test]
     fn test_extended_capability_display() {
-        let cap = FidlExtCapability { id: 0x0001, offset: 0x0100 };
-        let ext_cap = ExtendedCapability::new(&cap);
+        let ext_cap = ExtendedCapability::new(0x0001, 0x0100);
         assert_eq!(format!("{}", ext_cap), "Capabilities: [0x100] Advanced Error Reporting");
 
-        let cap_zero = FidlExtCapability { id: 0x0001, offset: 0x0 };
-        let ext_cap_zero = ExtendedCapability::new(&cap_zero);
+        let ext_cap_zero = ExtendedCapability::new(0x0001, 0x0);
         assert_eq!(format!("{}", ext_cap_zero), "Capabilities: [0x000] Advanced Error Reporting");
 
-        let cap_unknown = FidlExtCapability { id: 0xabcd, offset: 0x0200 };
-        let ext_cap_unknown = ExtendedCapability::new(&cap_unknown);
+        let ext_cap_unknown = ExtendedCapability::new(0xabcd, 0x0200);
         assert_eq!(
             format!("{}", ext_cap_unknown),
             "Capabilities: [0x200] Unknown Extended Capability (id = 0xabcd)"
+        );
+    }
+
+    #[test]
+    fn test_truncated_capabilities() {
+        // Capabilities too close to the end of config space print only their names.
+        let config = [0u8; 0x42];
+        assert_eq!(format!("{}", Capability::new(0x05, 0x41, &config)), "Capabilities: [0x41] MSI");
+        assert_eq!(
+            format!("{}", Capability::new(0x11, 0x40, &config)),
+            "Capabilities: [0x40] MSI-X"
+        );
+        assert_eq!(
+            format!("{}", Capability::new(0x10, 0x40, &config)),
+            "Capabilities: [0x40] Express"
+        );
+        assert_eq!(
+            format!("{}", Capability::new(0x09, 0x40, &config)),
+            "Capabilities: [0x40] Vendor Specific Information"
+        );
+        assert_eq!(
+            format!("{}", Capability::new(0x05, 0x3e, &config)),
+            "Capabilities: [0x3e] MSI: Enable- Count=1/1 Maskable- 64bit-"
         );
     }
 }

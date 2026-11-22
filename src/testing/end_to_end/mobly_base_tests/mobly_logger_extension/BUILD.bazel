@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":mobly_logger_extension_test"],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+py_library(
+    name = "mobly_logger_extension",
+    srcs = ["__init__.py"],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test:__pkg__"],
+    deps = [
+        "//scripts/lib/logging_utils",
+        "//third_party/mobly:mobly_no_testonly",
+    ],
+)
+
+host_py_test(
+    name = "mobly_logger_extension_test",
+    srcs = ["tests/mobly_logger_extension_test.py"],
+    main = "tests/mobly_logger_extension_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        ":mobly_logger_extension",
+        "//scripts/lib/logging_utils",
+        "//third_party/mobly",
+    ],
+)

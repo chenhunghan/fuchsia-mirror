@@ -1,0 +1,16 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(images)
+resource(
+    name = "images",
+    src = "f2fs.img.zst",
+    dest = "testdata/f2fs.img.zst",
+    visibility = ["//src/storage/f2fs_reader:__subpackages__"],
+)
+# LINT.ThenChange(BUILD.gn:images)

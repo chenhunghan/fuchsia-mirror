@@ -37,8 +37,8 @@ source_set("common") {
     "//zircon/third_party/ulib/safemath",
   ]
   public_deps = [
-    "//sdk/banjo/fuchsia.hardware.badblock:fuchsia.hardware.badblock_banjo_cpp",
     "//sdk/banjo/fuchsia.hardware.nand:fuchsia.hardware.nand_banjo_cpp",
+    "//sdk/fidl/fuchsia.hardware.badblock:fuchsia.hardware.badblock_cpp",
     "//sdk/fidl/fuchsia.hardware.skipblock:fuchsia.hardware.skipblock_cpp",
     "//sdk/lib/driver/compat/cpp",
     "//sdk/lib/driver/component/cpp",
@@ -64,7 +64,6 @@ fuchsia_driver_component("component") {
     ":driver",
     ":skip-block-bind",
   ]
-  info = "meta/skip-block-info.json"
 }
 
 fuchsia_driver_package("skip-block") {

@@ -242,7 +242,7 @@ void PopulateRegistersRISCV64General(const crashpad::CPUContextRISCV64& ctx,
                                      std::vector<debug::RegisterValue>* output) {
   AddReg(RegisterID::kRiscv64_pc, ctx.pc, output);
   for (size_t i = 0; i < std::size(ctx.regs); i++) {
-    uint32_t reg_id = static_cast<uint32_t>(RegisterID::kRiscv64_ra) + i;
+    uint32_t reg_id = static_cast<uint32_t>(RegisterID::kRiscv64_ra) + static_cast<uint32_t>(i);
     AddReg(static_cast<RegisterID>(reg_id), ctx.regs[i], output);
   }
 }

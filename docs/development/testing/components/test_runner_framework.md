@@ -11,7 +11,7 @@ design that on one hand allows developers to bring their language and testing
 framework of choice, and on the other hand allows building and testing Fuchsia
 on a variety of systems and targeting different hardware.
 
-## The Test Manager
+## The test manager {#the-test-manager}
 
 The `test_manager` component is responsible for running tests on a Fuchsia
 device. Test manager exposes the
@@ -60,7 +60,7 @@ appropriate test runner based on their build definition. For instance a test
 executable that depends on the GoogleTest library will include the
 [GoogleTest runner](#gtest-runner) in its generated manifest.
 
-### Inventory of test runners
+### Inventory of test runners {#inventory-of-test-runners}
 
 The following test runners are currently available for general use:
 
@@ -180,7 +180,7 @@ fuchsia_test_package("my-test-pkg") {
 }
 ```
 
-### Running test multiple times
+### Running test multiple times {#running-test-multiple-times}
 
 To run a test multiple times use:
 
@@ -228,7 +228,8 @@ given glob patterns will be executed.
  fx test --also-run-disabled-tests <test_url>
 ```
 
-- **--gtest_repeat** - See [Running test multiple times](#running_test_multiple_times).
+- **--gtest_repeat** - See [Running test multiple
+  times](#running-test-multiple-times).
 - **--gtest_output** - Emitting gtest json output is not supported.
 - **--gtest_list_tests** - Listing test cases is not supported.
 
@@ -260,7 +261,8 @@ given glob patterns will be executed.
  fx test --also-run-disabled-tests <test_url>
 ```
 
-- **--gunit_repeat** - See [Running test multiple times](#running_test_multiple_times).
+- **--gunit_repeat** - See [Running test multiple
+  times](#running-test-multiple-times).
 - **--gunit_output** - Emitting gtest json/xml output is not supported.
 - **--gunit_list_tests** - Listing test cases is not supported.
 
@@ -295,7 +297,7 @@ code between different runners. For instance, the GoogleTest runner and the Rust
 runner share code related to launching an ELF binary, but differ in code for
 passing command line arguments to the test and parsing the test's results.
 
-## Temporary storage
+## Temporary storage {#temporary-storage}
 
 To use temporary storage in your test, add the following to your component manifest:
 
@@ -357,7 +359,7 @@ fx test --ffx-output-directory <output-dir> custom_artifact_user
 After the test concludes, `<output-dir>` will contain the `artifact.txt` file
 produced by the test.
 
-## Hermeticity
+## Hermeticity {#hermeticity}
 
 In the context of software testing, Hermeticity refers to the isolation of a
 test or test suite from external factors and dependencies, ensuring that it
@@ -440,7 +442,7 @@ destroyed after the test finishes execution.
 | ------------------ | ----------- | ---- |
 |  `data` | Isolated data storage directory | `/data` |
 |  `cache` | Isolated cache storage directory | `/cache` |
-|  `tmp` | Isolated in-memory [temporary storage directory](#temporary_storage) | `/tmp` |
+|  `tmp` | Isolated in-memory [temporary storage directory](#temporary-storage) | `/tmp` |
 
 Add a use declaration in test's manifest file to use these capabilities.
 
@@ -526,7 +528,7 @@ to your test manifest file to selectively allow resolution of some packages:
 
 ```
 
-### Non-hermetic tests
+### Non-hermetic tests {#non-hermetic-tests}
 
 These tests can access some pre-defined capabilities outside of the test realm.
 A capability accessed by non-hermetic test from outside its test realm is called
@@ -784,11 +786,11 @@ offer: [
 [framework-capabilities]: /docs/concepts/components/v2/capabilities/protocol.md#framework
 [fx-test]: https://fuchsia.dev/reference/tools/fx/cmd/test
 [integration-testing]: /docs/development/testing/components/integration_testing.md
-[loader-service]: /docs/concepts/process/program_loading.md#the_loader_service
+[loader-service]: /docs/concepts/process/program_loading.md#the-loader-service
 [manifests-offer]: https://fuchsia.dev/reference/cml#offer
 [manifests-use]: https://fuchsia.dev/reference/cml#use
 [resolvers]:  /docs/concepts/components/v2/capabilities/resolver.md
-[restricted-logs]: /docs/development/diagnostics/test_and_logs.md#restricting_log_severity
+[restricted-logs]: /docs/development/diagnostics/test_and_logs.md#restrict-log-severity
 [runners]: /docs/concepts/components/v2/capabilities/runner.md
 [Starnix tests]: /src/sys/testing/meta/starnix-tests.shard.cml
 [subpackages]: /docs/concepts/components/v2/subpackaging.md
@@ -797,6 +799,6 @@ offer: [
 [Test Architecture Tests]: /src/sys/testing/meta/test-arch-tests.shard.cml
 [test-manager-as-a-service]: /docs/contribute/governance/rfcs/0202_test_manager_as_a_service.md
 [test-suite-protocol]: /docs/concepts/components/v2/realms.md
-[unit-tests]: /docs/development/components/build.md#unit_tests_with_generated_manifests
+[unit-tests]: /docs/development/components/build.md#unit-tests-with-generated-manifests
 [VFS compliance tests]: /src/sys/component_manager/tests/capability_provider_vfs_compliance/vfs_compliance_test_realm.shard.cml
 [Vulkan tests]: /src/lib/vulkan/vulkan_test_realm.shard.cml

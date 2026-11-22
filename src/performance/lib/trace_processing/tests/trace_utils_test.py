@@ -60,39 +60,25 @@ class TraceUtilsTest(unittest.TestCase):
         events: list[trace_model.Event] = [
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_a",
-                    name="name_a",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(
-                            697778328.2160872
-                        )
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_a",
+                name="name_a",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(697778328.2160872)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_b",
-                    name="name_b",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(
-                            697778328.2160872
-                        )
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_b",
+                name="name_b",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(697778328.2160872)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
         ]
 
@@ -120,51 +106,36 @@ class TraceUtilsTest(unittest.TestCase):
         events: list[trace_model.Event] = [
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_a",
-                    name="name_a",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(0)
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_a",
+                name="name_a",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(0)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_b",
-                    name="name_b",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(0)
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_b",
+                name="name_b",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(0)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_c",
-                    name="name_c",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(0)
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_c",
+                name="name_c",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(0)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
         ]
 
@@ -186,39 +157,25 @@ class TraceUtilsTest(unittest.TestCase):
         events: list[trace_model.Event] = [
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_a",
-                    name="name_a",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(
-                            697778328.2160872
-                        )
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_a",
+                name="name_a",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(697778328.2160872)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
             trace_model.DurationEvent(
                 duration=None,
-                parent=None,
-                child_durations=[],
-                child_flows=[],
-                base=trace_model.Event(
-                    category="cat_b",
-                    name="name_b",
-                    start=trace_time.TimePoint.from_epoch_delta(
-                        trace_time.TimeDelta.from_microseconds(
-                            697778328.2160872
-                        )
-                    ),
-                    pid=7009,
-                    tid=7022,
-                    args={},
+                category="cat_b",
+                name="name_b",
+                start=trace_time.TimePoint.from_epoch_delta(
+                    trace_time.TimeDelta.from_microseconds(697778328.2160872)
                 ),
+                pid=7009,
+                tid=7022,
+                args={},
             ),
         ]
 
@@ -312,75 +269,53 @@ class TraceUtilsTest(unittest.TestCase):
         # Flow 1 (t=70us -> t=90us) occurs after both processes are recording.
         p1_early_dur = trace_model.DurationEvent(
             duration=trace_time.TimeDelta.from_microseconds(5),
-            parent=None,
-            child_durations=[],
-            child_flows=[],
-            base=trace_model.Event(
-                category="gfx",
-                name="StartFrame",
-                start=trace_time.TimePoint.from_microseconds(20),
-                pid=1,
-                tid=10,
-                args={},
-            ),
+            category="gfx",
+            name="StartFrame",
+            start=trace_time.TimePoint.from_microseconds(20),
+            pid=1,
+            tid=10,
+            args={},
         )
         p2_first_event = trace_model.DurationEvent(
             duration=trace_time.TimeDelta.from_microseconds(5),
-            parent=None,
-            child_durations=[],
-            child_flows=[],
-            base=trace_model.Event(
-                category="gfx",
-                name="Init",
-                start=trace_time.TimePoint.from_microseconds(50),
-                pid=2,
-                tid=20,
-                args={},
-            ),
+            category="gfx",
+            name="Init",
+            start=trace_time.TimePoint.from_microseconds(50),
+            pid=2,
+            tid=20,
+            args={},
         )
         p2_early_vsync = trace_model.DurationEvent(
             duration=trace_time.TimeDelta.from_microseconds(5),
-            parent=None,
-            child_durations=[],
-            child_flows=[],
-            base=trace_model.Event(
-                category="gfx",
-                name="Vsync",
-                start=trace_time.TimePoint.from_microseconds(60),
-                pid=2,
-                tid=20,
-                args={},
-            ),
+            category="gfx",
+            name="Vsync",
+            start=trace_time.TimePoint.from_microseconds(60),
+            pid=2,
+            tid=20,
+            args={},
         )
         f0_end = trace_model.FlowEvent(
             id="0",
             phase=trace_model.FlowEventPhase.END,
             enclosing_duration=p2_early_vsync,
-            previous_flow=None,
-            next_flow=None,
-            base=trace_model.Event(
-                category="gfx",
-                name="frame_flow",
-                start=trace_time.TimePoint.from_microseconds(60),
-                pid=2,
-                tid=20,
-                args={},
-            ),
+            category="gfx",
+            name="frame_flow",
+            start=trace_time.TimePoint.from_microseconds(60),
+            pid=2,
+            tid=20,
+            args={},
         )
         f0_start = trace_model.FlowEvent(
             id="0",
             phase=trace_model.FlowEventPhase.START,
             enclosing_duration=p1_early_dur,
-            previous_flow=None,
             next_flow=f0_end,
-            base=trace_model.Event(
-                category="gfx",
-                name="frame_flow",
-                start=trace_time.TimePoint.from_microseconds(20),
-                pid=1,
-                tid=10,
-                args={},
-            ),
+            category="gfx",
+            name="frame_flow",
+            start=trace_time.TimePoint.from_microseconds(20),
+            pid=1,
+            tid=10,
+            args={},
         )
         f0_end.previous_flow = f0_start
         p1_early_dur.child_flows = (f0_start,)
@@ -388,61 +323,44 @@ class TraceUtilsTest(unittest.TestCase):
 
         p1_valid_dur = trace_model.DurationEvent(
             duration=trace_time.TimeDelta.from_microseconds(5),
-            parent=None,
-            child_durations=(),
-            child_flows=(),
-            base=trace_model.Event(
-                category="gfx",
-                name="StartFrame",
-                start=trace_time.TimePoint.from_microseconds(70),
-                pid=1,
-                tid=10,
-                args={},
-            ),
+            category="gfx",
+            name="StartFrame",
+            start=trace_time.TimePoint.from_microseconds(70),
+            pid=1,
+            tid=10,
+            args={},
         )
         p2_valid_vsync = trace_model.DurationEvent(
             duration=trace_time.TimeDelta.from_microseconds(5),
-            parent=None,
-            child_durations=(),
-            child_flows=(),
-            base=trace_model.Event(
-                category="gfx",
-                name="Vsync",
-                start=trace_time.TimePoint.from_microseconds(90),
-                pid=2,
-                tid=20,
-                args={},
-            ),
+            category="gfx",
+            name="Vsync",
+            start=trace_time.TimePoint.from_microseconds(90),
+            pid=2,
+            tid=20,
+            args={},
         )
         f1_end = trace_model.FlowEvent(
             id="1",
             phase=trace_model.FlowEventPhase.END,
             enclosing_duration=p2_valid_vsync,
-            previous_flow=None,
-            next_flow=None,
-            base=trace_model.Event(
-                category="gfx",
-                name="frame_flow",
-                start=trace_time.TimePoint.from_microseconds(90),
-                pid=2,
-                tid=20,
-                args={},
-            ),
+            category="gfx",
+            name="frame_flow",
+            start=trace_time.TimePoint.from_microseconds(90),
+            pid=2,
+            tid=20,
+            args={},
         )
         f1_start = trace_model.FlowEvent(
             id="1",
             phase=trace_model.FlowEventPhase.START,
             enclosing_duration=p1_valid_dur,
-            previous_flow=None,
             next_flow=f1_end,
-            base=trace_model.Event(
-                category="gfx",
-                name="frame_flow",
-                start=trace_time.TimePoint.from_microseconds(70),
-                pid=1,
-                tid=10,
-                args={},
-            ),
+            category="gfx",
+            name="frame_flow",
+            start=trace_time.TimePoint.from_microseconds(70),
+            pid=1,
+            tid=10,
+            args={},
         )
         f1_end.previous_flow = f1_start
         p1_valid_dur.child_flows = (f1_start,)

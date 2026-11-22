@@ -251,6 +251,7 @@ pub(crate) struct SaeParameters {
 mod tests {
     #![allow(unused_variables)] // Allow unused variables in tests.
     use super::*;
+    use crate::boringssl::Bignum;
     use assert_matches::assert_matches;
     use std::convert::TryFrom;
     use std::sync::LazyLock;
@@ -657,6 +658,26 @@ mod tests {
         assert_matches!(sink.remove(0), SaeUpdate::Reject(RejectReason::AuthFailed));
     }
 
+    fn p256_order() -> Bignum {
+        ecc::Group::new(EcGroupId::P256).unwrap().order().unwrap()
+    }
+
+    #[test_case(vec![0u8; 32]; "zero")]
+    #[test_case(Bignum::one().unwrap().to_be_vec(32); "one")]
+    #[test_case(p256_order().to_be_vec(32); "order")]
+    #[test_case(p256_order().add(Bignum::one().unwrap()).unwrap().to_be_vec(32); "order_plus_one")]
+    #[test_case(vec![0xff; 32]; "max_u256")]
+    fn bad_first_commit_scalar_rejects_auth(bad_scalar: Vec<u8>) {
+        let mut handshake = TestHandshake::new(TestHandshakeConfig::looping());
+        let valid_element = handshake.sta1_init().to_rx().msg().element.to_vec();
+        let bad_commit = frame::write_commit(19, &bad_scalar, &valid_element, &[], PweMethod::Loop);
+
+        let mut sink = vec![];
+        handshake.sta2.handle_frame(&mut sink, &to_rx(&bad_commit));
+        assert_eq!(sink.len(), 1);
+        assert_matches!(sink.remove(0), SaeUpdate::Reject(RejectReason::AuthFailed));
+    }
+
     #[test]
     fn bad_second_commit_ignored() {
         let mut handshake = TestHandshake::new(TestHandshakeConfig::looping());
@@ -671,6 +692,29 @@ mod tests {
         let mut sink = vec![];
         handshake.sta1.handle_commit(&mut sink, &commit2_wrong);
         assert_eq!(sink.len(), 0);
+    }
+
+    #[test_case(vec![0u8; 32]; "zero")]
+    #[test_case(Bignum::one().unwrap().to_be_vec(32); "one")]
+    #[test_case(p256_order().to_be_vec(32); "order")]
+    #[test_case(p256_order().add(Bignum::one().unwrap()).unwrap().to_be_vec(32); "order_plus_one")]
+    #[test_case(vec![0xff; 32]; "max_u256")]
+    fn bad_second_commit_scalar_ignored_without_state_transition(bad_scalar: Vec<u8>) {
+        let mut handshake = TestHandshake::new(TestHandshakeConfig::looping());
+        let commit1 = handshake.sta1_init();
+        let (commit2, confirm2) = handshake.sta2_handle_commit(commit1.to_rx());
+        let valid_element = commit2.to_rx().msg().element.to_vec();
+
+        let bad_commit = frame::write_commit(19, &bad_scalar, &valid_element, &[], PweMethod::Loop);
+        let mut sink = vec![];
+        handshake.sta1.handle_frame(&mut sink, &to_rx(&bad_commit));
+        assert!(sink.is_empty());
+
+        // sta1 must still be in SaeCommitted and complete the handshake when the valid commit arrives.
+        let confirm1 = handshake.sta1_handle_commit(commit2.to_rx());
+        let key1 = handshake.sta1_handle_confirm(confirm2.to_rx());
+        let key2 = handshake.sta2_handle_confirm(confirm1.to_rx());
+        assert_eq!(key1, key2);
     }
 
     #[test]

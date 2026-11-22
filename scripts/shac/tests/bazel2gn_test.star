@@ -4,7 +4,13 @@
 
 """Tests for the _verify_bazel2gn check in //scripts/shac/bazel_migration.star."""
 
-load("//scripts/shac/bazel_migration.star", "_verify_bazel2gn")
+load(
+    "//scripts/shac/bazel_migration.star",
+    "_dirs_to_check",
+    "_emit_bazel2gn_findings",
+    "_subrepo_prefix",
+    "_verify_bazel2gn",
+)
 
 _SENTINEL_GN = "## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##\n"
 
@@ -166,3 +172,176 @@ def test_non_json_output():
     asserts.eq(res.findings, (
         testing.finding(message = "bazel2gn failed: panic: oops"),
     ))
+
+def test_subrepo_dirs_and_findings():
+    """Subrepo paths are prefixed for bazel2gn and stripped back for findings."""
+
+    def _check_subrepo(ctx):
+        prefix = _subrepo_prefix(ctx)
+        asserts.eq(prefix, "vendor/foo")
+        dirs = _dirs_to_check(ctx, prefix)
+        asserts.eq(dirs, ["vendor/foo", "vendor/foo/deleted_bazel", "vendor/foo/foo/bar"])
+        _emit_bazel2gn_findings(
+            ctx,
+            [
+                {"directory": "vendor/foo", "file": "vendor/foo/BUILD.gn", "out_of_sync": True, "message": "root diff"},
+                {"directory": "vendor/foo/foo/bar", "file": "vendor/foo/foo/bar/BUILD.gn", "out_of_sync": True, "message": "foo diff"},
+                {"directory": "vendor/foo/foo/bar", "file": "vendor/foo/foo/bar/BUILD.bazel", "line": 4, "message": _BAD_CRATE},
+                {"directory": "vendor/foo/deleted_bazel", "file": "vendor/foo/deleted_bazel/BUILD.gn", "message": _NO_BAZEL_FILE},
+                {"directory": "other/repo", "file": "other/repo/BUILD.gn", "message": _NO_BAZEL_FILE},
+            ],
+            prefix,
+        )
+
+    res = testing.run(
+        _check_subrepo,
+        subdir = "vendor/foo",
+        vars = {"fuchsia_dir": "../..", "fuchsia_build_dir": "out"},
+        files = {
+            "BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "BUILD.bazel": testing.file(action = "M"),
+            "deleted_bazel/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "deleted_bazel/BUILD.bazel": testing.file(action = "D"),
+            "foo/bar/BUILD.gn": testing.file(content = _SENTINEL_GN, action = "M"),
+            "foo/bar/BUILD.bazel": testing.file(action = "M"),
+            # Even if a bazel2gn input pattern is affected in a subrepo, it stays scoped.
+            "build/tools/bazel2gn/cmd/main.go": testing.file(action = "M"),
+        },
+    )
+    fix = "fx bazel2gn -d vendor/foo -d vendor/foo/foo/bar\n"
+    asserts.eq([f.filepath for f in res.findings], ["BUILD.gn", "foo/bar/BUILD.gn", "foo/bar/BUILD.bazel", "deleted_bazel/BUILD.gn", ""])
+    asserts.eq(res.findings[2].line, 4)
+    asserts.true(res.findings[0].message.endswith(fix + "\nroot diff"))
+    asserts.true(res.findings[1].message.endswith(fix + "\nfoo diff"))
+    asserts.eq(res.findings[2].message, "bazel2gn failed: " + _BAD_CRATE)
+    asserts.eq(res.findings[3].message, "bazel2gn failed: " + _NO_BAZEL_FILE)
+    asserts.eq(res.findings[4].message, "other/repo/BUILD.gn: bazel2gn failed: " + _NO_BAZEL_FILE)
+
+def test_subrepo_no_sentinel_dirs_scoped():
+    """Subrepo with no sentinel files returns [] even when bazel2gn inputs match."""
+
+    def _check_empty_subrepo(ctx):
+        prefix = _subrepo_prefix(ctx)
+        asserts.eq(prefix, "vendor/foo")
+
+        # Even if bazel2gn input globs match in a subrepo with no sentinel
+        # files, _dirs_to_check returns [] instead of None.
+        asserts.eq(_dirs_to_check(ctx, prefix), [])
+
+    res = testing.run(
+        _check_empty_subrepo,
+        subdir = "vendor/foo",
+        vars = {"fuchsia_dir": "../..", "fuchsia_build_dir": "out"},
+        files = {
+            "build/tools/bazel2gn/cmd/main.go": testing.file(action = "M"),
+            "foo/BUILD.gn": testing.file(content = "group(\"foo\") {}\n", action = "M"),
+        },
+    )
+    asserts.eq(res.findings, ())
+
+def test_subrepo_prefix_normalization():
+    """Dot-slash fuchsia_dir normalizes to the root repository prefix."""
+
+    def _check_root(ctx):
+        asserts.eq(_subrepo_prefix(ctx), "")
+
+    testing.run(_check_root, vars = {"fuchsia_dir": "./", "fuchsia_build_dir": "out"})
+
+def test_modified_root_bazel2gn_config_checks_all_root_sentinels():
+    """Affected root .bazel2gn.json checks all sentinel directories at root."""
+
+    def _check_root_config(ctx):
+        asserts.eq(_dirs_to_check(ctx, ""), [".", "foo/bar", "other"])
+
+    res = testing.run(
+        _check_root_config,
+        vars = _VARS,
+        files = {
+            ".bazel2gn.json": testing.file(action = "M"),
+            "BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foo/bar/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "other/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "no_sentinel/BUILD.gn": testing.file(content = "group(\"none\") {}\n", affected = False),
+        },
+    )
+    asserts.eq(res.findings, ())
+
+def test_modified_nested_bazel2gn_config_checks_descendants():
+    """Affected nested .bazel2gn.json checks only descendant sentinel directories."""
+
+    def _check_nested_config(ctx):
+        asserts.eq(_dirs_to_check(ctx, ""), ["foo/bar", "foo/bar/sub"])
+
+    res = testing.run(
+        _check_nested_config,
+        vars = _VARS,
+        files = {
+            "foo/bar/.bazel2gn.json": testing.file(action = "M"),
+            "foo/bar/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foo/bar/sub/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foo/bar_other/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "other/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+        },
+    )
+    asserts.eq(res.findings, ())
+
+    res = _run(
+        files = {
+            "foo/bar/.bazel2gn.json": testing.file(action = "M"),
+            "foo/bar/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "other/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+        },
+        diagnostics = [{"directory": "foo/bar", "file": "foo/bar/BUILD.gn", "out_of_sync": True, "message": "diff"}],
+    )
+    asserts.eq([f.filepath for f in res.findings], ["foo/bar/BUILD.gn"])
+
+def test_subrepo_nested_config_checks_descendant_sentinels():
+    """Subrepo .bazel2gn.json changes check descendant sentinel directories only."""
+
+    def _check_nested_config(ctx):
+        prefix = _subrepo_prefix(ctx)
+        asserts.eq(
+            _dirs_to_check(ctx, prefix),
+            ["vendor/foo/bar", "vendor/foo/foo", "vendor/foo/foo/sub"],
+        )
+
+    res = testing.run(
+        _check_nested_config,
+        subdir = "vendor/foo",
+        vars = {"fuchsia_dir": "../..", "fuchsia_build_dir": "out"},
+        files = {
+            "foo/.bazel2gn.json": testing.file(action = "M"),
+            "bar/.bazel2gn.json": testing.file(action = "D"),
+            "foo/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foo/sub/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foo/no_sentinel/BUILD.gn": testing.file(content = "group(\"no_sentinel\") {}\n", affected = False),
+            "bar/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foobar/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "other/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+        },
+    )
+    asserts.eq(res.findings, ())
+
+def test_subrepo_root_config_checks_all_subrepo_sentinels():
+    """Subrepo root .bazel2gn.json change checks all sentinel dirs in the subrepo."""
+
+    def _check_root_config(ctx):
+        prefix = _subrepo_prefix(ctx)
+        asserts.eq(
+            _dirs_to_check(ctx, prefix),
+            ["vendor/foo", "vendor/foo/bar/baz", "vendor/foo/foo"],
+        )
+
+    res = testing.run(
+        _check_root_config,
+        subdir = "vendor/foo",
+        vars = {"fuchsia_dir": "../..", "fuchsia_build_dir": "out"},
+        files = {
+            ".bazel2gn.json": testing.file(action = "A"),
+            "BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "foo/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "bar/baz/BUILD.gn": testing.file(content = _SENTINEL_GN, affected = False),
+            "no_sentinel/BUILD.gn": testing.file(content = "group(\"none\") {}\n", affected = False),
+        },
+    )
+    asserts.eq(res.findings, ())

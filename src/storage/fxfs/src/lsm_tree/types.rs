@@ -41,7 +41,8 @@ pub trait FuzzyHash: Hash + Sized {
     /// suffices, in which case None is returned and the hash value of `self` should be checked.
     /// Note that in general only a small number of partitions (e.g. 2) should be checked at once.
     /// Queries checking too many partitions will fall back to returning true from bloom filter
-    /// checks to avoid degenerate performance.
+    /// checks to avoid degenerate performance.  Keys that return an empty iterator are never
+    /// filtered (bloom filter checks always return `Maybe` for them).
     fn fuzzy_hash(&self) -> impl ExactSizeIterator<Item = u64>;
 
     /// Returns whether the type is a range-based key. Used to prevent use of range-based keys as
@@ -430,6 +431,16 @@ pub trait LayerIterator<K, V>: Send + Sync {
     {
         FilterLayerIterator::new(self, predicate)
     }
+
+    /// Creates an iterator that coalesces adjacent compatible items from the underlying iterator.
+    fn coalesce(self) -> impl Future<Output = Result<CoalescingIterator<Self, K, V>, Error>> + Send
+    where
+        Self: Sized,
+        K: Coalesce<V> + Clone + Send + Sync,
+        V: Clone + Send + Sync,
+    {
+        CoalescingIterator::new(self)
+    }
 }
 
 pub type BoxedLayerIterator<'iter, K, V> = Box<dyn LayerIterator<K, V> + 'iter>;
@@ -535,5 +546,221 @@ where
 
     fn get(&self) -> Option<ItemRef<'_, K, V>> {
         self.iter.get()
+    }
+}
+
+/// Trait implemented by keys whose adjacent non-overlapping records can be coalesced within a
+/// mutable layer (`merge_into`) or in a merged `LayerIterator` stream (`CoalescingIterator`).
+pub trait Coalesce<V>: Sized {
+    /// Returns true if `item` may participate in coalescing (or adjacent-item invariant checks) in
+    /// `CoalescingIterator`. Items for which this returns `false` are yielded directly from the
+    /// underlying iterator without cloning or lookahead; `coalesce` must return `Ok(None)` if
+    /// called with such an item.
+    fn may_coalesce(item: ItemRef<'_, Self, V>) -> bool {
+        let _ = item;
+        false
+    }
+
+    /// Attempts to coalesce `left` and `right`, returning `Ok(Some(item))` if they can be
+    /// combined into a single record, `Ok(None)` if `left` should be emitted before `right`, or an
+    /// error if the stream violates invariants (e.g. overlapping extents).
+    fn coalesce(
+        left: ItemRef<'_, Self, V>,
+        right: ItemRef<'_, Self, V>,
+    ) -> Result<Option<Item<Self, V>>, Error> {
+        let _ = (left, right);
+        Ok(None)
+    }
+}
+
+// Pairwise merging across layers cannot coalesce records separated by an overwritten record in an
+// intermediate layer, e.g.:
+//
+//   L0 (newest):            [10..20 -> A]
+//   L1:          [0..10 -> A]
+//   L2 (oldest):            [10..15 -> B]
+//
+// `Merger` must emit `[0..10 -> A]` before it can resolve `[10..20 -> A]` against `[10..15 -> B]`,
+// and coalescing across layers inside `Merger` would also re-emit already-yielded prefixes during
+// `OptimizedMerge` range queries. `CoalescingIterator` runs on the merged stream (after any
+// tombstone filtering) to join adjacent compatible records once overlaps have been resolved.
+
+/// A `LayerIterator` that coalesces adjacent compatible items of another `LayerIterator`.
+pub struct CoalescingIterator<I, K, V> {
+    iter: I,
+    item: Option<Item<K, V>>,
+}
+
+impl<I, K, V> CoalescingIterator<I, K, V>
+where
+    I: LayerIterator<K, V>,
+    K: Coalesce<V> + Clone + Send + Sync,
+    V: Clone + Send + Sync,
+{
+    pub async fn new(iter: I) -> Result<Self, Error> {
+        let mut iter = Self { iter, item: None };
+        iter.fill_item().await?;
+        Ok(iter)
+    }
+
+    async fn fill_item(&mut self) -> Result<(), Error> {
+        let Some(curr) = self.iter.get() else {
+            return Ok(());
+        };
+        if !K::may_coalesce(curr) {
+            return Ok(());
+        }
+        let mut left = curr.cloned();
+        loop {
+            self.iter.advance().await?;
+            let Some(right) = self.iter.get() else {
+                break;
+            };
+            let Some(coalesced) = K::coalesce(left.as_item_ref(), right)? else {
+                break;
+            };
+            left = coalesced;
+        }
+        self.item = Some(left);
+        Ok(())
+    }
+}
+
+impl<I, K, V> LayerIterator<K, V> for CoalescingIterator<I, K, V>
+where
+    I: LayerIterator<K, V>,
+    K: Coalesce<V> + Clone + Send + Sync,
+    V: Clone + Send + Sync,
+{
+    async fn advance(&mut self) -> Result<(), Error> {
+        if self.item.take().is_none() {
+            if self.iter.get().is_none() {
+                return Ok(());
+            }
+            self.iter.advance().await?;
+        }
+        self.fill_item().await
+    }
+
+    fn advance_dyn<'a>(&'a mut self) -> Result<Option<BoxFuture<'a, Result<(), Error>>>, Error> {
+        Ok(Some(Box::pin(self.advance())))
+    }
+
+    fn get(&self) -> Option<ItemRef<'_, K, V>> {
+        self.item.as_ref().map(|x| x.as_item_ref()).or_else(|| self.iter.get())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Coalesce, Item, ItemRef, LayerIterator};
+    use anyhow::Error;
+    use futures::future::BoxFuture;
+    use std::ops::Range;
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct TestRangeKey(Range<u64>);
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum TestValue {
+        Coalesceable(i32),
+        Uncoalesceable(String),
+    }
+
+    impl Clone for TestValue {
+        fn clone(&self) -> Self {
+            match self {
+                Self::Coalesceable(v) => Self::Coalesceable(*v),
+                Self::Uncoalesceable(_) => {
+                    panic!("non-coalesceable items must not be cloned by CoalescingIterator")
+                }
+            }
+        }
+    }
+
+    impl Coalesce<TestValue> for TestRangeKey {
+        fn may_coalesce(item: ItemRef<'_, Self, TestValue>) -> bool {
+            matches!(item.value, TestValue::Coalesceable(_))
+        }
+
+        fn coalesce(
+            left: ItemRef<'_, Self, TestValue>,
+            right: ItemRef<'_, Self, TestValue>,
+        ) -> Result<Option<Item<Self, TestValue>>, Error> {
+            match (left.value, right.value) {
+                (TestValue::Coalesceable(lv), TestValue::Coalesceable(rv))
+                    if lv == rv && left.key.0.end == right.key.0.start =>
+                {
+                    Ok(Some(Item::new(
+                        TestRangeKey(left.key.0.start..right.key.0.end),
+                        TestValue::Coalesceable(*lv),
+                    )))
+                }
+                _ => Ok(None),
+            }
+        }
+    }
+
+    struct SliceIter<'a> {
+        items: &'a [Item<TestRangeKey, TestValue>],
+        index: usize,
+    }
+
+    impl<'a> LayerIterator<TestRangeKey, TestValue> for SliceIter<'a> {
+        async fn advance(&mut self) -> Result<(), Error> {
+            if self.index < self.items.len() {
+                self.index += 1;
+            }
+            Ok(())
+        }
+
+        fn advance_dyn<'b>(
+            &'b mut self,
+        ) -> Result<Option<BoxFuture<'b, Result<(), Error>>>, Error> {
+            Ok(Some(Box::pin(self.advance())))
+        }
+
+        fn get(&self) -> Option<ItemRef<'_, TestRangeKey, TestValue>> {
+            self.items.get(self.index).map(|x| x.as_item_ref())
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_coalescing_iterator_skips_cloning_uncoalesceable_items() {
+        let empty: [Item<TestRangeKey, TestValue>; 0] = [];
+        let iter = (SliceIter { items: &empty, index: 0 }).coalesce().await.unwrap();
+        assert!(iter.get().is_none());
+
+        let items = [
+            Item::new(TestRangeKey(0..1), TestValue::Uncoalesceable("n1".into())),
+            Item::new(TestRangeKey(1..2), TestValue::Uncoalesceable("n2".into())),
+            Item::new(TestRangeKey(10..20), TestValue::Coalesceable(1)),
+            Item::new(TestRangeKey(20..30), TestValue::Coalesceable(1)),
+            Item::new(TestRangeKey(30..40), TestValue::Coalesceable(2)),
+            Item::new(TestRangeKey(40..41), TestValue::Uncoalesceable("n3".into())),
+            Item::new(TestRangeKey(50..60), TestValue::Coalesceable(3)),
+            Item::new(TestRangeKey(60..70), TestValue::Coalesceable(3)),
+            Item::new(TestRangeKey(70..71), TestValue::Uncoalesceable("n4".into())),
+        ];
+
+        let mut iter = (SliceIter { items: &items, index: 0 }).coalesce().await.unwrap();
+        let expected = [
+            Item::new(TestRangeKey(0..1), TestValue::Uncoalesceable("n1".into())),
+            Item::new(TestRangeKey(1..2), TestValue::Uncoalesceable("n2".into())),
+            Item::new(TestRangeKey(10..30), TestValue::Coalesceable(1)),
+            Item::new(TestRangeKey(30..40), TestValue::Coalesceable(2)),
+            Item::new(TestRangeKey(40..41), TestValue::Uncoalesceable("n3".into())),
+            Item::new(TestRangeKey(50..70), TestValue::Coalesceable(3)),
+            Item::new(TestRangeKey(70..71), TestValue::Uncoalesceable("n4".into())),
+        ];
+
+        for exp in &expected {
+            assert_eq!(iter.get(), Some(exp.as_item_ref()));
+            iter.advance().await.unwrap();
+        }
+        assert!(iter.get().is_none());
+        // Advancing again at EOF is a no-op.
+        iter.advance().await.unwrap();
+        assert!(iter.get().is_none());
     }
 }

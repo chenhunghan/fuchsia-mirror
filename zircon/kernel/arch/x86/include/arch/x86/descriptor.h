@@ -42,7 +42,6 @@
 
 #ifndef __ASSEMBLER__
 
-#include <sys/types.h>
 #include <zircon/compiler.h>
 
 #include <arch/aspace.h>
@@ -57,28 +56,10 @@ inline void x86_clear_tss_io_bitmap(const IoBitmap& bitmap) {
 
 typedef uint16_t seg_sel_t;
 
+/* tss stuff */
 __BEGIN_CDECLS
 
-/* tss stuff */
-void x86_initialize_percpu_tss();
-void x86_set_tss_sp(vaddr_t sp);
 void x86_clear_tss_busy(seg_sel_t sel);
-
-static inline void gdt_load(uintptr_t base) {
-  struct gdtr {
-    uint16_t limit;
-    uintptr_t address;
-  } __PACKED;
-  // During VM exit GDTR limit is always set to 0xffff and instead of
-  // trying to maintain the limit aligned with the actual GDT size we
-  // decided to just keep it 0xffff all the time and instead of relying
-  // on the limit just map GDT in the way that accesses beyond GDT cause
-  // page faults. This allows us to avoid calling LGDT on every VM exit.
-  struct gdtr gdtr = {.limit = 0xffff, .address = base};
-  x86_lgdt((uintptr_t)&gdtr);
-}
-
-void gdt_setup();
 uintptr_t gdt_get();
 
 __END_CDECLS

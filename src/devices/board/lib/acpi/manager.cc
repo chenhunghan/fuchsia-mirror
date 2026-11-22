@@ -168,7 +168,7 @@ acpi::status<> Manager::PublishDevices(zx_device_t* platform_bus,
 
     uint32_t bus_type = d->GetBusType();
     if (bus_type == BusType::kPci) {
-      auto status = PublishPciBus(platform_bus, d);
+      auto status = PublishPciBus(platform_bus, d, device_dispatcher);
       if (status.is_error()) {
         return status.take_error();
       }
@@ -333,7 +333,8 @@ acpi::status<bool> Manager::DiscoverDevice(ACPI_HANDLE handle, CmosRtcDiscovery*
   return acpi::ok(false);
 }
 
-acpi::status<> Manager::PublishPciBus(zx_device_t* platform_bus, DeviceBuilder* device) {
+acpi::status<> Manager::PublishPciBus(zx_device_t* platform_bus, DeviceBuilder* device,
+                                      async_dispatcher_t* device_dispatcher) {
   if (published_pci_bus_) {
     return acpi::ok();
   }
@@ -357,23 +358,25 @@ acpi::status<> Manager::PublishPciBus(zx_device_t* platform_bus, DeviceBuilder* 
       return acpi::error(AE_BAD_DATA);
     }
   }
-  std::vector<pci_bdf_t> bdfs;
+  std::vector<ACPI_PCI_ID> bdfs;
   if (vec_ptr) {
+    bdfs.reserve(vec_ptr->size());
     // If we have children, generate a list of them to pass to the PCI driver.
     for (uint64_t df : *vec_ptr) {
       uint32_t dev_id = (df & (0xffff0000)) >> 16;
       uint32_t func_id = df & 0x0000ffff;
 
-      bdfs.emplace_back(pci_bdf_t{
-          .bus_id = static_cast<uint8_t>(device->GetBusId()),
-          .device_id = static_cast<uint8_t>(dev_id),
-          .function_id = static_cast<uint8_t>(func_id),
+      bdfs.emplace_back(ACPI_PCI_ID{
+          .Segment = 0,
+          .Bus = static_cast<uint16_t>(device->GetBusId()),
+          .Device = static_cast<uint16_t>(dev_id),
+          .Function = static_cast<uint16_t>(func_id),
       });
     }
   }
 
-  if (pci_init(platform_bus, device->handle(), std::move(info.value()), this, std::move(bdfs)) ==
-      ZX_OK) {
+  if (pci_init(platform_bus, device_dispatcher, device->handle(), std::move(info.value()), this,
+               std::move(bdfs)) == ZX_OK) {
     published_pci_bus_ = true;
   }
   return acpi::ok();

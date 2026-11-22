@@ -91,7 +91,7 @@ impl std::convert::TryFrom<u64> for Capabilities {
     type Error = Errno;
 
     fn try_from(capability_num: u64) -> Result<Self, Self::Error> {
-        match 1u64.checked_shl(capability_num as u32) {
+        match u32::try_from(capability_num).ok().and_then(|n| 1u64.checked_shl(n)) {
             Some(mask) => {
                 let caps = Self::from_bits_truncate(mask);
                 if caps.is_empty() { error!(EINVAL) } else { Ok(caps) }
@@ -356,8 +356,22 @@ impl Credentials {
         }
     }
 
+    /// Returns whether `gid` is the effective group ID or one of the supplementary group IDs.
+    ///
+    /// File permission checks must use [`Self::is_in_fs_group()`] instead.
     pub fn is_in_group(&self, gid: gid_t) -> bool {
         self.egid == gid || self.groups.contains(&gid)
+    }
+
+    /// Returns whether `gid` is the filesystem group ID or one of the supplementary group IDs.
+    ///
+    /// From <https://man7.org/linux/man-pages/man7/credentials.7.html>, the filesystem user and
+    /// group IDs:
+    ///
+    ///   in conjunction with the supplementary group IDs described below, are used to determine
+    ///   permissions for accessing files
+    pub fn is_in_fs_group(&self, gid: gid_t) -> bool {
+        self.fsgid == gid || self.groups.contains(&gid)
     }
 
     /// Updates the `securebits` field, taking into account *`_LOCKED` bits.
@@ -396,86 +410,6 @@ impl Credentials {
 
     pub fn uid_as_fscred(&self) -> FsCred {
         FsCred { uid: self.uid, gid: self.gid }
-    }
-
-    /// Adjusts the capability sets (permitted, effective, and ambient) of these credentials
-    /// to reflect changes in real, effective, or saved user IDs (`setuid`, `setreuid`,
-    /// `setresuid`), matching `cap_emulate_setxuid` (`LSM_SETID_ID | LSM_SETID_RE | LSM_SETID_RES`)
-    /// in Linux's `security/commoncap.c` and `capabilities(7)`.
-    pub fn update_capabilities_on_uid_change(&mut self, prev: &Credentials) {
-        // https://man7.org/linux/man-pages/man7/capabilities.7.html
-        // If one or more of the real, effective, or saved set user IDs
-        // was previously 0, and as a result of the UID changes all of
-        // these IDs have a nonzero value, then all capabilities are
-        // cleared from the permitted, effective, and ambient capability
-        // sets.
-        //
-        // SECBIT_KEEP_CAPS: Setting this flag allows a thread that has one or more 0
-        // UIDs to retain capabilities in its permitted set when it
-        // switches all of its UIDs to nonzero values.
-        // The setting of the SECBIT_KEEP_CAPS flag is ignored if the
-        // SECBIT_NO_SETUID_FIXUP flag is set.  (The latter flag
-        // provides a superset of the effect of the former flag.)
-        // SECBIT_NO_SETUID_FIXUP: Setting  this  flag  stops  the  kernel from adjusting
-        // the process's permitted, effective, and ambient capability sets when the thread's
-        // effective and filesystem UIDs are switched between zero and nonzero values.
-        if self.securebits.contains(SecureBits::NO_SETUID_FIXUP) {
-            return;
-        }
-        let was_any_zero = prev.uid == 0 || prev.euid == 0 || prev.saved_uid == 0;
-        let is_all_nonzero = self.uid != 0 && self.euid != 0 && self.saved_uid != 0;
-
-        if was_any_zero && is_all_nonzero {
-            if !self.securebits.contains(SecureBits::KEEP_CAPS) {
-                self.cap_permitted = Capabilities::empty();
-                self.cap_effective = Capabilities::empty();
-            }
-            self.cap_ambient = Capabilities::empty();
-        }
-        // If the effective user ID is changed from 0 to nonzero, then
-        // all capabilities are cleared from the effective set.
-        if prev.euid == 0 && self.euid != 0 {
-            self.cap_effective = Capabilities::empty();
-        } else if prev.euid != 0 && self.euid == 0 {
-            // If the effective user ID is changed from nonzero to 0, then
-            // the permitted set is copied to the effective set.
-            self.cap_effective = self.cap_permitted;
-        }
-    }
-
-    /// Adjusts filesystem-related effective capabilities of these credentials to reflect changes
-    /// made by `setfsuid(2)`, matching `LSM_SETID_FS` in Linux's `cap_task_fix_setuid`
-    /// (`security/commoncap.c`).
-    ///
-    /// Note that `fsuid` resets performed as a side effect of `setuid`, `setreuid`, or
-    /// `setresuid` use [`Self::update_capabilities_on_uid_change`] (`LSM_SETID_{ID,RE,RES}`)
-    /// rather than `LSM_SETID_FS`.
-    pub fn update_capabilities_on_fsuid_change(&mut self, prev: &Credentials) {
-        if self.securebits.contains(SecureBits::NO_SETUID_FIXUP) {
-            return;
-        }
-        // If the filesystem user ID is changed from 0 to nonzero (see
-        // setfsuid(2)), then the following capabilities are cleared from
-        // the effective set: CAP_CHOWN, CAP_DAC_OVERRIDE,
-        // CAP_DAC_READ_SEARCH, CAP_FOWNER, CAP_FSETID,
-        // CAP_LINUX_IMMUTABLE (since Linux 2.6.30), CAP_MAC_OVERRIDE,
-        // and CAP_MKNOD (since Linux 2.6.30).
-        let fs_capabilities = CAP_CHOWN
-            | CAP_DAC_OVERRIDE
-            | CAP_DAC_READ_SEARCH
-            | CAP_FOWNER
-            | CAP_FSETID
-            | CAP_LINUX_IMMUTABLE
-            | CAP_MAC_OVERRIDE
-            | CAP_MKNOD;
-        if prev.fsuid == 0 && self.fsuid != 0 {
-            self.cap_effective &= !fs_capabilities;
-        } else if prev.fsuid != 0 && self.fsuid == 0 {
-            // If the filesystem UID is changed from nonzero to 0, then any
-            // of these capabilities that are enabled in the permitted set
-            // are enabled in the effective set.
-            self.cap_effective |= self.cap_permitted & fs_capabilities;
-        }
     }
 }
 
@@ -582,61 +516,9 @@ mod tests {
         assert_eq!(Capabilities::try_from(uapi::CAP_BLOCK_SUSPEND as u64), Ok(capabilities));
 
         assert_eq!(Capabilities::try_from(200000), error!(EINVAL));
-    }
-
-    #[::fuchsia::test]
-    fn test_update_capabilities_on_fsuid_change() {
-        let prev = Credentials::with_ids(0, 0);
-        let mut creds = prev.clone();
-        creds.fsuid = 1000;
-        creds.update_capabilities_on_fsuid_change(&prev);
-        assert!(!creds.cap_effective.contains(CAP_DAC_OVERRIDE));
-        assert!(creds.cap_effective.contains(CAP_NET_ADMIN));
-        assert!(creds.cap_permitted.contains(CAP_DAC_OVERRIDE));
-
-        let prev_nonzero = creds.clone();
-        creds.fsuid = 0;
-        creds.update_capabilities_on_fsuid_change(&prev_nonzero);
-        assert!(creds.cap_effective.contains(CAP_DAC_OVERRIDE));
-
-        let mut no_fixup_prev = Credentials::with_ids(0, 0);
-        no_fixup_prev.securebits.insert(SecureBits::NO_SETUID_FIXUP);
-        let mut no_fixup_creds = no_fixup_prev.clone();
-        no_fixup_creds.fsuid = 1000;
-        no_fixup_creds.update_capabilities_on_fsuid_change(&no_fixup_prev);
-        assert!(no_fixup_creds.cap_effective.contains(CAP_DAC_OVERRIDE));
-    }
-
-    #[::fuchsia::test]
-    fn test_update_capabilities_on_uid_change_ignores_fsuid_transitions() {
-        // When KEEP_CAPS is set and euid is already nonzero, dropping saved_uid and resetting
-        // fsuid from 0 to 1000 retains effective capabilities while clearing ambient capabilities.
-        let mut prev = Credentials::with_ids(0, 0);
-        prev.uid = 1000;
-        prev.euid = 1000;
-        prev.saved_uid = 0;
-        prev.fsuid = 0;
-        prev.cap_effective = CAP_DAC_OVERRIDE;
-        prev.cap_ambient = CAP_DAC_OVERRIDE;
-        prev.securebits.insert(SecureBits::KEEP_CAPS);
-
-        let mut creds = prev.clone();
-        creds.saved_uid = 1000;
-        creds.fsuid = 1000;
-        creds.update_capabilities_on_uid_change(&prev);
-        assert!(creds.cap_permitted.contains(CAP_DAC_OVERRIDE));
-        assert!(creds.cap_effective.contains(CAP_DAC_OVERRIDE));
-        assert!(creds.cap_ambient.is_empty());
-
-        // When euid remains 0, resetting fsuid from nonzero back to 0 via set*uid does not
-        // re-raise filesystem capabilities previously dropped via setfsuid.
-        let mut prev_root = Credentials::with_ids(0, 0);
-        prev_root.fsuid = 1000;
-        prev_root.cap_effective.remove(CAP_DAC_OVERRIDE);
-
-        let mut creds_root = prev_root.clone();
-        creds_root.fsuid = 0;
-        creds_root.update_capabilities_on_uid_change(&prev_root);
-        assert!(!creds_root.cap_effective.contains(CAP_DAC_OVERRIDE));
+        assert_eq!(
+            Capabilities::try_from((1u64 << 32) | (uapi::CAP_BLOCK_SUSPEND as u64)),
+            error!(EINVAL)
+        );
     }
 }

@@ -12,8 +12,7 @@
 #include <optional>
 #include <string>
 
-#include <src/lib/files/directory.h>
-
+#include "src/lib/files/directory.h"
 #include "src/lib/fsl/vmo/file.h"
 #include "src/lib/fsl/vmo/sized_vmo.h"
 #include "src/lib/icu_data/cpp/icu_headers.h"

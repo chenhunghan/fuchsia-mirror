@@ -5,8 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 #include <zircon/errors.h>
-#include <zircon/rights.h>
 #include <zircon/types.h>
+
+#include <new>
 
 #include <fbl/alloc_checker.h>
 #include <fbl/ref_ptr.h>
@@ -16,14 +17,10 @@
 #include <object/handle.h>
 #include <object/pinned_memory_token_dispatcher.h>
 
-extern "C" {
-
-zx_status_t cpp_pinned_memory_token_dispatcher_create(
-    BusTransactionInitiatorDispatcher* bti,
-    ffi::Uninitialized<KernelHandle<PinnedMemoryTokenDispatcher>>* handle_out) {
-  fbl::RefPtr<BusTransactionInitiatorDispatcher> bti_ref = fbl::ImportFromRawPtr(bti);
+extern "C" zx_status_t cpp_pinned_memory_token_dispatcher_create(
+    const void* bti, ffi::Uninitialized<KernelHandle<PinnedMemoryTokenDispatcher>>* handle_out) {
   fbl::AllocChecker ac;
-  KernelHandle new_handle(fbl::AdoptRef(new (&ac) PinnedMemoryTokenDispatcher(ktl::move(bti_ref))));
+  KernelHandle new_handle(fbl::AdoptRef(new (&ac) PinnedMemoryTokenDispatcher(bti)));
   if (!ac.check()) {
     return ZX_ERR_NO_MEMORY;
   }
@@ -31,5 +28,3 @@ zx_status_t cpp_pinned_memory_token_dispatcher_create(
   handle_out->Initialize(ktl::move(new_handle));
   return ZX_OK;
 }
-
-}  // extern "C"

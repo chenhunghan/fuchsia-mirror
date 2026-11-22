@@ -14,5 +14,7 @@
         compat: "driver/realtek-audio-codec.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
     },
-    use: [],
+    use: [
+        { service: "fuchsia.hardware.intel.hda.CodecService" },
+    ],
 }

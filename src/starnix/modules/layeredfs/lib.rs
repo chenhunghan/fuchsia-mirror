@@ -174,6 +174,9 @@ impl FileSystemOps for LayeredFileSystemOps {
     fn name(&self) -> &'static FsStr {
         self.fs.base_fs.name()
     }
+    fn is_storage_backed(&self) -> bool {
+        self.fs.base_fs.is_storage_backed()
+    }
     fn reconfigure(
         &self,
         fs: &FileSystem,

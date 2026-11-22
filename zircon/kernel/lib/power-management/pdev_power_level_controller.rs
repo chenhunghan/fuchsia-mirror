@@ -6,8 +6,11 @@
 
 //! Platform device power level controller.
 
+use core::pin::Pin;
 use fbl::{Recyclable, RefPtr, make_ref_counted, ref_counted};
-use ksync::KCell;
+use ksync::{KCell, KMutex};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use zx_status::Status;
 use zx_types::ZX_KOID_INVALID;
 
@@ -17,7 +20,40 @@ use super::power_level_controller::{
 use crate::kernel::scheduler;
 use crate::pdev_power::{power_opp_get, power_opp_get_domain_count, power_opp_set};
 
-crate::ksync_kernel::declare_singleton_mutex!(InstanceLock);
+#[ksync::guarded]
+struct InstanceState {
+    #[mutex]
+    lock: KMutex<crate::ksync_kernel::TrackedMutex>,
+    #[guarded_by(lock)]
+    instance: Option<RefPtr<PDevPowerLevelController>>,
+}
+
+static INSTANCE: LazyInit<InstanceState, NoCheck> = LazyInit::uninit();
+
+impl InstanceState {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `INSTANCE` is initialized at `LK_INIT_LEVEL_EARLIEST` before
+        // `PDevPowerLevelController` can be accessed.
+        unsafe { INSTANCE.get_unchecked() }
+    }
+}
+
+fn instance_lock_init(_level: init::LkInitLevel) {
+    // SAFETY: lk init hooks run once during single-threaded early boot before
+    // `PDevPowerLevelController` can be accessed.
+    unsafe {
+        let _ = Pin::static_ref(&INSTANCE).init_pin(pin_init!(InstanceState {
+            lock <- KMutex::init(),
+            instance: KCell::new(None),
+        }));
+    }
+}
+init::lk_init_hook!(
+    pdev_power_level_controller_lock,
+    instance_lock_init,
+    init::LK_INIT_LEVEL_EARLIEST
+);
 
 // Serializes posting a power level request to the pdev driver with updating the scheduler's
 // power level bookkeeping for that request.
@@ -38,8 +74,6 @@ crate::ksync_kernel::declare_singleton_mutex!(InstanceLock);
 // domains are few; this can be split per domain if contention is ever observed.
 crate::ksync_kernel::declare_singleton_spinlock!(PostLock);
 
-static INSTANCE: KCell<Option<RefPtr<PDevPowerLevelController>>, InstanceLock> = KCell::new(None);
-
 /// Power level controller backed by the platform device (pdev) power driver.
 #[ref_counted]
 #[derive(Debug, Recyclable)]
@@ -52,18 +86,14 @@ pub struct PDevPowerLevelController {
 impl PDevPowerLevelController {
     /// Resets the singleton instance for tests.
     pub fn reset_for_test() {
-        ksync::lock!(let mut guard = InstanceLock::Get().lock());
-        // SAFETY: `guard.as_mut().token_mut()` proves `InstanceLock` is exclusively held.
-        unsafe {
-            *INSTANCE.get_mut(guard.as_mut().token_mut()) = None;
-        }
+        ksync::lock!(let mut guard = InstanceState::get().lock_lock());
+        *guard.as_mut().instance_mut() = None;
     }
 
     /// Returns the singleton `PDevPowerLevelController` after validating `domain_id`.
     pub fn get(domain_id: u32) -> Result<RefPtr<Self>, Status> {
-        ksync::lock!(let mut guard = InstanceLock::Get().lock());
-        // SAFETY: `guard.as_mut().token_mut()` proves `InstanceLock` is exclusively held.
-        let instance_slot = unsafe { INSTANCE.get_mut(guard.as_mut().token_mut()) };
+        ksync::lock!(let mut guard = InstanceState::get().lock_lock());
+        let instance_slot = guard.as_mut().instance_mut();
         if let Some(instance) = instance_slot.as_ref() {
             if (domain_id as usize) >= instance.domain_count() {
                 return Err(Status::OUT_OF_RANGE);

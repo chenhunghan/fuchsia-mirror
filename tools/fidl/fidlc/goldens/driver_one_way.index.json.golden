@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
       "data": "test.driveroneway",
       "start_offset": 173,
       "end_offset": 190
@@ -25,7 +25,7 @@
           "name": "payload",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "data": "payload",
             "start_offset": 318,
             "end_offset": 325
@@ -36,7 +36,7 @@
             "type_identifier": "test.driveroneway/Payload",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
               "data": "Payload",
               "start_offset": 326,
               "end_offset": 333
@@ -50,7 +50,7 @@
       "identifier": "test.driveroneway/Payload",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
         "data": "Payload",
         "start_offset": 198,
         "end_offset": 205
@@ -60,7 +60,7 @@
           "name": "value",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "data": "value",
             "start_offset": 221,
             "end_offset": 226
@@ -77,7 +77,7 @@
       "identifier": "test.driveroneway/OneWay",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
         "data": "OneWay",
         "start_offset": 276,
         "end_offset": 282
@@ -87,7 +87,7 @@
           "identifier": "Send",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/driver_one_way.test.fidl",
             "data": "Send",
             "start_offset": 296,
             "end_offset": 300

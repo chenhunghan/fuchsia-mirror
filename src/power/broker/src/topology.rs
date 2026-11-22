@@ -407,19 +407,30 @@ impl Topology {
             })
     }
 
-    /// Returns an iterator over all dependencies where `element_id` is the required element.
-    ///
-    /// # Warning
-    ///
-    /// This only covers dependencies in the topology graph. Root dependencies are not part of the
-    /// graph, so callers that reason about *claims* must use
-    /// `Catalog::all_dependencies_for_required_element` instead; omitting root dependencies
-    /// silently drops lease targets from required level computation.
-    pub fn dependencies_for_required_element(
+    /// Returns an iterator over all dependencies in the topology graph where `element_id` is the
+    /// required element.
+    fn dependencies_for_required_element(
         &self,
         element_id: ElementID,
     ) -> impl Iterator<Item = &Dependency> {
         self.deps_by_required_element.get(&element_id).into_iter().flat_map(|deps| deps.iter())
+    }
+
+    /// Returns an iterator over all dependencies in the topology graph where `element_id` is the
+    /// required element, chained with the root dependencies on `element_id` in
+    /// `root_deps_by_required_element`.
+    ///
+    /// Root dependencies (lease targets) are not part of the topology graph; callers that reason
+    /// about claims must pass `Catalog::root_deps_by_required_element` so direct lease demands on
+    /// `element_id` are included alongside element-to-element dependencies.
+    pub(crate) fn all_dependencies_for_required_element<'a>(
+        &'a self,
+        element_id: ElementID,
+        root_deps_by_required_element: &'a FxHashMap<ElementID, FxHashSet<Dependency>>,
+    ) -> impl Iterator<Item = &'a Dependency> {
+        self.dependencies_for_required_element(element_id).chain(
+            root_deps_by_required_element.get(&element_id).into_iter().flat_map(|deps| deps.iter()),
+        )
     }
 
     /// Returns an iterator over all dependencies where `element_id` is the dependent element.
@@ -1650,5 +1661,48 @@ mod tests {
 
         t.remove_dependency(&dep).expect("remove_dependency failed");
         assert!(!t.contains_dependency(&dep));
+    }
+
+    #[fuchsia::test]
+    fn test_all_dependencies_for_required_element_chains_root_deps() {
+        let inspect = fuchsia_inspect::Inspector::default();
+        let mut t = Topology::new(inspect.root(), 0);
+
+        let a = t.add_element_with_inspect("A", vec![0, 1], 0, 0).expect("add_element failed");
+        let b = t.add_element_with_inspect("B", vec![0, 1, 2], 0, 0).expect("add_element failed");
+
+        let a1_b1 = Dependency {
+            dependent: Some(ElementLevel { element_id: a, level: ONE }),
+            requires: ElementLevel { element_id: b, level: ONE },
+        };
+        t.add_dependency(
+            &a1_b1,
+            OnRequiredElementRemoval::MakeUnsatisfiable,
+            &mut EagerInspectWriter,
+        )
+        .expect("add_dependency failed");
+
+        let root_a1 = Dependency::new_root(ElementLevel { element_id: a, level: ONE });
+        let root_b2 = Dependency::new_root(ElementLevel { element_id: b, level: TWO });
+        let empty_root_deps: FxHashMap<ElementID, FxHashSet<Dependency>> = FxHashMap::default();
+        let root_deps_by_required_element: FxHashMap<ElementID, FxHashSet<Dependency>> = [
+            (a, FxHashSet::from_iter([root_a1.clone()])),
+            (b, FxHashSet::from_iter([root_b2.clone()])),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            sorted_deps(t.all_dependencies_for_required_element(b, &empty_root_deps)),
+            [a1_b1.clone()]
+        );
+        assert_eq!(
+            sorted_deps(t.all_dependencies_for_required_element(b, &root_deps_by_required_element)),
+            sorted_deps([&a1_b1, &root_b2].into_iter())
+        );
+        assert_eq!(
+            sorted_deps(t.all_dependencies_for_required_element(a, &root_deps_by_required_element)),
+            [root_a1]
+        );
     }
 }

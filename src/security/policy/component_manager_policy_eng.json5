@@ -255,7 +255,6 @@
                     // process is used in engineering builds to launch
                     // shell binaries. It uses PackageResolver to resolve tools from packages.
                     "/bootstrap/process_resolver",
-                    "/core/process_resolver",
                 ],
             },
             {
@@ -409,9 +408,9 @@
 
                     // This eng allowlist is used on userdebug builds when sl4f is enabled, so this
                     // entry is needed even though this is the eng policy file and on eng builds
-                    // /core/process_resolver is routed the -full impl instead of the -base impl.
+                    // /bootstrap/process_resolver is routed the -full impl instead of the -base impl.
                     // https://cs.opensource.google/fuchsia/fuchsia/+/main:src/lib/assembly/platform_configuration/src/subsystems/component.rs;l=172-175;drc=73535c61bc4f4402a06cf86985b426996895a6d1
-                    "/core/process_resolver",
+                    "/bootstrap/process_resolver",
                 ],
             },
             {
@@ -420,7 +419,7 @@
                 source_name: "fuchsia.pkg.PackageResolver-full",
                 capability: "protocol",
                 target_monikers: [
-                    "/core/process_resolver",
+                    "/bootstrap/process_resolver",
                     "/core/test_manager",
                     "/core/testing/component-framework-tests:**",
                     "/toolbox",
@@ -662,5 +661,27 @@
                 moniker: "/bootstrap/test_manager",
             },
         ],
+        child_policy: {
+            eager_startup: [
+                "/bootstrap/auto-slot-committer",
+                "/bootstrap/netsvc",
+                "/bootstrap/tee",
+                "/bootstrap/tee/binder-proxy",
+                "/bootstrap/vsock-sshd-host",
+                "/core/adb",
+                "/core/audio_device_registry",
+                "/core/devscreen",
+                "/core/fake-power-sensor",
+                "/core/fastboot-tcp",
+                "/core/fastboot-usb",
+                "/core/fdomain-uart-driver",
+                "/core/remote-control",
+                "/core/sshd-host",
+                "/core/stressor",
+                "/core/test_manager/**",
+                "/core/testing/**",
+                "/core/usb-policy",
+            ],
+        },
     },
 }

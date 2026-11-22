@@ -7,9 +7,14 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "target_tests",
     tests = [
+        "//src/devices/bin/driver_manager_rust/bind:tests",
+        "//src/devices/bin/driver_manager_rust/composite:tests",
+        "//src/devices/bin/driver_manager_rust/core:tests",
+        "//src/devices/bin/driver_manager_rust/development:tests",
         "//src/devices/bin/driver_manager_rust/devfs:tests",
         "//src/devices/bin/driver_manager_rust/driver_host:driver-manager-driver-host-unittests",
         "//src/devices/bin/driver_manager_rust/firmware_crash:driver-manager-firmware-crash-unittests",
+        "//src/devices/bin/driver_manager_rust/node:tests",
         "//src/devices/bin/driver_manager_rust/shutdown:driver-manager-shutdown-unittests",
         "//src/devices/bin/driver_manager_rust/types:driver-manager-types-unittests",
         "//src/devices/bin/driver_manager_rust/utils:driver-manager-utils-unittests",

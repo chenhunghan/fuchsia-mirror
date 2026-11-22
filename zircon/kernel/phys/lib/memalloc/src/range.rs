@@ -242,7 +242,7 @@ impl Range {
         // `Range` and `zbi::MemRange` have identical size, alignment, and field offsets
         //  (verified by `static_assert!` above).
         //
-        // Every `zbi::MemType` discriminant with `reserved == 0` in the upper 32 bits is a
+        // Every `zbi::MemType` value with `reserved == 0` in the upper 32 bits is a
         // valid [`Type`].
         //
         // `paddr + length` does not overflow.
@@ -728,19 +728,19 @@ mod tests {
             zbi::MemRange {
                 paddr: 0,
                 length: 0x1000,
-                r#type: zbi::MemType::Ram,
+                r#type: zbi::MemType::RAM,
                 reserved: 0xdeadbeef,
             },
             zbi::MemRange {
                 paddr: 0x1000,
                 length: 0x1000,
-                r#type: zbi::MemType::Peripheral,
+                r#type: zbi::MemType::PERIPHERAL,
                 reserved: 0x12345678,
             },
             zbi::MemRange {
                 paddr: u64::MAX - 1,
                 length: 0x1000,
-                r#type: zbi::MemType::Reserved,
+                r#type: zbi::MemType::RESERVED,
                 reserved: u32::MAX,
             },
         ];

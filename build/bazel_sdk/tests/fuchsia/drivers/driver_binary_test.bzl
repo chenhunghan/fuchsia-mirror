@@ -10,7 +10,7 @@ load(
 )
 load(
     "@rules_fuchsia//fuchsia_rules_common/debug_symbols:debug_symbols.bzl",
-    "FUCHSIA_DEBUG_SYMBOLS_ATTRS",
+    "STRIP_RESOURCES_ATTRS",
     "strip_resources",
 )
 load("//test_utils:py_test_utils.bzl", "PY_TOOLCHAIN_DEPS", "create_python3_shell_wrapper_provider")
@@ -75,5 +75,5 @@ driver_binary_test = rule(
         "_allowlist_function_transition": attr.label(
             default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
         ),
-    } | PY_TOOLCHAIN_DEPS | FUCHSIA_DEBUG_SYMBOLS_ATTRS,
+    } | PY_TOOLCHAIN_DEPS | STRIP_RESOURCES_ATTRS,
 )

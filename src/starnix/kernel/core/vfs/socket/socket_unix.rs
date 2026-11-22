@@ -982,8 +982,11 @@ impl SocketOps for UnixSocket {
                     self.peer_cred().unwrap_or(ucred { pid: 0, uid: uid_t::MAX, gid: gid_t::MAX }),
                 )
                 .map_err(|_| errno!(EINVAL))?),
+                // Like Linux, report peer labels only for connection-oriented Unix sockets.
                 SO_PEERSEC => match socket.socket_type {
-                    SocketType::Stream => security::socket_getpeersec_stream(current_task, socket),
+                    SocketType::Stream | SocketType::SeqPacket => {
+                        security::socket_getpeersec_stream(current_task, socket)
+                    }
                     _ => error!(ENOPROTOOPT),
                 },
                 SO_ACCEPTCONN =>
@@ -1250,8 +1253,8 @@ pub fn resolve_unix_socket_address(
 // Packet buffer representation used for eBPF filters.
 #[repr(C)]
 #[derive(Default)]
-struct SkBuf {
-    sk_buff: __sk_buff,
+pub struct SkBuf {
+    pub sk_buff: __sk_buff,
 }
 
 impl Packet for &mut SkBuf {
@@ -1291,7 +1294,7 @@ impl SocketRef for &'_ mut SkBuf {
     }
 }
 
-struct UnixSocketEbpfContext {}
+pub struct UnixSocketEbpfContext {}
 impl BpfProgramContext for UnixSocketEbpfContext {
     type RunContext<'a> = EbpfRunContextImpl<'a>;
     type Packet<'a> = &'a mut SkBuf;

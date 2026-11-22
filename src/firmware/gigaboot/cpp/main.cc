@@ -4,16 +4,12 @@
 
 #include "main.h"
 
-#include <lib/abr/abr.h>
-#include <lib/boot-options/boot-options.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <zircon/assert.h>
 
 #include <optional>
 #include <string_view>
-
-#include <phys/runtime/main.h>
 
 #include "backends.h"
 #include "fastboot_tcp.h"
@@ -111,58 +107,6 @@ void SetSerial() {
   gEfiSystemTable->ConOut = conn_out;
 }
 
-// TODO(b/285053546) 'BootByte' usage should be removed in favour of ABR Metadata
-bool ResetRebootMode(gigaboot::RebootMode reboot_mode, const AbrOps& abr_ops) {
-  if (reboot_mode != gigaboot::RebootMode::kNormal &&
-      !SetRebootMode(gigaboot::RebootMode::kNormal)) {
-    printf("Failed to reset reboot mode\n");
-    return false;
-  }
-
-  return true;
-}
-
-// Loads the desired reboot mode.
-//
-// The priority order is:
-// 1. UEFI commandline arguments
-// 2. One-shot flags
-// 3. Default to normal boot
-//
-// If any one-shot flags are used, they are also reset by this function.
-gigaboot::RebootMode LoadRebootMode() {
-  // Only allow reading raw commandline from disk for testing on QEMU.
-  bool allow_disk_fallback = IsQemu();
-  if (auto reboot_mode = gigaboot::GetCommandlineRebootMode(allow_disk_fallback);
-      reboot_mode.has_value()) {
-    return reboot_mode.value();
-  }
-
-  // Print OneShotFlags from ABR
-  AbrDataOneShotFlags one_shot_flags = kAbrDataOneShotFlagNone;
-  ZirconBootOps zb_ops = gigaboot::GetZirconBootOps();
-  AbrOps abr_ops = GetAbrOpsFromZirconBootOps(&zb_ops);
-  AbrResult abr_res = AbrGetAndClearOneShotFlags(&abr_ops, &one_shot_flags);
-  if (abr_res != kAbrResultOk) {
-    printf("Warning: failed to get one shot flags from ABR; checking legacy bootbyte\n");
-    one_shot_flags = kAbrDataOneShotFlagNone;
-  } else {
-    printf("abr.one_shot_flags = 0x%02x\n", one_shot_flags);
-  }
-
-  gigaboot::RebootMode reboot_mode =
-      gigaboot::GetOneShotRebootMode(one_shot_flags).value_or(gigaboot::RebootMode::kNormal);
-
-  // TODO(b/285053546) 'BootByte' usage should be removed in favour of ABR Metadata
-  // Reset previous reboot mode immediately to prevent it from being sticky.
-  if (!ResetRebootMode(reboot_mode, abr_ops)) {
-    printf("Error: failed to reset reboot mode\n");
-    return gigaboot::RebootMode::kNormal;
-  }
-
-  return reboot_mode;
-}
-
 bool CheckFastbootKey() {
   constexpr zx::duration timeout = zx::sec(2);
   gigaboot::InputReceiver receiver(gEfiSystemTable);
@@ -195,7 +139,8 @@ int gigaboot_main() {
            gigaboot::EfiStatusToString(res));
   }
 
-  gigaboot::RebootMode reboot_mode = LoadRebootMode();
+  gigaboot::RebootMode reboot_mode =
+      gigaboot::LoadRebootMode(gigaboot::GetZirconBootOps(), IsQemu());
 
   bool enter_fastboot = reboot_mode == gigaboot::RebootMode::kBootloader;
   if (enter_fastboot) {
@@ -237,14 +182,8 @@ int gbl_main(bool is_installer) {
     printf("Image is for bootstrap/installer use. Always stops in Fastboot...\n");
     mode = gigaboot::RebootMode::kBootloader;
   } else {
-    mode = LoadRebootMode();
-    if (mode == gigaboot::RebootMode::kRecovery) {
-      // GBL's Fuchsia boot flow selects the recovery slot via ABR one-shot recovery metadata.
-      // Re-apply the one-shot recovery flag so GBL sees and consumes it.
-      ZirconBootOps zb_ops = gigaboot::GetZirconBootOps();
-      AbrOps abr_ops = GetAbrOpsFromZirconBootOps(&zb_ops);
-      AbrSetOneShotRecovery(&abr_ops, true);
-    } else if (mode == gigaboot::RebootMode::kNormal && CheckFastbootKey()) {
+    mode = gigaboot::LoadRebootMode(gigaboot::GetZirconBootOps(), IsQemu());
+    if (mode == gigaboot::RebootMode::kNormal && CheckFastbootKey()) {
       mode = gigaboot::RebootMode::kBootloader;
     }
   }
@@ -267,7 +206,7 @@ efi_status EfiMain(efi_handle image_handle, efi_system_table* systab) {
   if (auto image = EfiOpenProtocol<efi_loaded_image_protocol>(image_handle); image.is_ok()) {
     gEfiLoadedImage = image.value().release();
   } else {
-    printf("%s: Cannot open EFI_LOADED_IMAGE_PROTOCOL: %#zx\n", ProgramName(), image.error_value());
+    printf("Cannot open EFI_LOADED_IMAGE_PROTOCOL: %#zx\n", image.error_value());
   }
 
   // Call static constructors in linked order.
@@ -301,7 +240,3 @@ void __zx_panic(const char* format, ...) {
   va_start(args, format);
   vpanic(format, args);
 }
-
-const BootOptions* BootOptions::Get() { return nullptr; }
-
-const char* ProgramName() { return "gigaboot"; }

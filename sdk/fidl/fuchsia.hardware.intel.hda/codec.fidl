@@ -16,3 +16,9 @@ closed protocol CodecDevice {
         ch zx.Handle:CHANNEL;
     });
 };
+
+/// Offered by the Intel HDA controller to codec drivers bound to a codec device.
+service CodecService {
+    /// The codec device, whose GetChannel returns the codec driver channel.
+    device client_end:CodecDevice;
+};

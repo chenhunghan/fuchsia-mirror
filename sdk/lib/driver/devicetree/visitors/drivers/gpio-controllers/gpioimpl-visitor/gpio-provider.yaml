@@ -73,6 +73,14 @@ patternProperties:
         type: boolean
         description: Disable output.
 
+      input-enable:
+        type: boolean
+        description: Enable input buffer.
+
+      input-disable:
+        type: boolean
+        description: Disable input buffer.
+
       bias-pull-down:
         type: boolean
         description: Enable pull-down bias.

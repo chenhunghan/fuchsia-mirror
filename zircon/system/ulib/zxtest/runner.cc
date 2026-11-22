@@ -3,19 +3,30 @@
 // found in the LICENSE file.
 
 #include <lib/fit/defer.h>
+#include <zircon/assert.h>
 
+#include <cstdarg>
+#include <cstring>
+#include <memory>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/json-reporter.h>
 #include <zxtest/base/log-sink.h>
+#include <zxtest/base/message.h>
 #include <zxtest/base/runner.h>
+#include <zxtest/cpp/internal.h>
+#include <zxtest/cpp/scoped_trace.h>
+#include <zxtest/cpp/streams_helper.h>
 
 namespace zxtest {
 
 const Runner::Options Runner::kDefaultOptions;
 
+thread_local std::vector<std::unique_ptr<zxtest::Message>> Runner::owned_scoped_traces_;
 thread_local std::vector<zxtest::Message*> Runner::scoped_traces_;
 
 namespace internal {
@@ -23,11 +34,14 @@ namespace internal {
 TestDriverImpl::TestDriverImpl() = default;
 TestDriverImpl::~TestDriverImpl() = default;
 
-void TestDriverImpl::Skip() { status_ = TestStatus::kSkipped; }
-
-bool TestDriverImpl::Continue() const {
-  return !current_test_has_fatal_failures_ && status_ != TestStatus::kSkipped;
+void TestDriverImpl::Skip() {
+  skipped_ = true;
+  // A skip after a failure leaves the test failed.
+  TestStatus passed = TestStatus::kPassed;
+  status_.compare_exchange_strong(passed, TestStatus::kSkipped);
 }
+
+bool TestDriverImpl::Continue() const { return !current_test_has_fatal_failures_ && !skipped_; }
 
 void TestDriverImpl::OnTestStart(const TestCase& test_case, const TestInfo& test_info) {
   status_ = TestStatus::kPassed;
@@ -43,11 +57,19 @@ void TestDriverImpl::OnTestFailure(const TestCase& test_case, const TestInfo& te
   Reset();
 }
 
+void TestDriverImpl::OnTestCaseEnd(const TestCase& test_case) {
+  // A skip or fatal failure in SetUpTestSuite or TearDownTestSuite ends only
+  // its own test suite.
+  Reset();
+}
+
 void TestDriverImpl::OnAssertion(const Assertion& assertion) {
   if (asserts_enabled_) {
     status_ = TestStatus::kFailed;
     current_test_has_any_failures_ = true;
-    current_test_has_fatal_failures_ = assertion.is_fatal();
+    if (assertion.is_fatal()) {
+      current_test_has_fatal_failures_ = true;
+    }
     had_any_failures_ = true;
   }
 }
@@ -55,6 +77,7 @@ void TestDriverImpl::OnAssertion(const Assertion& assertion) {
 void TestDriverImpl::Reset() {
   current_test_has_fatal_failures_ = false;
   current_test_has_any_failures_ = false;
+  skipped_ = false;
   status_ = TestStatus::kPassed;
 }
 
@@ -234,6 +257,228 @@ void Runner::SkipCurrent(const Message& message) {
   test_driver_.Skip();
 }
 
+void Runner::PushTrace(SourceLocation location, std::string_view message) {
+  auto owned = std::make_unique<zxtest::Message>(message, location);
+  scoped_traces_.push_back(owned.get());
+  owned_scoped_traces_.push_back(std::move(owned));
+}
+
+void Runner::PopTrace() {
+  zxtest::Message* popped = scoped_traces_.back();
+  scoped_traces_.pop_back();
+  if (!owned_scoped_traces_.empty() && owned_scoped_traces_.back().get() == popped) {
+    owned_scoped_traces_.pop_back();
+  }
+}
+
+ScopedTrace::ScopedTrace(SourceLocation location, std::string_view message) {
+  Runner::PushTrace(location, message);
+}
+
+ScopedTrace::~ScopedTrace() { Runner::PopTrace(); }
+
+namespace internal {
+
+void CheckRunning() {
+  ZX_ASSERT_MSG(Runner::GetInstance()->IsRunning(), "See Context Check in README.");
+}
+
+void ReportConditionFailure(const char* actual_symbol, FormatFn actual_printer,
+                            const char* expected_symbol, FormatFn expected_printer,
+                            FormatFn description, SourceLocation location, bool is_fatal) {
+  Runner* runner = Runner::GetInstance();
+  std::string actual_value = actual_printer();
+  std::string expected_value = expected_printer();
+  std::string desc = description();
+  Assertion assertion(desc, expected_symbol, expected_value, actual_symbol, actual_value, location,
+                      is_fatal, runner->GetScopedTraces());
+  runner->NotifyAssertion(assertion);
+}
+
+bool EvaluateBoolCondition(bool actual, bool expected, const char* actual_symbol,
+                           const char* expected_symbol, SourceLocation location, bool is_fatal,
+                           FormatFn description) {
+  if (actual == expected) {
+    return true;
+  }
+  Runner* runner = Runner::GetInstance();
+  std::string actual_value = PrintValue(actual);
+  std::string expected_value = PrintValue(expected);
+  std::string desc = description();
+  Assertion assertion(desc, expected_symbol, expected_value, actual_symbol, actual_value, location,
+                      is_fatal, runner->GetScopedTraces());
+  runner->NotifyAssertion(assertion);
+  return false;
+}
+
+bool EvaluateStatusCondition(zx_status_t actual, zx_status_t expected, bool expect_eq,
+                             const char* actual_symbol, const char* expected_symbol,
+                             SourceLocation location, bool is_fatal, FormatFn description) {
+  if ((actual == expected) == expect_eq) {
+    return true;
+  }
+  Runner* runner = Runner::GetInstance();
+  std::string actual_value = PrintStatus(actual);
+  std::string expected_value = PrintStatus(expected);
+  std::string desc = description();
+  Assertion assertion(desc, expected_symbol, expected_value, actual_symbol, actual_value, location,
+                      is_fatal, runner->GetScopedTraces());
+  runner->NotifyAssertion(assertion);
+  return false;
+}
+
+bool EvaluateBytesCondition(const void* actual, const void* expected, size_t size, bool expect_eq,
+                            const char* actual_symbol, const char* expected_symbol,
+                            SourceLocation location, bool is_fatal, FormatFn description) {
+  const bool equal = size == 0 || memcmp(actual, expected, size) == 0;
+  if (equal == expect_eq) {
+    return true;
+  }
+  Runner* runner = Runner::GetInstance();
+  std::string actual_value = ToHex(actual, size);
+  std::string expected_value = ToHex(expected, size);
+  std::string desc = description();
+  Assertion assertion(desc, expected_symbol, expected_value, actual_symbol, actual_value, location,
+                      is_fatal, runner->GetScopedTraces());
+  runner->NotifyAssertion(assertion);
+  return false;
+}
+
+void FailCurrentTest(SourceLocation location, bool is_fatal, std::string_view desc, const char* fmt,
+                     ...) {
+  va_list args;
+  va_start(args, fmt);
+  std::string message = FormatDescriptionV(desc, fmt, args);
+  va_end(args);
+  Runner* runner = Runner::GetInstance();
+  Assertion assertion(message, location, is_fatal, runner->GetScopedTraces());
+  runner->NotifyAssertion(assertion);
+}
+
+void SkipCurrentTest(SourceLocation location, std::string_view desc, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  std::string text = FormatDescriptionV(desc, fmt, args);
+  va_end(args);
+  Message message(text, location);
+  Runner::GetInstance()->SkipCurrent(message);
+}
+
+StreamableBase::StreamableBase(zxtest::SourceLocation location) : location_(location) {
+  CheckRunning();
+}
+
+StreamableBase::~StreamableBase() = default;
+
+std::ostream& StreamableBase::EnsureStream() {
+  if (!stream_) {
+    stream_ = std::make_unique<std::stringstream>();
+  }
+  return *stream_;
+}
+
+std::string StreamableBase::GetText() const { return stream_ ? stream_->str() : std::string{}; }
+
+StreamableFail::StreamableFail(zxtest::SourceLocation location, bool is_fatal)
+    : StreamableBase(location), is_fatal_(is_fatal) {}
+
+StreamableFail::StreamableFail(zxtest::SourceLocation location, bool is_fatal,
+                               std::span<zxtest::Message*> traces)
+    : StreamableBase(location), is_fatal_(is_fatal), traces_(traces), has_explicit_traces_(true) {}
+
+StreamableFail::~StreamableFail() {
+  Runner* runner = Runner::GetInstance();
+  std::span<zxtest::Message*> traces = has_explicit_traces_ ? traces_ : runner->GetScopedTraces();
+  std::string desc = GetText();
+  Assertion assertion(desc, location(), is_fatal_, traces);
+  runner->NotifyAssertion(assertion);
+}
+
+StreamableAssertion::StreamableAssertion(std::string_view actual_val, std::string_view expected_val,
+                                         const char* actual_symbol, const char* expected_symbol,
+                                         zxtest::SourceLocation location, bool is_fatal,
+                                         std::span<zxtest::Message*> traces)
+    : StreamableBase(location),
+      actual_value_(actual_val),
+      expected_value_(expected_val),
+      actual_symbol_(actual_symbol),
+      expected_symbol_(expected_symbol),
+      is_fatal_(is_fatal),
+      traces_(traces) {}
+
+StreamableAssertion::~StreamableAssertion() {
+  std::string desc = GetText();
+  Assertion assertion(desc, expected_symbol_, expected_value_, actual_symbol_, actual_value_,
+                      location(), is_fatal_, traces_);
+  Runner::GetInstance()->NotifyAssertion(assertion);
+}
+
+StreamableSkip::StreamableSkip(zxtest::SourceLocation location) : StreamableBase(location) {}
+
+StreamableSkip::~StreamableSkip() {
+  std::string text = GetText();
+  Message message(text, location());
+  Runner::GetInstance()->SkipCurrent(message);
+}
+
+std::unique_ptr<StreamableAssertion> CreateStreamableAssertion(
+    const char* actual_symbol, FormatFn actual_printer, const char* expected_symbol,
+    FormatFn expected_printer, zxtest::SourceLocation location, bool is_fatal) {
+  std::string actual_value = actual_printer();
+  std::string expected_value = expected_printer();
+  return std::make_unique<StreamableAssertion>(actual_value, expected_value, actual_symbol,
+                                               expected_symbol, location, is_fatal,
+                                               Runner::GetInstance()->GetScopedTraces());
+}
+
+std::unique_ptr<StreamableAssertion> EvaluateBoolConditionForStream(bool actual, bool expected,
+                                                                    const char* actual_symbol,
+                                                                    const char* expected_symbol,
+                                                                    zxtest::SourceLocation location,
+                                                                    bool is_fatal) {
+  CheckRunning();
+  if (actual == expected) {
+    return nullptr;
+  }
+  std::string actual_value = PrintValue(actual);
+  std::string expected_value = PrintValue(expected);
+  return std::make_unique<StreamableAssertion>(actual_value, expected_value, actual_symbol,
+                                               expected_symbol, location, is_fatal,
+                                               Runner::GetInstance()->GetScopedTraces());
+}
+
+std::unique_ptr<StreamableAssertion> EvaluateStatusConditionForStream(
+    zx_status_t actual, zx_status_t expected, bool expect_eq, const char* actual_symbol,
+    const char* expected_symbol, zxtest::SourceLocation location, bool is_fatal) {
+  CheckRunning();
+  if ((actual == expected) == expect_eq) {
+    return nullptr;
+  }
+  std::string actual_value = PrintStatus(actual);
+  std::string expected_value = PrintStatus(expected);
+  return std::make_unique<StreamableAssertion>(actual_value, expected_value, actual_symbol,
+                                               expected_symbol, location, is_fatal,
+                                               Runner::GetInstance()->GetScopedTraces());
+}
+
+std::unique_ptr<StreamableAssertion> EvaluateBytesConditionForStream(
+    const void* actual, const void* expected, size_t size, bool expect_eq,
+    const char* actual_symbol, const char* expected_symbol, zxtest::SourceLocation location,
+    bool is_fatal) {
+  CheckRunning();
+  const bool equal = size == 0 || memcmp(actual, expected, size) == 0;
+  if (equal == expect_eq) {
+    return nullptr;
+  }
+  std::string actual_value = ToHex(actual, size);
+  std::string expected_value = ToHex(expected, size);
+  return std::make_unique<StreamableAssertion>(actual_value, expected_value, actual_symbol,
+                                               expected_symbol, location, is_fatal,
+                                               Runner::GetInstance()->GetScopedTraces());
+}
+
+}  // namespace internal
+
 Runner* Runner::GetInstance() {
   static Runner runner = Runner(Reporter(std::make_unique<FileLogSink>(stdout)));
   return &runner;
@@ -254,7 +499,7 @@ int RunAllTests(int argc, char** argv) {
   // Errors will always set help to true.
   if (options.help) {
     Runner::Options::Usage(argv[0], log_sink);
-    return errors.empty();
+    return errors.empty() ? 0 : 1;
   }
 
   if (options.list) {
@@ -266,47 +511,37 @@ int RunAllTests(int argc, char** argv) {
 }
 
 namespace {
-bool MatchPatterns(std::string_view pattern, std::string_view str) {
-  static constexpr auto match_pattern = [](const char* pattern, const char* str) -> bool {
-    auto advance = [](const char* pattern, const char* str, auto& self) -> bool {
-      switch (*pattern) {
-        // Single character matching for gTest
-        case '?':
-          return *str != '\0' && self(pattern + 1, str + 1, self);
-        // Wild card matches anything.
-        case '*':
-          return (*str != '\0' && self(pattern, str + 1, self)) || self(pattern + 1, str, self);
-        // Pattern completed or another pattern in the list.
-        case '\0':
-        case ':':
-          return *str == '\0';
-        // 1:1 match
-        default:
-          return *str == *pattern && self(pattern + 1, str + 1, self);
-      };
-    };
-    return advance(pattern, str, advance);
-  };
 
+// Matches a single gTest glob pattern, where '?' matches any one character
+// and '*' matches any sequence of characters.
+bool MatchPattern(std::string_view pattern, std::string_view str) {
   if (pattern.empty()) {
-    return true;
+    return str.empty();
   }
+  switch (pattern.front()) {
+    case '?':
+      return !str.empty() && MatchPattern(pattern.substr(1), str.substr(1));
+    case '*':
+      return (!str.empty() && MatchPattern(pattern, str.substr(1))) ||
+             MatchPattern(pattern.substr(1), str);
+    default:
+      return !str.empty() && str.front() == pattern.front() &&
+             MatchPattern(pattern.substr(1), str.substr(1));
+  }
+}
 
-  bool has_next = true;
-  const char* curr_pattern = pattern.data();
-  while (has_next) {
-    if (match_pattern(curr_pattern, str.data())) {
+// Matches a ':'-separated list of patterns.
+bool MatchPatterns(std::string_view patterns, std::string_view str) {
+  while (true) {
+    size_t end = patterns.find(':');
+    if (MatchPattern(patterns.substr(0, end), str)) {
       return true;
     }
-    curr_pattern = strchr(curr_pattern, ':');
-    has_next = (curr_pattern != nullptr);
-    // Skip ':'
-    if (has_next) {
-      curr_pattern++;
+    if (end == std::string_view::npos) {
+      return false;
     }
+    patterns.remove_prefix(end + 1);
   }
-
-  return false;
 }
 
 }  // namespace
@@ -322,22 +557,15 @@ bool FilterOp::operator()(std::string_view test_case, std::string_view test) con
   full_test_name += '.';
   full_test_name += test;
 
-  const char* p = pattern.c_str();
-  const char* d = strchr(p, '-');
-  std::string_view positive, negative;
-
-  // No negative string.
-  if (d == nullptr) {
-    positive = std::string_view(p, pattern.size());
-  } else {
-    size_t delta = d - p;
-    // No positive pattern.
-    // E.g. ":-"
-    if (delta == 1) {
-      delta--;
-    }
-    positive = std::string_view(p, delta);
-    negative = std::string_view(d + 1, pattern.size() - delta - 1);
+  // The filter is "POSITIVE-NEGATIVE", where either part can be empty.  An
+  // empty (or all ':') positive part matches everything.
+  std::string_view positive = pattern, negative;
+  if (size_t dash = positive.find('-'); dash != std::string_view::npos) {
+    negative = positive.substr(dash + 1);
+    positive = positive.substr(0, dash);
+  }
+  if (positive.find_first_not_of(':') == std::string_view::npos) {
+    positive = {};
   }
   return (positive.empty() || MatchPatterns(positive, full_test_name)) &&
          (negative.empty() || !MatchPatterns(negative, full_test_name));

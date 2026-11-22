@@ -193,9 +193,10 @@ mod ops {
 
     macro_rules! read_barrier_op {
         () => {
-            // Use `dsb ld` (rather than `hw_rmb()`'s `dmb ld`) to match `write_barrier_op!`'s use
-            // of `dsb st` and Linux's `rmb()`, ensuring preceding device-memory loads have
-            // completed before subsequent loads execute.
+            // Use `dsb ld` (rather than `dmb ld`) to match `write_barrier_op!`'s use of `dsb st`
+            // and Linux's `rmb()`, ensuring preceding device-memory loads have completed before
+            // subsequent loads execute. This is the C++ `ReadDataSynchronizationBarrier()` in
+            // //sdk/lib/memory_barriers, rather than its `ReadDataMemoryBarrier()`.
             //
             // Safety: N/A; see [`crate::arch::read_barrier`].
             unsafe {

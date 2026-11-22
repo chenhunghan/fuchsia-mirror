@@ -31,6 +31,9 @@ gn2gone --fuchsia_dir "$FUCHSIA_DIR" scan [-v] [--json]
 gn2gone query //sdk/fidl/fuchsia.nand:fuchsia.nand
 gn2gone query //tools/lib/color
 
+# Find hand-written empty GN test groups and their static/dynamic callers.
+gn2gone empty-groups [--json]
+
 # Unsync READY directories (all of them, or the ones listed; --waves repeats
 # until no READY directories remain). Edits the working tree only; review,
 # then commit each repository yourself.
@@ -49,7 +52,7 @@ fx bazel run --config=host //build/tools/gn2gone -- --fuchsia_dir "$FUCHSIA_DIR"
 | State | Meaning |
 |---|---|
 | `READY` | Nothing in GN references the synced targets, except test groups (`group("tests")` / `group("*_tests")`) whose tests are also run through a `bazel_test_suite()`. |
-| `BLOCKED_DUAL_TESTED` | No GN consumers, but synced tests here (run by GN test groups, or synced while their GN package is still `# @bazel2gn:skip`) test code that GN still builds: a hand-written library above the sentinel here, or a synced or hand-written target in a related directory (an ancestor directory, e.g. `//lib/foo` for `//lib/foo/tests`, or a sibling of a test-only directory). Directories with a synced non-private library of their own aren't checked. Per the dual-run decision, GN test copies are removed together with the GN copy of the code under test, not before. |
+| `BLOCKED_DUAL_TESTED` | No GN consumers, but synced tests here (run by GN test groups, or synced while their GN package is still `# @bazel2gn:skip`) test code that GN still builds: a hand-written library above the sentinel here, or a synced or hand-written target in a related directory (an ancestor directory, e.g. `//lib/foo` for `//lib/foo/tests`, or a sibling or `zircon/system/ulib/<name>` pair of a test-only directory, including via an above-sentinel forwarding `group`). Directories with a synced non-private library of their own aren't checked. Per the dual-run decision, GN test copies are removed together with the GN copy of the code under test, not before. |
 | `BLOCKED_TESTS_UNWIRED` | No GN consumers, but a synced test that a GN test group runs isn't reachable from any `bazel_test_suite()`, or a synced test group is how GN reaches hand-written GN tests (listed as `(GN-only, via :<group>)`). Unsyncing would silently drop them from CQ. |
 | `EMPTY_SENTINEL` | Nothing is synced below the sentinel (e.g. every rule is `# @bazel2gn:skip`), so there's nothing to unsync. |
 | `BLOCKED` | GN still references synced targets. `-v` or `query` lists each reference. |
@@ -131,7 +134,8 @@ stripped annotation or attribute.
 
 ## Interface
 
-*   [`cmd/main.go`](./cmd/main.go): CLI with `scan`, `query` and `unsync`.
+*   [`cmd/main.go`](./cmd/main.go): CLI with `scan`, `query`, `empty-groups`,
+    and `unsync`.
     Flags: `--fuchsia_dir` (default `$FUCHSIA_DIR`), `--gn_bin` (default: the
     prebuilt under `--fuchsia_dir`), `--json`, `-v`, `--waves`, `--workers`,
     `--batch`.
@@ -148,6 +152,8 @@ stripped annotation or attribute.
     targets `bazel_test_suite()`s reach.
 *   [`scan.go`](./scan.go): `Index.Scan()`, `ScanAll()`, `Query()`;
     `DirReport`, `Reference`, `State`, `Mode`.
+*   [`emptygroups.go`](./emptygroups.go): `Index.EmptyGroups()`, `EmptyGroup`
+    (read-only discovery of hand-written empty test groups and their callers).
 *   [`unsync.go`](./unsync.go): `Index.PlanUnsync()`, `Plan.Apply()`, and
     `UnsyncWaves()`.
 
@@ -171,7 +177,8 @@ stripped annotation or attribute.
     (`BLOCKED_DUAL_TESTED`). "Code under test" is approximated as a
     hand-written library above the sentinel in the same directory, or synced
     or hand-written targets the tests depend on in an ancestor directory (or,
-    for a directory with only tests, a sibling directory). A directory with
+    for a directory with only tests, a sibling directory or
+    `zircon/system/ulib/<name>` pair). A directory with
     its own library (a synced non-test library target that isn't
     `visibility = [ ":*" ]`) is assumed to test that library and isn't
     checked, and shared test frameworks (such as gtest_main) don't count.
@@ -194,8 +201,8 @@ stripped annotation or attribute.
 
 ## Side Effects
 
-*   `scan` and `query` only read files. They exit non-zero if any GN file
-    fails to parse. They start `gn` subprocesses
+*   `scan`, `query`, and `empty-groups` only read files. They exit non-zero if
+    any GN file fails to parse. They start `gn` subprocesses
     (`--workers` at a time) and read `BUILD.bazel` files for test wiring.
 *   `unsync` deletes or rewrites `BUILD.gn` files, removes lines from parent
     test groups, strips `@bazel2gn:` annotations and GN-only macro attributes

@@ -198,4 +198,4 @@ For instance, to refer to the change that added
 
 <!-- Reference links -->
 
-[general-guidelines]:https://git-scm.com/book/en/v2/Distributed-Git-Contributing-to-a-Project
+[general-guidelines]: https://git-scm.com/book/en/v2/Distributed-Git-Contributing-to-a-Project

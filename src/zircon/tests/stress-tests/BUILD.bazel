@@ -1,0 +1,84 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_test_environment.bzl",
+    "fx_test_environment_variant",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":kernel-stress-tests"],
+    visibility = [
+        "//bundles:__pkg__",
+        "//src/zircon:__pkg__",
+    ],
+)
+
+fx_packaged_binary(
+    name = "kstress_packaged",
+    testonly = True,
+    binary = "//src/zircon/bin/kstress",
+    binary_name = "kstress",
+)
+
+fx_component_manifest(
+    name = "vm-stress-test-manifest",
+    testonly = True,
+    component_name = "vm-stress-test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/vm-stress-test.cml",
+)
+
+fx_test_component(
+    name = "vm-stress-test",
+    compiled_manifest = ":vm-stress-test-manifest",
+    test_type = "system",
+    deps = [":kstress_packaged"],
+)
+
+fx_package(
+    name = "kernel-stress-tests-package",
+    package_name = "kernel-stress-tests",
+    test_components = [":vm-stress-test"],
+)
+
+fx_test_environment_variant(
+    name = "emu_stress_env",
+    base = "//build/testing/environments:emu_env",
+    env_tags = ["stress-tests"],
+)
+
+fx_test_environment_variant(
+    name = "vim3_stress_env",
+    base = "//build/testing/environments:vim3_env",
+    env_tags = ["stress-tests"],
+)
+
+# This test will run for 6 hours on the core.x64-stress bot.
+fx_test(
+    name = "kernel-stress-tests",
+    environments = [
+        ":emu_stress_env",
+        ":vim3_stress_env",
+    ],
+    package = ":kernel-stress-tests-package",
+)

@@ -49,7 +49,7 @@ namespace abi {
 // memory image can enable debuggers that know the de facto standard format to
 // decode the `link_map` list found in the traditional `struct r_debug`.
 
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 struct Abi<Elf, AbiTraits>::Module {
   // This can be used in an initializer to allow the variable to go into bss.
   // InitLinkerZeroInitialized() must be called before the variable is used.
@@ -174,24 +174,24 @@ struct Abi<Elf, AbiTraits>::Module {
 }  // namespace abi
 
 // elfldltl::LinkMapList-compatible Traits type for abi::Abi<>::Module lists.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 using AbiModuleListTraits =
     elfldltl::LinkMapListInFirstMemberTraits<const typename abi::Abi<Elf>::Module>;
 
 // This provides a container-like view on the doubly-linked list of modules.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 using AbiModuleList =
     elfldltl::LinkMapList<const typename abi::Abi<Elf>::Module, AbiModuleListTraits<Elf>>;
 
 // This returns the ld::AbiModuleList for an ld::Abi::Abi<>.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 constexpr AbiModuleList<Elf> AbiLoadedModules(const abi::Abi<Elf>& abi) {
   return AbiModuleList<Elf>(abi.loaded_modules.get());
 }
 
 // This returns a view similar to AbiModuleList, but only for modules where
 // symbols_visible is true.
-template <class Elf = elfldltl::Elf<>>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>>
 constexpr auto AbiLoadedSymbolModules(const abi::Abi<Elf>& abi) {
   using Module = abi::Abi<Elf>::Module;
   return std::views::filter(AbiLoadedModules(abi), &Module::symbols_visible);
@@ -258,9 +258,8 @@ constexpr std::input_iterator auto FindModuleByVaddr(
 // all the writable segment data in the module, excluding the RELRO region.
 // This covers all the module's global (and static) variables (excluding TLS)
 // that could hold root pointers for GC or leak detection, for example.
-constexpr bool OnModuleWritableSegments(const auto& module,
-                                        std::invocable<std::span<std::byte>> auto&& callback) {
-  static_assert(std::is_invocable_r_v<bool, decltype(callback), std::span<std::byte>>);
+constexpr bool OnModuleWritableSegments(
+    const auto& module, elfldltl::InvocableAsR<bool(std::span<std::byte>)> auto&& callback) {
   auto on_segment = [load_bias = module.link_map.addr(), &callback](  //
                         uintptr_t start, size_t size) -> bool {
     std::byte* const data = reinterpret_cast<std::byte*>(start + load_bias);
@@ -311,13 +310,13 @@ template <typename F = elfldltl::InitFiniFunction, std::ranges::forward_range R>
       std::views::transform(std::forward<R>(modules), ModuleCallableFini<F, Module>));
 }
 
-template <typename F = elfldltl::InitFiniFunction, class Elf = elfldltl::Elf<>>
+template <typename F = elfldltl::InitFiniFunction, elfldltl::ElfApi Elf = elfldltl::Elf<>>
 [[nodiscard]] constexpr std::ranges::bidirectional_range auto AbiCallableInit(
     const abi::Abi<Elf>& abi) {
   return CallableInitList<F>(AbiLoadedModules(abi));
 }
 
-template <typename F = elfldltl::InitFiniFunction, class Elf = elfldltl::Elf<>>
+template <typename F = elfldltl::InitFiniFunction, elfldltl::ElfApi Elf = elfldltl::Elf<>>
 [[nodiscard]] constexpr std::ranges::bidirectional_range auto AbiCallableFini(
     const abi::Abi<Elf>& abi) {
   return CallableFiniList<F>(AbiLoadedModules(abi));

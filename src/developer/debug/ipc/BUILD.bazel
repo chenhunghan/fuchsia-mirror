@@ -24,6 +24,7 @@ cc_library(
         "@com_google_googletest//:gtest",
     ],
     deps = [":ipc"],
+    alwayslink = True,
 )
 
 cc_library(

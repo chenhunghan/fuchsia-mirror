@@ -152,7 +152,11 @@ class FakePowerBroker {
 
 class TestUfs : public UfsPci {
  public:
-  explicit TestUfs() : UfsPci() {}
+  explicit TestUfs() : UfsPci() {
+    if (startup_host_controller_callback_) {
+      SetHostControllerCallback(std::move(startup_host_controller_callback_));
+    }
+  }
   ~TestUfs() override = default;
 
   inspect::ComponentInspector& GetInspector() { return *component_inspector_; }
@@ -161,12 +165,19 @@ class TestUfs : public UfsPci {
   bool SupportsRuntimePowerManagement() const override {
     return supports_runtime_power_management_;
   }
+  uint32_t UicCommandTimeoutUsec() const override { return uic_command_timeout_usec_; }
 
   static void SetSupportsPowerDownSuspend(bool supports) {
     supports_power_down_suspend_ = supports;
   }
   static void SetSupportsRuntimePowerManagement(bool supports) {
     supports_runtime_power_management_ = supports;
+  }
+  static void SetUicCommandTimeoutUsec(uint32_t timeout_usec) {
+    uic_command_timeout_usec_ = timeout_usec;
+  }
+  static void SetStartupHostControllerCallback(HostControllerCallback callback) {
+    startup_host_controller_callback_ = std::move(callback);
   }
 
   // Marks |slot| as holding a programmed inline encryption key, bypassing the inline encryption
@@ -188,6 +199,8 @@ class TestUfs : public UfsPci {
   static ufs_mock_device::UfsMockDevice* mock_device_;
   static bool supports_power_down_suspend_;
   static bool supports_runtime_power_management_;
+  static uint32_t uic_command_timeout_usec_;
+  static HostControllerCallback startup_host_controller_callback_;
 };
 
 class Environment : public fdf_testing::Environment {
@@ -238,6 +251,9 @@ class UfsTest : public ::testing::Test {
 
   void InitMockDevice();
   void StartDriver(bool supply_power_framework = false);
+  // Stops the driver if it started, shuts down its dispatchers and destroys it, and then resets
+  // the mock MMIO and UIC hooks so no worker can race with Reset() or dangling stack captures.
+  void StopDriverAndResetHooks();
 
   fdf_testing::ForegroundDriverTest<TestConfig>& driver_test() { return driver_test_; }
 
@@ -318,7 +334,7 @@ class UfsTest : public ::testing::Test {
 
  protected:
   fdf_testing::ForegroundDriverTest<TestConfig> driver_test_;
-  TestConfig::DriverType* dut_;
+  TestConfig::DriverType* dut_ = nullptr;
   bool driver_stopped_ = false;
 };
 

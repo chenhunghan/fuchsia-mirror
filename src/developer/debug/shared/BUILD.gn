@@ -50,7 +50,7 @@ static_library("test_support") {
   ]
 }
 
-static_library("tests") {
+source_set("tests") {
   testonly = true
   sources = []
   sources += [

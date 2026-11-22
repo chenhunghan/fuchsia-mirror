@@ -1,12 +1,14 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2016 The Fuchsia Authors
+// Copyright (c) 2008-2014 Travis Geiselbrecht
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use core::cell::UnsafeCell;
 use core::ops;
 
-use affine::Ratio;
+use affine::{Ratio, Round};
 use zx_types::{ZX_TIME_INFINITE, ZX_TIME_INFINITE_PAST};
 
 #[inline]
@@ -293,6 +295,75 @@ pub struct CurrentTicksObservation {
 }
 
 zr::static_assert_size_and_align!(CurrentTicksObservation, 16, 8);
+zr::static_assert!(core::mem::offset_of!(CurrentTicksObservation, mono_now) == 0);
+zr::static_assert!(core::mem::offset_of!(CurrentTicksObservation, boot_now) == 8);
+
+/// Monotonic and boot time representing the same instant in both timelines.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct InstantMonoAndBootTime {
+    pub mono_time: InstantMono,
+    pub boot_time: InstantBoot,
+}
+
+zr::static_assert_size_and_align!(InstantMonoAndBootTime, 16, 8);
+zr::static_assert!(core::mem::offset_of!(InstantMonoAndBootTime, mono_time) == 0);
+zr::static_assert!(core::mem::offset_of!(InstantMonoAndBootTime, boot_time) == 8);
+
+/// Monotonic time and boot ticks representing same instant in both timelines.
+/// This is primarily useful for lining up samples of monotonic time with
+/// corresponding trace events, which use boot ticks, so that computed and
+/// visualized intervals are accurate.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct InstantMonoTimeAndBootTicks {
+    pub mono_time: InstantMono,
+    pub boot_ticks: InstantBootTicks,
+}
+
+zr::static_assert_size_and_align!(InstantMonoTimeAndBootTicks, 16, 8);
+zr::static_assert!(core::mem::offset_of!(InstantMonoTimeAndBootTicks, mono_time) == 0);
+zr::static_assert!(core::mem::offset_of!(InstantMonoTimeAndBootTicks, boot_ticks) == 8);
+
+// TODO(https://fxbug.dev/540178114): Consolidate `BootInitCell` with `BootStatic`,
+// `BootGlobal`, and `BootCell` into a shared `zr` type.
+/// Static storage initialized to a default value at compile time, mutated at
+/// most once during single-CPU boot in [`timer_set_ticks_to_time_ratio`] with
+/// interrupts disabled before secondary CPUs are started, and read-only
+/// thereafter.
+///
+/// Static default initialization is used instead of `LazyInit` because early
+/// boot logging (`printf` / `dprintf!`) calls [`current_boot_time`] before
+/// [`timer_set_ticks_to_time_ratio`] is invoked, requiring [`TICKS_TO_TIME`]
+/// to start with a valid `1:1` ratio (`Ratio::const_default()`).
+#[repr(transparent)]
+struct BootInitCell<T>(UnsafeCell<T>);
+
+impl<T> BootInitCell<T> {
+    const fn new(val: T) -> Self {
+        Self(UnsafeCell::new(val))
+    }
+
+    #[inline]
+    const fn as_ptr(&self) -> *mut T {
+        self.0.get()
+    }
+}
+
+// SAFETY: `BootInitCell<T>` is module-private and `as_ptr` only returns a raw pointer without
+// dereferencing it, so safe code cannot perform unsynchronized reads or writes through
+// `&BootInitCell<T>`. Every dereference in this module is either the single-CPU boot-time write
+// (with interrupts disabled before secondary CPUs start) or a by-value read that cannot execute
+// concurrently with that write. `T: Send + Sync` permits values written on the boot CPU to be
+// moved/copied and shared across CPUs.
+unsafe impl<T: Send + Sync> Sync for BootInitCell<T> {}
+
+/// The ratio that defines the relationship between the system's tick counter
+/// and the monotonic/boot nanosecond clocks.
+static TICKS_TO_TIME: BootInitCell<Ratio> = BootInitCell::new(Ratio::const_default());
+
+/// High-precision timer ticks per second.
+static TICKS_PER_SECOND: BootInitCell<u64> = BootInitCell::new(0);
 
 /// The `GetTicksSyncFlag` bits of `<platform/timer.h>`: which of the surrounding
 /// memory accesses a raw ticks observation must be ordered against (`kNone`).
@@ -308,22 +379,16 @@ pub const GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES: u8 = 1 << 3;
 
 unsafe extern "C" {
     fn cpp_timer_current_mono_ticks() -> InstantMonoTicks;
+    fn cpp_timer_current_mono_ticks_synchronized_after_and_before_stores() -> InstantMonoTicks;
     fn cpp_timer_current_boot_ticks() -> InstantBootTicks;
-    fn cpp_current_mono_time() -> InstantMono;
-    fn cpp_current_boot_time() -> InstantBoot;
-    fn cpp_ticks_per_second() -> i64;
-    fn cpp_timer_get_ticks_to_time_ratio() -> Ratio;
     fn cpp_timer_get_mono_ticks_offset() -> i64;
     fn cpp_timer_get_boot_ticks_offset() -> i64;
     fn cpp_timer_current_mono_and_boot_ticks() -> CurrentTicksObservation;
-    fn cpp_timer_set_ticks_to_time_ratio(ticks_to_time: Ratio);
     fn cpp_timer_set_initial_ticks(ticks: u64);
     fn cpp_timer_convert_mono_to_raw_ticks(
         mono_ticks: InstantMonoTicks,
         out_raw_ticks: *mut i64,
     ) -> bool;
-    fn cpp_platform_set_oneshot_timer(deadline: i64) -> zx_types::zx_status_t;
-    fn cpp_platform_stop_timer();
     /// Pauses the monotonic clock during system suspend entry.
     fn cpp_timer_pause_monotonic();
     /// Resumes the monotonic clock during system suspend exit.
@@ -389,12 +454,41 @@ pub fn timer_current_mono_ticks() -> InstantMonoTicks {
     unsafe { cpp_timer_current_mono_ticks() }
 }
 
+/// Access the platform specific monotonic ticks counter, carrying the platform-required barriers
+/// to ensure that the timer cannot be re-ordered conceptually with operations specified via the
+/// `GET_TICKS_SYNC_FLAG_*` constants.
+#[inline]
+pub fn timer_current_mono_ticks_synchronized<const FLAGS: u8>() -> InstantMonoTicks {
+    const {
+        assert!(
+            FLAGS
+                == (GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS
+                    | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS)
+                || FLAGS
+                    == (GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES
+                        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES)
+        );
+    }
+    if FLAGS
+        == (GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS)
+    {
+        // SAFETY: Calling this FFI function has no preconditions and safely returns the platform
+        // timer ticks synchronized with loads.
+        unsafe { cpp_timer_current_mono_ticks() }
+    } else {
+        // SAFETY: Calling this FFI function has no preconditions and safely returns the platform
+        // timer ticks synchronized with stores.
+        unsafe { cpp_timer_current_mono_ticks_synchronized_after_and_before_stores() }
+    }
+}
+
 /// High-precision timer ticks per second.
 #[inline]
 pub fn ticks_per_second() -> i64 {
-    // SAFETY: Calling this FFI function has no preconditions and returns the configured platform
-    // ticks per second.
-    unsafe { cpp_ticks_per_second() }
+    // SAFETY: `TICKS_PER_SECOND` is only written at most once in `timer_set_ticks_to_time_ratio`
+    // while running on the boot CPU with interrupts disabled and before secondary CPUs start, so
+    // no interrupt handler or other CPU can run this read concurrently with that write.
+    unsafe { *TICKS_PER_SECOND.as_ptr() as i64 }
 }
 
 /// Returns the current boot time in ticks.
@@ -405,28 +499,67 @@ pub fn timer_current_boot_ticks() -> InstantBootTicks {
     unsafe { cpp_timer_current_boot_ticks() }
 }
 
+/// The current monotonic time in ticks.
+#[inline]
+pub fn current_mono_ticks() -> InstantMonoTicks {
+    timer_current_mono_ticks()
+}
+
+/// The current boot time in ticks.
+#[inline]
+pub fn current_boot_ticks() -> InstantBootTicks {
+    timer_current_boot_ticks()
+}
+
 /// Current monotonic time in nanoseconds.
 #[inline]
 pub fn current_mono_time() -> InstantMono {
-    // SAFETY: Calling this FFI function has no preconditions and safely returns the platform
-    // monotonic time.
-    unsafe { cpp_current_mono_time() }
+    let ticks = current_mono_ticks().0;
+    InstantMono(timer_get_ticks_to_time_ratio().scale::<{ Round::DOWN }>(ticks))
 }
 
 /// Current boot time in nanoseconds.
 #[inline]
 pub fn current_boot_time() -> InstantBoot {
-    // SAFETY: Calling this FFI function has no preconditions and safely returns the platform boot
-    // time.
-    unsafe { cpp_current_boot_time() }
+    let ticks = current_boot_ticks().0;
+    InstantBoot(timer_get_ticks_to_time_ratio().scale::<{ Round::DOWN }>(ticks))
 }
 
-/// Returns the ratio between timer ticks and nanoseconds.
+/// Current monotonic and boot time in nanoseconds, derived from a coherent
+/// observation of the offsets and raw ticks.
+#[inline]
+pub fn current_mono_and_boot_time() -> InstantMonoAndBootTime {
+    let observation = timer_current_mono_and_boot_ticks();
+    let ticks_to_time = timer_get_ticks_to_time_ratio();
+    InstantMonoAndBootTime {
+        mono_time: InstantMono(ticks_to_time.scale::<{ Round::DOWN }>(observation.mono_now)),
+        boot_time: InstantBoot(ticks_to_time.scale::<{ Round::DOWN }>(observation.boot_now)),
+    }
+}
+
+/// Current monotonic time in nanoseconds and boot ticks, derived from a coherent
+/// observation of the offsets and raw ticks.
+#[inline]
+pub fn current_mono_time_and_boot_ticks() -> InstantMonoTimeAndBootTicks {
+    let observation = timer_current_mono_and_boot_ticks();
+    InstantMonoTimeAndBootTicks {
+        mono_time: InstantMono(
+            timer_get_ticks_to_time_ratio().scale::<{ Round::DOWN }>(observation.mono_now),
+        ),
+        boot_ticks: InstantBootTicks(observation.boot_now),
+    }
+}
+
+/// Setter/getter pair for the ratio which defines the relationship between the
+/// system's tick counter, and the current_time/clock_monotonic clock.  This gets
+/// set once by architecture specific platform code, after an appropriate ticks
+/// source has been selected and characterized.
 #[inline]
 pub fn timer_get_ticks_to_time_ratio() -> Ratio {
-    // SAFETY: Calling this FFI function has no preconditions and returns the globally configured
-    // timer ticks to time ratio.
-    unsafe { cpp_timer_get_ticks_to_time_ratio() }
+    // SAFETY: `TICKS_TO_TIME` is only written at most once in `timer_set_ticks_to_time_ratio`
+    // while running on the boot CPU with interrupts disabled and before secondary CPUs start, so
+    // no interrupt handler or other CPU can run this read concurrently with that write.
+    unsafe { *TICKS_TO_TIME.as_ptr() }
 }
 
 /// The offset added to raw platform ticks to put them on the monotonic ticks timeline.
@@ -452,18 +585,75 @@ pub fn timer_current_mono_and_boot_ticks() -> CurrentTicksObservation {
     unsafe { cpp_timer_current_mono_and_boot_ticks() }
 }
 
-/// Sets the ratio between timer ticks and nanoseconds.
+/// Setter/getter pair for the ratio which defines the relationship between the
+/// system's tick counter, and the current_time/clock_monotonic clock.  This gets
+/// set once by architecture specific platform code, after an appropriate ticks
+/// source has been selected and characterized.
 ///
 /// # Safety
 ///
-/// Must be called exactly once, on the boot CPU with interrupts disabled,
-/// before secondary CPUs are started and before anything converts ticks to
-/// time.
+/// Must be called at most once, on the boot CPU with interrupts disabled,
+/// before secondary CPUs are started. No other CPU or interrupt handler may
+/// access the ticks-to-time ratio or `ticks_per_second` concurrently with this
+/// call.
 #[inline]
 pub unsafe fn timer_set_ticks_to_time_ratio(ticks_to_time: Ratio) {
-    // SAFETY: the caller upholds the one-time, single-CPU contract above, so
-    // nothing reads the ratio while it is written.
-    unsafe { cpp_timer_set_ticks_to_time_ratio(ticks_to_time) }
+    // ASSERT that we are not calling this function twice.  Once set, this ratio
+    // may not change.
+    // SAFETY: The caller upholds the at-most-once, single-CPU contract with interrupts disabled
+    // before secondary CPUs are started, and ensures no concurrent reader (including interrupt
+    // handlers) accesses `TICKS_TO_TIME` or `TICKS_PER_SECOND` during this call.
+    unsafe {
+        debug_assert!(*TICKS_PER_SECOND.as_ptr() == 0);
+        debug_assert!(ticks_to_time.numerator() != 0);
+        debug_assert!(ticks_to_time.denominator() != 0);
+        *TICKS_TO_TIME.as_ptr() = ticks_to_time;
+        *TICKS_PER_SECOND.as_ptr() =
+            (*TICKS_TO_TIME.as_ptr()).inverse().scale::<{ Round::DOWN }>(zx_sec(1)) as u64;
+    }
+}
+
+/// C++ FFI entry point for [`timer_get_ticks_to_time_ratio`].
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/platform/timer.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_timer_get_ticks_to_time_ratio() -> *const Ratio {
+    TICKS_TO_TIME.as_ptr().cast_const()
+}
+
+/// C++ FFI entry point for [`current_mono_time`].
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/platform/timer.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_current_mono_time() -> InstantMono {
+    current_mono_time()
+}
+
+/// C++ FFI entry point for [`current_boot_time`].
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/platform/timer.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_current_boot_time() -> InstantBoot {
+    current_boot_time()
+}
+
+// TODO(https://fxbug.dev/540178114): Switch `kernel/scheduler.rs` to call
+// `current_mono_time_and_boot_ticks()` directly and remove this export, its C++ wrapper,
+// `Scheduler::CurrentMonoTimeAndBootTicks`, and `cpp_current_mono_time_and_boot_ticks`.
+/// C++ FFI entry point for [`current_mono_time_and_boot_ticks`].
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/platform/timer.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_current_mono_time_and_boot_ticks() -> InstantMonoTimeAndBootTicks {
+    current_mono_time_and_boot_ticks()
+}
+
+/// C++ FFI entry point for [`ticks_per_second`].
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/platform/timer.h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_ticks_per_second() -> zx_types::zx_ticks_t {
+    ticks_per_second()
 }
 
 /// Sets the raw ticks value at which the boot and monotonic timelines start.
@@ -494,17 +684,35 @@ pub fn timer_convert_mono_to_raw_ticks(mono_ticks: InstantMonoTicks) -> Option<i
 /// when it fires, to the raw ticks value `deadline`.
 #[inline]
 pub fn platform_set_oneshot_timer(deadline: i64) -> Result<(), zx_status::Status> {
-    // SAFETY: Calling this FFI function has no memory-safety preconditions; it only programs the
-    // calling CPU's platform timer.
-    zx_status::Status::ok(unsafe { cpp_platform_set_oneshot_timer(deadline) })
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arm_generic_timer::platform_set_oneshot_timer(deadline)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::timer::platform_set_oneshot_timer(deadline)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::timer::platform_set_oneshot_timer(deadline)
+    }
 }
 
 /// Clears the calling CPU's hardware oneshot timer.
 #[inline]
 pub fn platform_stop_timer() {
-    // SAFETY: Calling this FFI function has no memory-safety preconditions; it only stops the
-    // calling CPU's platform timer.
-    unsafe { cpp_platform_stop_timer() }
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arm_generic_timer::platform_stop_timer();
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::timer::platform_stop_timer();
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::timer::platform_stop_timer();
+    }
 }
 
 /// Shuts down the calling CPU's platform timer.
@@ -524,12 +732,37 @@ pub fn platform_shutdown_timer() {
     }
 }
 
+/// Convert a sample taken early on to a proper `zx_ticks_t`, if possible.
+/// This returns 0 if early samples are not convertible.
+#[inline]
+pub fn platform_convert_early_ticks(sample: libarch::EarlyTicks) -> zx_types::zx_ticks_t {
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arm_generic_timer::platform_convert_early_ticks(sample)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::timer::platform_convert_early_ticks(sample)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::timer::platform_convert_early_ticks(sample)
+    }
+}
+
 /// Platform timer tests.
 #[cfg(ktest)]
 #[unittest::suite(name = "platform_timer")]
 mod tests {
-    use super::{DurationMono, InstantMono};
-    use unittest::assert_true;
+    use super::{
+        DurationMono, InstantBoot, InstantMono, Round, TICKS_TO_TIME, current_boot_ticks,
+        current_boot_time, current_mono_and_boot_time, current_mono_ticks, current_mono_time,
+        current_mono_time_and_boot_ticks, rust_current_boot_time, rust_current_mono_time,
+        rust_current_mono_time_and_boot_ticks, rust_ticks_per_second,
+        rust_timer_get_ticks_to_time_ratio, ticks_per_second, timer_current_mono_and_boot_ticks,
+        timer_get_ticks_to_time_ratio, zx_sec,
+    };
+    use unittest::{assert_eq, assert_ge, assert_gt, assert_le, assert_true};
 
     /// Test time ordering and equality.
     #[test]
@@ -693,5 +926,64 @@ mod tests {
         // InstantMono - InstantMono -> DurationMono
         assert_true!(InstantMono::INFINITE - InstantMono(-1) == DurationMono::INFINITE);
         assert_true!(InstantMono::INFINITE_PAST - InstantMono(1) == DurationMono::INFINITE_PAST);
+    }
+
+    /// Test ticks-to-time ratio, `ticks_per_second`, current time conversions, and FFI shims.
+    #[test]
+    fn test_ticks_to_time_and_current_time() {
+        let ratio = timer_get_ticks_to_time_ratio();
+        assert_gt!(ratio.numerator(), 0);
+        assert_gt!(ratio.denominator(), 0);
+
+        let ffi_ratio_ptr = rust_timer_get_ticks_to_time_ratio();
+        assert_eq!(ffi_ratio_ptr, TICKS_TO_TIME.as_ptr().cast_const());
+        // SAFETY: `rust_timer_get_ticks_to_time_ratio` returns a pointer to `TICKS_TO_TIME`, which
+        // is immutable once initialized before secondary CPUs start and cannot be written
+        // concurrently during unit tests.
+        let ffi_ratio = unsafe { *ffi_ratio_ptr };
+        assert_eq!(ffi_ratio.numerator(), ratio.numerator());
+        assert_eq!(ffi_ratio.denominator(), ratio.denominator());
+
+        let tps = ticks_per_second();
+        assert_gt!(tps, 0);
+        assert_eq!(tps, rust_ticks_per_second());
+        assert_eq!(tps, ratio.inverse().scale::<{ Round::DOWN }>(zx_sec(1)));
+
+        let obs_start = timer_current_mono_and_boot_ticks();
+        let mono_ticks_1 = current_mono_ticks();
+        let boot_ticks_1 = current_boot_ticks();
+        let mono_time_1 = current_mono_time();
+        let ffi_mono_time = rust_current_mono_time();
+        let boot_time_1 = current_boot_time();
+        let ffi_boot_time = rust_current_boot_time();
+        let both_time = current_mono_and_boot_time();
+        let mixed = current_mono_time_and_boot_ticks();
+        let ffi_mixed = rust_current_mono_time_and_boot_ticks();
+        let obs_end = timer_current_mono_and_boot_ticks();
+
+        let expected_start_mono = InstantMono(ratio.scale::<{ Round::DOWN }>(obs_start.mono_now));
+        let expected_end_mono = InstantMono(ratio.scale::<{ Round::DOWN }>(obs_end.mono_now));
+        let expected_start_boot = InstantBoot(ratio.scale::<{ Round::DOWN }>(obs_start.boot_now));
+        let expected_end_boot = InstantBoot(ratio.scale::<{ Round::DOWN }>(obs_end.boot_now));
+
+        assert_ge!(mono_ticks_1.0, obs_start.mono_now);
+        assert_le!(mono_ticks_1.0, obs_end.mono_now);
+        assert_ge!(boot_ticks_1.0, obs_start.boot_now);
+        assert_le!(boot_ticks_1.0, obs_end.boot_now);
+
+        assert_ge!(mono_time_1.0, expected_start_mono.0);
+        assert_le!(mono_time_1.0, ffi_mono_time.0);
+        assert_le!(ffi_mono_time.0, both_time.mono_time.0);
+        assert_le!(both_time.mono_time.0, mixed.mono_time.0);
+        assert_le!(mixed.mono_time.0, ffi_mixed.mono_time.0);
+        assert_le!(ffi_mixed.mono_time.0, expected_end_mono.0);
+
+        assert_ge!(boot_time_1.0, expected_start_boot.0);
+        assert_le!(boot_time_1.0, ffi_boot_time.0);
+        assert_le!(ffi_boot_time.0, both_time.boot_time.0);
+        assert_le!(both_time.boot_time.0, ratio.scale::<{ Round::DOWN }>(mixed.boot_ticks.0));
+        assert_le!(mixed.boot_ticks.0, ffi_mixed.boot_ticks.0);
+        assert_le!(ffi_mixed.boot_ticks.0, obs_end.boot_now);
+        assert_le!(ratio.scale::<{ Round::DOWN }>(ffi_mixed.boot_ticks.0), expected_end_boot.0);
     }
 }

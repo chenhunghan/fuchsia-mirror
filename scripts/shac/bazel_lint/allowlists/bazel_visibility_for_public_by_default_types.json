@@ -208,10 +208,6 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "tools/bazel-docgen/testdata/BUILD.bazel",
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "tools/devshell/lib/BUILD.bazel",
             "bug": "https://fxbug.dev/570203009"
         },

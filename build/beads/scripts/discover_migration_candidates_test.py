@@ -341,6 +341,31 @@ class TestDiscoverMigrationCandidates(unittest.TestCase):
                 ],
             )
 
+    def test_targets_from_gn_file_excludes_driver_templates(self) -> None:
+        content = """
+fuchsia_cc_driver("cc_drv") {
+  sources = [ "driver.cc" ]
+}
+
+fuchsia_rust_driver("rust_drv") {
+  sources = [ "src/lib.rs" ]
+}
+
+source_set("lib") {
+  sources = [ "lib.cc" ]
+}
+"""
+        with mock.patch.object(
+            pathlib.Path, "read_text", return_value=content
+        ), mock.patch.object(pathlib.Path, "exists", return_value=True):
+            path = pathlib.Path("BUILD.gn")
+            targets = discover_migration_candidates.targets_from_gn_file(
+                path, None
+            )
+            self.assertEqual(len(targets), 1)
+            self.assertEqual(targets[0].name, "lib")
+            self.assertEqual(targets[0].type, "source_set")
+
     def test_complexity_calculator_initialization(self) -> None:
         root = pathlib.Path("/root")
         gn_file = pathlib.Path("src/BUILD.gn")

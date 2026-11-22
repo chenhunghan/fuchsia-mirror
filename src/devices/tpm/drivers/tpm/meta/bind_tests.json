@@ -1,14 +1,14 @@
 [
     {
         "device": {
-            "fuchsia.BIND_PROTOCOL": "fuchsia.spi.BIND_PROTOCOL.IMPL"
+            "fuchsia.Service": "\"fuchsia.hardware.other.Service\""
         },
         "expected": "abort",
         "name": "Wrong protocol"
     },
     {
         "device": {
-            "fuchsia.BIND_PROTOCOL": "fuchsia.tpm.BIND_PROTOCOL.IMPL"
+            "fuchsia.Service": "\"fuchsia.hardware.tpmimpl.Service\""
         },
         "expected": "match",
         "name": "Match"

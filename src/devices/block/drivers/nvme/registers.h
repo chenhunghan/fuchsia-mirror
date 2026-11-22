@@ -63,9 +63,13 @@ class CapabilityReg : public hwreg::RegisterBase<CapabilityReg, uint64_t> {
   DEF_BIT(16, contiguous_queues_required);
   DEF_FIELD(15, 0, max_queue_entries_raw);
 
-  uint32_t memory_page_size_max_bytes() const { return 1 << (12 + memory_page_size_max()); }
-  uint32_t memory_page_size_min_bytes() const { return 1 << (12 + memory_page_size_min()); }
-  uint32_t doorbell_stride_bytes() const { return 1 << (2 + doorbell_stride()); }
+  uint32_t memory_page_size_max_bytes() const {
+    return uint32_t{1} << (12 + memory_page_size_max());
+  }
+  uint32_t memory_page_size_min_bytes() const {
+    return uint32_t{1} << (12 + memory_page_size_min());
+  }
+  uint32_t doorbell_stride_bytes() const { return uint32_t{1} << (2 + doorbell_stride()); }
   uint32_t timeout_ms() const { return static_cast<uint32_t>(timeout()) * 500; }
   uint32_t max_queue_entries() const { return static_cast<uint32_t>(max_queue_entries_raw()) + 1; }
 
@@ -174,13 +178,13 @@ class DoorbellReg : public hwreg::RegisterBase<DoorbellReg, uint32_t> {
   static auto SubmissionQueue(size_t num, CapabilityReg& caps) {
     return hwreg::RegisterAddr<DoorbellReg>(
         NVME_REG_DOORBELL_BASE +
-        ((2 * static_cast<uint32_t>(num)) * (4 << caps.doorbell_stride())));
+        ((2 * static_cast<uint32_t>(num)) * (4u << caps.doorbell_stride())));
   }
 
   static auto CompletionQueue(size_t num, CapabilityReg& caps) {
     return hwreg::RegisterAddr<DoorbellReg>(
         NVME_REG_DOORBELL_BASE +
-        ((2 * static_cast<uint32_t>(num) + 1) * (4 << caps.doorbell_stride())));
+        ((2 * static_cast<uint32_t>(num) + 1) * (4u << caps.doorbell_stride())));
   }
 };
 

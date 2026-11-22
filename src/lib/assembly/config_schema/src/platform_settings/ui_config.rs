@@ -7,6 +7,7 @@ use camino::Utf8PathBuf;
 use input_device_constants::InputDeviceType;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 
 fn default_frame_prediction_margin_in_us() -> u64 {
     3000
@@ -14,6 +15,14 @@ fn default_frame_prediction_margin_in_us() -> u64 {
 
 fn is_default_frame_prediction_margin(val: &u64) -> bool {
     *val == default_frame_prediction_margin_in_us()
+}
+
+fn default_image_import_workers() -> u8 {
+    1
+}
+
+fn is_default_image_import_workers(val: &u8) -> bool {
+    *val == default_image_import_workers()
 }
 
 /// Platform configuration options for the UI area.
@@ -61,6 +70,10 @@ pub struct PlatformUiConfig {
     /// Enables direct-to-display check config heuristics in Scenic.
     #[serde(skip_serializing_if = "crate::common::is_default")]
     pub display_composition_enable_heuristics: bool,
+
+    /// Configuration for Scenic client image import worker pool and scheduling policy.
+    #[serde(skip_serializing_if = "crate::common::is_default")]
+    pub image_import: ImageImportConfig,
 
     /// Scenic *always* uses the Flatland2 uberstruct schema.
     /// This field is ignored. Delete ASAP.
@@ -136,6 +149,7 @@ impl Default for PlatformUiConfig {
             use_separate_input_thread: true,
             display_composition: false,
             display_composition_enable_heuristics: false,
+            image_import: Default::default(),
             use_flatland2_uberstruct_schema: false,
             supported_input_devices: Default::default(),
             display_rotation: Default::default(),
@@ -242,6 +256,100 @@ impl std::convert::From<VisualDebuggingLevel> for u8 {
     }
 }
 
+// LINT.IfChange
+/// Configuration for Scenic client image import worker pool and scheduling policy.
+///
+/// Every policy field other than `workers` is optional. An unset (`None`) field is omitted from
+/// `fuchsia.scenic.ImageImportPolicy`, so Scenic's built-in default applies (and may change
+/// between releases). Setting a field pins that policy value for the product, even if Scenic's
+/// default later changes.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ImageImportConfig {
+    /// Number of background GPU worker threads for Scenic client image import (default 1; 0 runs
+    /// inline on the main thread). Each worker spawns one dedicated thread under the image-import
+    /// scheduler role; values above the hardware core count provide no latency benefit.
+    #[serde(skip_serializing_if = "is_default_image_import_workers")]
+    pub workers: u8,
+
+    /// Scheduling policy across display and GPU import kinds. If unset, Scenic chooses the
+    /// default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<ImageImportKinds>,
+
+    /// Priority order among off-screen client images. If unset, Scenic chooses the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub off_screen: Option<ImageImportOffScreenOrder>,
+
+    /// Background import policy for client images that have not yet been presented. If unset,
+    /// Scenic chooses the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub never_shown: Option<ImageImportNeverShown>,
+
+    /// Idle delay in milliseconds after the last frame before `when_idle` imports may start. If
+    /// unset, Scenic chooses the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_ms: Option<u32>,
+
+    /// Maximum in-flight idle-window display imports. If unset, Scenic chooses the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_cap: Option<NonZeroU32>,
+
+    /// Whether to run display-coordinator replies on a dedicated thread instead of pumping the
+    /// reply loop on Scenic's main thread. If unset, Scenic chooses the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_thread: Option<bool>,
+}
+
+impl Default for ImageImportConfig {
+    fn default() -> Self {
+        Self {
+            workers: default_image_import_workers(),
+            kinds: None,
+            off_screen: None,
+            never_shown: None,
+            idle_ms: None,
+            display_cap: None,
+            reply_thread: None,
+        }
+    }
+}
+
+/// Scheduling policy across display and GPU import kinds.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImageImportKinds {
+    /// Favor the import kind (display or GPU) predicted for the next frame, and avoid running
+    /// display and GPU imports concurrently.
+    PredictedKindFirst,
+    /// Allow display and GPU imports to run concurrently.
+    Concurrent,
+}
+
+/// Priority order among off-screen client images.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImageImportOffScreenOrder {
+    /// Prioritize off-screen images that were shown most recently.
+    MostRecentFirst,
+    /// Prioritize off-screen images that were shown least recently.
+    LeastRecentFirst,
+}
+
+/// Background import policy for client images that have not yet been presented.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImageImportNeverShown {
+    /// Import never-presented images in the background once Scenic has been idle for `idle_ms`.
+    WhenIdle,
+    /// Import never-presented images whenever import capacity is free, without waiting for the
+    /// idle delay.
+    WhenFree,
+    /// Do not run background imports for images until a `Present` names them.
+    Never,
+}
+// LINT.ThenChange(/src/lib/assembly/platform_configuration/src/subsystems/ui.rs, /src/ui/scenic/lib/flatland/image_import/image_importer_impl.cc, /src/ui/scenic/bin/meta/config.shard.cml:image_import_policy)
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +357,78 @@ mod tests {
     #[test]
     fn test_default_serialization() {
         crate::common::tests::default_serialization_helper::<PlatformUiConfig>();
+        // `PlatformUiConfig` skips `image_import` when it is at its default, so round-trip
+        // `ImageImportConfig` directly as well.
+        crate::common::tests::default_serialization_helper::<ImageImportConfig>();
+    }
+
+    #[test]
+    fn test_zero_image_import_workers_serialization() {
+        // `workers: 0` (inline mode, no worker threads) is `u8::default()`, but
+        // `ImageImportConfig::default().workers` is 1. If `workers` used
+        // `crate::common::is_default` instead of `is_default_image_import_workers` in
+        // `skip_serializing_if`, then 0 would be omitted when serializing and would silently
+        // become 1 when deserialized.
+        crate::common::tests::value_serialization_helper(PlatformUiConfig {
+            image_import: ImageImportConfig { workers: 0, ..Default::default() },
+            ..Default::default()
+        });
+        assert_eq!(
+            serde_json::to_value(ImageImportConfig { workers: 0, ..Default::default() }).unwrap(),
+            serde_json::json!({ "workers": 0 }),
+        );
+    }
+
+    #[test]
+    fn test_non_default_image_import_serialization() {
+        // `reply_thread: Some(false)` also checks that an explicit `false` is kept, not collapsed
+        // to `None`.
+        let image_import = ImageImportConfig {
+            workers: 2,
+            kinds: Some(ImageImportKinds::Concurrent),
+            off_screen: Some(ImageImportOffScreenOrder::LeastRecentFirst),
+            never_shown: Some(ImageImportNeverShown::WhenFree),
+            idle_ms: Some(250),
+            display_cap: Some(NonZeroU32::new(3).unwrap()),
+            reply_thread: Some(false),
+        };
+        assert_eq!(
+            serde_json::to_value(&image_import).unwrap(),
+            serde_json::json!({
+                "workers": 2,
+                "kinds": "concurrent",
+                "off_screen": "least_recent_first",
+                "never_shown": "when_free",
+                "idle_ms": 250,
+                "display_cap": 3,
+                "reply_thread": false,
+            }),
+        );
+        crate::common::tests::value_serialization_helper(PlatformUiConfig {
+            image_import,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn test_invalid_image_import_config_rejected() {
+        assert!(
+            serde_json::from_value::<PlatformUiConfig>(
+                serde_json::json!({ "image_import": { "display_cap": 0 } })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PlatformUiConfig>(
+                serde_json::json!({ "image_import": { "kinds": "bogus" } })
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PlatformUiConfig>(
+                serde_json::json!({ "image_import": { "unknown_key": 1 } })
+            )
+            .is_err()
+        );
     }
 }

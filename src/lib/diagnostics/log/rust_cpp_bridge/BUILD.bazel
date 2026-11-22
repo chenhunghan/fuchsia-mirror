@@ -1,0 +1,109 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":logging_rust_cpp_bridge_tests"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
+fx_cc_library(
+    name = "cpp_syslog_wrapper",
+    srcs = ["wrapper.cc"],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    alwayslink = True,
+)
+
+rustc_library(
+    name = "rust_cpp_bridge",
+    srcs = ["src/lib.rs"],
+    crate_name = "logging_rust_cpp_bridge",
+    edition = "2024",
+    link_deps = [":cpp_syslog_wrapper"],
+    visibility = [
+        "//src/developer/ffx/lib/profiler:__pkg__",
+        "//src/developer/ffx/lib/symbolize/tests:__pkg__",
+    ],
+    deps = ["//third_party/rust_crates/vendor:log"],
+)
+
+fx_cc_library(
+    name = "cpp_syslog_test_wrapper",
+    srcs = ["test_wrapper.cc"],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    alwayslink = True,
+)
+
+# Rust binaries that link C++ code in GN need libc++ linked dynamically;
+# Bazel's C++ toolchain handles this automatically via link_deps.
+# @bazel2gn:raw_attribute:configs += [ "//build/config/fuchsia:dynamic_cpp_standard_library" ]
+rustc_test(
+    name = "logging_rust_cpp_bridge_test",
+    crate = ":rust_cpp_bridge",
+    link_deps = [":cpp_syslog_test_wrapper"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "logging_rust_cpp_bridge_test_packaged_bin",
+    testonly = True,
+    binary = ":logging_rust_cpp_bridge_test",
+    binary_name = "logging_rust_cpp_bridge_test",
+)
+
+fx_component_manifest(
+    name = "logging_rust_cpp_bridge_tests_manifest",
+    testonly = True,
+    component_name = "logging_rust_cpp_bridge_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/tests.cml",
+)
+
+fx_test_component(
+    name = "logging_rust_cpp_bridge_tests_component",
+    compiled_manifest = ":logging_rust_cpp_bridge_tests_manifest",
+    deps = [":logging_rust_cpp_bridge_test_packaged_bin"],
+)
+
+# bazel2gn does not support `parallel` on `fx_test`; keep the GN
+# `fuchsia_unittest_package` copy above the sentinel in BUILD.gn.
+# @bazel2gn:skip
+fx_package(
+    name = "logging_rust_cpp_bridge_tests_package",
+    package_name = "logging_rust_cpp_bridge_tests",
+    test_components = [":logging_rust_cpp_bridge_tests_component"],
+)
+
+fx_test(
+    name = "logging_rust_cpp_bridge_tests",
+    # These tests intentionally generate error messages.
+    max_log_severity = "ERROR",
+    package = ":logging_rust_cpp_bridge_tests_package",
+    # These tests use a single instance of archivist, and since they set
+    # up conflicting test cases, they can not run in parallel.
+    parallel = 1,
+)

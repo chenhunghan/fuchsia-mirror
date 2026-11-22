@@ -626,8 +626,10 @@ def _idk_atom_impl(
         api_contents_map,
         atom_build_deps,
         configurable_info,
+        prebuilt_library_format,
         target_compatible_with,
         testonly,
+        no_headers,
         **kwargs):
     if type not in _TYPES_SUPPORTING_UNSTABLE_ATOMS and not stable:
         fail("`stable` must be true unless the type ('%s') is one of %s." %
@@ -636,8 +638,14 @@ def _idk_atom_impl(
     if bool(api_contents_map) and bool(configurable_info):
         fail("`api_contents_map` and `configurable_info` must not be both set at the same time.")
 
+    if no_headers:
+        if type != "cc_prebuilt_library" or prebuilt_library_format != "shared":
+            fail("`no_headers` is only supported for shared 'cc_prebuilt_library' atoms.")
+        if api_file_path or api_contents_map or configurable_info:
+            fail("`api_file_path`, `api_contents_map`, and `configurable_info` must not be set when `no_headers` is True.")
+
     is_type_not_requiring_compatibility = type in _TYPES_NOT_REQUIRING_COMPATIBILITY
-    if stable and not api_file_path and not is_type_not_requiring_compatibility:
+    if stable and not api_file_path and not no_headers and not is_type_not_requiring_compatibility:
         fail("All atoms with types ('%s') requiring compatibility must specify an `api_file_path` unless explicitly unstable." % type)
 
     _verify_api = bool(api_file_path)
@@ -681,6 +689,7 @@ def _idk_atom_impl(
         api_contents_map = api_contents_map,
         atom_build_deps = atom_build_deps,
         configurable_info = configurable_info,
+        prebuilt_library_format = prebuilt_library_format,
         testonly = testonly,
         # Ensure IDK atoms are only being built for Fuchsia platform or host.
         target_compatible_with = select({
@@ -736,6 +745,16 @@ Atoms will be checked for category and API area violations when generating the I
         "atom_build_deps": attr.label_list(
             doc = "See _create_idk_atom().",
             mandatory = False,
+            configurable = False,
+        ),
+        "prebuilt_library_format": attr.string(
+            doc = "See _create_idk_atom().",
+            default = "",
+            configurable = False,
+        ),
+        "no_headers": attr.bool(
+            doc = "Whether the library has no headers in the IDK. Only applies to shared 'cc_prebuilt_library' type atoms.",
+            default = False,
             configurable = False,
         ),
         # Make this inherited attribute not configurable so that it can be

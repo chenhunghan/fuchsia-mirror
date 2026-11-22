@@ -1,9 +1,0 @@
-{
-    "short_description": "Sensirion SHTV3 digital humidity and temperature sensor driver",
-    "manufacturer": "Sensirion",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Thermal"
-    ]
-}

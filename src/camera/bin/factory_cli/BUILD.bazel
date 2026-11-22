@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "camera_factory_cli_bin",
+    srcs = ["main.cc"],
+    # TODO(https://fxbug.dev/42085293): delete the below and fix compiler warnings
+    copts = ["-Wno-vla-cxx-extension"],
+    deps = [
+        "//sdk/fidl/fuchsia.images:fuchsia.images_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/camera/bin/factory:fuchsia.factory.camera_hlcpp",
+        "//src/lib/fxl:fxl_cli",
+    ],
+)

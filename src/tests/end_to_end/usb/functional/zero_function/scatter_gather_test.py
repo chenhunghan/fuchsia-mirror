@@ -5,7 +5,7 @@
 """Mobly E2E scatter-gather test suite for USB Zero Function (usb-zero-function).
 
 Verifies DWC3 multi-region scatter-gather DMA, page-crossing regions,
-short-packet FIFO fast-forwarding, and unchained IN ZLP TRBs in Loopback mode.
+short-packet FIFO fast-forwarding, and chained IN ZLP TRBs in Loopback mode.
 """
 
 import zero_function
@@ -125,7 +125,7 @@ class ScatterGatherTest(zero_function.ZeroFunctionBaseTest):
                 dev.reset_scatter_gather()
 
     def test_dwc3_scatter_gather_in_zlp(self) -> None:
-        """Verifies DWC3 appends an unchained ZLP TRB after chained IN TRBs."""
+        """Verifies DWC3 chains multi-region IN data TRBs to a trailing ZLP TRB."""
         with self.open_loopback_device() as dev:
             ep_out = dev.ep_out
             ep_in = dev.ep_in
@@ -155,6 +155,34 @@ class ScatterGatherTest(zero_function.ZeroFunctionBaseTest):
                     asserts.assert_equal(rx_data, tx_data)
             finally:
                 dev.reset_scatter_gather()
+
+    def test_dwc3_single_trb_in_zlp(self) -> None:
+        """Verifies DWC3 chains a single contiguous IN data TRB to a ZLP TRB."""
+        with self.open_loopback_device() as dev:
+            ep_out = dev.ep_out
+            ep_in = dev.ep_in
+            mps = ep_out.wMaxPacketSize
+
+            for num_packets in (1, 2):
+                payload_len = num_packets * mps
+                dev.configure_scatter_gather(
+                    [(0, payload_len)], [], in_short_zlp=True
+                )
+                try:
+                    for i in range(8):
+                        tx_data = bytes(
+                            ((i * 109 + j) & 0xFF) for j in range(payload_len)
+                        )
+                        dev.bulk(ep_out.bEndpointAddress, tx_data)
+                        rx_data = dev.bulk(
+                            ep_in.bEndpointAddress,
+                            payload_len + mps,
+                            timeout=3000,
+                        )
+                        asserts.assert_equal(len(rx_data), payload_len)
+                        asserts.assert_equal(rx_data, tx_data)
+                finally:
+                    dev.reset_scatter_gather()
 
 
 if __name__ == "__main__":

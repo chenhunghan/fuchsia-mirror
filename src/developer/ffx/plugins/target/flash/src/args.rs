@@ -112,6 +112,15 @@ pub struct FlashCommand {
         description = "use streaming fastboot flash if supported by the device"
     )]
     pub streaming_flash: bool,
+
+    #[argh(
+        option,
+        description = "base name of a partition not to flash, without any slot suffix (e.g. \
+           `modem` skips `modem_a` and `modem_b`) - can be supplied multiple times. It's up to \
+           the caller to ensure the device already has compatible images in these partitions, \
+           or else the device may exhibit unexpected behavior or refuse to boot at all"
+    )]
+    pub skip_partition: Vec<String>,
 }
 
 impl FlashCommand {
@@ -155,6 +164,7 @@ impl FlashCommand {
             flash_timeout_rate_mb_per_second,
             ssh_key: self.authorized_keys,
             streaming_flash: self.streaming_flash,
+            skip_partitions: self.skip_partition,
         }
     }
 }
@@ -221,12 +231,14 @@ mod test {
             timeout_rate: Some(1.0),
             skip_authorized_keys: false,
             streaming_flash: true,
+            skip_partition: vec!["modem".to_string()],
         };
 
         let params: ManifestParams = cmd.to_manifest(&env.context);
         assert_eq!(params.oem_stage[0].file(), tmp_file_name);
         assert_eq!(params.oem_stage[0].command(), test_oem_cmd);
         assert!(params.streaming_flash);
+        assert_eq!(params.skip_partitions, vec!["modem".to_string()]);
     }
 
     #[fuchsia::test]

@@ -18,7 +18,7 @@
 #include <optional>
 #include <span>
 
-#include "../legacy-boot.h"
+#include <phys/linuxboot-runtime/x86/legacy-boot.h>
 
 // Must be defined by each legacy shim.
 extern const char* kLegacyShimName;

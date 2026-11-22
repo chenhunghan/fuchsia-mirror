@@ -5,7 +5,6 @@
 """Rules for host tools."""
 
 load("@io_bazel_rules_go//go:def.bzl", "go_binary")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("@rules_python//python:defs.bzl", "py_binary")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
@@ -28,9 +27,8 @@ def _cc_binary_host_tool_impl(
         name,
         target_compatible_with,
         **kwargs):
-    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
-    if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
-        fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
+    if target_compatible_with != HOST_OS_CONSTRAINTS:
+        fail("`target_compatible_with` must be `HOST_OS_CONSTRAINTS`.")
 
     # Also ensure the API level is "PLATFORM".
     target_compatible_with += _target_compatible_with_platform_api_level
@@ -54,7 +52,7 @@ cc_binary_host_tool = macro(
     inherit_attrs = fx_cc_binary,
     attrs = {
         "target_compatible_with": attr.string_list(
-            doc = "Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.",
+            doc = "Standard meaning. Must be `HOST_OS_CONSTRAINTS`.",
             mandatory = False,
             configurable = False,
             default = HOST_OS_CONSTRAINTS,
@@ -80,13 +78,12 @@ def go_binary_host_tool(
 
     Args:
         name: The name of the tool.
-        target_compatible_with: Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.
+        target_compatible_with: Standard meaning. Must be `HOST_OS_CONSTRAINTS`.
         **kwargs: Passed to `go_binary()`.
     """
 
-    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
-    if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
-        fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
+    if target_compatible_with != HOST_OS_CONSTRAINTS:
+        fail("`target_compatible_with` must be `HOST_OS_CONSTRAINTS`.")
 
     # Also ensure the API level is "PLATFORM".
     target_compatible_with += _target_compatible_with_platform_api_level
@@ -115,13 +112,12 @@ def py_binary_host_tool(
 
     Args:
         name: The name of the tool.
-        target_compatible_with: Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.
+        target_compatible_with: Standard meaning. Must be `HOST_OS_CONSTRAINTS`.
         **kwargs: Passed to `py_binary()`.
     """
 
-    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
-    if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
-        fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
+    if target_compatible_with != HOST_OS_CONSTRAINTS:
+        fail("`target_compatible_with` must be `HOST_OS_CONSTRAINTS`.")
 
     # Also ensure the API level is "PLATFORM".
     target_compatible_with += _target_compatible_with_platform_api_level
@@ -136,9 +132,8 @@ def _rustc_binary_host_tool_impl(
         name,
         target_compatible_with,
         **kwargs):
-    # TODO(https://fxbug.dev/567965595): Remove `HOST_CONSTRAINTS` once all targets are updated.
-    if target_compatible_with != HOST_CONSTRAINTS and target_compatible_with != HOST_OS_CONSTRAINTS:
-        fail("`target_compatible_with` must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.")
+    if target_compatible_with != HOST_OS_CONSTRAINTS:
+        fail("`target_compatible_with` must be `HOST_OS_CONSTRAINTS`.")
 
     # Also ensure the API level is "PLATFORM".
     target_compatible_with += _target_compatible_with_platform_api_level
@@ -162,7 +157,7 @@ rustc_binary_host_tool = macro(
     inherit_attrs = rustc_binary,
     attrs = {
         "target_compatible_with": attr.string_list(
-            doc = "Standard meaning. Must be `HOST_CONSTRAINTS` or `HOST_OS_CONSTRAINTS`.",
+            doc = "Standard meaning. Must be `HOST_OS_CONSTRAINTS`.",
             mandatory = False,
             configurable = False,
             default = HOST_OS_CONSTRAINTS,

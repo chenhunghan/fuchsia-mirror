@@ -45,13 +45,13 @@ Subpackages, see [Subpackaging components].
 Note: To understand how components and packages work together in Fuchsia,
 see [Fuchsia's software model](/docs/concepts/software_model.md).
 
-## Types of packages
+## Types of packages {#types-of-packages}
 
 The packages that comprise the Fuchsia operating system are categorized into
 three groups, which affect how they are managed:
 
 Note: To understand how these packages work in a Fuchsia build, see
-[Dependency sets](/docs/development/build/software_assembly/build_configuration.md#dependency_sets)
+[Dependency sets](/docs/development/build/software_assembly/build_configuration.md#dependency-sets)
 
 * [Base packages](#base-packages)
 * [Cached packages](#cached-packages)
@@ -188,7 +188,7 @@ package name must be present, optionally followed by the package hash.
 If the package hash is missing, the package resolver fetches the resources
 from the newest revision of the package variant available to the client.
 
-### Relative package URLs
+### Relative package URLs {#relative-package-urls}
 
 A relative Fuchsia package URL identifies a subpackage given previously loaded
 package (or subpackage) as "context". The repository and parent package are

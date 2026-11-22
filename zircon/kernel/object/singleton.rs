@@ -63,13 +63,3 @@ fn object_init(_level: init::LkInitLevel) {
 }
 
 init::lk_init_hook!(libobject, object_init, init::LK_INIT_LEVEL_THREADING);
-
-/// Returns a raw pointer to the singleton root job dispatcher for C++ `GetRootJobDispatcher`.
-///
-/// TODO(adanis): Remove once remaining C++ callers of `GetRootJobDispatcher` are ported to Rust.
-// SAFETY: `rust_get_root_job_dispatcher` is a unique global symbol matching the `extern "C"`
-// declaration in `//zircon/kernel/object/include/object/job_dispatcher.h`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_get_root_job_dispatcher() -> *mut JobDispatcher {
-    fbl::RefPtr::as_ptr(get_root_job_dispatcher()).cast_mut()
-}

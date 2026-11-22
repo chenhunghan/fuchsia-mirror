@@ -118,25 +118,25 @@ static inline void unittest_fails(void) {}
   LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_STRNE, val2, val1, false, __FILE__, __LINE__, \
                        "Expected strings " #val1 " != " #val2 ".", ##__VA_ARGS__)
 
-#define ASSERT_SUBSTR(str, substr, ...)                                              \
-  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_SUBSTR, substr, str, true, __FILE__, __LINE__,     \
-                       "Expected string " #str " to contain substring " #substr ".", \
-                       ##__VA_ARGS__)
+#define ASSERT_SUBSTR(str, substr, ...)                         \
+  LIB_ZXTEST_CHECK_VAR(                                         \
+      LIB_ZXTEST_SUBSTR, substr, str, true, __FILE__, __LINE__, \
+      "Expected string " #str " to contain substring " #substr ".", ##__VA_ARGS__)
 
-#define EXPECT_SUBSTR(str, substr, ...)                                              \
-  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_SUBSTR, substr, str, false, __FILE__, __LINE__,    \
-                       "Expected string " #str " to contain substring " #substr ".", \
-                       ##__VA_ARGS__)
+#define EXPECT_SUBSTR(str, substr, ...)                          \
+  LIB_ZXTEST_CHECK_VAR(                                          \
+      LIB_ZXTEST_SUBSTR, substr, str, false, __FILE__, __LINE__, \
+      "Expected string " #str " to contain substring " #substr ".", ##__VA_ARGS__)
 
-#define ASSERT_NOT_SUBSTR(str, substr, ...)                                              \
-  LIB_ZXTEST_CHECK_VAR(!LIB_ZXTEST_SUBSTR, substr, str, true, __FILE__, __LINE__,        \
-                       "Expected string " #str " to not contain substring " #substr ".", \
-                       ##__VA_ARGS__)
+#define ASSERT_NOT_SUBSTR(str, substr, ...)                      \
+  LIB_ZXTEST_CHECK_VAR(                                          \
+      !LIB_ZXTEST_SUBSTR, substr, str, true, __FILE__, __LINE__, \
+      "Expected string " #str " to not contain substring " #substr ".", ##__VA_ARGS__)
 
-#define EXPECT_NOT_SUBSTR(str, substr, ...)                                              \
-  LIB_ZXTEST_CHECK_VAR(!LIB_ZXTEST_SUBSTR, substr, str, false, __FILE__, __LINE__,       \
-                       "Expected string " #str " to not contain substring " #substr ".", \
-                       ##__VA_ARGS__)
+#define EXPECT_NOT_SUBSTR(str, substr, ...)                       \
+  LIB_ZXTEST_CHECK_VAR(                                           \
+      !LIB_ZXTEST_SUBSTR, substr, str, false, __FILE__, __LINE__, \
+      "Expected string " #str " to not contain substring " #substr ".", ##__VA_ARGS__)
 
 // Used to evaluate _ZXTEST_NULLPTR to an actual value.
 #define LIB_ZXTEST_CHECK_PTR_DELEGATE(...) LIB_ZXTEST_CHECK_PTR(__VA_ARGS__)
@@ -205,26 +205,27 @@ static inline void unittest_fails(void) {}
   LIB_ZXTEST_CHECK_VAR_BYTES(LIB_ZXTEST_BYTENE, val2, val1, size, false, __FILE__, __LINE__, \
                              "Expected " #val1 " same bytes as " #val2 ".", ##__VA_ARGS__)
 
-#define ASSERT_TRUE(val, ...)                                                \
-  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_BOOL, true, val, true, __FILE__, __LINE__, \
-                       "Expected " #val " is true.", ##__VA_ARGS__)
+#define ASSERT_TRUE(val, ...)                                \
+  LIB_ZXTEST_CHECK_BOOL(true, val, true, __FILE__, __LINE__, \
+                        "Expected " #val " is true.", ##__VA_ARGS__)
 
-#define ASSERT_FALSE(val, ...)                                                \
-  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_BOOL, false, val, true, __FILE__, __LINE__, \
-                       "Expected " #val " is false.", ##__VA_ARGS__)
+#define ASSERT_FALSE(val, ...)                                \
+  LIB_ZXTEST_CHECK_BOOL(false, val, true, __FILE__, __LINE__, \
+                        "Expected " #val " is false.", ##__VA_ARGS__)
 
-#define EXPECT_TRUE(val, ...)                                                 \
-  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_BOOL, true, val, false, __FILE__, __LINE__, \
-                       "Expected " #val " is true.", ##__VA_ARGS__)
+#define EXPECT_TRUE(val, ...)                                 \
+  LIB_ZXTEST_CHECK_BOOL(true, val, false, __FILE__, __LINE__, \
+                        "Expected " #val " is true.", ##__VA_ARGS__)
 
-#define EXPECT_FALSE(val, ...)                                                 \
-  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_BOOL, false, val, false, __FILE__, __LINE__, \
-                       "Expected " #val " is false.", ##__VA_ARGS__)
+#define EXPECT_FALSE(val, ...)                                 \
+  LIB_ZXTEST_CHECK_BOOL(false, val, false, __FILE__, __LINE__, \
+                        "Expected " #val " is false.", ##__VA_ARGS__)
 
 #define ADD_FAILURE(...) LIB_ZXTEST_FAIL_NO_RETURN(false, "", ##__VA_ARGS__)
 
 #define ADD_FATAL_FAILURE(...) LIB_ZXTEST_FAIL_NO_RETURN(true, "", ##__VA_ARGS__)
 
+// A skip in |statement| is not a failure, but ASSERT_NO_FATAL_FAILURE still ends the test after it.
 #define ASSERT_NO_FATAL_FAILURE(statement, ...)                                                  \
   do {                                                                                           \
     LIB_ZXTEST_ASSERT_ERROR(LIB_ZXTEST_ABORT_IF_ERROR, true,                                     \
@@ -232,6 +233,9 @@ static inline void unittest_fails(void) {}
     statement;                                                                                   \
     LIB_ZXTEST_ASSERT_ERROR(LIB_ZXTEST_ABORT_IF_ERROR, true,                                     \
                             "Test registered fatal failures in " #statement ".", ##__VA_ARGS__); \
+    if (LIB_ZXTEST_IS_SKIPPED) {                                                                 \
+      return;                                                                                    \
+    }                                                                                            \
   } while (0)
 
 #define EXPECT_NO_FATAL_FAILURE(statement, ...)                                                  \

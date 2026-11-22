@@ -11,6 +11,9 @@
 #include <lib/elfldltl/soname.h>
 
 #include <bit>
+#include <concepts>
+#include <ranges>
+#include <type_traits>
 
 #include "abi.h"
 #include "load.h"
@@ -52,6 +55,22 @@ enum class DecodedModuleRelocInfo : bool { kNo, kYes };
 // This is used as a base class for all DecodedModule<...> instantiations just
 // as a marker so they can be detected using std::is_base_of.
 struct DecodedModuleBase {};
+
+// This is satisfied by any pointer-like type that can be dereferenced with `*`
+// to get to a (possibly const) ld::DecodedModule<...> or class derived from
+// one.  That can be a plain pointer, a pointer to `const`, a smart pointer type
+// of some kind, or even something like `std::optional`.
+template <class T>
+concept DecodedModulePointer = !std::derived_from<T, DecodedModuleBase> && requires(T& ptr) {
+  requires std::derived_from<std::remove_reference_t<decltype(*ptr)>, DecodedModuleBase>;
+};
+
+// This is satisfied by the template parameter types ld::LoadModule accepts:
+// either a (non-const) ld::DecodedModule<...> or class derived from one, or a
+// DecodedModulePointer to one.
+template <class T>
+concept DecodedModuleStorage =
+    !std::is_const_v<T> && (std::derived_from<T, DecodedModuleBase> || DecodedModulePointer<T>);
 
 // These fixed limits on the number of PT_LOAD segments and the overall e_phnum
 // are what the startup dynamic linker uses, so it's not unreasonable for any
@@ -152,12 +171,14 @@ class DecodedModule : public DecodedModuleBase {
   // linking of this module.  It doesn't need to be stored at all if a module
   // is being cached after relocation without concern for a separate dynamic
   // linking session reusing the same data.
-  template <auto R = WithRelocInfo, typename = std::enable_if_t<R == DecodedModuleRelocInfo::kYes>>
-  constexpr RelocationInfo& reloc_info() {
+  constexpr RelocationInfo& reloc_info()
+    requires kRelocInfo
+  {
     return reloc_info_;
   }
-  template <auto R = WithRelocInfo, typename = std::enable_if_t<R == DecodedModuleRelocInfo::kYes>>
-  constexpr const RelocationInfo& reloc_info() const {
+  constexpr const RelocationInfo& reloc_info() const
+    requires kRelocInfo
+  {
     return reloc_info_;
   }
 
@@ -238,9 +259,9 @@ class DecodedModule : public DecodedModuleBase {
     return tls_module_;
   }
 
-  template <bool Inline = InlineModule == AbiModuleInline::kYes,
-            typename = std::enable_if_t<!Inline>>
-  constexpr void set_module(Module& module) {
+  constexpr void set_module(Module& module)
+    requires(!kModuleInline)
+  {
     module_ = &module;
   }
 
@@ -262,8 +283,8 @@ class DecodedModule : public DecodedModuleBase {
   // "load-order" list of modules; this allows the index to serve as a means
   // of back-pointer from the module() object to a containing LoadModule sort
   // of object via reference to the session's primary module list.
-  template <typename... Args, bool Inline = InlineModule == AbiModuleInline::kYes,
-            typename = std::enable_if_t<Inline>>
+  template <typename... Args>
+    requires kModuleInline
   constexpr void EmplaceModule(uint32_t modid, Args&&... args) {
     assert(!module_);
     module_.emplace(std::forward<Args>(args)...);
@@ -274,8 +295,8 @@ class DecodedModule : public DecodedModuleBase {
   // new (a...) Module{c...}.  See above about the modid argument.  The last
   // argument in a... must be a fbl::AllocChecker that indicates whether `new`
   // succeeded.
-  template <typename... Args, bool Inline = InlineModule == AbiModuleInline::kYes,
-            typename = std::enable_if_t<!Inline>>
+  template <typename... Args>
+    requires(!kModuleInline)
   constexpr void NewModule(uint32_t modid, Args&&... args) {
     assert(!module_);
     module_ = new (std::forward<Args>(args)...) Module;
@@ -289,8 +310,8 @@ class DecodedModule : public DecodedModuleBase {
   // used in the initial DecodeDynamic that also discovers DT_STRTAB et al.
   // The offsets can later be converted using ReifyNeeded (see below).
   template <class Container>
+    requires std::same_as<typename Container::value_type, size_type>
   static constexpr auto MakeNeededObserver(Container& needed_offsets) {
-    static_assert(std::is_same_v<size_type, typename Container::value_type>);
     return NeededObserver<Container>{needed_offsets};
   }
 
@@ -325,10 +346,10 @@ class DecodedModule : public DecodedModuleBase {
   // a bad entry was diagnosed, or there was an allocation failure.  If the
   // Diagnostics object returned true for a bad entry, that entry is just
   // omitted from the container it's success even with an empty container.
-  template <template <typename> class Container, class Diagnostics, class Offsets>
+  template <template <typename> class Container, class Diagnostics,
+            std::ranges::sized_range Offsets>
+    requires std::same_as<std::ranges::range_value_t<Offsets>, size_type>
   constexpr std::optional<Container<Soname>> ReifyNeeded(Diagnostics& diag, Offsets&& offsets) {
-    using OffsetType = std::decay_t<Offsets>::value_type;
-    static_assert(std::is_same_v<size_type, OffsetType>);
     std::optional<Container<Soname>> needed{std::in_place};
     if (!needed->reserve(diag, kNeededFail, offsets.size())) [[unlikely]] {
       return std::nullopt;

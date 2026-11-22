@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! End-to-end tests over the fixtures in `tests/fixtures`.
 //!
 //! Each test renders a report and compares it with an `expected*.txt` file

@@ -8,17 +8,19 @@
 #include <lib/zx/vmar.h>
 #include <zircon/syscalls/object.h>
 
+#include <cinttypes>
 #include <map>
 #include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #include <fbl/string.h>
+#include <fbl/string_printf.h>
 #include <zxtest/zxtest.h>
 
 #include "helper.h"
 #include "process-fixture.h"
-#include "src/lib/fxl/strings/string_printf.h"
 
 namespace object_info_test {
 namespace {
@@ -275,18 +277,18 @@ TEST_F(VmarMapsGetInfoTest, InfoVmarMapsSmokeTest) {
   ASSERT_LE(test_info.num_mappings, actual);
   ASSERT_LE(test_info.num_mappings, avail);
 
-  auto dump_diag = [&]() -> fbl::String {
-    std::string result;
-    fxl::StringAppendf(&result, "diagnostics follow:\n");
+  auto dump_diag = [&] -> fbl::String {
+    std::string result = "diagnostics follow:\n";
     for (size_t i = 0; i < actual; ++i) {
       const zx_info_maps_t& entry = maps[i];
-      fxl::StringAppendf(&result, "maps entry %lu, depth %lu, type %u, base %lu, size %lu\n", i,
-                         entry.depth, entry.type, entry.base, entry.size);
+      result.append(fbl::StringPrintf("maps entry %zu, depth %zu, type %" PRIu32 ", base %" PRIuPTR
+                                      ", size %zu\n",
+                                      i, entry.depth, entry.type, entry.base, entry.size));
     }
     for (size_t i = 0; i < test_info.num_mappings; ++i) {
       const Mapping& mapping = test_info.mappings[i];
-      fxl::StringAppendf(&result, "mapping %lu, base %lu, size %lu\n", i, mapping.base,
-                         mapping.size);
+      result.append(fbl::StringPrintf("mapping %zu, base %" PRIuPTR ", size %zu\n", i, mapping.base,
+                                      mapping.size));
     }
     return result;
   };

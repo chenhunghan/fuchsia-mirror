@@ -119,7 +119,7 @@ void CheckEq(facpi::Object value, facpi::Object expected) {
       break;
     }
     default:
-      FAIL("Unexpected tag: %" PRIu64, static_cast<fidl_xunion_tag_t>(value.Which()));
+      FAIL("Unexpected tag: %" PRIu64, static_cast<fidl_union_tag_t>(value.Which()));
   }
 }
 

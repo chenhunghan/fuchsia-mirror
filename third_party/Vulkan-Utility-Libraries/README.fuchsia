@@ -4,11 +4,9 @@ Version: vulkan-sdk-1.4.350
 Revision: a96bd4933c6adfc21329d15e9999791a0153bbf3
 Security Critical: yes
 
+License: Apache-2.0
 License File: src/LICENSE.md
-  License: Copyright, Misc
-
 License File: src/LICENSES/Apache-2.0.txt
-  License: Apache-2.0
 
 Description:
   Shared code across various Vulkan repositories.

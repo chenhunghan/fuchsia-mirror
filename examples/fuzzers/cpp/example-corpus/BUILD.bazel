@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Generated using `fx fuzz update example-fuzzers/corpus_fuzzer`.
+resource(
+    name = "example-corpus",
+    srcs = [
+        "corpus-fuzzer-input",
+        "dictionary-fuzzer-input1",
+        "dictionary-fuzzer-input2",
+        "dictionary-fuzzer-input3",
+        "dictionary-fuzzer-input4",
+    ],
+    outputs = ["data/examples/fuzzers/cpp/example-corpus/{{source_file_part}}"],
+    visibility = ["//examples/fuzzers:__pkg__"],
+)

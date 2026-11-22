@@ -14,7 +14,6 @@ fidl_library(
     ],
     api_area = "Storage",
     category = "prebuilt",
-    enable_hlcpp = True,
     enable_rust_next = True,
     stable = True,
     visibility = ["//visibility:public"],

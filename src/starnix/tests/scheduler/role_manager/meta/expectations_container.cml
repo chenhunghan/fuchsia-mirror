@@ -1,0 +1,63 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [ "//src/starnix/containers/container.shard.cml" ],
+    program: {
+        runner: "starnix",
+        name: "role_overrides_expectations_test_container",
+        init: [],
+        default_uid: "0",
+        mounts: [ "/tmp:tmpfs" ],
+        modules: [ "system_mode" ],
+        task_role_overrides: [
+            {
+                role: "first_custom_role",
+                process: "renamed_puppet",
+                thread: "renamed_puppet",
+            },
+            {
+                role: "second_custom_role",
+                process: "renamed_again",
+                thread: "renamed_again",
+            },
+            {
+                role: "cpuset_custom_role",
+                process: "puppet",
+                thread: "puppet",
+                cgroup: "/bg_tasks",
+            },
+            {
+                role: "app.leader",
+                process: "^test_app$",
+                thread: "^test_app$",
+                is_leader: "true",
+            },
+            {
+                role: "app.render.launch",
+                process: "^test_app$",
+                thread: "^RenderThread$",
+                system_mode: "^(LAUNCH|BOOST)$",
+            },
+            {
+                role: "app.render.uclamp",
+                process: "^test_app$",
+                thread: "^RenderThread$",
+                uclamp_min: "128..=512",
+            },
+            {
+                role: "app.worker.nice_window",
+                process: "^test_app$",
+                thread: "^worker$",
+                min_nice: "-5",
+                max_nice: "5",
+            },
+            {
+                role: "app.render.default",
+                process: "^test_app$",
+                thread: "^RenderThread$",
+            },
+        ],
+        features: [ "container" ],
+    },
+}

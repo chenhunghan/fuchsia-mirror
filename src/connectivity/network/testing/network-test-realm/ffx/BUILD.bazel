@@ -42,6 +42,7 @@ ffx_tool(
     srcs = ["src/main.rs"],
     binary_name = "ffx-net-test-realm",
     edition = "2024",
+    visibility = ["//src/connectivity/network/testing/conformance/emulator:__pkg__"],
     deps = [
         ":ffx_net_test_realm",
         "//src/developer/ffx/lib/fho:lib",

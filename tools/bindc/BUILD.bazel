@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Brought into GN by `bazel_host_tool("bin")` in BUILD.gn.
+rustc_binary_host_tool(
+    name = "bin",
+    srcs = [
+        "src/cpp_generator.rs",
+        "src/generate.rs",
+        "src/main.rs",
+        "src/rust_generator.rs",
+    ],
+    compile_data = [
+        "src/templates/cpp_header.template",
+        "src/templates/rust_file.template",
+    ],
+    crate_name = "bindc",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    # The default of the private `_bindc` attribute in
+    # //build/bazel/rules/bind:bind_library.bzl, so Bazel checks visibility
+    # against that package.
+    visibility = ["//build/bazel/rules/bind:__pkg__"],
+    deps = [
+        "//src/devices/lib/bind:lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:clap",
+    ],
+)
+
+host_rustc_test(
+    name = "bindc_bin_test",
+    compile_data = [
+        "src/templates/cpp_header.template",
+        "src/templates/rust_file.template",
+        "src/tests/expected_cpp_header_gen",
+        "src/tests/expected_deprecated_bind_cpp_header",
+        "src/tests/expected_rust_file_gen",
+        "src/tests/test_library.bind",
+        "//src/devices/bind/fuchsia:fuchsia.bind",
+    ],
+    crate = ":bin",
+    visibility = ["//tools:__pkg__"],
+)

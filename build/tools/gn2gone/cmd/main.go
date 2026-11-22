@@ -30,6 +30,8 @@ Commands:
                        BLOCKED_TESTS_UNWIRED, or BLOCKED.
   query <label>        List GN references to synced targets: //dir, //dir:*,
                        or //dir:target.
+  empty-groups         Report hand-written empty GN test groups and their
+                       callers across the checkout.
   unsync [--waves] [<dir>...]
                        Unsync READY directories (all of them by default;
                        with --waves, repeat until none remain): delete BUILD.gn
@@ -139,6 +141,23 @@ func main() {
 		for _, r := range refs {
 			fmt.Println(r.String())
 		}
+	case "empty-groups":
+		if len(args) != 0 {
+			fatalf("empty-groups takes no arguments")
+		}
+		groups := idx.EmptyGroups()
+		if *jsonOut {
+			out := emptyGroupsJSON{EmptyGroups: groups, ParseErrors: []string{}}
+			if out.EmptyGroups == nil {
+				out.EmptyGroups = []*gn2gone.EmptyGroup{}
+			}
+			for _, e := range stats.ParseErrors {
+				out.ParseErrors = append(out.ParseErrors, e.Error())
+			}
+			writeJSON(os.Stdout, out)
+			return
+		}
+		printEmptyGroups(os.Stdout, groups, stats)
 	case "unsync":
 		if *waves && len(args) > 0 {
 			fatalf("--waves cannot be combined with explicit directories")
@@ -220,6 +239,14 @@ type scanJSON struct {
 	Unattributed []string `json:"unattributed_dynamic_labels"`
 }
 
+// emptyGroupsJSON is the `empty-groups --json` output.
+type emptyGroupsJSON struct {
+	EmptyGroups []*gn2gone.EmptyGroup `json:"empty_groups"`
+	// ParseErrors lists GN files that failed to parse. If non-empty, the
+	// results are incomplete.
+	ParseErrors []string `json:"parse_errors"`
+}
+
 func hostTag() string {
 	arch := runtime.GOARCH
 	if arch == "amd64" {
@@ -292,6 +319,42 @@ func printScan(w io.Writer, reps []*gn2gone.DirReport, stats *gn2gone.Stats, ver
 			for _, b := range r.Blockers {
 				fmt.Fprintf(w, "      %s\n", b.String())
 			}
+		}
+	}
+}
+
+func printEmptyGroups(w io.Writer, groups []*gn2gone.EmptyGroup, stats *gn2gone.Stats) {
+	var unreferenced, referenced int
+	for _, g := range groups {
+		if len(g.Callers) == 0 && len(g.DynamicCallers) == 0 {
+			unreferenced++
+		} else {
+			referenced++
+		}
+	}
+	fmt.Fprintf(w, "Scanned %d GN files (%d string literals) in %.1fs (parsing %.1fs).\n",
+		stats.Files, stats.Literals, stats.TotalTime.Seconds(), stats.ParseTime.Seconds())
+	fmt.Fprintf(w, "%d empty test groups: %d with no GN callers, %d with callers.\n",
+		len(groups), unreferenced, referenced)
+	if len(groups) == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	for _, g := range groups {
+		gen := ""
+		if g.GeneratedHeader != "" {
+			gen = fmt.Sprintf(", generated: %s", g.GeneratedHeader)
+		}
+		fmt.Fprintf(w, "  %s  (%s:%d, %s%s)\n", g.Label, g.File, g.Line, g.Region, gen)
+		if len(g.Callers) == 0 && len(g.DynamicCallers) == 0 {
+			fmt.Fprintln(w, "      (no GN callers)")
+			continue
+		}
+		for _, c := range g.Callers {
+			fmt.Fprintf(w, "      %s\n", c.String())
+		}
+		if len(g.DynamicCallers) > 0 {
+			fmt.Fprintf(w, "      dynamic callers: %s\n", strings.Join(g.DynamicCallers, ", "))
 		}
 	}
 }

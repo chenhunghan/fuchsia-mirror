@@ -3,6 +3,10 @@
 # found in the LICENSE file.
 
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
+load(
+    "@fuchsia_rules_common//build_flags:default_flag_values.bzl",
+    "ARM64_BASELINE_C_FAMILY_FLAGS",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -13,10 +17,8 @@ package(default_applicable_licenses = ["//:license"])
 compiler_build_flags(
     name = "arm64",
     # Assume toolchain_environment != "kernel" in Bazel
-    c_family_flags = [
-        "-mtune=generic",
-        "-march=armv8-a+simd+crc+crypto",
-    ],
+    # These flags are shared with the out-of-tree C++ toolchain.
+    c_family_flags = ARM64_BASELINE_C_FAMILY_FLAGS,
     compiler_subflags = [":abi"],
 
     # For supported target features see:
@@ -98,4 +100,7 @@ compiler_build_flags(
     visibility = ["//visibility:public"],
 )
 
-# LINT.ThenChange(BUILD.gn:arm64_configs)
+# LINT.ThenChange(
+#     BUILD.gn:arm64_configs,
+#     //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:cpu_baseline,
+# )

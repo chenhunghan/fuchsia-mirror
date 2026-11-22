@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use crate::ksync_kernel::declare_singleton_critical_mutex;
+use crate::ksync_kernel::TrackedCriticalMutex;
 use core::cell::UnsafeCell;
 use core::convert::Infallible;
 use core::marker::PhantomPinned;
@@ -12,7 +12,7 @@ use core::pin::{Pin, pin};
 use core::ptr;
 use fbl::{DoublyLinkedList, DoublyLinkedListNode, is_sentinel_ptr};
 use ksync::{KCell, LockToken};
-use lazy_init::LazyInit;
+use lazy_init::{LazyInit, NoCheck};
 use pin_init::{PinInit, pin_data, pin_init};
 use vm_cow_pages_bindings as bindings;
 
@@ -20,7 +20,7 @@ use crate::platform_rs::timer::current_mono_time;
 pub use crate::vm::vm_cow_pages::DiscardablePageCounts;
 use crate::vm::vm_cow_pages::{VmCowPages, VmCowPagesLock, VmCowPagesLockClass};
 use zx_status::Status;
-use zx_types::{ZX_TIME_INFINITE, zx_instant_mono_t, zx_status_t};
+use zx_types::{ZX_TIME_INFINITE, zx_instant_mono_t};
 
 /// Tracks the current state of a discardable VMO, depending on the lock count and whether
 /// it has been discarded.
@@ -291,7 +291,30 @@ impl Drop for CursorGuard<'_> {
 // Lock that protects the global discardable lists.
 // This lock can be acquired with the vmo's lock held. To prevent deadlocks, if both locks are
 // required the order of locking should always be 1) vmo's lock, and then 2) DiscardableVmosLock.
-declare_singleton_critical_mutex!(DiscardableVmosLock);
+#[ksync::guarded]
+pub(super) struct DiscardableVmosMutex {
+    #[mutex]
+    lock: ksync::KMutex<TrackedCriticalMutex>,
+}
+
+pub(super) type DiscardableVmosLock = DiscardableVmosMutexLockClass;
+
+static DISCARDABLE_VMOS_LOCK: LazyInit<DiscardableVmosMutex, NoCheck> = LazyInit::uninit();
+
+impl DiscardableVmosLock {
+    #[inline]
+    pub(super) fn get() -> &'static ksync::KMutex<Self, TrackedCriticalMutex> {
+        // SAFETY: `DISCARDABLE_VMOS_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` in
+        // `initialize_discardable_lists`.
+        &unsafe { DISCARDABLE_VMOS_LOCK.get_unchecked() }.lock
+    }
+
+    #[inline]
+    pub(super) fn lock()
+    -> impl PinInit<ksync::KMutexGuard<'static, Self, TrackedCriticalMutex>, Infallible> {
+        Self::get().lock()
+    }
+}
 
 // Two global lists of discardable vmos:
 // - `reclaim_candidates` tracks discardable vmos that are eligible for reclamation
@@ -331,14 +354,17 @@ impl DiscardableVmoLists {
 // The lists cannot be a plain `static` because `DoublyLinkedList::new()` is a `PinInit` (the
 // list's sentinel encodes the address of the list itself), not a `const fn`. Instead, they are
 // initialized in place during early boot by `initialize_discardable_lists`.
-static LISTS: LazyInit<KCell<DiscardableVmoLists, DiscardableVmosLock>> = LazyInit::uninit();
+static LISTS: LazyInit<KCell<DiscardableVmoLists, DiscardableVmosLock>, NoCheck> =
+    LazyInit::uninit();
 
 fn initialize_discardable_lists(_level: init::LkInitLevel) {
     // SAFETY: Single-threaded initialization during early boot before concurrency. Discardable
     // VMOs can only be created by user mode, and the lists are otherwise only walked by the
     // scanner and memory stats, all of which happen well after this init level.
     unsafe {
-        let _ = Pin::static_ref(&LISTS).init_pin(KCell::pin_init(DiscardableVmoLists::init()));
+        let Ok(()) = Pin::static_ref(&DISCARDABLE_VMOS_LOCK)
+            .init_pin(pin_init!(DiscardableVmosMutex { lock <- ksync::KMutex::init() }));
+        let Ok(()) = Pin::static_ref(&LISTS).init_pin(KCell::pin_init(DiscardableVmoLists::init()));
     }
 }
 
@@ -359,9 +385,9 @@ fn get_lists<'a>(
     token: &'a mut LockToken<'_, DiscardableVmosLock>,
 ) -> Pin<&'a mut DiscardableVmoLists> {
     // SAFETY: `DiscardableVmosLock` is a singleton, so `token` is necessarily for the lock
-    // instance that guards `LISTS`. `LISTS` is a static initialized in place via `init_pin`, so
-    // the lists are never moved.
-    unsafe { LISTS.get().get_pinned_mut_locked(token) }
+    // instance that guards `LISTS`. `LISTS` is a static initialized in place via `init_pin` at
+    // `LK_INIT_LEVEL_EARLIEST`, so the lists are initialized and never moved.
+    unsafe { LISTS.get_unchecked().get_pinned_mut_locked(token) }
 }
 
 impl DiscardableVmoTracker {
@@ -1079,60 +1105,6 @@ unsafe extern "C" fn rust_discardable_vmo_tracker_remove_from_discardable_list_l
     let mut token = unsafe { LockToken::<VmCowPagesLockClass>::new() };
     // SAFETY: `token` is for the owning VmCowPages' lock, per the above.
     unsafe { tracker.remove_from_discardable_list_locked(&mut token) };
-}
-
-/// Locks a discardable tracker while the owning VMO lock is held.
-///
-/// # Safety
-///
-/// `tracker` must point to a live, pinned `DiscardableVmoTracker` whose address remains
-/// stable until it is unlinked from the discardable lists, and the caller must hold the owning
-/// `VmCowPages`' lock.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_discardable_vmo_tracker_lock_discardable_locked(
-    tracker: *const DiscardableVmoTracker,
-    try_lock: bool,
-    was_discarded_out: &mut bool,
-    updated_reclaim_candidates_out: &mut bool,
-) -> zx_status_t {
-    // SAFETY: The caller guarantees `tracker` points to a live instance. The C++ facade object is
-    // neither copyable nor movable, so its address is stable.
-    let tracker = unsafe { Pin::new_unchecked(&*tracker) };
-    // SAFETY: The C++ facade is annotated with TA_REQ(cow_lock) and DEBUG_ASSERTs that `cow_lock`
-    // is the owning VmCowPages' lock, so that lock is held for the duration of this call.
-    let mut token = unsafe { LockToken::<VmCowPagesLockClass>::new() };
-    // SAFETY: `token` is for the owning VmCowPages' lock, per the above.
-    let res = unsafe { tracker.lock_discardable_locked(&mut token, try_lock) };
-    // The only failure is `UNAVAILABLE`, from try-locking a discarded VMO.
-    debug_assert!(res.is_ok() || res == Err(Status::UNAVAILABLE));
-    let outcome =
-        res.unwrap_or(LockOutcome { was_discarded: true, updated_reclaim_candidates: false });
-    *was_discarded_out = outcome.was_discarded;
-    *updated_reclaim_candidates_out = outcome.updated_reclaim_candidates;
-    Status::result_into_raw(res.map(|_| ()))
-}
-
-/// Unlocks a discardable tracker while the owning VMO lock is held.
-///
-/// # Safety
-///
-/// `tracker` must point to a live, pinned `DiscardableVmoTracker`, and the caller must hold the
-/// owning `VmCowPages`' lock.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_discardable_vmo_tracker_unlock_discardable_locked(
-    tracker: *const DiscardableVmoTracker,
-    updated_reclaim_candidates_out: &mut bool,
-) -> zx_status_t {
-    // SAFETY: The caller guarantees `tracker` points to a live instance. The C++ facade object is
-    // neither copyable nor movable, so its address is stable.
-    let tracker = unsafe { Pin::new_unchecked(&*tracker) };
-    // SAFETY: The C++ facade is annotated with TA_REQ(cow_lock) and DEBUG_ASSERTs that `cow_lock`
-    // is the owning VmCowPages' lock, so that lock is held for the duration of this call.
-    let mut token = unsafe { LockToken::<VmCowPagesLockClass>::new() };
-    // SAFETY: `token` is for the owning VmCowPages' lock, per the above.
-    let res = unsafe { tracker.unlock_discardable_locked(&mut token) };
-    *updated_reclaim_candidates_out = res.unwrap_or(false);
-    Status::result_into_raw(res.map(|_| ()))
 }
 
 /// Returns whether this tracker is eligible for reclamation.

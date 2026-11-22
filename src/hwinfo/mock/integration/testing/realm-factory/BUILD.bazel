@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "hwinfo-mock-realm-factory",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hwinfo:fuchsia.hwinfo_rust",
+        "//sdk/rust/zx-status",
+        "//src/hwinfo/mock/fidl:fuchsia.hwinfo.mock_rust",
+        "//src/hwinfo/mock/integration/testing/fidl:test.mock_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/testing/realm_proxy",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "hwinfo-mock-realm-factory",
+)
+
+fx_component_manifest(
+    name = "realm-factory-component_manifest",
+    testonly = True,
+    component_name = "realm-factory",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/default.cml",
+)
+
+fx_component(
+    name = "realm-factory-component",
+    testonly = True,
+    compiled_manifest = ":realm-factory-component_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "realm-factory",
+    package_name = "mock-realm-factory",
+    testonly = True,
+    components = [
+        ":realm-factory-component",
+        # In GN, the Realm Builder server component came in transitively
+        # through //src/lib/fuchsia-component-test.
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    subpackages = ["//src/hwinfo/mock:package"],
+    visibility = ["//src/hwinfo/mock/integration/tests:__pkg__"],
+)

@@ -648,7 +648,6 @@ fx_test_component(
 
 fx_package(
     name = "debug-data-test",
-    package_name = "debug-data-test",
     test_components = [":debug_data_test"],
 )
 

@@ -16,7 +16,67 @@
     },
     capabilities: [
         { service: "fuchsia.hardware.power.PowerTokenService" },
-        { service: "fuchsia.hardware.spi.Service" },
+        {
+            service: "fuchsia.hardware.spi.Service",
+            metadata: {
+                id: "fuchsia.hardware.spi.businfo.SpiBusMetadata",
+                schema: {
+                    $schema: "http://json-schema.org/draft-07/schema#",
+                    title: "SpiBusMetadata",
+                    type: "object",
+                    properties: {
+                        bus_id: {
+                            type: "integer",
+                            fuchsia_type: "provider_id",
+                        },
+                        channels: {
+                            type: "array",
+                            items: { $ref: "#/definitions/SpiChannel" },
+                        },
+                    },
+                    required: [ "channels" ],
+                    definitions: {
+                        SpiChannel: {
+                            type: "object",
+                            properties: {
+                                cs: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                id: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                vid: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                pid: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                did: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                max_frequency_hz: {
+                                    type: "integer",
+                                    fuchsia_type: "uint32",
+                                },
+                                cs_polarity_high: { type: "boolean" },
+                                word_length_bits: {
+                                    type: "integer",
+                                    fuchsia_type: "uint8",
+                                },
+                                is_bus_controller: { type: "boolean" },
+                                clock_polarity_high: { type: "boolean" },
+                            },
+                            required: [ "cs" ],
+                        },
+                    },
+                },
+            },
+        },
         { service: "fuchsia.hardware.spi.TestService" },
     ],
     use: [

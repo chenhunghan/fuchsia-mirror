@@ -76,11 +76,5 @@
                 "DatagramLinearizedSendSemanticsTests/DatagramLinearizedSendSemanticsTest.SoBroadcast/IPv4",
             ],
         },
-        {
-            type: "expect_failure_with_err_logs",
-            matchers: [
-                "IOSendingMethodTests/IOSendingMethodTest.*WithRxZirconSocketRemainder/*",
-            ],
-        },
     ],
 }

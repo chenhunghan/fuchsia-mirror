@@ -23,6 +23,13 @@
     capabilities: [
         { service: "fuchsia.hardware.skipblock.Service" },
     ],
+    use: [
+        {
+            name: "default",
+            service: "fuchsia.hardware.badblock.Service",
+            generate_bind_rule: false,
+        },
+    ],
     expose: [
         {
             service: "fuchsia.hardware.skipblock.Service",

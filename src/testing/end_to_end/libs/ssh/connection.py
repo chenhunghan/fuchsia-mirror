@@ -13,6 +13,7 @@ import time
 from types import TracebackType
 from typing import IO, Self
 
+from libs.net import wait_for_port
 from libs.proc import job
 from libs.proc.runner import (
     CalledProcessError,
@@ -21,7 +22,8 @@ from libs.proc.runner import (
 )
 from libs.ssh import formatter
 from libs.ssh import settings as ssh_settings
-from mobly import logger
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # TODO(https://fxbug.dev/567167756): Merge SshConnection and SSHProvider into a
@@ -57,13 +59,6 @@ class SshConnection(Runner):
         self._main_ssh_proc: subprocess.Popen[bytes] | None = None
         self._main_ssh_tempdir: str | None = None
 
-        self.log = logger.PrefixLoggerAdapter(
-            logging.getLogger(),
-            {
-                logger.PrefixLoggerAdapter.EXTRA_KEY_LOG_PREFIX: f"[SshConnection | {self._settings.hostname}]",
-            },
-        )
-
     def __enter__(self) -> Self:
         return self
 
@@ -78,7 +73,7 @@ class SshConnection(Runner):
     def __del__(self) -> None:
         self.close()
 
-    def setup_main_ssh(self, timeout_sec: int = 5) -> None:
+    def setup_main_ssh(self, timeout_sec: float = 5) -> None:
         """Sets up the main ssh connection.
 
         Sets up the initial main ssh connection if it has not already been
@@ -98,8 +93,8 @@ class SshConnection(Runner):
                     not os.path.exists(socket_path)
                     or self._main_ssh_proc.poll() is not None
                 ):
-                    self.log.debug(
-                        "main ssh connection to %s is down.",
+                    _LOGGER.debug(
+                        "[SshConnection | %s] main ssh connection is down.",
                         self._settings.hostname,
                     )
                     self._cleanup_main_ssh()
@@ -125,16 +120,22 @@ class SshConnection(Runner):
                     extra_flags=extra_flags,
                     extra_options=extra_options,
                 )
-                self.log.info("Starting main ssh connection.")
+                _LOGGER.info(
+                    "[SshConnection | %s] Starting main ssh connection.",
+                    self._settings.hostname,
+                )
                 self._main_ssh_proc = job.run_async(main_cmd)
 
                 end_time = time.time() + timeout_sec
 
                 while time.time() < end_time:
-                    if os.path.exists(self.socket_path):
+                    if (
+                        os.path.exists(self.socket_path)
+                        or self._main_ssh_proc.poll() is not None
+                    ):
                         break
                     time.sleep(0.2)
-                else:
+                if not os.path.exists(self.socket_path):
                     self._cleanup_main_ssh()
                     raise CalledProcessTransportError(
                         "main ssh connection timed out."
@@ -177,12 +178,20 @@ class SshConnection(Runner):
         if attempts < 1:
             raise TypeError("attempts must be a positive, non-zero integer")
 
+        deadline = (
+            time.time() + timeout_sec if timeout_sec is not None else None
+        )
+        setup_timeout: float = self._settings.connect_timeout
+        if deadline is not None:
+            setup_timeout = min(setup_timeout, max(0.0, deadline - time.time()))
+
         try:
-            self.setup_main_ssh(self._settings.connect_timeout)
+            self.setup_main_ssh(setup_timeout)
         except CalledProcessTransportError:
-            self.log.warning(
-                "Failed to create main ssh connection, using "
-                "normal ssh connection."
+            _LOGGER.warning(
+                "[SshConnection | %s] Failed to create main ssh connection, "
+                "using normal ssh connection.",
+                self._settings.hostname,
             )
 
         extra_options: dict[str, str | int | bool] = {"BatchMode": True}
@@ -201,11 +210,18 @@ class SshConnection(Runner):
         dns_retry_count = 2
         while True:
             try:
+                run_timeout = timeout_sec
+                if deadline is not None:
+                    run_timeout = deadline - time.time()
+                    if run_timeout <= 0:
+                        raise subprocess.TimeoutExpired(
+                            terminal_command, timeout_sec or 0.0
+                        )
                 result = job.run(
                     terminal_command,
                     stdin=stdin,
                     log_output=log_output,
-                    timeout_sec=timeout_sec,
+                    timeout_sec=run_timeout,
                 )
 
                 return subprocess.CompletedProcess(
@@ -230,7 +246,11 @@ class SshConnection(Runner):
                             raise CalledProcessTransportError(
                                 "DNS failed to find host"
                             ) from e
-                        self.log.debug("Failed to connect to host, retrying...")
+                        _LOGGER.debug(
+                            "[SshConnection | %s] Failed to connect to host, "
+                            "retrying...",
+                            self._settings.hostname,
+                        )
                         continue
 
                     had_timeout = re.search(
@@ -260,14 +280,21 @@ class SshConnection(Runner):
                         raise CalledProcessTransportError("Unknown host") from e
 
                     # Retry unknown SSH errors.
-                    self.log.error(
-                        f"An unknown error has occurred. Job result: {e}"
+                    _LOGGER.error(
+                        "[SshConnection | %s] An unknown error has occurred. "
+                        "Job result: %s",
+                        self._settings.hostname,
+                        e,
                     )
                     ping_output = job.run(
                         ["ping", self._settings.hostname, "-c", "3", "-w", "1"],
                         ignore_status=True,
                     )
-                    self.log.error(f"Ping result: {ping_output}")
+                    _LOGGER.error(
+                        "[SshConnection | %s] Ping result: %s",
+                        self._settings.hostname,
+                        ping_output,
+                    )
                     if attempts > 1:
                         self._cleanup_main_ssh()
                         return self.run(
@@ -334,6 +361,90 @@ class SshConnection(Runner):
             terminal_command, stdout=stdout, stdin=stdin, stderr=stderr
         )
 
+    def wait_until_reachable(self, timeout_sec: int | None = None) -> None:
+        """Wait for the device to become reachable via SSH.
+
+        Args:
+            timeout_sec: Seconds to wait until raising TimeoutError.
+        """
+        if timeout_sec is None:
+            timeout_sec = self._settings.connect_timeout
+        timeout = time.monotonic() + timeout_sec
+        while True:
+            try:
+                remaining_sec = max(1, int(timeout - time.monotonic()))
+                wait_for_port(
+                    self._settings.hostname,
+                    self._settings.port,
+                    timeout_sec=min(5, remaining_sec),
+                )
+                break
+            except TimeoutError as e:
+                if time.monotonic() >= timeout:
+                    raise TimeoutError(
+                        f"Waited over {timeout_sec}s for the service to start "
+                        f"accepting connections at "
+                        f"{self._settings.hostname}:{self._settings.port}"
+                    ) from e
+
+        while True:
+            try:
+                self.close()
+                remaining = max(1.0, timeout - time.monotonic())
+                self.run(
+                    ["echo"],
+                    stdin=None,
+                    timeout_sec=min(10.0, remaining),
+                    log_output=True,
+                    attempts=1,
+                )
+                return
+            except (
+                CalledProcessTransportError,
+                CalledProcessError,
+                subprocess.TimeoutExpired,
+            ) as e:
+                if time.monotonic() < timeout:
+                    time.sleep(1.0)
+                    continue
+                raise TimeoutError(
+                    f"Waited over {timeout_sec}s for SSH to become reachable "
+                    f"at {self._settings.hostname}:{self._settings.port}"
+                ) from e
+
+    def wait_until_unreachable(
+        self,
+        interval_sec: int = 1,
+        timeout_sec: int | None = None,
+    ) -> None:
+        """Wait for the device to become unreachable via SSH.
+
+        Args:
+            interval_sec: Seconds to wait between unreachability attempts.
+            timeout_sec: Seconds to wait until raising TimeoutError.
+        """
+        self.close()
+        if timeout_sec is None:
+            timeout_sec = self._settings.connect_timeout
+        timeout = time.monotonic() + timeout_sec
+
+        while True:
+            try:
+                wait_for_port(
+                    self._settings.hostname,
+                    self._settings.port,
+                    timeout_sec=interval_sec,
+                )
+            except TimeoutError:
+                return
+
+            if time.monotonic() >= timeout:
+                raise TimeoutError(
+                    f"Connection to {self._settings.hostname} is still reachable "
+                    f"after {timeout_sec}s"
+                )
+            time.sleep(0.2)
+
     def close(self) -> None:
         """Clean up open connections to remote host."""
         self._cleanup_main_ssh()
@@ -345,13 +456,19 @@ class SshConnection(Runner):
         """
         # If a main SSH connection is running, kill it.
         if self._main_ssh_proc is not None:
-            self.log.debug("Nuking main_ssh_job.")
+            _LOGGER.debug(
+                "[SshConnection | %s] Nuking main_ssh_job.",
+                self._settings.hostname,
+            )
             self._main_ssh_proc.kill()
             self._main_ssh_proc.wait()
             self._main_ssh_proc = None
 
         # Remove the temporary directory for the main SSH socket.
         if self._main_ssh_tempdir is not None:
-            self.log.debug("Cleaning main_ssh_tempdir.")
+            _LOGGER.debug(
+                "[SshConnection | %s] Cleaning main_ssh_tempdir.",
+                self._settings.hostname,
+            )
             shutil.rmtree(self._main_ssh_tempdir)
             self._main_ssh_tempdir = None

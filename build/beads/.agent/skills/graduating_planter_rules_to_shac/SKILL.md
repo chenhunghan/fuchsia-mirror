@@ -190,8 +190,8 @@ Then validate:
   show <origin>:<lesson path>` and cite it by name. `git log -S` stops at the
   import commit `b4381f9bbc6`; if that is the oldest hit, write "origin predates
   import".
-- Include the validation results, a `Test:` line, and `No-Try: true`. No
-  personal names or emails.
+- Include the validation results and a `Test:` line. Don't add `No-Try: true`,
+  which skips the static checks these CLs change. No personal names or emails.
 - For several rules, make one commit per rule, each based on origin/main
   (separate CLs, not a stack). Two CLs that edit the same check may conflict;
   rebase the later one after the first lands.
@@ -226,7 +226,7 @@ Then validate:
   rule alone uses, and search every check and `machinery/tools/` for callers
   before changing a shared helper's return value.
 - **Stricter Planter rules aren't duplicates.** Planter's
-  `internal_vendor_subpath_visibility` forbids `//vendor/google/<x>` entries
+  `confidentiality_violation` forbids entries inside the internal vendor tree
   that shac's `bazel_vendor_paths` allows: PARTIAL by trigger.
 
 ## Related skills

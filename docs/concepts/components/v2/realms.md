@@ -186,7 +186,7 @@ definitions for full documentation.
 [glossary.storage capability]: /docs/glossary/README.md#storage-capability
 [children]: https://fuchsia.dev/reference/cml#children
 [collections]: https://fuchsia.dev/reference/cml#collections
-[component-manifest-examples]: ./component_manifests.md#examples
+[component-manifest-examples]: ./component_manifests.md
 [component-manifests]: ./component_manifests.md
 [component-urls]: /docs/concepts/components/v2/identifiers.md#component-urls
 [environments]: ./environments.md

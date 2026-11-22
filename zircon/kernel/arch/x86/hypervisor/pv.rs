@@ -32,10 +32,8 @@ use crate::platform_rs::timer::{current_boot_time, current_mono_time, ticks_per_
 ///
 /// System time is time since boot time, and boot time is some fixed point in the
 /// past.
-///
-/// This mirrors the layout of the C++ `PvClockState` in `<arch/hypervisor.h>`, which embeds it in
-/// `Vcpu`.
 #[repr(C)]
+#[derive(Default)]
 pub struct PvClockState {
     is_stable: bool,
     version: u32,
@@ -51,6 +49,13 @@ static_assert!(offset_of!(PvClockState, system_time) == 8);
 static_assert!(offset_of!(PvClockState, guest_ptr) == 16);
 static_assert!(size_of::<PvClockState>() == 56);
 static_assert!(align_of::<PvClockState>() == 8);
+
+impl PvClockState {
+    /// Sets whether the clock is stable, which is reported to the guest.
+    pub fn set_is_stable(&mut self, is_stable: bool) {
+        self.is_stable = is_stable;
+    }
+}
 
 /// This structure contains mapping between TSC and host wall time at some point
 /// in time. KVM has a hypercall that asks the VMM to populate this structure and
@@ -123,11 +128,7 @@ pub fn pv_clock_update_boot_time(
 ) -> Result<(), Status> {
     // Zircon does not maintain a UTC or local time to set a meaningful boot time
     // hence the value is fixed at zero.
-    let guest_ptr = gpa.create_guest_ptr(
-        guest_paddr,
-        size_of::<pv_clock_boot_time>(),
-        b"pv_clock-boot-time-guest-mapping",
-    )?;
+    let guest_ptr = gpa.create_guest_ptr(guest_paddr, size_of::<pv_clock_boot_time>())?;
     let boot_time = guest_ptr.as_ptr::<pv_clock_boot_time>();
     if boot_time.is_null() {
         return Err(Status::INVALID_ARGS);
@@ -147,11 +148,7 @@ pub fn pv_clock_reset_clock(
     gpa: &GuestPhysicalAspace,
     guest_paddr: zx_vaddr_t,
 ) -> Result<(), Status> {
-    let guest_ptr = gpa.create_guest_ptr(
-        guest_paddr,
-        size_of::<pv_clock_system_time>(),
-        b"pv_clock-system-time-guest-mapping",
-    )?;
+    let guest_ptr = gpa.create_guest_ptr(guest_paddr, size_of::<pv_clock_system_time>())?;
     let Some(system_time) = NonNull::new(guest_ptr.as_ptr::<pv_clock_system_time>()) else {
         pv_clock.system_time = None;
         return Err(Status::INVALID_ARGS);
@@ -255,11 +252,7 @@ pub fn pv_clock_populate_offset(
     gpa: &GuestPhysicalAspace,
     guest_paddr: zx_vaddr_t,
 ) -> Result<(), Status> {
-    let guest_ptr = gpa.create_guest_ptr(
-        guest_paddr,
-        size_of::<PvClockOffset>(),
-        b"pv_clock-offset-guest-mapping",
-    )?;
+    let guest_ptr = gpa.create_guest_ptr(guest_paddr, size_of::<PvClockOffset>())?;
     let offset = guest_ptr.as_ptr::<PvClockOffset>();
     if offset.is_null() {
         return Err(Status::INVALID_ARGS);

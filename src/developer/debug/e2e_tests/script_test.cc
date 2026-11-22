@@ -25,12 +25,13 @@ constexpr std::string_view kBuildType = ZXDB_E2E_TESTS_BUILD_TYPE;
 
 }  // namespace
 
-void ScriptTest::TestBody() {
+void ScriptTest::SetUp() {
   std::ifstream script_file(script_path_);
   ASSERT_TRUE(script_file) << "Fail to open " << script_path_;
 
-  // Process directives first.
-  uint64_t timeout = kDefaultTimeout;
+  // Skipped scripts don't need a target debug_agent connection. Parse header directives before
+  // calling E2eTest::SetUp.
+  timeout_ = kDefaultTimeout;
   std::string line;
   while (std::getline(script_file, line)) {
     if (line.empty())
@@ -43,7 +44,7 @@ void ScriptTest::TestBody() {
           GTEST_SKIP() << "Skipped because of unmet requirement " << requirement;
         }
       } else if (debug::StringStartsWith(directive, "set timeout ")) {
-        timeout = std::stoul(directive.substr(12));
+        timeout_ = std::stoul(directive.substr(12));
       } else {
         GTEST_FAIL() << "Unknown directive: " << directive;
       }
@@ -57,11 +58,15 @@ void ScriptTest::TestBody() {
 
   // Adjust timeout when running on bots so we're less likely to flake.
   if (std::getenv("BUILDBUCKET_ID")) {
-    timeout *= 5;
+    timeout_ *= 5;
   }
 
+  E2eTest::SetUp();
+}
+
+void ScriptTest::TestBody() {
   ScriptRunner runner(&session(), &console());
-  runner.set_timeout_s(timeout);
+  runner.set_timeout_s(timeout_);
 
   bool script_success = false;
   runner.Run(script_path_, [&](bool success) {

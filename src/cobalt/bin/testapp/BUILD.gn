@@ -7,7 +7,10 @@ import("//third_party/cobalt/metrics_registry.gni")
 
 group("testapp") {
   testonly = true
-  public_deps = [ ":cobalt_testapp" ]
+  public_deps = [
+    ":cobalt_key_rotation_test",
+    ":cobalt_testapp",
+  ]
 }
 
 metrics_registry("testapp_metrics_registry") {
@@ -69,6 +72,49 @@ cc_test_executable("cobalt_testapp") {
     "//third_party/cobalt/src/public/lib:clock_interfaces",
     "//third_party/cobalt/src/registry:cobalt_registry_proto",
     "//third_party/rapidjson",
+  ]
+
+  configs += [ "//third_party/cobalt:cobalt_config" ]
+}
+
+cc_test_executable("cobalt_key_rotation_test") {
+  testonly = true
+  output_name = "cobalt_key_rotation_test"
+  sources = [
+    "cobalt_testapp_logger.cc",
+    "cobalt_testapp_logger.h",
+    "key_rotation_test.cc",
+  ]
+
+  deps = [
+    ":testapp_metrics_registry_cc",
+    "//sdk/fidl/fuchsia.cobalt:fuchsia.cobalt_hlcpp",
+    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_hlcpp",
+    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_hlcpp",
+    "//sdk/fidl/fuchsia.net.http:fuchsia.net.http_hlcpp",
+    "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_cpp",
+    "//sdk/fidl/fuchsia.time:fuchsia.time_hlcpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/fdio",
+    "//sdk/lib/sys/component/cpp/testing:cpp",
+    "//sdk/lib/sys/cpp",
+    "//sdk/lib/syslog/cpp",
+    "//sdk/lib/vfs/cpp",
+    "//src/cobalt/bin/utils:error_utils",
+    "//src/lib/files",
+    "//src/lib/fsl",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/sys/pkg/bin/fake-channel-control",
+    "//third_party/cobalt/src/public:cobalt_config",
+    "//third_party/cobalt/src/public:cobalt_service",
+    "//third_party/cobalt/src/public/lib:clock_interfaces",
+    "//third_party/googletest:gtest",
+    "//third_party/rapidjson",
+    "//zircon/system/ulib/zx",
   ]
 
   configs += [ "//third_party/cobalt:cobalt_config" ]

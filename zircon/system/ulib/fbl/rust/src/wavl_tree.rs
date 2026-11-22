@@ -10,6 +10,7 @@ use core::borrow::Borrow;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::pin::Pin;
+use core::ptr::NonNull;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 
 /// Trait defining an observer for a `WavlTree`.
@@ -512,6 +513,11 @@ impl WavlTreeRank for i32 {
 }
 
 /// A node in a Weak AVL (WAVL) Tree.
+///
+/// Nodes are `!Unpin`: while an element is linked into a tree, its parent and children hold raw
+/// pointers to it, so it must not be moved (or have its node swapped/overwritten). Containing types
+/// should mark their node field(s) with `#[pin]` when using `#[pin_data]` so that the `!Unpin`-ness
+/// propagates.
 #[repr(C)]
 pub struct WavlTreeNode<T, R: WavlTreeRank = bool> {
     /// The parent element in the tree.
@@ -522,6 +528,11 @@ pub struct WavlTreeNode<T, R: WavlTreeRank = bool> {
     pub right: UnsafeCell<*mut T>,
     /// The integer rank of this node.
     pub rank: UnsafeCell<R>,
+    /// Marker making the node (and any type embedding it) `!Unpin`.
+    ///
+    /// Wrapped in `PhantomData` so the node remains FFI-safe (`improper_ctypes` rejects a bare
+    /// `PhantomPinned` in `extern` signatures, but ignores `PhantomData` fields).
+    _pin: PhantomData<core::marker::PhantomPinned>,
 }
 
 impl<T, R: WavlTreeRank> WavlTreeNode<T, R> {
@@ -532,6 +543,7 @@ impl<T, R: WavlTreeRank> WavlTreeNode<T, R> {
             left: UnsafeCell::new(core::ptr::null_mut()),
             right: UnsafeCell::new(core::ptr::null_mut()),
             rank: UnsafeCell::new(R::DEFAULT),
+            _pin: PhantomData,
         }
     }
 
@@ -712,7 +724,7 @@ trait LrTraits {
         O: WavlTreeObserver<Target = P::Target>;
 
     unsafe fn set_lr_most<K, P, Tag, S, O>(
-        tree: &mut WavlTree<K, P, Tag, S, O>,
+        tree: Pin<&mut WavlTree<K, P, Tag, S, O>>,
         val: *mut P::Target,
     ) where
         P: PtrTraits,
@@ -722,7 +734,7 @@ trait LrTraits {
         O: WavlTreeObserver<Target = P::Target>;
 
     unsafe fn set_rl_most<K, P, Tag, S, O>(
-        tree: &mut WavlTree<K, P, Tag, S, O>,
+        tree: Pin<&mut WavlTree<K, P, Tag, S, O>>,
         val: *mut P::Target,
     ) where
         P: PtrTraits,
@@ -775,7 +787,7 @@ impl LrTraits for ForwardTraits {
     }
 
     unsafe fn set_lr_most<K, P, Tag, S, O>(
-        tree: &mut WavlTree<K, P, Tag, S, O>,
+        tree: Pin<&mut WavlTree<K, P, Tag, S, O>>,
         val: *mut P::Target,
     ) where
         P: PtrTraits,
@@ -784,11 +796,11 @@ impl LrTraits for ForwardTraits {
         S: SizeTracker,
         O: WavlTreeObserver<Target = P::Target>,
     {
-        tree.left_most = val;
+        *tree.project().left_most = val;
     }
 
     unsafe fn set_rl_most<K, P, Tag, S, O>(
-        tree: &mut WavlTree<K, P, Tag, S, O>,
+        tree: Pin<&mut WavlTree<K, P, Tag, S, O>>,
         val: *mut P::Target,
     ) where
         P: PtrTraits,
@@ -797,7 +809,7 @@ impl LrTraits for ForwardTraits {
         S: SizeTracker,
         O: WavlTreeObserver<Target = P::Target>,
     {
-        tree.right_most = val;
+        *tree.project().right_most = val;
     }
 }
 
@@ -841,7 +853,7 @@ impl LrTraits for ReverseTraits {
     }
 
     unsafe fn set_lr_most<K, P, Tag, S, O>(
-        tree: &mut WavlTree<K, P, Tag, S, O>,
+        tree: Pin<&mut WavlTree<K, P, Tag, S, O>>,
         val: *mut P::Target,
     ) where
         P: PtrTraits,
@@ -850,11 +862,11 @@ impl LrTraits for ReverseTraits {
         S: SizeTracker,
         O: WavlTreeObserver<Target = P::Target>,
     {
-        tree.right_most = val;
+        *tree.project().right_most = val;
     }
 
     unsafe fn set_rl_most<K, P, Tag, S, O>(
-        tree: &mut WavlTree<K, P, Tag, S, O>,
+        tree: Pin<&mut WavlTree<K, P, Tag, S, O>>,
         val: *mut P::Target,
     ) where
         P: PtrTraits,
@@ -863,9 +875,54 @@ impl LrTraits for ReverseTraits {
         S: SizeTracker,
         O: WavlTreeObserver<Target = P::Target>,
     {
-        tree.left_most = val;
+        *tree.project().left_most = val;
     }
 }
+
+/// A slot holding a pointer to a node of a `WavlTree`: either the tree's `root` field, or a
+/// child pointer (`left` / `right`) inside the node's parent.
+///
+/// The root slot is named symbolically (rather than as a raw pointer into the tree) so that
+/// tree mutations never hold a raw pointer derived from one (pinned) mutable borrow of the tree
+/// while accessing the tree through another.
+///
+/// The child slot is a `NonNull` (it always points into a live node), so `Link` uses its null
+/// niche for `Root` and is pointer-sized.
+enum Link<T> {
+    /// The tree's `root` field.
+    Root,
+    /// A child pointer inside a node in the tree.
+    Child(NonNull<*mut T>),
+}
+
+/// Returns a non-null pointer to the child pointer stored in `cell`, for use as a [`Link::Child`]
+/// slot.
+fn child_slot<T>(cell: &UnsafeCell<*mut T>) -> NonNull<*mut T> {
+    // SAFETY: `UnsafeCell::get` on a reference is never null.
+    unsafe { NonNull::new_unchecked(cell.get()) }
+}
+
+// Implemented by hand: deriving would needlessly require `T: Clone + Copy + PartialEq`.
+impl<T> Clone for Link<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for Link<T> {}
+
+impl<T> PartialEq for Link<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Link::Root, Link::Root) => true,
+            (Link::Child(a), Link::Child(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+type TargetRank<P, Tag> =
+    <<P as PtrTraits>::Target as WavlTreeContainable<<P as PtrTraits>::Target, Tag>>::Rank;
 
 /// A Weak AVL (WAVL) Tree associative container.
 ///
@@ -917,9 +974,12 @@ impl LrTraits for ReverseTraits {
 /// Because of the intrusive nature of the container, direct-erase operations
 /// (AKA, erase operations where the reference to the element to be erased is
 /// already known) run in amortized constant time.
-type TargetRank<P, Tag> =
-    <<P as PtrTraits>::Target as WavlTreeContainable<<P as PtrTraits>::Target, Tag>>::Rank;
-
+///
+/// The tree's boundary nodes point back at a sentinel derived from the tree's own address, so the
+/// tree is `!Unpin` and must never move once initialized: it is only ever created in place (see
+/// `new` / `new_with_observer`), every mutating method takes `self: Pin<&mut Self>`, and
+/// `CursorMut` holds the tree as `Pin<&mut WavlTree>`. Read-only methods take `&self`, which is
+/// also reachable through `Pin`'s `Deref`.
 #[repr(C)]
 #[pin_data(PinnedDrop)]
 pub struct WavlTree<
@@ -1015,13 +1075,18 @@ where
         if self.is_empty() { None } else { unsafe { Some(&*self.right_most) } }
     }
 
-    /// Returns a mutable pointer to the pointer linking `node` into the tree.
+    /// Returns the link slot holding the pointer to `node`: either the tree's `root` field, or
+    /// a child pointer inside `node`'s parent.
+    ///
+    /// The root case is returned as [`Link::Root`] rather than as a raw pointer into `self`, so
+    /// that no raw pointer derived from a (pinned) mutable borrow of the tree is ever held across
+    /// other accesses to the tree; see [`Self::read_link`] and [`Self::write_link`].
     ///
     /// # Safety
     ///
     /// The caller must ensure that `node` is a valid, aligned, and dereferenceable pointer
     /// to a node that is currently contained within this tree instance.
-    unsafe fn get_link_ptr_to_node(&mut self, node: *mut P::Target) -> *mut *mut P::Target {
+    unsafe fn get_link_to_node(&self, node: *mut P::Target) -> Link<P::Target> {
         debug_assert!(valid_sentinel_ptr(node));
 
         // SAFETY: The caller guarantees that `node` is a valid pointer to a node currently in the tree.
@@ -1030,18 +1095,48 @@ where
         if is_sentinel_ptr(parent) {
             debug_assert_eq!(parent, self.get_sentinel());
             debug_assert_eq!(self.root, node);
-            &mut self.root as *mut _
+            Link::Root
         } else {
             debug_assert!(!parent.is_null());
             // SAFETY: `parent` is not a sentinel and is not null, so it must be a valid,
             // dereferenceable pointer to a node in the tree.
             let parent_ns = unsafe { Self::get_node_ref(parent) };
             if parent_ns.get_left() == node {
-                parent_ns.left.get()
+                Link::Child(child_slot(&parent_ns.left))
             } else {
                 debug_assert_eq!(parent_ns.get_right(), node);
-                parent_ns.right.get()
+                Link::Child(child_slot(&parent_ns.right))
             }
+        }
+    }
+
+    /// Returns the node pointer stored in `link`.
+    ///
+    /// # Safety
+    ///
+    /// If `link` is a [`Link::Child`], it must point to a child pointer of a node currently
+    /// contained within this tree instance.
+    unsafe fn read_link(&self, link: Link<P::Target>) -> *mut P::Target {
+        match link {
+            Link::Root => self.root,
+            // SAFETY: The caller guarantees `slot` is a child pointer (an `UnsafeCell`) of a node
+            // in this tree, to which we have access.
+            Link::Child(slot) => unsafe { slot.read() },
+        }
+    }
+
+    /// Stores `node` in `link`.
+    ///
+    /// # Safety
+    ///
+    /// If `link` is a [`Link::Child`], it must point to a child pointer of a node currently
+    /// contained within this tree instance.
+    unsafe fn write_link(self: Pin<&mut Self>, link: Link<P::Target>, node: *mut P::Target) {
+        match link {
+            Link::Root => *self.project().root = node,
+            // SAFETY: The caller guarantees `slot` is a child pointer (an `UnsafeCell`) of a node
+            // in this tree, to which we have exclusive access.
+            Link::Child(slot) => unsafe { slot.write(node) },
         }
     }
 
@@ -1052,7 +1147,11 @@ where
     /// The caller must ensure that `node` and `parent` are valid, aligned, and dereferenceable
     /// pointers to nodes currently contained within this tree instance, and that `node` is
     /// a child of `parent` in the direction specified by `LR::Inverse`.
-    unsafe fn rotate_lr<LR: LrTraits>(&mut self, node: *mut P::Target, parent: *mut P::Target) {
+    unsafe fn rotate_lr<LR: LrTraits>(
+        mut self: Pin<&mut Self>,
+        node: *mut P::Target,
+        parent: *mut P::Target,
+    ) {
         // SAFETY: The caller guarantees that `node` and `parent` are valid pointers to nodes
         // currently in the tree. The structural modifications (rotations) correctly permute the
         // parent/child links while maintaining BST structural validity.
@@ -1070,7 +1169,7 @@ where
 
             let x_link = LR::rl_child_ptr(z_ns);
             let y_link = LR::lr_child_ptr(x_ns);
-            let z_link = self.get_link_ptr_to_node(z);
+            let z_link = self.get_link_to_node(z);
 
             let g = z_ns.get_parent();
             let y = *y_link;
@@ -1081,8 +1180,8 @@ where
             self.observer.record_rotation(x, y, LR::rl_child(x_ns), z, LR::lr_child(z_ns));
             let tmp = *x_link;
             *x_link = *y_link;
-            *y_link = *z_link;
-            *z_link = tmp;
+            *y_link = self.read_link(z_link);
+            self.as_mut().write_link(z_link, tmp);
 
             // Update parent pointers.
             x_ns.set_parent(g);
@@ -1101,7 +1200,7 @@ where
     /// pointers to nodes currently contained within this tree instance, and that `node` is
     /// a child of `parent` in the direction specified by `LR`.
     unsafe fn post_insert_fixup_lr<LR: LrTraits>(
-        &mut self,
+        mut self: Pin<&mut Self>,
         node: *mut P::Target,
         parent: *mut P::Target,
     ) {
@@ -1130,8 +1229,8 @@ where
                 && rl_child_ns.rank_parity() != node_ns.rank_parity()
             {
                 // Case #1: double rotation.
-                self.rotate_lr::<LR>(rl_child, node);
-                self.rotate_lr::<RL<LR>>(rl_child, parent);
+                self.as_mut().rotate_lr::<LR>(rl_child, node);
+                self.as_mut().rotate_lr::<RL<LR>>(rl_child, parent);
 
                 rl_child_ns.promote_rank();
                 node_ns.demote_rank();
@@ -1139,7 +1238,7 @@ where
                 self.observer.record_insert_double_rotation();
             } else {
                 // Case #2: single rotation.
-                self.rotate_lr::<RL<LR>>(node, parent);
+                self.as_mut().rotate_lr::<RL<LR>>(node, parent);
                 parent_ns.demote_rank();
                 self.observer.record_insert_rotation();
             }
@@ -1153,7 +1252,7 @@ where
     /// The caller must ensure that `node` is a valid, aligned, and dereferenceable pointer
     /// to a node that has just been inserted into this tree instance, and that the tree
     /// is structurally valid except for potential balance violations at `node` and its ancestors.
-    unsafe fn balance_post_insert(&mut self, mut node: *mut P::Target) {
+    unsafe fn balance_post_insert(self: Pin<&mut Self>, mut node: *mut P::Target) {
         // SAFETY: The caller guarantees `node` is a valid pointer to a node in the tree.
         // The loop climbs the tree, updating ranks and performing rotations as needed, maintaining
         // tree integrity.
@@ -1234,7 +1333,7 @@ where
     /// The caller must ensure that `node` is a valid, aligned, and dereferenceable pointer
     /// to a node currently contained within this tree instance, and that the tree is structurally
     /// valid except for potential balance violations after an erasure at `node`.
-    unsafe fn balance_post_erase_fix_22_leaf(&mut self, node: *mut P::Target) {
+    unsafe fn balance_post_erase_fix_22_leaf(self: Pin<&mut Self>, node: *mut P::Target) {
         // SAFETY: The caller guarantees `node` is a valid pointer to a node in the tree.
         // The function safely demotes the rank and propagates rebalancing up the tree.
         unsafe {
@@ -1276,7 +1375,10 @@ where
     /// The caller must ensure that `node` is a valid, aligned, and dereferenceable pointer
     /// to a node currently contained within this tree instance, and that `node` is the parent
     /// of a subtree that has just seen an erasure and violates the 3-child balance rule.
-    unsafe fn balance_post_erase_fix_lr_3_child<LR: LrTraits>(&mut self, node: *mut P::Target) {
+    unsafe fn balance_post_erase_fix_lr_3_child<LR: LrTraits>(
+        self: Pin<&mut Self>,
+        node: *mut P::Target,
+    ) {
         type RL<LR> = <LR as LrTraits>::Inverse;
         // SAFETY: The caller guarantees `node` is a valid pointer to a node in the tree.
         // The loop walks up the tree performing rank adjustments and triggers rotations as required
@@ -1359,7 +1461,7 @@ where
     /// pointers to nodes currently contained within this tree instance, and that `y` is the
     /// right child of `z` in the direction specified by `LR`.
     unsafe fn balance_post_erase_do_rotations<LR: LrTraits>(
-        &mut self,
+        mut self: Pin<&mut Self>,
         y: *mut P::Target,
         z: *mut P::Target,
     ) {
@@ -1378,7 +1480,7 @@ where
                 if valid_sentinel_ptr(w) { Self::get_node_ref(w).rank_parity() } else { true };
 
             if y_ns.rank_parity() != w_rank_parity {
-                self.rotate_lr::<LR>(y, z);
+                self.as_mut().rotate_lr::<LR>(y, z);
                 y_ns.promote_rank();
 
                 if !valid_sentinel_ptr(z_ns.get_left()) && !valid_sentinel_ptr(z_ns.get_right()) {
@@ -1393,8 +1495,8 @@ where
                 let v_ns = Self::get_node_ref(v);
                 debug_assert_ne!(v_ns.rank_parity(), y_ns.rank_parity());
 
-                self.rotate_lr::<RL<LR>>(v, y);
-                self.rotate_lr::<LR>(v, z);
+                self.as_mut().rotate_lr::<RL<LR>>(v, y);
+                self.as_mut().rotate_lr::<LR>(v, z);
 
                 v_ns.double_promote_rank();
                 y_ns.demote_rank();
@@ -1408,21 +1510,21 @@ where
     ///
     /// # Safety
     ///
-    /// - `owner` must be a valid, aligned, dereferenceable pointer to a `*mut P::Target`.
-    /// - `*owner` must be `null_mut()`.
+    /// - `owner` must be [`Link::Root`] or a child pointer of a node in this tree, and must
+    ///   currently hold `null_mut()`.
     /// - `node` must be a valid, aligned, dereferenceable pointer to a node currently in the tree.
     /// - `node` must have exactly one child in the direction specified by `LR` (which must be
     ///   a valid non-null, non-sentinel node), and must NOT have a valid child in the opposite direction.
     unsafe fn promote_lr_child<LR: LrTraits>(
-        &mut self,
-        owner: *mut *mut P::Target,
+        mut self: Pin<&mut Self>,
+        owner: Link<P::Target>,
         node: *mut P::Target,
     ) {
-        // SAFETY: The caller must guarantee that `owner` is a valid, aligned, dereferenceable pointer
-        // to `*mut P::Target` containing `null_mut()`, that `node` is a valid node in the tree,
-        // and that the node has exactly one child in the `LR` direction to promote.
+        // SAFETY: The caller must guarantee that `owner` is a valid link slot of this tree
+        // containing `null_mut()`, that `node` is a valid node in the tree, and that the node has
+        // exactly one child in the `LR` direction to promote.
         unsafe {
-            debug_assert!((*owner).is_null());
+            debug_assert!(self.read_link(owner).is_null());
             debug_assert!(valid_sentinel_ptr(node));
 
             let ns = Self::get_node_ref(node);
@@ -1431,15 +1533,16 @@ where
 
             debug_assert!(valid_sentinel_ptr(*lr_child_ptr) && !valid_sentinel_ptr(*rl_child_ptr));
 
-            *owner = *lr_child_ptr;
+            let promoted = *lr_child_ptr;
+            self.as_mut().write_link(owner, promoted);
             *lr_child_ptr = core::ptr::null_mut();
-            Self::get_node_ref(*owner).set_parent(ns.get_parent());
+            Self::get_node_ref(promoted).set_parent(ns.get_parent());
 
-            let rl_most = LR::rl_most(self);
+            let rl_most = LR::rl_most(&*self);
             debug_assert_eq!(rl_most == node, is_sentinel_ptr(*rl_child_ptr));
 
             if is_sentinel_ptr(*rl_child_ptr) {
-                let mut replacement = *owner;
+                let mut replacement = promoted;
                 let mut next_rl_child_ptr;
 
                 loop {
@@ -1453,7 +1556,7 @@ where
                     replacement = *next_rl_child_ptr;
                 }
 
-                LR::set_rl_most(self, replacement);
+                LR::set_rl_most(self.as_mut(), replacement);
                 *next_rl_child_ptr = self.get_sentinel();
                 *rl_child_ptr = core::ptr::null_mut();
             }
@@ -1464,33 +1567,34 @@ where
         }
     }
 
-    /// Physically swaps the position of `node1` (pointed to by `ptr_ref1`) with `node2`
+    /// Physically swaps the position of `node1` (pointed to by `link1`) with `node2`
     /// (pointed to by `ptr_ref2`) in the tree's pointer structure.
     ///
     /// E.g. `node2` must be the leftmost descendant of the right child of `node1`.
     ///
-    /// Returns the pointer to the slot originally containing `node2` (which now contains `node1`).
+    /// Returns the pointer to the child slot now containing `node1` (which is never the root
+    /// slot, as `node1` always ends up below `node2`).
     ///
     /// # Safety
     ///
-    /// - `ptr_ref1` must be a valid, aligned, dereferenceable pointer to `*mut P::Target`
-    ///   which contains a valid, aligned, dereferenceable pointer to `node1`.
-    /// - `ptr_ref2` must be a valid, aligned, dereferenceable pointer to `*mut P::Target`
-    ///   which contains a valid, aligned, dereferenceable pointer to `node2`.
+    /// - `link1` must be [`Link::Root`] or a child pointer of a node in this tree, and must
+    ///   contain a valid, aligned, dereferenceable pointer to `node1`.
+    /// - `ptr_ref2` must be a child pointer of a node in this tree which contains a valid,
+    ///   aligned, dereferenceable pointer to `node2`.
     /// - `node2` must be a descendant of `node1`'s right subtree.
     /// - Both `node1` and `node2` must reside within the same tree.
     unsafe fn swap_with_right_descendant(
-        &mut self,
-        ptr_ref1: *mut *mut P::Target,
-        ptr_ref2: *mut *mut P::Target,
-    ) -> *mut *mut P::Target {
-        // SAFETY: The caller must guarantee that `ptr_ref1` and `ptr_ref2` are valid, aligned
-        // pointers pointing to valid nodes in the tree, and that `node2` is a descendant in the
+        mut self: Pin<&mut Self>,
+        link1: Link<P::Target>,
+        ptr_ref2: NonNull<*mut P::Target>,
+    ) -> NonNull<*mut P::Target> {
+        // SAFETY: The caller must guarantee that `link1` and `ptr_ref2` are valid link slots
+        // pointing to valid nodes in the tree, and that `node2` is a descendant in the
         // right subtree of `node1`. This method performs structural pointer manipulation to swap
         // the nodes physically, preserving local tree structure.
         unsafe {
-            let node1 = *ptr_ref1;
-            let node2 = *ptr_ref2;
+            let node1 = self.read_link(link1);
+            let node2 = ptr_ref2.read();
 
             let ns1 = Self::get_node_ref(node1);
             let ns2 = Self::get_node_ref(node2);
@@ -1530,10 +1634,10 @@ where
             let ns1_rp = Self::get_node_ref(ns1.get_right()).parent.get();
 
             if node1 == self.left_most {
-                self.left_most = node2;
+                *self.as_mut().project().left_most = node2;
             }
             if node2 == self.right_most {
-                self.right_most = node1;
+                *self.as_mut().project().right_most = node1;
             }
 
             // Swap parent.
@@ -1566,18 +1670,20 @@ where
                 *ns2_rp = node1;
             }
 
-            if ptr_ref2 != ns1.right.get() {
-                #[allow(clippy::swap_ptr_to_ref)]
-                core::mem::swap(&mut *ptr_ref1, &mut *ptr_ref2);
+            if ptr_ref2 != child_slot(&ns1.right) {
+                let slot2 = ptr_ref2.read();
+                ptr_ref2.write(self.read_link(link1));
+                self.as_mut().write_link(link1, slot2);
                 *ns1_rp = node2;
                 ptr_ref2
             } else {
                 debug_assert_eq!(*ns1.parent.get(), node1);
                 debug_assert_eq!(*ns2.right.get(), node2);
-                #[allow(clippy::swap_ptr_to_ref)]
-                core::mem::swap(&mut *ptr_ref1, &mut *ns2.right.get());
+                let slot2 = *ns2.right.get();
+                *ns2.right.get() = self.read_link(link1);
+                self.as_mut().write_link(link1, slot2);
                 *ns1.parent.get() = node2;
-                ns2.right.get()
+                child_slot(&ns2.right)
             }
         }
     }
@@ -1592,7 +1698,11 @@ where
     /// - `ptr` must wrap a valid, properly aligned, dereferenceable node.
     /// - The node must NOT be currently contained in this or any other intrusive container.
     /// - `collision` must be a valid, aligned, dereferenceable pointer to `*mut P::Target`.
-    unsafe fn internal_insert(&mut self, ptr: P, collision: &mut *mut P::Target) -> Result<(), P> {
+    unsafe fn internal_insert(
+        mut self: Pin<&mut Self>,
+        ptr: P,
+        collision: &mut *mut P::Target,
+    ) -> Result<(), P> {
         // SAFETY: The caller guarantees that `ptr` represents a valid, unlinked node, and that
         // `collision` is a valid slot. Dereferencing pointers and mutating the parent/child links
         // preserves tree structure.
@@ -1611,11 +1721,11 @@ where
                 ns.set_right(self.get_sentinel());
 
                 debug_assert!(is_sentinel_ptr(self.left_most) && is_sentinel_ptr(self.right_most));
-                self.left_most = raw;
-                self.right_most = raw;
-
-                self.root = raw;
-                self.size.increment();
+                let this = self.as_mut().project();
+                *this.left_most = raw;
+                *this.right_most = raw;
+                *this.root = raw;
+                this.size.increment();
                 self.observer.record_insert(raw);
                 return Ok(());
             }
@@ -1664,18 +1774,18 @@ where
             if is_right_most {
                 debug_assert!(is_sentinel_ptr(*owner));
                 ns.set_right(self.get_sentinel());
-                self.right_most = raw;
+                *self.as_mut().project().right_most = raw;
             } else if is_left_most {
                 debug_assert!(is_sentinel_ptr(*owner));
                 ns.set_left(self.get_sentinel());
-                self.left_most = raw;
+                *self.as_mut().project().left_most = raw;
             }
 
             debug_assert!(!valid_sentinel_ptr(*owner));
             ns.set_parent(parent);
 
             *owner = raw;
-            self.size.increment();
+            self.as_mut().project().size.increment();
             self.observer.record_insert(raw);
 
             self.balance_post_insert(*owner);
@@ -1691,7 +1801,7 @@ where
     ///
     /// - `ptr` must be a valid, properly aligned, dereferenceable raw pointer to a node.
     /// - If the node is not null or sentinel, it MUST be currently contained within this tree.
-    unsafe fn internal_erase(&mut self, ptr: *mut P::Target) -> Option<P> {
+    unsafe fn internal_erase(mut self: Pin<&mut Self>, ptr: *mut P::Target) -> Option<P> {
         // SAFETY: The caller guarantees that `ptr` points to a valid node belonging to this tree.
         // Removing it involves swapping it out structurally, repairing BST/WAVL invariants,
         // and reclaiming ownership via `P::from_raw`.
@@ -1701,39 +1811,45 @@ where
             }
 
             let ns = Self::get_node_ref(ptr);
-            let mut owner = self.get_link_ptr_to_node(ptr);
-            debug_assert_eq!(*owner, ptr);
+            let mut owner = self.get_link_to_node(ptr);
+            // Continue with the pointer stored in the tree (which carries the provenance of the
+            // `P::into_raw` pointer that was inserted) rather than the caller's `ptr`, which may
+            // have been derived from a shared reference (e.g. via `cursor_mut_at`).
+            let ptr = self.read_link(owner);
 
             if valid_sentinel_ptr(ns.get_left()) && valid_sentinel_ptr(ns.get_right()) {
-                let mut new_owner = ns.right.get();
+                let mut new_owner = child_slot(&ns.right);
                 let mut new_ns = Self::get_node_ref(ns.get_right());
 
                 while !new_ns.get_left().is_null() {
                     debug_assert!(!is_sentinel_ptr(new_ns.get_left()));
-                    new_owner = new_ns.left.get();
-                    new_ns = Self::get_node_ref(*new_owner);
+                    new_owner = child_slot(&new_ns.left);
+                    new_ns = Self::get_node_ref(new_owner.read());
                 }
 
-                owner = self.swap_with_right_descendant(owner, new_owner);
-                debug_assert_eq!(*owner, ptr);
+                owner = Link::Child(self.as_mut().swap_with_right_descendant(owner, new_owner));
+                debug_assert_eq!(self.read_link(owner), ptr);
             }
 
             let parent = ns.get_parent();
             debug_assert!(!parent.is_null());
             let (was_one_child, was_left_child) = if !is_sentinel_ptr(parent) {
                 let parent_ns = Self::get_node_ref(parent);
-                (ns.rank_parity() != parent_ns.rank_parity(), parent_ns.left.get() == owner)
+                (
+                    ns.rank_parity() != parent_ns.rank_parity(),
+                    owner == Link::Child(child_slot(&parent_ns.left)),
+                )
             } else {
                 (false, false)
             };
 
-            *owner = core::ptr::null_mut();
+            self.as_mut().write_link(owner, core::ptr::null_mut());
 
             let target = ptr;
             if valid_sentinel_ptr(ns.get_left()) {
-                self.promote_lr_child::<ForwardTraits>(owner, target);
+                self.as_mut().promote_lr_child::<ForwardTraits>(owner, target);
             } else if valid_sentinel_ptr(ns.get_right()) {
-                self.promote_lr_child::<ReverseTraits>(owner, target);
+                self.as_mut().promote_lr_child::<ReverseTraits>(owner, target);
             } else {
                 debug_assert_eq!(is_sentinel_ptr(ns.get_left()), self.left_most == target);
                 debug_assert_eq!(is_sentinel_ptr(ns.get_right()), self.right_most == target);
@@ -1744,22 +1860,24 @@ where
                             debug_assert_eq!(self.size.get(), 1);
                         }
                         debug_assert!(is_sentinel_ptr(ns.get_parent()));
-                        self.left_most = self.get_sentinel();
-                        self.right_most = self.get_sentinel();
+                        let sentinel = self.get_sentinel();
+                        let this = self.as_mut().project();
+                        *this.left_most = sentinel;
+                        *this.right_most = sentinel;
                         ns.set_left(core::ptr::null_mut());
                         ns.set_right(core::ptr::null_mut());
                     } else {
                         debug_assert!(valid_sentinel_ptr(ns.get_parent()));
                         debug_assert!(ns.get_right().is_null());
-                        self.left_most = ns.get_parent();
-                        *owner = ns.get_left();
+                        *self.as_mut().project().left_most = ns.get_parent();
+                        self.as_mut().write_link(owner, ns.get_left());
                         ns.set_left(core::ptr::null_mut());
                     }
                 } else if is_sentinel_ptr(ns.get_right()) {
                     debug_assert!(valid_sentinel_ptr(ns.get_parent()));
                     debug_assert!(ns.get_left().is_null());
-                    self.right_most = ns.get_parent();
-                    *owner = ns.get_right();
+                    *self.as_mut().project().right_most = ns.get_parent();
+                    self.as_mut().write_link(owner, ns.get_right());
                     ns.set_right(core::ptr::null_mut());
                 }
 
@@ -1769,7 +1887,7 @@ where
             debug_assert!(ns.is_valid() && !ns.in_container());
             self.observer.record_erase(target, parent);
 
-            self.size.decrement();
+            self.as_mut().project().size.decrement();
 
             if !is_sentinel_ptr(parent) {
                 if was_one_child {
@@ -1798,7 +1916,11 @@ where
     /// - `new_node` must be a valid node not currently contained in this or any other tree.
     /// - The key of `new_node` must exactly match the key of `old_node` to preserve the
     ///   Binary Search Tree (BST) ordering invariant.
-    unsafe fn internal_swap(&mut self, old_node: *mut P::Target, new_node: P) -> Option<P> {
+    unsafe fn internal_swap(
+        mut self: Pin<&mut Self>,
+        old_node: *mut P::Target,
+        new_node: P,
+    ) -> Option<P> {
         // SAFETY: The caller must guarantee that `old_node` is in this tree, that `new_node`
         // is unlinked, and that their keys match. This method updates all parent and child
         // links to point to the new node, and reclaims ownership of `old_node`.
@@ -1822,7 +1944,7 @@ where
             } else {
                 if is_sentinel_ptr(old_ns.get_left()) {
                     debug_assert_eq!(self.left_most, old_node);
-                    self.left_most = new_raw;
+                    *self.as_mut().project().left_most = new_raw;
                 }
             }
             new_ns.set_left(old_ns.get_left());
@@ -1833,7 +1955,7 @@ where
             } else {
                 if is_sentinel_ptr(old_ns.get_right()) {
                     debug_assert_eq!(self.right_most, old_node);
-                    self.right_most = new_raw;
+                    *self.as_mut().project().right_most = new_raw;
                 }
             }
             new_ns.set_right(old_ns.get_right());
@@ -1841,7 +1963,8 @@ where
 
             *new_ns.rank.get() = *old_ns.rank.get();
 
-            *self.get_link_ptr_to_node(old_node) = new_raw;
+            let link = self.get_link_to_node(old_node);
+            self.as_mut().write_link(link, new_raw);
             new_ns.set_parent(old_ns.get_parent());
             old_ns.set_parent(core::ptr::null_mut());
 
@@ -1928,12 +2051,13 @@ where
     /// Inserts an element into the tree.
     ///
     /// For raw pointers, use [`insert_raw`] instead.
-    pub fn insert(&mut self, ptr: P)
+    pub fn insert(self: Pin<&mut Self>, ptr: P)
     where
         P: ManagedPtr,
     {
         // SAFETY: `P` is a `ManagedPtr`, which guarantees that the pointer is valid and that the
-        // object will outlive its reference from this tree.
+        // object will outlive its reference from this tree. Managed objects are heap-allocated and
+        // the tree holds `ptr` while the object is linked, so it stays pinned at its address.
         unsafe { self.insert_raw(ptr) }
     }
 
@@ -1941,12 +2065,23 @@ where
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the tree. The caller must also uphold the synchronization preconditions
-    /// of `WavlTreeKeyable` and `O` for `ptr` while it resides in the tree.
-    pub unsafe fn insert_raw(&mut self, ptr: P) {
+    /// - `ptr` must be a valid pointer to a `P::Target`, and the object must outlive its reference
+    ///   from the tree.
+    /// - The object's `Tag` node must not currently be in any container (this is only checked by a
+    ///   debug assertion).
+    /// - While the object remains linked in the tree, it must stay pinned at `ptr` (neither moved
+    ///   nor overwritten), and no `&mut` reference to it may be live that aliases the tree's
+    ///   accesses to it.
+    /// - The caller must uphold the synchronization preconditions of `WavlTreeKeyable` and `O` for
+    ///   `ptr` while it resides in the tree.
+    ///
+    /// Because the tree is pinned, `Pin`'s drop guarantee ensures it is dropped (and, for managed
+    /// pointers, cleared) before its memory is invalidated or reused, so pointers into it held by
+    /// linked elements never dangle while the tree is alive.
+    pub unsafe fn insert_raw(self: Pin<&mut Self>, ptr: P) {
         let mut collision = core::ptr::null_mut();
-        // SAFETY: The caller guarantees `ptr` is valid and outlives the tree registration.
+        // SAFETY: The caller upholds `internal_insert`'s preconditions: `ptr` is valid, not in any
+        // container, and stays valid and pinned while linked into the tree.
         let _ = unsafe { self.internal_insert(ptr, &mut collision) };
     }
 
@@ -1962,12 +2097,16 @@ where
     /// * `Err((ptr, cursor))` if there was a collision. In this case, the
     ///   passed pointer `ptr` is returned back to the caller (not consumed), along with
     ///   a `CursorMut` positioned at the colliding node already in the tree.
-    pub fn insert_or_find<'a>(&'a mut self, ptr: P) -> InsertOrFindResult<'a, K, P, Tag, S, O>
+    pub fn insert_or_find<'a>(
+        self: Pin<&'a mut Self>,
+        ptr: P,
+    ) -> InsertOrFindResult<'a, K, P, Tag, S, O>
     where
         P: ManagedPtr,
     {
         // SAFETY: `P` is a `ManagedPtr`, which guarantees that the pointer is valid and that the
-        // object will outlive its reference from this tree.
+        // object will outlive its reference from this tree. Managed objects are heap-allocated and
+        // the tree holds `ptr` while the object is linked, so it stays pinned at its address.
         unsafe { self.insert_or_find_raw(ptr) }
     }
 
@@ -1976,19 +2115,26 @@ where
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the tree. The caller must also uphold the synchronization preconditions
-    /// of `WavlTreeKeyable` and `O` for `ptr` while it resides in the tree.
+    /// - `ptr` must be a valid pointer to a `P::Target`, and the object must outlive its reference
+    ///   from the tree.
+    /// - The object's `Tag` node must not currently be in any container (this is only checked by a
+    ///   debug assertion).
+    /// - While the object remains linked in the tree, it must stay pinned at `ptr` (neither moved
+    ///   nor overwritten), and no `&mut` reference to it may be live that aliases the tree's
+    ///   accesses to it.
+    /// - The caller must uphold the synchronization preconditions of `WavlTreeKeyable` and `O` for
+    ///   `ptr` while it resides in the tree.
     pub unsafe fn insert_or_find_raw<'a>(
-        &'a mut self,
+        mut self: Pin<&'a mut Self>,
         ptr: P,
     ) -> InsertOrFindResult<'a, K, P, Tag, S, O> {
         let mut collision = core::ptr::null_mut();
-        // SAFETY: The caller guarantees `ptr` is valid and outlives the tree registration.
+        // SAFETY: The caller upholds `internal_insert`'s preconditions: `ptr` is valid, not in any
+        // container, and stays valid and pinned while linked into the tree.
         // If a collision occurs, `collision` is guaranteed to be a valid pointer to the colliding
         // node in this tree, which allows us to safely construct a `CursorMut` pointing to it.
         unsafe {
-            match self.internal_insert(ptr, &mut collision) {
+            match self.as_mut().internal_insert(ptr, &mut collision) {
                 Ok(()) => Ok(()),
                 Err(ptr) => Err((ptr, CursorMut { tree: self, current: collision })),
             }
@@ -2009,12 +2155,13 @@ where
     ///
     /// `Some(replaced)` containing the previous element if a collision occurred,
     /// or `None` if the element was newly inserted.
-    pub fn insert_or_replace(&mut self, ptr: P) -> Option<P>
+    pub fn insert_or_replace(self: Pin<&mut Self>, ptr: P) -> Option<P>
     where
         P: ManagedPtr,
     {
         // SAFETY: `P` is a `ManagedPtr`, which guarantees that the pointer is valid and that the
-        // object will outlive its reference from this tree.
+        // object will outlive its reference from this tree. Managed objects are heap-allocated and
+        // the tree holds `ptr` while the object is linked, so it stays pinned at its address.
         unsafe { self.insert_or_replace_raw(ptr) }
     }
 
@@ -2026,16 +2173,23 @@ where
     ///
     /// # Safety
     ///
-    /// The caller must ensure that `ptr` is a valid pointer to a `T` and that the object outlives
-    /// the reference from the tree. The caller must also uphold the synchronization preconditions
-    /// of `WavlTreeKeyable` and `O` for `ptr` while it resides in the tree.
-    pub unsafe fn insert_or_replace_raw(&mut self, ptr: P) -> Option<P> {
+    /// - `ptr` must be a valid pointer to a `P::Target`, and the object must outlive its reference
+    ///   from the tree.
+    /// - The object's `Tag` node must not currently be in any container (this is only checked by a
+    ///   debug assertion).
+    /// - While the object remains linked in the tree, it must stay pinned at `ptr` (neither moved
+    ///   nor overwritten), and no `&mut` reference to it may be live that aliases the tree's
+    ///   accesses to it.
+    /// - The caller must uphold the synchronization preconditions of `WavlTreeKeyable` and `O` for
+    ///   `ptr` while it resides in the tree.
+    pub unsafe fn insert_or_replace_raw(mut self: Pin<&mut Self>, ptr: P) -> Option<P> {
         let mut collision = core::ptr::null_mut();
-        // SAFETY: The caller guarantees `ptr` is valid and outlives the tree registration.
+        // SAFETY: The caller upholds `internal_insert`'s preconditions: `ptr` is valid, not in any
+        // container, and stays valid and pinned while linked into the tree.
         // If a collision occurs, `collision` points to a valid node in the tree sharing the same key,
         // making it safe to swap `collision` with `ptr` via `internal_swap`.
         unsafe {
-            match self.internal_insert(ptr, &mut collision) {
+            match self.as_mut().internal_insert(ptr, &mut collision) {
                 Ok(()) => None,
                 Err(ptr) => self.internal_swap(collision, ptr),
             }
@@ -2043,95 +2197,158 @@ where
     }
 
     /// Removes and returns the first (smallest) element of the tree, or `None` if it is empty.
-    pub fn pop_front(&mut self) -> Option<P> {
+    pub fn pop_front(self: Pin<&mut Self>) -> Option<P> {
         if self.is_empty() {
             None
         } else {
+            let left_most = self.left_most;
             // SAFETY: If `self.is_empty()` is false, `self.left_most` is guaranteed to be a valid
             // pointer to a node currently contained in this tree instance.
-            unsafe { self.internal_erase(self.left_most) }
+            unsafe { self.internal_erase(left_most) }
         }
     }
 
     /// Removes and returns the last (largest) element of the tree, or `None` if it is empty.
-    pub fn pop_back(&mut self) -> Option<P> {
+    pub fn pop_back(self: Pin<&mut Self>) -> Option<P> {
         if self.is_empty() {
             None
         } else {
+            let right_most = self.right_most;
             // SAFETY: If `self.is_empty()` is false, `self.right_most` is guaranteed to be a valid
             // pointer to a node currently contained in this tree instance.
-            unsafe { self.internal_erase(self.right_most) }
+            unsafe { self.internal_erase(right_most) }
         }
     }
 
     /// Removes all elements from the tree.
-    pub fn clear(&mut self) {
-        while !self.is_empty() {
-            self.pop_front();
+    pub fn clear(mut self: Pin<&mut Self>) {
+        while self.as_mut().pop_front().is_some() {}
+    }
+
+    /// A special clear operation that resets the internal tree structure in O(1) time, leaving
+    /// the node state of the current elements unmodified.
+    ///
+    /// Only usable with containers of unmanaged pointers (`!P::IS_MANAGED`); attempting to call
+    /// this on a container of managed pointers (`UniquePtr` or `RefPtr`) fails to compile.
+    ///
+    /// While this can be useful in special cases (such as resetting a free list for a pool or slab
+    /// allocator during destruction), you normally do not want this behavior. Think carefully
+    /// before calling this!
+    ///
+    /// # Safety
+    ///
+    /// Unlike C++, `WavlTreeNode` does not have an `AllowClearUnsafe` node option; this safety
+    /// contract replaces the C++ node-option `static_assert`:
+    /// - After this call, every former element retains stale `parent`, `left`, and `right` links
+    ///   and still reports `in_container() == true`.
+    /// - The caller must ensure that no former element's node is used again by any tree, cursor, or
+    ///   iterator operation (such as insertion, `erase_raw`, `cursor_at`, `cursor_mut_at`,
+    ///   `successor_raw`, or `ForwardIterator`/`ReverseIterator::from_element`) until its memory is
+    ///   freed or the node is reinitialized.
+    /// - The caller must ensure that no former element's node is dropped while its `Drop`
+    ///   implementation's `!in_container()` debug assertion would fire (for example, by keeping
+    ///   the node in `ManuallyDrop`, freeing the backing memory without running `Drop`, or
+    ///   manually resetting the node state first).
+    #[inline]
+    pub unsafe fn clear_unsafe(self: Pin<&mut Self>) {
+        const {
+            assert!(
+                !P::IS_MANAGED,
+                "clear_unsafe is not allowed for containers of managed pointers",
+            );
+        }
+
+        let sentinel = self.get_sentinel();
+        let this = self.project();
+        *this.root = core::ptr::null_mut();
+        *this.left_most = sentinel;
+        *this.right_most = sentinel;
+
+        // Update our count bookkeeping.
+        if S::IS_TRACKING {
+            this.size.set(0);
         }
     }
 
     /// Swaps the contents of this tree with another tree.
     ///
     /// This runs in O(1) time.
-    pub fn swap(&mut self, other: &mut Self) {
-        // Swap all fields except _pin and _phantom.
-        core::mem::swap(&mut self.root, &mut other.root);
-        core::mem::swap(&mut self.left_most, &mut other.left_most);
-        core::mem::swap(&mut self.right_most, &mut other.right_most);
-        core::mem::swap(&mut self.size, &mut other.size);
-        core::mem::swap(&mut self.observer, &mut other.observer);
-
-        // Now repair the sentinel pointers which are self-referential.
-        self.fix_sentinels_after_swap(other);
-    }
-
-    fn fix_sentinels_after_swap(&mut self, other: &mut Self) {
+    pub fn swap(self: Pin<&mut Self>, other: Pin<&mut Self>) {
+        // The tree never dereferences its sentinel (it is only compared against and stored in the
+        // boundary nodes), so the sentinels can be computed up front from shared borrows.
         let self_sentinel = self.get_sentinel();
         let other_sentinel = other.get_sentinel();
 
-        // For `self` (which currently contains `other`'s old nodes):
-        // The old sentinel in these nodes is `other_sentinel`. We update them to `self_sentinel`.
-        if self.root.is_null() {
-            self.left_most = self_sentinel;
-            self.right_most = self_sentinel;
-        } else {
-            // SAFETY: Sentinels are verified to be valid and correspond to the correct node locations.
-            unsafe {
-                let root_ns = Self::get_node_ref(self.root);
-                debug_assert_eq!(root_ns.get_parent(), other_sentinel);
-                root_ns.set_parent(self_sentinel);
+        // Neither tree moves: only the non-structurally pinned fields are exchanged in place
+        // through pin projection.
+        let this = self.project();
+        let that = other.project();
+        core::mem::swap(this.root, that.root);
+        core::mem::swap(this.left_most, that.left_most);
+        core::mem::swap(this.right_most, that.right_most);
+        this.size.swap(that.size);
+        core::mem::swap(this.observer, that.observer);
 
-                let left_ns = Self::get_node_ref(self.left_most);
-                debug_assert_eq!(left_ns.get_left(), other_sentinel);
-                left_ns.set_left(self_sentinel);
+        // Now repair the self-referential sentinel pointers: the nodes that moved into `this`
+        // still refer to `other`'s sentinel, and vice versa.
+        //
+        // SAFETY: `*this.root` (and `*that.root`) is either null or the root of a structurally
+        // valid tree whose boundary nodes `*left_most`/`*right_most` hold the sentinel of the tree
+        // the nodes were just moved out of.
+        unsafe {
+            Self::repoint_sentinels(
+                *this.root,
+                this.left_most,
+                this.right_most,
+                other_sentinel,
+                self_sentinel,
+            );
+            Self::repoint_sentinels(
+                *that.root,
+                that.left_most,
+                that.right_most,
+                self_sentinel,
+                other_sentinel,
+            );
+        }
+    }
 
-                let right_ns = Self::get_node_ref(self.right_most);
-                debug_assert_eq!(right_ns.get_right(), other_sentinel);
-                right_ns.set_right(self_sentinel);
-            }
+    /// Rewrites the sentinel references held by a tree's boundary nodes from `old` to `new` after
+    /// the tree's contents were swapped in from another tree, or resets `left_most`/`right_most`
+    /// to `new` if the tree is empty.
+    ///
+    /// # Safety
+    ///
+    /// `root` must be null, or the root of a structurally valid tree whose leftmost and rightmost
+    /// nodes are `*left_most` and `*right_most`, and whose root's parent, leftmost node's left
+    /// child, and rightmost node's right child are all `old`.
+    unsafe fn repoint_sentinels(
+        root: *mut P::Target,
+        left_most: &mut *mut P::Target,
+        right_most: &mut *mut P::Target,
+        old: *mut P::Target,
+        new: *mut P::Target,
+    ) {
+        if root.is_null() {
+            *left_most = new;
+            *right_most = new;
+            return;
         }
 
-        // For `other` (which currently contains `self`'s old nodes):
-        // The old sentinel in these nodes is `self_sentinel`. We update them to `other_sentinel`.
-        if other.root.is_null() {
-            other.left_most = other_sentinel;
-            other.right_most = other_sentinel;
-        } else {
-            // SAFETY: Sentinels are verified to be valid and correspond to the correct node locations.
-            unsafe {
-                let root_ns = Self::get_node_ref(other.root);
-                debug_assert_eq!(root_ns.get_parent(), self_sentinel);
-                root_ns.set_parent(other_sentinel);
+        // SAFETY: The caller guarantees that `root`, `*left_most` and `*right_most` are valid
+        // nodes of a structurally valid, non-empty tree.
+        unsafe {
+            let root_ns = Self::get_node_ref(root);
+            debug_assert_eq!(root_ns.get_parent(), old);
+            root_ns.set_parent(new);
 
-                let left_ns = Self::get_node_ref(other.left_most);
-                debug_assert_eq!(left_ns.get_left(), self_sentinel);
-                left_ns.set_left(other_sentinel);
+            let left_ns = Self::get_node_ref(*left_most);
+            debug_assert_eq!(left_ns.get_left(), old);
+            left_ns.set_left(new);
 
-                let right_ns = Self::get_node_ref(other.right_most);
-                debug_assert_eq!(right_ns.get_right(), self_sentinel);
-                right_ns.set_right(other_sentinel);
-            }
+            let right_ns = Self::get_node_ref(*right_most);
+            debug_assert_eq!(right_ns.get_right(), old);
+            right_ns.set_right(new);
         }
     }
 
@@ -2201,42 +2418,73 @@ where
         }
     }
 
-    /// Finds an element in the tree by key and returns a cursor positioned at it.
+    /// Finds an element in the tree by key and returns a read-only cursor positioned at it.
     ///
     /// If the key is not found, the returned cursor is positioned at the sentinel
     /// (i.e. `cursor.get()` will return `None`).
-    pub fn find_cursor(&mut self, key: &K) -> CursorMut<'_, K, P, Tag, S, O> {
+    pub fn find_cursor(&self, key: &K) -> Cursor<'_, K, P, Tag, S, O> {
+        // SAFETY: find_raw returns a valid node pointer or sentinel pointer belonging to this tree.
+        let node = unsafe { self.find_raw(key) };
+        Cursor { tree: self, current: node }
+    }
+
+    /// Returns a read-only cursor positioned at the lower bound of the key (the first element
+    /// in the tree whose key is greater than or equal to `key`).
+    ///
+    /// If no such element exists (e.g. all elements in the tree are smaller than `key`),
+    /// the returned cursor is positioned at the sentinel.
+    pub fn lower_bound(&self, key: &K) -> Cursor<'_, K, P, Tag, S, O> {
+        // SAFETY: bound_raw returns a valid node pointer or sentinel pointer in the tree.
+        let node = unsafe { self.bound_raw(key, false) };
+        Cursor { tree: self, current: node }
+    }
+
+    /// Returns a read-only cursor positioned at the upper bound of the key (the first element
+    /// in the tree whose key is strictly greater than `key`).
+    ///
+    /// If no such element exists (e.g. all elements in the tree are smaller than or
+    /// equal to `key`), the returned cursor is positioned at the sentinel.
+    pub fn upper_bound(&self, key: &K) -> Cursor<'_, K, P, Tag, S, O> {
+        // SAFETY: bound_raw returns a valid node pointer or sentinel pointer in the tree.
+        let node = unsafe { self.bound_raw(key, true) };
+        Cursor { tree: self, current: node }
+    }
+
+    /// Finds an element in the tree by key and returns a mutable cursor positioned at it.
+    ///
+    /// If the key is not found, the returned cursor is positioned at the sentinel
+    /// (i.e. `cursor.get()` will return `None`).
+    pub fn find_cursor_mut(self: Pin<&mut Self>, key: &K) -> CursorMut<'_, K, P, Tag, S, O> {
         // SAFETY: find_raw returns a valid node pointer or sentinel pointer belonging to this tree.
         let node = unsafe { self.find_raw(key) };
         CursorMut { tree: self, current: node }
     }
 
-    /// Returns a cursor positioned at the lower bound of the key (the first element
+    /// Returns a mutable cursor positioned at the lower bound of the key (the first element
     /// in the tree whose key is greater than or equal to `key`).
     ///
     /// If no such element exists (e.g. all elements in the tree are smaller than `key`),
     /// the returned cursor is positioned at the sentinel.
-    pub fn lower_bound(&mut self, key: &K) -> CursorMut<'_, K, P, Tag, S, O> {
+    pub fn lower_bound_mut(self: Pin<&mut Self>, key: &K) -> CursorMut<'_, K, P, Tag, S, O> {
         // SAFETY: bound_raw returns a valid node pointer or sentinel pointer in the tree.
         let node = unsafe { self.bound_raw(key, false) };
         CursorMut { tree: self, current: node }
     }
 
-    /// Returns a cursor positioned at the upper bound of the key (the first element
+    /// Returns a mutable cursor positioned at the upper bound of the key (the first element
     /// in the tree whose key is strictly greater than `key`).
     ///
     /// If no such element exists (e.g. all elements in the tree are smaller than or
     /// equal to `key`), the returned cursor is positioned at the sentinel.
-    pub fn upper_bound(&mut self, key: &K) -> CursorMut<'_, K, P, Tag, S, O> {
+    pub fn upper_bound_mut(self: Pin<&mut Self>, key: &K) -> CursorMut<'_, K, P, Tag, S, O> {
         // SAFETY: bound_raw returns a valid node pointer or sentinel pointer in the tree.
         let node = unsafe { self.bound_raw(key, true) };
         CursorMut { tree: self, current: node }
     }
 
     /// Erases an element by key.
-    pub fn erase(&mut self, key: &K) -> Option<P> {
-        let mut cursor = self.find_cursor(key);
-        cursor.erase()
+    pub fn erase(self: Pin<&mut Self>, key: &K) -> Option<P> {
+        self.find_cursor_mut(key).erase()
     }
 
     /// Erases an element by raw pointer.
@@ -2245,7 +2493,7 @@ where
     ///
     /// The caller must ensure that `obj` is a valid pointer to an object that is currently
     /// contained within this tree instance.
-    pub unsafe fn erase_raw(&mut self, obj: *mut P::Target) -> Option<P> {
+    pub unsafe fn erase_raw(self: Pin<&mut Self>, obj: *mut P::Target) -> Option<P> {
         // SAFETY: The caller guarantees that `obj` is currently contained in this WavlTree.
         // `internal_erase` is safe to execute on a contained pointer.
         unsafe {
@@ -2258,7 +2506,7 @@ where
     }
 
     /// Returns a cursor positioned at the front (smallest element) of the tree.
-    pub fn cursor_mut(&mut self) -> CursorMut<'_, K, P, Tag, S, O> {
+    pub fn cursor_mut(self: Pin<&mut Self>) -> CursorMut<'_, K, P, Tag, S, O> {
         let left_most = self.left_most;
         CursorMut { tree: self, current: left_most }
     }
@@ -2282,7 +2530,10 @@ where
     /// The caller must ensure that `obj` is a member of this tree.
     /// It is undefined behavior to use the returned cursor if `obj` is not in the tree,
     /// or if it is in a different tree.
-    pub unsafe fn cursor_mut_at(&mut self, obj: &P::Target) -> CursorMut<'_, K, P, Tag, S, O> {
+    pub unsafe fn cursor_mut_at(
+        self: Pin<&mut Self>,
+        obj: &P::Target,
+    ) -> CursorMut<'_, K, P, Tag, S, O> {
         assert!(obj.get_node().in_container(), "Object must be in a container");
         CursorMut { tree: self, current: obj as *const P::Target as *mut P::Target }
     }
@@ -2334,8 +2585,7 @@ where
 {
     fn drop(self: Pin<&mut Self>) {
         if P::IS_MANAGED {
-            let me = unsafe { self.get_unchecked_mut() };
-            me.clear();
+            self.clear();
         } else {
             debug_assert!(self.is_empty(), "Tree must be empty on destruction");
             if S::IS_TRACKING {
@@ -2438,6 +2688,39 @@ where
         valid_sentinel_ptr(self.current)
     }
 
+    /// Moves the cursor to the next (larger) element.
+    ///
+    /// Moving past the last element positions the cursor at the sentinel. Moving from the
+    /// sentinel is a no-op.
+    pub fn move_next(&mut self) {
+        if valid_sentinel_ptr(self.current) {
+            // SAFETY: `self.current` is verified to be a valid node in the tree, which is
+            // borrowed (and therefore not modified) for `'a`. Advancing through tree pointers is
+            // safe.
+            unsafe {
+                WavlTree::<K, P, Tag, S, O>::advance::<ForwardTraits>(&mut self.current);
+            }
+        }
+    }
+
+    /// Moves the cursor to the previous (smaller) element.
+    ///
+    /// Moving before the first element positions the cursor at the sentinel. Moving from the
+    /// sentinel positions the cursor at the last element (or leaves it at the sentinel if the
+    /// tree is empty).
+    pub fn move_prev(&mut self) {
+        if valid_sentinel_ptr(self.current) {
+            // SAFETY: `self.current` is verified to be a valid node in the tree, which is
+            // borrowed (and therefore not modified) for `'a`. Advancing through tree pointers is
+            // safe.
+            unsafe {
+                WavlTree::<K, P, Tag, S, O>::advance::<ReverseTraits>(&mut self.current);
+            }
+        } else if is_sentinel_ptr(self.current) {
+            self.current = self.tree.right_most;
+        }
+    }
+
     /// Returns a cursor positioned at the left child of the current element.
     /// If the current element is the sentinel, returns a cursor at the sentinel.
     pub fn left(&self) -> Self {
@@ -2485,7 +2768,10 @@ where
 
 pub type InsertOrFindResult<'a, K, P, Tag, S, O> = Result<(), (P, CursorMut<'a, K, P, Tag, S, O>)>;
 
-/// A cursor over elements in a `WavlTree`.
+/// A cursor that can be used to iterate and modify a `WavlTree`.
+///
+/// The cursor holds the tree as `Pin<&mut WavlTree>` and mutates the tree's bookkeeping fields
+/// through pin projection, so an unpinned `&mut WavlTree` is never materialized.
 pub struct CursorMut<
     'a,
     K,
@@ -2500,7 +2786,7 @@ pub struct CursorMut<
     S: SizeTracker,
     O: WavlTreeObserver<Target = P::Target>,
 {
-    tree: &'a mut WavlTree<K, P, Tag, S, O>,
+    tree: Pin<&'a mut WavlTree<K, P, Tag, S, O>>,
     current: *mut P::Target,
 }
 
@@ -2561,7 +2847,7 @@ where
         // `to_erase` from the tree.
         unsafe {
             WavlTree::<K, P, Tag, S, O>::advance::<ForwardTraits>(&mut self.current);
-            self.tree.internal_erase(to_erase)
+            self.tree.as_mut().internal_erase(to_erase)
         }
     }
 }
@@ -2837,37 +3123,6 @@ where
     }
 }
 
-impl<K, T, Tag, S, O> WavlTree<K, *mut T, Tag, S, O>
-where
-    T: WavlTreeContainable<T, Tag> + WavlTreeKeyable<K>,
-    K: Ord,
-    S: SizeTracker,
-    O: WavlTreeObserver<Target = T>,
-{
-    /// Unsafely removes all elements from the tree without modifying node memory.
-    ///
-    /// This method resets the tree's internal pointers, effectively emptying it, but does
-    /// NOT modify the node state of the elements that were in the tree.
-    ///
-    /// # Safety
-    ///
-    /// Because the nodes are not modified, they will still believe they are in a container
-    /// (i.e. `in_container()` will return `true` for them). If these elements are subsequently
-    /// dropped, they will trigger a `debug_assert` panic (as `WavlTreeNode` asserts on drop
-    /// that it is not in a container).
-    ///
-    /// The caller is responsible for manually clearing the node state of the elements, or
-    /// ensuring they are never dropped while in this "dirty" state.
-    ///
-    /// Only usable with containers of unmanaged pointers. Think carefully before calling this!
-    pub fn clear_unsafe(&mut self) {
-        self.root = core::ptr::null_mut();
-        self.left_most = self.get_sentinel();
-        self.right_most = self.get_sentinel();
-        self.size.set(0);
-    }
-}
-
 impl<K, P, Tag, S, O> core::fmt::Debug for WavlTree<K, P, Tag, S, O>
 where
     P: PtrTraits,
@@ -2963,9 +3218,32 @@ mod tests {
             == core::mem::align_of::<*mut TestObject>()
     );
 
+    // `Link::Child` holds a `NonNull`, so `Link::Root` uses its null niche and `Link` is
+    // pointer-sized.
+    ::zr::static_assert!(core::mem::size_of::<Link<TestObject>>() == core::mem::size_of::<usize>());
+
+    // The `!Unpin` marker in `WavlTreeNode` is zero-sized and must not change the node layout
+    // shared with C++.
+    ::zr::static_assert!(
+        core::mem::size_of::<WavlTreeNode<TestObject>>()
+            == 4 * core::mem::size_of::<*mut TestObject>()
+    );
+    ::zr::static_assert!(
+        core::mem::size_of::<WavlTreeNode<TestObject, i32>>()
+            == 4 * core::mem::size_of::<*mut TestObject>()
+    );
+    ::zr::static_assert!(
+        core::mem::align_of::<WavlTreeNode<TestObject>>()
+            == core::mem::align_of::<*mut TestObject>()
+    );
+
+    // `#[pin_data]` elements must mark their node `#[pin]` (enforced by the derive) so that they
+    // stay `!Unpin`.
     #[derive(crate::WavlTreeContainable, crate::Recyclable)]
+    #[pin_data]
     struct UniqueTestObject {
         value: i32,
+        #[pin]
         #[wavl_node]
         node: WavlTreeNode<UniqueTestObject>,
     }
@@ -3012,6 +3290,13 @@ mod tests {
         }
     }
 
+    // Linked elements (and their nodes) must not be movable through safe code.
+    assert_not_impl!(WavlTreeNode<TestObject>: Unpin);
+    assert_not_impl!(TestObject: Unpin);
+    assert_not_impl!(UniqueTestObject: Unpin);
+    assert_not_impl!(RefTestObject: Unpin);
+    assert_not_impl!(WavlTree<i32, *mut TestObject>: Unpin);
+
     macro_rules! generate_tree_tests {
         ($mod_name:ident, $ptr_type:ty, $factory_type:ty, $get_val:expr, $insert:expr, $insert_or_find:expr, $insert_or_replace:expr) => {
             mod $mod_name {
@@ -3021,14 +3306,13 @@ mod tests {
                 fn test_basic_sorting() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
                     assert!(tree.is_empty());
 
                     // Insert in scrambled order
-                    $insert(tree, factory.create(3));
-                    $insert(tree, factory.create(1));
-                    $insert(tree, factory.create(4));
-                    $insert(tree, factory.create(2));
+                    $insert(tree.as_mut(), factory.create(3));
+                    $insert(tree.as_mut(), factory.create(1));
+                    $insert(tree.as_mut(), factory.create(4));
+                    $insert(tree.as_mut(), factory.create(2));
 
                     assert!(!tree.is_empty());
 
@@ -3040,7 +3324,7 @@ mod tests {
                     assert_eq!($get_val(iter.next().unwrap()), 4);
                     assert!(iter.next().is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                     assert!(tree.is_empty());
                 }
 
@@ -3048,10 +3332,9 @@ mod tests {
                 fn test_double_ended_iterator() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(30));
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(20));
+                    $insert(tree.as_mut(), factory.create(30));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(20));
 
                     let mut iter = tree.iter();
                     assert_eq!($get_val(iter.next().unwrap()), 10);
@@ -3060,33 +3343,31 @@ mod tests {
                     assert!(iter.next().is_none());
                     assert!(iter.next_back().is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_find() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(3));
-                    $insert(tree, factory.create(1));
-                    $insert(tree, factory.create(2));
+                    $insert(tree.as_mut(), factory.create(3));
+                    $insert(tree.as_mut(), factory.create(1));
+                    $insert(tree.as_mut(), factory.create(2));
 
                     assert!(tree.find(&2).is_some());
                     assert_eq!($get_val(tree.find(&2).unwrap()), 2);
                     assert!(tree.find(&4).is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_bounds() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(30));
-                    $insert(tree, factory.create(20));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(30));
+                    $insert(tree.as_mut(), factory.create(20));
 
                     // lower_bound(>=)
                     assert_eq!($get_val(tree.lower_bound(&15).get().unwrap()), 20);
@@ -3098,46 +3379,44 @@ mod tests {
                     assert_eq!($get_val(tree.upper_bound(&20).get().unwrap()), 30);
                     assert!(tree.upper_bound(&30).get().is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_pops() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(30));
-                    $insert(tree, factory.create(20));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(30));
+                    $insert(tree.as_mut(), factory.create(20));
 
-                    let popped = tree.pop_front();
+                    let popped = tree.as_mut().pop_front();
                     assert!(popped.is_some());
                     let val = popped.unwrap();
                     assert_eq!($get_val(unsafe { val.as_target_ref() }), 10);
 
-                    let popped = tree.pop_back();
+                    let popped = tree.as_mut().pop_back();
                     assert!(popped.is_some());
                     let val = popped.unwrap();
                     assert_eq!($get_val(unsafe { val.as_target_ref() }), 30);
 
-                    let popped = tree.pop_front();
+                    let popped = tree.as_mut().pop_front();
                     assert!(popped.is_some());
                     let val = popped.unwrap();
                     assert_eq!($get_val(unsafe { val.as_target_ref() }), 20);
 
-                    assert!(tree.pop_front().is_none());
+                    assert!(tree.as_mut().pop_front().is_none());
                 }
 
                 #[test]
                 fn test_erase_cursor() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(30));
-                    $insert(tree, factory.create(20));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(30));
+                    $insert(tree.as_mut(), factory.create(20));
 
-                    let mut cursor = tree.find_cursor(&20);
+                    let mut cursor = tree.as_mut().find_cursor_mut(&20);
                     let erased = cursor.erase();
                     assert!(erased.is_some());
                     let val = erased.unwrap();
@@ -3151,38 +3430,36 @@ mod tests {
                     assert_eq!($get_val(iter.next().unwrap()), 30);
                     assert!(iter.next().is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_insert_or_find() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(10));
+                    $insert(tree.as_mut(), factory.create(10));
 
                     let new_item = factory.create(10); // Duplicate key
-                    let res = $insert_or_find(tree, new_item);
+                    let res = $insert_or_find(tree.as_mut(), new_item);
                     assert!(res.is_err());
                     let (failed_ptr, collision) = res.err().unwrap();
                     assert_eq!($get_val(unsafe { failed_ptr.as_target_ref() }), 10);
                     assert_eq!($get_val(collision.get().unwrap()), 10);
 
                     let ok_item = factory.create(20);
-                    assert!($insert_or_find(tree, ok_item).is_ok());
+                    assert!($insert_or_find(tree.as_mut(), ok_item).is_ok());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_insert_or_replace() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(10));
+                    $insert(tree.as_mut(), factory.create(10));
 
                     let replacement = factory.create(10);
-                    let res = $insert_or_replace(tree, replacement);
+                    let res = $insert_or_replace(tree.as_mut(), replacement);
                     assert!(res.is_some());
                     let old_item = res.unwrap();
                     assert_eq!($get_val(unsafe { old_item.as_target_ref() }), 10);
@@ -3191,18 +3468,17 @@ mod tests {
                     assert!(found.is_some());
                     assert_eq!($get_val(found.unwrap()), 10);
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_from_element() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
 
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(20));
-                    $insert(tree, factory.create(30));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(20));
+                    $insert(tree.as_mut(), factory.create(30));
 
                     let target_ref = tree.find(&20).unwrap();
 
@@ -3216,18 +3492,17 @@ mod tests {
                     assert_eq!($get_val(reverse_iter.next().unwrap()), 10);
                     assert!(reverse_iter.next().is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_cursor_at() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
 
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(20));
-                    $insert(tree, factory.create(30));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(20));
+                    $insert(tree.as_mut(), factory.create(30));
 
                     let target_ptr = tree.find(&20).unwrap() as *const <$ptr_type as PtrTraits>::Target;
                     // SAFETY: target_ptr is a valid pointer to an object currently in the tree.
@@ -3243,7 +3518,7 @@ mod tests {
                     assert_eq!($get_val(cursor.right().get().unwrap()), 30);
 
                     // Test mutable cursor_mut_at
-                    let mut cursor_mut = unsafe { tree.cursor_mut_at(target_ref) };
+                    let mut cursor_mut = unsafe { tree.as_mut().cursor_mut_at(target_ref) };
                     assert_eq!($get_val(cursor_mut.get().unwrap()), 20);
 
                     // Verify we can erase using the cursor returned by cursor_mut_at
@@ -3255,14 +3530,12 @@ mod tests {
                     // Cursor should now be at the next element (30)
                     assert_eq!($get_val(cursor_mut.get().unwrap()), 30);
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_empty_tree_cursors() {
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    // SAFETY: `tree` is never moved out of `tree` after pinning.
-                    let tree = unsafe { tree.get_unchecked_mut() };
 
                     // On an empty tree the root is null while the extremes are the sentinel;
                     // neither is a valid element.
@@ -3272,7 +3545,7 @@ mod tests {
                     assert!(tree.front_cursor().get().is_none());
                     assert!(!tree.back_cursor().is_valid());
                     assert!(tree.back_cursor().get().is_none());
-                    assert!(tree.cursor_mut().get().is_none());
+                    assert!(tree.as_mut().cursor_mut().get().is_none());
                     assert!(tree.find_cursor(&1).get().is_none());
                 }
 
@@ -3280,10 +3553,9 @@ mod tests {
                 fn test_iterator_clone() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
-                    let tree = unsafe { tree.get_unchecked_mut() };
-                    $insert(tree, factory.create(10));
-                    $insert(tree, factory.create(20));
-                    $insert(tree, factory.create(30));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(20));
+                    $insert(tree.as_mut(), factory.create(30));
 
                     let mut iter = tree.iter();
                     assert_eq!($get_val(iter.next().unwrap()), 10);
@@ -3298,24 +3570,22 @@ mod tests {
                     assert_eq!($get_val(cloned_iter.next().unwrap()), 30);
                     assert!(cloned_iter.next().is_none());
 
-                    tree.clear();
+                    tree.as_mut().clear();
                 }
 
                 #[test]
                 fn test_swap() {
                     let mut factory = <$factory_type>::new();
                     stack_pin_init!(let tree1 = WavlTree::<i32, $ptr_type>::new());
-                    let tree1 = unsafe { tree1.get_unchecked_mut() };
                     stack_pin_init!(let tree2 = WavlTree::<i32, $ptr_type>::new());
-                    let tree2 = unsafe { tree2.get_unchecked_mut() };
 
-                    $insert(tree1, factory.create(1));
-                    $insert(tree1, factory.create(3));
+                    $insert(tree1.as_mut(), factory.create(1));
+                    $insert(tree1.as_mut(), factory.create(3));
 
-                    $insert(tree2, factory.create(2));
-                    $insert(tree2, factory.create(4));
+                    $insert(tree2.as_mut(), factory.create(2));
+                    $insert(tree2.as_mut(), factory.create(4));
 
-                    tree1.swap(tree2);
+                    tree1.as_mut().swap(tree2.as_mut());
 
                     let mut iter1 = tree1.iter();
                     assert_eq!($get_val(iter1.next().unwrap()), 2);
@@ -3327,8 +3597,172 @@ mod tests {
                     assert_eq!($get_val(iter2.next().unwrap()), 3);
                     assert!(iter2.next().is_none());
 
-                    tree1.clear();
-                    tree2.clear();
+                    tree1.as_mut().clear();
+                    tree2.as_mut().clear();
+                }
+
+                fn assert_tree_contents(
+                    tree: &WavlTree<i32, $ptr_type>,
+                    expected: &[i32],
+                ) {
+                    assert_eq!(tree.is_empty(), expected.is_empty());
+                    assert_eq!(tree.front().map($get_val), expected.first().copied());
+                    assert_eq!(tree.back().map($get_val), expected.last().copied());
+                    let mut iter = tree.iter();
+                    for value in expected {
+                        assert_eq!($get_val(iter.next().unwrap()), *value);
+                    }
+                    assert!(iter.next().is_none());
+                    let mut reverse_iter = tree.reverse_iter();
+                    for value in expected.iter().rev() {
+                        assert_eq!($get_val(reverse_iter.next().unwrap()), *value);
+                    }
+                    assert!(reverse_iter.next().is_none());
+                    // Walking off either end of the tree must land on this tree's sentinel and
+                    // walking back must return to the boundary element.
+                    let mut cursor = tree.back_cursor();
+                    cursor.move_next();
+                    assert!(!cursor.is_valid());
+                    cursor.move_prev();
+                    assert_eq!(cursor.get().map($get_val), expected.last().copied());
+                }
+
+                #[test]
+                fn test_swap_empty_and_non_empty() {
+                    let mut factory = <$factory_type>::new();
+                    stack_pin_init!(let tree1 = WavlTree::<i32, $ptr_type>::new());
+                    stack_pin_init!(let tree2 = WavlTree::<i32, $ptr_type>::new());
+
+                    // Both empty.
+                    tree1.as_mut().swap(tree2.as_mut());
+                    assert_tree_contents(&tree1, &[]);
+                    assert_tree_contents(&tree2, &[]);
+
+                    // Non-empty with empty.
+                    $insert(tree1.as_mut(), factory.create(1));
+                    $insert(tree1.as_mut(), factory.create(2));
+                    $insert(tree1.as_mut(), factory.create(3));
+                    tree1.as_mut().swap(tree2.as_mut());
+                    assert_tree_contents(&tree1, &[]);
+                    assert_tree_contents(&tree2, &[1, 2, 3]);
+
+                    // Empty with non-empty.
+                    tree1.as_mut().swap(tree2.as_mut());
+                    assert_tree_contents(&tree1, &[1, 2, 3]);
+                    assert_tree_contents(&tree2, &[]);
+
+                    // Both trees must remain fully usable after the swaps: inserting into the
+                    // formerly empty tree and erasing the boundary elements of the other one
+                    // exercise the repaired sentinels.
+                    $insert(tree2.as_mut(), factory.create(5));
+                    $insert(tree2.as_mut(), factory.create(4));
+                    assert_tree_contents(&tree2, &[4, 5]);
+
+                    let front = tree1.as_mut().pop_front().unwrap();
+                    assert_eq!($get_val(unsafe { front.as_target_ref() }), 1);
+                    let back = tree1.as_mut().pop_back().unwrap();
+                    assert_eq!($get_val(unsafe { back.as_target_ref() }), 3);
+                    assert_tree_contents(&tree1, &[2]);
+
+                    // Both non-empty.
+                    tree1.as_mut().swap(tree2.as_mut());
+                    assert_tree_contents(&tree1, &[4, 5]);
+                    assert_tree_contents(&tree2, &[2]);
+
+                    $insert(tree1.as_mut(), factory.create(6));
+                    $insert(tree2.as_mut(), factory.create(0));
+                    assert_tree_contents(&tree1, &[4, 5, 6]);
+                    assert_tree_contents(&tree2, &[0, 2]);
+                    assert!(tree1.as_mut().erase(&4).is_some());
+                    assert!(tree2.as_mut().erase(&2).is_some());
+                    assert_tree_contents(&tree1, &[5, 6]);
+                    assert_tree_contents(&tree2, &[0]);
+
+                    tree1.as_mut().clear();
+                    tree2.as_mut().clear();
+                    assert_tree_contents(&tree1, &[]);
+                    assert_tree_contents(&tree2, &[]);
+                }
+
+                #[test]
+                fn test_read_only_cursor_navigation() {
+                    let mut factory = <$factory_type>::new();
+                    stack_pin_init!(let tree = WavlTree::<i32, $ptr_type>::new());
+
+                    // Empty tree: every lookup lands on the sentinel, and moving in either
+                    // direction from it stays there.
+                    let mut cursor = tree.lower_bound(&0);
+                    assert!(!cursor.is_valid());
+                    cursor.move_next();
+                    assert!(!cursor.is_valid());
+                    cursor.move_prev();
+                    assert!(!cursor.is_valid());
+                    assert!(cursor.get().is_none());
+                    assert!(!tree.upper_bound(&0).is_valid());
+                    assert!(!tree.find_cursor(&0).is_valid());
+
+                    $insert(tree.as_mut(), factory.create(20));
+                    $insert(tree.as_mut(), factory.create(10));
+                    $insert(tree.as_mut(), factory.create(30));
+
+                    // lower_bound / upper_bound / find_cursor hit the expected elements.
+                    assert_eq!($get_val(tree.lower_bound(&15).get().unwrap()), 20);
+                    assert_eq!($get_val(tree.lower_bound(&20).get().unwrap()), 20);
+                    assert_eq!($get_val(tree.lower_bound(&i32::MIN).get().unwrap()), 10);
+                    assert!(tree.lower_bound(&31).get().is_none());
+                    assert_eq!($get_val(tree.upper_bound(&20).get().unwrap()), 30);
+                    assert_eq!($get_val(tree.upper_bound(&9).get().unwrap()), 10);
+                    assert!(tree.upper_bound(&30).get().is_none());
+                    assert_eq!($get_val(tree.find_cursor(&30).get().unwrap()), 30);
+                    assert!(tree.find_cursor(&25).get().is_none());
+
+                    // Forward walk to the sentinel; moving next from the sentinel is a no-op.
+                    let mut cursor = tree.lower_bound(&15);
+                    cursor.move_next();
+                    assert_eq!($get_val(cursor.get().unwrap()), 30);
+                    cursor.move_next();
+                    assert!(!cursor.is_valid());
+                    cursor.move_next();
+                    assert!(!cursor.is_valid());
+
+                    // From the sentinel, move_prev lands on the last element.
+                    cursor.move_prev();
+                    assert_eq!($get_val(cursor.get().unwrap()), 30);
+                    let mut cursor = tree.upper_bound(&30);
+                    assert!(!cursor.is_valid());
+                    cursor.move_prev();
+                    assert_eq!($get_val(cursor.get().unwrap()), 30);
+
+                    // Backward walk past the first element lands on the sentinel, and then
+                    // wraps to the last element (the sentinel is shared by both ends).
+                    let mut cursor = tree.find_cursor(&20);
+                    cursor.move_prev();
+                    assert_eq!($get_val(cursor.get().unwrap()), 10);
+                    cursor.move_prev();
+                    assert!(!cursor.is_valid());
+                    cursor.move_prev();
+                    assert_eq!($get_val(cursor.get().unwrap()), 30);
+
+                    // Read-only cursors are `Copy` and can coexist.
+                    let a = tree.front_cursor();
+                    let mut b = a;
+                    b.move_next();
+                    assert_eq!($get_val(a.get().unwrap()), 10);
+                    assert_eq!($get_val(b.get().unwrap()), 20);
+                    assert_eq!(b, tree.find_cursor(&20));
+
+                    // Single element boundaries.
+                    tree.as_mut().clear();
+                    $insert(tree.as_mut(), factory.create(42));
+                    let mut cursor = tree.find_cursor(&42);
+                    cursor.move_next();
+                    assert!(!cursor.is_valid());
+                    cursor.move_prev();
+                    assert_eq!($get_val(cursor.get().unwrap()), 42);
+                    cursor.move_prev();
+                    assert!(!cursor.is_valid());
+
+                    tree.as_mut().clear();
                 }
             }
         };
@@ -3367,21 +3801,20 @@ mod tests {
     #[test]
     fn test_erase_by_raw_pointer() {
         stack_pin_init!(let tree = WavlTree::<i32, *mut TestObject, DefaultObjectTag, TrackingSize>::new());
-        let tree = unsafe { tree.get_unchecked_mut() };
         let mut obj1 = TestObject::new(10);
         let mut obj2 = TestObject::new(20);
         let mut obj3 = TestObject::new(30);
 
         unsafe {
-            tree.insert_raw(core::ptr::addr_of_mut!(obj1));
-            tree.insert_raw(core::ptr::addr_of_mut!(obj2));
-            tree.insert_raw(core::ptr::addr_of_mut!(obj3));
+            tree.as_mut().insert_raw(core::ptr::addr_of_mut!(obj1));
+            tree.as_mut().insert_raw(core::ptr::addr_of_mut!(obj2));
+            tree.as_mut().insert_raw(core::ptr::addr_of_mut!(obj3));
         }
 
         assert_eq!(tree.len(), 3);
 
         // Erase obj2 directly
-        let erased = unsafe { tree.erase_raw(core::ptr::addr_of_mut!(obj2)) };
+        let erased = unsafe { tree.as_mut().erase_raw(core::ptr::addr_of_mut!(obj2)) };
         assert!(erased.is_some());
         assert_eq!(unsafe { &*erased.unwrap() }.value, 20);
         assert_eq!(tree.len(), 2);
@@ -3391,27 +3824,28 @@ mod tests {
         assert_eq!(iter.next().unwrap().value, 30);
         assert!(iter.next().is_none());
 
-        tree.clear();
+        tree.as_mut().clear();
     }
 
     #[test]
     fn test_clear_unsafe() {
         stack_pin_init!(let tree = WavlTree::<i32, *mut TestObject, DefaultObjectTag, TrackingSize>::new());
-        let tree = unsafe { tree.get_unchecked_mut() };
         let mut obj1 = TestObject::new(10);
         let mut obj2 = TestObject::new(20);
         let mut obj3 = TestObject::new(30);
 
         unsafe {
-            tree.insert_raw(core::ptr::addr_of_mut!(obj1));
-            tree.insert_raw(core::ptr::addr_of_mut!(obj2));
-            tree.insert_raw(core::ptr::addr_of_mut!(obj3));
+            tree.as_mut().insert_raw(core::ptr::addr_of_mut!(obj1));
+            tree.as_mut().insert_raw(core::ptr::addr_of_mut!(obj2));
+            tree.as_mut().insert_raw(core::ptr::addr_of_mut!(obj3));
         }
 
         assert_eq!(tree.len(), 3);
         assert!(!tree.is_empty());
 
-        tree.clear_unsafe();
+        // SAFETY: The nodes of `obj1`, `obj2` and `obj3` are manually reset below before they are
+        // dropped, and they are not accessed through the tree afterwards.
+        unsafe { tree.as_mut().clear_unsafe() };
 
         assert_eq!(tree.len(), 0);
         assert!(tree.is_empty());
@@ -3430,21 +3864,40 @@ mod tests {
             (*obj3.get_node().left.get()) = core::ptr::null_mut();
             (*obj3.get_node().right.get()) = core::ptr::null_mut();
         }
+
+        // Also test a `NonNull<TestObject>` tree with `NonTrackingSize`.
+        stack_pin_init!(let nn_tree = WavlTree::<i32, NonNull<TestObject>>::new());
+        // SAFETY: The tree is empty.
+        unsafe { nn_tree.as_mut().clear_unsafe() };
+        assert!(nn_tree.is_empty());
+
+        let mut nn_obj1 = core::mem::ManuallyDrop::new(TestObject::new(1));
+        let mut nn_obj2 = core::mem::ManuallyDrop::new(TestObject::new(2));
+        // SAFETY: `nn_obj1` and `nn_obj2` are valid, unlinked objects wrapped in `ManuallyDrop`
+        // that stay in place while linked and are never used again after `clear_unsafe`.
+        unsafe {
+            nn_tree.as_mut().insert_raw(NonNull::from(&mut *nn_obj1));
+            nn_tree.as_mut().insert_raw(NonNull::from(&mut *nn_obj2));
+            assert!(!nn_tree.is_empty());
+            nn_tree.as_mut().clear_unsafe();
+        }
+        assert!(nn_tree.is_empty());
+        assert!(nn_obj1.get_node().in_container());
+        assert!(nn_obj2.get_node().in_container());
     }
 
     #[test]
     fn test_tracking_size() {
         stack_pin_init!(let tree = WavlTree::<i32, UniquePtr<UniqueTestObject>, DefaultObjectTag, TrackingSize>::new());
-        let tree = unsafe { tree.get_unchecked_mut() };
 
         assert_eq!(tree.len(), 0);
-        tree.insert(UniquePtr::try_new(UniqueTestObject::new(10)).unwrap());
+        tree.as_mut().insert(UniquePtr::try_new(UniqueTestObject::new(10)).unwrap());
         assert_eq!(tree.len(), 1);
-        tree.insert(UniquePtr::try_new(UniqueTestObject::new(20)).unwrap());
+        tree.as_mut().insert(UniquePtr::try_new(UniqueTestObject::new(20)).unwrap());
         assert_eq!(tree.len(), 2);
-        tree.pop_front();
+        tree.as_mut().pop_front();
         assert_eq!(tree.len(), 1);
-        tree.clear();
+        tree.as_mut().clear();
         assert_eq!(tree.len(), 0);
     }
 
@@ -3471,9 +3924,7 @@ mod tests {
     #[test]
     fn test_multiple_containers() {
         stack_pin_init!(let tree1 = WavlTree::<i32, RefPtr<MultiTreeObject>, DefaultObjectTag>::new());
-        let tree1 = unsafe { tree1.get_unchecked_mut() };
         stack_pin_init!(let tree2 = WavlTree::<i32, RefPtr<MultiTreeObject>, Tag2>::new());
-        let tree2 = unsafe { tree2.get_unchecked_mut() };
 
         let obj1 = fbl::make_ref_counted!(MultiTreeObject {
             value: 10,
@@ -3489,11 +3940,11 @@ mod tests {
         })
         .unwrap();
 
-        tree1.insert(obj1.clone());
-        tree1.insert(obj2.clone());
+        tree1.as_mut().insert(obj1.clone());
+        tree1.as_mut().insert(obj2.clone());
 
-        tree2.insert(obj1.clone());
-        tree2.insert(obj2.clone());
+        tree2.as_mut().insert(obj1.clone());
+        tree2.as_mut().insert(obj2.clone());
 
         let mut iter1 = tree1.iter();
         assert_eq!(iter1.next().unwrap().value, 10);
@@ -3503,8 +3954,8 @@ mod tests {
         assert_eq!(iter2.next().unwrap().value, 10);
         assert_eq!(iter2.next().unwrap().value, 20);
 
-        tree1.clear();
-        tree2.clear();
+        tree1.as_mut().clear();
+        tree2.as_mut().clear();
     }
 
     extern crate alloc;
@@ -4096,7 +4547,6 @@ mod tests {
             let observer = WavlBalanceTestObserver { op_counts: Arc::clone(&op_counts) };
 
             stack_pin_init!(let tree = WavlTree::<u64, *mut BalanceTestObj, DefaultObjectTag, TrackingSize, WavlBalanceTestObserver>::new_with_observer(observer));
-            let tree = unsafe { tree.get_unchecked_mut() };
 
             let mut objects = Vec::with_capacity(test_size);
             let mut replacements = Vec::with_capacity(replacement_count);
@@ -4153,56 +4603,56 @@ mod tests {
             // 1. Insert all objects
             for i in 0..test_size {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw = &mut *objects[i] as *mut BalanceTestObj;
-                    tree.insert_raw(raw);
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    tree.as_mut().insert_raw(raw);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
-            check_iterators(tree);
+            check_iterators(&tree);
 
             // 2. Collide replacements
             for i in 0..replacement_count {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw = &mut *replacements[i] as *mut BalanceTestObj;
-                    assert!(tree.insert_or_find_raw(raw).is_err());
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    assert!(tree.as_mut().insert_or_find_raw(raw).is_err());
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
             // 3. Replace original nodes with replacements
             for i in 0..replacement_count {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw = &mut *replacements[i] as *mut BalanceTestObj;
-                    assert!(tree.insert_or_replace_raw(raw).is_some());
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    assert!(tree.as_mut().insert_or_replace_raw(raw).is_some());
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
-            check_iterators(tree);
+            check_iterators(&tree);
 
             // 4. Swap them back
             for i in 0..replacement_count {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw = &mut *objects[i] as *mut BalanceTestObj;
-                    assert!(tree.insert_or_replace_raw(raw).is_some());
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    assert!(tree.as_mut().insert_or_replace_raw(raw).is_some());
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
-            check_iterators(tree);
+            check_iterators(&tree);
 
             // Shuffle erase deck
             shuffle_erase_deck(&objects, &mut rng, test_size);
@@ -4210,32 +4660,32 @@ mod tests {
             // 5. Erase half the elements
             for i in 0..(test_size / 2) {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw_target = objects[i].erase_deck_ptr.get();
-                    let erased = tree.erase_raw(raw_target);
+                    let erased = tree.as_mut().erase_raw(raw_target);
                     assert!(erased.is_some());
                     assert_eq!(erased.unwrap(), raw_target);
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
-            check_iterators(tree);
+            check_iterators(&tree);
 
             // 6. Put them back
             for i in 0..(test_size / 2) {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw_target = objects[i].erase_deck_ptr.get();
-                    tree.insert_raw(raw_target);
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    tree.as_mut().insert_raw(raw_target);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
-            check_iterators(tree);
+            check_iterators(&tree);
 
             // Shuffle erase deck again
             shuffle_erase_deck(&objects, &mut rng, test_size);
@@ -4243,18 +4693,18 @@ mod tests {
             // 7. Erase everything
             for i in 0..test_size {
                 unsafe {
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                     let raw_target = objects[i].erase_deck_ptr.get();
-                    let erased = tree.erase_raw(raw_target);
+                    let erased = tree.as_mut().erase_raw(raw_target);
                     assert!(erased.is_some());
                     assert_eq!(erased.unwrap(), raw_target);
-                    check_augmented_invariants(tree);
-                    WavlTreeChecker::sanity_check(tree);
+                    check_augmented_invariants(&tree);
+                    WavlTreeChecker::sanity_check(&tree);
                 }
             }
 
-            check_iterators(tree);
+            check_iterators(&tree);
             assert_eq!(tree.size.get(), 0);
 
             assert!(op_counts.insert_ops.load(Ordering::Relaxed) > 0);
@@ -4303,7 +4753,6 @@ mod tests {
 
         unsafe {
             stack_pin_init!(let tree = WavlTree::<i32, UniquePtr<SharedUniqueObject>>::new());
-            let tree = tree.get_unchecked_mut();
 
             let cpp_raw1 = cpp_create_unique_object(10, destroyed1.as_ptr() as *mut bool);
             let cpp_raw2 = cpp_create_unique_object(20, destroyed2.as_ptr() as *mut bool);
@@ -4311,8 +4760,8 @@ mod tests {
             let obj1 = UniquePtr::from_raw(cpp_raw1 as *mut SharedUniqueObject);
             let obj2 = UniquePtr::from_raw(cpp_raw2 as *mut SharedUniqueObject);
 
-            tree.insert(obj1);
-            tree.insert(obj2);
+            tree.as_mut().insert(obj1);
+            tree.as_mut().insert(obj2);
 
             assert!(!destroyed1.load(Ordering::Relaxed));
             assert!(!destroyed2.load(Ordering::Relaxed));
@@ -4323,7 +4772,7 @@ mod tests {
             assert_eq!(found.unwrap().value, 10);
 
             // Erase one
-            let popped = tree.erase(&20);
+            let popped = tree.as_mut().erase(&20);
             assert!(popped.is_some());
             assert_eq!(popped.as_ref().unwrap().value, 20);
 
@@ -4396,7 +4845,6 @@ mod tests {
 
         unsafe {
             stack_pin_init!(let tree = WavlTree::<i32, RefPtr<SharedRefObject>>::new());
-            let tree = tree.get_unchecked_mut();
 
             let cpp_raw1 = cpp_create_ref_object(10, destroyed1.as_ptr() as *mut bool);
             let cpp_raw2 = cpp_create_ref_object(20, destroyed2.as_ptr() as *mut bool);
@@ -4404,8 +4852,8 @@ mod tests {
             let obj1 = RefPtr::from_raw(cpp_raw1 as *mut SharedRefObject);
             let obj2 = RefPtr::from_raw(cpp_raw2 as *mut SharedRefObject);
 
-            tree.insert(obj1);
-            tree.insert(obj2);
+            tree.as_mut().insert(obj1);
+            tree.as_mut().insert(obj2);
 
             assert!(!destroyed1.load(Ordering::Relaxed));
             assert!(!destroyed2.load(Ordering::Relaxed));
@@ -4416,7 +4864,7 @@ mod tests {
             assert_eq!(found.unwrap().value, 10);
 
             // Erase one
-            let popped = tree.erase(&20);
+            let popped = tree.as_mut().erase(&20);
             assert!(popped.is_some());
             assert_eq!(popped.as_ref().unwrap().value, 20);
 
@@ -4517,7 +4965,6 @@ mod tests {
 
         type TestTree = WavlTree<LargeKey, UniquePtr<TestRefKeyObject>>;
         stack_pin_init!(let tree = TestTree::new());
-        let tree = unsafe { tree.get_unchecked_mut() };
 
         let mut key1 = [0u8; 32];
         key1[0] = 10;
@@ -4526,15 +4973,15 @@ mod tests {
 
         let obj1 = UniquePtr::try_new(TestRefKeyObject::new(key1)).unwrap();
         let obj2 = UniquePtr::try_new(TestRefKeyObject::new(key2)).unwrap();
-        tree.insert(obj1);
-        tree.insert(obj2);
+        tree.as_mut().insert(obj1);
+        tree.as_mut().insert(obj2);
 
         let query = LargeKey { name: key1 };
         let found = tree.find(&query);
         assert!(found.is_some());
         assert_eq!(found.unwrap().key, query);
 
-        let erased = tree.erase(&query);
+        let erased = tree.as_mut().erase(&query);
         assert!(erased.is_some());
         assert_eq!(erased.unwrap().key, query);
     }
@@ -4598,7 +5045,6 @@ mod tests {
         >;
 
         stack_pin_init!(let tree = TestTree::new_with_observer(TestObserver::default()));
-        let tree = unsafe { tree.get_unchecked_mut() };
 
         // Helper to verify subtree sums recursively
         fn verify_subtree_sums(node: *mut TestAugmentedObject) -> i32 {
@@ -4623,7 +5069,7 @@ mod tests {
         let values = [10, 20, 5, 15, 25, 2, 7];
         for &val in &values {
             let obj = UniquePtr::try_new(TestAugmentedObject::new(val)).unwrap();
-            tree.insert(obj);
+            tree.as_mut().insert(obj);
             // Verify after each insert
             if !tree.root.is_null() {
                 verify_subtree_sums(tree.root);
@@ -4638,7 +5084,7 @@ mod tests {
         let to_erase = [15, 5, 20];
         let mut current_sum = expected_total_sum;
         for &val in &to_erase {
-            let erased = tree.erase(&val);
+            let erased = tree.as_mut().erase(&val);
             assert!(erased.is_some());
             assert_eq!(erased.as_ref().unwrap().value, val);
             current_sum -= val;
@@ -4742,7 +5188,6 @@ mod tests {
         >;
 
         stack_pin_init!(let tree = TestTree::new_with_observer(TestObserver::default()));
-        let tree = unsafe { tree.get_unchecked_mut() };
 
         // Helper to verify non-commutative subtree values recursively
         fn verify_subtree_values(node: *mut TestNonCommutativeObject) -> NonCommutativeVal {
@@ -4782,7 +5227,7 @@ mod tests {
         let values = [10, 20, 5, 15, 25, 2, 7, 1, 3, 6, 8, 12, 17, 22, 30];
         for (i, &val) in values.iter().enumerate() {
             let obj = UniquePtr::try_new(TestNonCommutativeObject::new(val)).unwrap();
-            tree.insert(obj);
+            tree.as_mut().insert(obj);
             if !tree.root.is_null() {
                 verify_subtree_values(tree.root);
                 let expected = expected_in_order(&values[..=i]);
@@ -4794,7 +5239,7 @@ mod tests {
         let to_erase = [5, 20, 15, 2, 25];
         let mut remaining: alloc::vec::Vec<i32> = values.iter().copied().collect();
         for &val in &to_erase {
-            let erased = tree.erase(&val);
+            let erased = tree.as_mut().erase(&val);
             assert!(erased.is_some());
             assert_eq!(erased.as_ref().unwrap().value, val);
             remaining.retain(|&x| x != val);
@@ -4810,7 +5255,6 @@ mod tests {
     fn test_successor_raw() {
         type TestTree = WavlTree<i32, *mut TestObject>;
         stack_pin_init!(let tree = TestTree::new());
-        let tree = unsafe { tree.get_unchecked_mut() };
 
         let mut cur: *mut TestObject = core::ptr::null_mut();
         unsafe { TestTree::successor_raw(&mut cur) };
@@ -4824,7 +5268,7 @@ mod tests {
         let mut objs =
             [TestObject::new(20), TestObject::new(10), TestObject::new(30), TestObject::new(15)];
         for obj in &mut objs {
-            unsafe { tree.insert_raw(obj) };
+            unsafe { tree.as_mut().insert_raw(obj) };
         }
 
         let mut visited = alloc::vec::Vec::new();
@@ -4836,7 +5280,7 @@ mod tests {
         assert_eq!(visited, alloc::vec![10, 15, 20, 30]);
 
         for obj in &mut objs {
-            unsafe { tree.erase_raw(obj) };
+            unsafe { tree.as_mut().erase_raw(obj) };
         }
     }
 }

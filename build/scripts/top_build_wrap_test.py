@@ -17,6 +17,7 @@ import unittest
 from typing import Any, Mapping, Sequence
 from unittest import mock
 
+from build.resultstore import rsclient
 from build.scripts import python_subprocess, top_build_wrap
 from build.tui import build_tui_wrap
 
@@ -33,11 +34,20 @@ class TopBuildWrapTest(unittest.TestCase):
         self.profile_wrapper = str(
             self.tmp_path / top_build_wrap._PROFILE_WRAPPER
         )
+        self.profile_cmd = python_subprocess.cmd(
+            self.tmp_path, self.tmp_path / top_build_wrap._PROFILE_WRAPPER
+        )
         self.reproxy_wrapper = str(
             self.tmp_path / top_build_wrap._REPROXY_WRAPPER
         )
+        self.reproxy_cmd = python_subprocess.cmd(
+            self.tmp_path, self.tmp_path / top_build_wrap._REPROXY_WRAPPER
+        )
         self.rsproxy_wrapper = str(
             self.tmp_path / top_build_wrap._RSPROXY_WRAPPER
+        )
+        self.rsproxy_cmd = python_subprocess.cmd(
+            self.tmp_path, self.tmp_path / top_build_wrap._RSPROXY_WRAPPER
         )
 
     def tearDown(self) -> None:
@@ -162,8 +172,8 @@ class TopBuildWrapTest(unittest.TestCase):
         self.assertEqual(
             context.command_prefix(),
             self.tui_prefix(context.tui.log_dir, ["--print_failed_actions"])
+            + self.rsproxy_cmd
             + [
-                self.rsproxy_wrapper,
                 "--auth-type",
                 "none",
                 "--log-dir",
@@ -194,9 +204,7 @@ class TopBuildWrapTest(unittest.TestCase):
         )
         env = context.execution_env()
         self.assertEqual(env["FOO"], "bar")
-        self.assertEqual(
-            env[build_tui_wrap.ENV_FX_INTERNAL_BAZEL_BESPROXY], "1"
-        )
+        self.assertEqual(env[rsclient.ENV_FX_INTERNAL_BAZEL_BESPROXY], "1")
         self.assertIn(str(self.tmp_path), env["PYTHONPATH"])
         self.assertIn(str(pathlib.Path(sys.executable).parent), env["PATH"])
 
@@ -223,8 +231,8 @@ class TopBuildWrapTest(unittest.TestCase):
                     str(expected_summary),
                 ],
             )
+            + self.rsproxy_cmd
             + [
-                self.rsproxy_wrapper,
                 "--auth-type",
                 "none",
                 "--log-dir",
@@ -301,8 +309,8 @@ class TopBuildWrapTest(unittest.TestCase):
         self.assertEqual(expected_hw_log.name, "hardware_profile.json")
         self.assertEqual(
             layer.prefix,
-            [
-                self.profile_wrapper,
+            self.profile_cmd
+            + [
                 "--system-log",
                 str(expected_sys_log),
                 "--",
@@ -373,8 +381,8 @@ class TopBuildWrapTest(unittest.TestCase):
         )
         self.assertEqual(
             layer.prefix,
-            [
-                self.reproxy_wrapper,
+            self.reproxy_cmd
+            + [
                 "--logdir",
                 str(layer.log_dir),
                 "--tmpdir",
@@ -408,8 +416,8 @@ class TopBuildWrapTest(unittest.TestCase):
         self.assertEqual(layer.artifacts, {"log_dir": layer.log_dir})
         self.assertEqual(
             layer.prefix,
-            [
-                self.rsproxy_wrapper,
+            self.rsproxy_cmd
+            + [
                 "--auth-type",
                 "auto",
                 "--log-dir",
@@ -594,7 +602,7 @@ class TopBuildWrapTest(unittest.TestCase):
             "ninja",
             "target",
         ]
-        top_build_wrap.main(argv)
+        top_build_wrap.main(argv, {})
         mock_execvpe.assert_called_once_with(
             "ninja", ["ninja", "target"], mock.ANY
         )

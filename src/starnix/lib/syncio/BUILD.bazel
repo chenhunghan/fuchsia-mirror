@@ -40,7 +40,6 @@ rustc_library(
         "//src/lib/fidl/rust/fidl",
         "//third_party/rust_crates/vendor:bitflags",
         "//third_party/rust_crates/vendor:bstr",
-        "//third_party/rust_crates/vendor:pin-weak",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
 )

@@ -2,13 +2,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+test_suite(
+    name = "tests",
+    tests = [":fsl_tests"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
     name = "fsl",
-    visibility = ["//visibility:public"],
+    visibility = ["//:__subpackages__"],
     deps = [
         "//src/lib/fsl/handles",
         "//src/lib/fsl/io",
@@ -17,4 +25,40 @@ cc_library(
         "//src/lib/fsl/types",
         "//src/lib/fsl/vmo",
     ],
+)
+
+fx_cc_test_binary(
+    name = "fsl_unittests",
+    srcs = [
+        "//src/lib/fsl/handles:object_info_unittest.cc",
+        "//src/lib/fsl/io:device_watcher_unittest.cc",
+        "//src/lib/fsl/io:redirection_unittest.cc",
+        "//src/lib/fsl/socket:blocking_drain_unittest.cc",
+        "//src/lib/fsl/socket:files_unittest.cc",
+        "//src/lib/fsl/socket:socket_drainer_unittest.cc",
+        "//src/lib/fsl/socket:strings_unittest.cc",
+        "//src/lib/fsl/tasks:fd_waiter_unittest.cc",
+        "//src/lib/fsl/types:type_converters_unittest.cc",
+        "//src/lib/fsl/vmo:file_unittest.cc",
+        "//src/lib/fsl/vmo:shared_vmo_unittest.cc",
+        "//src/lib/fsl/vmo:sized_vmo_unittest.cc",
+        "//src/lib/fsl/vmo:strings_unittest.cc",
+        "//src/lib/fsl/vmo:vector_unittest.cc",
+    ],
+    # Propagates "//src/sys/test_runners:tmp_storage.shard.cml" to
+    # `fx_unittest_package` in Bazel and maps to `deps` in GN via bazel2gn.
+    aspect_hints = ["//src/sys/test_runners:tmp_storage"],
+    deps = [
+        ":fsl",
+        "//sdk/lib/fit",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/storage/lib/vfs/cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fsl_tests",
+    unit_tests = [":fsl_unittests"],
 )

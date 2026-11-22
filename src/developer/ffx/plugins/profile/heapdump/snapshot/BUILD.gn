@@ -18,7 +18,7 @@ ffx_plugin("ffx_profile_heapdump_snapshot") {
     "//src/developer/ffx/lib/writer:lib",
     "//src/developer/ffx/plugins/profile/heapdump/common:ffx_profile_heapdump_common",
     "//src/lib/fdomain/client",
-    "//src/performance/memory/heapdump/lib/heapdump_snapshot:heapdump_snapshot_fdomain",
+    "//src/memory/heapdump/lib/heapdump_snapshot:heapdump_snapshot_fdomain",
     "//third_party/rust_crates:anyhow",
   ]
 

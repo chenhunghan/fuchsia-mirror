@@ -37,7 +37,6 @@ fuchsia_driver_component("pwm") {
     "//src/devices/pwm:drivers",
     "//src/devices/pwm/drivers:pwm",
   ]
-  info = "meta/pwm-info.json"
   component_name = "pwm"
   dml_label = ":pwm-dml"
   deps = [

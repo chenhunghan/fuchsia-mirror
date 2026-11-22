@@ -31,7 +31,6 @@ fuchsia_driver_component("component") {
   testonly = true
   component_name = "hang-on-stop"
   manifest = "meta/hang-on-stop.cml"
-  info = "meta/hang-on-stop-info.json"
   deps = [
     ":hang_on_stop_bind",
     ":hang_on_stop_driver",

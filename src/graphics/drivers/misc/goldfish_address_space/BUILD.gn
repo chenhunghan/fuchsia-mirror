@@ -30,11 +30,11 @@ common_deps = [
   "//sdk/lib/async-loop:async-loop-default",
   "//sdk/lib/component/outgoing/cpp",
   "//sdk/lib/driver/mmio/cpp",
+  "//sdk/lib/driver/pci/cpp",
   "//sdk/lib/driver/runtime:driver_runtime_cpp",
   "//sdk/lib/fidl",
   "//src/devices/lib/driver",
   "//src/devices/lib/driver:driver_runtime",
-  "//src/devices/pci/lib/device-protocol-pci",
   "//src/lib/ddk",
   "//src/lib/ddktl",
   "//zircon/system/ulib/fbl",
@@ -59,7 +59,6 @@ fuchsia_driver_component("address_space_driver") {
   dml_label = ":goldfish_address_space-dml"
   component_name = "goldfish_address_space"
   deps = [ ":address_space_driver-driver" ]
-  info = "meta/address_space_driver-info.json"
 }
 
 fuchsia_driver_package("goldfish_address_space") {

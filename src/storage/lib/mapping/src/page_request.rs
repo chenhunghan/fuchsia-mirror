@@ -4,6 +4,7 @@
 
 use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
 use std::fmt::{Debug, Formatter};
+use std::num::NonZero;
 use std::ops::Range;
 use std::sync::Arc;
 use storage_ptr_slice::MutPtrByteSlice;
@@ -59,14 +60,16 @@ impl PagePrecommit {
 pub trait PageRequest: DataBuffer + Sized {
     /// Prepares the target buffer for reading `read_range`.
     ///
-    /// `read_alignment` specifies the alignment boundary used when delivering chunks for Merkle
-    /// verification (ignored by direct pager implementations that supply pages without a verifier).
+    /// `flush_alignment` specifies the alignment boundary at which intermediate chunks may be
+    /// flushed to the downstream verifier before `read_range` completes (`None` delays flushing
+    /// until the full `read_range` has been committed). Ignored by direct pager implementations
+    /// that supply pages without a verifier.
     ///
     /// Must be called at most once prior to accessing the buffer slice or committing data.
     fn prepare(
         &mut self,
         read_range: Range<u64>,
-        read_alignment: usize,
+        flush_alignment: Option<NonZero<usize>>,
     ) -> Result<(), ChunkedArchiveError>;
 
     /// Splits `self` at uncompressed byte offset `mid` (`self.range().start < mid <
@@ -83,6 +86,23 @@ pub trait PageRequest: DataBuffer + Sized {
     /// length have been established.
     fn precommit(&self) -> PagePrecommit {
         PagePrecommit::default()
+    }
+
+    /// Associates a `trace_flow_id` (generated when the page fault arrived) with `self`.
+    fn with_trace_flow_id(self, _trace_flow_id: u64) -> Self {
+        self
+    }
+
+    /// Returns the trace flow ID associated with `self`, or `0` if none.
+    fn trace_flow_id(&self) -> u64 {
+        0
+    }
+
+    /// Returns `true` if `commit` forwards `trace_flow_id` to a downstream consumer (such as the
+    /// verifier delivery queue) that will emit `flow_end!`, or `false` if the flow terminates once
+    /// all bytes of this [`PageRequest`] have been committed in the driver.
+    fn forwards_trace_flow(&self) -> bool {
+        false
     }
 }
 
@@ -107,7 +127,7 @@ impl PageRequest for NullPageRequest {
     fn prepare(
         &mut self,
         _read_range: Range<u64>,
-        _read_alignment: usize,
+        _flush_alignment: Option<NonZero<usize>>,
     ) -> Result<(), ChunkedArchiveError> {
         Ok(())
     }
@@ -140,7 +160,7 @@ mod tests {
     fn test_null_page_request() {
         let mut req = NullPageRequest;
         assert_eq!(req.range(), 0..0);
-        assert!(req.prepare(0..4096, 128 * 1024).is_ok());
+        assert!(req.prepare(0..4096, None).is_ok());
         assert!(req.precommit().is_empty());
         assert_eq!(req.mut_ptr_slice().len(), 0);
         assert!(req.commit(0).is_ok());

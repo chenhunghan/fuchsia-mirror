@@ -4,14 +4,14 @@
 
 A UI client that wishes to vend user-visible content must place it in a Scenic
 View, which is a [Session](/docs/concepts/ui/scenic/index.md#sessions)-based
-[resource](/docs/concepts/ui/scenic/index.md#resources), local to that client. No resource can be
-directly referenced outside the scope of their owning Scenic Session.
+[resource](/docs/concepts/ui/scenic/index.md), local to that client. No resource
+can be directly referenced outside the scope of their owning Scenic Session.
 
 ### ViewRef refers to a Scenic View
 
 For a view resource in particular, it is very useful to have a stable and
 consistent view reference, that can be used across
-[component](/docs/concepts/components/v2/introduction.md#components_and_the_component_framework)
+[component](/docs/concepts/components/v2/introduction.md#component-framework)
 boundaries.
 
 We define a [fuchsia.ui.views.ViewRef](/sdk/fidl/fuchsia.ui.views/view_ref.fidl)
@@ -19,13 +19,13 @@ FIDL datatype that has some desirable properties:
 
 *   A ViewRef is globally unique across the operating system, it cannot be
     forged. This property arises from the ViewRef's underlying kernel object, an
-    [eventpair](/docs/concepts/kernel/concepts.md#events_event_pairs).
+    [eventpair](/docs/concepts/kernel/concepts.md#events-event-pairs).
 *   A ViewRef is globally unique over the lifetime of the operating system, it
     is never reused. This property arises from Zircon's guarantee of
-    [KOID uniqueness](/docs/concepts/kernel/concepts.md#kernel_object_ids) for
+    [KOID uniqueness](/docs/concepts/kernel/concepts.md#kernel-object-ids) for
     kernel objects.
 *   A ViewRef can be used in a
-    [feed-forward](/docs/development/api/fidl.md#feed_forward-dataflow) pattern for
+    [feed-forward](/docs/development/api/fidl.md#feed-forward) pattern for
     Scenic View creation. Protocols and components that participate in View
     creation do not have to "tunnel back" the corresponding ViewRef.
 *   ViewRef holders can implement lifecycle management by listening for a

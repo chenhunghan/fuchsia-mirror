@@ -14,12 +14,11 @@ use crate::kernel::mp::{
     cpu_num_to_mask, get_online_mask as mp_get_online_mask, unplug_cpu_mask as mp_unplug_cpu_mask,
     wait_for_all_cpus_ready as mp_wait_for_all_cpus_ready,
 };
-use crate::kernel::thread::{self, ThreadLockGuard};
+use crate::kernel::thread::{self, ThreadLockGuard, thread_lock_guard};
 use crate::kernel::types::BOOT_CPU_ID;
 use crate::vm::pmm::pmm_checker_check_all_free_pages;
 use kprint::kprintln;
 use zx_status::Status;
-use zx_types::zx_status_t;
 
 /// Gracefully halt and perform `action`.
 ///
@@ -94,11 +93,12 @@ pub fn platform_halt_secondary_cpus(deadline: InstantMono) -> Result<(), Status>
     // Ensure the current thread is pinned to the boot CPU.
     {
         let current_thread = thread::current_get();
-        // SAFETY: `current_thread` is a valid, live `Thread`, this CPU is not in a chain lock
-        // transaction, and `guard` is dropped at the end of this scope without blocking.
-        ksync::lock!(
-            let guard = unsafe {
-                ThreadLockGuard::lock(current_thread, clt_tag!("platform_halt_secondary_cpus"))
+        thread_lock_guard!(
+            guard,
+            // SAFETY: `current_thread` is the live running `Thread` (stays live past this scope),
+            // this CPU is not in a chain lock transaction, and we do not block.
+            unsafe {
+                ThreadLockGuard::target(current_thread, clt_tag!("platform_halt_secondary_cpus"))
             }
         );
         debug_assert!(guard.scheduler_state().hard_affinity() == cpu_num_to_mask(BOOT_CPU_ID));
@@ -134,20 +134,4 @@ pub fn platform_halt_secondary_cpus(deadline: InstantMono) -> Result<(), Status>
     }
 
     status
-}
-
-/// FFI trampoline for [`platform_graceful_halt_helper`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_graceful_halt_helper(
-    action: PlatformHaltAction,
-    reason: ZirconCrashReason,
-    panic_deadline: InstantMono,
-) -> ! {
-    platform_graceful_halt_helper(action, reason, panic_deadline)
-}
-
-/// FFI trampoline for [`platform_halt_secondary_cpus`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_halt_secondary_cpus(deadline: InstantMono) -> zx_status_t {
-    Status::result_into_raw(platform_halt_secondary_cpus(deadline))
 }

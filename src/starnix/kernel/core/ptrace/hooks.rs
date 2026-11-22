@@ -6,12 +6,19 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use starnix_logging::CATEGORY_STARNIX;
-use starnix_uapi::signals::SIGTRAP;
+use starnix_types::ownership::Releasable;
+use starnix_uapi::signals::{SIGKILL, SIGTRAP};
 use starnix_uapi::{CLONE_PTRACE, CLONE_UNTRACED, CLONE_VFORK, SIGCHLD, clone_args};
 
-use crate::ptrace::{PtraceEventData, PtraceOptions, StopState, ptrace_attach_from_state};
+use crate::ptrace::{
+    PtraceEvent, PtraceEventData, PtraceOptions, PtraceStatus, StopState, ptrace_attach_from_state,
+};
+use crate::signals::syscalls::WaitingOptions;
 use crate::signals::{SignalDetail, SignalInfo, send_signal_first};
-use crate::task::{CurrentTask, Task};
+use crate::task::{
+    CurrentTask, ExitStatus, PidTableGuard, ProcessSelector, Task, TaskMutableState, WaitResult,
+    ZombieState,
+};
 
 /// Provides access to ptrace hooks for a [`CurrentTask`].
 #[derive(Debug)]
@@ -150,5 +157,216 @@ impl<'a> CurrentTaskPtrace<'a> {
             return PtraceOptions::empty();
         }
         trace_type
+    }
+
+    /// For each task traced by this thread group that matches the given
+    /// selector, acquire its `TaskMutableState` and `ptracees` lock and execute
+    /// the given function.
+    pub fn get_ptracees_and(
+        &self,
+        selector: &ProcessSelector,
+        f: &mut dyn FnMut(&Task, &TaskMutableState),
+    ) {
+        for task_ref in self
+            .current_task
+            .thread_group()
+            .ptracees
+            .lock()
+            .iter()
+            .filter(|info| selector.match_tid(&info.tid))
+            .filter_map(|info| info.tid.get_task().ok())
+        {
+            let task_state = task_ref.write();
+            if task_state.ptrace.is_some() {
+                f(&task_ref, &task_state);
+            }
+        }
+    }
+
+    /// Returns a tracee whose state has changed, so that waitpid can report on
+    /// it. If this returns a value, and the pid is being traced, the tracer
+    /// thread is deemed to have seen the tracee ptrace-stop for the purposes of
+    /// `PTRACE_LISTEN`.
+    pub fn get_waitable_ptracee(
+        &self,
+        selector: &ProcessSelector,
+        options: &WaitingOptions,
+        pids: &mut PidTableGuard<'_>,
+    ) -> Option<WaitResult> {
+        let thread_group = self.current_task.thread_group();
+        // This checks to see if the target is a zombie ptracee.
+        let waitable_entry =
+            thread_group.write().zombie_ptracees.get_waitable_entry(selector, options);
+        match waitable_entry {
+            None => (),
+            Some((zombie, None)) => return Some(zombie.to_wait_result()),
+            Some((zombie, Some((tg, z)))) => {
+                if let Some(tg) = tg.upgrade() {
+                    if !Arc::ptr_eq(&tg, thread_group) {
+                        tg.do_zombie_notifications(z, pids);
+                    } else {
+                        {
+                            let mut state = tg.write();
+                            state.children.remove(&z.task.pid);
+                            state
+                                .deferred_zombie_ptracers
+                                .retain(|dzp| dzp.tracee_pid != z.task.pid);
+                        }
+
+                        z.release(pids);
+                    };
+                }
+                return Some(zombie.to_wait_result());
+            }
+        }
+
+        let mut tasks = vec![];
+
+        // This checks to see if the target is a running ptracee.
+        self.get_ptracees_and(selector, &mut |task: &Task, _| {
+            tasks.push(task.weak_self.clone());
+        });
+        for task in tasks {
+            let Some(task_ref) = task.upgrade() else {
+                continue;
+            };
+
+            let process_state = &mut task_ref.thread_group().write();
+            let mut task_state = task_ref.write();
+            if task_state
+                .ptrace
+                .as_ref()
+                .is_some_and(|ptrace| ptrace.is_waitable(task_ref.load_stopped(), options))
+            {
+                // We've identified a potential target.  Need to return either
+                // the process's information (if we are in group-stop) or the
+                // thread's information (if we are in a different stop).
+
+                // The shared information:
+                let uid = task_ref.real_creds().uid;
+                let mut exit_status = None;
+                let exit_signal = process_state.exit_signal.clone();
+                let time_stats =
+                    process_state.base.time_stats() + process_state.children_time_stats;
+                let task_stopped = task_ref.load_stopped();
+
+                #[derive(PartialEq)]
+                enum ExitType {
+                    None,
+                    Cont,
+                    Stop,
+                    Kill,
+                }
+                if process_state.is_waitable() {
+                    let ptrace = &mut task_state.ptrace;
+                    // The information for processes, if we were in group stop.
+                    let process_stopped = process_state.base.load_stopped();
+                    let mut fn_type = ExitType::None;
+                    if process_stopped == StopState::Awake && options.wait_for_continued {
+                        fn_type = ExitType::Cont;
+                    }
+                    let mut event = ptrace
+                        .as_ref()
+                        .map_or(PtraceEvent::None, |ptrace| {
+                            ptrace.event_data.as_ref().map_or(PtraceEvent::None, |data| data.event)
+                        })
+                        .clone();
+                    // Tasks that are ptrace'd always get stop notifications.
+                    if process_stopped == StopState::GroupStopped
+                        && (options.wait_for_stopped || ptrace.is_some())
+                    {
+                        fn_type = ExitType::Stop;
+                    }
+                    if fn_type != ExitType::None {
+                        let signal = if options.keep_waitable_state {
+                            process_state.last_signal.as_ref().map(|siginfo| siginfo.signal)
+                        } else {
+                            process_state.last_signal.take().map(|siginfo| siginfo.signal)
+                        };
+                        if let Some(signal) = signal {
+                            if task_ref.thread_group().load_stopped() == StopState::GroupStopped
+                                && ptrace.as_ref().is_some_and(|ptrace| ptrace.is_seized())
+                                && event == PtraceEvent::None
+                            {
+                                event = PtraceEvent::Stop;
+                            }
+                            if signal == SIGKILL {
+                                fn_type = ExitType::Kill;
+                            }
+                            exit_status = match fn_type {
+                                ExitType::Stop => Some((
+                                    ExitStatus::Stop(signal, event),
+                                    process_state.base.leader.clone(),
+                                )),
+                                ExitType::Cont => Some((
+                                    ExitStatus::Continue(signal, event),
+                                    process_state.base.leader.clone(),
+                                )),
+                                ExitType::Kill => Some((
+                                    ExitStatus::Kill(signal),
+                                    process_state.base.leader.clone(),
+                                )),
+                                _ => None,
+                            };
+                        }
+                        // Clear the wait status of the ptrace, because we're
+                        // using the tg status instead.
+                        ptrace
+                            .as_mut()
+                            .map(|ptrace| ptrace.get_last_signal(options.keep_waitable_state));
+                    }
+                }
+                if exit_status.is_none() {
+                    if let Some(ptrace) = task_state.ptrace.as_mut() {
+                        // The information for the task, if we were in a non-group stop.
+                        let mut fn_type = ExitType::None;
+                        let event = ptrace
+                            .event_data
+                            .as_ref()
+                            .map_or(PtraceEvent::None, |event| event.event);
+                        if task_stopped == StopState::Awake {
+                            fn_type = ExitType::Cont;
+                        }
+                        if task_stopped.is_stopping_or_stopped()
+                            || ptrace.stop_status == PtraceStatus::Listening
+                        {
+                            fn_type = ExitType::Stop;
+                        }
+                        if fn_type != ExitType::None {
+                            if let Some(signal) =
+                                ptrace.get_last_signal(options.keep_waitable_state)
+                            {
+                                if signal == SIGKILL {
+                                    fn_type = ExitType::Kill;
+                                }
+                                exit_status = match fn_type {
+                                    ExitType::Stop => Some((
+                                        ExitStatus::Stop(signal, event),
+                                        task_ref.tid.clone(),
+                                    )),
+                                    ExitType::Cont => Some((
+                                        ExitStatus::Continue(signal, event),
+                                        task_ref.tid.clone(),
+                                    )),
+                                    ExitType::Kill => {
+                                        Some((ExitStatus::Kill(signal), task_ref.tid.clone()))
+                                    }
+                                    _ => None,
+                                };
+                            }
+                        }
+                    }
+                }
+                if let Some((exit_status, pid)) = exit_status {
+                    return Some(WaitResult {
+                        pid,
+                        uid,
+                        zombie_state: ZombieState { exit_status, time_stats },
+                        exit_signal,
+                    });
+                }
+            }
+        }
+        None
     }
 }

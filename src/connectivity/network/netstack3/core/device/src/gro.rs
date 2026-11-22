@@ -6,6 +6,7 @@
 
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
+use core::ops::Range;
 
 use assert_matches::assert_matches;
 use derivative::Derivative;
@@ -16,6 +17,7 @@ use packet::ParsablePacket;
 use packet_formats::ethernet::{EtherType, EthernetFrame, EthernetFrameLengthCheck};
 use packet_formats::ip::{DscpAndEcn, IpExt, IpProto, Ipv4Proto, Ipv6Proto};
 use packet_formats::ipv4::{Ipv4Header, Ipv4Packet, Ipv4PacketRaw};
+use packet_formats::ipv6::ext_hdrs::Ipv6ExtensionHeader;
 use packet_formats::ipv6::{IPV6_FIXED_HDR_LEN, Ipv6Header, Ipv6Packet, Ipv6PacketRaw};
 use packet_formats::tcp::{MAX_OPTIONS_LEN, TcpParseArgs, TcpSegment, TcpSegmentRaw};
 use static_assertions::const_assert;
@@ -88,6 +90,9 @@ pub trait MaybeContiguousBuffer {
         &'a mut self,
         storage: Option<&'b mut Vec<u8>>,
     ) -> Option<BufferSlice<'a, 'b>>;
+
+    /// Obtains a slice into the buffer if it's contiguous.
+    fn as_contiguous(&self) -> Option<&[u8]>;
 
     /// Obtains a mutable slice into the buffer without linearizing. Panics if
     /// called on a buffer that's not contiguous.
@@ -187,6 +192,10 @@ struct Ipv6FlowId {
     src_ip: Ipv6Addr,
     dst_ip: Ipv6Addr,
     flowlabel: u32,
+    /// The fixed header's Next Header field. It identifies the first
+    /// extension header (if any), which the extension header comparison
+    /// doesn't cover. Consistent with Linux.
+    next_header: u8,
 }
 
 /// IP layer flow identifier for GRO matching.
@@ -208,7 +217,7 @@ impl IpFlowId {
 
         match self {
             IpFlowId::Ipv4(Ipv4FlowId { src_ip, dst_ip }) => recover(*src_ip, *dst_ip, segment),
-            IpFlowId::Ipv6(Ipv6FlowId { src_ip, dst_ip, flowlabel: _ }) => {
+            IpFlowId::Ipv6(Ipv6FlowId { src_ip, dst_ip, flowlabel: _, next_header: _ }) => {
                 recover(*src_ip, *dst_ip, segment)
             }
         }
@@ -239,6 +248,17 @@ impl IpPacket<'_> {
             IpPacket::V6(packet) => packet.header_len() + packet.body().len(),
         }
     }
+
+    /// The range of the IP extension headers (see [`GroPacket::ip_ext_hdrs`])
+    /// in a frame with this packet's header `offsets`.
+    fn ext_hdrs_range(&self, offsets: &HeaderOffsets) -> Range<usize> {
+        let HeaderOffsets { ip_offset, transport_offset } = *offsets;
+        match self {
+            // IPv4 packets with options are ineligible.
+            IpPacket::V4(_) => transport_offset..transport_offset,
+            IpPacket::V6(_) => ip_offset + IPV6_FIXED_HDR_LEN..transport_offset,
+        }
+    }
 }
 
 trait GroIpPacket<I: IpExt> {
@@ -253,9 +273,8 @@ impl GroIpPacket<Ipv4> for Ipv4Packet<&[u8]> {
         // available for flow matching in the first fragment.
         self.fragment_offset() == packet_formats::ip::FragmentOffset::ZERO
             && !self.mf_flag()
-            // Must not have options: this lets us avoid the need to
-            // copy them out of the buffer or arbitrarily index into the
-            // coalescing buffer to find them.
+            // Must not have options. This is consistent with Linux, which
+            // flushes IPv4 packets with options.
             && self.header_len() == packet_formats::ipv4::HDR_PREFIX_LEN
     }
 
@@ -273,12 +292,17 @@ impl GroIpPacket<Ipv4> for Ipv4Packet<&[u8]> {
 
 impl GroIpPacket<Ipv6> for Ipv6Packet<&[u8]> {
     fn is_eligible_for_gro(&self) -> bool {
-        // Must not have extension headers. Note that this differs from
-        // Linux, which allows extension headers as long as they're
-        // equal. We omit these for the same reason as the IPv4 case
-        // above: to avoid needing to copy them or arbitrarily index
-        // into the coalescing buffer.
-        self.iter_extension_hdrs().next().is_none()
+        // Only extension headers supported by Linux GRO are permitted, so long
+        // as they're equal across the flow.
+        self.iter_extension_hdrs().all(|ext_hdr| match ext_hdr {
+            Ipv6ExtensionHeader::HopByHopOptions { .. }
+            | Ipv6ExtensionHeader::Routing { .. }
+            | Ipv6ExtensionHeader::DestinationOptions { .. } => true,
+            // The transport headers are only available for flow matching in
+            // the first fragment, and even an atomic fragment can't be
+            // resegmented faithfully.
+            Ipv6ExtensionHeader::Fragment { .. } => false,
+        })
     }
 
     fn ip_proto(&self) -> Option<IpProto> {
@@ -293,6 +317,7 @@ impl GroIpPacket<Ipv6> for Ipv6Packet<&[u8]> {
             src_ip: self.src_ip(),
             dst_ip: self.dst_ip(),
             flowlabel: self.flowlabel(),
+            next_header: self.next_header(),
         })
     }
 }
@@ -377,6 +402,9 @@ impl<'a> TransportPacket<'a> {
 /// Note: if two packets have matching flow identifiers, it's not necessarily
 /// true that they'll be coalesced, but it is true that their fates (coalesced,
 /// flushed, or both) are shared.
+///
+/// The IP extension headers are also part of a flow's identity; see
+/// [`GroPacket::ip_ext_hdrs`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GroFlowId {
     link_layer: LinkLayerFlowId,
@@ -414,6 +442,11 @@ fn build_csum_offload_output(
 struct GroPacket<'a> {
     pub flow_id: GroFlowId,
     pub offsets: HeaderOffsets,
+    /// The IP header bytes past the fixed header and before the transport
+    /// header: IPv6 extension headers (IPv4 options are never present since
+    /// packets carrying them are ineligible). These must match the active
+    /// flow's exactly for the packet to belong to it.
+    pub ip_ext_hdrs: &'a [u8],
     pub ip: IpPacket<'a>,
     pub transport: TransportPacket<'a>,
 }
@@ -451,17 +484,18 @@ impl<'a> GroPacket<'a> {
             let transport = TransportPacket::parse(&mut view, proto, src, dst, context)
                 .filter(|p| p.is_eligible_for_gro())?;
 
-            (ip.into(), flow_id, transport_offset, transport)
+            (IpPacket::from(ip), flow_id, transport_offset, transport)
         });
 
         let offsets = HeaderOffsets { ip_offset, transport_offset };
+        let ip_ext_hdrs = &slice[ip.ext_hdrs_range(&offsets)];
         let flow_id = GroFlowId {
             link_layer: ll_frame.flow_id(),
             ip: ip_flow_id,
             transport: transport.flow_id(),
         };
 
-        Some(GroPacket { flow_id, offsets, ip, transport })
+        Some(GroPacket { flow_id, offsets, ip_ext_hdrs, ip, transport })
     }
 
     /// The offset of the end of the IP payload in the frame this packet was
@@ -928,7 +962,7 @@ struct GroFlow<T> {
 
 impl<T: Eq> GroFlow<T> {
     fn new(target: T, parsed: GroPacket<'_>, checksum_offload: ChecksumRxOffloading) -> Self {
-        let GroPacket { flow_id, offsets, ip, transport } = parsed;
+        let GroPacket { flow_id, offsets, ip_ext_hdrs: _, ip, transport } = parsed;
         Self {
             target,
             flow_id,
@@ -1057,11 +1091,11 @@ pub struct GroCounters<C = Counter> {
     /// `input_frames - output_frames` is the number of frames that were merged
     /// into another frame.
     output_frames: C,
-    /// The number of times the active flow was flushed early because a frame
-    /// belonging to a different flow arrived and replaced it.
+    /// The number of times an active flow was flushed early because a frame
+    /// belonging to a different flow arrived when the flow cache was full.
     ///
-    /// This indicates that flows were interleaved within a batch, costing
-    /// coalescing opportunities.
+    /// This indicates that more than [`MAX_ACTIVE_FLOWS`] flows were
+    /// interleaved within a batch, costing coalescing opportunities.
     flow_evictions: C,
 }
 
@@ -1075,15 +1109,65 @@ impl Inspectable for GroCounters {
     }
 }
 
-/// Persistent reusable buffer storage for GRO to save on per-batch allocations.
+/// The maximum number of concurrent flows tracked by GRO, matching Linux's
+/// `MAX_GRO_SKBS`.
+const MAX_ACTIVE_FLOWS: usize = 8;
+
+/// Persistent reusable buffer storage for a single GRO flow.
 #[derive(Debug, Derivative)]
 #[derivative(Default(bound = ""))]
-pub struct GroBufferStorage<B> {
+struct FlowBufferStorage<B> {
     /// Buffer for GRO coalescing.
     coalescing_vec: Vec<u8>,
     /// Holds onto the original buffers while building a coalesced frame before
     /// it's passed to the stack.
     coalesced_buffers: Vec<B>,
+}
+
+impl<B> FlowBufferStorage<B> {
+    fn clear(&mut self) {
+        let Self { coalescing_vec, coalesced_buffers } = self;
+        coalescing_vec.clear();
+        coalesced_buffers.clear();
+    }
+}
+
+impl<B: MaybeContiguousBuffer> FlowBufferStorage<B> {
+    fn build_output<'a, T: Eq>(
+        &'a mut self,
+        ActiveFlow { seq: _, flow, buffers }: ActiveFlow<B, T>,
+    ) -> GroOutputItem<'a, B, T, alloc::vec::Drain<'a, B>> {
+        match buffers {
+            // Nothing was ever merged into this flow, so its buffer was never
+            // copied into the coalescing buffer; hand it back untouched.
+            ActiveFlowBuffers::Single { buffer, payload_end: _ } => GroOutputItem {
+                target: flow.target,
+                checksum_offload: flow.checksum_offload,
+                gso_info: None,
+                buffers: GroOutputBuffers::Contiguous(buffer),
+            },
+            ActiveFlowBuffers::Coalesced => {
+                let Self { coalescing_vec, coalesced_buffers } = self;
+
+                let gso_info = flow.finalize(&mut coalescing_vec[..]);
+
+                let GroFlow { target, checksum_offload, num_coalesced, .. } = flow;
+                let buffers = GroOutputBuffers::Coalesced {
+                    slice: &mut coalescing_vec[..],
+                    buffers: coalesced_buffers.drain(..num_coalesced),
+                };
+                GroOutputItem { target, checksum_offload, gso_info, buffers }
+            }
+        }
+    }
+}
+
+/// Persistent reusable buffer storage for GRO to save on per-batch allocations.
+#[derive(Debug, Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct GroBufferStorage<B> {
+    /// Per-flow buffers for GRO coalescing.
+    flow_buffers: [FlowBufferStorage<B>; MAX_ACTIVE_FLOWS],
     /// Buffer for linearization of fragmented buffers.
     linearization_vec: Vec<u8>,
 }
@@ -1095,9 +1179,11 @@ impl<B> GroBufferStorage<B> {
     }
 
     fn clear(&mut self) {
-        self.coalescing_vec.clear();
-        self.linearization_vec.clear();
-        self.coalesced_buffers.clear();
+        let Self { flow_buffers, linearization_vec } = self;
+        for flow_buffer in flow_buffers {
+            flow_buffer.clear();
+        }
+        linearization_vec.clear();
     }
 }
 
@@ -1119,34 +1205,6 @@ impl<B: MaybeContiguousBuffer> GroBufferStorage<B> {
         };
         GroIter::new(iter, self, counters, enable_tcp_gro)
     }
-
-    fn build_output<'a, T: Eq>(
-        &'a mut self,
-        ActiveFlow { flow, buffers }: ActiveFlow<B, T>,
-    ) -> GroOutputItem<'a, B, T, alloc::vec::Drain<'a, B>> {
-        match buffers {
-            // Nothing was ever merged into this flow, so its buffer was never
-            // copied into the coalescing buffer; hand it back untouched.
-            ActiveFlowBuffers::Single { buffer, payload_end: _ } => GroOutputItem {
-                target: flow.target,
-                checksum_offload: flow.checksum_offload,
-                gso_info: None,
-                buffers: GroOutputBuffers::Contiguous(buffer),
-            },
-            ActiveFlowBuffers::Coalesced => {
-                let GroBufferStorage { coalescing_vec, coalesced_buffers, .. } = self;
-
-                let gso_info = flow.finalize(&mut coalescing_vec[..]);
-
-                let GroFlow { target, checksum_offload, num_coalesced, .. } = flow;
-                let buffers = GroOutputBuffers::Coalesced {
-                    slice: &mut coalescing_vec[..],
-                    buffers: coalesced_buffers.drain(..num_coalesced),
-                };
-                GroOutputItem { target, checksum_offload, gso_info, buffers }
-            }
-        }
-    }
 }
 
 /// The buffers held by an [`ActiveFlow`].
@@ -1160,13 +1218,16 @@ enum ActiveFlowBuffers<B> {
         /// bytes would be stranded in the middle of the coalesced payload.
         payload_end: usize,
     },
-    /// The flow's frame lives in the coalescing buffer and the buffers that
-    /// formed it are held by [`GroBufferStorage`].
+    /// The flow's frame and the buffers that formed it are held by its slot's
+    /// [`FlowBufferStorage`].
     Coalesced,
 }
 
 /// A [`GroFlow`] along with the buffers it currently holds.
 struct ActiveFlow<B, T> {
+    /// Monotonically increasing sequence number recording when this flow was
+    /// inserted, used to evict and flush flows in oldest-first order.
+    seq: usize,
     flow: GroFlow<T>,
     buffers: ActiveFlowBuffers<B>,
 }
@@ -1188,32 +1249,56 @@ impl<B, T> ActiveFlow<B, T> {
 impl<B: MaybeContiguousBuffer, T: Eq> ActiveFlow<B, T> {
     fn matches(
         &self,
+        coalescing_vec: &[u8],
         target: &T,
-        flow_id: &GroFlowId,
+        parsed: &GroPacket<'_>,
         checksum_offload: ChecksumRxOffloading,
     ) -> bool {
-        self.flow.matches(target, flow_id, checksum_offload)
+        if !self.flow.matches(target, &parsed.flow_id, checksum_offload) {
+            return false;
+        }
+        // Matching flow IDs fix the link layer and fixed IP header lengths, so
+        // equal offsets mean equal-length extension headers.
+        if self.flow.offsets != parsed.offsets {
+            return false;
+        }
+        // Equal offsets also mean the flow has no extension headers either.
+        if parsed.ip_ext_hdrs.is_empty() {
+            return true;
+        }
+        // Compare the IP extension headers against the flow's frame in place
+        // rather than keeping a copy of them in the flow. The offsets match, so
+        // the extension headers occupy the same range in both frames.
+        let frame: &[u8] = match &self.buffers {
+            // See `ActiveFlow::coalesce` for why this buffer is contiguous.
+            ActiveFlowBuffers::Single { buffer, payload_end: _ } => {
+                buffer.as_contiguous().expect("seed buffer must be contiguous")
+            }
+            ActiveFlowBuffers::Coalesced => coalescing_vec,
+        };
+        frame[parsed.ip.ext_hdrs_range(&parsed.offsets)] == *parsed.ip_ext_hdrs
     }
 
     fn can_coalesce(&self, coalescing_vec_len: usize, parsed: &GroPacket<'_>) -> bool {
         self.flow.can_coalesce(self.frame_len(coalescing_vec_len), parsed)
     }
 
-    /// Merges `parsed` into the flow's frame in `coalesce_into`.
+    /// Merges `parsed` into the flow's frame in `flow_storage`.
     ///
     /// If the flow is still holding its seed buffer verbatim, the seed is first
-    /// copied into `coalesce_into` and the buffer is moved into `hold_buffers`,
-    /// which must keep the buffers alive until the frame is handed to the
-    /// stack.
+    /// copied into `flow_storage.coalescing_vec` and the buffer is moved into
+    /// `flow_storage.coalesced_buffers`, which must keep the buffers alive
+    /// until the frame is handed to the stack.
     fn coalesce(
         &mut self,
         parsed: GroPacket<'_>,
-        coalesce_into: &mut Vec<u8>,
-        hold_buffers: &mut Vec<B>,
+        flow_storage: &mut FlowBufferStorage<B>,
     ) -> CoalesceResult {
+        let FlowBufferStorage { coalescing_vec, coalesced_buffers } = flow_storage;
         match core::mem::replace(&mut self.buffers, ActiveFlowBuffers::Coalesced) {
             ActiveFlowBuffers::Single { mut buffer, payload_end } => {
-                coalesce_into.clear();
+                coalescing_vec.clear();
+                coalesced_buffers.clear();
                 // Unwrapping is okay here because `ActiveFlowBuffers::Single`
                 // is only ever constructed for a buffer that was found to be
                 // contiguous; a fragmented buffer is linearized into the
@@ -1222,12 +1307,12 @@ impl<B: MaybeContiguousBuffer, T: Eq> ActiveFlow<B, T> {
                 //
                 // Any trailing bytes (e.g. link layer padding) are dropped;
                 // only the packet itself may be coalesced against.
-                coalesce_into.extend_from_slice(&buffer.unwrap_contiguous()[..payload_end]);
-                hold_buffers.push(buffer);
+                coalescing_vec.extend_from_slice(&buffer.unwrap_contiguous()[..payload_end]);
+                coalesced_buffers.push(buffer);
             }
             ActiveFlowBuffers::Coalesced => {}
         }
-        self.flow.coalesce(parsed, coalesce_into)
+        self.flow.coalesce(parsed, coalescing_vec)
     }
 }
 
@@ -1237,7 +1322,7 @@ enum BufferLinearization {
     Linearized,
 }
 
-/// The subsequent call to `GroIter::next()` must establish this as the active
+/// The subsequent call to `GroIter::next()` must establish this as an active
 /// flow.
 ///
 /// To avoid double-linearizing a fragmented buffer, `linearization` indicates
@@ -1275,8 +1360,12 @@ pub struct GroIter<'a, I, B, T> {
     iter: I,
     storage: &'a mut GroBufferStorage<B>,
     counters: &'a GroCounters,
-    /// The active GRO flow that GRO is attempting to match.
-    active_flow: Option<ActiveFlow<B, T>>,
+    /// The active GRO flows that GRO is attempting to match, indexed by slot in
+    /// `storage.flow_buffers`.
+    active_flows: [Option<ActiveFlow<B, T>>; MAX_ACTIVE_FLOWS],
+    /// Monotonically increasing sequence counter assigned to newly inserted
+    /// active flows to track insertion age.
+    next_flow_seq: usize,
     /// Item pending processing on next iteration.
     pending_item: Option<PendingItem<B, T>>,
     enable_tcp_gro: bool,
@@ -1293,7 +1382,65 @@ where
         enable_tcp_gro: bool,
     ) -> Self {
         counters.batches.increment();
-        Self { iter, storage, counters, active_flow: None, pending_item: None, enable_tcp_gro }
+        Self {
+            iter,
+            storage,
+            counters,
+            active_flows: core::array::from_fn(|_| None),
+            next_flow_seq: 0,
+            pending_item: None,
+            enable_tcp_gro,
+        }
+    }
+
+    /// Establishes `pending` as an active flow in the unoccupied `slot`, whose
+    /// coalescing buffers are `flow_storage`.
+    fn insert_new_flow(
+        slot: &mut Option<ActiveFlow<B, T>>,
+        flow_storage: &mut FlowBufferStorage<B>,
+        linearization_vec: &[u8],
+        next_flow_seq: &mut usize,
+        PendingFlow { buffer, flow, seed_payload_end, linearization }: PendingFlow<B, T>,
+    ) {
+        let buffers = match linearization {
+            // The buffer is contiguous, so the flow can hold onto it
+            // verbatim and defer copying it into the coalescing buffer
+            // until something merges into the flow.
+            BufferLinearization::Contiguous => {
+                ActiveFlowBuffers::Single { buffer, payload_end: seed_payload_end }
+            }
+            BufferLinearization::Linearized => {
+                // The buffer is fragmented and its linearization is in the
+                // linearization buffer; move it into this slot's coalescing
+                // buffer.
+                //
+                // Drop any trailing bytes (e.g. link layer padding) from the
+                // seed frame; only the packet itself may be coalesced against.
+                let FlowBufferStorage { coalescing_vec, coalesced_buffers } = flow_storage;
+                coalescing_vec.clear();
+                coalescing_vec.extend_from_slice(&linearization_vec[..seed_payload_end]);
+                coalesced_buffers.clear();
+                coalesced_buffers.push(buffer);
+                ActiveFlowBuffers::Coalesced
+            }
+        };
+
+        let seq = *next_flow_seq;
+        *next_flow_seq += 1;
+        assert!(slot.replace(ActiveFlow { seq, flow, buffers }).is_none());
+    }
+
+    /// Takes the oldest active flow, along with its slot's coalescing buffers.
+    fn take_oldest_flow<'s>(
+        active_flows: &mut [Option<ActiveFlow<B, T>>; MAX_ACTIVE_FLOWS],
+        flow_buffers: &'s mut [FlowBufferStorage<B>; MAX_ACTIVE_FLOWS],
+    ) -> Option<(ActiveFlow<B, T>, &'s mut FlowBufferStorage<B>)> {
+        let (slot, flow_storage) = active_flows
+            .iter_mut()
+            .zip(flow_buffers.iter_mut())
+            .filter(|(slot, _)| slot.is_some())
+            .min_by_key(|(slot, _)| slot.as_ref().map(|flow| flow.seq))?;
+        Some((slot.take()?, flow_storage))
     }
 }
 
@@ -1340,8 +1487,10 @@ where
                     ProcessingResult::Return(out) => return Some(out),
                 };
             }
-            if let Some(f) = self.active_flow.take() {
-                return Some(self.storage.build_output(f));
+            if let Some((f, flow_storage)) =
+                Self::take_oldest_flow(&mut self.active_flows, &mut self.storage.flow_buffers)
+            {
+                return Some(flow_storage.build_output(f));
             }
             return None;
         }
@@ -1351,39 +1500,22 @@ where
         &'b mut self,
         pending: PendingItem<B, T>,
     ) -> ProcessingResult<'b, B, T, alloc::vec::Drain<'b, B>> {
-        let Self { storage, active_flow, .. } = self;
+        let Self { storage, active_flows, next_flow_seq, .. } = self;
+        let GroBufferStorage { flow_buffers, linearization_vec } = &mut **storage;
         match pending {
             PendingItem::NewFlow(pending) => {
-                let PendingFlow { buffer, flow, seed_payload_end, linearization } = pending;
-                let buffers = match linearization {
-                    // The buffer is contiguous, so the flow can hold onto it
-                    // verbatim and defer copying it into the coalescing buffer
-                    // until something merges into the flow.
-                    BufferLinearization::Contiguous => {
-                        ActiveFlowBuffers::Single { buffer, payload_end: seed_payload_end }
-                    }
-                    BufferLinearization::Linearized => {
-                        // The buffer is fragmented and its linearization is
-                        // already in the linearization buffer; move it into the
-                        // coalescing buffer, which the previous active flow has
-                        // now released.
-                        //
-                        // Drop any trailing bytes (e.g. link layer padding)
-                        // from the seed frame; only the packet itself may be
-                        // coalesced against.
-                        let GroBufferStorage {
-                            coalescing_vec,
-                            coalesced_buffers,
-                            linearization_vec,
-                        } = storage;
-                        coalescing_vec.clear();
-                        coalescing_vec.extend_from_slice(&linearization_vec[..seed_payload_end]);
-                        coalesced_buffers.push(buffer);
-                        ActiveFlowBuffers::Coalesced
-                    }
-                };
-
-                *active_flow = Some(ActiveFlow { flow, buffers });
+                let (slot, flow_storage) = active_flows
+                    .iter_mut()
+                    .zip(flow_buffers.iter_mut())
+                    .find(|(slot, _)| slot.is_none())
+                    .expect("a flow was just flushed to make room for the pending flow");
+                Self::insert_new_flow(
+                    slot,
+                    flow_storage,
+                    linearization_vec,
+                    next_flow_seq,
+                    pending,
+                );
                 ProcessingResult::Continue
             }
             PendingItem::Flush(pending) => {
@@ -1391,10 +1523,9 @@ where
 
                 let buffers = match linearization {
                     BufferLinearization::Contiguous => GroOutputBuffers::Contiguous(buffer),
-                    BufferLinearization::Linearized => GroOutputBuffers::Linearized {
-                        buffer,
-                        slice: &mut storage.linearization_vec,
-                    },
+                    BufferLinearization::Linearized => {
+                        GroOutputBuffers::Linearized { buffer, slice: linearization_vec }
+                    }
                 };
                 ProcessingResult::Return(GroOutputItem {
                     target,
@@ -1412,13 +1543,22 @@ where
         &'b mut self,
         item: GroInputItem<B, T>,
     ) -> ProcessingResult<'b, B, T, alloc::vec::Drain<'b, B>> {
-        let Self { storage, counters, active_flow, pending_item, enable_tcp_gro, .. } = self;
+        let Self {
+            storage,
+            counters,
+            active_flows,
+            next_flow_seq,
+            pending_item,
+            enable_tcp_gro,
+            ..
+        } = self;
+        let GroBufferStorage { flow_buffers, linearization_vec } = &mut **storage;
         let GroInputItem { mut buffer, target, checksum_offload } = item;
 
         counters.input_frames.increment();
-        storage.linearization_vec.clear();
+        linearization_vec.clear();
         let buffer_slice = buffer
-            .linearized(Some(&mut storage.linearization_vec))
+            .linearized(Some(&mut *linearization_vec))
             .expect("must be `Some` if linearization vec is provided");
         let linearization = match &buffer_slice {
             BufferSlice::Contiguous(_) => BufferLinearization::Contiguous,
@@ -1463,84 +1603,73 @@ where
         };
 
         let flush_if_not_merged = parsed.flush_if_not_merged(buffer_slice.as_slice().len());
-        let Some(mut active) = active_flow.take() else {
-            // There's no active flow, so the buffer was not merged. Establish
-            // it as the active flow unless it must be flushed immediately.
+        let matching = active_flows.iter_mut().zip(flow_buffers.iter_mut()).find_map(
+            |(slot, flow_storage)| {
+                slot.take_if(|f| {
+                    f.matches(&flow_storage.coalescing_vec, &target, &parsed, checksum_offload)
+                })
+                .map(|active| (active, slot, flow_storage))
+            },
+        );
 
-            if flush_if_not_merged {
-                return_single_buffer!(checksum_offload);
-            }
-
-            let seed_payload_end = parsed.payload_end();
-            let flow = GroFlow::new(target, parsed, checksum_offload);
-            let buffers = match linearization {
-                // The buffer is contiguous, so the flow can hold onto it
-                // verbatim and defer copying it into the coalescing buffer
-                // until something merges into the flow.
-                BufferLinearization::Contiguous => {
-                    ActiveFlowBuffers::Single { buffer, payload_end: seed_payload_end }
-                }
-                BufferLinearization::Linearized => {
-                    storage.coalescing_vec.clear();
-                    // Drop any trailing bytes (e.g. link layer padding) from
-                    // the seed frame; only the packet itself may be coalesced
-                    // against.
-                    storage
-                        .coalescing_vec
-                        .extend_from_slice(&buffer_slice.as_slice()[..seed_payload_end]);
-                    storage.coalesced_buffers.push(buffer);
-                    ActiveFlowBuffers::Coalesced
-                }
-            };
-            *active_flow = Some(ActiveFlow { flow, buffers });
-            return ProcessingResult::Continue;
-        };
-
-        if !active.matches(&target, &parsed.flow_id, checksum_offload) {
-            // The buffer didn't match the active flow, so it was not merged and
-            // the active flow is not flushed. Replace the active flow with a
-            // new one unless the buffer must be flushed immediately, in which
-            // case we just keep the active flow as-is.
+        let Some((mut active, slot, flow_storage)) = matching else {
+            // The buffer didn't match any active flow, so it was not merged.
+            // Insert it as a new active flow (evicting the oldest flow if the
+            // cache is full) unless the buffer must be flushed immediately, in
+            // which case we just keep the active flows as-is.
             //
             // Note that while this may result in packet re-ordering across
             // separate flows, it will still preserve ordering within any given
-            // flow. This is consistent with Linux's implementation of GRO
-            // (albeit with a single tracked flow, where Linux tracks up to 8).
+            // flow. This is consistent with Linux's implementation of GRO.
 
             if flush_if_not_merged {
-                *active_flow = Some(active);
                 return_single_buffer!(checksum_offload);
             }
 
-            counters.flow_evictions.increment();
             let seed_payload_end = parsed.payload_end();
             let flow = GroFlow::new(target, parsed, checksum_offload);
-            let pending =
-                PendingItem::NewFlow(PendingFlow { buffer, flow, seed_payload_end, linearization });
-            *pending_item = Some(pending);
-            return ProcessingResult::Return(storage.build_output(active));
-        }
+            let pending_flow = PendingFlow { buffer, flow, seed_payload_end, linearization };
 
-        if active.can_coalesce(storage.coalescing_vec.len(), &parsed) {
-            let coalesce_result = active.coalesce(
-                parsed,
-                &mut storage.coalescing_vec,
-                &mut storage.coalesced_buffers,
-            );
+            if let Some((free_slot, flow_storage)) = active_flows
+                .iter_mut()
+                .zip(flow_buffers.iter_mut())
+                .find(|(slot, _)| slot.is_none())
+            {
+                Self::insert_new_flow(
+                    free_slot,
+                    flow_storage,
+                    linearization_vec,
+                    next_flow_seq,
+                    pending_flow,
+                );
+                return ProcessingResult::Continue;
+            }
 
-            storage.coalesced_buffers.push(buffer);
+            counters.flow_evictions.increment();
+            let (evicted, flow_storage) = Self::take_oldest_flow(active_flows, flow_buffers)
+                .expect("all flow slots are occupied");
+            *pending_item = Some(PendingItem::NewFlow(pending_flow));
+            return ProcessingResult::Return(flow_storage.build_output(evicted));
+        };
+
+        if active.can_coalesce(flow_storage.coalescing_vec.len(), &parsed) {
+            let coalesce_result = active.coalesce(parsed, flow_storage);
+
+            flow_storage.coalesced_buffers.push(buffer);
 
             match coalesce_result {
-                CoalesceResult::Flush => ProcessingResult::Return(storage.build_output(active)),
+                CoalesceResult::Flush => {
+                    ProcessingResult::Return(flow_storage.build_output(active))
+                }
                 CoalesceResult::Continue => {
-                    *active_flow = Some(active);
+                    *slot = Some(active);
                     ProcessingResult::Continue
                 }
             }
         } else {
-            // The buffer matched the active flow but could not be merged into
-            // it, so the active flow is flushed. The buffer is flushed as well
-            // if it must be; otherwise it becomes the new active flow.
+            // The buffer matched an active flow but could not be merged into
+            // it, so that active flow is flushed. The buffer is flushed as well
+            // if it must be; otherwise it becomes a new active flow.
 
             let pending = if flush_if_not_merged {
                 PendingItem::Flush(PendingFlush { buffer, target, linearization, checksum_offload })
@@ -1550,7 +1679,7 @@ where
                 PendingItem::NewFlow(PendingFlow { buffer, flow, seed_payload_end, linearization })
             };
             *pending_item = Some(pending);
-            ProcessingResult::Return(storage.build_output(active))
+            ProcessingResult::Return(flow_storage.build_output(active))
         }
     }
 }
@@ -1568,13 +1697,16 @@ mod tests {
     use packet::{Buf, InnerPacketBuilder, NestableSerializer as _, Serializer};
     use packet_formats::arp::{ArpOp, ArpPacketBuilder};
     use packet_formats::ethernet::{EtherType, EthernetFrameBuilder};
-    use packet_formats::ip::{FragmentOffset, IpExt, IpProto, Ipv4Proto};
+    use packet_formats::ip::{FragmentOffset, IpExt, IpProto, Ipv4Proto, Ipv6ExtHdrType};
     use packet_formats::ipv4::options::Ipv4Option;
     use packet_formats::ipv4::{Ipv4PacketBuilder, Ipv4PacketBuilderWithOptions};
     use packet_formats::ipv6::ext_hdrs::{
         ExtensionHeaderOptionAction, HopByHopOption, HopByHopOptionData,
     };
-    use packet_formats::ipv6::{Ipv6PacketBuilder, Ipv6PacketBuilderWithHbhOptions};
+    use packet_formats::ipv6::{
+        IPV6_PAYLOAD_LEN_BYTE_RANGE, Ipv6PacketBuilder, Ipv6PacketBuilderWithFragmentHeader,
+        Ipv6PacketBuilderWithHbhOptions,
+    };
     use packet_formats::tcp::options::{TcpOptionsBuilder, TimestampOption};
     use packet_formats::tcp::{TcpSegmentBuilder, TcpSegmentBuilderWithOptions};
     use packet_formats::udp::UdpPacketBuilder;
@@ -1642,6 +1774,10 @@ mod tests {
                 Some(BufferSlice::Linearized(slice))
             }
         }
+
+        fn as_contiguous(&self) -> Option<&[u8]> {
+            self.contiguous.then_some(&self.buf[..])
+        }
     }
 
     /// Wraps `buffer` in an Ethernet GRO input item.
@@ -1707,6 +1843,9 @@ mod tests {
         dscp_and_ecn: DscpAndEcn,
         /// Emits a TCP timestamp option with this TSval when set.
         timestamp: Option<u32>,
+        /// IPv6 only: emits a Hop-by-Hop Options extension header carrying a
+        /// Router Alert option with this value when set.
+        router_alert: Option<u16>,
         /// The minimum Ethernet body length, used to force link layer padding.
         min_body_len: usize,
         payload: &'static [u8],
@@ -1736,10 +1875,18 @@ mod tests {
             ttl: 64,
             dscp_and_ecn: DscpAndEcn::default(),
             timestamp: None,
+            router_alert: None,
             min_body_len: 0,
             payload,
             contiguous: true,
         }
+    }
+
+    /// Returns a default IPv6 frame carrying `payload` at `seq` with a
+    /// Hop-by-Hop Options extension header carrying a Router Alert option with
+    /// value `router_alert`.
+    fn v6_hbh(seq: u32, router_alert: u16, payload: &'static [u8]) -> FrameSpec {
+        FrameSpec { router_alert: Some(router_alert), ..v6(seq, payload) }
     }
 
     /// Returns a default IPv6 frame carrying `payload` at `seq`.
@@ -1763,6 +1910,7 @@ mod tests {
                 ttl,
                 dscp_and_ecn,
                 timestamp,
+                router_alert,
                 min_body_len,
                 payload,
                 contiguous: _,
@@ -1841,7 +1989,26 @@ mod tests {
                         Ipv6PacketBuilder::new(SRC_IP_V6, DST_IP_V6, ttl, IpProto::Tcp.into());
                     ip.dscp_and_ecn(dscp_and_ecn);
                     ip.flowlabel(flowlabel);
-                    serialize_with_options!(tcp_builder!(SRC_IP_V6, DST_IP_V6), ip, EtherType::Ipv6)
+                    match router_alert {
+                        None => serialize_with_options!(
+                            tcp_builder!(SRC_IP_V6, DST_IP_V6),
+                            ip,
+                            EtherType::Ipv6
+                        ),
+                        Some(data) => {
+                            let hbh_opt = [HopByHopOption {
+                                action: ExtensionHeaderOptionAction::SkipAndContinue,
+                                mutable: false,
+                                data: HopByHopOptionData::RouterAlert { data },
+                            }];
+                            let ip = Ipv6PacketBuilderWithHbhOptions::new(ip, &hbh_opt).unwrap();
+                            serialize_with_options!(
+                                tcp_builder!(SRC_IP_V6, DST_IP_V6),
+                                ip,
+                                EtherType::Ipv6
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1866,21 +2033,28 @@ mod tests {
 
     #[test]
     fn gro_counters() {
-        let frames = [
-            // Starts the active flow.
-            v4(100, b"a1"),
-            // Merged into the active flow.
-            v4(102, b"a2"),
-            // Evicts the active flow.
-            v6(200, b"b1"),
-            // Doesn't match the active flow but is flushed immediately since it
-            // carries no payload, so it doesn't evict the active flow.
-            v4(104, b""),
-            // Merged into the active flow.
-            v6(202, b"b2"),
-            // Evicts the active flow.
-            v4(104, b"a3"),
-        ];
+        let flow_v6 = |flowlabel: u32, seq: u32, payload: &'static [u8]| FrameSpec {
+            ip: IpSpec::V6 { flowlabel },
+            ..v6(seq, payload)
+        };
+        let max_flows = u32::try_from(MAX_ACTIVE_FLOWS).unwrap();
+
+        // Fill all `MAX_ACTIVE_FLOWS` slots in the flow cache.
+        let mut frames: Vec<FrameSpec> = (0..max_flows).map(|i| flow_v6(i, 100, b"a1")).collect();
+        frames.extend([
+            // Merged into the oldest active flow (flow 0).
+            flow_v6(0, 102, b"a2"),
+            // Doesn't match any active flow, but is flushed immediately since
+            // it carries no payload, so it doesn't evict any active flow.
+            flow_v6(max_flows, 200, b""),
+            // Cache is full, so this evicts the oldest active flow (flow 0).
+            flow_v6(max_flows, 200, b"b1"),
+            // Merged into the newly inserted flow (`max_flows`).
+            flow_v6(max_flows, 202, b"b2"),
+            // Cache is full, so re-introducing flow 0 evicts the next oldest
+            // active flow (flow 1).
+            flow_v6(0, 104, b"a3"),
+        ]);
         let to_items = |frames: &[FrameSpec]| -> Vec<GroInputItem<TrackedBuffer, GroFrameType>> {
             frames
                 .iter()
@@ -1896,10 +2070,129 @@ mod tests {
             while let Some(_item) = gro.next() {}
         }
 
+        let max_flows_u64 = u64::from(max_flows);
         assert_eq!(
             counters.cast::<u64>(),
-            GroCounters { batches: 2, input_frames: 7, output_frames: 5, flow_evictions: 2 }
+            GroCounters {
+                batches: 2,
+                input_frames: max_flows_u64 + 6,
+                output_frames: max_flows_u64 + 4,
+                flow_evictions: 2,
+            }
         );
+    }
+
+    // A fragmented newcomer is linearized straight into the coalescing buffers
+    // of the slot freed by evicting the oldest flow.
+    #[test_case(true; "contiguous_newcomer")]
+    #[test_case(false; "fragmented_newcomer")]
+    fn gro_multiflow_cache_and_eviction(newcomer_contiguous: bool) {
+        let flow_v6 = |flowlabel: u32, seq: u32, payload: &'static [u8], contiguous: bool| {
+            FrameSpec { ip: IpSpec::V6 { flowlabel }, contiguous, ..v6(seq, payload) }
+        };
+        let max_flows = u32::try_from(MAX_ACTIVE_FLOWS).unwrap();
+
+        // Interleave two segments across `MAX_ACTIVE_FLOWS` concurrent flows,
+        // alternating contiguous and fragmented buffers. All flows should
+        // coalesce without any evictions.
+        let mut frames = Vec::new();
+        for i in 0..max_flows {
+            frames.push(flow_v6(i, 100, b"first ", i % 2 == 0));
+        }
+        for i in 0..max_flows {
+            frames.push(flow_v6(i, 106, b"second", i % 2 == 1));
+        }
+        // Now introduce a `(MAX_ACTIVE_FLOWS + 1)`-th flow, which must evict the
+        // oldest flow (flow 0) while leaving flows `1..max_flows` active.
+        frames.push(flow_v6(max_flows, 100, b"new ", newcomer_contiguous));
+        // Merge another segment into flow 1 (still active) and into `max_flows`.
+        frames.push(flow_v6(1, 112, b" third", true));
+        frames.push(flow_v6(max_flows, 104, b"flow", false));
+
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = frames
+            .iter()
+            .map(|spec| input_item(TrackedBuffer::new(spec.build(), spec.contiguous)))
+            .collect();
+
+        let counters = GroCounters::default();
+        let mut storage = GroBufferStorage::new();
+        let mut output = Vec::new();
+        let mut gro = storage.coalesce(items.into_iter(), true, &counters);
+        while let Some(mut item) = gro.next() {
+            let parsed = parse_frame(item.buffers.slice_mut());
+            let IpFlowId::Ipv6(Ipv6FlowId { flowlabel, .. }) = parsed.flow_id.ip else {
+                panic!("expected IPv6 packet");
+            };
+            let TransportPacket::Tcp(tcp) = parsed.transport;
+            output.push((flowlabel, tcp.body().to_vec()));
+        }
+        drop(gro);
+
+        assert_eq!(counters.flow_evictions.get(), 1);
+        assert_eq!(output.len(), MAX_ACTIVE_FLOWS + 1);
+        // Flow 0 was evicted first, followed by flows 1..=max_flows in
+        // oldest-first order at the end of the batch.
+        assert_eq!(output[0], (0, b"first second".to_vec()));
+        assert_eq!(output[1], (1, b"first second third".to_vec()));
+        for i in 2..max_flows {
+            assert_eq!(output[usize::try_from(i).unwrap()], (i, b"first second".to_vec()));
+        }
+        assert_eq!(output[MAX_ACTIVE_FLOWS], (max_flows, b"new flow".to_vec()));
+    }
+
+    #[test]
+    fn gro_single_flow_flush_frees_slot_without_evicting_others() {
+        let flow_v6 = |flowlabel: u32, seq: u32, payload: &'static [u8], psh: bool| FrameSpec {
+            ip: IpSpec::V6 { flowlabel },
+            psh,
+            ..v6(seq, payload)
+        };
+        let max_flows = u32::try_from(MAX_ACTIVE_FLOWS).unwrap();
+
+        // Fill all `MAX_ACTIVE_FLOWS` slots.
+        let mut frames: Vec<FrameSpec> =
+            (0..max_flows).map(|i| flow_v6(i, 100, b"part1 ", false)).collect();
+        // Flush flow 3 immediately via PSH, freeing its slot in the cache.
+        frames.push(flow_v6(3, 106, b"part2.", true));
+        // Insert a new flow (`max_flows`); since flow 3's slot was freed, this
+        // must not evict any of the other active flows.
+        frames.push(flow_v6(max_flows, 100, b"new1 ", false));
+        frames.push(flow_v6(max_flows, 105, b"new2.", false));
+        // Merge second segments into all remaining original flows.
+        for i in (0..max_flows).filter(|&i| i != 3) {
+            frames.push(flow_v6(i, 106, b"part2.", false));
+        }
+
+        let items: Vec<GroInputItem<TrackedBuffer, GroFrameType>> = frames
+            .iter()
+            .map(|spec| input_item(TrackedBuffer::new(spec.build(), spec.contiguous)))
+            .collect();
+
+        let counters = GroCounters::default();
+        let mut storage = GroBufferStorage::new();
+        let mut output = Vec::new();
+        let mut gro = storage.coalesce(items.into_iter(), true, &counters);
+        while let Some(mut item) = gro.next() {
+            let parsed = parse_frame(item.buffers.slice_mut());
+            let IpFlowId::Ipv6(Ipv6FlowId { flowlabel, .. }) = parsed.flow_id.ip else {
+                panic!("expected IPv6 packet");
+            };
+            let TransportPacket::Tcp(tcp) = parsed.transport;
+            output.push((flowlabel, tcp.body().to_vec()));
+        }
+        drop(gro);
+
+        assert_eq!(counters.flow_evictions.get(), 0);
+        assert_eq!(output.len(), MAX_ACTIVE_FLOWS + 1);
+        // Flow 3 was flushed mid-batch when the PSH segment arrived.
+        assert_eq!(output[0], (3, b"part1 part2.".to_vec()));
+        // The remaining flows are flushed at the end of the batch in
+        // oldest-first order.
+        let expected_order: Vec<u32> = (0..max_flows).filter(|&i| i != 3).collect();
+        for (idx, flowlabel) in expected_order.into_iter().enumerate() {
+            assert_eq!(output[idx + 1], (flowlabel, b"part1 part2.".to_vec()));
+        }
+        assert_eq!(output[MAX_ACTIVE_FLOWS], (max_flows, b"new1 new2.".to_vec()));
     }
 
     /// Parses `frame` as a GRO packet, verifying its checksum.
@@ -1934,6 +2227,9 @@ mod tests {
     #[test_case(
         vec![v6(200, b"ipv6_1"), FrameSpec { psh: true, ..v6(206, b"ipv6_2") }],
         vec![b"ipv6_1ipv6_2"]; "coalesces_ipv6")]
+    #[test_case(
+        vec![v4(100, b"a1"), v6(200, b"b1"), v4(102, b"a2"), v6(202, b"b2")],
+        vec![b"a1a2", b"b1b2"]; "interleaved_flows_coalesce")]
     #[test_case(
         vec![
             FrameSpec { ack: 1000, ..v4(100, b"ack1000 ") },
@@ -2087,6 +2383,26 @@ mod tests {
     #[test_case(
         vec![v4(100, b"first "), v4(106, b"sub"), v4(109, b"more")],
         vec![b"first sub", b"more"]; "payload_smaller_than_gso_size_terminates_flow")]
+    #[test_case(
+        vec![v6_hbh(200, 7, b"ext1 "), v6_hbh(205, 7, b"ext2 "), v6_hbh(210, 7, b"ext3")],
+        vec![b"ext1 ext2 ext3"]; "matching_ipv6_ext_hdrs_coalesce")]
+    #[test_case(
+        vec![
+            FrameSpec { contiguous: false, ..v6_hbh(200, 7, b"ext1 ") },
+            FrameSpec { contiguous: false, ..v6_hbh(205, 7, b"ext2") },
+        ],
+        vec![b"ext1 ext2"]; "matching_ipv6_ext_hdrs_coalesce_non_contiguous")]
+    #[test_case(
+        vec![
+            v6_hbh(200, 7, b"ext7 "),
+            v6_hbh(205, 8, b"ext8 "),
+            v6_hbh(205, 7, b"more "),
+            v6_hbh(210, 8, b"again"),
+        ],
+        vec![b"ext7 more ", b"ext8 again"]; "ipv6_ext_hdrs_mismatch_is_separate_flow")]
+    #[test_case(
+        vec![v6_hbh(200, 7, b"ext "), v6(204, b"none"), v6_hbh(204, 7, b"more")],
+        vec![b"ext more", b"none"]; "ipv6_ext_hdrs_presence_mismatch_is_separate_flow")]
     fn gro_coalescing(frames: Vec<FrameSpec>, expected: Vec<&'static [u8]>) {
         let output = run_gro(&frames, true);
         assert_eq!(output.len(), expected.len(), "wrong number of frames emitted");
@@ -2096,6 +2412,63 @@ mod tests {
             let TransportPacket::Tcp(tcp) = parsed.transport;
             assert_eq!(tcp.body(), *payload, "frame {index}");
         }
+    }
+
+    #[test]
+    fn gro_ipv6_first_ext_hdr_type_mismatch_is_separate_flow() {
+        const IPV6_NEXT_HEADER_OFFSET: usize = 6;
+
+        // Relabel the second frame's Hop-by-Hop Options header as a
+        // Destination Options header, leaving every byte past the fixed header
+        // equal to the first frame's.
+        let first = v6_hbh(200, 7, b"hbh ").build();
+        let mut second = v6_hbh(204, 7, b"dst").build();
+        let next_header = parse_frame(&second).offsets.ip_offset + IPV6_NEXT_HEADER_OFFSET;
+        second[next_header] = Ipv6ExtHdrType::DestinationOptions.into();
+        assert_eq!(parse_frame(&first).ip_ext_hdrs, parse_frame(&second).ip_ext_hdrs);
+
+        let items = [first, second].map(|frame| input_item(TrackedBuffer::new(frame, true)));
+        let counters = GroCounters::default();
+        let mut storage = GroBufferStorage::new();
+        let mut output = Vec::new();
+        let mut gro = storage.coalesce(items.into_iter(), true, &counters);
+        while let Some(mut item) = gro.next() {
+            output.push(item.buffers.slice_mut().to_vec());
+        }
+        drop(gro);
+
+        // The frames differ in their first extension header type, so they
+        // belong to different flows and are not coalesced.
+        let payloads = output
+            .iter()
+            .map(|frame| {
+                let TransportPacket::Tcp(tcp) = parse_frame(frame).transport;
+                tcp.body().to_vec()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(payloads, [&b"hbh "[..], &b"dst"[..]]);
+    }
+
+    #[test]
+    fn gro_coalesced_ipv6_frame_keeps_ext_hdrs() {
+        let frames = vec![v6_hbh(200, 7, b"hello "), v6_hbh(206, 7, b"world")];
+        let seed = frames[0].build();
+        let output = run_gro(&frames, true);
+        let output = assert_matches!(&output[..], [output] => output);
+
+        // The coalesced frame carries the seed frame's headers, including its
+        // extension headers, verbatim.
+        let parsed = parse_frame(output);
+        let seed_parsed = parse_frame(&seed);
+        assert_eq!(parsed.offsets, seed_parsed.offsets);
+        assert!(!parsed.ip_ext_hdrs.is_empty());
+        // The headers match the seed's save for the IPv6 payload length.
+        let (ip, end) = (parsed.offsets.ip_offset, parsed.offsets.transport_offset);
+        let len = ip + IPV6_PAYLOAD_LEN_BYTE_RANGE.start..ip + IPV6_PAYLOAD_LEN_BYTE_RANGE.end;
+        assert_eq!(output[..len.start], seed[..len.start]);
+        assert_eq!(output[len.end..end], seed[len.end..end]);
+        let TransportPacket::Tcp(tcp) = parsed.transport;
+        assert_eq!(tcp.body(), b"hello world");
     }
 
     #[test]
@@ -2290,23 +2663,36 @@ mod tests {
         assert!(gro.next().is_none());
     }
 
-    #[test]
-    fn gro_iter_drop_releases_held_buffers() {
-        let pkt1 = v4(100, b"hello ").build();
-        let buffer1 = TrackedBuffer::new(pkt1, true);
-        let dropped1 = buffer1.dropped();
-        let items = vec![input_item(buffer1)];
+    #[test_case(vec![v4(100, b"hello ")]; "single_flow")]
+    #[test_case(vec![v4(100, b"hello "), v4(106, b"world!")]; "coalescing_flow")]
+    fn gro_iter_drop_releases_held_buffers(flow_frames: Vec<FrameSpec>) {
+        let mut dropped_handles = Vec::new();
+        let mut items: Vec<_> = flow_frames
+            .into_iter()
+            .map(|spec| {
+                let buffer = TrackedBuffer::new(spec.build(), spec.contiguous);
+                dropped_handles.push(buffer.dropped());
+                input_item(buffer)
+            })
+            .collect();
+        // Trail with a non-GRO packet so `next()` returns while `gro` is still
+        // holding the active flow's buffers.
+        items.push(input_item(TrackedBuffer::new(vec![0u8; 30], true)));
 
         let counters = GroCounters::default();
         let mut gro_state = GroBufferStorage::new();
         {
             let mut gro = gro_state.coalesce(items.into_iter(), true, &counters);
-            let item = gro.next();
-            assert!(item.is_some());
-            assert!(!dropped1.load(Ordering::SeqCst));
+            let item = gro.next().expect("emits non-GRO frame");
+            drop(item);
+            for dropped in &dropped_handles {
+                assert!(!dropped.load(Ordering::SeqCst));
+            }
         }
         // Dropping `gro` releases all held buffers.
-        assert!(dropped1.load(Ordering::SeqCst));
+        for dropped in &dropped_handles {
+            assert!(dropped.load(Ordering::SeqCst));
+        }
     }
 
     #[test]
@@ -2529,6 +2915,7 @@ mod tests {
                 src_ip: Ipv6::SRC_IP,
                 dst_ip: Ipv6::DST_IP,
                 flowlabel: TEST_FLOWLABEL,
+                next_header: IpProto::Tcp.into(),
             }),
             transport: TransportFlowId::Tcp(TcpFlowId {
                 src_port: TEST_SRC_PORT,
@@ -2561,6 +2948,7 @@ mod tests {
                 src_ip: Ipv6::SRC_IP,
                 dst_ip: Ipv6::DST_IP,
                 flowlabel: TEST_FLOWLABEL,
+                next_header: IpProto::Tcp.into(),
             }),
             transport: TransportFlowId::Tcp(TcpFlowId {
                 src_port: TEST_SRC_PORT,
@@ -2653,7 +3041,7 @@ mod tests {
     }
 
     #[test]
-    fn gro_ineligible_ipv6_extension_headers() {
+    fn gro_eligible_ipv6_extension_headers() {
         let hbh_opt = [HopByHopOption {
             action: ExtensionHeaderOptionAction::SkipAndContinue,
             mutable: false,
@@ -2661,6 +3049,33 @@ mod tests {
         }];
         let ip =
             Ipv6PacketBuilderWithHbhOptions::new(Ipv6::ip_builder(IpProto::Tcp), &hbh_opt).unwrap();
+        let packet = Buf::new(TEST_PAYLOAD.to_vec(), ..)
+            .wrap_in(tcp_builder::<Ipv6>())
+            .wrap_in(ip)
+            .wrap_in(ethernet_builder::<Ipv6>())
+            .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .unwrap()
+            .into_inner()
+            .as_ref()
+            .to_vec();
+        let mut context = NetworkParsingContext::new(ChecksumRxOffloading::FullyOffloaded);
+        let parsed = GroPacket::parse(&packet, &GroFrameType::Ethernet, &mut context)
+            .expect("packets with extension headers are eligible");
+        // 14-byte Ethernet + 40-byte fixed header + 8-byte HBH (Router Alert).
+        assert_eq!(parsed.offsets, HeaderOffsets { ip_offset: 14, transport_offset: 62 });
+        assert_eq!(parsed.ip_ext_hdrs, &packet[54..62]);
+    }
+
+    #[test]
+    fn gro_ineligible_ipv6_fragment_header() {
+        // Even an atomic fragment (a complete packet that carries a Fragment
+        // header) is ineligible.
+        let ip = Ipv6PacketBuilderWithFragmentHeader::new(
+            Ipv6::ip_builder(IpProto::Tcp),
+            FragmentOffset::ZERO,
+            false,
+            0x1234,
+        );
         let packet = Buf::new(TEST_PAYLOAD.to_vec(), ..)
             .wrap_in(tcp_builder::<Ipv6>())
             .wrap_in(ip)

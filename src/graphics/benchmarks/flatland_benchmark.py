@@ -76,14 +76,23 @@ class FlatlandBenchmark(fuchsia_base_test.FuchsiaBaseTest):
             debug_name="flatland-rainbow-example",
             aggregates_only=True,
         )
+        app_render_results = app_render_processor.process_metrics_with_fxt(
+            expected_trace_filename
+        )
+        asserts.assert_true(
+            app_render_results,
+            msg=(
+                "No AppRender metrics computed; "
+                "see AppRenderLatencyMetricsProcessor warnings"
+            ),
+        )
+
         cpu_processor = cpu.CpuMetricsProcessor(aggregates_only=False)
 
         model = trace_importing.create_model_from_trace_file_path(
             expected_trace_filename,
-            patterns=app_render_processor.event_patterns
-            | cpu_processor.event_patterns,
-            categories=app_render_processor.category_names
-            | cpu_processor.category_names,
+            patterns=cpu_processor.event_patterns,
+            categories=cpu_processor.category_names,
         )
 
         fuchsiaperf_json_path = Path(
@@ -93,7 +102,7 @@ class FlatlandBenchmark(fuchsia_base_test.FuchsiaBaseTest):
         metrics.TestCaseResult.write_fuchsiaperf_json(
             results=tuple(
                 itertools.chain(
-                    app_render_processor.process_metrics(model),
+                    app_render_results,
                     cpu_processor.process_metrics(model),
                 )
             ),

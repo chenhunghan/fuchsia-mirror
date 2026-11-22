@@ -8,6 +8,7 @@ import logging
 import fuchsia_controller_py as fuchsia_controller
 from honeydew import errors
 from honeydew.affordances_capable import FuchsiaDeviceAddressChange
+from honeydew.transports import transport
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.typing import custom_types
@@ -31,7 +32,7 @@ _CONTROLLER_ERRORS: tuple[type[Exception], ...] = errors.FIDL_ERRORS + (
 )
 
 
-class FuchsiaController:
+class FuchsiaController(transport.Transport):
     """Provides Host-(Fuchsia)Target interactions via Fuchsia-Controller.
 
     Args:
@@ -79,79 +80,30 @@ class FuchsiaController:
 
         self.ctx: fuchsia_controller.Context
 
+        self.verify_supported()
         self.create_context()
         self.check_connection()
 
+    def verify_supported(self) -> None:
+        """Verifies that Fuchsia-Controller transport is supported by the Fuchsia device."""
+        # All Fuchsia devices support Fuchsia-Controller transport.
+
     def create_context(self) -> None:
-        """Creates the fuchsia-controller context.
+        """Creates the fuchsia-controller context in ffx strict mode.
 
         Raises:
             FuchsiaControllerError: Failed to create FuchsiaController Context.
             FuchsiaControllerConnectionError: If target is not ready.
         """
         try:
-            config: dict[str, str] = {}
-            if self._ffx_config_data.logs_level:
-                level = self._ffx_config_data.logs_level
-                _LOGGER.debug("log.level set to %s", level)
-                config["log.level"] = level
-            else:
-                _LOGGER.debug("log level not set.")
-            if self._ffx_config_data.logs_dir:
-                log_dir = self._ffx_config_data.logs_dir
-                _LOGGER.debug("log.dir set to %s", log_dir)
-                config["log.dir"] = log_dir
-            else:
-                _LOGGER.debug("log dir not set.")
-            if self._ffx_config_data.shared_data:
-                shared_data = self._ffx_config_data.shared_data
-                _LOGGER.debug("shared_data set to %s", shared_data)
-                config["shared_data"] = shared_data
-            else:
-                _LOGGER.debug("shared_data not set.")
-            if self._ffx_config_data.enable_usb:
-                enable_usb = "true"
-            else:
-                enable_usb = "false"
-            _LOGGER.debug("connectivity.enable_usb set to %s", enable_usb)
-            config["connectivity.enable_usb"] = enable_usb
-            if self._ffx_config_data.usb_driver_autostart:
-                usb_driver_autostart = "true"
-            else:
-                usb_driver_autostart = "false"
+            config = self._ffx_config_data.get_config_dict()
             _LOGGER.debug(
-                "connectivity.usb_driver_autostart set to %s",
-                usb_driver_autostart,
+                "Creating strict Fuchsia-Controller Context with "
+                "target='%s', config='%s'",
+                self._target,
+                config,
             )
-            config["connectivity.usb_driver_autostart"] = usb_driver_autostart
-            if self._ffx_config_data.usb_socket_path:
-                usb_socket_path = self._ffx_config_data.usb_socket_path
-                _LOGGER.debug(
-                    "connectivity.usb_socket_path set to %s", usb_socket_path
-                )
-                config["connectivity.usb_socket_path"] = usb_socket_path
-            else:
-                _LOGGER.debug("connectivity.usb_socket_path not set.")
-            if self._ffx_config_data.ssh_auth_sock:
-                ssh_auth_sock = self._ffx_config_data.ssh_auth_sock
-                _LOGGER.debug("ssh.auth-sock set to %s", ssh_auth_sock)
-                config["ssh.auth-sock"] = ssh_auth_sock
-            else:
-                _LOGGER.debug("ssh auth sock not set.")
-            if self._ffx_config_data.identities_only is not None:
-                identities_only = (
-                    "true" if self._ffx_config_data.identities_only else "false"
-                )
-                _LOGGER.debug("ssh.identities-only set to %s", identities_only)
-                config["ssh.identities-only"] = identities_only
-            else:
-                _LOGGER.debug("ssh identities only not set.")
-            msg: str = (
-                f"Creating Fuchsia-Controller Context with "
-                f"target='{self._target}', config='{config}'"
-            )
-            _LOGGER.debug(msg)
-            self.ctx = fuchsia_controller.Context(
+            self.ctx = fuchsia_controller.Context.strict(
                 config=config, target=self._target
             )
         except _CONTROLLER_ERRORS as err:
@@ -160,8 +112,12 @@ class FuchsiaController:
             ) from err
 
     @decorators.liveness_check
-    def check_connection(self) -> None:
+    def check_connection(self, timeout: int = 0) -> None:
         """Checks the Fuchsia-Controller connection from host to Fuchsia device.
+
+        Args:
+            timeout: Maximum time in seconds to wait for the connection.
+                Defaults to 0 (waits indefinitely).
 
         Raises:
             FuchsiaControllerConnectionError
@@ -172,7 +128,7 @@ class FuchsiaController:
                 "connection from host to %s...",
                 self._target_name,
             )
-            self.ctx.target_wait(timeout=0)
+            self.ctx.target_wait(timeout=timeout)
             _LOGGER.info(
                 "Fuchsia-Controller completed the connection check from host "
                 "to %s...",
@@ -219,14 +175,6 @@ class FuchsiaController:
         self._target_addr = target_addr
         self._target = str(self._target_addr)
 
-        self.create_context()
-        self.check_connection()
-
-    def before_usb_disconnect(self) -> None:
-        """Callback method that gets invoked before USB disconnect."""
-
-    def after_usb_reconnect(self) -> None:
-        """Callback method that gets invoked after USB reconnect."""
         self.create_context()
         self.check_connection()
 

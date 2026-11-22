@@ -7,7 +7,7 @@
 import("//build/testing/boot_tests/zbi_test.gni")
 import("//build/zbi/zbi_input.gni")
 import("//zircon/kernel/phys/qemu.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 
 # Build a ZBI test that uses the physboot framework.
 #

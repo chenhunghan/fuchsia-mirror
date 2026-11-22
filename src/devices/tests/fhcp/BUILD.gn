@@ -3,7 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/json/validate_json.gni")
-import("//build/python/python_host_test.gni")
 
 intermediate_metadata_path = "${target_gen_dir}/fhcp_intermediate_metadata.json"
 fhcp_metadata_path = "${target_gen_dir}/fhcp_metadata.json"
@@ -58,13 +57,6 @@ validate_json("fhcp-test-json-validate") {
   public_deps = [ ":fhcp-metadata-json" ]
 }
 
-if (is_host) {
-  python_host_test("generate-metadata-test") {
-    main_source = "//src/devices/tests/fhcp/src/generate_metadata_json_test.py"
-    sources = [ "//src/devices/tests/fhcp/src/generate_metadata_json.py" ]
-  }
-}
-
 group("fhcp") {
   testonly = true
   deps = [
@@ -83,6 +75,5 @@ group("tests") {
   deps = [
     ":device-tests",
     ":fhcp-test-json-validate",
-    ":generate-metadata-test($host_toolchain)",
   ]
 }

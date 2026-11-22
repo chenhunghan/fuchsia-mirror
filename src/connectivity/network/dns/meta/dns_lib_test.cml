@@ -18,7 +18,10 @@
     ],
     use: [
         {
-            protocol: "fuchsia.posix.socket.Provider",
+            protocol: [
+                "fuchsia.net.root.Interfaces",
+                "fuchsia.posix.socket.Provider",
+            ],
             from: "#netstack",
         },
     ],

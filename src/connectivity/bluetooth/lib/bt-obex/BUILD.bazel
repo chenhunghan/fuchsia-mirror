@@ -78,6 +78,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "bt-obex-tests",
-    package_name = "bt-obex-tests",
     unit_tests = [":bt-obex_test"],
 )

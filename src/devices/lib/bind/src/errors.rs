@@ -9,6 +9,7 @@ use crate::debugger::{debugger, offline_debugger};
 use crate::interpreter::common::BytecodeError;
 use crate::linter::LinterError;
 use crate::parser::common::{BindParserError, CompoundIdentifier};
+#[cfg(not(target_os = "fuchsia"))]
 use crate::test;
 use std::fmt;
 
@@ -593,6 +594,7 @@ impl From<BytecodeError> for UserError {
     }
 }
 
+#[cfg(not(target_os = "fuchsia"))]
 impl From<test::TestError> for UserError {
     fn from(error: test::TestError) -> Self {
         match error {

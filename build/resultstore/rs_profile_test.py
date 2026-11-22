@@ -45,6 +45,7 @@ class RsProfileTest(unittest.TestCase):
             auth_type="fake-auth",
         )
         self.assertEqual(p1.rs_project, "valid-project")
+        self.assertEqual(p1.quota_project, "valid-project")
 
         # Invalid format - missing projects prefix
         p2 = rs_profile.RsProfile(

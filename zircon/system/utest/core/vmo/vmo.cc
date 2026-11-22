@@ -1464,6 +1464,143 @@ TEST(VmoTestCase, FaultBeyondStreamSizeNoPhysOrContig) {
                                            0, contig_slice, 0, zx_system_get_page_size(), &addr));
 }
 
+// Verifies that zx_vmar_map validates VMO/VMAR rights, mapping protections, and option flags
+// before rejecting non-stream-compatible VMOs with ZX_ERR_NOT_SUPPORTED when
+// ZX_VM_FAULT_BEYOND_STREAM_SIZE is set.
+TEST(VmoTestCase, FaultBeyondStreamSizeErrorPrecedence) {
+  const size_t page_size = zx_system_get_page_size();
+  const size_t vmo_size = page_size * 2;
+  const size_t vmar_size = page_size * 6;
+
+  zx::vmar rw_vmar;
+  uintptr_t rw_vmar_addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->allocate(
+      ZX_VM_CAN_MAP_READ | ZX_VM_CAN_MAP_WRITE | ZX_VM_CAN_MAP_SPECIFIC, 0, vmar_size, &rw_vmar,
+      &rw_vmar_addr));
+  auto destroy_rw_vmar = fit::defer([&rw_vmar] { rw_vmar.destroy(); });
+
+  zx::vmar ro_vmar;
+  uintptr_t ro_vmar_addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->allocate(ZX_VM_CAN_MAP_READ | ZX_VM_CAN_MAP_SPECIFIC, 0,
+                                            vmar_size, &ro_vmar, &ro_vmar_addr));
+  auto destroy_ro_vmar = fit::defer([&ro_vmar] { ro_vmar.destroy(); });
+
+  zx::vmar no_perms_vmar;
+  uintptr_t no_perms_vmar_addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->allocate(0, 0, vmar_size, &no_perms_vmar, &no_perms_vmar_addr));
+  auto destroy_no_perms_vmar = fit::defer([&no_perms_vmar] { no_perms_vmar.destroy(); });
+
+  auto check_error_precedence = [&](const zx::vmo &target_vmo, size_t map_size) {
+    constexpr zx_vm_option_t kValidReadOpts =
+        ZX_VM_PERM_READ | ZX_VM_FAULT_BEYOND_STREAM_SIZE | ZX_VM_ALLOW_FAULTS;
+    zx_vaddr_t addr = 0;
+
+    // Missing ZX_RIGHT_MAP on the VMO must return ZX_ERR_ACCESS_DENIED.
+    zx::vmo no_map_vmo;
+    ASSERT_OK(target_vmo.duplicate(ZX_RIGHT_READ | ZX_RIGHT_WRITE, &no_map_vmo));
+    EXPECT_STATUS(rw_vmar.map(kValidReadOpts, 0, no_map_vmo, 0, map_size, &addr),
+                  ZX_ERR_ACCESS_DENIED);
+
+    // Invalid mapping protections (write without read) must return ZX_ERR_INVALID_ARGS.
+    EXPECT_STATUS(
+        rw_vmar.map(ZX_VM_PERM_WRITE | ZX_VM_FAULT_BEYOND_STREAM_SIZE | ZX_VM_ALLOW_FAULTS, 0,
+                    target_vmo, 0, map_size, &addr),
+        ZX_ERR_INVALID_ARGS);
+
+    // Incompatible ZX_VM_MAP_RANGE | ZX_VM_SPECIFIC_OVERWRITE must return ZX_ERR_INVALID_ARGS.
+    EXPECT_STATUS(rw_vmar.map(kValidReadOpts | ZX_VM_MAP_RANGE | ZX_VM_SPECIFIC_OVERWRITE, 0,
+                              target_vmo, 0, map_size, &addr),
+                  ZX_ERR_INVALID_ARGS);
+
+    // User-specified ZX_VM_CAN_MAP_* flags must return ZX_ERR_INVALID_ARGS.
+    constexpr zx_vm_option_t kDisallowedCanMapFlags[] = {
+        ZX_VM_CAN_MAP_READ,
+        ZX_VM_CAN_MAP_WRITE,
+        ZX_VM_CAN_MAP_EXECUTE,
+    };
+    for (zx_vm_option_t bad_flag : kDisallowedCanMapFlags) {
+      EXPECT_STATUS(rw_vmar.map(kValidReadOpts | bad_flag, 0, target_vmo, 0, map_size, &addr),
+                    ZX_ERR_INVALID_ARGS);
+    }
+
+    // Missing ZX_RIGHT_READ on the VMO or VMAR must return ZX_ERR_ACCESS_DENIED.
+    zx::vmo no_read_vmo;
+    ASSERT_OK(target_vmo.duplicate(ZX_RIGHT_MAP, &no_read_vmo));
+    EXPECT_STATUS(rw_vmar.map(kValidReadOpts, 0, no_read_vmo, 0, map_size, &addr),
+                  ZX_ERR_ACCESS_DENIED);
+    EXPECT_STATUS(no_perms_vmar.map(kValidReadOpts, 0, target_vmo, 0, map_size, &addr),
+                  ZX_ERR_ACCESS_DENIED);
+
+    // Missing ZX_RIGHT_WRITE on the VMO or VMAR must return ZX_ERR_ACCESS_DENIED.
+    zx::vmo no_write_vmo;
+    ASSERT_OK(target_vmo.duplicate(ZX_RIGHT_MAP | ZX_RIGHT_READ, &no_write_vmo));
+    EXPECT_STATUS(
+        rw_vmar.map(kValidReadOpts | ZX_VM_PERM_WRITE, 0, no_write_vmo, 0, map_size, &addr),
+        ZX_ERR_ACCESS_DENIED);
+    EXPECT_STATUS(ro_vmar.map(kValidReadOpts | ZX_VM_PERM_WRITE, 0, target_vmo, 0, map_size, &addr),
+                  ZX_ERR_ACCESS_DENIED);
+
+    // Missing ZX_RIGHT_EXECUTE must return ZX_ERR_ACCESS_DENIED.
+    EXPECT_STATUS(
+        rw_vmar.map(kValidReadOpts | ZX_VM_PERM_EXECUTE, 0, target_vmo, 0, map_size, &addr),
+        ZX_ERR_ACCESS_DENIED);
+
+    // Omitting ZX_VM_ALLOW_FAULTS with ZX_VM_FAULT_BEYOND_STREAM_SIZE must return
+    // ZX_ERR_INVALID_ARGS.
+    EXPECT_STATUS(rw_vmar.map(ZX_VM_PERM_READ | ZX_VM_FAULT_BEYOND_STREAM_SIZE, 0, target_vmo, 0,
+                              map_size, &addr),
+                  ZX_ERR_INVALID_ARGS);
+
+    // Once rights and options are valid, non-stream-compatible VMOs return ZX_ERR_NOT_SUPPORTED.
+    EXPECT_STATUS(rw_vmar.map(kValidReadOpts | ZX_VM_PERM_WRITE | ZX_VM_SPECIFIC, 0, target_vmo, 0,
+                              map_size, &addr),
+                  ZX_ERR_NOT_SUPPORTED);
+  };
+
+  bool tested_phys = false;
+  if (zx::result<vmo_test::PhysVmo> res = vmo_test::GetTestPhysVmo(vmo_size); res.is_ok()) {
+    tested_phys = true;
+    ASSERT_NO_FATAL_FAILURE(check_error_precedence(res->vmo, vmo_size));
+
+    zx::vmo phys_slice;
+    ASSERT_OK(res->vmo.create_child(ZX_VMO_CHILD_SLICE, 0, 1, &phys_slice));
+    ASSERT_NO_FATAL_FAILURE(check_error_precedence(phys_slice, page_size));
+  } else {
+    ASSERT_STATUS(res.error_value(), ZX_ERR_NOT_SUPPORTED);
+  }
+
+  zx::unowned_resource system_resource = maybe_standalone::GetSystemResource();
+  if (!system_resource->is_valid()) {
+    if (!tested_phys) {
+      ZXTEST_SKIP("MMIO and system resources not available, skipping test case.");
+    }
+    return;
+  }
+
+  zx::result<zx::resource> result =
+      maybe_standalone::GetSystemResourceWithBase(system_resource, ZX_RSRC_SYSTEM_IOMMU_BASE);
+  ASSERT_OK(result.status_value());
+  zx::resource iommu_resource = std::move(result.value());
+
+  zx::iommu iommu;
+  zx::bti bti;
+  zx_iommu_desc_stub_t desc{};
+  auto final_bti_check = vmo_test::CreateDeferredBtiCheck(bti);
+
+  ASSERT_OK(zx::iommu::create(iommu_resource, ZX_IOMMU_TYPE_STUB, &desc, sizeof(desc), &iommu));
+  bti = vmo_test::CreateNamedBti(iommu, 0, 0xdeadbeef,
+                                 "VmoTestCase::FaultBeyondStreamSizeErrorPrecedence");
+  ASSERT_TRUE(bti.is_valid());
+
+  zx::vmo contig_vmo;
+  ASSERT_OK(zx::vmo::create_contiguous(bti, vmo_size, 0, &contig_vmo));
+  ASSERT_NO_FATAL_FAILURE(check_error_precedence(contig_vmo, vmo_size));
+
+  zx::vmo contig_slice;
+  ASSERT_OK(contig_vmo.create_child(ZX_VMO_CHILD_SLICE, 0, 1, &contig_slice));
+  ASSERT_NO_FATAL_FAILURE(check_error_precedence(contig_slice, page_size));
+}
+
 void RightsTestMapHelper(zx_handle_t vmo, size_t len, uint32_t flags, bool expect_success,
                          zx_status_t fail_err_code) {
   uintptr_t ptr;

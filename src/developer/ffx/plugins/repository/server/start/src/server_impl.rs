@@ -761,6 +761,7 @@ mod test {
     use ffx_command_error::bug;
     use ffx_config::TestEnv;
     use ffx_config::keys::TARGET_DEFAULT_KEY;
+    use ffx_target::TargetConnector;
     use ffx_target_net_testutil::FakeNetstack;
     use ffx_writer::{Format, TestBuffers, VerifiedMachineWriter};
     use fho::{FfxMain, FhoEnvironment, TryFromEnv, user_error};
@@ -776,8 +777,8 @@ mod test {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time;
-    use target_behavior::{DirectConnector, target_interface};
     use target_connector::Connector;
+    use target_holders::target_interface;
     use test_case::test_case;
     use timeout::timeout;
     use tuf::crypto::Ed25519PrivateKey;
@@ -1076,11 +1077,11 @@ mod test {
             .runtime_config("connectivity.enable_network", false)
     }
 
-    fn make_direct_connector(client: Arc<fdomain_client::Client>) -> DirectConnector {
+    fn make_target_connector(client: Arc<fdomain_client::Client>) -> TargetConnector {
         let resolution = ffx_target::Resolution::mock(move || {
             Ok(ffx_target::Connection::from_fdomain_client(client.clone()))
         });
-        DirectConnector::from_resolution_for_test(resolution)
+        TargetConnector::from_resolution_for_test(resolution)
     }
 
     async fn make_fake_rcs_proxy_connector(
@@ -1090,12 +1091,12 @@ mod test {
         let (fake_engine, _content) = FakeEngine::new();
         let (fdomain_client, _) = setup_fake_target(fake_repo, fake_engine);
 
-        let connector = make_direct_connector(fdomain_client);
+        let connector = make_target_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         Connector::try_from_env(&env).await.expect("Could not make RCS test connector")
     }
@@ -1108,12 +1109,12 @@ mod test {
             target_source: None,
         };
         let resolution = ffx_target::Resolution::mock(move || Err(anyhow::anyhow!(err.clone())));
-        let connector = DirectConnector::from_resolution_for_test(resolution);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         Connector::try_from_env(&env).await.expect("Could not make RCS test connector")
     }
@@ -1126,12 +1127,12 @@ mod test {
             target_source: None,
         };
         let resolution = ffx_target::Resolution::mock(move || Err(anyhow::anyhow!(err.clone())));
-        let connector = DirectConnector::from_resolution_for_test(resolution);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         Connector::try_from_env(&env).await.expect("Could not make RCS test connector")
     }
@@ -1644,12 +1645,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let connector = make_direct_connector(fdomain_client);
+        let connector = make_target_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         let tmp_port_file = tempfile::NamedTempFile::new().unwrap();
 
@@ -1786,17 +1787,17 @@ mod test {
         // In this test, target discovery is disabled (NETWORK_ENABLED and USB_ENABLED are false).
         // Consequently, the daemonless knocker (which resolves the target spec via discovery) will
         // fail on every knock and report `TargetNotFound`, simulating a lost connection.
-        // Meanwhile, the mocked DirectConnector behavior bypasses resolution and successfully returns a
+        // Meanwhile, the mocked TargetConnector behavior bypasses resolution and successfully returns a
         // connection to the target, allowing the loop to reconnect and testing the auto-reconnect logic.
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let connector = make_direct_connector(fdomain_client);
+        let connector = make_target_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         let tmp_port_file = tempfile::NamedTempFile::new().unwrap();
         let tmp_port_file_path = tmp_port_file.path().to_owned();
@@ -2095,12 +2096,12 @@ mod test {
             setup_fake_target(fake_repo.clone(), fake_engine.clone());
         let socket_provider = fake_netstack.new_socket_provider();
 
-        let connector = make_direct_connector(fdomain_client);
+        let connector = make_target_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         let (listen_addr, repo_host) = if direct_target_connection {
             (REPO_UNSPECIFIED_IPV4_ADDR, HOST_ADDR)
@@ -2293,12 +2294,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let connector = make_direct_connector(fdomain_client);
+        let connector = make_target_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         // Prepare serving the repo without passing the trusted root, and
         // passing of the trusted root 2.root.json explicitly
@@ -2362,12 +2363,12 @@ mod test {
 
         let (fdomain_client, _) = setup_fake_target(fake_repo.clone(), fake_engine.clone());
 
-        let connector = make_direct_connector(fdomain_client);
+        let connector = make_target_connector(fdomain_client);
 
         let env =
             FhoEnvironment::new_with_args(&test_env.context, &["some", "repo", "start", "test"]);
         let target_env = target_interface(&env);
-        target_env.set_behavior_for_test(connector);
+        target_env.set_connector_for_test(connector);
 
         let serve_cmd_with_root = StartCommand {
             repository: Some(REPO_NAME.to_string()),

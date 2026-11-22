@@ -3,8 +3,8 @@ URL: https://android.googlesource.com/platform/frameworks/native/
 Revision: 4f463a6b1de9198963dc6aff74154a504ba3f8f6
 Security Critical: yes
 
+License: Apache-2.0
 License File: LICENSE
-  License: Apache-2.0
 
 Description:
   Output of bindgen tool on Android binder headers

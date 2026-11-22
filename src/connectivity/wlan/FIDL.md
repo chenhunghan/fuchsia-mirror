@@ -37,6 +37,7 @@ These FIDL definitions are located in `//sdk/fidl` (except where noted).
 - `fuchsia.wlan.fullmac`: Vendor driver interface for FullMAC devices.
 - `fuchsia.wlan.phy`: Vendor driver interface for PHY control.
 - `fuchsia.wlan.softmac`: Vendor driver interface for SoftMAC devices.
+    - *Caution*: Only `WlanSoftmac` and `WlanSoftmacIfc` are vendor-driver-facing `@transport("Driver")` protocols. The bridge and FFI protocols (`WlanSoftmacBridge`, `WlanSoftmacIfcBridge`, `EthernetRx`, `EthernetTx`, `WlanRx`, `WlanTx`) serve only the in-tree `wlansoftmac` C++/Rust boundary and must never be implemented by vendor drivers or promoted to numbered API levels.
 
 ### Test Only (unstable and not versioned)
 - `fuchsia.wlan.tap`: Interface for mocking driver events in hw-sim tests, e.g. sending and receiving packets.
@@ -46,3 +47,10 @@ These FIDL definitions are located in `//sdk/fidl` (except where noted).
 Default to `zx.status` for FIDL errors, but never rely on `zx.status` for control flow. When control flow is impacted, introduce custom error types instead, for example like `ConnectResult` in `fuchsia.wlan.sme.fidl`.
 
 It's hard to know (and keep synchronized in code and docstrings) when a return value is intended to have control flow implications. We explicitly address that need by introducing custom error types for the methods that have control flow implications.
+
+## Naming and Documentation
+
+Follow the platform [FIDL API rubric](/docs/development/api/fidl.md) and [FIDL style guide](/docs/development/languages/fidl/guides/style.md). In addition:
+
+- **Physical unit suffixes**: Include explicit units in raw numeric field names carrying physical quantities, rates, or durations (for example `rssi_dbm`, `snr_db`, `frequency_mhz`, `tx_rate_500kbps`, `timeout_ms`) rather than bare names like `rssi`, `snr`, or `timeout`. Fields typed as `zx.Duration` do not need a unit suffix.
+- **Event and watcher lifecycle**: For events, callbacks, hanging-get watchers, and stateful monitoring or offload protocols, specify trigger semantics (edge-triggered on threshold crossing vs. periodic or continuous updates) and reset or invalidation behavior across disconnect and interface teardown in `///` doc comments.

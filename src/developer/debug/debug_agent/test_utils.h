@@ -22,18 +22,18 @@ namespace debug_agent {
 //
 // Expected: ZX_OK
 // Got: ZX_ERR_BAD_STATE
-#define ASSERT_ZX_EQ(stmt, expected)                                                          \
-  {                                                                                           \
-    zx_status_t status = (stmt);                                                              \
-    ASSERT_EQ(status, expected) << "Expected " << zx_status_get_string(expected) << std::endl \
-                                << "Got: " << zx_status_get_string(status);                   \
+#define ASSERT_ZX_EQ(stmt, expected)                                                     \
+  {                                                                                      \
+    zx_status_t status = (stmt);                                                         \
+    ASSERT_EQ(status, expected) << "Expected " << zx_status_get_string(expected) << '\n' \
+                                << "Got: " << zx_status_get_string(status);              \
   }
 
-#define EXPECT_ZX_EQ(stmt, expected)                                                          \
-  {                                                                                           \
-    zx_status_t status = (stmt);                                                              \
-    EXPECT_EQ(status, expected) << "Expected " << zx_status_get_string(expected) << std::endl \
-                                << "Got: " << zx_status_get_string(status);                   \
+#define EXPECT_ZX_EQ(stmt, expected)                                                     \
+  {                                                                                      \
+    zx_status_t status = (stmt);                                                         \
+    EXPECT_EQ(status, expected) << "Expected " << zx_status_get_string(expected) << '\n' \
+                                << "Got: " << zx_status_get_string(status);              \
   }
 
 }  // namespace debug_agent

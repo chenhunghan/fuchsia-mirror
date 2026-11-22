@@ -45,6 +45,8 @@ class TestTouchSourceV2Client : public fidl::AsyncEventHandler<fuchsia_ui_pointe
  public:
   void OnTouchEvents(
       fidl::Event<fuchsia_ui_pointer::TouchSourceV2::OnTouchEvents>& event) override {
+    ++on_touch_events_count_;
+    batch_sizes_.push_back(event.events().size());
     received_events_.insert(received_events_.end(), std::make_move_iterator(event.events().begin()),
                             std::make_move_iterator(event.events().end()));
     last_event_stamp_ = event.last_event_stamp();
@@ -54,6 +56,8 @@ class TestTouchSourceV2Client : public fidl::AsyncEventHandler<fuchsia_ui_pointe
   void handle_unknown_event(
       fidl::UnknownEventMetadata<fuchsia_ui_pointer::TouchSourceV2> metadata) override {}
 
+  size_t on_touch_events_count_ = 0;
+  std::vector<size_t> batch_sizes_;
   std::vector<fuchsia_ui_pointer::TouchEvent> received_events_;
   uint64_t last_event_stamp_ = 0;
   std::optional<fidl::UnbindInfo> unbind_info_;
@@ -495,6 +499,38 @@ TEST_F(TouchSourceV2Test, SynchronousLoseContestDuringChangeUpdateStream) {
   ASSERT_TRUE(client_event_handler.received_events_[2].interaction_result().has_value());
   EXPECT_EQ(client_event_handler.received_events_[2].interaction_result()->status(),
             fuchsia_ui_pointer::TouchInteractionStatus::kDenied);
+}
+
+TEST_F(TouchSourceV2Test, BatchMode_CoalescesMultiFingerEventsAndContestResultsIntoSingleMessage) {
+  constexpr StreamId kStream1 = 10;
+  constexpr StreamId kStream2 = 20;
+
+  touch_source_->SetBatchMode(true);
+
+  InternalTouchEvent finger1_add = CreateTouchEvent(Phase::kAdd);
+  finger1_add.pointer_id = 1;
+  touch_source_->UpdateStream(kSnapshot, kStream1, std::move(finger1_add),
+                              /*is_end_of_stream=*/false, {});
+  touch_source_->EndContest(kStream1, /*awarded_win=*/true);
+
+  InternalTouchEvent finger2_add = CreateTouchEvent(Phase::kAdd);
+  finger2_add.pointer_id = 2;
+  touch_source_->UpdateStream(kSnapshot, kStream2, std::move(finger2_add),
+                              /*is_end_of_stream=*/false, {});
+  touch_source_->EndContest(kStream2, /*awarded_win=*/true);
+
+  // Nothing should be sent over FIDL until the batch completes.
+  RunLoopUntilIdle();
+  EXPECT_EQ(event_handler_.on_touch_events_count_, 0u);
+  EXPECT_TRUE(event_handler_.received_events_.empty());
+
+  touch_source_->SetBatchMode(false);
+  RunLoopUntilIdle();
+
+  EXPECT_EQ(event_handler_.on_touch_events_count_, 1u);
+  EXPECT_THAT(event_handler_.batch_sizes_, testing::ElementsAre(4u));
+  ASSERT_EQ(event_handler_.received_events_.size(), 4u);
+  EXPECT_EQ(event_handler_.last_event_stamp_, 4u);
 }
 
 }  // namespace input::test

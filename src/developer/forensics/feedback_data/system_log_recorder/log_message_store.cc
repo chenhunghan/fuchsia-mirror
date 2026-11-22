@@ -64,20 +64,22 @@ bool LogMessageStore::Add(LogSink::MessageOr message) {
   TRACE_DURATION("feedback:io", "LogMessageStore::Add");
 
   if (message.is_ok()) {
-    if (ignore_before_timestamp_.has_value() && message.value().time <= *ignore_before_timestamp_) {
+    if (ignore_before_timestamp_.has_value() &&
+        message.value().time() <= *ignore_before_timestamp_) {
       return false;
     }
 
-    redactor_->Redact(message.value().msg);
-    for (std::string& tag : message.value().tags) {
+    redactor_->Redact(message.value().msg());
+    for (std::string& tag : message.value().tags()) {
       redactor_->Redact(tag);
     }
   }
 
-  const std::string& log_msg = message.is_ok() ? message.value().msg : message.error();
-  const int32_t& log_severity = (message.is_ok()) ? message.value().severity : kDefaultLogSeverity;
+  const std::string& log_msg = message.is_ok() ? message.value().msg() : message.error();
+  const int32_t& log_severity =
+      (message.is_ok()) ? message.value().severity() : kDefaultLogSeverity;
   const std::vector<std::string>& log_tags =
-      (message.is_ok()) ? message.value().tags : kDefaultTags;
+      (message.is_ok()) ? message.value().tags() : kDefaultTags;
 
   // 1. Early return if the incoming message, severity and tags are the same as last time.
   if (last_pushed_message_ == log_msg && last_pushed_severity_ == log_severity &&

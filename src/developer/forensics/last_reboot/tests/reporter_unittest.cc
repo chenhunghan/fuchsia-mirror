@@ -110,7 +110,8 @@ class ReporterTest : public UnitTestFixture, public testing::WithParamInterface<
   void ReportOnRebootLog() {
     const feedback::RebootLog reboot_log = feedback::RebootLog::ParseRebootLog(
         zircon_reboot_log_path_, graceful_shutdown_info_path_, legacy_graceful_reboot_log_path_,
-        /*previous_system_time_path=*/"", /*previous_boot_kernel_log_path=*/"",
+        /*last_log_timestamp=*/std::nullopt,
+        /*previous_boot_kernel_log_path=*/"",
         /*final_shutdown_info_path=*/"", not_a_fdr_,
         /*supports_user_initiated_poweroffs=*/false, /*first_component_instance=*/true,
         redactor_.get());
@@ -147,7 +148,8 @@ TEST_F(GenericReporterTest, Succeed_WellFormedRebootLog) {
   const feedback::RebootLog reboot_log(
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\n"
-      "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
+      "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-kernel-panic",
@@ -176,7 +178,8 @@ TEST_F(GenericReporterTest, Succeed_RootJobTerminationRebootLog) {
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\n"
       "ZIRCON REBOOT REASON (USERSPACE ROOT JOB TERMINATION)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072\n"
-      "ROOT JOB TERMINATED BY CRITICAL PROCESS DEATH: foo (1)");
+      "ROOT JOB TERMINATED BY CRITICAL PROCESS DEATH: foo (1)",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-reboot-foo-terminated",
@@ -202,7 +205,8 @@ TEST_F(GenericReporterTest, Succeed_SpontaneousDuringShutdown) {
       "ZIRCON REBOOT REASON (UNKNOWN)\n\nUPTIME (ms)\n65487494\nRUNTIME (ms)\n64208920";
   WriteZirconRebootLogContents(zircon_reboot_log);
   WriteGracefulShutdownInfoContents(ToJson(GracefulShutdownAction::kRebootToBootloader,
-                                           {GracefulShutdownReason::kDeveloperRequest}));
+                                           {GracefulShutdownReason::kDeveloperRequest},
+                                           zx::msec(65487494), zx::msec(64208920)));
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-spontaneous-reboot-during-shutdown",
@@ -256,7 +260,8 @@ TEST_F(GenericReporterTest, Succeed_NoUptime) {
   const feedback::FinalShutdownInfo final_shutdown_info(
       feedback::FinalShutdownReason::kKernelPanic);
   const feedback::RebootLog reboot_log(
-      final_shutdown_info, "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n");
+      final_shutdown_info, "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-kernel-panic",
@@ -282,7 +287,8 @@ TEST_F(GenericReporterTest, Succeed_NoRuntime) {
                                                         /*critical_process=*/std::nullopt);
   const feedback::RebootLog reboot_log(
       final_shutdown_info,
-      "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002");
+      "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-kernel-panic",
@@ -321,7 +327,8 @@ TEST_F(GenericReporterTest, Succeed_RedactsData) {
   const feedback::FinalShutdownInfo final_shutdown_info(
       feedback::FinalShutdownReason::kKernelPanic);
   const feedback::RebootLog reboot_log(
-      final_shutdown_info, "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n");
+      final_shutdown_info, "HW REBOOT REASON (WARM BOOT)\n\nZIRCON REBOOT REASON (KERNEL PANIC)\n",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-kernel-panic",
@@ -350,7 +357,8 @@ TEST_F(GenericReporterTest, Succeed_NoCrashReportFiledCleanReboot) {
   const feedback::RebootLog reboot_log(
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\n"
-      "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
+      "ZIRCON REBOOT REASON (NO CRASH)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-shutdown-undetermined-userspace-reason",
@@ -371,7 +379,7 @@ TEST_F(GenericReporterTest, Succeed_NoCrashReportFiledCleanReboot) {
 
 TEST_F(GenericReporterTest, Succeed_NoCrashReportFiledColdReboot) {
   const feedback::FinalShutdownInfo final_shutdown_info(feedback::FinalShutdownReason::kCold);
-  const feedback::RebootLog reboot_log(final_shutdown_info, "");
+  const feedback::RebootLog reboot_log(final_shutdown_info, "", /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
@@ -393,7 +401,8 @@ TEST_F(GenericReporterTest, Fail_CrashReporterFailsToFile) {
   const feedback::RebootLog reboot_log(
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\n"
-      "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
+      "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072",
+      /*uptime_from_logs=*/false);
   SetUpCrashReporter(std::make_unique<stubs::CrashReporterAlwaysReturnsError>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
 
@@ -415,7 +424,8 @@ TEST_F(GenericReporterTest, Succeed_DoesNothingIfAlreadyReportedOn) {
   const feedback::RebootLog reboot_log(
       final_shutdown_info,
       "HW REBOOT REASON (WARM BOOT)\n\n"
-      "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072");
+      "ZIRCON REBOOT REASON (KERNEL PANIC)\n\nUPTIME (ms)\n74715002\nRUNTIME (ms)\n73415072",
+      /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
   SetUpCobaltServer(std::make_unique<stubs::CobaltLoggerFactory>(dispatcher()));
@@ -534,17 +544,20 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(std::vector<GracefulShutdownTestParam>({
         {
             "UserRequest",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kUserRequest}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kUserRequest},
+                   zx::msec(65487494), zx::msec(64208920)),
             cobalt::LastRebootReason::kUserRequest,
         },
         {
             "SystemUpdate",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kSystemUpdate}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kSystemUpdate},
+                   zx::msec(65487494), zx::msec(64208920)),
             cobalt::LastRebootReason::kSystemUpdate,
         },
         {
             "ZbiSwap",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kZbiSwap}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kZbiSwap},
+                   zx::msec(65487494), zx::msec(64208920)),
             cobalt::LastRebootReason::kZbiSwap,
         },
     })),
@@ -598,7 +611,8 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::ValuesIn(std::vector<GracefulShutdownWithCrashTestParam>({
         {
             "SessionFailure",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kSessionFailure}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kSessionFailure},
+                   zx::msec(65487494), zx::msec(64208920)),
             {GracefulShutdownReason::kSessionFailure},
             "FINAL REBOOT REASON (SESSION FAILURE)",
             "fuchsia-session-failure",
@@ -609,7 +623,8 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             "OOM",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kOutOfMemory}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kOutOfMemory},
+                   zx::msec(65487494), zx::msec(64208920)),
             {GracefulShutdownReason::kOutOfMemory},
             "FINAL REBOOT REASON (OOM)",
             "fuchsia-oom",
@@ -620,7 +635,8 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             "SysmgrFailure",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kSysmgrFailure}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kSysmgrFailure},
+                   zx::msec(65487494), zx::msec(64208920)),
             {GracefulShutdownReason::kSysmgrFailure},
             "FINAL REBOOT REASON (SYSMGR FAILURE)",
             "fuchsia-sysmgr-failure",
@@ -632,7 +648,8 @@ INSTANTIATE_TEST_SUITE_P(
         {
             "CriticalComponentFailure",
             ToJson(GracefulShutdownAction::kReboot,
-                   {GracefulShutdownReason::kCriticalComponentFailure}),
+                   {GracefulShutdownReason::kCriticalComponentFailure}, zx::msec(65487494),
+                   zx::msec(64208920)),
             {GracefulShutdownReason::kCriticalComponentFailure},
             "FINAL REBOOT REASON (CRITICAL COMPONENT FAILURE)",
             "fuchsia-critical-component-failure",
@@ -644,7 +661,8 @@ INSTANTIATE_TEST_SUITE_P(
         {
             "CriticalDriverFailure",
             ToJson(GracefulShutdownAction::kReboot,
-                   {GracefulShutdownReason::kCriticalDriverFailure}),
+                   {GracefulShutdownReason::kCriticalDriverFailure}, zx::msec(65487494),
+                   zx::msec(64208920)),
             {GracefulShutdownReason::kCriticalDriverFailure},
             "FINAL REBOOT REASON (CRITICAL DRIVER FAILURE)",
             "fuchsia-critical-driver-failure",
@@ -655,7 +673,8 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             "RetrySystemUpdate",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kRetrySystemUpdate}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kRetrySystemUpdate},
+                   zx::msec(65487494), zx::msec(64208920)),
             {GracefulShutdownReason::kRetrySystemUpdate},
             "FINAL REBOOT REASON (RETRY SYSTEM UPDATE)",
             "fuchsia-retry-system-update",
@@ -666,7 +685,8 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             "HighTemperature",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kHighTemperature}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kHighTemperature},
+                   zx::msec(65487494), zx::msec(64208920)),
             {GracefulShutdownReason::kHighTemperature},
             "FINAL REBOOT REASON (HIGH TEMPERATURE)",
             "fuchsia-shutdown-high-temperature",
@@ -677,7 +697,8 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             "NotSupported",
-            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kNotSupported}),
+            ToJson(GracefulShutdownAction::kReboot, {GracefulShutdownReason::kNotSupported},
+                   zx::msec(65487494), zx::msec(64208920)),
             {GracefulShutdownReason::kNotSupported},
             "FINAL REBOOT REASON (GENERIC GRACEFUL)",
             "fuchsia-shutdown-undetermined-userspace-reason",
@@ -699,7 +720,8 @@ INSTANTIATE_TEST_SUITE_P(
         },
         {
             "None",
-            ToJson(GracefulShutdownAction::kReboot, {}),
+            ToJson(GracefulShutdownAction::kReboot, /*reasons=*/{}, zx::msec(65487494),
+                   zx::msec(64208920)),
             {},
             "FINAL REBOOT REASON (GENERIC GRACEFUL)",
             "fuchsia-shutdown-undetermined-userspace-reason",

@@ -1,0 +1,46 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/testing/cc_test_executable.gni")
+
+group("tests") {
+  testonly = true
+  public_deps = [ ":unittests" ]
+}
+
+cc_test_executable("unittests") {
+  output_name = "image_import_unittests"
+  testonly = true
+  sources = [
+    "image_importer_impl_unittest.cc",
+    "imported_image_unittest.cc",
+    "undisplayed_frame_deferral_unittest.cc",
+  ]
+
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+    "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+    "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_testing",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/fit-promise",
+    "//src/lib/fsl",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture:gtest",
+    "//src/ui/scenic/lib/display",
+    "//src/ui/scenic/lib/display/tests:mocks",
+    "//src/ui/scenic/lib/flatland/image_import",
+    "//src/ui/scenic/lib/flatland/image_import:impl",
+    "//src/ui/scenic/lib/flatland/image_import:testing",
+    "//src/ui/scenic/lib/flatland/renderer",
+    "//src/ui/scenic/lib/utils",
+    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
+    "//zircon/system/ulib/inspect",
+    "//zircon/system/ulib/sync:sync-cpp",
+  ]
+}

@@ -261,6 +261,60 @@ CALL_ETC_DISPLAY_TEST(
     "handle: \x1B[32mhandle\x1B[0m = "
     "\x1B[31mChannel:bde90222\x1B[0m(\x1B[34mZX_RIGHT_EXECUTE\x1B[0m) }\n")
 
+#define CALL_ETC_FAILED_WITH_SEMANTIC_TEST_CONTENT(errno, expected)                       \
+  auto loader = GetTestLibraryLoader();                                                   \
+  fidl_codec::Protocol* protocol = nullptr;                                               \
+  loader->GetLibraryFromName("fidl.examples.echo")                                        \
+      ->GetProtocolByName("fidl.examples.echo/Echo", &protocol);                          \
+  fidl_codec::ProtocolMethod* method = protocol->GetMethodByName("EchoHandle");           \
+  method->set_semantic(std::make_unique<fidl_codec::semantic::MethodSemantic>());         \
+  zx_handle_disposition_t outgoing_handle = {.operation = ZX_HANDLE_OP_DUPLICATE,         \
+                                             .handle = kHandleOut,                        \
+                                             .type = ZX_OBJ_TYPE_CHANNEL,                 \
+                                             .rights = ZX_RIGHT_TRANSFER,                 \
+                                             .result = ZX_OK};                            \
+  zx_handle_info_t incoming_handle = {                                                    \
+      .handle = kHandleOut2, .type = ZX_OBJ_TYPE_CHANNEL, .rights = ZX_RIGHT_EXECUTE};    \
+  zx_channel_call_etc_args_t args;                                                        \
+  args.wr_bytes = echo_handle.data();                                                     \
+  args.wr_handles = &outgoing_handle;                                                     \
+  args.rd_bytes = echo_handle.data();                                                     \
+  args.rd_handles = &incoming_handle;                                                     \
+  args.wr_num_bytes = echo_handle.size();                                                 \
+  args.wr_num_handles = 1;                                                                \
+  args.rd_num_bytes = 1000;                                                               \
+  args.rd_num_handles = 64;                                                               \
+  uint32_t actual_bytes = echo_handle.size();                                             \
+  uint32_t actual_handles = 1;                                                            \
+  PerformDisplayTest("$plt(zx_channel_call_etc)",                                         \
+                     ZxChannelCallEtc(errno, #errno, kHandle, 0, ZX_TIME_INFINITE, &args, \
+                                      &actual_bytes, &actual_handles),                    \
+                     expected, loader)
+
+#define CALL_ETC_FAILED_WITH_SEMANTIC_TEST(name, errno, expected) \
+  TEST_F(InterceptionWorkflowTestX64, name) {                     \
+    CALL_ETC_FAILED_WITH_SEMANTIC_TEST_CONTENT(errno, expected);  \
+  }                                                               \
+  TEST_F(InterceptionWorkflowTestArm, name) {                     \
+    CALL_ETC_FAILED_WITH_SEMANTIC_TEST_CONTENT(errno, expected);  \
+  }
+
+CALL_ETC_FAILED_WITH_SEMANTIC_TEST(
+    ZxChannelCallEtcFailedWithSemantic, ZX_ERR_PEER_CLOSED,
+    "\n"
+    "\x1B[32m0.000000\x1B[0m "
+    "test_3141 \x1B[31m3141\x1B[0m:\x1B[31m8764\x1B[0m zx_channel_call_etc("
+    "handle: \x1B[32mhandle\x1B[0m = \x1B[31mcefa1db0\x1B[0m, "
+    "options: \x1B[32muint32\x1B[0m = \x1B[34m0\x1B[0m, "
+    "deadline: \x1B[32mzx.time\x1B[0m = \x1B[34mZX_TIME_INFINITE\x1B[0m, "
+    "rd_num_bytes: \x1B[32muint32\x1B[0m = \x1B[34m1000\x1B[0m, "
+    "rd_num_handles: \x1B[32muint32\x1B[0m = \x1B[34m64\x1B[0m)\n"
+    "  \x1B[45m\x1B[37msent request\x1B[0m \x1B[32mfidl.examples.echo/Echo.EchoHandle\x1B[0m = { "
+    "handle: \x1B[32mhandle\x1B[0m = Duplicate(\x1B[31mChannel:bde90caf\x1B[0m,"
+    " \x1B[34mZX_RIGHT_TRANSFER\x1B[0m) }\n"
+    "\x1B[32m0.000000\x1B[0m "
+    "  -> \x1B[31mZX_ERR_PEER_CLOSED\x1B[0m\n")
+
 // Event tests.
 
 #define WRITE_EVENT_TEST_CONTENT(errno, dump_messages, expected)                             \

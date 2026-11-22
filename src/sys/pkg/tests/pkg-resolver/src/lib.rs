@@ -29,6 +29,8 @@ use fidl_fuchsia_pkg_internal as fpkg_internal;
 use fidl_fuchsia_pkg_internal::{PersistentEagerPackage, PersistentEagerPackages};
 use fidl_fuchsia_pkg_rewrite as fpkg_rewrite;
 use fidl_fuchsia_pkg_rewrite_ext::{Rule, RuleConfig};
+use fidl_fuchsia_storage_block as fstorage_block;
+use fidl_fuchsia_storage_mapping as fstorage_mapping;
 use fidl_fuchsia_sys2 as fsys2;
 use fidl_fuchsia_update as fupdate;
 use fuchsia_async as fasync;
@@ -316,6 +318,7 @@ pub struct TestEnvBuilder<BlobfsAndSystemImageFut, MountsFn> {
     blob_download_resumption_attempts_limit: Option<u32>,
     blob_implementation: Option<blobfs_ramdisk::Implementation>,
     blob_download_concurrency_limit: Option<u16>,
+    delivery_blob_type: Option<fuchsia_pkg_testing::DeliveryBlobType>,
 }
 
 impl TestEnvBuilder<future::BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>, fn() -> Mounts> {
@@ -353,6 +356,7 @@ impl TestEnvBuilder<future::BoxFuture<'static, (BlobfsRamdisk, Option<Hash>)>, f
             blob_download_resumption_attempts_limit: None,
             blob_implementation: None,
             blob_download_concurrency_limit: None,
+            delivery_blob_type: None,
         }
     }
 }
@@ -382,6 +386,7 @@ where
             blob_download_resumption_attempts_limit: self.blob_download_resumption_attempts_limit,
             blob_implementation: self.blob_implementation,
             blob_download_concurrency_limit: self.blob_download_concurrency_limit,
+            delivery_blob_type: self.delivery_blob_type,
         }
     }
 
@@ -413,6 +418,7 @@ where
             blob_download_resumption_attempts_limit: self.blob_download_resumption_attempts_limit,
             blob_implementation: Some(blobfs_ramdisk::Implementation::CppBlobfs),
             blob_download_concurrency_limit: self.blob_download_concurrency_limit,
+            delivery_blob_type: self.delivery_blob_type,
         }
     }
 
@@ -430,6 +436,7 @@ where
             blob_download_resumption_attempts_limit: self.blob_download_resumption_attempts_limit,
             blob_implementation: self.blob_implementation,
             blob_download_concurrency_limit: self.blob_download_concurrency_limit,
+            delivery_blob_type: self.delivery_blob_type,
         }
     }
 
@@ -477,6 +484,15 @@ where
     pub fn cpp_blobfs(self) -> Self {
         assert_eq!(self.blob_implementation, None);
         Self { blob_implementation: Some(blobfs_ramdisk::Implementation::CppBlobfs), ..self }
+    }
+
+    pub fn delivery_blob_type(
+        mut self,
+        delivery_blob_type: fuchsia_pkg_testing::DeliveryBlobType,
+    ) -> Self {
+        assert_eq!(self.delivery_blob_type, None);
+        self.delivery_blob_type = Some(delivery_blob_type);
+        self
     }
 
     pub async fn build(self) -> TestEnv<ConcreteBlobfs> {
@@ -548,7 +564,7 @@ where
             .await
             .unwrap();
         let http_client = builder
-            .add_child("http_client", "#meta/http-client.cm", ChildOptions::new())
+            .add_child("http_client", "http-client#meta/http-client.cm", ChildOptions::new())
             .await
             .unwrap();
         let service_reflector = builder
@@ -599,7 +615,12 @@ where
                 "fuchsia.pkgresolver.BlobNetworkHeaderTimeoutSeconds",
                 self.blob_network_header_timeout_seconds.map(cm_rust::ConfigValue::from),
             ),
-            ("fuchsia.pkgresolver.DeliveryBlobType", None),
+            (
+                "fuchsia.pkgresolver.DeliveryBlobType",
+                Some(cm_rust::ConfigValue::from(u32::from(
+                    self.delivery_blob_type.unwrap_or(fuchsia_pkg_testing::DeliveryBlobType::Type1),
+                ))),
+            ),
             (
                 "fuchsia.pkgresolver.TufMetadataTimeoutSeconds",
                 self.tuf_metadata_timeout_seconds.map(cm_rust::ConfigValue::from),
@@ -667,24 +688,6 @@ where
             .await
             .unwrap();
 
-        // Unconditionally overwrite `use_fxblob` because the value in the production config is
-        // outside of SWD control.
-        let pkg_cache_config = builder
-            .add_child("pkg_cache_config", "#meta/pkg-cache-config.cm", ChildOptions::new())
-            .await
-            .unwrap();
-        builder
-            .add_route(
-                Route::new()
-                    .capability(Capability::configuration("fuchsia.pkgcache.AllPackagesExecutable"))
-                    .capability(Capability::configuration(
-                        "fuchsia.pkgcache.EnableUpgradablePackages",
-                    ))
-                    .from(&pkg_cache_config)
-                    .to(&pkg_cache),
-            )
-            .await
-            .unwrap();
         builder
             .add_route(
                 Route::new()
@@ -703,9 +706,25 @@ where
                     .capability(Capability::configuration(
                         "fuchsia.pkgcache.PostCommitGcEarliestBootSeconds",
                     ))
-                    .capability(Capability::configuration("fuchsia.pkgcache.UseDriverBlobPaging"))
                     .capability(Capability::configuration("fuchsia.fshost.StartupProfilingSeconds"))
                     .from(Ref::void())
+                    .to(&pkg_cache),
+            )
+            .await
+            .unwrap();
+
+        builder
+            .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {
+                name: "fuchsia.pkgcache.UseDriverBlobPaging".parse().unwrap(),
+                value: (blob_implementation == blobfs_ramdisk::Implementation::Fxblob).into(),
+            }))
+            .await
+            .unwrap();
+        builder
+            .add_route(
+                Route::new()
+                    .capability(Capability::configuration("fuchsia.pkgcache.UseDriverBlobPaging"))
+                    .from(Ref::self_())
                     .to(&pkg_cache),
             )
             .await
@@ -874,6 +893,20 @@ where
                     .capability(
                         Capability::protocol::<ffxfs::BlobReaderMarker>()
                             .path(format!("/blob-svc/{}", ffxfs::BlobReaderMarker::PROTOCOL_NAME)),
+                    )
+                    .capability(
+                        Capability::protocol::<fstorage_mapping::MappingProviderMarker>().path(
+                            format!(
+                                "/blob-svc/{}",
+                                fstorage_mapping::MappingProviderMarker::PROTOCOL_NAME
+                            ),
+                        ),
+                    )
+                    .capability(
+                        Capability::protocol::<fstorage_block::MapperMarker>().path(format!(
+                            "/blob-svc/{}",
+                            fstorage_block::MapperMarker::PROTOCOL_NAME
+                        )),
                     )
                     .from(&service_reflector)
                     .to(&pkg_cache),

@@ -42,9 +42,12 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <print>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -501,8 +504,6 @@ class Compressor final {
         *this = {};
       } else if (!strcasecmp(arg, "none")) {
         *this = None();
-      } else if (!strcasecmp(arg, "lz4f.max")) {
-        SetMax<Lz4f>();
       } else if (!strcasecmp(arg, "lz4f")) {
         Set<Lz4f>();
       } else if (!strcasecmp(arg, "lz4f.max")) {
@@ -1749,6 +1750,249 @@ Extracted items use the file names shown below:\n\
     return uncompressed;
   }
 
+  // Orders unique BOOTFS file payloads by content similarity so that similar
+  // files sit adjacent to each other within the compressor's sliding window,
+  // regardless of their directory entry names (which for `blob/<merkle>` files
+  // are pseudorandom SHA-256 digests).
+  //
+  // Note: The BOOTFS format requires directory entries (`zbi_bootfs_dirent_t`)
+  // in the header block to be sorted ascendingly by `name`, which `CreateBootFS`
+  // preserves. Each directory entry explicitly records its payload's `data_off`,
+  // so payload placement order is independent of directory entry order.
+  //
+  // Algorithm:
+  // 1. Classify each unique file into a coarse format category (FAR archive,
+  //    generic data, or ELF binary) so dissimilar formats are not interleaved.
+  //
+  // 2. Compute a shift-invariant Bottom-k MinHash sketch (k = 1024) of each
+  //    file by splitting on NUL ('\0') bytes and hashing spans of length
+  //    [6, 128] with CRC32. Because NUL delimiters bound ELF string/symbol
+  //    tables (`.dynstr`, `.rodata`, `.strtab`), `meta.far` paths, and
+  //    zero-padded structures without depending on file offsets, small code
+  //    changes do not perturb the sketch.
+  //
+  // 3. Establish a deterministic initial ordering by sorting candidates on
+  //    `(category, exact_size, min_hash, first_name)`.
+  //
+  // 4. Within each category's contiguous range, perform a greedy
+  //    nearest-neighbor traversal (a heuristic for the Maximum-Weight
+  //    Hamiltonian Path problem): starting from the first candidate in the
+  //    category, repeatedly pick the unvisited candidate in that category that
+  //    maximizes sketch intersection size, breaking ties by closest file size
+  //    and then by initial sorted index.
+  static std::vector<const FileContents*> OrderBootFSPayloads(
+      const std::vector<std::pair<std::string, const FileContents*>>& entries) {
+    enum class Category : uint8_t {
+      kFar = 0,
+      kOther = 1,
+      kElf = 2,
+    };
+
+    struct Candidate {
+      const FileContents* contents = nullptr;
+      std::string_view first_name;
+      Category category = Category::kOther;
+      size_t exact_size = 0;
+      uint32_t min_hash = 0;
+      std::vector<uint32_t> sketch;
+    };
+
+    // Spans shorter than 6 bytes are mostly noise (short integer immediates or
+    // alignment padding), while spans longer than 128 bytes are rare and
+    // already captured by zstd's long-distance matcher (LDM).
+    constexpr size_t kMinSpanLen = 6;
+    constexpr size_t kMaxSpanLen = 128;
+    constexpr size_t kMaxSketchSize = 1024;
+    constexpr size_t kSketchCompactThreshold = kMaxSketchSize * 4;
+    static_assert(kSketchCompactThreshold >= kMaxSketchSize * 2);
+    constexpr uint8_t kFarMagic[8] = {0xc8, 0xbf, 0x0b, 0x48, 0xad, 0xab, 0xc5, 0x11};
+    constexpr uint8_t kElfMagic[4] = {0x7f, 'E', 'L', 'F'};
+
+    // Sorts, deduplicates, and truncates `sketch` to at most `kMaxSketchSize`
+    // (1024) elements. Because this is triggered at `kSketchCompactThreshold`
+    // (4096) and unconditionally caps `sketch.size()` at 1024, each call frees
+    // at least 3072 slots before the threshold can be reached again. Moreover,
+    // once 1024 distinct hashes are collected, `threshold` rejects any hash
+    // >= the current 1024th smallest hash in O(1), so over M random hashes only
+    // ~K * ln(M / K) hashes ever enter `sketch`.
+    auto prune_sketch = [](std::vector<uint32_t>& sketch, uint32_t& threshold) {
+      std::ranges::sort(sketch);
+      sketch.erase(std::ranges::unique(sketch).begin(), sketch.end());
+      if (sketch.size() > kMaxSketchSize) {
+        sketch.resize(kMaxSketchSize);
+        threshold = sketch.back() - 1;
+      }
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(entries.size());
+    std::unordered_set<const FileContents*> seen;
+    seen.reserve(entries.size());
+    std::vector<uint32_t> sketch;
+    sketch.reserve(kSketchCompactThreshold);
+
+    for (const auto& [name, contents] : entries) {
+      if (!seen.insert(contents).second) {
+        continue;
+      }
+
+      const iovec view = contents->View();
+      const auto* ptr = static_cast<const uint8_t*>(view.iov_base);
+      const size_t size = view.iov_len;
+
+      Category category = Category::kOther;
+      sketch.clear();
+      uint32_t threshold = std::numeric_limits<uint32_t>::max();
+      if (ptr != nullptr && size > 0) {
+        if (size >= sizeof(kFarMagic) && memcmp(ptr, kFarMagic, sizeof(kFarMagic)) == 0) {
+          category = Category::kFar;
+        } else if (size >= sizeof(kElfMagic) && memcmp(ptr, kElfMagic, sizeof(kElfMagic)) == 0) {
+          category = Category::kElf;
+        }
+
+        // Build the Bottom-k MinHash sketch in bounded memory by periodically
+        // pruning the buffer to the k smallest hashes and tracking
+        // `sketch.back() - 1` as an upper-bound filter.
+        const uint8_t* cur = ptr;
+        const uint8_t* end = ptr + size;
+        while (cur < end) {
+          const auto* nul = static_cast<const uint8_t*>(memchr(cur, 0, end - cur));
+          const uint8_t* span_end = nul ? nul : end;
+          const size_t span_len = span_end - cur;
+          if (span_len >= kMinSpanLen && span_len <= kMaxSpanLen) {
+            const uint32_t h = crc32(0, cur, span_len);
+            if (h <= threshold) {
+              sketch.push_back(h);
+              if (sketch.size() >= kSketchCompactThreshold) {
+                prune_sketch(sketch, threshold);
+              }
+            }
+          }
+          if (!nul) {
+            break;
+          }
+          cur = nul + 1;
+        }
+        prune_sketch(sketch, threshold);
+      }
+
+      const uint32_t min_hash = sketch.empty() ? 0 : sketch.front();
+      candidates.push_back(Candidate{
+          .contents = contents,
+          .first_name = name,
+          .category = category,
+          .exact_size = size,
+          .min_hash = min_hash,
+          .sketch = std::vector<uint32_t>(sketch.begin(), sketch.end()),
+      });
+    }
+
+    // Sort candidates deterministically so that greedy traversal starts from
+    // a canonical seed within each category and breaks ties reproducibly.
+    std::ranges::sort(candidates, [](const Candidate& a, const Candidate& b) {
+      return std::tie(a.category, a.exact_size, a.min_hash, a.first_name) <
+             std::tie(b.category, b.exact_size, b.min_hash, b.first_name);
+    });
+
+    // Counts the number of shared hashes between two sorted sketches, aborting
+    // early if the remaining elements cannot possibly reach `min_needed`.
+    auto count_intersection = [](const std::vector<uint32_t>& a, const std::vector<uint32_t>& b,
+                                 size_t min_needed) -> std::optional<size_t> {
+      if (min_needed == 0) {
+        if (a.empty() || b.empty()) {
+          return 0;
+        }
+      } else if (a.size() < min_needed || b.size() < min_needed || a.back() < b.front() ||
+                 b.back() < a.front()) {
+        return std::nullopt;
+      }
+
+      size_t i = 0;
+      size_t j = 0;
+      size_t count = 0;
+      while (i < a.size() && j < b.size()) {
+        const size_t max_remaining = std::min(a.size() - i, b.size() - j);
+        if (count + max_remaining < min_needed) {
+          return std::nullopt;
+        }
+        if (a[i] < b[j]) {
+          ++i;
+        } else if (b[j] < a[i]) {
+          ++j;
+        } else {
+          ++count;
+          ++i;
+          ++j;
+        }
+      }
+      if (count < min_needed) {
+        return std::nullopt;
+      }
+      return count;
+    };
+
+    std::vector<const FileContents*> ordered;
+    ordered.reserve(candidates.size());
+    std::vector<bool> visited(candidates.size(), false);
+
+    // Traverse each category range independently so categories are never
+    // interleaved and each category starts from its canonical seed.
+    for (size_t cat_start = 0; cat_start < candidates.size();) {
+      size_t cat_end = cat_start + 1;
+      while (cat_end < candidates.size() &&
+             candidates[cat_end].category == candidates[cat_start].category) {
+        ++cat_end;
+      }
+
+      size_t curr = cat_start;
+      visited[curr] = true;
+      ordered.push_back(candidates[curr].contents);
+      size_t first_unvisited = cat_start + 1;
+
+      for (size_t step = cat_start + 1; step < cat_end; ++step) {
+        while (first_unvisited < cat_end && visited[first_unvisited]) {
+          ++first_unvisited;
+        }
+
+        size_t best_idx = first_unvisited;
+        bool has_best = false;
+        size_t best_inter = 0;
+        size_t best_size_diff = std::numeric_limits<size_t>::max();
+
+        for (size_t i = first_unvisited; i < cat_end; ++i) {
+          if (visited[i]) {
+            continue;
+          }
+          const size_t size_diff = (candidates[i].exact_size > candidates[curr].exact_size)
+                                       ? (candidates[i].exact_size - candidates[curr].exact_size)
+                                       : (candidates[curr].exact_size - candidates[i].exact_size);
+          const size_t min_needed =
+              (!has_best || size_diff < best_size_diff) ? best_inter : (best_inter + 1);
+          const std::optional<size_t> inter =
+              count_intersection(candidates[curr].sketch, candidates[i].sketch, min_needed);
+          if (!inter.has_value()) {
+            continue;
+          }
+          if (!has_best || *inter > best_inter ||
+              (*inter == best_inter && size_diff < best_size_diff)) {
+            has_best = true;
+            best_inter = *inter;
+            best_size_diff = size_diff;
+            best_idx = i;
+          }
+        }
+
+        curr = best_idx;
+        visited[curr] = true;
+        ordered.push_back(candidates[curr].contents);
+      }
+
+      cat_start = cat_end;
+    }
+
+    return ordered;
+  }
+
   // Create a BOOTFS item.
   static ItemPtr CreateBootFS(Directory* root, Compressor::Config compress, uint32_t bootfs_type) {
     auto item = MakeItem(NewHeader(bootfs_type, 0), compress);
@@ -1766,51 +2010,49 @@ Extracted items use the file names shown below:\n\
       dirsize += ZBI_BOOTFS_DIRENT_SIZE(name.size() + 1);
 
       entries.emplace_back(std::move(name), contents);
-      files.emplace(contents, 0);
     }
 
     // Now fill a buffer with the BOOTFS header and directory entries,
     // appending each unique file to the payload.
     const zbi_bootfs_header_t header = {
-        ZBI_BOOTFS_MAGIC,                // magic
-        static_cast<uint32_t>(dirsize),  // dirsize
-        0,                               // reserved0
-        0,                               // reserved1
+        .magic = ZBI_BOOTFS_MAGIC,
+        .dirsize = static_cast<uint32_t>(dirsize),
+        .reserved0 = 0,
+        .reserved1 = 0,
     };
     size_t header_size = ZBI_BOOTFS_PAGE_ALIGN(sizeof(header) + dirsize);
     AppendBuffer buffer(header_size);
     buffer.Append(&header);
     uint32_t data_off = static_cast<uint32_t>(header_size);
-    for (const auto& [name, contents] : entries) {
-      // Place the file contents if this is the first name for them.
-      uint32_t* location = &files[contents];
-      if (*location == 0) {
-        size_t layout_size =
-            ((contents->exact_size() + ZBI_BOOTFS_PAGE_SIZE - 1) & -size_t{ZBI_BOOTFS_PAGE_SIZE});
-        if (layout_size > std::numeric_limits<uint32_t>::max()) {
-          fprintf(stderr, "input file size exceeds format maximum\n");
-          exit(1);
-        }
-        if (data_off + layout_size > std::numeric_limits<uint32_t>::max()) {
-          fprintf(stderr, "BOOTFS image size exceeds format maximum\n");
-          exit(1);
-        }
-        *location = data_off;
-        data_off += layout_size;
-        item->payload_.emplace_back(contents->PageRoundedView(0, layout_size));
+    for (const FileContents* contents : OrderBootFSPayloads(entries)) {
+      size_t layout_size =
+          ((contents->exact_size() + ZBI_BOOTFS_PAGE_SIZE - 1) & -size_t{ZBI_BOOTFS_PAGE_SIZE});
+      if (layout_size > std::numeric_limits<uint32_t>::max()) {
+        std::println(stderr, "input file size exceeds format maximum");
+        exit(1);
       }
+      if (data_off + layout_size > std::numeric_limits<uint32_t>::max()) {
+        std::println(stderr, "BOOTFS image size exceeds format maximum");
+        exit(1);
+      }
+      files[contents] = data_off;
+      data_off += layout_size;
+      item->payload_.emplace_back(contents->PageRoundedView(0, layout_size));
+    }
 
+    for (const auto& [name, contents] : entries) {
       // Emit the directory entry.
       const zbi_bootfs_dirent_t entry_hdr = {
-          static_cast<uint32_t>(name.size() + 1),         // name_len
-          static_cast<uint32_t>(contents->exact_size()),  // data_len
-          *location,                                      // data_off
+          .name_len = static_cast<uint32_t>(name.size() + 1),
+          .data_len = static_cast<uint32_t>(contents->exact_size()),
+          .data_off = files[contents],
       };
       buffer.Append(&entry_hdr);
       buffer.Append(name.c_str(), entry_hdr.name_len);
       buffer.Pad(ZBI_BOOTFS_DIRENT_SIZE(entry_hdr.name_len) -
                  offsetof(zbi_bootfs_dirent_t, name[entry_hdr.name_len]));
     }
+
     // Zero fill to the end of the page.
     buffer.Pad(header_size - buffer.size());
 

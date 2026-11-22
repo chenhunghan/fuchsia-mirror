@@ -28,7 +28,7 @@ ParseResult Sensor::ParseReportDescriptor(const hid::ReportDescriptor& hid_repor
     }
 
     fuchsia_input_report::wire::SensorType type;
-    zx_status_t status = HidSensorUsageToLlcppSensorType(
+    zx_status_t status = HidSensorUsageToWireSensorType(
         static_cast<hid::usage::Sensor>(field.attr.usage.usage), &type);
     if (status != ZX_OK) {
       continue;
@@ -74,11 +74,11 @@ ParseResult Sensor::CreateDescriptor(fidl::AnyArena& allocator,
   {
     fidl::VectorView<fuchsia_input_report::wire::SensorAxis> values(allocator, num_values_);
     for (size_t i = 0; i < num_values_; i++) {
-      if (HidSensorUsageToLlcppSensorType(static_cast<hid::usage::Sensor>(values_[i].usage.usage),
-                                          &values[i].type) != ZX_OK) {
+      if (HidSensorUsageToWireSensorType(static_cast<hid::usage::Sensor>(values_[i].usage.usage),
+                                         &values[i].type) != ZX_OK) {
         return ParseResult::kItemNotFound;
       }
-      values[i].axis = LlcppAxisFromAttribute(values_[i]);
+      values[i].axis = WireAxisFromAttribute(values_[i]);
     }
     input.set_values(allocator, std::move(values));
   }

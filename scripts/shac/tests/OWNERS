@@ -1,0 +1,3 @@
+# Consistent with the implementation ownership.
+per-file bazel_lint_test.py = file: /build/bazel/BAZEL_OWNERS
+per-file bazel_test.star = file: /build/bazel/BAZEL_OWNERS

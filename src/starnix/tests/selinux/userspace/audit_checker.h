@@ -18,9 +18,6 @@ class AuditChecker : public testing::EmptyTestEventListener {
  public:
   AuditChecker() = default;
 
-  // Creates an `AuditChecker` with debug prints enabled.
-  static AuditChecker* for_debug();
-
   // Creates an `AuditChecker` with audit log JSON generation.
   static AuditChecker* with_json_generation();
 

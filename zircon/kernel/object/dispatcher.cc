@@ -170,7 +170,7 @@ void Dispatcher::Cancel(const void* handle) {
 
   // Cancel all observers that registered on "handle".
   for (auto it = observers_.begin(); it != observers_.end(); /* nothing */) {
-    if (it->handle_ != handle) {
+    if (it->handle() != handle) {
       ++it;
       continue;
     }
@@ -194,7 +194,7 @@ bool Dispatcher::CancelByKey(const void* handle, const void* port, uint64_t key)
   // Cancel all observers that registered on "handle" that match the given key.
   bool remove_performed = false;
   for (auto it = observers_.begin(); it != observers_.end(); /* nothing */) {
-    if (it->handle_ != handle || !it->MatchesKey(port, key)) {
+    if (it->handle() != handle || !it->MatchesKey(port, key)) {
       ++it;
       continue;
     }
@@ -239,7 +239,7 @@ zx_status_t Dispatcher::UserSignalSelfSolo(Dispatcher* dispatcher, uint32_t clea
   return ZX_OK;
 }
 
-void Dispatcher::NotifyObserversLocked(zx_signals_t signals, OwnedWaitQueue* queue_to_own) {
+void Dispatcher::NotifyObserversLocked(zx_signals_t signals, void* queue_to_own) {
   for (auto it = observers_.begin(); it != observers_.end(); /* nothing */) {
     // Ignore observers that don't need to be notified.
     if ((it->triggering_signals_ & signals) == 0) {

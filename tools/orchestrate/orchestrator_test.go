@@ -104,8 +104,8 @@ func (m *mockFFXClient) TargetLogStart(ctx context.Context, output io.Writer) (i
 	return &mockTargetLogCloser{}, nil
 }
 
-func (m *mockFFXClient) Flash(ctx context.Context, fastbootSerial, productDir, pubKeyPath string) error {
-	call := m.recordCall("Flash", fastbootSerial, productDir, pubKeyPath)
+func (m *mockFFXClient) Flash(ctx context.Context, target, productDir, pubKeyPath string) error {
+	call := m.recordCall("Flash", target, productDir, pubKeyPath)
 	return call.retErr
 }
 
@@ -332,7 +332,7 @@ func runOrchestratorScenario(t *testing.T, isEmulator bool, runInput *RunInput, 
 		mockFfx.expectCall("SetDefaultTarget", emuName) // Pass emuName as actual string, mock will check pointer value.
 	} else {
 		// Hardware-specific expectations
-		mockFfx.expectCall("Flash", deviceConfig.FastbootSerial, productBundleDir, "")
+		mockFfx.expectCall("Flash", "id:"+deviceConfig.SerialNumber, productBundleDir, "")
 	}
 
 	// Package serving expectations (common)
@@ -440,8 +440,8 @@ func runOrchestratorScenario(t *testing.T, isEmulator bool, runInput *RunInput, 
 
 func TestOrchestrator_Run_Unit(t *testing.T) {
 	deviceConfig := &DeviceConfig{
-		FastbootSerial: "serial123",
-		Network:        DeviceNetworkConfig{IPv4: "192.168.1.10"},
+		SerialNumber: "serial123",
+		Network:      DeviceNetworkConfig{IPv4: "192.168.1.10"},
 	}
 	runInput := &RunInput{
 		Hardware: TargetRunInput{
@@ -479,8 +479,8 @@ func TestOrchestrator_Run_EmulatorLocalPB(t *testing.T) {
 
 func TestOrchestrator_Run_HardwareLocalPB(t *testing.T) {
 	deviceConfig := &DeviceConfig{
-		FastbootSerial: "serial123",
-		Network:        DeviceNetworkConfig{IPv4: "192.168.1.10"},
+		SerialNumber: "serial123",
+		Network:      DeviceNetworkConfig{IPv4: "192.168.1.10"},
 	}
 	runInput := &RunInput{
 		Hardware: TargetRunInput{
@@ -627,5 +627,18 @@ func TestInstantiateFfx_PathResolution(t *testing.T) {
 				t.Errorf("resolved path does not exist: %s, err: %v", resolvedPath, err)
 			}
 		})
+	}
+}
+
+func TestOrchestrator_FlashDevice_NoSerialNumber(t *testing.T) {
+	mockFfx := NewMockFFXClient(t)
+	mockFfx.expectCall("Flash", "", "/path/to/pb", "")
+	orchestrator := NewTestOrchestrator(&DeviceConfig{})
+	orchestrator.ffx = mockFfx
+	if err := orchestrator.flashDevice(context.Background(), "/path/to/pb"); err != nil {
+		t.Fatalf("flashDevice failed: %v", err)
+	}
+	if mockFfx.callIdx != len(mockFfx.calls) {
+		t.Errorf("Mock not fully exercised: called %d of %d", mockFfx.callIdx, len(mockFfx.calls))
 	}
 }

@@ -4,8 +4,8 @@
 
 #include "intel-hda-stream.h"
 
-#include <lib/ddk/hw/arch_ops.h>
 #include <lib/fidl/cpp/wire/server.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/zx/clock.h>
 #include <string.h>
 #include <zircon/syscalls.h>
@@ -109,7 +109,7 @@ void IntelHDAStream::EnsureStopped(MMIO_PTR hda_stream_desc_regs_t* regs) {
   // Stop the stream, but do not place it into reset.  Ack any lingering IRQ
   // status bits in the process.
   REG_CLR_BITS(&regs->ctl_sts.w, HDA_SD_REG_CTRL_RUN);
-  hw_wmb();
+  WriteDataMemoryBarrier();
   zx_nanosleep(zx_deadline_after(IHDA_SD_STOP_HOLD_TIME_NSEC));
 
   // Ack status bits using a byte write to keep QEMU's HDA emulation happy.
@@ -120,7 +120,7 @@ void IntelHDAStream::EnsureStopped(MMIO_PTR hda_stream_desc_regs_t* regs) {
   REG_WR(&regs->ctl_sts.b.sts, ACK);
   constexpr uint32_t CLR = HDA_SD_REG_CTRL_IOCE | HDA_SD_REG_CTRL_FEIE | HDA_SD_REG_CTRL_DEIE;
   REG_CLR_BITS(&regs->ctl_sts.w, CLR);
-  hw_wmb();
+  WriteDataMemoryBarrier();
 }
 
 void IntelHDAStream::Reset(MMIO_PTR hda_stream_desc_regs_t* regs) {
@@ -133,7 +133,7 @@ void IntelHDAStream::Reset(MMIO_PTR hda_stream_desc_regs_t* regs) {
   }
 
   REG_WR(&regs->ctl_sts.w, HDA_SD_REG_CTRL_SRST);  // Set the reset bit.
-  hw_mb();  // Make sure that all writes have gone through before we start to read.
+  DataMemoryBarrier();  // Make sure that all writes have gone through before we start to read.
 
   // Wait until the hardware acks the reset.
   zx_status_t res;
@@ -150,7 +150,7 @@ void IntelHDAStream::Reset(MMIO_PTR hda_stream_desc_regs_t* regs) {
   // 1) Set the SRST bit to 0.
   // 2) Poll until the hardware acks by setting the SRST bit back to 0.
   REG_WR(&regs->ctl_sts.w, 0u);
-  hw_mb();  // Make sure that all writes have gone through before we start to read.
+  DataMemoryBarrier();  // Make sure that all writes have gone through before we start to read.
 
   // Wait until the hardware acks the release from reset.
   res = WaitCondition(IHDA_SD_MAX_RESET_TIME_NSEC, IHDA_SD_RESET_POLL_TIME_NSEC, [&regs]() -> bool {
@@ -200,7 +200,7 @@ zx_status_t IntelHDAStream::SetStreamFormat(async_dispatcher_t* dispatcher, uint
   // based on this format selection.
   encoded_fmt_ = encoded_fmt;
   REG_WR(&regs_->fmt, encoded_fmt_);
-  hw_mb();
+  DataMemoryBarrier();
   driver_transfer_bytes_ = REG_RD(&regs_->fifod);
 
   LOG(DEBUG, "Stream format set 0x%04hx; fifo is %hu bytes deep", encoded_fmt_,
@@ -531,7 +531,7 @@ void IntelHDAStream::Start(StartCompleter::Sync& completer) {
   REG_WR(&regs_->bdpu, static_cast<uint32_t>((bdl_phys >> 32) & 0xFFFFFFFFu));
   REG_WR(&regs_->cbl, cyclic_buffer_length_);
   REG_WR(&regs_->lvi, bdl_last_valid_index_);
-  hw_wmb();
+  WriteDataMemoryBarrier();
 
   int64_t start_time = 0;
   // Make a copy of our reference to our channel which can be used by the IRQ
@@ -567,7 +567,7 @@ void IntelHDAStream::Start(StartCompleter::Sync& completer) {
     constexpr uint32_t SET =
         HDA_SD_REG_CTRL_RUN | HDA_SD_REG_CTRL_IOCE | HDA_SD_REG_CTRL_FEIE | HDA_SD_REG_CTRL_DEIE;
     REG_SET_BITS(&regs_->ctl_sts.w, SET);
-    hw_wmb();
+    WriteDataMemoryBarrier();
     start_time = zx::clock::get_monotonic().get();
   }
 

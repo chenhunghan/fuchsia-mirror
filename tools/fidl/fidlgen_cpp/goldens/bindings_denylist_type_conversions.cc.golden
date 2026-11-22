@@ -100,19 +100,19 @@ namespace internal {
   };
 }
 
-::test_bindingsdenylist::OnlyLlcpp WireNaturalConversionTraits<::test_bindingsdenylist::wire::OnlyLlcpp, ::test_bindingsdenylist::OnlyLlcpp>::ToNatural(::test_bindingsdenylist::wire::OnlyLlcpp src) {
+::test_bindingsdenylist::OnlyCpp WireNaturalConversionTraits<::test_bindingsdenylist::wire::OnlyCpp, ::test_bindingsdenylist::OnlyCpp>::ToNatural(::test_bindingsdenylist::wire::OnlyCpp src) {
   switch (src.Which()) {
-    case ::test_bindingsdenylist::wire::OnlyLlcpp::Tag::kX:
-      return ::test_bindingsdenylist::OnlyLlcpp::WithX(
+    case ::test_bindingsdenylist::wire::OnlyCpp::Tag::kX:
+      return ::test_bindingsdenylist::OnlyCpp::WithX(
           WireNaturalConversionTraits<uint32_t, uint32_t>::ToNatural(std::move(src.x())));
     default:
       ZX_PANIC("unknown union tag in strict union");
   }
 }
-::test_bindingsdenylist::wire::OnlyLlcpp WireNaturalConversionTraits<::test_bindingsdenylist::wire::OnlyLlcpp, ::test_bindingsdenylist::OnlyLlcpp>::ToWire(fidl::AnyArena& arena, ::test_bindingsdenylist::OnlyLlcpp src) {
+::test_bindingsdenylist::wire::OnlyCpp WireNaturalConversionTraits<::test_bindingsdenylist::wire::OnlyCpp, ::test_bindingsdenylist::OnlyCpp>::ToWire(fidl::AnyArena& arena, ::test_bindingsdenylist::OnlyCpp src) {
   switch (src.Which()) {
-    case ::test_bindingsdenylist::OnlyLlcpp::Tag::kX:
-      return ::test_bindingsdenylist::wire::OnlyLlcpp::WithX(
+    case ::test_bindingsdenylist::OnlyCpp::Tag::kX:
+      return ::test_bindingsdenylist::wire::OnlyCpp::WithX(
           WireNaturalConversionTraits<uint32_t, uint32_t>::ToWire(arena, std::move(src.x().value())));
   }
 }

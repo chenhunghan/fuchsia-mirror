@@ -17,33 +17,45 @@ namespace flatland {
 // Mock class of the Flatland Renderer for API testing.
 class MockRenderer : public Renderer {
  public:
+  MOCK_METHOD((fit::result<ImportImageError, std::unique_ptr<GpuCollection>>), CreateGpuCollection,
+              (allocation::GlobalBufferCollectionId,
+               fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>),
+              (override));
+
+  MOCK_METHOD((fit::result<ImportImageError, std::unique_ptr<GpuImage>>), CreateGpuImage,
+              (const allocation::ImageMetadata&, GpuCollection&, uint64_t), (override));
+
   MOCK_METHOD(fpromise::promise<>, ImportBufferCollection,
               (allocation::GlobalBufferCollectionId, fidl::WireClient<fuchsia_sysmem2::Allocator>&,
                fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>,
-               allocation::BufferCollectionUsage, std::optional<fuchsia_math::SizeU> size));
+               allocation::BufferCollectionUsage, std::optional<fuchsia_math::SizeU> size),
+              (override));
 
   MOCK_METHOD(void, ReleaseBufferCollection,
-              (allocation::GlobalBufferCollectionId, allocation::BufferCollectionUsage));
+              (allocation::GlobalBufferCollectionId, allocation::BufferCollectionUsage),
+              (override));
 
   MOCK_METHOD(fpromise::promise<>, ImportBufferImage,
-              (const allocation::ImageMetadata&, allocation::BufferCollectionUsage));
+              (const allocation::ImageMetadata&, allocation::BufferCollectionUsage), (override));
 
-  MOCK_METHOD(void, ReleaseBufferImage, (allocation::GlobalImageId image_id));
+  MOCK_METHOD(void, ReleaseBufferImage, (allocation::GlobalImageId image_id), (override));
 
   MOCK_METHOD(void, Render,
               (const allocation::ImageMetadata&, std::span<const ResolvedLayer>,
-               const RenderArgs& render_args));
+               const RenderArgs& render_args),
+              (override));
 
   MOCK_METHOD(void, SetColorConversionValues,
               ((const fidl::Array<float, 9>&), (const fidl::Array<float, 3>&),
-               (const fidl::Array<float, 3>&)));
+               (const fidl::Array<float, 3>&)),
+              (override));
 
   MOCK_METHOD(fuchsia_images2::PixelFormat, ChoosePreferredRenderTargetFormat,
-              (const std::vector<fuchsia_images2::PixelFormat>&), (const));
+              (const std::vector<fuchsia_images2::PixelFormat>&), (const, override));
 
-  MOCK_METHOD(bool, SupportsRenderInProtected, (), (const));
+  MOCK_METHOD(bool, SupportsRenderInProtected, (), (const, override));
 
-  MOCK_METHOD(bool, RequiresRenderInProtected, (std::span<const ResolvedLayer>), (const));
+  MOCK_METHOD(bool, RequiresRenderInProtected, (std::span<const ResolvedLayer>), (const, override));
 };
 
 }  // namespace flatland

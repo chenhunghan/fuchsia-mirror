@@ -37,12 +37,13 @@ source_set("common") {
     "//sdk/lib/driver/component/cpp",
     "//sdk/lib/driver/logging/cpp",
     "//sdk/lib/driver/mmio/cpp",
+    "//sdk/lib/driver/pci/cpp",
     "//sdk/lib/driver/platform-device/cpp",
     "//sdk/lib/driver/power/cpp",
     "//sdk/lib/fit-promise",
+    "//sdk/lib/memory_barriers",
     "//src/devices/lib/dma-buffer",
     "//src/devices/lib/synchronous-executor",
-    "//src/devices/pci/lib/device-protocol-pci",
     "//src/devices/usb/lib/usb:usb-dfv2-compat-logging",
     "//src/devices/usb/lib/usb-endpoint:usb-endpoint-server-dfv2-compat-logging",
     "//zircon/system/ulib/fbl",
@@ -80,7 +81,6 @@ fuchsia_component_manifest("xhci-manifest") {
 }
 
 fuchsia_driver_component("xhci") {
-  info = "meta/xhci-info.json"
   cm_label = ":xhci-manifest"
   deps = [ ":xhci-driver" ]
 }

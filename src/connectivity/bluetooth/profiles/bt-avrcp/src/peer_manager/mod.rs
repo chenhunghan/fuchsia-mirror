@@ -2,14 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use bt_avctp::{AvcPeer, AvctpPeer};
+use bt_avctp::AvcPeer;
+use fidl_fuchsia_bluetooth_avrcp as fidl_avrcp;
+use fidl_fuchsia_bluetooth_bredr as bredr;
 use fuchsia_bluetooth::types::{Channel, PeerId};
 use fuchsia_inspect_derive::{AttachError, Inspect};
 use fuchsia_sync::RwLock;
 use futures::channel::oneshot;
 use std::collections::HashMap;
 use std::sync::Arc;
-use {fidl_fuchsia_bluetooth_avrcp as fidl_avrcp, fidl_fuchsia_bluetooth_bredr as bredr};
 
 mod inspect;
 mod target_delegate;
@@ -135,8 +136,7 @@ impl PeerManager {
     /// Handle a new incoming browse channel connection by a remote peer.
     pub fn new_browse_connection(&mut self, peer_id: &PeerId, channel: Channel) {
         let peer_handle = self.get_remote_peer(peer_id);
-        let peer = AvctpPeer::new(channel);
-        peer_handle.set_browse_connection(peer);
+        peer_handle.set_browse_connection(channel);
     }
 
     pub fn services_found(&mut self, peer_id: &PeerId, services: Vec<AvrcpService>) {

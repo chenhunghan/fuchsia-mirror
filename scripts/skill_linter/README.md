@@ -36,6 +36,24 @@ PYTHONPATH=third_party/pyyaml/src/lib python3 \
     scripts/skill_linter/skill_linter.py --suggest-fix-in-json /path/to/skill/dir
 ```
 
+To run semantic skill, dynamic workflow (`workflow.json` / `workflow.py`), and
+`.agents/*.json` discovery config checks and output line-anchored JSON findings:
+
+```bash
+PYTHONPATH=third_party/pyyaml/src/lib python3 \
+    scripts/skill_linter/skill_linter.py --lint-json \
+    --repo-root . --fuchsia-root . \
+    /path/to/SKILL.md .agents/workflows/my-workflow .agents/skills.json
+```
+
+To run both formatting and semantic lint checks in human-readable CLI mode, pass
+`--strict`:
+
+```bash
+PYTHONPATH=third_party/pyyaml/src/lib python3 \
+    scripts/skill_linter/skill_linter.py --strict --repo-root . /path/to/skill/dir
+```
+
 ### Running Unit Tests
 
 Unit tests for the linter are written using the standard Python `unittest`
@@ -140,6 +158,41 @@ ensure consistency across all skills:
 - **Code Block Spacing**: Fenced code blocks must be preceded and followed by an
   empty line. Missing empty lines around code blocks are automatically detected
   and fixed.
+
+### Semantic Skill, Dynamic Workflow, and Discovery Config Checks (`--lint-json` / `--strict`)
+
+In addition to formatting `SKILL.md` files, SHAC runs `_agent_customizations_lint`
+(`--lint-json`) across skills, saved dynamic workflows, and `.agents/*.json`
+discovery configs:
+
+- **`SKILL.md` Frontmatter, Naming, Links, and Size**:
+  - Rejects duplicate YAML mapping keys (which fail Jetski's Go `yaml.v3`
+    loader) and unexpected frontmatter keys.
+  - Flags executable binary or build paths in `description` (Progressive
+    Disclosure violation) and warns when `description` omits positive
+    (`Use when...`) or negative (`Don't use for...`) trigger phrases.
+  - Rejects singular `.agent/` directory typos, warns on folder/name mismatches,
+    filler words (`skill`, `guide`, `playbook`, `how-to`, `checklist`,
+    `helper`, `utils`), and `README.md` / `CHANGELOG.md` inside skill folders.
+  - Enforces the `view_file` ceiling (`800` lines / `46,080` bytes error; `500`
+    lines / `35,000` bytes warning).
+  - Rejects `file://` URI links, machine-local paths, broken local Markdown
+    links, invalid `call_tool()` tool names, and non-existent `fx workflow` CLI
+    invocations.
+- **Saved Dynamic Workflows (`**/.agents/workflows/<name>/`)**:
+  - Validates `workflow.json` JSON syntax, allowed keys (`name`, `description`,
+    `entry`, `args`, `library`), `kebab-case` name matching the folder, entry
+    script containment and existence, and `args` JSON Schema structure.
+  - Parses `workflow.py` with Python `ast` to catch syntax errors, disallowed
+    `call_tool()` tools, invalid `agent(workspace=..., model=...)` literals,
+    undeclared `args.get("...")` / `args["..."]` keys, and unguarded external
+    mutation commands missing `dry_run: true` in `workflow.json`.
+  - Warns when workflow `README.md` files duplicate the `args` schema table or
+    recommend `/run-workflow <name>` instead of `/<name>`.
+- **Discovery Configs (`.agents/{skills,workflows,plugins,agents,rules}.json`)**:
+  - Verifies JSON syntax, allowed top-level keys, local `entries`/`inherits`
+    path existence, and paired `vendor/google/<path>` entries in
+    `vendor/google/.agents/{skills,workflows}.json`.
 
 ## Execution Modes
 

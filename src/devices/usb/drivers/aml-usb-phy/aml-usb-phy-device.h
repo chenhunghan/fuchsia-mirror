@@ -13,6 +13,7 @@
 #include <lib/driver/platform-device/cpp/pdev.h>
 
 #include <mutex>
+#include <optional>
 
 #include "src/devices/usb/drivers/aml-usb-phy/aml-usb-phy.h"
 
@@ -30,6 +31,13 @@ class AmlUsbPhyDevice : public fdf::DriverBase2 {
     void UnPublish(UnPublishCompleter completer);
     std::string_view name() const { return name_; }
 
+    // Sets the DML global ID to publish as the child's `fuchsia.ID`. Must be called before the
+    // child is first published.
+    void set_global_id(uint32_t global_id) {
+      std::lock_guard<std::mutex> _(lock_);
+      global_id_ = global_id;
+    }
+
     // fidl::WireAsyncEventHandler<fuchsia_driver_framework::NodeController>
     void on_fidl_error(fidl::UnbindInfo info) override;
     void handle_unknown_event(
@@ -46,6 +54,7 @@ class AmlUsbPhyDevice : public fdf::DriverBase2 {
     fidl::WireClient<fuchsia_driver_framework::NodeController> child_controller_
         __TA_GUARDED(lock_);
     std::atomic_uint32_t count_ __TA_GUARDED(lock_) = 0;
+    std::optional<uint32_t> global_id_ __TA_GUARDED(lock_);
   };
 
   static constexpr std::string_view kDeviceName = "aml_usb_phy";

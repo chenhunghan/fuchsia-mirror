@@ -18,7 +18,6 @@ async fn component_manager_namespace() {
         "/svc/fuchsia.sys2.LifecycleController",
         "/svc/fuchsia.sys2.RouteValidator",
         "/svc/fuchsia.sys2.RealmQuery",
-        "/svc/fuchsia.boot.Arguments",
         "/svc/fuchsia.boot.FactoryItems",
         "/svc/fuchsia.boot.Items",
         "/svc/fuchsia.boot.ReadOnlyLog",

@@ -412,6 +412,15 @@ impl Capabilities {
                 })();
                 let _ = responder.send(res);
             }
+            fruntime::CapabilitiesRequest::DictionaryCopy {
+                dictionary, copy, responder, ..
+            } => {
+                let res = (|| {
+                    let dictionary = self.remote_capabilities.get::<Dictionary>(dictionary)?;
+                    self.remote_capabilities.store(copy, dictionary.shallow_copy())
+                })();
+                let _ = responder.send(res);
+            }
             fruntime::CapabilitiesRequest::DictionaryLegacyExport {
                 dictionary_handle,
                 server_end,
@@ -1203,6 +1212,159 @@ mod tests {
         expected_dictionary_contents.sort_unstable();
         actual_dictionary_contents.sort_unstable();
         assert_eq!(expected_dictionary_contents, actual_dictionary_contents);
+    }
+
+    #[fuchsia::test]
+    async fn copy_dictionary_test() {
+        let (proxy, remote_capabilities, _scope) = new_connection();
+        let (dictionary, dictionary_other_end) = zx::EventPair::create();
+        proxy.dictionary_create(dictionary_other_end).await.unwrap().unwrap();
+
+        let (data, data_other_end) = zx::EventPair::create();
+        proxy.data_create(data_other_end, &fruntime::Data::Int64(1)).await.unwrap().unwrap();
+        proxy
+            .dictionary_insert(
+                dictionary.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                "a",
+                data,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (copy, copy_other_end) = zx::EventPair::create();
+        proxy
+            .dictionary_copy(
+                dictionary.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                copy_other_end,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The copy starts out with the entries of the original.
+        let (data_2, data_2_other_end) = zx::EventPair::create();
+        let capability_type = proxy
+            .dictionary_get(
+                copy.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                "a",
+                data_2_other_end,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capability_type, fruntime::CapabilityType::Data);
+        assert_eq!(proxy.data_get(data_2).await.unwrap(), Ok(fruntime::Data::Int64(1)));
+
+        // Removing an entry from the copy leaves the original untouched.
+        proxy
+            .dictionary_remove(fruntime::CapabilitiesDictionaryRemoveRequest {
+                dictionary: Some(copy.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap()),
+                key: Some("a".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        let (data_3, data_3_other_end) = zx::EventPair::create();
+        let capability_type = proxy
+            .dictionary_get(
+                dictionary.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                "a",
+                data_3_other_end,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capability_type, fruntime::CapabilityType::Data);
+        assert_eq!(proxy.data_get(data_3).await.unwrap(), Ok(fruntime::Data::Int64(1)));
+
+        drop(dictionary);
+        drop(copy);
+        assert_no_remote_capabilities(&remote_capabilities).await;
+    }
+
+    #[fuchsia::test]
+    async fn copy_dictionary_is_shallow_test() {
+        let (proxy, remote_capabilities, _scope) = new_connection();
+        let (dictionary, dictionary_other_end) = zx::EventPair::create();
+        proxy.dictionary_create(dictionary_other_end).await.unwrap().unwrap();
+
+        let (nested, nested_other_end) = zx::EventPair::create();
+        proxy.dictionary_create(nested_other_end).await.unwrap().unwrap();
+        proxy
+            .dictionary_insert(
+                dictionary.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                "nested",
+                nested.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let (copy, copy_other_end) = zx::EventPair::create();
+        proxy
+            .dictionary_copy(
+                dictionary.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                copy_other_end,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        // Change the nested dictionary after the copy has been made.
+        let (data, data_other_end) = zx::EventPair::create();
+        proxy.data_create(data_other_end, &fruntime::Data::Int64(1)).await.unwrap().unwrap();
+        proxy
+            .dictionary_insert(nested.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(), "a", data)
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The copy shares the nested dictionary with the original instead of holding a deep copy
+        // of it, so the change is visible through the copy.
+        let (nested_from_copy, nested_from_copy_other_end) = zx::EventPair::create();
+        let capability_type = proxy
+            .dictionary_get(
+                copy.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                "nested",
+                nested_from_copy_other_end,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capability_type, fruntime::CapabilityType::Dictionary);
+        let (data_2, data_2_other_end) = zx::EventPair::create();
+        let capability_type = proxy
+            .dictionary_get(
+                nested_from_copy.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+                "a",
+                data_2_other_end,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(capability_type, fruntime::CapabilityType::Data);
+        assert_eq!(proxy.data_get(data_2).await.unwrap(), Ok(fruntime::Data::Int64(1)));
+
+        drop(dictionary);
+        drop(nested);
+        drop(copy);
+        drop(nested_from_copy);
+        assert_no_remote_capabilities(&remote_capabilities).await;
+    }
+
+    #[fuchsia::test]
+    async fn copy_non_dictionary_test() {
+        let (proxy, _remote_capabilities, _scope) = new_connection();
+        let (data, data_other_end) = zx::EventPair::create();
+        proxy.data_create(data_other_end, &fruntime::Data::Int64(1)).await.unwrap().unwrap();
+
+        let (_copy, copy_other_end) = zx::EventPair::create();
+        assert_eq!(
+            proxy.dictionary_copy(data, copy_other_end).await.unwrap(),
+            Err(fruntime::CapabilitiesError::InvalidCapabilityType),
+        );
     }
 
     #[fuchsia::test]

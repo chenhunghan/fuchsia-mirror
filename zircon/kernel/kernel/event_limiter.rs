@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Thread-safe rate limiter for periodic actions, mirroring `<kernel/event_limiter.h>`.
+//! Thread-safe rate limiter for periodic actions.
 
 use crate::platform_rs::timer::current_mono_time;
 use core::sync::atomic::{AtomicI64, Ordering};

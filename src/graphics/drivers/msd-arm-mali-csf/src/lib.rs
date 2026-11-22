@@ -87,12 +87,12 @@ impl Driver for MsdArmMaliCsf {
         Ok(Self { device_client, _node: node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         log::info!("Stopping driver");
         self.device_client.device_task_sender.send(Box::new(move |state| {
             state.borrow_mut().should_shutdown = true;
         }));
-        let Some(handle) = self.device_client.device_thread.lock().unwrap().take() else {
+        let Some(handle) = self.device_client.device_thread.take() else {
             return;
         };
         let _ = handle.join();

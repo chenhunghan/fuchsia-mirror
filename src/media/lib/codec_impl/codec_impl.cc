@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fidl/fuchsia.images2/cpp/hlcpp_conversion.h>
-#include <fidl/fuchsia.sysmem/cpp/hlcpp_conversion.h>
-#include <fuchsia/media/cpp/fidl.h>
-#include <fuchsia/mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.media.drm/cpp/fidl.h>
+#include <fidl/fuchsia.media.drm/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/hlcpp_conversion.h>
 #include <inttypes.h>
 #include <lib/async/cpp/task.h>
 #include <lib/closure-queue/closure_queue.h>
-#include <lib/fidl/cpp/clone.h>
-#include <lib/fidl/cpp/comparison.h>
 #include <lib/fit/defer.h>
 #include <lib/media/codec_impl/codec_impl.h>
 #include <lib/media/codec_impl/codec_vmo_range.h>
@@ -39,13 +39,12 @@
 #include "src/media/lib/codec_impl/utils.h"
 #include "src/media/lib/metrics/metrics.cb.h"
 
-// "is_bound_checks" - In several places that send a message, we check is_bound() first, only
-// because of ZX_POL_BAD_HANDLE ZX_POL_ACTION_EXCEPTION which typically only applies in a driver
-// context. If it weren't for that, we wouldn't care about passing ZX_HANDLE_INVALID to
-// zx_channel_write(), since the channel error handling is async (we Unbind(), sweep the in-proc
-// send queue, and only then delete the Binding). This is only about ZX_HANDLE_INVALID specifically,
-// not arbitrary incorrect zx_handle_t values (for those, ZX_POL_BAD_HANDLE ZX_POL_ACTION_EXCEPTION
-// is great).
+// "is_bound_checks" - In several places that send a message, we check binding_ref_.has_value()
+// first. binding_ref_ is a std::optional<fidl::ServerBindingRef<>> that UnbindServerBinding()
+// resets, so the check is what prevents dereferencing an empty optional after unbind has started.
+// Once the check passes, sending an event via fidl::SendEvent() on a binding that's concurrently
+// being torn down just returns an error (which these sites intentionally ignore, since channel
+// error handling is async).
 
 namespace {
 
@@ -84,73 +83,88 @@ constexpr uint64_t kInputBufferConstraintsVersionOrdinal = 1;
 
 constexpr CodecPort kPorts[] = {kInputPort, kOutputPort};
 
-bool IsStreamErrorRecoverable(fuchsia::media::StreamError e) {
-  using StreamError = fuchsia::media::StreamError;
+bool IsStreamErrorRecoverable(fuchsia_media::StreamError e) {
+  using StreamError = fuchsia_media::StreamError;
   switch (e) {
-    case StreamError::DECRYPTOR_NO_KEY:
+    case StreamError::kDecryptorNoKey:
       return true;
     default:
       return false;
   }
 }
 
-const char* ToString(fuchsia::media::StreamError e) {
-  using StreamError = fuchsia::media::StreamError;
+const char* ToString(fuchsia_media::StreamError e) {
+  using StreamError = fuchsia_media::StreamError;
   switch (e) {
-    case StreamError::UNKNOWN:
+    case StreamError::kUnknown:
       return "UNKNOWN";
-    case StreamError::INVALID_INPUT_FORMAT_DETAILS:
+    case StreamError::kInvalidInputFormatDetails:
       return "INVALID_INPUT_FORMAT_DETAILS";
-    case StreamError::INCOMPATIBLE_BUFFERS_PROVIDED:
+    case StreamError::kIncompatibleBuffersProvided:
       return "INCOMPATIBLE_BUFFERS_PROVIDED";
-    case StreamError::EOS_PROCESSING:
+    case StreamError::kEosProcessing:
       return "EOS_PROCESSING";
-    case StreamError::DECODER_UNKNOWN:
+    case StreamError::kDecoderUnknown:
       return "DECODER_UNKNOWN";
-    case StreamError::DECODER_DATA_PARSING:
+    case StreamError::kDecoderDataParsing:
       return "DECODER_DATA_PARSING";
-    case StreamError::ENCODER_UNKNOWN:
+    case StreamError::kEncoderUnknown:
       return "ENCODER_UNKNOWN";
-    case StreamError::DECRYPTOR_UNKNOWN:
+    case StreamError::kDecryptorUnknown:
       return "DECRYPTOR_UNKNOWN";
-    case StreamError::DECRYPTOR_NO_KEY:
+    case StreamError::kDecryptorNoKey:
       return "DECRYPTOR_NO_KEY";
   }
 }
 
-const char* GetStreamErrorAdditionalHelpText(fuchsia::media::StreamError e) {
-  using StreamError = fuchsia::media::StreamError;
+const char* GetStreamErrorAdditionalHelpText(fuchsia_media::StreamError e) {
+  using StreamError = fuchsia_media::StreamError;
   switch (e) {
-    case StreamError::DECRYPTOR_NO_KEY:
+    case StreamError::kDecryptorNoKey:
       return "Retry after keys arrive.";
     default:
       return "";
   }
 }
 
-std::optional<CodecPort> CodecPortFromFidlPort(fuchsia::media::Port port) {
+std::optional<CodecPort> CodecPortFromFidlPort(fuchsia_media::Port port) {
   switch (port) {
-    case fuchsia::media::Port::INPUT:
+    case fuchsia_media::Port::kInput:
       return CodecPort::kInputPort;
-    case fuchsia::media::Port::OUTPUT:
+    case fuchsia_media::Port::kOutput:
       return CodecPort::kOutputPort;
     default:
       return std::nullopt;
   }
 }
 
-void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, bool is_decryptor);
+void NormalizeInputFormatDetails(fuchsia_media::FormatDetails* format_details, bool is_decryptor);
 
-CodecImpl::StreamProcessorParams EnsureInitialInputFormatDetailsVersionOrdinal(
-    CodecImpl::StreamProcessorParams params) {
-  fuchsia::media::FormatDetails* input_details =
-      std::visit([](auto& p) { return p.mutable_input_details(); }, params);
-  if (!input_details->has_format_details_version_ordinal()) {
-    input_details->set_format_details_version_ordinal(0);
+CodecImpl::NaturalStreamProcessorParams EnsureInitialInputFormatDetailsVersionOrdinal(
+    CodecImpl::NaturalStreamProcessorParams params) {
+  fuchsia_media::FormatDetails* input_details = std::visit(
+      [](auto& p) {
+        if (!p.input_details().has_value()) {
+          p.input_details().emplace();
+        }
+        return &p.input_details().value();
+      },
+      params);
+  if (!input_details->format_details_version_ordinal().has_value()) {
+    input_details->format_details_version_ordinal() = 0;
   }
-  const bool is_decryptor = std::holds_alternative<fuchsia::media::drm::DecryptorParams>(params);
+  const bool is_decryptor = std::holds_alternative<fuchsia_media_drm::DecryptorParams>(params);
   NormalizeInputFormatDetails(input_details, is_decryptor);
   return params;
+}
+
+CodecImpl::NaturalStreamProcessorParams ToNaturalStreamProcessorParams(
+    CodecImpl::StreamProcessorParams params) {
+  return std::visit(
+      [](auto&& p) -> CodecImpl::NaturalStreamProcessorParams {
+        return fidl::HLCPPToNatural(std::move(p));
+      },
+      std::move(params));
 }
 
 constexpr uint32_t kIntelYTiledHeightAlignment = 32u;
@@ -158,43 +172,43 @@ constexpr uint32_t kIntelYTiledHeightAlignment = 32u;
 // unused `MAX_PCM_CHANNEL_COUNT = 8` constant).
 constexpr size_t kMaxLegacyPcmChannelCount = 16;
 
-std::optional<fuchsia::media::AudioPcmMode2> ToAudioPcmMode2(fuchsia::media::AudioPcmMode v1) {
+std::optional<fuchsia_media::AudioPcmMode2> ToAudioPcmMode2(fuchsia_media::AudioPcmMode v1) {
   switch (v1) {
-    case fuchsia::media::AudioPcmMode::LINEAR:
-      return fuchsia::media::AudioPcmMode2::LINEAR;
-    case fuchsia::media::AudioPcmMode::ALAW:
-      return fuchsia::media::AudioPcmMode2::ALAW;
-    case fuchsia::media::AudioPcmMode::MULAW:
-      return fuchsia::media::AudioPcmMode2::MULAW;
+    case fuchsia_media::AudioPcmMode::kLinear:
+      return fuchsia_media::AudioPcmMode2::kLinear;
+    case fuchsia_media::AudioPcmMode::kAlaw:
+      return fuchsia_media::AudioPcmMode2::kAlaw;
+    case fuchsia_media::AudioPcmMode::kMulaw:
+      return fuchsia_media::AudioPcmMode2::kMulaw;
     default:
       return std::nullopt;
   }
 }
 
-std::optional<fuchsia::media::AudioPcmMode> ToAudioPcmModeV1(fuchsia::media::AudioPcmMode2 v2) {
+std::optional<fuchsia_media::AudioPcmMode> ToAudioPcmModeV1(fuchsia_media::AudioPcmMode2 v2) {
   switch (v2) {
-    case fuchsia::media::AudioPcmMode2::LINEAR:
-      return fuchsia::media::AudioPcmMode::LINEAR;
-    case fuchsia::media::AudioPcmMode2::ALAW:
-      return fuchsia::media::AudioPcmMode::ALAW;
-    case fuchsia::media::AudioPcmMode2::MULAW:
-      return fuchsia::media::AudioPcmMode::MULAW;
+    case fuchsia_media::AudioPcmMode2::kLinear:
+      return fuchsia_media::AudioPcmMode::kLinear;
+    case fuchsia_media::AudioPcmMode2::kAlaw:
+      return fuchsia_media::AudioPcmMode::kAlaw;
+    case fuchsia_media::AudioPcmMode2::kMulaw:
+      return fuchsia_media::AudioPcmMode::kMulaw;
     default:
       return std::nullopt;
   }
 }
 
 #define AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST(V) \
-  V(SKIP, SKIP)                                \
-  V(LF, FL)                                    \
-  V(RF, FR)                                    \
-  V(CF, FC)                                    \
-  V(LS, SL)                                    \
-  V(RS, SR)                                    \
-  V(LFE, LFE)                                  \
-  V(CS, BC)                                    \
-  V(LR, BL)                                    \
-  V(RR, BR)
+  V(kSkip, kSkip)                              \
+  V(kLf, kFl)                                  \
+  V(kRf, kFr)                                  \
+  V(kCf, kFc)                                  \
+  V(kLs, kSl)                                  \
+  V(kRs, kSr)                                  \
+  V(kLfe, kLfe)                                \
+  V(kCs, kBc)                                  \
+  V(kLr, kBl)                                  \
+  V(kRr, kBr)
 
 // Legacy `AudioChannelId` originally predated `strict` vs. `flexible` FIDL enums and was later
 // migrated from unqualified `enum` to `strict enum`, so its intended
@@ -203,12 +217,11 @@ std::optional<fuchsia::media::AudioPcmMode> ToAudioPcmModeV1(fuchsia::media::Aud
 // and `MAX` as range-bound markers rather than speaker roles. Treat
 // `[MIN_EXTENDED_AUDIO_CHANNEL_ID2, MAX_AUDIO_CHANNEL_ID2]` as V2-only (callers needing
 // extended channel IDs must use `pcm_format`).
-std::optional<fuchsia::media::AudioChannelId2> ToAudioChannelId2(
-    fuchsia::media::AudioChannelId v1) {
+std::optional<fuchsia_media::AudioChannelId2> ToAudioChannelId2(fuchsia_media::AudioChannelId v1) {
   switch (v1) {
-#define CASE_V1_TO_V2(v1_name, v2_name)         \
-  case fuchsia::media::AudioChannelId::v1_name: \
-    return fuchsia::media::AudioChannelId2::v2_name;
+#define CASE_V1_TO_V2(v1_name, v2_name)        \
+  case fuchsia_media::AudioChannelId::v1_name: \
+    return fuchsia_media::AudioChannelId2::v2_name;
     AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST(CASE_V1_TO_V2)
 #undef CASE_V1_TO_V2
     default:
@@ -216,12 +229,11 @@ std::optional<fuchsia::media::AudioChannelId2> ToAudioChannelId2(
   }
 }
 
-std::optional<fuchsia::media::AudioChannelId> ToAudioChannelIdV1(
-    fuchsia::media::AudioChannelId2 v2) {
+std::optional<fuchsia_media::AudioChannelId> ToAudioChannelIdV1(fuchsia_media::AudioChannelId2 v2) {
   switch (v2) {
-#define CASE_V2_TO_V1(v1_name, v2_name)          \
-  case fuchsia::media::AudioChannelId2::v2_name: \
-    return fuchsia::media::AudioChannelId::v1_name;
+#define CASE_V2_TO_V1(v1_name, v2_name)         \
+  case fuchsia_media::AudioChannelId2::v2_name: \
+    return fuchsia_media::AudioChannelId::v1_name;
     AUDIO_CHANNEL_ID_V1_V2_MAPPING_LIST(CASE_V2_TO_V1)
 #undef CASE_V2_TO_V1
     default:
@@ -308,16 +320,15 @@ std::optional<uint32_t> LinearStrideBytesPerWidthPixelInV1(fuchsia_images2::Pixe
 }
 
 std::optional<fuchsia_images2::ImageFormat> VideoFormatV1ToV2Natural(
-    const fuchsia::media::VideoUncompressedFormat& uncompressed) {
-  fuchsia_sysmem::ImageFormat2 v1_natural =
-      fidl::HLCPPToNatural(fidl::Clone(uncompressed.image_format));
+    const fuchsia_media::VideoUncompressedFormat& uncompressed) {
+  fuchsia_sysmem::ImageFormat2 v1_natural = uncompressed.image_format();
   if (v1_natural.coded_width() == 0 && v1_natural.coded_height() == 0 &&
-      (uncompressed.primary_width_pixels != 0 || uncompressed.primary_height_pixels != 0)) {
-    v1_natural.coded_width() = uncompressed.primary_width_pixels;
-    v1_natural.coded_height() = uncompressed.primary_height_pixels;
+      (uncompressed.primary_width_pixels() != 0 || uncompressed.primary_height_pixels() != 0)) {
+    v1_natural.coded_width() = uncompressed.primary_width_pixels();
+    v1_natural.coded_height() = uncompressed.primary_height_pixels();
   }
-  if (v1_natural.bytes_per_row() == 0 && uncompressed.primary_line_stride_bytes != 0) {
-    v1_natural.bytes_per_row() = uncompressed.primary_line_stride_bytes;
+  if (v1_natural.bytes_per_row() == 0 && uncompressed.primary_line_stride_bytes() != 0) {
+    v1_natural.bytes_per_row() = uncompressed.primary_line_stride_bytes();
   }
 
   bool had_pixel_format =
@@ -325,8 +336,8 @@ std::optional<fuchsia_images2::ImageFormat> VideoFormatV1ToV2Natural(
   if (!had_pixel_format) {
     if (v1_natural.coded_width() == 0 && v1_natural.coded_height() == 0 &&
         v1_natural.display_width() == 0 && v1_natural.display_height() == 0 &&
-        uncompressed.primary_display_width_pixels == 0 &&
-        uncompressed.primary_display_height_pixels == 0) {
+        uncompressed.primary_display_width_pixels() == 0 &&
+        uncompressed.primary_display_height_pixels() == 0) {
       return std::nullopt;
     }
     // `sysmem::V2CopyFromV1ImageFormat` requires `pixel_format.type` to be non-INVALID, whereas
@@ -356,12 +367,13 @@ std::optional<fuchsia_images2::ImageFormat> VideoFormatV1ToV2Natural(
     v2_natural.size().reset();
     v2_natural.valid_size().reset();
   }
-  if (uncompressed.image_format.display_width == 0 &&
-      uncompressed.image_format.display_height == 0) {
-    if (uncompressed.primary_display_width_pixels != 0 ||
-        uncompressed.primary_display_height_pixels != 0) {
-      v2_natural.display_rect() = {0, 0, uncompressed.primary_display_width_pixels,
-                                   uncompressed.primary_display_height_pixels};
+  if (uncompressed.image_format().display_width() == 0 &&
+      uncompressed.image_format().display_height() == 0) {
+    if (uncompressed.primary_display_width_pixels() != 0 ||
+        uncompressed.primary_display_height_pixels() != 0) {
+      v2_natural.display_rect() =
+          fuchsia_math::RectU{0, 0, uncompressed.primary_display_width_pixels(),
+                              uncompressed.primary_display_height_pixels()};
     } else {
       // `sysmem::V2CopyFromV1ImageFormat` unconditionally populates `display_rect` from
       // `v1.display_width()` / `v1.display_height()`. Reset `display_rect` when both V1 display
@@ -370,29 +382,30 @@ std::optional<fuchsia_images2::ImageFormat> VideoFormatV1ToV2Natural(
       v2_natural.display_rect().reset();
     }
   }
-  if (!uncompressed.image_format.has_pixel_aspect_ratio && uncompressed.has_pixel_aspect_ratio) {
-    v2_natural.pixel_aspect_ratio() = {uncompressed.pixel_aspect_ratio_width,
-                                       uncompressed.pixel_aspect_ratio_height};
+  if (!uncompressed.image_format().has_pixel_aspect_ratio() &&
+      uncompressed.has_pixel_aspect_ratio()) {
+    v2_natural.pixel_aspect_ratio() = fuchsia_math::SizeU{uncompressed.pixel_aspect_ratio_width(),
+                                                          uncompressed.pixel_aspect_ratio_height()};
   }
   return v2_natural;
 }
 
 void PopulateVideoDomainV1FromV2Natural(fuchsia_images2::ImageFormat* v2_natural,
-                                        fuchsia::media::FormatDetails* format_details) {
+                                        fuchsia_media::FormatDetails* format_details) {
   ZX_DEBUG_ASSERT(v2_natural);
   if (v2_natural->display_rect().has_value() &&
       (v2_natural->display_rect()->x() != 0 || v2_natural->display_rect()->y() != 0)) {
-    format_details->clear_domain();
+    format_details->domain().reset();
     return;
   }
   if (v2_natural->pixel_format().has_value() &&
       !IsPixelFormatRepresentableInV1(v2_natural->pixel_format().value())) {
-    format_details->clear_domain();
+    format_details->domain().reset();
     return;
   }
   if (v2_natural->color_space().has_value() &&
       !IsColorSpaceRepresentableInV1(v2_natural->color_space().value())) {
-    format_details->clear_domain();
+    format_details->domain().reset();
     return;
   }
 
@@ -410,16 +423,16 @@ void PopulateVideoDomainV1FromV2Natural(fuchsia_images2::ImageFormat* v2_natural
     v2_natural->pixel_format().reset();
   }
   if (!v1_result.is_ok()) {
-    format_details->clear_domain();
+    format_details->domain().reset();
     return;
   }
 
-  fuchsia::media::VideoUncompressedFormat video_uncompressed;
-  video_uncompressed.image_format = fidl::NaturalToHLCPP(v1_result.take_value());
-  auto& v1_img = video_uncompressed.image_format;
+  fuchsia_media::VideoUncompressedFormat video_uncompressed;
+  video_uncompressed.image_format() = v1_result.take_value();
+  auto& v1_img = video_uncompressed.image_format();
   if (!had_pixel_format) {
-    v1_img.pixel_format.type = fuchsia::sysmem::PixelFormatType::INVALID;
-    v1_img.pixel_format.has_format_modifier = false;
+    v1_img.pixel_format().type() = fuchsia_sysmem::PixelFormatType::kInvalid;
+    v1_img.pixel_format().has_format_modifier() = false;
   } else if (!v2_natural->bytes_per_row().has_value() && v2_natural->size().has_value() &&
              (!v2_natural->pixel_format_modifier().has_value() ||
               v2_natural->pixel_format_modifier().value() ==
@@ -430,115 +443,116 @@ void PopulateVideoDomainV1FromV2Natural(fuchsia_images2::ImageFormat* v2_natural
     if (auto stride_bytes_per_pixel =
             LinearStrideBytesPerWidthPixelInV1(v2_natural->pixel_format().value());
         stride_bytes_per_pixel.has_value()) {
-      auto unpadded_row_bytes = safemath::CheckMul(v1_img.coded_width, *stride_bytes_per_pixel);
+      auto unpadded_row_bytes = safemath::CheckMul(v1_img.coded_width(), *stride_bytes_per_pixel);
       if (!unpadded_row_bytes.IsValid()) {
-        format_details->clear_domain();
+        format_details->domain().reset();
         return;
       }
-      v1_img.bytes_per_row = unpadded_row_bytes.ValueOrDie();
+      v1_img.bytes_per_row() = unpadded_row_bytes.ValueOrDie();
     }
   }
 
-  uint32_t display_width = v1_img.display_width != 0 ? v1_img.display_width
-                                                     : (v2_natural->valid_size().has_value()
-                                                            ? v2_natural->valid_size()->width()
-                                                            : v1_img.coded_width);
-  uint32_t display_height = v1_img.display_height != 0 ? v1_img.display_height
+  uint32_t display_width = v1_img.display_width() != 0 ? v1_img.display_width()
                                                        : (v2_natural->valid_size().has_value()
-                                                              ? v2_natural->valid_size()->height()
-                                                              : v1_img.coded_height);
-  if (!had_pixel_format && v1_img.coded_width == 0 && v1_img.coded_height == 0 &&
+                                                              ? v2_natural->valid_size()->width()
+                                                              : v1_img.coded_width());
+  uint32_t display_height = v1_img.display_height() != 0 ? v1_img.display_height()
+                                                         : (v2_natural->valid_size().has_value()
+                                                                ? v2_natural->valid_size()->height()
+                                                                : v1_img.coded_height());
+  if (!had_pixel_format && v1_img.coded_width() == 0 && v1_img.coded_height() == 0 &&
       display_width == 0 && display_height == 0) {
-    format_details->clear_domain();
+    format_details->domain().reset();
     return;
   }
-  if (v1_img.display_width == 0 && v1_img.display_height == 0) {
-    v1_img.display_width = display_width;
-    v1_img.display_height = display_height;
+  if (v1_img.display_width() == 0 && v1_img.display_height() == 0) {
+    v1_img.display_width() = display_width;
+    v1_img.display_height() = display_height;
   }
 
-  video_uncompressed.primary_width_pixels = v1_img.coded_width;
-  video_uncompressed.primary_height_pixels = v1_img.coded_height;
-  video_uncompressed.primary_display_width_pixels = display_width;
-  video_uncompressed.primary_display_height_pixels = display_height;
-  video_uncompressed.has_pixel_aspect_ratio = v1_img.has_pixel_aspect_ratio;
-  video_uncompressed.pixel_aspect_ratio_width =
-      v1_img.has_pixel_aspect_ratio ? v1_img.pixel_aspect_ratio_width : 1;
-  video_uncompressed.pixel_aspect_ratio_height =
-      v1_img.has_pixel_aspect_ratio ? v1_img.pixel_aspect_ratio_height : 1;
-  video_uncompressed.primary_line_stride_bytes = v1_img.bytes_per_row;
-  video_uncompressed.primary_start_offset = 0;
+  video_uncompressed.primary_width_pixels() = v1_img.coded_width();
+  video_uncompressed.primary_height_pixels() = v1_img.coded_height();
+  video_uncompressed.primary_display_width_pixels() = display_width;
+  video_uncompressed.primary_display_height_pixels() = display_height;
+  video_uncompressed.has_pixel_aspect_ratio() = v1_img.has_pixel_aspect_ratio();
+  video_uncompressed.pixel_aspect_ratio_width() =
+      v1_img.has_pixel_aspect_ratio() ? v1_img.pixel_aspect_ratio_width() : 1;
+  video_uncompressed.pixel_aspect_ratio_height() =
+      v1_img.has_pixel_aspect_ratio() ? v1_img.pixel_aspect_ratio_height() : 1;
+  video_uncompressed.primary_line_stride_bytes() = v1_img.bytes_per_row();
+  video_uncompressed.primary_start_offset() = 0;
 
   if (v2_natural->pixel_format().has_value()) {
     switch (v2_natural->pixel_format().value()) {
       case fuchsia_images2::PixelFormat::kNv12: {
-        video_uncompressed.fourcc = make_fourcc('N', 'V', '1', '2');
-        video_uncompressed.planar = true;
+        video_uncompressed.fourcc() = make_fourcc('N', 'V', '1', '2');
+        video_uncompressed.planar() = true;
         bool is_y_tiled = v2_natural->pixel_format_modifier().has_value() &&
                           v2_natural->pixel_format_modifier().value() ==
                               fuchsia_images2::PixelFormatModifier::kIntelI915YTiled;
-        video_uncompressed.swizzled = is_y_tiled;
-        video_uncompressed.secondary_width_pixels = v1_img.coded_width / 2;
-        video_uncompressed.secondary_height_pixels = v1_img.coded_height / 2;
-        video_uncompressed.secondary_line_stride_bytes = v1_img.bytes_per_row;
-        uint32_t primary_height_for_offset = v1_img.coded_height;
+        video_uncompressed.swizzled() = is_y_tiled;
+        video_uncompressed.secondary_width_pixels() = v1_img.coded_width() / 2;
+        video_uncompressed.secondary_height_pixels() = v1_img.coded_height() / 2;
+        video_uncompressed.secondary_line_stride_bytes() = v1_img.bytes_per_row();
+        uint32_t primary_height_for_offset = v1_img.coded_height();
         if (is_y_tiled) {
-          uint32_t rem = v1_img.coded_height % kIntelYTiledHeightAlignment;
+          uint32_t rem = v1_img.coded_height() % kIntelYTiledHeightAlignment;
           if (rem != 0) {
             auto aligned =
-                safemath::CheckAdd(v1_img.coded_height, kIntelYTiledHeightAlignment - rem);
+                safemath::CheckAdd(v1_img.coded_height(), kIntelYTiledHeightAlignment - rem);
             if (!aligned.IsValid()) {
-              format_details->clear_domain();
+              format_details->domain().reset();
               return;
             }
             primary_height_for_offset = aligned.ValueOrDie();
           }
         }
-        auto secondary_offset = safemath::CheckMul(v1_img.bytes_per_row, primary_height_for_offset);
+        auto secondary_offset =
+            safemath::CheckMul(v1_img.bytes_per_row(), primary_height_for_offset);
         auto tertiary_offset = safemath::CheckAdd(secondary_offset, 1u);
         if (!secondary_offset.IsValid() || !tertiary_offset.IsValid()) {
-          format_details->clear_domain();
+          format_details->domain().reset();
           return;
         }
-        video_uncompressed.secondary_start_offset = secondary_offset.ValueOrDie();
-        video_uncompressed.tertiary_start_offset = tertiary_offset.ValueOrDie();
-        video_uncompressed.primary_pixel_stride = 1;
-        video_uncompressed.secondary_pixel_stride = 2;
+        video_uncompressed.secondary_start_offset() = secondary_offset.ValueOrDie();
+        video_uncompressed.tertiary_start_offset() = tertiary_offset.ValueOrDie();
+        video_uncompressed.primary_pixel_stride() = 1;
+        video_uncompressed.secondary_pixel_stride() = 2;
         break;
       }
       case fuchsia_images2::PixelFormat::kYv12:
       case fuchsia_images2::PixelFormat::kI420: {
-        video_uncompressed.fourcc =
+        video_uncompressed.fourcc() =
             (v2_natural->pixel_format().value() == fuchsia_images2::PixelFormat::kI420)
                 ? make_fourcc('I', '4', '2', '0')
                 : make_fourcc('Y', 'V', '1', '2');
-        video_uncompressed.planar = true;
-        video_uncompressed.swizzled = false;
-        video_uncompressed.secondary_width_pixels = v1_img.coded_width / 2;
-        video_uncompressed.secondary_height_pixels = v1_img.coded_height / 2;
-        video_uncompressed.secondary_line_stride_bytes = v1_img.bytes_per_row / 2;
-        auto secondary_offset = safemath::CheckMul(v1_img.bytes_per_row, v1_img.coded_height);
+        video_uncompressed.planar() = true;
+        video_uncompressed.swizzled() = false;
+        video_uncompressed.secondary_width_pixels() = v1_img.coded_width() / 2;
+        video_uncompressed.secondary_height_pixels() = v1_img.coded_height() / 2;
+        video_uncompressed.secondary_line_stride_bytes() = v1_img.bytes_per_row() / 2;
+        auto secondary_offset = safemath::CheckMul(v1_img.bytes_per_row(), v1_img.coded_height());
         auto secondary_plane_bytes =
-            safemath::CheckMul(video_uncompressed.secondary_height_pixels,
-                               video_uncompressed.secondary_line_stride_bytes);
+            safemath::CheckMul(video_uncompressed.secondary_height_pixels(),
+                               video_uncompressed.secondary_line_stride_bytes());
         auto tertiary_offset = safemath::CheckAdd(secondary_offset, secondary_plane_bytes);
         if (!secondary_offset.IsValid() || !tertiary_offset.IsValid()) {
-          format_details->clear_domain();
+          format_details->domain().reset();
           return;
         }
-        video_uncompressed.secondary_start_offset = secondary_offset.ValueOrDie();
-        video_uncompressed.tertiary_start_offset = tertiary_offset.ValueOrDie();
-        video_uncompressed.primary_pixel_stride = 1;
-        video_uncompressed.secondary_pixel_stride = 1;
+        video_uncompressed.secondary_start_offset() = secondary_offset.ValueOrDie();
+        video_uncompressed.tertiary_start_offset() = tertiary_offset.ValueOrDie();
+        video_uncompressed.primary_pixel_stride() = 1;
+        video_uncompressed.secondary_pixel_stride() = 1;
         break;
       }
       case fuchsia_images2::PixelFormat::kR8G8B8A8:
       case fuchsia_images2::PixelFormat::kB8G8R8A8: {
-        video_uncompressed.fourcc =
+        video_uncompressed.fourcc() =
             (v2_natural->pixel_format().value() == fuchsia_images2::PixelFormat::kR8G8B8A8)
                 ? make_fourcc('R', 'G', 'B', 'A')
                 : make_fourcc('B', 'G', 'R', 'A');
-        video_uncompressed.primary_pixel_stride = 4;
+        video_uncompressed.primary_pixel_stride() = 4;
         break;
       }
       default:
@@ -546,10 +560,11 @@ void PopulateVideoDomainV1FromV2Natural(fuchsia_images2::ImageFormat* v2_natural
     }
   }
 
-  format_details->mutable_domain()->video().set_uncompressed(std::move(video_uncompressed));
+  format_details->domain() = fuchsia_media::DomainFormat::WithVideo(
+      fuchsia_media::VideoFormat::WithUncompressed(std::move(video_uncompressed)));
 }
 
-void EnsureVideoFormatBridged(fuchsia::media::FormatDetails* format_details) {
+void EnsureVideoFormatBridged(fuchsia_media::FormatDetails* format_details) {
   // Video uncompressed: legacy `domain.video.uncompressed` <-> `image_format`, treating
   // `image_format` as authoritative when present (either when `domain` is unset or when `domain`
   // already holds uncompressed video that may be stale after mutating `image_format`).
@@ -559,164 +574,177 @@ void EnsureVideoFormatBridged(fuchsia::media::FormatDetails* format_details) {
   // `EnsureFormatDetailsBridged` are idempotent), and move `v2_natural` into `image_format`
   // without re-cloning or re-converting.
   std::optional<fuchsia_images2::ImageFormat> v2_natural;
-  bool set_image_format_from_v2_natural = false;
-  if (!format_details->has_image_format() && format_details->has_domain() &&
-      format_details->domain().is_video() && format_details->domain().video().is_uncompressed()) {
-    v2_natural = VideoFormatV1ToV2Natural(format_details->domain().video().uncompressed());
+  fuchsia_images2::ImageFormat* v2_ptr = nullptr;
+  const bool has_video_uncompressed =
+      format_details->domain().has_value() &&
+      format_details->domain()->Which() == fuchsia_media::DomainFormat::Tag::kVideo &&
+      format_details->domain()->video()->Which() == fuchsia_media::VideoFormat::Tag::kUncompressed;
+  if (!format_details->image_format().has_value() && has_video_uncompressed) {
+    v2_natural =
+        VideoFormatV1ToV2Natural(format_details->domain()->video()->uncompressed().value());
     if (!v2_natural.has_value()) {
       return;
     }
-    set_image_format_from_v2_natural = true;
-  } else if (format_details->has_image_format() &&
-             (!format_details->has_domain() ||
-              (format_details->domain().is_video() &&
-               format_details->domain().video().is_uncompressed()))) {
-    v2_natural = fidl::HLCPPToNatural(fidl::Clone(format_details->image_format()));
+    v2_ptr = &*v2_natural;
+  } else if (format_details->image_format().has_value() &&
+             (!format_details->domain().has_value() || has_video_uncompressed)) {
+    v2_ptr = &*format_details->image_format();
   } else {
     return;
   }
 
-  PopulateVideoDomainV1FromV2Natural(&*v2_natural, format_details);
-  if (set_image_format_from_v2_natural) {
-    format_details->set_image_format(fidl::NaturalToHLCPP(std::move(*v2_natural)));
+  PopulateVideoDomainV1FromV2Natural(v2_ptr, format_details);
+  if (v2_natural.has_value()) {
+    format_details->image_format() = std::move(*v2_natural);
   }
 }
 
-void PopulatePcmFormatV2FromV1(const fuchsia::media::PcmFormat& pcm_v1,
-                               fuchsia::media::FormatDetails* format_details) {
-  if (pcm_v1.bits_per_sample == 0 || pcm_v1.channel_map.size() > kMaxLegacyPcmChannelCount) {
+void PopulatePcmFormatV2FromV1(const fuchsia_media::PcmFormat& pcm_v1,
+                               fuchsia_media::FormatDetails* format_details) {
+  if (pcm_v1.bits_per_sample() == 0 || pcm_v1.channel_map().size() > kMaxLegacyPcmChannelCount) {
     return;
   }
-  auto mode_v2 = ToAudioPcmMode2(pcm_v1.pcm_mode);
+  auto mode_v2 = ToAudioPcmMode2(pcm_v1.pcm_mode());
   if (!mode_v2.has_value()) {
     return;
   }
-  std::vector<fuchsia::media::AudioChannelId2> channel_map_v2;
-  channel_map_v2.reserve(pcm_v1.channel_map.size());
-  for (const auto& ch_v1 : pcm_v1.channel_map) {
+  std::vector<fuchsia_media::AudioChannelId2> channel_map_v2;
+  channel_map_v2.reserve(pcm_v1.channel_map().size());
+  for (const auto& ch_v1 : pcm_v1.channel_map()) {
     auto ch_v2 = ToAudioChannelId2(ch_v1);
     if (!ch_v2.has_value()) {
       return;
     }
     channel_map_v2.push_back(ch_v2.value());
   }
-  auto* pcm_v2 = format_details->mutable_pcm_format();
-  pcm_v2->set_pcm_mode(mode_v2.value());
-  pcm_v2->set_bits_per_sample(pcm_v1.bits_per_sample);
-  pcm_v2->set_frames_per_second(pcm_v1.frames_per_second);
-  pcm_v2->set_channel_map(std::move(channel_map_v2));
-  if (pcm_v1.bits_per_sample == 24 && format_details->has_encoder_settings() &&
-      format_details->encoder_settings().is_lc3()) {
+  auto& pcm_v2 = format_details->pcm_format().emplace();
+  pcm_v2.pcm_mode() = mode_v2.value();
+  pcm_v2.bits_per_sample() = pcm_v1.bits_per_sample();
+  pcm_v2.frames_per_second() = pcm_v1.frames_per_second();
+  pcm_v2.channel_map() = std::move(channel_map_v2);
+  if (pcm_v1.bits_per_sample() == 24 && format_details->encoder_settings().has_value() &&
+      format_details->encoder_settings()->Which() == fuchsia_media::EncoderSettings::Tag::kLc3) {
     // Legacy V1 `PcmFormat` had no `bytes_per_sample` field and implicitly represented LC3 24-bit
     // input as 24-bit samples padded in 4-byte containers (`bytes_per_sample == 4`).
-    pcm_v2->set_bytes_per_sample(4);
+    pcm_v2.bytes_per_sample() = 4;
   }
 }
 
-void EnsurePcmFormatBridged(fuchsia::media::FormatDetails* format_details) {
+void EnsurePcmFormatBridged(fuchsia_media::FormatDetails* format_details) {
+  const bool has_audio_uncompressed =
+      format_details->domain().has_value() &&
+      format_details->domain()->Which() == fuchsia_media::DomainFormat::Tag::kAudio &&
+      format_details->domain()->audio()->Which() == fuchsia_media::AudioFormat::Tag::kUncompressed;
   // Treat `pcm_format` as authoritative when present (either when `domain` is unset or when
   // `domain` already holds uncompressed audio that may be stale after mutating `pcm_format`).
-  if (format_details->has_pcm_format() &&
-      (!format_details->has_domain() || (format_details->domain().is_audio() &&
-                                         format_details->domain().audio().is_uncompressed()))) {
-    const auto& pcm_v2 = format_details->pcm_format();
-    if (!pcm_v2.has_pcm_mode() || !pcm_v2.has_bits_per_sample() || pcm_v2.bits_per_sample() == 0 ||
-        !pcm_v2.has_frames_per_second() || !pcm_v2.has_channel_map() ||
-        pcm_v2.channel_map().size() > kMaxLegacyPcmChannelCount) {
-      format_details->clear_domain();
+  if (format_details->pcm_format().has_value() &&
+      (!format_details->domain().has_value() || has_audio_uncompressed)) {
+    const auto& pcm_v2 = format_details->pcm_format().value();
+    if (!pcm_v2.pcm_mode().has_value() || !pcm_v2.bits_per_sample().has_value() ||
+        *pcm_v2.bits_per_sample() == 0 || !pcm_v2.frames_per_second().has_value() ||
+        !pcm_v2.channel_map().has_value() ||
+        pcm_v2.channel_map()->size() > kMaxLegacyPcmChannelCount) {
+      format_details->domain().reset();
       return;
     }
-    const uint64_t min_packed_bytes = (static_cast<uint64_t>(pcm_v2.bits_per_sample()) + 7) / 8;
+    const uint64_t min_packed_bytes = (static_cast<uint64_t>(*pcm_v2.bits_per_sample()) + 7) / 8;
     const uint64_t effective_bytes_per_sample =
-        pcm_v2.has_bytes_per_sample() ? pcm_v2.bytes_per_sample() : min_packed_bytes;
-    const bool is_lc3_24bit = pcm_v2.bits_per_sample() == 24 &&
-                              format_details->has_encoder_settings() &&
-                              format_details->encoder_settings().is_lc3();
+        pcm_v2.bytes_per_sample().has_value() ? *pcm_v2.bytes_per_sample() : min_packed_bytes;
+    const bool is_lc3_24bit =
+        *pcm_v2.bits_per_sample() == 24 && format_details->encoder_settings().has_value() &&
+        format_details->encoder_settings()->Which() == fuchsia_media::EncoderSettings::Tag::kLc3;
     // Legacy V1 `PcmFormat` had no `bytes_per_sample` field: it implied packed containers
     // (`min_packed_bytes`) everywhere except LC3 24-bit encoding, where V1 implied 4-byte
     // (`24-in-32`) containers.
     const uint64_t v1_implied_bytes_per_sample = is_lc3_24bit ? 4 : min_packed_bytes;
     if (effective_bytes_per_sample != v1_implied_bytes_per_sample) {
-      format_details->clear_domain();
+      format_details->domain().reset();
       return;
     }
-    auto mode_v1 = ToAudioPcmModeV1(pcm_v2.pcm_mode());
+    auto mode_v1 = ToAudioPcmModeV1(*pcm_v2.pcm_mode());
     if (!mode_v1.has_value()) {
-      format_details->clear_domain();
+      format_details->domain().reset();
       return;
     }
-    std::vector<fuchsia::media::AudioChannelId> channel_map_v1;
-    channel_map_v1.reserve(pcm_v2.channel_map().size());
-    for (const auto& ch_v2 : pcm_v2.channel_map()) {
+    std::vector<fuchsia_media::AudioChannelId> channel_map_v1;
+    channel_map_v1.reserve(pcm_v2.channel_map()->size());
+    for (const auto& ch_v2 : *pcm_v2.channel_map()) {
       auto ch_v1 = ToAudioChannelIdV1(ch_v2);
       if (!ch_v1.has_value()) {
-        format_details->clear_domain();
+        format_details->domain().reset();
         return;
       }
       channel_map_v1.push_back(ch_v1.value());
     }
-    fuchsia::media::PcmFormat pcm_v1;
-    pcm_v1.pcm_mode = mode_v1.value();
-    pcm_v1.bits_per_sample = pcm_v2.bits_per_sample();
-    pcm_v1.frames_per_second = pcm_v2.frames_per_second();
-    pcm_v1.channel_map = std::move(channel_map_v1);
-    format_details->mutable_domain()->audio().uncompressed().set_pcm(std::move(pcm_v1));
+    fuchsia_media::PcmFormat pcm_v1;
+    pcm_v1.pcm_mode() = mode_v1.value();
+    pcm_v1.bits_per_sample() = *pcm_v2.bits_per_sample();
+    pcm_v1.frames_per_second() = *pcm_v2.frames_per_second();
+    pcm_v1.channel_map() = std::move(channel_map_v1);
+    format_details->domain() =
+        fuchsia_media::DomainFormat::WithAudio(fuchsia_media::AudioFormat::WithUncompressed(
+            fuchsia_media::AudioUncompressedFormat::WithPcm(std::move(pcm_v1))));
     return;
   }
 
   // Audio uncompressed PCM: legacy `domain.audio.uncompressed.pcm` -> `pcm_format`.
-  if (!format_details->has_pcm_format() && format_details->has_domain() &&
-      format_details->domain().is_audio() && format_details->domain().audio().is_uncompressed() &&
-      format_details->domain().audio().uncompressed().is_pcm()) {
-    PopulatePcmFormatV2FromV1(format_details->domain().audio().uncompressed().pcm(),
+  if (!format_details->pcm_format().has_value() && has_audio_uncompressed &&
+      format_details->domain()->audio()->uncompressed()->Which() ==
+          fuchsia_media::AudioUncompressedFormat::Tag::kPcm) {
+    PopulatePcmFormatV2FromV1(format_details->domain()->audio()->uncompressed()->pcm().value(),
                               format_details);
   }
 }
 
-void EnsureEncryptedFormatBridged(fuchsia::media::FormatDetails* format_details) {
+void EnsureEncryptedFormatBridged(fuchsia_media::FormatDetails* format_details) {
+  const bool has_crypto_encrypted =
+      format_details->domain().has_value() &&
+      format_details->domain()->Which() == fuchsia_media::DomainFormat::Tag::kCrypto &&
+      format_details->domain()->crypto()->Which() == fuchsia_media::CryptoFormat::Tag::kEncrypted;
   // Treat `encrypted_format` as authoritative when present (either when `domain` is unset or when
   // `domain` already holds `crypto.encrypted` that may be stale after mutating `encrypted_format`).
-  if (format_details->has_encrypted_format() &&
-      (!format_details->has_domain() || (format_details->domain().is_crypto() &&
-                                         format_details->domain().crypto().is_encrypted()))) {
-    format_details->mutable_domain()->crypto().set_encrypted(
-        fidl::Clone(format_details->encrypted_format()));
+  if (format_details->encrypted_format().has_value() &&
+      (!format_details->domain().has_value() || has_crypto_encrypted)) {
+    format_details->domain() = fuchsia_media::DomainFormat::WithCrypto(
+        fuchsia_media::CryptoFormat::WithEncrypted(*format_details->encrypted_format()));
     return;
   }
 
   // Crypto encrypted: legacy `domain.crypto.encrypted` -> `encrypted_format`.
-  if (!format_details->has_encrypted_format() && format_details->has_domain() &&
-      format_details->domain().is_crypto() && format_details->domain().crypto().is_encrypted()) {
-    format_details->set_encrypted_format(
-        fidl::Clone(format_details->domain().crypto().encrypted()));
+  if (!format_details->encrypted_format().has_value() && has_crypto_encrypted) {
+    format_details->encrypted_format() = format_details->domain()->crypto()->encrypted().value();
   }
 }
 
-void SynthesizeCompressedDomainFromMimeType(fuchsia::media::FormatDetails* format_details) {
-  if (!format_details->has_mime_type()) {
+void SynthesizeCompressedDomainFromMimeType(fuchsia_media::FormatDetails* format_details) {
+  if (!format_details->mime_type().has_value()) {
     return;
   }
-  const std::string& mime = format_details->mime_type();
+  const std::string& mime = format_details->mime_type().value();
   if (mime.starts_with("video/") && mime != "video/raw") {
-    fuchsia::media::VideoCompressedFormat compressed;
-    compressed.set_temp_field_todo_remove(0);
-    format_details->mutable_domain()->video().set_compressed(std::move(compressed));
+    format_details->domain() =
+        fuchsia_media::DomainFormat::WithVideo(fuchsia_media::VideoFormat::WithCompressed(
+            fuchsia_media::VideoCompressedFormat::WithTempFieldTodoRemove(0)));
   } else if (mime == "audio/aac" || mime == "audio/aac-adts" || mime == "audio/aac-latm") {
-    format_details->mutable_domain()->audio().compressed().set_aac(
-        fuchsia::media::AudioCompressedFormatAac());
+    format_details->domain() =
+        fuchsia_media::DomainFormat::WithAudio(fuchsia_media::AudioFormat::WithCompressed(
+            fuchsia_media::AudioCompressedFormat::WithAac({})));
   } else if (mime == "audio/sbc" || mime == "audio/msbc") {
-    format_details->mutable_domain()->audio().compressed().set_sbc(
-        fuchsia::media::AudioCompressedFormatSbc());
+    format_details->domain() =
+        fuchsia_media::DomainFormat::WithAudio(fuchsia_media::AudioFormat::WithCompressed(
+            fuchsia_media::AudioCompressedFormat::WithSbc({})));
   } else if (mime == "audio/cvsd") {
-    format_details->mutable_domain()->audio().compressed().set_cvsd(
-        fuchsia::media::AudioCompressedFormatCvsd());
+    format_details->domain() =
+        fuchsia_media::DomainFormat::WithAudio(fuchsia_media::AudioFormat::WithCompressed(
+            fuchsia_media::AudioCompressedFormat::WithCvsd({})));
   } else if (mime == "audio/lc3") {
-    format_details->mutable_domain()->audio().compressed().set_lc3(
-        fuchsia::media::AudioCompressedFormatLc3());
+    format_details->domain() =
+        fuchsia_media::DomainFormat::WithAudio(fuchsia_media::AudioFormat::WithCompressed(
+            fuchsia_media::AudioCompressedFormat::WithLc3({})));
   }
 }
 
-void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, bool is_decryptor) {
+void NormalizeInputFormatDetails(fuchsia_media::FormatDetails* format_details, bool is_decryptor) {
   if (!format_details) {
     return;
   }
@@ -726,16 +754,20 @@ void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, 
   // `encrypted_format` directly. Normalize per-packet encrypted input unidirectionally (moving
   // `key_id`, `init_vector`, and `subsamples` without cloning) and clear `domain.crypto` so V1 and
   // V2 callers compare equal in `QueueInputFormatDetails` without per-packet heap copies.
-  if (format_details->has_encrypted_format()) {
-    if (format_details->has_domain() && format_details->domain().is_crypto()) {
-      format_details->clear_domain();
+  const bool has_crypto_domain =
+      format_details->domain().has_value() &&
+      format_details->domain()->Which() == fuchsia_media::DomainFormat::Tag::kCrypto;
+  if (format_details->encrypted_format().has_value()) {
+    if (has_crypto_domain) {
+      format_details->domain().reset();
     }
-  } else if (format_details->has_domain() && format_details->domain().is_crypto()) {
-    if (format_details->domain().crypto().is_encrypted()) {
-      format_details->set_encrypted_format(
-          std::move(format_details->mutable_domain()->crypto().encrypted()));
+  } else if (has_crypto_domain) {
+    if (format_details->domain()->crypto()->Which() ==
+        fuchsia_media::CryptoFormat::Tag::kEncrypted) {
+      format_details->encrypted_format() =
+          std::move(format_details->domain()->crypto()->encrypted().value());
     }
-    format_details->clear_domain();
+    format_details->domain().reset();
   }
 
   if (is_decryptor) {
@@ -749,8 +781,8 @@ void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, 
   // synthesize compressed `domain` from `mime_type` even on encrypted input to a secure decoder.
   EnsureVideoFormatBridged(format_details);
   EnsurePcmFormatBridged(format_details);
-  if (!format_details->has_domain() && !format_details->has_image_format() &&
-      !format_details->has_pcm_format()) {
+  if (!format_details->domain().has_value() && !format_details->image_format().has_value() &&
+      !format_details->pcm_format().has_value()) {
     SynthesizeCompressedDomainFromMimeType(format_details);
   }
 }
@@ -759,24 +791,31 @@ void NormalizeInputFormatDetails(fuchsia::media::FormatDetails* format_details, 
 
 // static
 void CodecImpl::EnsureInputFormatDetailsNormalizedForTesting(
-    fuchsia::media::FormatDetails* format_details, bool is_decryptor) {
+    fuchsia_media::FormatDetails* format_details, bool is_decryptor) {
   EnsureInputFormatDetailsNormalized(format_details, is_decryptor);
 }
 
 // static
-void CodecImpl::EnsureFormatDetailsBridgedForTesting(
-    fuchsia::media::FormatDetails* format_details) {
+void CodecImpl::EnsureInputFormatDetailsNormalizedForTesting(
+    fuchsia::media::FormatDetails* format_details, bool is_decryptor) {
+  fuchsia_media::FormatDetails natural = fidl::HLCPPToNatural(std::move(*format_details));
+  EnsureInputFormatDetailsNormalized(&natural, is_decryptor);
+  *format_details = fidl::NaturalToHLCPP(std::move(natural));
+}
+
+// static
+void CodecImpl::EnsureFormatDetailsBridgedForTesting(fuchsia_media::FormatDetails* format_details) {
   EnsureFormatDetailsBridged(format_details);
 }
 
 // static
-void CodecImpl::EnsureInputFormatDetailsNormalized(fuchsia::media::FormatDetails* format_details,
+void CodecImpl::EnsureInputFormatDetailsNormalized(fuchsia_media::FormatDetails* format_details,
                                                    bool is_decryptor) {
   NormalizeInputFormatDetails(format_details, is_decryptor);
 }
 
 // static
-void CodecImpl::EnsureFormatDetailsBridged(fuchsia::media::FormatDetails* format_details) {
+void CodecImpl::EnsureFormatDetailsBridged(fuchsia_media::FormatDetails* format_details) {
   if (!format_details) {
     return;
   }
@@ -787,8 +826,9 @@ void CodecImpl::EnsureFormatDetailsBridged(fuchsia::media::FormatDetails* format
 
   // Synthesize legacy compressed `domain` marker from `mime_type` when neither `domain` nor any
   // uncompressed/encrypted format table is set.
-  if (!format_details->has_domain() && !format_details->has_image_format() &&
-      !format_details->has_pcm_format() && !format_details->has_encrypted_format()) {
+  if (!format_details->domain().has_value() && !format_details->image_format().has_value() &&
+      !format_details->pcm_format().has_value() &&
+      !format_details->encrypted_format().has_value()) {
     SynthesizeCompressedDomainFromMimeType(format_details);
   }
 }
@@ -837,16 +877,9 @@ class __TA_SCOPED_CAPABILITY ScopedLock {
 
 CodecImpl::CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
                      std::unique_ptr<CodecAdmission> codec_admission,
-                     async_dispatcher_t* shared_fidl_dispatcher, thrd_t shared_fidl_thread,
-                     StreamProcessorParams params,
-                     fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request)
-    : CodecImpl(std::move(sysmem), std::move(codec_admission), shared_fidl_dispatcher,
-                std::move(params), std::move(request)) {}
-
-CodecImpl::CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
-                     std::unique_ptr<CodecAdmission> codec_admission,
-                     async_dispatcher_t* shared_fidl_dispatcher, StreamProcessorParams params,
-                     fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request)
+                     async_dispatcher_t* shared_fidl_dispatcher,
+                     NaturalStreamProcessorParams params,
+                     fidl::ServerEnd<fuchsia_media::StreamProcessor> server_end)
     // The parameters to CodecAdapter constructor here aren't important.
     : CodecAdapter(lock_, this),
       codec_admission_(std::move(codec_admission)),
@@ -855,33 +888,32 @@ CodecImpl::CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
       checker_fidl_(shared_fidl_dispatcher),
       params_(EnsureInitialInputFormatDetailsVersionOrdinal(std::move(params))),
       tmp_sysmem_(std::move(sysmem)),
-      tmp_interface_request_(std::move(request)),
-      binding_(this) {
+      tmp_server_end_(std::move(server_end)) {
   ZX_DEBUG_ASSERT(tmp_sysmem_);
-  ZX_DEBUG_ASSERT(tmp_interface_request_);
+  ZX_DEBUG_ASSERT(tmp_server_end_);
 
   if (codec_admission_) {
-    codec_admission_->SetChannelToWaitOn(tmp_interface_request_.channel());
+    codec_admission_->SetChannelToWaitOn(tmp_server_end_.channel());
   }
 
-  // This is the binding_'s error handler, not the owner_error_handler_ which
-  // is related but separate.
-  //
-  // If client code instead does ~CodecImpl, this error handler is prevented from running by
-  // synchronously unbinding in ~CodecImpl.
-  binding_.set_error_handler([this](zx_status_t status) {
-    // This handler can't run until after binding_ is bound.
-    ZX_DEBUG_ASSERT(was_logically_bound_);
-    Unbind();
-  });
-
-  initial_input_format_details_ = IsDecoder()   ? &decoder_params().input_details()
-                                  : IsEncoder() ? &encoder_params().input_details()
-                                                : &decryptor_params().input_details();
+  initial_input_format_details_ = std::visit(
+      [](auto& p) {
+        return std::make_shared<const fuchsia_media::FormatDetails>(
+            std::move(p.input_details().value()));
+      },
+      params_);
 }
 
+CodecImpl::CodecImpl(fidl::ClientEnd<fuchsia_sysmem2::Allocator> sysmem,
+                     std::unique_ptr<CodecAdmission> codec_admission,
+                     async_dispatcher_t* shared_fidl_dispatcher, StreamProcessorParams params,
+                     fidl::InterfaceRequest<fuchsia::media::StreamProcessor> request)
+    : CodecImpl(std::move(sysmem), std::move(codec_admission), shared_fidl_dispatcher,
+                ToNaturalStreamProcessorParams(std::move(params)),
+                fidl::ServerEnd<fuchsia_media::StreamProcessor>(request.TakeChannel())) {}
+
 CodecImpl::~CodecImpl() {
-  // We need ~binding_ to run on fidl_thread() else it's not safe to
+  // We need ~binding_ref_ to run on fidl_thread() else it's not safe to
   // un-bind unilaterally.  We could potentially relax this if BindAsync() was
   // never called, but for now we just require this always.
   ZX_ASSERT(IsFidl());
@@ -931,17 +963,20 @@ CodecImpl::~CodecImpl() {
   // when deleted.  In this lambda we can force ~CodecAdmission before ~zx::channel, and we know
   // this lambda will run, whether the lambda further down runs or is just deleted.
   auto run_when_deleted = fit::defer([codec_admission = std::move(codec_admission_),
-                                      codec_to_close = std::move(codec_to_close_)]() mutable {
-    // Ensure codec_to_close is destructed only after the codec_admission is destructed.  We have
-    // to be fairly explicit about this since the order of lambda members is explicitly
-    // unspecified in C++, so their destruction order is also unspecified.
+                                      binding_unbind_state = std::move(binding_unbind_state_),
+                                      tmp_server_end = std::move(tmp_server_end_)]() mutable {
+    // Ensure codec_to_close (and any never-bound tmp_server_end) is destructed only after the
+    // codec_admission is destructed.  We have to be fairly explicit about this since the order of
+    // lambda members is explicitly unspecified in C++, so their destruction order is also
+    // unspecified.
     //
     // We care about the order because a client is fairly likely to immediately retry on seeing
     // the channel close, and we don't want that to ever bounce off the CodecAdmission for the
     // instance associated with that same channel.
     codec_admission = nullptr;
 
-    // ~codec_to_close (after ~CodecAdmission above).
+    // ~binding_unbind_state (drops codec_to_close after ~CodecAdmission above).
+    // ~tmp_server_end (drops never-bound channel after ~CodecAdmission above).
   });
   // We intentionally don't use shared_fidl_queue_ here.
   PostSerial(shared_fidl_dispatcher_, [run_when_deleted = std::move(run_when_deleted)] {
@@ -955,7 +990,7 @@ std::mutex& CodecImpl::lock() { return lock_; }
 
 void CodecImpl::SetLifetimeTracking(std::vector<zx::eventpair> lifetime_tracking_eventpair) {
   ZX_DEBUG_ASSERT(lifetime_tracking_eventpair.size() <=
-                  fuchsia::mediacodec::CODEC_FACTORY_LIFETIME_TRACKING_EVENTPAIR_PER_CREATE_MAX);
+                  fuchsia_mediacodec::kCodecFactoryLifetimeTrackingEventpairPerCreateMax);
   lifetime_tracking_ = std::move(lifetime_tracking_eventpair);
 }
 
@@ -1002,8 +1037,8 @@ void CodecImpl::BindAsync(fit::closure error_handler) {
   ZX_DEBUG_ASSERT(IsFidl());
   // Up to once only.  No reuse.
   ZX_DEBUG_ASSERT(!was_bind_async_called_);
-  ZX_DEBUG_ASSERT(!binding_.is_bound());
-  ZX_DEBUG_ASSERT(tmp_interface_request_);
+  ZX_DEBUG_ASSERT(!binding_ref_.has_value());
+  ZX_DEBUG_ASSERT(tmp_server_end_.is_valid());
   was_bind_async_called_ = true;
 
   // Give CodecAdapter a chance to set a scheduler profile. For historical
@@ -1062,17 +1097,32 @@ void CodecImpl::BindAsync(fit::closure error_handler) {
   // while, or if getting a scheduling slot on decode HW can require some
   // waiting, or similar.
   PostToStreamControl([this] {
+    // The IsStopping() checks in this lambda avoid continuing to set up (and eventually bind) a
+    // CodecImpl that's already failing, such as when CoreCodecInit() or
+    // CoreCodecSetSecureMemoryMode() calls Fail().
+    if (IsStopping()) {
+      return;
+    }
     // This is allowed to take a little while if necessary, using the current
     // StreamControl thread, which is not shared with any other CodecImpl.
-    CoreCodecInit(*initial_input_format_details_);
+    CoreCodecInit(initial_input_format_details_);
     is_core_codec_init_called_ = true;
+    if (IsStopping()) {
+      return;
+    }
 
     CoreCodecSetSecureMemoryMode(kOutputPort, PortSecureMemoryMode(kOutputPort));
+    if (IsStopping()) {
+      return;
+    }
     CoreCodecSetSecureMemoryMode(kInputPort, PortSecureMemoryMode(kInputPort));
+    if (IsStopping()) {
+      return;
+    }
 
     bool force_new_buffers_for_new_dimensions = false;
-    if (IsDecoder() && decoder_params().has_force_new_buffers_for_new_dimensions() &&
-        decoder_params().force_new_buffers_for_new_dimensions()) {
+    if (IsDecoder() && decoder_params().force_new_buffers_for_new_dimensions().has_value() &&
+        *decoder_params().force_new_buffers_for_new_dimensions()) {
       if (!is_supports_dynamic_buffers()) {
         Fail("force_new_buffers_for_new_dimensions true requires supports_dynamic_buffers");
         return;
@@ -1096,14 +1146,13 @@ void CodecImpl::BindAsync(fit::closure error_handler) {
       core_codec_bti_ = CoreCodecBti();
     }
 
-    auto input_constraints = std::make_unique<fuchsia::media::StreamBufferConstraints>();
-    input_constraints->set_buffer_constraints_version_ordinal(
-        kInputBufferConstraintsVersionOrdinal);
+    auto input_constraints = std::make_unique<fuchsia_media::StreamBufferConstraints>();
+    input_constraints->buffer_constraints_version_ordinal() = kInputBufferConstraintsVersionOrdinal;
     TryFillDynamicStreamBufferConstraintsFields(kInputPort, *input_constraints);
     input_constraints_ = std::move(input_constraints);
 
     sent_buffer_constraints_version_ordinal_[kInputPort] =
-        input_constraints_->buffer_constraints_version_ordinal();
+        *input_constraints_->buffer_constraints_version_ordinal();
 
     // We touch FIDL stuff only from the fidl_thread().
     //
@@ -1116,6 +1165,10 @@ void CodecImpl::BindAsync(fit::closure error_handler) {
     // buffer_constraints_version_ordinal 1, so it's important that
     // sent_buffer_constraints_version_ordinal_[kInputPort] is set to 1 above before binding.
     PostToSharedFidl([this] {
+      // Don't bind sysmem_ or the StreamProcessor server if we've started failing meanwhile.
+      if (IsStopping()) {
+        return;
+      }
       // If the fuchsia::sysmem2::Allocator connection dies, so does this CodecImpl.
       //
       // In case of client code calling ~CodecImpl, this error handler is prevented from running by
@@ -1140,24 +1193,42 @@ void CodecImpl::BindAsync(fit::closure error_handler) {
         return;
       }
 
-      zx_status_t status =
-          binding_.Bind(std::move(tmp_interface_request_), shared_fidl_dispatcher_);
-      if (status != ZX_OK) {
-        LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_FidlError);
-        Fail("binding_.Bind() failed");
-        return;
-      }
-      ZX_DEBUG_ASSERT(!tmp_interface_request_);
+      ZX_DEBUG_ASSERT(tmp_server_end_.is_valid());
+      binding_unbind_state_ = std::make_shared<BindingUnbindState>();
+      binding_ref_ =
+          fidl::BindServer(shared_fidl_dispatcher_, std::move(tmp_server_end_), this,
+                           [state = binding_unbind_state_](
+                               CodecImpl* impl, fidl::UnbindInfo info,
+                               fidl::ServerEnd<fuchsia_media::StreamProcessor> server_end) {
+                             // This is the binding's on_unbound handler, not the
+                             // owner_error_handler_ which is related but separate.
+                             //
+                             // Park the channel unclosed; see BindingUnbindState.
+                             state->codec_to_close = server_end.TakeChannel();
+                             // If CodecImpl initiated the unbind (UnbindServerBinding()), or if
+                             // client code is instead doing ~CodecImpl (which synchronously
+                             // unbinds via EnsureUnbindCompleted()), don't touch impl.
+                             if (state->is_codec_impl_unbinding_or_destroyed) {
+                               return;
+                             }
+                             // This handler can't run until after the binding is bound.
+                             ZX_DEBUG_ASSERT(impl->was_logically_bound_);
+                             impl->binding_ref_.reset();
+                             impl->Unbind();
+                           });
+      ZX_DEBUG_ASSERT(!tmp_server_end_);
 
       // See "is_bound_checks" comment up top.
-      if (binding_.is_bound()) {
-        binding_.events().OnInputConstraints(fidl::Clone(*input_constraints_));
+      if (binding_ref_.has_value()) {
+        fit::result<fidl::OneWayError> result =
+            fidl::SendEvent(*binding_ref_)->OnInputConstraints({*input_constraints_});
+        (void)result;
       }
     });
   });
 }
 
-void CodecImpl::EnableOnStreamFailed() {
+void CodecImpl::EnableOnStreamFailed(EnableOnStreamFailedCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   std::lock_guard<std::mutex> lock(lock_);
   is_on_stream_failed_enabled_ = true;
@@ -1177,18 +1248,19 @@ void CodecImpl::AddInputBuffer_StreamControl(CodecBuffer::Info buffer_info,
 }
 
 void CodecImpl::SetInputBufferPartialSettings(
-    fuchsia::media::StreamBufferPartialSettings input_settings) {
+    SetInputBufferPartialSettingsRequest& request,
+    SetInputBufferPartialSettingsCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   is_force_output_buffers_fixed_image_size_message_permitted_ = false;
   LogEvent(media_metrics::
                StreamProcessorEvents2MigratedMetricDimensionEvent_InputBufferAllocationStarted);
-  PostToStreamControl([this, input_settings = std::move(input_settings)]() mutable {
+  PostToStreamControl([this, input_settings = std::move(request.input_settings())]() mutable {
     SetInputBufferPartialSettings_StreamControl(std::move(input_settings));
   });
 }
 
 void CodecImpl::SetInputBufferPartialSettings_StreamControl(
-    fuchsia::media::StreamBufferPartialSettings input_partial_settings) {
+    fuchsia_media::StreamBufferPartialSettings input_partial_settings) {
   ZX_DEBUG_ASSERT(IsStreamControl());
   {  // scope lock
     ScopedLock lock(lock_);
@@ -1198,7 +1270,7 @@ void CodecImpl::SetInputBufferPartialSettings_StreamControl(
 }
 
 void CodecImpl::SetInputBufferSettingsCommon(
-    ScopedLock& lock, fuchsia::media::StreamBufferPartialSettings* input_partial_settings) {
+    ScopedLock& lock, fuchsia_media::StreamBufferPartialSettings* input_partial_settings) {
   lock.AssertHeld(lock_);
   if (IsStoppingLocked()) {
     return;
@@ -1212,7 +1284,7 @@ void CodecImpl::SetInputBufferSettingsCommon(
 }
 
 void CodecImpl::SetOutputBufferSettingsCommon(
-    ScopedLock& lock, fuchsia::media::StreamBufferPartialSettings* output_partial_settings) {
+    ScopedLock& lock, fuchsia_media::StreamBufferPartialSettings* output_partial_settings) {
   lock.AssertHeld(lock_);
   if (!output_constraints_) {
     // invalid client behavior
@@ -1250,7 +1322,7 @@ void CodecImpl::SetOutputBufferSettingsCommon(
   }
 
   SetBufferSettingsCommon(lock, kOutputPort, output_partial_settings,
-                          output_constraints_->buffer_constraints());
+                          output_constraints_->buffer_constraints().value());
 }
 
 void CodecImpl::AddOutputBufferInternal(CodecBuffer::Info buffer_info, CodecVmoRange vmo_range) {
@@ -1265,7 +1337,8 @@ void CodecImpl::AddOutputBufferInternal(CodecBuffer::Info buffer_info, CodecVmoR
 }
 
 void CodecImpl::SetOutputBufferPartialSettings(
-    fuchsia::media::StreamBufferPartialSettings output_partial_settings) {
+    SetOutputBufferPartialSettingsRequest& request,
+    SetOutputBufferPartialSettingsCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   is_force_output_buffers_fixed_image_size_message_permitted_ = false;
   VLOGF("CodecImpl::SetOutputBufferPartialSettings");
@@ -1279,12 +1352,15 @@ void CodecImpl::SetOutputBufferPartialSettings(
           "that lacks a sysmem_");
       return;
     }
-    SetOutputBufferSettingsCommon(lock, &output_partial_settings);
+    SetOutputBufferSettingsCommon(lock, &request.output_settings());
   }  // ~lock
 }
 
-void CodecImpl::CompleteOutputBufferPartialSettings(uint64_t buffer_lifetime_ordinal) {
+void CodecImpl::CompleteOutputBufferPartialSettings(
+    CompleteOutputBufferPartialSettingsRequest& request,
+    CompleteOutputBufferPartialSettingsCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  uint64_t buffer_lifetime_ordinal = request.buffer_lifetime_ordinal();
   {  // scope lock
     ScopedLock lock(lock_);
 
@@ -1340,8 +1416,11 @@ void CodecImpl::CompleteOutputBufferPartialSettings(uint64_t buffer_lifetime_ord
   wake_stream_control_condition_.notify_all();
 }
 
-void CodecImpl::FlushEndOfStreamAndCloseStream(uint64_t stream_lifetime_ordinal) {
+void CodecImpl::FlushEndOfStreamAndCloseStream(
+    FlushEndOfStreamAndCloseStreamRequest& request,
+    FlushEndOfStreamAndCloseStreamCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  uint64_t stream_lifetime_ordinal = request.stream_lifetime_ordinal();
   LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_StreamFlushed);
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
@@ -1493,9 +1572,12 @@ void CodecImpl::FlushEndOfStreamAndCloseStream_StreamControl(uint64_t stream_lif
   LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_CoreFlushed);
 }
 
-void CodecImpl::CloseCurrentStream(uint64_t stream_lifetime_ordinal, bool release_input_buffers,
-                                   bool release_output_buffers) {
+void CodecImpl::CloseCurrentStream(CloseCurrentStreamRequest& request,
+                                   CloseCurrentStreamCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  uint64_t stream_lifetime_ordinal = request.stream_lifetime_ordinal();
+  bool release_input_buffers = request.release_input_buffers();
+  bool release_output_buffers = request.release_output_buffers();
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
     if (IsStoppingLocked()) {
@@ -1551,9 +1633,13 @@ void CodecImpl::CloseCurrentStream_StreamControl(uint64_t stream_lifetime_ordina
   }
 }
 
-void CodecImpl::Sync(SyncCallback callback) {
+void CodecImpl::Sync(SyncCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  auto async_completer = completer.ToAsync();
   if (IsStopping()) {
+    // UnbindServerBinding() before ~async_completer so CompleterBase doesn't trigger
+    // UnbindInfo::AbandonedAsyncReply(). The channel is getting closed soon anyway.
+    UnbindServerBinding();
     return;
   }
   // By posting to StreamControl ordering domain, we sync both Output ordering
@@ -1563,30 +1649,30 @@ void CodecImpl::Sync(SyncCallback callback) {
   // happened/happens, it doesn't matter because the whole channel will be
   // closing before long.
   //
-  // The callback has affinity with fidl_thread(), including the destructor.
-  // This is problematic with respect to the
-  // stream_control_queue_.StopAndClear() called on StreamControl domain during
-  // unbind. Without special handling, that StopAndClear() would try to delete
-  // callback on the StreamControl domain instead of on the fidl_thread().  To
-  // prevent that, we ensure that deletion of the lambda without running the
-  // lambda will still post destruction of callback to fidl_thread(), and this
-  // posting will queue before the lamda that runs
-  // shared_fidl_queue_.StopAndClear().
-  PostToStreamControl([this, callback_holder = ThreadSafeDeleter<SyncCallback>(
-                                 &shared_fidl_queue_, std::move(callback))]() mutable {
-    Sync_StreamControl(std::move(callback_holder));
+  // SyncCompleter::Async destruction must occur on fidl_thread() after unbind
+  // (otherwise dropping an unanswered completer on StreamControl during
+  // stream_control_queue_.StopAndClear() would drive teardown from the wrong
+  // thread). Wrapping it in ThreadSafeDeleter ensures destruction is posted to
+  // fidl_thread(), queueing before shared_fidl_queue_.StopAndClear().
+  PostToStreamControl([this, completer_holder = ThreadSafeDeleter<SyncCompleter::Async>(
+                                 &shared_fidl_queue_, std::move(async_completer))]() mutable {
+    Sync_StreamControl(std::move(completer_holder));
   });
 }
 
-void CodecImpl::Sync_StreamControl(ThreadSafeDeleter<SyncCallback> callback_holder) {
+void CodecImpl::Sync_StreamControl(ThreadSafeDeleter<SyncCompleter::Async> completer_holder) {
   ZX_DEBUG_ASSERT(IsStreamControl());
   if (IsStopping()) {
-    // In this case, we rely on ThreadSafeDeleter to delete callback on fidl_thread().
+    // Ensure UnbindServerBinding() has run on fidl_thread() before
+    // ~SyncCompleter::Async runs, so CompleterBase doesn't trigger
+    // UnbindInfo::AbandonedAsyncReply().
     //
     // The response won't be sent, which is appropriate - the channel is getting closed soon
     // instead, and the client has to tolerate that.
-    //
-    // ~callback_holder
+    PostToSharedFidl([this, completer_holder = std::move(completer_holder)]() mutable {
+      ZX_DEBUG_ASSERT(IsFidl());
+      UnbindServerBinding();
+    });
     return;
   }
   // We post back to FIDL thread to respond to ensure we're not racing with
@@ -1594,18 +1680,24 @@ void CodecImpl::Sync_StreamControl(ThreadSafeDeleter<SyncCallback> callback_hold
   // which can cause process termination.  Also, because this fences
   // BufferAllocation clean close which itself is done async from StreamControl
   // to FIDL in some cases.
-  PostToSharedFidl([this, callback_holder = std::move(callback_holder)]() mutable {
+  PostToSharedFidl([this, completer_holder = std::move(completer_holder)]() mutable {
     ZX_DEBUG_ASSERT(IsFidl());
-    // call the held callback
-    callback_holder.held()();
+    if (IsStopping() || !binding_ref_.has_value()) {
+      // Same as above; unbind before ~completer_holder rather than replying.
+      UnbindServerBinding();
+      return;
+    }
+    completer_holder.held().Reply();
   });
 }
 
-void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_output_packet) {
+void CodecImpl::RecycleOutputPacket(RecycleOutputPacketRequest& request,
+                                    RecycleOutputPacketCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   if (IsStopping()) {
     return;
   }
+  const auto& available_output_packet = request.available_output_packet();
   if (kLogTimestampDelay) {
     LOG(INFO, "RecycleOutputPacket");
   }
@@ -1615,13 +1707,13 @@ void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_outpu
     if (IsStoppingLocked()) {
       return;
     }
-    if (!available_output_packet.has_buffer_lifetime_ordinal()) {
+    if (!available_output_packet.buffer_lifetime_ordinal().has_value()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
       FailLocked("output packet is missing buffer lifetime ordinal");
       return;
     }
-    uint64_t buffer_lifetime_ordinal = available_output_packet.buffer_lifetime_ordinal();
+    uint64_t buffer_lifetime_ordinal = *available_output_packet.buffer_lifetime_ordinal();
     if (!CheckPlausibleBufferLifetimeOrdinalLocked(kOutputPort, buffer_lifetime_ordinal)) {
       return;
     }
@@ -1655,14 +1747,14 @@ void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_outpu
           "wasn't configured yet - bad client behavior");
       return;
     }
-    if (!available_output_packet.has_packet_index()) {
+    if (!available_output_packet.packet_index().has_value()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
       FailLocked("output packet is missing packet index");
       return;
     }
 
-    uint32_t protocol_packet_index = available_output_packet.packet_index();
+    uint32_t protocol_packet_index = *available_output_packet.packet_index();
     uint32_t allocated_packet_index;
     if (IsDynamicBuffersLocked(kOutputPort)) {
       auto& protocol_packets_by_ordinal = protocol_packets_by_protocol_packet_index_[kOutputPort];
@@ -1735,9 +1827,11 @@ void CodecImpl::RecycleOutputPacket(fuchsia::media::PacketHeader available_outpu
   CoreCodecRecycleOutputPacket(packet);
 }
 
-void CodecImpl::QueueInputFormatDetails(uint64_t stream_lifetime_ordinal,
-                                        fuchsia::media::FormatDetails format_details) {
+void CodecImpl::QueueInputFormatDetails(QueueInputFormatDetailsRequest& request,
+                                        QueueInputFormatDetailsCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  uint64_t stream_lifetime_ordinal = request.stream_lifetime_ordinal();
+  auto format_details = std::move(request.format_details());
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
     if (IsStoppingLocked()) {
@@ -1748,7 +1842,7 @@ void CodecImpl::QueueInputFormatDetails(uint64_t stream_lifetime_ordinal,
     }
   }  // ~lock
 
-  if (!format_details.has_format_details_version_ordinal()) {
+  if (!format_details.format_details_version_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail(
         "client QueueInputFormatDetails(): Format details have no version "
@@ -1767,16 +1861,16 @@ void CodecImpl::QueueInputFormatDetails(uint64_t stream_lifetime_ordinal,
 // then this method setting OOB bytes (not the ideal client usage pattern in the long run since the
 // CreateDecoder() might decline to provide a optimized but partial Codec implementation, but should
 // be allowed nonetheless).
-void CodecImpl::QueueInputFormatDetails_StreamControl(
-    uint64_t stream_lifetime_ordinal, fuchsia::media::FormatDetails format_details) {
+void CodecImpl::QueueInputFormatDetails_StreamControl(uint64_t stream_lifetime_ordinal,
+                                                      fuchsia_media::FormatDetails format_details) {
   ZX_DEBUG_ASSERT(IsStreamControl());
 
   EnsureInputFormatDetailsNormalized(&format_details, IsDecryptor());
   // Declare `old_format_details` and `new_format_details` before `ScopedLock` so heap allocation
   // and destruction happen outside `lock_`.
-  std::unique_ptr<fuchsia::media::FormatDetails> old_format_details;
+  std::shared_ptr<const fuchsia_media::FormatDetails> old_format_details;
   auto new_format_details =
-      std::make_unique<fuchsia::media::FormatDetails>(std::move(format_details));
+      std::make_shared<const fuchsia_media::FormatDetails>(std::move(format_details));
 
   ScopedLock lock(lock_);
   if (IsStoppingLocked()) {
@@ -1810,12 +1904,12 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
     // No reason to handle since the stream is future-discarded (or failed).
     return;
   }
-  const fuchsia::media::FormatDetails* current_format = stream_->input_format_details()
-                                                            ? stream_->input_format_details()
-                                                            : initial_input_format_details_;
-  ZX_DEBUG_ASSERT(current_format && current_format->has_format_details_version_ordinal());
-  uint64_t new_ordinal = new_format_details->format_details_version_ordinal();
-  uint64_t last_ordinal = current_format->format_details_version_ordinal();
+  const fuchsia_media::FormatDetails* current_format = stream_->input_format_details()
+                                                           ? stream_->input_format_details().get()
+                                                           : initial_input_format_details_.get();
+  ZX_DEBUG_ASSERT(current_format && current_format->format_details_version_ordinal().has_value());
+  uint64_t new_ordinal = *new_format_details->format_details_version_ordinal();
+  uint64_t last_ordinal = *current_format->format_details_version_ordinal();
   if (new_ordinal < last_ordinal) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     FailLocked(
@@ -1826,7 +1920,7 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
   }
   if (new_ordinal == last_ordinal &&
       !stream_->input_format_details_same_version_different_content_complained_ &&
-      !fidl::Equals(*new_format_details, *current_format)) {
+      *new_format_details != *current_format) {
     // TODO(b/568171550): Switch to FailLocked(...) once clients are updated.
     // Complain (at most once per stream) if the input format changes without increasing
     // input_format_details_version_ordinal. We may switch this to strict enforcement in future.
@@ -1854,14 +1948,16 @@ void CodecImpl::QueueInputFormatDetails_StreamControl(
   stream_->SetOobConfigPending(true);
 }
 
-void CodecImpl::QueueInputPacket(fuchsia::media::Packet packet) {
+void CodecImpl::QueueInputPacket(QueueInputPacketRequest& request,
+                                 QueueInputPacketCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  auto packet = std::move(request.packet());
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
     if (IsStoppingLocked()) {
       return;
     }
-    if (!packet.has_stream_lifetime_ordinal()) {
+    if (!packet.stream_lifetime_ordinal().has_value()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
       FailLocked(
@@ -1869,78 +1965,78 @@ void CodecImpl::QueueInputPacket(fuchsia::media::Packet packet) {
           "ordinal");
       return;
     }
-    if (!EnsureFutureStreamSeenLocked(packet.stream_lifetime_ordinal())) {
+    if (!EnsureFutureStreamSeenLocked(*packet.stream_lifetime_ordinal())) {
       return;
     }
   }  // ~lock
   if (kLogTimestampDelay) {
-    LOG(INFO, "input timestamp: has: %d value: 0x%" PRIx64, packet.has_timestamp_ish(),
-        packet.has_timestamp_ish() ? packet.timestamp_ish() : 0);
+    LOG(INFO, "input timestamp: has: %d value: 0x%" PRIx64, packet.timestamp_ish().has_value(),
+        packet.timestamp_ish().has_value() ? *packet.timestamp_ish() : 0);
   }
   PostToStreamControl([this, packet = std::move(packet)]() mutable {
     QueueInputPacket_StreamControl(std::move(packet));
   });
 }
 
-void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
+void CodecImpl::QueueInputPacket_StreamControl(fuchsia_media::Packet packet) {
   ZX_DEBUG_ASSERT(IsStreamControl());
-  ZX_DEBUG_ASSERT(packet.has_stream_lifetime_ordinal());
+  ZX_DEBUG_ASSERT(packet.stream_lifetime_ordinal().has_value());
 
   // Until after creation of send_free_input_packet_locked further down, we can only return if
   // IsStoppingLocked() is true.
 
-  if (!packet.has_header()) {
+  if (!packet.header().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("QueueInputPacket with packet has no header");
     return;
   }
-  fuchsia::media::PacketHeader temp_header_copy = fidl::Clone(packet.header());
+  fuchsia_media::PacketHeader temp_header_copy = *packet.header();
 
-  if (!packet.header().has_buffer_lifetime_ordinal()) {
+  if (!packet.header()->buffer_lifetime_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail(
         "QueueInputPacket with header that has no buffer lifetime "
         "ordinal");
     return;
   }
-  uint64_t buffer_lifetime_ordinal = packet.header().buffer_lifetime_ordinal();
+  uint64_t buffer_lifetime_ordinal = *packet.header()->buffer_lifetime_ordinal();
 
-  if (!packet.has_stream_lifetime_ordinal()) {
+  if (!packet.stream_lifetime_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("QueueInputPacket without packet stream_lifetime_ordinal.");
     return;
   }
 
-  if (!packet.header().has_packet_index()) {
+  if (!packet.header()->packet_index().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("QueueInputPacket with packet has no packet index");
     return;
   }
 
-  if (!packet.has_buffer_index()) {
+  if (!packet.buffer_index().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("QueueInputPacket with packet has no buffer index");
     return;
   }
 
-  if (!packet.has_start_offset()) {
+  if (!packet.start_offset().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("client QueueInputPacket() with packet has no start offset");
     return;
   }
 
-  if (!packet.has_valid_length_bytes()) {
+  if (!packet.valid_length_bytes().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("client QueueInputPacket() with packet has no valid length bytes");
     return;
   }
 
-  if (packet.valid_length_bytes() == 0) {
+  if (*packet.valid_length_bytes() == 0) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("client QueueInputPacket() with valid_length_bytes 0 - not allowed");
     return;
   }
-  if (packet.start_offset() + packet.valid_length_bytes() < packet.start_offset()) {
+  if (*packet.start_offset() + *packet.valid_length_bytes() < *packet.start_offset()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("client QueueInputPacket() start_offset + valid_length_bytes overflow");
     return;
@@ -1959,7 +2055,7 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
       return;
     }
 
-    if (!CheckStreamLifetimeOrdinalLocked(packet.stream_lifetime_ordinal())) {
+    if (!CheckStreamLifetimeOrdinalLocked(*packet.stream_lifetime_ordinal())) {
       ZX_DEBUG_ASSERT(IsStoppingLocked());
       return;
     }
@@ -2031,22 +2127,22 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
     }
 
     // other cases rejected above
-    ZX_DEBUG_ASSERT(packet.stream_lifetime_ordinal() >= stream_lifetime_ordinal_);
+    ZX_DEBUG_ASSERT(*packet.stream_lifetime_ordinal() >= stream_lifetime_ordinal_);
 
-    if (packet.stream_lifetime_ordinal() > stream_lifetime_ordinal_) {
+    if (*packet.stream_lifetime_ordinal() > stream_lifetime_ordinal_) {
       // This case implicitly starts a new stream.  If the client wanted to
       // ensure that the old stream would be fully processed, the client would
       // have sent FlushEndOfStreamAndCloseStream() previously, whose
       // processing (previous to reaching here) takes care of the flush.
       //
       // Start a new stream, synchronously.
-      if (!StartNewStream(lock, packet.stream_lifetime_ordinal(), /*is_for_packet=*/true)) {
+      if (!StartNewStream(lock, *packet.stream_lifetime_ordinal(), /*is_for_packet=*/true)) {
         return;
       }
     }
-    ZX_DEBUG_ASSERT(packet.stream_lifetime_ordinal() == stream_lifetime_ordinal_);
+    ZX_DEBUG_ASSERT(*packet.stream_lifetime_ordinal() == stream_lifetime_ordinal_);
 
-    uint32_t protocol_packet_index = packet.header().packet_index();
+    uint32_t protocol_packet_index = *packet.header()->packet_index();
     auto& input_packets = all_packets(kInputPort);
 
     // CheckWaitEnsureInputConfigured() returned true above, so is_dynamic_buffers_[kInputPort] is
@@ -2085,13 +2181,13 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
         FailLocked(
             "QueueInputPacket with packet_index out of range - "
             "packet_index: %u size: %zu",
-            packet.header().packet_index(), input_packets.size());
+            *packet.header()->packet_index(), input_packets.size());
         return;
       }
       codec_packet = input_packets[protocol_packet_index].get();
     }
 
-    uint32_t buffer_index = packet.buffer_index();
+    uint32_t buffer_index = *packet.buffer_index();
 
     auto* buffers = all_buffers(kInputPort);
     std::optional<BuffersByIndex::iterator> buffers_iter;
@@ -2200,7 +2296,7 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
       return;
     }
 
-    if (static_cast<uint64_t>(packet.start_offset()) + packet.valid_length_bytes() >
+    if (static_cast<uint64_t>(*packet.start_offset()) + *packet.valid_length_bytes() >
         buffer->size()) {
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -2233,10 +2329,10 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
 
     ZX_DEBUG_ASSERT(buffer != nullptr);
     codec_packet->SetBuffer(buffer);
-    codec_packet->SetStartOffset(packet.start_offset());
-    codec_packet->SetValidLengthBytes(packet.valid_length_bytes());
-    if (packet.has_timestamp_ish()) {
-      codec_packet->SetTimstampIsh(packet.timestamp_ish());
+    codec_packet->SetStartOffset(*packet.start_offset());
+    codec_packet->SetValidLengthBytes(*packet.valid_length_bytes());
+    if (packet.timestamp_ish().has_value()) {
+      codec_packet->SetTimstampIsh(*packet.timestamp_ish());
     } else {
       codec_packet->ClearTimestampIsh();
     }
@@ -2266,8 +2362,10 @@ void CodecImpl::QueueInputPacket_StreamControl(fuchsia::media::Packet packet) {
   CoreCodecQueueInputPacket(codec_packet);
 }
 
-void CodecImpl::QueueInputEndOfStream(uint64_t stream_lifetime_ordinal) {
+void CodecImpl::QueueInputEndOfStream(QueueInputEndOfStreamRequest& request,
+                                      QueueInputEndOfStreamCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  uint64_t stream_lifetime_ordinal = request.stream_lifetime_ordinal();
   LogEvent(
       media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_StreamEndOfStreamInput);
   {  // scope lock
@@ -2287,7 +2385,8 @@ void CodecImpl::QueueInputEndOfStream(uint64_t stream_lifetime_ordinal) {
 // A correctly-operating client will only send this message if
 // DetailedCodecDescription.supports_dynamic_buffers was set to true.
 void CodecImpl::ParticipateInBufferAllocation(
-    fuchsia::media::StreamProcessorParticipateInBufferAllocationRequest request) {
+    ParticipateInBufferAllocationRequest& request,
+    ParticipateInBufferAllocationCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   if (!is_supports_dynamic_buffers()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -2297,53 +2396,49 @@ void CodecImpl::ParticipateInBufferAllocation(
   ZX_ASSERT(::codec_impl::internal::kEnableDynamicBuffers);
   is_force_output_buffers_fixed_image_size_message_permitted_ = false;
   ZX_DEBUG_ASSERT(!!codec_adapter_);
-  if (!request.has_port()) {
+  if (!request.port().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("ParticipateInBufferAllocation port field must be set");
     return;
   }
   CodecPort port;
-  switch (request.port()) {
-    case fuchsia::media::Port::INPUT:
+  switch (*request.port()) {
+    case fuchsia_media::Port::kInput:
       port = kInputPort;
       break;
-    case fuchsia::media::Port::OUTPUT:
+    case fuchsia_media::Port::kOutput:
       port = kOutputPort;
       break;
     default:
       LogEvent(
           media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
       Fail("ParticipateInBufferAllocation unrecognized port value - port: %u",
-           static_cast<uint32_t>(request.port()));
+           static_cast<uint32_t>(*request.port()));
       return;
   }
-  if (!request.has_buffer_constraints_version_ordinal()) {
+  if (!request.buffer_constraints_version_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("ParticipateInBufferAllocation buffer_constraints_version_ordinal field must be set");
     return;
   }
   if (port == kInputPort &&
-      request.buffer_constraints_version_ordinal() != kInputBufferConstraintsVersionOrdinal) {
+      *request.buffer_constraints_version_ordinal() != kInputBufferConstraintsVersionOrdinal) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail(
         "ParticipateInBufferAllocation buffer_constraints_version_ordinal must be 1 for input port");
     return;
   }
-  if (!request.has_sysmem2_token() || !request.sysmem2_token().is_valid()) {
+  if (!request.sysmem2_token().has_value() || !request.sysmem2_token()->is_valid()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("ParticipateInBufferAllocation sysmem2_token field must be set");
     return;
   }
-  uint64_t buffer_constraints_version_ordinal = request.buffer_constraints_version_ordinal();
-  auto token = fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>(
-      request.mutable_sysmem2_token()->TakeChannel());
-  std::optional<uint64_t> maybe_buffer_lifetime_ordinal;
-  if (request.has_buffer_lifetime_ordinal()) {
-    maybe_buffer_lifetime_ordinal = request.buffer_lifetime_ordinal();
-  }
-  bool allow_single_buffer = request.has_allow_single_buffer() && request.allow_single_buffer();
-  switch (request.port()) {
-    case fuchsia::media::Port::INPUT:
+  uint64_t buffer_constraints_version_ordinal = *request.buffer_constraints_version_ordinal();
+  auto token = std::move(*request.sysmem2_token());
+  std::optional<uint64_t> maybe_buffer_lifetime_ordinal = request.buffer_lifetime_ordinal();
+  bool allow_single_buffer = request.allow_single_buffer().value_or(false);
+  switch (*request.port()) {
+    case fuchsia_media::Port::kInput:
       // Everything input-related synchronizes by running on (and/or queueing to) the StreamControl
       // thread. This is also true for participating in buffer allocation, since the sysmem
       // constraints are allowed to depend on whether there's already a stream with other buffers
@@ -2356,7 +2451,7 @@ void CodecImpl::ParticipateInBufferAllocation(
                                               allow_single_buffer);
       });
       return;
-    case fuchsia::media::Port::OUTPUT:
+    case fuchsia_media::Port::kOutput:
       ParticipateInBufferAllocationInternal(port, buffer_constraints_version_ordinal,
                                             std::move(token), maybe_buffer_lifetime_ordinal,
                                             allow_single_buffer);
@@ -2813,9 +2908,12 @@ void CodecImpl::DeleteBuffer(CodecBuffer* buffer) {
 
 // A correctly-operating client will only send this message if
 // DetailedCodecDescription.supports_dynamic_buffers was set to true.
-void CodecImpl::RemoveBuffer(fuchsia::media::StreamProcessorRemoveBufferRequest request,
-                             RemoveBufferCallback callback) {
+void CodecImpl::RemoveBuffer(RemoveBufferRequest& request, RemoveBufferCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
+  auto async_completer = completer.ToAsync();
+  // Ensure UnbindServerBinding() runs before ~async_completer on any early error
+  // or IsStopping() return so CompleterBase doesn't trigger AbandonedAsyncReply().
+  auto unbind_on_early_return = fit::defer([this] { UnbindServerBinding(); });
   if (!is_supports_dynamic_buffers()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("client sent RemoveBuffer when !supports_dynamic_buffers");
@@ -2827,27 +2925,27 @@ void CodecImpl::RemoveBuffer(fuchsia::media::StreamProcessorRemoveBufferRequest 
     return;
   }
   ZX_DEBUG_ASSERT(!!codec_adapter_);
-  if (!request.has_port()) {
+  if (!request.port().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("RemoveBuffer must have port set");
     return;
   }
-  if (!request.has_buffer_lifetime_ordinal()) {
+  if (!request.buffer_lifetime_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("RemoveBuffer must have buffer_lifetime_ordinal set");
     return;
   }
-  if (!request.has_buffer_index()) {
+  if (!request.buffer_index().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     Fail("RemoveBuffer must have buffer_index set");
     return;
   }
   CodecPort port;
-  switch (request.port()) {
-    case fuchsia::media::Port::INPUT:
+  switch (*request.port()) {
+    case fuchsia_media::Port::kInput:
       port = kInputPort;
       break;
-    case fuchsia::media::Port::OUTPUT:
+    case fuchsia_media::Port::kOutput:
       port = kOutputPort;
       break;
     default:
@@ -2856,23 +2954,48 @@ void CodecImpl::RemoveBuffer(fuchsia::media::StreamProcessorRemoveBufferRequest 
       Fail("RemoveBuffer must have valid port set");
       return;
   }
-  uint64_t buffer_lifetime_ordinal = request.buffer_lifetime_ordinal();
-  uint32_t buffer_index = request.buffer_index();
+  uint64_t buffer_lifetime_ordinal = *request.buffer_lifetime_ordinal();
+  uint32_t buffer_index = *request.buffer_index();
   ZX_DEBUG_ASSERT(port == kInputPort || port == kOutputPort);
+  unbind_on_early_return.cancel();
   if (port == kInputPort) {
     PostToStreamControl([this, port, buffer_lifetime_ordinal, buffer_index,
-                         callback = std::move(callback)]() mutable {
-      RemoveBufferInternal(port, buffer_lifetime_ordinal, buffer_index, std::move(callback));
+                         completer_holder = ThreadSafeDeleter<RemoveBufferCompleter::Async>(
+                             &shared_fidl_queue_, std::move(async_completer))]() mutable {
+      RemoveBufferInternal(port, buffer_lifetime_ordinal, buffer_index,
+                           std::move(completer_holder));
     });
   } else {
     ZX_DEBUG_ASSERT(port == kOutputPort);
-    RemoveBufferInternal(port, buffer_lifetime_ordinal, buffer_index, std::move(callback));
+    RemoveBufferInternal(port, buffer_lifetime_ordinal, buffer_index,
+                         ThreadSafeDeleter<RemoveBufferCompleter::Async>(
+                             &shared_fidl_queue_, std::move(async_completer)));
   }
 }
 
-void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_ordinal,
-                                     uint32_t buffer_index, RemoveBufferCallback callback) {
+void CodecImpl::RemoveBufferInternal(
+    CodecPort port, uint64_t buffer_lifetime_ordinal, uint32_t buffer_index,
+    ThreadSafeDeleter<RemoveBufferCompleter::Async> completer_holder) {
   ZX_DEBUG_ASSERT(port == kInputPort && IsStreamControl() || port == kOutputPort && IsFidl());
+  // Once created below, remove_done_async owns completer_holder. It's declared here, before
+  // unbind_if_fidl_early_return, so that on any early error/stopping return the defer runs (and
+  // unbinds) before ~remove_done_async destroys the completer.
+  fit::function<void(ScopedLock&)> remove_done_async;
+  // For kOutputPort (running on fidl_thread()), unbind synchronously before ~completer_holder on
+  // any early error/stopping return, so ~Completer::Async doesn't see an abandoned reply while
+  // still bound.
+  //
+  // For kInputPort (running on StreamControl), ThreadSafeDeleter queues ~RemoveBufferCompleter
+  // onto shared_fidl_queue_. When !IsLegacyUnbind(), that's strictly after
+  // UnbindLockedInternalAsync()'s UnbindServerBinding() task. When IsLegacyUnbind(), UnbindLocked()
+  // doesn't post UnbindServerBinding(), so the completer can be destroyed while still bound, which
+  // tears down the binding (with reason AbandonedAsyncReply); that's benign since the binding is
+  // being torn down anyway.
+  auto unbind_if_fidl_early_return = fit::defer([this, port] {
+    if (port == kOutputPort) {
+      UnbindServerBinding();
+    }
+  });
   CodecBuffer::KeepAlive buffer_keep_alive;
   CodecBuffer* buffer_to_remove = nullptr;
   {  // scope lock
@@ -2916,22 +3039,30 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
       return;
     }
 
-    auto remove_done_async = [this, port,
-                              callback = std::move(callback)](ScopedLock& lock) mutable {
+    remove_done_async = [this, port,
+                         completer_holder = std::move(completer_holder)](ScopedLock& lock) mutable {
       ZX_DEBUG_ASSERT(port == kInputPort && IsStreamControl() || port == kOutputPort && IsFidl());
       lock.AssertHeld(lock_);
       if (port == kOutputPort) {
         // This must order after any queued output packets that use the buffer, so queue this in
         // order with stream output.
-        PostStreamOutputLocked([callback = std::move(callback)]() mutable {
-          std::move(callback)(fuchsia::media::StreamProcessor_RemoveBuffer_Result::WithResponse(
-              fuchsia::media::StreamProcessor_RemoveBuffer_Response{}));
+        PostStreamOutputLocked([this, completer_holder = std::move(completer_holder)]() mutable {
+          ZX_DEBUG_ASSERT(IsFidl());
+          if (IsStopping() || !binding_ref_.has_value()) {
+            UnbindServerBinding();
+            return;
+          }
+          completer_holder.held().Reply();
         });
       } else {
         ZX_DEBUG_ASSERT(port == kInputPort);
-        PostToSharedFidl([callback = std::move(callback)]() mutable {
-          std::move(callback)(fuchsia::media::StreamProcessor_RemoveBuffer_Result::WithResponse(
-              fuchsia::media::StreamProcessor_RemoveBuffer_Response{}));
+        PostToSharedFidl([this, completer_holder = std::move(completer_holder)]() mutable {
+          ZX_DEBUG_ASSERT(IsFidl());
+          if (IsStopping() || !binding_ref_.has_value()) {
+            UnbindServerBinding();
+            return;
+          }
+          completer_holder.held().Reply();
         });
       }
     };
@@ -2954,6 +3085,7 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
               port, buffer_lifetime_ordinal, buffer_index);
           return;
         }
+        unbind_if_fidl_early_return.cancel();
         adding_buffer->continue_remove_ = std::move(remove_done_async);
         // The continue_remove_ being set will be noticed during GetVmoInfo completion. Done here.
         return;
@@ -2978,6 +3110,7 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
               port, buffer_lifetime_ordinal, buffer_index);
           return;
         }
+        unbind_if_fidl_early_return.cancel();
         buffer_to_remove = active_buffer.get();
         // We complete the RemoveBuffer just after the CodecBuffer is destructed, which occurs when
         // CodecBuffer::parent_vmo_ sees ZX_VMO_ZERO_CHILDREN.
@@ -2993,6 +3126,7 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
       // possibilities, and we assume the specified buffer refers to an already-removed buffer. In
       // this path we don't enforce that there's never been any previous RemoveBuffer for the same
       // buffer.
+      unbind_if_fidl_early_return.cancel();
       std::move(remove_done_async)(lock);
       return;
     }
@@ -3032,7 +3166,7 @@ void CodecImpl::RemoveBufferInternal(CodecPort port, uint64_t buffer_lifetime_or
   // we complete the RemoveBuffer.
 }
 
-void CodecImpl::EnableOldOutputBuffers() {
+void CodecImpl::EnableOldOutputBuffers(EnableOldOutputBuffersCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   if (!is_supports_dynamic_buffers()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -3054,7 +3188,8 @@ void CodecImpl::EnableOldOutputBuffers() {
   is_enable_old_output_buffers_ = true;
 }
 
-void CodecImpl::EnableSameOutputBufferConcurrentlyInFlight() {
+void CodecImpl::EnableSameOutputBufferConcurrentlyInFlight(
+    EnableSameOutputBufferConcurrentlyInFlightCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   if (!is_supports_dynamic_buffers()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -3081,7 +3216,8 @@ void CodecImpl::EnableSameOutputBufferConcurrentlyInFlight() {
   is_enable_same_output_buffer_concurrently_in_flight_ = true;
 }
 
-void CodecImpl::EnableForceOutputBuffersFixedImageSize() {
+void CodecImpl::EnableForceOutputBuffersFixedImageSize(
+    EnableForceOutputBuffersFixedImageSizeCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   if (!is_supports_dynamic_buffers()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -3105,7 +3241,9 @@ void CodecImpl::EnableForceOutputBuffersFixedImageSize() {
   is_force_output_buffers_fixed_image_size_ = true;
 }
 
-void CodecImpl::handle_unknown_method(uint64_t ordinal, bool method_has_response) {
+void CodecImpl::handle_unknown_method(
+    fidl::UnknownMethodMetadata<fuchsia_media::StreamProcessor> metadata,
+    fidl::UnknownMethodCompleter::Sync& completer) {
   // StreamProcessor servers report which new sets of messages they support via
   // DetailedCodecDescription. Clients are not supposed to send messages that
   // the server didn't report support for via DetailedCodecDescription.
@@ -3128,7 +3266,7 @@ void CodecImpl::handle_unknown_method(uint64_t ordinal, bool method_has_response
   // unknown messages are logically strict despite not being "strict" in FIDL.
   Fail("unknown message received; closing channel - ordinal: 0x%" PRIx64
        " 'method_has_response': %u",
-       ordinal, method_has_response);
+       metadata.method_ordinal, metadata.unknown_method_type == fidl::UnknownMethodType::kTwoWay);
 }
 
 void CodecImpl::QueueInputEndOfStream_StreamControl(uint64_t stream_lifetime_ordinal) {
@@ -3341,14 +3479,10 @@ void CodecImpl::UnbindLockedInternalAsync() {
   // this is posting from unknown to shared fidl
   PostToSharedFidl([this] {
     VLOGF("UnbindLockedInternalAsync lambda on shared fidl");
-    // Go ahead and ensure the binding_ is unbound first so we stop getting fidl dispatch calls,
+    // Go ahead and ensure the binding is unbound first so we stop getting fidl dispatch calls,
     // without closing the channel yet; this isn't strictly relied on since every handler checks
     // IsStopping()/IsStoppingLocked(), but may as well end the dispatch calls first.
-    if (binding_.is_bound()) {
-      ZX_DEBUG_ASSERT(!codec_to_close_.is_valid());
-      codec_to_close_ = binding_.Unbind().TakeChannel();
-      ZX_DEBUG_ASSERT(codec_to_close_.is_valid());
-    }
+    UnbindServerBinding();
     VLOGF("calling PostToStreamControl");
     PostToStreamControl([this] {
       VLOGF("calling AsyncShutdownStepEndStreamAndRemoveInputBuffers on StreamControl");
@@ -3515,7 +3649,7 @@ void CodecImpl::AsyncShutdownStepQuitStreamControl() {
     // more work to the CodecImpl (because calling onCoreCodec... methods is not allowed when
     // there is no current stream).
     //
-    // The binding_.Unbind() has already run previously on fidl dispatcher and won't run again
+    // UnbindServerBinding() has already run previously on fidl dispatcher and won't run again
     // during EnsureUnbindCompleted().
     //
     // The stream_control_dispatcher.Join() will run during ~CodecImpl, so no more activity from
@@ -3625,7 +3759,7 @@ void CodecImpl::LegacyUnbindLockedInternal() {
       // more work to the CodecImpl (because calling onCoreCodec... methods is not allowed when
       // there is no current stream).
       //
-      // The binding_.Unbind() will run during EnsureUnbindCompleted() on the FIDL thread, so no
+      // UnbindServerBinding() will run during EnsureUnbindCompleted() on the FIDL thread, so no
       // more FIDL dispatching to this CodecImpl after that.
       //
       // The stream_control_dispatcher.Join() will run during ~CodecImpl, so no more activity from
@@ -3733,6 +3867,20 @@ void CodecImpl::Unbind() {
   // Unbind() is called from.
 }
 
+void CodecImpl::UnbindServerBinding() {
+  ZX_DEBUG_ASSERT(IsFidl());
+  if (binding_unbind_state_) {
+    binding_unbind_state_->is_codec_impl_unbinding_or_destroyed = true;
+  }
+  if (binding_ref_.has_value()) {
+    // Unbinds the channel, stopping any additional FIDL dispatching re. this CodecImpl. The
+    // channel itself is retrieved in on_unbound into binding_unbind_state_->codec_to_close and
+    // intentionally not closed until after ~CodecImpl and after ~CodecAdmission.
+    binding_ref_->Unbind();
+    binding_ref_.reset();
+  }
+}
+
 void CodecImpl::EnsureUnbindCompleted() {
   ZX_DEBUG_ASSERT(IsFidl());
   ZX_DEBUG_ASSERT(was_logically_bound_);
@@ -3744,17 +3892,7 @@ void CodecImpl::EnsureUnbindCompleted() {
 
   // Unbind from the channel so we won't see any more incoming FIDL messages. This binding doesn't
   // own "this".
-  //
-  // The Unbind() stops any additional FIDL dispatching re. this CodecImpl.
-  if (binding_.is_bound()) {
-    // This call unbinds the channel, but intentionally doesn't close the channel itself until
-    // after ~CodecImpl and after ~CodecAdmission. The intent is to prevent the possibility that
-    // overly-agressive client retries on channel closure by the server could build up many
-    // CodecImpl instances. By only closing the channel itself as the last thing after all other
-    // cleanup is fully done, we don't trigger the client to create a new CodecImpl while the old
-    // one still exists.
-    codec_to_close_ = binding_.Unbind().TakeChannel();
-  }
+  UnbindServerBinding();
 
   // Join() now after prior QuitAsync() called from StreamControl. This will be quick.
   stream_control_dispatcher_->Join();
@@ -3800,36 +3938,36 @@ void CodecImpl::EnsureUnbindCompleted() {
   }  // ~lock
 }
 
-fuchsia::mediacodec::SecureMemoryMode CodecImpl::OutputSecureMemoryMode() {
+fuchsia_mediacodec::SecureMemoryMode CodecImpl::OutputSecureMemoryMode() {
   if (!IsDecoder() && !IsDecryptor()) {
-    return fuchsia::mediacodec::SecureMemoryMode::OFF;
+    return fuchsia_mediacodec::SecureMemoryMode::kOff;
   }
   if (IsDecoder()) {
-    if (!decoder_params().has_secure_output_mode()) {
-      return fuchsia::mediacodec::SecureMemoryMode::OFF;
+    if (!decoder_params().secure_output_mode().has_value()) {
+      return fuchsia_mediacodec::SecureMemoryMode::kOff;
     }
-    return decoder_params().secure_output_mode();
+    return *decoder_params().secure_output_mode();
   } else {
     ZX_DEBUG_ASSERT(IsDecryptor());
-    if (!decryptor_params().has_require_secure_mode()) {
-      return fuchsia::mediacodec::SecureMemoryMode::OFF;
+    if (!decryptor_params().require_secure_mode().has_value()) {
+      return fuchsia_mediacodec::SecureMemoryMode::kOff;
     }
-    return decryptor_params().require_secure_mode() ? fuchsia::mediacodec::SecureMemoryMode::ON
-                                                    : fuchsia::mediacodec::SecureMemoryMode::OFF;
+    return *decryptor_params().require_secure_mode() ? fuchsia_mediacodec::SecureMemoryMode::kOn
+                                                     : fuchsia_mediacodec::SecureMemoryMode::kOff;
   }
 }
 
-fuchsia::mediacodec::SecureMemoryMode CodecImpl::InputSecureMemoryMode() {
+fuchsia_mediacodec::SecureMemoryMode CodecImpl::InputSecureMemoryMode() {
   if (!IsDecoder()) {
-    return fuchsia::mediacodec::SecureMemoryMode::OFF;
+    return fuchsia_mediacodec::SecureMemoryMode::kOff;
   }
-  if (!decoder_params().has_secure_input_mode()) {
-    return fuchsia::mediacodec::SecureMemoryMode::OFF;
+  if (!decoder_params().secure_input_mode().has_value()) {
+    return fuchsia_mediacodec::SecureMemoryMode::kOff;
   }
-  return decoder_params().secure_input_mode();
+  return *decoder_params().secure_input_mode();
 }
 
-fuchsia::mediacodec::SecureMemoryMode CodecImpl::PortSecureMemoryMode(CodecPort port) {
+fuchsia_mediacodec::SecureMemoryMode CodecImpl::PortSecureMemoryMode(CodecPort port) {
   if (port == kOutputPort) {
     return OutputSecureMemoryMode();
   } else {
@@ -3840,12 +3978,12 @@ fuchsia::mediacodec::SecureMemoryMode CodecImpl::PortSecureMemoryMode(CodecPort 
 
 bool CodecImpl::IsPortSecureRequired(CodecPort port) {
   // Return false for DYNAMIC, if/when we add that.
-  return PortSecureMemoryMode(port) == fuchsia::mediacodec::SecureMemoryMode::ON;
+  return PortSecureMemoryMode(port) == fuchsia_mediacodec::SecureMemoryMode::kOn;
 }
 
 bool CodecImpl::IsPortSecurePermitted(CodecPort port) {
   // Return true for DYNAMIC, if/when we add that.
-  return PortSecureMemoryMode(port) != fuchsia::mediacodec::SecureMemoryMode::OFF;
+  return PortSecureMemoryMode(port) != fuchsia_mediacodec::SecureMemoryMode::kOff;
 }
 
 bool CodecImpl::IsStreamActiveLocked() {
@@ -3854,43 +3992,46 @@ bool CodecImpl::IsStreamActiveLocked() {
 }
 
 void CodecImpl::SetBufferSettingsCommon(
-    ScopedLock& lock, CodecPort port, fuchsia::media::StreamBufferPartialSettings* partial_settings,
-    const fuchsia::media::StreamBufferConstraints& stream_constraints) {
+    ScopedLock& lock, CodecPort port, fuchsia_media::StreamBufferPartialSettings* partial_settings,
+    const fuchsia_media::StreamBufferConstraints& stream_constraints) {
   ZX_DEBUG_ASSERT(port == kInputPort && IsStreamControl() || port == kOutputPort && IsFidl());
   ZX_DEBUG_ASSERT(!IsStoppingLocked());
   lock.AssertHeld(lock_);
 
-  if (!partial_settings->has_buffer_lifetime_ordinal()) {
+  if (!partial_settings->buffer_lifetime_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     FailLocked("partial_settings do not have buffer lifetime ordinal");
     return;
   }
-  if (!partial_settings->has_buffer_constraints_version_ordinal()) {
+  if (!partial_settings->buffer_constraints_version_ordinal().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     FailLocked("partial_settings do not have buffer constraints version ordinal");
     return;
   }
-  if ((!partial_settings->has_sysmem_token() || !partial_settings->sysmem_token().is_valid()) &&
-      (!partial_settings->has_sysmem2_token() || !partial_settings->sysmem2_token().is_valid())) {
+  if ((!partial_settings->sysmem_token().has_value() ||
+       !partial_settings->sysmem_token()->is_valid()) &&
+      (!partial_settings->sysmem2_token().has_value() ||
+       !partial_settings->sysmem2_token()->is_valid())) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     FailLocked("partial_settings missing valid sysmem2_token (sysmem_token also missing)");
     return;
   }
-  if (partial_settings->has_sysmem_token() && partial_settings->has_sysmem2_token()) {
+  if (partial_settings->sysmem_token().has_value() &&
+      partial_settings->sysmem2_token().has_value()) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
     FailLocked(
         "partial_settings must have only sysmem2_token or sysmem_token, not both (prefer sysmem2_token)");
     return;
   }
-  if (partial_settings->has_sysmem_token() && !partial_settings->has_sysmem2_token()) {
+  if (partial_settings->sysmem_token().has_value() &&
+      !partial_settings->sysmem2_token().has_value()) {
     LOG(WARN,
         "client is using deprecated sysmem_token field; client should switch to sysmem2_token field");
     // Token channels served by sysmem serve both sysmem(1) and sysmem2 BufferCollectionToken on the
     // same channel.
-    partial_settings->set_sysmem2_token(
-        fidl::InterfaceHandle<fuchsia::sysmem2::BufferCollectionToken>(
-            partial_settings->mutable_sysmem_token()->TakeChannel()));
-    partial_settings->clear_sysmem_token();
+    partial_settings->sysmem2_token() = fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>(
+        partial_settings->sysmem_token()->TakeChannel());
+    partial_settings->sysmem_token().reset();
   }
 
   if (IsDynamicBuffersLocked(port)) {
@@ -3912,10 +4053,10 @@ void CodecImpl::SetBufferSettingsCommon(
   // Extract buffer_lifetime_ordinal and buffer_constraints_version_ordinal from
   // StreamBufferPartialSettings
   // is providing.
-  uint64_t buffer_lifetime_ordinal = partial_settings->buffer_lifetime_ordinal();
+  uint64_t buffer_lifetime_ordinal = *partial_settings->buffer_lifetime_ordinal();
 
   uint64_t buffer_constraints_version_ordinal =
-      partial_settings->buffer_constraints_version_ordinal();
+      *partial_settings->buffer_constraints_version_ordinal();
 
   if (buffer_lifetime_ordinal <= protocol_buffer_lifetime_ordinal_[port]) {
     LogEvent(media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolError);
@@ -3994,8 +4135,8 @@ void CodecImpl::SetBufferSettingsCommon(
   fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token = port_settings_[port]->TakeToken();
   // We intentionally don't want to hand the sysmem token directly to the core
   // codec, at least for now (maybe later it'll be necessary).
-  ZX_DEBUG_ASSERT(!port_settings_[port]->partial_settings().has_sysmem_token());
-  ZX_DEBUG_ASSERT(!port_settings_[port]->partial_settings().has_sysmem2_token());
+  ZX_DEBUG_ASSERT(!port_settings_[port]->partial_settings().sysmem_token().has_value());
+  ZX_DEBUG_ASSERT(!port_settings_[port]->partial_settings().sysmem2_token().has_value());
 
   fuchsia_sysmem2::BufferCollectionConstraints buffer_collection_constraints =
       [this, port, &lock, &stream_constraints]() {
@@ -4014,8 +4155,27 @@ void CodecImpl::SetBufferSettingsCommon(
         // CoreCodecGetBufferCollectionConstraints3 and fill out the result's constraints field.
         ZX_DEBUG_ASSERT(!is_supports_dynamic_buffers_);
         // fall back to CoreCodecGetBufferCollectionConstraints2
-        return CoreCodecGetBufferCollectionConstraints2(port, stream_constraints,
-                                                        port_settings_[port]->partial_settings());
+        fuchsia::media::StreamBufferPartialSettings hlcpp_partial_settings;
+        const auto& ps = port_settings_[port]->partial_settings();
+        if (ps.buffer_lifetime_ordinal().has_value()) {
+          hlcpp_partial_settings.set_buffer_lifetime_ordinal(*ps.buffer_lifetime_ordinal());
+        }
+        if (ps.buffer_constraints_version_ordinal().has_value()) {
+          hlcpp_partial_settings.set_buffer_constraints_version_ordinal(
+              *ps.buffer_constraints_version_ordinal());
+        }
+        if (ps.single_buffer_mode().has_value()) {
+          hlcpp_partial_settings.set_single_buffer_mode(*ps.single_buffer_mode());
+        }
+        if (ps.packet_count_for_server().has_value()) {
+          hlcpp_partial_settings.set_packet_count_for_server(*ps.packet_count_for_server());
+        }
+        if (ps.packet_count_for_client().has_value()) {
+          hlcpp_partial_settings.set_packet_count_for_client(*ps.packet_count_for_client());
+        }
+        return CoreCodecGetBufferCollectionConstraints2(
+            port, fidl::NaturalToHLCPP(fuchsia_media::StreamBufferConstraints(stream_constraints)),
+            hlcpp_partial_settings);
       }();
   // TA analysis doesn't pick up on the fact that we're running a lambda above, so doesn't
   // erroneously complain about lock_ not being held here (as it would without the lambda), but
@@ -4628,12 +4788,12 @@ void CodecImpl::EnsureBuffersNotConfigured(ScopedLock& lock, CodecPort port, boo
 }
 
 bool CodecImpl::ValidatePartialBufferSettingsVsConstraintsLocked(
-    CodecPort port, const fuchsia::media::StreamBufferPartialSettings& partial_settings,
-    const fuchsia::media::StreamBufferConstraints& constraints) {
+    CodecPort port, const fuchsia_media::StreamBufferPartialSettings& partial_settings,
+    const fuchsia_media::StreamBufferConstraints& constraints) {
   // Most of the constraints will be handled by telling sysmem about them, not
   // via the client, so there's not a ton to validate here.
-  if (partial_settings.has_single_buffer_mode()) {
-    if (partial_settings.single_buffer_mode()) {
+  if (partial_settings.single_buffer_mode().has_value()) {
+    if (*partial_settings.single_buffer_mode()) {
       LogEvent(media_metrics::
                    StreamProcessorEvents2MigratedMetricDimensionEvent_ClientConstraintsFailure);
       FailLocked("single_buffer_mode (deprecated; obsolete)");
@@ -4644,13 +4804,14 @@ bool CodecImpl::ValidatePartialBufferSettingsVsConstraintsLocked(
           "false (deprecated; obsolete)");
     }
   }
-  ZX_DEBUG_ASSERT(partial_settings.sysmem2_token().is_valid());
+  ZX_DEBUG_ASSERT(partial_settings.sysmem2_token().has_value() &&
+                  partial_settings.sysmem2_token()->is_valid());
   return true;
 }
 
 // A correctly-operating client will only send this message if
 // DetailedCodecDescription.supports_dynamic_buffers was set to true.
-void CodecImpl::AddBuffer(fuchsia::media::StreamProcessorAddBufferRequest request) {
+void CodecImpl::AddBuffer(AddBufferRequest& request, AddBufferCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(IsFidl());
   if (!is_supports_dynamic_buffers()) {
     LogEvent(
@@ -4664,60 +4825,60 @@ void CodecImpl::AddBuffer(fuchsia::media::StreamProcessorAddBufferRequest reques
     return;
   }
   is_force_output_buffers_fixed_image_size_message_permitted_ = false;
-  if (!request.has_port()) {
+  if (!request.port().has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer port must be set");
     return;
   }
-  auto maybe_codec_port = CodecPortFromFidlPort(request.port());
+  auto maybe_codec_port = CodecPortFromFidlPort(*request.port());
   if (!maybe_codec_port.has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
-    Fail("AddBuffer port unrecognized - port: %u", static_cast<uint32_t>(request.port()));
+    Fail("AddBuffer port unrecognized - port: %u", static_cast<uint32_t>(*request.port()));
     return;
   }
   CodecPort port = *maybe_codec_port;
-  if (!request.has_buffer_constraints_version_ordinal()) {
+  if (!request.buffer_constraints_version_ordinal().has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer buffer_constraints_version_ordinal must be set");
     return;
   }
-  uint64_t buffer_constraints_version_ordinal = request.buffer_constraints_version_ordinal();
-  if (!request.has_buffer_lifetime_ordinal()) {
+  uint64_t buffer_constraints_version_ordinal = *request.buffer_constraints_version_ordinal();
+  if (!request.buffer_lifetime_ordinal().has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer must have buffer_lifetime_ordinal set");
     return;
   }
-  uint64_t buffer_lifetime_ordinal = request.buffer_lifetime_ordinal();
+  uint64_t buffer_lifetime_ordinal = *request.buffer_lifetime_ordinal();
   if (buffer_lifetime_ordinal % 2 == 0) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer buffer_lifetime_ordinal values must be odd");
     return;
   }
-  if (!request.has_buffer_index()) {
+  if (!request.buffer_index().has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer buffer_index must be set");
     return;
   }
-  uint32_t buffer_index = request.buffer_index();
-  if (!request.has_buffer()) {
+  uint32_t buffer_index = *request.buffer_index();
+  if (!request.buffer().has_value()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer buffer must be set");
     return;
   }
-  if (!request.buffer().is_valid()) {
+  if (!request.buffer()->is_valid()) {
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_ClientProtocolFailure);
     Fail("AddBuffer buffer must be valid handle");
     return;
   }
-  zx::vmo buffer = std::move(*request.mutable_buffer());
+  zx::vmo buffer = std::move(*request.buffer());
   ZX_DEBUG_ASSERT(port == kInputPort || port == kOutputPort);
   if (port == kInputPort) {
     PostToStreamControl([this, port, buffer_constraints_version_ordinal, buffer_lifetime_ordinal,
@@ -6310,7 +6471,7 @@ void CodecImpl::StartIgnoringClientOldOutputConfig(ScopedLock& lock) {
 }
 
 void CodecImpl::TryFillDynamicStreamBufferConstraintsFields(
-    CodecPort port, fuchsia::media::StreamBufferConstraints& stream_buffer_constraints) {
+    CodecPort port, fuchsia_media::StreamBufferConstraints& stream_buffer_constraints) {
   // We may not get constraints this way, and we prefer not to fall back to
   // CoreCodecGetBufferCollectionConstraints2 here because that'd be checken-and-egg between
   // StreamBufferConstraints and a parameter to CoreCodecGetBufferCollectionConstraints2. The fields
@@ -6323,36 +6484,49 @@ void CodecImpl::TryFillDynamicStreamBufferConstraintsFields(
   ZX_DEBUG_ASSERT(!is_supports_dynamic_buffers_ || maybe_constraints_and_version.has_value());
   if (maybe_constraints_and_version.has_value()) {
     auto& buffer_collection_constraints = maybe_constraints_and_version->constraints;
-    ZX_DEBUG_ASSERT(buffer_collection_constraints.min_buffer_count_for_camping().has_value());
-    stream_buffer_constraints.set_buffer_count_for_server_current(
-        std::max(*buffer_collection_constraints.min_buffer_count_for_camping(),
-                 buffer_collection_constraints.min_buffer_count().has_value()
-                     ? *buffer_collection_constraints.min_buffer_count()
-                     : 1) +
-        (buffer_collection_constraints.min_buffer_count_for_dedicated_slack().has_value()
-             ? *buffer_collection_constraints.min_buffer_count_for_dedicated_slack()
-             : 0));
+    ZX_DEBUG_ASSERT(!is_supports_dynamic_buffers_ ||
+                    buffer_collection_constraints.min_buffer_count_for_camping().has_value());
+    if (buffer_collection_constraints.min_buffer_count_for_camping().has_value()) {
+      stream_buffer_constraints.buffer_count_for_server_current() =
+          std::max(*buffer_collection_constraints.min_buffer_count_for_camping(),
+                   buffer_collection_constraints.min_buffer_count().has_value()
+                       ? *buffer_collection_constraints.min_buffer_count()
+                       : 1) +
+          (buffer_collection_constraints.min_buffer_count_for_dedicated_slack().has_value()
+               ? *buffer_collection_constraints.min_buffer_count_for_dedicated_slack()
+               : 0);
+    }
     if (buffer_collection_constraints.image_format_constraints().has_value()) {
-      ZX_DEBUG_ASSERT(!buffer_collection_constraints.image_format_constraints()->empty());
-      auto& format_zero = buffer_collection_constraints.image_format_constraints()->at(0);
-      ZX_DEBUG_ASSERT(format_zero.required_min_size().has_value());
-      // intentional clone, just for clarity
-      auto min_size = *format_zero.required_min_size();
-      if (format_zero.size_alignment().has_value()) {
-        // This increases the chance that stream_buffer_constraints.size will match the 2d size
-        // sysmem ends up allocating, though this isn't sufficient to guarantee they'll match in all
-        // potential situations, depending on other fields and other participants. The CodecAdapter
-        // should not rely on sysmem to necessarily allocate buffer(s) with `size` equal to the
-        // `min_size` computed here.
-        auto& size_alignment = *format_zero.size_alignment();
-        min_size.width() = fbl::round_up(min_size.width(), size_alignment.width());
-        min_size.height() = fbl::round_up(min_size.height(), size_alignment.height());
+      ZX_DEBUG_ASSERT(!is_supports_dynamic_buffers_ ||
+                      !buffer_collection_constraints.image_format_constraints()->empty());
+      if (!buffer_collection_constraints.image_format_constraints()->empty()) {
+        auto& format_zero = buffer_collection_constraints.image_format_constraints()->at(0);
+        ZX_DEBUG_ASSERT(!is_supports_dynamic_buffers_ ||
+                        format_zero.required_min_size().has_value());
+        if (format_zero.required_min_size().has_value()) {
+          // intentional clone, just for clarity
+          auto min_size = *format_zero.required_min_size();
+          if (format_zero.size_alignment().has_value()) {
+            // This increases the chance that stream_buffer_constraints.size will match the 2d size
+            // sysmem ends up allocating, though this isn't sufficient to guarantee they'll match in
+            // all potential situations, depending on other fields and other participants. The
+            // CodecAdapter should not rely on sysmem to necessarily allocate buffer(s) with `size`
+            // equal to the `min_size` computed here.
+            auto& size_alignment = *format_zero.size_alignment();
+            if (size_alignment.width() != 0) {
+              min_size.width() = fbl::round_up(min_size.width(), size_alignment.width());
+            }
+            if (size_alignment.height() != 0) {
+              min_size.height() = fbl::round_up(min_size.height(), size_alignment.height());
+            }
+          }
+          stream_buffer_constraints.size() = min_size;
+        }
+        ZX_DEBUG_ASSERT(!is_supports_dynamic_buffers_ || format_zero.pixel_format().has_value());
+        if (format_zero.pixel_format().has_value()) {
+          stream_buffer_constraints.pixel_format() = *format_zero.pixel_format();
+        }
       }
-      stream_buffer_constraints.set_size({min_size.width(), min_size.height()});
-      ZX_DEBUG_ASSERT(format_zero.pixel_format().has_value());
-      auto& pixel_format = *format_zero.pixel_format();
-      stream_buffer_constraints.set_pixel_format(
-          fuchsia::images2::PixelFormat{static_cast<uint32_t>(pixel_format)});
     }
   }
 }
@@ -6375,12 +6549,12 @@ void CodecImpl::GenerateAndSendNewOutputConstraints(ScopedLock& lock,
   ZX_DEBUG_ASSERT(last_required_buffer_constraints_version_ordinal_[kOutputPort] ==
                   new_output_buffer_constraints_version_ordinal);
 
-  auto output_constraints = std::make_unique<fuchsia::media::StreamOutputConstraints>();
-  output_constraints->set_stream_lifetime_ordinal(current_stream_lifetime_ordinal);
-  output_constraints->set_buffer_constraints_action_required(true);
-  auto& buffer_constraints = *output_constraints->mutable_buffer_constraints();
-  buffer_constraints.set_buffer_constraints_version_ordinal(
-      new_output_buffer_constraints_version_ordinal);
+  auto output_constraints = std::make_unique<fuchsia_media::StreamOutputConstraints>();
+  output_constraints->stream_lifetime_ordinal() = current_stream_lifetime_ordinal;
+  output_constraints->buffer_constraints_action_required() = true;
+  auto& buffer_constraints = output_constraints->buffer_constraints().emplace();
+  buffer_constraints.buffer_constraints_version_ordinal() =
+      new_output_buffer_constraints_version_ordinal;
   {  // scope unlock
     ScopedUnlock unlock(*this);
     TryFillDynamicStreamBufferConstraintsFields(kOutputPort, buffer_constraints);
@@ -6440,7 +6614,7 @@ void CodecImpl::GenerateAndSendNewOutputConstraints(ScopedLock& lock,
   // This gets posted to the output queue to be ordered after any previous output. When this runs
   // on the output queue it pauses the output queue until the client has provided new buffers that
   // conform to the new constraints.
-  PostStreamOutputLocked([this, output_constraints = fidl::Clone(*output_constraints_),
+  PostStreamOutputLocked([this, output_constraints = *output_constraints_,
                           shared_stream_future_discarded = stream_->shared_future_discarded(),
                           paused_output = std::move(paused_output)]() mutable {
     if (IsStopping()) {
@@ -6450,8 +6624,10 @@ void CodecImpl::GenerateAndSendNewOutputConstraints(ScopedLock& lock,
       return;
     }
     // See "is_bound_checks" comment up top.
-    if (binding_.is_bound()) {
-      binding_.events().OnOutputConstraints(std::move(output_constraints));
+    if (binding_ref_.has_value()) {
+      fit::result<fidl::OneWayError> result =
+          fidl::SendEvent(*binding_ref_)->OnOutputConstraints({std::move(output_constraints)});
+      (void)result;
     }
     // Else the current lambda wouldn't be running.
     ZX_DEBUG_ASSERT(!maybe_weak_paused_output_.has_value());
@@ -6784,24 +6960,26 @@ bool CodecImpl::FixupBufferCollectionConstraintsLocked(
   return true;
 }
 
-void CodecImpl::SendFreeInputPacketLocked(fuchsia::media::PacketHeader header) {
+void CodecImpl::SendFreeInputPacketLocked(fuchsia_media::PacketHeader header) {
   // We allow calling this method on StreamControl or core codec/InputData
   // ordering domain.
   ZX_DEBUG_ASSERT(IsStreamControl() || IsCoreCodec());
 
   auto& protocol_packets_by_ordinal = protocol_packets_by_protocol_packet_index_[kInputPort];
   auto protocol_packets_by_ordinal_iter =
-      protocol_packets_by_ordinal.find(header.buffer_lifetime_ordinal());
+      protocol_packets_by_ordinal.find(*header.buffer_lifetime_ordinal());
   if (protocol_packets_by_ordinal_iter != protocol_packets_by_ordinal.end()) {
     auto& protocol_packets_by_index = protocol_packets_by_ordinal_iter->second;
-    protocol_packets_by_index.erase(header.packet_index());
+    protocol_packets_by_index.erase(*header.packet_index());
   }
 
   // We only send using fidl ordering domain.
   PostToSharedFidl([this, header = std::move(header)]() mutable {
     // See "is_bound_checks" comment up top.
-    if (binding_.is_bound()) {
-      binding_.events().OnFreeInputPacket(std::move(header));
+    if (binding_ref_.has_value()) {
+      fit::result<fidl::OneWayError> result =
+          fidl::SendEvent(*binding_ref_)->OnFreeInputPacket({std::move(header)});
+      (void)result;
     }
   });
 }
@@ -7207,19 +7385,19 @@ bool CodecImpl::IsEncoder() const { return params_.index() == 1; }
 
 bool CodecImpl::IsDecryptor() const { return params_.index() == 2; }
 
-const fuchsia::mediacodec::CreateDecoder_Params& CodecImpl::decoder_params() const {
+const fuchsia_mediacodec::CreateDecoderParams& CodecImpl::decoder_params() const {
   ZX_DEBUG_ASSERT(IsDecoder());
-  return std::get<fuchsia::mediacodec::CreateDecoder_Params>(params_);
+  return std::get<fuchsia_mediacodec::CreateDecoderParams>(params_);
 }
 
-const fuchsia::mediacodec::CreateEncoder_Params& CodecImpl::encoder_params() const {
+const fuchsia_mediacodec::CreateEncoderParams& CodecImpl::encoder_params() const {
   ZX_DEBUG_ASSERT(IsEncoder());
-  return std::get<fuchsia::mediacodec::CreateEncoder_Params>(params_);
+  return std::get<fuchsia_mediacodec::CreateEncoderParams>(params_);
 }
 
-const fuchsia::media::drm::DecryptorParams& CodecImpl::decryptor_params() const {
+const fuchsia_media_drm::DecryptorParams& CodecImpl::decryptor_params() const {
   ZX_DEBUG_ASSERT(IsDecryptor());
-  return std::get<fuchsia::media::drm::DecryptorParams>(params_);
+  return std::get<fuchsia_media_drm::DecryptorParams>(params_);
 }
 
 void CodecImpl::LogEvent(
@@ -7294,14 +7472,11 @@ bool CodecImpl::IsCoreCodec() {
 
 void CodecImpl::HandlePendingInputFormatDetails() {
   ZX_DEBUG_ASSERT(IsStreamControl());
-  const fuchsia::media::FormatDetails* input_details = nullptr;
-  if (stream_->input_format_details()) {
-    input_details = stream_->input_format_details();
-  } else {
-    input_details = initial_input_format_details_;
-  }
+  std::shared_ptr<const fuchsia_media::FormatDetails> input_details =
+      stream_->input_format_details() ? stream_->input_format_details()
+                                      : initial_input_format_details_;
   ZX_DEBUG_ASSERT(input_details);
-  CoreCodecQueueInputFormatDetails(*input_details);
+  CoreCodecQueueInputFormatDetails(std::move(input_details));
 }
 
 std::string CodecImpl::GetBufferName(CodecPort port) {
@@ -7331,6 +7506,10 @@ void CodecImpl::onCoreCodecFailCodec(const char* format, ...) {
 }
 
 void CodecImpl::onCoreCodecFailStream(fuchsia::media::StreamError error) {
+  onCoreCodecFailStream(fidl::HLCPPToNatural(error));
+}
+
+void CodecImpl::onCoreCodecFailStream(fuchsia_media::StreamError error) {
   {  // scope lock
     LogEvent(
         media_metrics::StreamProcessorEvents2MigratedMetricDimensionEvent_StreamFailureAnyReason);
@@ -7462,8 +7641,10 @@ void CodecImpl::onCoreCodecFailStream(fuchsia::media::StreamError error) {
     // StreamControl above.
     PostToSharedFidl([this, stream_lifetime_ordinal = stream_lifetime_ordinal_, error] {
       // See "is_bound_checks" comment up top.
-      if (binding_.is_bound()) {
-        binding_.events().OnStreamFailed(stream_lifetime_ordinal, error);
+      if (binding_ref_.has_value()) {
+        fit::result<fidl::OneWayError> result =
+            fidl::SendEvent(*binding_ref_)->OnStreamFailed({stream_lifetime_ordinal, error});
+        (void)result;
       }
     });
   }  // ~lock
@@ -7686,9 +7867,9 @@ void CodecImpl::onCoreCodecInputPacketDone(const CodecPacket* packet_param) {
       }
     }
 
-    fuchsia::media::PacketHeader header;
-    header.set_buffer_lifetime_ordinal(buffer_lifetime_ordinal);
-    header.set_packet_index(protocol_packet_index);
+    fuchsia_media::PacketHeader header;
+    header.buffer_lifetime_ordinal() = buffer_lifetime_ordinal;
+    header.packet_index() = protocol_packet_index;
     SendFreeInputPacketLocked(std::move(header));
   }  // ~lock
 }
@@ -8006,7 +8187,7 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
       uint64_t stream_lifetime_ordinal = stream_lifetime_ordinal_;
       uint64_t new_output_format_details_version_ordinal =
           next_output_format_details_version_ordinal_++;
-      fuchsia::media::StreamOutputFormat output_format;
+      fuchsia_media::StreamOutputFormat output_format;
       {  // scope unlock
         // packets_for_ordinal is a reference to the std::vector<std::unique_ptr<CodecPacket>>
         // container object itself (the mapped value inside the std::unordered_map node of
@@ -8023,12 +8204,12 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
         // packets_for_ordinal is only indexed again via operator[] after lock_ is re-acquired
         // below.
         ScopedUnlock unlock(*this);
-        VLOGF("calling CoreCodecGetOutputFormat");
-        output_format = CoreCodecGetOutputFormat(stream_lifetime_ordinal,
-                                                 new_output_format_details_version_ordinal);
+        VLOGF("calling CoreCodecGetOutputFormat2");
+        output_format = CoreCodecGetOutputFormat2(stream_lifetime_ordinal,
+                                                  new_output_format_details_version_ordinal);
       }  // ~unlock
       lock.AssertHeld(lock_);
-      ZX_DEBUG_ASSERT(output_format.has_format_details());
+      ZX_DEBUG_ASSERT(output_format.format_details().has_value());
       // Stream change while unlocked above won't happen because we're on
       // InputData domain which is fenced as part of stream switch.
       ZX_DEBUG_ASSERT(stream_lifetime_ordinal == stream_lifetime_ordinal_);
@@ -8051,9 +8232,11 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
               return;
             }
             // See "is_bound_checks" comment up top.
-            if (binding_.is_bound()) {
+            if (binding_ref_.has_value()) {
               VLOGF("calling OnOutputFormat");
-              binding_.events().OnOutputFormat(std::move(output_format));
+              fit::result<fidl::OneWayError> result =
+                  fidl::SendEvent(*binding_ref_)->OnOutputFormat({std::move(output_format)});
+              (void)result;
             }
           });
     }
@@ -8074,24 +8257,24 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
     // that the client gets no set timestamp_ish values if the client didn't
     // promise_separate_access_units_on_input.
     bool has_timestamp_ish =
-        (!IsDecoder() || (decoder_params().has_promise_separate_access_units_on_input() &&
-                          decoder_params().promise_separate_access_units_on_input())) &&
+        (!IsDecoder() || (decoder_params().promise_separate_access_units_on_input().has_value() &&
+                          *decoder_params().promise_separate_access_units_on_input())) &&
         packet->has_timestamp_ish();
-    fuchsia::media::Packet p;
-    p.mutable_header()->set_buffer_lifetime_ordinal(buffer_lifetime_ordinal);
-    p.mutable_header()->set_packet_index(protocol_packet_index);
-    p.set_buffer_index(packet->buffer()->index());
-    p.set_stream_lifetime_ordinal(stream_lifetime_ordinal_);
-    p.set_start_offset(packet->start_offset());
-    p.set_valid_length_bytes(packet->valid_length_bytes());
+    fuchsia_media::Packet p;
+    p.header().emplace().buffer_lifetime_ordinal() = buffer_lifetime_ordinal;
+    p.header()->packet_index() = protocol_packet_index;
+    p.buffer_index() = packet->buffer()->index();
+    p.stream_lifetime_ordinal() = stream_lifetime_ordinal_;
+    p.start_offset() = packet->start_offset();
+    p.valid_length_bytes() = packet->valid_length_bytes();
     if (has_timestamp_ish) {
-      p.set_timestamp_ish(packet->timestamp_ish());
+      p.timestamp_ish() = packet->timestamp_ish();
     }
     if (packet->has_key_frame()) {
-      p.set_key_frame(packet->key_frame());
+      p.key_frame() = packet->key_frame();
     }
-    p.set_start_access_unit(true);
-    p.set_known_end_access_unit(true);
+    p.start_access_unit() = true;
+    p.known_end_access_unit() = true;
     VLOGF("posting to call OnOutputPacket - packet ptr: %p index: %u", packet,
           packet->allocated_packet_index());
     // This same queue is used for OnOutputFormat and RemoveBuffer completions, so those will order
@@ -8118,8 +8301,8 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
           return;
         }
         // See "is_bound_checks" comment up top.
-        if (!binding_.is_bound()) {
-          VLOGF("!binding_.is_bound()");
+        if (!binding_ref_.has_value()) {
+          VLOGF("!binding_ref_.has_value()");
           // Despite CodecImpl and CodecAdapter going away soon, it's important to
           // ShortCircuitOutputPacketLocked here when dynamic buffers are supported by the
           // CodecAdapter, because the CodecAdapter's CoreCodecStopStream can depend on it.
@@ -8142,13 +8325,16 @@ void CodecImpl::onCoreCodecOutputPacket(CodecPacket* packet, bool error_detected
         packet->SetQueued(false);
       }
 
-      ZX_DEBUG_ASSERT(binding_.is_bound());
+      ZX_DEBUG_ASSERT(binding_ref_.has_value());
       if (kLogTimestampDelay) {
-        LOG(INFO, "output timestamp: has: %d value: 0x%" PRIx64, p.has_timestamp_ish(),
-            p.has_timestamp_ish() ? p.timestamp_ish() : 0);
+        LOG(INFO, "output timestamp: has: %d value: 0x%" PRIx64, p.timestamp_ish().has_value(),
+            p.timestamp_ish().has_value() ? *p.timestamp_ish() : 0);
       }
       VLOGF("calling OnOutputPacket");
-      binding_.events().OnOutputPacket(std::move(p), error_detected_before, error_detected_during);
+      fit::result<fidl::OneWayError> result =
+          fidl::SendEvent(*binding_ref_)
+              ->OnOutputPacket({std::move(p), error_detected_before, error_detected_during});
+      (void)result;
     });
   }  // ~lock
 }
@@ -8178,11 +8364,13 @@ void CodecImpl::onCoreCodecOutputTimestampHasNoOutput(uint64_t timestamp_ish) {
       if (stream_shared_future_discarded->load(std::memory_order_seq_cst)) {
         return;
       }
-      if (binding_.is_bound()) {
-        fuchsia::media::StreamProcessorOnOutputTimestampHasNoOutputRequest event;
-        event.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-        event.set_timestamp_ish(timestamp_ish);
-        binding_.events().OnOutputTimestampHasNoOutput(std::move(event));
+      if (binding_ref_.has_value()) {
+        fuchsia_media::StreamProcessorOnOutputTimestampHasNoOutputRequest event;
+        event.stream_lifetime_ordinal() = stream_lifetime_ordinal;
+        event.timestamp_ish() = timestamp_ish;
+        fit::result<fidl::OneWayError> result =
+            fidl::SendEvent(*binding_ref_)->OnOutputTimestampHasNoOutput(std::move(event));
+        (void)result;
       }
     });
   }  // ~lock
@@ -8218,10 +8406,13 @@ void CodecImpl::onCoreCodecOutputEndOfStream(bool error_detected_before) {
         return;
       }
       // See "is_bound_checks" comment up top.
-      if (binding_.is_bound()) {
+      if (binding_ref_.has_value()) {
         LogEvent(media_metrics::
                      StreamProcessorEvents2MigratedMetricDimensionEvent_StreamEndOfStreamOutput);
-        binding_.events().OnOutputEndOfStream(stream_lifetime_ordinal, error_detected_before);
+        fit::result<fidl::OneWayError> result =
+            fidl::SendEvent(*binding_ref_)
+                ->OnOutputEndOfStream({stream_lifetime_ordinal, error_detected_before});
+        (void)result;
       }
     });
   }  // ~lock
@@ -8276,14 +8467,15 @@ CodecImpl::Stream::~Stream() {
   VLOGF("~Stream() stream_lifetime_ordinal: %lu", stream_lifetime_ordinal_);
 }
 
-std::unique_ptr<fuchsia::media::FormatDetails> CodecImpl::Stream::SetInputFormatDetails(
-    std::unique_ptr<fuchsia::media::FormatDetails> input_format_details) {
+std::shared_ptr<const fuchsia_media::FormatDetails> CodecImpl::Stream::SetInputFormatDetails(
+    std::shared_ptr<const fuchsia_media::FormatDetails> input_format_details) {
   // This is allowed to happen multiple times per stream.
   return std::exchange(input_format_details_, std::move(input_format_details));
 }
 
-const fuchsia::media::FormatDetails* CodecImpl::Stream::input_format_details() {
-  return input_format_details_.get();
+const std::shared_ptr<const fuchsia_media::FormatDetails>&
+CodecImpl::Stream::input_format_details() {
+  return input_format_details_;
 }
 
 void CodecImpl::Stream::SetOobConfigPending(bool pending) {
@@ -8323,13 +8515,13 @@ void CodecImpl::Stream::ClearOutputFormatPending() { output_format_pending_ = fa
 bool CodecImpl::Stream::output_format_pending() { return output_format_pending_; }
 
 CodecImpl::PortSettings::PortSettings(CodecImpl* parent, CodecPort port,
-                                      fuchsia::media::StreamBufferPartialSettings partial_settings)
+                                      fuchsia_media::StreamBufferPartialSettings partial_settings)
     : parent_(parent),
       port_(port),
-      partial_settings_(std::make_unique<fuchsia::media::StreamBufferPartialSettings>(
+      partial_settings_(std::make_unique<fuchsia_media::StreamBufferPartialSettings>(
           std::move(partial_settings))),
-      buffer_constraints_version_ordinal_(partial_settings_->buffer_constraints_version_ordinal()),
-      buffer_lifetime_ordinal_(partial_settings_->buffer_lifetime_ordinal()) {}
+      buffer_constraints_version_ordinal_(*partial_settings_->buffer_constraints_version_ordinal()),
+      buffer_lifetime_ordinal_(*partial_settings_->buffer_lifetime_ordinal()) {}
 
 CodecImpl::PortSettings::PortSettings(CodecImpl* parent, CodecPort port,
                                       uint64_t buffer_constraints_version_ordinal,
@@ -8429,16 +8621,15 @@ fuchsia_sysmem2::CoherencyDomain CodecImpl::PortSettings::coherency_domain() {
   return buffer_collection_info_->settings()->buffer_settings()->coherency_domain().value();
 }
 
-const fuchsia::media::StreamBufferPartialSettings& CodecImpl::PortSettings::partial_settings() {
+const fuchsia_media::StreamBufferPartialSettings& CodecImpl::PortSettings::partial_settings() {
   return *partial_settings_;
 }
 
 fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> CodecImpl::PortSettings::TakeToken() {
-  ZX_DEBUG_ASSERT(!partial_settings_->has_sysmem_token());
-  ZX_DEBUG_ASSERT(partial_settings_->has_sysmem2_token());
-  auto token = fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>(
-      partial_settings_->mutable_sysmem2_token()->TakeChannel());
-  partial_settings_->clear_sysmem2_token();
+  ZX_DEBUG_ASSERT(!partial_settings_->sysmem_token().has_value());
+  ZX_DEBUG_ASSERT(partial_settings_->sysmem2_token().has_value());
+  auto token = std::move(*partial_settings_->sysmem2_token());
+  partial_settings_->sysmem2_token().reset();
   return token;
 }
 
@@ -8547,13 +8738,14 @@ CodecImpl::PausedOutput::~PausedOutput() {
 // methods instead of virtual methods.
 //
 
-void CodecImpl::CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) {
+void CodecImpl::CoreCodecInit(
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
   ZX_DEBUG_ASSERT(IsStreamControl());
-  codec_adapter_->CoreCodecInit(initial_input_format_details);
+  codec_adapter_->CoreCodecInit(std::move(initial_input_format_details));
 }
 
 void CodecImpl::CoreCodecSetSecureMemoryMode(
-    CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode) {
+    CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode) {
   ZX_DEBUG_ASSERT(IsStreamControl());
   codec_adapter_->CoreCodecSetSecureMemoryMode(port, secure_memory_mode);
 }
@@ -8625,9 +8817,9 @@ void CodecImpl::CoreCodecStartStream() {
 }
 
 void CodecImpl::CoreCodecQueueInputFormatDetails(
-    const fuchsia::media::FormatDetails& per_stream_override_format_details) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details) {
   ZX_DEBUG_ASSERT(IsStreamControl());
-  codec_adapter_->CoreCodecQueueInputFormatDetails(per_stream_override_format_details);
+  codec_adapter_->CoreCodecQueueInputFormatDetails(std::move(per_stream_override_format_details));
 }
 
 void CodecImpl::CoreCodecQueueInputPacket(const CodecPacket* packet) {
@@ -8677,22 +8869,28 @@ zx::unowned_bti CodecImpl::CoreCodecBti() {
   return codec_adapter_->CoreCodecBti();
 }
 
-fuchsia::media::StreamOutputFormat CodecImpl::CoreCodecGetOutputFormat(
+fuchsia_media::StreamOutputFormat CodecImpl::CoreCodecGetOutputFormat2(
     uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
   ZX_DEBUG_ASSERT(IsCoreCodec());
-  fuchsia::media::StreamOutputFormat format = codec_adapter_->CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat format = codec_adapter_->CoreCodecGetOutputFormat2(
       stream_lifetime_ordinal, new_output_format_details_version_ordinal);
-  ZX_DEBUG_ASSERT(format.has_stream_lifetime_ordinal());
-  ZX_DEBUG_ASSERT(format.stream_lifetime_ordinal() == stream_lifetime_ordinal);
-  ZX_DEBUG_ASSERT(format.has_format_details());
-  ZX_DEBUG_ASSERT(format.format_details().has_format_details_version_ordinal());
-  ZX_DEBUG_ASSERT(format.format_details().format_details_version_ordinal() ==
+  ZX_DEBUG_ASSERT(format.stream_lifetime_ordinal().has_value());
+  ZX_DEBUG_ASSERT(*format.stream_lifetime_ordinal() == stream_lifetime_ordinal);
+  ZX_DEBUG_ASSERT(format.format_details().has_value());
+  ZX_DEBUG_ASSERT(format.format_details()->format_details_version_ordinal().has_value());
+  ZX_DEBUG_ASSERT(*format.format_details()->format_details_version_ordinal() ==
                   new_output_format_details_version_ordinal);
-  if (IsDecryptor() && !format.format_details().has_domain() &&
-      !format.format_details().has_encrypted_format()) {
-    format.mutable_format_details()->mutable_domain()->crypto().decrypted();
+  // Preserve the old HLCPP mutable_format_details() semantics of creating format_details if absent
+  // (only possible in release builds given the ZX_DEBUG_ASSERT()s above).
+  if (!format.format_details().has_value()) {
+    format.format_details().emplace();
   }
-  EnsureFormatDetailsBridged(format.mutable_format_details());
+  if (IsDecryptor() && !format.format_details()->domain().has_value() &&
+      !format.format_details()->encrypted_format().has_value()) {
+    format.format_details()->domain() = fuchsia_media::DomainFormat::WithCrypto(
+        fuchsia_media::CryptoFormat::WithDecrypted(fuchsia_media::DecryptedFormat{}));
+  }
+  EnsureFormatDetailsBridged(&format.format_details().value());
   return format;
 }
 

@@ -2,5 +2,6 @@ wilkinsonclay@google.com
 chaselatta@google.com
 lijiaming@google.com
 
-per-file BUILD.gn = olivernewman@google.com
-per-file BUILD.gn = phosek@google.com
+per-file BUILD.* = olivernewman@google.com
+per-file BUILD.* = phosek@google.com
+per-file BUILD.* = file: /src/fidl/OWNERS

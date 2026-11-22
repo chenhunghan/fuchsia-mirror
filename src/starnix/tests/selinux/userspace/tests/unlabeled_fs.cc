@@ -27,7 +27,9 @@ fbl::unique_fd g_pre_policy_socket;
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
+extern std::string GetTestPolicyName() { return "file_transition_policy"; }
+
+extern void DoPrePolicyLoadWork() {
   EXPECT_THAT(mkdir(kPrePolicyMountDir, 0755), SyscallSucceeds());
   EXPECT_THAT(mount("none", kPrePolicyMountDir, "ramfs", 0, ""), SyscallSucceeds());
   fbl::unique_fd fd(open(kPrePolicyFilePath, O_CREAT | O_RDWR, 0644));
@@ -35,8 +37,6 @@ extern std::string DoPrePolicyLoadWork() {
 
   g_pre_policy_socket = fbl::unique_fd(socket(AF_UNIX, SOCK_STREAM, 0));
   EXPECT_THAT(g_pre_policy_socket.get(), SyscallSucceeds());
-
-  return "file_transition_policy";
 }
 
 namespace {

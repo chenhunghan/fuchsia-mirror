@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":ffx_usb_host_driver_lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = ["src/lib.rs"],
+    # This is named as such to avoid a conflict with an existing ffx echo command.
+    crate_name = "ffx_usb_host_driver",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/developer/ffx/command:lib",
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/logging:lib",
+        "//src/developer/ffx/lib/metrics:lib",
+        "//src/developer/ffx/lib/usb_driver_api:lib",
+        "//src/developer/ffx/tools/usb_driver/impl:lib",
+        "//src/lib/analytics/rust:lib",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:sha2",
+    ],
+)
+
+# LINT.IfChange
+ffx_tool(
+    name = "ffx_usb_driver",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-usb-driver",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/developer/ffx/lib/version:lib",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_usb_host_driver_lib_test",
+    crate = ":lib",
+)

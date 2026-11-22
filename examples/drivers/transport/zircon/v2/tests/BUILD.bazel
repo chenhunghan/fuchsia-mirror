@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":child-driver-hermetic-test-pkg"],
+    visibility = ["//examples:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "child-driver-test",
+    srcs = [
+        "child-driver-test.cc",
+        "//examples/drivers/transport/zircon/v2:child-driver.cc",
+        "//examples/drivers/transport/zircon/v2:child-driver.h",
+    ],
+    gn_output_name = "zircon_transport_example_test",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.i2c:fuchsia.hardware.i2c_cpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "child-driver-hermetic-test-pkg",
+    package_name = "zircon_transport_example_test",
+    unit_tests = [":child-driver-test"],
+)

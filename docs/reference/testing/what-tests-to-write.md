@@ -96,7 +96,7 @@ The following scenarios are validated for the component under test:
 
 The recommendation is to run integration tests hermetically (in isolation) using [Test Realm Factory](/docs/development/testing/components/test_realm_factory.md), but they can be run non-hermetically if needed.
 
-### Hermetic Integration Tests
+### Hermetic integration tests {#hermetic-integration-tests}
 
 * **What needs it:** All components and many drivers
 * **What does it test for:** Runtime behavior and contracts
@@ -221,7 +221,7 @@ Non-hermetic integration tests must be run in a location of the
 component topology that already has the required capabilities routed
 to it. A list of existing locations and instructions for adding new
 ones are
-[here](/docs/development/testing/components/test_runner_framework.md?#non-hermetic_tests).
+[here](/docs/development/testing/components/test_runner_framework.md#non-hermetic-tests).
 
 **Non-hermetic Integration Tests should be used sparingly and for
 situations where no hermetic solution is practical.** It is preferred
@@ -229,8 +229,8 @@ that they are used as a stop-gap solution for a test that otherwise
 would be made hermetic given appropriate mocks or isolation features.
 **They _should not_ be used for tests that legitimately want to
 assert on the behavior of a given system globally** (see instead
-[On-device System Validation](#system-validation-tests) and [Host-driven
-System Interaction Tests](#lacewing-tests)).
+[Platform expectation tests](#platform-expectation-tests) and [Host-driven
+system interaction tests](#system-interaction-tests)).
 
 
 ## Compatibility Tests (CTF) {#compatibility-tests}
@@ -363,7 +363,7 @@ RealmFactory (containing an implementation under test), a Test Suite
 (validating the implementation of the specification) wherever the
 contract is defined (e.g. fuchsia.git for SDK protocols), and the
 [FIDL protocol for driving the
-test](/docs/development/testing/components/test_realm_factory.md#test_topology)
+test](/docs/development/testing/components/test_realm_factory.md#test-topology)
 (which is responsible for instantiating and interacting with a set
 of components under test).  The Test Suite and FIDL protocol are
 distributed to implementers (for example, through the SDK).  Developers
@@ -381,7 +381,7 @@ The non-hermetic approach to test spec conformance is to run the test on a worki
 The diagram below shows an approach for running spec conformance tests in a non-hermetic way.
 ![Spec conformance tests (non-hermetic)](images/specification-conformance-test-non-hermetic.png "Diagram shows an approach for running spec conformance tests in a non-hermetic way.")
 
-### Host-driven approach to spec conformance tests
+### Host-driven approach to spec conformance tests {#host-driven-approach-to-spec-conformance-tests}
 Alternatively, Spec Conformance tests may be written using Lacewing
 and run as host-driven system interaction tests. This is particularly
 useful when the implementer of the protocol is a driver or otherwise

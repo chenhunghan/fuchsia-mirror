@@ -5,14 +5,18 @@
 #include "src/ui/scenic/bin/health_inspector.h"
 
 #include <lib/fpromise/promise.h>
+#include <lib/syslog/cpp/macros.h>
+#include <lib/trace/event.h>
 
 namespace scenic_impl {
 
 HealthInspector::HealthInspector(
     const std::optional<display::DisplayManager>& display_manager,
     const std::optional<display::DisplayPowerManager>& display_power_manager,
-    inspect::Node& parent_node)
-    : display_manager_(display_manager), display_power_manager_(display_power_manager) {
+    inspect::Node& parent_node, GetOmittedLayerTrackerFn get_omitted_layer_tracker)
+    : display_manager_(display_manager),
+      display_power_manager_(display_power_manager),
+      get_omitted_layer_tracker_(std::move(get_omitted_layer_tracker)) {
   InitializeInspectObjects(parent_node);
 }
 
@@ -20,11 +24,19 @@ void HealthInspector::InitializeInspectObjects(inspect::Node& parent_node) {
   // The user prefers "health" to be at the top, potentially as a peer to "subsystems".
   health_node_ = parent_node.CreateChild("health");
   inspect_lazy_node_ = health_node_.CreateLazyValues("metrics", [this] {
+    // Precautionary: Scenic serves Inspect on the thread that owns these objects. If that ever
+    // changes, guard these reads with a lock instead of relaxing this check.
+    FX_CHECK(thread_checker_.is_thread_valid());
+    TRACE_DURATION("gfx", "HealthInspectorLazyValues");
     inspect::Inspector inspector;
     auto& root = inspector.GetRoot();
 
     const zx::time_monotonic now(zx_clock_get_monotonic());
-    const bool healthy = CheckReceivingVsyncsWhenDisplayIsOn(root, now, inspector);
+    // Evaluate every check before combining so simultaneous failures all record
+    // their error child nodes in the same Inspect snapshot.
+    const bool vsync_healthy = CheckReceivingVsyncsWhenDisplayIsOn(root, now, inspector);
+    const bool layers_healthy = CheckNoOmittedLayers(root, inspector);
+    const bool healthy = vsync_healthy && layers_healthy;
     root.CreateString("overall_health", healthy ? "NOT_UNHEALTHY" : "UNHEALTHY", &inspector);
 
     return fpromise::make_ok_promise(std::move(inspector));
@@ -73,6 +85,55 @@ bool HealthInspector::CheckReceivingVsyncsWhenDisplayIsOn(inspect::Node& node,
   }
 
   return healthy;
+}
+
+bool HealthInspector::CheckNoOmittedLayers(inspect::Node& node,
+                                           inspect::Inspector& inspector) const {
+  const flatland::OmittedLayerTracker* tracker =
+      get_omitted_layer_tracker_ ? get_omitted_layer_tracker_() : nullptr;
+  if (!tracker) {
+    return true;
+  }
+
+  const uint64_t total_frames = tracker->total_frames_with_omitted_layers();
+  if (total_frames == 0) {
+    return true;
+  }
+
+  const auto populate_reasons = [&inspector](inspect::Node& parent, const char* child_name,
+                                             auto&& count_for_reason) {
+    inspect::Node child = parent.CreateChild(child_name);
+    for (size_t i = 0; i < flatland::OmittedLayerTracker::kReasonCount; ++i) {
+      const auto reason = static_cast<flatland::OmittedLayerReason>(i);
+      child.CreateUint(flatland::OmittedLayerReasonName(reason), count_for_reason(reason),
+                       &inspector);
+    }
+    inspector.emplace(std::move(child));
+  };
+
+  inspect::Node history_node = node.CreateChild("omitted_layers");
+  history_node.CreateUint("total_frames", total_frames, &inspector);
+  history_node.CreateInt("last_omitted_frame_mono_ns", tracker->last_omitted_frame_time().get(),
+                         &inspector);
+  populate_reasons(
+      history_node, "total_layers_by_reason",
+      [tracker](flatland::OmittedLayerReason r) { return tracker->TotalOmittedLayers(r); });
+  inspector.emplace(std::move(history_node));
+
+  const uint32_t recent_frames = tracker->RecentFramesWithOmittedLayers();
+  if (recent_frames == 0) {
+    return true;
+  }
+
+  inspect::Node error_node = node.CreateChild("ERROR_omitted_layers");
+  error_node.CreateUint("recent_frames", recent_frames, &inspector);
+  error_node.CreateUint("window_size_frames", flatland::OmittedLayerTracker::kWindowSize,
+                        &inspector);
+  populate_reasons(
+      error_node, "recent_layers_by_reason",
+      [tracker](flatland::OmittedLayerReason r) { return tracker->RecentOmittedLayers(r); });
+  inspector.emplace(std::move(error_node));
+  return false;
 }
 
 }  // namespace scenic_impl

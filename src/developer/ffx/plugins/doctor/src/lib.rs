@@ -40,7 +40,7 @@ use crate::environment::{
 };
 use crate::network::run_google_network_checks;
 use crate::record::doctor_record;
-use crate::target::check_targets_locally;
+use crate::target::{ShowTargetRunner, check_targets_locally};
 use crate::types::{
     DefaultDoctorStepHandler, DoctorRecorderParameters, DoctorResult, DoctorStepHandler, StepType,
 };
@@ -51,7 +51,7 @@ pub struct ShowToolWrapper {
     inner: Option<ShowTool>,
 }
 
-impl ShowToolWrapper {
+impl ShowTargetRunner for ShowToolWrapper {
     async fn allocate(&mut self, target_spec: Option<String>) -> fho::Result<()> {
         let mut context = self
             .env
@@ -99,29 +99,21 @@ impl FfxMain for DoctorTool {
     type Error = ::fho::Error;
 
     async fn main(self, mut writer: Self::Writer) -> fho::Result<()> {
-        // TODO(b/373723080): Add actual tests for the usage of `ffx target show` within `ffx
-        // doctor`.
         // This duplication avoids dynamic dispatch overhead from generic Write arguments
         // (std::io::Sink vs std::io::Stdout), which would result in different types.
         if writer.is_machine() {
             let ledger = Box::pin(doctor_cmd_impl(
                 self.context,
                 self.cmd,
-                Some(self.show_tool),
+                self.show_tool,
                 std::io::sink(),
                 std::io::sink(),
             ))
             .await?;
             writer.machine(&DoctorResult { steps: ledger.into_root_node() })?;
         } else {
-            Box::pin(doctor_cmd_impl(
-                self.context,
-                self.cmd,
-                Some(self.show_tool),
-                stdout(),
-                stdout(),
-            ))
-            .await?;
+            Box::pin(doctor_cmd_impl(self.context, self.cmd, self.show_tool, stdout(), stdout()))
+                .await?;
         }
         Ok(())
     }
@@ -134,7 +126,7 @@ pub async fn doctor_cmd_impl<
     context: EnvironmentContext,
 
     mut cmd: DoctorCommand,
-    show_tool: Option<ShowToolWrapper>,
+    show_tool: impl ShowTargetRunner,
     step_writer: StepWriter,
     ledger_writer: LedgerWriter,
 ) -> Result<DoctorLedger<LedgerWriter>> {
@@ -300,7 +292,7 @@ async fn doctor<W: Write>(
     record_params: DoctorRecorderParameters,
     usb_driver_finder: impl UsbDriverFinder,
     gchecker: impl gcheck::GChecker,
-    show_tool: Option<ShowToolWrapper>,
+    show_tool: impl ShowTargetRunner,
 ) -> Result<()> {
     doctor_summary(
         step_handler,
@@ -351,7 +343,7 @@ async fn doctor_summary<W: Write>(
     retry_delay: Duration,
     version_info: VersionInfo,
     env_context: &EnvironmentContext,
-    show_tool: Option<ShowToolWrapper>,
+    show_tool: impl ShowTargetRunner,
     usb_driver_finder: impl UsbDriverFinder,
     gchecker: impl gcheck::GChecker,
     ledger: &mut LedgerNodeGuard<'_, W>,
@@ -389,6 +381,7 @@ async fn doctor_summary<W: Write>(
 mod test {
     use super::*;
     use crate::record::collect_log_files;
+    use crate::target::MockShowTargetRunner;
     use crate::usb::{FindUsbDriverError, MockUsbDriverFinder, UsbDriverStatus};
     use doctor_utils::Recorder;
     use emulator_instance::{EmulatorInstanceData, EngineState};
@@ -501,12 +494,6 @@ mod test {
         Ok((pub_key, priv_key))
     }
 
-    fn setup_emu_dir(isolate_root: &Path) -> Result<PathBuf> {
-        let emu_dir = isolate_root.join("emu_data");
-        fs::create_dir_all(&emu_dir)?;
-        Ok(emu_dir)
-    }
-
     async fn setup_driver_socket_file(isolate_root: &Path) -> Result<PathBuf> {
         let socket_file_dir = isolate_root.join("test_usb_driver_socket");
         fs::create_dir_all(&socket_file_dir)?;
@@ -520,6 +507,13 @@ mod test {
         mock.expect_find().returning(|| {
             Ok(vec![UsbDriverStatus { pid: 1, socket_path: "/tmp/fake/socket/path".to_string() }])
         });
+        mock
+    }
+
+    fn unused_mock_show_target_runner() -> MockShowTargetRunner {
+        let mut mock = MockShowTargetRunner::new();
+        mock.expect_allocate().never();
+        mock.expect_run().never();
         mock
     }
 
@@ -614,7 +608,7 @@ mod test {
                 params,
                 mock_driver_finder,
                 FakeGChecker,
-                None,
+                unused_mock_show_target_runner(),
             )
             .await
             .is_err()
@@ -718,7 +712,7 @@ mod test {
             record_params_no_record(),
             mock_driver_finder,
             FakeGChecker,
-            None,
+            unused_mock_show_target_runner(),
         )
         .await
         .unwrap();
@@ -749,11 +743,9 @@ mod test {
         let socket_file = setup_driver_socket_file(&isolate_root)
             .await
             .expect("setting up fake driver socket file");
-        let emu_dir = setup_emu_dir(&isolate_root).expect("setting up emulator data");
 
         let test_env = builder
             .user_config(usb_driver_api::CONFIG_USB_SOCKET_PATH, json!(socket_file))
-            .user_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, json!(&emu_dir))
             .build()
             .unwrap();
         // No instances
@@ -771,8 +763,9 @@ mod test {
         }
 
         // One running instance
-        let instance_dir = emu_dir.as_path().join("fuchsia-emulator");
-        fs::create_dir(&instance_dir)?;
+        let emu_dir: PathBuf = test_env.context.get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)?;
+        let instance_dir = emu_dir.join("fuchsia-emulator");
+        fs::create_dir_all(&instance_dir)?;
         let mut instance_data =
             EmulatorInstanceData::new_with_state("fuchsia-emulator", EngineState::Running);
         instance_data.set_pid(std::process::id());
@@ -845,12 +838,10 @@ mod test {
 
         let (pub_key, priv_key) =
             setup_ssh_keys(&isolate_root).await.expect("setting up ssh test keys");
-        let emu_dir = setup_emu_dir(&isolate_root).expect("setting up emulator data");
 
         let test_env = builder
             .user_config("ssh.pub", json!([&pub_key]))
             .user_config("ssh.priv", json!([&priv_key]))
-            .user_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, json!(&emu_dir))
             .user_config(ffx_config::keys::USB_ENABLED, json!(true))
             .build()
             .unwrap();
@@ -883,7 +874,7 @@ mod test {
             record_params_no_record(),
             mock_driver_finder,
             FakeGChecker,
-            None,
+            unused_mock_show_target_runner(),
         )
         .await
         .unwrap();
@@ -903,12 +894,10 @@ mod test {
 
         let (pub_key, priv_key) =
             setup_ssh_keys(&isolate_root).await.expect("setting up ssh test keys");
-        let emu_dir = setup_emu_dir(&isolate_root).expect("setting up emulator data");
 
         let test_env = builder
             .user_config("ssh.pub", json!([&pub_key]))
             .user_config("ssh.priv", json!([&priv_key]))
-            .user_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, json!(&emu_dir))
             .user_config(ffx_config::keys::USB_ENABLED, json!(false))
             .build()
             .unwrap();
@@ -938,7 +927,7 @@ mod test {
             record_params_no_record(),
             mock_driver_finder,
             FakeGChecker,
-            None,
+            unused_mock_show_target_runner(),
         )
         .await
         .unwrap();
@@ -990,7 +979,7 @@ mod test {
             record_params_no_record(),
             mock_driver_finder,
             FakeGChecker,
-            None,
+            unused_mock_show_target_runner(),
         )
         .await
         .unwrap();
@@ -1039,7 +1028,7 @@ mod test {
             record_params_no_record(),
             mock_driver_finder,
             FakeGChecker,
-            None,
+            unused_mock_show_target_runner(),
         )
         .await
         .unwrap();

@@ -27,7 +27,8 @@ namespace ld {
 // **NOTE:** As with elfldltl::PerfectSymbolSet et al, this should only be
 // instantiated where it will have internal linkage, e.g. using a Names
 // reference that's inside an anonymous namespace.
-template <const auto& Names, class Elf = elfldltl::Elf<>, auto... SetArgs, class Diagnostics>
+template <const auto& Names, elfldltl::ElfApi Elf = elfldltl::Elf<>, auto... SetArgs,
+          class Diagnostics>
   requires elfldltl::SymbolNameArray<decltype(Names)>
 inline ld::RemoteLoadModule<Elf>::SymbolFilter RemotePerfectSymbolFilter(
     Diagnostics& diag, typename RemoteDecodedModule<Elf>::Ptr module, bool undef_ok = false) {
@@ -47,7 +48,7 @@ inline ld::RemoteLoadModule<Elf>::SymbolFilter RemotePerfectSymbolFilter(
 // will define.  Each one just wraps a call to ld::RemotePerfectSymbolFilter
 // instantiated with an internal-linkage elfldltl::SymbolNameArray initialized
 // via elfldltl::PerfectSymbolTable.
-template <class Diagnostics, class Elf = elfldltl::Elf<>>
+template <class Diagnostics, elfldltl::ElfApi Elf = elfldltl::Elf<>>
 using RemotePerfectSymbolFilterMaker = ld::RemoteLoadModule<Elf>::SymbolFilter(
     Diagnostics& diag, typename RemoteDecodedModule<Elf>::Ptr module);
 

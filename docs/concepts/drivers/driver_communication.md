@@ -386,13 +386,13 @@ effort.
 [devfs-migration-guide]: /docs/contribute/open_projects/drivers/devfs_to_service.md
 [devfs-migration-debugging]: /docs/contribute/open_projects/drivers/devfs_to_service.md#debugging
 
-[driver-manager]: driver_framework.md#driver_manager
+[driver-manager]: driver_framework.md#driver-manager
 [driver-runtime]: driver_framework.md#driver_runtime
 [node-topology]: drivers_and_nodes.md#node_topology
 [devfs-add-args]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.driver.framework/topology.fidl
 [components]: /docs/concepts/components/v2/README.md
 [connect-components]: /docs/development/components/connect.md
-[troubleshoot-routes]: /docs/development/components/connect.md#troubleshooting-troubleshooting
+[troubleshoot-routes]: /docs/development/components/connect.md#troubleshooting
 
 <!-- Gerrit links -->
 [usb-peripheral-dtr-client-cl]: https://fuchsia-review.git.corp.google.com/c/fuchsia/+/1199584

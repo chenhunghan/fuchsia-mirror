@@ -248,7 +248,7 @@ packages are written into the new partition, which is readable and writable to
 the system (and will become the new active partition after the update
 completes).
 
-### Routing of newly created files
+### Routing of newly created files {#routing-of-newly-created-files}
 
 There are three cases to consider when deciding where a new file is
 installed. To simplify the discussion, assume that partition A is active and

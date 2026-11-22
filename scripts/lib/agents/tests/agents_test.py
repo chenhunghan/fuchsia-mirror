@@ -138,6 +138,59 @@ class TestAgents(unittest.TestCase):
         env = {"FFX_AGENT_SESSION_ID": "1"}
         self.assertTrue(agents_lib.is_invoked_by_agent(env))
 
+    def test_resolve_session_id(self) -> None:
+        self.assertIsNone(agents_lib.resolve_session_id({}))
+
+        self.assertEqual(
+            agents_lib.resolve_session_id(
+                {
+                    "FFX_AGENT_SESSION_ID": "explicit-id",
+                    "ANTIGRAVITY_CONVERSATION_ID": "conv-id",
+                    "CLAUDE_CODE_SESSION_ID": "claude-id",
+                }
+            ),
+            "explicit-id",
+        )
+
+        self.assertEqual(
+            agents_lib.resolve_session_id(
+                {
+                    "FFX_AGENT_SESSION_ID": "   ",
+                    "ANTIGRAVITY_CONVERSATION_ID": "  conv-id \n",
+                    "CLAUDE_CODE_SESSION_ID": "claude-id",
+                }
+            ),
+            "conv-id",
+        )
+
+        self.assertEqual(
+            agents_lib.resolve_session_id(
+                {
+                    "FFX_AGENT_SESSION_ID": "",
+                    "ANTIGRAVITY_CONVERSATION_ID": "",
+                    "CLAUDE_CODE_SESSION_ID": "claude-id",
+                }
+            ),
+            "claude-id",
+        )
+
+        self.assertIsNone(
+            agents_lib.resolve_session_id(
+                {
+                    "ANTIGRAVITY_AGENT": "1",
+                    "GEMINI_CLI": "1",
+                    "CLAUDECODE": "1",
+                }
+            )
+        )
+
+        with mock.patch.dict(
+            os.environ,
+            {"ANTIGRAVITY_CONVERSATION_ID": "env-conv-id"},
+            clear=True,
+        ):
+            self.assertEqual(agents_lib.resolve_session_id(), "env-conv-id")
+
 
 if __name__ == "__main__":
     unittest.main()

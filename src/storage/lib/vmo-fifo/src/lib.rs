@@ -6,18 +6,26 @@ mod payload_allocator;
 use payload_allocator::{NO_ALLOCATION, PayloadAllocator};
 
 mod signal;
+use event_listener::{Event, EventListener};
+use fuchsia_async::OnSignals;
 use fuchsia_sync::Mutex;
+use scopeguard::ScopeGuard;
 pub use signal::SIG_SHUTDOWN;
 use signal::{
     EventSignal, SIG_DATA_AVAILABLE_0, SIG_DATA_AVAILABLE_1, SIG_SPACE_AVAILABLE_0,
     SIG_SPACE_AVAILABLE_1,
 };
 use std::fmt::{Debug, Formatter};
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use storage_ptr_slice::{MutPtrByteSlice, PtrByteSlice};
+use storage_units::{BlockSize, page_size};
 use zerocopy::{FromBytes, IntoBytes, KnownLayout};
+
+/// Byte alignment (and minimum buddy block size) for payload allocations.
+pub type Alignment = BlockSize;
 
 struct MappedVmo {
     vmo: zx::Vmo,
@@ -28,12 +36,16 @@ struct MappedVmo {
 impl MappedVmo {
     fn new(vmo: zx::Vmo) -> Result<Self, zx::Status> {
         let size = vmo.get_size()? as usize;
+        // The VMO may come from an untrusted peer. Refuse resizable VMOs so the peer cannot shrink
+        // the VMO underneath the mapping and fault the process on its next access.
         let addr = fuchsia_runtime::vmar_root_self().map(
             0,
             &vmo,
             0,
             size,
-            zx::VmarFlags::PERM_READ | zx::VmarFlags::PERM_WRITE,
+            zx::VmarFlags::PERM_READ
+                | zx::VmarFlags::PERM_WRITE
+                | zx::VmarFlags::REQUIRE_NON_RESIZABLE,
         )?;
         Ok(Self { vmo, addr, size })
     }
@@ -87,6 +99,15 @@ impl State {
     fn clear_waiter_and_increment(self) -> State {
         State(((self.0 & Self::INDEX_MASK) + 1) & Self::INDEX_MASK)
     }
+
+    fn has_popped(self, slot: u64) -> bool {
+        let next_slot = slot.wrapping_add(1) & Self::INDEX_MASK;
+        // Checks `self.index() >= next_slot` across 63-bit (`Self::INDEX_MASK`) wrap-around: if
+        // `self.index()` is at or ahead of `next_slot`, the 63-bit difference is in `[0, 2^62)`;
+        // if `self.index()` is still behind, subtracting `next_slot` underflows into
+        // `[2^62, 2^63)`.
+        (self.index().wrapping_sub(next_slot) & Self::INDEX_MASK) < (1u64 << 62)
+    }
 }
 
 // The header structure at the beginning of the VMO in `SharedQueue`.
@@ -99,7 +120,7 @@ struct QueueHeader {
     // Bit 63: Set if the reader is asleep and waiting for data.
     write_head: u64,
     // Bits 0-62: The index where the reader will read the next item.
-    // Bit 63: Set if the writer is asleep and waiting for space.
+    // Bit 63: Set if the writer is asleep waiting for `read_head` to advance.
     read_head: u64,
 }
 
@@ -168,8 +189,8 @@ where
 
         let header = mapping.addr as *mut QueueHeader;
         let slots = (mapping.addr + HEADER_SIZE) as *mut T;
-        let page_size = zx::system_get_page_size() as usize;
-        let payload_region_offset = (required_size + page_size - 1) & !(page_size - 1);
+        let payload_region_offset =
+            page_size().align_up(required_size as u64).ok_or(zx::Status::INVALID_ARGS)? as usize;
 
         Ok(Self {
             mapping,
@@ -183,10 +204,6 @@ where
 
     fn vmo(&self) -> &zx::Vmo {
         self.mapping.vmo()
-    }
-
-    fn capacity(&self) -> u32 {
-        self.capacity
     }
 
     fn addr(&self) -> usize {
@@ -248,6 +265,10 @@ where
 }
 
 impl<T> SharedQueue<T> {
+    fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
     fn read_head_atomic(&self) -> &AtomicU64 {
         // SAFETY: `self.header` points to a valid memory-mapped VMO region of at least HEADER_SIZE.
         unsafe {
@@ -260,20 +281,22 @@ impl<T> SharedQueue<T> {
         State(self.read_head_atomic().load(ordering))
     }
 
-    // Sets `HAS_WAITER` on `read_head` if it still equals `curr_read_head`, returning `true` if
-    // the waiter bit was armed or `false` if the consumer advanced `read_head` concurrently.
-    fn try_set_waiter(&self, curr_read_head: State) -> bool {
+    // Attempts to set `HAS_WAITER` on `read_head` when it matches `curr_read_head`, returning the
+    // observed state on mismatch or spurious failure.
+    fn try_set_waiter(&self, curr_read_head: State) -> Result<(), State> {
         let next_read_head = curr_read_head.with_waiter();
         self.read_head_atomic()
             .compare_exchange_weak(
                 curr_read_head.0,
                 next_read_head.0,
-                // `Ordering::Relaxed`: We are just publishing a sleep signal.
+                // `Ordering::Relaxed`: only sets `HAS_WAITER`; does not access slots or payloads.
                 Ordering::Relaxed,
-                // `Ordering::Acquire`: exchange failed (reader likely popped an item).
+                // `Ordering::Acquire`: synchronises with `Receiver::retire_slots` so callers can
+                // use `Err(actual)` without reloading `read_head`.
                 Ordering::Acquire,
             )
-            .is_ok()
+            .map(|_| ())
+            .map_err(State)
     }
 
     // Returns a mutable pointer slice for `[offset .. offset + size)` in the payload region.
@@ -310,56 +333,53 @@ struct SenderState {
     allocator: PayloadAllocator,
     // Used by the consumer to wait for and by the producer to signal that the queue is non-empty.
     data_available: EventSignal,
-    // Used by the producer to wait for and by the consumer to signal that space is available.
-    space_available: EventSignal,
 }
 
 impl SenderState {
-    fn new(payload_size: usize, capacity: usize, alignment: usize) -> Result<Self, zx::Status> {
-        if alignment == 0 || !alignment.is_power_of_two() || payload_size < alignment {
+    fn new(payload_size: usize, capacity: usize, alignment: Alignment) -> Result<Self, zx::Status> {
+        if (payload_size.min(NO_ALLOCATION as usize) as u64) < alignment {
             return Err(zx::Status::INVALID_ARGS);
         }
         Ok(Self {
             allocator: PayloadAllocator::new(payload_size, capacity, alignment),
             data_available: EventSignal::new(SIG_DATA_AVAILABLE_0, SIG_DATA_AVAILABLE_1),
-            space_available: EventSignal::new(SIG_SPACE_AVAILABLE_0, SIG_SPACE_AVAILABLE_1),
         })
     }
 
-    fn try_allocate<T: FromBytes + IntoBytes + KnownLayout + Copy>(
+    // `curr_read_head` must have been loaded with `Ordering::Acquire` so consumer reads of retired
+    // payloads complete before those blocks are reclaimed and overwritten.
+    fn try_allocate(
         &mut self,
-        queue: &SharedQueue<T>,
+        curr_read_head: State,
         size: usize,
         headroom_bytes: usize,
-    ) -> (Option<u32>, State) {
-        // `Ordering::Acquire`: ensures consumer reads of retired payload ranges have completed
-        // before those blocks are reclaimed and overwritten.
-        let curr_read_head = queue.load_read_head(Ordering::Acquire);
+    ) -> Option<u32> {
         self.allocator.reclaim_consumed_slots(curr_read_head.index());
-        (self.allocator.allocate(size, headroom_bytes), curr_read_head)
+        self.allocator.allocate(size, headroom_bytes)
     }
 
+    // `curr_read_head` must have been loaded with `Ordering::Acquire` so consumer reads of retired
+    // slots and payloads complete before they are reclaimed and overwritten.
     fn try_push_with_payload<T: FromBytes + IntoBytes + KnownLayout + Copy>(
         &mut self,
         queue: &SharedQueue<T>,
+        curr_read_head: State,
         msg: T,
         payload_offset: Option<u32>,
-    ) -> Result<Result<u64, State>, zx::Status> {
+    ) -> Option<u64> {
         let mut curr_write_head = queue.load_write_head(Ordering::Relaxed);
-        // `Ordering::Acquire`: guarantees the consumer finished reading the previous item in this
-        // slot before we overwrite it.
-        let curr_read_head = queue.load_read_head(Ordering::Acquire);
         self.allocator.reclaim_consumed_slots(curr_read_head.index());
 
         if queue.is_full_at(curr_write_head.index(), curr_read_head.index()) {
-            return Ok(Err(curr_read_head));
+            return None;
         }
 
         let write_idx = curr_write_head.index();
         let slot_ptr = queue.get_slot_ptr(write_idx);
         // SAFETY: `slot_ptr` is within the mapped VMO slots region, callers serialize access to
-        // `SenderState` so we exclusively own `write_idx`, and `T: IntoBytes` ensures all bytes of
-        // `msg` are initialized.
+        // `SenderState` so we exclusively own `write_idx`, `curr_read_head` was loaded with
+        // `Ordering::Acquire` so the consumer finished reading any prior item in this slot, and
+        // `T: IntoBytes` ensures all bytes of `msg` are initialized.
         unsafe {
             std::ptr::write(slot_ptr, msg);
         }
@@ -380,9 +400,11 @@ impl SenderState {
                 Ok(prev_write_head) => {
                     if State(prev_write_head).has_waiter() {
                         let vmo = queue.mapping.vmo();
-                        self.data_available.signal(vmo)?;
+                        // Ignore signal errors after `write_head` has already published `write_idx`
+                        // and `commit_to_slot` has taken ownership of `payload_offset`.
+                        let _ = self.data_available.signal(vmo);
                     }
-                    return Ok(Ok(write_idx));
+                    return Some(write_idx);
                 }
                 Err(actual) => curr_write_head = State(actual),
             }
@@ -407,7 +429,7 @@ impl SenderState {
                 // A prefix of this buddy block was already pushed to `last_slot` and has not yet
                 // been retired by the consumer; attach `base_offset` to `last_slot` so the buddy
                 // block is freed once `read_head` advances past `last_slot`. Note that
-                // `Receiver::retire_slot` advances `read_head` monotonically across contiguous
+                // `Receiver::retire_slots` advances `read_head` monotonically across contiguous
                 // completed slots, so `read_head` cannot pass `last_slot` until `last_slot` and all
                 // earlier prefix slots from this reservation have completed.
                 self.allocator.commit_to_slot(last_slot, base_offset);
@@ -424,6 +446,7 @@ const PORT_KEY_WAKE: u64 = 2;
 
 struct SyncSenderState {
     inner: SenderState,
+    space_available: EventSignal,
     wait_async_armed: bool,
     shutting_down: bool,
     sleeping_writers: usize,
@@ -436,7 +459,7 @@ struct SyncSenderState {
 /// commits.
 pub struct SyncSender<T> {
     inner: SharedQueue<T>,
-    alignment: usize,
+    alignment: Alignment,
     payload_capacity: usize,
     max_allocation_size: usize,
     port: zx::Port,
@@ -458,10 +481,13 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
     /// Creates a new `SyncSender`.
     ///
     /// * `vmo` - The shared VMO used for queue messages and payload buffers.
-    /// * `alignment` - Power-of-two byte alignment (and minimum buddy block size) for payload
-    ///                 allocations.
+    /// * `alignment` - Byte alignment (and minimum buddy block size) for payload allocations.
     /// * `queue_capacity` - Power-of-two maximum number of queue slots.
-    pub fn new(vmo: zx::Vmo, alignment: usize, queue_capacity: u32) -> Result<Self, zx::Status> {
+    pub fn new(
+        vmo: zx::Vmo,
+        alignment: Alignment,
+        queue_capacity: u32,
+    ) -> Result<Self, zx::Status> {
         let inner = SharedQueue::new(vmo, queue_capacity)?;
         let raw_payload_size = inner.vmo_size().saturating_sub(inner.payload_region_offset());
         let inner_state = SenderState::new(raw_payload_size, inner.capacity() as usize, alignment)?;
@@ -470,6 +496,7 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
         let port = zx::Port::create();
         let state = SyncSenderState {
             inner: inner_state,
+            space_available: EventSignal::new(SIG_SPACE_AVAILABLE_0, SIG_SPACE_AVAILABLE_1),
             wait_async_armed: false,
             shutting_down: false,
             sleeping_writers: 0,
@@ -529,7 +556,7 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
         size: usize,
     ) -> Result<PayloadBuffer<T, &mut Self>, zx::Status> {
         let aligned_len =
-            size.checked_next_multiple_of(self.alignment).ok_or(zx::Status::NO_MEMORY)?;
+            self.alignment.align_up(size as u64).ok_or(zx::Status::NO_MEMORY)? as usize;
         let (base_offset, current_offset, slice) = self.allocate_payload(aligned_len, size, 0)?;
         Ok(PayloadBuffer {
             sender: self,
@@ -554,7 +581,7 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
         headroom_bytes: usize,
     ) -> Result<OwnedPayloadBuffer<T>, zx::Status> {
         let aligned_len =
-            size.checked_next_multiple_of(self.alignment).ok_or(zx::Status::NO_MEMORY)?;
+            self.alignment.align_up(size as u64).ok_or(zx::Status::NO_MEMORY)? as usize;
         let (base_offset, current_offset, slice) =
             self.allocate_payload(aligned_len, aligned_len, headroom_bytes)?;
         Ok(PayloadBuffer {
@@ -582,13 +609,14 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
             return Err(zx::Status::NO_MEMORY);
         }
 
+        let mut curr_read_head = self.inner.load_read_head(Ordering::Acquire);
         let base_offset = loop {
-            match state.inner.try_allocate(&self.inner, aligned_len, headroom_bytes) {
-                (Some(offset), _) => break offset,
-                (None, curr_read_head) => {
-                    state = self.wait_for_space_locked(state, curr_read_head)?;
-                }
+            if let Some(offset) =
+                state.inner.try_allocate(curr_read_head, aligned_len, headroom_bytes)
+            {
+                break offset;
             }
+            (state, curr_read_head) = self.wait_for_space_locked(state, curr_read_head)?;
         };
         drop(state);
 
@@ -602,40 +630,39 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
 
     fn push_with_payload(&self, msg: T, payload_offset: Option<u32>) -> Result<u64, zx::Status> {
         let mut state = self.state.lock();
+        let mut curr_read_head = self.inner.load_read_head(Ordering::Acquire);
         loop {
-            match state.inner.try_push_with_payload(&self.inner, msg, payload_offset) {
-                Ok(Ok(slot)) => return Ok(slot),
-                Err(_) => {
-                    // `data_available.signal` failed only if the VMO handle is invalid; the item is
-                    // already published in `write_head`.
-                    return Ok(self.inner.write_index().wrapping_sub(1) & State::INDEX_MASK);
-                }
-                Ok(Err(curr_read_head)) => {
-                    state = self.wait_for_space_locked(state, curr_read_head)?;
-                }
+            if let Some(slot) =
+                state.inner.try_push_with_payload(&self.inner, curr_read_head, msg, payload_offset)
+            {
+                return Ok(slot);
             }
+            (state, curr_read_head) = self.wait_for_space_locked(state, curr_read_head)?;
         }
     }
 
-    // Arms `HAS_WAITER` + `vmo.wait_async` if not yet armed, drops `state` while waiting on
-    // `self.port`, and returns the re-acquired lock guard once woken (or immediately if `read_head`
-    // raced ahead before arming).
+    // Waits for free space, dropping `state` while sleeping so other writers can commit or release
+    // reservations, and returns the re-locked guard with the updated `read_head`.
     fn wait_for_space_locked<'a>(
         &'a self,
         mut state: fuchsia_sync::MutexGuard<'a, SyncSenderState>,
-        curr_read_head: State,
-    ) -> Result<fuchsia_sync::MutexGuard<'a, SyncSenderState>, zx::Status> {
+        mut curr_read_head: State,
+    ) -> Result<(fuchsia_sync::MutexGuard<'a, SyncSenderState>, State), zx::Status> {
         if state.shutting_down {
             return Err(zx::Status::CANCELED);
         }
 
         if !state.wait_async_armed {
-            if !self.inner.try_set_waiter(curr_read_head) {
-                return Ok(state);
+            while let Err(actual) = self.inner.try_set_waiter(curr_read_head) {
+                if actual.index() != curr_read_head.index() {
+                    // `read_head` advanced; let the caller re-check space before sleeping.
+                    return Ok((state, actual));
+                }
+                curr_read_head = actual;
             }
 
             let vmo = self.inner.mapping.vmo();
-            let mask = state.inner.space_available.current_mask(SIG_SHUTDOWN);
+            let mask = state.space_available.current_mask(SIG_SHUTDOWN);
             vmo.wait_async(&self.port, PORT_KEY_SIGNAL, mask, zx::WaitAsyncOpts::empty())?;
             state.wait_async_armed = true;
         }
@@ -654,9 +681,8 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
             state.wait_async_armed = false;
             if let zx::PacketContents::SignalOne(signals) = packet.contents() {
                 let observed = signals.observed();
-                if observed.contains(state.inner.space_available.current_mask(zx::Signals::empty()))
-                {
-                    state.inner.space_available.advance();
+                if observed.contains(state.space_available.current_mask(zx::Signals::empty())) {
+                    state.space_available.advance();
                 }
                 if observed.contains(SIG_SHUTDOWN) {
                     state.shutting_down = true;
@@ -668,7 +694,8 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> SyncSender<T> {
         if state.shutting_down {
             return Err(zx::Status::CANCELED);
         }
-        Ok(state)
+        let curr_read_head = self.inner.load_read_head(Ordering::Acquire);
+        Ok((state, curr_read_head))
     }
 
     fn release_uncommitted_payload(&self, base_offset: u32, last_committed_slot: Option<u64>) {
@@ -713,9 +740,129 @@ impl<T> Drop for SyncSender<T> {
     }
 }
 
+struct AsyncSignalState {
+    // Toggled by the consumer when `read_head` advances while `HAS_WAITER` is set, waking senders
+    // waiting for space or for a slot to be popped.
+    space_available: EventSignal,
+    // `true` while a leader future is actively awaiting `OnSignals` on the VMO.
+    has_leader: bool,
+    // `true` after `HAS_WAITER` has been set on `read_head` until the corresponding
+    // `space_available` VMO signal is consumed and `space_available` advances. Remains `true` if a
+    // leader future is dropped before `OnSignals` completes so the next leader consumes that
+    // pending signal instead of setting `HAS_WAITER` again and desynchronising signal bits.
+    unconsumed_waiter: bool,
+    shutting_down: bool,
+}
+
+struct AsyncSenderShared<T> {
+    queue: SharedQueue<T>,
+    event: Event,
+    signal_state: Mutex<AsyncSignalState>,
+}
+
+impl<T> AsyncSenderShared<T> {
+    // Waits until `slot` has been popped by the receiver, returning the observed `read_head`
+    // state, or `Err(zx::Status::CANCELED)` if the queue shuts down first.
+    //
+    // Because `read_head` has a single `HAS_WAITER` bit and `space_available` toggles a single
+    // signal pair, at most one task (the leader) sets `HAS_WAITER` and awaits `OnSignals` on the
+    // VMO at a time; concurrent waiters subscribe to `self.event` as followers.
+    async fn wait_until_popped(&self, slot: u64) -> Result<State, zx::Status> {
+        enum Action {
+            Follow(EventListener),
+            Lead(zx::Signals),
+        }
+
+        loop {
+            // `Ordering::Acquire`: synchronises with `Ordering::Release` in
+            // `Receiver::retire_slots`, guaranteeing all receiver work guarded by `slot`
+            // (including any `SlotGuard`) happens-before `wait_until_popped` returns.
+            let curr_read_head = self.queue.load_read_head(Ordering::Acquire);
+            if curr_read_head.has_popped(slot) {
+                return Ok(curr_read_head);
+            }
+
+            let action = {
+                let mut state = self.signal_state.lock();
+                // Re-check under `signal_state` in case `slot` was popped after the fast-path load
+                // above (including concurrently with shutdown or while `unconsumed_waiter` is set
+                // for a later slot).
+                let mut curr_read_head = self.queue.load_read_head(Ordering::Acquire);
+                if curr_read_head.has_popped(slot) {
+                    return Ok(curr_read_head);
+                }
+                if state.shutting_down {
+                    return Err(zx::Status::CANCELED);
+                }
+                if state.has_leader {
+                    // Another task is already the leader; register on `self.event` under the lock
+                    // so we cannot miss its notification.
+                    Action::Follow(self.event.listen())
+                } else {
+                    // Become the leader, setting `HAS_WAITER` unless an earlier cancelled leader
+                    // already set it (`unconsumed_waiter`).
+                    if !state.unconsumed_waiter {
+                        while let Err(actual) = self.queue.try_set_waiter(curr_read_head) {
+                            if actual.has_popped(slot) {
+                                return Ok(actual);
+                            }
+                            curr_read_head = actual;
+                        }
+                        state.unconsumed_waiter = true;
+                    }
+                    state.has_leader = true;
+                    Action::Lead(state.space_available.current_mask(SIG_SHUTDOWN))
+                }
+            };
+
+            let mask = match action {
+                Action::Follow(listener) => {
+                    listener.await;
+                    continue;
+                }
+                Action::Lead(mask) => mask,
+            };
+
+            // If the leader future is dropped before `OnSignals` resolves, clear `has_leader` and
+            // wake followers so another waiter can become leader and consume the pending signal.
+            let guard = scopeguard::guard(self, |this| {
+                this.signal_state.lock().has_leader = false;
+                this.event.notify(usize::MAX);
+            });
+
+            let observed = OnSignals::new(self.queue.mapping.vmo(), mask).await;
+            ScopeGuard::into_inner(guard);
+
+            let err = {
+                let mut state = self.signal_state.lock();
+                state.has_leader = false;
+                match observed {
+                    Ok(signals) => {
+                        let expected_space =
+                            state.space_available.current_mask(zx::Signals::empty());
+                        if signals.contains(expected_space) {
+                            state.space_available.advance();
+                            state.unconsumed_waiter = false;
+                        }
+                        if signals.contains(SIG_SHUTDOWN) {
+                            state.shutting_down = true;
+                        }
+                        None
+                    }
+                    Err(status) => Some(status),
+                }
+            };
+            self.event.notify(usize::MAX);
+            if let Some(status) = err {
+                return Err(status);
+            }
+        }
+    }
+}
+
 /// The asynchronous sender endpoint for a VMO-backed FIFO queue.
 pub struct AsyncSender<T> {
-    inner: SharedQueue<T>,
+    shared: Arc<AsyncSenderShared<T>>,
     state: SenderState,
 }
 
@@ -723,27 +870,40 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> AsyncSender<T> {
     /// Creates a new `AsyncSender`.
     ///
     /// * `vmo` - The shared VMO used for queue messages and payload buffers.
-    /// * `alignment` - Power-of-two byte alignment (and minimum buddy block size) for payload
-    ///                 allocations.
+    /// * `alignment` - Byte alignment (and minimum buddy block size) for payload allocations.
     /// * `queue_capacity` - The maximum number of queue slots.
-    pub fn new(vmo: zx::Vmo, alignment: usize, queue_capacity: u32) -> Result<Self, zx::Status> {
-        let inner = SharedQueue::new(vmo, queue_capacity)?;
-        let payload_size = inner.vmo_size().saturating_sub(inner.payload_region_offset());
-        let state = SenderState::new(payload_size, inner.capacity() as usize, alignment)?;
-        Ok(Self { inner, state })
+    pub fn new(
+        vmo: zx::Vmo,
+        alignment: Alignment,
+        queue_capacity: u32,
+    ) -> Result<Self, zx::Status> {
+        let queue = SharedQueue::new(vmo, queue_capacity)?;
+        let payload_size = queue.vmo_size().saturating_sub(queue.payload_region_offset());
+        let state = SenderState::new(payload_size, queue.capacity() as usize, alignment)?;
+        let shared = Arc::new(AsyncSenderShared {
+            queue,
+            event: Event::new(),
+            signal_state: Mutex::new(AsyncSignalState {
+                space_available: EventSignal::new(SIG_SPACE_AVAILABLE_0, SIG_SPACE_AVAILABLE_1),
+                has_leader: false,
+                unconsumed_waiter: false,
+                shutting_down: false,
+            }),
+        });
+        Ok(Self { shared, state })
     }
 
     /// Returns the maximum number of items the queue can hold.
     pub fn capacity(&self) -> u32 {
-        self.inner.capacity()
+        self.shared.queue.capacity()
     }
 
     pub fn is_full(&self) -> bool {
-        self.inner.is_full()
+        self.shared.queue.is_full()
     }
 
     pub fn vmo(&self) -> &zx::Vmo {
-        self.inner.vmo()
+        self.shared.queue.vmo()
     }
 
     /// Pushes a standalone message onto the queue, yielding to the executor if the queue is full.
@@ -756,17 +916,36 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> AsyncSender<T> {
         msg: T,
         payload_offset: Option<u32>,
     ) -> Result<u64, zx::Status> {
+        let mut curr_read_head = self.shared.queue.load_read_head(Ordering::Acquire);
         loop {
-            match self.state.try_push_with_payload(&self.inner, msg, payload_offset)? {
-                Ok(slot) => return Ok(slot),
-                Err(curr_read_head) => {
-                    if self.inner.try_set_waiter(curr_read_head) {
-                        let vmo = self.inner.mapping.vmo();
-                        self.state.space_available.wait_async(vmo, SIG_SHUTDOWN).await?;
-                    }
-                }
+            if let Some(slot) = self.state.try_push_with_payload(
+                &self.shared.queue,
+                curr_read_head,
+                msg,
+                payload_offset,
+            ) {
+                return Ok(slot);
             }
+            curr_read_head = self.shared.wait_until_popped(curr_read_head.index()).await?;
         }
+    }
+
+    /// Returns a `'static` future that resolves once `slot` has been popped by the receiver,
+    /// without borrowing `self` across `.await` points.
+    ///
+    /// # Errors
+    ///
+    /// Resolves to `Err(zx::Status::CANCELED)` if the sender or receiver shuts down before `slot`
+    /// is popped (if `slot` was already popped prior to shutdown, resolves to `Ok(())`).
+    pub fn wait_until_popped(
+        &self,
+        slot: u64,
+    ) -> impl Future<Output = Result<(), zx::Status>> + Send + 'static
+    where
+        T: Send + Sync + 'static,
+    {
+        let shared = Arc::clone(&self.shared);
+        async move { shared.wait_until_popped(slot).await.map(|_| ()) }
     }
 
     /// Reserves a payload buffer in the VMO. Yields to the executor if there is insufficient
@@ -779,27 +958,33 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> AsyncSender<T> {
         if !self.state.allocator.is_within_capacity(size, 0) {
             return Err(zx::Status::NO_MEMORY);
         }
+        let mut curr_read_head = self.shared.queue.load_read_head(Ordering::Acquire);
         let offset = loop {
-            match self.state.try_allocate(&self.inner, size, 0) {
-                (Some(offset), _) => break offset,
-                (None, curr_read_head) => {
-                    if self.inner.try_set_waiter(curr_read_head) {
-                        let vmo = self.inner.mapping.vmo();
-                        self.state.space_available.wait_async(vmo, SIG_SHUTDOWN).await?;
-                    }
-                }
+            if let Some(offset) = self.state.try_allocate(curr_read_head, size, 0) {
+                break offset;
             }
+            curr_read_head = self.shared.wait_until_popped(curr_read_head.index()).await?;
         };
 
         // SAFETY: `offset` was allocated by `try_allocate` for `size` bytes.
-        let slice = unsafe { self.inner.payload_slice_mut(offset, size) };
+        let slice = unsafe { self.shared.queue.payload_slice_mut(offset, size) };
         Ok(AsyncPayloadBuffer { sender: self, offset, slice })
+    }
+}
+
+impl<T> AsyncSender<T> {
+    /// Signals shutdown on the underlying VMO and wakes any tasks waiting on this sender.
+    pub fn shutdown(&self) -> Result<(), zx::Status> {
+        self.shared.signal_state.lock().shutting_down = true;
+        let res = self.shared.queue.shutdown();
+        self.shared.event.notify(usize::MAX);
+        res
     }
 }
 
 impl<T> Drop for AsyncSender<T> {
     fn drop(&mut self) {
-        let _ = self.inner.shutdown();
+        let _ = self.shutdown();
     }
 }
 
@@ -824,15 +1009,13 @@ impl<'a, T: FromBytes + IntoBytes + KnownLayout + Copy> AsyncPayloadBuffer<'a, T
     }
 
     /// Pushes the given message to the FIFO and commits this payload allocation, linking the
-    /// payload to the queue slot. Yields if the queue is full.
-    pub async fn commit(mut self, msg: T) -> Result<(), zx::Status> {
-        let offset = std::mem::replace(&mut self.offset, NO_ALLOCATION);
-        let payload_offset = (offset != NO_ALLOCATION).then_some(offset);
-        if let Err(e) = self.sender.push_with_payload(msg, payload_offset).await {
-            self.sender.state.allocator.free(offset);
-            return Err(e);
-        }
-        Ok(())
+    /// payload to the queue slot and returning the committed slot index. Yields if the queue is
+    /// full.
+    pub async fn commit(mut self, msg: T) -> Result<u64, zx::Status> {
+        let payload_offset = (self.offset != NO_ALLOCATION).then_some(self.offset);
+        let slot = self.sender.push_with_payload(msg, payload_offset).await?;
+        self.offset = NO_ALLOCATION;
+        Ok(slot)
     }
 }
 
@@ -944,11 +1127,11 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy, S: Deref<Target = SyncSender
         );
         let is_final = aligned_len == self.remaining_len;
         assert!(
-            is_final || aligned_len & (self.sender.alignment - 1) == 0,
+            is_final || self.sender.alignment.is_aligned(aligned_len as u64),
             "commit_prefix length must be a multiple of alignment"
         );
         // Because a buddy block cannot be freed in fragments, we attach `self.base_offset` only to
-        // the final committed slot of this reservation. `Receiver::retire_slot` advances
+        // the final committed slot of this reservation. `Receiver::retire_slots` advances
         // `read_head` monotonically across contiguous completed slots, guaranteeing all earlier
         // prefix slots have also been retired by the time `read_head` advances past the final slot.
         let payload_offset = (is_final && self.owns_allocation).then_some(self.base_offset);
@@ -991,17 +1174,28 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy, S: Deref<Target = SyncSender
     }
 }
 
+// Minimum number of additional unclaimed messages remaining in the FIFO (after the currently
+// claiming worker takes its message) before the receiver wakes another sleeping worker thread.
+// Keeping this at 4 ensures that a single 128 KiB page-in split into four 32 KiB chunks is
+// processed end-to-end by one worker thread without paying the scheduler cost of waking a second
+// worker for the tail chunk(s).
+const WAKE_ADDITIONAL_WORKER_THRESHOLD: u64 = 4;
+
 struct ReceiverState {
     claim_index: u64,
     committed_read_index: u64,
-    last_claim_write_index: u64,
     completed_slots: Box<[bool]>,
     data_available: EventSignal,
     space_available: EventSignal,
     wait_async_armed: bool,
     shutting_down: bool,
+    // Number of worker threads currently blocked in `port.wait`.
     sleeping_workers: usize,
+    // Number of claimed messages currently held by worker threads (not yet popped or detached into
+    // a `SlotGuard`).
     active_workers: usize,
+    // Number of unconsumed `PORT_KEY_WAKE` user packets currently queued on `port`.
+    pending_wakes: usize,
 }
 
 impl ReceiverState {
@@ -1010,7 +1204,6 @@ impl ReceiverState {
         Self {
             claim_index: initial_index,
             committed_read_index: initial_index,
-            last_claim_write_index: initial_index,
             completed_slots: vec![false; capacity as usize].into_boxed_slice(),
             data_available: EventSignal::new(SIG_DATA_AVAILABLE_0, SIG_DATA_AVAILABLE_1),
             space_available: EventSignal::new(SIG_SPACE_AVAILABLE_0, SIG_SPACE_AVAILABLE_1),
@@ -1018,6 +1211,7 @@ impl ReceiverState {
             shutting_down: false,
             sleeping_workers: 0,
             active_workers: 0,
+            pending_wakes: 0,
         }
     }
 }
@@ -1032,6 +1226,7 @@ pub struct Receiver<T> {
 pub struct Message<'a, T: FromBytes + IntoBytes + KnownLayout + Copy> {
     receiver: &'a Receiver<T>,
     slot_index: u64,
+    slot_count: u32,
     claimed: bool,
     popped: bool,
     item: T,
@@ -1056,6 +1251,10 @@ impl<'a, T: FromBytes + IntoBytes + KnownLayout + Copy> Message<'a, T> {
         self.receiver.payload_region_offset()
     }
 
+    pub fn try_payload_slice(&self, vmo_offset: u32, len: u32) -> Option<PtrByteSlice<'_>> {
+        self.receiver.try_payload_slice(vmo_offset, len)
+    }
+
     pub fn payload_slice(&self, vmo_offset: u32, len: u32) -> PtrByteSlice<'_> {
         self.receiver.payload_slice(vmo_offset, len)
     }
@@ -1066,9 +1265,28 @@ impl<'a, T: FromBytes + IntoBytes + KnownLayout + Copy> Message<'a, T> {
     ///
     /// Panics if `vmo_offset + len` exceeds the bounds of the VMO.
     pub fn payload_mut_slice(&mut self, vmo_offset: u32, len: u32) -> MutPtrByteSlice<'_> {
-        // SAFETY: Each `Message` represents an exclusive claim over its payload range until
-        // `pop()` retires the slot.
+        // SAFETY: Each `Message` represents an exclusive claim over its payload range until its
+        // slot is retired (via `pop()`, `into_slot_guard()`, or `Drop`).
         unsafe { self.receiver.payload_mut_slice_unchecked(vmo_offset, len) }
+    }
+
+    /// Attempts to claim the next message in the queue without blocking if it is immediately
+    /// contiguous with this message's slot range and `f` returns `Some`.
+    ///
+    /// When this returns `Some`, `self` owns the newly claimed slot in addition to its previously
+    /// claimed slot(s), `Deref` yields the new message, and retiring `self` (via [`Self::pop`],
+    /// [`Self::into_slot_guard`], or `Drop`) retires all merged slots together.
+    ///
+    /// Note: Must not be called from inside the `on_claim` closure of [`Receiver::claim_with`],
+    /// which already holds the receiver's state lock.
+    pub fn try_claim_next<R, F>(&mut self, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> Option<R>,
+    {
+        if !self.claimed {
+            return None;
+        }
+        self.receiver.try_claim_next_into(self, f)
     }
 
     /// Commit the read, freeing the slot.
@@ -1076,13 +1294,40 @@ impl<'a, T: FromBytes + IntoBytes + KnownLayout + Copy> Message<'a, T> {
         self.pop_internal()
     }
 
-    // Marks this message as popped and retires `self.slot_index` in the receiver.
+    /// Transfers ownership of this claimed message's slot retirement to an owned [`SlotGuard`].
+    ///
+    /// Consumes `self` so payload slices borrowed from `self` cannot outlive the returned guard.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `self` was obtained via [`Receiver::peek`] rather than [`Receiver::claim`] or
+    /// [`Receiver::claim_with`], or if `receiver` is not the [`Receiver`] from which `self` was
+    /// claimed.
+    pub fn into_slot_guard(mut self, receiver: Arc<Receiver<T>>) -> SlotGuard<T> {
+        assert!(self.claimed && !self.popped, "Message must be claimed and not yet popped");
+        assert!(
+            std::ptr::eq(self.receiver, receiver.as_ref()),
+            "Message converted with mismatched Receiver"
+        );
+        self.popped = true;
+        receiver.detach_active_worker();
+        SlotGuard { receiver, slot_index: self.slot_index, slot_count: self.slot_count }
+    }
+
+    // Marks this message as popped and retires `self.slot_index..self.slot_index + self.slot_count`
+    // in the receiver.
     fn pop_internal(&mut self) -> Result<(), zx::Status> {
         if self.popped {
             return Ok(());
         }
         self.popped = true;
-        self.receiver.retire_slot(self.slot_index, self.claimed)
+        let mut state = self.receiver.state.lock();
+        if self.claimed {
+            state.active_workers -= 1;
+        } else if state.claim_index == self.slot_index {
+            state.claim_index = (state.claim_index + self.slot_count as u64) & State::INDEX_MASK;
+        }
+        self.receiver.retire_slots(&mut state, self.slot_index, self.slot_count)
     }
 }
 
@@ -1091,6 +1336,29 @@ impl<'a, T: FromBytes + IntoBytes + KnownLayout + Copy> Drop for Message<'a, T> 
         if self.claimed && !self.popped {
             let _ = self.pop_internal();
         }
+    }
+}
+
+/// An owned `'static` guard for one or more claimed FIFO slots that retires them when dropped.
+pub struct SlotGuard<T> {
+    receiver: Arc<Receiver<T>>,
+    slot_index: u64,
+    slot_count: u32,
+}
+
+impl<T> Debug for SlotGuard<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlotGuard")
+            .field("slot_index", &self.slot_index)
+            .field("slot_count", &self.slot_count)
+            .finish()
+    }
+}
+
+impl<T> Drop for SlotGuard<T> {
+    fn drop(&mut self) {
+        let mut state = self.receiver.state.lock();
+        let _ = self.receiver.retire_slots(&mut state, self.slot_index, self.slot_count);
     }
 }
 
@@ -1152,21 +1420,98 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> Receiver<T> {
     }
 
     /// Notifies the receiver that the current worker thread (after popping its message) is about to
-    /// perform an operation that may block waiting for a subsequent message on this queue. If all
-    /// other workers are sleeping and unread messages were already queued before the waiter flag
-    /// was armed, wakes a sleeping worker to process them.
+    /// perform an operation that may block waiting for a subsequent message on this queue. If no
+    /// other worker is currently active, either wakes a sleeping worker immediately (if unread
+    /// messages are already queued) or arms `HAS_WAITER` and `wait_async` so the next incoming
+    /// message wakes a sleeping worker.
     pub fn will_maybe_reenter(&self) {
-        let state = self.state.lock();
+        let mut state = self.state.lock();
+        self.maybe_arm_or_wake_for_reentry(&mut state);
+    }
+
+    // Decrements `active_workers` when a claimed `Message` is converted into an owned `SlotGuard`
+    // so the worker thread can re-enter `claim()` (or other sleeping workers can arm `wait_async`)
+    // while the `SlotGuard` remains alive asynchronously.
+    fn detach_active_worker(&self) {
+        let mut state = self.state.lock();
+        state.active_workers -= 1;
+        self.maybe_arm_or_wake_for_reentry(&mut state);
+    }
+
+    fn maybe_arm_or_wake_for_reentry(&self, state: &mut ReceiverState) {
         if state.active_workers == 0
             && state.sleeping_workers > 0
-            && state.claim_index != state.last_claim_write_index
+            && !state.wait_async_armed
+            && !state.shutting_down
         {
-            let _ = self.port.queue(&zx::Packet::from_user_packet(
-                PORT_KEY_WAKE,
-                0,
-                zx::UserPacket::from_u8_array([0; 32]),
-            ));
+            let mut curr_write_head = self.inner.load_write_head(Ordering::Acquire);
+            loop {
+                if state.claim_index != curr_write_head.index() {
+                    self.wake_one_sleeping_worker(state);
+                    break;
+                }
+                if self.try_arm_wait_async(state, &mut curr_write_head).unwrap_or(true) {
+                    break;
+                }
+            }
         }
+    }
+
+    // Queues a user packet on `self.port` to wake one sleeping worker thread if any sleeping
+    // worker does not already have a wake or signal packet in flight.
+    fn wake_one_sleeping_worker(&self, state: &mut ReceiverState) {
+        if state.sleeping_workers > state.pending_wakes + usize::from(state.wait_async_armed)
+            && self
+                .port
+                .queue(&zx::Packet::from_user_packet(
+                    PORT_KEY_WAKE,
+                    0,
+                    zx::UserPacket::from_u8_array([0; 32]),
+                ))
+                .is_ok()
+        {
+            state.pending_wakes += 1;
+        }
+    }
+
+    // Wakes a sleeping worker if the unclaimed backlog after claiming a slot still has at least
+    // `WAKE_ADDITIONAL_WORKER_THRESHOLD` messages remaining.
+    fn maybe_wake_for_backlog(&self, state: &mut ReceiverState, curr_write_head: State) {
+        let remaining = curr_write_head.index().wrapping_sub(state.claim_index) & State::INDEX_MASK;
+        if remaining >= WAKE_ADDITIONAL_WORKER_THRESHOLD && !state.shutting_down {
+            self.wake_one_sleeping_worker(state);
+        }
+    }
+
+    // Attempts to set `HAS_WAITER` on `write_head` (expected to equal `*curr_write_head`) and arm
+    // `wait_async` on the VMO if not already armed. Returns `Ok(true)` if `wait_async` is armed,
+    // or `Ok(false)` (updating `*curr_write_head` to the observed value) if `write_head` changed
+    // concurrently or `compare_exchange_weak` failed spuriously.
+    fn try_arm_wait_async(
+        &self,
+        state: &mut ReceiverState,
+        curr_write_head: &mut State,
+    ) -> Result<bool, zx::Status> {
+        if !state.wait_async_armed {
+            let asleep_write_head = curr_write_head.with_waiter();
+            if let Err(actual) = self.inner.write_head_atomic().compare_exchange_weak(
+                curr_write_head.0,
+                asleep_write_head.0,
+                // `Ordering::Relaxed`: We are just publishing a sleep signal.
+                Ordering::Relaxed,
+                // `Ordering::Acquire`: exchange failed (writer likely pushed an item).
+                Ordering::Acquire,
+            ) {
+                *curr_write_head = State(actual);
+                return Ok(false);
+            }
+
+            let vmo = self.inner.mapping.vmo();
+            let mask = state.data_available.current_mask(SIG_SHUTDOWN);
+            vmo.wait_async(&self.port, PORT_KEY_SIGNAL, mask, zx::WaitAsyncOpts::empty())?;
+            state.wait_async_armed = true;
+        }
+        Ok(true)
     }
 
     // Waits for the next available message in the FIFO, optionally advancing `claim_index` and
@@ -1180,10 +1525,10 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> Receiver<T> {
         F: FnOnce(&mut Message<'_, T>) -> R,
     {
         let mut state = self.state.lock();
+        // `Ordering::Acquire`: guarantees the writer has finished writing the new data to the
+        // VMO before the reader attempts to read it.
+        let mut curr_write_head = self.inner.load_write_head(Ordering::Acquire);
         loop {
-            // `Ordering::Acquire`: guarantees the writer has finished writing the new data to the
-            // VMO before the reader attempts to read it.
-            let mut curr_write_head = self.inner.load_write_head(Ordering::Acquire);
             if state.claim_index != curr_write_head.index() {
                 let slot_index = state.claim_index;
                 let slot_ptr = self.inner.get_slot_ptr(slot_index);
@@ -1196,40 +1541,22 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> Receiver<T> {
                     state.active_workers += 1;
                 }
 
-                let mut msg =
-                    Message { receiver: self, slot_index, claimed: claim, popped: false, item };
+                let mut msg = Message {
+                    receiver: self,
+                    slot_index,
+                    slot_count: 1,
+                    claimed: claim,
+                    popped: false,
+                    item,
+                };
                 let res = on_claim(&mut msg);
 
-                // If another worker thread is still asleep, re-arm `HAS_WAITER` and `wait_async`
-                // so that if more items are pushed while this thread is busy processing `msg`,
-                // the sender will signal the VMO and wake the sleeping worker.
+                // Avoid arming `HAS_WAITER` while a worker is already active so the sender does not
+                // pay `zx_object_signal` and wake a second thread for a nearly empty queue.
+                // Instead, wake a sleeping worker from the receiver side only when the remaining
+                // unclaimed backlog reaches `WAKE_ADDITIONAL_WORKER_THRESHOLD`.
                 if claim {
-                    while state.sleeping_workers > 0
-                        && !state.wait_async_armed
-                        && !state.shutting_down
-                    {
-                        let asleep_write_head = curr_write_head.with_waiter();
-                        match self.inner.write_head_atomic().compare_exchange_weak(
-                            curr_write_head.0,
-                            asleep_write_head.0,
-                            Ordering::Relaxed,
-                            Ordering::Acquire,
-                        ) {
-                            Ok(_) => {
-                                let vmo = self.inner.mapping.vmo();
-                                let mask = state.data_available.current_mask(SIG_SHUTDOWN);
-                                vmo.wait_async(
-                                    &self.port,
-                                    PORT_KEY_SIGNAL,
-                                    mask,
-                                    zx::WaitAsyncOpts::empty(),
-                                )?;
-                                state.wait_async_armed = true;
-                            }
-                            Err(actual) => curr_write_head = State(actual),
-                        }
-                    }
-                    state.last_claim_write_index = curr_write_head.index();
+                    self.maybe_wake_for_backlog(&mut state, curr_write_head);
                 }
 
                 return Ok((msg, res));
@@ -1239,30 +1566,13 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> Receiver<T> {
                 return Err(zx::Status::CANCELED);
             }
 
-            // The queue is empty. Inform the writer that we are going to sleep and waiting for a
-            // signal when new items are pushed.
-            if !state.wait_async_armed {
-                let asleep_write_head = curr_write_head.with_waiter();
-                if self
-                    .inner
-                    .write_head_atomic()
-                    .compare_exchange_weak(
-                        curr_write_head.0,
-                        asleep_write_head.0,
-                        // `Ordering::Relaxed`: We are just publishing a sleep signal.
-                        Ordering::Relaxed,
-                        // `Ordering::Acquire`: exchange failed (writer likely pushed an item).
-                        Ordering::Acquire,
-                    )
-                    .is_err()
-                {
-                    continue;
-                }
-
-                let vmo = self.inner.mapping.vmo();
-                let mask = state.data_available.current_mask(SIG_SHUTDOWN);
-                vmo.wait_async(&self.port, PORT_KEY_SIGNAL, mask, zx::WaitAsyncOpts::empty())?;
-                state.wait_async_armed = true;
+            // The queue is empty. Only arm `HAS_WAITER` and `wait_async` when no other worker is
+            // currently active; an active worker will return to `next_internal` (or call
+            // `will_maybe_reenter` / `into_slot_guard`) once it finishes or detaches its message.
+            if state.active_workers == 0
+                && !self.try_arm_wait_async(&mut state, &mut curr_write_head)?
+            {
+                continue;
             }
 
             state.sleeping_workers += 1;
@@ -1273,7 +1583,9 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> Receiver<T> {
             state.sleeping_workers -= 1;
             let packet = wait_res?;
 
-            if packet.key() == PORT_KEY_SIGNAL {
+            if packet.key() == PORT_KEY_WAKE {
+                state.pending_wakes = state.pending_wakes.saturating_sub(1);
+            } else if packet.key() == PORT_KEY_SIGNAL {
                 state.wait_async_armed = false;
                 if let zx::PacketContents::SignalOne(signals) = packet.contents() {
                     let observed = signals.observed();
@@ -1282,93 +1594,101 @@ impl<T: FromBytes + IntoBytes + KnownLayout + Copy> Receiver<T> {
                     }
                     if observed.contains(SIG_SHUTDOWN) && !state.shutting_down {
                         state.shutting_down = true;
-                        for _ in 0..state.sleeping_workers {
-                            let _ = self.port.queue(&zx::Packet::from_user_packet(
-                                PORT_KEY_WAKE,
-                                0,
-                                zx::UserPacket::from_u8_array([0; 32]),
-                            ));
+                        let to_wake = state.sleeping_workers.saturating_sub(state.pending_wakes);
+                        for _ in 0..to_wake {
+                            if self
+                                .port
+                                .queue(&zx::Packet::from_user_packet(
+                                    PORT_KEY_WAKE,
+                                    0,
+                                    zx::UserPacket::from_u8_array([0; 32]),
+                                ))
+                                .is_ok()
+                            {
+                                state.pending_wakes += 1;
+                            }
                         }
                     }
                 }
             }
+
+            curr_write_head = self.inner.load_write_head(Ordering::Acquire);
         }
     }
 
-    // Records `slot_index` as completed and advances the shared `read_head` across all contiguous
-    // completed slots from `committed_read_index`.
-    fn retire_slot(&self, slot_index: u64, claimed: bool) -> Result<(), zx::Status> {
+    // Attempts to claim the next slot into `msg` without blocking if `state.claim_index` is
+    // immediately contiguous with `msg` and `f` returns `Some`.
+    fn try_claim_next_into<R, F>(&self, msg: &mut Message<'_, T>, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> Option<R>,
+    {
+        // Cap coalescing at half the ring capacity so a single message never pins the entire slot
+        // ring or wraps `(slot_index + i) & mask` before `pop()` retires the slots.
+        if msg.slot_count >= self.inner.capacity() / 2 {
+            return None;
+        }
+        let expected_slot = (msg.slot_index + msg.slot_count as u64) & State::INDEX_MASK;
+        // Fast-path check before locking `self.state`: `state.claim_index` never advances past
+        // `write_head.index()`, so if `write_head` is still at `expected_slot`, no continuation
+        // has been published yet.
+        if self.inner.load_write_head(Ordering::Acquire).index() == expected_slot {
+            return None;
+        }
         let mut state = self.state.lock();
-        if claimed {
-            state.active_workers -= 1;
-        } else if state.claim_index == slot_index {
-            state.claim_index = (state.claim_index + 1) & State::INDEX_MASK;
+        if state.claim_index != expected_slot {
+            return None;
         }
-        let mask = (self.inner.capacity() - 1) as u64;
-        state.completed_slots[(slot_index & mask) as usize] = true;
-        let mut advanced = false;
-        loop {
-            let committed_slot = (state.committed_read_index & mask) as usize;
-            if !state.completed_slots[committed_slot] {
-                break;
-            }
-            state.completed_slots[committed_slot] = false;
-            state.committed_read_index = (state.committed_read_index + 1) & State::INDEX_MASK;
-            advanced = true;
+        let curr_write_head = self.inner.load_write_head(Ordering::Acquire);
+        if state.claim_index == curr_write_head.index() {
+            return None;
         }
+        let slot_ptr = self.inner.get_slot_ptr(expected_slot);
+        // SAFETY: `slot_ptr` enforces VMO bounds, `Acquire` ordering guarantees the sender
+        // finished writing before we read, and `T: FromBytes` ensures any bit pattern is valid.
+        let next_item = unsafe { std::ptr::read(slot_ptr) };
+        let res = f(&next_item)?;
+        state.claim_index = (state.claim_index + 1) & State::INDEX_MASK;
+        msg.slot_count += 1;
+        msg.item = next_item;
 
-        if advanced {
-            let target_read_index = state.committed_read_index;
-            let mut curr_read_head = self.inner.load_read_head(Ordering::Relaxed);
-            loop {
-                let next_read_head = State(target_read_index);
-                match self.inner.read_head_atomic().compare_exchange_weak(
-                    curr_read_head.0,
-                    next_read_head.0,
-                    // `Ordering::Release`: ensure the reader has finished reading the old data from
-                    // the VMO before the writer sees this new index and overwrites the slot.
-                    Ordering::Release,
-                    // `Ordering::Relaxed`: swap failed (most likely due to WAITER flag being
-                    // modified).
-                    Ordering::Relaxed,
-                ) {
-                    Ok(prev_read_head) => {
-                        // Wake the writer if they fell asleep waiting for a free slot.
-                        if State(prev_read_head).has_waiter() {
-                            let vmo = self.inner.mapping.vmo();
-                            state.space_available.signal(vmo)?;
-                        }
-                        break;
-                    }
-                    Err(actual) => curr_read_head = State(actual),
-                }
-            }
+        self.maybe_wake_for_backlog(&mut state, curr_write_head);
+        Some(res)
+    }
+
+    /// Returns a raw slice pointer to the specified payload region, or `None` if the range is out
+    /// of bounds. `vmo_offset` is relative to the start of the payload region.
+    ///
+    /// Use this instead of [`Self::payload_slice`] when `vmo_offset` or `len` come from the peer.
+    pub fn try_payload_slice(&self, vmo_offset: u32, len: u32) -> Option<PtrByteSlice<'_>> {
+        let offset = self.inner.payload_region_offset().checked_add(vmo_offset as usize)?;
+        if offset.checked_add(len as usize)? > self.inner.vmo_size() {
+            return None;
         }
-        Ok(())
+        // SAFETY:
+        // 1. `self.inner.addr()` is a valid base pointer to a mapped VMO memory space active
+        //    for the entire lifetime of this instance. The VMO is non-resizable (enforced when
+        //    mapping), so the mapping cannot shrink underneath us.
+        // 2. The overflow-checked bounds check above guarantees that `offset + len` lies within
+        //    the mapping, preventing out-of-bounds pointer derivation.
+        // 3. Returning a `PtrByteSlice` wrapper instead of a native `&[u8]` avoids violating
+        //    Rust's strict aliasing rules for shared memory, thereby preventing Undefined Behavior.
+        unsafe {
+            let dest_ptr = (self.inner.addr() + offset) as *const u8;
+            let slice = std::ptr::slice_from_raw_parts(dest_ptr, len as usize);
+            Some(PtrByteSlice::new(slice))
+        }
     }
 
     /// Returns a raw slice pointer to the specified payload region.
     ///
     /// # Panics
     ///
-    /// Panics if the `vmo_offset + len` exceeds the bounds of the VMO.
+    /// Panics if the `vmo_offset + len` exceeds the bounds of the VMO. Use
+    /// [`Self::try_payload_slice`] for ranges supplied by the peer.
     // TODO(https://fxbug.dev/530494057): Refactor to encode the payload layout as part of the FIFO
     // messaging envelope to safely resolve bounds.
     pub fn payload_slice(&self, vmo_offset: u32, len: u32) -> PtrByteSlice<'_> {
-        // SAFETY:
-        // 1. `self.inner.addr()` is a valid base pointer to a mapped VMO memory space active
-        //    for the entire lifetime of this instance.
-        // 2. The explicit assertion guarantees that `offset + len` physically fits within
-        //    the bounded VMO boundaries, preventing out-of-bounds pointer derivation.
-        // 3. Returning a `PtrByteSlice` wrapper instead of a native `&[u8]` avoids violating
-        //    Rust's strict aliasing rules for shared memory, thereby preventing Undefined Behavior.
-        unsafe {
-            let offset = self.inner.payload_region_offset() + vmo_offset as usize;
-            assert!(offset + len as usize <= self.inner.vmo_size(), "Payload out of bounds");
-            let dest_ptr = (self.inner.addr() + offset) as *const u8;
-            let slice = std::ptr::slice_from_raw_parts(dest_ptr, len as usize);
-            PtrByteSlice::new(slice)
-        }
+        self.try_payload_slice(vmo_offset, len).expect("Payload out of bounds")
     }
 
     /// Returns a raw mutable slice pointer to the specified payload region.
@@ -1405,6 +1725,61 @@ impl<T> Receiver<T> {
     pub fn shutdown(&self) -> Result<(), zx::Status> {
         self.inner.shutdown()
     }
+
+    // Records `slot_index..slot_index + slot_count` as completed and advances the shared
+    // `read_head` across all contiguous completed slots from `committed_read_index`.
+    fn retire_slots(
+        &self,
+        state: &mut ReceiverState,
+        slot_index: u64,
+        slot_count: u32,
+    ) -> Result<(), zx::Status> {
+        let mask = (self.inner.capacity() - 1) as u64;
+        for i in 0..slot_count as u64 {
+            state.completed_slots[(slot_index.wrapping_add(i) & mask) as usize] = true;
+        }
+        let mut advanced = false;
+        loop {
+            let committed_slot = (state.committed_read_index & mask) as usize;
+            if !state.completed_slots[committed_slot] {
+                break;
+            }
+            state.completed_slots[committed_slot] = false;
+            state.committed_read_index = (state.committed_read_index + 1) & State::INDEX_MASK;
+            advanced = true;
+        }
+
+        if advanced {
+            let target_read_index = state.committed_read_index;
+            let mut curr_read_head = self.inner.load_read_head(Ordering::Relaxed);
+            loop {
+                let next_read_head = State(target_read_index);
+                match self.inner.read_head_atomic().compare_exchange_weak(
+                    curr_read_head.0,
+                    next_read_head.0,
+                    // `Ordering::Release`: ensures receiver reads of the slot and payload, as well
+                    // as any work guarded by `Message` / `SlotGuard`, happen-before the sender
+                    // observes the updated `read_head`.
+                    Ordering::Release,
+                    // `Ordering::Relaxed`: swap failed (most likely due to `HAS_WAITER` being set
+                    // concurrently).
+                    Ordering::Relaxed,
+                ) {
+                    Ok(prev_read_head) => {
+                        // Wake the sender if it is waiting for `read_head` to advance (either for
+                        // free space or in `wait_until_popped`).
+                        if State(prev_read_head).has_waiter() {
+                            let vmo = self.inner.mapping.vmo();
+                            state.space_available.signal(vmo)?;
+                        }
+                        break;
+                    }
+                    Err(actual) => curr_read_head = State(actual),
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<T> Drop for Receiver<T> {
@@ -1416,6 +1791,10 @@ impl<T> Drop for Receiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fuchsia_async::{DurationExt, LocalExecutor, Timer};
+    use futures::channel::oneshot;
+    use std::pin::pin;
+    use std::sync::Barrier;
     use std::thread;
     use std::time::Duration;
 
@@ -1431,7 +1810,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
 
-        let sender = SyncSender::<TestMessage>::new(vmo, 1, 4).expect("Sender new failed");
+        let sender =
+            SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_1B, 4).expect("Sender new failed");
         let mut receiver = Receiver::<TestMessage>::new(vmo_dup, 4).expect("Receiver new failed");
 
         assert!(receiver.is_empty());
@@ -1456,8 +1836,8 @@ mod tests {
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
         let mut receiver = Receiver::<TestMessage>::new(vmo, 2).expect("receiver creation failed");
-        let sender =
-            SyncSender::<TestMessage>::new(vmo_writer, 8, 2).expect("sender creation failed");
+        let sender = SyncSender::<TestMessage>::new(vmo_writer, Alignment::SIZE_8B, 2)
+            .expect("sender creation failed");
 
         let handle = std::thread::spawn(move || {
             let msg1 = TestMessage { val: 1 };
@@ -1504,7 +1884,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate_handle failed");
 
-        let sender = SyncSender::<TestMessage>::new(vmo, 8, 4).expect("Sender new failed");
+        let sender =
+            SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4).expect("Sender new failed");
         let mut receiver = Receiver::<TestMessage>::new_from_populated_vmo(vmo_dup, 4)
             .expect("Receiver new_from_populated_vmo failed");
 
@@ -1547,7 +1928,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = SyncSender::<TestMessage>::new(vmo, 8, 2).expect("Sender creation failed");
+        let sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 2)
+            .expect("Sender creation failed");
         let mut receiver =
             Receiver::<TestMessage>::new(vmo_dup, 2).expect("Receiver creation failed");
 
@@ -1571,7 +1953,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = SyncSender::<TestMessage>::new(vmo, 8, 2).expect("Sender creation failed");
+        let sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 2)
+            .expect("Sender creation failed");
         let receiver = Receiver::<TestMessage>::new(vmo_dup, 2).expect("Receiver creation failed");
 
         // Fill up the queue so the next push blocks
@@ -1639,8 +2022,8 @@ mod tests {
         let page_size = zx::system_get_page_size() as u64;
         let vmo = zx::Vmo::create(page_size * 2).expect("VMO creation failed");
 
-        let mut sender =
-            SyncSender::<WireTestCommand>::new(vmo, 8, 4).expect("Sender creation failed");
+        let mut sender = SyncSender::<WireTestCommand>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("Sender creation failed");
 
         let buffer = sender.reserve_payload(10).expect("reserve failed");
         assert_eq!(buffer.offset(), 0);
@@ -1658,8 +2041,8 @@ mod tests {
         let page_size = zx::system_get_page_size() as u64;
         let vmo = zx::Vmo::create(page_size * 2).expect("VMO creation failed");
 
-        let mut sender =
-            SyncSender::<WireTestCommand>::new(vmo, 8, 4).expect("Sender creation failed");
+        let mut sender = SyncSender::<WireTestCommand>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("Sender creation failed");
 
         // Simulate a function that reserves a payload but returns early (e.g., from encountering
         // an error).
@@ -1684,8 +2067,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let mut sender =
-            SyncSender::<WireTestCommand>::new(vmo, 8, 4).expect("Sender creation failed");
+        let mut sender = SyncSender::<WireTestCommand>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("Sender creation failed");
         let mut receiver =
             Receiver::<WireTestCommand>::new(vmo_dup, 4).expect("Receiver creation failed");
 
@@ -1715,12 +2098,40 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn test_try_payload_slice_bounds() {
+        let page_size = zx::system_get_page_size();
+        let vmo = zx::Vmo::create(page_size as u64 * 2).expect("VMO creation failed");
+        let receiver = Receiver::<u32>::new(vmo, 4).expect("Receiver creation failed");
+        let payload_size = (page_size as usize * 2 - receiver.payload_region_offset()) as u32;
+
+        assert_eq!(
+            receiver.try_payload_slice(0, payload_size).map(|s| s.len()),
+            Some(payload_size as usize)
+        );
+        assert_eq!(receiver.try_payload_slice(payload_size, 0).map(|s| s.len()), Some(0));
+        assert!(receiver.try_payload_slice(0, payload_size + 1).is_none());
+        assert!(receiver.try_payload_slice(payload_size, 1).is_none());
+        assert!(receiver.try_payload_slice(u32::MAX, u32::MAX).is_none());
+    }
+
+    #[fuchsia::test]
+    fn test_rejects_resizable_vmo() {
+        let page_size = zx::system_get_page_size() as u64;
+        let new_vmo = || {
+            zx::Vmo::create_with_opts(zx::VmoOptions::RESIZABLE, page_size * 2)
+                .expect("VMO creation failed")
+        };
+        assert!(Receiver::<u32>::new(new_vmo(), 4).is_err());
+        assert!(SyncSender::<u32>::new(new_vmo(), Alignment::SIZE_8B, 4).is_err());
+    }
+
+    #[fuchsia::test]
     fn test_pop_handles_canceled_race_condition() {
         // Run ten thousand times to force thread-scheduler starvation naturally
         for _ in 0..10000 {
             let vmo = zx::Vmo::create(8192).unwrap();
             let vmo_dup = vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
-            let sender = SyncSender::<u32>::new(vmo, 4, 1).unwrap();
+            let sender = SyncSender::<u32>::new(vmo, Alignment::SIZE_4B, 1).unwrap();
             let mut receiver = Receiver::<u32>::new(vmo_dup, 1).unwrap();
 
             let handle = std::thread::spawn(move || {
@@ -1763,7 +2174,7 @@ mod tests {
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
 
         let queue_capacity = 4;
-        let mut sender = AsyncSender::<TestMessage>::new(vmo, 4, queue_capacity)
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_4B, queue_capacity)
             .expect("failed to create AsyncSender");
         let mut receiver = Receiver::<TestMessage>::new(vmo_dup, queue_capacity)
             .expect("failed to create Receiver");
@@ -1803,8 +2214,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
 
-        let mut sender =
-            AsyncSender::<TestMessage>::new(vmo, 4, 4).expect("failed to create AsyncSender");
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_4B, 4)
+            .expect("failed to create AsyncSender");
         let mut receiver =
             Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver");
 
@@ -1851,8 +2262,9 @@ mod tests {
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
 
         let queue_capacity = 4;
-        let mut sender = AsyncSender::<WireTestCommand>::new(vmo, 4, queue_capacity)
-            .expect("failed to create AsyncSender");
+        let mut sender =
+            AsyncSender::<WireTestCommand>::new(vmo, Alignment::SIZE_4B, queue_capacity)
+                .expect("failed to create AsyncSender");
         let mut receiver = Receiver::<WireTestCommand>::new(vmo_dup, queue_capacity)
             .expect("failed to create Receiver");
 
@@ -1902,7 +2314,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = SyncSender::<TestMessage>::new(vmo, 8, 4).expect("Sender creation failed");
+        let sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("Sender creation failed");
         let receiver = Receiver::<TestMessage>::new(vmo_dup, 4).expect("Receiver creation failed");
 
         // The receiver goes away unexpectedly before the queue is full.
@@ -1926,8 +2339,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let mut sender =
-            AsyncSender::<TestMessage>::new(vmo, 8, 4).expect("Sender creation failed");
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("Sender creation failed");
         let receiver = Receiver::<TestMessage>::new(vmo_dup, 4).expect("Receiver creation failed");
 
         // The receiver goes away unexpectedly before the queue is full.
@@ -1952,8 +2365,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
 
-        let mut sender =
-            SyncSender::<TestMessage>::new(vmo, 4, 4).expect("failed to create Sender");
+        let mut sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_4B, 4)
+            .expect("failed to create Sender");
         let _receiver =
             Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver");
 
@@ -1970,8 +2383,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
 
-        let mut sender =
-            AsyncSender::<TestMessage>::new(vmo, 4, 4).expect("failed to create AsyncSender");
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_4B, 4)
+            .expect("failed to create AsyncSender");
         let _receiver =
             Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver");
 
@@ -1987,7 +2400,8 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = SyncSender::<TestMessage>::new(vmo, 8, 8).expect("Sender creation failed");
+        let sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 8)
+            .expect("Sender creation failed");
         let receiver =
             Arc::new(Receiver::<TestMessage>::new(vmo_dup, 8).expect("Receiver creation failed"));
 
@@ -2052,7 +2466,9 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = Arc::new(SyncSender::<PayloadRefMessage>::new(vmo, page, 8).expect("sender"));
+        let sender = Arc::new(
+            SyncSender::<PayloadRefMessage>::new(vmo, page_size().into(), 8).expect("sender"),
+        );
         let mut receiver =
             Receiver::<PayloadRefMessage>::new(vmo_dup, 8).expect("receiver creation failed");
         assert_eq!(sender.payload_capacity(), 4 * page);
@@ -2134,7 +2550,9 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = Arc::new(SyncSender::<PayloadRefMessage>::new(vmo, page, 8).expect("sender"));
+        let sender = Arc::new(
+            SyncSender::<PayloadRefMessage>::new(vmo, page_size().into(), 8).expect("sender"),
+        );
         let mut receiver =
             Receiver::<PayloadRefMessage>::new(vmo_dup, 8).expect("receiver creation failed");
         assert_eq!(sender.payload_capacity(), 2 * page);
@@ -2198,7 +2616,9 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = Arc::new(SyncSender::<PayloadRefMessage>::new(vmo, page, 8).expect("sender"));
+        let sender = Arc::new(
+            SyncSender::<PayloadRefMessage>::new(vmo, page_size().into(), 8).expect("sender"),
+        );
         let mut receiver =
             Receiver::<PayloadRefMessage>::new(vmo_dup, 8).expect("receiver creation failed");
 
@@ -2243,7 +2663,9 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = Arc::new(SyncSender::<PayloadRefMessage>::new(vmo, page, 8).expect("sender"));
+        let sender = Arc::new(
+            SyncSender::<PayloadRefMessage>::new(vmo, page_size().into(), 8).expect("sender"),
+        );
         let mut receiver =
             Receiver::<PayloadRefMessage>::new(vmo_dup, 8).expect("receiver creation failed");
 
@@ -2304,7 +2726,9 @@ mod tests {
         let vmo_dup =
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
 
-        let sender = Arc::new(SyncSender::<PayloadRefMessage>::new(vmo, page, 2).expect("sender"));
+        let sender = Arc::new(
+            SyncSender::<PayloadRefMessage>::new(vmo, page_size().into(), 2).expect("sender"),
+        );
         let receiver =
             Receiver::<PayloadRefMessage>::new(vmo_dup, 2).expect("receiver creation failed");
 
@@ -2329,5 +2753,603 @@ mod tests {
         for h in handles {
             assert_eq!(h.join().expect("writer panicked"), Some(zx::Status::CANCELED));
         }
+    }
+
+    #[fuchsia::test]
+    fn test_receiver_avoids_waking_second_worker_when_nearly_empty_and_wakes_on_threshold() {
+        let vmo = zx::Vmo::create(65536).expect("VMO creation failed");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
+
+        let sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 16)
+            .expect("Sender creation failed");
+        let receiver =
+            Arc::new(Receiver::<TestMessage>::new(vmo_dup, 16).expect("Receiver creation failed"));
+
+        // Push 1 item and claim it on Worker 1 (this thread) so `active_workers == 1`.
+        sender.push(TestMessage { val: 1 }).expect("push 1");
+        let msg1 = receiver.claim().expect("claim 1");
+        assert_eq!(msg1.val, 1);
+
+        // Spawn Worker 2 while Worker 1 is active (`active_workers == 1`).
+        let rx2 = Arc::clone(&receiver);
+        let worker2 = thread::spawn(move || {
+            let msg = rx2.claim().expect("worker 2 claim");
+            let val = msg.val;
+            msg.pop().expect("worker 2 pop");
+            val
+        });
+
+        // Wait until Worker 2 is asleep in `next_internal`.
+        while receiver.state.lock().sleeping_workers == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // Because Worker 1 is active, `HAS_WAITER` must not be armed on `write_head`.
+        assert!(!receiver.inner.load_write_head(Ordering::Acquire).has_waiter());
+        assert!(!receiver.state.lock().wait_async_armed);
+
+        // Push 4 more items (so claiming the first leaves `remaining == 3 ==
+        // WAKE_ADDITIONAL_WORKER_THRESHOLD - 1`). Neither pushing nor claiming should wake
+        // Worker 2!
+        for val in [2, 3, 4, 5] {
+            sender.push(TestMessage { val }).expect("push");
+        }
+        msg1.pop().expect("pop 1");
+
+        // Worker 1 claims item 2 (remaining = 3 < 4), item 3 (remaining = 2 < 4), item 4
+        // (remaining = 1 < 4), and item 5 (remaining = 0).
+        for expected in [2, 3, 4, 5] {
+            let msg = receiver.claim().expect("claim");
+            assert_eq!(msg.val, expected);
+            assert_eq!(receiver.state.lock().sleeping_workers, 1);
+            msg.pop().expect("pop");
+        }
+
+        // Now push 6 items (vals 10..16). When Worker 1 claims val 10 (`remaining == 5 >= 4`),
+        // Worker 2 is woken. Worker 1 then claims again (`remaining == 4 >= 4` if Worker 2 has not
+        // claimed yet); `pending_wakes` must deduplicate the wake packet so at most 1
+        // `PORT_KEY_WAKE` packet is ever queued for the single sleeping Worker 2.
+        for val in 10..16 {
+            sender.push(TestMessage { val }).expect("push burst");
+        }
+        // The wake is only issued while claiming val 10 (under the state lock), so Worker 1 always
+        // gets val 10.
+        let msg10 = receiver.claim().expect("claim 10");
+        assert_eq!(msg10.val, 10);
+        // Worker 2 runs concurrently once woken and may claim val 11 before Worker 1's next claim,
+        // so Worker 1 gets either val 11 or val 12.
+        let msg_next = receiver.claim().expect("claim next");
+
+        let worker2_val = worker2.join().expect("worker 2 panicked");
+        let mut claimed = [msg10.val, msg_next.val, worker2_val];
+        claimed.sort_unstable();
+        assert_eq!(claimed, [10, 11, 12]);
+        // No stale wake packet may remain queued once Worker 2 has consumed its wake.
+        assert_eq!(receiver.state.lock().pending_wakes, 0);
+        msg10.pop().expect("pop 10");
+        msg_next.pop().expect("pop next");
+
+        for expected in 13..16 {
+            let msg = receiver.claim().expect("claim rest");
+            assert_eq!(msg.val, expected);
+            msg.pop().expect("pop rest");
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_receiver_will_maybe_reenter_arms_waiter_or_wakes_worker() {
+        let vmo = zx::Vmo::create(65536).expect("VMO creation failed");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
+
+        let sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 16)
+            .expect("Sender creation failed");
+        let receiver =
+            Arc::new(Receiver::<TestMessage>::new(vmo_dup, 16).expect("Receiver creation failed"));
+
+        // Case 1: Queue is empty when `will_maybe_reenter` is called -> arms `HAS_WAITER` +
+        // `wait_async` so a subsequent push wakes the sleeping worker.
+        sender.push(TestMessage { val: 100 }).expect("push 100");
+        let msg100 = receiver.claim().expect("claim 100");
+
+        let rx2 = Arc::clone(&receiver);
+        let worker2 = thread::spawn(move || {
+            let msg = rx2.claim().expect("worker 2 claim");
+            let val = msg.val;
+            msg.pop().expect("worker 2 pop");
+            val
+        });
+        while receiver.state.lock().sleeping_workers == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // Calling `will_maybe_reenter` while `msg100` is still claimed (`active_workers == 1`) is a
+        // no-op.
+        receiver.will_maybe_reenter();
+        assert!(!receiver.state.lock().wait_async_armed);
+        assert!(!receiver.inner.load_write_head(Ordering::Acquire).has_waiter());
+
+        // Worker 1 pops its message (`active_workers` -> 0) and calls `will_maybe_reenter` before
+        // blocking on a re-entrant operation.
+        msg100.pop().expect("pop 100");
+        assert!(!receiver.state.lock().wait_async_armed);
+        receiver.will_maybe_reenter();
+        assert!(receiver.state.lock().wait_async_armed);
+        assert!(receiver.inner.load_write_head(Ordering::Acquire).has_waiter());
+
+        sender.push(TestMessage { val: 101 }).expect("push 101");
+        assert_eq!(worker2.join().expect("worker 2 panicked"), 101);
+
+        // Case 2: An item was already pushed while Worker 1 was active (without waking Worker 2) ->
+        // `will_maybe_reenter` wakes Worker 2 immediately via `PORT_KEY_WAKE`.
+        sender.push(TestMessage { val: 200 }).expect("push 200");
+        let msg200 = receiver.claim().expect("claim 200");
+
+        let rx3 = Arc::clone(&receiver);
+        let worker3 = thread::spawn(move || {
+            let msg = rx3.claim().expect("worker 3 claim");
+            let val = msg.val;
+            msg.pop().expect("worker 3 pop");
+            val
+        });
+        while receiver.state.lock().sleeping_workers == 0 {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // Push 201 while Worker 1 is still active (`HAS_WAITER` is not set, so Worker 3 stays
+        // asleep).
+        sender.push(TestMessage { val: 201 }).expect("push 201");
+        assert_eq!(receiver.state.lock().sleeping_workers, 1);
+
+        // Worker 1 pops 200 and calls `will_maybe_reenter`, which must wake Worker 3 for 201.
+        msg200.pop().expect("pop 200");
+        receiver.will_maybe_reenter();
+        assert_eq!(worker3.join().expect("worker 3 panicked"), 201);
+    }
+
+    #[fuchsia::test]
+    fn test_try_claim_next_coalesces_and_retires_slots() {
+        let vmo = zx::Vmo::create(65536).expect("VMO creation failed");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("VMO duplicate_handle failed");
+
+        let mut sender = SyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 8)
+            .expect("Sender creation failed");
+        let receiver = Receiver::<TestMessage>::new(vmo_dup, 8).expect("Receiver creation failed");
+
+        // Reserve a single 96-byte payload and split it across 3 prefixes (32 bytes each),
+        // followed by an unrelated message.
+        let mut buf = sender.reserve_payload(96).expect("reserve 96");
+        buf.data().fill(0xAA);
+        let base_off = buf.offset();
+        for val in 10..13 {
+            buf.commit_prefix(32, TestMessage { val }).expect("commit_prefix");
+        }
+        drop(buf);
+        sender.push(TestMessage { val: 99 }).expect("push 99");
+
+        let mut msg = receiver.claim().expect("claim 10");
+        assert_eq!(msg.val, 10);
+
+        let mut claimed_vals = vec![msg.val];
+        while let Some(val) = msg.try_claim_next(|next| {
+            (next.val == claimed_vals.last().unwrap() + 1).then_some(next.val)
+        }) {
+            claimed_vals.push(val);
+        }
+        assert_eq!(claimed_vals, vec![10, 11, 12]);
+
+        // All 3 slots remain pinned until `msg.pop()` is called, then all 3 are retired together
+        // and the 96-byte payload allocation is freed.
+        assert_eq!(receiver.inner.load_read_head(Ordering::Acquire).index(), 0);
+        msg.pop().expect("pop coalesced");
+        assert_eq!(receiver.inner.load_read_head(Ordering::Acquire).index(), 3);
+
+        // Next claim must return the un-coalesced item 99.
+        let msg99 = receiver.claim().expect("claim 99");
+        assert_eq!(msg99.val, 99);
+        msg99.pop().expect("pop 99");
+        assert_eq!(receiver.inner.load_read_head(Ordering::Acquire).index(), 4);
+
+        // Verify the 96-byte payload was freed after all 3 coalesced slots were popped.
+        let buf2 = sender.reserve_payload(96).expect("re-reserve 96");
+        assert_eq!(buf2.offset(), base_off);
+        drop(buf2);
+
+        // Verify `capacity / 2` (4 slots for capacity 8) cap and automatic retirement on `Drop`.
+        for val in 50..56 {
+            sender.push(TestMessage { val }).expect("push cap test");
+        }
+        let mut msg_cap = receiver.claim().expect("claim 50");
+        let mut cap_count = 1;
+        while msg_cap.try_claim_next(|_| Some(())).is_some() {
+            cap_count += 1;
+        }
+        assert_eq!(cap_count, 4);
+        drop(msg_cap);
+        assert_eq!(receiver.inner.load_read_head(Ordering::Acquire).index(), 8);
+        for expected in 54..56 {
+            let m = receiver.claim().expect("claim remaining");
+            assert_eq!(m.val, expected);
+            m.pop().expect("pop remaining");
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_until_popped() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("failed to create AsyncSender");
+        let mut receiver =
+            Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver");
+
+        // Fast path: slot already popped before `wait_until_popped` is called.
+        let slot1 = sender.push(TestMessage { val: 10 }).await.expect("push failed");
+        receiver.peek().expect("peek failed").pop().expect("pop failed");
+        sender.wait_until_popped(slot1).await.expect("wait_until_popped failed");
+
+        // `wait_until_popped` returns a `'static` future without borrowing `sender`, allowing
+        // concurrent `reserve_payload` and `push` calls while `wait_fut` is pending.
+        let slot2 = sender.push(TestMessage { val: 20 }).await.expect("push slot2 failed");
+        let mut wait_fut2 = pin!(sender.wait_until_popped(slot2));
+        assert!(futures::poll!(&mut wait_fut2).is_pending());
+
+        let mut payload = sender.reserve_payload(8).await.expect("reserve_payload failed");
+        payload.data().copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let slot3 = payload.commit(TestMessage { val: 30 }).await.expect("commit slot3 failed");
+        let mut wait_fut3 = pin!(sender.wait_until_popped(slot3));
+        assert!(futures::poll!(&mut wait_fut3).is_pending());
+
+        let msg2 = receiver.peek().expect("peek msg2 failed");
+        assert!(futures::poll!(&mut wait_fut2).is_pending());
+        msg2.pop().expect("pop msg2 failed");
+        wait_fut2.await.expect("wait_until_popped slot2 failed");
+        assert!(futures::poll!(&mut wait_fut3).is_pending());
+
+        receiver.peek().expect("peek msg3 failed").pop().expect("pop msg3 failed");
+        wait_fut3.await.expect("wait_until_popped slot3 failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_async_sender_cancellation_preserves_signal_sync() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 2)
+            .expect("failed to create AsyncSender");
+        let mut receiver =
+            Receiver::<TestMessage>::new(vmo_dup, 2).expect("failed to create Receiver");
+
+        // Case 1: Drop a leader future (after it sets `HAS_WAITER`) BEFORE the receiver pops and
+        // signals, while a follower future is also waiting; the follower must take over as leader
+        // without losing signal synchronisation.
+        let slot0 = sender.push(TestMessage { val: 1 }).await.expect("push 1 failed");
+        let slot1 = sender.push(TestMessage { val: 2 }).await.expect("push 2 failed");
+        let mut wait0 = Box::pin(sender.wait_until_popped(slot0));
+        let mut wait1 = Box::pin(sender.wait_until_popped(slot1));
+        assert!(futures::poll!(&mut wait0).is_pending());
+        assert!(futures::poll!(&mut wait1).is_pending());
+        drop(wait0);
+        // Follower wakes from leader drop, becomes the new leader, and stays pending until popped.
+        assert!(futures::poll!(&mut wait1).is_pending());
+
+        receiver.peek().expect("peek 1 failed").pop().expect("pop 1 failed");
+        assert!(futures::poll!(&mut wait1).is_pending());
+        receiver.peek().expect("peek 2 failed").pop().expect("pop 2 failed");
+        wait1.await.expect("wait1 failed");
+
+        // Case 2: Drop a leader future AFTER the receiver has already popped and toggled its
+        // `space_available` signal bit, before the leader future is polled again. Subsequent
+        // waits across multiple toggle cycles must consume that signal rather than desynchronising.
+        let slot2 = sender.push(TestMessage { val: 3 }).await.expect("push 3 failed");
+        let mut cancelled_wait = Box::pin(sender.wait_until_popped(slot2));
+        assert!(futures::poll!(&mut cancelled_wait).is_pending());
+        receiver.peek().expect("peek 3 failed").pop().expect("pop 3 failed");
+        drop(cancelled_wait);
+
+        for round in 0..4 {
+            let s_a = sender.push(TestMessage { val: round * 2 }).await.expect("push a failed");
+            let s_b = sender.push(TestMessage { val: round * 2 + 1 }).await.expect("push b failed");
+            let wait_a = sender.wait_until_popped(s_a);
+            let wait_b = sender.wait_until_popped(s_b);
+            // Queue is full (capacity 2); `push` must block cleanly and wake when a slot pops.
+            let mut push_c = Box::pin(sender.push(TestMessage { val: 99 }));
+            assert!(futures::poll!(&mut push_c).is_pending());
+
+            receiver.peek().expect("peek a failed").pop().expect("pop a failed");
+            wait_a.await.expect("wait s_a failed");
+            let s_c = push_c.await.expect("push c failed");
+
+            receiver.peek().expect("peek b failed").pop().expect("pop b failed");
+            receiver.peek().expect("peek c failed").pop().expect("pop c failed");
+            wait_b.await.expect("wait s_b failed");
+            sender.wait_until_popped(s_c).await.expect("wait s_c failed");
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_async_sender_shutdown_wakes_wait_until_popped() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("failed to create AsyncSender");
+        let mut receiver =
+            Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver");
+
+        let slot0 = sender.push(TestMessage { val: 1 }).await.expect("push slot0 failed");
+        let slot1 = sender.push(TestMessage { val: 2 }).await.expect("push slot1 failed");
+        receiver.peek().expect("peek slot0 failed").pop().expect("pop slot0 failed");
+
+        let mut wait_unpopped1 = pin!(sender.wait_until_popped(slot1));
+        let mut wait_unpopped2 = pin!(sender.wait_until_popped(slot1));
+        assert!(futures::poll!(&mut wait_unpopped1).is_pending());
+        assert!(futures::poll!(&mut wait_unpopped2).is_pending());
+
+        sender.shutdown().expect("shutdown failed");
+        assert_eq!(wait_unpopped1.await, Err(zx::Status::CANCELED));
+        assert_eq!(wait_unpopped2.await, Err(zx::Status::CANCELED));
+        // An already-popped slot still reports `Ok(())` after shutdown.
+        sender.wait_until_popped(slot0).await.expect("already-popped slot should succeed");
+
+        // Simultaneous pop + receiver shutdown while a `wait_until_popped` future is already
+        // pending (`OnSignals` observes both `SIG_SPACE_AVAILABLE_*` and `SIG_SHUTDOWN`): the
+        // popped slot must still resolve to `Ok(())`.
+        let vmo2 = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo2_dup =
+            vmo2.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+        let mut sender2 = AsyncSender::<TestMessage>::new(vmo2, Alignment::SIZE_8B, 4)
+            .expect("failed to create AsyncSender");
+        let mut receiver2 =
+            Receiver::<TestMessage>::new(vmo2_dup, 4).expect("failed to create Receiver");
+        let slot_sim = sender2.push(TestMessage { val: 9 }).await.expect("push slot_sim failed");
+        let mut wait_sim = pin!(sender2.wait_until_popped(slot_sim));
+        assert!(futures::poll!(&mut wait_sim).is_pending());
+        receiver2.peek().expect("peek slot_sim failed").pop().expect("pop slot_sim failed");
+        drop(receiver2);
+        wait_sim.await.expect("slot popped prior to shutdown should succeed");
+    }
+
+    #[fuchsia::test]
+    async fn test_async_payload_commit_cancelled_frees_allocation() {
+        let page_size = zx::system_get_page_size() as u64;
+        // 1 page header/slots + 1 page payload, queue_capacity = 2.
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 2)
+            .expect("failed to create AsyncSender");
+        let mut receiver =
+            Receiver::<TestMessage>::new(vmo_dup, 2).expect("failed to create Receiver");
+
+        // Fill both FIFO message slots without using payload space.
+        sender.push(TestMessage { val: 1 }).await.expect("push 1 failed");
+        sender.push(TestMessage { val: 2 }).await.expect("push 2 failed");
+
+        // Reserve the entire payload page, then poll `commit` once (which suspends because the
+        // slot ring is full) and drop the cancelled `commit` future.
+        {
+            let mut payload =
+                sender.reserve_payload(page_size as usize).await.expect("reserve_payload failed");
+            payload.data().fill(0xAB);
+            let mut commit_fut = pin!(payload.commit(TestMessage { val: 3 }));
+            assert!(futures::poll!(&mut commit_fut).is_pending());
+        }
+
+        // Free one slot and verify the entire payload page was reclaimed when `commit_fut` dropped.
+        receiver.peek().expect("peek 1 failed").pop().expect("pop 1 failed");
+        let payload2 = sender
+            .reserve_payload(page_size as usize)
+            .await
+            .expect("re-reserve full payload page failed");
+        let slot = payload2.commit(TestMessage { val: 4 }).await.expect("commit payload2 failed");
+        receiver.peek().expect("peek 2 failed").pop().expect("pop 2 failed");
+        let msg = receiver.peek().expect("peek 4 failed");
+        assert_eq!(msg.val, 4);
+        msg.pop().expect("pop 4 failed");
+        sender.wait_until_popped(slot).await.expect("wait_until_popped failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_slot_guard_out_of_order_drop() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 8)
+            .expect("failed to create AsyncSender");
+        let receiver =
+            Arc::new(Receiver::<TestMessage>::new(vmo_dup, 8).expect("failed to create Receiver"));
+
+        let slot0 = sender.push(TestMessage { val: 10 }).await.expect("push slot0 failed");
+        let slot1 = sender.push(TestMessage { val: 20 }).await.expect("push slot1 failed");
+        let slot2 = sender.push(TestMessage { val: 30 }).await.expect("push slot2 failed");
+
+        let msg0 = receiver.claim().expect("claim slot0 failed");
+        assert_eq!(msg0.val, 10);
+        let guard0 = msg0.into_slot_guard(Arc::clone(&receiver));
+
+        let mut msg1 = receiver.claim().expect("claim slot1 failed");
+        assert_eq!(msg1.val, 20);
+        assert_eq!(msg1.try_claim_next(|m| Some(m.val)), Some(30));
+        let guard1 = msg1.into_slot_guard(Arc::clone(&receiver));
+
+        let mut wait0 = pin!(sender.wait_until_popped(slot0));
+        let mut wait1 = pin!(sender.wait_until_popped(slot1));
+        let mut wait2 = pin!(sender.wait_until_popped(slot2));
+        assert!(futures::poll!(&mut wait0).is_pending());
+        assert!(futures::poll!(&mut wait1).is_pending());
+        assert!(futures::poll!(&mut wait2).is_pending());
+
+        // Dropping coalesced `guard1` out of order must not advance `read_head` past `slot0`,
+        // `slot1`, or `slot2` until `guard0` is also dropped.
+        drop(guard1);
+        assert!(futures::poll!(&mut wait0).is_pending());
+        assert!(futures::poll!(&mut wait1).is_pending());
+        assert!(futures::poll!(&mut wait2).is_pending());
+
+        drop(guard0);
+        wait0.await.expect("wait0 failed");
+        wait1.await.expect("wait1 failed");
+        wait2.await.expect("wait2 failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_until_popped_rechecks_popped_slot_with_unconsumed_waiter() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("failed to create AsyncSender");
+        let mut receiver =
+            Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver");
+
+        let slot0 = sender.push(TestMessage { val: 1 }).await.expect("push slot0 failed");
+        let slot1 = sender.push(TestMessage { val: 2 }).await.expect("push slot1 failed");
+
+        // Hold `signal_state` while a worker thread starts `wait_until_popped(slot0)` so the worker
+        // passes the fast-path `load_read_head` check before `slot0` is popped.
+        let wait0 = sender.wait_until_popped(slot0);
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = Arc::clone(&barrier);
+        let worker = thread::spawn(move || {
+            let mut executor = LocalExecutor::default();
+            worker_barrier.wait();
+            executor.run_singlethreaded(wait0)
+        });
+        {
+            let mut state_guard = sender.shared.signal_state.lock();
+            barrier.wait();
+            thread::sleep(Duration::from_millis(1));
+
+            // Pop `slot0` (`read_head` advances `0 -> 1` without `HAS_WAITER`, so no VMO signal is
+            // asserted) and simulate an earlier cancelled leader having set `HAS_WAITER` on
+            // `slot1`.
+            receiver.peek().expect("peek slot0 failed").pop().expect("pop slot0 failed");
+            while let Err(actual) = sender.shared.queue.try_set_waiter(State(1)) {
+                assert_eq!(actual.0, 1);
+            }
+            state_guard.unconsumed_waiter = true;
+        }
+
+        // `wait0` must resolve to `Ok(())` without blocking for `slot1` to pop, while leaving
+        // `unconsumed_waiter` intact for `slot1`.
+        worker.join().expect("worker panicked").expect("wait0 failed");
+
+        let mut wait1 = pin!(sender.wait_until_popped(slot1));
+        assert!(futures::poll!(&mut wait1).is_pending());
+        receiver.peek().expect("peek slot1 failed").pop().expect("pop slot1 failed");
+        wait1.await.expect("wait1 failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_slot_guard_allows_subsequent_blocking_claim() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("failed to create AsyncSender");
+        let receiver =
+            Arc::new(Receiver::<TestMessage>::new(vmo_dup, 4).expect("failed to create Receiver"));
+
+        let slot0 = sender.push(TestMessage { val: 10 }).await.expect("push slot0 failed");
+
+        let receiver_clone = Arc::clone(&receiver);
+        let (tx_ready, rx_ready) = oneshot::channel();
+        let (tx_second, rx_second) = oneshot::channel();
+        let worker = thread::spawn(move || {
+            let msg0 = receiver_clone.claim().expect("claim slot0 failed");
+            assert_eq!(msg0.val, 10);
+            // Convert `msg0` into a `SlotGuard` and keep it alive while blocking in `claim()` for
+            // the next message on an empty queue.
+            let guard0 = msg0.into_slot_guard(Arc::clone(&receiver_clone));
+            tx_ready.send(guard0).expect("send guard0 failed");
+
+            let msg1 = receiver_clone.claim().expect("claim slot1 failed");
+            tx_second.send(msg1.val).expect("send msg1.val failed");
+        });
+
+        let guard0 = rx_ready.await.expect("failed to receive guard0");
+        // Wait deterministically until the worker thread has entered `claim()`, set `HAS_WAITER`,
+        // and parked on `port.wait` while `guard0` is still alive.
+        while receiver.state.lock().sleeping_workers == 0 {
+            Timer::new(zx::MonotonicDuration::from_millis(1).after_now()).await;
+        }
+        assert!(receiver.inner.load_write_head(Ordering::Acquire).has_waiter());
+
+        let slot1 = sender.push(TestMessage { val: 20 }).await.expect("push slot1 failed");
+        assert_eq!(rx_second.await.expect("failed to receive msg1.val"), 20);
+        worker.join().expect("worker panicked");
+
+        let mut wait0 = pin!(sender.wait_until_popped(slot0));
+        assert!(futures::poll!(&mut wait0).is_pending());
+        drop(guard0);
+        wait0.await.expect("wait0 failed");
+        sender.wait_until_popped(slot1).await.expect("wait1 failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_until_popped_and_slot_guard_index_wrap_around() {
+        let page_size = zx::system_get_page_size() as u64;
+        let vmo = zx::Vmo::create(page_size * 2).expect("failed to create VMO");
+
+        let start_idx = State::INDEX_MASK - 1;
+        vmo.write(&start_idx.to_ne_bytes(), 0).expect("write write_head failed");
+        vmo.write(&start_idx.to_ne_bytes(), 8).expect("write read_head failed");
+
+        let vmo_dup =
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("failed to duplicate VMO handle");
+        let mut sender = AsyncSender::<TestMessage>::new(vmo, Alignment::SIZE_8B, 4)
+            .expect("failed to create AsyncSender");
+        let receiver = Arc::new(
+            Receiver::<TestMessage>::new_from_populated_vmo(vmo_dup, 4)
+                .expect("failed to create Receiver"),
+        );
+
+        let s0 = sender.push(TestMessage { val: 1 }).await.expect("push s0 failed");
+        let s1 = sender.push(TestMessage { val: 2 }).await.expect("push s1 failed");
+        let s2 = sender.push(TestMessage { val: 3 }).await.expect("push s2 failed");
+        assert_eq!(s0, State::INDEX_MASK - 1);
+        assert_eq!(s1, State::INDEX_MASK);
+        assert_eq!(s2, 0);
+
+        let mut w0 = pin!(sender.wait_until_popped(s0));
+        let mut w1 = pin!(sender.wait_until_popped(s1));
+        let mut w2 = pin!(sender.wait_until_popped(s2));
+        assert!(futures::poll!(&mut w0).is_pending());
+        assert!(futures::poll!(&mut w1).is_pending());
+        assert!(futures::poll!(&mut w2).is_pending());
+
+        let g0 = receiver.claim().expect("claim s0 failed").into_slot_guard(Arc::clone(&receiver));
+        let g1 = receiver.claim().expect("claim s1 failed").into_slot_guard(Arc::clone(&receiver));
+        let g2 = receiver.claim().expect("claim s2 failed").into_slot_guard(Arc::clone(&receiver));
+
+        drop(g1);
+        assert!(futures::poll!(&mut w0).is_pending());
+        assert!(futures::poll!(&mut w1).is_pending());
+
+        drop(g0);
+        w0.await.expect("w0 failed");
+        w1.await.expect("w1 failed");
+        assert!(futures::poll!(&mut w2).is_pending());
+
+        drop(g2);
+        w2.await.expect("w2 failed");
+        assert_eq!(receiver.index(), 1);
     }
 }

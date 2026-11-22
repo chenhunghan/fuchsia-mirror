@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN keeps its hand-written group("tests") above the sentinel.
+test_suite(
+    name = "tests",
+    tests = [":dhcp_client_core_test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_library(
+    name = "core",
+    srcs = [
+        "src/client.rs",
+        "src/deps.rs",
+        "src/inspect.rs",
+        "src/lib.rs",
+        "src/parse.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "dhcp_client_core",
+    edition = "2024",
+    visibility = ["//src/connectivity/network/dhcpv4/client/bindings:__pkg__"],
+    deps = [
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/dhcpv4/protocol",
+        "//src/connectivity/network/lib/diagnostics-traits",
+        "//src/lib/fuchsia-async",
+        "//src/lib/network/packet",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:bstr",
+        "//third_party/rust_crates/vendor:derive_builder",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "core_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":core",
+    # Disambiguate the GN output_name from other core_test binaries.
+    crate_name = "dhcp_client_core_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/network/dhcpv4/lib",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:simplelog",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "dhcp_client_core_test",
+    unit_tests = [":core_test"],
+)

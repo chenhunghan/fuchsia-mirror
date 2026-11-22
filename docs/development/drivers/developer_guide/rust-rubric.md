@@ -61,6 +61,11 @@ from adding more to it unless explicit clean up specifically required for your
 driver's functionality, such as performing graceful hardware shutdowns or
 unpinning DMA.
 
+`stop()` takes the driver by value, and the driver is dropped when it returns.
+Move any resources that need an orderly shutdown, such as tasks or hardware
+handles, out of `self` in `stop()` rather than keeping them behind a `Cell`,
+`RefCell` or mutex just so that they can be taken out during shutdown.
+
 If a driver controls when it should be shut down, it should store the
 [Node][node-struct] object as something that can be dropped, like in an
 `Option<Node>` or potentially behind a mutex if necessary. Dropping the `Node`
@@ -240,7 +245,7 @@ When testing drivers that use `MmioRegion`:
 [zircon-next-child]: /examples/drivers/transport/zircon/rust_next/child/
 [node-add-child]: /src/devices/bin/driver_manager_rust/node/src/add.rs
 [rust-logging]: https://docs.rs/log/latest/log/
-[logging-guidelines]: /docs/contribute/governance/rfcs/0003_logging.md#log_severity_levels
+[logging-guidelines]: /docs/contribute/governance/rfcs/0003_logging.md#log-severity-levels
 [interrupt-kind]: https://fuchsia-docs.firebaseapp.com/rust/fidl_next/fuchsia/zx/trait.InterruptKind.html
 [zircon-interrupt]: https://fuchsia-docs.firebaseapp.com/rust/fidl_next/fuchsia/zx/struct.Interrupt.html
 [zircon-interrupt-source]: /sdk/rust/zx/src/interrupt.rs

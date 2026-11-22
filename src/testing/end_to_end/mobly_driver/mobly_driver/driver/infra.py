@@ -6,11 +6,64 @@
 import logging
 import os
 from datetime import timedelta
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import yaml
+from mobly import keys
 from mobly_driver.api import api_infra, api_mobly
 from mobly_driver.driver import base, common
+
+_DMC_PATH_ENV_KEY: str = "DMC_PATH"
+_POWER_SWITCH_DMC_IMPL: dict[str, str] = {
+    "module": "honeydew.auxiliary_devices.power_switch.power_switch_using_dmc",
+    "class": "PowerSwitchUsingDmc",
+}
+_USB_POWER_HUB_DMC_IMPL: dict[str, str] = {
+    "module": "honeydew.auxiliary_devices.usb_power_hub.usb_power_hub_using_dmc",
+    "class": "UsbPowerHubUsingDmc",
+}
+
+
+def _populate_dmc_auxiliary_devices(
+    config: api_mobly.MoblyConfigComponent,
+) -> None:
+    """Populates DMC auxiliary device configs on infra testbed controllers."""
+    for testbed in config.get(keys.Config.key_testbed.value, []):
+        controllers = testbed.get(keys.Config.key_testbed_controllers.value, {})
+        for device in controllers.get(api_infra.FUCHSIA_DEVICE, []):
+            device_name = device.get("name")
+            if not device_name:
+                continue
+            honeydew_config = device.setdefault(
+                api_mobly.HONEYDEW_CONFIG_KEY, {}
+            )
+            aux_devices = honeydew_config.setdefault("auxiliary_devices", {})
+            aux_devices.setdefault(
+                "power_switch",
+                {
+                    "hardware": {"device_name": device_name},
+                    "implementation": dict(_POWER_SWITCH_DMC_IMPL),
+                },
+            )
+            aux_devices.setdefault(
+                "usb_power_hub",
+                {
+                    "hardware": {"device_name": device_name},
+                    "implementation": dict(_USB_POWER_HUB_DMC_IMPL),
+                },
+            )
+        for ap in controllers.get(api_infra.ACCESS_POINT, []):
+            nodename = ap.get("nodename")
+            if not nodename:
+                continue
+            aux_devices = ap.setdefault("auxiliary_devices", {})
+            aux_devices.setdefault(
+                "power_switch",
+                {
+                    "hardware": {"device_name": nodename},
+                    "implementation": dict(_POWER_SWITCH_DMC_IMPL),
+                },
+            )
 
 
 class InfraDriver(base.BaseDriver):
@@ -116,7 +169,9 @@ class InfraDriver(base.BaseDriver):
                 botanist_honeydew_map=botanist_honeydew_translation_map,
                 ssh_path=self._ssh_path,
             )
-            return yaml.dump(config)
+            if os.environ.get(_DMC_PATH_ENV_KEY):
+                _populate_dmc_auxiliary_devices(config)
+            return cast(str, yaml.dump(config))
         except (IOError, OSError) as e:
             raise common.DriverException(f"Failed to open file: {e}")
 

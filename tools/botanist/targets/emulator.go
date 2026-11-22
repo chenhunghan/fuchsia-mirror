@@ -25,6 +25,7 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/lib/ffxutil"
 	"go.fuchsia.dev/fuchsia/tools/lib/logger"
 	"go.fuchsia.dev/fuchsia/tools/net/sshutil"
+	testrunnerconstants "go.fuchsia.dev/fuchsia/tools/testing/testrunner/constants"
 
 	"github.com/creack/pty"
 )
@@ -99,7 +100,7 @@ type Emulator struct {
 	netProxy *emuNetProxy
 	opts     Options
 	process  *os.Process
-	ptm      *os.File
+	pts      *os.File
 	serial   io.ReadWriteCloser
 }
 
@@ -159,7 +160,7 @@ func NewEmulator(ctx context.Context, config EmulatorConfig, opts Options, emuTy
 		var err error
 		// TODO(joshuaseaton): Figure out how to manage ownership so that this may
 		// be closed.
-		t.ptm, t.serial, err = pty.Open()
+		t.serial, t.pts, err = openPTY()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create ptm/pts pair: %w", err)
 		}
@@ -171,6 +172,9 @@ func NewEmulator(ctx context.Context, config EmulatorConfig, opts Options, emuTy
 	t.genericFuchsiaTarget = base
 	return t, nil
 }
+
+// openPTY is pty.Open, as a variable so that tests can fake it.
+var openPTY = pty.Open
 
 // Nodename returns the name of the target node.
 func (t *Emulator) Nodename() string { return DefaultEmulatorNodename }
@@ -199,6 +203,7 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 	if t.process != nil {
 		return fmt.Errorf("a process has already been started with PID %d", t.process.Pid)
 	}
+	t.SetSerialNumber("")
 
 	if t.config.Path == "" {
 		return fmt.Errorf("directory must be set")
@@ -306,9 +311,21 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 		if t.genericFuchsiaTarget != nil && t.targetCtx != nil {
 			proxyCtx = t.targetCtx
 		}
-		// No domains are allowed yet, so the proxy blocks all guest
-		// network requests.
-		netProxy, err := newEmuNetProxy(proxyCtx, nil, "")
+		// The audit log isn't written to SerialLogDir, because infra
+		// symbolizes every file there and scans it for serial log failure
+		// modes, and the log contains guest-controlled host names.
+		var proxyLogPath string
+		if outDir := os.Getenv(testrunnerconstants.TestOutDirEnvKey); !dryRun && outDir != "" {
+			if err := os.MkdirAll(outDir, os.ModePerm); err != nil {
+				return fmt.Errorf("failed to create %q: %w", outDir, err)
+			}
+			proxyLogPath = filepath.Join(outDir, emuNetProxyLogName)
+		}
+		allowlist, err := emuNetAllowlist()
+		if err != nil {
+			return err
+		}
+		netProxy, err := newEmuNetProxy(proxyCtx, allowlist, "", proxyLogPath)
 		if err != nil {
 			return err
 		}
@@ -375,9 +392,9 @@ func (t *Emulator) Start(ctx context.Context, args []string, pbPath string, isBo
 		stdout = io.MultiWriter(serialWriter, stdout)
 	}
 
-	if t.ptm != nil {
-		cmd.Stdin = t.ptm
-		cmd.Stdout = io.MultiWriter(t.ptm, stdout)
+	if t.pts != nil {
+		cmd.Stdin = t.pts
+		cmd.Stdout = io.MultiWriter(t.pts, stdout)
 		cmd.SysProcAttr = &syscall.SysProcAttr{
 			Setctty: true,
 			Setsid:  true,

@@ -4,10 +4,10 @@
 
 from typing import Collection, Literal, Mapping, TypeGuard, TypeVar, overload
 
-from mobly import signals
+from libs import errors
 
 
-class ValidatorError(signals.TestError):
+class ValidatorError(errors.TestError):
     pass
 
 

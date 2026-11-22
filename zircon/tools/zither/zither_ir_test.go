@@ -281,6 +281,7 @@ const COMMENTED_STRING string = "YYY";
 	uint8Enum := Enum{
 		decl:    decl{Name: fidlgen.MustReadName("example/Uint8Enum")},
 		Subtype: "uint8",
+		Strict:  true,
 		Members: []EnumMember{
 			{
 				member: member{Name: "MAX"},

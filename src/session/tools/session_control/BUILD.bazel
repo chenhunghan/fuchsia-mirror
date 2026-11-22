@@ -68,7 +68,6 @@ fx_component(
 
 fx_package(
     name = "session_control",
-    package_name = "session_control",
     components = [":session_control_component"],
 )
 

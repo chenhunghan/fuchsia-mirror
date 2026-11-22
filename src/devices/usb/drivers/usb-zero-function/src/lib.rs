@@ -12,8 +12,9 @@ use futures::channel::mpsc;
 use futures::future::join;
 use futures::{FutureExt, SinkExt, StreamExt, TryStreamExt};
 use log::{debug, error, info, warn};
+use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
 use zerocopy::{FromBytes as _, little_endian};
 use zx::Status;
 
@@ -37,6 +38,7 @@ const USB_ZERO_IN_VMO_ID: u64 = 100;
 const QUEUE_DEPTH: usize = 32;
 
 const SG_IN_SHORT_ZLP_FLAG: u16 = 1;
+const SG_TARGET_BULK: u16 = 0;
 
 const USB_ZERO_WRITE_PAYLOAD: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
 const USB_ZERO_READ_PAYLOAD: &[u8] = &[0x12, 0x34, 0x56, 0x78];
@@ -115,29 +117,126 @@ impl TryFrom<u8> for TestMode {
     }
 }
 
-struct UsbZeroFunction {
-    // Stored to keep the driver node handle alive per Fuchsia component driver lifecycle rules.
-    _node: Node,
-    // Stored to keep the driver execution scope and spawned background tasks alive per Fuchsia component driver lifecycle rules.
-    _scope: Arc<fasync::Scope>,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum PipeType {
+    Bulk,
 }
 
-struct UsbZeroFunctionDevice {
-    function_client: fusb_function::UsbFunctionProxy,
+impl PipeType {
+    fn request_info(self) -> fusb_request::RequestInfo {
+        match self {
+            Self::Bulk => fusb_request::RequestInfo::Bulk(fusb_request::BulkRequestInfo::default()),
+        }
+    }
+
+    fn max_packet_size_for_speed(self, speed: fusb_descriptor::UsbSpeed) -> u16 {
+        match self {
+            Self::Bulk => match speed {
+                fusb_descriptor::UsbSpeed::Full => USB_MAX_PACKET_SIZE_FULL_SPEED,
+                fusb_descriptor::UsbSpeed::High => USB_MAX_PACKET_SIZE_HIGH_SPEED,
+                fusb_descriptor::UsbSpeed::Super | fusb_descriptor::UsbSpeed::EnhancedSuper => {
+                    USB_MAX_PACKET_SIZE_SUPER_SPEED
+                }
+                _ => USB_MAX_PACKET_SIZE_HIGH_SPEED,
+            },
+        }
+    }
+
+    fn endpoint_configuration(
+        self,
+        speed: fusb_descriptor::UsbSpeed,
+    ) -> fusb_function::EndpointConfiguration {
+        let w_max_packet_size = self.max_packet_size_for_speed(speed);
+        let (ep_type, b_interval, w_bytes_per_interval) = match self {
+            Self::Bulk => (fusb_descriptor::EndpointType::Bulk, 0, 0),
+        };
+        let super_speed_companion = matches!(
+            speed,
+            fusb_descriptor::UsbSpeed::Super | fusb_descriptor::UsbSpeed::EnhancedSuper
+        )
+        .then_some(fusb_function::SuperSpeedEndpointCompanionDescriptor {
+            b_max_burst: 0,
+            bm_attributes: 0,
+            w_bytes_per_interval,
+        });
+        fusb_function::EndpointConfiguration {
+            descriptor: Some(fusb_function::EndpointDescriptor {
+                bm_attributes: ep_type.into_primitive(),
+                w_max_packet_size,
+                b_interval,
+            }),
+            super_speed_companion,
+            ..Default::default()
+        }
+    }
+}
+
+type EndpointTaskPair = (fasync::Task<()>, fasync::Task<()>);
+
+struct EndpointPair {
     ep_in: fusb_endpoint::EndpointProxy,
     ep_in_addr: u8,
     ep_out: fusb_endpoint::EndpointProxy,
     ep_out_addr: u8,
+}
+
+struct PipeState {
+    pipe_type: PipeType,
+    ep_in: fusb_endpoint::EndpointProxy,
+    ep_in_addr: u8,
+    ep_out: fusb_endpoint::EndpointProxy,
+    ep_out_addr: u8,
+    vmos_registered: bool,
+    tasks: Option<EndpointTaskPair>,
+    requeue_rx: Option<mpsc::UnboundedReceiver<usize>>,
+    sg_config: Rc<RefCell<ScatterGatherConfig>>,
+}
+
+impl PipeState {
+    fn new(pipe_type: PipeType, eps: EndpointPair) -> Self {
+        Self {
+            pipe_type,
+            ep_in: eps.ep_in,
+            ep_in_addr: eps.ep_in_addr,
+            ep_out: eps.ep_out,
+            ep_out_addr: eps.ep_out_addr,
+            vmos_registered: false,
+            tasks: None,
+            requeue_rx: None,
+            sg_config: Rc::new(RefCell::new(ScatterGatherConfig::default())),
+        }
+    }
+
+    fn endpoint_addrs(&self) -> [u8; 2] {
+        [self.ep_in_addr, self.ep_out_addr]
+    }
+
+    fn endpoints(&self) -> [(u8, &fusb_endpoint::EndpointProxy); 2] {
+        [(self.ep_in_addr, &self.ep_in), (self.ep_out_addr, &self.ep_out)]
+    }
+
+    fn is_active(&self) -> bool {
+        self.vmos_registered || self.tasks.is_some()
+    }
+}
+
+struct UsbZeroFunction {
+    // Stored to keep the driver node handle alive per Fuchsia component driver lifecycle rules.
+    _node: Node,
+    // Stored to keep the driver execution scope and spawned background tasks alive per Fuchsia
+    // component driver lifecycle rules.
+    _scope: fasync::Scope,
+}
+
+struct UsbZeroFunctionDevice {
+    function_client: fusb_function::UsbFunctionProxy,
+    bulk: PipeState,
     interface_num: u8,
     is_configured: bool,
-    vmos_registered: bool,
-    endpoint_tasks: Option<(fasync::Task<()>, fasync::Task<()>)>,
-    requeue_rx: Option<mpsc::UnboundedReceiver<usize>>,
     mode: TestMode,
     speed: Option<fusb_descriptor::UsbSpeed>,
     stalled_endpoints: Vec<u8>,
     control_loopback_buf: Vec<u8>,
-    sg_config: Arc<Mutex<ScatterGatherConfig>>,
 }
 
 const BIND_USB_PROTOCOL_KEY: &str = "fuchsia.BIND_USB_PROTOCOL";
@@ -159,7 +258,7 @@ impl Driver for UsbZeroFunction {
 
     async fn start(mut context: DriverContext) -> Result<Self, DriverError> {
         let node = context.take_node()?;
-        let scope = Arc::new(fasync::Scope::new_with_name("driver"));
+        let scope = fasync::Scope::new_with_name("driver");
 
         info!("Starting usb-zero-function");
 
@@ -286,15 +385,11 @@ impl Driver for UsbZeroFunction {
         let ep_out = ep_out_client.into_proxy();
 
         let function_client_clone = function_client.clone();
-        let ep_in_clone = ep_in.clone();
-        let ep_out_clone = ep_out.clone();
+        let bulk_eps = EndpointPair { ep_in, ep_in_addr, ep_out, ep_out_addr };
         scope.spawn_local(async move {
             let mut device = UsbZeroFunctionDevice::new(
                 function_client_clone,
-                ep_in_clone,
-                ep_in_addr,
-                ep_out_clone,
-                ep_out_addr,
+                bulk_eps,
                 interface_num,
                 initial_mode,
             );
@@ -304,7 +399,7 @@ impl Driver for UsbZeroFunction {
         Ok(UsbZeroFunction { _node: node, _scope: scope })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 fn validate_vendor_out_request(
@@ -318,6 +413,10 @@ fn validate_vendor_out_request(
         return Err(Status::INVALID_ARGS);
     }
     u8::try_from(setup.w_value).map_err(|_| Status::INVALID_ARGS)
+}
+
+fn is_expected_disconnect_status(status: Status) -> bool {
+    matches!(status, Status::PEER_CLOSED | Status::CANCELED | Status::IO_NOT_PRESENT)
 }
 
 async fn configure_ep(
@@ -338,30 +437,41 @@ async fn configure_ep(
 impl UsbZeroFunctionDevice {
     fn new(
         function_client: fusb_function::UsbFunctionProxy,
-        ep_in: fusb_endpoint::EndpointProxy,
-        ep_in_addr: u8,
-        ep_out: fusb_endpoint::EndpointProxy,
-        ep_out_addr: u8,
+        bulk_eps: EndpointPair,
         interface_num: u8,
         mode: TestMode,
     ) -> Self {
         Self {
             function_client,
-            ep_in,
-            ep_in_addr,
-            ep_out,
-            ep_out_addr,
+            bulk: PipeState::new(PipeType::Bulk, bulk_eps),
             interface_num,
             is_configured: false,
-            vmos_registered: false,
-            endpoint_tasks: None,
-            requeue_rx: None,
             mode,
             speed: None,
             stalled_endpoints: Vec::new(),
             control_loopback_buf: Vec::new(),
-            sg_config: Arc::new(Mutex::new(ScatterGatherConfig::default())),
         }
+    }
+
+    fn pipes(&self) -> [&PipeState; 1] {
+        [&self.bulk]
+    }
+
+    fn pipes_mut(&mut self) -> [&mut PipeState; 1] {
+        [&mut self.bulk]
+    }
+
+    fn interface_endpoint_addrs(&self) -> [u8; USB_ZERO_NUM_ENDPOINTS as usize] {
+        [self.bulk.ep_in_addr, self.bulk.ep_out_addr]
+    }
+
+    /// Returns the type of the pipe that owns `ep_addr`, defaulting to `PipeType::Bulk` for
+    /// addresses outside this interface.
+    fn pipe_type_for_endpoint(&self, ep_addr: u8) -> PipeType {
+        self.pipes()
+            .into_iter()
+            .find(|p| p.endpoint_addrs().contains(&ep_addr))
+            .map_or(PipeType::Bulk, |p| p.pipe_type)
     }
 
     /// Resets the halt state and data toggle for all endpoints associated with this interface,
@@ -371,7 +481,7 @@ impl UsbZeroFunctionDevice {
             self.stalled_endpoints.clear();
             return;
         }
-        for ep_addr in [self.ep_in_addr, self.ep_out_addr] {
+        for ep_addr in self.interface_endpoint_addrs() {
             if let Err(e) = self.clear_endpoint_stall(ep_addr).await {
                 warn!("Failed to clear endpoint stall for {}: {:?}", ep_addr, e);
             }
@@ -390,77 +500,91 @@ impl UsbZeroFunctionDevice {
         Ok(())
     }
 
-    async fn cleanup_endpoints(&mut self) {
-        let had_tasks = if let Some((read_task, write_task)) = self.endpoint_tasks.take() {
-            let _ = join(read_task.abort(), write_task.abort()).await;
-            true
-        } else {
-            false
-        };
-        let was_active = self.is_configured || self.vmos_registered || had_tasks;
-        self.requeue_rx = None;
+    async fn cleanup_endpoints(&mut self) -> Result<(), Status> {
+        let mut had_tasks = false;
+        for pipe in self.pipes_mut() {
+            if let Some((read_task, write_task)) = pipe.tasks.take() {
+                let _ = join(read_task.abort(), write_task.abort()).await;
+                had_tasks = true;
+            }
+            pipe.requeue_rx = None;
+        }
+        let was_active =
+            self.is_configured || had_tasks || self.pipes().iter().any(|p| p.vmos_registered);
         self.is_configured = false;
         if was_active {
-            for (ep_addr, ep) in [(self.ep_in_addr, &self.ep_in), (self.ep_out_addr, &self.ep_out)]
-            {
-                // ZX_ERR_IO_NOT_PRESENT and closed channels are expected on disconnect/teardown.
-                match ep.cancel_all().await {
-                    Ok(Ok(())) | Ok(Err(zx::sys::ZX_ERR_IO_NOT_PRESENT)) => {}
-                    Err(err) if err.is_closed() => {}
-                    Ok(Err(raw)) => {
-                        warn!(
-                            "Failed to cancel requests on endpoint {:#x}: {:?}",
-                            ep_addr,
-                            Status::err_from_raw(raw)
-                        );
-                    }
-                    Err(err) => {
-                        warn!(
-                            "FIDL error canceling requests on endpoint {:#x}: {:?}",
-                            ep_addr, err
-                        );
+            for pipe in self.pipes() {
+                for (ep_addr, ep) in pipe.endpoints() {
+                    // Disconnect and teardown statuses are expected when peripheral/DCI tears down.
+                    match ep.cancel_all().await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(raw))
+                            if is_expected_disconnect_status(Status::err_from_raw(raw)) => {}
+                        Err(err) if err.is_closed() => {}
+                        Ok(Err(raw)) => {
+                            warn!(
+                                "Failed to cancel requests on endpoint {:#x}: {:?}",
+                                ep_addr,
+                                Status::err_from_raw(raw)
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "FIDL error canceling requests on endpoint {:#x}: {:?}",
+                                ep_addr, err
+                            );
+                        }
                     }
                 }
             }
         }
-        for ep_addr in [self.ep_in_addr, self.ep_out_addr] {
-            // ZX_ERR_IO_NOT_PRESENT and closed channels are expected on disconnect/teardown.
+        let mut disable_err: Option<Status> = None;
+        for ep_addr in self.interface_endpoint_addrs() {
+            // Disconnect and teardown statuses are expected when peripheral/DCI tears down.
             match self.function_client.disable_endpoint(ep_addr).await {
-                Ok(Ok(())) | Ok(Err(zx::sys::ZX_ERR_IO_NOT_PRESENT)) => {}
+                Ok(Ok(())) => {}
+                Ok(Err(raw)) if is_expected_disconnect_status(Status::err_from_raw(raw)) => {}
                 Err(err) if err.is_closed() => {}
                 Ok(Err(raw)) => {
-                    warn!(
-                        "Failed to disable endpoint {:#x}: {:?}",
-                        ep_addr,
-                        Status::err_from_raw(raw)
-                    );
+                    let status = Status::err_from_raw(raw);
+                    warn!("Failed to disable endpoint {:#x}: {:?}", ep_addr, status);
+                    disable_err.get_or_insert(status);
                 }
                 Err(err) => {
                     warn!("FIDL error disabling endpoint {:#x}: {:?}", ep_addr, err);
+                    disable_err.get_or_insert(Status::INTERNAL);
                 }
             }
         }
-        if self.vmos_registered {
+        if self.pipes().iter().any(|p| p.vmos_registered) {
             let in_ids: Vec<u64> =
                 (USB_ZERO_IN_VMO_ID..USB_ZERO_IN_VMO_ID + QUEUE_DEPTH as u64).collect();
             let out_ids: Vec<u64> =
                 (USB_ZERO_OUT_VMO_ID..USB_ZERO_OUT_VMO_ID + QUEUE_DEPTH as u64).collect();
-            let _ = self.ep_in.unregister_vmos(&in_ids).await;
-            let _ = self.ep_out.unregister_vmos(&out_ids).await;
-            self.vmos_registered = false;
-        }
-        if was_active {
-            for ep in [&self.ep_in, &self.ep_out] {
-                let mut events = ep.take_event_stream();
-                while let Some(Some(Ok(_))) = events.next().now_or_never() {}
+            for pipe in self.pipes_mut() {
+                if pipe.vmos_registered {
+                    let _ = pipe.ep_in.unregister_vmos(&in_ids).await;
+                    let _ = pipe.ep_out.unregister_vmos(&out_ids).await;
+                    pipe.vmos_registered = false;
+                }
             }
         }
-        if let Ok(mut sg) = self.sg_config.lock() {
+        if was_active {
+            for pipe in self.pipes() {
+                for (_ep_addr, ep) in pipe.endpoints() {
+                    let mut events = ep.take_event_stream();
+                    while let Some(Some(Ok(_))) = events.next().now_or_never() {}
+                }
+            }
+        }
+        for pipe in self.pipes() {
+            let mut sg = pipe.sg_config.borrow_mut();
             sg.in_flight_out = 0;
             sg.requeue_on_cancel = false;
         }
         self.stalled_endpoints.clear();
         self.control_loopback_buf.clear();
+        disable_err.map_or(Ok(()), Err)
     }
 
     async fn set_endpoint_stall(&mut self, ep_addr: u8) -> Result<(), Status> {
@@ -500,44 +624,20 @@ impl UsbZeroFunctionDevice {
         Ok(())
     }
 
-    fn max_packet_size_for_speed(speed: fusb_descriptor::UsbSpeed) -> u16 {
-        match speed {
-            fusb_descriptor::UsbSpeed::Full => USB_MAX_PACKET_SIZE_FULL_SPEED,
-            fusb_descriptor::UsbSpeed::High => USB_MAX_PACKET_SIZE_HIGH_SPEED,
-            fusb_descriptor::UsbSpeed::Super | fusb_descriptor::UsbSpeed::EnhancedSuper => {
-                USB_MAX_PACKET_SIZE_SUPER_SPEED
-            }
-            _ => USB_MAX_PACKET_SIZE_HIGH_SPEED,
-        }
-    }
-
-    /// Configures and activates the IN and OUT bulk endpoints.
+    /// Configures and activates the interface endpoints.
     async fn activate_endpoints(&self, speed: fusb_descriptor::UsbSpeed) -> Result<(), Status> {
-        let w_max_packet_size = Self::max_packet_size_for_speed(speed);
-        let super_speed_companion = match speed {
-            fusb_descriptor::UsbSpeed::Super | fusb_descriptor::UsbSpeed::EnhancedSuper => {
-                Some(fusb_function::SuperSpeedEndpointCompanionDescriptor {
-                    b_max_burst: 0,
-                    bm_attributes: 0,
-                    w_bytes_per_interval: 0,
-                })
+        let mut configured_addrs = Vec::with_capacity(USB_ZERO_NUM_ENDPOINTS as usize);
+        for pipe in self.pipes() {
+            let ep_config = pipe.pipe_type.endpoint_configuration(speed);
+            for ep_addr in pipe.endpoint_addrs() {
+                if let Err(e) = configure_ep(&self.function_client, ep_addr, &ep_config).await {
+                    for prev_addr in configured_addrs {
+                        let _ = self.function_client.disable_endpoint(prev_addr).await;
+                    }
+                    return Err(e);
+                }
+                configured_addrs.push(ep_addr);
             }
-            _ => None,
-        };
-        let ep_config = fusb_function::EndpointConfiguration {
-            descriptor: Some(fusb_function::EndpointDescriptor {
-                bm_attributes: fusb_descriptor::EndpointType::Bulk.into_primitive(),
-                w_max_packet_size,
-                b_interval: 0,
-            }),
-            super_speed_companion: super_speed_companion.clone(),
-            ..Default::default()
-        };
-
-        configure_ep(&self.function_client, self.ep_in_addr, &ep_config).await?;
-        if let Err(e) = configure_ep(&self.function_client, self.ep_out_addr, &ep_config).await {
-            let _ = self.function_client.disable_endpoint(self.ep_in_addr).await;
-            return Err(e);
         }
         Ok(())
     }
@@ -546,46 +646,59 @@ impl UsbZeroFunctionDevice {
         &mut self,
         configured: bool,
         speed: fusb_descriptor::UsbSpeed,
-    ) -> Result<Option<(fasync::Task<()>, fasync::Task<()>)>, Status> {
-        self.cleanup_endpoints().await;
+    ) -> Result<(), Status> {
+        let disable_res = self.cleanup_endpoints().await;
         self.speed = if configured { Some(speed) } else { None };
-        if configured {
-            self.activate_endpoints(speed).await?;
-            let transfer_size = Self::max_packet_size_for_speed(speed).into();
-            let res = match self.mode {
-                TestMode::SourceSink => {
-                    run_source_sink(
-                        self.ep_in.clone(),
-                        self.ep_out.clone(),
-                        &mut self.vmos_registered,
-                        transfer_size,
-                    )
-                    .await
-                }
-                TestMode::Loopback => run_loopback(
-                    self.ep_in.clone(),
-                    self.ep_out.clone(),
-                    &mut self.vmos_registered,
-                    transfer_size,
-                    self.sg_config.clone(),
+        if !configured {
+            return disable_res;
+        }
+
+        self.activate_endpoints(speed).await?;
+
+        let mode = self.mode;
+        let mut start_err = None;
+        for pipe in self.pipes_mut() {
+            let res = match mode {
+                TestMode::SourceSink => run_source_sink(
+                    pipe.ep_in.clone(),
+                    pipe.ep_out.clone(),
+                    &mut pipe.vmos_registered,
+                    pipe.pipe_type,
                 )
                 .await
-                .map(|(r_task, w_task, requeue_rx)| {
-                    self.requeue_rx = Some(requeue_rx);
-                    (r_task, w_task)
+                .map(|tasks| {
+                    pipe.tasks = Some(tasks);
                 }),
-            };
-            match res {
-                Ok((r_task, w_task)) => Ok(Some((r_task, w_task))),
-                Err(e) => {
-                    self.cleanup_endpoints().await;
-                    Err(e)
+                TestMode::Loopback => {
+                    let transfer_size = pipe.pipe_type.max_packet_size_for_speed(speed).into();
+                    run_loopback(
+                        pipe.ep_in.clone(),
+                        pipe.ep_out.clone(),
+                        &mut pipe.vmos_registered,
+                        transfer_size,
+                        pipe.sg_config.clone(),
+                        pipe.pipe_type,
+                    )
+                    .await
+                    .map(|(read_task, write_task, requeue_rx)| {
+                        pipe.tasks = Some((read_task, write_task));
+                        pipe.requeue_rx = Some(requeue_rx);
+                    })
                 }
+            };
+            if let Err(e) = res {
+                start_err = Some(e);
+                break;
             }
-        } else {
-            Ok(None)
         }
+
+        if let Some(e) = start_err {
+            let _ = self.cleanup_endpoints().await;
+            return Err(e);
+        }
+        Ok(())
     }
+
     async fn handle_vendor_request(
         &mut self,
         vendor_req: VendorRequest,
@@ -612,16 +725,7 @@ impl UsbZeroFunctionDevice {
             VendorRequest::ConfigureEndpoint => {
                 let ep_addr = validate_vendor_out_request(setup, write)?;
                 let speed = self.speed.unwrap_or(fusb_descriptor::UsbSpeed::High);
-                let w_max_packet_size = Self::max_packet_size_for_speed(speed);
-                let ep_config = fusb_function::EndpointConfiguration {
-                    descriptor: Some(fusb_function::EndpointDescriptor {
-                        bm_attributes: fusb_descriptor::EndpointType::Bulk.into_primitive(),
-                        w_max_packet_size,
-                        b_interval: 0,
-                    }),
-                    super_speed_companion: None,
-                    ..Default::default()
-                };
+                let ep_config = self.pipe_type_for_endpoint(ep_addr).endpoint_configuration(speed);
                 configure_ep(&self.function_client, ep_addr, &ep_config).await?;
                 Ok(Vec::new())
             }
@@ -659,7 +763,7 @@ impl UsbZeroFunctionDevice {
                 {
                     return Err(Status::INVALID_ARGS);
                 }
-                self.cleanup_endpoints().await;
+                let _ = self.cleanup_endpoints().await;
                 self.function_client
                     .deconfigure()
                     .await
@@ -726,6 +830,13 @@ impl UsbZeroFunctionDevice {
                 {
                     return Err(Status::INVALID_ARGS);
                 }
+                let is_configured = self.is_configured;
+                let mode = self.mode;
+                let pipe = match setup.w_index {
+                    SG_TARGET_BULK => &mut self.bulk,
+                    _ => return Err(Status::INVALID_ARGS),
+                };
+
                 let mut new_config = if write.is_empty() {
                     ScatterGatherConfig::default()
                 } else {
@@ -779,21 +890,21 @@ impl UsbZeroFunctionDevice {
                     }
                 };
 
-                if self.is_configured && self.mode == TestMode::Loopback {
+                if is_configured && mode == TestMode::Loopback {
                     let expected_requeued = {
-                        let mut sg = self.sg_config.lock().unwrap();
+                        let mut sg = pipe.sg_config.borrow_mut();
                         let in_flight = sg.in_flight_out;
                         new_config.in_flight_out = in_flight;
                         new_config.requeue_on_cancel = in_flight > 0;
                         *sg = new_config;
-                        if let Some(rx) = &mut self.requeue_rx {
-                            while let Ok(_) = rx.try_recv() {}
+                        if let Some(rx) = pipe.requeue_rx.as_mut() {
+                            while rx.try_recv().is_ok() {}
                         }
                         in_flight
                     };
-                    let _ = self.ep_in.cancel_all().await;
-                    let _ = self.ep_out.cancel_all().await;
-                    if let Some(rx) = &mut self.requeue_rx {
+                    let _ = pipe.ep_in.cancel_all().await;
+                    let _ = pipe.ep_out.cancel_all().await;
+                    if let Some(rx) = pipe.requeue_rx.as_mut() {
                         let mut requeued = 0;
                         while requeued < expected_requeued {
                             let Some(n) = rx.next().await else {
@@ -802,9 +913,9 @@ impl UsbZeroFunctionDevice {
                             requeued += n;
                         }
                     }
-                    self.sg_config.lock().unwrap().requeue_on_cancel = false;
+                    pipe.sg_config.borrow_mut().requeue_on_cancel = false;
                 } else {
-                    *self.sg_config.lock().unwrap() = new_config;
+                    *pipe.sg_config.borrow_mut() = new_config;
                 }
                 Ok(Vec::new())
             }
@@ -828,7 +939,7 @@ impl UsbZeroFunctionDevice {
             return Err(Status::NOT_SUPPORTED);
         }
         let ep_addr = (setup.w_index & 0xff) as u8;
-        if ![self.ep_in_addr, self.ep_out_addr].contains(&ep_addr) {
+        if !self.interface_endpoint_addrs().contains(&ep_addr) {
             return Err(Status::NOT_SUPPORTED);
         }
         Ok(ep_addr)
@@ -854,7 +965,7 @@ impl UsbZeroFunctionDevice {
                         && setup.w_index <= 0xff
                     {
                         let ep_addr = (setup.w_index & 0xff) as u8;
-                        if [self.ep_in_addr, self.ep_out_addr].contains(&ep_addr)
+                        if self.interface_endpoint_addrs().contains(&ep_addr)
                             || (ep_addr & fusb_descriptor::ENDPOINT_NUMBER_MASK) == 0
                         {
                             let is_stalled = self.stalled_endpoints.contains(&ep_addr);
@@ -941,11 +1052,9 @@ impl UsbZeroFunctionDevice {
                     responder,
                 } => {
                     info!("Set configured: {}", configured);
-                    let status = self.handle_set_configured(configured, speed).await;
 
-                    match status {
-                        Ok(tasks) => {
-                            self.endpoint_tasks = tasks;
+                    match self.handle_set_configured(configured, speed).await {
+                        Ok(()) => {
                             self.is_configured = configured;
                             let _ = responder.send(Ok(()));
                         }
@@ -968,8 +1077,8 @@ impl UsbZeroFunctionDevice {
                 }
             }
         }
-        if self.is_configured || self.vmos_registered || self.endpoint_tasks.is_some() {
-            self.cleanup_endpoints().await;
+        if self.is_configured || self.pipes().iter().any(|p| p.is_active()) {
+            let _ = self.cleanup_endpoints().await;
         }
         info!("handle_requests exiting");
     }
@@ -988,7 +1097,7 @@ async fn register_vmos(
         .map(|id| fusb_endpoint::VmoInfo { id: Some(id), size: Some(size), ..Default::default() })
         .collect();
 
-    let mut response = ep.register_vmos(&vmo_infos).await.map_err(|e| {
+    let mut response = ep.register_vmos(vmo_infos).await.map_err(|e| {
         warn!("FIDL error: {:?}", e);
         Status::INTERNAL
     })?;
@@ -1004,7 +1113,7 @@ async fn register_vmos(
     response.into_iter().map(|mut h| h.vmo.take().ok_or(Status::INTERNAL)).collect()
 }
 
-fn make_bulk_request(vmo_id: u64, offset: u64, size: u64) -> fusb_request::Request {
+fn make_request(vmo_id: u64, offset: u64, size: u64, pipe_type: PipeType) -> fusb_request::Request {
     fusb_request::Request {
         data: Some(vec![fusb_request::BufferRegion {
             buffer: Some(fusb_request::Buffer::VmoId(vmo_id)),
@@ -1013,17 +1122,16 @@ fn make_bulk_request(vmo_id: u64, offset: u64, size: u64) -> fusb_request::Reque
             ..Default::default()
         }]),
         defer_completion: Some(false),
-        information: Some(
-            fusb_request::RequestInfo::Bulk(fusb_request::BulkRequestInfo::default()),
-        ),
+        information: Some(pipe_type.request_info()),
         ..Default::default()
     }
 }
 
-fn make_sg_bulk_request(
+fn make_sg_request(
     vmo_id: u64,
     regions: &[ScatterGatherRegion],
     short: bool,
+    pipe_type: PipeType,
 ) -> fusb_request::Request {
     fusb_request::Request {
         data: Some(
@@ -1038,9 +1146,7 @@ fn make_sg_bulk_request(
                 .collect(),
         ),
         defer_completion: Some(false),
-        information: Some(
-            fusb_request::RequestInfo::Bulk(fusb_request::BulkRequestInfo::default()),
-        ),
+        information: Some(pipe_type.request_info()),
         short: if short { Some(true) } else { None },
         ..Default::default()
     }
@@ -1072,10 +1178,11 @@ fn spawn_endpoint_pump_ring(
     base_vmo_id: u64,
     transfer_size: u64,
     queue_depth: usize,
+    pipe_type: PipeType,
 ) -> fasync::Task<()> {
-    fasync::Task::spawn(async move {
+    fasync::Task::local(async move {
         let mut event_stream = ep.take_event_stream();
-        let make_req = |vmo_id, size| make_bulk_request(vmo_id, 0, size);
+        let make_req = |vmo_id, size| make_request(vmo_id, 0, size, pipe_type);
         let reqs: Vec<_> =
             (0..queue_depth as u64).map(|i| make_req(base_vmo_id + i, transfer_size)).collect();
         let _ = queue_requests_batch(&ep, reqs);
@@ -1094,7 +1201,8 @@ fn spawn_endpoint_pump_ring(
                                 }
                                 zx::sys::ZX_ERR_IO_NOT_PRESENT => {
                                     warn!(
-                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping bulk pump loop"
+                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping {:?} pump loop",
+                                        pipe_type
                                     );
                                     return;
                                 }
@@ -1129,17 +1237,14 @@ fn spawn_endpoint_pump_ring(
     })
 }
 
-/// Runs the driver in uncoupled Source/Sink testing mode for Bulk endpoints.
+/// Runs the driver in uncoupled Source/Sink testing mode for an IN/OUT endpoint pair.
 async fn run_source_sink(
     ep_in: fusb_endpoint::EndpointProxy,
     ep_out: fusb_endpoint::EndpointProxy,
     vmos_registered: &mut bool,
-    transfer_size: u64,
+    pipe_type: PipeType,
 ) -> Result<(fasync::Task<()>, fasync::Task<()>), Status> {
-    if transfer_size > DEFAULT_VMO_SIZE {
-        return Err(Status::INVALID_ARGS);
-    }
-    info!("Starting source/sink loop (Bulk Only)");
+    info!("Starting source/sink loop ({:?})", pipe_type);
 
     // Register VMOs
     let _vmo_out =
@@ -1162,10 +1267,24 @@ async fn run_source_sink(
         }
     }
 
-    let sink_task =
-        spawn_endpoint_pump_ring(ep_out, USB_ZERO_OUT_VMO_ID, DEFAULT_VMO_SIZE, QUEUE_DEPTH);
-    let source_task =
-        spawn_endpoint_pump_ring(ep_in, USB_ZERO_IN_VMO_ID, transfer_size, QUEUE_DEPTH);
+    // Queue whole-VMO requests on both endpoints. The host sees the same
+    // stream of max-packet-size packets either way, but queueing one packet
+    // per request adds a completion round trip for every packet and caps
+    // throughput far below what the link can carry.
+    let sink_task = spawn_endpoint_pump_ring(
+        ep_out,
+        USB_ZERO_OUT_VMO_ID,
+        DEFAULT_VMO_SIZE,
+        QUEUE_DEPTH,
+        pipe_type,
+    );
+    let source_task = spawn_endpoint_pump_ring(
+        ep_in,
+        USB_ZERO_IN_VMO_ID,
+        DEFAULT_VMO_SIZE,
+        QUEUE_DEPTH,
+        pipe_type,
+    );
 
     Ok((sink_task, source_task))
 }
@@ -1303,12 +1422,13 @@ async fn run_loopback(
     ep_out: fusb_endpoint::EndpointProxy,
     vmos_registered: &mut bool,
     transfer_size: u64,
-    sg_config: Arc<Mutex<ScatterGatherConfig>>,
+    sg_config: Rc<RefCell<ScatterGatherConfig>>,
+    pipe_type: PipeType,
 ) -> Result<(fasync::Task<()>, fasync::Task<()>, mpsc::UnboundedReceiver<usize>), Status> {
     if transfer_size > DEFAULT_VMO_SIZE {
         return Err(Status::INVALID_ARGS);
     }
-    info!("Starting loopback loop (Bulk Only)");
+    info!("Starting loopback loop ({:?})", pipe_type);
 
     // Register and map OUT VMOs (PERM_WRITE is required on riscv64 for zx_cache_flush).
     let vmos_out =
@@ -1357,7 +1477,7 @@ async fn run_loopback(
     *vmos_registered = true;
 
     let (requeue_tx, requeue_rx) = mpsc::unbounded();
-    let (read_bulk, write_bulk) = spawn_loopback_pair(
+    let (read_task, write_task) = spawn_loopback_pair(
         ep_in,
         ep_out,
         mapped_in,
@@ -1367,16 +1487,22 @@ async fn run_loopback(
         transfer_size,
         sg_config,
         requeue_tx,
+        pipe_type,
     );
 
-    Ok((read_bulk, write_bulk, requeue_rx))
+    Ok((read_task, write_task, requeue_rx))
 }
 
-fn make_out_req(vmo_id: u64, sg: &ScatterGatherConfig, buffer_size: u64) -> fusb_request::Request {
+fn make_out_req(
+    vmo_id: u64,
+    sg: &ScatterGatherConfig,
+    buffer_size: u64,
+    pipe_type: PipeType,
+) -> fusb_request::Request {
     if sg.out_regions.is_empty() {
-        make_bulk_request(vmo_id, 0, buffer_size)
+        make_request(vmo_id, 0, buffer_size, pipe_type)
     } else {
-        make_sg_bulk_request(vmo_id, &sg.out_regions, false)
+        make_sg_request(vmo_id, &sg.out_regions, false, pipe_type)
     }
 }
 
@@ -1422,8 +1548,9 @@ fn spawn_loopback_pair(
     base_in_id: u64,
     base_out_id: u64,
     buffer_size: u64,
-    sg_config: Arc<Mutex<ScatterGatherConfig>>,
+    sg_config: Rc<RefCell<ScatterGatherConfig>>,
     requeue_tx: mpsc::UnboundedSender<usize>,
+    pipe_type: PipeType,
 ) -> (fasync::Task<()>, fasync::Task<()>) {
     let (mut tx, mut rx) = mpsc::channel::<Vec<u8>>(QUEUE_DEPTH);
     let (mut ack_tx, mut ack_rx) = mpsc::channel::<Vec<u8>>(QUEUE_DEPTH);
@@ -1436,19 +1563,19 @@ fn spawn_loopback_pair(
     // Queue initial ring of OUT requests synchronously so in_flight_out is
     // tracked immediately.
     {
-        let mut initial_sg = sg_config_read.lock().unwrap();
+        let mut initial_sg = sg_config_read.borrow_mut();
         let mut initial_reqs = Vec::with_capacity(count_out);
         for (i, mapped) in mapped_out.iter().enumerate() {
             let vmo_id = base_out_id + (i as u64);
             flush_out_vmo(mapped, &initial_sg, buffer_size);
-            initial_reqs.push(make_out_req(vmo_id, &initial_sg, buffer_size));
+            initial_reqs.push(make_out_req(vmo_id, &initial_sg, buffer_size, pipe_type));
         }
         initial_sg.in_flight_out =
             if queue_requests_batch(&ep_out_clone, initial_reqs).is_ok() { count_out } else { 0 };
         debug!("read_task queued initial {} OUT requests of size {}", count_out, buffer_size);
     }
 
-    let read_task = fasync::Task::spawn(async move {
+    let read_task = fasync::Task::local(async move {
         let mut recycled_bufs: Vec<Vec<u8>> = Vec::with_capacity(QUEUE_DEPTH);
 
         while let Ok(Some(event)) = event_stream.try_next().await {
@@ -1487,7 +1614,8 @@ fn spawn_loopback_pair(
                                 }
                                 zx::sys::ZX_ERR_IO_NOT_PRESENT => {
                                     warn!(
-                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping loopback read"
+                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping {:?} loopback read",
+                                        pipe_type
                                     );
                                     return;
                                 }
@@ -1542,7 +1670,7 @@ fn spawn_loopback_pair(
                         }
                     }
                     {
-                        let mut sg = sg_config_read.lock().unwrap();
+                        let mut sg = sg_config_read.borrow_mut();
                         sg.in_flight_out = sg.in_flight_out.saturating_sub(completed_count);
                         if sg.requeue_on_cancel {
                             requeue_slots.extend(canceled_slots);
@@ -1550,7 +1678,7 @@ fn spawn_loopback_pair(
                         let mut re_reqs = Vec::with_capacity(requeue_slots.len());
                         for (id, idx) in requeue_slots {
                             flush_out_vmo(&mapped_out[idx], &sg, buffer_size);
-                            re_reqs.push(make_out_req(id, &sg, buffer_size));
+                            re_reqs.push(make_out_req(id, &sg, buffer_size, pipe_type));
                         }
                         let requeued = re_reqs.len();
                         if requeued > 0 && queue_requests_batch(&ep_out_clone, re_reqs).is_ok() {
@@ -1568,7 +1696,7 @@ fn spawn_loopback_pair(
     let ep_in_clone = ep_in.clone();
     let count_in = mapped_in.len();
     let sg_config_write = sg_config;
-    let write_task = fasync::Task::spawn(async move {
+    let write_task = fasync::Task::local(async move {
         let mut event_stream = ep_in_clone.take_event_stream();
         let mut free_slots: VecDeque<usize> = (0..count_in).collect();
         let mut zlp_slots: VecDeque<usize> = VecDeque::new();
@@ -1593,19 +1721,20 @@ fn spawn_loopback_pair(
                     let slot = free_slots.pop_front().expect("free_slots not empty");
                     let mapped = &mapped_in[slot];
                     let vmo_id = base_in_id + slot as u64;
-                    let sg = sg_config_write.lock().unwrap().clone();
+                    let sg = sg_config_write.borrow();
 
                     let is_zlp = data.is_empty();
                     let req = if is_zlp {
                         zlp_slots.push_back(slot);
-                        make_sg_bulk_request(vmo_id, &[], sg.in_short_zlp)
+                        make_sg_request(vmo_id, &[], sg.in_short_zlp, pipe_type)
                     } else if sg.in_regions.is_empty() {
                         let write_len = std::cmp::min(data.len(), mapped.size());
                         mapped.write_slice(0, &data[..write_len]);
-                        make_sg_bulk_request(
+                        make_sg_request(
                             vmo_id,
                             &[ScatterGatherRegion { offset: 0, size: write_len as u64 }],
                             sg.in_short_zlp,
+                            pipe_type,
                         )
                     } else {
                         let total_in_cap: usize =
@@ -1623,7 +1752,7 @@ fn spawn_loopback_pair(
                                 .push(ScatterGatherRegion { offset: r.offset, size: chunk as u64 });
                             copied += chunk;
                         }
-                        make_sg_bulk_request(vmo_id, &active_regions, sg.in_short_zlp)
+                        make_sg_request(vmo_id, &active_regions, sg.in_short_zlp, pipe_type)
                     };
 
                     // Recycle data buffer back to read_task
@@ -1670,7 +1799,8 @@ fn spawn_loopback_pair(
                             match status {
                                 zx::sys::ZX_ERR_IO_NOT_PRESENT => {
                                     warn!(
-                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping loopback write"
+                                        "Endpoint disconnected (IO_NOT_PRESENT), stopping {:?} loopback write",
+                                        pipe_type
                                     );
                                     return;
                                 }

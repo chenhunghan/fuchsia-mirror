@@ -6,26 +6,8 @@
 
 #include <fuchsia/net/cpp/fidl.h>
 #include <fuchsia/net/interfaces/cpp/fidl.h>
-#include <lib/fpromise/result.h>
-#include <lib/syslog/cpp/macros.h>
-
-#include "src/lib/testing/predicates/status.h"
 
 namespace net::interfaces::test {
-
-namespace {
-
-fuchsia::net::interfaces::Properties NewProperties(uint64_t id, bool reachable) {
-  fuchsia::net::interfaces::Properties properties;
-  properties.set_id(id);
-  properties.set_name(kName);
-  fuchsia::hardware::network::PortClass ethernet = fuchsia::hardware::network::PortClass::ETHERNET;
-  properties.set_port_class(fuchsia::net::interfaces::PortClass::WithDevice(std::move(ethernet)));
-  SetMutableProperties(properties, reachable, true, true, Addresses(kIPv4Address1, kIPv6Address1));
-  return properties;
-}
-
-}  // namespace
 
 fuchsia::net::Ipv4Address ToFIDL(const std::array<uint8_t, 4>& bytes) {
   fuchsia::net::Ipv4Address addr;
@@ -65,44 +47,5 @@ void SetMutableProperties(fuchsia::net::interfaces::Properties& properties, bool
   properties.set_has_default_ipv6_route(has_default_ipv6_route);
   properties.set_addresses(std::move(addresses));
 }
-
-void FakeWatcherImpl::SendAddedEvent(uint64_t id, bool reachable) {
-  SendEvent(fuchsia::net::interfaces::Event::WithAdded(NewProperties(id, reachable)));
-}
-
-void FakeWatcherImpl::SendExistingEvent(uint64_t id, bool reachable) {
-  SendEvent(fuchsia::net::interfaces::Event::WithExisting(NewProperties(id, reachable)));
-}
-
-void FakeWatcherImpl::SendChangedEvent(uint64_t id, bool reachable) {
-  fuchsia::net::interfaces::Properties properties;
-  properties.set_id(id);
-  properties.set_online(reachable);
-
-  SendEvent(fuchsia::net::interfaces::Event::WithChanged(std::move(properties)));
-}
-
-void FakeWatcherImpl::SendRemovedEvent(uint64_t id) {
-  SendEvent(fuchsia::net::interfaces::Event::WithRemoved(std::move(id)));
-}
-
-void FakeWatcherImpl::NotImplemented_(const std::string& name) {
-  FX_NOTIMPLEMENTED() << name << " is not implemented";
-}
-
-void FakeWatcherImpl::Watch(WatchCallback callback) {
-  ASSERT_FALSE(watch_callback_.has_value());
-  watch_callback_.emplace(std::move(callback));
-}
-
-void FakeWatcherImpl::SendEvent(fuchsia::net::interfaces::Event event) {
-  ASSERT_TRUE(watch_callback_.has_value());
-  (*watch_callback_)(std::move(event));
-  watch_callback_.reset();
-}
-
-void FakeWatcherImpl::Reset() { watch_callback_.reset(); }
-
-bool FakeWatcherImpl::IsWatchPending() { return watch_callback_.has_value(); }
 
 }  // namespace net::interfaces::test

@@ -9,6 +9,11 @@ package(
     default_visibility = ["//visibility:public"],
 )
 
+exports_files(
+    ["test_settings_unittest.cc"],
+    visibility = ["//src/lib/fxl:__pkg__"],
+)
+
 cc_library(
     name = "test_settings",
     srcs = ["test_settings.cc"],

@@ -29,6 +29,10 @@ set -euo pipefail
 #   - an existing `<pkg>/README.md` in a migrated package directory when every modified
 #     (`+`/`-`) line only updates a target label reference (`//<pkg>...`) to match the
 #     migrated BUILD.gn / BUILD.bazel targets; other README.md or OWNERS edits are not allowed.
+#   - an existing `docs/**/*.md` file when every changed line is an `{% includecode %}`
+#     directive whose `gerrit_path` only moves from a `BUILD.gn` region no longer present to
+#     the same directory's `BUILD.bazel` carrying that `region_tag`
+#     (`pcl.is_includecode_repoint_edit`); any other docs edit is still an error.
 #   - an existing source file in a migrated package when modified solely to add
 #     `LINT.IfChange` / `LINT.ThenChange` comments paired with `BUILD.bazel` / `BUILD.gn`,
 #     and/or (in `.rs` files) to resolve a `_CLIPPY_WARN_PRODUCTION` lint (such as
@@ -50,8 +54,9 @@ set -euo pipefail
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-python3 - "$WORKDIR" "$TARGET_DIRS" <<'PYEOF'
+python3 - "$WORKDIR" "$TARGET_DIRS" "$SCRIPT_DIR" <<'PYEOF'
 import json
 import os
 import re
@@ -61,6 +66,8 @@ import sys
 
 workdir = os.path.abspath(sys.argv[1])
 raw_dirs = sys.argv[2]
+sys.path.insert(0, os.path.abspath(sys.argv[3]))
+import planter_check_lib as pcl
 target_dirs = [
     d.strip().strip("/") for d in re.split(r"[\s,]+", raw_dirs) if d.strip().strip("/")
 ]
@@ -94,49 +101,7 @@ def git_out(args):
         return ""
 
 
-def is_ancestor(anc, desc):
-    if not anc or not desc:
-        return False
-    return (
-        subprocess.run(
-            ["git", "-C", workdir, "merge-base", "--is-ancestor", anc, desc],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
-        == 0
-    )
-
-
-def resolve_effective_change_base(raw_base):
-    """Advance change_base to merge-base(origin/main, HEAD) when HEAD was rebased onto a newer
-    origin/main after PLANTER_CHANGE_BASE was pinned, so upstream commits are not flagged."""
-    base = (raw_base or "").strip() or "HEAD"
-    head_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-    base_sha = git_out(["rev-parse", "--verify", "--quiet", f"{base}^{{commit}}"])
-    origin_main = git_out(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
-    merge_base = (
-        git_out(["merge-base", origin_main, head_sha]) if (origin_main and head_sha) else ""
-    )
-    if (
-        base_sha
-        and merge_base
-        and base_sha != merge_base
-        and is_ancestor(base_sha, merge_base)
-    ):
-        return merge_base
-    if head_sha and base_sha and not is_ancestor(base_sha, head_sha):
-        return merge_base or "HEAD~1"
-    return base
-
-
 changed = set()
-# The task's change: everything since PLANTER_CHANGE_BASE ("HEAD~1" when HEAD is the task's own
-# commit, "HEAD" when HEAD is unrelated upstream history or a stacked parent commit) plus untracked files.
-change_base = (
-    os.environ.get("PLANTER_RESOLVED_CHANGE_BASE", "").strip()
-    or resolve_effective_change_base(os.environ.get("PLANTER_CHANGE_BASE", ""))
-)
 # Resolve target package directories from environment overrides or CLI arguments
 raw_tdirs = re.split(
     r"[\s,]+",
@@ -153,70 +118,9 @@ for d in raw_tdirs:
         check_dirs.append(nd)
         if nd.startswith("build/secondary/"):
             check_dirs.append(nd[len("build/secondary/"):])
-head_subj = (git_lines(["log", "-1", "--format=%s", "HEAD"]) or [""])[0]
-# Like planter_check_lib.resolve_change_base, never step back from a HEAD that is already
-# merged on origin/main (an upstream [bazel_migration] commit at the checkout base while
-# the task's edits are uncommitted): its edits are pre-existing, not the task's.
-_bos_head = (git_lines(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) or [""])[0]
-_bos_origin = (
-    git_lines(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"]) or [""]
-)[0]
-_bos_head_on_origin = bool(
-    _bos_head
-    and _bos_origin
-    and (
-        _bos_head == _bos_origin
-        or (git_lines(["merge-base", _bos_origin, _bos_head]) or [""])[0] == _bos_head
-    )
-)
-if head_subj.startswith(("[bazel_migration]", "[bazel2gn]", "[bazel]")) and not _bos_head_on_origin:
-    head_sha = (git_lines(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]) or [""])[0]
-    parent_sha = (git_lines(["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"]) or [""])[0]
-    base_sha = (
-        git_lines(["rev-parse", "--verify", "--quiet", f"{change_base}^{{commit}}"]) or [""]
-    )[0]
-    head_files = (
-        git_lines(["diff", "--ignore-submodules=none", "--name-only", "HEAD~1", "HEAD"])
-        if parent_sha
-        else []
-    )
-    head_pkgs = {
-        os.path.dirname(f)
-        for f in head_files
-        if os.path.basename(f) in ("BUILD.bazel", "BUILD.gn", "BUILD")
-    }
-    sdir = (
-        head_subj.split(" //", 1)[1].split(":", 1)[0].strip().rstrip(".").strip("/")
-        if " //" in head_subj
-        else ""
-    )
-    subj_matches = bool(sdir) and any(
-        (td == sdir[4:] or td.endswith("/" + sdir[4:]))
-        if sdir.startswith(".../")
-        else (sdir == td)
-        for td in check_dirs
-    )
-    is_task_head = not check_dirs or (
-        not (sdir and sdir in head_pkgs and not subj_matches)
-        and (
-            (bool(head_pkgs & set(check_dirs)) or subj_matches)
-            if head_pkgs
-            else (
-                any(f == td or f.startswith(td + "/") for td in check_dirs for f in head_files)
-                or subj_matches
-            )
-        )
-    )
-    if parent_sha and is_task_head and (change_base == "HEAD" or base_sha == head_sha):
-        change_base = "HEAD~1"
-    elif parent_sha and is_task_head and base_sha and base_sha != parent_sha:
-        rc = subprocess.run(
-            ["git", "-C", workdir, "merge-base", "--is-ancestor", base_sha, parent_sha],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode
-        if rc == 0:
-            change_base = "HEAD~1"
+# The task's change: everything since the resolved change base ("HEAD~1" when HEAD is the task's
+# own commit, "HEAD" when HEAD is unrelated upstream history or a stacked prerequisite commit).
+change_base = pcl.resolve_change_base(workdir, target_dirs=check_dirs)
 # Pass --no-renames so moved files deterministically appear in both added and deleted sets.
 # Fuchsia .gitmodules sets `ignore = all`, which hides 160000 submodule gitlink changes from
 # default `git diff`. Query `--cached --ignore-submodules=none` against `change_base` as well
@@ -386,13 +290,29 @@ def find_relocated_component_manifests():
     return new_to_old, old_to_new
 
 
-def is_new_test_manifest(path: str) -> bool:
-    """A new `.cml` that an `fx_component_manifest` in the nearest BUILD.bazel uses as `manifest`
-    while that BUILD.bazel defines an `fx_test_component`: it replaces the manifest that GN's
-    `fuchsia_unittest_package` generated when a (C++ or Rust) test package migrates to `fx_test`."""
-    if path not in added or not path.endswith(".cml") or path.endswith(".shard.cml"):
+_bos_origin = git_out(["rev-parse", "--verify", "--quiet", "origin/main^{commit}"])
+
+
+# Return True when `path` is a non-shard `.cml` file newly introduced by this branch
+# (either added since `change_base` or absent on `origin/main` across multi-round amends).
+def is_cl_added_cml(path: str) -> bool:
+    if path in deleted or not path.endswith(".cml") or path.endswith(".shard.cml"):
         return False
     if not os.path.isfile(os.path.join(workdir, path)):
+        return False
+    if path in added:
+        return True
+    return bool(_bos_origin and git_blob_bytes(_bos_origin, path) is None)
+
+
+# Check whether a newly added `.cml` is referenced as `manifest` in the nearest
+# BUILD.bazel alongside an `fx_test_component` or `fx_unittest_component` target.
+def is_new_test_manifest(path: str) -> bool:
+    """A new `.cml` that an `fx_component_manifest` or `fx_unittest_component` in the nearest
+    BUILD.bazel uses as `manifest` while that BUILD.bazel defines an `fx_test_component` or
+    `fx_unittest_component`: it replaces the manifest that GN's `fuchsia_unittest_package`,
+    `fuchsia_unittest_component`, or `test_component_manifest_cml` metadata generated."""
+    if not is_cl_added_cml(path):
         return False
     pkg = os.path.dirname(path)
     for _ in range(4):
@@ -402,10 +322,13 @@ def is_new_test_manifest(path: str) -> bool:
                 text = open(bazel, encoding="utf-8").read()
             except OSError:
                 return False
-            rel = os.path.relpath(path, pkg) if pkg else path
-            return "fx_test_component(" in text and bool(
-                re.search(r'\bmanifest\s*=\s*":?' + re.escape(rel) + r'"', text)
+            rel = (os.path.relpath(path, pkg) if pkg else path).replace("\\", "/")
+            has_test_comp = (
+                "fx_test_component(" in text or "fx_unittest_component(" in text
             )
+            pkg_prefix = f"|//{re.escape(pkg)}:" if pkg else ""
+            manifest_pat = rf'\bmanifest\s*=\s*"(?::{pkg_prefix})?{re.escape(rel)}"'
+            return has_test_comp and bool(re.search(manifest_pat, text))
         if not pkg:
             break
         pkg = os.path.dirname(pkg)
@@ -688,9 +611,20 @@ def is_package_readme_label_update(path: str) -> bool:
 # Check whether a modified C/C++ file only normalizes checkout-root-relative
 # `#include <sdk/lib/...>` directives to `<lib/...>` (for `idk_cc_source_library`
 # targets with `include_base = "//sdk"`, where GN's `-I//` allowed `<sdk/lib/...>`
-# while Bazel exposes `<lib/...>` on `-isystem`) plus clang-format include sorting.
+# while Bazel exposes `<lib/...>` on `-isystem`) or removes unused
+# `#include <fidl/.../cpp/*test_base.h>` directives (isolated in `testonly = True`
+# `<fidl>_cpp_testing` targets in Bazel), plus clang-format include sorting.
 INCLUDE_LINE_RE = re.compile(r'^#\s*include\s+[<"][^>"]+[>"]\s*(?://.*|/\*.*\*/)?$')
 SDK_LIB_INCLUDE_RE = re.compile(r"^(\s*#\s*include\s+<)sdk/(lib/[^>]+>.*)$")
+FIDL_TEST_BASE_INCLUDE_RE = re.compile(
+    r"^#\s*include\s+<fidl/([^/>]+)/cpp/(?:driver/)?(?:wire_)?test_base\.h>"
+    r"\s*(?://.*|/\*.*\*/)?$"
+)
+FIDL_STD_HEADER_INCLUDE_RE = re.compile(
+    r"^#\s*include\s+<fidl/([^/>]+)/cpp/(?:driver/)?"
+    r"(?:fidl|wire|natural_types|wire_types|common_types|markers)\.h>"
+    r"\s*(?://.*|/\*.*\*/)?$"
+)
 
 
 def is_idk_include_path_fix(path: str) -> bool:
@@ -722,6 +656,31 @@ def is_idk_include_path_fix(path: str) -> bool:
         stripped = line.strip()
         if stripped and not INCLUDE_LINE_RE.match(stripped):
             return False
+    removed_test_base_libs = {
+        m.group(1)
+        for l in removed
+        if (m := FIDL_TEST_BASE_INCLUDE_RE.match(l.strip()))
+    }
+    if removed_test_base_libs:
+        pkg, _ = find_nearest_bazel_package(path)
+        if pkg and (f"{pkg}/BUILD.bazel" in changed or f"{pkg}/BUILD.gn" in changed):
+            kept_removed = sorted(
+                l.strip()
+                for l in removed
+                if l.strip() and not FIDL_TEST_BASE_INCLUDE_RE.match(l.strip())
+            )
+            kept_added = sorted(
+                l.strip()
+                for l in added_lines
+                if l.strip()
+                and not (
+                    (m := FIDL_STD_HEADER_INCLUDE_RE.match(l.strip()))
+                    and m.group(1) in removed_test_base_libs
+                    and l.strip() not in kept_removed
+                )
+            )
+            if kept_removed == kept_added:
+                return True
     has_sdk_lib_rewrite = any(SDK_LIB_INCLUDE_RE.match(l.strip()) for l in removed)
     if not has_sdk_lib_rewrite:
         return False
@@ -961,13 +920,179 @@ def check_allowed_assembly_scrutiny_golden_edit(path: str):
     )
 
 
+# Check whether a modified verification test file under `<area>/build/tests/**` only
+# updates subtool/artifact list entries paired with cutting over a `gn_ffx_test_data`
+# or `@gn_targets` bridge stub in a modified `BUILD.bazel` to native Bazel.
+def check_allowed_gn_bridge_cutover_test_edit(path: str):
+    if path in added or path in deleted or not path.endswith((".go", ".py", ".rs", ".sh")):
+        return None
+    norm = path.strip("/")
+    full_norm = os.path.join(workdir, norm)
+    if not os.path.isfile(full_norm):
+        return None
+    owner_pkg = os.path.dirname(norm).strip("/")
+    while owner_pkg and not os.path.isfile(os.path.join(workdir, owner_pkg, "BUILD.bazel")):
+        parent = os.path.dirname(owner_pkg).strip("/")
+        if parent == owner_pkg:
+            owner_pkg = ""
+            break
+        owner_pkg = parent
+    if not owner_pkg or not re.search(r"(?:^|/)build/tests?(?:/|$)", owner_pkg):
+        return None
+    try:
+        with open(os.path.join(workdir, owner_pkg, "BUILD.bazel"), encoding="utf-8") as f:
+            owner_bz_txt = f.read()
+    except OSError:
+        return None
+    rel_src = os.path.relpath(norm, owner_pkg).replace("\\", "/")
+    if rel_src not in owner_bz_txt:
+        return None
+    bridge_re = re.compile(r"\bgn_ffx_test_data\b|@gn_targets//")
+    changed_bz_pkgs = sorted(
+        {
+            os.path.dirname(p.strip("/"))
+            for p in changed
+            if os.path.basename(p) == "BUILD.bazel" and os.path.dirname(p.strip("/"))
+        }
+    )
+    cutover_tds = []
+    for td in changed_bz_pkgs:
+        if not re.search(r"//" + re.escape(td) + r'(?=[:"/\s\'])', owner_bz_txt):
+            continue
+        td_bz_rel = f"{td}/BUILD.bazel"
+        base_td_bz = git_out(["show", f"{change_base}:{td_bz_rel}"])
+        if not base_td_bz or not bridge_re.search(base_td_bz):
+            continue
+        try:
+            with open(os.path.join(workdir, td_bz_rel), encoding="utf-8") as f:
+                cur_td_bz = f.read()
+        except OSError:
+            continue
+        if not bridge_re.search(cur_td_bz):
+            cutover_tds.append((td, base_td_bz, cur_td_bz))
+    if not cutover_tds:
+        return None
+    diff_lines = git_lines(["diff", "-U0", change_base, "--", norm])
+    removed = [
+        ln[1:].strip()
+        for ln in diff_lines
+        if ln.startswith("-") and not ln.startswith("---") and ln[1:].strip()
+    ]
+    added_lines = [
+        ln[1:].strip()
+        for ln in diff_lines
+        if ln.startswith("+") and not ln.startswith("+++") and ln[1:].strip()
+    ]
+    if not (removed or added_lines) or len(removed) + len(added_lines) > 20:
+        return None
+    ignored_vals = {"2021", "2024", "0.1.0", "partner", "internal", "host-tools"}
+    cutover_tokens = set()
+    for _td, base_td_bz, cur_td_bz in cutover_tds:
+        for tok in re.findall(r'"([A-Za-z0-9_.-]+)"', base_td_bz + "\n" + cur_td_bz):
+            if len(tok) >= 3 and tok not in ignored_vals:
+                cutover_tokens.add(tok)
+    if not cutover_tokens:
+        return None
+    combined = "\n".join(removed + added_lines)
+    if not any(f'"{tok}"' in combined for tok in cutover_tokens):
+        return None
+
+    def _strip_literals(lines):
+        blob = "\n".join(lines)
+        for tok in sorted(cutover_tokens, key=len, reverse=True):
+            blob = blob.replace(f'"{tok}"', "")
+        return re.sub(r"[,\s]+", "", blob)
+
+    if _strip_literals(removed) != _strip_literals(added_lines):
+        return None
+    return (
+        f"Allowed GN-bridge cutover verification test update in '{path}' "
+        f"(package '//{owner_pkg}') paired with replacing a GN bridge stub in BUILD.bazel."
+    )
+
+
+# Detect unfinished git rebase/merge/cherry-pick states and unmerged index paths.
+def detect_unfinished_git_operation():
+    active_state = None
+    for state_name in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"):
+        git_path = git_out(["rev-parse", "--git-path", state_name])
+        if not git_path:
+            continue
+        abs_git_path = (
+            git_path if os.path.isabs(git_path) else os.path.join(workdir, git_path)
+        )
+        if os.path.exists(abs_git_path):
+            active_state = state_name
+            break
+    unmerged = set(git_lines(["diff", "--name-only", "--diff-filter=U"]))
+    if not active_state and not unmerged:
+        return None, unmerged
+    sorted_unmerged = sorted(unmerged)
+    state_desc = active_state or "unmerged index entries"
+    suffix = (
+        f" with unmerged file(s): {', '.join(sorted_unmerged)}"
+        if sorted_unmerged
+        else ""
+    )
+    finding = {
+        "source": "build_only_scope",
+        "category": "unfinished_git_operation",
+        "severity": "error",
+        "file": sorted_unmerged[0] if sorted_unmerged else "",
+        "line": 0,
+        "message": (
+            f"An unfinished git operation (`{state_desc}`) is active in the "
+            f"checkout{suffix}."
+        ),
+        "remediation": (
+            "Resolve all conflicted files, stage them with `git add <file>`, and "
+            "complete the operation with `git -c core.editor=true rebase --continue` "
+            "(or abort with `git rebase --abort` / `git merge --abort`)."
+        ),
+    }
+    return finding, unmerged
+
+
+# Build remediation guidance for a newly added `.cml` not wired to a Bazel test component.
+def build_unwired_new_cml_remediation(path: str) -> str:
+    return (
+        f"If '{path}' replaces a manifest generated by GN's `fuchsia_unittest_package` "
+        "or `fuchsia_unittest_component`, reference it via `manifest = \"...\"` on an "
+        "`fx_component_manifest` or `fx_unittest_component` alongside an "
+        "`fx_test_component` or `fx_unittest_component` in the nearest `BUILD.bazel`. "
+        f"Otherwise, remove '{path}' (`rm -f {path}`) and use existing checked-in "
+        "component manifests; GN-to-Bazel migrations must not add new non-test `.cml` "
+        "files."
+    )
+
+
+unfinished_op_finding, unmerged_paths = detect_unfinished_git_operation()
+if unfinished_op_finding is not None:
+    findings.append(unfinished_op_finding)
+
 # Emit findings for changed non-build files and relocated manifests.
 for path in sorted(changed):
+    if unfinished_op_finding is not None and (
+        path in unmerged_paths or is_cl_added_cml(path)
+    ):
+        continue
     if (
         is_build_file(path)
         or is_new_test_manifest(path)
         or is_package_readme_label_update(path)
+        or pcl.is_includecode_repoint_edit(workdir, change_base, path)
     ):
+        continue
+    gn_bridge_test_note = check_allowed_gn_bridge_cutover_test_edit(path)
+    if gn_bridge_test_note is not None:
+        findings.append({
+            "source": "build_only_scope",
+            "category": "allowed_gn_bridge_cutover_test_edit",
+            "severity": "INFO",
+            "file": path,
+            "line": 0,
+            "message": gn_bridge_test_note,
+        })
         continue
     scrutiny_golden_note = check_allowed_assembly_scrutiny_golden_edit(path)
     if scrutiny_golden_note is not None:
@@ -1049,36 +1174,43 @@ for path in sorted(changed):
         if fmt_finding is not None:
             findings.append(fmt_finding)
         continue
-    msg_text = (
-        f"Migration modifies non-build file '{path}'. GN-to-Bazel migrations must not "
-        "change source code, tests, manifests, submodule gitlinks/symlinks, or data files "
-        "(see //build/beads/references/migration/scoping_changelists.md)."
-    )
-    rem_text = (
-        "Revert this path to its pre-migration contents (`git checkout HEAD~1 -- <file>` "
-        "and `git commit --amend --no-edit` if committed in HEAD, `git checkout "
-        "$PLANTER_CHANGE_BASE -- <file>` for unstaged files, or `git reset origin/main -- "
-        "<submodule>` and `git commit --amend --no-edit` when restoring a 160000 submodule "
-        "gitlink). Never stage or commit worktree symlinks that "
-        "replace third-party submodule gitlinks during rebase or `git commit -a`, as "
-        "replacing a gitlink with a symlink causes CQ `checkout.jiri update` to fail with "
-        "`could not create work tree dir ...: File exists`. If the Bazel build surfaces "
-        "lint or compile errors on a target built in GN, fix the BUILD.bazel attributes "
-        "(lint_config, rustc_flags, configs, features, deps) instead of editing sources "
-        "(for a C/C++ '#include <sdk/lib/...>' on an idk_cc_source_library with "
-        "include_base = '//sdk', rewrite only that include to '<lib/...>' and run "
-        "'fx format-code --changed-lines --files=<file>'; for a host test using "
-        "host_test_data_files/host_test_data_map whose #[cfg(test)]/test code hardcodes "
-        "'../../<pkg>/...' or current_exe(), keep the edit strictly inside "
-        "#[cfg(test)]/test files to use a single consistent '<dest_dir>/...' path (never "
-        "runtime '.exists()' fallback probing) and mark the Bazel host test "
-        "'# @bazel2gn:skip'). "
-        "If a target was not being built in GN and has pre-existing source bitrot (or may "
-        "be dead code), do not fix source files in the migration CL: either omit an "
-        "unreferenced unit test target with a `# TODO` comment in BUILD.bazel and note it "
-        "in the commit message, or leave the broken target unmigrated so its code and GN "
-        "build graph can be fixed (or deleted) in a separate precursor CL."
-    )
+    if is_cl_added_cml(path):
+        msg_text = (
+            f"Newly added component manifest '{path}' is not paired with an "
+            "`fx_test_component` or `fx_unittest_component` in the nearest `BUILD.bazel`."
+        )
+        rem_text = build_unwired_new_cml_remediation(path)
+    else:
+        msg_text = (
+            f"Migration modifies non-build file '{path}'. GN-to-Bazel migrations must not "
+            "change source code, tests, manifests, submodule gitlinks/symlinks, or data files "
+            "(see //build/beads/references/migration/scoping_changelists.md)."
+        )
+        rem_text = (
+            "Revert this path to its pre-migration contents (`git checkout HEAD~1 -- <file>` "
+            "and `git commit --amend --no-edit` if committed in HEAD, `git checkout "
+            "$PLANTER_CHANGE_BASE -- <file>` for unstaged files, or `git reset origin/main -- "
+            "<submodule>` and `git commit --amend --no-edit` when restoring a 160000 submodule "
+            "gitlink). Never stage or commit worktree symlinks that "
+            "replace third-party submodule gitlinks during rebase or `git commit -a`, as "
+            "replacing a gitlink with a symlink causes CQ `checkout.jiri update` to fail with "
+            "`could not create work tree dir ...: File exists`. If the Bazel build surfaces "
+            "lint or compile errors on a target built in GN, fix the BUILD.bazel attributes "
+            "(lint_config, rustc_flags, configs, features, deps) instead of editing sources "
+            "(for a C/C++ '#include <sdk/lib/...>' on an idk_cc_source_library with "
+            "include_base = '//sdk', rewrite only that include to '<lib/...>' and run "
+            "'fx format-code --changed-lines --files=<file>'; for a host test using "
+            "host_test_data_files/host_test_data_map whose #[cfg(test)]/test code hardcodes "
+            "'../../<pkg>/...' or current_exe(), keep the edit strictly inside "
+            "#[cfg(test)]/test files to use a single consistent '<dest_dir>/...' path (never "
+            "runtime '.exists()' fallback probing) and mark the Bazel host test "
+            "'# @bazel2gn:skip'). "
+            "If a target was not being built in GN and has pre-existing source bitrot (or may "
+            "be dead code), do not fix source files in the migration CL: either omit an "
+            "unreferenced unit test target with a `# TODO` comment in BUILD.bazel and note it "
+            "in the commit message, or leave the broken target unmigrated so its code and GN "
+            "build graph can be fixed (or deleted) in a separate precursor CL."
+        )
     findings.append({
         "source": "build_only_scope",
         "category": "non_build_file_modified",

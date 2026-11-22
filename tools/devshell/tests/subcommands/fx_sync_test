@@ -21,7 +21,37 @@ BT_FILE_DEPS=(
 
 declare fx
 
+declare -ra _PLATFORM_HOOKS=(
+  "scripts/devshell/lib/add_symlink_to_bin.sh"
+  "sdk/ctf/build/internal/create_ctf_releases_gni.sh"
+  "build/info/create_jiri_hook_files.sh"
+  "tools/build/scripts/generate_prebuilt_versions.sh"
+  "tools/build/scripts/extract_protobuf_py3_wheel.sh"
+  "tools/build/scripts/extract_pydantic_core_wheel.sh"
+  "tools/build/scripts/extract_pathspec_wheel.sh"
+)
+
+_create_stub_platform_hooks() {
+  local hook
+  for hook in "${_PLATFORM_HOOKS[@]}"; do
+    local path="${BT_TEMP_DIR}/${hook}"
+    mkdir -p "$(dirname "${path}")"
+    cat > "${path}" <<EOF
+#!/bin/bash
+echo "${hook} path0=\${PATH%%:*}" >> "${BT_TEMP_DIR}/hook_calls.txt"
+echo "noisy stdout from ${hook}"
+if [[ "\${MOCK_FAIL_HOOK:-}" == "${hook}" ]]; then
+  echo "simulated failure in ${hook}" >&2
+  exit 42
+fi
+EOF
+    chmod +x "${path}"
+  done
+}
+
 BT_SET_UP() {
+  # Don't inherit the state of an outer fx invocation that already synced.
+  unset _FX_SYNC_RAN
   source "${BT_TEMP_DIR}/tools/devshell/tests/lib/fuchsia-mock.sh"
   fx="$(btf::setup_fx)"
 }
@@ -64,6 +94,7 @@ TEST_sync_bootstraps_and_updates_fxsync() {
   rm -rf "${BT_TEMP_DIR}/.jiri_root"
   mkdir -p "${BT_TEMP_DIR}/.git" "${BT_TEMP_DIR}/manifests"
   touch "${BT_TEMP_DIR}/manifests/platform"
+  _create_stub_platform_hooks
 
   local curl_mock
   curl_mock="$(btf::make_mock_binary curl)"
@@ -85,43 +116,216 @@ EOF
 
   local git_mock
   git_mock="$(btf::make_mock_binary git)"
-  cat >"${git_mock}.mock_side_effects" <<'EOF'
-if [[ "$*" == *"HEAD:manifests"* ]]; then
-  printf "%s\ncobalt_rev_123\ncobalt_config_rev_456\n" "${MOCK_MANIFEST_TREE:-manifests_tree_1}"
-elif [[ "$*" == *"HEAD:third_party/cobalt_config"* ]]; then
+  cat >"${git_mock}.mock_side_effects" <<EOF
+if [[ "\$*" == *"HEAD:manifests"* ]]; then
+  printf "%s\\ncobalt_rev_123\\ncobalt_config_rev_456\\n" "\${MOCK_MANIFEST_TREE:-manifests_tree_1}"
+elif [[ "\$*" == *"HEAD:third_party/cobalt_config"* ]]; then
   echo "cobalt_config_rev_456"
-elif [[ "$*" == *"HEAD:third_party/cobalt"* ]]; then
+elif [[ "\$*" == *"HEAD:third_party/cobalt"* ]]; then
   echo "cobalt_rev_123"
-elif [[ "$*" == *"rev-parse HEAD"* ]]; then
-  echo "${MOCK_HEAD_REV:-head_rev_789}"
+elif [[ "\$*" == *"update-ref"* ]]; then
+  echo "git \$*" >> "${BT_TEMP_DIR}/git_calls.txt"
 fi
 EOF
   btf::add_binary_to_path "${git_mock}"
 
-  # First invocation: initializes stub integration and .fxsync, and runs jiri init + jiri update.
-  BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
+  # First invocation: initializes stub integration and .fxsync, runs jiri init +
+  # jiri update, updates JIRI_HEAD, and runs the platform hooks quietly.
+  local out="${BT_TEMP_DIR}/sync_first.out"
+  BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync > "${out}" 2>&1
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${out}" "noisy stdout from"
   BT_EXPECT_FILE_EXISTS "${BT_TEMP_DIR}/integration/MILESTONE"
   BT_EXPECT_FILE_EXISTS "${BT_TEMP_DIR}/integration/ctf/all"
   BT_EXPECT_FILE_EXISTS "${BT_TEMP_DIR}/.fxsync/manifest_state"
   BT_EXPECT_FILE_EXISTS "${BT_TEMP_DIR}/.jiri_manifest"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" '<localimport file="manifests/third_party/all"/>'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" '<localimport file="manifests/prebuilts"/>'
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" "manifests/platform"
+  BT_EXPECT_FAIL grep -q '^$' "${BT_TEMP_DIR}/.jiri_manifest"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" "cobalt_rev_123"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" "cobalt_config_rev_456"
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.git/jiri/metadata.v2" "head_rev_789"
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.git/JIRI_HEAD" "head_rev_789"
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "init -analytics-opt=false -rewrite-sso-to-https=true -keep-git-hooks=true"
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "project-config -no-update=true"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/.git/jiri"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "init -analytics-opt=false -keep-git-hooks=true"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "rewrite-sso-to-https"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "project-config"
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "update"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/git_calls.txt" "git update-ref JIRI_HEAD HEAD"
+  local expected_hooks=""
+  local hook
+  for hook in "${_PLATFORM_HOOKS[@]}"; do
+    expected_hooks+="${hook} path0=${BT_TEMP_DIR}/.jiri_root/bin"$'\n'
+  done
+  BT_EXPECT_EQ "$(<"${BT_TEMP_DIR}/hook_calls.txt")"$'\n' "${expected_hooks}"
 
-  # Second invocation (same manifest state): does not re-run jiri update.
-  rm -f "${BT_TEMP_DIR}/jiri_calls.txt"
+  # Second invocation (same manifest state): does not re-run jiri update or hooks.
+  rm -f "${BT_TEMP_DIR}/jiri_calls.txt" "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
   BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
   BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/jiri_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/git_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/hook_calls.txt"
 
-  # Third invocation (new commit with changed manifests tree): re-syncs jiri to new HEAD.
-  BT_EXPECT MOCK_MANIFEST_TREE=manifests_tree_2 MOCK_HEAD_REV=head_rev_new _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.git/jiri/metadata.v2" "head_rev_new"
-  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.git/JIRI_HEAD" "head_rev_new"
+  # Third invocation (new commit with changed manifests tree): re-syncs jiri,
+  # updates JIRI_HEAD, and re-runs hooks.
+  BT_EXPECT MOCK_MANIFEST_TREE=manifests_tree_2 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
   BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "update"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/git_calls.txt" "git update-ref JIRI_HEAD HEAD"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/hook_calls.txt" "scripts/devshell/lib/add_symlink_to_bin.sh"
+
+  # Hook failure: exits with the hook's status, stops running subsequent hooks,
+  # reports its output, and does not record the new manifest state so the next
+  # invocation retries.
+  rm -f "${BT_TEMP_DIR}/hook_calls.txt"
+  out="${BT_TEMP_DIR}/sync_hook_fail.out"
+  local rc=0
+  MOCK_MANIFEST_TREE=manifests_tree_3 \
+    MOCK_FAIL_HOOK=tools/build/scripts/generate_prebuilt_versions.sh \
+    _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync > "${out}" 2>&1 || rc=$?
+  BT_EXPECT_EQ "${rc}" 42
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "Hook tools/build/scripts/generate_prebuilt_versions.sh failed (exit code 42):"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "simulated failure in tools/build/scripts/generate_prebuilt_versions.sh"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/hook_calls.txt" "extract_protobuf_py3_wheel.sh"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/.fxsync/manifest_state" "manifests_tree_3"
+
+  # Next invocation without hook failure retries and records the new state.
+  rm -f "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT MOCK_MANIFEST_TREE=manifests_tree_3 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.fxsync/manifest_state" "manifests_tree_3"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/hook_calls.txt" "tools/build/scripts/generate_prebuilt_versions.sh"
+}
+
+TEST_sync_imports_vendor_google_checkout() {
+  rm -rf "${BT_TEMP_DIR}/.jiri_root"
+  mkdir -p "${BT_TEMP_DIR}/.git" "${BT_TEMP_DIR}/manifests"
+  touch "${BT_TEMP_DIR}/manifests/platform"
+  _create_stub_platform_hooks
+
+  local curl_mock
+  curl_mock="$(btf::make_mock_binary curl)"
+  cat >"${curl_mock}.mock_side_effects" <<EOF
+cat <<'EOS' | base64
+mkdir -p "\$1/.jiri_root/bin"
+cat >"\$1/.jiri_root/bin/jiri" <<'EOJ'
+#!/bin/bash
+echo "\${PWD}: \$@" >> "${BT_TEMP_DIR}/jiri_calls.txt"
+# Emulate Jiri recording whether internal packages could be fetched.
+if [[ "\$1" == "update" && -n "\${MOCK_CIPD_LOGGED_IN}" ]]; then
+  if [[ -n "\${MOCK_NO_INTERNAL_ACCESS}" ]]; then
+    echo '{"internal_access": false}' > "${BT_TEMP_DIR}/.jiri_root/prebuilt.json"
+  else
+    echo '{"internal_access": true}' > "${BT_TEMP_DIR}/.jiri_root/prebuilt.json"
+  fi
+fi
+EOJ
+chmod +x "\$1/.jiri_root/bin/jiri"
+EOS
+EOF
+  btf::add_binary_to_path "${curl_mock}"
+
+  local git_mock
+  git_mock="$(btf::make_mock_binary git)"
+  cat >"${git_mock}.mock_side_effects" <<EOF
+if [[ "\$*" == "-C vendor/google rev-parse HEAD:manifests" ]]; then
+  echo "\${MOCK_VENDOR_MANIFEST_TREE:-vendor_manifests_tree_1}"
+elif [[ "\$*" == *"HEAD:manifests"* ]]; then
+  printf "%s\\ncobalt_rev_123\\ncobalt_config_rev_456\\n" "manifests_tree_1"
+elif [[ "\$*" == *"HEAD:third_party/cobalt_config"* ]]; then
+  echo "cobalt_config_rev_456"
+elif [[ "\$*" == *"HEAD:third_party/cobalt"* ]]; then
+  echo "cobalt_rev_123"
+elif [[ "\$*" == *"update-ref"* ]]; then
+  echo "git \$*" >> "${BT_TEMP_DIR}/git_calls.txt"
+fi
+EOF
+  btf::add_binary_to_path "${git_mock}"
+
+  # Without vendor/google: only the public manifests are imported.
+  BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" "vendor/google"
+  BT_EXPECT_FAIL grep -q '^$' "${BT_TEMP_DIR}/.jiri_manifest"
+
+  # Adding a vendor/google checkout triggers a re-sync that imports its
+  # dependency manifests directly and updates JIRI_HEAD without registering
+  # vendor/google as a Jiri project.
+  mkdir -p "${BT_TEMP_DIR}/vendor/google/.git"
+  rm -f "${BT_TEMP_DIR}/jiri_calls.txt" "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" \
+    '<localimport file="vendor/google/manifests/third_party/all"/>'
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" \
+    '<localimport file="vendor/google/manifests/prebuilts"/>'
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/.jiri_manifest" "platform_internal"
+  BT_EXPECT_FAIL grep -q '^$' "${BT_TEMP_DIR}/.jiri_manifest"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/vendor/google/.git/jiri"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "project-config"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/git_calls.txt" "git update-ref JIRI_HEAD HEAD"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/git_calls.txt" "git -C vendor/google update-ref JIRI_HEAD HEAD"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.fxsync/manifest_state" \
+    "vendor/google:vendor_manifests_tree_1"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/hook_calls.txt" "scripts/devshell/lib/add_symlink_to_bin.sh"
+
+  # Unchanged vendor/google manifests: no re-sync.
+  rm -f "${BT_TEMP_DIR}/jiri_calls.txt" "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/jiri_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/git_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/hook_calls.txt"
+
+  # Changed vendor/google manifests: re-sync.
+  BT_EXPECT MOCK_VENDOR_MANIFEST_TREE=vendor_manifests_tree_2 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" "update"
+
+  # In an internal checkout, being logged in to CIPD is required. When CIPD is
+  # bootstrapped and the user is not logged in, a sync fails before updating
+  # and prints the command to run (never prompting or running auth-login
+  # itself).
+  cat > "${BT_TEMP_DIR}/.jiri_root/bin/cipd" <<EOF
+#!/bin/bash
+echo "\$@" >> "${BT_TEMP_DIR}/cipd_calls.txt"
+[[ "\$1" != "auth-info" || -n "\${MOCK_CIPD_LOGGED_IN}" ]]
+EOF
+  chmod +x "${BT_TEMP_DIR}/.jiri_root/bin/cipd"
+  rm -f "${BT_TEMP_DIR}/jiri_calls.txt" "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
+  local out="${BT_TEMP_DIR}/sync_logged_out.out"
+  BT_EXPECT_FAIL MOCK_VENDOR_MANIFEST_TREE=vendor_manifests_tree_3 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync > "${out}" 2>&1 < /dev/null
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" ": update"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/git_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/cipd_calls.txt" "auth-login"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "cipd auth-login"
+  # The failed sync does not record the new state...
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/.fxsync/manifest_state" "vendor_manifests_tree_3"
+
+  # ...so the next invocation retries, and fails again while still logged out.
+  BT_EXPECT_FAIL MOCK_VENDOR_MANIFEST_TREE=vendor_manifests_tree_3 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync > "${out}" 2>&1 < /dev/null
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "cipd auth-login"
+
+  # Once the user has logged in, the next invocation syncs and records the
+  # state.
+  rm -f "${BT_TEMP_DIR}/jiri_calls.txt" "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT MOCK_CIPD_LOGGED_IN=1 MOCK_VENDOR_MANIFEST_TREE=vendor_manifests_tree_3 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync < /dev/null
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" ": update"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/git_calls.txt" "git -C vendor/google update-ref JIRI_HEAD HEAD"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/hook_calls.txt" "scripts/devshell/lib/add_symlink_to_bin.sh"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/.fxsync/manifest_state" "vendor_manifests_tree_3"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/cipd_calls.txt" "auth-login"
+
+  # Logged in, but Jiri still could not fetch internal packages: fails after
+  # the update and BEFORE updating JIRI_HEAD or running hooks, with a different
+  # message, without recording the state.
+  rm -f "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
+  out="${BT_TEMP_DIR}/sync_no_access.out"
+  BT_EXPECT_FAIL MOCK_CIPD_LOGGED_IN=1 MOCK_NO_INTERNAL_ACCESS=1 MOCK_VENDOR_MANIFEST_TREE=vendor_manifests_tree_4 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync > "${out}" 2>&1 < /dev/null
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${out}" "even though you are logged in to CIPD"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/git_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_EXIST "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT_FILE_DOES_NOT_CONTAIN_SUBSTRING "${BT_TEMP_DIR}/.fxsync/manifest_state" "vendor_manifests_tree_4"
+
+  # --force re-syncs even if nothing changed.
+  rm -f "${BT_TEMP_DIR}/jiri_calls.txt" "${BT_TEMP_DIR}/git_calls.txt" "${BT_TEMP_DIR}/hook_calls.txt"
+  BT_EXPECT MOCK_CIPD_LOGGED_IN=1 MOCK_VENDOR_MANIFEST_TREE=vendor_manifests_tree_3 _FX_PROC_STATUS="${BT_TEMP_DIR}/nonexistent" "${fx}" sync --force < /dev/null
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/jiri_calls.txt" ": update"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/git_calls.txt" "git update-ref JIRI_HEAD HEAD"
+  BT_EXPECT_FILE_CONTAINS_SUBSTRING "${BT_TEMP_DIR}/hook_calls.txt" "scripts/devshell/lib/add_symlink_to_bin.sh"
 }
 
 BT_RUN_TESTS "$@"

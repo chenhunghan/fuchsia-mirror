@@ -106,6 +106,8 @@ fn split_syscall_flags(
 #[repr(C)]
 pub struct VmAddressRegionDispatcherState {
     canary: Canary<{ fbl::magic(b"VARD") }>,
+    /// Safety invariant: `vmar` belongs to a user (`is_user()`) or guest-physical
+    /// (`is_guest_physical()`) `VmAspace`.
     vmar: RefPtr<VmAddressRegion>,
     base_arch_mmu_flags: ArchMmuFlags,
     #[mutex]
@@ -114,11 +116,12 @@ pub struct VmAddressRegionDispatcherState {
 
 impl VmAddressRegionDispatcherState {
     /// Initializes the `VmAddressRegionDispatcherState`.
-    pub fn init(
+    pub(super) fn init(
         _dispatcher: *const VmAddressRegionDispatcher,
         vmar: RefPtr<VmAddressRegion>,
         base_arch_mmu_flags: ArchMmuFlags,
     ) -> impl PinInit<Self, core::convert::Infallible> {
+        assert!(vmar.aspace().is_user() || vmar.aspace().is_guest_physical());
         pin_init!(Self {
             canary: {
                 DISPATCHER_VMAR_CREATE_COUNT.add(1);
@@ -265,16 +268,20 @@ impl VmAddressRegionDispatcher {
             }
         }
 
-        state.vmar.create_vm_mapping(
-            vmar_offset,
-            len,
-            alignment,
-            vmar_flags,
-            vmo,
-            vmo_offset,
-            arch_mmu_flags,
-            b"useralloc",
-        )
+        // SAFETY: By `VmAddressRegionDispatcherState::vmar`'s safety invariant, `state.vmar`
+        // belongs to a user or guest-physical `VmAspace`, where nothing in the kernel relies on
+        // mappings staying mapped and no Rust reference into mapped memory can be live.
+        unsafe {
+            state.vmar.create_vm_mapping(
+                vmar_offset,
+                len,
+                alignment,
+                vmar_flags,
+                vmo,
+                vmo_offset,
+                arch_mmu_flags,
+            )
+        }
     }
 
     /// Changes protections on a subset of the region of memory in the containing address space.

@@ -5,8 +5,9 @@
 use crate::security;
 use crate::task::CurrentTask;
 use crate::vfs::{
-    CheckAccessReason, DirectoryMode, FileHandle, FileObject, FsLockDepType, FsNodeHandle,
-    FsNodeLinkBehavior, FsStr, FsString, LookupVec, MountInfo, Mounts, NamespaceNode, PathBuilder,
+    CheckAccessReason, DirectoryMode, FileHandle, FileObject, FileSystemHandle,
+    FileSystemRenameToken, FsLockDepType, FsNodeHandle, FsNodeInfo, FsNodeLinkBehavior, FsStr,
+    FsString, FscryptNodePolicy, LookupVec, MountInfo, Mounts, NamespaceNode, PathBuilder,
     UnlinkKind, inotify_hook, path,
 };
 use atomic_bitflags::atomic_bitflags;
@@ -19,9 +20,9 @@ use smallvec::SmallVec;
 use starnix_rcu::RcuString;
 use starnix_sync::{
     DirEntryChildrenLevel, DirEntryChildrenRecursiveLevel, DynamicLockDepRwLock,
-    FuseDirEntryChildrenLevel, LockDepWriteGuard, allow_subclass,
+    FuseDirEntryChildrenLevel, LockDepGuard, LockDepWriteGuard, allow_subclass,
 };
-use starnix_uapi::auth::FsCred;
+use starnix_uapi::auth::CAP_FOWNER;
 use starnix_uapi::errors::{ENOENT, Errno};
 use starnix_uapi::file_mode::{Access, FileMode};
 use starnix_uapi::inotify_mask::InotifyMask;
@@ -90,6 +91,13 @@ atomic_bitflags! {
         /// `DirEntry::record_dcache_use` and cleared by `FileSystem::purge_old_entries` and
         /// `FileSystem::forget_dir_entry_uses`.
         const DCACHE_REFERENCED = 1 << 2;
+
+        /// Whether this entry was looked up or created while its parent directory was locked
+        /// (i.e. using an fscrypt no-key name) rather than a plaintext name. Such entries are
+        /// never inserted into their parent's `children` cache, cannot be renamed or unlinked
+        /// once the parent's encryption key is added, and do not cache child entries until
+        /// spliced onto a plaintext name.
+        const NO_KEY = 1 << 3;
     }
 }
 
@@ -152,6 +160,13 @@ pub struct DirEntry {
     // by the rename operation, which can move nodes around the hierarchy. See the referenced bug
     // for more details, the current mitigations, and potentials for long-term solutions.
     children: DynamicLockDepRwLock<DirEntryChildren>,
+}
+
+/// Canonical live directory entry for a directory [`FsNode`], along with its parent.
+#[derive(Default)]
+pub(crate) struct CanonicalDirEntry {
+    pub parent: Weak<DirEntry>,
+    pub entry: Weak<DirEntry>,
 }
 
 pub type DirEntryHandle = Arc<DirEntry>;
@@ -243,12 +258,24 @@ impl DirEntry {
     ///
     /// # Errors
     ///
+    /// * [`EPERM`]: If the caller neither owns the inode nor has `CAP_FOWNER`.
     /// * [`ENOTDIR`]: If this entry is not a directory.
     /// * [`ENOTSUP`]: If enabling casefolding on a filesystem without casefold support.
     /// * [`ENOTEMPTY`]: If the directory is not empty.
     /// * Propagates errors from [`FsNode::update_attributes`].
     pub fn set_casefold(&self, current_task: &CurrentTask, casefold: bool) -> Result<(), Errno> {
-        if self.node.info().casefold == casefold {
+        // From `ioctl_iflags(2)`:
+        //   In order to change the inode flags of a file using the FS_IOC_SETFLAGS
+        //   operation, the effective user ID of the caller must match the owner of
+        //   the file, or the caller must have the CAP_FOWNER capability.
+        let (uid, current_casefold) = {
+            let info = self.node.info();
+            (info.uid, info.casefold)
+        };
+        if uid != current_task.current_creds().fsuid {
+            security::check_task_capable(current_task, CAP_FOWNER)?;
+        }
+        if current_casefold == casefold {
             return Ok(());
         }
         if !self.node.is_dir() {
@@ -267,7 +294,10 @@ impl DirEntry {
             return Ok(());
         }
 
-        self.node.update_attributes(current_task, |info| {
+        self.node.update_attributes(current_task, /* force = */ false, |info| {
+            if info.uid != current_task.current_creds().fsuid {
+                security::check_task_capable(current_task, CAP_FOWNER)?;
+            }
             info.casefold = casefold;
             Ok(())
         })?;
@@ -282,8 +312,19 @@ impl DirEntry {
     }
 
     /// Set the parent of this DirEntry.
-    pub fn set_parent(&self, parent: DirEntryHandle) {
+    fn set_parent(self: &DirEntryHandle, parent: DirEntryHandle, is_dir: bool) {
+        if is_dir {
+            *self.node.canonical_dir_entry.lock() =
+                CanonicalDirEntry { parent: Arc::downgrade(&parent), entry: Arc::downgrade(self) };
+        }
         self.parent.update(Some(parent));
+    }
+
+    fn clear_canonical_dir_entry(&self) {
+        let mut canonical = self.node.canonical_dir_entry.lock();
+        if std::ptr::eq(canonical.entry.as_ptr(), self) {
+            *canonical = Default::default();
+        }
     }
 
     /// The parent DirEntry object or this DirEntry if this entry is the root.
@@ -323,6 +364,9 @@ impl DirEntry {
     ///
     /// Returns the flags of this DirEntry before the flags were raised.
     pub fn raise_flags(&self, flags: DirEntryFlags) -> DirEntryFlags {
+        if flags.contains(DirEntryFlags::IS_DEAD) {
+            self.clear_canonical_dir_entry();
+        }
         self.flags.fetch_or(flags, Ordering::AcqRel)
     }
 
@@ -336,6 +380,24 @@ impl DirEntry {
     /// Returns true if this DirEntry is dead.
     pub fn is_dead(&self) -> bool {
         self.flags().contains(DirEntryFlags::IS_DEAD)
+    }
+
+    /// Returns true if this DirEntry was resolved via a ciphertext no-key name while its parent
+    /// directory lacked its encryption key.
+    pub fn has_nokey_name(&self) -> bool {
+        self.flags().contains(DirEntryFlags::NO_KEY)
+    }
+
+    /// Returns true if this directory is allowed to cache children (neither a no-key entry nor a
+    /// locked encrypted directory).
+    fn can_cache_children(&self, current_task: &CurrentTask) -> bool {
+        !self.has_nokey_name() && self.node.fail_if_locked(current_task, &self.node.info()).is_ok()
+    }
+
+    /// Returns true if this directory is allowed to cache children using a pre-acquired
+    /// `FsNodeInfo` guard.
+    fn can_cache_children_with_info(&self, current_task: &CurrentTask, info: &FsNodeInfo) -> bool {
+        !self.has_nokey_name() && self.node.fail_if_locked(current_task, info).is_ok()
     }
 
     /// Look up a directory entry with the given name as direct child of this
@@ -353,6 +415,11 @@ impl DirEntry {
         Ok(node)
     }
 
+    /// Looks up multiple path components in sequence starting from `self`.
+    ///
+    /// Traversal stops at the first lookup error, or after resolving a component that has a
+    /// submount in `mount` or is not a directory (so callers may receive fewer than `names.len()`
+    /// `Ok` entries, unlike [`FsNodeOps::lookup_pipelined`]).
     pub fn get_children_pipelined(
         self: &DirEntryHandle,
         current_task: &CurrentTask,
@@ -362,8 +429,25 @@ impl DirEntry {
         let mut nodes = LookupVec::new();
         let mut results = LookupVec::new();
         let mut current_parent = self.clone();
+        let mut unlocked_policy: Option<FscryptNodePolicy> = None;
         for i in 0..names.len() {
-            let next_node = nodes.pop();
+            let mut next_node = nodes.pop();
+            if next_node.is_some() {
+                match current_parent.node.info().encryption_policy {
+                    Some(policy) if unlocked_policy != Some(policy) => {
+                        // Do not consume prefetched child nodes across an encryption policy
+                        // boundary unless that policy was already unlocked before pipelining
+                        // started; re-run lookup from `current_parent` so `get_or_create_child`
+                        // observes its lock state directly.
+                        nodes.clear();
+                        next_node = None;
+                    }
+                    None => {
+                        unlocked_policy = None;
+                    }
+                    Some(_) => {}
+                }
+            }
             match current_parent.get_or_create_child(
                 current_task,
                 mount,
@@ -372,6 +456,11 @@ impl DirEntry {
                     let node = if let Some(node) = next_node {
                         node?
                     } else {
+                        unlocked_policy = {
+                            let info = d.node.info();
+                            info.encryption_policy
+                                .filter(|_| d.node.fail_if_locked(current_task, &info).is_ok())
+                        };
                         nodes = d.node.ops().lookup_pipelined(d, current_task, &names[i..]);
                         nodes.reverse();
                         nodes.pop().expect("lookup_pipelined must return at least one result")?
@@ -381,6 +470,12 @@ impl DirEntry {
             ) {
                 Ok((entry, _)) => {
                     results.push(Ok(entry.clone()));
+                    // Stop pipelined traversal at mountpoints and non-directories (such as
+                    // symlinks) so `NamespaceNode::lookup_children` can resolve the mount or
+                    // symlink before looking up remaining path components.
+                    if entry.has_submount(mount) || !entry.node.is_dir() {
+                        break;
+                    }
                     current_parent = entry;
                 }
                 Err(e) => {
@@ -437,9 +532,6 @@ impl DirEntry {
             return error!(EEXIST);
         }
         // TODO: Do we need to check name for embedded NUL characters?
-        if name.len() > NAME_MAX as usize {
-            return error!(ENAMETOOLONG);
-        }
         if name.contains(&path::SEPARATOR) {
             return error!(EINVAL);
         }
@@ -461,8 +553,7 @@ impl DirEntry {
         Ok((entry, status))
     }
 
-    // This is marked as test-only because it sets the owner/group to root instead of the current
-    // user to save a bit of typing in tests, but this shouldn't happen silently in production.
+    // Creates a directory with mode 0o777 on a detached mount for testing.
     #[cfg(test)]
     pub fn create_dir(
         self: &DirEntryHandle,
@@ -472,8 +563,7 @@ impl DirEntry {
         self.create_dir_for_testing(current_task, name)
     }
 
-    // This function is for testing because it sets the owner/group to root instead of the current
-    // user to save a bit of typing in tests, but this shouldn't happen silently in production.
+    // Creates a directory with mode 0o777 on a detached mount for testing.
     pub fn create_dir_for_testing(
         self: &DirEntryHandle,
         current_task: &CurrentTask,
@@ -487,7 +577,6 @@ impl DirEntry {
                 name,
                 starnix_uapi::file_mode::mode!(IFDIR, 0o777),
                 starnix_uapi::device_id::DeviceId::NONE,
-                FsCred::root(),
             )
         })
     }
@@ -502,7 +591,6 @@ impl DirEntry {
         current_task: &CurrentTask,
         mount: &MountInfo,
         mode: FileMode,
-        owner: FsCred,
         flags: OpenFlags,
     ) -> Result<DirEntryHandle, Errno> {
         // Only directories can have children.
@@ -524,7 +612,7 @@ impl DirEntry {
             FsNodeLinkBehavior::Allowed
         };
 
-        let node = self.node.create_tmpfile(current_task, mount, mode, owner, link_behavior)?;
+        let node = self.node.create_tmpfile(current_task, mount, mode, link_behavior)?;
         let local_name = format!("#{}", node.ino).into();
         Ok(DirEntry::new_deleted(node, Some(self.clone()), local_name))
     }
@@ -569,8 +657,15 @@ impl DirEntry {
             }
         }
 
+        if child_to_unlink.has_nokey_name()
+            && self.node.fail_if_locked(current_task, &self.node.info()).is_ok()
+        {
+            return error!(ENOENT);
+        }
+
         self.node.unlink(current_task, mount, name, &child_to_unlink.node)?;
         self_children.children.remove(name);
+        child_to_unlink.clear_canonical_dir_entry();
 
         std::mem::drop(self_children);
         child_to_unlink.destroy(&current_task.kernel().mounts);
@@ -596,7 +691,10 @@ impl DirEntry {
         self.notify_deletion();
     }
 
-    /// Returns whether this entry is a descendant of |other|.
+    /// Returns whether this entry is a descendant of |other|, comparing `DirEntry` identity.
+    ///
+    /// Use this for namespace and mount checks, where mounts are keyed by `DirEntry`. Use
+    /// [`Self::is_descendant_node_of`] for checks on the directory structure itself.
     pub fn is_descendant_of(self: &DirEntryHandle, other: &DirEntryHandle) -> bool {
         if Arc::ptr_eq(self, other) {
             return true;
@@ -610,6 +708,26 @@ impl DirEntry {
             current = entry.parent();
         }
         // We reached the root of the file system.
+        false
+    }
+
+    /// Returns whether this entry is a descendant of |other|, comparing `FsNode` identity.
+    ///
+    /// Two distinct `DirEntry` handles can wrap the same directory `FsNode` (e.g. a no-key
+    /// handle and a canonical plaintext handle for an encrypted directory). Rename lock ordering
+    /// and cycle detection must treat such handles as the same directory, so they use this
+    /// rather than [`Self::is_descendant_of`].
+    fn is_descendant_node_of(self: &DirEntryHandle, other: &DirEntryHandle) -> bool {
+        if Arc::ptr_eq(&self.node, &other.node) {
+            return true;
+        }
+        let mut current = self.parent();
+        while let Some(entry) = current {
+            if Arc::ptr_eq(&entry.node, &other.node) {
+                return true;
+            }
+            current = entry.parent();
+        }
         false
     }
 
@@ -644,6 +762,14 @@ impl DirEntry {
             return error!(EBUSY);
         }
 
+        // Destination entry names must fit within `NAME_MAX` (for `RENAME_EXCHANGE`, `old_basename`
+        // also becomes a destination entry name).
+        if new_basename.len() > NAME_MAX as usize
+            || (flags.contains(RenameFlags::EXCHANGE) && old_basename.len() > NAME_MAX as usize)
+        {
+            return error!(ENAMETOOLONG);
+        }
+
         // If the names and parents are the same, then there's nothing to do
         // and we can report success.
         if Arc::ptr_eq(&old_parent.node, &new_parent.node) && old_basename == new_basename {
@@ -676,7 +802,15 @@ impl DirEntry {
         // We need to hold these DirEntryHandles until after we drop all the
         // locks so that we do not deadlock when we drop them.
         let renamed;
+        let lookup_replaced;
         let mut maybe_replaced = None;
+        let mut peer_handles = SmallVec::<[DirEntryHandle; 2]>::new();
+        let mut evicted_peer_entries = SmallVec::<[DirEntryHandle; 2]>::new();
+        let is_cross_handle_casefold_self_rename;
+        let mut register_replaced_in_dcache = false;
+        let mut evict_replaced_from_dcache = false;
+        let mut register_renamed_in_dcache = false;
+        let mut evict_renamed_from_dcache = false;
 
         {
             // Before we take any locks, we need to take the rename mutex on
@@ -688,12 +822,15 @@ impl DirEntry {
             // new_parent. If there was another rename operation in flight with
             // old_parent and new_parent reversed, then we could deadlock while
             // trying to acquire these locks.
-            let _lock = fs.rename_mutex.lock();
+            let _lock = RenameLock::new(&fs, old_parent, new_parent);
+
+            let same_parent_entry = Arc::ptr_eq(old_parent, new_parent);
+            let same_parent_node = Arc::ptr_eq(&old_parent.node, &new_parent.node);
 
             // We cannot simply grab the locks on old_parent and new_parent
             // independently because old_parent and new_parent might be the
-            // same directory entry. Instead, we use the RenameGuard helper to
-            // grab the appropriate locks.
+            // same directory entry (or distinct entries sharing an FsNode).
+            // Instead, we use the RenameGuard helper to grab the appropriate locks.
             let mut state = RenameGuard::lock(old_parent, new_parent);
 
             // Now that we know the old_parent child list cannot change, we
@@ -705,8 +842,12 @@ impl DirEntry {
             // new_basename in new_parent. If so, there are additional checks
             // we need to perform.
             // This must be done BEFORE locking info to avoid self-deadlock.
-            let lookup_replaced =
+            let new_parent_was_locked =
+                new_parent.node.fail_if_locked(current_task, &new_parent.node.info()).is_err();
+            lookup_replaced =
                 state.new_parent_children().component_lookup(current_task, mount, new_basename);
+            let new_lookup_used_nokey = new_parent_was_locked
+                || new_parent.node.fail_if_locked(current_task, &new_parent.node.info()).is_err();
 
             // If the target entry is an ancestor of the source parent, the
             // rename would create a cycle (for EXCHANGE) or attempt to
@@ -717,7 +858,7 @@ impl DirEntry {
             // This is done early (before parent locks) as a fail-fast
             // optimization since we already have the lookup result.
             if let Ok(replaced) = &lookup_replaced {
-                if old_parent.is_descendant_of(replaced) {
+                if old_parent.is_descendant_node_of(replaced) {
                     if flags.contains(RenameFlags::EXCHANGE) {
                         return error!(EINVAL);
                     } else {
@@ -733,9 +874,14 @@ impl DirEntry {
 
             // If new_parent is a descendant of renamed, the operation would
             // create a cycle. That's disallowed.
-            if new_parent.is_descendant_of(&renamed) {
+            if new_parent.is_descendant_node_of(&renamed) {
                 return error!(EINVAL);
             }
+
+            is_cross_handle_casefold_self_rename = !same_parent_entry
+                && same_parent_node
+                && state.old_parent_info().casefold
+                && canonicalize_name(old_basename) == canonicalize_name(new_basename);
 
             // Check whether the sticky bit on the old parent prevents us from
             // removing this child.
@@ -751,11 +897,20 @@ impl DirEntry {
                 )?;
             }
 
-            // Check whether the renamed entry is a mountpoint.
+            // Check whether the renamed entry (or a cached peer entry under another DirEntry
+            // handle for the same parent FsNode) is a mountpoint.
             // TODO: We should hold a read lock on the mount points for this
             //       namespace to prevent the child from becoming a mount point
             //       while this function is executing.
             renamed.require_no_mounts(mount)?;
+            if !same_parent_entry && same_parent_node {
+                if let Some(peer_renamed) =
+                    state.new_parent_children().children.get(old_basename).and_then(Weak::upgrade)
+                {
+                    peer_handles.push(peer_renamed);
+                    peer_handles.last().unwrap().require_no_mounts(mount)?;
+                }
+            }
 
             // We lookup the replaced entry before locking info to avoid deadlock, but we match
             // on the result here under the parent info locks. This ensures that checks on the
@@ -776,7 +931,9 @@ impl DirEntry {
                     }
 
                     if Arc::ptr_eq(&renamed.node, &replaced.node) {
-                        if !Arc::ptr_eq(&renamed, &replaced) {
+                        if !Arc::ptr_eq(&renamed, &replaced)
+                            && !is_cross_handle_casefold_self_rename
+                        {
                             // From <https://man7.org/linux/man-pages/man2/rename.2.html>:
                             //
                             // "If oldpath and newpath are existing hard links referring to the
@@ -785,7 +942,7 @@ impl DirEntry {
                             return Ok(());
                         }
 
-                        // Same DirEntry (e.g. case-only rename in a casefolded directory).
+                        // Same directory entry (e.g. case-only rename in a casefolded directory).
                         // With EXCHANGE, swapping an entry with itself is a no-op that succeeds.
                         // Without EXCHANGE, we must proceed to rename on the underlying filesystem
                         // to update the on-disk casing.
@@ -799,11 +956,23 @@ impl DirEntry {
                     // "oldpath can specify a directory.  In this case, newpath must"
                     // either not exist, or it must specify an empty directory."
                     if state.replaced_is_dir() {
-                        // Check whether the replaced entry is a mountpoint.
+                        // Check whether the replaced entry (or a cached peer entry under another
+                        // DirEntry handle for the same parent FsNode) is a mountpoint.
                         // TODO: We should hold a read lock on the mount points for this
                         //       namespace to prevent the child from becoming a mount point
                         //       while this function is executing.
                         replaced.require_no_mounts(mount)?;
+                        if !same_parent_entry && same_parent_node {
+                            if let Some(peer_replaced) = state
+                                .old_parent_children()
+                                .children
+                                .get(new_basename)
+                                .and_then(Weak::upgrade)
+                            {
+                                peer_handles.push(peer_replaced);
+                                peer_handles.last().unwrap().require_no_mounts(mount)?;
+                            }
+                        }
                     }
 
                     if !flags.intersects(RenameFlags::EXCHANGE | RenameFlags::REPLACE_ANY) {
@@ -848,12 +1017,33 @@ impl DirEntry {
                 )?;
             }
 
+            let renamed_is_dir = state.renamed_is_dir();
+            let replaced_is_dir = state.replaced_is_dir();
+
             // In a casefolded directory, renaming an entry to a case variant of itself resolves
-            // `lookup_replaced` to the same DirEntry (`renamed`). At the filesystem level, no
-            // distinct directory entry is being overwritten or replaced, so clear `state.replaced`
-            // to `None` before invoking the filesystem operation.
-            if state.replaced.is_some_and(|r| Arc::ptr_eq(&renamed, r)) {
+            // `lookup_replaced` to the same directory entry (`renamed` or its peer handle on the
+            // same parent `FsNode`). At the filesystem level, no distinct directory entry is being
+            // overwritten or replaced, so clear `state.replaced` to `None` before invoking the
+            // filesystem operation.
+            if state
+                .replaced
+                .is_some_and(|r| Arc::ptr_eq(&renamed, r) || is_cross_handle_casefold_self_rename)
+            {
                 state.replaced = None;
+            }
+
+            // Match Linux `__fscrypt_prepare_rename`: renaming into or out of a locked encrypted
+            // directory, or using a source/target lookup that ran while its parent lacked its
+            // encryption key before a concurrent unlock, fails with `ENOKEY`.
+            old_parent.node.fail_if_locked(current_task, state.old_parent_info())?;
+            if let Some(info) = state.new_parent_info() {
+                new_parent.node.fail_if_locked(current_task, info)?;
+            }
+            if renamed.has_nokey_name()
+                || maybe_replaced.as_ref().is_some_and(|r| r.has_nokey_name())
+                || new_lookup_used_nokey
+            {
+                return error!(ENOKEY);
             }
 
             if flags.contains(RenameFlags::EXCHANGE) {
@@ -862,33 +1052,91 @@ impl DirEntry {
                 fs.rename(current_task, &mut state, old_basename, new_basename)?;
             }
 
+            let renamed_was_cached = state
+                .old_parent_children()
+                .children
+                .get(old_basename)
+                .is_some_and(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&renamed)));
+            let replaced_was_cached = maybe_replaced.as_ref().is_some_and(|r| {
+                state
+                    .new_parent_children()
+                    .children
+                    .get(new_basename)
+                    .is_some_and(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(r)))
+            });
+            let new_parent_info_ref =
+                state.new_parent_info().unwrap_or_else(|| state.old_parent_info());
+            let new_parent_can_cache =
+                new_parent.can_cache_children_with_info(current_task, new_parent_info_ref);
+            let old_parent_can_cache =
+                old_parent.can_cache_children_with_info(current_task, state.old_parent_info());
+
+            let mut record_evicted_peer = |weak: Option<Weak<DirEntry>>| {
+                if let Some(peer) = weak.and_then(|w| w.upgrade()) {
+                    if !Arc::ptr_eq(&peer, &renamed)
+                        && !maybe_replaced.as_ref().is_some_and(|r| Arc::ptr_eq(&peer, r))
+                    {
+                        peer.clear_canonical_dir_entry();
+                        evicted_peer_entries.push(peer);
+                    }
+                }
+            };
+
             if flags.contains(RenameFlags::EXCHANGE) {
+                if !same_parent_entry && same_parent_node {
+                    record_evicted_peer(state.new_parent_children().children.remove(old_basename));
+                    record_evicted_peer(state.old_parent_children().children.remove(new_basename));
+                }
                 // Reparent `replaced` when exchanging.
                 let replaced =
                     maybe_replaced.as_ref().expect("replaced expected with RENAME_EXCHANGE");
-                replaced.set_parent(old_parent.clone());
+                replaced.set_parent(old_parent.clone(), replaced_is_dir);
                 replaced.local_name.update(old_basename.to_owned());
-                state.old_parent_children().children.insert(old_basename, Arc::downgrade(replaced));
+                if old_parent_can_cache {
+                    state
+                        .old_parent_children()
+                        .children
+                        .insert(old_basename, Arc::downgrade(replaced));
+                    register_replaced_in_dcache = !replaced_was_cached;
+                } else {
+                    state.old_parent_children().children.remove(old_basename);
+                    evict_replaced_from_dcache = replaced_was_cached;
+                }
             } else {
+                if let Some(replaced) = maybe_replaced.as_ref() {
+                    if !Arc::ptr_eq(&renamed, replaced) {
+                        replaced.clear_canonical_dir_entry();
+                    }
+                }
                 // Remove the renamed child from the old_parent's child list.
                 // In casefolded directories, removing old_basename before inserting new_basename
                 // prevents removal from clobbering the freshly inserted entry when old and new
                 // names canonicalize to the same key.
                 state.old_parent_children().children.remove(old_basename);
+                if !same_parent_entry && same_parent_node {
+                    record_evicted_peer(state.new_parent_children().children.remove(old_basename));
+                    record_evicted_peer(state.old_parent_children().children.remove(new_basename));
+                }
             }
 
             // We need to update the parent and local name for the DirEntry
             // we are renaming to reflect its new parent and its new name.
-            renamed.set_parent(new_parent.clone());
+            renamed.set_parent(new_parent.clone(), renamed_is_dir);
             renamed.local_name.update(new_basename.to_owned());
 
-            // Actually add the renamed child to the new_parent's child list.
-            // This operation implicitly removes the replaced child (if any)
-            // from the child list.
-            state.new_parent_children().children.insert(new_basename, Arc::downgrade(&renamed));
+            // Add the renamed child to `new_parent`'s child cache unless `new_parent` cannot
+            // cache children (e.g. an unspliced no-key entry).
+            if new_parent_can_cache {
+                state.new_parent_children().children.insert(new_basename, Arc::downgrade(&renamed));
+                register_renamed_in_dcache = !renamed_was_cached;
+            } else {
+                state.new_parent_children().children.remove(new_basename);
+                evict_renamed_from_dcache = renamed_was_cached;
+            }
 
             // Lock ordering is enforced from parent-to-child, and therefore we need to
-            // reset the lock ordering constraints when we reorder the tree nodes.
+            // reset the lock ordering constraints when we reorder the tree nodes. `_lock` does
+            // the same for the parents when it is dropped.
             // SAFETY: We manually clear the dependency graph for these locks.
             // This is safe because `fs.rename_mutex` is held during this operation, which
             // prevents the tree topology from changing concurrently. This allows us to safely
@@ -904,18 +1152,34 @@ impl DirEntry {
                 }
                 renamed.children.reset_dependencies();
                 renamed.node.info_lock().reset_dependencies();
-                old_parent.children.reset_dependencies();
-                old_parent.node.info_lock().reset_dependencies();
-                new_parent.children.reset_dependencies();
-                new_parent.node.info_lock().reset_dependencies();
             }
         };
+
+        for peer in &evicted_peer_entries {
+            fs.will_destroy_dir_entry(peer);
+        }
+        if let Some(replaced) = maybe_replaced.as_ref() {
+            if register_replaced_in_dcache {
+                fs.did_create_dir_entry(replaced);
+            } else if evict_replaced_from_dcache {
+                fs.will_destroy_dir_entry(replaced);
+            }
+        }
+        if register_renamed_in_dcache {
+            fs.did_create_dir_entry(&renamed);
+        } else if evict_renamed_from_dcache {
+            fs.will_destroy_dir_entry(&renamed);
+        }
 
         fs.purge_old_entries();
 
         if let Some(replaced) = maybe_replaced {
             if !flags.contains(RenameFlags::EXCHANGE) && !Arc::ptr_eq(&renamed, &replaced) {
-                replaced.destroy(&current_task.kernel().mounts);
+                if is_cross_handle_casefold_self_rename {
+                    fs.will_destroy_dir_entry(&replaced);
+                } else {
+                    replaced.destroy(&current_task.kernel().mounts);
+                }
             }
         }
 
@@ -963,6 +1227,9 @@ impl DirEntry {
         child = children.get(name).and_then(|weak| weak.upgrade());
         if child.as_ref().is_none_or(predicate) {
             children.remove(name);
+            if let Some(child) = &child {
+                child.clear_canonical_dir_entry();
+            }
             std::mem::drop(children);
             if let Some(child) = child {
                 child.destroy(mounts);
@@ -1042,16 +1309,16 @@ impl DirEntry {
         // the child is revalidated or evicted.
         let child = self.children.read().get(name).and_then(Weak::upgrade);
         if let Some(child) = child {
-            if child.ops.revalidate(current_task, &child)? {
-                // Do not cache a child in a locked directory
-                child.record_dcache_use(|| {
-                    self.node.fail_if_locked(current_task, &self.node.info()).is_ok()
-                });
-                return Ok((child, CreationStatus::Existed));
+            if !child.has_nokey_name() {
+                if child.ops.revalidate(current_task, &child)? {
+                    // Do not cache a child in a locked or no-key directory.
+                    child.record_dcache_use(|| self.can_cache_children(current_task));
+                    return Ok((child, CreationStatus::Existed));
+                }
+                // The cached child is stale. Evict it so that create_fn provides a fresh node.
+                self.internal_remove_child(&child);
+                child.destroy(&current_task.kernel().mounts);
             }
-            // The cached child is stale. Evict it so that create_fn provides a fresh node.
-            self.internal_remove_child(&child);
-            child.destroy(&current_task.kernel().mounts);
         }
 
         // If another thread added the child since the check above, it is returned without being
@@ -1080,6 +1347,7 @@ impl DirEntry {
         let scope = RcuReadScope::new();
         let local_name = child.local_name.read(&scope);
         children.remove_if_child_matches(local_name, child);
+        child.clear_canonical_dir_entry();
     }
 
     /// Notifies watchers on the current node and its parent about an event.
@@ -1158,14 +1426,15 @@ impl DirEntry {
         }
     }
 
+    /// Returns true if this entry has a submount in `parent_mount`.
+    fn has_submount(self: &Arc<Self>, parent_mount: &MountInfo) -> bool {
+        self.has_mounts() && parent_mount.as_ref().is_some_and(|mount| mount.has_submount(self))
+    }
+
     /// Verifies this directory has nothing mounted on it.
     fn require_no_mounts(self: &Arc<Self>, parent_mount: &MountInfo) -> Result<(), Errno> {
-        if self.has_mounts() {
-            if let Some(mount) = parent_mount.as_ref() {
-                if mount.has_submount(self) {
-                    return error!(EBUSY);
-                }
-            }
+        if self.has_submount(parent_mount) {
+            return error!(EBUSY);
         }
         Ok(())
     }
@@ -1334,32 +1603,80 @@ impl<'a> DirEntryLockedChildren<'a> {
         ) -> Result<(FsNodeHandle, CreationStatus), Errno>,
     ) -> Result<(DirEntryHandle, CreationStatus), Errno> {
         if let Some(child) = self.children.get(name).and_then(Weak::upgrade) {
-            // Do not cache a child in a locked directory
-            child.record_dcache_use(|| {
-                self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok()
-            });
+            debug_assert!(!child.has_nokey_name());
+            // Do not cache a child in a locked or no-key directory.
+            child.record_dcache_use(|| self.entry.can_cache_children(current_task));
             return Ok((child, CreationStatus::Existed));
         }
+        if name.len() > NAME_MAX as usize {
+            return error!(ENAMETOOLONG);
+        }
+
+        let parent_unlocked_before =
+            self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok();
 
         let (node, status) = create_fn(self.entry, mount, name)?;
 
+        let node_mode = node.info().mode;
         assert!(
-            node.info().mode & FileMode::IFMT != FileMode::EMPTY,
+            node_mode & FileMode::IFMT != FileMode::EMPTY,
             "FsNode initialization did not populate the FileMode in FsNodeInfo."
         );
 
-        let child = DirEntry::new(node, Some(self.entry.clone()), name.to_owned());
+        let parent_unlocked = parent_unlocked_before
+            && self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok();
 
-        if let Err(err) = security::fs_node_init_with_dentry(current_task, &child) {
-            // Null out the `parent` reference from `child` otherwise dropping `child` will
-            // attempt to remove itself from `parent`, triggering a deadlock with `self`.
-            child.parent.update(None);
-            return Err(err);
+        let reusable_dir = if node_mode.is_dir() {
+            let canonical = node.canonical_dir_entry.lock();
+            if std::ptr::eq(canonical.parent.as_ptr(), Arc::as_ptr(self.entry)) {
+                canonical.entry.upgrade()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let child = if let Some(entry) = reusable_dir {
+            let old_name = {
+                let scope = RcuReadScope::new();
+                let current_name = entry.local_name(&scope);
+                (current_name != name).then(|| current_name.to_owned())
+            };
+            if let Some(old_name) = old_name {
+                self.children.remove_if_child_matches(old_name.as_ref(), &entry);
+                entry.local_name.update(name.to_owned());
+            }
+            entry
+        } else {
+            let child = DirEntry::new_uncached(node, Some(self.entry.clone()), name.to_owned());
+            if let Err(err) = security::fs_node_init_with_dentry(current_task, &child) {
+                // Null out the `parent` reference from `child` otherwise dropping `child` will
+                // attempt to remove itself from `parent`, triggering a deadlock with `self`.
+                child.parent.update(None);
+                return Err(err);
+            }
+            if node_mode.is_dir() {
+                *child.node.canonical_dir_entry.lock() = CanonicalDirEntry {
+                    parent: Arc::downgrade(self.entry),
+                    entry: Arc::downgrade(&child),
+                };
+            }
+            child
+        };
+
+        if !parent_unlocked_before || (status == CreationStatus::Existed && !parent_unlocked) {
+            child.raise_flags(DirEntryFlags::NO_KEY);
+        } else {
+            child.lower_flags(DirEntryFlags::NO_KEY);
         }
 
-        // Do not cache a child in a locked directory
-        if self.entry.node.fail_if_locked(current_task, &self.entry.node.info()).is_ok() {
+        // Do not cache a child in a locked or no-key directory.
+        if parent_unlocked && !self.entry.has_nokey_name() {
             self.children.insert(name, Arc::downgrade(&child));
+            child.node.fs().did_create_dir_entry(&child);
+        } else {
+            child.node.fs().will_destroy_dir_entry(&child);
         }
 
         Ok((child, status))
@@ -1391,9 +1708,47 @@ impl fmt::Debug for DirEntry {
     }
 }
 
+/// Holds a file system's `rename_mutex` for the duration of a rename.
+///
+/// `RenameGuard` locks unrelated parents, or two entries for the same node, in address order,
+/// which can contradict the parent-to-child lock order recorded elsewhere. When dropped, this
+/// clears the `tracing-mutex` dependencies of the parents' locks before releasing
+/// `rename_mutex`, so the address-order edge does not outlive the rename on any exit path,
+/// including errors.
+struct RenameLock<'a> {
+    old_parent: &'a DirEntryHandle,
+    new_parent: &'a DirEntryHandle,
+    _guard: LockDepGuard<'a, FileSystemRenameToken>,
+}
+
+impl<'a> RenameLock<'a> {
+    fn new(
+        fs: &'a FileSystemHandle,
+        old_parent: &'a DirEntryHandle,
+        new_parent: &'a DirEntryHandle,
+    ) -> Self {
+        Self { old_parent, new_parent, _guard: fs.rename_mutex.lock() }
+    }
+}
+
+impl Drop for RenameLock<'_> {
+    fn drop(&mut self) {
+        // SAFETY: Address-order acquisitions of these locks only happen in `RenameGuard` while
+        // `rename_mutex` is held, and it is still held here (`_guard` is dropped after this
+        // body runs), so clearing their recorded order cannot mask a real deadlock.
+        unsafe {
+            for parent in [self.old_parent, self.new_parent] {
+                parent.children.reset_dependencies();
+                parent.node.info_lock().reset_dependencies();
+            }
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum RenameRelationship {
-    Same,
+    SameEntry,
+    SameNode,
     NewIsDescendant,
     OldIsDescendant,
     Independent,
@@ -1412,9 +1767,19 @@ impl<'a> RenameGuard<'a> {
             Self {
                 old_parent_guard,
                 new_parent_guard: None,
-                relationship: RenameRelationship::Same,
+                relationship: RenameRelationship::SameEntry,
             }
-        } else if new_parent.is_descendant_of(old_parent) {
+        } else if Arc::ptr_eq(&old_parent.node, &new_parent.node) {
+            let (g1, g2) =
+                starnix_sync::ordered_write_lock(&old_parent.children, &new_parent.children);
+            let old_parent_guard = DirEntryLockedChildren { entry: old_parent, children: g1 };
+            let new_parent_guard = DirEntryLockedChildren { entry: new_parent, children: g2 };
+            Self {
+                old_parent_guard,
+                new_parent_guard: Some(new_parent_guard),
+                relationship: RenameRelationship::SameNode,
+            }
+        } else if new_parent.is_descendant_node_of(old_parent) {
             let old_parent_guard = old_parent.lock_children();
             let _token = allow_subclass();
             let new_parent_guard = new_parent.lock_children();
@@ -1423,7 +1788,7 @@ impl<'a> RenameGuard<'a> {
                 new_parent_guard: Some(new_parent_guard),
                 relationship: RenameRelationship::NewIsDescendant,
             }
-        } else if old_parent.is_descendant_of(new_parent) {
+        } else if old_parent.is_descendant_node_of(new_parent) {
             let new_parent_guard = new_parent.lock_children();
             let _token = allow_subclass();
             let old_parent_guard = old_parent.lock_children();
@@ -1448,7 +1813,7 @@ impl<'a> RenameGuard<'a> {
 
     /// Consumes the `RenameGuard` (which only holds children locks) and locks the `info`
     /// of the parent directories in a safe order to prevent deadlocks. Returns a
-    /// `RenameGuardLocked` which encapsulates all acquired locks (both children and info).
+    /// `RenameContext` which encapsulates all acquired locks (both children and info).
     fn lock_info(
         self,
         old_parent: &'a DirEntryHandle,
@@ -1457,7 +1822,9 @@ impl<'a> RenameGuard<'a> {
         replaced: Option<&'a DirEntryHandle>,
     ) -> RenameContext<'a> {
         let (g1, g2) = match self.relationship {
-            RenameRelationship::Same => (old_parent.node.info_lock().write(), None),
+            RenameRelationship::SameEntry | RenameRelationship::SameNode => {
+                (old_parent.node.info_lock().write(), None)
+            }
             RenameRelationship::NewIsDescendant => {
                 let g1 = old_parent.node.info_lock().write();
                 let _token = allow_subclass();
@@ -1568,8 +1935,9 @@ impl<'a> RenameContext<'a> {
     /// The references are returned as a tuple to allow them to be borrowed
     /// mutably at the same time (e.g., to update link counts in both).
     ///
-    /// If `new_parent` is the same as `old_parent`, the second element of the
-    /// tuple will be `None` to prevent mutable aliasing of the same guard.
+    /// If `new_parent` shares the same `FsNode` as `old_parent`, the second
+    /// element of the tuple will be `None` to prevent mutable aliasing of the
+    /// same guard.
     pub fn parent_infos_mut(
         &mut self,
     ) -> (&mut crate::vfs::FsNodeInfo, Option<&mut crate::vfs::FsNodeInfo>) {
@@ -1586,7 +1954,7 @@ impl<'a> RenameContext<'a> {
     /// Returns a shared reference to the `FsNodeInfo` of the new parent
     /// directory.
     ///
-    /// Returns `None` if `new_parent` is the same as `old_parent`.
+    /// Returns `None` if `new_parent` shares the same `FsNode` as `old_parent`.
     pub fn new_parent_info(&self) -> Option<&crate::vfs::FsNodeInfo> {
         self.new_parent_info_guard.as_deref()
     }
@@ -1634,11 +2002,13 @@ mod tests {
     use crate::vfs::pseudo::simple_directory::SimpleDirectory;
     use crate::vfs::{
         CacheConfig, CacheMode, FileOps, FileSystem, FileSystemHandle, FileSystemOps,
-        FileSystemOptions, FsNode, FsNodeInfo, FsNodeOps, LookupContext, MemoryDirectoryFile,
-        Namespace, SymlinkNode, WhatToMount, fs_node_impl_not_dir,
+        FileSystemOptions, FsNode, FsNodeOps, FscryptPolicyFlags, LookupContext,
+        MemoryDirectoryFile, Namespace, SymlinkNode, WhatToMount, fs_node_impl_not_dir,
     };
+    use starnix_crypt::CryptService;
     use starnix_sync::Mutex;
     use starnix_types::vfs::default_statfs;
+    use starnix_uapi::auth::FsCred;
     use starnix_uapi::device_id::DeviceId;
     use starnix_uapi::file_mode::mode;
     use starnix_uapi::mount_flags::MountpointFlags;
@@ -1745,8 +2115,18 @@ mod tests {
         /// filesystem but are not in the dcache.
         existing_nodes: Mutex<BTreeMap<FsString, FsNodeHandle>>,
 
+        /// Optional node whose encryption policy is cleared mid-lookup to simulate a concurrent
+        /// `FS_IOC_ADD_ENCRYPTION_KEY` racing with VFS lookup/rename/unlink.
+        unlock_node_on_lookup: Mutex<Option<FsNodeHandle>>,
+
         /// The number of times that the entry of a `CountingFileNode` was revalidated.
         revalidate_count: AtomicUsize,
+
+        /// The number of times `FileSystemOps::rename` was invoked.
+        rename_count: AtomicUsize,
+
+        /// Optional crypt service for simulating locked/unlocked fscrypt directories.
+        crypt_service: Option<Arc<CryptService>>,
     }
 
     impl FileSystemOps for CountingTestFs {
@@ -1757,6 +2137,65 @@ mod tests {
         fn name(&self) -> &'static FsStr {
             "counting_test_fs".into()
         }
+
+        fn crypt_service(&self) -> Option<Arc<CryptService>> {
+            self.crypt_service.clone()
+        }
+
+        fn has_casefold_support(&self) -> bool {
+            true
+        }
+
+        fn rename(
+            &self,
+            _fs: &FileSystem,
+            _current_task: &CurrentTask,
+            context: &mut RenameContext<'_>,
+            old_name: &FsStr,
+            new_name: &FsStr,
+        ) -> Result<(), Errno> {
+            self.rename_count.fetch_add(1, Ordering::SeqCst);
+            if let Some(replaced) = context.replaced {
+                if context.replaced_is_dir() && !dir_entries(&replaced.node).lock().is_empty() {
+                    return error!(ENOTEMPTY);
+                }
+            }
+            let old_parent = context.old_parent().node.clone();
+            let new_parent = context.new_parent().node.clone();
+            let renamed = context.renamed.node.clone();
+            let (old_info, _) = context.parent_infos_mut();
+            let casefold = old_info.casefold;
+            {
+                let mut old_entries = dir_entries(&old_parent).lock();
+                if old_entries.remove(old_name).is_none() && casefold {
+                    if let Some(key) =
+                        old_entries.keys().find(|k| k.eq_ignore_ascii_case(old_name)).cloned()
+                    {
+                        old_entries.remove(&key);
+                    }
+                }
+            }
+            dir_entries(&new_parent).lock().insert(new_name.to_owned(), renamed);
+            Ok(())
+        }
+
+        fn exchange(
+            &self,
+            _fs: &FileSystem,
+            _current_task: &CurrentTask,
+            context: &mut RenameContext<'_>,
+            name1: &FsStr,
+            name2: &FsStr,
+        ) -> Result<(), Errno> {
+            let replaced = context.replaced.expect("exchange requires replaced entry");
+            dir_entries(&context.old_parent().node)
+                .lock()
+                .insert(name1.to_owned(), replaced.node.clone());
+            dir_entries(&context.new_parent().node)
+                .lock()
+                .insert(name2.to_owned(), context.renamed.node.clone());
+            Ok(())
+        }
     }
 
     /// Returns the `CountingTestFs` of `fs`.
@@ -1764,8 +2203,39 @@ mod tests {
         fs.downcast_ops::<CountingTestFs>().expect("not a CountingTestFs")
     }
 
+    fn dir_entries(node: &FsNode) -> &Mutex<BTreeMap<FsString, FsNodeHandle>> {
+        &node.downcast_ops::<CountingDirNode>().expect("not a CountingDirNode").entries
+    }
+
     struct CountingDirNode {
         lookup_count: Arc<AtomicUsize>,
+        entries: Mutex<BTreeMap<FsString, FsNodeHandle>>,
+    }
+
+    impl CountingDirNode {
+        fn lookup_in_dir(&self, dir_node: &FsNode, name: &FsStr) -> Result<FsNodeHandle, Errno> {
+            self.lookup_count.fetch_add(1, Ordering::SeqCst);
+            let fs = dir_node.fs();
+            let casefold = dir_node.info().casefold;
+            let in_dir = {
+                let entries = self.entries.lock();
+                entries.get(name).cloned().or_else(|| {
+                    casefold.then(|| {
+                        entries
+                            .iter()
+                            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                            .map(|(_, v)| v.clone())
+                    })?
+                })
+            };
+            let node = in_dir.or_else(|| counting_fs(&fs).existing_nodes.lock().get(name).cloned());
+            if let Some(node_to_unlock) = counting_fs(&fs).unlock_node_on_lookup.lock().take() {
+                node_to_unlock.update_info(|info| {
+                    info.encryption_policy = None;
+                });
+            }
+            node.ok_or_else(|| errno!(ENOENT))
+        }
     }
 
     impl FsNodeOps for CountingDirNode {
@@ -1784,47 +2254,90 @@ mod tests {
             _current_task: &CurrentTask,
             name: &FsStr,
         ) -> Result<FsNodeHandle, Errno> {
-            self.lookup_count.fetch_add(1, Ordering::SeqCst);
-            let fs = entry.node.fs();
-            let node = counting_fs(&fs).existing_nodes.lock().get(name).cloned();
-            node.ok_or_else(|| errno!(ENOENT))
+            self.lookup_in_dir(&entry.node, name)
+        }
+
+        fn lookup_pipelined(
+            &self,
+            entry: &DirEntry,
+            _current_task: &CurrentTask,
+            names: &[&FsStr],
+        ) -> LookupVec<Result<FsNodeHandle, Errno>> {
+            let mut out = LookupVec::new();
+            let mut current_dir = entry.node.clone();
+            for name in names {
+                let Some(dir_ops) = current_dir.downcast_ops::<CountingDirNode>() else {
+                    out.push(error!(ENOTDIR));
+                    break;
+                };
+                match dir_ops.lookup_in_dir(&current_dir, name) {
+                    Ok(node) => {
+                        current_dir = node;
+                        out.push(Ok(current_dir.clone()));
+                    }
+                    Err(e) => {
+                        out.push(Err(e));
+                        break;
+                    }
+                }
+            }
+            out
         }
 
         fn mknod(
             &self,
             node: &FsNode,
             _current_task: &CurrentTask,
-            _name: &FsStr,
+            name: &FsStr,
             mode: FileMode,
             dev: DeviceId,
             owner: FsCred,
         ) -> Result<FsNodeHandle, Errno> {
             let mut info = FsNodeInfo::new(mode, owner);
             info.rdev = dev;
-            Ok(node.fs().create_node_and_allocate_node_id(CountingFileNode, info))
+            let created = node.fs().create_node_and_allocate_node_id(CountingFileNode, info);
+            self.entries.lock().insert(name.to_owned(), created.clone());
+            Ok(created)
         }
 
         fn mkdir(
             &self,
             node: &FsNode,
             _current_task: &CurrentTask,
-            _name: &FsStr,
+            name: &FsStr,
             mode: FileMode,
             owner: FsCred,
         ) -> Result<FsNodeHandle, Errno> {
-            Ok(node.fs().create_node_and_allocate_node_id(
-                CountingDirNode { lookup_count: self.lookup_count.clone() },
+            let created = node.fs().create_node_and_allocate_node_id(
+                CountingDirNode {
+                    lookup_count: self.lookup_count.clone(),
+                    entries: Default::default(),
+                },
                 FsNodeInfo::new(mode, owner),
-            ))
+            );
+            self.entries.lock().insert(name.to_owned(), created.clone());
+            Ok(created)
+        }
+
+        fn link(
+            &self,
+            _node: &FsNode,
+            _current_task: &CurrentTask,
+            name: &FsStr,
+            child: &FsNodeHandle,
+        ) -> Result<(), Errno> {
+            self.entries.lock().insert(name.to_owned(), child.clone());
+            Ok(())
         }
 
         fn unlink(
             &self,
             _node: &FsNode,
             _current_task: &CurrentTask,
-            _name: &FsStr,
+            name: &FsStr,
             _child: &FsNodeHandle,
         ) -> Result<(), Errno> {
+            self.entries.lock().remove(name);
             Ok(())
         }
 
@@ -1867,16 +2380,26 @@ mod tests {
     }
 
     fn create_counting_fs(current_task: &CurrentTask) -> (FileSystemHandle, Arc<AtomicUsize>) {
+        create_counting_fs_with_crypt(current_task, None)
+    }
+
+    fn create_counting_fs_with_crypt(
+        current_task: &CurrentTask,
+        crypt_service: Option<Arc<CryptService>>,
+    ) -> (FileSystemHandle, Arc<AtomicUsize>) {
         let lookup_count = Arc::new(AtomicUsize::new(0));
         let fs = FileSystem::new(
             current_task.kernel(),
             CacheMode::Cached(CacheConfig { capacity: 16 }),
-            CountingTestFs::default(),
+            CountingTestFs { crypt_service, ..Default::default() },
             FileSystemOptions::default(),
         )
         .expect("create filesystem");
         let root_ino = fs.allocate_ino();
-        fs.create_root(root_ino, CountingDirNode { lookup_count: lookup_count.clone() });
+        fs.create_root(
+            root_ino,
+            CountingDirNode { lookup_count: lookup_count.clone(), entries: Default::default() },
+        );
         (fs, lookup_count)
     }
 
@@ -2027,6 +2550,486 @@ mod tests {
             entries.push(create("file32"));
             assert!(!is_cached(&entries[0]));
             assert!((17..33).all(|i| is_cached(&entries[i])));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_rename_across_distinct_entries_sharing_fs_node() {
+        spawn_kernel_and_run(async |current_task| {
+            let (fs, _lookup_count) = create_counting_fs(&current_task);
+            let root = Namespace::new(fs.clone()).root();
+
+            let create_file = |dir: &NamespaceNode, name: &str| {
+                dir.create_node(&current_task, name.into(), mode!(IFREG, 0o644), DeviceId::NONE)
+                    .expect("create file")
+            };
+            let create_dir = |dir: &NamespaceNode, name: &str| {
+                dir.create_node(&current_task, name.into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                    .expect("create dir")
+            };
+            let lookup = |dir: &NamespaceNode, name: &str| {
+                dir.lookup_child(&current_task, &mut LookupContext::default(), name.into())
+            };
+            let alias = |dir: &NamespaceNode, alias_name: &str| NamespaceNode {
+                mount: root.mount.clone(),
+                entry: DirEntry::new_uncached(
+                    dir.entry.node.clone(),
+                    Some(root.entry.clone()),
+                    alias_name.into(),
+                ),
+            };
+            let rename =
+                |old_dir: &NamespaceNode, old: &str, new_dir: &NamespaceNode, new: &str| {
+                    NamespaceNode::rename(
+                        &current_task,
+                        old_dir,
+                        old.into(),
+                        new_dir,
+                        new.into(),
+                        RenameFlags::empty(),
+                    )
+                };
+
+            let dir1 = create_dir(&root, "dir");
+            let dir2 = alias(&dir1, "dir_alias");
+            let src = create_file(&dir1, "src");
+            let _dst = create_file(&dir1, "dst");
+            let _child_dir = create_dir(&dir1, "child_dir");
+
+            // Rename across `dir2` -> `dir1` succeeds without deadlocking and evicts `"src"` from
+            // `dir1`'s child cache.
+            rename(&dir2, "src", &dir1, "dst").expect("rename across alias handles");
+            assert_eq!(lookup(&dir1, "src").unwrap_err(), errno!(ENOENT));
+            assert!(Arc::ptr_eq(&lookup(&dir1, "dst").unwrap().entry.node, &src.entry.node));
+
+            // `RENAME_EXCHANGE` across `dir1` and `dir2` keeps both handles' caches consistent.
+            let other = create_file(&dir1, "other");
+            NamespaceNode::rename(
+                &current_task,
+                &dir1,
+                "dst".into(),
+                &dir2,
+                "other".into(),
+                RenameFlags::EXCHANGE,
+            )
+            .expect("exchange across alias handles");
+            assert!(Arc::ptr_eq(&lookup(&dir1, "dst").unwrap().entry.node, &other.entry.node));
+            assert!(Arc::ptr_eq(&lookup(&dir1, "other").unwrap().entry.node, &src.entry.node));
+
+            // Cycle and ancestor checks compare `FsNode` identity across distinct handles.
+            assert_eq!(rename(&root, "dir", &dir2, "into_self").unwrap_err(), errno!(EINVAL));
+            assert_eq!(rename(&dir2, "child_dir", &root, "dir").unwrap_err(), errno!(ENOTEMPTY));
+
+            // In a casefolded directory, renaming across hard links is a no-op, whereas a
+            // case-only rename proceeds to `fs.rename`.
+            let cf1 = create_dir(&root, "cf_dir");
+            cf1.entry.set_casefold(&current_task, true).expect("enable casefold");
+            let cf2 = alias(&cf1, "cf_dir_alias");
+            let shared = create_file(&cf1, "link1");
+            cf1.link(&current_task, "link2".into(), &shared.entry.node).expect("hard link");
+            let _foo = create_file(&cf1, "Foo");
+
+            let renames_before = counting_fs(&fs).rename_count.load(Ordering::SeqCst);
+            rename(&cf2, "link1", &cf1, "link2").expect("hard-link rename in casefold dir");
+            assert_eq!(counting_fs(&fs).rename_count.load(Ordering::SeqCst), renames_before);
+
+            rename(&cf2, "Foo", &cf1, "foo").expect("case-only rename across alias handles");
+            assert_eq!(counting_fs(&fs).rename_count.load(Ordering::SeqCst), renames_before + 1);
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_splice_no_key_dir_entry_on_unlock() {
+        spawn_kernel_and_run(async |current_task| {
+            let crypt = Arc::new(CryptService::new(&[1; 32], &[2; 32], None));
+            let key = [3u8; 64];
+            let key_id = crypt.add_wrapping_key(&key, 0).expect("add wrapping key");
+            let (fs, lookup_count) =
+                create_counting_fs_with_crypt(&current_task, Some(crypt.clone()));
+            let ns = Namespace::new(fs.clone());
+            let root = ns.root();
+
+            let locked_dir = root
+                .create_node(&current_task, "locked".into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                .expect("create locked dir");
+            let bind_mountpoint = root
+                .create_node(&current_task, "mnt".into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                .expect("create bind mountpoint");
+            locked_dir.entry.node.update_info(|info| {
+                info.encryption_policy = Some(FscryptNodePolicy {
+                    key_identifier: key_id,
+                    flags: FscryptPolicyFlags::empty(),
+                });
+            });
+
+            let app_node = fs.create_node_and_allocate_node_id(
+                CountingDirNode { lookup_count: lookup_count.clone(), entries: Default::default() },
+                FsNodeInfo::new(mode!(IFDIR, 0o755), FsCred::root()),
+            );
+            {
+                let mut existing = counting_fs(&fs).existing_nodes.lock();
+                existing.insert("_nokey_app".into(), app_node.clone());
+                existing.insert("com.example.app".into(), app_node);
+            }
+
+            // Lock the directory and look up the child via its no-key name.
+            crypt.forget_wrapping_key(key_id, 0).expect("forget wrapping key");
+            let no_key_1 = locked_dir
+                .lookup_child(&current_task, &mut LookupContext::default(), "_nokey_app".into())
+                .expect("no-key lookup 1");
+            assert!(no_key_1.entry.flags().contains(DirEntryFlags::NO_KEY));
+            assert!(locked_dir.entry.copy_child_names().is_empty());
+
+            // A second locked lookup while the NO_KEY entry is live reuses the canonical entry.
+            let no_key_2 = locked_dir
+                .lookup_child(&current_task, &mut LookupContext::default(), "_nokey_app".into())
+                .expect("no-key lookup 2");
+            assert!(Arc::ptr_eq(&no_key_1.entry, &no_key_2.entry));
+            drop(no_key_2);
+
+            // Bind-mount the NO_KEY entry onto /mnt.
+            bind_mountpoint
+                .mount(WhatToMount::Bind(no_key_1.clone()), MountpointFlags::empty())
+                .expect("bind mount no_key_1");
+
+            // Unlock and look up by the plaintext name: the live NO_KEY entry is spliced in place.
+            crypt.add_wrapping_key(&key, 0).expect("re-add wrapping key");
+            let plaintext = locked_dir
+                .lookup_child(
+                    &current_task,
+                    &mut LookupContext::default(),
+                    "com.example.app".into(),
+                )
+                .expect("plaintext lookup");
+            assert!(Arc::ptr_eq(&plaintext.entry, &no_key_1.entry));
+            assert!(!plaintext.entry.flags().contains(DirEntryFlags::NO_KEY));
+            {
+                let scope = RcuReadScope::new();
+                assert_eq!(plaintext.entry.local_name(&scope), "com.example.app");
+            }
+            assert_eq!(
+                locked_dir.entry.copy_child_names(),
+                vec![FsString::from("com.example.app")]
+            );
+
+            // Verify that the bind mount at /mnt resolves to the spliced DirEntry and that `..`
+            // from the bind mount root traverses to / (the mountpoint's parent), not /locked.
+            let mnt_resolved = root
+                .lookup_child(&current_task, &mut LookupContext::default(), "mnt".into())
+                .expect("lookup mnt");
+            assert!(Arc::ptr_eq(&mnt_resolved.entry, &plaintext.entry));
+            let mnt_parent = mnt_resolved
+                .lookup_child(&current_task, &mut LookupContext::default(), "..".into())
+                .expect("lookup .. from mnt");
+            assert!(Arc::ptr_eq(&mnt_parent.entry, &root.entry));
+
+            // Subsequent plaintext lookup hits the dcache without calling lookup.
+            let lookups_before = lookup_count.load(Ordering::SeqCst);
+            let cached = locked_dir
+                .lookup_child(
+                    &current_task,
+                    &mut LookupContext::default(),
+                    "com.example.app".into(),
+                )
+                .expect("cached lookup");
+            assert!(Arc::ptr_eq(&cached.entry, &plaintext.entry));
+            assert_eq!(lookup_count.load(Ordering::SeqCst), lookups_before);
+
+            // Re-locking the directory and looking up via the no-key name splices the canonical
+            // DirEntry back to NO_KEY and evicts the plaintext name from `children`.
+            crypt.forget_wrapping_key(key_id, 0).expect("forget wrapping key again");
+            let relocked = locked_dir
+                .lookup_child(&current_task, &mut LookupContext::default(), "_nokey_app".into())
+                .expect("relocked no-key lookup");
+            assert!(Arc::ptr_eq(&relocked.entry, &plaintext.entry));
+            assert!(relocked.entry.flags().contains(DirEntryFlags::NO_KEY));
+            assert!(locked_dir.entry.copy_child_names().is_empty());
+
+            // Dead NO_KEY canonical entries must not be spliced on unlock, and canonical_dir_entry
+            // must be updated to point to the fresh entry.
+            let locked_dir2 = root
+                .create_node(&current_task, "locked2".into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                .expect("create locked2");
+            locked_dir2.entry.node.update_info(|info| {
+                info.encryption_policy = Some(FscryptNodePolicy {
+                    key_identifier: key_id,
+                    flags: FscryptPolicyFlags::empty(),
+                });
+            });
+            // Looking up `app_node` under a different parent (`locked_dir2`) must not splice
+            // `locked_dir`'s canonical entry across parents, and updates `canonical_dir_entry`.
+            let cross_parent = locked_dir2
+                .lookup_child(&current_task, &mut LookupContext::default(), "_nokey_app".into())
+                .expect("lookup app_node under locked_dir2");
+            assert!(!Arc::ptr_eq(&cross_parent.entry, &relocked.entry));
+            assert!(Arc::ptr_eq(
+                &cross_parent.entry.node.canonical_dir_entry.lock().entry.upgrade().unwrap(),
+                &cross_parent.entry
+            ));
+
+            let dead_target = fs.create_node_and_allocate_node_id(
+                CountingDirNode { lookup_count, entries: Default::default() },
+                FsNodeInfo::new(mode!(IFDIR, 0o755), FsCred::root()),
+            );
+            {
+                let mut existing = counting_fs(&fs).existing_nodes.lock();
+                existing.insert("_nokey_dead".into(), dead_target.clone());
+                existing.insert("dead.app".into(), dead_target);
+            }
+            let dead_entry = locked_dir2
+                .lookup_child(&current_task, &mut LookupContext::default(), "_nokey_dead".into())
+                .expect("lookup dead no-key");
+            dead_entry.entry.raise_flags(DirEntryFlags::IS_DEAD);
+            crypt.add_wrapping_key(&key, 0).expect("re-add key");
+            let fresh = locked_dir2
+                .lookup_child(&current_task, &mut LookupContext::default(), "dead.app".into())
+                .expect("lookup plaintext after dead no-key");
+            assert!(!Arc::ptr_eq(&fresh.entry, &dead_entry.entry));
+            assert!(!fresh.entry.is_dead());
+            assert!(Arc::ptr_eq(
+                &fresh.entry.node.canonical_dir_entry.lock().entry.upgrade().unwrap(),
+                &fresh.entry
+            ));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_nokey_name_dir_entry() {
+        spawn_kernel_and_run(async |current_task| {
+            let (fs, lookup_count) = create_counting_fs(&current_task);
+            let root = Namespace::new(fs.clone()).root();
+
+            let create_file = |dir: &NamespaceNode, name: &str| {
+                dir.create_node(&current_task, name.into(), mode!(IFREG, 0o644), DeviceId::NONE)
+                    .expect("create file")
+            };
+            let create_dir = |dir: &NamespaceNode, name: &str| {
+                dir.create_node(&current_task, name.into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                    .expect("create dir")
+            };
+            let lookup = |dir: &NamespaceNode, name: &str| {
+                dir.lookup_child(&current_task, &mut LookupContext::default(), name.into())
+            };
+            let rename =
+                |old_dir: &NamespaceNode, old: &str, new_dir: &NamespaceNode, new: &str| {
+                    NamespaceNode::rename(
+                        &current_task,
+                        old_dir,
+                        old.into(),
+                        new_dir,
+                        new.into(),
+                        RenameFlags::empty(),
+                    )
+                };
+            let set_locked = |dir: &NamespaceNode, is_locked: bool| {
+                dir.entry.node.update_info(|info| {
+                    info.encryption_policy = is_locked.then(FscryptNodePolicy::default);
+                });
+            };
+
+            let locked = create_dir(&root, "locked");
+            let setup_sub = create_dir(&locked, "nokey_sub");
+            create_file(&setup_sub, "leaf");
+            create_file(&locked, "locked_file");
+            drop(setup_sub);
+            locked.entry.remove_child("nokey_sub".into(), &current_task.kernel().mounts);
+            locked.entry.remove_child("locked_file".into(), &current_task.kernel().mounts);
+            set_locked(&locked, true);
+
+            // 1. A child resolved under a locked directory is marked `NO_KEY` and not cached in
+            // `locked`.
+            let before = lookup_count.load(Ordering::SeqCst);
+            let nokey_sub = lookup(&locked, "nokey_sub").expect("lookup nokey_sub");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), before + 1);
+            assert!(nokey_sub.entry.has_nokey_name());
+            let _ = lookup(&locked, "nokey_sub").expect("second lookup while locked");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), before + 2);
+            assert_eq!(
+                rename(&locked, "nokey_sub", &locked, "renamed_while_locked").unwrap_err(),
+                errno!(ENOKEY),
+            );
+
+            // 2. Unlock `locked`: until spliced by a plaintext lookup, `nokey_sub` refrains from
+            // caching direct children, while plaintext children resolved under it do not inherit
+            // `NO_KEY`.
+            set_locked(&locked, false);
+            let before_leaf = lookup_count.load(Ordering::SeqCst);
+            let leaf1 = lookup(&nokey_sub, "leaf").expect("lookup leaf 1");
+            assert!(!leaf1.entry.has_nokey_name());
+            let leaf2 = lookup(&nokey_sub, "leaf").expect("lookup leaf 2");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), before_leaf + 2);
+            assert!(!Arc::ptr_eq(&leaf1.entry, &leaf2.entry));
+
+            // 3. Concurrent unlock mid-lookup rejects `NO_KEY` entries with `ENOKEY` on `rename`
+            // and `ENOENT` on `unlink`.
+            set_locked(&locked, true);
+            *counting_fs(&fs).unlock_node_on_lookup.lock() = Some(locked.entry.node.clone());
+            assert_eq!(
+                rename(&locked, "nokey_sub", &locked, "new_name").unwrap_err(),
+                errno!(ENOKEY),
+            );
+
+            set_locked(&locked, true);
+            *counting_fs(&fs).unlock_node_on_lookup.lock() = Some(locked.entry.node.clone());
+            assert_eq!(
+                locked
+                    .unlink(
+                        &current_task,
+                        "locked_file".into(),
+                        UnlinkKind::NonDirectory,
+                        DirectoryMode::AllowAny,
+                    )
+                    .unwrap_err(),
+                errno!(ENOENT),
+            );
+
+            // 3b. Pipelined lookup across an unencrypted -> locked encrypted directory boundary
+            // discards prefetched nodes so the child under the locked directory is stamped
+            // `NO_KEY` and not cached.
+            let pipelined_enc = create_dir(&root, "pipelined_enc");
+            create_dir(&pipelined_enc, "nokey_sub");
+            set_locked(&pipelined_enc, true);
+            drop(pipelined_enc);
+            root.entry.remove_child("pipelined_enc".into(), &current_task.kernel().mounts);
+
+            let pipelined = root.entry.get_children_pipelined(
+                &current_task,
+                &root.mount,
+                &["pipelined_enc".into(), "nokey_sub".into()],
+            );
+            let pipelined_enc_entry = pipelined[0].as_ref().expect("pipelined_enc");
+            let pipelined_sub_entry = pipelined[1].as_ref().expect("pipelined nokey_sub");
+            assert!(!pipelined_enc_entry.has_nokey_name());
+            assert!(pipelined_sub_entry.has_nokey_name());
+
+            // 4. Destination unlock mid-lookup (`lookup_replaced` TOCTOU) returns `ENOKEY` for
+            // both missing and existing destinations, and moving a directory with a submount into
+            // an unspliced `NO_KEY` parent preserves the submount without caching under
+            // `nokey_sub`.
+            let cached_dir = create_dir(&root, "cached_dir");
+            create_file(&cached_dir, "toctou_src");
+            set_locked(&locked, true);
+            *counting_fs(&fs).unlock_node_on_lookup.lock() = Some(locked.entry.node.clone());
+            assert_eq!(
+                rename(&cached_dir, "toctou_src", &locked, "missing_while_locked").unwrap_err(),
+                errno!(ENOKEY),
+            );
+            set_locked(&locked, true);
+            *counting_fs(&fs).unlock_node_on_lookup.lock() = Some(locked.entry.node.clone());
+            assert_eq!(
+                rename(&cached_dir, "toctou_src", &locked, "locked_file").unwrap_err(),
+                errno!(ENOKEY),
+            );
+
+            let moved_dir = create_dir(&cached_dir, "moved");
+            let submount_point = create_dir(&moved_dir, "mnt");
+            let (sub_fs, _) = create_counting_fs(&current_task);
+            submount_point
+                .mount(WhatToMount::Fs(sub_fs.clone()), MountpointFlags::empty())
+                .expect("mount sub_fs");
+
+            rename(&cached_dir, "moved", &nokey_sub, "moved_in_nokey")
+                .expect("rename plaintext dir into unlocked nokey parent");
+            assert!(!moved_dir.entry.has_nokey_name());
+            assert!(!submount_point.entry.has_nokey_name());
+            let lookups_before_nokey = lookup_count.load(Ordering::SeqCst);
+            let _ = lookup(&nokey_sub, "moved_in_nokey").expect("lookup moved_in_nokey");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), lookups_before_nokey + 1);
+            let resolved_mnt = lookup(&moved_dir, "mnt").expect("lookup mnt after rename");
+            assert!(Arc::ptr_eq(&resolved_mnt.entry.node.fs(), &sub_fs));
+
+            // 5. Renaming an uncached plaintext entry out of `nokey_sub` into `cached_dir` caches
+            // it under `cached_dir`.
+            create_dir(&nokey_sub, "from_nokey");
+            rename(&nokey_sub, "from_nokey", &cached_dir, "into_cached")
+                .expect("rename from nokey parent into cached_dir");
+            let lookups_before = lookup_count.load(Ordering::SeqCst);
+            let moved_into_cached = lookup(&cached_dir, "into_cached").expect("lookup into_cached");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), lookups_before);
+            assert!(!moved_into_cached.entry.has_nokey_name());
+
+            // 6. Looking up `nokey_sub` under the unlocked `locked` directory splices it in place,
+            // clears `NO_KEY`, and enables child caching.
+            let canonical_sub = lookup(&locked, "nokey_sub").expect("lookup canonical_sub");
+            assert!(Arc::ptr_eq(&canonical_sub.entry, &nokey_sub.entry));
+            assert!(!canonical_sub.entry.has_nokey_name());
+
+            let cached_leaf1 = lookup(&canonical_sub, "leaf").expect("lookup cached_leaf1");
+            let after_first = lookup_count.load(Ordering::SeqCst);
+            let cached_leaf2 = lookup(&canonical_sub, "leaf").expect("lookup cached_leaf2");
+            assert_eq!(lookup_count.load(Ordering::SeqCst), after_first);
+            assert!(Arc::ptr_eq(&cached_leaf1.entry, &cached_leaf2.entry));
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_failed_rename_does_not_leave_lock_order_behind() {
+        spawn_kernel_and_run(async |current_task| {
+            let (fs, _lookup_count) = create_counting_fs(&current_task);
+            let root = Namespace::new(fs.clone()).root();
+
+            let create_dir = |dir: &NamespaceNode, name: &str| {
+                dir.create_node(&current_task, name.into(), mode!(IFDIR, 0o755), DeviceId::NONE)
+                    .expect("create dir")
+            };
+            let create_file = |dir: &NamespaceNode, name: &str| {
+                dir.create_node(&current_task, name.into(), mode!(IFREG, 0o644), DeviceId::NONE)
+                    .expect("create file")
+            };
+            let rename = |old_dir: &NamespaceNode,
+                          old: &str,
+                          new_dir: &NamespaceNode,
+                          new: &str,
+                          flags: RenameFlags| {
+                NamespaceNode::rename(
+                    &current_task,
+                    old_dir,
+                    old.into(),
+                    new_dir,
+                    new.into(),
+                    flags,
+                )
+            };
+
+            // Renames lock unrelated parents in address order. Sort three directories by the
+            // address of one of their locks into `a < b < c`. Then move `a` under `c`, so that
+            // renames from `c` into `a` lock `c` before `a`.
+            let setup = |prefix: &str, lock_addr: fn(&DirEntry) -> usize| {
+                let mut dirs = [0, 1, 2].map(|i| {
+                    let name = format!("{prefix}{i}");
+                    let dir = create_dir(&root, &name);
+                    create_file(&dir, "file");
+                    (name, dir)
+                });
+                dirs.sort_by_key(|(_, dir)| lock_addr(&dir.entry));
+                let [(a_name, a), (_, b), (_, c)] = dirs;
+                rename(&root, &a_name, &c, &a_name, RenameFlags::empty()).expect("move a under c");
+                (a, b, c)
+            };
+            // If a failed rename left its lock order behind, this closes `a -> b -> c -> a`.
+            let rename_between = |a: &NamespaceNode, b: &NamespaceNode| {
+                rename(a, "file", b, "moved", RenameFlags::empty())
+                    .expect("rename between a and b");
+            };
+
+            // Renames that fail while holding the `children` locks.
+            let (a, b, c) = setup("children", |entry| std::ptr::from_ref(&entry.children).addr());
+            let flags = RenameFlags::empty();
+            assert_eq!(rename(&c, "missing", &a, "x", flags).unwrap_err(), errno!(ENOENT));
+            assert_eq!(rename(&b, "missing", &c, "x", flags).unwrap_err(), errno!(ENOENT));
+            rename_between(&a, &b);
+
+            // Renames that fail while also holding the `info` locks.
+            let (a, b, c) =
+                setup("info", |entry| std::ptr::from_ref(entry.node.info_lock()).addr());
+            let flags = RenameFlags::NOREPLACE;
+            assert_eq!(rename(&c, "file", &a, "file", flags).unwrap_err(), errno!(EEXIST));
+            assert_eq!(rename(&b, "file", &c, "file", flags).unwrap_err(), errno!(EEXIST));
+            rename_between(&a, &b);
         })
         .await;
     }

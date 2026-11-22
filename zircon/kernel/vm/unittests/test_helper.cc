@@ -6,8 +6,14 @@
 
 #include "test_helper.h"
 
-#include <lib/fit/defer.h>
+#include <align.h>
 #include <lib/page/size.h>
+#include <lib/unittest/unittest.h>
+#include <zircon/errors.h>
+
+#include <fbl/alloc_checker.h>
+#include <ktl/utility.h>
+#include <vm/scanner.h>
 
 namespace vm_unittest {
 
@@ -28,10 +34,11 @@ zx_status_t make_partially_committed_pager_vmo(size_t num_pages, size_t committe
     return ZX_ERR_NO_MEMORY;
   }
 
-  fbl::RefPtr<PageSource> src = fbl::MakeRefCountedChecked<PageSource>(&ac, ktl::move(pager));
-  if (!ac.check()) {
+  zx::result<fbl::RefPtr<PageSource>> src_result = PageSource::Create(ktl::move(pager));
+  if (src_result.is_error()) {
     return ZX_ERR_NO_MEMORY;
   }
+  fbl::RefPtr<PageSource> src = ktl::move(src_result.value());
 
   fbl::RefPtr<VmObjectPaged> vmo;
   zx_status_t status = VmObjectPaged::CreateExternal(
@@ -162,33 +169,6 @@ bool test_region(uintptr_t seed, void* _ptr, size_t len) {
   return true;
 }
 
-// Helper function used by vm_mapping_page_fault_optimisation_test.
-// Given a mapping, check that a run of consecutive pages are mapped (indicated by
-// expected_mapped_page_count) and that remaining pages are unmapped.
-bool verify_mapped_page_range(vaddr_t base, size_t mapping_size,
-                              size_t expected_mapped_page_count) {
-  BEGIN_TEST;
-
-  // All pages up to expected_mapped_page_count should have been faulted.
-  paddr_t paddr_writable;
-  arch_mmu_flags_t mmu_flags;
-  uint64_t offset = 0;
-  for (; offset < expected_mapped_page_count * kPageSize; offset += kPageSize) {
-    ASSERT_OK(Thread::Current::Get()->active_aspace()->arch_aspace().Query(
-        base + offset, &paddr_writable, &mmu_flags));
-    EXPECT_TRUE(mmu_flags & ARCH_MMU_FLAG_PERM_READ);
-  }
-
-  // Remaining pages should not have been faulted in.
-  for (; offset < mapping_size; offset += kPageSize) {
-    ASSERT_EQ(Thread::Current::Get()->active_aspace()->arch_aspace().Query(
-                  base + offset, &paddr_writable, &mmu_flags),
-              ZX_ERR_NOT_FOUND);
-  }
-
-  END_TEST;
-}
-
 bool verify_continuous_attribution_bytes(VmObject& vmo, uint64_t expected_bytes) {
   BEGIN_TEST;
 
@@ -204,18 +184,6 @@ bool verify_continuous_attribution_bytes(VmObject& vmo, uint64_t expected_bytes)
   }
 
   END_TEST;
-}
-
-VmObject::AttributionCounts make_private_attribution_counts(uint64_t uncompressed,
-                                                            uint64_t compressed) {
-  return vm::AttributionCounts{
-      .uncompressed_bytes = uncompressed,
-      .compressed_bytes = compressed,
-      .private_uncompressed_bytes = uncompressed,
-      .private_compressed_bytes = compressed,
-      .scaled_uncompressed_bytes = vm::FractionalBytes(uncompressed),
-      .scaled_compressed_bytes = vm::FractionalBytes(compressed),
-  };
 }
 
 void change_vmo_high_priority_count(VmObjectPaged& vmo, int64_t delta) {

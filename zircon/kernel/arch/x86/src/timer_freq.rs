@@ -18,9 +18,8 @@ use super::feature::x86_get_microarch_config;
 pub fn x86_lookup_core_crystal_freq() -> u64 {
     let config = x86_get_microarch_config().expect("x86_microarch_config not initialized");
     let func = config.get_apic_freq.expect("get_apic_freq not initialized");
-    // SAFETY: `x86_get_microarch_config().expect(...)` above runtime-verifies that
-    // `x86_init_percpu(0)` has initialized `X86_MICROARCH_CONFIG`, `%gs.base`, and the kernel IDT,
-    // and `get_apic_freq` has no additional preconditions.
+    // SAFETY: Per `x86_get_microarch_config`'s safety-usable invariant, `get_apic_freq` has no
+    // preconditions.
     unsafe { func() }
 }
 
@@ -30,9 +29,9 @@ pub fn x86_lookup_core_crystal_freq() -> u64 {
 pub fn x86_lookup_tsc_freq() -> u64 {
     let config = x86_get_microarch_config().expect("x86_microarch_config not initialized");
     let func = config.get_tsc_freq.expect("get_tsc_freq not initialized");
-    // SAFETY: `x86_get_microarch_config().expect(...)` above runtime-verifies that
-    // `x86_init_percpu(0)` has initialized `X86_MICROARCH_CONFIG`, `%gs.base`
-    // (`PERCPU_GPF_RETURN_OFFSET`), and the kernel IDT (`x86_gpf_handler`, required by AMD
-    // `read_msr_safe(0xc0010064, ...)` hooks).
+    // SAFETY: Per `x86_get_microarch_config`'s safety-usable invariant, `get_tsc_freq` has no
+    // preconditions beyond running in the kernel (CPL 0) with `%gs.base` initialized, which
+    // holds for all kernel threads, and is safe to call from any thread context (AMD Zen's
+    // `read_msr_safe` preconditions are validated at runtime).
     unsafe { func() }
 }

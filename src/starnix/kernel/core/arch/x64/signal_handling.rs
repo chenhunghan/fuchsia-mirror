@@ -75,7 +75,6 @@ pub const SIG_STACK_SIZE: usize = std::mem::size_of::<SignalStackFrame>();
 
 impl SignalStackFrame {
     pub fn new(
-        _task: &Task,
         arch_width: ArchWidth,
         registers: &RegisterState<RegisterStorageEnum>,
         extended_pstate: &ArchExtendedPstateStorage,
@@ -156,6 +155,17 @@ impl SignalStackFrame {
     pub fn get_signal_mask(&self, _is_arch32: bool) -> SigSet {
         self.context.uc_sigmask.into()
     }
+}
+
+pub fn sigreturn_address(_task: &Task, _arch_width: ArchWidth) -> Result<u64, Errno> {
+    Ok(0)
+}
+
+pub fn set_sigreturn_register(
+    _arch_width: ArchWidth,
+    _registers: &mut RegisterState<RegisterStorageEnum>,
+    _sigreturn_addr: u64,
+) {
 }
 
 /// Aligns the stack pointer to be 16 byte aligned, and then misaligns it by 8 bytes.

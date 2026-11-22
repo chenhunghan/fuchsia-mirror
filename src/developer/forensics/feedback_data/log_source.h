@@ -5,8 +5,8 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_LOG_SOURCE_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_LOG_SOURCE_H_
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fpromise/result.h>
 #include <lib/sys/cpp/service_directory.h>
@@ -22,7 +22,7 @@ namespace forensics::feedback_data {
 class LogSink {
  public:
   // A message is a FIDL LogMessage or an error string.
-  using MessageOr = ::fpromise::result<fuchsia::logger::LogMessage, std::string>;
+  using MessageOr = ::fpromise::result<fuchsia_logger::LogMessage, std::string>;
 
   // Adds |message| to the sink.
   //
@@ -31,13 +31,21 @@ class LogSink {
 };
 
 // Receives log messages from the system's logging service and dispatches them to a sink.
-class LogSource {
+class LogSource : public fidl::AsyncEventHandler<fuchsia_diagnostics::ArchiveAccessor>,
+                  public fidl::AsyncEventHandler<fuchsia_diagnostics::BatchIterator> {
  public:
   LogSource(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
             LogSink* sink);
 
   // Starts log collection.
   void Start();
+
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_diagnostics::ArchiveAccessor> metadata) override;
+  void handle_unknown_event(
+      fidl::UnknownEventMetadata<fuchsia_diagnostics::BatchIterator> metadata) override;
 
  private:
   void GetNext();
@@ -46,7 +54,7 @@ class LogSource {
   std::shared_ptr<sys::ServiceDirectory> services_;
 
   LogSink* sink_;
-  fuchsia::diagnostics::ArchiveAccessorPtr archive_accessor_;
+  fidl::Client<fuchsia_diagnostics::ArchiveAccessor> archive_accessor_;
   std::unique_ptr<diagnostics::fidl_log_message_parser::LogBatchIterator> batch_iterator_;
 };
 

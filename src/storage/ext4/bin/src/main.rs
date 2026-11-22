@@ -10,6 +10,7 @@
 use anyhow::Error;
 use argh::FromArgs;
 use ext4_extract::ext4_extract;
+use std::collections::BTreeMap;
 
 fn ext4_to_pkg(
     path: &str,
@@ -17,7 +18,8 @@ fn ext4_to_pkg(
     path_prefix: &str,
     dep_file: Option<&str>,
 ) -> Result<(), Error> {
-    let manifest = ext4_extract(path, out_dir)?;
+    // Sort entries for deterministic manifest.fini and depfile output.
+    let manifest: BTreeMap<_, _> = ext4_extract(path, out_dir)?.into_iter().collect();
 
     // Write a fini manifest
     #[allow(clippy::format_collect, reason = "mass allow for https://fxbug.dev/381896734")]

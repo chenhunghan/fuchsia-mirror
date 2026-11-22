@@ -20,23 +20,6 @@ namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
 namespace usb_cdc_acm_serial {
 
-namespace {
-
-constexpr int32_t kReadRequestCount = 8;
-constexpr int32_t kWriteRequestCount = 8;
-
-constexpr uint32_t kDefaultBaudRate = 115200;
-constexpr uint32_t kDefaultConfig = fuchsia_hardware_serialimpl::wire::kSerialDataBits8 |
-                                    fuchsia_hardware_serialimpl::wire::kSerialStopBits1 |
-                                    fuchsia_hardware_serialimpl::wire::kSerialParityNone;
-
-constexpr uint32_t kUsbBufferSize = 2048;
-
-constexpr uint32_t kUsbCdcAcmSetLineCoding = 0x20;
-constexpr uint32_t kUsbCdcAcmGetLineCoding = 0x21;
-
-}  // namespace
-
 struct usb_cdc_acm_line_coding_t {
   uint32_t dwDTERate;
   uint8_t bCharFormat;
@@ -298,7 +281,7 @@ void UsbCdcAcmDevice::WriteComplete(usb_request_t* request) {
 
     if (!write_context_->data.empty()) {
       // There is more data to write, refill the request and queue it up to be sent.
-      write_context_->data = QueueWriteRequest(write_context->data, std::move(req));
+      write_context_->data = QueueWriteRequest(write_context_->data, std::move(req));
       return;
     }
 
@@ -320,7 +303,8 @@ void UsbCdcAcmDevice::WriteComplete(usb_request_t* request) {
 cpp20::span<const uint8_t> UsbCdcAcmDevice::QueueWriteRequest(cpp20::span<const uint8_t> data,
                                                               usb::Request<> req) {
   const ssize_t actual = req.CopyTo(data.data(), data.size(), 0);
-  req.request()->header.length = data.size();
+  ZX_ASSERT(actual >= 0);
+  req.request()->header.length = actual;
 
   usb_client_.RequestQueue(req.take(), &write_request_complete_);
 

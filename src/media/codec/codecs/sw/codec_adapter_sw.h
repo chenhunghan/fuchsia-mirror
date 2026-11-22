@@ -62,15 +62,16 @@ class CodecAdapterSW : public CodecAdapter {
 
   bool IsCoreCodecHwBased(CodecPort port) override { return false; }
 
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override {
-    if (!initial_input_format_details.has_format_details_version_ordinal()) {
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override {
+    if (!initial_input_format_details->format_details_version_ordinal().has_value()) {
       events_->onCoreCodecFailCodec(
           "CoreCodecInit(): Initial input format details missing version "
           "ordinal.");
       return;
     }
     initial_input_format_details_version_ordinal_ =
-        initial_input_format_details.format_details_version_ordinal();
+        *initial_input_format_details->format_details_version_ordinal();
     input_format_details_version_ordinal_ = initial_input_format_details_version_ordinal_;
     zx_status_t result =
         input_processing_loop_.StartThread("input_processing_thread_", &input_processing_thread_);
@@ -111,6 +112,7 @@ class CodecAdapterSW : public CodecAdapter {
     {
       std::lock_guard<std::mutex> lock(lock_);
       stream_active_ = true;
+      output_reconfig_pending_ = false;
     }
     input_format_details_version_ordinal_ = initial_input_format_details_version_ordinal_;
     // It's ok for RecycleInputPacket to make a packet free anywhere in this
@@ -130,14 +132,14 @@ class CodecAdapterSW : public CodecAdapter {
     TRACE_INSTANT("codec_runner", "Media:Start", TRACE_SCOPE_THREAD);
   }
 
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override {
-    ZX_ASSERT(per_stream_override_format_details.has_format_details_version_ordinal() &&
-              per_stream_override_format_details.format_details_version_ordinal() >=
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override {
+    ZX_ASSERT(per_stream_override_format_details->format_details_version_ordinal().has_value() &&
+              *per_stream_override_format_details->format_details_version_ordinal() >=
                   input_format_details_version_ordinal_);
     input_format_details_version_ordinal_ =
-        per_stream_override_format_details.format_details_version_ordinal();
-    input_queue_.Push(CodecInputItem::FormatDetails(per_stream_override_format_details));
+        *per_stream_override_format_details->format_details_version_ordinal();
+    input_queue_.Push(CodecInputItem::FormatDetails(std::move(per_stream_override_format_details)));
   }
 
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override {
@@ -239,34 +241,16 @@ class CodecAdapterSW : public CodecAdapter {
     }
   }
 
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override {
-    auto config = std::make_unique<fuchsia::media::StreamOutputConstraints>();
-
-    config->set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-
-    // For the moment, there will be only one StreamOutputConstraints, and it'll
-    // need output buffers configured for it.
-    ZX_DEBUG_ASSERT(buffer_constraints_action_required);
-    config->set_buffer_constraints_action_required(buffer_constraints_action_required);
-    auto* constraints = config->mutable_buffer_constraints();
-    constraints->set_buffer_constraints_version_ordinal(
-        new_output_buffer_constraints_version_ordinal);
-
-    return config;
-  }
-
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override {
-    fuchsia::media::StreamOutputFormat result;
-    // format_details is fuchsia::media::FormatDetails
+    fuchsia_media::StreamOutputFormat result;
+    // format_details is fuchsia_media::FormatDetails
     auto [format_details, per_packet_buffer_bytes] = OutputFormatDetails();
-    result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-    result.set_format_details(std::move(format_details));
-    result.mutable_format_details()->set_format_details_version_ordinal(
-        new_output_format_details_version_ordinal);
+    result.stream_lifetime_ordinal() = stream_lifetime_ordinal;
+    result.format_details() = std::move(format_details);
+    result.format_details()->format_details_version_ordinal() =
+        new_output_format_details_version_ordinal;
     return result;
   }
 
@@ -307,6 +291,32 @@ class CodecAdapterSW : public CodecAdapter {
     }
   }
 
+  // Blocks while output reconfiguration is pending and the stream is active.
+  // Returns true if the stream is still active, or false if the stream is
+  // stopping.
+  bool WaitForOutputReconfigToComplete() __TA_EXCLUDES(lock_) FXL_NO_THREAD_SAFETY_ANALYSIS {
+    std::unique_lock<std::mutex> lock(lock_);
+    while (output_reconfig_pending_ && stream_active_) {
+      reconfig_cond_.wait(lock);
+    }
+    return stream_active_;
+  }
+
+  bool IsStreamActive() __TA_EXCLUDES(lock_) {
+    std::lock_guard<std::mutex> lock(lock_);
+    return IsStreamActiveLocked();
+  }
+
+  bool IsStreamActiveLocked() const __TA_REQUIRES(lock_) { return stream_active_; }
+
+  // Marks output reconfiguration pending while holding `lock_`. Clearing
+  // `output_reconfig_pending_` (and notifying `reconfig_cond_`) is handled by
+  // `CodecAdapterSW`.
+  void SetOutputReconfigPendingLocked() __TA_REQUIRES(lock_) {
+    ZX_DEBUG_ASSERT(stream_active_);
+    output_reconfig_pending_ = true;
+  }
+
   // Processes input in a loop. Should only execute on input_processing_thread_.
   // Loops for the lifetime of a stream.
   virtual void ProcessInputLoop() = 0;
@@ -320,13 +330,13 @@ class CodecAdapterSW : public CodecAdapter {
   // Subclasses can assume this is only called after the stream's format details
   // have been processed on `input_processing_thread_` and before
   // `CleanUpAfterStream()` resets per-stream format state. When reached through
-  // `CoreCodecGetOutputFormat()` in production,
+  // `CoreCodecGetOutputFormat2()` in production,
   // `CodecImpl::onCoreCodecOutputPacket()` calls this synchronously on
   // `input_processing_thread_`. Implementations must still acquire `lock_` when
   // reading per-stream format state (such as `codec_params_` or `context_`) so
   // that direct callers (such as unit tests) and any future off-thread callers
   // are safe.
-  virtual std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  virtual std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) = 0;
 
   BlockingMpscQueue<CodecInputItem> input_queue_;
@@ -361,7 +371,7 @@ class CodecAdapterSW : public CodecAdapter {
   //     because no concurrent lifecycle/format mutation is possible while the
   //     input processing loop is active).
   //   * `OutputFormatDetails()` runs on `input_processing_thread_` when reached
-  //     through `CoreCodecGetOutputFormat()`, and takes `lock_` so that direct
+  //     through `CoreCodecGetOutputFormat2()`, and takes `lock_` so that direct
   //     callers such as tests, and any future off-thread caller, are safe. Any
   //     other reader not guaranteed to run on `input_processing_thread_` while
   //     the input processing loop is active must also hold `lock_`.
@@ -377,11 +387,11 @@ class CodecAdapterSW : public CodecAdapter {
   // hold intervals potentially ending early without TA noticing.
   thrd_t input_processing_thread_;
 
+ private:
   bool output_reconfig_pending_ FXL_GUARDED_BY(lock_) = false;
   bool stream_active_ FXL_GUARDED_BY(lock_) = false;
   std::condition_variable reconfig_cond_;
 
- private:
   uint64_t initial_input_format_details_version_ordinal_;
 };
 

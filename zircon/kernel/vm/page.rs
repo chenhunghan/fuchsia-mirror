@@ -293,11 +293,13 @@ pub struct VmPage {
     pub loaned_state_priv: AtomicU8,
 }
 
-// Compile-time layout assertions matching C++ vm_page_t via bindgen.
+// Compile-time layout assertions matching C++ vm_page_t via bindgen. Also assert that the page
+// structure isn't growing uncontrollably, and that its size and alignment are kept in sync with
+// the arena selection algorithm.
 zr::static_assert!(core::mem::size_of::<VmPage>() == core::mem::size_of::<bindings::vm_page_t>());
 zr::static_assert!(core::mem::align_of::<VmPage>() == core::mem::align_of::<bindings::vm_page_t>());
-zr::static_assert!(core::mem::size_of::<VmPage>() == 48);
-zr::static_assert!(core::mem::align_of::<VmPage>() == 8);
+zr::static_assert!(core::mem::size_of::<VmPage>() == arena::BOOKKEEPING_BYTES_PER_PAGE as usize);
+zr::static_assert!(core::mem::align_of::<VmPage>() == arena::BOOKKEEPING_ALIGNMENT as usize);
 zr::static_assert!(core::mem::offset_of!(VmPage, queue_node) == 0);
 zr::static_assert!(core::mem::offset_of!(VmPage, paddr_priv) == 16);
 zr::static_assert!(core::mem::offset_of!(VmPage, state_union) == 24);

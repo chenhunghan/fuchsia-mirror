@@ -5,7 +5,7 @@ However, these facilities are difficult to use because they involve directly
 mapping memory for executables, shared libraries, and stacks. Instead, you should
 use one of the higher-level mechanisms for creating processes.
 
-## fuchsia.process.Launcher
+## fuchsia.process.Launcher {:#fuchsia-process-launcher}
 
 Fuchsia provides a service, `fuchsia.process.Launcher`, that does the low-level
 work of constructing processes for you. You provide this service with all the

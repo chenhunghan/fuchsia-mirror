@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/icu:third_party_icu_headers.bzl", "third_party_icu_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+# [START icu_library]
+third_party_icu_headers(
+    name = "icu_headers",
+    headers = [
+        "third_party/icu/source/common/unicode/locid.h",
+        "third_party/icu/source/common/unicode/ucnv.h",
+        "third_party/icu/source/common/unicode/unistr.h",
+        "third_party/icu/source/i18n/unicode/calendar.h",
+        "third_party/icu/source/i18n/unicode/gregocal.h",
+        "third_party/icu/source/i18n/unicode/smpdtfmt.h",
+        "third_party/icu/source/i18n/unicode/timezone.h",
+        "third_party/icu/source/i18n/unicode/tzfmt.h",
+    ],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["intl_wisdom_client.cc"],
+    hdrs = ["intl_wisdom_client.h"],
+    deps = [
+        ":icu_headers",
+        "//examples/intl/wisdom/fidl:wisdom_hlcpp",
+        "//sdk/lib/sys/cpp",
+    ],
+    alwayslink = True,
+)
+
+# [END icu_library]
+
+fx_cc_binary(
+    name = "intl_wisdom_client",
+    srcs = ["main.cc"],
+    visibility = ["//examples/intl/wisdom/cpp:__pkg__"],
+    deps = [
+        ":lib",
+        "//examples/intl/wisdom/fidl:wisdom_hlcpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl:fxl_cli",
+        "//src/lib/icu:lib",
+        "//src/lib/icu_data/cpp",
+    ],
+)

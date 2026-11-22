@@ -55,6 +55,9 @@ impl RemoteUnixDomainSocket {
         if events.contains(FdEvents::POLLOUT) {
             signals |= WRITABLE_SIGNAL;
         }
+        if events.contains(FdEvents::POLLHUP) {
+            signals |= zx::Signals::EVENTPAIR_PEER_CLOSED;
+        }
         signals
     }
 
@@ -65,6 +68,9 @@ impl RemoteUnixDomainSocket {
         }
         if signals.contains(WRITABLE_SIGNAL) {
             events |= FdEvents::POLLOUT;
+        }
+        if signals.contains(zx::Signals::EVENTPAIR_PEER_CLOSED) {
+            events |= FdEvents::POLLHUP;
         }
         events
     }
@@ -250,12 +256,15 @@ impl SocketOps for RemoteUnixDomainSocket {
         _socket: &Socket,
         _current_task: &CurrentTask,
     ) -> Result<FdEvents, Errno> {
-        let signals = self
-            .event
-            .as_handle_ref()
-            .wait_one(zx::Signals::NONE, zx::MonotonicInstant::INFINITE_PAST)
-            .map_err(|e| from_status_like_fdio!(e))?;
-        Ok(Self::get_events_from_signals(signals))
+        // Probe currently asserted signals without blocking; `TimedOut` means none of the
+        // watched signals are active.
+        let watched = Self::get_signals_from_events(FdEvents::all());
+        match self.event.wait_one(watched, zx::MonotonicInstant::INFINITE_PAST) {
+            zx::WaitResult::Ok(signals) => Ok(Self::get_events_from_signals(signals)),
+            zx::WaitResult::TimedOut(_) => Ok(FdEvents::empty()),
+            zx::WaitResult::Canceled(_) => Err(from_status_like_fdio!(zx::Status::CANCELED)),
+            zx::WaitResult::Err(e) => Err(from_status_like_fdio!(e)),
+        }
     }
 
     fn shutdown(&self, _socket: &Socket, _how: SocketShutdownFlags) -> Result<(), Errno> {
@@ -320,13 +329,17 @@ mod tests {
     use super::*;
     use crate::testing::spawn_kernel_and_run;
     use crate::vfs::socket::SocketFile;
-    use crate::vfs::{VecInputBuffer, VecOutputBuffer};
+    use crate::vfs::{EpollFileObject, VecInputBuffer, VecOutputBuffer};
     use fidl::endpoints::{DiscoverableProtocolMarker as _, RequestStream};
     use fidl_fuchsia_unknown as funknown;
     use fuchsia_async as fasync;
     use futures::StreamExt;
+    use futures::channel::oneshot;
+    use futures::future::{AbortHandle, Abortable};
     use starnix_sync::{LockDepMutex, RemoteUnixDomainSocketStateLock};
+    use starnix_uapi::vfs::EpollEvent;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug)]
     struct Data {
@@ -384,6 +397,7 @@ mod tests {
     struct UnixDomainSocketImpl {
         state: LockDepMutex<UnixDomainSocketImplState, RemoteUnixDomainSocketStateLock>,
         close_on_read: bool,
+        abort_after_empty_reads: Option<(AtomicUsize, AbortHandle)>,
     }
 
     impl UnixDomainSocketImpl {
@@ -471,11 +485,18 @@ mod tests {
                         Ok(fbinder::UnixDomainSocketRequest::Read {
                             payload, responder, ..
                         }) => {
-                            assert!(
-                                responder
-                                    .send(self.read(payload).map_err(|e| e.into_raw()))
-                                    .is_ok()
-                            );
+                            let res = self.read(payload);
+                            let is_empty = res == Err(zx::Status::SHOULD_WAIT);
+                            assert!(responder.send(res.map_err(|e| e.into_raw())).is_ok());
+                            if is_empty {
+                                if let Some((remaining, abort_handle)) =
+                                    &self.abort_after_empty_reads
+                                {
+                                    if remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+                                        abort_handle.abort();
+                                    }
+                                }
+                            }
                         }
                         Ok(fbinder::UnixDomainSocketRequest::Write {
                             payload, responder, ..
@@ -528,6 +549,21 @@ mod tests {
                 OpenFlags::RDWR,
             )
             .expect("new_remote_file");
+
+            assert_eq!(file.query_events(current_task), Ok(FdEvents::empty()));
+
+            let epoll_object = EpollFileObject::new_file(current_task);
+            let epoll_file = epoll_object.downcast_file::<EpollFileObject>().unwrap();
+            epoll_file
+                .add(current_task, &file, &epoll_object, EpollEvent::new(FdEvents::POLLIN, 0))
+                .expect("epoll_file.add");
+            assert!(
+                epoll_file
+                    .wait(current_task, 1, zx::MonotonicInstant::ZERO)
+                    .expect("epoll wait initial")
+                    .is_empty()
+            );
+
             let ancillary_data =
                 vec![AncillaryData::Unix(UnixControlData::Rights(vec![original_file]))];
             let socket_ops = file.downcast_file::<SocketFile>().unwrap();
@@ -544,6 +580,14 @@ mod tests {
                 ),
                 Ok(data.len())
             );
+
+            let events = file.query_events(current_task).expect("query_events with message");
+            assert!(events.contains(FdEvents::POLLIN | FdEvents::POLLOUT), "{events:?}");
+            let epoll_events = epoll_file
+                .wait(current_task, 1, zx::MonotonicInstant::ZERO)
+                .expect("epoll wait readable");
+            assert_eq!(epoll_events.len(), 1);
+            assert!(epoll_events[0].events().contains(FdEvents::POLLIN));
 
             let flags = SocketMessageFlags::CTRUNC
                 | SocketMessageFlags::TRUNC
@@ -577,6 +621,16 @@ mod tests {
                 )
                 .unwrap_err();
             assert_eq!(err, errno!(EAGAIN));
+
+            let events = file.query_events(current_task).expect("query_events when drained");
+            assert!(!events.contains(FdEvents::POLLIN), "{events:?}");
+            assert!(events.contains(FdEvents::POLLOUT), "{events:?}");
+            assert!(
+                epoll_file
+                    .wait(current_task, 1, zx::MonotonicInstant::ZERO)
+                    .expect("epoll wait drained")
+                    .is_empty()
+            );
         })
         .await;
         handle.join().expect("join");
@@ -605,5 +659,76 @@ mod tests {
         })
         .await;
         handle.join().expect("join");
+    }
+
+    #[::fuchsia::test]
+    async fn test_remote_uds_peer_close_wakes_epoll_and_blocking_recv() {
+        // 1. Verify epoll observes POLLHUP when the remote server drops its EventPair.
+        let (epoll_client, epoll_server) = zx::Channel::create();
+        let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let epoll_handle = std::thread::spawn(move || {
+            let mut executor = fasync::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let uds_impl = Arc::new(UnixDomainSocketImpl::default());
+                futures::future::select(std::pin::pin!(uds_impl.serve(epoll_server)), stop_rx)
+                    .await;
+            });
+        });
+
+        // 2. Verify a blocking recvmsg wakes via EVENTPAIR_PEER_CLOSED when the server closes
+        // after `blocking_op` has armed `wait_async` and re-polled `read` (after the 2nd empty
+        // read).
+        let (recv_client, recv_server) = zx::Channel::create();
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        let recv_handle = std::thread::spawn(move || {
+            let mut executor = fasync::LocalExecutor::default();
+            executor.run_singlethreaded(async move {
+                let uds_impl = Arc::new(UnixDomainSocketImpl {
+                    abort_after_empty_reads: Some((AtomicUsize::new(2), abort_handle)),
+                    ..Default::default()
+                });
+                let _ = Abortable::new(
+                    async move { uds_impl.serve(recv_server).await },
+                    abort_registration,
+                )
+                .await;
+            });
+        });
+
+        spawn_kernel_and_run(async move |current_task| {
+            let epoll_target = new_remote_file(current_task, epoll_client.into(), OpenFlags::RDWR)
+                .expect("new_remote_file");
+            let epoll_object = EpollFileObject::new_file(current_task);
+            let epoll_file = epoll_object.downcast_file::<EpollFileObject>().unwrap();
+            epoll_file
+                .add(
+                    current_task,
+                    &epoll_target,
+                    &epoll_object,
+                    EpollEvent::new(FdEvents::POLLIN, 0),
+                )
+                .expect("epoll_file.add");
+
+            stop_tx.send(()).expect("signal server shutdown");
+            epoll_handle.join().expect("join epoll server");
+
+            assert_eq!(epoll_target.query_events(current_task), Ok(FdEvents::POLLHUP));
+            let events = epoll_file
+                .wait(current_task, 1, zx::MonotonicInstant::ZERO)
+                .expect("epoll wait on peer close");
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].events(), FdEvents::POLLHUP);
+
+            let recv_file = new_remote_file(current_task, recv_client.into(), OpenFlags::RDWR)
+                .expect("new_remote_file");
+            let socket_ops = recv_file.downcast_file::<SocketFile>().unwrap();
+            let mut buffer = VecOutputBuffer::new(1024);
+            let err = socket_ops
+                .recvmsg(current_task, &recv_file, &mut buffer, SocketMessageFlags::empty(), None)
+                .unwrap_err();
+            assert_eq!(err, errno!(ECONNREFUSED));
+        })
+        .await;
+        recv_handle.join().expect("join recv server");
     }
 }

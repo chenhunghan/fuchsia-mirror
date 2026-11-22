@@ -65,7 +65,6 @@ zx_status_t rust_vm_object_physical_state_prefetch_range(const void* state, uint
 zx_status_t rust_vm_object_physical_state_lookup(const void* state, uint64_t offset, uint64_t len,
                                                  const VmObject::LookupFunction* lookup_fn);
 zx_status_t rust_vm_object_physical_set_mapping_cache_policy(VmObjectPhysical* vmo,
-                                                             const void* state,
                                                              arch_mmu_flags_t cache_policy);
 ValidateChildSliceResult rust_vm_object_physical_validate_child_slice_args(const void* state,
                                                                            uint64_t offset,
@@ -100,11 +99,13 @@ VmObjectPhysical::~VmObjectPhysical() {
     Guard<CriticalMutex> guard{ChildListLock::Get()};
     fbl::RefPtr<VmObjectPhysical> parent_ptr = parent_locked();
     if (parent_ptr) {
+      // Clear state.parent while ChildListLock is still held and parent_ptr keeps the parent
+      // alive, so DoDeferredDelete below handles any final reference drop.
+      set_parent_locked(nullptr);
       parent_ptr->RemoveChild(this, guard.take());
       // Avoid recursing destructors when we delete our parent by using the deferred deletion
       // method.
-      VmDeferredDeleter<VmObjectPhysical>::DoDeferredDelete(ktl::move(parent_ptr));
-      set_parent_locked(nullptr);
+      VmDeferredDeleter::DoDeferredDelete(ktl::move(parent_ptr));
     }
   }
 
@@ -266,5 +267,5 @@ zx_status_t VmObjectPhysical::LookupContiguousLocked(uint64_t offset, uint64_t l
 }
 
 zx_status_t VmObjectPhysical::SetMappingCachePolicy(arch_mmu_flags_t cache_policy) {
-  return rust_vm_object_physical_set_mapping_cache_policy(this, state(), cache_policy);
+  return rust_vm_object_physical_set_mapping_cache_policy(this, cache_policy);
 }

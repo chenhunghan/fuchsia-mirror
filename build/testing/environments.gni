@@ -25,7 +25,6 @@ device_types = {
   luis = "Luis"
   maple = "Maple"
   nelson = "Nelson"
-  nuc7 = "Intel NUC Kit NUC7i5DNHE"
   nuc11 = "Intel NUC Kit NUC11TNHv5"
   qemu = "QEMU"
   sherlock = "Sherlock"
@@ -410,19 +409,6 @@ _all_named_fuchsia_envs += [
   },
 ]
 
-nuc7_env = {
-  dimensions = {
-    device_type = device_types.nuc7
-  }
-}
-
-_all_named_fuchsia_envs += [
-  {
-    name = "nuc7"
-    env = nuc7_env
-  },
-]
-
 nuc11_env = {
   dimensions = {
     device_type = device_types.nuc11
@@ -557,15 +543,7 @@ with_display_envs = [
   atlas_env,
   luis_env,
   nelson_env,
-  nuc7_env,
   nuc11_env,
-  sherlock_env,
-  vim3_env,
-]
-
-# Devices that can run display capture.
-with_display_capture_envs = [
-  astro_env,
   sherlock_env,
   vim3_env,
 ]

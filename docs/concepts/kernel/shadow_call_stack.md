@@ -77,7 +77,7 @@ this seems wasteful, it is only slightly so: at worst one page is wasted per
 kind of stack, plus the page table overhead of using more address space for
 pages that are never accessed.
 
-## Implementation details
+## Implementation details {:#implementation-details}
 
 The essential addition to support shadow-call-stack code is the *shadow call
 stack pointer*.  This is a register with a global use, like the traditional

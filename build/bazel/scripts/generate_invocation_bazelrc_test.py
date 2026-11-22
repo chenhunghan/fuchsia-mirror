@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from build.auth import auth_env
 from build.bazel.scripts import bazel_invocation as bazel_inv
 from build.bazel.scripts import generate_invocation_bazelrc as gen
 from build.rbe import casfs
@@ -190,15 +191,15 @@ class JiriPrebuiltBazelrcTest(unittest.TestCase):
 
 class AuthBazelrcTest(unittest.TestCase):
     def test_loas_auth(self) -> None:
+        env = auth_env.make_auth_env(rbe_auth=auth_env.LOAS)
         self.assertEqual(
-            list(gen._auth_bazelrc({"FX_BUILD_RBE_AUTH_TYPE": "loas"})),
+            list(gen._auth_bazelrc(env)),
             [f"build:_remote_common --config={bazel_inv.CONFIG_GCERTAUTH}"],
         )
 
     def test_non_loas_auth(self) -> None:
-        self.assertEqual(
-            list(gen._auth_bazelrc({"FX_BUILD_RBE_AUTH_TYPE": "oauth"})), []
-        )
+        env = auth_env.make_auth_env(rbe_auth=auth_env.OAUTH)
+        self.assertEqual(list(gen._auth_bazelrc(env)), [])
         self.assertEqual(list(gen._auth_bazelrc({})), [])
 
 
@@ -303,6 +304,19 @@ class ServiceProxiesBazelrcTest(unittest.TestCase):
         )
         self.assertIn(
             "build:_resultstore --bes_proxy=unix:///tmp/fake-rs.sock", rc
+        )
+
+    def test_bes_proxy_socket(self) -> None:
+        env = {
+            bazel_inv.ENV_BAZEL_RBE_SOCKET: "/tmp/fake-rbe.sock",
+            bazel_inv.ENV_BAZEL_BES_SOCKET: "/tmp/fake-bes.sock",
+        }
+        rc = list(gen._service_proxies_bazelrc(env))
+        self.assertIn(
+            "build:_remote_common --remote_proxy=unix:///tmp/fake-rbe.sock", rc
+        )
+        self.assertIn(
+            "build:_resultstore --bes_proxy=unix:///tmp/fake-bes.sock", rc
         )
 
     def test_rbe_casfs_virtualize_enabled(self) -> None:
@@ -440,7 +454,8 @@ class MainEnvWrapperTest(unittest.TestCase):
                     "--",
                     "echo",
                     "hello",
-                ]
+                ],
+                {},
             )
             self.assertTrue(rc_path.is_file())
             content = rc_path.read_text()
@@ -464,7 +479,7 @@ class MainEnvWrapperTest(unittest.TestCase):
             log_dir.mkdir()
             out_buf = io.StringIO()
             with contextlib.redirect_stdout(out_buf):
-                gen.main([f"--log-dir={log_dir}"])
+                gen.main([f"--log-dir={log_dir}"], {})
             stdout_content = out_buf.getvalue()
             saved_copy = log_dir / "invocation.bazelrc"
             self.assertTrue(saved_copy.is_file())
@@ -475,7 +490,7 @@ class MainEnvWrapperTest(unittest.TestCase):
     def test_main_wrap_without_output_bazelrc_errors(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
-                gen.main(["--", "echo", "hello"])
+                gen.main(["--", "echo", "hello"], {})
 
     @mock.patch.object(os, "execvpe")
     def test_main_empty_log_dir_ignored(
@@ -483,7 +498,7 @@ class MainEnvWrapperTest(unittest.TestCase):
     ) -> None:
         out_buf = io.StringIO()
         with contextlib.redirect_stdout(out_buf):
-            gen.main(["--log-dir="])
+            gen.main(["--log-dir="], {})
         self.assertIn("build --invocation_id=", out_buf.getvalue())
 
     @mock.patch.object(os, "execvpe")
@@ -498,7 +513,7 @@ class MainEnvWrapperTest(unittest.TestCase):
             contextlib.redirect_stderr(err_buf),
             contextlib.redirect_stdout(out_buf),
         ):
-            gen.main(["--log-dir=/fake/read_only_dir"])
+            gen.main(["--log-dir=/fake/read_only_dir"], {})
         self.assertIn("WARNING: Failed to save debug copy", err_buf.getvalue())
         self.assertIn("Read-only file system", err_buf.getvalue())
         self.assertIn("build --invocation_id=", out_buf.getvalue())
@@ -507,13 +522,12 @@ class MainEnvWrapperTest(unittest.TestCase):
         out_buf = io.StringIO()
         err_buf = io.StringIO()
         with (
-            mock.patch.dict(
-                os.environ, {bazel_inv.ENV_BAZEL_DISK_CACHE: "relative/path"}
-            ),
             contextlib.redirect_stdout(out_buf),
             contextlib.redirect_stderr(err_buf),
         ):
-            exit_code = gen.main([])
+            exit_code = gen.main(
+                [], {bazel_inv.ENV_BAZEL_DISK_CACHE: "relative/path"}
+            )
             self.assertEqual(exit_code, 0)
         self.assertIn("ignored (not absolute)", err_buf.getvalue())
         self.assertNotIn("--disk_cache", out_buf.getvalue())

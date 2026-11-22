@@ -106,7 +106,21 @@ impl DevicePublisher {
 
     pub fn stage(&self, name: &str) -> Result<StagedPublisher, Error> {
         let (proxy, staged_publisher) = StagedPublisher::new(self.scope.clone());
-        self.block_dir.add_entry(name, vfs::remote::remote_dir(proxy))?;
+        let mut dir = self.block_dir.clone();
+        let mut components = name.split('/').peekable();
+        while let Some(component) = components.next() {
+            if components.peek().is_some() {
+                let sub_name: vfs::name::Name = component.try_into()?;
+                let entry = dir.get_or_insert(sub_name, PseudoDirectory::new);
+                dir = entry
+                    .into_any()
+                    .downcast::<PseudoDirectory>()
+                    .map_err(|_| zx::Status::NOT_DIR)?;
+            } else {
+                dir.add_entry(component, vfs::remote::remote_dir(proxy))?;
+                break;
+            }
+        }
         Ok(staged_publisher)
     }
 
@@ -370,6 +384,51 @@ mod tests {
 
         // Check that connecting to the volume works.
         let path = "001/".to_string() + BlockMarker::PROTOCOL_NAME;
+        let volume = fuchsia_fs::directory::open_async::<BlockMarker>(
+            &client,
+            &path,
+            fio::Flags::PROTOCOL_SERVICE,
+        )
+        .unwrap();
+        let volume_server_end: fidl::endpoints::ServerEnd<BlockMarker> =
+            receiver.next().await.unwrap();
+        assert_eq!(
+            volume.as_channel().as_handle_ref().basic_info().unwrap().related_koid,
+            volume_server_end.channel().as_handle_ref().koid().unwrap()
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_stage_nested_subdirectory() {
+        let scope = ExecutionScope::new();
+        let device_publisher = DevicePublisher::new(scope.clone());
+        let (client, server_end) = fidl::endpoints::create_proxy::<fio::DirectoryMarker>();
+        vfs::directory::serve_on(
+            device_publisher.block_dir(),
+            fio::PERM_READABLE,
+            scope.clone(),
+            server_end,
+        );
+
+        let staged_a = device_publisher.stage("ota/zircon_a").unwrap();
+        let _staged_b = device_publisher.stage("ota/zircon_b").unwrap();
+
+        // Malformed empty segments and collisions with leaf entries fail.
+        assert!(device_publisher.stage("/ota/zircon_c").is_err());
+        assert!(device_publisher.stage("ota//zircon_c").is_err());
+        assert!(device_publisher.stage("ota/").is_err());
+        assert!(device_publisher.stage("ota/zircon_a/nested").is_err());
+
+        let (sender, mut receiver) = mpsc::unbounded();
+        let dir = vfs::pseudo_directory! {
+            "volume" => endpoint(move |_scope, channel| {
+                sender.unbounded_send(channel.into_zx_channel().into()).unwrap();
+            }),
+        };
+        let mock_device = MockDevice { source: "mock-source", scope: scope.clone(), dir };
+        Box::new(staged_a).publish(&mock_device).unwrap();
+
+        let path = format!("ota/zircon_a/{}", BlockMarker::PROTOCOL_NAME);
         let volume = fuchsia_fs::directory::open_async::<BlockMarker>(
             &client,
             &path,

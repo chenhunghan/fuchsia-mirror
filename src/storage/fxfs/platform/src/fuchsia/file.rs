@@ -943,7 +943,10 @@ impl GetVmo for FxFile {
 #[cfg(test)]
 mod tests {
     use super::FxFile;
-    use crate::fuchsia::paged_object_handle::BACKGROUND_FLUSH_THRESHOLD;
+    use crate::fuchsia::directory::FxDirectory;
+    use crate::fuchsia::node::FxNode;
+    use crate::fuchsia::paged_object_handle::{BACKGROUND_FLUSH_THRESHOLD, FLUSH_BATCH_SIZE};
+    use crate::fuchsia::symlink::FxSymlink;
     use crate::fuchsia::testing::{
         TestFixture, TestFixtureOptions, close_file_checked, open_dir_checked, open_file,
         open_file_checked,
@@ -953,18 +956,29 @@ mod tests {
     use fsverity_merkle::{FsVerityHasher, FsVerityHasherOptions};
     use fuchsia_async::{self as fasync, unblock};
     use fuchsia_fs::file;
-    use futures::join;
+    use futures::{FutureExt, join};
+    use fxfs::filesystem::SyncOptions;
     use fxfs::fsck::fsck;
+    use fxfs::hooks::Hooks;
     use fxfs::object_handle::INVALID_OBJECT_ID;
-    use fxfs::object_store::Timestamp;
+    use fxfs::object_store::allocator::max_extent_size_for_block_size;
+    use fxfs::object_store::transaction::{
+        LockKey, Options, TRANSACTION_MAX_JOURNAL_USAGE, lock_keys,
+    };
+    use fxfs::object_store::{Timestamp, journal};
     use fxfs_crypto::WrappingKeyId;
     use rand::{RngExt as _, rng};
+    use std::pin::pin;
     use std::sync::Arc;
     use std::sync::atomic::{self, AtomicBool};
     use std::time::Duration;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
     use storage_units::page_size;
+    use vfs::directory::entry_container::MutableDirectory;
+    use vfs::name::Name;
+    use vfs::node::Node;
+    use vfs::path::Path;
     use zx::Status;
 
     const WRAPPING_KEY_ID: WrappingKeyId = u128::to_le_bytes(123);
@@ -2967,6 +2981,98 @@ mod tests {
     }
 
     #[fuchsia::test]
+    async fn test_file_link_into_self_replacement_in_locked_directory() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let crypt = fixture.crypt().unwrap();
+
+        let encrypted_dir = open_dir_checked(
+            &root,
+            "encrypted_dir",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_DIRECTORY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            fio::Options::default(),
+        )
+        .await;
+        crypt.add_wrapping_key(WRAPPING_KEY_ID, [1; 32].into()).unwrap();
+        encrypted_dir
+            .update_attributes(&fio::MutableNodeAttributes {
+                encryption_policy: Some(fio::FscryptPolicy {
+                    key_identifier: WRAPPING_KEY_ID,
+                    flags: fxfs::object_store::LEGACY_FSCRYPT_FLAGS,
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("update_attributes wire call failed")
+            .map_err(zx::ok)
+            .expect("update_attributes failed");
+
+        let file = open_file_checked(
+            &encrypted_dir,
+            "foo",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_FILE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        file::write(&file, b"secret").await.expect("write failed");
+        file.sync()
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("sync failed");
+
+        let sub_dir = open_dir_checked(
+            &encrypted_dir,
+            "subdir",
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::Flags::PROTOCOL_DIRECTORY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            fio::Options::default(),
+        )
+        .await;
+        crate::testing::close_dir_checked(sub_dir).await;
+
+        // Lock the directory and obtain the proxy filenames for "foo" and "subdir".
+        crypt.forget_wrapping_key(&WRAPPING_KEY_ID).unwrap();
+        fixture.volume().volume().store().clear_caches();
+        let entries = fuchsia_fs::directory::readdir(&encrypted_dir).await.expect("readdir failed");
+        assert_eq!(entries.len(), 2);
+        for entry in &entries {
+            assert_ne!(entry.name, "foo");
+            assert_ne!(entry.name, "subdir");
+            let dst_token = encrypted_dir
+                .get_token()
+                .await
+                .expect("FIDL call failed")
+                .expect("get_token failed");
+            let status = file
+                .link_into(
+                    dst_token,
+                    &entry.name,
+                    &fio::LinkIntoOptions {
+                        flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("link_into FIDL call failed")
+                .map_err(zx::Status::err_from_raw);
+            assert_eq!(status, Err(zx::Status::ACCESS_DENIED));
+        }
+
+        close_file_checked(file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
     async fn test_symlink_link_into_replace_file() {
         let fixture = TestFixture::new().await;
         let root = fixture.root();
@@ -3336,11 +3442,6 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_concurrent_link_into_unnamed_temporary_file() {
-        use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
-        use std::pin::pin;
-        use vfs::name::Name;
-        use vfs::node::Node;
-
         let fixture = TestFixture::new().await;
         let root = fixture.root();
 
@@ -3430,20 +3531,33 @@ mod tests {
         fixture.close().await;
     }
 
-    #[fuchsia::test]
-    async fn test_link_into_races_with_unlink() {
-        use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
-        use std::pin::pin;
-        use vfs::directory::entry_container::MutableDirectory;
-        use vfs::name::Name;
-        use vfs::node::Node;
+    macro_rules! query_attributes {
+        ($proxy:expr, $query:expr) => {
+            $proxy
+                .get_attributes($query)
+                .await
+                .expect("FIDL call failed")
+                .map_err(zx::Status::err_from_raw)
+                .expect("get_attributes failed")
+        };
+    }
 
-        let fixture = TestFixture::new().await;
-        let root = fixture.root();
+    fn cached_node<T: FxNode>(fixture: &TestFixture, object_id: u64) -> Arc<T> {
+        fixture
+            .volume()
+            .volume()
+            .cache()
+            .get(object_id)
+            .expect("node missing from cache")
+            .into_any()
+            .downcast::<T>()
+            .unwrap_or_else(|_| panic!("unexpected node type for object {object_id}"))
+    }
 
+    async fn open_rw_file_and_id(dir: &fio::DirectoryProxy, name: &str) -> (fio::FileProxy, u64) {
         let file = open_file_checked(
-            &root,
-            "foo",
+            dir,
+            name,
             fio::Flags::FLAG_MAYBE_CREATE
                 | fio::Flags::PROTOCOL_FILE
                 | fio::PERM_READABLE
@@ -3451,34 +3565,155 @@ mod tests {
             &fio::Options::default(),
         )
         .await;
-        let (_, immutable_attrs) = file
-            .get_attributes(fio::NodeAttributesQuery::ID)
+        let (_, immutable) = query_attributes!(file, fio::NodeAttributesQuery::ID);
+        (file, immutable.id.unwrap())
+    }
+
+    async fn open_unnamed_temp_file_and_id(dir: &fio::DirectoryProxy) -> (fio::FileProxy, u64) {
+        let file = open_file_checked(
+            dir,
+            ".",
+            fio::Flags::PROTOCOL_FILE
+                | fio::Flags::FLAG_CREATE_AS_UNNAMED_TEMPORARY
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE,
+            &fio::Options::default(),
+        )
+        .await;
+        let (_, immutable) = query_attributes!(file, fio::NodeAttributesQuery::ID);
+        (file, immutable.id.unwrap())
+    }
+
+    async fn create_symlink_and_id(
+        dir: &fio::DirectoryProxy,
+        name: &str,
+        target: &[u8],
+    ) -> (fio::SymlinkProxy, u64) {
+        let (symlink, server_end) = fidl::endpoints::create_proxy::<fio::SymlinkMarker>();
+        dir.create_symlink(name, target, Some(server_end))
             .await
             .expect("FIDL call failed")
             .map_err(zx::Status::err_from_raw)
-            .expect("get_attributes failed");
-        let file_id = immutable_attrs.id.unwrap();
+            .expect("create_symlink failed");
+        let (_, immutable) = query_attributes!(symlink, fio::NodeAttributesQuery::ID);
+        (symlink, immutable.id.unwrap())
+    }
 
-        let volume = fixture.volume().volume();
-        let file_node = volume
-            .cache()
-            .get(file_id)
-            .expect("file node missing")
-            .into_any()
-            .downcast::<FxFile>()
-            .unwrap();
-        let root_dir = volume
-            .cache()
-            .get(volume.store().root_directory_object_id())
-            .expect("root dir missing")
-            .into_any()
-            .downcast::<super::FxDirectory>()
-            .unwrap();
+    fn set_purge_post_commit_hook<'a>(
+        hooks: &mut Hooks<'a>,
+        hook_ran: &'a AtomicBool,
+        fixture: &TestFixture,
+        replaced_id: u64,
+        dst_name: &'static str,
+        is_to_be_purged: impl Fn() -> bool + Send + Sync + 'a,
+    ) {
+        let fs = fixture.fs().clone();
+        let volume = fixture.volume().volume().clone();
+        let store_id = volume.store().store_object_id();
+        let root_id = volume.store().root_directory_object_id();
+        hooks.set_post_commit(move || {
+            hook_ran.store(true, atomic::Ordering::Relaxed);
+            assert!(
+                is_to_be_purged(),
+                "object {replaced_id} must be marked to_be_purged before transaction locks drop"
+            );
+            assert!(
+                fs.lock_manager()
+                    .txn_lock(lock_keys![LockKey::object(store_id, replaced_id)])
+                    .now_or_never()
+                    .is_none(),
+                "object lock must still be held when post_commit runs"
+            );
+            assert!(
+                volume
+                    .dirent_cache()
+                    .lookup(&(root_id, dst_name, false))
+                    .is_none_or(|node| node.object_id() != replaced_id),
+                "dirent_cache must no longer map {dst_name:?} to replaced object {replaced_id}"
+            );
+        });
+    }
+
+    async fn backdate_change_time(fixture: &TestFixture, object_id: u64) {
+        let store = fixture.volume().volume().store();
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), object_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        store
+            .update_attributes(&mut transaction, object_id, None, Some(Timestamp::from_nanos(1)))
+            .await
+            .expect("update_attributes failed");
+        transaction.commit().await.expect("commit failed");
+    }
+
+    async fn link_file_into(
+        file: &fio::FileProxy,
+        dir: &fio::DirectoryProxy,
+        name: &str,
+        replace: bool,
+    ) {
+        let dst_token = dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        let options = if replace {
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            }
+        } else {
+            fio::LinkIntoOptions::default()
+        };
+        file.link_into(dst_token, name, &options)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("link_into failed");
+    }
+
+    async fn link_symlink_into(
+        symlink: &fio::SymlinkProxy,
+        dir: &fio::DirectoryProxy,
+        name: &str,
+        replace: bool,
+    ) {
+        let dst_token = dir.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        let options = if replace {
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            }
+        } else {
+            fio::LinkIntoOptions::default()
+        };
+        symlink
+            .link_into(dst_token, name, &options)
+            .await
+            .expect("FIDL call failed")
+            .map_err(zx::Status::err_from_raw)
+            .expect("symlink link_into failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_races_with_unlink() {
+        let hook_ran = AtomicBool::new(false);
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions { hooks: Some(fs_hooks), ..Default::default() },
+        )
+        .await;
+        let root = fixture.root();
+
+        let (file, file_id) = open_rw_file_and_id(&root, "foo").await;
+        let store = fixture.volume().volume().store();
+        let file_node = cached_node::<FxFile>(&fixture, file_id);
+        let root_dir = cached_node::<FxDirectory>(&fixture, store.root_directory_object_id());
 
         // Hold the transaction lock on `file_id` and poll `unlink` first so `unlink` completes
         // its initial lookup on `root_dir` and blocks on `file_id` (while holding `root_dir`),
-        // and `link_into` queues behind `unlink`.
-        let store = volume.store();
+        // and both `link_into` calls queue behind `unlink` before checking `to_be_purged()`.
         let txn = store
             .new_transaction(
                 lock_keys![LockKey::object(store.store_object_id(), file_id)],
@@ -3497,14 +3732,442 @@ mod tests {
         ));
         assert!(futures::poll!(&mut link_fut).is_pending());
 
+        let mut replace_link_fut = pin!(file_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("baz".to_string()).unwrap(),
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        ));
+        assert!(futures::poll!(&mut replace_link_fut).is_pending());
+
+        let node_for_hook = file_node.clone();
+        set_purge_post_commit_hook(&mut hooks, &hook_ran, &fixture, file_id, "foo", move || {
+            node_for_hook.load_state().to_be_purged()
+        });
+
         drop(txn);
         unlink_fut.await.expect("unlink failed");
+        drop(hooks);
+        assert!(hook_ran.load(atomic::Ordering::Relaxed));
 
         assert_eq!(link_fut.await, Err(zx::Status::NOT_FOUND));
+        assert_eq!(replace_link_fut.await, Err(zx::Status::NOT_FOUND));
+        let (_, immutable) = query_attributes!(file, fio::NodeAttributesQuery::LINK_COUNT);
+        assert_eq!(immutable.link_count, Some(0));
 
         drop(file_node);
         drop(root_dir);
         close_file_checked(file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_races_with_file_link_into_replace() {
+        let hook_ran = AtomicBool::new(false);
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions { hooks: Some(fs_hooks), ..Default::default() },
+        )
+        .await;
+        let root = fixture.root();
+
+        let (replaced_file, replaced_id) = open_rw_file_and_id(&root, "foo").await;
+        let (replacer_file, replacer_id) = open_unnamed_temp_file_and_id(&root).await;
+
+        let store = fixture.volume().volume().store();
+        let replaced_node = cached_node::<FxFile>(&fixture, replaced_id);
+        let replacer_node = cached_node::<FxFile>(&fixture, replacer_id);
+        let root_dir = cached_node::<FxDirectory>(&fixture, store.root_directory_object_id());
+
+        // Hold the transaction lock on `replaced_id` so the replacing `link_into` blocks after
+        // looking up "foo", and concurrent `link_into` calls on `replaced_node` queue behind it.
+        let txn = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), replaced_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut replace_fut = pin!(replacer_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("foo".to_string()).unwrap(),
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        ));
+        assert!(futures::poll!(&mut replace_fut).is_pending());
+
+        let mut link_fut = pin!(replaced_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("bar".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+        assert!(futures::poll!(&mut link_fut).is_pending());
+
+        let mut replace_link_fut = pin!(replaced_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("baz".to_string()).unwrap(),
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        ));
+        assert!(futures::poll!(&mut replace_link_fut).is_pending());
+
+        let node_for_hook = replaced_node.clone();
+        set_purge_post_commit_hook(
+            &mut hooks,
+            &hook_ran,
+            &fixture,
+            replaced_id,
+            "foo",
+            move || node_for_hook.load_state().to_be_purged(),
+        );
+
+        drop(txn);
+        replace_fut.await.expect("replace link_into failed");
+        drop(hooks);
+        assert!(hook_ran.load(atomic::Ordering::Relaxed));
+
+        assert_eq!(link_fut.await, Err(zx::Status::NOT_FOUND));
+        assert_eq!(replace_link_fut.await, Err(zx::Status::NOT_FOUND));
+        let (_, immutable) = query_attributes!(replaced_file, fio::NodeAttributesQuery::LINK_COUNT);
+        assert_eq!(immutable.link_count, Some(0));
+
+        drop(replaced_node);
+        drop(replacer_node);
+        drop(root_dir);
+        close_file_checked(replaced_file).await;
+        close_file_checked(replacer_file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_races_with_rename_replace() {
+        let hook_ran = AtomicBool::new(false);
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions { hooks: Some(fs_hooks), ..Default::default() },
+        )
+        .await;
+        let root = fixture.root();
+
+        let (replaced_file, replaced_id) = open_rw_file_and_id(&root, "target").await;
+        let (src_file, _) = open_rw_file_and_id(&root, "src").await;
+        close_file_checked(src_file).await;
+
+        let store = fixture.volume().volume().store();
+        let replaced_node = cached_node::<FxFile>(&fixture, replaced_id);
+        let root_dir = cached_node::<FxDirectory>(&fixture, store.root_directory_object_id());
+
+        let txn = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), replaced_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut rename_fut = pin!(MutableDirectory::rename(
+            root_dir.clone(),
+            root_dir.clone(),
+            Path::validate_and_split("src").unwrap(),
+            Path::validate_and_split("target").unwrap(),
+        ));
+        assert!(futures::poll!(&mut rename_fut).is_pending());
+
+        let mut link_fut = pin!(replaced_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("target_link".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+        assert!(futures::poll!(&mut link_fut).is_pending());
+
+        let node_for_hook = replaced_node.clone();
+        set_purge_post_commit_hook(
+            &mut hooks,
+            &hook_ran,
+            &fixture,
+            replaced_id,
+            "target",
+            move || node_for_hook.load_state().to_be_purged(),
+        );
+
+        drop(txn);
+        rename_fut.await.expect("rename failed");
+        drop(hooks);
+        assert!(hook_ran.load(atomic::Ordering::Relaxed));
+
+        assert_eq!(link_fut.await, Err(zx::Status::NOT_FOUND));
+        let (_, immutable) = query_attributes!(replaced_file, fio::NodeAttributesQuery::LINK_COUNT);
+        assert_eq!(immutable.link_count, Some(0));
+
+        drop(replaced_node);
+        drop(root_dir);
+        close_file_checked(replaced_file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_races_with_symlink_link_into_replace() {
+        let hook_ran = AtomicBool::new(false);
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(16384, 512)),
+            TestFixtureOptions { hooks: Some(fs_hooks), ..Default::default() },
+        )
+        .await;
+        let root = fixture.root();
+
+        let (replaced_symlink, replaced_sym_id) =
+            create_symlink_and_id(&root, "sym_target", b"old_target").await;
+        let (_replacer_symlink, replacer_sym_id) =
+            create_symlink_and_id(&root, "sym_src", b"new_target").await;
+
+        let store = fixture.volume().volume().store();
+        let replaced_sym_node = cached_node::<FxSymlink>(&fixture, replaced_sym_id);
+        let replacer_sym_node = cached_node::<FxSymlink>(&fixture, replacer_sym_id);
+        let root_dir = cached_node::<FxDirectory>(&fixture, store.root_directory_object_id());
+
+        let txn = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), replaced_sym_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut sym_replace_fut = pin!(replacer_sym_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("sym_target".to_string()).unwrap(),
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        ));
+        assert!(futures::poll!(&mut sym_replace_fut).is_pending());
+
+        let mut sym_link_fut = pin!(replaced_sym_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("sym_resurrected".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+        assert!(futures::poll!(&mut sym_link_fut).is_pending());
+
+        let mut sym_replace_link_fut = pin!(replaced_sym_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("sym_resurrected_replace".to_string()).unwrap(),
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        ));
+        assert!(futures::poll!(&mut sym_replace_link_fut).is_pending());
+
+        let node_for_hook = replaced_sym_node.clone();
+        set_purge_post_commit_hook(
+            &mut hooks,
+            &hook_ran,
+            &fixture,
+            replaced_sym_id,
+            "sym_target",
+            move || node_for_hook.to_be_purged(),
+        );
+
+        drop(txn);
+        sym_replace_fut.await.expect("replace symlink link_into failed");
+        drop(hooks);
+        assert!(hook_ran.load(atomic::Ordering::Relaxed));
+
+        assert_eq!(sym_link_fut.await, Err(zx::Status::NOT_FOUND));
+        assert_eq!(sym_replace_link_fut.await, Err(zx::Status::NOT_FOUND));
+        let (_, immutable) =
+            query_attributes!(replaced_symlink, fio::NodeAttributesQuery::LINK_COUNT);
+        assert_eq!(immutable.link_count, Some(0));
+
+        drop(replaced_sym_node);
+        drop(replacer_sym_node);
+        drop(root_dir);
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_link_into_before_replace_preserves_open_file() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+
+        let (replaced_file, replaced_id) = open_rw_file_and_id(&root, "foo").await;
+        file::write(&replaced_file, b"original").await.expect("write failed");
+        let (replacer_file, replacer_id) = open_unnamed_temp_file_and_id(&root).await;
+        file::write(&replacer_file, b"replacement").await.expect("write failed");
+
+        let store = fixture.volume().volume().store();
+        let replaced_node = cached_node::<FxFile>(&fixture, replaced_id);
+        let replacer_node = cached_node::<FxFile>(&fixture, replacer_id);
+        let root_dir = cached_node::<FxDirectory>(&fixture, store.root_directory_object_id());
+
+        // Queue `link_fut` ahead of `replace_fut` on `replaced_id` so the new link commits first
+        // and the subsequent replacement removes only one of two links instead of marking the open
+        // file to be purged.
+        let txn = store
+            .new_transaction(
+                lock_keys![LockKey::object(store.store_object_id(), replaced_id)],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut link_fut = pin!(replaced_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("bar".to_string()).unwrap(),
+            fio::LinkIntoOptions::default(),
+        ));
+        assert!(futures::poll!(&mut link_fut).is_pending());
+
+        let mut replace_fut = pin!(replacer_node.clone().link_into(
+            root_dir.clone(),
+            Name::try_from("foo".to_string()).unwrap(),
+            fio::LinkIntoOptions {
+                flags: Some(fio::LinkIntoFlags::REPLACE_EXISTING),
+                ..Default::default()
+            },
+        ));
+        assert!(futures::poll!(&mut replace_fut).is_pending());
+
+        drop(txn);
+        let (link_res, replace_res) = join!(link_fut, replace_fut);
+        link_res.expect("link_into failed");
+        replace_res.expect("replace link_into failed");
+
+        assert!(!replaced_node.load_state().to_be_purged());
+        let (_, immutable) = query_attributes!(replaced_file, fio::NodeAttributesQuery::LINK_COUNT);
+        assert_eq!(immutable.link_count, Some(1));
+        assert_eq!(
+            fuchsia_fs::directory::read_file(&root, "bar").await.expect("read bar failed"),
+            b"original"
+        );
+        assert_eq!(
+            fuchsia_fs::directory::read_file(&root, "foo").await.expect("read foo failed"),
+            b"replacement"
+        );
+
+        drop(replaced_node);
+        drop(replacer_node);
+        drop(root_dir);
+        close_file_checked(replaced_file).await;
+        close_file_checked(replacer_file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_file_link_updates_change_time() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let time_query =
+            fio::NodeAttributesQuery::CHANGE_TIME | fio::NodeAttributesQuery::MODIFICATION_TIME;
+
+        let (file, file_id) = open_rw_file_and_id(&root, "foo").await;
+        let (mutable0, _) = query_attributes!(file, time_query);
+        let mtime0 = mutable0.modification_time.unwrap();
+
+        backdate_change_time(&fixture, file_id).await;
+        link_file_into(&file, &root, "bar", false).await;
+        let (file_mutable, file_immutable) = query_attributes!(file, time_query);
+        let (dir_mutable, dir_immutable) = query_attributes!(root, time_query);
+        assert!(file_immutable.change_time.unwrap() > 1);
+        assert_eq!(file_mutable.modification_time.unwrap(), mtime0);
+        assert_eq!(file_immutable.change_time, dir_immutable.change_time);
+        assert_eq!(file_immutable.change_time, dir_mutable.modification_time);
+
+        let (target, _) = open_rw_file_and_id(&root, "baz").await;
+        close_file_checked(target).await;
+
+        backdate_change_time(&fixture, file_id).await;
+        link_file_into(&file, &root, "baz", true).await;
+        let (file_mutable, file_immutable) = query_attributes!(file, time_query);
+        let (dir_mutable, dir_immutable) = query_attributes!(root, time_query);
+        assert!(file_immutable.change_time.unwrap() > 1);
+        assert_eq!(file_mutable.modification_time.unwrap(), mtime0);
+        assert_eq!(file_immutable.change_time, dir_immutable.change_time);
+        assert_eq!(file_immutable.change_time, dir_mutable.modification_time);
+
+        // Also verify `Directory::Link` (`link_object`) updates `change_time` to match the
+        // directory update timestamp.
+        backdate_change_time(&fixture, file_id).await;
+        let dst_token =
+            root.get_token().await.expect("FIDL call failed").expect("get_token failed");
+        let status = root.link("foo", dst_token.into(), "qux").await.expect("FIDL call failed");
+        zx::Status::ok(status).expect("link failed");
+        let (file_mutable, file_immutable) = query_attributes!(file, time_query);
+        let (dir_mutable, dir_immutable) = query_attributes!(root, time_query);
+        assert!(file_immutable.change_time.unwrap() > 1);
+        assert_eq!(file_mutable.modification_time.unwrap(), mtime0);
+        assert_eq!(file_immutable.change_time, dir_immutable.change_time);
+        assert_eq!(file_immutable.change_time, dir_mutable.modification_time);
+
+        // Also verify linking an unnamed temporary file updates its `change_time`.
+        let (tmpfile, tmp_id) = open_unnamed_temp_file_and_id(&root).await;
+        let (tmp_mutable0, _) = query_attributes!(tmpfile, time_query);
+        let tmp_mtime0 = tmp_mutable0.modification_time.unwrap();
+
+        backdate_change_time(&fixture, tmp_id).await;
+        link_file_into(&tmpfile, &root, "from_tmp", false).await;
+        let (tmp_mutable, tmp_immutable) = query_attributes!(tmpfile, time_query);
+        let (dir_mutable, dir_immutable) = query_attributes!(root, time_query);
+        assert!(tmp_immutable.change_time.unwrap() > 1);
+        assert_eq!(tmp_mutable.modification_time.unwrap(), tmp_mtime0);
+        assert_eq!(tmp_immutable.change_time, dir_immutable.change_time);
+        assert_eq!(tmp_immutable.change_time, dir_mutable.modification_time);
+
+        close_file_checked(tmpfile).await;
+        close_file_checked(file).await;
+        fsck(fixture.fs().clone()).await.expect("fsck failed");
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_symlink_link_into_updates_change_time() {
+        let fixture = TestFixture::new().await;
+        let root = fixture.root();
+        let time_query =
+            fio::NodeAttributesQuery::CHANGE_TIME | fio::NodeAttributesQuery::MODIFICATION_TIME;
+
+        let (symlink, sym_id) = create_symlink_and_id(&root, "sym", b"target").await;
+        let (sym_mutable0, _) = query_attributes!(symlink, time_query);
+        let sym_mtime0 = sym_mutable0.modification_time.unwrap();
+
+        backdate_change_time(&fixture, sym_id).await;
+        link_symlink_into(&symlink, &root, "sym_link", false).await;
+        let (sym_mutable, sym_immutable) = query_attributes!(symlink, time_query);
+        let (dir_mutable, dir_immutable) = query_attributes!(root, time_query);
+        assert!(sym_immutable.change_time.unwrap() > 1);
+        assert_eq!(sym_mutable.modification_time.unwrap(), sym_mtime0);
+        assert_eq!(sym_immutable.change_time, dir_immutable.change_time);
+        assert_eq!(sym_immutable.change_time, dir_mutable.modification_time);
+
+        let (target_file, _) = open_rw_file_and_id(&root, "existing").await;
+        close_file_checked(target_file).await;
+
+        backdate_change_time(&fixture, sym_id).await;
+        link_symlink_into(&symlink, &root, "existing", true).await;
+        let (sym_mutable, sym_immutable) = query_attributes!(symlink, time_query);
+        let (dir_mutable, dir_immutable) = query_attributes!(root, time_query);
+        assert!(sym_immutable.change_time.unwrap() > 1);
+        assert_eq!(sym_mutable.modification_time.unwrap(), sym_mtime0);
+        assert_eq!(sym_immutable.change_time, dir_immutable.change_time);
+        assert_eq!(sym_immutable.change_time, dir_mutable.modification_time);
+
         fsck(fixture.fs().clone()).await.expect("fsck failed");
         fixture.close().await;
     }
@@ -4117,7 +4780,7 @@ mod tests {
     )]
     #[fuchsia::test]
     async fn test_supported_wrapping_key_ids(key: fxfs_crypto::EncryptionKey) {
-        use fxfs::object_store::transaction::{LockKey, Mutation, Options, lock_keys};
+        use fxfs::object_store::transaction::Mutation;
         use fxfs::object_store::{FSCRYPT_KEY_ID, ObjectKey, ObjectValue};
 
         let fixture = TestFixture::new().await;
@@ -4237,6 +4900,282 @@ mod tests {
         // When that fails, we want to make sure that all the dirty pages still get returned to the
         // dirty page tracking and allocator. There is an assert in the `PagedObjectHandle::drop`
         // that will otherwise trigger.
+        fixture.close().await;
+    }
+
+    /// Logical offsets at or above 4 GiB take the full 9 bytes when serialized, which is the
+    /// largest encoding. Writing at this offset makes every logical extent record as big as it
+    /// can be.
+    const FULL_WIDTH_VARINT_OFFSET: u64 = 1 << 32;
+
+    /// The test devices are smaller than 4 GiB, so each device offset is serialized in 5 bytes.
+    /// On a larger device the same offset can take 9 bytes. This is the extra cost per offset.
+    const U64_WIDENING_FROM_U32: u64 = 4;
+
+    async fn write_stream_at_offsets(
+        stream: &zx::Stream,
+        offsets: impl IntoIterator<Item = u64>,
+        data: &[u8],
+    ) {
+        let stream = stream.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap();
+        let offsets: Vec<u64> = offsets.into_iter().collect();
+        let data = data.to_vec();
+        unblock(move || {
+            for offset in offsets {
+                stream
+                    .write_at(zx::StreamWriteOptions::empty(), offset, &data)
+                    .expect("write_at failed");
+            }
+        })
+        .await;
+    }
+
+    /// Syncs `file` and returns the number of journal bytes written by the flush.
+    ///
+    /// Compactions are paused so nothing else is written to the journal during the measurement,
+    /// and the filesystem is synced first so the flush starts on a journal block boundary. While
+    /// the flush is paused in `Journal::pre_commit`, a concurrent `fs.sync()` runs; if
+    /// `pre_commit` wrote records before taking `writer_mutex`, that sync would pad a second
+    /// block. Usage is counted from the initial block boundary to the end of the flush.
+    async fn measure_sync_journal_usage(
+        fixture: &TestFixture,
+        file: &fio::FileProxy,
+        file_id: u64,
+    ) -> u64 {
+        let fs = fixture.fs();
+        let journal = fs.journal();
+        // The first compaction moves `super_block_header.journal_checkpoint` past zero; the second
+        // sets `zero_offset`, so the next `pre_commit` runs its async zeroing pass.
+        journal.force_compact().await.expect("force_compact failed");
+        journal.force_compact().await.expect("force_compact failed");
+        journal.pause_compactions().await;
+        fs.sync(SyncOptions { flush_device: true, ..Default::default() })
+            .await
+            .expect("fs sync failed");
+        let offset_before = fs.object_manager().last_end_offset();
+        let writer_offset_before = journal::BLOCK_SIZE.align_up(offset_before).unwrap();
+
+        // Hold the journal object lock so `file.sync()` pauses in `Journal::pre_commit` after its
+        // initial check, while zeroing the old journal tail left by `force_compact`.
+        let journal_lock = fs
+            .lock_manager()
+            .txn_lock(lock_keys![LockKey::object(
+                fs.root_parent_store().store_object_id(),
+                journal.super_block_header().journal_object_id,
+            )])
+            .await;
+        let file_key = lock_keys![LockKey::object(
+            fixture.volume().volume().store().store_object_id(),
+            file_id,
+        )];
+
+        let mut sync_fut = std::pin::pin!(file.sync());
+        while futures::poll!(std::pin::pin!(fs.lock_manager().read_lock(file_key.clone())))
+            .is_ready()
+        {
+            assert!(futures::poll!(&mut sync_fut).is_pending());
+            fuchsia_async::yield_now().await;
+        }
+
+        fs.sync(SyncOptions::default()).await.expect("concurrent fs sync failed");
+        drop(journal_lock);
+
+        sync_fut.await.unwrap().expect("sync failed");
+        let offset_after = fs.object_manager().last_end_offset();
+        journal.resume_compactions();
+        offset_after - writer_offset_before
+    }
+
+    #[fuchsia::test]
+    async fn test_max_transaction_size_fragmented_cow_overwrite() {
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(49152, 512)),
+            TestFixtureOptions::default(),
+        )
+        .await;
+        // Pause background compactions during setup so neither premature device flushes nor
+        // `force_compact` zeroing the contiguous initial journal chunk release multi-block
+        // extents back into the allocator before step 4.
+        fixture.fs().journal().pause_compactions().await;
+        let root = fixture.root();
+        let page_size = page_size().get();
+        let pages_per_batch = FLUSH_BATCH_SIZE / page_size;
+        assert_eq!(pages_per_batch, 128);
+
+        // 1. Write 1 MiB (256 pages) to `target` at a 4 GiB offset and sync it. Step 4 overwrites
+        //    every other page, so the old blocks it frees are not adjacent.
+        let (target, target_id) = open_rw_file_and_id(&root, "target").await;
+        let target_stream = target.describe().await.unwrap().stream.unwrap();
+        let batch_buf = vec![0xaa; FLUSH_BATCH_SIZE as usize];
+        for i in 0..2 {
+            write_stream_at_offsets(
+                &target_stream,
+                [FULL_WIDTH_VARINT_OFFSET + i * FLUSH_BATCH_SIZE],
+                &batch_buf,
+            )
+            .await;
+            target.sync().await.unwrap().expect("sync failed");
+        }
+
+        // 2. Write 8 MiB to `donor`, then overwrite every other page. This frees 1024 scattered
+        //    4 KiB blocks (more than `metadata_reservation` plus the 1 MiB left for step 4, so
+        //    step 3 must exhaust all contiguous tail space). They cannot be reused until the next
+        //    device flush, so for now the allocator only has the contiguous free space at the end
+        //    of the disk.
+        let (donor, _) = open_rw_file_and_id(&root, "donor").await;
+        let donor_stream = donor.describe().await.unwrap().stream.unwrap();
+        for i in 0..16 {
+            write_stream_at_offsets(&donor_stream, [i * FLUSH_BATCH_SIZE], &batch_buf).await;
+            donor.sync().await.unwrap().expect("sync failed");
+        }
+        for batch in 0..8 {
+            let offsets =
+                (0..pages_per_batch).map(|i| (batch * pages_per_batch + i) * 2 * page_size);
+            write_stream_at_offsets(&donor_stream, offsets, &[0xbb]).await;
+            donor.sync().await.unwrap().expect("sync failed");
+        }
+
+        // 3. Fill the disk with `sponge`, leaving 1 MiB free. This uses up the contiguous space at
+        //    the end of the disk and forces a device flush, which releases the scattered blocks
+        //    from step 2. After this, the only free space left is isolated 4 KiB holes.
+        let (sponge, _) = open_rw_file_and_id(&root, "sponge").await;
+        let (status, info) = root.query_filesystem().await.expect("query_filesystem failed");
+        Status::ok(status).expect("query_filesystem status failed");
+        let info = info.unwrap();
+        let free_bytes = info.total_bytes - info.used_bytes;
+        let target_needed = 2 * FLUSH_BATCH_SIZE;
+        sponge
+            .allocate(0, free_bytes - target_needed, fio::AllocateMode::empty())
+            .await
+            .unwrap()
+            .expect("allocate failed");
+
+        // 4. Overwrite every other page of `target` (128 pages, one full flush batch) and sync.
+        //    Each page needs its own new block and frees its own old block, so one transaction
+        //    records 128 separate allocations, frees, extents and checksums.
+        let even_offsets =
+            (0..pages_per_batch).map(|i| FULL_WIDTH_VARINT_OFFSET + i * 2 * page_size);
+        write_stream_at_offsets(&target_stream, even_offsets, &[0xcc]).await;
+
+        let txn_journal_usage = measure_sync_journal_usage(&fixture, &target, target_id).await;
+
+        // Check that the file really is 256 separate one-page extents, and that none of the 128
+        // new blocks are next to each other on disk.
+        let extents = cached_node::<FxFile>(&fixture, target_id)
+            .handle()
+            .uncached_handle()
+            .device_extents()
+            .await
+            .expect("device_extents failed");
+        assert_eq!(extents.len(), (pages_per_batch * 2) as usize);
+        assert!(extents.iter().all(|e| e.length() == page_size));
+        let mut even_device_ranges: Vec<_> =
+            extents.iter().step_by(2).map(|e| e.device_range().clone()).collect();
+        even_device_ranges.sort_by_key(|r| r.start);
+        assert!(
+            even_device_ranges.windows(2).all(|w| w[0].end < w[1].start),
+            "Expected the 128 new blocks to be non-adjacent on disk",
+        );
+
+        // Each page writes 7 device offsets, and each would grow on a disk larger than 4 GiB. The
+        // limit must still hold with that growth added, and with a full block of padding on top.
+        let device_offset_widening = pages_per_batch * 7 * U64_WIDENING_FROM_U32;
+        assert!(
+            txn_journal_usage > 12_000,
+            "Expected the CoW flush to use over 12 KB of journal, got {txn_journal_usage}",
+        );
+        assert!(
+            txn_journal_usage + device_offset_widening + journal::BLOCK_SIZE.get()
+                <= TRANSACTION_MAX_JOURNAL_USAGE,
+            "journal usage {txn_journal_usage} plus offset growth {device_offset_widening} \
+             plus padding is over the limit of {TRANSACTION_MAX_JOURNAL_USAGE}",
+        );
+
+        close_file_checked(target).await;
+        close_file_checked(donor).await;
+        close_file_checked(sponge).await;
+        fixture.close().await;
+    }
+
+    #[fuchsia::test]
+    async fn test_max_transaction_size_overwrite_partial_flush() {
+        // The allocator hands out free space in 2 MiB chunks. Each 448-block extent takes one
+        // chunk and leaves a small hole behind. The device is 264 MiB so that, after filesystem
+        // metadata, there are still enough whole chunks for all 128 extents.
+        let fixture = TestFixture::open(
+            DeviceHolder::new(FakeDevice::new(67584, 4096)),
+            TestFixtureOptions::default(),
+        )
+        .await;
+        let root = fixture.root();
+        let page_size = page_size().get();
+        let pages_per_batch = FLUSH_BATCH_SIZE / page_size;
+        assert_eq!(pages_per_batch, 128);
+
+        // With 4 KiB blocks, the largest extent the allocator creates is 448 blocks. These extents
+        // are never merged, so allocating 128 of them at a 4 GiB offset gives 128 separate
+        // OverwritePartial extents, each as large as possible.
+        let extent_bytes = max_extent_size_for_block_size(fixture.fs().block_size());
+        let max_extent_blocks = extent_bytes / page_size;
+        assert_eq!(max_extent_blocks, 448);
+
+        let (file, file_id) = open_rw_file_and_id(&root, "overwrite_file").await;
+        file.allocate(
+            FULL_WIDTH_VARINT_OFFSET,
+            pages_per_batch * extent_bytes,
+            fio::AllocateMode::empty(),
+        )
+        .await
+        .unwrap()
+        .expect("allocate failed");
+
+        // Each extent tracks which blocks have been written using a bitmap of 14 32-bit words.
+        // A word with its top bit set takes the most space to serialize. Write the last block
+        // covered by each word so every bitmap is as large as possible. Most blocks stay
+        // unwritten, so the extents remain OverwritePartial.
+        let stream = file.describe().await.unwrap().stream.unwrap();
+        for w in 0..(max_extent_blocks / 32) {
+            let offsets = (0..pages_per_batch)
+                .map(|i| FULL_WIDTH_VARINT_OFFSET + i * extent_bytes + (w * 32 + 31) * page_size);
+            write_stream_at_offsets(&stream, offsets, &[0xee]).await;
+            file.sync().await.unwrap().expect("sync failed");
+        }
+
+        // Write the first block of each extent (128 pages, one full flush batch) and sync. One
+        // transaction then rewrites all 128 large bitmaps and adds 128 checksum records.
+        let first_block_offsets =
+            (0..pages_per_batch).map(|i| FULL_WIDTH_VARINT_OFFSET + i * extent_bytes);
+        write_stream_at_offsets(&stream, first_block_offsets, &[0xdd]).await;
+
+        let txn_journal_usage = measure_sync_journal_usage(&fixture, &file, file_id).await;
+
+        // Check that the file is still 128 separate 448-block extents.
+        let extents = cached_node::<FxFile>(&fixture, file_id)
+            .handle()
+            .uncached_handle()
+            .device_extents()
+            .await
+            .expect("device_extents failed");
+        assert_eq!(extents.len(), pages_per_batch as usize);
+        assert!(extents.iter().all(|e| e.length() == extent_bytes));
+
+        // Each extent writes 3 device offsets, and each would grow on a disk larger than 4 GiB.
+        // The limit must still hold with that growth added, and with a full block of padding on
+        // top.
+        let device_offset_widening = pages_per_batch * 3 * U64_WIDENING_FROM_U32;
+        assert!(
+            txn_journal_usage > 16_000,
+            "Expected the OverwritePartial flush to use over 16 KB of journal, got \
+             {txn_journal_usage}",
+        );
+        assert!(
+            txn_journal_usage + device_offset_widening + journal::BLOCK_SIZE.get()
+                <= TRANSACTION_MAX_JOURNAL_USAGE,
+            "journal usage {txn_journal_usage} plus offset growth {device_offset_widening} \
+             plus padding is over the limit of {TRANSACTION_MAX_JOURNAL_USAGE}",
+        );
+
+        close_file_checked(file).await;
         fixture.close().await;
     }
 }

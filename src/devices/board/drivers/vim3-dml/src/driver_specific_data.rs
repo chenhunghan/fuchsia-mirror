@@ -26,9 +26,6 @@ pub static VIM3_DRIVER_METADATA: dml_config::parser::DriverSpecificMetadata = ph
     "wifi" => &[
         ("fuchsia.wlan.broadcom.WifiConfig", get_wifi_metadata),
     ],
-    "pwm-ffd1b000" => &[
-        ("fuchsia.hardware.pwm.PwmChannelsMetadata", get_pwm_metadata),
-    ],
     "clock-controller-ff63c000" => &[
         ("fuchsia.hardware.clockimpl.InitMetadata", get_clock_init_metadata),
     ],
@@ -80,13 +77,13 @@ fn get_cpu_metadata() -> anyhow::Result<Vec<u8>> {
             id: 1,
             core_count: 4,
             relative_performance: 255,
-            name: "big".to_string(),
+            name: "a311d-arm-a73".to_string(),
         },
         PerformanceDomain {
             id: 2,
             core_count: 2,
-            relative_performance: 160,
-            name: "little".to_string(),
+            relative_performance: 112,
+            name: "a311d-arm-a53".to_string(),
         },
     ];
 
@@ -211,7 +208,9 @@ fn get_emmc_metadata() -> anyhow::Result<Vec<u8>> {
     let metadata = fidl_fuchsia_hardware_sdmmc::SdmmcMetadata {
         max_frequency: Some(120_000_000),
         speed_capabilities: Some(fidl_fuchsia_hardware_sdmmc::SdmmcHostPrefs::DISABLE_HS400),
+        removable: Some(false),
         use_fidl: Some(true),
+        instance_identifier: Some("mmc@ffe07000".to_string()),
         ..Default::default()
     };
     fidl::persist(&metadata).context("Failed to serialize eMMC metadata")
@@ -222,6 +221,7 @@ fn get_sdcard_metadata() -> anyhow::Result<Vec<u8>> {
         max_frequency: Some(50_000_000),
         removable: Some(true),
         use_fidl: Some(false),
+        instance_identifier: Some("mmc@ffe05000".to_string()),
         ..Default::default()
     };
     fidl::persist(&metadata).context("Failed to serialize SD card metadata")
@@ -230,7 +230,9 @@ fn get_sdcard_metadata() -> anyhow::Result<Vec<u8>> {
 fn get_sdio_metadata() -> anyhow::Result<Vec<u8>> {
     let metadata = fidl_fuchsia_hardware_sdmmc::SdmmcMetadata {
         max_frequency: Some(100_000_000),
+        removable: Some(true),
         use_fidl: Some(false),
+        instance_identifier: Some("mmc@ffe03000".to_string()),
         ..Default::default()
     };
     fidl::persist(&metadata).context("Failed to serialize SDIO metadata")
@@ -240,8 +242,8 @@ fn get_empty_i2c_metadata() -> anyhow::Result<Vec<u8>> {
     let dictionary = fdr::Dictionary {
         entries: Some(vec![
             fdr::DictionaryEntry {
-                key: "controller_id".to_string(),
-                value: fdr::DictionaryValue::Int64(2),
+                key: "provider".to_string(),
+                value: fdr::DictionaryValue::Int64(1),
             },
             fdr::DictionaryEntry {
                 key: "channels._count".to_string(),
@@ -251,26 +253,4 @@ fn get_empty_i2c_metadata() -> anyhow::Result<Vec<u8>> {
         ..Default::default()
     };
     fidl::persist(&dictionary).context("Failed to serialize empty i2c metadata")
-}
-
-fn get_pwm_metadata() -> anyhow::Result<Vec<u8>> {
-    let mut entries = vec![fdr::DictionaryEntry {
-        key: "channels._count".to_string(),
-        value: fdr::DictionaryValue::Int64(10),
-    }];
-
-    for i in 0..10 {
-        entries.push(fdr::DictionaryEntry {
-            key: format!("channels.{}.channel", i),
-            value: fdr::DictionaryValue::Int64(i as i64),
-        });
-        let period = if i == 0 || i == 9 { 1250 } else { 0 };
-        entries.push(fdr::DictionaryEntry {
-            key: format!("channels.{}.period_ns", i),
-            value: fdr::DictionaryValue::Int64(period),
-        });
-    }
-
-    let dictionary = fdr::Dictionary { entries: Some(entries), ..Default::default() };
-    fidl::persist(&dictionary).context("Failed to serialize pwm metadata")
 }

@@ -5,6 +5,13 @@
 #include "src/lib/files/file.h"
 
 #include <fcntl.h>
+#include <limits.h>
+
+#ifdef __Fuchsia__
+#include <fidl/fuchsia.io/cpp/wire.h>
+#include <lib/fdio/directory.h>
+#include <zircon/availability.h>
+#endif  // __Fuchsia__
 
 #include <vector>
 
@@ -29,8 +36,10 @@ std::vector<std::string> GetNonDotDirContents(const std::string& dir_path) {
   return contents;
 }
 
-TEST(File, WriteFileInTwoPhases) {
-  ScopedTempDir dir;
+class WriteFileInTwoPhasesTest : public ::testing::TestWithParam<std::string_view> {};
+
+TEST_P(WriteFileInTwoPhasesTest, WriteAndUpdate) {
+  ScopedTempDir dir(GetParam());
   fbl::unique_fd dirfd(open(dir.path().c_str(), O_RDONLY | O_DIRECTORY));
   ASSERT_TRUE(dirfd.is_valid());
 
@@ -47,6 +56,11 @@ TEST(File, WriteFileInTwoPhases) {
   ASSERT_TRUE(ReadFileToStringAt(dirfd.get(), filename, &read_content));
   EXPECT_EQ(read_content, updated_content);
   EXPECT_THAT(GetNonDotDirContents(dir.path()), UnorderedElementsAre("destination"));
+
+  ASSERT_TRUE(WriteFileInTwoPhases(dirfd.get(), filename, ""));
+  ASSERT_TRUE(ReadFileToStringAt(dirfd.get(), filename, &read_content));
+  EXPECT_TRUE(read_content.empty());
+  EXPECT_THAT(GetNonDotDirContents(dir.path()), UnorderedElementsAre("destination"));
 }
 
 TEST(File, WriteFileInTwoPhasesOverwritesLeftoverTempFile) {
@@ -57,8 +71,8 @@ TEST(File, WriteFileInTwoPhasesOverwritesLeftoverTempFile) {
   std::string path = dir.path() + "/destination";
   std::string leftover_temp_path = dir.path() + "/destination.tmp";
 
-  // Simulate a prior write that was interrupted (e.g. by a reboot) after writing the temp file
-  // but before renaming it over the destination.
+  // Simulate a prior fallback or Linux write that was interrupted (e.g. by a reboot) after
+  // creating/linking "<filename>.tmp" but before renaming it over the destination.
   ASSERT_TRUE(WriteFile(path, "old content"));
   ASSERT_TRUE(WriteFile(leftover_temp_path, "interrupted temp content"));
 
@@ -71,18 +85,77 @@ TEST(File, WriteFileInTwoPhasesOverwritesLeftoverTempFile) {
   EXPECT_THAT(GetNonDotDirContents(dir.path()), UnorderedElementsAre("destination"));
 }
 
-TEST(File, WriteFileInTwoPhasesCleansUpTempFileOnRenameFailure) {
-  ScopedTempDir dir;
+TEST_P(WriteFileInTwoPhasesTest, CleansUpTempFileOnRenameFailure) {
+  ScopedTempDir dir(GetParam());
   fbl::unique_fd dirfd(open(dir.path().c_str(), O_RDONLY | O_DIRECTORY));
   ASSERT_TRUE(dirfd.is_valid());
 
-  // Creating a directory at the target filename causes renameat() of the temporary file to fail
-  // with EISDIR.
+  // Creating a directory at the target filename causes replacing it to fail.
   ASSERT_TRUE(CreateDirectoryAt(dirfd.get(), "destination"));
 
   EXPECT_FALSE(WriteFileInTwoPhases(dirfd.get(), "destination", "content"));
   EXPECT_THAT(GetNonDotDirContents(dir.path()), UnorderedElementsAre("destination"));
 }
+
+TEST_P(WriteFileInTwoPhasesTest, FailsOnNonDirectoryFd) {
+  ScopedTempDir dir(GetParam());
+  fbl::unique_fd dirfd(open(dir.path().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_TRUE(dirfd.is_valid());
+
+  ASSERT_TRUE(WriteFileAt(dirfd.get(), "regular_file", "hello", 5));
+  fbl::unique_fd file_fd(openat(dirfd.get(), "regular_file", O_RDONLY));
+  ASSERT_TRUE(file_fd.is_valid());
+
+  EXPECT_FALSE(WriteFileInTwoPhases(file_fd.get(), "destination", "content"));
+  EXPECT_THAT(GetNonDotDirContents(dir.path()), UnorderedElementsAre("regular_file"));
+}
+
+#ifdef __Fuchsia__
+// Test both /tmp (memfs, which does not support FLAG_CREATE_AS_UNNAMED_TEMPORARY and exercises the
+// fallback path) and /data (fxfs on standard builds, or minfs on core_with_minfs builds).
+INSTANTIATE_TEST_SUITE_P(File, WriteFileInTwoPhasesTest, ::testing::Values("/tmp", "/data"));
+
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+TEST(File, WriteFileInTwoPhasesBypassesNamedTempFileWhenSupported) {
+  ScopedTempDir dir("/data");
+  fbl::unique_fd dirfd(open(dir.path().c_str(), O_RDONLY | O_DIRECTORY));
+  ASSERT_TRUE(dirfd.is_valid());
+
+  // Some configurations (e.g. core_with_minfs) back /data with a filesystem that does not support
+  // unnamed temporary files.
+  constexpr fuchsia_io::wire::Flags kProbeFlags =
+      fuchsia_io::wire::Flags::kProtocolFile | fuchsia_io::wire::kPermReadable |
+      fuchsia_io::wire::kPermWritable | fuchsia_io::wire::Flags::kFlagCreateAsUnnamedTemporary;
+  int probe_raw_fd = -1;
+  const zx_status_t probe_status =
+      fdio_open3_fd_at(dirfd.get(), ".", uint64_t{kProbeFlags}, &probe_raw_fd);
+  if (probe_status == ZX_ERR_NOT_SUPPORTED) {
+    GTEST_SKIP() << "/data filesystem does not support FLAG_CREATE_AS_UNNAMED_TEMPORARY";
+  }
+  ASSERT_EQ(probe_status, ZX_OK);
+  fbl::unique_fd probe_fd(probe_raw_fd);
+  probe_fd.reset();
+
+  // Occupy "destination.tmp" with a directory so the fallback path (opening "destination.tmp" for
+  // writing) would fail with EISDIR. Direct linking via FLAG_CREATE_AS_UNNAMED_TEMPORARY and
+  // LinkInto with REPLACE_EXISTING never opens "destination.tmp" and must still succeed.
+  ASSERT_TRUE(CreateDirectoryAt(dirfd.get(), "destination.tmp"));
+
+  ASSERT_TRUE(WriteFileInTwoPhases(dirfd.get(), "destination", "initial"));
+  std::string read_content;
+  ASSERT_TRUE(ReadFileToStringAt(dirfd.get(), "destination", &read_content));
+  EXPECT_EQ(read_content, "initial");
+
+  ASSERT_TRUE(WriteFileInTwoPhases(dirfd.get(), "destination", "overwritten"));
+  ASSERT_TRUE(ReadFileToStringAt(dirfd.get(), "destination", &read_content));
+  EXPECT_EQ(read_content, "overwritten");
+  EXPECT_THAT(GetNonDotDirContents(dir.path()),
+              UnorderedElementsAre("destination", "destination.tmp"));
+}
+#endif  // FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+#else
+INSTANTIATE_TEST_SUITE_P(File, WriteFileInTwoPhasesTest, ::testing::Values(""));
+#endif  // __Fuchsia__
 
 TEST(File, WriteFileInTwoPhasesFailsOnInvalidArguments) {
   ScopedTempDir dir;
@@ -96,6 +169,7 @@ TEST(File, WriteFileInTwoPhasesFailsOnInvalidArguments) {
   EXPECT_FALSE(WriteFileInTwoPhases(dirfd.get(), "..", "content"));
   EXPECT_FALSE(WriteFileInTwoPhases(dirfd.get(), "subdir/destination", "content"));
   EXPECT_FALSE(WriteFileInTwoPhases(dirfd.get(), "/destination", "content"));
+  EXPECT_FALSE(WriteFileInTwoPhases(dirfd.get(), std::string(NAME_MAX + 1, 'a'), "content"));
   EXPECT_THAT(GetNonDotDirContents(dir.path()), IsEmpty());
 }
 

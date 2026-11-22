@@ -2,8 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_binary", "rustc_test")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules:golden_files.bzl", "verify_golden_files")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+load("//tools/fidl/fidlc/testdata:info.bzl", "fidl_testdata_info")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -35,7 +39,6 @@ common_compile_data = [
     "src/templates/markdown/style.css",
 ]
 
-# @bazel2gn:transformer=deps
 common_deps = [
     "//third_party/rust_crates/vendor:anyhow",
     "//third_party/rust_crates/vendor:argh",
@@ -50,7 +53,6 @@ common_deps = [
     "//third_party/rust_crates/vendor:simplelog",
 ]
 
-# @bazel2gn:skip
 rustc_binary(
     name = "fidldoc",
     srcs = common_sources,
@@ -60,13 +62,12 @@ rustc_binary(
     ],
     crate_name = "fidldoc",
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = common_deps,
 )
 
-rustc_test(
+host_rustc_test(
     name = "fidldoc_bin_test",
-    testonly = True,
     srcs = common_sources,
     compile_data = common_compile_data + [
         "src/templates/markdown/testdata/README.md",
@@ -75,8 +76,68 @@ rustc_test(
     ],
     crate_root = "src/main.rs",
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
     deps = common_deps + [
         "//third_party/rust_crates/vendor:tempfile",
     ],
 )
+
+# LINT.IfChange(goldens)
+_FIDL_TESTDATA_INFO_FILTERED = [
+    info
+    for info in fidl_testdata_info
+    if "fidldoc" not in info["denylist"]
+]
+
+compiled_action(
+    name = "generate_goldens",
+    testonly = True,
+    srcs = [
+        "src/fidldoc.config.json",
+    ] + [
+        info["target"]
+        for info in _FIDL_TESTDATA_INFO_FILTERED
+    ],
+    # do not sort
+    outs = [
+        "goldens/_toc.yaml",
+        "goldens/README.md",
+        "goldens/style.css",
+    ] + [
+        "goldens/%s/README.md" % info["library"]
+        for info in _FIDL_TESTDATA_INFO_FILTERED
+    ],
+    args = [
+        "--silent",
+        "--config",
+        "$(location src/fidldoc.config.json)",
+        "--out",
+        "$(RULEDIR)/goldens",
+    ] + [
+        "$(location %s)" % info["target"]
+        for info in _FIDL_TESTDATA_INFO_FILTERED
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tool = ":fidldoc",
+)
+
+verify_golden_files(
+    name = "fidldoc_golden_tests",
+    testonly = True,
+    candidate_files = [":generate_goldens"],
+    golden_files = [
+        "goldens/_toc.yaml.golden",
+        "goldens/README.md.golden",
+        "goldens/style.css.golden",
+    ] + [
+        "goldens/%s.md.golden" % info["name"]
+        for info in _FIDL_TESTDATA_INFO_FILTERED
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build/bazel/rules/tests:__pkg__",
+        "//tools/fidl:__subpackages__",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:goldens)

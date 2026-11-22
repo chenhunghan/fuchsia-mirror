@@ -210,15 +210,24 @@ impl Extents {
         self.entries.is_empty()
     }
 
+    /// Returns the total logical length in bytes covered by this container (`O(1)`).
+    pub fn logical_len(&self) -> u64 {
+        self.entries.last().map_or(0, |e| e.end_logical_offset)
+    }
+
     /// Creates an `Extents` container from an iterator of `Extent`s, returning an `Error`
     /// if validation fails.
+    ///
+    /// Adjacent `Block` extents that are physically contiguous on the device (up to
+    /// `MAX_REGULAR_EXTENT_BLOCKS`) and adjacent `Sparse` extents (up to
+    /// `MAX_SPARSE_EXTENT_BLOCKS`) are merged into single entries.
     pub fn try_new(
         extents: impl IntoIterator<Item = impl Borrow<Extent>>,
         base_device_offset: u64,
     ) -> Result<Self, Error> {
         let iter = extents.into_iter();
         let (lower_bound, _) = iter.size_hint();
-        let mut entries = Vec::with_capacity(lower_bound);
+        let mut entries: Vec<ExtentEntry> = Vec::with_capacity(lower_bound);
         let mut current_logical_offset = 0u64;
 
         for extent in iter {
@@ -241,6 +250,11 @@ impl Extents {
                  got {:?}",
                 extent.logical_range
             );
+            let prev_start_logical =
+                if entries.len() >= 2 { entries[entries.len() - 2].end_logical_offset } else { 0 };
+            let prev_len = current_logical_offset - prev_start_logical;
+            let prev_blocks = prev_len / BLOCK_SIZE;
+
             let length_blocks = extent.len() / BLOCK_SIZE;
             match extent.device_extent {
                 DeviceExtent::InlineTail(dev_offset) => {
@@ -278,6 +292,25 @@ impl Extents {
                     );
                     let mut remaining_blocks = length_blocks;
                     let mut current_dev_offset = dev_offset;
+                    if prev_blocks < MAX_REGULAR_EXTENT_BLOCKS
+                        && let Some(last) = entries.last_mut()
+                        && !last.is_sparse()
+                        && (last.device_offset - base_device_offset) % BLOCK_SIZE == 0
+                        && last.device_offset.checked_add(prev_len) == Some(current_dev_offset)
+                    {
+                        let merge_blocks = std::cmp::min(
+                            remaining_blocks,
+                            MAX_REGULAR_EXTENT_BLOCKS - prev_blocks,
+                        );
+                        let merge_bytes = merge_blocks * BLOCK_SIZE;
+                        current_logical_offset += merge_bytes;
+                        current_dev_offset =
+                            current_dev_offset.checked_add(merge_bytes).ok_or_else(|| {
+                                anyhow!("device_offset + extent length overflows u64")
+                            })?;
+                        last.end_logical_offset = current_logical_offset;
+                        remaining_blocks -= merge_blocks;
+                    }
                     while remaining_blocks > 0 {
                         let entry_blocks =
                             std::cmp::min(remaining_blocks, MAX_REGULAR_EXTENT_BLOCKS);
@@ -301,15 +334,29 @@ impl Extents {
                     }
                 }
                 DeviceExtent::Sparse => {
-                    ensure!(
-                        length_blocks <= MAX_SPARSE_EXTENT_BLOCKS,
-                        "Extent length bounds exceed maximum encodeable length"
-                    );
-                    current_logical_offset = extent.logical_range.end;
-                    entries.push(ExtentEntry {
-                        end_logical_offset: current_logical_offset,
-                        device_offset: ExtentEntry::SPARSE_DEVICE_OFFSET,
-                    });
+                    let mut remaining_blocks = length_blocks;
+                    if prev_blocks < MAX_SPARSE_EXTENT_BLOCKS
+                        && let Some(last) = entries.last_mut()
+                        && last.is_sparse()
+                    {
+                        let merge_blocks =
+                            std::cmp::min(remaining_blocks, MAX_SPARSE_EXTENT_BLOCKS - prev_blocks);
+                        let merge_bytes = merge_blocks * BLOCK_SIZE;
+                        current_logical_offset += merge_bytes;
+                        last.end_logical_offset = current_logical_offset;
+                        remaining_blocks -= merge_blocks;
+                    }
+                    while remaining_blocks > 0 {
+                        let entry_blocks =
+                            std::cmp::min(remaining_blocks, MAX_SPARSE_EXTENT_BLOCKS);
+                        let entry_bytes = entry_blocks * BLOCK_SIZE;
+                        current_logical_offset += entry_bytes;
+                        entries.push(ExtentEntry {
+                            end_logical_offset: current_logical_offset,
+                            device_offset: ExtentEntry::SPARSE_DEVICE_OFFSET,
+                        });
+                        remaining_blocks -= entry_blocks;
+                    }
                 }
             }
         }
@@ -798,5 +845,153 @@ mod tests {
         assert_eq!(mapped.logical_range, (2 * BLOCK_SIZE)..(3 * BLOCK_SIZE));
         assert_eq!(mapped.device_extent(), DeviceExtent::InlineTail(3 * BLOCK_SIZE + 64));
         assert_eq!(mapped.device_offset(), Some(3 * BLOCK_SIZE + 64));
+    }
+
+    #[test]
+    fn test_merge_contiguous_regular_extents() {
+        let extents = Extents::try_new(
+            [
+                Extent::new(0..(3 * BLOCK_SIZE), Some(10 * BLOCK_SIZE)),
+                Extent::new((3 * BLOCK_SIZE)..(7 * BLOCK_SIZE), Some(13 * BLOCK_SIZE)),
+                Extent::new((7 * BLOCK_SIZE)..(8 * BLOCK_SIZE), Some(17 * BLOCK_SIZE)),
+                Extent::new((8 * BLOCK_SIZE)..(10 * BLOCK_SIZE), Some(50 * BLOCK_SIZE)),
+                Extent::new((10 * BLOCK_SIZE)..(13 * BLOCK_SIZE), Some(52 * BLOCK_SIZE)),
+            ],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(extents.len(), 2);
+        assert_eq!(
+            extents.mappings(),
+            vec![
+                Extent::new(0..(8 * BLOCK_SIZE), Some(10 * BLOCK_SIZE)),
+                Extent::new((8 * BLOCK_SIZE)..(13 * BLOCK_SIZE), Some(50 * BLOCK_SIZE)),
+            ]
+        );
+
+        let encoded: Vec<u64> = Extents::encode_extents(&extents).collect();
+        assert_eq!(encoded.len(), 2);
+        let decoded = Extents::from_encoded(encoded, 0).expect("from_encoded failed");
+        assert_eq!(decoded, extents);
+
+        let mapped_mid = decoded.map(3 * BLOCK_SIZE).expect("should map merged interior");
+        assert_eq!(mapped_mid.logical_range, (3 * BLOCK_SIZE)..(8 * BLOCK_SIZE));
+        assert_eq!(mapped_mid.device_offset(), Some(13 * BLOCK_SIZE));
+
+        let mapped_second = decoded.map(11 * BLOCK_SIZE).expect("should map second merged extent");
+        assert_eq!(mapped_second.logical_range, (11 * BLOCK_SIZE)..(13 * BLOCK_SIZE));
+        assert_eq!(mapped_second.device_offset(), Some(53 * BLOCK_SIZE));
+    }
+
+    #[test]
+    fn test_merge_contiguous_regular_extents_with_base_offset() {
+        let base_device_offset = 17408u64;
+        let extents = Extents::try_new(
+            [
+                Extent::new(0..(2 * BLOCK_SIZE), Some(base_device_offset + 4 * BLOCK_SIZE)),
+                Extent::new(
+                    (2 * BLOCK_SIZE)..(5 * BLOCK_SIZE),
+                    Some(base_device_offset + 6 * BLOCK_SIZE),
+                ),
+            ],
+            base_device_offset,
+        )
+        .unwrap();
+
+        assert_eq!(extents.len(), 1);
+        let encoded: Vec<u64> = Extents::encode_extents_with_base_offset(&extents).collect();
+        assert_eq!(encoded.len(), 1);
+        let decoded =
+            Extents::from_encoded(encoded, base_device_offset).expect("from_encoded failed");
+        assert_eq!(
+            decoded.mappings(),
+            vec![Extent::new(0..(5 * BLOCK_SIZE), Some(base_device_offset + 4 * BLOCK_SIZE))]
+        );
+    }
+
+    #[test]
+    fn test_merge_contiguous_sparse_extents() {
+        let extents = Extents::try_new(
+            [
+                Extent::new(0..(2 * BLOCK_SIZE), None),
+                Extent::new((2 * BLOCK_SIZE)..(5 * BLOCK_SIZE), None),
+                Extent::new((5 * BLOCK_SIZE)..(6 * BLOCK_SIZE), Some(10 * BLOCK_SIZE)),
+                Extent::new((6 * BLOCK_SIZE)..(8 * BLOCK_SIZE), None),
+                Extent::new((8 * BLOCK_SIZE)..(9 * BLOCK_SIZE), None),
+            ],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(extents.len(), 3);
+        assert_eq!(
+            extents.mappings(),
+            vec![
+                Extent::new(0..(5 * BLOCK_SIZE), None),
+                Extent::new((5 * BLOCK_SIZE)..(6 * BLOCK_SIZE), Some(10 * BLOCK_SIZE)),
+                Extent::new((6 * BLOCK_SIZE)..(9 * BLOCK_SIZE), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_inline_tail_not_merged() {
+        let extents = Extents::try_new(
+            [
+                Extent::new(0..BLOCK_SIZE, DeviceExtent::Block(10 * BLOCK_SIZE)),
+                Extent::new(
+                    BLOCK_SIZE..(2 * BLOCK_SIZE),
+                    DeviceExtent::InlineTail(11 * BLOCK_SIZE + 64),
+                ),
+                Extent::new(
+                    (2 * BLOCK_SIZE)..(3 * BLOCK_SIZE),
+                    DeviceExtent::Block(12 * BLOCK_SIZE),
+                ),
+            ],
+            0,
+        )
+        .unwrap();
+
+        assert_eq!(extents.len(), 3);
+    }
+
+    #[test]
+    fn test_merge_contiguous_regular_extents_splits_at_max_blocks() {
+        let entry_bytes = MAX_REGULAR_EXTENT_BLOCKS * BLOCK_SIZE;
+        let first_len = entry_bytes - 2 * BLOCK_SIZE;
+        let second_len = 5 * BLOCK_SIZE;
+        let total_len = first_len + second_len;
+        let start_dev = 10 * BLOCK_SIZE;
+
+        let merged = Extents::try_new(
+            [
+                Extent::new(0..first_len, Some(start_dev)),
+                Extent::new(first_len..total_len, Some(start_dev + first_len)),
+            ],
+            0,
+        )
+        .unwrap();
+        let single = Extents::try_new([Extent::new(0..total_len, Some(start_dev))], 0).unwrap();
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged, single);
+
+        // If the overflow chunk's target_block exceeds u32::MAX, merging must still reject it.
+        let high_start_dev = (u32::MAX as u64 - 10) * BLOCK_SIZE;
+        let result = Extents::try_new(
+            [
+                Extent::new(0..first_len, Some(high_start_dev)),
+                Extent::new(first_len..total_len, Some(high_start_dev + first_len)),
+            ],
+            0,
+        );
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Relative device offset block index exceeds u32::MAX")
+        );
     }
 }

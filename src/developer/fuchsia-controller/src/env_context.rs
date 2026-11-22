@@ -11,8 +11,8 @@ use errors::ffx_error;
 use fdomain_client::HandleBased;
 use fdomain_client::fidl::Proxy;
 use fdomain_fuchsia_device::ControllerMarker;
-use ffx_config::EnvironmentContext;
 use ffx_config::environment::ExecutableKind;
+use ffx_config::{ConfigError, ConfigLevel, EnvironmentContext};
 use ffx_target::connection::Connection;
 use rcs;
 use serde_json::{Map, Value};
@@ -92,6 +92,17 @@ pub(crate) fn unflatten_json(val: Value) -> Result<Value> {
     }
 }
 
+/// Execution mode for an [`EnvContext`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvMode {
+    /// Runs in ffx strict mode using only explicit runtime configuration.
+    Strict,
+    /// Runs in an isolated ffx environment rooted at the given directory.
+    Isolated(PathBuf),
+    /// Autodetects the ambient ffx environment.
+    Detect,
+}
+
 #[derive(Debug)]
 pub struct EnvContext {
     lib_ctx: Weak<LibContext>,
@@ -111,6 +122,73 @@ async fn new_device_connection(
     resolution.get_connection(ctx).await.map_err(anyhow::Error::from)
 }
 
+// Validates runtime configuration for a strict context so invalid or missing
+// settings fail at context creation rather than on first connection.
+fn check_strict_config(context: &EnvironmentContext, target_spec: &TargetInfoQuery) -> Result<()> {
+    // Reject empty or malformed runtime path settings even when the target does
+    // not need the registry (an empty `shared_data` would expand `$SHARED_DATA`
+    // to the filesystem root).
+    for key in ["shared_data", ffx_config::keys::REGISTERED_TARGETS_CONFIG] {
+        match context.query(key).level(Some(ConfigLevel::Runtime)).build().get::<PathBuf>(context) {
+            Ok(path) if path.as_os_str().is_empty() => {
+                anyhow::bail!("A strict context requires a non-empty `{key}` path");
+            }
+            Ok(_) | Err(ConfigError::KeyNotFound | ConfigError::NoValueSet(_)) => {}
+            Err(e) => {
+                anyhow::bail!("Invalid `{key}` in strict context config: {e}");
+            }
+        }
+    }
+
+    // Symbolic target queries (nodenames and `id:<serial>`) resolve from the
+    // target registry (`target.registered_targets`, defaulting to
+    // `$SHARED_DATA/targets.json`). Explicit transport addresses and local
+    // contexts (`TargetInfoQuery::First`) do not consult the registry.
+    let needs_registry =
+        !matches!(target_spec, TargetInfoQuery::First) && target_spec.get_target_addr().is_none();
+    if needs_registry {
+        ffx_target::targets_file_path(context).map_err(|e| {
+            anyhow::anyhow!(
+                "A strict context with a symbolic target requires `shared_data` or \
+                 `target.registered_targets` in its config: {e}"
+            )
+        })?;
+    }
+
+    // Validate `ssh.priv` if present in runtime config. Non-SSH transports,
+    // symbolic targets (which may resolve to a non-SSH transport), and local
+    // contexts do not require `ssh.priv` at creation time.
+    let has_ssh_keys = match context
+        .query(ffx_config::keys::SSH_PRIVATE_KEY)
+        .level(Some(ConfigLevel::Runtime))
+        .build()
+        .get::<Vec<PathBuf>>(context)
+    {
+        Ok(keys) => {
+            if keys.iter().any(|key| key.as_os_str().is_empty()) {
+                anyhow::bail!("A strict context cannot have an empty path in `ssh.priv`");
+            }
+            !keys.is_empty()
+        }
+        Err(ConfigError::KeyNotFound | ConfigError::NoValueSet(_)) => false,
+        Err(e) => {
+            anyhow::bail!("Invalid `ssh.priv` in strict context config: {e}");
+        }
+    };
+
+    // An explicit IP address (`TargetInfoQuery::Addr`) always connects via SSH.
+    // Strict mode cannot expand the default `ssh.priv` macros (`$FUCHSIA_SSH_KEY`,
+    // `$HOME/.ssh/fuchsia_ed25519`), and `ffx_ssh` requires at least one key
+    // path even when `ssh.auth-sock` is set, so require a non-empty `ssh.priv`
+    // at runtime.
+    if matches!(target_spec, TargetInfoQuery::Addr(_)) && !has_ssh_keys {
+        anyhow::bail!(
+            "A strict context with an address target requires a non-empty `ssh.priv` in its config"
+        );
+    }
+    Ok(())
+}
+
 impl EnvContext {
     pub(crate) fn write_err<T: std::fmt::Display>(&self, thread_id: std::thread::ThreadId, err: T) {
         let lib = self.lib_ctx.upgrade().expect("library context instance deallocated early");
@@ -121,10 +199,14 @@ impl EnvContext {
         self.lib_ctx.upgrade().expect("library context instance deallocated early")
     }
 
+    /// Creates a context configured by `config_json` in the given [`EnvMode`].
+    /// With [`EnvMode::Strict`], the context runs in ffx strict mode, as `ffx --strict` does:
+    /// it uses only the given configuration, and it resolves target names and serial numbers
+    /// from the target registry instead of discovering them.
     pub fn new(
         lib_ctx: Weak<LibContext>,
         config_json: Option<String>,
-        isolate_dir: Option<PathBuf>,
+        mode: EnvMode,
     ) -> Result<Self> {
         let config_json = match config_json.filter(|s| !s.is_empty()) {
             Some(json_str) => {
@@ -136,32 +218,44 @@ impl EnvContext {
         };
         let runtime_args = ffx_config::runtime::populate_runtime(&[], config_json)?;
         let env_path = None;
-        let current_dir = std::env::current_dir()?;
-        let context = match isolate_dir {
-            Some(d) => EnvironmentContext::isolated(
-                ExecutableKind::Test,
-                d,
-                std::collections::HashMap::from_iter(std::env::vars()),
-                runtime_args,
-                env_path,
-                Utf8PathBuf::try_from(current_dir).ok().as_deref(),
-                false,
-            )
-            .map_err(fxe)?,
-            None => EnvironmentContext::detect(
-                ExecutableKind::Test,
-                runtime_args,
-                &current_dir,
-                env_path,
-                false,
-            )
-            .map_err(fxe)?,
+        let is_strict = matches!(mode, EnvMode::Strict);
+        let context = match mode {
+            EnvMode::Strict => {
+                EnvironmentContext::strict(ExecutableKind::Test, runtime_args).map_err(fxe)?
+            }
+            EnvMode::Isolated(dir) => {
+                let current_dir = std::env::current_dir()?;
+                EnvironmentContext::isolated(
+                    ExecutableKind::Test,
+                    dir,
+                    std::collections::HashMap::from_iter(std::env::vars()),
+                    runtime_args,
+                    env_path,
+                    Utf8PathBuf::try_from(current_dir).ok().as_deref(),
+                    false,
+                )
+                .map_err(fxe)?
+            }
+            EnvMode::Detect => {
+                let current_dir = std::env::current_dir()?;
+                EnvironmentContext::detect(
+                    ExecutableKind::Test,
+                    runtime_args,
+                    &current_dir,
+                    env_path,
+                    false,
+                )
+                .map_err(fxe)?
+            }
         };
+        let target_spec: TargetInfoQuery =
+            TargetInfoQuery::try_from(ffx_target::get_target_specifier(&context)?)?;
+        if is_strict {
+            check_strict_config(&context, &target_spec)?;
+        }
         logging::init_logging(&context);
         logging::LOG_SINK.add_log_output(&context)?;
         log::info!("Logging setup for EnvContext instance: {}", logging::log_id(&context));
-        let target_spec: TargetInfoQuery =
-            TargetInfoQuery::try_from(ffx_target::get_target_specifier(&context)?)?;
 
         let device_connection = if matches!(target_spec, TargetInfoQuery::First) {
             log::info!("No target specified. Creating local/testing FDomain.");
@@ -171,12 +265,16 @@ impl EnvContext {
         } else {
             Mutex::new(None)
         };
-        let cache_path = context.get_cache_path()?;
-        std::fs::create_dir_all(&cache_path)?;
+        // A strict context has no cache directory: `get_cache_path()` fails on a
+        // strict Test-kind context because `$CACHE` can't be resolved.
+        if !is_strict {
+            let cache_path = context.get_cache_path()?;
+            std::fs::create_dir_all(&cache_path)?;
+        }
         Ok(Self { context, device_connection, target_spec, lib_ctx })
     }
 
-    async fn invariant_check(&self) -> Result<()> {
+    async fn invariant_check(&self) -> Result<Arc<Connection>> {
         log::debug!(
             "Checking connectivity invariant for EnvContext: {}",
             logging::log_id(&self.context)
@@ -194,12 +292,16 @@ impl EnvContext {
                 logging::log_id(&self.context)
             );
         }
-        if device_connection.is_none() || device_connection_is_terminated {
-            *device_connection =
-                Some(new_device_connection(&self.context, &self.target_spec).await?);
-        }
+        let conn = match &*device_connection {
+            Some(conn) if !device_connection_is_terminated => Arc::clone(conn),
+            _ => {
+                let conn = new_device_connection(&self.context, &self.target_spec).await?;
+                *device_connection = Some(Arc::clone(&conn));
+                conn
+            }
+        };
         log::debug!("Invariant check successful: {}", logging::log_id(&self.context));
-        Ok(())
+        Ok(conn)
     }
 
     async fn connect_remote_control_helper<F, Fut>(&self, func: F) -> Result<zx_types::zx_handle_t>
@@ -232,23 +334,32 @@ impl EnvContext {
         // hurt to keep this here, but we may want to re-examine its usefulness in the future.
         const MAX_RECONNECT_ATTEMPTS: u32 = 1;
         for attempt in 0..=MAX_RECONNECT_ATTEMPTS {
-            self.invariant_check().await?;
+            let conn = self.invariant_check().await?;
             let t = Duration::from_secs_f64(self.context.get(ffx_config::keys::PROXY_TIMEOUT)?);
-            match timeout::timeout(t, async {
-                let rcs_proxy = self.device_connection.lock().await.as_ref().unwrap().rcs_proxy_fdomain().await?;
-                log::debug!(
-                    "Acquired remote_control_proxy for EnvContext instance: {}",
-                    logging::log_id(&self.context)
-                );
-                func(rcs_proxy).await
-            }).await.map_err(|_| {
-            anyhow::anyhow!("Timed out attempting to get remote control proxy. This happened after verifying that we can connect to the device, so the device has likely disconnected in the interim.")
-                }) {
-                // No timeout here (there are two layers of errors)
-                Ok(res) => {
-                    return Ok(res?);
+            let rcs_res = timeout::timeout(t, conn.rcs_proxy_fdomain())
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Timed out attempting to get remote control proxy. This happened after \
+                         verifying that we can connect to the device, so the device has likely \
+                         disconnected in the interim."
+                    )
+                })
+                .and_then(|res| res.map_err(anyhow::Error::from));
+            match rcs_res {
+                Ok(rcs_proxy) => {
+                    log::debug!(
+                        "Acquired remote_control_proxy for EnvContext instance: {}",
+                        logging::log_id(&self.context)
+                    );
+                    return func(rcs_proxy).await;
                 }
                 Err(e) => {
+                    let mut guard = self.device_connection.lock().await;
+                    if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
+                        *guard = None;
+                    }
+                    drop(guard);
                     if attempt < MAX_RECONNECT_ATTEMPTS {
                         log::warn!("{e} Attempting to connect once more");
                     } else {
@@ -271,9 +382,8 @@ impl EnvContext {
         // first place.
         //
         // See said function for the explanation of what it's doing and a "bit of history."
-        self.invariant_check().await?;
-        let (fdomain, _) =
-            self.device_connection.lock().await.as_ref().unwrap().fdomain_client().await?;
+        let conn = self.invariant_check().await?;
+        let (fdomain, _) = conn.fdomain_client().await?;
         Ok(fdomain)
     }
 
@@ -412,5 +522,206 @@ mod tests {
     fn test_unflatten_conflict_dict_then_scalar() {
         let input = json!({"foo.bar": 2, "foo": 1});
         assert!(unflatten_json(input).is_err());
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_connect_remote_control_helper_clears_stale_connection() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let isolate_dir = tempfile::tempdir().unwrap();
+        let sock_path = isolate_dir.path().join("nonexistent_usb.sock");
+        let config = json!({
+            "proxy.timeout_secs": 0.05,
+            "connectivity.usb_socket_path": sock_path.to_str().unwrap(),
+            "target.default": "usb:cid:999",
+        });
+        let env_ctx = EnvContext::new(
+            Weak::new(),
+            Some(config.to_string()),
+            EnvMode::Isolated(isolate_dir.path().to_path_buf()),
+        )
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = Arc::clone(&calls);
+        let stale_conn =
+            Arc::new(Connection::from_fdomain_client(fdomain_local::local_client(move || {
+                calls_clone.fetch_add(1, Ordering::SeqCst);
+                Err(zx_status::Status::PEER_CLOSED)
+            })));
+        assert!(!stale_conn.is_terminated());
+        *env_ctx.device_connection.lock().await = Some(stale_conn);
+        let res = env_ctx.connect_remote_control_helper(|_| async { Ok(1) }).await;
+        assert!(res.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(env_ctx.device_connection.lock().await.is_none());
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_connect_remote_control_helper_preserves_concurrent_reconnect_and_retries() {
+        let isolate_dir = tempfile::tempdir().unwrap();
+        let sock_path = isolate_dir.path().join("nonexistent_usb.sock");
+        let config = json!({
+            "proxy.timeout_secs": 0.05,
+            "connectivity.usb_socket_path": sock_path.to_str().unwrap(),
+            "target.default": "usb:cid:999",
+        });
+        let env_ctx = Arc::new(
+            EnvContext::new(
+                Weak::new(),
+                Some(config.to_string()),
+                EnvMode::Isolated(isolate_dir.path().to_path_buf()),
+            )
+            .unwrap(),
+        );
+        let healthy_conn = Arc::new(Connection::from_fdomain_client(
+            fdomain_local::local_client_fdomain(|_channel| {}),
+        ));
+        let env_ctx_clone = Arc::clone(&env_ctx);
+        let healthy_conn_clone = Arc::clone(&healthy_conn);
+        let stale_conn =
+            Arc::new(Connection::from_fdomain_client(fdomain_local::local_client(move || {
+                *env_ctx_clone.device_connection.lock_blocking() =
+                    Some(Arc::clone(&healthy_conn_clone));
+                Err(zx_status::Status::PEER_CLOSED)
+            })));
+        *env_ctx.device_connection.lock().await = Some(stale_conn);
+        let res = env_ctx.connect_remote_control_helper(|_| async { Ok(42) }).await.unwrap();
+        assert_eq!(res, 42);
+        assert!(
+            env_ctx
+                .device_connection
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|c| Arc::ptr_eq(c, &healthy_conn))
+        );
+    }
+
+    #[test]
+    fn test_strict_context() {
+        let shared_data = tempfile::tempdir().unwrap();
+        let config = json!({
+            "shared_data": shared_data.path().to_str().unwrap(),
+            "ssh.priv": ["/keys/fuchsia_ed25519"],
+            "target.default": "id:SERIAL-A",
+        });
+
+        let env_ctx =
+            EnvContext::new(Weak::new(), Some(config.to_string()), EnvMode::Strict).unwrap();
+
+        assert!(env_ctx.context.is_strict());
+        assert_eq!(env_ctx.target_spec, TargetInfoQuery::Id("SERIAL-A".to_string()));
+        assert!(!shared_data.path().join("cache").exists());
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_strict_context_accepts_valid_configs() {
+        let shared_data = tempfile::tempdir().unwrap();
+        let shared_data_str = shared_data.path().to_str().unwrap();
+        let targets_file = shared_data.path().join("targets.json");
+        let targets_file_str = targets_file.to_str().unwrap();
+
+        for config in [
+            // Direct `target.registered_targets` without `shared_data`.
+            json!({
+                "target.registered_targets": targets_file_str,
+                "target.default": "fuchsia-emulator",
+            }),
+            // Empty `ssh.priv` list (used by Honeydew when no local SSH keys exist).
+            json!({
+                "shared_data": shared_data_str,
+                "ssh.priv": [],
+                "target.default": "fuchsia-emulator",
+            }),
+            // Scalar string `ssh.priv`.
+            json!({
+                "shared_data": shared_data_str,
+                "ssh.priv": "/keys/fuchsia_ed25519",
+                "target.default": "id:SERIAL-A",
+            }),
+            // Explicit IP address target requires a non-empty `ssh.priv`, but
+            // does not require `shared_data`.
+            json!({
+                "target.default": "127.0.0.1:8022",
+                "ssh.priv": ["/keys/fuchsia_ed25519"],
+            }),
+            // Explicit non-SSH transport address needs neither `shared_data` nor `ssh.priv`.
+            json!({"target.default": "usb:cid:42"}),
+            // Local/testing context with no target.
+            json!({}),
+        ] {
+            let env_ctx = EnvContext::new(Weak::new(), Some(config.to_string()), EnvMode::Strict)
+                .unwrap_or_else(|e| panic!("expected strict config {config} to succeed: {e}"));
+            assert!(env_ctx.context.is_strict());
+        }
+    }
+
+    #[test]
+    fn test_strict_context_rejects_invalid_settings() {
+        let shared_data = tempfile::tempdir().unwrap();
+        let shared_data_str = shared_data.path().to_str().unwrap();
+        for (config, expected_substring) in [
+            // Symbolic target without `shared_data` or `target.registered_targets`.
+            (json!({"target.default": "id:SERIAL-A"}), "shared_data"),
+            (json!({"target.default": "fuchsia-emulator"}), "shared_data"),
+            // IP address target missing non-empty `ssh.priv`.
+            (json!({"target.default": "127.0.0.1:8022"}), "ssh.priv"),
+            (json!({"target.default": "127.0.0.1:8022", "ssh.priv": []}), "ssh.priv"),
+            (
+                json!({
+                    "target.default": "127.0.0.1:8022",
+                    "ssh.priv": [],
+                    "ssh.auth-sock": "/tmp/agent.sock",
+                }),
+                "ssh.priv",
+            ),
+            // Empty or wrong-typed `shared_data`.
+            (json!({"shared_data": ""}), "shared_data"),
+            (json!({"shared_data": 123}), "shared_data"),
+            // Empty or wrong-typed `target.registered_targets`.
+            (json!({"target.registered_targets": ""}), "target.registered_targets"),
+            (json!({"target.registered_targets": 123}), "target.registered_targets"),
+            // Empty path entries or wrong type in `ssh.priv`.
+            (json!({"shared_data": shared_data_str, "ssh.priv": ""}), "ssh.priv"),
+            (json!({"shared_data": shared_data_str, "ssh.priv": [""]}), "ssh.priv"),
+            (json!({"shared_data": shared_data_str, "ssh.priv": 123}), "ssh.priv"),
+            // Empty, wrong-typed, or unexpandable `log.dir`.
+            (json!({"log.dir": ""}), "log.dir"),
+            (json!({"log.dir": 123}), "log.dir"),
+            (json!({"log.dir": "$HOME/logs"}), "HOME"),
+            (json!({"log.dir": "$SHARED_DATA/logs"}), "log.dir"),
+            // Disallowed variable expansion in strict mode.
+            (json!({"shared_data": shared_data_str, "ssh.priv": ["$HOME/key"]}), "HOME"),
+        ] {
+            let err = EnvContext::new(Weak::new(), Some(config.to_string()), EnvMode::Strict)
+                .unwrap_err();
+            assert!(err.to_string().contains(expected_substring), "{config}: {err}");
+        }
+    }
+
+    #[fuchsia_async::run_singlethreaded(test)]
+    async fn test_strict_context_resolves_registered_target() {
+        let shared_data = tempfile::tempdir().unwrap();
+        let targets_json = json!([
+            {
+                "nodename": "test-node",
+                "id": "SERIAL-A",
+                "address": "127.0.0.1:8022",
+            }
+        ]);
+        std::fs::write(shared_data.path().join("targets.json"), targets_json.to_string()).unwrap();
+        let config = json!({
+            "shared_data": shared_data.path().to_str().unwrap(),
+            "target.default": "id:SERIAL-A",
+        });
+
+        let env_ctx =
+            EnvContext::new(Weak::new(), Some(config.to_string()), EnvMode::Strict).unwrap();
+        let resolution =
+            ffx_target::resolve_target_address(&env_ctx.target_spec, false, &env_ctx.context)
+                .await
+                .unwrap();
+
+        assert_eq!(resolution.addr().unwrap().to_string(), "127.0.0.1:8022");
     }
 }

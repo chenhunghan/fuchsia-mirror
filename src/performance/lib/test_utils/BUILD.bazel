@@ -1,0 +1,153 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":tracing_test_utils_tests_test"],
+    visibility = ["//src/performance:__pkg__"],
+)
+
+fx_cc_library(
+    name = "test_utils",
+    testonly = True,
+    srcs = ["run_program.cc"],
+    hdrs = ["run_program.h"],
+    implementation_deps = ["//src/lib/fsl"],
+    visibility = [
+        "//src/performance/perfetto-bridge/tests:__pkg__",
+        "//src/performance/trace/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl",
+        "//src/lib/fxl:cli",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "tracing_test_utils_tests_app",
+    testonly = True,
+    srcs = ["run_program_tests.cc"],
+    gn_output_name = "tracing_test_utils_tests",
+    deps = [
+        ":test_utils",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+# TODO(https://fxbug.dev/570694755): GN writes this helper to target_out_dir so
+# its short output name doesn't collide with other binaries in root_out_dir.
+# @bazel2gn:raw_attribute:output_dir = target_out_dir
+fx_cc_binary(
+    name = "tracing_test_utils_return_1234",
+    testonly = True,
+    srcs = ["return_1234.cc"],
+    gn_output_name = "return_1234",
+)
+
+# TODO(https://fxbug.dev/570694755): GN writes this helper to target_out_dir so
+# its short output name doesn't collide with other binaries in root_out_dir.
+# @bazel2gn:raw_attribute:output_dir = target_out_dir
+fx_cc_binary(
+    name = "tracing_test_utils_signal_peer",
+    testonly = True,
+    srcs = ["signal_peer.cc"],
+    gn_output_name = "signal_peer",
+    deps = ["//zircon/system/ulib/zx"],
+)
+
+fx_packaged_binary(
+    name = "tracing_test_utils_tests_app_packaged_bin",
+    testonly = True,
+    binary = ":tracing_test_utils_tests_app",
+    binary_name = "tracing_test_utils_tests",
+)
+
+fx_packaged_binary(
+    name = "tracing_test_utils_return_1234_packaged_bin",
+    testonly = True,
+    binary = ":tracing_test_utils_return_1234",
+    binary_name = "return_1234",
+)
+
+fx_packaged_binary(
+    name = "tracing_test_utils_signal_peer_packaged_bin",
+    testonly = True,
+    binary = ":tracing_test_utils_signal_peer",
+    binary_name = "signal_peer",
+)
+
+fx_component_manifest(
+    name = "tracing_test_utils_tests_manifest",
+    testonly = True,
+    component_name = "tracing_test_utils_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/tracing_test_utils_tests.cml",
+)
+
+fx_test_component(
+    name = "tracing_test_utils_tests_component",
+    compiled_manifest = ":tracing_test_utils_tests_manifest",
+    deps = [
+        ":tracing_test_utils_return_1234_packaged_bin",
+        ":tracing_test_utils_signal_peer_packaged_bin",
+        ":tracing_test_utils_tests_app_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "tracing_test_utils_tests",
+    test_components = [":tracing_test_utils_tests_component"],
+)
+
+fx_test(
+    name = "tracing_test_utils_tests_test",
+    package = ":tracing_test_utils_tests",
+)
+
+# This is a library for use in Fuchsia-side tests that will start and stop
+# tracing in order to capture a trace from a test. This contrasts with the
+# alternative of starting and stopping tracing from the host-side part of
+# a test. Starting and stopping tracing from the Fuchsia side makes it
+# easier to enable tracing only for the part of the test we're interested in,
+# reducing the size of the trace, and it can avoid the need for host-side
+# test code.
+fx_cc_library(
+    name = "trace_controller",
+    testonly = True,
+    srcs = ["trace_controller.cc"],
+    hdrs = ["trace_controller.h"],
+    implementation_deps = ["//src/lib/fsl"],
+    visibility = ["//src/connectivity/network/tests/benchmarks/socket-loopback:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.tracing.controller:fuchsia.tracing.controller_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/trace-provider",
+    ],
+    alwayslink = True,
+)

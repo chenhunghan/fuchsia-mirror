@@ -74,7 +74,8 @@ where
         }
         .into());
     };
-    let config_value: fidl_fuchsia_component_decl::ConfigValue = match fidl::unpersist(bytes) {
+    let config_value: fidl_fuchsia_component_decl_common::ConfigValue = match fidl::unpersist(bytes)
+    {
         Ok(v) => v,
         Err(_) => {
             return Err(RoutingError::BedrockWrongCapabilityType {

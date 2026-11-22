@@ -36,7 +36,6 @@ fuchsia_driver_component("framebuffer-intel-display") {
     ":driver",
     "//src/graphics/display/lib/framebuffer-display:framebuffer-pci-boot-display-driver-shard",
   ]
-  info = "meta/framebuffer-intel-display-info.json"
   manifest = "meta/framebuffer-intel-display.cml"
 }
 

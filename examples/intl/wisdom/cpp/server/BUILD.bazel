@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/icu:third_party_icu_headers.bzl", "third_party_icu_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Add here all the ICU library headers that you would otherwise use #include
+# for. A header named "icu_headers.h" is generated in the same output directory,
+# and contains #includes to all the `headers` named below.
+#
+# Include that file as:
+#     #include "examples/intl/wisdom/cpp/server/icu_headers.h"
+#
+# In this example, we use one target for a set of header files - but if you need
+# to you can make multiple targets.
+third_party_icu_headers(
+    name = "icu_headers",
+    headers = [
+        "third_party/icu/source/common/unicode/locid.h",
+        "third_party/icu/source/common/unicode/unistr.h",
+        "third_party/icu/source/i18n/unicode/calendar.h",
+        "third_party/icu/source/i18n/unicode/datefmt.h",
+        "third_party/icu/source/i18n/unicode/timezone.h",
+    ],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["intl_wisdom_server_impl.cc"],
+    hdrs = ["intl_wisdom_server_impl.h"],
+    deps = [
+        ":icu_headers",
+        "//examples/intl/wisdom/fidl:wisdom_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/icu:lib",
+        "//src/lib/icu_data/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "intl_wisdom_server",
+    srcs = ["main.cc"],
+    visibility = ["//examples/intl/wisdom/cpp:__pkg__"],
+    deps = [
+        ":lib",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+    ],
+)

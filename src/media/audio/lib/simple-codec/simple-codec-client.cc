@@ -179,23 +179,23 @@ zx::result<DaiSupportedFormats> SimpleCodecClient::GetDaiFormats() {
   }
 
   ZX_ASSERT(result->value()->formats.size() == 1);
-  const auto& llcpp_formats = result->value()->formats[0];
+  const auto& wire_formats = result->value()->formats[0];
 
   DaiSupportedFormats formats;
-  formats.number_of_channels = std::vector(llcpp_formats.number_of_channels.cbegin(),
-                                           llcpp_formats.number_of_channels.cend());
-  for (auto& sample_format : llcpp_formats.sample_formats) {
+  formats.number_of_channels =
+      std::vector(wire_formats.number_of_channels.cbegin(), wire_formats.number_of_channels.cend());
+  for (auto& sample_format : wire_formats.sample_formats) {
     formats.sample_formats.push_back(static_cast<SampleFormat>(sample_format));
   }
-  for (auto& frame_format : llcpp_formats.frame_formats) {
+  for (auto& frame_format : wire_formats.frame_formats) {
     formats.frame_formats.push_back(static_cast<FrameFormat>(frame_format.frame_format_standard()));
   }
   formats.frame_rates =
-      std::vector(llcpp_formats.frame_rates.cbegin(), llcpp_formats.frame_rates.cend());
+      std::vector(wire_formats.frame_rates.cbegin(), wire_formats.frame_rates.cend());
   formats.bits_per_slot =
-      std::vector(llcpp_formats.bits_per_slot.cbegin(), llcpp_formats.bits_per_slot.cend());
+      std::vector(wire_formats.bits_per_slot.cbegin(), wire_formats.bits_per_slot.cend());
   formats.bits_per_sample =
-      std::vector(llcpp_formats.bits_per_sample.cbegin(), llcpp_formats.bits_per_sample.cend());
+      std::vector(wire_formats.bits_per_sample.cbegin(), wire_formats.bits_per_sample.cend());
 
   return zx::ok(formats);
 }

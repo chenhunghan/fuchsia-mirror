@@ -2,47 +2,53 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fuchsia/component/cpp/fidl.h>
-#include <fuchsia/component/test/cpp/fidl.h>
-#include <zircon/assert.h>
-#include <zircon/status.h>
-
 #ifndef LIB_SYS_COMPONENT_CPP_TESTING_INTERNAL_ERRORS_H_
 #define LIB_SYS_COMPONENT_CPP_TESTING_INTERNAL_ERRORS_H_
+
+#include <fidl/fuchsia.component.test/cpp/fidl.h>
+#include <fidl/fuchsia.component/cpp/fidl.h>
+#include <lib/fidl/cpp/any_error_in.h>
+#include <lib/fidl/cpp/wire/status.h>
+#include <zircon/assert.h>
+#include <zircon/status.h>
 
 namespace component_testing {
 namespace internal {
 
-const char* ConvertToString(fuchsia::component::test::RealmBuilderError& error);
-const char* ConvertToString(fuchsia::component::Error& error);
+const char* ConvertToString(fuchsia_component_test::RealmBuilderError error);
+const char* ConvertToString(fuchsia_component::Error error);
 void PanicWithMessage(const char* stacktrace, const char* context, zx_status_t status);
 void PanicWithMessage(const char* stacktrace, const char* context,
-                      fuchsia::component::test::RealmBuilderError& error);
-void PanicWithMessage(const char* stacktrace, const char* context,
-                      fuchsia::component::Error& error);
+                      fuchsia_component_test::RealmBuilderError error);
+void PanicWithMessage(const char* stacktrace, const char* context, fuchsia_component::Error error);
+void PanicWithFidlError(const char* stacktrace, const char* context, const fidl::Status& error);
+
+template <typename DomainError>
+void PanicWithFidlError(const char* stacktrace, const char* context,
+                        const fidl::internal::ErrorsInImpl<DomainError>& error) {
+  if (error.is_domain_error()) {
+    PanicWithMessage(stacktrace, context, error.domain_error());
+  } else {
+    PanicWithMessage(stacktrace, context, error.framework_error().status());
+  }
+}
 
 }  // namespace internal
 }  // namespace component_testing
 
-#define ZX_COMPONENT_ASSERT_STATUS_OK(method, status)                                           \
-  do {                                                                                          \
-    if ((status) != ZX_OK) {                                                                    \
-      ::component_testing::internal::PanicWithMessage(__PRETTY_FUNCTION__, (method), (status)); \
-    }                                                                                           \
+#define ZX_COMPONENT_ASSERT_STATUS_OK(method, status)                                             \
+  do {                                                                                            \
+    if (const zx_status_t _zx_status = (status); _zx_status != ZX_OK) {                           \
+      ::component_testing::internal::PanicWithMessage(__PRETTY_FUNCTION__, (method), _zx_status); \
+    }                                                                                             \
   } while (0)
 
-#define ZX_COMPONENT_ASSERT_RESULT_OK(method, result)                                \
-  do {                                                                               \
-    if ((result).is_err()) {                                                         \
-      ::component_testing::internal::PanicWithMessage(__PRETTY_FUNCTION__, (method), \
-                                                      (result).err());               \
-    }                                                                                \
-  } while (0)
-
-#define ZX_COMPONENT_ASSERT_STATUS_AND_RESULT_OK(method, status, result) \
-  do {                                                                   \
-    ZX_COMPONENT_ASSERT_STATUS_OK((method), (status));                   \
-    ZX_COMPONENT_ASSERT_RESULT_OK((method), (result));                   \
+#define ZX_COMPONENT_ASSERT_RESULT_OK(method, result)                                  \
+  do {                                                                                 \
+    if (const auto& _zx_result = (result); _zx_result.is_error()) {                    \
+      ::component_testing::internal::PanicWithFidlError(__PRETTY_FUNCTION__, (method), \
+                                                        _zx_result.error_value());     \
+    }                                                                                  \
   } while (0)
 
 #define ZX_SYS_ASSERT_NOT_NULL(value)                                                           \

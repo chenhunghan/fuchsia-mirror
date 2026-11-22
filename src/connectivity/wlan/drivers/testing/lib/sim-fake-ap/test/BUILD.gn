@@ -61,7 +61,7 @@ cc_test_executable("beacon_unittests") {
     "//src/connectivity/wlan/drivers/testing/lib/sim-env",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
   testonly = true
   emit_tool_path = false
@@ -88,7 +88,7 @@ cc_test_executable("probe_unittests") {
     "//src/connectivity/wlan/drivers/testing/lib/sim-env",
     "//src/connectivity/wlan/drivers/testing/lib/sim-fake-ap",
     "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
   testonly = true
   emit_tool_path = false

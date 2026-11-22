@@ -3,20 +3,613 @@
 # found in the LICENSE file.
 
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
-load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_debug", "is_release")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rbe:rbe.bzl", "RBE_USE_LARGE_WORKER")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load(
+    "//build/bazel/rules/rust:rustc_check_cfg_build_flags.bzl",
+    "rustc_check_cfg_build_flags",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        ":netstack3-bin-instrumented_test",
+        ":netstack3-bin_test",
+        "//src/connectivity/network/netstack3/bench:tests",
+        "//src/connectivity/network/netstack3/core:tests",
+        "//src/connectivity/network/netstack3/core/base:tests",
+        "//src/connectivity/network/netstack3/core/datagram:tests",
+        "//src/connectivity/network/netstack3/core/device:tests",
+        "//src/connectivity/network/netstack3/core/device/tests",
+        "//src/connectivity/network/netstack3/core/filter:tests",
+        "//src/connectivity/network/netstack3/core/filter/tests",
+        "//src/connectivity/network/netstack3/core/icmp_echo:tests",
+        "//src/connectivity/network/netstack3/core/icmp_echo/tests",
+        "//src/connectivity/network/netstack3/core/ip:tests",
+        "//src/connectivity/network/netstack3/core/ip/tests",
+        "//src/connectivity/network/netstack3/core/lock-order:tests",
+        "//src/connectivity/network/netstack3/core/sync:tests",
+        "//src/connectivity/network/netstack3/core/tcp:tests",
+        "//src/connectivity/network/netstack3/core/udp:tests",
+        "//src/connectivity/network/netstack3/core/udp/tests",
+    ],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//src/connectivity/network/netstack3/core:host_tests",
+        "//src/connectivity/network/netstack3/core/base:host_tests",
+        "//src/connectivity/network/netstack3/core/datagram:host_tests",
+        "//src/connectivity/network/netstack3/core/device:host_tests",
+        "//src/connectivity/network/netstack3/core/device/tests:host_tests",
+        "//src/connectivity/network/netstack3/core/filter:host_tests",
+        "//src/connectivity/network/netstack3/core/filter/tests:host_tests",
+        "//src/connectivity/network/netstack3/core/icmp_echo:host_tests",
+        "//src/connectivity/network/netstack3/core/icmp_echo/tests:host_tests",
+        "//src/connectivity/network/netstack3/core/ip:host_tests",
+        "//src/connectivity/network/netstack3/core/ip/tests:host_tests",
+        "//src/connectivity/network/netstack3/core/lock-order:host_tests",
+        "//src/connectivity/network/netstack3/core/macros:host_tests",
+        "//src/connectivity/network/netstack3/core/sync:host_tests",
+        "//src/connectivity/network/netstack3/core/tcp:host_tests",
+        "//src/connectivity/network/netstack3/core/tests:host_tests",
+        "//src/connectivity/network/netstack3/core/udp:host_tests",
+        "//src/connectivity/network/netstack3/core/udp/tests:host_tests",
+    ],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
 # LINT.IfChange(netstack3_configs)
+# @bazel2gn:skip
 build_flags(
     name = "netstack3_configs",
-    rustflags = select({
+    # TODO(https://fxbug.dev/556328773): Remove -Znext-solver=coherence once
+    # the ~80x wfcheck regression under -Znext-solver=globally is fixed.
+    rustflags = ["-Znext-solver=coherence"] + (select({
+        # Always optimize speed, even if it increases size.
         "@platforms//os:fuchsia": ["-Copt-level=3"],
         "//conditions:default": [],
-    }) if is_release else [],
+    }) if is_release else []),
     visibility = [
         "//src/connectivity/lib/packet-formats/benchmarks:__pkg__",
         "//src/connectivity/network:__subpackages__",
     ],
 )
 # LINT.ThenChange(BUILD.gn:netstack3_configs)
+
+# LINT.IfChange(netstack3_debug_configs)
+# @bazel2gn:skip
+build_flags(
+    name = "netstack3_debug_configs",
+    subflags = [
+        # Minor optimizations that remove a lot of indirection and make zero-cost
+        # closer to zero-cost.
+        "//build/config:optimize_debug",
+
+        # Enable ThinLTO to allow cross-crate optimization, as netstack3 is
+        # distributed across multiple crates.
+        "//build/config/lto:thinlto-if-compatible",
+    ] if is_debug else [],
+)
+# LINT.ThenChange(BUILD.gn:netstack3_debug_configs)
+
+rustc_check_cfg_build_flags(
+    name = "check_cfg_flags",
+    cfgs = ["test"],
+    features = ["instrumented"],
+)
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    ":config_lib",
+    "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf_rust",
+    "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+    "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust",
+    "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter_rust",
+    "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+    "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+    "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers_rust",
+    "//sdk/fidl/fuchsia.net.multicast.admin:fuchsia.net.multicast.admin_rust",
+    "//sdk/fidl/fuchsia.net.ndp:fuchsia.net.ndp_rust",
+    "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor_rust",
+    "//sdk/fidl/fuchsia.net.power:fuchsia.net.power_rust",
+    "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
+    "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
+    "//sdk/fidl/fuchsia.net.routes:fuchsia.net.routes_rust",
+    "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust",
+    "//sdk/fidl/fuchsia.net.settings:fuchsia.net.settings_rust",
+    "//sdk/fidl/fuchsia.net.sockets:fuchsia.net.sockets_rust",
+    "//sdk/fidl/fuchsia.net.stack:fuchsia.net.stack_rust",
+    "//sdk/fidl/fuchsia.net.tcp:fuchsia.net.tcp_rust",
+    "//sdk/fidl/fuchsia.net.udp:fuchsia.net.udp_rust",
+    "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
+    "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+    "//sdk/fidl/fuchsia.posix.socket.packet:fuchsia.posix.socket.packet_rust",
+    "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_rust",
+    "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker_rust",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust",
+    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+    "//sdk/rust/zx",
+    "//src/connectivity/lib/fidl_fuchsia_net_neighbor_ext",
+    "//src/connectivity/lib/net-declare",
+    "//src/connectivity/lib/net-types",
+    "//src/connectivity/lib/network-device/rust",
+    "//src/connectivity/lib/packet-formats",
+    "//src/connectivity/network/lib/chunked_ringbuf",
+    "//src/connectivity/network/lib/diagnostics-traits",
+    "//src/connectivity/network/lib/explicit",
+    "//src/connectivity/network/lib/pcap",
+    "//src/connectivity/network/netstack3/fidl:fuchsia.netstack.persistence_rust",
+    "//src/diagnostics/lib/redactor_client",
+    "//src/lib/async-utils",
+    "//src/lib/debug/rust",
+    "//src/lib/diagnostics/inspect/runtime/rust",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/diagnostics/log/rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fidl_table_validation",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-runtime",
+    "//src/lib/fuchsia-sync",
+    "//src/lib/network/fidl_fuchsia_net_ext",
+    "//src/lib/network/fidl_fuchsia_net_filter_ext",
+    "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+    "//src/lib/network/fidl_fuchsia_net_matchers_ext",
+    "//src/lib/network/fidl_fuchsia_net_multicast_ext",
+    "//src/lib/network/fidl_fuchsia_net_ndp_ext",
+    "//src/lib/network/fidl_fuchsia_net_routes_ext",
+    "//src/lib/network/fidl_fuchsia_net_sockets_ext",
+    "//src/lib/network/packet",
+    "//src/lib/replace-with",
+    "//src/lib/trace/rust:trace-provider",
+    "//src/lib/windowed-stats",
+    "//src/starnix/lib/ebpf",
+    "//src/starnix/lib/ebpf_api",
+    "//src/storage/lib/vfs/rust:vfs",
+    "//src/sys/pkg/fidl/fuchsia.update.verify:fuchsia.update.verify_rust",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:arc-swap",
+    "//third_party/rust_crates/vendor:assert_matches",
+    "//third_party/rust_crates/vendor:async-ringbuf",
+    "//third_party/rust_crates/vendor:bit-vec",
+    "//third_party/rust_crates/vendor:bitflags",
+    "//third_party/rust_crates/vendor:either",
+    "//third_party/rust_crates/vendor:event-listener",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:itertools",
+    "//third_party/rust_crates/vendor:libc",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:once_cell",
+    "//third_party/rust_crates/vendor:pin-project",
+    "//third_party/rust_crates/vendor:rand",
+    "//third_party/rust_crates/vendor:scopeguard",
+    "//third_party/rust_crates/vendor:smallvec",
+    "//third_party/rust_crates/vendor:thiserror",
+    "//third_party/rust_crates/vendor:zerocopy",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_PROC_MACRO_DEPS = [
+    "//third_party/rust_crates/vendor:derivative",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_TEST_DEPS = [
+    "//src/connectivity/network/netstack3/core:netstack3-core-testutils",
+    "//src/connectivity/network/testing/ebpf_test_util",
+    "//src/connectivity/network/testing/netemul/network-context/fidl:network_rust",
+    "//src/connectivity/network/testing/netemul/rust:lib",
+    "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+    "//src/lib/fdio/rust:fdio",
+    "//src/lib/fuchsia",
+    "//src/lib/proptest-support",
+    "//third_party/rust_crates/vendor:futures-lite",
+    "//third_party/rust_crates/vendor:proptest",
+    "//third_party/rust_crates/vendor:test-case",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_TEST_PROC_MACRO_DEPS = [
+    "//src/connectivity/lib/ip-test-macro",
+    "//src/lib/testing/fixture",
+]
+
+_COMMON_SRCS = [
+    "src/bindings.rs",
+    "src/bindings/bpf.rs",
+    "src/bindings/counters.rs",
+    "src/bindings/debug_fidl_worker.rs",
+    "src/bindings/devices.rs",
+    "src/bindings/errno.rs",
+    "src/bindings/error.rs",
+    "src/bindings/filter.rs",
+    "src/bindings/filter/controller.rs",
+    "src/bindings/filter/conversion.rs",
+    "src/bindings/filter/conversion/actions.rs",
+    "src/bindings/filter/conversion/matchers.rs",
+    "src/bindings/filter/socket_filters.rs",
+    "src/bindings/health_check_worker.rs",
+    "src/bindings/inspect.rs",
+    "src/bindings/integration_tests.rs",
+    "src/bindings/interface_config.rs",
+    "src/bindings/interfaces_admin.rs",
+    "src/bindings/interfaces_watcher.rs",
+    "src/bindings/matchers.rs",
+    "src/bindings/multicast_admin.rs",
+    "src/bindings/ndp_watcher.rs",
+    "src/bindings/neighbor_worker.rs",
+    "src/bindings/netdevice_worker.rs",
+    "src/bindings/packet_capture_worker.rs",
+    "src/bindings/persistence.rs",
+    "src/bindings/power.rs",
+    "src/bindings/power/element.rs",
+    "src/bindings/power/suspension_block.rs",
+    "src/bindings/power/transmit_suspension_handler.rs",
+    "src/bindings/reference_notifier.rs",
+    "src/bindings/resource_removal.rs",
+    "src/bindings/root_fidl_worker.rs",
+    "src/bindings/routes.rs",
+    "src/bindings/routes/admin.rs",
+    "src/bindings/routes/interface_local.rs",
+    "src/bindings/routes/rules_admin.rs",
+    "src/bindings/routes/rules_state.rs",
+    "src/bindings/routes/state.rs",
+    "src/bindings/routes/watcher.rs",
+    "src/bindings/routes/witness.rs",
+    "src/bindings/settings.rs",
+    "src/bindings/socket.rs",
+    "src/bindings/socket/datagram.rs",
+    "src/bindings/socket/datagram/sndbuf.rs",
+    "src/bindings/socket/event_pair.rs",
+    "src/bindings/socket/packet.rs",
+    "src/bindings/socket/queue.rs",
+    "src/bindings/socket/raw.rs",
+    "src/bindings/socket/stream.rs",
+    "src/bindings/socket/stream/buffer.rs",
+    "src/bindings/socket/worker.rs",
+    "src/bindings/sockets_fidl.rs",
+    "src/bindings/stack_fidl_worker.rs",
+    "src/bindings/stats_sampler.rs",
+    "src/bindings/sync.rs",
+    "src/bindings/time.rs",
+    "src/bindings/timers.rs",
+    "src/bindings/util.rs",
+    "src/bindings/util/data_available.rs",
+    "src/bindings/util/rcu.rs",
+    "src/bindings/util/result_ext.rs",
+    "src/bindings/util/scope_ext.rs",
+    "src/bindings/waker.rs",
+    "src/main.rs",
+]
+
+# Profile the binary build when requested.
+# @bazel2gn:raw_attribute:if (netstack3_profile_rustc) { configs += [ ":compiler_profile" ] }
+rustc_binary(
+    name = "bin",
+    srcs = _COMMON_SRCS,
+    binary_name = "netstack3",
+    build_flags = [
+        ":check_cfg_flags",
+        "//build/config/rust/lints:deny_unused_results",
+        ":netstack3_configs",
+        ":netstack3_debug_configs",
+    ],
+    edition = "2024",
+    # Both debug and release NS3 builds take a long while to run because of
+    # optimizations. Build these on the larger build machines to prevent build
+    # times from becoming unreasonably large.
+    exec_properties = RBE_USE_LARGE_WORKER,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _COMMON_DEPS + ["//src/connectivity/network/netstack3/core:netstack3-core"],
+)
+
+# Cannot attach to `:bin` via `crate` because unit tests require
+# `:netstack3-core-testutils` instead of `:netstack3-core`.
+# @bazel2gn:raw_attribute:if (netstack3_profile_rustc) { configs += [ ":compiler_profile" ] }
+rustc_test(
+    name = "bin_test",
+    srcs = _COMMON_SRCS,
+    build_flags = [
+        ":check_cfg_flags",
+        "//build/config/rust/lints:deny_unused_results",
+        ":netstack3_configs",
+        ":netstack3_debug_configs",
+    ],
+    # Preserves the GN `with_unit_tests = true` output binary name for `:bin`.
+    crate_name = "netstack3_bin_test",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    exec_properties = RBE_USE_LARGE_WORKER,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS + _COMMON_TEST_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = _COMMON_DEPS + _COMMON_TEST_DEPS,
+)
+
+rustc_binary(
+    name = "bin-instrumented",
+    srcs = _COMMON_SRCS,
+    binary_name = "netstack3-instrumented",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_features = ["instrumented"],
+    edition = "2024",
+    # This target needs more memory to build remotely, see b/484091776.
+    exec_properties = RBE_USE_LARGE_WORKER,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    deps = _COMMON_DEPS + ["//src/connectivity/network/netstack3/core:netstack3-core-instrumented"],
+)
+
+# Cannot attach to `:bin-instrumented` via `crate` because unit tests require
+# `:netstack3-core-testutils` instead of `:netstack3-core-instrumented`.
+rustc_test(
+    name = "bin-instrumented_test",
+    srcs = _COMMON_SRCS,
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_features = ["instrumented"],
+    # Preserves the GN `with_unit_tests = true` output binary name for
+    # `:bin-instrumented`.
+    crate_name = "netstack3_instrumented_bin_test",
+    crate_root = "src/main.rs",
+    edition = "2024",
+    exec_properties = RBE_USE_LARGE_WORKER,
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS + _COMMON_TEST_PROC_MACRO_DEPS,
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = _COMMON_DEPS + _COMMON_TEST_DEPS,
+)
+
+cml_shard(
+    name = "meta/routed_configs.shard",
+    shard = "meta/routed_configs.shard.cml",
+)
+
+cml_shard(
+    name = "meta/test_common_configs.shard",
+    shard = "meta/test_common_configs.shard.cml",
+)
+
+cml_shard(
+    name = "meta/netstack3.shard",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    shard = "meta/netstack3.shard.cml",
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "netstack3",
+)
+
+fx_packaged_binary(
+    name = "bin-instrumented_packaged",
+    binary = ":bin-instrumented",
+    binary_name = "netstack3-instrumented",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    component_name = "netstack3",
+    includes = [
+        ":meta/netstack3.shard",
+        ":meta/routed_configs.shard",
+    ],
+    manifest = "meta/netstack3_prod.cml",
+)
+
+# Preserve GN package-private visibility for the hand-written
+# fuchsia_package("netstack3") above the sentinel.
+# @bazel2gn:raw_attribute:visibility = [ ":*" ]
+fx_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "netstack3",
+    components = [":component"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "config_lib",
+    cm_label = ":component_manifest",
+    crate_name = "ns3_config",
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "component-for-tests_manifest",
+    component_name = "netstack3",
+    includes = [
+        ":meta/netstack3.shard",
+        ":meta/test_common_configs.shard",
+    ],
+    manifest = "meta/netstack3_test.cml",
+)
+
+# A stand-in for :component to use for tests.
+# @bazel2gn:skip
+fx_component(
+    name = "component-for-tests",
+    testonly = True,
+    compiled_manifest = ":component-for-tests_manifest",
+    deps = [":bin_packaged"],
+)
+
+# A stand-in for :netstack3 to use as a subpackage in tests.
+fx_package(
+    name = "package-for-tests",
+    package_name = "netstack",
+    testonly = True,
+    components = [":component-for-tests"],
+    visibility = [
+        "//src/connectivity/network:__subpackages__",
+        "//src/developer/adb/bin/adb-sideload:__pkg__",
+        "//src/sys/pkg/testing/mock-omaha-server-fuchsia:__pkg__",
+    ],
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "component-debug_manifest",
+    component_name = "netstack3-debug",
+    includes = [
+        ":meta/netstack3.shard",
+        ":meta/test_common_configs.shard",
+    ],
+    manifest = "meta/netstack3_debug.cml",
+)
+
+# Component with debugging instrumentation enabled. This should be used for
+# tests but not benchmarks.
+# @bazel2gn:skip
+fx_component(
+    name = "component-debug",
+    testonly = True,
+    compiled_manifest = ":component-debug_manifest",
+    deps = [":bin-instrumented_packaged"],
+)
+
+# Package with debugging instrumentation enabled. This should be used as a
+# subpackage in tests, not benchmarks.
+fx_package(
+    name = "package-debug",
+    package_name = "netstack-debug",
+    testonly = True,
+    components = [":component-debug"],
+    visibility = [
+        "//src/connectivity/network:__subpackages__",
+        "//src/testing/sl4f/proxy:__pkg__",
+    ],
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "component-debug-less-logs_manifest",
+    component_name = "netstack3-debug",
+    includes = [
+        ":meta/netstack3.shard",
+        ":meta/test_common_configs.shard",
+    ],
+    manifest = "meta/netstack3_debug_less_logs.cml",
+)
+
+# A stand-in for :component-debug to use for tests that need to avoid logging as
+# verbosely to avoid timing out in infra.
+# @bazel2gn:skip
+fx_component(
+    name = "component-debug-less-logs",
+    testonly = True,
+    compiled_manifest = ":component-debug-less-logs_manifest",
+    deps = [":bin-instrumented_packaged"],
+)
+
+# A stand-in for :package-debug for tests that need reduced logging verbosity.
+fx_package(
+    name = "package-debug-less-logs",
+    package_name = "netstack-debug",
+    testonly = True,
+    components = [":component-debug-less-logs"],
+)
+
+# @bazel2gn:skip
+fx_component_manifest(
+    name = "component-conformance_manifest",
+    component_name = "netstack3-conformance",
+    includes = [
+        ":meta/netstack3.shard",
+        ":meta/test_common_configs.shard",
+    ],
+    manifest = "meta/netstack3_conformance.cml",
+)
+
+# Component with debugging instrumentation enabled and opaque IIDs disabled for
+# convenience in conformance testing.
+# @bazel2gn:skip
+fx_component(
+    name = "component-conformance",
+    testonly = True,
+    compiled_manifest = ":component-conformance_manifest",
+    deps = [":bin-instrumented_packaged"],
+)
+
+# Package with debugging instrumentation enabled and opaque IIDs disabled for
+# convenience in conformance testing.
+fx_package(
+    name = "package-conformance",
+    package_name = "netstack-conformance",
+    testonly = True,
+    components = [":component-conformance"],
+)
+
+fx_unittest_component(
+    name = "netstack3-bin_test_component",
+    binary = ":bin_test",
+    component_name = "netstack3-bin_test",
+)
+
+fx_package(
+    name = "netstack3-bin_test_package",
+    package_name = "netstack3-bin_test",
+    subpackages = ["//src/connectivity/network/testing/netemul/service:package"],
+    test_components = [":netstack3-bin_test_component"],
+)
+
+fx_test(
+    name = "netstack3-bin_test",
+    package = ":netstack3-bin_test_package",
+)
+
+fx_unittest_component(
+    name = "netstack3-bin-instrumented_test_component",
+    binary = ":bin-instrumented_test",
+    component_name = "netstack3-bin-instr_test",
+)
+
+fx_package(
+    name = "netstack3-bin-instrumented_test_package",
+    package_name = "netstack3-bin-instr_test",
+    subpackages = ["//src/connectivity/network/testing/netemul/service:package"],
+    test_components = [":netstack3-bin-instrumented_test_component"],
+)
+
+fx_test(
+    name = "netstack3-bin-instrumented_test",
+    package = ":netstack3-bin-instrumented_test_package",
+)

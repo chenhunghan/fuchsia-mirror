@@ -121,4 +121,39 @@ TEST(Ns8250Tests, Read) {
   EXPECT_EQ(uint8_t{'\r'}, driver.Read());
 }
 
+template <typename UartDriver>
+void TestTxDrained(const typename UartDriver::config_type& cfg) {
+  uart::KernelDriver<UartDriver, uart::mock::IoProvider, uart::UnsynchronizedPolicy,
+                     uart::mock::IrqProvider>
+      driver(cfg);
+
+  driver.io()
+      .mock()
+      // Init()
+      .ExpectRead(uint8_t{0b0000'0000}, 1)
+      .ExpectWrite(uint8_t{0b0000'0000}, 1)
+      .ExpectRead(uint8_t{kDefaultLineControls}, 3)
+      .ExpectWrite(uint8_t{unsigned{kDefaultLineControls} | 0b1000'0000u}, 3)
+      .ExpectWrite(uint8_t{0b1110'0111}, 2)
+      .ExpectWrite(uint8_t{kDefaultLineControls}, 3)
+      .ExpectWrite(uint8_t{0b0000'0011}, 4)
+      .ExpectRead(uint8_t{0b1110'0001}, 2)
+      // TxDrained()
+      .ExpectRead(uint8_t{0b0000'0000}, 5)   // LineStatus (THRE and TEMT clear)
+      .ExpectRead(uint8_t{0b0010'0000}, 5)   // LineStatus (THRE set, TEMT clear)
+      .ExpectRead(uint8_t{0b0110'0000}, 5);  // LineStatus (THRE and TEMT set)
+
+  driver.Init();
+  EXPECT_FALSE(driver.TxDrained());
+  EXPECT_FALSE(driver.TxDrained());
+  EXPECT_TRUE(driver.TxDrained());
+}
+
+TEST(Ns8250Tests, TxDrained) {
+  TestTxDrained<uart::ns8250::Mmio32Driver>(kTestConfig);
+  TestTxDrained<uart::ns8250::Mmio8Driver>(kTestConfig);
+  constexpr zbi_dcfg_simple_pio_t kPioTestConfig = {};
+  TestTxDrained<uart::ns8250::PioDriver>(kPioTestConfig);
+}
+
 }  // namespace

@@ -6,7 +6,7 @@ The component manager is the heart of the component framework. It maintains the
 [capabilities][doc-capabilities] they require at runtime, and keeps them
 isolated from one another.
 
-## Booting the system
+## Booting the system {:#booting-the-system}
 
 The component manager is responsible for starting most processes in the system.
 It is one of the first processes created when the system boots and it is one

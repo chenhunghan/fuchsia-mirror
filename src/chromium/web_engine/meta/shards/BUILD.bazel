@@ -1,0 +1,76 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "context_provider_create_base.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "context_provider_create_base.shard.cml",
+)
+
+cml_shard(
+    name = "context_provider_create_with_vulkan.shard",
+    includes = ["//sdk/lib/vulkan:client.shard"],
+    shard = "context_provider_create_with_vulkan.shard.cml",
+)
+
+# `fuchsia.web.ContextProvider.Create` may be used.
+# Does not apply to launching a `fuchsia.web.ContextProvider` implementation.
+expect_includes(
+    name = "context_provider_create_base",
+    includes = [":context_provider_create_base.shard"],
+)
+
+# `fuchsia::web::ContextFeatureFlags::AUDIO` may be specified.
+expect_includes(
+    name = "context_provider_create_with_audio",
+    includes = ["context_provider_create_with_audio.shard.cml"],
+    deps = [":context_provider_create_base"],
+)
+
+# `fuchsia::web::ContextFeatureFlags::HARDWARE_VIDEO_DECODER` may be specified.
+expect_includes(
+    name = "context_provider_create_with_hardware_video_decoder",
+    includes = ["context_provider_create_with_hardware_video_decoder.shard.cml"],
+    deps = [":context_provider_create_with_vulkan"],
+)
+
+# `fuchsia::web::ContextFeatureFlags::KEYBOARD` may be specified.
+expect_includes(
+    name = "context_provider_create_with_keyboard",
+    includes = ["context_provider_create_with_keyboard.shard.cml"],
+    deps = [":context_provider_create_base"],
+)
+
+# `fuchsia::web::ContextFeatureFlags::NETWORK` may be specified.
+expect_includes(
+    name = "context_provider_create_with_network",
+    includes = ["context_provider_create_with_network.shard.cml"],
+    deps = [":context_provider_create_base"],
+)
+
+# `fuchsia::web::ContextFeatureFlags::VIRTUAL_KEYBOARD` may be specified.
+expect_includes(
+    name = "context_provider_create_with_virtual_keyboard",
+    includes = ["context_provider_create_with_virtual_keyboard.shard.cml"],
+    deps = [":context_provider_create_base"],
+)
+
+# `fuchsia::web::ContextFeatureFlags::VULKAN` may be specified.
+expect_includes(
+    name = "context_provider_create_with_vulkan",
+    includes = [":context_provider_create_with_vulkan.shard"],
+    deps = [":context_provider_create_base"],
+)
+
+# `fuchsia.web.Frame.CreateView*()` may be called.
+expect_includes(
+    name = "context_provider_create_with_view",
+    includes = ["context_provider_create_with_view.shard.cml"],
+    deps = [":context_provider_create_base"],
+)

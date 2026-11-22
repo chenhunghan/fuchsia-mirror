@@ -21,7 +21,6 @@ fidl_library(
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.component.decl",
-        "//sdk/fidl/fuchsia.component.sandbox",
         "//sdk/fidl/fuchsia.driver.framework",
         "//sdk/fidl/fuchsia.power.broker",
         "//sdk/fidl/fuchsia.url",

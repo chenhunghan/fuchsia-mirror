@@ -21,6 +21,53 @@ pub const SMP_MAX_CPUS: usize =
 pub use counters_abi::{ARENA_VMO_NAME, DESCRIPTOR_VMO_NAME, Descriptor, DescriptorVmo, Type};
 pub use zr::to_array;
 
+// Check that the counters-abi definitions match the C++ <lib/counter-vmo-abi.h>
+// definitions that the C++ kernel code and kernel.ld use.
+mod bindings_asserts {
+    use core::mem::{align_of, offset_of, size_of};
+    use counters_abi::{Descriptor, DescriptorVmo, Type};
+    use counters_bindings as bindings;
+
+    zr::static_assert!(Type::Padding as u64 == bindings::counters_Type_kPadding);
+    zr::static_assert!(Type::Sum as u64 == bindings::counters_Type_kSum);
+    zr::static_assert!(Type::Min as u64 == bindings::counters_Type_kMin);
+    zr::static_assert!(Type::Max as u64 == bindings::counters_Type_kMax);
+
+    zr::static_assert_size_and_align!(
+        Descriptor,
+        size_of::<bindings::counters_Descriptor>(),
+        align_of::<bindings::counters_Descriptor>(),
+    );
+    zr::static_assert!(
+        offset_of!(Descriptor, name) == offset_of!(bindings::counters_Descriptor, name)
+    );
+    zr::static_assert!(
+        offset_of!(Descriptor, type_) == offset_of!(bindings::counters_Descriptor, type_)
+    );
+
+    zr::static_assert_size_and_align!(
+        DescriptorVmo,
+        size_of::<bindings::counters_DescriptorVmo>(),
+        align_of::<bindings::counters_DescriptorVmo>(),
+    );
+    zr::static_assert!(
+        offset_of!(DescriptorVmo, magic) == offset_of!(bindings::counters_DescriptorVmo, magic)
+    );
+    zr::static_assert!(
+        offset_of!(DescriptorVmo, max_cpus)
+            == offset_of!(bindings::counters_DescriptorVmo, max_cpus)
+    );
+    zr::static_assert!(
+        offset_of!(DescriptorVmo, descriptor_table_size)
+            == offset_of!(bindings::counters_DescriptorVmo, descriptor_table_size)
+    );
+    zr::static_assert!(
+        size_of::<DescriptorVmo>()
+            == offset_of!(bindings::counters_DescriptorVmo, descriptor_table)
+    );
+    zr::static_assert!(DescriptorVmo::MAGIC == bindings::counters_DescriptorVmo_kMagic);
+}
+
 // Via magic in kernel.ld, all the descriptors wind up in a contiguous
 // array bounded by these two symbols, sorted by name.
 //

@@ -6,6 +6,7 @@
 
 import argparse
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -15,7 +16,7 @@ import tempfile
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 DEFAULT_REPO = "https://fuchsia-review.googlesource.com/fuchsia"
 
@@ -217,7 +218,7 @@ def get_cl_tags(files: List[Path]) -> List[str]:
        either "ulib" or "utest", e.g.
        zircon/system/ulib/fdio-caller/test/fdio.cc -> fdio-caller
     4) If the path begins with "examples" or "tools", then pick the next path
-       component, e.g. examples/fidl/llcpp/async_completer/client/main.cc -> fidl
+       component, e.g. examples/fidl/cpp/client/wire/main.cc -> fidl
 
     Example:
 
@@ -232,7 +233,7 @@ def get_cl_tags(files: List[Path]) -> List[str]:
         if p.parts[0] == "examples" or p.parts[0] == "tools":
             return p.parts[1]
         tag: str = ""
-        for part, next_part in zip(p.parts, p.parts[1:]):
+        for part, next_part in itertools.pairwise(p.parts):
             if (
                 part == "lib"
                 or part == "bin"
@@ -251,15 +252,12 @@ def get_cl_tags(files: List[Path]) -> List[str]:
                     return p.parts[3]
                 return p.parts[2]
         if p.parts[0] == "zircon":
-            for part, next_part in zip(p.parts, p.parts[1:]):
+            for part, next_part in itertools.pairwise(p.parts):
                 if part == "ulib" or part == "utest":
                     return next_part
         raise RuntimeError(f"Could not infer tags from path {p}")
 
-    tags: Set[str] = set()
-    for file in files:
-        tags.add(get_tag(file))
-    return sorted(list(tags))
+    return sorted(frozenset(map(get_tag, files)))
 
 
 def get_stable_hash(thing):

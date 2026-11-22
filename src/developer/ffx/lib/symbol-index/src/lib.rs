@@ -243,7 +243,7 @@ fn pathbuf_to_string(pathbuf: PathBuf) -> Result<String> {
 mod tests {
     use super::*;
 
-    const TEST_DATA_DIR: &str = "../../src/developer/ffx/lib/symbol-index/test_data";
+    const TEST_DATA_DIR: &str = "test_data";
 
     #[test]
     fn test_load() {

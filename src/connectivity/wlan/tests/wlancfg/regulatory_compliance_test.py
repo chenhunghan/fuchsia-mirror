@@ -26,6 +26,7 @@ from openwrt_access_point.lib.access_point_config import (
     BssSettings,
     EhtMode,
     HeMode,
+    PhyMode,
     RadioConfig,
     SecurityOpen,
 )
@@ -148,10 +149,11 @@ class RegulatoryComplianceTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             band = Band.BAND_2G if channel <= MAX_2_4_CHANNEL else Band.BAND_5G
             bw_literal = cast(Literal[20, 40, 80, 160, 320], channel_bandwidth)
 
+            phy_mode: PhyMode
             if bw_literal == 320:
                 phy_mode = EhtMode(bw=320)
             else:
-                phy_mode = HeMode(bw=bw_literal)  # type: ignore
+                phy_mode = HeMode(bw=bw_literal)
 
             config = AccessPointConfig(
                 radios=[

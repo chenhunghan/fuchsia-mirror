@@ -14,6 +14,8 @@ use fidl_fuchsia_hardware_block_volume as fvolume;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_logger as flogger;
 use fidl_fuchsia_process as fprocess;
+use fidl_fuchsia_storage_block as fblock;
+use fidl_fuchsia_storage_mapping as fmapping;
 use fidl_fuchsia_storage_partitions as fpartitions;
 use fidl_fuchsia_update_verify as ffuv;
 
@@ -252,6 +254,8 @@ impl FshostBuilder {
                     .capability(Capability::protocol::<fpartitions::PartitionsManagerMarker>())
                     .capability(Capability::protocol::<BlobCreatorMarker>())
                     .capability(Capability::protocol::<BlobReaderMarker>())
+                    .capability(Capability::protocol::<fblock::MapperMarker>())
+                    .capability(Capability::protocol::<fmapping::MappingProviderMarker>())
                     .capability(Capability::directory("blob").rights(fio::RW_STAR_DIR))
                     .capability(
                         Capability::directory("blob-exec")

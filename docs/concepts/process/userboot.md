@@ -9,7 +9,7 @@ time.  Zircon takes a different approach.
 
 [TOC]
 
-## Boot loader and kernel startup
+## Boot loader and kernel startup {:#boot-loader-and-kernel-startup}
 
 A boot loader loads the kernel into memory and transfers control to the
 kernel's startup code.  The details of the boot loader protocols are not
@@ -22,7 +22,7 @@ the [kernel "command line"](/docs/reference/kernel/kernel_cmdline.md) giving boo
 disk images (which are usually compressed).  The kernel extracts some
 essential information for its own use in the early stages of booting.
 
-## BOOTFS
+## BOOTFS {:#bootfs}
 
 One of the items embedded in the Zircon Boot Image is an initial RAM disk
 filesystem image.  The image is usually compressed using the **zstd**
@@ -41,16 +41,17 @@ After the system has bootstrapped itself, the files in the primary
 BOOTFS become the read-only filesystem tree rooted at `/boot` (and served by
 component manager).
 
-## Kernel loads userboot
+## Kernel loads userboot {:#kernel-loads-userboot}
 
 The kernel does not include any code for decompressing zstd format, nor
 any code for interpreting the BOOTFS format.  Instead, all of this work
 is done by the first userspace process, called `userboot`.
 
-`userboot` is a normal userspace process.  It can only make the standard
-system calls through the [vDSO](/docs/concepts/kernel/vdso.md) like any other process would, and
-is subject to the full [vDSO enforcement](/docs/concepts/kernel/vdso.md#Enforcement) regime.
-What's special about `userboot` is the way it gets loaded.
+`userboot` is a normal userspace process. It can only make the standard system
+calls through the [vDSO](/docs/concepts/kernel/vdso.md) like any other process
+would, and is subject to the full
+[vDSO enforcement](/docs/concepts/kernel/vdso.md#enforcement) regime. What's
+special about `userboot` is the way it gets loaded.
 
 `userboot` is built as an ELF dynamic shared object, using the
 same [RODSO layout](/docs/concepts/kernel/vdso.md#read-only-dynamic-shared-object-layout) as
@@ -81,15 +82,16 @@ bootstrap message.  All the handles that `userboot` itself will need, and
 that the rest of the system will need to access kernel facilities, are
 included in this message.  Following the normal format, *handle info
 entries* describe the purpose of each handle.  These include
-the [`PA_VMO_VDSO` handle](/docs/concepts/kernel/vdso.md#pa_vmo_vdso-handle).
+the [`PA_VMO_VDSO` handle](/docs/concepts/kernel/vdso.md#pa-vmo-vdso-handle).
 
 ## userboot finds system calls in the vDSO
 
-The [standard convention](/docs/concepts/kernel/vdso.md#process_start_argument) for informing
-a new process of its vDSO mapping requires the process to interpret the
-vDSO's ELF headers and symbol table to locate system call entry points.
-To avoid this complexity, `userboot` finds the entry points in the vDSO
-in a different way.
+The [standard
+convention](/docs/concepts/kernel/vdso.md#zx-process-start-argument) for
+informing a new process of its vDSO mapping requires the process to interpret
+the vDSO's ELF headers and symbol table to locate system call entry points. To
+avoid this complexity, `userboot` finds the entry points in the vDSO in a
+different way.
 
 When the kernel maps `userboot` into the first user process, it chooses
 a random location in memory, just as normal program loading does.
@@ -114,7 +116,7 @@ the kernel.  Among the handles it gets from the kernel is one with
 a [VMO](/docs/reference/kernel_objects/vm_object.md) containing the ZBI from the
 boot loader.  `userboot` reads the ZBI headers from this VMO
 looking for the first item with type `ZBI_TYPE_STORAGE_BOOTFS`.  That
-contains the [BOOTFS](#BOOTFS) image.  The item's ZBI header
+contains the [BOOTFS](#bootfs) image.  The item's ZBI header
 indicates if it's compressed, which it usually is.  `userboot` maps in
 this portion of the VMO.  `userboot` contains zstd format support code,
 which it uses to decompress the item into a fresh VMO.

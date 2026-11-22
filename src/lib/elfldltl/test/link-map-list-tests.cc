@@ -76,6 +76,14 @@ struct CheckList {
   CheckCtorDtor<typename T::const_iterator> kCheckConstIterator;
   CheckCtorDtor<typename T::reverse_iterator> kCheckReverseIterator;
   CheckCtorDtor<typename T::const_reverse_iterator> kCheckConstReverseIterator;
+
+  static_assert(std::bidirectional_iterator<typename T::iterator>);
+  static_assert(std::bidirectional_iterator<typename T::const_iterator>);
+  static_assert(std::bidirectional_iterator<typename T::reverse_iterator>);
+  static_assert(std::bidirectional_iterator<typename T::const_reverse_iterator>);
+  static_assert(std::is_const_v<std::remove_reference_t<typename T::const_iterator::reference>>);
+  static_assert(
+      std::is_const_v<std::remove_reference_t<typename T::const_reverse_iterator::reference>>);
 };
 
 CheckList<MapList> kCheckMapList;
@@ -189,6 +197,32 @@ TEST(ElfldltlLinkMapTTests, ReverseIteratorBackward) {
   ASSERT_NE(modulesi, modules.rend());
   EXPECT_EQ(modulesi, modules.rbegin());
   EXPECT_EQ(modulesi->link_map.name.get(), kName3);
+}
+
+TEST(ElfldltlLinkMapTTests, ConstReverseIterator) {
+  const MapList empty_maps;
+  EXPECT_EQ(empty_maps.rbegin(), empty_maps.rend());
+  EXPECT_EQ(empty_maps.crbegin(), empty_maps.crend());
+
+  const MapList maps{kMaps};
+  auto mapsi = maps.rbegin();
+  ASSERT_NE(mapsi, maps.rend());
+  EXPECT_EQ(mapsi->name.get(), kName3);
+  ASSERT_NE(++mapsi, maps.rend());
+  EXPECT_EQ(mapsi++->name.get(), kName2);
+  ASSERT_NE(mapsi, maps.rend());
+  EXPECT_EQ(mapsi++->name.get(), kName1);
+  EXPECT_EQ(mapsi, maps.rend());
+
+  const ModuleList modules{kModules};
+  auto modulesi = modules.crbegin();
+  ASSERT_NE(modulesi, modules.crend());
+  EXPECT_EQ(modulesi->link_map.name.get(), kName3);
+  ASSERT_NE(++modulesi, modules.crend());
+  EXPECT_EQ(modulesi++->link_map.name.get(), kName2);
+  ASSERT_NE(modulesi, modules.crend());
+  EXPECT_EQ(modulesi++->link_map.name.get(), kName1);
+  EXPECT_EQ(modulesi, modules.crend());
 }
 
 }  // namespace

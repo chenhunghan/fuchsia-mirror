@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "inspect-cpp-codelab-testing",
+    testonly = True,
+    srcs = ["integration_test.cc"],
+    hdrs = ["integration_test.h"],
+    visibility = [
+        "//examples/components/config/integration_test:__pkg__",
+        "//examples/diagnostics/inspect/codelab/cpp:__subpackages__",
+    ],
+    deps = [
+        "//examples/diagnostics/inspect/codelab/fidl:fuchsia.examples.inspect_hlcpp",
+        # TODO(https://fxbug.dev/570694755): Drop the path_overwrite once GN
+        # test packages list realm_builder_server_component directly. In GN,
+        # :cpp is a group that forwards :cpp_library alongside the RealmBuilder
+        # server component and shard includes for GN integration tests.
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",  # @bazel2gn:path_overwrite://sdk/lib/sys/component/cpp/testing:cpp
+        "//src/lib/testing/loop_fixture",
+    ],
+    alwayslink = True,
+)

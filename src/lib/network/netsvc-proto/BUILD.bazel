@@ -15,7 +15,6 @@ rustc_library(
         "src/debuglog.rs",
         "src/lib.rs",
         "src/netboot.rs",
-        "src/tftp.rs",
     ],
     build_flags = ["//build/config/rust/lints:deny_unused_results"],
     edition = "2024",
@@ -25,9 +24,6 @@ rustc_library(
     ],
     deps = [
         "//src/lib/network/packet",
-        "//third_party/rust_crates/vendor:arrayvec",
-        "//third_party/rust_crates/vendor:thiserror",
-        "//third_party/rust_crates/vendor:unicase",
         "//third_party/rust_crates/vendor:zerocopy",
     ],
 )

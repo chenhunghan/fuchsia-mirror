@@ -26,5 +26,4 @@ fuchsia_driver_component("component") {
   manifest = "meta/leaf.cml"
   component_name = "leaf"
   deps = [ ":driver" ]
-  info = "meta/info.json"
 }

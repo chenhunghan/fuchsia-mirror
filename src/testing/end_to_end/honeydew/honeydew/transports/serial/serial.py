@@ -1,16 +1,49 @@
 # Copyright 2024 The Fuchsia Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
-"""ABC with methods for Host-(Fuchsia)Target interactions via Serial port."""
+"""Serial transport interface implementation using unix socket."""
 
-import abc
+import codecs
+import logging
+import socket
+import time
 from collections.abc import Sequence
 
+from honeydew.transports import transport
+from honeydew.transports.serial import errors as serial_errors
+from honeydew.utils import decorators
 
-class Serial(abc.ABC):
-    """ABC with methods for Host-(Fuchsia)Target interactions via Serial port."""
+_LOGGER: logging.Logger = logging.getLogger(__name__)
 
-    @abc.abstractmethod
+
+_CARRIAGE_RETURN: bytes = b"\r\n\r\n"
+
+
+class Serial(transport.Transport):
+    """Serial transport interface implementation using unix socket.
+
+    Serial communication with Fuchsia devices is done using Unix Socket in
+    Fuchsia infra labs.
+
+    Args:
+        device_name: Fuchsia device name.
+        socket_path: AF_UNIX socket path associated with the device.
+    """
+
+    def __init__(
+        self,
+        device_name: str,
+        socket_path: str,
+    ) -> None:
+        self._device_name: str = device_name
+        self._socket_path: str = socket_path
+        self.verify_supported()
+
+    def verify_supported(self) -> None:
+        """Verifies that Serial transport is supported by the Fuchsia device."""
+        # All Fuchsia devices support Serial transport.
+
+    @decorators.liveness_check
     def read(
         self,
         size: int = 512,
@@ -30,8 +63,27 @@ class Serial(abc.ABC):
         Raises:
             SerialError: In case of failure.
         """
+        _LOGGER.debug(
+            "Reading %d bytes from the serial port of '%s'",
+            size,
+            self._device_name,
+        )
 
-    @abc.abstractmethod
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect(self._socket_path)
+                return s.recv(size).decode("utf-8", errors="ignore")
+        except socket.timeout as e:
+            raise serial_errors.SerialError(
+                f"Timed out while reading from the serial port of '{self._device_name}'"
+            ) from e
+        except socket.error as e:
+            raise serial_errors.SerialError(
+                f"Failed to read from the serial port of '{self._device_name}'"
+            ) from e
+
+    @decorators.liveness_check
     def send(
         self,
         cmd: str,
@@ -45,8 +97,24 @@ class Serial(abc.ABC):
         Raises:
             SerialError: In case of failure.
         """
+        _LOGGER.info(
+            "Sending '%s' command over the serial port of '%s'",
+            cmd,
+            self._device_name,
+        )
 
-    @abc.abstractmethod
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.connect(self._socket_path)
+                s.sendall(
+                    _CARRIAGE_RETURN + cmd.encode("utf-8") + _CARRIAGE_RETURN
+                )
+        except socket.error as e:
+            raise serial_errors.SerialError(
+                f"Failed to send '{cmd}' command over the serial port of '{self._device_name}'"
+            ) from e
+
+    @decorators.liveness_check
     def send_and_recv(
         self,
         cmd: str,
@@ -57,6 +125,10 @@ class Serial(abc.ABC):
         log_output: bool = True,
     ) -> str:
         """Send command over serial port and read output on the same connection.
+
+        Keeps the unix socket open only during the send and receive window so
+        the serial server does not drop unread command bytes on disconnect or
+        buffer unrelated console output outside the command window.
 
         Args:
             cmd: Command to run over serial port.
@@ -79,3 +151,51 @@ class Serial(abc.ABC):
         Raises:
             SerialError: In case of failure.
         """
+        _LOGGER.info(
+            "Sending '%s' command and reading output over the serial port of '%s'",
+            cmd,
+            self._device_name,
+        )
+
+        output = ""
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+        overall_deadline = time.monotonic() + timeout_sec
+
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                s.settimeout(inactivity_timeout_sec)
+                s.connect(self._socket_path)
+                s.sendall(
+                    _CARRIAGE_RETURN + cmd.encode("utf-8") + _CARRIAGE_RETURN
+                )
+
+                while True:
+                    remaining_overall = overall_deadline - time.monotonic()
+                    if remaining_overall <= 0:
+                        break
+                    # Time out if inactive for inactivity_timeout_sec, or if
+                    # overall deadline is reached.
+                    s.settimeout(min(inactivity_timeout_sec, remaining_overall))
+                    try:
+                        chunk_bytes = s.recv(recv_size)
+                    except socket.timeout:
+                        break
+
+                    if not chunk_bytes:
+                        break
+
+                    output += decoder.decode(chunk_bytes)
+                    if stop_tokens and any(
+                        token in output for token in stop_tokens
+                    ):
+                        break
+                output += decoder.decode(b"", final=True)
+        except socket.error as e:
+            raise serial_errors.SerialError(
+                f"Failed to send '{cmd}' command over the serial port of '{self._device_name}'"
+            ) from e
+
+        if log_output:
+            _LOGGER.debug("Received output from serial: %s", output)
+
+        return output

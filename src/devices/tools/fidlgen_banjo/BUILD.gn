@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/sdk/sdk_host_tool.gni")
-
 group("fidlgen_banjo") {
   deps = [ ":bin($host_toolchain)" ]
 }
@@ -14,14 +12,6 @@ group("tests") {
     ":fidlgen_banjo_lib_test($host_toolchain)",
     "tests",
   ]
-}
-
-if (is_host) {
-  sdk_host_tool("fidlgen_banjo_bin_sdk") {
-    category = "partner"
-    output_name = "fidlgen_banjo"
-    deps = [ ":bin" ]
-  }
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##

@@ -47,24 +47,26 @@ zx::result<> UsbXhci::Init(std::unique_ptr<dma_buffer::BufferFactory> buffer_fac
     return zx::error(ZX_ERR_NO_MEMORY);
   }
   max_slots_ = 32;
-  device_state_ = fbl::MakeArray<fbl::RefPtr<DeviceState>>(&ac, max_slots_);
+  auto device_states = fbl::MakeArray<fbl::RefPtr<DeviceState>>(&ac, max_slots_);
   if (!ac.check()) {
     return zx::error(ZX_ERR_NO_MEMORY);
   }
   for (size_t i = 0; i < max_slots_; i++) {
-    device_state_[i] = fbl::MakeRefCounted<DeviceState>(static_cast<uint32_t>(i), this);
-    fbl::AutoLock l(&device_state_[i]->transaction_lock());
+    device_states[i] = fbl::MakeRefCounted<DeviceState>(static_cast<uint32_t>(i), this);
+    fbl::AutoLock l(&device_states[i]->transaction_lock());
     for (size_t c = 0; c < max_slots_; c++) {
-      zx_status_t status = device_state_[i]->InitEndpoint(
+      zx_status_t status = device_states[i]->InitEndpoint(
           static_cast<uint8_t>(c), &GetTestHarness<TransferRingHarness>()->event_ring(), nullptr);
       if (status != ZX_OK) {
         return zx::error(status);
       }
     }
   }
+  InitDeviceState(std::move(device_states));
 
-  fbl::AutoLock l(&device_state_[0]->transaction_lock());
-  GetTestHarness<TransferRingHarness>()->SetRing(&device_state_[0]->GetEndpoint(0).transfer_ring());
+  auto state0 = GetDeviceState(0);
+  fbl::AutoLock l(&state0->transaction_lock());
+  GetTestHarness<TransferRingHarness>()->SetRing(&state0->GetEndpoint(0).transfer_ring());
   return zx::ok();
 }
 

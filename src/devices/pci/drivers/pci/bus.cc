@@ -147,6 +147,9 @@ zx_status_t Bus::Initialize() {
     return status;
   }
   root_->ConfigureDownstreamDevices();
+  // Publish devices after configuration has succeeded across the entire tree so that
+  // a bridge configuration failure does not leave partially published children behind.
+  root_->PublishDownstream();
 
   return ZX_OK;
 }

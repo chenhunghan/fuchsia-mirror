@@ -23,9 +23,12 @@ use std::sync::Arc;
 ///
 /// The caller must ensure that the `driver_token` is a valid pointer to the `DriverServer`
 /// that was returned by the `initialize` function.
-pub(crate) unsafe fn get_driver_from_token<'a, T: Driver>(driver_token: usize) -> Option<&'a T> {
+pub(crate) unsafe fn get_driver_from_token<'a, T: Driver + Sync>(
+    driver_token: usize,
+) -> Option<&'a T> {
     let driver_server = unsafe { &*(driver_token as *const server::DriverServer<T>) };
-    driver_server.testing_get_driver()
+    // SAFETY: The caller upholds the requirements of `testing_get_driver`.
+    unsafe { driver_server.testing_get_driver() }
 }
 
 /// Can be used to forward logsink requests to the test's.

@@ -7,10 +7,12 @@ use component_events::matcher::*;
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_pkg_http as fpkg_http;
 use fuchsia_async as fasync;
+use fuchsia_component_test::ScopedInstance;
 use futures::future::FutureExt as _;
-use futures::select;
 use futures::stream::{StreamExt as _, TryStreamExt as _};
-use std::net::SocketAddr;
+use futures::{AsyncReadExt as _, select};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use test_case::test_case;
 
 async fn serve_blob_writer_request_stream(mut stream: ffxfs::BlobWriterRequestStream) -> Vec<u8> {
     let (vmo, size) = match stream.next().await.unwrap().unwrap() {
@@ -48,7 +50,8 @@ async fn check_download_blob(client: fpkg_http::ClientProxy, addr: SocketAddr) {
                 blob_writer,
                 zx::BootDuration::from_seconds(30).into_nanos(),
                 zx::BootDuration::from_seconds(30).into_nanos(),
-                0
+                0,
+                None,
             )
             .await
             .unwrap()
@@ -113,6 +116,7 @@ async fn test_download_blob_blocks_idle_stop() {
             zx::BootDuration::from_seconds(30).into_nanos(),
             zx::BootDuration::from_seconds(30).into_nanos(),
             0,
+            None,
         );
 
         _ = EventMatcher::ok()
@@ -136,4 +140,47 @@ async fn test_download_blob_blocks_idle_stop() {
         };
     })
     .await
+}
+
+// Test that closing the peer of `cancel` cancels an in-flight blob download.
+#[test_case("never_idle")]
+#[test_case("idle_1ms")]
+#[fuchsia::test]
+async fn test_download_blob_cancel(behavior: &str) {
+    let listener =
+        fasync::net::TcpListener::bind(&SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))
+            .unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let http_client = ScopedInstance::new(behavior.into(), crate::HTTP_CLIENT_URL.into())
+        .await
+        .expect("failed to create http-client");
+    let client: fpkg_http::ClientProxy = http_client.connect_to_protocol_at_exposed_dir().unwrap();
+    let (blob_writer, mut blob_writer_request_stream) =
+        fidl::endpoints::create_request_stream::<ffxfs::BlobWriterMarker>();
+    let (cancel_tx, cancel_rx) = zx::EventPair::create();
+
+    let mut pending_fut = client.download_blob(
+        &format!("http://{addr}"),
+        blob_writer,
+        zx::BootDuration::from_seconds(30).into_nanos(),
+        zx::BootDuration::from_seconds(30).into_nanos(),
+        0,
+        Some(cancel_rx),
+    );
+
+    // Wait for `http-client` to connect and send the HTTP request so the download is guaranteed to
+    // be in flight before canceling.
+    let (_listener, mut conn, _peer_addr) = listener.accept().await.unwrap();
+    let mut buf = [0u8; 1];
+    assert_eq!(conn.read(&mut buf).await.unwrap(), 1);
+    assert!((&mut pending_fut).now_or_never().is_none());
+
+    drop(cancel_tx);
+    assert_eq!(pending_fut.await.unwrap(), Err(fpkg_http::ClientDownloadBlobError::Canceled));
+    assert!(blob_writer_request_stream.next().await.is_none());
+
+    // Confirm `http-client` closed the HTTP connection.
+    let mut rest = Vec::new();
+    let _ = conn.read_to_end(&mut rest).await.unwrap();
 }

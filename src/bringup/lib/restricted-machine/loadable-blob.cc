@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/elfldltl/testing/get-test-data.h>
 #include <lib/fit/result.h>
 #include <lib/symbolizer-markup/writer.h>
 
@@ -55,51 +56,13 @@ bool LoadableBlobSymbols::Init(elfldltl::LocalVmarLoader& loader,
   return true;
 }
 
-// Lifted from src/lib/elfldltl/testing/get-test-lib-vmo.cc
-zx::vmo LibVmoLoader::Get(std::string_view libname) {
-  constexpr auto init_ldsvc = []() {
-    // The dl_set_loader_service API replaces the handle used by `dlopen` et al
-    // and returns the old one, so initialize by borrowing that handle while
-    // leaving it intact in the system runtime.
-    zx::unowned_channel channel{dl_set_loader_service(ZX_HANDLE_INVALID)};
-    if (!channel->is_valid()) {
-      RM_LOG(ERROR) << "failed to setup channel to loader service";
-      return fidl::UnownedClientEnd<fuchsia_ldsvc::Loader>{channel};
-    }
-    zx_handle_t reset = dl_set_loader_service(channel->get());
-    if (reset != ZX_HANDLE_INVALID) {
-      RM_LOG(WARNING) << "dl_set_loader_service() had prior value";
-    }
-    return fidl::UnownedClientEnd<fuchsia_ldsvc::Loader>{channel};
-  };
-  static const auto ldsvc_endpoint = init_ldsvc();
-
-  fidl::Arena arena;
-  fidl::WireResult result = fidl::WireCall(ldsvc_endpoint)->LoadObject({arena, libname});
-  // Expect the FIDL call to succeed.
-  if (!result.ok()) {
-    RM_LOG(ERROR) << "LdSvc->LoadObject(" << libname
-                  << ") failed: " << zx_status_get_string(result.status());
-  }
-  // If the VMO was not found, return an empty object.
-  if (result->rv == ZX_ERR_NOT_FOUND) {
-    RM_LOG(ERROR) << "Loader service did not find a matching VMO for " << libname;
-    return zx::vmo(ZX_HANDLE_INVALID);
-  }
-  if (result->rv != ZX_OK) {
-    RM_LOG(ERROR) << "error loading vmo for library (" << libname
-                  << "): " << zx_status_get_string(result->rv);
-  }
-  return std::move(result->object);
-}
-
 const zx::vmo& LoadableBlob::elf_vmo(const std::string_view& name) {
   // This must only be loaded once because we can only fetch it from bootfs once.
   // This is because bootfs transfers data to callers instead of copying it.
   if (elf_vmos_.contains(name)) {
     return elf_vmos_[name];
   }
-  elf_vmos_[name] = LibVmoLoader().Get(name);
+  elf_vmos_[name] = elfldltl::testing::GetTestLibVmo(name);
   if (!elf_vmos_[name]) {
     RM_LOG(ERROR) << "could not load '" << name << "'";
   }

@@ -12,8 +12,15 @@ if (is_host) {
   }
 }
 
-# A forwarding target to the Bazel-built undercoat host tool for infra/builders
-# that request "//tools/fuzz".
+# A forwarding target to the Bazel-built undercoat host tool and its runtime
+# host tool dependencies for infra/builders that request "//tools/fuzz".
 group("fuzz") {
-  deps = [ ":undercoat($host_toolchain)" ]
+  deps = [
+    ":undercoat($host_toolchain)",
+    "//src/developer/ffx:host($host_toolchain)",
+    "//src/developer/ffx/plugins/fuzz($host_toolchain)",
+    "//src/storage/bin/fvm($host_toolchain)",
+    "//tools/symbolizer($host_toolchain)",
+    "//zircon/tools/zbi($host_toolchain)",
+  ]
 }

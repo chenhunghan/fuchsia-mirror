@@ -269,7 +269,7 @@ It's good for a public API to reuse types and compose protocols if they're
 semantically equivalent, but it's easy to make mistakes.
 
 [calibration]: /docs/contribute/governance/api_council.md#calibration
-[fidl-bool]: /docs/development/api/fidl.md#avoid_booleans_if_more_states_are_possible
+[fidl-bool]: /docs/development/api/fidl.md#avoid-booleans-if-more-states-are-possible
 [fidl-enum]: /docs/reference/fidl/language/language.md#strict-vs-flexible
 [fidl-error-enum]: /docs/development/api/fidl.md#prefer-domain-specific-enum-for-errors
 [fidl-error-syntax]: /docs/development/api/fidl.md#error-syntax
@@ -279,7 +279,7 @@ semantically equivalent, but it's easy to make mistakes.
 [fidl-rubric]: /docs/development/api/fidl.md
 [fidl-style]: /docs/development/languages/fidl/guides/style.md
 [fidl-library-style]: /docs/development/languages/fidl/guides/style.md#library-overview
-[fidl-string]: /docs/development/api/fidl.md#specify_bounds_for_vector_and_string
+[fidl-string]: /docs/development/api/fidl.md#specify-bounds-for-vector-and-string
 [fidl-versioning]: /docs/reference/fidl/language/versioning.md
 [sdk-category]: /docs/contribute/sdk/categories.md
 [sdk-category-promotion]: /docs/contribute/sdk/README.md#promoting-an-api

@@ -1,0 +1,157 @@
+{
+    "name": "hotplug_disconnect_and_reconnect",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd1",
+            "mode": "rdwr"
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "urb": "u_done",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "data": [
+                1,
+                2,
+                3,
+                4
+            ],
+            "usercontext": 257
+        },
+        {
+            "type": "device_ep_pop_out",
+            "ep": 2,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "poll",
+            "fd": "fd1",
+            "events": [
+                "POLLOUT",
+                "POLLWRNORM"
+            ],
+            "timeout_ms": 2000
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "urb": "u_inflight",
+            "urb_type": "bulk",
+            "ep": 129,
+            "buffer_len": 64,
+            "usercontext": 514
+        },
+        {
+            "type": "device_disconnect"
+        },
+        {
+            "type": "poll",
+            "fd": "fd1",
+            "events": [
+                "POLLOUT",
+                "POLLWRNORM",
+                "POLLERR",
+                "POLLHUP"
+            ],
+            "timeout_ms": 500
+        },
+        {
+            "type": "get_speed",
+            "fd": "fd1"
+        },
+        {
+            "type": "read",
+            "fd": "fd1",
+            "size": 18
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1"
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_done"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1"
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u_inflight"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd1"
+        },
+        {
+            "type": "close",
+            "fd": "fd1"
+        },
+        {
+            "type": "device_reconnect"
+        },
+        {
+            "type": "open",
+            "fd": "fd_new",
+            "mode": "rdwr"
+        },
+        {
+            "type": "get_speed",
+            "fd": "fd_new"
+        },
+        {
+            "type": "close",
+            "fd": "fd_new"
+        }
+    ]
+}

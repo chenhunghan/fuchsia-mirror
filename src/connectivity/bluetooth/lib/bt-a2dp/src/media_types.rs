@@ -201,6 +201,24 @@ impl SbcCodecInfo {
         self.0.maxbitpoolval()
     }
 
+    /// Returns the number of PCM frames encoded in each SBC frame (`block_count * sub_bands`),
+    /// or `None` if multiple block counts or sub-band counts are selected.
+    pub fn pcm_frames_per_encoded_frame(&self) -> Option<usize> {
+        let blocks = match self.block_count() {
+            SbcBlockCount::FOUR => 4,
+            SbcBlockCount::EIGHT => 8,
+            SbcBlockCount::TWELVE => 12,
+            SbcBlockCount::SIXTEEN => 16,
+            _ => return None,
+        };
+        let subbands = match self.sub_bands() {
+            SbcSubBands::FOUR => 4,
+            SbcSubBands::EIGHT => 8,
+            _ => return None,
+        };
+        Some(blocks * subbands)
+    }
+
     /// Returns the sampling frequency selected, in hz.
     /// Returns Error::OutOfRange if multiple frequencies are selected.
     pub fn sampling_frequency(&self) -> avdtp::Result<u32> {
@@ -235,6 +253,14 @@ impl SbcCodecInfo {
         if !(self.sub_bands().intersects(other.sub_bands())) {
             return false;
         }
+        if other.0.minbitpoolval() > other.0.maxbitpoolval() {
+            return false;
+        }
+        if other.0.minbitpoolval() < Self::BITPOOL_MIN
+            || other.0.maxbitpoolval() > Self::BITPOOL_MAX
+        {
+            return false;
+        }
         if self.0.minbitpoolval() > other.0.minbitpoolval() {
             return false;
         }
@@ -246,8 +272,14 @@ impl SbcCodecInfo {
 
     /// Return the best intersection of a and b's capabilities, if one exists.
     pub fn negotiate(a: &Self, b: &Self) -> Option<Self> {
-        let min_bitpool = std::cmp::max(a.0.minbitpoolval(), b.0.minbitpoolval());
-        let max_bitpool = std::cmp::min(a.0.maxbitpoolval(), b.0.maxbitpoolval());
+        let min_bitpool = std::cmp::max(
+            Self::BITPOOL_MIN,
+            std::cmp::max(a.0.minbitpoolval(), b.0.minbitpoolval()),
+        );
+        let max_bitpool = std::cmp::min(
+            Self::BITPOOL_MAX,
+            std::cmp::min(a.0.maxbitpoolval(), b.0.maxbitpoolval()),
+        );
         if max_bitpool < min_bitpool {
             return None;
         }
@@ -261,18 +293,16 @@ impl SbcCodecInfo {
         let allocation = SbcAllocation::LOUDNESS;
         let block_count = SbcBlockCount::SIXTEEN;
         let sub_bands = SbcSubBands::EIGHT;
-        Some(
-            SbcCodecInfo::new(
-                frequency,
-                channel_mode,
-                block_count,
-                sub_bands,
-                allocation,
-                min_bitpool,
-                max_bitpool,
-            )
-            .expect("supported options"),
+        SbcCodecInfo::new(
+            frequency,
+            channel_mode,
+            block_count,
+            sub_bands,
+            allocation,
+            min_bitpool,
+            max_bitpool,
         )
+        .ok()
     }
 }
 
@@ -674,6 +704,35 @@ mod tests {
         let empty = vec![0, 0, 0, 0];
         let res = SbcCodecInfo::try_from(&empty[..]).expect("created codec info");
         assert_eq!((res.0).0, 0);
+        assert!(!res.supports(&res));
+        assert!(SbcCodecInfo::negotiate(&res, &res).is_none());
+
+        // Inverted bitpool range (min_bitpool = 60 > max_bitpool = 30) parsed from wire bytes
+        let inverted_bitpool_bytes = [0x21, 0x15, 60, 30];
+        let inverted =
+            SbcCodecInfo::try_from(&inverted_bitpool_bytes[..]).expect("parsed wire bytes");
+        let valid_sbc = SbcCodecInfo::new(
+            SbcSamplingFrequency::MANDATORY_SNK,
+            SbcChannelMode::MANDATORY_SNK,
+            SbcBlockCount::MANDATORY_SNK,
+            SbcSubBands::MANDATORY_SNK,
+            SbcAllocation::MANDATORY_SNK,
+            SbcCodecInfo::BITPOOL_MIN,
+            SbcCodecInfo::BITPOOL_MAX,
+        )
+        .expect("valid sbc");
+        assert!(!valid_sbc.supports(&inverted));
+        assert!(!inverted.supports(&valid_sbc));
+        assert!(SbcCodecInfo::negotiate(&valid_sbc, &inverted).is_none());
+
+        // Out-of-bounds bitpool range (min_bitpool = 0, max_bitpool = 255) parsed from wire bytes
+        // should clamp during negotiation instead of panicking.
+        let unclamped_bytes = [0x21, 0x15, 0, 255];
+        let unclamped = SbcCodecInfo::try_from(&unclamped_bytes[..]).expect("parsed wire bytes");
+        let negotiated =
+            SbcCodecInfo::negotiate(&valid_sbc, &unclamped).expect("should clamp and negotiate");
+        assert_eq!(negotiated.0.minbitpoolval(), SbcCodecInfo::BITPOOL_MIN);
+        assert_eq!(negotiated.0.maxbitpoolval(), SbcCodecInfo::BITPOOL_MAX);
 
         let too_big = vec![0, 0, 0, 0, 0];
         assert_matches!(SbcCodecInfo::try_from(&too_big[..]), Err(avdtp::Error::OutOfRange));
@@ -702,6 +761,32 @@ mod tests {
         )
         .expect("Couldn't create sbc media codec info.");
         assert_matches!(sbc_codec_info.channel_count(), Ok(2));
+        // Multiple block counts selected -> None
+        assert_eq!(sbc_codec_info.pcm_frames_per_encoded_frame(), None);
+
+        let sbc_16_8 = SbcCodecInfo::new(
+            SbcSamplingFrequency::FREQ48000HZ,
+            SbcChannelMode::JOINT_STEREO,
+            SbcBlockCount::SIXTEEN,
+            SbcSubBands::EIGHT,
+            SbcAllocation::LOUDNESS,
+            2,
+            53,
+        )
+        .expect("sbc 16x8");
+        assert_eq!(sbc_16_8.pcm_frames_per_encoded_frame(), Some(128));
+
+        let sbc_8_4 = SbcCodecInfo::new(
+            SbcSamplingFrequency::FREQ48000HZ,
+            SbcChannelMode::MONO,
+            SbcBlockCount::EIGHT,
+            SbcSubBands::FOUR,
+            SbcAllocation::SNR,
+            2,
+            53,
+        )
+        .expect("sbc 8x4");
+        assert_eq!(sbc_8_4.pcm_frames_per_encoded_frame(), Some(32));
     }
 
     #[test]

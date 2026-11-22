@@ -9,7 +9,6 @@
 #include <climits>
 
 #include "src/ui/a11y/lib/screen_reader/focus/a11y_focus_manager.h"
-#include "third_party/quickjs/cutils.h"
 
 namespace accessibility_test {
 

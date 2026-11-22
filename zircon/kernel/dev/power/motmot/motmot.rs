@@ -15,6 +15,7 @@
 use unittest as _;
 
 use crate::pdev_power::{PdevPowerOps, PowerRebootFlags, pdev_register_power};
+use crate::psci::psci_cpu_on;
 use debug::dprintf;
 use zx_status::Status;
 
@@ -32,7 +33,6 @@ const PS_HOLD_CTRL_DATA: u32 = 1 << 8;
 unsafe extern "C" {
     fn cpp_motmot_modify_register_via_smc(phys_addr: usize, mask: u32, val: u32) -> u64;
     fn cpp_motmot_cpu_off_wfi_loop() -> !;
-    fn psci_cpu_on(hw_cpu_id: u64, entry: u64, context: u64) -> Result<(), Status>;
 }
 
 /// Modifies PMU registers via ARM SMC calls.
@@ -74,7 +74,8 @@ extern "C" fn motmot_cpu_off() -> Result<(), Status> {
 
 /// Powers on the specified hardware CPU core via PSCI CPU on.
 extern "C" fn motmot_cpu_on(hw_cpu_id: u64, entry: u64, context: u64) -> Result<(), Status> {
-    // SAFETY: Invokes PSCI CPU on call.
+    // SAFETY: `PdevPowerOps::cpu_on` callers (via `power_cpu_on`) supply the kernel secondary
+    // entry physical address and bootstrap context (or operator-authorized console arguments).
     unsafe { psci_cpu_on(hw_cpu_id, entry, context) }
 }
 

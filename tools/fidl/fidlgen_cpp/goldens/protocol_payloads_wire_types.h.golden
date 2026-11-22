@@ -61,7 +61,7 @@ class MainProtocolTwoWayLocalWithErrorResult {
   MainProtocolTwoWayLocalWithErrorResult(MainProtocolTwoWayLocalWithErrorResult&&) = default;
   MainProtocolTwoWayLocalWithErrorResult& operator=(MainProtocolTwoWayLocalWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -93,7 +93,7 @@ class MainProtocolTwoWayLocalWithErrorResult {
   ::test_protocolpayloads::wire::MainProtocolTwoWayLocalWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -116,7 +116,7 @@ class MainProtocolTwoWayAnonWithErrorResult {
   MainProtocolTwoWayAnonWithErrorResult(MainProtocolTwoWayAnonWithErrorResult&&) = default;
   MainProtocolTwoWayAnonWithErrorResult& operator=(MainProtocolTwoWayAnonWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -148,7 +148,7 @@ class MainProtocolTwoWayAnonWithErrorResult {
   ::test_protocolpayloads::wire::MainProtocolTwoWayAnonWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -169,7 +169,7 @@ class MainProtocolTwoWayImportWithErrorResult {
   MainProtocolTwoWayImportWithErrorResult(MainProtocolTwoWayImportWithErrorResult&&) = default;
   MainProtocolTwoWayImportWithErrorResult& operator=(MainProtocolTwoWayImportWithErrorResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -195,7 +195,7 @@ class MainProtocolTwoWayImportWithErrorResult {
   ::test_protocolpayloads::wire::MainProtocolTwoWayImportWithErrorResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2

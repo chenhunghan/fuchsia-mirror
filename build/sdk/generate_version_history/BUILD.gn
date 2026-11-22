@@ -37,11 +37,13 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 if (is_host) {
   python_library("generate_version_history") {
     sources = [ "__init__.py" ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//build:*",
       "//build/sdk/generate_version_history/*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -54,5 +56,6 @@ if (is_host) {
       "//sdk:*",
     ]
     deps = [ ":generate_version_history" ]
+    enable_mypy = false
   }
 }

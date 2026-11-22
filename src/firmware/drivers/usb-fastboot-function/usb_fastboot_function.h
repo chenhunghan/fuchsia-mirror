@@ -121,6 +121,7 @@ class UsbFastbootFunction
 
   std::optional<fdf::StopCompleter> stop_completer_;
   std::optional<SetConfiguredCompleter::Async> set_configured_completer_;
+  std::optional<SetConfiguredCompleter::Async> pending_configure_completer_;
   bool stopping_ = false;
   bool bulk_in_cancelled_ = false;
   bool bulk_out_cancelled_ = false;

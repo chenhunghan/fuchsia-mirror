@@ -74,11 +74,7 @@
 //! callback.  Any attempt to do so will produce an error.  That said, timer
 //! handlers may choose to stay registered after the handler has run by returning
 //! `IrqHandlerResult::RemainRegistered`, or they may have their handler
-//! unregistered after completing by returning `IrqHandlerResult::Unregister`.  Care
-//! must be taken, however, as the destruction of the inline function will take
-//! place at IRQ time.  In order to safely unregister the handler at this time,
-//! the inline function must not hold any references to anything which would
-//! require blocking to destroy (such as a heap allocation).
+//! unregistered after completing by returning `IrqHandlerResult::Unregister`.
 
 mod debug;
 mod registers;
@@ -95,7 +91,7 @@ use crate::pdev_interrupt::{
 use crate::root_resource_filter::root_resource_filter_add_deny_region;
 use ::debug::dprintf;
 use affine::Ratio;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
@@ -111,22 +107,19 @@ use zx_types::{ZX_RSRC_KIND_MMIO, zx_duration_t};
 const NS_PER_SEC: u32 = 1_000_000_000;
 
 zr::static_assert_size_and_align!(DcfgArmGenericTimerMmioDriver, 272, 8);
-zr::static_assert_size_and_align!(Ratio, 8, 4);
 
 /// Type of timer within an ARMv7 MMIO timer frame.
-#[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Type {
-    Pct = 0,
-    Vct = 1,
+    Pct,
+    Vct,
 }
 
 /// Return value from an [`IrqHandler`] callback indicating whether to remain registered.
-#[repr(i32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IrqHandlerResult {
-    RemainRegistered = 0,
-    Unregister = 1,
+    RemainRegistered,
+    Unregister,
 }
 
 /// Interrupt configuration for a timer.
@@ -138,15 +131,18 @@ pub struct Irq {
     pub zbi_flags: u32,
 }
 
+/// Type-erased call shim produced by [`IrqHandler::new`] for a closure type `F`.
+///
+/// The `cookie` passed to it must hold the matching `F` written by [`IrqHandler::new`].
+type IrqHandlerFn = unsafe fn(MaybeUninit<*mut c_void>) -> IrqHandlerResult;
+
 /// Pointer-sized inline callback for handling timer interrupts.
 pub struct IrqHandler {
     cookie: MaybeUninit<*mut c_void>,
-    call: Option<unsafe extern "C" fn(MaybeUninit<*mut c_void>) -> i32>,
-    destroy: Option<unsafe extern "C" fn(MaybeUninit<*mut c_void>)>,
+    call: Option<IrqHandlerFn>,
 }
 
-// SAFETY: `IrqHandler` only accepts `Send` closures in `IrqHandler::new` or caller-verified
-// cross-CPU-safe callbacks in `IrqHandler::from_raw`.
+// SAFETY: `IrqHandler::new` requires `F: Send`, and `IrqHandler::empty` holds no payload.
 unsafe impl Send for IrqHandler {}
 
 impl Default for IrqHandler {
@@ -155,37 +151,10 @@ impl Default for IrqHandler {
     }
 }
 
-impl Drop for IrqHandler {
-    fn drop(&mut self) {
-        if let Some(destroy) = self.destroy.take() {
-            // SAFETY: `self.cookie` holds the payload associated with `destroy`.
-            unsafe { destroy(self.cookie) };
-        }
-        self.call = None;
-        self.cookie = MaybeUninit::new(core::ptr::null_mut());
-    }
-}
-
 impl IrqHandler {
     /// Creates an empty `IrqHandler`.
     pub const fn empty() -> Self {
-        Self { cookie: MaybeUninit::new(core::ptr::null_mut()), call: None, destroy: None }
-    }
-
-    /// Creates an `IrqHandler` from raw C callback components.
-    ///
-    /// # Safety
-    ///
-    /// `cookie`, `call`, and `destroy` must be safe to transfer across CPUs. If `call` is `Some`,
-    /// `cookie` must be valid to pass to `call` in hard IRQ context with interrupts disabled. If
-    /// `destroy` is `Some`, `cookie` must be valid to pass to `destroy` once when the handler is
-    /// dropped.
-    pub const unsafe fn from_raw(
-        cookie: MaybeUninit<*mut c_void>,
-        call: Option<unsafe extern "C" fn(MaybeUninit<*mut c_void>) -> i32>,
-        destroy: Option<unsafe extern "C" fn(MaybeUninit<*mut c_void>)>,
-    ) -> Self {
-        Self { cookie, call, destroy }
+        Self { cookie: MaybeUninit::new(core::ptr::null_mut()), call: None }
     }
 
     /// Creates an `IrqHandler` from a pointer-sized, `Copy` Rust closure.
@@ -201,16 +170,16 @@ impl IrqHandler {
         /// # Safety
         ///
         /// `cookie` must have been initialized by writing a valid `F` at its start.
-        unsafe extern "C" fn call_shim<F: Fn() -> IrqHandlerResult>(
+        unsafe fn call_shim<F: Fn() -> IrqHandlerResult>(
             cookie: MaybeUninit<*mut c_void>,
-        ) -> i32 {
+        ) -> IrqHandlerResult {
             // SAFETY: `cookie` was initialized by writing `F` at its start.
             let f_ref = unsafe { &*cookie.as_ptr().cast::<F>() };
-            f_ref() as i32
+            f_ref()
         }
 
         // Store the closure in `MaybeUninit<*mut c_void>` so padding bytes inside `F` remain valid
-        // when `cookie` is copied or passed across FFI.
+        // when `cookie` is copied.
         let mut cookie: MaybeUninit<*mut c_void> = MaybeUninit::zeroed();
         // SAFETY: `F` fits within `MaybeUninit<*mut c_void>` and has alignment
         // `<= align_of::<*mut c_void>()`.
@@ -218,7 +187,7 @@ impl IrqHandler {
             core::ptr::write(cookie.as_mut_ptr().cast::<F>(), f);
         }
 
-        Self { cookie, call: Some(call_shim::<F>), destroy: None }
+        Self { cookie, call: Some(call_shim::<F>) }
     }
 
     /// Returns `true` if a callback is present.
@@ -227,10 +196,7 @@ impl IrqHandler {
     }
 
     /// Returns the raw `(cookie, call)` pair if a callback is registered.
-    const fn callable(
-        &self,
-    ) -> Option<(MaybeUninit<*mut c_void>, unsafe extern "C" fn(MaybeUninit<*mut c_void>) -> i32)>
-    {
+    const fn callable(&self) -> Option<(MaybeUninit<*mut c_void>, IrqHandlerFn)> {
         match self.call {
             Some(call) => Some((self.cookie, call)),
             None => None,
@@ -337,14 +303,6 @@ impl Timer {
         match self.timer_type {
             Type::Pct => "PCT",
             Type::Vct => "VCT",
-        }
-    }
-
-    /// Returns `"PCT"` or `"VCT"` as a static NUL-terminated string for C++ callers.
-    const fn type_name_cstr(&self) -> *const c_char {
-        match self.timer_type {
-            Type::Pct => c"PCT".as_ptr(),
-            Type::Vct => c"VCT".as_ptr(),
         }
     }
 
@@ -518,9 +476,9 @@ impl Timer {
 
             // Now that we are back inside of the lock, but before we mark ourselves as
             // no longer in flight, If the interrupt handler asked us to unregister, do
-            // so now.  The handler is destroyed here, under the lock and at IRQ time.
-            if irq_result == IrqHandlerResult::Unregister as i32 {
-                drop(core::mem::take(guard.as_mut().fields_mut().user_handler));
+            // so now.
+            if irq_result == IrqHandlerResult::Unregister {
+                *guard.as_mut().fields_mut().user_handler = IrqHandler::empty();
             }
 
             // We are back inside of the `irq_lock` once again.  The IRQ handler is
@@ -532,15 +490,10 @@ impl Timer {
     /// Installs `handler` as the interrupt callback and pins the interrupt to `mask`.
     ///
     /// Fails with `BAD_STATE` if a handler is already registered (call [`Timer::reset_handler`]
-    /// first) or if called from within the handler itself. Any previous handler is destroyed
-    /// after the lock is released.
+    /// first) or if called from within the handler itself.
     pub fn set_handler(&self, handler: IrqHandler, mask: cpu_mask_t) -> Result<(), Status> {
         let _irqd = InterruptDisableGuard::new();
 
-        // If we are resetting our handler, make sure to destroy the old handler
-        // outside of the spinlock code by transferring it to old_handler first before
-        // dropping the lock.
-        let mut _old_handler = IrqHandler::empty();
         let current_cpu = curr_cpu_num();
         loop {
             ksync::lock!(let mut guard = self.lock_irq_lock_policy::<NoIrqSavePolicy>());
@@ -571,7 +524,7 @@ impl Timer {
             // vectors; we hold `irq_lock` with the timer disabled, so no interrupt is in flight.
             unsafe { set_interrupt_affinity(InterruptVector(self.irq()), mask) }?;
 
-            _old_handler = core::mem::replace(guard.as_mut().fields_mut().user_handler, handler);
+            *guard.as_mut().fields_mut().user_handler = handler;
 
             return Ok(());
         }
@@ -969,146 +922,8 @@ impl Armv7MmioTimer {
     }
 }
 
-// ============================================================================
-// C++ FFI Entrypoints
-// ============================================================================
-
 /// Initializes all ARMv7 MMIO timers described by `config`.
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_init(config: &DcfgArmGenericTimerMmioDriver) {
+pub extern "C" fn Armv7MmioTimerInit(config: &DcfgArmGenericTimerMmioDriver) {
     Armv7MmioTimer::init(config);
-}
-
-/// Returns a pointer to the `Armv7MmioTimer` for frame `ndx`, or null if unavailable.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_get(ndx: usize) -> *mut Armv7MmioTimer {
-    match Armv7MmioTimer::get(ndx) {
-        Some(timer) => core::ptr::from_ref(timer).cast_mut(),
-        None => core::ptr::null_mut(),
-    }
-}
-
-/// Dumps register state for all timers matching `timer_mask`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_dump(timer_mask: u8) -> c_int {
-    Armv7MmioTimer::dump(timer_mask)
-}
-
-/// Shows status for all timers matching `timer_mask`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_show_status(timer_mask: u8) -> c_int {
-    Armv7MmioTimer::show_status(timer_mask)
-}
-
-/// Returns a reference to the `ticks_to_nsec` ratio of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_ticks_to_nsec(timer: &Armv7MmioTimer) -> &Ratio {
-    &timer.ticks_to_nsec
-}
-
-/// Returns a reference to the physical counter timer (`pct_timer`) of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_pct_timer(timer: &Armv7MmioTimer) -> &Timer {
-    &timer.pct_timer
-}
-
-/// Returns a reference to the virtual counter timer (`vct_timer`) of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_vct_timer(timer: &Armv7MmioTimer) -> &Timer {
-    &timer.vct_timer
-}
-
-/// Returns whether `timer` is supported.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_supported(timer: &Timer) -> bool {
-    timer.supported()
-}
-
-/// Returns whether `timer` is currently enabled.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_enabled(timer: &Timer) -> bool {
-    timer.enabled()
-}
-
-/// Returns whether `timer` currently has an IRQ handler registered.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_has_handler(timer: &Timer) -> bool {
-    timer.has_handler()
-}
-
-/// Returns the IRQ number of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_irq(timer: &Timer) -> u32 {
-    timer.irq()
-}
-
-/// Returns the type of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_type(timer: &Timer) -> Type {
-    timer.timer_type()
-}
-
-/// Returns the null-terminated name (`"PCT"` or `"VCT"`) of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_type_name(timer: &Timer) -> *const c_char {
-    timer.type_name_cstr()
-}
-
-/// Reads and returns the current counter value of `timer` in ticks.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_ticks(timer: &Timer) -> u64 {
-    timer.ticks()
-}
-
-/// Sets or clears the interrupt handler for `timer`.
-///
-/// # Safety
-///
-/// `cookie`, `call`, and `destroy` must satisfy the safety requirements of
-/// [`IrqHandler::from_raw`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_armv7_mmio_timer_timer_set_handler(
-    timer: &Timer,
-    cookie: MaybeUninit<*mut c_void>,
-    call: Option<unsafe extern "C" fn(MaybeUninit<*mut c_void>) -> i32>,
-    destroy: Option<unsafe extern "C" fn(MaybeUninit<*mut c_void>)>,
-    mask: cpu_mask_t,
-) -> Result<(), Status> {
-    // SAFETY: Caller guarantees handler parameters satisfy `IrqHandler::from_raw`.
-    let handler = unsafe { IrqHandler::from_raw(cookie, call, destroy) };
-    timer.set_handler(handler, mask)
-}
-
-/// Cancels any pending deadline on `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_cancel_timer(timer: &Timer) -> Result<(), Status> {
-    timer.cancel_timer()
-}
-
-/// Programs an absolute deadline in ticks on `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_set_timer(
-    timer: &Timer,
-    ticks_deadline: u64,
-) -> Result<(), Status> {
-    timer.set_timer(ticks_deadline)
-}
-
-/// Programs a relative timeout in nanoseconds on `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_set_relative_timer(
-    timer: &Timer,
-    relative_timeout: zx_duration_t,
-) -> Result<(), Status> {
-    timer.set_relative_timer(relative_timeout)
-}
-
-/// Computes the remaining duration until the programmed deadline of `timer`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_armv7_mmio_timer_timer_time_until_deadline(
-    timer: &Timer,
-    out_duration: &mut zx_duration_t,
-) -> Result<(), Status> {
-    *out_duration = timer.time_until_deadline()?;
-    Ok(())
 }

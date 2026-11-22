@@ -80,6 +80,11 @@ type Shard struct {
 	// IsBootTest specifies whether the test is a boot test.
 	IsBootTest bool `json:"is_boot_test,omitempty"`
 
+	// IsPerf specifies whether this shard contains only tests that produce
+	// performance results (tests with ProducesPerfResults set). It is only
+	// set when perf tests are put into separate shards.
+	IsPerf bool `json:"is_perf,omitempty"`
+
 	// BootupTimeoutSecs is the timeout in seconds that the provided product
 	// bundle/environment is expected to take to boot up the target.
 	BootupTimeoutSecs int `json:"bootup_timeout_secs,omitempty"`
@@ -334,6 +339,11 @@ type ShardOptions struct {
 
 	// The default CPU to apply to host or emulator envs.
 	DefaultCPU string
+
+	// Whether to put tests that produce performance results into separate
+	// shards, whose names have the PerfShardPrefix prefix and which have
+	// IsPerf set.
+	SeparatePerfShards bool
 }
 
 // populateEnvDefaults returns an env with certain defaults populated.
@@ -385,7 +395,7 @@ func MakeShards(specs []build.TestSpec, testListEntries map[string]build.TestLis
 		}
 	}
 
-	shards := []*Shard{}
+	var shards []*Shard
 	for envKey, e := range envs {
 		deviceType := e.Dimensions.DeviceType()
 		os := e.Dimensions.OS()
@@ -402,18 +412,30 @@ func MakeShards(specs []build.TestSpec, testListEntries map[string]build.TestLis
 			return specs[i].Test.Name < specs[j].Test.Name
 		})
 
-		shardForProductBundle := make(map[string]*Shard)
+		// Tests are grouped into shards by product bundle and, if
+		// requested, by whether they produce performance results.
+		type shardKey struct {
+			productBundle string
+			isPerf        bool
+		}
+		shardForKey := make(map[shardKey]*Shard)
 		for _, spec := range specs {
-			shard, ok := shardForProductBundle[spec.ProductBundle]
+			isPerf := opts.SeparatePerfShards && spec.Test.ProducesPerfResults
+			namePrefix := ""
+			if isPerf {
+				namePrefix = PerfShardPrefix
+			}
+			key := shardKey{productBundle: spec.ProductBundle, isPerf: isPerf}
+			shard, ok := shardForKey[key]
 			if !ok {
-				name := environmentName(e)
+				name := namePrefix + environmentName(e)
 				if spec.ProductBundle != "" {
 					name = fmt.Sprintf("%s-%s", name, spec.ProductBundle)
 				}
 				shard = &Shard{
 					Name:              name,
-					Tests:             []Test{},
 					ProductBundle:     spec.ProductBundle,
+					IsPerf:            isPerf,
 					BootupTimeoutSecs: spec.BootupTimeoutSecs,
 					ExpectsSSH:        spec.ExpectsSSH,
 					Env:               e,
@@ -431,12 +453,13 @@ func MakeShards(specs []build.TestSpec, testListEntries map[string]build.TestLis
 				test.Metadata = testMetadata
 			}
 			if spec.Test.Isolated || spec.IsBootTest {
-				name := fmt.Sprintf("%s-%s", environmentName(e), normalizeTestName(spec.Test.Name))
+				name := fmt.Sprintf("%s%s-%s", namePrefix, environmentName(e), normalizeTestName(spec.Test.Name))
 				shards = append(shards, &Shard{
 					Name:              name,
 					Tests:             []Test{test},
 					ProductBundle:     spec.ProductBundle,
 					IsBootTest:        spec.IsBootTest,
+					IsPerf:            isPerf,
 					BootupTimeoutSecs: spec.BootupTimeoutSecs,
 					ExpectsSSH:        spec.ExpectsSSH,
 					Env:               e,
@@ -445,10 +468,10 @@ func MakeShards(specs []build.TestSpec, testListEntries map[string]build.TestLis
 				})
 			} else {
 				shard.Tests = append(shard.Tests, test)
-				shardForProductBundle[spec.ProductBundle] = shard
+				shardForKey[key] = shard
 			}
 		}
-		for _, shard := range shardForProductBundle {
+		for _, shard := range shardForKey {
 			if len(shard.Tests) > 0 {
 				shards = append(shards, shard)
 			}
@@ -568,6 +591,11 @@ func environmentName(env build.Environment) string {
 	}
 	if env.Emulator.Name != "" {
 		addToken(env.Emulator.Name)
+	}
+	// Environments with emulator internet access are sharded separately (see
+	// environmentKey), so their names must differ too.
+	if env.Emulator.AllowInternet && !slices.Contains(tokens, "internet") {
+		addToken("internet")
 	}
 
 	return strings.Join(tokens, "-")

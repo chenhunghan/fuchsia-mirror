@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = ["include/lib/simple-audio-stream/simple-audio-stream.h"],
+)
+
+fx_cc_library(
+    name = "simple-audio-stream",
+    srcs = ["simple-audio-stream.cc"],
+    implementation_deps = [
+        "//src/lib/ddk",
+        "//src/media/audio/drivers/lib/audio-driver-proto",
+        "//src/media/audio/drivers/lib/audio-proto-utils",
+    ],
+    visibility = [
+        "//src/media/audio/drivers/aml-g12-pdm:__subpackages__",
+        "//src/media/audio/drivers/aml-g12-tdm:__pkg__",
+        "//src/media/audio/drivers/virtual-audio-legacy:__pkg__",
+        "//src/media/audio/lib/simple-audio-stream/tests:__pkg__",
+    ],
+    deps = [
+        ":headers",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fidl",
+        "//src/lib/ddktl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/inspect",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

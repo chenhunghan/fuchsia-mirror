@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "capture.cc",
+        "factory_server.cc",
+        "streamer.cc",
+        "web_ui.cc",
+    ],
+    hdrs = [
+        "capture.h",
+        "factory_server.h",
+        "streamer.h",
+        "web_ui.h",
+    ],
+    implementation_deps = [
+        # streamer.cc includes <fidl/fuchsia.sysmem2/cpp/hlcpp_conversion.h>, which
+        # GN got transitively.
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp_hlcpp_conversion",
+        "//sdk/lib/fdio",
+        "//src/lib/files",
+    ],
+    visibility = ["//build/cpp:__pkg__"],
+    deps = [
+        ":fuchsia.factory.camera_hlcpp",
+        "//sdk/fidl/fuchsia.camera3:fuchsia.camera3_hlcpp",
+        "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_hlcpp",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fit",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/ui/scenic/cpp",
+        "//src/lib/fsl",
+        "//third_party/libpng",
+        "//zircon/system/ulib/sysmem-version",
+    ],
+    alwayslink = True,
+)
+
+# GN set `defines = [ camera_debug_define ]` here, but nothing in this binary
+# reads CAMERA_MIN_LOG_LEVEL, so the define is dropped.
+fx_cc_binary(
+    name = "camera_factory_bin",
+    srcs = ["main.cc"],
+    deps = [":lib"],
+)
+
+fidl_library(
+    name = "fuchsia.factory.camera",
+    srcs = ["factory.fidl"],
+    enable_hlcpp = True,
+    # TODO(https://fxbug.dev/42111344): Remove lint exclusions by fixing known FIDL lint violations in this target
+    excluded_checks = [
+        "string-bounds-not-specified",
+        "invalid-case-for-decl-name",
+    ],
+    visibility = [
+        "//build/cpp:__pkg__",
+        "//src/camera/bin/factory_cli:__pkg__",
+    ],
+    deps = ["//sdk/fidl/fuchsia.images"],
+)

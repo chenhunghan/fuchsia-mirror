@@ -1,0 +1,85 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "lib",
+    srcs = [
+        "echo_connection.cc",
+        "example_server_app.cc",
+    ],
+    hdrs = [
+        "echo_connection.h",
+        "example_server_app.h",
+    ],
+    deps = [
+        "//examples/components/routing/fidl:echo_cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+
+        # [START inspect_libs]
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+
+        # [END inspect_libs]
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "server_bin",
+    srcs = ["example_server.cc"],
+    gn_output_name = "inspect_server_cpp",
+    deps = [
+        ":lib",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+    ],
+)
+
+fx_packaged_binary(
+    name = "server_bin_packaged",
+    binary = ":server_bin",
+    binary_name = "inspect_server_cpp",
+)
+
+fx_component_manifest(
+    name = "server_component_manifest",
+    component_name = "echo_server",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/echo_server.cml",
+)
+
+fx_component(
+    name = "server_component",
+    compiled_manifest = ":server_component_manifest",
+    deps = [":server_bin_packaged"],
+)
+
+fx_package(
+    name = "inspect-example-cpp",
+    components = [
+        ":server_component",
+        "//examples/components/routing:echo_realm",
+        "//examples/components/routing/cpp/echo_client:echo_client_cmp",
+    ],
+)

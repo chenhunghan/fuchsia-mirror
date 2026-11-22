@@ -6,7 +6,7 @@ There are a few ways that a Fuchsia component generates log messages:
 * The kernel's `debuglog`.
 * A combination of the above, routed through `stdout` or `stderr`.
 
-## `LogSink`/syslog
+## LogSink/syslog {:#logsink-syslog}
 
 Components that want to generate log messages should connect to the
 [`fuchsia.logger.LogSink`] protocol and then handle the
@@ -46,7 +46,7 @@ have the [`fuchsia.boot.WriteOnlyLog`] routed to it.
 
 Most logs written to `debuglog` handles are written through stdio forwarding.
 
-## Standard streams: `stdout` and `stderr`
+## Standard streams: stdout and stderr {:#standard-streams-stdout-and-stderr}
 
 While these concepts may be familiar to you from other operating systems, their
 use in Fuchsia can be complicated to follow because they are routed differently
@@ -71,7 +71,7 @@ By default, [components] only have their `stdout` and `stderr` streams captured
 if they have access to a `LogSink` protocol for forwarding. For more information,
 see the ELF runner section on [forwarding stdout and stderr streams].
 
-## Forwarding `klog` to `syslog`
+## Forwarding klog to syslog {:#forwarding-klog-to-syslog}
 
 The Archivist continually reads from the `klog` and forwards those messages to
 the `syslog` log. Messages from the `klog` can be dropped by the pipeline if
@@ -88,7 +88,7 @@ the `debuglog` syscalls do not have a way to express the severity of a message.
 [prints a warning]: /src/diagnostics/log_listener/src/main.rs?l=918&drc=3a02d1922c0519b4c7d639879ec0503de9c79f0c
 [C++ logging]: /docs/development/languages/c-cpp/logging.md
 [Rust logging]: /docs/development/languages/rust/logging.md
-[kernel's shared ring buffer]: /zircon/kernel/lib/debuglog/debuglog.cc?l=37&drc=1bdbf8a4e6f758c3b1782dee352071cc592ca3ab
+[kernel's shared ring buffer]: /zircon/kernel/lib/debuglog/debuglog.rs
 [bindable to file descriptors]: /sdk/lib/fdio/include/lib/fdio/fdio.h?l=36&drc=1bdbf8a4e6f758c3b1782dee352071cc592ca3ab
 [`debuglog_write`]: /reference/syscalls/debuglog_write.md
 [`debuglog_read`]: /reference/syscalls/debuglog_read.md
@@ -99,5 +99,5 @@ the `debuglog` syscalls do not have a way to express the severity of a message.
 [`ddk/debug.h`]: /src/lib/ddk/include/ddk/debug.h
 [components]: /docs/concepts/components/v2/introduction.md
 [ELF]: /docs/concepts/components/v2/elf_runner.md
-[forwarding stdout and stderr streams]: /docs/concepts/components/v2/elf_runner.md#forwarding_stdout_and_stderr_streams
+[forwarding stdout and stderr streams]: /docs/concepts/components/v2/elf_runner.md#forwarding-stdout-and-stderr-streams
 [driver-logging-docs]: /docs/development/drivers/diagnostics/logging.md

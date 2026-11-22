@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import shlex
+from collections.abc import Sequence, Set
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Callable, Literal, Protocol
 
@@ -16,6 +17,7 @@ from ffx_cmd import FfxCmd
 from fx_cmd import FxCmd
 
 _DEFAULT_SERVER_STARTUP_TIMEOUT = 30
+_DEFAULT_BACKGROUND_STARTUP_TIMEOUT = 60
 _CHECK_SERVER_POLLING_INTERVAL = 0.2
 _DEFAULT_PROBE_TIMEOUT = 15.0
 _DEFAULT_DEREGISTER_TIMEOUT = 5.0
@@ -111,6 +113,125 @@ class PackageServingCLIException(SystemExit, PackageServingException):
     """
 
 
+def _canonical_amber_files_path(
+    build_directory: str | os.PathLike[str] | None = None,
+) -> str:
+    out_dir = (
+        build_directory
+        if build_directory is not None
+        else build_dir.get_build_directory()
+    )
+    return os.path.realpath(os.path.join(out_dir, "amber-files"))
+
+
+def _extract_ffx_machine_list(output: str) -> list[object] | None:
+    parsed = json.loads(output)
+    # Expected format from ffx --machine json: {"ok": {"data": [...]}}
+    if isinstance(parsed, dict) and isinstance(
+        ok_val := parsed.get("ok"), dict
+    ):
+        data = ok_val.get("data", [])
+        return data if isinstance(data, list) else None
+    if isinstance(parsed, list):
+        return parsed
+    return None
+
+
+def _parse_running_server_names(
+    output: str, expected_repo_path: str
+) -> Set[str]:
+    try:
+        entries = _extract_ffx_machine_list(output)
+    except json.JSONDecodeError as e:
+        raise PackageServingException(
+            f"Invalid JSON from ffx repository server list: {e}"
+        ) from e
+    if entries is None:
+        raise PackageServingException(
+            "Unexpected JSON envelope from ffx repository server list."
+        )
+
+    matching_names = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        repo_path = entry.get("repo_path")
+        if isinstance(repo_path, dict):
+            raw_path = repo_path.get("file")
+        elif isinstance(repo_path, str):
+            raw_path = repo_path
+        else:
+            raw_path = None
+        if (
+            isinstance(raw_path, str)
+            and raw_path
+            and os.path.realpath(raw_path) == expected_repo_path
+        ):
+            matching_names.append(name)
+    return frozenset(matching_names)
+
+
+async def get_running_server_names(
+    build_directory: str | os.PathLike[str] | None = None,
+    *,
+    timeout: float = _DEFAULT_PROBE_TIMEOUT,
+    run_command: CommandRunner | None = None,
+) -> Set[str]:
+    """
+    Returns the names of running package servers for a build directory.
+
+    Args:
+        build_directory (str | PathLike[str] | None): Build directory whose
+            `amber-files` path is matched, or None for the active build
+            directory.
+        timeout (float): Subprocess timeout in seconds.
+        run_command (CommandRunner | None): Optional runner for `fx`
+            subcommands.
+
+    Returns:
+        Set[str]: Names of running package servers whose canonicalized
+            `repo_path.file` matches `<build_directory>/amber-files`.
+
+    Raises:
+        PackageServingException: If listing running package servers fails,
+            times out, or returns malformed JSON.
+    """
+    out_dir = (
+        build_directory
+        if build_directory is not None
+        else build_dir.get_build_directory()
+    )
+    expected_repo_path = _canonical_amber_files_path(out_dir)
+    runner = run_command or _default_command_runner(build_directory=out_dir)
+    list_output = await runner(
+        "ffx",
+        "--machine",
+        "json",
+        "repository",
+        "server",
+        "list",
+        timeout=timeout,
+        quiet_mode=True,
+    )
+    if list_output is None:
+        raise PackageServingException("Failed to list running package servers.")
+    if list_output.was_timeout:
+        raise PackageServingException(
+            f"Timed out listing running package servers after {timeout}s."
+        )
+    if list_output.return_code != 0:
+        stderr = list_output.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        raise PackageServingException(
+            "Failed to list running package servers "
+            f"(exit code {list_output.return_code}){detail}."
+        )
+    return _parse_running_server_names(list_output.stdout, expected_repo_path)
+
+
 async def is_running(
     *,
     timeout: float | None = None,
@@ -149,15 +270,7 @@ def is_fuchsia_repo_registered(
     Raises:
         json.JSONDecodeError: If `output` is not valid JSON.
     """
-    parsed = json.loads(output)
-    # Expected format from ffx --machine json: {"ok": {"data": [...]}}
-    entries = []
-    if isinstance(parsed, dict) and "ok" in parsed:
-        data = parsed["ok"].get("data", [])
-        if isinstance(data, list):
-            entries = data
-    elif isinstance(parsed, list):
-        entries = parsed
+    entries = _extract_ffx_machine_list(output) or []
     for entry in entries:
         if isinstance(entry, dict):
             name = entry.get("name", "").removeprefix("fuchsia-pkg://")
@@ -524,45 +637,43 @@ def ephemeral_repository_name(
         build_dir.GetBuildDirectoryError: If `build_directory` is None and no
             active build directory can be determined.
     """
-    out_dir = (
-        build_directory
-        if build_directory is not None
-        else build_dir.get_build_directory()
-    )
-    repo_path = os.path.realpath(os.path.join(out_dir, "amber-files"))
+    repo_path = _canonical_amber_files_path(build_directory)
     path_hash = hashlib.sha256(repo_path.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}-{path_hash}"
 
 
-async def get_arguments(name: str | None = None) -> tuple[str, ...]:
+async def get_arguments(
+    name: str | None = None,
+    *,
+    port: int = 0,
+    background: bool = False,
+) -> Sequence[str]:
     """
     Gets the ffx command line arguments for starting a package server.
 
+    Retains `async def` for compatibility with callers that await this helper.
+
     Args:
         name (str | None): Optionally specify the main repository name for this server.
+        port (int): TCP port to listen on; 0 selects an ephemeral port.
+        background (bool): Whether to pass `--background` instead of `--foreground`.
 
     Returns:
-        tuple[str, ...]: A tuple of ffx arguments for package serving.
+        Sequence[str]: ffx arguments for package serving.
     """
     out_dir = build_dir.get_build_directory()
     repo_name = name or ephemeral_repository_name(build_directory=out_dir)
-    ffx_default_port = await FfxCmd().start(
-        "config",
-        "get",
-        "repository.server.default_port",
-    )
-    stdout = (await ffx_default_port.run_to_completion()).stdout
-    try:
-        port = int(stdout.strip(' \t\n\r"'))
-    except ValueError:
-        port = 8083
+    mode_flag = "--background" if background else "--foreground"
 
+    # Intentionally ignore repository.server.default_port here and default to
+    # ephemeral port 0 so concurrent build directories do not collide on 8083;
+    # tools/devshell/serve retains repository.server.default_port unless -l 0 is passed.
     # LINT.IfChange
     return (
         "repository",
         "server",
         "start",
-        "--foreground",
+        mode_flag,
         "--address",
         f"[::]:{port}",
         "--repository",
@@ -580,7 +691,8 @@ async def get_arguments(name: str | None = None) -> tuple[str, ...]:
 
 
 async def start(
-    name: str | None = None, timeout: float = _DEFAULT_SERVER_STARTUP_TIMEOUT
+    name: str | None = None,
+    timeout: float = _DEFAULT_SERVER_STARTUP_TIMEOUT,
 ) -> asyncio.subprocess.Process:
     """
     Starts a package server.
@@ -619,6 +731,108 @@ async def start(
     else:
         errmsg = f"The package server exited with code {process.returncode}."
     raise PackageServingException(errmsg + f"\nCommand: {shlex.join(args)}")
+
+
+async def _get_running_server_names_or_empty(
+    runner: CommandRunner,
+    timeout: float,
+) -> Set[str]:
+    try:
+        return await get_running_server_names(
+            run_command=runner,
+            timeout=timeout,
+        )
+    except PackageServingException:
+        return frozenset()
+
+
+async def start_background(
+    name: str | None = None,
+    timeout: float = _DEFAULT_BACKGROUND_STARTUP_TIMEOUT,
+    *,
+    port: int = 0,
+    run_command: CommandRunner | None = None,
+) -> bool:
+    """
+    Starts a detached background package server via `ffx`.
+
+    Args:
+        name (str | None): Optionally specify the main repository name for this server.
+        timeout (float): Maximum time in seconds for `ffx` to start the server.
+        port (int): TCP port to listen on; 0 selects an ephemeral port.
+        run_command (CommandRunner | None): Optional runner for `fx` subcommands.
+
+    Returns:
+        bool: True if the server started (or was already running for this build
+            directory), or False if the package repository has not been built.
+
+    Raises:
+        PackageServingException: If starting the server fails or times out.
+    """
+    if not is_package_repository_built():
+        return False
+
+    repo_name = name or ephemeral_repository_name()
+    runner = run_command or _default_command_runner()
+    pre_running_names = await get_running_server_names(
+        run_command=runner,
+        timeout=timeout,
+    )
+    if port == 0 and repo_name in pre_running_names:
+        return True
+
+    args = await get_arguments(repo_name, port=port, background=True)
+    output = await runner("ffx", *args, timeout=timeout, quiet_mode=True)
+    if output is None:
+        raise PackageServingException(
+            f"Failed to start package server.\nCommand: {shlex.join(args)}"
+        )
+    if output.was_timeout:
+        post_running_names = await _get_running_server_names_or_empty(
+            runner, timeout
+        )
+        # Only stop repo_name if this startup attempt created it for this build
+        # directory; ffx stops by name globally and would kill another build's
+        # or a pre-existing healthy server when target RCS probing times out.
+        if (
+            repo_name not in pre_running_names
+            and repo_name in post_running_names
+        ):
+            await runner(
+                "ffx",
+                "repository",
+                "server",
+                "stop",
+                repo_name,
+                timeout=_DEFAULT_SERVER_STOP_TIMEOUT,
+                quiet_mode=True,
+            )
+        raise PackageServingException(
+            f"The package server didn't start within {timeout}s.\n"
+            f"Command: {shlex.join(args)}"
+        )
+    if output.return_code != 0:
+        if port == 0:
+            running_names = await _get_running_server_names_or_empty(
+                runner, timeout
+            )
+            if repo_name in running_names:
+                return True
+        stderr = output.stderr.strip()
+        detail = f": {stderr}" if stderr else ""
+        raise PackageServingException(
+            f"The package server exited with code {output.return_code}{detail}.\n"
+            f"Command: {shlex.join(args)}"
+        )
+    if repo_name not in await get_running_server_names(
+        run_command=runner,
+        timeout=timeout,
+    ):
+        raise PackageServingException(
+            f"The package server {repo_name} is not running after startup.\n"
+            f"Command: {shlex.join(args)}"
+        )
+    return True
 
 
 async def stop(name: str | None = None) -> None:

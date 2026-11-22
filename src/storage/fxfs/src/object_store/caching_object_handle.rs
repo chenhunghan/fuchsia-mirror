@@ -376,7 +376,7 @@ mod tests {
         }
 
         fn block_size(&self) -> BlockSize {
-            BlockSize::new(self.device.block_size()).unwrap()
+            BlockSize::new(self.device.block_size() as u64).unwrap()
         }
 
         fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {

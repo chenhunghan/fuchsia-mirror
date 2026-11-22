@@ -30,17 +30,20 @@ pub use ffx_command_error::{
     user_error,
 };
 
-// FfxCommandLine is being re-exported so that, it can easily be used by the derive macros for
-// subtools.
-pub use ffx_command::FfxCommandLine;
+// FfxCommandLine and TargetNeed are re-exported so they can easily be used by subtools and
+// derive macros.
+pub use ffx_command::{FfxCommandLine, TargetNeed};
 
 #[doc(hidden)]
 pub mod macro_deps {
     pub use crate as fho;
+    pub use crate::try_from_env::target_need_of;
     pub use anyhow;
     pub use argh;
     pub use async_lock;
-    pub use ffx_command::{bug, check_strict_constraints, return_bug, return_user_error};
+    pub use ffx_command::{
+        TargetNeed, bug, check_strict_constraints, return_bug, return_user_error,
+    };
     pub use ffx_config::EnvironmentContext;
     pub use ffx_diagnostics_analytics_state;
     pub use futures;

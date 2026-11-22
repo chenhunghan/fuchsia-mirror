@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/go/go_library.gni")
-import("//build/go/go_test.gni")
 import("//build/json/validate_json.gni")
 import("//tools/fidl/fidlc/testdata/info.gni")
 
@@ -15,6 +13,7 @@ group("tests") {
   ]
 }
 
+# LINT.IfChange(roundtrip_tests)
 # These tests perform a round-trip of the IR: valid JSON IR is read into its go
 # representation by the library utilities, unmarshaled back to JSON, and then
 # validated again as IR. This ensures that the library - and thus all backends
@@ -64,6 +63,8 @@ if (current_toolchain == default_toolchain) {
     deps = roundtrip_test_deps
   }
 }
+
+# LINT.ThenChange(//tools/fidl/lib/fidlgen/testing/roundtrip_tests.bzl:roundtrip_tests)
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #

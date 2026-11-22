@@ -37,7 +37,11 @@ class FixedAddressBootZbi : public BootZbi {
 
   [[noreturn]] void Boot(ktl::optional<void*> argument = {});
 
-  void Log();
+  // We override the base's Log() in the way that makes sense for the
+  // fixed-address case since we want the same spelling and semantics.
+  //
+  // NOLINTNEXTLINE(bugprone-derived-method-shadowing-base-method)
+  void Log(const char* program_name);
 
  private:
   // class Trampoline; (removed)
@@ -47,7 +51,7 @@ class FixedAddressBootZbi : public BootZbi {
     kernel_entry_address_ = load_address + KernelHeader()->entry;
   }
 
-  void LogFixedAddresses() const;
+  void LogFixedAddresses(const char* program_name) const;
 
   // Must be called after BootZbi::Init and before Load.
   void SetKernelAddresses();

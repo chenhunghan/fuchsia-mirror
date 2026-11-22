@@ -3,10 +3,6 @@
 # found in the LICENSE file.
 
 load(
-    "@fuchsia_rules_common//packages:resources.bzl",
-    "resource",
-)
-load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
@@ -17,11 +13,18 @@ load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
+load("//build/bazel/rules/packages:resources.bzl", "resource")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fake_factory_items_tests_test"],
+    visibility = ["//src/factory:__pkg__"],
+)
 
 rustc_binary(
     name = "bin",
@@ -68,7 +71,6 @@ fx_component(
 
 fx_package(
     name = "fake_factory_items",
-    package_name = "fake_factory_items",
     components = [":fake_factory_items_comp"],
 )
 
@@ -85,32 +87,16 @@ rustc_test(
     ],
 )
 
-# @bazel2gn:skip
 resource(
-    name = "testdata_empty",
-    src = "testdata/empty",
-    dest = "data/empty",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "testdata_fake_factory_items_json",
-    src = "testdata/fake_factory_items.json",
-    dest = "data/fake_factory_items.json",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "testdata_random1",
-    src = "testdata/random1",
-    dest = "data/random1",
-)
-
-# @bazel2gn:skip
-resource(
-    name = "testdata_random2",
-    src = "testdata/random2",
-    dest = "data/random2",
+    name = "testdata",
+    testonly = True,
+    srcs = [
+        "testdata/empty",
+        "testdata/fake_factory_items.json",
+        "testdata/random1",
+        "testdata/random2",
+    ],
+    outputs = ["data/{{source_file_part}}"],
 )
 
 fx_packaged_binary(
@@ -138,23 +124,15 @@ fx_test_component(
     deps = [":fake_factory_items_test_packaged_bin"],
 )
 
-# GN copy is hand-written in BUILD.gn because bazel2gn doesn't translate
-# `resources` on an fx_package with test_components.
-# @bazel2gn:skip
 fx_package(
-    name = "fake_factory_items_tests_package",
-    package_name = "fake_factory_items_tests",
+    name = "fake_factory_items_tests",
+    testonly = True,
     components = [":fake_factory_items_comp"],
-    resources = [
-        ":testdata_empty",
-        ":testdata_fake_factory_items_json",
-        ":testdata_random1",
-        ":testdata_random2",
-    ],
+    resources = [":testdata"],
     test_components = [":fake_factory_items_test_comp"],
 )
 
 fx_test(
-    name = "fake_factory_items_tests",
-    package = ":fake_factory_items_tests_package",
+    name = "fake_factory_items_tests_test",
+    package = ":fake_factory_items_tests",
 )

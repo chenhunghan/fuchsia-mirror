@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
       "data": "test.inheritancewithrecursivedecl",
       "start_offset": 8,
       "end_offset": 41
@@ -25,7 +25,7 @@
           "name": "request",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
             "data": "request",
             "start_offset": 239,
             "end_offset": 246
@@ -44,7 +44,7 @@
           "name": "request",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
             "data": "request",
             "start_offset": 112,
             "end_offset": 119
@@ -61,7 +61,7 @@
       "identifier": "test.inheritancewithrecursivedecl/Child",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
         "data": "Child",
         "start_offset": 167,
         "end_offset": 172
@@ -71,7 +71,7 @@
           "identifier": "First",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
             "data": "First",
             "start_offset": 80,
             "end_offset": 85
@@ -85,7 +85,7 @@
           "identifier": "Second",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
             "data": "Second",
             "start_offset": 206,
             "end_offset": 212
@@ -101,7 +101,7 @@
           "identifier": "test.inheritancewithrecursivedecl/Parent",
           "referenced_at": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
             "data": "Parent",
             "start_offset": 187,
             "end_offset": 193
@@ -113,7 +113,7 @@
       "identifier": "test.inheritancewithrecursivedecl/Parent",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
         "data": "Parent",
         "start_offset": 60,
         "end_offset": 66
@@ -123,7 +123,7 @@
           "identifier": "First",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/inheritance_with_recursive_decl.test.fidl",
             "data": "First",
             "start_offset": 80,
             "end_offset": 85

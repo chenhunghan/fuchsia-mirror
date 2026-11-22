@@ -33,7 +33,7 @@ success("AnEmptyStructInStruct") {
 }
 
 decode_failure("AnEmptyStructInStructNonZeroBytes") {
-    bindings_denylist = [llcpp, hlcpp],
+    bindings_denylist = [cpp_wire, hlcpp],
     type = AnEmptyStructInStruct,
     bytes = {
         v2 = [
@@ -56,7 +56,7 @@ success("TwoEmptyStructsInStruct") {
 }
 
 decode_failure("TwoEmptyStructsInStructNonZeroBytes") {
-    bindings_denylist = [llcpp, hlcpp],
+    bindings_denylist = [cpp_wire, hlcpp],
     type = TwoEmptyStructsInStruct,
     bytes = {
         v2 = [
@@ -83,7 +83,7 @@ success("EmptyStructsInArrayInStruct") {
 }
 
 decode_failure("EmptyStructsInArrayInStructNonZeroBytes") {
-    bindings_denylist = [llcpp, hlcpp],
+    bindings_denylist = [cpp_wire, hlcpp],
     type = EmptyStructsInArrayInStruct,
     bytes = {
         v2 = [
@@ -114,7 +114,7 @@ success("EmptyStructsInVectorInStruct") {
 
 // Bindings that use iovec with vectors may have special handling.
 decode_failure("EmptyStructsInVectorInStructNonZeroBytes") {
-    bindings_denylist = [llcpp, hlcpp],
+    bindings_denylist = [cpp_wire, hlcpp],
     type = EmptyStructsInVectorInStruct,
     bytes = {
         v2 = [
@@ -155,7 +155,7 @@ success("TwoEmptyStructsInStructInVectorInStruct") {
 
 // Bindings that use iovec with vectors may have special handling.
 decode_failure("TwoEmptyStructsInStructInVectorInStructNonZeroBytes") {
-    bindings_denylist = [llcpp, hlcpp],
+    bindings_denylist = [cpp_wire, hlcpp],
     type = TwoEmptyStructsInStructInVectorInStruct,
     bytes = {
         v2 = [
@@ -213,8 +213,8 @@ decode_failure("OptionalEmptyStructInvalidPresenceIndicatorWithOutOfLineBytes") 
 }
 
 decode_failure("OptionalEmptyStructNonZeroBytes") {
-    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in llcpp and hlcpp.
-    bindings_denylist = [llcpp, hlcpp],
+    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in cpp_wire and hlcpp.
+    bindings_denylist = [cpp_wire, hlcpp],
     bytes = {
         v2 = [
             repeat(0xff):8,
@@ -226,8 +226,8 @@ decode_failure("OptionalEmptyStructNonZeroBytes") {
 }
 
 decode_failure("TableWithEmptyStructNonZeroBytes") {
-    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in llcpp and hlcpp.
-    bindings_denylist = [llcpp, hlcpp],
+    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in cpp_wire and hlcpp.
+    bindings_denylist = [cpp_wire, hlcpp],
     type = StructOfTableWithEmptyStruct,
     bytes = {
         v2 = [
@@ -240,8 +240,8 @@ decode_failure("TableWithEmptyStructNonZeroBytes") {
 }
 
 decode_failure("UnionWithEmptyStructNonZeroBytes") {
-    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in llcpp and hlcpp.
-    bindings_denylist = [llcpp, hlcpp],
+    // TODO(https://fxbug.dev/579595791): Validate empty struct zero byte in cpp_wire and hlcpp.
+    bindings_denylist = [cpp_wire, hlcpp],
     type = Uint8UnionStruct,
     bytes = {
         v2 = [

@@ -158,8 +158,13 @@ template("code_patching_hermetic_alternative") {
     blob_entrypoint = target_name
   }
 
-  blob_path =
-      rebase_path("$target_out_dir/$blob_entrypoint.bin", root_build_dir)
+  if (defined(invoker.output_name)) {
+    blob_name = invoker.output_name
+  } else {
+    blob_name = target_name
+  }
+
+  blob_path = rebase_path("$target_out_dir/$blob_name.bin", root_build_dir)
 
   hermetic_code_blob(target_name) {
     forward_variables_from(invoker,
@@ -182,7 +187,7 @@ template("code_patching_hermetic_alternative") {
       code_patching_hermetic_alternatives += [
         {
           label = target_label
-          name = blob_entrypoint
+          name = blob_name
           path = blob_path
         },
       ]
@@ -192,7 +197,7 @@ template("code_patching_hermetic_alternative") {
       distribution_entries += [
         {
           source = blob_path
-          destination = "code-patches/$entrypoint"
+          destination = "code-patches/$blob_name"
           label = target_label
         },
       ]
@@ -227,10 +232,16 @@ template("code_patching_hermetic_alternative") {
 #     - Optional: a header path that defines patch case IDs. These IDs are
 #       expected to be of the form "CASE_ID_${OUTPUT_NAME}", where
 #       "${OUTPUT_NAME}" is the upper-cased transformation of "${output_name}".
-#       This parameter is only expected to be explicitly set for tests that
-#       wish to supply their own case IDs.
+#       This parameter is only expected to be explicitly set for tests or
+#       generated stubs that wish to supply their own case IDs.
 #     - Type: string
-#     - Default: "arch/code-patches/case-id.h"
+#     - Default: "arch/code-patches/case-id-asm.h"
+#
+#   * case_id
+#     - Optional: The patch case ID, as an assembler expression that can use
+#       macros from $case_id_header.
+#     - Type: string
+#     - Default: "CASE_ID_${OUTPUT_NAME}"
 #
 #   * aliases
 #     - Optional: A list of weak symbols to define as aliases to the associated
@@ -249,17 +260,19 @@ template("code_patching_hermetic_stub") {
 
   source_set(main_target) {
     forward_variables_from(invoker,
-                           "*",
                            [
-                             "aliases",
-                             "case_id_header",
-                             "deps",
-                             "output_name",
                              "testonly",
                              "visibility",
                            ])
+
     forward_variables_from(invoker,
+                           "*",
                            [
+                             "aliases",
+                             "case_id",
+                             "case_id_header",
+                             "deps",
+                             "output_name",
                              "testonly",
                              "visibility",
                            ])
@@ -274,27 +287,25 @@ template("code_patching_hermetic_stub") {
 
   generated_file(metadata_target) {
     visibility = [ ":$gen_target" ]
-    outputs = [ metadata_file ]
+    forward_variables_from(invoker, [ "testonly" ])
 
+    outputs = [ metadata_file ]
     output_conversion = "json"
     data_keys = [ "code_patching_hermetic_alternatives" ]
     walk_keys = [ "code_patching_hermetic_alternative_barrier" ]
-
-    forward_variables_from(invoker,
-                           [
-                             "deps",
-                             "testonly",
-                           ])
+    forward_variables_from(invoker, [ "deps" ])
   }
 
   action(gen_target) {
     visibility = [ ":$main_target" ]
+    forward_variables_from(invoker, [ "testonly" ])
+
     forward_variables_from(invoker,
                            [
                              "aliases",
+                             "case_id",
                              "case_id_header",
                              "output_name",
-                             "testonly",
                            ])
     if (!defined(output_name)) {
       output_name = main_target
@@ -326,6 +337,13 @@ template("code_patching_hermetic_stub") {
       rebase_path(outputs[0], root_build_dir),
     ]
 
+    if (defined(case_id)) {
+      args += [
+        "--case-id",
+        case_id,
+      ]
+    }
+
     if (defined(aliases)) {
       foreach(alias, aliases) {
         args += [
@@ -334,5 +352,194 @@ template("code_patching_hermetic_stub") {
         ]
       }
     }
+  }
+}
+
+# Defines a patchable function stub with several hermetic alternatives.
+#
+# This defines a code_patching_hermetic_stub() target, which see, along with a
+# code_patching_hermetic_alternative() for each element of $versions, each
+# compiled from the same $sources in a different way.  The alternatives are
+# reached through the main target, so dependents should use only that.
+#
+# Parameters
+#
+#   * versions
+#     - Required: Non-empty list of scopes, each defining one alternative.
+#     - Type: list(scope)
+#       * name
+#         - Optional: The alternative's name, as used with
+#           code_patching::Patcher; this is its file name under "code-patches/"
+#           in the kernel package.
+#         - Type: string
+#         - Default: $output_name
+#       * subdir
+#         - Optional: If not "", then "$subdir/" is prepended to $name.  This
+#           must not contain "/".
+#         - Type: string
+#         - Default: ""
+#       * allow_rodata, entrypoint
+#         - Optional: Overrides $default_allow_rodata or $default_entrypoint
+#           for this alternative; see hermetic_code_blob().
+#       * add_configs, remove_configs
+#         - Optional: Appended after the outer $add_configs and $remove_configs
+#           for compiling this alternative; see hermetic_code_blob().
+#         - Type: list(label)
+#         - Default: []
+#       * deps
+#         - Optional: Additional dependencies for this alternative.  As in any
+#           source_set(), the targets in $deps are compiled with their own
+#           configs, unaffected by $add_configs or $remove_configs here.
+#         - Type: list(label)
+#         - Default: []
+#
+#   * default_allow_rodata, default_entrypoint
+#     - Optional: Defaults for $allow_rodata and $entrypoint on each
+#       alternative; see hermetic_code_blob().  $default_entrypoint defaults to
+#       $output_name.
+#
+#   * add_configs, remove_configs
+#     - Optional: See hermetic_code_blob().  Applied when compiling each
+#       alternative, before per-version $add_configs and $remove_configs.
+#
+#   * aliases, case_id, case_id_header, metadata, output_name, public,
+#     public_configs, public_deps, testonly, visibility
+#     - Optional: See code_patching_hermetic_stub() and hermetic_code_blob().
+#       $public_configs and $public_deps also apply when compiling each
+#       alternative.
+#
+# Other parameters are as for hermetic_code_blob() and source_set() (except
+# that $allow_rodata, $configs, $entrypoint, and the `output_*` parameters are
+# disallowed), and apply when compiling each alternative ($asmflags, $cflags,
+# $defines, $include_dirs, and $inputs also apply when assembling the stub).
+#
+template("code_patching_hermetic_multiversion") {
+  assert(defined(invoker.versions), "`versions` is a required parameter")
+  assert(invoker.versions != [], "`versions` must be non-empty")
+  assert(!defined(invoker.allow_rodata),
+         "use `default_allow_rodata` rather than `allow_rodata`")
+  assert(!defined(invoker.entrypoint),
+         "use `default_entrypoint` rather than `entrypoint`")
+
+  main_target = target_name
+  if (defined(invoker.output_name)) {
+    stub_name = invoker.output_name
+  } else {
+    stub_name = main_target
+  }
+
+  if (defined(invoker.default_entrypoint)) {
+    default_entrypoint = invoker.default_entrypoint
+  } else {
+    default_entrypoint = stub_name
+  }
+
+  alt_deps = []
+  foreach(version, invoker.versions) {
+    if (defined(version.name)) {
+      alt_name = version.name
+    } else {
+      alt_name = stub_name
+    }
+    if (defined(version.subdir) && version.subdir != "") {
+      assert(string_replace(version.subdir, "/", "") == version.subdir,
+             "`subdir` must not contain '/': $version")
+      alt_name = "${version.subdir}/$alt_name"
+    }
+
+    alt_target = "$main_target.$alt_name"
+    alt_deps += [ ":$alt_target" ]
+
+    code_patching_hermetic_alternative(alt_target) {
+      visibility = [ ":*" ]
+      forward_variables_from(invoker, [ "testonly" ])
+
+      output_name = alt_name
+      forward_variables_from(invoker,
+                             "*",
+                             [
+                               "aliases",
+                               "case_id",
+                               "case_id_header",
+                               "configs",
+                               "default_allow_rodata",
+                               "default_entrypoint",
+                               "metadata",
+                               "output_dir",
+                               "output_extension",
+                               "output_name",
+                               "public",
+                               "public_configs",
+                               "public_deps",
+                               "testonly",
+                               "versions",
+                               "visibility",
+                             ])
+
+      if (defined(version.entrypoint)) {
+        entrypoint = version.entrypoint
+      } else {
+        entrypoint = default_entrypoint
+      }
+
+      if (defined(version.allow_rodata)) {
+        allow_rodata = version.allow_rodata
+      } else if (defined(invoker.default_allow_rodata)) {
+        allow_rodata = invoker.default_allow_rodata
+      }
+
+      if (!defined(add_configs)) {
+        add_configs = []
+      }
+      if (defined(invoker.public_configs)) {
+        add_configs += invoker.public_configs
+      }
+      if (defined(version.add_configs)) {
+        add_configs += version.add_configs
+      }
+
+      if (!defined(remove_configs)) {
+        remove_configs = []
+      }
+      if (defined(version.remove_configs)) {
+        remove_configs += version.remove_configs
+      }
+
+      if (!defined(deps)) {
+        deps = []
+      }
+      if (defined(invoker.public_deps)) {
+        deps += invoker.public_deps
+      }
+      if (defined(version.deps)) {
+        deps += version.deps
+      }
+    }
+  }
+
+  code_patching_hermetic_stub(main_target) {
+    forward_variables_from(invoker,
+                           [
+                             "testonly",
+                             "visibility",
+                           ])
+
+    forward_variables_from(invoker,
+                           [
+                             "aliases",
+                             "asmflags",
+                             "case_id",
+                             "case_id_header",
+                             "cflags",
+                             "defines",
+                             "include_dirs",
+                             "inputs",
+                             "metadata",
+                             "output_name",
+                             "public",
+                             "public_configs",
+                             "public_deps",
+                           ])
+    deps = alt_deps
   }
 }

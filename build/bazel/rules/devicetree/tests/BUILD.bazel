@@ -1,0 +1,257 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tests for `devicetree_visitor()` and `dtb()`."""
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/devicetree:devicetree_visitor.bzl", "devicetree_visitor")
+load("//build/bazel/rules/devicetree:dtb.bzl", "dtb")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/testing:defs.bzl", "analysis_failure_test")
+load(
+    ":devicetree_tests.bzl",
+    "dtb_actions_test",
+    "stub_devicetree_fragment",
+    "verify_devicetree_package",
+    "visitor_link_action_test",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# Tests that run on host via `fx bazel test --config=host`.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":devicetree_host_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Analysis tests built in host configuration by //build/bazel/rules/tests:quick_tests.
+test_suite(
+    name = "analysis_tests",
+    tests = [
+        ":dtb_empty_srcs_failure_test",
+        ":dtb_multiple_srcs_failure_test",
+        ":preprocessed_dtb_actions_test",
+        ":simple_dtb_actions_test",
+        ":test_visitor_link_action_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# Fuchsia build-only tests built by //build/bazel/rules/tests:quick_tests.
+filegroup(
+    name = "build_only_tests",
+    testonly = True,
+    srcs = [
+        ":verify_test_visitor_exports",
+        ":verify_test_visitor_package",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+fx_cc_library_headers(
+    name = "test_dep_headers",
+    testonly = True,
+    hdrs = ["include/test_dep/dep_header.h"],
+    defines = ["TEST_DEP_DEFINE=1"],
+    include_dir = "include",
+)
+
+fx_cc_library_headers(
+    name = "visitor_registry_headers",
+    testonly = True,
+    hdrs = ["visitor_registry.h"],
+    include_dir = ".",
+)
+
+dtb(
+    name = "simple_dtb",
+    testonly = True,
+    srcs = ["simple.dts"],
+)
+
+stub_devicetree_fragment(
+    name = "local_fragment_dep",
+    testonly = True,
+    src = "local_fragment.dtsi",
+)
+
+dtb(
+    name = "preprocessed_dtb",
+    testonly = True,
+    srcs = ["preprocessed.dts.S"],
+    hdrs = [
+        "local_fragment.dtsi",
+        "local_header.h",
+    ],
+    dtcflags = ["-Wno-unique_unit_address"],
+    deps = [
+        ":local_fragment_dep",
+        ":test_dep_headers",
+    ],
+)
+
+dtb_actions_test(
+    name = "simple_dtb_actions_test",
+    expect_preprocess = False,
+    expected_output_short_path = "build/bazel/rules/devicetree/tests/simple_dtb/simple.dtb",
+    target_under_test = ":simple_dtb",
+)
+
+dtb_actions_test(
+    name = "preprocessed_dtb_actions_test",
+    expect_preprocess = True,
+    expected_dtcflags = ["-Wno-unique_unit_address"],
+    expected_output_short_path = "build/bazel/rules/devicetree/tests/preprocessed_dtb/preprocessed.dtb",
+    expected_preprocess_flags = [
+        "-DTEST_DEP_DEFINE=1",
+        "-I build/bazel/rules/devicetree/tests",
+        "-iquote build/bazel/rules/devicetree/tests",
+    ],
+    target_under_test = ":preprocessed_dtb",
+)
+
+dtb(
+    name = "dtb_empty_srcs",
+    srcs = [],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "dtb_empty_srcs_failure_test",
+    expected_message = "requires exactly one `.dts` or `.dts.S` file",
+    target_under_test = ":dtb_empty_srcs",
+)
+
+dtb(
+    name = "dtb_multiple_srcs",
+    srcs = [
+        "preprocessed.dts.S",
+        "simple.dts",
+    ],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "dtb_multiple_srcs_failure_test",
+    expected_message = "requires exactly one `.dts` or `.dts.S` file",
+    target_under_test = ":dtb_multiple_srcs",
+)
+
+devicetree_visitor(
+    name = "test_visitor",
+    testonly = True,
+    srcs = ["test_visitor.cc"],
+    hdrs = ["test_visitor.h"],
+    deps = [":visitor_registry_headers"],
+)
+
+devicetree_visitor(
+    name = "test_visitor_custom_output",
+    testonly = True,
+    srcs = ["test_visitor.cc"],
+    hdrs = ["test_visitor.h"],
+    category = "internal",
+    non_sdk_deps = [":test_dep_headers"],
+    output_name = "custom_visitor_name",
+    deps = [":visitor_registry_headers"],
+)
+
+visitor_link_action_test(
+    name = "test_visitor_link_action_test",
+    target_under_test = ":test_visitor.so",
+)
+
+host_test_data_files(
+    name = "test_dtb_data",
+    testonly = True,
+    srcs = [
+        ":preprocessed_dtb",
+        ":simple_dtb",
+    ],
+    dest_dir = "test_data",
+)
+
+fx_cc_test_binary(
+    name = "devicetree_host_test_bin",
+    srcs = ["devicetree_host_test.cc"],
+    deps = [
+        ":test_visitor.static",
+        ":visitor_registry_headers",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+host_test(
+    name = "devicetree_host_test",
+    binary = ":devicetree_host_test_bin",
+    data = [":test_dtb_data"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+resource(
+    name = "test_dtb_resources",
+    testonly = True,
+    srcs = [
+        ":preprocessed_dtb",
+        ":simple_dtb",
+    ],
+    outputs = ["test-data/{{source_file_part}}"],
+)
+
+fx_package(
+    name = "test_visitor_package",
+    testonly = True,
+    resources = [
+        ":test_dtb_resources",
+        ":test_visitor",
+        ":test_visitor_custom_output",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+verify_devicetree_package(
+    name = "verify_test_visitor_package",
+    testonly = True,
+    expected_dests = [
+        "lib/visitors/custom_visitor_name.so",
+        "lib/visitors/test_visitor.so",
+        "test-data/preprocessed.dtb",
+        "test-data/simple.dtb",
+    ],
+    package = ":test_visitor_package",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+genrule(
+    name = "verify_test_visitor_exports",
+    testonly = True,
+    srcs = [":test_visitor.so"],
+    outs = ["verify_test_visitor_exports.stamp"],
+    cmd = """
+set -euo pipefail
+syms=$$($(execpath @prebuilt_clang//:bin/llvm-nm) -D --defined-only $(execpath :test_visitor.so))
+if ! echo "$$syms" | grep -q "__devicetree_visitor_registration__"; then
+  echo "Expected __devicetree_visitor_registration__ to be exported, got:" >&2
+  echo "$$syms" >&2
+  exit 1
+fi
+if echo "$$syms" | grep -q "VisitorHelperSymbol"; then
+  echo "Expected VisitorHelperSymbol to be hidden by visitor.ld, got:" >&2
+  echo "$$syms" >&2
+  exit 1
+fi
+touch $@
+""",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tools = ["@prebuilt_clang//:bin/llvm-nm"],
+)

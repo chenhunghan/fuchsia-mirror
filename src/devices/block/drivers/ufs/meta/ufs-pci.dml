@@ -55,6 +55,15 @@
             availability: "optional",
             default: 2,
         },
+        {
+            // Timeout in seconds for admin, query, and task-management commands, and the stall
+            // reporting interval for data-path I/O (which is never aborted on elapsed time).
+            config: "fuchsia.storage.ufs.CommandTimeoutSec",
+            key: "command_timeout_sec",
+            type: "uint32",
+            availability: "optional",
+            default: 10,
+        },
         { protocol: "fuchsia.power.system.CpuElementManager" },
         { protocol: "fuchsia.scheduler.RoleManager" },
         {

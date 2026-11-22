@@ -125,7 +125,7 @@ cc_test_executable("raw_unittests_bin") {
     ":lookups",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
   deps += [ "//src/sys/test_runners/gtest:death_test" ]
   testonly = true

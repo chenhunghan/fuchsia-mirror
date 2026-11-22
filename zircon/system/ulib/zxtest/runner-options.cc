@@ -9,7 +9,6 @@
 #include <ctime>
 #include <string_view>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/log-sink.h>
 #include <zxtest/base/runner.h>
 
@@ -100,7 +99,7 @@ Options Options::FromArgs(int argc, char** argv, std::vector<std::string>* error
   // Pick a random seed by default. Overwrite it if a value was explicitly set.
   options.seed = static_cast<int>(time(nullptr));
 
-  while ((c = getopt_long(argc, argv, "f::l::b::s::a::i:r:h:o::", opts, &option_index)) >= 0) {
+  while ((c = getopt_long(argc, argv, ":f::l::b::s::a::i:r:h::o:", opts, &option_index)) >= 0) {
     val = optarg;
     if (val == nullptr) {
       // Verifies that the flag value could be in the form -f value not just -fValue.
@@ -144,9 +143,19 @@ Options Options::FromArgs(int argc, char** argv, std::vector<std::string>* error
       case 'a':
         options.run_disabled = GetBoolFlag(val);
         break;
+      case ':':
+        // getopt_long returns ':' when an option is missing its required argument,
+        // leaving argv[optind - 1] pointing to that option.  Use argv[optind - 1]
+        // rather than optopt, which is restricted in drivers that link zxtest.
+        options.help = true;
+        errors->push_back(std::string(argv[optind - 1]) + " requires a value.");
+        return options;
+      case '?':
+        // Unrecognized options are ignored (left to the driver or test framework).
+        break;
       case 'o':
-        std::string_view v = val;
         constexpr std::string_view kPrefix = "json:";
+        std::string_view v = val;
         if (!v.starts_with(kPrefix)) {
           options.help = true;
           errors->push_back("--gtest_output only supports format \"json:PATH\". Value was (" +

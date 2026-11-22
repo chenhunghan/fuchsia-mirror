@@ -11,10 +11,13 @@ rustc_test("socket_proxy_integration_test") {
   deps = [
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/fidl/fuchsia.net.policy.properties:fuchsia.net.policy.properties_rust",
+    "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
     "//sdk/fidl/fuchsia.posix:fuchsia.posix_rust",
     "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
     "//sdk/fidl/fuchsia.posix.socket.raw:fuchsia.posix.socket.raw_rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/reader/rust",
+    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
@@ -23,6 +26,7 @@ rustc_test("socket_proxy_integration_test") {
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:log",
     "//third_party/rust_crates:pretty_assertions",
   ]
 
@@ -40,9 +44,9 @@ fuchsia_test_component("component") {
 
 fuchsia_test_package("socket-proxy-integration-tests") {
   test_components = [ ":component" ]
-  deps = [
+  subpackages = [
     # The component under test.
-    "../:component",
+    "//src/connectivity/policy/socket-proxy:package",
   ]
 }
 

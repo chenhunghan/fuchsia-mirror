@@ -41,21 +41,21 @@ struct FsContextState {
 impl FsContextState {
     fn set_namespace(
         &mut self,
-        new_ns: Arc<Namespace>,
+        new_ns: &Arc<Namespace>,
         mounts_guard: &MountsWriteToken,
-    ) -> Result<(), Errno> {
+    ) -> Result<(ActiveNamespaceNode, ActiveNamespaceNode, Arc<Namespace>), Errno> {
         log_trace!("updating namespace");
-        let new_root = Namespace::translate_node(self.root.to_passive(), &new_ns, mounts_guard)
+        let new_root = Namespace::translate_node(self.root.to_passive(), new_ns, mounts_guard)
             .ok_or_else(|| errno!(EINVAL))?;
-        let new_cwd = Namespace::translate_node(self.cwd.to_passive(), &new_ns, mounts_guard)
+        let new_cwd = Namespace::translate_node(self.cwd.to_passive(), new_ns, mounts_guard)
             .ok_or_else(|| errno!(EINVAL))?;
 
         // Only perform a mutation if the rebased nodes both exist in the target namespace.
-        mounts_guard.defer_drop(std::mem::replace(&mut self.root, new_root.into_active()));
-        mounts_guard.defer_drop(std::mem::replace(&mut self.cwd, new_cwd.into_active()));
-        mounts_guard.defer_drop(std::mem::replace(&mut self.namespace, new_ns));
+        let old_root = std::mem::replace(&mut self.root, new_root.into_active());
+        let old_cwd = std::mem::replace(&mut self.cwd, new_cwd.into_active());
+        let old_ns = std::mem::replace(&mut self.namespace, Arc::clone(new_ns));
         log_trace!("namespace update succeeded");
-        Ok(())
+        Ok((old_root, old_cwd, old_ns))
     }
 }
 
@@ -173,8 +173,14 @@ impl FsContext {
     /// Change the current working directory.
     pub fn chdir(&self, current_task: &CurrentTask, name: NamespaceNode) -> Result<(), Errno> {
         name.check_access(current_task, AccessCheck::for_chdir())?;
+        // Declare `_old_cwd` before `state` so the replaced node (and any final `Mount` /
+        // `FileSystem` reference it holds) drops after `FsContextStateLock` is released;
+        // `FileSystem::drop` unregisters BDI devices under locks ordered before
+        // `FsContextStateLock`. The same declaration ordering is used in `chroot`,
+        // `set_namespace`, `unshare_namespace`, and `update_root_after_pivot` below.
+        let _old_cwd;
         let mut state = self.state.write();
-        state.cwd = name.into_active();
+        _old_cwd = std::mem::replace(&mut state.cwd, name.into_active());
         Ok(())
     }
 
@@ -183,8 +189,9 @@ impl FsContext {
         name.check_access(current_task, AccessCheck::for_chroot()).map_err(|_| errno!(EACCES))?;
         security::check_task_capable(current_task, CAP_SYS_CHROOT)?;
 
+        let _old_root;
         let mut state = self.state.write();
-        state.root = name.into_active();
+        _old_root = std::mem::replace(&mut state.root, name.into_active());
         Ok(())
     }
 
@@ -212,10 +219,11 @@ impl FsContext {
     }
 
     pub fn set_namespace(&self, new_ns: Arc<Namespace>) -> Result<(), Errno> {
+        let _old_state;
         let mut state = self.state.write();
         let kernel = state.namespace.kernel();
         let mounts_guard = kernel.mounts_lock();
-        state.set_namespace(new_ns, &mounts_guard)?;
+        _old_state = state.set_namespace(&new_ns, &mounts_guard)?;
         Ok(())
     }
 
@@ -239,13 +247,14 @@ impl FsContext {
     }
 
     pub fn unshare_namespace(&self) {
+        let _old_state;
         let mut state = self.state.write();
         let kernel = state.namespace.kernel();
         let mounts_guard = kernel.mounts_lock();
 
         let cloned = state.namespace.clone_namespace(&mounts_guard);
-        state
-            .set_namespace(cloned, &mounts_guard)
+        _old_state = state
+            .set_namespace(&cloned, &mounts_guard)
             .expect("nodes should exist in the cloned namespace");
     }
 
@@ -254,23 +263,59 @@ impl FsContext {
     }
 
     pub fn update_root_after_pivot(&self, old_root: &NamespaceNode, new_root: &NamespaceNode) {
-        let mut state = self.state.write();
-        if state.root.to_passive() == *old_root {
-            state.root = new_root.clone().into_active();
-        }
-        if state.cwd.to_passive() == *old_root {
-            state.cwd = new_root.clone().into_active();
-        }
+        let (_old_root, _old_cwd) = {
+            let mut state = self.state.write();
+            (
+                (state.root.to_passive() == *old_root)
+                    .then(|| std::mem::replace(&mut state.root, new_root.clone().into_active())),
+                (state.cwd.to_passive() == *old_root)
+                    .then(|| std::mem::replace(&mut state.cwd, new_root.clone().into_active())),
+            )
+        };
     }
 }
 
 #[cfg(test)]
 mod test {
     use crate::fs::tmpfs::TmpFs;
+    use crate::task::{CurrentTask, Kernel};
     use crate::testing::{spawn_kernel_and_run, spawn_kernel_and_run_with_pkgfs};
-    use crate::vfs::{FsContext, Namespace};
-    use starnix_uapi::file_mode::FileMode;
+    use crate::vfs::pseudo::simple_directory::SimpleDirectory;
+    use crate::vfs::{
+        CacheMode, FileSystem, FileSystemHandle, FileSystemOps, FileSystemOptions, FsContext,
+        FsStr, LookupContext, Namespace, WhatToMount,
+    };
+    use starnix_types::vfs::default_statfs;
+    use starnix_uapi::errors::Errno;
+    use starnix_uapi::file_mode::{FileMode, mode};
+    use starnix_uapi::mount_flags::MountpointFlags;
     use starnix_uapi::open_flags::OpenFlags;
+    use starnix_uapi::statfs;
+    use starnix_uapi::unmount_flags::UnmountFlags;
+
+    struct TestBdiFs;
+
+    impl FileSystemOps for TestBdiFs {
+        fn statfs(&self, _fs: &FileSystem, _current_task: &CurrentTask) -> Result<statfs, Errno> {
+            Ok(default_statfs(0))
+        }
+
+        fn name(&self) -> &'static FsStr {
+            "test_bdi".into()
+        }
+
+        fn has_bdi(&self) -> bool {
+            true
+        }
+    }
+
+    fn new_test_bdi_fs(kernel: &Kernel) -> FileSystemHandle {
+        let fs =
+            FileSystem::new(kernel, CacheMode::Uncached, TestBdiFs, FileSystemOptions::default())
+                .expect("create test_bdi fs");
+        fs.create_root(fs.allocate_ino(), SimpleDirectory::new());
+        fs
+    }
 
     #[::fuchsia::test]
     async fn test_umask() {
@@ -324,6 +369,85 @@ mod test {
             current_task.fs().chdir(&current_task, previous_directory).expect("Failed to chdir");
             assert_eq!("/", current_task.fs().cwd().path_escaping_chroot());
             assert!(current_task.open_file("bin".into(), OpenFlags::RDONLY).is_ok());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_dropping_bdi_filesystem_outside_state_lock() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let sysfs_root = &kernel.device_registry.objects.root;
+            let base_ns = Namespace::new(TmpFs::new_fs(kernel));
+            base_ns
+                .root()
+                .create_node(current_task, "mnt".into(), mode!(IFDIR, 0o755), Default::default())
+                .expect("mkdir /mnt");
+            let lookup_mnt = |ns: &Namespace| {
+                current_task
+                    .lookup_path(&mut LookupContext::default(), ns.root(), "mnt".into())
+                    .expect("lookup /mnt")
+            };
+
+            // 1. `chdir` dropping the last reference to a detached BDI-backed mount.
+            let fs_ctx = FsContext::new(base_ns.clone());
+            let bdi_fs = new_test_bdi_fs(kernel);
+            let bdi_path = format!("class/bdi/{}", bdi_fs.dev_id);
+            lookup_mnt(&base_ns)
+                .mount(WhatToMount::Fs(bdi_fs), MountpointFlags::empty())
+                .expect("mount test_bdi");
+            let mounted = lookup_mnt(&base_ns);
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_some());
+            fs_ctx.chdir(current_task, mounted.clone()).expect("chdir into bdi mount");
+            mounted.unmount(UnmountFlags::DETACH).expect("detach bdi mount");
+            drop(mounted);
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_some());
+            fs_ctx.chdir(current_task, base_ns.root()).expect("chdir out of detached mount");
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_none());
+
+            // 2. `chroot` dropping the last reference to a detached BDI-backed mount.
+            let bdi_fs = new_test_bdi_fs(kernel);
+            let bdi_path = format!("class/bdi/{}", bdi_fs.dev_id);
+            lookup_mnt(&base_ns)
+                .mount(WhatToMount::Fs(bdi_fs), MountpointFlags::empty())
+                .expect("mount test_bdi");
+            let mounted = lookup_mnt(&base_ns);
+            fs_ctx.chroot(current_task, mounted.clone()).expect("chroot into bdi mount");
+            mounted.unmount(UnmountFlags::DETACH).expect("detach bdi mount");
+            drop(mounted);
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_some());
+            fs_ctx.chroot(current_task, base_ns.root()).expect("chroot out of detached mount");
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_none());
+
+            // 3. `set_namespace` and `unshare_namespace` dropping a namespace with a BDI mount.
+            let ns1 = base_ns.clone_namespace(&kernel.mounts_lock());
+            let ns2 = ns1.clone_namespace(&kernel.mounts_lock());
+            let bdi_fs = new_test_bdi_fs(kernel);
+            let bdi_path = format!("class/bdi/{}", bdi_fs.dev_id);
+            lookup_mnt(&ns1)
+                .mount(WhatToMount::Fs(bdi_fs), MountpointFlags::empty())
+                .expect("mount test_bdi in ns1");
+            let fs_ctx = FsContext::new(ns1);
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_some());
+            fs_ctx.set_namespace(ns2).expect("set_namespace to ns2");
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_none());
+            fs_ctx.unshare_namespace();
+
+            // 4. `update_root_after_pivot` replacing root and cwd on a detached BDI mount.
+            let bdi_fs = new_test_bdi_fs(kernel);
+            let bdi_path = format!("class/bdi/{}", bdi_fs.dev_id);
+            lookup_mnt(&base_ns)
+                .mount(WhatToMount::Fs(bdi_fs), MountpointFlags::empty())
+                .expect("mount test_bdi");
+            let mounted = lookup_mnt(&base_ns);
+            let fs_ctx = FsContext::new(base_ns.clone());
+            fs_ctx.chdir(current_task, mounted.clone()).expect("chdir into bdi mount");
+            fs_ctx.chroot(current_task, mounted.clone()).expect("chroot into bdi mount");
+            mounted.unmount(UnmountFlags::DETACH).expect("detach bdi mount");
+            fs_ctx.update_root_after_pivot(&mounted, &base_ns.root());
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_some());
+            drop(mounted);
+            assert!(sysfs_root.lookup(bdi_path.as_str().into()).is_none());
         })
         .await;
     }

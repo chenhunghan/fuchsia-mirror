@@ -9,14 +9,12 @@ load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package
 
 package(default_applicable_licenses = ["//:license"])
 
-# @bazel2gn:transformer=file_paths
 handle_test_sources = [
     "src/channel.rs",
     "src/lib.rs",
     "src/socket.rs",
 ]
 
-# @bazel2gn:transformer=deps
 handle_test_deps = [
     "//src/lib/fidl/rust/fidl",
     "//third_party/rust_crates/vendor:futures",
@@ -33,7 +31,6 @@ rustc_test(
 
 fx_unittest_package(
     name = "fidl_rust_handle_tests",
-    package_name = "fidl_rust_handle_tests",
     unit_tests = [":fidl_rust_handle_tests_bin"],
     visibility = ["//src/lib:__pkg__"],
 )

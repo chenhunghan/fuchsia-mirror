@@ -1,9 +1,9 @@
 // Copyright 2018 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+@available(added=HEAD)
 library fuchsia.netemul.network;
 
-using fuchsia.device;
 using fuchsia.hardware.network;
 using fuchsia.net;
 using zx;
@@ -178,21 +178,6 @@ closed protocol Network {
     strict StopCapture() -> ();
 };
 
-/// Simple interface to serve devices over fidl.
-closed protocol DeviceProxy {
-    // TODO(https://fxbug.dev/501161302): Remove or replace once netcfg no
-    // longer needs topo path.
-    /// Serve the Controller protocol for this device.
-    strict ServeController(resource struct {
-        req server_end:fuchsia.device.Controller;
-    });
-
-    /// Serve the device's FIDL protocol.
-    strict ServeDevice(resource struct {
-        req server_end:fuchsia.hardware.network.Device;
-    });
-};
-
 /// Virtual ethernet endpoint.
 closed protocol Endpoint {
     // Gets endpoint configuration.
@@ -210,10 +195,6 @@ closed protocol Endpoint {
     /// Connects to the underlying device port.
     strict GetPort(resource struct {
         port server_end:fuchsia.hardware.network.Port;
-    });
-    /// Gets a proxy to open requests with zircon ethernet device.
-    strict GetProxy(resource struct {
-        proxy server_end:DeviceProxy;
     });
 };
 

@@ -43,7 +43,7 @@ class FILE {
     requires requires(T* writer, ktl::string_view str) {
       { writer->Write(str) } -> ktl::convertible_to<int>;
     }
-  explicit FILE(T* writer)
+  constexpr explicit FILE(T* writer)
       : FILE([](void* ptr, const char* str,
                 size_t len) { return static_cast<T*>(ptr)->Write({str, len}); },
              writer) {}
@@ -91,7 +91,7 @@ int putchar(int c);
 
 int fputs(const char* s, FILE* f);
 int puts(const char* s);
-size_t fwrite(const void* buf, size_t size, size_t n, FILE * f);
+size_t fwrite(const void* buf, size_t size, size_t n, FILE* f);
 
 int printf(const char*, ...) __PRINTFLIKE(1, 2);
 int fprintf(FILE*, const char*, ...) __PRINTFLIKE(2, 3);

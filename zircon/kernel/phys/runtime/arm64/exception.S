@@ -198,7 +198,7 @@
   stp x8, x9, [sp, REGS_ESR]
   stp xzr, xzr, [sp, REGS_XZR]
 
-#if __has_feature(shadow_call_Stack)
+#if __has_feature(shadow_call_stack)
   // Reset the shadow call stack to the one reserved for phys exceptions.
   adr_global shadow_call_sp, phys_exception_shadow_call_stack  // Grows up.
 #endif

@@ -43,6 +43,20 @@ DEFAULT_TIMEOUT = 5 * 60
 _DEVICE_PROBE_TIMEOUT_SECONDS: float = 30.0
 
 
+def _format_target_address(address: str, port: str) -> str:
+    """Format a device address and port as an ffx --target TargetAddr string."""
+    stripped_address = address.strip()
+    stripped_port = port.strip()
+    if not stripped_address or not stripped_port:
+        return stripped_address
+    # Bracket unbracketed IPv6 addresses (which contain at least two colons),
+    # while leaving single-colon prefixes like "usb:cid" and "vsock:cid"
+    # unbracketed.
+    if not stripped_address.startswith("[") and stripped_address.count(":") > 1:
+        return f"[{stripped_address}]:{stripped_port}"
+    return f"{stripped_address}:{stripped_port}"
+
+
 class TestExecutionError(Exception):
     """Base error type for test failures."""
 
@@ -147,10 +161,11 @@ class TestExecution:
 
         min_severity_logs: list[str] = []
 
-        if self._use_test_pilot() and self._test.info.execution is not None:
-            # assert for mypy
-            assert self._test.build.test.new_path is not None
-
+        if (
+            self._is_pure_device_test()
+            and self._test.build.test.path
+            and self._test.info.execution is not None
+        ):
             execution = self._test.info.execution
 
             if self._flags.min_severity_logs:
@@ -203,9 +218,7 @@ class TestExecution:
                 ]
 
             return [
-                os.path.join(
-                    self._exec_env.out_dir, self._test.build.test.new_path
-                )
+                os.path.join(self._exec_env.out_dir, self._test.build.test.path)
             ] + extra_args
 
         elif self._test.info.execution is not None:
@@ -482,22 +495,20 @@ class TestExecution:
                 the test, or None if no environment is needed.
         """
         env = self._flags.computed_env()
-        if (
-            self._test.build.test.path
-            or self._test.is_e2e_test()
-            or self._use_test_pilot()
-        ):
+        if self._test.build.test.path or self._test.is_e2e_test():
             env.update(
                 {
                     "CWD": self._exec_env.out_dir,
                 }
             )
-        if self._use_test_pilot():
+        if self._is_pure_device_test() and self._test.build.test.path:
             if self._device_env is not None:
                 # TODO(https://fxbug.dev/550548948): don't assume x64 host
                 env.update(
                     {
-                        "FUCHSIA_DEVICE_ADDR": self._device_env.address,
+                        "FUCHSIA_DEVICE_ADDR": _format_target_address(
+                            self._device_env.address, self._device_env.port
+                        ),
                         "FUCHSIA_SSH_KEY": self._device_env.private_key_path,
                         "FUCHSIA_HOST_TOOLS": "./host_x64",
                     }
@@ -773,18 +784,13 @@ class TestExecution:
                 )
         return component_url
 
-    def _use_test_pilot(self) -> bool:
-        """Should this test use test_pilot.
-
+    def _is_pure_device_test(self) -> bool:
+        """Determine if this test is a pure device test.
 
         Returns:
-            True if experimental flag is enabled and the test supports new
-            interface.
+            True if the wrapped test is a pure device test, False otherwise.
         """
-        return (
-            self._flags.use_test_pilot
-            and self._test.build.test.new_path is not None
-        )
+        return self._test.is_pure_device_test()
 
     def _calculate_timeout(self) -> float | None:
         # Use the config/default timeout if not specified on the command line. If a zero timeout

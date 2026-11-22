@@ -71,7 +71,6 @@ rustc_library("kgsl") {
     "//third_party/rust_crates:bitfield",
     "//third_party/rust_crates:range-alloc",
   ]
-  deps += [ "//src/starnix/modules/kgsl/uapi_manual" ]
 }
 if (is_fuchsia) {
   rustc_test("kgsl_test") {
@@ -98,7 +97,6 @@ if (is_fuchsia) {
       "//third_party/rust_crates:bitfield",
       "//third_party/rust_crates:range-alloc",
     ]
-    deps += [ "//src/starnix/modules/kgsl/uapi_manual" ]
     features = []
     if (starnix_kgsl_enable) {
       features += [ "starnix-kgsl-enable" ]

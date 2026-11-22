@@ -53,6 +53,10 @@ try:
     import planter_check_lib as pcl
 except ImportError:
     pcl = None
+try:
+    import rdeps_lib
+except ImportError:
+    rdeps_lib = None
 
 workdir = os.path.abspath(sys.argv[2])
 target_dir = sys.argv[3].strip().strip("/")
@@ -402,11 +406,17 @@ def _is_dep_restricted_to_platform(dep_pkg, dep_name, cond):
                 if cond == "is_host" and dep_conds[dep_name].get("tmpl") in (
                     "bazel_ffx_tool",
                     "bazel_host_tool",
+                    "bazel_py_host_tool",
                     "ffx_plugin",
                     "ffx_tool",
                     "go_test",
                     "host_test",
                     "host_test_data",
+                    "python_binary",
+                    "python_host_test",
+                    "python_library",
+                    "python_mobly_test",
+                    "python_perf_test",
                 ):
                     return True
     bz_path = (
@@ -427,6 +437,7 @@ def _is_dep_restricted_to_platform(dep_pkg, dep_name, cond):
                 "ffx_plugin",
                 "ffx_tool",
                 "go_binary_host_tool",
+                "golden_test",
                 "host_cc_test",
                 "host_go_test",
                 "host_py_test",
@@ -439,7 +450,10 @@ def _is_dep_restricted_to_platform(dep_pkg, dep_name, cond):
                 "idk_ffx_tool",
                 "idk_go_binary_host_tool",
                 "idk_rustc_binary_host_tool",
+                "py_binary",
                 "py_binary_host_tool",
+                "py_library",
+                "py_zipapp_binary",
                 "rustc_binary_host_tool",
                 "wrap_host_rust_test",
             }
@@ -619,8 +633,10 @@ def check_unrequested_gn_conditions(gn_rel, pkg, before, after):
             re.I,
         )
         false_not_gated_note_re = re.compile(
-            r"#\s*(?:TODO|Note|Needs reviewer attention)\b[^\n]*target_compatible_with"
-            r"[^\n]*(?:\bnot\s+(?:gated|wrapped|guarded)\b|\b(?:unguarded|no\s+explicit)\b)",
+            r"#\s*(?:TODO|Note|Needs reviewer attention)\b[^\n]*(?:"
+            r"Verify\s+whether\b[^\n]*target_compatible_with"
+            r"|target_compatible_with[^\n]*(?:\bnot\s+(?:gated|wrapped|guarded)\b|\b(?:unguarded|no\s+explicit)\b)"
+            r")",
             re.I,
         )
 
@@ -743,6 +759,35 @@ def check_unrequested_gn_conditions(gn_rel, pkg, before, after):
                                 f"target_compatible_with ...` comment on `{tname}` in "
                                 f"`{bz_rel}` while keeping `target_compatible_with` synced "
                                 "(do not add `# @bazel2gn:skip`)."
+                            ),
+                        )
+                        break
+                    continue
+                # Python is not supported on Fuchsia, so `py_library` and `py_binary`
+                # always require `target_compatible_with = HOST_OS_CONSTRAINTS` (generating
+                # `if (is_host)` in `BUILD.gn`) even when `python_library` or
+                # `python_binary` was not wrapped in `if (is_host)` at the change base.
+                if cond == "is_host" and new_info["tmpl"].startswith("python_"):
+                    if has_false_not_gated_note:
+                        _emit(
+                            out_findings,
+                            "redundant_target_compatible_with_todo",
+                            "error",
+                            bz_rel,
+                            bz_note_line or rep_ln,
+                            (
+                                f"Python target `{tname}` in `{bz_rel}` has a redundant "
+                                "comment/TODO questioning `target_compatible_with`. Python is "
+                                "not supported on Fuchsia, so `py_library` and `py_binary` "
+                                "targets always require `target_compatible_with = "
+                                "HOST_OS_CONSTRAINTS` even when not wrapped in `if (is_host)` "
+                                f"in `{gn_rel}`."
+                            ),
+                            (
+                                f"Remove the `# TODO: Verify whether {tname} should use "
+                                f"target_compatible_with ...` comment on `{tname}` in "
+                                f"`{bz_rel}` while keeping `target_compatible_with = "
+                                "HOST_OS_CONSTRAINTS` synced (do not add `# @bazel2gn:skip`)."
                             ),
                         )
                         break
@@ -1072,9 +1117,12 @@ def check_testonly_dropped_from_gn(
         before_bt[-1], before_pkg_default_testonly
     ):
         return None
-    if cur is not None and before_bt is not None:
+    if cur is not None:
         cur_code = re.sub(r"#[^\n]*", "", cur[2])
-        if re.search(r"(?<![\w.])testonly\s*=\s*true\b", cur_code):
+        if re.search(r"(?<![\w.])testonly\s*=\s*true\b", cur_code) and (
+            before_bt is not None
+            or bool(_find_non_testonly_bazel_rdeps(pkg, {bt_name}).get(bt_name))
+        ):
             return None
     return {
         "source": "gn_attr_parity",
@@ -1100,9 +1148,175 @@ def check_testonly_dropped_from_gn(
     }
 
 
+NON_TESTONLY_EXEMPT_BAZEL_RULES = (
+    "assembly_input_bundle",
+    "cc_test_executable",
+    "fuchsia_test_component",
+    "fuchsia_unittest_component",
+    "fuchsia_unittest_package",
+    "fuchsia_test_package",
+    "fx_bootfs_files_package",
+    "host_shac_test",
+    "icu_assembly_input_bundle",
+    "platform_artifacts",
+    "prebuilt_package",
+    "test_suite",
+)
+INHERENTLY_TESTONLY_RULE_SUFFIXES = (
+    "_test",
+    "_tests",
+    "_test_binary",
+    "_test_package",
+    "_test_component",
+    "_unittest_component",
+    "_unittest_package",
+)
+NON_DEP_BAZEL_KWARGS = {
+    "applicable_licenses",
+    "binary_name",
+    "component_name",
+    "crate_name",
+    "name",
+    "package_name",
+    "visibility",
+}
+_non_testonly_rdeps_cache = {}
+
+
+# Find non-testonly BUILD.bazel targets across the checkout that depend on `//{pkg}:<name>`.
+def _find_non_testonly_bazel_rdeps(pkg, cand_names):
+    if not pkg or not cand_names or rdeps_lib is None:
+        return {}
+    cache_key = (pkg, tuple(sorted(cand_names)))
+    if cache_key in _non_testonly_rdeps_cache:
+        return _non_testonly_rdeps_cache[cache_key]
+    hits = {}
+    pkg_base = os.path.basename(pkg)
+    self_bz = os.path.abspath(os.path.join(workdir, pkg, "BUILD.bazel"))
+    ref_files = rdeps_lib.grep_checkout_files(
+        workdir, ["-e", f"//{pkg}"], ["BUILD.bazel", "*/BUILD.bazel"]
+    )
+    for ref_abs in sorted(ref_files):
+        if os.path.abspath(ref_abs) == self_bz or not os.path.isfile(ref_abs):
+            continue
+        try:
+            ref_src = open(ref_abs, encoding="utf-8").read()
+            ref_tree = ast.parse(ref_src, filename=ref_abs)
+        except Exception:
+            continue
+        ref_rel_dir = os.path.dirname(os.path.relpath(ref_abs, workdir)).replace(
+            os.sep, "/"
+        ).strip("/")
+        ref_pkg_def_to = bazel_has_default_testonly(ref_tree)
+        ref_top_vars = {}
+        for stmt in ref_tree.body:
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    if isinstance(tgt, ast.Name):
+                        ref_top_vars[tgt.id] = eval_starlark(stmt.value, ref_top_vars)
+            elif isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                call = stmt.value
+                r_rule = call.func.id if isinstance(call.func, ast.Name) else None
+                if not r_rule:
+                    continue
+                if (
+                    r_rule in BAZEL_TEST_RULES
+                    or r_rule in NON_TESTONLY_EXEMPT_BAZEL_RULES
+                    or r_rule.endswith(INHERENTLY_TESTONLY_RULE_SUFFIXES)
+                ):
+                    continue
+                r_kws = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+                if _bazel_target_has_testonly(r_kws, ref_pkg_def_to):
+                    continue
+                nm_node = r_kws.get("name")
+                r_name = (
+                    nm_node.value
+                    if isinstance(nm_node, ast.Constant) and isinstance(nm_node.value, str)
+                    else "?"
+                )
+                dep_labels = set()
+                for kw_name, kw_val in r_kws.items():
+                    if kw_name in NON_DEP_BAZEL_KWARGS:
+                        continue
+                    for raw_l in eval_starlark(kw_val, ref_top_vars):
+                        if isinstance(raw_l, str):
+                            dep_labels.add(raw_l.lstrip("@").strip())
+                for bt_name in cand_names:
+                    full_lbl = f"//{pkg}:{bt_name}"
+                    matched = full_lbl in dep_labels or (
+                        bt_name == pkg_base and f"//{pkg}" in dep_labels
+                    )
+                    if matched and bt_name not in hits:
+                        if ref_rel_dir == rdeps_lib.VG_ROOT or ref_rel_dir.startswith(
+                            rdeps_lib.VG_ROOT + "/"
+                        ):
+                            hits[bt_name] = "an existing non-testonly Bazel target"
+                        else:
+                            hits[bt_name] = f"`//{ref_rel_dir}:{r_name}`"
+    _non_testonly_rdeps_cache[cache_key] = hits
+    return hits
+
+
+# Flag newly added `testonly = True` on a Bazel target when non-testonly Bazel callers depend on it.
+def check_testonly_breaks_non_testonly_bazel_rdeps(
+    pkg,
+    gn_rel,
+    bazel_rel,
+    bazel_targets,
+    pkg_default_testonly,
+    before_bazel_targets,
+    before_pkg_default_testonly,
+):
+    cand_targets = {}
+    for bt_name, bt_val in sorted(bazel_targets.items()):
+        bt_rule, bt_line, _, bt_kws = bt_val
+        if (
+            bt_rule in BAZEL_TEST_RULES
+            or bt_rule in NON_TESTONLY_EXEMPT_BAZEL_RULES
+            or bt_rule.endswith(INHERENTLY_TESTONLY_RULE_SUFFIXES)
+        ):
+            continue
+        if not _bazel_target_has_testonly(bt_kws, pkg_default_testonly):
+            continue
+        before_bt = before_bazel_targets.get(bt_name)
+        if before_bt is not None and _bazel_target_has_testonly(
+            before_bt[-1], before_pkg_default_testonly
+        ):
+            continue
+        cand_targets[bt_name] = (bt_rule, bt_line)
+    if not cand_targets:
+        return []
+    broken_callers = _find_non_testonly_bazel_rdeps(pkg, set(cand_targets.keys()))
+    out = []
+    for bt_name, caller_desc in sorted(broken_callers.items()):
+        bt_rule, bt_line = cand_targets[bt_name]
+        _emit(
+            out,
+            "testonly_breaks_non_testonly_bazel_rdep",
+            "error",
+            bazel_rel,
+            bt_line,
+            (
+                f'Target `{bt_rule}(name = "{bt_name}")` in `{bazel_rel}` sets '
+                f"`testonly = True` (or `default_testonly = True`), but {caller_desc} "
+                f"depends on `//{pkg}:{bt_name}` without `testonly = True`, causing "
+                "Bazel analysis to fail (`non-test target ... depends on testonly "
+                f"target '//{pkg}:{bt_name}'`)."
+            ),
+            (
+                f'Omit `testonly = True` on `{bt_rule}(name = "{bt_name}")` in '
+                f"`{bazel_rel}` so non-testonly Bazel reverse dependencies continue "
+                f"to build, and preserve `testonly = true` in `{gn_rel}` via a "
+                "documented `# @bazel2gn:raw_attribute:testonly = true` comment "
+                f"directly above `{bt_name}` (then re-run `fx bazel2gn -d {pkg}`)."
+            ),
+        )
+    return out
+
+
 # Verify that a custom GN `name`, `output_name`, or `crate_name` on a migrated target at
-# $PLANTER_CHANGE_BASE is preserved on the generated GN target (via `crate_name` or
-# `binary_name` in BUILD.bazel for `rustc_test` / `rustc_binary`).
+# $PLANTER_CHANGE_BASE is preserved on the generated GN target (via `crate_name` on
+# `rustc_test` or `binary_name` on `rustc_binary` in BUILD.bazel).
 def check_custom_output_or_crate_name_dropped(
     pkg, gn_rel, bazel_rel, name, tmpl, bt_rule, bt_line, gn_top, cur, cur_top
 ):
@@ -1201,6 +1415,265 @@ def check_custom_output_or_crate_name_dropped(
             ),
         }
     return None
+
+
+GN_INV_TOKEN_RE = re.compile(
+    r"\}\s*else\s+if\s*\(((?:[^(){}\"]|\"(?:\\.|[^\"\\])*\"|\([^()\"{}]*\))+)\)\s*\{"
+    r"|\}\s*(else)\s*\{"
+    r"|\bif\s*\(((?:[^(){}\"]|\"(?:\\.|[^\"\\])*\"|\([^()\"{}]*\))+)\)\s*\{"
+    r"|\b([A-Za-z_]\w*)\(\s*\"([^\"$]+)\"\s*\)\s*\{"
+    r"|\"(?:\\.|[^\"\\])*\""
+    r"|\{|\}"
+)
+GN_BIN_TEMPLATES = (
+    "executable",
+    "test",
+    "cc_test_executable",
+    "rustc_binary",
+    "rustc_test",
+)
+
+
+# Parse GN target invocations with enclosing `if (...)` / `else` platform state.
+def _iter_gn_target_invocations_with_platform(text):
+    if not text:
+        return []
+    local_templates = _extract_local_gn_templates(text)
+    cleaned = "\n".join(
+        re.sub(r'("(?:\\.|[^"\\])*")|#.*$', lambda m: m.group(1) or "", ln)
+        for ln in text.splitlines()
+    )
+    file_is_host_only = bool(
+        re.search(r"(?m)^\s*assert\(\s*(?:is_host|!\s*is_fuchsia)\b", cleaned)
+    )
+    stack = []
+    invocations = []
+    for m in GN_INV_TOKEN_RE.finditer(cleaned):
+        tok = m.group(0)
+        line = cleaned.count("\n", 0, m.start()) + 1
+        if m.group(1) is not None:
+            if stack:
+                stack.pop()
+            stack.append(("if", _normalize_platform_cond(m.group(1))))
+        elif m.group(2) is not None:
+            prev_cond = stack.pop()[1] if stack else ""
+            if prev_cond == "is_host":
+                stack.append(("if", "is_fuchsia"))
+            elif prev_cond == "is_fuchsia":
+                stack.append(("if", "is_host"))
+            else:
+                stack.append(("if", "else"))
+        elif m.group(3) is not None:
+            stack.append(("if", _normalize_platform_cond(m.group(3))))
+        elif m.group(4) is not None:
+            tmpl, tname = m.group(4), m.group(5)
+            if tmpl in NOT_TARGETS:
+                stack.append(("other", ""))
+                continue
+            is_host_only = file_is_host_only or any(
+                item[0] == "if" and item[1] == "is_host" for item in stack
+            )
+            stack.append(("target", tmpl, tname, line, m.end(), is_host_only))
+        elif tok == "{":
+            stack.append(("other", ""))
+        elif tok == "}" and stack:
+            top = stack.pop()
+            if top[0] == "target":
+                _, tmpl, tname, tline, bstart, is_host_only = top
+                body = cleaned[bstart : m.start()]
+                if tmpl in local_templates:
+                    body = local_templates[tmpl] + "\n" + body
+                if re.search(r"\bassert\(\s*(?:is_host|!\s*is_fuchsia)\b", body):
+                    is_host_only = True
+                invocations.append((tmpl, tname, tline, body, is_host_only))
+    return invocations
+
+
+# Collect `host_test("<ht_name>")` blocks in `gn_text` mapped by their local binary dep.
+def _collect_gn_host_test_binary_paths(gn_text, pkg):
+    out = {}
+    if not gn_text:
+        return out
+    for m in GN_TARGET.finditer(gn_text):
+        if m.group(1) != "host_test":
+            continue
+        ht_name = m.group(2)
+        depth, i = 1, m.end()
+        while i < len(gn_text) and depth:
+            depth += {"{": 1, "}": -1}.get(gn_text[i], 0)
+            i += 1
+        body = gn_text[m.end() : i - 1]
+        body_start_line = gn_text.count("\n", 0, m.end()) + 1
+        bp_m = re.search(
+            r'^\s*binary_path\s*=\s*"\$root_out_dir/([^"$]+)"', body, re.M
+        )
+        if not bp_m:
+            continue
+        bp_val = bp_m.group(1).strip()
+        bp_line = body_start_line + body.count("\n", 0, bp_m.start())
+        dep_pat = (
+            r'"(?::|//'
+            + re.escape(pkg)
+            + r':)([A-Za-z0-9_.-]+)(?:\([^"]*\))?"'
+        )
+        for dep_m in re.finditer(dep_pat, body):
+            out.setdefault(dep_m.group(1), (ht_name, bp_val, bp_line))
+    return out
+
+
+# Check that `gn_output_name` on a Fuchsia-toolchain binary does not introduce a new
+# default-toolchain `output_name` colliding with a same-package target (such as
+# `fuchsia_unittest_package`) or copying an `is_host`-only binary name, and verify
+# that `host_test()` `binary_path` in BUILD.gn matches its binary target's output name.
+def check_fuchsia_toolchain_gn_output_name_cycle(
+    pkg,
+    gn_rel,
+    bazel_rel,
+    before,
+    after,
+    bazel_targets,
+    top_vars,
+    before_top_lists,
+    after_top_lists,
+    has_gn_sentinel=False,
+):
+    if not has_gn_sentinel or not before or not after:
+        return []
+    before_invs = _iter_gn_target_invocations_with_platform(before)
+    after_invs = _iter_gn_target_invocations_with_platform(after)
+
+    fuchsia_base_bin_outputs = set()
+    host_only_base_bin_outputs = set()
+    for tmpl, tname, _, body, is_host_only in before_invs:
+        if tmpl not in GN_BIN_TEMPLATES:
+            continue
+        gtop = parse_gn_top_attrs(body, before_top_lists)
+        out_vals = gtop.get("output_name") or (
+            gtop.get("name") if tmpl.startswith("rustc_") else None
+        )
+        eff_out = out_vals[0] if out_vals else tname
+        if is_host_only:
+            host_only_base_bin_outputs.add(eff_out)
+        else:
+            fuchsia_base_bin_outputs.add(eff_out)
+
+    fuchsia_non_bin_targets = {}
+    for tmpl, tname, _, _, is_host_only in before_invs + after_invs:
+        if not is_host_only and tmpl not in GN_BIN_TEMPLATES:
+            fuchsia_non_bin_targets.setdefault(tname, tmpl)
+
+    after_bin_outputs = {}
+    after_fuchsia_bins = {}
+    for tmpl, tname, tline, body, is_host_only in after_invs:
+        if tmpl not in GN_BIN_TEMPLATES:
+            continue
+        gtop = parse_gn_top_attrs(body, after_top_lists)
+        out_vals = gtop.get("output_name") or (
+            gtop.get("name") if tmpl.startswith("rustc_") else None
+        )
+        eff_out = (
+            out_vals[0]
+            if out_vals
+            else (tname.replace("-", "_") if tmpl.startswith("rustc_") else tname)
+        )
+        after_bin_outputs[tname] = (tmpl, eff_out, tline)
+        if not is_host_only:
+            after_fuchsia_bins[tname] = (tmpl, eff_out, tline)
+
+    host_test_by_bin = _collect_gn_host_test_binary_paths(after, pkg)
+    out_findings = []
+    flagged_bins = set()
+
+    for bt_name, bt_val in sorted(bazel_targets.items()):
+        if bt_name not in after_fuchsia_bins:
+            continue
+        bt_rule, bt_line, _, bt_kws = bt_val
+        gn_out_node = bt_kws.get("gn_output_name")
+        out_vals = (
+            eval_starlark(gn_out_node, top_vars) if gn_out_node is not None else []
+        )
+        out_name = (
+            out_vals[0]
+            if out_vals
+            else after_fuchsia_bins[bt_name][1]
+        )
+        if not out_name or out_name == bt_name:
+            continue
+        if out_name in fuchsia_base_bin_outputs:
+            continue
+        if (
+            out_name not in fuchsia_non_bin_targets
+            and out_name not in host_only_base_bin_outputs
+        ):
+            continue
+        flagged_bins.add(bt_name)
+        rep_line = (
+            getattr(gn_out_node, "lineno", bt_line)
+            if gn_out_node is not None
+            else bt_line
+        )
+        pkg_tmpl = fuchsia_non_bin_targets.get(out_name, "fuchsia_unittest_package")
+        ht_info = host_test_by_bin.get(bt_name)
+        ht_fix = (
+            f'update `binary_path = "$root_out_dir/{bt_name}"` in '
+            f'`host_test("{ht_info[0]}")` in `{gn_rel}`, and '
+            if ht_info and ht_info[1] != bt_name
+            else ""
+        )
+        msg = (
+            f'`{bt_rule}(name = "{bt_name}")` in `{bazel_rel}` sets '
+            f'`gn_output_name = "{out_name}"`, causing `bazel2gn` to emit '
+            f'`output_name = "{out_name}"` in the default Fuchsia toolchain in '
+            f"`{gn_rel}`. At the change base, no Fuchsia-toolchain binary used "
+            f'output name `"{out_name}"` (the Fuchsia binary was `"{bt_name}"`, '
+            f'wrapped by `{pkg_tmpl}("{out_name}")`), so emitting '
+            f'`$root_build_dir/{out_name}` records `{out_name}` in `.ninja_deps` '
+            "for `package_manifest.json` and forms a fatal 4-node Ninja startup "
+            f"dependency cycle with `build {out_name}: phony phony/{pkg}/{out_name}` "
+            "when switching back to a commit without this change "
+            "(https://fxbug.dev/584543989)."
+        )
+        rem = (
+            f'Remove `gn_output_name = "{out_name}"` from '
+            f'`{bt_rule}(name = "{bt_name}")` in `{bazel_rel}`, {ht_fix}'
+            f"re-run `fx bazel2gn -d {pkg}`."
+        )
+        _emit(
+            out_findings,
+            "fuchsia_toolchain_gn_output_name_cycle",
+            "error",
+            bazel_rel,
+            rep_line,
+            msg,
+            rem,
+        )
+
+    for bin_name, (ht_name, bp_val, bp_line) in sorted(host_test_by_bin.items()):
+        if bin_name in flagged_bins or bin_name not in after_bin_outputs:
+            continue
+        bin_tmpl, eff_out, _ = after_bin_outputs[bin_name]
+        if bp_val != eff_out:
+            msg = (
+                f'`host_test("{ht_name}")` in `{gn_rel}` sets '
+                f'`binary_path = "$root_out_dir/{bp_val}"`, but its binary '
+                f'dependency `:{bin_name}` (`{bin_tmpl}("{bin_name}")`) outputs '
+                f'`$root_out_dir/{eff_out}`.'
+            )
+            rem = (
+                f'Update `binary_path = "$root_out_dir/{eff_out}"` in '
+                f'`host_test("{ht_name}")` in `{gn_rel}`.'
+            )
+            _emit(
+                out_findings,
+                "gn_host_test_binary_path_mismatch",
+                "error",
+                gn_rel,
+                bp_line,
+                msg,
+                rem,
+            )
+
+    return out_findings
 
 
 CC_RULES = {
@@ -1552,6 +2025,7 @@ BAZEL_TEST_RULES = (
     "host_go_test",
     "host_test",
     "go_test",
+    "golden_test",
 )
 
 
@@ -1578,25 +2052,122 @@ def match_bazel_target_for_gn(name, gn_top, before_targets, bazel_targets, top_v
     return None, None
 
 
+# Check whether a parsed BUILD.bazel target tuple is annotated with `# @bazel2gn:skip`.
+def _bazel_call_has_skip(bt_val, bazel_lines):
+    if not bt_val or not bazel_lines or len(bt_val) < 3:
+        return False
+    bt_line, bt_end_line = bt_val[1], bt_val[2]
+    if bt_line <= 0:
+        return False
+    start_idx = max(0, bt_line - 1)
+    while start_idx > 0 and bazel_lines[start_idx - 1].strip().startswith("#"):
+        start_idx -= 1
+    span_txt = "\n".join(bazel_lines[start_idx : max(bt_line, bt_end_line)])
+    return bool(re.search(r"#\s*@bazel2gn:skip\b", span_txt))
+
+
+UNIT_TEST_FLAG_RE = re.compile(
+    r"(?<![\w.])(?:with_unit_tests|with_host_unit_tests|args_with_unit_tests)\s*=\s*true\b"
+)
+GN_TEST_ARGS_TEMPLATES = ("rustc_test", "go_test", "host_test", "test")
+
+
+# Collect post-migration GN test targets in `new_targets` corresponding to `name`.
+def _matching_gn_test_targets(name, new_targets, carrying_entries):
+    cand_names = {
+        name,
+        f"{name}_test",
+        f"{name}_lib_test",
+        f"{name}_bin_test",
+        f"{name}_host_test",
+        f"{name}_unittest",
+        f"{name}_args_test",
+        f"{name}_args_lib_test",
+    }
+    for bname, _, _, _, _, wrapped_bins in carrying_entries:
+        cand_names.add(bname)
+        cand_names.update(wrapped_bins)
+    matched = []
+    for nname, (ntmpl, _, nbody) in new_targets.items():
+        if nname not in cand_names:
+            continue
+        if ntmpl in GN_TEST_ARGS_TEMPLATES or UNIT_TEST_FLAG_RE.search(nbody):
+            matched.append((nname, ntmpl, nbody))
+    return matched
+
+
+# Check whether post-migration BUILD.gn still defines (or should define via bazel2gn)
+# a GN test target corresponding to `name` that must carry `old_args` in `args = [...]`.
+def _requires_gn_test_args_sync(
+    name,
+    new_targets,
+    carrying_entries,
+    bazel_rustc_test_skips,
+    has_gn_sentinel=False,
+):
+    if not new_targets:
+        return False
+    if _matching_gn_test_targets(name, new_targets, carrying_entries):
+        return True
+    if has_gn_sentinel and carrying_entries:
+        for _, brule, _, _, has_skip, wrapped_bins in carrying_entries:
+            if has_skip:
+                continue
+            if brule in ("rustc_test", "host_rustc_test", "host_go_test"):
+                return True
+            if brule == "wrap_host_rust_test" and any(
+                wb in bazel_rustc_test_skips and not bazel_rustc_test_skips[wb]
+                for wb in wrapped_bins
+            ):
+                return True
+    return False
+
+
 # Verify that Rust host test `test_args`/`args` do not use `"env RUST_BACKTRACE=0"` (which
 # GN's `rustc_test.gni` overrides by appending `"env RUST_BACKTRACE=1"` after `args`), and
-# that `args = [...]` on base GN targets (or `with_unit_tests` targets) are preserved on
-# the migrated test target.
+# that `args = [...]` on base GN test or unit-tested targets are preserved on the migrated
+# Bazel test target (and on the GN test target when dual-run in GN).
 def check_test_args_parity(
-    pkg, gn_rel, bazel_rel, before_targets, new_targets, bazel_targets, top_vars
+    pkg,
+    gn_rel,
+    bazel_rel,
+    before_targets,
+    new_targets,
+    bazel_targets,
+    top_vars,
+    bazel_lines=None,
+    before_top_lists=None,
+    after_top_lists=None,
+    has_gn_sentinel=False,
 ):
     out = []
     rust_test_rules = ("host_rustc_test", "wrap_host_rust_test", "rustc_test", "rust_test")
     all_bazel_test_args = set()
+    bazel_test_entries = []
+    bazel_rustc_test_skips = {}
     for bname, bt_val in sorted(bazel_targets.items()):
         brule, bline, bkws = bt_val[0], bt_val[1], bt_val[-1]
         if brule not in BAZEL_TEST_RULES:
             continue
+        has_skip = _bazel_call_has_skip(bt_val, bazel_lines)
+        if brule == "rustc_test":
+            bazel_rustc_test_skips[bname] = has_skip
         b_args = (
             eval_starlark(bkws.get("test_args"), top_vars)
             + eval_starlark(bkws.get("args"), top_vars)
         )
+        wrapped_bins = [
+            s.split(":")[-1].strip()
+            for s in (
+                eval_starlark(bkws.get("binary_name"), top_vars)
+                + eval_starlark(bkws.get("binary"), top_vars)
+            )
+            if s.strip()
+        ]
         all_bazel_test_args.update(b_args)
+        bazel_test_entries.append(
+            (bname, brule, bline, set(b_args), has_skip, wrapped_bins)
+        )
         if brule in rust_test_rules and "env RUST_BACKTRACE=0" in b_args:
             _emit(
                 out,
@@ -1619,42 +2190,75 @@ def check_test_args_parity(
             )
 
     all_new_gn_test_args = set()
-    for nname, (ntmpl, _, nbody) in new_targets.items():
-        ntop = parse_gn_top_attrs(nbody)
+    for _, (ntmpl, _, nbody) in new_targets.items():
+        if ntmpl not in GN_TEST_ARGS_TEMPLATES and not UNIT_TEST_FLAG_RE.search(nbody):
+            continue
+        ntop = parse_gn_top_attrs(nbody, after_top_lists)
         all_new_gn_test_args.update(ntop.get("args", []))
 
     for name, (tmpl, line, body) in sorted(before_targets.items()):
         if tmpl in ("action", "action_foreach", "compiled_action"):
             continue
-        if tmpl not in ("rustc_test", "host_test", "test") and not WITH_UNIT_TESTS.search(body):
+        if tmpl not in GN_TEST_ARGS_TEMPLATES and not UNIT_TEST_FLAG_RE.search(body):
             continue
-        gn_top = parse_gn_top_attrs(body)
+        gn_top = parse_gn_top_attrs(body, before_top_lists)
         old_args = gn_top.get("args", [])
         if not old_args:
             continue
+        # Only require BUILD.gn to carry `args` when a corresponding GN test target (or
+        # target with `with_unit_tests = true`) still exists in BUILD.gn; decomposed unit
+        # tests marked `# @bazel2gn:skip` in BUILD.bazel emit no GN test target.
         missing_bz = [a for a in old_args if a not in all_bazel_test_args]
-        missing_gn = (
-            [a for a in old_args if a not in all_new_gn_test_args]
-            if new_targets
+        carrying_entries = [
+            e for e in bazel_test_entries if e[3] & set(old_args)
+        ]
+        needs_gn_sync = _requires_gn_test_args_sync(
+            name,
+            new_targets,
+            carrying_entries,
+            bazel_rustc_test_skips,
+            has_gn_sentinel=has_gn_sentinel,
+        )
+        matched_gn_tests = (
+            _matching_gn_test_targets(name, new_targets, carrying_entries)
+            if needs_gn_sync
             else []
+        )
+        if matched_gn_tests:
+            gn_test_args = set()
+            for _, _, mbody in matched_gn_tests:
+                gn_test_args.update(
+                    parse_gn_top_attrs(mbody, after_top_lists).get("args", [])
+                )
+        else:
+            gn_test_args = all_new_gn_test_args
+        missing_gn = (
+            [a for a in old_args if a not in gn_test_args] if needs_gn_sync else []
         )
         if missing_bz or missing_gn:
             shown = ", ".join(f'"{a}"' for a in old_args)
+            rep_line = (
+                carrying_entries[0][2]
+                if carrying_entries
+                else (bazel_test_entries[0][2] if bazel_test_entries else 1)
+            )
             _emit(
                 out,
                 "test_args_dropped_or_modified",
                 "error",
                 bazel_rel,
-                1,
+                rep_line,
                 (
                     f'`{tmpl}("{name}")` in //{pkg} had `args = [{shown}]` at the '
                     "change base, but the migrated test target in BUILD.bazel/BUILD.gn "
                     "dropped or modified those test arguments."
                 ),
                 (
-                    f"Preserve `test_args = [{shown}]` on the migrated test target in "
-                    f"{bazel_rel} (and `args = [{shown}]` on the GN test target in "
-                    f"{gn_rel} via `fx bazel2gn -d {pkg}`)."
+                    f"Preserve `test_args = [{shown}]` on the migrated host test target "
+                    f"(or `args = [{shown}]` on `rustc_test`) in {bazel_rel}, and keep "
+                    f"`args = [{shown}]` on the GN test target in {gn_rel} via "
+                    f"`fx bazel2gn -d {pkg}` when dual-run in GN (including on an "
+                    "unskipped inner `rustc_test` wrapped by `wrap_host_rust_test`)."
                 ),
             )
     return out
@@ -1663,10 +2267,12 @@ def check_test_args_parity(
 HOST_BIN_GN_TEMPLATES = {
     "rustc_binary",
     "go_binary",
+    "python_binary",
     "executable",
     "cc_binary",
     "ffx_tool",
     "install_host_tools",
+    "install_python_tool",
     "sdk_executable_host_tool",
     "sdk_go_binary_host_tool",
     "sdk_rustc_binary_host_tool",
@@ -1676,6 +2282,7 @@ BAZEL_HOST_TOOL_BINARY_RULES = {
     "cc_binary_host_tool",
     "go_binary_host_tool",
     "py_binary_host_tool",
+    "py_zipapp_binary",
     "idk_rustc_binary_host_tool",
     "idk_cc_binary_host_tool",
     "idk_go_binary_host_tool",
@@ -1747,7 +2354,7 @@ def check_gn_conditions_with_host_tools(gn_rel, pkg, before, after):
     above_after = after.split("## BAZEL2GN SENTINEL", 1)[0]
     above_code = re.sub(r"#[^\n]*", "", above_after)
     before_code = re.sub(r"#[^\n]*", "", before)
-    bht_pat = r'\b(?:bazel_host_tool|bazel_ffx_tool)\(\s*"([^"$]+)"\s*\)'
+    bht_pat = r'\b(?:bazel_host_tool|bazel_py_host_tool|bazel_ffx_tool)\(\s*"([^"$]+)"\s*\)'
     bht_names_after = set(re.findall(bht_pat, above_code))
     if not bht_names_after:
         return check_unrequested_gn_conditions(gn_rel, pkg, before, after)
@@ -1835,7 +2442,7 @@ def check_redundant_gn_host_tool_testonly_false(gn_rel, before, after):
     out_findings = []
     for m in GN_TARGET.finditer(above_after):
         tmpl, tname = m.group(1), m.group(2)
-        if tmpl not in ("bazel_ffx_tool", "bazel_host_tool"):
+        if tmpl not in ("bazel_ffx_tool", "bazel_host_tool", "bazel_py_host_tool"):
             continue
         depth, i = 1, m.end()
         while i < len(above_after) and depth:
@@ -1939,6 +2546,7 @@ def is_host_tool_exclude_tags_exempt(
         or cur[0]
         in (
             "bazel_host_tool",
+            "bazel_py_host_tool",
             "bazel_ffx_tool",
             "group",
             "bazel_test_suite",
@@ -1950,7 +2558,10 @@ def is_host_tool_exclude_tags_exempt(
     after_code = re.sub(r"#[^\n]*", "", after) if after is not None else ""
     has_gn_bht = bool(
         after_code
-        and re.search(r'\b(?:bazel_host_tool|bazel_ffx_tool)\(\s*"[^"$]+"\s*\)', after_code)
+        and re.search(
+            r'\b(?:bazel_host_tool|bazel_py_host_tool|bazel_ffx_tool)\(\s*"[^"$]+"\s*\)',
+            after_code,
+        )
     )
     is_host_bin_migration = tmpl in HOST_BIN_GN_TEMPLATES and (
         bt_rule in BAZEL_HOST_TOOL_BINARY_RULES
@@ -1960,7 +2571,12 @@ def is_host_tool_exclude_tags_exempt(
         return False
     if after is not None:
         if not carried_in_bazel:
-            if cur is not None and cur[0] not in ("bazel_host_tool", "bazel_ffx_tool", "group"):
+            if cur is not None and cur[0] not in (
+                "bazel_host_tool",
+                "bazel_py_host_tool",
+                "bazel_ffx_tool",
+                "group",
+            ):
                 return False
             if cur is not None and not has_gn_bht:
                 return False
@@ -2168,9 +2784,27 @@ for pkg in sorted(d for d in dirs if d):
                                 )
                 except Exception:
                     pass
+            has_after_sentinel = bool(
+                after
+                and (
+                    pcl.has_sentinel(after)
+                    if pcl is not None
+                    else "## BAZEL2GN SENTINEL" in after
+                )
+            )
             findings.extend(
                 check_test_args_parity(
-                    pkg, gn_rel, bazel_rel, before_targets, new_targets, bazel_targets, top_vars
+                    pkg,
+                    gn_rel,
+                    bazel_rel,
+                    before_targets,
+                    new_targets,
+                    bazel_targets,
+                    top_vars,
+                    bazel_lines,
+                    before_top_lists,
+                    after_top_lists,
+                    has_gn_sentinel=has_after_sentinel,
                 )
             )
             for name, (tmpl, gn_line, body) in sorted(before_targets.items()):
@@ -2189,7 +2823,16 @@ for pkg in sorted(d for d in dirs if d):
                 cur = new_targets.get(name) or new_targets.get(bt_name)
                 cur_top = parse_gn_top_attrs(cur[2], after_top_lists) if cur else None
                 dropped_name = check_custom_output_or_crate_name_dropped(
-                    pkg, gn_rel, bazel_rel, name, tmpl, bt_rule, bt_line, gn_top, cur, cur_top
+                    pkg,
+                    gn_rel,
+                    bazel_rel,
+                    name,
+                    tmpl,
+                    bt_rule,
+                    bt_line,
+                    gn_top,
+                    cur,
+                    cur_top,
                 )
                 if dropped_name:
                     findings.append(dropped_name)
@@ -2210,6 +2853,31 @@ for pkg in sorted(d for d in dirs if d):
                 )
                 if dropped_testonly:
                     findings.append(dropped_testonly)
+            findings.extend(
+                check_testonly_breaks_non_testonly_bazel_rdeps(
+                    pkg,
+                    gn_rel,
+                    bazel_rel,
+                    bazel_targets,
+                    pkg_def_testonly,
+                    before_bazel_targets,
+                    before_pkg_def_testonly,
+                )
+            )
+            findings.extend(
+                check_fuchsia_toolchain_gn_output_name_cycle(
+                    pkg,
+                    gn_rel,
+                    bazel_rel,
+                    before,
+                    after,
+                    bazel_targets,
+                    top_vars,
+                    before_top_lists,
+                    after_top_lists,
+                    has_gn_sentinel=has_after_sentinel,
+                )
+            )
 
 # Check for GN root_out_dir binary output_name collisions on migrated rustc_test targets
 def check_rust_test_output_name_collision():
@@ -2350,91 +3018,88 @@ def check_rust_test_output_name_collision():
 check_rust_test_output_name_collision()
 
 
-# Load review_diff findings from PLANTER_REVIEW_DIFF_JSON or the shared `planter diff`
-# fallback, pinning the resolved change base for direct (non-run_checks.sh) runs.
-def _load_review_diff_findings_with_fallback():
-    if pcl is None or os.environ.get("PLANTER_SKIP_DIFF_COVERAGE") == "1":
-        return []
-    os.environ["PLANTER_CHANGE_BASE"] = change_base
-    os.environ["PLANTER_RESOLVED_CHANGE_BASE"] = change_base
-    return pcl.read_review_diff_findings(workdir)
+# Check that GN `disable_rustdoc = true` on Rust targets is preserved below
+# `## BAZEL2GN SENTINEL` when `BUILD.gn` still defines the target in dual builds.
+# In Case 1 (`BUILD.gn` deleted), Bazel Rust rules do not generate rustdoc by
+# default, so no Bazel attribute is required.
+DISABLE_RUSTDOC_TEMPLATES = {
+    "rustc_library",
+    "rustc_binary",
+    "rustc_macro",
+    "rustc_staticlib",
+}
+DISABLE_RUSTDOC_TRUE_RE = re.compile(r"(?<![\w.])disable_rustdoc\s*=\s*true\b")
 
 
-# Emit INFO waiver entries for false-positive review_diff alignment warnings that no
-# other verifier covers: GN `ifs_shared_library` mapped to `cc_link_stub_from_ifs_file`
-# and default-named cutover `:<name>-lib` library deps. Pre-existing unchanged targets,
-# companion-manifest attrs, @bazel2gn:raw_attribute/raw_overwrite attrs and deps,
-# fx_packaged_binary wrapper deps, cross-language Rust metadata deps and obsolete
-# "Retained in GN" comments are verified (more strictly) by migration_sanity
-# waive_verified_review_diff_findings and tools/run_checks.sh, so they are not
-# re-waived here.
-def waive_false_positive_review_diff_warnings():
-    rd_findings = _load_review_diff_findings_with_fallback()
-    for rf in rd_findings:
-        cat = rf.get("category", "")
-        rfile = rf.get("file", "")
-        rline = rf.get("line", 1)
-        rmsg = rf.get("message", "")
-        rrem = rf.get("remediation", "")
-        pkg_dir = os.path.dirname(rfile).strip("/") if rfile else ""
-        bz_abs = os.path.join(workdir, pkg_dir, "BUILD.bazel") if pkg_dir else ""
-        bz_txt = ""
-        if bz_abs and os.path.isfile(bz_abs):
-            try:
-                bz_txt = open(bz_abs, encoding="utf-8").read()
-            except OSError:
-                bz_txt = ""
-        waiver_reason = None
-        m_tgt = re.match(r'^Target "([^"]+)"', rmsg)
-        tname = m_tgt.group(1) if m_tgt else ""
-        if cat == "attribute_alignment" and tname:
-            if "abi in GN not carried over to Bazel" in rmsg and (
-                "cc_link_stub_from_ifs_file" in bz_txt and "ifs_file" in bz_txt
-            ):
-                waiver_reason = (
-                    "In Bazel, `cc_link_stub_from_ifs_file` declares the `.ifs` ABI file "
-                    "via `ifs_file` rather than GN `ifs_shared_library`'s `abi` attribute."
+def _collect_changed_gn_files_for_rustdoc():
+    paths = set()
+    diff_out = git(["diff", "--name-only", change_base]) or ""
+    for rel in diff_out.splitlines():
+        rel = rel.strip()
+        if rel == "BUILD.gn" or rel.endswith("/BUILD.gn"):
+            paths.add(rel)
+    raw_tdirs = os.environ.get("PLANTER_TARGET_DIRS", "") or target_dir
+    for td in re.split(r"[\s,]+", raw_tdirs):
+        td = td.strip().strip("/")
+        if td:
+            paths.add(f"{td}/BUILD.gn")
+    return sorted(paths)
+
+
+def check_retained_gn_disable_rustdoc():
+    for gn_rel in _collect_changed_gn_files_for_rustdoc():
+        gn_abs = os.path.join(workdir, gn_rel)
+        if not os.path.isfile(gn_abs):
+            continue
+        before_txt = git(["show", f"{change_base}:{gn_rel}"])
+        if not before_txt or "disable_rustdoc" not in before_txt:
+            continue
+        try:
+            after_txt = open(gn_abs, encoding="utf-8").read()
+        except OSError:
+            continue
+        if "## BAZEL2GN SENTINEL" not in after_txt:
+            continue
+        above_after, below_after = after_txt.split("## BAZEL2GN SENTINEL", 1)
+        before_targets = targets(before_txt)
+        below_targets = targets(below_after)
+        sentinel_lines = above_after.count("\n")
+        pkg_dir = os.path.dirname(gn_rel)
+        bz_rel = f"{pkg_dir}/BUILD.bazel" if pkg_dir else "BUILD.bazel"
+        for tname, (btmpl, _, bbody) in sorted(before_targets.items()):
+            if btmpl not in DISABLE_RUSTDOC_TEMPLATES:
+                continue
+            if not DISABLE_RUSTDOC_TRUE_RE.search(bbody):
+                continue
+            if tname not in below_targets:
+                continue
+            _, rel_line, abody = below_targets[tname]
+            if DISABLE_RUSTDOC_TRUE_RE.search(abody):
+                continue
+            gn_line = sentinel_lines + rel_line
+            attr_hint = (
+                "set `gn_disable_rustdoc = True` on the `rustc_staticlib` target"
+                if btmpl == "rustc_staticlib"
+                else (
+                    "add `# @bazel2gn:raw_attribute:disable_rustdoc = true` "
+                    "(preceded by a brief `# ...` explanation comment) directly "
+                    "above the target"
                 )
-            elif (
-                "Unusual rule mapping from ifs_shared_library to cc_link_stub_from_ifs_file"
-                in rmsg
-            ):
-                waiver_reason = (
-                    "`cc_link_stub_from_ifs_file` is the canonical Bazel equivalent of "
-                    "GN `ifs_shared_library`."
-                )
-        elif cat == "dep_alignment" and tname and "unmatched in GN:" in rmsg:
-            m_unm = re.search(r"unmatched in GN:\s*\[([^\]]+)\]", rmsg)
-            unm_items = (
-                [x.strip() for x in m_unm.group(1).split(",") if x.strip()]
-                if m_unm
-                else []
             )
-            if unm_items and all(
-                u.startswith("//")
-                and ":" in u
-                and u.split(":", 1)[1].endswith(("-lib", "_lib"))
-                and f'"{u.split(":", 1)[0]}"' in bz_txt
-                for u in unm_items
-            ):
-                waiver_reason = (
-                    "The GN `:<name>-lib` target corresponds to the default package "
-                    "target `//<pkg>` in `BUILD.bazel` after `BUILD.gn` deletion."
-                )
-        if waiver_reason:
-            findings.append({
-                "source": "gn_attr_parity",
-                "category": cat,
-                "severity": "info",
-                "file": rfile,
-                "line": rline,
-                "message": rmsg,
-                "remediation": rrem,
-                "waiver": waiver_reason,
-            })
+            msg = (
+                f"Target `{tname}` in `{gn_rel}` had `disable_rustdoc = true` at "
+                "the change base, but the `bazel2gn`-generated target below "
+                "`## BAZEL2GN SENTINEL` drops `disable_rustdoc = true`, re-enabling "
+                "GN rustdoc generation under `include_rustdoc`."
+            )
+            rem = (
+                f"In `{bz_rel}`, {attr_hint} for `{tname}` and re-run `fx bazel2gn` "
+                "so `disable_rustdoc = true` is preserved in `BUILD.gn`."
+            )
+            _emit(findings, "gn_only_attr_dropped", "error", gn_rel, gn_line, msg, rem)
 
 
-waive_false_positive_review_diff_warnings()
+check_retained_gn_disable_rustdoc()
 
 deduped_findings = []
 seen_keys = set()

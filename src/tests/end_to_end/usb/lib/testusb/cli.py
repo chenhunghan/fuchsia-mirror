@@ -17,10 +17,10 @@ import os
 import sys
 import time
 
-from .backend import USBTestBackend
-from .ioctl import USBTestIoctlBackend
-from .models import ALL_TEST_CASES, TestParams, TestStatus
-from .runner import TestRunner, format_text_report, generate_json_report
+from testusb.backend import USBTestBackend
+from testusb.ioctl import USBTestIoctlBackend
+from testusb.models import ALL_TEST_CASES, TestParams, TestStatus
+from testusb.runner import TestRunner, format_text_report, generate_json_report
 
 _LOGGER = logging.getLogger(__name__)
 

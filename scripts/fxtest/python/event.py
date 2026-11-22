@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from dataclasses import fields
 import datetime
 import enum
+import os
 import time
 import typing
 
@@ -110,10 +111,21 @@ class ProgramExecutionPayload:
 
         This output can be shown to the user to describe the command invocation.
 
+        Absolute paths to programs (e.g. ffx in the build directory's
+        host-tools) are shortened to the program name, since the path takes
+        up most of the space in the status line and gets truncated.
+
         Returns:
             str: Formatted command line.
         """
-        return f"{self.command}{'' if not self.flags else ' ' + ' '.join(self.flags)}"
+        command = (
+            os.path.basename(self.command)
+            if os.path.isabs(self.command)
+            else self.command
+        )
+        return (
+            f"{command}{'' if not self.flags else ' ' + ' '.join(self.flags)}"
+        )
 
 
 class ProgramOutputStream(enum.Enum):

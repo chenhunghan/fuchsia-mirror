@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/async-loop/cpp/loop.h>
+#include <lib/async-loop/default.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
 
@@ -215,6 +217,14 @@ TEST_F(CobaltTest, Check_LoopOutlivesCobalt) {
   RunLoopFor(delay);
 
   EXPECT_THAT(ReceivedCobaltEvents(), IsEmpty());
+}
+
+TEST_F(CobaltTest, Check_DispatcherShutsDown) {
+  // Shutting down the loop unbinds the connection to fuchsia.metrics/MetricEventLogger. This test
+  // crashes if |logger| tries to reconnect on the loop while it's shutting down.
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+  Logger logger(loop.dispatcher(), services(), &clock_);
+  loop.Shutdown();
 }
 
 TEST_F(CobaltTest, SmokeTest_NoLoggerFactoryServer) {

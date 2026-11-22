@@ -26,6 +26,9 @@ test_suite(
 test_suite(
     name = "assembly_tests",
     tests = [
+        "//fuchsia/assembly:arch_arm64_board_configuration_test",
+        "//fuchsia/assembly:arch_riscv64_board_configuration_test",
+        "//fuchsia/assembly:arch_x64_board_configuration_test",
         "//fuchsia/assembly:board_configuration_golden_test",
         "//fuchsia/assembly:board_input_bundle_golden_test",
         "//fuchsia/assembly:fuchsia_gen_android_starnix_container_test",
@@ -34,6 +37,9 @@ test_suite(
         "//fuchsia/assembly:hybrid_product_config_golden_test",
         "//fuchsia/assembly:nested_board_configuration_test",
         "//fuchsia/assembly:partitions_config_golden_test",
+        "//fuchsia/assembly:prebuilt_arch_arm64_board_configuration_test",
+        "//fuchsia/assembly:prebuilt_arch_riscv64_board_configuration_test",
+        "//fuchsia/assembly:prebuilt_arch_x64_board_configuration_test",
         "//fuchsia/assembly:prebuilt_product_config_extract_package_test",
         "//fuchsia/assembly:prebuilt_product_config_golden_test",
         "//fuchsia/assembly:product_config_golden_test",

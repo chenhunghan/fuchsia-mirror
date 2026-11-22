@@ -91,7 +91,7 @@ fn parse_zbi_payload(sections: Vec<ZbiSection>, deps: HashSet<PathBuf>) -> Resul
     info!(total = sections.len(); "Extracted sections from the ZBI");
     for section in sections.iter() {
         info!(section_type:? = section.section_type; "Extracted sections");
-        if section.section_type == zbi::Type::StorageBootfs {
+        if section.section_type == zbi::Type::STORAGE_BOOTFS {
             if bootfs_files.is_none() {
                 let mut bootfs_reader = BootfsReader::new(section.buffer.clone());
                 let files = bootfs_reader.parse().context("Failed to parse bootfs from ZBI")?;
@@ -100,7 +100,7 @@ fn parse_zbi_payload(sections: Vec<ZbiSection>, deps: HashSet<PathBuf>) -> Resul
             } else {
                 warn!("Multiple StorageBootfs sections found in ZBI; ignoring subsequent section");
             }
-        } else if section.section_type == zbi::Type::Cmdline {
+        } else if section.section_type == zbi::Type::CMDLINE {
             let mut cmd_buffer = section.buffer.clone();
             // The cmdline.blk contains a trailing 0.
             cmd_buffer.truncate(cmd_buffer.len() - 1);
@@ -351,8 +351,8 @@ mod tests {
         let bootfs2 = make_bootfs_bytes(&[("bin/second", b"second_content")]);
 
         let sections = vec![
-            ZbiSection { section_type: zbi::Type::StorageBootfs, buffer: bootfs1 },
-            ZbiSection { section_type: zbi::Type::StorageBootfs, buffer: bootfs2 },
+            ZbiSection { section_type: zbi::Type::STORAGE_BOOTFS, buffer: bootfs1 },
+            ZbiSection { section_type: zbi::Type::STORAGE_BOOTFS, buffer: bootfs2 },
         ];
 
         let zbi = parse_zbi_payload(sections, HashSet::new()).unwrap();
@@ -371,8 +371,8 @@ mod tests {
         let bootfs2 = make_bootfs_bytes(&[("bin/second", b"second_content")]);
 
         let sections = vec![
-            ZbiSection { section_type: zbi::Type::StorageBootfs, buffer: corrupted_bootfs },
-            ZbiSection { section_type: zbi::Type::StorageBootfs, buffer: bootfs2 },
+            ZbiSection { section_type: zbi::Type::STORAGE_BOOTFS, buffer: corrupted_bootfs },
+            ZbiSection { section_type: zbi::Type::STORAGE_BOOTFS, buffer: bootfs2 },
         ];
 
         let result = parse_zbi_payload(sections, HashSet::new());

@@ -12,7 +12,6 @@ use crate::vfs::{
     DirEntryHandle, FileSystemHandle, FileSystemOptions, FsNodeHandle, FsStr, LookupContext,
     MountInfo, NamespaceNode, path,
 };
-use starnix_uapi::auth::FsCred;
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::{FileMode, mode};
@@ -67,12 +66,25 @@ impl DevTmpFs {
         devtmpfs_get_or_create_directory_at(current_task, root, "pts".into()).unwrap();
         let create_symlink = |dir: &FsNodeHandle, mount: &MountInfo, name: &FsStr| {
             let target = "/proc/self/fd".into();
-            dir.create_symlink(current_task, mount, name, target, FsCred::root())
+            dir.create_symlink(current_task, mount, name, target)
         };
         let mount = MountInfo::detached();
         root.create_entry(current_task, &mount, "fd".into(), create_symlink).unwrap();
         fs
     }
+}
+
+fn run_devtmpfs_op(
+    kernel: &Kernel,
+    debug_name: &'static str,
+    op: impl FnOnce(&CurrentTask) -> Result<(), Errno> + Send + 'static,
+) -> Result<(), Errno> {
+    let (result_fn, req) = SpawnRequestBuilder::new()
+        .with_debug_name(debug_name)
+        .with_sync_closure(op)
+        .build_with_sync_result();
+    kernel.kthreads.spawner().spawn_from_request(req);
+    result_fn()?
 }
 
 /// Creates a device node in the devtmpfs filesystem.
@@ -84,15 +96,9 @@ pub fn devtmpfs_create_device(
     kernel: &Kernel,
     device_metadata: DeviceMetadata,
 ) -> Result<(), Errno> {
-    let closure = move |current_task: &CurrentTask| {
+    run_devtmpfs_op(kernel, "devtmpfs-create-device", move |current_task| {
         devtmpfs_create_device_internal(current_task, &device_metadata)
-    };
-    let (result_fn, req) = SpawnRequestBuilder::new()
-        .with_debug_name("devtmpfs-create-device")
-        .with_sync_closure(closure)
-        .build_with_sync_result();
-    kernel.kthreads.spawner().spawn_from_request(req);
-    result_fn()?
+    })
 }
 
 fn devtmpfs_create_device_internal(
@@ -127,7 +133,7 @@ fn devtmpfs_get_or_create_directory_at(
 ) -> Result<DirEntryHandle, Errno> {
     let create_dir = |dir: &FsNodeHandle, mount: &MountInfo, name: &FsStr| {
         let mode = mode!(IFDIR, 0o755);
-        dir.create_node(current_task, mount, name, mode, DeviceId::NONE, FsCred::root())
+        dir.create_node(current_task, mount, name, mode, DeviceId::NONE)
     };
     let mount = MountInfo::detached();
     let (entry, _status) =
@@ -149,7 +155,7 @@ fn devtmpfs_create_device_node(
         current_task,
         &MountInfo::detached(),
         device_name,
-        |dir, mount, name| dir.create_node(current_task, mount, name, mode, devt, FsCred::root()),
+        |dir, mount, name| dir.create_node(current_task, mount, name, mode, devt),
     )?;
     Ok(())
 }
@@ -170,4 +176,15 @@ pub fn devtmpfs_remove_device(
         info.mode.fmt() == device_metadata.mode.file_type() && info.rdev == device_metadata.devt
     });
     Ok(())
+}
+
+/// Removes the device node for `device_metadata` from `devtmpfs` on a kernel worker thread when the
+/// caller only holds `&Kernel`.
+pub fn devtmpfs_remove_device_on_kernel(
+    kernel: &Kernel,
+    device_metadata: DeviceMetadata,
+) -> Result<(), Errno> {
+    run_devtmpfs_op(kernel, "devtmpfs-remove-device", move |current_task| {
+        devtmpfs_remove_device(current_task, &device_metadata)
+    })
 }

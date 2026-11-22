@@ -52,6 +52,7 @@ py_library(
         "//build/api:__pkg__",
         "//build/beads/scripts:__pkg__",
         "//build/ninja_implicit_inputs:__pkg__",
+        "//build/tui:__pkg__",
     ],
 )
 
@@ -288,4 +289,17 @@ host_py_test(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//build:__subpackages__"],
     deps = [":fetch_cipd_prebuilt"],
+)
+
+py_library(
+    name = "update_no_workspace_bazel_vendor_dir",
+    srcs = ["update_no_workspace_bazel_vendor_dir.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_py_test(
+    name = "update_no_workspace_bazel_vendor_dir_test",
+    srcs = ["update_no_workspace_bazel_vendor_dir_test.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":update_no_workspace_bazel_vendor_dir"],
 )

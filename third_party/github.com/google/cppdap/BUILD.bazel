@@ -1,0 +1,149 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+
+package(default_applicable_licenses = [":license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":json_test_host_test"],
+)
+
+# Bazel license metadata has no GN equivalent target.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:Apache-2.0"],
+    license_text = "LICENSE",
+)
+
+# Suppress warnings that Fuchsia build adds
+# GN config() targets for -Wno-extra-semi and -Wno-newline-eof have no Bazel
+# build_flags() equivalents yet, and cflags is not mapped by bazel2gn.
+# TODO(https://fxbug.dev/570694755): Verify whether cppdap should use target_compatible_with (was not gated by if (is_host) in GN).
+# @bazel2gn:raw_attribute:cflags = [ "-DCPPDAP_JSON_RAPID" ]
+# @bazel2gn:raw_attribute:configs += [ "//build/config:Wno-extra-semi", "//build/config:Wno-newline-eof" ]
+fx_cc_library(
+    name = "cppdap",
+    srcs = [
+        "src/src/chan.h",
+        "src/src/content_stream.cpp",
+        "src/src/content_stream.h",
+        "src/src/io.cpp",
+        "src/src/json_serializer.h",
+        "src/src/jsoncpp_json_serializer.h",
+        "src/src/network.cpp",
+        "src/src/nlohmann_json_serializer.h",
+        "src/src/null_json_serializer.cpp",
+        "src/src/null_json_serializer.h",
+        "src/src/protocol_events.cpp",
+        "src/src/protocol_requests.cpp",
+        "src/src/protocol_response.cpp",
+        "src/src/protocol_types.cpp",
+        "src/src/rapid_json_serializer.cpp",
+        "src/src/rapid_json_serializer.h",
+        "src/src/rwmutex.h",
+        "src/src/session.cpp",
+        "src/src/socket.cpp",
+        "src/src/socket.h",
+        "src/src/string_buffer.h",
+        "src/src/typeinfo.cpp",
+        "src/src/typeof.cpp",
+    ],
+    hdrs = [
+        "src/include/dap/any.h",
+        "src/include/dap/dap.h",
+        "src/include/dap/future.h",
+        "src/include/dap/io.h",
+        "src/include/dap/network.h",
+        "src/include/dap/optional.h",
+        "src/include/dap/protocol.h",
+        "src/include/dap/serialization.h",
+        "src/include/dap/session.h",
+        "src/include/dap/traits.h",
+        "src/include/dap/typeinfo.h",
+        "src/include/dap/typeof.h",
+        "src/include/dap/types.h",
+        "src/include/dap/variant.h",
+    ],
+    build_flags = ["//build/config:Wno-deprecated-this-capture"],
+    # GN preserves cflags and configs via the raw_attribute directives above
+    # because bazel2gn does not map arbitrary copts flags to GN cflags.
+    # @bazel2gn:skip
+    copts = [
+        "-DCPPDAP_JSON_RAPID",
+        "-Wno-extra-semi",
+        "-Wno-newline-eof",
+    ],
+    implementation_deps = ["//third_party/rapidjson"],
+    includes = ["src/include"],
+    public_configs = [":includes"],
+    # cppdap is only used by host tools (zxdb) and uses mutex wrappers without
+    # Clang thread-safety annotations enabled on Fuchsia targets.
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/debug/zxdb/debug_adapter:__pkg__"],
+)
+
+# GN config() for -Wno-extra-semi has no Bazel build_flags() equivalent yet, and
+# cflags is not mapped by bazel2gn.
+# @bazel2gn:raw_attribute:cflags = [ "-DCPPDAP_JSON_RAPID" ]
+# @bazel2gn:raw_attribute:configs += [ "//build/config:Wno-extra-semi" ]
+fx_cc_test_binary(
+    name = "json_test",
+    srcs = [
+        "src/include/dap/any.h",
+        "src/include/dap/dap.h",
+        "src/include/dap/future.h",
+        "src/include/dap/io.h",
+        "src/include/dap/network.h",
+        "src/include/dap/optional.h",
+        "src/include/dap/protocol.h",
+        "src/include/dap/serialization.h",
+        "src/include/dap/session.h",
+        "src/include/dap/traits.h",
+        "src/include/dap/typeinfo.h",
+        "src/include/dap/typeof.h",
+        "src/include/dap/types.h",
+        "src/include/dap/variant.h",
+        "src/src/json_serializer.h",
+        "src/src/json_serializer_test.cpp",
+        "src/src/jsoncpp_json_serializer.h",
+        "src/src/nlohmann_json_serializer.h",
+        "src/src/null_json_serializer.cpp",
+        "src/src/null_json_serializer.h",
+        "src/src/rapid_json_serializer.cpp",
+        "src/src/rapid_json_serializer.h",
+        "src/src/string_buffer.h",
+        "src/src/typeinfo.cpp",
+        "src/src/typeof.cpp",
+    ],
+    # GN preserves cflags and configs via the raw_attribute directives above and
+    # uses public_configs = [":includes"]; Bazel cc_binary needs -I and
+    # -Wno-extra-semi directly in copts (Bazel enables -Wc++98-compat-extra-semi).
+    # @bazel2gn:skip
+    copts = [
+        "-DCPPDAP_JSON_RAPID",
+        "-I" + package_name() + "/src/include",
+        "-Wno-extra-semi",
+    ],
+    public_configs = [":includes"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//third_party/rapidjson",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+host_test(
+    name = "json_test_host_test",
+    binary = ":json_test",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

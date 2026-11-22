@@ -22,7 +22,6 @@ source_set("test_lib") {
   deps = [
     "//sdk/lib/fdio",
     "//sdk/lib/syslog/cpp",
-    "//src/lib/fostr/fidl/fuchsia.exception",
     "//src/lib/fsl",
     "//zircon/system/ulib/zx",
   ]
@@ -49,7 +48,7 @@ cc_test_executable("exception_broker_config_test_exe") {
 
   deps = [
     "//sdk/lib/inspect/testing/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/developer/forensics/exceptions:lib",
     "//src/lib/fsl",
     "//src/lib/fxl",
@@ -66,9 +65,8 @@ cc_test_executable("exception_broker_integration_test_exe") {
 
   deps = [
     ":test_lib",
-    "//sdk/fidl/fuchsia.exception:fuchsia.exception_hlcpp",
     "//src/developer/forensics/exceptions:lib",
-    "//src/developer/forensics/public/fakes:fuchsia.feedback.testing_hlcpp",
+    "//src/developer/forensics/public/fakes:fuchsia.feedback.testing_cpp",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/lib/fsl",
     "//src/lib/fxl",
@@ -96,7 +94,7 @@ cc_test_executable("exception_broker_unittest_exe") {
     "//sdk/fidl/fuchsia.driver.crash:fuchsia.driver.crash_cpp",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/developer/forensics/exceptions:constants",
     "//src/developer/forensics/exceptions:lib",
     "//src/developer/forensics/exceptions/handler:lib",
@@ -125,7 +123,6 @@ cc_test_executable("process_launch_failure_unittest_exe") {
     "//src/developer/forensics/testing:gpretty_printers",
     "//src/developer/forensics/testing:gtest_with_syslog_main",
     "//src/developer/forensics/testing:unit_test_fixture",
-    "//src/lib/fostr/fidl/fuchsia.exception",
     "//third_party/googletest:gtest",
     "//zircon/system/ulib/zx",
   ]

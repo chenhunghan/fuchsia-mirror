@@ -5,13 +5,12 @@
 
 import unittest
 
-import pb_message_util
-
 # The function being tested works on any subclass of message.Message
 # which is an abstract base class.  However, we need a concrete message type
 # to test.  We choose api.log.log_pb2.LogDump because this is what
 # upload_reproxy_logs.py uses, and it is very stable.
 from api.log import log_pb2
+from build.rbe import pb_message_util
 from go.api.command import command_pb2
 from google.protobuf import timestamp_pb2
 

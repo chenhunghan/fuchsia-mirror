@@ -17,10 +17,10 @@ class CodecAdapterCvsdDecoder : public CodecAdapterSWImpl<CvsdParams> {
   ~CodecAdapterCvsdDecoder() = default;
 
  protected:
-  std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) override;
   CodecAdapterCvsdDecoder::InputLoopStatus ProcessFormatDetails(
-      const fuchsia::media::FormatDetails& format_details) __TA_EXCLUDES(lock_) override;
+      const fuchsia_media::FormatDetails& format_details) __TA_EXCLUDES(lock_) override;
   int ProcessInputChunkData(const uint8_t* input_data, size_t input_data_size,
                             uint8_t* output_buffer, size_t output_buffer_size) override;
 
@@ -31,11 +31,11 @@ class CodecAdapterCvsdDecoder : public CodecAdapterSWImpl<CvsdParams> {
   // Buffer size required to process one input chunk.
   size_t MinOutputBufferSize() override { return kOutputFrameSize; }
 
-  fuchsia::sysmem::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
+  fuchsia_sysmem2::BufferCollectionConstraints BufferCollectionConstraints(CodecPort port)
       __TA_REQUIRES(lock_) override;
 
   TimestampExtrapolator CreateTimestampExtrapolator(
-      const fuchsia::media::FormatDetails& format_details) override {
+      const fuchsia_media::FormatDetails& format_details) override {
     return TimestampExtrapolator();
   }
 

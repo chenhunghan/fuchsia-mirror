@@ -130,11 +130,11 @@ class UnionWithHandle final {
 
   static UnionWithHandle WithH(::zx::vmo&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kH = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionWithHandle> New();
@@ -160,7 +160,7 @@ class UnionWithHandle final {
     return h_;
   }
   UnionWithHandle& set_h(::zx::vmo value);
-  UnionWithHandle& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles);
+  UnionWithHandle& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles);
 
   ::test::handlesintypes::UnionWithHandle::Tag Which() const {
     switch (tag_) {
@@ -174,7 +174,7 @@ class UnionWithHandle final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -194,9 +194,9 @@ class UnionWithHandle final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid);
   union {
     ::zx::vmo h_;
     ::fidl::UnknownData unknown_data_;
@@ -318,10 +318,10 @@ class EmptyResourceUnion final {
   EmptyResourceUnion(EmptyResourceUnion&&);
   EmptyResourceUnion& operator=(EmptyResourceUnion&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<EmptyResourceUnion> New();
@@ -334,7 +334,7 @@ class EmptyResourceUnion final {
   bool has_invalid_tag() const {
     return tag_ == Invalid;
   }
-  EmptyResourceUnion& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles);
+  EmptyResourceUnion& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles);
 
   ::test::handlesintypes::EmptyResourceUnion::Tag Which() const {
     switch (tag_) {
@@ -347,7 +347,7 @@ class EmptyResourceUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -367,9 +367,9 @@ class EmptyResourceUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid);
   union {
     ::fidl::UnknownData unknown_data_;
   };
@@ -443,7 +443,7 @@ struct Equality<::test::handlesintypes::TableWithHandle> {
 };
 
 template <>
-struct IsFidlXUnion<::test::handlesintypes::UnionWithHandle> : public std::true_type {};
+struct IsFidlUnion<::test::handlesintypes::UnionWithHandle> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::handlesintypes::UnionWithHandle>
@@ -455,9 +455,9 @@ struct CodingTraits<std::unique_ptr<::test::handlesintypes::UnionWithHandle>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::handlesintypes::UnionWithHandle>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -487,7 +487,7 @@ struct Equality<::test::handlesintypes::UnionWithHandle> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
         return true;
       case ::test::handlesintypes::UnionWithHandle::Tag::kH:
         return ::fidl::Equals(_lhs.h_, _rhs.h_);
@@ -577,7 +577,7 @@ struct Equality<::test::handlesintypes::EmptyResourceTable> {
 };
 
 template <>
-struct IsFidlXUnion<::test::handlesintypes::EmptyResourceUnion> : public std::true_type {};
+struct IsFidlUnion<::test::handlesintypes::EmptyResourceUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::handlesintypes::EmptyResourceUnion>
@@ -589,9 +589,9 @@ struct CodingTraits<std::unique_ptr<::test::handlesintypes::EmptyResourceUnion>>
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::handlesintypes::EmptyResourceUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -621,7 +621,7 @@ struct Equality<::test::handlesintypes::EmptyResourceUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
         return true;
       default:
         return ::fidl::Equals(_lhs.unknown_data_, _rhs.unknown_data_);

@@ -14,10 +14,8 @@ CodecAdapterFfmpegEncoder::CodecAdapterFfmpegEncoder(std::mutex& lock,
 
 CodecAdapterFfmpegEncoder::~CodecAdapterFfmpegEncoder() = default;
 
-fuchsia_sysmem2::BufferCollectionConstraints
-CodecAdapterFfmpegEncoder::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+CodecAdapterFfmpegEncoder::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
   ZX_ASSERT_MSG(false, "Not implemented.");
 }
 
@@ -30,7 +28,7 @@ void CodecAdapterFfmpegEncoder::ProcessInputLoop() { ZX_ASSERT_MSG(false, "Not i
 
 void CodecAdapterFfmpegEncoder::CleanUpAfterStream() { ZX_ASSERT_MSG(false, "Not implemented."); }
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterFfmpegEncoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterFfmpegEncoder::OutputFormatDetails() {
   ZX_ASSERT_MSG(false, "Not implemented.");
-  return {fuchsia::media::FormatDetails{}, 0};
+  return {fuchsia_media::FormatDetails{}, 0};
 }

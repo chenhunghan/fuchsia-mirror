@@ -13,7 +13,7 @@ from unittest import mock
 from honeydew import affordances_capable, errors
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
-from honeydew.transports.ffx import ffx_with_monitor
+from honeydew.transports.ffx import ffx_impl, ffx_with_monitor
 from honeydew.transports.ffx.types import MonitorTargetInfo
 from honeydew.typing import custom_types
 from honeydew.utils import host_shell
@@ -62,7 +62,6 @@ _INPUT_ARGS: dict[str, Any] = {
         subtools_search_path=_SUBTOOLS_SEARCH_PATH,
         proxy_timeout_secs=_PROXY_TIMEOUT_SECS,
         ssh_keepalive_timeout=_SSH_KEEPALIVE_TIMEOUT,
-        emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
         shared_data=_SHARED_DATA,
@@ -255,6 +254,148 @@ class FfxWithMonitorTests(unittest.TestCase):
         mock_time.monotonic.side_effect = [0.0, 5.0, 10.0]
         with self.assertRaises(errors.DeviceNotConnectedError):
             self.ffx_monitor_obj.wait_for_rcs_connection(timeout=10)
+        self.assertEqual(mock_get_target_status.call_count, 2)
+
+    @mock.patch.object(
+        ffx_with_monitor.FFXWithMonitor,
+        "_get_target_status",
+        side_effect=[
+            MonitorTargetInfo(**_FFX_TARGET_INFO),
+            MonitorTargetInfo(**{**_FFX_TARGET_INFO, "rcs_state": "N"}),
+        ],
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_disconnection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx_with_monitor, "time", autospec=True)
+    def test_wait_for_rcs_disconnection_waits_for_monitor(
+        self,
+        mock_time: mock.Mock,
+        mock_ffx_impl_wait_for_rcs_disconnection: mock.Mock,
+        mock_get_target_status: mock.Mock,
+    ) -> None:
+        """Verify wait_for_rcs_disconnection() waits until the monitor no
+        longer reports a stale RCS connection."""
+        mock_time.monotonic.return_value = 0.0
+        self.ffx_monitor_obj.wait_for_rcs_disconnection()
+        mock_ffx_impl_wait_for_rcs_disconnection.assert_called_once_with(
+            self.ffx_monitor_obj, timeout=None
+        )
+        self.assertEqual(mock_get_target_status.call_count, 2)
+        mock_time.sleep.assert_called_once_with(
+            ffx_with_monitor._MONITOR_CONNECTION_POLL_INTERVAL_SECS
+        )
+
+    @mock.patch.object(
+        ffx_with_monitor.FFXWithMonitor,
+        "_get_target_status",
+        return_value=MonitorTargetInfo(**_FFX_TARGET_INFO),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_disconnection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx_with_monitor, "time", autospec=True)
+    def test_wait_for_rcs_disconnection_with_timeout(
+        self,
+        mock_time: mock.Mock,
+        mock_ffx_impl_wait_for_rcs_disconnection: mock.Mock,
+        mock_get_target_status: mock.Mock,
+    ) -> None:
+        """Verify wait_for_rcs_disconnection(timeout=...) forwards timeout to
+        FfxImpl and bounds the monitor polling by the remaining timeout."""
+        mock_time.monotonic.side_effect = [0.0, 2.0, 6.0, 10.0]
+        with self.assertLogs(ffx_with_monitor._LOGGER, level="WARNING") as cm:
+            self.ffx_monitor_obj.wait_for_rcs_disconnection(timeout=10.0)
+        mock_ffx_impl_wait_for_rcs_disconnection.assert_called_once_with(
+            self.ffx_monitor_obj, timeout=10.0
+        )
+        self.assertEqual(mock_get_target_status.call_count, 2)
+        self.assertTrue(any("8.0 seconds" in msg for msg in cm.output))
+
+    @mock.patch.object(
+        ffx_with_monitor.FFXWithMonitor,
+        "_get_target_status",
+        side_effect=[
+            MonitorTargetInfo(**_FFX_TARGET_INFO),
+            MonitorTargetInfo(
+                **{**_FFX_TARGET_INFO, "target_state": "Fastboot"}
+            ),
+        ],
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_disconnection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx_with_monitor, "time", autospec=True)
+    def test_wait_for_rcs_disconnection_target_state_changed(
+        self,
+        mock_time: mock.Mock,
+        mock_ffx_impl_wait_for_rcs_disconnection: mock.Mock,
+        mock_get_target_status: mock.Mock,
+    ) -> None:
+        """Verify wait_for_rcs_disconnection() returns once the monitor reports
+        a target state other than Product, even if RCS is still reported as
+        connected."""
+        mock_time.monotonic.return_value = 0.0
+        self.ffx_monitor_obj.wait_for_rcs_disconnection()
+        mock_ffx_impl_wait_for_rcs_disconnection.assert_called_once()
+        self.assertEqual(mock_get_target_status.call_count, 2)
+
+    @mock.patch.object(
+        ffx_with_monitor.FFXWithMonitor,
+        "_get_target_status",
+        return_value=MonitorTargetInfo(),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_disconnection",
+        autospec=True,
+    )
+    def test_wait_for_rcs_disconnection_target_not_in_monitor(
+        self,
+        mock_ffx_impl_wait_for_rcs_disconnection: mock.Mock,
+        mock_get_target_status: mock.Mock,
+    ) -> None:
+        """Verify wait_for_rcs_disconnection() returns once the monitor no
+        longer lists the target."""
+        self.ffx_monitor_obj.wait_for_rcs_disconnection()
+        mock_ffx_impl_wait_for_rcs_disconnection.assert_called_once()
+        mock_get_target_status.assert_called_once()
+
+    @mock.patch.object(
+        ffx_with_monitor.FFXWithMonitor,
+        "_get_target_status",
+        return_value=MonitorTargetInfo(**_FFX_TARGET_INFO),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_disconnection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx_with_monitor, "time", autospec=True)
+    def test_wait_for_rcs_disconnection_monitor_timeout(
+        self,
+        mock_time: mock.Mock,
+        mock_ffx_impl_wait_for_rcs_disconnection: mock.Mock,
+        mock_get_target_status: mock.Mock,
+    ) -> None:
+        """Verify wait_for_rcs_disconnection() gives up waiting for the
+        monitor once the timeout expires, without raising."""
+        timeout = ffx_with_monitor._MONITOR_DISCONNECTION_TIMEOUT_SECS
+        mock_time.monotonic.side_effect = [0.0, timeout / 2, timeout]
+        with self.assertLogs(ffx_with_monitor._LOGGER, level="WARNING"):
+            self.ffx_monitor_obj.wait_for_rcs_disconnection()
+        mock_ffx_impl_wait_for_rcs_disconnection.assert_called_once()
         self.assertEqual(mock_get_target_status.call_count, 2)
 
     @mock.patch.object(

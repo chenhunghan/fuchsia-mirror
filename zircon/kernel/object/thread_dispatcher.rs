@@ -11,15 +11,11 @@ use super::exceptionate::Exceptionate;
 use super::handle::KernelHandle;
 use super::process_dispatcher::ProcessDispatcher;
 use super::thread_dispatcher_ffi::{
-    cpp_sys_thread_raise_exception, cpp_thread_dispatcher_alloc,
-    cpp_thread_dispatcher_attach_to_core_thread, cpp_thread_dispatcher_current,
-    cpp_thread_dispatcher_get_core_thread, cpp_thread_dispatcher_is_current,
+    cpp_thread_dispatcher_alloc, cpp_thread_dispatcher_get_core_thread,
     cpp_thread_dispatcher_lock_acquire, cpp_thread_dispatcher_lock_release,
     cpp_thread_dispatcher_release_core_thread_observation, cpp_thread_dispatcher_reset_core_thread,
-    cpp_thread_dispatcher_set_core_thread, cpp_thread_dispatcher_set_user_entry,
-    cpp_thread_handle_single_shot_exiting, cpp_thread_runtime_stats_add_lock_contention_ticks,
-    cpp_thread_runtime_stats_add_page_fault_ticks, cpp_thread_runtime_stats_get_compensated,
-    cpp_thread_runtime_stats_init, cpp_thread_runtime_stats_update, cpp_thread_start_routine_entry,
+    cpp_thread_dispatcher_set_core_thread, cpp_thread_dispatcher_set_is_initial_thread,
+    cpp_thread_dispatcher_set_user_entry, cpp_thread_start_routine_entry,
 };
 use super::thread_state::{Exception, Lifecycle, ThreadState, lifecycle_to_string};
 #[cfg(target_arch = "aarch64")]
@@ -29,11 +25,12 @@ use crate::arch_rs::debugger::{
     arch_get_vector_regs, arch_set_debug_regs, arch_set_fp_regs, arch_set_general_regs,
     arch_set_single_step, arch_set_vector_regs,
 };
-use crate::arch_rs::{ArchExceptionContext, UserEntryState};
+use crate::arch_rs::{ArchExceptionContext, UserEntryState, ints_disabled};
 use crate::counters::define_kcounter;
 use crate::kernel::scheduler_state::{
     DEFAULT_PRIORITY, SchedulerStateBaseProfile, ThreadStateKind,
 };
+use crate::kernel::task_runtime_stats::{TaskRuntimeStats, ThreadRuntimeStats};
 use crate::kernel::thread::{Thread, ThreadPtr, with_exception_context};
 use crate::ksync_kernel::{TrackedCriticalMutex, TrackedSpinlock};
 use crate::user_copy::{UserInPtr, UserOutPtr};
@@ -45,11 +42,13 @@ use kprint::kprintln;
 use ksync::{KMutex, LockToken, guarded};
 use object_constants_rs as object_constants;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
+use zr::ToMutPtr;
 use zx_status::Status;
 use zx_types::{
-    ZX_ERR_INTERNAL_INTR_KILLED, ZX_OBJ_TYPE_THREAD, ZX_THREAD_RUNNING, ZX_THREAD_SUSPENDED,
-    ZX_THREAD_TERMINATED, zx_exception_context_t, zx_exception_report_t, zx_excp_type_t,
-    zx_info_task_runtime_t, zx_info_thread_stats_t, zx_info_thread_t, zx_rights_t,
+    ZX_ERR_INTERNAL_INTR_KILLED, ZX_EXCEPTION_TARGET_JOB_DEBUGGER, ZX_EXCP_USER,
+    ZX_OBJ_TYPE_THREAD, ZX_THREAD_RUNNING, ZX_THREAD_SUSPENDED, ZX_THREAD_TERMINATED,
+    zx_duration_mono_ticks_t, zx_exception_context_t, zx_exception_report_t, zx_excp_type_t,
+    zx_info_thread_stats_t, zx_info_thread_t, zx_rights_t,
 };
 
 use crate::kernel::types::cpu_mask_t;
@@ -58,16 +57,6 @@ const LOCAL_TRACE: u32 = 0;
 
 define_kcounter!(DISPATCHER_THREAD_CREATE_COUNT, "dispatcher.thread.create", Sum);
 define_kcounter!(DISPATCHER_THREAD_DESTROY_COUNT, "dispatcher.thread.destroy", Sum);
-
-zr::define_opaque_storage_ffi! {
-    /// Opaque storage wrapper for `ThreadRuntimeStats`.
-    pub(crate) struct ThreadRuntimeStatsStorage(
-        object_constants::kThreadRuntimeStatsStorageSize,
-        object_constants::kThreadRuntimeStatsStorageAlign,
-        8,
-        cpp_thread_runtime_stats_init,
-    );
-}
 
 /// Internal state storage for `ThreadDispatcher`.
 ///
@@ -81,15 +70,14 @@ pub struct ThreadDispatcherState {
     canary: Canary<{ fbl::magic(b"THRD") }>,
 
     /// A ref pointer back to the parent process.
-    process: RefPtr<ProcessDispatcher>,
+    pub(super) process: RefPtr<ProcessDispatcher>,
 
     /// Thread lifecycle and exception state machine.
     #[guarded_by(lock)]
     state: ThreadState,
 
     /// The runtime stats for this thread.
-    #[pin]
-    pub(crate) runtime_stats: ThreadRuntimeStatsStorage,
+    runtime_stats: ThreadRuntimeStats,
     /// This is only valid while `lifecycle_locked()` is `Running`.
     ///
     /// This field is an atomic because it may be accessed concurrently by multiple
@@ -144,7 +132,9 @@ pub struct ThreadDispatcherState {
     #[mutex]
     lock: KMutex<TrackedCriticalMutex>,
 
-    /// Node for membership in process thread list.
+    /// Node for membership in the owning process' thread list
+    /// (`ProcessDispatcherState::thread_list`). It is guarded by the process' dispatcher lock,
+    /// not by `lock`, so it carries no `#[guarded_by]` here.
     #[pin]
     dll_node: DoublyLinkedListNode<ThreadDispatcher>,
 }
@@ -175,9 +165,7 @@ impl ThreadDispatcherState {
             },
             process,
             state: ThreadState::new().into(),
-            // SAFETY: `ThreadRuntimeStatsStorage::init()` initializes the opaque storage via
-            // placement new.
-            runtime_stats <- unsafe { ThreadRuntimeStatsStorage::init() },
+            runtime_stats: ThreadRuntimeStats::new(),
             blocked_reason: core::sync::atomic::AtomicU32::new(Blocked::NONE.0),
             exceptionate <- Exceptionate::new(zx_types::ZX_EXCEPTION_CHANNEL_TYPE_THREAD),
             exception: None.into(),
@@ -185,8 +173,8 @@ impl ThreadDispatcherState {
             suspend_count: 0.into(),
             channel_waiter <- MessageWaiter::init(),
             core_thread_lock <- KMutex::init(),
-            dll_node: DoublyLinkedListNode::new(),
             lock <- KMutex::init(),
+            dll_node: DoublyLinkedListNode::new(),
         })
     }
 }
@@ -357,9 +345,9 @@ impl ThreadDispatcher {
     /// Returns a wrapper that dereferences to the current [`ThreadDispatcher`].
     #[inline]
     pub fn get_current() -> CurrentThreadDispatcher {
-        // SAFETY: Calling `cpp_thread_dispatcher_current` is safe when executing in a valid user
-        // thread context.
-        let ptr = unsafe { cpp_thread_dispatcher_current() };
+        // SAFETY: Calling `current_user_thread` is safe when executing in a valid user thread
+        // context.
+        let ptr = unsafe { crate::kernel::thread::current_user_thread() };
         debug_assert!(!ptr.is_null());
         CurrentThreadDispatcher { ptr }
     }
@@ -368,9 +356,9 @@ impl ThreadDispatcher {
     /// current thread is not a user thread (i.e., not associated with a `ThreadDispatcher`).
     #[inline]
     pub fn try_get_current() -> Option<CurrentThreadDispatcher> {
-        // SAFETY: `cpp_thread_dispatcher_current` returns the current thread's `user_thread()`, or
-        // null when executing on a kernel-only thread.
-        let ptr = unsafe { cpp_thread_dispatcher_current() };
+        // SAFETY: `current_user_thread` returns the current thread's `user_thread`, or null when
+        // executing on a kernel-only thread.
+        let ptr = unsafe { crate::kernel::thread::current_user_thread() };
         if ptr.is_null() { None } else { Some(CurrentThreadDispatcher { ptr }) }
     }
 
@@ -413,22 +401,26 @@ impl ThreadDispatcher {
         let handle =
             unsafe { KernelHandle::create(|out| cpp_thread_dispatcher_alloc(process_raw, out)) }?;
 
-        let user_thread = &**handle.dispatcher() as *const Self as *mut Self;
+        let user_thread = RefPtr::as_ptr(handle.dispatcher()).cast_mut();
 
         // The default profile for user mode threads is a fair profile with default
         // weight which is not inherited by default.
         let profile = SchedulerStateBaseProfile::fair(DEFAULT_PRIORITY, false);
 
-        // Create the lower level thread and attach it to the scheduler.
-        // SAFETY: `user_thread` is valid for the lifetime of `handle`.
+        // Create the lower level thread and attach it to the scheduler. `zx_thread_create`
+        // documents `ZX_ERR_NO_MEMORY` for any failure to allocate the thread's resources, so
+        // report that regardless of the underlying error.
+        // SAFETY: `user_thread` is valid for the lifetime of `handle`, and syscall context may
+        // block with no active `ChainLockTransaction`.
         let core_thread = unsafe {
             crate::kernel::thread::create_with_profile(
                 name,
-                rust_thread_start_routine,
+                thread_start_routine,
                 user_thread.cast::<c_void>(),
                 &profile,
-            )?
-        };
+            )
+        }
+        .map_err(|_| Status::NO_MEMORY)?;
 
         // We haven't yet completed initialization of `user_thread`, and references to it
         // haven't possibly escaped this thread. We can safely set `core_thread` outside the
@@ -507,7 +499,8 @@ impl ThreadDispatcher {
     /// Returns true if the thread is dying or dead. Threads never return to a previous state
     /// from dying/dead so once this is true it will never flip back to false.
     ///
-    /// The caller must not hold this thread's dispatcher lock.
+    /// Acquires this thread's dispatcher lock (panicking when debug assertions are enabled, or
+    /// deadlocking otherwise, if already held by the calling thread).
     pub fn is_dying_or_dead(&self) -> bool {
         self.state().canary.assert();
         ksync::lock!(let guard = self.state().lock_lock());
@@ -534,7 +527,8 @@ impl ThreadDispatcher {
     /// Threads never return to an Initial state after starting, so once this is
     /// true it will never flip back to false.
     ///
-    /// The caller must not hold this thread's dispatcher lock.
+    /// Acquires this thread's dispatcher lock (panicking when debug assertions are enabled, or
+    /// deadlocking otherwise, if already held by the calling thread).
     pub fn has_started(&self) -> bool {
         self.state().canary.assert();
         ksync::lock!(let guard = self.state().lock_lock());
@@ -575,7 +569,7 @@ impl ThreadDispatcher {
     ) -> Option<ThreadPtr> {
         // SAFETY: `self` is a valid `ThreadDispatcher`, and the caller guarantees `_token` was
         // obtained by locking `self.state().lock`, which guards `core_thread_`.
-        let core_thread = unsafe { cpp_thread_dispatcher_get_core_thread(self as *const _) };
+        let core_thread = unsafe { cpp_thread_dispatcher_get_core_thread(self) };
         // SAFETY: A non-null `core_thread_` names the live kernel thread created for this
         // dispatcher, which outlives it.
         unsafe { ThreadPtr::from_raw(core_thread) }
@@ -604,7 +598,11 @@ impl ThreadDispatcher {
     /// constructor. If this fails, the object is invalid and should be dropped.
     ///
     /// The caller must not hold this thread's dispatcher lock.
-    pub fn initialize(&self) -> Result<(), Status> {
+    ///
+    /// # Safety
+    ///
+    /// The thread has not started running, and no chain lock transaction is active on this CPU.
+    pub unsafe fn initialize(&self) -> Result<(), Status> {
         self.state().canary.assert();
         ltrace_entry_obj!(self);
 
@@ -616,7 +614,10 @@ impl ThreadDispatcher {
         // normal address space as their active aspace.
         // SAFETY: `guard` holds `self`'s state lock.
         let core_thread = unsafe { self.core_thread_locked(guard.token()) };
-        self.process().attach_normal_aspace_to_thread(core_thread);
+        // SAFETY: `core_thread` points to a live `Thread` that has not started running, no chain
+        // lock transaction is active on this CPU, and the process stays alive while its normal
+        // address space is assigned to the thread.
+        unsafe { self.process().attach_normal_aspace_to_thread(core_thread) };
         // we've entered the initialized state
         // SAFETY: `guard` holds `self`'s state lock.
         unsafe {
@@ -645,9 +646,14 @@ impl ThreadDispatcher {
     /// It is the caller's responsibility to ensure this thread is registered with the parent
     /// process, as such this is only expected to be called from the `ProcessDispatcher`.
     ///
-    /// `ProcessDispatcher::AddInitializedThread` depends on this being infallible once both
+    /// `ProcessDispatcher::add_initialized_thread` depends on this being infallible once both
     /// checks below have passed, so nothing after them may return an error.
-    pub fn make_runnable(&self, entry: UserEntryState, suspended: bool) -> Result<(), Status> {
+    pub(super) fn make_runnable(
+        &self,
+        entry: UserEntryState,
+        suspended: bool,
+        is_initial_thread: bool,
+    ) -> Result<(), Status> {
         self.state().canary.assert();
         if !crate::arch_rs::vm::is_valid_user_pc(entry.pc as usize) {
             return Err(Status::INVALID_ARGS);
@@ -660,9 +666,14 @@ impl ThreadDispatcher {
             return Err(Status::BAD_STATE);
         }
 
-        // save the user space entry state
-        // SAFETY: `self` is a valid `ThreadDispatcher` and `entry` is a live local.
-        unsafe { cpp_thread_dispatcher_set_user_entry(self as *const _ as *mut _, &entry) };
+        // save the user space entry state and whether this is the initial thread in its process
+        // SAFETY: `self` is a valid `ThreadDispatcher` in `Lifecycle::Initialized` (so its kernel
+        // thread has not started yet), `guard` holds `self`'s state lock, and `entry` is a live
+        // local.
+        unsafe {
+            cpp_thread_dispatcher_set_user_entry(self.to_mut_ptr(), &entry);
+            cpp_thread_dispatcher_set_is_initial_thread(self.to_mut_ptr(), is_initial_thread);
+        };
 
         // update our suspend count to account for our parent state
         if suspended {
@@ -674,13 +685,9 @@ impl ThreadDispatcher {
 
         // Attach the ThreadDispatcher to the core thread. This takes out an additional
         // reference on the ThreadDispatcher.
-        // SAFETY: `self` is a valid `ThreadDispatcher` and `core_thread` a live kernel thread.
-        unsafe {
-            cpp_thread_dispatcher_attach_to_core_thread(
-                self as *const _ as *mut _,
-                core_thread.as_raw(),
-            )
-        };
+        // SAFETY: `self` is a valid `ThreadDispatcher` and `core_thread` is a live kernel thread
+        // in the `Initial` state with no `user_thread` yet attached.
+        unsafe { core_thread.set_usermode_thread(RefPtr::from_ref(self)) };
 
         // start the thread in Running state, if we're starting suspended it will transition to
         // Suspended when it checks thread signals before executing any user code
@@ -691,8 +698,9 @@ impl ThreadDispatcher {
 
         // Given this is no longer a kernel-only thread, start memory stall accounting
         // by entering the Inactive state.
-        // SAFETY: `core_thread` is live and, having never been started, is still in the
-        // `IgnoredKernelOnly` stall state.
+        // SAFETY: `core_thread` is live and in the `Initial` state prior to `resume()` below, so it
+        // has never been scheduled, is still in the `IgnoredKernelOnly` stall state, and this
+        // caller has exclusive access to its `memory_stall_state`.
         unsafe { core_thread.set_memory_stall_state_inactive() };
 
         if *guard.fields().suspend_count == 0 {
@@ -701,7 +709,7 @@ impl ThreadDispatcher {
         } else {
             // core_thread.suspend() only fails if the underlying thread is already dead,
             // which we should ignore here to match the behavior of core_thread.resume();
-            // our ExitingCurrent() callback will run shortly to clean us up
+            // our `exiting_current()` callback will run shortly to clean us up
             // SAFETY: `core_thread` is live; this dispatcher holds it until it exits.
             let _ = unsafe { core_thread.suspend() };
         }
@@ -710,8 +718,19 @@ impl ThreadDispatcher {
     }
 
     /// Terminates the current thread. Does not return.
-    pub fn exit_current() -> ! {
-        crate::kernel::thread::current_exit(0)
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - The calling CPU's per-CPU state is initialized and `ConstructFirstThread` has completed,
+    ///   with the current thread being a valid, live, non-idle user [`Thread`] in
+    ///   `ThreadStateKind::Running`.
+    /// - Interrupts are enabled (`!ints_disabled()`), blocking is permitted
+    ///   (`!blocking_disallowed()`), and no `ChainLockTransaction`, thread lock,
+    ///   `Thread::get_list_lock()`, scheduler lock, or spinlock is held on the calling CPU.
+    pub unsafe fn exit_current() -> ! {
+        // SAFETY: Forwarded from the caller's preconditions.
+        unsafe { crate::kernel::thread::current_exit(0) }
     }
 
     /// Sets the exception dispatcher and exceptionate type for the thread.
@@ -800,7 +819,9 @@ impl ThreadDispatcher {
     /// Marks the current thread for termination. The thread will actually terminate when the
     /// kernel stack unwinds.
     pub fn kill_current() {
-        crate::kernel::thread::current_kill();
+        // SAFETY: Called on a running non-idle user thread after `ConstructFirstThread`, with
+        // neither its thread lock nor an active `ChainLockTransaction` held.
+        unsafe { crate::kernel::thread::current_kill() };
     }
 
     /// Kills this thread.
@@ -836,8 +857,8 @@ impl ThreadDispatcher {
     /// Returns whether this `ThreadDispatcher` is the current thread.
     #[inline]
     pub fn is_current(&self) -> bool {
-        // SAFETY: `self` is a valid `ThreadDispatcher` reference.
-        unsafe { cpp_thread_dispatcher_is_current(self as *const _) }
+        // SAFETY: Calling `current_user_thread` is safe when executing in a valid thread context.
+        core::ptr::eq(self, unsafe { crate::kernel::thread::current_user_thread() })
     }
 
     /// Suspends the thread.
@@ -1034,9 +1055,11 @@ impl ThreadDispatcher {
         match state_kind {
             zx_types::ZX_THREAD_STATE_GENERAL_REGS => {
                 self.read_state_generic::<{ object_constants::kThreadStateGeneralRegsSize }, _>(
-                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `out` is
-                    // 16-byte aligned for `zx_thread_state_general_regs_t`.
+                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is a
+                    // live user `Thread` kept suspended or in an exception (no chain lock
+                    // transaction active) with its saved user register frame valid and only
+                    // accessed under its lock, and `out` is a uniquely accessed 16-byte-aligned
+                    // stack buffer disjoint from `thread`'s state.
                     |thread, out| unsafe { arch_get_general_regs(thread, out.as_mut_ptr()) },
                     buffer,
                     buffer_size,
@@ -1044,9 +1067,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_FP_REGS => {
                 self.read_state_generic::<{ object_constants::kThreadStateFpRegsSize }, _>(
-                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `out` is
-                    // 16-byte aligned for `zx_thread_state_fp_regs_t`.
+                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is a
+                    // live, initialized user `Thread` (created after early CPU 0 extended-register
+                    // init) kept suspended or in an exception with no chain lock transaction
+                    // active, and `out` is a uniquely accessed 16-byte-aligned stack buffer
+                    // disjoint from `thread`'s state.
                     |thread, out| unsafe { arch_get_fp_regs(thread, out.as_mut_ptr()) },
                     buffer,
                     buffer_size,
@@ -1054,9 +1079,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_VECTOR_REGS => {
                 self.read_state_generic::<{ object_constants::kThreadStateVectorRegsSize }, _>(
-                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `out` is
-                    // 16-byte aligned for `zx_thread_state_vector_regs_t`.
+                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is a
+                    // live, initialized user `Thread` (created after early CPU 0 extended-register
+                    // init) kept suspended or in an exception with no chain lock transaction
+                    // active, and `out` is a uniquely accessed 16-byte-aligned stack buffer
+                    // disjoint from `thread`'s state.
                     |thread, out| unsafe { arch_get_vector_regs(thread, out.as_mut_ptr()) },
                     buffer,
                     buffer_size,
@@ -1064,9 +1091,10 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_DEBUG_REGS => {
                 self.read_state_generic::<{ object_constants::kThreadStateDebugRegsSize }, _>(
-                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `out` is
-                    // 16-byte aligned for `zx_thread_state_debug_regs_t`.
+                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is a
+                    // live user `Thread` kept suspended or in an exception (no chain lock
+                    // transaction active), and `out` is a uniquely accessed 16-byte-aligned stack
+                    // buffer disjoint from `thread`'s state.
                     |thread, out| unsafe { arch_get_debug_regs(thread, out.as_mut_ptr()) },
                     buffer,
                     buffer_size,
@@ -1074,9 +1102,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_SINGLE_STEP => {
                 self.read_state_generic::<{ object_constants::kThreadStateSingleStepSize }, _>(
-                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `out` is
-                    // 16-byte aligned for `zx_thread_state_single_step_t`.
+                    // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is a
+                    // live user `Thread` kept suspended or in an exception (no chain lock
+                    // transaction active) with its saved user register frame valid and only
+                    // accessed under its lock, and `out` is a uniquely accessed 16-byte-aligned
+                    // stack buffer disjoint from `thread`'s state.
                     |thread, out| unsafe { arch_get_single_step(thread, out.as_mut_ptr()) },
                     buffer,
                     buffer_size,
@@ -1093,8 +1123,9 @@ impl ThreadDispatcher {
                         _,
                     >(
                         // SAFETY: `read_state_generic` holds `self.state().lock` while `thread` is
-                        // suspended or in an exception (no chain lock transaction active) and
-                        // `out` is 16-byte aligned for `zx_arm64_thread_state_sve_regs_t`.
+                        // a live user `Thread` kept suspended or in an exception (no chain lock
+                        // transaction active), and `out` is a uniquely accessed 16-byte-aligned
+                        // stack buffer disjoint from `thread`'s state.
                         |thread, out| unsafe { arch_get_arm64_sve(thread, out.as_mut_ptr()) },
                         buffer,
                         buffer_size,
@@ -1155,9 +1186,11 @@ impl ThreadDispatcher {
         match state_kind {
             zx_types::ZX_THREAD_STATE_GENERAL_REGS => {
                 self.write_state_generic::<{ object_constants::kThreadStateGeneralRegsSize }, _>(
-                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `in_` is
-                    // 16-byte aligned and initialized for `zx_thread_state_general_regs_t`.
+                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is a
+                    // live user `Thread` kept suspended or in an exception (no chain lock
+                    // transaction active) with its saved user register frame valid and only
+                    // accessed under its lock, and `in_` is an unmutated, initialized
+                    // 16-byte-aligned stack buffer disjoint from `thread`'s state.
                     |thread, in_| unsafe { arch_set_general_regs(thread, in_.as_ptr()) },
                     buffer,
                     buffer_size,
@@ -1165,9 +1198,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_FP_REGS => {
                 self.write_state_generic::<{ object_constants::kThreadStateFpRegsSize }, _>(
-                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `in_` is
-                    // 16-byte aligned and initialized for `zx_thread_state_fp_regs_t`.
+                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is a
+                    // live, initialized user `Thread` (created after early CPU 0 extended-register
+                    // init) kept suspended or in an exception with no chain lock transaction
+                    // active, and `in_` is an unmutated, initialized 16-byte-aligned stack buffer
+                    // disjoint from `thread`'s state.
                     |thread, in_| unsafe { arch_set_fp_regs(thread, in_.as_ptr()) },
                     buffer,
                     buffer_size,
@@ -1175,9 +1210,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_VECTOR_REGS => {
                 self.write_state_generic::<{ object_constants::kThreadStateVectorRegsSize }, _>(
-                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `in_` is
-                    // 16-byte aligned and initialized for `zx_thread_state_vector_regs_t`.
+                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is a
+                    // live, initialized user `Thread` (created after early CPU 0 extended-register
+                    // init) kept suspended or in an exception with no chain lock transaction
+                    // active, and `in_` is an unmutated, initialized 16-byte-aligned stack buffer
+                    // disjoint from `thread`'s state.
                     |thread, in_| unsafe { arch_set_vector_regs(thread, in_.as_ptr()) },
                     buffer,
                     buffer_size,
@@ -1185,9 +1222,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_DEBUG_REGS => {
                 self.write_state_generic::<{ object_constants::kThreadStateDebugRegsSize }, _>(
-                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `in_` is
-                    // 16-byte aligned and initialized for `zx_thread_state_debug_regs_t`.
+                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is a
+                    // live user `Thread` kept suspended or in an exception (no chain lock
+                    // transaction active) in kernel mode (CPL 0, `DR7.GD == 0`), and `in_` is an
+                    // unmutated, initialized 16-byte-aligned stack buffer disjoint from `thread`'s
+                    // state.
                     |thread, in_| unsafe { arch_set_debug_regs(thread, in_.as_ptr()) },
                     buffer,
                     buffer_size,
@@ -1195,9 +1234,11 @@ impl ThreadDispatcher {
             }
             zx_types::ZX_THREAD_STATE_SINGLE_STEP => {
                 self.write_state_generic::<{ object_constants::kThreadStateSingleStepSize }, _>(
-                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is
-                    // suspended or in an exception (no chain lock transaction active) and `in_` is
-                    // 16-byte aligned and initialized for `zx_thread_state_single_step_t`.
+                    // SAFETY: `write_state_generic` holds `self.state().lock` while `thread` is a
+                    // live user `Thread` kept suspended or in an exception (no chain lock
+                    // transaction active) with its saved user register frame valid and only
+                    // accessed under its lock, and `in_` is an unmutated, initialized
+                    // 16-byte-aligned stack buffer disjoint from `thread`'s state.
                     |thread, in_| unsafe { arch_set_single_step(thread, in_.as_ptr()) },
                     buffer,
                     buffer_size,
@@ -1214,9 +1255,9 @@ impl ThreadDispatcher {
                         _,
                     >(
                         // SAFETY: `write_state_generic` holds `self.state().lock` while `thread`
-                        // is suspended or in an exception (no chain lock transaction active) and
-                        // `in_` is 16-byte aligned and initialized for
-                        // `zx_arm64_thread_state_sve_regs_t`.
+                        // is a live user `Thread` kept suspended or in an exception (no chain lock
+                        // transaction active), and `in_` is an unmutated, initialized
+                        // 16-byte-aligned stack buffer disjoint from `thread`'s state.
                         |thread, in_| unsafe { arch_set_arm64_sve(thread, in_.as_ptr()) },
                         buffer,
                         buffer_size,
@@ -1331,11 +1372,15 @@ impl ThreadDispatcher {
         // SAFETY: `guard` holds `self`'s state lock.
         let core_thread =
             unsafe { self.try_core_thread_locked(guard.token()) }.ok_or(Status::BAD_STATE)?;
-        // SAFETY: `core_thread` is non-null and points to a valid kernel Thread.
-        let total_runtime = unsafe { core_thread.runtime() }.0;
-        // SAFETY: `core_thread` is non-null and points to a valid kernel Thread.
-        let last_scheduled_cpu = unsafe { core_thread.last_cpu() };
-        Ok(zx_info_thread_stats_t { total_runtime, last_scheduled_cpu, ..Default::default() })
+        // SAFETY: `core_thread` is non-null and points to a valid kernel Thread, and only `self`'s
+        // dispatcher lock (`KMutex`) is held here (no `ChainLockTransaction` or `core_thread`'s
+        // lock is held).
+        let (runtime, last_scheduled_cpu) = unsafe { core_thread.runtime_and_last_cpu() };
+        Ok(zx_info_thread_stats_t {
+            total_runtime: runtime.0,
+            last_scheduled_cpu,
+            ..Default::default()
+        })
     }
 
     /// This is called from Thread as it is exiting, just before it stops for good.
@@ -1377,12 +1422,15 @@ impl ThreadDispatcher {
         //
         // Thread exit exceptions don't currently provide an iframe.
         if self.process().debug_exceptionate().has_valid_channel() {
-            // SAFETY: `self` and `self.process()` are valid references, making the underlying
-            // pointers valid.
+            let context = ArchExceptionContext::default();
+            // SAFETY: Per the caller, `self` is the currently exiting user thread in a valid state
+            // to block with no dispatcher lock, thread lock, spinlock, or active
+            // `ChainLockTransaction` held, and `context` has a null `frame` pointer.
             unsafe {
-                cpp_thread_handle_single_shot_exiting(
-                    self.process().as_ffi_mut(),
-                    self as *const _ as *mut ThreadDispatcher,
+                self.handle_single_shot_exception(
+                    self.process().debug_exceptionate(),
+                    zx_types::ZX_EXCP_THREAD_EXITING,
+                    &context,
                 );
             }
         }
@@ -1411,7 +1459,7 @@ impl ThreadDispatcher {
             // SAFETY: `self` is a valid pointer, and `guard` holds `self`'s state lock.
             unsafe {
                 self.set_state_locked(guard.as_mut().token_mut(), Lifecycle::Dead);
-                cpp_thread_dispatcher_reset_core_thread(self as *const _ as *mut ThreadDispatcher);
+                cpp_thread_dispatcher_reset_core_thread(self.to_mut_ptr());
             }
         }
 
@@ -1478,34 +1526,21 @@ impl ThreadDispatcher {
     /// Must be called with interrupts disabled.
     pub fn update_runtime_stats(&self, new_state: ThreadStateKind) {
         self.state().canary.assert();
-        // SAFETY: Storage pointer is valid and points to initialized ThreadRuntimeStats; the
-        // caller ensures interrupts are disabled, which the shim asserts.
-        unsafe {
-            cpp_thread_runtime_stats_update(self.state().runtime_stats.as_void_ptr(), new_state);
-        }
+        debug_assert!(ints_disabled());
+        self.state().runtime_stats.update(new_state, ThreadRuntimeStats::NO_IRQ_SAVE);
     }
 
     /// Updates time spent handling page faults. This is called by the VM during page fault
     /// handling.
-    pub fn add_page_fault_ticks(&self, ticks: zx_types::zx_duration_mono_ticks_t) {
+    pub fn add_page_fault_ticks(&self, ticks: zx_duration_mono_ticks_t) {
         self.state().canary.assert();
-        // SAFETY: Storage pointer is valid and points to initialized ThreadRuntimeStats.
-        unsafe {
-            cpp_thread_runtime_stats_add_page_fault_ticks(
-                self.state().runtime_stats.as_void_ptr(),
-                ticks,
-            );
-        }
+        self.state().runtime_stats.add_page_fault_ticks(ticks);
     }
 
     /// Updates time spent contended on locks. This is called by lock implementations.
-    pub fn add_lock_contention_ticks(&self, ticks: zx_types::zx_duration_mono_ticks_t) {
+    pub fn add_lock_contention_ticks(&self, ticks: zx_duration_mono_ticks_t) {
         self.state().canary.assert();
-        // SAFETY: Storage pointer is valid and points to initialized ThreadRuntimeStats.
-        unsafe {
-            let stats = self.state().runtime_stats.as_void_ptr();
-            cpp_thread_runtime_stats_add_lock_contention_ticks(stats, ticks);
-        }
+        self.state().runtime_stats.add_lock_contention_ticks(ticks);
     }
 
     /// Executes a closure with a reference to the current user thread's `ThreadDispatcher`.
@@ -1517,9 +1552,9 @@ impl ThreadDispatcher {
     /// exception, where that already holds.
     #[inline]
     pub fn with_current<R>(f: impl FnOnce(&ThreadDispatcher) -> R) -> R {
-        // SAFETY: Foreign call to query the current user thread; it returns null (checked below)
-        // rather than faulting when the caller is a kernel thread.
-        let thread = unsafe { cpp_thread_dispatcher_current() };
+        // SAFETY: `current_user_thread` returns the current thread's `user_thread`, or null
+        // (checked below) when executing on a kernel-only thread.
+        let thread = unsafe { crate::kernel::thread::current_user_thread() };
         let thread = core::ptr::NonNull::new(thread)
             .expect("ThreadDispatcher::with_current called on a non-user thread");
         // SAFETY: `thread` is non-null, so the calling thread is a user thread and `thread`
@@ -1540,21 +1575,6 @@ impl ThreadDispatcher {
             blocked_reason.store(reason.0, core::sync::atomic::Ordering::Release);
             prev
         })
-    }
-
-    /// Returns thread task runtime stats.
-    pub fn get_runtime_stats(&self) -> zx_info_task_runtime_t {
-        self.state().canary.assert();
-        let mut info = MaybeUninit::<zx_info_task_runtime_t>::uninit();
-        // SAFETY: `info` is a valid uninitialized out-pointer and the runtime stats pointer
-        // is valid.
-        unsafe {
-            cpp_thread_runtime_stats_get_compensated(
-                self.state().runtime_stats.as_void_ptr(),
-                &raw mut info,
-            );
-            info.assume_init()
-        }
     }
 
     /// Assuming the thread is stopped waiting for an exception response, returns the exception
@@ -1669,15 +1689,14 @@ impl ThreadDispatcher {
     /// * `self` must be the currently executing user thread (`self.is_current()`).
     /// * `self`'s dispatcher lock (`state().lock`) must not be held (`TA_EXCL(get_lock())`), nor
     ///   any thread lock, spinlock, or active `ChainLockTransaction`.
-    /// * `arch_context` must point to a valid, initialized `arch_exception_context_t` for the
-    ///   current thread that outlives this call, and if `(*arch_context).frame` is non-null, it
-    ///   must point to a valid, initialized, writable `iframe_t` for the duration of the call
+    /// * `arch_context` must describe the current thread, and if `arch_context.frame` is non-null,
+    ///   it must point to a valid, initialized, writable `Iframe` for the duration of the call
     ///   without conflicting Rust references.
     pub unsafe fn handle_single_shot_exception(
         &self,
         exceptionate: &Exceptionate,
         exception_type: zx_excp_type_t,
-        arch_context: *const ArchExceptionContext,
+        arch_context: &ArchExceptionContext,
     ) -> bool {
         self.state().canary.assert();
         ltrace_entry_obj!(self);
@@ -1691,7 +1710,7 @@ impl ThreadDispatcher {
             return false;
         }
 
-        // SAFETY: Caller guarantees `arch_context` points to a valid `arch_exception_context_t`.
+        // SAFETY: Caller guarantees any non-null `arch_context.frame` points to a valid `Iframe`.
         let report =
             unsafe { ExceptionDispatcher::build_arch_report(exception_type, arch_context) };
 
@@ -1702,7 +1721,7 @@ impl ThreadDispatcher {
                 RefPtr::from_ref(self),
                 exception_type,
                 &report,
-                arch_context,
+                core::ptr::from_ref(arch_context),
             )
         }) else {
             core::hint::cold_path();
@@ -1719,7 +1738,7 @@ impl ThreadDispatcher {
         // current thread to make its user register state available to debuggers and exception
         // handlers while the thread is "in exception".
         // SAFETY: Caller guarantees `self` is the current user thread, `arch_context` (and any
-        // non-null `(*arch_context).frame`) is valid without conflicting references, and no
+        // non-null `arch_context.frame`) is valid without conflicting references, and no
         // dispatcher lock, thread lock, spinlock, or active `ChainLockTransaction` is held.
         unsafe {
             with_exception_context(arch_context, || {
@@ -1730,16 +1749,55 @@ impl ThreadDispatcher {
         }
     }
 
-    /// Raises a user exception for the job debugger.
+    /// Raises a user exception for the job debugger on the current user thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called on a non-user thread, with interrupts or blocking disabled, or while
+    /// holding a spinlock, thread lock, the thread's dispatcher lock, or an active
+    /// `ChainLockTransaction`.
     pub fn raise_user_exception(
         options: u32,
         exception_type: zx_excp_type_t,
         user_context: &zx_exception_context_t,
     ) -> Result<(), Status> {
-        // SAFETY: `user_context` is a valid reference.
-        let status =
-            unsafe { cpp_sys_thread_raise_exception(options, exception_type, user_context) };
-        Status::ok(status)
+        if options != ZX_EXCEPTION_TARGET_JOB_DEBUGGER || exception_type != ZX_EXCP_USER {
+            return Err(Status::INVALID_ARGS);
+        }
+
+        // Soundness requires running on a live user thread in a blocking-permitted context with
+        // interrupts enabled and no spinlock, thread lock, dispatcher lock, or active
+        // `ChainLockTransaction` held before dispatching through
+        // `on_user_exception_for_job_debugger`.
+        crate::kconcurrent::assert_no_transaction_active();
+        assert!(
+            !ints_disabled()
+                && !crate::arch_rs::blocking_disallowed()
+                && crate::arch_rs::ops::num_spinlocks_held() == 0
+        );
+
+        // TODO(https://fxbug.dev/42077468): Fill in the user registers once we have access.
+        let context = ArchExceptionContext {
+            user_synth_code: user_context.synth_code,
+            user_synth_data: user_context.synth_data,
+            ..ArchExceptionContext::default()
+        };
+
+        Self::with_current(|thread| {
+            assert!(!thread.state().lock.raw_mutex().is_held());
+            // SAFETY:
+            // * `Self::with_current` verifies in release builds that the current thread has a
+            //   non-null `user_thread`, so `thread` is the live currently executing user thread
+            //   (`thread.is_current()`) belonging to `thread.process()`.
+            // * `assert_no_transaction_active()` and the `assert!`s above verify in release builds
+            //   (including `lk_debuglevel = "0"`) that no `ChainLockTransaction` is active,
+            //   interrupts are enabled (ruling out any held `ChainLock`, including any thread
+            //   lock), blocking is permitted, no spinlocks are held, and `thread.state().lock` is
+            //   not held by the current thread.
+            // * `context` describes `thread` with a null `frame` pointer.
+            unsafe { thread.process().on_user_exception_for_job_debugger(thread, &context) };
+        });
+        Ok(())
     }
 
     /// Returns the thread's `Exceptionate`.
@@ -1747,6 +1805,13 @@ impl ThreadDispatcher {
     pub fn exceptionate(&self) -> &Exceptionate {
         self.assert_canary();
         &self.state().exceptionate
+    }
+
+    /// Fetches a consistent snapshot of the runtime stats, compensated for unaccumulated runtime
+    /// in the ready or running state.
+    pub fn get_compensated_task_runtime_stats(&self) -> TaskRuntimeStats {
+        self.state().canary.assert();
+        self.state().runtime_stats.get_compensated_task_runtime_stats()
     }
 }
 
@@ -1773,7 +1838,7 @@ impl<'a> NullableThreadDispatcherGuard<'a> {
     pub fn new(thread: Option<&'a ThreadDispatcher>) -> Self {
         let should_clear = if let Some(t) = thread {
             // SAFETY: `t` is a valid `ThreadDispatcher` reference.
-            unsafe { cpp_thread_dispatcher_lock_acquire(t as *const _ as *mut _) }
+            unsafe { cpp_thread_dispatcher_lock_acquire(t.to_mut_ptr()) }
         } else {
             false
         };
@@ -1802,7 +1867,7 @@ impl<'a> NullableThreadDispatcherGuard<'a> {
         if let Some(t) = self.thread.take() {
             // SAFETY: `t`'s lock was acquired by `Self::new` and has not yet been released.
             unsafe {
-                cpp_thread_dispatcher_lock_release(t as *const _ as *mut _, self.should_clear);
+                cpp_thread_dispatcher_lock_release(t.to_mut_ptr(), self.should_clear);
             }
         }
     }
@@ -1853,7 +1918,7 @@ impl CoreThreadObservation {
         // SAFETY: `self` is a valid `CoreThreadObservation` initialized by `Default` or
         // `cpp_thread_dispatcher_observe_core_thread`.
         unsafe {
-            cpp_thread_dispatcher_release_core_thread_observation(self as *mut Self);
+            cpp_thread_dispatcher_release_core_thread_observation(core::ptr::from_mut(self));
         }
     }
 }
@@ -1922,7 +1987,7 @@ zr::static_assert!(core::mem::align_of::<Blocked>() == 4);
 ///
 /// The body stays in C++ because it builds the architecture-specific iframe and performs the
 /// `arch_enter_uspace()` transition.
-extern "C" fn rust_thread_start_routine(arg: *mut c_void) -> i32 {
+extern "C" fn thread_start_routine(arg: *mut c_void) -> i32 {
     // SAFETY: `arg` is the `ThreadDispatcher` pointer handed to `create_with_profile`, and the
     // core thread cannot run before that dispatcher exists.
     unsafe { cpp_thread_start_routine_entry(arg) }
@@ -1941,6 +2006,7 @@ mod tests {
     use crate::arch_rs::{ArchExceptionContext, InterruptDisableGuard, UserEntryState};
     use crate::kernel::event::Event;
     use crate::kernel::scheduler_state::{DEFAULT_PRIORITY, SchedulerStateBaseProfile};
+    use crate::kernel::task_runtime_stats::TaskRuntimeStats;
     use crate::kernel::thread::Thread;
     use crate::user_copy::{UserInPtr, UserOutPtr};
     use crate::user_memory::UserMemory;
@@ -1950,23 +2016,7 @@ mod tests {
     use unittest::{assert_ok, expect_eq, expect_ok, expect_true, unwrap_ok};
     use zerocopy::FromZeros;
     use zx_status::Status;
-
-    /// Sized, aligned stack storage matching C++ `arch_exception_context_t` for tests.
-    ///
-    /// Rust's [`ArchExceptionContext`] is a zero-sized facade on `x86_64` and `aarch64`, whereas
-    /// C++ `ExceptionDispatcher` dereferences a full 32-byte, 8-byte-aligned
-    /// `arch_exception_context_t`.
-    // LINT.IfChange(arch_exception_context)
-    #[repr(C, align(8))]
-    struct DummyArchExceptionContext([u64; 4]);
-    // LINT.ThenChange(//zircon/kernel/object/thread_dispatcher_ffi.cc:arch_exception_context)
-
-    #[cfg(target_arch = "riscv64")]
-    zr::static_assert_size_and_align!(
-        DummyArchExceptionContext,
-        core::mem::size_of::<ArchExceptionContext>(),
-        core::mem::align_of::<ArchExceptionContext>(),
-    );
+    use zx_types::zx_info_task_runtime_t;
 
     /// Tests creating and destroying a thread without initializing it.
     #[test]
@@ -2018,7 +2068,9 @@ mod tests {
         );
         expect_eq!(rights, ThreadDispatcher::default_rights());
 
-        assert_ok!(thread.dispatcher().initialize(), "thread init");
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        assert_ok!(unsafe { thread.dispatcher().initialize() }, "thread init");
         expect_eq!(thread.dispatcher().has_started(), false);
         expect_eq!(thread.dispatcher().is_dying_or_dead(), false);
 
@@ -2039,10 +2091,18 @@ mod tests {
         expect_eq!(info_with_affinity.cpu_affinity_mask.mask[0], 1);
 
         // Verify that page fault and lock contention ticks are accumulated into the runtime
-        // stats; the thread has never run, so its cpu time stays at zero.
+        // stats; the thread has never run, so its cpu and queue ticks stay at zero.
+        let initial_ticks = thread.dispatcher().get_compensated_task_runtime_stats();
+        expect_true!(initial_ticks == TaskRuntimeStats::default());
         thread.dispatcher().add_page_fault_ticks(1000);
         thread.dispatcher().add_lock_contention_ticks(2000);
-        let runtime_stats = thread.dispatcher().get_runtime_stats();
+        let tick_stats = thread.dispatcher().get_compensated_task_runtime_stats();
+        expect_eq!(tick_stats.cpu_ticks, 0);
+        expect_eq!(tick_stats.queue_ticks, 0);
+        expect_eq!(tick_stats.page_fault_ticks, 1000);
+        expect_eq!(tick_stats.lock_contention_ticks, 2000);
+        let runtime_stats: zx_info_task_runtime_t =
+            thread.dispatcher().get_compensated_task_runtime_stats().into();
         expect_eq!(runtime_stats.cpu_time, 0);
         expect_true!(runtime_stats.page_fault_time > 0);
         expect_true!(runtime_stats.lock_contention_time > 0);
@@ -2128,7 +2188,9 @@ mod tests {
             ThreadDispatcher::create(process.dispatcher().clone(), 0, b"k-ut-t5"),
             "thread created"
         );
-        assert_ok!(thread.dispatcher().initialize(), "thread init");
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        assert_ok!(unsafe { thread.dispatcher().initialize() }, "thread init");
 
         let topics: [(u32, usize); 5] = [
             (zx_types::ZX_THREAD_STATE_GENERAL_REGS, object_constants::kThreadStateGeneralRegsSize),
@@ -2269,7 +2331,9 @@ mod tests {
             ThreadDispatcher::create(proc_handle.dispatcher().clone(), 0, b"k-ut-t6")
                 .expect("thread created");
         let thread = thread_handle.dispatcher();
-        assert_ok!(thread.initialize(), "thread init");
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        assert_ok!(unsafe { thread.initialize() }, "thread init");
 
         let expected_core_thread = {
             ksync::lock!(let mut guard = thread.state().lock_lock());
@@ -2389,16 +2453,15 @@ mod tests {
             },
             context: zx_types::zx_exception_context_t::new_zeroed(),
         };
-        let dummy_arch_context = DummyArchExceptionContext([0; 4]);
-        // SAFETY: `report` and `dummy_arch_context` match the size and alignment of C++
-        // `arch_exception_context_t` and remain valid on this stack frame until `exception.clear()`
-        // is called below.
+        let arch_context = ArchExceptionContext::default();
+        // SAFETY: `report` and `arch_context` remain valid on this stack frame until
+        // `exception.clear()` is called below.
         let exception = unsafe {
             ExceptionDispatcher::create(
                 thread.clone(),
                 zx_types::ZX_EXCP_GENERAL,
                 &raw const report,
-                (&raw const dummy_arch_context).cast::<ArchExceptionContext>(),
+                &raw const arch_context,
             )
         }
         .expect("exception created");
@@ -2447,11 +2510,11 @@ mod tests {
             }
             // SAFETY: `guard` holds `thread`'s state lock.
             if let Some(core_thread) = unsafe { thread.try_core_thread_locked(guard.token()) } {
-                // SAFETY: `thread` is valid and `guard` holds the state lock.
+                let thread_ptr = RefPtr::as_ptr(thread).cast_mut();
+                // SAFETY: `thread_ptr` points to the live `ThreadDispatcher` and `guard` holds the
+                // state lock.
                 unsafe {
-                    cpp_thread_dispatcher_reset_core_thread(
-                        core::ptr::from_ref(&**thread).cast_mut(),
-                    );
+                    cpp_thread_dispatcher_reset_core_thread(thread_ptr);
                 }
                 // SAFETY: `core_thread` was initialized but never started, so forgetting it cleans
                 // up.
@@ -2536,7 +2599,9 @@ mod tests {
                 .expect("thread created");
         let thread = thread_handle.dispatcher();
 
-        expect_ok!(thread.initialize());
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        expect_ok!(unsafe { thread.initialize() });
 
         let report = zx_types::zx_exception_report_t {
             header: zx_types::zx_exception_header_t {
@@ -2545,16 +2610,15 @@ mod tests {
             },
             context: zx_types::zx_exception_context_t::new_zeroed(),
         };
-        let dummy_arch_context = DummyArchExceptionContext([0; 4]);
-        // SAFETY: `report` and `dummy_arch_context` match the size and alignment of C++
-        // `arch_exception_context_t` and remain valid on this stack frame until `exception.clear()`
-        // is called below.
+        let arch_context = ArchExceptionContext::default();
+        // SAFETY: `report` and `arch_context` remain valid on this stack frame until
+        // `exception.clear()` is called below.
         let exception = unsafe {
             ExceptionDispatcher::create(
                 thread.clone(),
                 zx_types::ZX_EXCP_GENERAL,
                 &raw const report,
-                (&raw const dummy_arch_context).cast::<ArchExceptionContext>(),
+                &raw const arch_context,
             )
         }
         .expect("exception created");
@@ -2648,9 +2712,7 @@ mod tests {
             if let Some(core_thread) = unsafe { thread.try_core_thread_locked(guard.token()) } {
                 // SAFETY: `thread` is valid and `guard` holds the state lock.
                 unsafe {
-                    cpp_thread_dispatcher_reset_core_thread(
-                        core::ptr::from_ref(&**thread).cast_mut(),
-                    );
+                    cpp_thread_dispatcher_reset_core_thread(RefPtr::as_ptr(thread).cast_mut());
                 }
                 // SAFETY: `core_thread` was initialized but never started, so forgetting it is
                 // safe.
@@ -2689,7 +2751,7 @@ mod tests {
             // accessor rather than by observing again.
             // SAFETY: `thread` is valid and `guard` holds the state lock.
             unsafe {
-                cpp_thread_dispatcher_reset_core_thread(core::ptr::from_ref(&**thread).cast_mut());
+                cpp_thread_dispatcher_reset_core_thread(RefPtr::as_ptr(thread).cast_mut());
             }
             // SAFETY: `token` was obtained by locking `thread`'s state lock.
             expect_true!(unsafe { thread.try_core_thread_locked(token) }.is_none());
@@ -2702,7 +2764,7 @@ mod tests {
         }
     }
 
-    /// Tests linking `ThreadDispatcher` nodes in Rust and C++ `ProcessDispatcher` thread lists.
+    /// Tests linking `ThreadDispatcher` nodes in standalone and `ProcessDispatcher` thread lists.
     #[test]
     fn test_thread_process_list_node() {
         let root_job = JobDispatcher::create_root_job();
@@ -2718,15 +2780,19 @@ mod tests {
             unwrap_ok!(ThreadDispatcher::create(process.clone(), 0, b"k-ut-tl2"));
         let thread1 = thread1_handle.dispatcher().clone();
         let thread2 = thread2_handle.dispatcher().clone();
-        assert_ok!(thread1.initialize(), "thread1 init");
-        assert_ok!(thread2.initialize(), "thread2 init");
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        assert_ok!(unsafe { thread1.initialize() }, "thread1 init");
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        assert_ok!(unsafe { thread2.initialize() }, "thread2 init");
 
         let koid1 = thread1.get_koid();
         let koid2 = thread2.get_koid();
         expect_true!(!thread1.get_node().in_container());
         expect_true!(!thread2.get_node().in_container());
 
-        // Exercise the `DoublyLinkedListContainable` implementation on a Rust list first.
+        // Exercise the `DoublyLinkedListContainable` implementation on a standalone list first.
         pin_init::stack_pin_init!(let list = DoublyLinkedList::<RefPtr<ThreadDispatcher>>::new());
         list.as_mut().push_back(thread1.clone());
         list.as_mut().push_back(thread2.clone());
@@ -2746,8 +2812,8 @@ mod tests {
         expect_true!(!thread2.get_node().in_container());
         expect_true!(list.is_empty());
 
-        // Pre-suspend both threads and start them on `process`, linking their Rust nodes into C++
-        // `ProcessDispatcher::thread_list_` via `rust_thread_dispatcher_get_dll_node`.
+        // Pre-suspend both threads and start them on `process`, linking their Rust nodes into
+        // `ProcessDispatcherState::thread_list`.
         assert_ok!(thread1.suspend(), "thread1 suspend");
         assert_ok!(thread2.suspend(), "thread2 suspend");
         let entry = UserEntryState { pc: 0, sp: 0, arg1: 0, arg2: 0, tp: 0, abi_reg: 0 };
@@ -2765,24 +2831,33 @@ mod tests {
 
         // Watch `ZX_TASK_TERMINATED` from a separate handle table (`process` tears down its own
         // handle table before asserting `ZX_TASK_TERMINATED`) and kill `process` so both threads
-        // unlink from `ProcessDispatcher::thread_list_`.
+        // unlink from `ProcessDispatcherState::thread_list`.
         let proc_hv = unwrap_ok!(
             observer_proc.dispatcher().make_and_add_handle_from_ref(process.clone(), proc_rights)
         );
         pin_init::stack_pin_init!(let terminated = Event::init_unsignaled());
-        let mut wait_observer = WaitSignalObserver::new();
+        let terminated = terminated.into_ref();
+        let wait_observer = core::pin::pin!(WaitSignalObserver::new());
+        let wait_observer = wait_observer.into_ref();
         {
             let handle_table = observer_proc.dispatcher().handle_table();
             ksync::lock!(let guard = handle_table.read_lock());
             let handle = handle_table
                 .get_handle_locked(guard.token(), observer_proc.dispatcher(), proc_hv)
                 .expect("process handle in observer table");
-            unwrap_ok!(wait_observer.begin(
-                guard.token(),
-                terminated.as_ref().get_ref(),
-                &handle,
-                zx_types::ZX_TASK_TERMINATED,
-            ));
+            // SAFETY: `wait_observer` is freshly constructed (not registered), stack-pinned
+            // strictly after `terminated`, and never leaked or forgotten; `handle.dispatcher()`'s
+            // lock is not held; and `end` is called unconditionally below (with no locks held)
+            // before `wait_observer` is dropped and before `terminated` is destroyed.
+            let status = unsafe {
+                wait_observer.begin(
+                    guard.token(),
+                    terminated.get_ref(),
+                    &handle,
+                    zx_types::ZX_TASK_TERMINATED,
+                )
+            };
+            unwrap_ok!(status);
         }
 
         process.kill(0);
@@ -2815,7 +2890,9 @@ mod tests {
             ThreadDispatcher::create(proc_handle.dispatcher().clone(), 0, b"k-ut-orig")
                 .expect("thread created");
         let disp = thread_handle.dispatcher();
-        expect_ok!(disp.initialize());
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        expect_ok!(unsafe { disp.initialize() });
 
         // The name passed to create() is visible through get_name().
         let mut name_buf = [0xffu8; zx_types::ZX_MAX_NAME_LEN];
@@ -2855,7 +2932,7 @@ mod tests {
             expect_true!(core_thread.is_some());
             // SAFETY: `disp` is valid and `guard` holds the state lock.
             unsafe {
-                cpp_thread_dispatcher_reset_core_thread(core::ptr::from_ref(&**disp).cast_mut());
+                cpp_thread_dispatcher_reset_core_thread(RefPtr::as_ptr(disp).cast_mut());
             }
             if let Some(core_thread) = core_thread {
                 // SAFETY: `core_thread` was initialized but never started, so forgetting it
@@ -2879,7 +2956,9 @@ mod tests {
             ThreadDispatcher::create(proc_handle.dispatcher().clone(), 0, b"k-ut-t-susp")
                 .expect("thread created");
         let disp = thread_handle.dispatcher();
-        expect_ok!(disp.initialize());
+        // SAFETY: The thread has not started running, and no chain lock transaction is active on
+        // this CPU.
+        expect_ok!(unsafe { disp.initialize() });
 
         // Move the thread to Running so suspending() and resuming() drive real state transitions.
         {
@@ -2942,9 +3021,7 @@ mod tests {
             if let Some(core_thread) = unsafe { disp.try_core_thread_locked(guard.token()) } {
                 // SAFETY: `disp` is valid and `guard` holds the state lock.
                 unsafe {
-                    cpp_thread_dispatcher_reset_core_thread(
-                        core::ptr::from_ref(&**disp).cast_mut(),
-                    );
+                    cpp_thread_dispatcher_reset_core_thread(RefPtr::as_ptr(disp).cast_mut());
                 }
                 // SAFETY: `core_thread` was initialized but never started, so forgetting it is
                 // safe.

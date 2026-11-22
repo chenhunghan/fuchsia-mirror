@@ -90,7 +90,7 @@ ExampleUseOfErrorSyntax_CallWhichMayFail_Result::ExampleUseOfErrorSyntax_CallWhi
     case ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
       break;
   }
 }
@@ -107,7 +107,7 @@ ExampleUseOfErrorSyntax_CallWhichMayFail_Result& ExampleUseOfErrorSyntax_CallWhi
       case ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
         break;
     }
   }
@@ -135,10 +135,10 @@ void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Encode(::fidl::Encoder* en
       if (::fidl::EncodingInlineSize<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -147,21 +147,21 @@ void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Encode(::fidl::Encoder* en
           &response_,
           encoder->Alloc(::fidl::EncodingInlineSize<::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -170,11 +170,11 @@ void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Encode(::fidl::Encoder* en
           &err_,
           encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -183,18 +183,18 @@ void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Encode(::fidl::Encoder* en
 }
 
 void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Decode(::fidl::Decoder* _decoder, ExampleUseOfErrorSyntax_CallWhichMayFail_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::kResponse: {
@@ -252,15 +252,15 @@ void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid);
 }
 
-void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void ExampleUseOfErrorSyntax_CallWhichMayFail_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::Invalid):
         break;
       case ::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Result::Tag::kResponse:
         new (&response_)::test::errorsyntax::ExampleUseOfErrorSyntax_CallWhichMayFail_Response();

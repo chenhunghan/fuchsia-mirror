@@ -353,6 +353,39 @@ impl MemoryObject {
         }
     }
 
+    /// Writes `buffer_length` bytes from `buffer` to the memory at `offset`.
+    ///
+    /// Unlike [`MemoryObject::write`], `buffer` may be a user address that is accessed by Zircon
+    /// directly, so no intermediate kernel copy is needed.
+    ///
+    /// # Safety
+    ///
+    /// Callers must guarantee that `buffer` is valid to read `buffer_length` bytes from, or that
+    /// it is a user address whose faults Zircon reports as errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns `zx::Status::NOT_SUPPORTED` for read-only memory. Faults on `buffer` are reported
+    /// as errors, in which case part of the range may already have been written.
+    pub unsafe fn write_raw(
+        &self,
+        buffer: *const u8,
+        buffer_length: usize,
+        offset: u64,
+    ) -> Result<(), zx::Status> {
+        match self {
+            Self::Vmo(info) => {
+                // SAFETY: The caller guarantees that `buffer` can be read for `buffer_length`
+                // bytes, and `zx_vmo_write` does not retain the pointer.
+                let status = unsafe {
+                    zx::sys::zx_vmo_write(info.vmo.raw_handle(), buffer, offset, buffer_length)
+                };
+                zx::Status::ok(status)
+            }
+            Self::RingBuf(_) | Self::MemoryMappedClock { .. } => Err(zx::Status::NOT_SUPPORTED),
+        }
+    }
+
     /// Returns the koid of the underlying memory-like object.
     ///
     /// Should be cheap to call frequently.

@@ -184,11 +184,7 @@ TEST_F(WaitpidFlagsTest, waitPidStopContinue) {
 TEST_F(WaitpidFlagsTest, WaitpidFailsWithEchildWhenSaNocldwaitIsSet) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = SIG_DFL;
-    sa.sa_flags = SA_NOCLDWAIT;
-    ASSERT_THAT(sigaction(SIGCHLD, &sa, nullptr), SyscallSucceeds());
+    test_helper::ScopedSigAction scoped_sigchld(SIGCHLD, SIG_DFL, SA_NOCLDWAIT);
 
     test_helper::ScopedPipe pipe;
     test_helper::ForkHelper helper;
@@ -211,10 +207,7 @@ TEST_F(WaitpidFlagsTest, WaitpidFailsWithEchildWhenSaNocldwaitIsSet) {
 TEST_F(WaitpidFlagsTest, WaitpidFailsWithEchildWhenSigchldIsIgnored) {
   test_helper::ForkHelper helper;
   helper.RunInForkedProcess([] {
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = SIG_IGN;
-    ASSERT_THAT(sigaction(SIGCHLD, &sa, nullptr), SyscallSucceeds());
+    test_helper::ScopedSigAction scoped_sigchld(SIGCHLD, SIG_IGN, 0);
 
     test_helper::ScopedPipe pipe;
     test_helper::ForkHelper helper;

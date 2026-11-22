@@ -337,6 +337,19 @@ pub fn convert_channel_switch_info(
         vht_secondary_80_channel: info.vht_secondary_80_channel,
     }
 }
+pub fn convert_michael_mic_failure_indication(
+    ind: fidl_fullmac::WlanFullmacImplIfcOnMichaelMicFailureRequest,
+) -> Result<fidl_mlme::MichaelMicFailureIndication> {
+    let key_type = match ind.key_type.context("missing key_type")? {
+        fidl_ieee80211::KeyType::Pairwise => fidl_mlme::KeyType::Pairwise,
+        fidl_ieee80211::KeyType::Group => fidl_mlme::KeyType::Group,
+        other => bail!("unsupported key_type in OnMichaelMicFailure: {:?}", other),
+    };
+    Ok(fidl_mlme::MichaelMicFailureIndication {
+        peer_sta_address: ind.peer_sta_address.context("missing peer_sta_address")?,
+        key_type,
+    })
+}
 pub fn convert_signal_report_indication(
     ind: fidl_fullmac::WlanFullmacSignalReportIndication,
 ) -> fidl_internal::SignalReportIndication {
@@ -439,6 +452,7 @@ pub fn convert_get_scheduled_scan_enabled_resp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use test_case::test_case;
 
     fn fake_set_key_descriptor() -> fidl_mlme::SetKeyDescriptor {
         fidl_mlme::SetKeyDescriptor {
@@ -561,6 +575,20 @@ mod tests {
                 result_code: fidl_mlme::EapolResultCode::TransmissionFailure,
             }
         );
+    }
+
+    #[test_case(fidl_ieee80211::KeyType::Igtk; "igtk")]
+    #[test_case(fidl_ieee80211::KeyType::Peer; "peer")]
+    #[test_case(fidl_ieee80211::KeyType::from_primitive_allow_unknown(99); "unknown")]
+    fn test_convert_michael_mic_failure_indication_rejects_unsupported_key_type(
+        key_type: fidl_ieee80211::KeyType,
+    ) {
+        let fullmac = fidl_fullmac::WlanFullmacImplIfcOnMichaelMicFailureRequest {
+            peer_sta_address: Some([1; 6]),
+            key_type: Some(key_type),
+            ..Default::default()
+        };
+        assert!(convert_michael_mic_failure_indication(fullmac).is_err());
     }
 
     //

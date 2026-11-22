@@ -11,17 +11,17 @@ group("tests") {
   deps = [ ":httpdate-hyper-tests" ]
 }
 
-# Kept in GN because `httpdate-hyper-tests` packages
-# `//src/connectivity/network/dns:component` and subpackages
+# Kept in GN because `httpdate-hyper-tests` subpackages
+# `//src/connectivity/network/dns:package` and
 # `//src/connectivity/network/netstack3:package-for-tests`, which have no
 # Bazel build yet.
 fuchsia_unittest_package("httpdate-hyper-tests") {
   manifest = "meta/httpdate-hyper-lib-test.cml"
-  deps = [
-    ":httpdate-hyper_test",
-    "//src/connectivity/network/dns:component",
+  deps = [ ":httpdate-hyper_test" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
 
   # This test depends on root ssl certificate which is a system capability.
   test_type = "system"

@@ -253,6 +253,18 @@ class DriverTestCommon {
     return result;
   }
 
+  // Waits until the driver runtime requests that the suspended driver be resumed (for example,
+  // when a registered wake vector triggers).
+  void WaitForResumeRequest() {
+    ZX_ASSERT_MSG(StartedSuccessfully(),
+                  "Cannot call |WaitForResumeRequest| without having started successfully.");
+    ZX_ASSERT_MSG(!prepare_stop_result_.has_value(),
+                  "Cannot call |WaitForResumeRequest| after |StopDriver|.");
+    ZX_ASSERT_MSG(power_state_ == PowerState::kSuspended,
+                  "Cannot call |WaitForResumeRequest| when the driver is not suspended.");
+    WaitForResumeRequestInner();
+  }
+
   // Calls the driver's SystemResume hook, waits for it to complete, and then resumes the driver's
   // dispatchers.
   zx::result<> ResumeDriver(
@@ -352,6 +364,7 @@ class DriverTestCommon {
   virtual zx::result<> StopDriverInner() = 0;
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   virtual zx::result<> SuspendDriverInner() = 0;
+  virtual void WaitForResumeRequestInner() = 0;
   virtual zx::result<> ResumeDriverInner(
       std::optional<fuchsia_power_broker::LeaseToken> power_element_lease) = 0;
 #endif
@@ -472,6 +485,12 @@ class BackgroundDriverTest final : public internal::DriverTestCommon<Configurati
   zx::result<> SuspendDriverInner() override {
     return this->runtime().RunToCompletion(
         dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::Suspend));
+  }
+
+  void WaitForResumeRequestInner() override {
+    zx::result<> result = this->runtime().RunToCompletion(
+        dut_->SyncCall(&fdf_testing::internal::DriverUnderTest<DriverType>::WaitForResumeRequest));
+    ZX_ASSERT_MSG(result.is_ok(), "WaitForResumeRequest failed: %s", result.status_string());
   }
 
   zx::result<> ResumeDriverInner(
@@ -635,6 +654,11 @@ class ForegroundDriverTest final : public internal::DriverTestCommon<Configurati
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
   zx::result<> SuspendDriverInner() override {
     return this->runtime().RunToCompletion(dut_->Suspend());
+  }
+
+  void WaitForResumeRequestInner() override {
+    zx::result<> result = this->runtime().RunToCompletion(dut_->WaitForResumeRequest());
+    ZX_ASSERT_MSG(result.is_ok(), "WaitForResumeRequest failed: %s", result.status_string());
   }
 
   zx::result<> ResumeDriverInner(

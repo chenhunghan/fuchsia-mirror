@@ -4,7 +4,6 @@
 
 #include "src/performance/trace_manager/tracee.h"
 
-#include <lib/async/cpp/task.h>
 #include <lib/async/default.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/trace-engine/fields.h>
@@ -39,13 +38,14 @@ bool Tracee::operator==(TraceProviderBundle* bundle) const { return bundle_ == b
 bool Tracee::Initialize(std::vector<std::string> categories, size_t buffer_size,
                         fuchsia_tracing::BufferingMode buffering_mode, StartCallback start_callback,
                         StopCallback stop_callback, TerminateCallback terminate_callback,
-                        AlertCallback alert_callback) {
+                        AlertCallback alert_callback, SaveBufferCallback save_buffer_callback) {
   FX_DCHECK(state_ == State::kReady);
   FX_DCHECK(!buffer_);
   FX_DCHECK(start_callback);
   FX_DCHECK(stop_callback);
   FX_DCHECK(terminate_callback);
   FX_DCHECK(alert_callback);
+  FX_DCHECK(save_buffer_callback);
 
   // HACK(https://fxbug.dev/308796439): Until we get kernel trace streameing, kernel tracing is
   // special: it always allocates a fixed sized buffer in the kernel set by a boot arg. We're not at
@@ -99,13 +99,14 @@ bool Tracee::Initialize(std::vector<std::string> categories, size_t buffer_size,
     return false;
   }
 
-  buffer_ = std::move(*shared_buffer);
+  buffer_ = std::make_shared<SharedBuffer>(std::move(*shared_buffer));
   fifo_ = std::move(fifo);
 
   start_callback_ = std::move(start_callback);
   stop_callback_ = std::move(stop_callback);
   terminate_callback_ = std::move(terminate_callback);
   alert_callback_ = std::move(alert_callback);
+  save_buffer_callback_ = std::move(save_buffer_callback);
 
   wait_.set_object(fifo_.get());
   wait_.set_trigger(ZX_FIFO_READABLE | ZX_FIFO_PEER_CLOSED);
@@ -249,16 +250,14 @@ void Tracee::OnFifoReadable(async_dispatcher_t* dispatcher, async::WaitBase* wai
                  state_ == State::kStopping || state_ == State::kTerminating) {
         uint32_t wrapped_count = packet.data32;
         uint64_t durable_data_end = packet.data64;
-        // Schedule the write with the main async loop.
         FX_LOGS(DEBUG) << "Buffer save request from " << *bundle_
                        << ", wrapped_count=" << wrapped_count << ", durable_data_end=0x" << std::hex
                        << durable_data_end;
-        async::PostTask(executor_.dispatcher(),
-                        [weak = weak_ptr_factory_.GetWeakPtr(), wrapped_count, durable_data_end] {
-                          if (weak) {
-                            weak->TransferBuffer(wrapped_count, durable_data_end);
-                          }
-                        });
+        // Hand the save over now rather than from a posted task: if the provider exits right
+        // after asking, the peer-closed wait could otherwise run first, remove this tracee and
+        // leave the task with nothing to call. The callback may destroy |this|; OnHandleReady()
+        // checks for that before touching the wait again.
+        save_buffer_callback_(wrapped_count, durable_data_end);
       } else {
         FX_LOGS(WARNING) << *bundle_ << ": Received TRACE_PROVIDER_SAVE_BUFFER in state " << state_;
       }

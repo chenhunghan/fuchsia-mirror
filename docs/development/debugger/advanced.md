@@ -106,10 +106,10 @@ From the output above:
 
 The number that follows the job or process is the object's KOID. You can then:
 
-* [Attach to a specific process](#attach-process)
+* [Attach to a specific process](#attach-specific-process)
 * [Attach to processes in a specific job](#attach-job)
 
-### Attach to a specific process {#attach-process}
+### Attach to a specific process {#attach-specific-process}
 
 From the zxdb console, you can attach to a specific process. For example,
 to attach to the `starnix_kernel.cm` process which is listed with a KOID of `66797`:
@@ -156,9 +156,9 @@ Loading 17 modules for init Done.
 
 <!-- Reference links -->
 
-[koid-concept]: /docs/concepts/kernel/concepts.md#kernel_object_ids
+[koid-concept]: /docs/concepts/kernel/concepts.md#kernel-object-ids
 [zxdb-readme]: /docs/development/debugger/README.md
-[zxdb-readme-run]: /docs/development/debugger/README.md#run_zxdb
+[zxdb-readme-run]: /docs/development/debugger/README.md#run-zxdb
 [zxdb-tutorial-minidumps]: /docs/development/debugger/tutorial-minidumps.md
 [ffx-debug-symbol-index]: /docs/development/tools/ffx/workflows/register-debug-symbols.md
-[about-symbol-settings]: symbols.md#about_symbol_settings
+[about-symbol-settings]: symbols.md#symbol-settings

@@ -2,7 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":metrics-logger-tests_test"],
+    visibility = ["//src/power:__pkg__"],
+)
 
 exports_files(
     [
@@ -10,4 +30,104 @@ exports_files(
         "meta/metrics-logger.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/cpu_load_logger.rs",
+        "src/driver_utils.rs",
+        "src/gpu_usage_logger.rs",
+        "src/main.rs",
+        "src/network_activity_logger.rs",
+        "src/sensor_logger.rs",
+    ],
+    crate_name = "metrics_logger",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:serde_derive",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_rust",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.hardware.power.sensor:fuchsia.hardware.power.sensor_rust",
+        "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
+        "//sdk/fidl/fuchsia.hardware.thermal:fuchsia.hardware.thermal_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.power.metrics:fuchsia.power.metrics_rust",
+        "//sdk/fidl/fuchsia.ui.activity:fuchsia.ui.activity_rust",
+        "//sdk/rust/zbi",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/starnix/lib/magma",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    # Sets GN output_name via bazel2gn to match the original with_unit_tests binary name.
+    crate_name = "metrics_logger_bin_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "metrics_logger_bin_test_packaged",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "metrics_logger_bin_test",
+)
+
+fx_component_manifest(
+    name = "metrics-logger-tests_manifest",
+    testonly = True,
+    component_name = "metrics-logger-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/metrics-logger-tests.cml",
+)
+
+fx_test_component(
+    name = "metrics-logger-tests_component",
+    compiled_manifest = ":metrics-logger-tests_manifest",
+    deps = [":metrics_logger_bin_test_packaged"],
+)
+
+fx_package(
+    name = "metrics-logger-tests",
+    test_components = [":metrics-logger-tests_component"],
+)
+
+fx_test(
+    name = "metrics-logger-tests_test",
+    package = ":metrics-logger-tests",
 )

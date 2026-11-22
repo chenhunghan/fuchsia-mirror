@@ -14,6 +14,8 @@
 #include <lib/zx/clock.h>
 #include <zircon/status.h>
 
+#include <array>
+
 #include "src/devices/lib/acpi/client.h"
 
 namespace cr50::spi {
@@ -48,6 +50,26 @@ zx_status_t Cr50SpiDevice::Create(void *ctx, zx_device_t *parent) {
   return dev->Bind(&dev);
 }
 
+Cr50SpiDevice::~Cr50SpiDevice() { Shutdown(); }
+
+void Cr50SpiDevice::Shutdown() {
+  if (outgoing_.has_value()) {
+    sync_completion_t outgoing_reset;
+    if (async::PostTask(loop_.dispatcher(), [this, &outgoing_reset]() {
+          outgoing_.reset();
+          sync_completion_signal(&outgoing_reset);
+        }) == ZX_OK) {
+      sync_completion_wait(&outgoing_reset, ZX_TIME_INFINITE);
+    }
+  }
+  loop_.Shutdown();
+  sync_completion_signal(&unbind_txn_ready_);
+  irq_.destroy();
+  if (irq_thread_.joinable()) {
+    irq_thread_.join();
+  }
+}
+
 zx_status_t Cr50SpiDevice::Bind(std::unique_ptr<Cr50SpiDevice> *dev) {
   auto result = acpi_.borrow()->MapInterrupt(0);
   if (!result.ok() || result->is_error()) {
@@ -78,9 +100,53 @@ zx_status_t Cr50SpiDevice::Bind(std::unique_ptr<Cr50SpiDevice> *dev) {
     return ZX_ERR_NOT_SUPPORTED;
   }
 
-  status = DdkAdd(ddk::DeviceAddArgs("cr50-spi").set_inspect_vmo(inspect_.DuplicateVmo()));
+  auto endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  zx_status_t serve_status = ZX_ERR_INTERNAL;
+  sync_completion_t served;
+  zx_status_t post_status = async::PostTask(
+      loop_.dispatcher(),
+      [this, &serve_status, &served, server = std::move(endpoints.server)]() mutable {
+        outgoing_.emplace(loop_.dispatcher());
+        fuchsia_hardware_tpmimpl::Service::InstanceHandler handler({
+            .device =
+                [this](fidl::ServerEnd<fuchsia_hardware_tpmimpl::TpmImpl> server_end) {
+                  fidl::BindServer(loop_.dispatcher(), std::move(server_end), this);
+                },
+        });
+        zx::result result =
+            outgoing_->AddService<fuchsia_hardware_tpmimpl::Service>(std::move(handler));
+        if (result.is_ok()) {
+          result = outgoing_->Serve(std::move(server));
+        }
+        if (result.is_error()) {
+          outgoing_.reset();
+        }
+        serve_status = result.status_value();
+        sync_completion_signal(&served);
+      });
+  if (post_status != ZX_OK) {
+    zxlogf(ERROR, "Failed to post task to FIDL thread: %d", post_status);
+    return post_status;
+  }
+  sync_completion_wait(&served, ZX_TIME_INFINITE);
+  if (serve_status != ZX_OK) {
+    zxlogf(ERROR, "cr50-spi: Failed to serve outgoing directory: %s",
+           zx_status_get_string(serve_status));
+    return serve_status;
+  }
+
+  std::array offers = {fuchsia_hardware_tpmimpl::Service::Name};
+  status = DdkAdd(ddk::DeviceAddArgs("cr50-spi")
+                      .set_inspect_vmo(inspect_.DuplicateVmo())
+                      .set_fidl_service_offers(offers)
+                      .set_outgoing_dir(endpoints.client.TakeChannel()));
+  if (status != ZX_OK) {
+    zxlogf(ERROR, "cr50-spi: DdkAdd failed: %s", zx_status_get_string(status));
+    return status;
+  }
+
   [[maybe_unused]] auto unused = dev->release();
-  return status;
+  return ZX_OK;
 }
 
 void Cr50SpiDevice::DdkInit(ddk::InitTxn txn) {
@@ -104,17 +170,7 @@ void Cr50SpiDevice::DdkUnbind(ddk::UnbindTxn txn) {
   }
 }
 
-void Cr50SpiDevice::DdkRelease() {
-  if (irq_thread_.joinable()) {
-    irq_thread_.join();
-  }
-  delete this;
-}
-
-void Cr50SpiDevice::TpmImplConnectServer(zx::channel server) {
-  fidl::BindServer(loop_.dispatcher(),
-                   fidl::ServerEnd<fuchsia_hardware_tpmimpl::TpmImpl>(std::move(server)), this);
-}
+void Cr50SpiDevice::DdkRelease() { delete this; }
 
 void Cr50SpiDevice::Read(ReadRequestView request, ReadCompleter::Sync &completer) {
   // Cr50 ignores locality, so we do too. See section 33 of

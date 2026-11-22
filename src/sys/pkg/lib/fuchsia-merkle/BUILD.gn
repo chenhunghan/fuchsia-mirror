@@ -8,7 +8,7 @@ import("//build/rust/rustc_fuzzer.gni")
 
 bazel_test_suite("fuchsia-merkle-tests") {
   target_tests = [ "//src/sys/pkg/lib/fuchsia-merkle:fuchsia-merkle-tests" ]
-  host_tests = [ "//src/sys/pkg/lib/fuchsia-merkle:fuchsia-merkle_host_test" ]
+  host_tests = [ "//src/sys/pkg/lib/fuchsia-merkle:host_tests" ]
 }
 
 rustc_fuzzer("fuchsia-merkle-fuzzer") {
@@ -66,6 +66,14 @@ group("tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
+rustc_library("fuchsia-merkle-core") {
+  sources = [ "core/src/lib.rs" ]
+  source_root = "core/src/lib.rs"
+  edition = "2024"
+  lint_config = "//build/config/rust/lints:clippy_warn_all"
+  visibility = [ ":*" ]
+}
+
 rustc_library("fuchsia-merkle") {
   sources = [
     "src/lib.rs",
@@ -87,6 +95,7 @@ rustc_library("fuchsia-merkle") {
     "//tools/lib/*",
   ]
   deps = [
+    ":fuchsia-merkle-core",
     "//sdk/rust/zx-status",
     "//src/storage/lib/ptr_slice",
     "//src/sys/pkg/lib/fuchsia-hash",

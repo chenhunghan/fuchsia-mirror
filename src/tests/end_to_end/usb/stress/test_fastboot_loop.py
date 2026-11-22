@@ -52,7 +52,7 @@ class UsbFastbootLoopTest(usb_lib.UsbPowerHubBaseTest):
                 num_iterations,
             )
             try:
-                power_hub.power_off(port=self._usb_port)
+                power_hub.power_off()
                 # Ensure disconnect duration is at least 2s for VBUS discharge
                 # settling to avoid DWC3 bulk transfer aborts (b/568894619).
                 actual_disconnect_duration = max(2, disconnect_duration)
@@ -71,7 +71,7 @@ class UsbFastbootLoopTest(usb_lib.UsbPowerHubBaseTest):
                     "Fastboot device is still visible",
                 )
             finally:
-                power_hub.power_on(port=self._usb_port)
+                power_hub.power_on()
                 _LOGGER.info("Waiting for device to re-enter fastboot...")
                 try:
                     self.dut.fastboot.wait_for_fastboot_mode(
@@ -108,7 +108,6 @@ class UsbFastbootLoopTest(usb_lib.UsbPowerHubBaseTest):
             await usb_lib.reboot_to_fastboot_mode(
                 self.dut,
                 usb_power_hub=self._usb_power_hub,
-                usb_port=self._usb_port,
                 timeout_sec=fuchsia_reboot_timeout,
             )
             await self._run_fastboot_disconnect_loop(
@@ -119,7 +118,6 @@ class UsbFastbootLoopTest(usb_lib.UsbPowerHubBaseTest):
             await usb_lib.recover_to_fuchsia_mode(
                 self.dut,
                 usb_power_hub=self._usb_power_hub,
-                usb_port=self._usb_port,
                 timeout_sec=fuchsia_reboot_timeout,
             )
 

@@ -4,6 +4,14 @@
 // found in the LICENSE file.
 */}}
 {{- define "GenerateRustEnum" -}}
+{{- if .Strict }}
+{{ template "GenerateRustStrictEnum" . }}
+{{- else }}
+{{ template "GenerateRustFlexibleEnum" . }}
+{{- end }}
+{{- end }}
+
+{{- define "GenerateRustStrictEnum" -}}
 
 {{ range .Comments }}
 ///{{ . }}
@@ -36,6 +44,64 @@ impl {{ UpperCamelCase . }} {
 impl From<{{ UpperCamelCase . }}> for {{ ScalarTypeName .Subtype }} {
     fn from(val: {{ UpperCamelCase . }}) -> Self {
         val as Self
+    }
+}
+
+{{ end }}
+
+{{- define "GenerateRustFlexibleEnum" -}}
+{{- $name := UpperCamelCase . }}
+{{- $raw := ScalarTypeName .Subtype }}
+
+{{ range .Comments }}
+///{{ . }}
+{{- end }}
+{{- range EnumAttributes . }}
+{{ . }}
+{{- end }}
+pub struct {{ $name }}({{ $raw }});
+
+impl {{ $name }} {
+{{ range .Members }}
+{{- if .Comments }}
+{{ range .Comments }}
+    ///{{ . }}
+{{- end }}
+{{ end -}}
+    pub const {{ EnumMemberName $ . }}: Self = Self({{ .Value }}); {{- if .Expression }}  // {{ .Expression }}{{ end }}
+{{ end }}
+
+    /// Constructs a value from its underlying integer.
+    pub const fn from_raw(raw: {{ $raw }}) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the underlying integer.
+    pub const fn as_raw(self) -> {{ $raw }} {
+        self.0
+    }
+}
+
+impl From<{{ $raw }}> for {{ $name }} {
+    fn from(raw: {{ $raw }}) -> Self {
+        Self(raw)
+    }
+}
+
+impl From<{{ $name }}> for {{ $raw }} {
+    fn from(val: {{ $name }}) -> Self {
+        val.0
+    }
+}
+
+impl core::fmt::Debug for {{ $name }} {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            {{ range .Members }}
+            Self::{{ EnumMemberName $ . }} => f.write_str("{{ $name }}::{{ EnumMemberName $ . }}"),
+            {{ end }}
+            Self(raw) => f.debug_tuple("{{ $name }}").field(&raw).finish(),
+        }
     }
 }
 

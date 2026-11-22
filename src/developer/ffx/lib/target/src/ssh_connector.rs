@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 use crate::Resolution;
-use crate::target_connector::{
+use crate::transport_connector::{
     BUFFER_SIZE, ConnectionStreamError, FDomainConnection, OvernetConnection, TargetConnection,
-    TargetConnectionError, TargetConnector,
+    TargetConnectionError, TransportConnector,
 };
 use anyhow::Result;
 use async_channel::Sender;
@@ -414,7 +414,7 @@ async fn try_ssh_cmd_cleanup(mut cmd: Child) -> Result<()> {
     Ok(())
 }
 
-impl TargetConnector for SshConnector {
+impl TransportConnector for SshConnector {
     const CONNECTION_TYPE: &'static str = "ssh";
 
     async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
@@ -471,8 +471,6 @@ mod test {
     use super::*;
     use ffx_config::environment::TestEnvBuilder;
     use std::fs::File;
-    use std::io::Write;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
     #[test]
@@ -502,13 +500,19 @@ mod test {
         assert!(matches!(TargetConnectionError::from(err), TargetConnectionError::NonFatal(_)));
     }
 
+    // Writes the script from a child shell so that this process never holds it open for
+    // writing. Tests run in parallel threads, and a process that another test forks inherits
+    // any open file descriptor until it execs, so a script written here could still be open
+    // for writing when the test runs it, which fails with ETXTBSY ("Text file busy").
     fn write_mock_ssh(dir: &tempfile::TempDir, content: &str) -> PathBuf {
         let path = dir.path().join("ssh");
-        let mut file = File::create(&path).unwrap();
-        file.write_all(content.as_bytes()).unwrap();
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
+        let status = std::process::Command::new("sh")
+            .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(&path)
+            .arg(content)
+            .status()
+            .unwrap();
+        assert!(status.success(), "writing {path:?}: {status}");
         path
     }
 

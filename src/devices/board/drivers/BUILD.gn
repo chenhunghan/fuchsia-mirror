@@ -10,10 +10,10 @@ group("tests") {
     deps += [
       "astro:tests",
       "nelson:tests",
-      "qemu-arm64:tests",
       "sherlock:tests",
       "vim3-devicetree:tests",
       "vim3-dml:tests",
+      "virt:tests",
     ]
   }
 

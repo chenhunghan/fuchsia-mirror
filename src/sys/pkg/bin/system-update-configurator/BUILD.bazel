@@ -46,7 +46,7 @@ rustc_library(
     crate_root = "src/main.rs",
     edition = "2024",
     link_deps = [
-        "//src/security/lib/tee/tee-client-api:tee-client-api-static",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
+        "//src/security/lib/tee/tee-client-api:tee-client-api-import",  # @bazel2gn:path_overwrite://src/security/lib/tee/tee-client-api
     ],
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     proc_macro_deps = [

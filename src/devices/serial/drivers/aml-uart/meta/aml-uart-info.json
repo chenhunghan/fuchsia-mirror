@@ -1,9 +1,0 @@
-{
-    "short_description": "AMLogic serial driver",
-    "manufacturer": "AMLogic",
-    "families": [],
-    "models": [],
-    "areas": [
-        "UART"
-    ]
-}

@@ -12,13 +12,14 @@ use fidl_fuchsia_hardware_inlineencryption::DeviceMarker;
 use fidl_fuchsia_storage_block::{BlockMarker, BlockProxy};
 use fuchsia_async::{LocalExecutor, LocalExecutorBuilder};
 
-use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
+use fxfs::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem};
 use fxfs::object_store::journal::super_block::SuperBlockInstance;
 use fxfs::object_store::volume::root_volume as fxfs_root_volume;
 use fxfs::object_store::{Directory, HandleOptions, ObjectStore};
 use fxfs_platform::fuchsia::RemoteCrypt;
 use starnix_crypt::CryptService;
 use storage_device::block_device::BlockDevice;
+use storage_device::fake_device::FakeDevice;
 use storage_device::ranged_device::RangedDevice;
 
 use std::io::Read;
@@ -568,4 +569,72 @@ async fn verify(
     }
 
     crate::verify(&f2fs, fxfs, ino, root_directory, check_file_contents).await
+}
+
+// F2FS can store a short symlink target in a data block (e.g. when mounted with noinline_data).
+// Fxfs keeps such targets inline, so migration must still preserve that block for F2FS.
+#[fuchsia::test]
+async fn test_migrate_preserves_short_noinline_symlink_block() {
+    let block_server = create_device_with_image_at_offset("/pkg/testdata/f2fs.img.zst", 0);
+    let device = Arc::new(
+        BlockDevice::new(
+            RemoteBlockClient::new(block_server.connect::<BlockProxy>())
+                .await
+                .expect("Unable to create block client"),
+            /* read_only: */ true,
+        )
+        .await
+        .expect("Unable to create block device"),
+    );
+    let f2fs = F2fsReader::open_device(device).await.expect("f2fs open ok");
+    let dir_ino = recurse_resolve_f2fs(&f2fs, f2fs.root_ino(), "a/b/c").await;
+    let symlink_ino = recurse_resolve_f2fs(&f2fs, dir_ino, "noinline_symlink").await;
+    let symlink_inode = f2fs.read_inode(symlink_ino).await.expect("read inode");
+    assert!(symlink_inode.inline_data.is_none());
+    let symlink_block = symlink_inode.data_block_addr(0);
+
+    let crypt_service = Arc::new(CryptService::new(&[0; 32], &[1; 32], None));
+    let (crypt_client_end, crypt_proxy) = fidl::endpoints::create_endpoints::<CryptMarker>();
+    fuchsia_async::Task::spawn(async move {
+        if let Err(err) = crypt_service.handle_connection(crypt_proxy.into_stream()).await {
+            log::error!(err:?; "Crypt service failure");
+        }
+    })
+    .detach();
+    let crypt = Arc::new(RemoteCrypt::new(crypt_client_end)) as Arc<dyn Crypt>;
+
+    let mut fxfs =
+        FxFilesystem::new_empty(DeviceHolder::new(FakeDevice::new(8192, F2FS_BLOCK_SIZE as u32)))
+            .await
+            .expect("new_empty");
+    let vol = fxfs_root_volume(fxfs.clone())
+        .await
+        .expect("root volume")
+        .new_volume(
+            "userdata",
+            NewChildStoreOptions {
+                options: StoreOptions { crypt: Some(crypt), ..StoreOptions::default() },
+                reserve_32bit_object_ids: true,
+                ..NewChildStoreOptions::default()
+            },
+        )
+        .await
+        .expect("new volume");
+    let root_dir =
+        Directory::open_unchecked(vol.clone(), vol.root_directory_object_id(), DirType::Normal);
+    let mut f2fs_metadata_blocks = HashSet::new();
+    migrate(
+        0,
+        &f2fs,
+        &mut fxfs,
+        dir_ino,
+        root_dir,
+        &mut HashSet::new(),
+        &mut f2fs_metadata_blocks,
+        |_| {},
+    )
+    .await
+    .expect("migrate");
+    assert!(f2fs_metadata_blocks.contains(&symlink_block));
+    fxfs.close().await.expect("close fxfs");
 }

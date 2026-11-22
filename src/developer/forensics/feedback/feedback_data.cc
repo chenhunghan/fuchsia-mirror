@@ -5,6 +5,7 @@
 #include "src/developer/forensics/feedback/feedback_data.h"
 
 #include <fidl/fuchsia.io/cpp/fidl.h>
+#include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/component/incoming/cpp/directory.h>
 #include <lib/fdio/spawn.h>
@@ -34,7 +35,7 @@ FeedbackData::FeedbackData(async_dispatcher_t* dispatcher,
                             options.delete_previous_boot_logs_time, clock, redactor,
                             &inspect_data_budget_, options.snapshot_config.attachment_allowlist,
                             cobalt_, std::move(options.root_job)),
-      data_provider_(dispatcher_, services_, clock_, redactor, options.is_first_instance,
+      data_provider_(dispatcher_, services_, clock_, redactor,
                      options.snapshot_config.default_annotations,
                      options.snapshot_config.attachment_allowlist, cobalt_, annotation_manager,
                      attachment_providers_.GetAttachmentManager(), &inspect_data_budget_) {}
@@ -42,17 +43,33 @@ FeedbackData::FeedbackData(async_dispatcher_t* dispatcher,
 feedback_data::DataProvider* FeedbackData::DataProvider() { return &data_provider_; }
 
 void FeedbackData::ShutdownImminent(::fit::deferred_callback stop_respond) {
-  system_log_recorder_lifecycle_.set_error_handler(
-      [stop_respond = std::move(stop_respond)](const zx_status_t status) mutable {
-        if (status != ZX_OK) {
-          FX_PLOGS(WARNING, status) << "Lost connection to system log recorder";
-        }
+  if (!system_log_recorder_lifecycle_.is_valid()) {
+    stop_respond.call();
+    return;
+  }
 
-        // |stop_respond| must explicitly be called otherwise it won't run until the error
-        // handler is destroyed (which doesn't happen).
-        stop_respond.call();
-      });
-  system_log_recorder_lifecycle_->Stop();
+  if (const fit::result<fidl::OneWayError> result = system_log_recorder_lifecycle_->Stop();
+      result.is_error()) {
+    FX_LOGS(WARNING) << "Failed to stop system log recorder: " << result.error_value();
+    stop_respond.call();
+    return;
+  }
+
+  stop_respond_ = std::move(stop_respond);
+}
+
+void FeedbackData::on_fidl_error(const fidl::UnbindInfo error) {
+  if (error.status() != ZX_OK) {
+    FX_PLOGS(WARNING, error.status()) << "Lost connection to system log recorder";
+  }
+
+  system_log_recorder_lifecycle_ = fidl::Client<fuchsia_process_lifecycle::Lifecycle>();
+
+  if (stop_respond_.has_value()) {
+    // |stop_respond_| must explicitly be called otherwise it won't run until |stop_respond_| is
+    // destroyed (which doesn't happen).
+    stop_respond_->call();
+  }
 }
 
 std::shared_ptr<sys::ServiceDirectory> FeedbackData::SpawnSystemLogRecorder() {
@@ -107,7 +124,9 @@ std::shared_ptr<sys::ServiceDirectory> FeedbackData::SpawnSystemLogRecorder() {
     return nullptr;
   }
 
-  system_log_recorder_lifecycle_.Bind(std::move(lifecycle_client), dispatcher_);
+  system_log_recorder_lifecycle_.Bind(
+      fidl::ClientEnd<fuchsia_process_lifecycle::Lifecycle>(std::move(lifecycle_client)),
+      dispatcher_, this);
 
   zx::result svc_client = component::OpenDirectoryAt(
       fidl::UnownedClientEnd<fuchsia_io::Directory>(directory_client.get()), "svc");

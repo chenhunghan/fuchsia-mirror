@@ -18,6 +18,7 @@
 #include <lib/driver/mmio/cpp/mmio.h>
 #include <lib/sdmmc/hw.h>
 #include <lib/sync/completion.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/interrupt.h>
@@ -27,7 +28,6 @@
 
 #include "dma-descriptor-builder.h"
 #include "sdhci-reg.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace sdhci {
 

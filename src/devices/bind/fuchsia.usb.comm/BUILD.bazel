@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.usb.comm",
+    src = "fuchsia.usb.comm.bind",
+    category = "partner",
+    visibility = [
+        "//src/connectivity/ethernet/drivers:__subpackages__",
+        "//src/developer/adb/drivers/usb-adb-function:__pkg__",
+        "//src/developer/remote-control/usb/vsock-usb:__pkg__",
+        "//src/devices/serial/drivers/usb-cdc-acm:__pkg__",
+        "//src/firmware/drivers/usb-fastboot-function:__pkg__",
+    ],
+)

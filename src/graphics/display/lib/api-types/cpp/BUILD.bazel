@@ -3,8 +3,18 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":unittests-package",
+    ],
+    visibility = ["//src/graphics/display:__pkg__"],
+)
 
 fx_cc_library(
     name = "cpp",
@@ -78,4 +88,43 @@ fx_cc_library(
         "//sdk/fidl/fuchsia.math:fuchsia.math_cpp",
     ],
     alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = [
+        "alpha-mode-test.cc",
+        "backlight-state-test.cc",
+        "client-priority-test.cc",
+        "color-conversion-test.cc",
+        "color-test.cc",
+        "config-check-result-test.cc",
+        "coordinate-transformation-test.cc",
+        "dimensions-test.cc",
+        "display-timing-test.cc",
+        "driver-layer-test.cc",
+        "engine-info-test.cc",
+        "id-type-test.cc",
+        "image-buffer-usage-test.cc",
+        "image-metadata-test.cc",
+        "image-tiling-type-test.cc",
+        "mode-and-id-test.cc",
+        "mode-test.cc",
+        "pixel-format-test.cc",
+        "power-mode-test.cc",
+        "rectangle-test.cc",
+    ],
+    gn_output_name = "display-api-types-cpp-tests",
+    deps = [
+        ":cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/image-format",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "unittests-package",
+    package_name = "display-api-types-cpp-tests",
+    unit_tests = [":unittests"],
 )

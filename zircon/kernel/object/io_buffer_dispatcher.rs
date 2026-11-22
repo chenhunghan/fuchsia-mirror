@@ -711,7 +711,7 @@ impl IoBufferDispatcher {
                 let kernel_vmar = VmAspace::kernel_aspace()
                     .root_vmar()
                     .expect("kernel aspace root VMAR must be initialized");
-                let map_result = kernel_vmar.create_vm_mapping(
+                let map_result = kernel_vmar.create_vm_mapping_no_overwrite(
                     0,
                     region.size as usize,
                     0,
@@ -719,7 +719,6 @@ impl IoBufferDispatcher {
                     kernel_vmo,
                     0,
                     ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-                    b"IOBuffer region (ID allocator)",
                 )?;
                 let allocator = IobRegionIdAllocator::new(
                     ep0_vmo,

@@ -166,7 +166,7 @@ The log severities are, in order from most to least severe:
 * `TRACE`
 
 By default, the system sends log messages with `INFO` severity and higher to the
-[syslog](/docs/development/diagnostics/logs/recording.md#logsinksyslog). The
+[syslog](/docs/development/diagnostics/logs/recording.md#logsink-syslog). The
 system suppresses `DEBUG` and `TRACE` severities by default at the producer side
 to avoid unnecessary overhead.
 

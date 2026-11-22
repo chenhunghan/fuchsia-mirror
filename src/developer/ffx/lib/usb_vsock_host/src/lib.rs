@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
 use thiserror::Error;
 use usb_vsock::{
     Address, CID_ANY, CID_HOST, CID_LOOPBACK, Header, Packet, PacketType, ProtocolVersion,
-    UsbPacketBuilder, VsockPacketIterator,
+    SyncMagic, UsbPacketBuilder, VsockPacketIterator,
 };
 
 /// How long to wait for the USB protocol to synchronize.
@@ -81,24 +81,28 @@ enum SyncError {
     TimedOut,
 }
 
-/// Creates a new magic packet used to synchronize a USB VSOCK connection.
-fn sync_packet(version: ProtocolVersion) -> Vec<u8> {
-    let magic = version.magic();
+/// Creates a new magic packet with raw magic bytes.
+fn sync_packet_raw(magic: &[u8]) -> Vec<u8> {
     let header = &mut Header::new(PacketType::Sync);
     header.payload_len = (magic.len() as u32).into();
     header.host_cid = CID_HOST.into();
     header.host_port = 0.into();
     header.device_cid = CID_ANY.into();
     header.device_port = 0.into();
-    let packet = Packet { header, payload: &magic };
+    let packet = Packet { header, payload: magic };
     let mut packet_storage = vec![0; header.packet_size()];
     packet.write_to_unchecked(&mut packet_storage);
     packet_storage
 }
 
+/// Creates a new magic packet used to synchronize a USB VSOCK connection.
+fn sync_packet(magic: SyncMagic) -> Vec<u8> {
+    sync_packet_raw(&magic.magic())
+}
+
 /// Creates a new magic packet used to finish synchronizing a USB VSOCK connection.
-fn sync_ack_packet(cid: u32, version: ProtocolVersion) -> Vec<u8> {
-    let magic = version.magic();
+fn sync_ack_packet(cid: u32, magic: SyncMagic) -> Vec<u8> {
+    let magic = magic.magic();
     let header = &mut Header::new(PacketType::Sync);
     header.payload_len = (magic.len() as u32).into();
     header.host_cid = CID_HOST.into();
@@ -125,7 +129,31 @@ fn echo_reply_packet(address: &Address, payload: &[u8]) -> Vec<u8> {
 /// Information we got about the connection after the magic exchange.
 struct ConnectionInfo {
     protocol_version: ProtocolVersion,
+    sync_magic: SyncMagic,
     requested_cid: u32,
+}
+
+trait SyncTransport {
+    async fn write_sync(&self, data: &[u8]) -> Result<(), usb_rs::Error>;
+    async fn read_sync(&self, buf: &mut [u8]) -> Result<usize, usb_rs::Error>;
+}
+
+impl SyncTransport for (&usb_rs::BulkOutEndpoint, &usb_rs::BulkInEndpoint) {
+    async fn write_sync(&self, data: &[u8]) -> Result<(), usb_rs::Error> {
+        self.0.write(data, usb_rs::ZeroPacket::Send).await
+    }
+
+    async fn read_sync(&self, buf: &mut [u8]) -> Result<usize, usb_rs::Error> {
+        self.1.read(buf).await
+    }
+}
+
+fn random_nonce() -> NonZero<u32> {
+    loop {
+        if let Some(nonce) = NonZero::new(rand::random()) {
+            return nonce;
+        }
+    }
 }
 
 /// Wait on a USB port for the magic packet indicating the start of our USB
@@ -135,18 +163,24 @@ async fn wait_for_magic(
     out_ep: &usb_rs::BulkOutEndpoint,
     in_ep: &usb_rs::BulkInEndpoint,
 ) -> Result<ConnectionInfo, SyncError> {
+    let sent_magic = SyncMagic::latest(random_nonce());
+    wait_for_magic_inner(debug_name, &(out_ep, in_ep), &sync_packet(sent_magic), sent_magic).await
+}
+
+async fn wait_for_magic_inner(
+    debug_name: &str,
+    transport: &impl SyncTransport,
+    initial_packet: &[u8],
+    mut sent_magic: SyncMagic,
+) -> Result<ConnectionInfo, SyncError> {
     let mut magic_timer = fasync::Timer::new(MAGIC_TIMEOUT);
     let mut buf = [0u8; MTU];
-    let nonce = rand::random::<u32>();
-    let sent_version = ProtocolVersion::V2(nonce);
-    out_ep
-        .write(&sync_packet(sent_version), usb_rs::ZeroPacket::Send)
-        .await
-        .map_err(SyncError::Send)?;
+    let mut current_version = sent_magic.version();
+    transport.write_sync(initial_packet).await.map_err(SyncError::Send)?;
     loop {
         let size = {
             log::trace!(device:? = debug_name; "Reading from in endpoint for magic string");
-            let read_fut = in_ep.read(&mut buf);
+            let read_fut = transport.read_sync(&mut buf);
             let read_fut = pin!(read_fut);
             match select(read_fut, &mut magic_timer).await {
                 Either::Left((got, _)) => got.map_err(SyncError::Recv)?,
@@ -169,26 +203,54 @@ async fn wait_for_magic(
             };
             match packet.header.packet_type {
                 PacketType::Sync => {
-                    if let Some(protocol_version) = ProtocolVersion::from_magic(packet.payload) {
-                        if protocol_version == sent_version {
+                    if let Some(reply_magic) = SyncMagic::from_magic(packet.payload) {
+                        if reply_magic.is_reset() {
+                            let target_version = reply_magic.version();
+                            // Guard against a target requesting a higher version than we offered
+                            // (relevant once versions > V2 exist).
+                            if target_version <= current_version {
+                                log::info!(
+                                    device:? = debug_name;
+                                    "Target requested sync reset to protocol version {target_version}"
+                                );
+                                current_version = target_version;
+                                sent_magic = SyncMagic::v2(random_nonce());
+                                transport
+                                    .write_sync(&sync_packet(sent_magic))
+                                    .await
+                                    .map_err(SyncError::Send)?;
+                            } else {
+                                log::warn!(
+                                    device:? = debug_name;
+                                    "Received reset sync for unsupported version {reply_magic}, ignoring."
+                                );
+                            }
+                            continue;
+                        }
+                        if reply_magic == sent_magic {
                             return Ok(ConnectionInfo {
-                                protocol_version,
+                                protocol_version: current_version,
+                                sync_magic: reply_magic,
                                 requested_cid: packet.header.device_cid.get(),
                             });
                         }
-                        if matches!(protocol_version, ProtocolVersion::V1 | ProtocolVersion::V0) {
+                        let protocol_version = reply_magic.version();
+                        if matches!(protocol_version, ProtocolVersion::V0 | ProtocolVersion::V1)
+                            && protocol_version < current_version
+                        {
                             log::info!(
                                 device:? = debug_name;
                                 "Target requested downgrade to protocol version {protocol_version}"
                             );
                             return Ok(ConnectionInfo {
                                 protocol_version,
+                                sync_magic: reply_magic,
                                 requested_cid: packet.header.device_cid.get(),
                             });
                         }
                         log::warn!(
                             device:? = debug_name;
-                            "Received sync packet with unexpected version or non-matching nonce: {protocol_version}, ignoring."
+                            "Received sync packet with unexpected version or non-matching nonce: {reply_magic}, ignoring."
                         );
                     } else {
                         log::warn!(
@@ -203,11 +265,11 @@ async fn wait_for_magic(
                         device:? = debug_name;
                         "received echo packet while waiting for sync, responding."
                     );
-                    out_ep
-                        .write(
-                            &echo_reply_packet(&Address::from(packet.header), packet.payload),
-                            usb_rs::ZeroPacket::Send,
-                        )
+                    transport
+                        .write_sync(&echo_reply_packet(
+                            &Address::from(packet.header),
+                            packet.payload,
+                        ))
                         .await
                         .map_err(SyncError::Send)?;
                 }
@@ -279,7 +341,7 @@ async fn run_usb_link<S: AsyncRead + AsyncWrite + Send + 'static>(
     let in_ep = in_ep.ok_or(LinkError::InMissing)?;
     let out_ep = out_ep.ok_or(LinkError::OutMissing)?;
 
-    let ConnectionInfo { protocol_version, requested_cid } =
+    let ConnectionInfo { protocol_version, sync_magic, requested_cid } =
         wait_for_magic(debug_name, &out_ep, &in_ep).await?;
 
     let (conn_state, incoming_requests) = ConnectionState::new(protocol_version, serial.clone());
@@ -318,7 +380,7 @@ async fn run_usb_link<S: AsyncRead + AsyncWrite + Send + 'static>(
     let debug_name = format!("usb:cid:{cid} ({debug_name})");
 
     out_ep
-        .write(&sync_ack_packet(cid, protocol_version), usb_rs::ZeroPacket::Send)
+        .write(&sync_ack_packet(cid, sync_magic), usb_rs::ZeroPacket::Send)
         .await
         .map_err(SyncError::Send)?;
 
@@ -1650,31 +1712,154 @@ mod test {
 
     #[fuchsia::test]
     async fn test_sync_packet_generation() {
-        let version = ProtocolVersion::V2(0xabcdef01);
-        let raw = sync_packet(version);
+        let magic = SyncMagic::v2(NonZero::new(0xabcdef01).unwrap());
+        let raw = sync_packet(magic);
         let mut it = VsockPacketIterator::new(&raw);
         let packet = it.next().unwrap().unwrap();
         assert_eq!(packet.header.packet_type, PacketType::Sync);
         assert_eq!(packet.header.host_cid.get(), CID_HOST);
         assert_eq!(packet.header.device_cid.get(), CID_ANY);
         assert_eq!(packet.payload, b"vsock:2:abcdef01");
-        assert_eq!(ProtocolVersion::from_magic(packet.payload), Some(version));
+        assert_eq!(SyncMagic::from_magic(packet.payload), Some(magic));
     }
 
     #[fuchsia::test]
     async fn test_sync_ack_packet_downgrade() {
-        let ack_v2 = sync_ack_packet(42, ProtocolVersion::V2(0x1234));
+        let ack_v2 = sync_ack_packet(42, SyncMagic::v2(NonZero::new(0x1234).unwrap()));
         let mut it = VsockPacketIterator::new(&ack_v2);
         let packet = it.next().unwrap().unwrap();
         assert_eq!(packet.header.packet_type, PacketType::Sync);
         assert_eq!(packet.header.device_cid.get(), 42);
         assert_eq!(packet.payload, b"vsock:2:1234");
 
-        let ack_v1 = sync_ack_packet(42, ProtocolVersion::V1);
+        let ack_v1 = sync_ack_packet(42, SyncMagic::v1());
         let mut it = VsockPacketIterator::new(&ack_v1);
         let packet = it.next().unwrap().unwrap();
         assert_eq!(packet.header.packet_type, PacketType::Sync);
         assert_eq!(packet.header.device_cid.get(), 42);
         assert_eq!(packet.payload, b"vsock:1");
+    }
+
+    struct MockSyncTransport {
+        tx: mpsc::UnboundedSender<Vec<u8>>,
+        rx: futures::lock::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    }
+
+    impl SyncTransport for MockSyncTransport {
+        async fn write_sync(&self, data: &[u8]) -> Result<(), usb_rs::Error> {
+            self.tx.unbounded_send(data.to_vec()).unwrap();
+            Ok(())
+        }
+
+        async fn read_sync(&self, buf: &mut [u8]) -> Result<usize, usb_rs::Error> {
+            let data = self.rx.lock().await.next().await.unwrap();
+            buf[..data.len()].copy_from_slice(&data);
+            Ok(data.len())
+        }
+    }
+
+    fn target_sync_reply(cid: u32, payload: &[u8]) -> Vec<u8> {
+        let header = &mut Header::new(PacketType::Sync);
+        header.payload_len = (payload.len() as u32).into();
+        header.host_cid = CID_HOST.into();
+        header.device_cid = cid.into();
+        let packet = Packet { header, payload };
+        let mut out = vec![0; header.packet_size()];
+        packet.write_to_unchecked(&mut out);
+        out
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_for_magic_reset_and_downgrade_from_v9999() {
+        let (host_to_target_tx, mut host_to_target_rx) = mpsc::unbounded();
+        let (target_to_host_tx, target_to_host_rx) = mpsc::unbounded();
+        let transport = MockSyncTransport {
+            tx: host_to_target_tx,
+            rx: futures::lock::Mutex::new(target_to_host_rx),
+        };
+
+        let target_task = fasync::Task::spawn(async move {
+            // 1. Receive fake v9999 sync from host.
+            let first = host_to_target_rx.next().await.unwrap();
+            let pkt = VsockPacketIterator::new(&first).next().unwrap().unwrap();
+            assert_eq!(pkt.header.packet_type, PacketType::Sync);
+            assert_eq!(pkt.payload, b"vsock:9999:12345678");
+
+            // 2. Target doesn't recognize v9999; send reset sync for V2 (nonce 0).
+            target_to_host_tx
+                .unbounded_send(target_sync_reply(3, &SyncMagic::v2_reset().magic()))
+                .unwrap();
+
+            // 3. Host should reset and send a fresh V2 sync with a non-zero nonce.
+            let second = host_to_target_rx.next().await.unwrap();
+            let pkt2 = VsockPacketIterator::new(&second).next().unwrap().unwrap();
+            assert_eq!(pkt2.header.packet_type, PacketType::Sync);
+            let magic2 = SyncMagic::from_magic(pkt2.payload).unwrap();
+            assert_eq!(magic2.version(), ProtocolVersion::V2);
+            assert!(magic2.nonce().is_some());
+            assert!(!magic2.is_reset());
+
+            // 4. Target echoes the new V2 magic back.
+            target_to_host_tx.unbounded_send(target_sync_reply(3, pkt2.payload)).unwrap();
+            magic2
+        });
+
+        let dummy_magic = SyncMagic::v2(random_nonce());
+        let info = wait_for_magic_inner(
+            "test",
+            &transport,
+            &sync_packet_raw(b"vsock:9999:12345678"),
+            dummy_magic,
+        )
+        .await
+        .unwrap();
+        let expected_magic = target_task.await;
+        assert_eq!(info.protocol_version, ProtocolVersion::V2);
+        assert_eq!(info.sync_magic, expected_magic);
+        assert_eq!(info.requested_cid, 3);
+    }
+
+    #[fuchsia::test]
+    async fn test_wait_for_magic_reset_at_v2() {
+        let (host_to_target_tx, mut host_to_target_rx) = mpsc::unbounded();
+        let (target_to_host_tx, target_to_host_rx) = mpsc::unbounded();
+        let transport = MockSyncTransport {
+            tx: host_to_target_tx,
+            rx: futures::lock::Mutex::new(target_to_host_rx),
+        };
+
+        let target_task = fasync::Task::spawn(async move {
+            let first = host_to_target_rx.next().await.unwrap();
+            let pkt1 = VsockPacketIterator::new(&first).next().unwrap().unwrap();
+            let magic1 = SyncMagic::from_magic(pkt1.payload).unwrap();
+            assert_eq!(magic1.version(), ProtocolVersion::V2);
+            assert!(magic1.nonce().is_some());
+
+            // Target sends a reset sync (nonce 0).
+            target_to_host_tx
+                .unbounded_send(target_sync_reply(3, &SyncMagic::v2_reset().magic()))
+                .unwrap();
+
+            // Host must reset and send a fresh non-zero nonce.
+            let second = host_to_target_rx.next().await.unwrap();
+            let pkt2 = VsockPacketIterator::new(&second).next().unwrap().unwrap();
+            let magic2 = SyncMagic::from_magic(pkt2.payload).unwrap();
+            assert_eq!(magic2.version(), ProtocolVersion::V2);
+            assert!(magic2.nonce().is_some());
+            assert!(!magic2.is_reset());
+
+            target_to_host_tx.unbounded_send(target_sync_reply(3, pkt2.payload)).unwrap();
+            magic2
+        });
+
+        let initial_magic = SyncMagic::latest(random_nonce());
+        let info =
+            wait_for_magic_inner("test", &transport, &sync_packet(initial_magic), initial_magic)
+                .await
+                .unwrap();
+        let expected_magic = target_task.await;
+        assert_eq!(info.protocol_version, ProtocolVersion::V2);
+        assert_eq!(info.sync_magic, expected_magic);
+        assert_eq!(info.requested_cid, 3);
     }
 }

@@ -7,9 +7,6 @@
 #ifndef ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_CURRENT_THREAD_H_
 #define ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_CURRENT_THREAD_H_
 
-#include <lib/arch/intrin.h>
-#include <stdint.h>
-
 #include <ktl/byte.h>
 
 // Routines to directly access the current thread pointer out of the current

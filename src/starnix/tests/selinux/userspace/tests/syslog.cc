@@ -14,10 +14,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() {
-  EXPECT_THAT(mknod("/tmp/dev_kmsg", S_IFCHR | 0600, makedev(1, 11)), SyscallSucceeds());
-  return "syslog_policy";
-}
+extern std::string GetTestPolicyName() { return "syslog_policy"; }
 
 namespace {
 
@@ -36,7 +33,14 @@ constexpr int SYSLOG_ACTION_CONSOLE_LEVEL = 8;
 constexpr int SYSLOG_ACTION_SIZE_UNREAD = 9;
 constexpr int SYSLOG_ACTION_SIZE_BUFFER = 10;
 
-TEST(SyslogTest, ProcKmsgAllowed) {
+class SyslogTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    ASSERT_THAT(EnsureDeviceNode("/dev/kmsg", S_IFCHR | 0600, makedev(1, 11)), SyscallResultIsOk());
+  }
+};
+
+TEST_F(SyslogTest, ProcKmsgAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     fbl::unique_fd proc_kmsg = fbl::unique_fd(open("/proc/kmsg", O_RDONLY | O_NONBLOCK));
@@ -47,14 +51,14 @@ TEST(SyslogTest, ProcKmsgAllowed) {
   }));
 }
 
-TEST(SyslogTest, ProcKmsgDenied) {
+TEST_F(SyslogTest, ProcKmsgDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(open("/proc/kmsg", O_RDONLY | O_NONBLOCK), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, ProcKmsgReadDeniedIfDroppedPermission) {
+TEST_F(SyslogTest, ProcKmsgReadDeniedIfDroppedPermission) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     fbl::unique_fd proc_kmsg = fbl::unique_fd(open("/proc/kmsg", O_RDONLY | O_NONBLOCK));
@@ -66,10 +70,10 @@ TEST(SyslogTest, ProcKmsgReadDeniedIfDroppedPermission) {
   }));
 }
 
-TEST(SyslogTest, DevKmsgReadAllowed) {
+TEST_F(SyslogTest, DevKmsgReadAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_read_t:s0", [&] {
-    fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/tmp/dev_kmsg", O_RDONLY | O_NONBLOCK));
+    fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/dev/kmsg", O_RDONLY | O_NONBLOCK));
     ASSERT_TRUE(dev_kmsg) << strerror(errno);
     char buf[4096];
     EXPECT_THAT(read(dev_kmsg.get(), buf, sizeof(buf)),
@@ -77,17 +81,17 @@ TEST(SyslogTest, DevKmsgReadAllowed) {
   }));
 }
 
-TEST(SyslogTest, DevKmsgReadDenied) {
+TEST_F(SyslogTest, DevKmsgReadDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
-    EXPECT_THAT(open("/tmp/dev_kmsg", O_RDONLY | O_NONBLOCK), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(open("/dev/kmsg", O_RDONLY | O_NONBLOCK), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, DevKmsgReadAllowedIfDroppedPermission) {
+TEST_F(SyslogTest, DevKmsgReadAllowedIfDroppedPermission) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_read_t:s0", [&] {
-    fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/tmp/dev_kmsg", O_RDONLY | O_NONBLOCK));
+    fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/dev/kmsg", O_RDONLY | O_NONBLOCK));
     ASSERT_TRUE(dev_kmsg) << strerror(errno);
 
     // Permissions are not re-checked after opening.
@@ -99,45 +103,45 @@ TEST(SyslogTest, DevKmsgReadAllowedIfDroppedPermission) {
   }));
 }
 
-TEST(SyslogTest, DevKmsgWriteAllowed) {
+TEST_F(SyslogTest, DevKmsgWriteAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
-    fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/tmp/dev_kmsg", O_WRONLY | O_NONBLOCK));
+    fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/dev/kmsg", O_WRONLY | O_NONBLOCK));
     ASSERT_TRUE(dev_kmsg) << strerror(errno);
     char buf[] = "hello, world\n";
     EXPECT_THAT(write(dev_kmsg.get(), buf, sizeof(buf)), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionCloseDenied) {
+TEST_F(SyslogTest, SyslogActionCloseDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CLOSE, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionCloseAllowed) {
+TEST_F(SyslogTest, SyslogActionCloseAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CLOSE, 0, 0), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionOpenDenied) {
+TEST_F(SyslogTest, SyslogActionOpenDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_OPEN, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionOpenAllowed) {
+TEST_F(SyslogTest, SyslogActionOpenAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_OPEN, 0, 0), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionReadDenied) {
+TEST_F(SyslogTest, SyslogActionReadDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     char read_buf[4096];
@@ -146,11 +150,11 @@ TEST(SyslogTest, SyslogActionReadDenied) {
   }));
 }
 
-TEST(SyslogTest, SyslogActionReadAllowed) {
+TEST_F(SyslogTest, SyslogActionReadAllowed) {
   test_helper::ForkHelper fork_helper;
   fork_helper.ExpectSignal(SIGKILL);
 
-  fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/tmp/dev_kmsg", O_WRONLY));
+  fbl::unique_fd dev_kmsg = fbl::unique_fd(open("/dev/kmsg", O_WRONLY));
   ASSERT_TRUE(dev_kmsg);
 
   // In some cases, our messages get removed from the buffer before we can read them. We fork to
@@ -172,7 +176,7 @@ TEST(SyslogTest, SyslogActionReadAllowed) {
   ASSERT_TRUE(fork_helper.WaitForChildren());
 }
 
-TEST(SyslogTest, SyslogActionReadAllDenied) {
+TEST_F(SyslogTest, SyslogActionReadAllDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     char read_buf[4096];
@@ -181,7 +185,7 @@ TEST(SyslogTest, SyslogActionReadAllDenied) {
   }));
 }
 
-TEST(SyslogTest, SyslogActionReadAllAllowed) {
+TEST_F(SyslogTest, SyslogActionReadAllAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_read_t:s0", [&] {
     char read_buf[4096];
@@ -189,7 +193,7 @@ TEST(SyslogTest, SyslogActionReadAllAllowed) {
   }));
 }
 
-TEST(SyslogTest, SyslogActionReadClearDenied) {
+TEST_F(SyslogTest, SyslogActionReadClearDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     char read_buf[4096];
@@ -198,7 +202,7 @@ TEST(SyslogTest, SyslogActionReadClearDenied) {
   }));
 }
 
-TEST(SyslogTest, SyslogActionReadClearAllowed) {
+TEST_F(SyslogTest, SyslogActionReadClearAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     char read_buf[4096];
@@ -206,84 +210,84 @@ TEST(SyslogTest, SyslogActionReadClearAllowed) {
   }));
 }
 
-TEST(SyslogTest, SyslogActionClearDenied) {
+TEST_F(SyslogTest, SyslogActionClearDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CLEAR, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionClearAllowed) {
+TEST_F(SyslogTest, SyslogActionClearAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CLEAR, 0, 0), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionConsoleOffDenied) {
+TEST_F(SyslogTest, SyslogActionConsoleOffDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_OFF, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionConsoleOffAllowed) {
+TEST_F(SyslogTest, SyslogActionConsoleOffAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_console_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_OFF, 0, 0), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionConsoleOnDenied) {
+TEST_F(SyslogTest, SyslogActionConsoleOnDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_ON, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionConsoleOnAllowed) {
+TEST_F(SyslogTest, SyslogActionConsoleOnAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_console_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_ON, 0, 0), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionConsoleLevelDenied) {
+TEST_F(SyslogTest, SyslogActionConsoleLevelDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, 0, 7), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionConsoleLevelAllowed) {
+TEST_F(SyslogTest, SyslogActionConsoleLevelAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_console_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, 0, 7), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionSizeUnreadDenied) {
+TEST_F(SyslogTest, SyslogActionSizeUnreadDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_UNREAD, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionSizeUnreadAllowed) {
+TEST_F(SyslogTest, SyslogActionSizeUnreadAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_mod_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_UNREAD, 0, 0), SyscallSucceeds());
   }));
 }
 
-TEST(SyslogTest, SyslogActionSizeBufferDenied) {
+TEST_F(SyslogTest, SyslogActionSizeBufferDenied) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_no_syslog_perm_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_BUFFER, 0, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
-TEST(SyslogTest, SyslogActionSizeBufferAllowed) {
+TEST_F(SyslogTest, SyslogActionSizeBufferAllowed) {
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:syslog_test_has_syslog_read_t:s0", [&] {
     EXPECT_THAT(klogctl(SYSLOG_ACTION_SIZE_BUFFER, 0, 0), SyscallSucceeds());

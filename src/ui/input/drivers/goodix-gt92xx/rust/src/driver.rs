@@ -20,7 +20,7 @@ impl Driver for GoodixGt92xxDriver {
         Ok(Self { _node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("GoodixGt92xxDriver (Rust Skeleton) stopped!");
     }
 }

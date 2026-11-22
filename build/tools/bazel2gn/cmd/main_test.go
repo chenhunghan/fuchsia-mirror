@@ -123,6 +123,7 @@ compiled_action(
 	writeFile(t, gnPath, "# Above sentinel\n\n"+bazel2gn.SentinelComment+"\n")
 
 	p := syncParams{
+		fuchsiaDir:    fuchsiaDir,
 		relDir:        "pkg",
 		buildifierBin: fakeTool(t, "buildifier", "cat\n"),
 		gnBin:         fakeTool(t, "gn", "cat\n"),
@@ -145,5 +146,59 @@ compiled_action(
 		if !strings.Contains(got, wantSubstr) {
 			t.Errorf("synced BUILD.gn missing %q:\n%s", wantSubstr, got)
 		}
+	}
+}
+
+func TestSyncWithRepoConfigImportsAndRules(t *testing.T) {
+	fuchsiaDir := t.TempDir()
+	writeFile(t, filepath.Join(fuchsiaDir, "sub", bazel2gn.ConfigFileName), `{
+  "gn_imports": ["//sub/bazel/migration.gni"],
+  "rules": {
+    "custom_target": {
+      "gn_template": "custom_gn_target",
+      "attrs_to_omit": ["bazel_only"],
+      "attr_transformers": {"manifest": "file_paths"}
+    }
+  }
+}`)
+	bazelPath := filepath.Join(fuchsiaDir, "sub", "pkg", "BUILD.bazel")
+	gnPath := filepath.Join(fuchsiaDir, "sub", "pkg", "BUILD.gn")
+	writeFile(t, bazelPath, `load("//sub/bazel:rules.bzl", "custom_target")
+
+custom_target(
+    name = "demo",
+    bazel_only = True,
+    manifest = "meta/demo.cml",
+)
+`)
+	writeFile(t, gnPath, "# Header\n\n"+bazel2gn.SentinelComment+"\n")
+
+	p := syncParams{
+		fuchsiaDir:    fuchsiaDir,
+		relDir:        "sub/pkg",
+		buildifierBin: fakeTool(t, "buildifier", "cat\n"),
+		gnBin:         fakeTool(t, "gn", "cat\n"),
+		checkOnly:     false,
+	}
+	if err := syncDirectory(context.Background(), bazelPath, gnPath, p); err != nil {
+		t.Fatalf("syncDirectory() failed: %v", err)
+	}
+	gotBytes, err := os.ReadFile(gnPath)
+	if err != nil {
+		t.Fatalf("reading synced BUILD.gn: %v", err)
+	}
+	got := string(gotBytes)
+	for _, wantSubstr := range []string{
+		`import("//build/tools/bazel2gn/bazel_migration.gni")`,
+		`import("//sub/bazel/migration.gni")`,
+		`custom_gn_target("demo") {`,
+		`manifest = "meta/demo.cml"`,
+	} {
+		if !strings.Contains(got, wantSubstr) {
+			t.Errorf("synced BUILD.gn missing %q:\n%s", wantSubstr, got)
+		}
+	}
+	if strings.Contains(got, "bazel_only") {
+		t.Errorf("synced BUILD.gn should omit bazel_only:\n%s", got)
 	}
 }

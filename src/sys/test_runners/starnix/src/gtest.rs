@@ -4,8 +4,10 @@
 
 use crate::{helpers, results_parser};
 use anyhow::{Context, Error};
+use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_test::{self as ftest, Result_ as TestResult, Status};
 use ftest::CaseListenerProxy;
+use fuchsia_async as fasync;
 use futures::AsyncBufReadExt;
 use futures::io::BufReader;
 use gtest_runner_lib::parser;
@@ -13,7 +15,6 @@ use gtest_runner_lib::parser::{IndividualTestOutputStatus, TestSuiteOutput};
 use helpers::TestType;
 use std::collections::HashMap;
 use test_runners_lib::cases::TestCaseInfo;
-use {fidl_fuchsia_component_runner as frunner, fuchsia_async as fasync};
 
 const DYNAMIC_SKIP_RESULT: &str = "SKIPPED";
 
@@ -56,12 +57,17 @@ pub async fn get_cases_list_for_gtests(
     let read_content = parser::read_file(&output_dir, &output_file_name)
         .await
         .context("reading tests from output file.")?;
-    let tests = parser::parse_test_cases(read_content).context("parsing test cases")?;
+    parse_gtest_cases(read_content)
+}
+
+/// Parses serialized gTest case-list output into `ftest::Case` entries.
+pub(crate) fn parse_gtest_cases(contents: String) -> Result<Vec<ftest::Case>, Error> {
+    let tests = parser::parse_test_cases(contents).context("parsing test cases")?;
     Ok(tests
-        .iter()
+        .into_iter()
         .map(|TestCaseInfo { name, enabled }| ftest::Case {
-            name: Some(name.clone()),
-            enabled: Some(*enabled),
+            name: Some(name),
+            enabled: Some(enabled),
             ..Default::default()
         })
         .collect())
@@ -275,7 +281,7 @@ pub fn create_tests_filter_arg(tests: &Vec<ftest::Invocation>, test_type: TestTy
     let mut test_filter_arg = helpers::format_arg(test_type, FILTER_ARG);
     for test in tests {
         let test_name = test.name.clone().expect("No test name.");
-        test_filter_arg = format!("{}{}:", test_filter_arg, &test_name);
+        test_filter_arg = format!("{}{}:", test_filter_arg, test_name);
     }
 
     test_filter_arg

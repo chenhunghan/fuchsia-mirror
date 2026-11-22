@@ -41,7 +41,7 @@ This FTP also does not have a goal of defining a set of common error codes.
 This proposal modifies the wire format, the source language, and the first class
 language bindings.
 
-### Wire format
+### Wire format {#wire-format}
 
 The wire format specification currently has a section on Epitaphs. This section
 will be revised to read as follows:
@@ -239,5 +239,5 @@ an explicit system call.  We are starting with the thread-unsafe version to
 further develop our understanding of the problem space.
 
 <!-- xrefs -->
-[wire-format-epitaph]: /docs/reference/fidl/language/wire-format/README.md#epitaph-control-message-ordinal-0xffffffff
-[epitaphs]: /docs/reference/fidl/language/language.md#interfaces
+[wire-format-epitaph]: /docs/reference/fidl/language/wire-format/README.md#epitaph
+[epitaphs]: /docs/reference/fidl/language/language.md#protocols

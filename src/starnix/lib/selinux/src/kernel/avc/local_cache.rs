@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::kernel::{ClassPermission, KernelAccessDecision, KernelClass, KernelPermission};
+use crate::kernel::{KernelAccessDecision, KernelClass, KernelPermission};
 use crate::permission_check::PermissionCheckResult;
 use crate::policy::{AccessVector, XpermsKind};
 use crate::{PolicySeqNo, SecurityId};
@@ -119,7 +119,10 @@ impl XpermCacheKey {
 }
 
 /// Per-thread cache for SELinux policy decisions.
-#[derive(Debug)]
+///
+/// Cloning a [`PerThreadCache`] snapshots its cached entries and policy version so a child task
+/// can start with a copy of the parent's warm cache.
+#[derive(Clone, Debug)]
 pub struct PerThreadCache {
     /// Policy version for which this cache is valid.
     policy_seqno: Cell<PolicySeqNo>,
@@ -174,6 +177,10 @@ impl PerThreadCache {
             // Synchronize with the `Ordering::Release` increment of `policy_change_count` in
             // `SecurityServer` so that subsequent RCU reads of `active_policy` observe the new
             // policy without requiring an acquire barrier on the hot cache-hit path.
+            //
+            // `PerThreadCache` is `Send` and `!Sync`, so transferring a clone to another thread
+            // establishes a happens-before relationship: both visibility of the policy/AVC reset
+            // and monotonic `policy_seqno` reads require no additional barrier on lookup.
             fence(Ordering::Acquire);
             self.reset();
             self.policy_seqno.set(policy_seqno);
@@ -552,7 +559,7 @@ mod tests {
         let cache = PerThreadCache::default();
         let sid1 = SecurityId(1.try_into().unwrap());
         let sid2 = SecurityId(2.try_into().unwrap());
-        let permission = KernelPermission::File(FilePermission::Ioctl);
+        let permission: KernelPermission = FilePermission::Ioctl.into();
 
         let mut compute_called = false;
         let result = cache.check_xperm(
@@ -632,7 +639,7 @@ mod tests {
         let cache = PerThreadCache::default();
         let sid1 = SecurityId(1.try_into().unwrap());
         let sid2 = SecurityId(2.try_into().unwrap());
-        let permission = KernelPermission::File(FilePermission::Ioctl);
+        let permission: KernelPermission = FilePermission::Ioctl.into();
 
         cache.check_xperm(
             PolicySeqNo::INITIAL,
@@ -669,5 +676,304 @@ mod tests {
         );
         assert!(compute_called);
         assert!(!result.granted);
+    }
+
+    #[test]
+    fn test_cloned_fd_use_cache_serves_hit() {
+        let parent = PerThreadCache::default();
+        let sid1 = SecurityId(1.try_into().unwrap());
+        let sid2 = SecurityId(2.try_into().unwrap());
+
+        parent.lookup_fd_use(PolicySeqNo::INITIAL, sid1, sid2, || SIMPLE_ALLOW);
+
+        let child = parent.clone();
+        let mut compute_called = false;
+        let result = child.lookup_fd_use(PolicySeqNo::INITIAL, sid1, sid2, || {
+            compute_called = true;
+            PermissionCheckResult {
+                granted: false,
+                audit: AccessVector::NONE,
+                permissive: false,
+                todo_bug: None,
+            }
+        });
+        assert!(!compute_called);
+        assert!(result.granted);
+    }
+
+    #[test]
+    fn test_cloned_access_cache_serves_hit() {
+        let parent = PerThreadCache::default();
+        let sid1 = SecurityId(1.try_into().unwrap());
+        let sid2 = SecurityId(2.try_into().unwrap());
+        let class = KernelClass::File;
+
+        parent.lookup_access_decision(PolicySeqNo::INITIAL, sid1, sid2, class, || {
+            KernelAccessDecision {
+                allow: AccessVector::from(3),
+                audit: AccessVector::from(1),
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+
+        let child = parent.clone();
+        let mut compute_called = false;
+        let result = child.lookup_access_decision(PolicySeqNo::INITIAL, sid1, sid2, class, || {
+            compute_called = true;
+            KernelAccessDecision {
+                allow: AccessVector::NONE,
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+        assert!(!compute_called);
+        assert_eq!(result.allow, AccessVector::from(3));
+        assert_eq!(result.audit, AccessVector::from(1));
+    }
+
+    #[test]
+    fn test_cloned_xperm_cache_serves_hit() {
+        let parent = PerThreadCache::default();
+        let sid1 = SecurityId(1.try_into().unwrap());
+        let sid2 = SecurityId(2.try_into().unwrap());
+        let permission: KernelPermission = FilePermission::Ioctl.into();
+
+        parent.check_xperm(
+            PolicySeqNo::INITIAL,
+            XpermsKind::Ioctl,
+            sid1,
+            sid2,
+            permission.clone(),
+            42,
+            || SIMPLE_ALLOW,
+        );
+
+        let child = parent.clone();
+        let mut compute_called = false;
+        let result = child.check_xperm(
+            PolicySeqNo::INITIAL,
+            XpermsKind::Ioctl,
+            sid1,
+            sid2,
+            permission,
+            42,
+            || {
+                compute_called = true;
+                PermissionCheckResult {
+                    granted: false,
+                    audit: AccessVector::NONE,
+                    permissive: false,
+                    todo_bug: None,
+                }
+            },
+        );
+        assert!(!compute_called);
+        assert!(result.granted);
+    }
+
+    #[test]
+    fn test_cloned_cache_mutations_do_not_affect_parent() {
+        let parent = PerThreadCache::default();
+        let sid1 = SecurityId(1.try_into().unwrap());
+        let sid2 = SecurityId(2.try_into().unwrap());
+        let class = KernelClass::File;
+        let permission: KernelPermission = FilePermission::Ioctl.into();
+
+        parent.lookup_fd_use(PolicySeqNo::INITIAL, sid1, sid2, || SIMPLE_ALLOW);
+        parent.lookup_access_decision(PolicySeqNo::INITIAL, sid1, sid2, class, || {
+            KernelAccessDecision {
+                allow: AccessVector::from(1),
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+        parent.check_xperm(
+            PolicySeqNo::INITIAL,
+            XpermsKind::Ioctl,
+            sid1,
+            sid2,
+            permission.clone(),
+            1,
+            || SIMPLE_ALLOW,
+        );
+
+        let child = parent.clone();
+
+        // Fill and evict every sub-cache in the child.
+        for i in 10u32..(10 + ACCESS_CACHE_SIZE as u32) {
+            let other_sid = SecurityId(i.try_into().unwrap());
+            child.lookup_fd_use(PolicySeqNo::INITIAL, sid1, other_sid, || SIMPLE_ALLOW);
+            child.lookup_access_decision(PolicySeqNo::INITIAL, sid1, other_sid, class, || {
+                KernelAccessDecision {
+                    allow: AccessVector::from(2),
+                    audit: AccessVector::NONE,
+                    flags: 0,
+                    todo_bug: None,
+                }
+            });
+            child.check_xperm(
+                PolicySeqNo::INITIAL,
+                XpermsKind::Ioctl,
+                sid1,
+                other_sid,
+                permission.clone(),
+                i as u16,
+                || SIMPLE_ALLOW,
+            );
+        }
+
+        // Parent's entries remain untouched and still serve hits without recomputing.
+        let mut compute_called = false;
+        parent.lookup_fd_use(PolicySeqNo::INITIAL, sid1, sid2, || {
+            compute_called = true;
+            SIMPLE_ALLOW
+        });
+        assert!(!compute_called);
+
+        let access = parent.lookup_access_decision(PolicySeqNo::INITIAL, sid1, sid2, class, || {
+            compute_called = true;
+            KernelAccessDecision {
+                allow: AccessVector::NONE,
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+        assert!(!compute_called);
+        assert_eq!(access.allow, AccessVector::from(1));
+
+        parent.check_xperm(
+            PolicySeqNo::INITIAL,
+            XpermsKind::Ioctl,
+            sid1,
+            sid2,
+            permission,
+            1,
+            || {
+                compute_called = true;
+                SIMPLE_ALLOW
+            },
+        );
+        assert!(!compute_called);
+
+        // Entries inserted in child are not visible in parent.
+        let child_only_sid = SecurityId(10.try_into().unwrap());
+        parent.lookup_access_decision(PolicySeqNo::INITIAL, sid1, child_only_sid, class, || {
+            compute_called = true;
+            KernelAccessDecision {
+                allow: AccessVector::NONE,
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+        assert!(compute_called);
+    }
+
+    #[test]
+    fn test_cloned_cache_resets_on_policy_change() {
+        let parent = PerThreadCache::default();
+        let sid1 = SecurityId(1.try_into().unwrap());
+        let sid2 = SecurityId(2.try_into().unwrap());
+        let class = KernelClass::File;
+        let permission: KernelPermission = FilePermission::Ioctl.into();
+
+        parent.lookup_fd_use(PolicySeqNo::INITIAL, sid1, sid2, || SIMPLE_ALLOW);
+        parent.lookup_access_decision(PolicySeqNo::INITIAL, sid1, sid2, class, || {
+            KernelAccessDecision {
+                allow: AccessVector::from(1),
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+        parent.check_xperm(
+            PolicySeqNo::INITIAL,
+            XpermsKind::Ioctl,
+            sid1,
+            sid2,
+            permission.clone(),
+            1,
+            || SIMPLE_ALLOW,
+        );
+
+        let child = parent.clone();
+
+        // Advancing policy_seqno resets all three sub-caches in the clone.
+        let mut fd_use_computed = false;
+        child.lookup_fd_use(PolicySeqNo::OTHER, sid1, sid2, || {
+            fd_use_computed = true;
+            PermissionCheckResult {
+                granted: false,
+                audit: AccessVector::NONE,
+                permissive: false,
+                todo_bug: None,
+            }
+        });
+        assert!(fd_use_computed);
+
+        let mut access_computed = false;
+        child.lookup_access_decision(PolicySeqNo::OTHER, sid1, sid2, class, || {
+            access_computed = true;
+            KernelAccessDecision {
+                allow: AccessVector::NONE,
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+        assert!(access_computed);
+
+        let mut xperm_computed = false;
+        child.check_xperm(PolicySeqNo::OTHER, XpermsKind::Ioctl, sid1, sid2, permission, 1, || {
+            xperm_computed = true;
+            PermissionCheckResult {
+                granted: false,
+                audit: AccessVector::NONE,
+                permissive: false,
+                todo_bug: None,
+            }
+        });
+        assert!(xperm_computed);
+    }
+
+    #[test]
+    fn test_cloned_cache_transfers_across_threads() {
+        let parent = PerThreadCache::default();
+        let sid1 = SecurityId(1.try_into().unwrap());
+        let sid2 = SecurityId(2.try_into().unwrap());
+        let class = KernelClass::File;
+
+        parent.lookup_access_decision(PolicySeqNo::OTHER, sid1, sid2, class, || {
+            KernelAccessDecision {
+                allow: AccessVector::from(5),
+                audit: AccessVector::NONE,
+                flags: 0,
+                todo_bug: None,
+            }
+        });
+
+        let child = parent.clone();
+        let result = std::thread::spawn(move || {
+            let mut compute_called = false;
+            let decision =
+                child.lookup_access_decision(PolicySeqNo::OTHER, sid1, sid2, class, || {
+                    compute_called = true;
+                    KernelAccessDecision {
+                        allow: AccessVector::NONE,
+                        audit: AccessVector::NONE,
+                        flags: 0,
+                        todo_bug: None,
+                    }
+                });
+            (compute_called, decision.allow)
+        })
+        .join()
+        .unwrap();
+
+        assert_eq!(result, (false, AccessVector::from(5)));
     }
 }

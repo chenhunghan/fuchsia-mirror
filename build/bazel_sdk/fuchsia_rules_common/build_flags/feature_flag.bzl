@@ -13,19 +13,36 @@ visibility("public")
 # cycles when used in default_build_flags), it does not evaluate C++ toolchain
 # `feature(implies = ...)` relationships and only supports explicitly
 # toggleable variant/instrumentation features.
+#
+# NOTE: "thinlto" is intentionally spelled without an underscore to avoid
+# colliding with upstream Bazel / @rules_cc / @rules_rust / @rules_go's
+# built-in "thin_lto" feature, which triggers hardcoded LTO indexing and
+# backend actions that Fuchsia does not use.
+#
+# LINT.IfChange(supported_variant_features)
 _SUPPORTED_FEATURES = [
     "asan",
+    "cfi",
     "coverage",
+    "coverage-cts",
     "coverage-rust",
+    "fuzzer",
+    "heapdump",
     "hwasan",
+    "instrumented",
     "lsan",
+    "lto",
     "msan",
     "profile",
     "profile-rust",
+    "profile-use",
+    "profile-use-rust",
     "sancov",
+    "thinlto",
     "tsan",
     "ubsan",
 ]
+# LINT.ThenChange(//build/bazel/config/variant_features/BUILD.bazel:supported_variant_features)
 
 def _feature_flag_impl(ctx):
     """Evaluate whether a toolchain feature is enabled in the current configuration.

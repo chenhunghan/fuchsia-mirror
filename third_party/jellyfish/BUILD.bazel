@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = ["//third_party/jellyfish/tests:host_tests"],
+)
+
+# GN does not model package license targets; only Bazel needs license() metadata.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:MIT"],
+    license_text = "jellyfish/LICENSE",
+    visibility = [":__subpackages__"],
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether jellyfish should use target_compatible_with (was not gated by if (is_host) in GN).
+# @bazel2gn:raw_attribute:stubs_root = "stubs"
+# @bazel2gn:raw_attribute:stubs = [ "__init__.pyi", "_jellyfish.pyi" ]
+py_library(
+    name = "jellyfish",
+    srcs = [
+        "jellyfish/python/jellyfish/_jellyfish.py",
+    ],
+    imports = ["jellyfish/python"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/fxtest/python:__pkg__",
+        "//scripts/fxtest/scripts:__pkg__",
+        "//third_party/jellyfish/tests:__pkg__",
+    ],
+)

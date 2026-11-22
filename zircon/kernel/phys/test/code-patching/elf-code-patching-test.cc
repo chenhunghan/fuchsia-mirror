@@ -10,14 +10,15 @@
 #include <stdio.h>
 
 #include <fbl/no_destructor.h>
-#include <ktl/array.h>
 #include <ktl/byte.h>
 #include <ktl/span.h>
 #include <ktl/string_view.h>
-#include <phys/address-space.h>
-#include <phys/elf-image.h>
+#include <phys/address-space/address-space.h>
+#include <phys/elf/image.h>
 #include <phys/kernel-package/kernel-package.h>
-#include <phys/symbolize.h>
+#include <phys/memory/init.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
 
 #include "../test-main.h"
 #include "test.h"
@@ -30,8 +31,9 @@ constexpr const char* kTestName = "elf-code-patching-test";
 
 constexpr ktl::string_view kAddOne = "add-one";
 constexpr ktl::string_view kMultiply = "multiply_by_factor";
+constexpr ktl::string_view kAddValue = "add_value";
 
-// The BOOTFS namespace under which kAddOne and kMultiply live.
+// The BOOTFS namespace under which kAddOne, kMultiply, and kAddValue live.
 constexpr ktl::string_view kNamespace = "elf-code-patching-test-data";
 
 // Symbolizer module IDs for the loaded test modules (module 0 is this test).
@@ -40,6 +42,9 @@ enum ModuleId : unsigned int {
   kPatchedAddOne,
   kMultiplyBy2,
   kMultiplyBy10,
+  kAddValue2,
+  kAddValue3,
+  kAddValue10,
 };
 
 }  // namespace
@@ -87,7 +92,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
       return 1;
     }
 
-    add_one->AssertInterpMatchesBuildId(kAddOne, symbolize.build_id());
+    add_one->AssertInterpMatchesBuildId(kAddOne, *Self().build_id());
     unpatched =
         add_one->Load(memalloc::Type::kPhysElf, emit_markup(ModuleId::kUnpatchedAddOne), {}, false);
     add_one->Relocate();
@@ -109,7 +114,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
       return 1;
     }
 
-    add_one->AssertInterpMatchesBuildId(kAddOne, symbolize.build_id());
+    add_one->AssertInterpMatchesBuildId(kAddOne, *Self().build_id());
     patched =
         add_one->Load(memalloc::Type::kPhysElf, emit_markup(ModuleId::kPatchedAddOne), {}, false);
     add_one->Relocate();
@@ -147,7 +152,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
       return 1;
     }
 
-    multiply->AssertInterpMatchesBuildId(kMultiply, symbolize.build_id());
+    multiply->AssertInterpMatchesBuildId(kMultiply, *Self().build_id());
     patched_stub2 =
         multiply->Load(memalloc::Type::kPhysElf, emit_markup(ModuleId::kMultiplyBy2), {}, false);
     multiply->Relocate();
@@ -186,7 +191,7 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
       return 1;
     }
 
-    multiply->AssertInterpMatchesBuildId(kMultiply, symbolize.build_id());
+    multiply->AssertInterpMatchesBuildId(kMultiply, *Self().build_id());
     patched_stub10 =
         multiply->Load(memalloc::Type::kPhysElf, emit_markup(ModuleId::kMultiplyBy10), {}, false);
     multiply->Relocate();
@@ -215,5 +220,53 @@ int TestMain(void* zbi_ptr, ktl::optional<EarlyBootZbi> early_zbi, arch::EarlyTi
   }
   printf("OK\n");
 
-  return 0;
+  // Now test the multiversion hermetic blob stub cases.  As above, each
+  // Allocation is kept alive after its test so that its pages won't be reused
+  // for the next test's code, since that could require cache flushing.
+  auto test_add_value = [&](ktl::string_view alternative, uint64_t addend, ModuleId module_id,
+                            Allocation& loaded) -> bool {
+    printf("%s: Testing multiversion hermetic blob (%.*s)...\n", symbolize.name(),
+           static_cast<int>(alternative.size()), alternative.data());
+    ElfImage image;
+    if (auto result = image.Init(bootfs, kAddValue, true); result.is_error()) {
+      zbitl::PrintBootfsError(result.error_value());
+      return false;
+    }
+
+    image.AssertInterpMatchesBuildId(kAddValue, *Self().build_id());
+    loaded = image.Load(memalloc::Type::kPhysElf, emit_markup(module_id), {}, false);
+    image.Relocate();
+
+    enum class ExpectedCase : uint32_t { kAddValue = kAddValueCaseId };
+
+    auto patch = [alternative](code_patching::Patcher& patcher, ExpectedCase case_id,
+                               ktl::span<ktl::byte> code,
+                               auto&& print) -> fit::result<ElfImage::Error> {
+      ZX_ASSERT_MSG(case_id == ExpectedCase::kAddValue,
+                    "code-patching case ID %" PRIu32 " != expected %" PRIu32,
+                    static_cast<uint32_t>(case_id), static_cast<uint32_t>(ExpectedCase::kAddValue));
+      print({"patch in "sv, alternative});
+      return patcher.PatchWithAlternative(code, alternative);
+    };
+    if (auto result = image.ForEachPatch<ExpectedCase>(patch); result.is_error()) {
+      image.Printf(result.error_value());
+      return false;
+    }
+
+    printf("%s: Calling %p...", symbolize.name(), image.ImageEntry<TestFn>());
+    uint64_t value = image.Call<TestFn>(kValue);
+    if (value != kValue + addend) {
+      printf("FAILED: %.*s got %" PRIu64 " != expected %" PRIu64 "\n",
+             static_cast<int>(alternative.size()), alternative.data(), value, kValue + addend);
+      return false;
+    }
+    printf("OK\n");
+    return true;
+  };
+  Allocation add_two, add_three, add_ten;
+  bool ok = test_add_value("by-config/add_value"sv, 2, ModuleId::kAddValue2, add_two);
+  ok = test_add_value("add_value"sv, 3, ModuleId::kAddValue3, add_three) && ok;
+  ok = test_add_value("by-deps/add_ten"sv, 10, ModuleId::kAddValue10, add_ten) && ok;
+
+  return ok ? 0 : 1;
 }

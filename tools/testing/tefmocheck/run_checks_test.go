@@ -93,18 +93,70 @@ func (c infraFailureCheck) IsInfraFailure() bool {
 	return true
 }
 
+type categorizedCheck struct {
+	baseCheck
+	name          string
+	category      runtests.FailureCategory
+	infraDomain   runtests.InfraDomain
+	isFlake       bool
+	failureReason string
+}
+
+func (c categorizedCheck) Name() string                       { return c.name }
+func (c categorizedCheck) Category() runtests.FailureCategory { return c.category }
+func (c categorizedCheck) InfraDomain() runtests.InfraDomain  { return c.infraDomain }
+func (c categorizedCheck) IsFlake() bool                      { return c.isFlake }
+func (c categorizedCheck) FailureReason() string              { return c.failureReason }
+
 func TestRunChecks(t *testing.T) {
 	falseCheck := alwaysFalseCheck{}
 	outputsDir := t.TempDir()
 	trueCheck := alwaysTrueCheck{outputsDir: outputsDir}
 	flakeCheck := alwaysFlakeCheck{}
 	infraFailCheck := infraFailureCheck{}
+	infraFlakeCheck := categorizedCheck{
+		name:        "infra_flake",
+		category:    runtests.CategoryInfra,
+		infraDomain: runtests.InfraDomainTools,
+		isFlake:     true,
+	}
+	infraOrSystemFlakeCheck := categorizedCheck{
+		name:     "infra_or_system_flake",
+		category: runtests.CategoryInfraOrSystem,
+		isFlake:  true,
+	}
+	systemOrTestFlakeCheck := categorizedCheck{
+		name:     "system_or_test_flake",
+		category: runtests.CategorySystemOrTest,
+		isFlake:  true,
+	}
+	systemOrTestFatalCheck := categorizedCheck{
+		name:          "system_or_test_fatal",
+		category:      runtests.CategorySystemOrTest,
+		failureReason: "  assertion failed  \n",
+	}
+	infraDomainCheck := categorizedCheck{
+		name:          "infra_domain",
+		category:      runtests.CategoryInfra,
+		infraDomain:   runtests.InfraDomainEnvironment,
+		failureReason: "invalid boot config",
+	}
 
 	tests := []struct {
-		name   string
-		checks []FailureModeCheck
-		want   []runtests.TestDetails
+		name            string
+		checks          []FailureModeCheck
+		want            []runtests.TestDetails
+		wantFailureMode *runtests.FailureModeSummary
 	}{
+		{
+			name:   "no_matching_checks",
+			checks: []FailureModeCheck{falseCheck},
+			want:   nil,
+			wantFailureMode: &runtests.FailureModeSummary{
+				Result:   runtests.FailureModePass,
+				Failures: []runtests.CheckFailure{},
+			},
+		},
 		{
 			name: "mixed_checks",
 			checks: []FailureModeCheck{
@@ -129,7 +181,24 @@ func TestRunChecks(t *testing.T) {
 					TestResult:           runtests.TestResult{OutputFiles: []string{debugPathForCheck(trueCheck)}},
 				},
 			},
-		}, {
+			wantFailureMode: &runtests.FailureModeSummary{
+				Name:   trueCheck.Name(),
+				Result: runtests.FailureModeFail,
+				Failures: []runtests.CheckFailure{
+					{
+						Name:        flakeCheck.Name(),
+						Result:      runtests.FailureModeFlaky,
+						OutputFiles: []string{debugPathForCheck(flakeCheck)},
+					},
+					{
+						Name:        trueCheck.Name(),
+						Result:      runtests.FailureModeFail,
+						OutputFiles: []string{debugPathForCheck(trueCheck), "true.txt"},
+					},
+				},
+			},
+		},
+		{
 			name:   "infra_failure_check",
 			checks: []FailureModeCheck{infraFailCheck},
 			want: []runtests.TestDetails{
@@ -138,6 +207,165 @@ func TestRunChecks(t *testing.T) {
 					Status:               runtests.TestInfraFailure,
 					IsTestingFailureMode: true,
 					TestResult:           runtests.TestResult{OutputFiles: []string{debugPathForCheck(infraFailCheck)}},
+				},
+			},
+			wantFailureMode: &runtests.FailureModeSummary{
+				Name:     infraFailCheck.Name(),
+				Category: runtests.CategoryInfra,
+				Result:   runtests.FailureModeFail,
+				Infra:    nil,
+				Failures: []runtests.CheckFailure{
+					{
+						Name:        infraFailCheck.Name(),
+						Result:      runtests.FailureModeFail,
+						Category:    runtests.CategoryInfra,
+						OutputFiles: []string{debugPathForCheck(infraFailCheck)},
+					},
+				},
+			},
+		},
+		{
+			name:   "fatal_check_strictly_determines_category_over_earlier_infra_flake",
+			checks: []FailureModeCheck{infraFlakeCheck, systemOrTestFatalCheck},
+			want: []runtests.TestDetails{
+				{
+					Name:                 checkTestNamePrefix + infraFlakeCheck.Name(),
+					Status:               runtests.TestInfraFailure,
+					IsTestingFailureMode: true,
+					TestResult:           runtests.TestResult{OutputFiles: []string{debugPathForCheck(infraFlakeCheck)}},
+				},
+				{
+					Name:                 checkTestNamePrefix + infraFlakeCheck.Name(),
+					Status:               runtests.TestSuccess,
+					IsTestingFailureMode: true,
+				},
+				{
+					Name:                 checkTestNamePrefix + systemOrTestFatalCheck.Name(),
+					Status:               runtests.TestFailure,
+					IsTestingFailureMode: true,
+					TestResult: runtests.TestResult{
+						OutputFiles:   []string{debugPathForCheck(systemOrTestFatalCheck)},
+						FailureReason: runtests.FailureReasonFromMessage("assertion failed"),
+					},
+				},
+			},
+			wantFailureMode: &runtests.FailureModeSummary{
+				Name:     systemOrTestFatalCheck.Name(),
+				Category: runtests.CategorySystemOrTest,
+				Result:   runtests.FailureModeFail,
+				Failures: []runtests.CheckFailure{
+					{
+						Name:        infraFlakeCheck.Name(),
+						Result:      runtests.FailureModeFlaky,
+						Category:    runtests.CategoryInfra,
+						Infra:       &runtests.InfraDetails{Domain: runtests.InfraDomainTools},
+						OutputFiles: []string{debugPathForCheck(infraFlakeCheck)},
+					},
+					{
+						Name:           systemOrTestFatalCheck.Name(),
+						Result:         runtests.FailureModeFail,
+						FailureMessage: "assertion failed",
+						Category:       runtests.CategorySystemOrTest,
+						OutputFiles:    []string{debugPathForCheck(systemOrTestFatalCheck)},
+					},
+				},
+			},
+		},
+		{
+			name:   "flake_only_category_precedence",
+			checks: []FailureModeCheck{systemOrTestFlakeCheck, infraOrSystemFlakeCheck, flakeCheck},
+			want: []runtests.TestDetails{
+				{
+					Name:                 checkTestNamePrefix + systemOrTestFlakeCheck.Name(),
+					Status:               runtests.TestFailure,
+					IsTestingFailureMode: true,
+					TestResult:           runtests.TestResult{OutputFiles: []string{debugPathForCheck(systemOrTestFlakeCheck)}},
+				},
+				{
+					Name:                 checkTestNamePrefix + systemOrTestFlakeCheck.Name(),
+					Status:               runtests.TestSuccess,
+					IsTestingFailureMode: true,
+				},
+				{
+					Name:                 checkTestNamePrefix + infraOrSystemFlakeCheck.Name(),
+					Status:               runtests.TestFailure,
+					IsTestingFailureMode: true,
+					TestResult:           runtests.TestResult{OutputFiles: []string{debugPathForCheck(infraOrSystemFlakeCheck)}},
+				},
+				{
+					Name:                 checkTestNamePrefix + infraOrSystemFlakeCheck.Name(),
+					Status:               runtests.TestSuccess,
+					IsTestingFailureMode: true,
+				},
+				{
+					Name:                 checkTestNamePrefix + flakeCheck.Name(),
+					Status:               runtests.TestFailure,
+					IsTestingFailureMode: true,
+					TestResult:           runtests.TestResult{OutputFiles: []string{debugPathForCheck(flakeCheck)}},
+				},
+				{
+					Name:                 checkTestNamePrefix + flakeCheck.Name(),
+					Status:               runtests.TestSuccess,
+					IsTestingFailureMode: true,
+				},
+			},
+			wantFailureMode: &runtests.FailureModeSummary{
+				Name:     infraOrSystemFlakeCheck.Name(),
+				Category: runtests.CategoryInfraOrSystem,
+				Result:   runtests.FailureModeFlaky,
+				Failures: []runtests.CheckFailure{
+					{
+						Name:        systemOrTestFlakeCheck.Name(),
+						Result:      runtests.FailureModeFlaky,
+						Category:    runtests.CategorySystemOrTest,
+						OutputFiles: []string{debugPathForCheck(systemOrTestFlakeCheck)},
+					},
+					{
+						Name:        infraOrSystemFlakeCheck.Name(),
+						Result:      runtests.FailureModeFlaky,
+						Category:    runtests.CategoryInfraOrSystem,
+						OutputFiles: []string{debugPathForCheck(infraOrSystemFlakeCheck)},
+					},
+					{
+						Name:        flakeCheck.Name(),
+						Result:      runtests.FailureModeFlaky,
+						OutputFiles: []string{debugPathForCheck(flakeCheck)},
+					},
+				},
+			},
+		},
+		{
+			name:   "infra_with_domain",
+			checks: []FailureModeCheck{infraDomainCheck},
+			want: []runtests.TestDetails{
+				{
+					Name:                 checkTestNamePrefix + infraDomainCheck.Name(),
+					Status:               runtests.TestInfraFailure,
+					IsTestingFailureMode: true,
+					TestResult: runtests.TestResult{
+						OutputFiles:   []string{debugPathForCheck(infraDomainCheck)},
+						FailureReason: runtests.FailureReasonFromMessage("invalid boot config"),
+					},
+				},
+			},
+			wantFailureMode: &runtests.FailureModeSummary{
+				Name:     infraDomainCheck.Name(),
+				Category: runtests.CategoryInfra,
+				Result:   runtests.FailureModeFail,
+				Infra: &runtests.InfraDetails{
+					Domain: runtests.InfraDomainEnvironment,
+				},
+				Failures: []runtests.CheckFailure{
+					{
+						Name:           infraDomainCheck.Name(),
+						Result:         runtests.FailureModeFail,
+						FailureMessage: "invalid boot config",
+						Category:       runtests.CategoryInfra,
+						Infra: &runtests.InfraDetails{
+							Domain: runtests.InfraDomainEnvironment,
+						},
+						OutputFiles: []string{debugPathForCheck(infraDomainCheck)},
+					},
 				},
 			},
 		},
@@ -152,7 +380,7 @@ func TestRunChecks(t *testing.T) {
 			}
 			startTime := time.Now()
 
-			got, err := RunChecks(test.checks, nil, outputsDir)
+			got, gotFailureMode, err := RunChecks(test.checks, nil, outputsDir)
 			if err != nil {
 				t.Error("RunChecks() failed with:", err)
 			}
@@ -178,6 +406,9 @@ func TestRunChecks(t *testing.T) {
 			}
 			if diff := cmp.Diff(test.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("RunChecks() returned unexpected tests (-want +got):\n%s", diff)
+			}
+			if diff := cmp.Diff(test.wantFailureMode, gotFailureMode); diff != "" {
+				t.Errorf("RunChecks() returned unexpected failureMode (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -246,7 +477,7 @@ func TestRunChecks_TargetedSyntheticTestCase(t *testing.T) {
 	// This check should only be attributed to "failing_test_1".
 	check := targetedCheck{testName: "failing_test_1"}
 
-	_, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
+	_, _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
 	if err != nil {
 		t.Fatalf("RunChecks() failed: %v", err)
 	}
@@ -305,7 +536,7 @@ func TestRunChecks_GlobalSyntheticTestCase(t *testing.T) {
 	outputsDir := t.TempDir()
 	check := syntheticCheck{}
 
-	_, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
+	_, _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
 	if err != nil {
 		t.Fatalf("RunChecks() failed: %v", err)
 	}
@@ -378,7 +609,7 @@ func TestRunChecks_TargetedSyntheticTestCase_NotFound(t *testing.T) {
 		log.SetOutput(&buf)
 		defer log.SetOutput(os.Stderr)
 
-		_, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
+		_, _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
 		if err != nil {
 			t.Fatalf("RunChecks() failed: %v", err)
 		}
@@ -394,7 +625,7 @@ func TestRunChecks_TargetedSyntheticTestCase_NotFound(t *testing.T) {
 		log.SetOutput(&buf)
 		defer log.SetOutput(os.Stderr)
 
-		_, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
+		_, _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
 		if err != nil {
 			t.Fatalf("RunChecks() failed: %v", err)
 		}
@@ -488,7 +719,7 @@ func TestRunChecks_TargetedEnrichment(t *testing.T) {
 	}
 	wantErrMsg := check.FailureReason()
 
-	if _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
+	if _, _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
 		t.Fatalf("RunChecks() failed: %v", err)
 	}
 
@@ -544,7 +775,7 @@ func TestRunChecks_TargetedEnrichment(t *testing.T) {
 				log.SetOutput(&buf)
 				defer log.SetOutput(os.Stderr)
 
-				if _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir); err != nil {
+				if _, _, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir); err != nil {
 					t.Fatalf("RunChecks() failed: %v", err)
 				}
 				wantLog := fmt.Sprintf("Warning: targeted check %s attributed to test %q but test not found in summary", check.Name(), tc.testName)
@@ -617,12 +848,27 @@ func TestRunChecks_GlobalEnrichment(t *testing.T) {
 	check1 := mockCheck{name: "global_check_1", failureReason: "global failure reason 1"}
 	check2 := mockCheck{name: "global_check_2", failureReason: "global failure reason 2"}
 
-	got, err := RunChecks([]FailureModeCheck{check1, check2}, &TestingOutputs{TestSummary: &summary}, outputsDir)
+	got, gotFailureMode, err := RunChecks([]FailureModeCheck{check1, check2}, &TestingOutputs{TestSummary: &summary}, outputsDir)
 	if err != nil {
 		t.Fatalf("RunChecks() failed: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != checkTestNamePrefix+check1.Name() {
 		t.Errorf("RunChecks() returned top-level tests %+v, want only %q", got, checkTestNamePrefix+check1.Name())
+	}
+	wantFailureMode := &runtests.FailureModeSummary{
+		Name:   check1.Name(),
+		Result: runtests.FailureModeFail,
+		Failures: []runtests.CheckFailure{
+			{
+				Name:           check1.Name(),
+				Result:         runtests.FailureModeFail,
+				FailureMessage: check1.FailureReason(),
+				OutputFiles:    []string{debugPathForCheck(check1)},
+			},
+		},
+	}
+	if diff := cmp.Diff(wantFailureMode, gotFailureMode); diff != "" {
+		t.Errorf("RunChecks() returned unexpected failureMode (-want +got):\n%s", diff)
 	}
 
 	// 1. failing_test_mixed_cases: top-level test and both failing cases preserve pre-existing error at index 0 and append both check errors.
@@ -699,7 +945,7 @@ func TestRunChecks_EmptyFailureReasonNotEnriched(t *testing.T) {
 
 	// Check with empty FailureReason() (inheriting baseCheck.FailureReason()).
 	check := mockCheck{name: "empty_reason_check", failureReason: ""}
-	if _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
+	if _, _, err := RunChecks([]FailureModeCheck{check}, &TestingOutputs{TestSummary: &summary}, outputsDir); err != nil {
 		t.Fatalf("RunChecks() failed: %v", err)
 	}
 
@@ -755,14 +1001,21 @@ func TestRunChecks_Exoneration(t *testing.T) {
 	outputsDir := t.TempDir()
 	check := exonerationCheck{testName: "failing_test"}
 
-	got, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
+	got, gotFailureMode, err := RunChecks([]FailureModeCheck{check}, &to, outputsDir)
 	if err != nil {
 		t.Fatalf("RunChecks() failed: %v", err)
 	}
 
-	// No synthetic tests should be returned for exoneration.
+	// No synthetic tests should be returned for exoneration, and failure_mode should indicate pass.
 	if len(got) != 0 {
 		t.Fatalf("RunChecks() returned %d tests, want 0", len(got))
+	}
+	wantFailureMode := &runtests.FailureModeSummary{
+		Result:   runtests.FailureModePass,
+		Failures: []runtests.CheckFailure{},
+	}
+	if diff := cmp.Diff(wantFailureMode, gotFailureMode); diff != "" {
+		t.Fatalf("RunChecks() returned unexpected failureMode (-want +got):\n%s", diff)
 	}
 
 	// The actual test status should be updated to TestExonerated.
@@ -812,14 +1065,29 @@ func TestRunChecks_Exoneration(t *testing.T) {
 		nonExonerationCheck := mockCheck{name: "first_failure_check", failureReason: "first failure"}
 		exonCheck := exonerationCheck{testName: "failing_test"}
 
-		got, err := RunChecks([]FailureModeCheck{nonExonerationCheck, exonCheck}, &to, outputsDir)
+		got, gotFailureMode, err := RunChecks([]FailureModeCheck{nonExonerationCheck, exonCheck}, &to, outputsDir)
 		if err != nil {
 			t.Fatalf("RunChecks() failed: %v", err)
 		}
 
-		// The non-exoneration check should still emit its top-level synthetic test.
+		// The non-exoneration check should still emit its top-level synthetic test and failure_mode.
 		if len(got) != 1 || got[0].Name != checkTestNamePrefix+nonExonerationCheck.Name() {
 			t.Fatalf("RunChecks() returned %+v, want only %q", got, checkTestNamePrefix+nonExonerationCheck.Name())
+		}
+		wantFailureMode := &runtests.FailureModeSummary{
+			Name:   nonExonerationCheck.Name(),
+			Result: runtests.FailureModeFail,
+			Failures: []runtests.CheckFailure{
+				{
+					Name:           nonExonerationCheck.Name(),
+					Result:         runtests.FailureModeFail,
+					FailureMessage: nonExonerationCheck.FailureReason(),
+					OutputFiles:    []string{debugPathForCheck(nonExonerationCheck)},
+				},
+			},
+		}
+		if diff := cmp.Diff(wantFailureMode, gotFailureMode); diff != "" {
+			t.Fatalf("RunChecks() returned unexpected failureMode (-want +got):\n%s", diff)
 		}
 
 		// The subsequent exoneration check should still exonerate the test and its failing case.
@@ -831,6 +1099,69 @@ func TestRunChecks_Exoneration(t *testing.T) {
 		}
 		if summary.Tests[0].Cases[1].Status != runtests.TestSuccess {
 			t.Errorf("summary.Tests[0].Cases[1].Status = %v, want %v", summary.Tests[0].Cases[1].Status, runtests.TestSuccess)
+		}
+	})
+	t.Run("synthetic_case_not_emitted_on_exonerated_test", func(t *testing.T) {
+		summary := runtests.TestSummary{
+			Tests: []runtests.TestDetails{
+				{
+					Name:   "exonerated_test",
+					Status: runtests.TestExonerated,
+					TestResult: runtests.TestResult{
+						Cases: []runtests.TestCaseResult{
+							{
+								CaseName: "exonerated_case",
+								Status:   runtests.TestExonerated,
+							},
+						},
+					},
+				},
+				{
+					Name:   "failing_test",
+					Status: runtests.TestFailure,
+					TestResult: runtests.TestResult{
+						Cases: []runtests.TestCaseResult{
+							{
+								CaseName: "failed_case",
+								Status:   runtests.TestFailure,
+							},
+						},
+					},
+				},
+			},
+		}
+		to := TestingOutputs{TestSummary: &summary}
+		targeted := mockCheck{
+			name:                  "targeted_synth",
+			testName:              "exonerated_test",
+			failureReason:         "targeted reason",
+			emitSyntheticTestCase: true,
+		}
+		var buf bytes.Buffer
+		log.SetOutput(&buf)
+		defer log.SetOutput(os.Stderr)
+		if _, _, err := RunChecks([]FailureModeCheck{targeted}, &to, outputsDir); err != nil {
+			t.Fatalf("RunChecks() failed: %v", err)
+		}
+		if strings.Contains(buf.String(), "test not found in summary") {
+			t.Errorf("unexpected missing-test warning on exonerated test: %q", buf.String())
+		}
+		if got := len(summary.Tests[0].Cases); got != 1 {
+			t.Errorf("len(exonerated_test.Cases) = %d, want 1 (no synthetic FAIL case)", got)
+		}
+		global := mockCheck{
+			name:                  "global_synth",
+			failureReason:         "global reason",
+			emitSyntheticTestCase: true,
+		}
+		if _, _, err := RunChecks([]FailureModeCheck{global}, &to, outputsDir); err != nil {
+			t.Fatalf("RunChecks() failed: %v", err)
+		}
+		if got := len(summary.Tests[0].Cases); got != 1 {
+			t.Errorf("len(exonerated_test.Cases) after global check = %d, want 1", got)
+		}
+		if got := len(summary.Tests[1].Cases); got != 2 {
+			t.Errorf("len(failing_test.Cases) after global check = %d, want 2", got)
 		}
 	})
 }

@@ -130,7 +130,7 @@ def build_cmd(args):
     fx_workflow_filter = (
         ' "not ('
         "port ssh or dst port 8083 or dst port 2345 or port 1900 "
-        "or (ip6 and (dst portrange 33330-33341 or dst portrange 33337-33338))"
+        "or (ip6 and dst portrange 33330-33339)"
         ')"'
     )
 

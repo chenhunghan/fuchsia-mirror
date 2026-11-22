@@ -21,12 +21,6 @@
 #include "src/graphics/display/lib/designware-dsi/dsi-packet-handler-config.h"
 #include "src/graphics/display/lib/designware-dsi/dw-mipi-dsi-reg.h"
 
-// Header Creation Macros
-#define GEN_HDR_WC_MSB(x) ((x & 0xFF) << 16)
-#define GEN_HDR_WC_LSB(x) ((x & 0xFF) << 8)
-#define GEN_HDR_VC(x) ((x & 0x03) << 6)
-#define GEN_HDR_DT(x) ((x & 0x3F) << 0)
-
 namespace designware_dsi {
 
 namespace {
@@ -475,17 +469,18 @@ zx_status_t DsiHostController::GenWriteShort(const mipi_dsi::DsiCommandAndRespon
     return ZX_ERR_INVALID_ARGS;
   }
 
-  uint32_t regVal = 0;
-  regVal |= GEN_HDR_DT(command.data_type);
-  regVal |= GEN_HDR_VC(command.virtual_channel_id);
-  if (command.payload.size() >= 1) {
-    regVal |= GEN_HDR_WC_LSB(command.payload[0]);
+  DsiDwGenHdrReg header = DsiDwGenHdrReg::Get()
+                              .FromValue(0)
+                              .set_gen_dt(command.data_type)
+                              .set_gen_vc(command.virtual_channel_id);
+  if (!command.payload.empty()) {
+    header.set_gen_wc_lsbyte(command.payload[0]);
   }
   if (command.payload.size() == 2) {
-    regVal |= GEN_HDR_WC_MSB(command.payload[1]);
+    header.set_gen_wc_msbyte(command.payload[1]);
   }
 
-  return GenericHdrWrite(regVal);
+  return GenericHdrWrite(header.reg_value());
 }
 
 zx_status_t DsiHostController::DcsWriteShort(const mipi_dsi::DsiCommandAndResponse& command) {
@@ -500,15 +495,16 @@ zx_status_t DsiHostController::DcsWriteShort(const mipi_dsi::DsiCommandAndRespon
     return ZX_ERR_INVALID_ARGS;
   }
 
-  uint32_t regVal = 0;
-  regVal |= GEN_HDR_DT(command.data_type);
-  regVal |= GEN_HDR_VC(command.virtual_channel_id);
-  regVal |= GEN_HDR_WC_LSB(command.payload[0]);
+  DsiDwGenHdrReg header = DsiDwGenHdrReg::Get()
+                              .FromValue(0)
+                              .set_gen_dt(command.data_type)
+                              .set_gen_vc(command.virtual_channel_id)
+                              .set_gen_wc_lsbyte(command.payload[0]);
   if (command.payload.size() == 2) {
-    regVal |= GEN_HDR_WC_MSB(command.payload[1]);
+    header.set_gen_wc_msbyte(command.payload[1]);
   }
 
-  return GenericHdrWrite(regVal);
+  return GenericHdrWrite(header.reg_value());
 }
 
 // This function writes a generic long command. We can only write a maximum of FIFO_DEPTH
@@ -552,17 +548,18 @@ zx_status_t DsiHostController::GenWriteLong(const mipi_dsi::DsiCommandAndRespons
   }
 
   // At this point, we have written all of our mipi payload to FIFO. Let's transmit it
-  regVal = 0;
-  regVal |= GEN_HDR_DT(command.data_type);
-  regVal |= GEN_HDR_VC(command.virtual_channel_id);
-  regVal |= GEN_HDR_WC_LSB(static_cast<uint32_t>(command.payload.size()) & 0xFF);
-  regVal |= GEN_HDR_WC_MSB((command.payload.size() & 0xFF00) >> 16);
+  DsiDwGenHdrReg header =
+      DsiDwGenHdrReg::Get()
+          .FromValue(0)
+          .set_gen_dt(command.data_type)
+          .set_gen_vc(command.virtual_channel_id)
+          .set_gen_wc_lsbyte(static_cast<uint32_t>(command.payload.size()) & 0xFFu)
+          .set_gen_wc_msbyte((static_cast<uint32_t>(command.payload.size()) >> 8u) & 0xFFu);
 
-  return GenericHdrWrite(regVal);
+  return GenericHdrWrite(header.reg_value());
 }
 
 zx_status_t DsiHostController::GenRead(const mipi_dsi::DsiCommandAndResponse& command) {
-  uint32_t regVal = 0;
   zx_status_t status = ZX_OK;
 
   // valid cmd packet
@@ -575,20 +572,22 @@ zx_status_t DsiHostController::GenRead(const mipi_dsi::DsiCommandAndResponse& co
     return ZX_ERR_INVALID_ARGS;
   }
 
-  regVal = 0;
-  regVal |= GEN_HDR_DT(command.data_type);
-  regVal |= GEN_HDR_VC(command.virtual_channel_id);
-  if (command.payload.size() >= 1) {
-    regVal |= GEN_HDR_WC_LSB(command.payload[0]);
+  DsiDwGenHdrReg header = DsiDwGenHdrReg::Get()
+                              .FromValue(0)
+                              .set_gen_dt(command.data_type)
+                              .set_gen_vc(command.virtual_channel_id);
+  if (!command.payload.empty()) {
+    header.set_gen_wc_lsbyte(command.payload[0]);
   }
   if (command.payload.size() == 2) {
-    regVal |= GEN_HDR_WC_MSB(command.payload[1]);
+    header.set_gen_wc_msbyte(command.payload[1]);
   }
 
   // Packet is ready. Let's enable BTA first
   EnableBta();
 
-  if ((status = GenericHdrWrite(regVal)) != ZX_OK) {
+  status = GenericHdrWrite(header.reg_value());
+  if (status != ZX_OK) {
     // no need to print extra error msg
     return status;
   }

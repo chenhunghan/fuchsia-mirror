@@ -12,7 +12,7 @@
 
 // defined in cpp_specific.cpp.
 int cpp_out_of_mem(void);
-int llcpp_channel_overflow(void);
+int wire_channel_overflow(void);
 int cpp_log_fatal(void);
 
 typedef struct {
@@ -112,7 +112,7 @@ int invalid(volatile unsigned int* unused) {
 
 int oom(volatile unsigned int* unused) { return cpp_out_of_mem(); }
 
-int cpp_channel_overflow(volatile unsigned int* unused) { return llcpp_channel_overflow(); }
+int cpp_channel_overflow(volatile unsigned int* unused) { return wire_channel_overflow(); }
 
 int log_fatal(volatile unsigned int* unused) { return cpp_log_fatal(); }
 

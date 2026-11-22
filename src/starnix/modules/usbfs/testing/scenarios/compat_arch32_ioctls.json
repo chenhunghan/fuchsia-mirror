@@ -1,0 +1,137 @@
+{
+    "name": "compat_arch32_ioctls",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd1",
+            "mode": "rdwr"
+        },
+        {
+            "type": "claim_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "device_script_control",
+            "b_request": 1,
+            "action": {
+                "reply": [
+                    9,
+                    8,
+                    7,
+                    6
+                ]
+            }
+        },
+        {
+            "type": "control",
+            "fd": "fd1",
+            "arch32": true,
+            "bm_request_type": 192,
+            "b_request": 1,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "bulk",
+            "fd": "fd1",
+            "arch32": true,
+            "ep": 2,
+            "len": 4,
+            "timeout_ms": 2000,
+            "data": [
+                5,
+                6,
+                7,
+                8
+            ]
+        },
+        {
+            "type": "device_ep_pop_out",
+            "ep": 2,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "submit_urb",
+            "fd": "fd1",
+            "arch32": true,
+            "urb": "u32_out",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "data": [
+                11,
+                22,
+                33,
+                44
+            ],
+            "usercontext": 30583
+        },
+        {
+            "type": "device_ep_pop_out",
+            "ep": 2,
+            "timeout_ms": 2000
+        },
+        {
+            "type": "reap_urb",
+            "fd": "fd1",
+            "arch32": true
+        },
+        {
+            "type": "inspect_urb",
+            "urb": "u32_out"
+        },
+        {
+            "type": "release_interface",
+            "fd": "fd1",
+            "interface": 0
+        },
+        {
+            "type": "close",
+            "fd": "fd1"
+        }
+    ]
+}

@@ -140,37 +140,6 @@ pub struct KernelTransactionHooks;
 //   while a transaction is active, neither same-CPU interrupt reentrancy nor cross-CPU thread
 //   migration can occur while registered, ensuring the backing `PerCpu` slot is strictly local to
 //   the current execution context.
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_ints_enabled() -> ! {
-    panic!("ChainLockTransaction accessed with interrupts enabled");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-pub(super) fn panic_no_active_transaction(ints_off: bool) -> ! {
-    if !ints_off {
-        panic!("ChainLockTransaction accessed with interrupts enabled");
-    }
-    panic!("No active ChainLockTransaction on current CPU");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_already_active() -> ! {
-    panic!("ChainLockTransaction::register: transaction already active on current CPU");
-}
-
-#[cold]
-#[inline(never)]
-#[track_caller]
-fn panic_unregister_wrong_transaction() -> ! {
-    panic!("ChainLockTransaction::unregister: transaction does not match active transaction");
-}
-
 unsafe impl TransactionHooks for KernelTransactionHooks {
     type ContentionState = KernelContentionState;
     type CallsiteInfo = CallsiteInfo;
@@ -180,9 +149,7 @@ unsafe impl TransactionHooks for KernelTransactionHooks {
 
     #[inline(always)]
     fn active() -> core::option::Option<NonNull<ChainLockTransaction>> {
-        if cfg!(debug_assertions) && !ints_disabled() {
-            panic_ints_enabled();
-        }
+        debug_assert!(ints_disabled(), "ChainLockTransaction accessed with interrupts enabled");
         NonNull::new(PerCpu::get_current().active_cl_transaction())
     }
 
@@ -198,9 +165,7 @@ unsafe impl TransactionHooks for KernelTransactionHooks {
     ///   subsequent call to `set_active`.
     #[inline(always)]
     unsafe fn set_active(transaction: core::option::Option<NonNull<ChainLockTransaction>>) {
-        if cfg!(debug_assertions) && !ints_disabled() {
-            panic_ints_enabled();
-        }
+        debug_assert!(ints_disabled(), "ChainLockTransaction accessed with interrupts enabled");
         let ptr = transaction.map_or(core::ptr::null_mut(), NonNull::as_ptr);
         // SAFETY: The caller of `TransactionHooks::set_active` guarantees that interrupts are
         // disabled on the current CPU and that `transaction` is either `None` or points to a live,
@@ -214,12 +179,8 @@ unsafe impl TransactionHooks for KernelTransactionHooks {
     #[inline(always)]
     unsafe fn active_unchecked() -> NonNull<ChainLockTransaction> {
         let ptr = PerCpu::get_current().active_cl_transaction();
-        if cfg!(debug_assertions) {
-            let ints_off = ints_disabled();
-            if !ints_off || ptr.is_null() {
-                panic_no_active_transaction(ints_off);
-            }
-        }
+        debug_assert!(ints_disabled(), "ChainLockTransaction accessed with interrupts enabled");
+        debug_assert!(!ptr.is_null(), "No active ChainLockTransaction on current CPU");
         // SAFETY: Guaranteed by caller (`ChainLockTransactionToken` invariant) and verified above
         // in debug builds.
         unsafe { NonNull::new_unchecked(ptr) }
@@ -227,13 +188,12 @@ unsafe impl TransactionHooks for KernelTransactionHooks {
 
     #[inline(always)]
     unsafe fn register_active(transaction: NonNull<ChainLockTransaction>) {
-        if cfg!(debug_assertions) && !ints_disabled() {
-            panic_ints_enabled();
-        }
+        debug_assert!(ints_disabled(), "ChainLockTransaction accessed with interrupts enabled");
         let percpu = PerCpu::get_current();
-        if !percpu.active_cl_transaction().is_null() {
-            panic_already_active();
-        }
+        assert!(
+            percpu.active_cl_transaction().is_null(),
+            "ChainLockTransaction::register: transaction already active on current CPU"
+        );
         // SAFETY: Interrupts are disabled and the caller guarantees `transaction` points to a live,
         // stack-pinned `ChainLockTransaction` without mutable aliases while registered.
         unsafe {
@@ -244,14 +204,11 @@ unsafe impl TransactionHooks for KernelTransactionHooks {
     #[inline(always)]
     unsafe fn unregister_active(transaction: NonNull<ChainLockTransaction>) {
         let percpu = PerCpu::get_current();
-        if cfg!(debug_assertions) {
-            if !ints_disabled() {
-                panic_ints_enabled();
-            }
-            if percpu.active_cl_transaction() != transaction.as_ptr() {
-                panic_unregister_wrong_transaction();
-            }
-        }
+        debug_assert!(ints_disabled(), "ChainLockTransaction accessed with interrupts enabled");
+        debug_assert!(
+            percpu.active_cl_transaction() == transaction.as_ptr(),
+            "ChainLockTransaction::unregister: transaction does not match active transaction"
+        );
         // SAFETY: Interrupts are disabled and clearing to null requires no target lifetime.
         unsafe {
             percpu.set_active_cl_transaction(core::ptr::null_mut());
@@ -430,9 +387,7 @@ impl StateOption<ChainLockTransaction> for NoIrqSave {
 
     #[inline(always)]
     fn save_state(&self) -> Self::Saver {
-        if !ints_disabled() {
-            panic_ints_enabled();
-        }
+        assert!(ints_disabled(), "ChainLockTransaction accessed with interrupts enabled");
         NoIrqSaveStateSaver { _byte: 0, _not_send: PhantomData }
     }
 }

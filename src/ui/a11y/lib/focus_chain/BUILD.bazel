@@ -1,0 +1,34 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "focus_chain",
+    srcs = [
+        "focus_chain_manager.cc",
+    ],
+    hdrs = [
+        "accessibility_focus_chain_listener.h",
+        "accessibility_focus_chain_requester.h",
+        "focus_chain_manager.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+        "//src/ui/a11y/lib/util",
+    ],
+    # Headers and sources use Zircon/HLCPP FIDL types (zx_koid_t, fuchsia.ui.focus,
+    # fuchsia.ui.views) and async::WaitMethod.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/ui/a11y/lib:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_hlcpp",
+        "//src/ui/a11y/lib/view",
+    ],
+    alwayslink = True,
+)

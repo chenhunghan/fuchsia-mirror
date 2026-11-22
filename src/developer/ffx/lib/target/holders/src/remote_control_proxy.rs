@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::target_interface;
 use fdomain_client::fidl::{DiscoverableProtocolMarker, Proxy};
 use fdomain_fuchsia_developer_remotecontrol::RemoteControlProxy;
 use ffx_command_error::{FfxContext as _, Result};
-use fho::{FhoEnvironment, TryFromEnv};
+use fho::{FhoEnvironment, TargetNeed, TryFromEnv};
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use target_behavior::target_interface;
 
 #[derive(Clone, Debug)]
 pub struct RemoteControlProxyHolder(RemoteControlProxy);
@@ -29,10 +29,11 @@ impl From<RemoteControlProxy> for RemoteControlProxyHolder {
 }
 
 impl TryFromEnv for RemoteControlProxyHolder {
+    const TARGET_NEED: TargetNeed = TargetNeed::Required;
     type Error = ffx_command_error::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let target_env = target_interface(env);
-        let connector = target_env.init_connection_behavior(env.environment_context()).await?;
+        let connector = target_env.init(env.environment_context());
         let (_resolution, conn) = connector.connect(env.environment_context()).await?;
         conn.rcs_proxy_fdomain().await.bug().map(Into::into).map_err(Into::into)
     }

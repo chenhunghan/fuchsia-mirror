@@ -24,6 +24,7 @@ use fho::{Result, bug, return_bug, return_user_error, user_error};
 use fuchsia_async::Timer;
 use monitor::Monitor;
 use serde_json::{Deserializer, Value, json};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -54,18 +55,6 @@ impl QemuEngine {
     }
 
     fn validate_configuration(&self) -> Result<()> {
-        if self.data.get_emulator_configuration().device.pointing_device == PointingDevice::Touch
-            && !self.data.get_emulator_configuration().runtime.headless
-        {
-            let message = format!(
-                "{}\n{}",
-                "Touchscreen as a pointing device is not available on Qemu.",
-                "If you encounter errors, try changing the pointing device to 'mouse' in the \
-                Virtual Device specification."
-            );
-            log::info!("{message}");
-            eprintln!("{message}");
-        }
         self.validate_network_flags(&self.data.get_emulator_configuration())
             .and_then(|()| self.check_required_files(&self.data.get_emulator_configuration().guest))
             .and_then(|()| self.validate_snapshot_support())
@@ -222,12 +211,28 @@ impl EmulatorEngine for QemuEngine {
         &'a mut self,
         context: &'a EnvironmentContext,
         emulator_cmd: Command,
-    ) -> BoxFuture<'a, Result<i32>> {
-        Box::pin(async move { self.run(context, emulator_cmd).await })
+        out: &'a mut dyn Write,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { self.run(context, emulator_cmd, out).await })
     }
 
     fn show(&self, details: Vec<ShowDetail>) -> Vec<ShowDetail> {
         <Self as QemuBasedEngine>::show(self, details)
+    }
+
+    fn configuration_warnings(&self) -> Vec<String> {
+        let mut warnings = vec![];
+        if self.emu_config().device.pointing_device == PointingDevice::Touch
+            && !self.emu_config().runtime.headless
+        {
+            warnings.push(
+                "Touchscreen as a pointing device is not available on Qemu.\n\
+                If you encounter errors, try changing the pointing device to 'mouse' in the \
+                Virtual Device specification."
+                    .to_string(),
+            );
+        }
+        warnings
     }
 
     fn stop(&mut self) -> BoxFuture<'_, Result<()>> {
@@ -236,9 +241,6 @@ impl EmulatorEngine for QemuEngine {
 
     fn configure(&mut self) -> Result<()> {
         let result = if self.emu_config().runtime.config_override {
-            let message = "Custom configuration provided; bypassing validation.";
-            eprintln!("{message}");
-            log::info!("{message}");
             Ok(())
         } else {
             self.validate_configuration()
@@ -544,7 +546,6 @@ mod tests {
     use emulator_instance::{NetworkingMode, PortMapping};
     use ffx_emulator_config::InputEvent;
     use std::ffi::OsStr;
-    use std::io::Write as _;
     use std::os::unix::net::UnixListener;
     use std::sync::mpsc;
     use std::time::Instant;
@@ -855,6 +856,29 @@ mod tests {
         assert_eq!(ssh.guest, 22);
         assert_eq!(ssh.host, None);
         assert_eq!(engine.engine_state(), EngineState::Configured);
+    }
+
+    #[fuchsia::test]
+    fn test_configuration_warnings() {
+        let env = ffx_config::test_init().unwrap();
+        let make_engine = |cfg: EmulatorConfiguration| {
+            let data = EmulatorInstanceData::new(cfg, EngineType::Qemu, EngineState::Staged);
+            QemuEngine::new(&env.context, data, EmulatorInstances::new(PathBuf::new()))
+        };
+
+        let mut cfg = EmulatorConfiguration::default();
+        cfg.runtime.headless = true;
+        assert_eq!(
+            EmulatorEngine::configuration_warnings(&make_engine(cfg.clone())),
+            Vec::<String>::new()
+        );
+
+        // QEMU can't emulate a touchscreen on a display.
+        cfg.runtime.headless = false;
+        cfg.device.pointing_device = PointingDevice::Touch;
+        let warnings = EmulatorEngine::configuration_warnings(&make_engine(cfg.clone()));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].starts_with("Touchscreen as a pointing device"), "{warnings:?}");
     }
 
     #[fuchsia::test]

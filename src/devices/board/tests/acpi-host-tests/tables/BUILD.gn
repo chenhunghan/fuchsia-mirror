@@ -4,23 +4,19 @@
 
 import("//build/testing/host_test_data.gni")
 
-template("fake_acpi_table") {
-  assert(defined(invoker.sources))
-
-  # Fake tables used for everything.
-  fake_acpi_tables = [ "fake-fadt/facp.aml" ]
-
-  host_test_data(target_name) {
-    sources = fake_acpi_tables + invoker.sources
-
-    outputs = [ "$target_out_dir/$target_name/{{source_file_part}}" ]
-  }
-}
-
 if (is_host) {
-  fake_acpi_table("device-child-of-scope") {
-    sources = [ "device-child-of-scope/dsdt.aml" ]
+  # LINT.IfChange
+  host_test_data("device-child-of-scope") {
+    # Fake tables used for everything.
+    sources = [
+      "device-child-of-scope/dsdt.aml",
+      "fake-fadt/facp.aml",
+    ]
+
+    outputs = [ "$target_out_dir/device-child-of-scope/{{source_file_part}}" ]
   }
+
+  # LINT.ThenChange(BUILD.bazel)
 
   group("test-data") {
     testonly = true

@@ -71,7 +71,6 @@ fuchsia_cc_driver("aml-uart-driver") {
 
 fuchsia_driver_component("aml-uart") {
   dml_label = ":aml-uart-dml"
-  info = "meta/aml-uart-info.json"
   deps = [
     ":aml-uart-driver",
     ":aml_uart_bind",

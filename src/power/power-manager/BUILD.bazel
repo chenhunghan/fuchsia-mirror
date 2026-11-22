@@ -1,0 +1,137 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/components:structured_config.bzl", "fuchsia_structured_config_rust_lib")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//third_party/cobalt:metrics_registry.bzl", "metrics_registry")
+
+package(default_applicable_licenses = ["//:license"])
+
+metrics_registry(
+    name = "power_manager_metrics",
+    generate_binarypb = False,
+    generate_rust = True,
+    namespace = "power_manager_metrics",
+    project_id = 3,
+)
+
+cml_shard(
+    name = "meta/base.shard",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    shard = "meta/base.shard.cml",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "power-manager",
+    includes = [":meta/base.shard"],
+    manifest = "meta/power-manager.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "power-manager-config-lib",
+    cm_label = ":manifest",
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/activity_handler.rs",
+        "src/crash_report_handler.rs",
+        "src/debug_service.rs",
+        "src/error.rs",
+        "src/input_settings_handler.rs",
+        "src/main.rs",
+        "src/message.rs",
+        "src/node.rs",
+        "src/platform_metrics.rs",
+        "src/power_manager.rs",
+        "src/powercap_controller.rs",
+        "src/system_power_mode_handler.rs",
+        "src/system_profile_handler.rs",
+        "src/system_shutdown_handler.rs",
+        "src/temperature_handler.rs",
+        "src/thermal_load_driver.rs",
+        "src/thermal_policy.rs",
+        "src/thermal_sensor_manager.rs",
+        "src/thermal_shutdown.rs",
+        "src/thermal_state_handler.rs",
+        "src/timer.rs",
+        "src/utils.rs",
+        "//src/power/common/lib:common_utils.rs",
+        "//src/power/common/lib:types.rs",
+    ],
+    crate_name = "power_manager",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+        "//third_party/rust_crates/vendor:serde_derive",
+    ],
+    deps = [
+        ":power-manager-config-lib",
+        ":power_manager_metrics_rustlib",
+        "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_rust",
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_rust",
+        "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
+        "//sdk/fidl/fuchsia.hardware.trippoint:fuchsia.hardware.trippoint_rust",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
+        "//sdk/fidl/fuchsia.power.clientlevel:fuchsia.power.clientlevel_rust",
+        "//sdk/fidl/fuchsia.power.manager.debug:fuchsia.power.manager.debug_rust",
+        "//sdk/fidl/fuchsia.power.powercap:fuchsia.power.powercap_rust",
+        "//sdk/fidl/fuchsia.power.profile:fuchsia.power.profile_rust",
+        "//sdk/fidl/fuchsia.power.systemmode:fuchsia.power.systemmode_rust",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_rust",
+        "//sdk/fidl/fuchsia.ui.activity:fuchsia.ui.activity_rust",
+        "//sdk/lib/power/state_recorder/rust",
+        "//sdk/rust/zx",
+        "//src/lib/async-utils",
+        "//src/lib/cobalt/rust/builders",
+        "//src/lib/diagnostics/inspect/contrib/rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fake-clock/named-timer",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust/fidl-contrib",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/power/power-manager/system_power_mode_config/parser",
+        "//src/power/power-manager/thermal_config/parser",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:async-lock",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libm",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:serde_json5",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "power_manager_packaged_bin",
+    binary = ":bin",
+    binary_name = "power_manager",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":power_manager_packaged_bin"],
+)

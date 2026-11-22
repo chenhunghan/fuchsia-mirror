@@ -48,6 +48,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "host-watcher-tests",
-    package_name = "host-watcher-tests",
     unit_tests = [":host-watcher_test"],
 )

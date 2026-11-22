@@ -17,7 +17,7 @@ static const char* appname;
 
 static void usage(void) {
   fprintf(stderr, "usage: %s [options] <hostname> <command>\n", appname);
-  netboot_usage(false);
+  netboot_usage();
 }
 
 int main(int argc, char** argv) {

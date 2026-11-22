@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":ram-crashlog-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "ram-crashlog-test",
+    srcs = ["ram-crashlog-tests.cc"],
+    deps = [
+        "//zircon/system/ulib/ram-crashlog",
+        "//zircon/system/ulib/zxtest",
+        "//zircon/third_party/ulib/cksum",
+    ],
+)
+
+fx_unittest_package(
+    name = "ram-crashlog-test-pkg",
+    package_name = "ram-crashlog-test",
+    unit_tests = [":ram-crashlog-test"],
+)

@@ -13,20 +13,12 @@
 #error JTRACE_TARGET_BUFFER_SIZE must be defined by the build system!
 #endif
 
-#ifndef JTRACE_LAST_ENTRY_STORAGE
-#define JTRACE_LAST_ENTRY_STORAGE 0
-#endif
-
 #ifndef JTRACE_IS_PERSISTENT
 #define JTRACE_IS_PERSISTENT false
 #endif
 
 #ifndef JTRACE_USE_LARGE_ENTRIES
 #define JTRACE_USE_LARGE_ENTRIES false
-#endif
-
-#ifndef JTRACE_USE_MONO_TIMESTAMPS
-#define JTRACE_USE_MONO_TIMESTAMPS false
 #endif
 
 namespace jtrace {
@@ -39,15 +31,10 @@ enum class UseMonoTimestamps { No = 0, Yes };
 }  // namespace jtrace
 
 constexpr size_t kJTraceTargetBufferSize = JTRACE_TARGET_BUFFER_SIZE;
-constexpr size_t kJTraceLastEntryStorage = JTRACE_LAST_ENTRY_STORAGE;
 constexpr jtrace::IsPersistent kJTraceIsPersistent =
     JTRACE_IS_PERSISTENT ? jtrace::IsPersistent::Yes : jtrace::IsPersistent::No;
 constexpr jtrace::UseLargeEntries kJTraceUseLargeEntries =
     JTRACE_USE_LARGE_ENTRIES ? jtrace::UseLargeEntries::Yes : jtrace::UseLargeEntries::No;
-constexpr jtrace::UseMonoTimestamps kJTraceUseMonoTimestamps =
-    JTRACE_USE_MONO_TIMESTAMPS ? jtrace::UseMonoTimestamps::Yes : jtrace::UseMonoTimestamps::No;
-constexpr size_t kJTraceTargetPersistentBufferSize =
-    (kJTraceIsPersistent == jtrace::IsPersistent::Yes) ? kJTraceTargetBufferSize : 0;
 
 static_assert(
     (kJTraceIsPersistent == jtrace::IsPersistent::No) ||

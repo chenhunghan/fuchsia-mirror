@@ -231,7 +231,7 @@ but since this transformation from relative to absolute and/or normalized form
 is destructive it cannot be performed in the other direction. Therefore it is
 more inclusive of all use cases to prefer the relative form.
 
-## Design
+## Design {:#design}
 
 ### Policy
 
@@ -395,7 +395,7 @@ time, as is the nature of entropic decay.
 
 A great Jedi once said: "Only a Sith deals in absolutes."
 
-[action-tracer]: /docs/contribute/open_projects/build/hermetic_actions.md#reproducing_the_issue
+[action-tracer]: /docs/contribute/open_projects/build/hermetic_actions.md#reproducing-the-issue
 [arch-linux-chroot]: https://wiki.archlinux.org/title/DeveloperWiki:Building_in_a_clean_chroot
 [bazel-sandboxfs]: https://blog.bazel.build/2017/08/25/introducing-sandboxfs.html
 [chroot]: https://en.wikipedia.org/wiki/Chroot
@@ -420,7 +420,7 @@ A great Jedi once said: "Only a Sith deals in absolutes."
 [llvm-d87928]: https://reviews.llvm.org/D87928
 [ninja-depfile]: https://ninja-build.org/manual.html#_depfile
 [path-wikipedia]: https://en.wikipedia.org/wiki/Path_(computing)
-[paving]: /docs/development/build/fx.md#what-is-paving
+[paving]: /docs/development/build/fx.md
 [reproducible-builds]: https://reproducible-builds.org
 [sandboxfs-performance]: https://blog.bazel.build/2017/08/25/introducing-sandboxfs.html
 [test-coverage]: /docs/contribute/testing/coverage.md

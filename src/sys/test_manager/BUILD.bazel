@@ -81,8 +81,8 @@ rustc_library(
     # Only for internal use.
     visibility = ["//src/sys/test_manager/tests:__subpackages__"],
     deps = [
-        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
         "//sdk/fidl/fuchsia.component.resolution:fuchsia.component.resolution_rust",
         "//sdk/fidl/fuchsia.component.test:fuchsia.component.test_rust",
         "//sdk/fidl/fuchsia.data:fuchsia.data_rust",
@@ -103,9 +103,7 @@ rustc_library(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # In GN, `//src/lib/fuchsia-component-test` is a group that bundles
-        # `:fuchsia-component-test-lib` alongside `realm_builder_server_component`.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-fs",
         "//src/lib/fuchsia-sync",
         "//src/lib/fuchsia-url",

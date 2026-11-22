@@ -11,53 +11,29 @@
 #include <zircon/types.h>
 
 #include <kernel/ffi.h>
+#include <vm/page.h>
 #include <vm/page_source.h>
 
 __BEGIN_CDECLS
 
-void cpp_multi_page_request_construct(MultiPageRequest* req);
-void cpp_multi_page_request_destroy(MultiPageRequest* req);
-void cpp_multi_page_request_cancel_requests(MultiPageRequest* req);
-zx_status_t cpp_multi_page_request_wait(MultiPageRequest* req, bool suspendable);
+// The PageProvider virtual interface, reached through `PageProviderFfi` in page_source_ffi.cc.
+// This header is also the bindgen entry point for the page source types.
+void* cpp_page_provider_get_ref_counted(PageProvider* provider);
+void cpp_page_provider_free(PageProvider* provider);
+PageSourceProperties cpp_page_provider_properties(const PageProvider* provider);
+void cpp_page_provider_send_async_request(PageProvider* provider, PageRequest* request);
+void cpp_page_provider_clear_async_request(PageProvider* provider, PageRequest* request);
+void cpp_page_provider_swap_async_request(PageProvider* provider, PageRequest* old,
+                                          PageRequest* new_req);
+void cpp_page_provider_free_pages(PageProvider* provider, VmPageDoublyLinkedList* pages);
+bool cpp_page_provider_debug_is_page_ok(PageProvider* provider, vm_page_t* page, uint64_t offset);
+void cpp_page_provider_on_detach(PageProvider* provider);
+void cpp_page_provider_on_close(PageProvider* provider);
+zx_status_t cpp_page_provider_wait_on_event(PageProvider* provider, Event* event, bool suspendable);
+void cpp_page_provider_dump(PageProvider* provider, uint32_t depth, uint32_t max_items);
+zx_koid_t cpp_page_provider_get_koid(const PageProvider* provider);
+void cpp_page_provider_get_debug_name(const PageProvider* provider, char (*name)[ZX_MAX_NAME_LEN]);
 
-// PageRequest helpers
-uint32_t cpp_page_request_get_type(const PageRequest* request);
-uint64_t cpp_page_request_get_offset(const PageRequest* request);
-uint64_t cpp_page_request_get_len(const PageRequest* request);
-// Returns a pointer to the `PageProviderTag` list node state of |request|, allowing Rust page
-// providers to link requests into a Rust `fbl::DoublyLinkedList`.
-void* cpp_page_request_provider_node(PageRequest* request);
-
-// PageSource failure & helper shims
-void cpp_page_source_free(PageSource* src);
-void* cpp_page_source_get_ref_counted(PageSource* src);
-void cpp_page_source_on_pages_failed(PageSource* page_source, uint64_t offset, uint64_t len,
-                                     zx_status_t error_status);
-bool cpp_page_source_is_valid_external_failure_code(zx_status_t error_status);
-bool cpp_page_source_is_valid_internal_failure_code(zx_status_t status);
-// Returns whether the calling thread holds |page_source|'s paged VMO lock. Intended for debug
-// assertions in callers that are required to hold that lock.
-bool cpp_page_source_paged_vmo_lock_is_held(PageSource* page_source);
-void cpp_page_source_dump(const PageSource* page_source, uint32_t depth, uint32_t max_items);
-
-AnonymousPageRequest* cpp_multi_page_request_get_anonymous(MultiPageRequest* req);
-PageRequest* cpp_multi_page_request_get_read_request(MultiPageRequest* req);
-LazyPageRequest* cpp_multi_page_request_get_lazy_dirty_request(MultiPageRequest* req);
-void cpp_multi_page_request_made_dirty_request(MultiPageRequest* req);
-
-PageRequest* cpp_lazy_page_request_get(LazyPageRequest* req);
-bool cpp_lazy_page_request_is_initialized(const LazyPageRequest* req);
-
-PageSourceProperties cpp_page_source_properties(const PageSource* page_source);
-bool cpp_page_source_should_trap_dirty_transitions(const PageSource* page_source);
-zx_status_t cpp_page_source_get_pages(PageSource* page_source, uint64_t offset, uint64_t len,
-                                      PageRequest* req, VmoDebugInfo vmo_debug_info);
-zx_status_t cpp_page_source_request_dirty_transition(PageSource* page_source, PageRequest* req,
-                                                     uint64_t offset, uint64_t len,
-                                                     VmoDebugInfo vmo_debug_info);
-void cpp_page_source_on_pages_supplied(PageSource* page_source, uint64_t offset, uint64_t len);
-void cpp_page_source_on_pages_dirtied(PageSource* page_source, uint64_t offset, uint64_t len);
-void cpp_page_source_free_pages(PageSource* page_source, VmPageDoublyLinkedList* pages);
 __END_CDECLS
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_PAGE_SOURCE_FFI_H_

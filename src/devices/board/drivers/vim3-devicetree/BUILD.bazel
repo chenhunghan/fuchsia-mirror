@@ -44,7 +44,6 @@ fuchsia_package_resource_collection(
         "@internal_sdk//pkg/devicetree-mali-gpu-visitor",
         "@internal_sdk//pkg/devicetree-performance-domain-visitor",
         "@internal_sdk//pkg/devicetree-power-domain-visitor",
-        "@internal_sdk//pkg/devicetree-power-element-visitor",
         "@internal_sdk//pkg/devicetree-pwm-init-visitor",
         "@internal_sdk//pkg/devicetree-pwm-visitor",
         "@internal_sdk//pkg/devicetree-registers-visitor",
@@ -125,9 +124,6 @@ fuchsia_cc_test(
     name = "vim3-devicetree-test-bin",
     srcs = [
         "vim3-devicetree-test.cc",
-    ],
-    copts = [
-        "-Wno-vla-cxx-extension",
     ],
     deps = [
         "//zircon/system/ulib/ddk-platform-defs",

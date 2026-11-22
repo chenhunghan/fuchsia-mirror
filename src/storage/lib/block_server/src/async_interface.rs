@@ -28,6 +28,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Poll, ready};
 use storage_device::buffer::{Buffer, OwnedBuffer};
 use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+use storage_units::page_size;
 
 pub trait Interface: Send + Sync + Unpin + 'static {
     /// Runs `stream` to completion.
@@ -87,7 +88,7 @@ pub trait Interface: Send + Sync + Unpin + 'static {
         let buffer_source = BufferSource::new(MAX_READ_BUFFER_SIZE * 16);
         let vmo = buffer_source.vmo().clone();
         let allocator = Arc::new(BufferAllocator::new(
-            std::cmp::max(block_size as usize, zx::system_get_page_size() as usize),
+            std::cmp::max(block_size as usize, page_size().get() as usize),
             buffer_source,
         ));
         let scope = fasync::Scope::new();
@@ -596,7 +597,7 @@ impl<I: Interface + ?Sized> Session<I> {
                         let allocator = BufferAllocator::new(
                             std::cmp::max(
                                 self.helper.block_size as usize,
-                                zx::system_get_page_size() as usize,
+                                page_size().get() as usize,
                             ),
                             source,
                         );
@@ -725,7 +726,7 @@ impl<I: Interface + ?Sized> Session<I> {
                             let vmar = fuchsia_runtime::vmar_root_self();
                             // The target slice might not be page aligned.
                             let addr = target_slice.addr();
-                            let unaligned = addr % zx::system_get_page_size() as usize;
+                            let unaligned = (addr as u64 % page_size()) as usize;
                             if let Err(error) = vmar.op_range(
                                 zx::VmarOp::COMMIT,
                                 addr - unaligned,
@@ -931,7 +932,7 @@ impl<I: Interface + ?Sized> AsyncBlockService<I> {
         let source = BufferSource::new(pool_capacity);
         interface.on_attach_vmo(&source.vmo()).await?;
         let allocator = Arc::new(BufferAllocator::new(
-            std::cmp::max(block_size as usize, zx::system_get_page_size() as usize),
+            std::cmp::max(block_size as usize, page_size().get() as usize),
             source,
         ));
         Ok(Self::new_with_allocator(interface, block_size, allocator, scope))
@@ -1163,7 +1164,7 @@ mod tests {
         let source = BufferSource::new(pool_capacity);
         interface.on_attach_vmo(&source.vmo()).await.unwrap();
         let allocator = Arc::new(BufferAllocator::new(
-            std::cmp::max(block_size as usize, zx::system_get_page_size() as usize),
+            std::cmp::max(block_size as usize, page_size().get() as usize),
             source,
         ));
         let block_service = Arc::new(AsyncBlockService::new_with_allocator(
@@ -1243,7 +1244,7 @@ mod tests {
         }
         let mut sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             root_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();
@@ -1301,7 +1302,7 @@ mod tests {
         }
         let mut child_sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             child_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();
@@ -1384,7 +1385,7 @@ mod tests {
         }
         let mut sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             root_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();

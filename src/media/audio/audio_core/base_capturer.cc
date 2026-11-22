@@ -178,13 +178,21 @@ BaseCapturer::InitializeSourceLink(const AudioObject& source,
     case State::AsyncOperating:
     case State::AsyncStopping:
     case State::AsyncStoppingCallbackPending:
-    case State::WaitingForVmo:
+    case State::WaitingForVmo: {
       // In capture, source clocks originate from devices (inputs if live, outputs if loopback).
       // For now, "loop in" (direct client-to-client) routing is unsupported.
       // For now, device clocks should not be adjustable.
       FX_CHECK(!source_stream->reference_clock()->adjustable());
-      return fpromise::ok(
-          std::make_pair(mix_stage_->AddInput(std::move(source_stream)), &mix_domain()));
+      auto resampler = resampler_type();
+      // Sources running at <= 48 kHz have a Nyquist limit <= 24 kHz and cannot carry ultrasonic
+      // frequencies, so they can use the default resampler (e.g. PointSampler at 1:1).
+      if (resampler == Mixer::Resampler::LowPassWindowedSinc &&
+          source_stream->format().frames_per_second() <= 48000) {
+        resampler = Mixer::Resampler::Default;
+      }
+      return fpromise::ok(std::make_pair(
+          mix_stage_->AddInput(std::move(source_stream), std::nullopt, resampler), &mix_domain()));
+    }
 
     // If we are shut down, then I'm not sure why new links are being added, but
     // just go ahead and reject this one. We will be going away shortly.

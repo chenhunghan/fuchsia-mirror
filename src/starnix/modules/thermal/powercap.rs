@@ -333,14 +333,34 @@ fn register_powercap_devices_with_client(
     let mut registered_devices: HashMap<u64, Device> = HashMap::new();
 
     for zone in zones {
-        let parent_device =
-            zone.parent_node_id.and_then(|parent_id| registered_devices.get(&parent_id).cloned());
-        let device = registry.add_numberless_device(
+        let parent_device = match zone.parent_node_id {
+            Some(parent_id) => {
+                let Some(parent) = registered_devices.get(&parent_id).cloned() else {
+                    log_warn!(
+                        "Powercap zone {} (node_id={}) parent (node_id={}) was not registered, skipping",
+                        zone.zone_path,
+                        zone.node_id,
+                        parent_id
+                    );
+                    continue;
+                };
+                Some(parent)
+            }
+            None => None,
+        };
+        let Ok(device) = registry.add_numberless_device(
             zone.zone_path.as_str().into(),
             parent_device,
             powercap_class.clone(),
             |device, dir| build_powercap_zone_directory(device, dir, &zone, client.clone()),
-        );
+        ) else {
+            log_warn!(
+                "Failed to register powercap zone {} (node_id={})",
+                zone.zone_path,
+                zone.node_id,
+            );
+            continue;
+        };
         registered_devices.insert(zone.node_id, device);
     }
 
@@ -608,6 +628,40 @@ mod tests {
                 )
                 .is_some()
             );
+        })
+        .await;
+    }
+
+    #[fuchsia::test]
+    async fn test_register_powercap_devices_skips_colliding_zone_and_children() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            let root = &kernel.device_registry.objects.root;
+
+            let initial_client = spawn_fake_powercap_client(vec![make_node(
+                Some(0),
+                None,
+                Some("gpc:0"),
+                Some("gpc"),
+            )]);
+            register_powercap_devices_with_client(kernel, initial_client)
+                .expect("initial powercap registration should succeed");
+
+            // A zone whose sysfs path collides with an existing powercap device fails to register
+            // and its child zone is skipped rather than registered as a top-level virtual device,
+            // while non-colliding sibling zones still register cleanly.
+            let colliding_client = spawn_fake_powercap_client(vec![
+                make_node(Some(10), None, Some("gpc:0"), Some("colliding-root")),
+                make_node(Some(11), Some(10), Some("gpc:0:1"), Some("child-of-colliding")),
+                make_node(Some(12), None, Some("gpc:1"), Some("gpc1")),
+            ]);
+            register_powercap_devices_with_client(kernel, colliding_client)
+                .expect("colliding powercap tree registration should skip failed zones");
+            assert!(root.lookup("class/powercap/gpc:0:1".into()).is_none());
+            assert!(root.lookup("devices/virtual/powercap/gpc:0:1".into()).is_none());
+            assert!(root.lookup("class/powercap/gpc:1".into()).is_some());
+            assert!(root.lookup("devices/virtual/powercap/gpc:1/name".into()).is_some());
+            assert!(root.lookup("devices/virtual/powercap/gpc:0/name".into()).is_some());
         })
         .await;
     }

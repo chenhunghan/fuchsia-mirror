@@ -9,7 +9,7 @@ import("//build/testing/boot_tests/kernel_zbi_test.gni")
 import("//build/testing/boot_tests/zbi_test.gni")
 import("//build/toolchain/zircon/user_basic_redirect.gni")
 import("//zircon/kernel/kernel_package.gni")
-import("//zircon/kernel/phys/kernel_elf_binary.gni")
+import("//zircon/kernel/phys/elf/kernel_elf_binary.gni")
 
 long_name = "trivial-test-userboot-with-very-long-name-needing-truncation"
 

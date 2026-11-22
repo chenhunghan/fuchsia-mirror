@@ -109,6 +109,8 @@ _LIB_SRCS = [
   "src/subcommands/restart/mod.rs",
   "src/subcommands/show/args.rs",
   "src/subcommands/show/mod.rs",
+  "src/subcommands/suspend/args.rs",
+  "src/subcommands/suspend/mod.rs",
   "src/subcommands/test_node/args.rs",
   "src/subcommands/test_node/mod.rs",
   "src/subcommands/test_node/subcommands/add/args.rs",
@@ -137,6 +139,7 @@ _COMMON_DEPS += [
   "//sdk/rust/zx-status",
   "//src/developer/ffx/lib/safe_string:lib",
   "//src/devices/lib/bind",
+  "//src/lib/fidl/rust/fidl",
   "//third_party/rust_crates:prettytable-rs",
   "//third_party/rust_crates:ansi_term",
   "//third_party/rust_crates:anyhow",
@@ -209,6 +212,7 @@ if (is_fuchsia) {
              "//src/lib/fidl/rust/fidl",
              "//src/lib/fuchsia",
              "//src/lib/fuchsia-async",
+             "//src/lib/fuchsia-sync",
            ]
     output_name = "driver_tools_lib_test"
   }
@@ -237,6 +241,7 @@ if (is_host) {
              "//src/lib/fidl/rust/fidl",
              "//src/lib/fuchsia",
              "//src/lib/fuchsia-async",
+             "//src/lib/fuchsia-sync",
            ]
     features = [ "fdomain" ]
     output_name = "driver_tools_fdomain_lib_test"

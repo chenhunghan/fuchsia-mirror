@@ -64,10 +64,6 @@ test_platforms = [
     cpu = "riscv64"
   },
   {
-    device_type = "Intel NUC Kit NUC7i5DNHE"
-    cpu = "x64"
-  },
-  {
     device_type = "Intel NUC Kit NUC11TNHv5"
     cpu = "x64"
   },
@@ -142,18 +138,6 @@ test_platforms = [
     device_type = "Astro"
   },
   {
-    testbed = "bt_rf_chamber_nuc_phone"
-    cpu = "x64"
-    pool = "fuchsia.tests.connectivity"
-    device_type = "Intel NUC Kit NUC7i5DNHE"
-  },
-  {
-    testbed = "bt_rf_chamber_nuc_nuc"
-    cpu = "x64"
-    pool = "fuchsia.tests.connectivity"
-    device_type = "Intel NUC Kit NUC7i5DNHE"
-  },
-  {
     testbed = "wifi_rf_chamber_astro"
     cpu = "arm64"
     pool = "fuchsia.tests.connectivity"
@@ -164,12 +148,6 @@ test_platforms = [
     cpu = "arm64"
     pool = "fuchsia.tests.connectivity"
     device_type = "Astro"
-  },
-  {
-    testbed = "wifi_rf_chamber_nuc"
-    cpu = "x64"
-    pool = "fuchsia.tests.connectivity"
-    device_type = "Intel NUC Kit NUC7i5DNHE"
   },
   {
     testbed = "astro_thermal"

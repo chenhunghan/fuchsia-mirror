@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "echo_realm_manifest",
+    component_name = "echo_realm",
+    manifest = "meta/echo_realm.cml",
+)
+
+fx_component(
+    name = "echo_realm",
+    compiled_manifest = ":echo_realm_manifest",
+    visibility = [
+        "//examples/diagnostics/inspect/cpp:__pkg__",
+        "//examples/diagnostics/inspect/rust:__pkg__",
+    ],
+)

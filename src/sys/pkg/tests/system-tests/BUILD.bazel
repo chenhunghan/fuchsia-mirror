@@ -6,6 +6,7 @@ load(
     "//build/bazel/rules/host_tests:host_test_data.bzl",
     "host_test_data_map",
 )
+load("//build/testing/environments:device_types.bzl", "device_types")
 load(
     ":system_tests.bzl",
     "system_test_reboot_suite",
@@ -83,14 +84,12 @@ system_test_reboot_suite(
     environments = [
         # These are disabled on NUCs to preserve hardware capacity.
         #{
-        #  dimensions = {
-        #    device_type = "Intel NUC Kit NUC7i5DNHE"
-        #  }
+        #  dimensions = {"device_type": device_types.nuc11}
         #  tags = [ "e2e-isolated" ]
         #},
         {
             "dimensions": {
-                "device_type": "GCE",
+                "device_type": device_types.gce,
             },
             "tags": ["e2e-isolated"],
         },
@@ -105,13 +104,7 @@ system_test_recovery_suite(
     environments = [
         {
             "dimensions": {
-                "device_type": "Intel NUC Kit NUC7i5DNHE",
-            },
-            "tags": ["e2e-isolated-recovery"],
-        },
-        {
-            "dimensions": {
-                "device_type": "Intel NUC Kit NUC11TNHv5",
+                "device_type": device_types.nuc11,
             },
             "tags": ["e2e-isolated-recovery"],
         },
@@ -126,13 +119,7 @@ system_test_reboot_suite(
     environments = [
         {
             "dimensions": {
-                "device_type": "Intel NUC Kit NUC7i5DNHE",
-            },
-            "tags": ["e2e-isolated-longevity"],
-        },
-        {
-            "dimensions": {
-                "device_type": "Intel NUC Kit NUC11TNHv5",
+                "device_type": device_types.nuc11,
             },
             "tags": ["e2e-isolated-longevity"],
         },
@@ -147,14 +134,12 @@ system_test_upgrade_suite(
     environments = [
         # These are disabled on NUCs to preserve hardware capacity.
         #{
-        #  dimensions = {
-        #    device_type = "Intel NUC Kit NUC7i5DNHE"
-        #  }
+        #  dimensions = {"device_type": device_types.nuc11}
         #  tags = [ "e2e-isolated" ]
         #},
         {
             "dimensions": {
-                "device_type": "GCE",
+                "device_type": device_types.gce,
             },
             "tags": ["e2e-isolated"],
         },
@@ -173,13 +158,7 @@ system_test_upgrade_suite(
     environments = [
         {
             "dimensions": {
-                "device_type": "Intel NUC Kit NUC7i5DNHE",
-            },
-            "tags": ["e2e-isolated-longevity"],
-        },
-        {
-            "dimensions": {
-                "device_type": "Intel NUC Kit NUC11TNHv5",
+                "device_type": device_types.nuc11,
             },
             "tags": ["e2e-isolated-longevity"],
         },
@@ -195,13 +174,7 @@ system_test_upgrade_suite(
     environments = [
         {
             "dimensions": {
-                "device_type": "Intel NUC Kit NUC7i5DNHE",
-            },
-            "tags": ["e2e-isolated-omaha"],
-        },
-        {
-            "dimensions": {
-                "device_type": "Intel NUC Kit NUC11TNHv5",
+                "device_type": device_types.nuc11,
             },
             "tags": ["e2e-isolated-omaha"],
         },

@@ -25,6 +25,7 @@
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/stdcompat/span.h>
 #include <lib/trace/event.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zx/interrupt.h>
 #include <lib/zx/result.h>
 #include <threads.h>
@@ -38,7 +39,6 @@
 #include <soc/aml-common/aml-sdmmc.h>
 
 #include "src/devices/block/drivers/aml-sdmmc/aml_sdmmc_config.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace aml_sdmmc {
 

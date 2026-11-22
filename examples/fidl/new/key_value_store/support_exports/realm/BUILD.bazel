@@ -21,10 +21,5 @@ fx_component_manifest(
 fx_component(
     name = "realm",
     compiled_manifest = ":realm-manifest",
-    visibility = [
-        "//examples/fidl/new/key_value_store/support_exports/cpp_natural:__pkg__",
-        "//examples/fidl/new/key_value_store/support_exports/cpp_wire:__pkg__",
-        "//examples/fidl/new/key_value_store/support_exports/rust:__pkg__",
-        "//examples/fidl/new/key_value_store/support_exports/rust_next:__pkg__",
-    ],
+    visibility = ["//examples/fidl/new/key_value_store/support_exports:__subpackages__"],
 )

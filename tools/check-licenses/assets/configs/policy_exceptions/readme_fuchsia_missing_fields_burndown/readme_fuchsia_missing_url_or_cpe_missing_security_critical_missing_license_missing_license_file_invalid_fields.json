@@ -5,9 +5,8 @@
                 "bug": "b/514317894",
                 "description": "Found unknown/invalid fields | License File does not exist | Missing required field 'License' | Missing required field 'Security Critical' | Missing required fields. Must specify either ('URL' AND 'Revision') OR ('CPEPrefix' AND 'Version')",
                 "paths": [
-                    "build/secondary/third_party/alacritty",
-                    "build/secondary/third_party/ogg",
                     "prebuilt/third_party/bazel/linux-x64/install_base/embedded_tools/third_party/zlib",
+                    "prebuilt/third_party/bazel_oot/linux-x64/install_base/embedded_tools/third_party/zlib",
                     "prebuilt/third_party/chrome_latest/arch/x64",
                     "prebuilt/third_party/chromedriver/linux-x64",
                     "prebuilt/third_party/chromedriver_latest/linux-x64",
@@ -45,6 +44,7 @@
                     "third_party/ogg",
                     "third_party/rust_crates/forks/valico/tests/schema/JSON-Schema-Test-Suite",
                     "tools/check-licenses/assets/readmes/prebuilt/third_party/bazel/linux-x64/install_base/embedded_tools/third_party/zlib",
+                    "tools/check-licenses/assets/readmes/prebuilt/third_party/bazel_oot/linux-x64/install_base/embedded_tools/third_party/zlib",
                     "tools/check-licenses/assets/readmes/prebuilt/third_party/chrome_latest/arch/x64",
                     "tools/check-licenses/assets/readmes/prebuilt/third_party/chromedriver/linux-x64",
                     "tools/check-licenses/assets/readmes/prebuilt/third_party/chromedriver_latest/linux-x64",

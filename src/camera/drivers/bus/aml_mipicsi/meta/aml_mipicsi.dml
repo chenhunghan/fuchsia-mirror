@@ -12,6 +12,9 @@
         compat: "driver/aml_mipicsi.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
     },
+    capabilities: [
+        { service: "fuchsia.hardware.mipicsi.Service" },
+    ],
     use: [
         {
             name: "pdev",
@@ -27,6 +30,12 @@
                     },
                 ],
             },
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.mipicsi.Service",
+            from: "self",
         },
     ],
 }

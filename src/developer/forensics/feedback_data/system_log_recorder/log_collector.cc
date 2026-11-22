@@ -6,7 +6,6 @@
 
 #include <lib/async/cpp/task.h>
 #include <lib/syslog/cpp/macros.h>
-#include <zircon/status.h>
 
 #include <utility>
 
@@ -23,38 +22,53 @@ LogCollector::LogCollector(async_dispatcher_t* dispatcher,
       buffer_(buffer_size, redactor),
       started_(false) {}
 
+void LogCollector::on_fidl_error(const fidl::UnbindInfo error) {
+  FX_LOGS(WARNING) << "Lost connection to diagnostics: " << error;
+  OnError(Error::kStreamError);
+}
+
+void LogCollector::handle_unknown_event(
+    const fidl::UnknownEventMetadata<fuchsia_diagnostics::ArchiveAccessor> metadata) {
+  FX_LOGS(WARNING) << "Unexpected event ordinal: " << metadata.event_ordinal;
+}
+
+void LogCollector::handle_unknown_event(
+    const fidl::UnknownEventMetadata<fuchsia_diagnostics::BatchIterator> metadata) {
+  FX_LOGS(WARNING) << "Unexpected event ordinal: " << metadata.event_ordinal;
+}
+
 void LogCollector::Start(Callback callback) {
   FX_CHECK(!started_) << "Start can only be called once";
   started_ = true;
   callback_ = std::move(callback);
 
-  services_->Connect(archive_accessor_.NewRequest(dispatcher_), kLogsArchiveAccessorName);
+  auto [archive_client, archive_server] =
+      fidl::Endpoints<fuchsia_diagnostics::ArchiveAccessor>::Create();
+  services_->Connect(kLogsArchiveAccessorName, archive_server.TakeChannel());
+  archive_accessor_.Bind(std::move(archive_client), dispatcher_, this);
 
-  archive_accessor_.set_error_handler([this](zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to " << kLogsArchiveAccessorName << ": "
-                     << zx_status_get_string(status);
+  constexpr auto kFormat = fuchsia_diagnostics::Format::kFxt;
+  fuchsia_diagnostics::StreamParameters params;
+  params.data_type(fuchsia_diagnostics::DataType::kLogs)
+      .format(kFormat)
+      .stream_mode(fuchsia_diagnostics::StreamMode::kSnapshot)
+      .client_selector_configuration(
+          fuchsia_diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
+
+  auto [iterator_client, iterator_server] =
+      fidl::Endpoints<fuchsia_diagnostics::BatchIterator>::Create();
+  if (const fit::result result = archive_accessor_->StreamDiagnostics({{
+          .stream_parameters = std::move(params),
+          .result_stream = std::move(iterator_server),
+      }});
+      result.is_error()) {
+    FX_LOGS(WARNING) << "Failed to call StreamDiagnostics: " << result.error_value();
     OnError(Error::kStreamError);
-  });
-
-  const auto format = fuchsia::diagnostics::Format::FXT;
-  fuchsia::diagnostics::StreamParameters params;
-  params.set_data_type(fuchsia::diagnostics::DataType::LOGS)
-      .set_format(format)
-      .set_stream_mode(fuchsia::diagnostics::StreamMode::SNAPSHOT)
-      .set_client_selector_configuration(
-          fuchsia::diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
-
-  fuchsia::diagnostics::BatchIteratorPtr batch_iterator;
-  archive_accessor_->StreamDiagnostics(std::move(params), batch_iterator.NewRequest(dispatcher_));
+    return;
+  }
 
   iterator_ = std::make_unique<diagnostics::fidl_log_message_parser::LogBatchIterator>(
-      std::move(batch_iterator), format);
-
-  iterator_->set_error_handler([this](zx_status_t status) {
-    FX_LOGS(WARNING) << "Lost connection to fuchsia.diagnostics.BatchIterator: "
-                     << zx_status_get_string(status);
-    OnError(Error::kStreamError);
-  });
+      std::move(iterator_client), kFormat, dispatcher_, this);
 
   GetNext();
 }
@@ -106,7 +120,7 @@ void LogCollector::GetNext() {
       return;
     }
 
-    for (fpromise::result<fuchsia::logger::LogMessage, std::string>& msg : result.value()) {
+    for (fpromise::result<fuchsia_logger::LogMessage, std::string>& msg : result.value()) {
       buffer_.Add(std::move(msg));
     }
 

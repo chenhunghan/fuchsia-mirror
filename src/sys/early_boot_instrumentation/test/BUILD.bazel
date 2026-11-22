@@ -1,0 +1,85 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# This binary is in charge of wiring all the fake resources for the test.
+# Everything is offered to the test component, which is a parent. The parent
+# then forwards this to the child(the early boot instrumentation component).
+fx_cc_binary(
+    name = "provider",
+    srcs = ["provider.cc"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/vfs/cpp",
+        "//sdk/lib/zbi-format:internal",
+        "//src/lib/fxl:fxl_cli",
+        "//src/lib/zbitl",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "provider_packaged",
+    binary = ":provider",
+    binary_name = "provider",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "early-boot-instrumentation-provider-manifest",
+    component_name = "early-boot-instrumentation-provider",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/provider.cml",
+)
+
+fx_component(
+    name = "early-boot-instrumentation-provider",
+    compiled_manifest = ":early-boot-instrumentation-provider-manifest",
+    visibility = ["//src/sys/early_boot_instrumentation:__pkg__"],
+    deps = [":provider_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "early-boot-collector-stub",
+    srcs = ["collector-test.cc"],
+    visibility = [
+        "//:__pkg__",
+        "//build/testing/boot_tests:__pkg__",
+        "//sdk/lib/c/test:__pkg__",
+        "//src/bringup/bin/userboot/tests:__pkg__",
+        "//src/tests/early-boot-coverage/standalone-test:__pkg__",
+        "//zircon/kernel:__pkg__",
+        "//zircon/kernel/phys/test/debugdata-propagation:__pkg__",
+        "//zircon/system/ulib/uart/test/interrupt-test:__pkg__",
+        "//zircon/system/utest/core:__pkg__",
+    ],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)

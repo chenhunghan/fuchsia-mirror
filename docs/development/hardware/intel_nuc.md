@@ -138,7 +138,7 @@ To prepare a bootable USB drive, do the following:
 Update your NUC's BIOS setup so that it can boot from
 a USB drive.
 
-Two versions of BIOS are available on NUC devices: **Visual BIOS** (for instance, NUC7)
+Two versions of BIOS are available on NUC devices: **Visual BIOS** (for instance, NUC8)
 and **Aptio V BIOS** (for instance, NUC11). The steps are slightly different depending
 on which BIOS is included in your system.
 
@@ -292,15 +292,12 @@ To upload Fuchsia SSH keys to the NUC, do the following:
 
 ### Supported NUC models {#supported-nuc-models}
 
-For GPU support, get a NUC7 (Kaby Lake) or NUC8 (Coffee Lake), or a higher
-generation.
+For GPU support, get a NUC8 (Coffee Lake) or a higher generation, such as a
+NUC11 (Tiger Lake).
 
 The list below shows some example models:
 
- * [Intel® NUC Kit NUC7i5DNKE][NUC7i5DNKE]{:.external}
- * [Intel® NUC Kit NUC7i5DNHE][NUC7i5DNHE]{:.external} (Best choice)
- * [Intel® NUC Kit NUC7i3DNKE][NUC7i3DNKE]{:.external}
- * [Intel® NUC Kit NUC7i3DNHE][NUC7i3DNHE]{:.external}
+ * [Intel® NUC 11 Pro Kit NUC11TNHi5][NUC11TNHi5]{:.external} (Best choice)
  * [Intel® NUC Kit NUC8i5BEK][NUC8i5BEK]{:.external}
  * [Intel® NUC Kit NUC8i5BEH][NUC8i5BEH]{:.external}
  * [Intel® NUC Kit NUC8i3BEK][NUC8i3BEK]{:.external}
@@ -479,10 +476,7 @@ You can also turn on, turn off or reboot the NUC with the following terminal com
 [get-started-with-fuchsia]: /docs/get-started/README.md
 [usb-setup]: /docs/development/hardware/usb_setup.md
 [supported-sys-config]: /docs/reference/hardware/support-system-config.md
-[NUC7i5DNKE]: https://ark.intel.com/content/www/us/en/ark/products/122486/intel-nuc-kit-nuc7i5dnke.html
-[NUC7i5DNHE]: https://ark.intel.com/content/www/us/en/ark/products/122488/intel-nuc-kit-nuc7i5dnhe.html
-[NUC7i3DNKE]: https://ark.intel.com/content/www/us/en/ark/products/122495/intel-nuc-kit-nuc7i3dnke.html
-[NUC7i3DNHE]: https://ark.intel.com/content/www/us/en/ark/products/122498/intel-nuc-kit-nuc7i3dnhe.html
+[NUC11TNHi5]: https://www.intel.com/content/www/us/en/products/sku/205594/intel-nuc-11-pro-kit-nuc11tnhi5/specifications.html
 [NUC8i5BEK]: https://ark.intel.com/content/www/us/en/ark/products/126147/intel-nuc-kit-nuc8i5bek.html
 [NUC8i5BEH]: https://ark.intel.com/content/www/us/en/ark/products/126148/intel-nuc-kit-nuc8i5beh.html
 [NUC8i3BEK]: https://ark.intel.com/content/www/us/en/ark/products/126149/intel-nuc-kit-nuc8i3bek.html

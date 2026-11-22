@@ -10,9 +10,7 @@
 #include <lib/object-constants.h>
 #include <zircon/types.h>
 
-#include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
-#include <ktl/unique_ptr.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
 
@@ -53,7 +51,9 @@ class VcpuDispatcher final : public Dispatcher {
   friend zx_status_t cpp_vcpu_dispatcher_create(
       GuestDispatcher* guest_dispatcher_raw, Vcpu* vcpu_raw,
       ffi::Uninitialized<KernelHandle<VcpuDispatcher>>* handle_out);
-  VcpuDispatcher(fbl::RefPtr<GuestDispatcher> guest_dispatcher, ktl::unique_ptr<Vcpu> vcpu);
+  // Takes ownership of `vcpu` and of a reference to `guest_dispatcher`, which are owned by the
+  // Rust `VcpuDispatcherState`.
+  VcpuDispatcher(GuestDispatcher* guest_dispatcher, Vcpu* vcpu);
 
   OpaqueStorage<kVcpuDispatcherStateSize, kVcpuDispatcherStateAlign> opaque_storage_;
 };

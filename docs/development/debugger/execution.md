@@ -23,7 +23,7 @@ As you debug you can control execution through the use of the following:
   To control execution through stack frames in zxdb, see
   [Stack Frames](#stack-frames).
 
-## Threads
+## Threads {#threads}
 
 In zxdb, a `thread` is a [noun][zxdb-noun] that you can use with zxdb
 [verbs][zxdb-verb].

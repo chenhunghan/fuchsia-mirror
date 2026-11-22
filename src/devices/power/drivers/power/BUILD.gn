@@ -60,7 +60,6 @@ fuchsia_driver_component("power") {
     "//src/devices/bus/drivers/platform/test:*",
     "//src/devices/power:drivers",
   ]
-  info = "meta/power-info.json"
   component_name = "power"
   dml_label = ":power-dml"
   deps = [ ":power-driver" ]

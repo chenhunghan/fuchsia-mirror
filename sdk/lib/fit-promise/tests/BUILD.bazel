@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fit-promise-test-pkg"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fit-promise-tests_host_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+# TODO: Convert these to zxtest and move them into the test above.
+fx_cc_test_binary(
+    name = "fit-promise-tests",
+    srcs = [
+        "barrier_tests.cc",
+        "bridge_tests.cc",
+        "examples/promise_example1.cc",
+        "examples/promise_example1.h",
+        "examples/promise_example2.cc",
+        "examples/promise_example2.h",
+        "examples/utils.cc",
+        "examples/utils.h",
+        "future_tests.cc",
+        "pending_task_tests.cc",
+        "promise_examples.cc",
+        "promise_tests.cc",
+        "result_examples.cc",
+        "result_tests.cc",
+        "scheduler_tests.cc",
+        "scope_tests.cc",
+        "sequencer_tests.cc",
+        "single_threaded_executor_tests.cc",
+        "suspended_task_tests.cc",
+        "unittest_utils.h",
+    ],
+    build_flags = ["//build/config:test_exercising_sdk_headers"],
+    deps = [
+        "//sdk/lib/fit-promise",
+        "//zircon/system/ulib/zxtest",
+    ] + select({
+        "@platforms//os:fuchsia": ["//sdk/lib/fdio"],
+        "//conditions:default": [],
+    }),
+)
+
+fx_unittest_package(
+    name = "fit-promise-test-pkg",
+    package_name = "fit-promise-tests",
+    unit_tests = [":fit-promise-tests"],
+)
+
+host_test(
+    name = "fit-promise-tests_host_test",
+    binary = ":fit-promise-tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

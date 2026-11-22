@@ -176,10 +176,11 @@ async fn a2dp_source_search_and_connect(tf: A2dpSourceIntegrationTest) {
 
     // We then expect A2DP Source to attempt to connect to the peer.
     match connect_requests.select_next_some().await.expect("connection request") {
-        ConnectionReceiverRequest::Connected { peer_id, .. } => {
-            assert_eq!(peer_id, a2dp_src_under_test.peer_id().into());
+        ConnectionReceiver2Request::Connected { payload, responder, .. } => {
+            responder.send().unwrap();
+            assert_eq!(payload.peer_id, Some(a2dp_src_under_test.peer_id().into()));
         }
-        ConnectionReceiverRequest::_UnknownMethod { .. } => {
+        ConnectionReceiver2Request::_UnknownMethod { .. } => {
             panic!("unknown method");
         }
     }

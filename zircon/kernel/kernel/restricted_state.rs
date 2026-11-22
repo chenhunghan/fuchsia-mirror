@@ -56,11 +56,10 @@ fn create_vmo_mapping() -> Result<VmoMapping, Status> {
 
     // SAFETY: VmObjectPaged inherits from VmObject, so casting its RefPtr to RefPtr<VmObject> is sound.
     let base_vmo = unsafe { vmo.clone().cast::<VmObject>() };
-    let mapping_name = b"restricted state";
     let arch_mmu_flags = ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE;
 
     let map_result = kernel_vmar
-        .create_vm_mapping(0, STATE_VMO_SIZE, 0, 0, base_vmo, 0, arch_mmu_flags, mapping_name)
+        .create_vm_mapping_no_overwrite(0, STATE_VMO_SIZE, 0, 0, base_vmo, 0, arch_mmu_flags)
         .inspect_err(|_| {
             vmo.unpin(0, STATE_VMO_SIZE as u64);
         })?;
@@ -110,8 +109,24 @@ impl RestrictedState {
     }
 
     /// Return whether the thread is currently in restricted mode.
+    #[inline]
     pub fn in_restricted(&self) -> bool {
         self.in_restricted
+    }
+
+    /// Return whether the thread is currently in restricted mode from a raw pointer without
+    /// forming a `&RestrictedState` reference.
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a valid, live [`RestrictedState`] whose `in_restricted` field is not
+    /// concurrently mutated.
+    #[inline]
+    pub unsafe fn in_restricted_ptr(this: *const Self) -> bool {
+        // SAFETY: Caller guarantees `this` points to a valid `RestrictedState` with no concurrent
+        // mutation of `in_restricted`; projecting only `in_restricted` avoids forming a reference
+        // to the whole `RestrictedState`.
+        unsafe { (*this).in_restricted }
     }
 
     /// Set whether the thread is currently in restricted mode.
@@ -210,23 +225,13 @@ pub unsafe extern "C" fn rust_restricted_state_destroy(ptr: *mut RestrictedState
     }
 }
 
-/// Return whether the restricted state indicates that the thread is in restricted mode.
-///
-/// # Safety
-///
-/// `state` must be a valid, non-null reference to a `RestrictedState`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_restricted_state_in_restricted(state: &RestrictedState) -> bool {
-    state.in_restricted()
-}
-
 /// Restricted state kernel unit tests.
 #[cfg(ktest)]
 #[unittest::suite(name = "restricted_state_tests")]
 mod tests {
     use super::{
-        NonNull, RestrictedState, rust_restricted_state_destroy,
-        rust_restricted_state_in_restricted, zx_exception_report_t, zx_restricted_state_t,
+        NonNull, RestrictedState, rust_restricted_state_destroy, zx_exception_report_t,
+        zx_restricted_state_t,
     };
 
     /// Verifies creation of RestrictedState and basic field accessors and mutators.
@@ -274,7 +279,7 @@ mod tests {
 
         // SAFETY: raw_ptr points to a valid, initialized RestrictedState returned by create.
         unsafe {
-            unittest::expect_false!(rust_restricted_state_in_restricted(&*raw_ptr));
+            unittest::expect_false!(RestrictedState::in_restricted_ptr(raw_ptr));
         }
 
         // SAFETY: raw_ptr was returned by rust_restricted_state_create and has not been destroyed.

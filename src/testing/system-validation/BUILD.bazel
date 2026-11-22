@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
@@ -12,6 +13,12 @@ test_suite(
     name = "tests",
     tests = [],  # Include all tests in the package.
     visibility = ["//src/testing:__pkg__"],
+)
+
+cml_shard(
+    name = "meta/system_validation_test_realm.shard",
+    shard = "meta/system_validation_test_realm.shard.cml",
+    visibility = ["//:__subpackages__"],
 )
 
 rustc_library(

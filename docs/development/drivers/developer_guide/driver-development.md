@@ -50,10 +50,8 @@ After running this command, follow these steps:
 
 1. Define bind rules in `meta/<NAME>.bind`.
 2. Configure the component manifest in `meta/<NAME>.cml`.
-3. Add driver metadata in `meta/<NAME>-info.json`, including a `short_description`
-   and `areas` matching an entry in `//build/drivers/areas.txt`.
-4. Implement the driver class in C++ (inheriting from `fdf::DriverBase2`) or Rust.
-5. Include the `tests` target in the `<PATH>:tests` build target to ensure CQ coverage.
+3. Implement the driver class in C++ (inheriting from `fdf::DriverBase2`) or Rust.
+4. Include the `tests` target in the `<PATH>:tests` build target to ensure CQ coverage.
 
 ## Declaring a driver and bind rules
 
@@ -272,9 +270,9 @@ For detailed guidelines, see [Device power management][device-power-management].
 <!-- Reference links -->
 
 [driver-framework]: /docs/concepts/drivers/driver_framework.md
-[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
-[driver-host]: /docs/concepts/drivers/driver_framework.md#driver_host
-[driver-runtime]: /docs/concepts/drivers/driver_framework.md#driver_runtime
+[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver-manager
+[driver-host]: /docs/concepts/drivers/driver_framework.md#driver-host
+[driver-runtime]: /docs/concepts/drivers/driver_framework.md#driver-runtime
 [drivers-and-nodes]: /docs/concepts/drivers/drivers_and_nodes.md
 [driver-binding]: /docs/concepts/drivers/driver_binding.md
 [driver-communication]: /docs/concepts/drivers/driver_communication.md

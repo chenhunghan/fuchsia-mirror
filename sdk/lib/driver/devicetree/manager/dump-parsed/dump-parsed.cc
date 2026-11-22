@@ -114,8 +114,7 @@ int main(int argc, char** argv) {
   out << "platform_bus_nodes {\n";
   auto& pbus_nodes = publisher.GetPbusNodesWithMetadata();
   for (const auto& entry : pbus_nodes) {
-    fdf_devicetree::StringifyPbusNode(entry.node, entry.metadata_text, entry.power_config_text,
-                                      out);
+    fdf_devicetree::StringifyPbusNode(entry.node, entry.metadata_text, out);
     out << "\n";
   }
   out << "}\n\n";

@@ -45,6 +45,9 @@ load(
 load("//fuchsia/packaging/fuchsia_package:fuchsia_package_checker_test.bzl", "fuchsia_package_checker_test")
 load(
     ":fuchsia_board_configuration_test.bzl",
+    "fuchsia_board_arch_arm64_test",
+    "fuchsia_board_arch_riscv64_test",
+    "fuchsia_board_arch_x64_test",
     "fuchsia_board_configuration_test",
     "fuchsia_hybrid_board_configuration_test",
 )
@@ -188,6 +191,58 @@ fuchsia_board_configuration_test(
     visibility = ["//visibility:public"],
 )
 
+# Tests for the `arch` argument, which restricts a board (and everything
+# built from it) to one CPU. See fuchsia_board_configuration_test.bzl for
+# what the fuchsia_board_arch_*_test rules check.
+#
+# The x64 board also sets an explicit `target_compatible_with`, to check that
+# it is combined with the restriction from `arch`.
+fuchsia_board_configuration(
+    name = "arch_x64_board_configuration",
+    arch = "x64",
+    board_name = "arch_x64",
+    tags = ["manual"],
+    target_compatible_with = [],
+    version = "fake_version_123",
+)
+
+fuchsia_board_arch_x64_test(
+    name = "arch_x64_board_configuration_test",
+    expected_arch = "x64",
+    target_under_test = ":arch_x64_board_configuration",
+    visibility = ["//visibility:public"],
+)
+
+fuchsia_board_configuration(
+    name = "arch_arm64_board_configuration",
+    arch = "arm64",
+    board_name = "arch_arm64",
+    tags = ["manual"],
+    version = "fake_version_123",
+)
+
+fuchsia_board_arch_arm64_test(
+    name = "arch_arm64_board_configuration_test",
+    expected_arch = "arm64",
+    target_under_test = ":arch_arm64_board_configuration",
+    visibility = ["//visibility:public"],
+)
+
+fuchsia_board_configuration(
+    name = "arch_riscv64_board_configuration",
+    arch = "riscv64",
+    board_name = "arch_riscv64",
+    tags = ["manual"],
+    version = "fake_version_123",
+)
+
+fuchsia_board_arch_riscv64_test(
+    name = "arch_riscv64_board_configuration_test",
+    expected_arch = "riscv64",
+    target_under_test = ":arch_riscv64_board_configuration",
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "prebuilt_board_config_files",
     srcs = glob(["test_data/prebuilt_board_config/**/*"]),
@@ -206,6 +261,46 @@ filegroup(
 fuchsia_prebuilt_board_configuration(
     name = "prebuilt_nested_board_config",
     files = ":prebuilt_nested_board_config_files",
+)
+
+# The same `arch` tests, for prebuilt boards.
+fuchsia_prebuilt_board_configuration(
+    name = "prebuilt_arch_x64_board_config",
+    arch = "x64",
+    files = ":prebuilt_board_config_files",
+    tags = ["manual"],
+)
+
+fuchsia_board_arch_x64_test(
+    name = "prebuilt_arch_x64_board_configuration_test",
+    target_under_test = ":prebuilt_arch_x64_board_config",
+    visibility = ["//visibility:public"],
+)
+
+fuchsia_prebuilt_board_configuration(
+    name = "prebuilt_arch_arm64_board_config",
+    arch = "arm64",
+    files = ":prebuilt_board_config_files",
+    tags = ["manual"],
+)
+
+fuchsia_board_arch_arm64_test(
+    name = "prebuilt_arch_arm64_board_configuration_test",
+    target_under_test = ":prebuilt_arch_arm64_board_config",
+    visibility = ["//visibility:public"],
+)
+
+fuchsia_prebuilt_board_configuration(
+    name = "prebuilt_arch_riscv64_board_config",
+    arch = "riscv64",
+    files = ":prebuilt_board_config_files",
+    tags = ["manual"],
+)
+
+fuchsia_board_arch_riscv64_test(
+    name = "prebuilt_arch_riscv64_board_configuration_test",
+    target_under_test = ":prebuilt_arch_riscv64_board_config",
+    visibility = ["//visibility:public"],
 )
 
 fuchsia_board_configuration_test(

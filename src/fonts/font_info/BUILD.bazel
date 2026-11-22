@@ -1,0 +1,102 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":font_info_tests"],
+    visibility = ["//src/fonts:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":font_info_host_test"],
+    visibility = ["//src/fonts:__pkg__"],
+)
+
+rustc_library(
+    name = "font_info",
+    srcs = [
+        "src/lib.rs",
+        "src/sources.rs",
+        "src/vmo_stream.rs",
+    ],
+    edition = "2024",
+    visibility = [
+        "//src/fonts:__pkg__",
+        "//src/fonts/tools/manifest_generator:__pkg__",
+    ],
+    deps = [
+        "//src/fonts/char_set",
+        "//src/fonts/freetype_ffi",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:byteorder",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+            "//sdk/rust/zx",
+            "//third_party/rust_crates/vendor:libc",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+# GN's host test binary attaches host_test_data("test_data") via data_deps,
+# while Bazel attaches test_data on wrap_host_rust_test.
+# @bazel2gn:raw_attribute:if (is_host) { data_deps = [ ":test_data" ] }
+rustc_test(
+    name = "font_info_test_bin",
+    srcs = ["tests/tests.rs"],
+    crate_name = "font_info_test",
+    crate_root = "tests/tests.rs",
+    edition = "2024",
+    deps = [
+        ":font_info",
+        "//src/fonts/char_set",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+host_test_data_files(
+    name = "test_data",
+    testonly = True,
+    srcs = ["//src/fonts/test_data:SampleFont-Regular.ttf"],
+    dest_dir = "test_data/font_info",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+wrap_host_rust_test(
+    name = "font_info_host_test",
+    binary_name = "font_info_test_bin",
+    test_data = [":test_data"],
+)
+
+# bazel2gn does not translate resource() targets, so the GN copy is kept above
+# the sentinel in BUILD.gn.
+# @bazel2gn:skip
+resource(
+    name = "testdata",
+    testonly = True,
+    src = "//src/fonts/test_data:SampleFont-Regular.ttf",
+    dest = "data/SampleFont-Regular.ttf",
+)
+
+# bazel2gn does not translate fx_unittest_package(resources = ...), so the GN
+# copy is kept above the sentinel in BUILD.gn.
+# @bazel2gn:skip
+fx_unittest_package(
+    name = "font_info_tests",
+    resources = [":testdata"],
+    unit_tests = [":font_info_test_bin"],
+)

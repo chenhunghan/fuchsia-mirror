@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use anyhow::Result;
-use fidl::endpoints::{create_proxy_and_stream, create_request_stream, ClientEnd};
+use fidl::endpoints::{ClientEnd, create_proxy_and_stream, create_request_stream};
+use fidl_fuchsia_component_decl as fcdecl;
+use flex_fuchsia_io as fio;
+use flex_fuchsia_sys2 as fsys;
 use fuchsia_async::Task;
 use futures::{StreamExt, TryStreamExt};
 use moniker::Moniker;
 use std::collections::HashMap;
 use std::fs::{create_dir_all, write};
 use tempfile::TempDir;
-use {fidl_fuchsia_component_decl as fcdecl, flex_fuchsia_io as fio, flex_fuchsia_sys2 as fsys};
 
 #[derive(Clone)]
 pub struct File {
@@ -66,6 +68,24 @@ pub fn serve_realm_query(
     configs: HashMap<String, fcdecl::ResolvedConfig>,
     dirs: HashMap<(String, fsys::OpenDirType), TempDir>,
 ) -> fsys::RealmQueryProxy {
+    serve_realm_query_internal(instances, manifests, HashMap::new(), configs, dirs)
+}
+
+pub fn serve_realm_query_with_decl_errors(
+    instances: Vec<fsys::Instance>,
+    manifests: HashMap<String, fcdecl::Component>,
+    decl_errors: HashMap<String, fsys::GetDeclarationError>,
+) -> fsys::RealmQueryProxy {
+    serve_realm_query_internal(instances, manifests, decl_errors, HashMap::new(), HashMap::new())
+}
+
+fn serve_realm_query_internal(
+    instances: Vec<fsys::Instance>,
+    manifests: HashMap<String, fcdecl::Component>,
+    decl_errors: HashMap<String, fsys::GetDeclarationError>,
+    configs: HashMap<String, fcdecl::ResolvedConfig>,
+    dirs: HashMap<(String, fsys::OpenDirType), TempDir>,
+) -> fsys::RealmQueryProxy {
     let (client, mut stream) = create_proxy_and_stream::<fsys::RealmQueryMarker>();
 
     let mut instance_map = HashMap::new();
@@ -80,6 +100,14 @@ pub fn serve_realm_query(
         .map(|(moniker, component)| {
             let moniker = Moniker::parse_str(&moniker).unwrap().to_string();
             (moniker, component)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let decl_errors = decl_errors
+        .into_iter()
+        .map(|(moniker, err)| {
+            let moniker = Moniker::parse_str(&moniker).unwrap().to_string();
+            (moniker, err)
         })
         .collect::<HashMap<_, _>>();
 
@@ -114,7 +142,9 @@ pub fn serve_realm_query(
                 fsys::RealmQueryRequest::GetResolvedDeclaration { moniker, responder } => {
                     eprintln!("GetResolvedDeclaration call for {}", moniker);
                     let moniker = Moniker::parse_str(&moniker).unwrap().to_string();
-                    if let Some(manifest) = manifests.get(&moniker) {
+                    if let Some(err) = decl_errors.get(&moniker) {
+                        responder.send(Err(*err)).unwrap();
+                    } else if let Some(manifest) = manifests.get(&moniker) {
                         let iterator = serve_manifest_bytes_iterator(manifest.clone());
                         responder.send(Ok(iterator)).unwrap();
                     } else {

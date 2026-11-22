@@ -1,0 +1,28 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+# The most stack, in bytes, that any vDSO entry point may use, including
+# everything it calls and, on x86-64, the return address pushed by each call
+# and the red zone of a leaf function.
+#
+# This is an ABI contract. The vDSO runs on its caller's stack, so this is
+# what a caller with a small stack has to leave free before calling into the
+# vDSO. The vDSO is linked with -z stack-size set to this number, so its
+# PT_GNU_STACK p_memsz field always states the contract, and the build checks
+# the estimated stack usage of every entry point against it (see BUILD.gn).
+# So changing this number is a conscious change of the contract, in either
+# direction: raise it only if the new usage is acceptable to every caller.
+#
+# It is the same on every CPU, to keep the contract simple. No caller states
+# a requirement yet, so it leaves ample headroom over the usage measured when
+# the check was added (arm64: 160, riscv64: 256, x64: 208 plus the 128-byte
+# red zone that the check assumes for every leaf, including the syscall
+# stubs), to catch a change that makes an entry point much more expensive.
+#
+# TODO(https://fxbug.dev/42106893): Formalize the contract somewhere with API
+# level versioning, such as the FIDL syscall definitions, so that the public
+# value can change by API level.
+vdso_max_stack_usage = 512

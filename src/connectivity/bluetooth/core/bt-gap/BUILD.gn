@@ -112,7 +112,6 @@ if (is_fuchsia) {
       "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
       "//sdk/fidl/fuchsia.stash:fuchsia.stash_rust",
       "//sdk/rust/zx",
-      "//src/connectivity/bluetooth/lib/async-helpers",
       "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
       "//src/lib/async-utils",
       "//src/lib/diagnostics/inspect/contrib/rust",
@@ -203,7 +202,6 @@ if (is_fuchsia) {
              "//sdk/fidl/fuchsia.device:fuchsia.device_rust",
              "//sdk/fidl/fuchsia.stash:fuchsia.stash_rust",
              "//sdk/rust/zx",
-             "//src/connectivity/bluetooth/lib/async-helpers",
              "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
              "//src/lib/async-utils",
              "//src/lib/diagnostics/inspect/contrib/rust",
@@ -223,6 +221,7 @@ if (is_fuchsia) {
              "//third_party/rust_crates:slab",
              "//third_party/rust_crates:thiserror",
            ] + [
+             "//src/connectivity/bluetooth/lib/async-helpers",
              "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
              "//src/lib/test_util",
              "//third_party/rust_crates:assert_matches",

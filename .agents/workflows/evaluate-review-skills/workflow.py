@@ -981,7 +981,7 @@ async def _run_workflow(workflow_args):
    - Filter semantics: an entry applies to a file when at least one `include_filters` block matches (`project` matches or is empty, and `path_regex` **full-matches** the entire repo-relative path via RE2 / `re.fullmatch`) and no `exclude_filters` block matches.
 
 3. **Validate Every `path_regex` Against `git ls-files` of the Target Repo(s)**:
-   - Identify the exact repo-relative paths where diffs governed by this skill occur (`target_modified_paths`). Remember a skill's own directory often differs from the files it reviews (e.g., `wlan-api-review` also governs `sdk/fidl/fuchsia\\.wlan\\..*\\.fidl`; `update-assembly-bundles` governs `bundles/assembly/.*`).
+   - Identify the exact repo-relative paths where diffs governed by this skill occur (`target_modified_paths`). Remember a skill's own directory often differs from the files it reviews (e.g., `wlan-review-api` also governs `sdk/fidl/fuchsia\\.wlan\\..*\\.fidl`; `update-assembly-bundles` governs `bundles/assembly/.*`).
    - For any candidate `ADD`, `KEEP`, or `UPDATE` entry, test every `path_regex` via `run_command` using Python `re.fullmatch` against `git -C <target_repo_root> ls-files` so you confirm:
      1. Every `path_regex` full-matches real tracked files (`count > 0`) in the target repo(s), and
      2. It matches **nothing unintended** outside the skill's domain (tighten `path_regex` or add `exclude_filters` if needed).

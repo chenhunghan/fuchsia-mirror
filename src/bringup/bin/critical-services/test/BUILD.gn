@@ -59,16 +59,6 @@ fuchsia_component("critical-services-component") {
   deps = [ "//src/bringup/bin/critical-services" ]
 }
 
-fuchsia_structured_config_values2("config_values") {
-  testonly = true
-  cm_label = ":manifest"
-  component_name = "critical-services"
-  values = {
-    exception_handler_available = false
-    storage_stall_watchdog_enabled = false
-  }
-}
-
 fuchsia_component("test_driver_component") {
   testonly = true
   component_name = "test-driver"
@@ -85,7 +75,6 @@ fuchsia_test_component("mock_services_component") {
 fuchsia_test_package("critical-services-integration-test") {
   test_components = [ ":mock_services_component" ]
   deps = [
-    ":config_values",
     ":critical-services-component",
     ":test_driver_component",
   ]

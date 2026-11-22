@@ -553,7 +553,6 @@ mod tests {
                 blob_maximum_bytes: None,
                 data_maximum_bytes: None,
                 blob_format: bfc::FxfsBlobFormat::Zstd,
-                use_driver_blob_paging: true,
             },
             fvm: bfc::Fvm {
                 slice_size: bfc::FvmSliceSize(5678),
@@ -603,7 +602,6 @@ mod tests {
                 blob_maximum_bytes: None,
                 data_maximum_bytes: None,
                 blob_format: bfc::FxfsBlobFormat::Uncompressed,
-                use_driver_blob_paging: true,
             },
             fvm: bfc::Fvm {
                 slice_size: bfc::FvmSliceSize(5678),

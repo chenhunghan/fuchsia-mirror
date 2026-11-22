@@ -1,0 +1,368 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Realm component used to launch FIDL examples
+fx_component_manifest(
+    name = "echo_realm_manifest",
+    component_name = "echo_realm",
+    manifest = "meta/echo_realm.cml",
+)
+
+fx_component(
+    name = "echo_realm",
+    compiled_manifest = ":echo_realm_manifest",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+# Integration testing components for FIDL examples
+rustc_test(
+    name = "bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "fidl_examples_integration",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fidl_examples_integration",
+)
+
+fx_component_manifest(
+    name = "fidl_examples_test_manifest",
+    testonly = True,
+    component_name = "fidl_examples_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration_tests.cml",
+)
+
+fx_test_component(
+    name = "fidl_examples_test",
+    compiled_manifest = ":fidl_examples_test_manifest",
+    deps = [":bin_packaged"],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        ":echo-cpp-async-test",
+        ":echo-cpp-client-sync-test",
+        ":echo-cpp-client-test",
+        ":echo-cpp-wire-client-shared-test",
+        ":echo-cpp-wire-client-sync-test",
+        ":echo-cpp-wire-client-test",
+        ":echo-launcher-cpp-wire-test",
+        ":echo-launcher-rust-next-test",
+        ":echo-launcher-rust-test",
+        ":echo-rust-client-sync-test",
+        ":echo-rust-client-test",
+        ":echo-rust-next-client-test",
+        ":echo-service-cpp-wire-test",
+        ":echo-service-rust-next-test",
+        ":echo-service-rust-test",
+    ],
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+# C++ natural example integration test packages
+fx_package(
+    name = "echo-cpp-client-test_package",
+    package_name = "echo-cpp-client-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/client:echo-client",
+        "//examples/fidl/cpp/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-cpp-client-test",
+    package = ":echo-cpp-client-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-cpp-client-sync-test_package",
+    package_name = "echo-cpp-client-sync-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/client_sync:echo-client",
+        "//examples/fidl/cpp/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-cpp-client-sync-test",
+    package = ":echo-cpp-client-sync-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+# C++ wire example integration test packages
+fx_package(
+    name = "echo-cpp-wire-client-test_package",
+    package_name = "echo-cpp-wire-client-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/client/wire:echo-client",
+        "//examples/fidl/cpp/server/wire:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-cpp-wire-client-test",
+    package = ":echo-cpp-wire-client-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-cpp-wire-client-sync-test_package",
+    package_name = "echo-cpp-wire-client-sync-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/client_sync/wire:echo-client",
+        "//examples/fidl/cpp/server/wire:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-cpp-wire-client-sync-test",
+    package = ":echo-cpp-wire-client-sync-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-cpp-wire-client-shared-test_package",
+    package_name = "echo-cpp-wire-client-shared-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/client_thread_safety:echo-client",
+        "//examples/fidl/cpp/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-cpp-wire-client-shared-test",
+    package = ":echo-cpp-wire-client-shared-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-cpp-async-test_package",
+    package_name = "echo-cpp-async-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/client:echo-client",
+        "//examples/fidl/cpp/server_async_completer:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-cpp-async-test",
+    package = ":echo-cpp-async-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-launcher-cpp-wire-test_package",
+    package_name = "echo-launcher-cpp-wire-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/request_pipelining/client:echo-client",
+        "//examples/fidl/cpp/request_pipelining/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-launcher-cpp-wire-test",
+    package = ":echo-launcher-cpp-wire-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-service-cpp-wire-test_package",
+    package_name = "echo-service-cpp-wire-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/cpp/services/client:echo-client",
+        "//examples/fidl/cpp/services/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-service-cpp-wire-test",
+    package = ":echo-service-cpp-wire-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+# Rust example integration test packages
+fx_package(
+    name = "echo-rust-client-test_package",
+    package_name = "echo-rust-client-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust/client:echo-client",
+        "//examples/fidl/rust/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-rust-client-test",
+    package = ":echo-rust-client-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-rust-client-sync-test_package",
+    package_name = "echo-rust-client-sync-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust/client_sync:echo-client",
+        "//examples/fidl/rust/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-rust-client-sync-test",
+    package = ":echo-rust-client-sync-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-rust-next-client-test_package",
+    package_name = "echo-rust-next-client-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust_next/client:echo-client",
+        "//examples/fidl/rust_next/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-rust-next-client-test",
+    package = ":echo-rust-next-client-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-launcher-rust-test_package",
+    package_name = "echo-launcher-rust-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust/request_pipelining/client:echo-client",
+        "//examples/fidl/rust/request_pipelining/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-launcher-rust-test",
+    package = ":echo-launcher-rust-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-launcher-rust-next-test_package",
+    package_name = "echo-launcher-rust-next-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust_next/request_pipelining/client:echo-client",
+        "//examples/fidl/rust_next/request_pipelining/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-launcher-rust-next-test",
+    package = ":echo-launcher-rust-next-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-service-rust-test_package",
+    package_name = "echo-service-rust-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust/services/client:echo-client",
+        "//examples/fidl/rust/services/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-service-rust-test",
+    package = ":echo-service-rust-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)
+
+fx_package(
+    name = "echo-service-rust-next-test_package",
+    package_name = "echo-service-rust-next-test",
+    components = [
+        ":echo_realm",
+        "//examples/fidl/rust_next/services/client:echo-client",
+        "//examples/fidl/rust_next/services/server:echo-server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fidl_examples_test"],
+)
+
+fx_test(
+    name = "echo-service-rust-next-test",
+    package = ":echo-service-rust-next-test_package",
+    visibility = ["//examples/fidl:__subpackages__"],
+)

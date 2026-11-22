@@ -128,6 +128,11 @@ impl CompressionInfo {
         self.chunk_size
     }
 
+    /// Returns the compression algorithm for this compressed blob.
+    pub fn compression_algorithm(&self) -> CompressionAlgorithm {
+        self.decompressor.algorithm()
+    }
+
     /// Returns the total compressed size of this blob.
     pub fn compressed_size(&self) -> u64 {
         self.compressed_size

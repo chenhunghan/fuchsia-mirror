@@ -480,6 +480,28 @@ TEST_F(AudioConsumerTests, BindVolumeControl) {
   CleanUp();
 }
 
+// Tests consumer method |SetVolume| when |GetDbFromVolume2| fails.
+TEST_F(AudioConsumerTests, SetVolumeGetDbFromVolumeError) {
+  CreateConsumerUnderTest();
+  CreateVolumeControl();
+
+  EXPECT_TRUE(volume_control_under_test()->SetVolume({{.volume = kVolume}}).is_ok());
+  RunLoopUntilIdle();
+
+  const fuchsia_media::Usage2 kUsage =
+      fuchsia_media::Usage2::WithRenderUsage(fuchsia_media::AudioRenderUsage2::kMedia);
+
+  EXPECT_TRUE(fake_audio_core().FailGetDbFromVolume(kUsage, kVolume));
+  RunLoopUntilIdle();
+
+  EXPECT_TRUE(consumer_under_test_unbound());
+  EXPECT_TRUE(volume_control_under_test_unbound());
+  // The failed |GetDbFromVolume2| call must not change the gain.
+  EXPECT_TRUE(fake_gain_control().ExpectNoOtherCalled());
+
+  CleanUp();
+}
+
 // Tests consumer method |WatchStatus|.
 TEST_F(AudioConsumerTests, ConsumerWatchStatus) {
   CreateConsumerUnderTest();

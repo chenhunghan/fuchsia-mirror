@@ -2,9 +2,25 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/python/python_library.gni")
+import("//build/testing/python_build_time_tests.gni")
+
+if (is_host) {
+  python_library("analyze_migration_dag") {
+    source_root = ".agent/skills/analyzing_migration_dag/scripts"
+    sources = [ "analyze_migration_dag.py" ]
+  }
+
+  python_build_time_tests("analyze_migration_dag_test") {
+    tests = [ ".agent/skills/analyzing_migration_dag/scripts/analyze_migration_dag_test.py" ]
+    deps = [ ":analyze_migration_dag" ]
+  }
+}
+
 group("tests") {
   testonly = true
   deps = [
+    ":analyze_migration_dag_test($host_toolchain)",
     "planter/machinery/checks:tests($host_toolchain)",
     "scripts:tests($host_toolchain)",
     "verifications:tests($host_toolchain)",

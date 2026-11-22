@@ -78,7 +78,6 @@ fuchsia_driver_component("driver") {
     ":fuchsia_driver",
     ":usb_video_bind",
   ]
-  info = "meta/driver-info.json"
 }
 
 fuchsia_driver_package("usb_video") {

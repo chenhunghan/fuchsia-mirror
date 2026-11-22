@@ -3796,3 +3796,16 @@
   submitted: '2026-10-15'
   reviewed: '2026-11-03'
 
+- name: 'RFC-0289'
+  title: 'Code Review Policy'
+  short_description: 'Updates to Fuchsia code review policy.'
+  authors: ['wittrock@google.com', 'amituttam@google.com', 'abarth@google.com']
+  file: '0289_code_review_policy.md'
+  area: ['General']
+  issue: []
+  gerrit_change_id: []
+  status: 'Accepted'
+  reviewers: ['drewry@google.com']
+  submitted: '2026-10-22'
+  reviewed: '2026-11-17'
+

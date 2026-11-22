@@ -2,8 +2,8 @@
     "allowed_licenses": {
         "MPL-2.0": [
             {
-                "bug": "TODO: b/missing",
-                "description": "",
+                "bug": "b/585200385",
+                "description": "gRPC includes Mozilla Public License 2.0 root certificate and third-party files.",
                 "paths": [
                     "third_party/grpc"
                 ]

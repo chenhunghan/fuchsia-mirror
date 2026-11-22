@@ -252,10 +252,10 @@ class ExampleUnion final {
 
   static ExampleUnion WithVariant(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kVariant = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ExampleUnion> New();
@@ -288,7 +288,7 @@ class ExampleUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -296,9 +296,9 @@ class ExampleUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::placementofattributes::ExampleUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::placementofattributes::ExampleUnion::Tag::Invalid);
   union {
     uint32_t variant_;
   };
@@ -440,7 +440,7 @@ struct Equality<::test::placementofattributes::ExampleTable> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::placementofattributes::ExampleUnion> : public std::true_type {};
+struct IsFidlUnion<::test::placementofattributes::ExampleUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::placementofattributes::ExampleUnion>
@@ -452,9 +452,9 @@ struct CodingTraits<std::unique_ptr<::test::placementofattributes::ExampleUnion>
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::placementofattributes::ExampleUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -484,7 +484,7 @@ struct Equality<::test::placementofattributes::ExampleUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::placementofattributes::ExampleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::placementofattributes::ExampleUnion::Tag::Invalid):
         return true;
       case ::test::placementofattributes::ExampleUnion::Tag::kVariant:
         return ::fidl::Equals(_lhs.variant_, _rhs.variant_);

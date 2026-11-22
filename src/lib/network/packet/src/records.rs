@@ -652,6 +652,11 @@ where
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Consumes this `Records`, returning the bytes backing it.
+    pub fn into_bytes(self) -> B {
+        self.bytes
+    }
 }
 
 impl<B, R> Records<B, R>

@@ -1,16 +1,17 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2020 The Fuchsia Authors
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
-//
-// Ported from zircon/kernel/dev/hw_watchdog/generic32/hw_watchdog.cc
 
+use crate::arch_rs::vm::is_kernel_address;
 use crate::kernel::deadline::{Deadline, SlackMode, TimerSlack};
 use crate::kernel::timer::{Timer, ZX_CLOCK_BOOT};
+use crate::kernel::types::PAddr;
 use crate::platform_rs::timer::{
     DurationBoot, DurationUnknown, InstantBoot, InstantUnknown, current_boot_time,
 };
+use boot_options::BootOptions;
 use core::pin::Pin;
 use core::ptr::with_exposed_provenance_mut;
 use debug::dprintf;
@@ -24,21 +25,41 @@ use zbi::{
 };
 use zx_status::Status;
 
+zr::static_assert_size_and_align!(DcfgGeneric32Watchdog, 64, 8);
+
 const FORCE_WATCHDOG_DISABLED_NAME: &str = "kernel.force-watchdog-disabled";
 
+/// Timer callback invoked when the periodic watchdog pet timer expires.
+///
+/// # Safety
+///
+/// `arg` must point to a live `'static` [`GenericWatchdog32`].
 unsafe extern "C" fn watchdog_timer_cb(_timer: *mut Timer, _now: i64, arg: *mut core::ffi::c_void) {
-    // SAFETY: The caller must ensure that `arg` is a valid pointer that can be passed
-    // to `rust_watchdog_on_pet_timer`.
-    unsafe {
-        rust_watchdog_on_pet_timer(arg);
-    }
+    // SAFETY: `arg` is the `'static` `owner` reference passed to `Timer::set_deadline`.
+    let watchdog = unsafe { &*arg.cast::<GenericWatchdog32>() };
+    ksync::lock!(let mut guard = watchdog.lock_lock());
+    guard.as_mut().fields_mut().inner.handle_pet_timer_locked();
 }
 
-unsafe extern "C" {
-    /// Translates a physical MMIO address in-place to a virtual address. Returns `true` if valid.
-    fn cpp_watchdog_translate_paddr(paddr: *mut u64) -> bool;
-    /// Returns `true` if the `force_watchdog_disabled` kernel command-line option is set.
-    fn cpp_watchdog_is_force_disabled_cmdline() -> bool;
+/// Translates a physical MMIO address in place to its kernel virtual address, returning `true` if
+/// the address is zero, already in the kernel address space, or successfully mapped.
+fn translate_paddr(paddr: &mut u64) -> bool {
+    if *paddr == 0 || is_kernel_address(*paddr as usize) {
+        return true;
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        *paddr = crate::arch_rs::arm64::periph_paddr_to_vaddr(PAddr(*paddr as usize))
+            .map_or(0, |v| v.0 as u64);
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        *paddr = crate::vm::physmap::paddr_to_physmap(PAddr(*paddr as usize)).0 as u64;
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "riscv64")))]
+    compile_error!("unsupported architecture for generic32 watchdog");
+
+    *paddr != 0
 }
 
 /// Inner state of the generic 32-bit watchdog driver, protected by a spinlock.
@@ -46,7 +67,7 @@ pub struct GenericWatchdog32Inner {
     pub cfg: DcfgGeneric32Watchdog,
     /// Result code of the early initialization phase.
     pub early_init_result: Result<(), Status>,
-    /// Timestamp (`zx_instant_boot_t`) when the watchdog was last pet.
+    /// Boot time when the watchdog was last pet.
     pub last_pet_time: InstantBoot,
     /// Zircon kernel timer used for scheduling periodic pet callbacks.
     pub pet_timer: core::mem::MaybeUninit<Timer>,
@@ -161,22 +182,17 @@ impl GenericWatchdog32Inner {
         }
 
         self.cfg = *config;
-        // SAFETY: `self.cfg.pet_action.addr` is a pointer to the address field in our local config copy, valid for modification by the C++ translation shim.
-        if !unsafe { cpp_watchdog_translate_paddr(&mut self.cfg.pet_action.addr) } {
+        if !translate_paddr(&mut self.cfg.pet_action.addr) {
             self.early_init_result = Err(Status::IO);
             return;
         }
-        // SAFETY: `enable_action.addr` and `disable_action.addr` point to valid `u64` address fields in `self.cfg`.
-        unsafe {
-            cpp_watchdog_translate_paddr(&mut self.cfg.enable_action.addr);
-            cpp_watchdog_translate_paddr(&mut self.cfg.disable_action.addr);
-        }
+        translate_paddr(&mut self.cfg.enable_action.addr);
+        translate_paddr(&mut self.cfg.disable_action.addr);
 
         self.is_enabled = self.cfg.flags.contains(KernelDriverGeneric32WatchdogFlags::ENABLED);
 
         self.pet_locked();
-        // SAFETY: Calling C++ helper to read kernel boot options requires no parameters and has no side effects.
-        if unsafe { cpp_watchdog_is_force_disabled_cmdline() }
+        if BootOptions::get().force_watchdog_disabled
             && self.is_enabled
             && self.cfg.disable_action.addr != 0
         {
@@ -197,7 +213,7 @@ impl GenericWatchdog32Inner {
             );
             return;
         }
-        let force_disabled = unsafe { cpp_watchdog_is_force_disabled_cmdline() };
+        let force_disabled = BootOptions::get().force_watchdog_disabled;
         let can_disable = self.cfg.disable_action.addr != 0;
         let msec = self.cfg.watchdog_period_nsec / 1_000_000;
         let usec = (self.cfg.watchdog_period_nsec % 1_000_000) / 1000;
@@ -269,20 +285,6 @@ unsafe impl Sync for GenericWatchdog32 {}
 
 static G_WATCHDOG: LazyInit<GenericWatchdog32> = LazyInit::uninit();
 
-/// Callback invoked from Zircon timer tick when the pet timer expires.
-///
-/// # Safety
-///
-/// `arg` must be a pointer to `GenericWatchdog32`.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn rust_watchdog_on_pet_timer(arg: *mut core::ffi::c_void) {
-    // SAFETY: `arg` is the `owner` recorded at early init, so it points to a live
-    // `GenericWatchdog32` in static storage.
-    let watchdog = unsafe { &*(arg as *const GenericWatchdog32) };
-    ksync::lock!(let mut guard = watchdog.lock_lock());
-    guard.as_mut().fields_mut().inner.handle_pet_timer_locked();
-}
-
 impl crate::pdev_watchdog::WatchdogOps for GenericWatchdog32 {
     fn pet(&self) {
         ksync::lock!(let mut guard = self.lock_lock());
@@ -327,14 +329,15 @@ impl crate::pdev_watchdog::WatchdogOps for GenericWatchdog32 {
 ///
 /// # Safety
 ///
-/// `config` must be a valid pointer to a `DcfgGeneric32Watchdog` structure.
-/// Initialization must be serialized with respect to any other access.
+/// If non-null, `config` must point to a valid `DcfgGeneric32Watchdog` structure, and this
+/// function must be called at most once during single-threaded early boot before secondary CPUs
+/// start.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn generic_32bit_watchdog_early_init(config: *const DcfgGeneric32Watchdog) {
     if config.is_null() {
         return;
     }
-    // SAFETY: Initialization is serialized with respect to any other access.
+    // SAFETY: The caller guarantees one-time invocation during single-threaded early boot.
     let _ = unsafe {
         Pin::static_ref(&G_WATCHDOG).init_pin(pin_init::pin_init!(GenericWatchdog32 {
             inner: ksync::KCell::new(GenericWatchdog32Inner::new()),
@@ -343,19 +346,21 @@ pub unsafe extern "C" fn generic_32bit_watchdog_early_init(config: *const DcfgGe
     };
     let is_ok = {
         ksync::lock!(let mut guard = G_WATCHDOG.lock_lock());
-        // SAFETY: `config` is checked to be non-null and guaranteed by caller to point to a valid `DcfgGeneric32Watchdog`.
+        // SAFETY: `config` is non-null and guaranteed by the caller to point to a valid
+        // `DcfgGeneric32Watchdog`.
         let inner = guard.as_mut().fields_mut().inner;
         inner.owner = Some(&G_WATCHDOG);
         inner.init_early(unsafe { &*config });
         inner.early_init_result.is_ok()
     };
     if is_ok {
-        crate::pdev_watchdog::register_watchdog(G_WATCHDOG.get());
+        // SAFETY: The caller guarantees one-time invocation during single-threaded early boot
+        // before secondary CPUs start.
+        unsafe { crate::pdev_watchdog::register_watchdog(G_WATCHDOG.get()) };
     }
 }
 
 /// Post-VM initialization routine for the generic 32-bit watchdog driver.
-/// Currently a no-op matching C++.
 ///
 /// # Safety
 ///

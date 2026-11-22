@@ -385,14 +385,7 @@ impl<DS: DataStore, TS: SystemTimeSource> Server<DS, TS> {
         let record =
             LeaseRecord::new(Some(offered), options, self.time_source.now(), lease_length_seconds)?;
         let Self { records, pool, store, .. } = self;
-        let entry = records.entry(client_id);
-        let current = match &entry {
-            std::collections::hash_map::Entry::Occupied(occupied) => {
-                let LeaseRecord { current, .. } = occupied.get();
-                *current
-            }
-            std::collections::hash_map::Entry::Vacant(_vacant) => None,
-        };
+        let current = records.get(&client_id).and_then(|LeaseRecord { current, .. }| *current);
         let newly_allocated = match current {
             Some(current) => {
                 // If there is a lease record with a currently leased address, and the offered address
@@ -405,34 +398,41 @@ impl<DS: DataStore, TS: SystemTimeSource> Server<DS, TS> {
                 false
             }
             None => {
-                match pool.allocate_addr(offered) {
-                    Ok(()) => (),
-                    // An error here indicates that the offered address is already allocated, an
-                    // irrecoverable inconsistency.
-                    Err(e) => panic!("fatal server address allocation failure: {}", e),
+                // An unavailable offered address indicates an irrecoverable inconsistency.
+                assert!(
+                    pool.addr_is_available(offered),
+                    "fatal server address allocation failure: {} is unavailable",
+                    offered
+                );
+                // `client_id` is taking ownership of `offered`, so any other client's inactive
+                // record still referencing `offered` as its `previous` address is superseded.
+                // Evict it so retained records stay bounded by the managed pool size.
+                let stale_ids: Vec<_> = records
+                    .iter()
+                    .filter(|(id, LeaseRecord { current, previous, .. })| {
+                        *id != &client_id && current.is_none() && *previous == Some(offered)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for stale_id in stale_ids {
+                    if let Some(store) = store.as_mut() {
+                        store
+                            .delete(&stale_id)
+                            .context("failed to delete stale client from stash")?;
+                    }
+                    let _: Option<LeaseRecord> = records.remove(&stale_id);
                 }
                 true
             }
         };
-        if let Some(store) = store {
-            if let Err(e) =
-                store.insert(entry.key(), &record).context("failed to store client in stash")
-            {
-                // The lease record is not inserted into `records` on this path, so expired lease
-                // reclamation (which only considers `records`) would never release the address.
-                // Undo the allocation performed above to avoid leaking the address, which would
-                // otherwise allow a client to exhaust the pool by repeatedly triggering data store
-                // failures.
-                if newly_allocated {
-                    match pool.release_addr(offered) {
-                        Ok(()) => (),
-                        Err(_) => unreachable!("address was just allocated above"),
-                    }
-                }
-                return Err(e);
-            }
+        if let Some(store) = store.as_mut() {
+            store.insert(&client_id, &record).context("failed to store client in stash")?;
         }
-        let _ = entry.insert_entry(record);
+        if newly_allocated {
+            pool.allocate_addr(offered)
+                .unwrap_or_else(|e| unreachable!("address was checked available above: {e}"));
+        }
+        let _: Option<LeaseRecord> = records.insert(client_id, record);
         Ok(())
     }
 
@@ -1069,16 +1069,6 @@ impl<DS: DataStore, TS: SystemTimeSource> ServerDispatcher for Server<DS, TS> {
                     self.params.lease_length.clone().into_fidl(),
                 ))
             }
-            fidl_fuchsia_net_dhcp::ParameterName::PermittedMacs => {
-                Ok(fidl_fuchsia_net_dhcp::Parameter::PermittedMacs(
-                    self.params.permitted_macs.clone().into_fidl(),
-                ))
-            }
-            fidl_fuchsia_net_dhcp::ParameterName::StaticallyAssignedAddrs => {
-                Ok(fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(
-                    self.params.static_assignments.clone().into_fidl(),
-                ))
-            }
             fidl_fuchsia_net_dhcp::ParameterName::ArpProbe => {
                 Ok(fidl_fuchsia_net_dhcp::Parameter::ArpProbe(self.params.arp_probe))
             }
@@ -1151,24 +1141,6 @@ impl<DS: DataStore, TS: SystemTimeSource> ServerDispatcher for Server<DS, TS> {
                         }
                     }
             }
-            fidl_fuchsia_net_dhcp::Parameter::PermittedMacs(permitted_macs) => {
-                self.params.permitted_macs =
-                    crate::configuration::PermittedMacs::from_fidl(permitted_macs)
-            }
-            fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(static_assignments) => {
-                self.params.static_assignments =
-                    match crate::configuration::StaticAssignments::try_from_fidl(static_assignments)
-                    {
-                        Ok(static_assignments) => static_assignments,
-                        Err(e) => {
-                            info!(
-                                "dispatch_set_parameter() got invalid StaticallyAssignedAddrs argument: {}",
-                                e
-                            );
-                            return Err(Status::INVALID_ARGS);
-                        }
-                    }
-            }
             fidl_fuchsia_net_dhcp::Parameter::ArpProbe(arp_probe) => {
                 self.params.arp_probe = arp_probe
             }
@@ -1208,8 +1180,6 @@ impl<DS: DataStore, TS: SystemTimeSource> ServerDispatcher for Server<DS, TS> {
             server_ips,
             managed_addrs,
             lease_length,
-            permitted_macs,
-            static_assignments,
             arp_probe,
             bound_device_names,
         } = &self.params;
@@ -1217,10 +1187,6 @@ impl<DS: DataStore, TS: SystemTimeSource> ServerDispatcher for Server<DS, TS> {
             fidl_fuchsia_net_dhcp::Parameter::IpAddrs(server_ips.clone().into_fidl()),
             fidl_fuchsia_net_dhcp::Parameter::AddressPool(managed_addrs.clone().into_fidl()),
             fidl_fuchsia_net_dhcp::Parameter::Lease(lease_length.clone().into_fidl()),
-            fidl_fuchsia_net_dhcp::Parameter::PermittedMacs(permitted_macs.clone().into_fidl()),
-            fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(
-                static_assignments.clone().into_fidl(),
-            ),
             fidl_fuchsia_net_dhcp::Parameter::ArpProbe(*arp_probe),
             fidl_fuchsia_net_dhcp::Parameter::BoundDeviceNames(bound_device_names.clone()),
         ])
@@ -1571,9 +1537,7 @@ pub fn get_server_id_from(req: &Message) -> Option<Ipv4Addr> {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::configuration::{
-        LeaseLength, ManagedAddresses, PermittedMacs, StaticAssignments, SubnetMask,
-    };
+    use crate::configuration::{LeaseLength, ManagedAddresses, SubnetMask};
     use crate::protocol::{
         DhcpOption, FidlCompatible as _, IntoFidlExt as _, Message, MessageType, OpCode,
         OptionCode, ProtocolError,
@@ -1589,9 +1553,8 @@ pub mod tests {
     use bstr::BString;
     use datastore::{ActionRecordingDataStore, DataStoreAction, FailingDataStore};
     use dhcp_protocol::{AtLeast, AtMostBytes};
-    use fidl_fuchsia_net_ext::IntoExt as _;
     use net_declare::net::prefix_length_v4;
-    use net_declare::{fidl_ip_v4, std_ip_v4};
+    use net_declare::{fidl_ip_v4, net_mac, std_ip_v4};
     use net_types::ethernet::Mac as MacAddr;
     use net_types::ip::{Ipv4, PrefixLength};
     use std::cell::RefCell;
@@ -1641,6 +1604,11 @@ pub mod tests {
             pub fn actions(&mut self) -> std::vec::Drain<'_, DataStoreAction> {
                 let Self { actions } = self;
                 actions.drain(..)
+            }
+
+            pub fn clear(&mut self) {
+                let Self { actions } = self;
+                actions.clear()
             }
 
             pub fn load_client_records(&mut self) -> Result<ClientRecords, ActionRecordingError> {
@@ -1763,8 +1731,6 @@ pub mod tests {
                 pool_range_start: net_declare::std::ip_v4!("192.168.0.0"),
                 pool_range_stop: net_declare::std::ip_v4!("192.168.0.0"),
             },
-            permitted_macs: PermittedMacs(Vec::new()),
-            static_assignments: StaticAssignments(HashMap::new()),
             arp_probe: false,
             bound_device_names: Vec::new(),
         })
@@ -4128,9 +4094,7 @@ pub mod tests {
 
     #[test]
     fn server_dispatcher_set_option_saves_to_stash() {
-        let prefix_length = DEFAULT_PREFIX_LENGTH;
-        let fidl_mask =
-            fidl_fuchsia_net_dhcp::Option_::SubnetMask(prefix_length.get_mask().into_ext());
+        let fidl_mask = fidl_fuchsia_net_dhcp::Option_::SubnetMask(fidl_ip_v4!("255.255.255.0"));
         let params = default_server_params().expect("failed to get default serve parameters");
         let mut server: Server = super::Server {
             records: HashMap::new(),
@@ -4145,7 +4109,7 @@ pub mod tests {
             server.store.expect("missing store").actions().as_slice(),
             [
                 DataStoreAction::StoreOptions { opts },
-            ] if *opts == vec![DhcpOption::SubnetMask(prefix_length)]
+            ] if *opts == vec![DhcpOption::SubnetMask(DEFAULT_PREFIX_LENGTH)]
         );
     }
 
@@ -4189,20 +4153,6 @@ pub mod tests {
                 range_stop: Some(fidl_ip_v4!("192.168.0.254")),
                 ..Default::default()
             });
-        let mac = random_mac_generator().bytes();
-        let duplicated_static_assignment =
-            fidl_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(vec![
-                fidl_fuchsia_net_dhcp::StaticAssignment {
-                    host: Some(fidl_fuchsia_net::MacAddress { octets: mac.clone() }),
-                    assigned_addr: Some(random_ipv4_generator().into_fidl()),
-                    ..Default::default()
-                },
-                fidl_fuchsia_net_dhcp::StaticAssignment {
-                    host: Some(fidl_fuchsia_net::MacAddress { octets: mac.clone() }),
-                    assigned_addr: Some(random_ipv4_generator().into_fidl()),
-                    ..Default::default()
-                },
-            ]);
 
         let () =
             server.dispatch_set_parameter(valid_parameter()).expect("failed to set dhcp parameter");
@@ -4217,10 +4167,6 @@ pub mod tests {
             Err(zx::Status::INVALID_ARGS)
         );
         assert_eq!(server.dispatch_set_parameter(bad_prefix_length), Err(zx::Status::INVALID_ARGS));
-        assert_eq!(
-            server.dispatch_set_parameter(duplicated_static_assignment),
-            Err(zx::Status::INVALID_ARGS)
-        );
         assert_matches::assert_matches!(
             server.store.expect("missing store").actions().as_slice(),
             [DataStoreAction::StoreParameters { params }] if *params == server.params
@@ -4230,9 +4176,7 @@ pub mod tests {
     #[test]
     fn server_dispatcher_list_options_returns_set_options() {
         let mut server = new_test_minimal_server();
-        let mask = || {
-            fidl_fuchsia_net_dhcp::Option_::SubnetMask(DEFAULT_PREFIX_LENGTH.get_mask().into_ext())
-        };
+        let mask = || fidl_fuchsia_net_dhcp::Option_::SubnetMask(fidl_ip_v4!("255.255.255.0"));
         let hostname = || fidl_fuchsia_net_dhcp::Option_::HostName(String::from("testhostname"));
         assert_matches::assert_matches!(
             server.options_repo.insert(
@@ -4262,7 +4206,7 @@ pub mod tests {
         server.params.server_ips = vec![addr];
         let expected = fidl_fuchsia_net_dhcp::Parameter::IpAddrs(vec![addr.into_fidl()]);
         let result = server.dispatch_list_parameters().expect("failed to list dhcp options");
-        let params_fields_ct = 7;
+        let params_fields_ct = 5;
         assert_eq!(result.len(), params_fields_ct);
         assert!(result.contains(&expected));
     }
@@ -4433,8 +4377,6 @@ pub mod tests {
                 pool_range_start: client_ip,
                 pool_range_stop: net_declare::std::ip_v4!("192.168.0.2"),
             },
-            permitted_macs: PermittedMacs(Vec::new()),
-            static_assignments: StaticAssignments(HashMap::new()),
             arp_probe: false,
             bound_device_names: Vec::new(),
         };
@@ -4650,6 +4592,79 @@ pub mod tests {
                     DhcpOption::SubnetMask(subnet_mask),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn allocating_addr_evicts_previous_inactive_owner_and_preserves_self_reclaim() {
+        const CLIENT_1_MAC: MacAddr = net_mac!("01:02:03:04:05:01");
+        const CLIENT_2_MAC: MacAddr = net_mac!("01:02:03:04:05:02");
+
+        let mut server = new_test_minimal_server();
+        let pool_ip = std_ip_v4!("192.168.0.2");
+        server.params.managed_addrs.pool_range_start = pool_ip;
+        server.params.managed_addrs.pool_range_stop = std_ip_v4!("192.168.0.3");
+        server.pool = AddressPool::new(server.params.managed_addrs.pool_range());
+
+        let client_1_id = ClientIdentifier::from(CLIENT_1_MAC);
+        let client_2_id = ClientIdentifier::from(CLIENT_2_MAC);
+
+        let disc_1 = Message { chaddr: CLIENT_1_MAC, ..new_test_discover() };
+        assert_eq!(
+            extract_message(server.dispatch(disc_1).expect("disc_1 failed")).yiaddr,
+            pool_ip
+        );
+        let rel_1 = Message { chaddr: CLIENT_1_MAC, ciaddr: pool_ip, ..new_test_release() };
+        assert_eq!(server.dispatch(rel_1), Ok(ServerAction::AddressRelease(pool_ip)));
+        assert_matches!(
+            server.records.get(&client_1_id),
+            Some(LeaseRecord { current: None, previous: Some(ip), .. }) if *ip == pool_ip
+        );
+        server.store.as_mut().expect("missing store").clear();
+
+        // Returning client re-acquires its own previous IP without triggering a delete.
+        let disc_1_again = Message { chaddr: CLIENT_1_MAC, ..new_test_discover() };
+        assert_eq!(
+            extract_message(server.dispatch(disc_1_again).expect("disc_1_again failed")).yiaddr,
+            pool_ip
+        );
+        assert_matches!(
+            server.records.get(&client_1_id),
+            Some(LeaseRecord { current: Some(ip), previous: None, .. }) if *ip == pool_ip
+        );
+        assert_matches!(
+            server.store.as_mut().expect("missing store").actions().as_slice(),
+            [DataStoreAction::StoreClientRecord {
+                client_id,
+                record: LeaseRecord { current: Some(ip), previous: None, .. },
+            }] if *client_id == client_1_id && *ip == pool_ip
+        );
+
+        let rel_1_again = Message { chaddr: CLIENT_1_MAC, ciaddr: pool_ip, ..new_test_release() };
+        assert_eq!(server.dispatch(rel_1_again), Ok(ServerAction::AddressRelease(pool_ip)));
+        server.store.as_mut().expect("missing store").clear();
+
+        // A new client acquiring `pool_ip` evicts client 1's superseded inactive record.
+        let disc_2 = Message { chaddr: CLIENT_2_MAC, ..new_test_discover() };
+        assert_eq!(
+            extract_message(server.dispatch(disc_2).expect("disc_2 failed")).yiaddr,
+            pool_ip
+        );
+        assert_eq!(server.records.len(), 1);
+        assert!(!server.records.contains_key(&client_1_id));
+        assert_matches!(
+            server.records.get(&client_2_id),
+            Some(LeaseRecord { current: Some(ip), previous: None, .. }) if *ip == pool_ip
+        );
+        assert_matches!(
+            server.store.as_mut().expect("missing store").actions().as_slice(),
+            [
+                DataStoreAction::Delete { client_id: del_id },
+                DataStoreAction::StoreClientRecord {
+                    client_id: ins_id,
+                    record: LeaseRecord { current: Some(ip), previous: None, .. },
+                },
+            ] if *del_id == client_1_id && *ins_id == client_2_id && *ip == pool_ip
         );
     }
 }

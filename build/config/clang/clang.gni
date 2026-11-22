@@ -6,6 +6,7 @@ import("//build/config/clang/clang_cpu.gni")
 import("//build/config/clang/clang_prefix.gni")
 import("//build/config/current_target_tuple.gni")
 
+# LINT.IfChange(clang)
 declare_args() {
   # Embed LLVM bitcode as .llvmbc section in ELF files. This is intended
   # primarily for external tools that use bitcode for analysis.
@@ -19,10 +20,7 @@ declare_args() {
   # clang.
   clang_enable_error_reproducers = false
 
-  # LINT.IfChange(clang_ml_inliner)
-
   # Controls whether to use the ML inliner in Clang to reduce size.
   clang_ml_inliner = true
-
-  # LINT.ThenChange(//build/bazel/BUILD.gn:clang_ml_inliner)
 }
+# LINT.ThenChange(//build/bazel/BUILD.gn:clang)

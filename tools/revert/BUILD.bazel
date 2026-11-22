@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host:fx_host_tool.bzl", "fx_host_tool")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":fx_revert_test",
+        ":revert_bin_test",
+    ],
+    visibility = ["//tools:__pkg__"],
+)
+
+rustc_binary_host_tool(
+    name = "revert_bin",
+    srcs = [
+        "src/gerrit.rs",
+        "src/git.rs",
+        "src/graph.rs",
+        "src/jiri.rs",
+        "src/main.rs",
+        "src/message.rs",
+        "src/revert.rs",
+    ],
+    binary_name = "revert",
+    crate_name = "revert",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:chrono",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:url",
+    ],
+)
+
+host_rustc_test(
+    name = "revert_bin_test",
+    crate = ":revert_bin",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+# `fx revert` entry point; registered in //tools/devshell/fx_host_tools.json.
+fx_host_tool(
+    name = "fx_revert",
+    binary = ":revert_bin",
+    tool_name = "revert",
+    visibility = ["//visibility:private"],
+)
+
+host_py_test(
+    name = "fx_revert_test",
+    srcs = ["fx_revert_test.py"],
+    data = [":fx_revert"],
+    imports = ["."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
+)

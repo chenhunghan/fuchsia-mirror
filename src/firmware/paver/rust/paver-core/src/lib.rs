@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+pub mod abr;
+pub mod block;
 pub mod boot_manager;
 pub mod data_sink;
 pub mod partition;
@@ -20,6 +22,16 @@ use fuchsia_runtime::HandleType;
 use futures::StreamExt as _;
 use std::future::Future;
 use std::rc::Rc;
+
+/// Runtime configuration for the paver library, populated by the binary from component structured
+/// configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaverConfig {
+    /// Current boot slot (e.g., `"_a"`, `"_b"`, `"_r"`) reported by Zircon Verified Boot.
+    pub zvb_current_slot: String,
+    /// Current boot slot suffix (e.g., `"_a"`, `"_b"`) for Android-style A/B bootloaders.
+    pub android_boot_slot_suffix: String,
+}
 
 /// Extracts the underlying [`zx::Status`] from an [`anyhow::Error`], defaulting to
 /// [`zx::Status::INTERNAL`] if no [`zx::Status`] is in the error chain.

@@ -73,7 +73,7 @@ zx::result<SysmemBufferInfo> ImportedBufferCollection::GetSysmemMetadata(uint32_
                     fuchsia_sysmem2::wire::BufferCollectionWaitForAllBuffersAllocatedResponse*>&
       wait_response = wait_result.value();
   if (wait_response.is_error()) {
-    fuchsia_sysmem2::Error error_value = check_response.error_value();
+    fuchsia_sysmem2::Error error_value = wait_response.error_value();
     ZX_DEBUG_ASSERT_MSG(error_value != fuchsia_sysmem2::wire::Error::kPending,
                         "CheckAllBuffersAllocated() returned success incorrectly");
 

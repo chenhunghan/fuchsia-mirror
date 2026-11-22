@@ -4,44 +4,30 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::handle::KernelHandle;
-use super::iommu::Iommu;
+use super::KernelHandle;
+use super::dispatcher::impl_dispatcher_state_init;
 use super::iommu_dispatcher::{IommuDispatcher, IommuDispatcherState};
+use crate::iommu::Iommu;
 use core::mem::MaybeUninit;
-use fbl::RefPtr;
 use zx_types::zx_status_t;
 
-// C++ FFI declarations
+#[allow(improper_ctypes)]
 unsafe extern "C" {
+    /// Allocates and initializes a new `IommuDispatcher` via C++ `KernelHandle`, writing the
+    /// resulting handle to `handle_out` on `ZX_OK`.
+    ///
+    /// # Safety
+    ///
+    /// `iommu` must be a valid reference for the duration of the call, and `handle_out` must
+    /// point to valid, aligned, writable uninitialized storage.
     pub(crate) fn cpp_iommu_dispatcher_create(
-        type_param: u32,
-        desc_ptr: *const u8,
-        desc_len: usize,
+        iommu: &Iommu,
         handle_out: *mut MaybeUninit<KernelHandle<IommuDispatcher>>,
     ) -> zx_status_t;
-    pub(crate) fn cpp_iommu_recycle(iommu: *mut Iommu);
-    pub(crate) fn cpp_iommu_get_ref_counted(iommu: *mut Iommu) -> *mut ();
 }
 
-// FFI trampolines for C++ calling into Rust IommuDispatcherState
-
-/// Initializes an `IommuDispatcherState` in-place.
-///
-/// # Safety
-///
-/// `state` must point to valid uninitialized memory for `IommuDispatcherState`.
-/// `iommu_raw` must be a valid raw pointer exported from an `fbl::RefPtr<Iommu>`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_iommu_dispatcher_state_init(
-    state: *mut IommuDispatcherState,
-    dispatcher: *const IommuDispatcher,
-    iommu_raw: *mut Iommu,
-) {
-    // SAFETY: `iommu_raw` is a valid raw pointer exported from `fbl::RefPtr<Iommu>`.
-    let iommu = unsafe { RefPtr::from_raw(iommu_raw) };
-    let init = IommuDispatcherState::init(dispatcher, iommu);
-    // SAFETY: `state` points to uninitialized memory allocated for `IommuDispatcherState`.
-    unsafe {
-        let _ = pin_init::PinInit::__pinned_init(init, state);
-    }
-}
+impl_dispatcher_state_init!(
+    IommuDispatcher,
+    IommuDispatcherState,
+    iommu: &Iommu,
+);

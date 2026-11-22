@@ -161,11 +161,11 @@ Add the following unit test functions to validate the behavior of the
 Add the following rules to your `BUILD.gn` file to generate a new unit test package:
 
 {% set gn_rust_testpackage %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.gn" region_tag="unittest" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.bazel" region_tag="unittest" adjust_indentation="auto" %}
 {% endset %}
 
 {% set gn_cpp_testpackage %}
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.gn" region_tag="unittest" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.bazel" region_tag="unittest" adjust_indentation="auto" %}
 {% endset %}
 
 * {Rust}
@@ -210,7 +210,7 @@ test package:
   `echo-args/BUILD.gn`:
 
   ```gn {:.devsite-disable-click-to-copy}
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/rust/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 
   group("echo-args") {
     testonly = true
@@ -226,7 +226,7 @@ test package:
   `echo-args/BUILD.gn`:
 
   ```gn {:.devsite-disable-click-to-copy}
-  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.gn" region_tag="imports" adjust_indentation="auto" %}
+  {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/echo/cpp/BUILD.bazel" region_tag="imports" adjust_indentation="auto" %}
 
   group("echo-args") {
     testonly = true

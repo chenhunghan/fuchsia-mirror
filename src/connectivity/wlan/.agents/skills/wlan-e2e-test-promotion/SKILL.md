@@ -1,8 +1,12 @@
 ---
 name: wlan-e2e-test-promotion
 description: >
-  Workflow to identify FYI WLAN tests with 300+ consecutive passes, calculate
-  their average runtime, and promote them by creating a CL.
+  Workflow to identify FYI WLAN tests with at least 300 consecutive passes,
+  calculate their average runtime, and promote them to postsubmit CI by
+  creating a CL. Use when auditing tests_for_fyi stability across board
+  variants or promoting stable WLAN E2E tests into tests_for_postsubmit. Don't
+  use for triaging failing WLAN E2E tests (use wlan-e2e-test-luci-triage or
+  wlan-e2e-console-triage) or running tests locally (use wlan-run-e2e-test).
 ---
 
 # Promoting FYI WLAN Tests to Postsubmit CI
@@ -15,10 +19,20 @@ A test is considered stable enough if it has at least 300 runs in the last 90
 days (retention limit) on all of its board variants (e.g. astro, nelson,
 sherlock) across all builders, and 100% of them passed.
 
+## Quick Start
+
+| Goal | Command / Action |
+| :--- | :--- |
+| **1. Check FYI test stability** | `python3 src/connectivity/wlan/.agents/skills/wlan-e2e-test-promotion/scripts/promote_e2e_tests.py` |
+| **2. Verify promotion bar** | Require `>= 300` runs in 90 days with `100%` pass rate across **all** board variants; promote **one test per CL**. |
+| **3. Move target in GN/GNI** | Move target from `tests_for_fyi` to `tests_for_postsubmit`, then run `fx format-code` in that repo root (`//` or `vendor/google`). |
+| **4. Commit & upload CL** | Draft commit message with Milo history URL, passing runs, and average runtime, then commit and upload (`git push origin HEAD:refs/for/main`) in that repo root. |
+
 ## Prerequisites
 
 This skill requires `depot_tools` to be installed and available in your `PATH`.
 Specifically, the workflow relies on:
+
 * `prpc`: To query Buildbucket and LUCI Analysis.
 * `rdb`: To query ResultDB.
 
@@ -38,6 +52,7 @@ python3 src/connectivity/wlan/.agents/skills/wlan-e2e-test-promotion/scripts/pro
 ```
 
 The script will:
+
 1.  Scan the workspace to identify WLAN tests currently in `tests_for_fyi`
     (under `src/connectivity/wlan/tests/` and
     `vendor/google/tests/end_to_end/wlan/`).
@@ -56,6 +71,7 @@ small, focused, and easy to review.
 #### 1. Modify the Code
 Move the test from `tests_for_fyi` to `tests_for_postsubmit` in the appropriate
 GN/GNI file.
+
 * **Example (wlanix/test_lists.gni or BUILD.gn)**:
     * Remove `:sched_scan_test` from `tests_for_fyi` `public_deps`.
     * Add `:sched_scan_test` to `tests_for_postsubmit` `public_deps`.
@@ -87,6 +103,7 @@ during your analysis (which can be found in the script's output):
         * *Example*: `Test: None, promotion based on history.`
 
 **Example Commit Message:**
+
 ```
 [wlan] Promote sched_scan_test to CI
 
@@ -101,7 +118,12 @@ Average Runtime (last 20 runs): 18.2s
 Test: None, promotion based on history.
 ```
 
-## Step 4: Post-Execution Reporting
+#### 3. Commit and Upload the CL
+Stage and commit the promotion change from the corresponding git repository root
+(`//` or `vendor/google`), and push to Gerrit (`git -C <repo_root> push origin
+HEAD:refs/for/main`).
+
+### Step 3: Post-Execution Reporting
 
 Once the workflow has processed all candidate tests, print a consolidated
 summary to stdout for the user. The summary must contain two lists:

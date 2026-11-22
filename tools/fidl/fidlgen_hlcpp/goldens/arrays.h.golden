@@ -235,10 +235,10 @@ class UnionSmallArray final {
 
   static UnionSmallArray WithA(::std::array<uint32_t, 2>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kA = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionSmallArray> New();
@@ -271,7 +271,7 @@ class UnionSmallArray final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -279,9 +279,9 @@ class UnionSmallArray final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::arrays::UnionSmallArray::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::arrays::UnionSmallArray::Tag::Invalid);
   union {
     ::std::array<uint32_t, 2> a_;
   };
@@ -306,10 +306,10 @@ class UnionLargeArray final {
 
   static UnionLargeArray WithA(::std::array<uint32_t, 100>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kA = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionLargeArray> New();
@@ -342,7 +342,7 @@ class UnionLargeArray final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -350,9 +350,9 @@ class UnionLargeArray final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::arrays::UnionLargeArray::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::arrays::UnionLargeArray::Tag::Invalid);
   union {
     ::std::array<uint32_t, 100> a_;
   };
@@ -462,7 +462,7 @@ struct Equality<::test::arrays::TableLargeArray> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::arrays::UnionSmallArray> : public std::true_type {};
+struct IsFidlUnion<::test::arrays::UnionSmallArray> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::arrays::UnionSmallArray>
@@ -474,9 +474,9 @@ struct CodingTraits<std::unique_ptr<::test::arrays::UnionSmallArray>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::arrays::UnionSmallArray>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -506,7 +506,7 @@ struct Equality<::test::arrays::UnionSmallArray> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::arrays::UnionSmallArray::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::arrays::UnionSmallArray::Tag::Invalid):
         return true;
       case ::test::arrays::UnionSmallArray::Tag::kA:
         return ::fidl::Equals(_lhs.a_, _rhs.a_);
@@ -517,7 +517,7 @@ struct Equality<::test::arrays::UnionSmallArray> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::arrays::UnionLargeArray> : public std::true_type {};
+struct IsFidlUnion<::test::arrays::UnionLargeArray> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::arrays::UnionLargeArray>
@@ -529,9 +529,9 @@ struct CodingTraits<std::unique_ptr<::test::arrays::UnionLargeArray>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::arrays::UnionLargeArray>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -561,7 +561,7 @@ struct Equality<::test::arrays::UnionLargeArray> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::arrays::UnionLargeArray::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::arrays::UnionLargeArray::Tag::Invalid):
         return true;
       case ::test::arrays::UnionLargeArray::Tag::kA:
         return ::fidl::Equals(_lhs.a_, _rhs.a_);

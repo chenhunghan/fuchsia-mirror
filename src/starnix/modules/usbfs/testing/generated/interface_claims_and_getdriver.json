@@ -1,0 +1,269 @@
+{
+    "name": "interface_claims_and_getdriver",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd1",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd2",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd2"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "get_driver",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENODATA"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 5
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENOENT"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 99
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "get_driver",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "interface": 0,
+                    "driver": "usbfs"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd2",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EBUSY"
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd2",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "released": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "disconnect_claim",
+                "fd": "fd2",
+                "interface": 0,
+                "flags": [
+                    "EXCEPT_DRIVER"
+                ],
+                "driver": "other"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EBUSY"
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd2"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "release_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "released": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

@@ -1,0 +1,86 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fidl_library(
+    name = "test.suspendcontrol",
+    srcs = ["fidl/suspendcontrol.test.fidl"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power.suspend",
+        "//zircon/vdso/zx",
+    ],
+)
+
+fx_cc_library(
+    name = "cpp",
+    srcs = [
+        "device_server.cc",
+        "device_server.h",
+    ],
+    deps = [
+        ":test.suspendcontrol_cpp",
+        "//sdk/fidl/fuchsia.hardware.power.suspend:fuchsia.hardware.power.suspend_cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "fake-suspend-bin",
+    srcs = ["fake-suspend.cc"],
+    deps = [
+        ":cpp",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fake-suspend-bin_packaged_bin",
+    binary = ":fake-suspend-bin",
+    binary_name = "fake-suspend-bin",
+)
+
+fx_component_manifest(
+    name = "fake-suspend-manifest",
+    component_name = "fake-suspend",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fake-suspend.cml",
+)
+
+fx_component(
+    name = "fake-suspend",
+    compiled_manifest = ":fake-suspend-manifest",
+    visibility = ["//:__subpackages__"],
+    deps = [":fake-suspend-bin_packaged_bin"],
+)
+
+fx_package(
+    name = "fake-suspend-pkg",
+    components = [":fake-suspend"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)

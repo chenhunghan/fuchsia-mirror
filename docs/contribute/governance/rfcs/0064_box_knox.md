@@ -328,10 +328,7 @@ runtime behavior to properly paginate messages, or manually 'box' them.
 [rfc0062]: /docs/contribute/governance/rfcs/0062_method_impossible.md
 [rfc0060]: /docs/contribute/governance/rfcs/0060_error_handling.md
 [rfc0057]: /docs/contribute/governance/rfcs/0057_default_no_handles.md
-[channel_limits]:
-https://fuchsia.googlesource.com/fuchsia/+/b04f4996b17a78c6d18a9fc77432a8b4e62f57ce/zircon/system/public/zircon/types.h#303
-[fuchsia_mem_buffer]:
-https://fuchsia.googlesource.com/fuchsia/+/b04f4996b17a78c6d18a9fc77432a8b4e62f57ce/sdk/fidl/fuchsia.mem/buffer.fidl#9
-[fuchsia_mem_data]:
-https://fuchsia.googlesource.com/fuchsia/+/b04f4996b17a78c6d18a9fc77432a8b4e62f57ce/sdk/fidl/fuchsia.mem/buffer.fidl#30
+[channel_limits]: https://fuchsia.googlesource.com/fuchsia/+/b04f4996b17a78c6d18a9fc77432a8b4e62f57ce/zircon/system/public/zircon/types.h#303
+[fuchsia_mem_buffer]: https://fuchsia.googlesource.com/fuchsia/+/b04f4996b17a78c6d18a9fc77432a8b4e62f57ce/sdk/fidl/fuchsia.mem/buffer.fidl#9
+[fuchsia_mem_data]: https://fuchsia.googlesource.com/fuchsia/+/b04f4996b17a78c6d18a9fc77432a8b4e62f57ce/sdk/fidl/fuchsia.mem/buffer.fidl#30
 [max_out_pagination]: /docs/development/languages/fidl/guides/max-out-pagination.md

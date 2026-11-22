@@ -201,4 +201,4 @@ change that.
     infrastructure is tracked in https://fxbug.dev/42109789. A testability exception is granted
     until https://fxbug.dev/42109789 is addressed.
 
-[determinism]: /docs/contribute/testing/best-practices.md#write_reproducible_deterministic_tests
+[determinism]: /docs/contribute/testing/best-practices.md#write-reproducible-deterministic-tests

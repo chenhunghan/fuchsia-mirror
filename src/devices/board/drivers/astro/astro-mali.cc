@@ -22,14 +22,20 @@
 namespace astro {
 namespace fpbus = fuchsia_hardware_platform_bus;
 
+// Map only the first page (0x1000) of the Mali and HIU register blocks for aml-gpu.
+constexpr uint64_t kAmlGpuMaliLength = 0x1000;
+static_assert(kAmlGpuMaliLength <= S905D2_MALI_LENGTH);
+constexpr uint64_t kAmlGpuHiubusLength = 0x1000;
+static_assert(kAmlGpuHiubusLength <= S905D2_HIU_LENGTH);
+
 static const std::vector<fpbus::Mmio> aml_gpu_mmios{
     {{
         .base = S905D2_MALI_BASE,
-        .length = S905D2_MALI_LENGTH,
+        .length = kAmlGpuMaliLength,
     }},
     {{
         .base = S905D2_HIU_BASE,
-        .length = S905D2_HIU_LENGTH,
+        .length = kAmlGpuHiubusLength,
     }},
 };
 

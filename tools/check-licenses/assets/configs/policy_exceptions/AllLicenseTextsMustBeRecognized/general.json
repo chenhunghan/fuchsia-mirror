@@ -2,8 +2,8 @@
     "policy_exceptions": {
         "AllLicenseTextsMustBeRecognized": [
             {
-                "bug": "TODO: b/missing",
-                "description": "Unrecognized license exceptions for general",
+                "bug": "b/585200385",
+                "description": "Configuration, test fixture, and build documentation files whose filenames match license patterns but do not contain standalone license texts.",
                 "paths": [
                     "build/sdk/generate_prebuild_idk/validation_data/expected_idk/docs/sdk_notice.json",
                     "prebuilt/third_party/ffmpeg/pkg/ffmpeg/docs/LICENSE.md",

@@ -8,7 +8,7 @@
 #include <endian.h>
 #include <fidl/fuchsia.hardware.clock/cpp/wire.h>
 #include <fidl/fuchsia.hardware.gpio/cpp/wire.h>
-#include <fuchsia/hardware/mipicsi/cpp/banjo-mock.h>
+#include <fidl/fuchsia.hardware.mipicsi/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/default.h>
@@ -25,27 +25,50 @@
 #include "src/devices/gpio/testing/fake-gpio/fake-gpio.h"
 #include "src/devices/testing/mock-ddk/mock-device.h"
 
-// The following equality operators are necessary for mocks.
-
-bool operator==(const dimensions_t& lhs, const dimensions_t& rhs) {
-  return lhs.x == rhs.x && lhs.y == rhs.y;
-}
-
-bool operator==(const mipi_adap_info_t& lhs, const mipi_adap_info_t& rhs) {
-  return lhs.resolution == rhs.resolution && lhs.format == rhs.format && lhs.mode == rhs.mode &&
-         lhs.path == rhs.path;
-}
-
-bool operator==(const mipi_info_t& lhs, const mipi_info_t& rhs) {
-  return lhs.channel == rhs.channel && lhs.lanes == rhs.lanes && lhs.ui_value == rhs.ui_value &&
-         lhs.csi_version == rhs.csi_version;
-}
-
 namespace camera {
 namespace {
 
 const uint32_t kTestMode0 = 0;
 const uint32_t kTestMode1 = 1;
+
+class FakeMipiDevice : public fidl::WireServer<fuchsia_hardware_mipicsi::Device> {
+ public:
+  fidl::ClientEnd<fuchsia_hardware_mipicsi::Device> Connect(async_dispatcher_t* dispatcher) {
+    auto endpoints = fidl::Endpoints<fuchsia_hardware_mipicsi::Device>::Create();
+    bindings_.AddBinding(dispatcher, std::move(endpoints.server), this,
+                         fidl::kIgnoreBindingClosure);
+    return std::move(endpoints.client);
+  }
+
+  void Init(InitRequestView request, InitCompleter::Sync& completer) override {
+    init_called_++;
+    completer.ReplySuccess();
+  }
+
+  void DeInit(DeInitCompleter::Sync& completer) override {
+    deinit_called_++;
+    completer.ReplySuccess();
+  }
+
+  void ExpectInit() { expected_init_count_++; }
+  void ExpectDeInit() { expected_deinit_count_++; }
+
+  void VerifyAndClear() {
+    EXPECT_EQ(expected_init_count_, init_called_);
+    EXPECT_EQ(expected_deinit_count_, deinit_called_);
+    expected_init_count_ = 0;
+    expected_deinit_count_ = 0;
+    deinit_called_ = 0;
+    init_called_ = 0;
+  }
+
+ private:
+  fidl::ServerBindingGroup<fuchsia_hardware_mipicsi::Device> bindings_;
+  size_t expected_init_count_ = 0;
+  size_t expected_deinit_count_ = 0;
+  size_t deinit_called_ = 0;
+  size_t init_called_ = 0;
+};
 
 std::vector<uint8_t> SplitBytes(uint16_t bytes) {
   return std::vector<uint8_t>{static_cast<uint8_t>(bytes >> 8), static_cast<uint8_t>(bytes & 0xff)};
@@ -56,16 +79,20 @@ class FakeImx227Device : public Imx227Device {
   FakeImx227Device(zx_device_t* parent, fidl::ClientEnd<fuchsia_hardware_clock::Clock> clk24,
                    fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_vana_enable,
                    fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_vdig_enable,
-                   fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_cam_rst)
+                   fidl::ClientEnd<fuchsia_hardware_gpio::Gpio> gpio_cam_rst,
+                   fidl::ClientEnd<fuchsia_hardware_mipicsi::Device> mipi,
+                   async_patterns::TestDispatcherBound<FakeMipiDevice>* mock_mipi)
       : Imx227Device(parent, std::move(clk24), std::move(gpio_vana_enable),
-                     std::move(gpio_vdig_enable), std::move(gpio_cam_rst)),
-        proto_({&camera_sensor2_protocol_ops_, this}) {
+                     std::move(gpio_vdig_enable), std::move(gpio_cam_rst), std::move(mipi)),
+        proto_({&camera_sensor2_protocol_ops_, this}),
+        mock_mipi_(mock_mipi) {
     SetProtocols();
     ASSERT_OK(InitPdev());
     ASSERT_NO_FATAL_FAILURE(VerifyAll());
   }
 
-  void ExpectDeInit() { mock_mipi_.ExpectDeInit(ZX_OK); }
+  void ExpectInit() { mock_mipi_->SyncCall(&FakeMipiDevice::ExpectInit); }
+  void ExpectDeInit() { mock_mipi_->SyncCall(&FakeMipiDevice::ExpectDeInit); }
 
   void ExpectGetSensorId() {
     const auto kSensorModelIdHiRegByteVec = SplitBytes(htobe16(kSensorModelIdReg));
@@ -143,14 +170,13 @@ class FakeImx227Device : public Imx227Device {
     fidl::BindServer(loop_.dispatcher(), std::move(endpoints.server), &mock_i2c_);
 
     i2c_ = ddk::I2cChannel(std::move(endpoints.client));
-    mipi_ = ddk::MipiCsiProtocolClient(mock_mipi_.GetProto());
 
     EXPECT_OK(loop_.StartThread());
   }
 
   void VerifyAll() {
     mock_i2c_.VerifyAndClear();
-    mock_mipi_.VerifyAndClear();
+    mock_mipi_->SyncCall(&FakeMipiDevice::VerifyAndClear);
   }
 
   fpromise::result<uint8_t, zx_status_t> GetRegValFromSeq(uint8_t index, uint16_t address) {
@@ -166,7 +192,7 @@ class FakeImx227Device : public Imx227Device {
  private:
   camera_sensor2_protocol_t proto_;
   mock_i2c::MockI2c mock_i2c_;
-  ddk::MockMipiCsi mock_mipi_;
+  async_patterns::TestDispatcherBound<FakeMipiDevice>* mock_mipi_;
   async::Loop loop_{&kAsyncLoopConfigNeverAttachToThread};
 };
 
@@ -191,9 +217,13 @@ class Imx227DeviceTest : public zxtest::Test {
     fidl::ClientEnd gpio_cam_rst_client =
         mock_gpio_cam_rst_.SyncCall(&fake_gpio::FakeGpio::Connect);
 
+    fidl::ClientEnd mipi_client =
+        mock_mipi_.SyncCall([dispatcher = mock_fidl_servers_loop_.dispatcher()](
+                                FakeMipiDevice* mipi) { return mipi->Connect(dispatcher); });
+
     dut_.emplace(fake_parent_.get(), std::move(clk24_client.value()),
                  std::move(gpio_vana_enable_client), std::move(gpio_vdig_enable_client),
-                 std::move(gpio_cam_rst_client));
+                 std::move(gpio_cam_rst_client), std::move(mipi_client), &mock_mipi_);
 
     ASSERT_EQ(0, mock_gpio_vana_enable_.SyncCall(&fake_gpio::FakeGpio::GetWriteValue));
     ASSERT_EQ(0, mock_gpio_vdig_enable_.SyncCall(&fake_gpio::FakeGpio::GetWriteValue));
@@ -231,6 +261,8 @@ class Imx227DeviceTest : public zxtest::Test {
   async_patterns::TestDispatcherBound<fake_gpio::FakeGpio> mock_gpio_vdig_enable_{
       mock_fidl_servers_loop_.dispatcher(), std::in_place};
   async_patterns::TestDispatcherBound<fake_gpio::FakeGpio> mock_gpio_cam_rst_{
+      mock_fidl_servers_loop_.dispatcher(), std::in_place};
+  async_patterns::TestDispatcherBound<FakeMipiDevice> mock_mipi_{
       mock_fidl_servers_loop_.dispatcher(), std::in_place};
   std::shared_ptr<MockDevice> fake_parent_ = MockDevice::FakeRootParent();
 };

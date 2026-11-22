@@ -812,6 +812,178 @@ VK_TEST_F(CommandBufferTest, FrameEndFrameFailedSubmitSkipsCallbackAndCleansUpFr
   EXPECT_EQ(buffer_cache.free_buffer_count(), 1u);
 }
 
+VK_TEST_F(CommandBufferTest, WaitOnOldestPendingCommandBufferTracksFrontOfSinglePool) {
+  constexpr uint64_t kTimeoutNs = 1'000'000'000ULL;
+  auto escher = test::GetEscher();
+  impl::CommandBufferPool* pool = escher->command_buffer_pool();
+
+  EXPECT_EQ(0U, pool->OldestPendingSequenceNumber());
+  EXPECT_FALSE(pool->WaitOnOldestPendingCommandBuffer(kTimeoutNs));
+  EXPECT_FALSE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+
+  impl::CommandBuffer* cb1 = pool->GetCommandBuffer();
+  impl::CommandBuffer* cb2 = pool->GetCommandBuffer();
+  const uint64_t seq1 = cb1->sequence_number();
+  const uint64_t seq2 = cb2->sequence_number();
+  ASSERT_LT(seq1, seq2);
+
+  bool cb1_submitted = false;
+  bool cb2_submitted = false;
+  auto submit_unsubmitted = fit::defer([&] {
+    if (!cb1_submitted) {
+      EXPECT_TRUE(cb1->Submit(pool->queue(), nullptr));
+    }
+    if (!cb2_submitted) {
+      EXPECT_TRUE(cb2->Submit(pool->queue(), nullptr));
+    }
+  });
+
+  EXPECT_EQ(seq1, pool->OldestPendingSequenceNumber());
+
+  // Submitting `cb2` while `cb1` at the front of `pending_buffers_` is still
+  // unsubmitted must still report `seq1` and return false without waiting.
+  cb2_submitted = true;
+  ASSERT_TRUE(cb2->Submit(pool->queue(), nullptr));
+  ASSERT_EQ(vk::Result::eSuccess, escher->vk_device().waitIdle());
+  EXPECT_EQ(seq1, pool->OldestPendingSequenceNumber());
+  EXPECT_FALSE(pool->WaitOnOldestPendingCommandBuffer(kTimeoutNs));
+  EXPECT_FALSE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+
+  // Once `cb1` is submitted and finishes, waiting returns true without retiring
+  // `cb1` until `Cleanup()` runs.
+  cb1_submitted = true;
+  ASSERT_TRUE(cb1->Submit(pool->queue(), nullptr));
+  ASSERT_EQ(vk::Result::eSuccess, escher->vk_device().waitIdle());
+  EXPECT_TRUE(pool->WaitOnOldestPendingCommandBuffer(kTimeoutNs));
+  EXPECT_TRUE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+  EXPECT_EQ(seq1, pool->OldestPendingSequenceNumber());
+
+  EXPECT_TRUE(escher->Cleanup());
+  EXPECT_EQ(0U, pool->OldestPendingSequenceNumber());
+}
+
+VK_TEST_F(CommandBufferTest, WaitOnOldestPendingCommandBufferSelectsLowestSequenceAcrossPools) {
+  constexpr uint64_t kTimeoutNs = 1'000'000'000ULL;
+  auto escher = test::GetEscher();
+  impl::CommandBufferPool* main_pool = escher->command_buffer_pool();
+  impl::CommandBufferPool* transfer_pool = escher->transfer_command_buffer_pool();
+  if (!transfer_pool) {
+    GTEST_SKIP() << "Device has no dedicated transfer command buffer pool.";
+  }
+
+  // Case 0: a submitted buffer only in `transfer_pool` returns true and stays
+  // pending until `Cleanup()` retires it.
+  {
+    impl::CommandBuffer* transfer_cb = transfer_pool->GetCommandBuffer();
+    const uint64_t transfer_seq = transfer_cb->sequence_number();
+    ASSERT_TRUE(transfer_cb->Submit(transfer_pool->queue(), nullptr));
+    ASSERT_VK_SUCCESS(escher->vk_device().waitIdle());
+
+    EXPECT_TRUE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+    EXPECT_EQ(transfer_seq, transfer_pool->OldestPendingSequenceNumber());
+    EXPECT_TRUE(escher->Cleanup());
+    EXPECT_EQ(0U, transfer_pool->OldestPendingSequenceNumber());
+  }
+
+  // Case 1: older submitted buffer in `transfer_pool` (`seq1`) and newer
+  // unsubmitted buffer in `main_pool` (`seq2 > seq1`).
+  {
+    impl::CommandBuffer* transfer_cb = transfer_pool->GetCommandBuffer();
+    impl::CommandBuffer* main_cb = main_pool->GetCommandBuffer();
+    ASSERT_LT(transfer_cb->sequence_number(), main_cb->sequence_number());
+
+    bool main_submitted = false;
+    auto submit_main = fit::defer([&] {
+      if (!main_submitted) {
+        EXPECT_TRUE(main_cb->Submit(main_pool->queue(), nullptr));
+      }
+      EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+      EXPECT_TRUE(escher->Cleanup());
+    });
+
+    ASSERT_TRUE(transfer_cb->Submit(transfer_pool->queue(), nullptr));
+    ASSERT_EQ(vk::Result::eSuccess, escher->vk_device().waitIdle());
+
+    EXPECT_TRUE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+
+    main_submitted = true;
+    ASSERT_TRUE(main_cb->Submit(main_pool->queue(), nullptr));
+    ASSERT_EQ(vk::Result::eSuccess, escher->vk_device().waitIdle());
+    EXPECT_TRUE(escher->Cleanup());
+  }
+
+  // Case 2: older unsubmitted buffer in `main_pool` (`seq1`) and newer
+  // submitted buffer in `transfer_pool` (`seq2 > seq1`).
+  {
+    impl::CommandBuffer* main_cb = main_pool->GetCommandBuffer();
+    impl::CommandBuffer* transfer_cb = transfer_pool->GetCommandBuffer();
+    ASSERT_LT(main_cb->sequence_number(), transfer_cb->sequence_number());
+
+    bool main_submitted = false;
+    auto submit_main = fit::defer([&] {
+      if (!main_submitted) {
+        EXPECT_TRUE(main_cb->Submit(main_pool->queue(), nullptr));
+      }
+      EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+      EXPECT_TRUE(escher->Cleanup());
+    });
+
+    ASSERT_TRUE(transfer_cb->Submit(transfer_pool->queue(), nullptr));
+    ASSERT_EQ(vk::Result::eSuccess, escher->vk_device().waitIdle());
+
+    EXPECT_FALSE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+
+    main_submitted = true;
+    ASSERT_TRUE(main_cb->Submit(main_pool->queue(), nullptr));
+    ASSERT_EQ(vk::Result::eSuccess, escher->vk_device().waitIdle());
+    EXPECT_TRUE(escher->Cleanup());
+  }
+}
+
+// Verifies that waiting from inside a `CommandBufferFinishedCallback` returns false without
+// waiting, because the active `Cleanup()` on that pool would skip a nested `Cleanup()` and leave
+// the waited-on buffer unretired.
+VK_TEST_F(CommandBufferTest, WaitOnOldestPendingCommandBufferSkipsWaitDuringReentrantCleanup) {
+  constexpr uint64_t kTimeoutNs = 1'000'000'000ULL;
+  auto escher = test::GetEscher();
+  impl::CommandBufferPool* pool = escher->command_buffer_pool();
+
+  impl::CommandBuffer* cb1 = pool->GetCommandBuffer();
+  impl::CommandBuffer* cb2 = pool->GetCommandBuffer();
+  const uint64_t seq2 = cb2->sequence_number();
+
+  bool callback_ran = false;
+  bool cb1_submitted = false;
+  bool cb2_submitted = false;
+  // Retire both buffers before the stack captures of `cb1`'s callback go out of scope.
+  auto submit_and_drain = fit::defer([&] {
+    if (!cb1_submitted) {
+      EXPECT_TRUE(cb1->Submit(pool->queue(), nullptr));
+    }
+    if (!cb2_submitted) {
+      EXPECT_TRUE(cb2->Submit(pool->queue(), nullptr));
+    }
+    EXPECT_VK_SUCCESS(escher->vk_device().waitIdle());
+    EXPECT_TRUE(escher->Cleanup());
+  });
+
+  cb1_submitted = true;
+  ASSERT_TRUE(cb1->Submit(pool->queue(), [&] {
+    callback_ran = true;
+    // `cb2` is submitted and signaled at the front of `pending_buffers_`.
+    EXPECT_EQ(seq2, pool->OldestPendingSequenceNumber());
+    EXPECT_FALSE(pool->WaitOnOldestPendingCommandBuffer(kTimeoutNs));
+    EXPECT_FALSE(WaitOnOldestPendingCommandBuffer(escher, kTimeoutNs));
+  }));
+  cb2_submitted = true;
+  ASSERT_TRUE(cb2->Submit(pool->queue(), nullptr));
+  ASSERT_VK_SUCCESS(escher->vk_device().waitIdle());
+
+  EXPECT_TRUE(escher->Cleanup());
+  EXPECT_TRUE(callback_ran);
+  EXPECT_EQ(0U, pool->OldestPendingSequenceNumber());
+}
+
 class SequenceNumberTestResource : public Resource {
  public:
   static const ResourceTypeInfo kTypeInfo;

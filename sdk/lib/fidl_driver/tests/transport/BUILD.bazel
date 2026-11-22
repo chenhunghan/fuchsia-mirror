@@ -1,0 +1,351 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [],  # Include all tests in the package.
+    visibility = [
+        "//sdk/lib:__pkg__",
+        "//sdk/lib/fidl_driver/tests:__pkg__",
+    ],
+)
+
+fidl_library(
+    name = "test.transport",
+    testonly = True,
+    srcs = ["transport.test.fidl"],
+    contains_drivers = True,
+    excluded_checks = ["vector-bounds-not-specified"],
+    deps = [
+        "//sdk/fidl/fdf",
+        "//zircon/vdso/zx",
+    ],
+)
+
+fx_cc_library(
+    name = "fidl_driver_transport_testing_lib",
+    testonly = True,
+    srcs = ["assert_peer_closed_helper.cc"],
+    hdrs = [
+        "assert_peer_closed_helper.h",
+        "server_on_unbound_helper.h",
+    ],
+    deps = [
+        "//sdk/lib/fidl_driver",
+        "//zircon/system/ulib/zxtest",
+    ],
+    alwayslink = True,
+)
+
+_TRANSPORT_TEST_DEPS = [
+    ":fidl_driver_transport_testing_lib",
+    ":test.transport_cpp",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/driver/runtime/testing/cpp",
+    "//sdk/lib/driver/testing/cpp",
+    "//sdk/lib/fidl_driver",
+    "//sdk/lib/fidl_driver:fidl_driver_natural",
+    "//sdk/testing/fidl/protocols_tests:test.unknown.interactions_cpp",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zxtest",
+]
+
+fx_cc_test_binary(
+    name = "fidl_driver_client_test_bin",
+    srcs = ["client_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_client_test",
+    binary = ":fidl_driver_client_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_natural_async_driver_transport_end_test_bin",
+    srcs = ["natural_async_driver_transport_end_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_natural_async_driver_transport_end_test",
+    binary = ":fidl_driver_natural_async_driver_transport_end_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_natural_async_fdf_channel_test_bin",
+    srcs = ["natural_async_fdf_channel_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_natural_async_fdf_channel_test",
+    binary = ":fidl_driver_natural_async_fdf_channel_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_natural_async_two_way_test_bin",
+    srcs = ["natural_async_two_way_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_natural_async_two_way_test",
+    binary = ":fidl_driver_natural_async_two_way_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_natural_async_zircon_handle_test_bin",
+    srcs = ["natural_async_zircon_handle_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_natural_async_zircon_handle_test",
+    binary = ":fidl_driver_natural_async_zircon_handle_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_natural_one_way_test_bin",
+    srcs = ["natural_one_way_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_natural_one_way_test",
+    binary = ":fidl_driver_natural_one_way_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_natural_unknown_interactions_driver_test_bin",
+    srcs = ["natural_unknown_interactions_driver_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_natural_unknown_interactions_driver_test",
+    binary = ":fidl_driver_natural_unknown_interactions_driver_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_server_test_bin",
+    srcs = ["server_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_server_test",
+    binary = ":fidl_driver_server_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_async_driver_transport_end_test_bin",
+    srcs = ["wire_async_driver_transport_end_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_async_driver_transport_end_test",
+    binary = ":fidl_driver_wire_async_driver_transport_end_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_async_two_way_empty_test_bin",
+    srcs = ["wire_async_two_way_empty_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_async_two_way_empty_test",
+    binary = ":fidl_driver_wire_async_two_way_empty_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_async_two_way_test_bin",
+    srcs = ["wire_async_two_way_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_async_two_way_test",
+    binary = ":fidl_driver_wire_async_two_way_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_async_zircon_handle_test_bin",
+    srcs = ["wire_async_zircon_handle_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_async_zircon_handle_test",
+    binary = ":fidl_driver_wire_async_zircon_handle_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_one_way_test_bin",
+    srcs = ["wire_one_way_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_one_way_test",
+    binary = ":fidl_driver_wire_one_way_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_send_event_test_bin",
+    srcs = ["wire_send_event_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_send_event_test",
+    binary = ":fidl_driver_wire_send_event_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_sync_fdf_channel_test_bin",
+    srcs = ["wire_sync_fdf_channel_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_sync_fdf_channel_test",
+    binary = ":fidl_driver_wire_sync_fdf_channel_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_sync_two_way_test_bin",
+    srcs = ["wire_sync_two_way_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_sync_two_way_test",
+    binary = ":fidl_driver_wire_sync_two_way_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_sync_zircon_handle_test_bin",
+    srcs = ["wire_sync_zircon_handle_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_sync_zircon_handle_test",
+    binary = ":fidl_driver_wire_sync_zircon_handle_test_bin",
+)
+
+fx_cc_test_binary(
+    name = "fidl_driver_wire_unknown_interactions_driver_test_bin",
+    srcs = ["wire_unknown_interactions_driver_test.cc"],
+    deps = _TRANSPORT_TEST_DEPS,
+)
+
+fx_unittest_component(
+    name = "fidl_driver_wire_unknown_interactions_driver_test",
+    binary = ":fidl_driver_wire_unknown_interactions_driver_test_bin",
+)
+
+# This test uses gtest in order to exercise death conditions.
+fx_cc_test_binary(
+    name = "fidl_driver_api_test_bin",
+    srcs = [
+        "api_test.cc",
+        "api_test_helper.h",
+        "server_binding_group_test.cc",
+        "server_binding_test.cc",
+    ],
+    deps = [
+        ":test.transport_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async_patterns/testing/cpp",
+        "//sdk/lib/driver/runtime/testing/cpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//sdk/lib/fidl_driver",
+        "//sdk/lib/fidl_driver:fidl_driver_natural",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fidl_driver_api_test_packaged_bin",
+    testonly = True,
+    binary = ":fidl_driver_api_test_bin",
+    binary_name = "fidl_driver_api_test_bin",
+    install_root = "test/",
+)
+
+# Use `fuchsia.process.Launcher` for death tests
+fx_component_manifest(
+    name = "fidl_driver_api_test_manifest",
+    testonly = True,
+    component_name = "fidl_driver_api_test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:death_test.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/fidl_driver_api_test.cml",
+)
+
+fx_test_component(
+    name = "fidl_driver_api_test",
+    compiled_manifest = ":fidl_driver_api_test_manifest",
+    deps = [":fidl_driver_api_test_packaged_bin"],
+)
+
+fx_package(
+    name = "fidl_driver_transport_tests",
+    testonly = True,
+    test_components = [
+        ":fidl_driver_client_test",
+        ":fidl_driver_natural_async_driver_transport_end_test",
+        ":fidl_driver_natural_async_fdf_channel_test",
+        ":fidl_driver_natural_async_two_way_test",
+        ":fidl_driver_natural_async_zircon_handle_test",
+        ":fidl_driver_natural_one_way_test",
+        ":fidl_driver_natural_unknown_interactions_driver_test",
+        ":fidl_driver_server_test",
+        ":fidl_driver_wire_async_driver_transport_end_test",
+        ":fidl_driver_wire_async_two_way_empty_test",
+        ":fidl_driver_wire_async_two_way_test",
+        ":fidl_driver_wire_async_zircon_handle_test",
+        ":fidl_driver_wire_one_way_test",
+        ":fidl_driver_wire_send_event_test",
+        ":fidl_driver_wire_sync_fdf_channel_test",
+        ":fidl_driver_wire_sync_two_way_test",
+        ":fidl_driver_wire_sync_zircon_handle_test",
+        ":fidl_driver_wire_unknown_interactions_driver_test",
+        ":fidl_driver_api_test",
+    ],
+)
+
+fx_test(
+    name = "fidl_driver_transport_tests_test",
+    package = ":fidl_driver_transport_tests",
+)

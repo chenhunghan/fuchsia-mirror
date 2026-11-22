@@ -10,8 +10,6 @@ use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use std::convert::TryInto as _;
 use std::str::FromStr;
 
-const NETDEV_DIRECTORY: &str = "/dev/class/network";
-
 #[derive(Debug, Parser)]
 struct Config {
     send_byte: u8,
@@ -23,24 +21,14 @@ struct Config {
 async fn find_network_device(
     mac: MacAddress,
 ) -> (netdevice_client::Client, netdevice_client::Port) {
-    let (directory, directory_server) =
-        fidl::endpoints::create_proxy::<fidl_fuchsia_io::DirectoryMarker>();
-    fdio::service_connect(NETDEV_DIRECTORY, directory_server.into_channel().into())
-        .expect("connect to netdevice devfs");
     let devices =
-        fuchsia_fs::directory::readdir(&directory).await.expect("readdir failed").into_iter().map(
-            |file| {
-                let filepath = std::path::Path::new(NETDEV_DIRECTORY).join(&file.name);
-                let filepath = filepath
-                    .to_str()
-                    .unwrap_or_else(|| panic!("{} failed to convert to str", filepath.display()));
-                let (device_proxy, device_server) =
-                    fidl::endpoints::create_proxy::<fidl_fuchsia_hardware_network::DeviceMarker>();
-                fdio::service_connect(filepath, device_server.into_channel())
-                    .expect("connect to service");
-                device_proxy
-            },
-        );
+        fuchsia_component::client::Service::open(fidl_fuchsia_hardware_network::ServiceMarker)
+            .expect("open service")
+            .enumerate()
+            .await
+            .expect("enumerate failed")
+            .into_iter()
+            .map(|instance| instance.connect_to_device().expect("connect to service"));
     let results = futures::stream::iter(devices).filter_map(|device_proxy| async move {
         let device_proxy = &device_proxy;
         let client = netdevice_client::Client::new(Clone::clone(device_proxy));

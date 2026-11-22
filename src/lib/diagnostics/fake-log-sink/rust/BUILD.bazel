@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component_manifest",
@@ -10,6 +11,7 @@ load(
 load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_staticlib.bzl", "rustc_staticlib")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
@@ -33,6 +35,38 @@ rustc_library(
         "//src/lib/fuchsia-sync",
         "//third_party/rust_crates/vendor:futures",
     ],
+)
+
+rustc_staticlib(
+    name = "rust_ffi",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_features = ["ffi"],
+    edition = "2024",
+    # C/C++ consumers use the header through `:rust_ffi_headers`.
+    # `cpp-log-decoder:headers` links this library for the log decoder symbols.
+    visibility = ["//src/lib/diagnostics/log/message/rust/cpp-log-decoder:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+        "//sdk/rust/zx",
+        "//src/diagnostics/lib/ring-buffer",
+        "//src/lib/diagnostics/log/message/rust",
+        "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:lib",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_cc_library(
+    name = "rust_ffi_headers",
+    testonly = True,
+    hdrs = ["fake_log_sink.h"],
+    visibility = ["//src/lib/diagnostics/fake-log-sink/cpp:__pkg__"],
+    deps = [":rust_ffi"],
+    alwayslink = True,
 )
 
 rustc_test(

@@ -16,7 +16,88 @@ pub use self::get_current_settings::*;
 pub use self::get_value_text::*;
 pub use self::list_settings::*;
 pub use self::set_current_settings::*;
-use crate::packets::Error;
+use crate::packets::{CharsetId, Error, PacketResult};
+
+/// Size in bytes of the fixed header in a player application setting text entry:
+/// 1 byte for the attribute or value ID, 2 bytes for `character_set_id`, and
+/// 1 byte for the string length.
+pub(super) const TEXT_ENTRY_HEADER_LEN: usize = 4;
+
+/// Decodes a count-prefixed list of player application setting text entries from `buf`.
+pub(super) fn decode_text_entries<T>(
+    buf: &[u8],
+    placeholder: &str,
+    mut build_entry: impl FnMut(u8, String) -> PacketResult<T>,
+) -> PacketResult<Vec<T>> {
+    let Some((&num_entries, rest)) = buf.split_first() else {
+        return Err(Error::InvalidMessage);
+    };
+    let num_entries = usize::from(num_entries);
+    // There must be at least 1 entry provided (AVRCP 1.6.2 Sections 6.5.5 and 6.5.6).
+    if num_entries < 1 {
+        return Err(Error::InvalidMessage);
+    }
+
+    let mut entries = Vec::with_capacity(num_entries);
+    let mut idx = 0;
+    for _ in 0..num_entries {
+        let Some(&[id, charset_hi, charset_lo, len]) = rest.get(idx..idx + TEXT_ENTRY_HEADER_LEN)
+        else {
+            return Err(Error::InvalidMessageLength);
+        };
+        let charset_id = CharsetId::from_be_bytes([charset_hi, charset_lo]);
+        let str_start = idx + TEXT_ENTRY_HEADER_LEN;
+        let str_end = str_start + usize::from(len);
+        let bytes = rest.get(str_start..str_end).ok_or(Error::InvalidMessageLength)?;
+        let description = charset_id.decode_str(bytes, placeholder);
+        entries.push(build_entry(id, description)?);
+        idx = str_end;
+    }
+
+    if idx != rest.len() {
+        return Err(Error::InvalidMessage);
+    }
+
+    Ok(entries)
+}
+
+/// Encodes a count-prefixed list of `(id, description)` player application setting text entries
+/// into `buf`.
+pub(super) fn encode_text_entries<'a>(
+    encoded_len: usize,
+    entries: impl ExactSizeIterator<Item = (u8, &'a str)>,
+    buf: &mut [u8],
+) -> PacketResult<()> {
+    if buf.len() < encoded_len {
+        return Err(Error::InvalidMessageLength);
+    }
+    // There must be at least 1 entry provided (AVRCP 1.6.2 Sections 6.5.5 and 6.5.6).
+    if entries.len() == 0 {
+        return Err(Error::ParameterEncodingError);
+    }
+    buf[0] = u8::try_from(entries.len()).map_err(|_| Error::ParameterEncodingError)?;
+
+    let mut idx = 1;
+    for (id, description) in entries {
+        let desc_len =
+            u8::try_from(description.len()).map_err(|_| Error::ParameterEncodingError)?;
+        let str_start = idx + TEXT_ENTRY_HEADER_LEN;
+        let entry_end = str_start + description.len();
+        buf[idx] = id;
+        buf[idx + 1..idx + 3].copy_from_slice(&CharsetId::Utf8.to_be_bytes());
+        buf[idx + 3] = desc_len;
+        buf[str_start..entry_end].copy_from_slice(description.as_bytes());
+        idx = entry_end;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[track_caller]
+pub(super) fn encode_error(packet: &impl packet_encoding::Encodable<Error = Error>) -> Error {
+    let mut buf = vec![0; packet.encoded_len()];
+    packet.encode(&mut buf).expect_err("encoding should fail")
+}
 
 decodable_enum! {
     pub enum PlayerApplicationSettingAttributeId <u8, Error, InvalidParameter> {

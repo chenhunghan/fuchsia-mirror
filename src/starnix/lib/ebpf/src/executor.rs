@@ -150,7 +150,7 @@ impl<C: EbpfProgramContext> EbpfMachineBackend for NativeMachineBackend<'_, '_, 
 
     #[inline(always)]
     fn call_helper(&mut self, index: u32, r1: u64, r2: u64, r3: u64, r4: u64, r5: u64) -> u64 {
-        let helper = self.helpers.get_by_index(index).unwrap();
+        let helper = self.helpers.get(index).unwrap();
         helper.0(
             self.run_context,
             BpfValue::from(r1),

@@ -39,7 +39,9 @@ struct DebugAgentOptions {
   bool monitor_root_job = true;
 };
 
-class DebugAgent : public RemoteAPI, public Breakpoint::ProcessDelegate, public debug::LogBackend {
+class DebugAgent : public RemoteAPI,  // NOLINT(misc-multiple-inheritance)
+                   public Breakpoint::ProcessDelegate,
+                   public debug::LogBackend {
  public:
   // A MessageLoopZircon should already be set up on the current thread.
   //
@@ -72,11 +74,12 @@ class DebugAgent : public RemoteAPI, public Breakpoint::ProcessDelegate, public 
   Breakpoint* GetBreakpoint(uint32_t breakpoint_id);
   void RemoveBreakpoint(uint32_t breakpoint_id);
 
-  enum class ProcessChangedHow {
+  enum class ProcessChangedHow : uint8_t {
     kStarting,
     kNameChanged,
   };
-  void OnProcessChanged(ProcessChangedHow how, std::unique_ptr<ProcessHandle> process);
+  void OnProcessChanged(ProcessChangedHow how, std::unique_ptr<ProcessHandle> process_handle,
+                        zx_koid_t exception_thread_koid = ZX_KOID_INVALID);
 
   // Notified by ComponentManager.
   void OnComponentStarted(const std::string& moniker, const std::string& url, zx_koid_t job_koid);
@@ -146,26 +149,26 @@ class DebugAgent : public RemoteAPI, public Breakpoint::ProcessDelegate, public 
   // mutated, these pointers will be invalidated.
   std::vector<const debug_ipc::Filter*> GetIpcFilters() const;
 
- private:
-  FRIEND_TEST(DebugAgentTests, Kill);
-  FRIEND_TEST(DebugAgentTests, MonitorRootJobOption);
-
-  // Breakpoint::ProcessDelegate implementation ----------------------------------------------------
-
+  // Breakpoint::ProcessDelegate implementation.
   debug::Status RegisterBreakpoint(Breakpoint* bp, zx_koid_t process_koid,
                                    uint64_t address) override;
   void UnregisterBreakpoint(Breakpoint* bp, zx_koid_t process_koid, uint64_t address) override;
-  void SetupBreakpoint(const debug_ipc::AddOrChangeBreakpointRequest& request,
-                       debug_ipc::AddOrChangeBreakpointReply* reply);
-
   debug::Status RegisterWatchpoint(Breakpoint* bp, zx_koid_t process_koid,
                                    const debug::AddressRange& range) override;
   void UnregisterWatchpoint(Breakpoint* bp, zx_koid_t process_koid,
                             const debug::AddressRange& range) override;
 
+ private:
+  FRIEND_TEST(DebugAgentTests, Kill);
+  FRIEND_TEST(DebugAgentTests, MonitorRootJobOption);
+
+  void SetupBreakpoint(const debug_ipc::AddOrChangeBreakpointRequest& request,
+                       debug_ipc::AddOrChangeBreakpointReply* reply);
+
   // Process/Thread Management -----------------------------------------------------------------
 
-  debug::Status AddDebuggedProcess(DebuggedProcessCreateInfo&&, DebuggedProcess** added);
+  debug::Status AddDebuggedProcess(DebuggedProcessCreateInfo&& create_info,
+                                   DebuggedProcess** new_process);
   debug::Status AddDebuggedJob(DebuggedJobCreateInfo&& create_info, DebuggedJob** added);
 
   // Returns true if we're attached to the standard exception channel of |parent| or any ancestor of

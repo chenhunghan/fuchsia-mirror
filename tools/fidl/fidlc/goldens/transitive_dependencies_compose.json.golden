@@ -64,52 +64,19 @@
     {
       "name": "test.transitivedependenciescompose/Top",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
-        "line": 8,
+        "filename": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
+        "line": 5,
         "column": 17,
         "length": 3
       },
       "deprecated": false,
-      "maybe_attributes": [
-        {
-          "name": "bindings_denylist",
-          "arguments": [
-            {
-              "name": "value",
-              "type": "string",
-              "value": {
-                "kind": "literal",
-                "value": "cpp",
-                "expression": "\"cpp\"",
-                "literal": {
-                  "kind": "string",
-                  "value": "cpp",
-                  "expression": "\"cpp\""
-                }
-              },
-              "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
-                "line": 7,
-                "column": 20,
-                "length": 5
-              }
-            }
-          ],
-          "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
-            "line": 7,
-            "column": 1,
-            "length": 25
-          }
-        }
-      ],
       "openness": "closed",
       "composed_protocols": [
         {
           "name": "test.middle/Middle",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
-            "line": 9,
+            "filename": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/top.test.fidl",
+            "line": 6,
             "column": 13,
             "length": 18
           },
@@ -123,8 +90,8 @@
           "name": "GetFoo",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
-            "line": 14,
+            "filename": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+            "line": 8,
             "column": 12,
             "length": 6
           },
@@ -162,45 +129,12 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
-        "line": 17,
-        "column": 39,
+        "filename": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+        "line": 8,
+        "column": 25,
         "length": 31
       },
       "deprecated": false,
-      "maybe_attributes": [
-        {
-          "name": "bindings_denylist",
-          "arguments": [
-            {
-              "name": "value",
-              "type": "string",
-              "value": {
-                "kind": "literal",
-                "value": "cpp",
-                "expression": "\"cpp\"",
-                "literal": {
-                  "kind": "string",
-                  "value": "cpp",
-                  "expression": "\"cpp\""
-                }
-              },
-              "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
-                "line": 17,
-                "column": 32,
-                "length": 5
-              }
-            }
-          ],
-          "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
-            "line": 17,
-            "column": 13,
-            "length": 25
-          }
-        }
-      ],
       "members": [
         {
           "type": {
@@ -219,8 +153,8 @@
           },
           "name": "foo",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
-            "line": 18,
+            "filename": "tools/fidl/fidlc/testdata/transitive_dependencies_compose/bottom.test.fidl",
+            "line": 9,
             "column": 9,
             "length": 3
           },

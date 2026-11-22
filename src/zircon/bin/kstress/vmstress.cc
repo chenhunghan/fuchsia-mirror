@@ -16,6 +16,7 @@
 #include <lib/zx/iommu.h>
 #include <lib/zx/pager.h>
 #include <lib/zx/port.h>
+#include <lib/zx/stream.h>
 #include <lib/zx/thread.h>
 #include <lib/zx/vmar.h>
 #include <lib/zx/vmo.h>
@@ -1525,15 +1526,40 @@ class MultiVmoTestInstance : public TestInstance {
     auto rng = RngGen();
 
     zx::pmt pmt;
+    zx::stream stream;
+    zx::vmar sub_vmar;
+    uintptr_t sub_vmar_addr = 0;
+    const size_t sub_vmar_size = kMaxVmoSize * 4;
+    if (uniform_rand(2, rng) == 0) {
+      uint32_t vmar_flags = ZX_VM_CAN_MAP_READ | ZX_VM_CAN_MAP_WRITE | ZX_VM_CAN_MAP_SPECIFIC;
+      if (uniform_rand(2, rng) == 0) {
+        vmar_flags |= ZX_VM_COMPACT;
+      }
+      if (uniform_rand(4, rng) == 0) {
+        vmar_flags |=
+            static_cast<uint32_t>(uniform_rand_range(12ul, 16ul, rng) << ZX_VM_ALIGN_BASE);
+      }
+      zx::vmar::root_self()->allocate(vmar_flags, 0, sub_vmar_size, &sub_vmar, &sub_vmar_addr);
+    }
+    zx::unowned_vmar target_vmar = sub_vmar.is_valid() ? sub_vmar.borrow() : zx::vmar::root_self();
+
     std::optional<cpp20::span<uint8_t>> mapping;
-    auto unmap_mapping = [&mapping]() {
+    auto unmap_mapping = [&mapping, &sub_vmar, sub_vmar_addr, sub_vmar_size] {
       if (auto span = mapping) {
-        zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(span->data()), span->size_bytes());
+        if (sub_vmar.is_valid()) {
+          sub_vmar.unmap(sub_vmar_addr, sub_vmar_size);
+        } else {
+          zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(span->data()),
+                                       span->size_bytes());
+        }
         mapping = std::nullopt;
       }
     };
-    auto cleanup = fit::defer([this, &unmap_mapping, &pmt]() {
+    auto cleanup = fit::defer([this, &unmap_mapping, &sub_vmar, &pmt] {
       unmap_mapping();
+      if (sub_vmar.is_valid()) {
+        sub_vmar.destroy();
+      }
       if (pmt) {
         pmt.unpin();
       }
@@ -1554,7 +1580,7 @@ class MultiVmoTestInstance : public TestInstance {
       // Produce a random offset and size up front since many ops will need it.
       uint64_t op_off, op_size;
       random_off_size(rng, vmo_size, &op_off, &op_size);
-      switch (uniform_rand(171, rng)) {
+      switch (uniform_rand(181, rng)) {
         case 0:  // give up early
           Printf("G");
           return;
@@ -1590,7 +1616,12 @@ class MultiVmoTestInstance : public TestInstance {
           const size_t start = uniform_rand(op_size, rng);
           memset(&buffer[start], 42, end - std::min(end, start));
           if (use_map) {
-            if (reliable_mappings) {
+            if (uniform_rand(4, rng) == 0) {
+              size_t actual = 0;
+              zx::process::self()->read_memory(
+                  reinterpret_cast<uintptr_t>(&mapping.value()[op_off]), buffer.data(), op_size,
+                  &actual);
+            } else if (reliable_mappings) {
               memcpy(buffer.data(), &mapping.value()[op_off], op_size);
             } else {
               // In the absence of reliable mappings we can ask the kernel to read from the address
@@ -1624,7 +1655,12 @@ class MultiVmoTestInstance : public TestInstance {
           const size_t start = uniform_rand(op_size, rng);
           memset(&buffer[start], 42, end - std::min(end, start));
           if (use_map) {
-            if (reliable_mappings) {
+            if (uniform_rand(4, rng) == 0) {
+              size_t actual = 0;
+              zx::process::self()->write_memory(
+                  reinterpret_cast<uintptr_t>(&mapping.value()[op_off]), buffer.data(), op_size,
+                  &actual);
+            } else if (reliable_mappings) {
               memcpy(&mapping.value()[op_off], buffer.data(), op_size);
             } else {
               // In the absence of reliable mappings we can ask the kernel to write to the address
@@ -1704,6 +1740,9 @@ class MultiVmoTestInstance : public TestInstance {
             if (uniform_rand(2, rng) == 0) {
               options |= ZX_VM_MAP_RANGE;
             }
+            if (uniform_rand(4, rng) == 0) {
+              options |= ZX_VM_REQUIRE_NON_RESIZABLE;
+            }
 
             if (info.flags & ZX_INFO_VMO_PAGER_BACKED && !(info.flags & ZX_INFO_VMO_CONTIGUOUS) &&
                 uniform_rand(12, rng) == 0) {
@@ -1714,16 +1753,62 @@ class MultiVmoTestInstance : public TestInstance {
                 (ZX_INFO_VMO_PAGER_BACKED | ZX_INFO_VMO_DISCARDABLE | ZX_INFO_VMO_RESIZABLE)) {
               options |= ZX_VM_ALLOW_FAULTS;
             }
+
+            size_t vmar_offset = 0;
+            bool is_specific_overwrite = false;
+            if (sub_vmar.is_valid() && !reliable_mappings && uniform_rand(2, rng) == 0) {
+              vmar_offset = uniform_rand(kMaxVmoPages * 2, rng) * kPageSize;
+              switch (uniform_rand(3, rng)) {
+                case 0:
+                  options |= ZX_VM_SPECIFIC;
+                  break;
+                case 1:
+                  options |= ZX_VM_SPECIFIC_OVERWRITE;
+                  options &= ~ZX_VM_MAP_RANGE;
+                  is_specific_overwrite = true;
+                  break;
+                case 2:
+                  if (vmar_offset > 0) {
+                    options |= ZX_VM_OFFSET_IS_UPPER_LIMIT;
+                  }
+                  break;
+                default:
+                  break;
+              }
+            }
+            if (vmar_offset == 0 && !(options & (ZX_VM_SPECIFIC | ZX_VM_SPECIFIC_OVERWRITE)) &&
+                uniform_rand(4, rng) == 0) {
+              options |=
+                  static_cast<uint32_t>(uniform_rand_range(12ul, 16ul, rng) << ZX_VM_ALIGN_BASE);
+            }
+
             zx_vaddr_t addr;
+            if (sub_vmar.is_valid() && !is_specific_overwrite) {
+              unmap_mapping();
+            }
             // Currently fault prevention isn't enforced in mappings and so we must be *very*
             // careful to not map in outside the actual range of the vmo.
             if (op_off + op_size <= vmo_size &&
-                zx::vmar::root_self()->map(options, 0, vmo, op_off, op_size, &addr) == ZX_OK) {
-              unmap_mapping();
+                target_vmar->map(options, vmar_offset, vmo, op_off, op_size, &addr) == ZX_OK) {
+              if (!sub_vmar.is_valid()) {
+                unmap_mapping();
+              }
               mapping = cpp20::span<uint8_t>{reinterpret_cast<uint8_t*>(addr), op_size};
             }
           } else {
-            unmap_mapping();
+            if (!reliable_mappings && sub_vmar.is_valid() && mapping.has_value() &&
+                uniform_rand(2, rng) == 0) {
+              // Exercise partial unmapping to split VmMappings inside sub_vmar.
+              const uint64_t map_pages = mapping->size_bytes() / kPageSize;
+              if (map_pages > 0) {
+                const uint64_t unmap_off = uniform_rand(map_pages, rng) * kPageSize;
+                const uint64_t unmap_len =
+                    uniform_rand(map_pages - (unmap_off / kPageSize) + 1, rng) * kPageSize;
+                sub_vmar.unmap(reinterpret_cast<uintptr_t>(mapping->data()) + unmap_off, unmap_len);
+              }
+            } else {
+              unmap_mapping();
+            }
           }
           break;
         }
@@ -1879,20 +1964,48 @@ class MultiVmoTestInstance : public TestInstance {
           }
           break;
         }
-        case 151 ... 160: {  // vmar_protect
+        case 151 ... 160: {  // vmar_protect, vmar_op_range, and zx_cache_flush
           Printf("P");
-          // Only protect the mapping if it is deemed unreliable to avoid causing faults to any
-          // direct accesses.
-          if (mapping.has_value() && !reliable_mappings) {
-            const uint64_t page_size = zx_system_get_page_size();
-            op_off = uniform_rand(mapping.value().size_bytes() / page_size, rng) * page_size;
-            op_size =
-                uniform_rand((mapping.value().size_bytes() - op_off) / kPageSize, rng) * kPageSize;
-            const uint32_t options =
-                ZX_VM_PERM_READ | ((uniform_rand(2, rng) == 0) ? ZX_VM_PERM_WRITE : 0);
-            // Avoid ubsan complaints by making the size at least 1, so that &buffer[start] works
-            zx::vmar::root_self()->protect(
-                options, reinterpret_cast<uintptr_t>(mapping.value().data()) + op_off, op_size);
+          if (mapping.has_value()) {
+            const uint64_t map_pages = mapping.value().size_bytes() / kPageSize;
+            if (map_pages > 0) {
+              op_off = uniform_rand(map_pages, rng) * kPageSize;
+              op_size = uniform_rand(map_pages - (op_off / kPageSize) + 1, rng) * kPageSize;
+            } else {
+              op_off = 0;
+              op_size = 0;
+            }
+            const uintptr_t map_addr = reinterpret_cast<uintptr_t>(mapping.value().data()) + op_off;
+
+            // Only protect the mapping if it is deemed unreliable to avoid causing faults to any
+            // direct accesses.
+            if (!reliable_mappings && uniform_rand(2, rng) == 0) {
+              static const uint32_t kProtectOpts[] = {
+                  0,
+                  ZX_VM_PERM_READ,
+                  ZX_VM_PERM_READ | ZX_VM_PERM_WRITE,
+              };
+              const uint32_t options = kProtectOpts[uniform_rand(std::size(kProtectOpts), rng)];
+              target_vmar->protect(options, map_addr, op_size);
+            } else if (!reliable_mappings || uniform_rand(2, rng) == 0) {
+              static const uint32_t kVmarOps[] = {
+                  ZX_VMAR_OP_COMMIT,    ZX_VMAR_OP_MAP_RANGE,   ZX_VMAR_OP_ZERO,
+                  ZX_VMAR_OP_DONT_NEED, ZX_VMAR_OP_ALWAYS_NEED, ZX_VMAR_OP_PREFETCH,
+                  ZX_VMAR_OP_DECOMMIT,
+              };
+              const size_t num_ops =
+                  reliable_mappings ? (std::size(kVmarOps) - 1) : std::size(kVmarOps);
+              const uint32_t vmar_op = kVmarOps[uniform_rand(num_ops, rng)];
+              target_vmar->op_range(vmar_op, map_addr, op_size, nullptr, 0);
+            } else if (op_size > 0) {
+              static const uint32_t kFlushFlags[] = {
+                  ZX_CACHE_FLUSH_DATA,
+                  ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE,
+                  ZX_CACHE_FLUSH_INSN,
+              };
+              zx_cache_flush(mapping.value().data() + op_off, op_size,
+                             kFlushFlags[uniform_rand(std::size(kFlushFlags), rng)]);
+            }
           }
           break;
         }
@@ -1920,15 +2033,13 @@ class MultiVmoTestInstance : public TestInstance {
             }
             case 1: {
               zx_info_vmar_t vmar_info;
-              zx::vmar::root_self()->get_info(ZX_INFO_VMAR, &vmar_info, sizeof(vmar_info), nullptr,
-                                              nullptr);
+              target_vmar->get_info(ZX_INFO_VMAR, &vmar_info, sizeof(vmar_info), nullptr, nullptr);
               break;
             }
             case 2: {
               zx_info_maps_t maps[16];
               size_t actual = 0, avail = 0;
-              zx::vmar::root_self()->get_info(ZX_INFO_VMAR_MAPS, maps, sizeof(maps), &actual,
-                                              &avail);
+              target_vmar->get_info(ZX_INFO_VMAR_MAPS, maps, sizeof(maps), &actual, &avail);
               break;
             }
             case 3: {
@@ -1940,6 +2051,91 @@ class MultiVmoTestInstance : public TestInstance {
           }
           break;
         }
+        case 171 ... 180: {  // zx::stream operations
+          Printf("x");
+          if (!stream.is_valid() || uniform_rand(4, rng) == 0) {
+            static const uint32_t kStreamModes[] = {
+                ZX_STREAM_MODE_READ,
+                ZX_STREAM_MODE_WRITE,
+                ZX_STREAM_MODE_READ | ZX_STREAM_MODE_WRITE,
+                ZX_STREAM_MODE_READ | ZX_STREAM_MODE_WRITE | ZX_STREAM_MODE_APPEND,
+            };
+            const uint32_t stream_options =
+                kStreamModes[uniform_rand(std::size(kStreamModes), rng)];
+            const zx_off_t seek_off = uniform_rand(kMaxVmoSize, rng);
+            zx::stream new_stream;
+            if (zx::stream::create(stream_options, vmo, seek_off, &new_stream) == ZX_OK) {
+              stream = std::move(new_stream);
+            }
+          }
+          if (stream.is_valid()) {
+            const size_t stream_op_size = std::min<uint64_t>(op_size, kMaxVmoSize);
+            const zx_off_t stream_op_off = std::min<uint64_t>(op_off, kMaxVmoSize);
+            std::vector<uint8_t> buffer(std::max<size_t>(1, stream_op_size), 42);
+            const size_t split = uniform_rand(stream_op_size, rng);
+            zx_iovec_t iov[2] = {
+                {.buffer = buffer.data(), .capacity = split},
+                {.buffer = buffer.data() + split, .capacity = stream_op_size - split},
+            };
+            const size_t iov_count = (uniform_rand(2, rng) == 0) ? 1 : 2;
+            size_t actual = 0;
+
+            switch (uniform_rand(6, rng)) {
+              case 0:
+                stream.readv(0, iov, iov_count, &actual);
+                break;
+              case 1:
+                stream.readv_at(0, stream_op_off, iov, iov_count, &actual);
+                break;
+              case 2: {
+                zx_info_stream_t stream_info{};
+                if (stream.get_info(ZX_INFO_STREAM, &stream_info, sizeof(stream_info), nullptr,
+                                    nullptr) == ZX_OK &&
+                    stream_info.seek >= kMaxVmoSize) {
+                  zx_off_t new_seek = 0;
+                  stream.seek(ZX_STREAM_SEEK_ORIGIN_START,
+                              static_cast<int64_t>(uniform_rand(kMaxVmoSize, rng)), &new_seek);
+                }
+                const uint32_t write_opts = (uniform_rand(2, rng) == 0) ? 0 : ZX_STREAM_APPEND;
+                stream.writev(write_opts, iov, iov_count, &actual);
+                break;
+              }
+              case 3:
+                stream.writev_at(0, stream_op_off, iov, iov_count, &actual);
+                break;
+              case 4: {
+                static const zx_stream_seek_origin_t kOrigins[] = {
+                    ZX_STREAM_SEEK_ORIGIN_START,
+                    ZX_STREAM_SEEK_ORIGIN_CURRENT,
+                    ZX_STREAM_SEEK_ORIGIN_END,
+                };
+                const zx_stream_seek_origin_t origin =
+                    kOrigins[uniform_rand(std::size(kOrigins), rng)];
+                int64_t offset = static_cast<int64_t>(uniform_rand(kMaxVmoSize, rng));
+                if (origin != ZX_STREAM_SEEK_ORIGIN_START && uniform_rand(2, rng) == 0) {
+                  offset = -offset;
+                }
+                zx_off_t new_seek = 0;
+                stream.seek(origin, offset, &new_seek);
+                break;
+              }
+              case 5: {
+                stream.set_prop_mode_append(static_cast<uint8_t>(uniform_rand(2, rng)));
+                uint8_t mode_append = 0;
+                stream.get_prop_mode_append(&mode_append);
+                zx_info_stream_t stream_info{};
+                stream.get_info(ZX_INFO_STREAM, &stream_info, sizeof(stream_info), nullptr,
+                                nullptr);
+                break;
+              }
+              default:
+                break;
+            }
+          }
+          break;
+        }
+        default:
+          break;
       }
     }
     if (!shutdown_) {

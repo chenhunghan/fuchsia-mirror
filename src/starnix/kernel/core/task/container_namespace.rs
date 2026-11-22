@@ -4,8 +4,64 @@
 use fidl::endpoints::create_endpoints;
 use fidl_fuchsia_component_runner as frunner;
 use fidl_fuchsia_unknown as funknown;
+use starnix_uapi::errno;
+use starnix_uapi::errors::Errno;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+/// Purpose for which a container namespace directory is being opened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NamespaceNodePurpose {
+    /// Backing directory for a `remotefs` or `remote_bundle` filesystem mount.
+    DirectoryMount { read_only: bool },
+    /// Encryption key directory (`keylocation=`) for a `remotevol` volume mount.
+    VolumeKeys,
+}
+
+/// Returns whether `path` is a canonical absolute path suitable for addressing a container
+/// namespace entry or subdirectory.
+///
+/// Canonical namespace paths start with `/`, contain at least one path segment, do not end with
+/// `/`, and contain no empty (`//`), `.`, or `..` segments.
+fn is_canonical_ns_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.ends_with('/')
+        && path[1..]
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+/// Returns whether `path` refers to a namespace capability that must never be mounted or opened as
+/// a directory tree in the container VFS.
+fn is_disallowed_ns_dir_path(path: &str) -> bool {
+    matches!(path, "/svc" | "/tmp_lifecycle")
+        || path.starts_with("/svc/")
+        || path.starts_with("/tmp_lifecycle/")
+}
+
+/// Validates that `path` is a canonical container namespace path allowed for `purpose`.
+pub fn check_ns_dir_path(path: &str, purpose: NamespaceNodePurpose) -> Result<(), Errno> {
+    if !is_canonical_ns_path(path) || is_disallowed_ns_dir_path(path) {
+        return Err(errno!(ENOENT));
+    }
+
+    if path == "/pkg" || path.starts_with("/pkg/") {
+        match purpose {
+            NamespaceNodePurpose::DirectoryMount { read_only } => {
+                if !read_only || !path.strip_prefix("/pkg/data/").is_some_and(|sub| !sub.is_empty())
+                {
+                    return Err(errno!(EACCES));
+                }
+            }
+            NamespaceNodePurpose::VolumeKeys => {
+                return Err(errno!(EACCES));
+            }
+        }
+    }
+
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct ContainerNamespace {
@@ -70,55 +126,38 @@ impl ContainerNamespace {
         }
     }
 
-    /// Iterate backwards through the path ancestors, until we find a channel
-    /// which matches. This is needed since namespaces can be nested
-    /// (e.g. /foo/bar and /foo), so we should find the closest match to our
-    /// input query (e.g. /foo/bar/some should match /foo/bar). Returns the
-    /// namespace proxy which was found, and the remaining subdirectory paths.
-    /// For instance, if the input parameter is `/foo/bar/test` and we have a
-    /// namespace corresponding to `/foo/bar`, then this function will return
-    /// a proxy to `/foo/bar` and the remaining subdir `/test`.
-    pub fn find_closest_channel(
+    /// Resolves the closest matching namespace root entry for canonical `search_path` without cloning
+    /// its channel, returning `(matched_root, remaining_subdir)`.
+    pub fn find_closest_entry<'a>(
         &self,
-        search_path: impl AsRef<Path>,
-    ) -> Result<(zx::Channel, String), anyhow::Error> {
-        let search_path = search_path.as_ref();
-        if !search_path.is_absolute() {
+        search_path: &'a str,
+    ) -> Result<(&'a str, &'a str), anyhow::Error> {
+        if !is_canonical_ns_path(search_path) {
+            anyhow::bail!("Non-canonical path provided to find_closest_entry: {}", search_path);
+        }
+        if is_disallowed_ns_dir_path(search_path) {
             anyhow::bail!(
-                "Non-absolute path provided to find_closest_channel: {}",
-                search_path.display()
+                "Disallowed namespace path provided to find_closest_entry: {}",
+                search_path
             );
         }
 
-        let mut root_channel = None;
-        let mut remaining_subdir = String::new();
-
-        let mut ns_path_ancestors = search_path.ancestors();
-        while let Some(path) = ns_path_ancestors.next() {
-            // If there is not an entry, we'll continue looking and prepend the
-            // last path segment as a remaining subdir.
-            if !self.has_channel_entry(path) {
-                let last_segment = path
-                    .components()
-                    .next_back()
-                    .and_then(|component| component.as_os_str().to_str())
-                    .unwrap_or("");
-                remaining_subdir.insert_str(0, &format!("{last_segment}/"));
-                continue;
+        let mut prefix = search_path;
+        loop {
+            if self.has_channel_entry(prefix) {
+                let remaining_subdir = search_path.get(prefix.len() + 1..).unwrap_or("");
+                return Ok((prefix, remaining_subdir));
             }
-
-            // If we found an entry, we can save and halt the search.
-            root_channel = Some(self.get_namespace_channel(path)?);
-            break;
+            let Some((parent, _)) = prefix.rsplit_once('/') else {
+                break;
+            };
+            if parent.is_empty() {
+                break;
+            }
+            prefix = parent;
         }
 
-        if let Some(channel) = root_channel {
-            // Trim the trailing `/` from the remaining subdirs.
-            remaining_subdir.pop();
-            Ok((channel, remaining_subdir))
-        } else {
-            anyhow::bail!("Unable to find a namespace corresponding to {}", search_path.display());
-        }
+        anyhow::bail!("Unable to find a namespace corresponding to {}", search_path);
     }
 
     /// Attempts to clone this ContainerNamespace, returning an error if the
@@ -250,11 +289,15 @@ mod test {
             ..Default::default()
         });
 
-        // Assert that a request for an namespace extension channel
-        // (e.g. /pkg/foo/test) returns a channel for the root (e.g. /pkg).
+        // Assert that a request for a namespace extension path
+        // (e.g. /pkg/foo/bar) resolves to `/pkg` and yields a valid channel for it.
         let cn_under_test = ContainerNamespace::from(ns);
-        let (returned_channel, subdir) = cn_under_test
-            .find_closest_channel("/pkg/foo/bar")
+        let (ns_root, subdir) = cn_under_test
+            .find_closest_entry("/pkg/foo/bar")
+            .expect("find_closest_entry should resolve /pkg.");
+        assert_eq!(ns_root, "/pkg");
+        let returned_channel = cn_under_test
+            .get_namespace_channel(ns_root)
             .expect("get_namespace_channel should return a valid /pkg channel.");
 
         // Assert that the channel is valid, and the ContainerNamespace retains
@@ -285,10 +328,14 @@ mod test {
         });
 
         // Assert that a request for an exact namespace (e.g. /pkg)
-        // returns a channel for the namespace (e.g. /pkg).
+        // resolves to `/pkg` and yields a valid channel for it.
         let cn_under_test = ContainerNamespace::from(ns);
-        let (returned_channel, subdir) = cn_under_test
-            .find_closest_channel("/pkg")
+        let (ns_root, subdir) = cn_under_test
+            .find_closest_entry("/pkg")
+            .expect("find_closest_entry should resolve /pkg.");
+        assert_eq!(ns_root, "/pkg");
+        let returned_channel = cn_under_test
+            .get_namespace_channel(ns_root)
             .expect("get_namespace_channel should return a valid /pkg channel.");
 
         // Assert that the channel is valid, and the ContainerNamespace retains
@@ -362,5 +409,159 @@ mod test {
         assert!(removed_channel.write(b"hello", &mut vec![]).is_ok());
         assert!(!cn_under_test.has_channel_entry("/tmp_lifecycle"));
         assert!(cn_under_test.remove_namespace_channel("/tmp_lifecycle").is_err());
+    }
+
+    #[::fuchsia::test]
+    fn rejects_non_canonical_and_disallowed_paths() {
+        let _stub_exec = fuchsia_async::TestExecutor::new();
+        let mut ns = Vec::<frunner::ComponentNamespaceEntry>::new();
+        for path in ["/pkg", "/svc", "/tmp_lifecycle"] {
+            let pkg_channel: zx::Channel =
+                directory::open_in_namespace("/pkg", fio::PERM_READABLE | fio::PERM_EXECUTABLE)
+                    .expect("failed to open /pkg")
+                    .into_channel()
+                    .expect("into_channel")
+                    .into();
+            ns.push(frunner::ComponentNamespaceEntry {
+                path: Some(path.to_string()),
+                directory: Some(ClientEnd::new(pkg_channel)),
+                ..Default::default()
+            });
+        }
+        let cn_under_test = ContainerNamespace::from(ns);
+
+        for invalid in [
+            "",
+            "/",
+            ".",
+            "..",
+            "pkg",
+            "/pkg/",
+            "//pkg",
+            "/pkg//data",
+            "/pkg/.",
+            "/pkg/..",
+            "/pkg/data/../meta",
+            "/svc",
+            "/svc/fuchsia.logger.LogSink",
+            "/tmp_lifecycle",
+            "/tmp_lifecycle/bootreason",
+        ] {
+            assert!(
+                cn_under_test.find_closest_entry(invalid).is_err(),
+                "expected find_closest_entry({invalid:?}) to fail"
+            );
+            for purpose in [
+                NamespaceNodePurpose::DirectoryMount { read_only: true },
+                NamespaceNodePurpose::DirectoryMount { read_only: false },
+                NamespaceNodePurpose::VolumeKeys,
+            ] {
+                assert_eq!(
+                    check_ns_dir_path(invalid, purpose),
+                    Err(errno!(ENOENT)),
+                    "expected check_ns_dir_path({invalid:?}, {purpose:?}) to fail with ENOENT"
+                );
+            }
+        }
+    }
+
+    #[::fuchsia::test]
+    fn find_closest_entry_resolves_without_cloning() {
+        let _stub_exec = fuchsia_async::TestExecutor::new();
+        let (data_client, data_server) = zx::Channel::create();
+        let (fbe_keys_client, fbe_keys_server) = zx::Channel::create();
+        let (foo_bar_client, foo_bar_server) = zx::Channel::create();
+        let cn_under_test = ContainerNamespace::from(vec![
+            frunner::ComponentNamespaceEntry {
+                path: Some("/data".to_string()),
+                directory: Some(ClientEnd::new(data_client)),
+                ..Default::default()
+            },
+            frunner::ComponentNamespaceEntry {
+                path: Some("/data/fbe_keys".to_string()),
+                directory: Some(ClientEnd::new(fbe_keys_client)),
+                ..Default::default()
+            },
+            frunner::ComponentNamespaceEntry {
+                path: Some("/foo/bar".to_string()),
+                directory: Some(ClientEnd::new(foo_bar_client)),
+                ..Default::default()
+            },
+        ]);
+
+        assert_eq!(cn_under_test.find_closest_entry("/data").unwrap(), ("/data", ""));
+        assert_eq!(cn_under_test.find_closest_entry("/data/sub").unwrap(), ("/data", "sub"));
+        assert_eq!(
+            cn_under_test.find_closest_entry("/data/fbe_keys").unwrap(),
+            ("/data/fbe_keys", "")
+        );
+        assert_eq!(
+            cn_under_test.find_closest_entry("/data/fbe_keys/sub").unwrap(),
+            ("/data/fbe_keys", "sub")
+        );
+        assert_eq!(
+            cn_under_test.find_closest_entry("/data/fbe_keys_extra").unwrap(),
+            ("/data", "fbe_keys_extra")
+        );
+        assert_eq!(cn_under_test.find_closest_entry("/foo/bar").unwrap(), ("/foo/bar", ""));
+        assert_eq!(
+            cn_under_test.find_closest_entry("/foo/bar/sub/leaf").unwrap(),
+            ("/foo/bar", "sub/leaf")
+        );
+        assert!(cn_under_test.find_closest_entry("/foo").is_err());
+
+        // Resolving namespace entries must not send any `Clone` messages on the channels.
+        let mut buf = zx::MessageBuf::new();
+        assert_eq!(data_server.read(&mut buf), Err(zx::Status::SHOULD_WAIT));
+        assert_eq!(fbe_keys_server.read(&mut buf), Err(zx::Status::SHOULD_WAIT));
+        assert_eq!(foo_bar_server.read(&mut buf), Err(zx::Status::SHOULD_WAIT));
+    }
+
+    #[::fuchsia::test]
+    fn checks_ns_dir_path_by_purpose() {
+        for denied_pkg_path in ["/pkg", "/pkg/data", "/pkg/meta", "/pkg/bin/starnix_kernel"] {
+            for purpose in [
+                NamespaceNodePurpose::DirectoryMount { read_only: true },
+                NamespaceNodePurpose::DirectoryMount { read_only: false },
+                NamespaceNodePurpose::VolumeKeys,
+            ] {
+                assert_eq!(
+                    check_ns_dir_path(denied_pkg_path, purpose),
+                    Err(errno!(EACCES)),
+                    "expected check_ns_dir_path({denied_pkg_path:?}, {purpose:?}) to fail with EACCES"
+                );
+            }
+        }
+
+        for allowed_pkg_data_path in ["/pkg/data/system", "/pkg/data/system/subdir"] {
+            assert_eq!(
+                check_ns_dir_path(
+                    allowed_pkg_data_path,
+                    NamespaceNodePurpose::DirectoryMount { read_only: true },
+                ),
+                Ok(())
+            );
+            assert_eq!(
+                check_ns_dir_path(
+                    allowed_pkg_data_path,
+                    NamespaceNodePurpose::DirectoryMount { read_only: false },
+                ),
+                Err(errno!(EACCES))
+            );
+            assert_eq!(
+                check_ns_dir_path(allowed_pkg_data_path, NamespaceNodePurpose::VolumeKeys),
+                Err(errno!(EACCES))
+            );
+        }
+
+        for data_path in ["/data", "/data/subdir"] {
+            for purpose in [
+                NamespaceNodePurpose::DirectoryMount { read_only: true },
+                NamespaceNodePurpose::DirectoryMount { read_only: false },
+                NamespaceNodePurpose::VolumeKeys,
+            ] {
+                assert_eq!(check_ns_dir_path(data_path, purpose), Ok(()));
+            }
+        }
     }
 }

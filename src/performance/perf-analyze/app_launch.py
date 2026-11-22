@@ -27,10 +27,17 @@ It also provides:
     Sleeping/Blocked on IPC, locks, or I/O).
   - Cross-layer contention and Fuchsia subsystem attribution (Binder IPC, monitor locks,
     native mutexes, Fxfs storage page-ins, Sysmem buffer allocations, and Starnix SELinux hooks).
+  - Milestone-anchored scheduler wakeup critical-path process/thread breakdown, top
+    blocking slices, and chronological handoff timeline per launch (via `critical_path.py`).
 """
 
-from typing import Sequence
+from typing import Any, Sequence
 
+from critical_path import (
+    SpineSegment,
+    compute_critical_path,
+    merge_spine_segments,
+)
 from plugins import (
     AnalyzePlugin,
     PluginArgumentError,
@@ -1245,6 +1252,363 @@ def _analyze_subsystem_contention(
     )
 
 
+def _first_utid(*candidates: int | None) -> int | None:
+    """Returns the first non-None `utid` without treating `utid == 0` as falsy."""
+    for candidate in candidates:
+        if candidate is not None:
+            return candidate
+    return None
+
+
+def _build_spine_for_launch_row(
+    row: dict[str, Any],
+    group_id: int,
+) -> list[SpineSegment]:
+    """Constructs contiguous `SpineSegment`s tiling `[t0_launch_start, t6_launch_end]`."""
+    t0_raw = row.get("t0_launch_start")
+    t6_raw = row.get("t6_launch_end")
+    if t0_raw is None or t6_raw is None:
+        return []
+    t0 = int(t0_raw)
+    t6 = int(t6_raw)
+    if t6 <= t0:
+        return []
+
+    main_utid = (
+        int(row["main_utid"]) if row.get("main_utid") is not None else None
+    )
+    render_utid = (
+        int(row["render_utid"]) if row.get("render_utid") is not None else None
+    )
+    start_req_utid = (
+        int(row["start_req_utid"])
+        if row.get("start_req_utid") is not None
+        else None
+    )
+    start_proc_utid = (
+        int(row["start_proc_utid"])
+        if row.get("start_proc_utid") is not None
+        else None
+    )
+    complete_utid = (
+        int(row["complete_utid"])
+        if row.get("complete_utid") is not None
+        else None
+    )
+
+    if (
+        _first_utid(
+            main_utid,
+            render_utid,
+            start_proc_utid,
+            start_req_utid,
+            complete_utid,
+        )
+        is None
+    ):
+        return []
+
+    raw: list[SpineSegment] = []
+    cursor = t0
+
+    def push(until_ts: int, utid: int | None, reason: str) -> None:
+        nonlocal cursor
+        if utid is None:
+            return
+        clamped = max(cursor, min(t6, until_ts))
+        if clamped > cursor:
+            raw.append(
+                SpineSegment(
+                    group_id=group_id,
+                    seg_index=len(raw),
+                    utid=utid,
+                    ts=cursor,
+                    dur=clamped - cursor,
+                    handoff_reason=reason,
+                )
+            )
+            cursor = clamped
+
+    if row.get("t1_start_proc_ts") is not None:
+        t1 = int(row["t1_start_proc_ts"])
+        sp_dur = max(0, int(row.get("start_proc_dur") or 0))
+        proc_end = t1 + sp_dur
+        t1b_raw = row.get("t1b_post_fork_ts")
+        if t1b_raw is not None and main_utid is not None:
+            t1b = int(t1b_raw)
+            if t1b >= t1:
+                proc_end = min(proc_end, t1b) if sp_dur > 0 else t1b
+        proc_utid = _first_utid(start_proc_utid, main_utid)
+        if (
+            start_req_utid is not None
+            and row.get("start_req_end_ts") is not None
+            and proc_utid is not None
+        ):
+            push(
+                min(t1, int(row["start_req_end_ts"])),
+                start_req_utid,
+                "launch_intent",
+            )
+            push(proc_end, proc_utid, "start_proc")
+        else:
+            push(
+                t1,
+                _first_utid(start_req_utid, start_proc_utid, main_utid),
+                "launch_intent",
+            )
+            push(
+                proc_end,
+                _first_utid(start_proc_utid, start_req_utid, main_utid),
+                "start_proc",
+            )
+    elif start_req_utid is not None and row.get("start_req_end_ts") is not None:
+        sab_end = int(row["start_req_end_ts"])
+        if row.get("t3b_activity_start_ts") is not None:
+            sab_end = min(sab_end, int(row["t3b_activity_start_ts"]))
+        push(sab_end, start_req_utid, "launch_intent")
+
+    has_render = (
+        render_utid is not None and row.get("t5_draw_frame_start") is not None
+    )
+    t5 = int(row["t5_draw_frame_start"]) if has_render else t6
+    push(t5, _first_utid(main_utid, render_utid, complete_utid), "app_main")
+
+    if has_render:
+        assert render_utid is not None
+        df_end = (
+            int(row["draw_frame_end_ts"])
+            if row.get("draw_frame_end_ts") is not None
+            else t6
+        )
+        if complete_utid is not None and df_end < t6:
+            push(df_end, render_utid, "render_thread")
+            push(t6, complete_utid, "launch_complete")
+        else:
+            push(t6, render_utid, "render_thread")
+
+    push(
+        t6,
+        _first_utid(
+            complete_utid,
+            render_utid,
+            main_utid,
+            start_proc_utid,
+            start_req_utid,
+        ),
+        "launch_tail",
+    )
+
+    return merge_spine_segments(raw)
+
+
+def _analyze_launch_critical_path_sections(
+    tp: PerfettoTraceProcessor,
+    db_objects: set[str],
+    package_filter: str | None,
+    limit: int,
+) -> list[SectionResult]:
+    """Computes per-launch wakeup critical-path breakdowns, blocking slices, and timelines."""
+    section_names = (
+        "Critical Path Process & Thread Breakdown",
+        "Critical Path Top Blocking Slices",
+        "Critical Path Chronological Span Timeline",
+    )
+    required_tables = {
+        "slice",
+        "thread_track",
+        "thread",
+        "process",
+        "thread_state",
+    }
+    if missing := required_tables - db_objects:
+        err = f"Required schema tables/views missing: {', '.join(sorted(missing))}"
+        return [SectionResult(name=n, error=err) for n in section_names]
+
+    cte = _build_launch_cte(package_filter)
+    spine_query = f"""
+    {cte},
+      limited_launches AS MATERIALIZED (
+        SELECT *
+        FROM full_milestones
+        ORDER BY t0_launch_start
+        LIMIT {limit}
+      ),
+      sab_ranked AS (
+        SELECT
+          m.startup_id,
+          m.t0_launch_start,
+          tt.utid AS start_req_utid,
+          sab.ts + sab.dur AS start_req_end_ts,
+          ROW_NUMBER() OVER (
+            PARTITION BY m.startup_id, m.t0_launch_start
+            ORDER BY sab.ts ASC, sab.id ASC
+          ) AS rn
+        FROM limited_launches m
+        JOIN slice sab
+          ON sab.name = 'shouldAbortBackgroundActivityStart'
+          AND sab.dur >= 0
+          AND sab.ts >= m.t0_launch_start
+          AND sab.ts < m.t6_launch_end
+        JOIN thread_track tt ON sab.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid AND p.name = 'system_server'
+      )
+    SELECT
+      m.startup_id,
+      m.package,
+      m.process_name,
+      m.startup_type,
+      m.t0_launch_start,
+      m.t1_start_proc_ts,
+      m.start_proc_dur,
+      m.t1b_post_fork_ts,
+      m.t3b_activity_start_ts,
+      m.t5_draw_frame_start,
+      m.t6_launch_end,
+      m.main_utid,
+      m.render_utid,
+      sr.start_req_utid,
+      sr.start_req_end_ts,
+      (
+        SELECT tt.utid
+        FROM slice sp
+        JOIN thread_track tt ON sp.track_id = tt.id
+        JOIN thread t ON tt.utid = t.utid
+        JOIN process p ON t.upid = p.upid
+        WHERE p.name = 'system_server'
+          AND sp.name GLOB 'Start proc:*'
+          AND NOT (sp.name GLOB '*:sandboxed_process*')
+          AND (
+            sp.name GLOB '*' || m.package || '*'
+            OR (m.process_name IS NOT NULL AND sp.name GLOB '*' || m.process_name || '*')
+          )
+          AND sp.ts >= m.t0_launch_start
+          AND sp.ts < m.t6_launch_end
+        ORDER BY sp.ts ASC, sp.id ASC
+        LIMIT 1
+      ) AS start_proc_utid,
+      (
+        SELECT MAX(
+          CASE
+            WHEN df.dur < 0 THEN m.t6_launch_end
+            ELSE df.ts + df.dur
+          END
+        )
+        FROM slice df
+        JOIN thread_track tt ON df.track_id = tt.id
+        WHERE m.render_utid IS NOT NULL
+          AND tt.utid = m.render_utid
+          AND df.name GLOB 'DrawFrame*'
+          AND m.t5_draw_frame_start IS NOT NULL
+          AND df.ts >= m.t5_draw_frame_start
+          AND df.ts <= m.t6_launch_end
+      ) AS draw_frame_end_ts,
+      (
+        SELECT tt.utid
+        FROM slice sc
+        JOIN thread_track tt ON sc.track_id = tt.id
+        WHERE sc.dur = 0
+          AND sc.name GLOB 'launchingActivity#' || CAST(m.startup_id AS TEXT) || ':completed*:' || m.package
+          AND NOT (sc.name GLOB '*:completed-same-process:*')
+          AND sc.ts >= m.t0_launch_start
+          AND sc.ts <= m.t6_launch_end + 100000000
+        ORDER BY sc.ts ASC, sc.id ASC
+        LIMIT 1
+      ) AS complete_utid
+    FROM limited_launches m
+    LEFT JOIN sab_ranked sr
+      ON sr.startup_id = m.startup_id
+      AND sr.t0_launch_start = m.t0_launch_start
+      AND sr.rn = 1
+    ORDER BY m.t0_launch_start;
+    """
+
+    try:
+        launch_rows = tp.run_query(spine_query)
+        if not launch_rows:
+            return [SectionResult(name=n, results=[]) for n in section_names]
+
+        all_segments: list[SpineSegment] = []
+        launch_meta_by_group: dict[int, dict[str, Any]] = {}
+        for idx, row in enumerate(launch_rows):
+            grp_id = idx + 1
+            segs = _build_spine_for_launch_row(row, group_id=grp_id)
+            if segs:
+                all_segments.extend(segs)
+                launch_meta_by_group[grp_id] = row
+
+        if not all_segments:
+            return [SectionResult(name=n, results=[]) for n in section_names]
+
+        per_launch_timeline_cap = max(limit * 3, 50)
+        breakdowns = compute_critical_path(
+            tp,
+            db_objects,
+            all_segments,
+            limit=limit,
+            timeline_limit=per_launch_timeline_cap,
+            coalesce_timeline=True,
+        )
+    except Exception as e:
+        err = f"Query execution failed: {e}"
+        return [SectionResult(name=n, error=err) for n in section_names]
+
+    thread_rows: list[dict[str, Any]] = []
+    slice_rows: list[dict[str, Any]] = []
+    timeline_rows: list[dict[str, Any]] = []
+    truncated_launches: list[str] = []
+    for grp_id, meta in launch_meta_by_group.items():
+        bd = breakdowns.get(grp_id)
+        if bd is None:
+            continue
+        sid = meta["startup_id"]
+        pkg = meta["package"]
+        stype = meta.get("startup_type")
+        if bd.total_timeline_spans > len(bd.timeline):
+            truncated_launches.append(
+                f"#{sid} ({len(bd.timeline)}/{bd.total_timeline_spans})"
+            )
+        for tr in bd.thread_summary:
+            thread_rows.append(
+                {
+                    "startup_id": sid,
+                    "package": pkg,
+                    "startup_type": stype,
+                    **tr,
+                }
+            )
+        for sr in bd.top_slices:
+            slice_rows.append(
+                {
+                    "startup_id": sid,
+                    "package": pkg,
+                    **sr,
+                }
+            )
+        for tl in bd.timeline:
+            timeline_rows.append(
+                {
+                    "startup_id": sid,
+                    "package": pkg,
+                    **tl,
+                }
+            )
+
+    timeline_note = (
+        f"Timeline capped per launch ({', '.join(truncated_launches)}); "
+        "increase --limit to show more."
+        if truncated_launches
+        else None
+    )
+    return [
+        SectionResult(name=section_names[0], results=thread_rows),
+        SectionResult(name=section_names[1], results=slice_rows),
+        SectionResult(
+            name=section_names[2], results=timeline_rows, note=timeline_note
+        ),
+    ]
+
+
 class AppLaunchPlugin(AnalyzePlugin):
     """Analysis plugin for decomposing app launch critical path segments and bottlenecks."""
 
@@ -1273,7 +1637,11 @@ class AppLaunchPlugin(AnalyzePlugin):
             "--limit",
             type=int,
             default=20,
-            help="Maximum number of rows to return per section (default: 20)",
+            help=(
+                "Maximum rows in sections 1-5 (default: 20); in critical-path "
+                "sections 6-8, caps launches to limit and returns up to limit "
+                "threads/slices and max(limit * 3, 50) timeline spans per launch"
+            ),
         )
         parser.add_argument(
             "--scaling",
@@ -1292,7 +1660,7 @@ class AppLaunchPlugin(AnalyzePlugin):
 
         with PerfettoTraceProcessor(trace_path, cache=cache) as tp:
             db_objects = tp.get_tables()
-            return [
+            sections = [
                 _analyze_critical_path_segments(
                     tp, db_objects, args.package, args.limit
                 ),
@@ -1309,3 +1677,9 @@ class AppLaunchPlugin(AnalyzePlugin):
                     tp, db_objects, args.package, args.limit
                 ),
             ]
+            sections.extend(
+                _analyze_launch_critical_path_sections(
+                    tp, db_objects, args.package, args.limit
+                )
+            )
+            return sections

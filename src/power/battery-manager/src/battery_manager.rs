@@ -249,6 +249,28 @@ fn battery_status_to_battery_info(battery: &fbattery::Status) -> fpower::Battery
 /// this level is reported as `NotCharging` instead.
 const FULL_CHARGE_MIN_LEVEL_PERCENT: f32 = 95.0;
 
+/// Interval at which the battery is sampled while not charging at low SOC, where the fuel
+/// gauge's 1% integer interrupt no longer fires before the 0.5% rounding threshold for 0%.
+pub(crate) const LOW_BATTERY_SAMPLE_INTERVAL: zx::BootDuration = zx::BootDuration::from_seconds(47);
+
+/// Polished or raw battery level at or below which [`LOW_BATTERY_SAMPLE_INTERVAL`] is armed until
+/// the polished level reaches 0% or charging starts.
+const LOW_BATTERY_SAMPLE_THRESHOLD_PERCENT: f32 = 1.0;
+
+/// Whether battery-manager should poll the battery driver at [`LOW_BATTERY_SAMPLE_INTERVAL`] to
+/// detect the transition to 0%.
+fn needs_low_battery_sampling(raw_level: Option<f32>, info: &fpower::BatteryInfo) -> bool {
+    let is_charging = matches!(
+        info.charge_status,
+        Some(fpower::ChargeStatus::Charging | fpower::ChargeStatus::Full)
+    );
+    let polished_above_zero = info.level_percent.is_some_and(|level| level > 0.0);
+    let at_or_below_threshold = raw_level
+        .is_some_and(|level| level <= LOW_BATTERY_SAMPLE_THRESHOLD_PERCENT)
+        || info.level_percent.is_some_and(|level| level <= LOW_BATTERY_SAMPLE_THRESHOLD_PERCENT);
+    !is_charging && polished_above_zero && at_or_below_threshold
+}
+
 /// Whether `info` differs from `previous` in a field that `BatteryInfo` watchers act on, as opposed
 /// to telemetry such as voltage and current that changes with every sample.
 fn has_user_visible_change(previous: &fpower::BatteryInfo, info: &fpower::BatteryInfo) -> bool {
@@ -362,38 +384,10 @@ fn apply_simulated_overrides(info: &mut fpower::BatteryInfo, overrides: &fpower:
     }
 }
 
-pub(crate) trait BatterySimulationStateObserver {
-    fn update_simulation(&self, new_state: bool);
-    fn update_simulated_battery_info(&self, battery_info: fpower::BatteryInfo);
-    fn get_battery_info_copy(&self) -> fpower::BatteryInfo;
-}
-
-impl BatterySimulationStateObserver for BatteryManager {
-    fn update_simulation(&self, is_simulating: bool) {
-        let mut sim_state = self.simulation_state.borrow_mut();
-        *sim_state = is_simulating;
-        drop(sim_state);
-        if !is_simulating {
-            self.common_update_watchers(self.get_battery_info_copy(), None);
-        }
-    }
-    fn update_simulated_battery_info(&self, battery_info: fpower::BatteryInfo) {
-        *self.simulated_battery_info.borrow_mut() = battery_info;
-        if self.is_simulating() {
-            self.common_update_watchers(self.get_battery_info_copy(), None);
-        }
-    }
-    fn get_battery_info_copy(&self) -> fpower::BatteryInfo {
-        BatteryManager::get_battery_info_copy(self)
-    }
-}
-
 /// Core component for the battery manager system.
 ///
 /// BatteryManager maintains the current state info for the battery system
 /// as well as the watchers that share this information with subscribed clients.
-///
-/// simulation_state: true when the simulator is running
 pub struct BatteryManager {
     /// Cached battery info representing the last committed state.
     ///
@@ -403,13 +397,13 @@ pub struct BatteryManager {
     /// - Maintain state across simulation mode toggles.
     cached_battery_info: RefCell<fpower::BatteryInfo>,
     watchers: Rc<RefCell<Vec<fpower::BatteryInfoWatcherProxy>>>,
-    simulation_state: RefCell<bool>,
-    /// Per-field overrides set via `fuchsia.power.battery.test.BatterySimulator`.
+    /// Per-field overrides set via `fuchsia.power.battery.test.BatterySimulator` while
+    /// simulating (`Some`), or `None` when connected to the real battery.
     ///
-    /// When `simulation_state` is `true`, any `Some(...)` field here replaces the corresponding
+    /// When `Some(overrides)`, any `Some(...)` field in `overrides` replaces the corresponding
     /// field in `cached_battery_info`, while `None` fields leave the live `cached_battery_info`
     /// values untouched.
-    simulated_battery_info: RefCell<fpower::BatteryInfo>,
+    simulated_overrides: RefCell<Option<fpower::BatteryInfo>>,
     data_polisher: RefCell<Polisher>,
     info_recorders: BatteryInfoRecorders,
     /// Blocking suspension if charging
@@ -461,8 +455,7 @@ impl BatteryManager {
                 ..Default::default()
             }),
             watchers: watchers_rc,
-            simulation_state: RefCell::new(false),
-            simulated_battery_info: RefCell::new(fpower::BatteryInfo::default()),
+            simulated_overrides: RefCell::new(None),
             data_polisher: RefCell::new(Polisher::new_with_battery_manager_config(
                 battery_manager_config,
             )),
@@ -730,9 +723,14 @@ impl BatteryManager {
         };
 
         let raw_info = self.cache.with_cached(|cached| fpower::BatteryInfo::from(cached));
+        let raw_level = raw_info.level_percent;
         let info = self.process_battery_info(raw_info, sag).await;
-        // Samples are taken for governors. Watchers are only sent those that change a field they
-        // act on, so that they are updated on driver events as without governors.
+        let sample_interval =
+            needs_low_battery_sampling(raw_level, &info).then_some(LOW_BATTERY_SAMPLE_INTERVAL);
+        self.cache.set_battery_sample_interval(sample_interval);
+        // Samples are taken for governors or low-battery polling. Watchers are only sent those
+        // that change a field they act on, so that they are updated on driver events as without
+        // periodic sampling.
         if sampled && !has_user_visible_change(&self.cached_battery_info.borrow(), &info) {
             *self.cached_battery_info.borrow_mut() = info;
             return false;
@@ -778,14 +776,34 @@ impl BatteryManager {
 
     pub fn get_battery_info_copy(&self) -> fpower::BatteryInfo {
         let mut info = self.cached_battery_info.borrow().clone();
-        if *self.simulation_state.borrow() {
-            apply_simulated_overrides(&mut info, &self.simulated_battery_info.borrow());
+        if let Some(overrides) = self.simulated_overrides.borrow().as_ref() {
+            apply_simulated_overrides(&mut info, overrides);
         }
         info
     }
 
     pub fn is_simulating(&self) -> bool {
-        *self.simulation_state.borrow()
+        self.simulated_overrides.borrow().is_some()
+    }
+
+    /// Updates the simulation state (`Some(overrides)` when simulating, `None` when connected to
+    /// the real battery) and notifies watchers.
+    pub(crate) fn update_simulation(&self, simulated_overrides: Option<fpower::BatteryInfo>) {
+        *self.simulated_overrides.borrow_mut() = simulated_overrides;
+        self.common_update_watchers(self.get_battery_info_copy(), None);
+    }
+
+    pub(crate) fn update_override(&self, f: impl FnOnce(&mut fpower::BatteryInfo)) {
+        {
+            let mut simulated_overrides = self.simulated_overrides.borrow_mut();
+            let Some(overrides) = simulated_overrides.as_mut() else {
+                warn!("Ignoring BatterySimulator setter while not simulating");
+                return;
+            };
+            f(overrides);
+            overrides.timestamp = Some(get_current_time());
+        }
+        self.common_update_watchers(self.get_battery_info_copy(), None);
     }
 
     pub(crate) async fn serve(
@@ -1084,6 +1102,15 @@ mod tests {
     use tempfile::{TempDir, tempdir};
 
     pub fn create_manager() -> (TempDir, BatteryManager) {
+        create_manager_with_config(crate::BatteryManagerConfig {
+            shutdown_offset_percent: 3.0,
+            ..Default::default()
+        })
+    }
+
+    fn create_manager_with_config(
+        config: crate::BatteryManagerConfig,
+    ) -> (TempDir, BatteryManager) {
         let dir = tempdir().unwrap();
         let storage_path = dir.path().join("data");
         let volatile_path = dir.path().join("tmp");
@@ -1096,10 +1123,8 @@ mod tests {
         let recorder_config = RecorderConfig {
             persistence_dirs: Some(PersistenceDirs { storage_dir, volatile_dir }),
         };
-        let battery_manager = BatteryManager::new_with_battery_manager_config(
-            recorder_config,
-            crate::BatteryManagerConfig { shutdown_offset_percent: 3.0, ..Default::default() },
-        );
+        let battery_manager =
+            BatteryManager::new_with_battery_manager_config(recorder_config, config);
         (dir, battery_manager)
     }
 
@@ -1744,17 +1769,25 @@ mod tests {
     // Note: Must be `async fn` because `create_manager()` spawns an `fasync::Task`,
     // which requires `#[fuchsia::test]` to initialize a Fuchsia async executor.
     #[fuchsia::test]
-    async fn test_update_simulated_battery_info_updates_simulated_cache() {
+    async fn test_update_simulation_toggles_simulated_overrides() {
         let (_dir, battery_manager) = create_manager();
 
         // Ensure we are initially in real mode (not simulating)
         assert_eq!(battery_manager.is_simulating(), false);
+        assert!(battery_manager.simulated_overrides.borrow().is_none());
 
-        // Even though is_simulating() is false, simulated_battery_info should still be updated.
         let mut simulated_info = fpower::BatteryInfo::default();
         simulated_info.level_percent = Some(42.0);
-        battery_manager.update_simulated_battery_info(simulated_info);
-        assert_eq!(battery_manager.simulated_battery_info.borrow().level_percent, Some(42.0));
+        battery_manager.update_simulation(Some(simulated_info));
+        assert_eq!(battery_manager.is_simulating(), true);
+        assert_eq!(
+            battery_manager.simulated_overrides.borrow().as_ref().and_then(|o| o.level_percent),
+            Some(42.0)
+        );
+
+        battery_manager.update_simulation(None);
+        assert_eq!(battery_manager.is_simulating(), false);
+        assert!(battery_manager.simulated_overrides.borrow().is_none());
     }
 
     // Note: Must be `async fn` because `create_manager()` spawns an `fasync::Task`,
@@ -1764,7 +1797,7 @@ mod tests {
         let (_dir, battery_manager) = create_manager();
 
         // Switch to simulating mode
-        battery_manager.update_simulation(true);
+        battery_manager.update_simulation(Some(fpower::BatteryInfo::default()));
         assert_eq!(battery_manager.is_simulating(), true);
 
         // Even though is_simulating() is true, cached_battery_info should still be updated.
@@ -2239,6 +2272,134 @@ mod tests {
         assert_ne!(info.level_percent, Some(LEVEL_PERCENT));
         assert_eq!(info.present_voltage_mv, Some(CHANGED_VOLTAGE_MV));
         drop(wake_lease.expect("notified sample should forward wake lease"));
+        let _ =
+            fasync::OnSignals::new(&lease_peer, zx::Signals::EVENTPAIR_PEER_CLOSED).await.unwrap();
+    }
+
+    /// Verifies that discharging at <= 1% arms `LOW_BATTERY_SAMPLE_INTERVAL`, suppresses
+    /// intermediate `< 1%` samples that still round to 1% (dropping their wake lease), disarms
+    /// when charging starts, and forwards the 0% update + wake lease before disarming once raw SOC
+    /// drops below 0.5%.
+    #[fuchsia::test]
+    async fn test_low_battery_discharging_sampling_and_watcher_suppression() {
+        let (_dir, battery_manager) = create_manager_with_config(crate::BatteryManagerConfig {
+            shutdown_offset_percent: 0.0,
+            ..Default::default()
+        });
+        let (watcher, mut watcher_stream) =
+            create_request_stream::<fpower::BatteryInfoWatcherMarker>();
+        battery_manager.add_watcher(watcher.into_proxy());
+        connect_unread_battery_driver(&battery_manager);
+
+        // 1. Discharging at 50%: no low-battery polling.
+        let discharging_50 = fbattery::Status {
+            present: Some(true),
+            level_percent: Some(50.0),
+            current_ua: Some(-500_000),
+            ..Default::default()
+        };
+        assert!(
+            battery_manager
+                .apply_update(
+                    DriverUpdate::BatteryStatus {
+                        status: discharging_50.clone(),
+                        wake_lease: None
+                    },
+                    None
+                )
+                .await
+        );
+        let (info, _) = next_watcher_push(&mut watcher_stream).await;
+        assert_eq!(info.level_percent, Some(50.0));
+        assert_eq!(battery_manager.cache.battery_sample_interval(), None);
+
+        // 2. Last `dSOCi` interrupt at 0.99% (rounds to 1%): arms 47s low-battery polling.
+        let discharging_0_99 = fbattery::Status { level_percent: Some(0.99), ..discharging_50 };
+        assert!(
+            battery_manager
+                .apply_update(
+                    DriverUpdate::BatteryStatus {
+                        status: discharging_0_99.clone(),
+                        wake_lease: None
+                    },
+                    None
+                )
+                .await
+        );
+        let (info, _) = next_watcher_push(&mut watcher_stream).await;
+        assert_eq!(info.level_percent, Some(1.0));
+        assert_eq!(info.level_status, Some(fpower::LevelStatus::Low));
+        assert_eq!(
+            battery_manager.cache.battery_sample_interval(),
+            Some(LOW_BATTERY_SAMPLE_INTERVAL)
+        );
+
+        // 3. Intermediate sample at 0.80% (still rounds to 1%): watcher is NOT notified and wake
+        //    lease is dropped immediately, while 47s polling stays armed.
+        let discharging_0_80 = fbattery::Status { level_percent: Some(0.80), ..discharging_0_99 };
+        assert!(battery_manager.cache.battery_sampled(Some(&discharging_0_80), None));
+        let (lease, lease_peer) = zx::EventPair::create();
+        assert!(
+            !battery_manager
+                .apply_update(DriverUpdate::Sampled { wake_lease: Some(lease) }, None)
+                .await
+        );
+        assert!(matches!(
+            lease_peer
+                .wait_one(zx::Signals::EVENTPAIR_PEER_CLOSED, zx::MonotonicInstant::INFINITE_PAST),
+            zx::WaitResult::Ok(_)
+        ));
+        assert_eq!(
+            battery_manager.cache.battery_sample_interval(),
+            Some(LOW_BATTERY_SAMPLE_INTERVAL)
+        );
+
+        // 4. Plugging in charger at 0.80% disarms low-battery polling; unplugging re-arms it.
+        let charging_0_80 =
+            fbattery::Status { current_ua: Some(500_000), ..discharging_0_80.clone() };
+        assert!(
+            battery_manager
+                .apply_update(
+                    DriverUpdate::BatteryStatus { status: charging_0_80, wake_lease: None },
+                    None
+                )
+                .await
+        );
+        let _ = next_watcher_push(&mut watcher_stream).await;
+        assert_eq!(battery_manager.cache.battery_sample_interval(), None);
+
+        assert!(
+            battery_manager
+                .apply_update(
+                    DriverUpdate::BatteryStatus {
+                        status: discharging_0_80.clone(),
+                        wake_lease: None
+                    },
+                    None
+                )
+                .await
+        );
+        let _ = next_watcher_push(&mut watcher_stream).await;
+        assert_eq!(
+            battery_manager.cache.battery_sample_interval(),
+            Some(LOW_BATTERY_SAMPLE_INTERVAL)
+        );
+
+        // 5. Sample at 0.49% (rounds to 0% / Critical): notifies watcher with wake lease and
+        //    disarms low-battery polling.
+        let discharging_0_49 = fbattery::Status { level_percent: Some(0.49), ..discharging_0_80 };
+        assert!(battery_manager.cache.battery_sampled(Some(&discharging_0_49), None));
+        let (lease, lease_peer) = zx::EventPair::create();
+        assert!(
+            battery_manager
+                .apply_update(DriverUpdate::Sampled { wake_lease: Some(lease) }, None)
+                .await
+        );
+        assert_eq!(battery_manager.cache.battery_sample_interval(), None);
+        let (info, wake_lease) = next_watcher_push(&mut watcher_stream).await;
+        assert_eq!(info.level_percent, Some(0.0));
+        assert_eq!(info.level_status, Some(fpower::LevelStatus::Critical));
+        drop(wake_lease.expect("0% sample should forward wake lease"));
         let _ =
             fasync::OnSignals::new(&lease_peer, zx::Signals::EVENTPAIR_PEER_CLOSED).await.unwrap();
     }

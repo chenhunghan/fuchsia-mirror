@@ -253,7 +253,7 @@ unsafe fn apply_context_switch_states(
 ///
 /// - `current_thread` and `next_thread` must point to valid, initialized, distinct `Thread`
 ///   instances that remain alive for the duration of the call, and the caller must hold both of
-///   their locks (matching `StallAccumulator::ApplyContextSwitch`'s `TA_REQ`).
+///   their locks.
 /// - Interrupts (and thus preemption) must be disabled on the calling CPU, with exclusive access
 ///   to both threads' `memory_stall_state_`.
 /// - `next_thread` must be the thread being switched to on the calling CPU.
@@ -295,30 +295,6 @@ pub unsafe fn apply_context_switch(current_thread: *mut Thread, next_thread: *mu
             thread::set_memory_stall_state(next_thread, updated.next_thread);
         }
     }
-}
-
-/// Accounts for a context switch between two threads. See [`apply_context_switch`].
-///
-/// # Safety
-///
-/// See [`apply_context_switch`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_stall_apply_context_switch(
-    current_thread: *mut Thread,
-    next_thread: *mut Thread,
-) {
-    // SAFETY: The caller guarantees all safety preconditions of `apply_context_switch`.
-    unsafe { apply_context_switch(current_thread, next_thread) };
-}
-
-/// Alters the accumulator's contributor counts by the given amount.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_stall_accumulator_update(
-    accumulator: &StallAccumulator,
-    op_contributors_progressing: i32,
-    op_contributors_stalling: i32,
-) {
-    accumulator.update(op_contributors_progressing, op_contributors_stalling);
 }
 
 /// Receives notifications when a [`StallObserver`] crosses its configured threshold.

@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -164,11 +165,11 @@ func getQemuInvocation(config qemuConfig) ([]string, error) {
 // If Prepare succeeds, it is up to the caller to clean up by calling Kill later.
 // However, if it fails, any resources will have been automatically released.
 func (q *QemuLauncher) Prepare() (returnErr error) {
-	paths, err := q.build.Path("zbi", "fvm", "blk", "zbitool")
+	paths, err := q.build.Path("zbi", "blk", "zbitool")
 	if err != nil {
 		return fmt.Errorf("Error resolving qemu dependencies: %s", err)
 	}
-	zbi, fvm, blk, zbitool := paths[0], paths[1], paths[2], paths[3]
+	zbi, blk, zbitool := paths[0], paths[1], paths[2]
 
 	// Create a tmpdir to store files we need
 	if q.TmpDir == "" {
@@ -221,12 +222,38 @@ func (q *QemuLauncher) Prepare() (returnErr error) {
 	// Make an expanded copy of the disk image
 	extendedBlk := path.Join(q.TmpDir, "extended-"+path.Base(blk))
 	if !fileExists(extendedBlk) {
-		if err := CreateProcessForeground("cp", blk, extendedBlk); err != nil {
-			return fmt.Errorf("cp failed: %s", err)
-		}
-		if err := CreateProcessForeground(fvm, extendedBlk, "extend",
-			"--length", "3G"); err != nil {
-			return fmt.Errorf("fvm failed: %s", err)
+		if strings.HasSuffix(blk, ".sparse.blk") {
+			paths, err := q.build.Path("simg2img")
+			if err != nil {
+				return fmt.Errorf("Error resolving simg2img: %s", err)
+			}
+			simg2img := paths[0]
+			if err := CreateProcessForeground(simg2img, blk, extendedBlk); err != nil {
+				return fmt.Errorf("simg2img failed: %s", err)
+			}
+			if err := CreateProcessForeground("truncate", "-s", "3G", extendedBlk); err != nil {
+				return fmt.Errorf("truncate failed: %s", err)
+			}
+		} else if strings.HasSuffix(blk, "fxfs.blk") || strings.HasSuffix(blk, "storage-full.blk") {
+			if err := CreateProcessForeground("cp", blk, extendedBlk); err != nil {
+				return fmt.Errorf("cp failed: %s", err)
+			}
+			if err := CreateProcessForeground("truncate", "-s", "3G", extendedBlk); err != nil {
+				return fmt.Errorf("truncate failed: %s", err)
+			}
+		} else {
+			paths, err := q.build.Path("fvm")
+			if err != nil {
+				return fmt.Errorf("Error resolving fvm: %s", err)
+			}
+			fvm := paths[0]
+			if err := CreateProcessForeground("cp", blk, extendedBlk); err != nil {
+				return fmt.Errorf("cp failed: %s", err)
+			}
+			if err := CreateProcessForeground(fvm, extendedBlk, "extend",
+				"--length", "3G"); err != nil {
+				return fmt.Errorf("fvm failed: %s", err)
+			}
 		}
 	}
 	q.extendedBlk = extendedBlk
@@ -283,6 +310,7 @@ func (q *QemuLauncher) Start() (conn Connector, returnErr error) {
 	}
 
 	cmd := NewCommand(invocation[0], invocation[1:]...)
+	cmd.Dir = "/"
 
 	logFile, err := os.Create(q.logPath())
 	if err != nil {

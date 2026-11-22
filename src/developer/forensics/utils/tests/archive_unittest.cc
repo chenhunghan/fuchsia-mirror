@@ -4,8 +4,7 @@
 
 #include "src/developer/forensics/utils/archive.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
-#include <fuchsia/mem/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <map>
@@ -24,8 +23,7 @@
 namespace forensics {
 namespace {
 
-using fuchsia::feedback::Attachment;
-using fuchsia::mem::Buffer;
+using fuchsia_mem::Buffer;
 using testing::Pair;
 using testing::UnorderedElementsAreArray;
 
@@ -62,7 +60,7 @@ TEST(ArchiveTest, Archive) {
 TEST(ArchiveTest, Unpack) {
   fsl::SizedVmo vmo;
   ASSERT_TRUE(fsl::VmoFromFilename("/pkg/data/test_data.zip", &vmo));
-  Buffer archive = std::move(vmo).ToTransport();
+  Buffer archive = std::move(vmo).ToNaturalTransport();
 
   std::map<std::string, std::string> unpacked_attachments;
   ASSERT_TRUE(Unpack(archive, &unpacked_attachments));
@@ -78,7 +76,7 @@ TEST(ArchiveTest, UnpackArchive) {
   ASSERT_TRUE(Archive(kAttachments, &archive));
 
   std::map<std::string, std::string> unpacked_attachments;
-  ASSERT_TRUE(Unpack(std::move(archive).ToTransport(), &unpacked_attachments));
+  ASSERT_TRUE(Unpack(std::move(archive).ToNaturalTransport(), &unpacked_attachments));
   EXPECT_EQ(unpacked_attachments, kAttachments);
 }
 

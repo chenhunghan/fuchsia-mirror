@@ -14,6 +14,7 @@ import typing
 import fuchsia_base_test
 import perf_publish.publish as publish
 import test_data
+from honeydew import errors
 from honeydew.device_classes import android_device
 from mobly import asserts, signals, test_runner
 from reporting import metrics
@@ -89,6 +90,13 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
         f.seek(0)
         return f
 
+    def _remove_device_file(self, path: str) -> None:
+        """Removes a temporary file on the device, logging on failure."""
+        try:
+            self.dut.adb.run(["shell", "rm", "-f", path])
+        except errors.HoneydewError as err:
+            _LOGGER.warning("Failed to remove %s on device: %s", path, err)
+
     async def _run_transfer_benchmark(
         self,
         command: str,
@@ -100,17 +108,38 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
         trace_file = f"{metric_suite}_trace.fxt"
         trace_path = os.path.join(self.test_case_path, trace_file)
 
-        async with self.dut.tracing.trace_session(
-            categories=["system_metrics"],
-            buffer_size=32,
-            download=True,
-            directory=self.test_case_path,
-            trace_file=trace_file,
-        ):
-            output = self.dut.adb.run([command, "-Z", source_path, dest_path])
-            _LOGGER.info(
-                f"Output from `adb {command}` ({metric_suite}): {output}"
-            )
+        output: str | None = None
+        max_attempts = max(1, self.dut.adb.attempts)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                async with self.dut.tracing.trace_session(
+                    categories=["system_metrics"],
+                    buffer_size=32,
+                    download=True,
+                    directory=self.test_case_path,
+                    trace_file=trace_file,
+                ):
+                    output = self.dut.adb.run(
+                        [command, "-Z", source_path, dest_path],
+                        attempts=1,
+                    )
+                    _LOGGER.info(
+                        f"Output from `adb {command}` ({metric_suite}): {output}"
+                    )
+                break
+            except errors.HoneydewError as err:
+                if attempt >= max_attempts or not self.dut.adb._adb_server:
+                    raise
+                _LOGGER.warning(
+                    "ADB %s (%s) failed on attempt %d/%d: %s. "
+                    "Recovering isolated ADB server before retrying benchmark...",
+                    command,
+                    metric_suite,
+                    attempt,
+                    max_attempts,
+                    err,
+                )
+                self.dut.adb._recover_adb_server()
 
         assert output is not None, "ADB command produced no output."
 
@@ -196,7 +225,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
                     metric_suite="fuchsia.usb.adb.pull",
                 )
             finally:
-                self.dut.adb.run(["shell", "rm", "-f", _DEVICE_TMP_FILE_PATH])
+                self._remove_device_file(_DEVICE_TMP_FILE_PATH)
 
     async def test_adb_push_storage(self) -> None:
         """Pushes an uncompressed file from host disk to device flash storage."""
@@ -211,14 +240,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
                     metric_suite="fuchsia.usb.adb.push_storage",
                 )
             finally:
-                self.dut.adb.run(
-                    [
-                        "shell",
-                        "rm",
-                        "-f",
-                        _DEVICE_STORAGE_FILE_PATH,
-                    ]
-                )
+                self._remove_device_file(_DEVICE_STORAGE_FILE_PATH)
 
     async def test_adb_pull_storage(self) -> None:
         """Pulls an uncompressed file from device flash storage to host disk."""
@@ -244,14 +266,7 @@ class AdbThroughputTest(fuchsia_base_test.FuchsiaBaseTest):
                     metric_suite="fuchsia.usb.adb.pull_storage",
                 )
             finally:
-                self.dut.adb.run(
-                    [
-                        "shell",
-                        "rm",
-                        "-f",
-                        _DEVICE_STORAGE_FILE_PATH,
-                    ]
-                )
+                self._remove_device_file(_DEVICE_STORAGE_FILE_PATH)
 
 
 if __name__ == "__main__":

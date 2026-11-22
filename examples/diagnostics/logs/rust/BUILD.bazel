@@ -1,0 +1,105 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest", "fx_test_component")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":rust_logs_example_tests_test"],
+    visibility = ["//examples:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "rust_logs_example",
+    edition = "2024",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "rust_logs_example",
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    component_name = "rust_logs_example",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/rust_logs_example.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component-manifest",
+    deps = [":bin_packaged"],
+)
+
+rustc_test(
+    name = "test",
+    srcs = ["tests/lib.rs"],
+    # Keeps the binary name used by meta/rust_logs_example_tests.cml.
+    crate_name = "rust_logs_example_tests",
+    crate_root = "tests/lib.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//src/lib/diagnostics/reader",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "test_packaged",
+    testonly = True,
+    binary = ":test",
+    binary_name = "rust_logs_example_tests",
+)
+
+fx_component_manifest(
+    name = "test_component-manifest",
+    component_name = "rust_logs_example_tests",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/rust_logs_example_tests.cml",
+)
+
+fx_test_component(
+    name = "test_component",
+    compiled_manifest = ":test_component-manifest",
+    deps = [":test_packaged"],
+)
+
+# Run with `fx test rust_logs_example_tests`.
+fx_package(
+    name = "rust_logs_example_tests",
+    components = [":component"],
+    test_components = [":test_component"],
+)
+
+fx_test(
+    name = "rust_logs_example_tests_test",
+    package = ":rust_logs_example_tests",
+)

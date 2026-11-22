@@ -20,8 +20,6 @@ use core::slice;
 #[cfg(console_enabled)]
 use debug::dprintf;
 use zx_status::Status;
-#[cfg(target_arch = "aarch64")]
-use zx_types::zx_status_t;
 
 /// Action to perform when halting the platform.
 #[repr(u32)]
@@ -118,17 +116,6 @@ pub enum PlatformAllowDomainPowerDown {
     Yes = 1,
 }
 
-#[cfg(target_arch = "aarch64")]
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct PlatformCpuStateResult {
-    status: zx_status_t,
-    state: u32,
-}
-
-#[cfg(target_arch = "aarch64")]
-zr::static_assert_size_and_align!(PlatformCpuStateResult, 8, 4);
-
 /// Whether [`platform_panic_start_with_option`] should halt other CPUs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanicStartHaltOtherCpus {
@@ -136,38 +123,15 @@ pub enum PanicStartHaltOtherCpus {
     Yes,
 }
 
-unsafe extern "C" {
-    fn cpp_platform_specific_halt(
-        suggested_action: PlatformHaltAction,
-        reason: ZirconCrashReason,
-        halt_on_panic: bool,
-    ) -> !;
-    fn cpp_platform_panic_start(halt_other_cpus: bool);
-}
-
+use super::debug::platform_serial_drain_tx;
 pub use super::debug::{platform_serial_is_suspended, platform_serial_suspended_at};
-
-#[cfg(target_arch = "aarch64")]
-unsafe extern "C" {
-    /// Returns `true` iff this platform supports `platform_suspend_cpu`.
-    fn cpp_platform_supports_suspend_cpu() -> bool;
-    /// Suspends the calling CPU.
-    fn cpp_platform_suspend_cpu(allow_domain: bool) -> zx_status_t;
-    /// Returns `true` iff this platform supports `platform_suspend_system`.
-    fn cpp_platform_supports_suspend_system() -> bool;
-    /// Suspends the entire system from the boot CPU after secondary CPUs have powered off.
-    fn cpp_platform_suspend_system() -> zx_status_t;
-    /// Queries the current hardware power state of `cpu_id`.
-    fn cpp_platform_get_cpu_state(cpu_id: cpu_num_t) -> PlatformCpuStateResult;
-}
 
 /// Returns `true` iff this platform supports [`platform_suspend_cpu`].
 #[inline]
 pub fn platform_supports_suspend_cpu() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: Pure platform capability query with no preconditions.
-        unsafe { cpp_platform_supports_suspend_cpu() }
+        crate::generic_arm::platform_supports_suspend_cpu()
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -175,8 +139,14 @@ pub fn platform_supports_suspend_cpu() -> bool {
     }
     #[cfg(target_arch = "riscv64")]
     {
-        crate::generic_riscv64::platform::rust_platform_supports_suspend_cpu()
+        crate::generic_riscv64::platform::platform_supports_suspend_cpu()
     }
+}
+
+/// FFI trampoline for [`platform_supports_suspend_cpu`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_platform_supports_suspend_cpu() -> bool {
+    platform_supports_suspend_cpu()
 }
 
 /// Suspends the calling CPU.
@@ -220,11 +190,13 @@ pub unsafe fn platform_suspend_cpu(
 ) -> Result<(), Status> {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: Caller upholds the kernel-only thread, CPU-pinned, IRQ-disabled, and
-        // preempt-disabled preconditions of `platform_suspend_cpu`.
-        Status::ok(unsafe {
-            cpp_platform_suspend_cpu(allow_domain == PlatformAllowDomainPowerDown::Yes)
-        })
+        // SAFETY: The caller upholds this function's `# Safety` section, which is the same contract
+        // as `generic_arm::platform_suspend_cpu`.
+        unsafe {
+            crate::generic_arm::platform_suspend_cpu(
+                allow_domain == PlatformAllowDomainPowerDown::Yes,
+            )
+        }
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -234,10 +206,23 @@ pub unsafe fn platform_suspend_cpu(
     }
     #[cfg(target_arch = "riscv64")]
     {
-        crate::generic_riscv64::platform::rust_platform_suspend_cpu(
+        crate::generic_riscv64::platform::platform_suspend_cpu(
             allow_domain == PlatformAllowDomainPowerDown::Yes,
         )
     }
+}
+
+/// FFI trampoline for [`platform_suspend_cpu`].
+///
+/// # Safety
+///
+/// As for [`platform_suspend_cpu`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_platform_suspend_cpu(
+    allow_domain: PlatformAllowDomainPowerDown,
+) -> Result<(), Status> {
+    // SAFETY: Caller upholds `platform_suspend_cpu`'s preconditions.
+    unsafe { platform_suspend_cpu(allow_domain) }
 }
 
 /// Returns `true` iff this platform supports [`platform_suspend_system`].
@@ -245,8 +230,7 @@ pub unsafe fn platform_suspend_cpu(
 pub fn platform_supports_suspend_system() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: Pure platform capability query with no preconditions.
-        unsafe { cpp_platform_supports_suspend_system() }
+        crate::generic_arm::platform_supports_suspend_system()
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -254,8 +238,14 @@ pub fn platform_supports_suspend_system() -> bool {
     }
     #[cfg(target_arch = "riscv64")]
     {
-        crate::generic_riscv64::platform::rust_platform_supports_suspend_system()
+        crate::generic_riscv64::platform::platform_supports_suspend_system()
     }
+}
+
+/// FFI trampoline for [`platform_supports_suspend_system`].
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_platform_supports_suspend_system() -> bool {
+    platform_supports_suspend_system()
 }
 
 /// Suspends the entire system from the boot CPU after all secondary CPUs have been powered off.
@@ -279,9 +269,10 @@ pub fn platform_supports_suspend_system() -> bool {
 pub unsafe fn platform_suspend_system() -> Result<(), Status> {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: Caller upholds the boot-CPU, kernel-only thread, IRQ-disabled, and
-        // preempt-disabled preconditions of `platform_suspend_system`.
-        Status::ok(unsafe { cpp_platform_suspend_system() })
+        // SAFETY: The caller upholds this function's `# Safety` section, which covers the boot CPU,
+        // kernel-only thread, interrupt, preemption and wakeup source requirements of
+        // `generic_arm::platform_suspend_system`.
+        unsafe { crate::generic_arm::platform_suspend_system() }
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -289,8 +280,19 @@ pub unsafe fn platform_suspend_system() -> Result<(), Status> {
     }
     #[cfg(target_arch = "riscv64")]
     {
-        crate::generic_riscv64::platform::rust_platform_suspend_system()
+        crate::generic_riscv64::platform::platform_suspend_system()
     }
+}
+
+/// FFI trampoline for [`platform_suspend_system`].
+///
+/// # Safety
+///
+/// As for [`platform_suspend_system`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_platform_suspend_system() -> Result<(), Status> {
+    // SAFETY: Caller upholds `platform_suspend_system`'s preconditions.
+    unsafe { platform_suspend_system() }
 }
 
 /// Queries the current power state of `cpu_id` from the platform layer.
@@ -298,16 +300,7 @@ pub unsafe fn platform_suspend_system() -> Result<(), Status> {
 pub fn platform_get_cpu_state(cpu_id: cpu_num_t) -> Result<PowerCpuState, Status> {
     #[cfg(target_arch = "aarch64")]
     {
-        // SAFETY: Pure platform CPU power state query with no memory safety preconditions.
-        let res = unsafe { cpp_platform_get_cpu_state(cpu_id) };
-        Status::ok(res.status)?;
-        match PowerCpuState::try_from(res.state) {
-            Ok(state) => Ok(state),
-            Err(_) => {
-                core::hint::cold_path();
-                Err(Status::BAD_STATE)
-            }
-        }
+        crate::generic_arm::platform_get_cpu_state(cpu_id)
     }
     #[cfg(target_arch = "x86_64")]
     {
@@ -315,9 +308,7 @@ pub fn platform_get_cpu_state(cpu_id: cpu_num_t) -> Result<PowerCpuState, Status
     }
     #[cfg(target_arch = "riscv64")]
     {
-        let mut state = PowerCpuState::Off;
-        crate::generic_riscv64::platform::rust_platform_get_cpu_state(cpu_id, &mut state)?;
-        Ok(state)
+        crate::generic_riscv64::platform::platform_get_cpu_state(cpu_id)
     }
 }
 
@@ -327,8 +318,22 @@ fn platform_specific_halt(
     reason: ZirconCrashReason,
     halt_on_panic: bool,
 ) -> ! {
-    // SAFETY: `cpp_platform_specific_halt` halts or reboots the system and never returns.
-    unsafe { cpp_platform_specific_halt(suggested_action, reason, halt_on_panic) }
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::generic_arm::platform_specific_halt(suggested_action, reason, halt_on_panic)
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::power::platform_specific_halt(suggested_action, reason, halt_on_panic)
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::platform_specific_halt(
+            suggested_action,
+            reason,
+            halt_on_panic,
+        )
+    }
 }
 
 /// Common platform halt path. This handles some tasks we always want to make
@@ -355,13 +360,9 @@ pub fn platform_halt(suggested_action: PlatformHaltAction, reason: ZirconCrashRe
     }
 
     if halt_on_panic {
-        // SAFETY: Safe to call after early boot; dispatches to the registered static watchdog
-        // driver or the no-op default driver.
-        let _ = unsafe { hw_watchdog_set_enabled(false) };
+        let _ = hw_watchdog_set_enabled(false);
     } else {
-        // SAFETY: Safe to call after early boot; dispatches to the registered static watchdog
-        // driver or the no-op default driver.
-        unsafe { hw_watchdog_pet() };
+        hw_watchdog_pet();
     }
 
     // Render and stash our crashlog.  crashlog_to_string will decide what should
@@ -392,17 +393,12 @@ pub fn platform_halt(suggested_action: PlatformHaltAction, reason: ZirconCrashRe
         jtrace_invalidate();
     }
 
+    // Flush any pending debug UART output before handing off to the platform
+    // halt/reboot/shutdown implementation.
+    platform_serial_drain_tx();
+
     // Finally, fall into the platform specific halt handler.
     platform_specific_halt(suggested_action, reason, halt_on_panic);
-}
-
-/// FFI trampoline for [`platform_halt`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_halt(
-    suggested_action: PlatformHaltAction,
-    reason: ZirconCrashReason,
-) -> ! {
-    platform_halt(suggested_action, reason)
 }
 
 /// Prepares the platform to print a panic: stops the other CPUs and switches the
@@ -415,8 +411,19 @@ pub fn platform_panic_start() {
 /// Prepares the platform to print a panic, optionally halting other CPUs.
 #[inline]
 pub fn platform_panic_start_with_option(option: PanicStartHaltOtherCpus) {
-    // SAFETY: no preconditions; safe to call from any CPU at any time.
-    unsafe { cpp_platform_panic_start(matches!(option, PanicStartHaltOtherCpus::Yes)) }
+    let halt_other_cpus = matches!(option, PanicStartHaltOtherCpus::Yes);
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::generic_arm::platform_panic_start(halt_other_cpus);
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::platform_pc::power::platform_panic_start(halt_other_cpus);
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        crate::generic_riscv64::platform::platform_panic_start(halt_other_cpus);
+    }
 }
 
 /// # Safety

@@ -11,14 +11,16 @@ group("drivers") {
     "drivers/integration-test",
     "drivers/nelson",
     "drivers/nelson/post-init",
-    "drivers/qemu-arm64",
     "drivers/sherlock",
     "drivers/sherlock:sherlock-factory",
     "drivers/sherlock/post-init",
     "drivers/vim3-devicetree:bazel_package",
     "drivers/vim3-dml",
-    "drivers/virt",
   ]
+
+  if (current_cpu == "arm64" || current_cpu == "riscv64") {
+    deps += [ "drivers/virt" ]
+  }
 
   if (current_cpu == "x64") {
     deps += [ "drivers/x86:platform-bus-x86" ]

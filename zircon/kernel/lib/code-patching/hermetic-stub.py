@@ -23,12 +23,12 @@ STUB_CONTENTS = string.Template(
 
 #include <lib/arch/asm.h>
 #include <lib/code-patching/asm.h>
-#include <$header>  // Defines $case_id.
+#include <$header>  // For $case_id.
 
 .text
 
 .function $function_name, global
-  .code_patching.blob $size, $case_id
+  .code_patching.blob $size, ($case_id)
 .end_function
 """
 )
@@ -49,6 +49,11 @@ def main():
     parser.add_argument("--name", help="The name of the stub function")
     parser.add_argument(
         "--header", help="A header containing patch case ID constants"
+    )
+    parser.add_argument(
+        "--case-id",
+        help="Assembler expression for the patch case ID"
+        + " (default: CASE_ID_<NAME> in upper case)",
     )
     parser.add_argument(
         "--metadata-file",
@@ -92,8 +97,8 @@ def main():
                 header=args.header,
                 function_name=args.name,
                 # Per the expectations of code_patching_hermetic_stub()'s
-                # `case_id_header` parameter.
-                case_id="CASE_ID_%s" % args.name.upper(),
+                # `case_id` and `case_id_header` parameters.
+                case_id=args.case_id or "CASE_ID_%s" % args.name.upper(),
                 size=max_size,
             )
         )

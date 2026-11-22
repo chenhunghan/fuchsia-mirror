@@ -74,7 +74,7 @@ _codegen = rule(
             providers = [FuchsiaFidlLibraryInfo],
         ),
         "binding_level": attr.string(
-            doc = "Controls whether to generate high- (hlcpp) or low-level (llcpp) C++ bindings.",
+            doc = "The C++ binding level to generate (only 'hlcpp' is supported).",
             mandatory = True,
         ),
     } | COMPATIBILITY.FUCHSIA_ATTRS,
@@ -102,7 +102,7 @@ def _fidl_cc_library(name, library, binding_level, deps = [], tags = [], **kwarg
     Args:
       name: Target name. Required.
       library: fidl_library() target to generate the language bindings for. Required.
-      binding_level: Controls whether to generate high- (hlcpp) or low-level (llcpp) C++ bindings.
+      binding_level: The C++ binding level to generate (only "hlcpp" is supported).
       deps: Additional dependencies.
       tags: Optional tags.
       **kwargs: Remaining args.

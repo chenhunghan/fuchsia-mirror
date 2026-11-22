@@ -140,6 +140,7 @@ func (o *TestOutputs) Record(ctx context.Context, result runtests.TestDetails) e
 			SetupSucceeded:    result.SetupSucceeded,
 			TeardownSucceeded: result.TeardownSucceeded,
 			ExitCode:          result.ExitCode,
+			Runner:            result.Runner,
 		},
 		StartTime:      result.StartTime,
 		DurationMillis: duration.Milliseconds(),

@@ -28,8 +28,8 @@ fx_cc_library(
         "//sdk/lib/c/test:__pkg__",
         "//src/bringup/bin/critical-services/storage-watchdog:__pkg__",
         "//src/lib/elf-search:__subpackages__",
+        "//src/memory/sampler/instrumentation:__pkg__",
         "//src/performance/cpu_profiler:__pkg__",
-        "//src/performance/memory/sampler/instrumentation:__pkg__",
         "//zircon/system/ulib/inspector:__pkg__",
     ],
     deps = [

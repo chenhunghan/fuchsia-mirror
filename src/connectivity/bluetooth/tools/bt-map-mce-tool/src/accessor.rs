@@ -2,8 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Error};
-use fidl::endpoints::{create_endpoints, ServerEnd};
+use anyhow::{Error, format_err};
+use bt_repl::CommandSet as _;
+use fidl::endpoints::{Proxy as _, ServerEnd, create_endpoints};
 use fidl_fuchsia_bluetooth::PeerId;
 use fidl_fuchsia_bluetooth_map::{
     AccessorProxy, AccessorSetNotificationRegistrationRequest, NotificationRegistrationMarker,
@@ -11,11 +12,17 @@ use fidl_fuchsia_bluetooth_map::{
 };
 use fuchsia_async::Task;
 use fuchsia_sync::Mutex;
+use futures::Future;
 use futures::stream::StreamExt;
 use log::{info, warn};
 use std::sync::Arc;
 
 use crate::commands::Cmd;
+
+/// Escape code to clear the pty line on which the cursor is located.
+pub const CLEAR_LINE: &str = "\x1b[2K";
+/// Escape code to move the cursor to column 1.
+pub const CHA: &str = "\x1b[1G";
 
 #[derive(Clone)]
 pub(crate) struct AccessorClient {
@@ -31,6 +38,14 @@ impl AccessorClient {
 
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    /// Resolves when the `Accessor` FIDL channel to the `bt-map-mce` component closes.
+    pub fn wait_for_disconnect(&self) -> impl Future<Output = ()> + 'static {
+        let proxy = self.proxy.clone();
+        async move {
+            let _ = proxy.on_closed().await;
+        }
     }
 }
 
@@ -74,11 +89,15 @@ pub async fn register_for_notifications<'a>(
     accessor_client: AccessorClient,
 ) -> Result<(), Error> {
     if args.len() > 1 {
-        info!("usage: {}", Cmd::TurnOnNotifications.cmd_help());
+        info!("usage: {}", Cmd::TurnOnNotifications.usage());
         return Ok(());
     }
     if accessor_client.notification_task.lock().is_some() {
-        info!("No/op. There is a pre-existing notification registration. To reset, run `{}` and try again", Cmd::TurnOffNotifications);
+        info!(
+            "No/op. There is a pre-existing notification registration. \
+             To reset, run `{}` and try again",
+            Cmd::TurnOffNotifications
+        );
         return Ok(());
     }
 
@@ -109,7 +128,11 @@ pub async fn register_for_notifications<'a>(
 
     let mut lock = accessor_client.notification_task.lock();
     let _ = lock.replace(fuchsia_async::Task::local(print_notifications(relayer_server)));
-    info!("Incoming notifications will be printed to console. To stop receiving notifications, use `{}`", Cmd::TurnOffNotifications);
+    info!(
+        "Incoming notifications will be printed to console. \
+         To stop receiving notifications, use `{}`",
+        Cmd::TurnOffNotifications
+    );
     Ok(())
 }
 
@@ -118,9 +141,9 @@ pub async fn unregister_notifications<'a>(accessor_client: AccessorClient) -> Re
     match lock.take() {
         Some(previous_task) => {
             let _ = previous_task.abort();
-            info!("Will no longer receive notifications from peer...",);
+            info!("Will no longer receive notifications from peer...");
         }
-        None => info!("No/op since there is no active notification registration",),
+        None => info!("No/op since there is no active notification registration"),
     };
     info!("To turn on notifications, use `{}`", Cmd::TurnOnNotifications);
     Ok(())

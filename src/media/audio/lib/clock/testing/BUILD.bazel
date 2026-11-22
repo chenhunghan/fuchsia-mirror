@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Helper functions for clock-related gtest cases
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "testing",
+    testonly = True,
+    srcs = ["clock_test.cc"],
+    hdrs = ["clock_test.h"],
+    implementation_deps = [
+        "//src/lib/testing/loop_fixture",
+        "//zircon/system/ulib/affine",
+    ],
+    # Uses Zircon headers (<lib/zx/clock.h>) and depends on Fuchsia-only
+    # //src/lib/testing/loop_fixture.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/media/audio:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        "//sdk/lib/fit-promise",
+        "//src/media/audio/lib/clock",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

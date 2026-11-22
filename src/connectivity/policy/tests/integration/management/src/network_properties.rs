@@ -63,6 +63,9 @@ fn network(network_id: u32, mark: Option<u32>) -> fnp_properties::Network {
             handle: Some(network_id.into()),
             ..Default::default()
         })),
+        name: Some(format!("net{network_id}")),
+        network_type: Some(fnp_properties::NetworkType::Ethernet),
+        connectivity: Some(fnp_properties::ConnectivityState::FullConnectivity),
         ..Default::default()
     }
 }
@@ -1294,8 +1297,8 @@ async fn test_track_dns_changes_default_switch(name: &str) {
                                 port: DEFAULT_DNS_PORT,
                                 zone_index: 0,
                             })),
-                            source: Some(fnet_name::DnsServerSource::SocketProxy(
-                                fnet_name::SocketProxyDnsServerSource {
+                            source: Some(fnet_name::DnsServerSource::Delegated(
+                                fnet_name::DelegatedDnsServerSource {
                                     source_interface: Some(1),
                                     ..Default::default()
                                 },
@@ -1311,8 +1314,8 @@ async fn test_track_dns_changes_default_switch(name: &str) {
                                 port: DEFAULT_DNS_PORT,
                                 zone_index: 0,
                             })),
-                            source: Some(fnet_name::DnsServerSource::SocketProxy(
-                                fnet_name::SocketProxyDnsServerSource {
+                            source: Some(fnet_name::DnsServerSource::Delegated(
+                                fnet_name::DelegatedDnsServerSource {
                                     source_interface: Some(2),
                                     ..Default::default()
                                 },

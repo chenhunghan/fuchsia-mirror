@@ -321,6 +321,19 @@ variant("kernel_config") {
     "MIN_CRASHLOG_SIZE=${min_crashlog_size}",
     "TARGET_PERSISTENT_DEBUGLOG_SIZE=${target_persistent_debuglog_size}",
   ]
+
+  # Value-carrying macros from $kernel_extra_defines that Rust reads with
+  # option_env!() rather than as --cfg flags.  C++ sees them as ordinary
+  # defines via $defines above; they are forwarded verbatim as NAME=VALUE.
+  rustenv += filter_include(
+          kernel_extra_defines,
+          [
+            # //zircon/kernel/lib/crypto/entropy/quality_test.rs
+            "ENTROPY_COLLECTOR_TEST_MAXLEN=*",
+
+            # //zircon/kernel/lib/crypto/entropy/jitterentropy_collector.rs
+            "JITTERENTROPY_MEM_SIZE=*",
+          ])
 }
 
 # Each switchset is expected to include one of these.
@@ -386,10 +399,7 @@ config("lock_dep") {
 config("scheduler") {
   visibility = [ ":*" ]
   defines = [
-    "SCHEDULER_TRACING_LEVEL=$scheduler_tracing_level",
-    "SCHEDULER_QUEUE_TRACING_ENABLED=$scheduler_queue_tracing_enabled",
     "SCHEDULER_EXTRA_INVARIANT_VALIDATION=$scheduler_extra_invariant_validation",
-    "SCHEDULER_LOCK_SPIN_TRACING_COMPRESSED=$scheduler_lock_spin_tracing_compressed",
     "SCHEDULER_LOCK_SPIN_TRACING_ENABLED=$scheduler_lock_spin_tracing_enabled",
     "WAIT_QUEUE_DEPTH_TRACING_ENABLED=$wait_queue_depth_tracing_enabled",
   ]

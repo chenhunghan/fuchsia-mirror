@@ -33,26 +33,6 @@ inline bool arch_ints_disabled() {
   return !!state;
 }
 
-inline void arch_enable_fiqs() {
-  ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
-  __asm__ volatile("msr daifclr, #1" ::: "memory");
-}
-
-inline void arch_disable_fiqs() {
-  __asm__ volatile("msr daifset, #1" ::: "memory");
-  ktl::atomic_signal_fence(ktl::memory_order_seq_cst);
-}
-
-// XXX
-inline bool arch_fiqs_disabled() {
-  unsigned long state;
-
-  __asm__ volatile("mrs %0, daif" : "=r"(state));
-  state &= (1 << 6);
-
-  return !!state;
-}
-
 #endif  // __ASSEMBLER__
 
 #endif  // ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_INTERRUPT_H_

@@ -4,6 +4,11 @@
 
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
+load(
+    "@fuchsia_rules_common//build_flags:default_flag_values.bzl",
+    "X64_BASELINE_CFLAGS",
+    "X64_MITIGATE_SKYLAKE_JCC_CFLAGS",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -13,10 +18,8 @@ package(default_applicable_licenses = ["//:license"])
 # This tracks the minimum hardware requirements for Fuchsia on x86-64.
 compiler_build_flags(
     name = "x64",
-    cflags = [
-        "-march=x86-64-v2",
-        "-mtune=generic",
-    ],
+    # These flags are shared with the out-of-tree C++ toolchain.
+    cflags = X64_BASELINE_CFLAGS,
 
     # Assume toolchain_environment != "kernel" in Bazel
     rustflags = ["-Ctarget-cpu=x86-64-v2"],
@@ -33,7 +36,7 @@ compiler_build_flags(
 build_flags(
     name = "mitigate_skylake_jcc",
     # Assume is_gcc == false in Bazel
-    cflags = ["-mbranches-within-32B-boundaries"],
+    cflags = X64_MITIGATE_SKYLAKE_JCC_CFLAGS,
     # TODO(https://fxbug.dev/507570739): Need equivalent rustflags.
     visibility = ["//visibility:public"],
 )
@@ -61,4 +64,7 @@ build_flags(
     visibility = ["//visibility:public"],
 )
 
-# LINT.ThenChange(BUILD.gn:x64_configs)
+# LINT.ThenChange(
+#     BUILD.gn:x64_configs,
+#     //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:cpu_baseline,
+# )

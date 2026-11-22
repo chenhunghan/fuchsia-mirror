@@ -127,6 +127,40 @@ class OutgoingDirectoryTest : public gtest::RealLoopFixture {
     return fidl::WireClient(std::move(connect_result.value()), dispatcher());
   }
 
+  // Sends kTestString over a WireClient `client` and returns the reply.
+  std::string EchoTestString(fidl::WireClient<fuchsia_examples::Echo>& client) {
+    std::string reply;
+    client->EchoString(kTestString)
+        .ThenExactlyOnce([&reply, quit_loop = QuitLoopClosure()](
+                             fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& result) {
+          if (result.ok()) {
+            reply = std::string(result->response.get());
+          } else {
+            ADD_FAILURE() << "EchoString failed: " << result.error();
+          }
+          quit_loop();
+        });
+    RunLoop();
+    return reply;
+  }
+
+  // Sends kTestString over a natural Client `client` and returns the reply.
+  std::string EchoTestString(fidl::Client<fuchsia_examples::Echo>& client) {
+    std::string reply;
+    client->EchoString({kTestString})
+        .ThenExactlyOnce([&reply, quit_loop = QuitLoopClosure()](
+                             fidl::Result<fuchsia_examples::Echo::EchoString>& result) {
+          if (result.is_ok()) {
+            reply = result->response();
+          } else {
+            ADD_FAILURE() << "EchoString failed: " << result.error_value();
+          }
+          quit_loop();
+        });
+    RunLoop();
+    return reply;
+  }
+
   // Service handler that is pre-populated. This is only used for tests that
   // want to test failure paths.
   static fuchsia_examples::EchoService::InstanceHandler CreateNonEmptyServiceHandler() {
@@ -209,18 +243,7 @@ TEST_F(OutgoingDirectoryTest, CanBeMovedSafely) {
   ASSERT_TRUE(client_end.is_ok()) << client_end.status_string();
   fidl::WireClient<fuchsia_examples::Echo> client(std::move(client_end.value()), dispatcher());
 
-  std::string reply_received;
-  client->EchoString(kTestString)
-      .ThenExactlyOnce([&reply_received, quit_loop = QuitLoopClosure()](
-                           fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& result) {
-        ASSERT_TRUE(result.ok()) << "EchoString failed: " << result.error();
-        auto* response = result.Unwrap();
-        reply_received = std::string(response->response.data(), response->response.size());
-        quit_loop();
-      });
-  RunLoop();
-
-  EXPECT_EQ(reply_received, kTestString);
+  EXPECT_EQ(EchoTestString(client), kTestString);
 }
 
 TEST_F(OutgoingDirectoryTest, AddProtocol) {
@@ -237,18 +260,7 @@ TEST_F(OutgoingDirectoryTest, AddProtocol) {
   ASSERT_EQ(client_end.status_value(), ZX_OK);
   fidl::WireClient<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher());
 
-  std::string reply_received;
-  client->EchoString(kTestString)
-      .ThenExactlyOnce([&reply_received, quit_loop = QuitLoopClosure()](
-                           fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& result) {
-        ASSERT_TRUE(result.ok()) << "EchoString failed: " << result.error();
-        auto* response = result.Unwrap();
-        reply_received = std::string(response->response.data(), response->response.size());
-        quit_loop();
-      });
-  RunLoop();
-
-  EXPECT_EQ(reply_received, kTestString);
+  EXPECT_EQ(EchoTestString(client), kTestString);
 }
 
 TEST_F(OutgoingDirectoryTest, AddProtocolNaturalServer) {
@@ -264,17 +276,7 @@ TEST_F(OutgoingDirectoryTest, AddProtocolNaturalServer) {
   ASSERT_EQ(client_end.status_value(), ZX_OK);
   fidl::Client<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher());
 
-  std::string reply_received;
-  client->EchoString({kTestString})
-      .ThenExactlyOnce([&reply_received, quit_loop = QuitLoopClosure()](
-                           fidl::Result<fuchsia_examples::Echo::EchoString>& result) {
-        ASSERT_TRUE(result.is_ok()) << "EchoString failed: " << result.error_value();
-        reply_received = result->response();
-        quit_loop();
-      });
-  RunLoop();
-
-  EXPECT_EQ(reply_received, kTestString);
+  EXPECT_EQ(EchoTestString(client), kTestString);
 }
 
 // Test that outgoing directory is able to serve multiple service members. In
@@ -301,22 +303,8 @@ TEST_F(OutgoingDirectoryTest, AddServiceServesAllMembers) {
 
   // Assert that service is connected and that proper impl returns expected reply.
   for (bool reversed : {true, false}) {
-    bool message_echoed = false;
     fidl::WireClient client = ConnectToServiceMember(service, reversed);
-    std::string_view expected_reply = reversed ? kTestStringReversed : kTestString;
-    client->EchoString(kTestString)
-        .ThenExactlyOnce(
-            [quit_loop = QuitLoopClosure(), &message_echoed, expected_reply = expected_reply](
-                fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& reply) {
-              EXPECT_TRUE(reply.ok()) << "Reply failed with: " << reply.error().status_string();
-              EXPECT_EQ(reply.value().response.get(), expected_reply);
-              message_echoed = true;
-              quit_loop();
-            });
-
-    RunLoop();
-
-    EXPECT_TRUE(message_echoed);
+    EXPECT_EQ(EchoTestString(client), reversed ? kTestStringReversed : kTestString);
   }
 
   // Next, assert that after removing the service, the directory connection to
@@ -365,19 +353,7 @@ TEST_F(OutgoingDirectoryTest, AddProtocolCanServeMultipleProtocols) {
     ASSERT_EQ(client_end.status_value(), ZX_OK);
     fidl::WireClient<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher());
 
-    std::string reply_received;
-    client->EchoString(kTestString)
-        .ThenExactlyOnce([&reply_received, quit_loop = QuitLoopClosure()](
-                             fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& result) {
-          ASSERT_TRUE(result.ok()) << "EchoString failed: " << result.error();
-          auto* response = result.Unwrap();
-          reply_received = std::string(response->response.data(), response->response.size());
-          quit_loop();
-        });
-    RunLoop();
-
-    std::string_view expected_reply = reversed ? kTestStringReversed : kTestString;
-    EXPECT_EQ(reply_received, expected_reply);
+    EXPECT_EQ(EchoTestString(client), reversed ? kTestStringReversed : kTestString);
   }
 }
 
@@ -397,18 +373,7 @@ TEST_F(OutgoingDirectoryTest, AddProtocolAtServesProtocol) {
   ASSERT_EQ(client_end.status_value(), ZX_OK);
   fidl::WireClient<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher());
 
-  std::string reply_received;
-  client->EchoString(kTestString)
-      .ThenExactlyOnce([&reply_received, quit_loop = QuitLoopClosure()](
-                           fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& result) {
-        ASSERT_TRUE(result.ok()) << "EchoString failed: " << result.error().FormatDescription();
-        auto* response = result.Unwrap();
-        reply_received = std::string(response->response.data(), response->response.size());
-        quit_loop();
-      });
-  RunLoop();
-
-  EXPECT_EQ(reply_received, kTestString);
+  EXPECT_EQ(EchoTestString(client), kTestString);
 }
 
 TEST_F(OutgoingDirectoryTest, AddServiceAtServesServiceInNonSvcDirectory) {
@@ -433,22 +398,8 @@ TEST_F(OutgoingDirectoryTest, AddServiceAtServesServiceInNonSvcDirectory) {
   fuchsia_examples::EchoService::ServiceClient service = std::move(open_result.value());
 
   // Assert that service is connected and that proper impl returns expected reply.
-  bool message_echoed = false;
   fidl::WireClient client = ConnectToServiceMember(service, /*reversed=*/false);
-  std::string_view expected_reply = kTestString;
-  client->EchoString(kTestString)
-      .ThenExactlyOnce(
-          [quit_loop = QuitLoopClosure(), &message_echoed, expected_reply = expected_reply](
-              fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& reply) {
-            EXPECT_TRUE(reply.ok()) << "Reply failed with: " << reply.error().status_string();
-            EXPECT_EQ(reply.value().response.get(), expected_reply);
-            message_echoed = true;
-            quit_loop();
-          });
-
-  RunLoop();
-
-  EXPECT_TRUE(message_echoed);
+  EXPECT_EQ(EchoTestString(client), kTestString);
 }
 
 TEST_F(OutgoingDirectoryTest, AddServiceAtServesServiceInNestedPath) {
@@ -473,22 +424,8 @@ TEST_F(OutgoingDirectoryTest, AddServiceAtServesServiceInNestedPath) {
   fuchsia_examples::EchoService::ServiceClient service = std::move(open_result.value());
 
   // Assert that service is connected and that proper impl returns expected reply.
-  bool message_echoed = false;
   fidl::WireClient client = ConnectToServiceMember(service, /*reversed=*/false);
-  std::string_view expected_reply = kTestString;
-  client->EchoString(kTestString)
-      .ThenExactlyOnce(
-          [quit_loop = QuitLoopClosure(), &message_echoed, expected_reply = expected_reply](
-              fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& reply) {
-            EXPECT_TRUE(reply.ok()) << "Reply failed with: " << reply.error().status_string();
-            EXPECT_EQ(reply.value().response.get(), expected_reply);
-            message_echoed = true;
-            quit_loop();
-          });
-
-  RunLoop();
-
-  EXPECT_TRUE(message_echoed);
+  EXPECT_EQ(EchoTestString(client), kTestString);
 }
 
 TEST_F(OutgoingDirectoryTest, AddDirectoryAtCanServeADirectory) {
@@ -574,18 +511,7 @@ TEST_F(OutgoingDirectoryTest, ServeCanYieldMultipleConnections) {
     ASSERT_EQ(client_end.status_value(), ZX_OK);
     fidl::WireClient<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher());
 
-    std::string reply_received;
-    client->EchoString(kTestString)
-        .ThenExactlyOnce([&reply_received, quit_loop = QuitLoopClosure()](
-                             fidl::WireUnownedResult<fuchsia_examples::Echo::EchoString>& result) {
-          ASSERT_TRUE(result.ok()) << "EchoString failed: " << result.error();
-          auto* response = result.Unwrap();
-          reply_received = std::string(response->response.data(), response->response.size());
-          quit_loop();
-        });
-    RunLoop();
-
-    EXPECT_EQ(reply_received, kTestString);
+    EXPECT_EQ(EchoTestString(client), kTestString);
   }
 }
 
@@ -624,14 +550,7 @@ TEST_F(OutgoingDirectoryTest, RemoveProtocolClosesAllConnections) {
 
     fidl::Client<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher(),
                                                 &event_handler);
-    client->EchoString(std::string(kTestString))
-        .ThenExactlyOnce([quit_loop = QuitLoopClosure()](
-                             fidl::Result<fuchsia_examples::Echo::EchoString>& result) {
-          ASSERT_TRUE(result.is_ok());
-          ASSERT_EQ(result->response(), kTestString);
-          quit_loop();
-        });
-    RunLoop();
+    ASSERT_EQ(EchoTestString(client), kTestString);
 
     clients.emplace_back(std::move(client));
   }
@@ -663,14 +582,7 @@ TEST_F(OutgoingDirectoryTest, OutgoingDirectoryDestructorClosesAllConnections) {
 
   EchoEventHandler event_handler;
   fidl::Client<fuchsia_examples::Echo> client(std::move(*client_end), dispatcher(), &event_handler);
-  client->EchoString(std::string(kTestString))
-      .ThenExactlyOnce([quit_loop = QuitLoopClosure()](
-                           fidl::Result<fuchsia_examples::Echo::EchoString>& result) {
-        ASSERT_TRUE(result.is_ok());
-        ASSERT_EQ(result->response(), kTestString);
-        quit_loop();
-      });
-  RunLoop();
+  ASSERT_EQ(EchoTestString(client), kTestString);
 
   // We have to take the outgoing directory instead of creating a local one
   // because they would share a dispatcher and may fail synchronization checks.
@@ -719,6 +631,75 @@ TEST_F(OutgoingDirectoryTest, AddServiceFailsIfEntryExists) {
                 ->AddService<fuchsia_examples::EchoService>(CreateNonEmptyServiceHandler())
                 .status_value(),
             ZX_ERR_ALREADY_EXISTS);
+}
+
+// A duplicate AddService() must not disturb the instance that is already
+// published: its members keep serving afterwards.
+TEST_F(OutgoingDirectoryTest, AddServiceFailureLeavesExistingInstanceServed) {
+  EchoImpl regular_impl(/*reversed=*/false);
+  EchoImpl reversed_impl(/*reversed=*/true);
+  ASSERT_OK(GetOutgoingDirectory()
+                ->AddService<fuchsia_examples::EchoService>(
+                    fuchsia_examples::EchoService::InstanceHandler({
+                        .regular_echo = regular_impl.bind_handler(dispatcher()),
+                        .reversed_echo = reversed_impl.bind_handler(dispatcher()),
+                    }))
+                .status_value());
+
+  EXPECT_EQ(GetOutgoingDirectory()
+                ->AddService<fuchsia_examples::EchoService>(CreateNonEmptyServiceHandler())
+                .status_value(),
+            ZX_ERR_ALREADY_EXISTS);
+
+  zx::result open_result =
+      component::OpenServiceAt<fuchsia_examples::EchoService>(GetSvcClientEnd(GetRootClientEnd()));
+  ASSERT_TRUE(open_result.is_ok()) << open_result.status_string();
+  fuchsia_examples::EchoService::ServiceClient service = std::move(open_result.value());
+
+  for (bool reversed : {true, false}) {
+    fidl::WireClient client = ConnectToServiceMember(service, reversed);
+    EXPECT_EQ(EchoTestString(client), reversed ? kTestStringReversed : kTestString);
+  }
+}
+
+// A failed AddService() removes only the members it added, leaving members that
+// were already published.
+TEST_F(OutgoingDirectoryTest, AddServiceFailureRemovesOnlyAddedMembers) {
+  constexpr char kInstancePath[] = "svc/fuchsia.examples.EchoService/default";
+  // Members are added in name order, so regular_echo is added before reversed_echo fails.
+  ASSERT_OK(GetOutgoingDirectory()
+                ->AddProtocolAt<fuchsia_examples::Echo>(
+                    kInstancePath, std::make_unique<EchoImpl>(/*reversed=*/true),
+                    fuchsia_examples::EchoService::ReversedEcho::Name)
+                .status_value());
+
+  EXPECT_EQ(GetOutgoingDirectory()
+                ->AddService<fuchsia_examples::EchoService>(CreateNonEmptyServiceHandler())
+                .status_value(),
+            ZX_ERR_ALREADY_EXISTS);
+
+  zx::result open_result =
+      component::OpenServiceAt<fuchsia_examples::EchoService>(GetSvcClientEnd(GetRootClientEnd()));
+  ASSERT_TRUE(open_result.is_ok()) << open_result.status_string();
+  fuchsia_examples::EchoService::ServiceClient service = std::move(open_result.value());
+
+  zx::result regular_echo = service.connect_regular_echo();
+  ASSERT_TRUE(regular_echo.is_ok()) << regular_echo.status_string();
+  RunLoopUntilIdle();
+  EXPECT_OK(
+      regular_echo->channel().wait_one(ZX_CHANNEL_PEER_CLOSED, zx::time::infinite_past(), nullptr));
+
+  fidl::WireClient client = ConnectToServiceMember(service, /*reversed=*/true);
+  EXPECT_EQ(EchoTestString(client), kTestStringReversed);
+
+  // Nothing of the failed call is left behind, so the service can be added once
+  // reversed_echo is removed.
+  ASSERT_OK(GetOutgoingDirectory()
+                ->RemoveProtocolAt(kInstancePath, fuchsia_examples::EchoService::ReversedEcho::Name)
+                .status_value());
+  EXPECT_OK(GetOutgoingDirectory()
+                ->AddService<fuchsia_examples::EchoService>(CreateNonEmptyServiceHandler())
+                .status_value());
 }
 
 TEST_F(OutgoingDirectoryTest, AddServiceFailsIfServiceHandlerEmpty) {

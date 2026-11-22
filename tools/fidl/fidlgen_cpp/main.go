@@ -10,7 +10,7 @@ import (
 )
 
 func main() {
-	flags := cpp.NewCmdlineFlags("llcpp", []string{"api_coverage"})
+	flags := cpp.NewCmdlineFlags("cpp", []string{"api_coverage"})
 	root := cpp.Compile(flags.ParseAndLoadIR())
 	generator := codegen.NewGenerator(flags)
 	generator.GenerateFiles(root, []string{

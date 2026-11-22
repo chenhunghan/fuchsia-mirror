@@ -21,6 +21,19 @@ uint32_t BytesPerSample(fuchsia::media::AudioSampleFormat sample_format) {
   }
 }
 
+uint32_t BytesPerSample(fuchsia_media::AudioSampleFormat sample_format) {
+  switch (sample_format) {
+    case fuchsia_media::AudioSampleFormat::kUnsigned8:
+      return sizeof(uint8_t);
+    case fuchsia_media::AudioSampleFormat::kSigned16:
+      return sizeof(int16_t);
+    case fuchsia_media::AudioSampleFormat::kSigned24In32:
+      return sizeof(int32_t);
+    case fuchsia_media::AudioSampleFormat::kFloat:
+      return sizeof(float);
+  }
+}
+
 fuchsia::media::AudioStreamType CreateAudioStreamType(
     fuchsia::media::AudioSampleFormat sample_format, uint32_t channel_count,
     uint32_t frames_per_second) {
@@ -32,6 +45,18 @@ fuchsia::media::AudioStreamType CreateAudioStreamType(
   audio_stream_type.frames_per_second = frames_per_second;
 
   return audio_stream_type;
+}
+
+fuchsia_media::AudioStreamType CreateAudioStreamType(fuchsia_media::AudioSampleFormat sample_format,
+                                                     uint32_t channel_count,
+                                                     uint32_t frames_per_second) {
+  FX_DCHECK(channel_count != 0);
+
+  return fuchsia_media::AudioStreamType{{
+      .sample_format = sample_format,
+      .channels = channel_count,
+      .frames_per_second = frames_per_second,
+  }};
 }
 
 }  // namespace media

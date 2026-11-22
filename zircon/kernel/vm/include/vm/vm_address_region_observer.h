@@ -17,7 +17,7 @@
 
 // # VmAddressRegion Augmented B-Tree Support
 //
-// VmAddressRegion maintains an ordered set of non-overlapping subregions in a RegionList,
+// VmAddressRegion maintains an ordered set of non-overlapping subregions in subregions_,
 // which is implemented as a B-Tree. To efficiently find gaps for new allocations,
 // the tree is augmented with subtree metadata:
 // 1. min_addr: The lowest address in the subtree.

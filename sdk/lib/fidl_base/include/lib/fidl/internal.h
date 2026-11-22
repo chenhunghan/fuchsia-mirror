@@ -276,7 +276,6 @@ static const uint8_t kFidlTypeString = 6;
 static const uint8_t kFidlTypeHandle = 7;
 static const uint8_t kFidlTypeVector = 8;
 static const uint8_t kFidlTypeTable = 9;
-static const uint8_t kFidlTypeXUnion = 10;
 static const uint8_t kFidlTypeUnion = 10;
 
 // TODO(https://fxbug.dev/42119025): Consider starting enum values for FidlCodedPrimitive from 1,
@@ -533,10 +532,6 @@ extern const struct FidlCodedPrimitive fidl_internal_kFloat32Table;
 extern const struct FidlCodedPrimitive fidl_internal_kFloat64Table;
 
 extern const struct FidlCodedEnum fidl_internal_kFrameworkErrTable;
-
-// Backwards-compatible names
-typedef struct FidlCodedUnion FidlCodedXUnion;
-typedef struct FidlUnionField FidlXUnionField;
 
 __END_CDECLS
 

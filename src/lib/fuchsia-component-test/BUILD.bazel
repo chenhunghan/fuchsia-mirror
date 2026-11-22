@@ -12,6 +12,7 @@ load(
 load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library_group.bzl", "rustc_library_group")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
@@ -20,7 +21,28 @@ package(default_applicable_licenses = ["//:license"])
 cml_shard(
     name = "meta/nested_component_manager.shard",
     shard = "meta/nested_component_manager.shard.cml",
-    visibility = ["//src/sys/component_manager/tests:__subpackages__"],
+    visibility = [
+        "//examples/components/runner/colocated/integration_tests:__pkg__",
+        "//src/lib/fuchsia-component-test/tests:__pkg__",
+        "//src/sys/component_manager/tests:__subpackages__",
+    ],
+)
+
+# @bazel2gn:skip
+rustc_library_group(
+    name = "fuchsia-component-test",
+    testonly = True,
+    aspect_hints = [":includes"],
+    visibility = ["//:__subpackages__"],
+    deps = [":fuchsia-component-test-lib"],
+)
+
+# @bazel2gn:skip
+alias(
+    name = "lib",
+    testonly = True,
+    actual = ":fuchsia-component-test-lib",
+    visibility = ["//:__subpackages__"],
 )
 
 rustc_library(
@@ -64,11 +86,13 @@ rustc_library(
 expect_includes(
     name = "includes",
     includes = ["//sdk/lib/sys/component:realm_builder.shard"],
-    visibility = [
-        "//sdk/lib/sys/component/cpp/testing:__pkg__",
-        "//src/lib/fidl/rust/fidl-contrib:__pkg__",
-        "//src/sys/component_manager:__subpackages__",
+    # The shard starts the server from `#meta/realm_builder_server.cm`. In GN,
+    # the `fuchsia-component-test` group adds the server to the package through
+    # its deps instead.
+    required_package_components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
     ],
+    visibility = ["//sdk/lib/sys/component/cpp/testing:__pkg__"],
 )
 
 # @bazel2gn:skip

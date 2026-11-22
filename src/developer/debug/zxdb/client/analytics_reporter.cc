@@ -8,6 +8,7 @@
 
 #include "src/developer/debug/zxdb/client/analytics.h"
 #include "src/developer/debug/zxdb/client/analytics_event.h"
+#include "src/lib/analytics/cpp/core_dev_tools/environment_status.h"
 #include "src/lib/uuid/uuid.h"
 
 namespace zxdb {
@@ -25,7 +26,10 @@ void AnalyticsReporter::ReportInvoked() const {
 }
 
 void AnalyticsReporter::ReportSessionStarted() const {
-  Analytics::IfEnabledSendEvent(session_, std::make_unique<SessionStarted>(session_id_));
+  auto session_started = std::make_unique<SessionStarted>(session_id_);
+  session_started->SetRunByAgent(analytics::core_dev_tools::IsRunByAgent());
+
+  Analytics::IfEnabledSendEvent(session_, std::move(session_started));
 }
 
 void AnalyticsReporter::ReportSessionConnected(bool is_minidump, bool local_agent) const {

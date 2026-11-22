@@ -81,4 +81,17 @@ TEST_F(ExponentialBackoffTest, Random) {
   EXPECT_NE(backoff1.GetNext(), backoff2.GetNext());
 }
 
+TEST_F(ExponentialBackoffTest, DefaultSeedGeneratorUsesDefaultParameters) {
+  // Defaults: initial delay 100ms, retry factor 2, max delay 1h, seeded from the CPRNG.
+  ExponentialBackoff backoff;
+
+  zx::duration factor_delay = zx::msec(100);
+  for (size_t i = 0; i < 5u; i++) {
+    zx::duration delay = backoff.GetNext();
+    EXPECT_GE(delay, factor_delay);
+    EXPECT_LE(delay, factor_delay * 2);
+    factor_delay *= 2;
+  }
+}
+
 }  // namespace backoff

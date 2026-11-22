@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "fidl",
+    testonly = True,
+    srcs = [
+        ":target_tests",
+        "//examples/fidl/calculator:all",
+        "//examples/fidl/cpp:all",
+        "//examples/fidl/fuchsia.examples.docs:all",
+        "//examples/fidl/new:all",
+        "//examples/fidl/rust:all",
+        "//examples/fidl/rust_next:all",
+    ],
+    visibility = [
+        "//bundles/packages/examples:__pkg__",
+        "//examples:__subpackages__",
+    ],
+)
+
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//examples/fidl/calculator:hermetic_tests",
+        "//examples/fidl/cpp:hermetic_tests",
+        "//examples/fidl/echo-realm:hermetic_tests",
+        "//examples/fidl/new:hermetic_tests",
+        "//examples/fidl/rust_next:hermetic_tests",
+    ],
+    visibility = ["//examples:__subpackages__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        "//examples/fidl/rust/fidl_crates:host_tests",
+        "//examples/fidl/rust/persistence:host_tests",
+    ],
+    visibility = ["//examples:__subpackages__"],
+)

@@ -43,11 +43,13 @@ class TestSection:
     # If the test runs on the device, this is the URL of the test to execute.
     package_url: str | None = None
 
-    # If the test runs on the host, this is the path of the binary to execute.
-    path: str | None = None
+    # Package manifests to publish before running the test, relative to the
+    # build directory.
+    package_manifests: list[str] | None = None
 
-    # Experimental host binary paths for test components
-    new_path: str | None = None
+    # If the test runs a host executable or script (including pure device
+    # tests), this is the path to execute.
+    path: str | None = None
 
     # If the test is a device tests, this is the argument to pass to
     # ffx test run --parallel

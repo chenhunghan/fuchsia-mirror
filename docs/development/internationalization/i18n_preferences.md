@@ -137,7 +137,7 @@ article about Mallorca may choose to launch a map component with an `es-ES` UI,
 while at the same time an English-language (`en-US`) article launches the same
 map component, but tells it to display an `en-US` UI. This can be accomplished
 with two different
-[sub-realms](/docs/concepts/components/v2/realms.md#definitions) that each
+[sub-realms](/docs/concepts/components/v2/realms.md) that each
 receives a different `PropertyProvider` instance.
 
 ### `intl_services` library {#intl-services}
@@ -146,7 +146,7 @@ A basic C++ library implementing `fuchsia.intl.PropertyProvider` is found at
 [`//src/lib/intl/intl_property_provider_impl`](/src/lib/intl/intl_property_provider_impl).
 
 The
-[`core`](/docs/development/build/software_assembly/build_configuration.md#key_product_configurations)
+[`core`](/docs/development/build/software_assembly/build_configuration.md#key-product-configurations)
 product configuration includes [`intl_services`](/src/intl/intl_services), a
 component that wraps this implementation.
 

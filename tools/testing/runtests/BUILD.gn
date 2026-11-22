@@ -52,7 +52,6 @@ if (is_host) {
       "//tools/lib/osmisc",
       "//tools/lib/retry",
       "//tools/net/sshutil",
-      "//tools/net/tftp",
     ]
   }
 }
@@ -64,5 +63,6 @@ if (is_host) {
     ]
     embed = [ ":runtests" ]
     visibility = [ "//*" ]
+    deps = [ "//third_party/golibs:github.com/google/go-cmp/cmp" ]
   }
 }

@@ -61,7 +61,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/component-info.json"
 }
 
 fuchsia_driver_package("package") {
@@ -120,7 +119,6 @@ fuchsia_driver_component("fake_component") {
     ":fake_bind",
     ":fake_driver",
   ]
-  info = "meta/component-info.json"
 }
 
 rustc_test("integration-test") {

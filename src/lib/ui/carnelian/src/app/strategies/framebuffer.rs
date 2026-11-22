@@ -475,6 +475,7 @@ mod tests {
             info: fidl_fuchsia_hardware_display::Info {
                 id: fidl_fuchsia_hardware_display_types::DisplayId { value: 1 },
                 modes: vec![],
+                mode_vrr_configs: vec![],
                 pixel_format: vec![],
                 manufacturer_name: String::new(),
                 monitor_name: String::new(),

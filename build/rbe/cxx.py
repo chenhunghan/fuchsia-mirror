@@ -14,7 +14,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import AbstractSet, Any
 
-import cl_utils
+from build.rbe import cl_utils
 
 _SOURCE_EXTENSIONS = frozenset(
     {".c", ".cc", ".cpp", ".cxx", ".c++", ".s", ".S", ".asm"}

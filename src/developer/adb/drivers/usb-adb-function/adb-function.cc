@@ -41,6 +41,16 @@ void CompleteTxn(CompleterType& completer, zx_status_t status) {
   }
 }
 
+bool IsHandshakeResponseCommand(uint32_t command) {
+  return command == kAdbCommandConnect || command == kAdbCommandAuth || command == kAdbCommandStls;
+}
+
+// Checks an adb packet header the way adb itself does.
+template <typename HeaderType>
+bool IsValidAdbHeader(const HeaderType& header) {
+  return header.magic == (header.command ^ 0xffffffff) && header.data_length <= kMaxAdbPayload;
+}
+
 }  // namespace
 
 void UsbAdbDevice::PurgeOfflineQueues() {
@@ -68,6 +78,9 @@ void UsbAdbDevice::PurgeOfflineQueues() {
     CompleteTxn(tx_pending_reqs_.front().completer, ZX_ERR_CANCELED);
     tx_pending_reqs_.pop_front();
   }
+  rx_remaining_payload_bytes_ = 0;
+  tx_remaining_payload_bytes_ = 0;
+  awaiting_new_session_tx_ = false;
   UpdateQueueStats();
 }
 
@@ -247,24 +260,31 @@ void UsbAdbDevice::ResetOrStopUsb(State stop_state) {
 
   // Disconnect USB by disabling endpoints if previously online.
   // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
+  zx_status_t disable_status = ZX_OK;
   if (was_online) {
     zxlogf(INFO, "Disconnecting from USB by disabling endpoints");
     for (const uint8_t ep_addr : {bulk_out_addr(), bulk_in_addr()}) {
       fidl::Result result = function_->DisableEndpoint({ep_addr});
       if (result.is_error()) {
-        if (result.error_value().is_domain_error() &&
-            (result.error_value().domain_error() == ZX_ERR_IO_NOT_PRESENT ||
-             result.error_value().domain_error() == ZX_ERR_BAD_STATE)) {
+        const zx_status_t error = result.error_value().is_framework_error()
+                                      ? result.error_value().framework_error().status()
+                                      : result.error_value().domain_error();
+        if (error == ZX_ERR_PEER_CLOSED || error == ZX_ERR_CANCELED ||
+            error == ZX_ERR_IO_NOT_PRESENT) {
           zxlogf(INFO, "DisableEndpoint on 0x%x: hardware endpoint is inactive during teardown",
                  ep_addr);
         } else {
           zxlogf(WARNING, "Failed to disable endpoint 0x%x: %s", ep_addr,
                  result.error_value().FormatDescription().c_str());
+          if (disable_status == ZX_OK) {
+            disable_status = error;
+          }
         }
       }
     }
     RecordEvent("DisableEndpoints complete");
   }
+  disable_endpoints_status_ = disable_status;
 
   CheckUsbStopComplete();
 }
@@ -416,6 +436,8 @@ void UsbAdbDevice::ReceiveQueued() {
                  kVmoDataSize);
         }
         rx_bytes = std::min(rx_bytes, kVmoDataSize);
+        rx_remaining_payload_bytes_ = PayloadRemainingAfter(
+            rx_remaining_payload_bytes_, reinterpret_cast<const uint8_t*>(*addr), rx_bytes);
         rx_requests_.front().Reply(fit::ok(std::vector<uint8_t>(
             reinterpret_cast<uint8_t*>(*addr), reinterpret_cast<uint8_t*>(*addr) + rx_bytes)));
         bulk_out_inspect_.AddRxBytes(rx_bytes);
@@ -464,13 +486,72 @@ void UsbAdbDevice::QueueTx(QueueTxRequest& request, QueueTxCompleter::Sync& comp
         return;
       }
       [[fallthrough]];
-    case State::kOnline:
     case State::kAwaitingUsbConnection:
       tx_pending_reqs_.push_back(
           txn_req_t{.request = std::move(request), .start = 0, .completer = completer.ToAsync()});
       UpdateQueueStats();
       SendQueued();
+      break;
+    case State::kOnline:
+      if (IsStaleTx(request.data())) {
+        // This is recorded for every dropped transfer, so keep it out of the function's event
+        // history, where it could push out how the CNXN was handled.
+        bulk_in_inspect_.RecordEvent("dropped_stale_tx_for_new_session");
+        completer.Reply(fit::ok());
+        return;
+      }
+      tx_pending_reqs_.push_back(
+          txn_req_t{.request = std::move(request), .start = 0, .completer = completer.ToAsync()});
+      UpdateQueueStats();
+      SendQueued();
+      break;
   }
+}
+
+size_t UsbAdbDevice::PayloadRemainingAfter(size_t remaining, const uint8_t* data, size_t length) {
+  while (length > 0) {
+    if (remaining > 0) {
+      const size_t consumed = std::min(remaining, length);
+      remaining -= consumed;
+      data += consumed;
+      length -= consumed;
+      continue;
+    }
+    // A header split across two transfers can't be parsed.
+    if (length < kAdbHeaderSize) {
+      return 0;
+    }
+    AdbHeader header = AdbHeader::FromBytes(data);
+    if (!IsValidAdbHeader(header)) {
+      return 0;
+    }
+    remaining = header.data_length;
+    data += kAdbHeaderSize;
+    length -= kAdbHeaderSize;
+  }
+  return remaining;
+}
+
+bool UsbAdbDevice::IsStaleTx(const std::vector<uint8_t>& data) {
+  if (awaiting_new_session_tx_) {
+    // After an in-place session reset, the client's first packet for the new session answers the
+    // CNXN (with CNXN, AUTH or STLS), so it starts with a header and is queued only after the whole
+    // CNXN has been delivered. Anything else belongs to the previous session. That includes any
+    // payload after a dropped header, which may be partly missing: adbd cancels its queued writes
+    // when it receives the CNXN.
+    if (rx_remaining_payload_bytes_ > 0 || !pending_replies_.empty() ||
+        data.size() != kAdbHeaderSize) {
+      return true;
+    }
+    AdbHeader header = AdbHeader::FromBytes(data.data());
+    if (!IsValidAdbHeader(header) || !IsHandshakeResponseCommand(header.command)) {
+      return true;
+    }
+    awaiting_new_session_tx_ = false;
+  }
+  tx_remaining_payload_bytes_ =
+      PayloadRemainingAfter(tx_remaining_payload_bytes_, data.data(), data.size());
+  return false;
 }
 
 void UsbAdbDevice::Receive(ReceiveCompleter::Sync& completer) {
@@ -512,27 +593,56 @@ void UsbAdbDevice::RxComplete(std::vector<fendpoint::Completion> completions) {
         CheckUsbStopComplete();
         break;
       case State::kOnline:
-        if (host_session_started_ && IsAdbConnect(completion)) {
+        if ((host_session_started_ || rx_remaining_payload_bytes_ > 0) &&
+            IsAdbConnect(completion)) {
           // The host started a new adb session without a USB disconnect, e.g. because its adb
-          // server was restarted in the middle of a transfer. The client may be holding a
-          // partially received packet, and data from the previous session may still be queued
-          // ahead of the reply to this CNXN, which the host would reject. Restart USB as if the
-          // cable had been replugged: this flushes both directions, makes the client start over,
-          // and makes the host reconnect to a clean device.
-          zxlogf(WARNING, "Received adb CNXN during an existing host session; restarting USB");
-          RecordEvent("host_reconnected: CNXN during session");
-          bulk_out_ep_.PutRequest(usb::FidlRequest(std::move(completion.request().value())));
+          // server was restarted. If nothing is in flight in either direction, the client handles
+          // the CNXN on its existing connection, so reset the session in place. Otherwise, restart
+          // USB as if the cable had been replugged: this flushes both directions, makes the client
+          // start over, and makes the host reconnect to a clean device.
+          //
+          // Bulk OUT is busy if the client holds part of a packet or hasn't read everything sent.
+          const size_t transfer_size = completion.transfer_size().value_or(0);
+          const bool rx_busy = rx_remaining_payload_bytes_ > 0 || !pending_replies_.empty() ||
+                               transfer_size > kAdbHeaderSize;
+          // Bulk IN is busy if data for the previous session is being sent. The new host connection
+          // may already have read some of it ahead of its CNXN, and sent data can't be withdrawn.
+          // The same goes for the client's answer to a previous CNXN that it hasn't sent yet.
+          const bool tx_busy = !bulk_in_ep_.RequestsFull() || !tx_pending_reqs_.empty() ||
+                               tx_remaining_payload_bytes_ > 0 || awaiting_new_session_tx_;
+          if (!rx_busy && !tx_busy) {
+            zxlogf(INFO,
+                   "Received adb CNXN during an existing host session with nothing in flight; "
+                   "resetting the session without restarting USB");
+            RecordEvent("host_reconnected: CNXN in-place");
+            // Until the client answers the CNXN, anything it queues belongs to the previous
+            // session (see IsStaleTx()).
+            awaiting_new_session_tx_ = true;
+          } else {
+            zxlogf(WARNING,
+                   "Received adb CNXN during an existing host session with data in flight (bulk "
+                   "OUT: %zu payload bytes to deliver, %zu undelivered transfers, %zu stale bytes; "
+                   "bulk IN: %zu requests in flight, %zu queued transfers, %zu payload bytes to "
+                   "queue%s); restarting USB",
+                   rx_remaining_payload_bytes_, pending_replies_.size(),
+                   transfer_size - kAdbHeaderSize, bulk_in_ep_.GetInFlightCount(),
+                   tx_pending_reqs_.size(), tx_remaining_payload_bytes_,
+                   awaiting_new_session_tx_ ? ", answer to a previous CNXN not sent yet" : "");
+            RecordEvent(rx_busy ? "host_reconnected: CNXN rx-busy"
+                                : "host_reconnected: CNXN tx-busy");
+            bulk_out_ep_.PutRequest(usb::FidlRequest(std::move(completion.request().value())));
 
-          // Only an explicit USB reset (Deconfigure() + StartUsb()) makes the host re-enumerate and
-          // tears down the client's session. If a bus disconnect is already in progress, the
-          // SetConfigured(false) that follows handles it instead.
-          if (!usb_disconnect_observed_) {
-            reset_usb_on_stop_ = true;
-            RecordEvent("reset_usb_on_stop");
+            // Only an explicit USB reset (Deconfigure() + StartUsb()) makes the host re-enumerate
+            // and tears down the client's session. If a bus disconnect is already in progress, the
+            // SetConfigured(false) that follows handles it instead.
+            if (!usb_disconnect_observed_) {
+              reset_usb_on_stop_ = true;
+              RecordEvent("reset_usb_on_stop");
+            }
+
+            ResetOrStopUsb(State::kStoppingForReconnect);
+            break;
           }
-
-          ResetOrStopUsb(State::kStoppingForReconnect);
-          break;
         }
 
         if (completion.status().value_or(ZX_ERR_INTERNAL) == ZX_OK) {
@@ -747,6 +857,14 @@ zx::result<> UsbAdbDevice::EnableEndpoints() {
   adb_connected_during_stop_ = false;
   host_data_received_ = false;
   host_session_started_ = false;
+  rx_remaining_payload_bytes_ = 0;
+  // Transfers queued while offline weren't tracked by IsStaleTx(), and are sent next.
+  tx_remaining_payload_bytes_ = 0;
+  for (const txn_req_t& txn : tx_pending_reqs_) {
+    tx_remaining_payload_bytes_ = PayloadRemainingAfter(
+        tx_remaining_payload_bytes_, txn.request.data().data(), txn.request.data().size());
+  }
+  awaiting_new_session_tx_ = false;
   SetState(State::kOnline);
 
   SendQueued();
@@ -860,12 +978,14 @@ void UsbAdbDevice::CheckUsbStopComplete() {
   // `ZX_ERR_PEER_CLOSED` even during driver unbind.
   // TODO(b/417808660): Replace logs with Inspect once the bug is fixed.
   zxlogf(INFO, "Calling stop_completers_ and set_configured_completers_");
+  const zx_status_t set_configured_status = disable_endpoints_status_;
+  disable_endpoints_status_ = ZX_OK;
   while (!stop_completers_.empty()) {
     stop_completers_.back().Reply(zx::ok());
     stop_completers_.pop_back();
   }
   while (!set_configured_completers_.empty()) {
-    set_configured_completers_.back().Reply(zx::ok());
+    set_configured_completers_.back().Reply(zx::make_result(set_configured_status));
     set_configured_completers_.pop_back();
   }
 

@@ -282,12 +282,12 @@ fidl::ClientEnd<fcomponent::Introspector> DriverRunnerTestBase::ConnectToIntrosp
   return std::move(introspector_endpoints.client);
 }
 
-fidl::ClientEnd<fuchsia_component_sandbox::CapabilityStore>
-DriverRunnerTestBase::ConnectToCapabilityStore() {
-  auto store_endpoints = fidl::Endpoints<fuchsia_component_sandbox::CapabilityStore>::Create();
-  capstore_bindings_.AddBinding(dispatcher(), std::move(store_endpoints.server), &cap_store_,
-                                fidl::kIgnoreBindingClosure);
-  return std::move(store_endpoints.client);
+fidl::ClientEnd<fuchsia_component_runtime::Capabilities>
+DriverRunnerTestBase::ConnectToCapabilities() {
+  auto endpoints = fidl::Endpoints<fuchsia_component_runtime::Capabilities>::Create();
+  capabilities_bindings_.AddBinding(dispatcher(), std::move(endpoints.server),
+                                    &capabilities_server_, fidl::kIgnoreBindingClosure);
+  return std::move(endpoints.client);
 }
 
 fidl::ClientEnd<fuchsia_driver_token::Debug> DriverRunnerTestBase::ConnectToDebug() {
@@ -359,7 +359,7 @@ FakeDriverIndex DriverRunnerTestBase::CreateDriverIndex() {
 }
 void DriverRunnerTestBase::SetupDriverRunner(FakeDriverIndex driver_index) {
   driver_index_.emplace(std::move(driver_index));
-  driver_runner_.emplace(ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilityStore(),
+  driver_runner_.emplace(ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilities(),
                          driver_index_->Connect(), inspector_, &LoaderFactory, dispatcher(), false,
                          driver_manager::OfferInjector{{
                              .power_inject_offer = false,
@@ -391,8 +391,8 @@ void DriverRunnerTestBase::SetupDriverRunnerWithDynamicLinker(
   dynamic_linker_ =
       driver_loader::Loader::Create(loader_dispatcher, std::move(load_driver_handler));
   driver_runner_.emplace(
-      ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilityStore(),
-      driver_index_->Connect(), inspector_, &LoaderFactory, dispatcher(), false,
+      ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilities(), driver_index_->Connect(),
+      inspector_, &LoaderFactory, dispatcher(), false,
       driver_manager::OfferInjector{{
           .power_inject_offer = false,
           .power_suspend_enabled = false,

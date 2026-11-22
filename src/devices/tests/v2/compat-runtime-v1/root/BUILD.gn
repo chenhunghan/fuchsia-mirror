@@ -46,5 +46,4 @@ fuchsia_driver_component("component") {
   component_name = "root"
   dml_label = ":root-dml"
   deps = [ ":driver" ]
-  info = "meta/root-info.json"
 }

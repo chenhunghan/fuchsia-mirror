@@ -10,7 +10,6 @@ Inspect data and how various tools discover that data.
 A component may expose Inspect data in the following ways:
 
 * [`fuchsia.inspect.Tree`](#tree) (C++, Rust)
-* [`VmoFile`](#vmofile) (Dart)
 
 Components do not need to reach out to other services in
 order to expose Inspect data.

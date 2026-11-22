@@ -187,7 +187,8 @@ impl SysInfo {
     }
 }
 
-const SYSINFO: LazyLock<SysInfo> = LazyLock::new(|| {
+// `static` so the board name is fetched once and reused by every read of /proc/cpuinfo.
+static SYSINFO: LazyLock<SysInfo> = LazyLock::new(|| {
     SysInfo::fetch().unwrap_or_else(|e| {
         log_error!("Failed to fetch sysinfo: {e}");
         SysInfo { board_name: "Unknown".to_string() }

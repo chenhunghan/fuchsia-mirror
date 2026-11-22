@@ -20,7 +20,7 @@ the Driver Framework v2 (DFv2).
 ### Background
 
 In Driver Framework v1 (DFv1), drivers can create
-[composite nodes](/docs/concepts/drivers/drivers_and_nodes.md#composite_nodes)
+[composite nodes](/docs/concepts/drivers/drivers_and_nodes.md#composite-nodes)
 at runtime through the `AddComposite()` function. The driver defines the bind
 rules for the composite's parents and bind properties and the driver manager
 creates the composite node as the driver's child. A separate driver binds to the
@@ -93,7 +93,9 @@ When a driver defines a node group, the process is as follows:
     a composite node with the nodes as parents, and binds it to the composite
     driver. The primary node and node names are provided by the composite driver
 
-![device-group-bind-diagram](resources/0197_node_groups/node_group_diagram.png)
+![Node group matches parent nodes by bind rules and composite driver bind rules
+by properties to create a composite node bound to the
+driver.](resources/0197_node_groups/node_group_diagram.png)
 
 #### Node representation
 
@@ -152,7 +154,9 @@ fulfilled:
 
 If an ambiguous case occurs, a warning message will be printed out.
 
-![composite_bind_diagram](resources/0197_node_groups/composite_bind_diagram.png)
+![Two node groups matched via properties against composite driver bind rules:
+one leaves optional node bind rules unmatched and the other matches
+them.](resources/0197_node_groups/composite_bind_diagram.png)
 
 #### Node group API
 
@@ -559,6 +563,6 @@ drivers at once.
 
 [Driver Framework](/docs/concepts/drivers/driver_framework.md)
 
-[Composite nodes](/docs/concepts/drivers/drivers_and_nodes.md#composite_nodes)
+[Composite nodes](/docs/concepts/drivers/drivers_and_nodes.md#composite-nodes)
 
 [Driver Binding](/docs/development/drivers/concepts/device_driver_model/driver-binding.md)

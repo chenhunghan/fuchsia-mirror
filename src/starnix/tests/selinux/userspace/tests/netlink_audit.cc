@@ -12,8 +12,10 @@
 
 #include <cerrno>
 #include <cstring>
+#include <deque>
 #include <fstream>
 #include <string_view>
+#include <vector>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -27,7 +29,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "netlink_audit_policy"; }
+extern std::string GetTestPolicyName() { return "netlink_audit_policy"; }
 
 namespace {
 
@@ -97,7 +99,8 @@ TEST(NetlinkAuditTest, MessageReceivedOnlyOnDaemonSocket) {
   // Send a message on fd1 before registering it as the daemon.
   const std::string message = "test_message_case_1";
   ASSERT_TRUE(SendUserAuditMessage(fd1.get(), 101, message).is_ok());
-  ASSERT_TRUE(RegisterAsAuditDaemon(fd1.get()).is_ok());
+  std::deque<std::vector<char>> buffered_messages;
+  ASSERT_TRUE(RegisterAsAuditDaemon(fd1.get(), getpid(), &buffered_messages).is_ok());
 
   char buf[NETLINK_BUF_SIZE]{};
   EXPECT_THAT(ReceiveNetlinkMessage(fd2.get(), buf, sizeof(buf), false),
@@ -106,7 +109,7 @@ TEST(NetlinkAuditTest, MessageReceivedOnlyOnDaemonSocket) {
   // The message should be on fd1.
   struct nlmsghdr* nlh;
   do {
-    auto recv_res = ReceiveNetlinkMessage(fd1.get(), buf, sizeof(buf));
+    auto recv_res = ReceiveNetlinkMessage(fd1.get(), buffered_messages, buf, sizeof(buf));
     ASSERT_TRUE(recv_res.is_ok());
     ASSERT_GE(recv_res.value(), NLMSG_HDRLEN);
     nlh = reinterpret_cast<struct nlmsghdr*>(buf);
@@ -124,14 +127,15 @@ TEST(NetlinkAuditTest, ForkedChildReadsParentsQueuedMessage) {
 
   const std::string message = "message_before_fork";
   ASSERT_TRUE(SendUserAuditMessage(fd.get(), 201, message).is_ok());
-  ASSERT_TRUE(RegisterAsAuditDaemon(fd.get()).is_ok());
+  std::deque<std::vector<char>> buffered_messages;
+  ASSERT_TRUE(RegisterAsAuditDaemon(fd.get(), getpid(), &buffered_messages).is_ok());
 
   pid_t child_pid = fork_helper.RunInForkedProcess([&] {
     // Child process: try to read the message from the fd.
     char buf[NETLINK_BUF_SIZE]{};
     struct nlmsghdr* nlh;
     do {
-      auto recv_res = ReceiveNetlinkMessage(fd.get(), buf, sizeof(buf));
+      auto recv_res = ReceiveNetlinkMessage(fd.get(), buffered_messages, buf, sizeof(buf));
       ASSERT_TRUE(recv_res.is_ok());
       ASSERT_GE(recv_res.value(), NLMSG_HDRLEN);
       nlh = reinterpret_cast<struct nlmsghdr*>(buf);
@@ -155,12 +159,15 @@ TEST(NetlinkAuditTest, ChildDaemonReadsParentsMessageFromNewSocket) {
 
   pid_t child_pid = fork_helper.RunInForkedProcess([&] {
     // Register as the audit daemon on the inherited socket.
-    ASSERT_TRUE(RegisterAsAuditDaemon(fd_parent_initial.get()).is_ok());
+    std::deque<std::vector<char>> buffered_messages;
+    ASSERT_TRUE(
+        RegisterAsAuditDaemon(fd_parent_initial.get(), getpid(), &buffered_messages).is_ok());
     // Child process: try to read the message from the fd.
     char buf[NETLINK_BUF_SIZE]{};
     struct nlmsghdr* nlh;
     do {
-      auto recv_res = ReceiveNetlinkMessage(fd_parent_initial.get(), buf, sizeof(buf));
+      auto recv_res =
+          ReceiveNetlinkMessage(fd_parent_initial.get(), buffered_messages, buf, sizeof(buf));
       ASSERT_TRUE(recv_res.is_ok());
       ASSERT_GE(recv_res.value(), NLMSG_HDRLEN);
       nlh = reinterpret_cast<struct nlmsghdr*>(buf);

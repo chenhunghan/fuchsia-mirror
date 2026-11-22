@@ -231,6 +231,10 @@ class SpscBuffer {
   // remain available for reading in subsequent calls to 'Read'.
   template <CopyOutFunction CopyFunc>
   zx::result<uint32_t> Read(CopyFunc copy_fn, uint32_t len) {
+    if (len == 0) {
+      return zx::ok(0);
+    }
+
     const RingPointers initial_state = LoadPointers();
 
     const uint32_t available_data = AvailableData(initial_state);

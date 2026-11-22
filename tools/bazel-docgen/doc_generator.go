@@ -5,8 +5,9 @@
 package bazel_docgen
 
 import (
+	"cmp"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	pb "go.fuchsia.dev/fuchsia/tools/bazel-docgen/third_party/stardoc"
@@ -19,6 +20,12 @@ func checkDuplicateName(name string, entries map[string]TOCEntry) bool {
 	return ok
 }
 
+func sortEntriesByTitle(entries []TOCEntry) {
+	slices.SortFunc(entries, func(a, b TOCEntry) int {
+		return cmp.Compare(a.Title, b.Title)
+	})
+}
+
 func filterEntries(entries []TOCEntry, docType SupportedDocType) []TOCEntry {
 	var filteredEntries []TOCEntry
 	for _, entry := range entries {
@@ -27,9 +34,7 @@ func filterEntries(entries []TOCEntry, docType SupportedDocType) []TOCEntry {
 		}
 	}
 
-	sort.Slice(filteredEntries, func(i, j int) bool {
-		return filteredEntries[i].Title < filteredEntries[j].Title
-	})
+	sortEntriesByTitle(filteredEntries)
 	return filteredEntries
 }
 
@@ -111,6 +116,7 @@ func RenderModuleInfo(roots []pb.ModuleInfo, renderer Renderer, fileProvider Fil
 
 	// Render our README.md
 	tocEntries := maps.Values(entries)
+	sortEntriesByTitle(tocEntries)
 	renderer.RenderReadme(&tocEntries, fileProvider.NewFile("README.md"))
 
 	toc := []TOCEntry{

@@ -66,6 +66,22 @@ class TestArgs(unittest.TestCase):
                 ["--device", "--host"],
             ),
             (
+                "cannot combine --host with --e2e",
+                ["--host", "--e2e"],
+            ),
+            (
+                "cannot combine --host with --only-e2e",
+                ["--host", "--only-e2e"],
+            ),
+            (
+                "cannot combine --device with --e2e",
+                ["--device", "--e2e"],
+            ),
+            (
+                "cannot combine --device with --only-e2e",
+                ["--device", "--only-e2e"],
+            ),
+            (
                 "cannot exceed maximum status frequency",
                 ["--status-delay", ".00001"],
             ),
@@ -120,6 +136,46 @@ class TestArgs(unittest.TestCase):
             (
                 "--break-on-failure must be set when passing --use-existing-debugger.",
                 ["--use-existing-debugger"],
+            ),
+            (
+                "--profiler is not supported with host tests",
+                ["--profiler", "--host"],
+            ),
+            (
+                "--profiler is incompatible with --list",
+                ["--profiler", "--list"],
+            ),
+            (
+                "--profiler is incompatible with --list-runtime-deps",
+                ["--profiler", "--list-runtime-deps"],
+            ),
+            (
+                "--profiler is incompatible with --show-affected-tests",
+                ["--profiler", "--show-affected-tests"],
+            ),
+            (
+                "--profiler is incompatible with --previous",
+                ["--profiler", "-pr", "log"],
+            ),
+            (
+                "--profiler requires --count 1",
+                ["--profiler", "--count", "2"],
+            ),
+            (
+                "--profiler is incompatible with --break-on-failure",
+                ["--profiler", "--break-on-failure"],
+            ),
+            (
+                "--profiler is incompatible with --breakpoint",
+                ["--profiler", "--breakpoint", "test.cc:123"],
+            ),
+            (
+                "--profiler-config rejects a missing file",
+                [
+                    "--profiler",
+                    "--profiler-config",
+                    os.path.join(GLOBAL_TEMP_DIRECTORY.name, "missing.json"),
+                ],
             ),
         ]
     )
@@ -301,14 +357,98 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(flags.e2e, True)
         self.assertEqual(flags.only_e2e, True)
 
-    def test_use_test_pilot(self) -> None:
-        flags = args.parse_args(["--use-test-pilot"])
-        flags.validate()
-        self.assertEqual(flags.use_test_pilot, True)
+    def test_deprecated_and_removed_flags(self) -> None:
+        import contextlib
+        import io
 
+        stderr_buf = io.StringIO()
+        with contextlib.redirect_stderr(stderr_buf):
+            flags = args.parse_args(["--use-test-pilot"])
+            flags.validate()
+        self.assertIn("deprecated", stderr_buf.getvalue())
+
+        with self.assertRaises(argparse.ArgumentError):
+            args.parse_args(["--no-use-test-pilot"])
+
+    def test_profiler(self) -> None:
+        # Default is off, with no extra `ffx profiler` arguments.
         flags = args.parse_args([])
         flags.validate()
-        self.assertEqual(flags.use_test_pilot, False)
+        self.assertFalse(flags.profiler)
+        self.assertIsNone(flags.profiler_config)
+        self.assertEqual(flags.profiler_attach_args, [])
+        self.assertEqual(flags.profiler_stop_args, [])
+
+        flags = args.parse_args(["--profiler"])
+        flags.validate()
+        self.assertTrue(flags.profiler)
+        self.assertEqual(flags.profiler_attach_args, [])
+        self.assertEqual(flags.profiler_stop_args, [])
+
+        flags = args.parse_args(["--profiler", "--dry"])
+        flags.validate()
+        self.assertTrue(flags.profiler)
+        self.assertTrue(flags.dry)
+
+        with self.assertRaisesRegex(args.FlagError, r"fxbug\.dev/535175455"):
+            args.parse_args(["--profiler", "--count", "2"]).validate()
+
+        # --profiler-config is only read with --profiler, so it can live in
+        # ~/.fxtestrc without affecting other runs.
+        config_path = os.path.join(GLOBAL_TEMP_DIRECTORY.name, "profiler.json")
+        args.parse_args(["--profiler-config", config_path]).validate()
+
+        # Test arguments after `--` are kept separate from the profiler config.
+        with open(config_path, "w") as f:
+            f.write(
+                '{"attach": ["--sample-period-us", "1000"],'
+                ' "stop": ["--output-format", "perfetto"]}'
+            )
+        flags = args.parse_args(
+            [
+                "--profiler",
+                "--profiler-config",
+                config_path,
+                "my_test",
+                "--",
+                "--runs",
+                "5",
+            ]
+        )
+        flags.validate()
+        self.assertTrue(flags.profiler)
+        self.assertEqual(flags.profiler_config, config_path)
+        self.assertEqual(
+            flags.profiler_attach_args, ["--sample-period-us", "1000"]
+        )
+        self.assertEqual(
+            flags.profiler_stop_args, ["--output-format", "perfetto"]
+        )
+        self.assertEqual(flags.extra_args, ["--runs", "5"])
+
+        for contents, error in [
+            ("not json", r"^Failed to read --profiler-config "),
+            ('["--system-wide"]', r"^--profiler-config must be a JSON object"),
+            ('{"launch": []}', r"^--profiler-config must be a JSON object"),
+            (
+                '{"attach": [1000]}',
+                r'^--profiler-config "attach" must be a list',
+            ),
+            (
+                '{"stop": "--abort"}',
+                r'^--profiler-config "stop" must be a list',
+            ),
+            (
+                '{"attach": ["--duration", "5"], "stop": ["--abort"]}',
+                r"^--profiler-config cannot include --abort, --duration;",
+            ),
+        ]:
+            with open(config_path, "w") as f:
+                f.write(contents)
+            with self.assertRaisesRegex(args.FlagError, error):
+                args.parse_args(
+                    ["--profiler", "--profiler-config", config_path]
+                ).validate()
 
     def test_expand_output_variable(self) -> None:
         flags = args.parse_args(["--outdir", "$FUCHSIA_OUT/test_out"])

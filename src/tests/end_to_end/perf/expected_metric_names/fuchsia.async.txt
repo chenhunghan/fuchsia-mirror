@@ -1,0 +1,10 @@
+fuchsia.async: local_executor/channel_ping_pong
+fuchsia.async: local_executor/yield_batch
+fuchsia.async: send_executor/channel_ping_pong/2
+fuchsia.async: send_executor/channel_ping_pong/4
+fuchsia.async: send_executor/spawn_join/2
+fuchsia.async: send_executor/spawn_join/4
+fuchsia.async: send_executor/working_set_locality/2
+fuchsia.async: send_executor/working_set_locality/4
+fuchsia.async: send_executor/yield_batch/2
+fuchsia.async: send_executor/yield_batch/4

@@ -8,7 +8,7 @@ use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::mem::offset_of;
 use core::pin::Pin;
-use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering, compiler_fence};
 
 use debug::dprintf;
 use percpu_bindings as bindings;
@@ -24,7 +24,7 @@ use crate::kernel::idle_power_thread::IdlePowerThread;
 use crate::kernel::scheduler::SchedProcessingRate;
 pub use crate::kernel::scheduler::Scheduler;
 pub use crate::kernel::stats::{CpuStats, GuestStats};
-use crate::kernel::thread::AutoPreemptDisabler;
+use crate::kernel::thread::{AutoPreemptDisabler, Linebuffer};
 pub use crate::kernel::timer::TimerQueue;
 use crate::kernel::timer::{Timer, ZX_CLOCK_BOOT, ZX_CLOCK_MONOTONIC};
 use crate::kernel::types::{SMP_MAX_CPUS, cpu_num_t};
@@ -45,25 +45,83 @@ pub type guest_stats = GuestStats;
 pub type cpu_stats = CpuStats;
 
 /// Holds platform-specific, per-cpu state used to suspend/resume a CPU.
+#[cfg(target_arch = "aarch64")]
 #[repr(C)]
 pub struct PlatformCpuResumeState {
     /// CNTKCTL_EL1 saved by `platform_suspend_timer_curr_cpu` and restored on resume.
-    #[cfg(target_arch = "aarch64")]
     pub cntkctl_el1: AtomicU64,
-    #[cfg(not(target_arch = "aarch64"))]
-    pub _opaque: bindings::PlatformCpuResumeState,
 }
 
+#[cfg(target_arch = "aarch64")]
 impl PlatformCpuResumeState {
     fn new() -> Self {
-        Self {
-            #[cfg(target_arch = "aarch64")]
-            cntkctl_el1: AtomicU64::new(0),
-            #[cfg(not(target_arch = "aarch64"))]
-            _opaque: bindings::PlatformCpuResumeState::default(),
-        }
+        Self { cntkctl_el1: AtomicU64::new(0) }
     }
 }
+
+/// Per-CPU line and flush staging state for kernel stdout (`lib/io`).
+#[repr(C)]
+pub struct PerCpuStdoutState {
+    /// Line buffer for stdout writes when blocking is disallowed (e.g. IRQ context).
+    pub irq_linebuffer: UnsafeCell<Linebuffer>,
+
+    /// Staging buffers for flushing stdout lines without stack allocation.
+    /// The holder of a slot must not be rescheduled while it holds the slot.
+    pub flush_buffers: [UnsafeCell<[u8; Linebuffer::BUFFER_SIZE]>; Self::NUM_FLUSH_BUFFERS],
+
+    /// Nesting depth of active stdout flushes on this CPU. A flush is only counted
+    /// while its holder cannot be rescheduled.
+    // Safety invariant: Only stored to by `lib/io` when entering or leaving an active flush on
+    // this CPU from a context that cannot be rescheduled. A live flush uses `flush_buffers[i]`
+    // only while the value is above `i`.
+    flush_depth: AtomicUsize,
+}
+
+impl PerCpuStdoutState {
+    /// Number of per-CPU staging buffers. Deeper nested flushes use the stack.
+    pub const NUM_FLUSH_BUFFERS: usize = 1;
+
+    /// Maximum nested stdout flushes on one CPU before lines are dropped.
+    pub const MAX_FLUSH_DEPTH: usize = 8;
+
+    fn new() -> Self {
+        Self {
+            irq_linebuffer: UnsafeCell::new(Linebuffer::new()),
+            flush_buffers: [const { UnsafeCell::new([0; Linebuffer::BUFFER_SIZE]) };
+                Self::NUM_FLUSH_BUFFERS],
+            flush_depth: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns the nesting depth of active stdout flushes on this CPU.
+    #[inline(always)]
+    pub fn flush_depth(&self) -> usize {
+        // `Ordering::Relaxed` suffices because `flush_depth` is only stored to on the local CPU;
+        // a read from another CPU sees a stale value at worst.
+        self.flush_depth.load(Ordering::Relaxed)
+    }
+
+    /// Sets the nesting depth of active stdout flushes on this CPU.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `self` is the current CPU's stdout state.
+    /// - The caller cannot be rescheduled during this call, and if increasing the depth, until it
+    ///   restores the previous depth.
+    /// - No flush that is still live uses a staging buffer at index `depth` or above.
+    #[inline(always)]
+    pub unsafe fn set_flush_depth(&self, depth: usize) {
+        // `Ordering::Relaxed` suffices because `flush_depth` is only stored to on the local CPU;
+        // `compiler_fence`s prevent reordering staging-buffer or preemption-state accesses across
+        // the store relative to same-CPU interrupt handlers.
+        compiler_fence(Ordering::SeqCst);
+        self.flush_depth.store(depth, Ordering::Relaxed);
+        compiler_fence(Ordering::SeqCst);
+    }
+}
+
+zr::static_assert!(PerCpuStdoutState::NUM_FLUSH_BUFFERS <= PerCpuStdoutState::MAX_FLUSH_DEPTH);
 
 /// Rust representation of the C++ `struct percpu`.
 #[pin_data]
@@ -84,6 +142,14 @@ pub struct PerCpu {
     /// state for runtime lock validation when in irq context
     #[pin]
     pub lock_state: ThreadLockState,
+    /// ZST that starts a new cache line for the chain-lock fields below, mirroring
+    /// `__CPU_ALIGN` on C++ `percpu::active_cl_transaction`.
+    ///
+    /// `active_cl_transaction` and `chain_lock_conflict_id` are written by this CPU on every
+    /// chain-lock transaction, while other CPUs take `scheduler.queue_lock_` and touch the rest
+    /// of `scheduler` under it. Keep none of `scheduler` on a line with them.
+    // TODO(https://fxbug.dev/581980797): replace with a padded type once PerCpu is Rust-owned.
+    _cl_align: crate::arch_rs::CpuAlignMarker,
     /// The state of the currently active chain-lock transaction if any, null
     /// otherwise.
     // Safety invariant: Either null or points to a live, stack-pinned `ChainLockTransaction`
@@ -140,7 +206,7 @@ pub struct PerCpu {
     /// This field is not a member of LockupDetectorState because Timer depends on
     /// SpinLock, which depends on lockup_detector.  By pulling it out of
     /// LockupDetectorState we can inline performance critical lockup_detector
-    /// functions.  See also gLockupDetectorPerCpuState.
+    /// functions.  See also `LOCKUP_DETECTOR_PER_CPU_STATE`.
     #[pin]
     pub lockup_detector_timer: Timer,
     /// When thread sampling is enabled, we use this timer to periodically mark that the active
@@ -150,8 +216,12 @@ pub struct PerCpu {
     /// The accumulated memory stall timers for this CPU.
     #[pin]
     pub memory_stall_accumulator: StallAccumulator,
+    #[cfg(target_arch = "aarch64")]
     /// See [`PlatformCpuResumeState`] type declaration.
     pub resume_state: PlatformCpuResumeState,
+    /// Per-CPU line and flush staging state for kernel stdout (`lib/io`).
+    /// See [`PerCpuStdoutState`] for synchronization invariants.
+    pub stdout_state: PerCpuStdoutState,
 }
 
 // SAFETY: `PerCpu` instances live for `'static` and are shared across CPUs via `&'static PerCpu`.
@@ -213,80 +283,73 @@ zr::static_assert!(
     align_of::<lazy_init::LazyInit<PerCpu, lazy_init::BasicCheck>>() == MAX_CACHE_LINE
 );
 
+const fn field_size<T>(_: fn(&bindings::percpu) -> &T) -> usize {
+    size_of::<T>()
+}
+
+const fn field_align<T>(_: fn(&bindings::percpu) -> &T) -> usize {
+    align_of::<T>()
+}
+
+macro_rules! assert_percpu_field {
+    ($field:ident, $ty:ty) => {
+        zr::static_assert!(offset_of!(PerCpu, $field) == offset_of!(bindings::percpu, $field));
+        zr::static_assert!(field_size(|p| &p.$field) == size_of::<$ty>());
+        zr::static_assert!(field_align(|p| &p.$field) == align_of::<$ty>());
+    };
+}
+
 // Compile-time layout assertions against C++ `struct percpu` via bindgen.
 zr::static_assert!(size_of::<PerCpu>() == size_of::<bindings::percpu>());
 zr::static_assert!(align_of::<PerCpu>() == align_of::<bindings::percpu>());
 
-zr::static_assert!(offset_of!(PerCpu, timer_queue) == offset_of!(bindings::percpu, timer_queue));
-zr::static_assert!(offset_of!(PerCpu, search_set) == offset_of!(bindings::percpu, search_set));
-zr::static_assert!(offset_of!(PerCpu, scheduler) == offset_of!(bindings::percpu, scheduler));
+assert_percpu_field!(timer_queue, TimerQueue);
+assert_percpu_field!(search_set, CpuSearchSet);
+assert_percpu_field!(scheduler, Scheduler);
 #[cfg(with_lock_dep)]
-zr::static_assert!(offset_of!(PerCpu, lock_state) == offset_of!(bindings::percpu, lock_state));
-zr::static_assert!(
-    offset_of!(PerCpu, active_cl_transaction)
-        == offset_of!(bindings::percpu, active_cl_transaction)
-);
-zr::static_assert!(
-    offset_of!(PerCpu, chain_lock_conflict_id)
-        == offset_of!(bindings::percpu, chain_lock_conflict_id)
-);
-zr::static_assert!(offset_of!(PerCpu, gstats) == offset_of!(bindings::percpu, gstats));
-zr::static_assert!(offset_of!(PerCpu, stats) == offset_of!(bindings::percpu, stats));
-zr::static_assert!(
-    offset_of!(PerCpu, idle_power_thread) == offset_of!(bindings::percpu, idle_power_thread)
-);
-zr::static_assert!(offset_of!(PerCpu, counters) == offset_of!(bindings::percpu, counters));
-zr::static_assert!(offset_of!(PerCpu, dpc_runner) == offset_of!(bindings::percpu, dpc_runner));
-zr::static_assert!(
-    offset_of!(PerCpu, vm_page_counts) == offset_of!(bindings::percpu, vm_page_counts)
-);
-zr::static_assert!(
-    offset_of!(PerCpu, lockup_detector_timer)
-        == offset_of!(bindings::percpu, lockup_detector_timer)
-);
-zr::static_assert!(
-    offset_of!(PerCpu, sampling_timer) == offset_of!(bindings::percpu, sampling_timer)
-);
-zr::static_assert!(
-    offset_of!(PerCpu, memory_stall_accumulator)
-        == offset_of!(bindings::percpu, memory_stall_accumulator)
-);
-zr::static_assert!(offset_of!(PerCpu, resume_state) == offset_of!(bindings::percpu, resume_state));
-
-// Compile-time layout assertions for member types.
-zr::static_assert!(size_of::<TimerQueue>() == size_of::<bindings::TimerQueue>());
-zr::static_assert!(align_of::<TimerQueue>() == align_of::<bindings::TimerQueue>());
-
-zr::static_assert!(size_of::<Timer>() == size_of::<bindings::Timer>());
-zr::static_assert!(align_of::<Timer>() == align_of::<bindings::Timer>());
-
-zr::static_assert!(size_of::<CpuSearchSet>() == size_of::<bindings::CpuSearchSet>());
-zr::static_assert!(align_of::<CpuSearchSet>() == align_of::<bindings::CpuSearchSet>());
-
-zr::static_assert!(size_of::<Scheduler>() == size_of::<bindings::Scheduler>());
-zr::static_assert!(align_of::<Scheduler>() == align_of::<bindings::Scheduler>());
-
-#[cfg(with_lock_dep)]
-zr::static_assert!(size_of::<ThreadLockState>() == size_of::<bindings::lockdep_ThreadLockState>());
-#[cfg(with_lock_dep)]
-zr::static_assert!(
-    align_of::<ThreadLockState>() == align_of::<bindings::lockdep_ThreadLockState>()
-);
-
-zr::static_assert!(size_of::<IdlePowerThread>() == size_of::<bindings::IdlePowerThread>());
-zr::static_assert!(align_of::<IdlePowerThread>() == align_of::<bindings::IdlePowerThread>());
-
-zr::static_assert!(size_of::<DpcRunner>() == size_of::<bindings::DpcRunner>());
-zr::static_assert!(align_of::<DpcRunner>() == align_of::<bindings::DpcRunner>());
-
-zr::static_assert!(size_of::<StallAccumulator>() == size_of::<bindings::StallAccumulator>());
-zr::static_assert!(align_of::<StallAccumulator>() == align_of::<bindings::StallAccumulator>());
+assert_percpu_field!(lock_state, ThreadLockState);
+assert_percpu_field!(active_cl_transaction, AtomicPtr<ChainLockTransaction>);
+assert_percpu_field!(chain_lock_conflict_id, AtomicU64);
+// Other CPUs take `scheduler.queue_lock_` to wake threads onto this CPU and to steal work from it,
+// while this CPU writes `active_cl_transaction` and `chain_lock_conflict_id` on every chain-lock
+// transaction. If they share a cache line, every cross-CPU wake bounces that line away from this
+// CPU. A change that moved `queue_lock_` onto that line cost FutexWakeOne 15% on x64. C++
+// `percpu::AssertLayout` checks the same thing, including the full extent of `queue_lock_`.
+const QUEUE_LOCK_LINE: usize =
+    (offset_of!(PerCpu, scheduler) + Scheduler::QUEUE_LOCK_OFFSET) / MAX_CACHE_LINE;
+zr::static_assert!(offset_of!(PerCpu, active_cl_transaction) % MAX_CACHE_LINE == 0);
+zr::static_assert!(QUEUE_LOCK_LINE < offset_of!(PerCpu, active_cl_transaction) / MAX_CACHE_LINE);
+zr::static_assert!(QUEUE_LOCK_LINE < offset_of!(PerCpu, chain_lock_conflict_id) / MAX_CACHE_LINE);
+assert_percpu_field!(gstats, GuestStats);
+assert_percpu_field!(stats, UnsafeCell<CpuStats>);
+assert_percpu_field!(idle_power_thread, IdlePowerThread);
+assert_percpu_field!(counters, *mut i64);
+assert_percpu_field!(dpc_runner, DpcRunner);
+assert_percpu_field!(vm_page_counts, VmPageCounts);
+assert_percpu_field!(lockup_detector_timer, Timer);
+assert_percpu_field!(sampling_timer, Timer);
+assert_percpu_field!(memory_stall_accumulator, StallAccumulator);
+#[cfg(target_arch = "aarch64")]
+assert_percpu_field!(resume_state, PlatformCpuResumeState);
+assert_percpu_field!(stdout_state, PerCpuStdoutState);
 
 zr::static_assert!(
-    size_of::<PlatformCpuResumeState>() == size_of::<bindings::PlatformCpuResumeState>()
+    PerCpuStdoutState::NUM_FLUSH_BUFFERS == bindings::PerCpuStdoutStateLayout_kNumFlushBuffers
 );
 zr::static_assert!(
-    align_of::<PlatformCpuResumeState>() == align_of::<bindings::PlatformCpuResumeState>()
+    PerCpuStdoutState::MAX_FLUSH_DEPTH == bindings::PerCpuStdoutStateLayout_kMaxFlushDepth
+);
+zr::static_assert!(
+    offset_of!(PerCpuStdoutState, irq_linebuffer)
+        == bindings::PerCpuStdoutStateLayout_kIrqLinebufferOffset
+);
+zr::static_assert!(
+    offset_of!(PerCpuStdoutState, flush_buffers)
+        == bindings::PerCpuStdoutStateLayout_kFlushBuffersOffset
+);
+zr::static_assert!(
+    offset_of!(PerCpuStdoutState, flush_depth)
+        == bindings::PerCpuStdoutStateLayout_kFlushDepthOffset
 );
 
 zr::static_assert!(
@@ -313,6 +376,7 @@ impl PerCpu {
             scheduler <- Scheduler::init(),
             #[cfg(with_lock_dep)]
             lock_state <- ThreadLockState::init(),
+            _cl_align: crate::arch_rs::CpuAlignMarker,
             active_cl_transaction: AtomicPtr::new(core::ptr::null_mut()),
             chain_lock_conflict_id: AtomicU64::new(1),
             gstats: GuestStats::new(),
@@ -324,7 +388,9 @@ impl PerCpu {
             lockup_detector_timer <- Timer::init(ZX_CLOCK_BOOT),
             sampling_timer <- Timer::init(ZX_CLOCK_MONOTONIC),
             memory_stall_accumulator <- StallAccumulator::init(),
+            #[cfg(target_arch = "aarch64")]
             resume_state: PlatformCpuResumeState::new(),
+            stdout_state: PerCpuStdoutState::new(),
         });
         // SAFETY: `assert!` above guarantees `cpu_num < SMP_MAX_CPUS`, `base` initializes every
         // member field of `*slot` in declaration order, and the caller guarantees exclusive single-
@@ -387,9 +453,9 @@ impl PerCpu {
     /// # Safety
     ///
     /// Must only be called once on the boot processor (`cpu_num == 0`) with interrupts disabled
-    /// during early boot (`lk_main` before `Thread::Current::BecomeIdle()`) prior to any
-    /// concurrent per-CPU accesses.
-    unsafe fn initialize_boot() {
+    /// during early boot (`lk_main` before `current_become_idle()`) prior to any concurrent
+    /// per-CPU accesses.
+    pub unsafe fn initialize_boot() {
         // SAFETY: Caller guarantees single-threaded early boot execution on CPU 0 with interrupts
         // disabled before secondary CPUs are started.
         unsafe {
@@ -406,10 +472,11 @@ impl PerCpu {
     /// # Safety
     ///
     /// Must only be called once on the boot processor (`cpu_num == 0`) with interrupts disabled
-    /// (`lk_main` before `Thread::Current::BecomeIdle()`) after `PerCpu::initialize_boot`, kernel
-    /// heap initialization, and `CpuDistanceMap::Initialize` have succeeded, and before any
-    /// secondary processors are started.
-    unsafe fn initialize_secondaries_begin() {
+    /// (`lk_main` before `thread::current_become_idle()`) after `PerCpu::initialize_boot`, kernel
+    /// heap initialization, and `CpuDistanceMap::Initialize` (plus any
+    /// `CpuDistanceMap::set_distance_threshold` calls) have succeeded with no concurrent mutation
+    /// of the global distance map, and before any secondary processors are started.
+    pub unsafe fn initialize_secondaries_begin() {
         // SAFETY: Caller guarantees `CpuDistanceMap::Initialize` has succeeded.
         let processor_count = unsafe { CpuDistanceMap::get() }.cpu_count();
         assert!(processor_count > 0 && processor_count <= SMP_MAX_CPUS);
@@ -480,8 +547,10 @@ impl PerCpu {
                         i32::from(performance_class[i as usize]) + 1,
                         i32::from(max_performance_class) + 1,
                     ));
-                    // SAFETY: `i < processor_count` indexes an initialized `PerCpu` in `index_ptr`
-                    // during single-threaded boot on CPU 0 before schedulers become active.
+                    // SAFETY: `i < processor_count` indexes an initialized `PerCpu` in `index_ptr`.
+                    // Runs single-threaded on CPU 0 with interrupts disabled before secondary CPUs
+                    // start, before schedulers become active, and before `CpuSearchSet::initialize`
+                    // reads `PERF_SCALES`.
                     unsafe {
                         (&**index_ptr.add(i as usize))
                             .scheduler
@@ -499,8 +568,10 @@ impl PerCpu {
         }
 
         // Determine the clusters before initializing the CPU search sets.
-        // SAFETY: Called once on CPU 0 after `CpuDistanceMap::Initialize` and before secondary CPUs
-        // start.
+        // SAFETY: `initialize_secondaries_begin` runs at most once on CPU 0 with interrupts
+        // disabled after `CpuDistanceMap::Initialize` and any `set_distance_threshold` calls have
+        // succeeded with no concurrent map mutation, and before any calls to
+        // `CpuSearchSet::initialize`, `cluster`, or `dump_clusters`.
         unsafe {
             CpuSearchSet::auto_cluster(processor_count);
         }
@@ -509,15 +580,22 @@ impl PerCpu {
         // Initialize the search set for each CPU.
         dprintf!(INFO, "CPU search order:\n");
         for i in 0..(processor_count as cpu_num_t) {
-            // SAFETY: `i < processor_count` indexes an initialized `PerCpu` in `index_ptr`; called
-            // on CPU 0 after `auto_cluster` and before secondary CPUs start, mutating via interior
-            // mutability through `&Self` without forming `&mut Self`.
+            // SAFETY: `i < processor_count` indexes an initialized `PerCpu` in `index_ptr`.
+            let cpu = unsafe { &**index_ptr.add(i as usize) };
+            // SAFETY: Called on CPU 0 with interrupts disabled after `CpuDistanceMap`
+            // initialization (and `set_distance_threshold`), `set_perf_scale`, and `auto_cluster`
+            // have completed with no concurrent mutations. Secondary CPUs have not started,
+            // interrupts are disabled (preventing re-entrant IRQ access), and no `const_iterator`
+            // slice is live on `cpu.search_set`.
             unsafe {
-                let cpu = &**index_ptr.add(i as usize);
                 cpu.search_set.initialize(i, processor_count);
-                cpu.search_set.dump();
+            }
+            cpu.search_set.dump();
 
-                let cluster = cpu.search_set.cluster();
+            let cluster = cpu.search_set.cluster();
+            // SAFETY: Called during single-threaded early boot on CPU 0 before secondary CPUs
+            // start or concurrent access to `cpu.scheduler` is possible.
+            unsafe {
                 cpu.scheduler.set_cluster(cluster);
             }
         }
@@ -536,7 +614,7 @@ impl PerCpu {
     /// Must only be called on a secondary processor with interrupts disabled immediately after
     /// booting or during CPU hotplug re-entry, after `initialize_secondaries_begin` has completed
     /// on the boot processor.
-    unsafe fn initialize_secondary_finish() {
+    pub unsafe fn initialize_secondary_finish() {
         let cpu_num = crate::arch_rs::curr_cpu_num();
         assert!((cpu_num as usize) < Self::processor_count());
         // SAFETY: `assert!` above guarantees `cpu_num < Self::processor_count()` (which also
@@ -602,48 +680,4 @@ impl PerCpu {
     pub fn for_each<F: FnMut(cpu_num_t, &Self)>(mut func: F) {
         Self::iter().for_each(|(cpu_num, percpu)| func(cpu_num, percpu));
     }
-}
-
-/// FFI entry point for `percpu::InitializeBoot()`.
-///
-/// # Safety
-///
-/// Must only be called once on the boot processor (`cpu_num == 0`) with interrupts disabled during
-/// early boot (`lk_main` before `Thread::Current::BecomeIdle()`) prior to any concurrent per-CPU
-/// accesses.
-// TODO(https://fxbug.dev/575987745): Remove once C++ `thread_init_early()` is migrated to Rust.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_percpu_initialize_boot() {
-    // SAFETY: Caller upholds `PerCpu::initialize_boot` invariants.
-    unsafe { PerCpu::initialize_boot() };
-}
-
-/// FFI entry point for `percpu::InitializeSecondariesBegin()`.
-///
-/// # Safety
-///
-/// Must only be called once on the boot processor (`cpu_num == 0`) with interrupts disabled
-/// (`lk_main` before `Thread::Current::BecomeIdle()`) after `percpu::InitializeBoot()`, kernel
-/// heap initialization, and `CpuDistanceMap::Initialize` have succeeded, and before any secondary
-/// processors are started.
-// TODO(https://fxbug.dev/575987745): Remove once C++ `kernel_init()` is migrated to Rust.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_percpu_initialize_secondaries_begin() {
-    // SAFETY: Caller upholds `PerCpu::initialize_secondaries_begin` invariants.
-    unsafe { PerCpu::initialize_secondaries_begin() };
-}
-
-/// FFI entry point for `percpu::InitializeSecondaryFinish()`.
-///
-/// # Safety
-///
-/// Must only be called on a secondary processor with interrupts disabled immediately after
-/// booting or during CPU hotplug re-entry, after `percpu::InitializeSecondariesBegin()` has
-/// completed on the boot processor.
-// TODO(https://fxbug.dev/575987745): Remove once C++ `Thread::SecondaryCpuInitEarly()` is migrated
-// to Rust.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_percpu_initialize_secondary_finish() {
-    // SAFETY: Caller upholds `PerCpu::initialize_secondary_finish` invariants.
-    unsafe { PerCpu::initialize_secondary_finish() };
 }

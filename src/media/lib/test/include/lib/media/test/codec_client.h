@@ -163,6 +163,9 @@ class CodecClient {
       uint32_t* out_packet_count, fuchsia::sysmem2::BufferCollectionPtr* out_buffer_collection,
       fuchsia::sysmem2::BufferCollectionInfo* out_buffer_collection_info);
 
+  void PostAddBuffer(fuchsia::media::Port port, uint64_t buffer_constraints_version_ordinal,
+                     uint64_t buffer_lifetime_ordinal, uint32_t buffer_index, zx::vmo buffer);
+
   //
   // Events:
   //

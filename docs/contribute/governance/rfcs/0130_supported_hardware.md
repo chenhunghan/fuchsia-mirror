@@ -119,7 +119,7 @@ include the same YAML entries in
   configuration _supported_sys_config.yaml and hence in the **Supported
   category**.
 
-## Initial _supported_sys_config.yaml list
+## Initial _supported_sys_config.yaml list {:#initial-supported-sys-config-list}
 
 ```
 - name: 'VIM3'

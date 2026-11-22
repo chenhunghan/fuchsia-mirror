@@ -22,6 +22,7 @@ constexpr uint16_t PA_ConnectedTxDataLanes = 0x1561;
 constexpr uint16_t PA_ConnectedRxDataLanes = 0x1581;
 constexpr uint16_t PA_MaxRxHSGear = 0x1587;
 constexpr uint16_t PA_Granularity = 0x15AA;
+constexpr uint16_t PA_Hibern8Time = 0x15A7;
 constexpr uint16_t PA_TActivate = 0x15A8;
 
 constexpr uint16_t PA_RemoteVerInfo = 0x15A0;
@@ -74,6 +75,7 @@ enum class UicCommandOpcode : uint8_t {
   kDmeTestMode = 0x1a,
 };
 
+// UFSHCI 4.0 section 5.6.3: UICCMDARG2 AttrSetType (0 = NORMAL / volatile, 1 = STATIC).
 enum class AttrSetType : uint8_t {
   kVolatile = 0,
   kStatic = 1,
@@ -101,11 +103,7 @@ class UicCommand {
 
  protected:
   explicit UicCommand(Ufs &ufs, UicCommandOpcode opcode, uint16_t mib_attribute = 0,
-                      uint16_t gen_selector_index = 0)
-      : controller_(ufs),
-        opcode_(opcode),
-        mib_attribute_(mib_attribute),
-        gen_selector_index_(gen_selector_index) {}
+                      uint16_t gen_selector_index = 0);
 
   zx::result<> SendUicCommand();
 

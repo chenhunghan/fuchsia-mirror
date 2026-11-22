@@ -4,8 +4,8 @@
 
 from typing import Any, ClassVar, Final, Literal
 
-from pydantic import model_validator
-from shared.protocol.base import BaseRequest
+from pydantic import Field, model_validator
+from shared.protocol.base import THREAD_ID_ALIAS, BaseRequest
 
 COMMAND_NAME: Final = "pause"
 
@@ -14,7 +14,9 @@ class PauseRequest(BaseRequest[dict[str, Any]]):
     """Request to pause execution of a thread or process."""
 
     command: Literal["pause"] = COMMAND_NAME
-    thread_id: int | None = None
+    thread_id: int | None = Field(
+        default=None, validation_alias=THREAD_ID_ALIAS
+    )
     pid: int | None = None
     response_type: ClassVar[Any] = dict[str, Any]
 

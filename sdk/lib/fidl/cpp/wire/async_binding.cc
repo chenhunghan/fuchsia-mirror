@@ -523,6 +523,8 @@ void AsyncClientBinding::FinishTeardown(std::shared_ptr<AsyncBinding>&& calling_
   AnyTeardownObserver teardown_observer = std::move(teardown_observer_);
   AsyncEventHandler* error_handler = error_handler_;
   std::shared_ptr<ClientBase> client = std::move(client_);
+  const bool check_client_lifetime =
+      threading_policy() == ThreadingPolicy::kCreateAndTeardownFromDispatcherThread;
 
   // Delete the calling reference.
   // We are not returning the transport to the user, so don't wait for transient
@@ -535,12 +537,14 @@ void AsyncClientBinding::FinishTeardown(std::shared_ptr<AsyncBinding>&& calling_
 
   // Outstanding async responses will no longer be received, so release the contexts.
   client->ReleaseResponseContexts(info);
+  // Single-threaded clients borrow a non-owned |error_handler| whose lifetime
+  // is tied to the client object on the dispatcher thread.
+  const bool client_destroyed = check_client_lifetime && client->client_object_lifetime().expired();
   client = nullptr;
 
   // Execute the error hook if specified.
-  if (info.reason() != fidl::Reason::kUnbind) {
-    if (error_handler != nullptr)
-      error_handler->on_fidl_error(info);
+  if (error_handler != nullptr && info.reason() != fidl::Reason::kUnbind && !client_destroyed) {
+    error_handler->on_fidl_error(info);
   }
 
   // Notify teardown.

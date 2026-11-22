@@ -112,7 +112,7 @@
   .int syscall_dispatcher.\syscall - .
 .endm
 
-// One of these macros is invoked by kernel.inc for each syscall.
+// One of these macros is invoked by syscalls.inc for each syscall.
 // These are the direct kernel entry points.
 #define KERNEL_SYSCALL(name, type, attrs, nargs, arglist, prototype) \
   syscall_dispatcher nargs, name
@@ -121,7 +121,7 @@
 // These don't have kernel entry points.
 #define VDSO_SYSCALL(...)
 
-#include <lib/syscalls/kernel.inc>
+#include <lib/syscalls/syscalls.inc>
 
 #undef KERNEL_SYSCALL
 #undef INTERNAL_SYSCALL

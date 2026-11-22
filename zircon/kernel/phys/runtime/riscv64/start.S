@@ -91,10 +91,18 @@
   mv shadow_call_sp, zero
 #endif
 
-  // Now the full C++ ABI is available.  This could theoretically be a tail
-  // call since it's obliged never to return, but it's nice to have the
-  // caller in a backtrace.
-  call PhysMain
+  // Now the full C++ ABI is available. Apply our own relocations before
+  // anything that might depend on them, making sure to save the arguments to
+  // PhysMain.
+  mv s1, a0
+  mv s2, a1
+  call ApplyRelocationsToSelf
+
+  // This could theoretically be a tail call since it's obliged never to
+  // return, but it's nice to have the caller in a backtrace.
+  mv a0, s1
+  mv a1, s2
+  call CppPhysMain
 
   // Trap forever just in case it does return.
 0:

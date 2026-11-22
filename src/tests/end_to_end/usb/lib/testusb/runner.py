@@ -245,7 +245,7 @@ def format_text_report(
     Returns:
         Formatted multi-line string table summarizing results.
     """
-    lines = []
+    lines: list[str] = []
     lines.append("=" * 65)
     lines.append(" USB Test Results")
     lines.append("=" * 65)

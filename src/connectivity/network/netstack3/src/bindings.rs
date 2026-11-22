@@ -135,6 +135,7 @@ use netstack3_core::{
 };
 
 pub(crate) use inspect::InspectPublisher;
+pub(crate) use power::SuspendBlockerSource;
 
 mod ctx {
     use crate::bindings::interface_config::InterfaceConfigDefaults;
@@ -267,7 +268,7 @@ mod ctx {
             let (multicast_admin_workers, multicast_admin_sinks) =
                 multicast_admin::new_workers_and_sinks();
             let (ndp_watcher_worker, ndp_watcher_sink, ndp_ra_sink) = ndp_watcher::Worker::new();
-            let (power_worker, power_sink) = PowerWorker::new();
+            let (power_worker, power_sink) = PowerWorker::new(config.suspend_enabled);
             let destruction_dispatcher = SocketDestructionDispatcher::default();
 
             let ctx = Ctx::new(
@@ -1352,6 +1353,7 @@ impl NetstackSeed {
         self,
         services: S,
         inspect_publisher: InspectPublisher<'_>,
+        suspend_blocker_source: SuspendBlockerSource,
     ) {
         let Self {
             mut netstack,
@@ -1410,12 +1412,14 @@ impl NetstackSeed {
             .spawn_new_guard_assert_cancelled(resource_removal_worker.run())
             .expect("scope cancelled");
 
+        let suspend_enabled = netstack.ctx.bindings_ctx().config.suspend_enabled;
+        let suspend_blocker_stream = suspend_blocker_source.into_stream(suspend_enabled);
         // We don't need to join the power worker task, it should be resilient
         // to being dropped alongside the other level2 workers.
-        let _: fasync::JoinHandle<()> = level2_workers.spawn(power_worker.run(
-            netstack.ctx.bindings_ctx().config.suspend_enabled,
-            netstack.ctx.bindings_ctx().wake_groups.clone(),
-        ));
+        let _: fasync::JoinHandle<()> = level2_workers.spawn(
+            power_worker
+                .run(suspend_blocker_stream, netstack.ctx.bindings_ctx().wake_groups.clone()),
+        );
 
         netstack.add_default_rule::<Ipv4>().await;
         netstack.add_default_rule::<Ipv6>().await;

@@ -1,7 +1,11 @@
 {
     // Dynamic capability routing information needed by Scrutiny to construct
     // a valid routing graph for verify_routes and structured_config.
-    dynamic_components: {},
+    dynamic_components: {
+        "/core/bar/scrutiny_test_collection:packaged_config_component": {
+            url: "fuchsia-pkg://fuchsia.com/package_for_scrutiny_testing#meta/packaged_config_component.cm",
+        },
+    },
     dynamic_dictionaries: {
         // From src/bringup/bin/kernel-args-forwarder/src/main.rs.
         // This represents the set of boot args which are represented as config
@@ -14,11 +18,13 @@
                     "fuchsia.astro.sysconfig.abr-wear-leveling",
                     "fuchsia.console.shell",
                     "fuchsia.console.use_virtio_console",
+                    "fuchsia.dev.fdomain.uart",
                     "fuchsia.netsvc.advertise",
                     "fuchsia.netsvc.all-features",
                     "fuchsia.netsvc.disable",
                     "fuchsia.netsvc.netboot",
                     "fuchsia.androidboot.slot_suffix",
+                    "fuchsia.dev.fdomain.uart.baud",
                     "fuchsia.kernel.serial",
                     "fuchsia.omaha_app_id",
                     "fuchsia.omaha_url",

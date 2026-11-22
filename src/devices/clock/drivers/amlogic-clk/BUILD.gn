@@ -86,7 +86,6 @@ fuchsia_cc_driver("amlogic-clk-driver") {
 fuchsia_driver_component("amlogic-clk") {
   component_name = "amlogic-clk"
   deps = [ ":amlogic-clk-driver" ]
-  info = "meta/amlogic-clk-info.json"
   manifest = "meta/amlogic-clk.cml"
 }
 

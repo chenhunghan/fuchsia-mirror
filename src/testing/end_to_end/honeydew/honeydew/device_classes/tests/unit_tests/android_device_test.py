@@ -37,13 +37,15 @@ from honeydew.affordances.ui.user_input import (
 from honeydew.affordances.ui_navigation import (
     ui_navigation as ui_navigation_affordance,
 )
+from honeydew.affordances.usb import errors as usb_errors
+from honeydew.affordances.usb import usb as usb_affordance
 from honeydew.device_classes import android_device
 from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.adb import adb as adb_transport
 from honeydew.transports.adb import errors as adb_errors
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
-from honeydew.transports.ffx import ffx
+from honeydew.transports.ffx import ffx_impl
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fc_transport,
 )
@@ -74,7 +76,6 @@ _INPUT_ARGS: dict[str, Any] = {
         subtools_search_path=None,
         proxy_timeout_secs=None,
         ssh_keepalive_timeout=None,
-        emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
         shared_data="/tmp/shared_data",
@@ -119,7 +120,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(adb_cache_pid_patcher.stop)
 
         ffx_monitor_patcher = mock.patch.object(
-            ffx.FFX,
+            ffx_impl.FfxImpl,
             "_check_running_monitor",
             return_value=False,
             autospec=True,
@@ -143,7 +144,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 autospec=True,
             ),
             mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "check_connection",
                 autospec=True,
             ),
@@ -190,7 +191,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "check_connection",
                 autospec=True,
             ),
@@ -267,7 +268,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
         try:
             with mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "get_target_address",
                 return_value=custom_types.IpPort(
                     ip=ipaddress.IPv6Address(
@@ -280,7 +281,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(self.ad_obj._is_pontis_target())
 
             with mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "get_target_address",
                 side_effect=ffx_errors.FfxCommandError("FFX error"),
                 autospec=True,
@@ -486,7 +487,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         return_value="12345678",
@@ -644,6 +645,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 vendor_keys_path=None,
                 ffx_transport=self.ad_obj.ffx,
                 attempts=adb_transport._DEFAULT_RUN_ATTEMPTS,
+                usb=self.ad_obj.usb,
             )
         finally:
             self.ad_obj.__dict__.pop("adb", None)
@@ -673,6 +675,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 vendor_keys_path=None,
                 ffx_transport=self.ad_obj.ffx,
                 attempts=adb_transport._DEFAULT_RUN_ATTEMPTS,
+                usb=self.ad_obj.usb,
             )
         finally:
             self.ad_obj.__dict__.pop("adb", None)
@@ -708,6 +711,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 vendor_keys_path=None,
                 ffx_transport=self.ad_obj.ffx,
                 attempts=adb_transport._DEFAULT_RUN_ATTEMPTS,
+                usb=self.ad_obj.usb,
             )
         finally:
             self.ad_obj.__dict__.pop("adb", None)
@@ -737,6 +741,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 vendor_keys_path=None,
                 ffx_transport=self.ad_obj.ffx,
                 attempts=adb_transport._DEFAULT_RUN_ATTEMPTS,
+                usb=self.ad_obj.usb,
             )
         finally:
             self.ad_obj.__dict__.pop("adb", None)
@@ -761,6 +766,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 vendor_keys_path=None,
                 ffx_transport=self.ad_obj.ffx,
                 attempts=1,
+                usb=self.ad_obj.usb,
             )
         finally:
             self.ad_obj.__dict__.pop("adb", None)
@@ -928,7 +934,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         return_value="ffx-serial-1234",
@@ -969,13 +975,13 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "get_target_address",
         side_effect=ffx_errors.FfxCommandError("ffx error"),
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
     )
@@ -1024,12 +1030,12 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "get_target_address",
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
     )
@@ -1076,7 +1082,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
     )
@@ -1115,7 +1121,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.ad_obj._config = orig_config
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         return_value=None,
@@ -1142,7 +1148,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.ad_obj._device_info = device_info
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         side_effect=ffx_errors.FfxCommandError("FFX error"),
@@ -1169,7 +1175,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.ad_obj._device_info = device_info
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         side_effect=signals.TestAbortAll("abort"),
@@ -1210,7 +1216,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         "check_connection",
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     def test_health_check_adb_supported(
         self,
         mock_ffx_check_connection: mock.Mock,
@@ -1224,11 +1230,18 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         self.ad_obj.health_check()
 
-        mock_ffx_check_connection.assert_called_once_with(self.ad_obj.ffx)
-        mock_fc_check_connection.assert_called_once_with(
-            self.ad_obj.fuchsia_controller
+        mock_ffx_check_connection.assert_called_once_with(
+            self.ad_obj.ffx,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
         )
-        mock_adb_check_connection.assert_called_once_with(self.ad_obj.adb)
+        mock_fc_check_connection.assert_called_once_with(
+            self.ad_obj.fuchsia_controller,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
+        mock_adb_check_connection.assert_called_once_with(
+            self.ad_obj.adb,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
 
         self.ad_obj.__dict__.pop("adb", None)
 
@@ -1243,7 +1256,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         "check_connection",
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     def test_health_check_adb_not_supported(
         self,
         mock_ffx_check_connection: mock.Mock,
@@ -1254,9 +1267,13 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(errors.NotSupportedError):
             self.ad_obj.health_check()
 
-        mock_ffx_check_connection.assert_called_once_with(self.ad_obj.ffx)
+        mock_ffx_check_connection.assert_called_once_with(
+            self.ad_obj.ffx,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
         mock_fc_check_connection.assert_called_once_with(
-            self.ad_obj.fuchsia_controller
+            self.ad_obj.fuchsia_controller,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
         )
         mock_adb_verify_supported.assert_called_once()
         self.ad_obj.__dict__.pop("adb", None)
@@ -1288,7 +1305,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         "check_connection",
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     def test_health_check_on_pontis(
         self,
         mock_ffx_check_connection: mock.Mock,
@@ -1312,9 +1329,13 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.ad_obj.health_check()
 
-            mock_ffx_check_connection.assert_called_once_with(self.ad_obj.ffx)
+            mock_ffx_check_connection.assert_called_once_with(
+                self.ad_obj.ffx,
+                timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+            )
             mock_fc_check_connection.assert_called_once_with(
-                self.ad_obj.fuchsia_controller
+                self.ad_obj.fuchsia_controller,
+                timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
             )
             mock_host_shell_run.assert_called_once()
             mock_adb_verify_supported.assert_called_once()
@@ -1329,7 +1350,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         "check_connection",
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     def test_health_check_adb_disabled(
         self,
         mock_ffx_check_connection: mock.Mock,
@@ -1348,9 +1369,13 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.ad_obj.health_check()
 
-            mock_ffx_check_connection.assert_called_once_with(self.ad_obj.ffx)
+            mock_ffx_check_connection.assert_called_once_with(
+                self.ad_obj.ffx,
+                timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+            )
             mock_fc_check_connection.assert_called_once_with(
-                self.ad_obj.fuchsia_controller
+                self.ad_obj.fuchsia_controller,
+                timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
             )
             self.assertEqual(
                 self.ad_obj._health_check_leg_statuses[-1], "adb=skipped"
@@ -1360,6 +1385,11 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.ad_obj._config = orig_config
             self.ad_obj.__dict__.pop("adb", None)
 
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        autospec=True,
+    )
     @mock.patch.object(
         adb_transport.Adb,
         "check_connection",
@@ -1376,13 +1406,14 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         "check_connection",
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     def test_health_check_adb_connection_error(
         self,
         mock_ffx_check_connection: mock.Mock,
         mock_fc_check_connection: mock.Mock,
         mock_adb_verify_supported: mock.Mock,
         mock_adb_check_connection: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
     ) -> None:
         """Testcase for AndroidDevice.health_check() raising HealthCheckError on ADB failure."""
         with self.assertRaises(errors.HealthCheckError) as context:
@@ -1399,7 +1430,50 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             r"\[leg=adb \| ffx=ok\(\d+\.\ds\) fc=ok\(\d+\.\ds\) adb=FAIL\(\d+\.\ds\)\] AdbConnectionError: ADB connection error$",
         )
         mock_adb_check_connection.assert_called_once()
+        mock_get_diagnostic_info.assert_called_once_with(self.ad_obj.usb)
         self.ad_obj.__dict__.pop("adb", None)
+
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fc_transport.FuchsiaController,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
+    def test_health_check_skips_adb_leg_while_adb_is_recovering(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_fc_check_connection: mock.Mock,
+        mock_adb_verify_supported: mock.Mock,
+        mock_adb_check_connection: mock.Mock,
+    ) -> None:
+        """Testcase for AndroidDevice.health_check() skipping the adb leg while adb._is_recovering is True."""
+        adb_inst = self.ad_obj.adb
+        mock_adb_check_connection.reset_mock()
+        adb_inst._is_recovering = True
+        try:
+            self.ad_obj.health_check()
+            mock_ffx_check_connection.assert_called_once_with(
+                self.ad_obj.ffx,
+                timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+            )
+            mock_fc_check_connection.assert_called_once_with(
+                self.ad_obj.fuchsia_controller,
+                timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+            )
+            mock_adb_check_connection.assert_not_called()
+        finally:
+            adb_inst._is_recovering = False
+            self.ad_obj.__dict__.pop("adb", None)
 
     @mock.patch.object(
         fuchsia_device.FuchsiaDevice,
@@ -1438,7 +1512,9 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             timeout=android_device._WAIT_FOR_DISCONNECT_TIMEOUT_SECS,
             attempts=1,
         )
-        mock_super_wait_for_offline.assert_called_once_with(self.ad_obj)
+        mock_super_wait_for_offline.assert_called_once_with(
+            self.ad_obj, timeout=None
+        )
         self.ad_obj.__dict__.pop("adb", None)
 
     @mock.patch.object(
@@ -1467,7 +1543,9 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
                 mock_super_wait_for_offline.reset_mock()
                 self.ad_obj.wait_for_offline()
                 mock_adb.assert_called_once_with()
-                mock_super_wait_for_offline.assert_called_once_with(self.ad_obj)
+                mock_super_wait_for_offline.assert_called_once_with(
+                    self.ad_obj, timeout=None
+                )
 
     @mock.patch.object(
         fuchsia_device.FuchsiaDevice,
@@ -1507,7 +1585,9 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             timeout=android_device._WAIT_FOR_DISCONNECT_TIMEOUT_SECS,
             attempts=1,
         )
-        mock_super_wait_for_offline.assert_called_once_with(self.ad_obj)
+        mock_super_wait_for_offline.assert_called_once_with(
+            self.ad_obj, timeout=None
+        )
         self.ad_obj.__dict__.pop("adb", None)
 
     @mock.patch("time.time", return_value=0.0, autospec=True)
@@ -1561,7 +1641,10 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_super_wait_for_online.assert_called_once_with(self.ad_obj)
         mock_adb_check_connection.assert_called_once_with(
             self.ad_obj.adb,
-            timeout=android_device._DEFAULT_WAIT_FOR_BOOT_COMPLETE_TIMEOUT_SECS,
+            timeout=(
+                android_device._DEFAULT_WAIT_FOR_BOOT_COMPLETE_TIMEOUT_SECS
+                / adb_transport._DEFAULT_RUN_ATTEMPTS
+            ),
         )
         mock_is_boot_completed.assert_called_once_with(self.ad_obj)
         mock_is_user_unlocked.assert_called_once_with(self.ad_obj)
@@ -1711,7 +1794,7 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "check_connection",
         autospec=True,
     )
@@ -1745,7 +1828,10 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_adb_check_connection.reset_mock()
         await self.ad_obj.on_device_boot()
         mock_adb_on_device_boot.assert_called_once_with(self.ad_obj.adb)
-        mock_adb_check_connection.assert_called_once_with(self.ad_obj.adb)
+        mock_adb_check_connection.assert_called_once_with(
+            self.ad_obj.adb,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
         mock_on_boot_complete.assert_called_once_with(self.ad_obj)
         self.ad_obj.__dict__.pop("adb", None)
 
@@ -1900,6 +1986,120 @@ class AndroidDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.ad_obj._config = orig_config
             self.ad_obj.__dict__.pop("adb", None)
 
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        autospec=True,
+    )
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "on_device_boot",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "on_device_boot",
+        side_effect=adb_errors.AdbConnectionError("ADB boot check failed"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    async def test_on_device_boot_adb_connection_error(
+        self,
+        mock_adb_verify_supported: mock.Mock,
+        mock_adb_check_connection: mock.Mock,
+        mock_adb_on_device_boot: mock.Mock,
+        mock_super_on_device_boot: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
+    ) -> None:
+        """Testcase for AndroidDevice.on_device_boot() collecting USB health on ADB failure."""
+        with self.assertRaises(adb_errors.AdbConnectionError):
+            await self.ad_obj.on_device_boot()
+        mock_adb_on_device_boot.assert_called_once()
+        mock_get_diagnostic_info.assert_called_once_with(self.ad_obj.usb)
+        mock_super_on_device_boot.assert_not_called()
+        self.ad_obj.__dict__.pop("adb", None)
+
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        side_effect=errors.NotSupportedError("serial not supported"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "on_device_boot",
+        side_effect=adb_errors.AdbConnectionError("ADB boot check failed"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    async def test_on_device_boot_adb_connection_error_diagnostic_not_supported(
+        self,
+        mock_adb_verify_supported: mock.Mock,
+        mock_adb_check_connection: mock.Mock,
+        mock_adb_on_device_boot: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
+    ) -> None:
+        """Testcase for AndroidDevice.on_device_boot() ignoring NotSupportedError from get_diagnostic_info()."""
+        with self.assertRaises(adb_errors.AdbConnectionError):
+            await self.ad_obj.on_device_boot()
+        mock_adb_on_device_boot.assert_called_once()
+        mock_get_diagnostic_info.assert_called_once_with(self.ad_obj.usb)
+        self.ad_obj.__dict__.pop("adb", None)
+
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        side_effect=usb_errors.UsbError("serial failed"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "on_device_boot",
+        side_effect=adb_errors.AdbConnectionError("ADB boot check failed"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        adb_transport.Adb,
+        "verify_supported",
+        autospec=True,
+    )
+    async def test_on_device_boot_adb_connection_error_diagnostic_usb_error(
+        self,
+        mock_adb_verify_supported: mock.Mock,
+        mock_adb_check_connection: mock.Mock,
+        mock_adb_on_device_boot: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
+    ) -> None:
+        """Testcase for AndroidDevice.on_device_boot() logging UsbError from get_diagnostic_info()."""
+        with self.assertRaises(adb_errors.AdbConnectionError):
+            await self.ad_obj.on_device_boot()
+        mock_adb_on_device_boot.assert_called_once()
+        mock_get_diagnostic_info.assert_called_once_with(self.ad_obj.usb)
+        self.ad_obj.__dict__.pop("adb", None)
+
 
 class AndroidDeviceBaseCapabilitiesTest(unittest.IsolatedAsyncioTestCase):
     """Unit tests for base AndroidDevice profile, geometry, and diagnostics."""
@@ -1915,7 +2115,7 @@ class AndroidDeviceBaseCapabilitiesTest(unittest.IsolatedAsyncioTestCase):
         self.ffx_cfg = mock.create_autospec(
             ffx_config.FfxConfigData, instance=True
         )
-        self.mock_ffx = mock.create_autospec(ffx.FFX, instance=True)
+        self.mock_ffx = mock.create_autospec(ffx_impl.FfxImpl, instance=True)
         self.mock_screenshot = mock.create_autospec(
             screenshot_affordance.Screenshot, instance=True
         )
@@ -2089,10 +2289,15 @@ class AndroidDeviceBaseCapabilitiesTest(unittest.IsolatedAsyncioTestCase):
 
     def test_screen_size_query_and_precedence(self) -> None:
         """Verifies wm size Physical/Override query and fallback."""
+        self.mock_adb.run.reset_mock()
         self.mock_adb.run.return_value = (
             "Physical size: 500x1000\nOverride size: 400x800"
         )
         self.assertEqual(self.device.screen_size(), ui_types.Size(400, 800))
+        self.mock_adb.run.assert_called_once_with(
+            ["shell", "wm", "size"],
+            timeout=android_device._SCREEN_SIZE_ADB_TIMEOUT_SECS,
+        )
         self.assertEqual(
             self.device._screen_size_cache, ui_types.Size(400, 800)
         )
@@ -2344,7 +2549,10 @@ class AndroidDeviceBaseCapabilitiesTest(unittest.IsolatedAsyncioTestCase):
         await self.device.wait_for_online()
 
         self.mock_adb.check_connection.assert_called_once_with(
-            timeout=android_device._DEFAULT_WAIT_FOR_BOOT_COMPLETE_TIMEOUT_SECS
+            timeout=(
+                android_device._DEFAULT_WAIT_FOR_BOOT_COMPLETE_TIMEOUT_SECS
+                / adb_transport._DEFAULT_RUN_ATTEMPTS
+            )
         )
         self.mock_adb.getprop.assert_has_calls(
             [
@@ -2526,7 +2734,9 @@ class AndroidDeviceBaseCapabilitiesTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(errors.FuchsiaDeviceError):
             await self.device.wait_for_online(timeout=5.0)
 
-        self.mock_adb.check_connection.assert_called_once_with(timeout=4.0)
+        self.mock_adb.check_connection.assert_called_once_with(
+            timeout=4.0 / adb_transport._DEFAULT_RUN_ATTEMPTS
+        )
         self.mock_adb.getprop.assert_not_called()
 
     def test_disable_background_dexopt_success(self) -> None:

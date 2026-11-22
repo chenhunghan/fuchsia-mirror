@@ -260,12 +260,9 @@ fit::result<ParseError> VisitBody(Key& key, auto& visitor, Chunk& chunk) {
     // Key may be empty.
     KeyPart key_part{.name = *key_res};
 
-// This is safe, every recursive call pushes one element to key at most, and
-// if it does, it pops it as soon as it returns.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdangling-pointer"
+    // This is safe, every recursive call pushes one element to key at most, and
+    // if it does, it pops it as soon as it returns.
     key.push_back(&key_part);
-#pragma GCC diagnostic pop
     auto deferred_pop = fit::defer([&key]() { key.pop_back(); });
 
     chunk.remove_prefix_matching(" ");

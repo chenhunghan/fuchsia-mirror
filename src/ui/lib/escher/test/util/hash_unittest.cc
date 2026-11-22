@@ -4,7 +4,6 @@
 
 #include <gtest/gtest.h>
 
-#include "src/ui/lib/escher/shape/mesh_spec.h"
 #include "src/ui/lib/escher/util/hash_map.h"
 #include "src/ui/lib/escher/vk/image.h"
 
@@ -51,13 +50,6 @@ void TestHashForValue(const Hashee& hashee) {
 
 // This test should be updated to include all hashed types used by Escher.
 TEST(Hash, AllHashedTypes) {
-  // MeshSpec
-  {
-    MeshSpec mesh_spec{{MeshAttribute::kPosition2D, MeshAttribute::kUV}};
-
-    TestHashForValue(mesh_spec);
-  }
-
   // ImageInfo.
   {
     ImageInfo info;

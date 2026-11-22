@@ -11,7 +11,7 @@ from typing import Any
 import fuchsia_base_test
 import fuchsia_inspect
 from honeydew import errors
-from honeydew.affordances.starnix import starnix_using_ffx
+from honeydew.affordances.starnix import starnix
 from mobly import asserts, test_runner
 
 
@@ -24,9 +24,7 @@ class StarnixAffordanceTests(fuchsia_base_test.FuchsiaBaseTest):
         asserts.assert_equal(len(kernels), 1, f"{kernels}")
         asserts.assert_is_instance(kernels[0], fuchsia_inspect.InspectData)
         asserts.assert_true(
-            kernels[0].moniker.startswith(
-                starnix_using_ffx._STARNIX_KERNEL_PREFIX
-            ),
+            kernels[0].moniker.startswith(starnix._STARNIX_KERNEL_PREFIX),
             f"Unexpected moniker {kernels[0].moniker}",
         )
         asserts.assert_is_not_none(kernels[0].payload)
@@ -34,9 +32,7 @@ class StarnixAffordanceTests(fuchsia_base_test.FuchsiaBaseTest):
     def _assert_one_kernel_dict(self, kernels: list[dict[str, Any]]) -> None:
         asserts.assert_equal(len(kernels), 1, f"{kernels}")
         asserts.assert_true(
-            kernels[0]["moniker"].startswith(
-                starnix_using_ffx._STARNIX_KERNEL_PREFIX
-            ),
+            kernels[0]["moniker"].startswith(starnix._STARNIX_KERNEL_PREFIX),
             f"Unexpected moniker {kernels[0]['moniker']}",
         )
         asserts.assert_is_not_none(kernels[0]["payload"])

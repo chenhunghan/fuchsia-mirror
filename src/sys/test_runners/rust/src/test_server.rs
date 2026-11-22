@@ -144,7 +144,7 @@ impl SuiteServer for TestServer {
     ) -> AbortHandle {
         let test_url = test_url.to_owned();
         let (fut, test_suite_abortable_handle) =
-            abortable(self.serve_test_suite(request_stream, weak_test_component.clone()));
+            abortable(self.serve_test_suite(request_stream, weak_test_component));
 
         fasync::Task::local(async move {
             match fut.await {

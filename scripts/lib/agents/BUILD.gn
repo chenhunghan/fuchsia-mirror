@@ -63,10 +63,14 @@ if (is_host) {
       "__init__.py",
       "agents.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
+      "//scripts/debug/zxdb_cli/cli:*",
+      "//scripts/debug/zxdb_cli/tests:*",
       "//scripts/fxtest/python:*",
     ]
+    enable_mypy = false
     data_package_name = "data"
     data_sources = [
       "//tools/devshell/lib/agent_session_ids.txt",

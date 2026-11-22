@@ -100,14 +100,12 @@ group("tests") {
     ":netstack3-core-fuzzers",
     ":netstack3-core-instrumented_test($host_toolchain)",
     ":netstack3-core-test-package",
-    "base:tests",
     "datagram:tests",
     "device:tests",
     "filter:tests",
     "icmp_echo:tests",
     "ip:tests",
     "lock-order:tests",
-    "macros:tests",
     "sync:tests",
     "tcp:tests",
     "tests($host_toolchain)",
@@ -460,8 +458,4 @@ fuchsia_unittest_package("netstack3-core-test-package") {
   package_name = "netstack3-core-test-gn"
   component_name = "netstack3-core-test"
   deps = [ ":netstack3-core-instrumented_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity/network:*",
-  ]
 }

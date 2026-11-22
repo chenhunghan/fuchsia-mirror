@@ -27,7 +27,8 @@ use netstack3_base::{
 };
 use netstack3_hashmap::hash_map::{Entry, HashMap, OccupiedEntry};
 use packet::{
-    Buf, BufferMut, GrowBuffer as _, ParsablePacket as _, ParseBufferMut as _, SerializeError,
+    Buf, BufferMut, DynSerializer, GrowBuffer as _, ParsablePacket as _, ParseBufferMut as _,
+    SerializeError, Serializer as _,
 };
 use packet_formats::ip::IpPacket as _;
 use packet_formats::ipv4::{Ipv4FragmentType, Ipv4Header as _, Ipv4Packet};
@@ -507,15 +508,11 @@ impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Incomplete<D, N, M> {
         )
     }
 
-    fn queue_packet<B, S>(
+    fn queue_packet(
         &mut self,
-        body: S,
+        body: DynSerializer<'_, NetworkSerializationContext>,
         meta: M,
-    ) -> Result<(), ErrorAndSerializer<SerializeError<!>, S>>
-    where
-        B: BufferMut,
-        S: NetworkSerializer<Buffer = B>,
-    {
+    ) -> Result<(), SerializeError<!>> {
         let Self { pending_frames, transmit_counter: _, notifiers: _, _marker } = self;
 
         // We don't accept new packets when the queue is full because earlier packets
@@ -526,10 +523,7 @@ impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Incomplete<D, N, M> {
         // has not been received and handled yet.
         if pending_frames.len() < MAX_PENDING_FRAMES {
             pending_frames.push_back((
-                body.serialize_vec_outer(&mut NetworkSerializationContext::default())
-                    .map_err(|(error, serializer)| ErrorAndSerializer { error, serializer })?
-                    .map_a(|b| Buf::new(b.as_ref().to_vec(), ..))
-                    .into_inner(),
+                body.serialize_vec_outer_no_reuse(&mut NetworkSerializationContext::default())?,
                 meta,
             ));
         }
@@ -562,10 +556,21 @@ impl<D: LinkDevice, N: LinkResolutionNotifier<D>, M> Incomplete<D, N, M> {
             // Ignore any errors on sending the IP packet, because a failure at this point
             // is not actionable for the caller: failing to send a previously-queued packet
             // doesn't mean that updating the neighbor entry should fail.
+            //
+            // NB: Pending frames are type-erased so the device layer is not
+            // instantiated for `Buf<Vec<u8>>` in addition to the IP layer's
+            // serializer types.
             core_ctx
-                .send_ip_packet_to_neighbor_link_addr(bindings_ctx, link_address, body, meta)
-                .unwrap_or_else(|err| {
-                    error!("failed to send pending IP packet to neighbor {link_address:?} {err:?}")
+                .send_ip_packet_to_neighbor_link_addr(
+                    bindings_ctx,
+                    link_address,
+                    DynSerializer::new(&body),
+                    meta,
+                )
+                .unwrap_or_else(|ErrorAndSerializer { serializer: _, error }| {
+                    error!(
+                        "failed to send pending IP packet to neighbor {link_address:?} {error:?}"
+                    )
                 })
         }
         for notifier in notifiers.drain(..) {
@@ -1268,9 +1273,10 @@ impl<D: LinkDevice, BC: NudBindingsTypes<D>> DynamicNeighborState<D, BC> {
         S::Buffer: BufferMut,
     {
         match self {
-            DynamicNeighborState::Incomplete(incomplete) => {
-                incomplete.queue_packet(body, meta).map(|()| false).map_err(|e| e.err_into())
-            }
+            DynamicNeighborState::Incomplete(incomplete) => incomplete
+                .queue_packet(DynSerializer::new(&body), meta)
+                .map(|()| false)
+                .map_err(|e| ErrorAndSerializer { error: e.into(), serializer: body }),
             // Send the IP packet while holding the NUD lock to prevent a potential
             // ordering violation.
             //
@@ -2727,12 +2733,15 @@ impl<I: Ip, D: LinkDevice, BC: NudBindingsContext<I, D, CC::DeviceId>, CC: NudCo
                                     "newly inserted entry must still be incomplete"
                                 );
                                 // Queue the packet and unwind on failure.
-                                match incomplete.queue_packet(body, meta) {
+                                match incomplete.queue_packet(DynSerializer::new(&body), meta) {
                                     Ok(()) => Ok(true),
                                     Err(e) => {
                                         dynamic.cancel_timer(bindings_ctx, timer_heap, lookup_addr);
                                         let _entry = entry.remove();
-                                        Err(e.err_into())
+                                        Err(ErrorAndSerializer {
+                                            error: e.into(),
+                                            serializer: body,
+                                        })
                                     }
                                 }
                             }

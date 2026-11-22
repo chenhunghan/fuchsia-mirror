@@ -28,7 +28,7 @@ rustc_test(
     deps = [
         "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
         "//src/lib/fuchsia",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/lib/component-events",
     ],
 )

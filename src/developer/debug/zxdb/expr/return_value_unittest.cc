@@ -120,7 +120,7 @@ TEST_F(ReturnValue, BaseTypeX64) {
   EXPECT_EQ(kDoubleValue, result.value().GetAs<double>());
 
   // Provide a 4-byte float in the low bits of xmm0.
-  constexpr float kFloatValue = 2.17;
+  constexpr float kFloatValue = 2.17f;
   std::vector<uint8_t> float_data(16);  // 128-bit register.
   memcpy(float_data.data(), &kFloatValue, sizeof(kFloatValue));
   context->data_provider()->AddRegisterValue(RegisterID::kX64_xmm0, false, float_data);

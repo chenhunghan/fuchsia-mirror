@@ -4,7 +4,7 @@
 
 group("tests") {
   testonly = true
-  deps = [ ":starnix-ebpf-tests" ]
+  deps = [ ":starnix-ebpf-tests-package" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -72,9 +72,15 @@ rustc_library("ebpf") {
     sources += [ "src/jit/fuchsia.rs" ]
   }
   if (current_cpu == "x64") {
-    sources += [ "src/memio/x64.rs" ]
+    sources += [
+      "src/jit/x86_64.rs",
+      "src/memio/x64.rs",
+    ]
   } else if (current_cpu == "arm64") {
-    sources += [ "src/memio/arm64.rs" ]
+    sources += [
+      "src/jit/arm64.rs",
+      "src/memio/arm64.rs",
+    ]
   } else if (current_cpu == "riscv64") {
     sources += [ "src/memio/riscv64.rs" ]
   }
@@ -119,9 +125,15 @@ rustc_test("ebpf_test") {
     sources += [ "src/jit/fuchsia.rs" ]
   }
   if (current_cpu == "x64") {
-    sources += [ "src/memio/x64.rs" ]
+    sources += [
+      "src/jit/x86_64.rs",
+      "src/memio/x64.rs",
+    ]
   } else if (current_cpu == "arm64") {
-    sources += [ "src/memio/arm64.rs" ]
+    sources += [
+      "src/jit/arm64.rs",
+      "src/memio/arm64.rs",
+    ]
   } else if (current_cpu == "riscv64") {
     sources += [ "src/memio/riscv64.rs" ]
   }
@@ -144,6 +156,8 @@ rustc_test("ebpf_test") {
     ]
   }
   deps += [
+    "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+    "//src/lib/fdio/rust:fdio",
     "//src/lib/test_util",
     "//third_party/rust_crates:libc",
     "//third_party/rust_crates:pest",
@@ -151,6 +165,7 @@ rustc_test("ebpf_test") {
   ]
   inputs = [
     "src/tests/access_with_check.data",
+    "src/tests/any_parameter_scalar.data",
     "src/tests/ashr_fully_unknown_u64_stays_unbounded.data",
     "src/tests/atomic_aligned.data",
     "src/tests/bounded_loop_counter_access.data",
@@ -163,7 +178,11 @@ rustc_test("ebpf_test") {
     "src/tests/context_parameter.data",
     "src/tests/datadep_call_oob.data",
     "src/tests/datadep_store_oob.data",
+    "src/tests/diamond_branching_pruned.data",
     "src/tests/div_by_range_with_zero.data",
+    "src/tests/err_any_parameter_partial_uninitialized.data",
+    "src/tests/err_any_parameter_ptr_leak.data",
+    "src/tests/err_any_parameter_uninitialized.data",
     "src/tests/err_any_parameter_use_after_free.data",
     "src/tests/err_atomic_misaligned32.data",
     "src/tests/err_atomic_misaligned64.data",
@@ -180,6 +199,8 @@ rustc_test("ebpf_test") {
     "src/tests/err_infinite_loop_counter.data",
     "src/tests/err_infinite_loop_same_state.data",
     "src/tests/err_lddw_punning.data",
+    "src/tests/err_loop_jmp_seq_limit.data",
+    "src/tests/err_loop_path_depth_limit.data",
     "src/tests/err_map_ptr_jeq_zero_dce.data",
     "src/tests/err_mem_load_u64_max_wraparound.data",
     "src/tests/err_memory_id_collision.data",
@@ -203,6 +224,10 @@ rustc_test("ebpf_test") {
     "src/tests/err_prune_point_dependency_chain.data",
     "src/tests/err_prune_stack_store_dst_reg.data",
     "src/tests/err_prune_uninit_partial_stack_store.data",
+    "src/tests/err_ptr_jset_null_or.data",
+    "src/tests/err_ptr_jset_pkt_end.data",
+    "src/tests/err_ptr_jset_same_region.data",
+    "src/tests/err_ptr_jset_zero.data",
     "src/tests/err_ptr_to_array_negative_offset.data",
     "src/tests/err_ptr_wrap_jgt_dce.data",
     "src/tests/err_read_only_helper.data",
@@ -396,10 +421,21 @@ rustc_test("ebpf_test") {
   visibility = [ ":*" ]
 }
 
-fuchsia_unittest_package("starnix-ebpf-tests") {
-  package_name = "starnix-ebpf-tests-gn"
+fuchsia_component_manifest("starnix-ebpf-tests-manifest") {
+  testonly = true
   component_name = "starnix-ebpf-tests"
+  manifest = "meta/ebpf_tests.cml"
+}
+
+fuchsia_test_component("starnix-ebpf-tests-component") {
+  cm_label = ":starnix-ebpf-tests-manifest"
+  test_type = "system"
   deps = [ ":ebpf_test" ]
+}
+
+fuchsia_test_package("starnix-ebpf-tests-package") {
+  package_name = "starnix-ebpf-tests-gn"
+  test_components = [ ":starnix-ebpf-tests-component" ]
   visibility = [
     ":*",
     "//src/starnix/lib:*",

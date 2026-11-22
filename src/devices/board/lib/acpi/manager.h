@@ -92,7 +92,8 @@ class Manager {
                                     bool force_enable = false);
 
   // Call pci_init for the given device.
-  acpi::status<> PublishPciBus(zx_device_t* platform_bus, DeviceBuilder* device);
+  acpi::status<> PublishPciBus(zx_device_t* platform_bus, DeviceBuilder* device,
+                               async_dispatcher_t* device_dispatcher);
 
   Acpi* acpi_;
   iommu::IommuManagerInterface* iommu_manager_;

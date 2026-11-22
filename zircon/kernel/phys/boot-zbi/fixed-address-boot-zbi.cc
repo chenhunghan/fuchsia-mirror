@@ -7,6 +7,7 @@
 #include "phys/boot-zbi/fixed-address-boot-zbi.h"
 
 #include <lib/memalloc/pool.h>
+#include <stdio.h>
 #include <zircon/assert.h>
 
 #include <cstddef>
@@ -15,9 +16,8 @@
 
 #include <fbl/algorithm.h>
 #include <ktl/byte.h>
-#include <phys/address-space.h>
+#include <phys/address-space/address-space.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
 
 #include <ktl/enforce.h>
 
@@ -262,25 +262,25 @@ fit::result<FixedAddressBootZbi::Error> FixedAddressBootZbi::Init(InputZbi zbi,
   return res;
 }
 
-void FixedAddressBootZbi::Log() {
-  LogAddresses();
+void FixedAddressBootZbi::Log(const char* program_name) {
+  LogAddresses(program_name);
   if (kernel_load_address_) {
-    LogFixedAddresses();
+    LogFixedAddresses(program_name);
   }
-  LogBoot(KernelEntryAddress());
+  LogBoot(program_name, KernelEntryAddress());
 }
 
 // This output lines up with what BootZbi::LogAddresses() prints.
-void FixedAddressBootZbi::LogFixedAddresses() const {
+void FixedAddressBootZbi::LogFixedAddresses(const char* program_name) const {
 #define ADDR "0x%016" PRIx64
   const uint64_t kernel = kernel_load_address_.value();
   const uint64_t bss = kernel + KernelLoadSize();
   const uint64_t end = kernel + KernelMemorySize();
-  debugf("%s: Relocated\n", ProgramName());
-  debugf("%s:    Kernel @ [" ADDR ", " ADDR ")\n", ProgramName(), kernel, bss);
-  debugf("%s:       BSS @ [" ADDR ", " ADDR ")\n", ProgramName(), bss, end);
+  printf("%s: Relocated\n", program_name);
+  printf("%s:    Kernel @ [" ADDR ", " ADDR ")\n", program_name, kernel, bss);
+  printf("%s:       BSS @ [" ADDR ", " ADDR ")\n", program_name, bss, end);
   if (data_load_address_) {
-    debugf("%s:       ZBI @ [" ADDR ", " ADDR ")\n", ProgramName(), *data_load_address_,
+    printf("%s:       ZBI @ [" ADDR ", " ADDR ")\n", program_name, *data_load_address_,
            *data_load_address_ + DataLoadSize());
   }
 }

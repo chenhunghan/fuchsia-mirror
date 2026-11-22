@@ -32,14 +32,14 @@ filegroup(
 
 # Workspace Member Dependencies
 alias(
-    name = "aes-0.9.3",
-    actual = "//third_party/rust_crates/vendor/aes-0.9.3:aes",
+    name = "aes-0.9.4",
+    actual = "//third_party/rust_crates/vendor/aes-0.9.4:aes",
     tags = ["manual"],
 )
 
 alias(
     name = "aes",
-    actual = "//third_party/rust_crates/vendor/aes-0.9.3:aes",
+    actual = "//third_party/rust_crates/vendor/aes-0.9.4:aes",
     tags = ["manual"],
 )
 
@@ -224,26 +224,26 @@ alias(
 )
 
 alias(
-    name = "async-lock-3.4.2",
-    actual = "//third_party/rust_crates/vendor/async-lock-3.4.2:async_lock",
+    name = "async-lock-3.5.0",
+    actual = "//third_party/rust_crates/vendor/async-lock-3.5.0:async_lock",
     tags = ["manual"],
 )
 
 alias(
     name = "async-lock",
-    actual = "//third_party/rust_crates/vendor/async-lock-3.4.2:async_lock",
+    actual = "//third_party/rust_crates/vendor/async-lock-3.5.0:async_lock",
     tags = ["manual"],
 )
 
 alias(
-    name = "async-ringbuf-0.3.10",
-    actual = "//third_party/rust_crates/vendor/async-ringbuf-0.3.10:async_ringbuf",
+    name = "async-ringbuf-0.4.0",
+    actual = "//third_party/rust_crates/vendor/async-ringbuf-0.4.0:async_ringbuf",
     tags = ["manual"],
 )
 
 alias(
     name = "async-ringbuf",
-    actual = "//third_party/rust_crates/vendor/async-ringbuf-0.3.10:async_ringbuf",
+    actual = "//third_party/rust_crates/vendor/async-ringbuf-0.4.0:async_ringbuf",
     tags = ["manual"],
 )
 
@@ -622,14 +622,14 @@ alias(
 )
 
 alias(
-    name = "cpio-0.4.1",
-    actual = "//third_party/rust_crates/vendor/cpio-0.4.1:cpio",
+    name = "cpio-0.4.2",
+    actual = "//third_party/rust_crates/vendor/cpio-0.4.2:cpio",
     tags = ["manual"],
 )
 
 alias(
     name = "cpio",
-    actual = "//third_party/rust_crates/vendor/cpio-0.4.1:cpio",
+    actual = "//third_party/rust_crates/vendor/cpio-0.4.2:cpio",
     tags = ["manual"],
 )
 
@@ -646,14 +646,14 @@ alias(
 )
 
 alias(
-    name = "crc32fast-1.5.3",
-    actual = "//third_party/rust_crates/vendor/crc32fast-1.5.3:crc32fast",
+    name = "crc32fast-1.5.4",
+    actual = "//third_party/rust_crates/vendor/crc32fast-1.5.4:crc32fast",
     tags = ["manual"],
 )
 
 alias(
     name = "crc32fast",
-    actual = "//third_party/rust_crates/vendor/crc32fast-1.5.3:crc32fast",
+    actual = "//third_party/rust_crates/vendor/crc32fast-1.5.4:crc32fast",
     tags = ["manual"],
 )
 
@@ -760,14 +760,14 @@ alias(
 )
 
 alias(
-    name = "der-0.8.2",
-    actual = "//third_party/rust_crates/vendor/der-0.8.2:der",
+    name = "der-0.8.3",
+    actual = "//third_party/rust_crates/vendor/der-0.8.3:der",
     tags = ["manual"],
 )
 
 alias(
     name = "der",
-    actual = "//third_party/rust_crates/vendor/der-0.8.2:der",
+    actual = "//third_party/rust_crates/vendor/der-0.8.3:der",
     tags = ["manual"],
 )
 
@@ -1120,14 +1120,14 @@ alias(
 )
 
 alias(
-    name = "googletest-0.14.3",
-    actual = "//third_party/rust_crates/vendor/googletest-0.14.3:googletest",
+    name = "googletest-0.14.4",
+    actual = "//third_party/rust_crates/vendor/googletest-0.14.4:googletest",
     tags = ["manual"],
 )
 
 alias(
     name = "googletest",
-    actual = "//third_party/rust_crates/vendor/googletest-0.14.3:googletest",
+    actual = "//third_party/rust_crates/vendor/googletest-0.14.4:googletest",
     tags = ["manual"],
 )
 
@@ -1498,14 +1498,14 @@ alias(
 )
 
 alias(
-    name = "libc-0.2.190",
-    actual = "//third_party/rust_crates/forks/libc-0.2.190:libc",
+    name = "libc-0.2.191",
+    actual = "//third_party/rust_crates/forks/libc-0.2.191:libc",
     tags = ["manual"],
 )
 
 alias(
     name = "libc",
-    actual = "//third_party/rust_crates/forks/libc-0.2.190:libc",
+    actual = "//third_party/rust_crates/forks/libc-0.2.191:libc",
     tags = ["manual"],
 )
 
@@ -1546,14 +1546,14 @@ alias(
 )
 
 alias(
-    name = "log-0.4.34",
-    actual = "//third_party/rust_crates/vendor/log-0.4.34:log",
+    name = "log-0.4.35",
+    actual = "//third_party/rust_crates/vendor/log-0.4.35:log",
     tags = ["manual"],
 )
 
 alias(
     name = "log",
-    actual = "//third_party/rust_crates/vendor/log-0.4.34:log",
+    actual = "//third_party/rust_crates/vendor/log-0.4.35:log",
     tags = ["manual"],
 )
 
@@ -1984,38 +1984,38 @@ alias(
 )
 
 alias(
-    name = "pest-2.9.2",
-    actual = "//third_party/rust_crates/vendor/pest-2.9.2:pest",
+    name = "pest-2.9.5",
+    actual = "//third_party/rust_crates/vendor/pest-2.9.5:pest",
     tags = ["manual"],
 )
 
 alias(
     name = "pest",
-    actual = "//third_party/rust_crates/vendor/pest-2.9.2:pest",
+    actual = "//third_party/rust_crates/vendor/pest-2.9.5:pest",
     tags = ["manual"],
 )
 
 alias(
-    name = "pest_derive-2.9.2",
-    actual = "//third_party/rust_crates/vendor/pest_derive-2.9.2:pest_derive",
+    name = "pest_derive-2.9.5",
+    actual = "//third_party/rust_crates/vendor/pest_derive-2.9.5:pest_derive",
     tags = ["manual"],
 )
 
 alias(
     name = "pest_derive",
-    actual = "//third_party/rust_crates/vendor/pest_derive-2.9.2:pest_derive",
+    actual = "//third_party/rust_crates/vendor/pest_derive-2.9.5:pest_derive",
     tags = ["manual"],
 )
 
 alias(
-    name = "petgraph-0.6.2",
-    actual = "//third_party/rust_crates/vendor/petgraph-0.6.2:petgraph",
+    name = "petgraph-0.8.3",
+    actual = "//third_party/rust_crates/forks/petgraph-0.8.3:petgraph",
     tags = ["manual"],
 )
 
 alias(
     name = "petgraph",
-    actual = "//third_party/rust_crates/vendor/petgraph-0.6.2:petgraph",
+    actual = "//third_party/rust_crates/forks/petgraph-0.8.3:petgraph",
     tags = ["manual"],
 )
 
@@ -2086,8 +2086,26 @@ alias(
 )
 
 alias(
-    name = "pkcs1",
+    name = "pkcs1_0_7_5-0.7.5",
     actual = "//third_party/rust_crates/vendor/pkcs1-0.7.5:pkcs1",
+    tags = ["manual"],
+)
+
+alias(
+    name = "pkcs1_0_7_5",
+    actual = "//third_party/rust_crates/vendor/pkcs1-0.7.5:pkcs1",
+    tags = ["manual"],
+)
+
+alias(
+    name = "pkcs1-0.8.0",
+    actual = "//third_party/rust_crates/vendor/pkcs1-0.8.0:pkcs1",
+    tags = ["manual"],
+)
+
+alias(
+    name = "pkcs1",
+    actual = "//third_party/rust_crates/vendor/pkcs1-0.8.0:pkcs1",
     tags = ["manual"],
 )
 
@@ -2170,14 +2188,14 @@ alias(
 )
 
 alias(
-    name = "proptest-1.11.0",
-    actual = "//third_party/rust_crates/vendor/proptest-1.11.0:proptest",
+    name = "proptest-1.12.0",
+    actual = "//third_party/rust_crates/vendor/proptest-1.12.0:proptest",
     tags = ["manual"],
 )
 
 alias(
     name = "proptest",
-    actual = "//third_party/rust_crates/vendor/proptest-1.11.0:proptest",
+    actual = "//third_party/rust_crates/vendor/proptest-1.12.0:proptest",
     tags = ["manual"],
 )
 
@@ -2218,14 +2236,14 @@ alias(
 )
 
 alias(
-    name = "pulldown-cmark-0.13.5",
-    actual = "//third_party/rust_crates/vendor/pulldown-cmark-0.13.5:pulldown_cmark",
+    name = "pulldown-cmark-0.13.6",
+    actual = "//third_party/rust_crates/vendor/pulldown-cmark-0.13.6:pulldown_cmark",
     tags = ["manual"],
 )
 
 alias(
     name = "pulldown-cmark",
-    actual = "//third_party/rust_crates/vendor/pulldown-cmark-0.13.5:pulldown_cmark",
+    actual = "//third_party/rust_crates/vendor/pulldown-cmark-0.13.6:pulldown_cmark",
     tags = ["manual"],
 )
 
@@ -2924,14 +2942,14 @@ alias(
 )
 
 alias(
-    name = "signal-hook-0.4.5",
-    actual = "//third_party/rust_crates/vendor/signal-hook-0.4.5:signal_hook",
+    name = "signal-hook-0.4.6",
+    actual = "//third_party/rust_crates/vendor/signal-hook-0.4.6:signal_hook",
     tags = ["manual"],
 )
 
 alias(
     name = "signal-hook",
-    actual = "//third_party/rust_crates/vendor/signal-hook-0.4.5:signal_hook",
+    actual = "//third_party/rust_crates/vendor/signal-hook-0.4.6:signal_hook",
     tags = ["manual"],
 )
 
@@ -2984,14 +3002,14 @@ alias(
 )
 
 alias(
-    name = "smallvec-1.16.3",
-    actual = "//third_party/rust_crates/vendor/smallvec-1.16.3:smallvec",
+    name = "smallvec-1.16.4",
+    actual = "//third_party/rust_crates/vendor/smallvec-1.16.4:smallvec",
     tags = ["manual"],
 )
 
 alias(
     name = "smallvec",
-    actual = "//third_party/rust_crates/vendor/smallvec-1.16.3:smallvec",
+    actual = "//third_party/rust_crates/vendor/smallvec-1.16.4:smallvec",
     tags = ["manual"],
 )
 
@@ -3182,14 +3200,14 @@ alias(
 )
 
 alias(
-    name = "test-case-3.4.0",
-    actual = "//third_party/rust_crates/vendor/test-case-3.4.0:test_case",
+    name = "test-case-3.4.1",
+    actual = "//third_party/rust_crates/vendor/test-case-3.4.1:test_case",
     tags = ["manual"],
 )
 
 alias(
     name = "test-case",
-    actual = "//third_party/rust_crates/vendor/test-case-3.4.0:test_case",
+    actual = "//third_party/rust_crates/vendor/test-case-3.4.1:test_case",
     tags = ["manual"],
 )
 
@@ -3254,26 +3272,26 @@ alias(
 )
 
 alias(
-    name = "toml-1.1.8+spec-1.1.0",
-    actual = "//third_party/rust_crates/vendor/toml-1.1.8-spec-1.1.0:toml",
+    name = "toml-1.2.0+spec-1.1.0",
+    actual = "//third_party/rust_crates/vendor/toml-1.2.0-spec-1.1.0:toml",
     tags = ["manual"],
 )
 
 alias(
     name = "toml",
-    actual = "//third_party/rust_crates/vendor/toml-1.1.8-spec-1.1.0:toml",
+    actual = "//third_party/rust_crates/vendor/toml-1.2.0-spec-1.1.0:toml",
     tags = ["manual"],
 )
 
 alias(
-    name = "toml_edit-0.25.17+spec-1.1.0",
-    actual = "//third_party/rust_crates/vendor/toml_edit-0.25.17-spec-1.1.0:toml_edit",
+    name = "toml_edit-0.25.18+spec-1.1.0",
+    actual = "//third_party/rust_crates/vendor/toml_edit-0.25.18-spec-1.1.0:toml_edit",
     tags = ["manual"],
 )
 
 alias(
     name = "toml_edit",
-    actual = "//third_party/rust_crates/vendor/toml_edit-0.25.17-spec-1.1.0:toml_edit",
+    actual = "//third_party/rust_crates/vendor/toml_edit-0.25.18-spec-1.1.0:toml_edit",
     tags = ["manual"],
 )
 
@@ -3422,14 +3440,14 @@ alias(
 )
 
 alias(
-    name = "unicode-width-0.2.2",
-    actual = "//third_party/rust_crates/vendor/unicode-width-0.2.2:unicode_width",
+    name = "unicode-width-0.2.3",
+    actual = "//third_party/rust_crates/vendor/unicode-width-0.2.3:unicode_width",
     tags = ["manual"],
 )
 
 alias(
     name = "unicode-width",
-    actual = "//third_party/rust_crates/vendor/unicode-width-0.2.2:unicode_width",
+    actual = "//third_party/rust_crates/vendor/unicode-width-0.2.3:unicode_width",
     tags = ["manual"],
 )
 
@@ -3494,14 +3512,14 @@ alias(
 )
 
 alias(
-    name = "uuid-1.28.0",
-    actual = "//third_party/rust_crates/vendor/uuid-1.28.0:uuid",
+    name = "uuid-1.29.0",
+    actual = "//third_party/rust_crates/vendor/uuid-1.29.0:uuid",
     tags = ["manual"],
 )
 
 alias(
     name = "uuid",
-    actual = "//third_party/rust_crates/vendor/uuid-1.28.0:uuid",
+    actual = "//third_party/rust_crates/vendor/uuid-1.29.0:uuid",
     tags = ["manual"],
 )
 
@@ -3578,14 +3596,14 @@ alias(
 )
 
 alias(
-    name = "winnow-1.0.4",
-    actual = "//third_party/rust_crates/vendor/winnow-1.0.4:winnow",
+    name = "winnow-1.0.5",
+    actual = "//third_party/rust_crates/vendor/winnow-1.0.5:winnow",
     tags = ["manual"],
 )
 
 alias(
     name = "winnow",
-    actual = "//third_party/rust_crates/vendor/winnow-1.0.4:winnow",
+    actual = "//third_party/rust_crates/vendor/winnow-1.0.5:winnow",
     tags = ["manual"],
 )
 
@@ -3620,14 +3638,14 @@ alias(
 )
 
 alias(
-    name = "xattr-1.6.1",
-    actual = "//third_party/rust_crates/vendor/xattr-1.6.1:xattr",
+    name = "xattr-1.7.0",
+    actual = "//third_party/rust_crates/vendor/xattr-1.7.0:xattr",
     tags = ["manual"],
 )
 
 alias(
     name = "xattr",
-    actual = "//third_party/rust_crates/vendor/xattr-1.6.1:xattr",
+    actual = "//third_party/rust_crates/vendor/xattr-1.7.0:xattr",
     tags = ["manual"],
 )
 
@@ -3656,7 +3674,7 @@ alias(
 )
 
 alias(
-    name = "zeroize-1.9.0",
+    name = "zeroize-1.9.1",
     actual = "//third_party/rust_crates/forks/zeroize:zeroize",
     tags = ["manual"],
     visibility = ["//third_party/rust_crates:zeroize_visibility"],
@@ -3682,14 +3700,14 @@ alias(
 )
 
 alias(
-    name = "zip-9.0.5",
-    actual = "//third_party/rust_crates/vendor/zip-9.0.5:zip",
+    name = "zip-9.4.1",
+    actual = "//third_party/rust_crates/vendor/zip-9.4.1:zip",
     tags = ["manual"],
 )
 
 alias(
     name = "zip",
-    actual = "//third_party/rust_crates/vendor/zip-9.0.5:zip",
+    actual = "//third_party/rust_crates/vendor/zip-9.4.1:zip",
     tags = ["manual"],
 )
 

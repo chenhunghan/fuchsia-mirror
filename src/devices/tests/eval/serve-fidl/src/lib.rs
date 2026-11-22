@@ -21,7 +21,7 @@ impl Driver for DriverServeFidl {
         Ok(Self { node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("DriverServeFidl stopped");
     }
 }

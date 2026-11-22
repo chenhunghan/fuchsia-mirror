@@ -23,10 +23,7 @@ bazel_fuchsia_package("colocated-runner-example") {
 
 group("hermetic_tests") {
   testonly = true
-  deps = [
-    ":colocated-runner-unittests-package",
-    "integration_tests",
-  ]
+  deps = [ ":colocated-runner-unittests-package" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -76,7 +73,7 @@ if (is_fuchsia) {
       "//src/lib/fuchsia-component",
       "//src/lib/fuchsia-runtime",
       "//src/lib/fuchsia-sync",
-      "//src/performance/memory/attribution/server",
+      "//src/memory/attribution/server",
       "//src/sys/lib/runner",
       "//third_party/rust_crates:anyhow",
       "//third_party/rust_crates:async-lock",
@@ -107,7 +104,7 @@ if (is_fuchsia) {
              "//src/lib/fuchsia-component",
              "//src/lib/fuchsia-runtime",
              "//src/lib/fuchsia-sync",
-             "//src/performance/memory/attribution/server",
+             "//src/memory/attribution/server",
              "//src/sys/lib/runner",
              "//third_party/rust_crates:anyhow",
              "//third_party/rust_crates:async-lock",
@@ -131,7 +128,10 @@ fuchsia_component_manifest("colocated-runner_manifest") {
 
 fuchsia_component("colocated-runner") {
   cm_label = ":colocated-runner_manifest"
-  visibility = [ "//*" ]
+  visibility = [
+    ":*",
+    "//examples/components/runner/colocated/integration_tests:*",
+  ]
   deps = [ ":bin" ]
 }
 
@@ -152,7 +152,10 @@ fuchsia_component_manifest("colocated-component_manifest") {
 
 fuchsia_component("colocated-component") {
   cm_label = ":colocated-component_manifest"
-  visibility = [ "//*" ]
+  visibility = [
+    ":*",
+    "//examples/components/runner/colocated/integration_tests:*",
+  ]
 }
 
 fuchsia_unittest_component("colocated-runner-unittests-component") {

@@ -276,6 +276,69 @@ class TestAttachHandler(DaemonTestCase):
             exact_node_resp.message or "",
         )
 
+    @patch("daemon.daemon.ZxdbDapClient")
+    async def test_driver_attach_reports_failed_lookup(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        """A failed `ffx driver` lookup is not reported as "no match"."""
+        mock_dap_client = mock_dap_client_class.return_value
+        mock_dap_client.attach = AsyncMock()
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+
+        with patch(
+            "daemon.driver_utils.run_ffx_json",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("ffx driver host list timed out"),
+        ):
+            resp = await daemon.registry.handle(
+                "attach", AttachRequest(driver="flashlight")
+            )
+
+        self.assertFalse(resp.success)
+        message = resp.message or ""
+        self.assertIn(
+            "Could not look up the driver host for 'flashlight'", message
+        )
+        self.assertIn("ffx driver host list timed out", message)
+        self.assertIn("console ps", message)
+        self.assertIn("attach --exact --weak", message)
+        self.assertNotIn("No running driver_host matched", message)
+        self.assertNotIn("--wait", message)
+        mock_dap_client.attach.assert_not_called()
+
+    @patch("daemon.daemon.ZxdbDapClient")
+    async def test_driver_attach_wait_after_failed_lookup(
+        self, mock_dap_client_class: Mock
+    ) -> None:
+        """An explicit --wait still installs the filter if the lookup fails."""
+        mock_dap_client = mock_dap_client_class.return_value
+        mock_dap_client.attach = AsyncMock(
+            return_value=Mock(dump_dap=lambda: {"success": True})
+        )
+        daemon = Daemon(port=15678)
+        daemon.zxdb_writer = Mock()
+
+        with patch(
+            "daemon.driver_utils.run_ffx_json",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("ffx driver host list timed out"),
+        ):
+            resp = await daemon.registry.handle(
+                "attach", AttachRequest(driver="flashlight", wait=True)
+            )
+
+        self.assertTrue(resp.success, resp.message)
+        assert isinstance(resp.body, dict)
+        self.assertEqual(resp.body["attach_mode"], "filter")
+        self.assertEqual(resp.body["filter_pattern"], "driver_host")
+        self.assertEqual(resp.body["requested_target"], "flashlight")
+        mock_dap_client.attach.assert_called_once()
+        self.assertEqual(
+            mock_dap_client.attach.call_args[0][0].extra_fields,
+            {"process": "driver_host"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,9 +25,10 @@ Public headers and subdirectories expose these console components:
   `zxdb::CommandContext`, `zxdb::ConsoleCommandContext`,
   `zxdb::OfflineCommandContext`, and `zxdb::NestedCommandContext`. Also exposes
   `zxdb::CommandToken`, `zxdb::TokenizeCommand`, `zxdb::ParseCommand`,
-  `zxdb::FillCommandContextCallback`, `zxdb::GetCommandCompletions`,
-  `zxdb::RunCommandSequence`, `zxdb::ReadCommandsFromFile`,
-  `zxdb::CommandLineOptions`, and `zxdb::ParseCommandLine`.
+  `zxdb::ParseCommandForTest`, `zxdb::FillCommandContextCallback`,
+  `zxdb::GetCommandCompletions`, `zxdb::RunCommandSequence`,
+  `zxdb::ReadCommandsFromFile`, `zxdb::CommandLineOptions`, and
+  `zxdb::ParseCommandLine`.
 - Noun, verb, and switch registries (`nouns.h`, `verbs.h`, `switch_record.h`):
   `zxdb::Noun`, `zxdb::NounRecord`, `zxdb::GetNouns`, `zxdb::NounToString`,
   `zxdb::NounToRecord`, `zxdb::GetStringNounMap`, `zxdb::ExecuteNoun`,

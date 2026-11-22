@@ -60,7 +60,6 @@ fuchsia_driver_component("ams-light") {
     ":ams-light-driver",
     ":tcs3400_light_bind",
   ]
-  info = "meta/ams-light-info.json"
   manifest = "meta/ams-light.cml"
 }
 

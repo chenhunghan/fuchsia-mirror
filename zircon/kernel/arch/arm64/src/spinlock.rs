@@ -7,12 +7,15 @@
 //! arm64 spinlocks.
 //!
 //! A lock holds the number of the CPU holding it plus one, so 0 means unheld.
+//!
+//! The `arch_spin_*` functions below are the architecture half of `SpinLockBase` in
+//! `crate::kernel::spinlock`, which holds the lock word and calls them with interrupts disabled.
 
 // TODO(https://fxbug.dev/581987928): Remove `#![coverage(off)]` once compiler options can control
 // atomic coverage counter updates.
 #![coverage(off)]
 
-use super::mp::{arch_curr_cpu_num, read_percpu_field, write_percpu_field};
+use super::mp::{read_percpu_field, write_percpu_field};
 use crate::kernel::spin_tracing::{EncodedLockId, FinishType, Tracer};
 use crate::kernel::types::cpu_num_t;
 use core::arch::asm;
@@ -59,25 +62,30 @@ unsafe fn arch_spin_lock_core(lock: &AtomicU32, val: cpu_num_t) {
     unsafe { on_lock_acquired() };
 }
 
+/// Acquires `lock` without lock trace instrumentation.
+///
 /// # Safety
 ///
-/// Interrupts are disabled.
-#[inline]
-pub(crate) unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32) {
-    let val = arch_curr_cpu_num().wrapping_add(1);
+/// Interrupts are disabled on the calling CPU, and `cpu` equals `curr_cpu_num()`.
+#[inline(always)]
+pub unsafe fn arch_spin_lock_non_instrumented(lock: &AtomicU32, cpu: cpu_num_t) {
+    let val = cpu.wrapping_add(1);
     // SAFETY: The caller has disabled interrupts.
     unsafe { arch_spin_lock_core(lock, val) };
 }
 
+/// Acquires `lock`, tracing the spin with `encoded_lock_id` if the first attempt fails.
+///
 /// # Safety
 ///
-/// Interrupts are disabled.
-#[inline]
-pub(crate) unsafe fn arch_spin_lock_trace_instrumented(
+/// Interrupts are disabled on the calling CPU, and `cpu` equals `curr_cpu_num()`.
+#[inline(always)]
+pub unsafe fn arch_spin_lock_trace_instrumented(
     lock: &AtomicU32,
+    cpu: cpu_num_t,
     encoded_lock_id: EncodedLockId,
 ) {
-    let val = arch_curr_cpu_num().wrapping_add(1);
+    let val = cpu.wrapping_add(1);
 
     if lock.compare_exchange(0, val, Ordering::Acquire, Ordering::Relaxed).is_ok() {
         // SAFETY: The compare-exchange has acquired `lock`, and the caller has disabled
@@ -109,14 +117,21 @@ unsafe fn arch_spin_lock_trace_instrumented_contended(
     spin_tracer.finish(FinishType::LockAcquired, encoded_lock_id);
 }
 
-/// See `rust_arch_spin_trylock`.
+/// Tries to acquire `lock` without waiting for its holder; a failed store-exclusive is retried, so
+/// a failure means another CPU held the lock. Returns false if the lock was acquired and true
+/// otherwise.
+///
+/// Note: trylock operations are not permitted to fail spuriously, even on
+/// architectures with weak memory ordering.  If a trylock operation fails, it
+/// must be because the lock was actually observed to be held by another thread
+/// during the attempt.
 ///
 /// # Safety
 ///
-/// Interrupts are disabled.
-#[inline]
-pub(crate) unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
-    let val = arch_curr_cpu_num().wrapping_add(1);
+/// Interrupts are disabled on the calling CPU, and `cpu` equals `curr_cpu_num()`.
+#[inline(always)]
+pub unsafe fn arch_spin_trylock(lock: &AtomicU32, cpu: cpu_num_t) -> bool {
+    let val = cpu.wrapping_add(1);
     let out: cpu_num_t;
     // SAFETY: See `arch_spin_lock_core`.
     unsafe {
@@ -146,11 +161,18 @@ pub(crate) unsafe fn arch_spin_trylock(lock: &AtomicU32) -> bool {
     out != 0
 }
 
+/// Releases `lock`, which the calling CPU holds.
+///
+/// Takes a raw pointer `*const AtomicU32` rather than `&AtomicU32` because releasing the lock
+/// allows another CPU to immediately acquire it and free the containing object before this
+/// function returns.
+///
 /// # Safety
 ///
-/// The calling CPU holds `lock`, and interrupts are disabled.
-#[inline]
-pub(crate) unsafe fn arch_spin_unlock(lock: &AtomicU32) {
+/// `lock` points to a live, properly aligned `AtomicU32` that the calling CPU holds, and
+/// interrupts are disabled.
+#[inline(always)]
+pub unsafe fn arch_spin_unlock(lock: *const AtomicU32) {
     let count = read_percpu_field!(num_spinlocks).wrapping_sub(1);
     // SAFETY: `num_spinlocks` counts the spinlocks the calling CPU holds, and it is releasing
     // `lock`, which it holds. Interrupts are disabled, so no interrupt handler on this CPU changes
@@ -158,65 +180,14 @@ pub(crate) unsafe fn arch_spin_unlock(lock: &AtomicU32) {
     // points at this CPU's `arm64_percpu`, and Rust holds no reference to its fields (see
     // `write_percpu_field!`).
     unsafe { write_percpu_field!(num_spinlocks, count) };
-    lock.store(0, Ordering::Release);
-}
-
-// C FFI exports, called by the `arch_spin_*` functions in spinlock.cc, which carry the thread
-// safety annotations.
-//
-// Each takes the `value` of an `arch_spin_lock_t` as `&AtomicU32`: C++ always passes the address
-// of a live lock's `value`, which is non-null and 4-byte aligned (spinlock.cc asserts the size and
-// alignment), so a reference is sound and needs no cast or null check.
-//
-// Each requires what `SpinLock` in <kernel/spinlock.h> requires of its callers: interrupts are
-// disabled on the calling CPU.
-
-/// Acquires `lock` without lock trace instrumentation.
-///
-/// # Safety
-///
-/// Interrupts are disabled.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_spin_lock_non_instrumented(lock: &AtomicU32) {
-    // SAFETY: The caller has disabled interrupts.
-    unsafe { arch_spin_lock_non_instrumented(lock) };
-}
-
-/// Acquires `lock`, tracing the spin with `encoded_lock_id` if the first attempt fails.
-///
-/// # Safety
-///
-/// Interrupts are disabled.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_spin_lock_trace_instrumented(
-    lock: &AtomicU32,
-    encoded_lock_id: EncodedLockId,
-) {
-    // SAFETY: The caller has disabled interrupts.
-    unsafe { arch_spin_lock_trace_instrumented(lock, encoded_lock_id) };
-}
-
-/// Tries to acquire `lock` without waiting for its holder; a failed store-exclusive is retried, so
-/// a failure means another CPU held the lock. Returns false if the lock was acquired and true
-/// otherwise, the `TA_TRY_ACQ(false, lock)` contract of `arch_spin_trylock()` in
-/// `<arch/spinlock.h>`.
-///
-/// # Safety
-///
-/// Interrupts are disabled.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_spin_trylock(lock: &AtomicU32) -> bool {
-    // SAFETY: The caller has disabled interrupts.
-    unsafe { arch_spin_trylock(lock) }
-}
-
-/// Releases `lock`.
-///
-/// # Safety
-///
-/// The calling CPU holds `lock`, and interrupts are disabled.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_arch_spin_unlock(lock: &AtomicU32) {
-    // SAFETY: The caller holds `lock` and has disabled interrupts.
-    unsafe { arch_spin_unlock(lock) };
+    // SAFETY: The caller guarantees `lock` is live, 4-byte aligned, and held by this CPU until
+    // this store. Using an inline `stlr` avoids forming `&AtomicU32` across the release store and
+    // avoids `ub_checks` branches on the raw pointer in debug-assertion builds.
+    unsafe {
+        asm!(
+            "stlr wzr, [{lock}]",
+            lock = in(reg) lock,
+            options(nostack, preserves_flags),
+        );
+    }
 }

@@ -386,6 +386,18 @@ pub enum ExposeDecl {
     Config(ExposeConfigurationDecl),
 }
 
+// Guard against accidental size regressions in retained manifest declaration and reference types.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<ExposeDecl>() <= 72);
+    assert!(std::mem::size_of::<GenericRef>() <= 24);
+};
+#[cfg(all(target_pointer_width = "64", fuchsia_api_level_at_least = "HEAD"))]
+const _: () = {
+    assert!(std::mem::size_of::<ExposeDecl>() == 72);
+    assert!(std::mem::size_of::<GenericRef>() == 24);
+};
+
 impl SourceName for ExposeDecl {
     fn source_name(&self) -> &Name {
         match self {

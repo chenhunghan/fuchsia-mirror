@@ -195,6 +195,7 @@ fuchsia_component("component") {
   component_name = "mdns"
   deps = [ ":bin" ]
   manifest = "meta/mdns.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_package("mdns") {
@@ -291,7 +292,6 @@ fuchsia_test_component("device-name-provider-remote") {
 fuchsia_test_component("mdns-netemul-test") {
   manifest = "meta/mdns-netemul-test.cml"
   deps = [
-    ":component",
     ":device-name-provider-local",
     ":device-name-provider-remote",
     ":publisher",
@@ -302,7 +302,6 @@ fuchsia_test_component("mdns-netemul-test") {
 fuchsia_test_component("mdns-netemul-v6-test") {
   manifest = "meta/mdns-netemul-v6-test.cml"
   deps = [
-    ":component",
     ":device-name-provider-local",
     ":device-name-provider-remote",
     ":publisher",
@@ -355,6 +354,7 @@ fuchsia_test_package("mdns-netemul-tests") {
     ":mdns-netemul-multi-network-test",
   ]
   subpackages = [
+    ":mdns",
     "//src/connectivity/network/testing/netemul/configurable-netstack",
     "//src/connectivity/network/testing/netemul/sync-manager",
   ]

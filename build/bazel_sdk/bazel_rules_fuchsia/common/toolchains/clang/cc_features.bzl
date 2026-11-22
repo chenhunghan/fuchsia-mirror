@@ -14,10 +14,13 @@ load(
 )
 load(
     "@fuchsia_rules_common//build_flags:default_flag_values.bzl",
+    "ARM64_BASELINE_C_FAMILY_FLAGS",
     "DEFAULT_WARNINGS_CFLAGS",
     "DEFAULT_WARNINGS_DEFINES",
     "THREAD_SAFETY_CFLAGS",
     "THREAD_SAFETY_DEFINES",
+    "X64_BASELINE_CFLAGS",
+    "X64_MITIGATE_SKYLAKE_JCC_CFLAGS",
 )
 
 _all_actions = [
@@ -302,7 +305,25 @@ _flag_configs = struct(
         cflags = THREAD_SAFETY_CFLAGS + ["-D" + d for d in THREAD_SAFETY_DEFINES],
         combine_cflags_with_ldflags = False,
     ),
+    # The Fuchsia platform CPU baselines, see //build/config:cpu_baseline.
+    # The x64 flags are cflags only in GN, while the arm64 ones are
+    # c_family_flags, i.e. also passed to the linker.
+    cpu_baseline_fuchsia_x64 = _make_flag_config(
+        cflags = X64_BASELINE_CFLAGS + X64_MITIGATE_SKYLAKE_JCC_CFLAGS,
+        combine_cflags_with_ldflags = False,
+    ),
+    cpu_baseline_fuchsia_arm64 = _make_flag_config(
+        cflags = ARM64_BASELINE_C_FAMILY_FLAGS,
+    ),
 )
+
+# Maps a Fuchsia target_cpu value to the _flag_configs entry of the matching
+# Fuchsia platform CPU baseline.
+# TODO(https://fxbug.dev/565437401): Add riscv64.
+_FUCHSIA_CPU_BASELINES = {
+    "arm64": _flag_configs.cpu_baseline_fuchsia_arm64,
+    "x64": _flag_configs.cpu_baseline_fuchsia_x64,
+}
 
 #
 ## Begin feature definitions
@@ -312,6 +333,7 @@ _flag_configs = struct(
 def get_default_compile_flags_feature(
         clang_info,
         target_os,
+        target_cpu = "",
         sysroot = "",
         use_default_build_flags = False):
     """Compute the special "default_compile_flags" feature().
@@ -322,6 +344,8 @@ def get_default_compile_flags_feature(
     Args:
        clang_info: A ClangInfo provider value.
        target_os: Target OS, following Fuchsia conventions.
+       target_cpu: Target CPU, following Fuchsia conventions. Used to
+           select the CPU baseline flags for Fuchsia targets.
        sysroot: Optional path to sysroot to use.
        use_default_build_flags: True when building in-tree with
            @fuchsia_rules_common//build_flags:use_default_build_flags
@@ -355,31 +379,39 @@ def get_default_compile_flags_feature(
         combine_cflags_with_ldflags = False,
     )
 
-    # Flags not yet in @fuchsia_build_info//default_build_flags (to be moved to
-    # oot_only_* as their corresponding build_flags() targets are added in
-    # //build/config/**/BUILD.bazel):
     in_tree_remaining_cflags = [
         default_system_flags,
-        _flag_configs.color_diagnostics,
-        _flag_configs.no_frame_pointers,
-        _flag_configs.default_warnings,
-        _flag_configs.ffp_contract_off,
     ]
 
+    # The CPU baseline, only for Fuchsia targets, matching GN. Already in
+    # @fuchsia_build_info//default_build_flags (cpu_baseline, through
+    # //build/config:compiler).
+    cpu_baseline_flag_configs = (
+        [_FUCHSIA_CPU_BASELINES[target_cpu]] if (
+            target_os == "fuchsia" and target_cpu in _FUCHSIA_CPU_BASELINES
+        ) else []
+    )
+
     # Already in @fuchsia_build_info//default_build_flags (auto_var_init,
-    # default_debuginfo, default_linker_gc, libcpp_remove_transitive_includes,
-    # relative_paths, symbol_visibility_hidden, thread_safety_annotations).
+    # color_diagnostics, cpu_baseline, default_debuginfo, default_linker_gc,
+    # default_warnings, ffp_contract_off, libcpp_remove_transitive_includes,
+    # no_frame_pointers, relative_paths, symbol_visibility_hidden,
+    # thread_safety_annotations).
     # NOTE: //build/config/fuchsia:zircon_asserts (ZX_ASSERT_LEVEL) is not
     # supported OOT.
     oot_only_cflags = [] if use_default_build_flags else [
         _flag_configs.auto_var_init,
+        _flag_configs.color_diagnostics,
         _flag_configs.debuginfo,
+        _flag_configs.default_warnings,
+        _flag_configs.ffp_contract_off,
         _flag_configs.libcpp_remove_transitive_includes,
         _flag_configs.linker_gc,
+        _flag_configs.no_frame_pointers,
         _flag_configs.relpath_debug_info,
         _flag_configs.symbol_visibility_hidden,
         _flag_configs.thread_safety_annotations,
-    ]
+    ] + cpu_baseline_flag_configs
 
     in_tree_remaining_conlyflags = [
         default_system_flags,
@@ -410,21 +442,21 @@ def get_default_compile_flags_feature(
     in_tree_remaining_ldflags = [
         default_system_flags,
         _flag_configs.driver_mode,
-        _flag_configs.color_diagnostics,
-        _flag_configs.no_frame_pointers,
     ]
 
-    # Already in @fuchsia_build_info//default_build_flags (default_debuginfo,
-    # default_linker_gc, no_exceptions, icf, relative_paths,
-    # shared_library_config):
+    # Already in @fuchsia_build_info//default_build_flags (color_diagnostics,
+    # cpu_baseline, default_debuginfo, default_linker_gc, no_exceptions,
+    # no_frame_pointers, icf, relative_paths, shared_library_config):
     oot_only_ldflags = [] if use_default_build_flags else [
+        _flag_configs.color_diagnostics,
         _flag_configs.debuginfo,
         _flag_configs.linker_gc,
         _flag_configs.no_exceptions,
+        _flag_configs.no_frame_pointers,
         _flag_configs.no_rtti,
         _flag_configs.icf,
         _flag_configs.relpath_debug_info,
-    ]
+    ] + cpu_baseline_flag_configs
 
     return feature(
         name = "default_compile_flags",
@@ -433,7 +465,7 @@ def get_default_compile_flags_feature(
             flag_set(
                 actions = _all_compile_actions,
                 flag_groups = _iter_cflags(
-                    in_tree_remaining_cflags + oot_only_cflags + (
+                    in_tree_remaining_cflags + oot_only_cflags + ([] if use_default_build_flags else (
                         [
                             # TODO(b/430020292): Re-enable werror for
                             # strict-prototypes on host when we have a better
@@ -445,7 +477,7 @@ def get_default_compile_flags_feature(
                                 ],
                             ),
                         ] if is_host else [_flag_configs.werror]
-                    ),
+                    )),
                 ),
             ),
             # These are conlyflags that will be added to all builds
@@ -462,6 +494,21 @@ def get_default_compile_flags_feature(
                     in_tree_remaining_ccflags + oot_only_ccflags,
                 ),
             ),
+            # LINT.IfChange(clang_defaults)
+            flag_set(
+                actions = [
+                    ACTION_NAMES.assemble,
+                    ACTION_NAMES.preprocess_assemble,
+                ],
+                flag_groups = [
+                    flag_group(flags = ["-Wa,--mrelax-relocations=yes"]),
+                ] if (target_cpu == "x64" and target_os in ("fuchsia", "linux")) else [],
+            ),
+            # LINT.ThenChange(
+            #     //build/config/BUILD.bazel:clang_defaults,
+            #     //build/config/BUILD.gn:clang_defaults,
+            # )
+        ] + ([] if use_default_build_flags else [
             # These are cflags that will be added to dbg builds
             flag_set(
                 actions = _all_compile_actions,
@@ -481,6 +528,7 @@ def get_default_compile_flags_feature(
                 ]),
                 with_features = _apply_if("opt"),
             ),
+        ]) + [
 
             # Begin link Actions:
             # Note: The link actions must be added to the 'default_compile_flags' feature.
@@ -566,6 +614,7 @@ def get_default_compile_flags_feature(
                     ),
                 ],
             ),
+        ] + ([] if use_default_build_flags else [
             # These are ldflags that will be added to dbg builds
             flag_set(
                 actions = _all_link_actions,
@@ -584,7 +633,7 @@ def get_default_compile_flags_feature(
                 ]),
                 with_features = _apply_if("opt"),
             ),
-        ],
+        ]),
         enabled = True,
         implies = [
             # LINT.IfChange(target_system_name)

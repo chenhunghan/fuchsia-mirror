@@ -7,9 +7,9 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_DEV_POWER_H_
 #define ZIRCON_KERNEL_INCLUDE_DEV_POWER_H_
 
-#include <lib/zx/result.h>
+#include <stdint.h>
 #include <sys/types.h>
-#include <zircon/compiler.h>
+#include <zircon/types.h>
 
 enum class power_reboot_flags {
   REBOOT_NORMAL = 0,
@@ -38,23 +38,11 @@ static_assert(alignof(power_reboot_flags) == 4, "power_reboot_flags align mismat
 static_assert(sizeof(power_cpu_state) == 4, "power_cpu_state size mismatch");
 static_assert(alignof(power_cpu_state) == 4, "power_cpu_state align mismatch");
 
-void power_reboot(power_reboot_flags flags);
-void power_shutdown();
-zx_status_t power_cpu_off();
-
 // Initiates the power on sequence for the CPU with the given hardware CPU ID. Note that a hardware
 // CPU ID is architecture specific (e.g. MPID on ARM, hart ID on RISC-V, etc.) and not equivalent to
-// a cpu_num_t. This function does not block/wait on the CPU actually coming online. Callers are
-// expected to use power_get_cpu_state to poll the state of the CPU until it comes online.
+// a cpu_num_t. This function does not block/wait on the CPU actually coming online.
 //
 // On some architectures, the context argument is passed to the newly started CPU.
 zx_status_t power_cpu_on(uint64_t hw_cpu_id, paddr_t entry, uint64_t context);
-zx::result<power_cpu_state> power_get_cpu_state(uint64_t hw_cpu_id);
-
-// Restores platform power state that firmware may have altered while the system was suspended
-// (e.g. CPU OPP registers re-initialized by firmware on resume). Must be called on the boot CPU,
-// with interrupts disabled, immediately after returning from system suspend. Platforms without
-// such state treat this as a no-op and return ZX_OK.
-zx_status_t power_system_resume();
 
 #endif  // ZIRCON_KERNEL_INCLUDE_DEV_POWER_H_

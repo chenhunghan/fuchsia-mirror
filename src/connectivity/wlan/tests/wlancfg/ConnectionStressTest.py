@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env fuchsia-vendored-python
 #
 # Copyright 2025 The Fuchsia Authors
 # Use of this source code is governed by a BSD-style license that can be
@@ -7,12 +7,12 @@
 Script for testing WiFi connection and disconnection in a loop
 """
 
+import asyncio
+import enum
 import logging
-import time
 from dataclasses import dataclass
 from datetime import timedelta
 
-import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_wlan_base_test
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
@@ -26,8 +26,10 @@ from openwrt_access_point.lib.access_point_config import (
     DEFAULT_2G_CHANNEL,
     DEFAULT_5G_CHANNEL,
     AccessPointConfig,
+    Band,
     BssChannel,
     BssSettings,
+    LegacyMode,
     RadioConfig,
     Security,
     SecurityOpen,
@@ -36,12 +38,68 @@ from openwrt_access_point.lib.access_point_config import (
 from openwrt_access_point.lib.access_point_config_mapper import (
     AccessPointConfigMapper as ConfigMapper,
 )
+from openwrt_access_point.lib.uci_options import BasicRate, SupportedRates
+from openwrt_access_point.lib.uci_radio_options import UciRadioOptions
 
 
-@dataclass
+@enum.unique
+class _PhyMode(enum.StrEnum):
+    MODE_11N_2G = "11n_2g"
+    MODE_11AC_5G = "11ac_5g"
+    MODE_11B_2G = "11b_2g"
+    MODE_11G_2G = "11g_2g"
+    MODE_11A_5G = "11a_5g"
+
+    @property
+    def channel(self) -> BssChannel:
+        match self:
+            case _PhyMode.MODE_11N_2G:
+                return DEFAULT_2G_CHANNEL
+            case _PhyMode.MODE_11AC_5G:
+                return DEFAULT_5G_CHANNEL
+            case _PhyMode.MODE_11B_2G | _PhyMode.MODE_11G_2G:
+                return BssChannel(
+                    Band.BAND_2G, DEFAULT_2G_CHANNEL.number, LegacyMode()
+                )
+            case _PhyMode.MODE_11A_5G:
+                return BssChannel(
+                    Band.BAND_5G, DEFAULT_5G_CHANNEL.number, LegacyMode()
+                )
+
+    @property
+    def legacy_profile(self) -> str:
+        match self:
+            case _PhyMode.MODE_11N_2G | _PhyMode.MODE_11AC_5G:
+                return "whirlwind"
+            case _PhyMode.MODE_11B_2G | _PhyMode.MODE_11A_5G:
+                return "whirlwind_11ab_legacy"
+            case _PhyMode.MODE_11G_2G:
+                return "whirlwind_11ag_legacy"
+
+    @property
+    def custom_uci_options(self) -> UciRadioOptions:
+        match self:
+            case _PhyMode.MODE_11B_2G:
+                return {
+                    "supported_rates": SupportedRates.CCK,
+                    "basic_rates": BasicRate.CCK,
+                }
+            case _PhyMode.MODE_11G_2G:
+                return {
+                    "supported_rates": SupportedRates.OFDM,
+                    "basic_rates": BasicRate.OFDM_ONLY,
+                }
+            case (
+                _PhyMode.MODE_11N_2G
+                | _PhyMode.MODE_11AC_5G
+                | _PhyMode.MODE_11A_5G
+            ):
+                return {}
+
+
+@dataclass(frozen=True)
 class TestParams:
-    profile: str
-    channel: BssChannel
+    phy_mode: _PhyMode
     security: Security
     ap_ssid: str
     ap_password: str | None
@@ -60,33 +118,26 @@ class ConnectionStressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         tests: list[TestParams] = []
 
         # Successful associate
-        for profile in [
-            "whirlwind",
-            "whirlwind_11ab_legacy",
-            "whirlwind_11ag_legacy",
-        ]:
-            for channel in [DEFAULT_2G_CHANNEL, DEFAULT_5G_CHANNEL]:
-                ssid = AccessPointConfig.random_string(10)
-                tests.append(
-                    TestParams(
-                        profile=profile,
-                        channel=channel,
-                        security=SecurityOpen(),
-                        ap_ssid=ssid,
-                        ap_password=None,
-                        dut_ssid=ssid,
-                        dut_password=None,
-                        expect_associated=True,
-                    )
-                )
-
-        # Wrong SSID
-        for channel in [DEFAULT_2G_CHANNEL, DEFAULT_5G_CHANNEL]:
+        for phy_mode in _PhyMode:
             ssid = AccessPointConfig.random_string(10)
             tests.append(
                 TestParams(
-                    profile="whirlwind",
-                    channel=channel,
+                    phy_mode=phy_mode,
+                    security=SecurityOpen(),
+                    ap_ssid=ssid,
+                    ap_password=None,
+                    dut_ssid=ssid,
+                    dut_password=None,
+                    expect_associated=True,
+                )
+            )
+
+        # Wrong SSID
+        for phy_mode in (_PhyMode.MODE_11N_2G, _PhyMode.MODE_11AC_5G):
+            ssid = AccessPointConfig.random_string(10)
+            tests.append(
+                TestParams(
+                    phy_mode=phy_mode,
                     security=SecurityOpen(),
                     ap_ssid=ssid,
                     ap_password=None,
@@ -97,13 +148,12 @@ class ConnectionStressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             )
 
         # Wrong password
-        for channel in [DEFAULT_2G_CHANNEL, DEFAULT_5G_CHANNEL]:
+        for phy_mode in (_PhyMode.MODE_11N_2G, _PhyMode.MODE_11AC_5G):
             ssid = AccessPointConfig.random_string(10)
             password = AccessPointConfig.random_string(20)
             tests.append(
                 TestParams(
-                    profile="whirlwind",
-                    channel=channel,
+                    phy_mode=phy_mode,
                     security=SecurityWpa2(),
                     ap_ssid=ssid,
                     ap_password=password,
@@ -114,13 +164,13 @@ class ConnectionStressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             )
 
         def test_name(test: TestParams) -> str:
-            band = test.channel.band.lower()
             if test.expect_associated:
-                return f"test_{test.profile}_{band}"
+                return f"test_{test.phy_mode}"
+            band = test.phy_mode.channel.band.lower()
             if test.ap_ssid != test.dut_ssid:
-                return f"test_{test.profile}_{band}_wrong_ssid"
+                return f"test_wrong_ssid_{band}"
             if test.ap_password != test.dut_password:
-                return f"test_{test.profile}_{band}_wrong_password"
+                return f"test_wrong_password_{band}"
             raise TypeError(f"Unknown name for {test}")
 
         self.generate_tests(
@@ -130,7 +180,6 @@ class ConnectionStressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     async def setup_class(self) -> None:
         await super().setup_class()
         self.log = logging.getLogger()
-        self.ssid = AccessPointConfig.random_string(10)
 
         # Set country code US for 5G DFS channels
         await self.dut.wlan_policy.set_country_code(
@@ -178,40 +227,40 @@ class ConnectionStressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         Args:
             test: TestParams containing configuration
         """
+        radio_config = RadioConfig.generate(
+            channel=test.phy_mode.channel,
+            custom_uci_options=test.phy_mode.custom_uci_options,
+            bss_settings=[
+                BssSettings(
+                    ssid=test.ap_ssid,
+                    security=test.security,
+                    password=test.ap_password,
+                ),
+            ],
+        )
         if self.openwrt_ap:
-            config = AccessPointConfig(
-                radios=[
-                    RadioConfig.generate(
-                        channel=test.channel,
-                        bss_settings=[
-                            BssSettings(
-                                ssid=test.ap_ssid,
-                                security=test.security,
-                                password=test.ap_password,
-                            ),
-                        ],
-                    )
-                ]
+            self.openwrt_ap.configure_wifi(
+                AccessPointConfig(radios=[radio_config])
             )
-            self.openwrt_ap.configure_wifi(config)
         elif self.access_point:
             security = ConfigMapper.to_hostapd_security(test.security)
+            legacy_ap_params = (
+                ConfigMapper.to_legacy_params(radio_config)
+                if radio_config.custom_uci_options
+                else None
+            )
             setup_ap(
                 access_point=self.access_point,
-                profile_name=test.profile,
-                channel=test.channel.number,
+                profile_name=test.phy_mode.legacy_profile,
+                channel=test.phy_mode.channel.number,
                 ssid=test.ap_ssid,
                 security=DeprecatedSecurity(
                     security_mode=security, password=test.ap_password
                 ),
+                additional_ap_parameters=legacy_ap_params,
             )
 
-        if isinstance(test.security, SecurityOpen):
-            security_type = f_wlan_policy.SecurityType.NONE
-        elif isinstance(test.security, SecurityWpa2):
-            security_type = f_wlan_policy.SecurityType.WPA2
-        else:
-            raise TypeError(f"Unsupported security type: {test.security}")
+        security_type = test.security.to_fidl_wlan_policy()
 
         for iteration in range(0, self.num_of_iterations):
             associated = False
@@ -243,7 +292,7 @@ class ConnectionStressTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             await self.dut.wlan_policy.wait_for_no_connections()
 
             # Wait a second before trying again
-            time.sleep(1)
+            await asyncio.sleep(1)
 
 
 if __name__ == "__main__":

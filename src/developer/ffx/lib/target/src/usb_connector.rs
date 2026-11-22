@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 use crate::Resolution;
-use crate::target_connector::{
+use crate::transport_connector::{
     BUFFER_SIZE, FDomainConnection, OvernetConnection, TargetConnection, TargetConnectionError,
-    TargetConnector,
+    TransportConnector,
 };
 use anyhow::Result;
 use ffx_command_error::FfxContext as _;
@@ -120,7 +120,7 @@ impl TryFromEnvContext for UsbConnector {
     }
 }
 
-impl TargetConnector for UsbConnector {
+impl TransportConnector for UsbConnector {
     const CONNECTION_TYPE: &'static str = "USB VSOCK";
 
     async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {

@@ -2,8 +2,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/components.gni")
 import("//build/python/python_library.gni")
 import("//build/testing/perf/test.gni")
+
+if (is_fuchsia) {
+  executable("set_name_helper_bin") {
+    testonly = true
+    output_name = "set_name_helper"
+    sources = [ "test/set_name_helper.cc" ]
+
+    # For thrd_create_with_name().
+    configs += [ "//build/config:all_source" ]
+    deps = [
+      "//src/lib/fxl/test:gtest_main",
+      "//third_party/googletest:gtest",
+    ]
+  }
+
+  fuchsia_unittest_package("set_name_helper") {
+    deps = [ ":set_name_helper_bin" ]
+  }
+}
 
 python_perf_test("perf_publish_example") {
   main_source = "test/perf_publish_example.py"
@@ -28,10 +48,14 @@ python_perf_test("perftest_trace_events_test") {
   }
   expected_metric_names_filepaths = []
   libraries = [
+    "//src/performance/lib/tp_shell",
     "//src/performance/lib/trace_processing",
     "//src/testing/end_to_end/mobly_base_tests/fuchsia_base_test",
   ]
-  package_deps = [ "//src/tests/microbenchmarks:fuchsia_microbenchmarks" ]
+  package_deps = [
+    ":set_name_helper",
+    "//src/tests/microbenchmarks:fuchsia_microbenchmarks",
+  ]
 }
 
 python_perf_test("tracing_microbenchmarks_test") {
@@ -93,6 +117,7 @@ group("test") {
     "//src/diagnostics:benchmarks",
     "//src/graphics/benchmarks",
     "//src/lib/diagnostics:benchmarks",
+    "//src/lib/fuchsia-async:benchmarks",
     "//src/lib/fuchsia-rcu:benchmarks",
     "//src/media/audio/audio_core/mixer/tools:benchmarks",
     "//src/performance/trace_bench:benchmarks",

@@ -5,6 +5,8 @@
 #ifndef SRC_DEVICES_BIN_DRIVER_MANAGER_COMPOSITE_COMPOSITE_MANAGER_BRIDGE_H_
 #define SRC_DEVICES_BIN_DRIVER_MANAGER_COMPOSITE_COMPOSITE_MANAGER_BRIDGE_H_
 
+#include <lib/stdcompat/span.h>
+
 #include "src/devices/bin/driver_manager/composite/composite_node_spec.h"
 
 namespace driver_manager {
@@ -18,6 +20,11 @@ class CompositeManagerBridge {
   // Match and bind all unbound nodes. Called by the CompositeNodeManager
   // after a composite node spec is matched to a composite driver.
   virtual void BindNodesForCompositeNodeSpec() = 0;
+
+  virtual void BindNodesForCompositeNodeSpec(
+      cpp20::span<const fuchsia_driver_framework::ParentSpec2> parent_specs) {
+    BindNodesForCompositeNodeSpec();
+  }
 
   virtual void AddSpecToDriverIndex(fuchsia_driver_framework::wire::CompositeNodeSpec spec,
                                     AddToIndexCallback callback) = 0;

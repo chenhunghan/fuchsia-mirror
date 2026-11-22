@@ -116,10 +116,10 @@ closed protocol Access {
         token server_end:ProcedureToken;
     }) -> () error Error;
 
-    /// Returns a list of all peers (connectable Bluetooth devices) known to the system. The first
-    /// call results in a snapshot of all known peers to be sent immediately in the `updated` return
-    /// paremeter. Subsequent calls receive a response only when one or more entries have been
-    /// added, modified, or removed from the entries reported since the most recent call.
+    /// Monitor the peers (connectable Bluetooth devices) known to the system. The first call
+    /// returns a snapshot of all known peers immediately in the `updated` return parameter.
+    /// Subsequent calls receive a response only when one or more entries have been added, modified,
+    /// or removed since the most recent call.
     ///
     /// - response `updated` Peers that were added or updated since the last call to WatchPeers().
     /// - response `removed` Ids of peers that were removed since the last call to WatchPeers().

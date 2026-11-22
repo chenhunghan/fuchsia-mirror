@@ -163,7 +163,6 @@ fuchsia_driver_component("component-cpp") {
     ":driver-cpp",
     ":focaltech_touch_bind",
   ]
-  info = "meta/focaltech-info.json"
   dml_label = ":focaltech-cpp-dml"
 }
 
@@ -173,7 +172,6 @@ fuchsia_driver_component("component-sherlock-cpp") {
     ":driver-cpp-sherlock",
     ":focaltech_touch_bind",
   ]
-  info = "meta/focaltech-sherlock-info.json"
   dml_label = ":focaltech-sherlock-cpp-dml"
 }
 
@@ -183,7 +181,6 @@ fuchsia_driver_component("component-rust") {
     ":driver-rust",
     ":focaltech_touch_bind",
   ]
-  info = "meta/focaltech-info.json"
   dml_label = ":focaltech-rust-dml"
 }
 
@@ -193,7 +190,6 @@ fuchsia_driver_component("component-sherlock-rust") {
     ":driver-rust-sherlock",
     ":focaltech_touch_bind",
   ]
-  info = "meta/focaltech-sherlock-info.json"
   dml_label = ":focaltech-sherlock-rust-dml"
 }
 

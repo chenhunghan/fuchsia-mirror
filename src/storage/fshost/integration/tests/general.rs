@@ -5,7 +5,7 @@
 use blob_writer::BlobWriter;
 use crypt_policy as _;
 use delivery_blob::{CompressionMode, Type1Blob};
-use fidl_fuchsia_fxfs::{BlobCreatorProxy, BlobReaderProxy};
+use fidl_fuchsia_fxfs::BlobCreatorProxy;
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_update_verify::HealthStatus;
 use fshost_test_fixture::VFS_TYPE_MEMFS;
@@ -155,12 +155,7 @@ async fn delivery_blob_support() {
     blob_writer.write(&payload).await.unwrap();
 
     // We should now be able to open the blob by its hash and read the contents back.
-    let blob_reader: BlobReaderProxy = fixture
-        .realm
-        .root
-        .connect_to_protocol_at_exposed_dir()
-        .expect("connect_to_protocol_at_exposed_dir failed");
-    let vmo = blob_reader.get_vmo(&hash.into()).await.unwrap().unwrap();
+    let vmo = fixture.get_blob_vmo(&hash.into()).await.unwrap();
 
     // Read the last 1024 bytes of the file and ensure the bytes match the original `data`.
     let mut buf = vec![0; 1024];

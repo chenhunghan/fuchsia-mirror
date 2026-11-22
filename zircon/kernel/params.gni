@@ -136,7 +136,6 @@ kernel_test_environments = [
   astro_env,
   crosvm_env,
   nuc11_env,
-  nuc7_env,
   qemu_1cpu_env,
   qemu_env,
   sherlock_env,

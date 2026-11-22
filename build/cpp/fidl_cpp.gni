@@ -405,8 +405,25 @@ template("fidl_cpp_family") {
         additional_public_deps += [ "//sdk/lib/fidl/hlcpp:hlcpp_base" ]
       }
 
-      if (!defined(visibility) && !(defined(testonly) && testonly)) {
-        visibility = hlcpp_visibility
+      # Restrict non-testonly HLCPP bindings to the allowlist unless the
+      # invoker deliberately set a narrow visibility. A public visibility is
+      # treated like an undefined one: bazel2gn-synced libraries all carry
+      # `visibility = [ "*" ]` (from `//visibility:public` in BUILD.bazel),
+      # which must not bypass the allowlist. `:*` keeps sibling generated
+      # targets (e.g. `_cpp_hlcpp_conversion`, measure tapes) working.
+      if (!(defined(testonly) && testonly)) {
+        _is_public = !defined(visibility)
+        if (!_is_public) {
+          foreach(_pattern, visibility) {
+            if (_pattern == "*") {
+              _is_public = true
+            }
+          }
+        }
+        if (_is_public) {
+          visibility = []
+          visibility = hlcpp_visibility + [ ":*" ]
+        }
       }
     }
 

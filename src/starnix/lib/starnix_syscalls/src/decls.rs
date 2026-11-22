@@ -107,14 +107,17 @@ macro_rules! for_each_arch_arch32_syscall {
             _llseek,
             _newselect,
             arm_fadvise64_64,
+            chmod,
             chown,
             chown32,
             clock_gettime64,
+            creat,
             dup2,
             epoll_create,
             epoll_pwait,
             epoll_pwait2,
             epoll_wait,
+            eventfd,
             execve,
             execveat,
             fallocate,
@@ -140,6 +143,7 @@ macro_rules! for_each_arch_arch32_syscall {
             getresuid32,
             getrusage,
             gettimeofday,
+            inotify_init,
             io_pgetevents,
             io_pgetevents_time64,
             io_setup,
@@ -147,6 +151,7 @@ macro_rules! for_each_arch_arch32_syscall {
             ioctl,
             kexec_load,
             keyctl,
+            link,
             lseek,
             lstat,
             mkdir,
@@ -160,6 +165,7 @@ macro_rules! for_each_arch_arch32_syscall {
             open,
             open_by_handle_at,
             openat,
+            pause,
             poll,
             ppoll,
             ppoll_time64,
@@ -173,12 +179,15 @@ macro_rules! for_each_arch_arch32_syscall {
             pwritev,
             pwritev2,
             readahead,
+            readlink,
             recv,
             recvfrom,
             recvmmsg,
             recvmmsg_time64,
             recvmsg,
+            rename,
             renameat,  // renameat2
+            rmdir,
             rt_sigaction,
             rt_sigpending,
             rt_sigprocmask,
@@ -222,6 +231,7 @@ macro_rules! for_each_arch_arch32_syscall {
             stat64,
             statfs,
             statfs64,
+            symlink,
             sync_file_range2,
             sysinfo,
             timer_create,
@@ -967,6 +977,207 @@ impl SyscallDecl {
         }
 
         for_each_syscall! { syscall_number_to_trace_name_callback, number }
+    }
+
+    #[inline]
+    pub fn is_fs(&self) -> bool {
+        #[cfg(target_arch = "aarch64")]
+        if self.arch_width.is_arch32() {
+            return matches!(
+                self.number as u32,
+                starnix_uapi::arch32::__NR__llseek
+                    | starnix_uapi::arch32::__NR_access
+                    | starnix_uapi::arch32::__NR_arm_fadvise64_64
+                    | starnix_uapi::arch32::__NR_chdir
+                    | starnix_uapi::arch32::__NR_chmod
+                    | starnix_uapi::arch32::__NR_chown32
+                    | starnix_uapi::arch32::__NR_chroot
+                    | starnix_uapi::arch32::__NR_copy_file_range
+                    | starnix_uapi::arch32::__NR_creat
+                    | starnix_uapi::arch32::__NR_execve
+                    | starnix_uapi::arch32::__NR_execveat
+                    | starnix_uapi::arch32::__NR_faccessat
+                    | starnix_uapi::arch32::__NR_faccessat2
+                    | starnix_uapi::arch32::__NR_fallocate
+                    | starnix_uapi::arch32::__NR_fchdir
+                    | starnix_uapi::arch32::__NR_fchmod
+                    | starnix_uapi::arch32::__NR_fchmodat
+                    | starnix_uapi::arch32::__NR_fchown
+                    | starnix_uapi::arch32::__NR_fchown32
+                    | starnix_uapi::arch32::__NR_fchownat
+                    | starnix_uapi::arch32::__NR_fdatasync
+                    | starnix_uapi::arch32::__NR_flock
+                    | starnix_uapi::arch32::__NR_fsetxattr
+                    | starnix_uapi::arch32::__NR_fstat64
+                    | starnix_uapi::arch32::__NR_fstatat64
+                    | starnix_uapi::arch32::__NR_fstatfs
+                    | starnix_uapi::arch32::__NR_fstatfs64
+                    | starnix_uapi::arch32::__NR_fsync
+                    | starnix_uapi::arch32::__NR_ftruncate
+                    | starnix_uapi::arch32::__NR_ftruncate64
+                    | starnix_uapi::arch32::__NR_getcwd
+                    | starnix_uapi::arch32::__NR_getdents64
+                    | starnix_uapi::arch32::__NR_getxattr
+                    | starnix_uapi::arch32::__NR_inotify_add_watch
+                    | starnix_uapi::arch32::__NR_io_uring_enter
+                    | starnix_uapi::arch32::__NR_ioctl
+                    | starnix_uapi::arch32::__NR_lgetxattr
+                    | starnix_uapi::arch32::__NR_link
+                    | starnix_uapi::arch32::__NR_linkat
+                    | starnix_uapi::arch32::__NR_listxattr
+                    | starnix_uapi::arch32::__NR_llistxattr
+                    | starnix_uapi::arch32::__NR_lseek
+                    | starnix_uapi::arch32::__NR_lsetxattr
+                    | starnix_uapi::arch32::__NR_mkdir
+                    | starnix_uapi::arch32::__NR_mkdirat
+                    | starnix_uapi::arch32::__NR_mknodat
+                    | starnix_uapi::arch32::__NR_mmap2
+                    | starnix_uapi::arch32::__NR_mount
+                    | starnix_uapi::arch32::__NR_msync
+                    | starnix_uapi::arch32::__NR_open
+                    | starnix_uapi::arch32::__NR_openat
+                    | starnix_uapi::arch32::__NR_pivot_root
+                    | starnix_uapi::arch32::__NR_pread64
+                    | starnix_uapi::arch32::__NR_preadv
+                    | starnix_uapi::arch32::__NR_pwrite64
+                    | starnix_uapi::arch32::__NR_pwritev
+                    | starnix_uapi::arch32::__NR_read
+                    | starnix_uapi::arch32::__NR_readlink
+                    | starnix_uapi::arch32::__NR_readlinkat
+                    | starnix_uapi::arch32::__NR_readv
+                    | starnix_uapi::arch32::__NR_removexattr
+                    | starnix_uapi::arch32::__NR_rename
+                    | starnix_uapi::arch32::__NR_renameat2
+                    | starnix_uapi::arch32::__NR_rmdir
+                    | starnix_uapi::arch32::__NR_sendfile
+                    | starnix_uapi::arch32::__NR_sendfile64
+                    | starnix_uapi::arch32::__NR_setxattr
+                    | starnix_uapi::arch32::__NR_splice
+                    | starnix_uapi::arch32::__NR_stat64
+                    | starnix_uapi::arch32::__NR_statfs
+                    | starnix_uapi::arch32::__NR_statfs64
+                    | starnix_uapi::arch32::__NR_statx
+                    | starnix_uapi::arch32::__NR_symlink
+                    | starnix_uapi::arch32::__NR_symlinkat
+                    | starnix_uapi::arch32::__NR_sync
+                    | starnix_uapi::arch32::__NR_syncfs
+                    | starnix_uapi::arch32::__NR_truncate
+                    | starnix_uapi::arch32::__NR_truncate64
+                    | starnix_uapi::arch32::__NR_umount2
+                    | starnix_uapi::arch32::__NR_unlink
+                    | starnix_uapi::arch32::__NR_unlinkat
+                    | starnix_uapi::arch32::__NR_utimensat
+                    | starnix_uapi::arch32::__NR_write
+                    | starnix_uapi::arch32::__NR_writev
+            );
+        }
+
+        #[cfg(target_arch = "x86_64")]
+        if matches!(
+            self.number as u32,
+            starnix_uapi::__NR_access
+                | starnix_uapi::__NR_chmod
+                | starnix_uapi::__NR_chown
+                | starnix_uapi::__NR_creat
+                | starnix_uapi::__NR_getdents
+                | starnix_uapi::__NR_lchown
+                | starnix_uapi::__NR_link
+                | starnix_uapi::__NR_lstat
+                | starnix_uapi::__NR_mkdir
+                | starnix_uapi::__NR_mknod
+                | starnix_uapi::__NR_open
+                | starnix_uapi::__NR_readlink
+                | starnix_uapi::__NR_rename
+                | starnix_uapi::__NR_renameat
+                | starnix_uapi::__NR_rmdir
+                | starnix_uapi::__NR_stat
+                | starnix_uapi::__NR_symlink
+                | starnix_uapi::__NR_unlink
+        ) {
+            return true;
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        if self.number as u32 == starnix_uapi::__NR_renameat {
+            return true;
+        }
+
+        matches!(
+            self.number as u32,
+            starnix_uapi::__NR_chdir
+                | starnix_uapi::__NR_chroot
+                | starnix_uapi::__NR_copy_file_range
+                | starnix_uapi::__NR_execve
+                | starnix_uapi::__NR_execveat
+                | starnix_uapi::__NR_faccessat
+                | starnix_uapi::__NR_faccessat2
+                | starnix_uapi::__NR_fadvise64
+                | starnix_uapi::__NR_fallocate
+                | starnix_uapi::__NR_fchdir
+                | starnix_uapi::__NR_fchmod
+                | starnix_uapi::__NR_fchmodat
+                | starnix_uapi::__NR_fchown
+                | starnix_uapi::__NR_fchownat
+                | starnix_uapi::__NR_fdatasync
+                | starnix_uapi::__NR_fgetxattr
+                | starnix_uapi::__NR_flistxattr
+                | starnix_uapi::__NR_flock
+                | starnix_uapi::__NR_fremovexattr
+                | starnix_uapi::__NR_fsetxattr
+                | starnix_uapi::__NR_fstat
+                | starnix_uapi::__NR_fstatfs
+                | starnix_uapi::__NR_fsync
+                | starnix_uapi::__NR_ftruncate
+                | starnix_uapi::__NR_getcwd
+                | starnix_uapi::__NR_getdents64
+                | starnix_uapi::__NR_getxattr
+                | starnix_uapi::__NR_inotify_add_watch
+                | starnix_uapi::__NR_io_uring_enter
+                | starnix_uapi::__NR_ioctl
+                | starnix_uapi::__NR_lgetxattr
+                | starnix_uapi::__NR_linkat
+                | starnix_uapi::__NR_listxattr
+                | starnix_uapi::__NR_llistxattr
+                | starnix_uapi::__NR_lremovexattr
+                | starnix_uapi::__NR_lseek
+                | starnix_uapi::__NR_lsetxattr
+                | starnix_uapi::__NR_mkdirat
+                | starnix_uapi::__NR_mknodat
+                | starnix_uapi::__NR_mmap
+                | starnix_uapi::__NR_mount
+                | starnix_uapi::__NR_msync
+                | starnix_uapi::__NR_newfstatat
+                | starnix_uapi::__NR_openat
+                | starnix_uapi::__NR_openat2
+                | starnix_uapi::__NR_pivot_root
+                | starnix_uapi::__NR_pread64
+                | starnix_uapi::__NR_preadv
+                | starnix_uapi::__NR_preadv2
+                | starnix_uapi::__NR_pwrite64
+                | starnix_uapi::__NR_pwritev
+                | starnix_uapi::__NR_pwritev2
+                | starnix_uapi::__NR_read
+                | starnix_uapi::__NR_readahead
+                | starnix_uapi::__NR_readlinkat
+                | starnix_uapi::__NR_readv
+                | starnix_uapi::__NR_removexattr
+                | starnix_uapi::__NR_renameat2
+                | starnix_uapi::__NR_sendfile
+                | starnix_uapi::__NR_setxattr
+                | starnix_uapi::__NR_splice
+                | starnix_uapi::__NR_statfs
+                | starnix_uapi::__NR_statx
+                | starnix_uapi::__NR_symlinkat
+                | starnix_uapi::__NR_sync
+                | starnix_uapi::__NR_sync_file_range
+                | starnix_uapi::__NR_syncfs
+                | starnix_uapi::__NR_truncate
+                | starnix_uapi::__NR_umount2
+                | starnix_uapi::__NR_unlinkat
+                | starnix_uapi::__NR_utimensat
+                | starnix_uapi::__NR_write
+                | starnix_uapi::__NR_writev
+        )
     }
 }
 

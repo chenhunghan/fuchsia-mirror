@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::kernel::thread::AutoExpiringPreemptDisabler;
-use crate::object::{HandleValue, ProcessDispatcher, remove_user_handles};
+use crate::object::{HandleOwner, HandleValue, ProcessDispatcher, remove_user_handles};
 use crate::user_copy::UserInPtr;
 use debug::ltracef;
 use syscalls_macro::syscall;
@@ -52,38 +52,47 @@ fn handle_dup_replace_process(
     out: &mut HandleValue,
 ) -> Result<(), Status> {
     let table = up.handle_table();
-    let _preempt_disable = AutoExpiringPreemptDisabler::with_default_timeslice_extension();
-    ksync::lock!(let mut guard = table.write_lock());
-    let mut token_guard = guard.as_mut().as_token_guard_mut();
-    let source = table
-        .get_handle_entry_locked(&mut token_guard, up, handle_value)
-        .ok_or(Status::BAD_HANDLE)?;
+    // Hold any removed handle outside the locked closure so `drop(removed)` closes it only after
+    // `guard` and `_preempt_disable` have been released.
+    let mut removed: Option<HandleOwner> = None;
+    let res = (|| -> Result<(), Status> {
+        // `_preempt_disable` MUST remain declared before `guard` so `table.write_lock()` is
+        // released before clearing the timeslice extension.
+        let _preempt_disable = AutoExpiringPreemptDisabler::with_default_timeslice_extension();
+        ksync::lock!(let mut guard = table.write_lock());
+        let mut token_guard = guard.as_mut().as_token_guard_mut();
+        let source = table
+            .get_handle_entry_locked(&mut token_guard, up, handle_value)
+            .ok_or(Status::BAD_HANDLE)?;
 
-    if !is_replace && !source.as_ref().has_rights(ZX_RIGHT_DUPLICATE) {
-        return Err(Status::ACCESS_DENIED);
-    }
-
-    // When replacing, the source handle is removed from the table (and closed when the returned
-    // `HandleOwner` drops) on a rights mismatch and after a successful `dup`; a `NO_MEMORY`
-    // failure from `dup` leaves the source handle in place.
-    if rights == ZX_RIGHT_SAME_RIGHTS {
-        rights = source.as_ref().rights();
-    } else if (source.as_ref().rights() & rights) != rights {
-        if is_replace {
-            let _ = source.remove();
+        if !is_replace && !source.as_ref().has_rights(ZX_RIGHT_DUPLICATE) {
+            return Err(Status::ACCESS_DENIED);
         }
-        return Err(Status::INVALID_ARGS);
-    }
 
-    let handle = source.as_ref().dup(rights)?;
+        // When replacing, the source handle is removed from the table on a rights mismatch and
+        // after a successful `dup` (closing when `removed` drops after the table lock is
+        // released); a `NO_MEMORY` failure from `dup` leaves the source handle in place.
+        if rights == ZX_RIGHT_SAME_RIGHTS {
+            rights = source.as_ref().rights();
+        } else if (source.as_ref().rights() & rights) != rights {
+            if is_replace {
+                removed = Some(source.remove());
+            }
+            return Err(Status::INVALID_ARGS);
+        }
 
-    if is_replace {
-        let _ = source.remove();
-    }
+        let handle = source.as_ref().dup(rights)?;
 
-    *out = table.map_handle_to_value(handle.as_ref());
-    table.add_handle_locked_guard(handle, &mut token_guard);
-    Ok(())
+        if is_replace {
+            removed = Some(source.remove());
+        }
+
+        *out = table.map_handle_to_value(handle.as_ref());
+        table.add_handle_locked_guard(handle, &mut token_guard);
+        Ok(())
+    })();
+    drop(removed);
+    res
 }
 
 /// Helper routine implementing common logic for `zx_handle_duplicate` and `zx_handle_replace`.
@@ -276,7 +285,17 @@ mod tests {
         ));
         expect_eq!(process.handle_table().handle_count(), 1);
 
-        let _ = process.remove_handle(no_dup_out);
+        // Replacing the sole handle with invalid rights closes it and signals peer-closed.
+        expect_err!(
+            handle_dup_replace_process(
+                process,
+                true,
+                no_dup_out,
+                rights_no_dup | 0x8000_0000,
+                &mut fail_replace_val,
+            ),
+            Status::INVALID_ARGS
+        );
         expect_eq!(process.handle_table().handle_count(), 0);
         expect_err!(
             ep_no_dup1.dispatcher().user_signal_peer(0, zx_types::ZX_USER_SIGNAL_0),

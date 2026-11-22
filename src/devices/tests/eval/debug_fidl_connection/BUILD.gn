@@ -42,7 +42,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/component_info.json"
 }
 
 rustc_test("bin") {

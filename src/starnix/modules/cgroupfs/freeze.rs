@@ -53,3 +53,32 @@ impl BytesFileOps for FreezeFile {
         Ok(state_str.as_bytes().to_owned().into())
     }
 }
+
+/// Backs `cgroup.stat.local`, a read-only file present on every non-root cgroup v2 directory.
+///
+/// Its single line, `frozen_usec <usec>`, reports the cumulative wall time the cgroup has been
+/// effectively frozen (either by its own `cgroup.freeze` or by an ancestor's), in microseconds.
+/// The counter only ever grows and is not reset on thaw.
+pub struct StatLocalFile {
+    cgroup: Weak<dyn CgroupOps>,
+}
+
+impl StatLocalFile {
+    pub fn new_node(cgroup: Weak<dyn CgroupOps>) -> impl FsNodeOps {
+        BytesFile::new_node(Self { cgroup })
+    }
+
+    fn cgroup(&self) -> Result<Arc<dyn CgroupOps>, Errno> {
+        self.cgroup.upgrade().ok_or_else(|| errno!(ENODEV))
+    }
+}
+
+impl BytesFileOps for StatLocalFile {
+    fn read(&self, _current_task: &CurrentTask) -> Result<Cow<'_, [u8]>, Errno> {
+        let cgroup = self.cgroup()?;
+        let freezer = cgroup.freezer().ok_or_else(|| errno!(ENODEV))?;
+        let frozen_usec = freezer.get_freezer_state().frozen_duration.into_micros().max(0);
+        let stat_str = format!("frozen_usec {}\n", frozen_usec);
+        Ok(stat_str.into_bytes().into())
+    }
+}

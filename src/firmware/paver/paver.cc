@@ -378,7 +378,7 @@ std::optional<Configuration> GetActiveConfiguration(const abr::Client& abr_clien
 
 // Helper to wrap a std::variant with a WriteFirmwareResult union.
 //
-// This can go away once llcpp unions support owning memory, but until then we
+// This can go away once wire unions support owning memory, but until then we
 // need the variant to own the underlying data.
 //
 // |variant| must outlive the returned WriteFirmwareResult.

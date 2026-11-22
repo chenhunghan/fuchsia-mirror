@@ -30,6 +30,10 @@ import("//build/python/python_library.gni")
 #     Forwarded to python_c_extension_shared_lib.
 #     Type: list(target)
 #
+#   defines (optional)
+#     Forwarded to python_c_extension_shared_lib.
+#     Type: list(string)
+#
 #   public_configs (optional)
 #     Forwarded to python_c_extension_shared_lib.
 #     Type: list(target)
@@ -58,13 +62,15 @@ template("python_c_extension") {
                            [
                              "assert_no_deps",
                              "configs",
+                             "defines",
                              "public_configs",
                              "deps",
                              "sources",
                              "testonly",
+                             "visibility",
                            ])
-    if (defined(invoker.visibility)) {
-      visibility += invoker.visibility
+    if (defined(visibility)) {
+      visibility += [ ":${main_target_name}_wrapper" ]
     }
   }
 
@@ -114,9 +120,13 @@ template("python_c_extension") {
                            [
                              "assert_no_deps",
                              "testonly",
+                             "visibility",
                            ])
-    if (defined(invoker.visibility)) {
-      visibility += invoker.visibility
+    if (defined(visibility)) {
+      visibility += [
+        ":${main_target_name}",
+        ":${main_target_name}.library_infos",
+      ]
     }
 
     deps = [ ":${main_target_name}_wrapper" ]

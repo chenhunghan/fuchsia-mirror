@@ -125,7 +125,7 @@ pub async fn check_usb_driver<W: Write, D: UsbDriverFinder>(
     ledger: &mut LedgerNodeGuard<'_, W>,
     env_context: &EnvironmentContext,
 ) {
-    if !env_context.get(ffx_config::keys::USB_ENABLED).unwrap_or(false) {
+    if !env_context.get(ffx_config::keys::USB_ENABLED).unwrap_or(true) {
         return;
     }
     let mut usb_driver_node = ledger.add_node("FFX USB Driver", LedgerMode::Automatic);

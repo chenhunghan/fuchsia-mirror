@@ -172,7 +172,7 @@ kernel.jitterentropy.raw=$RAW
 
 ## Test results and analysis
 
-### Effects of pseudorandom loop counts
+### Effects of pseudorandom loop counts {:#effects-of-pseudorandom-loop-counts}
 
 #### Raw Data
 
@@ -240,7 +240,7 @@ we are too optimistic, we might have a security vulnerability. Ultimately, this
 forces a trade-off between security (which prefers conservative entropy
 estimates) and efficiency (which prefers optimistic entropy estimates).
 
-### Effects of processing the raw samples
+### Effects of processing the raw samples {:#effects-of-processing-the-raw-samples}
 
 #### Raw Data
 

@@ -110,8 +110,7 @@ impl MasqueradeState {
     }
 }
 
-// Convert errors observed on `fuchsia.net.filter` to errors on the Masquerade
-// API.
+// Errors observed on `fuchsia.net.filter` are fatal to netcfg.
 impl From<FilterError> for Error {
     fn from(error: FilterError) -> Error {
         match error {
@@ -304,7 +303,7 @@ impl MasqueradeHandler {
                 config,
                 fnet_masquerade::ControlRequest::SetEnabled { enabled, responder },
             ) => {
-                let response = self.set_enabled(filter, config.clone(), enabled).await;
+                let response = self.set_enabled(filter, config, enabled).await;
                 if let Some(state) = self.active_controllers.get_mut(&config) {
                     state.respond_and_maybe_shutdown(response, |r| responder.send(r));
                 } else {
@@ -326,24 +325,22 @@ impl MasqueradeHandler {
                             );
                         }
                     }
-                    // The controller was already cleaned up by
-                    // `handle_interface_removed` due to a race between the
-                    // interface removal and the client disconnect.
+                    // `set_enabled` returns `InvalidArguments` when `config` is
+                    // not in `active_controllers`. Aside from `Disconnect`
+                    // itself, only `handle_interface_removed` removes tracked
+                    // controllers; shutting down the control handle there (or a
+                    // concurrent client close) still triggers this chained
+                    // `Disconnect` event afterward, so nothing is left to do.
                     Err(Error::InvalidArguments) => {}
-                    // Interface is gone (Netstack failed to disable), but
-                    // controller is still tracked. Clean it up.
-                    Err(Error::NotFound) | Err(Error::BadRule) => {
-                        let _removed_controller: Option<MasqueradeState> =
-                            self.active_controllers.remove(&config);
-                    }
-                    Err(Error::RetryExceeded) => error!(
-                        "Failed to removed masquerade configuration for disconnected client \
-                            (RetryExceeded): {config:?}"
-                    ),
-                    Err(Error::AlreadyExists) | Err(Error::Unsupported) => {
-                        panic!("removing existing configuration cannot fail")
-                    }
-                    Err(Error::__SourceBreaking { unknown_ordinal: _ }) => {}
+                    // Unreachable: `InvalidArguments` is handled above, and
+                    // `From<FilterError> for Error` panics or exits netcfg
+                    // rather than returning any other `Error` variant from
+                    // `set_enabled`.
+                    Err(
+                        e @ (Error::AlreadyExists
+                        | Error::Unsupported
+                        | Error::__SourceBreaking { unknown_ordinal: _ }),
+                    ) => unreachable!("removing existing configuration cannot fail: {e:?}"),
                 }
             }
         }
@@ -351,7 +348,7 @@ impl MasqueradeHandler {
 }
 
 trait RespondAndMaybeShutdown {
-    fn respond_and_maybe_shutdown<T: Clone, Sender>(
+    fn respond_and_maybe_shutdown<T, Sender>(
         &self,
         response: Result<T, fnet_masquerade::Error>,
         sender: Sender,
@@ -359,48 +356,40 @@ trait RespondAndMaybeShutdown {
         Sender: FnOnce(Result<T, fnet_masquerade::Error>) -> Result<(), fidl::Error>;
 }
 
-fn to_epitaph(e: Error) -> fidl::Status {
+fn to_epitaph(e: &Error) -> fidl::Status {
     match e {
         Error::Unsupported => fidl::Status::NOT_SUPPORTED,
         Error::InvalidArguments => fidl::Status::INVALID_ARGS,
-        Error::NotFound => fidl::Status::NOT_FOUND,
         Error::AlreadyExists => fidl::Status::ALREADY_BOUND,
-        Error::BadRule => fidl::Status::BAD_PATH,
-        Error::RetryExceeded => fidl::Status::TIMED_OUT,
-        e => panic!("Unhandled error {e:?}"),
+        Error::__SourceBreaking { unknown_ordinal } => {
+            unreachable!("unexpected error ordinal: {unknown_ordinal}")
+        }
     }
 }
 
 impl RespondAndMaybeShutdown for fnet_masquerade::ControlControlHandle {
-    fn respond_and_maybe_shutdown<T: Clone, Sender>(
+    fn respond_and_maybe_shutdown<T, Sender>(
         &self,
         response: Result<T, fnet_masquerade::Error>,
         sender: Sender,
     ) where
         Sender: FnOnce(Result<T, fnet_masquerade::Error>) -> Result<(), fidl::Error>,
     {
-        // This is not a permanent error, and should not cause a shutdown.
-        if let Err(err) = sender(response.clone()) {
+        let epitaph = response.as_ref().err().map(to_epitaph);
+        if let Err(err) = sender(response) {
             error!("Shutting down due to fidl error: {err:?}");
             self.shutdown_with_epitaph(fidl::Status::INTERNAL);
             return;
         }
-        if let Err(e) = response {
-            match e {
-                Error::RetryExceeded => {
-                    // This is not a permanent error, and should not cause a shutdown.
-                }
-                e => {
-                    warn!("Shutting down due to permanent error: {e:?}");
-                    self.shutdown_with_epitaph(to_epitaph(e));
-                }
-            }
+        if let Some(epitaph) = epitaph {
+            warn!("Shutting down with epitaph: {epitaph:?}");
+            self.shutdown_with_epitaph(epitaph);
         }
     }
 }
 
 impl RespondAndMaybeShutdown for MasqueradeState {
-    fn respond_and_maybe_shutdown<T: Clone, Sender>(
+    fn respond_and_maybe_shutdown<T, Sender>(
         &self,
         response: Result<T, fnet_masquerade::Error>,
         sender: Sender,

@@ -22,8 +22,8 @@
 #include <ktl/iterator.h>
 #include <ktl/limits.h>
 #include <ktl/span.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
 #include <phys/handoff-prep/handoff-prep.h>
 #include <phys/handoff/boot-constants.h>
 #include <phys/handoff/handoff.h>

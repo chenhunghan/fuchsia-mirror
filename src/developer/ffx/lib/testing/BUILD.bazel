@@ -21,6 +21,7 @@ rustc_library(
         "//src/developer/ffx/plugins/component:__subpackages__",
         "//src/developer/ffx/plugins/inspect:__subpackages__",
         "//src/developer/ffx/plugins/log:__subpackages__",
+        "//src/developer/ffx/plugins/profile:__subpackages__",
         "//src/developer/ffx/plugins/target:__subpackages__",
         "//src/developer/ffx/plugins/test:__subpackages__",
     ],

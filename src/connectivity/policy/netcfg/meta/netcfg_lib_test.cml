@@ -3,9 +3,6 @@
 // found in the LICENSE file.
 {
     include: [
-        "//sdk/lib/sys/component/realm_builder.shard.cml",
-        "//src/connectivity/network/testing/netemul/service/meta/client.shard.cml",
-        "//src/connectivity/network/tests/integration/common/client.shard.cml",
         "//src/sys/test_runners/rust/default.shard.cml",
         "inspect/client.shard.cml",
         "sys/component/realm_builder.shard.cml",

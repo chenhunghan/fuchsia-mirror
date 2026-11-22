@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "target_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//tools/fidl/example-tester/example/cpp_wire:tests",
+        "//tools/fidl/example-tester/example/rust:tests",
+    ],
+)
+
+rustc_library(
+    name = "example_tester",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = [
+        "//examples/fidl:__subpackages__",
+        "//tools/fidl/example-tester:__subpackages__",
+    ],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/data/rust",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:regex",
+    ],
+)

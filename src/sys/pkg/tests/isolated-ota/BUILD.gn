@@ -18,8 +18,6 @@ fuchsia_test_component("isolated-ota-integration-test") {
 fuchsia_test_package("isolated-ota-integration-tests") {
   test_components = [ ":isolated-ota-integration-test" ]
   deps = [
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/storage/testing:storage_driver_test_realm",
     "//src/storage/tools/blobfs-compression",
     "//src/sys/pkg/bin/fake-system-update-committer",
@@ -30,7 +28,11 @@ fuchsia_test_package("isolated-ota-integration-tests") {
     "//src/sys/pkg/testing:fake-ssl-certs",
     "//src/sys/pkg/tests/pkg-resolver:empty-repo",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
   test_specs = {
     log_settings = {
       max_severity = "ERROR"

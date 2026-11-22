@@ -3,3 +3,49 @@
 // found in the LICENSE file.
 @available(added=HEAD)
 library fuchsia.net.policy.socketproxy;
+
+using fuchsia.net.resources;
+using fuchsia.posix.socket;
+
+/// Options for requesting a [`fuchsia.posix.socket.Provider`] from
+/// [`SocketProviderConnector`].
+type SocketProviderOptions = resource table {
+    /// The network over which sockets vended by the `Provider` are routed.
+    ///
+    /// The `Provider` dynamically tracks mark updates for this network and
+    /// applies the latest marks to each newly created socket, overriding any
+    /// caller-supplied [`fuchsia.posix.socket/SocketCreationOptions.marks`].
+    /// Mark updates do not modify already-vended sockets, and subsequent
+    /// [`fuchsia.posix.socket/BaseSocket.SetMark`] calls made by clients on
+    /// vended sockets are not overridden.
+    ///
+    /// When absent, the `Provider` dynamically tracks the system default
+    /// network's marks (or leaves newly created sockets unmarked when no
+    /// default network exists) without closing the `Provider` across default
+    /// network changes.
+    1: network_token fuchsia.net.resources.NetworkToken;
+};
+
+/// Protocol to obtain a [`fuchsia.posix.socket.Provider`] instance configured
+/// with [`SocketProviderOptions`].
+@discoverable
+open protocol SocketProviderConnector {
+    /// Connects `provider` configured with `options`.
+    ///
+    /// Epitaphs on `provider`:
+    /// - `ZX_ERR_NOT_FOUND`: `options` refer to an invalid or out-of-date
+    ///   resource (e.g. `options.network_token`).
+    /// - `ZX_ERR_CANCELED`: a bound resource became invalid after connection
+    ///   (e.g. the network was removed, or for a token from
+    ///   `fuchsia.net.policy.properties/Networks.WatchDefault`, the default
+    ///   network changed).
+    /// - `ZX_ERR_NOT_SUPPORTED`: the server does not support the requested
+    ///   `options` (e.g. binding sockets to a network).
+    /// - `ZX_ERR_INTERNAL`: the server encountered an unexpected failure,
+    ///   including inability to communicate with the network properties
+    ///   service.
+    strict Connect(resource struct {
+        options SocketProviderOptions;
+        provider server_end:fuchsia.posix.socket.Provider;
+    });
+};

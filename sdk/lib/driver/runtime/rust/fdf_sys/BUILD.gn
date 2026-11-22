@@ -3,51 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_test_suite.gni")
-import("//build/rust/rustc_bindgen.gni")
-
-rustc_bindgen_golden("fdf_sys_bindgen_golden") {
-  headers = [
-    "//sdk/lib/driver/runtime/include/lib/fdf/arena.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/channel.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/channel_read.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/dispatcher.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/env.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/handle.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/testing.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/token.h",
-    "//sdk/lib/driver/runtime/include/lib/fdf/types.h",
-    "//sdk/lib/driver/symbols/symbols.h",
-  ]
-  checked_in_source = "src/bindings.rs"
-  expect_lints = [ "non_camel_case_types" ]
-
-  # Match bindgen.sh defaults
-  layout_tests = true
-  explicit_padding = false
-
-  std_derives = [ "default" ]
-  std_impls = [ "debug" ]
-
-  allowlist_pattern = "fdf_.*|Driver.*|FDF_.*|DRIVER_.*"
-  function_allowlist = [ allowlist_pattern ]
-  var_allowlist = [ allowlist_pattern ]
-  type_allowlist = [ allowlist_pattern ]
-
-  type_blocklist = [
-    "zx_.*",
-    "async_.*",
-  ]
-
-  fuchsia_api_level = "HEAD"
-
-  notice_year = 2024
-  raw_lines = [
-    "use libasync_sys::*;",
-    "use zx_types::*;",
-  ]
-
-  deps = [ "//sdk/lib/driver/runtime:driver_runtime" ]
-}
 
 bazel_test_suite("bazel_tests") {
   target_tests = [ "//sdk/lib/driver/runtime/rust/fdf_sys:fdf_sys_tests" ]
@@ -93,6 +48,7 @@ rustc_library("fdf_sys") {
     "src/lib.rs",
   ]
   edition = "2024"
+  validations = [ ":fdf_sys_bindgen_golden" ]
   visibility = [
     ":*",
     "//sdk/lib/driver/*",
@@ -103,6 +59,47 @@ rustc_library("fdf_sys") {
   deps = [
     "//sdk/lib/async/rust/sys",
     "//sdk/rust/zx-types",
+  ]
+}
+
+rustc_bindgen_golden("fdf_sys_bindgen_golden") {
+  checked_in_source = "src/bindings.rs"
+  expect_lints = [ "non_camel_case_types" ]
+  explicit_padding = false
+  fuchsia_api_level = "HEAD"
+  function_allowlist = [ "fdf_.*|Driver.*|FDF_.*|DRIVER_.*" ]
+  headers = [
+    "//sdk/lib/driver/runtime/include/lib/fdf/arena.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/channel.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/channel_read.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/dispatcher.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/env.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/handle.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/testing.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/token.h",
+    "//sdk/lib/driver/runtime/include/lib/fdf/types.h",
+    "//sdk/lib/driver/symbols/symbols.h",
+  ]
+  layout_tests = true
+  notice_year = 2024
+  raw_lines = [
+    "use libasync_sys::*;",
+    "use zx_types::*;",
+  ]
+  std_derives = [ "default" ]
+  std_impls = [ "debug" ]
+  type_allowlist = [ "fdf_.*|Driver.*|FDF_.*|DRIVER_.*" ]
+  type_blocklist = [
+    "zx_.*",
+    "async_.*",
+  ]
+  var_allowlist = [ "fdf_.*|Driver.*|FDF_.*|DRIVER_.*" ]
+  deps = [
+    "//sdk/lib/driver/runtime:driver_runtime",
+    "//sdk/lib/driver/runtime:driver_runtime_env",
+    "//sdk/lib/driver/runtime:driver_runtime_testing",
+    "//sdk/lib/driver/symbols",
+    "//zircon/system/public",
   ]
 }
 

@@ -1,9 +1,0 @@
-{
-    "short_description": "ACPI Goldfish emulator pipe driver",
-    "manufacturer": "",
-    "families": [],
-    "models": [],
-    "areas": [
-        "Graphics"
-    ]
-}

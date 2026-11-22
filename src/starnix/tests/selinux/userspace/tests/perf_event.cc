@@ -25,23 +25,7 @@
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-uint64_t valid_tracepoint_id = 1;
-
-extern std::string DoPrePolicyLoadWork() {
-  // Mount the tracefs to a temporary directory to be able to read the tracepoint IDs.
-  test_helper::ScopedTempDir tracing_dir;
-  if (mount("tracefs", tracing_dir.path().c_str(), "tracefs", 0, nullptr) == 0) {
-    std::string id_path = tracing_dir.path() + "/events/sched/sched_switch/id";
-    FILE* f = fopen(id_path.c_str(), "r");
-    if (f) {
-      if (fscanf(f, "%lu", &valid_tracepoint_id) != 1) {
-        valid_tracepoint_id = 1;
-      }
-      fclose(f);
-    }
-  }
-  return "perf_event_policy";
-}
+extern std::string GetTestPolicyName() { return "perf_event_policy"; }
 
 namespace {
 
@@ -53,6 +37,26 @@ int perf_event_open(struct perf_event_attr* attr, pid_t pid, int cpu) {
 }
 
 class PerfEventTest : public ::testing::Test {};
+
+uint64_t GetValidTracepointId() {
+  static const uint64_t kValidTracepointId = []() -> uint64_t {
+    if (test_helper::IsStarnix()) {
+      // Starnix does not expose `/events/sched/sched_switch/id` in tracefs, and accepts tracepoint
+      // ID 1 directly.
+      return 1;
+    }
+    auto mount =
+        test_helper::ScopedMount::Mount("tracefs", "/sys/kernel/tracing", "tracefs", 0, "");
+    EXPECT_THAT(mount, SyscallResultIsOk());
+    std::string content;
+    EXPECT_TRUE(
+        files::ReadFileToString("/sys/kernel/tracing/events/sched/sched_switch/id", &content));
+    uint64_t id = 1;
+    EXPECT_EQ(sscanf(content.c_str(), "%lu", &id), 1);
+    return id;
+  }();
+  return kValidTracepointId;
+}
 
 std::unique_ptr<struct perf_event_attr> GetPerfEventAttr(uint32_t type, uint64_t config,
                                                          bool exclude_kernel) {
@@ -71,7 +75,7 @@ std::unique_ptr<struct perf_event_attr> GetPerfEventAttr(uint32_t type, uint64_t
 }
 
 uint64_t GetConfigForPerfType(uint32_t perf_type) {
-  return perf_type == PERF_TYPE_TRACEPOINT ? valid_tracepoint_id : 1;
+  return perf_type == PERF_TYPE_TRACEPOINT ? GetValidTracepointId() : 1;
 }
 
 class OpenTypeHardware : public PerfEventTest,
@@ -277,25 +281,26 @@ INSTANTIATE_TEST_SUITE_P(PerfEventTest, OpenTypeHWCacheOrTracepoint,
 
 TEST(PerfEventTest, OpenEventsNoTracepoint) {
   // perf_event_open fails for PERF_TYPE_TRACEPOINT without the tracepoint permission.
+  const uint64_t tracepoint_id = GetValidTracepointId();
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_perf_event_no_tracepoint_t:s0", [&] {
     // All `pid`s, exclude_kernel = 0.
-    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/false);
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/false);
     fbl::unique_fd fd(perf_event_open(pe.get(), kAllTasksPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
 
     // All `pid`s, exclude_kernel = 1.
-    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fd = fbl::unique_fd(perf_event_open(pe.get(), kAllTasksPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
 
     // Current pid, exclude_kernel = 0.
-    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/false);
+    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/false);
     fd = fbl::unique_fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
 
     // Current pid, exclude_kernel = 1.
-    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fd = fbl::unique_fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
   }));
@@ -303,45 +308,48 @@ TEST(PerfEventTest, OpenEventsNoTracepoint) {
 
 TEST(PerfEventTest, OpenEventsNoTracepointNoPerfmon) {
   // perf_event_open fails for PERF_TYPE_TRACEPOINT without the tracepoint permission.
+  const uint64_t tracepoint_id = GetValidTracepointId();
   auto enforce = ScopedEnforcement::SetEnforcing();
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_perf_event_no_tracepoint_no_perfmon_t:s0", [&] {
     // All `pid`s, exclude_kernel = 0.
-    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/false);
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/false);
     fbl::unique_fd fd(perf_event_open(pe.get(), kAllTasksPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
 
     // All `pid`s, exclude_kernel = 1.
-    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fd = fbl::unique_fd(perf_event_open(pe.get(), kAllTasksPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
 
     // Current pid, exclude_kernel = 0.
-    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/false);
+    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/false);
     fd = fbl::unique_fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
 
     // Current pid, exclude_kernel = 1.
-    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fd = fbl::unique_fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
   }));
 }
 
 TEST(PerfEventTest, OpenEventsNoPerfmon) {
+  const uint64_t tracepoint_id = GetValidTracepointId();
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_perf_event_no_perfmon_t:s0", [&] {
-    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fbl::unique_fd fd(perf_event_open(pe.get(), -1 /* All tasks */, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
   }));
 }
 
 TEST(PerfEventTest, OpenEventsNoPerfmonWithSysAdmin) {
+  const uint64_t tracepoint_id = GetValidTracepointId();
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_perf_event_no_perfmon_with_sys_admin_t:s0", [&] {
-    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fbl::unique_fd fd(perf_event_open(pe.get(), -1 /* All tasks */, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
   }));
@@ -682,7 +690,8 @@ template <typename T>
 }
 
 TEST(PerfEventTest, ParanoidMinusOneAllowsOpenWithoutCapabilities) {
-  auto paranoid = test_helper::ScopedPerfEventParanoid(-1);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(-1);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(
@@ -699,7 +708,8 @@ TEST(PerfEventTest, ParanoidMinusOneAllowsOpenWithoutCapabilities) {
 }
 
 TEST(PerfEventTest, ParanoidMinusOneStillRequiresOpenPermission) {
-  auto paranoid = test_helper::ScopedPerfEventParanoid(-1);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(-1);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_no_open_t:s0", [&] {
@@ -714,14 +724,16 @@ TEST(PerfEventTest, ParanoidMinusOneRequiresCpuPermission) {
   if (!test_helper::IsStarnix()) {
     GTEST_SKIP() << "Only Starnix requires `perf_event { cpu }` when the capability is waived";
   }
-  // Starnix samples job-wide regardless of the target (https://fxbug.dev/398914921), so when a
+  // Starnix samples job-wide regardless of the target (https://fxbug.dev/427246425), so when a
   // low `perf_event_paranoid` waives the capability requirement it requires `perf_event { cpu }`
   // instead, even for events that would otherwise not need it.
-  auto paranoid = test_helper::ScopedPerfEventParanoid(-1);
+  const uint64_t tracepoint_id = GetValidTracepointId();
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(-1);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_no_cpu_t:s0", [&] {
-    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id,
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id,
                                /*exclude_kernel=*/true);
     fbl::unique_fd fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
@@ -729,7 +741,8 @@ TEST(PerfEventTest, ParanoidMinusOneRequiresCpuPermission) {
 }
 
 TEST(PerfEventTest, ParanoidTwoRequiresCapability) {
-  auto paranoid = test_helper::ScopedPerfEventParanoid(2);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(2);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(
@@ -749,11 +762,13 @@ TEST(PerfEventTest, ParanoidTwoRequiresCapability) {
 TEST(PerfEventTest, ParanoidTwoTracepointOnSelfRequiresNoCpuPermission) {
   // A tracepoint on the calling task that excludes the kernel needs no capability. The capability
   // was not waived by `perf_event_paranoid`, so `perf_event { cpu }` is not required either.
-  auto paranoid = test_helper::ScopedPerfEventParanoid(2);
+  const uint64_t tracepoint_id = GetValidTracepointId();
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(2);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessWithoutCapabilitiesAs("test_u:test_r:test_perf_event_no_cpu_t:s0", [&] {
-    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, valid_tracepoint_id, /*exclude_kernel=*/true);
+    auto pe = GetPerfEventAttr(PERF_TYPE_TRACEPOINT, tracepoint_id, /*exclude_kernel=*/true);
     fbl::unique_fd fd(perf_event_open(pe.get(), kCurrentTaskPid, 0 /* this CPU */));
     EXPECT_THAT(fd.get(), SyscallSucceeds());
   }));
@@ -761,7 +776,8 @@ TEST(PerfEventTest, ParanoidTwoTracepointOnSelfRequiresNoCpuPermission) {
 
 TEST(PerfEventTest, OpenEventsNoPermissionsChecksOpenBeforeCapabilities) {
   // `perf_event { open }` is checked before the capabilities, so only its denial is audited.
-  auto paranoid = test_helper::ScopedPerfEventParanoid(2);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(2);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   auto enforce = ScopedEnforcement::SetEnforcing();
 
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_perf_event_no_permissions_t:s0", [&] {

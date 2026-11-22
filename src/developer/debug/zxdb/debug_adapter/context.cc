@@ -5,9 +5,11 @@
 #include "context.h"
 
 #include <algorithm>
+#include <cinttypes>
 #include <cstdint>
 #include <optional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "src/developer/debug/ipc/records.h"
@@ -83,17 +85,19 @@ DebugAdapterContext::DebugAdapterContext(Console* console, debug::StreamBuffer* 
 
   session()->AddObserver(this);
 
+  const char* const func = __FUNCTION__;
   dap_->registerHandler(
-      [this](const dap::InitializeRequest& req,
-             std::function<void(dap::ResponseOrError<dap::InitializeResponse>)> send_resp) {
-        DEBUG_LOG(DebugAdapter) << "InitializeRequest received";
+      [this, func](const dap::InitializeRequest& req,
+                   std::function<void(dap::ResponseOrError<dap::InitializeResponse>)> send_resp) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "InitializeRequest received";
         if (req.supportsInvalidatedEvent) {
           supports_invalidate_event_ = req.supportsInvalidatedEvent.value();
         }
         if (req.supportsRunInTerminalRequest) {
           supports_run_in_terminal_ = req.supportsRunInTerminalRequest.value();
         }
-        send_initialize_response_ = send_resp;
+        send_initialize_response_ = std::move(send_resp);
         // If the session is connected or there's no pending connection, send the response
         // immediately. Otherwise, defer the response until the connection resolves.
         if (session()->IsConnected()) {
@@ -107,14 +111,16 @@ DebugAdapterContext::DebugAdapterContext(Console* console, debug::StreamBuffer* 
         }
       });
 
-  dap_->registerSentHandler([this](const dap::ResponseOrError<dap::InitializeResponse>& response) {
-    DEBUG_LOG(DebugAdapter) << "InitializeResponse sent";
-    // Set up events and handlers now. All messages should be sent only after Initialize response
-    // is sent. Setting up earlier would lead to events and responses being sent before Initialize
-    // request is processed.
-    Init();
-    dap_->send(dap::InitializedEvent());
-  });
+  dap_->registerSentHandler(
+      [this, func](const dap::ResponseOrError<dap::InitializeResponse>& response) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "InitializeResponse sent";
+        // Set up events and handlers now. All messages should be sent only after Initialize
+        // response is sent. Setting up earlier would lead to events and responses being sent before
+        // Initialize request is processed.
+        Init();
+        dap_->send(dap::InitializedEvent());
+      });
 
   dap_->onError([](const char* msg) { LOGS(Error) << "dap::Session error:" << msg; });
 
@@ -154,48 +160,58 @@ void DebugAdapterContext::DidResolveConnection(const Err& err) {
 
 void DebugAdapterContext::Init() {
   session()->analytics().ReportConsoleType(ConsoleType::Type::kDebugAdapter);
+  const char* const func = __FUNCTION__;
 
   // Register handlers with dap module.
-  dap_->registerHandler([this](const dap::LaunchRequestZxdb& req) {
-    DEBUG_LOG(DebugAdapter) << "RunBinaryRequest received";
+  dap_->registerHandler([this, func](const dap::LaunchRequestZxdb& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "RunBinaryRequest received";
     return OnRequestLaunch(this, req);
   });
 
-  dap_->registerHandler([](const dap::SetExceptionBreakpointsRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "SetExceptionBreakpointsRequest received";
+  dap_->registerHandler([func](const dap::SetExceptionBreakpointsRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "SetExceptionBreakpointsRequest received";
     dap::SetExceptionBreakpointsResponse response;
     return response;
   });
 
-  dap_->registerHandler([this](const dap::SetBreakpointsRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "SetBreakpointsRequest received";
+  dap_->registerHandler([this, func](const dap::SetBreakpointsRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "SetBreakpointsRequest received";
     return OnRequestBreakpoint(this, req);
   });
 
-  dap_->registerHandler([this](const dap::SetFunctionBreakpointsRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "SetFunctionBreakpointsRequest received";
+  dap_->registerHandler([this, func](const dap::SetFunctionBreakpointsRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "SetFunctionBreakpointsRequest received";
     return OnRequestFunctionBreakpoint(this, req);
   });
 
   dap_->registerHandler(
-      [this](const dap::DataBreakpointInfoRequest& req,
-             std::function<void(dap::ResponseOrError<dap::DataBreakpointInfoResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "DataBreakpointInfoRequest received";
+      [this, func](
+          const dap::DataBreakpointInfoRequest& req,
+          std::function<void(dap::ResponseOrError<dap::DataBreakpointInfoResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "DataBreakpointInfoRequest received";
         OnRequestDataBreakpointInfo(this, req, std::move(callback));
       });
 
-  dap_->registerHandler([this](const dap::SetDataBreakpointsRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "SetDataBreakpointsRequest received";
+  dap_->registerHandler([this, func](const dap::SetDataBreakpointsRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "SetDataBreakpointsRequest received";
     return OnRequestSetDataBreakpoints(this, req);
   });
 
-  dap_->registerHandler([](const dap::ConfigurationDoneRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "ConfigurationDoneRequest received";
+  dap_->registerHandler([func](const dap::ConfigurationDoneRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "ConfigurationDoneRequest received";
     return dap::ConfigurationDoneResponse();
   });
 
-  dap_->registerHandler([this](const dap::AttachRequestZxdb& req) {
-    DEBUG_LOG(DebugAdapter) << "AttachRequest received";
+  dap_->registerHandler([this, func](const dap::AttachRequestZxdb& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "AttachRequest received";
     return OnRequestAttach(this, req);
   });
 
@@ -206,9 +222,10 @@ void DebugAdapterContext::Init() {
   // and onError, returning processId with each thread.
   dap_->registerHandler(
       dap::TypeOf<dap::ThreadsRequest>::type(),
-      [this](const void* args, const dap::Session::RequestHandlerSuccessCallback& onSuccess,
-             const dap::Session::RequestHandlerErrorCallback& onError) {
-        DEBUG_LOG(DebugAdapter) << "ThreadsRequest received";
+      [this, func](const void* args, const dap::Session::RequestHandlerSuccessCallback& onSuccess,
+                   const dap::Session::RequestHandlerErrorCallback& onError) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "ThreadsRequest received";
         auto res = OnRequestThreads(this, *static_cast<const dap::ThreadsRequest*>(args));
         if (res.error) {
           onError(dap::TypeOf<dap::ThreadsResponseZxdb>::type(), res.error);
@@ -218,107 +235,129 @@ void DebugAdapterContext::Init() {
       });
 
   dap_->registerHandler(
-      [this](const dap::PauseRequestZxdb& req,
-             std::function<void(dap::ResponseOrError<dap::PauseResponseZxdb>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "PauseRequest received";
-        OnRequestPause(this, req, callback);
+      [this, func](const dap::PauseRequestZxdb& req,
+                   std::function<void(dap::ResponseOrError<dap::PauseResponseZxdb>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "PauseRequest received";
+        OnRequestPause(this, req, std::move(callback));
       });
 
-  dap_->registerHandler([this](const dap::ContinueRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "ContinueRequest received";
+  dap_->registerHandler([this, func](const dap::ContinueRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "ContinueRequest received";
     return OnRequestContinue(this, req);
   });
 
   dap_->registerHandler(
-      [this](const dap::NextRequest& req,
-             std::function<void(dap::ResponseOrError<dap::NextResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "NextRequest received";
-        OnRequestNext(this, req, callback);
+      [this, func](const dap::NextRequest& req,
+                   std::function<void(dap::ResponseOrError<dap::NextResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "NextRequest received";
+        OnRequestNext(this, req, std::move(callback));
       });
 
   dap_->registerHandler(
-      [this](const dap::StepInRequest& req,
-             std::function<void(dap::ResponseOrError<dap::StepInResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "StepInRequest received";
-        OnRequestStepIn(this, req, callback);
+      [this, func](const dap::StepInRequest& req,
+                   std::function<void(dap::ResponseOrError<dap::StepInResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "StepInRequest received";
+        OnRequestStepIn(this, req, std::move(callback));
       });
 
   dap_->registerHandler(
-      [this](const dap::StepOutRequest& req,
-             std::function<void(dap::ResponseOrError<dap::StepOutResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "StepOutRequest received";
-        OnRequestStepOut(this, req, callback);
+      [this, func](const dap::StepOutRequest& req,
+                   std::function<void(dap::ResponseOrError<dap::StepOutResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "StepOutRequest received";
+        OnRequestStepOut(this, req, std::move(callback));
       });
 
   dap_->registerHandler(
-      [this](const dap::StackTraceRequestZxdb& req,
-             std::function<void(dap::ResponseOrError<dap::StackTraceResponseZxdb>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "StackTraceRequest received";
-        OnRequestStackTrace(this, req, callback);
+      [this, func](
+          const dap::StackTraceRequestZxdb& req,
+          std::function<void(dap::ResponseOrError<dap::StackTraceResponseZxdb>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "StackTraceRequest received";
+        OnRequestStackTrace(this, req, std::move(callback));
       });
 
-  dap_->registerHandler([this](const dap::ScopesRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "ScopesRequest received";
+  dap_->registerHandler([this, func](const dap::ScopesRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "ScopesRequest received";
     return OnRequestScopes(this, req);
   });
 
   dap_->registerHandler(
-      [this](const dap::VariablesRequest& req,
-             std::function<void(dap::ResponseOrError<dap::VariablesResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "VariablesRequest received";
+      [this, func](
+          const dap::VariablesRequest& req,
+          const std::function<void(dap::ResponseOrError<dap::VariablesResponse>)>& callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "VariablesRequest received";
         OnRequestVariables(this, req, callback);
       });
 
   dap_->registerHandler(
-      [this](const dap::EvaluateRequest& req,
-             std::function<void(dap::ResponseOrError<dap::EvaluateResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "EvaluateRequest received";
+      [this, func](const dap::EvaluateRequest& req,
+                   std::function<void(dap::ResponseOrError<dap::EvaluateResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "EvaluateRequest received";
         OnRequestEvaluate(this, req, std::move(callback));
       });
 
   dap_->registerHandler(
-      [this](const dap::ZxdbTerminateRequest& req,
-             std::function<void(dap::ResponseOrError<dap::TerminateResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "ZxdbTerminateRequest received";
+      [this, func](
+          const dap::ZxdbTerminateRequest& req,
+          const std::function<void(dap::ResponseOrError<dap::TerminateResponse>)>& callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "ZxdbTerminateRequest received";
         OnRequestZxdbTerminate(this, req, callback);
       });
 
   dap_->registerHandler(
-      [this](const dap::ZxdbDetachRequest& req,
-             std::function<void(dap::ResponseOrError<dap::ZxdbDetachResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "ZxdbDetachRequest received";
+      [this, func](
+          const dap::ZxdbDetachRequest& req,
+          const std::function<void(dap::ResponseOrError<dap::ZxdbDetachResponse>)>& callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "ZxdbDetachRequest received";
         OnRequestZxdbDetach(this, req, callback);
       });
 
-  dap_->registerHandler([this](const dap::ZxdbProcessRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "ZxdbProcessRequest received";
+  dap_->registerHandler([this, func](const dap::ZxdbProcessRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "ZxdbProcessRequest received";
     return OnRequestZxdbProcess(this, req);
   });
 
   dap_->registerHandler(
-      [this](const dap::ZxdbAsyncBacktraceRequest& req,
-             std::function<void(dap::ResponseOrError<dap::ZxdbAsyncBacktraceResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "ZxdbAsyncBacktraceRequest received";
+      [this, func](
+          const dap::ZxdbAsyncBacktraceRequest& req,
+          std::function<void(dap::ResponseOrError<dap::ZxdbAsyncBacktraceResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "ZxdbAsyncBacktraceRequest received";
         OnRequestZxdbAsyncBacktrace(this, req, std::move(callback));
       });
 
   dap_->registerHandler(
-      [this](const dap::ZxdbConsoleCommandRequest& req,
-             std::function<void(dap::ResponseOrError<dap::ZxdbConsoleCommandResponse>)> callback) {
-        DEBUG_LOG(DebugAdapter) << "ZxdbConsoleCommandRequest received";
+      [this, func](
+          const dap::ZxdbConsoleCommandRequest& req,
+          std::function<void(dap::ResponseOrError<dap::ZxdbConsoleCommandResponse>)> callback) {
+        DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+            << "ZxdbConsoleCommandRequest received";
         OnRequestZxdbConsoleCommand(this, req, std::move(callback));
       });
 
-  dap_->registerHandler([this](const dap::ZxdbSetTracepointsRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "ZxdbSetTracepointsRequest received";
+  dap_->registerHandler([this, func](const dap::ZxdbSetTracepointsRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "ZxdbSetTracepointsRequest received";
     return OnRequestZxdbSetTracepoints(this, req);
   });
 
-  dap_->registerHandler([this](const dap::DisconnectRequest& req) {
-    DEBUG_LOG(DebugAdapter) << "DisconnectRequest received";
+  dap_->registerHandler([this, func](const dap::DisconnectRequest& req) {
+    DEBUG_LOG_WITH_LOCATION(DebugAdapter, debug::FileLineFunction(__FILE__, __LINE__, func))
+        << "DisconnectRequest received";
     if (destroy_connection_cb_) {
       debug::MessageLoop::Current()->PostTask(
-          FROM_HERE, [cb = std::move(destroy_connection_cb_)]() mutable { cb(); });
+          FROM_HERE, [cb = std::move(destroy_connection_cb_)] mutable { cb(); });
     }
     return dap::DisconnectResponse();
   });
@@ -370,7 +409,7 @@ bool DebugAdapterContext::HasCompleteMessage() {
 
   size_t len = 0;
   while (val_pos < header_end && view[val_pos] >= '0' && view[val_pos] <= '9') {
-    len = len * 10 + (view[val_pos] - '0');
+    len = (len * 10) + (view[val_pos] - '0');
     val_pos++;
   }
 
@@ -410,7 +449,7 @@ void DebugAdapterContext::DidCreateThread(Thread* thread) {
 
   dap::ThreadEventZxdb event;
   event.reason = "started";
-  event.threadId = thread->GetKoid();
+  event.threadId = static_cast<int64_t>(thread->GetKoid());
   event.isStopped = is_stopped;
 
   if (thread->GetProcess()) {
@@ -442,7 +481,7 @@ void DebugAdapterContext::DidCreateThread(Thread* thread) {
 void DebugAdapterContext::WillDestroyThread(Thread* thread) {
   dap::ThreadEventZxdb event;
   event.reason = "exited";
-  event.threadId = thread->GetKoid();
+  event.threadId = static_cast<int64_t>(thread->GetKoid());
 
   if (thread->GetProcess()) {
     event.processId = thread->GetProcess()->GetKoid();
@@ -577,7 +616,7 @@ void DebugAdapterContext::OnBreakpointMatched(Breakpoint* breakpoint, bool user_
 
   dap::BreakpointEvent breakpoint_event;
   breakpoint_event.reason = "changed";
-  breakpoint_event.breakpoint = bp;
+  breakpoint_event.breakpoint = std::move(bp);
   dap_->send(breakpoint_event);
 }
 
@@ -626,27 +665,27 @@ Err DebugAdapterContext::CheckStoppedThread(Thread* thread) {
 
   std::optional<debug_ipc::ThreadRecord::State> state_or = thread->GetState();
   if (!state_or) {
-    return Err("Thread should be suspended but thread %llu is in an unknown state.",
-               static_cast<unsigned long long>(thread->GetKoid()));
+    return Err("Thread should be suspended but thread %" PRIu64 " is in an unknown state.",
+               thread->GetKoid());
   }
 
   if (*state_or != debug_ipc::ThreadRecord::State::kBlocked &&
       *state_or != debug_ipc::ThreadRecord::State::kCoreDump &&
       *state_or != debug_ipc::ThreadRecord::State::kSuspended) {
-    return Err("Thread should be suspended but thread %llu is %s.",
-               static_cast<unsigned long long>(thread->GetKoid()),
+    return Err("Thread should be suspended but thread %" PRIu64 " is %s.", thread->GetKoid(),
                debug_ipc::ThreadRecord::StateToString(*state_or));
   }
   return Err();
 }
 
 std::vector<PrettyStackManager::Match> DebugAdapterContext::GetElidedFrames(const Stack& stack) {
+  if (stack.empty()) {
+    return {};
+  }
+
   std::vector<PrettyStackManager::Match> result(stack.size());
 
-  Process* process = nullptr;
-  if (stack[0]->GetThread()) {
-    process = stack[0]->GetThread()->GetProcess();
-  }
+  Process* process = stack[0]->GetThread()->GetProcess();
 
   // Elide against PrettyStackManager's default matchers first.
   for (const auto& frame : console()->context().pretty_stack_manager()->ProcessStack(stack)) {
@@ -752,7 +791,7 @@ int64_t DebugAdapterContext::IdForVariables(int64_t frame_id, VariablesType type
   record.parent = std::move(parent);
   record.child = std::move(child);
 
-  int current_variables_id = next_variables_id_++;
+  int64_t current_variables_id = next_variables_id_++;
   id_to_variables_[current_variables_id] = std::move(record);
   return current_variables_id;
 }
@@ -857,7 +896,7 @@ void DebugAdapterContext::DeleteAllBreakpoints() {
 
 void DebugAdapterContext::StoreFilter(Filter* filter) {
   FX_DCHECK(filter);
-  if (std::find(filters_.begin(), filters_.end(), filter) == filters_.end()) {
+  if (std::ranges::find(filters_, filter) == filters_.end()) {
     filters_.push_back(filter);
   }
 }
@@ -886,7 +925,7 @@ void DebugAdapterContext::DeleteAllFilters() {
 
 void DebugAdapterContext::WillDestroyFilter(Filter* filter) {
   // Remove the filter from our local tracking vector if it is destroyed externally.
-  auto it = std::find(filters_.begin(), filters_.end(), filter);
+  auto it = std::ranges::find(filters_, filter);
   if (it != filters_.end()) {
     filters_.erase(it);
   }
@@ -938,7 +977,7 @@ void DebugAdapterContext::OnTracepointHit(Tracepoint* tracepoint, const Tracepoi
   event.max_hits = hit.max_hits;
   event.auto_disabled = hit.auto_disabled;
   event.truncated = hit.truncated;
-  event.thread_koid = hit.thread_koid;
+  event.thread_koid = static_cast<int64_t>(hit.thread_koid);
   event.dwell_ms = hit.dwell_ms;
   event.capture = ToDapFrameCapture(hit.capture);
 

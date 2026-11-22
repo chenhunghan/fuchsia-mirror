@@ -5,7 +5,6 @@
 #include "src/developer/forensics/feedback/stop_signals.h"
 
 #include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
-#include <fidl/fuchsia.hardware.power.statecontrol/cpp/hlcpp_conversion.h>
 #include <fidl/fuchsia.process.lifecycle/cpp/fidl.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/function.h>
@@ -145,10 +144,8 @@ void ShutdownWatcherServer::OnShutdown(OnShutdownRequest& request,
     completer.Reply();
     b.reset();
   });
-  const fuchsia::hardware::power::statecontrol::ShutdownOptions hlcpp_options =
-      fidl::NaturalToHLCPP(request.options());
-  completer_.complete_ok(GracefulShutdownInfoSignal(ToGracefulShutdownAction(hlcpp_options),
-                                                    ToGracefulShutdownReasons(hlcpp_options),
+  completer_.complete_ok(GracefulShutdownInfoSignal(ToGracefulShutdownAction(request.options()),
+                                                    ToGracefulShutdownReasons(request.options()),
                                                     [cb = std::move(cb)]() mutable { cb.call(); }));
 }
 

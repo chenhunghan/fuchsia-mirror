@@ -197,6 +197,16 @@ def _fx_host_tool_bundle_impl(ctx):
                     )
             else:
                 runtime_tool_args.append("--runtime-tool=%s=%s" % (t_exec.basename, t_exec.path))
+                if t_info.files_to_run.runfiles_manifest:
+                    runtime_tool_files.append(t_info.files_to_run.runfiles_manifest)
+                    runtime_tool_args.append(
+                        "--runtime-tool-manifest=%s=%s" % (
+                            t_exec.basename,
+                            t_info.files_to_run.runfiles_manifest.path,
+                        ),
+                    )
+                if t_info.files_to_run.repo_mapping_manifest:
+                    runtime_tool_files.append(t_info.files_to_run.repo_mapping_manifest)
             if CipdPrebuiltInfo not in target:
                 is_raw_source = (
                     t_info.files_to_run.executable == None and
@@ -219,7 +229,13 @@ def _fx_host_tool_bundle_impl(ctx):
             aspect_source_depsets.append(t[_FxHostToolSourcesInfo].source_files)
             aspect_pkg_depsets.append(t[_FxHostToolSourcesInfo].packages)
 
-    direct_inputs = list(runtime_tool_files) + list(ctx.files._python_modules) + [entry_point]
+    direct_inputs = (
+        list(runtime_tool_files) +
+        list(ctx.files._python_modules) +
+        [entry_point] +
+        [s.target_file for s in merged_runfiles.symlinks.to_list() if s.target_file] +
+        [s.target_file for s in merged_runfiles.root_symlinks.to_list() if s.target_file]
+    )
     if binary_runfiles_manifest:
         direct_inputs.append(binary_runfiles_manifest)
     if binary_repo_mapping_manifest:
@@ -254,7 +270,11 @@ def _fx_host_tool_bundle_impl(ctx):
         [
             t[DefaultInfo].default_runfiles.files
             for t in ctx.attr.runtime_tools
-            if FxHostToolInfo not in t and not (CipdPrebuiltInfo in t and t[CipdPrebuiltInfo].source_rel_path)
+            if (
+                FxHostToolInfo not in t and
+                not (CipdPrebuiltInfo in t and t[CipdPrebuiltInfo].source_rel_path) and
+                not t[DefaultInfo].files_to_run.runfiles_manifest
+            )
         ]
     )
     extra_runfile_paths = {}

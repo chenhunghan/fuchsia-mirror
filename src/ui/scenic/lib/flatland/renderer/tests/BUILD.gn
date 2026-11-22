@@ -55,6 +55,7 @@ cc_test_executable("unittests") {
     "//src/ui/lib/escher/test/common:gtest_escher",
     "//src/ui/lib/escher/test/common:readback_fixtures",
     "//src/ui/scenic/lib/flatland:flatland_types",
+    "//src/ui/scenic/lib/flatland/image_import:testing",
     "//src/ui/scenic/lib/flatland/renderer",
     "//src/ui/scenic/lib/screen_capture",
     "//src/ui/scenic/lib/utils",

@@ -5,8 +5,8 @@
 from typing import TYPE_CHECKING, Any
 
 import package_server
+import portpicker
 from daemon.constants import DEFAULT_DAP_PORT, UDS_PATH
-from portpicker import portpicker
 from shared.protocol.base import Response
 from shared.protocol.start import (
     COMMAND_NAME,

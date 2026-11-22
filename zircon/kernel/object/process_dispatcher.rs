@@ -4,58 +4,117 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::Name;
 use super::diagnostics::{
     VmarMapsInfoWriter, VmoInfoWriter, get_process_vmos, get_vm_aspace_maps, get_vm_aspace_vmos,
 };
 use super::dispatcher::DispatcherOps;
+use super::exceptionate::Exceptionate;
 use super::handle::{HandleOwner, HandleValue, KernelHandle};
 use super::handle_table::HandleTable;
-use super::job_dispatcher::JobDispatcher;
-#[cfg(target_arch = "x86_64")]
-use super::process_dispatcher_ffi::cpp_process_dispatcher_hw_trace_context_id;
+use super::job_dispatcher::{JobDispatcher, JobEnumerator};
+use super::job_policy::JobPolicy;
 use super::process_dispatcher_ffi::{
-    cpp_process_add_initialized_thread, cpp_process_dispatcher_aspace_at,
-    cpp_process_dispatcher_create, cpp_process_dispatcher_create_shared,
-    cpp_process_dispatcher_critical_to_root_job, cpp_process_dispatcher_current,
-    cpp_process_dispatcher_enforce_basic_policy, cpp_process_dispatcher_exit_current,
-    cpp_process_dispatcher_futex_context, cpp_process_dispatcher_get_debug_addr,
-    cpp_process_dispatcher_get_dyn_break_on_load, cpp_process_dispatcher_get_info,
-    cpp_process_dispatcher_get_runtime_stats, cpp_process_dispatcher_get_stats,
-    cpp_process_dispatcher_get_threads, cpp_process_dispatcher_get_timer_slack_policy,
-    cpp_process_dispatcher_handle_table, cpp_process_dispatcher_is_current,
-    cpp_process_dispatcher_job, cpp_process_dispatcher_kill,
-    cpp_process_dispatcher_lookup_process_by_id, cpp_process_dispatcher_lookup_thread_by_id,
-    cpp_process_dispatcher_normal_aspace, cpp_process_dispatcher_restricted_aspace,
-    cpp_process_dispatcher_resume, cpp_process_dispatcher_set_critical_to_job,
-    cpp_process_dispatcher_set_debug_addr, cpp_process_dispatcher_set_dyn_break_on_load,
-    cpp_process_dispatcher_shareable_state, cpp_process_dispatcher_state,
-    cpp_process_dispatcher_suspend, cpp_process_dispatcher_vdso_code_address,
-    cpp_process_remove_thread, cpp_shareable_process_state_aspace,
+    cpp_process_dispatcher_alloc, cpp_shareable_process_state_aspace,
+    cpp_shareable_process_state_create, cpp_shareable_process_state_decrement_share_count,
+    cpp_shareable_process_state_futex_context, cpp_shareable_process_state_handle_table,
+    cpp_shareable_process_state_increment_share_count, cpp_shareable_process_state_initialize,
+    cpp_shareable_process_state_share_count,
 };
+use super::root_job_observer::RootJobObserver;
+use super::singleton::get_root_job_dispatcher;
 use super::thread_dispatcher::ThreadDispatcher;
 use super::vm_address_region_dispatcher::VmAddressRegionDispatcher;
-use crate::arch_rs::UserEntryState;
-use crate::kernel::thread::ThreadPtr;
+use crate::arch_rs::{
+    ArchExceptionContext, USER_ASPACE_BASE, USER_ASPACE_SIZE, USER_RESTRICTED_ASPACE_SIZE,
+    UserEntryState,
+};
+use crate::counters::define_kcounter;
+use crate::kernel::deadline::TimerSlack;
+use crate::kernel::relaxed_atomic::RelaxedAtomicUsize;
+use crate::kernel::task_runtime_stats::TaskRuntimeStats;
+use crate::kernel::thread::{ThreadPtr, signal_policy_exception, signal_policy_kill};
+use crate::ksync_kernel::TrackedCriticalMutex;
+use crate::platform_rs::timer::current_mono_time;
+use crate::vm::arch_vm_aspace::ARCH_MMU_FLAG_PERM_USER;
+use crate::vm::attribution::{AttributionCounts, FractionalBytes};
 use crate::vm::pmm::{self, AllocFailure, AllocFailureType};
-use crate::vm::vm_aspace::VmAspace;
-use core::mem::MaybeUninit;
-use fbl::Array;
+use crate::vm::vm_address_region::VmEnumerator;
+use crate::vm::vm_aspace::{ShareOpt, Type as AspaceType, VmAspace};
+use core::pin::Pin;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
+use debug::{ltrace_entry_obj, ltracef, ltracef_level};
+use fbl::{
+    Array, Canary, DoublyLinkedList, DoublyLinkedListNode, HasRefCountUpgradeable, RefPtr,
+    SinglyLinkedListNode,
+};
+use ksync::{KMutex, KOnceCell, guarded};
+use object_constants_rs as object_constants;
+use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
-    ZX_HANDLE_INVALID, ZX_RIGHT_TRANSFER, zx_info_process_t, zx_info_task_runtime_t,
-    zx_info_task_stats_t, zx_koid_t, zx_rights_t, zx_vaddr_t,
+    ZX_DEFAULT_PROCESS_RIGHTS, ZX_EXCEPTION_CHANNEL_TYPE_DEBUGGER,
+    ZX_EXCEPTION_CHANNEL_TYPE_PROCESS, ZX_EXCP_POLICY_CODE_AMBIENT_MARK_VMO_EXEC,
+    ZX_EXCP_POLICY_CODE_BAD_HANDLE, ZX_EXCP_POLICY_CODE_NEW_ANY, ZX_EXCP_POLICY_CODE_NEW_CHANNEL,
+    ZX_EXCP_POLICY_CODE_NEW_EVENT, ZX_EXCP_POLICY_CODE_NEW_EVENTPAIR, ZX_EXCP_POLICY_CODE_NEW_FIFO,
+    ZX_EXCP_POLICY_CODE_NEW_IOB, ZX_EXCP_POLICY_CODE_NEW_PAGER, ZX_EXCP_POLICY_CODE_NEW_PORT,
+    ZX_EXCP_POLICY_CODE_NEW_PROCESS, ZX_EXCP_POLICY_CODE_NEW_PROFILE,
+    ZX_EXCP_POLICY_CODE_NEW_SAMPLER, ZX_EXCP_POLICY_CODE_NEW_SOCKET, ZX_EXCP_POLICY_CODE_NEW_TIMER,
+    ZX_EXCP_POLICY_CODE_NEW_VMO, ZX_EXCP_POLICY_CODE_VMAR_WX, ZX_EXCP_POLICY_CODE_WRONG_OBJECT,
+    ZX_EXCP_PROCESS_STARTING, ZX_EXCP_USER, ZX_HANDLE_INVALID,
+    ZX_INFO_PROCESS_FLAG_DEBUGGER_ATTACHED, ZX_INFO_PROCESS_FLAG_EXITED,
+    ZX_INFO_PROCESS_FLAG_STARTED, ZX_MAX_NAME_LEN, ZX_OBJ_TYPE_PROCESS, ZX_POL_ACTION_ALLOW,
+    ZX_POL_ACTION_ALLOW_EXCEPTION, ZX_POL_ACTION_DENY, ZX_POL_ACTION_DENY_EXCEPTION,
+    ZX_POL_ACTION_KILL, ZX_POL_MAX, ZX_PROCESS_SHARED, ZX_RIGHT_TRANSFER, ZX_TASK_TERMINATED,
+    zx_excp_type_t, zx_info_process_t, zx_info_task_runtime_t, zx_info_task_stats_t,
+    zx_instant_mono_t, zx_koid_t, zx_rights_t, zx_vaddr_t,
 };
 
-crate::object::dispatcher::impl_dispatcher_facade!(
-    pub struct ProcessDispatcher,
-    zx_types::ZX_OBJ_TYPE_PROCESS
-);
+const LOCAL_TRACE: u32 = 0;
 
-// LINT.IfChange(ProcessState)
+const PRIVATE_ASPACE_BASE: zx_vaddr_t = USER_ASPACE_BASE;
+const PRIVATE_ASPACE_SIZE: zx_vaddr_t = USER_RESTRICTED_ASPACE_SIZE;
+
+/// We leave a 1 page gap in between the private and shared regions to prevent cross-aspace reads
+/// and writes from working.
+const SHARED_ASPACE_BASE: zx_vaddr_t = PRIVATE_ASPACE_BASE + PRIVATE_ASPACE_SIZE + page::SIZE;
+const SHARED_ASPACE_SIZE: zx_vaddr_t = USER_ASPACE_BASE + USER_ASPACE_SIZE - SHARED_ASPACE_BASE;
+
+/// Mapping from policy id to the `synth_code` generated by a policy exception. Sized by
+/// `ZX_POL_MAX` so adding a new `ZX_POL_*` condition fails to compile until mapped here.
+const POLICY_ID_TO_POLICY_EXCEPTION: [u32; ZX_POL_MAX as usize] = [
+    ZX_EXCP_POLICY_CODE_BAD_HANDLE,            // ZX_POL_BAD_HANDLE,
+    ZX_EXCP_POLICY_CODE_WRONG_OBJECT,          // ZX_POL_WRONG_OBJECT
+    ZX_EXCP_POLICY_CODE_VMAR_WX,               // ZX_POL_VMAR_WX
+    ZX_EXCP_POLICY_CODE_NEW_ANY,               // ZX_POL_NEW_ANY
+    ZX_EXCP_POLICY_CODE_NEW_VMO,               // ZX_POL_NEW_VMO
+    ZX_EXCP_POLICY_CODE_NEW_CHANNEL,           // ZX_POL_NEW_CHANNEL
+    ZX_EXCP_POLICY_CODE_NEW_EVENT,             // ZX_POL_NEW_EVENT
+    ZX_EXCP_POLICY_CODE_NEW_EVENTPAIR,         // ZX_POL_NEW_EVENTPAIR
+    ZX_EXCP_POLICY_CODE_NEW_PORT,              // ZX_POL_NEW_PORT
+    ZX_EXCP_POLICY_CODE_NEW_SOCKET,            // ZX_POL_NEW_SOCKET
+    ZX_EXCP_POLICY_CODE_NEW_FIFO,              // ZX_POL_NEW_FIFO
+    ZX_EXCP_POLICY_CODE_NEW_TIMER,             // ZX_POL_NEW_TIMER
+    ZX_EXCP_POLICY_CODE_NEW_PROCESS,           // ZX_POL_NEW_PROCESS
+    ZX_EXCP_POLICY_CODE_NEW_PROFILE,           // ZX_POL_NEW_PROFILE
+    ZX_EXCP_POLICY_CODE_NEW_PAGER,             // ZX_POL_NEW_PAGER
+    ZX_EXCP_POLICY_CODE_AMBIENT_MARK_VMO_EXEC, // ZX_POL_AMBIENT_MARK_VMO_EXEC
+    ZX_EXCP_POLICY_CODE_NEW_IOB,               // ZX_POL_NEW_IOB
+    ZX_EXCP_POLICY_CODE_NEW_SAMPLER,           // ZX_POL_NEW_SAMPLER
+];
+
+define_kcounter!(DISPATCHER_PROCESS_CREATE_COUNT, "dispatcher.process.create", Sum);
+define_kcounter!(DISPATCHER_PROCESS_DESTROY_COUNT, "dispatcher.process.destroy", Sum);
+
+// `ProcessDispatcher` reference counts live in the C++ `Dispatcher` base, which derives from
+// `fbl::RefCountedUpgradeable`, so raw child pointers can be upgraded under the parent job's lock.
+impl HasRefCountUpgradeable for ProcessDispatcher {}
+
 /// State of a [`ProcessDispatcher`].
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProcessState {
+pub enum ProcessState {
     /// Initial state, no thread present in process.
     Initial = 0,
     /// First thread has started and is running.
@@ -65,34 +124,403 @@ pub(super) enum ProcessState {
     /// All threads have entered DEAD state and potentially dropped refs on process.
     Dead = 3,
 }
-// LINT.ThenChange(//zircon/kernel/object/include/object/process_dispatcher.h:ProcessState)
 
 zr::static_assert!(core::mem::size_of::<ProcessState>() == 4);
 zr::static_assert!(core::mem::align_of::<ProcessState>() == 4);
 
-/// Facade for the C++ `ShareableProcessState` class.
-#[repr(C)]
-pub(super) struct ShareableProcessState {
-    _facade: zr::OpaqueFacade,
+fn state_to_string(state: ProcessState) -> &'static str {
+    match state {
+        ProcessState::Initial => "initial",
+        ProcessState::Running => "running",
+        ProcessState::Dying => "dying",
+        ProcessState::Dead => "dead",
+    }
 }
 
-zr::static_assert!(core::mem::size_of::<ShareableProcessState>() == 0);
+/// The type of address space used to initialize a `ProcessDispatcher` for a shared process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SharedAspaceType {
+    /// Top half: a new shareable address space
+    /// Bottom half: nothing
+    New,
+    /// Top half: shared address space from another process
+    /// Bottom half: a new restricted address space
+    Shared,
+}
+
+struct FindProcessByKoid {
+    koid: zx_koid_t,
+    pd: Option<RefPtr<ProcessDispatcher>>,
+}
+
+impl FindProcessByKoid {
+    fn new(koid: zx_koid_t) -> Self {
+        Self { koid, pd: None }
+    }
+
+    /// To be called after enumeration.
+    fn get_pd(self) -> Option<RefPtr<ProcessDispatcher>> {
+        self.pd
+    }
+}
+
+impl JobEnumerator for FindProcessByKoid {
+    fn on_process(&mut self, process: &ProcessDispatcher) -> bool {
+        if process.get_koid() == self.koid {
+            self.pd = Some(RefPtr::from_ref(process));
+            // Stop the enumeration.
+            return false;
+        }
+        // Keep looking.
+        true
+    }
+}
+
+fbl::impl_opaque_ref_counted_facade!(
+    /// Facade for the C++ `ShareableProcessState` class.
+    ///
+    /// `ShareableProcessState` contains all the state that can belong to more than one process:
+    /// the handle table, the futex context and the shareable address space. It is logically
+    /// private to `ProcessDispatcher`.
+    ///
+    /// A `ShareableProcessState` is always constructed with a process count of 1, meaning that the
+    /// creator should issue a matching `decrement_share_count` before it is destroyed.
+    pub(super) struct ShareableProcessState,
+    super::process_dispatcher_ffi::cpp_shareable_process_state_free,
+    super::process_dispatcher_ffi::cpp_shareable_process_state_get_ref_counted,
+);
 
 impl ShareableProcessState {
     /// Returns a `*const ShareableProcessState` pointer suitable for passing to FFI routines.
     #[inline]
     fn as_ffi(&self) -> *const Self {
-        self as *const Self
+        core::ptr::from_ref(self)
+    }
+
+    /// Returns a `*mut ShareableProcessState` pointer suitable for passing to FFI routines that
+    /// take a non-const `ShareableProcessState*`.
+    #[inline]
+    fn as_ffi_mut(&self) -> *mut Self {
+        self.as_ffi().cast_mut()
+    }
+
+    /// Allocates a new `ShareableProcessState` with a process count of 1, or `None` if memory is
+    /// exhausted.
+    fn create() -> Option<RefPtr<Self>> {
+        // SAFETY: `cpp_shareable_process_state_create` returns null or a pointer exported with
+        // an acquired reference count.
+        unsafe { RefPtr::try_from_raw(cpp_shareable_process_state_create()) }
+    }
+
+    /// Shares this state with a process, effectively incrementing the number of calls to
+    /// `decrement_share_count` that can be made before the shared resources are cleaned up.
+    ///
+    /// Returns whether or not the share count was incremented successfully. Can fail if the
+    /// process state has been destroyed.
+    fn increment_share_count(&self) -> bool {
+        // SAFETY: `self` is a valid `ShareableProcessState` reference.
+        unsafe { cpp_shareable_process_state_increment_share_count(self.as_ffi_mut()) }
+    }
+
+    /// Removes this state from a process. If the state is not shared with any other processes,
+    /// the shared resources are cleaned.
+    fn decrement_share_count(&self) {
+        // SAFETY: `self` is a valid `ShareableProcessState` reference.
+        unsafe { cpp_shareable_process_state_decrement_share_count(self.as_ffi_mut()) }
+    }
+
+    /// Initializes the shared state.
+    ///
+    /// It is an error to call initialize on a shared state that has already been initialized, or
+    /// one that has been destroyed.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a live (`share_count() > 0`), uninitialized `ShareableProcessState`, and the
+    /// caller must have exclusive access to `self` (no prior or concurrent calls to `initialize`,
+    /// `futex_context`, or `aspace`).
+    unsafe fn initialize(
+        &self,
+        aspace_base: zx_vaddr_t,
+        aspace_size: usize,
+        aspace_name: &[u8],
+        share_opt: ShareOpt,
+    ) -> bool {
+        let name_buf = crate::vm::name::name_to_c_buf(aspace_name);
+        // SAFETY: The caller guarantees exclusive single-shot initialization of live `self`, and
+        // `name_buf` is a NUL-terminated C string.
+        unsafe {
+            cpp_shareable_process_state_initialize(
+                self.as_ffi_mut(),
+                aspace_base,
+                aspace_size,
+                name_buf.as_ptr().cast(),
+                share_opt,
+            )
+        }
+    }
+
+    /// Returns the number of processes currently sharing this state.
+    fn share_count(&self) -> u64 {
+        // SAFETY: `self` is a valid `ShareableProcessState` reference.
+        unsafe { cpp_shareable_process_state_share_count(self.as_ffi()) }
+    }
+
+    /// Returns the handle table shared by the processes using this state.
+    #[inline]
+    fn handle_table(&self) -> &HandleTable {
+        // SAFETY: `self` is a valid `ShareableProcessState`, which owns the handle table for its
+        // entire lifetime, so the returned reference cannot outlive it.
+        unsafe { &*cpp_shareable_process_state_handle_table(self.as_ffi()) }
+    }
+
+    /// Returns the futex context shared by the processes using this state.
+    ///
+    /// # Safety
+    ///
+    /// `self.initialize(...)` must have previously returned `true`.
+    #[inline]
+    unsafe fn futex_context(&self) -> &super::futex_context::FutexContext {
+        // SAFETY: `self` is a valid `ShareableProcessState` whose `FutexContext` was initialized
+        // by `initialize` (guaranteed by the caller) and remains valid for the lifetime of `self`.
+        unsafe { &*cpp_shareable_process_state_futex_context(self.as_ffi()).cast() }
     }
 
     /// Returns the shareable address space owned by this `ShareableProcessState`.
+    ///
+    /// # Safety
+    ///
+    /// `self.initialize(...)` must have previously returned `true`.
     #[inline]
-    fn aspace(&self) -> &VmAspace {
-        // SAFETY: `self` is a valid `ShareableProcessState` reference, and the shareable address
-        // space is valid for the lifetime of `self`.
-        unsafe { &*cpp_shareable_process_state_aspace(self.as_ffi()) }
+    unsafe fn aspace(&self) -> &VmAspace {
+        // SAFETY: The caller guarantees that `initialize` returned `true`, and `self` holds a
+        // reference to its address space for the lifetime of `self`.
+        unsafe { self.aspace_ptr().as_ref() }
+    }
+
+    /// # Safety
+    ///
+    /// `self.initialize(...)` must have previously returned `true`.
+    #[inline]
+    unsafe fn aspace_ptr(&self) -> NonNull<VmAspace> {
+        // SAFETY: `self` is a valid `ShareableProcessState` whose `aspace_` was populated by
+        // `initialize` (guaranteed by the caller) and remains non-null for the lifetime of `self`.
+        let aspace = unsafe { cpp_shareable_process_state_aspace(self.as_ffi()) };
+        // SAFETY: `aspace` is non-null, as `initialize` returned `true` (caller's guarantee).
+        unsafe { NonNull::new_unchecked(aspace) }
     }
 }
+
+/// Internal state storage for `ProcessDispatcher`.
+#[guarded]
+#[pin_data(PinnedDrop)]
+#[repr(C)]
+pub struct ProcessDispatcherState {
+    /// Magic canary value validating structural integrity.
+    canary: Canary<{ fbl::magic(b"PROC") }>,
+
+    /// The address space used when a thread is in normal mode but has a restricted address space.
+    /// This can be null if the process was not initialized with a restricted aspace, or the
+    /// architecture does not support unified aspaces.
+    ///
+    /// Declared before `restricted_aspace` and `shareable_state` so that its `RefPtr<VmAspace>`
+    /// drops first: `VmAspace::destruct` destroys the underlying `ArchVmAspace`, and a unified
+    /// page table must release its references to the constituent restricted and shared page tables
+    /// before either constituent `VmAspace` is destroyed.
+    ///
+    /// Written and read under the same rules as `restricted_aspace`.
+    unified_aspace: KOnceCell<RefPtr<VmAspace>, ProcessDispatcherStateLockClass>,
+
+    /// The address space used when a thread of this process is executing in restricted mode.
+    /// This field is only non-null if this process is a "shared process".
+    ///
+    /// This field is logically const and may not be changed after initialization. Resetting or
+    /// assigning to this field post-initialization is a programming error. It is written exactly
+    /// once, by `initialize_shared()` under `lock` before the dispatcher is published, and read
+    /// lock-free on hot paths such as `aspace_at()` afterwards.
+    restricted_aspace: KOnceCell<RefPtr<VmAspace>, ProcessDispatcherStateLockClass>,
+
+    pub(super) shareable_state: RefPtr<ShareableProcessState>,
+
+    /// The enclosing job.
+    job: RefPtr<JobDispatcher>,
+
+    /// Job that this process is critical to.
+    ///
+    /// We require that the job is the parent of this process, or an ancestor.
+    #[guarded_by(lock)]
+    critical_to_job: Option<RefPtr<JobDispatcher>>,
+    #[guarded_by(lock)]
+    retcode_nonzero: bool,
+
+    /// Policy set by the Job during `create()`.
+    ///
+    /// It is critical that this field is immutable as it will be accessed without
+    /// synchronization.
+    policy: JobPolicy,
+
+    /// List of threads in this process.
+    #[pin]
+    #[guarded_by(lock)]
+    thread_list: DoublyLinkedList<NonNull<ThreadDispatcher>>,
+
+    /// Our state.
+    #[guarded_by(lock)]
+    state: ProcessState,
+
+    /// Suspend count; incremented on `suspend()`, decremented on `resume()`.
+    #[guarded_by(lock)]
+    suspend_count: i32,
+
+    /// True if `finish_dead_transition()` has been called.
+    /// This is used as a sanity check only, so it is a relaxed atomic rather than a guarded
+    /// field.
+    completely_dead: AtomicBool,
+
+    /// Process return code.
+    #[guarded_by(lock)]
+    retcode: i64,
+
+    /// Exceptionates have internal locking so we don't need to guard them here.
+    #[pin]
+    exceptionate: Exceptionate,
+    /// Debug exception channel endpoint; internally synchronized.
+    #[pin]
+    debug_exceptionate: Exceptionate,
+
+    /// This is the value of `_dl_debug_addr` from ld.so.
+    /// See third_party/ulib/musl/ldso/dynlink.c.
+    #[guarded_by(lock)]
+    debug_addr: usize,
+
+    /// Whether the dynamic loader should issue a debug trap when loading a shared library,
+    /// either initially or when running (e.g. dlopen).
+    ///
+    /// See docs/reference/syscalls/object_get_property.md
+    /// See third_party/ulib/musl/ldso/dynlink.c.
+    #[guarded_by(lock)]
+    dyn_break_on_load: usize,
+
+    /// This is a cache of `shareable_state.aspace().vdso_code_address()`.
+    ///
+    /// Read lock-free by `vdso_code_address()` on syscall entry and written under `lock` by
+    /// `cache_vdso_code_address()`. Relaxed ordering suffices because the vDSO mapping is
+    /// established before any user thread enters a syscall, `cache_vdso_code_address()` always
+    /// computes the same address for a given process, and no other memory accesses are ordered
+    /// through this cache word.
+    vdso_code_address: RelaxedAtomicUsize,
+
+    /// The time at which the process was started.
+    #[guarded_by(lock)]
+    start_time: zx_instant_mono_t,
+
+    /// Hold accumulated stats for threads who have exited.
+    #[guarded_by(lock)]
+    accumulated_stats: TaskRuntimeStats,
+
+    /// The user-friendly process name. For debug purposes only. That
+    /// is, there is no mechanism to mint a handle to a process via this name.
+    #[pin]
+    name: Name<{ ZX_MAX_NAME_LEN }>,
+
+    /// Node through which the parent job links this process into its raw `procs` list; exclusively
+    /// accessed under the parent job's `lock`.
+    // Safety invariant: Link pointers are only read or written under `job.state().lock` (plus Drop
+    // after unlinking).
+    #[pin]
+    raw_job_list_node: DoublyLinkedListNode<ProcessDispatcher>,
+    /// Node through which [`JobDispatcher::kill`] links this process into its transient
+    /// `ProcessList`; exclusively accessed by the single `kill` call that transitions the parent
+    /// job out of `State::Ready` under the parent job's `lock`.
+    // Safety invariant: Link pointer is only read or written by the unique `JobDispatcher::kill`
+    // caller that transitions `job` out of `State::Ready` (plus Drop when unlinked).
+    job_list_node: SinglyLinkedListNode<ProcessDispatcher>,
+
+    #[mutex]
+    lock: KMutex<TrackedCriticalMutex>,
+}
+
+zr::static_assert_size_and_align!(
+    ProcessDispatcherState,
+    object_constants::kProcessDispatcherStateSize,
+    object_constants::kProcessDispatcherStateAlign,
+);
+
+impl ProcessDispatcherState {
+    /// Initializes the `ProcessDispatcherState` in-place.
+    ///
+    /// `dispatcher` is the enclosing `ProcessDispatcher`. `flags` is accepted for symmetry with
+    /// `ProcessDispatcher::create()` but is unused.
+    pub(super) fn init(
+        dispatcher: &ProcessDispatcher,
+        shareable_state: RefPtr<ShareableProcessState>,
+        job: RefPtr<JobDispatcher>,
+        proc_name: &[u8],
+        _flags: u32,
+    ) -> impl PinInit<Self, core::convert::Infallible> {
+        let policy = job.get_policy();
+        pin_init!(Self {
+            canary: Canary::new(),
+            unified_aspace: KOnceCell::new(),
+            restricted_aspace: KOnceCell::new(),
+            shareable_state,
+            job,
+            critical_to_job: None.into(),
+            retcode_nonzero: false.into(),
+            policy,
+            thread_list <- ksync::kcell_init(DoublyLinkedList::new()),
+            state: ProcessState::Initial.into(),
+            suspend_count: 0.into(),
+            completely_dead: AtomicBool::new(false),
+            retcode: 0.into(),
+            exceptionate <- Exceptionate::new(ZX_EXCEPTION_CHANNEL_TYPE_PROCESS),
+            debug_exceptionate <- Exceptionate::new(ZX_EXCEPTION_CHANNEL_TYPE_DEBUGGER),
+            debug_addr: 0.into(),
+            dyn_break_on_load: 0.into(),
+            vdso_code_address: RelaxedAtomicUsize::new(0),
+            start_time: 0.into(),
+            accumulated_stats: TaskRuntimeStats::default().into(),
+            name <- Name::init(),
+            raw_job_list_node: DoublyLinkedListNode::new(),
+            job_list_node: SinglyLinkedListNode::new(),
+            lock <- KMutex::init(),
+            _: {
+                Name::set(&name, proc_name);
+                // Creation side effects (trace logging and incrementing the creation counter)
+                // run only when the initializer is applied: a `PinInit` dropped without being
+                // applied would otherwise bump the create counter with no matching destroy.
+                ltrace_entry_obj!(dispatcher);
+                DISPATCHER_PROCESS_CREATE_COUNT.add(1);
+            },
+        })
+    }
+}
+
+#[pinned_drop]
+impl PinnedDrop for ProcessDispatcherState {
+    fn drop(self: Pin<&mut Self>) {
+        let this = self.project();
+
+        let state = *this.state.get_inner_mut();
+        debug_assert!(state == ProcessState::Initial || state == ProcessState::Dead);
+
+        // Assert that the -> DEAD transition cleaned up what it should have.
+        debug_assert!(
+            this.restricted_aspace.get_inner_mut().is_none_or(|aspace| aspace.is_destroyed())
+        );
+
+        DISPATCHER_PROCESS_DESTROY_COUNT.add(1);
+    }
+}
+
+crate::object::dispatcher::impl_dispatcher_facade_with_state!(
+    pub struct ProcessDispatcher,
+    ProcessDispatcherState,
+    ZX_OBJ_TYPE_PROCESS,
+    object_constants::kProcessDispatcherStateOffset
+);
+
+zr::static_assert!(core::mem::size_of::<ProcessDispatcher>() == 0);
 
 /// A wrapper around a raw pointer to the current [`ProcessDispatcher`].
 ///
@@ -119,55 +547,502 @@ impl core::ops::Deref for CurrentProcessDispatcher {
 }
 
 impl ProcessDispatcher {
+    /// Returns the default rights for a process handle.
+    pub const fn default_rights() -> zx_rights_t {
+        ZX_DEFAULT_PROCESS_RIGHTS
+    }
+
+    /// Creates a new `ProcessDispatcher` under `job`, along with the dispatcher for its root
+    /// VMAR.
+    pub fn create(
+        job: RefPtr<JobDispatcher>,
+        name: &[u8],
+        flags: u32,
+    ) -> Result<
+        (KernelHandle<Self>, zx_rights_t, KernelHandle<VmAddressRegionDispatcher>, zx_rights_t),
+        Status,
+    > {
+        let shareable_state = ShareableProcessState::create().ok_or(Status::NO_MEMORY)?;
+
+        let Some(new_handle) = Self::alloc(shareable_state.clone(), job.clone(), name, flags)
+        else {
+            // shareable_state was created successfully, and thus has a process count of 1
+            // that needs to be decremented here.
+            shareable_state.decrement_share_count();
+            return Err(Status::NO_MEMORY);
+        };
+
+        // SAFETY: `new_handle` was just allocated with the freshly created, uninitialized
+        // `shareable_state` and has not been initialized or published.
+        unsafe {
+            if flags == ZX_PROCESS_SHARED {
+                new_handle.dispatcher().initialize_shared(SharedAspaceType::New)?;
+            } else {
+                new_handle.dispatcher().initialize()?;
+            }
+        }
+
+        // Create a dispatcher for the root VMAR.
+        let root_vmar = new_handle
+            .dispatcher()
+            .normal_aspace()
+            .root_vmar()
+            .expect("an initialized aspace has a root VMAR");
+        let (new_vmar_handle, root_vmar_rights) =
+            VmAddressRegionDispatcher::create(root_vmar, ARCH_MMU_FLAG_PERM_USER)?;
+
+        // Only now that the process has been fully created and initialized can we register it
+        // with its parent job. We don't want anyone to see it in a partially initialized state.
+        // SAFETY: `new_handle` was just allocated with `job.clone()` as its parent job and has
+        // never been linked into any `procs` list.
+        if !unsafe { job.add_child_process(new_handle.dispatcher()) } {
+            return Err(Status::BAD_STATE);
+        }
+
+        Ok((new_handle, Self::default_rights(), new_vmar_handle, root_vmar_rights))
+    }
+
+    /// Creates a new process dispatcher for a process that will share its `shareable_state`
+    /// with other processes.
+    ///
+    /// The shared state will be instantiated from `shared_proc`.
+    ///
+    /// `restricted_vmar_handle` is the VMAR for the restricted aspace.
+    pub fn create_shared(
+        shared_proc: RefPtr<Self>,
+        name: &[u8],
+        flags: u32,
+    ) -> Result<
+        (KernelHandle<Self>, zx_rights_t, KernelHandle<VmAddressRegionDispatcher>, zx_rights_t),
+        Status,
+    > {
+        // Make sure shared_proc has a shared aspace.
+        if shared_proc.normal_aspace().base() != SHARED_ASPACE_BASE
+            || shared_proc.normal_aspace().size() != SHARED_ASPACE_SIZE
+        {
+            return Err(Status::INVALID_ARGS);
+        }
+
+        let shareable_state = shared_proc.state().shareable_state.clone();
+        // Increment the share count on the shared state before passing it to the
+        // ProcessDispatcher constructor. If the increment fails, the shared state has already
+        // been destroyed.
+        if !shareable_state.increment_share_count() {
+            return Err(Status::BAD_STATE);
+        }
+
+        let Some(new_process) =
+            Self::alloc(shareable_state.clone(), shared_proc.job().clone(), name, flags)
+        else {
+            // shareable_state was created successfully, and thus has a process count of
+            // 1 that needs to be decremented here.
+            shareable_state.decrement_share_count();
+            return Err(Status::NO_MEMORY);
+        };
+
+        // SAFETY: `new_process` was just allocated and has not been initialized or published, and
+        // `shared_proc` is a published shared process whose `shareable_state` was initialized over
+        // `[SHARED_ASPACE_BASE, SHARED_ASPACE_BASE + SHARED_ASPACE_SIZE)` with `ShareOpt::Shared`.
+        // `new_process` is a `KernelHandle`, so `on_zero_handles` runs `finish_dead_transition`
+        // (directly, or once the last thread exits) before the process is dropped.
+        unsafe {
+            new_process.dispatcher().initialize_shared(SharedAspaceType::Shared)?;
+        }
+
+        // Create a dispatcher for the restricted VMAR.
+        let restricted_vmar = new_process
+            .dispatcher()
+            .restricted_aspace()
+            .expect("initialize_shared(Shared) creates the restricted aspace")
+            .root_vmar()
+            .expect("an initialized aspace has a root VMAR");
+        let (new_restricted_vmar_handle, restricted_vmar_rights) =
+            VmAddressRegionDispatcher::create(restricted_vmar, ARCH_MMU_FLAG_PERM_USER)?;
+
+        // Copy the process properties that aren't inherently shared.
+        let _ = new_process.dispatcher().set_dyn_break_on_load(shared_proc.get_dyn_break_on_load());
+        let _ = new_process.dispatcher().set_debug_addr(shared_proc.get_debug_addr());
+
+        // Only now that the process has been fully created and initialized can we register it
+        // with its parent job. We don't want anyone to see it in a partially initialized state.
+        // SAFETY: `new_process` was just allocated with `shared_proc.job().clone()` as its parent
+        // job and has never been linked into any `procs` list.
+        if !unsafe { shared_proc.job().add_child_process(new_process.dispatcher()) } {
+            return Err(Status::BAD_STATE);
+        }
+
+        Ok((
+            new_process,
+            Self::default_rights(),
+            new_restricted_vmar_handle,
+            restricted_vmar_rights,
+        ))
+    }
+
+    /// Allocates and constructs a `ProcessDispatcher` (the C++ constructor), returning the
+    /// `KernelHandle` that owns it.
+    fn alloc(
+        shareable_state: RefPtr<ShareableProcessState>,
+        job: RefPtr<JobDispatcher>,
+        name: &[u8],
+        flags: u32,
+    ) -> Option<KernelHandle<Self>> {
+        let shareable_state_raw = RefPtr::into_raw(shareable_state).cast_mut();
+        let job_raw = RefPtr::into_raw(job).cast_mut();
+        // SAFETY: Both raw pointers carry an acquired reference count that the constructor
+        // takes ownership of, `name` is readable for `name.len()` bytes, and
+        // `cpp_process_dispatcher_alloc` initializes `out` on success.
+        unsafe {
+            KernelHandle::create(|out| {
+                cpp_process_dispatcher_alloc(
+                    shareable_state_raw,
+                    job_raw,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    flags,
+                    out,
+                )
+            })
+            .ok()
+        }
+    }
+
     /// Returns a wrapper that dereferences to the current [`ProcessDispatcher`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the calling thread is not a user thread.
     #[inline]
     pub fn get_current() -> CurrentProcessDispatcher {
-        // SAFETY: Calling `cpp_process_dispatcher_current` is safe when executing in a valid
-        // thread context.
-        let ptr = unsafe { cpp_process_dispatcher_current() };
-        CurrentProcessDispatcher { ptr }
+        let current = ThreadDispatcher::try_get_current()
+            .expect("ProcessDispatcher::get_current called on a non-user thread");
+        CurrentProcessDispatcher { ptr: core::ptr::from_ref(current.process()) }
     }
 
     /// Executes the given function with a reference to the current process.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the calling thread is not a user thread.
     #[inline]
     pub fn with_current<R>(f: impl FnOnce(&ProcessDispatcher) -> R) -> R {
         f(&Self::get_current())
     }
 
+    /// Exits the current process with the given return code. Does not return.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the calling thread is not a user thread.
+    ///
+    /// # Safety
+    ///
+    /// The caller must uphold the [`ThreadDispatcher::exit_current`] preconditions (the calling
+    /// thread is a valid, live, non-idle running user thread after `ConstructFirstThread`,
+    /// interrupts are enabled, blocking is permitted, and no `ChainLockTransaction`, thread lock,
+    /// `Thread::get_list_lock()`, scheduler lock, or spinlock is held on the calling CPU).
+    pub unsafe fn exit_current(retcode: i64) -> ! {
+        let current = ThreadDispatcher::try_get_current()
+            .expect("ProcessDispatcher::exit_current called on a non-user thread");
+        // SAFETY: `current.process()` is the current process, and the caller upholds the
+        // `ThreadDispatcher::exit_current` preconditions.
+        unsafe { current.process().exit(retcode) }
+    }
+
     /// Returns whether this `ProcessDispatcher` is the current process.
+    #[inline]
     pub fn is_current(&self) -> bool {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_is_current(self.as_ffi()) }
+        ThreadDispatcher::try_get_current().is_some_and(|t| core::ptr::eq(self, t.process()))
+    }
+
+    /// Dispatcher implementation: runs the shutdown sequence for a process whose last handle was
+    /// closed before it ever started.
+    pub fn on_zero_handles(&self) {
+        // If the process is in the initial state and the last handle is closed
+        // we never detach from the parent job, so run the shutdown sequence for
+        // that case.
+        {
+            ksync::lock!(let mut guard = self.state().lock_lock());
+            if *guard.state() != ProcessState::Initial {
+                // Initialized processes are kept alive by their threads, see
+                // remove_thread() for the details.
+                return;
+            }
+            self.set_state_locked(guard.as_mut(), ProcessState::Dead);
+        }
+
+        self.finish_dead_transition();
+    }
+
+    /// Returns the koid of the enclosing job.
+    pub fn get_related_koid(&self) -> zx_koid_t {
+        self.state().job.get_koid()
+    }
+
+    /// Copies the process name into `out_name`.
+    pub fn get_name(&self, out_name: &mut [u8; ZX_MAX_NAME_LEN]) -> Result<(), Status> {
+        self.state().name.get(out_name);
+        Ok(())
+    }
+
+    /// Sets the process name.
+    pub fn set_name(&self, name: &[u8]) -> Result<(), Status> {
+        crate::ktrace_rs::kernel_object!(
+            "kernel:meta",
+            self.get_koid(),
+            ZX_OBJ_TYPE_PROCESS,
+            name,
+            "job" => crate::ktrace_rs::Koid(self.state().job.get_koid()),
+        );
+        self.state().name.set(name);
+        Ok(())
+    }
+
+    /// # Safety
+    ///
+    /// Any reads or writes through the returned node (including `in_container`) must be
+    /// synchronized by holding `self.job().state().lock`.
+    #[inline]
+    pub(super) unsafe fn raw_job_list_node(&self) -> &DoublyLinkedListNode<ProcessDispatcher> {
+        &self.state().raw_job_list_node
+    }
+
+    /// # Safety
+    ///
+    /// Any reads or writes through the returned node must be performed exclusively by the single
+    /// `JobDispatcher::kill` call that transitions `self.job()` out of `State::Ready`.
+    #[inline]
+    pub(super) unsafe fn job_list_node(&self) -> &SinglyLinkedListNode<ProcessDispatcher> {
+        &self.state().job_list_node
+    }
+
+    /// Performs initialization on a newly constructed `ProcessDispatcher`.
+    ///
+    /// This should be used to initialize `ProcessDispatcher`s without a restricted aspace.
+    ///
+    /// If this fails, then the object is invalid and should be deleted.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a newly allocated, unpublished `ProcessDispatcher` whose `shareable_state`
+    /// is freshly created (`share_count() == 1`) and uninitialized.
+    unsafe fn initialize(&self) -> Result<(), Status> {
+        ltrace_entry_obj!(self);
+
+        ksync::lock!(let guard = self.state().lock_lock());
+
+        debug_assert!(*guard.state() == ProcessState::Initial);
+
+        let mut aspace_name = [0u8; ZX_MAX_NAME_LEN];
+        let aspace_name = kprint::kformat!(&mut aspace_name, "proc:{:u}", self.get_koid());
+
+        // SAFETY: The caller guarantees `self.state().shareable_state` is freshly created, live,
+        // and exclusively accessed for single-shot initialization.
+        if !unsafe {
+            self.state().shareable_state.initialize(
+                USER_ASPACE_BASE,
+                USER_ASPACE_SIZE,
+                aspace_name,
+                ShareOpt::None,
+            )
+        } {
+            return Err(Status::NO_MEMORY);
+        }
+
+        Ok(())
+    }
+
+    /// Performs initialization on a newly constructed `ProcessDispatcher`.
+    /// If this fails, then the object is invalid and should be deleted.
+    ///
+    /// This should be used to initialize `ProcessDispatcher`s with a restricted aspace.
+    ///
+    /// `type_` is used to determine how to initialize the restricted and normal aspaces.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be a newly allocated, unpublished `ProcessDispatcher` on which neither
+    /// `initialize` nor `initialize_shared` has been called. When `type_ == SharedAspaceType::New`,
+    /// `self.state().shareable_state` must be freshly created (`share_count() == 1`) and
+    /// uninitialized; when `type_ == SharedAspaceType::Shared`, `self.state().shareable_state`
+    /// must already have been initialized (`ShareableProcessState::initialize` returned `true`)
+    /// over `[SHARED_ASPACE_BASE, SHARED_ASPACE_BASE + SHARED_ASPACE_SIZE)` with
+    /// `ShareOpt::Shared`, and `self` must run `finish_dead_transition` before its last reference
+    /// is dropped.
+    unsafe fn initialize_shared(&self, type_: SharedAspaceType) -> Result<(), Status> {
+        ltrace_entry_obj!(self);
+
+        ksync::lock!(let mut guard = self.state().lock_lock());
+
+        debug_assert!(*guard.state() == ProcessState::Initial);
+
+        let mut aspace_name = [0u8; ZX_MAX_NAME_LEN];
+        if type_ == SharedAspaceType::New {
+            let aspace_name = kprint::kformat!(&mut aspace_name, "proc:{:u}", self.get_koid());
+            // SAFETY: For `SharedAspaceType::New`, the caller guarantees
+            // `self.state().shareable_state` is freshly created, live, and exclusively accessed
+            // for single-shot initialization.
+            if !unsafe {
+                self.state().shareable_state.initialize(
+                    SHARED_ASPACE_BASE,
+                    SHARED_ASPACE_SIZE,
+                    aspace_name,
+                    ShareOpt::Shared,
+                )
+            } {
+                return Err(Status::NO_MEMORY);
+            }
+        } else if type_ == SharedAspaceType::Shared {
+            // Create the restricted address space.
+            let name = kprint::kformat!(&mut aspace_name, "proc(restricted):{:u}", self.get_koid());
+            let restricted_aspace = VmAspace::create_with_opts(
+                PRIVATE_ASPACE_BASE,
+                PRIVATE_ASPACE_SIZE,
+                AspaceType::User,
+                name,
+                ShareOpt::Restricted,
+            )
+            .ok_or(Status::NO_MEMORY)?;
+            // SAFETY: `guard` holds `lock`, and `initialize_shared` is the only writer of
+            // the cell.
+            let restricted_aspace = unsafe {
+                self.state()
+                    .restricted_aspace
+                    .get_or_init(|| restricted_aspace, guard.as_mut().token_mut())
+            };
+            // Create the unified address space.
+            let name = kprint::kformat!(&mut aspace_name, "proc(unified):{:u}", self.get_koid());
+            // SAFETY: For `SharedAspaceType::Shared`, the caller guarantees `shareable_state` was
+            // initialized.
+            let shared_aspace = unsafe { self.state().shareable_state.aspace() };
+            // SAFETY: `shared_aspace` and `restricted_aspace` were created with `ShareOpt::Shared`
+            // and `ShareOpt::Restricted`, with the private range below the shared range and
+            // sharing no top-level page table entry; `restricted_aspace` was just created, so it
+            // has no mappings and is not part of another unified aspace. The caller guarantees that
+            // `finish_dead_transition` runs, which destroys `unified_aspace`. Its only reference is
+            // the one this process stores below, and the process holds strong references to
+            // `restricted_aspace` and `shared_aspace` (through `shareable_state`) in fields that
+            // field order drops after it.
+            let unified_aspace =
+                unsafe { VmAspace::create_unified(shared_aspace, restricted_aspace, name) }
+                    .ok_or(Status::NO_MEMORY)?;
+            // SAFETY: `guard` holds `lock`, and `initialize_shared` is the only writer of
+            // the cell.
+            let _ = unsafe {
+                self.state().unified_aspace.set(unified_aspace, guard.as_mut().token_mut())
+            };
+        }
+
+        Ok(())
     }
 
     /// Returns a reference to this process's [`HandleTable`].
     #[inline]
     pub fn handle_table(&self) -> &HandleTable {
-        // SAFETY: `self` is a valid `ProcessDispatcher`. In C++, the `HandleTable` is owned by
-        // `shareable_state_` which is held by `ProcessDispatcher` for its entire lifetime.
-        // Therefore, the returned `&HandleTable` reference tied to `&self` is guaranteed to
-        // remain valid for the lifetime of `self`.
-        unsafe { &*cpp_process_dispatcher_handle_table(self.as_ffi()) }
+        self.state().shareable_state.handle_table()
+    }
+
+    /// Returns a reference to the [`FutexContext`](super::futex_context::FutexContext) for this
+    /// process.
+    #[inline]
+    pub fn futex_context(&self) -> &super::futex_context::FutexContext {
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        unsafe { self.state().shareable_state.futex_context() }
     }
 
     /// Returns a reference to this process's [`ShareableProcessState`].
     #[inline]
     fn shareable_state(&self) -> &ShareableProcessState {
-        // SAFETY: `self` is a valid `ProcessDispatcher`, and its shareable state is valid for the
-        // lifetime of `self`.
-        unsafe { &*cpp_process_dispatcher_shareable_state(self.as_ffi()) }
+        &self.state().shareable_state
+    }
+
+    /// Returns the process's address space containing `va` if such an aspace exists, otherwise
+    /// it returns the normal aspace of the process.
+    pub fn aspace_at(&self, va: zx_vaddr_t) -> &VmAspace {
+        let Some(restricted_aspace) = self.restricted_aspace() else {
+            // If there is no restricted aspace associated with the process, shortcut and return
+            // the normal aspace. This ensures a valid VmAspace pointer is returned.
+            // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+            // `shareable_state.initialize(...)` returned `true`.
+            return unsafe { self.shareable_state().aspace() };
+        };
+
+        let begin = restricted_aspace.base();
+        let end = begin + restricted_aspace.size();
+
+        if va >= begin && va < end {
+            return restricted_aspace;
+        }
+
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        unsafe { self.shareable_state().aspace() }
+    }
+
+    /// Returns an identifier that can be used to associate hardware trace
+    /// data with this process.
+    #[cfg(target_arch = "x86_64")]
+    pub fn hw_trace_context_id(&self) -> usize {
+        // TODO(https://fxbug.dev/42055932): Figure out how to make HW tracing work in restricted
+        // mode.
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        unsafe { self.shareable_state().aspace() }.arch_aspace().arch_table_phys().0
+    }
+
+    /// Returns the base address of the vDSO mapping for this process.
+    pub fn vdso_base_address(&self) -> usize {
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        unsafe { self.shareable_state().aspace() }.vdso_base_address()
+    }
+
+    /// Returns a cached copy of the vDSO code address or computes a new one.
+    ///
+    /// This runs on every syscall entry, so the cache hit stays inline and the miss is cold.
+    #[inline]
+    pub fn vdso_code_address(&self) -> usize {
+        let vdso_code_address = self.state().vdso_code_address.load();
+        if vdso_code_address == 0 {
+            core::hint::cold_path();
+            return self.cache_vdso_code_address();
+        }
+        vdso_code_address
+    }
+
+    /// Computes the vDSO code address and stores it in `vdso_code_address`.
+    #[cold]
+    #[inline(never)]
+    fn cache_vdso_code_address(&self) -> usize {
+        ksync::lock!(let _guard = self.state().lock_lock());
+        // The VDSO code address is always stored in the shareable state's address space, even when
+        // a unified address space is present. This is because the unified address space doesn't
+        // store any mappings itself, so the VDSO code address of that address space is always 0.
+        // Therefore, to make sure syscalls work in shared processes, we redirect this call to the
+        // shared address space.
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        let vdso_code_address = unsafe { self.shareable_state().aspace() }.vdso_code_address();
+        self.state().vdso_code_address.store(vdso_code_address);
+        vdso_code_address
     }
 
     /// Returns the current [`ProcessState`] of this process.
-    pub(super) fn state(&self) -> ProcessState {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_state(self.as_ffi()) }
+    pub fn process_state(&self) -> ProcessState {
+        ksync::lock!(let guard = self.state().lock_lock());
+        *guard.state()
+    }
+
+    /// Returns the job associated with this process.
+    pub fn job(&self) -> &RefPtr<JobDispatcher> {
+        &self.state().job
     }
 
     /// Starts execution of this process.
     pub fn start(
         &self,
-        thread: fbl::RefPtr<ThreadDispatcher>,
+        thread: RefPtr<ThreadDispatcher>,
         pc: zx_vaddr_t,
         sp: zx_vaddr_t,
         arg_handle: Option<HandleOwner>,
@@ -207,31 +1082,789 @@ impl ProcessDispatcher {
         Ok(())
     }
 
-    /// Removes a handle from this process's handle table and returns the owned handle if found.
-    pub fn remove_handle(&self, handle: HandleValue) -> Option<HandleOwner> {
-        self.handle_table().remove_handle(self, handle)
-    }
-    /// Kills this process with the given return code.
-    pub fn kill(&self, retcode: i64) {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_kill(self.as_ffi_mut(), retcode) }
+    /// Exits this process with the given return code. It is an error to call this on anything
+    /// other than the current process. Please use `exit_current()` instead of calling this
+    /// directly.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the current process, and the caller must uphold the
+    /// [`ThreadDispatcher::exit_current`] preconditions.
+    unsafe fn exit(&self, retcode: i64) -> ! {
+        ltrace_entry_obj!(self);
+
+        debug_assert!(self.is_current());
+
+        {
+            ksync::lock!(let mut guard = self.state().lock_lock());
+
+            // check that we're in the RUNNING state or we're racing with something
+            // else that has already pushed us until the DYING state
+            let state = *guard.state();
+            debug_assert!(
+                state == ProcessState::Running || state == ProcessState::Dying,
+                "state is {}",
+                state_to_string(state)
+            );
+
+            // Set the exit status if there isn't already an exit in progress.
+            if state != ProcessState::Dying {
+                debug_assert!(*guard.retcode() == 0);
+                *guard.as_mut().retcode_mut() = retcode;
+                if guard.critical_to_job().as_ref() == Some(get_root_job_dispatcher()) {
+                    let mut pname = [0u8; ZX_MAX_NAME_LEN];
+                    let status = self.get_name(&mut pname);
+                    debug_assert!(status.is_ok());
+                    kprint::kprintln!(
+                        "KERN: process '{:s}' ({:u}) critical to root job exited {:d}",
+                        pname,
+                        self.get_koid(),
+                        retcode
+                    );
+                    RootJobObserver::set_critical_process_dying();
+                }
+            }
+
+            // enter the dying state, which should kill all threads
+            self.set_state_locked(guard.as_mut(), ProcessState::Dying);
+        }
+
+        // SAFETY: Forwarded from the caller; `guard` was dropped above.
+        unsafe { ThreadDispatcher::exit_current() }
     }
 
-    /// Suspends execution of this process.
+    /// Kills this process with the given return code.
+    pub fn kill(&self, retcode: i64) {
+        ltrace_entry_obj!(self);
+
+        // https://fxbug.dev/42105735: Call remove_child_process outside of `lock`.
+        let mut became_dead = false;
+
+        {
+            ksync::lock!(let mut guard = self.state().lock_lock());
+
+            // we're already dead
+            if *guard.state() == ProcessState::Dead {
+                return;
+            }
+
+            if *guard.state() != ProcessState::Dying {
+                debug_assert!(*guard.retcode() == 0);
+                *guard.as_mut().retcode_mut() = retcode;
+                if guard.critical_to_job().as_ref() == Some(get_root_job_dispatcher()) {
+                    let mut pname = [0u8; ZX_MAX_NAME_LEN];
+                    let status = self.get_name(&mut pname);
+                    debug_assert!(status.is_ok());
+                    kprint::kprintln!(
+                        "KERN: process '{:s}' ({:u}) critical to root job killed with {:d}",
+                        pname,
+                        self.get_koid(),
+                        retcode
+                    );
+                    RootJobObserver::set_critical_process_dying();
+                }
+            }
+
+            // if we have no threads, enter the dead state directly
+            if guard.thread_list().is_empty() {
+                self.set_state_locked(guard.as_mut(), ProcessState::Dead);
+                became_dead = true;
+            } else {
+                // enter the dying state, which should trigger a thread kill.
+                // the last thread exiting will transition us to DEAD
+                self.set_state_locked(guard.as_mut(), ProcessState::Dying);
+            }
+        }
+
+        if became_dead {
+            self.finish_dead_transition();
+        }
+    }
+
+    /// Suspends the process.
     ///
-    /// # Errors
+    /// Suspending a process causes all child threads to suspend as well as any new children
+    /// that are added until the process is resumed. `suspend()` is cumulative, so the process
+    /// will only resume once `resume()` has been called an equal number of times.
     ///
-    /// - `ZX_ERR_BAD_STATE` if the process is dying or dead.
+    /// Returns `Ok` on success, or `ZX_ERR_BAD_STATE` iff the process is dying or dead.
     pub fn suspend(&self) -> Result<(), Status> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status = unsafe { cpp_process_dispatcher_suspend(self.as_ffi_mut()) };
-        Status::ok(status)
+        self.state().canary.assert();
+
+        ltrace_entry_obj!(self);
+
+        ksync::lock!(let mut guard = self.state().lock_lock());
+
+        // If we're dying don't try to suspend.
+        if *guard.state() == ProcessState::Dying || *guard.state() == ProcessState::Dead {
+            return Err(Status::BAD_STATE);
+        }
+
+        debug_assert!(*guard.suspend_count() >= 0);
+        *guard.as_mut().suspend_count_mut() += 1;
+        if *guard.suspend_count() == 1 {
+            for thread in guard.thread_list().iter() {
+                // Thread suspend can only fail if the thread is already dying, which is fine here
+                // since it will be removed from this process shortly, so continue to suspend
+                // whether the thread suspend succeeds or fails.
+                let status = thread.suspend();
+                debug_assert!(status.is_ok() || thread.is_dying_or_dead());
+            }
+        }
+
+        Ok(())
     }
 
     /// Resumes execution of this process.
     pub fn resume(&self) {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_resume(self.as_ffi_mut()) }
+        self.state().canary.assert();
+
+        ltrace_entry_obj!(self);
+
+        ksync::lock!(let mut guard = self.state().lock_lock());
+
+        // If we're in the process of dying don't try to resume, just let it continue to clean up.
+        if *guard.state() == ProcessState::Dying || *guard.state() == ProcessState::Dead {
+            return;
+        }
+
+        debug_assert!(*guard.suspend_count() > 0);
+        *guard.as_mut().suspend_count_mut() -= 1;
+        if *guard.suspend_count() == 0 {
+            for thread in guard.thread_list().iter() {
+                thread.resume();
+            }
+        }
+    }
+
+    /// Kill all threads.
+    fn kill_all_threads_locked(&self, guard: &ProcessDispatcherStateLockGuard<'_>) {
+        ltrace_entry_obj!(self);
+
+        for thread in guard.thread_list().iter() {
+            ltracef!("killing thread {:p}\n", thread);
+            thread.kill();
+        }
+    }
+
+    /// Takes the given `ThreadDispatcher` and transitions it from the INITIALIZED state to a
+    /// runnable state (RUNNING or SUSPENDED depending on whether this process is suspended) by
+    /// calling `ThreadDispatcher::make_runnable`. The thread is then added to the `thread_list`
+    /// for this process and we transition to running if this is the initial thread.
+    ///
+    /// If `ensure_initial_thread` is true, adding the thread will fail if is not the initial
+    /// thread in the process.
+    pub(super) fn add_initialized_thread(
+        &self,
+        t: &ThreadDispatcher,
+        ensure_initial_thread: bool,
+        entry: &UserEntryState,
+    ) -> Result<(), Status> {
+        ltrace_entry_obj!(self);
+        assert!(core::ptr::eq(t.process(), self));
+
+        ksync::lock!(let mut guard = self.state().lock_lock());
+        let initial_thread = guard.thread_list().is_empty();
+        if ensure_initial_thread && !initial_thread {
+            return Err(Status::BAD_STATE);
+        }
+
+        if initial_thread {
+            if *guard.state() != ProcessState::Initial {
+                return Err(Status::BAD_STATE);
+            }
+        } else {
+            // We must not add a thread when in the DYING or DEAD states.
+            // Also, we want to ensure that this is not the first thread.
+            if *guard.state() != ProcessState::Running {
+                return Err(Status::BAD_STATE);
+            }
+        }
+
+        // Now that we know our state is okay we can attempt to start the thread running. This is
+        // okay since as long as the thread doesn't refuse to start running then we cannot fail
+        // from here and so we will update our thread_list and state before we drop the lock,
+        // making this whole process atomic to any observers.
+        t.make_runnable(*entry, *guard.suspend_count() > 0, initial_thread)?;
+
+        // add the thread to our list
+        // SAFETY: `t` has just been made runnable, so it is not yet in any process thread list,
+        // and the `assert!` above verified `core::ptr::eq(t.process(), self)` so `t` stays alive
+        // until `t.process().remove_thread(t)` unlinks it from this list on exit.
+        unsafe { guard.as_mut().thread_list_mut().push_back_raw(NonNull::from(t)) };
+
+        if initial_thread {
+            debug_assert!(*guard.start_time() == 0, "start_time {}", *guard.start_time());
+            *guard.as_mut().start_time_mut() = current_mono_time().0;
+            self.set_state_locked(guard.as_mut(), ProcessState::Running);
+        }
+
+        Ok(())
+    }
+
+    /// Removes `t` from the thread list of this process. If `t` was the last thread, the process
+    /// transitions to the dead state.
+    ///
+    /// This is called within thread `t`'s context when it is exiting.
+    ///
+    /// # Safety
+    ///
+    /// `t` must currently be linked into this process's thread list (i.e. it was added by
+    /// [`Self::add_initialized_thread`] and has not been removed since); unlinking a thread that
+    /// is not in the list corrupts it.
+    pub(super) unsafe fn remove_thread(&self, t: &ThreadDispatcher) {
+        ltrace_entry_obj!(self);
+
+        // https://fxbug.dev/42105735: Call remove_child_process outside of `lock`.
+        let mut became_dead = false;
+
+        {
+            // we're going to check for state and possibly transition below
+            ksync::lock!(let mut guard = self.state().lock_lock());
+
+            // remove the thread from our list
+            // SAFETY: `t` was linked into `thread_list` by `add_initialized_thread()` and is
+            // unlinked exactly once, here.
+            let _ = unsafe { guard.as_mut().thread_list_mut().erase(t) };
+
+            // Remember how much time this thread spent running/ready/etc while it was
+            // still a member of this process.
+            *guard.as_mut().accumulated_stats_mut() += t.get_compensated_task_runtime_stats();
+
+            // if this was the last thread, transition directly to DEAD state
+            if guard.thread_list().is_empty() {
+                ltracef!("last thread left the process {:p}, entering DEAD state\n", self);
+                self.set_state_locked(guard.as_mut(), ProcessState::Dead);
+                became_dead = true;
+            }
+        }
+
+        if became_dead {
+            self.finish_dead_transition();
+        }
+    }
+
+    fn set_state_locked(
+        &self,
+        mut guard: Pin<&mut ProcessDispatcherStateLockGuard<'_>>,
+        s: ProcessState,
+    ) {
+        ltracef!("process {:p}: state {} ({})\n", self, s as u32, state_to_string(s));
+
+        let state = guard.as_mut().state_mut();
+
+        // look for some invalid state transitions
+        if *state == ProcessState::Dead && s != ProcessState::Dead {
+            panic!(
+                "ProcessDispatcher::set_state_locked invalid state transition from DEAD to !DEAD"
+            );
+        }
+
+        // transitions to your own state are okay
+        if s == *state {
+            return;
+        }
+
+        *state = s;
+
+        if s == ProcessState::Dying {
+            // send kill to all of our threads
+            self.kill_all_threads_locked(&guard);
+        }
+    }
+
+    /// Finish processing of the transition to `ProcessState::Dead`. Some things need to be done
+    /// outside of holding `lock`. Beware this is called from several places
+    /// including `on_zero_handles()`.
+    fn finish_dead_transition(&self) {
+        debug_assert!(!self.state().completely_dead.load(Ordering::Relaxed));
+        self.state().completely_dead.store(true, Ordering::Relaxed);
+
+        // It doesn't matter whether the lock is held or not while shutting down
+        // the exceptionates, this is just the most convenient place to do it.
+        self.state().exceptionate.shutdown();
+        self.state().debug_exceptionate.shutdown();
+
+        // Tear down the unified address space. It may not exist if initialize_shared() failed,
+        // this process was not created with one, or they aren't supported on this architecture.
+        if let Some(unified_aspace) = self.unified_aspace() {
+            let result = unified_aspace.destroy();
+            assert!(result.is_ok(), "{:?}", result);
+        }
+
+        // Tear down the restricted address space. It may not exist if initialize_shared() failed
+        // or if this process was not created with one.
+        if let Some(restricted_aspace) = self.restricted_aspace() {
+            let result = restricted_aspace.destroy();
+            assert!(result.is_ok(), "{:?}", result);
+        }
+
+        // clean up shareable state, including the handle table
+        ltracef_level!(2, "removing shareable state reference from proc {:p}\n", self);
+        self.shareable_state().decrement_share_count();
+
+        // signal waiter
+        ltracef_level!(2, "signaling waiters\n");
+        self.update_state(0, ZX_TASK_TERMINATED);
+
+        // Call job.remove_child_process(self) outside of `lock`. Otherwise
+        // we risk a deadlock as we have `lock` and remove_child_process grabs
+        // the job's `lock`, whereas JobDispatcher::EnumerateChildren obtains the
+        // locks in the opposite order. We want to keep lock acquisition order
+        // consistent, and JobDispatcher::EnumerateChildren's order makes
+        // sense. We don't need `lock` when calling remove_child_process
+        // here. https://fxbug.dev/42105735
+        // SAFETY: `self.state().job` is `self`'s parent job.
+        unsafe { self.state().job.remove_child_process(self) };
+
+        // If we are critical to a job, we need to take action. Similar to the above
+        // comment, we avoid performing the actual call into the job whilst still
+        // holding the lock.
+        let mut kill_job: Option<RefPtr<JobDispatcher>> = None;
+        {
+            ksync::lock!(let guard = self.state().lock_lock());
+            if let Some(critical_to_job) = guard.critical_to_job() {
+                // Check if we accept any return code, or require it be non-zero.
+                if !*guard.retcode_nonzero() || *guard.retcode() != 0 {
+                    kill_job = Some(critical_to_job.clone());
+                }
+            }
+        }
+        if let Some(kill_job) = kill_job {
+            kill_job.critical_process_kill(self);
+        }
+    }
+
+    /// Returns whether this process is critical to the root job.
+    pub fn critical_to_root_job(&self) -> bool {
+        ksync::lock!(let guard = self.state().lock_lock());
+        guard.critical_to_job().as_ref() == Some(get_root_job_dispatcher())
+    }
+
+    /// Returns information about this process.
+    pub fn get_info(&self) -> zx_info_process_t {
+        self.state().canary.assert();
+
+        let state;
+        let start_time;
+        let return_code;
+        let mut flags: u32 = 0;
+        // retcode depends on the state: make sure they're consistent.
+        {
+            ksync::lock!(let guard = self.state().lock_lock());
+            state = *guard.state();
+            start_time = *guard.start_time();
+            return_code = *guard.retcode();
+            // TODO: Protect with rights if necessary.
+            if self.state().debug_exceptionate.has_valid_channel() {
+                flags |= ZX_INFO_PROCESS_FLAG_DEBUGGER_ATTACHED;
+            }
+        }
+
+        match state {
+            ProcessState::Dead | ProcessState::Dying => {
+                flags |= ZX_INFO_PROCESS_FLAG_EXITED;
+                flags |= ZX_INFO_PROCESS_FLAG_STARTED;
+            }
+            ProcessState::Running => flags |= ZX_INFO_PROCESS_FLAG_STARTED,
+            ProcessState::Initial => {}
+        }
+
+        zx_info_process_t { return_code, start_time, flags, padding1: Default::default() }
+    }
+
+    /// Returns task memory statistics for this process.
+    pub fn get_stats(&self) -> Result<zx_info_task_stats_t, Status> {
+        ksync::lock!(let guard = self.state().lock_lock());
+        if *guard.state() == ProcessState::Dead {
+            return Err(Status::BAD_STATE);
+        }
+
+        // The calls to share_count() get_memory_usage() are not synchronized, but that's OK
+        // because we're providing a moment-in-time view of just this one process's memory usage.
+        // If instead, we were providing a snapshot across multiple processes and required
+        // consistency within the snapshot, we'd need to synchronize.
+        let count = self.shareable_state().share_count();
+        if count < 1 {
+            return Err(Status::BAD_STATE);
+        }
+
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        let usage = unsafe { self.shareable_state().aspace() }.get_memory_usage()?;
+
+        let mut stats = zx_info_task_stats_t::default();
+        // If there's only one process using this aspace, then the accounting is simple.
+        let mut scaled_shared_bytes;
+        if count == 1 {
+            stats.mem_mapped_bytes = usage.mapped_bytes;
+            stats.mem_private_bytes = usage.private_bytes;
+            stats.mem_shared_bytes = usage.shared_bytes;
+            scaled_shared_bytes = usage.scaled_shared_bytes;
+        } else {
+            // There are multiple processes using the shareable aspace so things are a little
+            // more complex because the values in VmUsage are aspace-centric, while
+            // zx_info_task_stats_t is process-centric.
+            //
+            // Mapped pages are unchanged.  If they're mapped in the aspace, they're mapped in the
+            // process that uses this aspace.
+            stats.mem_mapped_bytes = usage.mapped_bytes;
+            //
+            // This aspace contributes no private-to-process pages because multiple processes are
+            // using it.
+            stats.mem_private_bytes = 0;
+            //
+            // However, the private-to-aspace pages are really shared among the processes sharing
+            // this aspace so be sure to count them in the process-shared bucket along with the
+            // aspace-shared pages.
+            stats.mem_shared_bytes = usage.private_bytes + usage.shared_bytes;
+            //
+            // Finally, we need to computed the mem_scaled_shared_bytes.
+            //
+            // Start by scaling down the aspace's scaled_shared_bytes by the number of processes
+            // sharing the aspace.
+            scaled_shared_bytes = usage.scaled_shared_bytes / count;
+            // Now, add to that the private-to-aspace pages, scaled down by the number of
+            // processes that share the aspace.
+            //
+            // Ensure the fractional part of private / count is tracked, rather than using integer
+            // division.
+            scaled_shared_bytes += FractionalBytes::from_whole(usage.private_bytes as u64) / count;
+        }
+
+        // Now that we've handled the shareable aspace, handle the restricted aspace (if present).
+        // SAFETY: `guard` holds `lock`, the lock class of the cell.
+        if let Some(restricted_aspace) =
+            unsafe { self.state().restricted_aspace.get(guard.token()) }
+        {
+            let r_usage = restricted_aspace.get_memory_usage()?;
+            stats.mem_mapped_bytes += r_usage.mapped_bytes;
+            stats.mem_private_bytes += r_usage.private_bytes;
+            stats.mem_shared_bytes += r_usage.shared_bytes;
+            scaled_shared_bytes += r_usage.scaled_shared_bytes;
+        }
+
+        // Update the scaled bytes with the final total, after doing computations above in
+        // fixed-point.
+        stats.mem_scaled_shared_bytes = scaled_shared_bytes.integral;
+        stats.mem_fractional_scaled_shared_bytes = usage.scaled_shared_bytes.fractional;
+
+        Ok(stats)
+    }
+
+    /// Returns the runtime of all threads that previously ran or are currently running under
+    /// this process.
+    pub fn get_task_runtime_stats(&self) -> TaskRuntimeStats {
+        ksync::lock!(let guard = self.state().lock_lock());
+
+        let mut accumulator = *guard.accumulated_stats();
+        for td in guard.thread_list().iter() {
+            accumulator += td.get_compensated_task_runtime_stats();
+        }
+
+        accumulator
+    }
+
+    /// Returns `get_task_runtime_stats()` converted to `zx_info_task_runtime_t`.
+    pub fn get_runtime_stats(&self) -> zx_info_task_runtime_t {
+        self.get_task_runtime_stats().into()
+    }
+
+    /// Returns the KOIDs of all threads in this process.
+    pub fn get_threads(&self) -> Result<Array<zx_koid_t>, Status> {
+        ksync::lock!(let guard = self.state().lock_lock());
+        let n = guard.thread_list().iter().count();
+        let mut threads = Array::<zx_koid_t>::try_new(n).map_err(|_| Status::NO_MEMORY)?;
+        let mut i = 0;
+        for thread in guard.thread_list().iter() {
+            threads[i] = thread.get_koid();
+            i += 1;
+        }
+        debug_assert!(i == n);
+        Ok(threads)
+    }
+
+    /// Sets this process as critical to `critical_to_job`, which must be its parent job or an
+    /// ancestor of it. If `retcode_nonzero` is true, the job is only killed when the process
+    /// exits with a non-zero return code.
+    pub fn set_critical_to_job(
+        &self,
+        critical_to_job: RefPtr<JobDispatcher>,
+        retcode_nonzero: bool,
+    ) -> Result<(), Status> {
+        ksync::lock!(let mut guard = self.state().lock_lock());
+
+        if guard.critical_to_job().is_some() {
+            // The process is already critical to a job.
+            return Err(Status::ALREADY_BOUND);
+        }
+
+        let mut job = Some(&self.state().job);
+        while let Some(j) = job {
+            if RefPtr::ptr_eq(j, &critical_to_job) {
+                *guard.as_mut().critical_to_job_mut() = Some(critical_to_job);
+                break;
+            }
+            job = j.parent();
+        }
+
+        if guard.critical_to_job().is_none() {
+            // The provided job is not the parent of this process, or an ancestor.
+            return Err(Status::INVALID_ARGS);
+        }
+
+        *guard.as_mut().retcode_nonzero_mut() = retcode_nonzero;
+        Ok(())
+    }
+
+    /// Returns the process's normal `Exceptionate`.
+    #[inline]
+    pub fn exceptionate(&self) -> &Exceptionate {
+        self.state().canary.assert();
+        &self.state().exceptionate
+    }
+
+    /// Returns the process's debug `Exceptionate`.
+    #[inline]
+    pub fn debug_exceptionate(&self) -> &Exceptionate {
+        self.state().canary.assert();
+        &self.state().debug_exceptionate
+    }
+
+    /// Dispatches `exception_type` on `t` to attached job debuggers up the ancestor job chain.
+    ///
+    /// # Safety
+    ///
+    /// * `t` must be the currently executing user thread (`t.is_current()`) and belong to `self`,
+    ///   in a blocking-permitted context with interrupts enabled.
+    /// * `t`'s dispatcher lock (`t.state().lock`) must not be held, nor any thread lock, spinlock,
+    ///   or active `ChainLockTransaction` (required by
+    ///   [`ThreadDispatcher::handle_single_shot_exception`]).
+    /// * `context` must describe `t`, and if `context.frame` is non-null, it must point to a valid,
+    ///   initialized, writable `Iframe` for the duration of the call without conflicting Rust
+    ///   references (required by [`ThreadDispatcher::handle_single_shot_exception`]).
+    unsafe fn notify_job_debuggers(
+        &self,
+        t: &ThreadDispatcher,
+        exception_type: zx_excp_type_t,
+        context: &ArchExceptionContext,
+        context_desc: &str,
+    ) {
+        let mut job: Option<&JobDispatcher> = Some(self.job());
+        while let Some(j) = job {
+            if j.for_each_debug_exceptionate(|exceptionate| {
+                // SAFETY: Guaranteed by the caller per `# Safety`. `for_each_debug_exceptionate`
+                // releases `j`'s lock before invoking this callback, and
+                // `handle_single_shot_exception` releases all locks and exception context it
+                // acquires before returning, preserving these invariants across iterations.
+                unsafe {
+                    t.handle_single_shot_exception(exceptionate, exception_type, context);
+                }
+            })
+            .is_err()
+            {
+                kprint::kprintln!(
+                    "KERN: failed to allocate memory to notify {:s} in {:u}",
+                    context_desc,
+                    self.get_koid()
+                );
+                break;
+            }
+
+            job = j.parent().map(|parent| &**parent);
+        }
+    }
+
+    /// Notifies attached job debuggers that `t` is starting this process.
+    ///
+    /// # Safety
+    ///
+    /// * `t` must be the currently executing user thread (`t.is_current()`) and belong to `self`,
+    ///   in a blocking-permitted context with interrupts enabled.
+    /// * `t`'s dispatcher lock (`t.state().lock`) must not be held, nor any thread lock, spinlock,
+    ///   or active `ChainLockTransaction` (required by
+    ///   [`ThreadDispatcher::handle_single_shot_exception`]).
+    /// * `context` must describe `t`, and if `context.frame` is non-null, it must point to a valid,
+    ///   initialized, writable `Iframe` for the duration of the call without conflicting Rust
+    ///   references (required by [`ThreadDispatcher::handle_single_shot_exception`]).
+    #[inline]
+    pub(super) unsafe fn on_process_start_for_job_debugger(
+        &self,
+        t: &ThreadDispatcher,
+        context: &ArchExceptionContext,
+    ) {
+        // SAFETY: Guaranteed by the caller per `# Safety`.
+        unsafe { self.notify_job_debuggers(t, ZX_EXCP_PROCESS_STARTING, context, "process starts") }
+    }
+
+    /// Dispatches a user exception to job debugger exception channels.
+    ///
+    /// # Safety
+    ///
+    /// * `t` must be the currently executing user thread (`t.is_current()`) and belong to `self`,
+    ///   in a blocking-permitted context with interrupts enabled.
+    /// * `t`'s dispatcher lock (`t.state().lock`) must not be held, nor any thread lock, spinlock,
+    ///   or active `ChainLockTransaction` (required by
+    ///   [`ThreadDispatcher::handle_single_shot_exception`]).
+    /// * `context` must describe `t`, and if `context.frame` is non-null, it must point to a valid,
+    ///   initialized, writable `Iframe` for the duration of the call without conflicting Rust
+    ///   references (required by [`ThreadDispatcher::handle_single_shot_exception`]).
+    #[inline]
+    pub(super) unsafe fn on_user_exception_for_job_debugger(
+        &self,
+        t: &ThreadDispatcher,
+        context: &ArchExceptionContext,
+    ) {
+        // SAFETY: Guaranteed by the caller per `# Safety`.
+        unsafe { self.notify_job_debuggers(t, ZX_EXCP_USER, context, "user exception") }
+    }
+
+    /// Returns the memory attributed to this process's address spaces.
+    ///
+    /// This can be slow and inaccurate and should only be called from diagnostics code.
+    pub fn get_attributed_memory(&self) -> AttributionCounts {
+        self.state().canary.assert();
+
+        let mut counts = AttributionCounts::default();
+        ksync::lock!(let guard = self.state().lock_lock());
+        if *guard.state() != ProcessState::Initial && *guard.state() != ProcessState::Running {
+            return counts;
+        }
+
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        let root_vmar = unsafe { self.shareable_state().aspace() }.root_vmar();
+        if let Some(root_vmar) = root_vmar {
+            counts += root_vmar.get_attributed_memory();
+        }
+
+        // SAFETY: `guard` holds `lock`, the lock class of the cell.
+        if let Some(restricted_aspace) =
+            unsafe { self.state().restricted_aspace.get(guard.token()) }
+        {
+            let root_vmar = restricted_aspace.root_vmar();
+            if let Some(root_vmar) = root_vmar {
+                counts += root_vmar.get_attributed_memory();
+            }
+        }
+        counts
+    }
+
+    /// Dumps this process's shareable address space and, if present, its restricted address
+    /// space to the console.
+    pub fn dump_aspace(&self) {
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        unsafe { self.shareable_state().aspace() }.dump();
+        if let Some(restricted_aspace) = self.restricted_aspace() {
+            restricted_aspace.dump();
+        }
+    }
+
+    /// Looks up a process given its koid.
+    /// Returns `None` if not found.
+    pub fn lookup_process_by_id(koid: zx_koid_t) -> Option<RefPtr<Self>> {
+        let mut finder = FindProcessByKoid::new(koid);
+        get_root_job_dispatcher().enumerate_children_recursive(&mut finder);
+        finder.get_pd()
+    }
+
+    /// Looks up a thread in this process given its koid.
+    /// Returns `None` if not found.
+    pub fn lookup_thread_by_id(&self, koid: zx_koid_t) -> Option<RefPtr<ThreadDispatcher>> {
+        ltrace_entry_obj!(self);
+        ksync::lock!(let guard = self.state().lock_lock());
+
+        guard.thread_list().find_if(|t| t.get_koid() == koid).map(RefPtr::from_ref)
+    }
+
+    /// Returns the debug address of the dynamic loader (`_dl_debug_addr`) for this process.
+    pub fn get_debug_addr(&self) -> usize {
+        ksync::lock!(let guard = self.state().lock_lock());
+        *guard.debug_addr()
+    }
+
+    /// Sets the debug address of the dynamic loader (`_dl_debug_addr`) for this process.
+    pub fn set_debug_addr(&self, addr: usize) -> Result<(), Status> {
+        ksync::lock!(let mut guard = self.state().lock_lock());
+        *guard.as_mut().debug_addr_mut() = addr;
+        Ok(())
+    }
+
+    /// Returns the dynamic break-on-load state for this process.
+    pub fn get_dyn_break_on_load(&self) -> usize {
+        ksync::lock!(let guard = self.state().lock_lock());
+        *guard.dyn_break_on_load()
+    }
+
+    /// Sets the dynamic break-on-load state for this process.
+    pub fn set_dyn_break_on_load(&self, break_on_load: usize) -> Result<(), Status> {
+        ksync::lock!(let mut guard = self.state().lock_lock());
+        *guard.as_mut().dyn_break_on_load_mut() = break_on_load;
+        Ok(())
+    }
+
+    /// Checks `condition` and enforces the parent job's policy.
+    ///
+    /// Depending on the parent job's policy, this method may signal an exception
+    /// on the calling thread or signal that the current process should be
+    /// killed.
+    ///
+    /// Must be called by syscalls before performing an action represented by an
+    /// `ZX_POL_xxxxx` condition. If the return value is `Ok` the action can
+    /// proceed; otherwise, the process is not allowed to perform the action,
+    /// and the status value should be returned to the usermode caller.
+    ///
+    /// E.g., in `sys_channel_create`:
+    ///
+    /// ```text
+    ///     ProcessDispatcher::with_current(|up| up.enforce_basic_policy(ZX_POL_NEW_CHANNEL))?;
+    ///     // Channel creation denied by the calling process's parent job's policy returns
+    ///     // early above. Ok to create a channel.
+    /// ```
+    #[inline]
+    pub fn enforce_basic_policy(&self, condition: u32) -> Result<(), Status> {
+        let action = self.state().policy.query_basic_policy(condition);
+        if action == ZX_POL_ACTION_ALLOW {
+            // Not calling increment_counter here because this is the common case (fast path).
+            return Ok(());
+        }
+        Self::enforce_basic_policy_slow(condition, action)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn enforce_basic_policy_slow(condition: u32, action: u32) -> Result<(), Status> {
+        match action {
+            ZX_POL_ACTION_DENY => {
+                JobPolicy::increment_counter(action, condition);
+                Err(Status::ACCESS_DENIED)
+            }
+            ZX_POL_ACTION_ALLOW_EXCEPTION => {
+                signal_policy_exception(POLICY_ID_TO_POLICY_EXCEPTION[condition as usize], 0);
+                JobPolicy::increment_counter(action, condition);
+                Ok(())
+            }
+            ZX_POL_ACTION_DENY_EXCEPTION => {
+                signal_policy_exception(POLICY_ID_TO_POLICY_EXCEPTION[condition as usize], 0);
+                JobPolicy::increment_counter(action, condition);
+                Err(Status::ACCESS_DENIED)
+            }
+            ZX_POL_ACTION_KILL => {
+                signal_policy_kill();
+                JobPolicy::increment_counter(action, condition);
+                // Because we've killed, this return value will never make it out to usermode.
+                // However, callers of this method will see and act on it.
+                Err(Status::ACCESS_DENIED)
+            }
+            _ => panic!("unexpected policy action {}", action),
+        }
+    }
+
+    /// Returns this job's timer slack policy.
+    #[inline]
+    pub fn get_timer_slack_policy(&self) -> TimerSlack {
+        self.state().policy.get_timer_slack()
     }
 
     /// Creates a handle for the given dispatcher in this process's handle table.
@@ -264,7 +1897,7 @@ impl ProcessDispatcher {
     /// Creates a handle for the given dispatcher reference in this process's handle table.
     pub fn make_and_add_handle_from_ref<T>(
         &self,
-        dispatcher: fbl::RefPtr<T>,
+        dispatcher: RefPtr<T>,
         rights: zx_rights_t,
     ) -> Result<HandleValue, Status>
     where
@@ -284,69 +1917,97 @@ impl ProcessDispatcher {
         Ok(hv)
     }
 
-    /// Enforces basic policy for this process.
-    pub fn enforce_basic_policy(&self, policy: u32) -> Result<(), Status> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status =
-            unsafe { cpp_process_dispatcher_enforce_basic_policy(self.as_ffi_mut(), policy) };
-        Status::ok(status)
-    }
-
-    /// Returns the timer slack policy for this process.
+    /// Returns the "restricted" address space for a process, or `None` if it does not have a
+    /// restricted address space.
+    ///
+    /// The restricted address space spans the bottom half of the process' total address space,
+    /// and is private to the process. Threads executing in restricted mode are restricted to this
+    /// address space.
     #[inline]
-    pub fn get_timer_slack_policy(&self) -> crate::kernel::deadline::TimerSlack {
-        let mut slack = crate::kernel::deadline::TimerSlack::none();
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference and `slack` points to valid
-        // memory.
-        unsafe {
-            cpp_process_dispatcher_get_timer_slack_policy(self.as_ffi(), &mut slack);
+    pub fn restricted_aspace(&self) -> Option<&VmAspace> {
+        self.restricted_aspace_ref().map(|aspace| &**aspace)
+    }
+
+    /// Returns a pointer to the restricted address space for a process, or `None` if it does not
+    /// have a restricted address space.
+    #[inline]
+    pub fn restricted_aspace_ptr(&self) -> Option<NonNull<VmAspace>> {
+        self.restricted_aspace_ref().map(VmAspace::as_non_null)
+    }
+
+    #[inline]
+    fn restricted_aspace_ref(&self) -> Option<&RefPtr<VmAspace>> {
+        // SAFETY: `restricted_aspace` is written only by `initialize_shared()`, which runs under
+        // `lock` before the dispatcher is published, and is logically const afterwards, so this
+        // lock-free read cannot race with a write.
+        unsafe { self.state().restricted_aspace.get_unchecked() }
+    }
+
+    /// Returns the unified address space of a shared process, or `None` if it has none.
+    #[inline]
+    fn unified_aspace(&self) -> Option<&RefPtr<VmAspace>> {
+        // SAFETY: `unified_aspace` is written only by `initialize_shared()`, which runs under
+        // `lock` before the dispatcher is published, and is logically const afterwards, so this
+        // lock-free read cannot race with a write.
+        unsafe { self.state().unified_aspace.get_unchecked() }
+    }
+
+    /// Returns the normal address space for this process.
+    ///
+    /// All processes have a normal address space.  The normal aspace is the
+    /// address space that's active when a thread is in normal mode.
+    ///
+    /// For "shared processes", on architectures that support unified aspaces, the normal aspace
+    /// is a unified aspace. A unified aspace is an aspace that spans both the shared and restricted
+    /// aspace, and is used by threads in normal mode to avoid having to switch between the shared
+    /// and restricted aspaces.
+    ///
+    /// On architectures that don't yet support unified aspaces, the normal
+    /// aspace is a shared aspace (`ShareableProcessState::aspace()`).
+    ///
+    /// For non-shared processes (regular ones), the normal aspace is the one and only aspace
+    /// belonging to the process (`ShareableProcessState::aspace()`).
+    ///
+    /// TODO(https://fxbug.dev/42083004): Update this comment once all architectures support unified
+    /// aspaces.
+    #[inline]
+    pub fn normal_aspace(&self) -> &VmAspace {
+        // SAFETY: This process holds a reference to its normal address space for its lifetime.
+        unsafe { self.normal_aspace_ptr().as_ref() }
+    }
+
+    /// Returns a pointer to the normal address space for this process.
+    #[inline]
+    pub fn normal_aspace_ptr(&self) -> NonNull<VmAspace> {
+        if let Some(unified_aspace) = self.unified_aspace() {
+            return VmAspace::as_non_null(unified_aspace);
         }
-        slack
+        // SAFETY: Every caller in `create`, `create_shared`, and post-publication methods on
+        // `ProcessDispatcher` runs only after `shareable_state.initialize(...)` returned `true`.
+        unsafe { self.shareable_state().aspace_ptr() }
     }
 
-    /// Returns information about this process.
-    pub fn get_info(&self) -> zx_info_process_t {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_info(self.as_ffi()) }
+    /// Attaches the normal address space of this process to `core_thread`.
+    ///
+    /// # Safety
+    ///
+    /// `core_thread` points to a live `Thread` that has not started running, no chain lock
+    /// transaction is active on this CPU, and this process stays alive while its normal address
+    /// space is assigned to the thread.
+    pub unsafe fn attach_normal_aspace_to_thread(&self, core_thread: ThreadPtr) {
+        // SAFETY: `core_thread` points to a live `Thread` that has not started running, no chain
+        // lock transaction is active on this CPU, and while the normal address space is assigned
+        // to the thread, this process holds a reference to it.
+        unsafe { VmAspace::attach_to_thread(self.normal_aspace_ptr(), core_thread) };
     }
 
-    /// Returns task memory statistics for this process.
-    pub fn get_stats(&self) -> Result<zx_info_task_stats_t, Status> {
-        let mut stats = zx_info_task_stats_t::default();
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference and `stats` is valid for
-        // writing.
-        let status = unsafe { cpp_process_dispatcher_get_stats(self.as_ffi(), &mut stats) };
-        Status::ok(status)?;
-        Ok(stats)
+    /// Removes a handle from this process's handle table and returns the owned handle if found.
+    pub fn remove_handle(&self, handle: HandleValue) -> Option<HandleOwner> {
+        self.handle_table().remove_handle(self, handle)
     }
 
-    /// Returns the runtime of all threads that previously ran or are currently running under this
-    /// process.
-    pub fn get_runtime_stats(&self) -> zx_info_task_runtime_t {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_runtime_stats(self.as_ffi()) }
-    }
-
-    /// Returns the KOIDs of all threads in this process.
-    pub fn get_threads(&self) -> Result<Array<zx_koid_t>, Status> {
-        let mut ptr: *mut zx_koid_t = core::ptr::null_mut();
-        let mut count: usize = 0;
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference and `ptr` and `count` are valid
-        // out-pointers.
-        let status = unsafe {
-            cpp_process_dispatcher_get_threads(self.as_ffi(), &raw mut ptr, &raw mut count)
-        };
-        Status::ok(status)?;
-        if count == 0 {
-            Ok(Array::new())
-        } else {
-            // SAFETY: `ptr` was allocated by `new zx_koid_t[count]` (backed by the kernel heap
-            // `malloc`) and initialized with `count` elements.
-            Ok(unsafe { Array::from_raw_parts(ptr, count) })
-        }
-    }
-
-    /// Writes the address space maps for this process into `maps` and returns `(actual, available)`.
+    /// Writes the address space maps for this process into `maps` and returns
+    /// `(actual, available)`.
     pub fn get_aspace_maps(
         &self,
         maps: &mut impl VmarMapsInfoWriter,
@@ -368,9 +2029,26 @@ impl ProcessDispatcher {
         // transition to the dead state during the operation, then the associated aspace will also
         // be destroyed, which will be noticed and result in a ZX_ERR_BAD_STATE being returned from
         // get_vm_aspace_maps.
-        let (actual, available) = get_vm_aspace_maps(self.shareable_state().aspace(), maps, max)?;
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        let shareable_aspace = unsafe { self.shareable_state().aspace() };
+        let (actual, available) = get_vm_aspace_maps(shareable_aspace, maps, max)?;
 
         Ok((actual + actual_r, available + available_r))
+    }
+
+    pub(super) fn enumerate_aspace_children(&self, ve: &mut impl VmEnumerator) {
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        let shareable_aspace = unsafe { self.shareable_state().aspace() };
+        if let Some(root_vmar) = shareable_aspace.root_vmar() {
+            let _ = root_vmar.enumerate_children(ve);
+        }
+        if let Some(restricted_aspace) = self.restricted_aspace()
+            && let Some(root_vmar) = restricted_aspace.root_vmar()
+        {
+            let _ = root_vmar.enumerate_children(ve);
+        }
     }
 
     /// Writes the VMOs associated with this process into `vmos` and returns `(actual, available)`.
@@ -379,7 +2057,7 @@ impl ProcessDispatcher {
         vmos: &mut impl VmoInfoWriter,
         max: usize,
     ) -> Result<(usize, usize), Status> {
-        match self.state() {
+        match self.process_state() {
             ProcessState::Initial | ProcessState::Running => {}
             ProcessState::Dying | ProcessState::Dead => return Err(Status::BAD_STATE),
         }
@@ -388,8 +2066,10 @@ impl ProcessDispatcher {
 
         debug_assert!(max >= actual);
         vmos.add_offset(actual);
-        let (actual2, available2) =
-            get_vm_aspace_vmos(self.shareable_state().aspace(), vmos, max - actual)?;
+        // SAFETY: `create` and `create_shared` never publish a `ProcessDispatcher` unless
+        // `shareable_state.initialize(...)` returned `true`.
+        let shareable_aspace = unsafe { self.shareable_state().aspace() };
+        let (actual2, available2) = get_vm_aspace_vmos(shareable_aspace, vmos, max - actual)?;
 
         let mut actual3 = 0;
         let mut available3 = 0;
@@ -403,361 +2083,19 @@ impl ProcessDispatcher {
         Ok((actual + actual2 + actual3, available + available2 + available3))
     }
 
-    /// Sets this process as critical to the given job.
-    pub fn set_critical_to_job(
-        &self,
-        job: fbl::RefPtr<JobDispatcher>,
-        retcode_nonzero: bool,
-    ) -> Result<(), Status> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference, and `job` transfers an acquired
-        // reference count into C++.
-        let status = unsafe {
-            cpp_process_dispatcher_set_critical_to_job(
-                self.as_ffi_mut(),
-                fbl::RefPtr::into_raw(job) as *mut _,
-                retcode_nonzero,
-            )
-        };
-        Status::ok(status)
-    }
-
-    /// Returns the default rights for a process handle.
-    pub const fn default_rights() -> zx_rights_t {
-        zx_types::ZX_DEFAULT_PROCESS_RIGHTS
-    }
-
-    /// Creates a new `ProcessDispatcher`.
-    pub fn create(
-        job: fbl::RefPtr<JobDispatcher>,
-        name: &[u8],
-        flags: u32,
-    ) -> Result<
-        (KernelHandle<Self>, zx_rights_t, KernelHandle<VmAddressRegionDispatcher>, zx_rights_t),
-        Status,
-    > {
-        let mut proc_handle = MaybeUninit::uninit();
-        let mut proc_rights = MaybeUninit::<zx_rights_t>::uninit();
-        let mut vmar_handle = MaybeUninit::uninit();
-        let mut vmar_rights = MaybeUninit::<zx_rights_t>::uninit();
-
-        // SAFETY: `job` is a valid `RefPtr<JobDispatcher>` whose refcount is transferred to C++,
-        // `name` points to readable memory of length `name.len()`, and output pointers point to
-        // valid uninitialized storage.
-        let status = unsafe {
-            cpp_process_dispatcher_create(
-                fbl::RefPtr::into_raw(job) as *mut _,
-                name.as_ptr().cast(),
-                name.len(),
-                flags,
-                &raw mut proc_handle,
-                &raw mut proc_rights,
-                &raw mut vmar_handle,
-                &raw mut vmar_rights,
-            )
-        };
-        Status::ok(status)?;
-        // SAFETY: Initialized by C++ on success.
-        unsafe {
-            Ok((
-                proc_handle.assume_init(),
-                proc_rights.assume_init(),
-                vmar_handle.assume_init(),
-                vmar_rights.assume_init(),
-            ))
-        }
-    }
-
-    /// Creates a new `ProcessDispatcher` that shares state with `shared_proc`.
-    pub fn create_shared(
-        shared_proc: fbl::RefPtr<Self>,
-        name: &[u8],
-        flags: u32,
-    ) -> Result<
-        (KernelHandle<Self>, zx_rights_t, KernelHandle<VmAddressRegionDispatcher>, zx_rights_t),
-        Status,
-    > {
-        let mut proc_handle = MaybeUninit::uninit();
-        let mut proc_rights = MaybeUninit::<zx_rights_t>::uninit();
-        let mut vmar_handle = MaybeUninit::uninit();
-        let mut vmar_rights = MaybeUninit::<zx_rights_t>::uninit();
-
-        // SAFETY: `shared_proc` is a valid `RefPtr<ProcessDispatcher>` whose refcount is
-        // transferred to C++.
-        let status = unsafe {
-            cpp_process_dispatcher_create_shared(
-                fbl::RefPtr::into_raw(shared_proc) as *mut _,
-                name.as_ptr().cast(),
-                name.len(),
-                flags,
-                &raw mut proc_handle,
-                &raw mut proc_rights,
-                &raw mut vmar_handle,
-                &raw mut vmar_rights,
-            )
-        };
-        Status::ok(status)?;
-        // SAFETY: Initialized by C++ on success.
-        unsafe {
-            Ok((
-                proc_handle.assume_init(),
-                proc_rights.assume_init(),
-                vmar_handle.assume_init(),
-                vmar_rights.assume_init(),
-            ))
-        }
-    }
-
-    /// Exits the current process with the given return code.
-    pub fn exit_current(retcode: i64) -> ! {
-        // SAFETY: Terminating current process execution within valid thread context.
-        unsafe { cpp_process_dispatcher_exit_current(retcode) }
-    }
-
-    /// Returns a reference to this process's address space at the given virtual address.
-    pub fn aspace_at(&self, va: usize) -> Option<&VmAspace> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let aspace_ptr = unsafe { cpp_process_dispatcher_aspace_at(self.as_ffi_mut(), va) };
-        // SAFETY: `aspace_ptr` is either null or points to a valid `VmAspace` managed by the
-        // process.
-        unsafe { aspace_ptr.as_ref() }
-    }
-
-    /// Returns the normal address space for this process.
-    ///
-    /// All processes have a normal address space.  The normal aspace is the
-    /// address space that's active when a thread is in normal mode.
-    ///
-    /// For "shared processes", on architectures that support unified aspaces, the normal aspace
-    /// is a unified aspace. A unified aspace is an aspace that spans both the shared and restricted
-    /// aspace, and is used by threads in normal mode to avoid having to switch between the shared
-    /// and restricted aspaces.
-    ///
-    /// On architectures that don't yet support unified aspaces, the normal
-    /// aspace is a shared aspace (`ShareableProcessState::aspace()`).
-    ///
-    /// For non-shared processes (regular ones), the normal aspace is the one and only aspace
-    /// belonging to the process (`ShareableProcessState::aspace()`).
-    ///
-    /// TODO(https://fxbug.dev/42083004): Update this comment once all architectures support unified
-    /// aspaces.
-    pub fn normal_aspace(&self) -> &VmAspace {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference, and the normal address space is
-        // valid for the lifetime of `self`.
-        unsafe { &*cpp_process_dispatcher_normal_aspace(self.as_ffi_mut()) }
-    }
-
-    /// Returns the "restricted" address space for a process, or nullptr if it does not have a
-    /// restricted address space.
-    ///
-    /// The restricted address space spans the bottom half of the process' total address space, and
-    /// is private to the process. Threads executing in restricted mode are restricted to this
-    /// address space.
-    pub fn restricted_aspace(&self) -> Option<&VmAspace> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference, and the restricted address
-        // space (if present) is valid for the lifetime of `self`.
-        unsafe { cpp_process_dispatcher_restricted_aspace(self.as_ffi()).as_ref() }
-    }
-
-    /// Returns the enclosing job of this process.
-    ///
-    /// Every process is created inside a job and holds a reference to it for its whole lifetime,
-    /// so this never fails.
-    pub fn job(&self) -> fbl::RefPtr<JobDispatcher> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let ptr = unsafe { cpp_process_dispatcher_job(self.as_ffi_mut()) };
-        // SAFETY: `ptr` is the process' non-null parent job, exported via `fbl::ExportToRawPtr`
-        // with an acquired refcount.
-        unsafe { fbl::RefPtr::from_raw(ptr) }
-    }
-
-    /// Returns the debug address of the dynamic loader (`_dl_debug_addr`) for this process.
-    pub fn get_debug_addr(&self) -> usize {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_debug_addr(self.as_ffi()) }
-    }
-
-    /// Sets the debug address of the dynamic loader (`_dl_debug_addr`) for this process.
-    pub fn set_debug_addr(&self, addr: usize) -> Result<(), Status> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status = unsafe { cpp_process_dispatcher_set_debug_addr(self.as_ffi_mut(), addr) };
-        Status::ok(status)
-    }
-
-    /// Returns the dynamic break-on-load state for this process.
-    pub fn get_dyn_break_on_load(&self) -> usize {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_get_dyn_break_on_load(self.as_ffi()) }
-    }
-
-    /// Sets the dynamic break-on-load state for this process.
-    pub fn set_dyn_break_on_load(&self, break_on_load: usize) -> Result<(), Status> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let status = unsafe {
-            cpp_process_dispatcher_set_dyn_break_on_load(self.as_ffi_mut(), break_on_load)
-        };
-        Status::ok(status)
-    }
-
-    /// Returns the base address of the vDSO mapping for this process.
-    pub fn vdso_base_address(&self) -> usize {
-        self.shareable_state().aspace().vdso_base_address()
-    }
-
-    /// Returns a cached copy of the vDSO code address or computes a new one.
-    #[inline]
-    pub fn vdso_code_address(&self) -> usize {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_vdso_code_address(self.as_ffi_mut()) }
-    }
-
-    /// Returns the hardware trace context ID for this process.
-    #[cfg(target_arch = "x86_64")]
-    pub fn hw_trace_context_id(&self) -> usize {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_hw_trace_context_id(self.as_ffi()) }
-    }
-
     /// Returns a `*const ProcessDispatcher` pointer suitable for passing to FFI routines.
     #[inline]
     pub fn as_ffi(&self) -> *const Self {
-        self as *const Self
+        core::ptr::from_ref(self)
     }
 
     /// Returns a `*mut ProcessDispatcher` pointer suitable for passing to FFI routines that
     /// take a non-const `ProcessDispatcher*`.
     #[inline]
     pub fn as_ffi_mut(&self) -> *mut Self {
-        self.as_ffi() as *mut Self
-    }
-
-    /// Returns a reference to the [`FutexContext`](super::futex_context::FutexContext) for this
-    /// process.
-    #[inline]
-    pub fn futex_context(&self) -> &super::futex_context::FutexContext {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference, and
-        // `cpp_process_dispatcher_futex_context` returns a pointer to the initialized
-        // `FutexContext` storage owned by `shareable_state_`.
-        unsafe { &*cpp_process_dispatcher_futex_context(self.as_ffi()).cast() }
-    }
-
-    /// Attaches the normal address space of this process to `core_thread`.
-    pub fn attach_normal_aspace_to_thread(&self, core_thread: ThreadPtr) {
-        self.normal_aspace().attach_to_thread(core_thread);
-    }
-
-    /// Transitions `thread` from the initialized state to a runnable state and adds it to the
-    /// thread list of this process.
-    ///
-    /// If `ensure_initial_thread` is true, this fails unless `thread` is the initial thread in
-    /// the process.
-    pub fn add_initialized_thread(
-        &self,
-        thread: &ThreadDispatcher,
-        ensure_initial_thread: bool,
-        entry: &UserEntryState,
-    ) -> Result<(), Status> {
-        // SAFETY: `self` and `thread` are valid references.
-        let status = unsafe {
-            cpp_process_add_initialized_thread(
-                self.as_ffi(),
-                thread as *const _,
-                ensure_initial_thread,
-                entry,
-            )
-        };
-        Status::ok(status)
-    }
-
-    /// Removes `thread` from the thread list of this process. If `thread` was the last thread,
-    /// the process transitions to the dead state.
-    ///
-    /// This is called within `thread`'s context when it is exiting.
-    ///
-    /// # Safety
-    ///
-    /// `thread` must currently be linked into this process's thread list (i.e. it was added by
-    /// [`Self::add_initialized_thread`] and has not been removed since); unlinking a thread that
-    /// is not in the list corrupts it.
-    pub(crate) unsafe fn remove_thread(&self, thread: &ThreadDispatcher) {
-        // SAFETY: `self` and `thread` are valid references, and the caller guarantees that
-        // `thread` is currently in this process's thread list.
-        unsafe { cpp_process_remove_thread(self.as_ffi_mut(), thread as *const _ as *mut _) }
-    }
-
-    /// Returns the process's normal `Exceptionate`.
-    #[inline]
-    pub fn exceptionate(&self) -> &super::exceptionate::Exceptionate {
-        // SAFETY: `self` is a valid `ProcessDispatcher`, which owns `exceptionate_` for its entire
-        // lifetime.
-        unsafe {
-            &*super::process_dispatcher_ffi::cpp_process_dispatcher_exceptionate(self.as_ffi_mut())
-        }
-    }
-
-    /// Returns the process's debug `Exceptionate`.
-    #[inline]
-    pub fn debug_exceptionate(&self) -> &super::exceptionate::Exceptionate {
-        // SAFETY: `self` is a valid `ProcessDispatcher`, which owns `debug_exceptionate_` for its
-        // entire lifetime.
-        unsafe {
-            &*super::process_dispatcher_ffi::cpp_process_dispatcher_debug_exceptionate(
-                self.as_ffi_mut(),
-            )
-        }
-    }
-
-    /// Looks up a thread in this process given its koid.
-    #[inline]
-    pub fn lookup_thread_by_id(
-        &self,
-        koid: zx_types::zx_koid_t,
-    ) -> Option<fbl::RefPtr<ThreadDispatcher>> {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        let ptr = unsafe { cpp_process_dispatcher_lookup_thread_by_id(self.as_ffi_mut(), koid) };
-        // SAFETY: `ptr` is exported via `fbl::ExportToRawPtr` with an acquired refcount, or null.
-        unsafe { fbl::RefPtr::try_from_raw(ptr) }
-    }
-    /// Returns whether this process is marked critical to the root job.
-    #[inline]
-    pub fn critical_to_root_job(&self) -> bool {
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference.
-        unsafe { cpp_process_dispatcher_critical_to_root_job(self.as_ffi()) }
-    }
-
-    /// Returns the memory attribution counts for this process.
-    #[cfg(ktest)]
-    pub fn get_attributed_memory(&self) -> crate::vm::attribution::AttributionCounts {
-        let mut counts = crate::vm::attribution::AttributionCounts::zero();
-        // SAFETY: `self` is a valid `ProcessDispatcher` reference and `counts` is valid for
-        // writing.
-        unsafe {
-            super::process_dispatcher_ffi::cpp_process_dispatcher_get_attributed_memory(
-                self.as_ffi(),
-                &mut counts,
-            );
-        }
-        counts
-    }
-
-    /// Look up a process given its koid.
-    ///
-    /// Returns `None` if not found.
-    ///
-    /// # Panics
-    ///
-    /// Panics if called before root job initialization or from a context where acquiring
-    /// `CriticalMutex` is not permitted (such as IRQ context).
-    pub fn lookup_process_by_id(koid: zx_koid_t) -> Option<fbl::RefPtr<Self>> {
-        // SAFETY: `koid` is a scalar value and the C++ implementation synchronizes the job tree
-        // walk internally. Calling this before root job initialization or from an invalid/IRQ
-        // thread context triggers a kernel assert/panic rather than undefined behavior.
-        let ptr = unsafe { cpp_process_dispatcher_lookup_process_by_id(koid) };
-        // SAFETY: `ptr` is exported via `fbl::ExportToRawPtr` with an acquired refcount, or null.
-        unsafe { fbl::RefPtr::try_from_raw(ptr) }
+        self.as_ffi().cast_mut()
     }
 }
-
-zr::static_assert!(core::mem::size_of::<ProcessDispatcher>() == 0);
 
 /// ProcessDispatcher unit tests.
 #[cfg(ktest)]
@@ -783,7 +2121,7 @@ mod process_dispatcher_tests {
         let (process, _process_rights, _vmar, _vmar_rights) =
             unwrap_ok!(ProcessDispatcher::create(job.dispatcher().clone(), b"unstarted-proc", 0));
 
-        expect_eq!(process.dispatcher().state() as u32, ProcessState::Initial as u32);
+        expect_eq!(process.dispatcher().process_state(), ProcessState::Initial);
         expect_eq!(process.dispatcher().get_attributed_memory().uncompressed_bytes, 0usize);
 
         let vmo_paged = unwrap_ok!(VmObjectPaged::create(0, 0, PAGE_SIZE as u64));
@@ -794,19 +2132,19 @@ mod process_dispatcher_tests {
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE | ARCH_MMU_FLAG_PERM_USER;
         let root_vmar = process.dispatcher().normal_aspace().root_vmar().expect("root_vmar");
         let mapping =
-            root_vmar.create_vm_mapping(0, PAGE_SIZE, 0, 0, vmo, 0, ARCH_FLAGS, b"test-mapping");
+            root_vmar.create_vm_mapping_no_overwrite(0, PAGE_SIZE, 0, 0, vmo, 0, ARCH_FLAGS);
         assert_true!(mapping.is_ok());
 
         // While the process is still in ProcessState::Initial, its mapped VMO pages should be
         // attributed.
-        expect_eq!(process.dispatcher().state() as u32, ProcessState::Initial as u32);
+        expect_eq!(process.dispatcher().process_state(), ProcessState::Initial);
         let counts = process.dispatcher().get_attributed_memory();
         expect_eq!(counts.uncompressed_bytes, PAGE_SIZE);
         expect_eq!(counts.private_uncompressed_bytes, PAGE_SIZE);
 
         // Once the process transitions to ProcessState::Dead, attributed memory should be zero.
         process.dispatcher().kill(0);
-        expect_eq!(process.dispatcher().state() as u32, ProcessState::Dead as u32);
+        expect_eq!(process.dispatcher().process_state(), ProcessState::Dead);
         expect_eq!(process.dispatcher().get_attributed_memory().uncompressed_bytes, 0usize);
 
         job.dispatcher().kill(0);
@@ -817,35 +2155,22 @@ mod process_dispatcher_tests {
 #[cfg(ktest)]
 #[unittest::suite(name = "shareable_process_state")]
 mod shareable_process_state_tests {
-    use crate::object::process_dispatcher_ffi::{
-        cpp_shareable_process_state_create, cpp_shareable_process_state_decrement_share_count,
-        cpp_shareable_process_state_destroy, cpp_shareable_process_state_handle_table,
-        cpp_shareable_process_state_increment_share_count,
-    };
+    use super::ShareableProcessState;
     use crate::object::{EventPairDispatcher, HandleOwner};
-    use unittest::{assert_true, expect_eq, unwrap_ok};
+    use unittest::{expect_eq, unwrap_ok};
 
     /// IncrementDecrement
     #[test]
     fn test_increment_decrement() {
         // State's share count is initialized to 1.
-        // SAFETY: `cpp_shareable_process_state_create` allocates and returns a new
-        // `ShareableProcessState` with refcount 1.
-        let state = unsafe { cpp_shareable_process_state_create() };
-        assert_true!(!state.is_null());
-        let _cleanup = zr::defer(|| {
-            // SAFETY: `state` was allocated by `cpp_shareable_process_state_create`.
-            unsafe { cpp_shareable_process_state_destroy(state) };
-        });
+        let state = ShareableProcessState::create().expect("ShareableProcessState::create");
 
         // Increment the share count to 2.
-        // SAFETY: `state` is a valid `ShareableProcessState`.
-        expect_eq!(unsafe { cpp_shareable_process_state_increment_share_count(state) }, true);
+        expect_eq!(state.increment_share_count(), true);
 
         let (ep0, _ep1, rights) = unwrap_ok!(EventPairDispatcher::create());
 
-        // SAFETY: `state` is a valid `ShareableProcessState`.
-        let handle_table = unsafe { &*cpp_shareable_process_state_handle_table(state) };
+        let handle_table = state.handle_table();
         expect_eq!(handle_table.handle_count(), 0u32);
 
         let handle_owner = HandleOwner::make(ep0, rights).expect("HandleOwner::make");
@@ -853,17 +2178,303 @@ mod shareable_process_state_tests {
 
         // The first decrement should not clear the handle table.
         expect_eq!(handle_table.handle_count(), 1u32);
-        // SAFETY: `state` is a valid `ShareableProcessState` with share count 2.
-        unsafe { cpp_shareable_process_state_decrement_share_count(state) };
+        state.decrement_share_count();
         expect_eq!(handle_table.handle_count(), 1u32);
 
         // The second decrement should clear the handle table.
-        // SAFETY: `state` is a valid `ShareableProcessState` with share count 1.
-        unsafe { cpp_shareable_process_state_decrement_share_count(state) };
+        state.decrement_share_count();
         expect_eq!(handle_table.handle_count(), 0u32);
 
         // Incrementing the share count after the shared state has been destroyed fails.
-        // SAFETY: `state` is a valid `ShareableProcessState`.
-        expect_eq!(unsafe { cpp_shareable_process_state_increment_share_count(state) }, false);
+        expect_eq!(state.increment_share_count(), false);
+    }
+}
+
+/// In-tree kernel unit tests for `ProcessDispatcher`.
+#[cfg(ktest)]
+#[unittest::suite(name = "process_dispatcher")]
+mod tests {
+    use super::super::job_dispatcher::JobDispatcher;
+    use super::super::singleton::get_root_job_dispatcher;
+    use super::{PRIVATE_ASPACE_BASE, ProcessDispatcher, ProcessState, SHARED_ASPACE_BASE};
+    use crate::kernel::deadline::SlackMode;
+    use fbl::RefPtr;
+    use unittest::{expect_eq, expect_false, expect_ok, expect_true, unwrap_ok};
+    use zx_status::Status;
+    use zx_types::{
+        ZX_INFO_PROCESS_FLAG_EXITED, ZX_INFO_PROCESS_FLAG_STARTED, ZX_JOB_POL_ABSOLUTE,
+        ZX_POL_ACTION_DENY, ZX_POL_NEW_CHANNEL, ZX_POL_NEW_VMO, ZX_POL_OVERRIDE_DENY,
+        ZX_PROCESS_SHARED, ZX_TASK_RETCODE_CRITICAL_PROCESS_KILL, ZX_TIMER_SLACK_LATE,
+        zx_policy_basic_v2_t, zx_policy_timer_slack_t,
+    };
+
+    /// Creates a job under a private root job so that nothing here is visible from the real job
+    /// tree.
+    fn make_job() -> RefPtr<JobDispatcher> {
+        let root_job = JobDispatcher::create_root_job();
+        JobDispatcher::create(0, root_job).expect("job created").0.release()
+    }
+
+    /// A freshly created process is in the initial state with empty, zeroed accessors.
+    #[test]
+    fn test_create_initial_state() {
+        let job = make_job();
+        let (process, rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job.clone(), b"k-ut-proc-init", 0), "created");
+        let disp = process.dispatcher();
+
+        expect_eq!(rights, ProcessDispatcher::default_rights());
+        expect_eq!(disp.process_state(), ProcessState::Initial);
+        expect_eq!(disp.get_related_koid(), job.get_koid());
+        expect_true!(RefPtr::ptr_eq(disp.job(), &job));
+
+        let info = disp.get_info();
+        expect_eq!(info.flags, 0);
+        expect_eq!(info.return_code, 0);
+        expect_eq!(info.start_time, 0);
+
+        expect_true!(unwrap_ok!(disp.get_threads(), "threads").is_empty());
+        expect_true!(disp.lookup_thread_by_id(disp.get_koid()).is_none());
+        expect_false!(disp.is_current());
+        expect_false!(disp.critical_to_root_job());
+        expect_true!(disp.restricted_aspace().is_none());
+        expect_true!(core::ptr::eq(disp.aspace_at(PRIVATE_ASPACE_BASE), disp.normal_aspace()));
+        expect_eq!(disp.vdso_code_address(), 0);
+
+        let runtime = disp.get_runtime_stats();
+        expect_eq!(runtime.cpu_time, 0);
+        expect_eq!(runtime.queue_time, 0);
+
+        let mut name = [0xffu8; zx_types::ZX_MAX_NAME_LEN];
+        expect_ok!(disp.get_name(&mut name));
+        expect_true!(name.starts_with(b"k-ut-proc-init\0"));
+        expect_ok!(disp.set_name(b"renamed"));
+        expect_ok!(disp.get_name(&mut name));
+        expect_true!(name.starts_with(b"renamed\0"));
+
+        // Dropping the last handle of a never-started process runs the Initial -> Dead
+        // transition through on_zero_handles().
+    }
+
+    /// Killing a never-started process moves it straight to Dead and makes it inert.
+    #[test]
+    fn test_kill_from_initial() {
+        let job = make_job();
+        let (process, _rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job, b"k-ut-proc-kill", 0), "created");
+        let disp = process.dispatcher();
+
+        expect_true!(disp.get_stats().is_ok());
+
+        disp.kill(42);
+        expect_eq!(disp.process_state(), ProcessState::Dead);
+        let info = disp.get_info();
+        expect_eq!(info.flags, ZX_INFO_PROCESS_FLAG_STARTED | ZX_INFO_PROCESS_FLAG_EXITED);
+        expect_eq!(info.return_code, 42);
+
+        // A second kill is a no-op and keeps the original return code.
+        disp.kill(7);
+        expect_eq!(disp.process_state(), ProcessState::Dead);
+        expect_eq!(disp.get_info().return_code, 42);
+
+        expect_true!(disp.get_stats() == Err(Status::BAD_STATE));
+        expect_true!(disp.suspend() == Err(Status::BAD_STATE));
+        disp.resume();
+        expect_eq!(disp.get_attributed_memory().total_bytes(), 0);
+    }
+
+    /// Suspend/resume on a process without threads only maintains the suspend count.
+    #[test]
+    fn test_suspend_resume_without_threads() {
+        let job = make_job();
+        let (process, _rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job, b"k-ut-proc-susp", 0), "created");
+        let disp = process.dispatcher();
+
+        expect_ok!(disp.suspend());
+        expect_ok!(disp.suspend());
+        {
+            ksync::lock!(let guard = disp.state().lock_lock());
+            expect_eq!(*guard.suspend_count(), 2);
+        }
+        disp.resume();
+        disp.resume();
+        {
+            ksync::lock!(let guard = disp.state().lock_lock());
+            expect_eq!(*guard.suspend_count(), 0);
+        }
+        expect_eq!(disp.process_state(), ProcessState::Initial);
+        disp.kill(0);
+    }
+
+    /// set_critical_to_job accepts only ancestors, binds once, and kills the job on death.
+    #[test]
+    fn test_set_critical_to_job() {
+        let job = make_job();
+        let (process, _rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job.clone(), b"k-ut-proc-crit", 0), "created");
+        let disp = process.dispatcher();
+
+        let unrelated_job = make_job();
+        expect_true!(disp.set_critical_to_job(unrelated_job, false) == Err(Status::INVALID_ARGS));
+        expect_ok!(disp.set_critical_to_job(job.clone(), true));
+        expect_true!(disp.set_critical_to_job(job.clone(), false) == Err(Status::ALREADY_BOUND));
+        expect_false!(disp.critical_to_root_job());
+
+        // retcode_nonzero exempts a zero return code: the job survives.
+        disp.kill(0);
+        expect_eq!(disp.process_state(), ProcessState::Dead);
+        expect_eq!(job.get_info().exited, 0);
+
+        // Without the exemption the job is killed when the process dies.
+        let (process2, _rights, _vmar2, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job.clone(), b"k-ut-proc-crit2", 0), "created");
+        let disp2 = process2.dispatcher();
+        expect_ok!(disp2.set_critical_to_job(job.clone(), false));
+        disp2.kill(0);
+        expect_eq!(disp2.process_state(), ProcessState::Dead);
+        let job_info = job.get_info();
+        expect_eq!(job_info.exited, 1);
+        expect_eq!(job_info.return_code, ZX_TASK_RETCODE_CRITICAL_PROCESS_KILL);
+    }
+
+    /// The debugger properties round-trip through their setters and getters.
+    #[test]
+    fn test_debug_properties() {
+        let job = make_job();
+        let (process, _rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job, b"k-ut-proc-dbg", 0), "created");
+        let disp = process.dispatcher();
+
+        expect_eq!(disp.get_debug_addr(), 0);
+        expect_eq!(disp.get_dyn_break_on_load(), 0);
+        expect_ok!(disp.set_debug_addr(0x1234));
+        expect_ok!(disp.set_dyn_break_on_load(0x5678));
+        expect_eq!(disp.get_debug_addr(), 0x1234);
+        expect_eq!(disp.get_dyn_break_on_load(), 0x5678);
+        disp.kill(0);
+    }
+
+    /// Shared processes get a restricted aspace below the shared one and copy debug properties.
+    #[test]
+    fn test_create_shared() {
+        let job = make_job();
+        let (regular, _rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job.clone(), b"k-ut-proc-reg", 0), "created");
+        // Only a process created with ZX_PROCESS_SHARED can be shared from.
+        expect_true!(
+            ProcessDispatcher::create_shared(regular.dispatcher().clone(), b"k-ut-bad", 0)
+                .is_err_and(|status| status == Status::INVALID_ARGS)
+        );
+        regular.dispatcher().kill(0);
+
+        let (shared, _rights, _vmar, _vmar_rights) = unwrap_ok!(
+            ProcessDispatcher::create(job.clone(), b"k-ut-proc-shared", ZX_PROCESS_SHARED),
+            "created"
+        );
+        let shared_disp = shared.dispatcher();
+        expect_eq!(shared_disp.normal_aspace().base(), SHARED_ASPACE_BASE);
+        expect_true!(shared_disp.restricted_aspace().is_none());
+        expect_ok!(shared_disp.set_debug_addr(0xabc));
+        expect_ok!(shared_disp.set_dyn_break_on_load(0xdef));
+
+        let (child, _rights, restricted_vmar, _vmar_rights) = unwrap_ok!(
+            ProcessDispatcher::create_shared(shared_disp.clone(), b"k-ut-proc-child", 0),
+            "created"
+        );
+        let child_disp = child.dispatcher();
+        expect_true!(RefPtr::ptr_eq(child_disp.job(), &job));
+        expect_eq!(child_disp.get_debug_addr(), 0xabc);
+        expect_eq!(child_disp.get_dyn_break_on_load(), 0xdef);
+
+        let restricted = child_disp.restricted_aspace().expect("restricted aspace");
+        expect_eq!(restricted.base(), PRIVATE_ASPACE_BASE);
+        expect_true!(core::ptr::eq(child_disp.aspace_at(PRIVATE_ASPACE_BASE), restricted));
+        expect_true!(core::ptr::eq(
+            child_disp.aspace_at(SHARED_ASPACE_BASE),
+            shared_disp.normal_aspace()
+        ));
+        expect_eq!(restricted_vmar.dispatcher().vmar().base().0, PRIVATE_ASPACE_BASE);
+
+        // Both processes share one handle table and futex context.
+        expect_true!(core::ptr::eq(child_disp.handle_table(), shared_disp.handle_table()));
+
+        // Stats account for the shared aspace being used by two processes.
+        let stats = unwrap_ok!(child_disp.get_stats(), "stats");
+        expect_eq!(stats.mem_private_bytes, 0);
+
+        child_disp.kill(0);
+        expect_eq!(child_disp.process_state(), ProcessState::Dead);
+        expect_true!(restricted.is_destroyed());
+        // The shared aspace stays alive until the shared process itself dies.
+        expect_false!(shared_disp.normal_aspace().is_destroyed());
+        // Once the shared state is gone, no further process can share it.
+        shared_disp.kill(0);
+        expect_eq!(shared_disp.process_state(), ProcessState::Dead);
+        expect_true!(
+            ProcessDispatcher::create_shared(shared_disp.clone(), b"k-ut-late", 0)
+                .is_err_and(|status| status == Status::BAD_STATE)
+        );
+    }
+
+    /// lookup_process_by_id walks the singleton root job tree and stops finding dead processes.
+    #[test]
+    fn test_lookup_process_by_id() {
+        let private_job = make_job();
+        let (private_proc, _rights, _vmar, _vmar_rights) = unwrap_ok!(
+            ProcessDispatcher::create(private_job, b"k-ut-proc-priv", 0),
+            "private process created"
+        );
+        expect_true!(
+            ProcessDispatcher::lookup_process_by_id(private_proc.dispatcher().get_koid()).is_none()
+        );
+        private_proc.dispatcher().kill(0);
+
+        let (job, _job_rights) = unwrap_ok!(
+            JobDispatcher::create(0, get_root_job_dispatcher().clone()),
+            "child job created"
+        );
+        let (process, _rights, _vmar, _vmar_rights) = unwrap_ok!(
+            ProcessDispatcher::create(job.dispatcher().clone(), b"k-ut-proc-lookup", 0),
+            "process created"
+        );
+        let koid = process.dispatcher().get_koid();
+
+        let found = ProcessDispatcher::lookup_process_by_id(koid).expect("found in root job tree");
+        expect_true!(RefPtr::ptr_eq(&found, process.dispatcher()));
+        drop(found);
+
+        process.dispatcher().kill(0);
+        expect_true!(ProcessDispatcher::lookup_process_by_id(koid).is_none());
+        expect_true!(job.dispatcher().kill(0));
+    }
+
+    /// Basic and timer-slack policies are enforced from the job's policy at creation time.
+    #[test]
+    fn test_enforce_basic_policy() {
+        let job = make_job();
+        expect_ok!(job.set_basic_policy_v2(
+            ZX_JOB_POL_ABSOLUTE,
+            &[zx_policy_basic_v2_t {
+                condition: ZX_POL_NEW_CHANNEL,
+                action: ZX_POL_ACTION_DENY,
+                flags: ZX_POL_OVERRIDE_DENY,
+            }],
+        ));
+        expect_ok!(job.set_timer_slack_policy(&zx_policy_timer_slack_t {
+            min_slack: 5_000,
+            default_mode: ZX_TIMER_SLACK_LATE,
+            _padding: [0; 4],
+        }));
+        let (process, _rights, _vmar, _vmar_rights) =
+            unwrap_ok!(ProcessDispatcher::create(job, b"k-ut-proc-pol", 0), "created");
+        let disp = process.dispatcher();
+
+        expect_ok!(disp.enforce_basic_policy(ZX_POL_NEW_VMO));
+        expect_true!(disp.enforce_basic_policy(ZX_POL_NEW_CHANNEL) == Err(Status::ACCESS_DENIED));
+        let slack = disp.get_timer_slack_policy();
+        expect_eq!(slack.amount().0, 5_000);
+        expect_true!(slack.mode() == SlackMode::Late);
+        disp.kill(0);
     }
 }

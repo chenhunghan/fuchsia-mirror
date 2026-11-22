@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h> /* Definition of O_* constants */
+#include <lib/fit/defer.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
@@ -12,20 +13,27 @@
 #include <stdlib.h>
 #include <sys/epoll.h>
 #include <sys/mman.h>
+#include <sys/ptrace.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <ucontext.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <climits>
 #include <csignal>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <latch>
 #include <new>
 #include <optional>
+#include <string>
 #include <thread>
+#include <type_traits>
 
 #include <gtest/gtest.h>
 #include <linux/futex.h>
@@ -125,10 +133,9 @@ TEST(SignalHandling, UseSigaltstackSucceeds) {
   constexpr size_t kStackSize = 0x20000;
   void *altstack = setup_sigaltstack(kStackSize);
 
-  struct sigaction sa = {};
-  sa.sa_handler = [](int) { stack_ptr = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)); };
-  sa.sa_flags = SA_ONSTACK;
-  ASSERT_EQ(0, sigaction(SIGUSR1, &sa, nullptr));
+  test_helper::ScopedSigAction scoped_sigusr1(
+      SIGUSR1, [](int) { stack_ptr = reinterpret_cast<uintptr_t>(__builtin_frame_address(0)); },
+      SA_ONSTACK);
   stack_ptr = 0;
   ASSERT_NE(-1, raise(SIGUSR1));
   // Check that the sigaltstack is used.
@@ -146,9 +153,9 @@ TEST(SignalHandling, UseSigaltstackSucceeds) {
 // This intentionally creates deadly signals which can't pass on sanitizer runs.
 #if (!__has_feature(address_sanitizer))
 TEST(SignalHandlingDeathTest, ExitsKilledBySignal) {
-  std::vector<int> term_signals = {SIGABRT, SIGALRM, SIGBUS,  SIGFPE,  SIGHUP,  SIGILL,
-                                   SIGINT,  SIGPIPE, SIGPOLL, SIGPROF, SIGQUIT, SIGSEGV,
-                                   SIGSYS,  SIGTERM, SIGTRAP, SIGUSR1, SIGUSR2};
+  std::vector<int> term_signals = {SIGABRT, SIGALRM, SIGBUS,  SIGFPE,   SIGHUP,  SIGILL, SIGINT,
+                                   SIGPIPE, SIGPOLL, SIGPROF, SIGQUIT,  SIGSEGV, SIGSYS, SIGTERM,
+                                   SIGTRAP, SIGUSR1, SIGUSR2, SIGRTMIN, SIGRTMAX};
 
   for (const auto signal : term_signals) {
     EXPECT_EXIT(
@@ -1614,6 +1621,10 @@ TEST(SignalHandling, FaultingAddress) {
       if (reinterpret_cast<uintptr_t>(siginfo->si_addr) != faulting_address) {
         abort();
       }
+      // Nothing can be mapped at this address.
+      if (siginfo->si_code != SEGV_MAPERR) {
+        abort();
+      }
       // Yay, all good. Exit our child process cleanly.
       _exit(0);
     };
@@ -2063,4 +2074,765 @@ TEST(SignalHandling, InvalidSigsegvHandlerPcWithNodeferExhaustsAltStack) {
 }
 #endif  // (!__has_feature(address_sanitizer))
 
+// Helper that suspends a child process inside clone(CLONE_VFORK) in the kernel.
+//
+// Note on clone flags: SYS_clone is invoked with `CLONE_VFORK | SIGCHLD` without `CLONE_VM`.
+// Unlike userspace vfork(2) which shares the memory map, omitting CLONE_VM gives the vfork
+// child its own copy-on-write page table and stack while still holding the parent in kernel
+// wait until the child exits.
+//
+// A process waiting in CLONE_VFORK is held in the kernel in a killable wait and cannot return to
+// userspace to dequeue signals or run signal handlers until its vfork child exits. Default-fatal
+// signals wake killable waits on delivery, whereas blocked or non-fatal signals leave the killable
+// wait suspended until the vfork child exits.
+//
+// ScopedVforkBlocker synchronizes child setup, signals the vfork child to exit when
+// Release() is called, and reaps the reparented vfork grandchild on Reap() or destruction.
+class ScopedVforkBlocker {
+ public:
+  ScopedVforkBlocker() = default;
+  ScopedVforkBlocker(const ScopedVforkBlocker &) = delete;
+  ScopedVforkBlocker &operator=(const ScopedVforkBlocker &) = delete;
+  ~ScopedVforkBlocker() {
+    Release();
+    Reap();
+  }
+
+  // Suspends the calling thread inside clone(CLONE_VFORK).
+  // The vfork child notifies the parent via pipe when it is alive, and waits for a release
+  // token before calling _exit(0).
+  void BlockInChild() {
+    ready_pipe_.ReadSide().reset();
+    release_pipe_.WriteSide().reset();
+    pid_t vfork_child =
+        static_cast<pid_t>(syscall(SYS_clone, static_cast<unsigned long>(CLONE_VFORK | SIGCHLD),
+                                   nullptr, nullptr, nullptr, nullptr));
+    ASSERT_THAT(vfork_child, SyscallSucceeds());
+    if (vfork_child == 0) {
+      pid_t my_pid = getpid();
+      if (HANDLE_EINTR(write(ready_pipe_.WriteSide().get(), &my_pid, sizeof(my_pid))) !=
+          static_cast<ssize_t>(sizeof(my_pid))) {
+        _exit(1);
+      }
+      ready_pipe_.WriteSide().reset();
+      char c = 0;
+      (void)HANDLE_EINTR(read(release_pipe_.ReadSide().get(), &c, 1));
+      _exit(0);
+    }
+    for (;;) {
+      pause();
+    }
+  }
+
+  // Blocks until the vfork child is running and the caller is suspended in CLONE_VFORK.
+  void WaitUntilBlocked() {
+    ready_pipe_.WriteSide().reset();
+    release_pipe_.ReadSide().reset();
+    ASSERT_THAT(HANDLE_EINTR(read(ready_pipe_.ReadSide().get(), &vfork_child_pid_,
+                                  sizeof(vfork_child_pid_))),
+                SyscallSucceedsWithValue(static_cast<ssize_t>(sizeof(vfork_child_pid_))));
+  }
+
+  // Signals the vfork child to exit, unblocking the vfork parent if it was not killed.
+  void Release() { release_pipe_.WriteSide().reset(); }
+
+  // Reaps the reparented vfork grandchild.
+  void Reap() {
+    if (vfork_child_pid_ > 0) {
+      int status = 0;
+      (void)HANDLE_EINTR(waitpid(vfork_child_pid_, &status, 0));
+      vfork_child_pid_ = -1;
+    }
+  }
+
+ private:
+  test_helper::ScopedPipe ready_pipe_;
+  test_helper::ScopedPipe release_pipe_;
+  pid_t vfork_child_pid_ = -1;
+};
+
+bool WaitUntil(fit::function<bool()> predicate,
+               std::chrono::nanoseconds timeout = std::chrono::seconds(5)) {
+  auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!predicate()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    usleep(1000);
+  }
+  return true;
+}
+
+void ExpectWaitidStatus(pid_t pid, int options, int expected_code, int expected_status) {
+  siginfo_t info = {};
+  ASSERT_TRUE(WaitUntil([&] {
+    info = {};
+    return HANDLE_EINTR(waitid(P_PID, pid, &info, options | WNOHANG)) == 0 && info.si_pid == pid;
+  }));
+  EXPECT_EQ(info.si_code, expected_code);
+  EXPECT_EQ(info.si_status, expected_status);
+}
+
+void ExpectChildExits(pid_t pid, test_helper::ForkHelper *helper,
+                      ScopedVforkBlocker *blocker = nullptr) {
+  bool exited = WaitUntil([pid] {
+    siginfo_t info = {};
+    return HANDLE_EINTR(waitid(P_PID, pid, &info, WEXITED | WNOWAIT | WNOHANG)) == 0 &&
+           info.si_pid == pid;
+  });
+  if (!exited && blocker != nullptr) {
+    blocker->Release();
+  }
+  ASSERT_TRUE(exited);
+  ASSERT_TRUE(helper->WaitForChildren());
+}
+
+void SetSignalMask(int how, std::initializer_list<int> sigs, sigset_t *out_mask = nullptr) {
+  sigset_t mask;
+  sigemptyset(&mask);
+  for (int sig : sigs) {
+    sigaddset(&mask, sig);
+  }
+  ASSERT_EQ(pthread_sigmask(how, &mask, nullptr), 0);
+  if (out_mask != nullptr) {
+    *out_mask = mask;
+  }
+}
+
+void SendSignal(pid_t pid, int sig, bool use_tgkill) {
+  if (use_tgkill) {
+    ASSERT_THAT(syscall(SYS_tgkill, pid, pid, sig), SyscallSucceeds());
+  } else {
+    ASSERT_THAT(kill(pid, sig), SyscallSucceeds());
+  }
+}
+
+struct KillableWaitFatalSignalTestCase {
+  int sig;
+  bool wakes_killable_wait;
+  bool use_tgkill;
+  const char *name;
+};
+
+class KillableWaitTerminationTest
+    : public ::testing::TestWithParam<KillableWaitFatalSignalTestCase> {};
+
+// Verifies killable kernel wait (CLONE_VFORK) behavior on fatal default dispositions:
+// - Unblocked signals with default action Terminate wake CLONE_VFORK immediately and terminate the
+//   process with `sig`.
+// - Unblocked signals with default action CoreDump do not wake CLONE_VFORK early, and terminate the
+//   process with `sig` once the vfork child finishes.
+TEST_P(KillableWaitTerminationTest, HandlesFatalDefaultSignals) {
+  const KillableWaitFatalSignalTestCase &test_case = GetParam();
+  ScopedVforkBlocker blocker;
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(test_case.sig);
+
+  pid_t child_pid = helper.RunInForkedProcess([&blocker, &test_case] {
+    ASSERT_NE(signal(test_case.sig, SIG_DFL), SIG_ERR);
+    ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_UNBLOCK, {test_case.sig}));
+
+    blocker.BlockInChild();
+  });
+
+  ASSERT_NO_FATAL_FAILURE(blocker.WaitUntilBlocked());
+
+  ASSERT_NO_FATAL_FAILURE(SendSignal(child_pid, test_case.sig, test_case.use_tgkill));
+  if (!test_case.wakes_killable_wait) {
+    usleep(10'000);
+    siginfo_t info = {};
+    ASSERT_THAT(HANDLE_EINTR(waitid(P_PID, child_pid, &info, WEXITED | WNOHANG)),
+                SyscallSucceeds());
+    EXPECT_EQ(info.si_pid, 0);
+    blocker.Release();
+  }
+  ExpectChildExits(child_pid, &helper, &blocker);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SignalHandling, KillableWaitTerminationTest,
+    ::testing::Values(
+        KillableWaitFatalSignalTestCase{SIGTERM, /*wakes_killable_wait=*/true, /*use_tgkill=*/false,
+                                        "DefaultTerminate_kill"},
+        KillableWaitFatalSignalTestCase{SIGTERM, /*wakes_killable_wait=*/true, /*use_tgkill=*/true,
+                                        "DefaultTerminate_tgkill"},
+        KillableWaitFatalSignalTestCase{SIGRTMIN, /*wakes_killable_wait=*/true,
+                                        /*use_tgkill=*/false, "DefaultRealTime_kill"},
+        KillableWaitFatalSignalTestCase{SIGQUIT, /*wakes_killable_wait=*/false,
+                                        /*use_tgkill=*/false, "DefaultCoreDump_kill"},
+        KillableWaitFatalSignalTestCase{SIGQUIT, /*wakes_killable_wait=*/false, /*use_tgkill=*/true,
+                                        "DefaultCoreDump_tgkill"}),
+    [](const ::testing::TestParamInfo<KillableWaitFatalSignalTestCase> &info) {
+      return info.param.name;
+    });
+
+class SigtimedwaitConsumeTest : public ::testing::TestWithParam<bool /*use_tgkill*/> {};
+
+// Verifies that when a thread is blocked in sigtimedwait(2) for a default-terminate signal,
+// sending that signal consumes it in sigtimedwait(2) rather than terminating the process.
+TEST_P(SigtimedwaitConsumeTest, ConsumesWaitedTerminateSignalWithoutExiting) {
+  const bool use_tgkill = GetParam();
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+
+  pid_t child_pid = helper.RunInForkedProcess([] {
+    ASSERT_NE(signal(SIGTERM, SIG_DFL), SIG_ERR);
+    sigset_t wait_set;
+    ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_BLOCK, {SIGTERM}, &wait_set));
+
+    siginfo_t info = {};
+    struct timespec timeout = {.tv_sec = 5, .tv_nsec = 0};
+    int received = HANDLE_EINTR(sigtimedwait(&wait_set, &info, &timeout));
+    _exit(received == SIGTERM ? 0 : 1);
+  });
+
+  // Wait until the child is blocked in sigtimedwait(2).
+  ASSERT_TRUE(test_helper::WaitUntilBlocked(child_pid, /*ignore_tracer=*/true));
+
+  ASSERT_NO_FATAL_FAILURE(SendSignal(child_pid, SIGTERM, use_tgkill));
+
+  ExpectChildExits(child_pid, &helper);
+}
+
+INSTANTIATE_TEST_SUITE_P(SignalHandling, SigtimedwaitConsumeTest,
+                         /*use_tgkill=*/::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool> &info) {
+                           return info.param ? "tgkill" : "kill";
+                         });
+
+class DefaultTerminateWhileStoppedTest : public ::testing::TestWithParam<bool /*use_tgkill*/> {};
+
+// Verifies that sending an unblocked default-terminate signal (SIGHUP) to a stopped process does
+// not terminate the process while stopped or overwrite the stopped status reported by waitid(2),
+// and that resuming the process with SIGCONT delivers the queued signal and terminates the process.
+TEST_P(DefaultTerminateWhileStoppedTest, DoesNotExitOrClobberStopSignal) {
+  const bool use_tgkill = GetParam();
+  auto rendezvous = test_helper::MakeRendezvous();
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(SIGHUP);
+
+  pid_t child_pid = helper.RunInForkedProcess([&rendezvous] {
+    rendezvous.holder = test_helper::Holder();
+
+    ASSERT_NE(signal(SIGHUP, SIG_DFL), SIG_ERR);
+    ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_UNBLOCK, {SIGHUP}));
+
+    rendezvous.poker.poke();
+
+    for (;;) {
+      pause();
+    }
+  });
+  rendezvous.poker = test_helper::Poker();
+
+  rendezvous.holder.hold();
+
+  // Stop the child with SIGSTOP and verify it enters the stopped state without consuming wait
+  // status.
+  ASSERT_THAT(kill(child_pid, SIGSTOP), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WSTOPPED | WNOWAIT, CLD_STOPPED, SIGSTOP));
+
+  // Sending an unblocked default-terminate signal (SIGHUP) while the process is stopped must leave
+  // the process stopped and must not overwrite the stopping signal reported by waitid(2).
+  ASSERT_NO_FATAL_FAILURE(SendSignal(child_pid, SIGHUP, use_tgkill));
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WEXITED | WSTOPPED, CLD_STOPPED, SIGSTOP));
+
+  // Continuing the child delivers the queued SIGHUP, terminating the process with SIGHUP.
+  ASSERT_THAT(kill(child_pid, SIGCONT), SyscallSucceeds());
+  ExpectChildExits(child_pid, &helper);
+}
+
+INSTANTIATE_TEST_SUITE_P(SignalHandling, DefaultTerminateWhileStoppedTest,
+                         /*use_tgkill=*/::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool> &info) {
+                           return info.param ? "tgkill" : "kill";
+                         });
+
+// Verifies that process-directed fatal signals wake a thread with the signal unblocked:
+// - If all threads block a process-directed signal, it remains queued without waking a killable
+//   wait or terminating the process.
+// - If a thread-directed signal is sent to a thread that blocks it, it remains queued on that
+//   thread without waking another thread that has it unblocked.
+// - If a process-directed signal has at least one thread with the signal unblocked, that thread
+//   wakes from its killable wait and terminates the thread group.
+TEST(SignalHandling, MultithreadedDefaultTerminateSelectsUnblockedThread) {
+  ScopedVforkBlocker blocker;
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(SIGTERM);
+
+  pid_t child_pid = helper.RunInForkedProcess([&blocker] {
+    ASSERT_NE(signal(SIGHUP, SIG_DFL), SIG_ERR);
+    ASSERT_NE(signal(SIGINT, SIG_DFL), SIG_ERR);
+    ASSERT_NE(signal(SIGTERM, SIG_DFL), SIG_ERR);
+    ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_BLOCK, {SIGHUP, SIGINT, SIGTERM}));
+
+    std::thread worker([&blocker] {
+      ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_UNBLOCK, {SIGINT, SIGTERM}));
+      blocker.BlockInChild();
+    });
+    worker.detach();
+
+    for (;;) {
+      pause();
+    }
+  });
+
+  ASSERT_NO_FATAL_FAILURE(blocker.WaitUntilBlocked());
+
+  // Process-directed SIGHUP (blocked on all threads) must not terminate the process.
+  ASSERT_THAT(kill(child_pid, SIGHUP), SyscallSucceeds());
+  // Thread-directed SIGINT to leader (blocked on leader) must not terminate the process, even
+  // though worker has SIGINT unblocked.
+  ASSERT_THAT(syscall(SYS_tgkill, child_pid, child_pid, SIGINT), SyscallSucceeds());
+  // Process-directed SIGTERM finds the unblocked worker thread, waking its killable wait and
+  // terminating the thread group.
+  ASSERT_THAT(kill(child_pid, SIGTERM), SyscallSucceeds());
+
+  ExpectChildExits(child_pid, &helper, &blocker);
+}
+
+// Verifies that seizing a task with ptrace keeps it blocked in CLONE_VFORK on default-fatal
+// signals until the vfork child finishes, so the tracer receives signal-delivery-stop rather than
+// an immediate exit.
+TEST(SignalHandling, PtracedTaskDefersKillableWaitTermination) {
+  ScopedVforkBlocker blocker;
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(SIGKILL);
+
+  pid_t child_pid = helper.RunInForkedProcess([&blocker] {
+    ASSERT_NE(signal(SIGTERM, SIG_DFL), SIG_ERR);
+    ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_UNBLOCK, {SIGTERM}));
+
+    blocker.BlockInChild();
+  });
+
+  ASSERT_NO_FATAL_FAILURE(blocker.WaitUntilBlocked());
+
+  ASSERT_THAT(ptrace(PTRACE_SEIZE, child_pid, /* addr = */ nullptr, /* data = */ 0),
+              SyscallSucceeds());
+
+  // Sending SIGTERM (via tgkill or kill) to a ptraced task must not wake CLONE_VFORK early.
+  ASSERT_THAT(syscall(SYS_tgkill, child_pid, child_pid, SIGTERM), SyscallSucceeds());
+  ASSERT_THAT(kill(child_pid, SIGTERM), SyscallSucceeds());
+  usleep(10'000);
+  int status = 0;
+  ASSERT_THAT(HANDLE_EINTR(waitpid(child_pid, &status, WNOHANG)), SyscallSucceedsWithValue(0));
+
+  // Release the vfork child so the seized task leaves CLONE_VFORK and reaches
+  // signal-delivery-stop rather than exiting immediately.
+  blocker.Release();
+  ASSERT_TRUE(
+      WaitUntil([&] { return HANDLE_EINTR(waitpid(child_pid, &status, WNOHANG)) == child_pid; }));
+  EXPECT_TRUE(WIFSTOPPED(status));
+  EXPECT_EQ(WSTOPSIG(status), SIGTERM);
+
+  // Fallback SIGKILL terminates the process.
+  ASSERT_THAT(kill(child_pid, SIGKILL), SyscallSucceeds());
+
+  ExpectChildExits(child_pid, &helper);
+}
+
+template <typename T>
+class SharedMemory {
+  static_assert(std::is_trivially_destructible_v<T>);
+
+ public:
+  static fit::result<int, SharedMemory<T>> Create() {
+    auto mapping = test_helper::ScopedMMap::MMap(nullptr, sizeof(T), PROT_READ | PROT_WRITE,
+                                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (mapping.is_error()) {
+      return mapping.take_error();
+    }
+    new (mapping.value().mapping()) T();
+    return fit::ok(SharedMemory<T>(std::move(mapping.value())));
+  }
+
+  T *get() const { return static_cast<T *>(mapping_.mapping()); }
+  T *operator->() const { return get(); }
+
+ private:
+  explicit SharedMemory(test_helper::ScopedMMap mapping) : mapping_(std::move(mapping)) {}
+
+  test_helper::ScopedMMap mapping_;
+};
+
+bool IsTaskStopped(pid_t pid, pid_t tid) {
+  std::string stat;
+  if (!files::ReadFileToString(fxl::StringPrintf("/proc/%d/task/%d/stat", pid, tid), &stat)) {
+    return false;
+  }
+  auto state = test_helper::GetTaskState(stat);
+  return state == "T" || state == "t";
+}
+
+void WaitForTaskStopped(pid_t pid, pid_t tid) {
+  ASSERT_TRUE(WaitUntil([pid, tid] { return IsTaskStopped(pid, tid); }));
+}
+
+void SpawnSpinnerThread(std::atomic<uint64_t> *counter, std::latch *ready_latch,
+                        std::atomic<pid_t> *tid_out) {
+  std::thread([counter, ready_latch, tid_out] {
+    tid_out->store(static_cast<pid_t>(syscall(SYS_gettid)), std::memory_order_release);
+    counter->fetch_add(1, std::memory_order_relaxed);
+    ready_latch->count_down();
+    for (;;) {
+      counter->fetch_add(1, std::memory_order_relaxed);
+      std::this_thread::yield();
+    }
+  }).detach();
+}
+
+// Verifies that delivering SIGSTOP to a multi-threaded process interrupts and stops all sibling
+// threads (both threads blocked in syscalls and threads executing in userspace), that SIGCONT
+// wakes all of them, and that subsequent SIGSTOP / SIGCONT transitions remain consistent.
+TEST(SignalHandling, MultithreadedSigstopStopsAllThreads) {
+  struct SharedState {
+    std::atomic<pid_t> blocker_tid{0};
+    std::atomic<pid_t> spinner_tid{0};
+    std::atomic<uint64_t> spinner_counter{0};
+    std::atomic<bool> blocker_progressed{false};
+  };
+  auto shared = ASSERT_RESULT_SUCCESS_AND_RETURN(SharedMemory<SharedState>::Create());
+
+  auto rendezvous = test_helper::MakeRendezvous();
+  test_helper::ScopedPipe unblock_pipe;
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(SIGKILL);
+
+  pid_t child_pid = helper.RunInForkedProcess([shared = shared.get(), &rendezvous, &unblock_pipe] {
+    rendezvous.holder = test_helper::Holder();
+    unblock_pipe.WriteSide().reset();
+
+    std::latch ready_latch(2);
+    std::thread([shared, &unblock_pipe, &ready_latch] {
+      shared->blocker_tid.store(static_cast<pid_t>(syscall(SYS_gettid)), std::memory_order_release);
+      ready_latch.count_down();
+      char byte = 0;
+      (void)HANDLE_EINTR(read(unblock_pipe.ReadSide().get(), &byte, sizeof(byte)));
+      shared->blocker_progressed.store(true, std::memory_order_release);
+      for (;;) {
+        pause();
+      }
+    }).detach();
+
+    SpawnSpinnerThread(&shared->spinner_counter, &ready_latch, &shared->spinner_tid);
+
+    ready_latch.wait();
+    rendezvous.poker.poke();
+
+    for (;;) {
+      pause();
+    }
+  });
+  rendezvous.poker = test_helper::Poker();
+  unblock_pipe.ReadSide().reset();
+
+  rendezvous.holder.hold();
+
+  pid_t blocker_tid = shared->blocker_tid.load(std::memory_order_acquire);
+  pid_t spinner_tid = shared->spinner_tid.load(std::memory_order_acquire);
+  ASSERT_GT(blocker_tid, 0);
+  ASSERT_GT(spinner_tid, 0);
+
+  // Direct SIGSTOP at the leader thread; delivering it must stop the entire thread group.
+  ASSERT_THAT(syscall(SYS_tgkill, child_pid, child_pid, SIGSTOP), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WSTOPPED, CLD_STOPPED, SIGSTOP));
+  ASSERT_NO_FATAL_FAILURE(WaitForTaskStopped(child_pid, blocker_tid));
+  ASSERT_NO_FATAL_FAILURE(WaitForTaskStopped(child_pid, spinner_tid));
+
+  // Verify observable stopped behavior: writing to the pipe does not allow blocker_thread to
+  // make progress, and spinner_thread does not increment its counter.
+  uint64_t count_while_stopped = shared->spinner_counter.load(std::memory_order_relaxed);
+  char wake_byte = 'x';
+  ASSERT_THAT(write(unblock_pipe.WriteSide().get(), &wake_byte, sizeof(wake_byte)),
+              SyscallSucceedsWithValue(static_cast<ssize_t>(sizeof(wake_byte))));
+  usleep(10000);
+  EXPECT_EQ(shared->spinner_counter.load(std::memory_order_relaxed), count_while_stopped);
+  EXPECT_FALSE(shared->blocker_progressed.load(std::memory_order_acquire));
+
+  // Sending SIGCONT must resume both the blocked thread and the spinning thread.
+  ASSERT_THAT(kill(child_pid, SIGCONT), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WCONTINUED, CLD_CONTINUED, SIGCONT));
+
+  ASSERT_TRUE(WaitUntil([&] {
+    return shared->blocker_progressed.load(std::memory_order_acquire) &&
+           shared->spinner_counter.load(std::memory_order_relaxed) > count_while_stopped;
+  }));
+
+  // Verify a second SIGSTOP / SIGCONT cycle stops and resumes the spinner thread cleanly.
+  ASSERT_THAT(kill(child_pid, SIGSTOP), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WSTOPPED, CLD_STOPPED, SIGSTOP));
+  ASSERT_NO_FATAL_FAILURE(WaitForTaskStopped(child_pid, spinner_tid));
+
+  count_while_stopped = shared->spinner_counter.load(std::memory_order_relaxed);
+  usleep(2000);
+  EXPECT_EQ(shared->spinner_counter.load(std::memory_order_relaxed), count_while_stopped);
+
+  ASSERT_THAT(kill(child_pid, SIGCONT), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WCONTINUED, CLD_CONTINUED, SIGCONT));
+
+  ASSERT_TRUE(WaitUntil([&] {
+    return shared->spinner_counter.load(std::memory_order_relaxed) >= count_while_stopped + 2;
+  }));
+
+  ASSERT_THAT(kill(child_pid, SIGKILL), SyscallSucceeds());
+  ExpectChildExits(child_pid, &helper);
+}
+
+bool HasPendingSignal(int sig) {
+  sigset_t pending;
+  sigemptyset(&pending);
+  EXPECT_THAT(sigpending(&pending), SyscallSucceeds());
+  return sigismember(&pending, sig) == 1;
+}
+
+struct ConflictingSignalsTestCase {
+  int queued_sig;
+  int clearing_sig;
+  bool queue_via_tgkill;
+  bool clear_via_tgkill;
+  const char *name;
+};
+
+class ConflictingSignalsDiscardTest : public ::testing::TestWithParam<ConflictingSignalsTestCase> {
+};
+
+// Verifies that generating a stop signal discards any pending SIGCONT across both shared and
+// thread-specific queues, and vice-versa, per signal(7).
+TEST_P(ConflictingSignalsDiscardTest, DiscardsPendingConflictingSignal) {
+  const ConflictingSignalsTestCase &test_case = GetParam();
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+
+  pid_t child_pid = helper.RunInForkedProcess([&test_case] {
+    pid_t pid = getpid();
+
+    ASSERT_NE(signal(SIGTSTP, SIG_DFL), SIG_ERR);
+    ASSERT_NE(signal(SIGCONT, SIG_DFL), SIG_ERR);
+    // Block both signals so they remain pending rather than being delivered immediately.
+    ASSERT_NO_FATAL_FAILURE(SetSignalMask(SIG_BLOCK, {SIGTSTP, SIGCONT}));
+
+    std::atomic<pid_t> worker_tid{0};
+    std::latch ready_latch(1);
+    std::latch clear_latch(1);
+
+    std::thread worker([&] {
+      worker_tid.store(static_cast<pid_t>(syscall(SYS_gettid)), std::memory_order_release);
+      ready_latch.count_down();
+      clear_latch.wait();
+      EXPECT_FALSE(HasPendingSignal(test_case.queued_sig));
+    });
+    auto join_worker = fit::defer([&] {
+      clear_latch.count_down();
+      worker.join();
+    });
+
+    ready_latch.wait();
+    pid_t wtid = worker_tid.load(std::memory_order_acquire);
+
+    // Queue the initial signal on either the worker thread or the shared process queue.
+    if (test_case.queue_via_tgkill) {
+      ASSERT_THAT(syscall(SYS_tgkill, pid, wtid, test_case.queued_sig), SyscallSucceeds());
+    } else {
+      ASSERT_THAT(kill(pid, test_case.queued_sig), SyscallSucceeds());
+      EXPECT_TRUE(HasPendingSignal(test_case.queued_sig));
+    }
+
+    // Send the conflicting clearing signal on either the leader thread or the shared process queue.
+    ASSERT_NO_FATAL_FAILURE(SendSignal(pid, test_case.clearing_sig, test_case.clear_via_tgkill));
+
+    // Verify that the queued signal was discarded from pending signals.
+    EXPECT_FALSE(HasPendingSignal(test_case.queued_sig));
+    EXPECT_TRUE(HasPendingSignal(test_case.clearing_sig));
+  });
+
+  ExpectChildExits(child_pid, &helper);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SignalHandling, ConflictingSignalsDiscardTest,
+    ::testing::Values(
+        ConflictingSignalsTestCase{SIGTSTP, SIGCONT, /*queue_via_tgkill=*/true,
+                                   /*clear_via_tgkill=*/false, "ThreadStopClearedByProcessCont"},
+        ConflictingSignalsTestCase{SIGCONT, SIGTSTP, /*queue_via_tgkill=*/true,
+                                   /*clear_via_tgkill=*/false, "ThreadContClearedByProcessStop"},
+        ConflictingSignalsTestCase{SIGTSTP, SIGCONT, /*queue_via_tgkill=*/false,
+                                   /*clear_via_tgkill=*/true, "ProcessStopClearedByThreadCont"},
+        ConflictingSignalsTestCase{SIGCONT, SIGTSTP, /*queue_via_tgkill=*/false,
+                                   /*clear_via_tgkill=*/true, "ProcessContClearedByThreadStop"}),
+    [](const ::testing::TestParamInfo<ConflictingSignalsTestCase> &info) {
+      return info.param.name;
+    });
+
+// Verifies that back-to-back SIGSTOP and SIGCONT signals across multiple active threads never
+// leave any worker thread stuck half-stopped or corrupt subsequent group-stop transitions.
+TEST(SignalHandling, SigcontAbortsStoppingBeforeAllThreadsStop) {
+  constexpr size_t kWorkerCount = 3;
+  struct SharedState {
+    std::array<std::atomic<pid_t>, kWorkerCount> worker_tids{};
+    std::array<std::atomic<uint64_t>, kWorkerCount> worker_counters{};
+  };
+  auto shared = ASSERT_RESULT_SUCCESS_AND_RETURN(SharedMemory<SharedState>::Create());
+
+  auto rendezvous = test_helper::MakeRendezvous();
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(SIGKILL);
+
+  pid_t child_pid = helper.RunInForkedProcess([shared = shared.get(), &rendezvous] {
+    rendezvous.holder = test_helper::Holder();
+
+    std::latch ready_latch(kWorkerCount);
+    for (size_t i = 0; i < kWorkerCount; ++i) {
+      SpawnSpinnerThread(&shared->worker_counters[i], &ready_latch, &shared->worker_tids[i]);
+    }
+
+    ready_latch.wait();
+    rendezvous.poker.poke();
+
+    for (;;) {
+      pause();
+    }
+  });
+  rendezvous.poker = test_helper::Poker();
+  rendezvous.holder.hold();
+
+  // Rapidly pair SIGSTOP with immediate SIGCONT so SIGCONT races with pending stop signals
+  // and in-flight GroupStopping transitions across workers.
+  constexpr int kBurstCount = 50;
+  for (int i = 0; i < kBurstCount; ++i) {
+    ASSERT_THAT(kill(child_pid, SIGSTOP), SyscallSucceeds());
+    ASSERT_THAT(kill(child_pid, SIGCONT), SyscallSucceeds());
+  }
+
+  auto drain_wait_statuses = [&] {
+    siginfo_t info = {};
+    while (HANDLE_EINTR(waitid(P_PID, child_pid, &info, WSTOPPED | WCONTINUED | WNOHANG)) == 0 &&
+           info.si_signo != 0) {
+      info = {};
+    }
+  };
+  drain_wait_statuses();
+
+  for (size_t i = 0; i < kWorkerCount; ++i) {
+    uint64_t baseline = shared->worker_counters[i].load(std::memory_order_relaxed);
+    ASSERT_TRUE(WaitUntil([&] {
+      return shared->worker_counters[i].load(std::memory_order_relaxed) >= baseline + 2;
+    }));
+  }
+  drain_wait_statuses();
+
+  // Verify a subsequent SIGSTOP still stops all threads and SIGCONT still resumes every worker.
+  ASSERT_THAT(kill(child_pid, SIGSTOP), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WSTOPPED, CLD_STOPPED, SIGSTOP));
+  for (size_t i = 0; i < kWorkerCount; ++i) {
+    pid_t tid = shared->worker_tids[i].load(std::memory_order_acquire);
+    ASSERT_GT(tid, 0);
+    ASSERT_NO_FATAL_FAILURE(WaitForTaskStopped(child_pid, tid));
+  }
+
+  std::array<uint64_t, kWorkerCount> stopped_counts{};
+  for (size_t i = 0; i < kWorkerCount; ++i) {
+    stopped_counts[i] = shared->worker_counters[i].load(std::memory_order_relaxed);
+  }
+  usleep(2000);
+  for (size_t i = 0; i < kWorkerCount; ++i) {
+    EXPECT_EQ(shared->worker_counters[i].load(std::memory_order_relaxed), stopped_counts[i]);
+  }
+
+  ASSERT_THAT(kill(child_pid, SIGCONT), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WCONTINUED, CLD_CONTINUED, SIGCONT));
+
+  for (size_t i = 0; i < kWorkerCount; ++i) {
+    ASSERT_TRUE(WaitUntil([&] {
+      return shared->worker_counters[i].load(std::memory_order_relaxed) > stopped_counts[i];
+    }));
+  }
+
+  ASSERT_THAT(kill(child_pid, SIGKILL), SyscallSucceeds());
+  ExpectChildExits(child_pid, &helper);
+}
+
+// Verifies that while a thread group is stopped, a sibling thread does not dequeue or execute a
+// pending caught signal, and that the signal is delivered once SIGCONT resumes the process.
+TEST(SignalHandling, StoppedSiblingDoesNotDequeuePendingSignal) {
+  struct SharedState {
+    std::atomic<pid_t> worker_tid{0};
+    std::atomic<uint64_t> spinner_counter{0};
+    std::atomic<int> usr1_count{0};
+  };
+  auto shared = ASSERT_RESULT_SUCCESS_AND_RETURN(SharedMemory<SharedState>::Create());
+
+  static SharedState *g_shared = nullptr;
+  g_shared = shared.get();
+  auto clear_global = fit::defer([] { g_shared = nullptr; });
+
+  auto rendezvous = test_helper::MakeRendezvous();
+  test_helper::ForkHelper helper;
+  helper.OnlyWaitForForkedChildren();
+  helper.KillChildrenOnDestroy();
+  helper.ExpectSignal(SIGKILL);
+
+  pid_t child_pid = helper.RunInForkedProcess([shared = shared.get(), &rendezvous] {
+    rendezvous.holder = test_helper::Holder();
+
+    struct sigaction sa = {};
+    sa.sa_handler = [](int) { g_shared->usr1_count.fetch_add(1, std::memory_order_release); };
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    ASSERT_THAT(sigaction(SIGUSR1, &sa, nullptr), SyscallSucceeds());
+
+    std::latch ready_latch(1);
+    SpawnSpinnerThread(&shared->spinner_counter, &ready_latch, &shared->worker_tid);
+
+    ready_latch.wait();
+    rendezvous.poker.poke();
+
+    for (;;) {
+      pause();
+    }
+  });
+  rendezvous.poker = test_helper::Poker();
+  rendezvous.holder.hold();
+
+  pid_t worker_tid = shared->worker_tid.load(std::memory_order_acquire);
+  ASSERT_GT(worker_tid, 0);
+
+  // Stop the entire child thread group.
+  ASSERT_THAT(kill(child_pid, SIGSTOP), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WSTOPPED, CLD_STOPPED, SIGSTOP));
+  ASSERT_NO_FATAL_FAILURE(WaitForTaskStopped(child_pid, worker_tid));
+
+  uint64_t count_while_stopped = shared->spinner_counter.load(std::memory_order_relaxed);
+
+  // Queue SIGUSR1 directly on the stopped worker thread and via the shared process queue; neither
+  // must run the signal handler until the group is continued.
+  ASSERT_THAT(syscall(SYS_tgkill, child_pid, worker_tid, SIGUSR1), SyscallSucceeds());
+  ASSERT_THAT(kill(child_pid, SIGUSR1), SyscallSucceeds());
+  usleep(10000);
+  EXPECT_EQ(shared->spinner_counter.load(std::memory_order_relaxed), count_while_stopped);
+  EXPECT_EQ(shared->usr1_count.load(std::memory_order_acquire), 0);
+
+  // Resume with SIGCONT and verify both queued SIGUSR1 instances are delivered.
+  ASSERT_THAT(kill(child_pid, SIGCONT), SyscallSucceeds());
+  ASSERT_NO_FATAL_FAILURE(ExpectWaitidStatus(child_pid, WCONTINUED, CLD_CONTINUED, SIGCONT));
+
+  ASSERT_TRUE(WaitUntil([&] { return shared->usr1_count.load(std::memory_order_acquire) >= 2; }));
+
+  ASSERT_THAT(kill(child_pid, SIGKILL), SyscallSucceeds());
+  ExpectChildExits(child_pid, &helper);
+}
 }  // namespace

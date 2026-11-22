@@ -373,11 +373,11 @@ TEST_F(GraphServerTest, CreateProducerFailsUnknownDataSource) {
   // possibly merged with CreateProducerFailsBadFields. For now we must create an "unknown" variant
   // manually.
   struct RawProducerDataSource {
-    fidl_xunion_tag_t ordinal;
+    fidl_union_tag_t ordinal;
     FIDL_ALIGNDECL fidl::UntypedEnvelope envelope;
   };
   RawProducerDataSource raw{
-      .ordinal = std::numeric_limits<fidl_xunion_tag_t>::max(),
+      .ordinal = std::numeric_limits<fidl_union_tag_t>::max(),
   };
   static_assert(sizeof(ProducerDataSource) == sizeof(raw));
   auto decoded = fidl::StandaloneInplaceDecode<ProducerDataSource>(

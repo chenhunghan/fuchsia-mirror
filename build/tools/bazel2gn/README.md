@@ -79,6 +79,22 @@ complicated; for example, `go_library` from `rules_go` in Bazel requires sources
 for [embed][goembed] to be specified in [`embedsrcs`][embedsrcs], whereas
 `go_library` in GN mixes embed sources with other sources in `sources`.
 
+#### C++ header dependencies (`deps`, `implementation_deps`) and `check_includes_strict`
+
+GN's `check_includes_strict = true` enforces direct header dependencies:
+
+*   `deps` in Bazel C++ library rules maps to `public_deps` in GN (headers
+    `#include`d by the target's own public `hdrs`), while `implementation_deps`
+    maps to `deps` in GN (headers `#include`d only by `srcs`).
+*   With `check_includes_strict = true` in GN, `public_deps` does not allow
+    downstream consumers to `#include` transitive headers without declaring a
+    direct dependency on the target providing the header.
+*   When unmigrated GN consumers still rely on transitive `#include`s through an
+    umbrella or transitional library, annotate the target in `BUILD.bazel` with
+    `# @bazel2gn:raw_attribute:check_includes_strict = false` (accompanied by a
+    `TODO` referencing the cleanup bug) until those GN consumers declare direct
+    dependencies or migrate.
+
 To bridge this gap, modifying the template implementation in GN while
 maintaining backward compatibility is preferred because:
 
@@ -96,6 +112,34 @@ Conversely, C++ library rules (`cc_library()`, `fx_cc_library()`, and
 `fx_cc_library_headers()`) map Bazel `deps` to GN `public_deps` and
 `implementation_deps` to GN `deps`, because Bazel propagates the headers of
 `deps` (but not `implementation_deps`) to dependents.
+
+`fx_cc_library()` also has a `friend` attribute that Bazel ignores. It passes
+through unchanged to GN `friend` (GN label patterns such as `":*"` or
+`"//foo/*"`), which lets the listed targets include the library's private
+headers in GN. Bazel has no such check (the Fuchsia Bazel C++ toolchain does
+not enable `layering_check`).
+
+`fx_cc_shared_library()` (from `//build/bazel/rules/cc:fx_cc_shared_library.bzl`)
+maps to GN `shared_library()`. Both `deps` and `dynamic_deps` map to GN `deps`,
+`user_link_flags` to `ldflags`, and `build_flags` / `disable_build_flags` to
+`configs +=` / `configs -=`. The GN-only `gn_public_deps` and
+`gn_public_configs` attributes, which Bazel ignores, map to GN `public_deps`
+and `public_configs`. Headers don't propagate the same way in both builds: GN
+dependents of a `shared_library()` get the headers and `public_configs` of its
+`public_deps`, while Bazel dependents of a `cc_shared_library()` get no headers
+from it (it only provides `CcSharedLibraryInfo` for linking, not `CcInfo`) and
+depend on the library's headers themselves. Use `gn_public_deps` to keep forwarding a
+headers target to existing GN dependents. `bazel2gn` sets `output_name`,
+`output_extension`, and `output_prefix_override` so the GN output file name
+matches the Bazel one (`shared_lib_name`, or `lib<name>.so` by default), and
+fails on Bazel-only attributes such as `exports_filter`, `roots`, and
+`transitive_features`. Note that Bazel links the direct `deps` of a
+`cc_shared_library()` whole, while a GN `shared_library()` only links the
+objects it references from a `static_library()`, so direct `deps` need
+`alwayslink = True` (which converts to a GN `source_set()`) for GN to link the
+same code. `bazel2gn` doesn't select the GN shared library toolchain: a
+`BUILD.gn` file that must only be evaluated in `${default_toolchain}-shared`
+keeps its own `assert()` above the sentinel.
 
 #### `compiled_action()`
 
@@ -200,6 +244,22 @@ libraries (`fuchsia_cc_dso()` and `fuchsia_rust_dso()` from
     (`fuchsia_cc_dso()` builds in GN's `$shlib_toolchain`, so non-default
     `fx_packaged_binary` destinations on `fuchsia_cc_dso()` are rejected.)
 
+#### `cc_link_stub_from_ifs_file()`
+
+`cc_link_stub_from_ifs_file()` from `//build/bazel/rules/cc:shared_library.bzl`
+syncs to `ifs_shared_library()` from `//build/toolchain/ifs_shared_library.gni`.
+Both only build a link stub from an `.ifs` file, for a shared library that is
+provided at runtime by something else:
+
+*   `ifs_file` maps to GN `abi`, and `deps` to GN `public_deps`, because they
+    propagate to dependents like the `deps` of `cc_import()`.
+*   `system_provided = True` is required, because GN never ships the stub as the
+    runtime library.
+*   The stub is named `<stub_name>.so`, or after the `.ifs` file if `stub_name`
+    is not set, in Bazel, and `lib<output_name>.so` in GN. The name must start
+    with `lib`, and `bazel2gn` sets GN `output_name` to the rest of it when that
+    is not the target name.
+
 #### Components
 
 `cmc_merge()`, `fx_component_manifest()`, `fx_compiled_manifest()`, and
@@ -222,12 +282,14 @@ libraries (`fuchsia_cc_dso()` and `fuchsia_rust_dso()` from
     `fx_component_manifest()` referenced via `compiled_manifest` only by
     Bazel-only `fx_test_component()`s (see [Tests](#tests)) or skipped
     `fx_component()`s in the same `BUILD.bazel` (and not by any converted
-    component or `fuchsia_structured_config_rust_lib()`) is skipped
+    component, `fuchsia_structured_config_rust_lib()`, or
+    `fuchsia_structured_config_cpp_elf_lib()`) is skipped
     automatically.
 *   `fx_component()` maps `compiled_manifest` (which must refer to a
     `:<manifest>` target in the same `BUILD` file) to `cm_label`. If the
     `fx_component_manifest()` or `fx_compiled_manifest()` appears after a
-    consumer (including `fuchsia_structured_config_rust_lib()`) in
+    consumer (including `fuchsia_structured_config_rust_lib()` and
+    `fuchsia_structured_config_cpp_elf_lib()`) in
     `BUILD.bazel`, `bazel2gn` hoists it earlier in `BUILD.gn` so GN's
     `get_target_outputs()` succeeds.
 *   `fx_compiled_manifest()` maps to the low-level GN `cm()`, which compiles
@@ -260,6 +322,61 @@ when its package is Bazel-only and has no GN consumer (its
 `fx_component_manifest()` will then be skipped automatically unless used by
 another un-skipped target).
 
+#### Package resources
+
+`resource()` (and `fuchsia_package_resource()`), `resource_group()`,
+`fuchsia_package_resource_group()`, `resource_tree()`, and
+`fuchsia_package_resource_collection()` (from
+`//build/bazel/rules/packages:resources.bzl` (and SDK rules from
+`@fuchsia_rules_common//packages:resources.bzl`)) sync to GN's `resource()`,
+`resource_group()`, `resource_tree()`, and `group()` (from
+`//build/dist/resource.gni`):
+
+*   `resource()` supports both `src` + `dest` (converted to single-element
+    `sources` and `outputs` lists in GN) and `sources` +
+    `outputs = [".../{{source_file_part}}"]`. If a `src` or `sources` entry
+    refers to an output of a `compiled_action()` in the same `BUILD.bazel`,
+    `bazel2gn` rewrites it to `"$target_gen_dir/<out>"` and adds the
+    `compiled_action()` target to `deps`.
+*   `resource_group()` with `files = [{"source": ..., "dest": ...}]` converts
+    directly to GN `resource_group()`. `fuchsia_package_resource_group()` (or
+    `resource_group()` with `srcs` and `dest`) converts to GN `resource()` with
+    `outputs = ["<dest>/{{source_file_part}}"]` when `basename_only = True`, or
+    expands `srcs`, `dest`, and `strip_prefix` into `files` on GN
+    `resource_group()` otherwise.
+*   `resource_tree()` syncs directly to GN `resource_tree()`.
+*   `fuchsia_package_resource_collection()` syncs to GN `group()` with
+    `resources` mapped to `deps`.
+*   On C++ rules (`cc_library()`, `fx_cc_library()`, `cc_binary()`,
+    `fx_cc_binary()`, and `fx_cc_test_binary()`), `data` maps to GN
+    `data_deps`.
+
+#### ICU and internationalization rules
+
+ICU flavor-aware rules (`icu_source_set()`, `icu_executable()`,
+`icu_fuchsia_component()`, `icu_fuchsia_package()`, `icu_group()`, and
+`third_party_icu_headers()` from `//build/bazel/rules/icu:*`) and
+`intl_strings()` (from `//build/bazel/rules/intl:intl_strings.bzl`) sync to
+their GN counterparts in `//build/icu/*.gni` and `//build/intl/intl_strings.gni`:
+
+*   `icu_source_set()` uses the same attribute mappings as `fx_cc_library()`
+    (`srcs` to `sources`, `hdrs` to `public`, `deps` to `public_deps`,
+    `implementation_deps` to `deps`), and passes `icu_deps` and
+    `icu_public_deps` through with dependency label translation.
+*   `icu_executable()` uses the same attribute mappings as `fx_cc_binary()`,
+    and passes `output_name`, `icu_deps`, and `icu_public_deps` through.
+*   `icu_fuchsia_component()` and `icu_group()` pass `icu_deps` and
+    `icu_public_deps` through with dependency label translation
+    (`icu_fuchsia_component()` also translates `manifest` / `compiled_manifest`
+    and omits `includes`).
+*   `icu_fuchsia_package()` merges `components` and `resources` into `deps`,
+    `icu_components` and `icu_resources` into `icu_deps`, and translates
+    `validate_elf_binaries` into `disable_elf_binaries_checks`.
+*   `third_party_icu_headers()` passes `headers` and `icu_assembly` through.
+*   `intl_strings()` converts `source` to a GN file path and passes
+    `source_locale`, `output_locales`, `library`, and `same_dir_locales`
+    through.
+
 #### Starnix Linux binaries
 
 Starnix Linux binaries and shared objects packaged into Fuchsia components use
@@ -270,8 +387,10 @@ standard binary rules (`fx_cc_binary()`, `fx_cc_test_binary()`, `cc_binary()`,
 
 *   On C++ binary rules (`fx_cc_binary()`, `cc_binary()`,
     `cc_binary_host_tool()`, and `idk_cc_binary_host_tool()`), `linkopts` maps
-    to GN `ldflags`, and `linkshared = True` on `fx_cc_binary()` / `cc_binary()`
-    maps to GN `loadable_module()`. `gn_output_name` on `fx_cc_binary()`
+    to GN `ldflags`, `includes` maps to GN `include_dirs` (unlike C++ library
+    rules, binaries have no downstream compilation dependents), and
+    `linkshared = True` on `fx_cc_binary()` / `cc_binary()` maps to GN
+    `loadable_module()`. `gn_output_name` on `fx_cc_binary()`
     / `fx_cc_test_binary()` is only used by GN: it maps to the GN `output_name` (the
     Bazel binary is always named after the target).
 *   When a `linux_resource()` references a binary target in the same
@@ -380,18 +499,23 @@ so `bazel2gn` translates test rules too:
     `fuchsia_unittest_component()`s in a `fuchsia_test_package()` when it has
     several `unit_tests`. The GN package name gets a `-gn` suffix so it doesn't
     collide with the Bazel package in the package repository. Only `name`,
-    `package_name`, `unit_tests`, `max_log_severity`, `min_log_severity`,
-    `tags`, `testonly`, and `visibility` are supported; any other attribute
-    (such as `resources` or `environments`) is an error.
+    `package_name`, `unit_tests`, `resources`, `max_log_severity`,
+    `min_log_severity`, `parallel`, `tags`, `testonly`, and `visibility` are
+    supported (`parallel > 0` maps to `test_specs.parallel`, `0` omits it); any
+    other attribute (such as `environments`) is an error.
 *   An `fx_package()` with un-skipped `test_components` maps to
     `fuchsia_test_package()`, with the same `-gn` suffix on the package name.
     `test_components` (which must be a list literal) and `subpackages` are
-    passed through, and `components` maps to `deps`. Any other attribute (such
-    as `resources` or `tools`) is an error. The `fx_test()` in the same
-    `BUILD.bazel` whose `package` is the `fx_package()` (at most one) sets the
-    GN `test_specs`: `max_log_severity` and `min_log_severity` map to
-    `log_settings.max_severity` and `log_settings.min_severity`,
-    `build_only` is passed through, and `environments` must be a list of
+    passed through, and `components` and `resources` map to `deps`. For package
+    validations, `validate_elf_binaries` (`True` or `False`) maps to GN
+    `disable_elf_binaries_checks` with the value inverted, and
+    `validate_structured_config` (`True` or `False`) is passed through. Any
+    other attribute (such as `tools`) is an error. The
+    `fx_test()` in the same `BUILD.bazel` whose `package` is the `fx_package()`
+    (at most one) sets the GN `test_specs`: `max_log_severity` and `min_log_severity` map to
+    `log_settings.max_severity` and `log_settings.min_severity`, `parallel > 0`
+    maps to `parallel` (`0` omits it), `build_only` is
+    passed through, and `environments` must be a list of
     `//build/testing/environments:<env>` labels, which map to the `<env>`
     variables of `//build/testing/environments.gni`. GN only supports
     `test_type` on components, so `fx_test(test_type = ...)` is set on each test
@@ -406,6 +530,18 @@ so `bazel2gn` translates test rules too:
     a skipped one) is an error. Other `fx_test_component()`s and
     `fx_unittest_component()`s, `fx_package()`s without `test_components`, and
     `fx_test()` are ignored.
+*   `ctf_fx_package()` (from `//sdk/ctf/build/ctf_fx_package.bzl`) maps to
+    `ctf_fuchsia_package()`, which also defines the `<name>_archive` target
+    that GN `ctf-tests` groups depend on. The GN package name does **not** get
+    a `-gn` suffix, because CTF releases and the tests that subpackage a CTF
+    package identify it by name; only the GN copy is published or released
+    until the CTF release is built with Bazel. `package_name` defaults to
+    `name`, `components` and `test_components` map to `deps`, and
+    `subpackages`, `test_component_names`, and `visibility` are passed
+    through. Same-package test components listed in `test_components` are
+    converted like those of an `fx_package()` with `test_components` (see
+    below), except that no `test_type` is added from an `fx_test()`. Any other attribute (such as
+    `resources`) is an error.
 *   `fx_component_manifest_with_expectations()` and `fx_expectations()` map to
     `fuchsia_component_manifest_with_expectations()` and
     `fuchsia_expectations()` in
@@ -477,6 +613,86 @@ rustc_binary("bin") {
   exclude_toolchain_tags = [ "heapdump" ]
 }
 ```
+
+#### Python mypy
+
+Bazel type checks `py_library()` and `py_binary()` targets with
+[Pyrefly][pyrefly] through `pyrefly_aspect`, so `bazel2gn` adds
+`enable_mypy = false` to their GN copies instead of type checking the same
+sources again with [mypy][mypy]. Pyrefly skips targets under `third_party/` and
+`prebuilt/`, and targets tagged `no-pyrefly`, so such targets are not type
+checked by either build unless they override the default.
+Without mypy, a GN `python_library()` also stops providing type information to
+GN consumers that still run mypy, so they treat it as an untyped import. To keep
+running mypy in GN, override the default with a `# @bazel2gn:raw_attribute:`
+annotation:
+
+```bzl
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "lib",
+    srcs = ["lib.py"],
+)
+```
+
+is synced to:
+
+```gn
+python_library("lib") {
+  sources = [ "lib.py" ]
+  enable_mypy = true
+}
+```
+
+#### Python `imports`
+
+`imports` of `py_library()` passes through unchanged to GN `python_library()`,
+which stages sources the same way Bazel adds them to the import path: each
+source is importable by its path relative to the closest directory in `imports`
+that contains it (or relative to the root of the source tree if none does).
+`srcs` therefore don't need `# @bazel2gn:path_overwrite:` annotations, and
+`source_root` and `library_name` (which can't be used together with `imports`)
+don't need `# @bazel2gn:raw_attribute:` annotations:
+
+```bzl
+py_library(
+    name = "yaml",
+    srcs = [
+        "src/lib/yaml/__init__.py",
+        "src/lib/yaml/composer.py",
+    ],
+    imports = ["src/lib"],
+)
+```
+
+is synced to:
+
+```gn
+python_library("yaml") {
+  sources = [
+    "src/lib/yaml/__init__.py",
+    "src/lib/yaml/composer.py",
+  ]
+  imports = [ "src/lib" ]
+  enable_mypy = false
+}
+```
+
+and both builds import it with `import yaml`. GN `python_binary()` doesn't
+support `imports`, so `imports` on `py_binary()` is an error.
+
+`py_data_package()` (from `//build/bazel/rules/python:py_data_package.bzl`)
+stages `importlib.resources` data packages for Bazel Python targets and is
+ignored by `bazel2gn`; while a `py_library()` still has GN consumers, skip its
+`py_data_package()` `deps` entry and set `data_package_name` and `data_sources`
+with `# @bazel2gn:raw_attribute:`.
+
+#### Python C extensions
+
+`python_c_extension()` (from `//build/bazel/rules/python:python_c_extension.bzl`)
+maps to GN `python_c_extension()` inside `if (is_host && is_linux)`, converting
+`srcs` to `sources` and passing `defines`, `deps`, `stubs`, `stubs_root`,
+`testonly`, and `visibility` through.
 
 ### Starlark vs GN
 
@@ -772,8 +988,9 @@ The currently supported transformers are:
 
 `bazel2gn` automatically translates Bazel external repository target labels
 (e.g., `@com_google_googletest//:gtest`, `@com_googletest_gtest//:gtest`,
-`@re2//:re2`, `@zlib//:zlib`) to their equivalent GN labels (e.g.,
-`//third_party/googletest:gtest`, `//third_party/re2`, `//third_party/zlib`).
+`@zlib//:zlib`) and root-package third-party target labels (e.g., `//:glm`) to
+their equivalent GN labels (e.g., `//third_party/googletest:gtest`,
+`//third_party/zlib`, `//third_party/glm`).
 
 The mapping between Bazel target labels and GN labels is defined in
 [third_party_target_map.json](./third_party_target_map.json).
@@ -787,7 +1004,45 @@ directive:
 2.  It appends an inline comment in the generated GN file: `# BAZEL2GN_WARNING:
     Unknown Bazel repository name`
 
+### Repository-local rule extensions (`.bazel2gn.json`)
+
+Subtrees or nested repositories can extend `bazel2gn` with custom Bazel-to-GN
+rule mappings and extra GN `.gni` imports by placing a `.bazel2gn.json` file in
+an ancestor directory (loaded and merged from `--fuchsia_dir` down to each
+synced directory):
+
+```json
+{
+  "gn_imports": ["//path/to/migration.gni"],
+  "rules": {
+    "custom_rule": {
+      "gn_template": "custom_gn_template",
+      "attrs_to_omit": ["bazel_only_attr"],
+      "attr_map": {"bazel_attr": "gn_attr"},
+      "attr_transformers": {"manifest": "file_paths", "extra_deps": "deps"},
+      "attr_assignment_ops": {"configs": "+="},
+      "extra_gn_expressions": ["from_config = true"],
+      "default_gn_expressions": ["opt_in = false"],
+      "unwrap_packaged_binary_attrs": ["deps"]
+    }
+  }
+}
+```
+
+*   `gn_imports`: Additional `.gni` files imported below the `bazel2gn` sentinel
+    after `//build/tools/bazel2gn/bazel_migration.gni`.
+*   `rules.<name>.gn_template`: Target GN template name, or
+    `"__NO_GN_EQUIVALENT__"` to skip targets of that rule.
+*   `rules.<name>.attr_transformers`: Maps Bazel or converted GN attribute names
+    to one of the transformers listed above (`visibility`, `deps`, `configs`,
+    `file_paths`, `expectations`).
+*   `rules.<name>.unwrap_packaged_binary_attrs`: Lists attributes whose
+    same-file `fx_packaged_binary()` labels should be unwrapped to the
+    underlying GN binary (or rewritten to `renamed_binary()`).
+
 [embedsrcs]: https://github.com/bazel-contrib/rules_go/blob/master/docs/go/core/rules.md#go_library-embedsrcs
 [goembed]: https://pkg.go.dev/embed
 [starlark]: https://bazel.build/rules/language
 [gnreference]: https://gn.googlesource.com/gn/+/main/docs/reference.md
+[mypy]: https://mypy-lang.org/
+[pyrefly]: https://pyrefly.org/

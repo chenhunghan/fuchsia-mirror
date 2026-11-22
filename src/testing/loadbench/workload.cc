@@ -6,13 +6,16 @@
 
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zircon-internal/ktrace.h>
+#include <lib/zx/clock.h>
 #include <lib/zx/port.h>
 #include <lib/zx/profile.h>
 #include <lib/zx/time.h>
 #include <lib/zx/timer.h>
 #include <zircon/syscalls/port.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -122,11 +125,11 @@ struct SetTimerAction : ActionBase<SetTimerAction> {
                  std::chrono::nanoseconds timer_slack_ns)
       : timer{timer}, relative_deadline_ns{relative_deadline_ns}, timer_slack_ns{timer_slack_ns} {}
 
-  void Perform(Worker*) override {
-    const zx_status_t status =
-        timer->set(zx::deadline_after(zx::duration{relative_deadline_ns.count()}),
-                   zx::duration{timer_slack_ns.count()});
+  void Perform(Worker* worker) override {
+    const zx::time deadline = zx::deadline_after(zx::duration{relative_deadline_ns.count()});
+    const zx_status_t status = timer->set(deadline, zx::duration{timer_slack_ns.count()});
     FX_CHECK(status == ZX_OK);
+    worker->SetExpectedTimerWakeTime(timer->get(), deadline);
   }
 
   TimerObject timer;
@@ -178,12 +181,20 @@ struct WaitOneAction : ActionBase<WaitOneAction> {
                 std::optional<std::chrono::nanoseconds> relative_deadline_ns = std::nullopt)
       : handle{handle}, signals{signals}, relative_deadline_ns{relative_deadline_ns} {}
 
-  void Perform(Worker*) {
+  void Perform(Worker* worker) override {
+    const zx::time before_wait = zx::clock::get_monotonic();
     const auto absolute_deadline =
         relative_deadline_ns ? zx::deadline_after(zx::duration{relative_deadline_ns->count()})
                              : zx::time::infinite();
     const auto status = handle->wait_one(signals, absolute_deadline, nullptr);
     FX_CHECK(status == ZX_OK) << "Failed to signal object: " << status;
+    // Only record timer wake-to-run latency when the worker actually blocked
+    // ahead of the scheduled timer deadline (rather than polling an already-
+    // expired period timer after a spin slice).
+    if (const auto expected = worker->TakeExpectedTimerWakeTime(handle->get());
+        expected.has_value() && before_wait < *expected) {
+      worker->RecordWakeupLatency(zx::clock::get_monotonic() - *expected);
+    }
   }
 
   zx::unowned_handle handle;
@@ -192,17 +203,26 @@ struct WaitOneAction : ActionBase<WaitOneAction> {
 };
 
 struct WaitAsyncAction : ActionBase<WaitAsyncAction> {
-  WaitAsyncAction(zx::unowned_port port, zx::unowned_handle handle, zx_signals_t signals)
-      : port{port}, handle{handle}, signals{signals} {}
+  WaitAsyncAction(zx::unowned_port port, zx::unowned_handle handle, zx_signals_t signals,
+                  std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns = nullptr)
+      : port{port},
+        handle{handle},
+        signals{signals},
+        pending_since_ns{std::move(pending_since_ns)} {}
 
   void Perform(Worker*) override {
-    const auto status = handle->wait_async(*port, 0, signals, 0);
-    FX_CHECK(status == ZX_OK) << "Faild to wait async: " << status;
+    // The packet key carries the address of the event timestamp to
+    // PortWaitAction. This action shares ownership of the timestamp so that
+    // the address stays valid while workers run.
+    const auto packet_key = reinterpret_cast<uint64_t>(pending_since_ns.get());
+    const auto status = handle->wait_async(*port, packet_key, signals, 0);
+    FX_CHECK(status == ZX_OK) << "Failed to wait async: " << status;
   }
 
   zx::unowned_port port;
   zx::unowned_handle handle;
   zx_signals_t signals;
+  std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns;
 };
 
 struct PortWaitAction : ActionBase<PortWaitAction, ActionDefaultCopyable::False> {
@@ -218,8 +238,8 @@ struct PortWaitAction : ActionBase<PortWaitAction, ActionDefaultCopyable::False>
     FX_CHECK(status == ZX_OK) << "Failed to wait async on terminate event: " << status;
   }
 
-  void Perform(Worker*) override {
-    zx_port_packet_t packet;
+  void Perform(Worker* worker) override {
+    zx_port_packet_t packet{};
     const auto absolute_deadline =
         relative_deadline_ns ? zx::deadline_after(zx::duration{relative_deadline_ns->count()})
                              : zx::time::infinite();
@@ -227,6 +247,21 @@ struct PortWaitAction : ActionBase<PortWaitAction, ActionDefaultCopyable::False>
 
     // TODO(eieio): Add option to fail or not on timeout.
     FX_CHECK(status == ZX_OK || status == ZX_ERR_TIMED_OUT) << "Failed to port wait: " << status;
+    if (status == ZX_OK && packet.key != 0) {
+      const zx::time wake_time = zx::clock::get_monotonic();
+      if (worker->IsTerminating()) {
+        // Worker::Run() exits before running subsequent clear actions once
+        // termination is signaled; consume any in-flight event timestamp here
+        // so stalls spanning the benchmark end boundary are still recorded.
+        auto* pending_since_ns = reinterpret_cast<std::atomic<zx_time_t>*>(packet.key);
+        const zx_time_t since = pending_since_ns->exchange(0, std::memory_order_acq_rel);
+        if (since > 0 && wake_time.get() >= since) {
+          worker->RecordWakeupLatency(wake_time - zx::time{since});
+        }
+      } else {
+        worker->SetPendingPortWakeTime(wake_time);
+      }
+    }
   }
 
   std::unique_ptr<Action> Copy() const override {
@@ -241,17 +276,45 @@ struct PortWaitAction : ActionBase<PortWaitAction, ActionDefaultCopyable::False>
 };
 
 struct ObjectSignalAction : ActionBase<ObjectSignalAction> {
-  ObjectSignalAction(zx::unowned_handle handle, zx_signals_t clear_mask, zx_signals_t set_mask)
-      : handle{handle}, clear_mask{clear_mask}, set_mask{set_mask} {}
+  ObjectSignalAction(zx::unowned_handle handle, zx_signals_t clear_mask, zx_signals_t set_mask,
+                     std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns = nullptr)
+      : handle{handle},
+        clear_mask{clear_mask},
+        set_mask{set_mask},
+        pending_since_ns{std::move(pending_since_ns)} {}
 
-  void Perform(Worker*) {
+  void Perform(Worker* worker) override {
+    if (pending_since_ns && set_mask != 0) {
+      zx_time_t expected = 0;
+      const zx_time_t now = zx::clock::get_monotonic().get();
+      pending_since_ns->compare_exchange_strong(expected, now, std::memory_order_acq_rel);
+    }
+
+    // The timestamp and the signal cannot change in one step, so a signaler
+    // can run between the two. Take the timestamp before the clear: a signaler
+    // that runs in between keeps its timestamp, and the error stays within one
+    // signal period. In the other order its timestamp is erased while its
+    // signal stays asserted, and a stall that starts there is not recorded. A
+    // lock would close the gap, but signalers would then block on waiters,
+    // which changes the workload being measured.
+    const bool is_clear = pending_since_ns && clear_mask != 0 && set_mask == 0;
+    const zx_time_t since = is_clear ? pending_since_ns->exchange(0, std::memory_order_acq_rel) : 0;
+
     const auto status = handle->signal(clear_mask, set_mask);
     FX_CHECK(status == ZX_OK) << "Failed to signal object: " << status;
+
+    if (is_clear) {
+      if (const auto wake = worker->TakePendingPortWakeTime();
+          wake.has_value() && since > 0 && wake->get() >= since) {
+        worker->RecordWakeupLatency(*wake - zx::time{since});
+      }
+    }
   }
 
   zx::unowned_handle handle;
   zx_signals_t clear_mask;
   zx_signals_t set_mask;
+  std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns;
 };
 
 // Proxies an iterator over the members of the given value node. As of this
@@ -477,9 +540,14 @@ std::unique_ptr<Action> Workload::ParseAction(const rapidjson::Value& action) {
 
     auto& port_object = Get<PortObject>(port_name);
     zx::unowned_handle handle = ParseTargetObjectAndGetHandle(object_name, action, context);
+    std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns;
+    Object& target = Get(object_name);
+    if (target.type() == EventObject::Type) {
+      pending_since_ns = static_cast<EventObject&>(target).pending_since_ns;
+    }
 
-    return WaitAsyncAction::Create(zx::unowned_port{port_object->get()}, std::move(handle),
-                                   signals);
+    return WaitAsyncAction::Create(zx::unowned_port{port_object->get()}, std::move(handle), signals,
+                                   std::move(pending_since_ns));
   } else if (action_string == "wait_one") {
     const auto* context = "Wait one action";
     const auto* object_name = GetString("object", action, context);
@@ -509,8 +577,14 @@ std::unique_ptr<Action> Workload::ParseAction(const rapidjson::Value& action) {
     const auto set_mask = GetInt("set", action, context);
 
     zx::unowned_handle handle = ParseTargetObjectAndGetHandle(object_name, action, context);
+    std::shared_ptr<std::atomic<zx_time_t>> pending_since_ns;
+    Object& target = Get(object_name);
+    if (target.type() == EventObject::Type) {
+      pending_since_ns = static_cast<EventObject&>(target).pending_since_ns;
+    }
 
-    return ObjectSignalAction::Create(std::move(handle), clear_mask, set_mask);
+    return ObjectSignalAction::Create(std::move(handle), clear_mask, set_mask,
+                                      std::move(pending_since_ns));
   } else if (action_string == "timer_set") {
     const auto* timer_name = GetString("timer", action, "Timer set action");
     const auto relative_deadline_ns = ParseDuration(action["deadline"]).value;
@@ -545,6 +619,30 @@ void Workload::ParseNamedBehavior(const std::string& name, const rapidjson::Valu
   }
 }
 
+namespace {
+zx_cpu_set_t ParseCpuAffinity(const rapidjson::Value& affinity_member) {
+  zx_cpu_set_t mask{};
+  if (affinity_member.IsUint64()) {
+    mask.mask[0] = affinity_member.GetUint64();
+    FX_CHECK(mask.mask[0] != 0) << "Worker \"affinity\" bitmask must be non-zero!";
+    return mask;
+  }
+  FX_CHECK(affinity_member.IsArray())
+      << "Worker \"affinity\" must be an array of CPU indices or an unsigned bitmask!";
+  bool any_cpu = false;
+  for (const auto& value : IterateValues(affinity_member)) {
+    FX_CHECK(value.IsUint()) << "Elements of \"affinity\" array must be unsigned CPU indices!";
+    const size_t cpu = value.GetUint();
+    FX_CHECK(cpu < ZX_CPU_SET_MAX_CPUS)
+        << "CPU index " << cpu << " exceeds ZX_CPU_SET_MAX_CPUS (" << ZX_CPU_SET_MAX_CPUS << ")!";
+    mask.mask[cpu / ZX_CPU_SET_BITS_PER_WORD] |= (1ULL << (cpu % ZX_CPU_SET_BITS_PER_WORD));
+    any_cpu = true;
+  }
+  FX_CHECK(any_cpu) << "Worker \"affinity\" array must not be empty!";
+  return mask;
+}
+}  // namespace
+
 void Workload::ParseWorker(const rapidjson::Value& worker) {
   FX_CHECK(worker.IsObject()) << "Worker must be a JSON object!";
 
@@ -556,6 +654,10 @@ void Workload::ParseWorker(const rapidjson::Value& worker) {
 
   if (worker.HasMember("group")) {
     config.group = GetString("group", worker, "Worker");
+  }
+
+  if (worker.HasMember("affinity")) {
+    config.affinity = ParseCpuAffinity(worker["affinity"]);
   }
 
   if (worker.HasMember("priority")) {
@@ -571,15 +673,28 @@ void Workload::ParseWorker(const rapidjson::Value& worker) {
       const bool has_capacity = priority_member.HasMember("capacity");
       const bool has_deadline = priority_member.HasMember("deadline");
       const bool has_period = priority_member.HasMember("period");
-      FX_CHECK(has_capacity && has_deadline && has_period)
-          << "Worker member \"priority\" must have members \"capacity\", \"deadline\", and "
-             "\"period\"!";
+      FX_CHECK(has_capacity && (has_deadline || has_period))
+          << "Worker member \"priority\" must have \"capacity\" and (\"deadline\" or \"period\")!";
 
       const zx::duration capacity{ParseDuration(priority_member["capacity"]).value.count()};
-      const zx::duration deadline{ParseDuration(priority_member["deadline"]).value.count()};
-      const zx::duration period{ParseDuration(priority_member["period"]).value.count()};
+      const zx::duration period{
+          ParseDuration(priority_member[has_period ? "period" : "deadline"]).value.count()};
+      const zx::duration deadline =
+          has_deadline ? zx::duration{ParseDuration(priority_member["deadline"]).value.count()}
+                       : period;
+      bool critical = false;
+      if (priority_member.HasMember("critical")) {
+        FX_CHECK(priority_member["critical"].IsBool())
+            << "Deadline \"critical\" field must be a boolean!";
+        critical = priority_member["critical"].GetBool();
+      }
+      if (priority_member.HasMember("affinity")) {
+        FX_CHECK(!config.affinity.has_value())
+            << "Worker \"affinity\" must not be specified both on worker and inside \"priority\"!";
+        config.affinity = ParseCpuAffinity(priority_member["affinity"]);
+      }
 
-      config.priority = WorkerConfig::DeadlineParams{capacity, deadline, period};
+      config.priority = WorkerConfig::DeadlineParams{capacity, deadline, period, critical};
     }
   }
 

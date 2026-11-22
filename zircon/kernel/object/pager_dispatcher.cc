@@ -8,8 +8,6 @@
 
 #include <object/pager_dispatcher.h>
 
-static_assert(PagerProxy::kTrapDirty == kPagerProxyTrapDirty);
-
 PagerDispatcher::PagerDispatcher() : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(PagerDispatcher, kPagerDispatcherStateOffset);
   rust_pager_dispatcher_state_init(&opaque_storage_, this);

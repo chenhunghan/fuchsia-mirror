@@ -4,10 +4,9 @@
 
 #include "src/developer/forensics/snapshot/snapshotter.h"
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/zx/time.h>
 #include <zircon/errors.h>
-#include <zircon/status.h>
 
 #include <cstdio>
 
@@ -15,28 +14,30 @@ namespace forensics {
 namespace snapshot {
 
 bool MakeSnapshot(std::shared_ptr<sys::ServiceDirectory> services, const char* out_filename) {
-  fuchsia::feedback::DataProviderSyncPtr feedback_data_provider;
-  services->Connect(feedback_data_provider.NewRequest());
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_feedback::DataProvider>::Create();
+  services->Connect(fidl::DiscoverableProtocolName<fuchsia_feedback::DataProvider>,
+                    server_end.TakeChannel());
+  fidl::SyncClient feedback_data_provider(std::move(client_end));
 
-  fuchsia::feedback::Snapshot snapshot;
-  if (const zx_status_t status = feedback_data_provider->GetSnapshot(
-          std::move(fuchsia::feedback::GetSnapshotParameters().set_collection_timeout_per_data(
-              zx::min(1).get())),
-          &snapshot);
-      status != ZX_OK) {
-    fprintf(stderr, "Failed to get data from fuchsia.feedback.DataProvider: %d (%s)\n", status,
-            zx_status_get_string(status));
+  fuchsia_feedback::GetSnapshotParameters params;
+  params.collection_timeout_per_data(zx::min(1).get());
+
+  const fidl::Result result = feedback_data_provider->GetSnapshot(std::move(params));
+  if (result.is_error()) {
+    fprintf(stderr, "Failed to get data from fuchsia.feedback.DataProvider: %s\n",
+            result.error_value().FormatDescription().c_str());
     return false;
   }
 
-  if (!snapshot.has_archive()) {
+  const fuchsia_feedback::Snapshot& snapshot = result->snapshot();
+  if (!snapshot.archive().has_value()) {
     fprintf(stderr, "Failed to get snapshot from fuchsia.feedback.DataProvider");
     return false;
   }
 
-  const uint64_t size = snapshot.archive().value.size;
-  auto data = std::make_unique<uint8_t[]>(snapshot.archive().value.size);
-  if (const zx_status_t status = snapshot.archive().value.vmo.read(data.get(), 0u, size);
+  const uint64_t size = snapshot.archive()->value().size();
+  auto data = std::make_unique<uint8_t[]>(size);
+  if (const zx_status_t status = snapshot.archive()->value().vmo().read(data.get(), 0u, size);
       status != ZX_OK) {
     fprintf(stderr, "Failed to read VMO archive from fuchsia.feedback.DataProvider");
     return false;

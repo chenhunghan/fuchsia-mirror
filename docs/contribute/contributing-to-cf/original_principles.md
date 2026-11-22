@@ -43,7 +43,7 @@ are general Fuchsia principles that Component Framework also commits to.
 
 ## Principles
 
-### Least privilege
+### Least privilege {#least-privilege}
 
 Components should receive the minimum capabilities they need to perform their
 role in the system and nothing more, in accordance with the
@@ -75,7 +75,7 @@ There was an intent for component manager to support flexible isolation
 policies, which are another mechanism to control privilege. More in
 [Isolation](#isolation) below.
 
-## No ambient authority
+## No ambient authority {#no-ambient-authority}
 
 A system exhibits [ambient authority][wiki-ambient-authority] when a program can
 perform an operation on an object without being granted access to the object
@@ -99,7 +99,7 @@ objects. Example: what looks to a component like its POSIX filesystem is derived
 from the parent's declaration of the component's sandbox.
 
 Component framework, except in the case of a few privileged
-APIs,[*][#peer-exception] does not reveal to components the identity of their
+APIs,[*][peer-exception] does not reveal to components the identity of their
 peers. This prevents components from misusing peer identity to build ambient
 authorities.
 
@@ -200,7 +200,7 @@ identity which are not consistent between each other. For example, under what
 circumstances is a component considered the "same" when it is
 updated/moved/recreated?
 
-### Isolation
+### Isolation {#isolation}
 
 Components may possess sensitive information and privileges and the component
 framework is responsible for protecting their
@@ -263,7 +263,7 @@ obfuscated token they could use to locally identify their peers. This was called
 present the client with the hash. Since this is derived from the relative
 moniker, it would inherently be instance-specific.
 
-### Accountability
+### Accountability {#accountability}
 
 System resources are finite. There's only so much memory, disk, or CPU time
 available on a computing device. The component framework should keep track of
@@ -474,7 +474,7 @@ cases it could be useful to have APIs that are principally static but delegate
 some aspects to runtime, or that are principally dynamic but are constrained by
 a statically described "upper bound".
 
-### Sandboxing
+### Sandboxing {#sandboxing}
 
 Component instances have no awareness of where the services in their
 [sandbox][wiki-sandbox] actually come from. They perceive a subjective reality
@@ -540,7 +540,7 @@ parent tree.
 In its most powerful form, recursive symmetry could support "lifting" a subtree
 of a topology to run on a different device, with all persisted state intact.
 
-## Encapsulation
+## Encapsulation {#encapsulation}
 
 Encapsulation, as in OOP, refers to the concealment of a component's internal
 structure or data from a containing component. In particular, this means
@@ -769,3 +769,4 @@ contents of a collection are runtime determined.
 [wiki-info-security]: https://en.wikipedia.org/wiki/Information_security
 [wiki-least-privilege]: https://en.wikipedia.org/wiki/Principle_of_least_privilege
 [wiki-sandbox]: https://en.wikipedia.org/wiki/Sandbox_(computer_security)
+[peer-exception]: #peer-exception

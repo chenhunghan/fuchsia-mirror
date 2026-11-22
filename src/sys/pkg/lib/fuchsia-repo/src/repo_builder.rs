@@ -868,6 +868,7 @@ mod tests {
     use pretty_assertions::{assert_eq, assert_ne};
     use std::io::Write as _;
     use std::os::unix::fs::PermissionsExt as _;
+    use test_case::test_case;
     use tuf::crypto::Ed25519PrivateKey;
     use tuf::metadata::{Metadata as _, MetadataPath};
     use walkdir::WalkDir;
@@ -902,14 +903,18 @@ mod tests {
         assert_matches!(repo_client.update().await, Ok(true));
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_create_and_update_repo() {
+    async fn test_create_and_update_repo(delivery_blob_type: DeliveryBlobType) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
         let metadata_repo_path = dir.join("metadata");
         let blob_repo_path = dir.join("blobs");
-        let repo = FileSystemRepository::new(metadata_repo_path, blob_repo_path.clone());
+        let repo = FileSystemRepository::builder(metadata_repo_path, blob_repo_path.clone())
+            .delivery_blob_type(delivery_blob_type)
+            .build();
         let repo_keys = test_utils::make_repo_keys();
 
         let pkg1_dir = dir.join("package1");
@@ -929,6 +934,7 @@ mod tests {
             .unwrap();
 
         // Make sure we wrote all the blobs from package1.
+        let blob_type_num = u32::from(delivery_blob_type);
         assert_eq!(
             read_dir(&blob_repo_path),
             [
@@ -938,8 +944,8 @@ mod tests {
             ]
             .into_iter()
             .map(|(hash, content)| (
-                format!("1/{hash}"),
-                delivery_blob::generate(delivery_blob::DeliveryBlobType::Type1, &content)
+                format!("{blob_type_num}/{hash}"),
+                delivery_blob::generate(delivery_blob_type, &content)
             ),)
             .collect()
         );
@@ -989,8 +995,8 @@ mod tests {
             ]
             .into_iter()
             .map(|(hash, content)| (
-                format!("1/{hash}"),
-                delivery_blob::generate(delivery_blob::DeliveryBlobType::Type1, &content)
+                format!("{blob_type_num}/{hash}"),
+                delivery_blob::generate(delivery_blob_type, &content)
             ))
             .collect()
         );
@@ -1815,14 +1821,20 @@ mod tests {
         );
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_stage_package_overwrites_corrupted_blob_in_blob_store() {
+    async fn test_stage_package_overwrites_corrupted_blob_in_blob_store(
+        delivery_blob_type: DeliveryBlobType,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
         let metadata_repo_path = dir.join("metadata");
         let blob_repo_path = dir.join("blobs");
-        let repo = FileSystemRepository::new(metadata_repo_path, blob_repo_path.clone());
+        let repo = FileSystemRepository::builder(metadata_repo_path, blob_repo_path.clone())
+            .delivery_blob_type(delivery_blob_type)
+            .build();
         let repo_keys = test_utils::make_repo_keys();
 
         // Create 2 packages with a shared blob between them
@@ -1861,7 +1873,8 @@ mod tests {
             .unwrap();
 
         // Corrupt the contents of the blob, and change it's size.
-        let shared_blob_path = blob_repo_path.join(format!("1/{hash}"));
+        let shared_blob_path =
+            blob_repo_path.join(format!("{}/{hash}", u32::from(delivery_blob_type)));
         let mut perms = fs::metadata(&shared_blob_path).unwrap().permissions();
         perms.set_mode(perms.mode() | 0o664);
         fs::set_permissions(&shared_blob_path, perms).unwrap();
@@ -1882,14 +1895,20 @@ mod tests {
         assert_eq!(actual, contents);
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_stage_package_does_not_overwrite_corrupted_blob_in_blob_store_if_lengths_match() {
+    async fn test_stage_package_does_not_overwrite_corrupted_blob_in_blob_store_if_lengths_match(
+        delivery_blob_type: DeliveryBlobType,
+    ) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
         let metadata_repo_path = dir.join("metadata");
         let blob_repo_path = dir.join("blobs");
-        let repo = FileSystemRepository::new(metadata_repo_path, blob_repo_path.clone());
+        let repo = FileSystemRepository::builder(metadata_repo_path, blob_repo_path.clone())
+            .delivery_blob_type(delivery_blob_type)
+            .build();
         let repo_keys = test_utils::make_repo_keys();
 
         // Create 2 packages with a shared blob between them
@@ -1929,11 +1948,12 @@ mod tests {
             .unwrap();
 
         // Corrupt the contents of the blob, but keep it's length the same.
-        let shared_blob_path = blob_repo_path.join(format!("1/{hash}"));
+        let shared_blob_path =
+            blob_repo_path.join(format!("{}/{hash}", u32::from(delivery_blob_type)));
         let mut perms = fs::metadata(&shared_blob_path).unwrap().permissions();
         perms.set_mode(perms.mode() | 0o664);
         fs::set_permissions(&shared_blob_path, perms).unwrap();
-        fs::write(&shared_blob_path, delivery_blob::generate(DeliveryBlobType::Type1, contents2))
+        fs::write(&shared_blob_path, delivery_blob::generate(delivery_blob_type, contents2))
             .unwrap();
 
         // Publish the second package, which should succeed and overwrite the corrupted blob.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"io/fs"
 	"log"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,18 @@ func (c *Crawler) Run(ctx context.Context, rootDirs []string) (<-chan pipeline.R
 						return filepath.SkipDir
 					}
 					return nil
+				}
+
+				// filepath.WalkDir does not follow symlinks, and d.IsDir() returns false
+				// for all symlinks. Skip broken symlinks and symlinks to directories (such
+				// as deduplicated vendor repositories) so downstream stages do not treat
+				// directory symlinks as regular files, while still emitting symlinks to
+				// regular files (such as CIPD prebuilt LICENSE and README.fuchsia files).
+				if d.Type()&fs.ModeSymlink != 0 {
+					info, statErr := os.Stat(path)
+					if statErr != nil || info.IsDir() {
+						return nil
+					}
 				}
 
 				if !d.IsDir() {

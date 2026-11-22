@@ -4,7 +4,9 @@ Version: android16-qpr1-release
 Revision: 818b99f77d3b6fedd7e3f9d4378329f4991b9cc9
 Security Critical: no
 
+License: Apache-2.0, BSD-2-Clause
 License File: src/NOTICE
-  License: Apache-2.0, BSD-2-Clause, Copyright
+Non-License File: src/MODULE_LICENSE_APACHE2
 
-Description: Android device tree tools and libraries
+Description:
+  Android device tree tools and libraries

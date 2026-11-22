@@ -73,6 +73,6 @@ fx_package(
 fx_test(
     name = "calculator-integration-test-cpp",
     package = ":calculator-integration-test-cpp-package",
-    # Aggregated by the examples test suite in //examples/BUILD.bazel.
-    visibility = ["//examples:__pkg__"],
+    # Aggregated by the examples test suite in //examples/fidl/calculator/BUILD.bazel.
+    visibility = ["//examples:__subpackages__"],
 )

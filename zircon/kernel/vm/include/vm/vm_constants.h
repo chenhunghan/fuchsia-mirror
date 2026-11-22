@@ -44,49 +44,41 @@ constexpr size_t kVmObjectPhysicalStateOffset = 152;
 constexpr size_t kVmObjectPhysicalStateOffset = 136;
 #endif
 
-// Size and alignment for VmAddressRegionOrMapping state stored in C++ OpaqueStorage.
-constexpr size_t kVmAddressRegionOrMappingStateSize = 48;
-constexpr size_t kVmAddressRegionOrMappingStateAlign = 8;
-
 // Whether fbl::RefCounted starts at its pre-adopt sentinel and validates adoption. The Rust
-// fbl::RefCounted in VmAddressRegionOrMapping's state must make the same choice.
+// fbl::RefCounted in RegionOrMappingCommon and in VmAspace must make the same choice.
 constexpr bool kRefCountedAdoptionValidator = ZX_DEBUG_ASSERT_IMPLEMENTED;
 
 // Size and alignment for VmCowPages state stored in C++ OpaqueStorage.
+#if WITH_LOCK_DEP
 #if EXPERIMENTAL_CONTINUOUS_PER_VMO_ATTRIBUTION_ENABLED
-constexpr size_t kVmCowPagesStateSize = 96;
+constexpr size_t kVmCowPagesStateSize = 120;
 #else
-constexpr size_t kVmCowPagesStateSize = 88;
+constexpr size_t kVmCowPagesStateSize = 112;
 #endif
+#else  // !WITH_LOCK_DEP
+#if EXPERIMENTAL_CONTINUOUS_PER_VMO_ATTRIBUTION_ENABLED
+constexpr size_t kVmCowPagesStateSize = 112;
+#else
+constexpr size_t kVmCowPagesStateSize = 104;
+#endif
+#endif  // WITH_LOCK_DEP
 constexpr size_t kVmCowPagesStateAlign = 8;
 
-// Size and alignment for VmAddressRegion state stored in C++ OpaqueStorage.
-constexpr size_t kVmAddressRegionStateSize = 36;
-constexpr size_t kVmAddressRegionStateAlign = 4;
+// Size and alignment for VmAddressRegionSubregions stored in Rust.
+constexpr size_t kVmAddressRegionSubregionsSize = 8;
+constexpr size_t kVmAddressRegionSubregionsAlign = 8;
 
-// Size and alignment for VmMapping state stored in C++ OpaqueStorage.
-constexpr size_t kVmMappingStateSize = 32;
-constexpr size_t kVmMappingStateAlign = 8;
+// Size and alignment for VmAddressRegionSubregionsCursor stored in Rust.
+constexpr size_t kVmAddressRegionSubregionsCursorSize = 16;
+constexpr size_t kVmAddressRegionSubregionsCursorAlign = 8;
+
+// Size and alignment for VmMappingProtectionRanges stored in Rust.
+constexpr size_t kVmMappingProtectionRangesSize = 8;
+constexpr size_t kVmMappingProtectionRangesAlign = 8;
 
 // Size and alignment for VmMappingProtectionRangesCursor stored in Rust.
 constexpr size_t kVmMappingProtectionRangesCursorSize = 16;
 constexpr size_t kVmMappingProtectionRangesCursorAlign = 8;
-
-// Size and alignment for PageQueues state stored in C++ OpaqueStorage.
-#if WITH_LOCK_DEP
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
-constexpr size_t kPageQueuesStorageSize = 608;
-#else
-constexpr size_t kPageQueuesStorageSize = 600;
-#endif
-#else  // !WITH_LOCK_DEP
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
-constexpr size_t kPageQueuesStorageSize = 592;
-#else
-constexpr size_t kPageQueuesStorageSize = 584;
-#endif
-#endif  // WITH_LOCK_DEP
-constexpr size_t kPageQueuesStorageAlign = 8;
 
 // Size and alignment for PhysicalPageProvider.
 #if WITH_LOCK_DEP
@@ -95,6 +87,11 @@ constexpr size_t kPhysicalPageProviderStateSize = 120;
 constexpr size_t kPhysicalPageProviderStateSize = 104;
 #endif
 constexpr size_t kPhysicalPageProviderStateAlign = 8;
+
+// Size and alignment for MultiPageRequest, which is a Rust struct that C++ callers allocate
+// (typically on the stack) through an OpaqueStorage-backed shell.
+constexpr size_t kMultiPageRequestSize = 248;
+constexpr size_t kMultiPageRequestAlign = 8;
 
 // VM Page List Constants
 constexpr uint32_t kPmmNodeIndexZeroBits = 3;
@@ -113,7 +110,5 @@ constexpr uint32_t kVmPageListIntervalBits =
 
 // Fanout of a single VmPageListNode (number of page slots in a node).
 constexpr size_t kVmPageListFanOut = 16;
-
-constexpr uint64_t kVmMappingPageFaultMaxOptimisticPages = 16;
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_CONSTANTS_H_

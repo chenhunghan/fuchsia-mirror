@@ -4,26 +4,11 @@
 
 load(
     "@bazel_skylib//rules:common_settings.bzl",
-    "bool_flag",
     "int_flag",
     "string_flag",
 )
 
 package(default_applicable_licenses = ["//:license"])
-
-# If the build configuration has coverage enabled.
-bool_flag(
-    name = "is_coverage",
-    build_setting_default = False,
-    visibility = ["//visibility:public"],
-)
-
-# If the build configuration has profiling enabled.
-bool_flag(
-    name = "is_profile",
-    build_setting_default = False,
-    visibility = ["//visibility:public"],
-)
 
 # LINT.IfChange(dwarf_version)
 int_flag(

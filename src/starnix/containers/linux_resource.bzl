@@ -31,13 +31,23 @@ _FEATURES = "//command_line_option:features"
 _INSTRUMENTATION_FEATURES = [
     "asan",
     "coverage",
+    "coverage-cts",
+    "coverage-rust",
+    "fuzzer",
+    "heapdump",
     "hwasan",
+    "instrumented",
     "lsan",
     "msan",
+    "profile",
+    "profile-rust",
+    "profile-use",
+    "profile-use-rust",
+    "sancov",
     "tsan",
     "ubsan",
 ]
-# LINT.ThenChange(//build/bazel/rules/cc/fx_cc_binary.bzl:instrumentation_features)
+# LINT.ThenChange(//build/bazel/rules/cc/instrumentation.bzl:instrumentation_features)
 
 def _linux_settings(cpu, settings):
     disabled = ["-" + f for f in _INSTRUMENTATION_FEATURES]

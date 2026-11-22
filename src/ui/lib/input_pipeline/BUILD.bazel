@@ -1,0 +1,211 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+load("//third_party/cobalt:metrics_registry.bzl", "metrics_registry")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":input_pipeline_lib_tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+metrics_registry(
+    name = "metrics_registry",
+    generate_rust = True,
+    # This must match the ID of our Cobalt project as specified in:
+    # third_party/cobalt_config/projects.yaml
+    project_id = 19,
+)
+
+_COMMON_SRCS = [
+    "src/consumer_controls_binding.rs",
+    "src/device_listener_registry.rs",
+    "src/dispatcher.rs",
+    "src/display_ownership.rs",
+    "src/factory_reset_handler.rs",
+    "src/fake_input_device_binding.rs",
+    "src/focus_listener.rs",
+    "src/ime_handler.rs",
+    "src/incoming.rs",
+    "src/input_device.rs",
+    "src/input_handler.rs",
+    "src/input_pipeline.rs",
+    "src/inspect_handler.rs",
+    "src/keyboard_binding.rs",
+    "src/keymap_handler.rs",
+    "src/lib.rs",
+    "src/light_sensor.rs",
+    "src/light_sensor/calibrator.rs",
+    "src/light_sensor/calibrator/calibrator_tests.rs",
+    "src/light_sensor/led_watcher.rs",
+    "src/light_sensor/led_watcher/led_watcher_tests.rs",
+    "src/light_sensor/light_sensor_binding.rs",
+    "src/light_sensor/light_sensor_handler.rs",
+    "src/light_sensor/light_sensor_handler/light_sensor_handler_tests.rs",
+    "src/light_sensor/test_utils.rs",
+    "src/light_sensor/types.rs",
+    "src/light_sensor/types/types_tests.rs",
+    "src/media_buttons_handler.rs",
+    "src/metrics/mod.rs",
+    "src/modifier_handler.rs",
+    "src/mouse_binding.rs",
+    "src/mouse_injector_handler.rs",
+    "src/observe_fake_events_input_handler.rs",
+    "src/task.rs",
+    "src/testing_utilities.rs",
+    "src/touch_binding.rs",
+    "src/touch_injector_handler.rs",
+    "src/utils.rs",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_PROC_MACRO_DEPS = [
+    "//third_party/rust_crates/vendor:async-trait",
+    "//third_party/rust_crates/vendor:derivative",
+    "//third_party/rust_crates/vendor:strum_macros",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    ":metrics_registry_rustlib",
+    "//sdk/fidl/fuchsia.factory:fuchsia.factory_rust",
+    "//sdk/fidl/fuchsia.input:fuchsia.input_rust",
+    "//sdk/fidl/fuchsia.input:fuchsia.input_rust_next",
+    "//sdk/fidl/fuchsia.input.injection:fuchsia.input.injection_rust",
+    "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust",
+    "//sdk/fidl/fuchsia.input.report:fuchsia.input.report_rust_next",
+    "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+    "//sdk/fidl/fuchsia.lightsensor:fuchsia.lightsensor_rust",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_rust",
+    "//sdk/fidl/fuchsia.media.sounds:fuchsia.media.sounds_rust",
+    "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust_next",
+    "//sdk/fidl/fuchsia.power.system:fuchsia.power.system_rust_next",
+    "//sdk/fidl/fuchsia.recovery:fuchsia.recovery_rust",
+    "//sdk/fidl/fuchsia.recovery.policy:fuchsia.recovery.policy_rust",
+    "//sdk/fidl/fuchsia.recovery.ui:fuchsia.recovery.ui_rust",
+    "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+    "//sdk/fidl/fuchsia.ui.brightness:fuchsia.ui.brightness_rust",
+    "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_rust",
+    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust",
+    "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_rust_next",
+    "//sdk/fidl/fuchsia.ui.input.internal:fuchsia.ui.input.internal_rust",
+    "//sdk/fidl/fuchsia.ui.input3:fuchsia.ui.input3_rust",
+    "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_rust",
+    "//sdk/fidl/fuchsia.ui.pointerinjector:fuchsia.ui.pointerinjector_rust",
+    "//sdk/fidl/fuchsia.ui.pointerinjector:fuchsia.ui.pointerinjector_rust_next",
+    "//sdk/fidl/fuchsia.ui.pointerinjector.configuration:fuchsia.ui.pointerinjector.configuration_rust",
+    "//sdk/fidl/fuchsia.ui.policy:fuchsia.ui.policy_rust",
+    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust_next",
+    "//sdk/rust/zx",
+    "//src/lib/async-utils",
+    "//src/lib/collections/sorted-vec-map",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fidl/rust_next/fidl_next",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-fs",
+    "//src/lib/fuchsia-sync",
+    "//src/lib/trace/rust:trace",
+    "//src/lib/ui/fuchsia-scenic",
+    "//src/lib/ui/keymaps",
+    "//src/ui/lib/focus_chain_provider:lib",
+    "//src/ui/lib/input-device-constants:lib",
+    "//third_party/cobalt/src/lib/client/rust:cobalt-client",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:itertools",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:pin-project-lite",
+    "//third_party/rust_crates/vendor:serde",
+    "//third_party/rust_crates/vendor:strum",
+]
+
+rustc_library(
+    name = "input_pipeline",
+    srcs = _COMMON_SRCS,
+    aspect_hints = [":input_pipeline_includes"],
+    edition = "2024",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    visibility = [
+        "//src/ui/bin/scene_manager:__pkg__",
+        "//src/ui/lib/scene_management:__pkg__",
+    ],
+    deps = _COMMON_DEPS + [
+        "//src/lib/fdio/rust:fdio",
+    ],
+)
+
+rustc_library(
+    name = "dso",
+    srcs = _COMMON_SRCS,
+    aspect_hints = [":input_pipeline_includes"],
+    crate_features = ["dso"],
+    crate_name = "input_pipeline_dso",
+    edition = "2024",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    visibility = [
+        "//src/ui/bin/scene_manager:__pkg__",
+        "//src/ui/lib/scene_management:__pkg__",
+    ],
+    # :input_pipeline provides unit tests.
+    deps = _COMMON_DEPS + [
+        "//sdk/fidl/fuchsia.ui.pointerinjector.dso:fuchsia.ui.pointerinjector.dso_rust_next",
+        "//sdk/lib/async/rust",
+        "//sdk/lib/async/rust/fidl",
+        "//sdk/lib/driver/component/rust",
+        "//sdk/lib/driver/runtime/rust",
+        "//sdk/lib/driver/runtime/rust/fidl",
+    ],
+)
+
+cml_shard(
+    name = "meta/client.shard",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:use.shard",
+        "//src/ui/lib/focus_chain_provider:meta/client.shard",
+    ],
+    shard = "meta/client.shard.cml",
+    visibility = ["//src/ui/bin/scene_manager:__pkg__"],
+)
+
+expect_includes(
+    name = "input_pipeline_includes",
+    includes = [":meta/client.shard"],
+)
+
+rustc_test(
+    name = "input_pipeline_test",
+    aspect_hints = [":input_pipeline_includes"],
+    crate = ":input_pipeline",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/ui/fidl_fuchsia_ui_focus_ext:lib",
+        "//src/lib/ui/fidl_fuchsia_ui_views_ext:lib",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "input_pipeline_lib_tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":input_pipeline_test"],
+)

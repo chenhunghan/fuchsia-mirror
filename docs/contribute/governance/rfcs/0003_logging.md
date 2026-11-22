@@ -32,7 +32,7 @@ frequency of ERROR log entries to be one of the proxies to system stability.
 
 ## Implementation
 
-### Log severity levels
+### Log severity levels {:#log-severity-levels}
 
 Fuchsia supports a number of standard log severity levels:
 

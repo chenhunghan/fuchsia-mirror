@@ -1,0 +1,96 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":ffx_audio_device_args_test",
+        ":ffx_audio_device_test",
+    ],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+ffx_plugin(
+    name = "ffx_audio_device",
+    srcs = [
+        "src/connect.rs",
+        "src/control.rs",
+        "src/info.rs",
+        "src/lib.rs",
+        "src/list.rs",
+        "src/serde_ext.rs",
+    ],
+    args_deps = [
+        "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_fdomain",
+        "//src/developer/ffx/core:lib",
+        "//src/media/audio/lib/rust:fuchsia_audio_fdomain",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    # Uncomment this line, to enable all lints during local development.
+    # (GN: configs = [ "//build/config/rust/lints:clippy_warn_all" ])
+    # lint_config = "//build/config/rust/lints:clippy_warn_all",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    visibility = [
+        "//src/developer/ffx/plugins/audio:__pkg__",
+        "//src/developer/ffx/plugins/audio/list-devices:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.audio.controller:fuchsia.audio.controller_rust_fdomain",
+        "//sdk/fidl/fuchsia.audio.device:fuchsia.audio.device_rust_fdomain",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_rust_fdomain",
+        "//sdk/fidl/fuchsia.hardware.audio.signalprocessing:fuchsia.hardware.audio.signalprocessing_rust_fdomain",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust_fdomain",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_rust_fdomain",
+        "//sdk/rust/zx-status",
+        "//sdk/rust/zx-types",
+        "//src/developer/ffx/command/error:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/futures:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/ffx/plugins/audio/common:ffx_audio_common",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/media/audio/lib/rust:fuchsia_audio_fdomain",
+        # prettytable-rs is a fork outside vendor/; GN reaches it through
+        # the //third_party/rust_crates:prettytable-rs alias group.
+        "//third_party/rust_crates/forks/prettytable-rs:prettytable",  # @bazel2gn:path_overwrite://third_party/rust_crates:prettytable-rs
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:blocking",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:itertools",
+        "//third_party/rust_crates/vendor:serde",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_audio_device_args_test",
+    crate = ":ffx_audio_device_args",
+)
+
+host_rustc_test(
+    name = "ffx_audio_device_test",
+    crate = ":ffx_audio_device",
+    deps = [
+        "//src/lib/fdomain/local",
+        "//src/lib/fidl/rust/fidl_test_util",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)

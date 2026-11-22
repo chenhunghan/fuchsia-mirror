@@ -161,18 +161,20 @@ class ExpectReport {
  private:
   enum class State { kUncalled, kCalled, kMoved };
 
-  template <typename T, typename T2 = void>
+  template <typename T>
   struct NormalizeImpl {
     using type = T;
   };
 
   template <typename T>
-  struct NormalizeImpl<T, std::enable_if_t<std::is_constructible_v<std::string_view, T>>> {
+    requires std::is_constructible_v<std::string_view, T>
+  struct NormalizeImpl<T> {
     using type = std::string_view;
   };
 
   template <typename T>
-  struct NormalizeImpl<T, std::enable_if_t<std::is_integral_v<T>>> {
+    requires std::is_integral_v<T>
+  struct NormalizeImpl<T> {
     using type = uint64_t;
   };
 

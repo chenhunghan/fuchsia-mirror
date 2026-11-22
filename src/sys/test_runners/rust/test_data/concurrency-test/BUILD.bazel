@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
@@ -50,6 +51,7 @@ fx_component(
     name = "concurrency_test_driver_component",
     testonly = True,
     compiled_manifest = ":concurrency_test_driver_component-manifest",
+    visibility = ["//src/sys/test_runners/rust/test_data:__pkg__"],
     deps = [":concurrency_test_driver_packaged_bin"],
 )
 
@@ -68,4 +70,20 @@ fx_component(
     name = "concurrency_test_component",
     testonly = True,
     compiled_manifest = ":concurrency_test_component-manifest",
+    visibility = ["//src/sys/test_runners/rust/test_data:__pkg__"],
+)
+
+stamp_group(
+    name = "concurrency-test",
+    testonly = True,
+    stamp = "concurrency-test.stamp",
+    visibility = [
+        "//:__pkg__",
+        "//src/sys/test_runners/rust/test_data:__pkg__",
+    ],
+    deps = [
+        ":concurrency_test_component",
+        ":concurrency_test_driver_component",
+        "//src/sys/test_runners:echo_server_for_concurrency_test",
+    ],
 )

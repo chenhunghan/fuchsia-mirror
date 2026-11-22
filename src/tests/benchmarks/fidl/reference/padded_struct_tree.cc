@@ -23,7 +23,7 @@ bool EncodePaddedStructTree(void* value, const char** error,
   uint64_t* out = reinterpret_cast<uint64_t*>(buf);
   for (; in < in_end; ++in, ++out) {
     // Note: padding bytes are blindly zeroed rather than checking that existing padding data is
-    // zero because LLCPP does not require that padding bytes in values are zero.
+    // zero because C++ wire does not require that padding bytes in values are zero.
     *out = *in & mask;
   }
   callback(buf, sizeof(buf));

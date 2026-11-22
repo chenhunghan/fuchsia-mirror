@@ -109,5 +109,6 @@ rustc_test(
     deps = [
         "//src/lib/fuchsia",
         "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
     ],
 )

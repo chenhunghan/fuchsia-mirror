@@ -1,0 +1,201 @@
+# Diamond-branching program with 64 sequential branches (2^64 abstract paths without state
+# pruning) that must verify quickly via state pruning at join points and execute cleanly.
+-- asm
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+ldxb %r0, [%r1]
+jeq %r0, 0, +1
+add %r0, 1
+mov %r0, 0
+exit
+-- mem
+00
+-- result
+0

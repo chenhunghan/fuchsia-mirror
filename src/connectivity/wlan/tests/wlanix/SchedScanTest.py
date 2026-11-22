@@ -65,7 +65,12 @@ from wlanix_testing.sched_scan_utils import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MATCH_TIMEOUT_SEC = 15.0
+# Scheduled scans run every 10 s (DEFAULT_SCHED_SCAN_INTERVAL_MS), and drivers
+# may back off from there. 25 s leaves time for the scans at 0 s, 10 s and 20 s
+# to report a match.
+DEFAULT_MATCH_TIMEOUT_SEC = 25.0
+# Long enough for the scans at 0 s and 10 s to finish.
+NO_MATCH_TIMEOUT_SEC = 15.0
 
 
 class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
@@ -177,7 +182,7 @@ class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         iface_index: int,
         payload: list[int],
         expected_ssids: list[str],
-        timeout_seconds: int = 10,
+        timeout_seconds: float = DEFAULT_MATCH_TIMEOUT_SEC,
     ) -> None:
         logger.info("Sending start scheduled scan netlink message")
         async with self.iface.nl80211.listen_multicast("scan") as scan_queue:
@@ -406,7 +411,7 @@ class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 iface_index=iface_index,
                 payload=payload,
                 expected_ssids=[],
-                timeout_seconds=12,
+                timeout_seconds=NO_MATCH_TIMEOUT_SEC,
             )
 
     async def test_start_sched_scan_with_multiple_ssids(self) -> None:
@@ -511,7 +516,7 @@ class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             iface_index=iface_index,
             payload=payload,
             expected_ssids=[],
-            timeout_seconds=12,
+            timeout_seconds=NO_MATCH_TIMEOUT_SEC,
         )
 
     async def test_start_sched_scan_with_scan_plans(self) -> None:
@@ -525,9 +530,13 @@ class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         freq_nla = build_nla(1, struct.pack("<I", 2437))
         freqs_attr = build_nla(NL80211_ATTR_SCAN_FREQUENCIES, freq_nla)
 
-        plan_1_interval_sec = 3
+        # Drivers may reject scan intervals shorter than 10 s. The slow
+        # interval is long enough that a match from a scan at the fast
+        # interval, even one that kept running past its iterations, can't land
+        # in the expected window.
+        plan_1_interval_sec = 10
         plan_1_iterations = 2
-        plan_2_interval_sec = 15
+        plan_2_interval_sec = 45
 
         plan_1_interval = build_nla(
             NL80211_SCHED_SCAN_PLAN_INTERVAL,
@@ -616,8 +625,13 @@ class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
                 logger.info(
                     f"Match received at {elapsed_at_match:.2f} seconds after PNO start."
                 )
+                # The AP comes up after the fast scans, so scans that stayed
+                # at the fast interval would find it within 10 s, well before
+                # the expected window.
                 assert_true(
-                    16.0 < elapsed_at_match < 25.0,
+                    expected_discovery_time_sec - 5.0
+                    < elapsed_at_match
+                    < expected_discovery_time_sec + 10.0,
                     f"Elapsed time {elapsed_at_match:.2f}s implies the firmware didn't respect the multi-tier scan plans!",
                 )
 
@@ -639,7 +653,6 @@ class SchedScanTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
         payload = build_start_sched_scan_payload(
             iface_index=iface_index,
             match_attr=match_attr,
-            interval_ms=3000,
         )
 
         async with self.iface.nl80211.listen_multicast("scan") as scan_queue:

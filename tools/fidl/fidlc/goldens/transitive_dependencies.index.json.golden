@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
       "data": "test.transitivedependencies",
       "start_offset": 8,
       "end_offset": 35
@@ -14,7 +14,7 @@
       "library_name": "test.middle",
       "referenced_at": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
         "data": "test.middle",
         "start_offset": 44,
         "end_offset": 55
@@ -26,7 +26,7 @@
       "library_name": "test.middle",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies/middle.test.fidl",
         "data": "test.middle",
         "start_offset": 8,
         "end_offset": 19
@@ -38,10 +38,10 @@
       "identifier": "test.middle/Bar",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies/middle.test.fidl",
         "data": "Bar",
-        "start_offset": 195,
-        "end_offset": 198
+        "start_offset": 47,
+        "end_offset": 50
       }
     }
   ],
@@ -55,20 +55,20 @@
       "identifier": "test.transitivedependencies/Baz",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
         "data": "Baz",
-        "start_offset": 211,
-        "end_offset": 214
+        "start_offset": 63,
+        "end_offset": 66
       },
       "members": [
         {
           "name": "g",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
             "data": "g",
-            "start_offset": 230,
-            "end_offset": 231
+            "start_offset": 82,
+            "end_offset": 83
           },
           "type": {
             "kind": "identifier",
@@ -76,10 +76,10 @@
             "type_identifier": "test.middle/Bar",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/transitive_dependencies/top.test.fidl",
               "data": "test.middle.Bar",
-              "start_offset": 232,
-              "end_offset": 247
+              "start_offset": 84,
+              "end_offset": 99
             }
           }
         }

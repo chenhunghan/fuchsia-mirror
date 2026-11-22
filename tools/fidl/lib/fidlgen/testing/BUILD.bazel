@@ -2,17 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+load(":roundtrip_tests.bzl", "fidlgen_roundtrip_tests")
 
 package(default_applicable_licenses = ["//:license"])
 
 go_binary_host_tool(
     name = "roundtripper",
     srcs = ["roundtripper.go"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//visibility:public"],
     deps = [
         "//tools/fidl/lib/fidlgen",
     ],
+)
+
+fidlgen_roundtrip_tests(
+    name = "roundtrip_tests",
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
 )

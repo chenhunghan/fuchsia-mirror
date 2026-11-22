@@ -6,13 +6,14 @@
 #define SRC_DEVICES_THERMAL_DRIVERS_AML_THERMAL_S905D2G_LEGACY_AML_THERMAL_H_
 
 #include <fidl/fuchsia.hardware.thermal/cpp/fidl.h>
-#include <fuchsia/hardware/thermal/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/ddk/device.h>
 #include <threads.h>
 
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include <ddktl/device.h>
@@ -27,7 +28,7 @@ class AmlThermal;
 using DeviceType =
     ddk::Device<AmlThermal, ddk::Messageable<fuchsia_hardware_thermal::Device>::Mixin>;
 
-class AmlThermal : public DeviceType, public ddk::ThermalProtocol<AmlThermal, ddk::base_protocol> {
+class AmlThermal : public DeviceType {
  public:
   DISALLOW_COPY_AND_ASSIGN_ALLOW_MOVE(AmlThermal);
   AmlThermal(zx_device_t* device, std::unique_ptr<thermal::AmlTSensor> tsensor,
@@ -45,9 +46,6 @@ class AmlThermal : public DeviceType, public ddk::ThermalProtocol<AmlThermal, dd
 
   // Ddk Hooks
   void DdkRelease();
-
-  // Implements ZX_PROTOCOL_THERMAL
-  zx_status_t ThermalConnect(zx::channel ch);
 
   // For testing
  protected:
@@ -83,8 +81,7 @@ class AmlThermal : public DeviceType, public ddk::ThermalProtocol<AmlThermal, dd
   int ThermalNotificationThread();
   zx_status_t NotifyThermalDaemon();
 
-  zx_status_t ValidatePowerDomain(
-      fuchsia_hardware_thermal::wire::PowerDomain power_domain) const;
+  zx_status_t ValidatePowerDomain(fuchsia_hardware_thermal::wire::PowerDomain power_domain) const;
 
   zx_status_t StartConnectDispatchThread();
 
@@ -93,6 +90,7 @@ class AmlThermal : public DeviceType, public ddk::ThermalProtocol<AmlThermal, dd
   std::unique_ptr<thermal::AmlCpuFrequency> cpufreq_scaling_;
   fuchsia_hardware_thermal::wire::ThermalDeviceInfo thermal_config_;
   async::Loop loop_;
+  std::optional<component::OutgoingDirectory> outgoing_;
 };
 }  // namespace thermal
 

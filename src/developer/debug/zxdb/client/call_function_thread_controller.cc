@@ -63,7 +63,7 @@ uint64_t CallFunctionThreadController::GetRegisterData(
   if (reg_it == regs.end())
     return 0;
 
-  return reg_it->GetValue();
+  return static_cast<uint64_t>(reg_it->GetValue());
 }
 
 Err CallFunctionThreadController::WriteParametersToRegisters() {

@@ -782,6 +782,7 @@ TEST(DriverBase2Test, ForegroundSuspendAndResumePausesDispatchersUntilResumeComp
   // Trigger a wakeable interrupt and post a regular task while suspended.
   driver_test.driver()->PostRegularTask();
   driver_test.driver()->TriggerWakeIrq();
+  driver_test.WaitForResumeRequest();
   driver_test.runtime().RunUntilIdle();
 
   // Neither the wakeable interrupt nor the regular task may run before ResumeDriver.
@@ -816,6 +817,15 @@ TEST(DriverBase2Test, BackgroundSuspendAndResumePausesDispatchersUntilResumeComp
     EXPECT_EQ(0u, driver.regular_tasks_run());
     driver.PostRegularTask();
     driver.TriggerWakeIrq();
+  });
+
+  // Wait for the wakeable interrupt to trigger a resume request before calling ResumeDriver().
+  driver_test.WaitForResumeRequest();
+
+  // Neither the wakeable interrupt nor the regular task may run before ResumeDriver.
+  driver_test.RunInDriverContext([](SuspendResumeTestDriver2& driver) {
+    EXPECT_FALSE(driver.wake_irq_handled());
+    EXPECT_EQ(0u, driver.regular_tasks_run());
   });
 
   zx::eventpair lease, lease_peer;

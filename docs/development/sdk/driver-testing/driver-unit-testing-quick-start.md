@@ -25,7 +25,7 @@ deps = [
 The library provides two classes that can be used in tests.
 In the example we use `ForegroundDriverTest`, but there is also a
 `BackgroundDriverTest` available.
-See [Foreground vs. Background](#foreground-vs-background) below for details.
+See [Foreground vs. background](#foreground-vs-background) below for details.
 
 ## Create configuration class
 
@@ -175,7 +175,7 @@ class CustomEnvironment : public fdf_testing::Environment {
 };
 ```
 
-## Foreground vs. Background
+## Foreground vs. background {:#foreground-vs-background}
 
 The choice between foreground and background driver tests lies in how the test plans to
 communicate with the driver-under-test. If the test will be calling public methods on the driver
@@ -281,7 +281,7 @@ Runs a task on the `fdf_testing::TestNode` instance that the test is using.
 This can be used to validate the driver’s interactions with the driver framework node
 (like checking how many children have been added).
 
-## Starting the driver multiple times in a single test
+## Starting the driver multiple times in a single test {:#starting-the-driver-multiple-times-in-a-single-test}
 
 To start/stop the driver multiple times in a test without changing the
 environment, ensure to go through all 3 steps:

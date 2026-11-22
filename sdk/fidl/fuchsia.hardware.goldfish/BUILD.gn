@@ -35,7 +35,6 @@ fidl("fuchsia.hardware.goldfish") {
     "goldfish_sync.fidl",
     "overview.fidl",
   ]
-  enable_hlcpp = true
   visibility = [ "*" ]
   public_deps = [ "//zircon/vdso/zx" ]
 }

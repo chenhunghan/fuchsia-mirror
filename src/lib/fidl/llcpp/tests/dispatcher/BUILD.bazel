@@ -1,0 +1,168 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fidl_llcpp_dispatcher_tests",
+        ":fidl_llcpp_endpoints_tests_test",
+        ":fidl_llcpp_private_intrusive_wavl_tree_tests",
+    ],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_library(
+    name = "client_test_helpers",
+    testonly = True,
+    srcs = ["fake_sequence_dispatcher.cc"],
+    hdrs = [
+        "async_loop_and_endpoints_fixture.h",
+        "client_checkers.h",
+        "fake_sequence_dispatcher.h",
+        "lsan_disabler.h",
+        "mock_client_impl.h",
+        "test_messages.h",
+    ],
+    visibility = ["//sdk/lib/fidl/cpp/tests:__subpackages__"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-testing",
+        "//sdk/lib/fidl/cpp/wire",
+        "//zircon/system/ulib/zxtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_dispatcher_tests_bin",
+    srcs = [
+        "bind_server_overloads_test.cc",
+        "client_base_test.cc",
+        "client_continuation_test.cc",
+        "client_controller_test.cc",
+        "client_test.cc",
+        "mock_client_impl.h",
+        "server_binding_test.cc",
+        "server_test.cc",
+        "shared_client_test.cc",
+        "teardown_observer_test.cc",
+        "thread_checker_test.cc",
+        "transaction_tests.cc",
+    ],
+    deps = [
+        ":client_test_helpers",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/testing/fidl/protocols_tests:test.basic.protocol_cpp",
+        "//sdk/testing/fidl/protocols_tests:test.empty.protocol_cpp",
+        "//src/lib/fidl/llcpp/tests/integration:fidl.test.coding.fuchsia_cpp",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_dispatcher_tests",
+    unit_tests = [":fidl_llcpp_dispatcher_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_private_intrusive_wavl_tree_tests_bin",
+    srcs = [
+        "intrusive_container/associative_container_test_environment.h",
+        "intrusive_container/base_test_environments.h",
+        "intrusive_container/intrusive_wavl_tree_checker.h",
+        "intrusive_container/lfsr.h",
+        "intrusive_container/objects.h",
+        "intrusive_container/ordered_associative_container_test_environment.h",
+        "intrusive_container/test_environment_utils.h",
+        "intrusive_container/test_thunks.h",
+        "intrusive_wavl_tree_tests.cc",
+    ],
+    # test-parity-allow-manual: packaged in :fidl_llcpp_private_intrusive_wavl_tree_tests
+    tags = ["manual"],
+    deps = [
+        "//sdk/lib/fidl/cpp/wire",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_private_intrusive_wavl_tree_tests",
+    unit_tests = [":fidl_llcpp_private_intrusive_wavl_tree_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_endpoints_tests_bin",
+    srcs = [
+        "client_end_test.cc",
+        "server_end_test.cc",
+    ],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fidl/llcpp/tests/integration:llcpptest.protocol.test_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fidl_llcpp_endpoints_tests_packaged_bin",
+    testonly = True,
+    binary = ":fidl_llcpp_endpoints_tests_bin",
+    binary_name = "fidl_llcpp_endpoints_tests",
+    install_root = "test/",
+)
+
+# Use `fuchsia.process.Launcher` for death tests
+fx_component_manifest(
+    name = "fidl_llcpp_endpoints_tests_manifest",
+    component_name = "fidl_llcpp_endpoints_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:death_test.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/endpoints_tests.cml",
+)
+
+fx_test_component(
+    name = "fidl_llcpp_endpoints_tests_component",
+    compiled_manifest = ":fidl_llcpp_endpoints_tests_manifest",
+    deps = [":fidl_llcpp_endpoints_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "fidl_llcpp_endpoints_tests",
+    testonly = True,
+    test_components = [":fidl_llcpp_endpoints_tests_component"],
+)
+
+fx_test(
+    name = "fidl_llcpp_endpoints_tests_test",
+    package = ":fidl_llcpp_endpoints_tests",
+    visibility = ["//src/lib:__pkg__"],
+)

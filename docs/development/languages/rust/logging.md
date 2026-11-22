@@ -133,4 +133,4 @@ language-agnostic logging documentation.
 [log-crate]: https://fuchsia-docs.firebaseapp.com/rust/log/index.html
 [ref-fuchsia]: https://fuchsia-docs.firebaseapp.com/rust/fuchsia/
 [rust-dev]: /docs/development/languages/rust/README.md
-[std-streams]: /docs/development/diagnostics/logs/recording.md#stdout-stderr
+[std-streams]: /docs/development/diagnostics/logs/recording.md#standard-streams-stdout-and-stderr

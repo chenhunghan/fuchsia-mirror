@@ -19,7 +19,10 @@ use fuchsia_component::server::{ServiceFs, ServiceFsDir};
 use futures::{Future, StreamExt as _};
 use log::{error, info, warn};
 
-use bindings::{GlobalConfig, InspectPublisher, InterfaceConfigDefaults, NetstackSeed, Service};
+use bindings::{
+    GlobalConfig, InspectPublisher, InterfaceConfigDefaults, NetstackSeed, Service,
+    SuspendBlockerSource,
+};
 
 /// Runs Netstack3.
 pub fn main() {
@@ -65,14 +68,14 @@ pub fn main() {
     diagnostics_log::initialize(log_options).expect("failed to initialize log");
 
     // Enable redaction of MAC addresses in logs and Inspect before anything
-    // else can log them. `enable()` installs masking synchronously; the
-    // returned future fetches the per-boot salt and is awaited by the
-    // executor below before the netstack starts serving.
-    // TODO(https://fxbug.dev/576752502): Initialize the redactor synchronously
-    // once the salt is provided at startup.
-    let redactor_fut = futures::future::OptionFuture::from(
-        redact_network_identifiers.then(redactor_client::enable),
-    );
+    // else can log them. This blocks until the per-boot salt is fetched, which
+    // is fine here because the executor is not running yet.
+    // TODO(https://fxbug.dev/576752502): Read the salt from startup instead of
+    // fetching it from fuchsia.diagnostics.SaltProvider once it is provided
+    // there.
+    if *redact_network_identifiers {
+        redactor_client::enable_sync();
+    }
 
     fuchsia_trace_provider::trace_provider_create_with_fdio();
 
@@ -140,12 +143,7 @@ pub fn main() {
     // Short circuit when we receive a lifecycle stop request.
     let fs = fs.take_until(get_lifecycle_stop_fut());
 
-    executor.run(async move {
-        // Install the salted redactor before serving so that, once the
-        // netstack starts, identifiers are hashed rather than masked.
-        let _: Option<()> = redactor_fut.await;
-        seed.serve(fs, inspect_publisher).await
-    })
+    executor.run(seed.serve(fs, inspect_publisher, SuspendBlockerSource::System))
 }
 
 /// Takes the lifecycle handle from startup and returns a future that resolves

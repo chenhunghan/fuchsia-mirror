@@ -7,6 +7,7 @@
 #include <fuchsia/sysmem/cpp/fidl.h>
 #include <lib/async/cpp/wait.h>
 #include <lib/async/default.h>
+#include <lib/fit/defer.h>
 #include <zircon/errors.h>
 #include <zircon/status.h>
 #include <zircon/types.h>
@@ -222,8 +223,100 @@ bool IsValidImage(const allocation::ImageMetadata& metadata) {
 
 }  // anonymous namespace
 
+// `VkRenderer`-private slot record whose fields `VkRenderer` manages directly.
+struct VkRenderer::VkGpuCollection final : public Renderer::GpuCollection {
+  VkGpuCollection(GlobalBufferCollectionId collection_id, vk::Device vk_device,
+                  PFN_vkDestroyBufferCollectionFUCHSIA vk_destroy_buffer_collection,
+                  const async_dispatcher_t* main_dispatcher,
+                  vk::BufferCollectionFUCHSIA vk_collection)
+      : collection_id(collection_id),
+        vk_device(vk_device),
+        vk_destroy_buffer_collection(vk_destroy_buffer_collection),
+        main_dispatcher(main_dispatcher),
+        vk_collection(vk_collection) {}
+
+  ~VkGpuCollection() override {
+    FX_DCHECK(main_dispatcher == async_get_default_dispatcher());
+    TRACE_DURATION("gfx", "vkDestroyBufferCollectionFUCHSIA", "collection_id", collection_id);
+    FX_DCHECK(vk_collection);
+    FX_DCHECK(vk_destroy_buffer_collection != nullptr);
+    vk_destroy_buffer_collection(static_cast<VkDevice>(vk_device),
+                                 static_cast<VkBufferCollectionFUCHSIA>(vk_collection), nullptr);
+  }
+
+  const GlobalBufferCollectionId collection_id;
+  const vk::Device vk_device;
+  const PFN_vkDestroyBufferCollectionFUCHSIA vk_destroy_buffer_collection;
+  const async_dispatcher_t* const main_dispatcher;
+  const vk::BufferCollectionFUCHSIA vk_collection;
+
+  // Uses a `std::mutex` rather than `std::once_flag` so main lends its deadline
+  // via futex priority inheritance if it blocks behind a worker querying the
+  // collection's first image (image_import/DESIGN.md#requirements).
+  std::mutex properties_mutex;
+  std::optional<vk::BufferCollectionPropertiesFUCHSIA> properties FXL_GUARDED_BY(properties_mutex);
+};
+
+// `VkRenderer`-private slot record whose fields `VkRenderer` manages directly.
+struct VkRenderer::VkGpuImage final : public Renderer::GpuImage {
+  VkGpuImage(vk::Device vk_device, GlobalImageId image_id,
+             const async_dispatcher_t* main_dispatcher, vk::Image vk_image,
+             escher::GpuMemPtr gpu_mem, escher::ImageInfo image_info,
+             vk::ImageLayout initial_layout, bool is_protected)
+      : vk_device(vk_device),
+        image_id(image_id),
+        main_dispatcher(main_dispatcher),
+        vk_image(vk_image),
+        gpu_mem(std::move(gpu_mem)),
+        image_info(image_info),
+        initial_layout(initial_layout),
+        is_protected(is_protected) {}
+
+  ~VkGpuImage() override {
+    if (texture) {
+      // `NaiveImage::AdoptBoundVkImage()` took ownership of `vk_image` and
+      // `gpu_mem`; releasing `texture` hands destruction to Escher's `ResourceRecycler`,
+      // which is main-thread only.
+      FX_DCHECK(main_dispatcher == async_get_default_dispatcher());
+      return;
+    }
+    // Never sampled, so no command buffer references `vk_image`, and Vulkan requires only
+    // that no other thread uses it: safe on any thread (image_import/DESIGN.md#renderer-contract).
+    TRACE_DURATION("gfx", "VkGpuImage::~VkGpuImage[unwrapped]", "image_id", image_id.value());
+    FX_DCHECK(vk_image);
+    {
+      TRACE_DURATION("gfx", "vkDestroyImage", "image_id", image_id.value());
+      vk_device.destroyImage(vk_image, nullptr);
+      vk_image = nullptr;
+    }
+    gpu_mem = nullptr;
+  }
+
+  bool WasSampled() const override {
+    FX_DCHECK(main_dispatcher == async_get_default_dispatcher());
+    return static_cast<bool>(texture);
+  }
+
+  const vk::Device vk_device;
+  const GlobalImageId image_id;
+  const async_dispatcher_t* const main_dispatcher;
+  vk::Image vk_image;
+  escher::GpuMemPtr gpu_mem;
+  const escher::ImageInfo image_info;
+  const vk::ImageLayout initial_layout;
+  const bool is_protected;
+  escher::TexturePtr texture;
+  bool layout_transitioned = false;
+};
+
 VkRenderer::VkRenderer(escher::EscherWeakPtr escher)
     : escher_(std::move(escher)),
+      vk_device_(escher_->vk_device()),
+      vk_loader_(escher_->device()->dispatch_loader()),
+      vk_physical_device_memory_properties_([this] {
+        TRACE_DURATION("gfx", "vkGetPhysicalDeviceMemoryProperties");
+        return escher_->vk_physical_device().getMemoryProperties();
+      }()),
       compositor_(escher::RectangleCompositor(escher_)),
       texture_collections_(16, &pool_resource_),
       render_target_collections_(4, &pool_resource_),
@@ -249,41 +342,218 @@ VkRenderer::VkRenderer(escher::EscherWeakPtr escher)
 VkRenderer::~VkRenderer() {
   FX_DCHECK(main_dispatcher_ == async_get_default_dispatcher());
 
-  auto vk_device = escher_->vk_device();
-  auto vk_loader = escher_->device()->dispatch_loader();
-  for (auto& [_, collection] : texture_collections_) {
-    vk_device.destroyBufferCollectionFUCHSIA(collection.vk_collection, nullptr, vk_loader);
+  for (const auto* collections :
+       {&texture_collections_, &render_target_collections_, &readback_collections_}) {
+    for (const auto& [collection_id, collection] : *collections) {
+      DestroyVulkanBufferCollection(collection_id, collection.vk_collection);
+    }
   }
-  for (auto& [_, collection] : render_target_collections_) {
-    vk_device.destroyBufferCollectionFUCHSIA(collection.vk_collection, nullptr, vk_loader);
+}
+
+void VkRenderer::DestroyVulkanBufferCollection(GlobalBufferCollectionId collection_id,
+                                               vk::BufferCollectionFUCHSIA vk_collection) const {
+  TRACE_DURATION("gfx", "vkDestroyBufferCollectionFUCHSIA", "collection_id", collection_id);
+  vk_device_.destroyBufferCollectionFUCHSIA(vk_collection, nullptr, vk_loader_);
+}
+
+fit::result<ImportImageError, std::unique_ptr<Renderer::GpuCollection>>
+VkRenderer::CreateGpuCollection(GlobalBufferCollectionId collection_id,
+                                fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token) {
+  FX_DCHECK(main_dispatcher_ == async_get_default_dispatcher());
+  if (collection_id == allocation::kInvalidId || !token.is_valid()) {
+    return fit::error(ImportImageError::kCollectionFailed);
   }
-  for (auto& [_, collection] : readback_collections_) {
-    vk_device.destroyBufferCollectionFUCHSIA(collection.vk_collection, nullptr, vk_loader);
+
+  auto vk_collection = SetConstraintsAndCreateVulkanBufferCollection(
+      collection_id, std::move(token), BufferCollectionUsage::kClientImage, std::nullopt);
+  if (!vk_collection) {
+    return fit::error(ImportImageError::kCollectionFailed);
   }
+  return fit::ok(std::make_unique<VkGpuCollection>(collection_id, vk_device_,
+                                                   vk_loader_.vkDestroyBufferCollectionFUCHSIA,
+                                                   main_dispatcher_, *vk_collection));
+}
+
+fit::result<ImportImageError, std::unique_ptr<Renderer::GpuImage>> VkRenderer::CreateGpuImage(
+    const ImageMetadata& metadata, GpuCollection& collection, uint64_t per_buffer_bytes) {
+  TRACE_DURATION("gfx", "VkRenderer::CreateGpuImage", "image_id", metadata.identifier.value(),
+                 "collection_id", metadata.collection_id);
+  if (!IsValidImage(metadata)) {
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+
+  auto& vk_collection = static_cast<VkGpuCollection&>(collection);
+  FX_CHECK(metadata.collection_id == vk_collection.collection_id);
+  vk::BufferCollectionPropertiesFUCHSIA properties;
+  {
+    std::scoped_lock properties_lock(vk_collection.properties_mutex);
+    if (!vk_collection.properties.has_value()) {
+      vk::ResultValue<vk::BufferCollectionPropertiesFUCHSIA> properties_result(
+          vk::Result::eErrorUnknown, vk::BufferCollectionPropertiesFUCHSIA{});
+      {
+        TRACE_DURATION("gfx", "vkGetBufferCollectionPropertiesFUCHSIA", "image_id",
+                       metadata.identifier.value(), "collection_id", vk_collection.collection_id);
+        properties_result = vk_device_.getBufferCollectionPropertiesFUCHSIA(
+            vk_collection.vk_collection, vk_loader_);
+      }
+      if (properties_result.result != vk::Result::eSuccess) {
+        FX_LOGS(WARNING) << "Could not get buffer collection properties: "
+                         << vk::to_string(properties_result.result);
+        return fit::error(ImportImageError::kGpuImportFailed);
+      }
+      vk_collection.properties = properties_result.value;
+    }
+    properties = *vk_collection.properties;
+  }
+
+  if (properties.bufferCount <= metadata.vmo_index) {
+    FX_LOGS(ERROR) << "Specified vmo index is out of bounds: " << metadata.vmo_index;
+    return fit::error(ImportImageError::kInvalidVmoIndex);
+  }
+
+  if (properties.memoryTypeBits == 0) {
+    FX_LOGS(ERROR) << "Buffer collection reported zero Vulkan memoryTypeBits.";
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+
+  const bool is_protected =
+      (vk_physical_device_memory_properties_
+           .memoryTypes[escher::CountTrailingZeros(properties.memoryTypeBits)]
+           .propertyFlags &
+       vk::MemoryPropertyFlagBits::eProtected) == vk::MemoryPropertyFlagBits::eProtected;
+
+  vk::BufferCollectionImageCreateInfoFUCHSIA collection_image_info;
+  collection_image_info.collection = vk_collection.vk_collection;
+  collection_image_info.index = metadata.vmo_index;
+
+  // The same list of formats was provided when specifying constraints in
+  // `CreateGpuCollection()`; `createInfoIndex` is the index into that list, in
+  // the same order that it was provided.
+  const auto& supported_formats = SupportedClientImageFormats();
+  if (properties.createInfoIndex >= supported_formats.size()) {
+    FX_LOGS(ERROR) << "Buffer collection createInfoIndex out of bounds: "
+                   << properties.createInfoIndex;
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+  const vk::Format pixel_format = supported_formats[properties.createInfoIndex];
+  vk::ImageCreateInfo create_info = escher::RectangleCompositor::GetDefaultImageConstraints(
+      pixel_format, escher::RectangleCompositor::kTextureUsageFlags);
+  create_info.extent = vk::Extent3D{metadata.width, metadata.height, 1};
+  create_info.setPNext(&collection_image_info);
+  if (is_protected) {
+    create_info.flags |= vk::ImageCreateFlagBits::eProtected;
+  }
+  if (per_buffer_bytes == 0) {
+    return fit::error(ImportImageError::kImageTooLarge);
+  }
+
+  vk::Image image;
+  {
+    vk::ResultValue<vk::Image> image_result(vk::Result::eErrorUnknown, vk::Image{});
+    {
+      TRACE_DURATION("gfx", "vkCreateImage", "image_id", metadata.identifier.value());
+      image_result = vk_device_.createImage(create_info);
+    }
+    if (image_result.result != vk::Result::eSuccess) {
+      FX_LOGS(ERROR) << "vkCreateImage failed: " << vk::to_string(image_result.result);
+      return fit::error(ImportImageError::kGpuImportFailed);
+    }
+    image = image_result.value;
+  }
+  auto destroy_image_on_error = fit::defer([this, image, id = metadata.identifier.value()] {
+    TRACE_DURATION("gfx", "vkDestroyImage", "image_id", id);
+    vk_device_.destroyImage(image, nullptr);
+  });
+
+  vk::MemoryRequirements memory_requirements;
+  {
+    TRACE_DURATION("gfx", "vkGetImageMemoryRequirements", "image_id", metadata.identifier.value());
+    memory_requirements = vk_device_.getImageMemoryRequirements(image);
+  }
+  if (memory_requirements.size > per_buffer_bytes) {
+    FX_LOGS(ERROR) << "Image memory requirements (" << memory_requirements.size
+                   << ") exceed buffer VMO size (" << per_buffer_bytes << ").";
+    return fit::error(ImportImageError::kImageTooLarge);
+  }
+
+  const uint32_t candidate_memory_types =
+      memory_requirements.memoryTypeBits & properties.memoryTypeBits;
+  if (candidate_memory_types == 0) {
+    FX_LOGS(ERROR) << "No compatible Vulkan memory type for client image.";
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+
+  const uint32_t memory_type_index = escher::CountTrailingZeros(candidate_memory_types);
+  const vk::StructureChain<vk::MemoryAllocateInfo, vk::ImportMemoryBufferCollectionFUCHSIA,
+                           vk::MemoryDedicatedAllocateInfoKHR>
+      alloc_info(vk::MemoryAllocateInfo()
+                     .setAllocationSize(memory_requirements.size)
+                     .setMemoryTypeIndex(memory_type_index),
+                 vk::ImportMemoryBufferCollectionFUCHSIA()
+                     .setCollection(vk_collection.vk_collection)
+                     .setIndex(metadata.vmo_index),
+                 vk::MemoryDedicatedAllocateInfoKHR().setImage(image));
+
+  vk::DeviceMemory memory = nullptr;
+  vk::Result alloc_result = vk::Result::eErrorUnknown;
+  {
+    TRACE_DURATION("gfx", "vkAllocateMemory", "image_id", metadata.identifier.value());
+    alloc_result =
+        vk_device_.allocateMemory(&alloc_info.get<vk::MemoryAllocateInfo>(), nullptr, &memory);
+  }
+  if (alloc_result != vk::Result::eSuccess) {
+    FX_LOGS(ERROR) << "vkAllocateMemory failed: " << vk::to_string(alloc_result);
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+
+  escher::GpuMemPtr gpu_mem = escher::GpuMem::AdoptVkMemory(
+      vk_device_, vk::DeviceMemory(memory), memory_requirements.size, /*needs_mapped_ptr=*/false);
+
+  vk::Result bind_result = vk::Result::eErrorUnknown;
+  {
+    TRACE_DURATION("gfx", "vkBindImageMemory", "image_id", metadata.identifier.value());
+    bind_result = vk_device_.bindImageMemory(image, gpu_mem->base(), gpu_mem->offset());
+  }
+  if (bind_result != vk::Result::eSuccess) {
+    FX_LOGS(ERROR) << "vkBindImageMemory failed: " << vk::to_string(bind_result);
+    return fit::error(ImportImageError::kGpuImportFailed);
+  }
+
+  escher::ImageInfo escher_image_info;
+  escher_image_info.format = create_info.format;
+  escher_image_info.width = create_info.extent.width;
+  escher_image_info.height = create_info.extent.height;
+  escher_image_info.usage = create_info.usage;
+  escher_image_info.memory_flags = is_protected ? vk::MemoryPropertyFlagBits::eProtected
+                                                : vk::MemoryPropertyFlagBits::eDeviceLocal;
+  escher_image_info.is_external = true;
+  escher_image_info.color_space = escher::FromSysmemColorSpace(
+      static_cast<fuchsia::sysmem::ColorSpaceType>(properties.sysmemColorSpaceIndex.colorSpace));
+
+  destroy_image_on_error.cancel();
+  return fit::ok(std::make_unique<VkGpuImage>(vk_device_, metadata.identifier, main_dispatcher_,
+                                              image, std::move(gpu_mem), escher_image_info,
+                                              create_info.initialLayout, is_protected));
 }
 
 std::optional<vk::BufferCollectionFUCHSIA>
 VkRenderer::SetConstraintsAndCreateVulkanBufferCollection(
+    const GlobalBufferCollectionId collection_id,
     fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> token,
     const BufferCollectionUsage usage, const std::optional<fuchsia_math::SizeU> size) {
-  auto vk_device = escher_->vk_device();
-  auto vk_loader = escher_->device()->dispatch_loader();
-  FX_DCHECK(vk_device);
-
   vk::BufferCollectionCreateInfoFUCHSIA bc_create_info;
   bc_create_info.collectionToken = token.TakeChannel().release();
-  vk::BufferCollectionFUCHSIA vk_collection;
-  {
-    const auto vk_result =
-        vk_device.createBufferCollectionFUCHSIA(bc_create_info, nullptr, vk_loader);
-    if (vk_result.result != vk::Result::eSuccess) {
-      FX_LOGS(ERROR) << "Cannot create vulkan buffer collection: "
-                     << vk::to_string(vk_result.result)
-                     << "; The client may have invalidated the token.";
-      return std::nullopt;
-    }
-    vk_collection = vk_result.value;
+  const auto create_collection_result = [&] {
+    TRACE_DURATION("gfx", "vkCreateBufferCollectionFUCHSIA", "collection_id", collection_id);
+    return vk_device_.createBufferCollectionFUCHSIA(bc_create_info, nullptr, vk_loader_);
+  }();
+  if (create_collection_result.result != vk::Result::eSuccess) {
+    FX_LOGS(ERROR) << "Cannot create vulkan buffer collection: "
+                   << vk::to_string(create_collection_result.result)
+                   << "; The client may have invalidated the token.";
+    return std::nullopt;
   }
+  const vk::BufferCollectionFUCHSIA vk_collection = create_collection_result.value;
 
   vk::ImageConstraintsInfoFUCHSIA vk_image_constraints;
   const auto image_format_constraints = GetVulkanImageFormatConstraints(usage, size);
@@ -294,12 +564,16 @@ VkRenderer::SetConstraintsAndCreateVulkanBufferCollection(
       .setBufferCollectionConstraints(
           vk::BufferCollectionConstraintsInfoFUCHSIA().setMinBufferCount(1u));
 
-  if (const auto vk_result = vk_device.setBufferCollectionImageConstraintsFUCHSIA(
-          vk_collection, vk_image_constraints, vk_loader);
-      vk_result != vk::Result::eSuccess) {
-    FX_LOGS(ERROR) << "Cannot set vulkan constraints: " << vk::to_string(vk_result)
+  const vk::Result set_constraints_result = [&] {
+    TRACE_DURATION("gfx", "vkSetBufferCollectionImageConstraintsFUCHSIA", "collection_id",
+                   collection_id);
+    return vk_device_.setBufferCollectionImageConstraintsFUCHSIA(vk_collection,
+                                                                 vk_image_constraints, vk_loader_);
+  }();
+  if (set_constraints_result != vk::Result::eSuccess) {
+    FX_LOGS(ERROR) << "Cannot set vulkan constraints: " << vk::to_string(set_constraints_result)
                    << "; The client may have invalidated the token.";
-    vk_device.destroyBufferCollectionFUCHSIA(vk_collection, nullptr, vk_loader);
+    DestroyVulkanBufferCollection(collection_id, vk_collection);
     return std::nullopt;
   }
 
@@ -453,8 +727,8 @@ fpromise::promise<> VkRenderer::ImportBufferCollection(
           return;
         }
 
-        auto vk_collection =
-            SetConstraintsAndCreateVulkanBufferCollection(std::move(vulkan_token), usage, size);
+        auto vk_collection = SetConstraintsAndCreateVulkanBufferCollection(
+            collection_id, std::move(vulkan_token), usage, size);
         if (!vk_collection) {
           FX_LOGS(ERROR) << "ImportBufferCollection failed to create vulkan buffer collection.";
           completer.complete_error();
@@ -473,9 +747,7 @@ fpromise::promise<> VkRenderer::ImportBufferCollection(
           FX_LOGS(WARNING) << "ImportBufferCollection failed to store buffer collection, "
                               "because an entry already existed for "
                            << collection_id;
-          auto vk_device = escher_->vk_device();
-          auto vk_loader = escher_->device()->dispatch_loader();
-          vk_device.destroyBufferCollectionFUCHSIA(*vk_collection, nullptr, vk_loader);
+          DestroyVulkanBufferCollection(collection_id, *vk_collection);
           completer.complete_error();
           return;
         }
@@ -502,10 +774,7 @@ void VkRenderer::ReleaseBufferCollection(GlobalBufferCollectionId collection_id,
     return;
   }
 
-  auto vk_device = escher_->vk_device();
-  auto vk_loader = escher_->device()->dispatch_loader();
-  vk_device.destroyBufferCollectionFUCHSIA(collection_itr->second.vk_collection, nullptr,
-                                           vk_loader);
+  DestroyVulkanBufferCollection(collection_id, collection_itr->second.vk_collection);
 
   fidl::OneWayStatus result = collection_itr->second.collection->Release();
   // AttachToken failure causes ZX_ERR_PEER_CLOSED.
@@ -671,24 +940,27 @@ escher::ImagePtr VkRenderer::ExtractImage(const allocation::ImageMetadata& metad
                                           const vk::BufferCollectionFUCHSIA collection,
                                           const vk::ImageUsageFlags image_usage,
                                           const bool readback) {
+  // Legacy image-extraction path; `CreateGpuImage()` is the authoritative copy
+  // for `kClientImage` imports, and the `kClientImage` branch of `ExtractImage()`
+  // (together with `ExtractTexture()` and `ImportClientImage()`) goes away with
+  // the legacy client-image maps (image_import/DESIGN.md#pending).
   // Called from main thread or Flatland threads.
   TRACE_DURATION("gfx", "VkRenderer::ExtractImage");
-  auto vk_device = escher_->vk_device();
-  auto vk_loader = escher_->device()->dispatch_loader();
+  const uint64_t image_id = metadata.identifier.value();
 
   // Grab the collection Properties from Vulkan.
   // TODO(https://fxbug.dev/42053219): Add unittests to cover the case where sysmem client
   // token gets invalidated when importing images.
-  vk::BufferCollectionPropertiesFUCHSIA properties;
-  if (const auto properties_results =
-          vk_device.getBufferCollectionPropertiesFUCHSIA(collection, vk_loader);
-      properties_results.result == vk::Result::eSuccess) {
-    properties = properties_results.value;
-  } else {
+  const auto properties_results = [&] {
+    TRACE_DURATION("gfx", "vkGetBufferCollectionPropertiesFUCHSIA", "image_id", image_id);
+    return vk_device_.getBufferCollectionPropertiesFUCHSIA(collection, vk_loader_);
+  }();
+  if (properties_results.result != vk::Result::eSuccess) {
     FX_LOGS(WARNING) << "Could not get buffer collection properties: "
                      << vk::to_string(properties_results.result);
     return nullptr;
   }
+  const vk::BufferCollectionPropertiesFUCHSIA properties = properties_results.value;
 
   // Check the provided index against actually allocated number of buffers.
   if (properties.bufferCount <= metadata.vmo_index) {
@@ -698,8 +970,7 @@ escher::ImagePtr VkRenderer::ExtractImage(const allocation::ImageMetadata& metad
 
   // Check if allocated buffers are backed by protected memory.
   const bool is_protected =
-      (escher_->vk_physical_device()
-           .getMemoryProperties()
+      (vk_physical_device_memory_properties_
            .memoryTypes[escher::CountTrailingZeros(properties.memoryTypeBits)]
            .propertyFlags &
        vk::MemoryPropertyFlagBits::eProtected) == vk::MemoryPropertyFlagBits::eProtected;
@@ -721,22 +992,26 @@ escher::ImagePtr VkRenderer::ExtractImage(const allocation::ImageMetadata& metad
   create_info.extent = vk::Extent3D{metadata.width, metadata.height, 1};
   create_info.setPNext(&collection_image_info);
   if (is_protected) {
-    create_info.flags = vk::ImageCreateFlagBits::eProtected;
+    create_info.flags |= vk::ImageCreateFlagBits::eProtected;
   }
 
   // Create the VK Image, return nullptr if this fails.
-  vk::Image image;
-  if (const auto image_result = vk_device.createImage(create_info);
-      image_result.result == vk::Result::eSuccess) {
-    image = image_result.value;
-  } else {
+  const auto image_result = [&] {
+    TRACE_DURATION("gfx", "vkCreateImage", "image_id", image_id);
+    return vk_device_.createImage(create_info);
+  }();
+  if (image_result.result != vk::Result::eSuccess) {
     FX_LOGS(ERROR) << "VkCreateImage failed: " << vk::to_string(image_result.result);
     return nullptr;
   }
+  const vk::Image image = image_result.value;
 
   // Now we have to allocate VK memory for the image. This memory is going to come from
   // the imported buffer collection's vmo.
-  const auto memory_requirements = vk_device.getImageMemoryRequirements(image);
+  const auto memory_requirements = [&] {
+    TRACE_DURATION("gfx", "vkGetImageMemoryRequirements", "image_id", image_id);
+    return vk_device_.getImageMemoryRequirements(image);
+  }();
   const uint32_t memory_type_index =
       escher::CountTrailingZeros(memory_requirements.memoryTypeBits & properties.memoryTypeBits);
   const vk::StructureChain<vk::MemoryAllocateInfo, vk::ImportMemoryBufferCollectionFUCHSIA,
@@ -749,28 +1024,24 @@ escher::ImagePtr VkRenderer::ExtractImage(const allocation::ImageMetadata& metad
                      .setIndex(metadata.vmo_index),
                  vk::MemoryDedicatedAllocateInfoKHR().setImage(image));
   vk::DeviceMemory memory = nullptr;
-  if (const vk::Result err =
-          vk_device.allocateMemory(&alloc_info.get<vk::MemoryAllocateInfo>(), nullptr, &memory);
-      err != vk::Result::eSuccess) {
+  const vk::Result err = [&] {
+    TRACE_DURATION("gfx", "vkAllocateMemory", "image_id", image_id);
+    return vk_device_.allocateMemory(&alloc_info.get<vk::MemoryAllocateInfo>(), nullptr, &memory);
+  }();
+  if (err != vk::Result::eSuccess) {
     FX_LOGS(ERROR) << "Could not successfully allocate memory: " << vk::to_string(err);
-    vk_device.destroyImage(image, nullptr);
+    {
+      TRACE_DURATION("gfx", "vkDestroyImage", "image_id", image_id);
+      vk_device_.destroyImage(image, nullptr);
+    }
     return nullptr;
   }
 
-  // Have escher manager the memory since this is the required format for creating
-  // an Escher image. Also we can now check if the total memory size is great enough
-  // for the image memory requirements. If it's not big enough, the client likely
-  // requested an image size that is larger than the maximum image size allowed by
-  // the sysmem collection constraints.
+  // `AdoptVkMemory()` hands ownership of the `vk::DeviceMemory` to Escher, as
+  // Escher image creation requires.
   const auto gpu_mem =
-      escher::GpuMem::AdoptVkMemory(vk_device, vk::DeviceMemory(memory), memory_requirements.size,
+      escher::GpuMem::AdoptVkMemory(vk_device_, vk::DeviceMemory(memory), memory_requirements.size,
                                     /*needs_mapped_ptr*/ false);
-  if (memory_requirements.size > gpu_mem->size()) {
-    FX_LOGS(ERROR) << "Memory requirements for image exceed available memory: "
-                   << memory_requirements.size << " " << gpu_mem->size();
-    vk_device.destroyImage(image, nullptr);
-    return nullptr;
-  }
 
   // Create and return an escher image.
   escher::ImageInfo escher_image_info;
@@ -786,6 +1057,7 @@ escher::ImagePtr VkRenderer::ExtractImage(const allocation::ImageMetadata& metad
   escher_image_info.is_external = true;
   escher_image_info.color_space = escher::FromSysmemColorSpace(
       static_cast<fuchsia::sysmem::ColorSpaceType>(properties.sysmemColorSpaceIndex.colorSpace));
+  // TODO(https://fxbug.dev/580156981): Bind memory directly and adopt via AdoptBoundVkImage().
   return escher::impl::NaiveImage::AdoptVkImage(escher_->resource_recycler(), escher_image_info,
                                                 image, std::move(gpu_mem),
                                                 create_info.initialLayout);
@@ -906,36 +1178,76 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   std::pmr::vector<escher::Rectangle2D> normalized_rects(arena.resource());
   std::pmr::vector<escher::TexturePtr> textures(arena.resource());
   std::pmr::vector<escher::RectangleCompositor::ColorData> color_data(arena.resource());
+  std::pmr::vector<VkGpuImage*> slots_to_transition(arena.resource());
   normalized_rects.reserve(layers.size());
   textures.reserve(layers.size());
   color_data.reserve(layers.size());
   for (const auto& layer : layers) {
-    allocation::GlobalImageId image_id = allocation::kInvalidImageId;
-    if (std::holds_alternative<ResolvedLayer::ImageContent>(layer.content)) {
-      image_id = std::get<ResolvedLayer::ImageContent>(layer.content).image_id;
-    }
+    escher::TexturePtr texture_ptr;
+    bool is_protected_texture = false;
 
-    const auto texture_it = local_texture_map.find(image_id);
-    if (texture_it == local_texture_map.end()) {
-      // TODO(https://fxbug.dev/496160334): the image wasn't found, probably (hopefully) because it
-      // was removed by `TrustedFlatland.ReleaseImageImmediately()`, otherwise for unknown reasons.
-      // Either way, there's nothing we can do but ignore it.
-      FX_LOGS(WARNING) << "VkRenderer::Render missing image: " << image_id;
-      continue;
+    if (std::holds_alternative<ResolvedLayer::ImageContent>(layer.content)) {
+      const auto& img_content = std::get<ResolvedLayer::ImageContent>(layer.content);
+      // Non-null `image` serves `ImageImporter` layers; `else` serves the legacy
+      // `BufferCollectionImporter` path.
+      if (img_content.image != nullptr) {
+        const ImportWord word = img_content.image->word();
+        FX_DCHECK(IsReadyForGpuComposition(word));
+        // Both `word.released` (`ReleaseImage()` called, main-thread cleanup pending)
+        // and `word.gpu == ImportState::kReleased` (main-thread cleanup or
+        // `StopOnMain()` destroyed the GPU slot) mean the image must not be sampled.
+        if (word.released || word.gpu == ImportState::kReleased) {
+          continue;
+        }
+        if (word.gpu == ImportState::kFailed) {
+          if (render_args.omitted_layer_counts != nullptr) {
+            ++(*render_args.omitted_layer_counts)[OmittedLayerTracker::ReasonIndex(
+                OmittedLayerReason::kGpuImportFailed)];
+          }
+          continue;
+        }
+
+        auto* slot = static_cast<VkGpuImage*>(img_content.image->gpu_image());
+        FX_CHECK(slot != nullptr);
+        is_protected_texture = slot->is_protected;
+        // An unprotected frame must not touch protected memory: emit black
+        // without wrapping or layout-transitioning the slot.
+        if (render_in_protected_mode || !slot->is_protected) {
+          if (!slot->texture) {
+            WrapGpuImage(*slot, img_content.image->id());
+          }
+          if (!slot->layout_transitioned) {
+            slots_to_transition.push_back(slot);
+          }
+          texture_ptr = slot->texture;
+        }
+      } else {
+        const auto texture_it = local_texture_map.find(img_content.image_id);
+        if (texture_it == local_texture_map.end()) {
+          // TODO(https://fxbug.dev/496160334): the image wasn't found, probably (hopefully) because
+          // it was removed by `TrustedFlatland.ReleaseImageImmediately()`, otherwise for unknown
+          // reasons. Either way, there's nothing we can do but ignore it.
+          FX_LOGS(WARNING) << "VkRenderer::Render missing image: " << img_content.image_id;
+          continue;
+        }
+        texture_ptr = texture_it->second;
+        is_protected_texture = texture_ptr->image()->use_protected_memory();
+      }
+    } else {
+      texture_ptr = local_texture_map.at(allocation::kInvalidImageId);
     }
-    const escher::TexturePtr& texture_ptr = texture_it->second;
 
     normalized_rects.push_back(GetNormalizedUvRect(layer));
 
     // When we are not in protected mode, replace any protected content with black solid color.
-    if (!render_in_protected_mode && texture_ptr->image()->use_protected_memory()) {
+    if (!render_in_protected_mode && is_protected_texture) {
       textures.emplace_back(local_texture_map.at(allocation::kInvalidImageId));
       color_data.emplace_back(kProtectedReplacementColorInRGBA,
                               escher::RectangleCompositor::Opacity::Opaque);
       continue;
     }
 
-    textures.push_back(texture_ptr);
+    textures.push_back(std::move(texture_ptr));
 
     glm::vec4 multiply(layer.multiply_color[0], layer.multiply_color[1], layer.multiply_color[2],
                        layer.multiply_color[3]);
@@ -970,6 +1282,18 @@ void VkRenderer::Render(const ImageMetadata& render_target, std::span<const Reso
   if (!framebuffer) {
     FX_LOGS(ERROR) << "Framebuffer is null; skipping render.";
     return;
+  }
+
+  // Recheck `layout_transitioned` because one slot can appear in several layers
+  // (see https://fxbug.dev/42129471 on external image transitions).
+  for (VkGpuImage* slot : slots_to_transition) {
+    if (!slot->layout_transitioned) {
+      command_buffer->impl()->TransitionImageLayout(slot->texture->image(),
+                                                    vk::ImageLayout::eUndefined,
+                                                    vk::ImageLayout::eShaderReadOnlyOptimal);
+      slot->layout_transitioned = true;
+      ++layout_transitions_for_testing_;
+    }
   }
 
   // Transition to eColorAttachmentOptimal for rendering.  Note the src queue family is FOREIGN,
@@ -1113,6 +1437,18 @@ bool VkRenderer::RequiresRenderInProtected(std::span<const ResolvedLayer> layers
       continue;
     }
     const auto& image = std::get<ResolvedLayer::ImageContent>(layer.content);
+    if (image.image != nullptr) {
+      const ImportWord word = image.image->word();
+      FX_DCHECK(IsReadyForGpuComposition(word));
+      if (!word.released && word.gpu == ImportState::kReady) {
+        const auto* slot = static_cast<const VkGpuImage*>(image.image->gpu_image());
+        FX_DCHECK(slot != nullptr);
+        if (slot->is_protected) {
+          return true;
+        }
+      }
+      continue;
+    }
     auto it = texture_map_.find(image.image_id);
     if (it != texture_map_.end()) {
       if (it->second->image()->use_protected_memory()) {
@@ -1128,10 +1464,28 @@ bool VkRenderer::RequiresRenderInProtected(std::span<const ResolvedLayer> layers
   return false;
 }
 
+void VkRenderer::WrapGpuImage(VkGpuImage& slot, GlobalImageId id) {
+  TRACE_DURATION("gfx", "VkRenderer::WrapGpuImage", "image_id", id.value());
+  escher::ImagePtr escher_image = escher::impl::NaiveImage::AdoptBoundVkImage(
+      escher_->resource_recycler(), slot.image_info, slot.vk_image, std::move(slot.gpu_mem),
+      slot.initial_layout);
+  slot.vk_image = nullptr;
+
+  escher::SamplerPtr sampler =
+      escher::image_utils::IsYuvFormat(escher_image->format())
+          ? escher_->sampler_cache()->ObtainYuvSampler(escher_image->format(), kDefaultFilter,
+                                                       escher_image->color_space())
+          : escher_->sampler_cache()->ObtainSampler(kDefaultFilter);
+  FX_DCHECK(escher::image_utils::IsYuvFormat(escher_image->format()) ? sampler->is_immutable()
+                                                                     : !sampler->is_immutable());
+  slot.texture = fxl::MakeRefCounted<escher::Texture>(escher_->resource_recycler(),
+                                                      std::move(sampler), std::move(escher_image));
+}
+
 bool VkRenderer::WaitIdle() {
   FX_DCHECK(main_dispatcher_ == async_get_default_dispatcher());
 
-  return escher_->vk_device().waitIdle() == vk::Result::eSuccess;
+  return vk_device_.waitIdle() == vk::Result::eSuccess;
 }
 
 void VkRenderer::WarmPipelineCache() {

@@ -1,0 +1,56 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":overnet-fidl-tests"],
+    visibility = ["//src/connectivity:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fidl_host_test"],
+    visibility = ["//src/connectivity:__pkg__"],
+)
+
+rustc_test(
+    name = "fidl_on_overnet_tests",
+    srcs = [
+        "src/channel.rs",
+        "src/lib.rs",
+        "src/socket.rs",
+    ],
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    deps = [
+        "//src/connectivity/overnet/lib/circuit",
+        "//src/connectivity/overnet/lib/core",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fidl/rust/handle_tests:fidl_handle_tests",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+wrap_host_rust_test(
+    name = "fidl_host_test",
+    binary_name = "fidl_on_overnet_tests",
+)
+
+fx_unittest_package(
+    name = "overnet-fidl-tests",
+    unit_tests = [":fidl_on_overnet_tests"],
+)

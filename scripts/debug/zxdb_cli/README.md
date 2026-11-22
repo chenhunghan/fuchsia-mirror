@@ -68,7 +68,7 @@ stopping the daemon.
    ```
    Output:
    ```
-   {"success": true, "body": {"threads": [{"id": 1, "name": "main"}, {"id": 2, "name": "worker"}]}}
+   {"success": true, "body": {"threads": [{"thread_id": 1, "name": "main", "process_id": 12345}, {"thread_id": 2, "name": "worker", "process_id": 12345}]}}
    ```
 
 4. **Pause a thread**:
@@ -221,7 +221,7 @@ For programmatic environments or agents, the same operations can be invoked via 
    ```
    Output:
    ```
-   {"success": true, "body": {"threads": [{"id": 1, "name": "main"}, {"id": 2, "name": "worker"}]}}
+   {"success": true, "body": {"threads": [{"thread_id": 1, "name": "main", "process_id": 12345}, {"thread_id": 2, "name": "worker", "process_id": 12345}]}}
    ```
 
 4. **Pause a thread**:
@@ -411,18 +411,15 @@ token-efficient.
 Example `get-state` Response:
 ```json
 {
-  "processes": [
+  "threads": [
     {
-      "id": "p1",
-      "name": "target_app",
-      "threads": [
-        {
-          "id": 1,
-          "name": "main"
-        }
-      ]
+      "thread_id": 1,
+      "name": "main"
     }
-  ]
+  ],
+  "processes": {
+    "12345": "target_app"
+  }
 }
 ```
 
@@ -433,3 +430,31 @@ replace `zxdb`; instead, it leverages `zxdb`'s DAP support (found in
 `src/lib/debug/dap/python`) to provide a machine-friendly interface. By bridging
 the gap between interactive streams and request-response patterns, it enables
 automated tools to use our standard debugging stack effectively.
+
+## Testing
+
+Test suites are located next to their respective subsystems:
+
+* `daemon/tests/`: Core daemon lifecycle and event waiter tests.
+* `daemon/handlers/tests/`: Unit tests for individual DAP command handlers.
+  These use `DaemonTestCase` in `daemon/tests/helpers.py`.
+* `cli/tests/`: Core CLI argument parsing, JSON serialization, and transport
+  tests.
+* `cli/commands/tests/`: Unit tests for CLI subcommands. These use
+  `CLITestCase` in `cli/tests/helpers.py`.
+* `shared/tests/`: Core protocol request dispatch and response envelope
+  deserialization tests.
+* `shared/protocol/tests/`: Unit tests for individual request and response
+  Pydantic schemas. These use `ProtocolTestCase` in `shared/tests/helpers.py`.
+* `daemon_manager/tests/`: Process management and connection handling tests.
+* `tests/`: End-to-end integration tests using `FakeDapServerMixin` in
+  `tests/fake_dap_server.py`. These tests verify live communication between
+  `zxdb-daemon` and `fx debug cli` across domain-scoped test modules.
+
+Add the test group to your build if needed, then run the full test suite with
+`fx test`:
+
+```bash
+fx add-test //scripts/debug/zxdb_cli:tests
+fx test scripts/debug/zxdb_cli
+```

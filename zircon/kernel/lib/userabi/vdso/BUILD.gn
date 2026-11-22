@@ -5,10 +5,12 @@
 # https://opensource.org/licenses/MIT
 
 import("//build/toolchain/ifs_extract.gni")
+import("//build/toolchain/stack_usage_check/verify_stack_sizes.gni")
 import("//build/toolchain/toolchain_environment.gni")
 import("//build/toolchain/zircon/user_basic_redirect.gni")
 import("//build/zircon/c_utils.gni")
 import("//build/zircon/zircon_cpu.gni")
+import("vdso_max_stack_usage.gni")
 
 # A max ELF page size for the vDSO, which is free to be strictly larger than
 # that of the kernel or userspace binaries.
@@ -30,15 +32,7 @@ config("max-page-size.defines") {
 user_basic_redirect("vdso") {
   select = true
 
-  public_deps = [
-    ":libzircon",
-
-    # This is just an independent testing step that doesn't produce any
-    # output. But making it a dependency here ensures that a kernel can't be
-    # built with a vDSO that doesn't have a verified ABI.
-    ":verify-abi",
-    ":verify-segments",
-  ]
+  public_deps = [ ":libzircon" ]
 }
 
 if (toolchain_environment == "user.basic") {
@@ -48,7 +42,23 @@ if (toolchain_environment == "user.basic") {
   loadable_module("libzircon") {
     visibility = [ ":*" ]
 
-    ldflags = [ "-Wl,-soname=libzircon.so" ]
+    ldflags = [
+      "-Wl,-soname=libzircon.so",
+
+      # State the stack usage contract in PT_GNU_STACK p_memsz. See
+      # vdso_max_stack_usage.gni.
+      "-Wl,-z,stack-size=$vdso_max_stack_usage",
+    ]
+
+    # Check the ABI, the segments, and the stack usage of every entry point
+    # against the contract whenever the vDSO is linked. A violation fails
+    # the build, but as validations these hold up nothing that depends on
+    # the vDSO, such as the kernel that embeds it.
+    validations = [
+      ":verify-abi",
+      ":verify-segments",
+      ":verify-stack-sizes",
+    ]
 
     configs += [ "//build/config/zircon:rodso" ]
 
@@ -180,10 +190,6 @@ if (toolchain_environment == "user.basic") {
 
     script = "verify-abi.sh"
     args = rebase_path(sources + outputs, root_build_dir)
-
-    metadata = {
-      link_output_barrier = []
-    }
   }
 
   link_output_rspfile("libzircon.rsp") {
@@ -206,5 +212,17 @@ if (toolchain_environment == "user.basic") {
       "--rspfile=" + rebase_path(sources[0], root_build_dir),
       "--read-only-segments",
     ]
+  }
+
+  # Check the estimated maximum stack usage of each vDSO entry point against
+  # the contract in vdso_max_stack_usage.gni. The exported functions are
+  # entry points. So is every CODE_* function: those are the alternates that
+  # the kernel can patch in at boot in place of an exported function (see
+  # ../vdso.rs).
+  verify_stack_sizes("verify-stack-sizes") {
+    visibility = [ ":*" ]
+    deps = [ ":libzircon" ]
+    max_stack_usage = vdso_max_stack_usage
+    entry_points = [ "CODE_*" ]
   }
 }

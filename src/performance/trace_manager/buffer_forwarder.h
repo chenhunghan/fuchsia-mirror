@@ -67,6 +67,11 @@ class BufferForwarder {
 
   bool IsDestinationPeerClosed() const;
   virtual TransferStatus Flush();
+
+  // Whether a write can block until the consumer reads the socket. True here: writes go straight
+  // to the socket and wait while it is full. Subclasses that buffer elsewhere return false.
+  virtual bool WritesWaitForConsumer() const { return true; }
+
   virtual ~BufferForwarder() = default;
 
  protected:

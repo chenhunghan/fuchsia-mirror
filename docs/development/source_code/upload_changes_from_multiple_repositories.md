@@ -5,15 +5,16 @@ Certain changes require modifying more than one repository simultaneously.  Ther
 supported methods for accomplishing this: soft and hard transitions.
 
 In general, prefer soft transitions over hard transitions (see
-[Making changes across multiple petals](working_across_petals.md#hard-and-soft-transitions) for
+[Making changes across multiple petals](working_across_petals.md) for
 further details). This means that if a change to one repository depends on a change in another
 repository, you must wait until the respective commit has been rolled before the dependent commit
 can be submitted to the queue.
 
 Most multi-Petal changes (including
-[updates to FIDL protocols](workflow_tips_and_faq.md#q_how_do_i_update_a_fidl_protocol)) should
+[updates to FIDL
+protocols](workflow_tips_and_faq.md#q-how-do-i-update-a-fidl-protocol)) should
 be attempted using a soft transition, whereas coordinating
-[changes across multiple Petals](workflow_tips_and_faq.md#q_how_do_i_coordinate_changes_across_multiple_petals)
+[changes across multiple Petals](workflow_tips_and_faq.md#q-how-do-i-coordinate-changes-across-multiple-petals)
 *may* require a hard transition.  Typically, one should use the techniques described in the above
 references to avoid hard transitions wherever possible.
 

@@ -57,7 +57,6 @@ fuchsia_cc_driver("aml-pwm-regulator-driver") {
 
 fuchsia_driver_component("aml-pwm-regulator") {
   dml_label = ":aml-pwm-regulator-dml"
-  info = "meta/aml-pwm-regulator-info.json"
   component_name = "aml-pwm-regulator"
   deps = [ ":aml-pwm-regulator-driver" ]
 }
@@ -72,6 +71,7 @@ test("aml-pwm-regulator-test-bin") {
   sources = [ "aml-pwm-regulator-test.cc" ]
   deps = [
     ":common",
+    "//sdk/fidl/fuchsia.driver.metadata:fuchsia.driver.metadata_cpp",
     "//sdk/fidl/fuchsia.hardware.pwm:fuchsia.hardware.pwm_cpp_testing",
     "//sdk/lib/driver/fake-platform-device/cpp",
     "//sdk/lib/driver/testing/cpp",

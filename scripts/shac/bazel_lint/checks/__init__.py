@@ -12,10 +12,12 @@ from . import (
     fuchsia_wrappers,
     host_constraints,
     load_visibility,
+    migration_bazel2gn_overwrites,
     package_default_visibility,
     repository_paths,
     root_package_labels,
     target_visibility,
+    test_suite_target_compatible_with,
     vendor_paths,
     visibility_for_public_by_default_types,
 )

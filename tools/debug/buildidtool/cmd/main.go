@@ -60,7 +60,7 @@ func init() {
 func getTmpFile(path string, name string) (string, error) {
 	out := make([]byte, 16)
 	if _, err := rand.Read(out); err != nil {
-		return "", nil
+		return "", err
 	}
 	return filepath.Join(path, name+"-"+hex.EncodeToString(out)) + ".tmp", nil
 }
@@ -107,8 +107,8 @@ func atomicWrite(file, fmtStr string, args ...any) error {
 	return os.Rename(tmpFile, file)
 }
 
-func removeOldFile(newBuildID, suffix string) error {
-	data, err := os.ReadFile(stamp)
+func removeOldFile(stampPath, dir, newBuildID, suffix string) error {
+	data, err := os.ReadFile(stampPath)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return err
@@ -124,7 +124,7 @@ func removeOldFile(newBuildID, suffix string) error {
 	if newBuildID == oldBuildID {
 		return nil
 	}
-	oldPath := filepath.Join(buildIDDir, oldBuildID[:2], oldBuildID[2:]) + suffix
+	oldPath := filepath.Join(dir, oldBuildID[:2], oldBuildID[2:]) + suffix
 	// If the file has already been removed (perhaps by another process) then
 	// just keep going.
 	if err := os.Remove(oldPath); !os.IsNotExist(err) {
@@ -138,32 +138,148 @@ type entryInfo struct {
 	suffix string
 }
 
-func getEntriesInfo() ([]entryInfo, error) {
+type cachedBuildID struct {
+	id    string
+	found bool
+}
+
+func readEntryBuildID(path string, cache map[string]cachedBuildID) (string, bool, error) {
+	if cached, ok := cache[path]; ok {
+		return cached.id, cached.found, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, fmt.Errorf("opening %s to read build ID: %v", path, err)
+	}
+	defer f.Close()
+	buildIDs, err := elflib.GetBuildIDs(path, f)
+	if err != nil {
+		return "", false, fmt.Errorf("reading build ID from %s: %v", path, err)
+	}
+	// Ignore entries where the binary doesn't have a build ID.
+	if len(buildIDs) == 0 {
+		cache[path] = cachedBuildID{}
+		return "", false, nil
+	}
+	if len(buildIDs) != 1 {
+		return "", false, fmt.Errorf("unexpected number of build IDs in %s. Expected 1 but found %v", path, buildIDs)
+	}
+	if len(buildIDs[0]) < 2 {
+		return "", false, fmt.Errorf("build ID (%s) is too short in %s", buildIDs[0], path)
+	}
+	id := hex.EncodeToString(buildIDs[0])
+	cache[path] = cachedBuildID{id: id, found: true}
+	return id, true, nil
+}
+
+func getEntriesInfo(entryList entryList, isVirtualizedStub func(string) bool) ([]entryInfo, error) {
+	hasNonDebug := false
+	for _, e := range entryList {
+		if e.suffix != ".debug" {
+			hasNonDebug = true
+			break
+		}
+	}
+
 	var outs []entryInfo
-	for _, entry := range entries {
-		f, err := os.Open(entry.file)
-		if err != nil {
-			return nil, fmt.Errorf("opening %s to read build ID: %v", entry.file, err)
+	var deferredDebug []entry
+	cache := make(map[string]cachedBuildID, len(entryList))
+
+	for _, e := range entryList {
+		// On casfs (ABFS), unstripped .debug binaries from RBE cache hits are
+		// materialized as lazy ARI stubs. Opening them purely to re-read the
+		// same ELF build ID already present in the stripped sibling forces
+		// full remote download of multi-hundred-MB debug binaries before
+		// atomicLink (which hardlinks without hydrating). Defer virtualized
+		// .debug entries when a non-.debug sibling is present and reuse the
+		// sibling's build ID.
+		if hasNonDebug && e.suffix == ".debug" && isVirtualizedStub != nil && isVirtualizedStub(e.file) {
+			fi, err := os.Stat(e.file)
+			if err != nil {
+				return nil, fmt.Errorf("opening %s to read build ID: %v", e.file, err)
+			}
+			if !fi.IsDir() {
+				deferredDebug = append(deferredDebug, e)
+				continue
+			}
 		}
-		defer f.Close()
-		buildIDs, err := elflib.GetBuildIDs(entry.file, f)
+
+		buildID, found, err := readEntryBuildID(e.file, cache)
 		if err != nil {
-			return nil, fmt.Errorf("reading build ID from %s: %v", entry.file, err)
+			return nil, err
 		}
-		// Ignore entries where the binary doesn't have a build ID.
-		if len(buildIDs) == 0 {
+		if !found {
 			continue
 		}
-		if len(buildIDs) != 1 {
-			return nil, fmt.Errorf("unexpected number of build IDs in %s. Expected 1 but found %v", entry.file, buildIDs)
+		outs = append(outs, entryInfo{elflib.BinaryFileRef{BuildID: buildID, Filepath: e.file}, e.suffix})
+	}
+
+	if len(outs) > 0 {
+		buildID := outs[0].ref.BuildID
+		for _, info := range outs[1:] {
+			if buildID != info.ref.BuildID {
+				return nil, fmt.Errorf("%s and %s do not have the same build ID", info.ref.Filepath, outs[0].ref.Filepath)
+			}
 		}
-		if len(buildIDs[0]) < 2 {
-			return nil, fmt.Errorf("build ID (%s) is too short in %s", buildIDs[0], entry.file)
+		for _, e := range deferredDebug {
+			outs = append(outs, entryInfo{elflib.BinaryFileRef{BuildID: buildID, Filepath: e.file}, e.suffix})
 		}
-		buildID := hex.EncodeToString(buildIDs[0])
-		outs = append(outs, entryInfo{elflib.BinaryFileRef{BuildID: buildID, Filepath: entry.file}, entry.suffix})
+		return outs, nil
+	}
+
+	// No non-.debug entry carried a build ID; fall back to opening deferred
+	// .debug entries so callers passing a build-ID-less stripped file alongside
+	// a debug binary retain identical behavior.
+	for _, e := range deferredDebug {
+		buildID, found, err := readEntryBuildID(e.file, cache)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			continue
+		}
+		outs = append(outs, entryInfo{elflib.BinaryFileRef{BuildID: buildID, Filepath: e.file}, e.suffix})
+	}
+	if len(outs) > 1 {
+		buildID := outs[0].ref.BuildID
+		for _, info := range outs[1:] {
+			if buildID != info.ref.BuildID {
+				return nil, fmt.Errorf("%s and %s do not have the same build ID", info.ref.Filepath, outs[0].ref.Filepath)
+			}
+		}
 	}
 	return outs, nil
+}
+
+func run(dir, stampPath string, entryList entryList, isVirtualizedStub func(string) bool) error {
+	// Get the build IDs.
+	infos, err := getEntriesInfo(entryList, isVirtualizedStub)
+	if err != nil {
+		return fmt.Errorf("Parsing entries: %v", err)
+	}
+	var buildID string
+	if len(infos) != 0 {
+		buildID = infos[0].ref.BuildID
+		// Now that we know all the build IDs are in order perform operations.
+		// Make sure to not output the stamp file until all of these operations are
+		// performed to ensure that this tool is re-run if it fails mid-run.
+		buildIDRunes := []rune(buildID)
+		buildIDPathPrefix := filepath.Join(dir, string(buildIDRunes[:2]), string(buildIDRunes[2:]))
+		for _, info := range infos {
+			buildIDPath := buildIDPathPrefix + info.suffix
+			if err = atomicLink(info.ref.Filepath, buildIDPath); err != nil {
+				return fmt.Errorf("atomically linking %s to %s: %v", info.ref.Filepath, buildIDPath, err)
+			}
+			if err = removeOldFile(stampPath, dir, buildID, info.suffix); err != nil {
+				return fmt.Errorf("removing old file referenced by %s: %v", stampPath, err)
+			}
+		}
+	}
+	// Update the stamp last atomically to commit all the above operations.
+	if err = atomicWrite(stampPath, "%s", buildID); err != nil {
+		return fmt.Errorf("emitting final stamp %s: %v", stampPath, err)
+	}
+	return nil
 }
 
 func main() {
@@ -179,39 +295,7 @@ func main() {
 	if len(entries) == 0 {
 		l.Fatalf("Need at least one -entry arg")
 	}
-	// Get the build IDs
-	infos, err := getEntriesInfo()
-	if err != nil {
-		l.Fatalf("Parsing entries: %v", err)
-	}
-	var buildID string
-	if len(infos) != 0 {
-		buildID = infos[0].ref.BuildID
-		for _, info := range infos {
-			if buildID != info.ref.BuildID {
-				l.Fatalf("%s and %s do not have the same build ID", info.ref.Filepath, infos[0].ref.Filepath)
-			}
-			if err := info.ref.Verify(); err != nil {
-				l.Fatalf("Could not verify build ID of %s: %v", info.ref.Filepath, err)
-			}
-		}
-		// Now that we know all the build IDs are in order perform operations.
-		// Make sure to not output the stamp file until all of these operations are
-		// performed to ensure that this tool is re-run if it fails mid-run.
-		buildIDRunes := []rune(buildID)
-		buildIDPathPrefix := filepath.Join(buildIDDir, string(buildIDRunes[:2]), string(buildIDRunes[2:]))
-		for _, info := range infos {
-			buildIDPath := buildIDPathPrefix + info.suffix
-			if err = atomicLink(info.ref.Filepath, buildIDPath); err != nil {
-				l.Fatalf("atomically linking %s to %s: %v", info.ref.Filepath, buildIDPath, err)
-			}
-			if err = removeOldFile(buildID, info.suffix); err != nil {
-				l.Fatalf("removing old file referenced by %s: %v", stamp, err)
-			}
-		}
-	}
-	// Update the stamp last atomically to commit all the above operations.
-	if err = atomicWrite(stamp, buildID); err != nil {
-		l.Fatalf("emitting final stamp %s: %v", stamp, err)
+	if err := run(buildIDDir, stamp, entries, isVirtualizedCasfsARI); err != nil {
+		l.Fatalf("%v", err)
 	}
 }

@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "kernel-boot-stats",
+    testonly = True,
+    srcs = ["kernel_boot_stats.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//zircon/system/ulib/inspect",
+        "//zircon/system/ulib/perftest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "kernel-boot-stats_packaged",
+    testonly = True,
+    binary = ":kernel-boot-stats",
+    binary_name = "kernel-boot-stats",
+)
+
+fx_component_manifest(
+    name = "kernel-boot-benchmarks_manifest",
+    testonly = True,
+    component_name = "kernel-boot-benchmarks",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/kernel-boot-benchmarks.cml",
+)
+
+fx_component(
+    name = "kernel-boot-benchmarks_component",
+    testonly = True,
+    compiled_manifest = ":kernel-boot-benchmarks_manifest",
+    deps = [":kernel-boot-stats_packaged"],
+)
+
+fx_package(
+    name = "kernel-boot-benchmarks",
+    testonly = True,
+    components = [":kernel-boot-benchmarks_component"],
+)

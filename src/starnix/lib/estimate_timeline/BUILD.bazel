@@ -2,11 +2,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":starnix-estimate-timeline-tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )
 
 rustc_library(
@@ -15,8 +22,19 @@ rustc_library(
     crate_name = "estimate_timeline",
     edition = "2024",
     lint_config = "//src/starnix/config:starnix_clippy_lints",
-    with_unit_tests = True,
+    visibility = ["//src/starnix/kernel/core:__pkg__"],
     deps = [
         "//sdk/rust/zx",
     ],
+)
+
+rustc_test(
+    name = "estimate_timeline_test",
+    crate = ":estimate_timeline",
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "starnix-estimate-timeline-tests",
+    unit_tests = [":estimate_timeline_test"],
 )

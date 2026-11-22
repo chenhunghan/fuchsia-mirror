@@ -45,7 +45,7 @@ async fn printout_bass_events(
         match res {
             Ok(event) => println!("\n\t[BASS Event]\n\t{:#?}\n", event),
             Err(e) => {
-                eprintln!("\n\t[BASS Error]\n\t{:#?}\n", e);
+                println!("\n\t[BASS Error]\n\t{:#?}\n", e);
                 break;
             }
         }
@@ -111,14 +111,14 @@ pub async fn assistant_cmd<T: bt_gatt::GattTypes + 'static, R: GetPeerAddr + 'st
     <T as bt_gatt::GattTypes>::NotificationStream: std::marker::Send,
 {
     if let Err(e) = state.debug.run(cmd, args).await {
-        eprintln!("\n[Error] Error running assistant: {e:#?}\n");
+        println!("\n[Error] Error running assistant: {e:#?}\n");
         return;
     }
 
     if let Ok(peer_event_stream) = state.debug.take_connected_peer_event_stream() {
         let event_task = fasync::Task::local(async move {
             let _ = printout_bass_events(peer_event_stream).await;
-            eprintln!("\n\t[Notice] Connected scan delegator peer event stream terminated!\n");
+            println!("\n\t[Notice] Connected scan delegator peer event stream terminated!\n");
         });
         state.peer_event_task = Some(event_task);
     }

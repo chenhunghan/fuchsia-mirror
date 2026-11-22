@@ -57,7 +57,6 @@ fuchsia_cc_driver("ti-ina231-driver") {
 
 fuchsia_driver_component("ti-ina231") {
   dml_label = ":ti-ina231-dml"
-  info = "meta/ti-ina231-info.json"
   component_name = "ti-ina231"
   deps = [
     ":bind",

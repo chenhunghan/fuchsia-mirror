@@ -105,7 +105,7 @@ rustc_library("elf_parse") {
     "//src/developer/*",
     "//src/lib/elf-search/rust:*",
     "//src/lib/process_builder:*",
-    "//src/performance/*",
+    "//src/memory/*",
     "//src/starnix/*",
   ]
   deps = [

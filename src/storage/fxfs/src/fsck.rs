@@ -8,10 +8,11 @@ use crate::log::*;
 use crate::lsm_tree::Query;
 use crate::lsm_tree::skip_list_layer::SkipListLayer;
 use crate::lsm_tree::types::{
-    BoxedLayerIterator, Item, Key, Layer, LayerIterator, LayerKey, MaybeContainsKey, Value,
+    BoxedLayerIterator, CoalescingIterator, Item, Key, Layer, LayerIterator, LayerKey,
+    MaybeContainsKey, Value,
 };
 use crate::object_handle::INVALID_OBJECT_ID;
-use crate::object_store::allocator::{AllocatorKey, AllocatorValue, CoalescingIterator};
+use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
 use crate::object_store::journal::super_block::SuperBlockInstance;
 use crate::object_store::volume::root_volume;
 use crate::object_store::{ObjectStore, load_store_info};

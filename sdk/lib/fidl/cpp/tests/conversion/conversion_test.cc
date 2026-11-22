@@ -5,7 +5,8 @@
 #include <lib/fidl/cpp/features.h>
 
 #include <gtest/gtest.h>
-#include <src/lib/fidl/llcpp/tests/arena_checker.h>
+
+#include "src/lib/fidl/llcpp/tests/arena_checker.h"
 
 #if __FIDL_SUPPORT_HANDLES
 #include <fidl/test.types/cpp/fidl.h>
@@ -248,10 +249,10 @@ TEST(NaturalToWireConversion, ObjectView) {
 TEST(WireToNaturalConversion, Union) {
   fidl::Arena arena;
 
-  test_types::TestStrictXUnion union_with_uint32 =
-      fidl::internal::ToNatural<test_types::TestStrictXUnion>(
-          test_types::wire::TestStrictXUnion::WithPrimitive(123));
-  ASSERT_EQ(test_types::TestStrictXUnion::Tag::kPrimitive, union_with_uint32.Which());
+  test_types::TestStrictUnion union_with_uint32 =
+      fidl::internal::ToNatural<test_types::TestStrictUnion>(
+          test_types::wire::TestStrictUnion::WithPrimitive(123));
+  ASSERT_EQ(test_types::TestStrictUnion::Tag::kPrimitive, union_with_uint32.Which());
   EXPECT_EQ(123, union_with_uint32.primitive().value());
 
   test_types::UnionWithUint64 union_with_uint64 =
@@ -264,9 +265,9 @@ TEST(WireToNaturalConversion, Union) {
 TEST(NaturalToWireConversion, Union) {
   fidl::Arena arena;
 
-  test_types::wire::TestStrictXUnion union_with_uint32 =
-      fidl::ToWire(arena, test_types::TestStrictXUnion::WithPrimitive(123));
-  ASSERT_EQ(test_types::wire::TestStrictXUnion::Tag::kPrimitive, union_with_uint32.Which());
+  test_types::wire::TestStrictUnion union_with_uint32 =
+      fidl::ToWire(arena, test_types::TestStrictUnion::WithPrimitive(123));
+  ASSERT_EQ(test_types::wire::TestStrictUnion::Tag::kPrimitive, union_with_uint32.Which());
   EXPECT_EQ(123, union_with_uint32.primitive());
   // Inline union value.
   EXPECT_FALSE(fidl_testing::ArenaChecker::IsPointerInArena(&union_with_uint32.primitive(), arena));
@@ -282,12 +283,12 @@ TEST(NaturalToWireConversion, Union) {
 TEST(WireToNaturalConversion, OptionalUnion) {
   fidl::Arena arena;
 
-  ASSERT_EQ(nullptr, fidl::ToNatural(fidl::WireOptional<test_types::wire::TestStrictXUnion>()));
+  ASSERT_EQ(nullptr, fidl::ToNatural(fidl::WireOptional<test_types::wire::TestStrictUnion>()));
 
-  fidl::Box<test_types::TestStrictXUnion> union_with_uint32 =
-      fidl::ToNatural(fidl::WireOptional<test_types::wire::TestStrictXUnion>(
-          test_types::wire::TestStrictXUnion::WithPrimitive(123)));
-  ASSERT_EQ(test_types::TestStrictXUnion::Tag::kPrimitive, union_with_uint32->Which());
+  fidl::Box<test_types::TestStrictUnion> union_with_uint32 =
+      fidl::ToNatural(fidl::WireOptional<test_types::wire::TestStrictUnion>(
+          test_types::wire::TestStrictUnion::WithPrimitive(123)));
+  ASSERT_EQ(test_types::TestStrictUnion::Tag::kPrimitive, union_with_uint32->Which());
   EXPECT_EQ(123, union_with_uint32->primitive().value());
 
   fidl::Box<test_types::UnionWithUint64> union_with_uint64 =
@@ -300,18 +301,18 @@ TEST(WireToNaturalConversion, OptionalUnion) {
 TEST(NaturalToWireConversion, OptionalUnion) {
   fidl::Arena arena;
 
-  fidl::WireOptional<test_types::wire::TestStrictXUnion> empty =
-      fidl::ToWire(arena, fidl::Box(std::unique_ptr<test_types::TestStrictXUnion>()));
+  fidl::WireOptional<test_types::wire::TestStrictUnion> empty =
+      fidl::ToWire(arena, fidl::Box(std::unique_ptr<test_types::TestStrictUnion>()));
   ASSERT_FALSE(empty.has_value());
 
-  fidl::WireOptional<test_types::wire::TestStrictXUnion> xunion =
-      fidl::ToWire(arena, fidl::Box(std::make_unique<test_types::TestStrictXUnion>(
-                              test_types::TestStrictXUnion::WithPrimitive(123))));
-  ASSERT_TRUE(xunion.has_value());
-  ASSERT_EQ(test_types::wire::TestStrictXUnion::Tag::kPrimitive, xunion->Which());
-  EXPECT_EQ(123, xunion->primitive());
+  fidl::WireOptional<test_types::wire::TestStrictUnion> fidl_union =
+      fidl::ToWire(arena, fidl::Box(std::make_unique<test_types::TestStrictUnion>(
+                              test_types::TestStrictUnion::WithPrimitive(123))));
+  ASSERT_TRUE(fidl_union.has_value());
+  ASSERT_EQ(test_types::wire::TestStrictUnion::Tag::kPrimitive, fidl_union->Which());
+  EXPECT_EQ(123, fidl_union->primitive());
   // Inline union value.
-  EXPECT_FALSE(fidl_testing::ArenaChecker::IsPointerInArena(&xunion->primitive(), arena));
+  EXPECT_FALSE(fidl_testing::ArenaChecker::IsPointerInArena(&fidl_union->primitive(), arena));
 
   fidl::WireOptional<test_types::wire::UnionWithUint64> union_with_uint64 =
       fidl::ToWire(arena, fidl::Box(std::make_unique<test_types::UnionWithUint64>(
@@ -348,16 +349,17 @@ TEST(NaturalToWireConversion, Table) {
 
 #if __FIDL_SUPPORT_HANDLES
 TEST(WireToNaturalConversion, MoveOnlyUnion) {
-  test_types::wire::TestXUnion wire = test_types::wire::TestXUnion::WithH(zx::handle());
-  test_types::TestXUnion natural =
-      fidl::internal::ToNatural<test_types::TestXUnion>(std::move(wire));
+  test_types::wire::TestFlexibleUnion wire =
+      test_types::wire::TestFlexibleUnion::WithH(zx::handle());
+  test_types::TestFlexibleUnion natural =
+      fidl::internal::ToNatural<test_types::TestFlexibleUnion>(std::move(wire));
   EXPECT_FALSE(natural.h()->is_valid());
 }
 
 TEST(NaturalToWireConversion, MoveOnlyUnion) {
   fidl::Arena arena;
-  test_types::TestXUnion natural = test_types::TestXUnion::WithH(zx::handle());
-  test_types::wire::TestXUnion wire = fidl::ToWire(arena, std::move(natural));
+  test_types::TestFlexibleUnion natural = test_types::TestFlexibleUnion::WithH(zx::handle());
+  test_types::wire::TestFlexibleUnion wire = fidl::ToWire(arena, std::move(natural));
   EXPECT_FALSE(wire.h().is_valid());
 }
 

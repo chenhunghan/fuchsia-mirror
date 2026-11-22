@@ -122,6 +122,7 @@ if (is_fuchsia) {
         [
           "//src/connectivity/bluetooth/lib/async-helpers:async-test-helpers",
           "//src/connectivity/bluetooth/lib/packet-encoding",
+          "//src/connectivity/bluetooth/lib/profile-client:test-profile-server",
           "//src/connectivity/bluetooth/testing/bt-channel-test-support",
           "//src/lib/async-utils",
           "//third_party/rust_crates:test-case",

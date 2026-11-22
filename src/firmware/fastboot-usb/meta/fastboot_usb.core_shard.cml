@@ -40,5 +40,20 @@
             availability: "optional",
             source_availability: "unknown",
         },
+        {
+            directory: "block",
+            from: "parent",
+            as: "misc",
+            to: "#fastboot-usb",
+            subdir: "misc",
+            availability: "optional",
+            source_availability: "unknown",
+        },
+        {
+            config: "fuchsia.fastboot.UseAndroidBcb",
+            from: "parent",
+            to: "#fastboot-usb",
+            availability: "optional",
+        },
     ],
 }

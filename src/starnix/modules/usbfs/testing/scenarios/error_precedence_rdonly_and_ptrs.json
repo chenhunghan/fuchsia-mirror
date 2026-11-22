@@ -1,0 +1,460 @@
+{
+    "name": "error_precedence_rdonly_and_ptrs",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "type": "open",
+            "fd": "fd_ro",
+            "mode": "rdonly"
+        },
+        {
+            "type": "open",
+            "fd": "fd_rw",
+            "mode": "rdwr"
+        },
+        {
+            "type": "get_capabilities",
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "get_capabilities",
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "connectinfo",
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "connectinfo",
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "get_driver",
+            "interface": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "get_driver",
+            "interface": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "claim_interface",
+            "interface": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "claim_interface",
+            "interface": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "release_interface",
+            "interface": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "release_interface",
+            "interface": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "disconnect_claim",
+            "interface": 0,
+            "driver": "usbfs",
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "disconnect_claim",
+            "interface": 0,
+            "driver": "usbfs",
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "set_interface",
+            "interface": 0,
+            "altsetting": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "set_interface",
+            "interface": 0,
+            "altsetting": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "set_configuration",
+            "config": 1,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "set_configuration",
+            "config": 1,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "clear_halt",
+            "endpoint": 129,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "clear_halt",
+            "endpoint": 129,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "control",
+            "bm_request_type": 192,
+            "b_request": 1,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 500,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "control",
+            "bm_request_type": 192,
+            "b_request": 1,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 500,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "bulk",
+            "ep": 2,
+            "len": 4,
+            "timeout_ms": 500,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "bulk",
+            "ep": 2,
+            "len": 4,
+            "timeout_ms": 500,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "submit_urb",
+            "urb": "u_bad_null",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "submit_urb",
+            "urb": "u_bad_null",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "discard_urb",
+            "urb": "u_none",
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "discard_urb",
+            "urb": "u_none",
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "raw_ioctl",
+            "request": 3735928559,
+            "fd": "fd_ro",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "raw_ioctl",
+            "request": 3735928559,
+            "fd": "fd_rw",
+            "arg_ptr": "null"
+        },
+        {
+            "type": "get_capabilities",
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "get_capabilities",
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "connectinfo",
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "connectinfo",
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "get_driver",
+            "interface": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "get_driver",
+            "interface": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "claim_interface",
+            "interface": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "claim_interface",
+            "interface": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "release_interface",
+            "interface": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "release_interface",
+            "interface": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "disconnect_claim",
+            "interface": 0,
+            "driver": "usbfs",
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "disconnect_claim",
+            "interface": 0,
+            "driver": "usbfs",
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "set_interface",
+            "interface": 0,
+            "altsetting": 0,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "set_interface",
+            "interface": 0,
+            "altsetting": 0,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "set_configuration",
+            "config": 1,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "set_configuration",
+            "config": 1,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "clear_halt",
+            "endpoint": 129,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "clear_halt",
+            "endpoint": 129,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "control",
+            "bm_request_type": 192,
+            "b_request": 1,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 500,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "control",
+            "bm_request_type": 192,
+            "b_request": 1,
+            "w_value": 0,
+            "w_index": 0,
+            "w_length": 4,
+            "timeout_ms": 500,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "bulk",
+            "ep": 2,
+            "len": 4,
+            "timeout_ms": 500,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "bulk",
+            "ep": 2,
+            "len": 4,
+            "timeout_ms": 500,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "submit_urb",
+            "urb": "u_bad_unmapped",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "submit_urb",
+            "urb": "u_bad_unmapped",
+            "urb_type": "bulk",
+            "ep": 2,
+            "buffer_len": 4,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "discard_urb",
+            "urb": "u_none",
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "discard_urb",
+            "urb": "u_none",
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "reap_urb_ndelay",
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "raw_ioctl",
+            "request": 3735928559,
+            "fd": "fd_ro",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "raw_ioctl",
+            "request": 3735928559,
+            "fd": "fd_rw",
+            "arg_ptr": "unmapped"
+        },
+        {
+            "type": "close",
+            "fd": "fd_ro"
+        },
+        {
+            "type": "close",
+            "fd": "fd_rw"
+        }
+    ]
+}

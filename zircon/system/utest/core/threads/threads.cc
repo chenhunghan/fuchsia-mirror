@@ -36,9 +36,11 @@
 #include <zircon/threads.h>
 #include <zircon/types.h>
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <thread>
+#include <vector>
 
 #include <mini-process/mini-process.h>
 #include <zxtest/zxtest.h>
@@ -95,6 +97,23 @@ void resume_thread_synchronous(zx_handle_t thread, zx_handle_t suspend_token) {
 
   zx_signals_t observed = 0u;
   ASSERT_EQ(zx_object_wait_one(thread, ZX_THREAD_RUNNING, ZX_TIME_INFINITE, &observed), ZX_OK);
+}
+
+// Joins |thread| and waits for its kernel thread object to reach ZX_THREAD_TERMINATED.
+//
+// libc's std::thread::join() returns once the exiting thread wakes its userspace lifecycle futex
+// in _zx_futex_wake_handle_close_thread_exit, before the thread finishes zx_thread_exit() in the
+// kernel. Waiting for ZX_THREAD_TERMINATED ensures the kernel thread has fully exited so that
+// subsequent tests which attach a process-wide ZX_EXCEPTION_CHANNEL_DEBUGGER do not receive a
+// trailing ZX_EXCP_THREAD_EXITING exception from a previous test's std::thread.
+void JoinThreadAndWaitForTermination(std::thread& thread) {
+  ASSERT_TRUE(thread.joinable());
+  zx::thread zx_thread;
+  const zx_status_t status = zx::unowned_thread(native_thread_get_zx_handle(thread.native_handle()))
+                                 ->duplicate(ZX_RIGHT_SAME_RIGHTS, &zx_thread);
+  thread.join();
+  ASSERT_OK(status);
+  ASSERT_OK(zx_thread.wait_one(ZX_THREAD_TERMINATED, zx::time::infinite(), nullptr));
 }
 
 // Updates the thread state to advance over a software breakpoint instruction, assuming the
@@ -425,7 +444,7 @@ TEST(Threads, GetInfoRuntimeAfterRescheduleContinue) {
     std::atomic_ref<zx_futex_t>(futex_word).store(1, std::memory_order_relaxed);
     zx_futex_wake(&futex_word, 1);
     if (waiter.joinable()) {
-      waiter.join();
+      JoinThreadAndWaitForTermination(waiter);
     }
   });
 
@@ -482,6 +501,85 @@ TEST(Threads, GetInfoRuntimeAfterRescheduleContinue) {
 
   ASSERT_OK(zx_futex_get_owner(&futex_word, &owner_koid));
   EXPECT_EQ(owner_koid, ZX_KOID_INVALID);
+}
+
+TEST(Threads, GetInfoRuntimePageFaultAndLockContention) {
+  zx_info_task_runtime_t before{};
+  zx_info_task_runtime_t proc_before{};
+  ASSERT_OK(zx::thread::self()->get_info(ZX_INFO_TASK_RUNTIME, &before, sizeof(before), nullptr,
+                                         nullptr));
+  ASSERT_OK(zx::process::self()->get_info(ZX_INFO_TASK_RUNTIME, &proc_before, sizeof(proc_before),
+                                          nullptr, nullptr));
+
+  const size_t page_size = zx_system_get_page_size();
+  zx::vmo fault_vmo;
+  ASSERT_OK(zx::vmo::create(page_size, 0, &fault_vmo));
+  zx_vaddr_t addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, fault_vmo, 0,
+                                       page_size, &addr));
+  auto unmap = fit::defer([addr, page_size] { zx::vmar::root_self()->unmap(addr, page_size); });
+
+  // Fault in the unmapped page to exercise `vmm::page_fault_handler` and `PageFaultTimer`.
+  *reinterpret_cast<volatile uint8_t*>(addr) = 1u;
+
+  zx_info_task_runtime_t after{};
+  zx_info_task_runtime_t proc_after{};
+  ASSERT_OK(
+      zx::thread::self()->get_info(ZX_INFO_TASK_RUNTIME, &after, sizeof(after), nullptr, nullptr));
+  ASSERT_OK(zx::process::self()->get_info(ZX_INFO_TASK_RUNTIME, &proc_after, sizeof(proc_after),
+                                          nullptr, nullptr));
+
+  EXPECT_GT(after.page_fault_time, before.page_fault_time);
+  EXPECT_GT(proc_after.page_fault_time, proc_before.page_fault_time);
+
+  // Exercise `ContentionTimer` by contending on a shared VMO's hierarchy lock across multiple
+  // threads. `VmObjectPaged::ReadWriteInternal` holds the VMO's `CriticalMutex` across 16-page
+  // batches until `guard.lock()->IsContested()` (`STATE_FLAG_CONTESTED`) becomes true, ensuring
+  // contending threads exit the adaptive spin phase, construct `ContentionTimer`, and block in the
+  // `OwnedWaitQueue` before the holder yields the lock at the next 16-page boundary.
+  if (zx_system_get_num_cpus() >= 2) {
+    const size_t vmo_size = 512 * page_size;
+    zx::vmo shared_vmo;
+    ASSERT_OK(zx::vmo::create(vmo_size, 0, &shared_vmo));
+    ASSERT_OK(shared_vmo.op_range(ZX_VMO_OP_COMMIT, 0, vmo_size, nullptr, 0));
+    std::vector<uint8_t> buf(vmo_size, 1u);
+
+    ASSERT_OK(zx::process::self()->get_info(ZX_INFO_TASK_RUNTIME, &proc_before, sizeof(proc_before),
+                                            nullptr, nullptr));
+
+    const size_t num_workers = std::clamp<size_t>(zx_system_get_num_cpus(), 4, 8);
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> workers;
+    workers.reserve(num_workers);
+    for (size_t i = 0; i < num_workers; ++i) {
+      workers.emplace_back([&] {
+        while (!stop.load(std::memory_order_relaxed)) {
+          shared_vmo.write(buf.data(), 0, vmo_size);
+        }
+      });
+    }
+    auto stop_workers = fit::defer([&] {
+      stop.store(true, std::memory_order_relaxed);
+      for (std::thread& worker : workers) {
+        if (worker.joinable()) {
+          worker.join();
+        }
+      }
+    });
+
+    const zx::time deadline = zx::deadline_after(zx::sec(5));
+    while (zx::clock::get_monotonic() < deadline) {
+      ASSERT_OK(shared_vmo.write(buf.data(), 0, vmo_size));
+      ASSERT_OK(zx::process::self()->get_info(ZX_INFO_TASK_RUNTIME, &proc_after, sizeof(proc_after),
+                                              nullptr, nullptr));
+      if (proc_after.lock_contention_time > proc_before.lock_contention_time) {
+        break;
+      }
+    }
+
+    stop_workers.call();
+    EXPECT_GT(proc_after.lock_contention_time, proc_before.lock_contention_time);
+  }
 }
 
 TEST(Threads, GetAffinity) {
@@ -1079,7 +1177,7 @@ void RunSuspendedChannelCallExitRace(ChannelCallPeerAction action) {
     // Resume the thread so that it exits concurrently with the peer's action.
     go.store(true);
     suspend_token.reset();
-    peer.join();
+    JoinThreadAndWaitForTermination(peer);
     ASSERT_NO_FATAL_FAILURE(test_thread.Wait());
     // zx_channel_call never returned to the thread.
     EXPECT_EQ(thread_arg.call_status, ZX_ERR_BAD_STATE);
@@ -1872,6 +1970,161 @@ TEST(Threads, ThreadStartInvalidEntry) {
   ASSERT_NO_FATAL_FAILURE(core_test_utils::X86LowestNonCanonicalAddr(non_canonical_pc));
   test_thread_start(non_canonical_pc, ZX_ERR_INVALID_ARGS);
 #endif  // defined(__x86_64__)
+}
+
+void ExpectInvalidPcsRejected(const zx::thread& thread,
+                              const zx_thread_state_general_regs_t& orig_regs) {
+#ifdef __x86_64__
+  uintptr_t non_canonical = 0;
+  ASSERT_NO_FATAL_FAILURE(core_test_utils::X86LowestNonCanonicalAddr(non_canonical));
+  const uintptr_t kInvalidPcs[] = {
+      non_canonical,         // lowest non-canonical (1<<47 or 1<<56 w/ LA57)
+      ~(non_canonical - 1),  // lowest canonical upper half (0xffff800000000000 w/o LA57)
+      0xffffff8000000000UL,  // KERNEL_ASPACE_BASE
+      ~0UL,
+  };
+#elifdef __aarch64__
+  constexpr uintptr_t kInvalidPcs[] = {
+      0x1UL << 55u,
+      0xffff000000000000UL,  // KERNEL_ASPACE_BASE
+      ~0UL,
+  };
+#elifdef __riscv
+  constexpr uintptr_t kInvalidPcs[] = {
+      0x1UL << 38u,          // first invalid, Sv39 hole
+      0xffffffc000000000UL,  // KERNEL_ASPACE_BASE
+      ~0UL,
+  };
+#endif
+  for (uintptr_t invalid_pc : kInvalidPcs) {
+    zx_thread_state_general_regs_t bad_regs = orig_regs;
+    bad_regs.REG_PC = invalid_pc;
+    bad_regs.REG_STACK_PTR -= 16;
+#ifdef __x86_64__
+    bad_regs.fs_base = orig_regs.fs_base + 0x1000;
+    bad_regs.gs_base = orig_regs.gs_base + 0x1000;
+#elifdef __aarch64__
+    bad_regs.tpidr = orig_regs.tpidr + 0x1000;
+#endif
+    EXPECT_EQ(thread.write_state(ZX_THREAD_STATE_GENERAL_REGS, &bad_regs, sizeof(bad_regs)),
+              ZX_ERR_INVALID_ARGS);
+
+    zx_thread_state_general_regs_t current_regs{};
+    ASSERT_OK(thread.read_state(ZX_THREAD_STATE_GENERAL_REGS, &current_regs, sizeof(current_regs)));
+    ASSERT_NO_FATAL_FAILURE(general_regs_expect_eq(current_regs, orig_regs));
+#ifdef __x86_64__
+    EXPECT_EQ(current_regs.fs_base, orig_regs.fs_base);
+    EXPECT_EQ(current_regs.gs_base, orig_regs.gs_base);
+#elifdef __aarch64__
+    EXPECT_EQ(current_regs.tpidr, orig_regs.tpidr);
+#endif
+  }
+}
+
+// Regression test for https://fxbug.dev/505360538: setting PC to a kernel or
+// non-userspace address via zx_thread_write_state() during
+// ZX_EXCP_THREAD_STARTING must fail with ZX_ERR_INVALID_ARGS without mutating
+// the saved register state or panicking the kernel on userspace entry.
+TEST(Threads, WriteGeneralRegsInvalidPcOnThreadStarting) {
+  zx::event event;
+  ASSERT_OK(zx::event::create(0, &event));
+
+  zx::channel exception_channel;
+  ASSERT_OK(zx::process::self()->create_exception_channel(ZX_EXCEPTION_CHANNEL_DEBUGGER,
+                                                          &exception_channel));
+
+  TestThread test_thread;
+  ASSERT_NO_FATAL_FAILURE(test_thread.Init("WriteGeneralRegsInvalidPcOnThreadStarting"));
+  ASSERT_NO_FATAL_FAILURE(test_thread.Start(threads_test_wait_fn, event.get()));
+
+  zx::exception exception;
+  ASSERT_NO_FATAL_FAILURE(wait_thread_excp_type(test_thread.thread().get(), exception_channel.get(),
+                                                ZX_EXCP_THREAD_STARTING, 0,
+                                                exception.reset_and_get_address()));
+
+  zx_thread_state_general_regs_t orig_regs{};
+  ASSERT_OK(
+      test_thread.thread().read_state(ZX_THREAD_STATE_GENERAL_REGS, &orig_regs, sizeof(orig_regs)));
+  ASSERT_NO_FATAL_FAILURE(ExpectInvalidPcsRejected(test_thread.thread(), orig_regs));
+
+  // Close the debugger exception channel before resuming so ZX_EXCP_THREAD_EXITING
+  // does not hold the thread in the dying state.
+  exception_channel.reset();
+
+  uint32_t state = ZX_EXCEPTION_STATE_HANDLED;
+  ASSERT_OK(exception.set_property(ZX_PROP_EXCEPTION_STATE, &state, sizeof(state)));
+  exception.reset();
+
+  ASSERT_OK(event.signal(0, ZX_USER_SIGNAL_0));
+  ASSERT_OK(event.wait_one(ZX_USER_SIGNAL_1, zx::time::infinite(), nullptr));
+  ASSERT_NO_FATAL_FAILURE(test_thread.Wait());
+}
+
+// Verify that zx_thread_write_state() rejects kernel and non-userspace PC
+// values on a suspended thread across all architectures while still permitting
+// valid edge-case PCs (such as 0 and Top-Byte-Ignore tagged user pointers on
+// arm64).
+TEST(Threads, WriteGeneralRegsInvalidPcSuspended) {
+  zx::event event;
+  ASSERT_OK(zx::event::create(0, &event));
+
+  TestThread test_thread;
+  ASSERT_NO_FATAL_FAILURE(test_thread.Init("WriteGeneralRegsInvalidPcSuspended"));
+  ASSERT_NO_FATAL_FAILURE(test_thread.Start(threads_test_wait_fn, event.get()));
+
+  wait_thread_blocked(test_thread.thread().get(), ZX_THREAD_STATE_BLOCKED_WAIT_ONE);
+
+  zx::suspend_token suspend_token;
+  ASSERT_NO_FATAL_FAILURE(suspend_thread_synchronous(test_thread.thread().get(),
+                                                     suspend_token.reset_and_get_address()));
+
+  zx_thread_state_general_regs_t orig_regs{};
+  ASSERT_OK(
+      test_thread.thread().read_state(ZX_THREAD_STATE_GENERAL_REGS, &orig_regs, sizeof(orig_regs)));
+  ASSERT_NO_FATAL_FAILURE(ExpectInvalidPcsRejected(test_thread.thread(), orig_regs));
+
+  // Zero is accepted as a valid user PC on all architectures (used for tests
+  // that intentionally fault on execution).
+  zx_thread_state_general_regs_t valid_regs = orig_regs;
+  valid_regs.REG_PC = 0;
+  EXPECT_OK(test_thread.thread().write_state(ZX_THREAD_STATE_GENERAL_REGS, &valid_regs,
+                                             sizeof(valid_regs)));
+
+  // Verify the highest valid userspace PC is accepted (catches off-by-one at
+  // the upper userspace boundary).
+#ifdef __x86_64__
+  uintptr_t non_canonical = 0;
+  ASSERT_NO_FATAL_FAILURE(core_test_utils::X86LowestNonCanonicalAddr(non_canonical));
+  valid_regs = orig_regs;
+  valid_regs.rip = non_canonical - 1;
+  EXPECT_OK(test_thread.thread().write_state(ZX_THREAD_STATE_GENERAL_REGS, &valid_regs,
+                                             sizeof(valid_regs)));
+#elifdef __aarch64__
+  valid_regs = orig_regs;
+  valid_regs.pc = (0x1UL << 55u) - 4;
+  EXPECT_OK(test_thread.thread().write_state(ZX_THREAD_STATE_GENERAL_REGS, &valid_regs,
+                                             sizeof(valid_regs)));
+
+  // Top-Byte-Ignore (TBI) tagged userspace addresses (bit 55 == 0, non-zero top
+  // byte) remain valid userspace PCs on arm64.
+  valid_regs = orig_regs;
+  valid_regs.pc = (0xaaUL << 56u) | (orig_regs.pc & ~(0xffUL << 56u));
+  EXPECT_OK(test_thread.thread().write_state(ZX_THREAD_STATE_GENERAL_REGS, &valid_regs,
+                                             sizeof(valid_regs)));
+#elifdef __riscv
+  valid_regs = orig_regs;
+  valid_regs.pc = (0x1UL << 38u) - 4;
+  EXPECT_OK(test_thread.thread().write_state(ZX_THREAD_STATE_GENERAL_REGS, &valid_regs,
+                                             sizeof(valid_regs)));
+#endif
+
+  // Restore original registers and let the thread exit cleanly.
+  ASSERT_OK(test_thread.thread().write_state(ZX_THREAD_STATE_GENERAL_REGS, &orig_regs,
+                                             sizeof(orig_regs)));
+  suspend_token.reset();
+  ASSERT_OK(event.signal(0, ZX_USER_SIGNAL_0));
+  ASSERT_OK(event.wait_one(ZX_USER_SIGNAL_1, zx::time::infinite(), nullptr));
+  ASSERT_NO_FATAL_FAILURE(test_thread.Wait());
 }
 
 #if defined(__x86_64__)
@@ -2758,7 +3011,10 @@ TEST(Threads, DebugRegistersWatchpointSyscallPanicRepro) {
   ASSERT_OK(exception.set_property(ZX_PROP_EXCEPTION_STATE, &state, sizeof(state)));
   exception.reset();
 
-  t.join();
+  // Close the exception channel before waiting for the thread to terminate so it does not keep the
+  // exiting thread in the DYING state on ZX_EXCP_THREAD_EXITING.
+  exception_channel.reset();
+  JoinThreadAndWaitForTermination(t);
 }
 
 TEST(Threads, WatchpointSyscallPanic) {

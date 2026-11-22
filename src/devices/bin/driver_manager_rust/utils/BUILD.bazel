@@ -20,10 +20,11 @@ rustc_library(
     lint_config = "//build/config/rust/lints:clippy_warn_all",
     visibility = ["//src/devices/bin/driver_manager_rust:__subpackages__"],
     deps = [
-        "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_rust",
+        "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_rust",
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/rust/zx",
         "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-component",
         "//third_party/rust_crates/vendor:thiserror",
     ],
 )

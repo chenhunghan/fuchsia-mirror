@@ -2,10 +2,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest", "fx_test_component")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(
     default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "tests",
+    tests = [":fxl_tests"],
+    visibility = ["//src/lib:__pkg__"],
 )
 
 cc_library(
@@ -132,11 +143,15 @@ cc_library(
     alwayslink = True,
 )
 
-cc_library(
+fx_cc_library(
     name = "fxl",
     hdrs = [
         "observer_list.h",
         "synchronization/thread_annotations.h",
+    ],
+    visibility = [
+        "//:__subpackages__",
+        "//vendor/google:__subpackages__",
     ],
     deps = [
         ":common",
@@ -152,13 +167,17 @@ cc_library(
 # Transitional target for things depending on the CLI
 # parts of fxl. Eventually CLI-specific functionality
 # will be removed from the main "fxl" target, and moved to this one.
-cc_library(
+fx_cc_library(
     name = "cli",
     srcs = [
         "log_settings_command_line.cc",
     ],
     hdrs = [
         "log_settings_command_line.h",
+    ],
+    visibility = [
+        "//:__subpackages__",
+        "//vendor/google:__subpackages__",
     ],
     deps = [
         ":cli_no_logging",
@@ -184,4 +203,80 @@ cc_library(
 alias(
     name = "fxl_cli",
     actual = ":cli",
+    visibility = [
+        "//:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "fxl_unittests",
+    srcs = [
+        "command_line_unittest.cc",
+        "functional/apply_unittest.cc",
+        "functional/cancelable_callback_unittest.cc",
+        "log_settings_command_line_unittest.cc",
+        "memory/ref_counted_unittest.cc",
+        "memory/weak_ptr_unittest.cc",
+        "observer_list_unittest.cc",
+        "strings/ascii_unittest.cc",
+        "strings/concatenate_unittest.cc",
+        "strings/join_strings_unittest.cc",
+        "strings/split_string_unittest.cc",
+        "strings/string_number_conversions_unittest.cc",
+        "strings/string_printf_unittest.cc",
+        "strings/substitute_unittest.cc",
+        "strings/trim_unittest.cc",
+        "synchronization/thread_annotations_unittest.cc",
+        "//src/lib/fxl/test:test_settings_unittest.cc",
+    ],
+    deps = [
+        ":fxl",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/fxl/test:test_settings",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fxl_unittests_packaged_bin",
+    testonly = True,
+    binary = ":fxl_unittests",
+    binary_name = "fxl_unittests",
+)
+
+fx_component_manifest(
+    name = "fxl_tests_manifest",
+    testonly = True,
+    component_name = "fxl_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/fxl_unittests.cml",
+)
+
+fx_test_component(
+    name = "fxl_tests_component",
+    compiled_manifest = ":fxl_tests_manifest",
+    deps = [
+        ":fxl_unittests_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "fxl_tests_package",
+    package_name = "fxl_tests",
+    test_components = [
+        ":fxl_tests_component",
+    ],
+)
+
+fx_test(
+    name = "fxl_tests",
+    max_log_severity = "FATAL",
+    package = ":fxl_tests_package",
 )

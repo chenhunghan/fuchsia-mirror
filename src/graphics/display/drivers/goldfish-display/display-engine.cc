@@ -486,7 +486,7 @@ zx_status_t DisplayEngine::PresentPrimaryDisplayConfig(const DisplayConfig& disp
     fidl::WireResult result = control_->CreateSyncFence(std::move(event_sync_device));
     if (!result.ok()) {
       fdf::error("Failed to call FIDL CreateSyncFence: {}", result.error().FormatDescription());
-      return status;
+      return result.status();
     }
     if (result.value().is_error()) {
       fdf::error("Failed to create SyncFence: {}", zx::make_result(result.value().error_value()));

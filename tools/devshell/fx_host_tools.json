@@ -19,5 +19,11 @@
         "category": "Source tree",
         "script": "//tools/devshell/fx_cli/registry.py",
         "summary": "Manage fx_host_tools.json command registrations."
+    },
+    "revert": {
+        "category": "Source tree",
+        "contrib": true,
+        "summary": "Generate a pure revert for a submitted Gerrit CL",
+        "target": "//tools/revert:fx_revert"
     }
 }

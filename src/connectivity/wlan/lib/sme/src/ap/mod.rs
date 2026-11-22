@@ -27,6 +27,7 @@ use wlan_common::capabilities::get_band_cap_for_channel;
 use wlan_common::channel::{Bandwidth, Channel};
 use wlan_common::ie::rsn::rsne::{RsnCapabilities, Rsne};
 use wlan_common::ie::{ChanWidthSet, SupportedRate, parse_ht_capabilities};
+use wlan_common::security::{SecurityAuthenticator, wpa};
 use wlan_common::timer::{self, EventHandle, Timer};
 use wlan_common::{RadioConfig, mac};
 use wlan_rsn::psk;
@@ -37,7 +38,7 @@ const DEFAULT_DTIM_PERIOD: u8 = 2;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     pub ssid: Ssid,
-    pub password: Vec<u8>,
+    pub authentication: fidl_internal::Authentication,
     pub radio_cfg: RadioConfig,
 }
 
@@ -75,7 +76,7 @@ struct StoppingState {
     stop_timeout: Option<EventHandle>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RsnCfg {
     psk: psk::Psk,
     rsne: Rsne,
@@ -153,7 +154,7 @@ impl ApSme {
                     Ok(op_radio_cfg) => op_radio_cfg,
                 };
 
-                let rsn_cfg_result = create_rsn_cfg(&config.ssid, &config.password[..]);
+                let rsn_cfg_result = create_rsn_cfg(&config.ssid, config.authentication);
                 let rsn_cfg = match rsn_cfg_result {
                     Err(e) => {
                         responder.respond(e);
@@ -304,7 +305,7 @@ impl super::Station for ApSme {
     type Event = Event;
 
     fn on_mlme_event(&mut self, event: MlmeEvent) {
-        debug!("received MLME event: {:?}", event);
+        debug!("received MLME event: {:?}", mlme_event_name(&event));
         self.state = self.state.take().map(|state| match state {
             State::Idle(_) => {
                 warn!("received MlmeEvent while ApSme is idle {:?}", mlme_event_name(&event));
@@ -349,7 +350,7 @@ impl super::Station for ApSme {
                 match event {
                     MlmeEvent::OnChannelSwitched { info } => bss.handle_channel_switch(info),
                     MlmeEvent::AuthenticateInd { ind } => bss.handle_auth_ind(ind),
-                    MlmeEvent::DeauthenticateInd { ind } => {
+                    MlmeEvent::DeauthenticateInd { ind, .. } => {
                         bss.handle_deauth(&ind.peer_sta_address.into())
                     }
                     // TODO(https://fxbug.dev/42113580): This path should never be taken, as the MLME will never send
@@ -358,8 +359,8 @@ impl super::Station for ApSme {
                         bss.handle_deauth(&resp.peer_sta_address.into())
                     }
                     MlmeEvent::AssociateInd { ind } => bss.handle_assoc_ind(ind),
-                    MlmeEvent::DisassociateInd { ind } => bss.handle_disassoc_ind(ind),
-                    MlmeEvent::EapolInd { ind } => bss.handle_eapol_ind(ind),
+                    MlmeEvent::DisassociateInd { ind, .. } => bss.handle_disassoc_ind(ind),
+                    MlmeEvent::EapolInd { ind, .. } => bss.handle_eapol_ind(ind),
                     MlmeEvent::EapolConf { resp } => bss.handle_eapol_conf(resp),
                     _ => {
                         warn!("unsupported MlmeEvent type {:?}; ignoring", mlme_event_name(&event))
@@ -728,21 +729,29 @@ impl StartedState {
     }
 }
 
-fn create_rsn_cfg(ssid: &Ssid, password: &[u8]) -> Result<Option<RsnCfg>, StartResult> {
-    if password.is_empty() {
-        Ok(None)
-    } else {
-        let psk_result = psk::compute(password, ssid);
-        let psk = match psk_result {
-            Err(e) => {
-                return Err(StartResult::InvalidArguments(e.to_string()));
-            }
-            Ok(o) => o,
-        };
-
-        // Note: TKIP is legacy and considered insecure. Only allow CCMP usage
-        // for group and pairwise ciphers.
-        Ok(Some(RsnCfg { psk, rsne: Rsne::wpa2_rsne_with_caps(RsnCapabilities(0)) }))
+fn create_rsn_cfg(
+    ssid: &Ssid,
+    authentication: fidl_internal::Authentication,
+) -> Result<Option<RsnCfg>, StartResult> {
+    match SecurityAuthenticator::try_from(authentication)
+        .map_err(|e| StartResult::InvalidArguments(e.to_string()))?
+    {
+        SecurityAuthenticator::Open => Ok(None),
+        SecurityAuthenticator::Wpa(wpa::WpaAuthenticator::Wpa2 {
+            authentication: wpa::Authentication::Personal(credentials),
+            ..
+        }) => {
+            // Note: TKIP is legacy and considered insecure. Only allow CCMP usage
+            // for group and pairwise ciphers.
+            Ok(Some(RsnCfg {
+                psk: psk::ToPsk::to_psk(&credentials, ssid).into(),
+                rsne: Rsne::wpa2_rsne_with_caps(RsnCapabilities(0)),
+            }))
+        }
+        other => Err(StartResult::InvalidArguments(format!(
+            "Unsupported AP security configuration: {:?}",
+            other.into_descriptor()
+        ))),
     }
 }
 
@@ -839,7 +848,10 @@ mod tests {
     fn unprotected_config() -> Config {
         Config {
             ssid: SSID.clone(),
-            password: vec![],
+            authentication: fidl_internal::Authentication {
+                protocol: fidl_internal::Protocol::Open,
+                credentials: None,
+            },
             radio_cfg: RadioConfig::new(
                 fidl_ieee80211::WlanPhyType::Ht,
                 Bandwidth::Cbw20,
@@ -852,7 +864,14 @@ mod tests {
     fn protected_config() -> Config {
         Config {
             ssid: SSID.clone(),
-            password: vec![0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68],
+            authentication: fidl_internal::Authentication {
+                protocol: fidl_internal::Protocol::Wpa2Personal,
+                credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                    fidl_internal::WpaCredentials::Passphrase(vec![
+                        0x61, 0x62, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+                    ]),
+                ))),
+            },
             radio_cfg: RadioConfig::new(
                 fidl_ieee80211::WlanPhyType::Ht,
                 Bandwidth::Cbw20,
@@ -1199,6 +1218,165 @@ mod tests {
                 }
             }
             Err(e) => panic!("Unexpected StartResult value: {0:?}, {e:?}", fn_args),
+        }
+    }
+
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: None,
+        },
+        Ok(false);
+        "open_without_credentials"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        },
+        Err(());
+        "open_with_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([1u8; 32]),
+            ))),
+        },
+        Err(());
+        "open_with_psk"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        },
+        Ok(true);
+        "wpa2_personal_with_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Psk([1u8; 32]),
+            ))),
+        },
+        Ok(true);
+        "wpa2_personal_with_psk"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: None,
+        },
+        Err(());
+        "wpa2_personal_without_credentials"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"".to_vec()),
+            ))),
+        },
+        Err(());
+        "wpa2_personal_with_empty_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"short".to_vec()),
+            ))),
+        },
+        Err(());
+        "wpa2_personal_with_short_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(vec![b'a'; 64]),
+            ))),
+        },
+        Err(());
+        "wpa2_personal_with_long_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(vec![0xff; 8]),
+            ))),
+        },
+        Err(());
+        "wpa2_personal_with_non_utf8_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wep,
+            credentials: None,
+        },
+        Err(());
+        "wep_without_credentials"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wep,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wep(
+                fidl_internal::WepCredentials { key: b"12345".to_vec() },
+            ))),
+        },
+        Err(());
+        "wep_with_credentials"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa1,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        },
+        Err(());
+        "wpa1_with_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa3Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(b"password".to_vec()),
+            ))),
+        },
+        Err(());
+        "wpa3_personal_with_passphrase"
+    )]
+    #[test_case(
+        fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Owe,
+            credentials: None,
+        },
+        Err(());
+        "owe_without_credentials"
+    )]
+    #[fuchsia::test(add_test_attr = false)]
+    fn test_create_rsn_cfg(
+        authentication: fidl_internal::Authentication,
+        expected: Result<bool, ()>,
+    ) {
+        let result = create_rsn_cfg(&SSID, authentication);
+        match expected {
+            Ok(expect_some) => {
+                let rsn_cfg = result.expect("expected create_rsn_cfg to succeed");
+                assert_eq!(rsn_cfg.is_some(), expect_some);
+            }
+            Err(()) => {
+                assert_matches!(result, Err(StartResult::InvalidArguments(_)));
+            }
         }
     }
 

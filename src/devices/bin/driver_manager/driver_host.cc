@@ -376,9 +376,13 @@ void DriverHostComponent::GetProcessKoidAsync(fit::callback<void(zx::result<uint
   }
 
   driver_host_->GetProcessInfo().Then(
-      [this,
+      [this, alive = std::weak_ptr(alive_),
        cb = std::move(cb)](fidl::WireUnownedResult<fuchsia_driver_host::DriverHost::GetProcessInfo>&
                                result) mutable {
+        if (alive.expired()) {
+          cb(zx::error(ZX_ERR_CANCELED));
+          return;
+        }
         if (!result.ok()) {
           cb(zx::error(result.status()));
           return;

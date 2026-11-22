@@ -110,3 +110,27 @@ TEST(HangingGetHelperTest, NonCopyableType) {
   EXPECT_FALSE(helper.Get([&](Thing t) { returned = t.x; }));
   EXPECT_EQ(returned, 42);
 }
+
+TEST(HangingGetHelperTest, RevertToSentClearsPending) {
+  camera::HangingGetHelper<int> helper;
+  int returned = -1;
+  EXPECT_FALSE(helper.Get([&](int x) { returned = x; }));
+  EXPECT_FALSE(helper.Set(1));
+  EXPECT_EQ(returned, 1);
+
+  EXPECT_FALSE(helper.Set(2));
+  EXPECT_TRUE(helper.Set(1));
+  EXPECT_FALSE(helper.Set(1));
+
+  bool called = false;
+  EXPECT_FALSE(helper.Get([&](int x) {
+    called = true;
+    returned = x;
+  }));
+  EXPECT_FALSE(called);
+  EXPECT_EQ(returned, 1);
+
+  EXPECT_FALSE(helper.Set(3));
+  EXPECT_TRUE(called);
+  EXPECT_EQ(returned, 3);
+}

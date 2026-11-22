@@ -199,7 +199,7 @@ the `known_variants` variable in `//build/config/BUILDCONFIG.gn`, and
 
 - **`tags`**: An optional list of free-form strings describing properties
   of the variant (see
-  [toolchain and variant tags](#toolchain_and_variant_tags]).
+  [toolchain and variant tags](#toolchain-and-variant-tags).
 
 - **`toolchain_args`**: An optional scope, where each variable defined
   in this scope overrides a build argument in the toolchain context
@@ -333,6 +333,17 @@ This is a scope with the following schema:
     //build/toolchain/fuchsia:x64-shared       //build/toolchain/fuchsia:x64
     //build/toolchain/fuchsia:x64-asan-shared  //build/toolchain/fuchsia:x64
     ```
+
+- **`default_host_variant_toolchain`**: Only defined in host toolchains
+  (`is_host`). A fully-qualified GN label to the default host variant toolchain
+  for `toolchain_variant.base` selected by global `select_variant` rules.
+  Unlike the global `host_default_variant_toolchain`, which is based on the
+  build machine's host toolchain, this applies the default host variant to the
+  current base toolchain (e.g. `host_arm64` on x64 hosts). Falls back to
+  `toolchain_variant.base` when no host variant is selected. Like
+  `host_default_variant_toolchain`, this normalizes `"novariant"` to
+  `toolchain_variant.base` and does not account for per-target
+  `select_variant` selectors or `exclude_toolchain_tags`.
 
 - **`tags`**: A list of free-form strings, each one describing a property of the
   current toolchain instance and its variant. This is simply the union of
@@ -551,7 +562,7 @@ The order of selectors in the `select_variant` list is important: the first sele
 that matches the current target wins and determines how said target will be built.
 
 
-### Variant shortcuts
+### Variant shortcuts {:#variant-shortcuts}
 
 In addition to variant descriptors, the build sets up a number of "shortcuts", which
 are named aliases for a few hard-coded variant selector scope values. The build adds

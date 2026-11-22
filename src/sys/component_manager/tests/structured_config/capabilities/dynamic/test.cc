@@ -133,13 +133,13 @@ TEST(ScTest, CheckValuesVoidOptional) {
   ASSERT_OK(client_channel);
 
   fidl::SyncClient client(std::move(client_channel.value()));
-  ASSERT_NO_FATAL_FAILURE(CheckValues(
-      client, {
-                  .my_flag = true,
-                  // This value is coming from the CVF file because there's a void optional.
-                  .my_int = 0,
-                  .my_transitional = 5,
-              }));
+  ASSERT_NO_FATAL_FAILURE(CheckValues(client, {
+                                                  .my_flag = true,
+                                                  // This value comes from the default set in
+                                                  // child.cml because the optional route is void.
+                                                  .my_int = 0,
+                                                  .my_transitional = 5,
+                                              }));
 }
 
 TEST(ScTest, CheckValuesNoOptional) {
@@ -250,7 +250,8 @@ TEST(ScTest, NoTransitionalValue) {
   ASSERT_NO_FATAL_FAILURE(CheckValues(client, {
                                                   .my_flag = false,
                                                   .my_int = 10,
-                                                  // This value is coming from the CVF file.
+                                                  // This value comes from the default set in
+                                                  // child.cml.
                                                   .my_transitional = 5,
                                               }));
 }

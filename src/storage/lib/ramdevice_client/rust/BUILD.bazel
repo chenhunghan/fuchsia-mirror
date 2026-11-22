@@ -3,12 +3,10 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests (`:ramdevice_client_test`) stay in BUILD.gn because they are
-# packaged via `storage_driver_test_realm_component`, which has no Bazel build
-# yet.
 rustc_library(
     name = "ramdevice_client",
     srcs = ["src/lib.rs"],
@@ -32,4 +30,13 @@ rustc_library(
         "//src/storage/lib/fs_management/rust:fs_management",
         "//third_party/rust_crates/vendor:anyhow",
     ],
+)
+
+rustc_test(
+    name = "ramdevice_client_test",
+    crate = ":ramdevice_client",
+    # Avoids a name collision in GN.
+    crate_name = "ramdevice_client_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
 )

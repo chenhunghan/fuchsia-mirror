@@ -140,6 +140,32 @@ TEST(ZxdumpTests, DumpFileZstd) {
   EXPECT_EQ(str, kTestData);
 }
 
+TEST(ZxdumpTests, DumpFileZstdCorruptRead) {
+  // Valid 4-byte zstd magic number (0xFD2FB528 in little-endian) followed by
+  // corrupted frame/block data so Decompress() succeeds on the 4-byte header
+  // probe and the subsequent ReadEphemeral() fails in Pump().
+  constexpr std::string_view kCorruptZstd = "\x28\xb5\x2f\xfd\x00\xff\xff\xff\xff\xff\xff\xff"sv;
+
+  zxdump::testing::TestFile test_file;
+  ASSERT_EQ(fwrite(kCorruptZstd.data(), 1, kCorruptZstd.size(), test_file.stdio()),
+            kCorruptZstd.size());
+  ASSERT_EQ(fflush(test_file.stdio()), 0);
+
+  auto file = zxdump::internal::DumpFile::Open(test_file.RewoundFd());
+  ASSERT_TRUE(file.is_ok()) << file.error_value();
+
+  auto header = file->ReadEphemeral({0, 4});
+  ASSERT_TRUE(header.is_ok()) << header.error_value();
+  ASSERT_TRUE(zxdump::internal::DumpFile::IsCompressed(*header));
+
+  auto decompressed = file->Decompress({0, file->size()}, *header);
+  ASSERT_TRUE(decompressed.is_ok()) << decompressed.error_value();
+
+  auto bytes = decompressed->ReadEphemeral({0, 10});
+  ASSERT_TRUE(bytes.is_error());
+  EXPECT_EQ(bytes.error_value().status_, ZX_ERR_IO_DATA_INTEGRITY);
+}
+
 #if !defined(__Fuchsia__) || defined(__aarch64__)
 void AppendNote(std::vector<std::byte>& notes, std::string_view name, uint32_t type,
                 zxdump::ByteView desc) {

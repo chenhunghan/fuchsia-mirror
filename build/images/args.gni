@@ -28,7 +28,6 @@ declare_args() {
   vbmeta_b_partition = ""
   vbmeta_r_partition = ""
   fvm_partition = ""
-  fxfs_partition = ""
 
   # Whether to include images necessary to run Fuchsia in QEMU in build
   # archives.
@@ -39,9 +38,6 @@ declare_args() {
   # Valid values are integers, for example: 1
   # This arg is for local developer only, products should not set this arg.
   delivery_blob_type = 1
-
-  # Include an account partition in the FVM image if set to true.
-  include_account_in_fvm = false
 
   # bazel_product_bundle_[full|root|prefix|board] together identifies the
   # bazel_product_bundle target in GN target to use in Bazel assembly. The
@@ -69,10 +65,6 @@ declare_args() {
   bazel_product_bundle_root = "//"
   bazel_product_bundle_prefix = false
   bazel_product_bundle_board = false
-
-  # Extra GN targets to include when Bazel assembly is enabled. This list is
-  # useful for including verification and other Bazel assembly specific targets.
-  extra_bazel_assembly_targets = []
 
   # Label pointing to the main product bundle to work with if the default
   # product in a multi-product build is not desired.

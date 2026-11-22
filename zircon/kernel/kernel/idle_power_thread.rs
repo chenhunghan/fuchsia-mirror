@@ -7,22 +7,22 @@
 //! Platform-independent per-CPU idle/power thread and system suspend coordinator.
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_int, c_void};
-use core::mem::{MaybeUninit, align_of, offset_of, size_of};
+#[cfg(console_enabled)]
+use core::ffi::c_int;
+use core::ffi::c_void;
+use core::mem::{offset_of, size_of};
 use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use debug::{dprintf, kernel_oops};
-use idle_power_thread_bindings as bindings;
 use kprint::kprintln;
 use ksync::LockToken;
-use lazy_init::{AtomicCheck, LazyInit};
-use pin_init::PinInit;
+use lazy_init::{AtomicCheck, LazyInit, NoCheck};
+use pin_init::{PinInit, pin_data, pin_init};
 use zr::static_assert;
 use zx_status::Status;
 use zx_types::{
     ZX_KOID_KERNEL, ZX_TIME_INFINITE, zx_duration_mono_t, zx_instant_boot_t, zx_instant_mono_t,
-    zx_status_t,
 };
 #[cfg(console_enabled)]
 use zx_types::{ZX_OK, zx_duration_boot_t};
@@ -39,7 +39,9 @@ use crate::kernel::thread::{
     AutoPreemptDisabler, Thread, ThreadPtr, current_preemption_state, preempt_is_enabled,
     reschedule, sleep,
 };
-use crate::kernel::types::{BOOT_CPU_ID, cpu_mask_t, cpu_num_t, cpu_num_to_mask, highest_cpu_set};
+use crate::kernel::types::{
+    BOOT_CPU_ID, INVALID_CPU, cpu_mask_t, cpu_num_t, cpu_num_to_mask, highest_cpu_set,
+};
 use crate::kernel::wait_queue::Interruptible;
 use crate::pdev_power::PowerCpuState;
 use crate::platform_rs::power::{
@@ -56,16 +58,6 @@ use crate::platform_rs::timer::{
 use crate::suspend_wakeup_timer::{Callback as SuspendWakeupTimerCallback, SuspendWakeupTimer};
 use crate::userabi::vdso::VDso;
 use crate::wake_vector::{Diagnostics, WakeEvent, WakeResult};
-
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    /// Placement-constructs an `IdlePowerThread` in uninitialized storage.
-    fn cpp_idle_power_thread_init(out: *mut MaybeUninit<IdlePowerThread>);
-    /// Initializes the global `IdlePowerThread::resume_timer_wake_vector_` singleton.
-    fn cpp_resume_timer_wake_vector_init();
-    /// Returns a pointer to the `WakeEvent` embedded in `resume_timer_wake_vector_`.
-    fn cpp_resume_timer_wake_vector_get_wake_event() -> *const WakeEvent;
-}
 
 /// Whether run-loop `ktrace` scopes for state transitions and idle periods are enabled.
 const ENABLE_RUNLOOP_TRACING: bool = false;
@@ -185,48 +177,11 @@ impl PendingPowerWorkPredicate {
 /// The result of a transition request, including the status code of the request and the current
 /// state when the request was made.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TransitionResult {
+pub struct TransitionResult {
     /// Status code of the transition request.
-    pub(crate) status: Result<(), Status>,
+    pub status: Result<(), Status>,
     /// Observed state of the CPU when the transition started or completed.
-    pub(crate) starting_state: State,
-}
-
-/// FFI representation of [`TransitionResult`] returned across `extern "C"` boundaries.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct IdlePowerThreadTransitionResult {
-    /// Raw `zx_status_t` status code.
-    pub status: zx_status_t,
-    /// Raw `State` discriminant (`u8`).
-    pub starting_state: u8,
-}
-
-static_assert!(
-    size_of::<IdlePowerThreadTransitionResult>()
-        == size_of::<bindings::IdlePowerThreadTransitionResult>()
-);
-static_assert!(
-    align_of::<IdlePowerThreadTransitionResult>()
-        == align_of::<bindings::IdlePowerThreadTransitionResult>()
-);
-static_assert!(
-    offset_of!(IdlePowerThreadTransitionResult, status)
-        == offset_of!(bindings::IdlePowerThreadTransitionResult, status)
-);
-static_assert!(
-    offset_of!(IdlePowerThreadTransitionResult, starting_state)
-        == offset_of!(bindings::IdlePowerThreadTransitionResult, starting_state)
-);
-
-impl From<TransitionResult> for IdlePowerThreadTransitionResult {
-    /// Converts a Rust [`TransitionResult`] into its C-ABI representation.
-    fn from(res: TransitionResult) -> Self {
-        Self {
-            status: Status::result_into_raw(res.status),
-            starting_state: res.starting_state as u8,
-        }
-    }
+    pub starting_state: State,
 }
 
 /// Whether `transition_active_to_offline_locked` must confirm that the CPU has powered off.
@@ -240,14 +195,24 @@ enum PowerOffConfirmation {
 }
 
 /// How `suspend_all_active` suspends the system.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum SuspendMode {
+#[derive(Copy, Clone)]
+enum SuspendMode<'a> {
     /// Transition the active non-boot CPUs to `Suspend`, then suspend the boot CPU with
     /// `platform_suspend_cpu`. See [`IdlePowerThread::transition_all_active_to_suspend`].
     Cpu,
     /// Transition the active non-boot CPUs to `Offline`, then suspend the system from the boot
     /// CPU with `platform_suspend_system`. See [`IdlePowerThread::suspend_system`].
-    System,
+    ///
+    /// Carries proof that [`mp::HotplugLock`] is held across the entire operation.
+    System(&'a LockToken<'a, mp::HotplugLock>),
+}
+
+impl SuspendMode<'_> {
+    /// Returns `true` if `self` is [`Self::System`].
+    #[inline]
+    const fn is_system(self) -> bool {
+        matches!(self, Self::System(_))
+    }
 }
 
 /// Pair of `(current, target)` states stored atomically in [`IdlePowerThread::state`].
@@ -295,6 +260,12 @@ static_assert!(offset_of!(StateMachine, target) == 1);
 struct StateMachineAtomic(AtomicU16);
 
 impl StateMachineAtomic {
+    /// Creates a new `StateMachineAtomic` initialized to `val`.
+    #[inline]
+    const fn new(val: StateMachine) -> Self {
+        Self(AtomicU16::new(val.to_u16()))
+    }
+
     /// Atomically loads the current [`StateMachine`] with memory ordering `order`.
     #[inline]
     fn load(&self, order: Ordering) -> StateMachine {
@@ -326,27 +297,43 @@ impl StateMachineAtomic {
     }
 }
 
-crate::ksync_kernel::declare_singleton_mutex!(
-    /// Guards the `state` of the subset of secondary (non-boot) CPUs that are actively
-    /// transitioning in and out of suspension. Modifications to this participating secondary set
-    /// must be performed under this global lock.
-    ///
-    /// `transition_all_active_to_suspend` and `suspend_system` obtain the global lock when they
-    /// obtain the participating secondary set and hold it for the remainder of the method to
-    /// prevent CPUs unexpectedly going offline.
-    ///
-    /// For example, unplugging a CPU by transitioning it from active to offline must be done under
-    /// this lock, as otherwise it could modify the participating secondary set. On the other hand,
-    /// transitioning a secondary CPU from offline to active need not be done under this lock, as
-    /// `transition_all_active_to_suspend` itself ignores additional active CPUs after its
-    /// participating set is acquired.
-    ///
-    /// Note: `suspend_system` cannot ignore additional active CPUs, since
-    /// `platform_suspend_system` requires that all secondary CPUs be powered off. If a secondary
-    /// CPU is brought online concurrently with `suspend_system`, `platform_suspend_system` will
-    /// fail with `Status::BAD_STATE` and the boot CPU will fall back to `platform_suspend_cpu`.
-    TransitionLock
-);
+/// Guards the `state` of the subset of secondary (non-boot) CPUs that are actively
+/// transitioning in and out of suspension. Modifications to this participating secondary set
+/// must be performed under this global lock.
+///
+/// `transition_all_active_to_suspend` and `suspend_system` obtain the global lock when they
+/// obtain the participating secondary set and hold it for the remainder of the method to
+/// prevent CPUs unexpectedly going offline.
+///
+/// For example, unplugging a CPU by transitioning it from active to offline must be done under
+/// this lock, as otherwise it could modify the participating secondary set. On the other hand,
+/// transitioning a secondary CPU from offline to active need not be done under this lock, as
+/// `transition_all_active_to_suspend` itself ignores additional active CPUs after its
+/// participating set is acquired.
+///
+/// Note: `suspend_system` also acquires [`mp::HotplugLock`] (before `TransitionLock`) to
+/// serialize secondary CPU offline and [`platform_mp_cpu_hotplug`] resume transitions with
+/// [`mp::hotplug_cpu_mask`] and [`mp::unplug_cpu_mask`]. Because `platform_suspend_system`
+/// requires that all secondary CPUs be powered off, if a secondary CPU started before
+/// `HotplugLock` was acquired finishes coming online concurrently with `suspend_system`,
+/// `platform_suspend_system` will fail with `Status::BAD_STATE` and the boot CPU will fall
+/// back to `platform_suspend_cpu`.
+#[ksync::guarded]
+struct TransitionLock {
+    #[mutex]
+    lock: ksync::KMutex<crate::ksync_kernel::TrackedMutex>,
+}
+
+static TRANSITION_LOCK: LazyInit<TransitionLock, NoCheck> = LazyInit::uninit();
+
+impl TransitionLock {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `TRANSITION_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` in `init_hook`
+        // before any caller can access it.
+        unsafe { TRANSITION_LOCK.get_unchecked() }
+    }
+}
 
 /// Provides an interlock between pending wake events and system suspend, preventing suspend entry
 /// until there are no pending wake events.
@@ -367,17 +354,25 @@ static SYSTEM_SUSPEND_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// events occur by then.
 static RESUME_TIMER: LazyInit<SuspendWakeupTimer, AtomicCheck> = LazyInit::uninit();
 
+/// A bespoke wake event used by the resume timer handler to wake the system when the resume boot
+/// time is reached.
+///
+/// Initialized in [`init_hook`] at `LK_INIT_LEVEL_EARLIEST` immediately after
+/// [`crate::wake_vector::init_global_list_lock`], since registering the wake event acquires the
+/// global wake-vector list lock and hooks at the same init level run in an unspecified order.
+static RESUME_TIMER_WAKE_EVENT: LazyInit<WakeEvent, NoCheck> = LazyInit::uninit();
+
 /// Returns a reference to the bespoke resume timer [`WakeEvent`].
 ///
 /// # Safety
 ///
-/// `LK_INIT_LEVEL_EARLIEST` (`init_hook`) must have completed so that
-/// `IdlePowerThread::resume_timer_wake_vector_` is initialized.
+/// `LK_INIT_LEVEL_EARLIEST` (`init_hook`) must have completed so that `RESUME_TIMER_WAKE_EVENT` is
+/// initialized.
 #[inline]
 unsafe fn resume_timer_wake_event() -> &'static WakeEvent {
-    // SAFETY: Caller guarantees `resume_timer_wake_vector_` has been initialized at
+    // SAFETY: Caller guarantees `RESUME_TIMER_WAKE_EVENT` has been initialized at
     // `LK_INIT_LEVEL_EARLIEST`, and it lives in static storage for the lifetime of the kernel.
-    unsafe { &*cpp_resume_timer_wake_vector_get_wake_event() }
+    unsafe { RESUME_TIMER_WAKE_EVENT.get_unchecked() }
 }
 
 /// Waits until the platform reports (via `platform_get_cpu_state`) that `cpu` is powered off or
@@ -429,17 +424,19 @@ fn wait_for_cpu_power_off(cpu: cpu_num_t, timeout_at: zx_instant_mono_t) -> Resu
 /// requested for the CPU. The idle/power thread provides the platform-independent run loop for
 /// handling these functions and delegates to the platform-specific subsystems for the relevant
 /// operations.
+#[pin_data]
 #[repr(C)]
 pub struct IdlePowerThread {
     /// Current and target power state of this CPU (see `TransitionLock`).
     state: StateMachineAtomic,
     /// Completion event signaled when requested transitions finish.
+    #[pin]
     complete: AutounsignalMpUnplugEvent,
     /// Underlying kernel [`Thread`] executing [`IdlePowerThread::run`], wrapped in [`zr::Opaque`]
-    /// because `ConstructFirstThread` / `Thread::CreateIdleThread` placement-news it in-place once
-    /// during boot before the CPU can ever be observed active, and C++ accesses its interior state
-    /// (`Thread::ReviveIdlePowerThread` during CPU hotplug mutates fields in-place under
-    /// `thread->get_lock()`).
+    /// because `construct_first_thread` / `create_idle_thread` constructs it in-place once during
+    /// boot before the CPU can ever be observed active, and `revive_idle_power_thread` during CPU
+    /// hotplug mutates its interior state in-place under its thread lock.
+    #[pin]
     thread: zr::Opaque<Thread>,
     /// CPU ID owning this `IdlePowerThread`, initialized once in `percpu` setup.
     this_cpu: UnsafeCell<cpu_num_t>,
@@ -453,30 +450,20 @@ unsafe impl Send for IdlePowerThread {}
 // locked primitives (`complete`), or `Thread`'s synchronized APIs.
 unsafe impl Sync for IdlePowerThread {}
 
-static_assert!(size_of::<IdlePowerThread>() == bindings::IdlePowerThreadLayout_kSize);
-static_assert!(align_of::<IdlePowerThread>() == bindings::IdlePowerThreadLayout_kAlign);
-static_assert!(
-    size_of::<AutounsignalMpUnplugEvent>() == bindings::IdlePowerThreadLayout_kCompleteSize
-);
-static_assert!(
-    align_of::<AutounsignalMpUnplugEvent>() == bindings::IdlePowerThreadLayout_kCompleteAlign
-);
-static_assert!(offset_of!(IdlePowerThread, state) == bindings::IdlePowerThreadLayout_kStateOffset);
-static_assert!(
-    offset_of!(IdlePowerThread, complete) == bindings::IdlePowerThreadLayout_kCompleteOffset
-);
-static_assert!(
-    offset_of!(IdlePowerThread, thread) == bindings::IdlePowerThreadLayout_kThreadOffset
-);
-static_assert!(
-    offset_of!(IdlePowerThread, this_cpu) == bindings::IdlePowerThreadLayout_kThisCpuOffset
-);
-
 impl IdlePowerThread {
     /// Constructs a default `IdlePowerThread` in place.
+    ///
+    /// Leaves `thread` uninitialized; `construct_first_thread` (boot CPU) and
+    /// `create_idle_thread` (secondary CPUs) initialize it in place before the CPU can be observed
+    /// active.
     #[inline]
     pub fn init() -> impl PinInit<Self, core::convert::Infallible> {
-        zr::pin_init_ffi!(cpp_idle_power_thread_init)
+        pin_init::pin_init!(Self {
+            state: StateMachineAtomic::new(StateMachine::ACTIVE),
+            complete <- AutounsignalMpUnplugEvent::init(),
+            thread: zr::Opaque::uninit(),
+            this_cpu: UnsafeCell::new(INVALID_CPU),
+        })
     }
 
     /// Initializes `this_cpu` for this [`IdlePowerThread`] instance during per-CPU construction.
@@ -527,8 +514,8 @@ impl IdlePowerThread {
     ///
     /// # Safety
     ///
-    /// This CPU's idle [`Thread`] must have been constructed (`ConstructFirstThread` for the boot
-    /// CPU or `CreateIdleThread` for secondary CPUs during boot, before the CPU can ever be
+    /// This CPU's idle [`Thread`] must have been constructed (`construct_first_thread` for the boot
+    /// CPU or `create_idle_thread` for secondary CPUs during boot, before the CPU can ever be
     /// observed active).
     #[inline]
     pub unsafe fn thread(&self) -> &Thread {
@@ -655,7 +642,7 @@ impl IdlePowerThread {
     /// # Safety
     ///
     /// Must be invoked exclusively as the entry point of a per-CPU kernel-only idle/power thread.
-    unsafe fn run(_arg: *mut c_void) -> c_int {
+    pub unsafe fn run(_arg: *mut c_void) -> ! {
         let cpu_num = curr_cpu_num();
         let this_idle_power_thread = &PerCpu::get_current().idle_power_thread;
         let this_scheduler = &PerCpu::get_current().scheduler;
@@ -896,6 +883,7 @@ impl IdlePowerThread {
     ///     case, the CPU's state is `Offline`.
     ///   - `{error, starting state}` if the transition completed, but querying the CPU's power
     ///     state failed with `error`. Note that in this case, the CPU's state is `Offline`.
+    ///
     /// # Safety
     ///
     /// `self` must be an initialized per-CPU [`IdlePowerThread`] for a non-boot CPU, and the caller
@@ -905,12 +893,17 @@ impl IdlePowerThread {
         &self,
         timeout_at: zx_instant_mono_t,
     ) -> TransitionResult {
-        ksync::lock!(let guard = TransitionLock::get().lock());
-        self.transition_active_to_offline_locked(
-            timeout_at,
-            PowerOffConfirmation::BestEffort,
-            guard.token(),
-        )
+        ksync::lock!(let guard = TransitionLock::get().lock_lock());
+        // SAFETY: Caller guarantees `self` is an initialized per-CPU `IdlePowerThread` for a
+        // non-boot CPU and the calling thread is initialized with blocking permitted and no
+        // spinlocks or active `ChainLockTransaction` held.
+        unsafe {
+            self.transition_active_to_offline_locked(
+                timeout_at,
+                PowerOffConfirmation::BestEffort,
+                guard.token(),
+            )
+        }
     }
 
     /// Requests to transition from `Offline` to `Active`.
@@ -923,20 +916,38 @@ impl IdlePowerThread {
     ///     `Offline`.
     ///   - `{Status::TIMED_OUT, State::Offline}` if the current state was `Offline` and transition
     ///     timeout expired.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be an initialized per-CPU [`IdlePowerThread`], the calling CPU's current thread
+    /// must be initialized, blocking must be permitted on the current thread, and no spinlocks or
+    /// active `ChainLockTransaction` may be held.
     #[inline]
-    fn transition_offline_to_active(&self, timeout_at: zx_instant_mono_t) -> TransitionResult {
-        self.transition_from_to(State::Offline, State::Active, timeout_at)
+    pub unsafe fn transition_offline_to_active(
+        &self,
+        timeout_at: zx_instant_mono_t,
+    ) -> TransitionResult {
+        // SAFETY: Forwarded from caller.
+        unsafe { self.transition_from_to(State::Offline, State::Active, timeout_at) }
     }
 
     /// Transitions this CPU from `Active` to `Offline` while holding `TransitionLock`.
-    fn transition_active_to_offline_locked(
+    ///
+    /// # Safety
+    ///
+    /// `self` must be an initialized per-CPU [`IdlePowerThread`] for a non-boot CPU in `'static`
+    /// per-CPU storage, the calling CPU's current thread must be initialized, blocking must be
+    /// permitted on the current thread, and no spinlocks or active `ChainLockTransaction` may be
+    /// held.
+    unsafe fn transition_active_to_offline_locked(
         &self,
         timeout_at: zx_instant_mono_t,
         confirmation: PowerOffConfirmation,
-        _token: &LockToken<'_, TransitionLock>,
+        _token: &LockToken<'_, TransitionLockLockClass>,
     ) -> TransitionResult {
         debug_assert_ne!(self.cpu_num(), BOOT_CPU_ID);
-        let result = self.transition_from_to(State::Active, State::Offline, timeout_at);
+        // SAFETY: Forwarded from caller.
+        let result = unsafe { self.transition_from_to(State::Active, State::Offline, timeout_at) };
         if result.status.is_err() {
             return result;
         }
@@ -956,7 +967,14 @@ impl IdlePowerThread {
 
     /// Requests a state transition from `expected_state` to `target_state` up to `timeout_at`
     /// (see `TransitionLock`).
-    fn transition_from_to(
+    ///
+    /// # Safety
+    ///
+    /// `self` must be an initialized per-CPU [`IdlePowerThread`] in `'static` per-CPU storage (so
+    /// `self.complete` is an initialized `AutounsignalMpUnplugEvent`), the calling CPU's current
+    /// thread must be initialized, blocking must be permitted on the current thread, and no
+    /// spinlocks or active `ChainLockTransaction` may be held.
+    unsafe fn transition_from_to(
         &self,
         expected_state: State,
         target_state: State,
@@ -966,8 +984,9 @@ impl IdlePowerThread {
         // or aborted early. If a stale signal were left pending, `wait_deadline` below would
         // return immediately before the target CPU begins processing the transition, racing with
         // concurrent wake events that modify `state.target` and causing premature cancellation.
-        // SAFETY: `self.complete` is an initialized per-CPU `AutounsignalMpUnplugEvent`, the
-        // calling thread is initialized, and no `ChainLockTransaction` is active.
+        // SAFETY: Caller guarantees `self.complete` is an initialized per-CPU
+        // `AutounsignalMpUnplugEvent`, the calling thread is initialized, and no
+        // `ChainLockTransaction` is active.
         let _ = unsafe { self.complete.unsignal() };
         // Attempt to move from the expected state to the transitional state.
         let mut expected = StateMachine { current: expected_state, target: expected_state };
@@ -1015,9 +1034,10 @@ impl IdlePowerThread {
         // Wait for the transition to the target state to complete or timeout, looping to deal with
         // spurious wakeups.
         loop {
-            // SAFETY: `self.complete` is an initialized per-CPU `AutounsignalMpUnplugEvent` in
-            // `'static` per-CPU storage, and `transition_from_to` runs in normal thread context
-            // where blocking is permitted with no spinlocks or `ChainLockTransaction` held.
+            // SAFETY: Caller guarantees `self.complete` is an initialized per-CPU
+            // `AutounsignalMpUnplugEvent` in `'static` per-CPU storage, the calling thread is
+            // initialized with blocking permitted, and no spinlocks or `ChainLockTransaction` are
+            // held.
             let status = unsafe { self.complete.wait_deadline(timeout_at, Interruptible::No) };
             if status.is_err() {
                 core::hint::cold_path();
@@ -1058,7 +1078,7 @@ impl IdlePowerThread {
     /// # Safety
     ///
     /// - Must be called after `LK_INIT_LEVEL_PLATFORM` has completed (`RESUME_TIMER` and
-    ///   `resume_timer_wake_vector_` initialized).
+    ///   `RESUME_TIMER_WAKE_EVENT` initialized).
     /// - Must be called from a normal thread context where blocking and CPU affinity changes are
     ///   permitted, with no spinlocks, `TransitionLock`, or active `ChainLockTransaction` held.
     #[inline]
@@ -1095,23 +1115,24 @@ impl IdlePowerThread {
     /// # Safety
     ///
     /// - Must be called after `LK_INIT_LEVEL_PLATFORM` has completed (`RESUME_TIMER` and
-    ///   `resume_timer_wake_vector_` initialized).
+    ///   `RESUME_TIMER_WAKE_EVENT` initialized).
     /// - Must be called from a normal thread context where blocking and CPU affinity changes are
-    ///   permitted, with no spinlocks, `TransitionLock`, or active `ChainLockTransaction` held.
-    /// - No concurrent CPU hotplug or unplug operations may occur for the duration of the call.
+    ///   permitted, with no spinlocks, [`mp::HotplugLock`], `TransitionLock`, or active
+    ///   `ChainLockTransaction` held.
     pub unsafe fn suspend_system(resume_at: zx_instant_boot_t) -> zx_instant_boot_t {
+        ksync::lock!(let hotplug_guard = mp::HotplugLock::get().lock());
         // System suspend requires that the platform both support it and be able to confirm that
         // the non-boot CPUs have powered off (see `suspend_all_active`).
         let can_confirm_power_off =
             platform_get_cpu_state(BOOT_CPU_ID) != Err(Status::NOT_SUPPORTED);
         let supports_system = platform_supports_suspend_system();
-        // SAFETY: Caller upholds the post-`LK_INIT_LEVEL_PLATFORM`, normal-thread, lock-free,
-        // and serialized hotplug/unplug preconditions.
+        // SAFETY: Caller upholds the post-`LK_INIT_LEVEL_PLATFORM`, normal-thread, and lock-free
+        // preconditions (`HotplugLock` is acquired above before `TransitionLock`).
         unsafe {
             Self::suspend_all_active(
                 resume_at,
                 if supports_system && can_confirm_power_off {
-                    SuspendMode::System
+                    SuspendMode::System(hotplug_guard.token())
                 } else {
                     SuspendMode::Cpu
                 },
@@ -1124,18 +1145,18 @@ impl IdlePowerThread {
     /// # Safety
     ///
     /// - Must be called after `LK_INIT_LEVEL_PLATFORM` has completed (`RESUME_TIMER` and
-    ///   `resume_timer_wake_vector_` initialized).
+    ///   `RESUME_TIMER_WAKE_EVENT` initialized).
     /// - Must be called from a normal thread context where blocking and CPU affinity changes are
-    ///   permitted, with no spinlocks, `TransitionLock`, or active `ChainLockTransaction` held.
-    /// - When `mode == SuspendMode::System`, no concurrent CPU hotplug or unplug operations may
-    ///   occur for the duration of the call.
+    ///   permitted, with no spinlocks, `TransitionLock`, or active `ChainLockTransaction` held
+    ///   (when `mode` is [`SuspendMode::System`], [`mp::HotplugLock`] is held as proven by its
+    ///   token).
     unsafe fn suspend_all_active(
         resume_at: zx_instant_boot_t,
-        mode: SuspendMode,
+        mode: SuspendMode<'_>,
     ) -> zx_instant_boot_t {
         // Ensure CPUs in `cpus_active_before_suspend` are not modified during the execution of
         // `suspend_all_active`.
-        ksync::lock!(let guard = TransitionLock::get().lock());
+        ksync::lock!(let guard = TransitionLock::get().lock_lock());
 
         // Ensure that the monotonic clock is running and is returned to the running state no
         // matter how we leave this function. This is a CYA check to ensure we don't inadvertently
@@ -1149,8 +1170,9 @@ impl IdlePowerThread {
         if resume_at < suspend_start_time {
             core::hint::cold_path();
             // SAFETY: `suspend_all_active` runs long after `LK_INIT_LEVEL_EARLIEST` (`init_hook`),
-            // so `resume_timer_wake_vector_` is initialized.
-            unsafe { resume_timer_wake_event() }.strobe(current_boot_time().0);
+            // so `RESUME_TIMER_WAKE_EVENT` has been initialized via `WakeEvent::initialize` and is
+            // never destroyed.
+            unsafe { resume_timer_wake_event().strobe(current_boot_time().0) };
             return suspend_start_time;
         }
 
@@ -1221,7 +1243,7 @@ impl IdlePowerThread {
         dprintf!(
             INFO,
             "{} non-boot CPUs...\n",
-            if mode == SuspendMode::System { "Taking offline" } else { "Suspending" },
+            if mode.is_system() { "Taking offline" } else { "Suspending" },
         );
 
         let suspend_timeout_at = Deadline::after_mono(DurationMono(zx_min(1)), TimerSlack::none());
@@ -1235,18 +1257,30 @@ impl IdlePowerThread {
             // For a system suspend, it is critical that each CPU has finished powering off (i.e.
             // completed PSCI CPU_OFF) before the boot CPU calls `platform_suspend_system`, so
             // require confirmation from the platform. If it cannot be confirmed, abort.
-            let active_to_suspend_result = if mode == SuspendMode::System {
-                idle_power_thread.transition_active_to_offline_locked(
-                    suspend_timeout_at.when().0,
-                    PowerOffConfirmation::Required,
-                    guard.token(),
-                )
+            let active_to_suspend_result = if mode.is_system() {
+                // SAFETY: `idle_power_thread` is an initialized `'static` per-CPU
+                // `IdlePowerThread` for non-boot CPU `cpu_id`, and `suspend_system`'s caller
+                // guarantees normal thread context with blocking permitted and no spinlocks or
+                // active `ChainLockTransaction` held.
+                unsafe {
+                    idle_power_thread.transition_active_to_offline_locked(
+                        suspend_timeout_at.when().0,
+                        PowerOffConfirmation::Required,
+                        guard.token(),
+                    )
+                }
             } else {
-                idle_power_thread.transition_from_to(
-                    State::Active,
-                    State::Suspend,
-                    suspend_timeout_at.when().0,
-                )
+                // SAFETY: `idle_power_thread` is an initialized `'static` per-CPU
+                // `IdlePowerThread`, and `suspend_system`'s caller guarantees normal thread
+                // context with blocking permitted and no spinlocks or active
+                // `ChainLockTransaction` held.
+                unsafe {
+                    idle_power_thread.transition_from_to(
+                        State::Active,
+                        State::Suspend,
+                        suspend_timeout_at.when().0,
+                    )
+                }
             };
             if let Err(err) = active_to_suspend_result.status {
                 core::hint::cold_path();
@@ -1254,7 +1288,7 @@ impl IdlePowerThread {
                 // reported to be powered off before the timeout), or the request may still be
                 // pending (if the transition itself timed out), in which case the CPU may yet go
                 // offline. Either way, try to bring it back online (see below).
-                if mode == SuspendMode::System {
+                if mode.is_system() {
                     // `Acquire` synchronizes with state updates on `cpu_id`.
                     let state = idle_power_thread.state.load(Ordering::Acquire);
                     if state.current == State::Offline || state.target == State::Offline {
@@ -1264,7 +1298,7 @@ impl IdlePowerThread {
                 kernel_oops!(
                     "Failed to transition CPU {} to {:s}: {}\n",
                     cpu_id,
-                    if mode == SuspendMode::System { "offline" } else { "suspend" },
+                    if mode.is_system() { "offline" } else { "suspend" },
                     err.into_raw(),
                 );
                 break;
@@ -1280,7 +1314,7 @@ impl IdlePowerThread {
             dprintf!(
                 INFO,
                 "Done {} non-boot CPUs.\n",
-                if mode == SuspendMode::System { "taking offline" } else { "suspending" },
+                if mode.is_system() { "taking offline" } else { "suspending" },
             );
 
             // Set the resume timer before suspending the boot CPU.
@@ -1299,7 +1333,7 @@ impl IdlePowerThread {
 
             // For a system suspend, have the boot CPU's idle/power thread suspend the system
             // rather than just the boot CPU. See `run`.
-            if mode == SuspendMode::System {
+            if mode.is_system() {
                 // `Relaxed` suffices because `transition_from_to` below performs an `AcqRel`
                 // RMW on `boot_idle_power_thread.state`.
                 SYSTEM_SUSPEND_REQUESTED.store(true, Ordering::Relaxed);
@@ -1308,17 +1342,22 @@ impl IdlePowerThread {
             dprintf!(
                 INFO,
                 "Attempting to suspend {}...\n",
-                if mode == SuspendMode::System { "system from boot CPU" } else { "boot CPU" },
+                if mode.is_system() { "system from boot CPU" } else { "boot CPU" },
             );
 
             // SAFETY: `BOOT_CPU_ID` is `0`, and `PerCpu::processor_count()` is initialized to a
             // non-zero count during early boot before `suspend_system` can be called.
             let boot_idle_power_thread = &unsafe { PerCpu::get(BOOT_CPU_ID) }.idle_power_thread;
-            let active_to_suspend_result = boot_idle_power_thread.transition_from_to(
-                State::Active,
-                State::Suspend,
-                suspend_timeout_at.when().0,
-            );
+            // SAFETY: `boot_idle_power_thread` is an initialized `'static` per-CPU
+            // `IdlePowerThread`, and `suspend_system`'s caller guarantees normal thread context
+            // with blocking permitted and no spinlocks or active `ChainLockTransaction` held.
+            let active_to_suspend_result = unsafe {
+                boot_idle_power_thread.transition_from_to(
+                    State::Active,
+                    State::Suspend,
+                    suspend_timeout_at.when().0,
+                )
+            };
 
             // Cancel the resume timer in case it wasn't the reason for the wakeup.
             RESUME_TIMER.cancel_timer();
@@ -1379,7 +1418,7 @@ impl IdlePowerThread {
         dprintf!(INFO, "Resuming non-boot CPUs...\n");
 
         let resume_timeout_at = Deadline::after_mono(DurationMono(zx_min(1)), TimerSlack::none());
-        if mode == SuspendMode::System {
+        if let SuspendMode::System(hotplug_token) = mode {
             // The CPUs were taken offline via their idle/power threads rather than unplugged (see
             // `suspend_system`), so their `TimerQueue`s, `DpcRunner`s, and pinned threads stayed
             // with them. If a CPU cannot be brought back online, migrate its timers to this CPU
@@ -1428,12 +1467,9 @@ impl IdlePowerThread {
                     continue;
                 }
 
-                // SAFETY: Running in a normal thread context with interrupts enabled where memory
-                // allocation and sleeping are permitted, serialized against concurrent
-                // hotplug/unplug operations by the caller's contract and `TransitionLock`, and
-                // `cpu_id` is a valid non-boot CPU ID confirmed powered off by
-                // `wait_for_cpu_power_off`.
-                if let Err(err) = unsafe { platform_mp_cpu_hotplug(cpu_id) } {
+                // SAFETY: `hotplug_token` proves `HotplugLock` is held, and `cpu_id` was confirmed
+                // powered off above by `wait_for_cpu_power_off`.
+                if let Err(err) = unsafe { platform_mp_cpu_hotplug(cpu_id, hotplug_token) } {
                     kernel_oops!(
                         "Failed to hotplug CPU {}: {}.  Leaving it offline.\n",
                         cpu_id,
@@ -1485,10 +1521,16 @@ impl IdlePowerThread {
             while cpus_to_resume != 0 {
                 let cpu_id = highest_cpu_set(cpus_to_resume);
                 // SAFETY: `cpus_to_resume` is a subset of `peek_active_mask()`, whose set bits are
-                // `< PerCpu::processor_count()`, and `cpus_to_resume != 0`.
-                let suspend_to_active_result = unsafe { PerCpu::get(cpu_id) }
-                    .idle_power_thread
-                    .transition_from_to(State::Suspend, State::Active, resume_timeout_at.when().0);
+                // `< PerCpu::processor_count()`, and `cpus_to_resume != 0`; `suspend_system`'s
+                // caller guarantees normal thread context with blocking permitted and no spinlocks
+                // or active `ChainLockTransaction` held.
+                let suspend_to_active_result = unsafe {
+                    PerCpu::get(cpu_id).idle_power_thread.transition_from_to(
+                        State::Suspend,
+                        State::Active,
+                        resume_timeout_at.when().0,
+                    )
+                };
                 if let Err(err) = suspend_to_active_result.status {
                     kernel_oops!(
                         "Failed to transition CPU {} to active: {}\n",
@@ -1625,8 +1667,8 @@ impl IdlePowerThread {
 
         // SAFETY: `RESUME_TIMER` is only initialized at `LK_INIT_LEVEL_PLATFORM` and armed by
         // `suspend_all_active`, both after `LK_INIT_LEVEL_EARLIEST` (`init_hook`) has initialized
-        // `resume_timer_wake_vector_`.
-        let wake_result = unsafe { resume_timer_wake_event() }.strobe(now.0);
+        // `RESUME_TIMER_WAKE_EVENT` via `WakeEvent::initialize`, and it is never destroyed.
+        let wake_result = unsafe { resume_timer_wake_event().strobe(now.0) };
         let message_prefix = if wake_result == WakeResult::SuspendAborted {
             "Wakeup before suspend completed. Aborting suspend"
         } else {
@@ -1644,26 +1686,40 @@ impl IdlePowerThread {
     }
 }
 
-/// Populates diagnostic metadata for `IdlePowerThread::ResumeTimerWakeVector`.
-fn resume_timer_wake_vector_get_diagnostics(diagnostics_out: &mut Diagnostics) {
-    diagnostics_out.enabled = true;
-    diagnostics_out.koid = ZX_KOID_KERNEL;
-    diagnostics_out.set_extra("suspend timeout");
-}
-
-/// Initializes the global resume timer wake vector at `LK_INIT_LEVEL_EARLIEST` and the
+/// Initializes the global resume timer wake event at `LK_INIT_LEVEL_EARLIEST` and the
 /// `SuspendWakeupTimer` instance at `LK_INIT_LEVEL_PLATFORM`.
 fn init_hook(level: init::LkInitLevel) {
     if level == init::LK_INIT_LEVEL_EARLIEST {
-        // Register the resume timer wake event after global ctors have initialized the global
-        // list.
-        // SAFETY: Called once during single-threaded boot at `LK_INIT_LEVEL_EARLIEST`.
-        unsafe { cpp_resume_timer_wake_vector_init() };
+        // Construct the global wake event list lock, which registering the resume timer wake event
+        // acquires. It is constructed here, rather than by its own init hook, as hooks at the same
+        // level run in an unspecified order.
+        // SAFETY: Called once during single-threaded boot at `LK_INIT_LEVEL_EARLIEST`, before any
+        // `WakeEvent` is initialized.
+        unsafe { crate::wake_vector::init_global_list_lock() };
+
+        // SAFETY: Called once during single-threaded boot at `LK_INIT_LEVEL_EARLIEST`, before
+        // `TRANSITION_LOCK` is first acquired at `LK_INIT_LEVEL_PLATFORM`.
+        let Ok(()) = unsafe {
+            Pin::static_ref(&TRANSITION_LOCK).init_pin(pin_init!(TransitionLock {
+                lock <- ksync::KMutex::init(),
+            }))
+        };
+
+        // Initialize and register the resume timer wake event.
+        let mut diagnostics = Diagnostics::new(ZX_KOID_KERNEL);
+        diagnostics.set_extra("suspend timeout");
+        // SAFETY: Called once during single-threaded boot at `LK_INIT_LEVEL_EARLIEST` after
+        // `init_global_list_lock()`. `RESUME_TIMER_WAKE_EVENT` is not yet initialized, lives in
+        // `'static` storage, and is never dropped.
+        unsafe {
+            let Ok(()) = Pin::static_ref(&RESUME_TIMER_WAKE_EVENT).init_pin(WakeEvent::init());
+            Pin::static_ref(RESUME_TIMER_WAKE_EVENT.get_unchecked()).initialize(&diagnostics);
+        }
     } else if level == init::LK_INIT_LEVEL_PLATFORM {
         // Create the `SuspendWakeupTimer` after platform drivers have been initialized. This gives
         // systems which use special timer HW to exit suspend a chance to detect and initialize
         // their hardware before we start to use it.
-        ksync::lock!(let _guard = TransitionLock::get().lock());
+        ksync::lock!(let _guard = TransitionLock::get().lock_lock());
         // SAFETY: Called once at `LK_INIT_LEVEL_PLATFORM` while holding `TransitionLock` before
         // any suspend operation can start; `suspend_all_active` subsequently transitions the boot
         // CPU's `IdlePowerThread::state` with `AcqRel` before the boot CPU's
@@ -1679,69 +1735,6 @@ fn init_hook(level: init::LkInitLevel) {
 
 init::lk_init_hook!(idle_power_thread_earliest, init_hook, init::LK_INIT_LEVEL_EARLIEST);
 init::lk_init_hook!(idle_power_thread_platform, init_hook, init::LK_INIT_LEVEL_PLATFORM);
-
-/// FFI trampoline for [`IdlePowerThread::transition_active_to_offline`].
-///
-/// # Safety
-///
-/// `ipt` must reference a valid initialized per-CPU [`IdlePowerThread`] for a non-boot CPU, and
-/// the caller must execute in a normal thread context where blocking is permitted with no
-/// spinlocks, `TransitionLock`, or active `ChainLockTransaction` held.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_idle_power_thread_transition_active_to_offline(
-    ipt: &IdlePowerThread,
-    timeout_at: zx_instant_mono_t,
-) -> IdlePowerThreadTransitionResult {
-    // SAFETY: Caller upholds all preconditions of `IdlePowerThread::transition_active_to_offline`.
-    unsafe { ipt.transition_active_to_offline(timeout_at) }.into()
-}
-
-/// FFI trampoline for [`IdlePowerThread::transition_offline_to_active`].
-///
-/// # Safety
-///
-/// `ipt` must reference a valid initialized per-CPU [`IdlePowerThread`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_idle_power_thread_transition_offline_to_active(
-    ipt: &IdlePowerThread,
-    timeout_at: zx_instant_mono_t,
-) -> IdlePowerThreadTransitionResult {
-    ipt.transition_offline_to_active(timeout_at).into()
-}
-
-/// FFI trampoline for [`IdlePowerThread::run`].
-///
-/// # Safety
-///
-/// Must be invoked exclusively as the entry point of a per-CPU kernel-only idle/power thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_idle_power_thread_run(arg: *mut c_void) -> c_int {
-    // SAFETY: Caller guarantees this is the per-CPU idle/power thread entry point.
-    unsafe { IdlePowerThread::run(arg) }
-}
-
-/// FFI trampoline for [`IdlePowerThread::flush_and_halt`].
-///
-/// # Safety
-///
-/// Must be called on the unplugging CPU owning `ipt` with interrupts disabled.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_idle_power_thread_flush_and_halt(ipt: &IdlePowerThread) -> ! {
-    // SAFETY: Caller guarantees execution on `ipt`'s unplugging CPU with interrupts disabled.
-    unsafe { ipt.flush_and_halt() }
-}
-
-/// FFI trampoline populating diagnostics for `IdlePowerThread::ResumeTimerWakeVector`.
-///
-/// # Safety
-///
-/// `diagnostics_out` must reference a valid writable [`Diagnostics`] struct.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_resume_timer_wake_vector_get_diagnostics(
-    diagnostics_out: &mut Diagnostics,
-) {
-    resume_timer_wake_vector_get_diagnostics(diagnostics_out);
-}
 
 /// Kernel console command handler for `suspend`.
 ///
@@ -1841,12 +1834,88 @@ crate::console::static_command!(
 #[cfg(ktest)]
 #[unittest::suite(name = "idle_power_thread_rust")]
 mod tests {
-    #[cfg(not(target_arch = "riscv64"))]
-    use crate::kernel::thread::sleep_relative;
-    #[cfg(not(target_arch = "riscv64"))]
-    use unittest::expect_eq;
+    use crate::kernel::thread::{DEFAULT_PRIORITY, create_with_priority, sleep_relative};
     #[cfg(target_arch = "aarch64")]
     use unittest::expect_ne;
+    use unittest::{expect_eq, expect_false, expect_ge, expect_le, expect_true, unwrap_ok};
+    use zx_types::ZX_TIME_INFINITE_PAST;
+
+    /// Verifies that `IdlePowerThread::suspend_system` serializes against `mp::HotplugLock`.
+    #[test]
+    fn suspend_system_serializes_with_hotplug_lock() {
+        struct WorkerState {
+            entered: AtomicBool,
+            completed: AtomicBool,
+            suspend_start: AtomicU64,
+        }
+
+        extern "C" fn worker_entry(arg: *mut c_void) -> c_int {
+            // SAFETY: `arg` points to `state` on the stack of
+            // `suspend_system_serializes_with_hotplug_lock`, which joins this thread before
+            // `state` goes out of scope.
+            let state = unsafe { &*(arg as *const WorkerState) };
+            // `Release` pairs with `Acquire` in the test thread's wait loop.
+            state.entered.store(true, Ordering::Release);
+            // SAFETY: Runs on a normal kernel thread after `LK_INIT_LEVEL_PLATFORM` with no locks
+            // held.
+            let start = unsafe { IdlePowerThread::suspend_system(ZX_TIME_INFINITE_PAST) };
+            // `Relaxed` suffices because `completed.store(..., Release)` below publishes `start`.
+            state.suspend_start.store(start as u64, Ordering::Relaxed);
+            // `Release` pairs with `Acquire` loads of `completed` (and `worker.join`) on the test
+            // thread.
+            state.completed.store(true, Ordering::Release);
+            0
+        }
+
+        let had_unreported = WakeEvent::has_pending_wake_events();
+        let _cleanup = zr::defer(|| {
+            if !had_unreported {
+                WakeEvent::discard_wake_event_report();
+            }
+        });
+
+        let before = current_boot_time().0;
+        let state = WorkerState {
+            entered: AtomicBool::new(false),
+            completed: AtomicBool::new(false),
+            suspend_start: AtomicU64::new(0),
+        };
+        let state_ref = &state;
+
+        let worker = {
+            ksync::lock!(let _hotplug_guard = mp::HotplugLock::get().lock());
+
+            // SAFETY: `worker_entry` and `state_ref` are valid, and `worker` is joined below
+            // before `state` goes out of scope.
+            let worker = unwrap_ok!(unsafe {
+                create_with_priority(
+                    c"suspend_hotplug_lock".as_ptr(),
+                    worker_entry,
+                    (&raw const *state_ref).cast_mut().cast::<c_void>(),
+                    DEFAULT_PRIORITY,
+                )
+            });
+            // SAFETY: `worker` was just created and has not been resumed or joined yet.
+            unsafe { worker.resume() };
+
+            while !state_ref.entered.load(Ordering::Acquire) {
+                let _ = sleep_relative(DurationMono(zx_usec(200)));
+            }
+            // Give the worker thread time to reach `HotplugLock::lock()` and verify it cannot
+            // complete `suspend_system` while `_hotplug_guard` is held.
+            let _ = sleep_relative(DurationMono(zx_msec(10)));
+            expect_false!(state_ref.completed.load(Ordering::Acquire));
+            worker
+        };
+
+        // SAFETY: `worker` was created above and has not been joined yet.
+        let ret = unwrap_ok!(unsafe { worker.join(InstantMono::INFINITE) });
+        expect_eq!(ret, 0);
+        expect_true!(state_ref.completed.load(Ordering::Acquire));
+        let suspend_start = state_ref.suspend_start.load(Ordering::Relaxed) as zx_instant_boot_t;
+        expect_ge!(suspend_start, before);
+        expect_le!(suspend_start, current_boot_time().0);
+    }
 
     /// Verifies that `SuspendMode::System` restores all active CPUs after system suspend/resume.
     #[test]
@@ -1876,13 +1945,16 @@ mod tests {
             let online_before = mp::get_online_mask();
             let active_before = peek_active_mask();
 
-            // SAFETY: Kernel unit tests run in normal thread context after
-            // `LK_INIT_LEVEL_PLATFORM` with no locks held.
-            unsafe {
-                IdlePowerThread::suspend_all_active(
-                    current_boot_time().0.saturating_add(zx_msec(100)),
-                    SuspendMode::System,
-                );
+            {
+                ksync::lock!(let hotplug_guard = mp::HotplugLock::get().lock());
+                // SAFETY: Kernel unit tests run in normal thread context after
+                // `LK_INIT_LEVEL_PLATFORM` with no other locks held.
+                unsafe {
+                    IdlePowerThread::suspend_all_active(
+                        current_boot_time().0.saturating_add(zx_msec(100)),
+                        SuspendMode::System(hotplug_guard.token()),
+                    );
+                }
             }
 
             // `suspend_all_active` waits for each CPU's idle/power thread to become active again,
@@ -1904,8 +1976,7 @@ mod tests {
                 // that may have powered down. PSTATE.PAN is not saved and restored per-thread, so
                 // if a CPU had resumed with PAN clear, the threads it switches to would observe it
                 // clear as well. Run on each CPU and check.
-                // SAFETY: `arm64_feature_init` on the boot CPU completed during `arch_early_init`.
-                if unsafe { crate::arch_rs::arm64::arm64_mmu_features_pan() } {
+                if crate::arch_rs::arm64::arm64_mmu_features_pan() {
                     // SAFETY: Called from normal thread context with no spinlocks held.
                     let previous_affinity = unsafe { ThreadPtr::current().get_cpu_affinity() };
                     let _restore = zr::defer(move || {
@@ -1919,12 +1990,10 @@ mod tests {
                         // SAFETY: Pins the test thread to `cpu` with no spinlocks held.
                         let _ =
                             unsafe { ThreadPtr::current().set_cpu_affinity(cpu_num_to_mask(cpu)) };
-                        let pan: u64;
-                        // SAFETY: Reading `S3_0_C4_C2_3` (`PAN`) is valid at EL1 when
-                        // `arm64_mmu_features.pan` is true.
-                        unsafe {
-                            core::arch::asm!("mrs {}, s3_0_c4_c2_3", out(reg) pan);
-                        }
+                        // SAFETY: `arm64_mmu_features_pan()` confirmed `FEAT_PAN` is supported on
+                        // every online CPU, and kernel code executes at EL1 or higher
+                        // (`CurrentEL.EL >= 1`).
+                        let pan = unsafe { crate::arch_rs::arm64::arm64_read_pan() };
                         if pan == 0 {
                             kprintln!("PSTATE.PAN is clear on CPU {}", cpu);
                         }

@@ -12,13 +12,11 @@ assert(current_cpu == "riscv64",
        "The riscv64 board can only be defined in an riscv64 toolchain.")
 
 bazel_board_configuration("riscv64") {
-  testonly = true
   bazel_board_configuration_target = "//boards/riscv64"
   deps = [ ":riscv64.bazel_input" ]
 }
 
 group("riscv64.bazel_input") {
-  testonly = true
   deps = [
     ":main_bundle.bazel_inputs",
     "//boards/emulation/virtio:virtio.bazel_inputs",

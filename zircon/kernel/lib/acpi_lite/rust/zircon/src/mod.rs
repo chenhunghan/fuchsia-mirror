@@ -98,7 +98,7 @@ impl PhysMemReader for ZirconPhysmemReader {
 
         let root_vmar = kernel_aspace.root_vmar().ok_or(Status::BAD_STATE)?;
 
-        let map_result = root_vmar.create_vm_mapping(
+        let map_result = root_vmar.create_vm_mapping_no_overwrite(
             0,
             size,
             0,
@@ -106,7 +106,6 @@ impl PhysMemReader for ZirconPhysmemReader {
             vmo,
             0,
             ARCH_MMU_FLAG_PERM_READ,
-            b"acpi",
         )?;
 
         if let Err(err) = map_result.mapping.map_range(0, size, true, false) {

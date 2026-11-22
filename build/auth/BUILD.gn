@@ -11,9 +11,11 @@ if (is_host) {
     testonly = true
     deps = [
       ":apt_test($host_toolchain)",
+      ":auth_env_test($host_toolchain)",
       ":bazel_tests",
       ":gcloud_creds_test($host_toolchain)",
       ":gcloud_test($host_toolchain)",
+      ":loas_test($host_toolchain)",
       ":select_auth_method_test($host_toolchain)",
     ]
   }
@@ -21,14 +23,22 @@ if (is_host) {
   bazel_test_suite("bazel_tests") {
     host_tests = [
       "//build/auth:apt_test",
+      "//build/auth:auth_env_test",
       "//build/auth:gcloud_creds_test",
       "//build/auth:gcloud_test",
+      "//build/auth:loas_test",
       "//build/auth:select_auth_method_test",
     ]
   }
 
   # GN copies of the host_py_test() targets in BUILD.bazel, which bazel2gn
   # can't translate yet. These run the same tests at build time.
+  python_build_time_tests("auth_env_test") {
+    tests = [ "auth_env_test.py" ]
+    inputs = [ "auth_env.py" ]
+    deps = [ ":auth_env" ]
+  }
+
   python_build_time_tests("apt_test") {
     tests = [ "apt_test.py" ]
     inputs = [ "apt.py" ]
@@ -51,13 +61,19 @@ if (is_host) {
     ]
   }
 
+  python_build_time_tests("loas_test") {
+    tests = [ "loas_test.py" ]
+    inputs = [ "loas.py" ]
+    deps = [ ":loas" ]
+  }
+
   python_build_time_tests("select_auth_method_test") {
     tests = [ "select_auth_method_test.py" ]
-    inputs = [
-      "select_auth_method.py",
-      "gcloud.py",
+    deps = [
+      ":gcloud",
+      ":loas",
+      ":select_auth_method",
     ]
-    deps = [ ":select_auth_method" ]
   }
 } else {
   # If evaluated on the target toolchain (e.g. via fx add-test), redirect the
@@ -94,12 +110,33 @@ if (is_host) {
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 if (is_host) {
+  python_library("auth_env") {
+    sources = [ "auth_env.py" ]
+    visibility = [
+      ":*",
+      "//build/bazel/scripts:*",
+      "//build/rbe:*",
+      "//build/resultstore:*",
+      "//build/scripts:*",
+      "//tools/devshell/fx_cli:*",
+    ]
+    deps = [
+      ":gcloud",
+      ":gcloud_creds",
+      ":loas",
+      ":select_auth_method",
+    ]
+    enable_mypy = false
+  }
+}
+if (is_host) {
   python_library("apt") {
     sources = [ "apt.py" ]
     visibility = [
       ":*",
       "//build/scripts:*",
     ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -110,6 +147,7 @@ if (is_host) {
       "//build/scripts:*",
     ]
     deps = [ ":apt" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -123,6 +161,15 @@ if (is_host) {
       ":apt",
       ":gcloud",
     ]
+    enable_mypy = false
+  }
+}
+if (is_host) {
+  python_library("loas") {
+    sources = [ "loas.py" ]
+    visibility = [ ":*" ]
+    deps = [ "//build/rbe:textpb" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
@@ -132,6 +179,10 @@ if (is_host) {
       ":*",
       "//build/scripts:*",
     ]
-    deps = [ ":gcloud" ]
+    deps = [
+      ":gcloud",
+      ":loas",
+    ]
+    enable_mypy = false
   }
 }

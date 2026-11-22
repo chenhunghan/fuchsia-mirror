@@ -33,6 +33,8 @@ failure_mode_checks:
   - kind: "string_in_log"
     string: "cas: failed to call UploadIfMissing"
     infra_failure: true
+    category: "infra"
+    infra_domain: "tools"
     log_types:
       - swarmingOutputType
     only_on_states:
@@ -110,6 +112,8 @@ failure_mode_checks:
 			String:          "cas: failed to call UploadIfMissing",
 			Type:            swarmingOutputType,
 			InfraFailure:    true,
+			FailureCategory: runtests.CategoryInfra,
+			Domain:          runtests.InfraDomainTools,
 			OnlyOnStates:    []string{"BOT_DIED"},
 			SkipPassedTest:  true,
 			IgnoreFlakes:    true,
@@ -209,6 +213,21 @@ func TestLoadChecksFromYAML_Errors(t *testing.T) {
 			name:    "unknown log type",
 			yaml:    "failure_mode_checks: [{kind: 'string_in_log', string: 'error', log_types: ['invalidLogType']}]",
 			wantErr: "invalid log type",
+		},
+		{
+			name:    "invalid category",
+			yaml:    "failure_mode_checks: [{kind: 'string_in_log', string: 'error', category: 'bogus', log_types: ['swarmingOutputType']}]",
+			wantErr: "invalid 'category'",
+		},
+		{
+			name:    "contradictory infra_failure and category",
+			yaml:    "failure_mode_checks: [{kind: 'string_in_log', string: 'error', infra_failure: true, category: 'system_or_test', log_types: ['swarmingOutputType']}]",
+			wantErr: "cannot set both 'infra_failure: true'",
+		},
+		{
+			name:    "invalid infra_domain",
+			yaml:    "failure_mode_checks: [{kind: 'string_in_log', string: 'error', category: 'infra', infra_domain: 'network', log_types: ['swarmingOutputType']}]",
+			wantErr: "invalid 'infra_domain'",
 		},
 	}
 
@@ -356,7 +375,7 @@ func TestFastbootAndHealthCheckOrdering(t *testing.T) {
 						},
 					},
 				}
-				got, err := RunChecks(checks, &to, "")
+				got, _, err := RunChecks(checks, &to, "")
 				if err != nil {
 					t.Fatalf("RunChecks failed: %v", err)
 				}
@@ -380,7 +399,7 @@ func TestFastbootAndHealthCheckOrdering(t *testing.T) {
 						},
 					},
 				}
-				got, err := RunChecks(checks, &passedTo, "")
+				got, _, err := RunChecks(checks, &passedTo, "")
 				if err != nil {
 					t.Fatalf("RunChecks on passed task failed: %v", err)
 				}
@@ -535,7 +554,7 @@ func TestGoCrashChecks(t *testing.T) {
 					},
 				},
 			}
-			got, err := RunChecks(checks, &to, "")
+			got, _, err := RunChecks(checks, &to, "")
 			if err != nil {
 				t.Fatalf("RunChecks failed: %v", err)
 			}
@@ -559,6 +578,191 @@ func TestGoCrashChecks(t *testing.T) {
 				if gotReason := got[0].TestResult.FailureReason.Errors[0].Message; gotReason != tc.wantFailureReason {
 					t.Errorf("FailureReason.Errors[0].Message = %q, want %q", gotReason, tc.wantFailureReason)
 				}
+			}
+		})
+	}
+}
+
+func TestRustTufErrorCheck(t *testing.T) {
+	checks, err := LoadChecksFromYAML(embeddedCheckConfigsYAML)
+	if err != nil {
+		t.Fatalf("LoadChecksFromYAML failed: %v", err)
+	}
+
+	const (
+		tufErrorCheckName = "testing_failure_mode/string_in_log/infra_and_test_std_and_klog.txt/rust_tuf_error"
+		tufErrorLine      = "[00334.970744][pkg-resolver] WARN: failed to resolve fuchsia-pkg://example.com/just_meta_far: rust tuf error: metadata root at version 1 not found"
+		passedTufTest     = "fuchsia-pkg://fuchsia.com/pkg-resolver-integration-tests#meta/metrics.cm"
+		failedOtherTest   = "fuchsia-pkg://fuchsia.com/pkgctl-tests#meta/pkgctl-tests.cm"
+	)
+
+	t.Run("skips rust tuf error logged by passed test when another test fails", func(t *testing.T) {
+		test0Log := tufErrorLine + "\n"
+		test1Log := "unrelated failure\n"
+		fullLog := test0Log + test1Log
+		summary := runtests.TestSummary{
+			Tests: []runtests.TestDetails{
+				{
+					Name:   passedTufTest,
+					Status: runtests.TestSuccess,
+				},
+				{
+					Name:   failedOtherTest,
+					Status: runtests.TestFailure,
+					TestResult: runtests.TestResult{
+						FailureReason: runtests.FailureReasonFromMessage("timed out"),
+					},
+				},
+			},
+		}
+		to := TestingOutputs{
+			TestSummary:    &summary,
+			SwarmingOutput: []byte(fullLog),
+			SwarmingOutputPerTest: []TestLog{
+				{
+					TestName: passedTufTest,
+					Bytes:    []byte(test0Log),
+					FilePath: "test0/stdio.txt",
+					Index:    0,
+				},
+				{
+					TestName: failedOtherTest,
+					Bytes:    []byte(test1Log),
+					FilePath: "test1/stdio.txt",
+					Index:    len(test0Log),
+				},
+			},
+			SwarmingSummary: &SwarmingTaskSummary{
+				Results: &SwarmingRpcsTaskResult{
+					TaskId:  "task-123",
+					State:   "COMPLETED",
+					Failure: true,
+				},
+			},
+		}
+		got, _, err := RunChecks(checks, &to, "")
+		if err != nil {
+			t.Fatalf("RunChecks failed: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("expected no matches when rust tuf error is in a passed test, got %+v", got)
+		}
+		if gotErrors := summary.Tests[1].FailureReason.Errors; len(gotErrors) != 1 || gotErrors[0].Message != "timed out" {
+			t.Errorf("sibling failing test FailureReason.Errors = %+v, want only original error", gotErrors)
+		}
+	})
+
+	t.Run("matches and attributes rust tuf error when logged by failed test", func(t *testing.T) {
+		test0Log := tufErrorLine + "\n"
+		summary := runtests.TestSummary{
+			Tests: []runtests.TestDetails{
+				{
+					Name:   failedOtherTest,
+					Status: runtests.TestFailure,
+					TestResult: runtests.TestResult{
+						FailureReason: runtests.FailureReasonFromMessage("test failed"),
+					},
+				},
+			},
+		}
+		to := TestingOutputs{
+			TestSummary:    &summary,
+			SwarmingOutput: []byte(test0Log),
+			SwarmingOutputPerTest: []TestLog{
+				{
+					TestName: failedOtherTest,
+					Bytes:    []byte(test0Log),
+					FilePath: "test0/stdio.txt",
+					Index:    0,
+				},
+			},
+			SwarmingSummary: &SwarmingTaskSummary{
+				Results: &SwarmingRpcsTaskResult{
+					TaskId:  "task-123",
+					State:   "COMPLETED",
+					Failure: true,
+				},
+			},
+		}
+		got, _, err := RunChecks(checks, &to, "")
+		if err != nil {
+			t.Fatalf("RunChecks failed: %v", err)
+		}
+		if len(got) != 1 || got[0].Name != tufErrorCheckName {
+			t.Fatalf("RunChecks() = %+v, want single check %q", got, tufErrorCheckName)
+		}
+		wantTags := []build.TestTag{{Key: "test_name", Value: failedOtherTest}}
+		if diff := cmp.Diff(wantTags, got[0].Tags); diff != "" {
+			t.Errorf("Tags diff (-want +got):\n%s", diff)
+		}
+		if gotErrors := summary.Tests[0].FailureReason.Errors; len(gotErrors) != 2 || gotErrors[1].Message != tufErrorLine {
+			t.Errorf("failing test FailureReason.Errors = %+v, want enriched with %q", gotErrors, tufErrorLine)
+		}
+	})
+}
+
+func TestSerialSocketBrokenPipeCheck(t *testing.T) {
+	checks, err := LoadChecksFromYAML(embeddedCheckConfigsYAML)
+	if err != nil {
+		t.Fatalf("LoadChecksFromYAML failed: %v", err)
+	}
+
+	const (
+		brokenPipeLine  = "attempting to reconnect after error: failed to write to serial socket: write unix /tmp/serial.sock: write: broken pipe\n"
+		brokenPipeCheck = "testing_failure_mode/string_in_log/infra_and_test_std_and_klog.txt/.sock:_write:_broken_pipe"
+	)
+
+	cases := []struct {
+		name     string
+		log      string
+		failure  bool
+		wantName string
+	}{
+		{
+			name:     "skips passed task after recovery",
+			log:      brokenPipeLine,
+			failure:  false,
+			wantName: "",
+		},
+		{
+			name:     "yields to more specific Category 3 check when shard later fails",
+			log:      brokenPipeLine + "botanist ERROR: Command exceeded timeout\n",
+			failure:  true,
+			wantName: "testing_failure_mode/string_in_log/infra_and_test_std_and_klog.txt/botanist_ERROR:_Command_exceeded_timeout",
+		},
+		{
+			name:     "matches before Category 4 botanist failed catch-all",
+			log:      brokenPipeLine + "botanist ERROR: botanist failed: failed to write to serial socket\n",
+			failure:  true,
+			wantName: brokenPipeCheck,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			to := TestingOutputs{
+				SwarmingOutput: []byte(tc.log),
+				TestSummary:    &runtests.TestSummary{},
+				SwarmingSummary: &SwarmingTaskSummary{
+					Results: &SwarmingRpcsTaskResult{
+						TaskId:  "task-123",
+						State:   "COMPLETED",
+						Failure: tc.failure,
+					},
+				},
+			}
+			got, _, err := RunChecks(checks, &to, "")
+			if err != nil {
+				t.Fatalf("RunChecks failed: %v", err)
+			}
+			if tc.wantName == "" {
+				if len(got) != 0 {
+					t.Errorf("RunChecks() = %+v, want no matches", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Name != tc.wantName {
+				t.Errorf("RunChecks() = %+v, want single check %q", got, tc.wantName)
 			}
 		})
 	}

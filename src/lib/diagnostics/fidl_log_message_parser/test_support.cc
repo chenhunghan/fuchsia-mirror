@@ -30,27 +30,27 @@ const char kTagsLabel[] = "tags";
 const char kMessageLabel[] = "value";
 const char kVerbosityLabel[] = "verbosity";
 
-inline fuchsia::logger::LogLevelFilter StringToSeverity(const std::string& input) {
+inline fuchsia_logger::LogLevelFilter StringToSeverity(const std::string& input) {
   if (strcasecmp(input.c_str(), "trace") == 0) {
-    return fuchsia::logger::LogLevelFilter::TRACE;
+    return fuchsia_logger::LogLevelFilter::kTrace;
   }
   if (strcasecmp(input.c_str(), "debug") == 0) {
-    return fuchsia::logger::LogLevelFilter::DEBUG;
+    return fuchsia_logger::LogLevelFilter::kDebug;
   }
   if (strcasecmp(input.c_str(), "info") == 0) {
-    return fuchsia::logger::LogLevelFilter::INFO;
+    return fuchsia_logger::LogLevelFilter::kInfo;
   }
   if (strcasecmp(input.c_str(), "warn") == 0 || strcasecmp(input.c_str(), "warning") == 0) {
-    return fuchsia::logger::LogLevelFilter::WARN;
+    return fuchsia_logger::LogLevelFilter::kWarn;
   }
   if (strcasecmp(input.c_str(), "error") == 0) {
-    return fuchsia::logger::LogLevelFilter::ERROR;
+    return fuchsia_logger::LogLevelFilter::kError;
   }
   if (strcasecmp(input.c_str(), "fatal") == 0) {
-    return fuchsia::logger::LogLevelFilter::FATAL;
+    return fuchsia_logger::LogLevelFilter::kFatal;
   }
 
-  return fuchsia::logger::LOG_LEVEL_DEFAULT;
+  return fuchsia_logger::kLogLevelDefault;
 }
 
 std::string GetComponentName(const std::string& moniker) {
@@ -66,7 +66,7 @@ std::string GetComponentName(const std::string& moniker) {
 
 struct ParsedJsonLog {
   zx::basic_time<ZX_CLOCK_BOOT> timestamp{0};
-  int32_t severity{static_cast<int32_t>(fuchsia::logger::LogLevelFilter::INFO)};
+  int32_t severity{static_cast<int32_t>(fuchsia_logger::LogLevelFilter::kInfo)};
   uint64_t pid{0};
   uint64_t tid{0};
   std::vector<std::string> tags;
@@ -367,21 +367,22 @@ std::vector<zx::vmo> EncodeJsonBatchToFxtVmos(const std::vector<std::string>& js
   return vmos;
 }
 
-fpromise::result<std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>>,
+fpromise::result<std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>>,
                  std::string>
-ConvertFormattedContentForTest(fuchsia::diagnostics::FormattedContent content) {
-  if (content.is_fxt()) {
+ConvertFormattedContentForTest(fuchsia_diagnostics::FormattedContent content) {
+  if (content.fxt().has_value()) {
     return fidl_log_message_parser::ConvertFormattedContentToLogMessages(std::move(content));
   }
-  if (!content.is_json()) {
+  if (!content.json().has_value()) {
     return fpromise::error("Expected json or FXT content");
   }
 
+  fsl::SizedVmo sized_vmo(std::move(content.json()->vmo()), content.json()->size());
   std::string data;
-  if (!fsl::StringFromVmo(content.json(), &data)) {
+  if (!fsl::StringFromVmo(sized_vmo, &data)) {
     return fpromise::error("Failed to read string from VMO");
   }
-  content.json().vmo.reset();
+  sized_vmo.vmo().reset();
 
   rapidjson::Document d;
   d.Parse(std::move(data));
@@ -396,7 +397,7 @@ ConvertFormattedContentForTest(fuchsia::diagnostics::FormattedContent content) {
     return fpromise::error("Expected content to contain an array");
   }
 
-  std::vector<fpromise::result<fuchsia::logger::LogMessage, std::string>> output;
+  std::vector<fpromise::result<fuchsia_logger::LogMessage, std::string>> output;
   for (rapidjson::SizeType i = 0; i < d.Size(); ++i) {
     auto parsed = ParseSingleJsonLog(d[i]);
     if (parsed.is_error()) {
@@ -421,10 +422,8 @@ ConvertFormattedContentForTest(fuchsia::diagnostics::FormattedContent content) {
       output.emplace_back(fpromise::error("Failed to set content size on FXT VMO"));
       continue;
     }
-    fuchsia::diagnostics::FormattedContent fxt_content;
-    fxt_content.set_fxt(std::move(vmo));
-    auto decoded_results =
-        fidl_log_message_parser::ConvertFormattedContentToLogMessages(std::move(fxt_content));
+    auto decoded_results = fidl_log_message_parser::ConvertFormattedContentToLogMessages(
+        fuchsia_diagnostics::FormattedContent::WithFxt(std::move(vmo)));
     if (decoded_results.is_error()) {
       output.emplace_back(fpromise::error(decoded_results.error()));
     } else if (decoded_results.value().empty()) {

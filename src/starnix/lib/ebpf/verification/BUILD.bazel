@@ -1,0 +1,60 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/testing/formal_verification:rust_lean_verification_test.bzl",
+    "rust_lean_verification_test",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rust_lean_verification_test(
+    name = "ebpf_verification_test",
+    assumptions_lean = "spec/Assumptions.lean",
+    charon_excludes = [
+        "ebpf_core::_::{impl core::fmt::Debug for _}",
+        "ebpf_core::_::{impl core::fmt::Display for _}",
+        "ebpf_core::_::{impl core::error::Error for _}",
+        "core::fmt",
+        "core::error",
+    ],
+    contract_lean = "spec/Contract.lean",
+    contract_lean_target = "StarnixEbpfContract",
+    crate_name = "ebpf_core",
+    crate_srcs = [
+        "//src/starnix/lib/ebpf:core/src/api.rs",
+        "//src/starnix/lib/ebpf:core/src/converter.rs",
+        "//src/starnix/lib/ebpf:core/src/error.rs",
+        "//src/starnix/lib/ebpf:core/src/executor.rs",
+        "//src/starnix/lib/ebpf:core/src/lib.rs",
+        "//src/starnix/lib/ebpf:core/src/maps.rs",
+        "//src/starnix/lib/ebpf:core/src/program.rs",
+        "//src/starnix/lib/ebpf:core/src/scalar_value.rs",
+        "//src/starnix/lib/ebpf:core/src/verifier.rs",
+        "//src/starnix/lib/ebpf:core/src/visitor.rs",
+    ],
+    lakefile = "lakefile.lean",
+    proof_lean = [
+        "proof/Proof.lean",
+        "proof/Proof/AluAndJumpSoundness.lean",
+        "proof/Proof/ApiConverterLinkerExec.lean",
+        "proof/Proof/AtomicPacketSoundness.lean",
+        "proof/Proof/ComputationCtxOps.lean",
+        "proof/Proof/CondJumpSoundness.lean",
+        "proof/Proof/CtxContainers.lean",
+        "proof/Proof/DecodeAndPrescan.lean",
+        "proof/Proof/HelperAndLddwSoundness.lean",
+        "proof/Proof/InsnAluEndExit.lean",
+        "proof/Proof/LoopLemmas.lean",
+        "proof/Proof/MemLoadStoreSoundness.lean",
+        "proof/Proof/ScalarAlu.lean",
+        "proof/Proof/ScalarBase.lean",
+        "proof/Proof/ScalarProofs.lean",
+        "proof/Proof/StackAndCtxOps.lean",
+        "proof/Proof/StateInvariant.lean",
+        "proof/Proof/SubsumptionAndTopLevel.lean",
+    ],
+    spec_lean = "spec/Spec.lean",
+    visibility = ["//src/starnix/lib:__pkg__"],
+)

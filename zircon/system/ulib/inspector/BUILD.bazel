@@ -2,8 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules:zx_library.bzl", "cc_shared_library_zx")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl", "fx_cc_shared_library_zx")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -14,7 +14,7 @@ package(default_applicable_licenses = ["//:license"])
 # TODO(https://fxbug.dev/582031294): Support the frame pointer configs directly
 # without a `raw_attribute` override.
 # @bazel2gn:raw_attribute:if (configs + [ "//build/config:default_frame_pointers" ] - [ "//build/config:default_frame_pointers" ] != configs) { configs -= [ "//build/config:default_frame_pointers" ] configs += [ "//build/config:frame_pointers" ] }
-cc_shared_library_zx(
+fx_cc_shared_library_zx(
     name = "inspector",
     srcs = [
         "backtrace.cc",
@@ -28,7 +28,7 @@ cc_shared_library_zx(
     # TODO(https://fxbug.dev/582031294): GN conditionally swaps
     # `//build/config:default_frame_pointers` for `//build/config:frame_pointers`
     # via the `raw_attribute` directive above; Bazel enables frame pointers
-    # directly via `copts` due to gaps in `cc_shared_library_zx`.
+    # directly via `copts` due to gaps in `fx_cc_shared_library_zx`.
     # @bazel2gn:skip
     copts = ["-fno-omit-frame-pointer"],
     implementation_deps = [

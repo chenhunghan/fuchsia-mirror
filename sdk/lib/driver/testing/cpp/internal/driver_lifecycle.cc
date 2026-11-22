@@ -34,6 +34,9 @@ DriverUnderTestBase::DriverUnderTestBase(DriverRegistration driver_registration_
       driver_owner_(fdf_env_get_current_driver()),
       checker_(fdf_dispatcher_get_async_dispatcher(driver_dispatcher_)),
       driver_registration_symbol_(driver_registration_symbol) {
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  fdf_env_register_resume_requester(driver_owner_, &resume_requester_);
+#endif
   auto [client_end, server_end] = fdf::Endpoints<fuchsia_driver_framework::Driver>::Create();
   void* token = driver_registration_symbol_.v1.initialize(server_end.TakeHandle().release());
 #if FUCHSIA_API_LEVEL_AT_LEAST(32)
@@ -46,6 +49,9 @@ DriverUnderTestBase::DriverUnderTestBase(DriverRegistration driver_registration_
 }
 
 DriverUnderTestBase::~DriverUnderTestBase() {
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  fdf_env_register_resume_requester(driver_owner_, nullptr);
+#endif
   if (token_.has_value()) {
     driver_registration_symbol_.v1.destroy(token_.value());
   }
@@ -97,9 +103,20 @@ DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::Start(
 DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::PrepareStop() {
   std::lock_guard guard(checker_);
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  fdf_env_register_resume_requester(driver_owner_, nullptr);
   // Ensure the driver's dispatchers are resumed before calling Stop in case a previous suspend or
   // resume transition failed and left them suspended.
   fdf_env_driver_resume(driver_owner_);
+  std::optional<fpromise::completer<zx::result<>>> resume_completer;
+  {
+    std::lock_guard lock(resume_request_mutex_);
+    resume_requested_ = false;
+    resume_completer = std::move(resume_request_completer_);
+    resume_request_completer_.reset();
+  }
+  if (resume_completer.has_value()) {
+    resume_completer->complete_ok(zx::error(ZX_ERR_CANCELED));
+  }
 #endif
   fpromise::bridge<zx::result<>> bridge;
   stop_completer_.emplace(std::move(bridge.completer));
@@ -111,6 +128,9 @@ DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::PrepareStop() {
 
 zx::result<> DriverUnderTestBase::Stop() {
   ZX_ASSERT(token_.has_value());
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  fdf_env_register_resume_requester(driver_owner_, nullptr);
+#endif
   driver_registration_symbol_.v1.destroy(token_.value());
   token_.reset();
   return zx::ok();
@@ -153,8 +173,29 @@ size_t DriverUnderTestBase::PendingHealthAlertCount() const {
 }
 
 #if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+// static
+zx_status_t DriverUnderTestBase::OnResumeRequested(fdf_env_resume_requester_t* requester) {
+  auto* self = static_cast<ResumeRequester*>(requester)->owner;
+  std::optional<fpromise::completer<zx::result<>>> completer;
+  {
+    std::lock_guard lock(self->resume_request_mutex_);
+    self->resume_requested_ = true;
+    completer = std::move(self->resume_request_completer_);
+    self->resume_request_completer_.reset();
+  }
+  if (completer.has_value()) {
+    completer->complete_ok(zx::ok());
+  }
+  return ZX_OK;
+}
+
 DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::Suspend() {
   std::lock_guard guard(checker_);
+  {
+    std::lock_guard lock(resume_request_mutex_);
+    resume_requested_ = false;
+    resume_request_completer_.reset();
+  }
   fpromise::bridge<zx::result<>> bridge;
   fdf_dispatcher_t* always_on_dispatcher =
       fdf_dispatcher_get_always_on_dispatcher(driver_dispatcher_);
@@ -186,6 +227,25 @@ DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::Suspend() {
   return DriverRuntime::AsyncTask<zx::result<>>(bridge.consumer.promise());
 }
 
+DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::WaitForResumeRequest() {
+  fpromise::bridge<zx::result<>> bridge;
+  bool already_requested = false;
+  {
+    std::lock_guard lock(resume_request_mutex_);
+    if (resume_requested_) {
+      already_requested = true;
+    } else {
+      ZX_ASSERT_MSG(!resume_request_completer_.has_value(),
+                    "WaitForResumeRequest is already pending.");
+      resume_request_completer_.emplace(std::move(bridge.completer));
+    }
+  }
+  if (already_requested) {
+    bridge.completer.complete_ok(zx::ok());
+  }
+  return DriverRuntime::AsyncTask<zx::result<>>(bridge.consumer.promise());
+}
+
 DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::Resume(
     std::optional<fuchsia_power_broker::LeaseToken> power_element_lease) {
   std::lock_guard guard(checker_);
@@ -208,6 +268,10 @@ DriverRuntime::AsyncTask<zx::result<>> DriverUnderTestBase::Resume(
         }
 
         fdf_env_driver_resume(driver_owner_);
+        {
+          std::lock_guard lock(resume_request_mutex_);
+          resume_requested_ = false;
+        }
         completer(zx::ok());
       });
 

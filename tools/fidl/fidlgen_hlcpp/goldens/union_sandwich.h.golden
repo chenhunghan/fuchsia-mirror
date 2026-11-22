@@ -43,10 +43,10 @@ class UnionSize8Alignment4 final {
 
   static UnionSize8Alignment4 WithVariant(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kVariant = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionSize8Alignment4> New();
@@ -79,7 +79,7 @@ class UnionSize8Alignment4 final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -87,9 +87,9 @@ class UnionSize8Alignment4 final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid);
   union {
     uint32_t variant_;
   };
@@ -139,10 +139,10 @@ class UnionSize12Alignment4 final {
 
   static UnionSize12Alignment4 WithVariant(::std::array<uint8_t, 6>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kVariant = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionSize12Alignment4> New();
@@ -175,7 +175,7 @@ class UnionSize12Alignment4 final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -183,9 +183,9 @@ class UnionSize12Alignment4 final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid);
   union {
     ::std::array<uint8_t, 6> variant_;
   };
@@ -258,10 +258,10 @@ class UnionSize24Alignment8 final {
 
   static UnionSize24Alignment8 WithVariant(::test::unionsandwich::StructSize16Alignment8&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kVariant = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionSize24Alignment8> New();
@@ -294,7 +294,7 @@ class UnionSize24Alignment8 final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -302,9 +302,9 @@ class UnionSize24Alignment8 final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid);
   union {
     ::test::unionsandwich::StructSize16Alignment8 variant_;
   };
@@ -354,10 +354,10 @@ class UnionSize36Alignment4 final {
 
   static UnionSize36Alignment4 WithVariant(::std::array<uint8_t, 32>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kVariant = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionSize36Alignment4> New();
@@ -390,7 +390,7 @@ class UnionSize36Alignment4 final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -398,9 +398,9 @@ class UnionSize36Alignment4 final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid);
   union {
     ::std::array<uint8_t, 32> variant_;
   };
@@ -443,7 +443,7 @@ using SandwichUnionSize36Alignment4Ptr = ::std::unique_ptr<SandwichUnionSize36Al
 namespace fidl {
 
 template <>
-struct IsFidlXUnion<::test::unionsandwich::UnionSize8Alignment4> : public std::true_type {};
+struct IsFidlUnion<::test::unionsandwich::UnionSize8Alignment4> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::unionsandwich::UnionSize8Alignment4>
@@ -455,9 +455,9 @@ struct CodingTraits<std::unique_ptr<::test::unionsandwich::UnionSize8Alignment4>
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::unionsandwich::UnionSize8Alignment4>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -487,7 +487,7 @@ struct Equality<::test::unionsandwich::UnionSize8Alignment4> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize8Alignment4::Tag::Invalid):
         return true;
       case ::test::unionsandwich::UnionSize8Alignment4::Tag::kVariant:
         return ::fidl::Equals(_lhs.variant_, _rhs.variant_);
@@ -529,7 +529,7 @@ struct Equality<::test::unionsandwich::SandwichUnionSize8Alignment4> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::unionsandwich::UnionSize12Alignment4> : public std::true_type {};
+struct IsFidlUnion<::test::unionsandwich::UnionSize12Alignment4> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::unionsandwich::UnionSize12Alignment4>
@@ -541,9 +541,9 @@ struct CodingTraits<std::unique_ptr<::test::unionsandwich::UnionSize12Alignment4
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::unionsandwich::UnionSize12Alignment4>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -573,7 +573,7 @@ struct Equality<::test::unionsandwich::UnionSize12Alignment4> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize12Alignment4::Tag::Invalid):
         return true;
       case ::test::unionsandwich::UnionSize12Alignment4::Tag::kVariant:
         return ::fidl::Equals(_lhs.variant_, _rhs.variant_);
@@ -640,7 +640,7 @@ struct Equality<::test::unionsandwich::StructSize16Alignment8> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::unionsandwich::UnionSize24Alignment8> : public std::true_type {};
+struct IsFidlUnion<::test::unionsandwich::UnionSize24Alignment8> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::unionsandwich::UnionSize24Alignment8>
@@ -652,9 +652,9 @@ struct CodingTraits<std::unique_ptr<::test::unionsandwich::UnionSize24Alignment8
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::unionsandwich::UnionSize24Alignment8>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -684,7 +684,7 @@ struct Equality<::test::unionsandwich::UnionSize24Alignment8> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize24Alignment8::Tag::Invalid):
         return true;
       case ::test::unionsandwich::UnionSize24Alignment8::Tag::kVariant:
         return ::fidl::Equals(_lhs.variant_, _rhs.variant_);
@@ -726,7 +726,7 @@ struct Equality<::test::unionsandwich::SandwichUnionSize24Alignment8> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::unionsandwich::UnionSize36Alignment4> : public std::true_type {};
+struct IsFidlUnion<::test::unionsandwich::UnionSize36Alignment4> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::unionsandwich::UnionSize36Alignment4>
@@ -738,9 +738,9 @@ struct CodingTraits<std::unique_ptr<::test::unionsandwich::UnionSize36Alignment4
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::unionsandwich::UnionSize36Alignment4>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -770,7 +770,7 @@ struct Equality<::test::unionsandwich::UnionSize36Alignment4> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::unionsandwich::UnionSize36Alignment4::Tag::Invalid):
         return true;
       case ::test::unionsandwich::UnionSize36Alignment4::Tag::kVariant:
         return ::fidl::Equals(_lhs.variant_, _rhs.variant_);

@@ -2,7 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -17,11 +19,37 @@ fx_cc_library(
         "types.h",
     ],
     implementation_deps = [
+        "//sdk/fidl/fuchsia.media.audio:fuchsia.media.audio_cpp",
         "//sdk/lib/syslog/cpp",
         "//src/lib/fxl",
     ],
     includes = ["../../../.."],
     visibility = ["//src/media/audio:__subpackages__"],
-    deps = ["//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp"],
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_cpp",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+    ],
     alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "unittest_bin",
+    testonly = True,
+    srcs = [
+        "perceived_level_unittest.cc",
+        "types_unittest.cc",
+    ],
+    gn_output_name = "media_audio_cpp_unittests",
+    tags = ["manual"],
+    deps = [
+        ":cpp",
+        "//sdk/fidl/fuchsia.media.audio:fuchsia.media.audio_cpp",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "media_audio_cpp_unittests",
+    unit_tests = [":unittest_bin"],
+    visibility = ["//src/media:__pkg__"],
 )

@@ -19,17 +19,9 @@ fuchsia_test_component("integration_test") {
   test_type = "starnix"
 }
 
-fuchsia_component("print_uname") {
-  testonly = true
-  manifest = "meta/print_uname.cml"
-  deps = [ ":print_uname_bin" ]
-}
-
-fuchsia_component("realm") {
-  testonly = true
-  manifest = "meta/realm.cml"
-}
-
+# Kept in GN until //src/starnix/containers/debian:debian_package and
+# //src/starnix/kernel:starnix_kernel_package are migrated to Bazel
+# (and fx_test supports package_resolution_timeout_secs).
 fuchsia_test_package("starnix_fp_stack_glue_test") {
   test_components = [ ":integration_test" ]
 
@@ -106,4 +98,27 @@ linux_resource("print_uname_bin") {
   src = ":print_uname_bin_bin"
   bin_output_name = "print_uname_bin"
   dest = "data/tests/print_uname_bin"
+}
+
+fuchsia_component_manifest("print_uname_manifest") {
+  testonly = true
+  component_name = "print_uname"
+  manifest = "meta/print_uname.cml"
+}
+
+fuchsia_component("print_uname") {
+  testonly = true
+  cm_label = ":print_uname_manifest"
+  deps = [ ":print_uname_bin" ]
+}
+
+fuchsia_component_manifest("realm_manifest") {
+  testonly = true
+  component_name = "realm"
+  manifest = "meta/realm.cml"
+}
+
+fuchsia_component("realm") {
+  testonly = true
+  cm_label = ":realm_manifest"
 }

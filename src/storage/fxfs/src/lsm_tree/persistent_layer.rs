@@ -43,7 +43,8 @@
 //
 // BloomFilter blocks contain a bitmap which is used to probabilistically determine if a given key
 // might exist in the layer file.   See `BloomFilter` for details on this structure.  Note that this
-// can be absent from the file if the layer is empty.
+// can be absent from the file if the layer is empty or bloom filters are omitted via
+// `BloomFilterOptions`.
 //
 // Seek/LayerInfo blocks contain both the seek table, and a single LayerInfo struct at the tail of
 // the last block, with the LayerInfo's length written as a little-endian u64 at the very end.  The
@@ -864,7 +865,7 @@ impl<K: FuzzyHash> LayerData<K> {
         if &header.magic != PERSISTENT_LAYER_MAGIC {
             return Err(anyhow!(FxfsError::Inconsistent).context("Invalid layer file magic"));
         }
-        let block_size = BlockSize::from_u64(header.block_size).ok_or_else(|| {
+        let block_size = BlockSize::new(header.block_size).ok_or_else(|| {
             anyhow!(FxfsError::Inconsistent)
                 .context(format!("Invalid block size {}", header.block_size))
         })?;
@@ -1446,9 +1447,17 @@ impl<K: Key, V: LayerValue> Layer<K, V> for SyncPersistentLayer<K, V> {
 }
 
 // This ensures that item_count can't be overflowed below.
-const_assert!(MAX_BLOCK_SIZE.size() <= u16::MAX as u64 + 1);
+const_assert!(MAX_BLOCK_SIZE.get() <= u16::MAX as u64 + 1);
 
 // -- Writer support --
+
+/// Options for building a bloom filter when writing a persistent layer file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BloomFilterOptions {
+    /// Approximate number of items expected to be written, used to size the bloom filter. If 0, no
+    /// bloom filter is written.
+    pub num_items: usize,
+}
 
 pub struct PersistentLayerWriter<W: WriteBytes, K: Key, V: LayerValue> {
     writer: W,
@@ -1459,19 +1468,23 @@ pub struct PersistentLayerWriter<W: WriteBytes, K: Key, V: LayerValue> {
     item_count: usize,
     block_offsets: Vec<u16>,
     block_keys: Vec<u64>,
-    bloom_filter: BloomFilterWriter<K>,
+    bloom_filter: Option<BloomFilterWriter<K>>,
     _value: PhantomData<V>,
 }
 
 impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
-    /// Creates a new writer that will serialize items to the object accessible via |object_handle|
-    pub async fn new(writer: W, num_items: usize, block_size: BlockSize) -> Result<Self, Error> {
-        Self::new_with_version(writer, num_items, block_size, LATEST_VERSION).await
+    /// Creates a new writer that will serialize items to `writer`.
+    pub async fn new(
+        writer: W,
+        bloom_filter_options: Option<BloomFilterOptions>,
+        block_size: BlockSize,
+    ) -> Result<Self, Error> {
+        Self::new_with_version(writer, bloom_filter_options, block_size, LATEST_VERSION).await
     }
 
     pub(crate) async fn new_with_version(
         mut writer: W,
-        num_items: usize,
+        bloom_filter_options: Option<BloomFilterOptions>,
         block_size: BlockSize,
         version: Version,
     ) -> Result<Self, Error> {
@@ -1489,7 +1502,12 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
         }
         writer.write_bytes(&buf[..]).await?;
 
-        let seed: u64 = rand::random();
+        let bloom_filter = match bloom_filter_options {
+            Some(options) if options.num_items > 0 => {
+                Some(BloomFilterWriter::new(rand::random(), options.num_items))
+            }
+            _ => None,
+        };
         Ok(Self {
             writer,
             version,
@@ -1499,7 +1517,7 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
             item_count: 0,
             block_offsets: Vec::new(),
             block_keys: Vec::new(),
-            bloom_filter: BloomFilterWriter::new(seed, num_items),
+            bloom_filter,
             _value: PhantomData,
         })
     }
@@ -1566,12 +1584,14 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
         seek_table_len: usize,
     ) -> Result<(), Error> {
         let block_size = self.writer.block_size().get() as usize;
+        let (bloom_filter_seed, bloom_filter_num_hashes) =
+            self.bloom_filter.as_ref().map_or((0, 0), |f| (f.seed(), f.num_hashes()));
         let layer_info = LayerInfo {
             num_items: self.item_count,
             num_data_blocks,
             bloom_filter_size_bytes,
-            bloom_filter_seed: self.bloom_filter.seed(),
-            bloom_filter_num_hashes: self.bloom_filter.num_hashes(),
+            bloom_filter_seed,
+            bloom_filter_num_hashes,
         };
         self.buf.clear();
         layer_info.serialize_into(&mut self.buf)?;
@@ -1598,24 +1618,27 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
     // Assumes the writer is positioned to a new block.
     // Returns the size of the bloom filter, in bytes.
     async fn write_bloom_filter(&mut self) -> Result<usize, Error> {
-        if self.data_blocks() == 0 || self.bloom_filter.serialized_size() == 0 {
+        let Some(bloom_filter) = &self.bloom_filter else {
+            return Ok(0);
+        };
+        if self.data_blocks() == 0 || bloom_filter.serialized_size() == 0 {
             return Ok(0);
         }
         // TODO(https://fxbug.dev/323571978): Avoid bounce-buffering.
-        let size =
-            self.block_size.align_up(self.bloom_filter.serialized_size() as u64).unwrap() as usize;
+        let serialized_size = bloom_filter.serialized_size();
+        let size = self.block_size.align_up(serialized_size as u64).unwrap() as usize;
         self.buf.resize(size, 0);
         let mut cursor = std::io::Cursor::new(&mut self.buf);
-        self.bloom_filter.write(&mut cursor)?;
+        bloom_filter.write(&mut cursor)?;
         self.writer.write_bytes(&self.buf).await?;
-        Ok(self.bloom_filter.serialized_size())
+        Ok(serialized_size)
     }
 
     // Returns the bloom filter writer. Intended to be used for testing purposes, e.g., gain access
     // to the bloom filter to then corrupt it.
     #[cfg(test)]
-    pub(crate) fn bloom_filter(&mut self) -> &mut BloomFilterWriter<K> {
-        &mut self.bloom_filter
+    pub(crate) fn bloom_filter(&mut self) -> Option<&mut BloomFilterWriter<K>> {
+        self.bloom_filter.as_mut()
     }
 
     fn serialize_item(&mut self, item: ItemRef<'_, K, V>) -> Result<(), Error> {
@@ -1674,7 +1697,9 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> LayerWriter<K, V>
             self.serialize_item(item)?;
         }
 
-        self.bloom_filter.insert(&item.key);
+        if let Some(bloom_filter) = &mut self.bloom_filter {
+            bloom_filter.insert(&item.key);
+        }
         *self.buf_item_count += 1;
         self.item_count += 1;
         Ok(())
@@ -1719,8 +1744,8 @@ impl std::ops::DerefMut for LayerWriterBufItemCount {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockSize, FxfsError, LayerData, NUM_HEADER_BLOCKS, PersistentLayer, PersistentLayerWriter,
-        SyncPersistentLayer,
+        BlockSize, BloomFilterOptions, FxfsError, LayerData, NUM_HEADER_BLOCKS, PersistentLayer,
+        PersistentLayerWriter, SyncPersistentLayer,
     };
     use crate::filesystem::MAX_BLOCK_SIZE;
     use crate::lsm_tree::LayerIterator;
@@ -1765,7 +1790,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize * 4,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize * 4 }),
                 BLOCK_SIZE,
             )
             .await
@@ -1794,7 +1819,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize * 18,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize * 18 }),
                 BLOCK_SIZE,
             )
             .await
@@ -1845,7 +1870,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize * 18,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize * 18 }),
                 BLOCK_SIZE,
             )
             .await
@@ -1874,7 +1899,7 @@ mod tests {
         {
             let writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                0,
+                Some(BloomFilterOptions { num_items: 0 }),
                 BLOCK_SIZE,
             )
             .await
@@ -1898,7 +1923,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                1,
+                Some(BloomFilterOptions { num_items: 1 }),
                 BLOCK_SIZE,
             )
             .await
@@ -1958,7 +1983,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                item_count as usize * 18,
+                Some(BloomFilterOptions { num_items: item_count as usize * 18 }),
                 BLOCK_SIZE,
             )
             .await
@@ -1983,10 +2008,10 @@ mod tests {
     #[fuchsia::test]
     async fn test_overlarge_block_size() {
         // At the upper end of the supported size.
-        const BLOCK_SIZE: BlockSize = BlockSize::from_u64(MAX_BLOCK_SIZE.size() * 2).unwrap();
+        const BLOCK_SIZE: BlockSize = BlockSize::new(MAX_BLOCK_SIZE.get() * 2).unwrap();
 
         let handle = FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
-        PersistentLayerWriter::<_, i32, i32>::new(Writer::new(&handle).await, 0, BLOCK_SIZE)
+        PersistentLayerWriter::<_, i32, i32>::new(Writer::new(&handle).await, None, BLOCK_SIZE)
             .await
             .expect_err("Creating writer with overlarge block size.");
     }
@@ -2000,7 +2025,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize * 18,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize * 18 }),
                 BLOCK_SIZE,
             )
             .await
@@ -2189,7 +2214,7 @@ mod tests {
 
             let mut writer = PersistentLayerWriter::<_, ObjectKey, u64>::new(
                 Writer::new(&handle).await,
-                (3 * BLOCK_SIZE) as usize,
+                Some(BloomFilterOptions { num_items: (3 * BLOCK_SIZE) as usize }),
                 BLOCK_SIZE,
             )
             .await
@@ -2215,7 +2240,7 @@ mod tests {
         // At the upper end of the supported size.
         const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
         const ITEMS_PER_PHASE: u64 = 50;
-        const ITEM_COUNT: u64 = ITEMS_PER_PHASE * ((BLOCK_SIZE.size() / 8) + 2);
+        const ITEM_COUNT: u64 = ITEMS_PER_PHASE * ((BLOCK_SIZE.get() / 8) + 2);
 
         let mut to_find = Vec::new();
 
@@ -2223,7 +2248,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, TestKey, u64>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize * 18,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize * 18 }),
                 BLOCK_SIZE,
             )
             .await
@@ -2266,7 +2291,7 @@ mod tests {
         const ITEMS_PER_PHASE: u64 = 50;
 
         // How many entries there are in a seek table block.
-        const SEEK_TABLE_ENTRIES: u64 = BLOCK_SIZE.size() / 8;
+        const SEEK_TABLE_ENTRIES: u64 = BLOCK_SIZE.get() / 8;
 
         // Number of entries to fill a seek block would need one more block of entries, but we're
         // starting low here on purpose to do a range and make sure we hit the size we are
@@ -2279,7 +2304,7 @@ mod tests {
             {
                 let mut writer = PersistentLayerWriter::<_, TestKey, u64>::new(
                     Writer::new(&handle).await,
-                    entries as usize,
+                    Some(BloomFilterOptions { num_items: entries as usize }),
                     BLOCK_SIZE,
                 )
                 .await
@@ -2318,7 +2343,7 @@ mod tests {
             let mut old_version_writer =
                 PersistentLayerWriter::<_, TestKey, u64>::new_with_version(
                     Writer::new(&old_version_handle).await,
-                    ITEM_COUNT as usize,
+                    Some(BloomFilterOptions { num_items: ITEM_COUNT as usize }),
                     BLOCK_SIZE,
                     OLD_KEY_SERIALIZATION_VERSION,
                 )
@@ -2326,7 +2351,7 @@ mod tests {
                 .expect("writer new");
             let mut current_version_writer = PersistentLayerWriter::<_, TestKey, u64>::new(
                 Writer::new(&current_version_handle).await,
-                ITEM_COUNT as usize,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize }),
                 BLOCK_SIZE,
             )
             .await
@@ -2408,7 +2433,7 @@ mod tests {
             let mut old_version_writer =
                 PersistentLayerWriter::<_, AllocatorKey, i64>::new_with_version(
                     Writer::new(&old_version_handle).await,
-                    ITEM_COUNT as usize,
+                    None,
                     BLOCK_SIZE,
                     OLD_KEY_SERIALIZATION_VERSION,
                 )
@@ -2416,7 +2441,7 @@ mod tests {
                 .expect("writer new");
             let mut current_version_writer = PersistentLayerWriter::<_, AllocatorKey, i64>::new(
                 Writer::new(&current_version_handle).await,
-                ITEM_COUNT as usize,
+                None,
                 BLOCK_SIZE,
             )
             .await
@@ -2467,7 +2492,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize }),
                 BLOCK_SIZE,
             )
             .await
@@ -2505,7 +2530,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize }),
                 BLOCK_SIZE,
             )
             .await
@@ -2551,7 +2576,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ESTIMATED_ITEMS,
+                Some(BloomFilterOptions { num_items: ESTIMATED_ITEMS }),
                 BLOCK_SIZE,
             )
             .await
@@ -2583,7 +2608,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                100,
+                Some(BloomFilterOptions { num_items: 100 }),
                 BLOCK_SIZE,
             )
             .await
@@ -2663,7 +2688,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize }),
                 BLOCK_SIZE,
             )
             .await
@@ -2777,7 +2802,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                ITEM_COUNT as usize,
+                Some(BloomFilterOptions { num_items: ITEM_COUNT as usize }),
                 BLOCK_SIZE,
             )
             .await
@@ -2835,7 +2860,7 @@ mod tests {
         {
             let writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&empty_handle).await,
-                0,
+                None,
                 BLOCK_SIZE,
             )
             .await
@@ -2903,7 +2928,7 @@ mod tests {
         {
             let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
                 Writer::new(&handle).await,
-                10,
+                Some(BloomFilterOptions { num_items: 10 }),
                 BLOCK_SIZE,
             )
             .await
@@ -2938,5 +2963,29 @@ mod tests {
             iter.advance().await.expect("advance");
         }
         assert!(iter.get().is_none());
+    }
+
+    #[fuchsia::test]
+    async fn test_no_bloom_filter_when_options_none() {
+        const BLOCK_SIZE: BlockSize = BlockSize::SIZE_512B;
+        let handle = FakeObjectHandle::new_with_block_size(Arc::new(FakeObject::new()), BLOCK_SIZE);
+        {
+            let mut writer = PersistentLayerWriter::<_, i32, i32>::new(
+                Writer::new(&handle).await,
+                None,
+                BLOCK_SIZE,
+            )
+            .await
+            .expect("writer new");
+            for i in 0..10 {
+                writer.write(Item::new(i * 2, i * 2).as_item_ref()).await.expect("write failed");
+            }
+            writer.complete().await.expect("flush failed");
+        }
+        // Header block + 1 data block + 1 seek/info block = 3 blocks (no bloom filter block).
+        assert_eq!(handle.get_size(), 3 * BLOCK_SIZE.get());
+        let layer = PersistentLayer::<i32, i32>::open(handle).await.expect("open failed");
+        assert!(!layer.has_bloom_filter());
+        assert_eq!(layer.maybe_contains_key(&1), MaybeContainsKey::Maybe);
     }
 }

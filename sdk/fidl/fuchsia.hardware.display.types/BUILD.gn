@@ -36,6 +36,7 @@ fidl("fuchsia.hardware.display.types") {
     "mode.fidl",
     "overview.fidl",
     "power-mode.fidl",
+    "vrr.fidl",
   ]
   sdk_area = "Graphics"
   contains_drivers = true
@@ -45,5 +46,6 @@ fidl("fuchsia.hardware.display.types") {
   public_deps = [
     "//sdk/fidl/fuchsia.images2",
     "//sdk/fidl/fuchsia.math",
+    "//zircon/vdso/zx",
   ]
 }

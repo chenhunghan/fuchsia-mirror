@@ -4,23 +4,25 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <lib/arch/arm64/feature.h>
 #include <lib/arch/arm64/system.h>
 #include <lib/boot-options/boot-options.h>
 #include <lib/code-patching/code-patches.h>
 #include <lib/zbi-format/driver-config.h>
 #include <lib/zbi-format/zbi.h>
+#include <stdio.h>
 #include <zircon/assert.h>
 
 #include <ktl/byte.h>
 #include <ktl/optional.h>
 #include <ktl/span.h>
+#include <ktl/string_view.h>
 #include <ktl/variant.h>
 #include <phys/handoff-prep/handoff-prep.h>
 #include <phys/handoff/handoff.h>
 #include <phys/runtime/arm64/info.h>
 #include <phys/runtime/arm64/smccc.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
 
 #include <ktl/enforce.h>
 
@@ -63,11 +65,11 @@ bool SmcccAvailable(arch::ArmSmcccFunction function) {
 
 Arm64AlternateVbar AutoAlternateVbar() {
   if (gArchPhysInfo->smccc_disabled) {
-    debugf("%s: SMCCC disabled, cannot query for SMCCC_ARCH_WORKAROUND functions\n", ProgramName());
+    printf("%s: SMCCC disabled, cannot query for SMCCC_ARCH_WORKAROUND functions\n", ProgramName());
     return kNoSmccc;
   }
   if (!gArchPhysInfo->have_psci_features) {
-    debugf(
+    printf(
         "%s: SMCCC 1.1 not available,"
         " cannot query for SMCCC_ARCH_WORKAROUND functions\n",
         ProgramName());
@@ -79,7 +81,7 @@ Arm64AlternateVbar AutoAlternateVbar() {
           ArmSmcccCall(arch::ArmSmcccFunction::kPsciPsciFeatures,
                        static_cast<uint32_t>(arch::ArmSmcccFunction::kSmcccVersion))) !=
       arch::kArmSmcccSuccess) {
-    debugf(
+    printf(
         "%s: SMCCC_VERSION not available from PSCI_FEATURES,"
         " cannot query for SMCCC_ARCH_WORKAROUND functions\n",
         ProgramName());
@@ -90,7 +92,7 @@ Arm64AlternateVbar AutoAlternateVbar() {
   arch::ArmSmcccVersion version =
       arch::ArmSmcccVersionResult(ArmSmcccCall(arch::ArmSmcccFunction::kSmcccVersion));
   if (version < arch::ArmSmcccVersion{1, 1}) {
-    debugf("%s: SMCCC %" PRIu16 ".%" PRIu16
+    printf("%s: SMCCC %" PRIu16 ".%" PRIu16
            " < 1.1 does not support SMCCC_ARCH_FEATURES,"
            " cannot query for SMCCC_ARCH_WORKAROUND functions\n",
            ProgramName(), version.major, version.minor);
@@ -99,21 +101,21 @@ Arm64AlternateVbar AutoAlternateVbar() {
 
   // SMCCC_ARCH_FEATURES is available.  Use it to check for workarounds.
   if (SmcccAvailable(arch::ArmSmcccFunction::kSmcccArchWorkaround3)) {
-    debugf("%s: SMCCC %" PRIu16 ".%" PRIu16 " reports SMCCC_ARCH_WORKAROUND_3 (%#" PRIx32
+    printf("%s: SMCCC %" PRIu16 ".%" PRIu16 " reports SMCCC_ARCH_WORKAROUND_3 (%#" PRIx32
            ") available\n",
            ProgramName(), version.major, version.minor,
            static_cast<uint32_t>(arch::ArmSmcccFunction::kSmcccArchWorkaround3));
     return Arm64AlternateVbar::kArchWorkaround3;
   }
   if (SmcccAvailable(arch::ArmSmcccFunction::kSmcccArchWorkaround1)) {
-    debugf("%s: SMCCC %" PRIu16 ".%" PRIu16 " reports SMCCC_ARCH_WORKAROUND_1 (%#" PRIx32
+    printf("%s: SMCCC %" PRIu16 ".%" PRIu16 " reports SMCCC_ARCH_WORKAROUND_1 (%#" PRIx32
            ") available\n",
            ProgramName(), version.major, version.minor,
            static_cast<uint32_t>(arch::ArmSmcccFunction::kSmcccArchWorkaround1));
     return Arm64AlternateVbar::kArchWorkaround1;
   }
 
-  debugf("%s: SMCCC %" PRIu16 ".%" PRIu16 " reports no SMCCC_ARCH_WORKAROUND functions available\n",
+  printf("%s: SMCCC %" PRIu16 ".%" PRIu16 " reports no SMCCC_ARCH_WORKAROUND functions available\n",
          ProgramName(), version.major, version.minor);
   return kNoSmcccFunction;
 }
@@ -125,11 +127,44 @@ Arm64AlternateVbar GetAlternateVbar() {
   return BootOptions::Get()->arm64_alternate_vbar;
 }
 
+bool HasLseAtomics() {
+  return arch::ArmIdAa64IsaR0El1::Read().atomic() != arch::ArmIdAa64IsaR0El1::Atomic::kNone;
+}
+
+Arm64Atomics AutoAtomics() {
+  if (!HasLseAtomics()) {
+    return Arm64Atomics::kLlsc;
+  }
+  // Cortex-A55 executes FEAT_LSE atomic instructions as far atomics in L3
+  // unless the cache line is already in L1 in Unique state; `lse-a55` precedes
+  // each with `prfm pstl1keep` to allocate into L1 for a near atomic.
+  return arch::ArmMidrEl1::Read().IsCortexA55() ? Arm64Atomics::kLseA55 : Arm64Atomics::kLse;
+}
+
+Arm64Atomics UseAtomics() {
+  Arm64Atomics choice = BootOptions::Get()->arm64_atomics;
+  switch (choice) {
+    case Arm64Atomics::kAuto:
+      return AutoAtomics();
+    case Arm64Atomics::kLse:
+    case Arm64Atomics::kLseA55: {
+      ktl::string_view name = Arm64AtomicsName(choice);
+      ZX_ASSERT_MSG(HasLseAtomics(), "kernel.arm64.atomics=%.*s but CPU does not support FEAT_LSE",
+                    static_cast<int>(name.size()), name.data());
+      return choice;
+    }
+    case Arm64Atomics::kLlsc:
+      return Arm64Atomics::kLlsc;
+  }
+  ZX_PANIC("unexpected Arm64Atomics value");
+}
+
 }  // namespace
 
 ArchPatchInfo ArchPreparePatchInfo() {
   return ArchPatchInfo{
       .alternate_vbar = GetAlternateVbar(),
+      .atomics = UseAtomics(),
   };
 }
 
@@ -223,9 +258,9 @@ void HandoffPrep::ArchSummarizeMiscZbiItem(const zbi_header_t& header,
           arch_handoff.qcom_rng_driver =
               *reinterpret_cast<const zbi_dcfg_qcom_rng_t*>(payload.data());
           break;
-        case ZBI_KERNEL_DRIVER_ARM_SMMU:
+        case ZBI_KERNEL_DRIVER_ARM_SMMU_V2:
           fbl::AllocChecker ac;
-          constexpr size_t elem_size = sizeof(zbi_dcfg_arm_smmu_driver_t);
+          constexpr size_t elem_size = sizeof(zbi_dcfg_arm_smmu_v2_driver_t);
           const size_t num_ele = payload.size() / elem_size;
           ZX_ASSERT_MSG(
               payload.size() % elem_size == 0,

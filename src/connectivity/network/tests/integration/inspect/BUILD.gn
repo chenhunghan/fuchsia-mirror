@@ -69,9 +69,11 @@ fuchsia_unittest_package("netstack-inspect-integration-test") {
   deps = [
     ":netstack-sampler-config",
     ":netstack_inspect_tests",
-    "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
+  subpackages = [
+    "//src/connectivity/network/netstack3:package-debug",
+    "//src/connectivity/network/testing/netemul/service:package",
+  ]
 }
 
 group("tests") {

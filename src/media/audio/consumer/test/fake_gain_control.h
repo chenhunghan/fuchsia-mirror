@@ -83,6 +83,12 @@ class FakeGainControl : public fidl::Server<fuchsia_media_audio::GainControl> {
     return result;
   }
 
+  bool ExpectNoOtherCalled() {
+    EXPECT_FALSE(set_gain_artifact_.has_value());
+    EXPECT_FALSE(set_mute_artifact_.has_value());
+    return !set_gain_artifact_.has_value() && !set_mute_artifact_.has_value();
+  }
+
  private:
   std::optional<fidl::ServerBindingRef<fuchsia_media_audio::GainControl>> binding_ref_;
   bool unbind_completed_ = false;

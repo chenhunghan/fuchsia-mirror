@@ -24,11 +24,11 @@
         },
         {
             name: "dhcpv6-client",
-            url: "#meta/dhcpv6-client.cm",
+            url: "dhcpv6-client#meta/dhcpv6-client.cm",
         },
         {
             name: "dns-resolver",
-            url: "#meta/dns_resolver.cm",
+            url: "dns-resolver#meta/dns_resolver.cm",
         },
     ],
     collections: [

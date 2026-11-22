@@ -16,8 +16,6 @@ use cm_rust::{
 };
 use cm_types::{IterablePath, Name, Url};
 use config_encoder::ConfigFields;
-use fidl::prelude::*;
-use fidl_fuchsia_component as fcomponent;
 use fuchsia_url::fuchsia_pkg::AbsoluteComponentUrl;
 use futures::FutureExt;
 use moniker::{ChildName, ExtendedMoniker, Moniker};
@@ -867,7 +865,7 @@ impl ComponentModelForAnalyzer {
             _ => Err(AnalyzerModelError::InvalidSourceCapability(
                 source_moniker,
                 format!("{:?}", source_capability.source_name()),
-                fcomponent::StorageAdminMarker::PROTOCOL_NAME.to_string(),
+                "fuchsia.component.StorageAdmin".to_string(),
             )),
         }
     }
@@ -1007,8 +1005,8 @@ mod tests {
     };
     use cm_types::{Name, RelativePath, Url};
     use config_encoder::ConfigFields;
-    use fidl_fuchsia_component_decl as fdecl;
-    use fidl_fuchsia_component_internal as component_internal;
+    use fidl_fuchsia_component_decl_common as fdecl;
+    use fidl_fuchsia_component_internal_common as component_internal;
     use maplit::hashmap;
     use moniker::{ChildName, ExtendedMoniker, Moniker};
     use routing::bedrock::request_metadata::{resolver_metadata, runner_metadata};

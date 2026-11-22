@@ -5,7 +5,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-pub(super) use boot_options::IntelHwpPolicy;
+use boot_options::IntelHwpPolicy;
 
 use super::cpuid::{CpuId, Features};
 use super::platform_access::MsrAccess;
@@ -13,9 +13,6 @@ use super::registers::{
     X86_MSR_IA32_ENERGY_PERF_BIAS, X86_MSR_IA32_HWP_CAPABILITIES, X86_MSR_IA32_HWP_REQUEST,
     X86_MSR_IA32_PM_ENABLE,
 };
-
-zr::static_assert!(core::mem::size_of::<IntelHwpPolicy>() == 1);
-zr::static_assert!(core::mem::align_of::<IntelHwpPolicy>() == 1);
 
 /// An "energy performance preference" is a 8-bit value specifying a desired
 /// tradeoff between running a CPU in a high performance mode (0) vs an
@@ -180,6 +177,7 @@ pub(super) fn intel_hwp_init(cpuid: &impl CpuId, msr: &mut impl MsrAccess, polic
 }
 
 /// Determine if Intel HWP is supported on given CPU.
+#[cfg(any(console_enabled, ktest))]
 pub(super) fn intel_hwp_supported(cpuid: &impl CpuId) -> bool {
     intel_hwp_features_supported(&cpuid.read_features())
 }

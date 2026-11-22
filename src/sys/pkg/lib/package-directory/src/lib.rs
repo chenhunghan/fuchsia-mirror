@@ -34,6 +34,10 @@ pub(crate) const ALLOWED_FLAGS: fio::Flags = fio::Flags::empty()
     .union(fio::Flags::PERM_INHERIT_EXECUTE)
     .union(fio::Flags::FLAG_SEND_REPRESENTATION);
 
+/// Opening a file that is listed in the package directory manifest but whose backing blob is absent
+/// from blobfs will return this error instead of NOT_FOUND.
+const MISSING_BLOB_STATUS: zx::Status = zx::Status::IO_DATA_INTEGRITY;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("the meta.far was not found")]
@@ -142,7 +146,15 @@ impl NonMetaStorage for blobfs::Client {
         scope: ExecutionScope,
         object_request: ObjectRequestRef<'_>,
     ) -> Result<(), zx::Status> {
-        self.open_blob_for_read(blob, flags, scope, object_request)
+        let client = self.clone();
+        let blob = *blob;
+        scope.clone().spawn(object_request.take().handle_async(async move |object_request| {
+            client
+                .open_blob_for_read(&blob, flags, scope, object_request)
+                .await
+                .map_err(|s| if s == zx::Status::NOT_FOUND { MISSING_BLOB_STATUS } else { s })
+        }));
+        Ok(())
     }
 
     async fn get_blob_vmo(
@@ -590,5 +602,36 @@ mod tests {
 
         let result = blobfs_client.read_blob(&blob_contents_hash()).await;
         assert_matches!(result, Err(e) if e.is_not_found_error());
+    }
+
+    #[fuchsia::test]
+    async fn blobfs_open_remaps_missing_blob_status() {
+        for (reader_status, expected_status) in [
+            (zx::Status::NOT_FOUND, zx::Status::IO_DATA_INTEGRITY),
+            (zx::Status::IO, zx::Status::IO),
+        ] {
+            let (client, mut mock) = blobfs::Client::new_mock();
+            let hash = Hash::from([7; 32]);
+            let flags = fio::PERM_READABLE | fio::Flags::FLAG_SEND_REPRESENTATION;
+            let (node_proxy, server_end) = fidl::endpoints::create_proxy::<fio::NodeMarker>();
+
+            ObjectRequest::new(flags, &fio::Options::default(), server_end.into_channel()).handle(
+                |object_request| {
+                    NonMetaStorage::open(
+                        &client,
+                        &hash,
+                        flags,
+                        ExecutionScope::new(),
+                        object_request,
+                    )
+                },
+            );
+
+            let ((), status) = futures::join!(
+                mock.expect_open_blob(hash, Err(reader_status)),
+                node_into_on_open_status(node_proxy),
+            );
+            assert_eq!(status, Some(expected_status));
+        }
     }
 }

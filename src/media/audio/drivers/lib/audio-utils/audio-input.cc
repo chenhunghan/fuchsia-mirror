@@ -76,7 +76,7 @@ zx_status_t AudioInput::RecordPrepare(AudioSink& sink) {
       (zx_duration_mul_int64(2 * kDesiredWakeupPeriod.get(), frame_rate_) / ZX_SEC(1)) * frame_sz_;
   if (ring_bytes_64 > std::numeric_limits<uint32_t>::max()) {
     printf("Invalid frame rate %u\n", frame_rate_);
-    return res;
+    return ZX_ERR_INVALID_ARGS;
   }
 
   uint32_t ring_bytes = static_cast<uint32_t>(ring_bytes_64);

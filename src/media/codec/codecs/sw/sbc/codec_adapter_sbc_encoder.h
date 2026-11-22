@@ -34,9 +34,8 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
   CodecAdapterSbcEncoder(std::mutex& lock, CodecAdapterEvents* codec_adapter_events);
   ~CodecAdapterSbcEncoder();
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
 
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
@@ -48,35 +47,35 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
 
   void CleanUpAfterStream() __TA_EXCLUDES(lock_) override;
 
-  std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) override;
 
  private:
   struct Context {
-    fuchsia::media::SbcChannelMode channel_mode;
-    fuchsia::media::PcmFormat2 input_format;
+    fuchsia_media::SbcChannelMode channel_mode;
+    uint32_t bits_per_sample;
     bool is_msbc;
     SBC_ENC_PARAMS params;
     size_t precomputed_sbc_frame_length = 0;
 
-    static size_t ComputeSbcFrameLength(fuchsia::media::SbcChannelMode channel_mode,
+    static size_t ComputeSbcFrameLength(fuchsia_media::SbcChannelMode channel_mode,
                                         const SBC_ENC_PARAMS& params) {
       const size_t channel_count = params.s16ChannelMode == SBC_MONO ? 1 : 2;
       const size_t part = 4 + params.s16NumOfSubBands * channel_count / 2;
       switch (channel_mode) {
-        case fuchsia::media::SbcChannelMode::MONO:
-        case fuchsia::media::SbcChannelMode::DUAL:
+        case fuchsia_media::SbcChannelMode::kMono:
+        case fuchsia_media::SbcChannelMode::kDual:
           return part +
                  static_cast<size_t>(std::ceil(static_cast<double>(params.s16NumOfBlocks) *
                                                static_cast<double>(channel_count) *
                                                static_cast<double>(params.s16BitPool) / 8.0));
-        case fuchsia::media::SbcChannelMode::JOINT_STEREO:
+        case fuchsia_media::SbcChannelMode::kJointStereo:
           return part +
                  static_cast<size_t>(std::ceil((static_cast<double>(params.s16NumOfSubBands) +
                                                 static_cast<double>(params.s16NumOfBlocks) *
                                                     static_cast<double>(params.s16BitPool)) /
                                                8.0));
-        case fuchsia::media::SbcChannelMode::STEREO:
+        case fuchsia_media::SbcChannelMode::kStereo:
           return part +
                  static_cast<size_t>(std::ceil(static_cast<double>(params.s16NumOfBlocks) *
                                                static_cast<double>(params.s16BitPool) / 8.0));
@@ -92,7 +91,7 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
       return params.s16NumOfBlocks * params.s16NumOfSubBands;
     }
 
-    size_t pcm_frame_size() const { return input_format.bits_per_sample() / 8 * channel_count(); }
+    size_t pcm_frame_size() const { return bits_per_sample / 8 * channel_count(); }
 
     size_t pcm_batch_size() const { return pcm_frame_size() * pcm_frames_per_sbc_frame(); }
 
@@ -106,7 +105,7 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
 
   // Attempts to create a context from format details. Reports failures through
   // `events_`.
-  InputLoopStatus CreateContext(const fuchsia::media::FormatDetails& format_details)
+  InputLoopStatus CreateContext(const fuchsia_media::FormatDetails& format_details)
       __TA_EXCLUDES(lock_);
 
   // Attempts to encode input packet. Reports failures through `events_`.
@@ -121,7 +120,7 @@ class CodecAdapterSbcEncoder : public CodecAdapterSW<fit::deferred_action<fit::c
 
   // See the Threading / Locking Rules comment on `CodecAdapterSW::input_processing_thread_`:
   // - `std::optional` engagement and stream-invariant format state (`channel_mode`,
-  //   `input_format`, `is_msbc`, `precomputed_sbc_frame_length`) are populated under `lock_` in
+  //   `bits_per_sample`, `is_msbc`, `precomputed_sbc_frame_length`) are populated under `lock_` in
   //   `CreateContext()` and reset under `lock_` in `CleanUpAfterStream()`.
   // - Per-chunk encoder working state (`params`) is mutated without `lock_` on
   //   `input_processing_thread_` during `EncodeInput()`.

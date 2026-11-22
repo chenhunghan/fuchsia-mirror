@@ -100,7 +100,7 @@ void relay_events(int epoll_fd, size_t num_of_events) {
     ASSERT_GE(num_remaining, num_read, "expected %zu events at most but got %zu");
     num_remaining = num_remaining - num_read;
 
-    std::array<char, relay_api::kMaxPacketLen * relay_api::kDownUpNumPackets> text_event_buf{};
+    std::array<char, relay_api::kMaxPacketLen * relay_api::kMaxBatchPackets> text_event_buf{};
     size_t total_formatted_len = 0;
 
     for (size_t i = 0; i < num_read; i++) {
@@ -114,6 +114,8 @@ void relay_events(int epoll_fd, size_t num_of_events) {
                                       event.time.tv_usec, event.type, event.code, event.value);
       ASSERT_GE(partial_text_event_buf.size(), formatted_len,
                 "expected formatted_len < %zu, but got %zu");
+      ASSERT_GE(text_event_buf.size(), total_formatted_len + formatted_len,
+                "expected total_formatted_len <= %zu, but got %zu");
       memcpy(&text_event_buf[total_formatted_len], partial_text_event_buf.data(), formatted_len);
       total_formatted_len = total_formatted_len + formatted_len;
     }
@@ -163,6 +165,8 @@ void write_message_to_stdout(const std::string& message) {
 // device, which therefore receives event0.
 constexpr std::string kTouchDevice = "/dev/input/event0";
 constexpr std::string kMouseDevice = "/dev/input/event0";
+// Starnix allocates direct input device minors starting at 64.
+constexpr std::string kDirectInputDevice = "/dev/input/event64";
 
 int main() {
   int epoll_fd = ENSURE(epoll_create, 1);  // Per manual page, must be >0.
@@ -199,6 +203,8 @@ int main() {
         device = kTouchDevice;
       } else if (device == relay_api::kMouseDev) {
         device = kMouseDevice;
+      } else if (device == relay_api::kDirectInputDev) {
+        device = kDirectInputDevice;
       }
       continue;
     }

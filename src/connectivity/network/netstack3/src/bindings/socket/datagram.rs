@@ -32,7 +32,7 @@ use net_types::{
 use netstack3_core::device::{DeviceId, WeakDeviceId};
 use netstack3_core::error::{LocalAddressError, NotSupportedError, SocketError};
 use netstack3_core::icmp::ReceiveIcmpEchoError;
-use netstack3_core::ip::{IpSockCreateAndSendError, IpSockSendError, Mark, MarkDomain};
+use netstack3_core::ip::{IpSockCreateAndSendError, Mark, MarkDomain};
 use netstack3_core::routes::{RoutableIpAddr, RouteResolveOptions};
 use netstack3_core::socket::{
     self as core_socket, ConnInfo, ConnectError, ExpectedConnError, ExpectedUnboundError,
@@ -1179,20 +1179,9 @@ where
             core_socket::SendToError::NotWriteable => fposix::Errno::Epipe,
             core_socket::SendToError::LocalAddress(err) => err.to_errno(),
             core_socket::SendToError::Zone(err) => err.to_errno(),
-            // NB: Mapping MTU to EMSGSIZE is different from the impl on
-            // `IpSockSendError` which maps to EINVAL instead.
-            core_socket::SendToError::CreateAndSend(IpSockCreateAndSendError::Send(
-                IpSockSendError::Mtu,
-            )) => fposix::Errno::Emsgsize,
-            core_socket::SendToError::CreateAndSend(IpSockCreateAndSendError::Send(
-                IpSockSendError::IllegalLoopbackAddress,
-            )) => fposix::Errno::Einval,
-            core_socket::SendToError::CreateAndSend(IpSockCreateAndSendError::Send(
-                IpSockSendError::BroadcastNotAllowed,
-            )) => fposix::Errno::Eacces,
-            core_socket::SendToError::CreateAndSend(IpSockCreateAndSendError::Send(
-                IpSockSendError::Unroutable(err),
-            )) => err.to_errno(),
+            core_socket::SendToError::CreateAndSend(IpSockCreateAndSendError::Send(err)) => {
+                err.to_errno()
+            }
             core_socket::SendToError::CreateAndSend(IpSockCreateAndSendError::Create(err)) => {
                 err.to_errno()
             }
@@ -2972,6 +2961,7 @@ mod tests {
     use fuchsia_async as fasync;
     use futures::StreamExt;
     use netstack3_core::NetworkSerializationContext;
+    use netstack3_core::ip::IpSockSendError;
     use packet::{NestablePacketBuilder as _, Serializer as _};
     use packet_formats::icmp::IcmpIpExt;
 
@@ -3017,18 +3007,13 @@ mod tests {
             .await
             .unwrap()
             .expect("Socket succeeds");
-        match response {
-            fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(sock) => {
-                fposix_socket::SynchronousDatagramSocketProxy::new(fasync::Channel::from_channel(
-                    sock.into_channel(),
-                ))
-            }
-            // TODO(https://fxrev.dev/99905): Implement Fast UDP sockets in Netstack3.
-            fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(sock) => {
-                let _: fidl::endpoints::ClientEnd<fposix_socket::DatagramSocketMarker> = sock;
-                panic!("expected SynchronousDatagramSocket, found DatagramSocket")
-            }
-        }
+        let sock = assert_matches!(
+            response,
+            fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(sock) => sock
+        );
+        fposix_socket::SynchronousDatagramSocketProxy::new(fasync::Channel::from_channel(
+            sock.into_channel(),
+        ))
     }
 
     async fn get_socket_and_event<A: TestSockAddr>(
@@ -3591,14 +3576,10 @@ mod tests {
             .await
             .unwrap()
             .expect("Socket call succeeds");
-        let socket = match response {
-            fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(sock) => sock,
-            // TODO(https://fxrev.dev/99905): Implement Fast UDP sockets in Netstack3.
-            fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(sock) => {
-                let _: fidl::endpoints::ClientEnd<fposix_socket::DatagramSocketMarker> = sock;
-                panic!("expected SynchronousDatagramSocket, found DatagramSocket")
-            }
-        };
+        let socket = assert_matches!(
+            response,
+            fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(sock) => sock
+        );
         let fposix_socket::SynchronousDatagramSocketDescribeResponse { event, .. } =
             socket.into_proxy().describe().await.expect("Describe call succeeds");
         let _: zx::EventPair = event.expect("Describe call returns event");
@@ -3629,14 +3610,10 @@ mod tests {
             .await
             .unwrap()
             .expect("Socket call succeeds");
-        let socket = match response {
-            fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(sock) => sock,
-            // TODO(https://fxrev.dev/99905): Implement Fast UDP sockets in Netstack3.
-            fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(sock) => {
-                let _: fidl::endpoints::ClientEnd<fposix_socket::DatagramSocketMarker> = sock;
-                panic!("expected SynchronousDatagramSocket, found DatagramSocket")
-            }
-        };
+        let socket = assert_matches!(
+            response,
+            fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(sock) => sock
+        );
         let info = socket.into_proxy().get_info().await.expect("get_info call succeeds");
         assert_eq!(info, Ok((domain, proto)));
 
@@ -4775,4 +4752,20 @@ mod tests {
         // this option for ICMP sockets, we should write a dedicated test for
         // ICMP.
     );
+
+    #[test]
+    fn core_send_error_mtu_to_errno() {
+        assert_eq!(
+            IcmpSendError::CoreSend(core_socket::SendError::IpSock(IpSockSendError::Mtu))
+                .to_errno(),
+            fposix::Errno::Emsgsize,
+        );
+        assert_eq!(
+            IcmpSendError::CoreSendTo(core_socket::SendToError::CreateAndSend(
+                IpSockCreateAndSendError::Send(IpSockSendError::Mtu),
+            ))
+            .to_errno(),
+            fposix::Errno::Emsgsize,
+        );
+    }
 }

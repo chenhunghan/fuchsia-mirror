@@ -30,10 +30,11 @@ namespace {
 template <typename SourceSampleType, size_t SourceChannelCount, size_t DestChannelCount>
 class SincSamplerImpl : public SincSampler {
  public:
-  SincSamplerImpl(int32_t source_frame_rate, int32_t dest_frame_rate)
-      : SincSampler(SincFilter::Length(source_frame_rate, dest_frame_rate),
+  SincSamplerImpl(int32_t source_frame_rate, int32_t dest_frame_rate, bool high_pass = false,
+                  bool low_pass = false)
+      : SincSampler(SincFilter::Length(source_frame_rate, dest_frame_rate, high_pass, low_pass),
                     // Sinc filters are symmetric.
-                    SincFilter::Length(source_frame_rate, dest_frame_rate)),
+                    SincFilter::Length(source_frame_rate, dest_frame_rate, high_pass, low_pass)),
         source_frame_rate_(source_frame_rate),
         dest_frame_rate_(dest_frame_rate),
         position_(SourceChannelCount, DestChannelCount, pos_filter_length().raw_value(),
@@ -41,7 +42,8 @@ class SincSamplerImpl : public SincSampler {
         working_data_(DestChannelCount, kDataCacheLength),
         // `SincFilter` holds one side of coefficients (positive), we invert the position to
         // calculate the other side (negative).
-        filter_(source_frame_rate_, dest_frame_rate_, pos_filter_length().raw_value()) {
+        filter_(source_frame_rate_, dest_frame_rate_, pos_filter_length().raw_value(),
+                Fixed::Format::FractionalBits, high_pass, low_pass) {
     FX_CHECK(pos_filter_length() == neg_filter_length())
         << "SincSampler assumes a symmetric filter, pos_filter_length (" << ffl::String::DecRational
         << pos_filter_length() << ") != neg_filter_length (" << neg_filter_length() << ")";
@@ -265,23 +267,29 @@ class SincSamplerImpl : public SincSampler {
 
 // Helper functions to expand the combinations of possible `SincSamplerImpl` configurations.
 template <typename SourceSampleType, size_t SourceChannelCount, size_t DestChannelCount>
-std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& dest_format) {
+std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& dest_format,
+                                    bool high_pass, bool low_pass) {
   return std::make_shared<SincSamplerImpl<SourceSampleType, SourceChannelCount, DestChannelCount>>(
       static_cast<int32_t>(source_format.frames_per_second()),
-      static_cast<int32_t>(dest_format.frames_per_second()));
+      static_cast<int32_t>(dest_format.frames_per_second()), high_pass, low_pass);
 }
 
 template <typename SourceSampleType, size_t SourceChannelCount>
-std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& dest_format) {
+std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& dest_format,
+                                    bool high_pass, bool low_pass) {
   switch (dest_format.channels()) {
     case 1:
-      return CreateWith<SourceSampleType, SourceChannelCount, 1>(source_format, dest_format);
+      return CreateWith<SourceSampleType, SourceChannelCount, 1>(source_format, dest_format,
+                                                                 high_pass, low_pass);
     case 2:
-      return CreateWith<SourceSampleType, SourceChannelCount, 2>(source_format, dest_format);
+      return CreateWith<SourceSampleType, SourceChannelCount, 2>(source_format, dest_format,
+                                                                 high_pass, low_pass);
     case 3:
-      return CreateWith<SourceSampleType, SourceChannelCount, 3>(source_format, dest_format);
+      return CreateWith<SourceSampleType, SourceChannelCount, 3>(source_format, dest_format,
+                                                                 high_pass, low_pass);
     case 4:
-      return CreateWith<SourceSampleType, SourceChannelCount, 4>(source_format, dest_format);
+      return CreateWith<SourceSampleType, SourceChannelCount, 4>(source_format, dest_format,
+                                                                 high_pass, low_pass);
     default:
       FX_LOGS(WARNING) << "SincSampler does not support this channelization: " << SourceChannelCount
                        << " -> " << dest_format.channels();
@@ -290,16 +298,17 @@ std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& d
 }
 
 template <typename SourceSampleType>
-std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& dest_format) {
+std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& dest_format,
+                                    bool high_pass, bool low_pass) {
   switch (source_format.channels()) {
     case 1:
-      return CreateWith<SourceSampleType, 1>(source_format, dest_format);
+      return CreateWith<SourceSampleType, 1>(source_format, dest_format, high_pass, low_pass);
     case 2:
-      return CreateWith<SourceSampleType, 2>(source_format, dest_format);
+      return CreateWith<SourceSampleType, 2>(source_format, dest_format, high_pass, low_pass);
     case 3:
-      return CreateWith<SourceSampleType, 3>(source_format, dest_format);
+      return CreateWith<SourceSampleType, 3>(source_format, dest_format, high_pass, low_pass);
     case 4:
-      return CreateWith<SourceSampleType, 4>(source_format, dest_format);
+      return CreateWith<SourceSampleType, 4>(source_format, dest_format, high_pass, low_pass);
     default:
       FX_LOGS(WARNING) << "SincSampler does not support this channelization: "
                        << source_format.channels() << " -> " << dest_format.channels();
@@ -309,9 +318,38 @@ std::shared_ptr<Sampler> CreateWith(const Format& source_format, const Format& d
 
 }  // namespace
 
-std::shared_ptr<Sampler> SincSampler::Create(const Format& source_format,
-                                             const Format& dest_format) {
+std::shared_ptr<Sampler> SincSampler::Create(const Format& source_format, const Format& dest_format,
+                                             bool high_pass, bool low_pass) {
   TRACE_DURATION("audio", "SincSampler::Create");
+
+  if (high_pass && low_pass) {
+    FX_LOGS(WARNING) << "SincSampler cannot be both high-pass and low-pass";
+    return nullptr;
+  }
+
+  if (high_pass) {
+    if (source_format.frames_per_second() != dest_format.frames_per_second()) {
+      FX_LOGS(WARNING) << "High-pass SincSampler does not support frame rate conversion ("
+                       << source_format.frames_per_second() << " -> "
+                       << dest_format.frames_per_second() << ")";
+      return nullptr;
+    }
+    if (source_format.frames_per_second() <= 2 * kUltrasoundMinFrequencyHz) {
+      FX_LOGS(WARNING) << "High-pass SincSampler source frame rate ("
+                       << source_format.frames_per_second() << ") must exceed "
+                       << 2 * kUltrasoundMinFrequencyHz;
+      return nullptr;
+    }
+  }
+
+  if (low_pass) {
+    if (source_format.frames_per_second() <= 2 * kAudioMaxFrequencyHz) {
+      FX_LOGS(WARNING) << "Low-pass SincSampler source frame rate ("
+                       << source_format.frames_per_second() << ") must exceed "
+                       << 2 * kAudioMaxFrequencyHz;
+      return nullptr;
+    }
+  }
 
   if (dest_format.sample_type() != fuchsia_audio::SampleType::kFloat32) {
     FX_LOGS(WARNING) << "SincSampler does not support this dest sample type: "
@@ -321,13 +359,13 @@ std::shared_ptr<Sampler> SincSampler::Create(const Format& source_format,
 
   switch (source_format.sample_type()) {
     case fuchsia_audio::SampleType::kUint8:
-      return CreateWith<uint8_t>(source_format, dest_format);
+      return CreateWith<uint8_t>(source_format, dest_format, high_pass, low_pass);
     case fuchsia_audio::SampleType::kInt16:
-      return CreateWith<int16_t>(source_format, dest_format);
+      return CreateWith<int16_t>(source_format, dest_format, high_pass, low_pass);
     case fuchsia_audio::SampleType::kInt32:
-      return CreateWith<int32_t>(source_format, dest_format);
+      return CreateWith<int32_t>(source_format, dest_format, high_pass, low_pass);
     case fuchsia_audio::SampleType::kFloat32:
-      return CreateWith<float>(source_format, dest_format);
+      return CreateWith<float>(source_format, dest_format, high_pass, low_pass);
     default:
       // TODO(https://fxbug.dev/42065526): Support `SampleType::kFloat64`.
       FX_LOGS(WARNING) << "SincSampler does not support this source sample type: "

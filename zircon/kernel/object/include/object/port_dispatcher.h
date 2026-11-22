@@ -8,6 +8,7 @@
 #define ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_PORT_DISPATCHER_H_
 
 #include <lib/object-constants.h>
+#include <lib/zx/result.h>
 #include <stddef.h>
 #include <zircon/rights.h>
 #include <zircon/syscalls/port.h>
@@ -18,7 +19,6 @@
 #include <kernel/mutex.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
-#include <object/signal_observer.h>
 
 // PortObserver lifetime and locking notes: the canonical description of the
 // PortDispatcher / PortObserver / Dispatcher pointer graph, cancelation
@@ -27,7 +27,7 @@
 
 class PortDispatcher;
 class PortObserver;
-class PortSignalObserver;
+class SignalObserver;
 struct PortPacket;
 
 struct PortAllocator {
@@ -59,12 +59,8 @@ void rust_port_dispatcher_on_zero_handles(const PortDispatcher* disp);
 zx_status_t rust_port_dispatcher_queue(const PortDispatcher* disp, PortPacket* port_packet);
 bool rust_port_dispatcher_cancel_queued_packet(const PortDispatcher* disp, PortPacket* port_packet);
 
-zx_status_t cpp_port_dispatcher_create(uint32_t options,
-                                       ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out,
-                                       ffi::Uninitialized<zx_rights_t>* rights_out);
-void cpp_port_signal_observer_init(ffi::Uninitialized<PortSignalObserver>* observer,
-                                   uint32_t options);
-void cpp_port_signal_observer_destroy(PortSignalObserver* observer);
+zx_status_t cpp_port_dispatcher_create(
+    uint32_t options, ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out);
 
 }  // extern "C"
 
@@ -78,16 +74,12 @@ void cpp_port_signal_observer_destroy(PortSignalObserver* observer);
 // The state and queue logic live in Rust (port_dispatcher.rs).
 class PortDispatcher final : public Dispatcher {
  public:
-  static constexpr zx_rights_t default_rights() { return ZX_DEFAULT_PORT_RIGHTS; }
-  static zx_status_t Create(uint32_t options, KernelHandle<PortDispatcher>* handle,
-                            zx_rights_t* rights);
-
   ~PortDispatcher() final;
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_PORT; }
 
   void on_zero_handles() final { rust_port_dispatcher_on_zero_handles(this); }
 
-  bool is_waitable() const final { return default_rights() & ZX_RIGHT_WAIT; }
+  bool is_waitable() const final { return ZX_DEFAULT_PORT_RIGHTS & ZX_RIGHT_WAIT; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
 
   zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
@@ -115,8 +107,7 @@ class PortDispatcher final : public Dispatcher {
 
  private:
   friend zx_status_t cpp_port_dispatcher_create(
-      uint32_t options, ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out,
-      ffi::Uninitialized<zx_rights_t>* rights_out);
+      uint32_t options, ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out);
   explicit PortDispatcher(uint32_t options);
 
   OpaqueStorage<kPortDispatcherStateSize, kPortDispatcherStateAlign> opaque_storage_;

@@ -10,8 +10,6 @@
 #include <sys/types.h>
 
 #include <fbl/macros.h>
-#include <vm/evictor.h>
-#include <vm/page_queues.h>
 
 // Increase the disable count of the scanner. This may need to block until the scanner finishes any
 // current work and so should not be called with other locks held that may conflict with the

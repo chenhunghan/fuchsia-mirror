@@ -15,6 +15,7 @@
 #include <kernel/deadline.h>
 #include <kernel/mp.h>
 #include <kernel/scheduler.h>
+#include <ktl/bit.h>
 
 namespace {
 

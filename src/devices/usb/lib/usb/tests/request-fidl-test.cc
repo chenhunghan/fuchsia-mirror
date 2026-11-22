@@ -120,7 +120,8 @@ TEST(RequestFidlTest, UnpinTest) {
   EXPECT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, zx::vmo(info[0].vmo),
                                        0, info[0].size, reinterpret_cast<uintptr_t*>(&mapped)));
   auto iter3 = fidl_request.phys_iter(1, zx_system_get_page_size());
-  EXPECT_EQ((*iter3.begin()).second, 4);
+  ASSERT_OK(iter3);
+  EXPECT_EQ((*iter3->begin()).second, 4);
   uint8_t expected_vals[] = {0xA, 0xB, 0xC, 0xC};
   memcpy(mapped, expected_vals, sizeof(expected_vals));
   EXPECT_OK(zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(mapped), info[0].size));
@@ -250,15 +251,17 @@ TEST(RequestFidlTest, DataTest) {
   EXPECT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, zx::vmo(info[0].vmo),
                                        0, info[0].size, reinterpret_cast<uintptr_t*>(&mapped)));
   auto iter1 = fidl_request.phys_iter(0, zx_system_get_page_size());
+  ASSERT_OK(iter1);
   EXPECT_BYTES_EQ(mapped, expected1, sizeof(expected1));
-  EXPECT_EQ((*iter1.begin()).second, 16);
+  EXPECT_EQ((*iter1->begin()).second, 16);
   EXPECT_OK(zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(mapped), info[0].size));
 
   EXPECT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, zx::vmo(info[1].vmo),
                                        0, info[1].size, reinterpret_cast<uintptr_t*>(&mapped)));
   auto iter2 = fidl_request.phys_iter(1, zx_system_get_page_size());
+  ASSERT_OK(iter2);
   EXPECT_BYTES_EQ(mapped, expected2, sizeof(expected2));
-  EXPECT_EQ((*iter2.begin()).second, 32);
+  EXPECT_EQ((*iter2->begin()).second, 32);
   EXPECT_OK(zx::vmar::root_self()->unmap(reinterpret_cast<uintptr_t>(mapped), info[1].size));
 }
 
@@ -381,7 +384,8 @@ TEST(RequestFidlTest, MixedTest) {
   EXPECT_EQ(actual, 1);
 
   auto iter = fidl_request.phys_iter(2, zx_system_get_page_size());
-  EXPECT_EQ((*iter.begin()).second, 32);
+  ASSERT_OK(iter);
+  EXPECT_EQ((*iter->begin()).second, 32);
 }
 
 // Verifies FidlRequestPool allocation, recycling, and lifecycle management.
@@ -904,8 +908,9 @@ TEST(RequestFidlTest, PhysIterNonZeroOffsetAddressTest) {
   ASSERT_OK(fidl_request.PhysMap(fake_bti));
 
   auto iter = fidl_request.phys_iter(0, zx_system_get_page_size());
-  auto it = iter.begin();
-  ASSERT_NE(it, iter.end());
+  ASSERT_OK(iter);
+  auto it = iter->begin();
+  ASSERT_NE(it, iter->end());
   auto [paddr, len] = *it;
   EXPECT_GT(paddr, 0u);
   EXPECT_EQ(len, 128u);
@@ -1397,6 +1402,372 @@ TEST(RequestFidlTest, PhysMapRepeatedWithoutUnpinReturnsBadStateTest) {
   // After Unpin(), PhysMap() succeeds again.
   EXPECT_OK(fidl_request.PhysMap(fake_bti));
   EXPECT_OK(fidl_request.Unpin());
+}
+
+// Verifies that PhysMap() keeps pinned_vmos_ physical page addresses page-aligned and phys_iter()
+// dynamically applies the region's sub-page offset via vmo_offset.
+//
+// Note: PhysMap() enforces end_offset <= kMaxTransferSize (1024 bytes < kPageSize) on inline kData
+// regions (returning ZX_ERR_INVALID_ARGS if exceeded), so valid kData regions always reside within
+// a single page. Keeping page_list page-aligned and computing vmo_offset in phys_iter() preserves
+// PhysIter's page-alignment contract and ensures sub-slicing a pinned kData region via offset() and
+// size() updates reflects the updated sub-page offset rather than a stale offset baked into
+// page_list[0].
+TEST(RequestFidlTest, PhysMapKeepPhysListPageAlignedAndApplyDynamicVmoOffset) {
+  const size_t kPageSize = zx_system_get_page_size();
+  constexpr size_t kInitialOffset = 128;
+  constexpr size_t kInitialSize = 512;
+  static_assert(kInitialOffset + kInitialSize <= fuchsia_hardware_usb_request::kMaxTransferSize);
+
+  usb::FidlRequest fidl_request;
+  fidl_request.add_data(std::vector<uint8_t>(kInitialOffset + kInitialSize, 0x5A), kInitialSize,
+                        kInitialOffset);
+
+  zx::bti fake_bti;
+  ASSERT_OK(fake_bti_create(fake_bti.reset_and_get_address()));
+  ASSERT_OK(fidl_request.PhysMap(fake_bti));
+
+  auto collect_segments = [&](size_t max_len) {
+    std::vector<std::pair<zx_paddr_t, size_t>> segments;
+    auto iter = fidl_request.phys_iter(0, max_len);
+    EXPECT_OK(iter);
+    if (iter.is_ok()) {
+      for (auto [paddr, len] : *iter) {
+        segments.emplace_back(paddr, len);
+      }
+    }
+    return segments;
+  };
+
+  // 1. Initial unaligned slice [128, 640).
+  auto initial_segments = collect_segments(kPageSize);
+  ASSERT_EQ(initial_segments.size(), 1u);
+  EXPECT_EQ(initial_segments[0].first, FAKE_BTI_PHYS_ADDR + kInitialOffset);
+  EXPECT_EQ(initial_segments[0].second, kInitialSize);
+
+  // 2. Advance sub-slice within the already-pinned VMO to [256, 640).
+  constexpr size_t kUpdatedOffset = 256;
+  constexpr size_t kUpdatedSize = 384;
+  static_assert(kUpdatedOffset + kUpdatedSize <= kInitialOffset + kInitialSize);
+  fidl_request->data()->at(0).offset(kUpdatedOffset).size(kUpdatedSize);
+
+  auto updated_segments = collect_segments(kPageSize);
+  ASSERT_EQ(updated_segments.size(), 1u);
+  EXPECT_EQ(updated_segments[0].first, FAKE_BTI_PHYS_ADDR + kUpdatedOffset);
+  EXPECT_EQ(updated_segments[0].second, kUpdatedSize);
+
+  // 3. Reset sub-slice offset to 0 across [0, 640) to verify page-aligned base address.
+  fidl_request->data()->at(0).offset(0).size(kInitialOffset + kInitialSize);
+
+  auto aligned_segments = collect_segments(kPageSize);
+  ASSERT_EQ(aligned_segments.size(), 1u);
+  EXPECT_EQ(aligned_segments[0].first, FAKE_BTI_PHYS_ADDR);
+  EXPECT_EQ(aligned_segments[0].second, kInitialOffset + kInitialSize);
+
+  // 4. Out-of-bounds offset or length exceeding the pinned VMO size returns ZX_ERR_OUT_OF_RANGE.
+  fidl_request->data()->at(0).offset(kPageSize).size(64);
+  EXPECT_STATUS(fidl_request.phys_iter(0, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  fidl_request->data()->at(0).offset(kUpdatedOffset).size(kInitialSize);
+  EXPECT_STATUS(fidl_request.phys_iter(0, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  fidl_request->data()->at(0).offset(0).size(kInitialOffset + kInitialSize);
+  EXPECT_OK(fidl_request.Unpin());
+}
+
+// Verifies that FidlRequest::phys_iter returns structured zx::result error codes for out-of-range
+// buffer indices, unpinned buffers, missing or zero region sizes, and out-of-range offsets.
+TEST(RequestFidlTest, PhysIterValidationErrorsTest) {
+  const size_t kPageSize = zx_system_get_page_size();
+
+  // 1. Empty request (data() not present) returns ZX_ERR_OUT_OF_RANGE.
+  usb::FidlRequest empty_req;
+  EXPECT_STATUS(empty_req.phys_iter(0, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  // 2. Unpinned buffer or out-of-range buffer index.
+  usb::FidlRequest req;
+  req.add_data(std::vector<uint8_t>(64, 0xAA), 64, 0);
+  EXPECT_STATUS(req.phys_iter(1, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+  EXPECT_STATUS(req.phys_iter(0, kPageSize).status_value(), ZX_ERR_NOT_FOUND);
+
+  // 3. Missing or zero size returns ZX_ERR_INVALID_ARGS.
+  zx::bti fake_bti;
+  ASSERT_OK(fake_bti_create(fake_bti.reset_and_get_address()));
+  ASSERT_OK(req.PhysMap(fake_bti));
+
+  req->data()->at(0).size(0);
+  EXPECT_STATUS(req.phys_iter(0, kPageSize).status_value(), ZX_ERR_INVALID_ARGS);
+
+  req->data()->at(0).size().reset();
+  EXPECT_STATUS(req.phys_iter(0, kPageSize).status_value(), ZX_ERR_INVALID_ARGS);
+
+  // 4. Offset >= kPageSize, offset > pinned.mapped.size, or length > pinned.mapped.size - offset
+  // returns ZX_ERR_OUT_OF_RANGE.
+  req->data()->at(0).offset(kPageSize).size(16);
+  EXPECT_STATUS(req.phys_iter(0, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  req->data()->at(0).offset(128).size(16);
+  EXPECT_STATUS(req.phys_iter(0, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  req->data()->at(0).offset(32).size(64);
+  EXPECT_STATUS(req.phys_iter(0, kPageSize).status_value(), ZX_ERR_OUT_OF_RANGE);
+
+  req->data()->at(0).offset(0).size(64);
+  EXPECT_OK(req.phys_iter(0, kPageSize));
+  EXPECT_OK(req.Unpin());
+}
+
+// Verifies that CopyTo and CopyFrom safely return 0 copied bytes when get_mapped returns
+// std::nullopt for an unmapped kVmoId region.
+TEST(RequestFidlTest, UnmappedVmoIdGracefulHandlingTest) {
+  fuchsia_hardware_usb_request::Request request;
+  request.data()
+      .emplace()
+      .emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(99))
+      .offset(0)
+      .size(16);
+  usb::FidlRequest fidl_request(std::move(request));
+
+  std::vector<uint8_t> src(16, 0xAB);
+  auto copied = fidl_request.CopyTo(0, src.data(), src.size(), MakeNulloptMock);
+  ASSERT_EQ(copied.size(), 1u);
+  EXPECT_EQ(copied[0], 0u);
+
+  std::vector<uint8_t> dst(16, 0);
+  auto read = fidl_request.CopyFrom(0, dst.data(), dst.size(), MakeNulloptMock);
+  ASSERT_EQ(read.size(), 1u);
+  EXPECT_EQ(read[0], 0u);
+  for (uint8_t byte : dst) {
+    EXPECT_EQ(byte, 0u);
+  }
+}
+
+// Verifies that Unpin() safely avoids underflow when a region offset exceeds both vector and
+// mapped VMO sizes.
+TEST(RequestFidlTest, UnpinOffsetGreaterThanCapacitySafetyTest) {
+  usb::FidlRequest fidl_request;
+  fidl_request.add_data(std::vector<uint8_t>(16, 0xFF), 16, 0);
+
+  zx::bti fake_bti;
+  ASSERT_OK(fake_bti_create(fake_bti.reset_and_get_address()));
+  ASSERT_OK(fidl_request.PhysMap(fake_bti));
+  // Mutate offset to exceed underlying vector and mapped VMO sizes.
+  (*fidl_request->data())[0].offset(100);
+
+  EXPECT_OK(fidl_request.Unpin());
+  size_t actual = 0;
+  EXPECT_OK(fake_bti_get_pinned_vmos(fake_bti.get(), nullptr, 0, &actual));
+  EXPECT_EQ(actual, 0u);
+  const auto& vec = (*fidl_request->data())[0].buffer()->data().value();
+  ASSERT_EQ(vec.size(), 16u);
+  for (uint8_t byte : vec) {
+    EXPECT_EQ(byte, 0xFF);
+  }
+}
+
+// Verifies that CopyFrom clamps reads to the actual underlying kData vector and kVmoId mapped sizes
+// when the FIDL region size exceeds backing capacity.
+TEST(RequestFidlTest, CopyFromExceedingBufferCapacityBoundsTest) {
+  fuchsia_hardware_usb_request::Request kdata_request;
+  std::vector<uint8_t> payload = {1, 2, 3, 4};
+  kdata_request.data()
+      .emplace()
+      .emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithData(std::move(payload)))
+      .offset(0)
+      .size(100);
+  usb::FidlRequest fidl_kdata(std::move(kdata_request));
+
+  std::vector<uint8_t> dst(100, 0);
+  auto copied = fidl_kdata.CopyFrom(0, dst.data(), dst.size(), MakeNulloptMock);
+  ASSERT_EQ(copied.size(), 1u);
+  EXPECT_EQ(copied[0], 4u);
+  EXPECT_EQ(dst[0], 1u);
+  EXPECT_EQ(dst[1], 2u);
+  EXPECT_EQ(dst[2], 3u);
+  EXPECT_EQ(dst[3], 4u);
+  for (size_t i = 4; i < dst.size(); ++i) {
+    EXPECT_EQ(dst[i], 0u);
+  }
+
+  const size_t page_size = zx_system_get_page_size();
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(page_size, 0, &vmo));
+  uintptr_t mapped_addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo, 0, page_size,
+                                       &mapped_addr));
+  auto cleanup = fit::defer([mapped_addr, page_size]() {
+    EXPECT_OK(zx::vmar::root_self()->unmap(mapped_addr, page_size));
+  });
+  memset(reinterpret_cast<void*>(mapped_addr), 0x7E, 64);
+
+  fuchsia_hardware_usb_request::Request vmo_request;
+  vmo_request.data()
+      .emplace()
+      .emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(1))
+      .offset(0)
+      .size(1000);
+  usb::FidlRequest fidl_vmo(std::move(vmo_request));
+
+  auto get_mapped = [mapped_addr](const fuchsia_hardware_usb_request::Buffer&)
+      -> zx::result<std::optional<usb::internal::MappedVmo>> {
+    return zx::ok(usb::internal::MappedVmo{mapped_addr, 64});
+  };
+
+  std::vector<uint8_t> dst_vmo(1000, 0);
+  auto copied_vmo = fidl_vmo.CopyFrom(0, dst_vmo.data(), dst_vmo.size(), get_mapped);
+  ASSERT_EQ(copied_vmo.size(), 1u);
+  EXPECT_EQ(copied_vmo[0], 64u);
+  for (size_t i = 0; i < 64; ++i) {
+    EXPECT_EQ(dst_vmo[i], 0x7E);
+  }
+  for (size_t i = 64; i < dst_vmo.size(); ++i) {
+    EXPECT_EQ(dst_vmo[i], 0u);
+  }
+}
+
+// Verifies that CacheHelper catches integer overflow when region offset, slice offset, and flush
+// size wrap around 64-bit bounds.
+TEST(RequestFidlTest, CacheHelperIntegerOverflowProtectionTest) {
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(zx_system_get_page_size(), 0, &vmo));
+  uintptr_t mapped_addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo, 0,
+                                       zx_system_get_page_size(), &mapped_addr));
+  auto cleanup = fit::defer([mapped_addr]() {
+    EXPECT_OK(zx::vmar::root_self()->unmap(mapped_addr, zx_system_get_page_size()));
+  });
+
+  fuchsia_hardware_usb_request::Request request;
+  request.data()
+      .emplace()
+      .emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(1))
+      .offset(std::numeric_limits<uint64_t>::max() - 10)
+      .size(100);
+  usb::FidlRequest fidl_request(std::move(request));
+
+  auto get_mapped = [mapped_addr](const fuchsia_hardware_usb_request::Buffer&)
+      -> zx::result<std::optional<usb::internal::MappedVmo>> {
+    return zx::ok(usb::internal::MappedVmo{mapped_addr, zx_system_get_page_size()});
+  };
+
+  EXPECT_STATUS(fidl_request.CacheFlush(get_mapped), ZX_ERR_OUT_OF_RANGE);
+  EXPECT_STATUS(fidl_request.CacheFlushInvalidate(get_mapped), ZX_ERR_OUT_OF_RANGE);
+  EXPECT_STATUS(fidl_request.CacheFlush(get_mapped, 20, 10), ZX_ERR_OUT_OF_RANGE);
+  EXPECT_STATUS(fidl_request.CacheFlushInvalidate(get_mapped, 20, 10), ZX_ERR_OUT_OF_RANGE);
+}
+
+// Verifies that CacheFlushInvalidate records a get_mapped error while continuing iteration across
+// remaining scatter-gather regions.
+TEST(RequestFidlTest, CacheFlushInvalidateGetMappedErrorContinuationTest) {
+  fuchsia_hardware_usb_request::Request request;
+  request.data().emplace();
+  request.data()
+      ->emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(1))
+      .offset(0)
+      .size(16);
+  request.data()
+      ->emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(2))
+      .offset(0)
+      .size(16);
+  request.data()
+      ->emplace_back()
+      .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(3))
+      .offset(0)
+      .size(16);
+  usb::FidlRequest fidl_request(std::move(request));
+
+  zx::vmo vmo;
+  ASSERT_OK(zx::vmo::create(zx_system_get_page_size(), 0, &vmo));
+  uintptr_t mapped_addr = 0;
+  ASSERT_OK(zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo, 0,
+                                       zx_system_get_page_size(), &mapped_addr));
+  auto cleanup = fit::defer([mapped_addr]() {
+    EXPECT_OK(zx::vmar::root_self()->unmap(mapped_addr, zx_system_get_page_size()));
+  });
+
+  bool first_processed = false;
+  bool third_processed = false;
+  auto status =
+      fidl_request.CacheFlushInvalidate([&](const fuchsia_hardware_usb_request::Buffer& b)
+                                            -> zx::result<std::optional<usb::internal::MappedVmo>> {
+        if (b.vmo_id().value() == 1) {
+          first_processed = true;
+          return zx::ok(usb::internal::MappedVmo{mapped_addr, zx_system_get_page_size()});
+        }
+        if (b.vmo_id().value() == 2) {
+          return zx::error(ZX_ERR_BAD_HANDLE);
+        }
+        if (b.vmo_id().value() == 3) {
+          third_processed = true;
+          return zx::ok(usb::internal::MappedVmo{mapped_addr, zx_system_get_page_size()});
+        }
+        return zx::ok(std::nullopt);
+      });
+
+  EXPECT_STATUS(status, ZX_ERR_BAD_HANDLE);
+  EXPECT_TRUE(first_processed);
+  EXPECT_TRUE(third_processed);
+}
+
+// Verifies that CacheFlush and CacheFlushInvalidate return ZX_ERR_OUT_OF_RANGE when a near-max
+// offset wraps past the request length.
+TEST(RequestFidlTest, CacheRangeHelperIntegerOverflowTest) {
+  size_t get_mapped_calls = 0;
+  auto get_mapped = [&](const fuchsia_hardware_usb_request::Buffer&)
+      -> zx::result<std::optional<usb::internal::MappedVmo>> {
+    get_mapped_calls++;
+    return zx::error(ZX_ERR_INTERNAL);
+  };
+
+  usb::FidlRequest fidl_request;
+  fidl_request.add_vmo_id(1, 100, 0);
+
+  const size_t overflow_offset = std::numeric_limits<size_t>::max() - 10;
+  EXPECT_STATUS(fidl_request.CacheFlush(get_mapped, overflow_offset, 100), ZX_ERR_OUT_OF_RANGE);
+  EXPECT_STATUS(fidl_request.CacheFlushInvalidate(get_mapped, overflow_offset, 100),
+                ZX_ERR_OUT_OF_RANGE);
+  EXPECT_EQ(get_mapped_calls, 0u);
+}
+
+// Verifies that CopyTo and CopyFrom return 0 copied bytes when a kVmoId region offset exceeds or
+// equals the mapped VMO size.
+TEST(RequestFidlTest, VmoIdOffsetExceedsMappedSizeTest) {
+  std::vector<uint8_t> backing(100, 0x5A);
+  auto get_mapped = [&backing](const fuchsia_hardware_usb_request::Buffer&)
+      -> zx::result<std::optional<usb::internal::MappedVmo>> {
+    return zx::ok(
+        usb::internal::MappedVmo{reinterpret_cast<zx_vaddr_t>(backing.data()), backing.size()});
+  };
+
+  for (size_t offset : {backing.size(), std::numeric_limits<size_t>::max() - 10}) {
+    fuchsia_hardware_usb_request::Request request;
+    request.data()
+        .emplace()
+        .emplace_back()
+        .buffer(fuchsia_hardware_usb_request::Buffer::WithVmoId(1))
+        .offset(offset)
+        .size(20);
+    usb::FidlRequest fidl_request(std::move(request));
+
+    std::vector<uint8_t> src(20, 0xFF);
+    auto copied = fidl_request.CopyTo(0, src.data(), src.size(), get_mapped);
+    ASSERT_EQ(copied.size(), 1u);
+    EXPECT_EQ(copied[0], 0u);
+
+    std::vector<uint8_t> dst(20, 0);
+    auto read = fidl_request.CopyFrom(0, dst.data(), dst.size(), get_mapped);
+    ASSERT_EQ(read.size(), 1u);
+    EXPECT_EQ(read[0], 0u);
+    for (uint8_t byte : dst) {
+      EXPECT_EQ(byte, 0u);
+    }
+  }
 }
 
 }  // namespace

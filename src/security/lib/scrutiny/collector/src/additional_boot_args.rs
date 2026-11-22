@@ -39,7 +39,7 @@ fn load_additional_boot_args<P1: AsRef<Path>, P2: AsRef<Path>>(
     let update_package_path_ref = update_package_path.as_ref();
     let zbi = model.get::<Zbi>().unwrap();
     // `userboot` only mounts the first StorageBootfs section, so only inspect the first one.
-    if let Some(section) = zbi.sections.iter().find(|s| s.section_type == zbi::Type::StorageBootfs)
+    if let Some(section) = zbi.sections.iter().find(|s| s.section_type == zbi::Type::STORAGE_BOOTFS)
     {
         let mut bootfs_reader = BootfsReader::new(section.buffer.clone());
         let bootfs_data = bootfs_reader.parse().map_err(|bootfs_error| {

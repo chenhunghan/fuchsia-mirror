@@ -1,7 +1,6 @@
 // Copyright 2020 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
-use crate::config::{RecoveryUpdateConfig, UpdateType};
 use crate::setup::DevhostConfig;
 use anyhow::{Context, Error, bail, format_err};
 use fidl::endpoints::ServerEnd;
@@ -11,7 +10,7 @@ use fuchsia_async as fasync;
 use fuchsia_component::client;
 use http_body_util::BodyExt;
 use hyper::Uri;
-use isolated_ota::{OmahaConfig, download_and_apply_update};
+use isolated_ota::download_and_apply_update;
 use serde_json::{Value, json};
 use std::fs::File;
 use std::str::FromStr;
@@ -19,16 +18,8 @@ use std::sync::Arc;
 use vfs::directory::helper::DirectlyMutable;
 use vfs::directory::immutable::simple::Simple;
 
-const PATH_TO_CONFIGS_DIR: &'static str = "/config/data/ota-configs";
 const SERVE_FLAGS: fio::Flags =
     fio::PERM_READABLE.union(fio::PERM_WRITABLE).union(fio::PERM_EXECUTABLE);
-
-enum OtaType {
-    /// Ota from a devhost.
-    Devhost { cfg: DevhostConfig },
-    /// Ota from a well-known location. TODO(simonshields): implement this.
-    WellKnown,
-}
 
 enum BoardName {
     /// Use board name from /config/build-info.
@@ -41,8 +32,7 @@ enum BoardName {
 /// Helper for constructing OTAs.
 pub struct OtaEnvBuilder {
     board_name: BoardName,
-    omaha_config: Option<OmahaConfig>,
-    ota_type: OtaType,
+    devhost_cfg: Option<DevhostConfig>,
     ssl_certificates: String,
     outgoing_dir: Arc<Simple>,
     blobfs_proxy: Option<fio::DirectoryProxy>,
@@ -57,8 +47,7 @@ impl OtaEnvBuilder {
     pub fn new(outgoing_dir: Arc<Simple>) -> Self {
         OtaEnvBuilder {
             board_name: BoardName::BuildInfo,
-            omaha_config: None,
-            ota_type: OtaType::WellKnown,
+            devhost_cfg: None,
             ssl_certificates: "/config/ssl".to_owned(),
             outgoing_dir,
             blobfs_proxy: None,
@@ -74,14 +63,7 @@ impl OtaEnvBuilder {
 
     /// Use the given |DevhostConfig| to run an OTA.
     pub fn devhost(mut self, cfg: DevhostConfig) -> Self {
-        self.ota_type = OtaType::Devhost { cfg };
-        self
-    }
-
-    #[allow(dead_code)]
-    /// Use the given |OmahaConfig| to run an OTA.
-    pub fn omaha_config(mut self, omaha_config: OmahaConfig) -> Self {
-        self.omaha_config = Some(omaha_config);
+        self.devhost_cfg = Some(cfg);
         self
     }
 
@@ -156,21 +138,10 @@ impl OtaEnvBuilder {
         Ok(File::open(tempdir.keep()).context("Opening tmpdir")?)
     }
 
-    async fn get_wellknown_config(&self) -> Result<File, Error> {
-        println!("recovery-ota: passing in config from config_data");
-        Ok(File::open(PATH_TO_CONFIGS_DIR).context("Opening config data path")?)
-    }
-
     /// Construct an |OtaEnv| from this |OtaEnvBuilder|.
     pub async fn build(self) -> Result<OtaEnv, Error> {
-        let repo_dir = match &self.ota_type {
-            OtaType::Devhost { cfg } => {
-                self.get_devhost_config(cfg).await.context("Getting devhost config")?
-            }
-            OtaType::WellKnown => {
-                self.get_wellknown_config().await.context("Preparing wellknown config")?
-            }
-        };
+        let cfg = self.devhost_cfg.as_ref().ok_or_else(|| format_err!("Devhost config not set"))?;
+        let repo_dir = self.get_devhost_config(cfg).await.context("Getting devhost config")?;
 
         let ssl_certificates =
             File::open(&self.ssl_certificates).context("Opening SSL certificate folder")?;
@@ -183,7 +154,6 @@ impl OtaEnvBuilder {
         Ok(OtaEnv {
             blobfs_proxy,
             board_name,
-            omaha_config: self.omaha_config,
             repo_dir,
             ssl_certificates,
             outgoing_dir: self.outgoing_dir,
@@ -194,7 +164,6 @@ impl OtaEnvBuilder {
 pub struct OtaEnv {
     blobfs_proxy: fio::DirectoryProxy,
     board_name: String,
-    omaha_config: Option<OmahaConfig>,
     repo_dir: File,
     ssl_certificates: File,
     outgoing_dir: Arc<Simple>,
@@ -230,9 +199,7 @@ impl OtaEnv {
 
         self.outgoing_dir.add_entry("blob", vfs::remote::remote_dir(self.blobfs_proxy))?;
 
-        download_and_apply_update(channel, version, self.omaha_config)
-            .await
-            .context("Installing OTA")?;
+        download_and_apply_update(channel, version, None).await.context("Installing OTA")?;
 
         Ok(())
     }
@@ -243,10 +210,6 @@ pub async fn run_devhost_ota(
     cfg: DevhostConfig,
     out_dir: ServerEnd<fio::DirectoryMarker>,
 ) -> Result<(), Error> {
-    // TODO(https://fxbug.dev/42064284, b/255340851): deduplicate this spinup code with the code in
-    // ota_main.rs. To do that, we'll need to remove the run_devhost_ota call
-    // from //src/recovery/system/src/main.rs and make run_*_ota public to only ota_main.rs.
-    // Also, remove out_dir - ota_main.rs should provide an outgoing directory already spun up.
     let outgoing_dir_vfs = vfs::pseudo_directory! {};
 
     let scope = vfs::execution_scope::ExecutionScope::new();
@@ -259,65 +222,6 @@ pub async fn run_devhost_ota(
         .await
         .context("Failed to create devhost OTA env")?;
     ota_env.do_ota("devhost", "20200101.1.1").await
-}
-
-/// Run an OTA against a TUF or Omaha server. Returns Ok after the system has successfully been installed.
-pub async fn run_wellknown_ota(
-    blobfs_proxy: fio::DirectoryProxy,
-    outgoing_dir: Arc<Simple>,
-) -> Result<(), Error> {
-    let config =
-        RecoveryUpdateConfig::resolve_update_config().await.context("Couldn't get config")?;
-    let channel = config.channel;
-    let version = config.version;
-
-    match config.update_type {
-        UpdateType::Tuf => {
-            println!("recovery-ota: Creating TUF OTA environment");
-            let ota_env = OtaEnvBuilder::new(outgoing_dir)
-                .blobfs_proxy(blobfs_proxy)
-                .build()
-                .await
-                .context("Failed to create OTA env")?;
-            println!(
-                "recovery-ota: Starting TUF OTA on channel '{}' against version '{}'",
-                channel, version
-            );
-            ota_env.do_ota(&channel, &version).await
-        }
-        UpdateType::Omaha { app_id, service_url } => {
-            println!("recovery-ota: Creating Omaha OTA environment");
-            // Check for testing override
-            println!(
-                "recovery-ota: trying Omaha OTA on channel '{}' against version '{}', with service URL '{}' and app id '{}'",
-                channel, version, service_url, app_id
-            );
-
-            let ota_env = OtaEnvBuilder::new(outgoing_dir)
-                .omaha_config(OmahaConfig { app_id: app_id, server_url: service_url })
-                .blobfs_proxy(blobfs_proxy)
-                .build()
-                .await
-                .context("Failed to create OTA env");
-
-            match ota_env {
-                Ok(ref _ota_env) => {
-                    println!("got no error while creating OTA env...")
-                }
-                Err(ref e) => {
-                    eprintln!("got error while creating OTA env: {:?}", e)
-                }
-            }
-
-            println!(
-                "recovery-ota: Starting Omaha OTA on channel '{}' against version '{}'",
-                channel, version
-            );
-            let res = ota_env?.do_ota(&channel, &version).await;
-            println!("recovery-ota: OTA result: {:?}", res);
-            res
-        }
-    }
 }
 
 #[cfg(test)]

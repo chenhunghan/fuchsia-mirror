@@ -22,7 +22,7 @@ impl Driver for MyDriverRust {
         Ok(Self { _node: node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("MyDriverRust::stop()");
     }
 }

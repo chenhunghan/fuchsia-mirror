@@ -39,6 +39,7 @@ config("android_config") {
   ]
 }
 
+# LINT.IfChange(android_rust_config)
 config("android_rust_config") {
   rustflags = [
     "-Adead-code",
@@ -53,6 +54,9 @@ config("android_rust_config") {
   ]
 }
 
+# LINT.ThenChange(BUILD.bazel:android_rust_config)
+
+# LINT.IfChange(android_aidl_rust_config)
 config("android_aidl_rust_config") {
   rustflags = [
     "-Aunused-crate-dependencies",
@@ -62,3 +66,4 @@ config("android_aidl_rust_config") {
   ]
   configs = [ ":android_rust_config" ]
 }
+# LINT.ThenChange(BUILD.bazel:android_aidl_rust_config)

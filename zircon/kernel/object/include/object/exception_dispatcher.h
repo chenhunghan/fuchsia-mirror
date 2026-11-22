@@ -36,7 +36,7 @@ void rust_exception_dispatcher_on_zero_handles(ExceptionDispatcher* disp);
 }
 
 // Zircon channel-based exception handling uses two primary classes,
-// ExceptionDispatcher (this file) and Exceptionate (exceptionate.h).
+// ExceptionDispatcher (this file) and Exceptionate (object/exceptionate.rs).
 //
 // An ExceptionDispatcher represents a single currently-active exception. This
 // will be transmitted to registered exception handlers in userspace and

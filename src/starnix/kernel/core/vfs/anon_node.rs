@@ -51,7 +51,7 @@ impl Anon {
         info: FsNodeInfo,
     ) -> Result<FileHandle, Errno> {
         let fs = anon_fs(current_task.kernel());
-        let node = fs.create_node_with_flags(None, Anon {}, info, FsNodeFlags::empty());
+        let node = fs.create_node_with_flags(None, Anon {}, info, FsNodeFlags::HAS_NO_PRIVILEGES);
         security::fs_node_init_anon(current_task, &node, name)?;
         let name = NamespaceNode::new_anonymous(DirEntry::new(node, None, name.into()));
         FileObject::new(current_task, ops, name, flags)

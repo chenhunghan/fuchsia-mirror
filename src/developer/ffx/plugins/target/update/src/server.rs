@@ -434,7 +434,7 @@ async fn try_rcs_proxy_connection(
 pub(crate) mod tests {
     use super::*;
     use ffx_config::TestEnv;
-    use ffx_target::TargetInfoQuery;
+    use ffx_target::{TargetConnector, TargetInfoQuery};
     use fho::{FhoEnvironment, TryFromEnv as _};
     use fidl::endpoints::DiscoverableProtocolMarker;
     use fidl_fuchsia_developer_remotecontrol::{ConnectCapabilityError, RemoteControlRequest};
@@ -450,8 +450,7 @@ pub(crate) mod tests {
     use futures::{SinkExt as _, StreamExt as _, TryStreamExt as _};
     use std::assert_matches;
     use std::sync::{Arc, Mutex};
-    use target_behavior::DirectConnector;
-    use target_holders::{HostAddrHolder, RemoteControlProxyHolder};
+    use target_holders::{HostAddrHolder, RemoteControlProxyHolder, target_interface};
 
     fn setup_fake_client() -> Arc<fdomain_client::Client> {
         fdomain_local::local_client(move || {
@@ -495,9 +494,9 @@ pub(crate) mod tests {
         pub(crate) async fn new(test_env: &TestEnv) -> Self {
             let fdomain_client = setup_fake_client();
             let fho_env = FhoEnvironment::new_with_args(&test_env.context, &["some", "test"]);
-            let target_env = target_behavior::target_interface(&fho_env);
-            let connector = DirectConnector::fake_with_fdomain_client(fdomain_client.clone()).await;
-            target_env.set_behavior_for_test(connector);
+            let target_env = target_interface(&fho_env);
+            let connector = TargetConnector::fake_with_fdomain_client(fdomain_client.clone()).await;
+            target_env.set_connector_for_test(connector);
 
             let rcs_proxy_connector =
                 Connector::try_from_env(&fho_env).await.expect("Could not make RCS test connector");

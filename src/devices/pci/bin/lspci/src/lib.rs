@@ -36,6 +36,10 @@ pub struct Args {
     /// dump raw configuration space
     pub print_config: bool,
 
+    #[argh(switch, short = 'X')]
+    /// dump extended configuration space
+    pub print_extended_config: bool,
+
     #[argh(switch, short = 'n')]
     /// print numeric IDs.
     pub print_numeric: bool,

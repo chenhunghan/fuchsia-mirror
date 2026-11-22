@@ -61,7 +61,6 @@ fuchsia_cc_driver("usb-virtual-bus-driver") {
 
 fuchsia_driver_component("usb-virtual-bus") {
   dml_label = ":usb-virtual-bus-dml"
-  info = "meta/usb-virtual-bus-info.json"
   component_name = "usb-virtual-bus"
   deps = [
     ":usb-virtual-bus-bind",
@@ -73,6 +72,7 @@ group("tests") {
   testonly = true
   deps = [
     "tests:usb-virtual-bus-fidl-test",
+    "tests:usb-virtual-bus-tester-function-fidl-test",
     "tests:usb-virtual-bus-unit-test",
   ]
 }

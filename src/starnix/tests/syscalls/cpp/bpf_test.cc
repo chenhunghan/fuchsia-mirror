@@ -5,6 +5,8 @@
 #include "third_party/android/platform/bionic/libc/kernel/uapi/linux/bpf.h"
 
 #include <fcntl.h>
+#include <lib/fit/defer.h>
+#include <lib/fit/result.h>
 #include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/file.h>
@@ -21,16 +23,20 @@
 #include <atomic>
 #include <climits>
 #include <fstream>
+#include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
 #include <linux/capability.h>
+#include <linux/filter.h>
 
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
+#include "third_party/android/platform/bionic/libc/kernel/uapi/linux/btf.h"
 
 #ifndef CAP_PERFMON
 #define CAP_PERFMON 38
@@ -107,6 +113,75 @@
   }
 
 namespace {
+
+TEST(BpfTest, ProgRun) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "bpf() system call requires CAP_SYS_ADMIN";
+  }
+
+  struct bpf_insn prog[] = {
+      {BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 42},
+      {BPF_JMP | BPF_EXIT, 0, 0, 0, 0},
+  };
+
+  union bpf_attr attr = {};
+  attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+  attr.insns = reinterpret_cast<uint64_t>(prog);
+  attr.insn_cnt = sizeof(prog) / sizeof(prog[0]);
+  attr.license = reinterpret_cast<uint64_t>("GPL");
+
+  int prog_fd = static_cast<int>(syscall(__NR_bpf, BPF_PROG_LOAD, &attr, sizeof(attr)));
+  ASSERT_GE(prog_fd, 0);
+
+  uint8_t data_in[128] = {0};
+  struct __sk_buff ctx_in = {};
+  uint8_t data_out[128] = {0};
+  struct __sk_buff ctx_out = {};
+
+  union bpf_attr run_attr = {};
+  run_attr.test.prog_fd = prog_fd;
+  run_attr.test.data_size_in = sizeof(data_in);
+  run_attr.test.data_in = reinterpret_cast<uint64_t>(data_in);
+  run_attr.test.ctx_size_in = sizeof(ctx_in);
+  run_attr.test.ctx_in = reinterpret_cast<uint64_t>(&ctx_in);
+  run_attr.test.data_size_out = sizeof(data_out);
+  run_attr.test.data_out = reinterpret_cast<uint64_t>(data_out);
+  run_attr.test.ctx_size_out = sizeof(ctx_out);
+  run_attr.test.ctx_out = reinterpret_cast<uint64_t>(&ctx_out);
+
+  EXPECT_EQ(syscall(__NR_bpf, BPF_PROG_TEST_RUN, &run_attr, sizeof(run_attr)), 0l);
+  EXPECT_EQ(run_attr.test.retval, 42u);
+  EXPECT_EQ(run_attr.test.data_size_out, sizeof(data_in));
+  EXPECT_EQ(run_attr.test.ctx_size_out, sizeof(ctx_out));
+
+  // Verify that omitting ctx_in while providing ctx_out still populates ctx_out.
+  run_attr.test.ctx_size_in = 0;
+  run_attr.test.ctx_in = 0;
+  run_attr.test.ctx_size_out = sizeof(ctx_out);
+  EXPECT_EQ(syscall(__NR_bpf, BPF_PROG_TEST_RUN, &run_attr, sizeof(run_attr)), 0l);
+  EXPECT_EQ(run_attr.test.retval, 42u);
+  EXPECT_EQ(run_attr.test.ctx_size_out, sizeof(ctx_out));
+
+  // Verify that an undersized ctx_out buffer returns ENOSPC and updates ctx_size_out.
+  run_attr.test.ctx_size_out = 64;
+  EXPECT_EQ(syscall(__NR_bpf, BPF_PROG_TEST_RUN, &run_attr, sizeof(run_attr)), -1l);
+  EXPECT_EQ(errno, ENOSPC);
+  EXPECT_EQ(run_attr.test.ctx_size_out, sizeof(ctx_out));
+
+  // Verify that an undersized data_out buffer returns ENOSPC and updates data_size_out.
+  run_attr.test.data_size_out = 64;
+  EXPECT_EQ(syscall(__NR_bpf, BPF_PROG_TEST_RUN, &run_attr, sizeof(run_attr)), -1l);
+  EXPECT_EQ(errno, ENOSPC);
+  EXPECT_EQ(run_attr.test.data_size_out, sizeof(data_in));
+
+  // Verify that mismatched pointer and size fields return EINVAL.
+  run_attr.test.ctx_in = reinterpret_cast<uint64_t>(&ctx_in);
+  run_attr.test.ctx_size_in = 0;
+  EXPECT_EQ(syscall(__NR_bpf, BPF_PROG_TEST_RUN, &run_attr, sizeof(run_attr)), -1l);
+  EXPECT_EQ(errno, EINVAL);
+
+  close(prog_fd);
+}
 
 int bpf(int cmd, union bpf_attr* attr) { return (int)syscall(__NR_bpf, cmd, attr, sizeof(*attr)); }
 
@@ -244,6 +319,25 @@ class BpfTestBase : public testing::Test {
     };
     return info.id;
   }
+
+  // Configures `/proc/sys/kernel/unprivileged_bpf_disabled` for `disabled`, returning an RAII
+  // restore guard (empty if already disabled and locked at `1`), or `EPERM` when `!disabled` and
+  // locked at `1`.
+  fit::result<int, test_helper::ScopedSysctl> SetUnprivilegedBpfDisabled(bool disabled) {
+    constexpr char kPath[] = "/proc/sys/kernel/unprivileged_bpf_disabled";
+    auto res = test_helper::ScopedSysctl::Create(kPath, disabled ? "2" : "0");
+    if (res.is_error() && (res.error_value() == EPERM || res.error_value() == EACCES)) {
+      std::ifstream file(kPath);
+      int current_value = 0;
+      if ((file >> current_value) && current_value == 1) {
+        if (disabled) {
+          return fit::ok(test_helper::ScopedSysctl());
+        }
+        return fit::error(EPERM);
+      }
+    }
+    return res;
+  }
 };
 
 // Call fcntl syscall directly. It's used instead of `fcntl()` provided by libc
@@ -299,13 +393,17 @@ class BpfMapTest : public BpfTestBase {
     EXPECT_EQ(map_info.map_flags, 0u);
   }
 
-  void Pin(int fd, const char* pin_path) {
-    unlink(pin_path);
+  int TryPin(int fd, const char* pin_path) {
     bpf_attr attr = {
         .pathname = reinterpret_cast<uintptr_t>(pin_path),
-        .bpf_fd = static_cast<unsigned>(fd),
+        .bpf_fd = static_cast<uint32_t>(fd),
     };
-    ASSERT_EQ(bpf(BPF_OBJ_PIN, &attr), 0) << strerror(errno);
+    return bpf(BPF_OBJ_PIN, &attr);
+  }
+
+  void Pin(int fd, const char* pin_path) {
+    unlink(pin_path);
+    ASSERT_EQ(TryPin(fd, pin_path), 0) << strerror(errno);
   }
 
   fbl::unique_fd BpfLock(fbl::unique_fd fd, short type) {
@@ -360,13 +458,10 @@ class BpfMapTest : public BpfTestBase {
   // Run the given bpf program.
   void Run(const bpf_insn* program, size_t len) {
     fbl::unique_fd prog_fd = LoadProgram(program, len, BPF_PROG_TYPE_SOCKET_FILTER, 0);
-    int sk[2];
-    SAFE_SYSCALL(socketpair(AF_UNIX, SOCK_DGRAM, 0, sk));
-    fbl::unique_fd sk0(sk[0]);
-    fbl::unique_fd sk1(sk[1]);
+    test_helper::ScopedSocketPair sk(SOCK_DGRAM);
     int fd = prog_fd.get();
-    SAFE_SYSCALL(setsockopt(sk1.get(), SOL_SOCKET, SO_ATTACH_BPF, &fd, sizeof(int)));
-    SAFE_SYSCALL(write(sk0.get(), "", 1));
+    SAFE_SYSCALL(setsockopt(sk[1].get(), SOL_SOCKET, SO_ATTACH_BPF, &fd, sizeof(int)));
+    SAFE_SYSCALL(write(sk[0].get(), "", 1));
   }
 
   void WriteToRingBuffer(char v, uint32_t submit_flag = 0) {
@@ -1553,6 +1648,235 @@ TEST_F(BpfTestBase, PointerLeakByEnd) {
   EXPECT_THAT(prog_fd.get(), SyscallFailsWithErrno(EACCES));
 }
 
+TEST_F(BpfTestBase, NarrowScalarLoadMasksBounds) {
+  constexpr uint32_t kMapValueSize = 65536;
+  fbl::unique_fd array_map = CreateMap(BPF_MAP_TYPE_ARRAY, sizeof(uint32_t), kMapValueSize, 1);
+  ASSERT_TRUE(array_map.is_valid());
+
+  // Narrow loads (u8, u16, u32) from PtrToMemory (a 64 KiB map value) must constrain the
+  // destination register's upper bound to the load width so it can index into the map value
+  // without an explicit bounds-check branch (including unshifted 16-bit loads as emitted for
+  // tracepoint __data_loc offset addition, b/582666680).
+  bpf_insn mem_narrow_prog[] = {
+      // r2 = r10 - 4; *(uint32_t*)(r2 + 0) = 0
+      BPF_MOV_REG(2, 10),
+      BPF_ADD_IMM(2, -4),
+      BPF_STORE_W(2, 0),
+      // r1 = array_map (2 insns)
+      BPF_LOAD_MAP(1, array_map.get()),
+      // r0 = bpf_map_lookup_elem(r1, r2)
+      BPF_CALL_EXTERNAL(BPF_FUNC_map_lookup_elem),
+      // if r0 == 0 goto +14
+      bpf_insn{
+          .code = BPF_JMP | BPF_JEQ | BPF_K,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 14,
+          .imm = 0,
+      },
+      // r6 = r0 (PtrToMemory, size 65536)
+      BPF_MOV_REG(6, 0),
+      // u8 load: r2 in [0, 255]
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_B,
+          .dst_reg = 2,
+          .src_reg = 6,
+          .off = 0,
+          .imm = 0,
+      },
+      BPF_MOV_REG(7, 6),
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 7,
+          .src_reg = 2,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_B,
+          .dst_reg = 0,
+          .src_reg = 7,
+          .off = 0,
+          .imm = 0,
+      },
+      // Unshifted u16 load: r2 in [0, 65535]
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_H,
+          .dst_reg = 2,
+          .src_reg = 6,
+          .off = 0,
+          .imm = 0,
+      },
+      BPF_MOV_REG(7, 6),
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 7,
+          .src_reg = 2,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_B,
+          .dst_reg = 0,
+          .src_reg = 7,
+          .off = 0,
+          .imm = 0,
+      },
+      // u32 load shifted right by 16: r2 in [0, 65535]
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_W,
+          .dst_reg = 2,
+          .src_reg = 6,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_RSH | BPF_K,
+          .dst_reg = 2,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 16,
+      },
+      BPF_MOV_REG(7, 6),
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 7,
+          .src_reg = 2,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_B,
+          .dst_reg = 0,
+          .src_reg = 7,
+          .off = 0,
+          .imm = 0,
+      },
+      BPF_MOV_IMM(0, 0),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd mem_prog_fd =
+      LoadProgram(mem_narrow_prog, std::size(mem_narrow_prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_TRUE(mem_prog_fd.is_valid());
+
+  // Narrow loads from PtrToStruct (__sk_buff.len u32 load) must likewise constrain the loaded
+  // scalar's bounds.
+  bpf_insn struct_narrow_prog[] = {
+      // r6 = r1 (__sk_buff*)
+      BPF_MOV_REG(6, 1),
+      // r2 = r10 - 4; *(uint32_t*)(r2 + 0) = 0
+      BPF_MOV_REG(2, 10),
+      BPF_ADD_IMM(2, -4),
+      BPF_STORE_W(2, 0),
+      // r1 = array_map (2 insns)
+      BPF_LOAD_MAP(1, array_map.get()),
+      // r0 = bpf_map_lookup_elem(r1, r2)
+      BPF_CALL_EXTERNAL(BPF_FUNC_map_lookup_elem),
+      // if r0 == 0 goto +5
+      bpf_insn{
+          .code = BPF_JMP | BPF_JEQ | BPF_K,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 5,
+          .imm = 0,
+      },
+      // r7 = r0 (PtrToMemory, size 65536)
+      BPF_MOV_REG(7, 0),
+      // r2 = *(uint32_t*)(r6 + offsetof(__sk_buff, len))
+      BPF_LOAD_OFFSET(2, 6, static_cast<int16_t>(offsetof(__sk_buff, len))),
+      // r2 >>= 16 (bounds [0, 0xffffffff] -> [0, 65535])
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_RSH | BPF_K,
+          .dst_reg = 2,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 16,
+      },
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 7,
+          .src_reg = 2,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_B,
+          .dst_reg = 0,
+          .src_reg = 7,
+          .off = 0,
+          .imm = 0,
+      },
+      BPF_MOV_IMM(0, 0),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd struct_prog_fd = LoadProgram(struct_narrow_prog, std::size(struct_narrow_prog),
+                                              BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_TRUE(struct_prog_fd.is_valid());
+
+  // Legacy packet loads (BPF_LD | BPF_ABS | BPF_B) leave r0 as an unbounded scalar on both Linux
+  // and Starnix because runtime SKF_AD_* loads do not mask the return value to the instruction
+  // width. Masking r0 with 0x1ffff keeps the pointer offset within the 1 << 29 pointer-arithmetic
+  // limit (avoiding EINVAL on r7 += r0) while exceeding the 64 KiB map value size unless the u8
+  // packet load had constrained r0 to [0, 255], so dereferencing r7 must be rejected with EACCES.
+  bpf_insn packet_narrow_prog[] = {
+      // r6 = r1 (__sk_buff*)
+      BPF_MOV_REG(6, 1),
+      // r2 = r10 - 4; *(uint32_t*)(r2 + 0) = 0
+      BPF_MOV_REG(2, 10),
+      BPF_ADD_IMM(2, -4),
+      BPF_STORE_W(2, 0),
+      // r1 = array_map (2 insns)
+      BPF_LOAD_MAP(1, array_map.get()),
+      // r0 = bpf_map_lookup_elem(r1, r2)
+      BPF_CALL_EXTERNAL(BPF_FUNC_map_lookup_elem),
+      // if r0 == 0 goto +5
+      bpf_insn{
+          .code = BPF_JMP | BPF_JEQ | BPF_K,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 5,
+          .imm = 0,
+      },
+      // r7 = r0 (PtrToMemory, size 65536)
+      BPF_MOV_REG(7, 0),
+      // r0 = *(uint8_t*)skb[0] (unbounded scalar)
+      bpf_insn{
+          .code = BPF_LD | BPF_ABS | BPF_B,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 0,
+      },
+      // r0 &= 0x1ffff (bounds [0, 131071] if r0 was unbounded, or [0, 255] if masked to u8)
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_AND | BPF_K,
+          .dst_reg = 0,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 0x1ffff,
+      },
+      bpf_insn{
+          .code = BPF_ALU64 | BPF_ADD | BPF_X,
+          .dst_reg = 7,
+          .src_reg = 0,
+          .off = 0,
+          .imm = 0,
+      },
+      bpf_insn{
+          .code = BPF_LDX | BPF_MEM | BPF_B,
+          .dst_reg = 0,
+          .src_reg = 7,
+          .off = 0,
+          .imm = 0,
+      },
+      BPF_MOV_IMM(0, 0),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd pkt_prog_fd = TryLoadProgram(packet_narrow_prog, std::size(packet_narrow_prog),
+                                              BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  EXPECT_THAT(pkt_prog_fd.get(), SyscallFailsWithErrno(EACCES));
+}
+
 class BpfMapCapabilityTest
     : public BpfTestBase,
       public ::testing::WithParamInterface<std::tuple<uint32_t, bool, bool, bool, bool>> {
@@ -1562,26 +1886,6 @@ class BpfMapCapabilityTest
       GTEST_SKIP() << "bpf() system call requires CAP_SYS_ADMIN";
     }
   }
-
-  void TearDown() override {
-    if (restore_unpriv_bpf_disabled) {
-      SetUnprivilegedBpfDisabled(restore_unpriv_bpf_disabled.value());
-    }
-  }
-
-  void GetUnprivilegedBpfDisabled(int* out_result) {
-    std::ifstream file("/proc/sys/kernel/unprivileged_bpf_disabled");
-    ASSERT_TRUE(file.is_open());
-    ASSERT_TRUE(file >> *out_result);
-  }
-
-  void SetUnprivilegedBpfDisabled(int value) {
-    std::ofstream file("/proc/sys/kernel/unprivileged_bpf_disabled");
-    ASSERT_TRUE(file.is_open());
-    ASSERT_TRUE(file << value);
-  }
-
-  std::optional<int> restore_unpriv_bpf_disabled;
 };
 
 TEST_P(BpfMapCapabilityTest, MapCreation) {
@@ -1594,25 +1898,11 @@ TEST_P(BpfMapCapabilityTest, MapCreation) {
     }
   }
 
-  // `unprivileged_bpf_disabled` can be set to 0, 1, or 2. Unprivileged BPF
-  // access is disabled when the value is either 1 or 2, but 1 also prohibits
-  // changing it.
-  int current_unpriv_bpf_disabled = {};
-  ASSERT_NO_FATAL_FAILURE(GetUnprivilegedBpfDisabled(&current_unpriv_bpf_disabled));
-
-  // True if we need to update `unprivileged_bpf_disabled` for this test.
-  bool update_unpriv_bpf_disabled = unpriv_bpf_disabled != (current_unpriv_bpf_disabled != 0);
-
-  // If `unprivileged_bpf_disabled` is 1 then we cannot update it, which means
-  // we may need to skip the test.
-  if (current_unpriv_bpf_disabled == 1 && update_unpriv_bpf_disabled) {
+  auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(unpriv_bpf_disabled);
+  if (unpriv_bpf_disabled_sysctl.is_error() && unpriv_bpf_disabled_sysctl.error_value() == EPERM) {
     GTEST_SKIP() << "/proc/sys/kernel/unprivileged_bpf_disabled is set to 1";
   }
-
-  if (update_unpriv_bpf_disabled) {
-    ASSERT_NO_FATAL_FAILURE(SetUnprivilegedBpfDisabled(unpriv_bpf_disabled ? 2 : 0));
-    restore_unpriv_bpf_disabled = current_unpriv_bpf_disabled;
-  }
+  ASSERT_THAT(unpriv_bpf_disabled_sysctl, SyscallResultIsOk());
 
   // Determine expected success.
   bool cap_bpf_always = (map_type == BPF_MAP_TYPE_LPM_TRIE || map_type == BPF_MAP_TYPE_LRU_HASH ||
@@ -1665,10 +1955,8 @@ TEST_P(BpfMapCapabilityTest, MapCreation) {
     auto fd = TryCreateMap(map_type, key_size, value_size, max_entries, map_flags);
     if (may_fail) {
       EXPECT_THAT(fd.get(), AnyOf(SyscallSucceeds(), SyscallFailsWithErrno(EPERM)));
-    } else if (expect_success) {
-      EXPECT_THAT(fd.get(), SyscallSucceeds());
     } else {
-      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EPERM));
+      EXPECT_THAT(fd.get(), SyscallSucceedsOrFailsWithErrno(expect_success, EPERM));
     }
   });
 }
@@ -1735,44 +2023,17 @@ class BpfProgramCapabilityTest
       GTEST_SKIP() << "bpf() system call requires CAP_SYS_ADMIN";
     }
   }
-
-  void TearDown() override {
-    if (restore_unpriv_bpf_disabled) {
-      SetUnprivilegedBpfDisabled(restore_unpriv_bpf_disabled.value());
-    }
-  }
-
-  void GetUnprivilegedBpfDisabled(int* out_result) {
-    std::ifstream file("/proc/sys/kernel/unprivileged_bpf_disabled");
-    ASSERT_TRUE(file.is_open());
-    ASSERT_TRUE(file >> *out_result);
-  }
-
-  void SetUnprivilegedBpfDisabled(int value) {
-    std::ofstream file("/proc/sys/kernel/unprivileged_bpf_disabled");
-    ASSERT_TRUE(file.is_open());
-    ASSERT_TRUE(file << value);
-  }
-
-  std::optional<int> restore_unpriv_bpf_disabled;
 };
 
 TEST_P(BpfProgramCapabilityTest, ProgramLoad) {
   auto [prog_type, unpriv_bpf_disabled, has_bpf, has_perfmon, has_net_admin, has_sys_admin] =
       GetParam();
 
-  int current_unpriv_bpf_disabled = {};
-  ASSERT_NO_FATAL_FAILURE(GetUnprivilegedBpfDisabled(&current_unpriv_bpf_disabled));
-
-  bool update_unpriv_bpf_disabled = unpriv_bpf_disabled != (current_unpriv_bpf_disabled != 0);
-  if (current_unpriv_bpf_disabled == 1 && update_unpriv_bpf_disabled) {
+  auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(unpriv_bpf_disabled);
+  if (unpriv_bpf_disabled_sysctl.is_error() && unpriv_bpf_disabled_sysctl.error_value() == EPERM) {
     GTEST_SKIP() << "/proc/sys/kernel/unprivileged_bpf_disabled is set to 1";
   }
-
-  if (update_unpriv_bpf_disabled) {
-    ASSERT_NO_FATAL_FAILURE(SetUnprivilegedBpfDisabled(unpriv_bpf_disabled ? 2 : 0));
-    restore_unpriv_bpf_disabled = current_unpriv_bpf_disabled;
-  }
+  ASSERT_THAT(unpriv_bpf_disabled_sysctl, SyscallResultIsOk());
 
   bool allow_unpriv = !unpriv_bpf_disabled && (prog_type == BPF_PROG_TYPE_SOCKET_FILTER ||
                                                prog_type == BPF_PROG_TYPE_CGROUP_SKB);
@@ -1810,11 +2071,7 @@ TEST_P(BpfProgramCapabilityTest, ProgramLoad) {
 
     auto fd = TryLoadProgram(program_insns, sizeof(program_insns) / sizeof(program_insns[0]),
                              prog_type, 0);
-    if (expect_success) {
-      EXPECT_THAT(fd.get(), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EPERM));
-    }
+    EXPECT_THAT(fd.get(), SyscallSucceedsOrFailsWithErrno(expect_success, EPERM));
   });
   EXPECT_TRUE(fork_helper.WaitForChildren());
 }
@@ -1869,6 +2126,183 @@ INSTANTIATE_TEST_SUITE_P(
                        ::testing::Bool(), ::testing::Bool(), ::testing::Bool(), ::testing::Bool(),
                        ::testing::Bool()),
     BpfProgramCapabilityTestName);
+
+TEST_F(BpfTestBase, ProgRunDoesNotRequireCapabilities) {
+  bpf_insn prog[] = {
+      BPF_MOV_IMM(0, 42),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd prog_fd = LoadProgram(prog, std::size(prog), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  ASSERT_TRUE(prog_fd.is_valid());
+
+  auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(/*disabled=*/true);
+  ASSERT_THAT(unpriv_bpf_disabled_sysctl, SyscallResultIsOk());
+
+  uint8_t data_in[64] = {};
+  bpf_attr run_attr = {};
+  run_attr.test.prog_fd = static_cast<uint32_t>(prog_fd.get());
+  run_attr.test.data_size_in = sizeof(data_in);
+  run_attr.test.data_in = reinterpret_cast<uint64_t>(data_in);
+
+  // BPF_PROG_TEST_RUN does not require capabilities even when unprivileged_bpf_disabled is set.
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::DropAllCapabilities();
+    EXPECT_THAT(bpf(BPF_PROG_TEST_RUN, &run_attr), SyscallSucceeds());
+    EXPECT_EQ(run_attr.test.retval, 42u);
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+}
+
+TEST_F(BpfTestBase, BtfLoadRequiresCapBpfOrSysAdmin) {
+  struct MinimalBtf {
+    btf_header header;
+    btf_type ptr_type;
+    char str_section[1];
+  } __attribute__((packed));
+
+  constexpr MinimalBtf kMinimalBtf = {
+      .header =
+          {
+              .magic = BTF_MAGIC,
+              .version = BTF_VERSION,
+              .flags = 0,
+              .hdr_len = sizeof(btf_header),
+              .type_off = 0,
+              .type_len = sizeof(btf_type),
+              .str_off = sizeof(btf_type),
+              .str_len = sizeof(kMinimalBtf.str_section),
+          },
+      .ptr_type =
+          {
+              .name_off = 0,
+              .info = static_cast<uint32_t>(BTF_KIND_PTR) << 24,
+              .type = 0,
+          },
+      .str_section = {'\0'},
+  };
+
+  struct Case {
+    const char* label;
+    bool unpriv_bpf_disabled;
+    std::vector<int> unset_caps;
+    int expected_errno = 0;
+  };
+  test_helper::ForkHelper fork_helper;
+  for (const auto& tc : {
+           Case{
+               .label = "CAP_BPF only", .unpriv_bpf_disabled = true, .unset_caps = {CAP_SYS_ADMIN}},
+           Case{
+               .label = "CAP_SYS_ADMIN only", .unpriv_bpf_disabled = true, .unset_caps = {CAP_BPF}},
+           Case{.label = "neither CAP_BPF nor CAP_SYS_ADMIN",
+                .unpriv_bpf_disabled = false,
+                .unset_caps = {CAP_BPF, CAP_SYS_ADMIN},
+                .expected_errno = EPERM},
+       }) {
+    SCOPED_TRACE(tc.label);
+    auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(tc.unpriv_bpf_disabled);
+    if (unpriv_bpf_disabled_sysctl.is_error()) {
+      ASSERT_FALSE(tc.unpriv_bpf_disabled);
+      ASSERT_EQ(unpriv_bpf_disabled_sysctl.error_value(), EPERM);
+    }
+    fork_helper.RunInForkedProcess([&]() {
+      for (int cap : tc.unset_caps) {
+        test_helper::UnsetCapabilityEffective(cap);
+      }
+      bpf_attr attr = {};
+      attr.btf = reinterpret_cast<uint64_t>(&kMinimalBtf);
+      attr.btf_size = sizeof(kMinimalBtf);
+      fbl::unique_fd fd(bpf(BPF_BTF_LOAD, &attr));
+      if (tc.expected_errno == 0) {
+        EXPECT_THAT(fd.get(), SyscallSucceeds());
+      } else {
+        EXPECT_THAT(fd.get(), SyscallFailsWithErrno(tc.expected_errno));
+      }
+    });
+    EXPECT_TRUE(fork_helper.WaitForChildren());
+  }
+}
+
+TEST_F(BpfMapTest, UnprivilegedMapOpsIgnoreUnprivilegedBpfDisabled) {
+  auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(/*disabled=*/true);
+  ASSERT_THAT(unpriv_bpf_disabled_sysctl, SyscallResultIsOk());
+
+  fbl::unique_fd freeze_map_fd = CreateMap(BPF_MAP_TYPE_ARRAY, sizeof(int), sizeof(int), 1);
+  ASSERT_TRUE(freeze_map_fd.is_valid());
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::DropAllCapabilities();
+
+    int key = 1;
+    int val = 100;
+    bpf_attr update_attr = {
+        .map_fd = static_cast<uint32_t>(map_fd()),
+        .key = reinterpret_cast<uint64_t>(&key),
+        .value = reinterpret_cast<uint64_t>(&val),
+    };
+    EXPECT_THAT(bpf(BPF_MAP_UPDATE_ELEM, &update_attr), SyscallSucceeds());
+
+    int out_val = 0;
+    bpf_attr lookup_attr = {
+        .map_fd = static_cast<uint32_t>(map_fd()),
+        .key = reinterpret_cast<uint64_t>(&key),
+        .value = reinterpret_cast<uint64_t>(&out_val),
+    };
+    EXPECT_THAT(bpf(BPF_MAP_LOOKUP_ELEM, &lookup_attr), SyscallSucceeds());
+    EXPECT_EQ(out_val, 100);
+
+    int next_key = 0;
+    bpf_attr next_key_attr = {
+        .map_fd = static_cast<uint32_t>(map_fd()),
+        .next_key = reinterpret_cast<uint64_t>(&next_key),
+    };
+    EXPECT_THAT(bpf(BPF_MAP_GET_NEXT_KEY, &next_key_attr), SyscallSucceeds());
+    EXPECT_EQ(next_key, 1);
+
+    bpf_attr delete_attr = {
+        .map_fd = static_cast<uint32_t>(map_fd()),
+        .key = reinterpret_cast<uint64_t>(&key),
+    };
+    EXPECT_THAT(bpf(BPF_MAP_DELETE_ELEM, &delete_attr), SyscallSucceeds());
+
+    bpf_attr freeze_attr = {.map_fd = static_cast<uint32_t>(freeze_map_fd.get())};
+    EXPECT_THAT(bpf(BPF_MAP_FREEZE, &freeze_attr), SyscallSucceeds());
+  });
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
+
+TEST_F(BpfMapTest, UnprivilegedObjOpsIgnoreUnprivilegedBpfDisabled) {
+  constexpr char kPinPath[] = "/sys/fs/bpf/unpriv_pin_test";
+
+  bpf_insn prog_insns[] = {
+      BPF_MOV_IMM(0, 1),
+      BPF_RETURN(),
+  };
+  fbl::unique_fd prog_fd =
+      LoadProgram(prog_insns, std::size(prog_insns), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  ASSERT_TRUE(prog_fd.is_valid());
+
+  auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(/*disabled=*/true);
+  ASSERT_THAT(unpriv_bpf_disabled_sysctl, SyscallResultIsOk());
+
+  unlink(kPinPath);
+  auto cleanup_pin = fit::defer([&]() { unlink(kPinPath); });
+
+  test_helper::ForkHelper fork_helper;
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_BPF);
+    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+
+    EXPECT_THAT(BpfGetMapId(map_fd()), SyscallSucceeds());
+    EXPECT_THAT(BpfGetProgId(prog_fd.get()), SyscallSucceeds());
+    EXPECT_THAT(TryPin(array_fd(), kPinPath), SyscallSucceeds());
+
+    fbl::unique_fd get_fd = BpfFdGet(kPinPath, 0);
+    EXPECT_THAT(get_fd.get(), SyscallSucceeds());
+  });
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+}
 
 class BpfCgroupTest : public BpfTestBase {
  protected:
@@ -2241,7 +2675,23 @@ TEST_F(BpfCgroupTest, CgroupSkbAttachRequiresNetAdmin) {
     ASSERT_TRUE(fork_helper.WaitForChildren());
   }
 
+  {
+    SCOPED_TRACE("Without CAP_SYS_ADMIN and CAP_BPF, unpriv_disabled");
+    auto unpriv_bpf_disabled_sysctl = SetUnprivilegedBpfDisabled(/*disabled=*/true);
+    ASSERT_THAT(unpriv_bpf_disabled_sysctl, SyscallResultIsOk());
+
+    fork_helper.RunInForkedProcess([&]() {
+      test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+      test_helper::UnsetCapabilityEffective(CAP_BPF);
+      AttachToRootCgroup(BPF_CGROUP_INET_INGRESS, prog.get());
+      DetachFromRootCgroup(BPF_CGROUP_INET_INGRESS);
+    });
+    ASSERT_TRUE(fork_helper.WaitForChildren());
+  }
+
   SCOPED_TRACE("Without CAP_SYS_ADMIN and CAP_NET_ADMIN");
+  AttachToRootCgroup(BPF_CGROUP_INET_INGRESS, prog.get());
+  auto detach_on_exit = fit::defer([&]() { TryDetachFromRootCgroup(BPF_CGROUP_INET_INGRESS); });
   fork_helper.RunInForkedProcess([&]() {
     test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
     test_helper::UnsetCapabilityEffective(CAP_NET_ADMIN);
@@ -2251,6 +2701,9 @@ TEST_F(BpfCgroupTest, CgroupSkbAttachRequiresNetAdmin) {
     if (version_at_least_6_9) {
       EXPECT_EQ(errno, EPERM);
     }
+
+    test_helper::DropAllCapabilities();
+    EXPECT_THAT(TryDetachFromRootCgroup(BPF_CGROUP_INET_INGRESS), SyscallSucceeds());
   });
   ASSERT_TRUE(fork_helper.WaitForChildren());
 }
@@ -2416,8 +2869,18 @@ TEST_F(BpfCgroupTest, QueryProg) {
   ASSERT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallSucceeds());
   EXPECT_EQ(attr.query.prog_cnt, 1u);
 
-  // Querying without CAP_NET_ADMIN fails with EPERM.
+  // Querying succeeds with CAP_NET_ADMIN alone (without CAP_BPF or CAP_SYS_ADMIN).
   test_helper::ForkHelper fork_helper;
+  attr.query.prog_cnt = 0;
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_BPF);
+    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+    EXPECT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallSucceeds());
+    EXPECT_EQ(attr.query.prog_cnt, 1u);
+  });
+  EXPECT_TRUE(fork_helper.WaitForChildren());
+
+  // Querying without CAP_NET_ADMIN fails with EPERM.
   fork_helper.RunInForkedProcess([&]() {
     test_helper::UnsetCapabilityEffective(CAP_NET_ADMIN);
     EXPECT_THAT(bpf(BPF_PROG_QUERY, &attr), SyscallFailsWithErrno(EPERM));
@@ -2450,6 +2913,127 @@ TEST_F(BpfCgroupTest, QueryProg) {
   EXPECT_NE(prog_ids[0], 0u);
 
   DetachFromRootCgroup(BPF_CGROUP_INET_INGRESS);
+}
+
+TEST(BpfTest, SocketFilterDiamondBranchingBounded) {
+  // Construct a cBPF diamond-branching program (64 conditional branches that converge at every
+  // step: 2^64 abstract paths without state pruning). Both Linux and Starnix must complete
+  // verification quickly without unbounded memory or CPU growth.
+  std::vector<sock_filter> filter;
+  filter.push_back(BPF_STMT(BPF_LD | BPF_W | BPF_LEN, 0));
+  for (int i = 0; i < 64; ++i) {
+    filter.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, static_cast<uint32_t>(i), 0, 1));
+    filter.push_back(BPF_STMT(BPF_ALU | BPF_ADD | BPF_K, 1));
+  }
+  filter.push_back(BPF_STMT(BPF_RET | BPF_K, 0xffff));
+
+  sock_fprog prog = {
+      .len = static_cast<unsigned short>(filter.size()),
+      .filter = filter.data(),
+  };
+
+  bool verified_on_at_least_one_socket = false;
+
+  fbl::unique_fd udp_sock(socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_TRUE(udp_sock.is_valid()) << strerror(errno);
+  if (setsockopt(udp_sock.get(), SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) == 0) {
+    verified_on_at_least_one_socket = true;
+  } else {
+    // Starnix currently supports SO_ATTACH_FILTER only on AF_PACKET sockets and returns ENOTSUP
+    // on AF_INET sockets.
+    EXPECT_THAT(errno, testing::AnyOf(testing::Eq(ENOTSUP), testing::Eq(EOPNOTSUPP)))
+        << "Unexpected errno: " << strerror(errno);
+  }
+
+  fbl::unique_fd packet_sock(socket(AF_PACKET, SOCK_RAW, 0));
+  if (packet_sock.is_valid()) {
+    EXPECT_THAT(setsockopt(packet_sock.get(), SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)),
+                SyscallSucceeds());
+    verified_on_at_least_one_socket = true;
+  } else {
+    EXPECT_TRUE(errno == EPERM || errno == EACCES || errno == EAFNOSUPPORT)
+        << "Unexpected errno: " << strerror(errno);
+    if (!verified_on_at_least_one_socket) {
+      GTEST_SKIP() << "CAP_NET_RAW required for AF_PACKET socket";
+    }
+  }
+
+  EXPECT_TRUE(verified_on_at_least_one_socket);
+}
+
+TEST_F(BpfTestBase, SocketFilterSoAttachBpf) {
+  bpf_insn program[] = {
+      {BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 0xffff},
+      {BPF_JMP | BPF_EXIT, 0, 0, 0, 0},
+  };
+  fbl::unique_fd prog_fd = LoadProgram(program, std::size(program), BPF_PROG_TYPE_SOCKET_FILTER, 0);
+  ASSERT_TRUE(prog_fd.is_valid());
+
+  bool verified_on_at_least_one_socket = false;
+
+  fbl::unique_fd udp_sock(socket(AF_INET, SOCK_DGRAM, 0));
+  ASSERT_TRUE(udp_sock.is_valid()) << strerror(errno);
+  int fd = prog_fd.get();
+  if (setsockopt(udp_sock.get(), SOL_SOCKET, SO_ATTACH_BPF, &fd, sizeof(fd)) == 0) {
+    verified_on_at_least_one_socket = true;
+  } else {
+    EXPECT_THAT(errno, testing::AnyOf(testing::Eq(ENOTSUP), testing::Eq(EOPNOTSUPP)))
+        << "Unexpected errno: " << strerror(errno);
+  }
+
+  fbl::unique_fd packet_sock(socket(AF_PACKET, SOCK_RAW, 0));
+  if (packet_sock.is_valid()) {
+    EXPECT_THAT(setsockopt(packet_sock.get(), SOL_SOCKET, SO_ATTACH_BPF, &fd, sizeof(fd)),
+                SyscallSucceeds());
+    verified_on_at_least_one_socket = true;
+
+    // Reject attaching a program of wrong type (e.g. CGROUP_SKB).
+    bpf_insn cgroup_program[] = {
+        {BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 1},
+        {BPF_JMP | BPF_EXIT, 0, 0, 0, 0},
+    };
+    fbl::unique_fd cgroup_prog_fd =
+        LoadProgram(cgroup_program, std::size(cgroup_program), BPF_PROG_TYPE_CGROUP_SKB, 0);
+    if (cgroup_prog_fd.is_valid()) {
+      int invalid_fd = cgroup_prog_fd.get();
+      EXPECT_THAT(
+          setsockopt(packet_sock.get(), SOL_SOCKET, SO_ATTACH_BPF, &invalid_fd, sizeof(invalid_fd)),
+          SyscallFailsWithErrno(EINVAL));
+    }
+  } else {
+    EXPECT_TRUE(errno == EPERM || errno == EACCES || errno == EAFNOSUPPORT)
+        << "Unexpected errno: " << strerror(errno);
+    if (!verified_on_at_least_one_socket) {
+      GTEST_SKIP() << "CAP_NET_RAW required for AF_PACKET socket";
+    }
+  }
+
+  EXPECT_TRUE(verified_on_at_least_one_socket);
+}
+
+TEST_F(BpfTestBase, VerifierRejectsUnboundedBackwardLoop) {
+  // Backward jump loop: r0 = 0; loop: r0 += 1; if r0 != 2000000 goto loop; exit
+  // In Starnix, this exceeds MAX_JMP_SEQ (8,192) after 8,193 jumps (16,385 instructions, well
+  // below BPF_MAX_INSTS = 65,536). In Linux, 2,000,000 iterations also exceeds the verifier
+  // complexity limits (BPF_COMPLEXITY_LIMIT_JMP_SEQ / BPF_COMPLEXITY_LIMIT_INSNS).
+  // Load with log_level = 0 so the Linux kernel verifier returns E2BIG directly rather than
+  // ENOSPC from overflowing a small log_buf.
+  bpf_insn program[] = {
+      BPF_MOV_IMM(0, 0),
+      BPF_ADD_IMM(0, 1),
+      BPF_JNE_IMM(0, 2000000, -2),
+      BPF_RETURN(),
+  };
+
+  union bpf_attr attr;
+  memset(&attr, 0, sizeof(attr));
+  attr.prog_type = BPF_PROG_TYPE_SOCKET_FILTER;
+  attr.insns = reinterpret_cast<uint64_t>(program);
+  attr.insn_cnt = static_cast<uint32_t>(sizeof(program) / sizeof(program[0]));
+  attr.license = reinterpret_cast<uint64_t>("N/A");
+
+  fbl::unique_fd fd(bpf(BPF_PROG_LOAD, &attr));
+  EXPECT_THAT(fd.get(), SyscallFailsWithErrno(E2BIG));
 }
 
 }  // namespace

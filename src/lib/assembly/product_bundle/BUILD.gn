@@ -54,7 +54,6 @@ rustc_test("product_bundle_test") {
     "//src/lib/fuchsia-hyper",
     "//src/lib/gcs",
     "//src/lib/utf8_path",
-    "//src/storage/fxfs/fxfs_pbtool",
     "//src/storage/lib/delivery_blob",
     "//src/sys/pkg/lib/epoch",
     "//src/sys/pkg/lib/fuchsia-merkle",

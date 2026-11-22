@@ -5,9 +5,7 @@
 #include "src/developer/forensics/feedback_data/data_provider.h"
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
-#include <fidl/fuchsia.feedback/cpp/hlcpp_conversion.h>
 #include <fidl/fuchsia.mem/cpp/fidl.h>
-#include <fuchsia/feedback/cpp/fidl.h>
 #include <lib/fpromise/promise.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/macros.h>
@@ -81,7 +79,6 @@ fuchsia_feedback::Attachment ToSnapshotAttachment(fsl::SizedVmo archive) {
 DataProvider::DataProvider(async_dispatcher_t* dispatcher,
                            std::shared_ptr<sys::ServiceDirectory> services,
                            timekeeper::Clock* clock, RedactorBase* redactor,
-                           const bool is_first_instance,
                            const std::set<std::string>& default_snapshot_annotations,
                            const feedback::AttachmentKeys& attachment_allowlist,
                            cobalt::Logger* cobalt, feedback::AnnotationManager* annotation_manager,
@@ -90,7 +87,7 @@ DataProvider::DataProvider(async_dispatcher_t* dispatcher,
     : dispatcher_(dispatcher),
       services_(std::move(services)),
       utc_clock_ready_watcher_(dispatcher_, zx::unowned_clock(zx_utc_reference_get())),
-      metadata_(dispatcher_, clock, &utc_clock_ready_watcher_, redactor, is_first_instance,
+      metadata_(dispatcher_, clock, &utc_clock_ready_watcher_, redactor,
                 default_snapshot_annotations, attachment_allowlist),
       cobalt_(cobalt),
       annotation_manager_(annotation_manager),
@@ -127,8 +124,7 @@ void DataProvider::GetAnnotations(GetAnnotationsRequest& request,
   // TODO(https://fxbug.dev/42153749): Track how long GetAnnotations took via Cobalt.
   executor_.schedule_task(GetAnnotations(timeout).and_then(
       [completer = completer.ToAsync()](feedback::Annotations& annotations) mutable {
-        completer.Reply(
-            fidl::HLCPPToNatural(feedback::Encode<fuchsia::feedback::Annotations>(annotations)));
+        completer.Reply(feedback::Encode<fuchsia_feedback::Annotations>(annotations));
       }));
 }
 
@@ -152,8 +148,8 @@ void DataProvider::GetSnapshot(GetSnapshotRequest& request, GetSnapshotCompleter
 
                         // Add the annotations to the FIDL object and as file in the snapshot
                         // itself.
-                        if (fuchsia_feedback::Annotations fidl = fidl::HLCPPToNatural(
-                                feedback::Encode<fuchsia::feedback::Annotations>(annotations));
+                        if (fuchsia_feedback::Annotations fidl =
+                                feedback::Encode<fuchsia_feedback::Annotations>(annotations);
                             fidl.annotations2().has_value()) {
                           snapshot.annotations2(std::move(*fidl.annotations2()));
                         }

@@ -85,7 +85,7 @@ def prepare_ninja_invocation(
     return full_cmd, child_env
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
         add_help=False,  # Pass -h / --help through to ninja
@@ -112,7 +112,7 @@ def main(argv: Sequence[str]) -> int:
             wrapper=args.wrapper,
             ninja_bin=args.ninja_bin,
             ninja_args=ninja_args,
-            environ=os.environ,
+            environ=env,
             fuchsia_dir=_FUCHSIA_DIR,
         )
     except RuntimeError as e:
@@ -123,4 +123,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

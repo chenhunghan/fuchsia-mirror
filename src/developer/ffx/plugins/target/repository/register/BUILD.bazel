@@ -48,7 +48,6 @@ host_rustc_test(
     crate = ":ffx_target_repository_register",
     visibility = ["//src/developer/ffx:__pkg__"],
     deps = [
-        "//src/developer/ffx/lib/target/behavior:lib",
         "//src/lib/fdomain/client",
         "//src/lib/fdomain/local",
         "//src/lib/fuchsia",

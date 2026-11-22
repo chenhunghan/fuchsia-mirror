@@ -4,6 +4,9 @@
 
 #include "utils.h"
 
+#include <lib/abr/abr.h>
+#include <lib/zircon_boot/test/mock_zircon_boot_ops.h>
+
 #include <algorithm>
 #include <memory>
 #include <string_view>
@@ -401,6 +404,123 @@ TEST(EfiGuidTest, Endianness) {
   for (size_t i = 0; i < sizeof(guid); i++) {
     EXPECT_EQ(buf[i], i);
   }
+}
+
+class LoadRebootModeTest : public testing::Test {
+ protected:
+  static EFIAPI efi_status GetBootbyteVar(char16_t*, efi_guid*, uint32_t*, size_t* size,
+                                          void* data) {
+    *size = sizeof(bootbyte_);
+    *static_cast<uint8_t*>(data) = bootbyte_;
+    return bootbyte_status_;
+  }
+
+  static EFIAPI efi_status SetBootbyteVar(char16_t*, efi_guid*, uint32_t, size_t,
+                                          const void* data) {
+    if (bootbyte_status_ == EFI_SUCCESS) {
+      bootbyte_ = *static_cast<const uint8_t*>(data);
+    }
+    return bootbyte_status_;
+  }
+
+  void SetUp() override {
+    bootbyte_ = RebootModeToByte(RebootMode::kNormal);
+    bootbyte_status_ = EFI_SUCCESS;
+  }
+
+  auto SetupEfi(bool with_durable_boot = true) {
+    auto cleanup = SetupEfiGlobalState(stub_service_, image_device_);
+    gEfiLoadedImage->LoadOptions = nullptr;
+    runtime_services_ = {
+        .GetVariable = GetBootbyteVar,
+        .SetVariable = SetBootbyteVar,
+    };
+    gEfiSystemTable->RuntimeServices = &runtime_services_;
+    if (with_durable_boot) {
+      mock_zb_ops_.AddPartition(GPT_DURABLE_BOOT_NAME, sizeof(AbrData));
+      AbrOps abr_ops = mock_zb_ops_.GetAbrOps();
+      EXPECT_EQ(AbrMarkSlotActive(&abr_ops, kAbrSlotIndexA), kAbrResultOk);
+    }
+    return cleanup;
+  }
+
+  MockStubService stub_service_;
+  Device image_device_{{"disk0", "image"}};
+  efi_runtime_services runtime_services_{};
+  MockZirconBootOps mock_zb_ops_;
+  static uint8_t bootbyte_;
+  static efi_status bootbyte_status_;
+};
+
+uint8_t LoadRebootModeTest::bootbyte_ = RebootModeToByte(RebootMode::kNormal);
+efi_status LoadRebootModeTest::bootbyte_status_ = EFI_SUCCESS;
+
+TEST_F(LoadRebootModeTest, OneShotRecoveryConsumedOnceAcrossBoots) {
+  auto cleanup = SetupEfi();
+  AbrOps abr_ops = mock_zb_ops_.GetAbrOps();
+
+  // Simulate x64 `dm reboot-recovery`, which sets both ABR one-shot recovery in `durable_boot`
+  // and `RTC_BOOT_RECOVERY` in the EFI `bootbyte` variable.
+  ASSERT_EQ(AbrSetOneShotRecovery(&abr_ops, true), kAbrResultOk);
+  ASSERT_TRUE(SetRebootMode(RebootMode::kRecovery));
+
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kRecovery);
+  EXPECT_EQ(bootbyte_, RebootModeToByte(RebootMode::kNormal));
+
+  // Subsequent boot (even when GBL skips `AbrGetBootSlot()` in recovery mode) must boot normally.
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kNormal);
+}
+
+TEST_F(LoadRebootModeTest, OneShotBootloaderConsumedOnceAcrossBoots) {
+  auto cleanup = SetupEfi();
+  AbrOps abr_ops = mock_zb_ops_.GetAbrOps();
+
+  ASSERT_EQ(AbrSetOneShotBootloader(&abr_ops, true), kAbrResultOk);
+  ASSERT_TRUE(SetRebootMode(RebootMode::kBootloader));
+
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kBootloader);
+  EXPECT_EQ(bootbyte_, RebootModeToByte(RebootMode::kNormal));
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kNormal);
+}
+
+TEST_F(LoadRebootModeTest, BootloaderTakesPrecedenceOverRecoveryWhenBothFlagsSet) {
+  auto cleanup = SetupEfi();
+  AbrOps abr_ops = mock_zb_ops_.GetAbrOps();
+
+  ASSERT_EQ(AbrSetOneShotRecovery(&abr_ops, true), kAbrResultOk);
+  ASSERT_EQ(AbrSetOneShotBootloader(&abr_ops, true), kAbrResultOk);
+
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kBootloader);
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kNormal);
+}
+
+TEST_F(LoadRebootModeTest, LegacyBootbyteFallbackWithoutAbrPartition) {
+  auto cleanup = SetupEfi(/*with_durable_boot=*/false);
+  ASSERT_TRUE(SetRebootMode(RebootMode::kRecovery));
+
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kRecovery);
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kNormal);
+}
+
+TEST_F(LoadRebootModeTest, ResetBootbyteFailureFallsBackToNormal) {
+  auto cleanup = SetupEfi();
+  AbrOps abr_ops = mock_zb_ops_.GetAbrOps();
+  ASSERT_EQ(AbrSetOneShotRecovery(&abr_ops, true), kAbrResultOk);
+  bootbyte_status_ = EFI_DEVICE_ERROR;
+
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kNormal);
+}
+
+TEST_F(LoadRebootModeTest, CommandlineFastbootOverridesAbrOneShot) {
+  auto cleanup = SetupEfi();
+  AbrOps abr_ops = mock_zb_ops_.GetAbrOps();
+  ASSERT_EQ(AbrSetOneShotRecovery(&abr_ops, true), kAbrResultOk);
+
+  char16_t args[] = u"boot_mode=fastboot";
+  gEfiLoadedImage->LoadOptions = args;
+  gEfiLoadedImage->LoadOptionsSize = sizeof(args);
+
+  EXPECT_EQ(LoadRebootMode(mock_zb_ops_.GetZirconBootOps(), false), RebootMode::kBootloader);
 }
 
 }  // namespace

@@ -60,12 +60,12 @@ TEST_F(MemFdTest, MemFdReadWriteDeniedWithoutPermissions) {
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
+extern std::string GetTestPolicyName() { return "memfd_transition_policy"; }
+
+extern void DoPrePolicyLoadWork() {
   // Create a memfd prior to policy load, to allow the test to validate the post-policy label.
   EXPECT_THAT((g_before_policy_fd = test_helper::MemFdCreate("test", 0)), SyscallSucceeds());
 
   // Until a policy is loaded, no file label is provided.
   EXPECT_THAT(GetLabel(g_before_policy_fd), SyscallResultIsErrno(ENODATA));
-
-  return "memfd_transition_policy";
 }

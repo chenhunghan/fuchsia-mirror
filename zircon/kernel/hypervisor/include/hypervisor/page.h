@@ -7,57 +7,46 @@
 #ifndef ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_PAGE_H_
 #define ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_PAGE_H_
 
-#include <lib/page/size.h>
 #include <lib/zx/result.h>
+#include <zircon/types.h>
 
-#include <vm/physmap.h>
-#include <vm/pmm.h>
+#include <new>
+
+#include <fbl/macros.h>
+#include <hypervisor/page_ffi.h>
+#include <kernel/ffi.h>
 
 namespace hypervisor {
 
+// This is a facade over the Rust `Page` in hypervisor/page.rs, which is stored in place in
+// `storage_`.
 class Page {
  public:
-  Page() = default;
+  Page() { rust_hypervisor_page_init(this); }
   DISALLOW_COPY_ASSIGN_AND_MOVE(Page);
 
-  ~Page() {
-    if (page_ != nullptr) {
-      pmm_free_page(page_);
-    }
-  }
+  ~Page() { rust_hypervisor_page_free(this); }
 
   zx::result<> Alloc(uint8_t fill) {
-    zx_status_t status = pmm_alloc_page(0, &page_, &pa_);
-    if (status != ZX_OK) {
-      return zx::error(status);
-    }
-
-    page_->set_state(vm_page_state::WIRED);
-    memset(VirtualAddress(), fill, kPageSize);
-    return zx::ok();
+    return zx::make_result(rust_hypervisor_page_alloc(this, fill));
   }
 
-  void* VirtualAddress() const {
-    DEBUG_ASSERT(pa_ != 0);
-    return paddr_to_physmap(pa_);
-  }
+  void* VirtualAddress() const { return rust_hypervisor_page_virtual_address(this); }
 
   template <typename T>
   T* VirtualAddress() const {
     return static_cast<T*>(VirtualAddress());
   }
 
-  zx_paddr_t PhysicalAddress() const {
-    DEBUG_ASSERT(pa_ != 0);
-    return pa_;
-  }
+  zx_paddr_t PhysicalAddress() const { return rust_hypervisor_page_physical_address(this); }
 
-  bool IsAllocated() const { return pa_ != 0; }
+  bool IsAllocated() const { return rust_hypervisor_page_is_allocated(this); }
 
  private:
-  vm_page* page_ = nullptr;
-  zx_paddr_t pa_ = 0;
+  [[maybe_unused]] OpaqueStorage<16, 8> storage_{};
 };
+static_assert(sizeof(Page) == 16);
+static_assert(alignof(Page) == 8);
 
 template <typename T>
 class PagePtr {
@@ -81,6 +70,8 @@ class PagePtr {
   Page page_;
   T* ptr_;
 };
+static_assert(sizeof(PagePtr<uint8_t>) == 24);
+static_assert(alignof(PagePtr<uint8_t>) == 8);
 
 }  // namespace hypervisor
 

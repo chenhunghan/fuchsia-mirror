@@ -18,4 +18,5 @@ py_library(
     # Bazel only registers a host Python toolchain; GN python_library is not gated on is_host.
     target_compatible_with = HOST_OS_CONSTRAINTS,  # @bazel2gn:skip
     visibility = ["//src/developer/fuchsia-controller/end_to_end_tests/mobly:__pkg__"],
+    deps = ["//third_party/mobly"],
 )

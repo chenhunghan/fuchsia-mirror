@@ -124,7 +124,7 @@ fn add_loopback(ctx: &mut FakeCtx) -> DeviceId<FakeBindingsCtx> {
         .core_api()
         .device::<LoopbackDevice>()
         .add_device_with_default_state(
-            LoopbackCreationProperties { mtu: Ipv6::MINIMUM_LINK_MTU },
+            LoopbackCreationProperties { mtu: Ipv6::MINIMUM_LINK_MTU.get() },
             DEFAULT_INTERFACE_METRIC,
         )
         .into();

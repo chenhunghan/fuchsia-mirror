@@ -14,24 +14,25 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use debug::ltracef;
 use init::{LK_INIT_LEVEL_EARLIEST, LK_INIT_LEVEL_THREADING, LkInitFlags, LkInitLevel};
 use kprint::kprintln;
+use libc::stdio::FILE;
 
 use super::arch_ffi::{
-    lk_secondary_cpu_entry, x86_cpu_feature_init, x86_cpu_feature_late_init_percpu,
-    x86_feature_debug, x86_mmu_early_init, x86_mmu_init, x86_mmu_percpu_init, x86_mmu_prevm_init,
-    x86_uspace_entry,
+    x86_mmu_early_init, x86_mmu_init, x86_mmu_percpu_init, x86_mmu_prevm_init, x86_uspace_entry,
 };
-use super::handoff::ZX_TLS_STACK_GUARD_OFFSET;
 #[cfg(sanitize = "safestack")]
-use super::handoff::ZX_TLS_UNSAFE_SP_OFFSET;
-use super::mp_ffi::{x86_apic_id_to_cpu_num, x86_init_percpu, x86_percpu_for};
+use super::mp::ZX_TLS_UNSAFE_SP_OFFSET;
+use super::mp::{
+    BP_PERCPU, ZX_TLS_STACK_GUARD_OFFSET, apic_id_to_cpu_num, init_percpu, percpu_for,
+};
 use super::registers::{
     X86_CR0_CD, X86_FLAGS_IF, X86_FLAGS_IOPL_SHIFT, X86_MSR_IA32_FS_BASE, X86_MSR_IA32_GS_BASE,
 };
 use super::vm::{is_kernel_address, is_valid_user_pc};
 use super::x86::{read_msr, write_msr, x86_cli, x86_get_cr0, x86_hlt};
-use super::{Iframe, USER_CODE_64_SELECTOR, USER_DATA_SELECTOR, UserEntryState};
+use super::{Iframe, USER_CODE_64_SELECTOR, USER_DATA_SELECTOR, UserEntryState, feature};
 use crate::kernel::mp;
 use crate::kernel::thread::{self, Thread};
+use crate::top::main::lk_secondary_cpu_entry;
 
 const LOCAL_TRACE: u32 = 0;
 
@@ -55,12 +56,15 @@ pub unsafe fn early_init() {
 ///
 /// # Safety
 ///
-/// The caller must ensure that this function is called once on CPU 0 during pre-VM boot.
+/// The caller must ensure that this function is called once at CPL 0 on CPU 0 during single-CPU
+/// pre-VM boot with interrupts disabled, after `post_handoff_bootstrap` and [`early_init`] have
+/// initialized `%gs.base` and early CPUID state and before any secondary CPUs start.
 #[inline]
 pub unsafe fn prevm_init() {
-    // SAFETY: Caller guarantees single-CPU pre-VM boot context on CPU 0.
+    // SAFETY: Caller guarantees CPL 0 single-CPU pre-VM boot context on CPU 0 with interrupts
+    // disabled and `%gs.base` and `early_init_percpu` initialized.
     unsafe {
-        x86_cpu_feature_init();
+        feature::cpu_feature_init();
         // Perform some MMU initialization that is dependent on having done the previous feature
         // init.
         x86_mmu_prevm_init();
@@ -76,7 +80,7 @@ pub unsafe fn prevm_init() {
 /// and after early feature, kernel address space, and VM initialization have completed.
 #[inline]
 pub unsafe fn init() {
-    let model = super::feature::x86_get_model();
+    let model = feature::x86_get_model();
     kprintln!(
         "Processor Model Info: type {:#x} family {:#x} model {:#x} stepping {:#x}",
         model.processor_type,
@@ -90,27 +94,32 @@ pub unsafe fn init() {
         model.display_model
     );
 
+    feature::feature_debug();
+
     // SAFETY: Caller guarantees single-CPU `arch_init` context on CPU 0 after early feature and
     // VM initialization.
     unsafe {
-        x86_feature_debug();
         x86_mmu_init();
         super::descriptor::gdt_setup();
         super::idt::idt_setup_readonly();
     }
 }
 
-/// Late per-CPU architecture initialization on the boot CPU (`arch_late_init_percpu`).
+/// Late per-CPU architecture initialization (`arch_late_init_percpu`).
 ///
 /// # Safety
 ///
-/// The caller must ensure that this function is called on CPU 0 during late arch initialization
-/// after topology and platform initialization have completed.
+/// The caller must ensure that this function is called at CPL 0 on the target online CPU (once on
+/// CPU 0 during boot, and once per bringup on secondary CPUs) with `%gs.base` initialized and
+/// thread migration prevented, after [`prevm_init`], topology initialization, and
+/// [`super::pv::PvEoi::init_all`] have completed.
 #[inline]
 pub unsafe fn late_init_percpu() {
-    // Call per-CPU init function for the boot CPU.
-    // SAFETY: Caller guarantees late arch initialization context on CPU 0.
-    unsafe { x86_cpu_feature_late_init_percpu() };
+    // Call per-CPU init function for the current CPU.
+    // SAFETY: The caller guarantees CPL 0 on the target online CPU with `%gs.base` initialized and
+    // thread migration prevented after `prevm_init`, topology initialization, and `PvEoi::init_all`
+    // have completed.
+    unsafe { feature::cpu_feature_late_init_percpu() };
 }
 
 /// Prepares `out` and `%fs.base` for entering user space with `state` (`arch_prepare_uspace`).
@@ -297,8 +306,7 @@ pub unsafe fn secondary_entry(aps_still_booting: *const AtomicU32, thread: *mut 
     super::lapic::apic_local_init();
 
     let local_apic_id = super::lapic::apic_local_id() as u32;
-    // SAFETY: `x86_apic_id_to_cpu_num` reads the APIC ID table initialized before AP bringup.
-    let cpu_num = unsafe { x86_apic_id_to_cpu_num(local_apic_id) };
+    let cpu_num = apic_id_to_cpu_num(local_apic_id);
     if cpu_num <= 0 {
         // If we could not find our CPU number, do not proceed further.
         // SAFETY: Disables interrupts and halts the unrecognized AP at CPL 0.
@@ -313,14 +321,16 @@ pub unsafe fn secondary_entry(aps_still_booting: *const AtomicU32, thread: *mut 
 
     let cpu_num = cpu_num as u32;
 
-    // Set %gs.base to our percpu struct.
+    // Set %gs.base to our percpu struct. This has to be done before
+    // calling init_percpu, which initializes most of that struct, so
+    // that init_percpu can use safe-stack and/or stack-protector code.
     // SAFETY: `cpu_num > 0` is a valid allocated AP CPU number, and `BP_PERCPU` was initialized on
     // CPU 0 before AP bringup (`ZX_TLS_STACK_GUARD_OFFSET` lies within `size_of::<X86Percpu>()`).
     unsafe {
-        let percpu = x86_percpu_for(cpu_num).cast::<u8>();
+        let percpu = percpu_for(cpu_num).cast::<u8>();
 
         // Copy the stack-guard value from the boot CPU's percpu.
-        let bp_percpu = super::mp_ffi::BP_PERCPU.as_mut_ptr().cast_const();
+        let bp_percpu = BP_PERCPU.get().cast_const().cast::<u8>();
         let stack_guard = *bp_percpu.add(ZX_TLS_STACK_GUARD_OFFSET).cast::<usize>();
         *percpu.add(ZX_TLS_STACK_GUARD_OFFSET).cast::<usize>() = stack_guard;
 
@@ -342,12 +352,41 @@ pub unsafe fn secondary_entry(aps_still_booting: *const AtomicU32, thread: *mut 
 
     // SAFETY: `%gs.base`, `stack_guard`, and `kernel_unsafe_sp` are initialized for `cpu_num`.
     unsafe {
-        x86_init_percpu(cpu_num);
+        init_percpu(cpu_num);
 
         // Now do the rest of the work, in a function that is free to
         // use %gs in its code.
         finish_secondary_entry(aps_still_booting, thread, cpu_num)
     }
+}
+
+/// Prints an x86 interrupt frame to `output_target` (`PrintFrame`).
+///
+/// # Safety
+///
+/// CPL must be 0, and `output_target` must be non-null, aligned, and point to an initialized `FILE`
+/// with a valid write callback for the duration of the call.
+pub unsafe fn print_frame_to(frame: &Iframe, output_target: *mut FILE) {
+    struct RawFile(*mut FILE);
+
+    impl core::fmt::Write for RawFile {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            if s.is_empty() {
+                return Ok(());
+            }
+            // SAFETY: `RawFile` is only constructed inside `print_frame_to`, whose caller
+            // guarantees `self.0` is a valid, aligned, initialized `FILE` for the duration of the
+            // call.
+            if unsafe { FILE::write_raw(self.0, s.as_bytes()) } < 0 {
+                Err(core::fmt::Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    // SAFETY: `frame` is a valid `Iframe` reference, and the caller guarantees CPL 0.
+    unsafe { super::registers::print_frame(frame, &mut RawFile(output_target)) };
 }
 
 #[cfg(console_enabled)]
@@ -358,11 +397,9 @@ pub mod console {
     use zx_types::ZX_OK;
 
     use crate::arch_rs::InterruptDisableGuard;
-    use crate::arch_rs::x86::Iframe;
-    use crate::arch_rs::x86::arch_ffi::console::{x86_print_frame, x86_request_context};
-    use crate::arch_rs::x86::arch_ffi::x86_feature_debug;
     use crate::arch_rs::x86::msr::{read_msr_safe_on_cpu, write_msr_safe_on_cpu};
-    use crate::backtrace::Backtrace;
+    use crate::arch_rs::x86::{Iframe, feature};
+    use crate::backtrace::GLOBAL_CPU_CONTEXT_EXCHANGE;
     use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
     use crate::kernel::mp;
     use crate::kernel::percpu::PerCpu;
@@ -371,28 +408,14 @@ pub mod console {
 
     /// Prints an x86 interrupt frame to the kernel console.
     fn print_frame(frame: &Iframe) {
-        // SAFETY: `frame` is a valid `Iframe` reference.
-        unsafe { x86_print_frame(frame) };
+        // SAFETY: Kernel code executes at CPL 0 and `frame` is a valid reference.
+        unsafe {
+            crate::arch_rs::x86::registers::print_frame(
+                frame,
+                &mut debug::dprintf::KernelConsoleWriter,
+            )
+        };
     }
-
-    /// Prints x86 CPU feature and vulnerability information to the kernel console.
-    fn feature_debug() {
-        // SAFETY: Reads CPUID/feature state initialized during early boot with no caller
-        // preconditions.
-        unsafe { x86_feature_debug() };
-    }
-
-    /// Context for a CPU, representing its state at a given point in time.
-    #[repr(C)]
-    pub struct CpuContext {
-        frame: Iframe,
-        backtrace: Backtrace,
-    }
-    zr::static_assert!(core::mem::offset_of!(CpuContext, frame) == 0);
-    zr::static_assert!(core::mem::offset_of!(CpuContext, backtrace) == 176);
-
-    zr::static_assert!(core::mem::size_of::<CpuContext>() == 448);
-    zr::static_assert!(core::mem::align_of::<CpuContext>() == 8);
 
     fn get_context(argv: &[CmdArgs], _flags: u32) -> c_int {
         let print_usage = || {
@@ -415,25 +438,22 @@ pub mod console {
         let timeout_ms = argv[3].arg_uint;
         kprintln!("requesting context of CPU-{target} with timeout {timeout_ms}ms");
 
-        let mut context = core::mem::MaybeUninit::<CpuContext>::zeroed();
-        let status = {
+        let result = {
             let _irqd = InterruptDisableGuard::new();
-            // SAFETY: Interrupts are disabled by `_irqd`, `target < PerCpu::processor_count()`, and
-            // `context.as_mut_ptr()` points to a zero-initialized `CpuContext` valid for writes.
+            // SAFETY: Interrupts are disabled by `_irqd` and
+            // `target < PerCpu::processor_count()`.
             unsafe {
-                x86_request_context(
-                    target,
-                    DurationMono::from_millis(timeout_ms as i64).0,
-                    context.as_mut_ptr(),
-                )
+                GLOBAL_CPU_CONTEXT_EXCHANGE
+                    .request_context(target, DurationMono::from_millis(timeout_ms as i64).0)
             }
         };
-        if status != ZX_OK {
-            kprintln!("error: {status}");
-            return 1;
-        }
-        // SAFETY: `context` was zero-initialized and populated by `x86_request_context`.
-        let context = unsafe { context.assume_init_ref() };
+        let context = match result {
+            Ok(context) => context,
+            Err(status) => {
+                kprintln!("error: {}", status.into_raw());
+                return 1;
+            }
+        };
         context.backtrace.print();
         print_frame(&context.frame);
 
@@ -471,7 +491,7 @@ pub mod console {
             }
 
             if argv[1].as_str() == "features" {
-                feature_debug();
+                feature::feature_debug();
             } else if argv[1].as_str() == "rdmsr" {
                 if argv.len() != 4 {
                     break 'usage;
@@ -546,3 +566,6 @@ pub mod console {
         CMD_AVAIL_NORMAL
     );
 }
+pub use super::mp::{
+    enter_idle_state as arch_enter_idle_state, flush_state_and_halt as arch_flush_state_and_halt,
+};

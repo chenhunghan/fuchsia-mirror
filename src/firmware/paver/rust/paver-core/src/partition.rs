@@ -9,6 +9,7 @@ use crate::status_from_error;
 use async_trait::async_trait;
 use block_client::BlockClient;
 use fidl_next_fuchsia_io as fio;
+use std::fmt;
 use std::num::NonZero;
 use std::ops::Range;
 use storage_device::Device as _;
@@ -90,6 +91,13 @@ pub trait PartitionClient {
     }
 
     /// Flushes any buffered writes on this partition to persistent storage.
+    ///
+    /// Implementations must not hold unflushed write data exclusively in per-instance memory:
+    /// writes must either be dispatched to the underlying storage device (so flushing a freshly
+    /// opened [`PartitionClient`] persists them) or stored in board-level state owned by
+    /// [`BoardPartitions`] and persisted by [`BoardPartitions::flush`]. This allows callers such
+    /// as [`crate::partition_io::PartitionIo`] to evict broken sessions and retry flushes on a
+    /// newly opened client without losing buffered writes.
     async fn flush(&self) -> Result<(), zx::Status> {
         Ok(())
     }
@@ -127,6 +135,23 @@ pub trait PartitionClient {
         let vmo = zx::Vmo::create(len)?;
         vmo.write(buf, 0)?;
         self.write_vmo(&vmo, 0, offset, len).await
+    }
+
+    /// Wraps this partition client in a [`FixedOffsetPartitionClient`] that shifts all accesses by
+    /// `offset` bytes.
+    ///
+    /// `offset` may be any byte value and does not need to be aligned to any underlying block
+    /// size.
+    ///
+    /// Note: This constructor is infallible; if `offset` exceeds the underlying partition size,
+    /// [`PartitionClient::partition_size`], [`PartitionClient::read_vmo`],
+    /// [`PartitionClient::write_vmo`], and [`PartitionClient::trim_tail`] on the returned wrapper
+    /// will return `Err(zx::Status::OUT_OF_RANGE)`.
+    fn with_offset(self, offset: u64) -> FixedOffsetPartitionClient<Self>
+    where
+        Self: Sized,
+    {
+        FixedOffsetPartitionClient::new(self, offset)
     }
 }
 
@@ -404,6 +429,285 @@ impl<B: BlockClient + 'static> PartitionClient for BlockPartitionClient<B> {
     }
 }
 
+/// [`PartitionClient`] wrapper that shifts all byte accesses into an underlying
+/// [`PartitionClient`] by a fixed byte `offset`.
+///
+/// `offset` may be any byte value and does not need to be aligned to any underlying block size. If
+/// `offset` exceeds the underlying partition's size, [`PartitionClient::partition_size`],
+/// [`PartitionClient::read_vmo`], [`PartitionClient::write_vmo`], and
+/// [`PartitionClient::trim_tail`] return `Err(zx::Status::OUT_OF_RANGE)`.
+#[derive(Clone)]
+pub struct FixedOffsetPartitionClient<T> {
+    partition: T,
+    offset: u64,
+}
+
+impl<T> fmt::Debug for FixedOffsetPartitionClient<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FixedOffsetPartitionClient")
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> FixedOffsetPartitionClient<T> {
+    /// Creates a [`FixedOffsetPartitionClient`] that shifts accesses into `partition` by `offset`
+    /// bytes.
+    ///
+    /// `offset` may be any byte value and does not need to be aligned to any underlying block
+    /// size. If `offset` exceeds `partition`'s size, subsequent calls to
+    /// [`PartitionClient::partition_size`], [`PartitionClient::read_vmo`],
+    /// [`PartitionClient::write_vmo`], and [`PartitionClient::trim_tail`] will return
+    /// `Err(zx::Status::OUT_OF_RANGE)`.
+    pub fn new(partition: T, offset: u64) -> Self {
+        Self { partition, offset }
+    }
+}
+
+impl<T: PartitionClient> FixedOffsetPartitionClient<T> {
+    /// Validates `[dev_offset, dev_offset + size)` against this client's logical partition size
+    /// and returns the shifted physical byte offset (`self.offset + dev_offset`).
+    fn physical_offset(&self, dev_offset: u64, size: u64) -> Result<u64, zx::Status> {
+        validate_range(self, dev_offset, size)?;
+        self.offset.checked_add(dev_offset).ok_or(zx::Status::OUT_OF_RANGE)
+    }
+}
+
+#[async_trait(?Send)]
+impl<T: PartitionClient> PartitionClient for FixedOffsetPartitionClient<T> {
+    fn partition_size(&self) -> Result<u64, zx::Status> {
+        self.partition.partition_size()?.checked_sub(self.offset).ok_or(zx::Status::OUT_OF_RANGE)
+    }
+
+    async fn read_vmo(
+        &self,
+        vmo: &zx::Vmo,
+        vmo_offset: u64,
+        dev_offset: u64,
+        size: u64,
+    ) -> Result<(), zx::Status> {
+        let phys_offset = self.physical_offset(dev_offset, size)?;
+        self.partition.read_vmo(vmo, vmo_offset, phys_offset, size).await
+    }
+
+    async fn write_vmo(
+        &self,
+        vmo: &zx::Vmo,
+        vmo_offset: u64,
+        dev_offset: u64,
+        size: u64,
+    ) -> Result<(), zx::Status> {
+        let phys_offset = self.physical_offset(dev_offset, size)?;
+        self.partition.write_vmo(vmo, vmo_offset, phys_offset, size).await
+    }
+
+    async fn trim_tail(&self, offset: u64) -> Result<(), zx::Status> {
+        let phys_offset = self.physical_offset(offset, 0)?;
+        self.partition.trim_tail(phys_offset).await
+    }
+
+    async fn flush(&self) -> Result<(), zx::Status> {
+        self.partition.flush().await
+    }
+}
+
+/// Chunk size (64 KiB) used when comparing mirror partition contents in
+/// [`MultiPartitionClient::read_vmo`].
+const MIRROR_COMPARE_CHUNK_SIZE: usize = 64 * 1024;
+
+/// [`PartitionClient`] that mirrors writes across multiple underlying [`PartitionClient`]s (such
+/// as eMMC `boot1` and `boot2`) and verifies that all mirrors agree on reads.
+///
+/// - [`PartitionClient::partition_size`] returns the minimum usable size across all mirrors, or
+///   returns an error if any mirror's `partition_size()` fails.
+/// - [`PartitionClient::read_vmo`] reads from all mirrors and returns an error if any mirror's
+///   read fails or if any mirror's contents differ from the first
+///   (`zx::Status::IO_DATA_INTEGRITY`).
+/// - [`PartitionClient::write_vmo`] attempts the write and immediate flush on every mirror. If at
+///   least one mirror both writes and flushes successfully, any mirror whose write or flush failed
+///   is best-effort trimmed from offset 0 and `Ok(())` is returned; if all mirrors fail, no
+///   mirrors are trimmed and the last error is returned.
+/// - [`PartitionClient::flush`] attempts the flush on every mirror and returns `Ok(())` if at
+///   least one mirror succeeds, or the last error if all mirrors fail.
+/// - [`PartitionClient::trim_tail`] attempts the trim on every mirror and returns `Ok(())` if at
+///   least one mirror succeeds, `Err(zx::Status::NOT_SUPPORTED)` if no mirror succeeds and at
+///   least one returned `NOT_SUPPORTED`, or the last error otherwise.
+#[derive(Clone)]
+pub struct MultiPartitionClient<T> {
+    partitions: Vec<T>,
+}
+
+impl<T> fmt::Debug for MultiPartitionClient<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MultiPartitionClient")
+            .field("partition_count", &self.partitions.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> MultiPartitionClient<T> {
+    /// Creates a [`MultiPartitionClient`] backed by `partitions`, returning
+    /// `Err(zx::Status::INVALID_ARGS)` if `partitions` is empty.
+    pub fn new(partitions: Vec<T>) -> Result<Self, zx::Status> {
+        if partitions.is_empty() {
+            return Err(zx::Status::INVALID_ARGS);
+        }
+        Ok(Self { partitions })
+    }
+}
+
+#[async_trait(?Send)]
+impl<T: PartitionClient> PartitionClient for MultiPartitionClient<T> {
+    fn partition_size(&self) -> Result<u64, zx::Status> {
+        let mut min_size = u64::MAX;
+        for part in &self.partitions {
+            min_size = min_size.min(part.partition_size()?);
+        }
+        Ok(min_size)
+    }
+
+    async fn read_vmo(
+        &self,
+        vmo: &zx::Vmo,
+        vmo_offset: u64,
+        dev_offset: u64,
+        size: u64,
+    ) -> Result<(), zx::Status> {
+        validate_vmo_range(self, vmo, vmo_offset, dev_offset, size)?;
+        if size == 0 {
+            return Ok(());
+        }
+        self.partitions[0].read_vmo(vmo, vmo_offset, dev_offset, size).await.inspect_err(
+            |err| {
+                log::warn!(mirror = 0, err:?; "Error reading from mirror partition");
+            },
+        )?;
+        if self.partitions.len() > 1 {
+            let chunk_cap = usize::try_from(size)
+                .unwrap_or(MIRROR_COMPARE_CHUNK_SIZE)
+                .min(MIRROR_COMPARE_CHUNK_SIZE);
+            let mirror_vmo = zx::Vmo::create(chunk_cap as u64)?;
+            let mut expected_chunk = vec![0u8; chunk_cap];
+            let mut actual_chunk = vec![0u8; chunk_cap];
+            for (i, part) in self.partitions.iter().enumerate().skip(1) {
+                let mut compared = 0u64;
+                while compared < size {
+                    let chunk_len = usize::try_from(size - compared)
+                        .unwrap_or(MIRROR_COMPARE_CHUNK_SIZE)
+                        .min(MIRROR_COMPARE_CHUNK_SIZE);
+                    part.read_vmo(&mirror_vmo, 0, dev_offset + compared, chunk_len as u64)
+                        .await
+                        .inspect_err(|err| {
+                            log::warn!(mirror = i, err:?; "Error reading from mirror partition");
+                        })?;
+                    vmo.read(&mut expected_chunk[..chunk_len], vmo_offset + compared)?;
+                    mirror_vmo.read(&mut actual_chunk[..chunk_len], 0)?;
+                    if expected_chunk[..chunk_len] != actual_chunk[..chunk_len] {
+                        log::warn!(mirror = i; "Mirror partition contents differ from mirror 0");
+                        return Err(zx::Status::IO_DATA_INTEGRITY);
+                    }
+                    compared += chunk_len as u64;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn write_vmo(
+        &self,
+        vmo: &zx::Vmo,
+        vmo_offset: u64,
+        dev_offset: u64,
+        size: u64,
+    ) -> Result<(), zx::Status> {
+        validate_vmo_range(self, vmo, vmo_offset, dev_offset, size)?;
+        if size == 0 {
+            return Ok(());
+        }
+        let mut any_succeeded = false;
+        let mut last_err = zx::Status::IO;
+        let mut failed_mirrors = Vec::new();
+        for (i, part) in self.partitions.iter().enumerate() {
+            let res = match part.write_vmo(vmo, vmo_offset, dev_offset, size).await {
+                Ok(()) => part.flush().await,
+                Err(err) => Err(err),
+            };
+            match res {
+                Ok(()) => {
+                    any_succeeded = true;
+                }
+                Err(err) => {
+                    log::warn!(
+                        mirror = i,
+                        err:?;
+                        "Error writing or flushing mirror partition"
+                    );
+                    failed_mirrors.push(part);
+                    last_err = err;
+                }
+            }
+        }
+        if !any_succeeded {
+            return Err(last_err);
+        }
+        for part in failed_mirrors {
+            let _ = part.trim_tail(0).await;
+        }
+        Ok(())
+    }
+
+    async fn trim_tail(&self, offset: u64) -> Result<(), zx::Status> {
+        validate_range(self, offset, 0)?;
+        let mut any_succeeded = false;
+        let mut any_not_supported = false;
+        let mut last_err = zx::Status::IO;
+        for (i, part) in self.partitions.iter().enumerate() {
+            match part.trim_tail(offset).await {
+                Ok(()) => {
+                    any_succeeded = true;
+                }
+                Err(zx::Status::NOT_SUPPORTED) => {
+                    any_not_supported = true;
+                }
+                Err(err) => {
+                    log::warn!(
+                        mirror = i,
+                        err:?;
+                        "Error trimming mirror partition"
+                    );
+                    last_err = err;
+                }
+            }
+        }
+        match (any_succeeded, any_not_supported) {
+            (true, _) => Ok(()),
+            (false, true) => Err(zx::Status::NOT_SUPPORTED),
+            (false, false) => Err(last_err),
+        }
+    }
+
+    async fn flush(&self) -> Result<(), zx::Status> {
+        let mut any_succeeded = false;
+        let mut last_err = zx::Status::IO;
+        for (i, part) in self.partitions.iter().enumerate() {
+            match part.flush().await {
+                Ok(()) => {
+                    any_succeeded = true;
+                }
+                Err(err) => {
+                    log::warn!(
+                        mirror = i,
+                        err:?;
+                        "Error flushing mirror partition"
+                    );
+                    last_err = err;
+                }
+            }
+        }
+        if any_succeeded { Ok(()) } else { Err(last_err) }
+    }
+}
+
 /// Computes the bounce buffer byte capacity for a block-aligned transfer of `aligned_len` bytes,
 /// given an already block-aligned `max_bounce_buffer_bytes`.
 fn aligned_bounce_buffer_bytes(max_bounce_buffer_bytes: usize, aligned_len: u64) -> usize {
@@ -497,6 +801,9 @@ fn block_io_segments(
 }
 
 /// Validates that `[offset, offset + size)` is within `client.partition_size()`.
+///
+/// Returns `Err(zx::Status::OUT_OF_RANGE)` if `offset + size` overflows or exceeds
+/// `client.partition_size()`, or propagates any error returned by `client.partition_size()`.
 pub(crate) fn validate_range<P: PartitionClient + ?Sized>(
     client: &P,
     offset: u64,
@@ -512,7 +819,12 @@ pub(crate) fn validate_range<P: PartitionClient + ?Sized>(
 
 /// Validates both partition bounds `[dev_offset, dev_offset + size)` and VMO bounds
 /// `[vmo_offset, vmo_offset + size)`.
-pub(crate) fn validate_vmo_range<P: PartitionClient + ?Sized>(
+///
+/// Returns `Err(zx::Status::OUT_OF_RANGE)` if `dev_offset + size` overflows or exceeds
+/// `client.partition_size()`, or (when `size > 0`) `vmo_offset + size` overflows or exceeds
+/// `vmo.get_size()`, or propagates any error returned by `client.partition_size()` or
+/// `vmo.get_size()`.
+pub fn validate_vmo_range<P: PartitionClient + ?Sized>(
     client: &P,
     vmo: &zx::Vmo,
     vmo_offset: u64,
@@ -633,13 +945,18 @@ pub(crate) mod tests {
     /// In-memory [`BoardPartitions`] for unit tests.
     pub(crate) struct FakeBoardPartitions {
         partitions: RefCell<HashMap<String, Option<FakePartitionClient>>>,
+        pub(crate) opens: Rc<Cell<u32>>,
         pub(crate) flushes: Rc<Cell<u32>>,
     }
 
     impl FakeBoardPartitions {
         /// Creates an empty [`FakeBoardPartitions`].
         pub(crate) fn new() -> Self {
-            Self { partitions: RefCell::new(HashMap::new()), flushes: Rc::new(Cell::new(0)) }
+            Self {
+                partitions: RefCell::new(HashMap::new()),
+                opens: Rc::new(Cell::new(0)),
+                flushes: Rc::new(Cell::new(0)),
+            }
         }
 
         /// Registers an in-memory partition named `name` filled with `fill`.
@@ -672,6 +989,7 @@ pub(crate) mod tests {
             partition_name: &str,
             _block_dir: &fidl_next::ClientEnd<fio::Directory>,
         ) -> Result<Box<dyn PartitionClient>, zx::Status> {
+            self.opens.set(self.opens.get() + 1);
             match self.partitions.borrow().get(partition_name) {
                 Some(Some(client)) => Ok(Box::new(client.clone())),
                 Some(None) => Err(zx::Status::NOT_FOUND),
@@ -1343,5 +1661,330 @@ pub(crate) mod tests {
         err_client.client().io_calls.store(0, SeqCst);
         assert_eq!(err_client.read_vmo(&vmo, 0, 0, 2048).await, Err(zx::Status::IO));
         assert_eq!(err_client.client().attach_count.load(SeqCst), 1);
+    }
+
+    /// Verifies [`FixedOffsetPartitionClient`] size calculation, shifted reads/writes/trims,
+    /// prefix preservation, and `OUT_OF_RANGE` bounds checks.
+    #[fuchsia::test]
+    async fn test_fixed_offset_partition_client() {
+        let raw = FakePartitionClient::new(2048, TEST_BLOCK_SIZE, 0xaa);
+        let shifted = raw.clone().with_offset(512);
+        assert!(format!("{shifted:?}").contains("FixedOffsetPartitionClient"));
+        assert_eq!(shifted.partition_size(), Ok(1536));
+
+        // Offset exceeding underlying partition size returns OUT_OF_RANGE across all operations.
+        let oversized = raw.clone().with_offset(2560);
+        let vmo = zx::Vmo::create(4096).unwrap();
+        assert_eq!(oversized.partition_size(), Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(oversized.read_vmo(&vmo, 0, 0, 0).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(oversized.write_vmo(&vmo, 0, 0, 0).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(oversized.trim_tail(0).await, Err(zx::Status::OUT_OF_RANGE));
+
+        // Write 600 bytes at logical offset 100 -> physical [612..1212); prefix [0..512) stays
+        // 0xaa.
+        let payload: Vec<u8> = (0..600).map(|i| ((i * 3 + 7) % 251) as u8).collect();
+        shifted.write_at(&payload, 100).await.expect("shifted write_at");
+        let disk = raw.bytes();
+        assert_eq!(&disk[..612], &[0xaau8; 612]);
+        assert_eq!(&disk[612..1212], &payload[..]);
+        assert_eq!(&disk[1212..], &[0xaau8; 2048 - 1212]);
+
+        let mut read_back = vec![0u8; 600];
+        shifted.read_at(&mut read_back, 100).await.expect("shifted read_at");
+        assert_eq!(read_back, payload);
+
+        // Trim at logical offset 100 -> physical offset 612 -> next block boundary 1024..2048.
+        shifted.trim_tail(100).await.expect("shifted trim_tail");
+        shifted.flush().await.expect("shifted flush");
+        assert_eq!(raw.flushes(), 1);
+        let trimmed_disk = raw.bytes();
+        assert_eq!(&trimmed_disk[..512], &[0xaau8; 512]);
+        assert_eq!(&trimmed_disk[612..1024], &payload[..412]);
+        assert_eq!(&trimmed_disk[1024..], &[0xabu8; 1024]);
+
+        // Out-of-bounds, boundary (`==`), and u64::MAX overflow checks.
+        assert_eq!(shifted.read_vmo(&vmo, 0, 1536, 0).await, Ok(()));
+        assert_eq!(shifted.trim_tail(1536).await, Ok(()));
+        assert_eq!(raw.clone().with_offset(2048).partition_size(), Ok(0));
+        assert_eq!(shifted.read_vmo(&vmo, 0, 1536, 1).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(shifted.write_vmo(&vmo, 0, 1536, 1).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(shifted.trim_tail(1537).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(shifted.read_vmo(&vmo, 0, u64::MAX, 1).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(shifted.write_vmo(&vmo, 0, u64::MAX, 1).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(shifted.trim_tail(u64::MAX).await, Err(zx::Status::OUT_OF_RANGE));
+    }
+
+    /// Configurable [`PartitionClient`] wrapper for testing [`MultiPartitionClient`] mirror
+    /// behavior.
+    #[derive(Clone)]
+    struct FlakyMirrorClient {
+        inner: FakePartitionClient,
+        fail_size: Rc<Cell<Option<zx::Status>>>,
+        fail_read: Rc<Cell<Option<zx::Status>>>,
+        fail_write: Rc<Cell<Option<zx::Status>>>,
+        fail_trim: Rc<Cell<Option<zx::Status>>>,
+        fail_flush: Rc<Cell<Option<zx::Status>>>,
+        write_calls: Rc<Cell<usize>>,
+        trim_calls: Rc<Cell<usize>>,
+    }
+
+    impl FlakyMirrorClient {
+        fn new(size: usize, fill: u8) -> Self {
+            Self {
+                inner: FakePartitionClient::new(size, TEST_BLOCK_SIZE, fill),
+                fail_size: Rc::new(Cell::new(None)),
+                fail_read: Rc::new(Cell::new(None)),
+                fail_write: Rc::new(Cell::new(None)),
+                fail_trim: Rc::new(Cell::new(None)),
+                fail_flush: Rc::new(Cell::new(None)),
+                write_calls: Rc::new(Cell::new(0)),
+                trim_calls: Rc::new(Cell::new(0)),
+            }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl PartitionClient for FlakyMirrorClient {
+        fn partition_size(&self) -> Result<u64, zx::Status> {
+            if let Some(err) = self.fail_size.get() {
+                return Err(err);
+            }
+            self.inner.partition_size()
+        }
+
+        async fn read_vmo(
+            &self,
+            vmo: &zx::Vmo,
+            vmo_offset: u64,
+            dev_offset: u64,
+            size: u64,
+        ) -> Result<(), zx::Status> {
+            if let Some(err) = self.fail_read.get() {
+                return Err(err);
+            }
+            self.inner.read_vmo(vmo, vmo_offset, dev_offset, size).await
+        }
+
+        async fn write_vmo(
+            &self,
+            vmo: &zx::Vmo,
+            vmo_offset: u64,
+            dev_offset: u64,
+            size: u64,
+        ) -> Result<(), zx::Status> {
+            self.write_calls.set(self.write_calls.get() + 1);
+            if let Some(err) = self.fail_write.get() {
+                return Err(err);
+            }
+            self.inner.write_vmo(vmo, vmo_offset, dev_offset, size).await
+        }
+
+        async fn trim_tail(&self, offset: u64) -> Result<(), zx::Status> {
+            self.trim_calls.set(self.trim_calls.get() + 1);
+            if let Some(err) = self.fail_trim.get() {
+                return Err(err);
+            }
+            self.inner.trim_tail(offset).await
+        }
+
+        async fn flush(&self) -> Result<(), zx::Status> {
+            if let Some(err) = self.fail_flush.get() {
+                return Err(err);
+            }
+            self.inner.flush().await
+        }
+    }
+
+    /// Verifies [`MultiPartitionClient`] mirror size min-reduction and error propagation, read
+    /// verification across all mirrors, atomic per-mirror write+flush and best-effort trim on
+    /// failure, `trim_tail` error aggregation, and 0-byte no-ops.
+    #[fuchsia::test]
+    async fn test_multi_partition_client() {
+        assert_eq!(
+            MultiPartitionClient::<FlakyMirrorClient>::new(vec![]).unwrap_err(),
+            zx::Status::INVALID_ARGS
+        );
+
+        let m0 = FlakyMirrorClient::new(2048, 0x11);
+        let m1 = FlakyMirrorClient::new(1536, 0x22);
+        let multi = MultiPartitionClient::new(vec![m0.clone(), m1.clone()]).expect("create multi");
+        assert!(format!("{multi:?}").contains("MultiPartitionClient"));
+
+        // 1. partition_size returns the minimum size across all mirrors, or fails immediately if
+        // any mirror fails partition_size.
+        assert_eq!(multi.partition_size(), Ok(1536));
+        m0.fail_size.set(Some(zx::Status::IO));
+        assert_eq!(multi.partition_size(), Err(zx::Status::IO));
+        m0.fail_size.set(None);
+        m1.fail_size.set(Some(zx::Status::IO_REFUSED));
+        assert_eq!(multi.partition_size(), Err(zx::Status::IO_REFUSED));
+        m1.fail_size.set(None);
+
+        // Writes past the smaller mirror's size (1536) are rejected before touching m0.
+        assert_eq!(multi.write_at(&[0x99u8; 512], 1536).await, Err(zx::Status::OUT_OF_RANGE));
+        assert_eq!(m0.write_calls.get(), 0);
+
+        // 2. read_vmo returns IO_DATA_INTEGRITY when mirrors differ in contents (0x11 vs 0x22),
+        // and returns an error if any mirror fails read_vmo.
+        let mut buf = vec![0u8; 512];
+        assert_eq!(multi.read_at(&mut buf, 0).await, Err(zx::Status::IO_DATA_INTEGRITY));
+        m0.fail_read.set(Some(zx::Status::IO));
+        assert_eq!(multi.read_at(&mut buf, 0).await, Err(zx::Status::IO));
+        m0.fail_read.set(None);
+        m1.fail_read.set(Some(zx::Status::IO_REFUSED));
+        assert_eq!(multi.read_at(&mut buf, 0).await, Err(zx::Status::IO_REFUSED));
+        m1.fail_read.set(None);
+
+        // 3. write_vmo writes and immediately flushes all healthy mirrors, after which read_vmo
+        // succeeds when all mirrors match.
+        let chunk0 = vec![0x55u8; 512];
+        multi.write_at(&chunk0, 0).await.expect("write chunk0 to both");
+        assert_eq!(m0.inner.flushes(), 1);
+        assert_eq!(m1.inner.flushes(), 1);
+        assert_eq!(&m0.inner.bytes()[..512], &chunk0[..]);
+        assert_eq!(&m1.inner.bytes()[..512], &chunk0[..]);
+        multi.read_at(&mut buf, 0).await.expect("read_at succeeds when mirrors match");
+        assert_eq!(buf, chunk0);
+        multi.flush().await.expect("flush both mirrors");
+        assert_eq!(m0.inner.flushes(), 2);
+        assert_eq!(m1.inner.flushes(), 2);
+
+        // 4. trim_tail attempts all mirrors: mixed [NOT_SUPPORTED, IO] / [IO, NOT_SUPPORTED] both
+        // return Err(NOT_SUPPORTED), partial success returns Ok(()), and total IO failure returns
+        // the last error.
+        m0.fail_trim.set(Some(zx::Status::NOT_SUPPORTED));
+        m1.fail_trim.set(Some(zx::Status::NOT_SUPPORTED));
+        assert_eq!(multi.trim_tail(512).await, Err(zx::Status::NOT_SUPPORTED));
+        m1.fail_trim.set(Some(zx::Status::IO));
+        assert_eq!(multi.trim_tail(512).await, Err(zx::Status::NOT_SUPPORTED));
+        m0.fail_trim.set(Some(zx::Status::IO));
+        m1.fail_trim.set(Some(zx::Status::NOT_SUPPORTED));
+        assert_eq!(multi.trim_tail(512).await, Err(zx::Status::NOT_SUPPORTED));
+        m1.fail_trim.set(Some(zx::Status::IO_REFUSED));
+        assert_eq!(multi.trim_tail(512).await, Err(zx::Status::IO_REFUSED));
+        m1.fail_trim.set(None);
+        assert_eq!(multi.trim_tail(512).await, Ok(()));
+        assert_eq!(m0.trim_calls.get(), 5);
+        assert_eq!(m1.trim_calls.get(), 5);
+        m0.fail_trim.set(None);
+
+        // 5. Partial write failure succeeds via the surviving mirror and best-effort trims the
+        // failed mirror from offset 0 (`0xab` fill in FakePartitionClient); read_vmo then reports
+        // IO_DATA_INTEGRITY until a subsequent write heals the degraded mirror.
+        let new_chunk0 = vec![0x66u8; 512];
+        let new_chunk1 = vec![0x77u8; 512];
+        let m1_trims_before = m1.trim_calls.get();
+        m1.fail_write.set(Some(zx::Status::IO));
+        multi.write_at(&new_chunk0, 0).await.expect("write new_chunk0 succeeds via m0");
+        assert_eq!(&m0.inner.bytes()[..512], &new_chunk0[..]);
+        assert_eq!(m1.trim_calls.get(), m1_trims_before + 1);
+        assert_eq!(&m1.inner.bytes()[..], &[0xabu8; 1536]);
+        assert_eq!(multi.read_at(&mut buf, 0).await, Err(zx::Status::IO_DATA_INTEGRITY));
+
+        m1.fail_write.set(None);
+        let writes_before_chunk1 = m1.write_calls.get();
+        multi.write_at(&new_chunk0, 0).await.expect("re-write heals m1");
+        multi.write_at(&new_chunk1, 512).await.expect("write new_chunk1 attempts both mirrors");
+        assert_eq!(m1.write_calls.get(), writes_before_chunk1 + 2);
+        assert_eq!(&m0.inner.bytes()[512..1024], &new_chunk1[..]);
+        assert_eq!(&m1.inner.bytes()[512..1024], &new_chunk1[..]);
+        multi.read_at(&mut buf, 0).await.expect("read_at succeeds after healing m1");
+        assert_eq!(buf, new_chunk0);
+
+        // 6. Disjoint write/flush failure: if m0 succeeds write_vmo but fails flush while m1 fails
+        // write_vmo, write_vmo fails overall without trimming either mirror; if m0 fails flush
+        // while m1 succeeds both write_vmo and flush, write_vmo succeeds via m1 and trims m0.
+        let m0_trims_before = m0.trim_calls.get();
+        let m1_trims_before = m1.trim_calls.get();
+        m0.fail_flush.set(Some(zx::Status::IO));
+        m1.fail_write.set(Some(zx::Status::IO_REFUSED));
+        assert_eq!(multi.write_at(&chunk0, 0).await, Err(zx::Status::IO_REFUSED));
+        assert_eq!(m0.trim_calls.get(), m0_trims_before);
+        assert_eq!(m1.trim_calls.get(), m1_trims_before);
+        assert_eq!(&m1.inner.bytes()[..512], &new_chunk0[..]);
+
+        m1.fail_write.set(None);
+        multi.write_at(&chunk0, 0).await.expect("write succeeds when m1 writes and flushes");
+        assert_eq!(m0.trim_calls.get(), m0_trims_before + 1);
+        assert_eq!(&m0.inner.bytes()[..512], &[0xabu8; 512]);
+        assert_eq!(&m1.inner.bytes()[..512], &chunk0[..]);
+        m0.fail_flush.set(None);
+
+        m0.fail_write.set(Some(zx::Status::IO));
+        m1.fail_write.set(Some(zx::Status::IO_REFUSED));
+        assert_eq!(multi.write_at(&new_chunk0, 0).await, Err(zx::Status::IO_REFUSED));
+        assert_eq!(&m1.inner.bytes()[..512], &chunk0[..]);
+        m0.fail_write.set(None);
+        m1.fail_write.set(None);
+
+        m0.fail_flush.set(Some(zx::Status::IO));
+        assert_eq!(multi.flush().await, Ok(()));
+        m1.fail_flush.set(Some(zx::Status::IO_REFUSED));
+        assert_eq!(multi.flush().await, Err(zx::Status::IO_REFUSED));
+        m0.fail_flush.set(None);
+        m1.fail_flush.set(None);
+
+        // 7. Multi-chunk read comparison (> MIRROR_COMPARE_CHUNK_SIZE) detects mismatches in
+        // later chunks and succeeds when all chunks match.
+        let large_size = MIRROR_COMPARE_CHUNK_SIZE + 1024;
+        let large_m0 = FlakyMirrorClient::new(large_size, 0x33);
+        let large_m1 = FlakyMirrorClient::new(large_size, 0x33);
+        let large_multi = MultiPartitionClient::new(vec![large_m0.clone(), large_m1.clone()])
+            .expect("create large multi");
+        let mut large_buf = vec![0u8; large_size];
+        large_multi.read_at(&mut large_buf, 0).await.expect("multi-chunk read_at succeeds");
+        assert_eq!(large_buf, vec![0x33u8; large_size]);
+        large_m1.inner.data.borrow_mut()[MIRROR_COMPARE_CHUNK_SIZE + 512] = 0x44;
+        assert_eq!(
+            large_multi.read_at(&mut large_buf, 0).await,
+            Err(zx::Status::IO_DATA_INTEGRITY)
+        );
+
+        // 8. 0-byte reads and writes are no-ops after range validation.
+        let writes_before_zero = m0.write_calls.get();
+        m0.fail_read.set(Some(zx::Status::IO));
+        m1.fail_read.set(Some(zx::Status::IO));
+        m0.fail_write.set(Some(zx::Status::IO));
+        m1.fail_write.set(Some(zx::Status::IO));
+        multi.read_at(&mut [], 0).await.expect("0-byte read is a no-op");
+        multi.write_at(&[], 0).await.expect("0-byte write is a no-op");
+        assert_eq!(m0.write_calls.get(), writes_before_zero);
+    }
+
+    /// Verifies [`MultiPartitionClient`] composed directly over [`FixedOffsetPartitionClient`].
+    #[fuchsia::test]
+    async fn test_multi_with_fixed_offset_partition_client() {
+        let m0 = FlakyMirrorClient::new(2048, 0xaa);
+        let m1 = FlakyMirrorClient::new(2560, 0xbb);
+        let multi = MultiPartitionClient::new(vec![
+            m0.clone().with_offset(512),
+            m1.clone().with_offset(1024),
+        ])
+        .expect("create multi over fixed offset");
+        assert_eq!(multi.partition_size(), Ok(1536));
+
+        m0.fail_write.set(Some(zx::Status::IO));
+        let payload = vec![0x44u8; 512];
+        multi.write_at(&payload, 0).await.expect("write succeeds via shifted m1");
+        multi.trim_tail(512).await.expect("trim_tail(512) succeeds on both shifted mirrors");
+        // m0's [0..512) header prefix is preserved while [512..2048) was trimmed to 0xab by
+        // write_vmo's best-effort trim_tail(0).
+        assert_eq!(&m0.inner.bytes()[..512], &[0xaau8; 512]);
+        assert_eq!(&m0.inner.bytes()[512..], &[0xabu8; 1536]);
+        // m1's [0..1024) header prefix is preserved, [1024..1536) holds payload, and [1536..2560)
+        // was trimmed to 0xab.
+        assert_eq!(&m1.inner.bytes()[..1024], &[0xbbu8; 1024]);
+        assert_eq!(&m1.inner.bytes()[1024..1536], &payload[..]);
+        assert_eq!(&m1.inner.bytes()[1536..], &[0xabu8; 1024]);
+
+        // Because m0 was trimmed to 0xab while m1 holds payload, read_at detects the mismatch.
+        let mut read_buf = vec![0u8; 512];
+        assert_eq!(multi.read_at(&mut read_buf, 0).await, Err(zx::Status::IO_DATA_INTEGRITY));
+
+        // Healing m0 via a follow-up write makes both shifted mirrors match on read_at.
+        m0.fail_write.set(None);
+        multi.write_at(&payload, 0).await.expect("re-write heals shifted m0");
+        multi.read_at(&mut read_buf, 0).await.expect("read_at succeeds when shifted mirrors match");
+        assert_eq!(read_buf, payload);
     }
 }

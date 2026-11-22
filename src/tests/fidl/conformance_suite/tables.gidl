@@ -1695,10 +1695,10 @@ decode_failure("TableKnownInlineHandleZeroHandlesInEnvelope") {
 }
 
 decode_failure("TableUnknownOutOfLineEnvelopeZeroBytesWithHandle") {
-    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and cpp_wire.
     // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
     // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
-    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    bindings_denylist = [cpp, hlcpp, cpp_wire, rust, rust_codec, rust_next],
     handle_defs = {
         #0 = channel(),
     },
@@ -1717,10 +1717,10 @@ decode_failure("TableUnknownOutOfLineEnvelopeZeroBytesWithHandle") {
 }
 
 decode_failure("TableUnknownOutOfLineEnvelopeMoreHandlesThanFitInBytes") {
-    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and cpp_wire.
     // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
     // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
-    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    bindings_denylist = [cpp, hlcpp, cpp_wire, rust, rust_codec, rust_next],
     handle_defs = {
         #0 = channel(),
         #1 = channel(),
@@ -1742,10 +1742,10 @@ decode_failure("TableUnknownOutOfLineEnvelopeMoreHandlesThanFitInBytes") {
 }
 
 decode_failure("TableUnknownInlineEnvelopeMoreThanOneHandle") {
-    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and llcpp.
+    // TODO(https://fxbug.dev/579637828): Validate unknown envelope byte/handle count in cpp, hlcpp, and cpp_wire.
     // TODO(https://fxbug.dev/579582741): Validate unknown envelope byte/handle count in rust and rust_codec.
     // TODO(https://fxbug.dev/579582163): Validate unknown envelope byte/handle count in rust_next.
-    bindings_denylist = [cpp, hlcpp, llcpp, rust, rust_codec, rust_next],
+    bindings_denylist = [cpp, hlcpp, cpp_wire, rust, rust_codec, rust_next],
     handle_defs = {
         #0 = channel(),
         #1 = channel(),
@@ -1814,5 +1814,874 @@ decode_success("ValueTableWithUnknownHandlesThenResourceTableWithHandle") {
     },
     handles = {
         v2 = [#0, #1],
+    },
+}
+
+// An inline unknown envelope with an all-zero 4-byte payload (e.g. uint32(0),
+// bool(false), or EmptyStruct{}) is still present because the inline bit is 1.
+decode_success("TableUnknownInlineZeroValueDropped") {
+    value = TableFieldUnknownStruct{
+        t: TableFieldUnknown{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(0):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+decode_success("ResourceTableUnknownInlineZeroValueDropped") {
+    value = TableFieldUnknownResourceStruct{
+        t: TableFieldUnknownResource{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(0):4, num(0):2, num(1):2,
+        ],
+    },
+}
+
+// Decoders do not know the static type of an unknown inline envelope and must
+// not assume any of the 4 inline value bytes are padding.
+decode_success("TableUnknownInlineAllBytesNonZeroDropped") {
+    value = TableFieldUnknownStruct{
+        t: TableFieldUnknown{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            0x01, 0xff, 0xfe, 0xfd, num(0):2, num(1):2,
+        ],
+    },
+}
+
+// Decoders do not know the static layout of an unknown out-of-line envelope and
+// must not enforce internal padding bytes inside its 8-byte-aligned payload.
+decode_success("TableUnknownOutOfLineAllOnesPayloadDropped") {
+    value = TableFieldUnknownStruct{
+        t: TableFieldUnknown{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(16):4, num(0):2, num(0):2,
+            repeat(0xff):16,
+        ],
+    },
+}
+
+// Tests closing a handle inside an unknown inlined envelope on a non-resource table.
+decode_success("ValueTableUnknownInlineHandleDropped") {
+    handle_defs = {
+        #0 = event(),
+    },
+    value = StructOfSimpleTable{
+        table: SimpleTable{},
+    },
+    bytes = {
+        v2 = [
+            num(2):8,
+            repeat(0xff):8,
+            num(0):8, // ordinal 1 absent
+            repeat(0xff):4, num(1):2, num(1):2, // ordinal 2 unknown inline handle
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+}
+
+encode_success("ValueTableUnknownInlineHandleDropped") {
+    // TODO(https://fxbug.dev/42067496): Implement the decode function in all backends.
+    bindings_allowlist = [rust],
+    handle_defs = {
+        #0 = event(),
+    },
+    value = StructOfSimpleTable{
+        table: decode({
+            type = SimpleTable,
+            bytes = {
+                v2 = [
+                    num(2):8,
+                    repeat(0xff):8,
+                    num(0):8,
+                    repeat(0xff):4, num(1):2, num(1):2,
+                ],
+            },
+            handles = {
+                v2 = [#0],
+            },
+        }),
+    },
+    bytes = {
+        v2 = [
+            num(0):8, repeat(0xff):8,
+        ],
+    },
+}
+
+// TableWithGaps starts at ordinal 2; test max_ordinal = 1 with only an unknown
+// envelope in the initial gap (shorter than the first known ordinal).
+decode_success("TableWithGapsOnlyFirstGapUnknownOutOfLine") {
+    value = StructOfTableWithGaps{
+        table: TableWithGaps{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8, repeat(0xff):8,
+            num(8):4, num(0):2, num(0):2, // ordinal 1 unknown out-of-line
+            repeat(0xab):8,
+        ],
+    },
+}
+
+decode_success("TableWithGapsOnlyFirstGapUnknownInline") {
+    value = StructOfTableWithGaps{
+        table: TableWithGaps{},
+    },
+    bytes = {
+        v2 = [
+            num(1):8, repeat(0xff):8,
+            num(0):4, num(0):2, num(1):2, // ordinal 1 unknown inline (zero value)
+        ],
+    },
+}
+
+decode_success("TableWithGapsUnknownInAllGapsAndTrailing") {
+    value = StructOfTableWithGaps{
+        table: TableWithGaps{
+            second: 10,
+            fourth: 20,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(5):8, repeat(0xff):8,
+            num(8):4, num(0):2, num(0):2, // ordinal 1: unknown out-of-line
+            num(10):4, num(0):2, num(1):2, // ordinal 2: second (inlined)
+            num(0):4, num(0):2, num(1):2, // ordinal 3: unknown inline (zero value)
+            num(20):4, num(0):2, num(1):2, // ordinal 4: fourth (inlined)
+            num(16):4, num(0):2, num(0):2, // ordinal 5: unknown out-of-line
+            repeat(0xaa):8, // ordinal 1 payload
+            repeat(0xbb):16, // ordinal 5 payload
+        ],
+    },
+}
+
+// Decoders accept non-minimal envelope vectors containing trailing absent
+// envelopes after an unknown envelope.
+decode_success("TableTrailingEmptyEnvelopesAfterUnknownDropped") {
+    value = TableFieldUnknownStruct{
+        t: TableFieldUnknown{},
+    },
+    bytes = {
+        v2 = [
+            num(3):8, repeat(0xff):8,
+            num(8):4, num(0):2, num(0):2, // ordinal 1: unknown out-of-line
+            num(0):8, // ordinal 2: trailing absent envelope
+            num(0):8, // ordinal 3: trailing absent envelope
+            repeat(0xcc):8,
+        ],
+    },
+}
+
+decode_success("TableWithUnknown65thAnd66thOrdinalsOutOfLineAndHandles") {
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    value = StructOfTableWith64Ordinals{
+        t: TableWith64Ordinals{
+            v63: 0xaa,
+            v64: 0xbb,
+        },
+    },
+    bytes = {
+        v2 = [
+            num(66):8, // max ordinal
+            repeat(0xff):8, // alloc present
+            repeat(0x00):496, // absent envelopes 1..62
+            0xaa, padding:3, num(0):2, num(1):2, // envelope 63 (inlined)
+            0xbb, padding:3, num(0):2, num(1):2, // envelope 64 (inlined)
+            num(8):4, num(1):2, num(0):2, // envelope 65 (unknown OOL + 1 handle)
+            repeat(0xff):4, num(1):2, num(1):2, // envelope 66 (unknown inline + 1 handle)
+            repeat(0xff):4, repeat(0xdd):4, // envelope 65 payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+decode_success("SimpleTableWithUnknownEnvelopesThenUint64") {
+    value = SimpleTableThenUint64{
+        table: SimpleTable{
+            y: 67,
+        },
+        number: 0x0102030405060708,
+    },
+    bytes = {
+        v2 = [
+            num(6):8, repeat(0xff):8, // table header
+            num(0x0102030405060708):8, // number (inline in struct)
+            num(0):8, // envelope 1 (x absent)
+            num(99):4, num(0):2, num(1):2, // envelope 2 (unknown inline)
+            num(8):4, num(0):2, num(0):2, // envelope 3 (unknown OOL 8B)
+            num(0):8, // envelope 4 (absent)
+            num(8):4, num(0):2, num(0):2, // envelope 5 (y: 67)
+            num(16):4, num(0):2, num(0):2, // envelope 6 (unknown OOL 16B)
+            repeat(0xaa):8, // envelope 3 payload
+            num(67):8, // envelope 5 payload (y)
+            repeat(0xbb):16, // envelope 6 payload
+        ],
+    },
+}
+
+decode_success("TableWithStringAndVectorInterleavedUnknownEnvelopes") {
+    value = StructOfTableWithStringAndVector{
+        table: TableWithStringAndVector{
+            foo: "hi",
+            bar: 7,
+            baz: [9, 8, 7],
+        },
+    },
+    bytes = {
+        v2 = [
+            num(5):8, repeat(0xff):8,
+            num(24):4, num(0):2, num(0):2, // envelope 1: foo ("hi")
+            num(7):4, num(0):2, num(1):2, // envelope 2: bar (7, inlined)
+            num(24):4, num(0):2, num(0):2, // envelope 3: baz ([9, 8, 7])
+            num(0):4, num(0):2, num(1):2, // envelope 4: unknown inline (zero)
+            num(24):4, num(0):2, num(0):2, // envelope 5: unknown OOL 24B
+            // foo
+            num(2):8, repeat(0xff):8,
+            'h', 'i', padding:6,
+            // baz
+            num(3):8, repeat(0xff):8,
+            9, 8, 7, padding:5,
+            // unknown ordinal 5
+            repeat(0xee):24,
+        ],
+    },
+}
+
+// Interleaves known and unknown envelopes (both inline and out-of-line) with
+// handles and secondary string objects, surrounded by struct handles, to verify
+// exact depth-first byte and handle traversal order.
+decode_success("ResourceTableInterleavedKnownAndUnknownBytesAndHandles") {
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+        #3 = event(),
+        #4 = event(),
+        #5 = event(),
+        #6 = channel(),
+        #7 = channel(),
+        #8 = channel(),
+    },
+    value = StructOfResourceTableWithHandlesAndVectors{
+        before: #0,
+        table: ResourceTableWithHandlesAndVectors{
+            first_handle: #1,
+            middle: [#4],
+            last_handle: #6,
+        },
+        after: #8,
+    },
+    bytes = {
+        v2 = [
+            // primary struct (32 bytes)
+            repeat(0xff):4, padding:4, // before (#0)
+            num(6):8, repeat(0xff):8, // table header
+            repeat(0xff):4, padding:4, // after (#8)
+            // table envelopes (6 * 8 = 48 bytes)
+            repeat(0xff):4, num(1):2, num(1):2, // ord 1: first_handle (#1)
+            num(8):4, num(2):2, num(0):2, // ord 2: unknown OOL (8B, #2, #3)
+            num(24):4, num(1):2, num(0):2, // ord 3: middle ([#4]: 16B hdr + 8B elem)
+            repeat(0xff):4, num(1):2, num(1):2, // ord 4: unknown inline (#5)
+            repeat(0xff):4, num(1):2, num(1):2, // ord 5: last_handle (#6)
+            num(16):4, num(1):2, num(0):2, // ord 6: unknown OOL (16B, #7)
+            // ord 2 unknown OOL payload
+            repeat(0xff):8,
+            // ord 3 middle (vector header 16B + 1 handle element padded to 8B = 24B)
+            num(1):8, repeat(0xff):8,
+            repeat(0xff):4, padding:4, // middle[0] (#4)
+            // ord 6 unknown OOL payload
+            repeat(0xff):4, repeat(0xab):12,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2, #3, #4, #5, #6, #7, #8],
+    },
+}
+
+// Handles in unknown envelopes must be closed without checking subtype or rights,
+// even when they have reduced or empty rights.
+decode_success("ResourceTableUnknownHandlesWithReducedAndEmptyRightsDropped") {
+    handle_defs = {
+        #0 = event(rights: transfer),
+        #1 = channel(rights: none),
+    },
+    value = TableFieldUnknownResourceStruct{
+        t: TableFieldUnknownResource{},
+    },
+    bytes = {
+        v2 = [
+            num(2):8, repeat(0xff):8,
+            repeat(0xff):4, num(1):2, num(1):2, // ord 1: inline handle #0
+            num(8):4, num(1):2, num(0):2, // ord 2: OOL handle #1
+            repeat(0xff):4, padding:4,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+}
+
+// Tests a known table out-of-line envelope wrapping a flexible union whose own
+// envelope is an unknown out-of-line payload with a handle, sandwiched between
+// two known table fields carrying out-of-line handle vectors. Verifies
+// outer-envelope byte/handle accounting across an inner discarded unknown envelope.
+decode_success("TableWithNestedUnionUnknownEnvelopeSandwiched") {
+    // TODO(https://fxbug.dev/42166276): Support unknown union variants in remaining GIDL backends.
+    bindings_allowlist = [cpp, rust, rust_codec, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+        #2 = event(),
+    },
+    value = StructOfTableWithNestedFlexibleResourceUnion{
+        value: TableWithNestedFlexibleResourceUnion{
+            before: [#0],
+            xu: SampleResourceUnion{
+                99: null,
+            },
+            after: [#2],
+        },
+    },
+    bytes = {
+        v2 = [
+            num(3):8, repeat(0xff):8, // table header
+            num(24):4, num(1):2, num(0):2, // ord 1: before ([#0])
+            num(24):4, num(1):2, num(0):2, // ord 2: xu (16B union + 8B unknown, 1 handle #1)
+            num(24):4, num(1):2, num(0):2, // ord 3: after ([#2])
+            // ord 1: vector<handle:EVENT> ([#0])
+            num(1):8, repeat(0xff):8,
+            repeat(0xff):4, padding:4,
+            // ord 2: SampleResourceUnion (unknown ordinal 99, 8B OOL, 1 handle #1)
+            num(99):8,
+            num(8):4, num(1):2, num(0):2,
+            repeat(0xff):4, repeat(0xab):4,
+            // ord 3: vector<handle:EVENT> ([#2])
+            num(1):8, repeat(0xff):8,
+            repeat(0xff):4, padding:4,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+}
+
+// Also test a value table (`UnionInTable`) with an inner flexible value union
+// (`SampleUnion`) carrying an unknown handle, verifying outer envelope
+// accounting on non-resource types via decode_failure on a subsequent UTF-8 string.
+decode_failure("ValueTableNestedValueUnionUnknownHandleBeforeInvalidUtf8") {
+    handle_defs = {
+        #0 = event(),
+    },
+    type = TestUnionInTable,
+    bytes = {
+        v2 = [
+            num(3):8, repeat(0xff):8, // table header
+            num(24):4, num(0):2, num(0):2, // ord 1: before ("pre")
+            num(24):4, num(1):2, num(0):2, // ord 2: xu (16B union + 8B valid ASCII, 1 handle #0)
+            num(24):4, num(0):2, num(0):2, // ord 3: after (invalid UTF-8)
+            // ord 1: "pre"
+            num(3):8, repeat(0xff):8,
+            'p', 'r', 'e', padding:5,
+            // ord 2: SampleUnion (unknown ordinal 99, 8B OOL ASCII, 1 handle #0)
+            num(99):8,
+            num(8):4, num(1):2, num(0):2,
+            'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h',
+            // ord 3: invalid UTF-8
+            num(2):8, repeat(0xff):8,
+            0xff, 0xff, padding:6,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = STRING_NOT_UTF8,
+}
+
+decode_failure("TableUnknownEnvelopeBadInlineMarkerLowerByte") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(123):4, num(0):2, 0xff, 0x00,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownEnvelopeBadInlineMarkerBit1Set") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(123):4, num(0):2, 0x03, 0x00,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeBadFlagsBit1") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(8):4, num(0):2, 0x02, 0x00,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeBadFlagsAllExceptInlineBit") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(8):4, num(0):2, 0xfe, 0xff,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+// Envelope is non-zero solely in bit 15 of flags (inline bit 0 is unset,
+// num_bytes == 0, num_handles == 0). Must not be treated as an absent envelope.
+decode_failure("TableUnknownEnvelopeOnlyHighFlagBitSet") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(0):4, num(0):2, 0x00, 0x80,
+        ],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+// Unknown out-of-line envelope with num_bytes = 4 (<= inline threshold, not a
+// multiple of 8), with 8 padded bytes supplied so buffer-length alignment passes.
+decode_failure("TableUnknownOutOfLineEnvelopeFourBytes") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(4):4, num(0):2, num(0):2,
+            repeat(0):8,
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeBytesExceedMessageLengthEmpty") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(8):4, num(0):2, num(0):2,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeBytesExceedMessageLengthPartial") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(16):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+// num_bytes = 0xfffffff8 is 8-byte aligned; at out-of-line offset 24,
+// 24 + 0xfffffff8 wraps in 32-bit arithmetic to 16 <= 32 (message length).
+decode_failure("TableUnknownOutOfLineEnvelopeBytesUint32Overflow") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(0xfffffff8):4, num(0):2, num(0):2,
+            repeat(0):8,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("TableTwoUnknownOutOfLineEnvelopesSumOverflowsUint32") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_BYTES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(2):8,
+            repeat(0xff):8,
+            num(0x80000000):4, num(0):2, num(0):2,
+            num(0x80000000):4, num(0):2, num(0):2,
+        ],
+    },
+    err = ENVELOPE_BYTES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("TableUnknownInlineEnvelopeHandleExceedsMessageLength") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_HANDLES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            repeat(0xff):4, num(1):2, num(1):2,
+        ],
+    },
+    err = ENVELOPE_HANDLES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeHandlesExceedMessageLengthClosesPartial") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_HANDLES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    handle_defs = {
+        #0 = channel(),
+    },
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(8):4, num(2):2, num(0):2,
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = ENVELOPE_HANDLES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("TableKnownHandleThenUnknownEnvelopeHandlesExceedRemaining") {
+    // TODO(https://fxbug.dev/42169965): Return INVALID_NUM_HANDLES_IN_ENVELOPE in rust.
+    // TODO(https://fxbug.dev/579582163): Return InvalidEnvelopeSize in rust_next.
+    bindings_denylist = [rust, rust_next],
+    handle_defs = {
+        #0 = event(),
+        #1 = channel(),
+    },
+    type = StructOfResourceTableWithHandlesAndVectors,
+    bytes = {
+        v2 = [
+            repeat(0xff):4, padding:4, // before consumes #0
+            num(2):8, repeat(0xff):8, // table header
+            repeat(0xff):4, padding:4, // after
+            num(0):8, // ord 1 absent
+            num(8):4, num(2):2, num(0):2, // ord 2 claims 2 handles, only #1 remains
+            repeat(0xff):8,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = ENVELOPE_HANDLES_EXCEED_MESSAGE_LENGTH,
+}
+
+decode_failure("TableUnknownInlineEnvelopeTooManyBytesInMessage") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(42):4, num(0):2, num(1):2,
+            repeat(0):8, // unconsumed trailing bytes
+        ],
+    },
+    err = TOO_MANY_BYTES_IN_MESSAGE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeTooManyBytesInMessage") {
+    type = TableFieldUnknownStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(8):4, num(0):2, num(0):2,
+            repeat(0xab):8,
+            repeat(0):8, // unconsumed trailing bytes
+        ],
+    },
+    err = TOO_MANY_BYTES_IN_MESSAGE,
+}
+
+decode_failure("TableUnknownInlineEnvelopeTooManyHandlesInMessage") {
+    handle_defs = {
+        #0 = channel(),
+    },
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(42):4, num(0):2, num(1):2,
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = TOO_MANY_HANDLES_IN_MESSAGE,
+}
+
+decode_failure("TableUnknownOutOfLineEnvelopeTooManyHandlesInMessage") {
+    handle_defs = {
+        #0 = channel(),
+        #1 = channel(),
+    },
+    type = TableFieldUnknownResourceStruct,
+    bytes = {
+        v2 = [
+            num(1):8,
+            repeat(0xff):8,
+            num(8):4, num(1):2, num(0):2,
+            repeat(0xff):4, padding:4,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1],
+    },
+    err = TOO_MANY_HANDLES_IN_MESSAGE,
+}
+
+// Fails AFTER unknown inline (#1) and unknown OOL (#2) handles were closed while
+// walking the table, with #0 already decoded into `before` and #3 not yet
+// consumed for `after`. Verifies all handles #0..#3 are closed exactly once.
+decode_failure("TableDecodeFailureAfterClosingUnknownHandlesClosesAllOnce") {
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+        #3 = channel(),
+    },
+    type = StructOfTableAndTrigger,
+    bytes = {
+        v2 = [
+            repeat(0xff):4, padding:4, // before (#0)
+            num(2):8, repeat(0xff):8, // table
+            0x02, padding:3, // invalid bool (triggers INVALID_BOOLEAN)
+            repeat(0xff):4, // after (#3)
+            repeat(0xff):4, num(1):2, num(1):2, // ord 1: unknown inline handle (#1)
+            num(8):4, num(1):2, num(0):2, // ord 2: unknown OOL handle (#2)
+            repeat(0xff):4, padding:4, // ord 2 payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2, #3],
+    },
+    err = INVALID_BOOLEAN,
+}
+
+decode_failure("TableDecodeFailureInUnknownEnvelopeClosesSurroundingHandles") {
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+    },
+    type = StructOfTableAndTrigger,
+    bytes = {
+        v2 = [
+            repeat(0xff):4, padding:4, // before (#0)
+            num(1):8, repeat(0xff):8, // table
+            0x01, padding:3, // valid = true
+            repeat(0xff):4, // after (#2)
+            repeat(0xff):4, num(1):2, 0x01, 0xee, // bad inline marker
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+    err = INVALID_INLINE_MARKER_IN_ENVELOPE,
+}
+
+// Outer known table envelope (`xu`) overclaims 32 bytes while inner flexible
+// union's unknown envelope only consumes 24 bytes total (16B union + 8B OOL).
+decode_failure("TableOuterEnvelopeByteOverclaimOnInnerUnionUnknownEnvelope") {
+    // TODO(https://fxbug.dev/579582163): Validate envelope byte count in rust_next.
+    bindings_denylist = [rust_next],
+    type = TestUnionInTable,
+    bytes = {
+        v2 = [
+            num(2):8, repeat(0xff):8, // table header
+            repeat(0x00):8, // ord 1: absent
+            num(32):4, num(0):2, num(0):2, // ord 2: xu claims 32 bytes instead of 24
+            num(99):8, num(8):4, num(0):2, num(0):2, // SampleUnion unknown OOL (8B)
+            repeat(0xab):8, // unknown OOL payload (24 bytes consumed in xu)
+            num(0):8, // trailing bytes matching claimed 32
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+// Outer known table envelope (`xu`) underclaims 16 bytes (ignoring the 8 OOL
+// bytes consumed by the inner flexible union's unknown envelope).
+decode_failure("TableOuterEnvelopeByteUnderclaimOnInnerUnionUnknownEnvelope") {
+    // TODO(https://fxbug.dev/579582163): Validate envelope byte count in rust_next.
+    bindings_denylist = [rust_next],
+    type = TestUnionInTable,
+    bytes = {
+        v2 = [
+            num(3):8, repeat(0xff):8, // table header
+            repeat(0x00):8, // ord 1: absent
+            num(16):4, num(0):2, num(0):2, // ord 2: xu claims 16 bytes instead of 24
+            num(24):4, num(0):2, num(0):2, // ord 3: after ("post")
+            num(99):8, num(8):4, num(0):2, num(0):2, // SampleUnion unknown OOL (8B)
+            repeat(0xab):8, // unknown OOL payload (makes xu consume 24 bytes)
+            num(4):8, repeat(0xff):8,
+            'p', 'o', 's', 't', padding:4,
+        ],
+    },
+    err = INVALID_NUM_BYTES_IN_ENVELOPE,
+}
+
+// Outer known table envelope (`xu`) claims 0 handles while inner flexible
+// union's unknown inline envelope consumes 1 handle.
+decode_failure("TableOuterEnvelopeHandleMismatchOnInnerUnionUnknownHandle") {
+    handle_defs = {
+        #0 = event(),
+    },
+    type = TestUnionInTable,
+    bytes = {
+        v2 = [
+            num(2):8, repeat(0xff):8, // table header
+            repeat(0x00):8, // ord 1: absent
+            num(16):4, num(0):2, num(0):2, // ord 2: xu claims 0 handles instead of 1
+            num(99):8, repeat(0xff):4, num(1):2, num(1):2, // SampleUnion unknown inline (#0)
+        ],
+    },
+    handles = {
+        v2 = [#0],
+    },
+    err = INVALID_NUM_HANDLES_IN_ENVELOPE,
+}
+
+// Zero-member value table (`EmptyTable`) receiving unknown inline, absent gap,
+// and out-of-line envelopes.
+decode_success("EmptyTableWithUnknownInlineAndOutOfLine") {
+    value = StructOfEmptyTable{
+        table: EmptyTable{},
+    },
+    bytes = {
+        v2 = [
+            num(3):8, repeat(0xff):8, // max_ordinal = 3
+            0x01, 0x02, 0x03, 0x04, num(0):2, num(1):2, // ord 1: unknown inline
+            repeat(0x00):8, // ord 2: absent gap
+            num(16):4, num(0):2, num(0):2, // ord 3: unknown OOL 16B
+            repeat(0xab):16,
+        ],
+    },
+}
+
+// Zero-member value table (`EmptyTable`) carrying unknown inline and OOL handles
+// before a subsequent struct handle; both unknown handles must be closed and the
+// handle cursor must advance so `after` receives #2.
+decode_success("EmptyValueTableUnknownHandlesThenKnownHandle") {
+    // TODO(https://fxbug.dev/579582742): Advance handle_index_ for unknown handles in value tables in hlcpp.
+    bindings_denylist = [hlcpp],
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+    },
+    value = EmptyValueTableThenHandle{
+        t: EmptyTable{},
+        after: #2,
+    },
+    bytes = {
+        v2 = [
+            // primary struct (24 bytes)
+            num(2):8, repeat(0xff):8, // t: max_ordinal = 2
+            repeat(0xff):4, padding:4, // after (#2)
+            // secondary objects: t envelopes + OOL payload
+            repeat(0xff):4, num(1):2, num(1):2, // ord 1: unknown inline (#0)
+            num(8):4, num(1):2, num(0):2, // ord 2: unknown OOL 8B (#1)
+            repeat(0xff):4, padding:4, // ord 2 payload
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
+    },
+}
+
+// Zero-member resource table (`EmptyResourceTable`) carrying unknown inline,
+// absent gap, and unknown OOL bytes/handles before subsequent known OOL string
+// and handle fields.
+decode_success("EmptyResourceTableUnknownInlineAndOutOfLineBeforeKnownFields") {
+    handle_defs = {
+        #0 = event(),
+        #1 = event(),
+        #2 = channel(),
+    },
+    value = EmptyResourceTableThenHandle{
+        t: EmptyResourceTable{},
+        s: "ok",
+        after: #2,
+    },
+    bytes = {
+        v2 = [
+            // primary struct (40 bytes)
+            num(3):8, repeat(0xff):8, // t: max_ordinal = 3
+            num(2):8, repeat(0xff):8, // s ("ok")
+            repeat(0xff):4, padding:4, // after (#2)
+            // secondary 1: t envelope vector (24 bytes)
+            repeat(0xff):4, num(1):2, num(1):2, // ord 1: unknown inline (#0)
+            repeat(0x00):8, // ord 2: absent gap
+            num(16):4, num(1):2, num(0):2, // ord 3: unknown OOL 16B (#1)
+            // secondary 2: t ord 3 payload (16 bytes)
+            repeat(0xff):4, repeat(0xcd):12,
+            // secondary 3: s payload (8 bytes)
+            'o', 'k', padding:6,
+        ],
+    },
+    handles = {
+        v2 = [#0, #1, #2],
     },
 }

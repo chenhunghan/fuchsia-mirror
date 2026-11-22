@@ -11,9 +11,7 @@
 #include <ktl/tuple.h>
 #include <ktl/type_traits.h>
 #include <ktl/utility.h>
-#include <vm/vm_address_region.h>
 #include <vm/vm_address_region_ffi.h>
-#include <vm/vm_object.h>
 
 static_assert(ktl::is_trivially_copy_constructible_v<VmMappingProtectionRangesCursor>);
 static_assert(ktl::is_trivially_move_constructible_v<VmMappingProtectionRangesCursor>);
@@ -24,41 +22,13 @@ static_assert(sizeof(ffi::Uninitialized<VmMappingProtectionRangesCursor>) ==
               sizeof(VmMappingProtectionRangesCursor));
 static_assert(alignof(ffi::Uninitialized<VmMappingProtectionRangesCursor>) ==
               alignof(VmMappingProtectionRangesCursor));
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-extern "C" {
-FFI_ALWAYS_INLINE void cpp_vm_mapping_construct(ffi::Uninitialized<VmMapping>* slot,
-                                                VmAddressRegion* parent, bool private_clone,
-                                                vaddr_t base, size_t size, uint32_t vmar_flags,
-                                                VmObject* vmo, uint64_t vmo_offset,
-                                                arch_mmu_flags_t arch_mmu_flags, bool mergeable) {
-  slot->Initialize(*parent, private_clone, base, size, vmar_flags, fbl::ImportFromRawPtr(vmo),
-                   vmo_offset, arch_mmu_flags, static_cast<VmMapping::Mergeable>(mergeable));
-}
-FFI_ALWAYS_INLINE void cpp_vm_mapping_construct_with_ranges(
-    ffi::Uninitialized<VmMapping>* slot, VmAddressRegion* parent, bool private_clone, vaddr_t base,
-    size_t size, uint32_t vmar_flags, VmObject* vmo, uint64_t vmo_offset,
-    arch_mmu_flags_t first_mmu_flags, VmMappingProtectionRanges* ranges, bool mergeable) {
-  slot->Initialize(*parent, private_clone, base, size, vmar_flags, fbl::ImportFromRawPtr(vmo),
-                   vmo_offset, first_mmu_flags, ktl::move(*ranges),
-                   static_cast<VmMapping::Mergeable>(mergeable));
-}
-FFI_ALWAYS_INLINE void cpp_vm_mapping_destruct(VmMapping* mapping) { mapping->~VmMapping(); }
-FFI_ALWAYS_INLINE void* cpp_vm_mapping_state(VmMapping* mapping) {
-  return &mapping->opaque_storage_;
-}
-FFI_ALWAYS_INLINE VmMappingProtectionRanges* cpp_vm_mapping_rest_protection_ranges(
-    VmMapping* mapping) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &mapping->rest_protection_ranges_;
-}
-FFI_ALWAYS_INLINE const VmMappingProtectionRanges* cpp_vm_mapping_rest_protection_ranges_const(
-    const VmMapping* mapping) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &mapping->rest_protection_ranges_;
-}
 static_assert(sizeof(ffi::Uninitialized<VmMappingProtectionRanges>) ==
               sizeof(VmMappingProtectionRanges));
 static_assert(alignof(ffi::Uninitialized<VmMappingProtectionRanges>) ==
               alignof(VmMappingProtectionRanges));
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+extern "C" {
 FFI_ALWAYS_INLINE void cpp_vm_mapping_protection_ranges_construct(
     ffi::Uninitialized<VmMappingProtectionRanges>* ranges) {
   ranges->Initialize();

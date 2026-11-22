@@ -13,6 +13,7 @@
 #include <unordered_set>
 
 #include <llvm/DebugInfo/DIContext.h>
+#include <llvm/DebugInfo/DWARF/DWARFAcceleratorTable.h>
 #include <llvm/DebugInfo/DWARF/DWARFCompileUnit.h>
 #include <llvm/DebugInfo/DWARF/DWARFContext.h>
 #include <llvm/DebugInfo/DWARF/DWARFDebugArangeSet.h>
@@ -233,7 +234,7 @@ llvm::object::ObjectFile* DwarfBinaryImpl::GetLLVMObjectFile() {
   return static_cast<llvm::object::ObjectFile*>(binary_.get());
 }
 
-llvm::DWARFContext* DwarfBinaryImpl::GetLLVMContext() { return context_.get(); }
+llvm::DWARFContext* DwarfBinaryImpl::GetLLVMContext() const { return context_.get(); }
 
 uint64_t DwarfBinaryImpl::GetMappedLength() const { return mapped_length_; }
 
@@ -247,12 +248,12 @@ const std::map<std::string, uint64_t> DwarfBinaryImpl::GetPLTSymbols() const {
 
 uint32_t DwarfBinaryImpl::GetNormalUnitCount() const {
   auto unit_range = context_->normal_units();
-  return unit_range.end() - unit_range.begin();
+  return static_cast<uint32_t>(unit_range.end() - unit_range.begin());
 }
 
 uint32_t DwarfBinaryImpl::GetDWOUnitCount() const {
   auto unit_range = context_->dwo_units();
-  return unit_range.end() - unit_range.begin();
+  return static_cast<uint32_t>(unit_range.end() - unit_range.begin());
 }
 
 fxl::RefPtr<DwarfUnit> DwarfBinaryImpl::GetUnitAtIndex(UnitIndex i) {
@@ -348,6 +349,15 @@ DwarfDieRef DwarfBinaryImpl::GetDieRefForSignature(uint64_t signature) const {
   if (found == signature_to_die_->end())
     return DwarfDieRef();
   return found->second;
+}
+
+const llvm::DWARFDebugNames* DwarfBinaryImpl::GetDebugNames() const {
+  if (!context_)
+    return nullptr;
+  const auto& names = context_->getDebugNames();
+  if (names.begin() == names.end())
+    return nullptr;
+  return &names;
 }
 
 void DwarfBinaryImpl::ClearLLVMCache() {

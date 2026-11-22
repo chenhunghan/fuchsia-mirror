@@ -87,26 +87,9 @@ fuchsia_component("vkext_cmp") {
   cm_label = ":child-manifest"
 }
 
-fuchsia_structured_config_values("default_config") {
-  cm_label = ":child-manifest"
-  values = {
-    gpu_vendor_id = 0
-    support_sysmem_yuv = false
-    support_sysmem_yv12 = false
-    support_sysmem_a2b10g10r10 = false
-    support_sysmem_linear_nonrgba = true
-    support_sysmem_renderable_linear = true
-    support_protected_memory = false
-    disabled_test_pattern = ""
-  }
-}
-
 fuchsia_package("vkext-child-package") {
   package_name = "vkext-test"
-  deps = [
-    ":default_config",
-    ":vkext_cmp",
-  ]
+  deps = [ ":vkext_cmp" ]
 }
 
 if (current_toolchain == default_toolchain) {

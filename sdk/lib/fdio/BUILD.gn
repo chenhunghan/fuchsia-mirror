@@ -13,18 +13,6 @@ config("fdio_includes") {
   include_dirs = [ "include" ]
 }
 
-if (is_fuchsia) {
-  source_set("fdio-spawn-actions") {
-    configs += [ "//build/config:all_source" ]
-    public = [ "include/lib/fdio/spawn-actions.h" ]
-
-    deps = [
-      ":fdio",
-      "//zircon/system/ulib/zx",
-    ]
-  }
-}
-
 if (!is_fuchsia) {
   source_set("fdio") {
     public_configs = [ ":fdio_includes" ]
@@ -147,6 +135,7 @@ if (is_fuchsia) {
         [ "-Wl,--version-script=" + rebase_path("fdio.ld", root_build_dir) ]
     visibility = [ "//*" ]
     sdk = "shared"
+    bazel_target = ":fdio_gn_outputs"
   }
 }
 
@@ -164,4 +153,18 @@ source_set("constants") {
     "//third_party/abseil-cpp/absl/time/internal/cctz:*",
     "//third_party/cobalt/third_party/abseil-cpp/absl/time/internal/cctz:*",
   ]
+}
+if (is_fuchsia) {
+  source_set("fdio-spawn-actions") {
+    public = [ "include/lib/fdio/spawn-actions.h" ]
+    configs += [ "//build/config:all_source" ]
+    visibility = [
+      ":*",
+      "//src/devices/bin/driver_playground:*",
+    ]
+    public_deps = [
+      ":fdio",
+      "//zircon/system/ulib/zx",
+    ]
+  }
 }

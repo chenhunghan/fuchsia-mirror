@@ -301,6 +301,9 @@ struct DriverInner {
     // The current power state/transition state of the driver.
     power_state: DriverPowerState,
 
+    // Whether the driver has been asked to stop. Once set, the driver isn't suspended anymore.
+    stop_requested: bool,
+
     // A sender used to unblock the termination watcher when a pending resume
     // operation completes or is bypassed.
     resume_sender: Option<oneshot::Sender<()>>,
@@ -357,6 +360,7 @@ impl DriverInner {
             active_lease: None,
             stop_lease: None,
             power_state: DriverPowerState::Resumed,
+            stop_requested: false,
             resume_sender: None,
             internal_stop_tx: None,
             power_element_runner_task: None,
@@ -952,7 +956,11 @@ impl Driver {
 
         // Note: We first have to completely resume the driver
         // (if its suspended) before we can stop the driver.
-        let state = driver.inner.lock().power_state;
+        let state = {
+            let mut inner = driver.inner.lock();
+            inner.stop_requested = true;
+            inner.power_state
+        };
         match state {
             DriverPowerState::Suspended | DriverPowerState::SuspendRequested => {
                 driver.inner.lock().resume_sender = Some(resume_sender);
@@ -964,10 +972,6 @@ impl Driver {
             }
             DriverPowerState::ResumeRequested => {
                 driver.inner.lock().resume_sender = Some(resume_sender);
-                {
-                    let mut inner = driver.inner.lock();
-                    inner.stop_lease = inner.active_lease.take();
-                }
             }
             DriverPowerState::Resumed => {
                 // Nothing to do here if the driver is already in a Resumed state.
@@ -1032,6 +1036,16 @@ impl Driver {
     async fn handle_suspend_transition(self: &Arc<Self>, client: &DriverClient) -> Result<(), ()> {
         {
             let mut inner = self.inner.lock();
+
+            // Fail the transition, which closes the runner instead of answering, once the driver
+            // has been asked to stop. The driver may need its dispatchers to stop, and nothing
+            // would resume it again. Not answering leaves the power element, and so what it
+            // depends on, at its current level until the element goes away with the driver.
+            if inner.stop_requested {
+                log::info!("Not suspending {} because it was asked to stop", self.url);
+                return Err(());
+            }
+
             inner.power_state = DriverPowerState::SuspendRequested;
         }
         if self.suspend_driver(client).await.is_err() {
@@ -1132,7 +1146,8 @@ impl Driver {
     /// returns immediately and the work is done asynchronously. Eventually a `SetLevel(1)`
     /// request will arrive via the `ElementRunner` protocol where the driver will resume.
     ///
-    /// If the power element is not in `RuntimeControlled` state, this function will do nothing.
+    /// If the power element is not in `RuntimeControlled` state, or the driver is already resuming
+    /// or resumed, this function will do nothing.
     pub fn request_power_lease(self: &Arc<Self>) {
         let self_clone = self.clone();
         let remote_token;
@@ -1142,6 +1157,18 @@ impl Driver {
             let PowerElementState::RuntimeControlled(..) = &inner.power_element else {
                 return;
             };
+
+            // The driver runtime calls this for every wake vector that fires while the driver's
+            // dispatchers are suspended, and they stay suspended until the driver's resume hook
+            // has returned. The lease is handed to that hook, so one taken after the hook was
+            // called would never be dropped and would keep the power element on for good.
+            match inner.power_state {
+                DriverPowerState::SuspendRequested | DriverPowerState::Suspended => {}
+                // The driver is already on its way up (or, if this call raced with the end of
+                // the resume, already there) and runs its pending wake vector callbacks as soon
+                // as its dispatchers resume.
+                DriverPowerState::ResumeRequested | DriverPowerState::Resumed => return,
+            }
 
             let (local_token, remote) = zx::EventPair::create();
             inner.active_lease = Some(local_token);
@@ -1343,7 +1370,7 @@ mod tests {
     use super::*;
     use fdf::{DispatcherBuilder, OnDriverDispatcher, WakeVectorRegistration};
     use fidl_fuchsia_power_broker::{
-        LessorMarker, TopologyMarker, TopologyRequest, TopologyRequestStream,
+        ElementRunnerProxy, LessorMarker, TopologyMarker, TopologyRequest, TopologyRequestStream,
     };
     use libasync::OnSignals;
     use std::pin::Pin;
@@ -1370,8 +1397,8 @@ mod tests {
     /// The power broker that the power element of a test driver is connected to.
     struct FakePowerBroker {
         topology: TopologyRequestStream,
-        // Keep the other ends of the power element channels open.
-        _runner: ClientEnd<ElementRunnerMarker>,
+        runner: ElementRunnerProxy,
+        // Keep the other end of the lessor channel open.
         _lessor: ServerEnd<LessorMarker>,
     }
 
@@ -1419,6 +1446,7 @@ mod tests {
                 active_lease: None,
                 stop_lease: None,
                 power_state: DriverPowerState::Resumed,
+                stop_requested: false,
                 resume_sender: None,
                 internal_stop_tx: None,
                 power_element_runner_task: None,
@@ -1441,7 +1469,7 @@ mod tests {
         *driver.runtime_handle.lock() = Some(runtime_handle);
         let power_broker = FakePowerBroker {
             topology: topology_stream,
-            _runner: runner_client,
+            runner: runner_client.into_proxy(),
             _lessor: lessor_server,
         };
         (driver, power_broker)
@@ -1450,13 +1478,20 @@ mod tests {
     /// Creates a client for the driver's `fuchsia.driver.framework/Driver` protocol. Nothing serves
     /// the protocol because the tests never get to the point of calling into the driver.
     fn create_driver_client(driver: &Driver) -> DriverClient {
+        create_unanswered_driver_client(driver).0
+    }
+
+    /// Like `create_driver_client`, but calls into the driver stay pending instead of failing for
+    /// as long as the second return value is kept alive.
+    fn create_unanswered_driver_client(driver: &Driver) -> (DriverClient, impl Sized + use<>) {
         let always_on =
             driver.inner.lock().always_on_dispatcher.as_ref().unwrap().as_async_dispatcher();
-        let (client_end, _server_end) = fdf_fidl::create_channel_with_dispatchers::<
+        let (client_end, server_end) = fdf_fidl::create_channel_with_dispatchers::<
             fidl_next_fdf::Driver,
             _,
         >(always_on.clone(), always_on);
-        ClientDispatcher::new(client_end).client()
+        let client_dispatcher = ClientDispatcher::new(client_end);
+        (client_dispatcher.client(), (client_dispatcher, server_end))
     }
 
     /// Shuts down a driver created by `create_test_driver` and waits until it is gone.
@@ -1555,7 +1590,7 @@ mod tests {
         // Suspending the runtime only completes once the wake vector callback returns, so this
         // stays pending. It is dropped there since nothing serves the driver protocol, which is
         // what it would use next.
-        assert!(driver.suspend_driver(&client).now_or_never().is_none());
+        assert!(driver.handle_suspend_transition(&client).now_or_never().is_none());
 
         wake_vector.release();
         let lease = power_broker.expect_lease().await;
@@ -1579,7 +1614,7 @@ mod tests {
         let wake_vector = start_wake_vector_callback(&dispatcher, &event).await;
 
         // No resume requester is registered yet, so the driver runtime can't request a resume.
-        assert!(driver.suspend_driver(&client).now_or_never().is_none());
+        assert!(driver.handle_suspend_transition(&client).now_or_never().is_none());
 
         let scope = fuchsia_async::Scope::new();
         driver.start_power_element_runner(client, &scope);
@@ -1587,6 +1622,92 @@ mod tests {
         wake_vector.release();
         power_broker.expect_lease().await;
         assert!(driver.inner.lock().active_lease.is_some());
+
+        shutdown_test_driver(driver, scope).await;
+    }
+
+    // The driver runtime keeps the dispatchers of a driver suspended until its resume hook has
+    // returned, so a wake vector that fires while the hook runs makes the runtime request another
+    // resume. The lease is only ever handed to the resume hook, so one taken for such a request
+    // would never be dropped.
+    #[fuchsia::test]
+    async fn wake_vector_during_resume_does_not_take_power_lease() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, _power_broker) = create_test_driver(&env);
+        let (client, _unanswered) = create_unanswered_driver_client(&driver);
+
+        let dispatcher = driver.inner.lock().dispatcher.as_ref().unwrap().as_async_dispatcher();
+        let event = zx::Event::create();
+        let wake_vector = start_wake_vector_callback(&dispatcher, &event).await;
+
+        // No resume requester is registered yet, so the driver runtime can't request a resume.
+        assert!(driver.handle_suspend_transition(&client).now_or_never().is_none());
+
+        // The resume hook never returns, so the runtime stays suspended.
+        assert!(driver.handle_resume_transition(&client).now_or_never().is_none());
+        assert_eq!(driver.inner.lock().power_state, DriverPowerState::ResumeRequested);
+
+        // The driver runtime calls the requester from within `fdf_env_register_resume_requester`
+        // because of the wake vector callback that is still executing.
+        let scope = fuchsia_async::Scope::new();
+        driver.start_power_element_runner(client, &scope);
+        assert!(driver.inner.lock().active_lease.is_none());
+
+        wake_vector.release();
+        shutdown_test_driver(driver, scope).await;
+    }
+
+    // `request_power_lease` can also be called after the driver has resumed, since the driver
+    // runtime doesn't hold its lock while it requests a resume.
+    #[fuchsia::test]
+    async fn request_power_lease_only_takes_lease_before_resume_starts() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, mut power_broker) = create_test_driver(&env);
+
+        for state in [DriverPowerState::ResumeRequested, DriverPowerState::Resumed] {
+            driver.inner.lock().power_state = state;
+            driver.request_power_lease();
+            assert!(driver.inner.lock().active_lease.is_none(), "took a lease while {state:?}");
+        }
+
+        // Before the resume hook is called, the lease is what resumes the driver.
+        for state in [DriverPowerState::SuspendRequested, DriverPowerState::Suspended] {
+            driver.inner.lock().power_state = state;
+            driver.request_power_lease();
+            power_broker.expect_lease().await;
+            // Clear the lease so that the next state can't pass on this one.
+            let lease = driver.inner.lock().active_lease.take();
+            assert!(lease.is_some(), "took no lease while {state:?}");
+        }
+
+        shutdown_test_driver(driver, fuchsia_async::Scope::new()).await;
+    }
+
+    // A driver that was asked to stop may need its dispatchers to do so, so it must not be
+    // suspended anymore.
+    #[fuchsia::test]
+    async fn driver_is_not_suspended_after_stop_request() {
+        let env = fdf_env::Environment::start(0).unwrap();
+        let (driver, power_broker) = create_test_driver(&env);
+        let client = create_driver_client(&driver);
+        let scope = fuchsia_async::Scope::new();
+        driver.start_power_element_runner(client, &scope);
+
+        let (resume_sender, _resume_receiver) = oneshot::channel();
+        assert!(Driver::handle_stop_request(Arc::downgrade(&driver), resume_sender));
+
+        // The runner closes its channel instead of answering, which leaves the power element at
+        // its current level.
+        assert!(power_broker.runner.set_level(0).await.is_err());
+        assert_eq!(driver.inner.lock().power_state, DriverPowerState::Resumed);
+
+        // The dispatchers of the driver still run.
+        let dispatcher = driver.inner.lock().dispatcher.as_ref().unwrap().as_async_dispatcher();
+        let (ran_sender, ran_receiver) = oneshot::channel();
+        dispatcher.spawn(async move {
+            let _ = ran_sender.send(());
+        });
+        ran_receiver.await.expect("task did not run");
 
         shutdown_test_driver(driver, scope).await;
     }

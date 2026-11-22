@@ -29,9 +29,8 @@ import("//tools/cmc/build/cmc.gni")
 #   cm_label (optional)
 #     A `fuchsia_component_manifest` target label. Either this or `manifest` must be specified.
 #     Type: GN label, e.g. `:my_manifest`
-#   info (mandatory for //src and //zircon)
-#     Name of the file containing the driver information file.
-#     Type: file
+#   info (deprecated)
+#     Ignored. Driver information files are deprecated and no longer used.
 #   applicable_licenses
 #   deps
 #   testonly
@@ -60,57 +59,10 @@ template("fuchsia_driver_component") {
       _cm_label = "${invoker.dml_label}_manifest"
     }
 
-    driver_path =
-        get_path_info(get_path_info(invoker.target_name, "abspath"), "dir")
-    splitted_path = string_split(driver_path, "/")
-    base_folder = splitted_path[2]  # after removing "//"
-    create_driver_doc = false
-    if (base_folder == "src" || base_folder == "zircon") {
-      # Public drivers (defined as drivers in //src and //zircon) must provide
-      # an 'info' field with a driver information file.
-      assert(defined(invoker.info), "Must include driver info")
-      create_driver_doc = true
-    } else {
-      # Ignore info assignment if present, e.g. from //tools templates.
-      if (defined(invoker.info)) {
-        not_needed(invoker, [ "info" ])
-      }
-    }
-
-    if (create_driver_doc) {
-      doc_output = "${target_gen_dir}/${target_name}-doc.json"
-      doc_target = "${target_name}-driver-info"
-
-      name = invoker.target_name
-      if (defined(invoker.component_name)) {
-        name = invoker.component_name
-      }
-      doc_input = invoker.info
-
-      action(doc_target) {
-        visibility = [ ":*" ]
-        forward_variables_from(invoker,
-                               [
-                                 "applicable_licenses",
-                                 "testonly",
-                               ])
-        script = "//build/drivers/create_driver_doc.py"
-        inputs = [
-          driver_path,
-          doc_input,
-        ]
-        outputs = [ "${doc_output}" ]
-        args = [
-          "--name",
-          name,
-          "--driver_path",
-          driver_path,
-          "--doc_input",
-          rebase_path(doc_input, root_build_dir),
-          "--doc_output",
-          rebase_path(outputs[0], root_build_dir),
-        ]
-      }
+    if (defined(invoker.info)) {
+      # TODO(https://fxbug.dev/584335219): Driver info files are deprecated.
+      # `info` is still accepted, and ignored, until no repository sets it.
+      not_needed(invoker, [ "info" ])
     }
 
     fuchsia_component(target_name) {
@@ -140,19 +92,10 @@ template("fuchsia_driver_component") {
       } else {
         deps = []
       }
-      if (create_driver_doc) {
-        deps += [ ":${doc_target}" ]
-        not_needed(invoker, [ ":${doc_target}" ])
-      }
       deps += [ "//src/devices/misc/drivers/compat:driver" ]
       metadata = {
         # Used by the assert_driver_components template.
         driver_component_barrier = []
-
-        if (create_driver_doc) {
-          # Used by the create_all_drivers_doc template.
-          fuchsia_driver_doc_file = [ doc_output ]
-        }
       }
     }
   } else {

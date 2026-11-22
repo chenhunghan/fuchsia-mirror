@@ -1,0 +1,234 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":ot-rcp-fuchsia-platform-unittests",
+        ":ot-rcp-fuchsia-spinel-device-server-unittests",
+    ],
+    visibility = ["//src/connectivity/openthread:__pkg__"],
+)
+
+# Header-only view of the RCP's host-facing contract (EUI-64 base, max frame
+# size, flow-control defaults), for code that needs the constants without
+# linking :platform or :rcp-lib (which pull in otPlat* symbols and the
+# OpenThread core).
+fx_cc_library(
+    name = "rcp-test-headers",
+    testonly = True,
+    hdrs = [
+        "rcp/platform/platform.h",
+        "rcp/platform/radio.h",
+        "rcp/rcp_instance.h",
+        "rcp/spinel_device_server.h",
+    ],
+    # Every RCP translation unit must see OPENTHREAD_RADIO=1 so that
+    # openthread-config-fuchsia.h selects the RCP branch (and not the host
+    # stack's), even in targets that only use the public headers.
+    public_configs = ["//third_party/openthread:openthread_radio_config"],
+    # Uses Fuchsia-only FIDL bindings.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/connectivity/openthread/tests/ot-rcp-fuchsia:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/fit",
+        # In Bazel, openthread_radio_config is an fx_cc_library that propagates
+        # OPENTHREAD_RADIO=1 transitively via deps, replacing GN public_configs.
+        "//third_party/openthread:openthread_radio_config",  # @bazel2gn:skip
+        "//third_party/openthread/include/openthread",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# The OpenThread platform: the ot_rcp::Platform class (platform.{h,cc}), the
+# Radio it owns (radio.{h,cc}) and the otPlat* entry points that
+# forward to them (ot_platform.cc, ot_radio_platform.cc, logging.cc). Built
+# against the public OpenThread headers only; the OpenThread library itself is
+# linked by the final RCP binary.
+fx_cc_library(
+    name = "platform",
+    testonly = True,
+    srcs = [
+        "rcp/platform/logging.cc",
+        "rcp/platform/ot_platform.cc",
+        "rcp/platform/ot_radio_platform.cc",
+        "rcp/platform/platform.cc",
+        "rcp/platform/radio.cc",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":rcp-test-headers",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/syslog/cpp",
+        "//third_party/openthread/include/openthread",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# Everything except main(): the OpenThread RADIO core + NCP, NcpAdapter,
+# RcpInstance, SpinelDeviceServer and the rfsim RfsimClient.
+fx_cc_library(
+    name = "rcp-lib",
+    testonly = True,
+    srcs = [
+        "rcp/ncp_fidl.cc",
+        "rcp/rcp_instance.cc",
+        "rcp/rfsim_client.cc",
+        "rcp/spinel_device_server.cc",
+    ],
+    hdrs = [
+        "rcp/ncp_fidl.h",
+        "rcp/rfsim_client.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":platform",
+        ":rcp-test-headers",
+        "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/fit",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher/fidl/test.lowpan.rfsim:test.lowpan.rfsim_cpp",
+        "//third_party/openthread:libopenthread-rcp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_component_manifest(
+    name = "ot-rcp-fuchsia-manifest",
+    testonly = True,
+    component_name = "ot-rcp-fuchsia",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "rcp/meta/ot-rcp-fuchsia.cml",
+)
+
+# Generated accessors (ot_rcp_fuchsia_config::Config, header
+# ot_rcp_fuchsia_config.h) for the config capabilities the manifest uses:
+# `node_id` is routed in as `fuchsia.openthread.rcp.NodeId` by the parent.
+fuchsia_structured_config_cpp_elf_lib(
+    name = "ot-rcp-fuchsia-config",
+    testonly = True,
+    cm_label = ":ot-rcp-fuchsia-manifest",
+)
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["rcp/main.cc"],
+    gn_output_name = "ot_rcp_fuchsia",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":ot-rcp-fuchsia-config",
+        ":rcp-lib",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "ot_rcp_fuchsia",
+)
+
+fx_component(
+    name = "ot-rcp-fuchsia-component",
+    testonly = True,
+    compiled_manifest = ":ot-rcp-fuchsia-manifest",
+    deps = [":bin_packaged"],
+)
+
+# Subpackaged by tests whose realms run the RCP
+# ("ot-rcp-fuchsia#meta/ot-rcp-fuchsia.cm"), through the GN wrapper in
+# BUILD.gn.
+fx_package(
+    name = "ot-rcp-fuchsia",
+    testonly = True,
+    components = [":ot-rcp-fuchsia-component"],
+)
+
+# The platform calls back into the OpenThread core (otTaskletsProcess,
+# otPlatRadioTxDone, ...). The core is not linked here; each test file fakes
+# the callbacks of the component it tests, so all of them share one binary.
+fx_cc_test_binary(
+    name = "platform_unittests",
+    srcs = [
+        "rcp/platform/platform_unittest.cc",
+        "rcp/platform/radio_unittest.cc",
+    ],
+    gn_output_name = "ot_rcp_fuchsia_platform_unittests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":platform",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-testing",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "ot-rcp-fuchsia-platform-unittests",
+    unit_tests = [":platform_unittests"],
+)
+
+# Links the whole RCP (SpinelDeviceServer, RcpInstance, RfsimClient, the
+# OpenThread core and the platform) and serves it on the test's own loop,
+# driven over FIDL by MockSpinelHost, with an in-test fake medium on the same
+# loop. Does not cover the component manifest, the
+# fuchsia.lowpan.spinel.Service route, the node id config capability or main.cc.
+fx_cc_test_binary(
+    name = "spinel_device_server_unittests",
+    srcs = ["rcp/spinel_device_server_unittest.cc"],
+    gn_output_name = "ot_rcp_fuchsia_spinel_device_server_unittests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":rcp-lib",
+        "//sdk/fidl/fuchsia.lowpan.spinel:fuchsia.lowpan.spinel_cpp",
+        "//sdk/lib/fidl/cpp",
+        "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host",
+        "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host:mac-frame",
+        "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host:mock-spinel-host-fixture",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher/fidl/test.lowpan.rfsim:test.lowpan.rfsim_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//third_party/openthread/include/openthread",
+        "//zircon/system/ulib/zx",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "ot-rcp-fuchsia-spinel-device-server-unittests",
+    unit_tests = [":spinel_device_server_unittests"],
+)

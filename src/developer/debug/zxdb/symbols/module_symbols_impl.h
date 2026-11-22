@@ -75,6 +75,14 @@ class ModuleSymbolsImpl final : public ModuleSymbols, public DwarfSymbolFactory:
   const Index& GetIndex() const override;
   LazySymbol IndexSymbolRefToSymbol(const IndexNode::SymbolRef&) const override;
   bool HasBinary() const override;
+  bool HasDebugNames() const override;
+  const llvm::DWARFDebugNames* GetDebugNames() const override;
+  std::vector<DebugNamesEntry> FindDebugNamesEntries(std::string_view name) const override;
+  std::vector<DebugNamesEntry> FindDebugNamesPrefixEntries(std::string_view prefix) const override;
+
+  void SetForceSlowIndex(bool force);
+  bool force_slow_index() const;
+
   std::optional<uint64_t> GetDebugAddrEntry(uint64_t addr_base, uint64_t index) const override;
 
   // DwarfSymbolFactory::Delegate implementation.
@@ -110,6 +118,9 @@ class ModuleSymbolsImpl final : public ModuleSymbols, public DwarfSymbolFactory:
   std::vector<Location> ResolveSymbolInputLocation(const SymbolContext& symbol_context,
                                                    const InputLocation& input_location,
                                                    const ResolveOptions& options) const;
+  std::vector<Location> ResolveDebugNamesSymbolInputLocation(const SymbolContext& symbol_context,
+                                                             const Identifier& symbol_to_find,
+                                                             const ResolveOptions& options) const;
   std::vector<Location> ResolveAddressInputLocation(const SymbolContext& symbol_context,
                                                     const InputLocation& input_location,
                                                     const ResolveOptions& options) const;
@@ -212,6 +223,9 @@ class ModuleSymbolsImpl final : public ModuleSymbols, public DwarfSymbolFactory:
   // All symbols in the mangled_elf_symbols_ map (pointers owned by that structure) sorted by the
   // relative address. Theoretically there can be more than one symbol for the same address.
   std::vector<const ElfSymbolRecord*> elf_addresses_;
+
+  bool force_slow_index_ = false;
+  bool full_index_built_ = false;
 
   fxl::WeakPtrFactory<ModuleSymbolsImpl> weak_factory_;
   fxl::WeakPtrFactory<DwarfSymbolFactory::Delegate> symbol_weak_factory_;

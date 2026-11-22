@@ -26,7 +26,6 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/lib/subprocess"
 	"go.fuchsia.dev/fuchsia/tools/net/netboot"
 	"go.fuchsia.dev/fuchsia/tools/net/sshutil"
-	"go.fuchsia.dev/fuchsia/tools/net/tftp"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -53,8 +52,13 @@ const (
 
 // DeviceConfig contains the static properties of a target device.
 type DeviceConfig struct {
-	// FastbootSernum is the fastboot serial number of the device.
-	FastbootSernum string `json:"fastboot_sernum"`
+	// SerialNumber is the serial number of the device. If set, botanist
+	// flashes the device over USB fastboot, selecting it by this serial
+	// number, unless TCPFastboot is set.
+	//
+	// The JSON key is "fastboot_sernum" for historical reasons: fastboot was
+	// originally the only tool that used this field.
+	SerialNumber string `json:"fastboot_sernum"`
 
 	// Network is the network properties of the target.
 	Network NetworkProperties `json:"network"`
@@ -93,6 +97,13 @@ type DeviceConfig struct {
 	Monsoon *targetMonsoon `json:"monsoon,omitempty"`
 }
 
+// usesFastboot reports whether botanist flashes the device with fastboot
+// (over TCP if TCPFastboot is set, otherwise over USB selected by
+// SerialNumber) instead of paving it.
+func (c DeviceConfig) usesFastboot() bool {
+	return c.SerialNumber != "" || c.TCPFastboot
+}
+
 // NetworkProperties are the static network properties of a target.
 type NetworkProperties struct {
 	// Nodename is the hostname of the device that we want to boot on.
@@ -120,12 +131,13 @@ func LoadDeviceConfigs(path string) ([]DeviceConfig, error) {
 // Device represents a physical Fuchsia device.
 type Device struct {
 	*genericFuchsiaTarget
-	config   DeviceConfig
-	opts     Options
-	signers  []ssh.Signer
-	serial   io.ReadWriteCloser
-	tftp     tftp.Client
-	stopping uint32
+	config        DeviceConfig
+	opts          Options
+	signers       []ssh.Signer
+	serial        io.ReadWriteCloser
+	stopping      uint32
+	usbAddr       string
+	usbSocketPath string
 }
 
 var _ FuchsiaTarget = (*Device)(nil)
@@ -143,7 +155,7 @@ func NewDevice(ctx context.Context, config DeviceConfig, opts Options) (*Device,
 	}
 	var s io.ReadWriteCloser
 	if config.SerialMux != "" {
-		if config.FastbootSernum == "" && !config.TCPFastboot {
+		if !config.usesFastboot() {
 			s, err = serial.NewSocket(ctx, config.SerialMux)
 			if err != nil {
 				return nil, fmt.Errorf("unable to open: %s: %w", config.SerialMux, err)
@@ -181,14 +193,39 @@ func NewDevice(ctx context.Context, config DeviceConfig, opts Options) (*Device,
 	}, nil
 }
 
-// Tftp returns a tftp client interface for the device.
-func (t *Device) Tftp() tftp.Client {
-	return t.tftp
+// Nodename returns the configured name of the node, falling back to any
+// nodename discovered at runtime once booted.
+func (t *Device) Nodename() string {
+	if t.config.Network.Nodename != "" {
+		return t.config.Network.Nodename
+	}
+	return t.nodename
 }
 
-// Nodename returns the name of the node.
-func (t *Device) Nodename() string {
-	return t.config.Network.Nodename
+// SerialNumber returns the serial number configured for the device, falling back
+// to any serial number discovered at runtime once booted.
+func (t *Device) SerialNumber() string {
+	if t.config.SerialNumber != "" {
+		return t.config.SerialNumber
+	}
+	return t.serialNum
+}
+
+// SetUSBConfig records the ffx usb-driver socket path and discovered USB
+// target address (usb:cid:<cid>) for the device.
+func (t *Device) SetUSBConfig(socketPath, usbAddr string) {
+	t.usbSocketPath = socketPath
+	t.usbAddr = usbAddr
+}
+
+// USBSocketPath returns the path to the ffx usb-driver socket for the device.
+func (t *Device) USBSocketPath() string {
+	return t.usbSocketPath
+}
+
+// USBAddress returns the discovered USB target address (usb:cid:<cid>) for the device.
+func (t *Device) USBAddress() string {
+	return t.usbAddr
 }
 
 // Serial returns the serial device associated with the target for serial i/o.
@@ -293,21 +330,11 @@ func (t *Device) Start(ctx context.Context, args []string, pbPath string, isBoot
 	}
 
 	// Boot Fuchsia.
-	if t.config.FastbootSernum != "" || t.config.TCPFastboot {
+	if t.config.usesFastboot() {
 		maxAllowedAttempts := max(t.config.MaxFlashAttempts, 1)
-		var err error
-		tcpFlash := false
-		target := t.config.FastbootSernum
-		if target == "" {
-			ipv6, err := t.genericFuchsiaTarget.IPv6()
-			if err != nil {
-				return err
-			}
-
-			target = ipv6.String()
-			tcpFlash = true
-		} else {
-			target = "id:" + target
+		target, tcpFlash, err := t.resolveFastbootTransport()
+		if err != nil {
+			return err
 		}
 		t.ffx.SetTarget(target)
 		for attempt := 1; attempt <= maxAllowedAttempts; attempt++ {
@@ -369,6 +396,26 @@ func (t *Device) Start(ctx context.Context, args []string, pbPath string, isBoot
 	}
 
 	return nil
+}
+
+// resolveFastbootTransport returns the fastboot target and whether it uses TCP.
+func (t *Device) resolveFastbootTransport() (string, bool, error) {
+	// TCPFastboot takes precedence over SerialNumber because fastboot over TCP
+	// discovers targets over mDNS without exposing a serial number.
+	if t.config.TCPFastboot {
+		ipv6, err := t.genericFuchsiaTarget.IPv6()
+		if err != nil {
+			return "", false, err
+		}
+		if ipv6 == nil || len(ipv6.IP) == 0 {
+			return "", false, fmt.Errorf("no IPv6 address resolved for TCP fastboot target %s", t.Nodename())
+		}
+		return ipv6.String(), true, nil
+	}
+	if t.config.SerialNumber == "" {
+		return "", false, fmt.Errorf("missing serial number for USB fastboot target %s", t.Nodename())
+	}
+	return "id:" + t.config.SerialNumber, false, nil
 }
 
 func (t *Device) flash(ctx context.Context, productBundle, target string, tcpFlash bool) error {

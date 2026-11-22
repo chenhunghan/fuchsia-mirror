@@ -6,7 +6,7 @@ group("tests") {
   testonly = true
   deps = [
     "hwstress:tests",
+    "kcounter:tests",
     "role_manager:tests",
-    "zxsh:tests",
   ]
 }

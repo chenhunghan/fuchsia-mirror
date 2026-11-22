@@ -1,0 +1,139 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":component_debug_integration_tests"],
+    visibility = ["//src/sys:__pkg__"],
+)
+
+rustc_test(
+    name = "integration_test_bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "component_debug_integration_test",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-fs",
+        "//src/sys/lib/cm_rust",
+        "//src/sys/lib/component_debug",
+        "//src/sys/lib/moniker",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_bin_packaged",
+    testonly = True,
+    binary = ":integration_test_bin",
+    binary_name = "component_debug_integration_test",
+)
+
+fx_component_manifest(
+    name = "test_manifest",
+    testonly = True,
+    component_name = "test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/test.cml",
+)
+
+fx_test_component(
+    name = "test",
+    compiled_manifest = ":test_manifest",
+    deps = [":integration_test_bin_packaged"],
+)
+
+rustc_binary(
+    name = "foo_noop",
+    testonly = True,
+    srcs = ["src/foo.rs"],
+    crate_root = "src/foo.rs",
+    edition = "2024",
+    tags = ["manual"],
+)
+
+fx_packaged_binary(
+    name = "foo_noop_packaged",
+    testonly = True,
+    binary = ":foo_noop",
+    binary_name = "foo_noop",
+)
+
+fx_component_manifest(
+    name = "foo_manifest",
+    testonly = True,
+    component_name = "foo",
+    manifest = "meta/foo.cml",
+)
+
+fx_component(
+    name = "foo",
+    testonly = True,
+    compiled_manifest = ":foo_manifest",
+    deps = [":foo_noop_packaged"],
+)
+
+fx_component_manifest(
+    name = "config_capability_user_manifest",
+    testonly = True,
+    component_name = "config_capability_user",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/config_capability_user.cml",
+)
+
+fx_component(
+    name = "config_capability_user",
+    testonly = True,
+    compiled_manifest = ":config_capability_user_manifest",
+    deps = [":foo_noop_packaged"],
+)
+
+fx_package(
+    name = "component_debug_integration_tests_package",
+    package_name = "component_debug_integration_tests",
+    testonly = True,
+    components = [
+        ":config_capability_user",
+        ":foo",
+        "//src/sys/component_manager/testing/echo_server",
+    ],
+    test_components = [":test"],
+)
+
+# TODO(https://fxbug.dev/42162724): Failing test disabled on coverage.
+# Please fix test and remove condition below.
+fx_test(
+    name = "component_debug_integration_tests",
+    build_only = select({
+        "//build/bazel/config/select/is_coverage:is_coverage": True,
+        "//conditions:default": False,
+    }),
+    package = ":component_debug_integration_tests_package",
+)

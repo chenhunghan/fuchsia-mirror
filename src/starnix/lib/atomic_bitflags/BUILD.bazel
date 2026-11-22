@@ -2,11 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":atomic_bitflags-tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )
 
 rustc_library(
@@ -18,8 +22,23 @@ rustc_library(
         "//third_party/rust_crates/vendor:paste",
     ],
     version = "0.1.0",
-    with_unit_tests = True,
+    visibility = [
+        "//src/starnix/kernel/core:__pkg__",
+        "//src/starnix/lib:__pkg__",
+        "//src/starnix/lib/starnix_uapi:__pkg__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:bitflags",
     ],
+)
+
+rustc_test(
+    name = "atomic_bitflags_test",
+    crate = ":atomic_bitflags",
+    tags = ["manual"],
+)
+
+fx_unittest_package(
+    name = "atomic_bitflags-tests",
+    unit_tests = [":atomic_bitflags_test"],
 )

@@ -79,7 +79,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/driver.json"
   dml_label = ":msd_arm_mali_csf-dml"
 }
 

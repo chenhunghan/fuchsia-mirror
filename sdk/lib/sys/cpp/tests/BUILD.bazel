@@ -1,0 +1,152 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":sys_cpp_tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "component_cpp_unittests_bin",
+    srcs = [
+        "component_context_unittest.cc",
+        "echo_server.h",
+        "outgoing_directory_unittest.cc",
+        "service_directory_unittest.cc",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fidl",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/vfs/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/testing/fidl:placeholders_cpp",
+        "//src/testing/fidl:placeholders_hlcpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "component_cpp_unittests_packaged_bin",
+    testonly = True,
+    binary = ":component_cpp_unittests_bin",
+    binary_name = "component_cpp_unittests_bin",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "component_cpp_unittests_manifest",
+    testonly = True,
+    component_name = "component_cpp_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/component_cpp_unittests.cml",
+)
+
+fx_test_component(
+    name = "component_cpp_unittests",
+    compiled_manifest = ":component_cpp_unittests_manifest",
+    deps = [":component_cpp_unittests_packaged_bin"],
+)
+
+fx_cc_test_binary(
+    name = "component_cpp_testing_unittests_bin",
+    srcs = [
+        "component_context_provider_unittest.cc",
+        "echo_server.h",
+        "service_directory_provider_unittest.cc",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_hlcpp",
+        "//sdk/lib/fidl",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//sdk/lib/vfs/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/testing/fidl:placeholders_cpp",
+        "//src/testing/fidl:placeholders_hlcpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "component_cpp_testing_unittests_packaged_bin",
+    testonly = True,
+    binary = ":component_cpp_testing_unittests_bin",
+    binary_name = "component_cpp_testing_unittests_bin",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "component_cpp_testing_unittests_manifest",
+    testonly = True,
+    component_name = "component_cpp_testing_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/component_cpp_testing_unittests.cml",
+)
+
+fx_test_component(
+    name = "component_cpp_testing_unittests",
+    compiled_manifest = ":component_cpp_testing_unittests_manifest",
+    deps = [":component_cpp_testing_unittests_packaged_bin"],
+)
+
+fx_cc_binary(
+    name = "constructor_helper_proc",
+    testonly = True,
+    srcs = ["constructor_helper.cc"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl:fxl_cli",
+        "//src/testing/fidl:placeholders_hlcpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "constructor_helper_proc_packaged_bin",
+    testonly = True,
+    binary = ":constructor_helper_proc",
+    binary_name = "constructor_helper_proc",
+)
+
+fx_package(
+    name = "sys_cpp_tests_pkg",
+    package_name = "sys_cpp_tests",
+    resources = [":constructor_helper_proc_packaged_bin"],
+    test_components = [
+        ":component_cpp_testing_unittests",
+        ":component_cpp_unittests",
+    ],
+)
+
+fx_test(
+    name = "sys_cpp_tests",
+    package = ":sys_cpp_tests_pkg",
+)

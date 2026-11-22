@@ -46,6 +46,7 @@ use crate::platform_rs::timer::DurationMono;
 ///     }
 /// } // `guard` is dropped first, then (if `predicate()` was true), preemption is re-enabled.
 /// ```
+#[repr(transparent)]
 pub struct AutoPreemptDisabler {
     disabled: bool,
     _marker: PhantomData<*mut ()>,

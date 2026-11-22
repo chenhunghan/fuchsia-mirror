@@ -253,7 +253,7 @@ std::ostream& operator<<(std::ostream& os, const {{ .Name.Parse.Name }}& value) 
       return os << "{{ .Name }} " << value.{{ .Name }}();
             {{- end }}
         {{- end }}
-    case static_cast<fidl_xunion_tag_t>({{ $type_name }}::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>({{ $type_name }}::Tag::Invalid):
       return os << "<empty union>";
         {{- if .IsFlexible }}
     default:

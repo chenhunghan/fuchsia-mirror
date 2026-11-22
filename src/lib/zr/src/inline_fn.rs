@@ -35,6 +35,7 @@ impl<const SIZE: usize> AlignedStorage<SIZE> {
 mod private {
     pub trait SealedThreadSafety {}
     pub trait SealedSig {}
+    pub trait SealedArg {}
     pub trait SealedWithSig<Sig> {}
 }
 
@@ -96,38 +97,119 @@ unsafe impl<F: Send> ThreadSafety<F> for SendOnly {}
 // SAFETY: `SendSync` is `Send` and `Sync`, and this impl requires `F: Send + Sync`.
 unsafe impl<F: Send + Sync> ThreadSafety<F> for SendSync {}
 
-/// Trait implemented for supported function pointer signature types (e.g., `fn(A, B) -> Ret`).
-pub trait FnSig: private::SealedSig {
-    #[doc(hidden)]
-    type Trampoline: Copy;
+/// Trait implemented for supported function pointer signature types (e.g., `fn(A, B) -> Ret` or
+/// [`Hrtb<fn(RefArg<A>, ValArg<B>) -> Ret>`]).
+pub trait FnSig: private::SealedSig {}
+
+/// Sealed argument descriptor for higher-ranked ([`Hrtb`]) inline function signatures.
+///
+/// Implemented for [`ValArg<T>`] (by-value / non-higher-ranked arguments, including references
+/// with a fixed lifetime), [`RefArg<T>`] (shared references `for<'r> &'r T`), and [`MutArg<T>`]
+/// (mutable references `for<'r> &'r mut T`).
+pub trait FnArg: private::SealedArg {
+    /// The concrete argument type for a given call-site lifetime `'r`.
+    type Target<'r>;
+}
+
+/// By-value (non-higher-ranked) argument descriptor for [`Hrtb`] signatures (`Target<'r> = T`).
+///
+/// Covariant in `T`, so in contravariant function-parameter position (`Hrtb<fn(ValArg<T>)>`) it
+/// is contravariant in `T`, matching `fn(T)`.
+pub struct ValArg<T>(PhantomData<fn() -> T>);
+
+impl<T> fmt::Debug for ValArg<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ValArg")
+    }
+}
+
+/// Shared-reference argument descriptor for [`Hrtb`] signatures (`Target<'r> = &'r T`).
+///
+/// Covariant in `T`, so in contravariant function-parameter position (`Hrtb<fn(RefArg<T>)>`) it
+/// is contravariant in `T`, matching `for<'r> fn(&'r T)`.
+pub struct RefArg<T: ?Sized + 'static>(PhantomData<fn() -> *const T>);
+
+impl<T: ?Sized + 'static> fmt::Debug for RefArg<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RefArg")
+    }
+}
+
+/// Mutable-reference argument descriptor for [`Hrtb`] signatures (`Target<'r> = &'r mut T`).
+///
+/// Invariant in `T`, matching `for<'r> fn(&'r mut T)`.
+pub struct MutArg<T: ?Sized + 'static>(PhantomData<fn(&mut T)>);
+
+impl<T: ?Sized + 'static> fmt::Debug for MutArg<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MutArg")
+    }
+}
+
+impl<T> private::SealedArg for ValArg<T> {}
+impl<T: ?Sized + 'static> private::SealedArg for RefArg<T> {}
+impl<T: ?Sized + 'static> private::SealedArg for MutArg<T> {}
+
+impl<T> FnArg for ValArg<T> {
+    type Target<'r> = T;
+}
+
+impl<T: ?Sized + 'static> FnArg for RefArg<T> {
+    type Target<'r> = &'r T;
+}
+
+impl<T: ?Sized + 'static> FnArg for MutArg<T> {
+    type Target<'r> = &'r mut T;
+}
+
+/// Signature wrapper enabling higher-ranked reference arguments (`for<'r> &'r T` and
+/// `for<'r> &'r mut T`) in [`InlineFn`], [`InlineFnMut`], and [`InlineFnOnce`].
+///
+/// Wrap a function pointer signature whose parameter types are [`ValArg`], [`RefArg`], or
+/// [`MutArg`], e.g. `Hrtb<fn(RefArg<str>, ValArg<usize>) -> usize>`. Closures passed to `new`
+/// and arguments passed to `call` use ordinary Rust references directly.
+pub struct Hrtb<Sig>(PhantomData<Sig>);
+
+impl<Sig> fmt::Debug for Hrtb<Sig> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Hrtb")
+    }
 }
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
-pub struct VTableOnce<Trampoline> {
-    call_once: Trampoline,
+pub struct VTableOnce {
+    call_once: *const (),
     drop: unsafe fn(*mut u8),
 }
 
+// SAFETY: `VTableOnce` holds only static function pointers (`call_once` and `drop`), which are
+// immutable code addresses safe to share across threads.
+unsafe impl Sync for VTableOnce {}
+
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug)]
-pub struct VTable<Trampoline> {
-    call: Trampoline,
-    once: VTableOnce<Trampoline>,
+pub struct VTable {
+    call: *const (),
+    once: VTableOnce,
 }
 
-trait HasDrop: Copy {
+// SAFETY: `VTable` holds only static function pointers (`call`, `call_once`, and `drop`), which
+// are immutable code addresses safe to share across threads.
+unsafe impl Sync for VTable {}
+
+trait HasDrop: Sync + 'static {
     fn drop_fn(&self) -> unsafe fn(*mut u8);
 }
 
-impl<Trampoline: Copy> HasDrop for VTableOnce<Trampoline> {
+impl HasDrop for VTableOnce {
     #[inline]
     fn drop_fn(&self) -> unsafe fn(*mut u8) {
         self.drop
     }
 }
 
-impl<Trampoline: Copy> HasDrop for VTable<Trampoline> {
+impl HasDrop for VTable {
     #[inline]
     fn drop_fn(&self) -> unsafe fn(*mut u8) {
         self.once.drop
@@ -138,43 +220,46 @@ impl<Trampoline: Copy> HasDrop for VTable<Trampoline> {
 ///
 /// # Safety
 ///
-/// - `VTABLE_ONCE.call_once` must be a valid trampoline for `Self` that, given a pointer to a
-///   properly aligned and initialized `Self` with exclusive ownership, moves `Self` out of the
-///   pointer and invokes it once.
+/// - `VTABLE_ONCE.call_once` must be a valid erased trampoline function pointer for `Self` and
+///   `Sig` that, when transmuted back to `Sig`'s trampoline type and given a pointer to a properly
+///   aligned and initialized `Self` with exclusive ownership, moves `Self` out of the pointer and
+///   invokes it once.
 /// - `VTABLE_ONCE.drop` must be a valid drop function for `Self` that, given a pointer to a
 ///   properly aligned and initialized `Self` with exclusive access, drops `Self` in place (or is a
 ///   no-op if `!core::mem::needs_drop::<Self>()`).
 pub unsafe trait FnOnceWithSig<Sig: FnSig>: Sized + private::SealedWithSig<Sig> {
     #[doc(hidden)]
-    const VTABLE_ONCE: VTableOnce<Sig::Trampoline>;
+    const VTABLE_ONCE: &'static VTableOnce;
 }
 
 /// Trait implemented by closures that can be invoked mutably with signature `Sig`.
 ///
 /// # Safety
 ///
-/// - `VTABLE_MUT.call` must be a valid trampoline for `Self` that, given a pointer to a properly
+/// - `VTABLE_MUT.call` must be a valid erased trampoline function pointer for `Self` and `Sig`
+///   that, when transmuted back to `Sig`'s trampoline type and given a pointer to a properly
 ///   aligned and initialized `Self` with exclusive (`&mut Self`) access for the duration of the
 ///   call, invokes `Self` mutably without moving or dropping it.
 /// - `VTABLE_MUT.once` must satisfy the safety requirements of [`FnOnceWithSig::VTABLE_ONCE`] for
 ///   `Self`.
 pub unsafe trait FnMutWithSig<Sig: FnSig>: FnOnceWithSig<Sig> {
     #[doc(hidden)]
-    const VTABLE_MUT: VTable<Sig::Trampoline>;
+    const VTABLE_MUT: &'static VTable;
 }
 
 /// Trait implemented by closures that can be invoked by shared reference with signature `Sig`.
 ///
 /// # Safety
 ///
-/// - `VTABLE.call` must be a valid trampoline for `Self` that, given a pointer to a properly
-///   aligned and initialized `Self` with shared (`&Self`) access for the duration of the call,
-///   invokes `Self` by shared reference without mutating, moving, or dropping it.
+/// - `VTABLE.call` must be a valid erased trampoline function pointer for `Self` and `Sig` that,
+///   when transmuted back to `Sig`'s trampoline type and given a pointer to a properly aligned and
+///   initialized `Self` with shared (`&Self`) access for the duration of the call, invokes `Self`
+///   by shared reference without mutating, moving, or dropping it.
 /// - `VTABLE.once` must satisfy the safety requirements of [`FnOnceWithSig::VTABLE_ONCE`] for
 ///   `Self`.
 pub unsafe trait FnWithSig<Sig: FnSig>: FnMutWithSig<Sig> {
     #[doc(hidden)]
-    const VTABLE: VTable<Sig::Trampoline>;
+    const VTABLE: &'static VTable;
 }
 
 /// No-op drop function used for closure types `F` where `!core::mem::needs_drop::<F>()`.
@@ -221,14 +306,14 @@ const fn drop_fn_for<F>() -> unsafe fn(*mut u8) {
 ///   suppressing `RawInlineFn::drop` via `ManuallyDrop`.
 struct RawInlineFn<'a, const SIZE: usize, V: HasDrop, S> {
     storage: AlignedStorage<SIZE>,
-    vtable: V,
+    vtable: &'static V,
     _marker: PhantomData<(&'a (), S)>,
 }
 
 // SAFETY: By the type invariants of `RawInlineFn`, `S: ThreadSafety<F>` holds for the stored
 // closure `F`. When `S: Send` (`SendOnly` or `SendSync`), `ThreadSafety<F>` guarantees `F: Send`,
-// and `V: HasDrop` consists only of plain function pointers, so moving `RawInlineFn` across
-// threads is sound.
+// and `vtable: &'static V` (`V: Sync`) is a shared reference to immutable static function pointers,
+// so moving `RawInlineFn` across threads is sound.
 unsafe impl<'a, const SIZE: usize, V: HasDrop, S: Send> Send for RawInlineFn<'a, SIZE, V, S> {}
 
 // SAFETY: By the type invariants of `RawInlineFn`, `S: ThreadSafety<F>` holds for the stored
@@ -259,7 +344,7 @@ impl<'a, const SIZE: usize, V: HasDrop, S> RawInlineFn<'a, SIZE, V, S> {
     /// [`FnOnceWithSig::VTABLE_ONCE`]), and any callable trampolines in `vtable` must be valid for
     /// `F` under the invariants of the enclosing wrapper.
     #[inline]
-    unsafe fn new<F>(closure: F, vtable: V) -> Self
+    unsafe fn new<F>(closure: F, vtable: &'static V) -> Self
     where
         F: 'a,
         S: ThreadSafety<F>,
@@ -330,7 +415,7 @@ impl<'a, const SIZE: usize, V: HasDrop, S> RawInlineFn<'a, SIZE, V, S> {
     #[inline]
     unsafe fn map_vtable_and_safety<NewV: HasDrop, NewS>(
         self,
-        new_vtable: NewV,
+        new_vtable: &'static NewV,
     ) -> RawInlineFn<'a, SIZE, NewV, NewS> {
         let this = ManuallyDrop::new(self);
         // SAFETY: `this` is wrapped in `ManuallyDrop`, suppressing `RawInlineFn::drop`.
@@ -357,10 +442,15 @@ impl<'a, const SIZE: usize, V: HasDrop, S> RawInlineFn<'a, SIZE, V, S> {
 /// - [`SendOnly`]: `Send + !Sync`, requires `F: Send`.
 /// - [`SendSync`]: `Send + Sync`, requires `F: Send + Sync`.
 pub struct InlineFn<'a, Sig: FnSig, const SIZE: usize = DEFAULT_INLINE_FN_SIZE, S = Local> {
-    // Safety Invariant: `raw.vtable` satisfies the safety contract of `FnWithSig::VTABLE` for the
-    // closure `F` stored in `raw.storage` (in particular, `raw.vtable.call` only accesses `F` by
-    // shared reference `&F` without mutating, moving, or dropping it).
-    raw: RawInlineFn<'a, SIZE, VTable<Sig::Trampoline>, S>,
+    // Safety Invariant: `raw.vtable` satisfies the safety contract of `FnWithSig<Sig>::VTABLE` for
+    // the closure `F` stored in `raw.storage` (in particular, `raw.vtable.call` is the erased
+    // trampoline for `F` and `Sig` that only accesses `F` by shared reference `&F` without
+    // mutating, moving, or dropping it).
+    raw: RawInlineFn<'a, SIZE, VTable, S>,
+    // Invariant in `Sig`: `raw.vtable.call` / `raw.vtable.once.call_once` are transmuted back to
+    // `Sig`'s trampoline function pointer type on call, so `Sig` must not undergo subtyping
+    // coercions.
+    _sig: PhantomData<fn(Sig) -> Sig>,
 }
 
 impl<'a, Sig: FnSig, const SIZE: usize, S> fmt::Debug for InlineFn<'a, Sig, SIZE, S> {
@@ -383,7 +473,7 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFn<'a, Sig, SIZE, S> {
     {
         // SAFETY: `F::VTABLE` is the vtable constructed for `F` by `FnWithSig<Sig>`, satisfying
         // both `RawInlineFn::new` and `InlineFn`'s invariant on `raw.vtable`.
-        Self { raw: unsafe { RawInlineFn::new(closure, F::VTABLE) } }
+        Self { raw: unsafe { RawInlineFn::new(closure, F::VTABLE) }, _sig: PhantomData }
     }
 
     /// Widens the inline storage capacity to `NEW_SIZE` bytes (`NEW_SIZE >= SIZE`).
@@ -391,16 +481,16 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFn<'a, Sig, SIZE, S> {
     /// Fails to compile if `NEW_SIZE < SIZE`.
     #[inline]
     pub fn resize<const NEW_SIZE: usize>(self) -> InlineFn<'a, Sig, NEW_SIZE, S> {
-        InlineFn { raw: self.raw.resize::<NEW_SIZE>() }
+        InlineFn { raw: self.raw.resize::<NEW_SIZE>(), _sig: PhantomData }
     }
 
     /// Relaxes the thread-safety marker of this `InlineFn` to [`Local`] (`!Send + !Sync`).
     #[inline]
     pub fn into_local(self) -> InlineFn<'a, Sig, SIZE, Local> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid `FnWithSig` vtable for the stored closure `F`,
-        // and `Local: ThreadSafety<F>` holds for all `F`.
-        InlineFn { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        // SAFETY: `vtable` is the existing valid `FnWithSig<Sig>` vtable for the stored closure
+        // `F`, and `Local: ThreadSafety<F>` holds for all `F`.
+        InlineFn { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 
     /// Converts this shared `InlineFn` into a mutable [`InlineFnMut`] with the same capacity and
@@ -408,20 +498,23 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFn<'a, Sig, SIZE, S> {
     #[inline]
     pub fn into_fn_mut(self) -> InlineFnMut<'a, Sig, SIZE, S> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid `FnWithSig` vtable for the stored closure `F`.
-        // Because `vtable.call` only accesses `F` via shared reference `&F`, it is also valid
+        // SAFETY: `vtable` is the existing valid `FnWithSig<Sig>` vtable for the stored closure
+        // `F`. Because `vtable.call` only accesses `F` via shared reference `&F`, it is also valid
         // when invoked with exclusive `&mut F` access in `InlineFnMut`, and `S` is unchanged.
-        InlineFnMut { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        InlineFnMut { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 
     /// Converts this shared `InlineFn` into a single-use [`InlineFnOnce`] with the same capacity
     /// and thread-safety bounds at zero cost.
     #[inline]
     pub fn into_fn_once(self) -> InlineFnOnce<'a, Sig, SIZE, S> {
-        let once_vtable = self.raw.vtable.once;
-        // SAFETY: `once_vtable` is the valid `VTableOnce` for the stored closure `F`, satisfying
-        // `InlineFnOnce`'s invariant on `raw.vtable`, and `S` is unchanged.
-        InlineFnOnce { raw: unsafe { self.raw.map_vtable_and_safety(once_vtable) } }
+        let once_vtable = &self.raw.vtable.once;
+        // SAFETY: `once_vtable` is the valid `VTableOnce` for the stored closure `F` and `Sig`,
+        // satisfying `InlineFnOnce`'s invariant on `raw.vtable`, and `S` is unchanged.
+        InlineFnOnce {
+            raw: unsafe { self.raw.map_vtable_and_safety(once_vtable) },
+            _sig: PhantomData,
+        }
     }
 }
 
@@ -461,9 +554,10 @@ impl<'a, Sig: FnSig, const SIZE: usize> InlineFn<'a, Sig, SIZE, SendSync> {
     #[inline]
     pub fn into_send(self) -> InlineFn<'a, Sig, SIZE, SendOnly> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid `FnWithSig` vtable for the stored closure `F`,
-        // and `SendSync: ThreadSafety<F>` implies `F: Send`, so `SendOnly: ThreadSafety<F>` holds.
-        InlineFn { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        // SAFETY: `vtable` is the existing valid `FnWithSig<Sig>` vtable for the stored closure
+        // `F`, and `SendSync: ThreadSafety<F>` implies `F: Send`, so `SendOnly: ThreadSafety<F>`
+        // holds.
+        InlineFn { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 }
 
@@ -490,11 +584,15 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> From<InlineFn<'a, Sig, SIZE, S>>
 /// Like [`InlineFn`], `InlineFnMut` stores the callable inline without heap allocation, but
 /// takes `&mut self` on invocation, allowing the wrapped closure to mutate its captured state.
 pub struct InlineFnMut<'a, Sig: FnSig, const SIZE: usize = DEFAULT_INLINE_FN_SIZE, S = Local> {
-    // Safety Invariant: `raw.vtable` satisfies the safety contract of `FnMutWithSig::VTABLE_MUT`
-    // (or `FnWithSig::VTABLE`) for the closure `F` stored in `raw.storage` (in particular,
-    // `raw.vtable.call` is valid to invoke when given exclusive `&mut F` access without moving or
-    // dropping `F`).
-    raw: RawInlineFn<'a, SIZE, VTable<Sig::Trampoline>, S>,
+    // Safety Invariant: `raw.vtable` satisfies the safety contract of
+    // `FnMutWithSig<Sig>::VTABLE_MUT` (or `FnWithSig<Sig>::VTABLE`) for the closure `F` stored in
+    // `raw.storage` (in particular, `raw.vtable.call` is the erased trampoline for `F` and `Sig`
+    // valid to invoke when given exclusive `&mut F` access without moving or dropping `F`).
+    raw: RawInlineFn<'a, SIZE, VTable, S>,
+    // Invariant in `Sig`: `raw.vtable.call` / `raw.vtable.once.call_once` are transmuted back to
+    // `Sig`'s trampoline function pointer type on call, so `Sig` must not undergo subtyping
+    // coercions.
+    _sig: PhantomData<fn(Sig) -> Sig>,
 }
 
 impl<'a, Sig: FnSig, const SIZE: usize, S> fmt::Debug for InlineFnMut<'a, Sig, SIZE, S> {
@@ -517,7 +615,7 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFnMut<'a, Sig, SIZE, S> {
     {
         // SAFETY: `F::VTABLE_MUT` is the vtable constructed for `F` by `FnMutWithSig<Sig>`,
         // satisfying both `RawInlineFn::new` and `InlineFnMut`'s invariant on `raw.vtable`.
-        Self { raw: unsafe { RawInlineFn::new(closure, F::VTABLE_MUT) } }
+        Self { raw: unsafe { RawInlineFn::new(closure, F::VTABLE_MUT) }, _sig: PhantomData }
     }
 
     /// Widens the inline storage capacity to `NEW_SIZE` bytes (`NEW_SIZE >= SIZE`).
@@ -525,26 +623,29 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFnMut<'a, Sig, SIZE, S> {
     /// Fails to compile if `NEW_SIZE < SIZE`.
     #[inline]
     pub fn resize<const NEW_SIZE: usize>(self) -> InlineFnMut<'a, Sig, NEW_SIZE, S> {
-        InlineFnMut { raw: self.raw.resize::<NEW_SIZE>() }
+        InlineFnMut { raw: self.raw.resize::<NEW_SIZE>(), _sig: PhantomData }
     }
 
     /// Relaxes the thread-safety marker of this `InlineFnMut` to [`Local`] (`!Send + !Sync`).
     #[inline]
     pub fn into_local(self) -> InlineFnMut<'a, Sig, SIZE, Local> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid vtable for the stored closure `F`, and
+        // SAFETY: `vtable` is the existing valid vtable for the stored closure `F` and `Sig`, and
         // `Local: ThreadSafety<F>` holds for all `F`.
-        InlineFnMut { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        InlineFnMut { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 
     /// Converts this mutable `InlineFnMut` into a single-use [`InlineFnOnce`] with the same
     /// capacity and thread-safety bounds at zero cost.
     #[inline]
     pub fn into_fn_once(self) -> InlineFnOnce<'a, Sig, SIZE, S> {
-        let once_vtable = self.raw.vtable.once;
-        // SAFETY: `once_vtable` is the valid `VTableOnce` for the stored closure `F`, satisfying
-        // `InlineFnOnce`'s invariant on `raw.vtable`, and `S` is unchanged.
-        InlineFnOnce { raw: unsafe { self.raw.map_vtable_and_safety(once_vtable) } }
+        let once_vtable = &self.raw.vtable.once;
+        // SAFETY: `once_vtable` is the valid `VTableOnce` for the stored closure `F` and `Sig`,
+        // satisfying `InlineFnOnce`'s invariant on `raw.vtable`, and `S` is unchanged.
+        InlineFnOnce {
+            raw: unsafe { self.raw.map_vtable_and_safety(once_vtable) },
+            _sig: PhantomData,
+        }
     }
 }
 
@@ -584,9 +685,9 @@ impl<'a, Sig: FnSig, const SIZE: usize> InlineFnMut<'a, Sig, SIZE, SendSync> {
     #[inline]
     pub fn into_send(self) -> InlineFnMut<'a, Sig, SIZE, SendOnly> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid vtable for the stored closure `F`, and
+        // SAFETY: `vtable` is the existing valid vtable for the stored closure `F` and `Sig`, and
         // `SendSync: ThreadSafety<F>` implies `F: Send`, so `SendOnly: ThreadSafety<F>` holds.
-        InlineFnMut { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        InlineFnMut { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 }
 
@@ -604,10 +705,14 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> From<InlineFnMut<'a, Sig, SIZE, S>>
 /// Similar to C++ `fit::inline_callback`, `InlineFnOnce` stores a single-use callable inline
 /// without heap allocation and consumes `self` upon invocation.
 pub struct InlineFnOnce<'a, Sig: FnSig, const SIZE: usize = DEFAULT_INLINE_FN_SIZE, S = Local> {
-    // Safety Invariant: `raw.vtable` satisfies the safety contract of `FnOnceWithSig::VTABLE_ONCE`
-    // for the closure `F` stored in `raw.storage` (in particular, `raw.vtable.call_once` is valid
-    // to invoke once when moving/consuming `F` with exclusive ownership).
-    raw: RawInlineFn<'a, SIZE, VTableOnce<Sig::Trampoline>, S>,
+    // Safety Invariant: `raw.vtable` satisfies the safety contract of
+    // `FnOnceWithSig<Sig>::VTABLE_ONCE` for the closure `F` stored in `raw.storage` (in
+    // particular, `raw.vtable.call_once` is the erased trampoline for `F` and `Sig` valid to
+    // invoke once when moving/consuming `F` with exclusive ownership).
+    raw: RawInlineFn<'a, SIZE, VTableOnce, S>,
+    // Invariant in `Sig`: `raw.vtable.call_once` is transmuted back to `Sig`'s trampoline
+    // function pointer type on call, so `Sig` must not undergo subtyping coercions.
+    _sig: PhantomData<fn(Sig) -> Sig>,
 }
 
 impl<'a, Sig: FnSig, const SIZE: usize, S> fmt::Debug for InlineFnOnce<'a, Sig, SIZE, S> {
@@ -630,7 +735,7 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFnOnce<'a, Sig, SIZE, S> {
     {
         // SAFETY: `F::VTABLE_ONCE` is the vtable constructed for `F` by `FnOnceWithSig<Sig>`,
         // satisfying both `RawInlineFn::new` and `InlineFnOnce`'s invariant on `raw.vtable`.
-        Self { raw: unsafe { RawInlineFn::new(closure, F::VTABLE_ONCE) } }
+        Self { raw: unsafe { RawInlineFn::new(closure, F::VTABLE_ONCE) }, _sig: PhantomData }
     }
 
     /// Widens the inline storage capacity to `NEW_SIZE` bytes (`NEW_SIZE >= SIZE`).
@@ -638,16 +743,16 @@ impl<'a, Sig: FnSig, const SIZE: usize, S> InlineFnOnce<'a, Sig, SIZE, S> {
     /// Fails to compile if `NEW_SIZE < SIZE`.
     #[inline]
     pub fn resize<const NEW_SIZE: usize>(self) -> InlineFnOnce<'a, Sig, NEW_SIZE, S> {
-        InlineFnOnce { raw: self.raw.resize::<NEW_SIZE>() }
+        InlineFnOnce { raw: self.raw.resize::<NEW_SIZE>(), _sig: PhantomData }
     }
 
     /// Relaxes the thread-safety marker of this `InlineFnOnce` to [`Local`] (`!Send + !Sync`).
     #[inline]
     pub fn into_local(self) -> InlineFnOnce<'a, Sig, SIZE, Local> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid `VTableOnce` for the stored closure `F`, and
-        // `Local: ThreadSafety<F>` holds for all `F`.
-        InlineFnOnce { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        // SAFETY: `vtable` is the existing valid `VTableOnce` for the stored closure `F` and
+        // `Sig`, and `Local: ThreadSafety<F>` holds for all `F`.
+        InlineFnOnce { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 }
 
@@ -687,9 +792,9 @@ impl<'a, Sig: FnSig, const SIZE: usize> InlineFnOnce<'a, Sig, SIZE, SendSync> {
     #[inline]
     pub fn into_send(self) -> InlineFnOnce<'a, Sig, SIZE, SendOnly> {
         let vtable = self.raw.vtable;
-        // SAFETY: `vtable` is the existing valid `VTableOnce` for the stored closure `F`, and
-        // `SendSync: ThreadSafety<F>` implies `F: Send`, so `SendOnly: ThreadSafety<F>` holds.
-        InlineFnOnce { raw: unsafe { self.raw.map_vtable_and_safety(vtable) } }
+        // SAFETY: `vtable` is the existing valid `VTableOnce` for the stored closure `F` and `Sig`,
+        // and `SendSync: ThreadSafety<F>` implies `F: Send`, so `SendOnly: ThreadSafety<F>` holds.
+        InlineFnOnce { raw: unsafe { self.raw.map_vtable_and_safety(vtable) }, _sig: PhantomData }
     }
 }
 
@@ -721,9 +826,7 @@ macro_rules! impl_inline_fn_for_signature {
     ($($arg:ident : $arg_ty:ident),*) => {
         impl<$($arg_ty,)* Ret> private::SealedSig for fn($($arg_ty),*) -> Ret {}
 
-        impl<$($arg_ty,)* Ret> FnSig for fn($($arg_ty),*) -> Ret {
-            type Trampoline = unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret;
-        }
+        impl<$($arg_ty,)* Ret> FnSig for fn($($arg_ty),*) -> Ret {}
 
         impl<$($arg_ty,)* Ret, F> private::SealedWithSig<fn($($arg_ty),*) -> Ret> for F
         where
@@ -731,13 +834,14 @@ macro_rules! impl_inline_fn_for_signature {
         {
         }
 
-        // SAFETY: `call_once_trampoline` moves `F` out of `state_ptr` and invokes it once, and
-        // `drop_fn_for::<F>()` drops `F` in place at `state_ptr`.
+        // SAFETY: `call_once_trampoline` moves `F` out of `state_ptr` and invokes it once with
+        // signature `unsafe fn(*mut u8, $arg_ty...) -> Ret`, and `drop_fn_for::<F>()` drops `F`
+        // in place at `state_ptr`.
         unsafe impl<$($arg_ty,)* Ret, F> FnOnceWithSig<fn($($arg_ty),*) -> Ret> for F
         where
             F: FnOnce($($arg_ty),*) -> Ret,
         {
-            const VTABLE_ONCE: VTableOnce<unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret> = {
+            const VTABLE_ONCE: &'static VTableOnce = {
                 /// Moves `F` out of `state_ptr` and invokes it once.
                 ///
                 /// # Safety
@@ -760,20 +864,23 @@ macro_rules! impl_inline_fn_for_signature {
                     closure($($arg),*)
                 }
 
-                VTableOnce {
-                    call_once: call_once_trampoline::<$($arg_ty,)* Ret, F>,
+                &VTableOnce {
+                    call_once: call_once_trampoline::<$($arg_ty,)* Ret, F>
+                        as unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret
+                        as *const (),
                     drop: drop_fn_for::<F>(),
                 }
             };
         }
 
-        // SAFETY: `call_mut_trampoline` invokes `F` via `&mut F`, and `VTABLE_ONCE` is `F`'s
-        // valid `FnOnceWithSig` vtable.
+        // SAFETY: `call_mut_trampoline` invokes `F` via `&mut F` with signature
+        // `unsafe fn(*mut u8, $arg_ty...) -> Ret`, and `VTABLE_ONCE` is `F`'s valid
+        // `FnOnceWithSig` vtable.
         unsafe impl<$($arg_ty,)* Ret, F> FnMutWithSig<fn($($arg_ty),*) -> Ret> for F
         where
             F: FnMut($($arg_ty),*) -> Ret,
         {
-            const VTABLE_MUT: VTable<unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret> = {
+            const VTABLE_MUT: &'static VTable = {
                 /// Invokes `F` at `state_ptr` by mutable reference `&mut F`.
                 ///
                 /// # Safety
@@ -793,20 +900,23 @@ macro_rules! impl_inline_fn_for_signature {
                     closure_mut($($arg),*)
                 }
 
-                VTable {
-                    call: call_mut_trampoline::<$($arg_ty,)* Ret, F>,
-                    once: <F as FnOnceWithSig<fn($($arg_ty),*) -> Ret>>::VTABLE_ONCE,
+                &VTable {
+                    call: call_mut_trampoline::<$($arg_ty,)* Ret, F>
+                        as unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret
+                        as *const (),
+                    once: *<F as FnOnceWithSig<fn($($arg_ty),*) -> Ret>>::VTABLE_ONCE,
                 }
             };
         }
 
-        // SAFETY: `call_trampoline` invokes `F` via `&F`, and `VTABLE_ONCE` is `F`'s valid
+        // SAFETY: `call_trampoline` invokes `F` via `&F` with signature
+        // `unsafe fn(*mut u8, $arg_ty...) -> Ret`, and `VTABLE_ONCE` is `F`'s valid
         // `FnOnceWithSig` vtable.
         unsafe impl<$($arg_ty,)* Ret, F> FnWithSig<fn($($arg_ty),*) -> Ret> for F
         where
             F: Fn($($arg_ty),*) -> Ret,
         {
-            const VTABLE: VTable<unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret> = {
+            const VTABLE: &'static VTable = {
                 /// Invokes `F` at `state_ptr` by shared reference `&F`.
                 ///
                 /// # Safety
@@ -826,9 +936,11 @@ macro_rules! impl_inline_fn_for_signature {
                     closure_ref($($arg),*)
                 }
 
-                VTable {
-                    call: call_trampoline::<$($arg_ty,)* Ret, F>,
-                    once: <F as FnOnceWithSig<fn($($arg_ty),*) -> Ret>>::VTABLE_ONCE,
+                &VTable {
+                    call: call_trampoline::<$($arg_ty,)* Ret, F>
+                        as unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret
+                        as *const (),
+                    once: *<F as FnOnceWithSig<fn($($arg_ty),*) -> Ret>>::VTABLE_ONCE,
                 }
             };
         }
@@ -841,9 +953,17 @@ macro_rules! impl_inline_fn_for_signature {
             #[allow(clippy::too_many_arguments)]
             pub fn call(&self, $($arg: $arg_ty),*) -> Ret {
                 // SAFETY: By the type invariants of `RawInlineFn` and `InlineFn`, `self.raw`
-                // holds a valid, initialized `F` matching `self.raw.vtable.call`, and `&self`
-                // guarantees shared access to `F` for the duration of the call.
-                unsafe { (self.raw.vtable.call)(self.raw.as_ptr() $(, $arg)*) }
+                // holds a valid, initialized `F` matching `self.raw.vtable.call`,
+                // `self.raw.vtable.call` was erased from an `unsafe fn(*mut u8, ...) -> Ret`
+                // trampoline for this exact signature, and `&self` guarantees shared access to `F`
+                // for the duration of the call.
+                unsafe {
+                    let call = core::mem::transmute::<
+                        *const (),
+                        unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret,
+                    >(self.raw.vtable.call);
+                    call(self.raw.as_ptr() $(, $arg)*)
+                }
             }
         }
 
@@ -855,9 +975,17 @@ macro_rules! impl_inline_fn_for_signature {
             #[allow(clippy::too_many_arguments)]
             pub fn call(&mut self, $($arg: $arg_ty),*) -> Ret {
                 // SAFETY: By the type invariants of `RawInlineFn` and `InlineFnMut`, `self.raw`
-                // holds a valid, initialized `F` matching `self.raw.vtable.call`, and `&mut self`
-                // guarantees exclusive access to `F` for the duration of the call.
-                unsafe { (self.raw.vtable.call)(self.raw.as_ptr() $(, $arg)*) }
+                // holds a valid, initialized `F` matching `self.raw.vtable.call`,
+                // `self.raw.vtable.call` was erased from an `unsafe fn(*mut u8, ...) -> Ret`
+                // trampoline for this exact signature, and `&mut self` guarantees exclusive access
+                // to `F` for the duration of the call.
+                unsafe {
+                    let call = core::mem::transmute::<
+                        *const (),
+                        unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret,
+                    >(self.raw.vtable.call);
+                    call(self.raw.as_ptr() $(, $arg)*)
+                }
             }
         }
 
@@ -870,10 +998,244 @@ macro_rules! impl_inline_fn_for_signature {
             pub fn call(self, $($arg: $arg_ty),*) -> Ret {
                 let raw = ManuallyDrop::new(self.raw);
                 // SAFETY: By the type invariants of `RawInlineFn` and `InlineFnOnce`, `raw` holds
-                // a valid, initialized `F` matching `raw.vtable.call_once`. Wrapping `self.raw` in
+                // a valid, initialized `F` matching `raw.vtable.call_once`, and
+                // `raw.vtable.call_once` was erased from an `unsafe fn(*mut u8, ...) -> Ret`
+                // trampoline for this exact signature. Wrapping `self.raw` in `ManuallyDrop`
+                // suppresses `RawInlineFn::drop` so `F` is moved and consumed exactly once by
+                // `call_once`.
+                unsafe {
+                    let call_once = core::mem::transmute::<
+                        *const (),
+                        unsafe fn(*mut u8 $(, $arg_ty)*) -> Ret,
+                    >(raw.vtable.call_once);
+                    call_once(raw.as_ptr() $(, $arg)*)
+                }
+            }
+        }
+    };
+}
+
+macro_rules! impl_inline_fn_for_hrtb_signature {
+    ($($lt:lifetime => $arg:ident : $arg_ty:ident),+) => {
+        impl<$($arg_ty: FnArg,)+ Ret> private::SealedSig for Hrtb<fn($($arg_ty),+) -> Ret> {}
+
+        impl<$($arg_ty: FnArg,)+ Ret> FnSig for Hrtb<fn($($arg_ty),+) -> Ret> {}
+
+        impl<$($arg_ty: FnArg,)+ Ret, F>
+            private::SealedWithSig<Hrtb<fn($($arg_ty),+) -> Ret>> for F
+        where
+            F: for<$($lt),+> FnOnce($($arg_ty::Target<$lt>),+) -> Ret,
+        {
+        }
+
+        // SAFETY: `Helper::call_once` moves `F` out of `state_ptr` and invokes it once with
+        // signature `for<$lt...> unsafe fn(*mut u8, $arg_ty::Target<$lt>...) -> Ret`, and
+        // `drop_fn_for::<F>()` drops `F` in place at `state_ptr`.
+        unsafe impl<$($arg_ty: FnArg,)+ Ret, F>
+            FnOnceWithSig<Hrtb<fn($($arg_ty),+) -> Ret>> for F
+        where
+            F: for<$($lt),+> FnOnce($($arg_ty::Target<$lt>),+) -> Ret,
+        {
+            const VTABLE_ONCE: &'static VTableOnce = {
+                struct Helper<$($arg_ty: FnArg,)+ Ret, F>(
+                    PhantomData<(*const Ret, F $(, *const $arg_ty)+)>,
+                );
+
+                impl<$($arg_ty: FnArg,)+ Ret, F> Helper<$($arg_ty,)+ Ret, F>
+                where
+                    F: for<$($lt),+> FnOnce($($arg_ty::Target<$lt>),+) -> Ret,
+                {
+                    /// Moves `F` out of `state_ptr` and invokes it once.
+                    ///
+                    /// # Safety
+                    ///
+                    /// - `state_ptr` must be non-null, properly aligned for `F`, and valid for
+                    ///   reads of `F`.
+                    /// - `state_ptr` must point to a valid, initialized instance of `F` with
+                    ///   exclusive ownership.
+                    /// - Ownership of `F` is consumed by this call; the value at `state_ptr` must
+                    ///   not be accessed or dropped again after this call.
+                    #[allow(clippy::too_many_arguments)]
+                    unsafe fn call_once<$($lt),+>(
+                        state_ptr: *mut u8,
+                        $($arg: $arg_ty::Target<$lt>),+
+                    ) -> Ret {
+                        // SAFETY: The caller guarantees `state_ptr` points to a valid, properly
+                        // aligned, initialized `F` and transfers ownership of `F` to this call so
+                        // it is moved and consumed exactly once.
+                        let closure = unsafe { ptr::read(state_ptr.cast::<F>()) };
+                        closure($($arg),+)
+                    }
+                }
+
+                &VTableOnce {
+                    call_once: Helper::<$($arg_ty,)+ Ret, F>::call_once
+                        as for<$($lt),+> unsafe fn(*mut u8 $(, $arg_ty::Target<$lt>)+) -> Ret
+                        as *const (),
+                    drop: drop_fn_for::<F>(),
+                }
+            };
+        }
+
+        // SAFETY: `Helper::call_mut` invokes `F` via `&mut F` with signature
+        // `for<$lt...> unsafe fn(*mut u8, $arg_ty::Target<$lt>...) -> Ret`, and `VTABLE_ONCE` is
+        // `F`'s valid `FnOnceWithSig` vtable.
+        unsafe impl<$($arg_ty: FnArg,)+ Ret, F>
+            FnMutWithSig<Hrtb<fn($($arg_ty),+) -> Ret>> for F
+        where
+            F: for<$($lt),+> FnMut($($arg_ty::Target<$lt>),+) -> Ret,
+        {
+            const VTABLE_MUT: &'static VTable = {
+                struct Helper<$($arg_ty: FnArg,)+ Ret, F>(
+                    PhantomData<(*const Ret, F $(, *const $arg_ty)+)>,
+                );
+
+                impl<$($arg_ty: FnArg,)+ Ret, F> Helper<$($arg_ty,)+ Ret, F>
+                where
+                    F: for<$($lt),+> FnMut($($arg_ty::Target<$lt>),+) -> Ret,
+                {
+                    /// Invokes `F` at `state_ptr` by mutable reference `&mut F`.
+                    ///
+                    /// # Safety
+                    ///
+                    /// - `state_ptr` must be non-null, properly aligned for `F`, and valid for
+                    ///   reads and writes of `F`.
+                    /// - `state_ptr` must point to a valid, initialized instance of `F` with
+                    ///   exclusive (`&mut F`) access for the duration of this call.
+                    #[allow(clippy::too_many_arguments)]
+                    unsafe fn call_mut<$($lt),+>(
+                        state_ptr: *mut u8,
+                        $($arg: $arg_ty::Target<$lt>),+
+                    ) -> Ret {
+                        // SAFETY: The caller guarantees `state_ptr` points to a valid, properly
+                        // aligned, initialized `F` with exclusive access for the duration of the
+                        // call.
+                        let closure_mut = unsafe { &mut *state_ptr.cast::<F>() };
+                        closure_mut($($arg),+)
+                    }
+                }
+
+                &VTable {
+                    call: Helper::<$($arg_ty,)+ Ret, F>::call_mut
+                        as for<$($lt),+> unsafe fn(*mut u8 $(, $arg_ty::Target<$lt>)+) -> Ret
+                        as *const (),
+                    once: *<F as FnOnceWithSig<Hrtb<fn($($arg_ty),+) -> Ret>>>::VTABLE_ONCE,
+                }
+            };
+        }
+
+        // SAFETY: `Helper::call` invokes `F` via `&F` with signature
+        // `for<$lt...> unsafe fn(*mut u8, $arg_ty::Target<$lt>...) -> Ret`, and `VTABLE_ONCE` is
+        // `F`'s valid `FnOnceWithSig` vtable.
+        unsafe impl<$($arg_ty: FnArg,)+ Ret, F>
+            FnWithSig<Hrtb<fn($($arg_ty),+) -> Ret>> for F
+        where
+            F: for<$($lt),+> Fn($($arg_ty::Target<$lt>),+) -> Ret,
+        {
+            const VTABLE: &'static VTable = {
+                struct Helper<$($arg_ty: FnArg,)+ Ret, F>(
+                    PhantomData<(*const Ret, F $(, *const $arg_ty)+)>,
+                );
+
+                impl<$($arg_ty: FnArg,)+ Ret, F> Helper<$($arg_ty,)+ Ret, F>
+                where
+                    F: for<$($lt),+> Fn($($arg_ty::Target<$lt>),+) -> Ret,
+                {
+                    /// Invokes `F` at `state_ptr` by shared reference `&F`.
+                    ///
+                    /// # Safety
+                    ///
+                    /// - `state_ptr` must be non-null, properly aligned for `F`, and valid for
+                    ///   reads of `F`.
+                    /// - `state_ptr` must point to a valid, initialized instance of `F` with
+                    ///   shared (`&F`) access (no concurrent mutable access) for the duration of
+                    ///   this call.
+                    #[allow(clippy::too_many_arguments)]
+                    unsafe fn call<$($lt),+>(
+                        state_ptr: *mut u8,
+                        $($arg: $arg_ty::Target<$lt>),+
+                    ) -> Ret {
+                        // SAFETY: The caller guarantees `state_ptr` points to a valid, properly
+                        // aligned, initialized `F` with shared access for the duration of the call.
+                        let closure_ref = unsafe { &*state_ptr.cast::<F>() };
+                        closure_ref($($arg),+)
+                    }
+                }
+
+                &VTable {
+                    call: Helper::<$($arg_ty,)+ Ret, F>::call
+                        as for<$($lt),+> unsafe fn(*mut u8 $(, $arg_ty::Target<$lt>)+) -> Ret
+                        as *const (),
+                    once: *<F as FnOnceWithSig<Hrtb<fn($($arg_ty),+) -> Ret>>>::VTABLE_ONCE,
+                }
+            };
+        }
+
+        impl<'a, $($arg_ty: FnArg,)+ Ret, const SIZE: usize, S>
+            InlineFn<'a, Hrtb<fn($($arg_ty),+) -> Ret>, SIZE, S>
+        {
+            /// Invokes the underlying closure with the provided arguments.
+            #[inline]
+            #[allow(clippy::too_many_arguments)]
+            pub fn call<$($lt),+>(&self, $($arg: $arg_ty::Target<$lt>),+) -> Ret {
+                // SAFETY: By the type invariants of `RawInlineFn` and `InlineFn`, `self.raw`
+                // holds a valid, initialized `F` matching `self.raw.vtable.call`,
+                // `self.raw.vtable.call` was erased from a higher-ranked trampoline valid for all
+                // call-site lifetimes of this exact signature, and `&self` guarantees shared
+                // access to `F` for the duration of the call.
+                unsafe {
+                    let call = core::mem::transmute::<
+                        *const (),
+                        unsafe fn(*mut u8 $(, $arg_ty::Target<$lt>)+) -> Ret,
+                    >(self.raw.vtable.call);
+                    call(self.raw.as_ptr() $(, $arg)+)
+                }
+            }
+        }
+
+        impl<'a, $($arg_ty: FnArg,)+ Ret, const SIZE: usize, S>
+            InlineFnMut<'a, Hrtb<fn($($arg_ty),+) -> Ret>, SIZE, S>
+        {
+            /// Invokes the underlying mutable closure with the provided arguments.
+            #[inline]
+            #[allow(clippy::too_many_arguments)]
+            pub fn call<$($lt),+>(&mut self, $($arg: $arg_ty::Target<$lt>),+) -> Ret {
+                // SAFETY: By the type invariants of `RawInlineFn` and `InlineFnMut`, `self.raw`
+                // holds a valid, initialized `F` matching `self.raw.vtable.call`,
+                // `self.raw.vtable.call` was erased from a higher-ranked trampoline valid for all
+                // call-site lifetimes of this exact signature, and `&mut self` guarantees exclusive
+                // access to `F` for the duration of the call.
+                unsafe {
+                    let call = core::mem::transmute::<
+                        *const (),
+                        unsafe fn(*mut u8 $(, $arg_ty::Target<$lt>)+) -> Ret,
+                    >(self.raw.vtable.call);
+                    call(self.raw.as_ptr() $(, $arg)+)
+                }
+            }
+        }
+
+        impl<'a, $($arg_ty: FnArg,)+ Ret, const SIZE: usize, S>
+            InlineFnOnce<'a, Hrtb<fn($($arg_ty),+) -> Ret>, SIZE, S>
+        {
+            /// Consumes `self` and invokes the underlying closure once.
+            #[inline]
+            #[allow(clippy::too_many_arguments)]
+            pub fn call<$($lt),+>(self, $($arg: $arg_ty::Target<$lt>),+) -> Ret {
+                let raw = ManuallyDrop::new(self.raw);
+                // SAFETY: By the type invariants of `RawInlineFn` and `InlineFnOnce`, `raw` holds
+                // a valid, initialized `F` matching `raw.vtable.call_once`, and
+                // `raw.vtable.call_once` was erased from a higher-ranked trampoline valid for all
+                // call-site lifetimes of this exact signature. Wrapping `self.raw` in
                 // `ManuallyDrop` suppresses `RawInlineFn::drop` so `F` is moved and consumed
                 // exactly once by `call_once`.
-                unsafe { (raw.vtable.call_once)(raw.as_ptr() $(, $arg)*) }
+                unsafe {
+                    let call_once = core::mem::transmute::<
+                        *const (),
+                        unsafe fn(*mut u8 $(, $arg_ty::Target<$lt>)+) -> Ret,
+                    >(raw.vtable.call_once);
+                    call_once(raw.as_ptr() $(, $arg)+)
+                }
             }
         }
     };
@@ -888,6 +1250,45 @@ impl_inline_fn_for_signature!(a1: A1, a2: A2, a3: A3, a4: A4, a5: A5);
 impl_inline_fn_for_signature!(a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6);
 impl_inline_fn_for_signature!(a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7);
 impl_inline_fn_for_signature!(a1: A1, a2: A2, a3: A3, a4: A4, a5: A5, a6: A6, a7: A7, a8: A8);
+
+impl_inline_fn_for_hrtb_signature!('r1 => a1: A1);
+impl_inline_fn_for_hrtb_signature!('r1 => a1: A1, 'r2 => a2: A2);
+impl_inline_fn_for_hrtb_signature!('r1 => a1: A1, 'r2 => a2: A2, 'r3 => a3: A3);
+impl_inline_fn_for_hrtb_signature!('r1 => a1: A1, 'r2 => a2: A2, 'r3 => a3: A3, 'r4 => a4: A4);
+impl_inline_fn_for_hrtb_signature!(
+    'r1 => a1: A1,
+    'r2 => a2: A2,
+    'r3 => a3: A3,
+    'r4 => a4: A4,
+    'r5 => a5: A5
+);
+impl_inline_fn_for_hrtb_signature!(
+    'r1 => a1: A1,
+    'r2 => a2: A2,
+    'r3 => a3: A3,
+    'r4 => a4: A4,
+    'r5 => a5: A5,
+    'r6 => a6: A6
+);
+impl_inline_fn_for_hrtb_signature!(
+    'r1 => a1: A1,
+    'r2 => a2: A2,
+    'r3 => a3: A3,
+    'r4 => a4: A4,
+    'r5 => a5: A5,
+    'r6 => a6: A6,
+    'r7 => a7: A7
+);
+impl_inline_fn_for_hrtb_signature!(
+    'r1 => a1: A1,
+    'r2 => a2: A2,
+    'r3 => a3: A3,
+    'r4 => a4: A4,
+    'r5 => a5: A5,
+    'r6 => a6: A6,
+    'r7 => a7: A7,
+    'r8 => a8: A8
+);
 
 #[cfg(test)]
 mod tests {
@@ -1285,10 +1686,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(buf.as_str(), "Local,SendOnly,SendSync");
+
+        // Verify `fmt::Debug` on `ValArg`, `RefArg`, `MutArg`, and `Hrtb` even when their type
+        // parameters do not implement `Debug`.
+        struct NoDebug;
+        let mut buf = Buf::new();
+        write!(
+            &mut buf,
+            "{:?},{:?},{:?},{:?}",
+            ValArg::<NoDebug>(PhantomData),
+            RefArg::<NoDebug>(PhantomData),
+            MutArg::<NoDebug>(PhantomData),
+            Hrtb::<fn(ValArg<NoDebug>)>(PhantomData),
+        )
+        .unwrap();
+        assert_eq!(buf.as_str(), "ValArg,RefArg,MutArg,Hrtb");
     }
 
     #[test]
-    fn test_option_niche_optimization() {
+    fn test_layout_and_option_niche_optimization() {
+        let ptr_size = core::mem::size_of::<usize>();
+        assert_eq!(core::mem::size_of::<InlineFn<'static, fn(), 0>>(), ptr_size);
+        assert_eq!(core::mem::size_of::<InlineFn<'static, fn(), 8>>(), 8 + ptr_size);
+        assert_eq!(core::mem::size_of::<InlineFnMut<'static, fn(), 16>>(), 16 + ptr_size);
+        assert_eq!(core::mem::size_of::<InlineFnOnce<'static, fn(), 16>>(), 16 + ptr_size);
         assert_eq!(
             core::mem::size_of::<Option<InlineFn<'static, fn()>>>(),
             core::mem::size_of::<InlineFn<'static, fn()>>()
@@ -1301,5 +1722,178 @@ mod tests {
             core::mem::size_of::<Option<InlineFnOnce<'static, fn()>>>(),
             core::mem::size_of::<InlineFnOnce<'static, fn()>>()
         );
+        assert_eq!(
+            core::mem::size_of::<
+                Option<SendInlineFnMut<'static, Hrtb<fn(RefArg<u32>, ValArg<u32>)>, 16>>,
+            >(),
+            16 + ptr_size
+        );
+    }
+
+    #[test]
+    fn test_hrtb_signatures() {
+        // 1-arg shared reference (including `?Sized` `str`)
+        let prefix_len = 2usize;
+        let f_str: InlineFn<'_, Hrtb<fn(RefArg<str>) -> usize>> =
+            InlineFn::new(|s: &str| s.len() + prefix_len);
+        {
+            let local = [b'a', b'b', b'c'];
+            let s = core::str::from_utf8(&local).unwrap();
+            assert_eq!(f_str.call(s), 5);
+        }
+        assert_eq!(f_str.call("hello"), 7);
+
+        // 1-arg mutable reference
+        let mut step = 1u32;
+        let mut f_mut_ref: InlineFnMut<'_, Hrtb<fn(MutArg<u32>)>> =
+            InlineFnMut::new(move |x: &mut u32| {
+                *x += step;
+                step += 1;
+            });
+        let mut val = 10u32;
+        f_mut_ref.call(&mut val);
+        assert_eq!(val, 11);
+        f_mut_ref.call(&mut val);
+        assert_eq!(val, 13);
+
+        // 2-arg `fn(&T, U)` with `SendInlineFnMut`, `resize`, and `into_fn_once`
+        let mut calls = 0u32;
+        let f_pair: SendInlineFnMut<'static, Hrtb<fn(RefArg<u32>, ValArg<u32>) -> u32>, 8> =
+            SendInlineFnMut::new(move |a: &u32, b: u32| {
+                calls += 1;
+                *a + b + calls
+            });
+        let mut f_pair = f_pair;
+        {
+            let short_lived = 10u32;
+            assert_eq!(f_pair.call(&short_lived, 5), 16);
+        }
+        let mut f_pair_wide: SendInlineFnMut<
+            'static,
+            Hrtb<fn(RefArg<u32>, ValArg<u32>) -> u32>,
+            16,
+        > = f_pair.resize::<16>();
+        {
+            let short_lived2 = 20u32;
+            assert_eq!(f_pair_wide.call(&short_lived2, 3), 25);
+        }
+        let f_pair_once: SendInlineFnOnce<'static, Hrtb<fn(RefArg<u32>, ValArg<u32>) -> u32>, 16> =
+            f_pair_wide.into_fn_once();
+        let short_lived3 = 30u32;
+        assert_eq!(f_pair_once.call(&short_lived3, 1), 34);
+
+        // 2-arg `fn(U, &T)`, `fn(&T, &U)`, and `fn(&mut T, &mut U)`
+        let f_second_ref: InlineFn<'static, Hrtb<fn(ValArg<u32>, RefArg<str>) -> usize>> =
+            InlineFn::new(|n: u32, s: &str| n as usize + s.len());
+        assert_eq!(f_second_ref.call(4, "abc"), 7);
+
+        let f_two_refs: InlineFn<'static, Hrtb<fn(RefArg<str>, RefArg<[u8]>) -> usize>> =
+            InlineFn::new(|a: &str, b: &[u8]| a.len() + b.len());
+        assert_eq!(f_two_refs.call("hi", &[1, 2, 3]), 5);
+
+        let f_two_muts: InlineFn<'static, Hrtb<fn(MutArg<u32>, MutArg<u32>)>> =
+            InlineFn::new(|a: &mut u32, b: &mut u32| core::mem::swap(a, b));
+        let (mut x, mut y) = (1u32, 2u32);
+        f_two_muts.call(&mut x, &mut y);
+        assert_eq!((x, y), (2, 1));
+
+        // 3-arg `fn(&T, U, V)` and `fn(&mut T, U, V)`
+        let f_three: InlineFn<'static, Hrtb<fn(RefArg<u32>, ValArg<u32>, ValArg<u32>) -> u32>> =
+            InlineFn::new(|a: &u32, b: u32, c: u32| *a + b + c);
+        assert_eq!(f_three.call(&1, 2, 3), 6);
+
+        let f_three_mut: InlineFn<'static, Hrtb<fn(MutArg<u32>, ValArg<u32>, ValArg<u32>)>> =
+            InlineFn::new(|a: &mut u32, b: u32, c: u32| *a += b + c);
+        let mut z = 10u32;
+        f_three_mut.call(&mut z, 4, 5);
+        assert_eq!(z, 19);
+
+        // Verify `Send + Sync` and `Drop` behavior for `Hrtb` signatures.
+        fn assert_send<T: Send>(_: &T) {}
+        fn assert_sync<T: Sync>(_: &T) {}
+
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        struct StaticDropGuard(u32);
+        impl Drop for StaticDropGuard {
+            fn drop(&mut self) {
+                DROPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        DROPS.store(0, Ordering::SeqCst);
+        {
+            let guard = StaticDropGuard(7);
+            let f_sync: SendSyncInlineFn<'static, Hrtb<fn(RefArg<u32>) -> u32>, 8> =
+                SendSyncInlineFn::new(move |x: &u32| *x + guard.0);
+            assert_send(&f_sync);
+            assert_sync(&f_sync);
+            assert_eq!(f_sync.call(&5), 12);
+            let mut f_mut = f_sync.into_send().into_fn_mut();
+            assert_send(&f_mut);
+            assert_eq!(f_mut.call(&6), 13);
+            assert_eq!(DROPS.load(Ordering::SeqCst), 0);
+        }
+        assert_eq!(DROPS.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_hrtb_non_static_val_arg_and_variance() {
+        // Non-`'static` borrowed value passed via `ValArg<&'a u32>` alongside a higher-ranked
+        // `RefArg<str>` parameter across `InlineFn`, `InlineFnMut`, and `InlineFnOnce`.
+        fn run_with_borrowed<'a>(base: &'a u32) -> (u32, u32, u32) {
+            let f: InlineFn<'_, Hrtb<fn(ValArg<&'a u32>, RefArg<str>) -> u32>> =
+                InlineFn::new(|v: &'a u32, s: &str| *v + s.len() as u32);
+            let r1 = {
+                let bytes = [b'x', b'y'];
+                let s = core::str::from_utf8(&bytes).unwrap();
+                f.call(base, s)
+            };
+
+            let mut acc = 0u32;
+            let mut f_mut: InlineFnMut<'_, Hrtb<fn(ValArg<&'a u32>, RefArg<str>) -> u32>> =
+                InlineFnMut::new(move |v: &'a u32, s: &str| {
+                    acc += *v + s.len() as u32;
+                    acc
+                });
+            let _ = f_mut.call(base, "a");
+            let r2 = {
+                let bytes = [b'b', b'c', b'd'];
+                let s = core::str::from_utf8(&bytes).unwrap();
+                f_mut.call(base, s)
+            };
+
+            let f_once: InlineFnOnce<'_, Hrtb<fn(ValArg<&'a u32>, RefArg<str>) -> u32>> =
+                InlineFnOnce::new(|v: &'a u32, s: &str| *v * 2 + s.len() as u32);
+            let r3 = {
+                let bytes = [b'z'];
+                let s = core::str::from_utf8(&bytes).unwrap();
+                f_once.call(base, s)
+            };
+
+            (r1, r2, r3)
+        }
+
+        let local = 10u32;
+        assert_eq!(run_with_borrowed(&local), (12, 24, 21));
+
+        // Compile-time checks verifying `ValArg` and `RefArg` are covariant in `T`, making
+        // `Hrtb<fn(ValArg<T>)>` and `Hrtb<fn(RefArg<T>)>` contravariant in `T`.
+        fn val_arg_covariant<'a>(x: ValArg<&'static u32>) -> ValArg<&'a u32> {
+            x
+        }
+        fn hrtb_val_arg_contravariant<'a>(
+            x: Hrtb<fn(ValArg<&'a u32>)>,
+        ) -> Hrtb<fn(ValArg<&'static u32>)> {
+            x
+        }
+        fn hrtb_ref_arg_contravariant(
+            x: Hrtb<fn(RefArg<fn(&'static u32)>)>,
+        ) -> Hrtb<fn(RefArg<for<'r> fn(&'r u32)>)> {
+            x
+        }
+
+        let _ = val_arg_covariant(ValArg(PhantomData));
+        let _ = hrtb_val_arg_contravariant(Hrtb(PhantomData));
+        let _ = hrtb_ref_arg_contravariant(Hrtb(PhantomData));
     }
 }

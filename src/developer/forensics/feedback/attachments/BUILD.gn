@@ -69,7 +69,7 @@ source_set("inspect") {
 
   public_deps = [
     ":attachments",
-    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
+    "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
     "//sdk/lib/async",
     "//sdk/lib/fit",
     "//sdk/lib/fit-promise",
@@ -97,7 +97,7 @@ source_set("kernel_log") {
 
   public_deps = [
     ":attachments",
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_hlcpp",
+    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
     "//sdk/lib/fit-promise",
     "//sdk/lib/sys/cpp",
     "//src/developer/forensics/utils/redact",
@@ -112,24 +112,6 @@ source_set("kernel_log") {
   ]
 }
 
-source_set("previous_boot_log") {
-  sources = [
-    "previous_boot_log.cc",
-    "previous_boot_log.h",
-  ]
-
-  public_deps = [
-    ":attachments",
-    "//sdk/lib/fit-promise",
-    "//sdk/lib/sys/cpp",
-  ]
-
-  deps = [
-    "//sdk/lib/syslog/cpp",
-    "//src/developer/forensics/feedback/attachments:file_backed_provider",
-  ]
-}
-
 source_set("previous_boot_inspect") {
   sources = [
     "previous_boot_inspect.cc",
@@ -138,7 +120,7 @@ source_set("previous_boot_inspect") {
 
   public_deps = [
     ":attachments",
-    "//sdk/fidl/fuchsia.diagnostics.persistence:fuchsia.diagnostics.persistence_hlcpp",
+    "//sdk/fidl/fuchsia.diagnostics.persistence:fuchsia.diagnostics.persistence_cpp",
     "//sdk/lib/async",
     "//sdk/lib/fit-promise",
     "//sdk/lib/sys/cpp",
@@ -150,9 +132,12 @@ source_set("previous_boot_inspect") {
   deps = [
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/fdio",
+    "//sdk/lib/fit",
     "//sdk/lib/syslog/cpp",
     "//src/developer/forensics/utils:errors",
+    "//src/developer/forensics/utils:storage_size",
     "//src/lib/files",
+    "//third_party/zlib",
   ]
 }
 

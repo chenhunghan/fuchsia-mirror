@@ -35,6 +35,10 @@ class CommandBufferSequencer {
   // monotonically-increasing.
   uint64_t latest_sequence_number() { return latest_sequence_number_; }
 
+  // Get the highest sequence number where its command buffer, and all command
+  // buffers for all previous sequence numbers, have finished execution.
+  uint64_t last_finished_sequence_number() const { return last_finished_sequence_number_; }
+
   void AddListener(CommandBufferSequencerListener* listener);
   void RemoveListener(CommandBufferSequencerListener* listener);
 

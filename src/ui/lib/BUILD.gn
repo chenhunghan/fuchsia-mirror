@@ -6,7 +6,6 @@ group("tests") {
   testonly = true
 
   deps = [
-    "debug_telemetry:tests",
     "diagnostic_overlay:tests",
     "escher:tests",
     "input-device-constants:tests",

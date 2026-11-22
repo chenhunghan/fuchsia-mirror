@@ -1,6 +1,7 @@
 // Copyright 2018 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+#include <fidl/fuchsia.hardware.mipicsi/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.platform.bus/cpp/driver/fidl.h>
 #include <fidl/fuchsia.hardware.platform.bus/cpp/fidl.h>
 #include <lib/ddk/debug.h>
@@ -254,10 +255,10 @@ zx_status_t Sherlock::CameraInit() {
   }
 
   auto imx227_sensor_mipicsi_spec = fuchsia_driver_framework::ParentSpec2{{
-      .bind_rules = std::vector{fdf::MakeAcceptBindRule(
-          bind_fuchsia::PROTOCOL, bind_fuchsia_camera::BIND_PROTOCOL_MIPICSI)},
-      .properties = {fdf::MakeProperty2(bind_fuchsia::PROTOCOL,
-                                        bind_fuchsia_camera::BIND_PROTOCOL_MIPICSI)},
+      .bind_rules = std::vector{fdf::MakeAcceptBindRule(bind_fuchsia::SERVICE,
+                                                        fuchsia_hardware_mipicsi::Service::Name)},
+      .properties = {fdf::MakeProperty2(bind_fuchsia::SERVICE,
+                                        fuchsia_hardware_mipicsi::Service::Name)},
   }};
 
   auto imx227_sensor_i2c_spec = fuchsia_driver_framework::ParentSpec2{{

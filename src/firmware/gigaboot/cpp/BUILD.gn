@@ -17,11 +17,11 @@ if (current_toolchain == default_toolchain) {
     zircon_toolchain_suite("kernel.efi_$cpu") {
       cpu = cpu
 
-      # TODO(https://fxbug.dev/460196031): Remove this x64 check when aarch64-uefi triple is supported.
-      if (cpu == "x64") {
-        os = "uefi"
-      } else {
+      # Clang has no UEFI target for riscv64, so keep the Windows triple there.
+      if (cpu == "riscv64") {
         os = "win"
+      } else {
+        os = "uefi"
       }
       environment = "kernel.efi"
       with_shared = false
@@ -216,19 +216,25 @@ if (is_efi_toolchain) {
 # Parameters
 #
 #   permanent_attributes_file (required)
-#     [path] path label to the permanent attributes file
+#     [path] Path to the permanent attributes file (`//...` or `/...`).
 #   gbl (optional)
-#     [path] path label to the GBL EFI app file. If provided, the generated image will be a
-#     gigaboot to gbl boot app. TODO(b/368647237): Removed once fully switched to GBL
+#     [path] Path to the GBL EFI app file (`//...` or `/...`). If non-empty,
+#     the generated image embeds and chainloads GBL.
+#     TODO(b/368647237): Remove once fully switched to GBL.
 #   stop_in_fastboot (optional)
-#     [bool] Whether the image is for installer use. If set to true, the GBL EFI app will always
-#     stops in fastboot mode on boot. The flag is ignored if `gbl` is not given.
+#     [bool] Whether the image is for installer use. If set to true, the GBL
+#     EFI app always stops in fastboot mode on boot. Ignored if `gbl` is empty.
 template("gigaboot_esp") {
   assert(defined(invoker.permanent_attributes_file))
 
   gbl = ""
   if (defined(invoker.gbl)) {
     gbl = invoker.gbl
+  }
+  if (gbl != "") {
+    assert(
+        string_replace("##$gbl", "##/", "") != "##$gbl",
+        "gigaboot_esp `gbl` must be a '//' source-relative or '/' system-absolute path: $gbl")
   }
 
   # Action to generate source file containing various blobs.
@@ -238,7 +244,7 @@ template("gigaboot_esp") {
     script = "//src/firmware/gigaboot/cpp/blob.py"
     _out_path = "$target_gen_dir/$target_name/blob.cc"
     args = [
-      rebase_path(invoker.permanent_attributes_file),
+      rebase_path(invoker.permanent_attributes_file, root_build_dir),
       rebase_path(_out_path, root_build_dir),
     ]
     inputs = [ invoker.permanent_attributes_file ]
@@ -288,11 +294,9 @@ template("gigaboot_esp") {
       "legacy_c_gigaboot",
       "//src/firmware/lib/zircon_boot:in_tree",
       "//src/lib/zbitl",
-      "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/libc",
       "//zircon/kernel/phys/boot-zbi",
-      "//zircon/kernel/phys/runtime",
       "//zircon/system/ulib/uart",
       "//zircon/third_party/ulib/cksum",
       gigaboot_backends,
@@ -353,9 +357,7 @@ template("gigaboot_esp") {
 
 gigaboot_esp("fuchsia") {
   permanent_attributes_file = gigaboot_eng_permanent_attributes
-  if (gigaboot_use_gbl) {
-    gbl = gigaboot_gbl_efi_app
-  }
+  gbl = gigaboot_gbl_efi_app
 }
 
 bazel_input_file("esp.bazel_input") {

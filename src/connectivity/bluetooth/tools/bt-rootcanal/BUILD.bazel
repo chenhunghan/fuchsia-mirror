@@ -2,9 +2,92 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-rootcanal-unittests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
 
 exports_files(
     ["meta/bt-rootcanal.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "bt-rootcanal",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth.pandora:fuchsia.bluetooth.pandora_rust",
+        "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "bt-rootcanal",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "bt-rootcanal",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/bt-rootcanal.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "bt-rootcanal",
+    components = [":component"],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    # Preserves the `bt_rootcanal_bin_test` GN output_name to avoid a generic
+    # `bin_test` binary name collision.
+    crate_name = "bt_rootcanal_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "bt-rootcanal-unittests",
+    unit_tests = [":bin_test"],
 )

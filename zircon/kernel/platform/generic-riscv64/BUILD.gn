@@ -23,9 +23,11 @@ kernel_rust_mod("generic-riscv64-rs") {
     "//src/lib/kprint",
     "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/zr",
+    "//zircon/kernel/lib/arch:arch-rs",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/init:init_rust",
+    "//zircon/kernel/phys/handoff:handoff-rs",
     "//zircon/kernel/phys/lib/memalloc:memalloc-rs",
     "//zircon/system/ulib/fbl/rust:fbl",
   ]

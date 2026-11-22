@@ -11,7 +11,7 @@ use crate::mm::{
 };
 use crate::security;
 use crate::syscalls::time::TimeSpecPtr;
-use crate::task::{CurrentTask, ProcessEntryRef};
+use crate::task::{CurrentTask, ProcessEntryRef, confirm_fs_syscall_trace_if};
 use crate::time::TargetTime;
 use crate::time::utc::estimate_boot_deadline_from_utc;
 use crate::vfs::buffers::{OutputBuffer, UserBuffersInputBuffer, UserBuffersOutputBuffer};
@@ -32,8 +32,8 @@ use starnix_uapi::{
     FUTEX_TRYLOCK_PI, FUTEX_UNLOCK_PI, FUTEX_WAIT, FUTEX_WAIT_BITSET, FUTEX_WAIT_REQUEUE_PI,
     FUTEX_WAKE, FUTEX_WAKE_BITSET, FUTEX_WAKE_OP, MAP_ANONYMOUS, MAP_DENYWRITE, MAP_FIXED,
     MAP_FIXED_NOREPLACE, MAP_GROWSDOWN, MAP_LOCKED, MAP_NORESERVE, MAP_POPULATE, MAP_PRIVATE,
-    MAP_SHARED, MAP_SHARED_VALIDATE, MAP_STACK, PROT_EXEC, errno, error, robust_list_head, tid_t,
-    uapi,
+    MAP_SHARED, MAP_SHARED_VALIDATE, MAP_STACK, MAP_TYPE, PROT_EXEC, errno, error,
+    robust_list_head, tid_t, uapi,
 };
 use zx;
 
@@ -101,6 +101,45 @@ pub fn do_mmap(
         errno!(EINVAL)
     })?;
 
+    let file = if flags & MAP_ANONYMOUS != 0 {
+        None
+    } else {
+        let file = current_task.get_file(fd)?;
+        confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
+        Some(file)
+    };
+
+    // With `READ_IMPLIES_EXEC`, `PROT_READ` implies `PROT_EXEC` (see personality(2)). Files that
+    // cannot be executed (e.g. on a `noexec` mount), or whose `mmap()` can't map them executable
+    // (e.g. binder or io_uring files), are still mapped, without `PROT_EXEC`.
+    if prot_flags.contains(ProtectionFlags::READ)
+        && read_implies_exec(current_task)
+        && file.as_ref().is_none_or(|file| file.can_exec() && file.ops().can_map_executable())
+    {
+        prot_flags |= ProtectionFlags::EXEC;
+    }
+
+    let map_type = flags & MAP_TYPE;
+    if !matches!(map_type, MAP_PRIVATE | MAP_SHARED | MAP_SHARED_VALIDATE) {
+        return error!(EINVAL);
+    }
+    // `MAP_SHARED_VALIDATE` is only accepted for file-backed mappings.
+    if map_type == MAP_SHARED_VALIDATE && file.is_none() {
+        return error!(EINVAL);
+    }
+    // `MAP_GROWSDOWN` is only allowed for private anonymous mappings. File-backed mappings with
+    // `MAP_GROWSDOWN` are rejected in `FileObject::mmap()`, after file access checks.
+    if flags & MAP_GROWSDOWN != 0 && file.is_none() && map_type != MAP_PRIVATE {
+        return error!(EINVAL);
+    }
+    if length == 0 {
+        return error!(EINVAL);
+    }
+    if offset % *PAGE_SIZE != 0 {
+        return error!(EINVAL);
+    }
+
+    // Unsupported flags are only reported once the other arguments have been validated.
     let valid_flags: u32 = get_valid_platform_mmap_flags()
         | MAP_PRIVATE
         | MAP_SHARED
@@ -115,34 +154,10 @@ pub fn do_mmap(
         | MAP_GROWSDOWN
         | MAP_LOCKED;
     if flags & !valid_flags != 0 {
-        if flags & MAP_SHARED_VALIDATE != 0 {
+        if map_type == MAP_SHARED_VALIDATE {
             return error!(EOPNOTSUPP);
         }
         track_stub!(TODO("https://fxbug.dev/322873638"), "mmap check flags", flags);
-        return error!(EINVAL);
-    }
-
-    let file = if flags & MAP_ANONYMOUS != 0 { None } else { Some(current_task.get_file(fd)?) };
-
-    // With `READ_IMPLIES_EXEC`, `PROT_READ` implies `PROT_EXEC` (see personality(2)). Files that
-    // cannot be executed (e.g. on a `noexec` mount), or whose `mmap()` can't map them executable
-    // (e.g. binder or io_uring files), are still mapped, without `PROT_EXEC`.
-    if prot_flags.contains(ProtectionFlags::READ)
-        && read_implies_exec(current_task)
-        && file.as_ref().is_none_or(|file| file.can_exec() && file.ops().can_map_executable())
-    {
-        prot_flags |= ProtectionFlags::EXEC;
-    }
-
-    if flags & (MAP_PRIVATE | MAP_SHARED) == 0
-        || flags & (MAP_PRIVATE | MAP_SHARED) == MAP_PRIVATE | MAP_SHARED
-    {
-        return error!(EINVAL);
-    }
-    if length == 0 {
-        return error!(EINVAL);
-    }
-    if offset % *PAGE_SIZE != 0 {
         return error!(EINVAL);
     }
 
@@ -152,9 +167,8 @@ pub fn do_mmap(
     let rlimit_as = current_task
         .thread_group()
         .get_rlimit(starnix_uapi::resource_limits::Resource::AS) as usize;
-    let current_usage: usize = current_task.mm()?.get_total_usage();
-
-    if current_usage.saturating_add(length_aligned) > rlimit_as {
+    let mm = current_task.mm()?;
+    if rlimit_as != usize::MAX && mm.get_total_usage().saturating_add(length_aligned) > rlimit_as {
         return error!(ENOMEM);
     }
 
@@ -893,7 +907,8 @@ mod tests {
     use crate::mm::memory::MemoryObject;
     use crate::testing::*;
     use starnix_uapi::errors::EEXIST;
-    use starnix_uapi::{MREMAP_FIXED, MREMAP_MAYMOVE, PROT_READ};
+    use starnix_uapi::resource_limits::Resource;
+    use starnix_uapi::{MREMAP_FIXED, MREMAP_MAYMOVE, PROT_NONE, PROT_READ};
 
     #[::fuchsia::test]
     async fn test_mmap_with_colliding_hint() {
@@ -969,6 +984,30 @@ mod tests {
                     panic!("mmap with fixed_noreplace collision failed: {result:?}");
                 }
             }
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_mmap_growsdown_requires_private_mapping() {
+        spawn_kernel_and_run(async |current_task| {
+            let page_size = *PAGE_SIZE as usize;
+            let mmap_anonymous = |flags| {
+                do_mmap(
+                    &current_task,
+                    UserAddress::default(),
+                    page_size,
+                    PROT_READ,
+                    flags | MAP_ANONYMOUS,
+                    FdNumber::from_raw(-1),
+                    0,
+                )
+            };
+
+            assert!(mmap_anonymous(MAP_PRIVATE | MAP_GROWSDOWN).is_ok());
+            assert_eq!(mmap_anonymous(MAP_SHARED | MAP_GROWSDOWN), error!(EINVAL));
+            assert_eq!(mmap_anonymous(MAP_SHARED_VALIDATE), error!(EINVAL));
+            assert_eq!(mmap_anonymous(MAP_SHARED_VALIDATE | MAP_GROWSDOWN), error!(EINVAL));
         })
         .await;
     }
@@ -1622,6 +1661,98 @@ mod tests {
                 ),
                 error!(ESRCH)
             );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_mmap_rlimit_as() {
+        spawn_kernel_and_run(async |current_task| {
+            let page_size = *PAGE_SIZE as usize;
+            let mmap_anonymous = |addr: UserAddress, length: usize, prot: u32, flags: u32| {
+                do_mmap(
+                    &current_task,
+                    addr,
+                    length,
+                    prot,
+                    MAP_PRIVATE | MAP_ANONYMOUS | flags,
+                    FdNumber::from_raw(-1),
+                    0,
+                )
+            };
+            let any_address = UserAddress::default();
+
+            // There is no limit by default.
+            assert_eq!(
+                current_task.thread_group().get_rlimit(Resource::AS),
+                uapi::RLIM_INFINITY as u64
+            );
+            assert!(mmap_anonymous(any_address, 64 * page_size, PROT_READ, 0).is_ok());
+
+            // Without a limit, mmap() doesn't lock the memory manager state to read the usage, so
+            // a call that fails after the RLIMIT_AS check doesn't lock it at all. When it did, this
+            // deadlocked (or tripped lockdep). `PROT_NONE` avoids the thread group lock that
+            // `PROT_READ` takes for `READ_IMPLIES_EXEC`.
+            {
+                let _state = current_task.mm().unwrap().state.write();
+                let unaligned_address = UserAddress::from((page_size + 1) as u64);
+                assert_eq!(
+                    mmap_anonymous(unaligned_address, page_size, PROT_NONE, MAP_FIXED),
+                    error!(EINVAL)
+                );
+            }
+
+            // With a limit, mappings that would make the address space exceed it fail.
+            let usage = current_task.mm().unwrap().get_total_usage();
+            current_task.thread_group().limits.lock().set(
+                Resource::AS,
+                uapi::rlimit {
+                    rlim_cur: (usage + 2 * page_size) as u64,
+                    rlim_max: uapi::RLIM_INFINITY as u64,
+                },
+            );
+            assert!(mmap_anonymous(any_address, page_size, PROT_READ, 0).is_ok());
+            assert_eq!(mmap_anonymous(any_address, 2 * page_size, PROT_READ, 0), error!(ENOMEM));
+            assert!(mmap_anonymous(any_address, page_size, PROT_READ, 0).is_ok());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_membarrier_private_expedited_registration() {
+        spawn_kernel_and_run(async |current_task| {
+            let membarrier = |task: &CurrentTask, cmd| sys_membarrier(task, cmd, 0, 0);
+            let memory = uapi::membarrier_cmd_MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+            let sync_core = uapi::membarrier_cmd_MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE;
+            let register_memory = uapi::membarrier_cmd_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+            let register_sync_core =
+                uapi::membarrier_cmd_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE;
+
+            // Private expedited barriers need a registration of the address space.
+            assert_eq!(membarrier(&current_task, memory), error!(EPERM));
+            assert_eq!(membarrier(&current_task, sync_core), error!(EPERM));
+
+            // Each kind of barrier has its own registration.
+            assert_eq!(membarrier(&current_task, register_memory), Ok(0));
+            assert_eq!(membarrier(&current_task, memory), Ok(0));
+            assert_eq!(membarrier(&current_task, sync_core), error!(EPERM));
+
+            // A forked address space inherits the registrations, but does not share them.
+            let child = current_task.clone_task_for_test(0, None);
+            assert_eq!(membarrier(&child, memory), Ok(0));
+            assert_eq!(membarrier(&child, sync_core), error!(EPERM));
+            assert_eq!(membarrier(&child, register_sync_core), Ok(0));
+            assert_eq!(membarrier(&child, sync_core), Ok(0));
+            assert_eq!(membarrier(&current_task, sync_core), error!(EPERM));
+
+            // A thread sharing the address space shares its registrations.
+            let thread = current_task.clone_task_for_test(
+                (starnix_uapi::CLONE_VM | starnix_uapi::CLONE_THREAD | starnix_uapi::CLONE_SIGHAND)
+                    as u64,
+                None,
+            );
+            assert_eq!(membarrier(&thread, register_sync_core), Ok(0));
+            assert_eq!(membarrier(&current_task, sync_core), Ok(0));
         })
         .await;
     }

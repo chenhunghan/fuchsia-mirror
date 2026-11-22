@@ -190,9 +190,9 @@ TEST_F(RegisterTest, InterruptEnable) {
   EXPECT_FALSE(
       InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_hibernate_exit_status_enable());
   EXPECT_FALSE(InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_power_mode_status_enable());
-  EXPECT_TRUE(InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_test_mode_status_enable());
+  EXPECT_FALSE(InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_test_mode_status_enable());
   EXPECT_TRUE(InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_error_enable());
-  EXPECT_TRUE(InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_dme_endpointreset());
+  EXPECT_FALSE(InterruptEnableReg::Get().ReadFrom(&dut_->GetMmio()).uic_dme_endpointreset());
   EXPECT_TRUE(InterruptEnableReg::Get()
                   .ReadFrom(&dut_->GetMmio())
                   .utp_task_management_request_completion_enable());

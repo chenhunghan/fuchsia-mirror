@@ -20,9 +20,11 @@ _MODULE_FILES = (
     Path("build/bazel_sdk/tests/MODULE.bazel"),
 )
 
-_BAZEL_VENDOR_DIR = Path("third_party/bazel_vendor/fuchsia_in_tree")
-_BAZEL_REGISTRY_DIR = Path(
-    "third_party/bazel_registries/bcr.bazel.build/modules"
+_STAGED_PATHS = (
+    *_MODULE_FILES,
+    Path("third_party/bazel_registries"),
+    Path("third_party/bazel_vendor"),
+    Path("tools/check-licenses/assets/readmes/third_party/bazel_vendor"),
 )
 
 _VALID_DEP_NAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
@@ -95,34 +97,25 @@ def _check_workspace_clean(fuchsia_dir: Path) -> tuple[bool, str]:
     return len(output) == 0, output
 
 
-def _get_vendor_dir(dep_name: str) -> Path:
-    """Find the vendored directory for dep_name under third_party/bazel_vendor/fuchsia_in_tree."""
-    for candidate_name in (f"{dep_name}+", dep_name):
-        candidate_path = _BAZEL_VENDOR_DIR / candidate_name
-        if (_FUCHSIA_DIR / candidate_path).is_dir():
-            return candidate_path
-    return _BAZEL_VENDOR_DIR / f"{dep_name}+"
-
-
-def _get_registry_dir(dep_name: str) -> Path:
-    """Find the registry directory for dep_name under BCR modules."""
-    return _BAZEL_REGISTRY_DIR / dep_name
-
-
 def _update_module_files(dep_name: str, new_version: str) -> bool:
-    """Update all in-tree MODULE.bazel files for dep_name to new_version.
+    """Update in-tree MODULE.bazel files for dep_name to new_version.
 
-    Returns True if all files were updated successfully, False otherwise.
+    Returns True if at least one file was updated, False otherwise.
     """
-    for rel_path in _MODULE_FILES:
-        module_path = _FUCHSIA_DIR / rel_path
-        if not _update_module_file(module_path, dep_name, new_version):
-            print(
-                f"Error: dependency {dep_name!r} not found in {rel_path}",
-                file=sys.stderr,
-            )
-            return False
+    updated_paths = tuple(
+        rel_path
+        for rel_path in _MODULE_FILES
+        if _update_module_file(_FUCHSIA_DIR / rel_path, dep_name, new_version)
+    )
+    for rel_path in updated_paths:
         print(f"Updated {dep_name} to {new_version} in {rel_path}")
+    if not updated_paths:
+        print(
+            f"Error: dependency {dep_name!r} not found in any of "
+            f"{[str(p) for p in _MODULE_FILES]}",
+            file=sys.stderr,
+        )
+        return False
     return True
 
 
@@ -136,18 +129,16 @@ def _run_fx_update_bazel_vendor_dir() -> int:
 
 
 def _commit_files(dep_name: str, new_version: str) -> int:
-    """Stage modified MODULE files and vendor/registry directories and commit them."""
-    files_to_add: list[str] = [str(rel_path) for rel_path in _MODULE_FILES]
-    registry_dir = _get_registry_dir(dep_name)
-    if (_FUCHSIA_DIR / registry_dir).exists():
-        files_to_add.append(str(registry_dir))
-    vendor_dir = _get_vendor_dir(dep_name)
-    if (_FUCHSIA_DIR / vendor_dir).exists():
-        files_to_add.append(str(vendor_dir))
+    """Stage modified MODULE, vendor, registry, and readme files and commit them."""
+    files_to_add = tuple(
+        str(rel_path)
+        for rel_path in _STAGED_PATHS
+        if (_FUCHSIA_DIR / rel_path).exists()
+    )
 
     print(f"\nStaging: {' '.join(files_to_add)}")
     git_add_res = subprocess.run(
-        ["git", "add", "--"] + files_to_add, cwd=_FUCHSIA_DIR
+        ["git", "add", "--", *files_to_add], cwd=_FUCHSIA_DIR
     )
     if git_add_res.returncode != 0:
         return git_add_res.returncode

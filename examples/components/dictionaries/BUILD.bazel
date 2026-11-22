@@ -96,7 +96,6 @@ fx_test_component(
 # Run with `fx test dictionary-examples`
 fx_package(
     name = "dictionary-examples",
-    package_name = "dictionary-examples",
     components = [":dynamic-dictionary-provider"],
     test_components = [":dynamic-dictionary-example"],
 )

@@ -9,6 +9,7 @@ allow_network: False
 ignore: "/third_party/golibs"
 ignore: "/third_party/rust_crates/vendor"
 ignore: "/third_party/PyMonsoon/src"
+ignore: "/third_party/bazel_vendor/no_workspace"
 ignore: "/build/bazel/fuchsia_idk/validation_data"
 vars: [
   {

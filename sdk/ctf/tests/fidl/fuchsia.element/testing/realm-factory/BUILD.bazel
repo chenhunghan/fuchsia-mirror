@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Verify whether bin should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "fuchsia-element-test-realm-factory",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/ctf/tests/fidl/fuchsia.element/testing/fidl:fuchsia.element.test_rust",
+        "//sdk/fidl/fuchsia.element:fuchsia.element_rust",
+        "//sdk/fidl/fuchsia.testing.harness:fuchsia.testing.harness_rust",
+        "//sdk/rust/zx-status",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-component-test",
+        "//src/testing/realm_proxy",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fuchsia-element-test-realm-factory",
+)
+
+fx_component_manifest(
+    name = "realm-factory_manifest",
+    testonly = True,
+    component_name = "fuchsia-element-test-realm-factory",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/testing/realm_proxy:service/meta/realm_proxy.shard",
+    ],
+    manifest = "meta/realm-factory.cml",
+)
+
+fx_component(
+    name = "realm-factory-component",
+    testonly = True,
+    compiled_manifest = ":realm-factory_manifest",
+    deps = [":bin_packaged"],
+)

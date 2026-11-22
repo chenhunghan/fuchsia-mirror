@@ -5,6 +5,7 @@
 #include "src/devices/block/drivers/nvme/queue-pair.h"
 
 #include <lib/driver/logging/cpp/logger.h>
+#include <zircon/assert.h>
 #include <zircon/errors.h>
 #include <zircon/syscalls.h>
 
@@ -15,6 +16,10 @@
 #include "src/devices/block/drivers/nvme/registers.h"
 
 namespace nvme {
+
+// The pinned page addresses of a transaction, including the PRP list, are stored in a single PRP
+// buffer page. The smallest supported page size is 4096 bytes.
+static_assert(QueuePair::kMaxPinnedPages <= 4096 / sizeof(zx_paddr_t));
 
 zx::result<std::unique_ptr<QueuePair>> QueuePair::Create(zx::unowned_bti bti, uint16_t queue_id,
                                                          uint32_t max_entries, CapabilityReg& caps,
@@ -101,17 +106,36 @@ zx_status_t QueuePair::CheckForNewCompletion(Completion** completion, IoCommand*
     if (io_cmd != nullptr) {
       *io_cmd = txn_data.io_cmd;
     }
-    if (txn_data.pmt.is_valid()) {
-      zx_status_t status = txn_data.pmt.unpin();
-      if (status != ZX_OK) {
-        fdf::error("Failed to unpin IO buffer: {}", zx_status_get_string(status));
-        return ZX_ERR_INTERNAL;
-      }
-    }
-    txn_data.ClearExceptPrp();
+    ReleaseTransaction(txn_data);
   }
 
   return ZX_OK;
+}
+
+void QueuePair::ReleaseTransaction(TransactionData& txn_data) {
+  if (txn_data.pmt.is_valid()) {
+    zx_status_t status = txn_data.pmt.unpin();
+    if (status != ZX_OK) {
+      // This does not affect the outcome of the transfer, so it must not prevent the transaction
+      // from being completed or its command ID from being reused.
+      fdf::error("Failed to unpin IO buffer: {}", zx_status_get_string(status));
+    }
+  }
+  txn_data.ClearExceptPrp();
+  --in_flight_count_;
+}
+
+void QueuePair::CancelAll(fit::function<void(IoCommand*)> on_cancel) {
+  for (TransactionData& txn_data : txns_) {
+    if (!txn_data.active) {
+      continue;
+    }
+    IoCommand* io_cmd = txn_data.io_cmd;
+    ReleaseTransaction(txn_data);
+    if (io_cmd != nullptr && on_cancel) {
+      on_cancel(io_cmd);
+    }
+  }
 }
 
 void QueuePair::RingCompletionDb() {
@@ -119,29 +143,32 @@ void QueuePair::RingCompletionDb() {
   completion_doorbell_.set_value(static_cast<uint32_t>(completion_.NextIndex())).WriteTo(&mmio_);
 }
 
-zx_status_t QueuePair::Submit(cpp20::span<uint8_t> submission_data,
-                              std::optional<zx::unowned_vmo> data_vmo, zx_off_t vmo_offset,
-                              size_t bytes, IoCommand* io_cmd) {
+zx::result<uint16_t> QueuePair::Submit(cpp20::span<uint8_t> submission_data,
+                                       std::optional<zx::unowned_vmo> data_vmo, zx_off_t vmo_offset,
+                                       size_t bytes, IoCommand* io_cmd) {
   if ((submission_.NextIndex() + 1) % submission_.entry_count() == sq_head_) {
     // No room. Try again later.
-    return ZX_ERR_SHOULD_WAIT;
+    return zx::error(ZX_ERR_SHOULD_WAIT);
   }
   if (submission_data.size() != sizeof(Submission)) {
-    return ZX_ERR_INVALID_ARGS;
+    return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
-  // Allocate a new submission
-  size_t index = submission_.NextIndex();
-  TransactionData& txn_data = txns_[index];
-  if (txn_data.active) {
-    // TODO(https://fxbug.dev/42053036): Consider decoupling the submission queue from the tracking
-    // of outstanding transactions. We tie a transaction's state to its submission queue slot, even
-    // if the submission entry has already been consumed by the controller.
-    return ZX_ERR_SHOULD_WAIT;
+  // Allocate a free transaction slot decoupled from the submission queue index so a single
+  // long-running command cannot block subsequent submissions when the submission ring wraps around.
+  std::optional<size_t> index;
+  for (size_t i = 0; i < txns_.size(); i++) {
+    size_t candidate = (submission_.NextIndex() + i) % txns_.size();
+    if (!txns_[candidate].active) {
+      index = candidate;
+      break;
+    }
   }
+  if (!index.has_value()) {
+    return zx::error(ZX_ERR_SHOULD_WAIT);
+  }
+  TransactionData& txn_data = txns_[*index];
   txn_data.ClearExceptPrp();
-  txn_data.io_cmd = io_cmd;
-  txn_data.data_vmo = data_vmo;
 
   // We only peek here so that if the transaction setup fails somewhere we can easily roll-back
   auto submission = static_cast<Submission*>(submission_.Peek());
@@ -150,33 +177,42 @@ zx_status_t QueuePair::Submit(cpp20::span<uint8_t> submission_data,
 
   // We do not support metadata.
   submission->metadata_pointer = 0;
-  submission->set_cid(static_cast<uint32_t>(index)).set_fused(0).set_data_transfer_mode(0);
+  submission->set_cid(static_cast<uint32_t>(*index)).set_fused(0).set_data_transfer_mode(0);
 
   if (data_vmo.has_value()) {
+    // Checking this up front also means that the page count calculation below cannot overflow.
+    if (bytes == 0 || bytes > kMaxTransferPages * kPageSize) {
+      fdf::error("Invalid transfer size {} (must be non-zero and at most {} bytes).", bytes,
+                 kMaxTransferPages * kPageSize);
+      return zx::error(ZX_ERR_INVALID_ARGS);
+    }
     // Page offset of first page of transfer
     const size_t page_offset = vmo_offset & (~kPageMask);
     // Byte offset into first page of transfer
     const size_t byte_offset = vmo_offset & kPageMask;
-    // Total pages mapped / touched
-    const size_t page_count = (byte_offset + bytes + kPageMask) >> kPageShift;
-    if (page_count > kMaxTransferPages) {
-      fdf::error("Did not expect a single transaction to transfer more than {} pages.",
-                 kMaxTransferPages);
-      return ZX_ERR_BAD_STATE;
+    // The offset portion of a PRP entry must be dword aligned. See NVM Express Base Specification
+    // 2.0 Section 4.1.1, "Physical Region Page Entry and List".
+    if ((byte_offset & 0x3) != 0) {
+      fdf::error("Data offset {} is not dword aligned.", vmo_offset);
+      return zx::error(ZX_ERR_INVALID_ARGS);
     }
+    // Total pages mapped / touched. A transfer of the maximum size that does not start on a page
+    // boundary touches kMaxPinnedPages pages.
+    const size_t page_count = (byte_offset + bytes + kPageMask) >> kPageShift;
+    ZX_DEBUG_ASSERT(page_count >= 1 && page_count <= kMaxPinnedPages);
 
     zx_paddr_t single_page;
     zx_paddr_t* page_list;
     if (io_cmd == nullptr) {
       if (page_count != 1) {
         fdf::error("Unexpected page count for admin command.");
-        return ZX_ERR_INVALID_ARGS;
+        return zx::error(ZX_ERR_INVALID_ARGS);
       }
       page_list = &single_page;
     } else {
       if (!txn_data.prp_buffer) {
         fdf::error("No PRP buffer was preallocated for this IO transaction.");
-        return ZX_ERR_BAD_STATE;
+        return zx::error(ZX_ERR_BAD_STATE);
       }
       page_list = static_cast<zx_paddr_t*>(txn_data.prp_buffer->virt());
     }
@@ -189,10 +225,10 @@ zx_status_t QueuePair::Submit(cpp20::span<uint8_t> submission_data,
                                    page_count << kPageShift, page_list, page_count, &txn_data.pmt);
     if (status != ZX_OK) {
       fdf::error("Failed to pin IO buffer: {}", zx_status_get_string(status));
-      return status;
+      return zx::error(status);
     }
 
-    fdf::trace("Submitting transaction #{} command {}: op={}, pages={}", index,
+    fdf::trace("Submitting transaction #{} command {}: op={}, pages={}", *index,
                static_cast<const void*>(io_cmd), options == ZX_BTI_PERM_WRITE ? "RD" : "WR",
                page_count);
 
@@ -207,11 +243,14 @@ zx_status_t QueuePair::Submit(cpp20::span<uint8_t> submission_data,
 
   // We used Peek() before, so advance the pointer, and mark the transaction as in-flight.
   submission_.Next();
+  txn_data.io_cmd = io_cmd;
+  txn_data.data_vmo = data_vmo;
   txn_data.active = true;
+  ++in_flight_count_;
 
   // Ring the doorbell.
   submission_doorbell_.set_value(static_cast<uint32_t>(submission_.NextIndex())).WriteTo(&mmio_);
-  return ZX_OK;
+  return zx::ok(static_cast<uint16_t>(*index));
 }
 
 zx_status_t QueuePair::PreparePrpList(std::unique_ptr<dma_buffer::PagedBuffer>& buf,

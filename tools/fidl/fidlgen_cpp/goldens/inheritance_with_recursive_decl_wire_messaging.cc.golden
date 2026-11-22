@@ -156,7 +156,7 @@ fidl::WireServer<::test_inheritancewithrecursivedecl::Parent>::Handler fidl::Wir
 
 ::fidl::internal::TransactionalRequest<::test_inheritancewithrecursivedecl::Parent::First>::TransactionalRequest(::fidl::ServerEnd<::test_inheritancewithrecursivedecl::Parent>&& request)
     : body(::test_inheritancewithrecursivedecl::wire::ParentFirstRequest{std::move(request)}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritancewithrecursivedecl::kParent_First_Ordinal, ::test_inheritancewithrecursivedecl::kParent_First_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritancewithrecursivedecl::kParent_First_Ordinal, ::test_inheritancewithrecursivedecl::kParent_First_DynamicFlags);
 }
 void ::fidl::internal::TransactionalRequest<::test_inheritancewithrecursivedecl::Parent::First>::_CloseHandles() {
   body._CloseHandles();
@@ -440,7 +440,7 @@ fidl::WireServer<::test_inheritancewithrecursivedecl::Child>::Handler fidl::Wire
 
 ::fidl::internal::TransactionalRequest<::test_inheritancewithrecursivedecl::Child::First>::TransactionalRequest(::fidl::ServerEnd<::test_inheritancewithrecursivedecl::Parent>&& request)
     : body(::test_inheritancewithrecursivedecl::wire::ParentFirstRequest{std::move(request)}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritancewithrecursivedecl::kChild_First_Ordinal, ::test_inheritancewithrecursivedecl::kChild_First_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritancewithrecursivedecl::kChild_First_Ordinal, ::test_inheritancewithrecursivedecl::kChild_First_DynamicFlags);
 }
 void ::fidl::internal::TransactionalRequest<::test_inheritancewithrecursivedecl::Child::First>::_CloseHandles() {
   body._CloseHandles();
@@ -470,7 +470,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_inheritancewithrecursivedecl::Child::Second>::TransactionalRequest(::fidl::ServerEnd<::test_inheritancewithrecursivedecl::Parent>&& request)
     : body(::test_inheritancewithrecursivedecl::wire::ChildSecondRequest{std::move(request)}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_inheritancewithrecursivedecl::kChild_Second_Ordinal, ::test_inheritancewithrecursivedecl::kChild_Second_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_inheritancewithrecursivedecl::kChild_Second_Ordinal, ::test_inheritancewithrecursivedecl::kChild_Second_DynamicFlags);
 }
 void ::fidl::internal::TransactionalRequest<::test_inheritancewithrecursivedecl::Child::Second>::_CloseHandles() {
   body._CloseHandles();

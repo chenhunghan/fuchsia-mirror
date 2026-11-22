@@ -32,7 +32,6 @@ fuchsia_rust_driver("dt-eval-driver-driver") {
 
 fuchsia_driver_component("dt-eval-driver-component") {
   testonly = true
-  info = "meta/dt-eval-driver-info.json"
   component_name = "dt-eval-driver"
   deps = [
     ":dt-eval-driver-bind",

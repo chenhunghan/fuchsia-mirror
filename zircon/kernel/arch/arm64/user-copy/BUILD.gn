@@ -8,7 +8,7 @@ import("//build/components.gni")
 import("//build/components/fuchsia_package.gni")
 import("//build/components/fuchsia_test_package.gni")
 import("//build/components/fuchsia_unittest_component.gni")
-import("//build/test.gni")
+import("//build/rust/rustc_test.gni")
 
 source_set("user-copy-asm") {
   visibility = [ ":*" ]
@@ -39,16 +39,27 @@ if (is_fuchsia) {
       extra_deps = invoker.deps
     }
 
-    test(test_target_name) {
+    source_set("${main_target_name}-asm") {
+      testonly = true
       visibility = [ ":*" ]
-      sources = [ "user-copy-tests.cc" ] + invoker.sources
-      defines = [ "ARM64_USERCOPY_FN=${main_target_name}" ]
+      sources = invoker.sources
       deps = [
                ":user-copy-asm",
-               "//src/lib/fxl/test:gtest_main",
-               "//third_party/googletest:gtest",
                "//zircon/kernel/lib/arch",
              ] + extra_deps
+    }
+
+    rustc_test(test_target_name) {
+      edition = "2024"
+      visibility = [ ":*" ]
+      source_root = "user_copy_tests.rs"
+      sources = [ "user_copy_tests.rs" ]
+      features = [ main_target_name ]
+      deps = [
+        ":${main_target_name}-asm",
+        "//sdk/rust/zx-types",
+        "//src/lib/zr",
+      ]
     }
 
     benchmark_name = "$target_name-bench"

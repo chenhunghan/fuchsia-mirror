@@ -433,7 +433,7 @@ class SensitiveUnion {
   SensitiveUnion(SensitiveUnion&&) = default;
   SensitiveUnion& operator=(SensitiveUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kField = 1,  // 0x1
   };
 
@@ -456,7 +456,7 @@ class SensitiveUnion {
   ::test_sensitive::wire::SensitiveUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kField = 1,  // 0x1
   };
@@ -476,7 +476,7 @@ class NonSensitiveUnion {
   NonSensitiveUnion(NonSensitiveUnion&&) = default;
   NonSensitiveUnion& operator=(NonSensitiveUnion&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSensitiveField = 1,        // 0x1
     kSensitiveStructField = 2,  // 0x2
   };
@@ -514,7 +514,7 @@ class NonSensitiveUnion {
   ::test_sensitive::wire::NonSensitiveUnion::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSensitiveField = 1,        // 0x1
     kSensitiveStructField = 2,  // 0x2

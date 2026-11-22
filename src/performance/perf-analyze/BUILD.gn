@@ -10,6 +10,7 @@ perf_analyze_sources = [
   "app_launch.py",
   "binder.py",
   "cpu.py",
+  "critical_path.py",
   "plugins.py",
   "query.py",
   "result_formatter.py",
@@ -82,9 +83,23 @@ if (is_host) {
     main_source = "app_launch_test.py"
     sources = [
       "app_launch.py",
+      "critical_path.py",
       "plugins.py",
     ]
+    libraries = [ "//src/performance/lib/trace_writing" ]
     deps = [ "//src/performance/lib/tp_shell" ]
+  }
+
+  python_host_test("critical_path_test") {
+    main_source = "critical_path_test.py"
+    sources = [
+      "critical_path.py",
+      "plugins.py",
+    ]
+    libraries = [ "//src/performance/lib/trace_writing" ]
+    deps = [ "//src/performance/lib/tp_shell" ]
+    data_sources = [ "test-data/sample_fxt.fxt" ]
+    data_package_name = "test_data"
   }
 } else {
   group("app_launch_test") {
@@ -100,6 +115,11 @@ if (is_host) {
   group("cpu_test") {
     testonly = true
     public_deps = [ ":cpu_test($host_toolchain)" ]
+  }
+
+  group("critical_path_test") {
+    testonly = true
+    public_deps = [ ":critical_path_test($host_toolchain)" ]
   }
 
   group("perf_analyze_test") {
@@ -124,6 +144,7 @@ group("tests") {
     ":app_launch_test",
     ":binder_test",
     ":cpu_test",
+    ":critical_path_test",
     ":perf_analyze_test",
     ":plugins_test",
     ":result_formatter_test",

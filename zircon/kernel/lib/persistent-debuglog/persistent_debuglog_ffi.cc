@@ -12,10 +12,6 @@ void persistent_dlog_set_location(void* vaddr, size_t len) {
   rust_persistent_dlog_set_location(vaddr, len);
 }
 
-void persistent_dlog_write(const ktl::string_view str) {
-  rust_persistent_dlog_write(str.data(), str.size());
-}
-
 void persistent_dlog_invalidate() { rust_persistent_dlog_invalidate(); }
 
 ktl::string_view persistent_dlog_get_recovered_log() {

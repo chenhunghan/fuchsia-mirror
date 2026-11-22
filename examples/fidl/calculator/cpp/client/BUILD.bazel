@@ -87,8 +87,5 @@ fx_cc_binary(
 fx_unittest_package(
     name = "calculator-client-cpp-parser-unittests",
     unit_tests = [":parser_unittests_bin"],
-    visibility = [
-        "//examples:__pkg__",
-        "//examples/fidl/calculator/cpp:__pkg__",
-    ],
+    visibility = ["//examples:__subpackages__"],
 )

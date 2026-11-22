@@ -44,7 +44,7 @@ struct LocalAbiTraits;
 // provided to do the bit-field extraction.
 
 template <typename T, typename... AnyOfThese>
-inline constexpr bool kIsAnyOf = (std::is_same_v<T, AnyOfThese> || ...);
+inline constexpr bool kIsAnyOf = (std::same_as<T, AnyOfThese> || ...);
 
 template <template <typename> typename Template>
 struct IsTemplateHelper {
@@ -322,9 +322,11 @@ struct Elf : private Layout<Class, Data> {
     }
 
     // This is the verbose version that uses the Diagnostics template API (see
-    // diagnostics.h) to report why it returns false when it does.
+    // diagnostics.h) to report why it returns false when it does.  If target
+    // is not std::nullopt, e_machine is also checked against *target.
     template <class Diagnostics>
-    constexpr bool Valid(Diagnostics& diagnostics) const {
+    constexpr bool Valid(Diagnostics& diagnostics,
+                         std::optional<ElfMachine> target = std::nullopt) const {
       using namespace std::literals::string_view_literals;
 
       // The diagnostics object might tell us to keep going after each error.
@@ -345,7 +347,8 @@ struct Elf : private Layout<Class, Data> {
              // decode the values meaningfully, so reporting mismatches is
              // redundant after mismatches in the single-byte values.
              valid && check(version == ElfVersion::kCurrent, "wrong e_version value"sv) &&
-             check(ehsize == sizeof(Ehdr), "wrong e_ehsize value"sv) && valid;
+             check(ehsize == sizeof(Ehdr), "wrong e_ehsize value"sv) &&
+             (!target || check(machine == *target, "wrong e_machine for architecture"sv)) && valid;
     }
 
     constexpr bool Loadable(std::optional<ElfMachine> target = ElfMachine::kNative) const {
@@ -359,12 +362,7 @@ struct Elf : private Layout<Class, Data> {
                             std::optional<ElfMachine> target = ElfMachine::kNative) const {
       using namespace std::literals::string_view_literals;
 
-      if (!Valid(diagnostics)) [[unlikely]] {
-        return false;
-      }
-
-      if (target && machine != target) [[unlikely]] {
-        diagnostics.FormatError("wrong e_machine for architecture"sv);
+      if (!Valid(diagnostics, target)) [[unlikely]] {
         return false;
       }
 
@@ -395,7 +393,13 @@ struct Elf : private Layout<Class, Data> {
 
     // phnum has this value to indicate the real number of phdrs is too large
     // to fit and is instead stored in shdr[0].info.
-    static inline const Half kPnXnum{0xffff};
+    static constexpr Half kPnXnum{0xffff};  // PN_XNUM
+
+    // shstrndx has this value to indicate the real section index is >=
+    // SHN_LORESERVE (0xff00) and is instead stored in shdr[0].link.
+    // (For shnum >= SHN_LORESERVE, shnum is 0 with a nonzero shoff and the
+    // real count is stored in shdr[0].size.)
+    static constexpr Half kShnXindex{0xffff};  // SHN_XINDEX
 
     // These together make up the traditional unsigned char e_ident[16].
     Word magic;

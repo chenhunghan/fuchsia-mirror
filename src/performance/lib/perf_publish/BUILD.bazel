@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/python:py_data_package.bzl", "py_data_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+py_data_package(
+    name = "data",
+    testonly = True,
+    srcs_map = {
+        "catapult_converter": "//src/testing/catapult_converter:converter_bin",
+    },
+)
+
+# GN python_library packages catapult_converter into the `perf_publish.data`
+# resource package via data_package_name, data_sources, and library_deps;
+# rules_python py_library has no data_package_name/data_sources attributes,
+# so Bazel stages `perf_publish.data` via `py_data_package` (ignored by
+# bazel2gn) while raw_attribute preserves GN attributes for remaining GN
+# consumers.
+# TODO(https://fxbug.dev/570694755): Verify whether perf_publish should use target_compatible_with (was not gated by if (is_host) in GN).
+# @bazel2gn:raw_attribute:library_deps = [ "//src/testing/catapult_converter:converter_bin" ]
+# @bazel2gn:raw_attribute:data_package_name = "data"
+# @bazel2gn:raw_attribute:data_sources = [ "${root_out_dir}/catapult_converter" ]
+py_library(
+    name = "perf_publish",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "device_types.py",
+        "metrics_allowlist.py",
+        "publish.py",
+        "summarize.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+    deps = [":data"],  # @bazel2gn:skip
+)

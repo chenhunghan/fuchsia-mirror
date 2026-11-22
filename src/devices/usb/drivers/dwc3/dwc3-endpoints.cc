@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/trace/event.h>
 
 #include "src/devices/usb/drivers/dwc3/dwc3-regs.h"
@@ -45,13 +46,16 @@ void Dwc3::EpSetConfig(Endpoint& ep, bool enable) {
 
 zx_status_t Dwc3::EpSetStall(Endpoint& ep, bool stall) {
   TRACE_DURATION("dwc3", "Dwc3::EpSetStall", "ep_num", ep.ep_num, "stall", stall);
+  ZX_DEBUG_ASSERT(ep.ep_num != kEp0In || !stall);
   if (!ep.enabled) {
     return ZX_ERR_BAD_STATE;
   }
 
   if (stall && !ep.stalled) {
     CmdEpSetStall(ep);
-  } else if (!stall && ep.stalled) {
+  } else if (!stall && ep.stalled && ep.ep_num > kEp0In) {
+    // DWC3 hardware clears control endpoint stalls automatically upon receiving the next SETUP
+    // token and forbids issuing DEPCSTALL to control endpoints.
     CmdEpClearStall(ep);
   }
 
@@ -70,9 +74,9 @@ void Dwc3::EpStartSingleTransfer(Endpoint& ep, TrbFifo& fifo, uint32_t type, zx_
   trb->ptr_high = static_cast<uint32_t>(buffer >> 32);
   trb->status = TRB_BUFSIZ(static_cast<uint32_t>(length));
 
-  // std::memory_order_release enforces compiler memory ordering for uncached
-  // memory, preventing TRB_HWO from being committed to RAM before the payload.
-  std::atomic_thread_fence(std::memory_order_release);
+  // Order the TRB pointer and status writes before the TRB_HWO write as observed by the controller
+  // (system domain), so it never fetches a TRB it owns with stale contents.
+  WriteDataMemoryBarrier();
   trb->control = type | TRB_LST | TRB_IOC | TRB_HWO;
   zx_paddr_t trb_phys = fifo.Write(trb, 1);
 
@@ -369,11 +373,14 @@ Dwc3::QueueRequestResult Dwc3::QueueNextRequest(UserEndpoint& uep, bool is_singl
       if (uep.ep.IsOutput() && !is_single) {
         control |= TRB_CSP;
       }
-      if (trb_idx + 1 < data_trbs) {
+      if (trb_idx + 1 < total_trbs) {
         control |= TRB_CHN;
       } else {
+        // When needs_zlp is true, total_trbs == data_trbs + 1, so all data TRBs
+        // take the TRB_CHN branch above and TRB_IOC/TRB_LST are set on zlp_trb.
+        ZX_DEBUG_ASSERT(!needs_zlp);
         control |= TRB_IOC;
-        if (is_single && !needs_zlp) {
+        if (is_single) {
           control |= TRB_LST;
         }
       }
@@ -386,9 +393,11 @@ Dwc3::QueueRequestResult Dwc3::QueueNextRequest(UserEndpoint& uep, bool is_singl
   // seem to work, so we just enqueue an actual zero length transfer as a second
   // TRB.
   //
-  // Because the data TRB and ZLP TRB are submitted as separate, unchained
-  // Transfer Descriptors (TDs), both must have TRB_IOC set so the driver
-  // receives completion events to finish the request.
+  // When `needs_zlp` is true, the preceding data TRB(s) set `TRB_CHN` without
+  // `TRB_IOC`, chaining into this trailing zero-length TRB so the controller
+  // transmits the data packet(s) plus terminating ZLP and raises a single
+  // completion event on the trailing TRB (`TRB_IOC`, plus `TRB_LST` in
+  // single-transfer mode).
   if (data_trbs == 0 || needs_zlp) {
     dwc3_trb_t* zlp_trb = uep.fifo.AdvanceWrite(0);
     zlp_trb->ptr_low = 0;
@@ -408,9 +417,10 @@ Dwc3::QueueRequestResult Dwc3::QueueNextRequest(UserEndpoint& uep, bool is_singl
     uep.fifo.Write(second_trb, total_trbs - 1);
   }
 
-  // Safely grant hardware ownership to the primary TRB spanning the release
-  // fence.
-  std::atomic_thread_fence(std::memory_order_release);
+  // Grant hardware ownership of the first TRB last: order all of this request's TRB writes before
+  // the first TRB's TRB_HWO write as observed by the controller (system domain), so it never
+  // follows the chain into TRBs whose contents are not yet visible to it.
+  WriteDataMemoryBarrier();
   first_trb->control = first_trb_control;
   zx_paddr_t first_trb_phys = uep.fifo.Write(first_trb, 1);
 
@@ -503,8 +513,8 @@ void Dwc3::UserEpQueueNextOngoing(UserEndpoint& uep, bool start_transfer) {
                uep.server->active_reqs.size());
     CmdEpStartTransfer(uep.ep, first_trb_phys);
     uep.ep.transfer_state = Endpoint::TransferState::kStartingOngoing;
-  } else {
-    CmdEpUpdateTransfer(uep.ep);
+  } else if (!CmdEpUpdateTransfer(uep.ep)) {
+    uep.ep.command_failures++;
   }
 }
 
@@ -591,16 +601,13 @@ void Dwc3::UserEpCompleteTransfers(UserEndpoint& uep) {
                                 /*send_now=*/false);
     uep.server->active_reqs.pop();
 
-    // Complete at most one request per transfer event. Every request ends in a
-    // TRB_IOC TRB, and an IN request that needs a ZLP has a second TRB_IOC on the
-    // trailing ZLP TRB, so each request raises at least one event. Stopping after
-    // one request prevents racing ahead into a subsequent multi-TRB Bulk OUT
-    // request whose first TRB has TRB_HWO=0 due to a short packet while the
-    // controller is still skipping the rest of its chained TRBs without clearing
-    // their TRB_HWO bit. An extra event from an IN ZLP may complete the next IN
-    // request early, which is harmless because IN requests never skip TRBs.
-    // TODO(https://fxbug.dev/579572059): Make IN+ZLP raise a single event and
-    // drop this caveat.
+    // Complete at most one request per transfer event. Every request sets TRB_IOC
+    // only on its final TRB (including the chained trailing ZLP TRB for IN
+    // requests that need a ZLP), so each request raises a single transfer event.
+    // Stopping after one request prevents racing ahead into a subsequent
+    // multi-TRB Bulk OUT request whose first TRB has TRB_HWO=0 due to a short
+    // packet while the controller is still skipping the rest of its chained TRBs
+    // without clearing their TRB_HWO bit.
     break;
   }
 }

@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! babeldiff lines up C++ code removed by a change with the Rust code that
 //! replaces it, and checks that the two do the same things in the same order:
 //! the same comments, error returns, locks, calls, and control flow.

@@ -37,11 +37,22 @@
             from: "parent",
             to: "#video-decoder-ffd00000",
             constraints: {
+                // Order must match the `MmioRegion` indices used by amlogic_video_decoder.
                 mmio: [
                     {
-                        name: "cbus",
-                        address: 0xffd00000,
-                        size: 0x100000,
+                        name: "cbus-reset",
+                        address: 0xffd01000,
+                        size: 0x1000,
+                    },
+                    {
+                        name: "cbus-demux",
+                        address: 0xffd06000,
+                        size: 0x1000,
+                    },
+                    {
+                        name: "cbus-parser",
+                        address: 0xffd0e000,
+                        size: 0x1000,
                     },
                     {
                         name: "dos",
@@ -51,7 +62,7 @@
                     {
                         name: "hiu",
                         address: 0xff63c000,
-                        size: 0x2000,
+                        size: 0x1000,
                     },
                     {
                         name: "aobus",
@@ -64,24 +75,26 @@
                         size: 0x2000,
                     },
                 ],
+
+                // Order must match the `Interrupt` indices used by amlogic_video_decoder.
                 interrupts: [
                     {
-                        name: "vdec",
+                        name: "demux",
                         number: 55,
                         mode: "EdgeHigh",
                     },
                     {
-                        name: "vidx",
+                        name: "parser",
                         number: 64,
                         mode: "EdgeHigh",
                     },
                     {
-                        name: "vdec-hevc",
+                        name: "dos-mbox-0",
                         number: 75,
                         mode: "EdgeHigh",
                     },
                     {
-                        name: "vdec-hevc-vidx",
+                        name: "dos-mbox-1",
                         number: 76,
                         mode: "EdgeHigh",
                     },

@@ -35,12 +35,12 @@ class {{ .Name }} {
   {{ .Name }}& operator=({{ .Name }}&&) = default;
   {{- end }}
 
-  enum class {{ .TagEnum.Self }} : fidl_xunion_tag_t {
+  enum class {{ .TagEnum.Self }} : fidl_union_tag_t {
   {{- range .Members }}
     {{ .TagName.Self }} = {{ .Ordinal }},  // {{ .Ordinal | printf "%#x" }}
   {{- end }}
   {{- if .IsFlexible }}
-    {{ .TagUnknown.Self }} = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    {{ .TagUnknown.Self }} = ::std::numeric_limits<uint32_t>::max(),
   {{- end }}
   };
 
@@ -85,7 +85,7 @@ class {{ .Name }} {
   {{- end }}
 
  private:
-  enum class {{ .WireOrdinalEnum.Self }} : fidl_xunion_tag_t {
+  enum class {{ .WireOrdinalEnum.Self }} : fidl_union_tag_t {
     {{ .WireInvalidOrdinal.Self }} = 0,
   {{- range .Members }}
     {{ .WireOrdinalName.Self }} = {{ .Ordinal }},  // {{ .Ordinal | printf "%#x" }}
@@ -251,7 +251,7 @@ void fidl::internal::WireCodingTraits<{{ . }}, Constraint, IsRecursive>::Encode(
     return;
   }
 
-  *position.As<fidl_xunion_tag_t>() = u->tag;
+  *position.As<fidl_union_tag_t>() = u->tag;
 
   {{/* Two switches here, so they are translated to lookup tables. */}}
   size_t encode_inline_size;
@@ -276,7 +276,7 @@ void fidl::internal::WireCodingTraits<{{ . }}, Constraint, IsRecursive>::Encode(
       encode_fn = nullptr;
       break;
   }
-  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  WireEncodeEnvelope(encode_inline_size, encode_fn, encoder, &u->envelope, position + sizeof(fidl_union_tag_t), inner_depth);
 
 }
 
@@ -290,7 +290,7 @@ void fidl::internal::WireCodingTraits<{{ . }}, Constraint, IsRecursive>::Decode(
       decoder->SetError(::fidl::internal::kCodingErrorInvalidUnionTag);
       return;
     }
-    if (*(position + sizeof(fidl_xunion_tag_t)).As<uint64_t>() != 0) {
+    if (*(position + sizeof(fidl_union_tag_t)).As<uint64_t>() != 0) {
       decoder->SetError(::fidl::internal::kCodingErrorZeroTagButNonZeroEnvelope);
     }
     return;
@@ -325,9 +325,9 @@ void fidl::internal::WireCodingTraits<{{ . }}, Constraint, IsRecursive>::Decode(
       break;
   }
   {{- if .IsFlexible }}
-  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeFlexibleEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
   {{- else }}
-  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_xunion_tag_t), inner_depth);
+  ::fidl::internal::WireDecodeStrictEnvelope(decode_inline_size, decode_fn, decoder, position + sizeof(fidl_union_tag_t), inner_depth);
   {{- end }}
 }
 

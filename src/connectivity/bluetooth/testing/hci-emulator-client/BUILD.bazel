@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Verify whether hci-emulator-client should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+rustc_library(
+    name = "hci-emulator-client",
+    testonly = True,
+    srcs = [
+        "src/lib.rs",
+        "src/types.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/connectivity/bluetooth/testing/bt-test-harness:__pkg__",
+        "//src/connectivity/bluetooth/tests/bt-access-integration-tests:__pkg__",
+        "//src/connectivity/bluetooth/tests/bt-host-integration:__pkg__",
+        "//src/connectivity/bluetooth/tools/bt-hci-emulator:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+# TODO(https://fxbug.dev/571945302): Package `hci-emulator-client-tests` in
+# Bazel once `//src/connectivity/bluetooth/hci/virtual` is migrated to Bazel.
+rustc_test(
+    name = "hci-emulator-client_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":hci-emulator-client",
+    # Match the binary name referenced by meta/hci-emulator-client-tests.cml.
+    crate_name = "hci_emulator_client_lib_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+    ],
+)

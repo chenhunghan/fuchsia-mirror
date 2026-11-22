@@ -2,78 +2,55 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//src/developer/ffx/build/ffx_plugin.gni")
+import("//build/sdk/sdk_atom.gni")
 import("//src/developer/ffx/build/ffx_tool.gni")
 
-ffx_plugin("ffx_setui") {
-  sdk_category = "not-yet-specified"
-  version = "0.1.0"
-  edition = "2024"
+if (is_host) {
+  # LINT.IfChange
+  bazel_ffx_tool("ffx_setui_tool") {
+    output_name = "ffx-setui"
+    sdk_category = "partner"
+  }
 
-  plugin_deps = [
-    "accessibility:ffx_setui_accessibility",
-    "audio:ffx_setui_audio",
-    "display:ffx_setui_display",
-    "do_not_disturb:ffx_setui_do_not_disturb",
-    "factory_reset:ffx_setui_factory_reset",
-    "input:ffx_setui_input",
-    "intl:ffx_setui_intl",
-    "keyboard:ffx_setui_keyboard",
-    "light:ffx_setui_light",
-    "night_mode:ffx_setui_night_mode",
-    "privacy:ffx_setui_privacy",
-    "setup:ffx_setui_setup",
-  ]
+  # LINT.ThenChange(BUILD.bazel)
 
-  args_sources = [ "src/args.rs" ]
-  args_deps = [
-    "//src/developer/ffx/core:lib",
-    "//third_party/rust_crates:argh",
-  ]
-}
+  group("setui") {
+    public_deps = [
+      ":ffx_setui_tool",
+      ":ffx_setui_tool_host_tool",
+    ]
+  }
 
-ffx_tool("ffx_setui_tool") {
-  edition = "2024"
-  output_name = "ffx-setui"
-  deps = [
-    ":ffx_setui_suite",
-    "//src/lib/fuchsia-async",
-  ]
-  sources = [ "src/main.rs" ]
+  group("bin") {
+    public_deps = [ ":ffx_setui_tool_versioned" ]
+  }
 
-  sdk_target_name = "sdk"
-  sdk_category = "partner"
-}
+  # TODO(https://fxbug.dev/438572714): Remove once the IDK uses the Bazel atom.
+  _idk_path = "tools/$current_cpu/ffx_tools/ffx-setui"
 
-group("setui") {
-  public_deps = [
-    ":ffx_setui_tool",
-    ":ffx_setui_tool_host_tool",
-  ]
-}
-
-group("bin") {
-  public_deps = [ ":ffx_setui_tool_versioned" ]
-}
-
-group("tests") {
-  testonly = true
-  deps = [
-    ":ffx_setui_tests($host_toolchain)",
-
-    # Plugins migrated to Bazel define standalone unit test targets that are
-    # not aggregated by `:ffx_setui_tests`.
-    "accessibility:tests",
-    "audio:tests",
-    "display:tests",
-    "do_not_disturb:tests",
-    "factory_reset:tests",
-    "input:tests",
-    "intl:tests",
-    "keyboard:tests",
-    "light:tests",
-    "night_mode:tests",
-    "privacy:tests",
-    "setup:tests",
-  ]
+  sdk_atom("sdk") {
+    category = "partner"
+    sdk_area = "Developer"
+    id = "sdk://$_idk_path"
+    idk_name = "ffx-setui"
+    meta = {
+      dest = "$_idk_path-meta.json"
+      type = "ffx_tool"
+      source_prebuild_info = {
+        arch = current_cpu
+        file_base = "tools"
+      }
+    }
+    files = [
+      {
+        source = "$root_out_dir/ffx-setui"
+        dest = _idk_path
+      },
+      {
+        source = "$root_out_dir/ffx-setui.json"
+        dest = "$_idk_path.json"
+      },
+    ]
+    non_sdk_deps = [ ":ffx_setui_tool_versioned" ]
+  }
 }

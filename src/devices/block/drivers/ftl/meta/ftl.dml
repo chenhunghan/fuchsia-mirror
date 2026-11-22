@@ -22,6 +22,12 @@
             service: "fuchsia.driver.compat.Service",
             generate_bind_rule: false,
         },
+        {
+            name: "default",
+            service: "fuchsia.hardware.badblock.Service",
+            generate_bind_rule: false,
+            availability: "optional",
+        },
     ],
     expose: [
         {

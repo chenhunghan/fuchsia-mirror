@@ -421,6 +421,7 @@ impl<D: DeviceOps> Context<D> {
                     reason_code,
                     locally_initiated: locally_initiated.0,
                 },
+                wake_lease: None,
             })
             .map_err(|e| e.into())
     }
@@ -464,6 +465,7 @@ impl<D: DeviceOps> Context<D> {
                     reason_code,
                     locally_initiated: locally_initiated.0,
                 },
+                wake_lease: None,
             })
             .map_err(|e| e.into())
     }
@@ -482,6 +484,7 @@ impl<D: DeviceOps> Context<D> {
                     src_addr: src_addr.to_array(),
                     data: data.to_vec(),
                 },
+                wake_lease: None,
             })
             .map_err(|e| e.into())
     }

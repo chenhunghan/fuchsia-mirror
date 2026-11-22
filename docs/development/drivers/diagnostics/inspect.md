@@ -275,10 +275,9 @@ From the host development workstation:
 
 ### Using `iquery` on target
 
-Important: if you are working in a product other than `bringup` please
-read [this section](#include-iquery-bootfs) to learn how to include
-`iquery` in bootfs. If you are working on a product in which networking and
-`ffx` are available, you can use `ffx inspect` instead of `iquery` without
+Important: if you are working in a product other than `bringup`, you need to
+include `iquery` in bootfs. If you are working on a product in which networking
+and `ffx` are available, you can use `ffx inspect` instead of `iquery` without
 the need of including `iquery` in `bootfs`.
 
 When connected to a target device via serial or `ffx target ssh`:

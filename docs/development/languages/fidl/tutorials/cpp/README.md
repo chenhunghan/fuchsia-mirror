@@ -6,7 +6,7 @@ description: This page provides an overview and index of tutorials for using the
 # New C++ bindings tutorials
 
 This section helps you learn how to use the new C++ FIDL bindings. See
-[Getting started](#getting_started) for a step-by-step guide to setting up the
+[Getting started](#getting-started) for a step-by-step guide to setting up the
 build and writing a simple client or server from scratch. See [Topics](#topics)
 for more involved guides and recommendations to using the bindings effectively.
 See [Terminologies](#terminologies) for names and concepts that come up
@@ -19,7 +19,7 @@ At a high level, the C++ bindings is made up of:
 * **Behavior**: the client/server APIs to send those domain objects over a
   protocol, receive events, ...
 
-## Natural and wire domain objects
+## Natural and wire domain objects {:#natural-and-wire-domain-objects}
 
 The bindings support two types of domain objects: **natural** types and
 **wire** types:
@@ -44,13 +44,13 @@ logic in the critical path, or when needing to precisely control memory
 allocation. Because the wire types consists of unsafe views, improper use of
 those may lead to use-after-free and other memory safety bugs.
 
-## Getting started
+## Getting started {:#getting-started}
 
 1. [Using natural and wire domain objects][domain-objects]
 2. [Write a server][server]
 3. Write a client ([async][async] or [synchronous][sync])
 
-## Topics
+## Topics {:#topics}
 
 * [Memory ownership of wire domain objects][memory-ownership]
 * [Responding asynchronously][async-completers]
@@ -59,7 +59,7 @@ those may lead to use-after-free and other memory safety bugs.
 * [Request pipelining][pipelining]
 * [Unified services][services]
 
-## Terminologies
+## Terminologies {:#terminologies}
 
 ### `Wire` vs no `Wire` in clients and servers
 
@@ -90,8 +90,6 @@ also depend on only the wire parts of the bindings by depending on the
 
 <!-- TODO(https://fxbug.dev/42181382): Talk about Bazel targets -->
 
-Note: the wire types portions of the bindings was historically named "Low-Level
-C++ bindings", or LLCPP.
 
 ### `Sync` vs no `sync` in clients
 

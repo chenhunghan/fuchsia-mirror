@@ -18,4 +18,4 @@ readonly stem="${script_basename%.sh}"
 source "$script_dir"/common-setup.sh
 # 'python' is defined
 
-exec "$python" -S "$script_dir"/"$stem".py "$@"
+exec env PYTHONPATH="$default_project_root" "$python" -S "$script_dir"/"$stem".py "$@"

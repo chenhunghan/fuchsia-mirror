@@ -107,6 +107,15 @@ pub enum FfxFastbootError {
     #[error("Manifest does not contain product: {0}")]
     MissingProduct(String),
 
+    #[error(
+        "--skip-partition '{name}' has a slot suffix; pass the base name '{base_name}' instead, \
+         which skips every slot"
+    )]
+    SlottedSkipPartition { name: String, base_name: String },
+
+    #[error("--skip-partition '{name}' does not match any partition. Partitions: {available:?}")]
+    UnknownSkipPartition { name: String, available: Vec<String> },
+
     #[error("Could not find matching partition {missing} for slot {slot}")]
     MatchingPartitionsNotFound { slot: String, missing: String },
 

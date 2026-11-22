@@ -8,6 +8,7 @@
 #include <fidl/fuchsia.sysmem2/cpp/wire.h>
 #include <lib/fit/function.h>
 #include <lib/zx/result.h>
+#include <lib/zx/time.h>
 #include <zircon/compiler.h>
 
 #include <cstddef>
@@ -69,6 +70,9 @@ class MockDisplayEngine : public display::DisplayEngineInterface {
   using ReleaseCaptureChecker =
       fit::function<zx::result<>(display::DriverCaptureImageId capture_image_id)>;
   using SetMinimumRgbChecker = fit::function<zx::result<>(uint8_t minimum_rgb)>;
+  using NotifyExpectedPresentChecker =
+      fit::function<void(display::DisplayId display_id, zx::time_monotonic expected_present_time,
+                         zx::duration frame_interval)>;
 
   MockDisplayEngine();
   MockDisplayEngine(const MockDisplayEngine&) = delete;
@@ -90,6 +94,7 @@ class MockDisplayEngine : public display::DisplayEngineInterface {
   void ExpectStartCapture(StartCaptureChecker checker);
   void ExpectReleaseCapture(ReleaseCaptureChecker checker);
   void ExpectSetMinimumRgb(SetMinimumRgbChecker checker);
+  void ExpectNotifyExpectedPresent(NotifyExpectedPresentChecker checker);
 
   // Must be called at least once during an instance's lifetime.
   //
@@ -126,6 +131,9 @@ class MockDisplayEngine : public display::DisplayEngineInterface {
   zx::result<> StartCapture(display::DriverCaptureImageId capture_image_id) override;
   zx::result<> ReleaseCapture(display::DriverCaptureImageId capture_image_id) override;
   zx::result<> SetMinimumRgb(uint8_t minimum_rgb) override;
+  void NotifyExpectedPresent(display::DisplayId display_id,
+                             zx::time_monotonic expected_present_time,
+                             zx::duration frame_interval) override;
 
  private:
   struct Expectation;

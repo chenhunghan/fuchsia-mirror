@@ -470,7 +470,7 @@ void fidl::internal::WireBufferCompleterImpl<::test_errorsyntax::ExampleUseOfErr
 
 ::fidl::internal::TransactionalRequest<::test_errorsyntax::ExampleUseOfErrorSyntax::ComposedCallWhichMayFail>::TransactionalRequest(::fidl::StringView s)
     : body(::test_errorsyntax_parent::wire::ParentUsesErrorSyntaxComposedCallWhichMayFailRequest{s}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -495,7 +495,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_errorsyntax::ExampleUseOfErrorSyntax::ComposedCallWhichMayFail>::TransactionalResponse(::test_errorsyntax_parent::wire::ParentUsesErrorSyntaxComposedCallWhichMayFailResult ParentUsesErrorSyntaxComposedCallWhichMayFailResult)
     : body(::fidl::WireResponse<::test_errorsyntax::ExampleUseOfErrorSyntax::ComposedCallWhichMayFail>(ParentUsesErrorSyntaxComposedCallWhichMayFailResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_errorsyntax::ExampleUseOfErrorSyntax::ComposedCallWhichMayFail>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_ComposedCallWhichMayFail_DynamicFlags);
@@ -540,7 +540,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalRequest<::test_errorsyntax::ExampleUseOfErrorSyntax::CallWhichMayFail>::TransactionalRequest(::fidl::StringView s)
     : body(::test_errorsyntax::wire::ExampleUseOfErrorSyntaxCallWhichMayFailRequest{s}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -565,7 +565,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_errorsyntax::ExampleUseOfErrorSyntax::CallWhichMayFail>::TransactionalResponse(::test_errorsyntax::wire::ExampleUseOfErrorSyntaxCallWhichMayFailResult ExampleUseOfErrorSyntaxCallWhichMayFailResult)
     : body(::fidl::WireResponse<::test_errorsyntax::ExampleUseOfErrorSyntax::CallWhichMayFail>(ExampleUseOfErrorSyntaxCallWhichMayFailResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_errorsyntax::ExampleUseOfErrorSyntax::CallWhichMayFail>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_Ordinal, ::test_errorsyntax::kExampleUseOfErrorSyntax_CallWhichMayFail_DynamicFlags);

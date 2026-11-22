@@ -11,7 +11,6 @@ use core::pin::Pin;
 use zx_types::zx_status_t;
 
 unsafe extern "C" {
-    pub(super) fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
     pub(super) fn rand_r(seed: *mut usize) -> c_int;
 }
 

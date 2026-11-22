@@ -8,7 +8,6 @@ group("tests") {
   testonly = true
   deps = [
     ":lib_test",
-    "behavior:lib_test",
     "connector:tests",
     "holders:tests",
   ]
@@ -60,6 +59,7 @@ if (is_host) {
       "src/ssh_connector.rs",
       "src/store.rs",
       "src/target_connector.rs",
+      "src/transport_connector.rs",
       "src/uart_connector.rs",
       "src/usb_connector.rs",
       "src/vsock_connector.rs",
@@ -135,6 +135,7 @@ if (is_host) {
       "src/ssh_connector.rs",
       "src/store.rs",
       "src/target_connector.rs",
+      "src/transport_connector.rs",
       "src/uart_connector.rs",
       "src/usb_connector.rs",
       "src/vsock_connector.rs",

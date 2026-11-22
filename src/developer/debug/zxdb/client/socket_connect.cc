@@ -191,7 +191,7 @@ Err ConnectToUnixSocket(const std::string& path, fbl::unique_fd* socket_out) {
   addr->sa_family = AF_UNIX;
   strcpy(addr->sa_data, path.c_str());
 
-  if (connect(fd, addr, sockaddr_data.size()) == -1) {
+  if (connect(fd, addr, static_cast<socklen_t>(sockaddr_data.size())) == -1) {
     return Err("Connect error");
   }
 

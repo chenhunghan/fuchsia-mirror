@@ -7,6 +7,7 @@ use assembly_cli_args::{AssemblyMode, ValidationMode};
 
 use anyhow::{Context, Result, bail};
 use assembly_config_schema::developer_overrides::{DeveloperOnlyOptions, DeveloperOverrides};
+use assembly_config_schema::platform_settings::swd_config::DEFAULT_DELIVERY_BLOB_TYPE;
 use assembly_config_schema::{
     BoardConfig, BoardInputBundle, BuildType, FeatureSetLevel, ProductConfig,
 };
@@ -230,11 +231,13 @@ impl ProductAssembly {
             &self.mode,
         )?;
 
-        // Set the info used for BoardDriver arguments.
+        if self.mode != AssemblyMode::TestRamdisk {
+            builder.set_platform_id(&board_config).context("Setting platform ID")?;
+        }
+
+        // Set the info passed to the board driver via ZBI_TYPE_DRV_BOARD_INFO.
         if !self.mode.is_test_kernel() {
-            builder
-                .set_board_driver_arguments(&board_config)
-                .context("Setting arguments for the Board Driver")?;
+            builder.set_driver_board_info(&board_config).context("Setting driver board info")?;
         }
 
         // Set the configuration for the rest of the packages.
@@ -370,6 +373,10 @@ impl ProductAssembly {
             )
             .context("Setting images configuration.")?;
 
+        builder.set_delivery_blob_type(
+            platform.software_delivery.delivery_blob_type.unwrap_or(DEFAULT_DELIVERY_BLOB_TYPE),
+        );
+
         if let Some(builder_forensics_file_path) = &self.builder_forensics_file_path {
             if let Some(parent_dir) = builder_forensics_file_path.parent() {
                 std::fs::create_dir_all(parent_dir)
@@ -401,5 +408,107 @@ impl ProductAssembly {
             return Err(validation_error.into());
         }
         Ok(image_assembly_config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assembly_config_schema::assembly_input_bundle::{AssemblyInputBundle, PartialKernelConfig};
+    use assembly_config_schema::board_config::HardwareInfo;
+    use assembly_tool::testing::FakeToolProvider;
+    use image_assembly_config::{DriverBoardInfo, PlatformId};
+    use tempfile::TempDir;
+
+    fn build_product_assembly_with_mode(mode: AssemblyMode) -> ImageAssemblyConfig {
+        let tmp = TempDir::new().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let pib_dir = root.join("pibs");
+        let outdir = root.join("out");
+        std::fs::create_dir_all(&outdir).unwrap();
+
+        let kernel_aib_dir = pib_dir.join("zircon_eng");
+        std::fs::create_dir_all(&kernel_aib_dir).unwrap();
+        let kernel_aib = AssemblyInputBundle {
+            kernel: Some(PartialKernelConfig {
+                path: Some("kernel/path".into()),
+                args: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        serde_json::to_writer(
+            std::fs::File::create(kernel_aib_dir.join("assembly_config.json")).unwrap(),
+            &kernel_aib,
+        )
+        .unwrap();
+
+        let emulator_aib_dir = pib_dir.join("emulator_support");
+        std::fs::create_dir_all(&emulator_aib_dir).unwrap();
+        let emulator_aib = AssemblyInputBundle {
+            qemu_kernel: Some("qemu/kernel/path".into()),
+            ..Default::default()
+        };
+        serde_json::to_writer(
+            std::fs::File::create(emulator_aib_dir.join("assembly_config.json")).unwrap(),
+            &emulator_aib,
+        )
+        .unwrap();
+
+        let mut platform_artifacts = PlatformArtifacts::empty_for_test();
+        platform_artifacts.platform_input_bundle_dir = pib_dir;
+
+        let mut product_config = ProductConfig::default();
+        product_config.platform.build_type = BuildType::Eng;
+        product_config.platform.storage.filesystems.image_mode = FilesystemImageMode::NoImage;
+
+        let board_config = BoardConfig {
+            name: "test-board".into(),
+            hardware_info: HardwareInfo {
+                name: Some("test-hw-name".into()),
+                vendor_id: Some(0x1234),
+                product_id: Some(0x5678),
+                revision: Some(0x9abc),
+            },
+            ..Default::default()
+        };
+
+        let tools = FakeToolProvider::default();
+        let pa = ProductAssembly::new(
+            platform_artifacts,
+            product_config,
+            board_config,
+            false,
+            mode,
+            None,
+        )
+        .unwrap();
+        pa.build(&tools, &outdir).unwrap()
+    }
+
+    #[test]
+    fn test_ramdisk_mode_omits_platform_id_and_driver_board_info() {
+        let config = build_product_assembly_with_mode(AssemblyMode::TestRamdisk);
+        assert_eq!(config.platform_id, None);
+        assert_eq!(config.driver_board_info, None);
+    }
+
+    #[test]
+    fn test_zbi_mode_sets_platform_id_without_driver_board_info() {
+        let config = build_product_assembly_with_mode(AssemblyMode::TestZBI);
+        assert_eq!(
+            config.platform_id,
+            Some(PlatformId { vendor_id: 0x1234, product_id: 0x5678, name: "test-hw-name".into() })
+        );
+        assert_eq!(config.driver_board_info, None);
+    }
+
+    #[test]
+    fn test_non_test_kernel_mode_sets_platform_id_and_driver_board_info() {
+        let config = build_product_assembly_with_mode(AssemblyMode::TestNoPlatform);
+        assert_eq!(
+            config.platform_id,
+            Some(PlatformId { vendor_id: 0x1234, product_id: 0x5678, name: "test-hw-name".into() })
+        );
+        assert_eq!(config.driver_board_info, Some(DriverBoardInfo { revision: 0x9abc }));
     }
 }

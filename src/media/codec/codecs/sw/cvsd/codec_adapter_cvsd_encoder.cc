@@ -30,12 +30,12 @@ CodecAdapterCvsdEncoder::CodecAdapterCvsdEncoder(std::mutex& lock,
                                                  CodecAdapterEvents* codec_adapter_events)
     : CodecAdapterSWImpl(lock, codec_adapter_events) {}
 
-std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterCvsdEncoder::OutputFormatDetails() {
+std::pair<fuchsia_media::FormatDetails, size_t> CodecAdapterCvsdEncoder::OutputFormatDetails() {
   std::lock_guard<std::mutex> lock(lock_);
   ZX_DEBUG_ASSERT(codec_params_);
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_mime_type(kCvsdMimeType);
+  fuchsia_media::FormatDetails format_details;
+  format_details.mime_type() = kCvsdMimeType;
 
   // The bytes needed to store each output packet. Since we're doing 16-1
   // compression for mono audio, where 2 byte input = 1 bit output. bytes needed
@@ -44,31 +44,37 @@ std::pair<fuchsia::media::FormatDetails, size_t> CodecAdapterCvsdEncoder::Output
 }
 
 CodecAdapterCvsdEncoder::InputLoopStatus CodecAdapterCvsdEncoder::ProcessFormatDetails(
-    const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.has_pcm_format()) {
+    const fuchsia_media::FormatDetails& format_details) {
+  if (!format_details.pcm_format().has_value()) {
     events_->onCoreCodecFailCodec(
         "CVSD Encoder received input that was not uncompressed pcm audio.");
     return kShouldTerminate;
   }
-  if (!format_details.has_encoder_settings() || !format_details.encoder_settings().is_cvsd()) {
+  if (!format_details.encoder_settings().has_value() ||
+      format_details.encoder_settings()->Which() != fuchsia_media::EncoderSettings::Tag::kCvsd) {
     events_->onCoreCodecFailCodec("CVSD Encoder did not receive encoder settings.");
     return kShouldTerminate;
   }
-  const auto& input_format = format_details.pcm_format();
-  if (!input_format.has_pcm_mode() ||
-      input_format.pcm_mode() != fuchsia::media::AudioPcmMode2::LINEAR ||
-      !input_format.has_bits_per_sample() || input_format.bits_per_sample() != 16 ||
-      (input_format.has_bytes_per_sample() && input_format.bytes_per_sample() != sizeof(int16_t)) ||
-      !input_format.has_channel_map() || input_format.channel_map().size() != 1 ||
-      !input_format.has_frames_per_second()) {
+  const auto& input_format = *format_details.pcm_format();
+  if (!input_format.pcm_mode().has_value() || !input_format.bits_per_sample().has_value() ||
+      !input_format.frames_per_second().has_value() || !input_format.channel_map().has_value()) {
+    events_->onCoreCodecFailCodec("CVSD Encoder received incomplete PcmFormat2.");
+    return kShouldTerminate;
+  }
+
+  if (*input_format.pcm_mode() != fuchsia_media::AudioPcmMode2::kLinear ||
+      *input_format.bits_per_sample() != 16 ||
+      (input_format.bytes_per_sample().has_value() &&
+       *input_format.bytes_per_sample() != sizeof(int16_t)) ||
+      input_format.channel_map()->size() != 1) {
     events_->onCoreCodecFailCodec(
         "CVSD Encoder only encodes mono audio with signed 16 bit linear samples.");
     return kShouldTerminate;
   }
 
-  if (input_format.frames_per_second() != kExpectedSamplingFreq) {
+  if (*input_format.frames_per_second() != kExpectedSamplingFreq) {
     LOG(WARNING, "Expected sampling frequency %u got %u", kExpectedSamplingFreq,
-        input_format.frames_per_second());
+        *input_format.frames_per_second());
   }
 
   {
@@ -94,40 +100,40 @@ int CodecAdapterCvsdEncoder::ProcessInputChunkData(const uint8_t* input_data,
   return 1;
 }
 
-fuchsia::sysmem::BufferCollectionConstraints CodecAdapterCvsdEncoder::BufferCollectionConstraints(
+fuchsia_sysmem2::BufferCollectionConstraints CodecAdapterCvsdEncoder::BufferCollectionConstraints(
     CodecPort port) {
-  fuchsia::sysmem::BufferCollectionConstraints c;
-  c.min_buffer_count_for_camping = kMinBufferCountForCamping;
+  fuchsia_sysmem2::BufferCollectionConstraints c;
+  c.min_buffer_count_for_camping() = kMinBufferCountForCamping;
 
   // Actual minimum buffer size is 16 bytes for input and 1 byte for output since we're doing
   // 16:1 compression for encoding. However, sysmem will basically allocate at least a
   // 4KiB page per buffer even if the client is also ok with less, so we default to
   // system page size for now.
+  auto& bmc = c.buffer_memory_constraints().emplace();
   if (port == kInputPort) {
     // TODO(dayeonglee): consider requiring a larger buffer, based on what
     // seems like a minimum reasonable time duration per buffer, to keep the
     // buffers per second <= ~120.
-    c.buffer_memory_constraints.min_size_bytes =
-        std::max(zx_system_get_page_size(), kInputFrameSize);
-    c.buffer_memory_constraints.max_size_bytes = kInputPerPacketBufferBytesMax;
+    bmc.min_size_bytes() = std::max(zx_system_get_page_size(), kInputFrameSize);
+    bmc.max_size_bytes() = kInputPerPacketBufferBytesMax;
   } else {
-    c.buffer_memory_constraints.min_size_bytes = static_cast<uint32_t>(MinOutputBufferSize());
+    bmc.min_size_bytes() = static_cast<uint32_t>(MinOutputBufferSize());
     // Set to some arbitrary value.
-    c.buffer_memory_constraints.max_size_bytes = 0xFFFFFFFF;
+    bmc.max_size_bytes() = 0xFFFFFFFF;
   }
 
   return c;
 }
 
 TimestampExtrapolator CodecAdapterCvsdEncoder::CreateTimestampExtrapolator(
-    const fuchsia::media::FormatDetails& format_details) {
-  if (format_details.has_timebase()) {
-    const auto& input_format = format_details.pcm_format();
+    const fuchsia_media::FormatDetails& format_details) {
+  if (format_details.timebase().has_value()) {
+    const auto& input_format = *format_details.pcm_format();
     // Bytes per second is sampling frequency * number_of_channels * bytes_per_sample.
-    const size_t bytes_per_second = input_format.channel_map().size() *
-                                    input_format.frames_per_second() *
-                                    (input_format.bits_per_sample() / 8ull);
-    return TimestampExtrapolator(format_details.timebase(), bytes_per_second);
+    const size_t bytes_per_second = input_format.channel_map()->size() *
+                                    *input_format.frames_per_second() *
+                                    (*input_format.bits_per_sample() / 8ull);
+    return TimestampExtrapolator(*format_details.timebase(), bytes_per_second);
   }
   return TimestampExtrapolator();
 }

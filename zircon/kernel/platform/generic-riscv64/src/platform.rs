@@ -15,6 +15,7 @@ use crate::arch_rs::riscv64::mp::{
     riscv64_curr_hart_id, riscv64_start_cpu,
 };
 use crate::arch_rs::riscv64::sbi::sbi_get_cpu_state_impl;
+use crate::backtrace::Backtrace;
 #[cfg(console_enabled)]
 use crate::console::panic_shell_start;
 use crate::jtrace::{
@@ -22,6 +23,7 @@ use crate::jtrace::{
     TARGET_PERSISTENT_BUFFER_SIZE as JTRACE_TARGET_PERSISTENT_BUFFER_SIZE,
 };
 use crate::kernel::mp::{MpIpi, MpIpiTarget, SMP_MAX_CPUS};
+use crate::kernel::thread::current_get_backtrace;
 use crate::kernel::types::cpu_num_t;
 use crate::object::ResourceDispatcher;
 use crate::pdev_interrupt::{interrupt_get_base_vector, interrupt_get_max_vector};
@@ -30,8 +32,10 @@ use crate::pdev_power::{
     power_shutdown,
 };
 use crate::platform_rs::crashlog::PlatformCrashlog;
+use crate::platform_rs::debug::platform_serial_drain_tx;
 use crate::platform_rs::mapped_crashlog::MappedCrashlog;
 use crate::platform_rs::power::{PlatformHaltAction, ZirconCrashReason};
+use crate::top::main::lk_init_secondary_cpus;
 use crate::vm::pmm;
 use crate::{debuglog_rs as debuglog, persistent_debuglog_rs as persistent_debuglog, topology};
 use boot_options::BootOptions;
@@ -83,8 +87,6 @@ unsafe extern "C" {
     fn cpp_phys_handoff_memory(count: &mut usize) -> *const memalloc::Range;
     fn cpp_phys_handoff_nvram(size: &mut usize) -> *mut u8;
     fn cpp_phys_handoff_platform_id(out: &mut zbi::PlatformId) -> bool;
-    fn cpp_print_current_thread_backtrace();
-    fn lk_init_secondary_cpus(secondary_cpu_count: u32);
 }
 
 /// The console is compiled out, so the panic shell is a no-op like the
@@ -100,8 +102,7 @@ static HALTED: AtomicBool = AtomicBool::new(false);
 static MAPPED_CRASHLOG: LazyInit<MappedCrashlog, NoCheck> = LazyInit::uninit();
 
 /// Whether EFI services are expected on this platform.
-#[unsafe(export_name = "IsEfiExpected")]
-pub extern "C" fn is_efi_expected() -> bool {
+pub fn platform_is_efi_expected() -> bool {
     false
 }
 
@@ -123,8 +124,7 @@ fn halt_other_cpus() {
 /// Informs the system that a panic message is about to be printed and that
 /// `platform_halt` will be called shortly.  `halt_others` says whether the
 /// other CPUs are stopped first.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_panic_start(halt_others: bool) {
+pub fn platform_panic_start(halt_others: bool) {
     arch_disable_ints();
     debuglog::dlog_panic_start();
 
@@ -140,8 +140,7 @@ pub extern "C" fn rust_platform_panic_start(halt_others: bool) {
 }
 
 /// Stops the calling CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_halt_cpu() -> ! {
+pub fn platform_halt_cpu() -> ! {
     let status = power_cpu_off();
 
     // Should not have returned
@@ -149,38 +148,29 @@ pub extern "C" fn rust_platform_halt_cpu() -> ! {
 }
 
 /// Whether this platform supports `platform_suspend_cpu`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_supports_suspend_cpu() -> bool {
+pub fn platform_supports_suspend_cpu() -> bool {
     false
 }
 
 /// Suspending a CPU is not supported on this platform.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_cpu(_allow_domain_power_down: bool) -> Result<(), Status> {
+pub fn platform_suspend_cpu(_allow_domain_power_down: bool) -> Result<(), Status> {
     Err(Status::NOT_SUPPORTED)
 }
 
 /// Whether this platform supports `platform_suspend_system`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_supports_suspend_system() -> bool {
+pub fn platform_supports_suspend_system() -> bool {
     false
 }
 
 /// Suspending the system is not supported on this platform.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_system() -> Result<(), Status> {
+pub fn platform_suspend_system() -> Result<(), Status> {
     Err(Status::NOT_SUPPORTED)
 }
 
-/// Queries the power state of `cpu_id` from the SEE, into `out_state`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_get_cpu_state(
-    cpu_id: cpu_num_t,
-    out_state: &mut PowerCpuState,
-) -> Result<(), Status> {
+/// Queries the power state of `cpu_id` from the SEE.
+pub fn platform_get_cpu_state(cpu_id: cpu_num_t) -> Result<PowerCpuState, Status> {
     debug_assert!((cpu_id as usize) < SMP_MAX_CPUS);
-    *out_state = power_get_cpu_state(arch_cpu_num_to_hart_id(cpu_id) as u64)?;
-    Ok(())
+    power_get_cpu_state(arch_cpu_num_to_hart_id(cpu_id) as u64)
 }
 
 /// The processors of the system topology, each with its riscv64 information.
@@ -504,7 +494,9 @@ fn allocate_persistent_ram(range: &'static mut [u8]) {
             "Persistent debug logging enabled and configured with {} bytes\n",
             pdlog_size
         );
-        persistent_debuglog::persistent_dlog_set_location(pdlog);
+        // SAFETY: `allocate_persistent_ram` runs once during single-core early boot, before
+        // `LK_INIT_LEVEL_HEAP`.
+        unsafe { persistent_debuglog::persistent_dlog_set_location(pdlog) };
     }
 
     // Do _not_ attempt to set the location of the debug trace buffer if this is
@@ -514,7 +506,7 @@ fn allocate_persistent_ram(range: &'static mut [u8]) {
         let (jtrace, _) = leftover.split_at_mut(jtrace_size);
         let jtrace_len = jtrace.len();
         // SAFETY: `allocate_persistent_ram` runs once during single-CPU early
-        // platform initialization (`rust_platform_early_init`), so
+        // platform initialization (`platform_early_init`), so
         // `jtrace_set_location` is never called concurrently with itself or
         // `jtrace_dump(TraceBufferType::Recovered)`. `jtrace` is the tail of
         // the initialized persistent RAM range, which stays mapped and valid
@@ -531,8 +523,12 @@ fn allocate_persistent_ram(range: &'static mut [u8]) {
 
 /// Early platform initialization: claims the persistent RAM and brings up the
 /// PMM from the handoff memory map.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_early_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU during single-threaded early boot while the physboot
+/// handoff remains valid.
+pub unsafe fn platform_early_init() {
     let mut nvram_size = 0usize;
     // SAFETY: `nvram_size` is a live local that the callee fills in.
     let nvram = unsafe { cpp_phys_handoff_nvram(&mut nvram_size) };
@@ -561,8 +557,7 @@ pub extern "C" fn rust_platform_early_init() {
 }
 
 /// Platform initialization before the VM is up.  Nothing to do here.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_prevm_init() {}
+pub fn platform_prevm_init() {}
 
 // Called after the heap is up but before the system is multithreaded.
 fn platform_init_pre_thread(_level: init::LkInitLevel) {}
@@ -570,8 +565,12 @@ fn platform_init_pre_thread(_level: init::LkInitLevel) {}
 init::lk_init_hook!(platform_init_pre_thread, platform_init_pre_thread, init::LK_INIT_LEVEL_VM);
 
 /// Platform initialization once threading is up: starts the secondary CPUs.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_init() {
+///
+/// # Safety
+///
+/// Must be called once on the boot CPU after [`init_topology`] has run and before secondary CPUs
+/// start.
+pub unsafe fn platform_init() {
     topology_cpu_init();
 }
 
@@ -583,8 +582,7 @@ init::lk_init_hook!(platform_postvm, platform_init_postvm, init::LK_INIT_LEVEL_V
 /// Halts the system the platform's way: reboots or shuts down as
 /// `suggested_action` asks, drops into the panic shell after a panic when
 /// `halt_on_panic` is set, and otherwise spins forever.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_specific_halt(
+pub fn platform_specific_halt(
     suggested_action: PlatformHaltAction,
     reason: ZirconCrashReason,
     halt_on_panic: bool,
@@ -597,6 +595,7 @@ pub extern "C" fn rust_platform_specific_halt(
     );
     match suggested_action {
         PlatformHaltAction::Reboot => {
+            platform_serial_drain_tx();
             power_reboot(if reason == ZirconCrashReason::NoCrash {
                 PowerRebootFlags::Normal
             } else {
@@ -605,14 +604,17 @@ pub extern "C" fn rust_platform_specific_halt(
             kprint!("reboot failed\n");
         }
         PlatformHaltAction::RebootBootloader => {
+            platform_serial_drain_tx();
             power_reboot(PowerRebootFlags::Bootloader);
             kprint!("reboot-bootloader failed\n");
         }
         PlatformHaltAction::RebootRecovery => {
+            platform_serial_drain_tx();
             power_reboot(PowerRebootFlags::Recovery);
             kprint!("reboot-recovery failed\n");
         }
         PlatformHaltAction::Shutdown => {
+            platform_serial_drain_tx();
             power_shutdown();
             kprint!("shutdown failed\n");
         }
@@ -620,9 +622,11 @@ pub extern "C" fn rust_platform_specific_halt(
     }
 
     if reason == ZirconCrashReason::Panic {
-        // SAFETY: takes no arguments; prints the current thread's backtrace.
-        unsafe { cpp_print_current_thread_backtrace() };
+        let mut bt = Backtrace::new();
+        current_get_backtrace(&mut bt);
+        bt.print();
         if !halt_on_panic {
+            platform_serial_drain_tx();
             power_reboot(PowerRebootFlags::Panic);
             kprint!("reboot failed\n");
         }

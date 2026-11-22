@@ -5,8 +5,6 @@
 import("//build/components.gni")
 
 source_set("ui_test_realm") {
-  testonly = true
-
   sources = [
     "ui_test_realm.cc",
     "ui_test_realm.h",
@@ -55,8 +53,6 @@ source_set("ui_test_realm") {
 }
 
 group("test_realms") {
-  testonly = true
-
   deps = [
     ":scene_manager_scene",
     ":scenic_no_config",
@@ -65,8 +61,6 @@ group("test_realms") {
 }
 
 fuchsia_component("scenic_with_config") {
-  testonly = true
-
   component_name = "scenic_with_config"
   manifest = "meta/scenic_with_config.cml"
   deps = [
@@ -77,7 +71,6 @@ fuchsia_component("scenic_with_config") {
 }
 
 fuchsia_component("scenic_no_config") {
-  testonly = true
   manifest = "meta/scenic_no_config.cml"
   deps = [
     "//src/cobalt/bin/testing/fake_cobalt:component_v2",
@@ -87,8 +80,6 @@ fuchsia_component("scenic_no_config") {
 }
 
 group("a11y_deps") {
-  testonly = true
-
   deps = [
     "//src/ui/a11y/bin/a11y_manager:component_v2",
     "//src/ui/a11y/testing:fake-a11y-manager",
@@ -97,8 +88,6 @@ group("a11y_deps") {
 }
 
 fuchsia_component("scene_manager_scene") {
-  testonly = true
-
   component_name = "scene_manager_scene"
   manifest = "meta/scene_manager_scene.cml"
   deps = [

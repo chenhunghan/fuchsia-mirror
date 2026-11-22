@@ -40,3 +40,9 @@ type ProofOfInterfaceAuthorization = resource struct {
 type WakeGroupToken = resource struct {
     token zx.Handle:<EVENT, zx.Rights.TRANSFER | zx.Rights.DUPLICATE | zx.Rights.WAIT>;
 };
+
+/// An opaque token minted by network policy services that represents a logical
+/// network for the purpose of accessing network properties or binding traffic.
+type NetworkToken = resource struct {
+    value zx.Handle:<EVENTPAIR, zx.Rights.TRANSFER | zx.Rights.DUPLICATE | zx.Rights.WAIT>;
+};

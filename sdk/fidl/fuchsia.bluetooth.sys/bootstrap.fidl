@@ -14,7 +14,7 @@ type BootstrapError = strict enum : uint32 {
 ///
 /// This protocol can be obtained only before the core Bluetooth host subsystem has generated its
 /// own identity. Once initial data is committed, this capability becomes unavailable and remains
-/// unavailable even if new Bluetooth adapters are attached.
+/// unavailable even if new Bluetooth controllers are attached.
 ///
 /// Due to the privacy and bonding secrets involved, as well as the capability to make this device
 /// assume the Bluetooth identity of another device, this protocol should only be exposed to

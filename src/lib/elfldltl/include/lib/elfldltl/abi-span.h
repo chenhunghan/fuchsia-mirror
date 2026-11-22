@@ -11,6 +11,23 @@
 #include "layout.h"
 
 namespace elfldltl {
+namespace internal {
+
+template <typename>
+inline constexpr bool kIsAbiSpan = false;
+template <typename T, size_t N, ElfApi Elf, AbiPtrTraitsApi<T, Elf> Traits>
+inline constexpr bool kIsAbiSpan<AbiSpan<T, N, Elf, Traits>> = true;
+
+template <class Ptr, typename U, size_t Extent, ElfApi Elf, AbiPtrTraitsApi<U, Elf> Traits>
+constexpr Ptr ConvertAbiPtr(const AbiSpan<U, Extent, Elf, Traits>& other) {
+  if constexpr (Ptr::kLocal) {
+    return Ptr{other.data()};
+  } else {
+    return Ptr{other.ptr()};
+  }
+}
+
+}  // namespace internal
 
 // elfldltl::AbiSpan<T> is like a C++20 std::span<T> but with the same
 // properties as elfldltl::AbiPtr<T> (see <lib/elfldltl/abi-ptr.h>): it can be
@@ -48,12 +65,36 @@ class AbiSpan : public internal::AbiSpanImpl<T, N, Elf, Traits> {
   explicit constexpr AbiSpan(AbiPtr<U, Elf, Traits> ptr, size_type size) noexcept
       : AbiSpan{Ptr{ptr}, size} {}
 
+  // Allow whatever conversions to related AbiSpan types std::span would allow.
+  template <typename U, size_t Extent>
+    requires std::constructible_from<std::span<T, N>, std::span<U, Extent>> &&
+             std::convertible_to<AbiPtr<U, Elf, Traits>, Ptr>
+  constexpr explicit(!std::convertible_to<std::span<U, Extent>, std::span<T, N>>)
+      AbiSpan(AbiSpan<U, Extent, Elf, Traits> other)
+      : internal::AbiSpanImpl<T, N, Elf, Traits>{internal::ConvertAbiPtr<Ptr>(other)} {
+    assert(other.size() == N);
+  }
+
+  // If pointers are local, allow whatever kinds of construction span would.
+  template <typename Other>
+    requires(!internal::kIsAbiSpan<std::remove_cvref_t<Other>> &&
+             !std::same_as<std::remove_cvref_t<Other>, std::span<T, N>> && Ptr::kLocal &&
+             std::constructible_from<std::span<T, N>, Other>)
+  constexpr explicit(!std::convertible_to<Other, std::span<T, N>>) AbiSpan(Other&& other)
+      : AbiSpan{std::span<T, N>{std::forward<Other>(other)}} {}
+
   // Allow copy-construction from the corresponding span type if it admits
-  // construction from a pointer.  Note that span's "range" copy-constructor
-  // already allows the other direction because AbiSpan has data() and size().
+  // construction from a pointer.
   explicit(false) constexpr AbiSpan(std::span<T, N> other)
     requires Ptr::kLocal
       : internal::AbiSpanImpl<T, N, Elf, Traits>(Ptr{other.data()}) {}
+
+  // If pointers are local, convert implicitly to the plain std::span.
+  constexpr explicit(false) operator std::span<T, N>() const
+    requires Ptr::kLocal
+  {
+    return std::span<T, N>{this->data(), size()};
+  }
 
   constexpr AbiSpan& operator=(const AbiSpan&) = default;
 
@@ -100,11 +141,36 @@ class AbiSpan<T, std::dynamic_extent, Elf, Traits>
   constexpr AbiSpan(AbiPtr<U, Elf, Traits> ptr, size_type size) noexcept
       : AbiSpan{Ptr{ptr}, size} {}
 
+  // Allow whatever conversions to related AbiSpan types std::span would allow.
+  template <typename U, size_t Extent>
+    requires std::constructible_from<std::span<T>, std::span<U, Extent>> &&
+                 std::convertible_to<AbiPtr<U, Elf, Traits>, Ptr>
+  constexpr explicit(!std::convertible_to<std::span<U, Extent>, std::span<T>>)
+      AbiSpan(AbiSpan<U, Extent, Elf, Traits> other)
+      : internal::AbiSpanImpl<T, std::dynamic_extent, Elf, Traits>{
+            internal::ConvertAbiPtr<Ptr>(other)},
+        size_{other.size()} {}
+
+  // If pointers are local, allow whatever kinds of construction span would.
+  template <typename Other>
+    requires(!internal::kIsAbiSpan<std::remove_cvref_t<Other>> &&
+             !std::same_as<std::remove_cvref_t<Other>, std::span<T>> && Ptr::kLocal &&
+             std::constructible_from<std::span<T>, Other>)
+  constexpr explicit(!std::convertible_to<Other, std::span<T>>) AbiSpan(Other&& other)
+      : AbiSpan{std::span<T>{std::forward<Other>(other)}} {}
+
   // See comment above.
   explicit(false) constexpr AbiSpan(std::span<T> other)
     requires Ptr::kLocal
       : internal::AbiSpanImpl<T, std::dynamic_extent, Elf, Traits>{Ptr{other.data()}},
         size_{static_cast<size_type>(other.size())} {}
+
+  // If pointers are local, convert implicitly to the plain std::span.
+  constexpr explicit(false) operator std::span<T>() const
+    requires Ptr::kLocal
+  {
+    return std::span<T>{this->data(), size()};
+  }
 
   constexpr AbiSpan& operator=(const AbiSpan&) = default;
 
@@ -155,6 +221,13 @@ class AbiStringView {
       : contents_{std::span{str}} {}
 
   constexpr AbiStringView& operator=(const AbiStringView&) = default;
+
+  constexpr AbiStringView& operator=(std::string_view other)
+    requires Ptr::kLocal
+  {
+    *this = AbiStringView{other};
+    return *this;
+  }
 
   constexpr bool empty() const { return contents_.empty(); }
 

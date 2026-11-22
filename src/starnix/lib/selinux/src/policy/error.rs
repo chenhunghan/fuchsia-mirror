@@ -112,6 +112,8 @@ pub enum ValidateError {
     InvalidTypeAlias { id: u32 },
     #[error("invalid or cyclic typebounds hierarchy for Id {id}")]
     InvalidTypeBounds { id: u32 },
+    #[error("unexpected type attribute Id value {id} where concrete type is required")]
+    UnexpectedTypeAttribute { id: u32 },
     #[error("undefined {kind} Id value {id}")]
     UnknownId { kind: &'static str, id: u32 },
 }

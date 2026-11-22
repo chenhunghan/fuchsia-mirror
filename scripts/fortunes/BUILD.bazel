@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fuchsia_fortunes_test"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+py_library(
+    name = "fuchsia_fortunes",
+    srcs = ["fuchsia_fortunes.py"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# The test imports the module under test from its own directory, hence
+# `imports = ["."]`.
+host_py_test(
+    name = "fuchsia_fortunes_test",
+    srcs = [
+        "fuchsia_fortunes.py",
+        "fuchsia_fortunes_test.py",
+    ],
+    imports = ["."],
+    main = "fuchsia_fortunes_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

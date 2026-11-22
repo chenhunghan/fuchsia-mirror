@@ -13,6 +13,7 @@ import("//build/test.gni")
 import("//build/toolchain/ifs_shared_library.gni")
 import("//build/zircon/c_utils.gni")
 import("//build/zircon/migrated_targets.gni")
+import("experimental.gni")
 import("libc.gni")
 import("libc_toolchain.gni")
 
@@ -88,7 +89,6 @@ group("unittests") {
   deps = [
     ":test_utils",
     ":weak-tests",
-    "errno:errno.testonly",
   ]
   foreach(subdir, libc_components + libc_testonly_components) {
     deps += [ "$subdir:unittests" ]
@@ -101,11 +101,11 @@ group("unittests") {
 # compiled into libc or just into unit test code.
 config("llvm-libc.config") {
   visibility = [ "./*" ]
-  defines = [
-    "LIBC_ENABLE_CONSTEXPR=1",
-    "LIBC_COPT_USE_C_ASSERT=1",
-    "LIBC_CONF_WCTYPE_MODE=LIBC_WCTYPE_MODE_UTF8",
-  ]
+
+  configs = [ "config" ]  # This handles everything in $llvm_libc/config.json.
+
+  defines = [ "LIBC_ENABLE_CONSTEXPR=1" ]
+
   include_dirs = [
     ".",
 
@@ -135,15 +135,13 @@ config("llvm-libc.config") {
     ]
   }
 
-  configs = [ "//build/config:Wmissing-declarations" ]
+  configs += [ "//build/config:Wmissing-declarations" ]
 }
 
 # This is needed when compiling libc-related code for use in unit tests.
 config("testonly.config") {
   visibility = [ "./*" ]
   defines = [
-    "LIBC_COPT_TEST_USE_ZXTEST",
-
     # This namespace is different from the one used below for building libc
     # itself, mostly just for more visual clarity looking at backtraces from
     # unit test code and such.  Since the unit test code only ever gets linked
@@ -185,7 +183,7 @@ config("llvm-libc-export.config") {
 
     # libfuzzer also uses libc internally.  By removing the fuzzing
     # instrumentation we avoid it adding noise to the fuzzing coverage.
-    # TODO(https://fxbug.dev/25073): Once a cleaner solution is found, remove
+    # TODO(https://fxbug.dev/42099340): Once a cleaner solution is found, remove
     # this.
     configs += [ "//build/config/zircon:no_fuzzer" ]
   }
@@ -212,18 +210,35 @@ group("libc_source_set.deps") {
   }
 }
 
+# Every non-test libc_source_set() implicitly depends on this, and every
+# libc_test() asserts no dependency on it so production objects never leak into
+# unit test binaries.
+group("libc_non_test.deps") {
+  visibility = [ "./*" ]
+  public_deps = [ ":libc_source_set.deps" ]
+}
+
 # Every libc_test() implicitly depends on this.
 group("libc_test.deps") {
   visibility = [ "./*" ]
   testonly = true
-  public_deps = [ ":libc_source_set.deps" ]
+  public_deps = [
+    ":libc_source_set.deps",
+    "test:unittest",
+  ]
 }
 
 # Every libc_test() implicitly depends on one of these two.
 group("zxtest") {
   visibility = [ "./*" ]
   testonly = true
+  public_configs = [ ":zxtest.config" ]
   public_deps = [ "//zircon/system/ulib/zxtest:zxtest-streams" ]
+}
+
+config("zxtest.config") {
+  visibility = [ ":zxtest" ]
+  defines = [ "LIBC_COPT_TEST_USE_ZXTEST" ]
 }
 
 # libc_test() targets with gtest=true use gtest rather than zxtest.  This is
@@ -238,14 +253,14 @@ group("gtest") {
     "//src/lib/fxl/test:gtest_main",
     "//third_party/googletest:gmock",
   ]
+  if (is_fuchsia) {
+    public_deps += [ "//src/zircon/lib/zircon" ]
+  }
 }
 
-# When a libc_test() depends on :gtest, this will come after :testonly.config
-# so it can override it (defines come before cflags on compiler command lines).
 config("gtest.config") {
   visibility = [ ":gtest" ]
   defines = [ "LIBC_COPT_TEST_USE_GTEST" ]
-  cflags = [ "-ULIBC_COPT_TEST_USE_ZXTEST" ]
 }
 
 if (current_toolchain == default_toolchain) {
@@ -276,6 +291,9 @@ if (current_toolchain == default_toolchain) {
       # The asan and hwasan variants are always exported to the IDK sysroot,
       # while the other instrumented variants are needed by the in-tree Bazel
       # sysroot (and when -fuzzer variants redirect to their base variant).
+      # Note: "heapdump" is intentionally omitted here because
+      # //sdk/lib/c/sysroot_entries.gni maps dist/lib/heapdump/ld.so.1 to
+      # the uninstrumented system_libc_target.
       enable_variants = [
         "asan",
         "asan-sancov",
@@ -283,9 +301,12 @@ if (current_toolchain == default_toolchain) {
         "ubsan",
         "ubsan-sancov",
         "coverage",
+        "coverage-cts",
         "coverage-rust",
         "profile",
         "profile-rust",
+        "profile-use",
+        "profile-use-rust",
       ]
 
       # TODO(https://fxbug.dev/327442322): Support hwasan for x64 and riscv64.
@@ -439,10 +460,10 @@ if (current_toolchain == libc_toolchain) {
     if (!is_gcc && current_cpu == "riscv64" &&
         toolchain_variant.tags + [ "instrumented" ] - [ "instrumented" ] !=
         toolchain_variant.tags) {
-      # TODO(https://fxbug.dev/42072830): There is no R_RISCV_GLOB_DAT and instead
-      # R_RISCV_64 is used for all GOT relocs; this means that they all must be
-      # presumed to have potentially nonzero addends that matter.  The ld.so
-      # bootstrap hack of saving the in-place DT_REL addends on the stack
+      # TODO(https://fxbug.dev/349433421): There is no R_RISCV_GLOB_DAT and
+      # instead R_RISCV_64 is used for all GOT relocs; this means that they all
+      # must be presumed to have potentially nonzero addends that matter.  The
+      # ld.so bootstrap hack of saving the in-place DT_REL addends on the stack
       # depends on the total number of addend-using relocs in ld.so being
       # fairly small.  Luckily, it normally is even with all its plain GOT
       # slots requiring addends (though in practice they're probably all zero
@@ -472,10 +493,9 @@ if (current_toolchain == libc_toolchain) {
     }
   }
 
-  # TODO(https://fxbug.dev/342469121): This is in an experimental state.
+  # TODO(https://fxbug.dev/492249787): This is in an experimental state.
   shared_library("new-libc") {
     visibility = [ ":*" ]
-    testonly = true
 
     # Use the same SONAME string as the production libc, since the ABI is a
     # sufficient subset for the needs of (at least most) other shared libraries
@@ -503,25 +523,23 @@ if (current_toolchain == libc_toolchain) {
     configs += [ "//build/config/rbe:remote_link_scandeps_workaround" ]
   }
 
-  # TODO(https://fxbug.dev/342469121): Test targets using :new-libc can do so
-  # via this target to fix up manifest issues when going inside an in-package
-  # sandbox as //sdk/lib/ld/test/modules targets do.  $default_toolchain
-  # targets get implicit deps that always lead to the production libc, and
-  # that's pretty much impossible to avoid.  So instead, this can come into the
-  # explicit deps that are earlier in each target's deps list than other paths
-  # to the production libc.  The metadata walks for distribution_entries will
-  # only touch each target in the whole deps graph once.  So when the path
-  # through this target reaches :libc.so _first_, the metadata collection will
-  # yield its distribution_entries followed by the entry here that defangs it.
-  # Since it's only reached via a data_deps arc, :libc.so won't affect the
-  # dependent's link; but that will still count as the first path to it in the
-  # metadata walk.
-  group("new-libc-test") {
-    testonly = true
-
+  # TODO(https://fxbug.dev/492249787): Packages in $default_toolchain opting
+  # into :new-libc via //sdk/lib/c/experimental.gni depend on this target.
+  # Unlike :new-libc-test, this omits -nostartfiles and
+  # //sdk/lib/c/startup:nostartfiles so both C++ and Rust executables link the
+  # standard $sysroot/lib/Scrt1.o (which is hard-linked from the same
+  # user.basic crt1.o, while avoiding duplicate _start errors with rustc's
+  # built-in Fuchsia target spec that unconditionally links Scrt1.o).
+  #
+  # $default_toolchain targets also get implicit deps (via terminal_link_deps ->
+  # //zircon/public/sysroot:data) that install the production :libc.so at
+  # lib/ld.so.1, colliding with //sdk/lib/ld:startup.  The renamed_source entry
+  # below rewrites :libc.so to unused/libc.so in distribution_manifest.py
+  # (independent of deps order), while data_deps ensures :libc.so is always
+  # present in the manifest scope without affecting the dependent's link.
+  group("new-libc-bundle") {
     public_deps = [
       ":new-libc",
-      "//sdk/lib/c/startup:nostartfiles",
       "//sdk/lib/ld:startup",
     ]
 
@@ -540,7 +558,7 @@ if (current_toolchain == libc_toolchain) {
     }
   }
 
-  # TODO(https://fxbug.dev/342469121): At this stage of development, the new
+  # TODO(https://fxbug.dev/492249787): At this stage of development, the new
   # libc is missing some symbols in the production libc ABI.  Rather than
   # putting a separate new-libc.ifs into the source tree, generate it as a
   # subset of the libc.ifs that lives in the source tree.
@@ -557,7 +575,6 @@ if (current_toolchain == libc_toolchain) {
 
   toolchain_utils_action("new-libc.ifs") {
     visibility = [ ":*" ]
-    testonly = true
 
     sources = [ "libc.ifs" ]
     outputs = [ "$target_gen_dir/$target_name" ]
@@ -573,7 +590,6 @@ if (current_toolchain == libc_toolchain) {
 
   verify_public_symbols("new-libc.verify-abi") {
     visibility = [ ":*" ]
-    testonly = true
 
     deps = [
       ":new-libc",
@@ -589,11 +605,23 @@ if (current_toolchain == libc_toolchain) {
     }
   }
 } else {
-  # TODO(https://fxbug.dev/342469121): This is in an experimental state.
-  group("new-libc-test") {
-    testonly = true
-    public_deps = [ ":new-libc-test($libc_toolchain)" ]
+  # TODO(https://fxbug.dev/492249787): This is in an experimental state.
+  group("new-libc-bundle") {
+    public_deps = [ ":new-libc-bundle($libc_toolchain)" ]
   }
+}
+
+# TODO(https://fxbug.dev/492249787): Standalone test targets (such as
+# libc_test_executable in //sdk/lib/ld/test/modules) link with -nostartfiles
+# and use //sdk/lib/c/startup:nostartfiles to supply crt1.o directly instead of
+# relying on the sysroot Scrt1.o.
+group("new-libc-test") {
+  testonly = true
+  public_configs = [ "//build/config:nostartfiles" ]
+  public_deps = [
+    ":new-libc-bundle",
+    "//sdk/lib/c/startup:nostartfiles",
+  ]
 }
 
 # This gets the actual shared_library() target defined above.
@@ -677,7 +705,7 @@ if (toolchain_environment != "user.libc") {
       "//zircon/third_party/ulib/musl:common-impl",
     ]
 
-    # TODO(https://fxbug.dev/435557561): Work around RBE linking bugs handling
+    # TODO(https://fxbug.dev/483475945): Work around RBE linking bugs handling
     # the maze of linker scripts that come with static libc.
     public_configs += [ "//build/config/rbe:remote_link_scandeps_workaround" ]
   }
@@ -777,6 +805,23 @@ group("tests") {
   deps = [
     "dlfcn:tests",
     "test:tests",
+  ]
+  if (experimental_libc_opt_in) {
+    deps += [ ":experimental-libc-opt-in-tests" ]
+  }
+}
+
+# TODO(https://fxbug.dev/492249787): Packages that opt into :new-libc via
+# //sdk/lib/c/experimental.gni.  When `experimental_libc_opt_in = true` (as on
+# the core.arm64-experimental_libc builder), these are built and tested via
+# :tests.  Every opted-in package must be listed here.
+group("experimental-libc-opt-in-tests") {
+  testonly = true
+  deps = [
+    "//src/lib/ffl:ffl-rust-test-pkg",
+    "//src/lib/trivial-allocator:stub-delete-tests",
+    "//src/starnix/kernel:starnix_kernel_bin-tests",
+    "//src/starnix/tests",
   ]
 }
 

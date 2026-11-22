@@ -1,4 +1,9 @@
+# Bazel SDK owners may differ from //build owners so do not inherit.
+set noparent
+
 lijiaming@google.com
 chaselatta@google.com
 chandarren@google.com
 jcecil@google.com
+
+file:/build/bazel/BAZEL_OWNERS

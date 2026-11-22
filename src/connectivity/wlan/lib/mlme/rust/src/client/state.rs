@@ -2522,6 +2522,7 @@ mod tests {
         // (sme->mlme) Send a reconnect request
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: [1, 2, 3, 4, 5, 6],
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
 
@@ -2694,6 +2695,7 @@ mod tests {
         // (sme->mlme) Send a reconnect request
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: [1, 2, 3, 4, 5, 6],
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
 
@@ -2853,6 +2855,7 @@ mod tests {
         // (sme->mlme) Send a reconnect request
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: BSSID.to_array(),
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
         assert_matches!(state, States::Associating(_), "not in associating state");
@@ -2878,6 +2881,7 @@ mod tests {
         let sus_bssid = [b's', b'u', b's', b'r', b'e', b'q'];
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: sus_bssid,
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
         assert_matches!(state, States::Associating(_), "not in associating state");
@@ -2946,6 +2950,7 @@ mod tests {
         // (sme->mlme) Send a reconnect request
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: BSSID.to_array(),
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
         assert_matches!(state, States::Associating(_), "not in associating state");
@@ -3042,6 +3047,7 @@ mod tests {
         // (sme->mlme) Send a reconnect request
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: BSSID.to_array(),
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
         assert_matches!(state, States::Associating(_), "not in associating state");
@@ -3113,6 +3119,7 @@ mod tests {
         let sus_bssid = [b's', b'u', b's', b'r', b'e', b'q'];
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: sus_bssid,
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
         assert_matches!(state, States::Authenticated(_), "not in auth'd state");
@@ -3155,6 +3162,7 @@ mod tests {
         // (sme->mlme) Send a reconnect request
         let reconnect_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: BSSID.to_array(),
+            owe_public_key: None,
         });
         state = state.handle_mlme_request(&mut sta, reconnect_req).await;
         assert_matches!(state, States::Associated(_), "not in associated state");

@@ -1,0 +1,23 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "nlassert",
+    hdrs = [
+        "src/include/nlassert.h",
+        "src/include/nlassert-config.h.in",
+        "src/include/nlassert-internal.h",
+        "src/include/nlassert-nonproduction.h",
+        "src/include/nlassert-production.h",
+        "src/include/stdc/assert.h",
+    ],
+    includes = ["src/include"],
+    public_configs = [":nlassert_config"],
+    visibility = ["//third_party/openweave-core/src/include:__pkg__"],
+    alwayslink = True,
+)

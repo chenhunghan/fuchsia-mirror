@@ -17,7 +17,7 @@ This RFC was superseded by:
 
 * [RFC-0050: Syntax revamp](0050_syntax_revamp.md)
 
-## Motivation
+## Motivation {:#motivation}
 
 Having attributes on more language elements increases the language consistency
 and also an enabler for further features in the future. Any fact about the API

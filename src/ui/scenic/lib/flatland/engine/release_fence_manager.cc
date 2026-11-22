@@ -4,6 +4,7 @@
 
 #include "src/ui/scenic/lib/flatland/engine/release_fence_manager.h"
 
+#include <lib/async/cpp/task.h>
 #include <lib/async/cpp/time.h>
 #include <lib/syslog/cpp/macros.h>
 #include <lib/trace/event.h>
@@ -70,7 +71,16 @@ void ReleaseFenceManager::OnSkippedFrame(
   TRACE_FLOW_END("gfx", "scenic_frame", frame_number);
   FLATLAND_VERBOSE_LOG << "ReleaseFenceManager::OnSkippedFrame() frame_number=" << frame_number;
 
-  auto record = NewSkippedFrameRecord(std::move(frame_presented_callback));
+  // Defer `frame_presented_callback` to the dispatcher loop so `OnSkippedFrame()` never invokes
+  // it synchronously inside `Engine::RenderScheduledFrame()` before `DefaultFrameScheduler`
+  // finishes `on_cpu_work_done_()` (publishing the new `ViewTreeSnapshot`) and `++frame_number_`.
+  scheduling::FramePresentedCallback deferred_callback =
+      [dispatcher = dispatcher_,
+       cb = std::move(frame_presented_callback)](const scheduling::Timestamps& timestamps) mutable {
+        async::PostTask(dispatcher, [cb = std::move(cb), timestamps]() mutable { cb(timestamps); });
+      };
+
+  auto record = NewSkippedFrameRecord(std::move(deferred_callback));
   record->present_fences = std::move(present_fences);
   SignalOrScheduleSignalForReleaseFences(frame_number, *record, std::move(release_fences),
                                          std::move(release_counters));

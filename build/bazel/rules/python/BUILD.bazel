@@ -6,6 +6,12 @@ load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files"
 
 package(default_applicable_licenses = ["//:license"])
 
+# Used by py_zipapp_binary() to build archives.
+exports_files(
+    ["build_py_zipapp.py"],
+    visibility = ["//:__subpackages__"],
+)
+
 host_test_data_files(
     name = "python_interpreter_as_test_data",
     testonly = True,

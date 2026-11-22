@@ -161,11 +161,11 @@ int main(int argc, char** argv) {
     device_id_get(boot_item_mac.data(), device_name, args.namegen);
     printf("device-name-provider: generated device name from Boot Items: %s\n", device_name);
   } else {
-    zx::result status = netifc_discover(args.devdir, args.interface);
+    zx::result status = netifc_discover(args.interface);
     if (status.is_error()) {
       strlcpy(device_name, fuchsia_device::wire::kDefaultDeviceName, sizeof(device_name));
-      printf("device-name-provider: using default name \"%s\": netifc_discover(\"%s\", ...) = %s\n",
-             device_name, args.devdir.c_str(), status.status_string());
+      printf("device-name-provider: using default name \"%s\": netifc_discover(\"%s\") = %s\n",
+             device_name, args.interface.c_str(), status.status_string());
     } else {
       const NetdeviceInterface& interface = status.value();
       device_id_get(interface.mac.x, device_name, args.namegen);

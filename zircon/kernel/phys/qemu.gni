@@ -59,7 +59,7 @@ qemu_boot_formats += [
     name = "linuxboot"
     has_embed = current_cpu != "x64"
     environment = phys_toolchain
-    deps = [ "//zircon/kernel/arch/$zircon_cpu/phys:linuxboot" ]
+    deps = [ "//zircon/kernel/phys/linuxboot-runtime" ]
     shim_deps = [ "//zircon/kernel/arch/$zircon_cpu/phys/boot-shim:linux-$zircon_cpu-boot-shim($environment)" ]
     timeout = qemu_short_timeout
 

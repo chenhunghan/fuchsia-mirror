@@ -168,9 +168,6 @@ bringup_platform_aib_names = [
     "ufs_pci_driver",
     "ufs_pdev_driver",
 
-    # UFS device user-space utility.
-    "ufsutil",
-
     # SPMI device user-space utility.
     "spmi-ctl",
 
@@ -194,6 +191,7 @@ platform_aib_names = bringup_platform_aib_names + [
     "network_tun",
     "thread_lowpan",
     "mdns",
+    "mdns_wired_only",
 
     # The minimal feature-set-level
     "common_standard",

@@ -1,0 +1,87 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""Tests for the Bazel CTF build rules."""
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/testing:defs.bzl", "analysis_failure_test")
+load("//sdk/ctf/build:ctf_fx_package.bzl", "ctf_fx_package")
+load(":rules.bzl", "verify_ctf_package_archive")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_component_manifest(
+    name = "example_manifest",
+    testonly = True,
+    component_name = "example",
+    manifest = "meta/example.cml",
+)
+
+fx_component(
+    name = "example_component",
+    testonly = True,
+    compiled_manifest = ":example_manifest",
+)
+
+# Tests that the package and its archive are named after `package_name`.
+ctf_fx_package(
+    name = "example_package",
+    package_name = "ctf-fx-package-example",
+    components = [":example_component"],
+    test_component_names = ["example"],
+)
+
+verify_ctf_package_archive(
+    name = "verify_example_package",
+    testonly = True,
+    archive = ":example_package_archive",
+    expected_package_name = "ctf-fx-package-example",
+    expected_test_component_names = ["example"],
+)
+
+# Tests that `package_name` defaults to `name`.
+ctf_fx_package(
+    name = "example_default_name_package",
+    components = [":example_component"],
+)
+
+verify_ctf_package_archive(
+    name = "verify_example_default_name_package",
+    testonly = True,
+    archive = ":example_default_name_package_archive",
+    expected_package_name = "example_default_name_package",
+)
+
+# Tests that `test_component_names` must name components in the package.
+ctf_fx_package(
+    name = "example_unknown_test_component_package",
+    package_name = "ctf-fx-package-unknown-test-component-example",
+    components = [":example_component"],
+    tags = ["manual"],
+    test_component_names = ["missing"],
+)
+
+analysis_failure_test(
+    name = "example_unknown_test_component_failure_test",
+    expected_message = "`test_component_names` lists `missing`",
+    target_under_test = ":example_unknown_test_component_package_archive",
+)
+
+# Builds targets for which building successfully is the test.
+filegroup(
+    name = "quick_build_only_tests",
+    testonly = True,
+    srcs = [
+        ":example_package",
+        ":example_package_archive",
+        ":example_unknown_test_component_failure_test",
+        ":verify_example_default_name_package",
+        ":verify_example_package",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

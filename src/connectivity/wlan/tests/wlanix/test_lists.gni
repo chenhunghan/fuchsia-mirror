@@ -21,12 +21,12 @@ wlanix_tests_for_presubmit =
 # the infra pool of devices, which are much less capacity-limited
 # than the WLAN-specific shielded testbeds.
 wlanix_tests_for_presubmit_no_shield_box = [
+  "//src/connectivity/wlan/tests/wlanix:canary_test",
   "//src/connectivity/wlan/tests/wlanix:iface_correctness_and_consistency_test",
   "//src/connectivity/wlan/tests/wlanix:iface_lifecycle_test",
   "//src/connectivity/wlan/tests/wlanix:wifi_chip_correctness_and_consistency_test",
   "//src/connectivity/wlan/tests/wlanix:wifi_chip_existence_test",
   "//src/connectivity/wlan/tests/wlanix:wifi_chip_restart_test",
-  "//src/connectivity/wlan/tests/wlanix:wlan_canary_test",
 ]
 
 # These tests run in blocking CI (~once per hour) as well as a blocking
@@ -51,6 +51,8 @@ wlanix_tests_for_fyi =
 # upload performance data to fuchsiaperf via Catapult.
 wlanix_tests_for_fyi_performance = [
   "//src/connectivity/wlan/tests/wlanix:create_client_iface_benchmark_test",
+  "//src/connectivity/wlan/tests/wlanix:sched_scan_odpm_test",
+  "//src/connectivity/wlan/tests/wlanix/power:odpm_power_test",
 ]
 
 # Tests longer than ~20 minutes consume significant resources and significantly

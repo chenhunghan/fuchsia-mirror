@@ -63,7 +63,12 @@ def main() -> int:
 
         dep_files = []
         for lib_info in lib_infos:
-            source_root = lib_info["source_root"]
+            # Sources are relative to `package_dir` for libraries with
+            # `imports`, see //build/python/python_library.gni.
+            if "imports" in lib_info:
+                source_root = lib_info["package_dir"]
+            else:
+                source_root = lib_info["source_root"]
             for source in lib_info["sources"]:
                 dep_files.append(os.path.join(source_root, source))
 

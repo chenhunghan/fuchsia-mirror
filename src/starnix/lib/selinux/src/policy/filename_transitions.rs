@@ -16,10 +16,17 @@ use super::traits::{Parse, Serialize, Validate};
 use super::{ClassId, Policy, TypeId, U24Index};
 
 /// Output type mapping for a set of source types in a filename transition (policy version >= 33).
-#[derive(Clone, Debug, PartialEq, Eq, Parse, Serialize, Validate)]
+#[derive(Clone, Debug, PartialEq, Eq, Parse, Serialize)]
 struct FilenameTransitionItem {
     source_types: IdSet<TypeId>,
     out_type: TypeId,
+}
+
+impl Validate for FilenameTransitionItem {
+    fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
+        self.source_types.validate(policy)?;
+        policy.types().validate_concrete_type(self.out_type)
+    }
 }
 
 /// Filename transition rule grouping items by target type, target class, and filename (policy version >= 33).
@@ -271,7 +278,7 @@ impl Validate for FilenameTransitions {
 
 #[cfg(test)]
 mod tests {
-    use super::super::traits::HasPolicyId;
+    use super::super::traits::{HasPolicyId, PolicyId};
     use super::*;
     use std::num::NonZeroU16;
 
@@ -441,5 +448,36 @@ mod tests {
         cursor.set_policy_version(PolicyVersion::V33);
         let result = cursor.parse::<FilenameTransitions>();
         assert!(matches!(result, Err(ParseError::DuplicateFilenameTransition { .. })));
+    }
+
+    #[test]
+    fn test_filename_transition_validate_rejects_attribute_out_type() {
+        let policy_bytes =
+            include_bytes!("../../testdata/micro_policies/allow_a_t_b_attr_class0_perm0_policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
+
+        let a_t = policy.types().get_by_name(b"a_t").expect("look up a_t").id();
+        let b_t = policy.types().get_by_name(b"b_t").expect("look up b_t").id();
+        let b_attr = policy.types().get_attribute_by_name(b"b_attr").expect("look up b_attr").id();
+        let class0 = policy.classes().get_by_name(b"class0").expect("look up class0").id();
+
+        let filename =
+            ByteArray::parse(&mut PolicyCursor::new(&[4, 0, 0, 0, b't', b'e', b's', b't']))
+                .expect("parse filename");
+        let make_transition = |out_type| FilenameTransition {
+            filename: filename.clone(),
+            transition_type: b_t,
+            transition_class: class0,
+            items: Array::from(vec![FilenameTransitionItem {
+                source_types: IdSet::from_ids([a_t]),
+                out_type,
+            }]),
+        };
+
+        assert_eq!(make_transition(a_t).validate(&policy), Ok(()));
+        assert_eq!(
+            make_transition(b_attr).validate(&policy),
+            Err(ValidateError::UnexpectedTypeAttribute { id: b_attr.as_u32() })
+        );
     }
 }

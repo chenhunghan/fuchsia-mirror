@@ -8,8 +8,33 @@
 
 use core::fmt::Write;
 
-/// Hardware crashlog registers capturing CPU exception state.
-pub type CrashlogRegs = riscv64_crashlog_bindings::crashlog_regs_t;
+use super::restricted::Iframe;
+
+/// Hardware crashlog registers capturing CPU exception state on RISC-V 64.
+#[derive(Clone, Copy, Debug)]
+pub struct CrashlogRegs {
+    /// Pointer to the faulting interrupt frame (`null` if unavailable).
+    pub iframe: *const Iframe,
+    /// `scause` register holding the exception reason code (negative values are interrupts,
+    /// positive are exceptions).
+    pub cause: i64,
+    /// `stval` register holding the faulting address in the case of a page fault and
+    /// (optionally) the faulting instruction in the case of an illegal instruction.
+    pub tval: u64,
+}
+
+impl CrashlogRegs {
+    /// Returns an empty [`CrashlogRegs`] with a null `iframe` and zeroed registers.
+    pub const fn empty() -> Self {
+        Self { iframe: core::ptr::null(), cause: 0, tval: 0 }
+    }
+}
+
+impl Default for CrashlogRegs {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 fn write_hex_reg<W: Write>(w: &mut W, name: &str, val: u64) -> core::fmt::Result {
     if val == 0 {
@@ -22,16 +47,16 @@ fn write_hex_reg<W: Write>(w: &mut W, name: &str, val: u64) -> core::fmt::Result
 /// Format crashlog registers into a string or writer.
 ///
 /// # Safety
-/// `regs.iframe` must either be null or point at a live `iframe_t` that outlives
-/// the call. It is captured at the time of the crash, so the caller is
-/// responsible for only rendering a crashlog whose frame is still mapped.
+///
+/// The caller must ensure that `regs.iframe` is either null or aligned and pointing to a valid,
+/// initialized [`Iframe`] that stays live and unmutated for the duration of the call.
 unsafe fn format_crashlog_registers<W: Write>(w: &mut W, regs: &CrashlogRegs) -> core::fmt::Result {
     if regs.iframe.is_null() {
         return writeln!(w, "missing");
     }
 
     // SAFETY: null was ruled out above, and the caller guarantees a non-null
-    // `regs.iframe` points at a live `iframe_t` for the duration of the call.
+    // `regs.iframe` points at a live `Iframe` for the duration of the call.
     let frame = unsafe { &*regs.iframe };
     write_hex_reg(w, "pc", frame.regs.pc)?;
     write_hex_reg(w, "ra", frame.regs.ra)?;
@@ -73,9 +98,9 @@ unsafe fn format_crashlog_registers<W: Write>(w: &mut W, regs: &CrashlogRegs) ->
 /// Renders the registers in `regs` to `target` for a crashlog.
 ///
 /// # Safety
-/// `regs.iframe` must either be null or point at a live `iframe_t` that outlives
-/// the call. It is captured at the time of the crash, so the caller is
-/// responsible for only rendering a crashlog whose frame is still mapped.
+///
+/// The caller must ensure that `regs.iframe` is either null or aligned and pointing to a valid,
+/// initialized [`Iframe`] that stays live and unmutated for the duration of the call.
 pub unsafe fn render_crashlog_registers(target: &mut impl Write, regs: &CrashlogRegs) {
     // SAFETY: `regs.iframe` came from the caller under the same contract this
     // function documents.

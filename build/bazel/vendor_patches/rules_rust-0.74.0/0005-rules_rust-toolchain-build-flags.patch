@@ -1,0 +1,1346 @@
+Subject: [rules_rust] Support opt-out toolchain flags and response files
+
+Upstream rules_rust has four limitations when managing default and
+per-target compiler flags via Starlark rules and generated response
+files:
+
+1. `toolchain.extra_rustc_flags_for_crate_types` is applied
+   unconditionally, leaking target-only crate-type flags (e.g. `bin` or
+   `cdylib` flags) into exec-configuration host tools such as
+   `process_wrapper` and build scripts (unlike `extra_rustc_flags`,
+   which already distinguishes exec vs non-exec), and there is no
+   `extra_exec_rustc_flags_for_crate_types` attribute for exec
+   crate-type defaults (such as proc-macro).
+2. `rust_toolchain` provides no feature gate for individual targets to
+   opt out of toolchain-level `extra_rustc_flags`,
+   `extra_exec_rustc_flags`, `extra_rustc_flags_for_crate_types`,
+   `extra_exec_rustc_flags_for_crate_types`, and `env` when replacing
+   toolchain defaults with a target-computed subset.
+3. Passing generated `@response_file` arguments via
+   `rustc_flags = ["@$(location :rsp)"]` breaks Bazel RBE path mapping
+   (`--experimental_output_paths=strip`) and is not inherited by
+   `rust_test(crate = ...)` or `rustdoc`:
+   - `$(location ...)` expands during analysis to a plain string
+     containing the unmapped configuration directory (e.g.
+     `@bazel-out/k8-opt-ST-<hash>/bin/pkg/rsp`), which Bazel's `Args`
+     cannot rewrite to `@bazel-out/cfg/bin/pkg/rsp` when staging a
+     path-mapped RBE sandbox. Consequently, `has_location_expansion()`
+     disables `supports-path-mapping`, losing cross-transition RBE
+     cache hits.
+   - Passing `File` artifacts directly to
+     `rustc_flags.add_all(..., format_each = "@%s")` defers path
+     formatting to execution time so `--experimental_output_paths=strip`
+     rewrites both the sandbox input path and the `@%s` argument while
+     keeping `supports-path-mapping` enabled.
+4. `rust_clippy_action` appends `lint_config` flags after `construct_arguments()`
+   (after `rustc_flags_files` and target `rustc_flags`), causing
+   `lint_config` defaults to override target-level warning/lint overrides.
+
+This patch:
+- Separates crate-type flags by configuration (`extra_rustc_flags_for_crate_types`
+  for non-exec targets and `extra_exec_rustc_flags_for_crate_types` for exec
+  targets).
+- Adds an optional `extra_rustc_flags_feature` (`attr.string`) to
+  `rust_toolchain` to omit toolchain `extra_*_rustc_flags*` and `env`
+  (leaving `//rust/settings:extra_*` unaffected) when that feature is in
+  `ctx.disabled_features`, propagating `disable_extra_rustc_flags` via
+  `CrateInfo` to wrapped `rust_test`, `rustdoc`, and `rustdoc_test`
+  targets, keeping `replace_default_rustc_flags_files` scoped to default
+  response files by default while adding `replace_crate_rustc_flags_files`
+  on `rust_test` for wrapper macros that emit pre-merged replacement files.
+- Adds two `File`-backed response-file attributes to `rust_*` rules and
+  `CrateInfo` to preserve `rustc`'s last-wins lint flag precedence around
+  `rust_flags` (`lint_config`):
+    1. `default_rustc_flags_files` (surviving defaults when toolchain
+       defaults are disabled, before `extra_rustc_flags` and `lint_config`)
+    2. `collect_extra_rustc_flags()` (toolchain defaults on fast path, plus
+       CLI `//rust/settings:extra_*` and `unstable_rust_features_config`)
+    3. `rust_flags` (`lint_config`, `--test`)
+    4. `rustc_flags_files` (target-specific flags overriding `lint_config`)
+    5. `rustc_flags` (explicit target string flags)
+  and forwards `--cfg` entries from response files to `_collect_cfgs`
+  via `TemplateVariableInfo` (`RUSTC_FLAGS_FILE_CFGS`).
+- Passes `lint_config` flags (or fallback `-Dwarnings`) to
+  `construct_arguments()` as `rust_flags` in `rust_clippy_action` so
+  `rustc_flags_files` and target `rustc_flags` override `lint_config`
+  consistently with compilation, while CLI `extra_clippy_flags` remain last.
+- Filters `--remap-path-scope` (rejected on stable `rustdoc`) and
+  `--remap-path-prefix` (preventing scoped build-dir prefixes like `../..`
+  from applying unscoped to `rustdoc` diagnostics and doctest names when
+  `--remap-path-scope` is stripped, while keeping `-Zremap-cwd-prefix=.`)
+  from CLI flags and `@param_file` expansions, stopping at `--` and leaving
+  adjacent `@param_file` tokens intact, and writes expanded parameter files
+  into per-PID indexed temporary paths removed on exit to eliminate
+  `--spawn_strategy=local` write races.
+- Spells out `fmt::Formatter<'_>` in `//rust/runfiles` and drops the unused
+  `//rust/runfiles` dependency on `//rust/private/rustdoc:rustdoc_test_writer`
+  so exec-configured `rust_clippy_test` and `rust_doc_test` helper crates
+  build cleanly under `-Wrust-2018-idioms` and `-Wunused_crate_dependencies`.
+---
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/clippy.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/clippy.bzl
+index 8fac154779..bb47418325 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/clippy.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/clippy.bzl
+@@ -168,6 +168,14 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
+         crate_info_dict["rustc_output"] = clippy_diagnostics_file
+         crate_info = rust_common.create_crate_info(**crate_info_dict)
+ 
++    # Place lint_config flags (or the conservative `-Dwarnings` default) in
++    # construct_arguments's `rust_flags` slot so target response files
++    # (`rustc_flags_files`) and target `rustc_flags` override lint_config
++    # defaults consistently with rustc compilation actions, while keeping fallback
++    # `-Dwarnings` ordered after `default_rustc_flags_files` and
++    # `extra_rustc_flags` when lint_config is unset.
++    base_clippy_rust_flags = clippy_flags if (clippy_flags or lint_files or extra_clippy_flags) else ["-Dwarnings"]
++
+     args, env = construct_arguments(
+         ctx = ctx,
+         attr = ctx.rule.attr,
+@@ -181,7 +189,7 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
+         linkstamp_outs = linkstamp_outs,
+         ambiguous_libs = ambiguous_libs,
+         output_hash = determine_output_hash(crate_info.root, ctx.label),
+-        rust_flags = [],
++        rust_flags = base_clippy_rust_flags,
+         out_dir = out_dir,
+         build_env_files = build_env_files,
+         build_flags_files = build_flags_files,
+@@ -194,10 +202,6 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
+     if crate_info.is_test:
+         args.rustc_flags.add("--test")
+ 
+-    # Then append the clippy flags specified from the command line, so they override what is
+-    # specified on the library.
+-    clippy_flags += extra_clippy_flags
+-
+     outputs = []
+ 
+     if output != None:
+@@ -208,15 +212,10 @@ def rust_clippy_action(ctx, clippy_executable, process_wrapper, crate_info, conf
+         args.process_wrapper_flags.add("--touch-file", success_marker)
+         outputs.append(success_marker)
+ 
+-    if clippy_flags or lint_files:
+-        args.rustc_flags.add_all(clippy_flags)
+-    else:
+-        # The user didn't provide any clippy flags explicitly so we apply conservative defaults.
+-
+-        # Turn any warnings from clippy or rustc into an error, as otherwise
+-        # Bazel will consider the execution result of the aspect to be "success",
+-        # and Clippy won't be re-triggered unless the source file is modified.
+-        args.rustc_flags.add("-Dwarnings")
++    # Append command-line clippy flags after target flags so CLI flags override
++    # target lint settings.
++    if extra_clippy_flags:
++        args.rustc_flags.add_all(extra_clippy_flags)
+ 
+     if cap_at_warnings:
+         # If we are capturing the output, we want the build system to be able to keep going
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/common.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/common.bzl
+index 81b58acc0d..21551d4c5d 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/common.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/common.bzl
+@@ -61,6 +61,16 @@ def _create_crate_info(**kwargs):
+         kwargs.update({"extra_named_deps": depset([])})
+     if not "rustc_env_files" in kwargs:
+         kwargs.update({"rustc_env_files": []})
++    if not "default_rustc_flags_cfgs" in kwargs:
++        kwargs.update({"default_rustc_flags_cfgs": []})
++    if not "default_rustc_flags_files" in kwargs:
++        kwargs.update({"default_rustc_flags_files": []})
++    if not "rustc_flags_cfgs" in kwargs:
++        kwargs.update({"rustc_flags_cfgs": []})
++    if not "rustc_flags_files" in kwargs:
++        kwargs.update({"rustc_flags_files": []})
++    if not "disable_extra_rustc_flags" in kwargs:
++        kwargs.update({"disable_extra_rustc_flags": False})
+     if not "data" in kwargs:
+         kwargs.update({"data": depset([])})
+     if not "root_path" in kwargs:
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/providers.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/providers.bzl
+index fdb952c155..85905d0472 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/providers.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/providers.bzl
+@@ -25,7 +25,10 @@ CrateInfo = provider(
+         "compile_data": "depset[File]: Compile data required by this crate.",
+         "compile_data_targets": "depset[Label]: Compile data targets required by this crate.",
+         "data": "depset[File]: Runtime data associated with the target. Not passed to `Rustc` actions, except for `proc-macro` targets where `Rustc` is the runtime.",
++        "default_rustc_flags_cfgs": "List[str]: --cfg specs (without --cfg=) from default_rustc_flags_files, populated when @rules_rust//rust/settings:collect_cfgs is set.",
++        "default_rustc_flags_files": "List[File]: Response files containing default toolchain flags to pass to rustc before lint_config.",
+         "deps": "depset[DepVariantInfo]: This crate's direct (rust or cc) dependencies' providers.",
++        "disable_extra_rustc_flags": "bool: Whether toolchain extra flags and environment variables are disabled for this crate.",
+         "edition": "str: The edition of this crate.",
+         "extra_named_deps": "depset[AliasableDepInfo]: Extra named dependencies.",
+         "is_test": "bool: If the crate is being compiled in a test context",
+@@ -40,6 +43,8 @@ CrateInfo = provider(
+         "root_path": "str: If root is a directory, path to the source entrypoint under it.",
+         "rustc_env": "Dict[String, String]: Additional `\"key\": \"value\"` environment variables to set for rustc.",
+         "rustc_env_files": "[File]: Files containing additional environment variables to set for rustc.",
++        "rustc_flags_cfgs": "List[str]: --cfg specs (without --cfg=) from rustc_flags_files, populated when @rules_rust//rust/settings:collect_cfgs is set.",
++        "rustc_flags_files": "List[File]: Response files containing target-specific flags to pass to rustc after lint_config.",
+         "rustc_output": "File: The output from rustc from producing the output file. It is optional.",
+         "rustc_rmeta_output": "File: The rmeta file produced for this crate. It is optional.",
+         "srcs": "depset[File]: All source Files that are part of the crate.",
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/rust.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/rust.bzl
+index c656c989c9..0b259e6b6a 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/rust.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/rust.bzl
+@@ -34,6 +34,7 @@ load(
+     ":rustc.bzl",
+     "UnstableSelfProfileInfo",
+     "collect_extra_rustc_flags",
++    "is_extra_rustc_flags_disabled",
+     "is_no_std",
+     "rustc_compile_action",
+ )
+@@ -304,6 +305,8 @@ def _rust_library_common(ctx, crate_type):
+         deps += transform_link_deps(ctx.attr.link_deps)
+     proc_macro_deps = transform_deps(ctx.attr.proc_macro_deps)
+ 
++    disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
++
+     return rustc_compile_action(
+         ctx = ctx,
+         attr = ctx.attr,
+@@ -326,12 +329,17 @@ def _rust_library_common(ctx, crate_type):
+             edition = get_edition(ctx.attr, toolchain, ctx.label),
+             rustc_env = ctx.attr.rustc_env,
+             rustc_env_files = ctx.files.rustc_env_files,
++            default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files),
++            default_rustc_flags_files = ctx.files.default_rustc_flags_files,
++            rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files),
++            rustc_flags_files = ctx.files.rustc_flags_files,
++            disable_extra_rustc_flags = disable_extra_rustc_flags,
+             is_test = False,
+             data = depset(ctx.files.data),
+             compile_data = depset(compile_data),
+             compile_data_targets = depset(ctx.attr.compile_data),
+             owner = ctx.label,
+-            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = False),
++            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = False, disable_extra_rustc_flags = disable_extra_rustc_flags),
+         ),
+     )
+ 
+@@ -374,6 +382,8 @@ def _rust_binary_impl(ctx):
+         )
+         rustc_rmeta_output = generate_output_diagnostics(ctx, rust_metadata)
+ 
++    disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
++
+     providers = rustc_compile_action(
+         ctx = ctx,
+         attr = ctx.attr,
+@@ -394,12 +404,17 @@ def _rust_binary_impl(ctx):
+             edition = get_edition(ctx.attr, toolchain, ctx.label),
+             rustc_env = ctx.attr.rustc_env,
+             rustc_env_files = ctx.files.rustc_env_files,
++            default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files),
++            default_rustc_flags_files = ctx.files.default_rustc_flags_files,
++            rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files),
++            rustc_flags_files = ctx.files.rustc_flags_files,
++            disable_extra_rustc_flags = disable_extra_rustc_flags,
+             is_test = False,
+             data = depset(ctx.files.data),
+             compile_data = depset(compile_data),
+             compile_data_targets = depset(ctx.attr.compile_data),
+             owner = ctx.label,
+-            cfgs = _collect_cfgs(ctx, toolchain, crate_root, ctx.attr.crate_type, crate_is_test = False),
++            cfgs = _collect_cfgs(ctx, toolchain, crate_root, ctx.attr.crate_type, crate_is_test = False, disable_extra_rustc_flags = disable_extra_rustc_flags),
+         ),
+     )
+ 
+@@ -489,7 +504,47 @@ def _rust_test_impl(ctx):
+             compile_data_targets = depset(ctx.attr.compile_data, transitive = [crate.compile_data_targets])
+         else:
+             compile_data_targets = depset(ctx.attr.compile_data)
+-        rustc_env_files = ctx.files.rustc_env_files + crate.rustc_env_files
++        crate_default_rustc_flags_cfgs = getattr(crate, "default_rustc_flags_cfgs", [])
++        crate_default_rustc_flags_files = getattr(crate, "default_rustc_flags_files", [])
++        crate_rustc_flags_cfgs = getattr(crate, "rustc_flags_cfgs", [])
++        crate_rustc_flags_files = getattr(crate, "rustc_flags_files", [])
++        crate_rustc_env_files = getattr(crate, "rustc_env_files", [])
++        crate_disable_extra_rustc_flags = getattr(crate, "disable_extra_rustc_flags", False)
++
++        self_disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
++        extra_flags_feature = getattr(toolchain, "extra_rustc_flags_feature", "")
++        target_explicitly_disables_extra_flags = bool(extra_flags_feature) and ("-" + extra_flags_feature) in getattr(ctx.attr, "features", [])
++        replace_crate_rustc_flags_files = getattr(ctx.attr, "replace_crate_rustc_flags_files", False)
++        replace_default_rustc_flags_files = replace_crate_rustc_flags_files or (
++            self_disable_extra_rustc_flags and (
++                bool(ctx.files.default_rustc_flags_files) or target_explicitly_disables_extra_flags
++            )
++        )
++        own_default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files)
++        own_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files)
++        if replace_crate_rustc_flags_files:
++            default_rustc_flags_files = ctx.files.default_rustc_flags_files
++            default_rustc_flags_cfgs = own_default_rustc_flags_cfgs
++            rustc_flags_files = ctx.files.rustc_flags_files
++            rustc_flags_cfgs = own_rustc_flags_cfgs
++            inherited_cfgs = []
++            rustc_env_files = ctx.files.rustc_env_files
++        else:
++            if replace_default_rustc_flags_files:
++                default_rustc_flags_files = ctx.files.default_rustc_flags_files
++                default_rustc_flags_cfgs = own_default_rustc_flags_cfgs
++                inherited_cfgs = crate_rustc_flags_cfgs
++            else:
++                default_rustc_flags_files = [f for f in crate_default_rustc_flags_files if f not in ctx.files.default_rustc_flags_files] + ctx.files.default_rustc_flags_files
++                default_rustc_flags_cfgs = [c for c in crate_default_rustc_flags_cfgs if c not in own_default_rustc_flags_cfgs] + own_default_rustc_flags_cfgs
++                inherited_cfgs = crate_default_rustc_flags_cfgs + [c for c in crate_rustc_flags_cfgs if c not in crate_default_rustc_flags_cfgs]
++            rustc_flags_files = [f for f in crate_rustc_flags_files if f not in ctx.files.rustc_flags_files] + ctx.files.rustc_flags_files
++            rustc_flags_cfgs = [c for c in crate_rustc_flags_cfgs if c not in own_rustc_flags_cfgs] + own_rustc_flags_cfgs
++
++            # Append test env files after crate env files so test values override
++            # in process_wrapper's sequential env_from_files lookup, matching rustc_env.
++            rustc_env_files = [f for f in crate_rustc_env_files if f not in ctx.files.rustc_env_files] + ctx.files.rustc_env_files
++        disable_extra_rustc_flags = self_disable_extra_rustc_flags or crate_disable_extra_rustc_flags
+ 
+         # crate.rustc_env is already expanded upstream in rust_library rule implementation
+         rustc_env = dict(crate.rustc_env)
+@@ -520,12 +575,25 @@ def _rust_test_impl(ctx):
+             edition = crate.edition,
+             rustc_env = rustc_env,
+             rustc_env_files = rustc_env_files,
++            default_rustc_flags_cfgs = default_rustc_flags_cfgs,
++            default_rustc_flags_files = default_rustc_flags_files,
++            rustc_flags_cfgs = rustc_flags_cfgs,
++            rustc_flags_files = rustc_flags_files,
++            disable_extra_rustc_flags = disable_extra_rustc_flags,
+             is_test = True,
+             compile_data = depset(compile_data),
+             compile_data_targets = compile_data_targets,
+             wrapped_crate_type = crate.type,
+             owner = ctx.label,
+-            cfgs = _collect_cfgs(ctx, toolchain, crate.root, crate_type, crate_is_test = True),
++            cfgs = _collect_cfgs(
++                ctx,
++                toolchain,
++                crate.root,
++                crate_type,
++                crate_is_test = True,
++                disable_extra_rustc_flags = disable_extra_rustc_flags,
++                extra_cfgs = inherited_cfgs,
++            ),
+         )
+     else:
+         crate_name = compute_crate_name(ctx.workspace_name, ctx.label, toolchain, ctx.attr.crate_name)
+@@ -561,6 +629,8 @@ def _rust_test_impl(ctx):
+         else:
+             rustc_env = {}
+ 
++        disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
++
+         # Target is a standalone crate. Build the test binary as its own crate.
+         crate_info_dict = dict(
+             name = crate_name,
+@@ -578,11 +648,16 @@ def _rust_test_impl(ctx):
+             edition = get_edition(ctx.attr, toolchain, ctx.label),
+             rustc_env = rustc_env,
+             rustc_env_files = ctx.files.rustc_env_files,
++            default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files),
++            default_rustc_flags_files = ctx.files.default_rustc_flags_files,
++            rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files),
++            rustc_flags_files = ctx.files.rustc_flags_files,
++            disable_extra_rustc_flags = disable_extra_rustc_flags,
+             is_test = True,
+             compile_data = depset(compile_data),
+             compile_data_targets = depset(ctx.attr.compile_data),
+             owner = ctx.label,
+-            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = True),
++            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = True, disable_extra_rustc_flags = disable_extra_rustc_flags),
+         )
+ 
+     providers = rustc_compile_action(
+@@ -889,6 +964,28 @@ _COMMON_ATTRS = {
+             file of arguments to rustc: `@$(location //package:target)`.
+         """),
+     ),
++    "default_rustc_flags_files": attr.label_list(
++        doc = dedent("""\
++            Files containing default toolchain compiler flags passed to rustc as `@file` before `lint_config`.
++
++            Targets may also provide `platform_common.TemplateVariableInfo` with
++            `RUSTC_FLAGS_FILE_CFGS` containing newline-delimited `--cfg` specs (without
++            the `--cfg=` prefix) so `_collect_cfgs` includes them when
++            `@rules_rust//rust/settings:collect_cfgs` is enabled.
++        """),
++        allow_files = True,
++    ),
++    "rustc_flags_files": attr.label_list(
++        doc = dedent("""\
++            Files containing additional compiler flags passed to rustc as `@file`.
++
++            Targets may also provide `platform_common.TemplateVariableInfo` with
++            `RUSTC_FLAGS_FILE_CFGS` containing newline-delimited `--cfg` specs (without
++            the `--cfg=` prefix) so `_collect_cfgs` includes them when
++            `@rules_rust//rust/settings:collect_cfgs` is enabled.
++        """),
++        allow_files = True,
++    ),
+     # TODO(stardoc): How do we provide additional documentation to an inherited attribute?
+     # "name": attr.string(
+     #     doc = "This name will also be used as the name of the crate built by this rule.",
+@@ -1027,6 +1124,18 @@ _RUST_TEST_ATTRS = {
+             Default is false. This is often required when testing a target that depends on a Rust ABI dylib.
+         """),
+     ),
++    "replace_crate_rustc_flags_files": attr.bool(
++        mandatory = False,
++        default = False,
++        doc = dedent("""\
++            When true on `rust_test(crate = ...)`, do not inherit `default_rustc_flags_files`,
++            `rustc_flags_files`, `rustc_env_files`, or their `--cfg` entries from `crate`;
++            use only the response and environment files configured on this `rust_test` target.
++
++            Useful for wrapper macros that merge and filter the wrapped crate's flags into
++            dedicated test response/env files so opted-out crate flags do not leak back in.
++        """),
++    ),
+     "use_libtest_harness": attr.bool(
+         mandatory = False,
+         default = True,
+@@ -1885,11 +1994,25 @@ def _replace_illlegal_chars(name):
+         name = name.replace(illegal_char, "_")
+     return name
+ 
+-def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test):
++def _collect_flags_files_cfgs(ctx, targets):
++    """Extract `--cfg` specs from `TemplateVariableInfo["RUSTC_FLAGS_FILE_CFGS"]` on `targets` when `collect_cfgs` is enabled."""
++    if not (hasattr(ctx.attr, "_collect_cfgs") and ctx.attr._collect_cfgs[BuildSettingInfo].value):
++        return []
++    cfgs = {}
++    for flags_file_target in targets:
++        if platform_common.TemplateVariableInfo in flags_file_target:
++            raw_cfgs = flags_file_target[platform_common.TemplateVariableInfo].variables.get("RUSTC_FLAGS_FILE_CFGS", "")
++            for cfg in raw_cfgs.splitlines():
++                if cfg:
++                    cfgs[cfg] = True
++    return list(cfgs)
++
++def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test, disable_extra_rustc_flags = False, extra_cfgs = []):
+     """Collect all cfg flags for a crate but only when @rules_rust//rust/settings:collect_cfgs is set.
+ 
+-    Cfgs are gathered from the target's own attributes (e.g., rustc_flags, crate_features, etc.), as
+-    well as from the toolchain (e.g., toolchain.extra_rustc_flags).
++    Cfgs are gathered from the target's own attributes (e.g., rustc_flags, crate_features,
++    default_rustc_flags_files, rustc_flags_files, etc.), as well as from the toolchain
++    (e.g., toolchain.extra_rustc_flags) and any wrapped crate's cfgs.
+ 
+     Args:
+         ctx (ctx): The current rule's context object.
+@@ -1897,6 +2020,8 @@ def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test, disable
+         crate_root (File): The root file of the crate.
+         crate_type (str): The crate type.
+         crate_is_test (bool): Whether the crate is a test target or not.
++        disable_extra_rustc_flags (bool): Whether toolchain extra flags are disabled.
++        extra_cfgs (List[str]): Additional cfg values inherited from a wrapped crate.
+ 
+     Returns:
+         List[str]: All cfg flags for the target (or empty list if build setting is unset).
+@@ -1910,8 +2035,19 @@ def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test, disable
+     if is_no_std(ctx, toolchain, crate_is_test):
+         cfgs['feature="no_std"'] = True
+ 
+-    rustc_flags = getattr(ctx.attr, "rustc_flags", []) + collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type)
++    rustc_flags = getattr(ctx.attr, "rustc_flags", []) + collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type, disable_extra_rustc_flags = disable_extra_rustc_flags)
+     cfgs |= {flag.removeprefix("--cfg="): True for flag in rustc_flags if flag.startswith("--cfg=")}
+     cfgs |= {value: True for (flag, value) in zip(rustc_flags[:-1], rustc_flags[1:]) if flag == "--cfg"}
++    for cfg in extra_cfgs:
++        cfgs[cfg] = True
++
++    # Response files cannot be read during Starlark analysis, so targets can expose
++    # their `--cfg` specs (without `--cfg=`, one per line) via
++    # TemplateVariableInfo["RUSTC_FLAGS_FILE_CFGS"].
++    for cfg in _collect_flags_files_cfgs(
++        ctx,
++        getattr(ctx.attr, "default_rustc_flags_files", []) + getattr(ctx.attr, "rustc_flags_files", []),
++    ):
++        cfgs[cfg] = True
+ 
+     return list(cfgs)
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/rustc.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/rustc.bzl
+index 85d2e88738..2c00c819e3 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/rustc.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/rustc.bzl
+@@ -862,7 +862,11 @@ def collect_inputs(
+     if build_env_file:
+         build_env_files = list(build_env_files)
+         build_env_files.append(build_env_file)
+-    compile_inputs = depset(build_env_files + lint_files, transitive = [build_script_compile_inputs, compile_inputs])
++    crate_default_rustc_flags_files = getattr(crate_info, "default_rustc_flags_files", [])
++    crate_rustc_flags_files = getattr(crate_info, "rustc_flags_files", [])
++    default_rustc_flags_files = crate_default_rustc_flags_files if crate_default_rustc_flags_files else getattr(files, "default_rustc_flags_files", [])
++    rustc_flags_files = crate_rustc_flags_files if crate_rustc_flags_files else getattr(files, "rustc_flags_files", [])
++    compile_inputs = depset(build_env_files + lint_files + default_rustc_flags_files + rustc_flags_files, transitive = [build_script_compile_inputs, compile_inputs])
+     return compile_inputs, out_dir, build_env_files, build_flags_files, linkstamp_outs, ambiguous_libs
+ 
+ def _will_emit_object_file(emit):
+@@ -1450,7 +1454,8 @@ def construct_arguments(
+                 env["CARGO_BIN_EXE_" + env_basename] = dep_crate_info.output.short_path
+ 
+     # Add environment variables from the Rust toolchain.
+-    env.update(toolchain.env)
++    if _use_toolchain_extra_flags(ctx, toolchain, getattr(crate_info, "disable_extra_rustc_flags", False)):
++        env.update(toolchain.env)
+ 
+     # Update environment with user provided variables.
+     if skip_expanding_rustc_env:
+@@ -1495,7 +1500,7 @@ def construct_arguments(
+     # Fuchsia: Only extract `-Zallow-features=` when there is a feature config
+     # to merge it with. Otherwise, pass toolchain-wide `-Zallow-features=`
+     # through unchanged, as rules_rust <= 0.69 did, so that it is enforced.
+-    extra_rustc_flags = collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type)
++    extra_rustc_flags = collect_extra_rustc_flags(ctx, toolchain, crate_info.root, crate_info.type, disable_extra_rustc_flags = getattr(crate_info, "disable_extra_rustc_flags", False))
+     if getattr(ctx.attr, "unstable_rust_features_config", None):
+         extra_rustc_flags = _extract_allowed_unstable_features_from_flags(
+             extra_rustc_flags,
+@@ -1508,6 +1513,26 @@ def construct_arguments(
+         # require_explicit_unstable_features makes no sense when all features are allowed anyway
+         if require_explicit_unstable_features:
+             process_wrapper_flags.add("--require-explicit-unstable-features", "true")
++
++    # Response files containing surviving toolchain/macro defaults when
++    # `extra_rustc_flags_feature` is disabled on a target. Emitted before
++    # `extra_rustc_flags` (CLI `//rust/settings:extra_rustc_flag*` and
++    # `unstable_rust_features_config`) and `rust_flags` (`lint_config`) so
++    # CLI overrides, allowed unstable features, and target lint allowances
++    # still win. Passing `File` objects via `Args.add_all(format_each = "@%s")`
++    # instead of `$(location ...)` strings in `rustc_flags` lets Bazel's path
++    # mapping (`--experimental_output_paths=strip`) rewrite `@bazel-out/<cfg>/...`
++    # at execution time while keeping `supports-path-mapping` enabled.
++    default_rustc_flags_files = getattr(crate_info, "default_rustc_flags_files", None)
++    if not default_rustc_flags_files:
++        default_rustc_flags_files = [
++            f
++            for t in getattr(attr, "default_rustc_flags_files", [])
++            for f in t[DefaultInfo].files.to_list()
++        ]
++    if default_rustc_flags_files:
++        rustc_flags.add_all(default_rustc_flags_files, format_each = "@%s")
++
+     rustc_flags.add_all(extra_rustc_flags, map_each = map_flag)
+ 
+     if is_no_std(ctx, toolchain, crate_info.is_test):
+@@ -1551,6 +1576,20 @@ def construct_arguments(
+                 if flag != None:
+                     rustc_flags.add(flag)
+ 
++    # Response files containing target-specific flags, emitted after
++    # `rust_flags` (`lint_config`) so they override `lint_config` defaults,
++    # and before `authored_rustc_flags` (`rustc_flags`) so explicit target
++    # flags still win. Passed as `File` objects to preserve path mapping.
++    rustc_flags_files = getattr(crate_info, "rustc_flags_files", None)
++    if not rustc_flags_files:
++        rustc_flags_files = [
++            f
++            for t in getattr(attr, "rustc_flags_files", [])
++            for f in t[DefaultInfo].files.to_list()
++        ]
++    if rustc_flags_files:
++        rustc_flags.add_all(rustc_flags_files, format_each = "@%s")
++
+     # Add target specific flags last, so they can override previous flags
+     authored_rustc_flags = getattr(attr, "rustc_flags", [])
+     rustc_flags.add_all(
+@@ -1600,7 +1639,21 @@ def construct_arguments(
+ 
+     return args, env
+ 
+-def collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type):
++def is_extra_rustc_flags_disabled(ctx, toolchain):
++    """Returns True if toolchain-level extra flags and `env` are disabled via `ctx.disabled_features`.
++
++    Note: This only gates `toolchain.extra_rustc_flags`, `toolchain.extra_exec_rustc_flags`,
++    `toolchain.extra_rustc_flags_for_crate_types`,
++    `toolchain.extra_exec_rustc_flags_for_crate_types`, and `toolchain.env`, not
++    command-line `//rust/settings:extra_rustc_flags` build settings.
++    """
++    feature = getattr(toolchain, "extra_rustc_flags_feature", "")
++    return bool(feature) and feature in ctx.disabled_features
++
++def _use_toolchain_extra_flags(ctx, toolchain, disable_extra_rustc_flags = False):
++    return not disable_extra_rustc_flags and not is_extra_rustc_flags_disabled(ctx, toolchain)
++
++def collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type, disable_extra_rustc_flags = False):
+     """Gather all 'extra' rustc flags from the target's attributes and toolchain.
+ 
+     Args:
+@@ -1608,18 +1661,23 @@ def collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type, disable_ex
+         toolchain (rust_toolchain): The current Rust toolchain.
+         crate_root (File): The root file of the crate.
+         crate_type (str): The crate type.
++        disable_extra_rustc_flags (bool): Whether toolchain extra flags are disabled.
+ 
+     Returns:
+         List[str]: Extra rustc flags.
+     """
+     flags = []
+ 
+-    if crate_type in toolchain.extra_rustc_flags_for_crate_types.keys():
+-        flags.extend(toolchain.extra_rustc_flags_for_crate_types[crate_type])
+-
+     is_exec = is_exec_configuration(ctx)
+-
+-    flags.extend(toolchain.extra_exec_rustc_flags if is_exec else toolchain.extra_rustc_flags)
++    if _use_toolchain_extra_flags(ctx, toolchain, disable_extra_rustc_flags):
++        crate_type_flags_map = (
++            getattr(toolchain, "extra_exec_rustc_flags_for_crate_types", {})
++            if is_exec
++            else toolchain.extra_rustc_flags_for_crate_types
++        )
++        if crate_type in crate_type_flags_map:
++            flags.extend(crate_type_flags_map[crate_type])
++        flags.extend(toolchain.extra_exec_rustc_flags if is_exec else toolchain.extra_rustc_flags)
+ 
+     if hasattr(ctx.attr, "_extra_rustc_flags") and not is_exec:
+         flags.extend(ctx.attr._extra_rustc_flags[ExtraRustcFlagsInfo].extra_rustc_flags)
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc/BUILD.bazel b/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc/BUILD.bazel
+index cf603d6025..70d1819951 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc/BUILD.bazel
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc/BUILD.bazel
+@@ -15,9 +15,6 @@ rust_binary(
+     name = "rustdoc_test_writer",
+     srcs = ["rustdoc_test_writer.rs"],
+     edition = "2018",
+-    deps = [
+-        "//rust/runfiles",
+-    ],
+ )
+ 
+ rust_binary(
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc.bzl
+index 2114d3790d..0154c84e74 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc.bzl
+@@ -62,6 +62,9 @@ def _rustdoc_crate_info(crate_info, output):
+         edition = crate_info.edition,
+         rustc_env = crate_info.rustc_env,
+         rustc_env_files = crate_info.rustc_env_files,
++        default_rustc_flags_files = getattr(crate_info, "default_rustc_flags_files", []),
++        rustc_flags_files = getattr(crate_info, "rustc_flags_files", []),
++        disable_extra_rustc_flags = getattr(crate_info, "disable_extra_rustc_flags", False),
+         is_test = crate_info.is_test,
+         compile_data = crate_info.compile_data,
+         compile_data_targets = crate_info.compile_data_targets,
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc_test.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc_test.bzl
+index 664878cecd..0bb994b37a 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc_test.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/rustdoc_test.bzl
+@@ -141,6 +141,9 @@ def _create_crate_info(ctx):
+         edition = crate.edition,
+         rustc_env = crate.rustc_env,
+         rustc_env_files = crate.rustc_env_files,
++        default_rustc_flags_files = getattr(crate, "default_rustc_flags_files", []),
++        rustc_flags_files = getattr(crate, "rustc_flags_files", []),
++        disable_extra_rustc_flags = getattr(crate, "disable_extra_rustc_flags", False),
+         is_test = True,
+         compile_data = crate.compile_data,
+         compile_data_targets = crate.compile_data_targets,
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/private/toolchain.bzl b/third_party/bazel_vendor/rules_rust+/rust/private/toolchain.bzl
+index b31e5e8a7e..aa3d2125da 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/private/toolchain.bzl
++++ b/third_party/bazel_vendor/rules_rust+/rust/private/toolchain.bzl
+@@ -630,8 +630,10 @@ def _rust_toolchain_impl(ctx):
+         staticlib_ext = ctx.attr.staticlib_ext,
+         stdlib_linkflags = stdlib_linkflags_cc_info,
+         extra_rustc_flags = expanded_extra_rustc_flags,
++        extra_rustc_flags_feature = ctx.attr.extra_rustc_flags_feature,
+         extra_rustc_flags_for_crate_types = ctx.attr.extra_rustc_flags_for_crate_types,
+         extra_exec_rustc_flags = expanded_extra_exec_rustc_flags,
++        extra_exec_rustc_flags_for_crate_types = ctx.attr.extra_exec_rustc_flags_for_crate_types,
+         per_crate_rustc_flags = ctx.attr.per_crate_rustc_flags,
+         sysroot = sysroot_path,
+         sysroot_anchor = sysroot.sysroot_anchor,
+@@ -748,9 +750,15 @@ rust_toolchain = rule(
+         "extra_exec_rustc_flags": attr.string_list(
+             doc = "Extra flags to pass to rustc in exec configuration. Subject to location expansion with respect to the srcs of the `rust_std` attribute. Subject to Make variable expansion with respect to RUST_SYSROOT, RUST_SYSROOT_SHORT, RUSTC, etc.",
+         ),
++        "extra_exec_rustc_flags_for_crate_types": attr.string_list_dict(
++            doc = "Extra flags to pass to rustc in exec configuration based on crate type",
++        ),
+         "extra_rustc_flags": attr.string_list(
+             doc = "Extra flags to pass to rustc in non-exec configuration. Subject to location expansion with respect to the srcs of the `rust_std` attribute. Subject to Make variable expansion with respect to RUST_SYSROOT, RUST_SYSROOT_SHORT, RUSTC, etc.",
+         ),
++        "extra_rustc_flags_feature": attr.string(
++            doc = "Optional feature name that, when disabled on a target (e.g. `features = [\"-<name>\"]`), omits toolchain `extra_rustc_flags`, `extra_exec_rustc_flags`, `extra_rustc_flags_for_crate_types`, `extra_exec_rustc_flags_for_crate_types`, and `env`.",
++        ),
+         "extra_rustc_flags_for_crate_types": attr.string_list_dict(
+             doc = "Extra flags to pass to rustc based on crate type",
+         ),
+diff --git a/third_party/bazel_vendor/rules_rust+/rust/runfiles/runfiles.rs b/third_party/bazel_vendor/rules_rust+/rust/runfiles/runfiles.rs
+index d58ef9a919..c7b1093c67 100644
+--- a/third_party/bazel_vendor/rules_rust+/rust/runfiles/runfiles.rs
++++ b/third_party/bazel_vendor/rules_rust+/rust/runfiles/runfiles.rs
+@@ -86,7 +86,7 @@ pub enum RunfilesError {
+ }
+ 
+ impl std::fmt::Display for RunfilesError {
+-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         match self {
+             RunfilesError::RunfilesDirNotFound => write!(f, "RunfilesDirNotFound"),
+             RunfilesError::RunfilesDirIoError(err) => write!(f, "RunfilesDirIoError: {:?}", err),
+diff --git a/third_party/bazel_vendor/rules_rust+/util/process_wrapper/main.rs b/third_party/bazel_vendor/rules_rust+/util/process_wrapper/main.rs
+index a6d754cac4..9d530de93e 100644
+--- a/third_party/bazel_vendor/rules_rust+/util/process_wrapper/main.rs
++++ b/third_party/bazel_vendor/rules_rust+/util/process_wrapper/main.rs
+@@ -119,6 +119,7 @@ fn process_line(
+ 
+ fn main() -> Result<(), ProcessWrapperError> {
+     let opts = options().map_err(|e| ProcessWrapperError(e.to_string()))?;
++    let temp_files = opts.temp_files;
+ 
+     let mut command = Command::new(opts.executable);
+     command
+@@ -228,6 +229,7 @@ fn main() -> Result<(), ProcessWrapperError> {
+         }
+     }
+ 
++    drop(temp_files);
+     exit(code)
+ }
+ 
+diff --git a/third_party/bazel_vendor/rules_rust+/util/process_wrapper/options.rs b/third_party/bazel_vendor/rules_rust+/util/process_wrapper/options.rs
+index ed97876486..738ead1f07 100644
+--- a/third_party/bazel_vendor/rules_rust+/util/process_wrapper/options.rs
++++ b/third_party/bazel_vendor/rules_rust+/util/process_wrapper/options.rs
+@@ -3,6 +3,7 @@
+ use std::fmt;
+ use std::fs::File;
+ use std::io::{self, Write};
++use std::iter::Peekable;
+ use std::process::exit;
+ 
+ use crate::flags::{FlagParseError, Flags, ParseOutcome};
+@@ -24,6 +25,23 @@ fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+     }
+ }
+ 
++#[derive(Debug, Default)]
++pub(crate) struct TempFiles(Vec<String>);
++
++impl TempFiles {
++    fn push(&mut self, path: String) {
++        self.0.push(path);
++    }
++}
++
++impl Drop for TempFiles {
++    fn drop(&mut self) {
++        for path in &self.0 {
++            let _ = std::fs::remove_file(path);
++        }
++    }
++}
++
+ #[derive(Debug)]
+ pub(crate) struct Options {
+     // Contains the path to the child executable
+@@ -49,6 +67,8 @@ pub(crate) struct Options {
+     pub(crate) rustc_quit_on_rmeta: bool,
+     // This controls the output format of rustc messages.
+     pub(crate) rustc_output_format: Option<rustc::ErrorFormat>,
++    // Temporary expanded parameter files removed when dropped before exit.
++    pub(crate) temp_files: TempFiles,
+ }
+ 
+ pub(crate) fn options() -> Result<Options, OptionError> {
+@@ -276,10 +296,13 @@ pub(crate) fn options() -> Result<Options, OptionError> {
+ 
+     // Append all the arguments fetched from files to those provided via command line.
+     child_args.append(&mut file_arguments);
+-    let child_args = prepare_args(
++    let expansion_tag = format!("pid{}", std::process::id());
++    let mut temp_files = TempFiles::default();
++    let child_args = prepare_args_internal(
+         child_args,
+         &subst_mappings,
+         require_explicit_unstable_features,
++        Some((&expansion_tag, &mut temp_files)),
+         None,
+         None,
+     )?;
+@@ -301,6 +324,7 @@ pub(crate) fn options() -> Result<Options, OptionError> {
+         output_file,
+         rustc_quit_on_rmeta,
+         rustc_output_format,
++        temp_files,
+     })
+ }
+ 
+@@ -336,6 +360,45 @@ fn is_allow_features_flag(arg: &str) -> bool {
+     arg.starts_with("-Zallow-features=") || arg.starts_with("allow-features=")
+ }
+ 
++fn is_rustdoc_executable(exec_path: &str) -> bool {
++    std::path::Path::new(exec_path)
++        .file_stem()
++        .and_then(|s| s.to_str())
++        .is_some_and(|stem| stem == "rustdoc")
++}
++
++// When invoking `rustdoc`, strip both `--remap-path-scope` and
++// `--remap-path-prefix`. Stable `rustdoc` rejects `--remap-path-scope` without
++// `-Zunstable-options` (which `-Zallow-features=` blocks), and stripping
++// `--remap-path-scope` alone causes build-dir-relative prefixes meant to be
++// scoped away from diagnostics (e.g. `--remap-path-scope=macro,debuginfo,coverage,object`
++// paired with `--remap-path-prefix==../..`) to apply unscoped in `rustdoc`
++// diagnostics and `rustdoc --test` names (`../../<pkg>/...`). `-Zremap-cwd-prefix=.`
++// remains preserved for working-directory reproducibility, matching `rustdoc.bzl`
++// passing `remap_path_prefix = None`.
++fn is_remap_flag_with_eq(arg: &str) -> bool {
++    arg.starts_with("--remap-path-scope=") || arg.starts_with("--remap-path-prefix=")
++}
++
++fn is_remap_flag_separate(arg: &str) -> bool {
++    arg == "--remap-path-scope" || arg == "--remap-path-prefix"
++}
++
++/// Consumes the optional value argument following `--remap-path-scope` or
++/// `--remap-path-prefix`, leaving adjacent `@param_file` or `--` tokens intact
++/// so a malformed trailing flag cannot swallow them.
++fn skip_remap_flag_value<I>(iter: &mut Peekable<I>, subst_mappings: &[(String, String)])
++where
++    I: Iterator<Item = String>,
++{
++    if iter.peek().is_some_and(|next_arg| {
++        let next_prepared = prepare_arg(next_arg.clone(), subst_mappings);
++        next_prepared != "--" && !next_prepared.starts_with('@')
++    }) {
++        iter.next();
++    }
++}
++
+ fn prepare_arg(mut arg: String, subst_mappings: &[(String, String)]) -> String {
+     for (f, replace_with) in subst_mappings {
+         let from = format!("${{{f}}}");
+@@ -348,39 +411,91 @@ fn prepare_param_file(
+ fn prepare_param_file(
+     filename: &str,
+     subst_mappings: &[(String, String)],
++    filter_rustdoc_remap: bool,
++    after_double_dash: &mut bool,
+     read_file: &mut impl FnMut(&str) -> Result<Vec<String>, OptionError>,
+     write_to_file: &mut impl FnMut(&str) -> Result<(), OptionError>,
+ ) -> Result<bool, OptionError> {
+     fn process_file(
+         filename: &str,
+         subst_mappings: &[(String, String)],
++        filter_rustdoc_remap: bool,
++        after_double_dash: &mut bool,
+         read_file: &mut impl FnMut(&str) -> Result<Vec<String>, OptionError>,
+         write_to_file: &mut impl FnMut(&str) -> Result<(), OptionError>,
+     ) -> Result<bool, OptionError> {
+         let mut has_allow_features_flag = false;
+-        for arg in read_file(filename)? {
+-            let arg = prepare_arg(arg, subst_mappings);
++        let mut iter = read_file(filename)?.into_iter().peekable();
++        while let Some(raw_arg) = iter.next() {
++            let arg = prepare_arg(raw_arg, subst_mappings);
++            if arg == "--" {
++                *after_double_dash = true;
++                write_to_file(&arg)?;
++                continue;
++            }
++            if filter_rustdoc_remap && !*after_double_dash {
++                if is_remap_flag_with_eq(&arg) {
++                    continue;
++                }
++                if is_remap_flag_separate(&arg) {
++                    skip_remap_flag_value(&mut iter, subst_mappings);
++                    continue;
++                }
++            }
+             has_allow_features_flag |= is_allow_features_flag(&arg);
+             if let Some(arg_file) = arg.strip_prefix('@') {
+-                has_allow_features_flag |=
+-                    process_file(arg_file, subst_mappings, read_file, write_to_file)?;
++                has_allow_features_flag |= process_file(
++                    arg_file,
++                    subst_mappings,
++                    filter_rustdoc_remap,
++                    after_double_dash,
++                    read_file,
++                    write_to_file,
++                )?;
+             } else {
+                 write_to_file(&arg)?;
+             }
+         }
+         Ok(has_allow_features_flag)
+     }
+-    let has_allow_features_flag = process_file(filename, subst_mappings, read_file, write_to_file)?;
++    let has_allow_features_flag = process_file(
++        filename,
++        subst_mappings,
++        filter_rustdoc_remap,
++        after_double_dash,
++        read_file,
++        write_to_file,
++    )?;
+     Ok(has_allow_features_flag)
+ }
+ 
+ /// Apply substitutions to the provided arguments, recursing into param files.
++#[cfg(test)]
+ #[allow(clippy::type_complexity)]
+ fn prepare_args(
+     args: Vec<String>,
+     subst_mappings: &[(String, String)],
+     require_explicit_unstable_features: bool,
+     read_file: Option<&mut dyn FnMut(&str) -> Result<Vec<String>, OptionError>>,
++    write_file: Option<&mut dyn FnMut(&str, &str) -> Result<(), OptionError>>,
++) -> Result<Vec<String>, OptionError> {
++    prepare_args_internal(
++        args,
++        subst_mappings,
++        require_explicit_unstable_features,
++        None,
++        read_file,
++        write_file,
++    )
++}
++
++#[allow(clippy::type_complexity)]
++fn prepare_args_internal(
++    args: Vec<String>,
++    subst_mappings: &[(String, String)],
++    require_explicit_unstable_features: bool,
++    mut expansion_context: Option<(&str, &mut TempFiles)>,
++    read_file: Option<&mut dyn FnMut(&str) -> Result<Vec<String>, OptionError>>,
+     mut write_file: Option<&mut dyn FnMut(&str, &str) -> Result<(), OptionError>>,
+ ) -> Result<Vec<String>, OptionError> {
+     let mut allowed_features = false;
+@@ -389,10 +504,47 @@ fn prepare_args_internal(
+     let mut read_file_wrapper = |s: &str| read_file_to_array(s).map_err(OptionError::Generic);
+     let mut read_file = read_file.unwrap_or(&mut read_file_wrapper);
+ 
+-    for arg in args.into_iter() {
+-        let arg = prepare_arg(arg, subst_mappings);
++    let filter_rustdoc_remap = args
++        .first()
++        .is_some_and(|exec| is_rustdoc_executable(&prepare_arg(exec.clone(), subst_mappings)));
++    let mut is_exec_arg = true;
++    let mut after_double_dash = false;
++    let mut param_file_index: usize = 0;
++    let mut iter = args.into_iter().peekable();
++
++    while let Some(raw_arg) = iter.next() {
++        let arg = prepare_arg(raw_arg, subst_mappings);
++        if is_exec_arg {
++            is_exec_arg = false;
++            processed_args.push(arg);
++            continue;
++        }
++        if arg == "--" {
++            after_double_dash = true;
++            processed_args.push(arg);
++            continue;
++        }
++        if filter_rustdoc_remap && !after_double_dash {
++            if is_remap_flag_with_eq(&arg) {
++                continue;
++            }
++            if is_remap_flag_separate(&arg) {
++                skip_remap_flag_value(&mut iter, subst_mappings);
++                continue;
++            }
++        }
+         if let Some(param_file) = arg.strip_prefix('@') {
+-            let expanded_file = format!("{param_file}.expanded");
++            let current_index = param_file_index;
++            param_file_index += 1;
++            let expansion_tag = expansion_context.as_ref().map(|(tag, _)| *tag);
++            let expanded_file = match (expansion_tag, filter_rustdoc_remap) {
++                (Some(tag), true) => {
++                    format!("{param_file}.rustdoc.{tag}.{current_index}.expanded")
++                }
++                (Some(tag), false) => format!("{param_file}.{tag}.{current_index}.expanded"),
++                (None, true) => format!("{param_file}.rustdoc.expanded"),
++                (None, false) => format!("{param_file}.expanded"),
++            };
+             let format_err = |err: io::Error| {
+                 OptionError::Generic(format!(
+                     "{} writing path: {:?}, current directory: {:?}",
+@@ -408,9 +560,13 @@ enum Writer<'f, F: FnMut(&str, &str) -> Result<(), OptionError>> {
+             }
+             let mut out = match write_file {
+                 Some(ref mut f) => Writer::Function(f),
+-                None => Writer::BufWriter(io::BufWriter::new(
+-                    File::create(&expanded_file).map_err(format_err)?,
+-                )),
++                None => {
++                    let file = File::create(&expanded_file).map_err(format_err)?;
++                    if let Some((_, ref mut temp_files)) = expansion_context {
++                        temp_files.push(expanded_file.clone());
++                    }
++                    Writer::BufWriter(io::BufWriter::new(file))
++                }
+             };
+             let mut write_to_file = |s: &str| -> Result<(), OptionError> {
+                 match out {
+@@ -423,10 +579,15 @@ enum Writer<'f, F: FnMut(&str, &str) -> Result<(), OptionError>> {
+             let (file, allowed) = prepare_param_file(
+                 param_file,
+                 subst_mappings,
++                filter_rustdoc_remap,
++                &mut after_double_dash,
+                 &mut read_file,
+                 &mut write_to_file,
+             )
+             .map(|af| (format!("@{expanded_file}"), af))?;
++            if let Writer::BufWriter(ref mut bw) = out {
++                bw.flush().map_err(format_err)?;
++            }
+             allowed_features |= allowed;
+             processed_args.push(file);
+         } else {
+@@ -472,6 +633,8 @@ fn environment_block(
+ 
+ #[cfg(test)]
+ mod test {
++    use std::path::Path;
++
+     use super::*;
+ 
+     #[test]
+@@ -550,4 +713,338 @@ fn test_enforce_allow_features_flag_user_requested_something_in_param_file() {
+             )])
+         );
+     }
++
++    #[test]
++    fn test_rustdoc_filters_remap_path_flags_on_cli_and_param_files() {
++        let mut read_files = HashMap::<String, Vec<String>>::new();
++        read_files.insert(
++            "rustc_params".to_string(),
++            vec![
++                "--remap-path-scope=coverage".to_string(),
++                "--remap-path-prefix".to_string(),
++                "external/=external/".to_string(),
++                "--edition=2021".to_string(),
++            ],
++        );
++
++        let mut rustdoc_written = HashMap::<String, Vec<String>>::new();
++        let mut read_file = |filename: &str| -> Result<Vec<String>, OptionError> {
++            read_files
++                .get(filename)
++                .cloned()
++                .ok_or_else(|| OptionError::Generic(format!("file not found: {filename}")))
++        };
++        let mut write_rustdoc = |filename: &str, content: &str| -> Result<(), OptionError> {
++            rustdoc_written
++                .entry(filename.to_owned())
++                .or_default()
++                .push(content.to_owned());
++            Ok(())
++        };
++
++        let rustdoc_args = prepare_args(
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "--remap-path-scope=macro,debuginfo".to_string(),
++                "--remap-path-scope".to_string(),
++                "object".to_string(),
++                "--remap-path-prefix==../..".to_string(),
++                "--remap-path-prefix".to_string(),
++                ".=.".to_string(),
++                "-Zremap-cwd-prefix=.".to_string(),
++                "@rustc_params".to_string(),
++            ],
++            &[],
++            true,
++            Some(&mut read_file),
++            Some(&mut write_rustdoc),
++        )
++        .unwrap();
++
++        assert_eq!(
++            rustdoc_args,
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "-Zremap-cwd-prefix=.".to_string(),
++                "@rustc_params.rustdoc.expanded".to_string(),
++                "-Zallow-features=".to_string(),
++            ]
++        );
++        assert_eq!(
++            rustdoc_written,
++            HashMap::from([(
++                "rustc_params.rustdoc.expanded".to_string(),
++                vec!["--edition=2021".to_string()],
++            )])
++        );
++
++        let mut rustc_written = HashMap::<String, Vec<String>>::new();
++        let mut write_rustc = |filename: &str, content: &str| -> Result<(), OptionError> {
++            rustc_written
++                .entry(filename.to_owned())
++                .or_default()
++                .push(content.to_owned());
++            Ok(())
++        };
++
++        let rustc_args = prepare_args(
++            vec![
++                "/path/to/rustc".to_string(),
++                "--remap-path-scope=macro,debuginfo".to_string(),
++                "@rustc_params".to_string(),
++            ],
++            &[],
++            true,
++            Some(&mut read_file),
++            Some(&mut write_rustc),
++        )
++        .unwrap();
++
++        assert_eq!(
++            rustc_args,
++            vec![
++                "/path/to/rustc".to_string(),
++                "--remap-path-scope=macro,debuginfo".to_string(),
++                "@rustc_params.expanded".to_string(),
++                "-Zallow-features=".to_string(),
++            ]
++        );
++        assert_eq!(
++            rustc_written,
++            HashMap::from([(
++                "rustc_params.expanded".to_string(),
++                vec![
++                    "--remap-path-scope=coverage".to_string(),
++                    "--remap-path-prefix".to_string(),
++                    "external/=external/".to_string(),
++                    "--edition=2021".to_string(),
++                ],
++            )])
++        );
++    }
++
++    #[test]
++    fn test_rustdoc_all_filtered_param_file_creates_empty_file_and_cleans_up() {
++        let param_path = std::env::temp_dir().join(format!(
++            "process_wrapper_all_filtered_{}.params",
++            std::process::id()
++        ));
++        let param_path_str = param_path.to_str().unwrap().to_owned();
++        std::fs::write(
++            &param_path,
++            "--remap-path-scope=coverage\n--remap-path-prefix\n.=..\n",
++        )
++        .unwrap();
++
++        let mut input_guard = TempFiles::default();
++        input_guard.push(param_path_str.clone());
++
++        let mut temp_files = TempFiles::default();
++        let args = prepare_args_internal(
++            vec!["/path/to/rustdoc".to_string(), format!("@{param_path_str}")],
++            &[],
++            false,
++            Some(("pid4242", &mut temp_files)),
++            None,
++            None,
++        )
++        .unwrap();
++
++        let expected_expanded = format!("{param_path_str}.rustdoc.pid4242.0.expanded");
++        assert_eq!(
++            args,
++            vec![
++                "/path/to/rustdoc".to_string(),
++                format!("@{expected_expanded}"),
++            ]
++        );
++        assert!(Path::new(&expected_expanded).exists());
++        assert_eq!(std::fs::read_to_string(&expected_expanded).unwrap(), "");
++
++        drop(temp_files);
++        assert!(!Path::new(&expected_expanded).exists());
++        drop(input_guard);
++    }
++
++    #[test]
++    fn test_rustdoc_remap_filtering_stops_at_double_dash_and_preserves_adjacent_param_file() {
++        let mut read_files = HashMap::<String, Vec<String>>::new();
++        read_files.insert(
++            "rustc_params".to_string(),
++            vec![
++                "--remap-path-scope=coverage".to_string(),
++                "--edition=2021".to_string(),
++            ],
++        );
++        read_files.insert(
++            "params_with_double_dash".to_string(),
++            vec![
++                "--remap-path-scope=before".to_string(),
++                "--".to_string(),
++                "--remap-path-scope=keep".to_string(),
++                "--remap-path-prefix".to_string(),
++                "a=b".to_string(),
++            ],
++        );
++
++        let mut read_file = |filename: &str| -> Result<Vec<String>, OptionError> {
++            read_files
++                .get(filename)
++                .cloned()
++                .ok_or_else(|| OptionError::Generic(format!("file not found: {filename}")))
++        };
++        let mut written = HashMap::<String, Vec<String>>::new();
++        let mut write_file = |filename: &str, content: &str| -> Result<(), OptionError> {
++            written
++                .entry(filename.to_owned())
++                .or_default()
++                .push(content.to_owned());
++            Ok(())
++        };
++
++        let cli_args = prepare_args(
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "--remap-path-scope".to_string(),
++                "@rustc_params".to_string(),
++                "--remap-path-prefix".to_string(),
++                "--".to_string(),
++                "--remap-path-scope=keep".to_string(),
++                "--remap-path-prefix".to_string(),
++                "a=b".to_string(),
++            ],
++            &[],
++            false,
++            Some(&mut read_file),
++            Some(&mut write_file),
++        )
++        .unwrap();
++
++        assert_eq!(
++            cli_args,
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "@rustc_params.rustdoc.expanded".to_string(),
++                "--".to_string(),
++                "--remap-path-scope=keep".to_string(),
++                "--remap-path-prefix".to_string(),
++                "a=b".to_string(),
++            ]
++        );
++        assert_eq!(
++            written,
++            HashMap::from([(
++                "rustc_params.rustdoc.expanded".to_string(),
++                vec!["--edition=2021".to_string()],
++            )])
++        );
++
++        let mut file_written = HashMap::<String, Vec<String>>::new();
++        let mut write_file_double_dash = |filename: &str, content: &str| -> Result<(), OptionError> {
++            file_written
++                .entry(filename.to_owned())
++                .or_default()
++                .push(content.to_owned());
++            Ok(())
++        };
++        let file_double_dash_args = prepare_args(
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "@params_with_double_dash".to_string(),
++            ],
++            &[],
++            false,
++            Some(&mut read_file),
++            Some(&mut write_file_double_dash),
++        )
++        .unwrap();
++        assert_eq!(
++            file_double_dash_args,
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "@params_with_double_dash.rustdoc.expanded".to_string(),
++            ]
++        );
++        assert_eq!(
++            file_written,
++            HashMap::from([(
++                "params_with_double_dash.rustdoc.expanded".to_string(),
++                vec![
++                    "--".to_string(),
++                    "--remap-path-scope=keep".to_string(),
++                    "--remap-path-prefix".to_string(),
++                    "a=b".to_string(),
++                ],
++            )])
++        );
++    }
++
++    #[test]
++    fn test_per_process_expansion_tag_disambiguates_concurrent_and_repeated_param_files() {
++        let mut read_files = HashMap::<String, Vec<String>>::new();
++        read_files.insert("rustc_params".to_string(), vec!["--edition=2021".to_string()]);
++        let mut read_file = |filename: &str| -> Result<Vec<String>, OptionError> {
++            read_files
++                .get(filename)
++                .cloned()
++                .ok_or_else(|| OptionError::Generic(format!("file not found: {filename}")))
++        };
++
++        let mut written1 = HashMap::<String, Vec<String>>::new();
++        let mut write1 = |filename: &str, content: &str| -> Result<(), OptionError> {
++            written1
++                .entry(filename.to_owned())
++                .or_default()
++                .push(content.to_owned());
++            Ok(())
++        };
++        let mut tf1 = TempFiles::default();
++        let args1 = prepare_args_internal(
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "@rustc_params".to_string(),
++                "@rustc_params".to_string(),
++            ],
++            &[],
++            false,
++            Some(("pid100", &mut tf1)),
++            Some(&mut read_file),
++            Some(&mut write1),
++        )
++        .unwrap();
++        assert_eq!(
++            args1,
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "@rustc_params.rustdoc.pid100.0.expanded".to_string(),
++                "@rustc_params.rustdoc.pid100.1.expanded".to_string(),
++            ]
++        );
++
++        let mut written2 = HashMap::<String, Vec<String>>::new();
++        let mut write2 = |filename: &str, content: &str| -> Result<(), OptionError> {
++            written2
++                .entry(filename.to_owned())
++                .or_default()
++                .push(content.to_owned());
++            Ok(())
++        };
++        let mut tf2 = TempFiles::default();
++        let args2 = prepare_args_internal(
++            vec!["/path/to/rustdoc".to_string(), "@rustc_params".to_string()],
++            &[],
++            false,
++            Some(("pid101", &mut tf2)),
++            Some(&mut read_file),
++            Some(&mut write2),
++        )
++        .unwrap();
++        assert_eq!(
++            args2,
++            vec![
++                "/path/to/rustdoc".to_string(),
++                "@rustc_params.rustdoc.pid101.0.expanded".to_string(),
++            ]
++        );
++    }
+ }

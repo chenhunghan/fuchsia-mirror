@@ -23,8 +23,6 @@ async fn test_default() -> Result<(), Error> {
         ${protocol_pascal_case}Marker::PROTOCOL_NAME,
         TestKind::ClientAndServer { client: &client, server: &server },
         |builder: RealmBuilder, client: ChildRef| async move {
-            builder.init_mutable_config_to_empty(&client).await?;
-
             // TODO(${dns}): Use the `builder` parameter to set the appropriate structured config for this test case.
 
             Ok::<(RealmBuilder, ChildRef), Error>((builder, client))

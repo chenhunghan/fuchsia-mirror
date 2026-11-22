@@ -1765,4 +1765,224 @@ mod test {
             )
         );
     }
+
+    // Validates https://fxbug.dev/586102325 (parent https://fxbug.dev/306199648):
+    // FXT logs streamed through log-command currently emit KVPs in deterministic sorted
+    // key order (via LogsDataBuilder::build() -> payload.sort()) in both text and machine
+    // JSON modes rather than FXT insertion order. Update this expectation when insertion
+    // order preservation is implemented.
+    #[cfg(not(feature = "fdomain"))]
+    #[fuchsia::test]
+    async fn test_fxt_kvp_ordering_text_and_json_output() {
+        use diagnostics_log_encoding::encode::{Encoder, EncoderOpts, ResizableBuffer};
+        use diagnostics_log_encoding::{Argument, Header, LOG_CONTROL_BIT, MONIKER, Record, URL};
+        use zerocopy::{FromBytes, IntoBytes};
+
+        let symbolizer = NoOpSymbolizer {};
+        let fn_encode = |record: Record<'_>, tag: u32| -> Vec<u8> {
+            let mut encoder = Encoder::new(
+                std::io::Cursor::new(ResizableBuffer::from(Vec::new())),
+                EncoderOpts::default(),
+            );
+            encoder.write_record(record).unwrap();
+            let mut bytes = encoder.take().into_inner().into_inner();
+            let mut header = Header::read_from_bytes(&bytes[0..8]).unwrap();
+            header.set_tag(tag);
+            bytes[0..8].copy_from_slice(header.as_bytes());
+            bytes
+        };
+
+        let manifest_bytes = fn_encode(
+            Record {
+                timestamp: zx::BootInstant::from_nanos(0),
+                severity: 0x30,
+                arguments: vec![
+                    Argument::other(MONIKER, "core/foo"),
+                    Argument::other(URL, "fuchsia-pkg://foo"),
+                ],
+            },
+            1 | LOG_CONTROL_BIT,
+        );
+
+        let log_bytes = fn_encode(
+            Record {
+                timestamp: zx::BootInstant::from_nanos(123_000),
+                severity: 0x30,
+                arguments: vec![
+                    Argument::message("hello"),
+                    Argument::new("zebra", "last"),
+                    Argument::new("alpha", -42i64),
+                    Argument::new("middle", 7u64),
+                    Argument::new("beta", true),
+                ],
+            },
+            1,
+        );
+
+        // 1. Human-readable text mode.
+        let buffers_text = TestBuffers::default();
+        let stdout_text = JsonWriter::<LogEntry>::new_test(None, &buffers_text);
+        let text_options = LogFormatterOptions {
+            display: Some(LogTextDisplayOptions {
+                color: LogTextColor::None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut formatter_text =
+            DefaultLogFormatter::new(LogFilterCriteria::default(), stdout_text, text_options);
+        formatter_text.set_boot_timestamp(Timestamp::from_nanos(0));
+
+        let (sender_text, receiver_text) = zx::Socket::create_stream();
+        sender_text.write(&manifest_bytes).unwrap();
+        sender_text.write(&log_bytes).unwrap();
+        drop(sender_text);
+
+        super::dump_fxt_logs_from_socket(
+            flex_client::socket_to_async(receiver_text),
+            &mut formatter_text,
+            &symbolizer,
+            false,
+        )
+        .await
+        .unwrap();
+        drop(formatter_text);
+
+        let text_output = buffers_text.into_stdout_str();
+        assert!(
+            text_output.ends_with(" INFO: hello alpha=-42 beta=true middle=7 zebra=last\n"),
+            "unexpected FXT text output: {text_output:?}"
+        );
+
+        // 2. Machine JSON mode.
+        let buffers_json = TestBuffers::default();
+        let stdout_json = JsonWriter::<LogEntry>::new_test(Some(Format::Json), &buffers_json);
+        let json_options = LogFormatterOptions { display: None, ..Default::default() };
+        let mut formatter_json =
+            DefaultLogFormatter::new(LogFilterCriteria::default(), stdout_json, json_options);
+        formatter_json.set_boot_timestamp(Timestamp::from_nanos(0));
+
+        let (sender_json, receiver_json) = zx::Socket::create_stream();
+        sender_json.write(&manifest_bytes).unwrap();
+        sender_json.write(&log_bytes).unwrap();
+        drop(sender_json);
+
+        super::dump_fxt_logs_from_socket(
+            flex_client::socket_to_async(receiver_json),
+            &mut formatter_json,
+            &symbolizer,
+            false,
+        )
+        .await
+        .unwrap();
+        drop(formatter_json);
+
+        let json_output = buffers_json.into_stdout_str();
+        let keys_marker = "\"keys\":{";
+        let keys_start = json_output
+            .find(keys_marker)
+            .unwrap_or_else(|| panic!("missing keys object in JSON output: {json_output}"));
+        let keys_slice = &json_output[keys_start..];
+        let alpha_pos = keys_slice.find("\"alpha\":-42").unwrap();
+        let beta_pos = keys_slice.find("\"beta\":true").unwrap();
+        let middle_pos = keys_slice.find("\"middle\":7").unwrap();
+        let zebra_pos = keys_slice.find("\"zebra\":\"last\"").unwrap();
+        assert!(
+            alpha_pos < beta_pos && beta_pos < middle_pos && middle_pos < zebra_pos,
+            "expected sorted keys in machine JSON output, got: {json_output}"
+        );
+    }
+
+    // Validates https://fxbug.dev/586102325 (parent https://fxbug.dev/306199648):
+    // JSON logs deserialize through HashMap in diagnostics_hierarchy::serialization::deserialize,
+    // so multi-KVP order on the JSON path is currently nondeterministic. This test validates all
+    // KVPs are emitted in both text and machine JSON modes without pinning a single HashMap
+    // iteration permutation (avoiding flakes).
+    // TODO(https://fxbug.dev/306199648): Update this test when deterministic KVP ordering
+    // is implemented for JSON deserialization.
+    #[cfg(not(feature = "fdomain"))]
+    #[fuchsia::test]
+    async fn test_json_kvp_ordering_text_and_json_output() {
+        let symbolizer = NoOpSymbolizer {};
+        let raw_json_log = concat!(
+            r#"{"data_source":"Logs","#,
+            r#""metadata":{"component_url":"fuchsia-pkg://foo","timestamp":123000,"severity":"INFO"},"#,
+            r#""moniker":"core/foo","#,
+            r#""payload":{"root":{"message":{"value":"hello"},"keys":{"zebra":"last","alpha":-42,"middle":7,"beta":true}}},"#,
+            r#""version":1}"#,
+            "\n"
+        );
+
+        // 1. Human-readable text mode.
+        let buffers_text = TestBuffers::default();
+        let stdout_text = JsonWriter::<LogEntry>::new_test(None, &buffers_text);
+        let text_options = LogFormatterOptions {
+            display: Some(LogTextDisplayOptions {
+                color: LogTextColor::None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut formatter_text =
+            DefaultLogFormatter::new(LogFilterCriteria::default(), stdout_text, text_options);
+        formatter_text.set_boot_timestamp(Timestamp::from_nanos(0));
+
+        let (sender_text, receiver_text) = zx::Socket::create_stream();
+        sender_text.write(raw_json_log.as_bytes()).unwrap();
+        drop(sender_text);
+
+        super::dump_logs_from_socket(
+            flex_client::socket_to_async(receiver_text),
+            &mut formatter_text,
+            &symbolizer,
+            false,
+        )
+        .await
+        .unwrap();
+        drop(formatter_text);
+
+        let text_output = buffers_text.into_stdout_str();
+        let line = text_output.trim_end_matches('\n');
+        let (prefix, kvps_str) = line
+            .split_once(" INFO: hello ")
+            .unwrap_or_else(|| panic!("unexpected JSON text output: {text_output:?}"));
+        assert!(prefix.ends_with(']'), "unexpected prefix: {prefix:?}");
+        let mut kvps: Vec<&str> = kvps_str.split_ascii_whitespace().collect();
+        kvps.sort_unstable();
+        assert_eq!(kvps, vec!["alpha=-42", "beta=true", "middle=7", "zebra=last"]);
+
+        // 2. Machine JSON mode.
+        let buffers_json = TestBuffers::default();
+        let stdout_json = JsonWriter::<LogEntry>::new_test(Some(Format::Json), &buffers_json);
+        let json_options = LogFormatterOptions { display: None, ..Default::default() };
+        let mut formatter_json =
+            DefaultLogFormatter::new(LogFilterCriteria::default(), stdout_json, json_options);
+        formatter_json.set_boot_timestamp(Timestamp::from_nanos(0));
+
+        let (sender_json, receiver_json) = zx::Socket::create_stream();
+        sender_json.write(raw_json_log.as_bytes()).unwrap();
+        drop(sender_json);
+
+        super::dump_logs_from_socket(
+            flex_client::socket_to_async(receiver_json),
+            &mut formatter_json,
+            &symbolizer,
+            false,
+        )
+        .await
+        .unwrap();
+        drop(formatter_json);
+
+        let json_output = buffers_json.into_stdout_str();
+        let parsed: serde_json::Value = serde_json::from_str(json_output.trim()).unwrap();
+        assert_eq!(
+            parsed["data"]["TargetLog"]["payload"]["root"]["keys"],
+            serde_json::json!({
+                "alpha": -42,
+                "beta": true,
+                "middle": 7,
+                "zebra": "last",
+            })
+        );
+    }
 }

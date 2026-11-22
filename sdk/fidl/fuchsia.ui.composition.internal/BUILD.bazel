@@ -12,7 +12,6 @@ fidl_library(
         "display_ownership.fidl",
         "screen_capture.fidl",
     ],
-    enable_hlcpp = True,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.math",

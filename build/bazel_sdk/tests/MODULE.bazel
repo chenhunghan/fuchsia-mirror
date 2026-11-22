@@ -45,6 +45,12 @@ local_path_override(
     path = "{}/third_party/googletest/src".format(_FUCHSIA_SOURCE_ROOT),
 )
 
+bazel_dep(name = "re2", version = "", repo_name = "com_googlesource_code_re2")
+local_path_override(
+    module_name = "re2",
+    path = "{}/third_party/re2/src".format(_FUCHSIA_SOURCE_ROOT),
+)
+
 # Define @fuchsia_in_tree_idk to point to an empty IDK repository.
 # This will always be overridden by bazel_tests.py when running the test suite
 # against the real in-tree IDK using --override-repository=fuchsia_in_tree_idk=/path/to/idk.
@@ -146,77 +152,10 @@ empty_host_cpp_toolchain_repository(
 
 register_toolchains("@host_no_cpp//:empty_cpp_toolchain")
 
-# The following deps are not needed by the tests. They are here to make sure the
-# tests do NOT try to depend on different versions of common deps transitively
-# depended on by them, so it won't fail local Bazel registry lookup. For this
-# reason, they are intentionally kept as the same version as the toplevel
-# module.
-bazel_dep(name = "rules_rust", version = "0.74.0")
-bazel_dep(name = "rules_go", version = "0.61.1", repo_name = "io_bazel_rules_go")
-single_version_override(
-    module_name = "rules_go",
-    version = "0.61.1",
-)
-
-bazel_dep(name = "pybind11_bazel", version = "2.13.6")
-bazel_dep(name = "apple_support", version = "1.24.2", repo_name = "build_bazel_apple_support")
-bazel_dep(name = "re2", version = "", repo_name = "com_googlesource_code_re2")
-local_path_override(
-    module_name = "re2",
-    path = "{}/third_party/re2/src".format(_FUCHSIA_SOURCE_ROOT),
-)
-
-single_version_override(
-    module_name = "rules_cc",
-    version = "0.2.25",
-)
-
-single_version_override(
-    module_name = "rules_python",
-    version = "2.0.3",
-)
-
-single_version_override(
-    module_name = "bazel_skylib",
-    version = "1.9.0",
-)
-
-single_version_override(
-    module_name = "apple_support",
-    version = "1.24.1",
-)
-
-single_version_override(
-    module_name = "rules_proto",
-    version = "7.0.2",
-)
-
-single_version_override(
-    module_name = "bazel_features",
-    version = "1.36.0",
-)
-
-single_version_override(
-    module_name = "jsoncpp",
-    version = "1.9.5",
-)
-
-single_version_override(
-    module_name = "rules_java",
-    version = "8.14.0",
-)
-
-single_version_override(
-    module_name = "rules_jvm_external",
-    version = "6.3",
-)
-
+# Keep rules_kotlin at 1.9.6: protobuf depends on rules_kotlin 2.2.2, which
+# adds a bazel_dep on rules_android 0.6.4 whose MODULE.bazel unconditionally
+# registers @androidsdk toolchains.
 single_version_override(
     module_name = "rules_kotlin",
     version = "1.9.6",
-)
-
-single_version_override(
-    module_name = "rules_rust",
-    version = "0.74.0",
 )

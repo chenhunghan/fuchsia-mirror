@@ -21,7 +21,7 @@
     {
       "name": "test.experimentalmaybefromalias/MyProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 3,
         "column": 17,
         "length": 10
@@ -40,7 +40,7 @@
         "Testing"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 14,
         "column": 6,
         "length": 7
@@ -68,7 +68,7 @@
           },
           "name": "u1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 15,
             "column": 5,
             "length": 2
@@ -114,7 +114,7 @@
           },
           "name": "u2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 16,
             "column": 5,
             "length": 2
@@ -159,7 +159,7 @@
           },
           "name": "u3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 17,
             "column": 5,
             "length": 2
@@ -218,7 +218,7 @@
           },
           "name": "u4",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 18,
             "column": 5,
             "length": 2
@@ -276,7 +276,7 @@
           },
           "name": "u5",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 19,
             "column": 5,
             "length": 2
@@ -335,7 +335,7 @@
           },
           "name": "u6",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 20,
             "column": 5,
             "length": 2
@@ -393,7 +393,7 @@
           },
           "name": "u7",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 21,
             "column": 5,
             "length": 2
@@ -438,7 +438,7 @@
           },
           "name": "v1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 23,
             "column": 5,
             "length": 2
@@ -496,7 +496,7 @@
           },
           "name": "v2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 24,
             "column": 5,
             "length": 2
@@ -554,7 +554,7 @@
           },
           "name": "v3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 25,
             "column": 5,
             "length": 2
@@ -599,7 +599,7 @@
           },
           "name": "a1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 27,
             "column": 5,
             "length": 2
@@ -657,7 +657,7 @@
           },
           "name": "a2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 28,
             "column": 5,
             "length": 2
@@ -715,7 +715,7 @@
           },
           "name": "a3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 29,
             "column": 5,
             "length": 2
@@ -750,7 +750,7 @@
           },
           "name": "r1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 31,
             "column": 5,
             "length": 2
@@ -798,7 +798,7 @@
           },
           "name": "r2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 32,
             "column": 5,
             "length": 2
@@ -846,7 +846,7 @@
           },
           "name": "r3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 33,
             "column": 5,
             "length": 2
@@ -891,7 +891,7 @@
           },
           "name": "b1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 35,
             "column": 5,
             "length": 2
@@ -949,7 +949,7 @@
           },
           "name": "b2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 36,
             "column": 5,
             "length": 2
@@ -1007,7 +1007,7 @@
           },
           "name": "b3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 37,
             "column": 5,
             "length": 2
@@ -1039,7 +1039,7 @@
           },
           "name": "s1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 39,
             "column": 5,
             "length": 2
@@ -1084,7 +1084,7 @@
           },
           "name": "s2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 40,
             "column": 5,
             "length": 2
@@ -1129,7 +1129,7 @@
           },
           "name": "s3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 41,
             "column": 5,
             "length": 2
@@ -1180,7 +1180,7 @@
           },
           "name": "vv1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 43,
             "column": 5,
             "length": 3
@@ -1245,7 +1245,7 @@
           },
           "name": "vv2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 44,
             "column": 5,
             "length": 3
@@ -1309,7 +1309,7 @@
           },
           "name": "vv3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 45,
             "column": 5,
             "length": 3
@@ -1359,7 +1359,7 @@
           },
           "name": "aa1",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 47,
             "column": 5,
             "length": 3
@@ -1423,7 +1423,7 @@
           },
           "name": "aa2",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 48,
             "column": 5,
             "length": 3
@@ -1486,7 +1486,7 @@
           },
           "name": "aa3",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
             "line": 49,
             "column": 5,
             "length": 3
@@ -1518,7 +1518,7 @@
     {
       "name": "test.experimentalmaybefromalias/AliasOfArray",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 9,
         "column": 7,
         "length": 12
@@ -1575,7 +1575,7 @@
     {
       "name": "test.experimentalmaybefromalias/AliasOfArrayContainingAliasOfArray",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 12,
         "column": 7,
         "length": 34
@@ -1637,7 +1637,7 @@
     {
       "name": "test.experimentalmaybefromalias/AliasOfBytes",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 5,
         "column": 7,
         "length": 12
@@ -1684,7 +1684,7 @@
     {
       "name": "test.experimentalmaybefromalias/AliasOfRequest",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 10,
         "column": 7,
         "length": 14
@@ -1721,7 +1721,7 @@
     {
       "name": "test.experimentalmaybefromalias/AliasOfString",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 6,
         "column": 7,
         "length": 13
@@ -1749,7 +1749,7 @@
     {
       "name": "test.experimentalmaybefromalias/AliasOfVectorContainingAliasOfVector",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 11,
         "column": 7,
         "length": 36
@@ -1812,7 +1812,7 @@
     {
       "name": "test.experimentalmaybefromalias/U64",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 7,
         "column": 7,
         "length": 3
@@ -1840,7 +1840,7 @@
     {
       "name": "test.experimentalmaybefromalias/Vector",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/experimental_maybe_from_alias.test.fidl",
         "line": 8,
         "column": 7,
         "length": 6

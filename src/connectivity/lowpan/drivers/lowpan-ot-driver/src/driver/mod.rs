@@ -94,6 +94,11 @@ pub struct OtDriver<OT, NI, BI> {
     /// Additional TXT records set by `meshcop_update_txt_entries`.
     border_agent_vendor_txt_entries: futures::lock::Mutex<Vec<(String, Vec<u8>)>>,
 
+    /// NAT64 masquerade state. Held across masquerade FIDL calls to serialize
+    /// NAT64 reconciliation. Must never be acquired while `driver_state` is
+    /// locked.
+    nat64: futures::lock::Mutex<Nat64>,
+
     /// Information about the platform on which the driver is running.  This information is cached
     /// to prevent repeated service reconnections and redundant queries.
     /// Commands ePSKc publishing logic to start or stop.
@@ -124,6 +129,7 @@ impl<OT: ot::Cli + ot::BackboneRouter, NI: NetworkInterface, BI: BackboneInterfa
                 vec![],
             )),
             border_agent_vendor_txt_entries: futures::lock::Mutex::new(vec![]),
+            nat64: futures::lock::Mutex::new(Nat64::new()),
             product_metadata,
             epskc_publisher: fuchsia_sync::Mutex::new(epskc_publisher),
             border_agent_publisher: fuchsia_sync::Mutex::new(border_agent_publisher),

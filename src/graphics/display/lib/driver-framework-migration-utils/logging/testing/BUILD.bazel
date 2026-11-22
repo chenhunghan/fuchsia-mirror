@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "logging-hardware-module",
+    testonly = True,
+    srcs = ["logging-hardware-module.cc"],
+    hdrs = ["logging-hardware-module.h"],
+    implementation_deps = ["//src/graphics/display/lib/driver-framework-migration-utils/logging:zxlogf"],
+    visibility = ["//src/graphics/display/lib/driver-framework-migration-utils/logging:__pkg__"],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether dfv1-driver-with-logging should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_library(
+    name = "dfv1-driver-with-logging",
+    testonly = True,
+    srcs = ["dfv1-driver-with-logging.cc"],
+    hdrs = ["dfv1-driver-with-logging.h"],
+    implementation_deps = [
+        "//src/lib/ddk",
+        "//zircon/system/ulib/fbl",
+    ],
+    # Uses Fuchsia-only DFv1 driver (`ddktl`/`ddk`) and Zircon headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/graphics/display/lib/driver-framework-migration-utils/logging:__pkg__"],
+    deps = [
+        ":logging-hardware-module",
+        "//src/lib/ddktl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether dfv2-driver-with-logging should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_library(
+    name = "dfv2-driver-with-logging",
+    testonly = True,
+    srcs = ["dfv2-driver-with-logging.cc"],
+    hdrs = ["dfv2-driver-with-logging.h"],
+    # Uses Fuchsia-only DFv2 driver component and Zircon headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/graphics/display/lib/driver-framework-migration-utils/logging:__pkg__"],
+    deps = [
+        ":logging-hardware-module",
+        "//sdk/lib/driver/component/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

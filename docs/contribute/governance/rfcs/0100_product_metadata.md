@@ -152,7 +152,7 @@ to the schemata.
     1. Specify [emulator metadata](#emulator-schema) including sufficient
        details to boot the image on a virtual device.
 
-#### Schema evolution
+#### Schema evolution {#schema-evolution}
 
 There are a number of possible future directions for evolution of the schema.
 For example:

@@ -19,11 +19,11 @@ static const std::map<std::string, AVCodecID> codec_ids = {{"video/h264", AV_COD
 }  // namespace
 
 std::optional<std::unique_ptr<AvCodecContext>> AvCodecContext::CreateDecoder(
-    const fuchsia::media::FormatDetails& format_details, GetBufferCallback get_buffer_callback) {
-  if (!format_details.has_mime_type()) {
+    const fuchsia_media::FormatDetails& format_details, GetBufferCallback get_buffer_callback) {
+  if (!format_details.mime_type().has_value()) {
     return std::nullopt;
   }
-  auto codec_id = codec_ids.find(format_details.mime_type());
+  auto codec_id = codec_ids.find(*format_details.mime_type());
   if (codec_id == codec_ids.end()) {
     return std::nullopt;
   }
@@ -49,9 +49,9 @@ std::optional<std::unique_ptr<AvCodecContext>> AvCodecContext::CreateDecoder(
   std::unique_ptr<AvCodecContext> decoder(
       new AvCodecContext(std::move(avcodec_context), std::move(get_buffer_callback)));
 
-  if (format_details.has_oob_bytes() && !format_details.oob_bytes().empty()) {
+  if (format_details.oob_bytes().has_value() && !format_details.oob_bytes()->empty()) {
     // Freed in AVCodecContext deleter in avcodec_free.
-    const std::vector<uint8_t>& oob = format_details.oob_bytes();
+    const std::vector<uint8_t>& oob = *format_details.oob_bytes();
     ZX_ASSERT(oob.size() <=
               static_cast<size_t>(std::numeric_limits<int>::max()) - AV_INPUT_BUFFER_PADDING_SIZE);
     auto* extradata =
@@ -140,26 +140,20 @@ AvCodecContext::FrameBufferRequest AvCodecContext::frame_buffer_request(AVFrame*
   int linesizes[4];
   av_image_fill_linesizes(linesizes, static_cast<AVPixelFormat>(frame->format), frame->width);
 
-  fuchsia::images2::ImageFormat image_format;
-  image_format.set_pixel_format(fuchsia::images2::PixelFormat::YV12);
-  image_format.set_size(fuchsia::math::SizeU{
-      .width = static_cast<uint32_t>(frame->width),
-      .height = static_cast<uint32_t>(frame->height),
-  });
-  image_format.set_bytes_per_row(static_cast<uint32_t>(linesizes[0]));
-  image_format.set_display_rect(fuchsia::math::RectU{
-      .x = 0,
-      .y = 0,
-      .width = static_cast<uint32_t>(frame->width - frame->crop_right),
-      .height = static_cast<uint32_t>(frame->height - frame->crop_bottom),
-  });
-  image_format.set_color_space(fuchsia::images2::ColorSpace::REC709);
+  fuchsia_images2::ImageFormat image_format;
+  image_format.pixel_format() = fuchsia_images2::PixelFormat::kYv12;
+  image_format.size() = fuchsia_math::SizeU(static_cast<uint32_t>(frame->width),
+                                            static_cast<uint32_t>(frame->height));
+  image_format.bytes_per_row() = static_cast<uint32_t>(linesizes[0]);
+  image_format.display_rect() =
+      fuchsia_math::RectU(0, 0, static_cast<uint32_t>(frame->width - frame->crop_right),
+                          static_cast<uint32_t>(frame->height - frame->crop_bottom));
+  image_format.color_space() = fuchsia_images2::ColorSpace::kRec709;
 
   if (frame->sample_aspect_ratio.num) {
-    image_format.set_pixel_aspect_ratio(fuchsia::math::SizeU{
-        .width = static_cast<uint32_t>(frame->sample_aspect_ratio.num),
-        .height = static_cast<uint32_t>(frame->sample_aspect_ratio.den),
-    });
+    image_format.pixel_aspect_ratio() =
+        fuchsia_math::SizeU(static_cast<uint32_t>(frame->sample_aspect_ratio.num),
+                            static_cast<uint32_t>(frame->sample_aspect_ratio.den));
   }
 
   int buffer_bytes_needed_int = av_image_get_buffer_size(static_cast<AVPixelFormat>(frame->format),
@@ -187,15 +181,15 @@ int AvCodecContext::GetBufferCallbackRouter(AVCodecContext* avcodec_context, AVF
                                             int flags) {
   auto instance = reinterpret_cast<AvCodecContext*>(avcodec_context->opaque);
   ZX_DEBUG_ASSERT(instance);
-  return instance->GetBufferHandler(avcodec_context, frame, flags);
+  return instance->GetBufferHandler(frame, flags);
 }
 
-int AvCodecContext::GetBufferHandler(AVCodecContext* avcodec_context, AVFrame* frame, int flags) {
+int AvCodecContext::GetBufferHandler(AVFrame* frame, int flags) {
   ZX_DEBUG_ASSERT(avcodec_context_);
   ZX_DEBUG_ASSERT(get_buffer_callback_);
   ZX_DEBUG_ASSERT(frame->width);
 
-  return get_buffer_callback_(frame_buffer_request(frame), avcodec_context, frame, flags);
+  return get_buffer_callback_(frame_buffer_request(frame), frame, flags);
 }
 
 AvCodecContext::AvCodecContext(

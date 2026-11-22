@@ -173,6 +173,7 @@ rustc_binary_host_tool(
         "exclude_toolchain_tags=profile",
     ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//vendor/google:__subpackages__"],
     deps = [
         ":triage_app_lib",
         "//third_party/rust_crates/vendor:anyhow",

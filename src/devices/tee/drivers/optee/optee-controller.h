@@ -19,6 +19,7 @@
 #include <lib/zx/channel.h>
 #include <lib/zx/resource.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <list>
 #include <map>
@@ -88,11 +89,11 @@ class OpteeControllerBase {
   virtual SharedMemoryManager::DriverMemoryPool* driver_pool() const = 0;
   virtual SharedMemoryManager::ClientMemoryPool* client_pool() const = 0;
 
-  void WaitQueueWait(uint64_t key);
+  bool WaitQueueWait(uint64_t key);
   void WaitQueueSignal(uint64_t key);
   size_t WaitQueueSize() const;
   std::list<WaitCtx>::iterator CommandQueueInit();
-  void CommandQueueWait(std::list<WaitCtx>::iterator& el);
+  bool CommandQueueWait(std::list<WaitCtx>::iterator& el, bool abort_if_no_active_commands = false);
   void CommandQueueSignal(const std::list<WaitCtx>::iterator& el);
   size_t CommandQueueSize() const;
   size_t CommandQueueWaitSize() const;
@@ -100,15 +101,18 @@ class OpteeControllerBase {
   virtual zx::result<fidl::ClientEnd<fuchsia_hardware_rpmb::Rpmb>> RpmbConnectServer() const = 0;
   virtual zx_device_t* GetDevice() const = 0;
 
+ protected:
+  virtual bool ShouldBlockOnWaitQueue() const { return true; }
+
  private:
-  fbl::Mutex wq_lock_;
+  mutable fbl::Mutex wq_lock_;
   struct WaitQueueEntry {
     std::list<std::shared_ptr<WaitCtx>> waiters;
     bool has_pending_signal = false;
   };
   std::map<uint64_t, WaitQueueEntry> wait_queue_;
 
-  fbl::Mutex cq_lock_;
+  mutable fbl::Mutex cq_lock_;
   std::list<WaitCtx> command_queue_;
   std::list<WaitCtx*> command_queue_wait_;
 };
@@ -146,11 +150,16 @@ class OpteeController : public OpteeControllerBase,
 
   CallResult CallWithMessage(const optee::Message& message, RpcHandler rpc_handler) override;
 
+  // `shared_memory_manager_` is initialized in `Bind()` before any clients can connect and is only
+  // cleared/destroyed after `ShutdownLoops()` has stopped all loops and destroyed every
+  // `OpteeClient`.
   SharedMemoryManager::DriverMemoryPool* driver_pool() const override {
+    ZX_DEBUG_ASSERT(shared_memory_manager_ != nullptr);
     return shared_memory_manager_->driver_pool();
   }
 
   SharedMemoryManager::ClientMemoryPool* client_pool() const override {
+    ZX_DEBUG_ASSERT(shared_memory_manager_ != nullptr);
     return shared_memory_manager_->client_pool();
   }
 
@@ -161,15 +170,22 @@ class OpteeController : public OpteeControllerBase,
   }
 
   const GetOsRevisionResult& os_revision() const { return os_revision_; }
+  bool IsShuttingDown() const __TA_EXCLUDES(client_binding_lock_);
 
   // Should only be used for testing.
   const std::optional<fdf::MmioPinnedBuffer>& pinned_mmio() const { return pinned_mmio_; }
+
+ protected:
+  bool ShouldBlockOnWaitQueue() const override {
+    return !in_single_threaded_teardown_.load(std::memory_order_acquire);
+  }
 
  private:
   static constexpr fuchsia_tee::wire::Uuid kOpteeOsUuid = {
       0x486178E0, 0xE7F8, 0x11E3, {0xBC, 0x5E, 0x00, 0x02, 0xA5, 0xD5, 0xC5, 0x1B}};
 
   zx_status_t InitThreadPools();
+  void ShutdownLoops() __TA_EXCLUDES(client_binding_lock_);
   zx_status_t SetProfileByRole(thrd_t& thr, const std::string& role);
   zx_status_t CreateThreadPool(async::Loop* loop, uint32_t thread_count, const std::string& role);
   async_dispatcher_t* GetDispatcherForTa(const Uuid& ta_uuid);
@@ -183,19 +199,25 @@ class OpteeController : public OpteeControllerBase,
 
   zx_status_t ConnectToApplicationInternal(
       Uuid application_uuid, fidl::ClientEnd<fuchsia_tee_manager::Provider> service_provider,
-      fidl::ServerEnd<fuchsia_tee::Application> application_request);
+      fidl::ServerEnd<fuchsia_tee::Application> application_request)
+      __TA_EXCLUDES(client_binding_lock_);
 
+  // Hardware and shared-memory resources must be declared before the dispatch loops so they
+  // outlive all OpteeClient instances during reverse-order member destruction.
   fdf::PDev pdev_;
-  async::Loop loop_;
-  std::list<async::Loop> custom_loops_;
-  std::map<Uuid, std::list<async::Loop>::iterator> uuid_config_;
-
   zx::resource secure_monitor_;
   uint32_t secure_world_capabilities_ = 0;
   GetOsRevisionResult os_revision_;
   zx::bti bti_;
   std::optional<fdf::MmioPinnedBuffer> pinned_mmio_;
   std::unique_ptr<SharedMemoryManager> shared_memory_manager_;
+
+  mutable fbl::Mutex client_binding_lock_;
+  bool is_shutting_down_ __TA_GUARDED(client_binding_lock_) = false;
+  std::atomic<bool> in_single_threaded_teardown_{false};
+  async::Loop loop_;
+  std::list<async::Loop> custom_loops_;
+  std::map<Uuid, std::list<async::Loop>::iterator> uuid_config_;
 
   component::OutgoingDirectory outgoing_{fdf::Dispatcher::GetCurrent()->async_dispatcher()};
   fidl::ServerBindingGroup<fuchsia_hardware_tee::DeviceConnector> bindings_;

@@ -12,7 +12,7 @@ Fuchsia system.
 
 [^1]: With the exception of early-boot software necessary to run components.
 
-### What is sandboxing?
+### What is sandboxing? {:#what-is-sandboxing}
 
 Sandboxing is a security mechanism to isolate programs from each other at
 runtime. In Fuchsia, all software is sandboxed. When a program is initially
@@ -22,7 +22,7 @@ for it to execute. This isolation property allows Fuchsia to employ the
 _principle of least privilege_: programs are provided only the minimal set
 of capabilities needed to execute.
 
-## Component Framework
+## Component Framework {:#component-framework}
 
 The Component Framework (CF) consists of the core concepts, tools, APIs,
 runtime, and libraries necessary to describe and run components and to
@@ -34,7 +34,7 @@ The Component Framework includes:
     _runner_, _realm_, _environment_, _capabilities_, and _resolver_.
 -   The [`component_manager`][doc-component-manager] process, which coordinates
     the communication and sharing of resources between components.
--   [FIDL APIs](#fidl-apis) implemented by `component_manager`, or implemented
+-   FIDL APIs implemented by `component_manager`, or implemented
     by other components and used by `component_manager`, for the purposes of
     coordination.
 -   Developer tools to build, execute, and test components.
@@ -88,7 +88,7 @@ Further reading:
 * [Component Framework capabilities][doc-capabilities]
 * [Environments][doc-environments]
 
-## Components
+## Components {:#components}
 
 _Components_ are the foundational building blocks of software running in Fuchsia.
 Each component is a composable, sandboxed module that interacts with other
@@ -151,7 +151,7 @@ Further reading:
 * [Component topology][doc-topology]
 * [Realms][doc-realms]
 
-### Lifecycle
+### Lifecycle {:#lifecycle}
 
 Components move through the following lifecycle states:
 

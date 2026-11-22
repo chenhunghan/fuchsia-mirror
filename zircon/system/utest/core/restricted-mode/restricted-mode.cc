@@ -22,6 +22,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 
 #include <bringup/lib/restricted-machine/environment.h>
 #include <bringup/lib/restricted-machine/machine-type.h>
@@ -314,10 +315,9 @@ TEST_P(RestrictedMode, FloatingPointState) {
   for (uint32_t i = 0; i < kNumFloatingPointThreads; i++) {
     threads.emplace_back(
         [](uint32_t thread_num) {
-          char fpu_buffer[restricted_machine::RegisterState::kFpuBufferSize];
-          memset(&fpu_buffer[0], 0x90 + thread_num,
-                 restricted_machine::RegisterState::kFpuBufferSize);
-          restricted_machine::internal::load_fpu_registers(fpu_buffer);
+          std::vector<uint8_t> fpu_buffer(restricted_machine::RegisterState::kFpuBufferSize,
+                                          static_cast<uint8_t>(0x90 + thread_num));
+          restricted_machine::internal::load_fpu_registers(fpu_buffer.data());
         },
         i);
   }

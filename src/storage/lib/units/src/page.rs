@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{BlockSize, BlockSizeSpec, GenericBlockSize, MaskShiftSpec};
+use crate::{BlockSize, BlockSizeTag, make_mask_shift};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Cached system page size in the MaskShiftSpec representation, initialized on first access.
+/// Cached system page size in the "mask shift" representation, initialized on first access.
 static PAGE_MASK_SHIFT: AtomicU64 = AtomicU64::new(0);
 
 /// Initializes `PAGE_MASK_SHIFT`.
@@ -13,7 +13,7 @@ static PAGE_MASK_SHIFT: AtomicU64 = AtomicU64::new(0);
 #[inline(never)]
 fn initialize_page_mask_shift() -> u64 {
     let page_size = zx::system_get_page_size();
-    let repr = MaskShiftSpec::new(page_size as u64).0;
+    let repr = make_mask_shift(page_size as u64);
     PAGE_MASK_SHIFT.store(repr, Ordering::Relaxed);
     repr
 }
@@ -23,39 +23,16 @@ fn initialize_page_mask_shift() -> u64 {
 pub fn page_size() -> PageSize {
     let val = PAGE_MASK_SHIFT.load(Ordering::Relaxed);
     let val = if val != 0 { val } else { initialize_page_mask_shift() };
-    GenericBlockSize(PageSizeSpec(MaskShiftSpec(val)))
+    BlockSize { mask_shift: val, tag: PageSizeTag(()) }
 }
 
-/// A [`GenericBlockSize`] configured with the system's page size.
-pub type PageSize = GenericBlockSize<PageSizeSpec>;
+/// [`BlockSizeTag`] representing the Fuchsia system memory page size.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PageSizeTag(());
+impl BlockSizeTag for PageSizeTag {}
 
-/// [`BlockSizeSpec`] implementation representing the Fuchsia system memory page size.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct PageSizeSpec(MaskShiftSpec);
-
-impl BlockSizeSpec for PageSizeSpec {
-    #[inline(always)]
-    fn size(self) -> u64 {
-        self.0.size()
-    }
-
-    #[inline(always)]
-    fn mask(self) -> u64 {
-        self.0.mask()
-    }
-
-    #[inline(always)]
-    fn shift(self) -> u32 {
-        self.0.shift()
-    }
-}
-
-impl From<PageSize> for BlockSize {
-    #[inline(always)]
-    fn from(page_size: PageSize) -> Self {
-        GenericBlockSize(page_size.0.0)
-    }
-}
+/// A [`BlockSize`] configured with the system's page size.
+pub type PageSize = BlockSize<PageSizeTag>;
 
 #[cfg(test)]
 mod tests {

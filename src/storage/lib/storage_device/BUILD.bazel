@@ -44,6 +44,7 @@ rustc_library(
         "//src/storage/lib/block_protocol",
         "//src/storage/lib/buddy_allocator",
         "//src/storage/lib/ptr_slice",
+        "//src/storage/lib/units",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:event-listener",
         "//third_party/rust_crates/vendor:futures",

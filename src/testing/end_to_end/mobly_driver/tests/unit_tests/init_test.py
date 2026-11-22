@@ -333,6 +333,38 @@ class MoblyDriverLibTest(unittest.TestCase):
             preexec_fn=mock.ANY,
         )
 
+    @mock.patch("builtins.print")
+    @mock.patch("subprocess.Popen")
+    @mock.patch("mobly_driver.NamedTemporaryFile")
+    def test_run_sets_rules_python_extract_root(
+        self,
+        mock_tempfile: Any,
+        mock_popen: Any,
+        *unused_args: Any,
+    ) -> None:
+        """Test case to ensure the test gets a temporary RULES_PYTHON_EXTRACT_ROOT."""
+        self.mock_tmp.name = "/tmp/path"
+        self.mock_process.wait.return_value = 0
+        mock_tempfile.return_value.__enter__.return_value = self.mock_tmp
+        extract_root_existed_during_test = []
+
+        def popen(*args: Any, env: dict[str, str], **kwargs: Any) -> Any:
+            extract_root_existed_during_test.append(
+                os.path.isdir(env["RULES_PYTHON_EXTRACT_ROOT"])
+            )
+            return mock.DEFAULT
+
+        mock_popen.side_effect = popen
+        mock_popen.return_value.__enter__.return_value = self.mock_process
+
+        mobly_driver.run(self.mock_driver, "/py/path", "/test/path")
+
+        extract_root = mock_popen.call_args.kwargs["env"][
+            "RULES_PYTHON_EXTRACT_ROOT"
+        ]
+        self.assertEqual(extract_root_existed_during_test, [True])
+        self.assertFalse(os.path.exists(extract_root))
+
     @mock.patch.object(
         mobly_driver, "_LEFTOVER_PROCESS_GRACE_PERIOD", timedelta(seconds=0)
     )

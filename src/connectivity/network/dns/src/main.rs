@@ -638,6 +638,7 @@ fn handle_err(source: &str, err: ResolveError) -> fname::LookupError {
 async fn sort_preferred_addresses(
     mut addrs: Vec<fnet::IpAddress>,
     routes: &fnet_routes::StateProxy,
+    marks: &fnet::Marks,
 ) -> Result<Vec<fnet::IpAddress>, fname::LookupError> {
     let mut addrs_info = futures::future::try_join_all(
         addrs
@@ -645,22 +646,39 @@ async fn sort_preferred_addresses(
             // reallocate.
             .drain(..)
             .map(|addr| async move {
-                let source_addr = match routes.resolve(&addr).await? {
-                    Ok(fnet_routes::Resolved::Direct(fnet_routes::Destination {
+                let source_addr = match routes
+                    .resolve2(
+                        &addr,
+                        &fnet_routes::ResolveOptions {
+                            marks: Some(marks.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .await?
+                {
+                    Ok(fnet_routes::ResolveResult::Direct(fnet_routes::Destination {
                         source_address,
                         ..
                     }))
-                    | Ok(fnet_routes::Resolved::Gateway(fnet_routes::Destination {
+                    | Ok(fnet_routes::ResolveResult::Gateway(fnet_routes::Destination {
                         source_address,
                         ..
                     })) => source_address,
+                    Ok(fnet_routes::ResolveResult::__SourceBreaking { unknown_ordinal }) => {
+                        warn!(
+                            "fuchsia.net.routes/State.Resolve2({}) returned unknown variant {}",
+                            net_ext::IpAddress::from(addr),
+                            unknown_ordinal
+                        );
+                        None
+                    }
                     // If resolving routes returns an error treat it as an
                     // unreachable address.
                     Err(e) => {
                         debug!(
-                            "fuchsia.net.routes/State.resolve({}) failed {}",
+                            "fuchsia.net.routes/State.Resolve2({}) failed {:?}",
                             net_ext::IpAddress::from(addr),
-                            zx::Status::err_from_raw(e)
+                            e
                         );
                         None
                     }
@@ -670,7 +688,7 @@ async fn sort_preferred_addresses(
     )
     .await
     .map_err(|e: fidl::Error| {
-        warn!("fuchsia.net.routes/State.resolve FIDL error {:?}", e);
+        warn!("fuchsia.net.routes/State.Resolve2 FIDL error {:?}", e);
         fname::LookupError::InternalError
     })?;
 
@@ -911,12 +929,13 @@ async fn run_lookup<T: ResolverLookup>(
 
 const MAX_PARALLEL_REQUESTS: usize = 256;
 
-fn create_ip_lookup_fut<T: ResolverLookup>(
-    resolver: &SharedResolver<T>,
+fn create_ip_lookup_fut<'a, T: ResolverLookup>(
+    resolver: &'a SharedResolver<T>,
+    config_state: &'a dns::config::ServerConfigState,
     stats: Arc<QueryStats>,
     routes: fnet_routes::StateProxy,
     recv: mpsc::Receiver<IpLookupRequest>,
-) -> impl futures::Future<Output = ()> + '_ {
+) -> impl futures::Future<Output = ()> + 'a {
     recv.for_each_concurrent(
         MAX_PARALLEL_REQUESTS,
         move |IpLookupRequest { hostname, options, responder }| {
@@ -1060,7 +1079,8 @@ fn create_ip_lookup_fut<T: ResolverLookup>(
                         }
                     }
                     let addrs = if sort_addresses {
-                        sort_preferred_addresses(addrs, &routes).await?
+                        let marks = config_state.socket_marks();
+                        sort_preferred_addresses(addrs, &routes, &marks).await?
                     } else {
                         addrs
                     };
@@ -1124,13 +1144,13 @@ async fn run_lookup_admin<T: ResolverLookup>(
         .try_for_each(|req| async {
             match req {
                 LookupAdminRequest::SetDnsServers { servers, responder } => {
-                    let response = match state.update_servers(servers) {
+                    let response = match state.update_admin_servers(servers) {
                         UpdateServersResult::Updated(servers) => {
                             update_resolver(resolver, servers);
                             Ok(())
                         }
                         UpdateServersResult::NoChange => Ok(()),
-                        UpdateServersResult::InvalidsServers => {
+                        UpdateServersResult::InvalidServers => {
                             Err(zx::Status::INVALID_ARGS.into_raw())
                         }
                     };
@@ -1334,7 +1354,7 @@ pub async fn main() -> Result<(), Error> {
             }
         }
     });
-    let ip_lookup_fut = create_ip_lookup_fut(&resolver, stats.clone(), routes, recv);
+    let ip_lookup_fut = create_ip_lookup_fut(&resolver, &config_state, stats.clone(), routes, recv);
 
     // Failing to apply a scheduling role is not fatal. Issue a warning in case
     // DNS latency is important to a product and running at default priority is
@@ -1412,12 +1432,14 @@ mod tests {
                 panic!("Should not call routes/State. Received request {:?}", req)
             });
         let (sender, recv) = mpsc::channel(MAX_PARALLEL_REQUESTS);
+        let config_state = Arc::new(dns::config::ServerConfigState::new());
 
         (name_lookup_proxy, async move {
             futures::future::try_join3(
                 run_lookup(&resolver, stream, sender),
                 routes_fut,
-                create_ip_lookup_fut(&resolver, stats.clone(), routes_proxy, recv).map(Ok),
+                create_ip_lookup_fut(&resolver, &config_state, stats.clone(), routes_proxy, recv)
+                    .map(Ok),
             )
             .map(|r| match r {
                 Ok(((), (), ())) => (),
@@ -1665,12 +1687,19 @@ mod tests {
                 fidl::endpoints::create_proxy_and_stream::<fnet_routes::StateMarker>();
 
             let (sender, recv) = mpsc::channel(MAX_PARALLEL_REQUESTS);
-            let Self { shared_resolver, config_state: _, stats } = self;
+            let Self { shared_resolver, config_state, stats } = self;
             let ((), (), (), ()) = futures::future::try_join4(
                 run_lookup(shared_resolver, name_lookup_stream, sender),
                 f(name_lookup_proxy).map(Ok),
                 routes_stream.try_for_each(|req| futures::future::ok(handle_routes(req))),
-                create_ip_lookup_fut(shared_resolver, stats.clone(), routes_proxy, recv).map(Ok),
+                create_ip_lookup_fut(
+                    shared_resolver,
+                    config_state,
+                    stats.clone(),
+                    routes_proxy,
+                    recv,
+                )
+                .map(Ok),
             )
             .await
             .expect("Error running lookup future");
@@ -2671,11 +2700,15 @@ mod tests {
                 ResolverConfig::default(),
                 ResolverOpts::default(),
             ));
+            let config_state = dns::config::ServerConfigState::new();
             let stats = Arc::new(QueryStats::new());
             let (routes_proxy, _routes_stream) =
                 fidl::endpoints::create_proxy_and_stream::<fnet_routes::StateMarker>();
-            async move { create_ip_lookup_fut(&resolver, stats.clone(), routes_proxy, recv).await }
-                .fuse()
+            async move {
+                create_ip_lookup_fut(&resolver, &config_state, stats.clone(), routes_proxy, recv)
+                    .await
+            }
+            .fuse()
         });
         futures::select! {
             () = send_fut => {},
@@ -2985,15 +3018,18 @@ mod tests {
             std_ip!("192.168.50.22"),
             std_ip!("2001::2"),
         ];
+        let test_marks = fnet::Marks { mark_1: Some(42), mark_2: Some(99), ..Default::default() };
+        let expected_marks = test_marks.clone();
         let (routes_proxy, routes_stream) =
             fidl::endpoints::create_proxy_and_stream::<fnet_routes::StateMarker>();
         let routes_fut =
-            routes_stream.map(|r| r.context("stream FIDL error")).try_for_each(|req| {
-                let (destination, responder) = assert_matches!(
+            routes_stream.map(|r| r.context("stream FIDL error")).try_for_each(move |req| {
+                let (destination, options, responder) = assert_matches!(
                     req,
-                    fnet_routes::StateRequest::Resolve { destination, responder }
-                        => (destination, responder)
+                    fnet_routes::StateRequest::Resolve2 { destination, options, responder }
+                        => (destination, options, responder)
                 );
+                assert_eq!(options.marks, Some(expected_marks.clone()));
                 let result = TEST_IPS
                     .iter()
                     .enumerate()
@@ -3007,25 +3043,25 @@ mod tests {
                             // Send both Direct and Gateway resolved routes to show we
                             // don't care about that part.
                             if i % 2 == 0 {
-                                Some(fnet_routes::Resolved::Direct(inner))
+                                Some(fnet_routes::ResolveResult::Direct(inner))
                             } else {
-                                Some(fnet_routes::Resolved::Gateway(inner))
+                                Some(fnet_routes::ResolveResult::Gateway(inner))
                             }
                         } else {
                             None
                         }
                     })
-                    .ok_or_else(|| zx::Status::ADDRESS_UNREACHABLE.into_raw());
+                    .ok_or(fnet_routes::ResolveError::AddressUnreachable);
                 futures::future::ready(
                     responder
                         .send(result.as_ref().map_err(|e| *e))
-                        .context("failed to send Resolve response"),
+                        .context("failed to send Resolve2 response"),
                 )
             });
 
         let ((), ()) = futures::future::try_join(routes_fut, async move {
             let addrs = TEST_IPS.iter().map(|(dst, _src)| *dst).collect();
-            let addrs = sort_preferred_addresses(addrs, &routes_proxy)
+            let addrs = sort_preferred_addresses(addrs, &routes_proxy, &test_marks)
                 .await
                 .expect("failed to sort addresses");
             let addrs = addrs
@@ -3044,125 +3080,130 @@ mod tests {
 
     #[fuchsia::test(logging = false)]
     async fn test_lookupip() {
+        // Non-default marks show that lookups pass the current socket marks
+        // from `ServerConfigState` to `Resolve2`.
+        let lookup_marks = fnet::Marks { mark_1: Some(42), mark_2: Some(99), ..Default::default() };
         // Routes handler will say that only IPV6_HOST is reachable.
         let routes_handler = |req| {
-            let (destination, responder) = assert_matches!(
+            let (destination, options, responder) = assert_matches!(
                 req,
-                fnet_routes::StateRequest::Resolve { destination, responder }
-                    => (destination, responder)
+                fnet_routes::StateRequest::Resolve2 { destination, options, responder }
+                    => (destination, options, responder)
             );
+            assert_eq!(options.marks, Some(lookup_marks.clone()));
             let resolved;
             let response = if destination == map_ip(IPV6_HOST) {
-                resolved = fnet_routes::Resolved::Direct(fnet_routes::Destination {
+                resolved = fnet_routes::ResolveResult::Direct(fnet_routes::Destination {
                     address: Some(destination),
                     source_address: Some(destination),
                     ..Default::default()
                 });
                 Ok(&resolved)
             } else {
-                Err(zx::Status::ADDRESS_UNREACHABLE.into_raw())
+                Err(fnet_routes::ResolveError::AddressUnreachable)
             };
-            responder.send(response).expect("failed to send Resolve FIDL response");
+            responder.send(response).expect("failed to send Resolve2 FIDL response");
         };
-        TestEnvironment::default()
-            .run_lookup_with_routes_handler(
-                |proxy| async move {
-                    // All arguments unset.
-                    assert_eq!(
-                        proxy
-                            .lookup_ip(REMOTE_IPV4_HOST, &fname::LookupIpOptions::default())
-                            .await
-                            .expect("lookup_ip"),
-                        Err(fname::LookupError::InvalidArgs)
-                    );
-                    // No IP addresses to look.
-                    assert_eq!(
-                        proxy
-                            .lookup_ip(
-                                REMOTE_IPV4_HOST,
-                                &fname::LookupIpOptions {
-                                    ipv4_lookup: Some(false),
-                                    ipv6_lookup: Some(false),
-                                    ..Default::default()
-                                }
-                            )
-                            .await
-                            .expect("lookup_ip"),
-                        Err(fname::LookupError::InvalidArgs)
-                    );
-                    // No results for an IPv4 only host.
-                    assert_eq!(
-                        proxy
-                            .lookup_ip(
-                                REMOTE_IPV4_HOST,
-                                &fname::LookupIpOptions {
-                                    ipv4_lookup: Some(false),
-                                    ipv6_lookup: Some(true),
-                                    ..Default::default()
-                                }
-                            )
-                            .await
-                            .expect("lookup_ip"),
-                        Err(fname::LookupError::NotFound)
-                    );
-                    // Successfully resolve IPv4.
-                    assert_eq!(
-                        proxy
-                            .lookup_ip(
-                                REMOTE_IPV4_HOST,
-                                &fname::LookupIpOptions {
-                                    ipv4_lookup: Some(true),
-                                    ipv6_lookup: Some(true),
-                                    ..Default::default()
-                                }
-                            )
-                            .await
-                            .expect("lookup_ip"),
-                        Ok(fname::LookupResult {
-                            addresses: Some(vec![map_ip(IPV4_HOST)]),
-                            ..Default::default()
-                        })
-                    );
-                    // Successfully resolve IPv4 + IPv6 (no sorting).
-                    assert_eq!(
-                        proxy
-                            .lookup_ip(
-                                REMOTE_IPV4_IPV6_HOST,
-                                &fname::LookupIpOptions {
-                                    ipv4_lookup: Some(true),
-                                    ipv6_lookup: Some(true),
-                                    ..Default::default()
-                                }
-                            )
-                            .await
-                            .expect("lookup_ip"),
-                        Ok(fname::LookupResult {
-                            addresses: Some(vec![map_ip(IPV4_HOST), map_ip(IPV6_HOST)]),
-                            ..Default::default()
-                        })
-                    );
-                    // Successfully resolve IPv4 + IPv6 (with sorting).
-                    assert_eq!(
-                        proxy
-                            .lookup_ip(
-                                REMOTE_IPV4_IPV6_HOST,
-                                &fname::LookupIpOptions {
-                                    ipv4_lookup: Some(true),
-                                    ipv6_lookup: Some(true),
-                                    sort_addresses: Some(true),
-                                    ..Default::default()
-                                }
-                            )
-                            .await
-                            .expect("lookup_ip"),
-                        Ok(fname::LookupResult {
-                            addresses: Some(vec![map_ip(IPV6_HOST), map_ip(IPV4_HOST)]),
-                            ..Default::default()
-                        })
-                    );
-                },
-                routes_handler,
-            )
-            .await
+        let env = TestEnvironment::default();
+        env.config_state.set_socket_marks(lookup_marks.clone());
+        env.run_lookup_with_routes_handler(
+            |proxy| async move {
+                // All arguments unset.
+                assert_eq!(
+                    proxy
+                        .lookup_ip(REMOTE_IPV4_HOST, &fname::LookupIpOptions::default())
+                        .await
+                        .expect("lookup_ip"),
+                    Err(fname::LookupError::InvalidArgs)
+                );
+                // No IP addresses to look.
+                assert_eq!(
+                    proxy
+                        .lookup_ip(
+                            REMOTE_IPV4_HOST,
+                            &fname::LookupIpOptions {
+                                ipv4_lookup: Some(false),
+                                ipv6_lookup: Some(false),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .expect("lookup_ip"),
+                    Err(fname::LookupError::InvalidArgs)
+                );
+                // No results for an IPv4 only host.
+                assert_eq!(
+                    proxy
+                        .lookup_ip(
+                            REMOTE_IPV4_HOST,
+                            &fname::LookupIpOptions {
+                                ipv4_lookup: Some(false),
+                                ipv6_lookup: Some(true),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .expect("lookup_ip"),
+                    Err(fname::LookupError::NotFound)
+                );
+                // Successfully resolve IPv4.
+                assert_eq!(
+                    proxy
+                        .lookup_ip(
+                            REMOTE_IPV4_HOST,
+                            &fname::LookupIpOptions {
+                                ipv4_lookup: Some(true),
+                                ipv6_lookup: Some(true),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .expect("lookup_ip"),
+                    Ok(fname::LookupResult {
+                        addresses: Some(vec![map_ip(IPV4_HOST)]),
+                        ..Default::default()
+                    })
+                );
+                // Successfully resolve IPv4 + IPv6 (no sorting).
+                assert_eq!(
+                    proxy
+                        .lookup_ip(
+                            REMOTE_IPV4_IPV6_HOST,
+                            &fname::LookupIpOptions {
+                                ipv4_lookup: Some(true),
+                                ipv6_lookup: Some(true),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .expect("lookup_ip"),
+                    Ok(fname::LookupResult {
+                        addresses: Some(vec![map_ip(IPV4_HOST), map_ip(IPV6_HOST)]),
+                        ..Default::default()
+                    })
+                );
+                // Successfully resolve IPv4 + IPv6 (with sorting).
+                assert_eq!(
+                    proxy
+                        .lookup_ip(
+                            REMOTE_IPV4_IPV6_HOST,
+                            &fname::LookupIpOptions {
+                                ipv4_lookup: Some(true),
+                                ipv6_lookup: Some(true),
+                                sort_addresses: Some(true),
+                                ..Default::default()
+                            }
+                        )
+                        .await
+                        .expect("lookup_ip"),
+                    Ok(fname::LookupResult {
+                        addresses: Some(vec![map_ip(IPV6_HOST), map_ip(IPV4_HOST)]),
+                        ..Default::default()
+                    })
+                );
+            },
+            routes_handler,
+        )
+        .await
     }
 }

@@ -25,6 +25,7 @@ use starnix_uapi::{
     CLOCK_REALTIME_COARSE, CLOCK_TAI, CLOCK_THREAD_CPUTIME_ID, MAX_CLOCKS, TIMER_ABSTIME, errno,
     error, from_status_like_fdio, pid_t, timespec, timezone, tms, uapi,
 };
+use std::sync::Arc;
 use zx::{
     Task as _, {self as zx},
 };
@@ -118,25 +119,52 @@ pub fn sys_gettimeofday(
 
 pub fn sys_settimeofday(
     current_task: &CurrentTask,
-    tv: TimeValPtr,
-    _tz: TimeZonePtr,
+    user_tv: TimeValPtr,
+    user_tz: TimeZonePtr,
 ) -> Result<(), Errno> {
     const SEC_IN_NANOS: i64 = 1_000_000_000;
     const USEC_IN_NANOS: i64 = 1000;
-    let kernel = current_task.kernel();
-    if let Some(ref proxy) = kernel.time_adjustment_proxy {
-        // Setting time is allowed.
-        let boot_now = zx::BootInstant::get();
-        let tv = current_task.read_multi_arch_object(tv)?;
+    const USEC_PER_SEC: i64 = 1_000_000;
+    const MAX_TZ_MINUTESWEST: i32 = 15 * 60;
 
-        // Any errors here result in EINVAL, there should be no overflow in "normal" situations.
+    let utc_now_nanos = if !user_tv.is_null() {
+        let tv = current_task.read_multi_arch_object(user_tv)?;
+        if tv.tv_sec < 0 || !(0..USEC_PER_SEC).contains(&tv.tv_usec) {
+            return error!(EINVAL);
+        }
         let utc_now_sec_as_nanos =
             tv.tv_sec.checked_mul(SEC_IN_NANOS).ok_or_else(|| errno!(EINVAL))?;
         let utc_now_usec_as_nanos =
             tv.tv_usec.checked_mul(USEC_IN_NANOS).ok_or_else(|| errno!(EINVAL))?;
-        let utc_now_nanos = utc_now_sec_as_nanos
-            .checked_add(utc_now_usec_as_nanos)
-            .ok_or_else(|| errno!(EINVAL))?;
+        Some(
+            utc_now_sec_as_nanos
+                .checked_add(utc_now_usec_as_nanos)
+                .ok_or_else(|| errno!(EINVAL))?,
+        )
+    } else {
+        None
+    };
+
+    let tz =
+        if !user_tz.is_null() { Some(current_task.read_multi_arch_object(user_tz)?) } else { None };
+
+    security::check_settime_access(current_task)?;
+
+    if let Some(tz) = tz {
+        if !(-MAX_TZ_MINUTESWEST..=MAX_TZ_MINUTESWEST).contains(&tz.tz_minuteswest) {
+            return error!(EINVAL);
+        }
+        track_stub!(TODO("https://fxbug.dev/322874502"), "settimeofday tz argument");
+    }
+
+    let Some(utc_now_nanos) = utc_now_nanos else {
+        return Ok(());
+    };
+
+    let kernel = current_task.kernel();
+    if let Some(ref proxy) = kernel.time_adjustment_proxy {
+        // Setting time is allowed.
+        let boot_now = zx::BootInstant::get();
         log_debug!(
             "settimeofday: reporting reference: boot_now={:?}, utc_now_nanos={:?}",
             boot_now,
@@ -323,7 +351,7 @@ pub fn sys_nanosleep(
     user_request: TimeSpecPtr,
     user_remaining: TimeSpecPtr,
 ) -> Result<(), Errno> {
-    sys_clock_nanosleep(current_task, CLOCK_REALTIME as ClockId, 0, user_request, user_remaining)
+    sys_clock_nanosleep(current_task, CLOCK_MONOTONIC as ClockId, 0, user_request, user_remaining)
 }
 
 /// Returns the cpu time for `task`.
@@ -386,6 +414,10 @@ fn get_dynamic_clock(current_task: &CurrentTask, which_clock: i32) -> Result<i64
 
     if is_thread_clock(which_clock) {
         let task = target_pid.get_task().map_err(|_| errno!(EINVAL))?;
+        // Like Linux, a thread CPU clock may only refer to a thread in the caller's thread group.
+        if !Arc::ptr_eq(task.thread_group(), current_task.thread_group()) {
+            return error!(EINVAL);
+        }
         get_thread_cpu_time(&task)
     } else {
         let tg = target_pid.get_thread_group().map_err(|_| errno!(EINVAL))?;
@@ -600,7 +632,6 @@ mod test {
     use fuchsia_runtime::{UtcDuration, UtcTimeline};
     use starnix_uapi::signals;
     use starnix_uapi::user_address::UserAddress;
-    use std::sync::Arc;
     use test_util::{assert_geq, assert_leq};
     use zx::{BootTimeline, Clock, ClockUpdate};
 

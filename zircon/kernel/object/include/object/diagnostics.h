@@ -9,21 +9,18 @@
 
 #include <zircon/types.h>
 
-// Prints all handles and owning processes for the specified koid.
-void DumpHandlesForKoid(zx_koid_t id);
+class ProcessDispatcher;
+class VmObject;
 
 extern "C" {
-void cpp_dump_process_handles(zx_koid_t id);
-void cpp_dump_peer_dispatchers_by_koid(zx_obj_type_t type, zx_koid_t id);
-void cpp_dump_all_peer_dispatchers(zx_obj_type_t type);
 void cpp_dump_all_vm_objects(bool hidden_only, char format_unit);
 void cpp_dump_orphaned_slices(char format_unit);
 void cpp_dump_orphaned_mapped_vmos(char format_unit);
 void cpp_dump_process_vm_objects(zx_koid_t id, char format_unit);
 void cpp_dump_vm_object_cow_tree(zx_koid_t id);
-void cpp_dump_process_address_space(zx_koid_t id);
-void cpp_dump_process_memory_usage(const char* prefix, size_t min_bytes);
-void cpp_dump_handles_for_koid(zx_koid_t id);
+void cpp_dump_vm_object(const VmObject& vmo, char format_unit, zx_handle_t handle,
+                        zx_rights_t rights, zx_koid_t koid);
+void rust_diagnostics_dump_aspace_vm_objects(const ProcessDispatcher& process, char format_unit);
 }  // extern "C"
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_DIAGNOSTICS_H_

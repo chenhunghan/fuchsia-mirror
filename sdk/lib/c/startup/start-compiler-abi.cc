@@ -108,11 +108,25 @@ StartupTrampoline StartCompilerAbi(zx_handle_t bootstrap, const void* vdso_base)
   // This fills the stack-guard ABI slot, among other things.
   InitStartupRandom();
 
+  Thread* self = *new_thread;
+
   // At this point it is actually safe to start using the full Compiler ABI,
   // even though the original machine stack is still in use.
   std::atomic_signal_fence(std::memory_order_seq_cst);
 
-  SetStartHandles(std::move(process_self), std::move(allocation_vmar), std::move(thread_self));
+  // Initialize the zxr_thread first, taking ownership of the thread handle.
+  // The locking code uses _zx_thread_self(), which fetches the handle stored
+  // here.  So this is the bare minimum that must be done before more normal
+  // operation, even taking locks, is possible.
+  self->handle_ = thread_self.release();
+  // The zero-initialized value is already JOINABLE, so nothing to do there.
+  static_assert(static_cast<int>(Thread::Lifecycle::JOINABLE) == 0);
+  assert(self->lifecycle_ == Thread::Lifecycle::JOINABLE);
+
+  // This touches globals outside the basic ABI bubble, so it has to be
+  // separate.  But it does little more than that so that minimal code paths
+  // are used on the original machine stack.
+  SetStartHandles(std::move(process_self), std::move(allocation_vmar));
 
   return {.hook = hook, .sp = sp};
 }

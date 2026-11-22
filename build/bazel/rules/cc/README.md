@@ -5,8 +5,9 @@ providers for platform builds.
 
 See [Use Fuchsia-specific wrappers](/docs/development/languages/bazel/style/common.md#use-fuchsia-specific-wrappers)
 for general usage guidance. For Zircon libraries (`zx_library()` in GN), see
-[`//build/bazel/rules:zx_library.bzl`](/build/bazel/rules/zx_library.bzl)
-(`cc_shared_library_zx()`, `cc_source_library_zx()`, `cc_static_library_zx()`).
+[`fx_cc_shared_library_zx.bzl`](./fx_cc_shared_library_zx.bzl),
+[`fx_cc_source_library_zx.bzl`](./fx_cc_source_library_zx.bzl), and
+[`fx_cc_static_library_zx.bzl`](./fx_cc_static_library_zx.bzl).
 
 ## Contents
 
@@ -21,6 +22,15 @@ for general usage guidance. For Zircon libraries (`zx_library()` in GN), see
 * [`fx_cc_shared_library.bzl`](./fx_cc_shared_library.bzl): Defines
   `fx_cc_shared_library()`, Fuchsia's wrapper macro for `@rules_cc`'s
   `cc_shared_library()`.
+* [`fx_cc_shared_library_zx.bzl`](./fx_cc_shared_library_zx.bzl): Defines
+  `fx_cc_shared_library_zx()` for Zircon C++ shared libraries (`zx_library()`
+  in GN).
+* [`fx_cc_source_library_zx.bzl`](./fx_cc_source_library_zx.bzl): Defines
+  `fx_cc_source_library_zx()` for Zircon C++ source libraries (`zx_library()`
+  in GN).
+* [`fx_cc_static_library_zx.bzl`](./fx_cc_static_library_zx.bzl): Defines
+  `fx_cc_static_library_zx()` for Zircon C++ static libraries (`zx_library()`
+  in GN).
 * [`instrumentation.bzl`](./instrumentation.bzl): Shared helper functions for
   applying sanitizer and coverage instrumentation features in `fx_cc_*()`
   wrapper macros.
@@ -29,6 +39,8 @@ for general usage guidance. For Zircon libraries (`zx_library()` in GN), see
 * [`shared_library.bzl`](./shared_library.bzl): Defines rules and macros for
   shared library ABI verification (`verify_public_symbols()`) and `.ifs` link
   stub generation (`link_stub_from_ifs_file()`, `cc_link_stub_from_ifs_file()`).
+* [`zx_library_utils.bzl`](./zx_library_utils.bzl): Defines internal helper
+  functions and attributes for Zircon C++ library macros.
 
 ## Adding a New Wrapper Macro or Rule
 
@@ -69,4 +81,4 @@ When adding a new Fuchsia wrapper macro or rule equivalent for an upstream
 6. **Verify tests and checks**:
    * Run `fx test --host @//scripts/shac/tests:bazel_test`.
    * Run `fx host-tool shac check --only bazel_fuchsia_wrappers --all`.
-   * Run `fx doc-checker --local-links-only`.
+   * Run `fx doc-checker`.

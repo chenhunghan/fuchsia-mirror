@@ -10,6 +10,18 @@
     capabilities: [
         { protocol: "fuchsia.netemul.Sandbox" },
     ],
+    use: [
+        {
+            protocol: "fuchsia.component.Realm",
+            from: "parent",
+        },
+        {
+            directory: "pkg",
+            from: "parent",
+            rights: [ "rx*" ],
+            path: "/parent_pkg",
+        },
+    ],
     expose: [
         {
             protocol: "fuchsia.netemul.Sandbox",
@@ -18,6 +30,14 @@
         {
             protocol: "fuchsia.net.tun.Control",
             from: "#network-tun",
+        },
+        {
+            protocol: "fuchsia.netemul.network.NetworkContext",
+            from: "#network-context",
+        },
+        {
+            directory: "custom_artifacts",
+            from: "self",
         },
     ],
 }

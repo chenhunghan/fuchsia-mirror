@@ -5,11 +5,13 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_DEVICE_STATE_H_
 #define SRC_DEVICES_USB_DRIVERS_XHCI_XHCI_DEVICE_STATE_H_
 
+#include <lib/fpromise/bridge.h>
 #include <lib/inspect/cpp/vmo/types.h>
 #include <lib/sync/cpp/completion.h>
 
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "src/devices/usb/drivers/xhci/xhci-endpoint.h"
 #include "src/devices/usb/drivers/xhci/xhci-hub.h"
@@ -44,7 +46,11 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
     port_ = port;
     hub_ = hub;
     disconnecting_ = false;
+    bus_registration_state_ = BusRegistrationState::kNotAdded;
     slot_disable_started_ = false;
+    slot_disable_status_.reset();
+    slot_disabled_.Reset();
+    ZX_DEBUG_ASSERT(slot_disable_waiters_.empty());
   }
 
   // True if the device state has been initialized, false otherwise.
@@ -65,9 +71,70 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
 
   bool IsDisconnecting() const __TA_REQUIRES(transaction_lock_) { return disconnecting_; }
 
+  // Transitions bus registration state from kNotAdded -> kAdded when bus.AddDevice() succeeds.
+  // Returns false if RemoveSubtreeFromBusOnDdkDispatcher() already ran reentrantly during
+  // bus.AddDevice() (state is kRemoved), signaling that the caller should immediately remove the
+  // newly registered device from bus_ instead of leaving it orphaned.
+  bool MarkBusDeviceAddedLocked() __TA_REQUIRES(transaction_lock_) {
+    if (bus_registration_state_ == BusRegistrationState::kRemoved) {
+      return false;
+    }
+    bus_registration_state_ = BusRegistrationState::kAdded;
+    return true;
+  }
+
+  // Transitions bus registration state to kRemoved and returns true iff the device was previously
+  // marked kAdded.
+  bool TakeBusDeviceAddedForRemovalLocked() __TA_REQUIRES(transaction_lock_) {
+    return std::exchange(bus_registration_state_, BusRegistrationState::kRemoved) ==
+           BusRegistrationState::kAdded;
+  }
+
   // Marks that a Disable Slot command has been issued for this slot. Returns the previous value.
   bool ExchangeSlotDisableStarted() __TA_REQUIRES(transaction_lock_) {
     return std::exchange(slot_disable_started_, true);
+  }
+
+  std::optional<zx_status_t> SlotDisableStatusLocked() const __TA_REQUIRES(transaction_lock_) {
+    return slot_disable_status_;
+  }
+
+  void AddSlotDisableWaiterLocked(fpromise::completer<void, zx_status_t> waiter)
+      __TA_REQUIRES(transaction_lock_) {
+    ZX_DEBUG_ASSERT(!slot_disable_status_.has_value());
+    slot_disable_waiters_.push_back(std::move(waiter));
+  }
+
+  // Records the terminal Disable Slot status (preserving the first status recorded), signals
+  // slot_disabled_, and drains any queued waiters so they can be completed outside
+  // transaction_lock_.
+  std::vector<fpromise::completer<void, zx_status_t>> CompleteSlotDisableLocked(zx_status_t status)
+      __TA_REQUIRES(transaction_lock_) {
+    if (!slot_disable_status_.has_value()) {
+      slot_disable_status_ = status;
+    }
+    slot_disabled_.Signal();
+    return std::exchange(slot_disable_waiters_, {});
+  }
+
+  static void CompleteSlotDisableWaiters(
+      std::vector<fpromise::completer<void, zx_status_t>>& waiters, zx_status_t status) {
+    for (auto& waiter : waiters) {
+      if (status == ZX_OK) {
+        waiter.complete_ok();
+      } else {
+        waiter.complete_error(status);
+      }
+    }
+  }
+
+  void CompleteSlotDisable(zx_status_t status) {
+    std::vector<fpromise::completer<void, zx_status_t>> waiters;
+    {
+      fbl::AutoLock _(&transaction_lock_);
+      waiters = CompleteSlotDisableLocked(status);
+    }
+    CompleteSlotDisableWaiters(waiters, status);
   }
 
   Endpoint& GetEndpoint() __TA_REQUIRES(transaction_lock_) { return tr_; }
@@ -104,17 +171,25 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
   }
 
   // Marks the device as disconnecting and tears down active endpoint transfer rings.
+  // Preserves bus_registration_state_ so DeviceOffline() and UsbHciHubDeviceRemoved() on
+  // ddk_interaction_dispatcher_ still know whether to call bus.RemoveDevice() after
+  // DrainAndResetDeviceOnInterrupter() runs ResetHci().
   void ResetHci() {
-    fbl::AutoLock l(&transaction_lock_);
-    disconnecting_ = true;
-    slot_disable_started_ = true;
-    tr_.transfer_ring().DeinitIfActive();
-    for (auto& ring : rings_) {
-      if (ring.has_value()) {
-        ring->transfer_ring().DeinitIfActive();
+    std::vector<fpromise::completer<void, zx_status_t>> waiters;
+    {
+      fbl::AutoLock l(&transaction_lock_);
+      disconnecting_ = true;
+      slot_disable_started_ = true;
+      tr_.transfer_ring().DeinitIfActive();
+      for (auto& ring : rings_) {
+        if (ring.has_value()) {
+          ring->transfer_ring().DeinitIfActive();
+        }
       }
+      hub_.reset();
+      waiters = CompleteSlotDisableLocked(ZX_ERR_IO_NOT_PRESENT);
     }
-    hub_.reset();
+    CompleteSlotDisableWaiters(waiters, ZX_ERR_IO_NOT_PRESENT);
   }
 
   void CreateInspectNode(inspect::Node node, uint16_t vendor_id, uint16_t product_id);
@@ -138,6 +213,12 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
                                             std::unique_ptr<dma_buffer::PagedBuffer>* out)
       __TA_REQUIRES(transaction_lock_);
 
+  enum class BusRegistrationState : uint8_t {
+    kNotAdded,
+    kAdded,
+    kRemoved,
+  };
+
   uint32_t device_id_;
   UsbXhci* const hci_;
   uint8_t slot_ = 0;
@@ -146,7 +227,12 @@ class DeviceState : public fbl::RefCounted<DeviceState> {
   fbl::Mutex transaction_lock_;
   std::optional<HubInfo> hub_ __TA_GUARDED(transaction_lock_);
   bool disconnecting_ __TA_GUARDED(transaction_lock_) = false;
+  BusRegistrationState bus_registration_state_ __TA_GUARDED(transaction_lock_) =
+      BusRegistrationState::kNotAdded;
   bool slot_disable_started_ __TA_GUARDED(transaction_lock_) = false;
+  std::optional<zx_status_t> slot_disable_status_ __TA_GUARDED(transaction_lock_);
+  std::vector<fpromise::completer<void, zx_status_t>> slot_disable_waiters_
+      __TA_GUARDED(transaction_lock_);
   Endpoint tr_ __TA_GUARDED(transaction_lock_);
   std::optional<Endpoint> rings_[kMaxEndpoints] __TA_GUARDED(transaction_lock_);
   std::unique_ptr<dma_buffer::PagedBuffer> input_context_ __TA_GUARDED(transaction_lock_);

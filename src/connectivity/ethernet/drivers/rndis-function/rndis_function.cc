@@ -9,6 +9,7 @@
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/metadata/cpp/metadata.h>
+#include <lib/fit/defer.h>
 #include <zircon/status.h>
 
 #include <usb/descriptors.h>
@@ -528,12 +529,18 @@ zx_status_t RndisFunction::Halt() {
   for (auto ep_info : GetEndpoints()) {
     fidl::Result result = function_->DisableEndpoint({ep_info.address});
     if (result.is_error()) {
+      zx_status_t error = result.error_value().is_framework_error()
+                              ? result.error_value().framework_error().status()
+                              : result.error_value().domain_error();
+      // The endpoint is already inactive once the device or usb-peripheral disconnects.
+      if (error == ZX_ERR_PEER_CLOSED || error == ZX_ERR_CANCELED ||
+          error == ZX_ERR_IO_NOT_PRESENT) {
+        continue;
+      }
       fdf::error("Failed to disable {} endpoint: {}", ep_info.name,
                  result.error_value().FormatDescription());
       if (status == ZX_OK) {
-        status = result.error_value().is_framework_error()
-                     ? result.error_value().framework_error().status()
-                     : result.error_value().domain_error();
+        status = error;
       }
     }
   }
@@ -547,6 +554,7 @@ void RndisFunction::Reset() {
     }
   }
   rx_completion_queue_.clear();
+  bulk_out_inspect_.UpdateRxPendingProcessing(0);
   CancelAllRequests();
   while (!control_responses_.empty()) {
     control_responses_.pop();
@@ -879,7 +887,10 @@ void RndisFunction::QueueRxSpace(QueueRxSpaceRequestView request, fdf::Arena& ar
   }
   // Take over all pending completions and process them. We'll re-queue if
   // not enough space available.
-  ProcessRxCompletions(std::move(rx_completion_queue_));
+  auto pending = std::move(rx_completion_queue_);
+  rx_completion_queue_.clear();
+  bulk_out_inspect_.UpdateRxPendingProcessing(0);
+  ProcessRxCompletions(std::move(pending));
 }
 
 void RndisFunction::PrepareVmo(PrepareVmoRequestView request, fdf::Arena& arena,
@@ -968,6 +979,8 @@ void RndisFunction::ProcessRxCompletions(std::vector<fendpoint::Completion> comp
   if (completions.empty()) {
     return;
   }
+  auto update_rx_pending = fit::defer(
+      [&]() { bulk_out_inspect_.UpdateRxPendingProcessing(rx_completion_queue_.size()); });
   fdf::Arena arena(kArenaTag);
   const size_t count = completions.size();
   const size_t max_rx_buffers = rx_space_buffers_.size();
@@ -1612,6 +1625,7 @@ void RndisFunction::Stop(fdf::StopCompleter completer) {
     }
   }
   rx_completion_queue_.clear();
+  bulk_out_inspect_.UpdateRxPendingProcessing(0);
 
   DiscardPendingTxBuffers(ZX_ERR_CANCELED);
   ReturnPendingRxSpace();

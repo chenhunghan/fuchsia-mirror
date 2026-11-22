@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+"""Aspect for asserting that a target does not transitively depend on forbidden labels."""
+
 _DEP_ATTRS = [
     "deps",
     "implementation_deps",
@@ -19,10 +21,16 @@ TransitiveDepsInfo = provider(
 def _assert_no_deps_aspect_impl(_target, ctx):
     child_labels = []
     for attr_name in _DEP_ATTRS:
-        for dep in getattr(ctx.rule.attr, attr_name, []):
-            if TransitiveDepsInfo not in dep:
-                continue
-            child_labels.append(dep[TransitiveDepsInfo].labels)
+        attr_val = getattr(ctx.rule.attr, attr_name, None)
+        if not attr_val:
+            continue
+        if type(attr_val) == "Target":
+            if TransitiveDepsInfo in attr_val:
+                child_labels.append(attr_val[TransitiveDepsInfo].labels)
+        elif type(attr_val) == "list" and type(attr_val[0]) == "Target":
+            for dep in attr_val:
+                if TransitiveDepsInfo in dep:
+                    child_labels.append(dep[TransitiveDepsInfo].labels)
 
     transitive_deps = depset(transitive = child_labels)
 

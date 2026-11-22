@@ -56,8 +56,8 @@ if (is_fuchsia) {
       "//sdk/lib/c/test:*",
       "//src/bringup/bin/critical-services/storage-watchdog:*",
       "//src/lib/elf-search/*",
+      "//src/memory/sampler/instrumentation:*",
       "//src/performance/cpu_profiler:*",
-      "//src/performance/memory/sampler/instrumentation:*",
       "//zircon/system/ulib/inspector:*",
     ]
     public_deps = [

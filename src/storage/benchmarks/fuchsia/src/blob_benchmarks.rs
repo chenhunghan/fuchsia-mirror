@@ -20,6 +20,7 @@ use std::ops::Range;
 use storage_benchmarks::{
     Benchmark, CacheClearableFilesystem as _, OperationDuration, OperationTimer,
 };
+use storage_units::page_size;
 
 const RNG_SEED: u64 = 0xda782a0c3ce1819a;
 
@@ -351,7 +352,7 @@ fn create_compressible_data(size: usize, rng: &mut XorShiftRng) -> DeliveryBlob 
 
 /// Returns an iterator to the index of the first byte of every page in sequential order.
 fn sequential_page_iter(blob_size: usize) -> Vec<usize> {
-    let page_size = zx::system_get_page_size() as usize;
+    let page_size = page_size().get() as usize;
     (0..blob_size).step_by(page_size).collect::<Vec<usize>>()
 }
 
@@ -363,7 +364,7 @@ fn random_page_iter(blob_size: usize, rng: &mut XorShiftRng) -> Vec<usize> {
     const RUN_LENGTHS: [usize; 6] = [1, 3, 15, 40, 60, 80];
     const WEIGHTS: [usize; 6] = [25, 15, 40, 10, 6, 4];
     let distribution = WeightedIndex::new(WEIGHTS).unwrap();
-    let page_size = zx::system_get_page_size() as usize;
+    let page_size = page_size().get() as usize;
     let total_pages = (0..blob_size).step_by(page_size).len();
     // Only access 60% of the pages. Not all pages of an executable are typically accessed near the
     // start of a process. Accessing every page would favour filesystems with overly aggressive
@@ -498,8 +499,14 @@ impl ColdPageFaultBenchmark {
 
 // Byte offset used for the timed cold page fault in `ColdPageFaultBenchmark`. Must be a multiple
 // of the 128 KiB readahead window and sufficiently distant from offset 0 so the untimed warmup
-// fault at offset 0 (which completes lazy `get_vmo` metadata setup) never prefetches this range.
-const COLD_FAULT_OFFSET: usize = 512 * 1024;
+// fault (which completes lazy `get_vmo` metadata setup) never prefetches this range. 640 KiB
+// (5 * 128 KiB) is chosen so that for all 128 KiB compressed test blobs, the compressed chunk at
+// `COLD_FAULT_OFFSET` aligns to the same number of 4 KiB blocks as offset 0.
+const COLD_FAULT_OFFSET: usize = 640 * 1024;
+// Fault at the last byte of the first 128 KiB readahead window during warmup so that even when
+// the pager supplies verified prefixes incrementally (e.g. in 96 KiB batches in `fxblob_driver`),
+// warmup waits for the entire 128 KiB warmup window to be supplied.
+const WARMUP_FAULT_OFFSET: usize = 128 * 1024 - 1;
 const COLD_FAULT_SAMPLES: usize = 20;
 
 #[async_trait]
@@ -507,9 +514,9 @@ impl Benchmark<FxblobInstance> for ColdPageFaultBenchmark {
     async fn run(&self, fs: &mut FxblobInstance) -> Vec<OperationDuration> {
         storage_trace::duration!("benchmark", "ColdPageFault", "name" => self.name.as_str());
 
-        // Prepend `COLD_FAULT_OFFSET` (512 KiB) of warmup prefix data so that the timed fault at
+        // Prepend `COLD_FAULT_OFFSET` (640 KiB) of warmup prefix data so that the timed fault at
         // `COLD_FAULT_OFFSET` still has a full chunk/page behind it unaffected by the untimed
-        // warmup fault at offset 0.
+        // warmup fault.
         let delivery_blob = match &self.data_source {
             BlobDataSource::Compressed { resource_path, algo } => {
                 let raw_data = std::fs::read(resource_path)
@@ -556,15 +563,24 @@ impl Benchmark<FxblobInstance> for ColdPageFaultBenchmark {
             assert!(data.len() > COLD_FAULT_OFFSET);
             let ptr = data.as_ptr();
 
-            // Perform one untimed fault at offset 0 first to warm `get_vmo` (ensuring any lazy
-            // blob metadata read and verifier registration finishes before timing).
+            // Perform one untimed fault in the first 128 KiB window to warm `get_vmo` (ensuring
+            // any lazy blob metadata read and verifier registration finishes before timing).
             {
-                storage_trace::duration!("benchmark", "warmup_page_in", "offset" => 0usize);
-                // SAFETY: `data.len() > COLD_FAULT_OFFSET > 0`, so `ptr` is valid for a 1-byte
-                // read.
-                let warm_val = unsafe { std::ptr::read_volatile(ptr) };
+                storage_trace::duration!(
+                    "benchmark",
+                    "warmup_page_in",
+                    "offset" => WARMUP_FAULT_OFFSET
+                );
+                // SAFETY: `data.len() > COLD_FAULT_OFFSET > WARMUP_FAULT_OFFSET`, so
+                // `ptr.add(WARMUP_FAULT_OFFSET)` is valid for a 1-byte read.
+                let warm_val = unsafe { std::ptr::read_volatile(ptr.add(WARMUP_FAULT_OFFSET)) };
                 std::hint::black_box(warm_val);
             }
+            // `zx_pager_supply_pages` wakes the faulting thread before the pager worker thread
+            // returns from the syscall, drops `PageInRange` (freeing its `BufferAllocator` slot),
+            // and returns to `zx_port_wait`. Pause briefly so warmup teardown does not overlap
+            // with the timed fault.
+            std::thread::sleep(std::time::Duration::from_millis(1));
 
             let duration = {
                 storage_trace::duration!("benchmark", "page_in", "offset" => COLD_FAULT_OFFSET);
@@ -600,7 +616,7 @@ mod tests {
     const PAGE_COUNT: usize = 32;
 
     fn page_size() -> usize {
-        zx::system_get_page_size() as usize
+        storage_units::page_size().get() as usize
     }
 
     async fn check_benchmark<T, U, V>(benchmark: T, filesystem_config: V, op_count: usize)
@@ -687,15 +703,11 @@ mod tests {
             COLD_FAULT_SAMPLES,
         )
         .await;
-        check_benchmark(
-            ColdPageFaultBenchmark::new_zstd_55(),
-            Fxblob::with_driver_paging(),
-            COLD_FAULT_SAMPLES,
-        )
-        .await;
+        check_benchmark(ColdPageFaultBenchmark::new_zstd_55(), Fxblob::new(), COLD_FAULT_SAMPLES)
+            .await;
         check_benchmark(
             ColdPageFaultBenchmark::new_uncompressed(1024),
-            Fxblob::with_driver_paging(),
+            Fxblob::new(),
             COLD_FAULT_SAMPLES,
         )
         .await;

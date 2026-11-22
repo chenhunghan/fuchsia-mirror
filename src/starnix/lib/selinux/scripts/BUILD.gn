@@ -4,20 +4,12 @@
 
 import("//build/bazel/bazel_test_suite.gni")
 
-# Host Python tests migrated to BUILD.bazel.
-bazel_test_suite("merge_policies_test") {
-  host_tests = [ "//src/starnix/lib/selinux/scripts:merge_policies_test" ]
-}
-
-bazel_test_suite("verify_or_compile_policy_test") {
-  host_tests =
-      [ "//src/starnix/lib/selinux/scripts:verify_or_compile_policy_test" ]
+# Host tests migrated to BUILD.bazel.
+bazel_test_suite("host_tests") {
+  host_tests = [ "//src/starnix/lib/selinux/scripts:host_tests" ]
 }
 
 group("tests") {
   testonly = true
-  deps = [
-    ":merge_policies_test",
-    ":verify_or_compile_policy_test",
-  ]
+  deps = [ ":host_tests" ]
 }

@@ -21,7 +21,7 @@
     {
       "name": "test.unknowninteractions/UnknownInteractionsAjarDriverProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 226,
         "column": 15,
         "length": 37
@@ -45,7 +45,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
                 "line": 225,
                 "column": 12,
                 "length": 8
@@ -53,7 +53,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 225,
             "column": 1,
             "length": 20
@@ -69,7 +69,7 @@
           "name": "StrictOneWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 228,
             "column": 12,
             "length": 12
@@ -86,7 +86,7 @@
           "name": "FlexibleOneWay",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 229,
             "column": 14,
             "length": 14
@@ -103,7 +103,7 @@
           "name": "StrictTwoWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 232,
             "column": 12,
             "length": 12
@@ -120,7 +120,7 @@
           "name": "StrictTwoWayFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 233,
             "column": 12,
             "length": 18
@@ -151,7 +151,7 @@
           "name": "StrictTwoWayUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 236,
             "column": 12,
             "length": 17
@@ -182,7 +182,7 @@
           "name": "StrictTwoWayTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 239,
             "column": 12,
             "length": 17
@@ -213,7 +213,7 @@
           "name": "StrictTwoWayErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 243,
             "column": 12,
             "length": 15
@@ -271,7 +271,7 @@
           "name": "StrictTwoWayFieldsErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 244,
             "column": 12,
             "length": 21
@@ -329,7 +329,7 @@
           "name": "StrictTwoWayUnionErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 247,
             "column": 12,
             "length": 20
@@ -387,7 +387,7 @@
           "name": "StrictTwoWayTableErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 250,
             "column": 12,
             "length": 20
@@ -444,7 +444,7 @@
     {
       "name": "test.unknowninteractions/UnknownInteractionsAjarProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 81,
         "column": 15,
         "length": 31
@@ -459,7 +459,7 @@
           "name": "StrictOneWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 83,
             "column": 12,
             "length": 12
@@ -476,7 +476,7 @@
           "name": "FlexibleOneWay",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 84,
             "column": 14,
             "length": 14
@@ -493,7 +493,7 @@
           "name": "StrictTwoWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 87,
             "column": 12,
             "length": 12
@@ -510,7 +510,7 @@
           "name": "StrictTwoWayFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 88,
             "column": 12,
             "length": 18
@@ -541,7 +541,7 @@
           "name": "StrictTwoWayUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 91,
             "column": 12,
             "length": 17
@@ -572,7 +572,7 @@
           "name": "StrictTwoWayTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 94,
             "column": 12,
             "length": 17
@@ -603,7 +603,7 @@
           "name": "StrictTwoWayErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 98,
             "column": 12,
             "length": 15
@@ -661,7 +661,7 @@
           "name": "StrictTwoWayFieldsErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 99,
             "column": 12,
             "length": 21
@@ -719,7 +719,7 @@
           "name": "StrictTwoWayUnionErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 102,
             "column": 12,
             "length": 20
@@ -777,7 +777,7 @@
           "name": "StrictTwoWayTableErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 105,
             "column": 12,
             "length": 20
@@ -835,7 +835,7 @@
           "name": "StrictEvent",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 110,
             "column": 15,
             "length": 11
@@ -852,7 +852,7 @@
           "name": "StrictEventFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 111,
             "column": 15,
             "length": 17
@@ -883,7 +883,7 @@
           "name": "StrictEventUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 114,
             "column": 15,
             "length": 16
@@ -914,7 +914,7 @@
           "name": "StrictEventTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 117,
             "column": 15,
             "length": 16
@@ -945,7 +945,7 @@
           "name": "FlexibleEvent",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 121,
             "column": 17,
             "length": 13
@@ -962,7 +962,7 @@
           "name": "FlexibleEventFields",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 122,
             "column": 17,
             "length": 19
@@ -993,7 +993,7 @@
           "name": "FlexibleEventUnion",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 125,
             "column": 17,
             "length": 18
@@ -1024,7 +1024,7 @@
           "name": "FlexibleEventTable",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 128,
             "column": 17,
             "length": 18
@@ -1054,7 +1054,7 @@
     {
       "name": "test.unknowninteractions/UnknownInteractionsClosedDriverProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 256,
         "column": 17,
         "length": 39
@@ -1078,7 +1078,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
                 "line": 255,
                 "column": 12,
                 "length": 8
@@ -1086,7 +1086,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 255,
             "column": 1,
             "length": 20
@@ -1102,7 +1102,7 @@
           "name": "StrictOneWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 258,
             "column": 12,
             "length": 12
@@ -1119,7 +1119,7 @@
           "name": "StrictTwoWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 261,
             "column": 12,
             "length": 12
@@ -1136,7 +1136,7 @@
           "name": "StrictTwoWayFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 262,
             "column": 12,
             "length": 18
@@ -1167,7 +1167,7 @@
           "name": "StrictTwoWayUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 265,
             "column": 12,
             "length": 17
@@ -1198,7 +1198,7 @@
           "name": "StrictTwoWayTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 268,
             "column": 12,
             "length": 17
@@ -1229,7 +1229,7 @@
           "name": "StrictTwoWayErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 272,
             "column": 12,
             "length": 15
@@ -1287,7 +1287,7 @@
           "name": "StrictTwoWayFieldsErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 273,
             "column": 12,
             "length": 21
@@ -1345,7 +1345,7 @@
           "name": "StrictTwoWayUnionErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 276,
             "column": 12,
             "length": 20
@@ -1403,7 +1403,7 @@
           "name": "StrictTwoWayTableErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 279,
             "column": 12,
             "length": 20
@@ -1460,7 +1460,7 @@
     {
       "name": "test.unknowninteractions/UnknownInteractionsClosedProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 133,
         "column": 17,
         "length": 33
@@ -1475,7 +1475,7 @@
           "name": "StrictOneWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 135,
             "column": 12,
             "length": 12
@@ -1492,7 +1492,7 @@
           "name": "StrictTwoWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 138,
             "column": 12,
             "length": 12
@@ -1509,7 +1509,7 @@
           "name": "StrictTwoWayFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 139,
             "column": 12,
             "length": 18
@@ -1540,7 +1540,7 @@
           "name": "StrictTwoWayUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 142,
             "column": 12,
             "length": 17
@@ -1571,7 +1571,7 @@
           "name": "StrictTwoWayTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 145,
             "column": 12,
             "length": 17
@@ -1602,7 +1602,7 @@
           "name": "StrictTwoWayErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 149,
             "column": 12,
             "length": 15
@@ -1660,7 +1660,7 @@
           "name": "StrictTwoWayFieldsErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 150,
             "column": 12,
             "length": 21
@@ -1718,7 +1718,7 @@
           "name": "StrictTwoWayUnionErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 153,
             "column": 12,
             "length": 20
@@ -1776,7 +1776,7 @@
           "name": "StrictTwoWayTableErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 156,
             "column": 12,
             "length": 20
@@ -1834,7 +1834,7 @@
           "name": "StrictEvent",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 161,
             "column": 15,
             "length": 11
@@ -1851,7 +1851,7 @@
           "name": "StrictEventFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 162,
             "column": 15,
             "length": 17
@@ -1882,7 +1882,7 @@
           "name": "StrictEventUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 165,
             "column": 15,
             "length": 16
@@ -1913,7 +1913,7 @@
           "name": "StrictEventTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 168,
             "column": 15,
             "length": 16
@@ -1943,7 +1943,7 @@
     {
       "name": "test.unknowninteractions/UnknownInteractionsDriverProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 174,
         "column": 15,
         "length": 33
@@ -1967,7 +1967,7 @@
                 }
               },
               "location": {
-                "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+                "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
                 "line": 173,
                 "column": 12,
                 "length": 8
@@ -1975,7 +1975,7 @@
             }
           ],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 173,
             "column": 1,
             "length": 20
@@ -1991,7 +1991,7 @@
           "name": "StrictOneWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 176,
             "column": 12,
             "length": 12
@@ -2008,7 +2008,7 @@
           "name": "FlexibleOneWay",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 177,
             "column": 14,
             "length": 14
@@ -2025,7 +2025,7 @@
           "name": "StrictTwoWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 180,
             "column": 12,
             "length": 12
@@ -2042,7 +2042,7 @@
           "name": "StrictTwoWayFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 181,
             "column": 12,
             "length": 18
@@ -2073,7 +2073,7 @@
           "name": "StrictTwoWayUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 184,
             "column": 12,
             "length": 17
@@ -2104,7 +2104,7 @@
           "name": "StrictTwoWayTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 187,
             "column": 12,
             "length": 17
@@ -2135,7 +2135,7 @@
           "name": "StrictTwoWayErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 191,
             "column": 12,
             "length": 15
@@ -2193,7 +2193,7 @@
           "name": "StrictTwoWayFieldsErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 192,
             "column": 12,
             "length": 21
@@ -2251,7 +2251,7 @@
           "name": "StrictTwoWayUnionErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 195,
             "column": 12,
             "length": 20
@@ -2309,7 +2309,7 @@
           "name": "StrictTwoWayTableErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 198,
             "column": 12,
             "length": 20
@@ -2367,7 +2367,7 @@
           "name": "FlexibleTwoWay",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 202,
             "column": 14,
             "length": 14
@@ -2412,7 +2412,7 @@
           "name": "FlexibleTwoWayFields",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 203,
             "column": 14,
             "length": 20
@@ -2457,7 +2457,7 @@
           "name": "FlexibleTwoWayUnion",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 206,
             "column": 14,
             "length": 19
@@ -2502,7 +2502,7 @@
           "name": "FlexibleTwoWayTable",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 209,
             "column": 14,
             "length": 19
@@ -2547,7 +2547,7 @@
           "name": "FlexibleTwoWayErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 213,
             "column": 14,
             "length": 17
@@ -2605,7 +2605,7 @@
           "name": "FlexibleTwoWayFieldsErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 214,
             "column": 14,
             "length": 23
@@ -2663,7 +2663,7 @@
           "name": "FlexibleTwoWayUnionErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 217,
             "column": 14,
             "length": 22
@@ -2721,7 +2721,7 @@
           "name": "FlexibleTwoWayTableErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 220,
             "column": 14,
             "length": 22
@@ -2778,7 +2778,7 @@
     {
       "name": "test.unknowninteractions/UnknownInteractionsProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 7,
         "column": 15,
         "length": 27
@@ -2793,7 +2793,7 @@
           "name": "StrictOneWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 9,
             "column": 12,
             "length": 12
@@ -2810,7 +2810,7 @@
           "name": "FlexibleOneWay",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 10,
             "column": 14,
             "length": 14
@@ -2827,7 +2827,7 @@
           "name": "StrictTwoWay",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 13,
             "column": 12,
             "length": 12
@@ -2844,7 +2844,7 @@
           "name": "StrictTwoWayFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 14,
             "column": 12,
             "length": 18
@@ -2875,7 +2875,7 @@
           "name": "StrictTwoWayUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 17,
             "column": 12,
             "length": 17
@@ -2906,7 +2906,7 @@
           "name": "StrictTwoWayTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 20,
             "column": 12,
             "length": 17
@@ -2937,7 +2937,7 @@
           "name": "StrictTwoWayErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 24,
             "column": 12,
             "length": 15
@@ -2995,7 +2995,7 @@
           "name": "StrictTwoWayFieldsErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 25,
             "column": 12,
             "length": 21
@@ -3053,7 +3053,7 @@
           "name": "StrictTwoWayUnionErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 28,
             "column": 12,
             "length": 20
@@ -3111,7 +3111,7 @@
           "name": "StrictTwoWayTableErr",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 31,
             "column": 12,
             "length": 20
@@ -3169,7 +3169,7 @@
           "name": "FlexibleTwoWay",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 35,
             "column": 14,
             "length": 14
@@ -3214,7 +3214,7 @@
           "name": "FlexibleTwoWayFields",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 36,
             "column": 14,
             "length": 20
@@ -3259,7 +3259,7 @@
           "name": "FlexibleTwoWayUnion",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 39,
             "column": 14,
             "length": 19
@@ -3304,7 +3304,7 @@
           "name": "FlexibleTwoWayTable",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 42,
             "column": 14,
             "length": 19
@@ -3349,7 +3349,7 @@
           "name": "FlexibleTwoWayErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 46,
             "column": 14,
             "length": 17
@@ -3407,7 +3407,7 @@
           "name": "FlexibleTwoWayFieldsErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 47,
             "column": 14,
             "length": 23
@@ -3465,7 +3465,7 @@
           "name": "FlexibleTwoWayUnionErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 50,
             "column": 14,
             "length": 22
@@ -3523,7 +3523,7 @@
           "name": "FlexibleTwoWayTableErr",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 53,
             "column": 14,
             "length": 22
@@ -3581,7 +3581,7 @@
           "name": "StrictEvent",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 58,
             "column": 15,
             "length": 11
@@ -3598,7 +3598,7 @@
           "name": "StrictEventFields",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 59,
             "column": 15,
             "length": 17
@@ -3629,7 +3629,7 @@
           "name": "StrictEventUnion",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 62,
             "column": 15,
             "length": 16
@@ -3660,7 +3660,7 @@
           "name": "StrictEventTable",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 65,
             "column": 15,
             "length": 16
@@ -3691,7 +3691,7 @@
           "name": "FlexibleEvent",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 69,
             "column": 17,
             "length": 13
@@ -3708,7 +3708,7 @@
           "name": "FlexibleEventFields",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 70,
             "column": 17,
             "length": 19
@@ -3739,7 +3739,7 @@
           "name": "FlexibleEventUnion",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 73,
             "column": 17,
             "length": 18
@@ -3770,7 +3770,7 @@
           "name": "FlexibleEventTable",
           "strict": false,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 76,
             "column": 17,
             "length": 18
@@ -3808,7 +3808,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 233,
         "column": 37,
         "length": 40
@@ -3831,7 +3831,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 234,
             "column": 9,
             "length": 10
@@ -3864,7 +3864,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 243,
         "column": 33,
         "length": 2
@@ -3892,7 +3892,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 244,
         "column": 40,
         "length": 40
@@ -3915,7 +3915,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 245,
             "column": 9,
             "length": 10
@@ -3947,7 +3947,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 122,
         "column": 37,
         "length": 40
@@ -3970,7 +3970,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 123,
             "column": 9,
             "length": 10
@@ -4002,7 +4002,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 111,
         "column": 33,
         "length": 40
@@ -4025,7 +4025,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 112,
             "column": 9,
             "length": 10
@@ -4057,7 +4057,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 88,
         "column": 37,
         "length": 40
@@ -4080,7 +4080,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 89,
             "column": 9,
             "length": 10
@@ -4113,7 +4113,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 98,
         "column": 33,
         "length": 2
@@ -4141,7 +4141,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 99,
         "column": 40,
         "length": 40
@@ -4164,7 +4164,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 100,
             "column": 9,
             "length": 10
@@ -4196,7 +4196,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 262,
         "column": 37,
         "length": 40
@@ -4219,7 +4219,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 263,
             "column": 9,
             "length": 10
@@ -4252,7 +4252,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 272,
         "column": 33,
         "length": 2
@@ -4280,7 +4280,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 273,
         "column": 40,
         "length": 40
@@ -4303,7 +4303,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 274,
             "column": 9,
             "length": 10
@@ -4335,7 +4335,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 162,
         "column": 33,
         "length": 40
@@ -4358,7 +4358,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 163,
             "column": 9,
             "length": 10
@@ -4390,7 +4390,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 139,
         "column": 37,
         "length": 40
@@ -4413,7 +4413,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 140,
             "column": 9,
             "length": 10
@@ -4446,7 +4446,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 149,
         "column": 33,
         "length": 2
@@ -4474,7 +4474,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 150,
         "column": 40,
         "length": 40
@@ -4497,7 +4497,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 151,
             "column": 9,
             "length": 10
@@ -4529,7 +4529,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 181,
         "column": 37,
         "length": 40
@@ -4552,7 +4552,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 182,
             "column": 9,
             "length": 10
@@ -4585,7 +4585,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 213,
         "column": 37,
         "length": 2
@@ -4613,7 +4613,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 214,
         "column": 44,
         "length": 40
@@ -4636,7 +4636,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 215,
             "column": 9,
             "length": 10
@@ -4669,7 +4669,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 203,
         "column": 41,
         "length": 40
@@ -4692,7 +4692,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 204,
             "column": 9,
             "length": 10
@@ -4725,7 +4725,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 202,
         "column": 34,
         "length": 2
@@ -4753,7 +4753,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 191,
         "column": 33,
         "length": 2
@@ -4781,7 +4781,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 192,
         "column": 40,
         "length": 40
@@ -4804,7 +4804,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 193,
             "column": 9,
             "length": 10
@@ -4836,7 +4836,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 70,
         "column": 37,
         "length": 40
@@ -4859,7 +4859,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 71,
             "column": 9,
             "length": 10
@@ -4891,7 +4891,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 59,
         "column": 33,
         "length": 40
@@ -4914,7 +4914,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 60,
             "column": 9,
             "length": 10
@@ -4946,7 +4946,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 14,
         "column": 37,
         "length": 40
@@ -4969,7 +4969,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 15,
             "column": 9,
             "length": 10
@@ -5002,7 +5002,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 46,
         "column": 37,
         "length": 2
@@ -5030,7 +5030,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 47,
         "column": 44,
         "length": 40
@@ -5053,7 +5053,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 48,
             "column": 9,
             "length": 10
@@ -5086,7 +5086,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 36,
         "column": 41,
         "length": 40
@@ -5109,7 +5109,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 37,
             "column": 9,
             "length": 10
@@ -5142,7 +5142,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 35,
         "column": 34,
         "length": 2
@@ -5170,7 +5170,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 24,
         "column": 33,
         "length": 2
@@ -5198,7 +5198,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 25,
         "column": 40,
         "length": 40
@@ -5221,7 +5221,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 26,
             "column": 9,
             "length": 10
@@ -5256,7 +5256,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 239,
         "column": 36,
         "length": 42
@@ -5280,7 +5280,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 240,
             "column": 12,
             "length": 10
@@ -5309,7 +5309,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 250,
         "column": 39,
         "length": 42
@@ -5333,7 +5333,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 251,
             "column": 12,
             "length": 10
@@ -5361,7 +5361,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 128,
         "column": 36,
         "length": 42
@@ -5385,7 +5385,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 129,
             "column": 12,
             "length": 10
@@ -5413,7 +5413,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 117,
         "column": 32,
         "length": 42
@@ -5437,7 +5437,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 118,
             "column": 12,
             "length": 10
@@ -5465,7 +5465,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 94,
         "column": 36,
         "length": 42
@@ -5489,7 +5489,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 95,
             "column": 12,
             "length": 10
@@ -5518,7 +5518,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 105,
         "column": 39,
         "length": 42
@@ -5542,7 +5542,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 106,
             "column": 12,
             "length": 10
@@ -5570,7 +5570,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 268,
         "column": 36,
         "length": 42
@@ -5594,7 +5594,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 269,
             "column": 12,
             "length": 10
@@ -5623,7 +5623,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 279,
         "column": 39,
         "length": 42
@@ -5647,7 +5647,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 280,
             "column": 12,
             "length": 10
@@ -5675,7 +5675,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 168,
         "column": 32,
         "length": 42
@@ -5699,7 +5699,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 169,
             "column": 12,
             "length": 10
@@ -5727,7 +5727,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 145,
         "column": 36,
         "length": 42
@@ -5751,7 +5751,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 146,
             "column": 12,
             "length": 10
@@ -5780,7 +5780,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 156,
         "column": 39,
         "length": 42
@@ -5804,7 +5804,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 157,
             "column": 12,
             "length": 10
@@ -5832,7 +5832,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 187,
         "column": 36,
         "length": 42
@@ -5856,7 +5856,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 188,
             "column": 12,
             "length": 10
@@ -5885,7 +5885,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 220,
         "column": 43,
         "length": 42
@@ -5909,7 +5909,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 221,
             "column": 12,
             "length": 10
@@ -5938,7 +5938,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 209,
         "column": 40,
         "length": 42
@@ -5962,7 +5962,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 210,
             "column": 12,
             "length": 10
@@ -5991,7 +5991,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 198,
         "column": 39,
         "length": 42
@@ -6015,7 +6015,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 199,
             "column": 12,
             "length": 10
@@ -6043,7 +6043,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 76,
         "column": 36,
         "length": 42
@@ -6067,7 +6067,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 77,
             "column": 12,
             "length": 10
@@ -6095,7 +6095,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 65,
         "column": 32,
         "length": 42
@@ -6119,7 +6119,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 66,
             "column": 12,
             "length": 10
@@ -6147,7 +6147,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 20,
         "column": 36,
         "length": 42
@@ -6171,7 +6171,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 21,
             "column": 12,
             "length": 10
@@ -6200,7 +6200,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 53,
         "column": 43,
         "length": 42
@@ -6224,7 +6224,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 54,
             "column": 12,
             "length": 10
@@ -6253,7 +6253,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 42,
         "column": 40,
         "length": 42
@@ -6277,7 +6277,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 43,
             "column": 12,
             "length": 10
@@ -6306,7 +6306,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 31,
         "column": 39,
         "length": 42
@@ -6330,7 +6330,7 @@
           },
           "name": "some_field",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 32,
             "column": 12,
             "length": 10
@@ -6360,7 +6360,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 236,
         "column": 36,
         "length": 42
@@ -6384,7 +6384,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 237,
             "column": 12,
             "length": 10
@@ -6413,7 +6413,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 243,
         "column": 33,
         "length": 2
@@ -6491,7 +6491,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 244,
         "column": 39,
         "length": 42
@@ -6569,7 +6569,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 250,
         "column": 38,
         "length": 44
@@ -6648,7 +6648,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 247,
         "column": 39,
         "length": 42
@@ -6672,7 +6672,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 248,
             "column": 12,
             "length": 10
@@ -6701,7 +6701,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 247,
         "column": 38,
         "length": 44
@@ -6779,7 +6779,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 125,
         "column": 36,
         "length": 42
@@ -6803,7 +6803,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 126,
             "column": 12,
             "length": 10
@@ -6832,7 +6832,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 114,
         "column": 32,
         "length": 42
@@ -6856,7 +6856,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 115,
             "column": 12,
             "length": 10
@@ -6885,7 +6885,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 91,
         "column": 36,
         "length": 42
@@ -6909,7 +6909,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 92,
             "column": 12,
             "length": 10
@@ -6938,7 +6938,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 98,
         "column": 33,
         "length": 2
@@ -7016,7 +7016,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 99,
         "column": 39,
         "length": 42
@@ -7094,7 +7094,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 105,
         "column": 38,
         "length": 44
@@ -7173,7 +7173,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 102,
         "column": 39,
         "length": 42
@@ -7197,7 +7197,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 103,
             "column": 12,
             "length": 10
@@ -7226,7 +7226,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 102,
         "column": 38,
         "length": 44
@@ -7304,7 +7304,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 265,
         "column": 36,
         "length": 42
@@ -7328,7 +7328,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 266,
             "column": 12,
             "length": 10
@@ -7357,7 +7357,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 272,
         "column": 33,
         "length": 2
@@ -7435,7 +7435,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 273,
         "column": 39,
         "length": 42
@@ -7513,7 +7513,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 279,
         "column": 38,
         "length": 44
@@ -7592,7 +7592,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 276,
         "column": 39,
         "length": 42
@@ -7616,7 +7616,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 277,
             "column": 12,
             "length": 10
@@ -7645,7 +7645,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 276,
         "column": 38,
         "length": 44
@@ -7723,7 +7723,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 165,
         "column": 32,
         "length": 42
@@ -7747,7 +7747,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 166,
             "column": 12,
             "length": 10
@@ -7776,7 +7776,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 142,
         "column": 36,
         "length": 42
@@ -7800,7 +7800,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 143,
             "column": 12,
             "length": 10
@@ -7829,7 +7829,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 149,
         "column": 33,
         "length": 2
@@ -7907,7 +7907,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 150,
         "column": 39,
         "length": 42
@@ -7985,7 +7985,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 156,
         "column": 38,
         "length": 44
@@ -8064,7 +8064,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 153,
         "column": 39,
         "length": 42
@@ -8088,7 +8088,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 154,
             "column": 12,
             "length": 10
@@ -8117,7 +8117,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 153,
         "column": 38,
         "length": 44
@@ -8195,7 +8195,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 184,
         "column": 36,
         "length": 42
@@ -8219,7 +8219,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 185,
             "column": 12,
             "length": 10
@@ -8248,7 +8248,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 213,
         "column": 37,
         "length": 2
@@ -8350,7 +8350,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 214,
         "column": 43,
         "length": 42
@@ -8452,7 +8452,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 203,
         "column": 40,
         "length": 42
@@ -8530,7 +8530,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 220,
         "column": 42,
         "length": 44
@@ -8632,7 +8632,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 209,
         "column": 39,
         "length": 44
@@ -8711,7 +8711,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 217,
         "column": 43,
         "length": 42
@@ -8735,7 +8735,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 218,
             "column": 12,
             "length": 10
@@ -8764,7 +8764,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 217,
         "column": 42,
         "length": 44
@@ -8867,7 +8867,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 206,
         "column": 40,
         "length": 42
@@ -8891,7 +8891,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 207,
             "column": 12,
             "length": 10
@@ -8920,7 +8920,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 206,
         "column": 39,
         "length": 44
@@ -8998,7 +8998,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 202,
         "column": 34,
         "length": 2
@@ -9076,7 +9076,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 191,
         "column": 33,
         "length": 2
@@ -9154,7 +9154,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 192,
         "column": 39,
         "length": 42
@@ -9232,7 +9232,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 198,
         "column": 38,
         "length": 44
@@ -9311,7 +9311,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 195,
         "column": 39,
         "length": 42
@@ -9335,7 +9335,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 196,
             "column": 12,
             "length": 10
@@ -9364,7 +9364,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 195,
         "column": 38,
         "length": 44
@@ -9442,7 +9442,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 73,
         "column": 36,
         "length": 42
@@ -9466,7 +9466,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 74,
             "column": 12,
             "length": 10
@@ -9495,7 +9495,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 62,
         "column": 32,
         "length": 42
@@ -9519,7 +9519,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 63,
             "column": 12,
             "length": 10
@@ -9548,7 +9548,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 17,
         "column": 36,
         "length": 42
@@ -9572,7 +9572,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 18,
             "column": 12,
             "length": 10
@@ -9601,7 +9601,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 46,
         "column": 37,
         "length": 2
@@ -9703,7 +9703,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 47,
         "column": 43,
         "length": 42
@@ -9805,7 +9805,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 36,
         "column": 40,
         "length": 42
@@ -9883,7 +9883,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 53,
         "column": 42,
         "length": 44
@@ -9985,7 +9985,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 42,
         "column": 39,
         "length": 44
@@ -10064,7 +10064,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 50,
         "column": 43,
         "length": 42
@@ -10088,7 +10088,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 51,
             "column": 12,
             "length": 10
@@ -10117,7 +10117,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 50,
         "column": 42,
         "length": 44
@@ -10220,7 +10220,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 39,
         "column": 40,
         "length": 42
@@ -10244,7 +10244,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 40,
             "column": 12,
             "length": 10
@@ -10273,7 +10273,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 39,
         "column": 39,
         "length": 44
@@ -10351,7 +10351,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 35,
         "column": 34,
         "length": 2
@@ -10429,7 +10429,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 24,
         "column": 33,
         "length": 2
@@ -10507,7 +10507,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 25,
         "column": 39,
         "length": 42
@@ -10585,7 +10585,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 31,
         "column": 38,
         "length": 44
@@ -10664,7 +10664,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 28,
         "column": 39,
         "length": 42
@@ -10688,7 +10688,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
             "line": 29,
             "column": 12,
             "length": 10
@@ -10717,7 +10717,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/unknown_interactions.test.fidl",
         "line": 28,
         "column": 38,
         "length": 44

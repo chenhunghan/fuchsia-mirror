@@ -16,7 +16,8 @@ extern "C" {
 }
 #pragma clang diagnostic pop
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.images2/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
 #include <lib/media/codec_impl/codec_packet.h>
 
 #include "src/lib/fxl/macros.h"
@@ -26,13 +27,12 @@ class AvCodecContext {
  public:
   // Describes the requirements of a buffer which can back a frame.
   struct FrameBufferRequest {
-    fuchsia::images2::ImageFormat format;
+    fuchsia_images2::ImageFormat format;
     size_t buffer_bytes_needed;
   };
 
-  using GetBufferCallback =
-      ::fit::function<int(const FrameBufferRequest& frame_buffer_request,
-                          AVCodecContext* avcodec_context, AVFrame* frame, int flags)>;
+  using GetBufferCallback = ::fit::function<int(const FrameBufferRequest& frame_buffer_request,
+                                                AVFrame* frame, int flags)>;
 
   using AVFramePtr = ::std::unique_ptr<AVFrame, fit::function<void(AVFrame*)>>;
 
@@ -49,13 +49,13 @@ class AvCodecContext {
   // buffers back when the decoder is done referencing them, set up a free
   // callback in the AVBufferRef provided to each frame.
   //
-  // Calls to get_buffer_callback may also be redirected to
-  // avcodec_default_get_buffer2 if you have an error state and just want ffmpeg
-  // to gracefully conclude its work.
+  // If get_buffer_callback is unable to provide a buffer (for example, on an
+  // unsupported mid-stream format change or when the stream is stopping), it
+  // should return a negative AVERROR code (such as AVERROR(ENOMEM)).
   //
   // See ffmpeg's get_buffer2 and av_buffer_create for more details.
   static std::optional<std::unique_ptr<AvCodecContext>> CreateDecoder(
-      const fuchsia::media::FormatDetails& format_details, GetBufferCallback get_buffer_callback);
+      const fuchsia_media::FormatDetails& format_details, GetBufferCallback get_buffer_callback);
 
   // Sends a compressed packet to the decoder. The semantics of SendPacket and
   // ReceiveFrame mirror those of avcodec_send_packet and avcodec_receive_frame
@@ -78,9 +78,9 @@ class AvCodecContext {
   static AVPixelFormat GetFormatCallback(AVCodecContext* avcodec_context,
                                          const AVPixelFormat* pix_fmts);
 
-  static int GetBufferCallbackRouter(AVCodecContext* avcodec_context, AVFrame* frame, int flag);
+  static int GetBufferCallbackRouter(AVCodecContext* avcodec_context, AVFrame* frame, int flags);
 
-  int GetBufferHandler(AVCodecContext* avcodec_context, AVFrame* frame, int flag);
+  int GetBufferHandler(AVFrame* frame, int flags);
 
   // Takes ownership of ffmpeg's AVCodecContext type (note uppercase V).
   AvCodecContext(

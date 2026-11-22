@@ -24,7 +24,7 @@ _CONFORMANCE_GOLDEN_ITEMS = [
     },
     {
         "extension": "cc",
-        "language": "llcpp",
+        "language": "cpp_wire",
     },
     {
         "extension": "py",
@@ -77,6 +77,9 @@ verify_golden_files(
         )
         for item in _CONFORMANCE_GOLDEN_ITEMS
     ],
-    visibility = ["//tools/fidl:__subpackages__"],
+    visibility = [
+        "//build/bazel/rules/tests:__pkg__",
+        "//tools/fidl:__subpackages__",
+    ],
 )
 # LINT.ThenChange(BUILD.gn)

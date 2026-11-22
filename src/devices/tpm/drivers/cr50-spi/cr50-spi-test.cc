@@ -7,6 +7,8 @@
 #include <fidl/fuchsia.hardware.spi/cpp/wire.h>
 #include <fidl/fuchsia.hardware.tpmimpl/cpp/wire.h>
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/component/incoming/cpp/protocol.h>
+#include <lib/component/incoming/cpp/service.h>
 #include <lib/ddk/debug.h>
 #include <lib/inspect/testing/cpp/zxtest/inspect.h>
 #include <zircon/rights.h>
@@ -201,13 +203,13 @@ TEST_F(Cr50SpiTest, TestTpmRead) {
   ASSERT_NO_FATAL_FAILURE(CreateDevice(false));
   ASSERT_NO_FATAL_FAILURE(ExpectFirmware("hello firmware"));
 
-  fidl::ClientEnd<fuchsia_hardware_tpmimpl::TpmImpl> client_end;
-  auto server = fidl::CreateEndpoints(&client_end);
-  ASSERT_TRUE(server.is_ok());
-  fidl::WireSyncClient client{std::move(client_end)};
-
-  ddk::TpmImplProtocolClient proto(fake_root_->GetLatestChild());
-  proto.ConnectServer(server->TakeChannel());
+  auto client_end = component::ConnectAt<fuchsia_hardware_tpmimpl::TpmImpl>(
+      fake_root_->GetLatestChild()->outgoing(),
+      std::string("svc/").append(
+          component::MakeServiceMemberPath<fuchsia_hardware_tpmimpl::Service::Device>(
+              component::kDefaultInstance)));
+  ASSERT_OK(client_end.status_value());
+  fidl::WireSyncClient client{std::move(*client_end)};
 
   std::vector<uint8_t> expected{1, 2, 3, 4};
   ExpectMessage(false, fidl::ToUnderlying(fuchsia_hardware_tpmimpl::wire::RegisterAddress::kTpmSts),
@@ -225,13 +227,13 @@ TEST_F(Cr50SpiTest, TestTpmWrite) {
   ASSERT_NO_FATAL_FAILURE(CreateDevice(false));
   ASSERT_NO_FATAL_FAILURE(ExpectFirmware("hello firmware"));
 
-  fidl::ClientEnd<fuchsia_hardware_tpmimpl::TpmImpl> client_end;
-  auto server = fidl::CreateEndpoints(&client_end);
-  ASSERT_TRUE(server.is_ok());
-  fidl::WireSyncClient client{std::move(client_end)};
-
-  ddk::TpmImplProtocolClient proto(fake_root_->GetLatestChild());
-  proto.ConnectServer(server->TakeChannel());
+  auto client_end = component::ConnectAt<fuchsia_hardware_tpmimpl::TpmImpl>(
+      fake_root_->GetLatestChild()->outgoing(),
+      std::string("svc/").append(
+          component::MakeServiceMemberPath<fuchsia_hardware_tpmimpl::Service::Device>(
+              component::kDefaultInstance)));
+  ASSERT_OK(client_end.status_value());
+  fidl::WireSyncClient client{std::move(*client_end)};
 
   std::vector<uint8_t> expected{4, 4, 2, 0};
   ExpectMessage(true, fidl::ToUnderlying(fuchsia_hardware_tpmimpl::wire::RegisterAddress::kTpmSts),

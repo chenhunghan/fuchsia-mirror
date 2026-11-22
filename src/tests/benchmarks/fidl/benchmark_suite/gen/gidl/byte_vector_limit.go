@@ -11,7 +11,7 @@ import (
 	"go.fuchsia.dev/fuchsia/src/tests/benchmarks/fidl/benchmark_suite/gen/gidl/util"
 )
 
-// In LLCPP and possibly other bindings, vector size limits effect the buffer
+// In C++ wire and possibly other bindings, vector size limits effect the buffer
 // size that is allocated.
 func init() {
 	util.Register(config.GidlFile{

@@ -1,0 +1,132 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(sbc_warnings)
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "sbc_warnings",
+    cflags = [
+        "-Wno-conversion",
+        "-Wno-implicit-fallthrough",
+        "-Wno-write-strings",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:sbc_warnings)
+
+# LINT.IfChange(undefined_behavior_shift)
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "undefined_behavior_shift",
+    cflags = ["-fno-sanitize=shift"],
+)
+# LINT.ThenChange(BUILD.gn:undefined_behavior_shift)
+
+# LINT.IfChange(undefined_behavior_signed_integer_overflow)
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "undefined_behavior_signed_integer_overflow",
+    cflags = ["-fno-sanitize=signed-integer-overflow"],
+)
+# LINT.ThenChange(BUILD.gn:undefined_behavior_signed_integer_overflow)
+
+fx_cc_library(
+    name = "sbc_decoder",
+    srcs = [
+        "src/system/embdrv/sbc/decoder/srce/alloc.c",
+        "src/system/embdrv/sbc/decoder/srce/bitalloc.c",
+        "src/system/embdrv/sbc/decoder/srce/bitalloc-sbc.c",
+        "src/system/embdrv/sbc/decoder/srce/bitstream-decode.c",
+        "src/system/embdrv/sbc/decoder/srce/decoder-oina.c",
+        "src/system/embdrv/sbc/decoder/srce/decoder-private.c",
+        "src/system/embdrv/sbc/decoder/srce/decoder-sbc.c",
+        "src/system/embdrv/sbc/decoder/srce/dequant.c",
+        "src/system/embdrv/sbc/decoder/srce/framing.c",
+        "src/system/embdrv/sbc/decoder/srce/framing-sbc.c",
+        "src/system/embdrv/sbc/decoder/srce/oi_codec_version.c",
+        "src/system/embdrv/sbc/decoder/srce/readsamplesjoint.inc",
+        "src/system/embdrv/sbc/decoder/srce/synthesis-8-generated.c",
+        "src/system/embdrv/sbc/decoder/srce/synthesis-dct8.c",
+        "src/system/embdrv/sbc/decoder/srce/synthesis-sbc.c",
+    ],
+    hdrs = [
+        "src/system/embdrv/sbc/decoder/include/oi_assert.h",
+        "src/system/embdrv/sbc/decoder/include/oi_bitstream.h",
+        "src/system/embdrv/sbc/decoder/include/oi_bt_spec.h",
+        "src/system/embdrv/sbc/decoder/include/oi_codec_sbc.h",
+        "src/system/embdrv/sbc/decoder/include/oi_codec_sbc_private.h",
+        "src/system/embdrv/sbc/decoder/include/oi_common.h",
+        "src/system/embdrv/sbc/decoder/include/oi_cpu_dep.h",
+        "src/system/embdrv/sbc/decoder/include/oi_modules.h",
+        "src/system/embdrv/sbc/decoder/include/oi_osinterface.h",
+        "src/system/embdrv/sbc/decoder/include/oi_status.h",
+        "src/system/embdrv/sbc/decoder/include/oi_stddefs.h",
+        "src/system/embdrv/sbc/decoder/include/oi_string.h",
+        "src/system/embdrv/sbc/decoder/include/oi_time.h",
+        "src/system/embdrv/sbc/decoder/include/oi_utils.h",
+    ],
+    build_flags = [
+        ":sbc_warnings",
+        ":undefined_behavior_shift",
+    ],
+    includes = ["src/system/embdrv/sbc/decoder/include"],
+    public_configs = [":sbc_decoder_includes_config"],
+    visibility = [
+        # Needed by GN static_library("sbc") via bazel2gn.
+        ":__pkg__",
+        "//src/media/codec/codecs/sw/sbc:__pkg__",
+    ],
+    # Keep as a GN source_set via bazel2gn to match the pre-existing target type.
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "sbc_encoder",
+    srcs = [
+        "src/system/embdrv/sbc/encoder/srce/sbc_analysis.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_dct.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_dct_coeffs.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_enc_bit_alloc_mono.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_enc_bit_alloc_ste.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_enc_coeffs.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_encoder.c",
+        "src/system/embdrv/sbc/encoder/srce/sbc_packing.c",
+    ],
+    hdrs = [
+        "src/system/embdrv/sbc/encoder/include/sbc_dct.h",
+        "src/system/embdrv/sbc/encoder/include/sbc_enc_func_declare.h",
+        "src/system/embdrv/sbc/encoder/include/sbc_encoder.h",
+        "src/system/embdrv/sbc/encoder/include/sbc_if.h",
+        "src/system/embdrv/sbc/encoder/include/sbc_types.h",
+    ],
+    build_flags = [
+        ":sbc_warnings",
+        ":undefined_behavior_shift",
+        ":undefined_behavior_signed_integer_overflow",
+    ],
+    includes = ["src/system/embdrv/sbc/encoder/include"],
+    public_configs = [":sbc_encoder_includes_config"],
+    visibility = [
+        # Needed by GN static_library("sbc") via bazel2gn.
+        ":__pkg__",
+        "//src/media/codec/codecs/sw/sbc:__pkg__",
+    ],
+    # Keep as a GN source_set via bazel2gn to match the pre-existing target type.
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "sbc",
+    deps = [
+        ":sbc_decoder",
+        ":sbc_encoder",
+    ],
+)

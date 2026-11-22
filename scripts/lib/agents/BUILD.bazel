@@ -25,7 +25,11 @@ py_library(
     ],  # @bazel2gn:skip
     imports = [".."],
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//scripts/fxtest/python:__pkg__"],
+    visibility = [
+        "//scripts/debug/zxdb_cli/cli:__pkg__",
+        "//scripts/debug/zxdb_cli/tests:__pkg__",
+        "//scripts/fxtest/python:__pkg__",
+    ],
 )
 
 host_py_test(

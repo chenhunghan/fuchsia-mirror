@@ -1,0 +1,44 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":create_api_level_tests",
+        ":replace_next_tests",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# Run using the following command:
+# fx test //scripts/versioning:create_api_level_tests
+host_py_test(
+    name = "create_api_level_tests",
+    srcs = [
+        "create_api_level.py",
+        "create_api_level_tests.py",
+    ],
+    imports = ["."],
+    main = "create_api_level_tests.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# Run using the following command:
+# fx test //scripts/versioning:replace_next_tests
+host_py_test(
+    name = "replace_next_tests",
+    srcs = [
+        "replace_next.py",
+        "replace_next_tests.py",
+    ],
+    imports = ["."],
+    main = "replace_next_tests.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

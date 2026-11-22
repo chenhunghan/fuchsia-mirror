@@ -30,7 +30,7 @@ rustc_library(
         "//tools/lib/cm_fidl_analyzer:__subpackages__",
     ],
     deps = [
-        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_common",
         "//src/lib/from-enum",
         "//src/sys/lib/cm_rust",
         "//src/sys/lib/cm_types",
@@ -55,7 +55,7 @@ rustc_test(
     }),
     edition = "2024",
     deps = [
-        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
     ],
 )
 

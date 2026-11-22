@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 use babeldiff::analyze::{self, CppFinder, NoFinder};
 use babeldiff::git::{Git, RepoFinder};
 use babeldiff::html;

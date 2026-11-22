@@ -175,6 +175,18 @@ impl<T: Fastboot + Send> Fastboot for CachingFastboot<T> {
         self.inner.oem(command)
     }
 
+    fn oem_with_timeout<'a>(
+        &'a mut self,
+        command: &'a str,
+        timeout: Duration,
+    ) -> BoxFuture<'a, Result<(), FastbootError>> {
+        self.inner.oem_with_timeout(command, timeout)
+    }
+
+    fn supports_gbl_async_tasks(&self) -> bool {
+        self.inner.supports_gbl_async_tasks()
+    }
+
     fn stream<'a>(
         &'a mut self,
         partition_name: &'a str,
@@ -307,5 +319,22 @@ mod test {
         // Uncacheable variables should still query the inner interface
         assert_eq!(caching.get_var("current-slot").await.unwrap(), "a");
         assert_eq!(state.lock().unwrap().get_var_call_count("current-slot"), (true, 1));
+    }
+
+    #[fuchsia::test]
+    async fn test_caching_version_gbl_and_oem_with_timeout() {
+        let (state, interface) = setup();
+        state.lock().unwrap().set_var("version-gbl".to_string(), "gbl.2026".to_string());
+
+        let mut caching = CachingFastboot::new(interface);
+        assert_eq!(caching.get_var("version-gbl").await.unwrap(), "gbl.2026");
+        assert_eq!(caching.get_var("version-gbl").await.unwrap(), "gbl.2026");
+        assert_eq!(state.lock().unwrap().get_var_call_count("version-gbl"), (true, 1));
+
+        caching.oem_with_timeout("gbl-sync-tasks", Duration::seconds(120)).await.unwrap();
+        assert_eq!(
+            state.lock().unwrap().oem_timeouts,
+            vec![("oem gbl-sync-tasks".to_string(), Duration::seconds(120))]
+        );
     }
 }

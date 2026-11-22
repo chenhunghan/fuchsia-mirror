@@ -59,8 +59,6 @@ TEST_F(StartupAnnotationsTest, Keys) {
                                        Key(kBuildProductKey),
                                        Key(kBuildLatestCommitDateKey),
                                        Key(kBuildPlatformBackstopKey),
-                                       Key(kBuildVersionKey),
-                                       Key(kBuildVersionPreviousBootKey),
                                        Key(kBuildPlatformVersionKey),
                                        Key(kBuildPlatformVersionPreviousBootKey),
                                        Key(kBuildProductVersionKey),
@@ -79,7 +77,7 @@ TEST_F(StartupAnnotationsTest, Keys) {
 }
 
 TEST_F(StartupAnnotationsTest, Values_FilesPresent) {
-  testing::ScopedMemFsManager memfs_manager;
+  ScopedMemFsManager memfs_manager;
 
   memfs_manager.Create("/boot/config/build_info");
   memfs_manager.Create("/config/build-info");
@@ -93,8 +91,6 @@ TEST_F(StartupAnnotationsTest, Values_FilesPresent) {
       {kBuildCommitDatePath, "commit-date"},
       {kBuildMinUtcStampPath, "1748946819"},
       {kTestCompilationModePath, "compilation-mode"},
-      {kCurrentBuildVersionPath, "current-version"},
-      {kPreviousBuildVersionPath, "previous-version"},
       {kCurrentBuildPlatformVersionPath, "current-platform-version"},
       {kPreviousBuildPlatformVersionPath, "previous-platform-version"},
       {kCurrentBuildProductVersionPath, "current-product-version"},
@@ -118,8 +114,6 @@ TEST_F(StartupAnnotationsTest, Values_FilesPresent) {
           Pair(kBuildProductKey, ErrorOrString("product")),
           Pair(kBuildLatestCommitDateKey, ErrorOrString("commit-date")),
           Pair(kBuildPlatformBackstopKey, ErrorOrString("2025-06-03T10:33:39+00:00")),
-          Pair(kBuildVersionKey, ErrorOrString("current-version")),
-          Pair(kBuildVersionPreviousBootKey, ErrorOrString("previous-version")),
           Pair(kBuildPlatformVersionKey, ErrorOrString("current-platform-version")),
           Pair(kBuildPlatformVersionPreviousBootKey, ErrorOrString("previous-platform-version")),
           Pair(kBuildProductVersionKey, ErrorOrString("current-product-version")),
@@ -154,8 +148,6 @@ TEST_F(StartupAnnotationsTest, Values_FilesMissing) {
           Pair(kBuildProductKey, ErrorOrString(Error::kFileReadFailure)),
           Pair(kBuildLatestCommitDateKey, ErrorOrString(Error::kFileReadFailure)),
           Pair(kBuildPlatformBackstopKey, ErrorOrString(Error::kFileReadFailure)),
-          Pair(kBuildVersionKey, ErrorOrString(Error::kFileReadFailure)),
-          Pair(kBuildVersionPreviousBootKey, ErrorOrString(Error::kFileReadFailure)),
           Pair(kBuildPlatformVersionKey, ErrorOrString(Error::kFileReadFailure)),
           Pair(kBuildPlatformVersionPreviousBootKey, ErrorOrString(Error::kFileReadFailure)),
           Pair(kBuildProductVersionKey, ErrorOrString(Error::kFileReadFailure)),
@@ -176,7 +168,7 @@ TEST_F(StartupAnnotationsTest, Values_FilesMissing) {
 }
 
 TEST_F(StartupAnnotationsTest, BackstopTime_Invalid) {
-  testing::ScopedMemFsManager memfs_manager;
+  ScopedMemFsManager memfs_manager;
 
   memfs_manager.Create("/boot/config/build_info");
 
@@ -192,44 +184,6 @@ TEST_F(StartupAnnotationsTest, BackstopTime_Invalid) {
 
   EXPECT_THAT(startup_annotations,
               Contains(Pair(kBuildPlatformBackstopKey, ErrorOrString(Error::kBadValue))));
-}
-
-TEST_F(StartupAnnotationsTest, BuildProductVersionPreviousBootFallback) {
-  testing::ScopedMemFsManager memfs_manager;
-  memfs_manager.Create("/data");
-  memfs_manager.Create("/tmp");
-
-  // On the first OTA, the build platform and product versions for the previous boot won't be
-  // available. The build product version should match the legacy build version.
-  WriteFiles({
-      {kCurrentBuildVersionPath, "current-version"},
-      {kPreviousBuildVersionPath, "previous-version"},
-      {kCurrentBuildPlatformVersionPath, "current-platform-version"},
-      {kCurrentBuildProductVersionPath, "current-product-version"},
-  });
-
-  const FinalShutdownInfo final_shutdown_info(FinalShutdownReason::kOom,
-                                              GracefulShutdownAction::kReboot);
-  const Annotations startup_annotations =
-      GetStartupAnnotations(final_shutdown_info, SpontaneousRebootReason::kSpontaneous,
-                            /*compilation_mode_path=*/kTestCompilationModePath);
-
-  EXPECT_THAT(
-      startup_annotations,
-      UnorderedElementsAre(
-          Pair(kBuildBoardKey, _), Pair(kBuildCompilationModeKey, _), Pair(kBuildProductKey, _),
-          Pair(kBuildLatestCommitDateKey, _), Pair(kBuildPlatformBackstopKey, _),
-          Pair(kBuildVersionKey, ErrorOrString("current-version")),
-          Pair(kBuildVersionPreviousBootKey, ErrorOrString("previous-version")),
-          Pair(kBuildPlatformVersionKey, ErrorOrString("current-platform-version")),
-          Pair(kBuildPlatformVersionPreviousBootKey, ErrorOrString(Error::kFileReadFailure)),
-          Pair(kBuildProductVersionKey, ErrorOrString("current-product-version")),
-          Pair(kBuildProductVersionPreviousBootKey, ErrorOrString("previous-version")),
-          Pair(kDeviceBoardNameKey, _), Pair(kDeviceNumCPUsKey, _),
-          Pair(kSystemBootIdCurrentKey, _), Pair(kSystemBootIdPreviousKey, _),
-          Pair(kSystemBootIdTimelineKey, _), Pair(kSystemLastRebootRuntimeKey, _),
-          Pair(kSystemLastRebootTotalSuspendedTimeKey, _), Pair(kSystemLastRebootUptimeKey, _),
-          Pair(kSystemLastShutdownGracefulActionKey, _), Pair(kSystemLastRebootReasonKey, _)));
 }
 
 }  // namespace

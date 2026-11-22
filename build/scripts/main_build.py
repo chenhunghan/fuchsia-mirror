@@ -27,8 +27,8 @@ import json
 import os
 import pathlib
 import shlex
-import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -38,19 +38,21 @@ from typing import Any, Self, TextIO
 
 # Expects FUCHSIA_DIR to be present in sys.path (via PYTHONPATH).
 # LINT.IfChange(main_build_python_imports)
-from build.auth import gcloud
+from build.auth import auth_env
 from build.bazel.scripts import bazel_invocation as bazel_inv
 from build.profile import procfs
 from build.rbe import build_summary, casfs, rbe_profile, rbe_settings
 from build.resultstore import rs_profile
 from build.scripts import (
     build_timeout,
+    lock_utils,
     properties,
     pstree,
     python_subprocess,
     signal_utils,
     top_build_wrap,
 )
+from build.scripts.python_forkserver import setting as forkserver_setting
 
 # LINT.ThenChange(//tools/devshell/BUILD.gn:main_build_python_imports, //tools/devshell/tests/subcommands/fx_build_test:main_build_python_imports)
 
@@ -159,6 +161,9 @@ LOCAL_RESULTSTORE_CONFIG = pathlib.Path(".resultstore")
 # LINT.IfChange(ninja_build_trace_filename)
 NINJA_BUILD_TRACE_GZ = "ninja_build_trace.json.gz"
 # LINT.ThenChange(/tools/integration/fint/fint_build.py:ninja_build_trace_filename)
+# LINT.IfChange(host_tool_building_env)
+_HOST_TOOL_BUILDING_ENV = "_FX_HOST_TOOL_BUILDING"
+# LINT.ThenChange(//tools/devshell/fx_cli/builder.py:host_tool_building_env)
 NINJA_LOGS_DIR = "ninja_logs"
 NINJA_ACTION_METRICS_JSON = "ninja_action_metrics.json"
 NINJA_ERRORS_JSON = "ninja_errors.json"
@@ -166,9 +171,6 @@ TIMEOUT_LOGS_DIR = pathlib.Path("timeout_logs")
 BUILD_TIMEOUT_SCRIPT = pathlib.Path("build/scripts/build_timeout.py")
 FINT_BUILD_PY_RELATIVE_PATH = pathlib.Path(
     "tools/integration/fint/fint_build.py"
-)
-BAZEL_CRED_HELPER = pathlib.Path(
-    "/google/src/head/depot/google3/devtools/blaze/bazel/credhelper/credhelper"
 )
 
 
@@ -190,6 +192,8 @@ class FuchsiaBuildConfig(object):
     Fields:
       rbe: if True, build uses RBE
       rbe_casfs: if True, virtualize RBE outputs on casfs instead of downloading them
+      python_forkserver: if True, run Python build actions through a
+        per-build forkserver
       resultstore: "all", "none", "ninja", or "bazel"
       profile: if True, collect system profile during build
       tui: if True, enable terminal UI for monitoring build
@@ -202,7 +206,8 @@ class FuchsiaBuildConfig(object):
       fint_context_path: path to Fint context parameters if Fint wrapping is triggered
       output_metadata_json: path to write the structured metadata JSON of build artifacts
       remote_proxy_socket: path to the local RBE proxy socket if passed via CLI
-      resultstore_proxy_socket: path to the local ResultStore/BES proxy socket if passed via CLI
+      resultstore_proxy_socket: path to the local ResultStore proxy socket for rsproxy (deprecated for Bazel)
+      bes_proxy_socket: path to the local Build Event Service (BES) proxy socket for Bazel
       resultstore_instance: the target ResultStore instance name
       cas_instance: the target CAS instance name
       rbe_instance: the target RBE instance name
@@ -222,6 +227,7 @@ class FuchsiaBuildConfig(object):
     output_metadata_json: pathlib.Path | None = None
     remote_proxy_socket: pathlib.Path | None = None
     resultstore_proxy_socket: pathlib.Path | None = None
+    bes_proxy_socket: pathlib.Path | None = None
     resultstore_instance: str | None = None
     cas_instance: str | None = None
     rbe_instance: str | None = None
@@ -229,6 +235,7 @@ class FuchsiaBuildConfig(object):
     timeout: str | None = None
     timeout_grace_period: str | None = None
     rbe_casfs: bool = False
+    python_forkserver: bool = False
     summarize_failures: bool = False
 
     @staticmethod
@@ -236,6 +243,7 @@ class FuchsiaBuildConfig(object):
         args: argparse.Namespace,
         default_resultstore: str | None = None,
         default_rbe_casfs: bool = False,
+        python_forkserver: bool = False,
     ) -> "FuchsiaBuildConfig":
         resultstore_val = args.resultstore or default_resultstore or "none"
         rbe_casfs_val = (
@@ -257,6 +265,7 @@ class FuchsiaBuildConfig(object):
         return FuchsiaBuildConfig(
             rbe=args.rbe,
             rbe_casfs=rbe_casfs_val,
+            python_forkserver=python_forkserver,
             resultstore=resultstore_val,
             profile=args.profile,
             tui=args.tui,
@@ -270,6 +279,7 @@ class FuchsiaBuildConfig(object):
             max_concurrency=args.max_concurrency,
             remote_proxy_socket=args.remote_proxy_socket,
             resultstore_proxy_socket=args.resultstore_proxy_socket,
+            bes_proxy_socket=args.bes_proxy_socket,
             resultstore_instance=args.resultstore_instance,
             cas_instance=args.cas_instance,
             rbe_instance=args.rbe_instance,
@@ -278,16 +288,6 @@ class FuchsiaBuildConfig(object):
             timeout_grace_period=args.timeout_grace_period,
             summarize_failures=summarize_failures_val,
         )
-
-
-def check_shell_command(cmd: str) -> bool:
-    return shutil.which(cmd) is not None
-
-
-@functools.lru_cache()
-def has_loas() -> bool:
-    """Checks whether the host system supports LOAS/gcert authentication."""
-    return check_shell_command("gcert") and check_shell_command("gcertstatus")
 
 
 def _collect_rbe_metadata(reproxy_log_dir: pathlib.Path) -> JSONObject:
@@ -531,6 +531,82 @@ def ensure_file_descriptor_limit(limit: int) -> None:
         pass
 
 
+def check_jobserver_pool_fifo(makeflags: str) -> str:
+    """Check if a FIFO-based jobserver is enabled.
+
+    Args:
+        makeflags: value of MAKEFLAGS environment variable.
+    Returns:
+        An empty string if no server is enabled, or the sanitized
+        MAKEFLAGS value to pass to sub-processes otherwise (stripping
+        any non-relevant flags from the input).
+    """
+    # Several --jobserver-auth= or --jobserver-fds= values can appear,
+    # only the last one wins. Ignore --jobserver-style= though.
+    jobserver_auths = [
+        arg
+        for arg in makeflags.split()
+        if arg.startswith(("--jobserver-fds=", "--jobserver-auth="))
+    ]
+    if not jobserver_auths:
+        return ""
+
+    # There are four different formats for these values:
+    #
+    #  --jobserver-auth=R,W where R and W are file descriptor numbers.
+    #    This corresponds to the deprecated pipe-based pool implementation.
+    #    In practice this is very fragile as it requires every participant
+    #    in the build to properly pass the R and W file descriptors to its
+    #    children. Some tools do not, breaking build performance, hence why
+    #    the FIFO scheme is more robust.
+    #
+    #  --jobserver-fds=R,W: Deprecated version of --jobserver-auth=R,W
+    #
+    #  --jobserver-auth=SEMAPHORE_NAME is used on Windows only.
+    #
+    #  --jobserver-auth=fifo:PATH is used by the FIFO-based pool and is
+    #    what this function is looking for. Only supported since GNU Make 4.4.
+    #
+    last_auth = jobserver_auths[-1]
+    fifo_prefix = "--jobserver-auth=fifo:"
+    if not last_auth.startswith(fifo_prefix):
+        return ""
+
+    # A relative FIFO path will not survive the current directory change
+    # from `ninja -C <build_dir>`, so reject it.
+    fifo_path = last_auth[len(fifo_prefix) :]
+    if not fifo_path.startswith("/"):
+        return ""
+
+    # Check for valid FIFO path that is accessible by the current user.
+    try:
+        info = os.stat(fifo_path)
+    except OSError:
+        return ""
+
+    if not (
+        stat.S_ISFIFO(info.st_mode) and os.access(fifo_path, os.R_OK | os.W_OK)
+    ):
+        return ""
+
+    # Verify that a jobserver process actually has the FIFO open for reading.
+    # Under POSIX, opening a FIFO with O_WRONLY | O_NONBLOCK fails immediately
+    # with ENXIO if no process has the read end open (e.g. a stale FIFO left
+    # behind after the pool owner was killed). Closing the descriptor without
+    # writing leaves job tokens untouched.
+    try:
+        fd = os.open(fifo_path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return ""
+    try:
+        if not stat.S_ISFIFO(os.fstat(fd).st_mode):
+            return ""
+    finally:
+        os.close(fd)
+
+    return last_auth
+
+
 def _check_rbe_env_vars(environ: dict[str, str]) -> None:
     """Warns if environment variables starting with 'RBE_' are set."""
     rbe_vars = sorted([k for k in environ if k.startswith("RBE_")])
@@ -609,39 +685,32 @@ class BuildLock:
     def __init__(
         self, build_dir: pathlib.Path, print_message: bool = False
     ) -> None:
-        # LINT.IfChange(build_lock)
-        self.build_lock_file = pathlib.Path(f"{build_dir}.build_lock")
-        # LINT.ThenChange(//tools/devshell/lib/vars.sh:build_lock)
-        self._has_shlock = check_shell_command("shlock")
+        self.build_lock_file = lock_utils.build_lock_path(build_dir)
         self.print_message = print_message
+        self._lock = lock_utils.BlockingFileLock(
+            self.build_lock_file,
+            write_pid=True,
+            waiting_message=(
+                f"Locked by {self.build_lock_file}..."
+                if print_message
+                else None
+            ),
+            acquired_message=(
+                # This message is critical for AI agents to understand when a
+                # build is proceeding after acquiring a lock. Do not remove.
+                "Lock acquired, proceeding with build."
+                if print_message
+                else None
+            ),
+            released_message="Build completed." if print_message else None,
+        )
 
     def __enter__(self) -> Self:
-        if self._has_shlock:
-            while (
-                subprocess.call(
-                    [
-                        "shlock",
-                        "-f",
-                        str(self.build_lock_file),
-                        "-p",
-                        str(os.getpid()),
-                    ]
-                )
-                != 0
-            ):
-                time.sleep(0.1)
-
-            if self.print_message:
-                # This message is critical for AI agents to understand when a build
-                # is proceeding after acquiring a lock. Do not remove.
-                print("Lock acquired, proceeding with build.")
+        self._lock.__enter__()
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
-        if self._has_shlock:
-            self.build_lock_file.unlink(missing_ok=True)
-        if self.print_message:
-            print("Build completed.")
+        self._lock.__exit__(exc_type, exc_val, exc_tb)
 
 
 def resolve_source_dir(environ: dict[str, str]) -> pathlib.Path:
@@ -718,10 +787,9 @@ class FuchsiaBuildContext(object):
                 pass
 
         if not user:
-            if self.rbe_auth_type in (
-                "loas",
-                "oauth",
-            ) or self.resultstore_auth_type in ("loas", "oauth"):
+            if auth_env.is_user_auth(
+                self.rbe_auth_type
+            ) or auth_env.is_user_auth(self.resultstore_auth_type):
                 raise BuildConfigurationError(
                     "USER environment variable is not set and could not be "
                     "inferred. This is required for RBE/ResultStore user authentication."
@@ -803,82 +871,31 @@ class FuchsiaBuildContext(object):
                 return project_id
         return ""
 
-    def _isolate_gcloud_credentials(self) -> pathlib.Path | None:
-        """Invokes the credential isolation script to isolate Google Application Credentials.
-
-        Returns:
-            The Path to the isolated credentials file, or None if isolation failed
-            or was bypassed.
-        """
-        # Skip credential isolation if neither service requires user-based credentials.
-        if self.rbe_auth_type in (
-            "machine",
-            "none",
-        ) and self.resultstore_auth_type in ("machine", "none"):
-            return None
-
-        isolate_script = self.gcloud_creds_script
-        if not is_executable(isolate_script):
-            raise BuildConfigurationError(
-                f"Required in-tree credentials management script is missing or unreadable: {isolate_script}"
-            )
-
-        # Use ResultStore's quota project if RBE does not require user credentials.
-        quota_project = (
-            self.rbe_quota_project
-            if self.rbe_auth_type not in ("machine", "none")
-            else self.resultstore_quota_project
-        )
-        if not quota_project:
-            return None
-
-        try:
-            output = self.check_python_output(
-                [
-                    str(isolate_script),
-                    "isolate",
-                    "--out-dir",
-                    str(self.out_dir),
-                    "--quota-project",
-                    quota_project,
-                ],
-                stderr=None,
-            )
-            if output:
-                return pathlib.Path(output)
-        except subprocess.CalledProcessError:
-            pass
-
-        return None
-
     @functools.cached_property
     def auth_env(self) -> dict[str, str]:
         """Returns a dictionary of authentication-related environment variables."""
-        env: dict[str, str] = {}
-        env["USER"] = self.authenticated_user
-        env["FX_BUILD_RBE_AUTH_TYPE"] = self.rbe_auth_type
-        env["FX_BUILD_RS_AUTH_TYPE"] = self.resultstore_auth_type
+        creds_path = (
+            auth_env.resolve_credentials_file(
+                self.rbe_auth_type,
+                self.resultstore_auth_type,
+                out_dir=self.out_dir,
+                rbe_quota_project=self.rbe_quota_project,
+                rs_quota_project=self.resultstore_quota_project,
+                env=self.env,
+            )
+            if self.needs_auth
+            else None
+        )
+
+        env = auth_env.make_auth_env(
+            rbe_auth=self.rbe_auth_type,
+            rs_auth=self.resultstore_auth_type,
+            user=self.authenticated_user,
+            credentials_file=creds_path,
+        )
 
         if not self.needs_auth:
             return env
-
-        # Isolate Google Application Credentials to avoid global quota_project_id contamination.
-        local_adc_path = self._isolate_gcloud_credentials()
-        if local_adc_path:
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = str(local_adc_path)
-        elif "GOOGLE_APPLICATION_CREDENTIALS" in self.env:
-            env["GOOGLE_APPLICATION_CREDENTIALS"] = self.env[
-                "GOOGLE_APPLICATION_CREDENTIALS"
-            ]
-        elif self.rbe_auth_type not in (
-            "machine",
-            "none",
-        ) or self.resultstore_auth_type not in ("machine", "none"):
-            try:
-                default_adc = pathlib.Path.home() / gcloud.ADC_SUBPATH
-                env["GOOGLE_APPLICATION_CREDENTIALS"] = str(default_adc)
-            except (RuntimeError, KeyError):
-                pass
 
         # Forward GCE metadata host overrides to support Java/Bazel inside sandboxes.
         # This automatically translates standard GCE_METADATA_HOST to the Java-specific
@@ -911,11 +928,12 @@ class FuchsiaBuildContext(object):
             # Override for rsproxy, through build/resultstore/fuchsia-rsproxy-wrap.sh:
             env["RS_rs_service"] = f"unix://{socket_str}"
 
-        # Consumed by Bazel invocation generators to route Bazel remote/resultstore traffic:
+        # Consumed by Bazel invocation generators to route Bazel remote/BES traffic:
         env.update(
             bazel_inv.socket_env_vars(
                 rbe_socket=self.config.remote_proxy_socket,
                 resultstore_socket=self.config.resultstore_proxy_socket,
+                bes_socket=self.config.bes_proxy_socket,
             )
         )
 
@@ -928,6 +946,17 @@ class FuchsiaBuildContext(object):
             env.update(self.rbe_profile.to_env_dict())
 
         return env
+
+    @functools.cached_property
+    def jobserver_makeflags(self) -> str:
+        """Return MAKEFLAGS value to pass to build actions
+
+        Empty if no such value is needed, otherwise only contains the
+        jobserver-related flags from the parent env, discarding anything
+        else.
+        """
+        makeflags = self.env.get("MAKEFLAGS", "")
+        return check_jobserver_pool_fifo(makeflags)
 
     @functools.cached_property
     def configured_env(self) -> dict[str, str]:
@@ -972,7 +1001,6 @@ class FuchsiaBuildContext(object):
         # Forwarded standard variables
         forward_vars = [
             "SSH_AUTH_SOCK",  # need to forward the authentication socket (used by gnubby) for bazel
-            "MAKEFLAGS",
             "TMPDIR",  # was passed for Goma on macOS, but it might have other uses.
             "CLICOLOR_FORCE",
             bazel_inv.ENV_BAZEL_DISK_CACHE,
@@ -985,9 +1013,16 @@ class FuchsiaBuildContext(object):
             "FX_BUILD_RBE_STATS",
             "FX_BUILD_QUIET",
             "FX_REMOTE_BUILD_METRICS",  # Honor environment variable to disable RBE build metrics.
+            _HOST_TOOL_BUILDING_ENV,  # Preserve active fx host tool build guard across main_build.py.
             "BUILDBUCKET_ID",  # Propagated in infra environments to tag ResultStore/BES uploads
             "BUILDBUCKET_BUILDER",
             "SWARMING_TASK_ID",
+            # @fuchsia_build_config re-runs, reloading every package that
+            # loads from it, whenever this differs from the previous Bazel
+            # command's value. Forward only the caller's value, even an empty
+            # one, so Bazel sees the same value here as in commands that don't
+            # run through this script, like `fx gen`'s tests.json queries.
+            rbe_profile.ENV_PROFILE_NAME,
         ]
         for var in forward_vars:
             if var in self.env:
@@ -1014,6 +1049,12 @@ class FuchsiaBuildContext(object):
         env[casfs.ENV_CASFS_VIRTUALIZE] = "1" if self.config.rbe_casfs else "0"
 
         env.update(self.build_service_env)
+
+        # As a special case, if MAKEFLAGS is provided and points to a valid
+        # jobserver FIFO path, pass the corresponding stripped flag to sub-processes.
+        makeflags = self.jobserver_makeflags
+        if makeflags:
+            env["MAKEFLAGS"] = makeflags
 
         return env
 
@@ -1052,6 +1093,7 @@ class FuchsiaBuildContext(object):
                 args,
                 default_resultstore=resultstore_pref,
                 default_rbe_casfs=rbe_casfs_pref,
+                python_forkserver=forkserver_setting.load(source_dir, environ),
             ),
         )
 
@@ -1212,14 +1254,6 @@ class FuchsiaBuildContext(object):
         return self.build_dir / "rbe_config.json"
 
     @property
-    def select_auth_script(self) -> pathlib.Path:
-        return self.source_dir / "build/auth/select_auth_method.py"
-
-    @property
-    def gcloud_creds_script(self) -> pathlib.Path:
-        return self.source_dir / "build/auth/gcloud_creds.py"
-
-    @property
     def build_timeout_script(self) -> pathlib.Path:
         """Path to build_timeout.py wrapper script."""
         return self.source_dir / BUILD_TIMEOUT_SCRIPT
@@ -1324,25 +1358,6 @@ class FuchsiaBuildContext(object):
 
         return min(factors)
 
-    def _run_select_auth_script(self) -> str:
-        """Invokes select_auth_method.py to determine the auth type."""
-        select_script = self.select_auth_script
-        try:
-            output = self.check_python_output(
-                [str(select_script)],
-                stderr=None,  # Let warnings flow through to the console directly
-            )
-            lines = output.splitlines()
-            if lines:
-                return lines[-1]
-            raise BuildConfigurationError(
-                "Authentication selection script succeeded but returned no output."
-            )
-        except subprocess.CalledProcessError:
-            raise BuildConfigurationError(
-                "Failed to detect valid build authentication. See error messages above."
-            )
-
     @functools.cached_property
     def _detected_auth_type(self) -> str:
         """Automatically detect the host authentication type (loas, oauth, machine, or none)."""
@@ -1353,8 +1368,13 @@ class FuchsiaBuildContext(object):
         if mode == "machine":
             return "machine"
 
-        # Under 'user' or 'auto' mode: run our auth selection script
-        return self._run_select_auth_script()
+        # Under 'user' or 'auto' mode: use the cached or detected auth type
+        try:
+            return auth_env.resolve_build_auth_type(
+                env=self.env, fuchsia_dir=self.source_dir
+            )
+        except (RuntimeError, ValueError) as e:
+            raise BuildConfigurationError(str(e)) from e
 
     @functools.cached_property
     def rbe_auth_type(self) -> str:
@@ -1669,7 +1689,7 @@ class BuildInvocation(object):
         config = self.top_build_wrap_config()
         return top_build_wrap.WrapContext(
             config,
-            environ=self.context.env,
+            environ=self.get_build_env(),
             source_dir=self.context.source_dir,
         )
 
@@ -1722,7 +1742,6 @@ class BuildInvocation(object):
           preflight_actions: optional build-tool-specific callables to run under
             the build lock, just before the build command is spawned.
         """
-        build_env = self.get_build_env()
         context = self.context
 
         # For non-build commands (e.g. 'bazel query' or 'bazel info'), we bypass
@@ -1731,13 +1750,14 @@ class BuildInvocation(object):
         if not is_build:
             return BuildCommandExecution(
                 full_command=list(build_command),
-                env=build_env,
+                env=self.get_build_env(),
                 invocation=self,
                 is_build=is_build,
                 preflight_actions=preflight_actions,
             )
 
         top_cmd = self.top_build_command_prefix()
+        build_env = self.wrap_context.execution_env()
 
         # Prepare Ninja-specific options
         if command_type == "ninja":
@@ -1810,7 +1830,7 @@ class BuildInvocation(object):
             and "--jobserver" not in remaining_args
             and "--jobserver-pool" not in remaining_args
         ):
-            injected.append("--jobserver")
+            injected.append("--jobserver-pool")
         return injected + list(remaining_args)
 
 
@@ -1916,7 +1936,7 @@ class BuildCommandExecution(object):
         """
         try:
             if self.is_build:
-                quiet = os.getenv("FX_BUILD_QUIET") == "1"
+                quiet = self.invocation.context.env.get("FX_BUILD_QUIET") == "1"
                 with BuildLock(
                     self.invocation.context.build_dir, print_message=quiet
                 ):
@@ -2443,7 +2463,13 @@ def _main_arg_parser() -> argparse.ArgumentParser:
         "--resultstore-proxy-socket",
         type=pathlib.Path,
         default=None,
-        help="Path to the local ResultStore/BES proxy socket.",
+        help="Path to the local ResultStore proxy socket for rsproxy (deprecated for Bazel).",
+    )
+    parser.add_argument(
+        "--bes-proxy-socket",
+        type=pathlib.Path,
+        default=None,
+        help="Path to the local Build Event Service (BES) proxy socket for Bazel.",
     )
     parser.add_argument(
         "--resultstore-instance",
@@ -2493,12 +2519,12 @@ def _main_arg_parser() -> argparse.ArgumentParser:
 _MAIN_ARG_PARSER = _main_arg_parser()
 
 
-def main(argv: list[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     args, unknown = _MAIN_ARG_PARSER.parse_known_args(argv)
 
-    environ = dict(os.environ)
-    _check_rbe_env_vars(environ)
-    context = FuchsiaBuildContext.from_args(args, environ)
+    env_dict = dict(env)
+    _check_rbe_env_vars(env_dict)
+    context = FuchsiaBuildContext.from_args(args, env_dict)
 
     invocation = None
     try:
@@ -2534,4 +2560,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

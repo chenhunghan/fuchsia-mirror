@@ -450,6 +450,11 @@ template("rust_auxiliary") {
         "@" + rebase_path(_transdeps_output, root_build_dir),
         "--crate-type=${crate_type}",
         "--crate-name=${_crate_name}",
+
+        # See the comment on -Znext-solver in the clippy action above.
+        # TODO(b/556328773): Remove once the compile-time regression in the
+        # next-generation trait solver is fixed.
+        "-Znext-solver=coherence",
         "{{rustflags}}",
       ]
       args += invoker.rustflags

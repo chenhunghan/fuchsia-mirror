@@ -16,12 +16,11 @@ driver_bind_rules("tpm_bind") {
   bind_output = "tpm.bindbc"
   dml_label = ":tpm-dml"
   tests = "meta/bind_tests.json"
-  deps = [ "//src/devices/bind/fuchsia.tpm" ]
+  deps = [ "//src/devices/bind/fuchsia" ]
 }
 
 common_deps = [
   ":tpm_bind",
-  "//sdk/banjo/fuchsia.hardware.tpmimpl:fuchsia.hardware.tpmimpl_banjo_cpp",
   "//sdk/fidl/fuchsia.hardware.tpmimpl:fuchsia.hardware.tpmimpl_cpp",
   "//sdk/fidl/fuchsia.tpm:fuchsia.tpm_cpp",
   "//sdk/lib/async-loop:async-loop-cpp",
@@ -43,7 +42,6 @@ fuchsia_cc_driver("fuchsia_driver") {
 }
 
 fuchsia_driver_component("tpm-driver") {
-  info = "meta/tpm-driver-info.json"
   deps = [ ":fuchsia_driver" ]
   manifest = "meta/tpm.cml"
 }
@@ -60,7 +58,9 @@ test("tpm-driver-test-bin") {
     "tpm.cc",
   ]
   deps = common_deps + [
+           "//sdk/lib/component/outgoing/cpp",
            "//src/devices/testing/mock-ddk",
+           "//zircon/system/ulib/sync",
            "//zircon/system/ulib/zxtest",
          ]
 

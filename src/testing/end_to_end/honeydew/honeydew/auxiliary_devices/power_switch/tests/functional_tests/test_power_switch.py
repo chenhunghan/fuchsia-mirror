@@ -16,22 +16,19 @@ class PowerSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
     """Mobly test for PowerSwitch implementations."""
 
     _power_switch: power_switch.PowerSwitch
-    _outlet_arg: int | None
 
     async def setup_class(self) -> None:
         """setup_class is called once before running tests."""
         await super().setup_class()
 
-        power_switch_dev, outlet = self._lookup_power_switch(self.dut)
+        power_switch_dev = self.dut.power_switch
         if power_switch_dev is None:
             asserts.abort_class(
                 "No PowerSwitch configured (neither DMC_PATH environment "
-                "variable nor power_switch_hw/power_switch_impl in device "
-                "config)."
+                "variable nor auxiliary_devices.power_switch in device config)."
             )
         assert power_switch_dev is not None
         self._power_switch = power_switch_dev
-        self._outlet_arg = outlet
 
     async def test_power_switch(self) -> None:
         """Test case for PowerSwitch.power_off and PowerSwitch.power_on."""
@@ -43,16 +40,16 @@ class PowerSwitchTest(fuchsia_base_test.FuchsiaBaseTest):
         # Check if device is online before powering off
         await self.dut.wait_for_online()
 
-        # power off the device using the dynamically determined outlet argument
+        # power off the device
         _LOGGER.info("Starting power_off test cycle.")
         self.dut.ffx.notify_intentional_disconnect()
-        self._power_switch.power_off(outlet=self._outlet_arg)
+        self._power_switch.power_off()
 
         self.dut.wait_for_offline()
 
-        # power on the device using the dynamically determined outlet argument
+        # power on the device
         _LOGGER.info("Starting power_on test cycle.")
-        self._power_switch.power_on(outlet=self._outlet_arg)
+        self._power_switch.power_on()
 
         await self.dut.wait_for_online()
         await self.dut.on_device_boot()

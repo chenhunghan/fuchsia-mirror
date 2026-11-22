@@ -39,6 +39,47 @@
             type: "bool",
         },
         {
+            // Number of background GPU worker threads for client image import (0 runs inline on the
+            // main thread). Assembly sets it, default 1 (`ui_config.rs`).
+            config: "fuchsia.scenic.ImageImportWorkers",
+            key: "image_import_workers",
+            type: "uint8",
+        },
+
+        // LINT.ThenChange(//src/ui/scenic/bin/meta/test-config.shard.cml)
+        {
+            // LINT.IfChange(image_import_policy)
+            // Comma-separated `key=value` overrides of the client image import policy. An empty
+            // string or an omitted key uses the default; duplicate keys are rejected. Assembly
+            // formats this string from typed `ImageImportConfig` fields at build time and Scenic
+            // rejects a malformed string at startup.
+            // What each key trades is in src/ui/scenic/lib/flatland/image_import/DESIGN.md#config.
+            //   kinds:        predicted_kind_first (default) | concurrent
+            //   off_screen:   most_recent_first (default) | least_recent_first
+            //   never_shown:  when_idle (default) | when_free | never
+            //   idle_ms:      uint32 milliseconds, no leading zeros on multi-digit values (default 100)
+            //   display_cap:  uint32 >= 1, no leading zeros (default 1)
+            //   reply_thread: false (default) | true
+            config: "fuchsia.scenic.ImageImportPolicy",
+            key: "image_import_policy",
+            type: "string",
+
+            // The grammar bounds valid strings to 139 bytes (< 256).
+            max_size: 256,
+
+            // This entry sits between the blocks paired with test-config.shard.cml because
+            // IfThisThenThat blocks cannot nest.
+            // LINT.ThenChange(
+            //     //src/ui/scenic/bin/meta/test-config.shard.cml,
+            //     //src/ui/scenic/lib/flatland/image_import/image_importer_impl.h:config,
+            //     //src/ui/scenic/lib/flatland/image_import/image_importer_impl.cc,
+            //     //src/lib/assembly/platform_configuration/src/subsystems/ui.rs,
+            //     //src/lib/assembly/config_schema/src/platform_settings/ui_config.rs,
+            // )
+        },
+
+        // LINT.IfChange
+        {
             config: "fuchsia.scenic.ICanHazDisplayId",
             key: "i_can_haz_display_id",
             type: "int64",

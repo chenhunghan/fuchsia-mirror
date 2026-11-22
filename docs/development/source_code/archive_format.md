@@ -32,7 +32,7 @@ An archive is a sequence of bytes, divided into chunks:
 
 All offsets and lengths are encoded as unsigned integers in little endian.
 
-## Index chunk
+## Index chunk {:#index-chunk}
 
 The index chunk is required and must start at the beginning of the archive.
 

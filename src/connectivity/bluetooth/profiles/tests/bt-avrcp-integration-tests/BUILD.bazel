@@ -1,0 +1,97 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-avrcp-integration-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_test(
+    name = "bt_avrcp_integration_tests",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    proc_macro_deps = ["//src/lib/testing/fixture"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
+        "//sdk/fidl/fuchsia.bluetooth.avrcp:fuchsia.bluetooth.avrcp_rust",
+        "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
+        "//sdk/fidl/fuchsia.bluetooth.bredr.test:fuchsia.bluetooth.bredr.test_rust",
+        "//src/connectivity/bluetooth/lib/bt-avctp",
+        "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/testing/mock-piconet-server:lib",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        # GN's //src/lib/fuchsia-component-test group also pulls in the
+        # RealmBuilder server component, which Bazel adds via the test
+        # package's `components`.
+        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bt_avrcp_integration_tests_packaged_bin",
+    testonly = True,
+    binary = ":bt_avrcp_integration_tests",
+    binary_name = "bt_avrcp_integration_tests",
+)
+
+fx_component_manifest(
+    name = "component_manifest",
+    testonly = True,
+    component_name = "component",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/bt-avrcp-integration-tests.cml",
+)
+
+fx_test_component(
+    name = "component",
+    compiled_manifest = ":component_manifest",
+    deps = [":bt_avrcp_integration_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "bt-avrcp-integration-tests_package",
+    package_name = "bt-avrcp-integration-tests",
+    components = [
+        "//src/connectivity/bluetooth/profiles/bt-avrcp:component",
+        "//src/connectivity/bluetooth/testing/mock-piconet-server:component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":component"],
+)
+
+fx_test(
+    name = "bt-avrcp-integration-tests",
+    # In some test runs, `bt-avrcp` emits an ERROR severity log if the mock
+    # component that provides the BR/EDR Profile service gets torn down before
+    # `bt-avrcp`. This is expected and correct behavior. There is currently no
+    # way to enforce shutdown ordering of components started in RealmBuilder.
+    max_log_severity = "ERROR",
+    package = ":bt-avrcp-integration-tests_package",
+    # The profile integration tests tend to flake if tests are run in parallel.
+    parallel = 1,
+)

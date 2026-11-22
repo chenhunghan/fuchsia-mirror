@@ -23,6 +23,9 @@ impl crate::Blobfs for BrokenBlobfs {
     fn blob_reader_proxy(&self) -> fidl_fuchsia_fxfs::BlobReaderProxy {
         fidl::endpoints::create_proxy::<ffxfs::BlobReaderMarker>().0
     }
+    fn use_driver_blob_paging(&self) -> bool {
+        false
+    }
 }
 
 #[fuchsia::test]

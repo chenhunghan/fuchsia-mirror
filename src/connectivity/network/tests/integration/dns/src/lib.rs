@@ -52,7 +52,7 @@ use packet_formats::ipv6::{Ipv6Packet, Ipv6PacketBuilder};
 use packet_formats::udp::{UdpPacket, UdpPacketBuilder, UdpParseArgs};
 use packet_formats_dhcp::v6;
 use policy_testing_common::{
-    NetcfgOwnedDeviceArgs, add_default_route, add_device_to_devfs, verify_interface_added,
+    NetcfgOwnedDeviceArgs, add_default_route, publish_device_service, verify_interface_added,
     with_netcfg_owned_device,
 };
 use test_case::test_case;
@@ -661,6 +661,9 @@ async fn discovered_starnix_networks_dns(name: &str, check_type: DnsCheckType) {
             v6: Some(vec![]),
             ..Default::default()
         }),
+        name: Some("network1".to_string()),
+        network_type: Some(fnp_properties::NetworkType::Ethernet),
+        connectivity: Some(fnp_properties::ConnectivityState::FullConnectivity),
         ..Default::default()
     };
     assert_matches::assert_matches!(network_registry.add(&network1).await, Ok(Ok(())));
@@ -699,6 +702,9 @@ async fn discovered_starnix_networks_dns(name: &str, check_type: DnsCheckType) {
             v6: Some(vec![fidl_ip_v6!("2001:db8::2222")]),
             ..Default::default()
         }),
+        name: Some("network2".to_string()),
+        network_type: Some(fnp_properties::NetworkType::Ethernet),
+        connectivity: Some(fnp_properties::ConnectivityState::FullConnectivity),
         ..Default::default()
     };
     assert_matches::assert_matches!(network_registry.add(&network2).await, Ok(Ok(())));
@@ -770,6 +776,9 @@ async fn discovered_starnix_fuchsia_networks_dns(name: &str, check_type: DnsChec
             v6: Some(vec![]),
             ..Default::default()
         }),
+        name: Some("starnix_network".to_string()),
+        network_type: Some(fnp_properties::NetworkType::Ethernet),
+        connectivity: Some(fnp_properties::ConnectivityState::FullConnectivity),
         ..Default::default()
     };
     assert_matches::assert_matches!(network_registry.add(&starnix_network).await, Ok(Ok(())));
@@ -782,12 +791,11 @@ async fn discovered_starnix_fuchsia_networks_dns(name: &str, check_type: DnsChec
     let mut wait_for_netmgr = pin!(wait_for_netmgr);
     check_type.clone().evaluate_check(&realm, &mut wait_for_netmgr, &expect1).await;
 
-    // Add a device to devfs for netcfg to manage and install into the Netstack.
+    // Add a device to the realm for netcfg to manage and install into the Netstack.
     // The network will not yet be added to the NetworkRegistry or set it as default.
     // It will not be a default network candidate until it has a default route.
     let network = sandbox.create_network(name).await.expect("create network");
-    let _endpoint =
-        add_device_to_devfs(&network, &realm, format!("{}-fuchsia-ep", name), None).await;
+    let _endpoint = publish_device_service(&network, &realm, "fuchsia-ep".to_string(), None).await;
 
     // Make sure the Netstack got the new device added.
     let (_interface_state, if_id, _if_name) = verify_interface_added(&realm).await;

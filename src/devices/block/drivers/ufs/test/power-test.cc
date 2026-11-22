@@ -214,7 +214,6 @@ TEST_F(PowerTest, PowerSuspendResume) {
   ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
   EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
 
-  // TODO(https://fxbug.dev/42075643): Check if suspend is enabled with inspect
   ASSERT_FALSE(dut_->IsResumed());
   UfsPowerMode power_mode = UfsPowerMode::kSleep;
   ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), power_mode);
@@ -2955,6 +2954,7 @@ class UfsPdevPowerTest : public ::testing::Test {
       config.enable_auto_hibernate() = true;
       config.auto_hibernate_timer_us() = 1000;
       config.link_idle_ahit_multiplier() = 2;
+      config.command_timeout_sec() = static_cast<uint32_t>(kCommandTimeout.to_secs());
       args.config(config.ToVmo());
       args.power_element_args(std::move(power_args));
     }));
@@ -3385,6 +3385,164 @@ TEST_F(UfsPdevPowerTest, PhyNotSupportedAndSetBandwidthErrorRollbackAndConcurren
         phy_active ? kExpectedActiveBandwidthBps : kExpectedIdleBandwidthBps;
     EXPECT_EQ(env.interconnect().current_avg_bandwidth_bps(), expected_bw);
   });
+}
+
+TEST_F(PowerTest, PowerDownResumeMasksUnhandledInterruptBits) {
+  TestUfs::SetSupportsPowerDownSuspend(true);
+  libsync::Completion sleep_complete;
+  auto reset_hooks = fit::defer([&] { mock_device_.GetUicCmdProcessor().Reset(); });
+
+  mock_device_.GetUicCmdProcessor().SetHook(
+      UicCommandOpcode::kDmeHibernateEnter,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        UicCmdProcessor::DefaultDmeHibernateEnterHandler(mock_device, ucmdarg1, ucmdarg2, ucmdarg3);
+        sleep_complete.Signal();
+      });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver(/*supply_power_framework=*/true));
+  auto ie_init = InterruptEnableReg::Get().ReadFrom(mock_device_.GetRegisters());
+  EXPECT_FALSE(ie_init.uic_test_mode_status_enable());
+  EXPECT_FALSE(ie_init.uic_dme_endpointreset());
+
+  ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+
+  const auto ie_resume = InterruptEnableReg::Get().ReadFrom(mock_device_.GetRegisters());
+  EXPECT_FALSE(ie_resume.uic_test_mode_status_enable());
+  EXPECT_FALSE(ie_resume.uic_dme_endpointreset());
+}
+
+TEST_F(PowerTest, PowerDownResumeReappliesUniproTimingQuirks) {
+  TestUfs::SetSupportsPowerDownSuspend(true);
+  mock_device_.GetDeviceDesc().wManufacturerID = htobe16(kSamsungManufacturerId);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+
+  libsync::Completion sleep_complete;
+  auto reset_hooks = fit::defer([&] { uic.Reset(); });
+
+  uic.SetHook(
+      UicCommandOpcode::kDmeHibernateEnter,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        UicCmdProcessor::DefaultDmeHibernateEnterHandler(mock_device, ucmdarg1, ucmdarg2, ucmdarg3);
+        sleep_complete.Signal();
+      });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver(/*supply_power_framework=*/true));
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate, /*peer=*/true), (std::vector<uint32_t>{kTActivate + 1}));
+  EXPECT_EQ(uic.GetDmeSets(PA_Hibern8Time), (std::vector<uint32_t>{kHibern8Time + 1}));
+
+  ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate, /*peer=*/true),
+            (std::vector<uint32_t>{kTActivate + 1, kTActivate + 1}));
+  EXPECT_EQ(uic.GetDmeSets(PA_Hibern8Time),
+            (std::vector<uint32_t>{kHibern8Time + 1, kHibern8Time + 1}));
+}
+
+TEST_F(PowerTest, PowerDownResumeReappliesHostPaTActivateQuirk) {
+  TestUfs::SetSupportsPowerDownSuspend(true);
+  HostControllerProdManufIdReg::Get()
+      .FromValue(0)
+      .set_manufacturer_id(kGoogleManufacturerId)
+      .WriteTo(mock_device_.GetRegisters());
+  auto& uic = mock_device_.GetUicCmdProcessor();
+
+  libsync::Completion sleep_complete;
+  auto reset_hooks = fit::defer([&] { uic.Reset(); });
+
+  uic.SetHook(
+      UicCommandOpcode::kDmeHibernateEnter,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        UicCmdProcessor::DefaultDmeHibernateEnterHandler(mock_device, ucmdarg1, ucmdarg2, ucmdarg3);
+        sleep_complete.Signal();
+      });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver(/*supply_power_framework=*/true));
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate), (std::vector<uint32_t>{kTActivate + 1}));
+
+  ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&]() { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+  EXPECT_EQ(uic.GetDmeSets(PA_TActivate), (std::vector<uint32_t>{kTActivate + 1, kTActivate + 1}));
+  EXPECT_TRUE(uic.GetDmeSets(PA_TActivate, /*peer=*/true).empty());
+  EXPECT_TRUE(uic.GetDmeSets(PA_Hibern8Time).empty());
+}
+
+TEST_F(PowerTest, PowerDownResumeClearsUecpaAndUecdlAfterLinkStartup) {
+  TestUfs::SetSupportsPowerDownSuspend(true);
+  auto& uic = mock_device_.GetUicCmdProcessor();
+
+  libsync::Completion sleep_complete;
+  std::atomic<uint32_t> uecpa_reads{0};
+  std::atomic<uint32_t> uecdl_reads{0};
+  std::atomic<bool> cleared_before_is_ue{false};
+  auto reset_hooks = fit::defer([this] { StopDriverAndResetHooks(); });
+
+  uic.SetHook(
+      UicCommandOpcode::kDmeHibernateEnter,
+      [&](UfsMockDevice& mock_device, uint32_t ucmdarg1, uint32_t ucmdarg2, uint32_t ucmdarg3) {
+        UicCmdProcessor::DefaultDmeHibernateEnterHandler(mock_device, ucmdarg1, ucmdarg2, ucmdarg3);
+        sleep_complete.Signal();
+      });
+
+  ASSERT_NO_FATAL_FAILURE(StartDriver(/*supply_power_framework=*/true));
+  ASSERT_NO_FATAL_FAILURE(VerifyInitialOffIgnoredAndSuspend());
+  EXPECT_OK(driver_test().RunOnBackgroundDispatcherSync([&] { sleep_complete.Wait(); }));
+  ASSERT_EQ(dut_->GetDeviceManager().GetCurrentPowerMode(), UfsPowerMode::kPowerDown);
+
+  const uint32_t stale_uecpa = HostUicErrorCodePhyAdapterLayerReg::Get()
+                                   .FromValue(0)
+                                   .set_uic_phy_adapter_layer_error(true)
+                                   .set_uic_phy_adapter_layer_error_code(0x10)
+                                   .reg_value();
+  const uint32_t stale_uecdl = HostUicErrorCodeDataLinkLayerReg::Get()
+                                   .FromValue(0)
+                                   .set_uic_data_link_layer_error(true)
+                                   .set_uic_data_link_layer_error_code(0x01)
+                                   .reg_value();
+
+  auto install_read_to_clear = [&](RegisterMap reg, uint32_t initial_val,
+                                   std::atomic<uint32_t>& counter) {
+    mock_device_.GetRegisters()->Write<uint32_t>(initial_val, reg);
+    mock_device_.GetRegisterMmioProcessor().SetReadHook(
+        reg, [&counter, reg](UfsMockDevice& mock_device) {
+          counter.fetch_add(1);
+          const uint32_t val = mock_device.GetRegisters()->Read<uint32_t>(reg);
+          mock_device.GetRegisters()->Write<uint32_t>(0, reg);
+          return val;
+        });
+  };
+  install_read_to_clear(RegisterMap::kUECPA, stale_uecpa, uecpa_reads);
+  install_read_to_clear(RegisterMap::kUECDL, stale_uecdl, uecdl_reads);
+
+  mock_device_.GetRegisterMmioProcessor().SetHook(
+      RegisterMap::kIS, [&](UfsMockDevice& mock_device, uint32_t value) {
+        if (InterruptStatusReg::Get().FromValue(value).uic_error() && uecpa_reads.load() > 0 &&
+            uecdl_reads.load() > 0) {
+          cleared_before_is_ue.store(true);
+        }
+        RegisterMmioProcessor::DefaultISHandler(mock_device, value);
+      });
+
+  SetPowerLevelSync(Ufs::kPowerLevelOn);
+  ASSERT_TRUE(dut_->IsResumed());
+
+  EXPECT_EQ(uecpa_reads.load(), 1u);
+  EXPECT_EQ(uecdl_reads.load(), 1u);
+  EXPECT_TRUE(cleared_before_is_ue.load());
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(RegisterMap::kUECPA), 0u);
+  EXPECT_EQ(mock_device_.GetRegisters()->Read<uint32_t>(RegisterMap::kUECDL), 0u);
 }
 
 }  // namespace

@@ -32,13 +32,6 @@ void* calloc(size_t count, size_t size) __MALLOC __ALLOC_SIZE(1, 2);
 void free(void* ptr);
 void sized_free(void* ptr, size_t s);
 
-// called once at kernel initialization
-#ifdef __cplusplus
-inline void heap_init() { rust_heap_init(); }
-#else
-static inline void heap_init(void) { rust_heap_init(); }
-#endif
-
 // Tracks an allocation of the given |size| in the heap profiler. This can be used to make visible
 // allocations that, while not from the general kernel heap, are notionally heap-like or from
 // separate slab / other non-general heap allocators.

@@ -11,12 +11,6 @@ if (is_host) {
     install_host_tool = true
   }
 
-  bazel_host_tool("netcp") {
-    bazel_target = ":netcp"
-    bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/netcp"
-    install_host_tool = true
-  }
-
   bazel_host_tool("netls") {
     bazel_target = ":netls"
     bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/netls"
@@ -33,7 +27,6 @@ if (is_host) {
 group("netprotocol") {
   deps = [
     ":netaddr($host_toolchain)",
-    ":netcp($host_toolchain)",
     ":netls($host_toolchain)",
     ":netruncmd($host_toolchain)",
   ]

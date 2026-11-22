@@ -6,7 +6,7 @@
 import unittest
 from collections.abc import Iterable, Sequence
 
-import textpb
+from build.rbe import textpb
 
 
 def unlex(tokens: Iterable[textpb.Token]) -> str:
@@ -80,6 +80,38 @@ class LexTests(unittest.TestCase):
         self._test_tokens(
             [textpb.Token(text="value:", type=textpb.TokenType.FIELD_NAME)]
         )
+        self._test_tokens(
+            [
+                textpb.Token(
+                    text="[AcctRestrictions]:",
+                    type=textpb.TokenType.FIELD_NAME,
+                )
+            ]
+        )
+        self._test_tokens(
+            [
+                textpb.Token(
+                    text="[AcctRestrictions]",
+                    type=textpb.TokenType.FIELD_NAME,
+                )
+            ]
+        )
+        self._test_tokens(
+            [
+                textpb.Token(
+                    text="[pkg.sub.Ext]:",
+                    type=textpb.TokenType.FIELD_NAME,
+                )
+            ]
+        )
+        self._test_tokens(
+            [
+                textpb.Token(
+                    text="[type.googleapis.com/pkg.Message]:",
+                    type=textpb.TokenType.FIELD_NAME,
+                )
+            ]
+        )
 
     def test_strings(self) -> None:
         self._test_tokens(
@@ -146,6 +178,58 @@ class LexTests(unittest.TestCase):
                 textpb.Token(text="\n", type=textpb.TokenType.NEWLINE),
             ]
         )
+
+    def test_comments(self) -> None:
+        self.assertEqual(
+            list(textpb._lex_line(">  // ThinMintDescription\n")),
+            [
+                textpb.Token(text=">", type=textpb.TokenType.END_BLOCK),
+                textpb.Token(text="  ", type=textpb.TokenType.SPACE),
+            ],
+        )
+        self.assertEqual(
+            list(textpb._lex_line("cost: 24//inline comment\n")),
+            [
+                textpb.Token(text="cost:", type=textpb.TokenType.FIELD_NAME),
+                textpb.Token(text=" ", type=textpb.TokenType.SPACE),
+                textpb.Token(text="24", type=textpb.TokenType.OTHER_VALUE),
+            ],
+        )
+        self.assertEqual(
+            list(
+                textpb._lex_line(
+                    'url: "https://example.com/a//b" // trailing\n'
+                )
+            ),
+            [
+                textpb.Token(text="url:", type=textpb.TokenType.FIELD_NAME),
+                textpb.Token(text=" ", type=textpb.TokenType.SPACE),
+                textpb.Token(
+                    text='"https://example.com/a//b"',
+                    type=textpb.TokenType.STRING_VALUE,
+                ),
+                textpb.Token(text=" ", type=textpb.TokenType.SPACE),
+            ],
+        )
+
+    def test_unrecognized_text(self) -> None:
+        with self.assertRaisesRegex(textpb.ParseError, "Unrecognized text"):
+            list(textpb._lex_line('"unterminated string'))
+        with self.assertRaisesRegex(textpb.ParseError, "Unrecognized text"):
+            list(textpb._lex_line("[unterminated_extension"))
+        with self.assertRaisesRegex(textpb.ParseError, "Unrecognized text"):
+            list(textpb._lex_line("[foo//bar]: 1"))
+        with self.assertRaisesRegex(textpb.ParseError, "Unrecognized text"):
+            list(textpb._lex_line("cost: 24/5"))
+
+    def test_unrecognized_text_snippet_truncation(self) -> None:
+        long_tail = "x" * (textpb._MAX_ERROR_SNIPPET_LEN + 50)
+        with self.assertRaises(ValueError) as cm:
+            list(textpb._lex_line(f'"{long_tail}'))
+        msg = str(cm.exception)
+        expected_snippet = f'"{long_tail}'[: textpb._MAX_ERROR_SNIPPET_LEN]
+        self.assertIn(expected_snippet, msg)
+        self.assertNotIn(long_tail, msg)
 
 
 class AutoDictTests(unittest.TestCase):
@@ -446,6 +530,146 @@ class ParseTests(unittest.TestCase):
             },
         )
 
+    def test_extensions_and_colonless_blocks(self) -> None:
+        self.assertEqual(
+            textpb.parse(
+                [
+                    'role: "alice"',
+                    "[AcctRestrictions]: {}",
+                    "[pkg.sub.ext_val]: 42",
+                ]
+            ),
+            {
+                "role": [
+                    textpb.Token('"alice"', type=textpb.TokenType.STRING_VALUE)
+                ],
+                "[AcctRestrictions]": [{}],
+                "[pkg.sub.ext_val]": [
+                    textpb.Token("42", type=textpb.TokenType.OTHER_VALUE)
+                ],
+            },
+        )
+        self.assertEqual(
+            textpb.parse(
+                [
+                    "[AcctRestrictions] {",
+                    "  destination_restriction {",
+                    "    destination_permissions {",
+                    "      type: PROD",
+                    "    }",
+                    "  }",
+                    "  restricted_role: true",
+                    "}",
+                ]
+            ),
+            {
+                "[AcctRestrictions]": [
+                    {
+                        "destination_restriction": [
+                            {
+                                "destination_permissions": [
+                                    {
+                                        "type": [
+                                            textpb.Token(
+                                                "PROD",
+                                                type=textpb.TokenType.OTHER_VALUE,
+                                            )
+                                        ]
+                                    }
+                                ]
+                            }
+                        ],
+                        "restricted_role": [
+                            textpb.Token(
+                                "true", type=textpb.TokenType.OTHER_VALUE
+                            )
+                        ],
+                    }
+                ]
+            },
+        )
+
+    def test_colonless_scalar_field_error(self) -> None:
+        with self.assertRaises(textpb.ParseError):
+            textpb.parse(["foo 123"])
+        with self.assertRaises(textpb.ParseError):
+            textpb.parse(["[AcctRestrictions] 123"])
+
+    def test_bracketed_list_value_rejected(self) -> None:
+        with self.assertRaises(textpb.ParseError):
+            textpb.parse(["field: [v1, v2]"])
+        with self.assertRaises(textpb.ParseError):
+            textpb.parse(
+                "outer: {\n  [foo//bar]: {\n    a: 1\n  }\n}".splitlines()
+            )
+
+    def test_slash_slash_comments(self) -> None:
+        lines = [
+            "// leading comment",
+            "Credentials: <",
+            "  Cert: <",
+            "    ThinMintDescription: <",
+            '      url: "https://example.com/path//to#anchor" // trailing comment',
+            "      count: 42//no-space comment",
+            "      restrictions: {",
+            "        [AcctRestrictions]: {}",
+            "      }",
+            "    >  // ThinMintDescription",
+            "  >  // Cert",
+            ">  // Credentials",
+        ]
+        parsed = textpb.parse(lines)
+        thin_mint = parsed["Credentials"][0]["Cert"][0]["ThinMintDescription"][
+            0
+        ]
+        self.assertEqual(
+            thin_mint["url"],
+            [
+                textpb.Token(
+                    '"https://example.com/path//to#anchor"',
+                    type=textpb.TokenType.STRING_VALUE,
+                )
+            ],
+        )
+        self.assertEqual(
+            thin_mint["count"],
+            [textpb.Token("42", type=textpb.TokenType.OTHER_VALUE)],
+        )
+        self.assertEqual(
+            thin_mint["restrictions"][0]["[AcctRestrictions]"],
+            [{}],
+        )
+
+    def test_walk_messages(self) -> None:
+        text = (
+            "outer: {\n"
+            "  id: 1\n"
+            "  inner: {\n"
+            "    id: 2\n"
+            "  }\n"
+            "  kv: {\n"
+            '    key: "k"\n'
+            '    value: "v"\n'
+            "  }\n"
+            "}\n"
+        )
+        parsed = textpb.parse(text.splitlines())
+        walked = list(textpb.walk_messages(parsed))
+        self.assertEqual(
+            walked,
+            [
+                parsed,
+                parsed["outer"][0],
+                parsed["outer"][0]["inner"][0],
+                parsed["outer"][0]["kv"],
+            ],
+        )
+        lazy_walked = [
+            m.to_dict() if isinstance(m, textpb.LazyMapping) else m
+            for m in textpb.walk_messages(textpb.parse_lazy(text))
+        ]
+        self.assertEqual(lazy_walked, walked)
+
 
 class ParseLazyTests(unittest.TestCase):
     def test_empty(self) -> None:
@@ -569,6 +793,12 @@ class ParseLazyTests(unittest.TestCase):
             len(textpb.parse_lazy('msg: { a: "unclosed string'))
         with self.assertRaisesRegex(textpb.ParseError, "Unterminated string"):
             len(textpb.parse_lazy('msg: { a: "unclosed string with brace }'))
+        with self.assertRaisesRegex(textpb.ParseError, "Unterminated string"):
+            len(
+                textpb.parse_lazy(
+                    'msg: {\n  a: "unclosed on line 1\n  // comment with "\n}\n'
+                )
+            )
 
     def test_lazy_evaluation_unaccessed_block(self) -> None:
         text = """
@@ -613,6 +843,172 @@ class ParseLazyTests(unittest.TestCase):
         self.assertEqual(lazy["foo"][0].text, "1")
         self.assertEqual(lazy["bar"][0].text, "2")
         self.assertEqual(lazy["baz"][0].text, "3")
+
+    def test_extensions_and_colonless_blocks(self) -> None:
+        text = """
+        role: "alice"
+        [AcctRestrictions] {
+            destination_restriction {
+                destination_permissions {
+                    type: PROD
+                }
+            }
+            restricted_role: true
+        }
+        [pkg.sub.ext_val]: 42
+        [type.googleapis.com/pkg.Message]: {
+            id: "abc"
+        }
+        """
+        lazy = textpb.parse_lazy(text)
+        self.assertEqual(lazy, textpb.parse(text.splitlines()))
+        acct = lazy["[AcctRestrictions]"][0]
+        self.assertEqual(
+            acct["destination_restriction"][0]["destination_permissions"][0][
+                "type"
+            ][0].text,
+            "PROD",
+        )
+        self.assertEqual(acct["restricted_role"][0].text, "true")
+        self.assertEqual(lazy["[pkg.sub.ext_val]"][0].text, "42")
+        self.assertEqual(
+            lazy["[type.googleapis.com/pkg.Message]"][0]["id"][0].text, '"abc"'
+        )
+
+    def test_colonless_scalar_field_error(self) -> None:
+        with self.assertRaises(textpb.ParseError):
+            len(textpb.parse_lazy("foo 123"))
+        with self.assertRaises(textpb.ParseError):
+            len(textpb.parse_lazy("[AcctRestrictions] 123"))
+
+    def test_bracketed_list_value_rejected(self) -> None:
+        with self.assertRaises(textpb.ParseError):
+            len(textpb.parse_lazy("field: [v1, v2]"))
+        with self.assertRaises(textpb.ParseError):
+            _ = textpb.parse_lazy(
+                "outer: {\n  [foo//bar]: {\n    a: 1\n  }\n}\n"
+            ).to_dict()
+
+    def test_expected_field_error_snippet_truncation(self) -> None:
+        long_str = '"' + ("y" * (textpb._MAX_ERROR_SNIPPET_LEN + 50)) + '"'
+        with self.assertRaises(textpb.ParseError) as cm:
+            len(textpb.parse_lazy(long_str))
+        msg = str(cm.exception)
+        self.assertIn(long_str[: textpb._MAX_ERROR_SNIPPET_LEN], msg)
+        self.assertNotIn(long_str, msg)
+
+    def test_next_delim_re_single_pass_over_strings_and_comments(self) -> None:
+        body = (
+            "args: \"awk '{print $1}'\"\n"
+            'args: "escaped \\" } < > # // \\\\"\n'
+            'url: "https://example.com/a//b"\n'
+            '# comment with unmatched " quote and } < > delimiters\n'
+            '// slash comment with unmatched " quote and } < > delimiters\n'
+            "[type.googleapis.com/pkg.Message]: 1\n"
+            "count: 42\n"
+            "}"
+        )
+        m = textpb._NEXT_DELIM_RE.match(body, 0, len(body))
+        self.assertIsNotNone(m)
+        assert m is not None
+        # A single match() call must consume all strings and comments and land
+        # directly on the final closing '}'.
+        self.assertEqual(m.group(1), "}")
+        self.assertEqual(m.end(), len(body))
+
+    def test_next_delim_re_possessive_unterminated_string(self) -> None:
+        body = 'a: "first closed" b: "second unclosed with } and \\" inside'
+        m = textpb._NEXT_DELIM_RE.match(body, 0, len(body))
+        self.assertIsNotNone(m)
+        assert m is not None
+        # Possessive quantifiers lock in "first closed" and stop at the opening
+        # quote of the second (unterminated) string without backtracking.
+        self.assertEqual(m.group(1), '"')
+        self.assertEqual(m.end() - 1, body.index('"second'))
+
+    def test_next_delim_re_possessive_unclosed_block_no_backtracking(
+        self,
+    ) -> None:
+        body = 'args: "-Ifoo/bar/baz" # comment\n' * 2000
+        self.assertIsNone(textpb._NEXT_DELIM_RE.match(body, 0, len(body)))
+
+    def test_comment_with_unmatched_quote_and_braces(self) -> None:
+        text = """
+        msg: {
+            # don't stop at } or > inside this comment
+            // or inside this slash-slash comment with " } > <
+            url: "https://example.com/a//b"
+            count: 42//inline comment
+            value: "ok"
+        }  // msg
+        // trailing comment without newline: fake_field: 1"""
+        lazy = textpb.parse_lazy(text)
+        self.assertEqual(lazy, textpb.parse(text.splitlines()))
+        self.assertEqual(
+            lazy["msg"][0]["url"][0].text, '"https://example.com/a//b"'
+        )
+        self.assertEqual(lazy["msg"][0]["count"][0].text, "42")
+        self.assertEqual(lazy["msg"][0]["value"][0].text, '"ok"')
+        self.assertNotIn("fake_field", lazy)
+
+    def test_field_step_re_dispatch_and_rejections(self) -> None:
+        cases = (
+            (
+                '  # comment\n  name: "hello"',
+                "str",
+                "name",
+                '"hello"',
+            ),
+            (
+                ", ; [pkg.ext_val]: # inline comment\n  42",
+                "val",
+                "[pkg.ext_val]",
+                "42",
+            ),
+            (
+                "msg: {",
+                "block",
+                "msg",
+                "{",
+            ),
+            (
+                "[AcctRestrictions] <",
+                "colonless_block",
+                "[AcctRestrictions]",
+                "<",
+            ),
+            (
+                "  # trailing comment\n}",
+                "end_block",
+                None,
+                "}",
+            ),
+        )
+        for text, expected_group, expected_key, expected_token in cases:
+            with self.subTest(text=text):
+                m = textpb._FIELD_STEP_RE.match(text, 0, len(text))
+                self.assertIsNotNone(m)
+                assert m is not None
+                self.assertEqual(m.lastgroup, expected_group)
+                self.assertEqual(m.group("key"), expected_key)
+                self.assertEqual(m.group(expected_group), expected_token)
+                self.assertEqual(m.end(), len(text))
+
+        # Colon-less scalars and whitespace-only tails must NOT match
+        # _FIELD_STEP_RE so _index_fields routes them to EOF or error handling.
+        for non_matching in (
+            "foo 123",
+            'foo "bar"',
+            "[AcctRestrictions] 123",
+            "   # just a comment\n  ",
+            "foo: ",
+        ):
+            with self.subTest(non_matching=non_matching):
+                self.assertIsNone(
+                    textpb._FIELD_STEP_RE.match(
+                        non_matching, 0, len(non_matching)
+                    )
+                )
 
 
 if __name__ == "__main__":

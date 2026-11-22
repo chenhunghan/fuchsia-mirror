@@ -58,7 +58,6 @@ fuchsia_cc_driver("aml-g12-pdm-driver") {
 fuchsia_driver_component("aml-g12-pdm") {
   component_name = "aml-g12-pdm"
   deps = [ ":aml-g12-pdm-driver" ]
-  info = "meta/aml-g12-pdm-info.json"
   manifest = "meta/aml-g12-pdm.cml"
 }
 

@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
+
+package(default_applicable_licenses = ["//:license"])
+
+stamp_group(
+    name = "lib",
+    testonly = True,
+    stamp = "lib.stamp",
+    visibility = ["//src/media/audio:__pkg__"],
+    deps = [
+        "//src/media/audio/lib/analysis",
+        "//src/media/audio/lib/clock",
+        "//src/media/audio/lib/format",
+        "//src/media/audio/lib/format2",
+        "//src/media/audio/lib/processing",
+        "//src/media/audio/lib/rust",
+        "//src/media/audio/lib/simple-codec",
+        "//src/media/audio/lib/test",
+        "//src/media/audio/lib/timeline",
+        "//src/media/audio/lib/wav",
+    ],
+)

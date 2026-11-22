@@ -7,98 +7,42 @@
 #ifndef ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_INTERRUPT_TRACKER_H_
 #define ZIRCON_KERNEL_HYPERVISOR_INCLUDE_HYPERVISOR_INTERRUPT_TRACKER_H_
 
-#include <lib/fit/defer.h>
-#include <lib/ktrace.h>
 #include <lib/zx/result.h>
+#include <zircon/types.h>
 
-#include <bitmap/raw-bitmap.h>
-#include <bitmap/storage.h>
-#include <hypervisor/ktrace.h>
-#include <hypervisor/state_invalidator.h>
+#include <fbl/macros.h>
+#include <hypervisor/interrupt_tracker_ffi.h>
 #include <kernel/event.h>
+#include <kernel/ffi.h>
+#include <kernel/spinlock.h>
 
 namespace hypervisor {
-
-template <uint32_t N>
-class InterruptBitmap {
- public:
-  InterruptBitmap() {
-    zx_status_t result = bitmap_.Reset(N);
-    // `bitmap_` uses static storage, so `Reset` cannot fail.
-    DEBUG_ASSERT(result == ZX_OK);
-  }
-
-  bool Get(uint32_t vector) const { return bitmap_.GetOne(vector); }
-  void Set(uint32_t vector) { bitmap_.SetOne(vector); }
-  void Clear(uint32_t min, uint32_t max) { bitmap_.Clear(min, max); }
-
-  bool Scan(uint32_t* vector) {
-    size_t bitoff = 0;
-#if defined(__aarch64__) || defined(__riscv)
-    bool is_empty = bitmap_.Scan(0, N, false, &bitoff);
-#elif defined(__x86_64__)
-    bool is_empty = bitmap_.ReverseScan(0, N, false, &bitoff);
-#else
-#error add support for this architecture
-#endif
-    if (is_empty) {
-      return false;
-    }
-    *vector = static_cast<uint32_t>(bitoff);
-    return true;
-  }
-
- private:
-  bitmap::RawBitmapGeneric<bitmap::FixedStorage<N>> bitmap_;
-};
 
 // |N| is the maximum number of interrupts to be tracked.
 template <uint32_t N>
 class InterruptTracker {
  public:
+  static_assert(N == 256, "InterruptTracker FFI expects N == 256");
+
+  InterruptTracker() { rust_interrupt_tracker_init(this); }
+  DISALLOW_COPY_ASSIGN_AND_MOVE(InterruptTracker);
+  ~InterruptTracker() { rust_interrupt_tracker_destroy(this); }
+
   // Returns whether there are pending interrupts.
-  bool Pending() {
-    uint32_t vector;
-    Guard<SpinLock, IrqSave> lock{&lock_};
-    return bitmap_.Scan(&vector);
-  }
+  bool Pending() const { return rust_interrupt_tracker_pending(this); }
 
   // Clears all vectors in the range [min, max).
-  void Clear(uint32_t min, uint32_t max) {
-    Guard<SpinLock, IrqSave> lock{&lock_};
-    bitmap_.Clear(min, max);
-  }
+  void Clear(uint32_t min, uint32_t max) { rust_interrupt_tracker_clear(this, min, max); }
 
   // Pops the specified vector, if it is pending.
-  bool TryPop(uint32_t vector) {
-    if (vector >= N) {
-      Guard<SpinLock, IrqSave> lock{&lock_};
-      if (bitmap_.Get(vector)) {
-        bitmap_.Clear(vector, vector + 1);
-        return true;
-      }
-    }
-    return false;
-  }
+  bool TryPop(uint32_t vector) { return rust_interrupt_tracker_try_pop(this, vector); }
 
   // Pops the highest priority interrupt.
-  bool Pop(uint32_t* vector) {
-    Guard<SpinLock, IrqSave> lock{&lock_};
-    if (bitmap_.Scan(vector)) {
-      bitmap_.Clear(*vector, *vector + 1);
-      return true;
-    }
-    return false;
-  }
+  bool Pop(uint32_t* vector) { return rust_interrupt_tracker_pop(this, vector); }
 
   // Tracks the given interrupt.
   zx::result<> Track(uint32_t vector) {
-    if (vector >= N) {
-      return zx::error(ZX_ERR_OUT_OF_RANGE);
-    }
-    Guard<SpinLock, IrqSave> lock{&lock_};
-    bitmap_.Set(vector);
-    return zx::ok();
+    return zx::make_result(rust_interrupt_tracker_track(this, vector));
   }
 
   template <uint32_t Vector>
@@ -109,11 +53,7 @@ class InterruptTracker {
 
   // Tracks the given interrupt, and signals any waiters.
   zx::result<> Interrupt(uint32_t vector) {
-    zx::result<> result = Track(vector);
-    if (result.is_ok()) {
-      event_.Signal();
-    }
-    return result;
+    return zx::make_result(rust_interrupt_tracker_interrupt(this, vector));
   }
 
   template <uint32_t Vector>
@@ -126,35 +66,24 @@ class InterruptTracker {
   //
   // We signal `ZX_ERR_INTERNAL_INTR_RETRY`, so that if the status is propagated
   // to the syscall-layer, we will retry the syscall.
-  void Cancel() { event_.Signal(ZX_ERR_INTERNAL_INTR_RETRY); }
+  void Cancel() { rust_interrupt_tracker_cancel(this); }
 
   // Waits for an interrupt.
-  zx::result<> Wait(zx_instant_mono_t deadline, StateInvalidator* invalidator = nullptr) {
-    if (invalidator != nullptr) {
-      invalidator->Invalidate();
-    }
-    ktrace_vcpu(VCPU_BLOCK, VCPU_INTERRUPT);
-    auto defer = fit::defer([] { ktrace_vcpu(VCPU_UNBLOCK, VCPU_INTERRUPT); });
-    do {
-      zx_status_t status = event_.Wait(Deadline::no_slack(deadline));
-      switch (status) {
-        case ZX_OK:
-          continue;
-        case ZX_ERR_TIMED_OUT:
-          // If the event timed out, return ZX_OK to resume the VCPU.
-          return zx::ok();
-        default:
-          // Otherwise, return the status.
-          return zx::error(status);
-      }
-    } while (!Pending());
-    return zx::ok();
+  zx::result<> Wait(zx_instant_mono_t deadline) {
+    return zx::make_result(rust_interrupt_tracker_wait(this, deadline));
   }
 
  private:
-  AutounsignalEvent event_;
-  DECLARE_SPINLOCK(InterruptTracker) lock_;
-  InterruptBitmap<N> bitmap_ TA_GUARDED(lock_);
+  using LockType = DECLARE_SPINLOCK(InterruptTracker);
+  static constexpr size_t kLockSize = (sizeof(LockType) + size_t{7}) & ~size_t{7};
+  // Rust `InterruptBitmap<256>` stores four 64-bit words plus a `size` field (40 bytes).
+  static constexpr size_t kBitmap256StorageSize = 40;
+  static constexpr size_t kStorageSize =
+      sizeof(AutounsignalEvent) + kLockSize + kBitmap256StorageSize;
+
+  [[maybe_unused]] OpaqueStorage<kStorageSize, 8> storage_{};
+  static_assert(sizeof(storage_) == kStorageSize);
+  static_assert(alignof(decltype(storage_)) == 8);
 };
 
 }  // namespace hypervisor

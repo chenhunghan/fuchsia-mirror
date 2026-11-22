@@ -148,18 +148,47 @@ mod platform {
     }
     pub(crate) use ktrace_duration_end;
 
-    crate::ksync_kernel::declare_singleton_critical_mutex!(
-        /// This is a popular lock.  Critical sections protected by this lock are
-        /// *usually* short-lived, so we'd like to minimize lock thrash by disabling
-        /// preemption while holding the lock.  However, in degenerate cases (e.g. with
-        /// excessive PMM fragmentation), the lock can be held for long periods of time.
-        /// In those cases, we don't want to overly delay the scheduling of a higher
-        /// priority task.  To strike a balance between these competing concerns, we use
-        /// a critical mutex which employs "time-limited preemption deferral".
-        ///
-        /// For more information, see https://fxbug.dev/399694236.
-        pub(crate) TheHeapLock
-    );
+    #[ksync::guarded]
+    pub(crate) struct TheHeapMutex {
+        #[mutex]
+        pub(crate) lock: ksync::KMutex<crate::ksync_kernel::TrackedCriticalMutex>,
+    }
+
+    /// This is a popular lock.  Critical sections protected by this lock are
+    /// *usually* short-lived, so we'd like to minimize lock thrash by disabling
+    /// preemption while holding the lock.  However, in degenerate cases (e.g. with
+    /// excessive PMM fragmentation), the lock can be held for long periods of time.
+    /// In those cases, we don't want to overly delay the scheduling of a higher
+    /// priority task.  To strike a balance between these competing concerns, we use
+    /// a critical mutex which employs "time-limited preemption deferral".
+    ///
+    /// For more information, see https://fxbug.dev/399694236.
+    pub(crate) type TheHeapLock = TheHeapMutexLockClass;
+
+    static THE_HEAP_LOCK: lazy_init::LazyInit<TheHeapMutex, lazy_init::NoCheck> =
+        lazy_init::LazyInit::uninit();
+
+    impl TheHeapLock {
+        #[inline]
+        pub(crate) fn get()
+        -> &'static ksync::KMutex<Self, crate::ksync_kernel::TrackedCriticalMutex> {
+            // SAFETY: `THE_HEAP_LOCK` is initialized at `LK_INIT_LEVEL_EARLIEST` by
+            // `the_heap_lock_init` before `cmpct_init` or any other caller can acquire
+            // `TheHeapLock`.
+            &unsafe { THE_HEAP_LOCK.get_unchecked() }.lock
+        }
+    }
+
+    fn the_heap_lock_init(_level: init::LkInitLevel) {
+        // SAFETY: lk init hooks run once during single-threaded early boot before
+        // `LK_INIT_LEVEL_HEAP` (`cmpct_init`) or any other caller can acquire `TheHeapLock`.
+        unsafe {
+            let Ok(()) = core::pin::Pin::static_ref(&THE_HEAP_LOCK).init_pin(pin_init::pin_init!(
+                TheHeapMutex { lock <- ksync::KMutex::init() }
+            ));
+        }
+    }
+    init::lk_init_hook!(the_heap_lock, the_heap_lock_init, init::LK_INIT_LEVEL_EARLIEST);
 
     crate::counters::define_kcounter!(MALLOC_SIZE_LE_64, "malloc.size_le_64", Sum);
     crate::counters::define_kcounter!(MALLOC_SIZE_LE_96, "malloc.size_le_96", Sum);
@@ -205,7 +234,7 @@ mod platform {
 
 #[cfg(feature = "userspace")]
 mod platform {
-    pub use crate::cmpctmalloc_ffi::{heap_page_alloc, heap_page_free, heap_report_alloc_failure};
+    pub use crate::tests::{heap_page_alloc, heap_page_free, heap_report_alloc_failure};
 
     // When built in a host (aka non-kernel) environment it is assumed to be for testing and so we
     // want to make sure that debug assertions are correctly enabled. This is to prevent any
@@ -283,7 +312,6 @@ mod platform {
 
 bitflags! {
     /// Options controlling `cmpct_dump` output.
-    #[repr(transparent)]
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
     pub struct CmpctDumpOptions: u8 {
         /// Standard dump output.
@@ -294,9 +322,6 @@ bitflags! {
         const VERBOSE = 0x2;
     }
 }
-
-zr::static_assert!(size_of::<CmpctDumpOptions>() == 1);
-zr::static_assert!(align_of::<CmpctDumpOptions>() == 1);
 
 use debug_fill::*;
 
@@ -630,6 +655,17 @@ mod kernel_asan {
     // free list or the OS.
     pub(super) type Quarantine = AsanQuarantine<Header>;
 
+    // Ensure the maximum allocation size plus its ASAN right redzone and header still fits within
+    // the largest non-OS allocation bucket.
+    zr::static_assert!(
+        SizeToIndexRet::size_to_index_allocating(
+            asan_heap_redzone_size(HEAP_MAX_ALLOC_SIZE) + HEAP_MAX_ALLOC_SIZE
+        )
+        .rounded_up
+            + size_of::<Header>()
+            <= HEAP_LARGE_ALLOC_BYTES
+    );
+
     /// Adds space at the end of the allocation for an ASAN right redzone.
     #[sanitize(address = "off")]
     #[inline]
@@ -639,21 +675,7 @@ mod kernel_asan {
         // A redzone is used to detect buffer overflows by oversizing the buffer and poisoning
         // the excess memory. The redzone is after the buffer - before the buffer is a
         // Header, which is also poisoned.
-        // SAFETY: `alloc_size <= HEAP_MAX_ALLOC_SIZE`, so `asan_heap_redzone_size` cannot
-        // overflow.
-        let (redzone, max_redzone) = unsafe {
-            (asan_heap_redzone_size(alloc_size), asan_heap_redzone_size(HEAP_MAX_ALLOC_SIZE))
-        };
-        let size = size + redzone;
-        // When we validated the max allocation size above, we did not take into account the
-        // asan redzone. Unfortunately this cannot presently be checked statically due to the
-        // asan_heap_redzone_size not being a constexpr, and so we check it here instead.
-        assert!(
-            SizeToIndexRet::size_to_index_allocating(max_redzone + HEAP_MAX_ALLOC_SIZE).rounded_up
-                + size_of::<Header>()
-                <= HEAP_LARGE_ALLOC_BYTES
-        );
-        size
+        size + asan_heap_redzone_size(alloc_size)
     }
 
     /// Poisons the allocation's header and trailing right redzone, while
@@ -1198,36 +1220,6 @@ unsafe fn possibly_free_to_os(left_sentinel: *mut Header, total_size: usize) {
     }
 }
 
-#[cold]
-#[inline(never)]
-fn panic_unexpected_left_sentinel_size(left_size: u32) -> ! {
-    panic!("Unexpected left sentinel size {} != header size {}", left_size, size_of::<Header>());
-}
-
-#[cold]
-#[inline(never)]
-fn panic_remaining_underflow(remaining: usize, free_size: u32) -> ! {
-    panic!("{} >= {}", remaining, free_size);
-}
-
-#[cold]
-#[inline(never)]
-fn panic_unrounded_os_alloc(size: usize, ptr: *mut c_void) -> ! {
-    panic!("{:#x} bytes @{:p}", size, ptr);
-}
-
-#[cold]
-#[inline(never)]
-fn panic_header_size_too_small(header_size: u32) -> ! {
-    panic!("got {} min {}", header_size, size_of::<Header>());
-}
-
-#[cold]
-#[inline(never)]
-fn panic_sized_free_too_small(header_size: u32, s: usize) -> ! {
-    panic!("expected {} got {}", header_size, s);
-}
-
 /// Frees `size` bytes starting at `address`, either to a free bucket or to the
 /// OS (in which case the left/right sentinels are freed as well). `address`
 /// should point to what would be the `Header` of the memory area to free, and
@@ -1254,9 +1246,12 @@ unsafe fn free_memory(address: *mut c_void, left: *mut c_void, size: usize) {
             && is_end_of_os_allocation(address.cast::<u8>().add(size))
         {
             // Assert that it's safe to do a simple 2*size_of::<Header>() below.
-            if cfg!(debug_assertions) && ((*left).size as usize) != size_of::<Header>() {
-                panic_unexpected_left_sentinel_size((*left).size);
-            }
+            debug_assert!(
+                ((*left).size as usize) == size_of::<Header>(),
+                "Unexpected left sentinel size {} != header size {}",
+                (*left).size,
+                size_of::<Header>()
+            );
             possibly_free_to_os(left, size + 2 * size_of::<Header>());
         } else {
             create_free_area(address, left.cast(), size);
@@ -1280,9 +1275,7 @@ unsafe fn unlink_free(free_area: *mut Free, bucket: i32) {
     unsafe {
         let theheap = THE_HEAP.get();
         let free_size = (*free_area).header.size as usize;
-        if (*theheap).remaining < free_size {
-            panic_remaining_underflow((*theheap).remaining, (*free_area).header.size);
-        }
+        assert!((*theheap).remaining >= free_size, "{} >= {}", (*theheap).remaining, free_size);
         (*theheap).remaining -= free_size;
         let next = (*free_area).next;
         let prev = (*free_area).prev;
@@ -1445,11 +1438,12 @@ unsafe fn heap_grow(mut size: usize) -> bool {
                 );
                 ptr = os_alloc.cast();
                 size = os_alloc_size;
-                if cfg!(debug_assertions)
-                    && (!page::is_page_rounded(ptr.addr()) || !page::is_page_rounded(size))
-                {
-                    panic_unrounded_os_alloc(size, ptr);
-                }
+                debug_assert!(
+                    page::is_page_rounded(ptr.addr()) && page::is_page_rounded(size),
+                    "{:#x} bytes @{:p}",
+                    size,
+                    ptr
+                );
             } else {
                 // We need to allocate more from the OS. Return the cached OS
                 // allocation, in case we're holding an unusually-small block
@@ -1650,9 +1644,12 @@ unsafe fn cmpct_free_internal(payload: *mut c_void, mut header: *mut Header) {
         debug_assert!(!is_tagged_as_free(header)); // Double free!
         (*header).size
     };
-    if (header_size as usize) <= size_of::<Header>() {
-        panic_header_size_too_small(header_size);
-    }
+    assert!(
+        (header_size as usize) > size_of::<Header>(),
+        "got {} min {}",
+        header_size,
+        size_of::<Header>()
+    );
 
     // SAFETY: `TheHeapLock` is held and `header` is a valid allocated `Header`.
     header =
@@ -1803,9 +1800,7 @@ pub unsafe fn cmpct_sized_free(payload: *mut c_void, s: usize) {
         // plus the difference between the block size and the requested allocation size. If kernel
         // ASAN is enabled, it also includes an ASAN redzone.
         let header_size = (*header).size;
-        if (header_size as usize) < s {
-            panic_sized_free_too_small(header_size, s);
-        }
+        assert!((header_size as usize) >= s, "expected {} got {}", header_size, s);
         cmpct_free_internal(payload, header);
     }
 }

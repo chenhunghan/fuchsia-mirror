@@ -11,6 +11,8 @@ pub use crate::platform_rs::timer::InstantBootTicks;
 use crate::platform_rs::timer::timer_current_boot_ticks;
 use core::mem::size_of;
 use core::ptr::NonNull;
+#[cfg(ktest)]
+use core::sync::atomic::AtomicUsize;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 use core::{ffi, ptr, slice};
 pub use fxt_layout::{
@@ -58,12 +60,13 @@ impl KTraceState {
 
     #[inline]
     pub fn is_category_enabled(&self, category: &InternedCategory) -> bool {
+        const { assert!(InternedCategory::INVALID_INDEX > u32::BITS) };
         let category_index = category.index();
-        if category_index == InternedCategory::INVALID_INDEX {
+        if category_index >= u32::BITS {
             return false;
         }
         let bitmask = self.categories_bitmask.load(Ordering::Acquire);
-        (bitmask & (1 << category_index)) != 0
+        (bitmask & (1u32 << category_index)) != 0
     }
 }
 
@@ -85,10 +88,13 @@ pub static GLOBAL_KTRACE_STATE: KTraceState = KTraceState::new();
 /// state and the per-CPU buffer pointers) is atomic and carries its own ordering.
 static ACTIVE_KTRACE: AtomicPtr<KTrace> = AtomicPtr::new(ptr::null_mut());
 
-unsafe extern "C" {
-    #[cfg(ktest)]
-    fn cpp_ktrace_get_thread_local_override() -> *mut ffi::c_void;
-}
+/// Number of threads currently holding a non-null thread-local test `KTrace` override.
+///
+/// Maintained by `rust_ktrace_set_thread_local_override` so `KTrace::thread_local_override` can
+/// skip reading the thread pointer at every tracepoint when no test override is active.
+#[cfg(ktest)]
+static ACTIVE_THREAD_LOCAL_OVERRIDES: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
     Thread = 0,
@@ -180,17 +186,25 @@ impl<'a> From<&'static InternedString> for StringRef<'a> {
 
 impl<'a> From<&'a [u8]> for StringRef<'a> {
     fn from(s: &'a [u8]) -> Self {
-        StringRef::Inline(s)
+        StringRef::Inline(StringRef::inline_bytes(s))
     }
 }
 
 impl<'a> From<&'a str> for StringRef<'a> {
     fn from(s: &'a str) -> Self {
-        StringRef::Inline(s.as_bytes())
+        StringRef::Inline(StringRef::inline_bytes(s.as_bytes()))
     }
 }
 
 impl<'a> StringRef<'a> {
+    /// Returns the effective inline byte slice, truncated at the first NUL byte and capped at
+    /// the FXT inline string maximum length (`0x7fff`), matching `fxt::StringRef`.
+    fn inline_bytes(b: &[u8]) -> &[u8] {
+        let max = b.len().min(0x7fff);
+        let len = b[..max].iter().position(|&c| c == 0).unwrap_or(max);
+        &b[..len]
+    }
+
     /// Returns the FXT header entry for this string reference.
     pub fn header_entry(&self) -> u16 {
         match self {
@@ -200,7 +214,7 @@ impl<'a> StringRef<'a> {
                 hdr.bits()
             }
             StringRef::Inline(b) => {
-                let len = b.len().min(0x7fff) as u16;
+                let len = Self::inline_bytes(b).len() as u16;
                 let mut hdr = StringRefHeader::new();
                 hdr.set_is_inline(true).set_id_or_len(len);
                 hdr.bits()
@@ -212,10 +226,7 @@ impl<'a> StringRef<'a> {
     pub fn payload_words(&self) -> usize {
         match self {
             StringRef::Interned(_) => 0,
-            StringRef::Inline(b) => {
-                let len = b.len().min(0x7fff);
-                len.div_ceil(8)
-            }
+            StringRef::Inline(b) => Self::inline_bytes(b).len().div_ceil(8),
         }
     }
 
@@ -223,10 +234,7 @@ impl<'a> StringRef<'a> {
     pub fn write(&self, res: &mut KTraceReservation<'_>) -> Result<(), Status> {
         match self {
             StringRef::Interned(_) => Ok(()),
-            StringRef::Inline(b) => {
-                let len = b.len().min(0x7fff);
-                res.write_bytes(&b[..len])
-            }
+            StringRef::Inline(b) => res.write_bytes(Self::inline_bytes(b)),
         }
     }
 }
@@ -372,14 +380,18 @@ pub struct KTraceScope<'a, const N: usize> {
 }
 
 impl<'a, const N: usize> KTraceScope<'a, N> {
+    /// Begins a duration scope, evaluating `make_args` in this out-of-line frame before sampling
+    /// the start timestamp so argument construction neither inflates the caller's stack frame nor
+    /// widens the measured duration window.
     #[inline(never)]
     #[cold]
     pub fn begin(
         category: &'static InternedCategory,
         name: &'static InternedString,
         context: Context,
-        args: [Argument<'a>; N],
+        make_args: impl FnOnce() -> [Argument<'a>; N],
     ) -> Self {
+        let args = make_args();
         let timestamp = KTrace::timestamp();
         Self { category, name, timestamp, context, args, ended: false }
     }
@@ -391,35 +403,49 @@ impl<'a, const N: usize> KTraceScope<'a, N> {
 
     #[inline]
     pub fn end(&mut self) {
-        self.end_with_args(&[]);
+        if !self.ended {
+            core::hint::cold_path();
+            let end_time = KTrace::timestamp();
+            self.finish_drop(end_time);
+        }
+    }
+
+    #[inline]
+    pub fn end_with_args(&mut self, end_args: &[Argument<'_>]) {
+        if !self.ended {
+            core::hint::cold_path();
+            let end_time = KTrace::timestamp();
+            self.end_at_with_args(end_time, end_args);
+        }
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn end_at_with_args(&mut self, end_time: InstantBootTicks, end_args: &[Argument<'_>]) {
+        self.ended = true;
+        KTrace::emit_event(
+            EventType::DurationComplete,
+            self.category,
+            self.name,
+            self.timestamp,
+            self.context,
+            Some(end_time.0 as u64),
+            &self.args,
+            end_args,
+        );
     }
 
     #[inline(never)]
     #[cold]
-    pub fn end_with_args(&mut self, end_args: &[Argument<'_>]) {
-        if !self.ended {
-            if KTrace::category_enabled(self.category) {
-                let end_time = KTrace::timestamp();
-                KTrace::emit_event(
-                    EventType::DurationComplete,
-                    self.category,
-                    self.name,
-                    self.timestamp,
-                    self.context,
-                    Some(end_time.0 as u64),
-                    &self.args,
-                    end_args,
-                );
-            }
-            self.ended = true;
-        }
+    fn finish_drop(&mut self, end_time: InstantBootTicks) {
+        self.end_at_with_args(end_time, &[]);
     }
 }
 
 impl<'a, const N: usize> Drop for KTraceScope<'a, N> {
     #[inline]
     fn drop(&mut self) {
-        self.end_with_args(&[]);
+        self.end();
     }
 }
 
@@ -756,7 +782,7 @@ impl KTrace {
         // A thread-local test override takes precedence over the global instance.
         #[cfg(ktest)]
         if let Some(ptr) = Self::thread_local_override() {
-            // SAFETY: The pointer set via `cpp_ktrace_set_thread_local_override` points to a
+            // SAFETY: The pointer set via `rust_ktrace_set_thread_local_override` points to a
             // valid `KTrace` instance that remains alive for the duration of this call on the
             // current thread.
             return Some(f(unsafe { ptr.as_ref() }));
@@ -775,16 +801,26 @@ impl KTrace {
     #[cfg(ktest)]
     #[inline]
     fn thread_local_override() -> Option<NonNull<Self>> {
-        // SAFETY: `cpp_ktrace_get_thread_local_override` has no preconditions; it returns null if
-        // there is no current thread or no override.
-        NonNull::new(unsafe { cpp_ktrace_get_thread_local_override() }.cast::<Self>())
+        if ACTIVE_THREAD_LOCAL_OVERRIDES.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        core::hint::cold_path();
+        // SAFETY: `ACTIVE_THREAD_LOCAL_OVERRIDES` is only non-zero while a kernel unit test has an
+        // override installed. Overrides are set and cleared from thread context within a single
+        // sequential ktrace test, during which no CPU is brought online, so every CPU that
+        // reaches this point has a valid current `Thread`.
+        let ptr = unsafe { crate::kernel::thread::current_rust_ktrace_override() }.cast::<Self>();
+        // Pairs with the `compiler_fence(Release)` in `rust_ktrace_set_thread_local_override`:
+        // keeps reads of `*ptr` after the load of the pointer.
+        core::sync::atomic::compiler_fence(Ordering::Acquire);
+        NonNull::new(ptr)
     }
 
     #[cfg(ktest)]
     #[inline]
     fn with_override<R>(f: impl FnOnce(&Self) -> R) -> Option<R> {
         let ptr = Self::thread_local_override()?;
-        // SAFETY: The pointer set via `cpp_ktrace_set_thread_local_override` points to a
+        // SAFETY: The pointer set via `rust_ktrace_set_thread_local_override` points to a
         // valid `KTrace` instance that remains alive for the duration of this call on the
         // current thread.
         Some(f(unsafe { ptr.as_ref() }))
@@ -1271,14 +1307,72 @@ pub unsafe extern "C" fn rust_ktrace_set_active(ktrace_ptr: *mut ffi::c_void) {
     ACTIVE_KTRACE.store(ktrace_ptr.cast::<KTrace>(), Ordering::Release);
 }
 
+/// Sets or clears the current thread's test `KTrace` override and maintains
+/// `ACTIVE_THREAD_LOCAL_OVERRIDES`.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - This is called in kernel thread context (`Thread::Current::Get()` is non-null).
+/// - If `ktrace_ptr` is non-null, it points to a valid `KTrace` instance returned by
+///   `rust_ktrace_init` that remains live until cleared on the same thread by passing a null
+///   `ktrace_ptr`.
+/// - While any override is installed (`ACTIVE_THREAD_LOCAL_OVERRIDES > 0`), no CPU without a
+///   valid current `Thread` (for example, one being brought online) reaches a tracepoint:
+///   `KTrace::thread_local_override` then reads the current thread's override without a null
+///   check.
+#[cfg(ktest)]
+// SAFETY: `rust_ktrace_set_thread_local_override` is a unique symbol matched only by the C++ test
+// declaration in `zircon/kernel/lib/ktrace/tests/ktrace-tests.cc` with an identical signature.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_ktrace_set_thread_local_override(ktrace_ptr: *mut ffi::c_void) {
+    use crate::kernel::thread::{current_rust_ktrace_override, current_set_rust_ktrace_override};
+    // SAFETY: The caller guarantees thread context, so the calling CPU has a valid current
+    // `Thread`.
+    let prev = unsafe { current_rust_ktrace_override() };
+    match (prev.is_null(), ktrace_ptr.is_null()) {
+        (true, false) => {
+            // Keep the caller's initialization of `*ktrace_ptr` from being moved past the store
+            // that publishes it to same-CPU interrupts. Interrupts on this CPU observe its stores
+            // in program order, so only the compiler needs to be constrained.
+            core::sync::atomic::compiler_fence(Ordering::Release);
+            // No fence is needed between the store and the increment: if the increment becomes
+            // visible to a same-CPU interrupt before the pointer, the interrupt reads a null
+            // override and uses the global instance.
+            //
+            // SAFETY: As above, and the caller guarantees that `ktrace_ptr` stays live until it is
+            // cleared on this thread.
+            unsafe { current_set_rust_ktrace_override(ktrace_ptr) };
+            ACTIVE_THREAD_LOCAL_OVERRIDES.fetch_add(1, Ordering::Relaxed);
+        }
+        (false, true) => {
+            // Clear the thread-local pointer before decrementing the active counter so an
+            // interrupt on this thread cannot observe a stale pointer while the counter transitions
+            // to zero. Interrupts on this CPU observe its stores in program order, so only the
+            // compiler needs to be kept from reordering them.
+            //
+            // SAFETY: As above; clearing installs no pointer.
+            unsafe { current_set_rust_ktrace_override(ptr::null_mut()) };
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            ACTIVE_THREAD_LOCAL_OVERRIDES.fetch_sub(1, Ordering::Relaxed);
+        }
+        _ => {
+            // As in the install case, keep the initialization of a new `*ktrace_ptr` before the
+            // store that publishes it, and keep the caller's teardown of a replaced `*prev` after
+            // the store that unpublishes it.
+            core::sync::atomic::compiler_fence(Ordering::Release);
+            // SAFETY: As above, and the caller guarantees that `ktrace_ptr` is null or stays live
+            // until it is cleared on this thread.
+            unsafe { current_set_rust_ktrace_override(ktrace_ptr) };
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+        }
+    }
+}
+
 /// KTrace tests
 #[cfg(all(not(gcc), ktest))]
 #[unittest::suite(name = "ktrace_rust")]
 mod tests {
-    unsafe extern "C" {
-        fn cpp_ktrace_set_thread_local_override(ktrace_ptr: *mut ffi::c_void);
-    }
-
     use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num, max_num_cpus};
     use crate::kernel::thread::{FxtRef, ThreadPtr};
     use crate::percpu_writer::buffer::{DROP_STATS_REF, META_CAT, NUM_BYTES_REF, NUM_RECORDS_REF};
@@ -1583,7 +1677,7 @@ mod tests {
         impl Drop for OverrideGuard {
             fn drop(&mut self) {
                 unsafe {
-                    cpp_ktrace_set_thread_local_override(ptr::null_mut());
+                    rust_ktrace_set_thread_local_override(ptr::null_mut());
                     rust_ktrace_free(self.0);
                 }
             }
@@ -1608,7 +1702,7 @@ mod tests {
         let status = unsafe { rust_ktrace_init(num_cpus, local_state_ptr, &mut ktrace_ptr) };
         expect_eq!(status, 0);
         expect_false!(ktrace_ptr.is_null());
-        unsafe { cpp_ktrace_set_thread_local_override(ktrace_ptr) };
+        unsafe { rust_ktrace_set_thread_local_override(ktrace_ptr) };
         let _override_guard = OverrideGuard(ktrace_ptr);
 
         let ktrace = unsafe { &*ktrace_ptr.cast::<KTrace>() };
@@ -1809,6 +1903,15 @@ mod tests {
         let inline_str_ref = StringRef::from("hello_world");
         expect_eq!(inline_str_ref.header_entry(), 0x800b);
         expect_eq!(inline_str_ref.payload_words(), 2);
+
+        // NUL-padded inline byte slice (e.g. ZX_MAX_NAME_LEN buffers) truncates at first NUL.
+        let nul_padded_ref = StringRef::from(&b"proc\0\0\0\0\0\0"[..]);
+        expect_eq!(nul_padded_ref.header_entry(), 0x8004);
+        expect_eq!(nul_padded_ref.payload_words(), 1);
+
+        let direct_nul_ref = StringRef::Inline(&b"proc_name\0ignored"[..]);
+        expect_eq!(direct_nul_ref.header_entry(), 0x8009);
+        expect_eq!(direct_nul_ref.payload_words(), 2);
     }
 
     /// Verifies Koid argument wrapping and size calculation.
@@ -2002,7 +2105,7 @@ mod tests {
         impl Drop for OverrideGuard {
             fn drop(&mut self) {
                 unsafe {
-                    cpp_ktrace_set_thread_local_override(ptr::null_mut());
+                    rust_ktrace_set_thread_local_override(ptr::null_mut());
                     rust_ktrace_free(self.0);
                 }
             }
@@ -2015,7 +2118,7 @@ mod tests {
         let mut ktrace_ptr = ptr::null_mut();
         let status = unsafe { rust_ktrace_init(max_num_cpus(), local_state_ptr, &mut ktrace_ptr) };
         expect_eq!(status, 0);
-        unsafe { cpp_ktrace_set_thread_local_override(ktrace_ptr) };
+        unsafe { rust_ktrace_set_thread_local_override(ktrace_ptr) };
         let _override_guard = OverrideGuard(ktrace_ptr);
 
         let value = KTrace::timestamp().0 as u64;
@@ -2048,7 +2151,7 @@ mod tests {
             fn drop(&mut self) {
                 // SAFETY: Clearing the thread-local override to null ensures no subsequent trace
                 // call on this thread can dereference `self.0`.
-                unsafe { cpp_ktrace_set_thread_local_override(ptr::null_mut()) };
+                unsafe { rust_ktrace_set_thread_local_override(ptr::null_mut()) };
                 // SAFETY: `self.0` was allocated by `rust_ktrace_init` and is no longer referenced
                 // after clearing the thread-local override with interrupts disabled.
                 unsafe { rust_ktrace_free(self.0) };
@@ -2066,7 +2169,7 @@ mod tests {
         assert_eq!(status, 0);
         // SAFETY: `ktrace_ptr` was initialized by `rust_ktrace_init` and `_override_guard` clears
         // the thread-local override before freeing `ktrace_ptr`.
-        unsafe { cpp_ktrace_set_thread_local_override(ktrace_ptr) };
+        unsafe { rust_ktrace_set_thread_local_override(ktrace_ptr) };
         let _override_guard = OverrideGuard(ktrace_ptr);
 
         // Enable `META_CAT` at runtime first so the `DISABLED` checks below verify that a `false`

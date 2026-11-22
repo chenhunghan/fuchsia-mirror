@@ -4,6 +4,7 @@
 # found in the LICENSE file.
 """Utilities for trace model tests."""
 
+import os
 import unittest
 from collections.abc import Mapping, Sequence
 
@@ -12,6 +13,17 @@ import trace_processing.trace_time as trace_time
 
 TEST_MODEL_BEGIN_TIME_IN_US: float = 697503138.0
 TEST_MODEL_END_TIME_IN_US: float = 698607465.375
+
+
+def runtime_dep_path(filename: str) -> str:
+    """Returns the path of a test data file in the runtime_deps directory."""
+    # A second dirname is required to account for the .pyz archive which
+    # contains the test and a third one since data is a sibling of the test.
+    runtime_deps_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "runtime_deps",
+    )
+    return os.path.join(runtime_deps_path, filename)
 
 
 def get_test_model(is_fxt: bool = False) -> trace_model.Model:
@@ -23,19 +35,14 @@ def get_test_model(is_fxt: bool = False) -> trace_model.Model:
     read_event = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(698607461.7395687)
         - trace_time.TimeDelta.from_microseconds(697503138.9531089),
-        parent=None,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="Read",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(697503138.9531089)
-            ),
-            pid=7009,
-            tid=7021,
-            args={},
+        category="io",
+        name="Read",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(697503138.9531089)
         ),
+        pid=7009,
+        tid=7021,
+        args={},
     )
     write_event = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(90254.0)
@@ -44,38 +51,31 @@ def get_test_model(is_fxt: bool = False) -> trace_model.Model:
             trace_time.TimeDelta.from_microseconds(697868582.5994568)
             - trace_time.TimeDelta.from_microseconds(697778328.2160872)
         ),
-        parent=None,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="Write",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(697778328.2160872)
-            ),
-            pid=7009,
-            tid=7022,
-            args={},
+        category="io",
+        name="Write",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(697778328.2160872)
         ),
+        pid=7009,
+        tid=7022,
+        args={},
     )
     async_read_write_event = trace_model.AsyncEvent(
         # Perfetto does not store the correlation ID for async events.
         id=0 if is_fxt else 43,
         duration=trace_time.TimeDelta.from_microseconds(698607461.0)
         - trace_time.TimeDelta.from_microseconds(TEST_MODEL_BEGIN_TIME_IN_US),
-        base=trace_model.Event(
-            category="io",
-            name="AsyncReadWrite",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(
-                    int(TEST_MODEL_BEGIN_TIME_IN_US)
-                )
-            ),
-            pid=7009,
-            # Async events are process scoped in Perfetto.
-            tid=0 if is_fxt else 7022,
-            args={},
+        category="io",
+        name="AsyncReadWrite",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(
+                int(TEST_MODEL_BEGIN_TIME_IN_US)
+            )
         ),
+        pid=7009,
+        # Async events are process scoped in Perfetto.
+        tid=0 if is_fxt else 7022,
+        args={},
     )
     read_event2 = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(386.0)
@@ -84,21 +84,16 @@ def get_test_model(is_fxt: bool = False) -> trace_model.Model:
             trace_time.TimeDelta.from_microseconds(697868571.6018075)
             - trace_time.TimeDelta.from_microseconds(697868185.3588456)
         ),
-        parent=None,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="Read",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(
-                    697868185.358 if is_fxt else 697868185.3588456
-                )
-            ),
-            pid=7010,
-            tid=7023,
-            args={},
+        category="io",
+        name="Read",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(
+                697868185.358 if is_fxt else 697868185.3588456
+            )
         ),
+        pid=7010,
+        tid=7023,
+        args={},
     )
     # Note on flow event timestamps and names (FXT vs Legacy JSON):
     # This is NOT a precision loss or rounding jitter issue. Rather, it reflects a difference in the underlying source records:
@@ -115,147 +110,110 @@ def get_test_model(is_fxt: bool = False) -> trace_model.Model:
     flow_start = trace_model.FlowEvent(
         id="1" if is_fxt else "0",
         phase=trace_model.FlowEventPhase.START,
-        enclosing_duration=None,
-        previous_flow=None,
-        next_flow=None,
-        base=trace_model.Event(
-            category="io",
-            name="ReadSubBegin" if is_fxt else "ReadWriteFlow",
-            start=us_tp(697778305.0) if is_fxt else us_tp(697778305.5),
-            pid=7009,
-            tid=7021,
-            args={},
-        ),
+        category="io",
+        name="ReadSubBegin" if is_fxt else "ReadWriteFlow",
+        start=us_tp(697778305.0) if is_fxt else us_tp(697778305.5),
+        pid=7009,
+        tid=7021,
+        args={},
     )
     flow_step = trace_model.FlowEvent(
         id="1" if is_fxt else "0",
         phase=trace_model.FlowEventPhase.STEP,
-        enclosing_duration=None,
-        previous_flow=None,
-        next_flow=None,
-        base=trace_model.Event(
-            category="io",
-            name="WriteSubBegin" if is_fxt else "ReadWriteFlow",
-            start=us_tp(697778329.0) if is_fxt else us_tp(697779328.2160872),
-            pid=7009,
-            tid=7022,
-            args={},
-        ),
+        category="io",
+        name="WriteSubBegin" if is_fxt else "ReadWriteFlow",
+        start=us_tp(697778329.0) if is_fxt else us_tp(697779328.2160872),
+        pid=7009,
+        tid=7022,
+        args={},
     )
     flow_end = trace_model.FlowEvent(
         id="1" if is_fxt else "0",
         phase=trace_model.FlowEventPhase.END,
-        enclosing_duration=None,
-        previous_flow=None,
-        next_flow=None,
-        base=trace_model.Event(
-            category="io",
-            name="WriteSubEnd" if is_fxt else "ReadWriteFlow",
-            start=us_tp(697868049.0) if is_fxt else us_tp(697868050.2160872),
-            pid=7009,
-            tid=7022,
-            args={},
-        ),
+        category="io",
+        name="WriteSubEnd" if is_fxt else "ReadWriteFlow",
+        start=us_tp(697868049.0) if is_fxt else us_tp(697868050.2160872),
+        pid=7009,
+        tid=7022,
+        args={},
     )
 
     read_sub_begin = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(1.0),
         parent=read_event,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="ReadSubBegin",
-            start=us_tp(697778305.0),
-            pid=7009,
-            tid=7021,
-            args={},
-        ),
+        category="io",
+        name="ReadSubBegin",
+        start=us_tp(697778305.0),
+        pid=7009,
+        tid=7021,
+        args={},
     )
     read_sub_end = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(2.0),
         parent=read_event,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="ReadSubEnd",
-            start=us_tp(697868583.0),
-            pid=7009,
-            tid=7021,
-            args={},
-        ),
+        category="io",
+        name="ReadSubEnd",
+        start=us_tp(697868583.0),
+        pid=7009,
+        tid=7021,
+        args={},
     )
     write_sub_begin = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(1000.0),
         parent=write_event,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="WriteSubBegin",
-            start=us_tp(697778329.0),
-            pid=7009,
-            tid=7022,
-            args={},
-        ),
+        category="io",
+        name="WriteSubBegin",
+        start=us_tp(697778329.0),
+        pid=7009,
+        tid=7022,
+        args={},
     )
     write_sub_end = trace_model.DurationEvent(
         duration=trace_time.TimeDelta.from_microseconds(2.0),
         parent=write_event,
-        child_durations=[],
-        child_flows=[],
-        base=trace_model.Event(
-            category="io",
-            name="WriteSubEnd",
-            start=us_tp(697868049.0),
-            pid=7009,
-            tid=7022,
-            args={},
-        ),
+        category="io",
+        name="WriteSubEnd",
+        start=us_tp(697868049.0),
+        pid=7009,
+        tid=7022,
+        args={},
     )
 
     counter_event1 = trace_model.CounterEvent(
         id=0 if is_fxt else None,
-        base=trace_model.Event(
-            category="" if is_fxt else "system_metrics",
-            name="cpu_usage",
-            start=us_tp(697503150.0),
-            pid=7010,
-            tid=0 if is_fxt else 7023,
-            args={
-                "average_cpu_percentage": 0.1,
-                "max_cpu_usage": 0.2,
-            },
-        ),
+        category="" if is_fxt else "system_metrics",
+        name="cpu_usage",
+        start=us_tp(697503150.0),
+        pid=7010,
+        tid=0 if is_fxt else 7023,
+        args={
+            "average_cpu_percentage": 0.1,
+            "max_cpu_usage": 0.2,
+        },
     )
     counter_event2 = trace_model.CounterEvent(
         id=0 if is_fxt else None,
-        base=trace_model.Event(
-            category="" if is_fxt else "system_metrics",
-            name="cpu_usage",
-            start=us_tp(698000000.0),
-            pid=7010,
-            tid=0 if is_fxt else 7023,
-            args={
-                "average_cpu_percentage": 0.5,
-                "max_cpu_usage": 0.6,
-            },
-        ),
+        category="" if is_fxt else "system_metrics",
+        name="cpu_usage",
+        start=us_tp(698000000.0),
+        pid=7010,
+        tid=0 if is_fxt else 7023,
+        args={
+            "average_cpu_percentage": 0.5,
+            "max_cpu_usage": 0.6,
+        },
     )
     counter_event3 = trace_model.CounterEvent(
         id=0 if is_fxt else None,
-        base=trace_model.Event(
-            category="" if is_fxt else "system_metrics",
-            name="cpu_usage",
-            start=us_tp(698607465.375),
-            pid=7010,
-            tid=0 if is_fxt else 7023,
-            args={
-                "average_cpu_percentage": 0.89349317793,
-                "max_cpu_usage": 0.1234,
-            },
-        ),
+        category="" if is_fxt else "system_metrics",
+        name="cpu_usage",
+        start=us_tp(698607465.375),
+        pid=7010,
+        tid=0 if is_fxt else 7023,
+        args={
+            "average_cpu_percentage": 0.89349317793,
+            "max_cpu_usage": 0.1234,
+        },
     )
     # Testing instant events under different scopes.
     # Note: Perfetto's Fuchsia Trace Parser tokenizer unconditionally registers all
@@ -268,46 +226,40 @@ def get_test_model(is_fxt: bool = False) -> trace_model.Model:
         scope=trace_model.InstantEventScope.THREAD
         if is_fxt
         else trace_model.InstantEventScope.GLOBAL,
-        base=trace_model.Event(
-            category="log",
-            name="global_instant",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(697820000.0)
-            ),
-            pid=7009,
-            tid=7022,
-            args={"message": "Global scoped instant event"},
+        category="log",
+        name="global_instant",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(697820000.0)
         ),
+        pid=7009,
+        tid=7022,
+        args={"message": "Global scoped instant event"},
     )
 
     process_instant_event = trace_model.InstantEvent(
         scope=trace_model.InstantEventScope.THREAD
         if is_fxt
         else trace_model.InstantEventScope.PROCESS,
-        base=trace_model.Event(
-            category="log",
-            name="process_instant",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(697821000.0)
-            ),
-            pid=7009,
-            tid=7022,
-            args={"message": "Process scoped instant event"},
+        category="log",
+        name="process_instant",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(697821000.0)
         ),
+        pid=7009,
+        tid=7022,
+        args={"message": "Process scoped instant event"},
     )
 
     thread_instant_event = trace_model.InstantEvent(
         scope=trace_model.InstantEventScope.THREAD,
-        base=trace_model.Event(
-            category="log",
-            name="thread_instant",
-            start=trace_time.TimePoint.from_epoch_delta(
-                trace_time.TimeDelta.from_microseconds(697822000.0)
-            ),
-            pid=7009,
-            tid=7022,
-            args={"message": "Thread scoped instant event"},
+        category="log",
+        name="thread_instant",
+        start=trace_time.TimePoint.from_epoch_delta(
+            trace_time.TimeDelta.from_microseconds(697822000.0)
         ),
+        pid=7009,
+        tid=7022,
+        args={"message": "Thread scoped instant event"},
     )
 
     flow_start.enclosing_duration = read_sub_begin

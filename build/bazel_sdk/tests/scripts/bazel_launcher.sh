@@ -101,7 +101,11 @@ fi
 # Auto-detect authentication method when invoked directly outside `fx build`.
 if [[ -z "${FX_BUILD_RBE_AUTH_TYPE:-}" ]]; then
   if [[ -x "${_FUCHSIA_SOURCE_DIR}/build/auth/select_auth_method.py" ]]; then
-    FX_BUILD_RBE_AUTH_TYPE="$("${_PYTHON_PREBUILT_DIR}/bin/python3" -S "${_FUCHSIA_SOURCE_DIR}/build/auth/select_auth_method.py" 2>/dev/null | tail -n 1 || true)"
+    FX_BUILD_RBE_AUTH_TYPE="$(
+      PYTHONPATH="${_FUCHSIA_SOURCE_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${_PYTHON_PREBUILT_DIR}/bin/python3" -S \
+        "${_FUCHSIA_SOURCE_DIR}/build/auth/select_auth_method.py" 2>/dev/null | tail -n 1 || true
+    )"
     export FX_BUILD_RBE_AUTH_TYPE
     export FX_BUILD_RS_AUTH_TYPE="${FX_BUILD_RS_AUTH_TYPE:-"${FX_BUILD_RBE_AUTH_TYPE}"}"
   fi
@@ -264,6 +268,16 @@ if [[ "${FUCHSIA_BAZEL_PRINT_COMMANDS:-}" == "1" ]]; then
   echo >&2 "RUN_COMMAND: (cd ${_WORKSPACE_DIR@Q} && ${_FINAL_CMD[*]@Q})"
 fi
 
+# Delegate to bazel_besproxy_wrap.py, which intercepts the Build Event Stream
+# (BES) with besproxy when Buildminder is active, or transparently passes
+# through to the raw Bazel command when inactive.
+readonly _BAZEL_BESPROXY_WRAP="${_FUCHSIA_SOURCE_DIR}/build/bazel/scripts/bazel_besproxy_wrap.py"
+
 # Do not 'exec' here so that the shell process remains alive until the command
 # exits, ensuring that the EXIT trap triggers to clean up _INVOCATION_BAZELRC.
-cd "${_WORKSPACE_DIR}" && "${_FINAL_CMD[@]}"
+cd "${_WORKSPACE_DIR}" && env "PYTHONPATH=${_FUCHSIA_SOURCE_DIR}" \
+  "${_PYTHON_PREBUILT_DIR}/bin/python3" -S "${_BAZEL_BESPROXY_WRAP}" \
+  --fuchsia-dir="${_FUCHSIA_SOURCE_DIR}" \
+  --log-dir="${_OUTPUT_BASE}" \
+  -- \
+  "${_FINAL_CMD[@]}"

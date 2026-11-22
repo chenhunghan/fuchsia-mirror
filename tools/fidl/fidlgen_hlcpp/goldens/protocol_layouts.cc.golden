@@ -155,7 +155,7 @@ LocalUnionPayload::LocalUnionPayload(LocalUnionPayload&& other) : tag_(other.tag
     case ::test::protocollayouts::LocalUnionPayload::Tag::kB:
       b_ = std::move(other.b_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -172,7 +172,7 @@ LocalUnionPayload& LocalUnionPayload::operator=(LocalUnionPayload&& other) {
       case ::test::protocollayouts::LocalUnionPayload::Tag::kB:
         b_ = std::move(other.b_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -199,10 +199,10 @@ void LocalUnionPayload::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<bool>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &b_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -211,11 +211,11 @@ void LocalUnionPayload::Encode(::fidl::Encoder* encoder, size_t offset,
         &b_,
         encoder->Alloc(::fidl::EncodingInlineSize<bool, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::LocalUnionPayload::Tag::kUnknown: {
@@ -229,18 +229,18 @@ void LocalUnionPayload::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void LocalUnionPayload::Decode(::fidl::Decoder* _decoder, LocalUnionPayload* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::LocalUnionPayload::Tag::kB: {
@@ -248,7 +248,7 @@ void LocalUnionPayload::Decode(::fidl::Decoder* _decoder, LocalUnionPayload* val
       break;
     }
     default: {
-  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
   break;
@@ -277,7 +277,7 @@ LocalUnionPayload& LocalUnionPayload::set_b(bool value) {
   b_ = std::move(value);
   return *this;
 }
-LocalUnionPayload& LocalUnionPayload::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+LocalUnionPayload& LocalUnionPayload::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -288,22 +288,22 @@ void LocalUnionPayload::Destroy() {
     case ::test::protocollayouts::LocalUnionPayload::Tag::kB:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid);
 }
 
-void LocalUnionPayload::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void LocalUnionPayload::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::LocalUnionPayload::Tag::Invalid):
         break;
       case ::test::protocollayouts::LocalUnionPayload::Tag::kB:
         new (&b_) bool();
@@ -335,7 +335,7 @@ MainProtocol_TwoWayImportWithError_Result::MainProtocol_TwoWayImportWithError_Re
     case ::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid):
       break;
   }
 }
@@ -352,7 +352,7 @@ MainProtocol_TwoWayImportWithError_Result& MainProtocol_TwoWayImportWithError_Re
       case ::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid):
         break;
     }
   }
@@ -380,10 +380,10 @@ void MainProtocol_TwoWayImportWithError_Result::Encode(::fidl::Encoder* encoder,
       if (::fidl::EncodingInlineSize<::test::protocollayouts::imported::ImportUnionPayload>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -392,21 +392,21 @@ void MainProtocol_TwoWayImportWithError_Result::Encode(::fidl::Encoder* encoder,
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocollayouts::imported::ImportUnionPayload, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -415,11 +415,11 @@ void MainProtocol_TwoWayImportWithError_Result::Encode(::fidl::Encoder* encoder,
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -428,18 +428,18 @@ void MainProtocol_TwoWayImportWithError_Result::Encode(::fidl::Encoder* encoder,
 }
 
 void MainProtocol_TwoWayImportWithError_Result::Decode(::fidl::Decoder* _decoder, MainProtocol_TwoWayImportWithError_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::kResponse: {
@@ -498,15 +498,15 @@ void MainProtocol_TwoWayImportWithError_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid);
 }
 
-void MainProtocol_TwoWayImportWithError_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void MainProtocol_TwoWayImportWithError_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::Invalid):
         break;
       case ::test::protocollayouts::MainProtocol_TwoWayImportWithError_Result::Tag::kResponse:
         new (&response_) ::test::protocollayouts::imported::ImportUnionPayload();
@@ -540,7 +540,7 @@ MainProtocol_TwoWayLocalWithError_Result::MainProtocol_TwoWayLocalWithError_Resu
     case ::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
       break;
   }
 }
@@ -557,7 +557,7 @@ MainProtocol_TwoWayLocalWithError_Result& MainProtocol_TwoWayLocalWithError_Resu
       case ::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
         break;
     }
   }
@@ -585,10 +585,10 @@ void MainProtocol_TwoWayLocalWithError_Result::Encode(::fidl::Encoder* encoder, 
       if (::fidl::EncodingInlineSize<::test::protocollayouts::LocalUnionPayload>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -597,21 +597,21 @@ void MainProtocol_TwoWayLocalWithError_Result::Encode(::fidl::Encoder* encoder, 
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocollayouts::LocalUnionPayload, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -620,11 +620,11 @@ void MainProtocol_TwoWayLocalWithError_Result::Encode(::fidl::Encoder* encoder, 
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -633,18 +633,18 @@ void MainProtocol_TwoWayLocalWithError_Result::Encode(::fidl::Encoder* encoder, 
 }
 
 void MainProtocol_TwoWayLocalWithError_Result::Decode(::fidl::Decoder* _decoder, MainProtocol_TwoWayLocalWithError_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::kResponse: {
@@ -703,15 +703,15 @@ void MainProtocol_TwoWayLocalWithError_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid);
 }
 
-void MainProtocol_TwoWayLocalWithError_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void MainProtocol_TwoWayLocalWithError_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
         break;
       case ::test::protocollayouts::MainProtocol_TwoWayLocalWithError_Result::Tag::kResponse:
         new (&response_) ::test::protocollayouts::LocalUnionPayload();
@@ -868,7 +868,7 @@ MainProtocolTwoWayAnonRequest::MainProtocolTwoWayAnonRequest(MainProtocolTwoWayA
     case ::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::kB:
       b_ = std::move(other.b_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -885,7 +885,7 @@ MainProtocolTwoWayAnonRequest& MainProtocolTwoWayAnonRequest::operator=(MainProt
       case ::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::kB:
         b_ = std::move(other.b_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -912,10 +912,10 @@ void MainProtocolTwoWayAnonRequest::Encode(::fidl::Encoder* encoder, size_t offs
       if (::fidl::EncodingInlineSize<bool>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &b_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -924,11 +924,11 @@ void MainProtocolTwoWayAnonRequest::Encode(::fidl::Encoder* encoder, size_t offs
         &b_,
         encoder->Alloc(::fidl::EncodingInlineSize<bool, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::kUnknown: {
@@ -942,18 +942,18 @@ void MainProtocolTwoWayAnonRequest::Encode(::fidl::Encoder* encoder, size_t offs
 }
 
 void MainProtocolTwoWayAnonRequest::Decode(::fidl::Decoder* _decoder, MainProtocolTwoWayAnonRequest* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::kB: {
@@ -961,7 +961,7 @@ void MainProtocolTwoWayAnonRequest::Decode(::fidl::Decoder* _decoder, MainProtoc
       break;
     }
     default: {
-  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
   break;
@@ -990,7 +990,7 @@ MainProtocolTwoWayAnonRequest& MainProtocolTwoWayAnonRequest::set_b(bool value) 
   b_ = std::move(value);
   return *this;
 }
-MainProtocolTwoWayAnonRequest& MainProtocolTwoWayAnonRequest::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+MainProtocolTwoWayAnonRequest& MainProtocolTwoWayAnonRequest::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -1001,22 +1001,22 @@ void MainProtocolTwoWayAnonRequest::Destroy() {
     case ::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::kB:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid);
 }
 
-void MainProtocolTwoWayAnonRequest::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void MainProtocolTwoWayAnonRequest::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::Invalid):
         break;
       case ::test::protocollayouts::MainProtocolTwoWayAnonRequest::Tag::kB:
         new (&b_) bool();
@@ -1298,7 +1298,7 @@ MainProtocol_TwoWayAnonWithError_Response::MainProtocol_TwoWayAnonWithError_Resp
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::kB:
       b_ = std::move(other.b_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -1315,7 +1315,7 @@ MainProtocol_TwoWayAnonWithError_Response& MainProtocol_TwoWayAnonWithError_Resp
       case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::kB:
         b_ = std::move(other.b_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -1342,10 +1342,10 @@ void MainProtocol_TwoWayAnonWithError_Response::Encode(::fidl::Encoder* encoder,
       if (::fidl::EncodingInlineSize<bool>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &b_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1354,11 +1354,11 @@ void MainProtocol_TwoWayAnonWithError_Response::Encode(::fidl::Encoder* encoder,
         &b_,
         encoder->Alloc(::fidl::EncodingInlineSize<bool, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::kUnknown: {
@@ -1372,18 +1372,18 @@ void MainProtocol_TwoWayAnonWithError_Response::Encode(::fidl::Encoder* encoder,
 }
 
 void MainProtocol_TwoWayAnonWithError_Response::Decode(::fidl::Decoder* _decoder, MainProtocol_TwoWayAnonWithError_Response* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::kB: {
@@ -1391,7 +1391,7 @@ void MainProtocol_TwoWayAnonWithError_Response::Decode(::fidl::Decoder* _decoder
       break;
     }
     default: {
-  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
   break;
@@ -1420,7 +1420,7 @@ MainProtocol_TwoWayAnonWithError_Response& MainProtocol_TwoWayAnonWithError_Resp
   b_ = std::move(value);
   return *this;
 }
-MainProtocol_TwoWayAnonWithError_Response& MainProtocol_TwoWayAnonWithError_Response::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+MainProtocol_TwoWayAnonWithError_Response& MainProtocol_TwoWayAnonWithError_Response::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -1431,22 +1431,22 @@ void MainProtocol_TwoWayAnonWithError_Response::Destroy() {
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::kB:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid);
 }
 
-void MainProtocol_TwoWayAnonWithError_Response::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void MainProtocol_TwoWayAnonWithError_Response::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
         break;
       case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response::Tag::kB:
         new (&b_) bool();
@@ -1478,7 +1478,7 @@ MainProtocol_TwoWayAnonWithError_Result::MainProtocol_TwoWayAnonWithError_Result
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::kErr:
       err_ = std::move(other.err_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
       break;
   }
 }
@@ -1495,7 +1495,7 @@ MainProtocol_TwoWayAnonWithError_Result& MainProtocol_TwoWayAnonWithError_Result
       case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::kErr:
         err_ = std::move(other.err_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
         break;
     }
   }
@@ -1523,10 +1523,10 @@ void MainProtocol_TwoWayAnonWithError_Result::Encode(::fidl::Encoder* encoder, s
       if (::fidl::EncodingInlineSize<::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &response_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1535,21 +1535,21 @@ void MainProtocol_TwoWayAnonWithError_Result::Encode(::fidl::Encoder* encoder, s
         &response_,
         encoder->Alloc(::fidl::EncodingInlineSize<::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::kErr: {
       if (::fidl::EncodingInlineSize<uint32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &err_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1558,11 +1558,11 @@ void MainProtocol_TwoWayAnonWithError_Result::Encode(::fidl::Encoder* encoder, s
         &err_,
         encoder->Alloc(::fidl::EncodingInlineSize<uint32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -1571,18 +1571,18 @@ void MainProtocol_TwoWayAnonWithError_Result::Encode(::fidl::Encoder* encoder, s
 }
 
 void MainProtocol_TwoWayAnonWithError_Result::Decode(::fidl::Decoder* _decoder, MainProtocol_TwoWayAnonWithError_Result* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::kResponse: {
@@ -1641,15 +1641,15 @@ void MainProtocol_TwoWayAnonWithError_Result::Destroy() {
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid);
 }
 
-void MainProtocol_TwoWayAnonWithError_Result::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void MainProtocol_TwoWayAnonWithError_Result::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
         break;
       case ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Result::Tag::kResponse:
         new (&response_) ::test::protocollayouts::MainProtocol_TwoWayAnonWithError_Response();
@@ -1679,7 +1679,7 @@ MainProtocolOnAnonRequest::MainProtocolOnAnonRequest(MainProtocolOnAnonRequest&&
     case ::test::protocollayouts::MainProtocolOnAnonRequest::Tag::kB:
       b_ = std::move(other.b_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -1696,7 +1696,7 @@ MainProtocolOnAnonRequest& MainProtocolOnAnonRequest::operator=(MainProtocolOnAn
       case ::test::protocollayouts::MainProtocolOnAnonRequest::Tag::kB:
         b_ = std::move(other.b_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -1723,10 +1723,10 @@ void MainProtocolOnAnonRequest::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<bool>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &b_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -1735,11 +1735,11 @@ void MainProtocolOnAnonRequest::Encode(::fidl::Encoder* encoder, size_t offset,
         &b_,
         encoder->Alloc(::fidl::EncodingInlineSize<bool, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::protocollayouts::MainProtocolOnAnonRequest::Tag::kUnknown: {
@@ -1753,18 +1753,18 @@ void MainProtocolOnAnonRequest::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void MainProtocolOnAnonRequest::Decode(::fidl::Decoder* _decoder, MainProtocolOnAnonRequest* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::protocollayouts::MainProtocolOnAnonRequest::Tag::kB: {
@@ -1772,7 +1772,7 @@ void MainProtocolOnAnonRequest::Decode(::fidl::Decoder* _decoder, MainProtocolOn
       break;
     }
     default: {
-  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+  auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.resize(unknown_info.num_bytes);
       ::fidl::DecodeUnknownBytesContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
   break;
@@ -1801,7 +1801,7 @@ MainProtocolOnAnonRequest& MainProtocolOnAnonRequest::set_b(bool value) {
   b_ = std::move(value);
   return *this;
 }
-MainProtocolOnAnonRequest& MainProtocolOnAnonRequest::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes) {
+MainProtocolOnAnonRequest& MainProtocolOnAnonRequest::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes) {
   EnsureStorageInitialized(ordinal);
   unknown_data_ = std::move(bytes);
   return *this;
@@ -1812,22 +1812,22 @@ void MainProtocolOnAnonRequest::Destroy() {
     case ::test::protocollayouts::MainProtocolOnAnonRequest::Tag::kB:
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
 
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid);
 }
 
-void MainProtocolOnAnonRequest::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void MainProtocolOnAnonRequest::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayouts::MainProtocolOnAnonRequest::Tag::Invalid):
         break;
       case ::test::protocollayouts::MainProtocolOnAnonRequest::Tag::kB:
         new (&b_) bool();

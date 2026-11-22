@@ -10,19 +10,18 @@
 #include "src/ui/tests/integration_input_tests/starnix-input/starnix-input-test-base.h"
 #include "third_party/android/platform/bionic/libc/kernel/uapi/linux/input-event-codes.h"
 
+namespace {
+
 struct MouseEvent {
   int scroll_v;  // The number of ticks scrolled up/down.
 };
 
 class StarnixMouseTest : public starnix_input_test::StarnixInputTestBase {
- protected:
-  // To satisfy ::testing::Test
-  void SetUp() override {
-    ui_testing::PortableUITest::SetUp();
-    FX_LOGS(INFO) << "Registering input injection device";
-    RegisterMouse();
-  }
+ public:
+  explicit StarnixMouseTest(bool direct_input_mode = false)
+      : starnix_input_test::StarnixInputTestBase(direct_input_mode) {}
 
+ protected:
   // Reads sequences of mouse events from `input_dump.cc`, via `out_socket`
   // until we get num_expected events and the trailing EV_SYN packet.
   //
@@ -66,125 +65,149 @@ class StarnixMouseTest : public starnix_input_test::StarnixInputTestBase {
     WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
     // Inform `input_dump` to run the input_relay.
     std::stringstream ss;
-    ss << relay_api::kDeviceDelimiter << " " << relay_api::kMouseDev;
+    ss << relay_api::kDeviceDelimiter << " "
+       << (direct_input_mode() ? relay_api::kDirectInputDev : relay_api::kMouseDev);
     WriteMessageToSocket(in_socket, ss.str());
+  }
+
+  void RunScrollTest() {
+    auto [in_socket, out_socket] = LaunchDumper();
+
+    // Wait until #launch_input is presented before injecting input.
+    WaitForViewPresentation();
+    FX_LOGS(INFO) << "Registering input injection device";
+    RegisterMouse();
+
+    // Start `input_dump` for a mouse device.
+    InitMouseInputRelay(in_socket, out_socket);
+
+    // `input_dump` is ready to receive events.
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    // Empty event that wakes container.
+    // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
+    // upon container wakeup.
+    SimulateMouseScroll({}, 0, 0);
+
+    // Scroll down 1 tick before input_dump opens the device.
+    // This lazily registers the mouse device in Starnix and buffers the event.
+    SimulateMouseScroll({}, 0, -1);
+
+    std::stringstream ss;
+    // This test expects 3 scroll event sequences.
+    ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets * 3;
+    WriteMessageToSocket(in_socket, ss.str());
+
+    // Wait for `input_dump` to be ready for event injection.
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    {
+      auto events = GetMouseEventSequenceOfLen(out_socket, 1);
+      EXPECT_EQ(events[0].scroll_v, -1);
+    }
+
+    // Scroll down 4 ticks.
+    SimulateMouseScroll({}, 0, -4);
+    {
+      auto events = GetMouseEventSequenceOfLen(out_socket, 1);
+      EXPECT_EQ(events[0].scroll_v, -4);
+    }
+
+    // Scroll back up.
+    SimulateMouseScroll({}, 0, 5);
+    {
+      auto events = GetMouseEventSequenceOfLen(out_socket, 1);
+      EXPECT_EQ(events[0].scroll_v, 5);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    WriteMessageToSocket(in_socket, "quit");
+  }
+
+  // EventsDuringFileCloseAreIgnored ensure event reader does not get events before open.
+  void RunEventsDuringFileCloseTest() {
+    auto [in_socket, out_socket] = LaunchDumper();
+
+    // Wait until #launch_input is presented before injecting input.
+    WaitForViewPresentation();
+    FX_LOGS(INFO) << "Registering input injection device";
+    RegisterMouse();
+
+    // Start `input_dump` for a mouse device.
+    InitMouseInputRelay(in_socket, out_socket);
+
+    // `input_dump` is ready to receive events.
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    // Empty event that wakes container.
+    // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
+    // upon container wakeup.
+    SimulateMouseScroll({}, 0, 0);
+
+    // Scroll down 1 tick before input_dump opens the device.
+    // This lazily registers the mouse device in Starnix and buffers the event.
+    SimulateMouseScroll({}, 0, -1);
+
+    std::stringstream ss;
+    ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets;
+    WriteMessageToSocket(in_socket, ss.str());
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    {
+      auto events = GetMouseEventSequenceOfLen(out_socket, 1);
+      EXPECT_EQ(events[0].scroll_v, -1);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    FX_LOGS(INFO) << "device file closed";
+
+    // Now the file is closed. Send 1 scroll event. input_dump should not receive this event
+    // sequence.
+    SimulateMouseScroll({}, 0, -1);
+
+    // TODO(b/375021518): Here should block on a state instead of timeout to ensure events are
+    // reached to Starnix before open file below.
+    // It is ok if this test is flaky when the tap top left reach to starnix after "device file
+    // opened". It just means this timeout is not enough.
+    RunLoopWithTimeout(zx::sec(1));
+
+    WriteMessageToSocket(in_socket, ss.str());
+
+    FX_LOGS(INFO) << "device file opened";
+
+    // Wait for `input_dump` to ready for event injection.
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    // Send 1 scroll up event. input_dump should receive this event sequence.
+    SimulateMouseScroll({}, 0, 1);
+    {
+      auto events = GetMouseEventSequenceOfLen(out_socket, 1);
+      EXPECT_EQ(events[0].scroll_v, 1);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    WriteMessageToSocket(in_socket, "quit");
   }
 };
 
-TEST_F(StarnixMouseTest, Scroll) {
-  auto [in_socket, out_socket] = LaunchDumper();
+// Tests for Scenic input path with Starnix.
+TEST_F(StarnixMouseTest, Scroll) { RunScrollTest(); }
 
-  // Wait until #launch_input is presented before injecting input.
-  WaitForViewPresentation();
+TEST_F(StarnixMouseTest, EventsDuringFileCloseAreIgnored) { RunEventsDuringFileCloseTest(); }
 
-  // Start `input_dump` for a mouse device.
-  InitMouseInputRelay(in_socket, out_socket);
+// Tests for direct input path with Starnix.
+class StarnixMouseDirectInputTest : public StarnixMouseTest {
+ public:
+  StarnixMouseDirectInputTest() : StarnixMouseTest(true) {}
+};
 
-  // `input_dump` is ready to receive events.
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+TEST_F(StarnixMouseDirectInputTest, Scroll) { RunScrollTest(); }
 
-  // Empty event that wakes container.
-  // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
-  // upon container wakeup.
-  SimulateMouseScroll({}, 0, 0);
-
-  // Scroll down 1 tick before input_dump opens the device.
-  // This lazily registers the mouse device in Starnix and buffers the event.
-  SimulateMouseScroll({}, 0, -1);
-
-  std::stringstream ss;
-  // This test expects 3 scroll event sequences.
-  ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets * 3;
-  WriteMessageToSocket(in_socket, ss.str());
-
-  // Wait for `input_dump` to be ready for event injection.
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  {
-    auto events = GetMouseEventSequenceOfLen(out_socket, 1);
-    EXPECT_EQ(events[0].scroll_v, -1);
-  }
-
-  // Scroll down 4 ticks.
-  SimulateMouseScroll({}, 0, -4);
-  {
-    auto events = GetMouseEventSequenceOfLen(out_socket, 1);
-    EXPECT_EQ(events[0].scroll_v, -4);
-  }
-
-  // Scroll back up.
-  SimulateMouseScroll({}, 0, 5);
-  {
-    auto events = GetMouseEventSequenceOfLen(out_socket, 1);
-    EXPECT_EQ(events[0].scroll_v, 5);
-  }
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, "quit");
+TEST_F(StarnixMouseDirectInputTest, EventsDuringFileCloseAreIgnored) {
+  RunEventsDuringFileCloseTest();
 }
 
-// EventsDuringFileCloseAreIgnored ensure event reader does not get events before open.
-TEST_F(StarnixMouseTest, EventsDuringFileCloseAreIgnored) {
-  auto [in_socket, out_socket] = LaunchDumper();
-
-  // Wait until #launch_input is presented before injecting input.
-  WaitForViewPresentation();
-
-  // Start `input_dump` for a mouse device.
-  InitMouseInputRelay(in_socket, out_socket);
-
-  // `input_dump` is ready to receive events.
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  // Empty event that wakes container.
-  // TODO(b/438244012): Starnix input relay doubles the first event received from InputPipeline
-  // upon container wakeup.
-  SimulateMouseScroll({}, 0, 0);
-
-  // Scroll down 1 tick before input_dump opens the device.
-  // This lazily registers the mouse device in Starnix and buffers the event.
-  SimulateMouseScroll({}, 0, -1);
-
-  std::stringstream ss;
-  ss << relay_api::kEventCmd << " " << relay_api::kScrollNumPackets;
-  WriteMessageToSocket(in_socket, ss.str());
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  {
-    auto events = GetMouseEventSequenceOfLen(out_socket, 1);
-    EXPECT_EQ(events[0].scroll_v, -1);
-  }
-
-  FX_LOGS(INFO) << "device file closed";
-
-  // Now the file is closed. Send 1 scroll event. input_dump should not receive this event
-  // sequence.
-  SimulateMouseScroll({}, 0, -1);
-
-  // TODO(b/375021518): Here should block on a state instead of timeout to ensure events are
-  // reached to Starnix before open file below.
-  // It is ok if this test is flaky when the tap top left reach to starnix after "device file
-  // opened". It just means this timeout is not enough.
-  RunLoopWithTimeout(zx::sec(1));
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, ss.str());
-
-  FX_LOGS(INFO) << "device file opened";
-
-  // Wait for `input_dump` to ready for event injection.
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  // Send 1 scroll up event. input_dump should receive this event sequence.
-  SimulateMouseScroll({}, 0, 1);
-  {
-    auto events = GetMouseEventSequenceOfLen(out_socket, 1);
-    EXPECT_EQ(events[0].scroll_v, 1);
-  }
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, "quit");
-}
+}  // namespace

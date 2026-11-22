@@ -2,99 +2,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/test.gni")
+import("//build/testing/host_test.gni")
 
 config("include") {
   visibility = [ ":*" ]
   include_dirs = [ "include" ]
 }
 
-test("logging_cpp_unittests") {
-  sources = [
-    "host/encoder.h",
-    "log_settings_unittest.cc",
-    "logging_unittest.cc",
-  ]
-  deps = [
-    ":cpp",
-    "//src/lib/fxl",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/uuid",
-    "//third_party/googletest:gmock",
-    "//third_party/googletest:gtest",
-  ]
-  if (is_fuchsia) {
-    deps += [
-      "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_cpp",
-      "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
-      "//sdk/lib/async",
-      "//sdk/lib/async:async-cpp",
-      "//sdk/lib/async-loop:async-loop-cpp",
-      "//src/lib/diagnostics/fake-log-sink/cpp",
-      "//src/lib/fsl",
-      "//third_party/rapidjson",
-    ]
-  }
-}
-
-test("logging_cpp_unittests_structured") {
-  sources = [ "log_structure_unittest.cc" ]
-
-  deps = [
-    ":cpp",
-    "//src/lib/diagnostics/fake-log-sink/cpp",
-    "//src/lib/files",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-  ]
-}
-
-fuchsia_unittest_component("logging-cpp-unittests") {
-  manifest = "meta/logging_cpp_unittests.cml"
-  deps = [ ":logging_cpp_unittests" ]
-}
-
-fuchsia_unittest_component("logging-cpp-unittests-structured") {
-  manifest = "meta/logging_cpp_unittests_structured.cml"
-  deps = [ ":logging_cpp_unittests_structured" ]
-}
-
-test("logging-cpp-from-void") {
-  sources = [ "log_from_void.cc" ]
-
-  deps = [
-    ":cpp",
-    "//src/lib/files",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-  ]
-}
-
-fuchsia_component("from_void_test_root") {
-  testonly = true
-  deps = [ ":logging-cpp-from-void" ]
-  manifest = "meta/from_void_test_root.cml"
-}
-
-fuchsia_unittest_component("logging-cpp-from-void-test") {
-  manifest = "meta/logging_cpp_from_void_test.cml"
-  deps = [
-    ":from_void_test_root",
-    ":logging-cpp-from-void",
-  ]
-}
-
-fuchsia_test_package("logging-cpp-tests") {
-  test_components = [
-    ":logging-cpp-unittests",
-    ":logging-cpp-unittests-structured",
-    ":logging-cpp-from-void-test",
-  ]
-  test_specs = {
-    log_settings = {
-      max_severity = "FATAL"
-    }
+if (is_host) {
+  host_test("logging_cpp_unittests_host_test") {
+    binary_path = "$root_out_dir/logging_cpp_unittests"
+    target = get_label_info(":logging_cpp_unittests", "label_with_toolchain")
+    deps = [ ":logging_cpp_unittests" ]
   }
 }
 
@@ -102,7 +21,7 @@ group("tests") {
   testonly = true
   public_deps = [
     ":logging-cpp-tests",
-    ":logging_cpp_unittests($host_toolchain)",
+    ":logging_cpp_unittests_host_test($host_toolchain)",
   ]
 }
 
@@ -214,5 +133,142 @@ if (is_fuchsia) {
       "//sdk/lib/fdio",
     ]
     public_deps = [ "//src/zircon/lib/zircon" ]
+    bazel_target = ":backend_fuchsia_globals_gn_outputs"
+  }
+}
+
+cc_test_executable("logging_cpp_unittests") {
+  sources = [
+    "host/encoder.h",
+    "log_settings_unittest.cc",
+    "logging_unittest.cc",
+  ]
+  deps = []
+  deps += [
+    ":cpp",
+    "//src/lib/fxl",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/uuid",
+    "//third_party/googletest:gtest",
+  ]
+  if (is_fuchsia) {
+    deps += [
+      "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_cpp",
+      "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+      "//sdk/lib/async",
+      "//sdk/lib/async:async-cpp",
+      "//sdk/lib/async-loop:async-loop-cpp",
+      "//src/lib/diagnostics/fake-log-sink/cpp",
+      "//src/lib/fsl",
+      "//third_party/rapidjson",
+    ]
+  }
+  testonly = true
+  emit_tool_path = false
+}
+
+renamed_binary("logging_cpp_unittests_packaged") {
+  testonly = true
+  source = "$root_out_dir/logging_cpp_unittests"
+  source_deps = [ ":logging_cpp_unittests" ]
+  dest = "test/logging_cpp_unittests"
+}
+
+fuchsia_component_manifest("logging-cpp-unittests_manifest") {
+  testonly = true
+  component_name = "logging-cpp-unittests"
+  manifest = "meta/logging_cpp_unittests.cml"
+}
+
+fuchsia_test_component("logging-cpp-unittests") {
+  cm_label = ":logging-cpp-unittests_manifest"
+  deps = [ ":logging_cpp_unittests_packaged" ]
+}
+if (is_fuchsia) {
+  cc_test_executable("logging_cpp_unittests_structured") {
+    sources = [ "log_structure_unittest.cc" ]
+    deps = [
+      ":cpp",
+      "//src/lib/diagnostics/fake-log-sink/cpp",
+      "//src/lib/files",
+      "//src/lib/fxl/test:gtest_main",
+      "//third_party/googletest:gtest",
+    ]
+    testonly = true
+    emit_tool_path = false
+  }
+}
+
+renamed_binary("logging_cpp_unittests_structured_packaged") {
+  testonly = true
+  source = "$root_out_dir/logging_cpp_unittests_structured"
+  source_deps = [ ":logging_cpp_unittests_structured" ]
+  dest = "test/logging_cpp_unittests_structured"
+}
+
+fuchsia_component_manifest("logging-cpp-unittests-structured_manifest") {
+  testonly = true
+  component_name = "logging-cpp-unittests-structured"
+  manifest = "meta/logging_cpp_unittests_structured.cml"
+}
+
+fuchsia_test_component("logging-cpp-unittests-structured") {
+  cm_label = ":logging-cpp-unittests-structured_manifest"
+  deps = [ ":logging_cpp_unittests_structured_packaged" ]
+}
+
+cc_test_executable("logging-cpp-from-void") {
+  sources = [ "log_from_void.cc" ]
+  deps = [
+    ":cpp",
+    "//src/lib/files",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+renamed_binary("logging-cpp-from-void_packaged") {
+  testonly = true
+  source = "$root_out_dir/logging-cpp-from-void"
+  source_deps = [ ":logging-cpp-from-void" ]
+  dest = "test/logging-cpp-from-void"
+}
+
+fuchsia_component_manifest("from_void_test_root_manifest") {
+  testonly = true
+  component_name = "from_void_test_root"
+  manifest = "meta/from_void_test_root.cml"
+}
+
+fuchsia_component("from_void_test_root") {
+  testonly = true
+  cm_label = ":from_void_test_root_manifest"
+  deps = [ ":logging-cpp-from-void_packaged" ]
+}
+
+fuchsia_component_manifest("logging-cpp-from-void-test_manifest") {
+  testonly = true
+  component_name = "logging-cpp-from-void-test"
+  manifest = "meta/logging_cpp_from_void_test.cml"
+}
+
+fuchsia_test_component("logging-cpp-from-void-test") {
+  cm_label = ":logging-cpp-from-void-test_manifest"
+}
+
+fuchsia_test_package("logging-cpp-tests") {
+  package_name = "logging-cpp-tests-gn"
+  test_components = [
+    ":logging-cpp-unittests",
+    ":logging-cpp-unittests-structured",
+    ":logging-cpp-from-void-test",
+  ]
+  deps = [ ":from_void_test_root" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "FATAL"
+    }
   }
 }

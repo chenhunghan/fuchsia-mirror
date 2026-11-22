@@ -9,13 +9,13 @@
 #include <lib/zbi-format/zbi.h>
 #include <lib/zbitl/items/cpu-topology.h>
 #include <lib/zbitl/view.h>
+#include <stdio.h>
 #include <zircon/compiler.h>
 
 #include <ktl/optional.h>
 #include <ktl/string_view.h>
 #include <phys/runtime/main.h>
 #include <phys/runtime/riscv64/info.h>
-#include <phys/stdio.h>
 
 #include "riscv64.h"
 
@@ -87,7 +87,7 @@ void ArchSetUpZbi(EarlyBootZbi zbi) {
       continue;
     }
     ktl::string_view isa_string{&strtab[strtab_index]};
-    debugf("%s: hart %02" PRIu64 " ISA string: %s\n", ProgramName(), arch_info.hart_id,
+    printf("%s: hart %02" PRIu64 " ISA string: %s\n", ProgramName(), arch_info.hart_id,
            isa_string.data());
     if (features) {
       *features &= arch::RiscvFeatures{}.SetMany(isa_string);

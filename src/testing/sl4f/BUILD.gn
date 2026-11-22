@@ -383,6 +383,6 @@ group("tests") {
   deps = [
     ":service-tests",
     ":sl4f-tests",
-    "proxy:data-proxy-test",
+    "proxy:tests",
   ]
 }

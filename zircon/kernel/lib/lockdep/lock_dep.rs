@@ -4,14 +4,53 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Lock dependency graph diagnostics and console commands.
+//! Kernel lock dependency tracking runtime, diagnostics, and console commands.
 
-use core::ffi::{CStr, c_char};
+mod lock_dep_ffi;
+
+use crate::backtrace::Backtrace;
+use crate::kernel::event::Event;
+use crate::kernel::percpu::PerCpu;
+use crate::kernel::relaxed_atomic::RelaxedAtomicBool;
+use crate::kernel::thread::{self, Interruptible, LOW_PRIORITY, Thread};
+use crate::ksync_kernel::TrackedMutex;
+use crate::platform_rs::timer::{DurationMono, InstantMono};
+use core::ffi::{CStr, c_void};
+use core::pin::Pin;
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::Ordering;
+use debug::kernel_oops;
+use init::{LK_INIT_LEVEL_EARLIEST, LK_INIT_LEVEL_THREADING, LkInitLevel};
+use kprint::{kprint, kprintln};
+use ksync::KMutex;
+use lazy_init::{LazyInit, NoCheck};
+use lock_dep_ffi::cpp_lockdep_thread_lock_state_init;
+use lockdep::{LOCK_FLAGS_IRQ_SAFE, LockFlags};
+use pin_init::pin_init;
 use zr::OpaqueFacade;
+use zx_status::Status;
+use zx_types::ZX_MAX_NAME_LEN;
 
 const MAX_LOCK_DEPENDENCIES: usize = 193;
+
+/// Atomic flag used to indicate that a loop detection pass needs to be performed.
+///
+/// Relaxed ordering suffices because `LockDependencySet` updates use relaxed atomics and the
+/// polling loop-detector thread does not depend on any non-atomic stores published via this flag.
+static LOOP_DETECTION_GRAPH_IS_DIRTY: RelaxedAtomicBool = RelaxedAtomicBool::new(false);
+
+/// Event to wait on the completion of a triggered loop detection pass. This is
+/// primarily to bound the async loop detection report when testing.
+static DETECTION_COMPLETE_EVENT: LazyInit<Event, NoCheck> = LazyInit::uninit();
+
+/// Synchronizes the access to the loop detection completion event.
+#[ksync::guarded]
+struct DetectionCompleteLock {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+}
+
+static DETECTION_COMPLETE_LOCK: LazyInit<DetectionCompleteLock, NoCheck> = LazyInit::uninit();
 
 /// Opaque representation of C++ `lockdep::ValidatorLockClassState`.
 #[repr(C, align(8))]
@@ -19,70 +58,35 @@ pub struct ValidatorLockClassState {
     _facade: OpaqueFacade,
 }
 
-unsafe extern "C" {
-    /// Returns the first `ValidatorLockClassState` in the global lock class list, or null.
-    ///
-    /// # Safety
-    ///
-    /// Always safe to call; returns the head of the static lock class list (or null).
-    fn cpp_lockdep_iter_begin() -> *mut ValidatorLockClassState;
-    /// Returns the next `ValidatorLockClassState` after `state` in the global lock class list, or
-    /// null.
-    ///
-    /// # Safety
-    ///
-    /// `state` must be a non-null pointer previously returned by `cpp_lockdep_iter_begin` or
-    /// `cpp_lockdep_iter_next`.
-    fn cpp_lockdep_iter_next(state: *mut ValidatorLockClassState) -> *mut ValidatorLockClassState;
-    /// Returns the static null-terminated name string for `state`.
-    ///
-    /// # Safety
-    ///
-    /// `state` must point to a valid `ValidatorLockClassState`.
-    fn cpp_lockdep_state_name(state: *const ValidatorLockClassState) -> *const c_char;
-    /// Returns a pointer to `state`'s `LockDependencySet` array.
-    ///
-    /// # Safety
-    ///
-    /// `state` must point to a valid `ValidatorLockClassState`.
-    fn cpp_lockdep_state_dependency_set(
-        state: *const ValidatorLockClassState,
-    ) -> *const [AtomicPtr<ValidatorLockClassState>; MAX_LOCK_DEPENDENCIES];
-    /// Returns the root of the connected set containing `state`.
-    ///
-    /// # Safety
-    ///
-    /// `state` must point to a valid `ValidatorLockClassState`.
-    fn cpp_lockdep_state_connected_set(
-        state: *mut ValidatorLockClassState,
-    ) -> *mut ValidatorLockClassState;
-    /// Triggers an asynchronous loop detection pass.
-    ///
-    /// # Safety
-    ///
-    /// Always safe to call; sets the atomic dirty flag to trigger loop detection.
-    fn cpp_lockdep_trigger_loop_detection();
-}
-
 impl ValidatorLockClassState {
+    /// Returns the `ValidatorLockClassState` instance for the given lock class ID
+    /// (`ValidatorLockClassState::Get(id)`).
+    #[inline]
+    pub fn get(id: &Self) -> &Self {
+        id
+    }
+
     /// Returns the name of this lock class (`ValidatorLockClassState::name()`).
     pub fn name(&self) -> &CStr {
         // SAFETY: `self` is a valid `ValidatorLockClassState` whose name is a static C string.
-        unsafe { CStr::from_ptr(cpp_lockdep_state_name(self)) }
+        unsafe { CStr::from_ptr(lock_dep_ffi::cpp_lockdep_state_name(self)) }
     }
 
     /// Returns the type name of the lock class for the given lock class ID
     /// (`ValidatorLockClassState::GetName(id)`).
     pub fn get_name(id: &Self) -> &CStr {
-        // SAFETY: `id` is a valid `ValidatorLockClassState` whose name is a static C string.
-        unsafe { CStr::from_ptr(cpp_lockdep_state_name(id)) }
+        Self::get(id).name()
     }
 
     /// Returns the root of the connected set containing `self`
     /// (`ValidatorLockClassState::connected_set()`).
     pub fn connected_set(&self) -> *const Self {
-        // SAFETY: `self` is a valid `ValidatorLockClassState`.
-        unsafe { cpp_lockdep_state_connected_set(ptr::from_ref(self).cast_mut()).cast_const() }
+        // SAFETY: `self` is a valid `ValidatorLockClassState`; `OpaqueFacade` wraps `UnsafeCell`,
+        // permitting interior mutation of the relaxed-atomic disjoint-set parent in `FindSet`.
+        unsafe {
+            lock_dep_ffi::cpp_lockdep_state_connected_set(ptr::from_ref(self).cast_mut())
+                .cast_const()
+        }
     }
 
     /// Returns an iterator over all registered `ValidatorLockClassState` instances
@@ -90,7 +94,7 @@ impl ValidatorLockClassState {
     pub fn iter() -> impl Iterator<Item = &'static Self> {
         // SAFETY: `cpp_lockdep_iter_begin` returns the head of the static linked list of lock
         // classes (or null).
-        let mut curr = unsafe { cpp_lockdep_iter_begin() };
+        let mut curr = unsafe { lock_dep_ffi::cpp_lockdep_iter_begin() };
         core::iter::from_fn(move || {
             let state = curr;
             if state.is_null() {
@@ -98,7 +102,7 @@ impl ValidatorLockClassState {
             } else {
                 // SAFETY: `state` is a valid node in the static linked list of lock classes.
                 unsafe {
-                    curr = cpp_lockdep_iter_next(state);
+                    curr = lock_dep_ffi::cpp_lockdep_iter_next(state);
                     Some(&*state)
                 }
             }
@@ -108,9 +112,8 @@ impl ValidatorLockClassState {
     /// Returns an iterator over the dependency set of `self`
     /// (`ValidatorLockClassState::dependency_set()`).
     pub fn dependency_set(&self) -> impl Iterator<Item = &'static Self> + '_ {
-        // SAFETY: `cpp_lockdep_state_dependency_set` returns a non-null pointer to the lock
-        // class's `LockDependencySet` (`[AtomicPtr<ValidatorLockClassState>; 193]`).
-        let set = unsafe { &*cpp_lockdep_state_dependency_set(self) };
+        // SAFETY: `self` is a valid `ValidatorLockClassState`.
+        let set = unsafe { lock_dep_ffi::cpp_lockdep_state_dependency_set(self) };
         set.iter().filter_map(|entry| {
             let ptr = entry.load(Ordering::Relaxed);
             // SAFETY: Any non-null entry in `LockDependencySet` points to a valid `'static`
@@ -120,46 +123,278 @@ impl ValidatorLockClassState {
     }
 }
 
-/// An opaque type representing the C++ `lockdep::ThreadLockState` class.
-#[cfg(with_lock_dep)]
-#[repr(transparent)]
-pub struct ThreadLockState(zr::Opaque<percpu_bindings::lockdep_ThreadLockState>);
+/// Opaque representation of C++ `lockdep::AcquiredLockEntry`.
+#[repr(C, align(8))]
+pub struct AcquiredLockEntry {
+    _facade: OpaqueFacade,
+}
 
-#[cfg(with_lock_dep)]
+impl AcquiredLockEntry {
+    /// Returns the lock class ID for this acquired lock entry (`AcquiredLockEntry::id()`).
+    ///
+    /// # Safety
+    ///
+    /// `self` must have a non-null lock class ID pointing to a valid [`ValidatorLockClassState`].
+    pub unsafe fn id(&self) -> &ValidatorLockClassState {
+        // SAFETY: `self` is a valid `AcquiredLockEntry`, and the caller guarantees its lock class
+        // ID points to a valid `ValidatorLockClassState`.
+        unsafe { lock_dep_ffi::cpp_lockdep_entry_id(self) }
+    }
+
+    /// Returns the external/address order recorded for this acquired lock entry
+    /// (`AcquiredLockEntry::order()`).
+    pub fn order(&self) -> usize {
+        // SAFETY: `self` is a valid `AcquiredLockEntry`.
+        unsafe { lock_dep_ffi::cpp_lockdep_entry_order(self) }
+    }
+}
+
+/// Representation of C++ `lockdep::LockResult` (`enum class LockResult : uint8_t`).
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub struct LockResult(u8);
+
+impl LockResult {
+    /// Returns a string representation of the given `LockResult` (`lockdep::ToString(result)`).
+    pub fn to_cstr(self) -> &'static CStr {
+        // SAFETY: `cpp_lockdep_result_to_string` returns a static NUL-terminated string literal
+        // for every `u8` value.
+        unsafe { CStr::from_ptr(lock_dep_ffi::cpp_lockdep_result_to_string(self)) }
+    }
+}
+
+/// An opaque type representing the C++ `lockdep::ThreadLockState` class.
+#[repr(transparent)]
+pub struct ThreadLockState(zr::Opaque<[usize; 2]>);
+
 impl ThreadLockState {
     /// Constructs a default `ThreadLockState` in place.
     #[inline]
     pub fn init() -> impl pin_init::PinInit<Self, core::convert::Infallible> {
+        // SAFETY: `cpp_lockdep_thread_lock_state_init` placement-constructs a valid
+        // `lockdep::ThreadLockState` in place in the provided uninitialized slot.
         zr::pin_init_ffi!(cpp_lockdep_thread_lock_state_init)
+    }
+
+    /// Returns a raw mutable pointer to the underlying `ThreadLockState` storage.
+    #[inline]
+    const fn as_mut_ptr(&self) -> *mut Self {
+        self.0.get().cast()
     }
 }
 
-#[cfg(with_lock_dep)]
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    fn cpp_lockdep_thread_lock_state_init(out: *mut core::mem::MaybeUninit<ThreadLockState>);
-    fn cpp_lockdep_system_init_thread_lock_state(state: *mut ThreadLockState);
+impl Drop for ThreadLockState {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: `self` holds an initialized C++ `lockdep::ThreadLockState` being destroyed
+        // exactly once with exclusive access.
+        unsafe { lock_dep_ffi::cpp_lockdep_thread_lock_state_destroy(self.as_mut_ptr()) };
+    }
 }
 
-/// Initializes an instance of [`ThreadLockState`] (`lockdep::SystemInitThreadLockState`).
+/// Loop detection thread. Traverses the lock dependency graph to find circular
+/// lock dependencies.
+extern "C" fn lock_dep_thread(_arg: *mut c_void) -> i32 {
+    loop {
+        // Check to see if our graph has been flagged as dirty once every 2 seconds.
+        let _ = thread::sleep_relative(DurationMono::from_seconds(2));
+
+        if LOOP_DETECTION_GRAPH_IS_DIRTY.load() {
+            LOOP_DETECTION_GRAPH_IS_DIRTY.store(false);
+            // SAFETY: Called solely from the single dedicated `lockdep` loop-detection thread
+            // (spawned at `LK_INIT_LEVEL_THREADING`, after `lock_dep_event_init` at
+            // `LK_INIT_LEVEL_EARLIEST`), satisfying `lockdep::LoopDetectionPass`'s non-reentrancy
+            // requirement and guaranteeing `DETECTION_COMPLETE_EVENT` is initialized.
+            unsafe {
+                lock_dep_ffi::cpp_lockdep_loop_detection_pass();
+                DETECTION_COMPLETE_EVENT.get_unchecked().signal();
+            }
+        }
+    }
+}
+
+fn lock_dep_event_init(_level: LkInitLevel) {
+    // SAFETY: `LK_INIT_LEVEL_EARLIEST` runs once on CPU 0 in `lk_main` with interrupts disabled
+    // before `bootstrap2`, kernel threads, or secondary CPUs exist.
+    unsafe {
+        let Ok(()) = Pin::static_ref(&DETECTION_COMPLETE_EVENT).init_pin(Event::init_unsignaled());
+        let Ok(()) = Pin::static_ref(&DETECTION_COMPLETE_LOCK)
+            .init_pin(pin_init!(DetectionCompleteLock { lock <- KMutex::init() }));
+    }
+}
+
+init::lk_init_hook!(lockdep_event, lock_dep_event_init, LK_INIT_LEVEL_EARLIEST);
+
+fn lock_dep_init(_level: LkInitLevel) {
+    // SAFETY: `c"lockdep"` is a valid NUL-terminated C string, `lock_dep_thread` is safe to run on
+    // a new kernel thread with a null argument, and `LK_INIT_LEVEL_THREADING` runs in blockable
+    // thread context with no active `ChainLockTransaction` and before `t` can be started elsewhere.
+    unsafe {
+        let t = thread::create_with_priority(
+            c"lockdep".as_ptr(),
+            lock_dep_thread,
+            ptr::null_mut(),
+            LOW_PRIORITY,
+        )
+        .expect("failed to create lockdep thread");
+        t.detach_and_resume().expect("failed to resume lockdep thread");
+    }
+}
+
+init::lk_init_hook!(lockdep, lock_dep_init, LK_INIT_LEVEL_THREADING);
+
+/// Waits for a loop detection pass to complete, or times out. This is exposed for tests.
 ///
 /// # Safety
 ///
-/// Must only be called once during single-threaded construction before `state` is accessed
-/// concurrently.
-#[cfg(with_lock_dep)]
-#[inline]
-pub unsafe fn system_init_thread_lock_state(state: &ThreadLockState) {
-    // SAFETY: `state.0.get()` yields a valid mutable pointer via `zr::Opaque` (`UnsafeCell`) to
-    // `#[repr(transparent)]` `ThreadLockState`, and the caller guarantees exclusive access during
-    // construction.
-    unsafe { cpp_lockdep_system_init_thread_lock_state(state.0.get().cast::<ThreadLockState>()) };
+/// Must only be called in blockable thread context after `LK_INIT_LEVEL_EARLIEST`
+/// (`lock_dep_event_init`) and threading initialization have completed.
+unsafe fn trigger_and_wait_for_loop_detection(deadline: InstantMono) -> Result<(), Status> {
+    // SAFETY: Caller guarantees `LK_INIT_LEVEL_EARLIEST` (`lock_dep_event_init`) has completed.
+    ksync::lock!(let _guard = unsafe { DETECTION_COMPLETE_LOCK.get_unchecked() }.lock_lock());
+    // SAFETY: As above.
+    let _ = unsafe { DETECTION_COMPLETE_EVENT.get_unchecked() }.unsignal();
+    system_trigger_loop_detection();
+    // SAFETY: As above.
+    unsafe { DETECTION_COMPLETE_EVENT.get_unchecked() }.wait_deadline(deadline, Interruptible::Yes)
 }
 
-/// Triggers an asynchronous loop detection pass (`lockdep::SystemTriggerLoopDetection()`).
-pub fn system_trigger_loop_detection() {
-    // SAFETY: Safe FFI call into `lockdep::SystemTriggerLoopDetection`.
-    unsafe { cpp_lockdep_trigger_loop_detection() };
+/// Prints a kernel oops when a normal lock order violation is detected
+/// (`lockdep::SystemLockValidationError`).
+///
+/// # Safety
+///
+/// - `lock_entry` and `conflicting_entry` must have non-null lock class IDs pointing to valid
+///   [`ValidatorLockClassState`] instances.
+/// - The calling CPU must have a valid, initialized current `Thread`.
+/// - `caller_frame` must either lie outside the calling thread's stack bounds (such as null) or be
+///   a valid, aligned, initialized frame pointer on the calling thread's stack.
+#[cold]
+unsafe fn system_lock_validation_error(
+    lock_entry: &AcquiredLockEntry,
+    conflicting_entry: &AcquiredLockEntry,
+    _state: &ThreadLockState,
+    caller_address: *const c_void,
+    caller_frame: *const c_void,
+    result: LockResult,
+) {
+    // SAFETY: Caller guarantees the calling CPU has a valid, initialized current `Thread`.
+    let current_thread = unsafe { &*thread::current_get() };
+
+    let mut owner_name = [0u8; ZX_MAX_NAME_LEN];
+    current_thread.owner_name(&mut owner_name);
+    let owner_name = thread::name_buf_as_bytes(&owner_name);
+
+    let pid = current_thread.pid();
+    let tid = current_thread.tid();
+
+    let thread_name = current_thread.name();
+    kernel_oops!(
+        "Lock validation failed for thread {:p} pid {:u} tid {:u} ({:s}:{:s}):\n",
+        ptr::from_ref(current_thread),
+        pid,
+        tid,
+        owner_name,
+        thread_name.as_bytes(),
+    );
+    kprintln!("Reason: {:s}", result.to_cstr());
+    // SAFETY: Caller guarantees `lock_entry` and `conflicting_entry` have valid lock class IDs.
+    let (bad_id, conflicting_id) = unsafe { (lock_entry.id(), conflicting_entry.id()) };
+    kprintln!(
+        "Bad lock: name={:s} order={:u}",
+        ValidatorLockClassState::get_name(bad_id),
+        lock_entry.order(),
+    );
+    kprintln!(
+        "Conflict: name={:s} order={:u}",
+        ValidatorLockClassState::get_name(conflicting_id),
+        conflicting_entry.order(),
+    );
+    kprintln!("caller={:p} frame={:p}", caller_address, caller_frame);
+
+    let mut bt = Backtrace::new();
+    // SAFETY: Caller guarantees `caller_frame` is either outside stack bounds or a valid, aligned,
+    // initialized frame pointer on the calling thread's stack.
+    unsafe { thread::current_get_backtrace_with_fp(caller_frame.expose_provenance(), &mut bt) };
+    bt.print();
+    kprint!("\n");
+}
+
+/// Issues a kernel panic when a fatal lock order violation is detected
+/// (`lockdep::SystemLockValidationFatal`).
+///
+/// # Safety
+///
+/// `lock_entry` must have a non-null lock class ID pointing to a valid
+/// [`ValidatorLockClassState`].
+#[cold]
+unsafe fn system_lock_validation_fatal(
+    lock_entry: &AcquiredLockEntry,
+    _state: &ThreadLockState,
+    caller_address: *const c_void,
+    caller_frame: *const c_void,
+    result: LockResult,
+) -> ! {
+    // SAFETY: Caller guarantees `lock_entry` has a valid lock class ID.
+    let lock_id = unsafe { lock_entry.id() };
+    panic!(
+        "Fatal lock violation detected! name={}, reason={}, pc={:p}, stack frame={:p}",
+        zr::from_utf8_lossy(ValidatorLockClassState::get_name(lock_id).to_bytes()),
+        zr::from_utf8_lossy(result.to_cstr().to_bytes()),
+        caller_address,
+        caller_frame,
+    );
+}
+
+/// Prints a kernel oops when a circular lock dependency is detected
+/// (`lockdep::SystemCircularLockDependencyDetected`).
+#[cold]
+fn system_circular_lock_dependency_detected(connected_set_root: &ValidatorLockClassState) {
+    kernel_oops!("Circular lock dependency detected:\n");
+
+    for node in ValidatorLockClassState::iter() {
+        if ptr::eq(node.connected_set(), connected_set_root) {
+            for dependency_id in node.dependency_set() {
+                let dependency = ValidatorLockClassState::get(dependency_id);
+                if ptr::eq(dependency.connected_set(), connected_set_root) {
+                    kprintln!("  {:s} -> {:s}", dependency.name(), node.name());
+                }
+            }
+        }
+    }
+
+    kprint!("\n");
+}
+
+/// Returns a pointer to the [`ThreadLockState`] instance for the current thread when in thread
+/// context or for the current CPU when in irq context (`lockdep::SystemGetThreadLockState`).
+///
+/// # Safety
+///
+/// - When `(lock_flags & LOCK_FLAGS_IRQ_SAFE) != 0`, the current CPU's `PerCpu` pointer must be
+///   initialized.
+/// - Otherwise, the calling CPU must have a valid, initialized current `Thread`.
+#[inline]
+unsafe fn system_get_thread_lock_state(lock_flags: LockFlags) -> *mut ThreadLockState {
+    if (lock_flags & LOCK_FLAGS_IRQ_SAFE) != 0 {
+        PerCpu::get_current().lock_state.as_mut_ptr()
+    } else {
+        // SAFETY: Caller guarantees the calling CPU has a valid, initialized current `Thread`.
+        unsafe { Thread::lock_state_ptr(thread::current_get()) }
+    }
+}
+
+/// Initializes an instance of [`ThreadLockState`] (`lockdep::SystemInitThreadLockState`).
+#[inline]
+pub fn system_init_thread_lock_state(_state: &ThreadLockState) {}
+
+/// There is no explicit event based triggering mechanism for lockdep when used
+/// in the kernel. The loop detection thread will simply poll the "dirty" flag
+/// once every 2 seconds, clearing the flag and performing a check if the flag
+/// is set.
+#[inline]
+fn system_trigger_loop_detection() {
+    LOOP_DETECTION_GRAPH_IS_DIRTY.store(true);
 }
 
 #[cfg(console_enabled)]

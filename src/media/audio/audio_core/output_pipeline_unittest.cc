@@ -15,6 +15,7 @@
 #include "src/media/audio/lib/clock/clone_mono.h"
 #include "src/media/audio/lib/clock/testing/clock_test.h"
 #include "src/media/audio/lib/effects_loader/testing/test_effects_v1.h"
+#include "src/media/audio/lib/processing/filter.h"
 
 using testing::Each;
 using testing::Eq;
@@ -997,6 +998,75 @@ TEST_F(OutputPipelineTest, PipelineWithEffectsV2) {
       CheckBuffer(loopback_buf->payload(), 1.0, frames_remaining * 2);
     }
   }
+}
+
+// Verifies OutputPipelineImpl::AddInput selects HighPassWindowedSinc by default for ULTRASOUND.
+TEST_F(OutputPipelineTest, AddInputUltrasoundSelectsHighPassWindowedSinc) {
+  const Format k96kFormat =
+      Format::Create(fuchsia::media::AudioStreamType{
+                         .sample_format = fuchsia::media::AudioSampleFormat::FLOAT,
+                         .channels = 2,
+                         .frames_per_second = 96000,
+                     })
+          .take_value();
+  const TimelineFunction k96kTransform = TimelineFunction(
+      TimelineRate(Fixed(k96kFormat.frames_per_second()).raw_value(), zx::sec(1).to_nsecs()));
+
+  PipelineConfig::MixGroup root{
+      .name = "linearize",
+      .input_streams =
+          {
+              RenderUsage::ULTRASOUND,
+              RenderUsage::MEDIA,
+          },
+      .loopback = false,
+      .output_rate = 96000,
+      .output_channels = 2,
+  };
+  auto pipeline_config = PipelineConfig(root);
+  auto volume_curve = VolumeCurve::DefaultForMinGain(VolumeCurve::kDefaultGainForMinVolume);
+  auto pipeline = std::make_shared<OutputPipelineImpl>(pipeline_config, volume_curve,
+                                                       nullptr /* EffectsLoaderV2 */, 128,
+                                                       k96kTransform, device_clock());
+
+  auto make_96k_stream = [&](StreamUsage usage) {
+    auto stream = std::make_shared<testing::FakeStream>(k96kFormat, context().clock_factory());
+    stream->set_usage_mask({usage});
+    stream->set_gain_db(0.0);
+    stream->timeline_function()->Update(k96kTransform);
+    return stream;
+  };
+
+  // RenderUsage::ULTRASOUND with Default hint selects HighPassWindowedSinc (28-frame filter width).
+  const auto ultrasound_usage = StreamUsage::WithRenderUsage(RenderUsage::ULTRASOUND);
+  auto ultrasound_stream = make_96k_stream(ultrasound_usage);
+  auto ultrasound_mixer = pipeline->AddInput(ultrasound_stream, ultrasound_usage);
+  ASSERT_NE(ultrasound_mixer, nullptr);
+  EXPECT_EQ(ultrasound_mixer->pos_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracHighPassSideLength - 1));
+  EXPECT_EQ(ultrasound_mixer->neg_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracHighPassSideLength - 1));
+  pipeline->RemoveInput(*ultrasound_stream);
+
+  // RenderUsage::MEDIA with Default hint selects standard WindowedSinc (14-frame filter width).
+  const auto media_usage = StreamUsage::WithRenderUsage(RenderUsage::MEDIA);
+  auto media_stream = make_96k_stream(media_usage);
+  auto media_mixer = pipeline->AddInput(media_stream, media_usage);
+  ASSERT_NE(media_mixer, nullptr);
+  EXPECT_EQ(media_mixer->pos_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracSideLength - 1));
+  EXPECT_EQ(media_mixer->neg_filter_width(),
+            Fixed::FromRaw(media_audio::SincFilter::kFracSideLength - 1));
+  pipeline->RemoveInput(*media_stream);
+
+  // Explicit sampler_hint on RenderUsage::ULTRASOUND is respected.
+  auto ultrasound_override_stream = make_96k_stream(ultrasound_usage);
+  auto ultrasound_override_mixer = pipeline->AddInput(
+      ultrasound_override_stream, ultrasound_usage, std::nullopt, Mixer::Resampler::SampleAndHold);
+  ASSERT_NE(ultrasound_override_mixer, nullptr);
+  EXPECT_EQ(ultrasound_override_mixer->pos_filter_width(), kHalfFrame);
+  EXPECT_EQ(ultrasound_override_mixer->neg_filter_width(), kHalfFrame - Fixed::FromRaw(1));
+  pipeline->RemoveInput(*ultrasound_override_stream);
 }
 
 }  // namespace

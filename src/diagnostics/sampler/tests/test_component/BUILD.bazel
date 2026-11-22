@@ -1,0 +1,59 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "single_counter_bin",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/diagnostics/sampler/tests/fidl:fuchsia.samplertestcontroller_rust",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "single_counter_bin",
+)
+
+fx_component_manifest(
+    name = "single_counter_test_component_manifest",
+    testonly = True,
+    component_name = "single_counter_test_component",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/single-counter-test-component.cml",
+)
+
+fx_component(
+    name = "single_counter_test_component",
+    testonly = True,
+    compiled_manifest = ":single_counter_test_component_manifest",
+    visibility = ["//src/diagnostics/sampler/testing/realm-factory:__pkg__"],
+    deps = [":packaged_bin"],
+)

@@ -51,7 +51,7 @@ the indication is expected to be source-breaking.
 
 ## Design
 
-### Terminology
+### Terminology {#terminology}
 
 A FIDL type is either a **value** type or a **resource** type. Resource types
 include:
@@ -343,7 +343,7 @@ and Rust have this behaviour, as well as the IO monad in Haskell.
 
 <!-- link labels -->
 [api-council-values]: /docs/contribute/governance/api_council.md#values
-[compat-resource]: /docs/development/languages/fidl/guides/compatibility/README.md#value-vs-resource
+[compat-resource]: /docs/development/languages/fidl/guides/compatibility/README.md
 [rfc-0033]: /docs/contribute/governance/rfcs/0033_handling_unknown_fields_strictness.md
 [rfc-0052]: /docs/contribute/governance/rfcs/0052_type_aliasing_named_types.md
 [rfc-0058]: /docs/contribute/governance/rfcs/0058_deprecated_attribute.md

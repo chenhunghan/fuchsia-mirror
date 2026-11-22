@@ -115,6 +115,7 @@ pub enum FsckWarning {
     OrphanedExtendedAttributeRecord(u64, u64),
     OversizedInlineSymlink(u64, u64),
     ProjectUsageInconsistent(u64, ProjectId, (i64, i64), (i64, i64)),
+    ProjectUsageOverflow(u64, ProjectId, u64, u64),
 }
 
 impl FsckWarning {
@@ -181,6 +182,12 @@ impl FsckWarning {
                     ({stored_bytes}, {stored_nodes}) found ({used_bytes}, {used_nodes})"
                 )
             }
+            FsckWarning::ProjectUsageOverflow(store_id, project_id, object_id, size) => {
+                format!(
+                    "Project id {project_id} in store {store_id} overflowed usage tracking; \
+                    largest object was {object_id} with size {size}"
+                )
+            }
         }
     }
 
@@ -221,6 +228,9 @@ impl FsckWarning {
             }
             FsckWarning::ProjectUsageInconsistent(store_id, project_id, stored, used) => {
                 warn!(project_id, store_id, stored:?, used:?; "Project Inconsistent");
+            }
+            FsckWarning::ProjectUsageOverflow(store_id, project_id, object_id, size) => {
+                warn!(project_id, store_id, object_id, size; "Project usage overflowed");
             }
         }
     }
@@ -936,6 +946,7 @@ mod tests {
             FsckWarning::OrphanedExtendedAttributeRecord(10, 20),
             FsckWarning::OversizedInlineSymlink(10, 20),
             FsckWarning::ProjectUsageInconsistent(10, proj_id, (10, 1), (20, 2)),
+            FsckWarning::ProjectUsageOverflow(10, proj_id, 20, 100),
         ];
         assert!(
             FsckWarning::GraveyardRecordForAbsentObject(10, 20)

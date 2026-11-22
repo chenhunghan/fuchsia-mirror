@@ -81,7 +81,7 @@ class Style:
 @dataclass
 class Use:
     name: str
-    func: Tuple[Callable[[IO, List[ScopedIdentifier]], None]]
+    func: Tuple[Callable[[IO[str], List[ScopedIdentifier]], None]]
 
-    def __call__(self, f: IO, idents: List[ScopedIdentifier]):
+    def __call__(self, f: IO[str], idents: List[ScopedIdentifier]):
         return self.func[0](f, idents)

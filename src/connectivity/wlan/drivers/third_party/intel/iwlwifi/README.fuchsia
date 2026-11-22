@@ -1,5 +1,11 @@
-License: BSD
-License File: LICENSE
+Name: Intel iwlwifi
+URL: https://fuchsia.googlesource.com/drivers/wlan/intel/iwlwifi/
+Revision: 31fee9e7a1af37fb601bd2b5ae36b6e8244bc347
+Security Critical: yes
 
-Modifications:
- - added README.fuchsia and kept BSD license
+License: BSD-3-Clause, ISC
+License File: LICENSE
+Generated Notice File: NOTICE.fuchsia
+
+Local Modifications:
+  - added README.fuchsia and kept BSD license

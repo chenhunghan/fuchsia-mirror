@@ -2,17 +2,129 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_fuchsia//fuchsia:assembly.bzl", "fuchsia_prebuilt_package")
-
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load(
+    "@rules_fuchsia//fuchsia:defs.bzl",
+    "fuchsia_cc_driver",
+    "fuchsia_cc_test",
+    "fuchsia_component_manifest",
+    "fuchsia_driver_bind_bytecode",
+    "fuchsia_driver_component",
+    "fuchsia_package",
+    "fuchsia_structured_config_cpp_elf_lib",
+    "fuchsia_unittest_package",
 )
 
-fuchsia_prebuilt_package(
-    name = "dwc2",
-    archive = "@gn_targets//src/devices/usb/drivers/dwc2:package",
-    drivers = [
-        "meta/dwc2.cm",
+package(default_applicable_licenses = ["//:license"])
+
+fuchsia_driver_bind_bytecode(
+    name = "dwc2-bind",
+    output = "dwc2.bindbc",
+    rules = "meta/dwc2.bind",
+    deps = [
+        "@fuchsia_sdk//bind/fuchsia",
+        "@fuchsia_sdk//bind/fuchsia.platform",
     ],
+)
+
+cc_library(
+    name = "common",
+    srcs = [
+        "dwc2.cc",
+    ],
+    hdrs = [
+        "dwc2.h",
+        "usb_dwc_regs.h",
+    ],
+    local_defines = [
+        "ZX_ASSERT_LEVEL=2",
+        "_ALL_SOURCE",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":dwc2-config",
+        "//src/devices/lib/dma-buffer",
+        "//src/devices/usb/lib/fuchsia.hardware.usb.dwc2:fuchsia.hardware.usb.dwc2_cpp",
+        "//src/devices/usb/lib/usb:descriptors",
+        "//src/devices/usb/lib/usb-endpoint:usb-endpoint-server",
+        "@fuchsia_sdk//bind/fuchsia.designware.platform:fuchsia.designware.platform_cc",
+        "@fuchsia_sdk//bind/fuchsia:fuchsia_cc",
+        "@fuchsia_sdk//fidl/fuchsia.boot.metadata:fuchsia.boot.metadata_cpp",
+        "@fuchsia_sdk//fidl/fuchsia.driver.framework:fuchsia.driver.framework_cpp",
+        "@fuchsia_sdk//fidl/fuchsia.hardware.platform.device:fuchsia.hardware.platform.device_cpp",
+        "@fuchsia_sdk//fidl/fuchsia.hardware.usb.dci:fuchsia.hardware.usb.dci_cpp",
+        "@fuchsia_sdk//fidl/fuchsia.hardware.usb.descriptor:fuchsia.hardware.usb.descriptor_cpp",
+        "@fuchsia_sdk//fidl/fuchsia.hardware.usb.phy:fuchsia.hardware.usb.phy_cpp",
+        "@fuchsia_sdk//pkg/async",
+        "@fuchsia_sdk//pkg/driver_component_cpp",
+        "@fuchsia_sdk//pkg/driver_logging_cpp",
+        "@fuchsia_sdk//pkg/driver_metadata_cpp",
+        "@fuchsia_sdk//pkg/driver_mmio_cpp",
+        "@fuchsia_sdk//pkg/driver_platform_device_cpp",
+        "@fuchsia_sdk//pkg/driver_power_cpp",
+        "@fuchsia_sdk//pkg/driver_runtime",
+        "@fuchsia_sdk//pkg/fit",
+        "@fuchsia_sdk//pkg/hwreg",
+        "@fuchsia_sdk//pkg/sync_cpp",
+        "@fuchsia_sdk//pkg/zx",
+    ],
+)
+
+fuchsia_cc_driver(
+    name = "dwc2-driver",
+    output_name = "dwc2",
+    deps = [
+        ":common",
+    ],
+)
+
+fuchsia_component_manifest(
+    name = "manifest",
+    src = "meta/dwc2.cml",
+)
+
+fuchsia_driver_component(
+    name = "component",
+    bind_bytecode = ":dwc2-bind",
+    driver_lib = ":dwc2-driver",
+    manifest = ":manifest",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "dwc2-config",
+    cm_label = ":manifest",
+)
+
+fuchsia_package(
+    name = "dwc2",
+    package_name = "dwc2",
+    components = [":component"],
+    fuchsia_api_level = "HEAD",
+    package_repository_name = "fuchsia.com",
+    visibility = [
+        "//boards/vim3:__pkg__",
+        "//vendor/google/boards:__subpackages__",
+    ],
+)
+
+# Tests
+fuchsia_cc_test(
+    name = "dwc2-test-bin",
+    srcs = [
+        "dwc2-test.cc",
+    ],
+    deps = [
+        ":common",
+        "@com_google_googletest//:gtest_main",
+        "@fuchsia_sdk//pkg/driver_fake_mmio_reg_cpp",
+        "@fuchsia_sdk//pkg/driver_fake_platform_device_cpp",
+        "@fuchsia_sdk//pkg/driver_testing_cpp",
+    ],
+)
+
+fuchsia_unittest_package(
+    name = "dwc2-test",
+    package_name = "dwc2-test",
+    fuchsia_api_level = "HEAD",
+    unit_tests = [":dwc2-test-bin"],
 )

@@ -3,6 +3,8 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:shared_library.bzl", "cc_link_stub_from_ifs_file")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
@@ -23,6 +25,25 @@ fx_cc_library(
         "//vendor:__subpackages__",
     ],
     alwayslink = True,
+)
+
+cc_link_stub_from_ifs_file(
+    name = "lib",
+    ifs_file = "libtee_internal.ifs",
+    stub_name = "liblib",
+    system_provided = True,
+    visibility = ["//src/microfuchsia/tee:__subpackages__"],
+)
+
+# Trusted Applications link against an ifs specification that says that
+# "libtee_internal.so" exports the TEE_ entry points. They actually are exported
+# by the ta_runtime binary, but TAs will have "libtee_internal.so" in their
+# DT_NEEDED list. This is an empty stub library that satisfies this requirement
+# at TA load time.
+fx_cc_shared_library(
+    name = "tee_internal_stub_so",
+    shared_lib_name = "libtee_internal.so",
+    visibility = ["//src/microfuchsia/tee/runtime:__pkg__"],
 )
 
 rustc_library(

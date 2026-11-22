@@ -250,7 +250,21 @@ class Sampler {
   enum class Type : uint8_t {
     kDefault,
     kSincSampler,
+    kHighPassSincSampler,
+    kLowPassSincSampler,
   };
+
+  // Half-amplitude (-6.02 dB) cutoff frequency for the ultrasound high-pass filter.
+  // With a 28-frame side_length Hann-windowed sinc filter at 96 kHz, the transition
+  // band spans 20 kHz to 26 kHz, achieving > 43.9 dB stopband attenuation at <= 20 kHz
+  // (> 50 dB at <= 19 kHz) and unity passband (+-0.06 dB) at >= 26 kHz.
+  static constexpr int32_t kUltrasoundMinFrequencyHz = 23000;
+
+  // Half-amplitude (-6.02 dB) cutoff frequency ceiling for the audio low-pass filter.
+  // With a 28-frame side_length Hann-windowed sinc filter at 96 kHz, the transition
+  // band spans 20 kHz to 26 kHz, achieving > 43.9 dB stopband attenuation at >= 26 kHz
+  // (> 50 dB at >= 27 kHz).
+  static constexpr int32_t kAudioMaxFrequencyHz = 23000;
 
   // Creates an appropriate `Sampler` for a given `source_format` and `dest_format`. If a sampler
   // `type` is specified explicitly (i.e. `type != Type::kDefault`), this will either return a

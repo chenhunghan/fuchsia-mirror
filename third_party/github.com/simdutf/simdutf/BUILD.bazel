@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = [":license"])
+
+license(
+    name = "license",
+    license_kinds = [
+        "@rules_license//licenses/spdx:Apache-2.0",
+        "@rules_license//licenses/spdx:MIT",
+    ],
+    license_text = "src/LICENSE-APACHE",
+)
+
+# LINT.IfChange
+fx_cc_library(
+    name = "simdutf",
+    srcs = ["src/src/simdutf.cpp"],
+    hdrs = glob(["src/include/**/*.h"]),
+    copts = [
+        "-I" + package_name() + "/src/src",
+        "-Wno-extra-semi",
+    ],
+    includes = ["src/include"],
+    # simdutf.cpp textually includes implementation .cpp and .h files under
+    # src/src.
+    textual_hdrs = glob(
+        [
+            "src/src/**/*.cpp",
+            "src/src/**/*.h",
+        ],
+        exclude = ["src/src/simdutf.cpp"],
+    ),
+    visibility = [
+        "//src/connectivity/openthread/third_party/openthread/platform:__pkg__",
+        "//src/connectivity/weave/adaptation:__pkg__",
+        "//src/performance/lib/trace_converters:__pkg__",
+        "//src/sys/fuzzing/realmfuzzer/engine:__pkg__",
+        "//src/sys/fuzzing/realmfuzzer/target:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)

@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        "//examples/fidl/new/canvas/add_line_metered:all",
+        "//examples/fidl/new/canvas/baseline:all",
+        "//examples/fidl/new/canvas/client_requested_draw:all",
+    ],
+    visibility = ["//examples/fidl/new:__pkg__"],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        "//examples/fidl/new/canvas/add_line_metered:hermetic_tests",
+        "//examples/fidl/new/canvas/baseline:hermetic_tests",
+        "//examples/fidl/new/canvas/client_requested_draw:hermetic_tests",
+    ],
+    visibility = ["//examples/fidl/new:__pkg__"],
+)

@@ -9,7 +9,7 @@
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/fdio/fd.h>
-#include <lib/fdio/internal.h>  // IWYU pragma: keep
+#include <lib/fdio/fdio.h>
 #include <lib/fdio/io.h>
 #include <lib/fdio/unsafe.h>
 #include <lib/fidl/cpp/wire/channel.h>
@@ -432,7 +432,7 @@ TEST_F(PagingTest, Write) {
   zx::vmo vmo;
   // TODO: Add fdio_get_vmo_write() to fdio
   fdio_t* io = fdio_unsafe_fd_to_io(file1_fd.get());
-  ASSERT_EQ(ZX_OK, zxio_vmo_get(&io->zxio_storage().io, ZXIO_VMO_READ | ZXIO_VMO_WRITE,
+  ASSERT_EQ(ZX_OK, zxio_vmo_get(fdio_get_zxio(io), ZXIO_VMO_READ | ZXIO_VMO_WRITE,
                                 vmo.reset_and_get_address()));
   fdio_unsafe_release(io);
   ASSERT_TRUE(file1_shared_->WaitForChangedVmoPresence());
@@ -475,8 +475,7 @@ TEST_F(PagingTest, Write) {
 
   // Mmap to another adderss space and verify data in mmaped memory.
   io = fdio_unsafe_fd_to_io(file1_fd.get());
-  ASSERT_EQ(ZX_OK,
-            zxio_vmo_get(&io->zxio_storage().io, ZXIO_VMO_READ, vmo.reset_and_get_address()));
+  ASSERT_EQ(ZX_OK, zxio_vmo_get(fdio_get_zxio(io), ZXIO_VMO_READ, vmo.reset_and_get_address()));
   fdio_unsafe_release(io);
 
   // Map the data and validate the result can be read.
@@ -510,7 +509,7 @@ TEST_F(PagingTest, VmoDirty) {
   zx::vmo vmo;
   // TODO: Add fdio_get_vmo_write() to fdio
   fdio_t* io = fdio_unsafe_fd_to_io(file1_fd.get());
-  ASSERT_EQ(ZX_OK, zxio_vmo_get(&io->zxio_storage().io, ZXIO_VMO_READ | ZXIO_VMO_WRITE,
+  ASSERT_EQ(ZX_OK, zxio_vmo_get(fdio_get_zxio(io), ZXIO_VMO_READ | ZXIO_VMO_WRITE,
                                 vmo.reset_and_get_address()));
   fdio_unsafe_release(io);
 
@@ -547,7 +546,7 @@ TEST_F(PagingTest, WriteError) {
   zx::vmo vmo;
   // TODO: Add fdio_get_vmo_write() to fdio
   fdio_t* io = fdio_unsafe_fd_to_io(file_err_fd.get());
-  ASSERT_EQ(ZX_OK, zxio_vmo_get(&io->zxio_storage().io, ZXIO_VMO_READ | ZXIO_VMO_WRITE,
+  ASSERT_EQ(ZX_OK, zxio_vmo_get(fdio_get_zxio(io), ZXIO_VMO_READ | ZXIO_VMO_WRITE,
                                 vmo.reset_and_get_address()));
   fdio_unsafe_release(io);
   // All writes should be errors.

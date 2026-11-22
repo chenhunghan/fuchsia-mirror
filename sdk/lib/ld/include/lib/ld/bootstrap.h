@@ -6,6 +6,7 @@
 #define LIB_LD_BOOTSTRAP_H_
 
 #include <lib/elfldltl/diagnostics.h>
+#include <lib/elfldltl/init-fini.h>
 #include <lib/elfldltl/memory.h>
 #include <lib/elfldltl/note.h>
 #include <lib/elfldltl/phdr.h>
@@ -137,9 +138,7 @@ class Bootstrap {
 
   // Call f(start, size) for each whole-page region in self_module() containing
   // writable PT_LOAD segment data.
-  void OnWritablePages(std::invocable<uintptr_t, size_t> auto&& f) const
-    requires(std::is_void_v<std::invoke_result_t<decltype(f), uintptr_t, size_t>>)
-  {
+  void OnWritablePages(elfldltl::InvocableAsR<void(uintptr_t, size_t)> auto&& f) const {
     const Module& self = self_module();
     uintptr_t pending_start = self.vaddr_start;
     uintptr_t pending_end = self.vaddr_start;

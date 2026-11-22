@@ -3513,9 +3513,9 @@ class UnknownInteractionsProtocolStrictTwoWayUnionResponse {
   UnknownInteractionsProtocolStrictTwoWayUnionResponse(UnknownInteractionsProtocolStrictTwoWayUnionResponse&&) = default;
   UnknownInteractionsProtocolStrictTwoWayUnionResponse& operator=(UnknownInteractionsProtocolStrictTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -3534,7 +3534,7 @@ class UnknownInteractionsProtocolStrictTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -3556,7 +3556,7 @@ class UnknownInteractionsProtocolStrictTwoWayErrResult {
   UnknownInteractionsProtocolStrictTwoWayErrResult(UnknownInteractionsProtocolStrictTwoWayErrResult&&) = default;
   UnknownInteractionsProtocolStrictTwoWayErrResult& operator=(UnknownInteractionsProtocolStrictTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3582,7 +3582,7 @@ class UnknownInteractionsProtocolStrictTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -3605,7 +3605,7 @@ class UnknownInteractionsProtocolStrictTwoWayFieldsErrResult {
   UnknownInteractionsProtocolStrictTwoWayFieldsErrResult(UnknownInteractionsProtocolStrictTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsProtocolStrictTwoWayFieldsErrResult& operator=(UnknownInteractionsProtocolStrictTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3631,7 +3631,7 @@ class UnknownInteractionsProtocolStrictTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -3653,9 +3653,9 @@ class UnknownInteractionsProtocolStrictTwoWayUnionErrResponse {
   UnknownInteractionsProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsProtocolStrictTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsProtocolStrictTwoWayUnionErrResponse& operator=(UnknownInteractionsProtocolStrictTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -3674,7 +3674,7 @@ class UnknownInteractionsProtocolStrictTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -3696,7 +3696,7 @@ class UnknownInteractionsProtocolStrictTwoWayUnionErrResult {
   UnknownInteractionsProtocolStrictTwoWayUnionErrResult(UnknownInteractionsProtocolStrictTwoWayUnionErrResult&&) = default;
   UnknownInteractionsProtocolStrictTwoWayUnionErrResult& operator=(UnknownInteractionsProtocolStrictTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3728,7 +3728,7 @@ class UnknownInteractionsProtocolStrictTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -3751,7 +3751,7 @@ class UnknownInteractionsProtocolStrictTwoWayTableErrResult {
   UnknownInteractionsProtocolStrictTwoWayTableErrResult(UnknownInteractionsProtocolStrictTwoWayTableErrResult&&) = default;
   UnknownInteractionsProtocolStrictTwoWayTableErrResult& operator=(UnknownInteractionsProtocolStrictTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3783,7 +3783,7 @@ class UnknownInteractionsProtocolStrictTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -3806,7 +3806,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayResult {
   UnknownInteractionsProtocolFlexibleTwoWayResult(UnknownInteractionsProtocolFlexibleTwoWayResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -3832,7 +3832,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -3855,7 +3855,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayFieldsResult {
   UnknownInteractionsProtocolFlexibleTwoWayFieldsResult(UnknownInteractionsProtocolFlexibleTwoWayFieldsResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayFieldsResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayFieldsResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -3881,7 +3881,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayFieldsResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayFieldsResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -3903,9 +3903,9 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionResponse {
   UnknownInteractionsProtocolFlexibleTwoWayUnionResponse(UnknownInteractionsProtocolFlexibleTwoWayUnionResponse&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayUnionResponse& operator=(UnknownInteractionsProtocolFlexibleTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -3924,7 +3924,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -3946,7 +3946,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionResult {
   UnknownInteractionsProtocolFlexibleTwoWayUnionResult(UnknownInteractionsProtocolFlexibleTwoWayUnionResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayUnionResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayUnionResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -3978,7 +3978,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -4001,7 +4001,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayTableResult {
   UnknownInteractionsProtocolFlexibleTwoWayTableResult(UnknownInteractionsProtocolFlexibleTwoWayTableResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayTableResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayTableResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -4033,7 +4033,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayTableResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayTableResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -4056,7 +4056,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayErrResult {
   UnknownInteractionsProtocolFlexibleTwoWayErrResult(UnknownInteractionsProtocolFlexibleTwoWayErrResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayErrResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4091,7 +4091,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4115,7 +4115,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult {
   UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult(UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4150,7 +4150,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4173,9 +4173,9 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse {
   UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse(UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse& operator=(UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4194,7 +4194,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4216,7 +4216,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult {
   UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult(UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4257,7 +4257,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4281,7 +4281,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayTableErrResult {
   UnknownInteractionsProtocolFlexibleTwoWayTableErrResult(UnknownInteractionsProtocolFlexibleTwoWayTableErrResult&&) = default;
   UnknownInteractionsProtocolFlexibleTwoWayTableErrResult& operator=(UnknownInteractionsProtocolFlexibleTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4322,7 +4322,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4345,9 +4345,9 @@ class UnknownInteractionsProtocolStrictEventUnionRequest {
   UnknownInteractionsProtocolStrictEventUnionRequest(UnknownInteractionsProtocolStrictEventUnionRequest&&) = default;
   UnknownInteractionsProtocolStrictEventUnionRequest& operator=(UnknownInteractionsProtocolStrictEventUnionRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictEventUnionRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4366,7 +4366,7 @@ class UnknownInteractionsProtocolStrictEventUnionRequest {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictEventUnionRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4387,9 +4387,9 @@ class UnknownInteractionsProtocolFlexibleEventUnionRequest {
   UnknownInteractionsProtocolFlexibleEventUnionRequest(UnknownInteractionsProtocolFlexibleEventUnionRequest&&) = default;
   UnknownInteractionsProtocolFlexibleEventUnionRequest& operator=(UnknownInteractionsProtocolFlexibleEventUnionRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleEventUnionRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4408,7 +4408,7 @@ class UnknownInteractionsProtocolFlexibleEventUnionRequest {
   ::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleEventUnionRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4429,9 +4429,9 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse {
   UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse(UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse&&) = default;
   UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse& operator=(UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4450,7 +4450,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4472,7 +4472,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayErrResult {
   UnknownInteractionsAjarProtocolStrictTwoWayErrResult(UnknownInteractionsAjarProtocolStrictTwoWayErrResult&&) = default;
   UnknownInteractionsAjarProtocolStrictTwoWayErrResult& operator=(UnknownInteractionsAjarProtocolStrictTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4498,7 +4498,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4521,7 +4521,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult {
   UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult(UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult& operator=(UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4547,7 +4547,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4569,9 +4569,9 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse {
   UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse& operator=(UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4590,7 +4590,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4612,7 +4612,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult {
   UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult(UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult&&) = default;
   UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult& operator=(UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4644,7 +4644,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4667,7 +4667,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult {
   UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult(UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult&&) = default;
   UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult& operator=(UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4699,7 +4699,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4721,9 +4721,9 @@ class UnknownInteractionsAjarProtocolStrictEventUnionRequest {
   UnknownInteractionsAjarProtocolStrictEventUnionRequest(UnknownInteractionsAjarProtocolStrictEventUnionRequest&&) = default;
   UnknownInteractionsAjarProtocolStrictEventUnionRequest& operator=(UnknownInteractionsAjarProtocolStrictEventUnionRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictEventUnionRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4742,7 +4742,7 @@ class UnknownInteractionsAjarProtocolStrictEventUnionRequest {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictEventUnionRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4763,9 +4763,9 @@ class UnknownInteractionsAjarProtocolFlexibleEventUnionRequest {
   UnknownInteractionsAjarProtocolFlexibleEventUnionRequest(UnknownInteractionsAjarProtocolFlexibleEventUnionRequest&&) = default;
   UnknownInteractionsAjarProtocolFlexibleEventUnionRequest& operator=(UnknownInteractionsAjarProtocolFlexibleEventUnionRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolFlexibleEventUnionRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4784,7 +4784,7 @@ class UnknownInteractionsAjarProtocolFlexibleEventUnionRequest {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolFlexibleEventUnionRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4805,9 +4805,9 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse {
   UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse(UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse&&) = default;
   UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse& operator=(UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4826,7 +4826,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4848,7 +4848,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayErrResult {
   UnknownInteractionsClosedProtocolStrictTwoWayErrResult(UnknownInteractionsClosedProtocolStrictTwoWayErrResult&&) = default;
   UnknownInteractionsClosedProtocolStrictTwoWayErrResult& operator=(UnknownInteractionsClosedProtocolStrictTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4874,7 +4874,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4897,7 +4897,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult {
   UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult(UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult& operator=(UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4923,7 +4923,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -4945,9 +4945,9 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse {
   UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse& operator=(UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -4966,7 +4966,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -4988,7 +4988,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult {
   UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult(UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult&&) = default;
   UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult& operator=(UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5020,7 +5020,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5043,7 +5043,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult {
   UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult(UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult&&) = default;
   UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult& operator=(UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5075,7 +5075,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5097,9 +5097,9 @@ class UnknownInteractionsClosedProtocolStrictEventUnionRequest {
   UnknownInteractionsClosedProtocolStrictEventUnionRequest(UnknownInteractionsClosedProtocolStrictEventUnionRequest&&) = default;
   UnknownInteractionsClosedProtocolStrictEventUnionRequest& operator=(UnknownInteractionsClosedProtocolStrictEventUnionRequest&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictEventUnionRequest::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -5118,7 +5118,7 @@ class UnknownInteractionsClosedProtocolStrictEventUnionRequest {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictEventUnionRequest::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -5139,9 +5139,9 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse {
   UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse(UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse&&) = default;
   UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse& operator=(UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -5160,7 +5160,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -5182,7 +5182,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayErrResult {
   UnknownInteractionsDriverProtocolStrictTwoWayErrResult(UnknownInteractionsDriverProtocolStrictTwoWayErrResult&&) = default;
   UnknownInteractionsDriverProtocolStrictTwoWayErrResult& operator=(UnknownInteractionsDriverProtocolStrictTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5208,7 +5208,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5231,7 +5231,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult {
   UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult(UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult& operator=(UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5257,7 +5257,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5279,9 +5279,9 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse {
   UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse& operator=(UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -5300,7 +5300,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -5322,7 +5322,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult {
   UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult(UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult&&) = default;
   UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult& operator=(UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5354,7 +5354,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5377,7 +5377,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult {
   UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult(UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult&&) = default;
   UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult& operator=(UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5409,7 +5409,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5432,7 +5432,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayResult(UnknownInteractionsDriverProtocolFlexibleTwoWayResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -5458,7 +5458,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -5481,7 +5481,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult(UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -5507,7 +5507,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -5529,9 +5529,9 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse {
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -5550,7 +5550,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -5572,7 +5572,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -5604,7 +5604,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -5627,7 +5627,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult(UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -5659,7 +5659,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
@@ -5682,7 +5682,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult(UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -5717,7 +5717,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5741,7 +5741,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult(UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -5776,7 +5776,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5799,9 +5799,9 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse {
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -5820,7 +5820,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -5842,7 +5842,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -5883,7 +5883,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5907,7 +5907,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult {
   UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult(UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult&&) = default;
   UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult& operator=(UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -5948,7 +5948,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -5971,9 +5971,9 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse {
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse&&) = default;
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse& operator=(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -5992,7 +5992,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -6014,7 +6014,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult {
   UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult(UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult&&) = default;
   UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult& operator=(UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6040,7 +6040,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6063,7 +6063,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult {
   UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult(UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult& operator=(UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6089,7 +6089,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6111,9 +6111,9 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse {
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse& operator=(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -6132,7 +6132,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -6154,7 +6154,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult {
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult&&) = default;
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult& operator=(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6186,7 +6186,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6209,7 +6209,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult {
   UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult(UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult&&) = default;
   UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult& operator=(UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6241,7 +6241,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6263,9 +6263,9 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse {
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse&&) = default;
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse& operator=(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -6284,7 +6284,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -6306,7 +6306,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult {
   UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult(UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult&&) = default;
   UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult& operator=(UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6332,7 +6332,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6355,7 +6355,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult {
   UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult(UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult&&) = default;
   UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult& operator=(UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6381,7 +6381,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6403,9 +6403,9 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse {
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse&&) = default;
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse& operator=(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -6424,7 +6424,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kSomeField = 1,  // 0x1
   };
@@ -6446,7 +6446,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult {
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult&&) = default;
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult& operator=(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6478,7 +6478,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
@@ -6501,7 +6501,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult {
   UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult(UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult&&) = default;
   UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult& operator=(UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6533,7 +6533,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult {
   ::test_unknowninteractions::wire::UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2

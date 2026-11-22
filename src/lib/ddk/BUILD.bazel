@@ -28,7 +28,6 @@ fx_cc_library(
         "include/lib/ddk/debug.h",
         "include/lib/ddk/device.h",
         "include/lib/ddk/driver.h",
-        "include/lib/ddk/hw/arch_ops.h",
         "include/lib/ddk/hw/inout.h",
         "include/lib/ddk/io-buffer.h",
         "include/lib/ddk/metadata.h",
@@ -82,7 +81,6 @@ fx_cc_library_headers(
     visibility = [
         "//src/devices/board/drivers/astro:__pkg__",
         "//src/devices/board/drivers/nelson:__pkg__",
-        "//src/devices/board/drivers/qemu-arm64:__pkg__",
         "//src/devices/board/drivers/sherlock:__pkg__",
         "//src/devices/board/drivers/x86:__subpackages__",
         "//src/devices/board/lib/acpi:__subpackages__",
@@ -109,10 +107,7 @@ fx_cc_library_headers(
         "include/lib/ddk/driver.h",
         "include/lib/ddk/protodefs.h",
     ],
-    visibility = [
-        "//src/connectivity/ethernet/drivers/third_party/igc:__pkg__",
-        "//zircon/third_party/dev/ethernet/e1000:__pkg__",
-    ],
+    visibility = ["//src/connectivity/ethernet/drivers/third_party/igc:__pkg__"],
     deps = ["//sdk/lib/async"],
 )
 
@@ -214,21 +209,13 @@ fx_cc_library_headers(
 fx_cc_library_headers(
     name = "ddk-deprecated-mmio-headers",
     hdrs = ["include/lib/ddk/hw/reg.h"],
-    visibility = [
-        "//src/devices/bus/lib/virtio:__pkg__",
-        "//zircon/third_party/dev/ethernet/e1000:__pkg__",
-    ],
+    visibility = ["//src/devices/bus/lib/virtio:__pkg__"],
 )
 
 fx_cc_library_headers(
     name = "ddk-hw-headers",
     hdrs = [
-        "include/lib/ddk/hw/arch_ops.h",
         "include/lib/ddk/hw/inout.h",
     ],
-    visibility = [
-        "//src/devices/block/drivers/ufs:__pkg__",
-        "//src/graphics/display/drivers/intel-display:__pkg__",
-        "//src/graphics/magma/lib/magma/platform:__pkg__",
-    ],
+    visibility = ["//src/graphics/display/drivers/intel-display:__pkg__"],
 )

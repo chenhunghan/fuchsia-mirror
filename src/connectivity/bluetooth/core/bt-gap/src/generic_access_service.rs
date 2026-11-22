@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use anyhow::{format_err, Error};
-use fidl::endpoints::{create_request_stream, Responder};
+use anyhow::{Error, format_err};
+use fidl::endpoints::{Responder, create_request_stream};
 use fidl_fuchsia_bluetooth_gatt2 as gatt;
 use fuchsia_bluetooth::types::Uuid;
 use futures::channel::mpsc;
@@ -161,14 +161,13 @@ impl GenericAccessService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_helpers::hanging_get::asynchronous as hanging_get;
     use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_bluetooth::{Appearance, PeerId};
+    use fuchsia_async as fasync;
+    use fuchsia_inspect as inspect;
     use futures::FutureExt;
-    use std::collections::HashMap;
-    use {fuchsia_async as fasync, fuchsia_inspect as inspect};
 
-    use crate::host_dispatcher::{NameReplace, DEFAULT_DEVICE_NAME};
+    use crate::host_dispatcher::{DEFAULT_DEVICE_NAME, NameReplace};
     use crate::store::stash::Stash;
 
     const TEST_DEVICE_APPEARANCE: Appearance = Appearance::Computer;
@@ -195,26 +194,12 @@ mod tests {
         let stash = Stash::in_memory_mock();
         let inspector = inspect::Inspector::default();
         let system_inspect = inspector.root().create_child("system");
-        let watch_peers_broker = hanging_get::HangingGetBroker::new(
-            HashMap::new(),
-            |_, _| true,
-            hanging_get::DEFAULT_CHANNEL_SIZE,
-        );
-        let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-            Vec::new(),
-            |_, _| true,
-            hanging_get::DEFAULT_CHANNEL_SIZE,
-        );
         let dispatcher = HostDispatcher::new(
             TEST_DEVICE_APPEARANCE,
             Default::default(),
             stash,
             system_inspect,
             gas_task_channel,
-            watch_peers_broker.new_publisher(),
-            watch_peers_broker.new_registrar(),
-            watch_hosts_broker.new_publisher(),
-            watch_hosts_broker.new_registrar(),
         );
         let service = GenericAccessService { hd: dispatcher.clone(), generic_access_req_stream };
         fasync::Task::spawn(service.run()).detach();

@@ -37,7 +37,7 @@ rustc_library("units") {
   edition = "2024"
   visibility = [
     ":*",
-    "//src/storage/fxfs/*",
+    "//src/storage/*",
   ]
   if (is_fuchsia) {
     deps = [ "//sdk/rust/zx" ]

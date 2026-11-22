@@ -12,31 +12,34 @@ class FakeDictionaryUtil : public driver_manager::DictionaryUtil {
  public:
   FakeDictionaryUtil(async_dispatcher_t* dispatcher)
       : driver_manager::DictionaryUtil(
-            fidl::Endpoints<fuchsia_component_sandbox::CapabilityStore>::Create().client,
-            dispatcher) {}
+            fidl::Endpoints<fuchsia_component_runtime::Capabilities>::Create().client, dispatcher) {
+  }
 
   void DictionaryDirConnectorOpen(
-      fuchsia_component_sandbox::CapabilityId dictionary, std::string_view key,
+      const zx::eventpair& dictionary, std::string_view key,
       fit::callback<void(zx::result<fidl::ClientEnd<fuchsia_io::Directory>>)> callback) override {
     auto [client, server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
     callback(zx::ok(std::move(client)));
   }
 
-  void CopyExportDictionary(
-      fuchsia_component_sandbox::CapabilityId dictionary,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::DictionaryRef>)> callback) override {
-    callback(zx::ok(fuchsia_component_sandbox::DictionaryRef(zx::eventpair{})));
+  void CopyDictionary(const zx::eventpair& dictionary,
+                      fit::callback<void(zx::result<zx::eventpair>)> callback) override {
+    zx::eventpair ep1, ep2;
+    ZX_ASSERT(zx::eventpair::create(0, &ep1, &ep2) == ZX_OK);
+    callback(zx::ok(std::move(ep1)));
   }
 
   void CreateDictionaryWith(
-      std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
+      std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
           receivers,
-      fit::callback<void(zx::result<fuchsia_component_sandbox::CapabilityId>)> callback) override {
+      fit::callback<void(zx::result<zx::eventpair>)> callback) override {
     receivers_ = std::move(receivers);
-    callback(zx::ok(1234));
+    zx::eventpair ep1, ep2;
+    ZX_ASSERT(zx::eventpair::create(0, &ep1, &ep2) == ZX_OK);
+    callback(zx::ok(std::move(ep1)));
   }
 
-  std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_sandbox::DirReceiver>>
+  std::unordered_map<std::string, fidl::ClientEnd<fuchsia_component_runtime::DirReceiver>>
       receivers_;
 };
 
@@ -238,7 +241,9 @@ TEST_F(CompositeNodeSpecTest, SpecBindWithResourcesAndDictionary) {
   // Create a parent node.
   std::shared_ptr parent = CreateNode("parent");
   parent->set_collection(driver_manager::Collection::kBoot);
-  parent->set_dictionary_ref(1234);
+  zx::eventpair dict_ep1, dict_ep2;
+  ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &dict_ep1, &dict_ep2));
+  parent->set_dictionary_ref(std::move(dict_ep1));
 
   // Create a resource from the parent.
   driver_manager::NodeOffer node_offer_1{

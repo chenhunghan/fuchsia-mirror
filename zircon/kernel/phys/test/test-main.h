@@ -9,9 +9,10 @@
 
 #include <lib/arch/ticks.h>
 
+#include <ktl/optional.h>
 #include <ktl/variant.h>
 #include <phys/runtime/main.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/symbolize.h>
 
 class AddressSpace;
 

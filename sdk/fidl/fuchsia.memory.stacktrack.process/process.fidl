@@ -15,8 +15,8 @@ const VMO_MAP_READONLY_RIGHTS zx.Rights
 open protocol Registry {
     /// Binds the given process to the registry and share the relevant resources.
     ///
-    /// See //src/performance/memory/stacktrack/README.md and
-    /// //src/performance/memory/stacktrack/lib/stacktrack_vmo for details on
+    /// See //src/memory/stacktrack/README.md and
+    /// //src/memory/stacktrack/lib/stacktrack_vmo for details on
     /// the format of the VMO.
     strict RegisterV1(resource struct {
         process zx.Handle:<PROCESS, zx.RIGHTS_BASIC | zx.RIGHTS_IO | zx.Rights.GET_PROPERTY>;

@@ -4,7 +4,7 @@
 
 #include "src/devices/bin/driver_manager/driver_runner.h"
 
-#include <fidl/fuchsia.component.sandbox/cpp/common_types_format.h>
+#include <fidl/fuchsia.component.runtime/cpp/common_types_format.h>
 #include <fidl/fuchsia.driver.development/cpp/wire.h>
 #include <fidl/fuchsia.driver.host/cpp/wire.h>
 #include <fidl/fuchsia.driver.index/cpp/wire.h>
@@ -56,6 +56,12 @@ namespace {
 
 constexpr auto kBootScheme = "fuchsia-boot://";
 constexpr std::string_view kRootDeviceName = "dev";
+
+std::string FormatDriverHostMoniker(std::string_view colocation_name) {
+  std::string_view suffix =
+      colocation_name.starts_with("#") ? colocation_name.substr(1) : colocation_name;
+  return std::format("driver-host-{}", suffix);
+}
 
 void InspectNode(inspect::Inspector& inspector, InspectStack& stack) {
   std::forward_list<inspect::Node> roots;
@@ -322,7 +328,7 @@ Collection ToCollection(const Node& node, fdf::DriverPackageType package_type) {
 DriverRunner::DriverRunner(
     fidl::ClientEnd<fcomponent::Realm> realm,
     fidl::ClientEnd<fcomponent::Introspector> introspector,
-    fidl::ClientEnd<fuchsia_component_sandbox::CapabilityStore> capability_store,
+    fidl::ClientEnd<fuchsia_component_runtime::Capabilities> capabilities,
     fidl::ClientEnd<fdi::DriverIndex> driver_index, inspect::ComponentInspector& inspect,
     LoaderServiceFactory loader_service_factory, async_dispatcher_t* dispatcher,
     bool enable_test_shutdown_delays, OfferInjector offer_injector,
@@ -333,7 +339,7 @@ DriverRunner::DriverRunner(
     std::optional<fidl::ClientEnd<fpower::Admin>> statecontrol_admin)
     : driver_index_(std::move(driver_index), dispatcher),
       loader_service_factory_(std::move(loader_service_factory)),
-      dictionary_util_(std::move(capability_store), dispatcher),
+      dictionary_util_(std::move(capabilities), dispatcher),
       dispatcher_(dispatcher),
       root_node_(std::make_shared<Node>(kRootDeviceName, std::weak_ptr<Node>{}, this, dispatcher)),
       pending_node_manager_(this, dispatcher),
@@ -482,6 +488,11 @@ void DriverRunner::handle_unknown_method(
 }
 
 void DriverRunner::BindNodesForCompositeNodeSpec() { TryBindAllAvailable(); }
+
+void DriverRunner::BindNodesForCompositeNodeSpec(
+    cpp20::span<const fuchsia_driver_framework::ParentSpec2> parent_specs) {
+  bind_manager_.TryBindForParentSpecs(parent_specs);
+}
 
 void DriverRunner::AddSpec(AddSpecRequestView request, AddSpecCompleter::Sync& completer) {
   if (!request->has_name() || !request->has_parents2()) {
@@ -847,6 +858,17 @@ void DriverRunner::RebindCompositesWithDriver(const std::string& url,
   }
 }
 
+void DriverRunner::StartSuspendSession(const fuchsia_driver_development::NodeTarget& target,
+                                       zx::eventpair token, fit::callback<void(zx::result<>)> cb) {
+  if (!power_manager_) {
+    fdf_log::error("Failed to suspend driver at node '{}': power is not supported",
+                   target.moniker().value_or("<unknown>"));
+    cb(zx::error(ZX_ERR_NOT_SUPPORTED));
+    return;
+  }
+  power_manager_->StartSuspendSession(target, std::move(token), std::move(cb));
+}
+
 DriverHost* DriverRunner::GetDriverHost(std::string_view driver_host_name_for_colocation) {
   if (driver_host_name_for_colocation.empty()) {
     return nullptr;
@@ -864,9 +886,7 @@ zx::result<DriverHost*> DriverRunner::CreateDriverHost(
   auto endpoints = fidl::Endpoints<fio::Directory>::Create();
   std::string name;
   if (!driver_host_name_for_colocation.empty()) {
-    std::string_view suffix = driver_host_name_for_colocation;
-    suffix = suffix.starts_with("#") ? suffix.substr(1) : suffix;
-    name = std::format("driver-host-{}", suffix);
+    name = FormatDriverHostMoniker(driver_host_name_for_colocation);
   } else {
     name = std::format("driver-host-{}", next_driver_host_id_++);
   }
@@ -1122,7 +1142,7 @@ zx::result<> DriverRunner::CreateDriverHostComponent(
 
   auto it = pending_driver_host_destructions_.find(moniker);
   if (it != pending_driver_host_destructions_.end()) {
-    it->second.push_back([do_create = std::move(do_create)](zx::result<> result) mutable {
+    it->second.callbacks.push_back([do_create = std::move(do_create)](zx::result<> result) mutable {
       if (result.is_ok()) {
         do_create();
       }
@@ -1137,35 +1157,32 @@ void DriverRunner::DestroyDriverHostComponent(std::string_view driver_host_name_
                                               fit::callback<void(zx::result<>)> completion_cb) {
   std::string name;
   if (!driver_host_name_for_colocation.empty()) {
-    std::string_view suffix = driver_host_name_for_colocation;
-    suffix = suffix.starts_with("#") ? suffix.substr(1) : suffix;
-    name = std::format("driver-host-{}", suffix);
+    name = FormatDriverHostMoniker(driver_host_name_for_colocation);
   } else {
     // Cannot reliably destroy an unnamed host here by name.
     completion_cb(zx::error(ZX_ERR_INVALID_ARGS));
     return;
   }
 
-  // Clear name_for_colocation on the dying host so GetDriverHost will not match it.
-  for (auto& host : driver_hosts_) {
-    if (host.name_for_colocation() == driver_host_name_for_colocation) {
-      host.set_name_for_colocation("");
+  auto [it, inserted] = pending_driver_host_destructions_.try_emplace(name);
+  if (inserted) {
+    // Clear name_for_colocation on the dying host so GetDriverHost will not match it.
+    for (auto& host : driver_hosts_) {
+      if (host.name_for_colocation() == driver_host_name_for_colocation) {
+        host.set_name_for_colocation("");
+      }
     }
+  }
+
+  if (completion_cb) {
+    it->second.callbacks.push_back(std::move(completion_cb));
   }
 
   // If destruction is already in flight for this moniker, coalesce callbacks.
-  auto it = pending_driver_host_destructions_.find(name);
-  if (it != pending_driver_host_destructions_.end()) {
-    if (completion_cb) {
-      it->second.push_back(std::move(completion_cb));
-    }
+  if (it->second.destroy_called) {
     return;
   }
-
-  auto& callbacks = pending_driver_host_destructions_[name];
-  if (completion_cb) {
-    callbacks.push_back(std::move(completion_cb));
-  }
+  it->second.destroy_called = true;
 
   fdecl::wire::ChildRef child_ref{
       .name = fidl::StringView::FromExternal(name),
@@ -1194,7 +1211,7 @@ void DriverRunner::DestroyDriverHostComponent(std::string_view driver_host_name_
 
         auto it = pending_driver_host_destructions_.find(moniker);
         if (it != pending_driver_host_destructions_.end()) {
-          auto pending = std::move(it->second);
+          auto pending = std::move(it->second.callbacks);
           pending_driver_host_destructions_.erase(it);
           for (auto& cb : pending) {
             cb(final_status);
@@ -1302,42 +1319,81 @@ zx::result<uint32_t> DriverRunner::RestartNodesColocatedWithDriverUrl(
   // their colocation name upfront.
   //
   // Unregistering `name_for_colocation_` immediately ensures that `GetDriverHost("tag")` will
-  // return nullptr while the dying driver host process is shutting down. When the restarting
-  // nodes re-bind/start, `GetDriverHost("tag")` will trigger `CreateDriverHost()` to spawn a
-  // fresh driver host process for the tag instead of reusing the dying host instance.
+  // return nullptr while the dying driver host process is shutting down, and registering the
+  // moniker in `pending_driver_host_destructions_` ensures that any new `CreateDriverHostComponent`
+  // call waits until the old component has been destroyed in ComponentManager.
   std::unordered_set<std::string> tags_to_destroy;
   for (DriverHost* host : driver_hosts) {
     if (std::string_view tag = host->name_for_colocation(); !tag.empty()) {
+      pending_driver_host_destructions_.try_emplace(FormatDriverHostMoniker(tag));
       tags_to_destroy.insert(std::string(tag));
       host->set_name_for_colocation("");
     }
   }
 
+  // Wait to destroy the old driver host components in ComponentManager until the restarting
+  // nodes have finished shutting down their drivers, so that ComponentManager's stop timeout
+  // does not race multi-layer driver teardown.
+  fit::function<void()> on_node_shutdown;
+  if (!tags_to_destroy.empty()) {
+    auto remaining = std::make_shared<size_t>(nodes_to_restart.size());
+    auto tags = std::make_shared<std::unordered_set<std::string>>(std::move(tags_to_destroy));
+    on_node_shutdown = [this, remaining = std::move(remaining), tags = std::move(tags)]() {
+      ZX_ASSERT(*remaining > 0);
+      if (--(*remaining) == 0) {
+        for (const auto& tag : *tags) {
+          DestroyDriverHostComponent(tag, [](zx::result<>) {});
+        }
+      }
+    };
+  }
+
   // Initiate node restart first so that the nodes start their shutdown flow and send StopDriver()
   // to their drivers.
   for (const auto& current : nodes_to_restart) {
+    std::shared_ptr<fit::callback<void()>> on_current_shutdown;
+    if (on_node_shutdown) {
+      on_current_shutdown = std::make_shared<fit::callback<void()>>(
+          [on_node_shutdown = on_node_shutdown.share()]() mutable { on_node_shutdown(); });
+      current->AddShutdownCompleteCallback([on_current_shutdown]() {
+        if (*on_current_shutdown) {
+          (*on_current_shutdown)();
+        }
+      });
+    }
     if (current->EvaluateRematchFlags(rematch_flags, url)) {
       if (current->type() == driver_manager::NodeType::kComposite) {
         fdf_log::debug("RestartNodesColocatedWithDriverUrl rebinding composite {}",
                        current->MakeComponentMoniker());
-        RebindComposite(current->name(), std::nullopt, [](zx::result<>) {});
+        RebindComposite(current->name(), std::nullopt,
+                        [weak_node = current->weak_from_this(), on_current_shutdown](zx::result<>) {
+                          auto node = weak_node.lock();
+                          if (!node || !node->GetNodeShutdownCoordinator().IsShuttingDown()) {
+                            if (on_current_shutdown && *on_current_shutdown) {
+                              (*on_current_shutdown)();
+                            }
+                          }
+                        });
         continue;
       }
 
       fdf_log::debug("RestartNodesColocatedWithDriverUrl restarting node with rematch {}",
                      current->MakeComponentMoniker());
-      current->RestartNodeWithRematch();
+      current->RestartNodeWithRematch("", [](zx::result<>) {});
+      if (on_current_shutdown && *on_current_shutdown &&
+          !current->GetNodeShutdownCoordinator().IsShuttingDown()) {
+        (*on_current_shutdown)();
+      }
       continue;
     }
 
     fdf_log::debug("RestartNodesColocatedWithDriverUrl restarting node {}",
                    current->MakeComponentMoniker());
     current->RestartNode();
-  }
-
-  // Destroy the old driver host components in ComponentManager.
-  for (const auto& tag : tags_to_destroy) {
-    DestroyDriverHostComponent(tag, [](zx::result<>) {});
+    if (on_current_shutdown && *on_current_shutdown &&
+        !current->GetNodeShutdownCoordinator().IsShuttingDown()) {
+      (*on_current_shutdown)();
+    }
   }
 
   // Count the number of nodes that matched the URL but didn't have a driver host yet.
@@ -1352,181 +1408,145 @@ zx::result<uint32_t> DriverRunner::RestartNodesColocatedWithDriverUrl(
   return zx::ok(static_cast<uint32_t>(driver_hosts.size() + matching_nodes_without_hosts));
 }
 
-void DriverRunner::RestartWithDictionary(fidl::StringView moniker,
-                                         fuchsia_component_sandbox::wire::DictionaryRef dictionary,
+void DriverRunner::RestartWithDictionary(fidl::StringView moniker, zx::eventpair dictionary,
                                          zx::eventpair reset_eventpair) {
-  dictionary_util_.ImportDictionaryWire(std::move(dictionary), [this,
-                                                                moniker =
-                                                                    std::string(moniker.get()),
-                                                                reset_eventpair =
-                                                                    std::move(reset_eventpair)](
-                                                                   zx::result<
-                                                                       fuchsia_component_sandbox::
-                                                                           NewCapabilityId>
-                                                                       result) mutable {
-    if (result.is_error()) {
-      return;
-    }
-
-    std::shared_ptr<driver_manager::Node> restarted_node = nullptr;
-    PerformBFS(root_node_, [&](const std::shared_ptr<driver_manager::Node>& current) {
-      if (current->MakeComponentMoniker() == moniker && current->HasDriverComponent()) {
-        if (current->HasSubtreeDictionaryRef()) {
-          fdf_log::error(
-              "RestartWithDictionary requested node id already contains a dictionary_ref from another RestartWithDictionary operation.");
-          return false;
-        }
-        ZX_ASSERT_MSG(restarted_node == nullptr, "Multiple nodes with same moniker not possible.");
-        restarted_node = current;
-        current->SetSubtreeDictionaryRef(result.value());
-        current->RestartNode();
+  std::string moniker_str(moniker.get());
+  std::shared_ptr<driver_manager::Node> restarted_node = nullptr;
+  PerformBFS(root_node_, [&](const std::shared_ptr<driver_manager::Node>& current) {
+    if (current->MakeComponentMoniker() == moniker_str && current->HasDriverComponent()) {
+      if (current->HasSubtreeDictionaryRef()) {
+        fdf_log::error(
+            "RestartWithDictionary requested node id already contains a dictionary_ref from another RestartWithDictionary operation.");
         return false;
       }
-
-      return true;
-    });
-
-    if (restarted_node != nullptr) {
-      std::weak_ptr<driver_manager::Node> weak_restarted_node = restarted_node;
-      std::unique_ptr<async::WaitOnce> wait = std::make_unique<async::WaitOnce>(
-          reset_eventpair.release(), ZX_EVENTPAIR_PEER_CLOSED | ZX_EVENTPAIR_SIGNALED);
-      async::WaitOnce* wait_ptr = wait.get();
-      zx_status_t status = wait_ptr->Begin(
-          dispatcher_,
-          [weak_restarted_node = std::move(weak_restarted_node), moved_wait = std::move(wait)](
-              async_dispatcher_t* dispatcher, async::WaitOnce* wait, zx_status_t status,
-              const zx_packet_signal_t* signal) {
-            fdf_log::info("RestartWithDictionary operation released.");
-            auto restarted_node = weak_restarted_node.lock();
-            if (!restarted_node) {
-              return;
-            }
-            restarted_node->SetSubtreeDictionaryRef(std::nullopt);
-            restarted_node->RestartNode();
-          });
-
-      if (status != ZX_OK) {
-        fdf_log::error("Failed to Begin async::Wait for RestartWithDictionary.");
-      }
+      ZX_ASSERT_MSG(restarted_node == nullptr, "Multiple nodes with same moniker not possible.");
+      restarted_node = current;
+      current->SetSubtreeDictionaryRef(std::move(dictionary));
+      current->RestartNode();
+      return false;
     }
+
+    return true;
   });
+
+  if (restarted_node != nullptr) {
+    std::weak_ptr<driver_manager::Node> weak_restarted_node = restarted_node;
+    std::unique_ptr<async::WaitOnce> wait = std::make_unique<async::WaitOnce>(
+        reset_eventpair.release(), ZX_EVENTPAIR_PEER_CLOSED | ZX_EVENTPAIR_SIGNALED);
+    async::WaitOnce* wait_ptr = wait.get();
+    zx_status_t status = wait_ptr->Begin(
+        dispatcher_,
+        [weak_restarted_node = std::move(weak_restarted_node), moved_wait = std::move(wait)](
+            async_dispatcher_t* dispatcher, async::WaitOnce* wait, zx_status_t status,
+            const zx_packet_signal_t* signal) {
+          fdf_log::info("RestartWithDictionary operation released.");
+          auto restarted_node = weak_restarted_node.lock();
+          if (!restarted_node) {
+            return;
+          }
+          restarted_node->SetSubtreeDictionaryRef(std::nullopt);
+          restarted_node->RestartNode();
+        });
+
+    if (status != ZX_OK) {
+      fdf_log::error("Failed to Begin async::Wait for RestartWithDictionary.");
+    }
+  }
 }
 
 void DriverRunner::RestartWithDictionaryAndPowerDependencies(
-    std::string moniker, fuchsia_component_sandbox::DictionaryRef dictionary,
+    std::string moniker, zx::eventpair dictionary,
     std::vector<fuchsia_power_broker::LevelDependency> power_dependencies,
     std::optional<zx::event> cpu_token_override,
     std::vector<fuchsia_driver_development::NodePowerTokenOverride> node_power_token_overrides,
     zx::eventpair release_fence) {
-  dictionary_util_.ImportDictionary(std::move(dictionary), [this, moniker = std::move(moniker),
-                                                            power_dependencies =
-                                                                std::move(power_dependencies),
-                                                            cpu_token_override =
-                                                                std::move(cpu_token_override),
-                                                            node_power_token_overrides = std::move(
-                                                                node_power_token_overrides),
-                                                            release_fence =
-                                                                std::move(release_fence)](
-                                                               zx::result<
-                                                                   fuchsia_component_sandbox::
-                                                                       NewCapabilityId>
-                                                                   result) mutable {
-    if (result.is_error()) {
-      fdf_log::error(
-          "Failed to import dictionary for RestartWithDictionaryAndPowerDependencies: {}",
-          result.status_string());
-      return;
-    }
-
-    std::shared_ptr<driver_manager::Node> restarted_node = nullptr;
-    PerformBFS(root_node_, [&](const std::shared_ptr<driver_manager::Node>& current) {
-      if (current->MakeComponentMoniker() == moniker && current->HasDriverComponent()) {
-        if (current->HasSubtreeDictionaryRef()) {
-          fdf_log::error(
-              "RestartWithDictionaryAndPowerDependencies requested node id already contains a dictionary_ref from another restart operation.");
-          return false;
-        }
-        ZX_ASSERT_MSG(restarted_node == nullptr, "Multiple nodes with same moniker not possible.");
-        restarted_node = current;
-        current->SetSubtreeDictionaryRef(result.value());
-
-        // Clone power dependencies for the node
-        std::vector<fuchsia_power_broker::LevelDependency> deps;
-        for (const auto& dep : power_dependencies) {
-          if (!dep.requires_token().has_value() || !dep.dependent_level().has_value() ||
-              !dep.requires_level_by_preference().has_value()) {
-            fdf_log::warn("Power dependency is invalid, skipping.");
-            continue;
-          }
-          fuchsia_power_broker::DependencyToken clone;
-          zx_status_t status = dep.requires_token()->duplicate(ZX_RIGHT_SAME_RIGHTS, &clone);
-          if (status != ZX_OK) {
-            fdf_log::error("Failed to duplicate power token: {}", zx_status_get_string(status));
-            continue;
-          }
-          deps.push_back(fuchsia_power_broker::LevelDependency{{
-              .dependent_level = dep.dependent_level().value(),
-              .requires_token = std::move(clone),
-              .requires_level_by_preference = dep.requires_level_by_preference().value(),
-          }});
-        }
-        current->SetPowerDependencyOverrides(std::move(deps));
-
-        if (cpu_token_override.has_value()) {
-          zx::event clone;
-          zx_status_t status = cpu_token_override->duplicate(ZX_RIGHT_SAME_RIGHTS, &clone);
-          if (status == ZX_OK) {
-            current->SetCpuTokenOverride(std::move(clone));
-          } else {
-            fdf_log::error("Failed to duplicate CPU token override: {}",
-                           zx_status_get_string(status));
-          }
-        }
-
-        std::map<std::string, zx::event> token_overrides_map;
-        for (auto& override_entry : node_power_token_overrides) {
-          if (!override_entry.target_node().empty() && override_entry.token().is_valid()) {
-            token_overrides_map.emplace(override_entry.target_node(),
-                                        std::move(override_entry.token()));
-          }
-        }
-        current->SetNodeTokenOverrides(std::move(token_overrides_map));
-
-        current->RestartNode();
+  std::shared_ptr<driver_manager::Node> restarted_node = nullptr;
+  PerformBFS(root_node_, [&](const std::shared_ptr<driver_manager::Node>& current) {
+    if (current->MakeComponentMoniker() == moniker && current->HasDriverComponent()) {
+      if (current->HasSubtreeDictionaryRef()) {
+        fdf_log::error(
+            "RestartWithDictionaryAndPowerDependencies requested node id already contains a dictionary_ref from another restart operation.");
         return false;
       }
+      ZX_ASSERT_MSG(restarted_node == nullptr, "Multiple nodes with same moniker not possible.");
+      restarted_node = current;
+      current->SetSubtreeDictionaryRef(std::move(dictionary));
 
-      return true;
-    });
-
-    if (restarted_node != nullptr) {
-      std::weak_ptr<driver_manager::Node> weak_restarted_node = restarted_node;
-      std::unique_ptr<async::WaitOnce> wait = std::make_unique<async::WaitOnce>(
-          release_fence.release(), ZX_EVENTPAIR_PEER_CLOSED | ZX_EVENTPAIR_SIGNALED);
-      async::WaitOnce* wait_ptr = wait.get();
-      zx_status_t status = wait_ptr->Begin(
-          dispatcher_,
-          [weak_restarted_node = std::move(weak_restarted_node), moved_wait = std::move(wait)](
-              async_dispatcher_t* dispatcher, async::WaitOnce* wait, zx_status_t status,
-              const zx_packet_signal_t* signal) {
-            fdf_log::info("RestartWithDictionaryAndPowerDependencies operation released.");
-            auto restarted_node = weak_restarted_node.lock();
-            if (!restarted_node) {
-              return;
-            }
-            restarted_node->SetSubtreeDictionaryRef(std::nullopt);
-            restarted_node->SetPowerDependencyOverrides(std::nullopt);
-            restarted_node->SetCpuTokenOverride(std::nullopt);
-            restarted_node->SetNodeTokenOverrides({});
-            restarted_node->RestartNode();
-          });
-
-      if (status != ZX_OK) {
-        fdf_log::error(
-            "Failed to Begin async::Wait for RestartWithDictionaryAndPowerDependencies.");
+      // Clone power dependencies for the node
+      std::vector<fuchsia_power_broker::LevelDependency> deps;
+      for (const auto& dep : power_dependencies) {
+        if (!dep.requires_token().has_value() || !dep.dependent_level().has_value() ||
+            !dep.requires_level_by_preference().has_value()) {
+          fdf_log::warn("Power dependency is invalid, skipping.");
+          continue;
+        }
+        fuchsia_power_broker::DependencyToken clone;
+        zx_status_t status = dep.requires_token()->duplicate(ZX_RIGHT_SAME_RIGHTS, &clone);
+        if (status != ZX_OK) {
+          fdf_log::error("Failed to duplicate power token: {}", zx_status_get_string(status));
+          continue;
+        }
+        deps.push_back(fuchsia_power_broker::LevelDependency{{
+            .dependent_level = dep.dependent_level().value(),
+            .requires_token = std::move(clone),
+            .requires_level_by_preference = dep.requires_level_by_preference().value(),
+        }});
       }
+      current->SetPowerDependencyOverrides(std::move(deps));
+
+      if (cpu_token_override.has_value()) {
+        zx::event clone;
+        zx_status_t status = cpu_token_override->duplicate(ZX_RIGHT_SAME_RIGHTS, &clone);
+        if (status == ZX_OK) {
+          current->SetCpuTokenOverride(std::move(clone));
+        } else {
+          fdf_log::error("Failed to duplicate CPU token override: {}",
+                         zx_status_get_string(status));
+        }
+      }
+
+      std::map<std::string, zx::event> token_overrides_map;
+      for (auto& override_entry : node_power_token_overrides) {
+        if (!override_entry.target_node().empty() && override_entry.token().is_valid()) {
+          token_overrides_map.emplace(override_entry.target_node(),
+                                      std::move(override_entry.token()));
+        }
+      }
+      current->SetNodeTokenOverrides(std::move(token_overrides_map));
+
+      current->RestartNode();
+      return false;
     }
+
+    return true;
   });
+
+  if (restarted_node != nullptr) {
+    std::weak_ptr<driver_manager::Node> weak_restarted_node = restarted_node;
+    std::unique_ptr<async::WaitOnce> wait = std::make_unique<async::WaitOnce>(
+        release_fence.release(), ZX_EVENTPAIR_PEER_CLOSED | ZX_EVENTPAIR_SIGNALED);
+    async::WaitOnce* wait_ptr = wait.get();
+    zx_status_t status = wait_ptr->Begin(
+        dispatcher_,
+        [weak_restarted_node = std::move(weak_restarted_node), moved_wait = std::move(wait)](
+            async_dispatcher_t* dispatcher, async::WaitOnce* wait, zx_status_t status,
+            const zx_packet_signal_t* signal) {
+          fdf_log::info("RestartWithDictionaryAndPowerDependencies operation released.");
+          auto restarted_node = weak_restarted_node.lock();
+          if (!restarted_node) {
+            return;
+          }
+          restarted_node->SetSubtreeDictionaryRef(std::nullopt);
+          restarted_node->SetPowerDependencyOverrides(std::nullopt);
+          restarted_node->SetCpuTokenOverride(std::nullopt);
+          restarted_node->SetNodeTokenOverrides({});
+          restarted_node->RestartNode();
+        });
+
+    if (status != ZX_OK) {
+      fdf_log::error("Failed to Begin async::Wait for RestartWithDictionaryAndPowerDependencies.");
+    }
+  }
 }
 
 std::unordered_set<DriverHost*> DriverRunner::DriverHostsWithDriverUrl(std::string_view url) {

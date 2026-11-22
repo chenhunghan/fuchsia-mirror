@@ -115,7 +115,7 @@ source_set("driver_runner") {
     "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
     "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_cpp",
-    "//sdk/fidl/fuchsia.component.sandbox:fuchsia.component.sandbox_cpp",
+    "//sdk/fidl/fuchsia.component.runtime:fuchsia.component.runtime_cpp",
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
     "//sdk/fidl/fuchsia.driver.crash:fuchsia.driver.crash_cpp",
     "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_cpp",
@@ -188,7 +188,7 @@ executable("driver_manager") {
 
 executable("driver_manager_with_heapdump") {
   forward_variables_from(_driver_manager_common, "*")
-  deps += [ "//src/performance/memory/heapdump/instrumentation:autobind" ]
+  deps += [ "//src/memory/heapdump/instrumentation:autobind" ]
 }
 
 fuchsia_component("component") {

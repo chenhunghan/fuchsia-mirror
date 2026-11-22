@@ -1,0 +1,54 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":power_config_test"],
+    visibility = ["//tools:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "power_config_test_bin",
+    srcs = ["test.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.power:fuchsia.hardware.power_cpp",
+        "//tools/power_config/lib/cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+compiled_action(
+    name = "example_power_action",
+    testonly = True,
+    srcs = ["power_config.json5"],
+    outs = ["example_power.fidl"],
+    args = [
+        "--values",
+        "$(location :power_config.json5)",
+        "--output",
+        "$(location :example_power.fidl)",
+    ],
+    mnemonic = "PowerConfig",
+    tool = "//tools/power_config",
+)
+
+resource(
+    name = "example_power",
+    testonly = True,
+    src = ":example_power_action",
+    dest = "data/example_power",
+)
+
+fx_unittest_package(
+    name = "power_config_test",
+    resources = [":example_power"],
+    unit_tests = [":power_config_test_bin"],
+)

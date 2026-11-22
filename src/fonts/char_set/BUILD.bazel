@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:skip
+test_suite(
+    name = "tests",
+    tests = [":char_set_tests"],
+)
+
+# Library for working with collections of Unicode code points.
+rustc_library(
+    name = "char_set",
+    srcs = ["src/lib.rs"],
+    edition = "2024",
+    visibility = [
+        "//src/fonts:__pkg__",
+        "//src/fonts/font_info:__pkg__",
+        "//src/fonts/manifest:__pkg__",
+        "//src/fonts/offset_string:__pkg__",
+        "//src/fonts/tools/manifest_generator:__pkg__",
+    ],
+    deps = ["//src/lib/intl/unicode_utils/char_collection"],
+)
+
+rustc_test(
+    name = "char_set_test",
+    crate = ":char_set",
+)
+
+fx_unittest_package(
+    name = "char_set_tests",
+    unit_tests = [":char_set_test"],
+)

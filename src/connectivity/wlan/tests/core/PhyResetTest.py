@@ -6,7 +6,7 @@ import asyncio
 import logging
 
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from mobly import asserts, test_runner
 
 logger = logging.getLogger(__name__)

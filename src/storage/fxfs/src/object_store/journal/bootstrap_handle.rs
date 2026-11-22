@@ -84,7 +84,7 @@ impl ObjectHandle for BootstrapObjectHandle {
     }
 
     fn block_size(&self) -> BlockSize {
-        BlockSize::new(self.device.block_size()).unwrap()
+        BlockSize::new(self.device.block_size() as u64).unwrap()
     }
 
     fn set_trace(&self, trace: bool) {

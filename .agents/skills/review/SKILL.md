@@ -4,9 +4,10 @@ description: >
   Performs an AI code review of Fuchsia changes (fuchsia.git and
   vendor/google) using the same Fuchsia review skills as the Gerrit CL Review
   Agent. Use when asked to review, self-review, or `/review` changes in a
-  Fuchsia checkout. Supports `quick`, `standard`, and `deep` effort levels,
-  up-front skip globs, an adversarial challenger pass, and `[Pre-existing]`
-  tagging.
+  Fuchsia checkout (including `/review quick`, `/review deep`, and `/review
+  simplify`). Supports `quick`, `standard`, `deep`, and `simplify` modes, up-
+  front skip globs, a `code-simplification` pass (in `deep` and `simplify`),
+  an adversarial challenger pass, and `[Pre-existing]` tagging.
 ---
 
 # Fuchsia code review
@@ -17,28 +18,38 @@ vendor/google copy for vendor/google changes), the same files the Gerrit CL
 Review Agent (`groupagent-fuchsia-review` / `groupagent-turquoise-review`)
 reads. Local and hosted reviews therefore load the same skills.
 
-It is self-contained: do not load or follow any other `review` skill. It is
-named `review` so that `/review` in a Fuchsia checkout runs it.
+It is self-contained: do not load or follow any other top-level `review` skill.
+It is named `review` so that `/review` in a Fuchsia checkout runs it.
 
 ## Overview & Flow
 
 1.  **Scope, Effort & Skip Globs**: Detects `fuchsia.git` and `vendor/google`
-    changes (`jj` or `git`), picks the effort level (`quick`, `standard`, or
-    `deep`), and filters out non-reviewable files (`Cargo.lock`, `*.golden`,
-    `*.pb.*`, binaries, `out/**`) before dispatching reviewers.
-1.  **Round-1 Review**: Resolves domain skills from
-    `.agents/code-review/agent_configs.textproto` via `resolve_skills.py`.
-    `quick` runs a single diff-focused pass per repository for `blocking` bugs
-    (`confidence >= 90`); `standard` and `deep` run parallel skill + `general`
-    reviewers (`deep` also traces cross-file callers, callees, and invariants).
-1.  **Adversarial Challenger Pass (Round 2, `standard` & `deep`)**: Deduplicates
-    Round-1 candidate findings and runs `fuchsia_code_challenger`
-    (`references/challenger.md`) to score confidence (`0-100`, keeping `>= 80`),
-    prune false positives (including findings that depend on peer firmware or
-    hardware behavior the peer cannot produce), and tag exposed legacy bugs as
-    `[Pre-existing]` non-blocking suggestions.
+    changes (`jj` or `git`), picks the effort/mode (`quick`, `standard`, `deep`,
+    or `simplify`), and filters out non-reviewable files (`Cargo.lock`,
+    `*.golden`, `*.pb.*`, binaries, `out/**`) before dispatching reviewers.
+1.  **Mode Dispatch & Round-1 Review**: Resolves domain skills from
+    `.agents/code-review/agent_configs.textproto` via `resolve_skills.py`, then
+    loads **only** the selected mode's execution profile under `modes/`:
+    - `quick` ([review-quick](modes/review-quick/SKILL.md)): single diff-focused
+      pass per repository for `blocking` bugs (`confidence >= 90`), skipping
+      Round 2.
+    - `standard` ([review-standard](modes/review-standard/SKILL.md)): parallel
+      domain-skill + `general` reviewers.
+    - `deep` ([review-deep](modes/review-deep/SKILL.md)): `standard` plus
+      cross-file caller/callee/invariant tracing and a parallel
+      `code-simplification` subagent per repository.
+    - `simplify` ([review-simplify](modes/review-simplify/SKILL.md)): standalone
+      `code-simplification` subagent per repository.
+1.  **Adversarial Challenger Pass (Round 2, `standard`, `deep` & `simplify`)**:
+    Deduplicates Round-1 candidate findings and runs `fuchsia_code_challenger`
+    ([challenger.md](references/challenger.md)) to score confidence (`0-100`,
+    keeping `>= 80`), prune false positives and subjective nitpicks (including
+    findings that depend on peer firmware or hardware behavior the peer cannot
+    produce), and tag exposed legacy bugs as `[Pre-existing]` non-blocking
+    suggestions.
 1.  **Merge & Render**: Writes verified findings, `effort`, and `skipped_files`
-    to `review.json` and renders the Markdown report via `render_report.py`.
+    to `review.json` and renders the Markdown report via `render_report.py`
+    (read-only by default unless the user explicitly asks to apply fixes).
 
 ## Step 1: Determine the scope and effort level
 
@@ -51,7 +62,13 @@ named `review` so that `/review` in a Fuchsia checkout runs it.
       by the Round-2 adversarial challenger (`confidence >= 80`).
     - `deep` (if the user asks for `deep` or `thorough`): `standard` plus
       cross-file caller/callee, invariant, concurrency, and wire-contract
-      tracing in both Round 1 and Round 2 (`confidence >= 80`).
+      tracing in both Round 1 and Round 2, **plus** a parallel
+      `code-simplification` pass per repository (`confidence >= 80`).
+    - `simplify` (if the user asks for `/review simplify`, `simplify`, or a
+      focused simplification pass): runs **only** the read-only
+      `code-simplification` pass per repository followed by the Round-2
+      adversarial challenger (`confidence >= 80`), emitting non-blocking
+      `suggestion` findings.
 1.  Check each repository in the checkout separately: the fuchsia.git root, and
     `vendor/google` inside it if that directory exists. Detect the VCS at each
     repository's root (`jj` if a `.jj` directory exists there, otherwise `git`).
@@ -74,7 +91,7 @@ write a short, factual intent summary: the objective and the key logic changes.
 When reviewing code written earlier in the same session, do not include claims
 about correctness or justifications for design choices; they bias the reviewers.
 
-## Step 3: Filter skip globs and resolve review tasks
+## Step 3: Filter skip globs and resolve domain skills
 
 Run from the fuchsia.git root once per repository in scope:
 
@@ -96,7 +113,7 @@ both scripts use only the standard library.
   `skipped_files`. Pass `--skip_globs="<glob 1>,<glob 2>"` if the user asked to
   skip extra paths, or `--no_default_skips` if the user explicitly asked to
   review skipped files.
-- Keep tasks from different repositories separate so each keeps its own
+- Keep outputs from different repositories separate so each keeps its own
   repository root and VCS.
 - Pass `--project=fuchsia` with fuchsia.git-relative paths for fuchsia.git, and
   `--project=vendor/google` with `vendor/google`-relative paths for
@@ -104,79 +121,31 @@ both scripts use only the standard library.
   `vendor/google/.agents/code-review/agent_configs.textproto` and resolves its
   skills relative to `vendor/google`. Pass `--repo_root=<fuchsia.git root>` if
   you run the script outside the checkout.
-- For each repository whose `retained_files` is non-empty, add one `general`
-  task with no skill and `retained_files` (never `skipped_files`). It stands in
-  for the hosted agent's default reviewer and covers correctness, error
-  handling, edge cases, tests, and the Fuchsia style of the surrounding code. If
-  `retained_files` is empty across all repositories in scope, skip Step 4 and
-  render `decision: "not_applicable"` with `skipped_files` in Step 5.
+- If `retained_files` is empty across **all** repositories in scope, skip Step 4
+  (do not load a mode skill) and render `decision: "not_applicable"` with
+  `skipped_files` in Step 5.
 
-## Step 4: Run the reviewers and adversarial challenger
+## Step 4: Load and execute the selected mode profile
 
 Use `${TMPDIR:-/tmp}/fuchsia_review_<run_id>` as `<out_dir>`, where `<run_id>`
 comes from `uuidgen`. Never write review files inside the checkout.
 
-If `define_subagent` and `invoke_subagent` are available:
+Read **only** the `SKILL.md` for the effort level chosen in Step 1 (do **not**
+read the other mode files) and follow its task-building, Round-1 reviewer, and
+Round-2 challenger instructions:
 
-1.  **Define `fuchsia_code_reviewer`**: Enable write tools (so it can run VCS
-    diff commands and write its result file). Its system prompt must state that
-    it is a strictly read-only reviewer: it never edits files in the checkout
-    and never runs builds or tests, and it must read and follow
-    `.agents/skills/review/references/reviewer.md`.
-1.  **If `effort == "quick"`**: Invoke one `fuchsia_code_reviewer` per
-    repository in scope in parallel with `effort: quick`, its repository root,
-    VCS, target scope and commit hash(es), intent summary, `retained_files`, all
-    resolved `skill_path`s for that repository, and output file
-    `<out_dir>/quick_<repo>.json`. Wait for all of them (retrying once on
-    failure or missing/invalid output as below), keep only `blocking` findings
-    with `confidence >= 90`, and skip deduplication and Round 2 (proceed to Step
-    5).
-1.  **Round 1 (`standard` and `deep` Reviewers)**: In a single turn, invoke one
-    `fuchsia_code_reviewer` per task (across all repositories in scope) in
-    parallel. Pass its repository root and VCS, target scope and commit
-    hash(es), effort level (`standard` or `deep`), intent summary, its task
-    (`skill_path` and `files`, or `general` with `retained_files`), and its
-    output file `<out_dir>/task_<n>.json`.
-1.  Wait for all of them. If a reviewer fails or its output file is missing or
-    invalid, invoke it once more; if it fails again, leave it out and say so in
-    the report summary.
-1.  **Deduplicate candidate findings**: Read all Round-1 result files per
-    repository. Treat findings as duplicates when they have the same
-    `file_path`, overlapping lines, and the same defect (file-level findings
-    with no location: same `file_path` and defect). Keep the one from a skill
-    task over `general`; between skills, keep the one whose `rule_reference`
-    cites the rule that is violated; otherwise keep the more detailed comment
-    (Round 2 determines the authoritative `pre_existing` value). Never merge
-    different defects at the same line. If no candidate findings remain, skip
-    Round 2 and proceed to Step 5.
-1.  **Round 2 (Adversarial Challenger Pass)**: For each repository with
-    candidate findings, write `<out_dir>/draft_findings_<repo>.json` with a
-    0-based `finding_index` on each candidate finding. Define a **separate**
-    subagent named `fuchsia_code_challenger` with write tools enabled (strictly
-    read-only on the checkout; never runs builds or tests) that must read and
-    follow `.agents/skills/review/references/challenger.md`. Invoke one
-    `fuchsia_code_challenger` per repository in parallel with its repository
-    root, VCS, target scope and commit hash(es), effort level (`standard` or
-    `deep`), intent summary, `<out_dir>/draft_findings_<repo>.json`, every
-    resolved `skill_path` for that repository (so it can check peer contracts
-    for `general` findings too), and output file
-    `<out_dir>/evaluations_<repo>.json`.
-1.  Join `<out_dir>/evaluations_<repo>.json` back onto the candidate findings by
-    `finding_index`: keep only findings where `verdict == "accept"` and
-    `confidence >= 80`, set `confidence` and `pre_existing` (`true` or `false`,
-    overwriting any Round-1 value) on each surviving finding, and apply
-    `adjusted_severity` when set to `blocking` or `suggestion` (with
-    `pre_existing: true` always downgraded to `suggestion`).
+- **`quick`**: Read [modes/review-quick/SKILL.md](modes/review-quick/SKILL.md)
+  (`.agents/skills/review/modes/review-quick/SKILL.md`).
+- **`standard`** (default): Read
+  [modes/review-standard/SKILL.md](modes/review-standard/SKILL.md)
+  (`.agents/skills/review/modes/review-standard/SKILL.md`).
+- **`deep`**: Read [modes/review-deep/SKILL.md](modes/review-deep/SKILL.md)
+  (`.agents/skills/review/modes/review-deep/SKILL.md`).
+- **`simplify`**: Read
+  [modes/review-simplify/SKILL.md](modes/review-simplify/SKILL.md)
+  (`.agents/skills/review/modes/review-simplify/SKILL.md`).
 
-Otherwise, follow `references/reviewer.md` yourself: in `quick` mode, run one
-combined pass per repository and keep only `blocking` findings with `confidence
->= 90`; in `standard` and `deep` modes, run once per task in sequence,
-deduplicate candidate findings, follow `references/challenger.md` to challenge
-and score each candidate finding (`0-100`), and apply the same join rules
-(`verdict == "accept"` and `confidence >= 80`, setting `confidence` and
-`pre_existing`, applying `adjusted_severity`, and downgrading `pre_existing:
-true` to `suggestion`). Reviewing your own change in the same session is not
-independent; say so in the report summary.
+Once the selected mode profile finishes, proceed to Step 5.
 
 ## Step 5: Merge, render, and present
 
@@ -186,18 +155,26 @@ independent; say so in the report summary.
     prefixed) so all paths are relative to the fuchsia.git root. Write one
     merged JSON object to `<out_dir>/review.json` with:
     - `decision`: `changes_requested` if any surviving finding is `blocking`
-      (and not `pre_existing`), `approved_with_suggestions` if there are only
-      suggestions (including `[Pre-existing]` findings), `approved` if there are
-      none, or `not_applicable` if there were no tasks (`retained_files` was
-      empty; `render_report.py` also re-derives `decision` from surviving
-      findings).
-    - `summary`: one paragraph summarizing the verified findings (noting how
-      many draft findings the challenger pruned in `standard`/`deep`, any
-      `[Pre-existing]` findings surfaced, and any reviewer that failed twice).
+      (and not `pre_existing` and `effort != "simplify"`),
+      `approved_with_suggestions` if there are only suggestions (including
+      `[Pre-existing]` and `code-simplification` findings), `approved` if there
+      are none, or `not_applicable` if there were no applicable tasks
+      (`retained_files` was empty or every Round-1 task returned `decision:
+      "not_applicable"`; `render_report.py` also re-derives `decision` from
+      surviving findings).
+    - `summary`: 1 to 2 short plain-English sentences covering what changed and
+      high-level coverage (such as clean production files, `[Pre-existing]`
+      notes, same-session self-review, or any reviewer that failed twice),
+      without repeating individual findings or challenger jargon in prose.
     - `scope`: the reviewed target per repository in scope (name both when the
       review spans both), for example `fuchsia.git` commit `1a2b3c4d` and
       `vendor/google` working copy (`git diff HEAD`).
-    - `effort`: `"quick"`, `"standard"`, or `"deep"`.
+    - `effort`: `"quick"`, `"standard"`, `"deep"`, or `"simplify"`.
+    - `challenger_kept` and `challenger_total`: optional non-negative integers
+      (`0 <= challenger_kept <= challenger_total`, with `challenger_total > 0`)
+      passed only when Round 2 ran (omitted in `quick` mode or when Round 1
+      produced zero candidate findings), summed across repositories where Round
+      2 ran.
     - `agent_skills`: the union of all reviewers' `agent_skills`.
     - `reviewed_files`: the union of all reviewers' `reviewed_files` (with
       `vendor/google/` prefixes applied).
@@ -206,23 +183,26 @@ independent; say so in the report summary.
     - `findings`: all surviving findings (with `vendor/google/` prefixes,
       `confidence`, and `pre_existing` applied).
 1.  Render the report with `--workspace` set to the fuchsia.git root,
-    `--effort=<quick|standard|deep>`, and `--min_confidence=90` (for `quick`) or
-    `--min_confidence=80` (for `standard` and `deep`):
+    `--effort=<quick|standard|deep|simplify>`, and `--min_confidence=90` (for
+    `quick`) or `--min_confidence=80` (for `standard`, `deep`, and `simplify`):
 
     ```bash
     fuchsia-vendored-python .agents/skills/review/scripts/render_report.py \
       --review_result_file=<out_dir>/review.json \
       --workspace=<fuchsia.git root> \
-      --effort=<quick|standard|deep> \
+      --effort=<quick|standard|deep|simplify> \
       --min_confidence=<90|80>
     ```
 
     If it reports a validation error, fix `review.json` and run it again.
 
 1.  Present the rendered Markdown to the user unchanged. Findings are numbered
-    in the report (`#1`, `#2`, ...); use those numbers when discussing fixes.
-1.  If the user asked to fix the findings, apply the fixes in each repository
-    with its VCS after presenting the report.
+    in the report (`1.`, `2.`, ...); use those numbers when discussing fixes.
+1.  All modes (including `simplify`) are read-only by default: never edit files
+    unless the user explicitly asked to apply/fix findings. If the user asked to
+    fix the findings, apply the fixes in each repository with its VCS after
+    presenting the report and verify with `fx build` (and affected `fx test`
+    targets when applicable).
 
 ## Notes
 

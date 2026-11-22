@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+# Ensure FIDL snippets used in documentation build.
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        "//examples/fidl/cpp/client:echo-cpp-client",
+        "//examples/fidl/cpp/client/wire:echo-cpp-wire-client",
+        "//examples/fidl/cpp/client_sync:echo-cpp-client-sync",
+        "//examples/fidl/cpp/client_sync/wire:echo-cpp-wire-client-sync",
+        "//examples/fidl/cpp/client_thread_safety:echo-cpp-client-shared",
+        "//examples/fidl/cpp/domain_objects:fidl-examples-domain-objects-cpp-test",
+        "//examples/fidl/cpp/request_pipelining:echo-launcher-cpp",
+        "//examples/fidl/cpp/server:echo-cpp-server",
+        "//examples/fidl/cpp/server/wire:echo-cpp-wire-server",
+        "//examples/fidl/cpp/server_async_completer:echo-cpp-async",
+        "//examples/fidl/cpp/services:echo-service-cpp-wire",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        "//examples/fidl/cpp/domain_objects:fidl-examples-domain-objects-cpp-test",
+
+        # Client and server tests are exercised in //examples/fidl/echo-realm.
+        "//examples/fidl/echo-realm:echo-cpp-async-test",
+        "//examples/fidl/echo-realm:echo-cpp-client-sync-test",
+        "//examples/fidl/echo-realm:echo-cpp-client-test",
+        "//examples/fidl/echo-realm:echo-cpp-wire-client-shared-test",
+        "//examples/fidl/echo-realm:echo-cpp-wire-client-sync-test",
+        "//examples/fidl/echo-realm:echo-cpp-wire-client-test",
+    ],
+    visibility = ["//examples/fidl:__pkg__"],
+)

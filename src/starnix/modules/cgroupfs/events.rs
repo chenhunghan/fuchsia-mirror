@@ -10,7 +10,6 @@
 //!
 //! Full details at https://docs.kernel.org/admin-guide/cgroup-v2.html#core-interface-files
 
-use std::borrow::Cow;
 use std::sync::{Arc, Weak};
 
 use starnix_core::task::{CgroupOps, CurrentTask};
@@ -65,11 +64,7 @@ impl FileOps for EventsFile {
             cgroup.is_populated() as u8,
             effective_freezer_state
         );
-        let content: Cow<'_, [u8]> = events_str.as_bytes().to_owned().into();
-        if offset >= content.len() {
-            return Ok(0);
-        }
-        data.write(&content[offset..])
+        data.write_tail(events_str.as_bytes(), offset)
     }
 
     fn query_events(

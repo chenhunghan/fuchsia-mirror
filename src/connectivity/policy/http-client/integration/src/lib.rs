@@ -18,6 +18,7 @@ use test_case::test_case;
 
 mod pkg;
 
+const HTTP_CLIENT_URL: &str = "http-client#meta/http-client.cm";
 const ROOT_DOCUMENT: &str = "Root document\n";
 
 fn big_vec() -> Vec<u8> {
@@ -127,7 +128,6 @@ async fn run_without_connecting<F: Future<Output = ()>>(
         }
     });
 
-    const HTTP_CLIENT_URL: &str = "#meta/http-client.cm";
     let http_client = ScopedInstance::new(behavior.into(), HTTP_CLIENT_URL.into())
         .await
         .expect("failed to create http-client");

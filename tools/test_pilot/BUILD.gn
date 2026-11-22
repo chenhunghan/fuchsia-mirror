@@ -19,8 +19,3 @@ if (is_host) {
     sources = [ "${host_tools_dir}/test-pilot" ]
   }
 }
-
-group("tests") {
-  testonly = true
-  deps = [ "//tools/test_pilot/test_pilot_lib:tests" ]
-}

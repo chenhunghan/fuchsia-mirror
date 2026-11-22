@@ -1,0 +1,111 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Aggregated into //src/ui:target_tests.
+test_suite(
+    name = "tests",
+    tests = [":scene_management_tests"],
+    visibility = ["//src/ui:__pkg__"],
+)
+
+_COMMON_SRCS = [
+    "src/display_metrics.rs",
+    "src/graphics_utils.rs",
+    "src/lib.rs",
+    "src/pointerinjector_config.rs",
+    "src/scene_manager.rs",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_PROC_MACRO_DEPS = [
+    "//third_party/rust_crates/vendor:async-trait",
+]
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = [
+    "//sdk/fidl/fuchsia.accessibility.scene:fuchsia.accessibility.scene_rust",
+    "//sdk/fidl/fuchsia.math:fuchsia.math_rust",
+    "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_rust",
+    "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_rust",
+    "//sdk/fidl/fuchsia.ui.display.singleton:fuchsia.ui.display.singleton_rust",
+    "//sdk/fidl/fuchsia.ui.pointerinjector:fuchsia.ui.pointerinjector_rust",
+    "//sdk/fidl/fuchsia.ui.pointerinjector.configuration:fuchsia.ui.pointerinjector.configuration_rust",
+    "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+    "//sdk/rust/zx",
+    "//src/lib/async-utils",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/trace/rust:trace",
+    "//src/lib/ui/flatland-frame-scheduling:flatland-frame-scheduling-lib",
+    "//src/lib/ui/fuchsia-scenic",
+    "//third_party/rust_crates/vendor:anyhow",
+    "//third_party/rust_crates/vendor:futures",
+    "//third_party/rust_crates/vendor:libm",
+    "//third_party/rust_crates/vendor:log",
+    "//third_party/rust_crates/vendor:num-traits",
+]
+
+rustc_library(
+    name = "scene_management",
+    srcs = _COMMON_SRCS,
+    edition = "2024",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    visibility = ["//src/ui/bin/scene_manager:__pkg__"],
+    deps = _COMMON_DEPS + [
+        "//src/ui/lib/input_pipeline",
+    ],
+)
+
+rustc_library(
+    name = "dso",
+    srcs = _COMMON_SRCS,
+    crate_features = ["dso"],
+    crate_name = "scene_management_dso",
+    edition = "2024",
+    proc_macro_deps = _COMMON_PROC_MACRO_DEPS,
+    visibility = ["//src/ui/bin/scene_manager:__pkg__"],
+    # :scene_management provides unit tests.
+    deps = _COMMON_DEPS + [
+        "//src/ui/lib/input_pipeline:dso",
+    ],
+)
+
+rustc_library(
+    name = "scene_management_mocks",
+    testonly = True,
+    srcs = [
+        "src/mocks/lib.rs",
+        "src/mocks/mock_scene_manager.rs",
+    ],
+    crate_root = "src/mocks/lib.rs",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    visibility = ["//src/ui/bin/scene_manager:__pkg__"],
+    deps = [
+        ":scene_management",
+        "//sdk/fidl/fuchsia.ui.app:fuchsia.ui.app_rust",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_rust",
+        "//src/lib/fuchsia-async",
+        "//src/ui/lib/input_pipeline",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+rustc_test(
+    name = "scene_management_test",
+    crate = ":scene_management",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/lib/fuchsia"],
+)
+
+fx_unittest_package(
+    name = "scene_management_tests",
+    unit_tests = [":scene_management_test"],
+)

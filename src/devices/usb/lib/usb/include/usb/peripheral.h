@@ -50,10 +50,17 @@
 // USB Product ID for CDC Ethernet, ADB, and Fastboot composite device.
 #define GOOGLE_USB_CDC_AND_ADB_AND_FASTBOOT_PID 0xA02C
 
+// USB Product ID for VSOCK Bridge and Fastboot composite device.
+#define GOOGLE_USB_FASTBOOT_AND_VSOCK_BRIDGE_PID 0xA02D
+
+// USB Product ID for CDC Ethernet, VSOCK Bridge, and Fastboot composite device.
+#define GOOGLE_USB_CDC_AND_FASTBOOT_AND_VSOCK_BRIDGE_PID 0xA02E
+
 // USB Product ID for Fastboot function
 #define GOOGLE_USB_FASTBOOT_PID 0x4ee0
 // LINT.ThenChange(
 //   //src/devices/usb/bin/usb-cli/src/config.rs,
+//   //src/devices/usb/drivers/usb-peripheral/config-parser.h,
 //   //src/tests/end_to_end/usb/lib/fuchsia_usb_pids.json,
 // )
 

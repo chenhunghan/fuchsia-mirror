@@ -7,6 +7,7 @@
 
 #include <fidl/fuchsia.sysmem2/cpp/wire.h>
 #include <lib/zx/result.h>
+#include <lib/zx/time.h>
 
 #include <cstdint>
 #include <span>
@@ -93,6 +94,10 @@ class DisplayEngineInterface {
   // OOT drivers must use the default implementation for SetMinimumRgb().
   // The interface is not stabilized and will change.
   virtual zx::result<> SetMinimumRgb(uint8_t minimum_rgb);
+
+  virtual void NotifyExpectedPresent(display::DisplayId display_id,
+                                     zx::time_monotonic expected_present_time,
+                                     zx::duration frame_interval);
 
  protected:
   // Destruction via base class pointer is not supported intentionally.

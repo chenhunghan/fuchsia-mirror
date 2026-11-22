@@ -7,6 +7,8 @@
 # Invokes a formatter as expected by golden_files() (i.e., via stdio).
 # If the supplied file does not exist, the given output path is `touch`ed.
 
+set -e
+
 depfile="$1"
 input="$2"
 output="$3"

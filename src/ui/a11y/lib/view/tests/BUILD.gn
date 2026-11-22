@@ -32,7 +32,7 @@ cc_test_executable("view_tests") {
     "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_hlcpp",
     "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/syslog/cpp",
     "//src/lib/fsl",
     "//src/lib/fxl/test:gtest_main",
@@ -90,12 +90,8 @@ fuchsia_test_package("flatland-a11y-view-test") {
       max_severity = "ERROR"
     }
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
   }
 }
@@ -138,12 +134,8 @@ fuchsia_test_package("flatland-scene-integration-test") {
       max_severity = "ERROR"
     }
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
   }
 }

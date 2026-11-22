@@ -10,7 +10,10 @@ load("@rules_license//rules:package_info.bzl", "package_info")
 load("@rules_rust//rust:defs.bzl", "rust_library")
 
 package(
-    default_package_metadata = [":package_info"],
+    default_package_metadata = [
+        "//:license",
+        ":package_info",
+    ],
     default_visibility = ["//visibility:public"],
 )
 
@@ -66,6 +69,6 @@ rust_library(
     }),
     version = "2.1.2+zstd.1.5.7",
     deps = [
-        "//third_party/rust_crates/forks/libc-0.2.190:libc",
+        "//third_party/rust_crates/forks/libc-0.2.191:libc",
     ],
 )

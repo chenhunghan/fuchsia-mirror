@@ -1,0 +1,49 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":stack_estimator_test"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+host_test_data_files(
+    name = "test_data",
+    srcs = [
+        "test_call_graph.json",
+        "test_combined.json",
+        "test_indirect.json",
+        "test_readelf_output.json",
+        "test_stack_sizes.json",
+    ],
+    dest_dir = "test_data",
+)
+
+# Pre-existing Pyrefly error in stack_estimator.py (_generate_output_json arg type); skip Pyrefly.
+host_py_test(
+    name = "stack_estimator_test",
+    srcs = [
+        "stack_estimator_test.py",
+        "//scripts:clang/stack_size_estimator/call_graph.py",
+        "//scripts:clang/stack_size_estimator/graph.py",
+        "//scripts:clang/stack_size_estimator/stack_estimator.py",
+    ],
+    imports = ["../../stack_size_estimator"],
+    main = "stack_estimator_test.py",
+    main_callable = "main",
+    tags = ["no-pyrefly"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    test_args = [
+        "--testdata-dir",
+        "test_data",
+    ],
+    test_data = [":test_data"],
+)

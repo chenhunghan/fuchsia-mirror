@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+idk_cc_source_library_zx(
+    name = "trace-reader",
+    srcs = [
+        "file_reader.cc",
+        "reader.cc",
+        "records.cc",
+    ],
+    hdrs = [
+        "include/trace-reader/file_reader.h",
+        "include/trace-reader/reader.h",
+        "include/trace-reader/records.h",
+    ],
+    api_area = "Diagnostics",
+    api_file_path = "//sdk/lib/trace-reader:trace-reader.api",
+    category = "partner",
+    idk_name = "trace-reader",
+    # Needed on host in Bazel for <zircon/assert.h>, <zircon/compiler.h>,
+    # <zircon/syscalls/object.h>, and <zircon/types.h> (https://fxbug.dev/429377203).
+    # @bazel2gn:skip
+    non_fuchsia_deps = [
+        "//sdk/lib/zircon-assert",
+        "//zircon/system/public",
+    ],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <trace-reader/reader.h> has #include <lib/fit/function.h>.
+        "//sdk/lib/fit",
+
+        # <trace-reader/records.h> has #include <trace-engine/types.h>.
+        "//zircon/system/ulib/trace-engine:trace-engine-headersonly",
+    ],
+)
+
+fx_cc_source_library_zx(
+    name = "trace-buffer-reader",
+    srcs = ["reader_internal.cc"],
+    hdrs = ["include/trace-reader/reader_internal.h"],
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <trace-reader/reader_internal.h> has #include <trace-reader/reader.h>.
+        ":trace-reader",
+
+        # <trace-reader/reader_internal.h> has #include <lib/fit/function.h>.
+        "//sdk/lib/fit",
+
+        # <trace-reader/reader_internal.h> has #include
+        # <trace-engine/buffer_internal.h>.
+        "//zircon/system/ulib/trace-engine:trace-engine-headers-for-reader",
+    ],
+)

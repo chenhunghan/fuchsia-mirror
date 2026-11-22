@@ -23,7 +23,6 @@ cc_test_executable("system_monitor_integration_test_bin") {
     "//sdk/lib/async",
     "//sdk/lib/async-loop:async-loop-cpp",
     "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/sys/cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/ui/bin/system_monitor:lib",
   ]
@@ -50,7 +49,6 @@ cc_test_executable("system_monitor_unittest_bin") {
   testonly = true
   sources = [ "system_monitor_unittest.cc" ]
   deps = [
-    "//sdk/lib/sys/cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture",
     "//src/ui/bin/system_monitor:lib",

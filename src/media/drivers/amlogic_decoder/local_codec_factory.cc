@@ -4,7 +4,6 @@
 
 #include "local_codec_factory.h"
 
-#include <lib/fidl/cpp/clone.h>
 #include <lib/fit/function.h>
 #include <lib/media/codec_impl/codec_admission_control.h>
 
@@ -23,9 +22,9 @@ namespace {
 // |fuchsia.mediacodec.DecoderProfileDescription|. Used so that we can construct values statically.
 struct DecoderDescription {
   struct ProfileDescription {
-    fuchsia::media::CodecProfile profile;
-    fuchsia::math::SizeU min_coded_size;
-    fuchsia::math::SizeU max_coded_size;
+    fuchsia_media::CodecProfile profile;
+    fuchsia_math::SizeU min_coded_size;
+    fuchsia_math::SizeU max_coded_size;
     bool allow_encryption;
     bool require_encryption;
     bool allow_input_protection;
@@ -42,9 +41,9 @@ const DecoderDescription kDecoderDescriptions[] = {
     {.mime_type = "video/h264",
      .is_hw = true,
      .profiles = {{
-         .profile = fuchsia::media::CodecProfile::H264PROFILE_MAIN,
-         .min_coded_size = {.width = 16u, .height = 16u},
-         .max_coded_size = {.width = 4096u, .height = 4096u},
+         .profile = fuchsia_media::CodecProfile::kH264ProfileMain,
+         .min_coded_size = fuchsia_math::SizeU(16u, 16u),
+         .max_coded_size = fuchsia_math::SizeU(4096u, 4096u),
          // The decoder itself does not yet support decryption. Rather the decoder supports
          // receiving input in protected memory.
          .allow_encryption = false,
@@ -55,9 +54,9 @@ const DecoderDescription kDecoderDescriptions[] = {
     {.mime_type = "video/h264",
      .is_hw = true,
      .profiles = {{
-         .profile = fuchsia::media::CodecProfile::H264PROFILE_HIGH,
-         .min_coded_size = {.width = 16u, .height = 16u},
-         .max_coded_size = {.width = 4096u, .height = 4096u},
+         .profile = fuchsia_media::CodecProfile::kH264ProfileHigh,
+         .min_coded_size = fuchsia_math::SizeU(16u, 16u),
+         .max_coded_size = fuchsia_math::SizeU(4096u, 4096u),
          // The decoder itself does not yet support decryption. Rather the decoder supports
          // receiving input in protected memory.
          .allow_encryption = false,
@@ -68,9 +67,9 @@ const DecoderDescription kDecoderDescriptions[] = {
     {.mime_type = "video/vp9",
      .is_hw = true,
      .profiles = {{
-         .profile = fuchsia::media::CodecProfile::VP9PROFILE_PROFILE0,
-         .min_coded_size = {.width = 2u, .height = 2u},
-         .max_coded_size = {.width = 4096u, .height = 4096u},
+         .profile = fuchsia_media::CodecProfile::kVp9ProfileProfile0,
+         .min_coded_size = fuchsia_math::SizeU(2u, 2u),
+         .max_coded_size = fuchsia_math::SizeU(4096u, 4096u),
          // The decoder itself does not yet support decryption. Rather the decoder supports
          // receiving input in protected memory.
          .allow_encryption = false,
@@ -82,7 +81,7 @@ const DecoderDescription kDecoderDescriptions[] = {
 
 struct CodecAdapterFactory {
   bool is_enabled;
-  fuchsia::mediacodec::CodecDescription description;
+  fuchsia_mediacodec::CodecDescription description;
 
   // This typedef is just for local readability here, not for use outside this
   // struct.
@@ -101,25 +100,24 @@ struct CodecAdapterFactory {
 const CodecAdapterFactory kCodecFactories[] = {
     {
         true,  // is_enabled
-        fuchsia::mediacodec::CodecDescription{
-            .codec_type = fuchsia::mediacodec::CodecType::DECODER,
+        fuchsia_mediacodec::CodecDescription(
+            /*codec_type=*/fuchsia_mediacodec::CodecType::kDecoder,
             // TODO(dustingreen): See TODO comments on this field in
             // codec_common.fidl.
-            .mime_type = "video/h264",
+            /*mime_type=*/"video/h264",
 
             // TODO(https://fxbug.dev/42084549): Make more of these true by implementing in
             // CodecAdapterH264Multi.
-            .can_stream_bytes_input = true,
-            .can_find_start = false,
-            .can_re_sync = false,
-            .will_report_all_detected_errors = false,
+            /*can_stream_bytes_input=*/true,
+            /*can_find_start=*/false,
+            /*can_re_sync=*/false,
+            /*will_report_all_detected_errors=*/false,
 
-            .is_hw = true,
+            /*is_hw=*/true,
 
             // TODO(dustingreen): Determine if this claim of "true" is actually
             // the case.
-            .split_header_handling = true,
-        },
+            /*split_header_handling=*/true),
         true,  // multi_instance
         [](std::mutex& lock, CodecAdapterEvents* events, DeviceCtx* device) {
           return std::make_unique<CodecAdapterH264Multi>(lock, events, device);
@@ -127,25 +125,24 @@ const CodecAdapterFactory kCodecFactories[] = {
     },
     {
         false,  // is_enabled
-        fuchsia::mediacodec::CodecDescription{
-            .codec_type = fuchsia::mediacodec::CodecType::DECODER,
+        fuchsia_mediacodec::CodecDescription(
+            /*codec_type=*/fuchsia_mediacodec::CodecType::kDecoder,
             // TODO(dustingreen): See TODO comments on this field in
             // codec_common.fidl.
-            .mime_type = "video/mpeg2",
+            /*mime_type=*/"video/mpeg2",
 
             // TODO(dustingreen): Determine which of these can safely indicate
             // more capability.
-            .can_stream_bytes_input = false,
-            .can_find_start = false,
-            .can_re_sync = false,
-            .will_report_all_detected_errors = false,
+            /*can_stream_bytes_input=*/false,
+            /*can_find_start=*/false,
+            /*can_re_sync=*/false,
+            /*will_report_all_detected_errors=*/false,
 
-            .is_hw = true,
+            /*is_hw=*/true,
 
             // TODO(dustingreen): Determine if this claim of "true" is actually
             // the case.
-            .split_header_handling = true,
-        },
+            /*split_header_handling=*/true),
         false,  // multi_instance
         [](std::mutex& lock, CodecAdapterEvents* events, DeviceCtx* device) {
           return std::make_unique<CodecAdapterMpeg2>(lock, events, device);
@@ -153,25 +150,24 @@ const CodecAdapterFactory kCodecFactories[] = {
     },
     {
         true,  // is_enabled
-        fuchsia::mediacodec::CodecDescription{
-            .codec_type = fuchsia::mediacodec::CodecType::DECODER,
+        fuchsia_mediacodec::CodecDescription(
+            /*codec_type=*/fuchsia_mediacodec::CodecType::kDecoder,
             // TODO(dustingreen): See TODO comments on this field in
             // codec_common.fidl.
-            .mime_type = "video/vp9",
+            /*mime_type=*/"video/vp9",
 
             // TODO(dustingreen): Determine which of these can safely indicate
             // more capability.
-            .can_stream_bytes_input = false,
-            .can_find_start = false,
-            .can_re_sync = false,
-            .will_report_all_detected_errors = false,
+            /*can_stream_bytes_input=*/false,
+            /*can_find_start=*/false,
+            /*can_re_sync=*/false,
+            /*will_report_all_detected_errors=*/false,
 
-            .is_hw = true,
+            /*is_hw=*/true,
 
             // TODO(dustingreen): Determine if this claim of "true" is actually
             // the case.
-            .split_header_handling = true,
-        },
+            /*split_header_handling=*/true),
         true,  // multi_instance
         [](std::mutex& lock, CodecAdapterEvents* events, DeviceCtx* device) {
           return std::make_unique<CodecAdapterVp9>(lock, events, device);
@@ -179,25 +175,24 @@ const CodecAdapterFactory kCodecFactories[] = {
     },
     {
         true,  // is_enabled
-        fuchsia::mediacodec::CodecDescription{
-            .codec_type = fuchsia::mediacodec::CodecType::DECODER,
+        fuchsia_mediacodec::CodecDescription(
+            /*codec_type=*/fuchsia_mediacodec::CodecType::kDecoder,
             // TODO(dustingreen): See TODO comments on this field in
             // codec_common.fidl.
-            .mime_type = "video/h264-multi/test/force-context-save-restore",
+            /*mime_type=*/"video/h264-multi/test/force-context-save-restore",
 
             // TODO(dustingreen): Determine which of these can safely indicate
             // more capability.
-            .can_stream_bytes_input = false,
-            .can_find_start = false,
-            .can_re_sync = false,
-            .will_report_all_detected_errors = false,
+            /*can_stream_bytes_input=*/false,
+            /*can_find_start=*/false,
+            /*can_re_sync=*/false,
+            /*will_report_all_detected_errors=*/false,
 
-            .is_hw = true,
+            /*is_hw=*/true,
 
             // TODO(dustingreen): Determine if this claim of "true" is actually
             // the case.
-            .split_header_handling = true,
-        },
+            /*split_header_handling=*/true),
         true,  // multi_instance
         [](std::mutex& lock, CodecAdapterEvents* events, DeviceCtx* device) {
           auto decoder = std::make_unique<CodecAdapterH264Multi>(lock, events, device);
@@ -210,25 +205,24 @@ const CodecAdapterFactory kCodecFactories[] = {
     },
     {
         true,  // is_enabled
-        fuchsia::mediacodec::CodecDescription{
-            .codec_type = fuchsia::mediacodec::CodecType::DECODER,
+        fuchsia_mediacodec::CodecDescription(
+            /*codec_type=*/fuchsia_mediacodec::CodecType::kDecoder,
             // TODO(dustingreen): See TODO comments on this field in
             // codec_common.fidl.
-            .mime_type = "video/vp9/test/force-context-save-restore",
+            /*mime_type=*/"video/vp9/test/force-context-save-restore",
 
             // TODO(dustingreen): Determine which of these can safely indicate
             // more capability.
-            .can_stream_bytes_input = false,
-            .can_find_start = false,
-            .can_re_sync = false,
-            .will_report_all_detected_errors = false,
+            /*can_stream_bytes_input=*/false,
+            /*can_find_start=*/false,
+            /*can_re_sync=*/false,
+            /*will_report_all_detected_errors=*/false,
 
-            .is_hw = true,
+            /*is_hw=*/true,
 
             // TODO(dustingreen): Determine if this claim of "true" is actually
             // the case.
-            .split_header_handling = true,
-        },
+            /*split_header_handling=*/true),
         true,  // multi_instance
         [](std::mutex& lock, CodecAdapterEvents* events, DeviceCtx* device) {
           auto decoder = std::make_unique<CodecAdapterVp9>(lock, events, device);
@@ -246,7 +240,6 @@ const CodecAdapterFactory kCodecFactories[] = {
 // device - associated device.
 LocalCodecFactory::LocalCodecFactory(DeviceCtx* device)
     : device_(device),
-      factory_binding_(this),
       closure_queue_(
           std::make_shared<ClosureQueue>(device->driver()->shared_fidl_loop()->dispatcher())) {
   // nothing else to do here
@@ -258,7 +251,7 @@ LocalCodecFactory::~LocalCodecFactory() {
   // We need ~factory_binding_ to run on the shared fidl sequence else it's not
   // safe to un-bind unilaterally (without the channel closing).  Unless not
   // bound in the first place.
-  ZX_ASSERT(device_->driver()->IsSharedFidlSynchronized() || !factory_binding_.is_bound());
+  ZX_ASSERT(device_->driver()->IsSharedFidlSynchronized() || !factory_binding_.has_value());
 
   // ~factory_binding_ here + fact that we're running on the shared fidl
   // sequence (if Bind() previously called) means error_handler won't be running
@@ -267,78 +260,82 @@ LocalCodecFactory::~LocalCodecFactory() {
 }
 
 void LocalCodecFactory::SetErrorHandler(fit::closure error_handler) {
-  ZX_DEBUG_ASSERT(!factory_binding_.is_bound());
-  factory_binding_.set_error_handler([this, error_handler = std::move(error_handler)](
-                                         zx_status_t status) mutable {
-    ZX_ASSERT(device_->driver()->IsSharedFidlSynchronized());
-    // This queues after the similar posting in CreateDecoder() (via
-    // TryAddCodec()), so that LocalCodecFactory won't get deleted until
-    // after previously-started TryAddCodec()s are done.
-    device_->codec_admission_control()->PostAfterPreviouslyStartedClosesDone(
-        [this, closure_queue = closure_queue_, error_handler = std::move(error_handler)]() mutable {
-          closure_queue->Enqueue([this, error_handler = std::move(error_handler)] {
-            ZX_ASSERT(device_->driver()->IsSharedFidlSynchronized());
-            error_handler();
-            // "this" is gone
-          });
-        });
-  });
+  ZX_DEBUG_ASSERT(!factory_binding_.has_value());
+  error_handler_ = std::move(error_handler);
   is_error_handler_set_ = true;
 }
 
 void LocalCodecFactory::Bind(zx::channel server_endpoint) {
   ZX_DEBUG_ASSERT(is_error_handler_set_);
-  ZX_DEBUG_ASSERT(!factory_binding_.is_bound());
+  ZX_DEBUG_ASSERT(!factory_binding_.has_value());
 
   // Go!  (immediately - dispatching occurs on the shared fidl sequence).
-  factory_binding_.Bind(std::move(server_endpoint),
-                        device_->driver()->shared_fidl_loop()->dispatcher());
+  factory_binding_.emplace(
+      device_->driver()->shared_fidl_loop()->dispatcher(),
+      fidl::ServerEnd<fuchsia_mediacodec::CodecFactory>(std::move(server_endpoint)), this,
+      [this](fidl::UnbindInfo info) {
+        ZX_ASSERT(device_->driver()->IsSharedFidlSynchronized());
+        auto error_handler = std::move(error_handler_);
+        if (!error_handler) {
+          return;
+        }
+        // This queues after the similar posting in CreateDecoder() (via
+        // TryAddCodec()), so that LocalCodecFactory won't get deleted until
+        // after previously-started TryAddCodec()s are done.
+        device_->codec_admission_control()->PostAfterPreviouslyStartedClosesDone(
+            [this, closure_queue = closure_queue_,
+             error_handler = std::move(error_handler)]() mutable {
+              closure_queue->Enqueue([this, error_handler = std::move(error_handler)] {
+                ZX_ASSERT(device_->driver()->IsSharedFidlSynchronized());
+                error_handler();
+                // "this" is gone
+              });
+            });
+      });
 }
 
 void LocalCodecFactory::GetDetailedCodecDescriptions(
-    GetDetailedCodecDescriptionsCallback callback) {
-  std::vector<fuchsia::mediacodec::DetailedCodecDescription> fidl_codec_descriptions;
+    GetDetailedCodecDescriptionsCompleter::Sync& completer) {
+  std::vector<fuchsia_mediacodec::DetailedCodecDescription> fidl_codec_descriptions;
 
   for (const auto& decoder_description : kDecoderDescriptions) {
-    fuchsia::mediacodec::DetailedCodecDescription fidl_codec_description;
-    fidl_codec_description.set_codec_type(::fuchsia::mediacodec::CodecType::DECODER);
-    fidl_codec_description.set_mime_type(decoder_description.mime_type);
-    fidl_codec_description.set_is_hw(decoder_description.is_hw);
+    fuchsia_mediacodec::DetailedCodecDescription fidl_codec_description;
+    fidl_codec_description.codec_type(fuchsia_mediacodec::CodecType::kDecoder);
+    fidl_codec_description.mime_type(decoder_description.mime_type);
+    fidl_codec_description.is_hw(decoder_description.is_hw);
 
-    std::vector<fuchsia::mediacodec::DecoderProfileDescription> fidl_profile_description_vector;
+    std::vector<fuchsia_mediacodec::DecoderProfileDescription> fidl_profile_description_vector;
     for (const auto& decoder_profile : decoder_description.profiles) {
-      fuchsia::mediacodec::DecoderProfileDescription profile_description;
-      profile_description.set_profile(decoder_profile.profile);
-      profile_description.set_min_image_size(decoder_profile.min_coded_size);
-      profile_description.set_max_image_size(decoder_profile.max_coded_size);
-      profile_description.set_allow_encryption(decoder_profile.allow_encryption);
-      profile_description.set_require_encryption(decoder_profile.require_encryption);
-      profile_description.set_allow_input_protection(decoder_profile.allow_input_protection);
-      profile_description.set_require_input_protection(decoder_profile.require_input_protection);
+      fuchsia_mediacodec::DecoderProfileDescription profile_description;
+      profile_description.profile(decoder_profile.profile);
+      profile_description.min_image_size(decoder_profile.min_coded_size);
+      profile_description.max_image_size(decoder_profile.max_coded_size);
+      profile_description.allow_encryption(decoder_profile.allow_encryption);
+      profile_description.require_encryption(decoder_profile.require_encryption);
+      profile_description.allow_input_protection(decoder_profile.allow_input_protection);
+      profile_description.require_input_protection(decoder_profile.require_input_protection);
       fidl_profile_description_vector.push_back(std::move(profile_description));
     }
 
-    fuchsia::mediacodec::ProfileDescriptions fidl_profile_descriptions;
-    fidl_profile_descriptions.set_decoder_profile_descriptions(
-        std::move(fidl_profile_description_vector));
-    fidl_codec_description.set_profile_descriptions(std::move(fidl_profile_descriptions));
+    fidl_codec_description.profile_descriptions(
+        fuchsia_mediacodec::ProfileDescriptions::WithDecoderProfileDescriptions(
+            std::move(fidl_profile_description_vector)));
 
     fidl_codec_descriptions.push_back(std::move(fidl_codec_description));
   }
 
-  fuchsia::mediacodec::CodecFactoryGetDetailedCodecDescriptionsResponse fidl_response;
-  fidl_response.set_codecs(std::move(fidl_codec_descriptions));
-  callback(std::move(fidl_response));
+  completer.Reply({{.codecs = std::move(fidl_codec_descriptions)}});
 }
 
-void LocalCodecFactory::CreateDecoder(
-    fuchsia::mediacodec::CreateDecoder_Params video_decoder_params,
-    ::fidl::InterfaceRequest<fuchsia::media::StreamProcessor> video_decoder) {
-  if (!video_decoder_params.has_input_details()) {
+void LocalCodecFactory::CreateDecoder(CreateDecoderRequest& request,
+                                      CreateDecoderCompleter::Sync& completer) {
+  auto video_decoder_params = std::move(request.decoder_params());
+  auto video_decoder = std::move(request.decoder());
+  if (!video_decoder_params.input_details().has_value()) {
     return;
   }
 
-  if (!video_decoder_params.input_details().has_mime_type()) {
+  if (!video_decoder_params.input_details()->mime_type().has_value()) {
     // Without mime_type we cannot search for a decoder.
     return;
   }
@@ -348,8 +345,8 @@ void LocalCodecFactory::CreateDecoder(
     if (!candidate_factory.is_enabled) {
       continue;
     }
-    if (candidate_factory.description.mime_type ==
-        video_decoder_params.input_details().mime_type()) {
+    if (candidate_factory.description.mime_type() ==
+        video_decoder_params.input_details()->mime_type().value()) {
       factory = &candidate_factory;
       break;
     }
@@ -366,7 +363,7 @@ void LocalCodecFactory::CreateDecoder(
     return;
   }
 
-  // We also post to the same queue in the set_error_handler() lambda, so that
+  // We also post to the same queue in the error handler lambda, so that
   // we know the LocalCodecFactory will remain alive until after this lambda
   // completes.
   //
@@ -387,7 +384,7 @@ void LocalCodecFactory::CreateDecoder(
       return;
     }
     auto sysmem = std::move(*allocator_client_result);
-    if (!sysmem) {
+    if (!sysmem.is_valid()) {
       return;
     }
 
@@ -422,35 +419,36 @@ void LocalCodecFactory::CreateDecoder(
       });
 }
 
-void LocalCodecFactory::CreateEncoder(
-    fuchsia::mediacodec::CreateEncoder_Params encoder_params,
-    ::fidl::InterfaceRequest<fuchsia::media::StreamProcessor> encoder_request) {
+void LocalCodecFactory::CreateEncoder(CreateEncoderRequest& request,
+                                      CreateEncoderCompleter::Sync& completer) {
   // We have no encoders to provide.
   lifetime_tracking_.clear();
-  // ~encoder_request
+  // ~request.encoder()
 }
 
-void LocalCodecFactory::AttachLifetimeTracking(zx::eventpair codec_end) {
+void LocalCodecFactory::AttachLifetimeTracking(AttachLifetimeTrackingRequest& request,
+                                               AttachLifetimeTrackingCompleter::Sync& completer) {
   ZX_DEBUG_ASSERT(lifetime_tracking_.size() <=
-                  fuchsia::mediacodec::CODEC_FACTORY_LIFETIME_TRACKING_EVENTPAIR_PER_CREATE_MAX);
+                  fuchsia_mediacodec::kCodecFactoryLifetimeTrackingEventpairPerCreateMax);
   if (lifetime_tracking_.size() >=
-      fuchsia::mediacodec::CODEC_FACTORY_LIFETIME_TRACKING_EVENTPAIR_PER_CREATE_MAX) {
-    factory_binding_.Close(ZX_ERR_BAD_STATE);
-    device_->device_fidl()->DeleteFactory(this);
+      fuchsia_mediacodec::kCodecFactoryLifetimeTrackingEventpairPerCreateMax) {
+    completer.Close(ZX_ERR_BAD_STATE);
     return;
   }
-  lifetime_tracking_.emplace_back(std::move(codec_end));
+  lifetime_tracking_.emplace_back(std::move(request.codec_end()));
 }
 
-void LocalCodecFactory::handle_unknown_method(uint64_t ordinal, bool method_has_response) {
+void LocalCodecFactory::handle_unknown_method(
+    fidl::UnknownMethodMetadata<fuchsia_mediacodec::CodecFactory> metadata,
+    fidl::UnknownMethodCompleter::Sync& completer) {
   // See src/media/codec/factory/codec_factory_impl.cc handle_unknown_method for why we handle
   // this way.
-  if (!method_has_response) {
+  if (metadata.unknown_method_type == fidl::UnknownMethodType::kOneWay) {
     // As a client author, if you see this message, please read the comments
     // in src/media/codec/factory/codec_factory_impl.cc handle_unknown_method.
-    LOG(WARNING, "unrecognized one-way message - ordinal: %" PRIx64, ordinal);
+    LOG(WARNING, "unrecognized one-way message - ordinal: %" PRIx64, metadata.method_ordinal);
   } else {
-    LOG(INFO, "unrecognized two-way message - ordinal: %" PRIx64, ordinal);
+    LOG(INFO, "unrecognized two-way message - ordinal: %" PRIx64, metadata.method_ordinal);
   }
 }
 

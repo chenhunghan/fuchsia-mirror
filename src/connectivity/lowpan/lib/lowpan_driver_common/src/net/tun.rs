@@ -101,7 +101,7 @@ impl TunNetworkInterface {
                 ftun::DevicePortConfig {
                     base: Some(ftun::BasePortConfig {
                         id: Some(TUN_PORT_ID),
-                        mtu: Some(Ipv6::MINIMUM_LINK_MTU.get()),
+                        mtu: Some(u32::from(Ipv6::MINIMUM_LINK_MTU)),
                         rx_types: Some(vec![fhwnet::FrameType::Ipv6, fhwnet::FrameType::Ipv4]),
                         tx_types: Some(vec![
                             fhwnet::FrameTypeSupport {

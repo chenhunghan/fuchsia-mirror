@@ -18,10 +18,10 @@ use assert_matches::assert_matches;
 use derivative::Derivative;
 use explicit::ResultExt as _;
 use netstack3_base::{
-    Control, EffectiveMss, HandshakeOptions, IcmpErrorCode, Instant, Milliseconds, Mss,
-    MssSizeLimiters, Options, Payload, PayloadLen as _, ResetOptions, RxTimestampOption,
-    SackBlocks, Segment, SegmentHeader, SegmentOptions, SeqNum, Timestamp, TimestampOption,
-    TxTimestampOption, UnscaledWindowSize, WindowScale, WindowSize,
+    Control, EffectiveMss, HandshakeOptions, Instant, Milliseconds, Mss, MssSizeLimiters, Options,
+    Payload, PayloadLen as _, ResetOptions, RxTimestampOption, SackBlocks, Segment, SegmentHeader,
+    SegmentOptions, SeqNum, Timestamp, TimestampOption, TxTimestampOption, UnscaledWindowSize,
+    WindowScale, WindowSize,
 };
 use netstack3_trace::{TraceResourceId, trace_instant};
 use packet_formats::utils::NonZeroDuration;
@@ -80,12 +80,21 @@ const SWS_PROBE_TIMEOUT: Duration = Duration::from_millis(100);
 /// Note that we use the inverse since we want to avoid floating point.
 const SWS_BUFFER_FACTOR: u32 = 2;
 
+/// The maximum payload of a single segment emitted with GSO.
+///
+/// Leaves room for the largest IPv4 and TCP headers such that the coalesced
+/// packet's total length still fits in the 16-bit IPv4 total length field,
+/// like Linux's `GSO_LEGACY_MAX_SIZE`. This is also conservative for IPv6,
+/// whose 16-bit payload length field excludes the 40-byte fixed header (allowing
+/// up to `u16::MAX - tcp::MAX_HDR_LEN` without extension headers).
+const TCP_GSO_MAX_PAYLOAD: u32 = u16::MAX as u32
+    - packet_formats::ipv4::MAX_HDR_LEN as u32
+    - packet_formats::tcp::MAX_HDR_LEN as u32;
+
 /// Whether Generic Segmentation Offload (GSO) is enabled when polling for
 /// outgoing segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Gso {
-    // TODO(https://fxbug.dev/565891068): Support and enable GSO.
-    #[expect(dead_code)]
     Enabled,
     Disabled,
 }
@@ -107,6 +116,37 @@ impl<P> TxSegment<P> {
     /// Creates a [`TxSegment`] for a segment that is transmitted as is.
     fn without_gso(segment: Segment<P>) -> Self {
         Self { segment, gso_size: None }
+    }
+}
+
+impl<P: Payload> TxSegment<P> {
+    /// Returns the number of wire segments this [`TxSegment`] will produce on
+    /// egress.
+    fn total_segments(&self) -> u64 {
+        match self.gso_size {
+            Some(gso_size) => {
+                u64::try_from(self.segment.data().len().div_ceil(usize::from(gso_size.get())))
+                    .expect("segment count fits in u64")
+            }
+            None => 1,
+        }
+    }
+
+    /// Returns the number of wire segments produced by this [`TxSegment`] whose
+    /// sequence numbers lie strictly before `seq`.
+    fn num_segments_before(&self, seq: SeqNum) -> u64 {
+        let this_seq = self.segment.header().seq;
+        let seq_max = this_seq + self.segment.len();
+        if !seq_max.after(seq) {
+            return self.total_segments();
+        }
+        // A GSO burst may straddle `seq`, sending whole `gso_size` segments
+        // strictly before `seq` while its final segment reaches past `seq`.
+        match (u32::try_from(seq - this_seq), self.gso_size) {
+            (Ok(overlap), Some(gso_size)) => u64::from(overlap / u32::from(gso_size.get()))
+                .min(self.total_segments().saturating_sub(1)),
+            (Err(TryFromIntError { .. }), _) | (Ok(_), None) => 0,
+        }
     }
 }
 
@@ -1355,7 +1395,7 @@ impl<I: Instant, R: ReceiveBuffer> Recv<I, R> {
         match self.timer {
             Some(ReceiveTimer::DelayedAck { at }) => (at <= now).then(|| {
                 self.timer = None;
-                self.make_ack(snd_max, now)
+                RecvSegmentArgumentsProvider::Recv(self).make_ack(snd_max, now)
             }),
             None => None,
         }
@@ -1392,19 +1432,6 @@ impl<I: Instant, R: ReceiveBuffer> Recv<I, R> {
     }
 }
 
-impl<'a, I: Instant, R: ReceiveBuffer> RecvSegmentArgumentsProvider<'a, I> for &'a mut Recv<I, R> {
-    fn take_rcv_segment_args(
-        self,
-    ) -> (SeqNum, UnscaledWindowSize, SackBlocks, &'a TimestampOptionState<I>) {
-        let WindowSizeCalculation { rcv_nxt, window_size, threshold: _ } =
-            self.calculate_window_size();
-        // A segment was produced, update the receiver with last info.
-        self.last_window_update = (rcv_nxt, window_size);
-        self.ts_opt.process_tx_ack(rcv_nxt);
-        (rcv_nxt, window_size >> self.wnd_scale, self.sack_blocks(), &self.ts_opt)
-    }
-}
-
 /// Cached parameters for states that do not have a full receive state machine.
 #[derive(Debug, Clone)]
 #[cfg_attr(test, derive(PartialEq, Eq))]
@@ -1423,16 +1450,6 @@ impl<I: Instant> RecvParams<I> {
 
     fn timestamp_option_for_non_ack(&self, now: I) -> Option<TimestampOption> {
         self.ts_opt.make_option_for_non_ack(now).map(TxTimestampOption::into)
-    }
-}
-
-impl<'a, I: Instant> RecvSegmentArgumentsProvider<'a, I> for &'a mut RecvParams<I> {
-    fn take_rcv_segment_args(
-        self,
-    ) -> (SeqNum, UnscaledWindowSize, SackBlocks, &'a TimestampOptionState<I>) {
-        // A segment was produced, update the receiver with last info.
-        self.ts_opt.process_tx_ack(self.ack);
-        (self.ack, self.wnd >> self.wnd_scale, SackBlocks::default(), &self.ts_opt)
     }
 }
 
@@ -1491,38 +1508,6 @@ impl<'a, I: Instant, R: ReceiveBuffer> CalculatedRecvParams<'a, I, R> {
     }
 }
 
-impl<'a, I: Instant, R> RecvSegmentArgumentsProvider<'a, I> for CalculatedRecvParams<'a, I, R> {
-    fn take_rcv_segment_args(
-        self,
-    ) -> (SeqNum, UnscaledWindowSize, SackBlocks, &'a TimestampOptionState<I>) {
-        let (ack, wnd, wnd_scale, sack_blocks, ts_opt) = match self {
-            Self::Recv {
-                backing_state,
-                cached_window: WindowSizeCalculation { rcv_nxt, window_size, threshold: _ },
-            } => {
-                // A segment was produced, update the receiver with last info.
-                backing_state.last_window_update = (rcv_nxt, window_size);
-                backing_state.ts_opt.process_tx_ack(rcv_nxt);
-                (
-                    rcv_nxt,
-                    window_size,
-                    backing_state.wnd_scale,
-                    backing_state.sack_blocks(),
-                    &backing_state.ts_opt,
-                )
-            }
-            Self::RecvParams {
-                backing_state: RecvParams { ack, wnd_scale, wnd, ts_opt, last_ack_recv: _ },
-            } => {
-                // A segment was produced, update the receiver with last info.
-                ts_opt.process_tx_ack(*ack);
-                (*ack, *wnd, *wnd_scale, SackBlocks::default(), &*ts_opt)
-            }
-        };
-        (ack, wnd >> wnd_scale, sack_blocks, ts_opt)
-    }
-}
-
 impl<'a, I: Instant, R: ReceiveBuffer> CalculatedRecvParams<'a, I, R> {
     fn from_recv(recv: &'a mut Recv<I, R>) -> Self {
         let cached_window = recv.calculate_window_size();
@@ -1530,24 +1515,88 @@ impl<'a, I: Instant, R: ReceiveBuffer> CalculatedRecvParams<'a, I, R> {
     }
 }
 
-trait RecvSegmentArgumentsProvider<'a, I: Instant>: Sized {
+/// Provides the receive state needed to construct outgoing segments.
+enum RecvSegmentArgumentsProvider<'a, I, R> {
+    Recv(&'a mut Recv<I, R>),
+    RecvParams(&'a mut RecvParams<I>),
+    CalculatedRecvParams(CalculatedRecvParams<'a, I, R>),
+}
+
+impl<'a, I, R> From<&'a mut Recv<I, R>> for RecvSegmentArgumentsProvider<'a, I, R> {
+    fn from(recv: &'a mut Recv<I, R>) -> Self {
+        Self::Recv(recv)
+    }
+}
+
+impl<'a, I, R> From<CalculatedRecvParams<'a, I, R>> for RecvSegmentArgumentsProvider<'a, I, R> {
+    fn from(params: CalculatedRecvParams<'a, I, R>) -> Self {
+        Self::CalculatedRecvParams(params)
+    }
+}
+
+impl<'a, I: Instant, R: ReceiveBuffer> RecvSegmentArgumentsProvider<'a, I, R> {
     /// Returns the receive state needed to construct a segment.
     ///
-    /// The implementer assumes that the parameters *will be sent to a peer* and
+    /// The provider assumes that the parameters *will be sent to a peer* and
     /// may cache the yielded values as the last sent receiver information.
     fn take_rcv_segment_args(
         self,
-    ) -> (SeqNum, UnscaledWindowSize, SackBlocks, &'a TimestampOptionState<I>);
+    ) -> (SeqNum, UnscaledWindowSize, SackBlocks, &'a TimestampOptionState<I>) {
+        match self {
+            Self::Recv(recv) => {
+                let WindowSizeCalculation { rcv_nxt, window_size, threshold: _ } =
+                    recv.calculate_window_size();
+                // A segment was produced, update the receiver with last info.
+                recv.last_window_update = (rcv_nxt, window_size);
+                recv.ts_opt.process_tx_ack(rcv_nxt);
+                (rcv_nxt, window_size >> recv.wnd_scale, recv.sack_blocks(), &recv.ts_opt)
+            }
+            Self::RecvParams(params) => {
+                // A segment was produced, update the receiver with last info.
+                params.ts_opt.process_tx_ack(params.ack);
+                (params.ack, params.wnd >> params.wnd_scale, SackBlocks::default(), &params.ts_opt)
+            }
+            Self::CalculatedRecvParams(calculated) => {
+                let (ack, wnd, wnd_scale, sack_blocks, ts_opt) = match calculated {
+                    CalculatedRecvParams::Recv {
+                        backing_state,
+                        cached_window: WindowSizeCalculation { rcv_nxt, window_size, threshold: _ },
+                    } => {
+                        // A segment was produced, update the receiver with last
+                        // info.
+                        backing_state.last_window_update = (rcv_nxt, window_size);
+                        backing_state.ts_opt.process_tx_ack(rcv_nxt);
+                        (
+                            rcv_nxt,
+                            window_size,
+                            backing_state.wnd_scale,
+                            backing_state.sack_blocks(),
+                            &backing_state.ts_opt,
+                        )
+                    }
+                    CalculatedRecvParams::RecvParams {
+                        backing_state: RecvParams { ack, wnd_scale, wnd, ts_opt, last_ack_recv: _ },
+                    } => {
+                        // A segment was produced, update the receiver with last
+                        // info.
+                        ts_opt.process_tx_ack(*ack);
+                        (*ack, *wnd, *wnd_scale, SackBlocks::default(), &*ts_opt)
+                    }
+                };
+                (ack, wnd >> wnd_scale, sack_blocks, ts_opt)
+            }
+        }
+    }
 
     /// Consumes this provider and calls `f` with the arguments that should be
     /// put in the segment to be returned by `f`.
     fn make_segment<
         P,
-        F: FnOnce(SeqNum, UnscaledWindowSize, SackBlocks, &TimestampOptionState<I>) -> Segment<P>,
+        F: FnOnce(SeqNum, UnscaledWindowSize, SackBlocks, &TimestampOptionState<I>) -> TxSegment<P>,
     >(
         self,
         f: F,
-    ) -> Segment<P> {
+    ) -> TxSegment<P> {
         let (ack, wnd, sack, ts_opt) = self.take_rcv_segment_args();
         f(ack, wnd, sack, ts_opt)
     }
@@ -1605,11 +1654,11 @@ impl<I: Instant, S: SendBuffer, const FIN_QUEUED: bool> Send<I, S, FIN_QUEUED> {
     /// Polls for new segments with enabled options.
     ///
     /// See [`SendInner::poll_send`].
-    fn poll_send<'a>(
+    fn poll_send<'a, R: ReceiveBuffer>(
         &mut self,
         id: &impl StateMachineDebugId,
         counters: &TcpCountersRefs<'_>,
-        rcv: impl RecvSegmentArgumentsProvider<'a, I>,
+        rcv: RecvSegmentArgumentsProvider<'a, I, R>,
         now: I,
         socket_options: &SocketOptions,
         gso: Gso,
@@ -1621,7 +1670,7 @@ impl<I: Instant, S: SendBuffer, const FIN_QUEUED: bool> Send<I, S, FIN_QUEUED> {
     /// Processes an incoming ACK.
     ///
     /// See [`SendInner::process_ack`].
-    fn process_ack<'a, R: RecvSegmentArgumentsProvider<'a, I>>(
+    fn process_ack<'a, R: ReceiveBuffer>(
         &mut self,
         id: &impl StateMachineDebugId,
         counters: &TcpCountersRefs<'_>,
@@ -1631,7 +1680,7 @@ impl<I: Instant, S: SendBuffer, const FIN_QUEUED: bool> Send<I, S, FIN_QUEUED> {
         seg_sack_blocks: &SackBlocks,
         rx_ts_opt: Option<RxTimestampOption>,
         pure_ack: bool,
-        rcv: R,
+        rcv: RecvSegmentArgumentsProvider<'a, I, R>,
         now: I,
         socket_options: &SocketOptions,
     ) -> (Option<Segment<()>>, DataAcked) {
@@ -1678,12 +1727,17 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
     /// When `gso` is [`Gso::Disabled`], the returned segment has payload size
     /// up to the calculated MSS for the connection (bounded by the send and
     /// congestion windows).
-    fn poll_send<'a>(
+    ///
+    /// When `gso` is [`Gso::Enabled`], the returned segment may carry multiple
+    /// segments worth of payload (up to [`TCP_GSO_MAX_PAYLOAD`]), in which
+    /// case [`TxSegment::gso_size`] is set and the IP layer must segment it on
+    /// egress.
+    fn poll_send<'a, R: ReceiveBuffer>(
         &mut self,
         fin_queued: bool,
         id: &impl StateMachineDebugId,
         counters: &TcpCountersRefs<'_>,
-        rcv: impl RecvSegmentArgumentsProvider<'a, I>,
+        rcv: RecvSegmentArgumentsProvider<'a, I, R>,
         now: I,
         SocketOptions {
             keep_alive,
@@ -1736,8 +1790,12 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
         } = self;
         let mss = congestion_control.mss();
 
-        // TODO(https://fxbug.dev/565891068): Support GSO in SendInner::poll_send.
-        assert_eq!(gso, Gso::Disabled);
+        // Prefer sending a single segment when `mss >= TCP_GSO_MAX_PAYLOAD`,
+        // since GSO segments would otherwise be smaller than `mss` and every
+        // segment would be subject to Nagle's algorithm and SWS avoidance.
+        let use_gso = matches!(gso, Gso::Enabled) && u32::from(mss) < TCP_GSO_MAX_PAYLOAD;
+        let new_data_limit =
+            if use_gso { NewDataLimit::AvailableWindow } else { NewDataLimit::SingleMss };
 
         // Find the sequence number for the next segment, we start with snd_nxt
         // unless a fast retransmit is needed.
@@ -1753,10 +1811,13 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
             *snd_nxt,
             *snd_wnd,
             readable_bytes,
-            // TODO(https://fxbug.dev/565891068): Allow multi-MSS new-data sends
-            // when GSO is enabled.
-            NewDataLimit::SingleMss,
+            new_data_limit,
         )?;
+        // Without GSO, segments are limited to one MSS by congestion control.
+        debug_assert!(
+            use_gso || congestion_limit <= u32::from(mss),
+            "congestion_limit ({congestion_limit}) exceeds mss ({mss:?}) without GSO"
+        );
 
         // First calculate the unused window, note that if our peer has shrank
         // their window (it is strongly discouraged), the following conversion
@@ -1769,13 +1830,15 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
             });
         let available = u32::try_from(readable_bytes + usize::from(fin_queued) - offset)
             .unwrap_or_else(|_| WindowSize::MAX.into());
-        // We can only send the minimum of the unused or congestion windows and
-        // the bytes that are available, additionally, if in zero window probe
-        // mode, allow at least one byte past the limit to be sent.
+        // We can only send the minimum of the unused or congestion windows, the
+        // bytes that are available, and with GSO, the maximum GSO payload (with
+        // the congestion limit and maximum payload applying only to payload
+        // bytes, not a FIN); additionally, if in zero window probe mode, allow
+        // at least one byte past the limit to be sent.
+        let bytes = available.saturating_sub(u32::from(fin_queued)).min(congestion_limit);
+        let bytes = if use_gso { bytes.min(TCP_GSO_MAX_PAYLOAD) } else { bytes };
         let can_send = unused_window
-            .min(congestion_limit)
-            .min(available)
-            .min(u32::from(mss))
+            .min(bytes + u32::from(fin_queued && bytes + 1 == available))
             .max(u32::from(zero_window_probe));
 
         if can_send == 0 {
@@ -1787,7 +1850,7 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
         }
 
         let has_fin = fin_queued && can_send == available;
-        let seg = buffer.peek_with(offset, |readable| {
+        let tx_seg = buffer.peek_with(offset, |readable| {
             let bytes_to_send = u32::min(
                 can_send - u32::from(has_fin),
                 u32::try_from(readable.len()).unwrap_or(u32::MAX),
@@ -1861,7 +1924,7 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
                 }
             }
 
-            let seg = rcv.make_segment(|ack, wnd, sack_blocks, ts_opt| {
+            let tx_seg = rcv.make_segment(|ack, wnd, sack_blocks, ts_opt| {
                 let options = SegmentOptions {
                     sack_blocks,
                     // Per RFC 7323 section 3.2:
@@ -1870,11 +1933,47 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
                     //   for the duration of the connection.
                     timestamp: ts_opt.make_option_for_ack(now).map(TxTimestampOption::into),
                 };
-                // We may have to trim bytes_to_send to account for options.
+                let payload_size = mss.payload_size(&options);
+                let payload_size_u32 = u32::from(payload_size.get());
                 let untrimmed_bytes_to_send = bytes_to_send;
-                let bytes_to_send = bytes_to_send.min(u32::from(mss.payload_size(&options).get()));
+                // With GSO, the segment is split into `payload_size`-sized
+                // segments on egress (every one of them carries the same
+                // options). Hold back a trailing partial segment if more
+                // buffered data or a FIN follows that can't be sent yet, or if
+                // Nagle's algorithm applies (`nagle_enabled && !has_fin`), so
+                // that the partial segment is subject to Netstack3's RFC 9293
+                // Nagle and SWS avoidance checks on the next poll as it would
+                // be without GSO.
+                let bytes_to_send = if use_gso
+                    && bytes_to_send > payload_size_u32
+                    && (bytes_to_send + u32::from(has_fin) < available
+                        || (*nagle_enabled && !has_fin))
+                {
+                    bytes_to_send - bytes_to_send % payload_size_u32
+                } else {
+                    bytes_to_send
+                };
+                // A send that fits in a single `mss`-sized segment is sent as a
+                // single segment even if options reduce the per-segment
+                // payload. Without GSO, `bytes_to_send <= mss`, so this is
+                // where the payload is trimmed to fit the options. With GSO,
+                // this keeps e.g. a loss-recovery send, which congestion
+                // control limits to 1 `mss`, from going out as two segments.
+                let bytes_to_send = if bytes_to_send <= u32::from(mss) {
+                    bytes_to_send.min(payload_size_u32)
+                } else {
+                    bytes_to_send
+                };
                 // If we trimmed data, the FIN can't go out with this segment.
                 let has_fin = has_fin && bytes_to_send == untrimmed_bytes_to_send;
+                let (gso_size, last_seg_seq) = if bytes_to_send > payload_size_u32 {
+                    (
+                        Some(payload_size),
+                        next_seg + (bytes_to_send - 1) / payload_size_u32 * payload_size_u32,
+                    )
+                } else {
+                    (None, next_seg)
+                };
 
                 // From https://datatracker.ietf.org/doc/html/rfc9293#section-3.9.1.2:
                 //
@@ -1890,11 +1989,17 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
                 // - If there's no more data available in the send buffer.
                 // - (borrowed from Linux behavior) it's been snd_wnd_max / 2 in
                 // sequence space number that we haven't pushed.
-                let no_more_data_to_send = u32::try_from(readable_bytes - offset)
-                    .is_ok_and(|avail| avail == bytes_to_send);
+                let no_more_data_to_send =
+                    u32::try_from(readable_bytes - offset).is_ok_and(|available_data| {
+                        // `available_data` excludes any queued FIN, unlike
+                        // `available`.
+                        available_data == bytes_to_send
+                    });
 
-                let periodic_push =
-                    next_seg.after_or_eq(*last_push + snd_wnd_max.halved().max(WindowSize::ONE));
+                // When GSO splits a burst, the PSH flag is only retained on the
+                // final segment in the burst.
+                let periodic_push = last_seg_seq
+                    .after_or_eq(*last_push + snd_wnd_max.halved().max(WindowSize::ONE));
                 let push = no_more_data_to_send || periodic_push;
                 if bytes_to_send > 0 {
                     *last_data_sent = Some(now);
@@ -1911,10 +2016,14 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
                     readable.slice(0..bytes_to_send),
                 );
                 debug_assert_eq!(discarded, 0);
-                seg
+                if seg.header().push {
+                    *last_push = last_seg_seq;
+                }
+                TxSegment { segment: seg, gso_size }
             });
-            Some(seg)
+            Some(tx_seg)
         })?;
+        let TxSegment { segment: seg, gso_size: _ } = &tx_seg;
         trace_instant!("tcp::Send::poll_send/segment",
             "id" => id.trace_id(),
             "seq" => u32::from(next_seg),
@@ -1929,64 +2038,25 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
         rtt_sampler.on_will_send_segment(now, next_seg..seq_max, *snd_max);
         congestion_control.on_will_send_segment(seg.len());
 
-        if seq_max.after(*snd_nxt) {
-            *snd_nxt = seq_max;
-        } else {
-            // Anything before SND.NXT is possibly a retransmission caused by
-            // loss recovery.
-            match loss_recovery {
-                LossRecoverySegment::Yes { rearm_retransmit: _, ref mode } => match mode {
-                    LossRecoveryMode::FastRecovery => counters.increment(|c| &c.fast_retransmits),
-                    LossRecoveryMode::SackRecovery => counters.increment(|c| &c.sack_retransmits),
-                },
-                LossRecoverySegment::No => (),
-            }
-        }
-        if seq_max.after(*snd_max) {
-            *snd_max = seq_max;
-        } else {
-            // Anything before SDN.MAX is considered a retransmitted segment.
-            counters.increment(|c| &c.retransmits);
-            if congestion_control.in_slow_start() {
-                counters.increment(|c| &c.slow_start_retransmits);
-            }
-        }
+        let SendSeqs { nxt, max } = SendSeqs { nxt: *snd_nxt, max: *snd_max }
+            .advance_and_update_counters(&tx_seg, &loss_recovery, congestion_control, counters);
+        *snd_nxt = nxt;
+        *snd_max = max;
 
-        // Record the last pushed segment.
-        if seg.header().push {
-            *last_push = seg.header().seq;
-        }
-
-        // Per https://tools.ietf.org/html/rfc6298#section-5:
-        //   (5.1) Every time a packet containing data is sent (including a
-        //         retransmission), if the timer is not running, start it
-        //         running so that it will expire after RTO seconds (for the
-        //         current value of RTO).
-        let update_rto = match timer {
-            Some(SendTimer::Retrans(_)) | Some(SendTimer::ZeroWindowProbe(_)) => {
-                // Loss recovery might have asked us to rearm either way, check
-                // with it.
-                match loss_recovery {
-                    LossRecoverySegment::Yes { rearm_retransmit, mode: _ } => rearm_retransmit,
-                    LossRecoverySegment::No => false,
-                }
-            }
-            Some(SendTimer::KeepAlive(_)) | Some(SendTimer::SWSProbe { at: _ }) | None => true,
-        };
-        if update_rto {
+        if should_rearm_retrans_timer(timer, &loss_recovery) {
             *timer = Some(SendTimer::Retrans(RetransTimer::new(
                 now,
                 rtt_estimator.rto(),
                 *user_timeout,
                 DEFAULT_MAX_RETRIES,
-            )))
+            )));
         }
-        Some(TxSegment::without_gso(seg))
+        Some(tx_seg)
     }
 
     /// Processes an incoming ACK and returns a segment if one needs to be sent,
     /// along with whether at least one byte of data was ACKed.
-    fn process_ack<'a, R: RecvSegmentArgumentsProvider<'a, I>>(
+    fn process_ack<'a, R: ReceiveBuffer>(
         &mut self,
         fin_queued: bool,
         id: &impl StateMachineDebugId,
@@ -1997,7 +2067,7 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
         seg_sack_blocks: &SackBlocks,
         rx_ts_opt: Option<RxTimestampOption>,
         pure_ack: bool,
-        rcv: R,
+        rcv: RecvSegmentArgumentsProvider<'a, I, R>,
         now: I,
         SocketOptions {
             keep_alive,
@@ -2229,7 +2299,11 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
         //    paths to the destination, each with a different PMTU.
         //
         // [RFC 8201 section 5.4]: https://datatracker.ietf.org/doc/html/rfc8201#section-5.4
-        if mss >= *self.congestion_control.mss().mss() {
+        let current_mss = *self.congestion_control.mss().mss();
+        if mss >= current_mss {
+            log::debug!(
+                "ignoring PMTU update: MSS {mss:?} does not reduce the current MSS {current_mss:?}"
+            );
             return ShouldRetransmit::No;
         }
 
@@ -2356,9 +2430,10 @@ impl<I: Instant, S: SendBuffer> SendInner<I, S> {
             None => {}
         }
 
-        // If there's an empty advertised window but we want to send data, we
-        // need to start Zero Window Probing, overwriting any previous timer.
-        if *snd_wnd == WindowSize::ZERO && readable_bytes > 0 {
+        // If there's an empty advertised window but we want to send data or a
+        // FIN, we need to start Zero Window Probing, overwriting any previous
+        // timer.
+        if *snd_wnd == WindowSize::ZERO && (readable_bytes > 0 || fin_queued) {
             match timer {
                 Some(SendTimer::ZeroWindowProbe(_)) => {}
                 _ => {
@@ -2399,6 +2474,83 @@ enum PollTimersOutcome {
     WaitForZeroWindowProbe,
     /// Proceed with polling for a segment to send.
     Proceed { zero_window_probe: bool, override_sws: bool },
+}
+
+/// Snapshot of `SND.NXT` and `SND.MAX` updated when sending a segment.
+#[derive(Clone, Copy)]
+#[must_use]
+struct SendSeqs {
+    nxt: SeqNum,
+    max: SeqNum,
+}
+
+impl SendSeqs {
+    fn advance_and_update_counters<I: Instant, P: Payload>(
+        self,
+        tx_seg: &TxSegment<P>,
+        loss_recovery: &LossRecoverySegment,
+        congestion_control: &CongestionControl<I>,
+        counters: &TcpCountersRefs<'_>,
+    ) -> Self {
+        let Self { mut nxt, mut max } = self;
+        let next_seg = tx_seg.segment.header().seq;
+        let seq_max = next_seg + tx_seg.segment.len();
+        if seq_max.after(nxt) {
+            nxt = seq_max;
+        } else {
+            // Anything before SND.NXT is possibly a retransmission caused by
+            // loss recovery.
+            match loss_recovery {
+                LossRecoverySegment::Yes { rearm_retransmit: _, mode } => {
+                    let segments = tx_seg.total_segments();
+                    match mode {
+                        LossRecoveryMode::FastRecovery => {
+                            counters.add(segments, |c| &c.fast_retransmits)
+                        }
+                        LossRecoveryMode::SackRecovery => {
+                            counters.add(segments, |c| &c.sack_retransmits)
+                        }
+                    }
+                }
+                LossRecoverySegment::No => (),
+            }
+        }
+        let retransmitted_segs = tx_seg.num_segments_before(max);
+        if seq_max.after(max) {
+            max = seq_max;
+        }
+        if retransmitted_segs > 0 {
+            counters.add(retransmitted_segs, |c| &c.retransmits);
+            if congestion_control.in_slow_start() {
+                counters.add(retransmitted_segs, |c| &c.slow_start_retransmits);
+            }
+        }
+        Self { nxt, max }
+    }
+}
+
+/// Returns whether the retransmission timer should be rearmed after sending a
+/// segment, as required by RFC 6298 or active loss recovery.
+fn should_rearm_retrans_timer<I>(
+    timer: &Option<SendTimer<I>>,
+    loss_recovery: &LossRecoverySegment,
+) -> bool {
+    // Per https://tools.ietf.org/html/rfc6298#section-5:
+    //   (5.1) Every time a packet containing data is sent (including a
+    //         retransmission), if the timer is not running, start it
+    //         running so that it will expire after RTO seconds (for the
+    //         current value of RTO).
+    match timer {
+        Some(SendTimer::Retrans(_)) | Some(SendTimer::ZeroWindowProbe(_)) => {
+            // Loss recovery might have asked us to rearm either way, check
+            // with it.
+            match loss_recovery {
+                LossRecoverySegment::Yes { rearm_retransmit, mode: _ } => *rearm_retransmit,
+                LossRecoverySegment::No => false,
+            }
+        }
+        Some(SendTimer::KeepAlive(_)) | Some(SendTimer::SWSProbe { at: _ }) | None => true,
+    }
 }
 
 impl<I: Instant, S: SendBuffer> Send<I, S, { FinQueued::NO }> {
@@ -2838,7 +2990,8 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                                         rcv: rcv.map(|s| s.with_buffer(rcv_buffer)),
                                     };
                                     let ack = Some(
-                                        established.rcv.make_ack(established.snd.max, now)
+                                        RecvSegmentArgumentsProvider::Recv(established.rcv.get_mut())
+                                            .make_ack(established.snd.max, now)
                                     );
                                     (State::Established(established), ack)
                                 })
@@ -2974,7 +3127,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                         // Enter quickacks when we receive a segment out of
                         // the window.
                         rcv.reset_quickacks();
-                        Some(rcv.make_ack(snd_max, now))
+                        Some(RecvSegmentArgumentsProvider::from(rcv).make_ack(snd_max, now))
                     };
 
                     return (segment, NewlyClosed::No);
@@ -3172,7 +3325,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                             seg_options.sack_blocks(),
                             seg_options.timestamp().map(RxTimestampOption::from),
                             pure_ack,
-                            rcv.get_mut(),
+                            rcv.get_mut().into(),
                             now,
                             options,
                         );
@@ -3191,7 +3344,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                             seg_options.sack_blocks(),
                             seg_options.timestamp().map(RxTimestampOption::from),
                             pure_ack,
-                            closed_rcv,
+                            RecvSegmentArgumentsProvider::<I, R>::RecvParams(closed_rcv),
                             now,
                             options,
                         );
@@ -3212,7 +3365,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                             seg_options.sack_blocks(),
                             seg_options.timestamp().map(RxTimestampOption::from),
                             pure_ack,
-                            closed_rcv,
+                            RecvSegmentArgumentsProvider::<I, R>::RecvParams(closed_rcv),
                             now,
                             options,
                         );
@@ -3241,7 +3394,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                             seg_options.sack_blocks(),
                             seg_options.timestamp().map(RxTimestampOption::from),
                             pure_ack,
-                            rcv.get_mut(),
+                            rcv.get_mut().into(),
                             now,
                             options,
                         );
@@ -3289,7 +3442,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                                 seg_options.sack_blocks(),
                                 seg_options.timestamp().map(RxTimestampOption::from),
                                 pure_ack,
-                                closed_rcv,
+                                RecvSegmentArgumentsProvider::<I, R>::RecvParams(closed_rcv),
                                 now,
                                 options,
                             )
@@ -3430,7 +3583,7 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                 let segment =
                     (!matches!(rcv.timer, Some(ReceiveTimer::DelayedAck { .. }))).then(|| {
                         rcv.remaining_quickacks = rcv.remaining_quickacks.saturating_sub(1);
-                        rcv.make_ack(snd_max, now)
+                        RecvSegmentArgumentsProvider::Recv(rcv).make_ack(snd_max, now)
                     });
                 (segment, rcv.nxt())
             };
@@ -3475,7 +3628,8 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                         // Per RFC 793 (https://tools.ietf.org/html/rfc793#page-75):
                         //   Enter the CLOSE-WAIT state.
                         let mut params = rcv.handle_fin();
-                        let segment = params.make_ack(snd_max, now);
+                        let segment = RecvSegmentArgumentsProvider::<I, R>::RecvParams(&mut params)
+                            .make_ack(snd_max, now);
                         let closewait =
                             CloseWait { snd: snd.to_ref().to_takeable(), closed_rcv: params };
                         assert_eq!(
@@ -3496,7 +3650,8 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                     }
                     State::FinWait1(FinWait1 { snd, rcv }) => {
                         let mut params = rcv.handle_fin();
-                        let segment = params.make_ack(snd_max, now);
+                        let segment = RecvSegmentArgumentsProvider::<I, R>::RecvParams(&mut params)
+                            .make_ack(snd_max, now);
                         let closing = Closing { snd: snd.to_ref().take(), closed_rcv: params };
                         assert_eq!(
                             self.transition_to_state(counters, State::Closing(closing)),
@@ -3506,7 +3661,8 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                     }
                     State::FinWait2(FinWait2 { last_seq, rcv, timeout_at: _, snd_info }) => {
                         let mut params = rcv.handle_fin();
-                        let segment = params.make_ack(snd_max, now);
+                        let segment = RecvSegmentArgumentsProvider::<I, R>::RecvParams(&mut params)
+                            .make_ack(snd_max, now);
                         let timewait = TimeWait {
                             last_seq: *last_seq,
                             expiry: new_time_wait_expiry(now),
@@ -3525,7 +3681,10 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
                         //     Remain in the TIME-WAIT state.  Restart the 2 MSL time-wait
                         //     timeout.
                         *expiry = new_time_wait_expiry(now);
-                        Some(closed_rcv.make_ack(*last_seq, now))
+                        Some(
+                            RecvSegmentArgumentsProvider::<I, R>::RecvParams(closed_rcv)
+                                .make_ack(*last_seq, now),
+                        )
                     }
                 }
             } else {
@@ -3608,7 +3767,16 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
             let seg = rcv
                 .poll_send(snd.max, now)
                 .map(|seg| TxSegment::without_gso(seg.into_empty()))
-                .or_else(|| snd.poll_send(id, counters, &mut *rcv, now, socket_options, gso));
+                .or_else(|| {
+                    snd.poll_send(
+                        id,
+                        counters,
+                        RecvSegmentArgumentsProvider::Recv(&mut *rcv),
+                        now,
+                        socket_options,
+                        gso,
+                    )
+                });
             // We must have piggybacked an ACK so we can cancel the timer now.
             if seg.is_some() && matches!(rcv.timer, Some(ReceiveTimer::DelayedAck { .. })) {
                 rcv.timer = None;
@@ -3678,13 +3846,23 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
             State::Established(Established { snd, rcv }) => {
                 poll_rcv_then_snd(id, counters, snd, rcv, now, socket_options, gso)
             }
-            State::CloseWait(CloseWait { snd, closed_rcv }) => {
-                snd.poll_send(id, counters, closed_rcv, now, socket_options, gso)
-            }
+            State::CloseWait(CloseWait { snd, closed_rcv }) => snd.poll_send(
+                id,
+                counters,
+                RecvSegmentArgumentsProvider::<I, R>::RecvParams(closed_rcv),
+                now,
+                socket_options,
+                gso,
+            ),
             State::LastAck(LastAck { snd, closed_rcv })
-            | State::Closing(Closing { snd, closed_rcv }) => {
-                snd.poll_send(id, counters, closed_rcv, now, socket_options, gso)
-            }
+            | State::Closing(Closing { snd, closed_rcv }) => snd.poll_send(
+                id,
+                counters,
+                RecvSegmentArgumentsProvider::<I, R>::RecvParams(closed_rcv),
+                now,
+                socket_options,
+                gso,
+            ),
             State::FinWait1(FinWait1 { snd, rcv }) => {
                 poll_rcv_then_snd(id, counters, snd, rcv, now, socket_options, gso)
             }
@@ -4072,15 +4250,12 @@ impl<I: Instant + 'static, R: ReceiveBuffer, S: SendBuffer, ActiveOpen: Debug>
     pub(super) fn on_icmp_error(
         &mut self,
         counters: &TcpCountersRefs<'_>,
-        err: IcmpErrorCode,
+        result: IcmpErrorResult,
         seq: SeqNum,
     ) -> (Option<ConnectionError>, NewlyClosed, ShouldRetransmit) {
-        let Some(result) = IcmpErrorResult::try_from_icmp_error(err) else {
-            return (None, NewlyClosed::No, ShouldRetransmit::No);
-        };
         let err = match result {
             IcmpErrorResult::ConnectionError(err) => err,
-            IcmpErrorResult::PmtuUpdate(mms) => {
+            IcmpErrorResult::PmtuUpdate { mtu: _, mms } => {
                 // Clamp the PMTU Update to the minimum allowed MSS.
                 let mss = Mss::from_mms(mms).unwrap_or(Mss::MIN);
                 let should_send = self.on_pmtu_update(mss, seq);
@@ -5207,13 +5382,14 @@ mod test {
                 },
             }),
         ] {
+            let fin = matches!(state, State::FinWait1(_) | State::Closing(_) | State::LastAck(_));
             assert_eq!(
                 state.poll_send_with_default_options(FakeInstant::default(), &counters.refs(),),
                 Some(Segment::new_assert_no_discard(
                     SegmentHeader {
                         seq: TEST_ISS + 1,
                         ack: Some(TEST_IRS + 1),
-                        control: None,
+                        control: fin.then_some(Control::FIN),
                         wnd: UnscaledWindowSize::from(0),
                         push: true,
                         options: DEFAULT_SEGMENT_OPTIONS.into(),
@@ -5234,7 +5410,8 @@ mod test {
                 ),
                 (None, None),
             );
-            assert_eq!(state.poll_send_at(), None);
+            // The retransmission timer stays armed for the unacknowledged FIN.
+            assert_eq!(state.poll_send_at(), fin.then_some(FakeInstant::from(Rto::DEFAULT.get())),);
             let snd = match state {
                 State::Closed(_)
                 | State::Listen(_)
@@ -5248,8 +5425,8 @@ mod test {
                 State::FinWait1(f) => f.snd.into_inner(),
                 State::Closing(c) => c.snd,
             };
-            assert_eq!(snd.nxt, TEST_ISS + 1 + TEST_BYTES.len());
-            assert_eq!(snd.max, TEST_ISS + 1 + TEST_BYTES.len());
+            assert_eq!(snd.nxt, TEST_ISS + 1 + TEST_BYTES.len() + usize::from(fin));
+            assert_eq!(snd.max, TEST_ISS + 1 + TEST_BYTES.len() + usize::from(fin));
             assert_eq!(snd.una, TEST_ISS + 1 + TEST_BYTES.len());
             assert_eq!(snd.buffer.limits().len, 0);
         }
@@ -7321,13 +7498,13 @@ mod test {
                 .poll_send(
                     &FakeStateMachineDebugId::default(),
                     &counters.refs(),
-                    &mut RecvParams {
+                    RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                         ack: TEST_ISS,
                         wnd: WindowSize::DEFAULT,
                         wnd_scale: WindowScale::ZERO,
                         ts_opt: default_ts_opt_state(TEST_IRS + 1),
                         last_ack_recv: None,
-                    },
+                    }),
                     FakeInstant::default(),
                     &SocketOptions::default_for_state_tests(),
                     Gso::Disabled,
@@ -7394,7 +7571,7 @@ mod test {
             .poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut rcv,
+                RecvSegmentArgumentsProvider::Recv(&mut rcv),
                 FakeInstant::default(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -7405,22 +7582,724 @@ mod test {
         assert_eq!(seg.header().control, None);
     }
 
+    #[test_case(true; "fin fits in window")]
+    #[test_case(false; "fin exceeds window")]
+    fn poll_send_fin_with_full_mss_segment(fin_fits_in_window: bool) {
+        let mss_len = usize::from(DEVICE_EFFECTIVE_MSS.get());
+        let buffer = RingBuffer::with_data(mss_len, &vec![0xaa; mss_len]);
+        let mut snd = Send::<FakeInstant, _, true>::default_for_test_at(TEST_ISS, buffer);
+        snd.0.wnd =
+            WindowSize::from_u32(u32::from(DEVICE_EFFECTIVE_MSS) + u32::from(fin_fits_in_window))
+                .unwrap();
+        let counters = FakeTcpCounters::default();
+        let mut recv_params = RecvParams {
+            ack: TEST_IRS + 1,
+            wnd: WindowSize::DEFAULT,
+            wnd_scale: WindowScale::ZERO,
+            ts_opt: default_ts_opt_state(TEST_IRS + 1),
+            last_ack_recv: None,
+        };
+        let mut segments = core::iter::from_fn(|| {
+            snd.poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Disabled,
+            )
+            .map(|TxSegment { segment: seg, gso_size: _ }| (seg.data().len(), seg.header().control))
+        });
+
+        // The FIN is sent with the last full-sized segment if it fits in the
+        // send window.
+        assert_eq!(segments.next(), Some((mss_len, fin_fits_in_window.then_some(Control::FIN))));
+        assert_eq!(segments.next(), None);
+    }
+
     #[test]
-    fn zero_window_probe() {
+    fn poll_send_fin_with_full_congestion_window() {
+        let mss_len = usize::from(DEVICE_EFFECTIVE_MSS.get());
+        // The initial congestion window is 10 MSS.
+        let cwnd_segments = 10;
+        let cwnd_len = cwnd_segments * mss_len;
+        let buffer = RingBuffer::with_data(cwnd_len, &vec![0xaa; cwnd_len]);
+        let mut snd = SendInner::default_for_test_at(TEST_ISS, buffer);
+        assert_eq!(
+            usize::try_from(snd.congestion_control.inspect_cwnd().cwnd()).unwrap(),
+            cwnd_len
+        );
+        let counters = FakeTcpCounters::default();
+        let mut recv_params = RecvParams {
+            ack: TEST_IRS + 1,
+            wnd: WindowSize::DEFAULT,
+            wnd_scale: WindowScale::ZERO,
+            ts_opt: default_ts_opt_state(TEST_IRS + 1),
+            last_ack_recv: None,
+        };
+        let poll_send = |snd: &mut SendInner<FakeInstant, RingBuffer>,
+                         recv_params: &mut RecvParams<FakeInstant>,
+                         fin_queued| {
+            snd.poll_send(
+                fin_queued,
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Disabled,
+            )
+            .map(|TxSegment { segment: seg, gso_size: _ }| (seg.data().len(), seg.header().control))
+        };
+
+        // Fill the congestion window.
+        for _ in 0..cwnd_segments {
+            assert_eq!(poll_send(&mut snd, &mut recv_params, false), Some((mss_len, None)));
+        }
+        assert_eq!(poll_send(&mut snd, &mut recv_params, false), None);
+
+        // A standalone FIN is sent with a full congestion window, but only if
+        // it fits in the send window.
+        let in_flight = u32::try_from(snd.nxt - snd.una).unwrap();
+        snd.wnd = WindowSize::from_u32(in_flight).unwrap();
+        assert_eq!(poll_send(&mut snd, &mut recv_params, true), None);
+
+        snd.wnd = WindowSize::from_u32(in_flight + 1).unwrap();
+        assert_eq!(poll_send(&mut snd, &mut recv_params, true), Some((0, Some(Control::FIN))));
+        assert_eq!(poll_send(&mut snd, &mut recv_params, true), None);
+    }
+
+    /// Parameters for `poll_send_with_gso_partial_segment`.
+    #[derive(Clone, Copy, Debug, Default)]
+    struct GsoPartialSegmentParams {
+        /// The number of readable bytes the send buffer withholds.
+        reserved_bytes: usize,
+        /// Whether a FIN is queued after the data.
+        fin_queued: bool,
+        /// Whether Nagle's algorithm is enabled.
+        nagle_enabled: bool,
+        /// Whether the send window lacks room for a FIN after the data.
+        wnd_excludes_fin: bool,
+    }
+
+    // Tests that a GSO segment is sized as a whole number of segments unless
+    // the trailing partial segment carries the last of the data and is not held
+    // back by Nagle's algorithm. With a non-zero `reserved_bytes`, the send
+    // buffer yields less data than is readable (which also clears `has_fin`),
+    // so Nagle must remain disabled here to verify `bytes_to_send +
+    // u32::from(has_fin) < available` rather than `*nagle_enabled && !has_fin`
+    // holds back the partial segment.
+    #[test_case(
+        2,
+        GsoPartialSegmentParams::default(),
+        true;
+        "end of data without nagle"
+    )]
+    #[test_case(
+        2,
+        GsoPartialSegmentParams { nagle_enabled: true, ..Default::default() },
+        false;
+        "end of data held back by nagle"
+    )]
+    #[test_case(
+        2,
+        GsoPartialSegmentParams { fin_queued: true, nagle_enabled: true, ..Default::default() },
+        true;
+        "end of data with fin bypasses nagle"
+    )]
+    #[test_case(
+        2,
+        GsoPartialSegmentParams { fin_queued: true, wnd_excludes_fin: true, ..Default::default() },
+        false;
+        "fin exceeds window"
+    )]
+    #[test_case(
+        2,
+        GsoPartialSegmentParams { reserved_bytes: 1, fin_queued: true, ..Default::default() },
+        false;
+        "reserving buffer"
+    )]
+    #[test_case(
+        2,
+        GsoPartialSegmentParams {
+            reserved_bytes: 1,
+            fin_queued: true,
+            nagle_enabled: true,
+            ..Default::default()
+        },
+        false;
+        "reserving buffer with nagle"
+    )]
+    #[test_case(
+        1,
+        GsoPartialSegmentParams::default(),
+        true;
+        "single segment end of data without nagle"
+    )]
+    #[test_case(
+        1,
+        GsoPartialSegmentParams { nagle_enabled: true, ..Default::default() },
+        false;
+        "single segment end of data held back by nagle"
+    )]
+    fn poll_send_with_gso_partial_segment(
+        full_segments: u32,
+        params: GsoPartialSegmentParams,
+        expect_all_data: bool,
+    ) {
+        fn check<const FIN_QUEUED: bool>(
+            full_segments: u32,
+            params: GsoPartialSegmentParams,
+            expect_all_data: bool,
+        ) {
+            let GsoPartialSegmentParams {
+                reserved_bytes,
+                fin_queued: _,
+                nagle_enabled,
+                wnd_excludes_fin,
+            } = params;
+            let mss = DEVICE_EFFECTIVE_MSS;
+            let mss_len = u32::from(mss.get());
+            let data_len = full_segments * mss_len + 10;
+            let data_len_usize = usize::try_from(data_len).unwrap();
+            let buffer = ReservingBuffer {
+                buffer: RingBuffer::with_data(data_len_usize, &vec![0xaa; data_len_usize]),
+                reserved_bytes,
+            };
+            let mut snd = Send::<FakeInstant, _, FIN_QUEUED>::default_for_test_at(TEST_ISS, buffer);
+            if wnd_excludes_fin {
+                snd.0.wnd = WindowSize::from_u32(data_len).unwrap();
+            }
+            let last_push_before = snd.last_push;
+            let counters = FakeTcpCounters::default();
+            let socket_options =
+                SocketOptions { nagle_enabled, ..SocketOptions::default_for_state_tests() };
+            let mut recv_params = RecvParams {
+                ack: TEST_IRS + 1,
+                wnd: WindowSize::DEFAULT,
+                wnd_scale: WindowScale::ZERO,
+                ts_opt: default_ts_opt_state(TEST_IRS + 1),
+                last_ack_recv: None,
+            };
+            let TxSegment { segment: seg, gso_size } = snd
+                .poll_send(
+                    &FakeStateMachineDebugId::default(),
+                    &counters.refs(),
+                    RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                    FakeInstant::default(),
+                    &socket_options,
+                    Gso::Enabled,
+                )
+                .expect("has data");
+            let seq = seg.header().seq;
+            if expect_all_data {
+                assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+                assert_eq!(seg.data().len(), data_len_usize);
+                assert_eq!(seg.header().control, FIN_QUEUED.then_some(Control::FIN));
+                assert!(seg.header().push);
+                // PSH is retained only on the final segment after splitting.
+                assert_eq!(snd.last_push, seq + full_segments * mss_len);
+            } else {
+                if full_segments > 1 {
+                    assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+                } else {
+                    assert_eq!(gso_size, None);
+                }
+                assert_eq!(seg.data().len(), usize::try_from(full_segments * mss_len).unwrap());
+                assert_eq!(seg.header().control, None);
+                assert!(!seg.header().push);
+                assert_eq!(snd.last_push, last_push_before);
+                // Without Nagle, the remaining readable bytes of a reserving
+                // buffer are legitimately sent on the next poll.
+                if reserved_bytes == 0 || nagle_enabled {
+                    // With the full segment(s) now unacknowledged in flight,
+                    // the held-back partial tail is suppressed by Nagle (when
+                    // enabled) or SWS avoidance (when the remaining window
+                    // excludes the FIN).
+                    assert_eq!(
+                        snd.poll_send(
+                            &FakeStateMachineDebugId::default(),
+                            &counters.refs(),
+                            RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(
+                                &mut recv_params
+                            ),
+                            FakeInstant::default(),
+                            &socket_options,
+                            Gso::Enabled,
+                        ),
+                        None
+                    );
+                }
+            }
+        }
+        match params.fin_queued {
+            true => check::<true>(full_segments, params, expect_all_data),
+            false => check::<false>(full_segments, params, expect_all_data),
+        }
+    }
+
+    #[test]
+    fn poll_send_with_gso() {
+        let mss = DEVICE_EFFECTIVE_MSS;
+        let mss_len = u32::from(mss.get());
+        // Have more data than the initial congestion window allows, plus a
+        // byte so that the data is never an exact multiple of the MSS.
+        let data_len = usize::try_from(20 * mss_len + 1).unwrap();
+        let mut snd = Send::<FakeInstant, _, false>::default_for_test_at(
+            TEST_ISS,
+            RingBuffer::with_data(data_len, &vec![0xaa; data_len]),
+        );
+        let counters = FakeTcpCounters::default();
+        let mut recv_params = RecvParams {
+            ack: TEST_IRS + 1,
+            wnd: WindowSize::DEFAULT,
+            wnd_scale: WindowScale::ZERO,
+            ts_opt: default_ts_opt_state(TEST_IRS + 1),
+            last_ack_recv: None,
+        };
+        let TxSegment { segment: seg, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("has data");
+        let seg_len = seg.len();
+        // The segment carries multiple whole MSS-sized segments worth of
+        // data, bounded by the congestion window.
+        assert!(seg_len > mss_len, "{seg_len} <= {mss_len}");
+        assert_eq!(seg_len % mss_len, 0, "{seg_len} isn't a multiple of {mss_len}");
+        assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+        assert_eq!(seg.header().seq, TEST_ISS);
+        assert!(!seg.header().push);
+        assert_eq!(snd.nxt, TEST_ISS + seg_len);
+        assert_eq!(snd.max, TEST_ISS + seg_len);
+        assert_matches!(snd.timer, Some(SendTimer::Retrans(_)));
+
+        // With the congestion window now full, no further data can be sent.
+        assert_eq!(
+            snd.poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            ),
+            None
+        );
+
+        // A single duplicate ACK triggers Limited Transmit (RFC 3042),
+        // which must send 1 MSS of new data rather than being suppressed by
+        // the uninflated congestion window.
+        let (una, nxt) = (snd.una, snd.nxt);
+        assert_eq!(snd.congestion_control.on_dup_ack(una, nxt), None);
+        let limited_transmit_seg = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("limited transmit should send 1 MSS");
+        assert_eq!(limited_transmit_seg.segment.header().seq, TEST_ISS + seg_len);
+        assert_eq!(limited_transmit_seg.segment.len(), mss_len);
+        assert_eq!(limited_transmit_seg.gso_size, None);
+        assert_eq!(snd.nxt, TEST_ISS + seg_len + mss_len);
+        assert_eq!(snd.max, TEST_ISS + seg_len + mss_len);
+
+        // Initial RTO clamps `cwnd` to 1 MSS, so the first retransmission is a
+        // single segment.
+        let nxt = snd.nxt;
+        snd.congestion_control.on_retransmission_timeout(nxt);
+        snd.nxt = snd.una;
+        let rto_seg = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("retransmit should send 1 MSS");
+        assert_eq!(rto_seg.segment.header().seq, TEST_ISS);
+        assert_eq!(rto_seg.segment.len(), mss_len);
+        assert_eq!(rto_seg.gso_size, None);
+        CounterExpectations { retransmits: 1, slow_start_retransmits: 1, ..Default::default() }
+            .assert_counters(&counters);
+
+        // When that retransmitted segment is ACKed, slow start opens `cwnd` to
+        // 2 MSS while `snd.nxt < snd.max`. Subsequent go-back-N retransmissions
+        // use GSO and count each split segment as a retransmit.
+        let ack = snd.una + mss_len;
+        let nxt = snd.nxt;
+        assert_eq!(snd.congestion_control.preprocess_ack(ack, nxt, &SackBlocks::EMPTY), None);
+        snd.buffer.mark_read(usize::try_from(mss_len).unwrap());
+        snd.una = ack;
+        let _: bool = snd.congestion_control.on_ack(
+            ack,
+            NonZeroU32::new(mss_len).unwrap(),
+            FakeInstant::default(),
+            Some(RTT),
+        );
+        let next_rto_seg = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("subsequent retransmit should use GSO");
+        assert_eq!(next_rto_seg.segment.header().seq, TEST_ISS + mss_len);
+        assert_eq!(next_rto_seg.segment.len(), 2 * mss_len);
+        assert_eq!(next_rto_seg.gso_size.map(NonZeroU16::get), Some(mss.get()));
+        CounterExpectations { retransmits: 3, slow_start_retransmits: 3, ..Default::default() }
+            .assert_counters(&counters);
+
+        // Acknowledge up to `snd.max - 2 * MSS` so `cwnd` opens past `ssthresh`
+        // (exiting slow start) and the next GSO burst straddles `snd.max`,
+        // retransmitting 2 segments before `prev_snd_max` and sending new
+        // segments after it. Only those 2 split segments count as retransmits
+        // and `snd.max` advances.
+        let prev_snd_max = snd.max;
+        let ack2 = prev_snd_max - 2 * mss_len;
+        let newly_acked = u32::try_from(ack2 - snd.una).unwrap();
+        let nxt = snd.nxt;
+        assert_eq!(snd.congestion_control.preprocess_ack(ack2, nxt, &SackBlocks::EMPTY), None);
+        snd.buffer.mark_read(usize::try_from(newly_acked).unwrap());
+        snd.una = ack2;
+        snd.nxt = ack2;
+        let _: bool = snd.congestion_control.on_ack(
+            ack2,
+            NonZeroU32::new(newly_acked).unwrap(),
+            FakeInstant::default(),
+            Some(RTT),
+        );
+        let ssthresh = snd.congestion_control.slow_start_threshold();
+        snd.congestion_control.inflate_cwnd(ssthresh);
+        assert!(!snd.congestion_control.in_slow_start());
+        let straddle_seg = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("straddling GSO burst");
+        let straddle_len = straddle_seg.segment.len();
+        assert_eq!(straddle_seg.segment.header().seq, ack2);
+        assert!(straddle_len > 2 * mss_len);
+        assert_eq!(straddle_seg.gso_size.map(NonZeroU16::get), Some(mss.get()));
+        assert_eq!(snd.max, ack2 + straddle_len);
+        CounterExpectations { retransmits: 5, slow_start_retransmits: 3, ..Default::default() }
+            .assert_counters(&counters);
+
+        // When all buffered data was previously sent (`prev_snd_max == TEST_ISS
+        // + 2 * MSS`) and a newly queued `FIN` makes the final segment in a
+        // 2-MSS GSO retransmit extend 1 sequence number past `prev_snd_max`,
+        // only the first segment counts as a retransmit. This matches non-GSO
+        // accounting, where a segment that advances `SND.MAX` (here, only by
+        // the `FIN`) is not counted.
+        let fin_data_len = usize::try_from(2 * mss_len).unwrap();
+        let mut fin_snd = Send::<FakeInstant, _, true>::default_for_test_at(
+            TEST_ISS,
+            RingBuffer::with_data(fin_data_len, &vec![0xdd; fin_data_len]),
+        );
+        fin_snd.max = TEST_ISS + 2 * mss_len;
+        let fin_counters = FakeTcpCounters::default();
+        let fin_seg = fin_snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &fin_counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("GSO burst with FIN");
+        assert_eq!(fin_seg.segment.header().control, Some(Control::FIN));
+        assert_eq!(fin_seg.gso_size.map(NonZeroU16::get), Some(mss.get()));
+        assert_eq!(fin_snd.max, TEST_ISS + 2 * mss_len + 1);
+        CounterExpectations { retransmits: 1, slow_start_retransmits: 1, ..Default::default() }
+            .assert_counters(&fin_counters);
+    }
+
+    // Tests that GSO bursts are capped by `TCP_GSO_MAX_PAYLOAD` when windows
+    // are larger.
+    #[test]
+    fn poll_send_with_gso_max_payload() {
+        let mss = DEVICE_EFFECTIVE_MSS;
+        let mss_len = u32::from(mss.get());
+        let data_len = usize::try_from(2 * TCP_GSO_MAX_PAYLOAD).unwrap();
+        let mut congestion_control = CongestionControl::cubic_with_mss(mss);
+        congestion_control.inflate_cwnd(2 * TCP_GSO_MAX_PAYLOAD);
+        let mut snd: Send<FakeInstant, _, false> = Send(SendInner {
+            congestion_control,
+            wnd: WindowSize::MAX,
+            wnd_max: WindowSize::MAX,
+            wnd_scale: WindowSize::MAX.scale(),
+            ..SendInner::default_for_test_at(
+                TEST_ISS,
+                RingBuffer::with_data(data_len, &vec![0xaa; data_len]),
+            )
+        });
+        let counters = FakeTcpCounters::default();
+        let mut recv_params = RecvParams {
+            ack: TEST_IRS + 1,
+            wnd: WindowSize::MAX,
+            wnd_scale: WindowSize::MAX.scale(),
+            ts_opt: default_ts_opt_state(TEST_IRS + 1),
+            last_ack_recv: None,
+        };
+        let TxSegment { segment: seg, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("has data");
+        assert_eq!(seg.len(), (TCP_GSO_MAX_PAYLOAD / mss_len) * mss_len);
+        assert!(seg.len() <= TCP_GSO_MAX_PAYLOAD);
+        assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+    }
+
+    // Tests that GSO is disabled when `mss >= TCP_GSO_MAX_PAYLOAD` (such as on
+    // 64KiB loopback interfaces) so variable-length options cannot produce a
+    // multi-segment packet exceeding `TCP_GSO_MAX_PAYLOAD`.
+    #[test]
+    fn poll_send_with_gso_mss_exceeds_max_payload() {
+        // Loopback-sized MSS (`65535 - 20 - 20 = 65495`, `EffectiveMss = 65483`
+        // with TSopt) exceeds `TCP_GSO_MAX_PAYLOAD` (`65415`). Even when SACK
+        // blocks shrink `payload_size` below `mss` at the end of the buffer,
+        // `poll_send` must disable GSO and trim to a single `payload_size`
+        // segment rather than emitting a `65483`-byte GSO burst.
+        let large_mss = EffectiveMss::from_mss(
+            Mss::new(u16::MAX - 40).unwrap(),
+            MssSizeLimiters { timestamp_enabled: true },
+        );
+        let large_mss_len = u32::from(large_mss.get());
+        assert!(large_mss_len > TCP_GSO_MAX_PAYLOAD);
+        let mut rcv = Recv::<FakeInstant, _>::default_for_test(RingBuffer::default());
+        let RecvBufferState::Open { buffer: _, assembler } = &mut rcv.buffer else {
+            unreachable!("receive buffer is open");
+        };
+        assert_eq!(assembler.insert(TEST_IRS + 11..TEST_IRS + 21), 0);
+        let payload_size = large_mss.payload_size(&SegmentOptions {
+            sack_blocks: rcv.sack_blocks(),
+            timestamp: Some(DEFAULT_ACK_TS_OPT),
+        });
+        assert!(u32::from(payload_size.get()) < large_mss_len);
+        assert!(u32::from(payload_size.get()) > TCP_GSO_MAX_PAYLOAD);
+
+        let buf_len = usize::try_from(large_mss_len).unwrap();
+        let mut large_snd: Send<FakeInstant, _, false> = Send(SendInner {
+            congestion_control: CongestionControl::cubic_with_mss(large_mss),
+            wnd: WindowSize::MAX,
+            wnd_max: WindowSize::MAX,
+            wnd_scale: WindowSize::MAX.scale(),
+            ..SendInner::default_for_test_at(
+                TEST_ISS,
+                RingBuffer::with_data(buf_len, &vec![0xbb; buf_len]),
+            )
+        });
+        let counters = FakeTcpCounters::default();
+        let TxSegment { segment: seg, gso_size } = large_snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::Recv(&mut rcv),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("has data");
+        assert_eq!(gso_size, None);
+        assert_eq!(seg.len(), u32::from(payload_size.get()));
+    }
+
+    // Tests that when options (SACK blocks) shrink the per-segment payload, a
+    // GSO burst limited to `n` MSS-sized segments is rounded down to a whole
+    // number of reduced-size segments by bytes, which may be more than `n`
+    // segments.
+    #[test]
+    fn poll_send_with_gso_options_reduce_payload() {
+        let mss = TEST_MSS;
+        let mss_len = u32::from(mss.get());
+        let mut rcv = Recv::<FakeInstant, _>::default_for_test(RingBuffer::default());
+        let RecvBufferState::Open { buffer: _, assembler } = &mut rcv.buffer else {
+            unreachable!("receive buffer is open");
+        };
+        assert_eq!(assembler.insert(TEST_IRS + 11..TEST_IRS + 21), 0);
+        let payload_size = mss.payload_size(&SegmentOptions {
+            sack_blocks: rcv.sack_blocks(),
+            timestamp: Some(DEFAULT_ACK_TS_OPT),
+        });
+        let payload_len = u32::from(payload_size.get());
+        assert!(payload_len < mss_len);
+        // Pick `n` such that `n * mss_len` bytes would round down to more than
+        // `n` segments of `payload_len`.
+        let n = payload_len / (mss_len - payload_len) + 1;
+        let window = n * mss_len;
+        assert!(window / payload_len > n);
+        assert!(window <= TCP_GSO_MAX_PAYLOAD);
+
+        let data_len = usize::try_from(2 * window).unwrap();
+        let mut congestion_control = CongestionControl::cubic_with_mss(mss);
+        congestion_control.inflate_cwnd(2 * window);
+        let mut snd: Send<FakeInstant, _, false> = Send(SendInner {
+            congestion_control,
+            wnd: WindowSize::from_u32(window).unwrap(),
+            wnd_max: WindowSize::from_u32(window).unwrap(),
+            ..SendInner::default_for_test_at(
+                TEST_ISS,
+                RingBuffer::with_data(data_len, &vec![0xaa; data_len]),
+            )
+        });
+        let counters = FakeTcpCounters::default();
+        let TxSegment { segment: seg, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::Recv(&mut rcv),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("has data");
+        assert_eq!(gso_size, Some(payload_size));
+        assert_eq!(seg.len(), (window / payload_len) * payload_len);
+    }
+
+    // Tests that when options (SACK blocks) shrink the per-segment payload, a
+    // GSO burst is sized as a whole number of the reduced payload size rather
+    // than being limited to a single segment, while loss-recovery
+    // retransmissions at `snd.nxt == snd.max` still trim to a single segment.
+    #[test]
+    fn poll_send_with_gso_and_sack_blocks() {
+        let mss = DEVICE_EFFECTIVE_MSS;
+        let mss_len = u32::from(mss.get());
+        let data_len = usize::try_from(20 * mss_len + 1).unwrap();
+        let mut snd = Send::<FakeInstant, _, false>::default_for_test_at(
+            TEST_ISS,
+            RingBuffer::with_data(data_len, &vec![0xaa; data_len]),
+        );
+        // Receiver with a hole in the assembler so outgoing segments carry a
+        // SACK block.
+        let mut rcv = Recv::<FakeInstant, _>::default_for_test(RingBuffer::default());
+        let RecvBufferState::Open { buffer: _, assembler } = &mut rcv.buffer else {
+            unreachable!("receive buffer is open");
+        };
+        assert_eq!(assembler.insert(TEST_IRS + 11..TEST_IRS + 21), 0);
+        let sack_blocks = rcv.sack_blocks();
+        assert_eq!(sack_blocks.as_slice().unwrap_or_default().len(), 1);
+        let payload_size =
+            mss.payload_size(&SegmentOptions { sack_blocks, timestamp: Some(DEFAULT_ACK_TS_OPT) });
+        let payload_len = u32::from(payload_size.get());
+        assert!(payload_len < mss_len);
+
+        let counters = FakeTcpCounters::default();
+        let TxSegment { segment: seg, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::Recv(&mut rcv),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("has data");
+        assert_eq!(seg.header().options.sack_blocks().as_slice().unwrap_or_default().len(), 1);
+        let seg_len = seg.len();
+        assert!(seg_len > payload_len, "{seg_len} <= {payload_len}");
+        assert_eq!(seg_len % payload_len, 0, "{seg_len} isn't a multiple of {payload_len}");
+        assert_eq!(gso_size, Some(payload_size));
+
+        // During Fast Recovery (`snd.nxt == snd.max`), when all `mss_len`
+        // buffered bytes are in flight (`bytes_to_send == remaining == mss_len`)
+        // and outgoing SACK blocks reduce `payload_size < mss_len`, the fast
+        // retransmit must be trimmed to `payload_len` without GSO rather than
+        // split into 2 segments.
+        let single_mss_usize = usize::try_from(mss_len).unwrap();
+        let mut recovery_snd = Send::<FakeInstant, _, false>::default_for_test_at(
+            TEST_ISS,
+            RingBuffer::with_data(single_mss_usize, &vec![0xcc; single_mss_usize]),
+        );
+        recovery_snd.nxt = TEST_ISS + mss_len;
+        recovery_snd.max = TEST_ISS + mss_len;
+        for n in 1..=DUP_ACK_THRESHOLD {
+            assert_eq!(
+                recovery_snd.congestion_control.on_dup_ack(TEST_ISS, TEST_ISS + mss_len),
+                (n == DUP_ACK_THRESHOLD).then_some(LossRecoveryMode::FastRecovery)
+            );
+        }
+        let TxSegment { segment: rexmit_seg, gso_size } = recovery_snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::Recv(&mut rcv),
+                FakeInstant::default(),
+                &SocketOptions::default_for_state_tests(),
+                Gso::Enabled,
+            )
+            .expect("fast retransmit should send 1 segment");
+        assert_eq!(gso_size, None);
+        assert_eq!(rexmit_seg.header().seq, TEST_ISS);
+        assert_eq!(rexmit_seg.len(), payload_len);
+        assert_eq!(counters.per_socket.fast_retransmits.get(), 1);
+    }
+
+    #[test_case(false; "data")]
+    #[test_case(true; "fin")]
+    fn zero_window_probe(fin_only: bool) {
         let mut clock = FakeInstantCtx::default();
         let counters = FakeTcpCounters::default();
         let mut send_buffer = RingBuffer::new(BUFFER_SIZE);
-        assert_eq!(send_buffer.enqueue_data(TEST_BYTES), TEST_BYTES.len());
-        // Set up the state machine to start with Established.
-        let mut state = State::Established(Established {
-            snd: Send(SendInner {
-                wnd: WindowSize::ZERO,
-                wnd_max: WindowSize::ZERO,
-                ..SendInner::default_for_test(send_buffer.clone())
-            })
-            .into(),
-            rcv: Recv::default_for_test(RingBuffer::new(BUFFER_SIZE)).into(),
+        if !fin_only {
+            assert_eq!(send_buffer.enqueue_data(TEST_BYTES), TEST_BYTES.len());
+        }
+        let snd = Send(SendInner {
+            wnd: WindowSize::ZERO,
+            wnd_max: WindowSize::ZERO,
+            ..SendInner::default_for_test(send_buffer)
         });
+        let rcv = Recv::default_for_test(RingBuffer::new(BUFFER_SIZE)).into();
+        let mut state: State<_, _, _, ()> = if fin_only {
+            State::FinWait1(FinWait1 { snd: snd.queue_fin().into(), rcv })
+        } else {
+            State::Established(Established { snd: snd.into(), rcv })
+        };
+        let expected_probe = |clock: &FakeInstantCtx| {
+            let options = default_segment_options(timestamp_now(clock), DEFAULT_TIMESTAMP);
+            if fin_only {
+                Segment::fin(
+                    TEST_ISS + 1,
+                    TEST_IRS + 1,
+                    UnscaledWindowSize::from_usize(BUFFER_SIZE),
+                    options,
+                )
+            } else {
+                Segment::with_data(
+                    TEST_ISS + 1,
+                    TEST_IRS + 1,
+                    UnscaledWindowSize::from_usize(BUFFER_SIZE),
+                    options,
+                    FragmentedPayload::new_contiguous(&TEST_BYTES[0..1]),
+                )
+            }
+        };
         assert_eq!(state.poll_send_with_default_options(clock.now(), &counters.refs()), None);
         assert_eq!(state.poll_send_at(), Some(clock.now().panicking_add(Rto::DEFAULT.get())));
 
@@ -7428,13 +8307,7 @@ mod test {
         clock.sleep(Rto::DEFAULT.get());
         assert_eq!(
             state.poll_send_with_default_options(clock.now(), &counters.refs()),
-            Some(Segment::with_data(
-                TEST_ISS + 1,
-                TEST_IRS + 1,
-                UnscaledWindowSize::from_usize(BUFFER_SIZE),
-                default_segment_options(timestamp_now(&clock), DEFAULT_TIMESTAMP),
-                FragmentedPayload::new_contiguous(&TEST_BYTES[0..1])
-            ))
+            Some(expected_probe(&clock))
         );
 
         // The receiver still has a zero window.
@@ -7463,13 +8336,7 @@ mod test {
         clock.sleep(Rto::DEFAULT.get());
         assert_eq!(
             state.poll_send_with_default_options(clock.now(), &counters.refs()),
-            Some(Segment::with_data(
-                TEST_ISS + 1,
-                TEST_IRS + 1,
-                UnscaledWindowSize::from_usize(BUFFER_SIZE),
-                default_segment_options(timestamp_now(&clock), DEFAULT_TIMESTAMP),
-                FragmentedPayload::new_contiguous(&TEST_BYTES[0..1])
-            ))
+            Some(expected_probe(&clock))
         );
 
         // The receiver now opens its receive window.
@@ -7477,7 +8344,7 @@ mod test {
             state.on_segment_with_default_options::<(), ClientlessBufferProvider>(
                 Segment::ack(
                     TEST_IRS + 1,
-                    TEST_ISS + 2,
+                    if fin_only { TEST_ISS + 1 } else { TEST_ISS + 2 },
                     UnscaledWindowSize::from(u16::MAX),
                     DEFAULT_SEGMENT_OPTIONS
                 ),
@@ -7487,9 +8354,10 @@ mod test {
             (None, None)
         );
         assert_eq!(state.poll_send_at(), None);
-        assert_eq!(
-            state.poll_send_with_default_options(clock.now(), &counters.refs()),
-            Some(Segment::new_assert_no_discard(
+        let expected_after_open = if fin_only {
+            expected_probe(&clock)
+        } else {
+            Segment::new_assert_no_discard(
                 SegmentHeader {
                     seq: TEST_ISS + 2,
                     ack: Some(TEST_IRS + 1),
@@ -7499,8 +8367,12 @@ mod test {
                     options: default_segment_options(timestamp_now(&clock), DEFAULT_TIMESTAMP)
                         .into(),
                 },
-                FragmentedPayload::new_contiguous(&TEST_BYTES[1..])
-            ))
+                FragmentedPayload::new_contiguous(&TEST_BYTES[1..]),
+            )
+        };
+        assert_eq!(
+            state.poll_send_with_default_options(clock.now(), &counters.refs()),
+            Some(expected_after_open)
         );
     }
 
@@ -8397,13 +9269,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 FakeInstant::default(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8517,13 +9389,14 @@ mod test {
                 },
             }),
         ] {
+            let fin = matches!(state, State::FinWait1(_) | State::Closing(_) | State::LastAck(_));
             assert_eq!(
                 state.poll_send_with_default_options(FakeInstant::default(), &counters.refs(),),
                 Some(Segment::new_assert_no_discard(
                     SegmentHeader {
                         seq: TEST_ISS + 1,
                         ack: Some(TEST_IRS + 1),
-                        control: None,
+                        control: fin.then_some(Control::FIN),
                         // We expect this to be wnd_size >> rcv_wnd_scale, which
                         // equals 1024 >> 8 == 4
                         wnd: UnscaledWindowSize::from(4),
@@ -8560,13 +9433,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8591,13 +9464,13 @@ mod test {
                 &SackBlocks::EMPTY,
                 None,
                 true,
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd_scale: WindowScale::default(),
                     wnd: WindowSize::DEFAULT,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default(),
             ),
@@ -8610,13 +9483,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8641,13 +9514,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8675,13 +9548,13 @@ mod test {
                     &SackBlocks::EMPTY,
                     None,
                     true,
-                    &mut RecvParams {
+                    RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                         ack: TEST_IRS + 1,
                         wnd_scale: WindowScale::default(),
                         wnd: WindowSize::DEFAULT,
                         ts_opt: default_ts_opt_state(TEST_IRS + 1),
                         last_ack_recv: None,
-                    },
+                    }),
                     clock.now(),
                     &SocketOptions::default(),
                 ),
@@ -8699,13 +9572,13 @@ mod test {
                     &SackBlocks::EMPTY,
                     None,
                     true,
-                    &mut RecvParams {
+                    RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                         ack: TEST_IRS + 1,
                         wnd_scale: WindowScale::default(),
                         wnd: WindowSize::DEFAULT,
                         ts_opt: default_ts_opt_state(TEST_IRS + 1),
                         last_ack_recv: None,
-                    },
+                    }),
                     clock.now(),
                     &SocketOptions::default(),
                 ),
@@ -8724,13 +9597,13 @@ mod test {
                     &SackBlocks::EMPTY,
                     None,
                     true,
-                    &mut RecvParams {
+                    RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                         ack: TEST_IRS + 1,
                         wnd_scale: WindowScale::default(),
                         wnd: WindowSize::DEFAULT,
                         ts_opt: default_ts_opt_state(TEST_IRS + 1),
                         last_ack_recv: None,
-                    },
+                    }),
                     clock.now(),
                     &SocketOptions::default(),
                 ),
@@ -8743,13 +9616,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8770,13 +9643,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8815,13 +9688,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -8857,13 +9730,13 @@ mod test {
                 &SackBlocks::EMPTY,
                 None,
                 true,
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd_scale: WindowScale::default(),
                     wnd: WindowSize::DEFAULT,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default(),
             ),
@@ -8876,13 +9749,13 @@ mod test {
             snd.poll_send(
                 &FakeStateMachineDebugId::default(),
                 &counters.refs(),
-                &mut RecvParams {
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut RecvParams {
                     ack: TEST_IRS + 1,
                     wnd: WindowSize::DEFAULT,
                     wnd_scale: WindowScale::ZERO,
                     ts_opt: default_ts_opt_state(TEST_IRS + 1),
                     last_ack_recv: None,
-                },
+                }),
                 clock.now(),
                 &SocketOptions::default_for_state_tests(),
                 Gso::Disabled,
@@ -10203,6 +11076,102 @@ mod test {
                 (None, None, DataAcked::Yes, NewlyClosed::No)
             );
         }
+    }
+
+    #[test]
+    fn push_segments_with_gso() {
+        let mss = EffectiveMss::from_mss(
+            DEVICE_MAXIMUM_SEGMENT_SIZE,
+            MssSizeLimiters { timestamp_enabled: true },
+        );
+        let mss_len = u32::from(mss);
+        // Set `wnd_max` to 8 MSS so periodic push triggers every 4 MSS, while
+        // `wnd` is 3 MSS so each GSO burst carries 3 MSS of data.
+        let snd_wnd_max = WindowSize::from_u32(8 * mss_len).unwrap();
+        let snd_wnd = WindowSize::from_u32(3 * mss_len).unwrap();
+        let mut snd: Send<_, _, false> = Send(SendInner {
+            congestion_control: CongestionControl::cubic_with_mss(mss),
+            wnd_scale: snd_wnd_max.scale(),
+            wnd: snd_wnd,
+            wnd_max: snd_wnd_max,
+            ..SendInner::default_for_test(RepeatingSendBuffer::new(12 * usize::from(mss)))
+        });
+        let socket_options = SocketOptions::default_for_state_tests();
+        let counters = FakeTcpCounters::default();
+        let mut recv_params = RecvParams {
+            ack: TEST_IRS + 1,
+            wnd: snd_wnd,
+            wnd_scale: snd_wnd_max.scale(),
+            ts_opt: default_ts_opt_state(TEST_IRS + 1),
+            last_ack_recv: None,
+        };
+
+        // First 3-MSS GSO burst (`0..3 * MSS`, final segment at `+2 * MSS`):
+        // `last_push` is `TEST_ISS + 1`, so `periodic_push` is false (`2 < 4`).
+        let TxSegment { segment: seg1, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &socket_options,
+                Gso::Enabled,
+            )
+            .expect("produces first GSO burst");
+        assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+        assert_eq!(seg1.len(), 3 * mss_len);
+        assert!(!seg1.header().push);
+        assert_eq!(snd.last_push, TEST_ISS + 1);
+
+        // Acknowledge the first burst and send a second 3-MSS GSO burst
+        // (`3..6 * MSS`, first segment at `+3 * MSS`, final segment at
+        // `+5 * MSS`). Even though the first segment is `< 4 * MSS` past
+        // `last_push`, the final segment (`+5 * MSS`) crosses the `4 * MSS`
+        // threshold so `periodic_push` triggers, and `last_push` is recorded at
+        // that final segment (`seg2.header().seq + 2 * mss_len`).
+        let ack1 = seg1.header().seq + seg1.len();
+        let nxt = snd.nxt;
+        assert_eq!(snd.congestion_control.preprocess_ack(ack1, nxt, &SackBlocks::EMPTY), None);
+        snd.buffer.mark_read(usize::try_from(seg1.len()).unwrap());
+        snd.una = ack1;
+        let TxSegment { segment: seg2, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &socket_options,
+                Gso::Enabled,
+            )
+            .expect("produces second GSO burst");
+        assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+        assert_eq!(seg2.len(), 3 * mss_len);
+        assert!(seg2.header().push);
+        assert_eq!(snd.last_push, seg2.header().seq + 2 * mss_len);
+
+        // Acknowledge the second burst and send a third 3-MSS GSO burst
+        // (`6..9 * MSS`, final segment at `+8 * MSS`). Because `last_push` was
+        // recorded at `+5 * MSS` rather than `+3 * MSS`, the final segment is
+        // only `3 * MSS` past `last_push` (`< 4 * MSS`), so `periodic_push` is
+        // false.
+        let ack2 = seg2.header().seq + seg2.len();
+        let nxt = snd.nxt;
+        assert_eq!(snd.congestion_control.preprocess_ack(ack2, nxt, &SackBlocks::EMPTY), None);
+        snd.buffer.mark_read(usize::try_from(seg2.len()).unwrap());
+        snd.una = ack2;
+        let TxSegment { segment: seg3, gso_size } = snd
+            .poll_send(
+                &FakeStateMachineDebugId::default(),
+                &counters.refs(),
+                RecvSegmentArgumentsProvider::<_, NullBuffer>::RecvParams(&mut recv_params),
+                FakeInstant::default(),
+                &socket_options,
+                Gso::Enabled,
+            )
+            .expect("produces third GSO burst");
+        assert_eq!(gso_size.map(NonZeroU16::get), Some(mss.get()));
+        assert_eq!(seg3.len(), 3 * mss_len);
+        assert!(!seg3.header().push);
     }
 
     #[test]

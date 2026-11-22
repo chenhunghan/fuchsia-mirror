@@ -16,6 +16,11 @@ if (is_host) {
     enable_mypy = false
     sources = [
       "bazel_minimality_test.py",
+      "build_verification_test.py",
+      "commit_message_format_test.py",
+      "empty_gn_targets_test.py",
+      "macro_api_parity_test.py",
+      "migration_sanity_test.py",
       "planter_check_lib.py",
       "planter_check_lib_test.py",
       "planter_version_test.py",
@@ -29,7 +34,10 @@ if (is_host) {
     sources = [
       "commit_message_format.sh",
       "cq_reachability.sh",
+      "package_boundary_labels.sh",
       "planter_check_lib.py",
+      "rdeps_lib.py",
+      "tests_json_parity.sh",
     ]
     outputs = [ "$target_out_dir/check_scripts/{{source_file_part}}" ]
   }

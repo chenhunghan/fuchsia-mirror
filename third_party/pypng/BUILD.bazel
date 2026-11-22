@@ -1,0 +1,29 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Bazel license metadata has no GN target equivalent.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:MIT"],
+    license_text = "src/LICENCE",
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether pypng should use
+# target_compatible_with (was not gated by if (is_host) in GN).
+py_library(
+    name = "pypng",
+    srcs = [
+        "src/code/png.py",
+    ],
+    imports = ["src/code"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/testing/end_to_end/honeydew:__subpackages__"],
+)

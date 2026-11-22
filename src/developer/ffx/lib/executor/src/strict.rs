@@ -37,7 +37,7 @@ pub type Config = std::collections::HashMap<String, String>;
 /// ffx --strict
 ///     --log-output stdout
 ///     --machine json
-///     --config emu.instance_dir=./Fuchsia/ffx/emu/instances
+///     --config shared_data=./Fuchsia/ffx/shared
 ///     --config ssh.priv="$HOME/.ssh/fuchsia_ed25519"
 ///     emu stop
 ///

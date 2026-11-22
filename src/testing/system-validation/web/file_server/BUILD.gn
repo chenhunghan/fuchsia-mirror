@@ -2,23 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-resource_group("server_data") {
-  files = [
-    {
-      source = "data/test_video.webm"
-      dest = "data/sample_video.webm"
-    },
-    {
-      source = "data/fuchsia_logo.png"
-      dest = "data/fuchsia_logo.png"
-    },
-    {
-      source = "data/100Hz_tone.mp3"
-      dest = "data/100Hz_tone.mp3"
-    },
-  ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -70,7 +53,23 @@ rustc_binary("bin") {
     "//src/lib/fuchsia",
     "//third_party/rust_crates:anyhow",
   ]
-  data_deps = [ ":server_data" ]
+}
+
+resource_group("server_data") {
+  files = [
+    {
+      source = "data/test_video.webm"
+      dest = "data/sample_video.webm"
+    },
+    {
+      source = "data/fuchsia_logo.png"
+      dest = "data/fuchsia_logo.png"
+    },
+    {
+      source = "data/100Hz_tone.mp3"
+      dest = "data/100Hz_tone.mp3"
+    },
+  ]
 }
 
 fuchsia_component_manifest("file_server_manifest") {
@@ -84,5 +83,8 @@ fuchsia_component("file_server_component") {
     ":*",
     "//src/testing/system-validation/web:*",
   ]
-  deps = [ ":bin" ]
+  deps = [
+    ":bin",
+    ":server_data",
+  ]
 }

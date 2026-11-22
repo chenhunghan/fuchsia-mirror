@@ -1,0 +1,135 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fidl_example_tester_cpp_wire_tests"],
+    visibility = ["//tools/fidl/example-tester:__pkg__"],
+)
+
+fx_packaged_binary(
+    name = "client_bin_packaged",
+    binary = "//tools/fidl/example-tester/example/cpp_wire/client:bin",
+    binary_name = "client_bin",
+)
+
+fx_component_manifest(
+    name = "client_manifest",
+    component_name = "example_tester_example_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//tools/fidl/example-tester/example:meta/client.cml",
+)
+
+fx_component(
+    name = "client",
+    compiled_manifest = ":client_manifest",
+    deps = [":client_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "proxy_bin_packaged",
+    binary = "//tools/fidl/example-tester/example/cpp_wire/proxy:bin",
+    binary_name = "proxy_bin",
+)
+
+fx_component_manifest(
+    name = "proxy_manifest",
+    component_name = "example_tester_example_proxy",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//tools/fidl/example-tester/example:meta/proxy.cml",
+)
+
+fx_component(
+    name = "proxy",
+    compiled_manifest = ":proxy_manifest",
+    deps = [":proxy_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "server_bin_packaged",
+    binary = "//tools/fidl/example-tester/example/cpp_wire/server:bin",
+    binary_name = "server_bin",
+)
+
+fx_component_manifest(
+    name = "server_manifest",
+    component_name = "example_tester_example_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "//tools/fidl/example-tester/example:meta/server.cml",
+)
+
+fx_component(
+    name = "server",
+    compiled_manifest = ":server_manifest",
+    deps = [":server_bin_packaged"],
+)
+
+fx_packaged_binary(
+    name = "runner_bin_packaged",
+    testonly = True,
+    binary = "//tools/fidl/example-tester/example/test:runner_bin",
+    binary_name = "runner_bin",
+)
+
+fx_component_manifest(
+    name = "test_manifest",
+    testonly = True,
+    component_name = "test",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "//tools/fidl/example-tester/example/test:meta/runner.cml",
+)
+
+fx_test_component(
+    name = "test",
+    compiled_manifest = ":test_manifest",
+    deps = [
+        ":runner_bin_packaged",
+        "//tools/fidl/example-tester/example/test/goldens:test_one_component_client",
+        "//tools/fidl/example-tester/example/test/goldens:test_three_component_client",
+        "//tools/fidl/example-tester/example/test/goldens:test_three_component_proxy",
+        "//tools/fidl/example-tester/example/test/goldens:test_three_component_server",
+        "//tools/fidl/example-tester/example/test/goldens:test_two_component_client",
+        "//tools/fidl/example-tester/example/test/goldens:test_two_component_server",
+    ],
+)
+
+fx_package(
+    name = "fidl_example_tester_cpp_wire_tests_pkg",
+    package_name = "fidl_example_tester_cpp_wire_tests",
+    testonly = True,
+    components = [
+        ":client",
+        ":proxy",
+        ":server",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+        "//tools/fidl/example-tester/example/realm",
+    ],
+    test_components = [":test"],
+)
+
+fx_test(
+    name = "fidl_example_tester_cpp_wire_tests",
+    package = ":fidl_example_tester_cpp_wire_tests_pkg",
+    visibility = ["//tools/fidl/example-tester:__pkg__"],
+)

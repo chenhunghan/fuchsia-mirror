@@ -113,7 +113,7 @@ mod tests {
     use async_utils::PollExt;
     use fidl::client::QueryResponseFut;
     use fidl::endpoints::Proxy;
-    use fidl_fuchsia_bluetooth_bredr::{ConnectionReceiverMarker, ConnectionReceiverProxy};
+    use fidl_fuchsia_bluetooth_bredr::{ConnectionReceiver2Marker, ConnectionReceiver2Proxy};
     use fuchsia_async as fasync;
     use std::pin::pin;
 
@@ -148,13 +148,13 @@ mod tests {
     fn make_token(
         responder: di::DeviceIdentificationSetDeviceIdentificationResponder,
         request_server: di::DeviceIdentificationHandleRequestStream,
-    ) -> (DeviceIdRequestToken, ConnectionReceiverProxy) {
+    ) -> (DeviceIdRequestToken, ConnectionReceiver2Proxy) {
         // Use a random service definition.
         let svc = DeviceIdentificationService::from_di_records(&vec![minimal_record(false)])
             .expect("should parse record");
         // A BR/EDR advertise request.
         let (connect_client, connect_stream) =
-            fidl::endpoints::create_proxy_and_stream::<ConnectionReceiverMarker>();
+            fidl::endpoints::create_proxy_and_stream::<ConnectionReceiver2Marker>();
         let advertisement = BrEdrProfileAdvertisement { connect_stream };
         let token = DeviceIdRequestToken::new(svc, advertisement, request_server, responder);
 

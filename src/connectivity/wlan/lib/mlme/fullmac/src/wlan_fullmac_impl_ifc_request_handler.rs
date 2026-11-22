@@ -43,6 +43,7 @@ fn handle_one_request(
         } => {
             driver_event_sink.0.send(FullmacDriverEvent::OnScheduledScanMatchesAvailable {
                 txn_id: payload.txn_id.context("missing txn_id")?,
+                wake_lease: payload.wake_lease,
             });
         }
         fidl_fullmac::WlanFullmacImplIfcRequest::OnScheduledScanStoppedByFirmware {
@@ -56,6 +57,7 @@ fn handle_one_request(
         fidl_fullmac::WlanFullmacImplIfcRequest::OnRssiThresholdBreached { payload, .. } => {
             driver_event_sink.0.send(FullmacDriverEvent::OnRssiThresholdBreached {
                 cur_rssi_dbm: payload.cur_rssi_dbm.context("missing cur_rssi_dbm")?,
+                wake_lease: payload.wake_lease,
             });
         }
         fidl_fullmac::WlanFullmacImplIfcRequest::ConnectConf { payload, responder } => {
@@ -70,16 +72,20 @@ fn handle_one_request(
                 conf: fullmac_to_mlme::convert_roam_confirm(payload)?,
             });
         }
-        fidl_fullmac::WlanFullmacImplIfcRequest::RoamStartInd { payload, responder } => {
+        fidl_fullmac::WlanFullmacImplIfcRequest::RoamStartInd { mut payload, responder } => {
             responder.send().context("Failed to respond to RoamStartInd")?;
+            let wake_lease = payload.wake_lease.take();
             driver_event_sink.0.send(FullmacDriverEvent::RoamStartInd {
                 ind: fullmac_to_mlme::convert_roam_start_indication(payload)?,
+                wake_lease,
             });
         }
-        fidl_fullmac::WlanFullmacImplIfcRequest::RoamResultInd { payload, responder } => {
+        fidl_fullmac::WlanFullmacImplIfcRequest::RoamResultInd { mut payload, responder } => {
             responder.send().context("Failed to respond to RoamResultInd")?;
+            let wake_lease = payload.wake_lease.take();
             driver_event_sink.0.send(FullmacDriverEvent::RoamResultInd {
                 ind: fullmac_to_mlme::convert_roam_result_indication(payload)?,
+                wake_lease,
             });
         }
         fidl_fullmac::WlanFullmacImplIfcRequest::AuthInd { payload, responder } => {
@@ -94,10 +100,12 @@ fn handle_one_request(
                 resp: fullmac_to_mlme::convert_deauthenticate_confirm(payload),
             });
         }
-        fidl_fullmac::WlanFullmacImplIfcRequest::DeauthInd { payload, responder } => {
+        fidl_fullmac::WlanFullmacImplIfcRequest::DeauthInd { mut payload, responder } => {
             responder.send().context("Failed to respond to DeauthInd")?;
+            let wake_lease = payload.wake_lease.take();
             driver_event_sink.0.send(FullmacDriverEvent::DeauthInd {
                 ind: fullmac_to_mlme::convert_deauthenticate_indication(payload)?,
+                wake_lease,
             });
         }
         fidl_fullmac::WlanFullmacImplIfcRequest::AssocInd { payload, responder } => {
@@ -112,10 +120,12 @@ fn handle_one_request(
                 resp: fullmac_to_mlme::convert_disassociate_confirm(payload),
             });
         }
-        fidl_fullmac::WlanFullmacImplIfcRequest::DisassocInd { payload, responder } => {
+        fidl_fullmac::WlanFullmacImplIfcRequest::DisassocInd { mut payload, responder } => {
             responder.send().context("Failed to respond to DisassocInd")?;
+            let wake_lease = payload.wake_lease.take();
             driver_event_sink.0.send(FullmacDriverEvent::DisassocInd {
                 ind: fullmac_to_mlme::convert_disassociate_indication(payload)?,
+                wake_lease,
             });
         }
         fidl_fullmac::WlanFullmacImplIfcRequest::StartConf { payload, responder } => {
@@ -142,16 +152,24 @@ fn handle_one_request(
                 resp: fullmac_to_mlme::convert_channel_switch_info(ind),
             });
         }
+        fidl_fullmac::WlanFullmacImplIfcRequest::OnMichaelMicFailure { payload, responder } => {
+            responder.send().context("Failed to respond to OnMichaelMicFailure")?;
+            driver_event_sink.0.send(FullmacDriverEvent::OnMichaelMicFailure {
+                ind: fullmac_to_mlme::convert_michael_mic_failure_indication(payload)?,
+            });
+        }
         fidl_fullmac::WlanFullmacImplIfcRequest::SignalReport { ind, responder } => {
             responder.send().context("Failed to respond to SignalReport")?;
             driver_event_sink.0.send(FullmacDriverEvent::SignalReport {
                 ind: fullmac_to_mlme::convert_signal_report_indication(ind),
             });
         }
-        fidl_fullmac::WlanFullmacImplIfcRequest::EapolInd { payload, responder } => {
+        fidl_fullmac::WlanFullmacImplIfcRequest::EapolInd { mut payload, responder } => {
             responder.send().context("Failed to respond to EapolInd")?;
+            let wake_lease = payload.wake_lease.take();
             driver_event_sink.0.send(FullmacDriverEvent::EapolInd {
                 ind: fullmac_to_mlme::convert_eapol_indication(payload)?,
+                wake_lease,
             });
         }
         fidl_fullmac::WlanFullmacImplIfcRequest::OnPmkAvailable { payload, responder } => {

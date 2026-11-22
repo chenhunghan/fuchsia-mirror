@@ -74,6 +74,13 @@ pub struct BestFit {
 }
 
 impl BestFit {
+    /// Returns true if `ranges` is non-empty. Note that un-reset overflow markers also keep
+    /// buckets in `ranges` even after their tracked extents have been allocated or removed, so
+    /// this is only exact right after `reset_overflow_markers` / rebuilding from disk.
+    pub fn has_free_space(&self) -> bool {
+        !self.ranges.is_empty()
+    }
+
     /// Tries to assign a set of contiguous `bytes` and returns the range, removing it
     /// from the pool of available bytes and returning it.
     ///
@@ -237,42 +244,51 @@ impl BestFit {
     /// map we only track ranges up to N blocks long (up to 2MB). Longer ranges
     /// are broken up into ranges of this size.
     pub fn free(&mut self, mut range: Range<u64>) -> Result<(), Error> {
-        // If there is a free range immediately before this one, merge with it.
-        let mut iter = self.by_end.range(range.start..);
-        let mut next_item = iter.next();
-        if let Some((&end, &start)) = next_item {
-            if end == range.start {
-                self.remove_range(start..end);
-                range.start = start;
-                iter = self.by_end.range(range.start + 1..);
-                next_item = iter.next();
-            } else if start < range.end {
-                // There exists a range already that overlaps with this.
-                // We have a double free or freeing of overlapping allocations.
-                // While the data-structure here remains valid after this error, the fact that
-                // an overlapping free was attempted indicates that the filesystem is not in a
-                // safe state to continue, thus we return "Inconsistent".
-                return Err(FxfsError::Inconsistent).context("overlapping free");
-            }
+        // Find the free ranges immediately before and after this one. Reject any overlap before
+        // mutating `self.ranges` / `self.by_end`.
+        let mut iter = self.by_end.range(range.start..).map(|(&end, &start)| start..end).peekable();
+        let prev = iter.next_if(|prev| prev.end == range.start);
+        let next = iter.next();
+        if next.as_ref().is_some_and(|next| next.start < range.end) {
+            // There exists a range already that overlaps with this.
+            // We have a double free or freeing of overlapping allocations.
+            // While the data-structure here remains valid after this error, the fact that
+            // an overlapping free was attempted indicates that the filesystem is not in a
+            // safe state to continue, thus we return "Inconsistent".
+            return Err(FxfsError::Inconsistent).context("overlapping free");
         }
-        // If there is a free range immediately after this one, merge with it.
-        if let Some((&end, &start)) = next_item {
-            if start == range.end {
-                self.remove_range(start..end);
-                range.end = end;
-            }
+        // Merge with adjacent free ranges.
+        if let Some(prev) = prev {
+            range.start = prev.start;
+            self.remove_range(prev);
+        }
+        if let Some(next) = next.filter(|next| next.start == range.end) {
+            range.end = next.end;
+            self.remove_range(next);
         }
 
-        // We don't allow ranges longer than maximum extent size, but if we need to split such
-        // a range, we want the smaller fragment to come first (pushing small fragments together at
-        // the start of the device).
-        while (range.end - range.start) >= DEFAULT_MAX_EXTENT_SIZE {
-            self.insert_range(range.end - DEFAULT_MAX_EXTENT_SIZE..range.end)
-                .context("adding max_extent_size fragment")?;
-            range.end -= DEFAULT_MAX_EXTENT_SIZE;
+        // We don't allow ranges longer than maximum extent size, so split into chunks of at most
+        // DEFAULT_MAX_EXTENT_SIZE. Keep any smaller remainder at the start of the range (pushing
+        // small fragments together at the start of the device).
+        let remainder = (range.end - range.start) % DEFAULT_MAX_EXTENT_SIZE;
+        if remainder > 0 {
+            self.insert_range(range.start..range.start + remainder)
+                .context("adding remainder range")?;
         }
-        if range.start < range.end {
-            self.insert_range(range).context("adding final range")?;
+        for start in (range.start + remainder..range.end).step_by(DEFAULT_MAX_EXTENT_SIZE as usize)
+        {
+            if let Some(bucket) = self.ranges.get_mut(&DEFAULT_MAX_EXTENT_SIZE) {
+                if bucket.offsets.len() >= max_entries(DEFAULT_MAX_EXTENT_SIZE)
+                    && bucket.offsets.last().is_some_and(|&last| start > last)
+                {
+                    // The bucket is full and this and all remaining chunks lie above every
+                    // retained offset, so each would be inserted and immediately evicted.
+                    bucket.overflow = true;
+                    break;
+                }
+            }
+            self.insert_range(start..start + DEFAULT_MAX_EXTENT_SIZE)
+                .context("adding max_extent_size fragment")?;
         }
         Ok(())
     }
@@ -333,7 +349,8 @@ mod test {
         let mut bestfit = BestFit::default();
         let end = DEFAULT_MAX_EXTENT_SIZE * (NUM_MAX_SIZED_EXTENTS_TO_KEEP + 1) + 10000;
         bestfit.free(0..end).unwrap();
-        // We slice from the back so we have sizes: 10000,2M,2M,2M,2M,...
+        // After the leading 10000-byte remainder, we retain 2MB slices from the front:
+        // 10000, 2M, 2M, 2M, ...
         // Free up most of the 2MB tail entries -- we just needed to trigger an overflow marker.
         bestfit.remove(DEFAULT_MAX_EXTENT_SIZE * 3 + 10000..end);
         // Free up the firs two slices worth. (This exercises unaligned removal.)
@@ -370,6 +387,19 @@ mod test {
         // didn't occur.
         bestfit.remove(0..32);
         assert_eq!(bestfit.allocate(32), Err(FxfsError::NoSpace));
+    }
+
+    #[test]
+    fn coalescing_free_rejects_overlap() {
+        let mut bestfit = BestFit::default();
+        bestfit.free(0..10).unwrap();
+        bestfit.free(20..30).unwrap();
+        // 10..25 is adjacent to 0..10 but overlaps 20..30, so it must be rejected without merging
+        // into 0..10.
+        assert!(bestfit.free(10..25).is_err());
+        assert_eq!(bestfit.allocate(10), Ok(0..10));
+        assert_eq!(bestfit.allocate(10), Ok(20..30));
+        assert_eq!(bestfit.allocate(1), Err(FxfsError::NoSpace));
     }
 
     #[test]
@@ -508,5 +538,36 @@ mod test {
         // In the actual bug, we would not add this until after the next flush, so
         // force_free would not return true and the only change would be the overflow marker.
         assert_eq!(bestfit.overflow_markers(), vec![262144, 524288, 786432]);
+    }
+
+    #[test]
+    fn max_range_overflow_stops_early() {
+        let mut bestfit = BestFit::default();
+        // Pre-populate the bucket with high offsets so a lower range displaces them before hitting
+        // the early-exit boundary.
+        let high_base = 1u64 << 40;
+        for i in 0..NUM_MAX_SIZED_EXTENTS_TO_KEEP {
+            let start = high_base + i * 2 * DEFAULT_MAX_EXTENT_SIZE;
+            bestfit.free(start..start + DEFAULT_MAX_EXTENT_SIZE).unwrap();
+        }
+        assert_eq!(bestfit.overflow_markers(), Vec::<u64>::new());
+
+        // Freeing a multi-GiB range below `high_base` with a non-aligned remainder must retain the
+        // smallest fragment, keep the lowest NUM_MAX_SIZED_EXTENTS_TO_KEEP full-sized chunks,
+        // displace the high-offset entries, and mark the full-sized bucket as overflowed.
+        let remainder = 12_288u64;
+        let huge_end = remainder + (1u64 << 34);
+        bestfit.free(0..huge_end).unwrap();
+        assert_eq!(bestfit.overflow_markers(), vec![DEFAULT_MAX_EXTENT_SIZE]);
+
+        assert_eq!(bestfit.allocate(remainder), Ok(0..remainder));
+        for i in 0..NUM_MAX_SIZED_EXTENTS_TO_KEEP {
+            let expected_start = remainder + i * DEFAULT_MAX_EXTENT_SIZE;
+            assert_eq!(
+                bestfit.allocate(DEFAULT_MAX_EXTENT_SIZE),
+                Ok(expected_start..expected_start + DEFAULT_MAX_EXTENT_SIZE)
+            );
+        }
+        assert_eq!(bestfit.allocate(DEFAULT_MAX_EXTENT_SIZE), Err(FxfsError::NotFound));
     }
 }

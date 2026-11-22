@@ -6,54 +6,56 @@
 
 use crate::kernel::deadline::Deadline;
 use crate::kernel::event::Event;
+use core::convert::Infallible;
+use core::pin::Pin;
 use core::sync::atomic::{AtomicBool, Ordering};
-use halt_token_bindings as bindings;
+use lazy_init::LazyInit;
+use pin_init::{PinInit, pin_data, pin_init};
 use zx_status::Status;
 
-// One of the members of the HaltToken has a zero sized type, which is not FFI compliant, however we
-// are separately validating the equivalence of the final layout of the C++ and Rust objects so
-// this is okay.
-#[allow(improper_ctypes)]
-unsafe extern "C" {
-    // C++ name mangled form of `HaltToken HaltToken::g_instance`
-    #[link_name = "_ZN9HaltToken10g_instanceE"]
-    static G_INSTANCE: HaltToken;
-}
+static G_INSTANCE: LazyInit<HaltToken> = LazyInit::uninit();
+
+init::lk_init_hook!(
+    halt_token,
+    |_level| {
+        // SAFETY: `LK_INIT_LEVEL_EARLIEST` primary-CPU hooks run once on the boot CPU with
+        // interrupts disabled before threading or secondary CPUs start, and `HaltToken::init` does
+        // not access `G_INSTANCE`, so `init_pin` is serialized with respect to all other accesses
+        // to `G_INSTANCE`.
+        let Ok(()) = unsafe { Pin::static_ref(&G_INSTANCE).init_pin(HaltToken::init()) };
+    },
+    init::LK_INIT_LEVEL_EARLIEST
+);
 
 /// This object is used to coordinate concurrent halt/reboot operations.
 ///
 /// The idea is there's a single resource, the "halt token" and only the holder of the token may
 /// initiate a halt/reboot (except for panics).
-#[repr(C)]
+#[pin_data]
 pub struct HaltToken {
     // No public construction. Global singleton only.
     halt_token_claimed: AtomicBool,
+    #[pin]
     ack_event: Event,
 }
 
-// Compile-time layout assertions against the C++ HaltToken type via bindgen.
-zr::static_assert!(
-    core::mem::size_of::<HaltToken>() == core::mem::size_of::<bindings::HaltToken>()
-);
-zr::static_assert!(
-    core::mem::align_of::<HaltToken>() == core::mem::align_of::<bindings::HaltToken>()
-);
-zr::static_assert!(
-    core::mem::offset_of!(HaltToken, halt_token_claimed)
-        == core::mem::offset_of!(bindings::HaltToken, halt_token_claimed_)
-);
-zr::static_assert!(
-    core::mem::offset_of!(HaltToken, ack_event)
-        == core::mem::offset_of!(bindings::HaltToken, ack_event_)
-);
-
 impl HaltToken {
+    /// In-place initializer for the global singleton.
+    fn init() -> impl PinInit<Self, Infallible> {
+        pin_init!(Self {
+            halt_token_claimed: AtomicBool::new(false),
+            ack_event <- Event::init_unsignaled(),
+        })
+    }
+
     /// Accessor for the global singleton halt token.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before initialization at `LK_INIT_LEVEL_EARLIEST`.
     #[inline]
     pub fn get() -> &'static Self {
-        // SAFETY: `G_INSTANCE` is the global `HaltToken::g_instance` singleton, and `HaltToken`
-        // uses interior synchronization (`AtomicBool` and `Event`) so shared access is safe.
-        unsafe { &G_INSTANCE }
+        G_INSTANCE.get()
     }
 
     /// The `take` method attempts to acquire the token and signals an irrevocable

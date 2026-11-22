@@ -8,9 +8,7 @@
 #include <fidl/fuchsia.hardware.usb.dci/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.descriptor/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.usb.phy/cpp/fidl.h>
-#include <lib/ddk/metadata.h>
 #include <lib/dma-buffer/buffer.h>
-#include <lib/driver/compat/cpp/metadata.h>
 #include <lib/driver/component/cpp/driver_export2.h>
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/driver/logging/cpp/logger.h>

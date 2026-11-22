@@ -1,0 +1,159 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+"""Base test class for Mobly tests requiring or optionally using a USB power hub fixture."""
+
+import logging
+import typing
+from collections.abc import Mapping
+
+import fuchsia_base_test
+from honeydew import errors
+from honeydew.auxiliary_devices.usb_power_hub import usb_power_hub
+from honeydew.fuchsia_device import fuchsia_device
+from honeydew.utils import common
+from mobly import signals
+
+from . import dmc_virtual_usb_hub, linux_virtual_usb_hub
+
+_LOGGER: logging.Logger = logging.getLogger(__name__)
+
+
+class UsbPowerHubBaseTest(fuchsia_base_test.FuchsiaBaseTest):
+    """Base test class for Mobly tests that bind to a USB power hub fixture.
+
+    Attributes:
+        USB_POWER_HUB_REQUIRED: If True, failure to acquire the USB power hub fixture
+            or power on the port will abort the test class (signals.TestAbortClass).
+            If False, failures are logged as warnings and the test proceeds with
+            _usb_power_hub set to None.
+    """
+
+    USB_POWER_HUB_REQUIRED: bool = True
+
+    _usb_power_hub: usb_power_hub.UsbPowerHub | None = None
+
+    def require_usb_power_hub(self) -> usb_power_hub.UsbPowerHub:
+        """Returns the bound hub, raising if it was not acquired."""
+        if self._usb_power_hub is None:
+            raise errors.HoneydewError(
+                "USB power hub fixture is required but was not acquired."
+            )
+        return self._usb_power_hub
+
+    def _lookup_usb_power_hub(
+        self, fx_device: fuchsia_device.FuchsiaDevice
+    ) -> usb_power_hub.UsbPowerHub | None:
+        """Returns the USB power hub to use for the given device.
+
+        Selected in this order:
+          1. The hub described by `auxiliary_devices.usb_power_hub` (`hardware`
+             + `implementation`) in the testbed config, when present.
+          2. The host side virtual hub, when the `use_virtual_usb_hub` param
+             is set. It needs no testbed config nor physical hub. The
+             `virtual_usb_hub_mode` param picks how it virtually disconnects
+             the device:
+               - "authorize" (default): toggles the device USB `authorized`
+                 attribute. At desk, the host toggles it directly; see
+                 //src/tests/end_to_end/usb/lib/disconnect/udev.sh for the
+                 host permissions it requires. In infra, DMC toggles it on the
+                 host the device is attached to.
+               - "reset": resets the device USB port with USBDEVFS_RESET.
+                 At desk, the host issues it directly; see udev.sh above. In
+                 infra, DMC issues it on the host the device is attached to.
+          3. DMC, for devices power cycled in infra.
+
+        Returns:
+            The USB power hub, or `None` if none apply.
+
+        Raises:
+            ValueError: If `virtual_usb_hub_mode` is not supported.
+        """
+        user_params = getattr(self, "user_params", {})
+        mode = user_params.get("virtual_usb_hub_mode", "authorize")
+        if mode not in ("authorize", "reset"):
+            raise ValueError(
+                f"Unsupported virtual_usb_hub_mode {mode!r}; expected "
+                "'authorize' or 'reset'."
+            )
+        if user_params.get("use_virtual_usb_hub"):
+            device_config: dict[str, object] = self._get_device_config(
+                controller_type="FuchsiaDevice",
+                identifier_key="name",
+                identifier_value=fx_device.device_name,
+            )
+            aux_devices = device_config.get("auxiliary_devices")
+            has_physical_hub = isinstance(aux_devices, Mapping) and bool(
+                aux_devices.get("usb_power_hub")
+            )
+            if not has_physical_hub:
+                if common.is_infra():
+                    if mode == "authorize":
+                        return dmc_virtual_usb_hub.DmcVirtualUsbPowerHub(
+                            device_name=fx_device.device_name
+                        )
+                    return dmc_virtual_usb_hub.DmcVirtualUsbResetPowerHub(
+                        device_name=fx_device.device_name
+                    )
+                virtual_hub_cls: type[
+                    linux_virtual_usb_hub.LinuxVirtualUsbAuthorizePowerHub
+                    | linux_virtual_usb_hub.LinuxVirtualUsbResetPowerHub
+                ]
+                if mode == "authorize":
+                    virtual_hub_cls = (
+                        linux_virtual_usb_hub.LinuxVirtualUsbAuthorizePowerHub
+                    )
+                else:
+                    virtual_hub_cls = (
+                        linux_virtual_usb_hub.LinuxVirtualUsbResetPowerHub
+                    )
+                # Disambiguates discovery when more than one Fuchsia USB device is
+                # attached to the same host.
+                target_serial = typing.cast(
+                    str | None, device_config.get("device_serial", None)
+                )
+                return virtual_hub_cls(
+                    target_serial=target_serial,
+                    # Retry settings for the bus ID lookup before each virtual
+                    # disconnect.
+                    bus_id_lookup_attempts=user_params.get(
+                        "bus_id_lookup_attempts",
+                        linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_ATTEMPTS,
+                    ),
+                    bus_id_lookup_timeout_sec=user_params.get(
+                        "bus_id_lookup_timeout_sec",
+                        linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_TIMEOUT_SEC,
+                    ),
+                )
+        return fx_device.usb.power_hub
+
+    async def setup_class(self) -> None:
+        """setup_class is called once before running tests."""
+        await super().setup_class()
+        hub = self._lookup_usb_power_hub(self.dut)
+        if hub is not None and hub is not self.dut.usb.power_hub:
+            self.dut.usb.set_power_hub(power_hub=hub)
+        if hub is None:
+            if self.USB_POWER_HUB_REQUIRED:
+                raise signals.TestAbortClass(
+                    f"USB power hub is not configured for {self.dut.device_name}."
+                )
+            _LOGGER.info(
+                "No USB power hub configured for %s. Proceeding without one.",
+                self.dut.device_name,
+            )
+            self._usb_power_hub = None
+        else:
+            self._usb_power_hub = hub
+            self._usb_power_hub.power_on()
+            _LOGGER.info("Successfully bound USB Power Hub fixture.")
+
+        await self.dut.wait_for_online()
+        self.dut.usb.after_connect()
+
+        # Pre-cache PersistentProperty values (board, product) while the device is online
+        # in Fuchsia OS. Because they are lazily evaluated, if left un-evaluated and the test
+        # later fails while in Fastboot mode or offline, Mobly's post-test metadata collection
+        # (test_summary.yaml) would trigger an FFX query against the offline device.
+        _ = self.dut.board
+        _ = self.dut.product

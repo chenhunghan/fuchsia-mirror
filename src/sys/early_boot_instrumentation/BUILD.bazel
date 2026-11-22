@@ -1,0 +1,179 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":early-boot-instrumentation-tests_test"],
+    visibility = ["//src/sys:__pkg__"],
+)
+
+fx_cc_library(
+    name = "coverage-source",
+    testonly = True,
+    srcs = ["coverage_source.cc"],
+    hdrs = ["coverage_source.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        # coverage_source.cc includes <fidl/fuchsia.io/cpp/wire_test_base.h>,
+        # which is in the testonly :fuchsia.io_cpp_testing target.
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_testing",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/zbi-format:internal",
+        "//src/lib/zbitl",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/lib/vfs/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "app",
+    testonly = True,
+    srcs = ["main.cc"],
+    tags = ["manual"],
+    deps = [
+        ":coverage-source",
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl:fxl_cli",
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "app_packaged",
+    testonly = True,
+    binary = ":app",
+    binary_name = "app",
+)
+
+fx_component_manifest(
+    name = "early-boot-instrumentation_manifest",
+    testonly = True,
+    component_name = "early-boot-instrumentation",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/early_boot_instrumentation.cml",
+)
+
+fx_component(
+    name = "early-boot-instrumentation",
+    testonly = True,
+    compiled_manifest = ":early-boot-instrumentation_manifest",
+    visibility = ["//src/sys/test_manager:__pkg__"],
+    deps = [":app_packaged"],
+)
+
+fx_package(
+    name = "early-boot-instrumentation-pkg",
+    package_name = "early-boot-instrumentation",
+    testonly = True,
+    components = [":early-boot-instrumentation"],
+)
+
+fx_cc_test_binary(
+    name = "coverage-source-test",
+    srcs = ["coverage_source_test.cc"],
+    deps = [
+        ":coverage-source",
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/fidl/fuchsia.debugdata:fuchsia.debugdata_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/zbi-format:internal",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/zbitl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "coverage-source-tests",
+    binary = ":coverage-source-test",
+)
+
+fx_cc_test_binary(
+    name = "early-boot-instrumentation-integration-test",
+    srcs = ["early_boot_instrumentation_test.cc"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "early-boot-instrumentation-integration-test_packaged",
+    testonly = True,
+    binary = ":early-boot-instrumentation-integration-test",
+    binary_name = "early-boot-instrumentation-integration-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "early-boot-instrumentation-integration-test_manifest",
+    testonly = True,
+    component_name = "early-boot-instrumentation-integration-test",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/early_boot_instrumentation_test.cml",
+)
+
+fx_test_component(
+    name = "early-boot-instrumentation-integration-test-component",
+    compiled_manifest = ":early-boot-instrumentation-integration-test_manifest",
+    deps = [":early-boot-instrumentation-integration-test_packaged"],
+)
+
+fx_package(
+    name = "early-boot-instrumentation-tests",
+    # Needed by end to end test to provide fake raw instrumentation sources.
+    components = [
+        ":early-boot-instrumentation",
+        "//src/sys/early_boot_instrumentation/test:early-boot-instrumentation-provider",
+    ],
+    test_components = [
+        ":coverage-source-tests",
+        ":early-boot-instrumentation-integration-test-component",
+    ],
+)
+
+fx_test(
+    name = "early-boot-instrumentation-tests_test",
+    package = ":early-boot-instrumentation-tests",
+)

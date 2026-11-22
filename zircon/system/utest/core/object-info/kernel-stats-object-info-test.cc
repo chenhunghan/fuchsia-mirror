@@ -383,6 +383,28 @@ TEST_F(KernelStatsGetInfoTest, CpuStats) {
   for (uint32_t i = 0; i < num_cpus_; i++) {
     EXPECT_EQ(buf[i].cpu_number, i);
   }
+
+  // Read with an oversized buffer to verify that actual is clamped to num_cpus_ rather than the
+  // buffer capacity and trailing records are left untouched.
+  constexpr uint32_t kSentinelCpuNumber = ~uint32_t{0};
+  constexpr size_t kExtraRecords = 2;
+  std::vector<zx_info_cpu_stats_t> oversized_buf(
+      static_cast<size_t>(num_cpus_) + kExtraRecords,
+      zx_info_cpu_stats_t{.cpu_number = kSentinelCpuNumber});
+  actual = 0;
+  avail = 0;
+  ASSERT_OK(zx_object_get_info(info_resource.get(), ZX_INFO_CPU_STATS, oversized_buf.data(),
+                               oversized_buf.size() * sizeof(zx_info_cpu_stats_t), &actual,
+                               &avail));
+
+  EXPECT_EQ(actual, num_cpus_);
+  EXPECT_EQ(avail, num_cpus_);
+  for (uint32_t i = 0; i < num_cpus_; i++) {
+    EXPECT_EQ(oversized_buf[i].cpu_number, i);
+  }
+  for (size_t i = num_cpus_; i < oversized_buf.size(); i++) {
+    EXPECT_EQ(oversized_buf[i].cpu_number, kSentinelCpuNumber);
+  }
 }
 
 TEST_F(KernelStatsGetInfoTest, CpuStatsMonotonicValues) {

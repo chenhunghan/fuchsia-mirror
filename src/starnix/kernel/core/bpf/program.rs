@@ -2,28 +2,37 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+use crate::bpf::context::EbpfRunContextImpl;
 use crate::bpf::fs::get_bpf_object;
 use crate::bpf::{BpfMapHandle, check_cap_or_sys_admin};
+use crate::mm::{MemoryAccessor, MemoryAccessorExt};
 use crate::security;
 use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
 use crate::task::{CurrentTask, Kernel, register_delayed_release};
+use crate::vfs::socket::{SkBuf, UnixSocketEbpfContext};
 use crate::vfs::{FdNumber, OutputBuffer};
 use ebpf::{
     BPF_LDDW, BPF_PSEUDO_BTF_ID, BPF_PSEUDO_FUNC, BPF_PSEUDO_MAP_FD, BPF_PSEUDO_MAP_IDX,
     BPF_PSEUDO_MAP_IDX_VALUE, BPF_PSEUDO_MAP_VALUE, CallingContext, EbpfError, EbpfInstruction,
     EbpfProgram, EbpfProgramContext, NullVerifierLogger, StaticHelperSet, VerifiedEbpfProgram,
-    VerifierError, VerifierLogger, link_program, verify_program,
+    VerifierError, VerifierLogger, verify_program,
 };
-use ebpf_api::{AttachType, EbpfApiError, MapsContext, PinnedMap, ProgramType};
+use ebpf_api::{
+    AttachType, EbpfApiError, MapsContext, PinnedMap, ProgramType, TraceEvent,
+    TracepointProgramContext,
+};
 use fidl_fuchsia_ebpf as febpf;
 use futures::StreamExt as _;
 use starnix_lifecycle::{AtomicCounter, ObjectReleaser, ReleaserAction};
-use starnix_logging::track_stub;
+use starnix_logging::{log_warn, track_stub};
+use starnix_syscalls::{SUCCESS, SyscallResult};
 use starnix_types::ownership::{Releasable, ReleaseGuard};
 use starnix_uapi::auth::{CAP_BPF, CAP_NET_ADMIN, CAP_PERFMON};
 use starnix_uapi::errors::{Errno, ErrnoCode};
-use starnix_uapi::{bpf_attr__bindgen_ty_4, errno, error};
+use starnix_uapi::user_address::UserAddress;
+use starnix_uapi::{__sk_buff, bpf_attr__bindgen_ty_4, bpf_attr__bindgen_ty_7, errno, error};
 use std::sync::{Arc, Weak};
+use zerocopy::IntoBytes;
 
 bitflags::bitflags! {
     /// Verifier log level flags (`BPF_LOG_*` in Linux `include/linux/bpf_verifier.h`).
@@ -201,10 +210,111 @@ impl Program {
             return error!(EINVAL);
         }
 
-        let maps = self.maps.iter().map(|map| map.get_inner()).collect();
-        let program = link_program(&self.program, maps).map_err(map_ebpf_error)?;
+        let maps: Vec<PinnedMap> = self.maps.iter().map(|map| map.get_inner()).collect();
+        let _ = <ebpf::StaticTypeChecker as ebpf::ArgumentTypeChecker<C>>::link(&self.program)
+            .map_err(map_ebpf_error)?;
+        let linkage = ebpf::collect_program_linkage::<C>(&maps);
+        let linked = ebpf::link_instructions(&self.program, &linkage)
+            .map_err(|err| map_ebpf_error(EbpfError::from(err)))?;
+        if let Some(vmo) = try_compile_jit_vmo(&linked, &linkage) {
+            // SAFETY: `vmo` was compiled from verified `self.program` linked against context `C`
+            // and `maps`, whose argument types were validated above.
+            match unsafe { EbpfProgram::<C>::from_compiled_vmo(vmo, maps.clone()) } {
+                Ok(program) => return Ok(program),
+                Err(err) => {
+                    log_warn!(
+                        "Failed to initialize JIT eBPF program, falling back to interpreter: {err:?}"
+                    );
+                }
+            }
+        }
 
-        Ok(program)
+        // SAFETY: `linked` was verified and linked against context `C` and `maps`, whose argument
+        // types were validated via `StaticTypeChecker::link` above.
+        Ok(unsafe { EbpfProgram::<C>::from_linked_instructions(linked, maps) })
+    }
+
+    pub fn run(
+        &self,
+        current_task: &CurrentTask,
+        data_in: &[u8],
+        ctx_in: &[u8],
+        repeat: u32,
+    ) -> Result<(u32, u32, Vec<u8>, Vec<u8>), Errno> {
+        let repeat = if repeat == 0 { 1 } else { repeat };
+        let start_time = zx::MonotonicInstant::get();
+        let mut retval = 0;
+
+        let data_out = data_in.to_vec();
+        let ctx_out;
+
+        match self.info.program_type {
+            ProgramType::SocketFilter => {
+                let ebpf_program = self.link::<UnixSocketEbpfContext>(self.info.program_type)?;
+
+                let mut sk_buff = __sk_buff::default();
+                if !ctx_in.is_empty() {
+                    let sk_buff_bytes = sk_buff.as_mut_bytes();
+                    if ctx_in.len() > sk_buff_bytes.len()
+                        && ctx_in[sk_buff_bytes.len()..].iter().any(|&b| b != 0)
+                    {
+                        return error!(E2BIG);
+                    }
+                    let copy_len = std::cmp::min(ctx_in.len(), sk_buff_bytes.len());
+                    sk_buff_bytes[..copy_len].copy_from_slice(&ctx_in[..copy_len]);
+                }
+                sk_buff.len = u32::try_from(data_in.len()).map_err(|_| errno!(EINVAL))?;
+
+                let mut sk_buf = SkBuf { sk_buff };
+                for i in 0..repeat {
+                    if i > 0
+                        && (current_task.is_exitted()
+                            || current_task.is_work_cancelled()
+                            || current_task.is_interrupt_pending())
+                    {
+                        return error!(EINTR);
+                    }
+                    let mut run_context = EbpfRunContextImpl::new(current_task);
+                    retval = ebpf_program.run(&mut run_context, &mut sk_buf) as u32;
+                }
+
+                ctx_out = sk_buf.sk_buff.as_bytes().to_vec();
+            }
+            ProgramType::Tracepoint => {
+                let ebpf_program = self.link::<TracepointEbpfContext>(self.info.program_type)?;
+
+                let mut trace_event = TraceEvent::default();
+                let input_bytes = if !ctx_in.is_empty() { ctx_in } else { data_in };
+                if !input_bytes.is_empty() {
+                    let event_bytes = trace_event.as_mut_bytes();
+                    let copy_len = std::cmp::min(input_bytes.len(), event_bytes.len());
+                    event_bytes[..copy_len].copy_from_slice(&input_bytes[..copy_len]);
+                }
+
+                for i in 0..repeat {
+                    if i > 0
+                        && (current_task.is_exitted()
+                            || current_task.is_work_cancelled()
+                            || current_task.is_interrupt_pending())
+                    {
+                        return error!(EINTR);
+                    }
+                    let mut run_context = EbpfRunContextImpl::new(current_task);
+                    retval =
+                        ebpf_program.run_with_1_argument(&mut run_context, &trace_event) as u32;
+                }
+
+                ctx_out = trace_event.as_bytes().to_vec();
+            }
+            _ => {
+                return error!(ENOTSUP);
+            }
+        }
+
+        let elapsed_nanos =
+            u64::try_from((zx::MonotonicInstant::get() - start_time).into_nanos()).unwrap_or(0);
+        let duration = u32::try_from(elapsed_nanos / u64::from(repeat)).unwrap_or(u32::MAX);
+        Ok((retval, duration, data_out, ctx_out))
     }
 
     pub(super) fn check_load_access(
@@ -305,12 +415,35 @@ pub type ProgramReleaser = ObjectReleaser<Program, ProgramReleaserAction>;
 pub type ProgramHandle = Arc<ProgramReleaser>;
 pub type WeakProgramHandle = Weak<ProgramReleaser>;
 
-fn link_program_to_fidl_bytecode(
-    program: &VerifiedEbpfProgram,
+fn try_compile_jit_vmo(
+    linked: &[EbpfInstruction],
     linkage: &ebpf::ProgramLinkageInfo,
-) -> Result<febpf::Bytecode, febpf::LinkError> {
-    let linked = ebpf::link_instructions(program, linkage).map_err(ebpf_api::link_error_to_fidl)?;
-    Ok(febpf::Bytecode { instructions: linked.into_iter().map(u64::from).collect() })
+) -> Option<zx::Vmo> {
+    if !ebpf::jit::IS_SUPPORTED {
+        return None;
+    }
+    match ebpf::jit::compile_jit_vmo(linked, linkage, &*crate::mm::VMEX_RESOURCE) {
+        Ok(vmo) => Some(vmo),
+        Err(err) => {
+            log_warn!("Failed to JIT compile eBPF program, falling back to interpreter: {err:?}");
+            None
+        }
+    }
+}
+
+fn link_program_for_fidl(
+    program: &VerifiedEbpfProgram,
+    payload: febpf::ProgramLinkageInfo,
+) -> Result<febpf::LinkedProgram, febpf::LinkError> {
+    let linkage = ebpf_api::program_linkage_from_fidl(payload)?;
+    let linked =
+        ebpf::link_instructions(program, &linkage).map_err(ebpf_api::link_error_to_fidl)?;
+    if let Some(vmo) = try_compile_jit_vmo(&linked, &linkage) {
+        return Ok(febpf::LinkedProgram::CompiledProgram(vmo));
+    }
+    Ok(febpf::LinkedProgram::Bytecode(febpf::Bytecode {
+        instructions: linked.into_iter().map(u64::from).collect(),
+    }))
 }
 
 fn spawn_program_linker(
@@ -323,17 +456,10 @@ fn spawn_program_linker(
         .with_debug_name("ebpf-program-linker")
         .with_async_closure(async move |_current_task: &CurrentTask| {
             let mut stream = server_end.into_stream();
-            if let Some(Ok(request)) = stream.next().await {
-                match request {
-                    febpf::ProgramLinkerRequest::Link { payload, responder } => {
-                        let result =
-                            ebpf_api::program_linkage_from_fidl(payload).and_then(|linkage| {
-                                link_program_to_fidl_bytecode(&program, &linkage)
-                                    .map(febpf::LinkedProgram::Bytecode)
-                            });
-                        let _ = responder.send(result);
-                    }
-                }
+            if let Some(Ok(febpf::ProgramLinkerRequest::Link { payload, responder })) =
+                stream.next().await
+            {
+                let _ = responder.send(link_program_for_fidl(&program, payload));
             }
         })
         .build();
@@ -356,6 +482,17 @@ impl TryFrom<&Program> for febpf::VerifiedProgram {
             maps: Some(maps),
             ..Default::default()
         })
+    }
+}
+
+pub(crate) fn new_verified_program_fidl(
+    kernel: &Kernel,
+    program: Arc<VerifiedEbpfProgram>,
+) -> febpf::VerifiedProgram {
+    febpf::VerifiedProgram {
+        linker: Some(spawn_program_linker(kernel, program)),
+        maps: Some(vec![]),
+        ..Default::default()
     }
 }
 
@@ -552,4 +689,224 @@ mod tests {
         let log_str = std::str::from_utf8(&out.data()[..out.data().len() - 1]).unwrap();
         assert_eq!(log_str, "0: (b7) mov %r0, 0x0\n1: (95) exit\n");
     }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct TestSkBuff(linux_uapi::__sk_buff);
+
+    impl ebpf::ProgramArgument for &'_ TestSkBuff {
+        fn get_type() -> &'static ebpf::Type {
+            &*ebpf_api::SOCKET_FILTER_SK_BUF_TYPE
+        }
+    }
+
+    impl ebpf_api::SocketRef for &'_ TestSkBuff {
+        fn get_socket_cookie(&self) -> Option<u64> {
+            None
+        }
+
+        fn get_socket_uid(&self) -> Option<ebpf_api::uid_t> {
+            None
+        }
+    }
+
+    impl ebpf_api::PacketWithLoadBytes for &'_ TestSkBuff {
+        fn load_bytes_relative(
+            &self,
+            _base: ebpf_api::LoadBytesBase,
+            _offset: usize,
+            _buf: ebpf::EbpfBufferPtr<'_>,
+        ) -> i64 {
+            -1
+        }
+    }
+
+    struct TestSocketFilterContext;
+
+    impl EbpfProgramContext for TestSocketFilterContext {
+        type RunContext<'a> = crate::bpf::context::EbpfRunContextImpl<'a>;
+        type Packet<'a> = ();
+        type Arg1<'a> = &'a TestSkBuff;
+        type Arg2<'a> = ();
+        type Arg3<'a> = ();
+        type Arg4<'a> = ();
+        type Arg5<'a> = ();
+        type Map = PinnedMap;
+    }
+
+    ebpf_api::ebpf_program_context_type!(
+        TestSocketFilterContext,
+        ebpf_api::SocketFilterProgramContext
+    );
+
+    #[::fuchsia::test]
+    async fn test_program_link_and_linker_jit_and_fallback() {
+        crate::testing::spawn_kernel_and_run(async |current_task| {
+            let info = ProgramInfo {
+                program_type: ProgramType::SocketFilter,
+                expected_attach_type: AttachType::Unspecified,
+                log_level: VerifierLogLevel::empty(),
+            };
+            let skb = TestSkBuff::default();
+            let fidl_linkage = ebpf_api::program_linkage_to_fidl(
+                ebpf::collect_program_linkage::<TestSocketFilterContext>(&[]),
+            );
+
+            // 1. Happy path: valid program compiles via JIT when `IS_SUPPORTED` is true (and via
+            //    interpreter otherwise) in both `Program::link` and `spawn_program_linker`.
+            let valid_code = vec![
+                EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 42),
+                EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            ];
+            let mut logger = VecOutputBuffer::new(0);
+            let program = Program::new(current_task, info.clone(), &mut logger, valid_code)
+                .expect("load valid socket filter program");
+
+            let linked: EbpfProgram<TestSocketFilterContext> =
+                program.link(ProgramType::SocketFilter).expect("link valid program");
+            let mut run_ctx = crate::bpf::context::EbpfRunContextImpl::new(current_task);
+            assert_eq!(linked.run_with_1_argument(&mut run_ctx, &skb), 42);
+
+            let fidl_prog = febpf::VerifiedProgram::try_from(&**program).expect("VerifiedProgram");
+            let linked_fidl = fidl_prog
+                .linker
+                .expect("linker client_end")
+                .into_proxy()
+                .link(&fidl_linkage)
+                .await
+                .expect("ProgramLinker FIDL")
+                .expect("ProgramLinker.Link");
+            if ebpf::jit::IS_SUPPORTED {
+                let vmo = match linked_fidl {
+                    febpf::LinkedProgram::CompiledProgram(vmo) => vmo,
+                    other => panic!("expected CompiledProgram, got {other:?}"),
+                };
+                assert!(vmo.get_size().unwrap() > 0);
+                // SAFETY: `vmo` was linked and JIT-compiled by `spawn_program_linker` for
+                // `TestSocketFilterContext` with no maps.
+                let compiled_prog = unsafe {
+                    EbpfProgram::<TestSocketFilterContext>::from_compiled_vmo(vmo, Vec::new())
+                }
+                .expect("initialize EbpfProgram from compiled VMO");
+                assert_eq!(compiled_prog.run_with_1_argument(&mut run_ctx, &skb), 42);
+            } else {
+                assert!(matches!(linked_fidl, febpf::LinkedProgram::Bytecode(_)));
+            }
+
+            // 2. Fallback path: a statically untaken out-of-bounds conditional jump passes
+            //    verification, fails JIT compilation (`JumpOutOfBounds`), and falls back cleanly to
+            //    the interpreter in both `Program::link` and `spawn_program_linker`.
+            let fallback_code = vec![
+                EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 0, 0, 7),
+                EbpfInstruction::new(BPF_JMP | ebpf::BPF_JEQ | BPF_K, 0, 0, 10, 0),
+                EbpfInstruction::new(BPF_JMP | BPF_EXIT, 0, 0, 0, 0),
+            ];
+            let mut logger = VecOutputBuffer::new(0);
+            let fallback_program = Program::new(current_task, info, &mut logger, fallback_code)
+                .expect("load fallback socket filter program");
+
+            let linked_fallback: EbpfProgram<TestSocketFilterContext> = fallback_program
+                .link(ProgramType::SocketFilter)
+                .expect("link fallback program via interpreter");
+            let mut run_ctx = crate::bpf::context::EbpfRunContextImpl::new(current_task);
+            assert_eq!(linked_fallback.run_with_1_argument(&mut run_ctx, &skb), 7);
+
+            let fidl_fallback =
+                febpf::VerifiedProgram::try_from(&**fallback_program).expect("VerifiedProgram");
+            let linked_fallback_fidl = fidl_fallback
+                .linker
+                .expect("linker client_end")
+                .into_proxy()
+                .link(&fidl_linkage)
+                .await
+                .expect("ProgramLinker FIDL")
+                .expect("ProgramLinker.Link");
+            assert!(
+                matches!(linked_fallback_fidl, febpf::LinkedProgram::Bytecode(febpf::Bytecode { instructions }) if instructions.len() == 3)
+            );
+        })
+        .await;
+    }
+}
+
+struct TracepointEbpfContext {}
+
+impl EbpfProgramContext for TracepointEbpfContext {
+    type RunContext<'a> = EbpfRunContextImpl<'a>;
+    type Packet<'a> = ();
+    type Arg1<'a> = &'a TraceEvent;
+    type Arg2<'a> = ();
+    type Arg3<'a> = ();
+    type Arg4<'a> = ();
+    type Arg5<'a> = ();
+    type Map = PinnedMap;
+}
+
+ebpf_api::ebpf_program_context_type!(TracepointEbpfContext, TracepointProgramContext);
+
+pub fn bpf_prog_run(
+    current_task: &CurrentTask,
+    program: &Program,
+    run_attr: &mut bpf_attr__bindgen_ty_7,
+    attr_addr: UserAddress,
+    attr_size: u32,
+) -> Result<SyscallResult, Errno> {
+    if (run_attr.data_in == 0) != (run_attr.data_size_in == 0)
+        || (run_attr.data_out == 0) != (run_attr.data_size_out == 0)
+        || (run_attr.ctx_in == 0) != (run_attr.ctx_size_in == 0)
+        || (run_attr.ctx_out == 0) != (run_attr.ctx_size_out == 0)
+        || run_attr.flags != 0
+        || run_attr.cpu != 0
+        || run_attr.batch_size != 0
+    {
+        return error!(EINVAL);
+    }
+
+    let data_in = if run_attr.data_size_in > 0 {
+        current_task.read_memory_to_vec(
+            UserAddress::from(run_attr.data_in),
+            run_attr.data_size_in as usize,
+        )?
+    } else {
+        Vec::new()
+    };
+    let ctx_in = if run_attr.ctx_size_in > 0 {
+        current_task
+            .read_memory_to_vec(UserAddress::from(run_attr.ctx_in), run_attr.ctx_size_in as usize)?
+    } else {
+        Vec::new()
+    };
+
+    let (retval, duration, data_out, ctx_out) =
+        program.run(current_task, &data_in, &ctx_in, run_attr.repeat)?;
+
+    let mut res = Ok(SUCCESS);
+
+    if run_attr.data_out != 0 {
+        let mut copy_len = data_out.len();
+        if copy_len > run_attr.data_size_out as usize {
+            copy_len = run_attr.data_size_out as usize;
+            res = error!(ENOSPC);
+        }
+        current_task.write_memory(UserAddress::from(run_attr.data_out), &data_out[..copy_len])?;
+        run_attr.data_size_out = u32::try_from(data_out.len()).unwrap_or(u32::MAX);
+    }
+
+    if res.is_ok() && run_attr.ctx_out != 0 {
+        let mut copy_len = ctx_out.len();
+        if copy_len > run_attr.ctx_size_out as usize {
+            copy_len = run_attr.ctx_size_out as usize;
+            res = error!(ENOSPC);
+        }
+        current_task.write_memory(UserAddress::from(run_attr.ctx_out), &ctx_out[..copy_len])?;
+        run_attr.ctx_size_out = u32::try_from(ctx_out.len()).unwrap_or(u32::MAX);
+    }
+
+    run_attr.retval = retval;
+    run_attr.duration = duration;
+    let write_size =
+        std::cmp::min(attr_size as usize, std::mem::size_of::<bpf_attr__bindgen_ty_7>());
+    current_task.write_memory(attr_addr, &run_attr.as_bytes()[..write_size])?;
+
+    res
 }

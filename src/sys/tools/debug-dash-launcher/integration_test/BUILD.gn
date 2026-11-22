@@ -2,24 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-# Kept in GN because `debug-dash-launcher-test` packages
-# `//src/bringup/bin/ptysvc:component`, which has no Bazel build yet.
-fuchsia_unittest_package("debug-dash-launcher-test") {
-  manifest = "meta/test.cml"
-  deps = [
-    ":test_bin",
-    "mock_resolver",
-    "//src/bringup/bin/ptysvc:component",
-    "//src/sys/tools/debug-dash-launcher:component",
-    "//src/zircon/bin/zxsh:sh",
-  ]
-}
-
 group("integration_test") {
   testonly = true
-  deps = [ ":debug-dash-launcher-test" ]
+  deps = [ ":debug-dash-launcher-test-package" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -47,15 +32,41 @@ group("integration_test") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-rustc_test("test_bin") {
-  sources = [ "src/lib.rs" ]
-  output_name = "debug_dash_launcher_test"
-  edition = "2024"
+if (is_fuchsia) {
+  rustc_test("test_bin") {
+    sources = [ "src/lib.rs" ]
+    output_name = "debug_dash_launcher_test"
+    edition = "2024"
+    deps = [
+      "//sdk/fidl/fuchsia.dash:fuchsia.dash_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-component",
+      "//third_party/rust_crates:futures",
+    ]
+  }
+}
+
+fuchsia_component_manifest("debug-dash-launcher-test-manifest") {
+  testonly = true
+  component_name = "debug-dash-launcher-test"
+  manifest = "meta/test.cml"
+}
+
+fuchsia_test_component("debug-dash-launcher-test-component") {
+  cm_label = ":debug-dash-launcher-test-manifest"
   deps = [
-    "//sdk/fidl/fuchsia.dash:fuchsia.dash_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-component",
-    "//third_party/rust_crates:futures",
+    ":test_bin",
+    "//src/developer/zxsh:sh",
+  ]
+}
+
+fuchsia_test_package("debug-dash-launcher-test-package") {
+  package_name = "debug-dash-launcher-test-gn"
+  test_components = [ ":debug-dash-launcher-test-component" ]
+  deps = [
+    "//src/bringup/bin/ptysvc:component",
+    "//src/sys/tools/debug-dash-launcher:component",
+    "//src/sys/tools/debug-dash-launcher/integration_test/mock_resolver",
   ]
 }

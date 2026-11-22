@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::FhoEnvironment;
+use ffx_command::TargetNeed;
 use ffx_config::EnvironmentContext;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -13,19 +14,49 @@ use std::sync::Arc;
 /// TryFromEnv is used to perform dependency injection on the members of
 /// FfxTool.
 pub trait TryFromEnv: Sized {
+    /// Whether injecting this type requires a target specifier in `--strict` mode.
+    ///
+    /// Defaults to [`TargetNeed::None`]. Any implementation that resolves or connects
+    /// to a target must override this (typically to [`TargetNeed::Required`]) so
+    /// strict-mode pre-entry checks catch missing or invalid `--target` flags.
+    const TARGET_NEED: TargetNeed = TargetNeed::None;
     type Error: std::error::Error + Send + Sync + 'static;
     fn try_from_env(
         env: &FhoEnvironment,
     ) -> impl Future<Output = std::result::Result<Self, Self::Error>>;
 }
 
+/// Decorator trait used by `#[with(expr)]` fields on `#[derive(FfxTool)]` structs.
+///
+/// Expressions passed to `#[with(...)]` must be standalone (cannot reference locals
+/// from `from_env`) because `#[derive(FfxTool)]` also inspects the decorator's type
+/// inside the zero-argument `FfxTool::target_need()` method.
 pub trait TryFromEnvWith: 'static {
+    /// Whether injecting this type requires a target specifier in `--strict` mode.
+    ///
+    /// Defaults to [`TargetNeed::None`]. Any implementation that resolves or connects
+    /// to a target must override this (typically to [`TargetNeed::Required`]).
+    const TARGET_NEED: TargetNeed = TargetNeed::None;
     type Output: 'static;
     type Error: std::error::Error + Send + Sync + 'static;
     fn try_from_env_with(
         self,
         env: &FhoEnvironment,
     ) -> impl Future<Output = std::result::Result<Self::Output, Self::Error>>;
+}
+
+/// Returns the `TARGET_NEED` of a `#[with(...)]` decorator without executing the expression.
+///
+/// Taking a never-called closure tied to the field type `O` resolves generic parameters on
+/// constructors like `moniker("...")` or `toolbox()` without allocating or running side
+/// effects. Because `#[derive(FfxTool)]` emits this inside the zero-argument `target_need()`,
+/// `#[with(expr)]` expressions must be standalone and cannot reference `from_env` locals.
+pub fn target_need_of<O, D, F>(_: F) -> TargetNeed
+where
+    D: TryFromEnvWith<Output = O>,
+    F: FnOnce() -> D,
+{
+    D::TARGET_NEED
 }
 
 /// This is so that you can use a () somewhere that generically expects something
@@ -41,6 +72,7 @@ impl<T> TryFromEnv for Arc<T>
 where
     T: TryFromEnv,
 {
+    const TARGET_NEED: TargetNeed = T::TARGET_NEED;
     type Error = T::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         T::try_from_env(env).await.map(Arc::new)
@@ -51,6 +83,7 @@ impl<T> TryFromEnv for Rc<T>
 where
     T: TryFromEnv,
 {
+    const TARGET_NEED: TargetNeed = T::TARGET_NEED;
     type Error = T::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         T::try_from_env(env).await.map(Rc::new)
@@ -61,6 +94,7 @@ impl<T> TryFromEnv for Box<T>
 where
     T: TryFromEnv,
 {
+    const TARGET_NEED: TargetNeed = T::TARGET_NEED;
     type Error = T::Error;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         T::try_from_env(env).await.map(Box::new)
@@ -78,6 +112,7 @@ impl<T> TryFromEnv for std::result::Result<T, T::Error>
 where
     T: TryFromEnv,
 {
+    const TARGET_NEED: TargetNeed = T::TARGET_NEED;
     type Error = std::convert::Infallible;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         Ok(T::try_from_env(env).await)
@@ -127,6 +162,7 @@ impl<T> TryFromEnv for Deferred<T, T::Error>
 where
     T: TryFromEnv + 'static,
 {
+    const TARGET_NEED: TargetNeed = T::TARGET_NEED.or_optional();
     type Error = std::convert::Infallible;
     async fn try_from_env(env: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
         let env = env.clone();
@@ -148,6 +184,7 @@ impl<T> TryFromEnvWith for WithDeferred<T>
 where
     T: TryFromEnvWith + 'static,
 {
+    const TARGET_NEED: TargetNeed = T::TARGET_NEED.or_optional();
     type Output = Deferred<T::Output, T::Error>;
     type Error = std::convert::Infallible;
     async fn try_from_env_with(

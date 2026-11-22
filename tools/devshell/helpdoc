@@ -35,6 +35,8 @@
 
 # shellcheck disable=SC1091
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/vars.sh || exit $?
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"/lib/fx-cmd-locator.sh || exit $?
 
 categories=()
 
@@ -82,6 +84,10 @@ function main {
         ;;
       --archive)
         archive_output=1
+        ;;
+      -h|--help)
+        fx-command-help
+        exit 0
         ;;
       -*)
         fx-error "Unknown argument $1"
@@ -133,12 +139,12 @@ ${archive_path}:  ../../tools/devshell/lib/fx-optional-features.sh ../../tools/d
 ${archive_path}:  ../../tools/devshell/lib/platform.sh "
     echo -n "$initial_deps" >> "${depfile_prefix}"
     for vendor_dir in "${FUCHSIA_DIR}"/vendor/*/scripts/devshell; do
+      [[ -d "${vendor_dir}" ]] || continue
       for d in "${vendor_dir}"/*; do
-          echo "vendor file ${d}"
-          if [[ "${d}" != *"/*" ]]; then
-            rel_path="$(realpath_relative_to_pwd "${d}")"
-            printf %s "${rel_path} " >> "${depfile_prefix}"
-          fi
+        [[ -e "${d}" ]] || continue
+        echo "vendor file ${d}"
+        rel_path="$(realpath_relative_to_pwd "${d}")"
+        printf %s "${rel_path} " >> "${depfile_prefix}"
       done
     done
   fi
@@ -185,7 +191,7 @@ ${archive_path}:  ../../tools/devshell/lib/platform.sh "
           echo
           _md_main_table_header
         } >> "${base_out}/index.md"
-        handle-directory "${d}"
+        handle-directory "${d}" "vendor"
       fi
     done
   else
@@ -197,7 +203,7 @@ ${archive_path}:  ../../tools/devshell/lib/platform.sh "
       echo
       _md_main_table_header
     } >> "${base_out}/index.md"
-    handle-directory "${FUCHSIA_DIR}/tools/devshell"
+    handle-directory "${FUCHSIA_DIR}/tools/devshell" "main"
     local d="${FUCHSIA_DIR}/tools/devshell/contrib"
     if [[ "${show_contrib}" -eq 1 && -d "${d}" ]]; then
       {
@@ -210,7 +216,7 @@ ${archive_path}:  ../../tools/devshell/lib/platform.sh "
         echo
         _md_main_table_header
       } >> "${base_out}/index.md"
-      handle-directory "${d}"
+      handle-directory "${d}" "contrib"
     fi
   fi
   create-main-toc
@@ -238,6 +244,9 @@ function realpath_relative_to_pwd {
 }
 
 function cleanup {
+  if [[ -n "${_redacted_help_filter:-}" ]]; then
+    rm -f "${_redacted_help_filter}"
+  fi
   if [[ -d "$temp_dir" ]]; then
     rm -Rf "$temp_dir"
   fi
@@ -251,6 +260,10 @@ function _md_main_table_header {
 function print-redacted-fx-help {
   local filter
   filter="$(mktemp)"
+  _redacted_help_filter="${filter}"
+  if [[ "${archive_output}" -eq 0 ]]; then
+    trap '[[ -n "${_redacted_help_filter:-}" ]] && rm -f "${_redacted_help_filter}"' INT TERM EXIT
+  fi
   cat > "${filter}" <<EOF
   NR==1 || NR==3, /^$/ {
     print
@@ -264,16 +277,57 @@ function print-redacted-fx-help {
   }
 EOF
   "${FUCHSIA_DIR}"/scripts/fx help --full | awk -f "${filter}"
-  rm "${filter}"
+  rm -f "${filter}"
+  _redacted_help_filter=""
 }
 
 function handle-directory {
-  local d files cmds
+  local d="$1"
+  local section="${2:-main}"
+  local files=( "${d}"/* )
+  local -A reg_skip_names=()
+  local -A reg_skip_scripts=()
+  local -A reg_rows=()
+  local -A legacy_files=()
+  local -a all_names=()
 
-  d="$1"
-  files=( "${d}"/* )
-  cmds=()
+  local reg_file
+  if [[ -n "${vendor:-}" ]]; then
+    reg_file="${FUCHSIA_DIR}/vendor/${vendor}/scripts/devshell/fx_host_tools.json"
+  else
+    reg_file="${FUCHSIA_DIR}/tools/devshell/fx_host_tools.json"
+  fi
+  if [[ -f "${reg_file}" ]]; then
+    if [[ "${create_depfile}" -eq 1 && "${section}" != "contrib" ]]; then
+      local rel_reg
+      rel_reg="$(realpath_relative_to_pwd "${reg_file}")"
+      printf %s "${rel_reg} " >> "${depfile_prefix}"
+    fi
 
+    local r_name r_cat r_contrib r_deprecated r_mode r_spec r_summary
+    while IFS=$'\x1f' read -r r_name r_cat r_contrib r_deprecated r_mode r_spec r_summary; do
+      [[ -n "${r_name}" ]] || continue
+      reg_skip_names["${r_name}"]=1
+      if [[ "${r_mode}" == "script" ]]; then
+        local clean_s="${r_spec#@//}"
+        clean_s="${clean_s#//}"
+        reg_skip_scripts["${FUCHSIA_DIR}/${clean_s}"]=1
+      fi
+      if [[ "${section}" == "contrib" && "${r_contrib}" != "true" ]]; then
+        continue
+      fi
+      if [[ "${section}" == "main" && "${r_contrib}" == "true" ]]; then
+        continue
+      fi
+      if [[ "${section}" == "vendor" && "${show_contrib}" -eq 0 && "${r_contrib}" == "true" ]]; then
+        continue
+      fi
+      reg_rows["${r_name}"]="${r_cat}"$'\x1f'"${r_contrib}"$'\x1f'"${r_deprecated}"$'\x1f'"${r_mode}"$'\x1f'"${r_spec}"$'\x1f'"${r_summary}"
+      all_names+=( "${r_name}" )
+    done < <(_fx_cli_registry list --format=help-tsv --registry-file "${reg_file}" 2>/dev/null | awk -F '\t' '{ print $8 "\037" $2 "\037" $3 "\037" $4 "\037" $6 "\037" $7 "\037" $5 }' || true)
+  fi
+
+  local f rel_path base_cmd
   for f in "${files[@]}"; do
     if [[ "${create_depfile}" -eq 1 ]]; then
       rel_path="$(realpath_relative_to_pwd "${f}")"
@@ -281,17 +335,31 @@ function handle-directory {
     fi
 
     if [[ -f "${f}" && ( -x "${f}" || "${f: -3}" == ".fx" ) ]]; then
-      cmds+=( "${f}" )
+      base_cmd="$(basename "${f}" ".fx")"
+      if [[ -n "${reg_skip_names["${base_cmd}"]:-}" || -n "${reg_skip_scripts["${f}"]:-}" ]]; then
+        continue
+      fi
+      if [[ -z "${legacy_files["${base_cmd}"]:-}" ]]; then
+        legacy_files["${base_cmd}"]="${f}"
+        all_names+=( "${base_cmd}" )
+      fi
     fi
   done
 
-  # sort cmds
-  IFS=$'\n' sorted=($(sort <<< "${cmds[*]}"))
-  unset IFS
+  local -a sorted_names=()
+  if [[ ${#all_names[@]} -gt 0 ]]; then
+    mapfile -t sorted_names < <(printf '%s\n' "${all_names[@]}" | LC_ALL=C sort -u)
+  fi
 
-  for c in "${sorted[@]}"; do
-    echo "Processing $(basename "${c}")"
-    handle-command "${c}"
+  local cmd_name
+  for cmd_name in "${sorted_names[@]}"; do
+    [[ -n "${cmd_name}" ]] || continue
+    if [[ -n "${reg_rows["${cmd_name}"]:-}" ]]; then
+      _emit_registered_command_row "${cmd_name}" "${reg_rows["${cmd_name}"]}"
+    elif [[ -n "${legacy_files["${cmd_name}"]:-}" ]]; then
+      echo "Processing $(basename "${legacy_files["${cmd_name}"]}")"
+      handle-command "${legacy_files["${cmd_name}"]}"
+    fi
   done
 }
 
@@ -410,42 +478,37 @@ function escape-jinja {
   sed "s/{%/{{ '{\&ZeroWidthSpace;%' }}/g"
 }
 
-function handle-command {
-  local category cat_url cmd_name cmd_path cmd_url deprecated deprecated_str filename norm_cat rel_path summary
+function _emit_command_doc {
+  local cmd_name="$1"
+  local category="$2"
+  local deprecated="$3"
+  local escaped_summary="$4"
+  local rel_path="$5"
+  local help_script_path="${6:-}"
 
-  cmd_path="$1"
-  cmd_name="$(basename "${cmd_path}" ".fx")"
-
-  category="$(get_metadata_camelcase "${cmd_path}" "CATEGORY")"
-   if [[ -z "${category}" ]]; then
+  if [[ -z "${category}" ]]; then
     category="Other"
   fi
 
+  local norm_cat
   norm_cat="$(maybe-add-category "${category}")"
-
-  # categories is a global list.
   categories+=( "${category}" )
 
-  # filename is the name of the generated markdown for this command.
-  filename="${base_out}/cmd/${cmd_name}.md"
-  deprecated_str=""
-  deprecated="$(get_binary_metadata "${cmd_path}" "DEPRECATED")"
-
-  if [[ "${deprecated}" -eq 1 ]]; then
+  local deprecated_str=""
+  if [[ "${deprecated}" == "1" || "${deprecated}" == "true" ]]; then
     if [[ "${show_deprecated}" -eq 0 ]]; then
       return
     fi
     deprecated_str="DEPRECATED! "
   fi
 
-  summary="${deprecated_str}$(get_summary "${cmd_path}")"
-  cmd_url="cmd/${cmd_name}.md"
-  cat_url="${norm_cat}/README.md"
-  rel_path="${cmd_path#"${FUCHSIA_DIR}"/}"
+  local summary="${deprecated_str}${escaped_summary}"
+  local cmd_url="cmd/${cmd_name}.md"
+  local cat_url="${norm_cat}/README.md"
+  local filename="${base_out}/${cmd_url}"
 
-  # Creates the per-command markdown file
   {
-    if [[ -n "${vendor}" ]]; then
+    if [[ -n "${vendor:-}" ]]; then
       echo "# ${deprecated_str}fx vendor ${vendor} ${cmd_name}"
     else
       echo "# ${deprecated_str}fx ${cmd_name}"
@@ -454,32 +517,85 @@ function handle-command {
     echo "${summary}"
     echo
     echo '~~~~none'
-    fx-print-command-help "$cmd_path" |
-      ( [[ ${escape_jinja} -eq 0 ]] && cat || escape-jinja )
+    if [[ -n "${help_script_path}" && -f "${help_script_path}" ]]; then
+      fx-print-command-help "${help_script_path}" |
+        ( [[ ${escape_jinja} -eq 0 ]] && cat || escape-jinja )
+    elif [[ -n "${vendor:-}" ]]; then
+      echo "usage: fx vendor ${vendor} ${cmd_name} [--help]"
+    else
+      echo "usage: fx ${cmd_name} [--help]"
+    fi
     echo
     echo '~~~~'
-    if [[ -z "${vendor}" ]]; then
+    if [[ -z "${vendor:-}" ]]; then
       echo
       echo "[${cmd_name} source code](https://cs.opensource.google/fuchsia/fuchsia/+/main:${rel_path})"
     fi
   } > "${filename}"
 
-  # Appends the command to the per-category index
   {
     echo "[${cmd_name}](../${cmd_url}) | ${summary}"
   } >> "${base_out}/${norm_cat}/README.md"
 
-  # Appends the command to the global index
   {
     echo "[${cmd_name}](${cmd_url}) | [${category}](${cat_url}) | ${summary}"
   } >> "${base_out}/index.md"
 
-  # Appends the command to the per-category _toc.yaml
   {
     echo "- title: \"${deprecated_str}${cmd_name}\""
     echo "  path: ${toc_prefix}/${cmd_url}"
   } >> "${base_out}/${norm_cat}/_toc.yaml"
+}
 
+function handle-command {
+  local cmd_path="$1"
+  local cmd_name category deprecated escaped_summary rel_path
+  cmd_name="$(basename "${cmd_path}" ".fx")"
+  category="$(get_metadata_camelcase "${cmd_path}" "CATEGORY")"
+  deprecated="$(get_binary_metadata "${cmd_path}" "DEPRECATED")"
+  escaped_summary="$(get_summary "${cmd_path}")"
+  rel_path="${cmd_path#"${FUCHSIA_DIR}"/}"
+  _emit_command_doc "${cmd_name}" "${category}" "${deprecated}" "${escaped_summary}" "${rel_path}" "${cmd_path}"
+}
+
+function _emit_registered_command_row {
+  local -r cmd_name="$1"
+  local -r row="$2"
+  local raw_cat contrib deprecated mode spec raw_summary
+  IFS=$'\x1f' read -r raw_cat contrib deprecated mode spec raw_summary <<< "${row}"
+
+  local category="Other"
+  if [[ -n "${raw_cat}" ]]; then
+    local cat_lower="${raw_cat,,}"
+    category="${cat_lower^}"
+  fi
+
+  local escaped_summary="${raw_summary}"
+  escaped_summary="${escaped_summary//_/\\_}"
+  escaped_summary="${escaped_summary//\*/\\*}"
+  escaped_summary="${escaped_summary//|/\\|}"
+
+  local rel_path help_script_path=""
+  if [[ "${mode}" == "script" ]]; then
+    local clean_script="${spec#@//}"
+    rel_path="${clean_script#//}"
+    local script_abs="${FUCHSIA_DIR}/${rel_path}"
+    if [[ "${create_depfile}" -eq 1 && -f "${script_abs}" ]]; then
+      local rel_script_dep
+      rel_script_dep="$(realpath_relative_to_pwd "${script_abs}")"
+      printf %s "${rel_script_dep} " >> "${depfile_prefix}"
+    fi
+    if [[ -f "${script_abs}" ]] && grep -q '^## ' "${script_abs}"; then
+      help_script_path="${script_abs}"
+    fi
+  else
+    local clean_target="${spec#@//}"
+    clean_target="${clean_target#//}"
+    local pkg_dir="${clean_target%%:*}"
+    rel_path="${pkg_dir}/BUILD.bazel"
+  fi
+
+  _emit_command_doc "${cmd_name}" "${category}" "${deprecated}" "${escaped_summary}" "${rel_path}" "${help_script_path}"
 }
 
 main "$@"

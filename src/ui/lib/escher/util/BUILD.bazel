@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Preserve GN cflags = [ "-Wno-unknown-warning-option" ]
+# until bazel2gn can map copts to cflags.
+# @bazel2gn:raw_attribute:cflags = [ "-Wno-unknown-warning-option" ]
+fx_cc_library(
+    name = "check_vulkan_support",
+    srcs = ["check_vulkan_support.cc"],
+    hdrs = ["check_vulkan_support.h"],
+    # TODO(https://fxbug.dev/42085078) Remove -Wno-unknown-warning-option after next clang roll.
+    # After that, the toolchain will properly support the new flag.
+    # TODO(https://fxbug.dev/570694755): bazel2gn maps copts to GN
+    # configs += [...]; cflags is emitted via raw_attribute above.
+    # @bazel2gn:skip
+    copts = ["-Wno-unknown-warning-option"],
+    visibility = ["//src/ui/lib/escher/test/common:__pkg__"],
+    deps = ["//src/lib/vulkan"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "escher_geometry_utils",
+    hdrs = [
+        "align.h",
+        "alloca.h",
+        "bit_ops.h",
+        "bitmap.h",
+        "debug_print.h",
+    ],
+    visibility = ["//src/ui/lib/escher/geometry:__pkg__"],
+    deps = ["//src/lib/fxl"],
+)

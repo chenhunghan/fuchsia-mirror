@@ -65,7 +65,11 @@ impl Mms {
 #[derive(Copy, Clone, Debug, PartialEq)]
 #[allow(missing_docs)]
 pub enum Icmpv4ErrorCode {
-    DestUnreachable(Icmpv4DestUnreachableCode, IcmpDestUnreachable),
+    DestUnreachable {
+        code: Icmpv4DestUnreachableCode,
+        message: IcmpDestUnreachable,
+        original_packet_length: u16,
+    },
     Redirect(Icmpv4RedirectCode),
     TimeExceeded(Icmpv4TimeExceededCode),
     ParameterProblem(Icmpv4ParameterProblemCode),

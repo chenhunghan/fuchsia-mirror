@@ -233,8 +233,8 @@ void SimInterface::RoamResultInd(RoamResultIndRequestView request,
                                  RoamResultIndCompleter::Sync& completer) {
   ZX_ASSERT(assoc_ctx_.state == AssocContext::kAssociated);
   ZX_ASSERT(request->has_status_code());
-  const auto roam_result = fidl::ToNatural(*request);
-  stats_.roam_result_indications.push_back(roam_result);
+  auto roam_result = fidl::ToNatural(*request);
+  stats_.roam_result_indications.push_back(std::move(roam_result));
   if (request->status_code() == wlan_ieee80211::StatusCode::kSuccess) {
     stats_.connect_successes++;
     ZX_ASSERT(request->has_selected_bssid());
@@ -267,7 +267,7 @@ void SimInterface::DeauthConf(DeauthConfRequestView request, DeauthConfCompleter
 
 void SimInterface::DeauthInd(DeauthIndRequestView request, DeauthIndCompleter::Sync& completer) {
   auto deauth_ind = fidl::ToNatural(*request);
-  stats_.deauth_indications.push_back(deauth_ind);
+  stats_.deauth_indications.push_back(std::move(deauth_ind));
   const auto& peer_sta_address = request->peer_sta_address().data();
   if (memcmp(assoc_ctx_.bssid.byte, peer_sta_address, ETH_ALEN) == 0) {
     assoc_ctx_.state = AssocContext::kNone;
@@ -314,6 +314,12 @@ void SimInterface::EapolConf(EapolConfRequestView request, EapolConfCompleter::S
 void SimInterface::OnChannelSwitch(OnChannelSwitchRequestView request,
                                    OnChannelSwitchCompleter::Sync& completer) {
   stats_.csa_indications.push_back(request->ind);
+  completer.Reply();
+}
+
+void SimInterface::OnMichaelMicFailure(OnMichaelMicFailureRequestView request,
+                                       OnMichaelMicFailureCompleter::Sync& completer) {
+  stats_.mic_failure_indications.push_back(fidl::ToNatural(*request));
   completer.Reply();
 }
 

@@ -22,7 +22,7 @@ The **migration package count** is checked only before selecting a new package. 
 
 If there is a **migration directory**, follow [Directory Selection](#directory-selection) instead of steps 1 to 5, and then run step 6 for each **migration package**, and step 7.
 
-Never select a package under an [excluded directory](#excluded-directories), in any step.
+Never select a package under an [excluded directory](#excluded-directories) or one that fails the [Build File Check](#build-file-check), in any step.
 
 ## Excluded Directories
 
@@ -33,6 +33,11 @@ Packages under these directories are not migrated by this skill, even if their r
 
 Skip the rows of these packages without changing them in the **control table** (do not claim them, and do not set them to "blocked"). If the user explicitly asks to migrate a package or **migration directory** under an excluded directory, do not migrate it: tell the user that the directory is excluded by this skill.
 
+## Build File Check
+
+Before claiming ownership of a candidate package in any step, inspect `BUILD.gn` and `BUILD.bazel` for `<dir>` to catch changes since the last hourly sheet sync (in workbox mode, resolve `<dir>`'s owning git repository root, such as `vendor/google` for `vendor/google/...` or the checkout root otherwise, run `git -C <repo_root> fetch -q origin main` once per repository in the run, and inspect `origin/main:<path_relative_to_repo_root>/BUILD.{gn,bazel}` rather than the host working tree):
+* Skip the row without changing the **control table** if `BUILD.gn` does not exist, if all migratable targets in `BUILD.gn` are already defined in `BUILD.bazel`, if any migratable target depends on a custom GN template with no Bazel equivalent (or `BUILD.gn` declares a non-`testonly` production target with one), or if a migratable target depends on an unmigrated in-tree package unless that package is also eligible to be selected and migrated in the same **migration group** (if a required co-migrated dependency is ineligible or is later skipped or dropped before step 6, also drop the package that depends on it, clear its `"Owner"`, and do not re-select it in this run).
+
 ## Directory Selection
 
 Select packages under the **migration directory** as the **migration packages**. A package is under the **migration directory** if its directory is the **migration directory** itself or one of its subdirectories, compared by whole path components (e.g., for the **migration directory** `src/lib/foo`, `src/lib/foo` and `src/lib/foo/bar` are under it, but `src/lib/foobar` is not).
@@ -41,9 +46,9 @@ Select packages under the **migration directory** as the **migration packages**.
    Otherwise, use the "gsheets" skill: In the **control table**, find all the rows whose package is under the **migration directory**.
    * If the **control table** link cannot be resolved or the sheet cannot be read, fail the Migration Package Selection step with the reason: "Failed to read the control table."
    * If no row is found, fail the Migration Package Selection step with the reason: "No package under `<migration directory>` is found in the control table."
-2. From these rows, take the rows where the "Migration Status" column is "ready_for_migration", the "Owner" column is empty, and the package is not under an [excluded directory](#excluded-directories) as the candidate packages. Skip the other rows (e.g., packages that are already migrated, in progress, blocked, owned by another user, or excluded).
+2. From these rows, take the rows where the "Migration Status" column is "ready_for_migration", the "Owner" column is empty, the package is not under an [excluded directory](#excluded-directories), and the package passes the [Build File Check](#build-file-check) as the candidate packages. Skip the other rows (e.g., packages that are already migrated, in progress, blocked, owned by another user, excluded, or skipped by the build file check).
    * If there is no candidate package, fail the Migration Package Selection step with the reason: "No package under `<migration directory>` is ready for migration."
-3. If the user specified a package count in the prompt (e.g., "migrate the next 3 targets in `<migration directory>`"), limit the candidate packages to at most that count. Otherwise, if there are more than 10 candidate packages, confirm with the user before claiming any of them, telling the user the **migration directory**, the total number of candidate packages, and their directories, and ask whether to proceed with the migration of all of them.
+3. If the user specified a package count in the prompt (e.g., "migrate the next 3 targets in `<migration directory>`"), do not pre-truncate the candidate packages here (step 4 stops once the requested count of **migration packages** is claimed). Otherwise, if there are more than 10 candidate packages, confirm with the user before claiming any of them, telling the user the **migration directory**, the total number of candidate packages, and their directories, and ask whether to proceed with the migration of all of them.
    * If the user confirms (or candidate packages <= 10, or a count was specified), continue to the next step.
    * Otherwise, fail the Migration Package Selection step with the reason: "The user canceled the migration of `<migration directory>`."
 4. For each candidate package, from the top of the **control table**, claim its ownership and check for an existing migration CL as described in [Claim migration ownership](#2-claim-migration-ownership) and [Check for an existing migration CL](#3-check-for-an-existing-migration-cl).
@@ -98,7 +103,7 @@ When a selection failure happens:
 
 ## 1. Find the first package
 
-Use the "gsheets" skill: In the **control table**, find the first row from the top where the "Migration Status" column is "ready_for_migration", the "Owner" column is empty, and the package is not under an [excluded directory](#excluded-directories).
+Use the "gsheets" skill: In the **control table**, find the first row from the top where the "Migration Status" column is "ready_for_migration", the "Owner" column is empty, the package is not under an [excluded directory](#excluded-directories), and the package passes the [Build File Check](#build-file-check).
    * If the **control table** link cannot be resolved or the sheet cannot be read, it's a [selection failure](#selection-failures) with the reason: "Failed to read the control table."
    * If no row meets the requirements, fail the Migration Package Selection step with the reason: "No migration package is found."
    * The row that meets the requirements is the candidate package.
@@ -124,7 +129,7 @@ After the ownership of the candidate package is claimed, use the "fuchsia-gerrit
 
 ## 4. Add the packages that have to be migrated together
 
-For the package just added to the **migration packages** in step 3, find the [packages that have to be migrated together](#packages-that-have-to-be-migrated-together) with it (e.g., with `fx gn refs` and by inspecting the `BUILD.gn` files). For each of them whose row in the **control table** has "ready_for_migration" in the "Migration Status" column and an empty "Owner" column, that is not under an [excluded directory](#excluded-directories), and is not already one of the **migration packages**:
+For the package just added to the **migration packages** in step 3, find the [packages that have to be migrated together](#packages-that-have-to-be-migrated-together) with it (e.g., with `fx gn refs` and by inspecting the `BUILD.gn` files). For each of them whose row in the **control table** has "ready_for_migration" in the "Migration Status" column and an empty "Owner" column, that is not under an [excluded directory](#excluded-directories), that passes the [Build File Check](#build-file-check), and is not already one of the **migration packages**:
    * Claim its ownership and check for an existing migration CL as described in [Claim migration ownership](#2-claim-migration-ownership) and [Check for an existing migration CL](#3-check-for-an-existing-migration-cl), with this package as the candidate package.
    * If it's dropped in step 2 or step 3, skip it and continue with the next one, instead of going to step 5.
    * If it's added to the **migration packages** in step 3, run this step for it too, so that the packages that have to be migrated together with it are also added. This step ends because a package that is already one of the **migration packages** is never handled again.
@@ -137,7 +142,7 @@ When all of them, including the packages added transitively, are handled, contin
 
 * If no **migration package** has been selected yet, refer to [Find the first package](#1-find-the-first-package) to find another package for the migration.
 * If the number of **migration packages** has reached the **migration package count**, continue to the next step.
-* Otherwise, use the "gsheets" skill: In the **control table**, find the rows where the "Migration Status" column is "ready_for_migration", the "Owner" column is empty, the package is not under an [excluded directory](#excluded-directories), and the row is not already one of the **migration packages**.
+* Otherwise, use the "gsheets" skill: In the **control table**, find the rows where the "Migration Status" column is "ready_for_migration", the "Owner" column is empty, the package is not under an [excluded directory](#excluded-directories), the row is not already one of the **migration packages**, and the package passes the [Build File Check](#build-file-check).
    * If the **migration package count** is 5 or less (including the default batching behavior), greedily search the rows from top to bottom to find rows that can be grouped with the **migration packages** according to the [Grouping Rules](#grouping-rules) (matching Pattern A, B, C, or D). Pick the first such row.
    * If the **migration package count** is more than 5, take the first of these rows from the top. It does not need to be able to be grouped with the **migration packages**; it will be partitioned into **migration groups** in step 7.
    * If the **control table** cannot be read, it's a [selection failure](#selection-failures) with the reason: "Failed to read the control table."

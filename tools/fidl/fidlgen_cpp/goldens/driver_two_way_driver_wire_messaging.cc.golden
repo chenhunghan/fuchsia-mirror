@@ -156,7 +156,7 @@ void fidl::internal::WireBufferCompleterImpl<::test_drivertwoway::TwoWay::Add>::
 
 ::fidl::internal::TransactionalRequest<::test_drivertwoway::TwoWay::Add>::TransactionalRequest(uint16_t addend1, uint16_t addend2)
     : body(::test_drivertwoway::wire::TwoWayAddRequest{addend1, addend2}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_drivertwoway::kTwoWay_Add_Ordinal, ::test_drivertwoway::kTwoWay_Add_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_drivertwoway::kTwoWay_Add_Ordinal, ::test_drivertwoway::kTwoWay_Add_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -182,7 +182,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_drivertwoway::TwoWay::Add>::TransactionalResponse(uint16_t sum)
     : body(::fidl::WireResponse<::test_drivertwoway::TwoWay::Add>(sum)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_drivertwoway::kTwoWay_Add_Ordinal, ::test_drivertwoway::kTwoWay_Add_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_drivertwoway::kTwoWay_Add_Ordinal, ::test_drivertwoway::kTwoWay_Add_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_drivertwoway::TwoWay::Add>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_drivertwoway::kTwoWay_Add_Ordinal, ::test_drivertwoway::kTwoWay_Add_DynamicFlags);

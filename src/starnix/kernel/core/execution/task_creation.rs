@@ -256,16 +256,26 @@ pub fn create_init_process(
         },
         Credentials::root(),
         rlimits,
+        None,
     )?;
     let _ = kernel.init_task.set(Arc::downgrade(&builder.task));
     Ok(builder)
 }
 
+/// Duplicates the calling Zircon thread's handle with only `INSPECT` rights.
+///
+/// `Task::state_code` uses the handle to report whether the kernel thread that runs on this
+/// Zircon thread is blocked.
+fn duplicate_calling_thread_for_inspect() -> Result<zx::Thread, Errno> {
+    fuchsia_runtime::with_thread_self(|thread| thread.duplicate_handle(zx::Rights::INSPECT))
+        .map_err(|status| from_status_like_fdio!(status))
+}
+
 /// Creates the `kthreadd` system task that runs inside the kernel.
 ///
 /// There is no underlying Zircon process to host the task. Instead, the work done by this task
-/// is performed by a thread in the original Starnix process, possibly as part of a thread
-/// pool.
+/// is performed by a thread in the original Starnix process. Must be called on the Zircon thread
+/// that will run the system task so its thread handle can be captured to report blocked state.
 ///
 /// The task is initialized with a temporary bootstrap `"rootfs"` [`TmpFs`] intended to be
 /// replaced with the container's root filesystem via [`FsContext::replace_bootstrap_namespace`]
@@ -276,7 +286,8 @@ pub fn create_init_process(
 /// task and a threadpool on which it can do work.
 pub fn create_system_task(kernel: &Arc<Kernel>) -> Result<CurrentTask, Errno> {
     let fs = FsContext::new(Namespace::new(TmpFs::new_fs_with_name(kernel, "rootfs".into())));
-    let builder = create_task(
+    let kernel_thread = duplicate_calling_thread_for_inspect()?;
+    let builder = create_task_internal(
         kernel,
         TaskCommand::new(b"kthreadd"),
         fs,
@@ -285,6 +296,7 @@ pub fn create_system_task(kernel: &Arc<Kernel>) -> Result<CurrentTask, Errno> {
             Ok(TaskInfo { thread_group, memory_manager: None }.into())
         },
         Credentials::root(),
+        Some(kernel_thread),
     )?;
     Ok(builder.into())
 }
@@ -299,9 +311,33 @@ pub fn create_task<F>(
 where
     F: FnOnce(Pid) -> Result<TaskInfo, Errno>,
 {
+    create_task_internal(kernel, initial_name, root_fs, task_info_factory, creds, None)
+}
+
+fn create_task_internal<F>(
+    kernel: &Kernel,
+    initial_name: TaskCommand,
+    root_fs: Arc<FsContext>,
+    task_info_factory: F,
+    creds: Arc<Credentials>,
+    kernel_thread: Option<zx::Thread>,
+) -> Result<TaskBuilder, Errno>
+where
+    F: FnOnce(Pid) -> Result<TaskInfo, Errno>,
+{
     let mut guard = kernel.pids.lock();
     let pid = guard.allocate_pid()?;
-    create_task_with_pid(kernel, guard, pid, initial_name, root_fs, task_info_factory, creds, &[])
+    create_task_with_pid(
+        kernel,
+        guard,
+        pid,
+        initial_name,
+        root_fs,
+        task_info_factory,
+        creds,
+        &[],
+        kernel_thread,
+    )
 }
 
 fn create_task_with_pid<F>(
@@ -313,6 +349,7 @@ fn create_task_with_pid<F>(
     task_info_factory: F,
     creds: Arc<Credentials>,
     rlimits: &[(Resource, u64)],
+    kernel_thread: Option<zx::Thread>,
 ) -> Result<TaskBuilder, Errno>
 where
     F: FnOnce(Pid) -> Result<TaskInfo, Errno>,
@@ -347,8 +384,10 @@ where
             SeccompFilterContainer::default(),
             RobustListHeadPtr::null(&ArchWidth::Arch64),
             default_timerslack,
+            kernel_thread,
         ),
         thread_state: Default::default(),
+        security_state: Default::default(),
     };
     release_on_error!(builder, {
         builder.thread_group().add(Arc::clone(&builder.task))?;
@@ -371,11 +410,14 @@ where
 
 /// Create a kernel task in the same ThreadGroup as the given `system_task`.
 ///
-/// There is no underlying Zircon thread to host the task.
+/// Kernel threads have no restricted-mode user `ZirconThread`. Must be called on the Zircon
+/// thread that will run the returned task so its thread handle can be captured to report blocked
+/// state.
 pub fn create_kernel_thread(
     system_task: &Task,
     initial_name: TaskCommand,
 ) -> Result<CurrentTask, Errno> {
+    let kernel_thread = duplicate_calling_thread_for_inspect()?;
     let mut pids = system_task.kernel().pids.lock();
     let pid = pids.allocate_pid()?;
 
@@ -420,6 +462,7 @@ pub fn create_kernel_thread(
         SeccompFilterContainer::default(),
         RobustListHeadPtr::null(&ArchWidth::Arch64),
         default_timerslack_ns,
+        Some(kernel_thread),
     ))
     .into();
     release_on_error!(current_task, {

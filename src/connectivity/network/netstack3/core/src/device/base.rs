@@ -813,7 +813,7 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::IpDeviceAddresses<
     }
 
     fn set_link_mtu(&mut self, device_id: &Self::DeviceId, mtu: Mtu) {
-        if mtu < Ipv6::MINIMUM_LINK_MTU {
+        if mtu < Ipv6::MINIMUM_LINK_MTU.get() {
             return;
         }
 

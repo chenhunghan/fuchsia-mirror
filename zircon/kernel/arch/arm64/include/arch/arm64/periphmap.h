@@ -8,8 +8,6 @@
 #define ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ARM64_PERIPHMAP_H_
 
 #include <sys/types.h>
-#include <zircon/compiler.h>
-#include <zircon/types.h>
 
 // translates peripheral physical address to virtual address in the big kernel map
 extern "C" vaddr_t periph_paddr_to_vaddr(paddr_t paddr);

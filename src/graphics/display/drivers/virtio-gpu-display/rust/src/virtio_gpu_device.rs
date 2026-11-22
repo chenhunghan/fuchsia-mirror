@@ -56,6 +56,10 @@ impl ControlQueueBuffer {
         self.buffer.as_ref().expect("buffer accessed after drop")
     }
 
+    fn buffer_mut(&mut self) -> &mut ContiguousBuffer {
+        self.buffer.as_mut().expect("buffer accessed after drop")
+    }
+
     /// Device-accessible physical address of the command area.
     fn command_physical_address(&self) -> u64 {
         self.buffer().phys() as u64
@@ -378,11 +382,10 @@ impl VirtioGpuDevice {
         let response_size_bytes = NonZero::<u32>::new(response_bytes.len() as u32)
             .expect("virtio-gpu responses are not empty");
 
-        response_bytes.fill(0);
-        self.control_queue_buffer.buffer().write(0, command_bytes)?;
+        self.control_queue_buffer.buffer_mut().write(0, command_bytes)?;
         self.control_queue_buffer
-            .buffer()
-            .write(ControlQueueBuffer::AREA_SIZE_BYTES, response_bytes)?;
+            .buffer_mut()
+            .zero(ControlQueueBuffer::AREA_SIZE_BYTES, response_bytes.len())?;
 
         // SAFETY: The ranges cover pinned memory that is contiguous in the
         // device's physical address space. No Rust reference points into the

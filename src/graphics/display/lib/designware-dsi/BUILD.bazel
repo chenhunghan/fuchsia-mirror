@@ -1,0 +1,62 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":dsi-host-controller-tests"],
+    visibility = ["//src/graphics/display:__pkg__"],
+)
+
+fx_cc_library(
+    name = "dsi-host-controller",
+    srcs = ["dsi-host-controller.cc"],
+    hdrs = [
+        "dphy-interface-config.h",
+        "dpi-interface-config.h",
+        "dpi-video-timing.h",
+        "dsi-host-controller.h",
+        "dsi-host-controller-config.h",
+        "dsi-packet-handler-config.h",
+        "dw-mipi-dsi-reg.h",
+    ],
+    visibility = ["//src/graphics/display/drivers/amlogic-display:__pkg__"],
+    deps = [
+        "//sdk/lib/driver/logging/cpp",
+        "//sdk/lib/driver/mmio/cpp",
+        "//src/graphics/display/lib/api-types/cpp",
+        "//src/graphics/display/lib/mipi-dsi",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/hwreg",
+        "//zircon/system/ulib/zircon-internal",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "dsi-host-controller-tests-bin",
+    srcs = [
+        "dphy-interface-config-test.cc",
+        "dpi-interface-config-test.cc",
+        "dpi-video-timing-test.cc",
+        "dsi-host-controller-config-test.cc",
+        "dsi-host-controller-test.cc",
+        "dsi-packet-handler-config-test.cc",
+    ],
+    gn_output_name = "dsi-host-controller-tests",
+    deps = [
+        ":dsi-host-controller",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_unittest_package(
+    name = "dsi-host-controller-tests",
+    unit_tests = [":dsi-host-controller-tests-bin"],
+)

@@ -19,6 +19,7 @@ use ffx_emulator_config::{BoxFuture, EmulatorEngine, EngineConsoleType, ShowDeta
 use fho::{Result, bug, return_bug};
 use nix::sys::signal::Signal;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -154,8 +155,9 @@ impl EmulatorEngine for CrosvmEngine {
         &'a mut self,
         context: &'a EnvironmentContext,
         emulator_cmd: Command,
-    ) -> BoxFuture<'a, Result<i32>> {
-        Box::pin(async move { self.run(context, emulator_cmd).await })
+        out: &'a mut dyn Write,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move { self.run(context, emulator_cmd, out).await })
     }
 
     fn show(&self, details: Vec<ShowDetail>) -> Vec<ShowDetail> {
@@ -195,9 +197,6 @@ impl EmulatorEngine for CrosvmEngine {
 
     fn configure(&mut self) -> Result<()> {
         let result = if self.emu_config().runtime.config_override {
-            let message = "Custom configuration provided; bypassing validation.";
-            eprintln!("{message}");
-            log::info!("{message}");
             Ok(())
         } else {
             self.validate_configuration()

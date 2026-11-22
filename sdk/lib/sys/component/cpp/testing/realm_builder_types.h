@@ -5,22 +5,29 @@
 #ifndef LIB_SYS_COMPONENT_CPP_TESTING_REALM_BUILDER_TYPES_H_
 #define LIB_SYS_COMPONENT_CPP_TESTING_REALM_BUILDER_TYPES_H_
 
+#include <fidl/fuchsia.component.decl/cpp/fidl.h>
+#include <fidl/fuchsia.component.test/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 #include <fuchsia/component/decl/cpp/fidl.h>
 #include <fuchsia/component/test/cpp/fidl.h>
 #include <fuchsia/io/cpp/fidl.h>
 #include <fuchsia/mem/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/fdio/namespace.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/outgoing_directory.h>
 #include <lib/sys/cpp/service_directory.h>
+#include <lib/zx/result.h>
 #include <zircon/availability.h>
 
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -191,26 +198,6 @@ class LocalComponentImplBase {
   // This method is not valid until |OnStart()| is invoked.
   fdio_ns_t* ns();
 
-// TODO(https://fxbug.dev/296292544): Remove when build support for API level 16 is removed.
-#if FUCHSIA_API_LEVEL_LESS_THAN(17)
-  // Returns a wrapper around the component's outgoing directory. The mock
-  // component may publish capabilities using the returned object.
-  //
-  // This method is not valid until |OnStart()| is invoked.
-  sys::OutgoingDirectory* outgoing();
-
-  // Convenience method to construct a ServiceDirectory by opening a handle to
-  // "/svc" in the namespace object returned by `ns()`.
-  //
-  // This method is not valid until |OnStart()| is invoked.
-  sys::ServiceDirectory svc();
-
- private:
-  friend internal::LocalComponentRunner;
-  // The |LocalComponentHandles| are set by the |LocalComponentRunner| after
-  // construction by the factory, and before calling |OnStart()|
-  std::unique_ptr<LocalComponentHandles> handles_;
-#else
  protected:
   // Called by internal::LocalComponentInstance
   zx_status_t Initialize(fdio_ns_t* ns, zx::channel outgoing_dir, async_dispatcher_t* dispatcher,
@@ -227,13 +214,8 @@ class LocalComponentImplBase {
  private:
   friend internal::LocalComponentInstance;
   fit::function<void(zx_status_t)> on_exit_;
-#endif
 };
 
-// TODO(https://fxbug.dev/296292544): Remove when build support for API level 16 is removed.
-#if FUCHSIA_API_LEVEL_LESS_THAN(17)
-using LocalComponentImpl = LocalComponentImplBase;
-#else
 class LocalHlcppComponent : public LocalComponentImplBase {
  public:
   // Returns a wrapper around the component's outgoing directory. The mock
@@ -269,6 +251,24 @@ class LocalCppComponent : public LocalComponentImplBase {
   // This method is not valid until |OnStart()| is invoked.
   component::OutgoingDirectory* outgoing();
 
+  // Opens a handle to "/svc" in the namespace object returned by `ns()`.
+  //
+  // This method is not valid until |OnStart()| is invoked.
+  zx::result<fidl::ClientEnd<fuchsia_io::Directory>> svc() ZX_AVAILABLE_SINCE(NEXT);
+
+  // Connects to `Protocol` in the component's "/svc" namespace directory.
+  //
+  // This method is not valid until |OnStart()| is invoked.
+  template <typename Protocol, typename = std::enable_if_t<fidl::IsProtocolV<Protocol>>>
+  zx::result<fidl::ClientEnd<Protocol>> Connect(
+      std::string_view name = fidl::DiscoverableProtocolName<Protocol>) ZX_AVAILABLE_SINCE(NEXT) {
+    zx::result<fidl::ClientEnd<fuchsia_io::Directory>> svc_dir = svc();
+    if (svc_dir.is_error()) {
+      return svc_dir.take_error();
+    }
+    return component::ConnectAt<Protocol>(*svc_dir, name);
+  }
+
  private:
   zx_status_t SetOutgoingDirectory(zx::channel outgoing_dir,
                                    async_dispatcher_t* dispatcher) override {
@@ -278,24 +278,7 @@ class LocalCppComponent : public LocalComponentImplBase {
   }
   std::unique_ptr<component::OutgoingDirectory> outgoing_dir_;
 };
-#endif
 // [END mock_interface_cpp]
-
-// The use of this class is DEPRECATED.
-//
-// The interface for backing implementations of components with a Source of Mock
-// when added by deprecated method AddLocalChild(..., LocalComponent*, ...).
-//
-// TODO(https://fxbug.dev/296292544): Remove class when build support for API level 16 is removed.
-class LocalComponent {
- public:
-  virtual ~LocalComponent();
-
-  // Invoked when the Component Manager issues a Start request to the component.
-  // |mock_handles| contains the outgoing directory and namespace of
-  // the component.
-  virtual void Start(std::unique_ptr<LocalComponentHandles> mock_handles) = 0;
-} ZX_REMOVED_SINCE(1, 9, 17, "Use LocalComponentFactory instead.");
 
 // Type for a function that returns a new |LocalComponentImplBase| when component
 // manager requests a new component instance.
@@ -303,19 +286,7 @@ class LocalComponent {
 // See |Realm.AddLocalChild| for more details.
 using LocalComponentFactory = fit::function<std::unique_ptr<LocalComponentImplBase>()>;
 
-// Type for either variation of implementation passed to AddLocalChild(): the
-// deprecated raw pointer, or one of the valid callback functions.
-#if FUCHSIA_API_LEVEL_LESS_THAN(17)
-// TODO(https://fxbug.dev/296292544): Remove variant when build support for API level 16 is removed.
-// Ignore warnings caused by the use of the deprecated `LocalComponent` type as it is part of the
-// implementation that supports the deprecated type.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-using LocalComponentKind = std::variant<LocalComponent*, LocalComponentFactory>;
-#pragma clang diagnostic pop
-#else
 using LocalComponentKind = std::variant<LocalComponentFactory>;
-#endif
 
 using StartupMode = fuchsia::component::decl::StartupMode;
 
@@ -420,9 +391,9 @@ class DirectoryContents {
 
   // Take this object and convert it to its FIDL counterpart. Invoking this method
   // resets this object, erasing all previously-added file entries.
-  fuchsia::component::test::DirectoryContents TakeAsFidl();
+  fuchsia_component_test::DirectoryContents TakeAsFidl();
 
-  fuchsia::component::test::DirectoryContents contents_;
+  fuchsia_component_test::DirectoryContents contents_;
 };
 
 // Defines a structured configuration value. Used to replace configuration values of existing
@@ -471,9 +442,9 @@ class ConfigValue {
   // Friend class needed in order to invoke |TakeAsFidl|.
   friend class Realm;
 
-  fuchsia::component::decl::ConfigValueSpec TakeAsFidl();
-  explicit ConfigValue(fuchsia::component::decl::ConfigValueSpec spec);
-  fuchsia::component::decl::ConfigValueSpec spec;
+  fuchsia_component_decl::ConfigValueSpec TakeAsFidl();
+  explicit ConfigValue(fuchsia_component_decl::ConfigValueSpec spec);
+  fuchsia_component_decl::ConfigValueSpec spec;
 };
 
 // Defines a configuration capability.

@@ -5,15 +5,24 @@
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component_manifest",
+    "fx_test_component",
 )
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load(
     "//build/bazel/rules/packages:fx_packaged_binary.bzl",
     "fx_packaged_binary",
 )
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":mock-omaha-server-fuchsia-tests"],
+    visibility = ["//src/sys/pkg:__pkg__"],
+)
 
 rustc_library(
     name = "mock-omaha-server-fuchsia",
@@ -33,17 +42,15 @@ rustc_library(
     ],
 )
 
-# Kept in GN because `mock-omaha-server-fuchsia-tests` packages
-# `//src/connectivity/network/netstack3:component-for-tests`, which has no
-# Bazel build yet.
-# @bazel2gn:skip
 rustc_test(
     name = "mock-omaha-server-fuchsia_test",
     crate = ":mock-omaha-server-fuchsia",
-    edition = "2024",
+    # Matches the binary path in meta/mock-omaha-server-fuchsia-tests.cml.
+    crate_name = "mock_omaha_server_fuchsia_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
 )
 
-# @bazel2gn:skip
 fx_packaged_binary(
     name = "mock-omaha-server-fuchsia_test_packaged_bin",
     testonly = True,
@@ -51,7 +58,6 @@ fx_packaged_binary(
     binary_name = "mock_omaha_server_fuchsia_lib_test",
 )
 
-# @bazel2gn:skip
 fx_component_manifest(
     name = "mock-omaha-server-fuchsia-tests-manifest",
     testonly = True,
@@ -63,4 +69,23 @@ fx_component_manifest(
         "//src/sys/test_runners/rust:default.shard.cml",
     ],
     manifest = "meta/mock-omaha-server-fuchsia-tests.cml",
+)
+
+fx_test_component(
+    name = "mock-omaha-server-fuchsia-tests-component",
+    compiled_manifest = ":mock-omaha-server-fuchsia-tests-manifest",
+    deps = [":mock-omaha-server-fuchsia_test_packaged_bin"],
+)
+
+fx_package(
+    name = "mock-omaha-server-fuchsia-tests-package",
+    package_name = "mock-omaha-server-fuchsia-tests",
+    testonly = True,
+    subpackages = ["//src/connectivity/network/netstack3:package-for-tests"],
+    test_components = [":mock-omaha-server-fuchsia-tests-component"],
+)
+
+fx_test(
+    name = "mock-omaha-server-fuchsia-tests",
+    package = ":mock-omaha-server-fuchsia-tests-package",
 )

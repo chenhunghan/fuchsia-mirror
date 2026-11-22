@@ -362,6 +362,11 @@ void Consumer::SetVolume(SetVolumeRequest& request, SetVolumeCompleter::Sync& co
           .volume = request.volume(),
       }})
       .Then([this](auto& result) {
+        if (result.is_error()) {
+          FX_LOGS(WARNING) << "Failed to GetDbFromVolume2: "
+                           << result.error_value().status_string();
+          return;
+        }
         if (!gain_control_) {
           FX_LOGS(WARNING) << "Gain control lost during SetVolume processing";
           return;
@@ -369,7 +374,7 @@ void Consumer::SetVolume(SetVolumeRequest& request, SetVolumeCompleter::Sync& co
 
         fit::result<fidl::OneWayError> set_gain_result =
             gain_control_->SetGain({{.gain_db = result.value().gain_db()}});
-        if (result.is_error()) {
+        if (set_gain_result.is_error()) {
           FX_LOGS(WARNING) << "Failed to SetGain to " << result.value().gain_db() << ": "
                            << set_gain_result.error_value().status_string();
           return;

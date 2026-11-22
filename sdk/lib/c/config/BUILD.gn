@@ -1,0 +1,315 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("../libc.gni")
+
+# JSON object defining the configuration macros available in $llvm_libc code.
+config_json = read_file("$llvm_libc/config/config.json", "json")
+
+no_floating_point = toolchain_variant.tags + [ "no-floating-point" ] -
+                    [ "no-floating-point" ] != toolchain_variant.tags
+
+# Choices for the $current_toolchain instantiation of the libc code.  There
+# **must** be a choice expressed here for each option defined in $config_json.
+#
+# This has an entry for each category, i.e. an entry for each key in the
+# $config_json object, which uses category names as keys.  Each entry is:
+#
+#   * name
+#     - Required: Category name, such that `config_json[name]` works.
+#     - Type: string
+#
+#   * bad_macros
+#     - Optional: Maps $config_json (cmake) names to macro names where llvm-libc
+#     needs cleanup to harmonize all the spellings.
+#     - Type: scope(string -> string)
+#
+#  * set
+#     - Required: List of "OPTION" or "OPTION=..." strings to set.  These match
+#     the "OPTION" cmake variables used in $config_json; and translate into
+#     "OPTION" macros, modulo $bad_macros.
+#     - Type: list(string)
+#
+#  * unset
+#     - Required: This is a list of "OPTION" names that could have been in $set
+#     (perhaps as "OPTION=..." instead, but not here) but are not.  They are
+#     specifically meant to be in disabled state for this configuration.  Their
+#     presence in the list indicates that it was a considered choice to omit
+#     them from $set.
+#     - Type: list(string)
+#
+#  * moot
+#     - Required: This is a list of "OPTION" names that exist in $llvm_libc
+#     code but are only used by code that this build never actually uses from
+#     there at all (either source files that are not being compiled, or
+#     known-dead `#if` branches in headers).  This is like $unset in
+#     practice--they're just not defined as macros, and they're recognized as
+#     being covered for the completeness checks so there's no assertion failure
+#     about a new option to decide about.  It differs from $unset only in
+#     intent (for now).  This is distinguished from $unset in case the
+#     llvm-libc internal macros change in future for `-Wundef` / typo-proofing,
+#     where $unset would start to be actually "set to false" or something else
+#     distinct from "absent".
+#     - Type: list(string)
+#
+# These are applied uniformly to both production and testonly compilations of
+# the code.  If it becomes useful to vary them between the two, this can be
+# extended for that (to produce two configs at the end).
+config_categories = [
+  {
+    name = "assert"
+    set = [ "LIBC_COPT_USE_C_ASSERT" ]
+    unset = []
+    moot = [
+      "LIBC_COPT_HARDENING_MODE",  # Currently only affects embedded malloc.
+    ]
+  },
+  {
+    name = "ctype"
+    set = []
+    unset = [ "LIBC_CONF_CTYPE_SMALLER_ASCII" ]
+    moot = []
+  },
+  {
+    name = "errno"
+    set = []
+    unset = []
+    moot = [ "LIBC_CONF_ERRNO_MODE" ]
+  },
+  {
+    name = "fenv"
+    set = []
+    unset = []
+    moot = [ "LIBC_CONF_TRAP_ON_RAISE_FP_EXCEPT" ]
+  },
+  {
+    name = "general"
+    set = []
+    unset = [
+      "LIBC_ADD_NULL_CHECKS",
+      "LIBC_COPT_PROVIDE_GNU_ALIASES",
+    ]
+    moot = []
+  },
+  {
+    name = "printf"
+    set = [
+      # Never support %n.
+      "LIBC_CONF_PRINTF_DISABLE_WRITE_INT",
+
+      # Don't support %m since it uses problematic llvm-libc internals.
+      "LIBC_CONF_PRINTF_DISABLE_STRERROR",
+
+      # Don't support %lc since it's not used anywhere in the internal uses,
+      # and this implementation is not yet used for public printf.
+      "LIBC_CONF_PRINTF_DISABLE_WIDE",
+
+      # Don't support bitint types yet since they are not used internally.
+      "LIBC_COPT_PRINTF_DISABLE_BITINT",
+
+      # Don't support %<n>$s et al POSIX syntax, not used internally.
+      "LIBC_CONF_PRINTF_DISABLE_INDEX_MODE",
+    ]
+    unset = [
+      "LIBC_CONF_PRINTF_FLOAT_TO_STR_NO_SPECIALIZE_LD",
+      "LIBC_CONF_PRINTF_FLOAT_TO_STR_USE_DYADIC_FLOAT",
+      "LIBC_CONF_PRINTF_FLOAT_TO_STR_USE_FLOAT320",
+      "LIBC_CONF_PRINTF_FLOAT_TO_STR_USE_MEGA_LONG_DOUBLE_TABLE",
+      "LIBC_CONF_PRINTF_MODULAR",
+      "LIBC_CONF_PRINTF_RUNTIME_DISPATCH",
+    ]
+
+    # Don't support FP types if the toolchain doesn't.  Fixed-point is
+    # technically unrelated and could very plausibly be available when
+    # floating-point is not for ABI reasons.  But in our internal uses it's the
+    # same cases where floating-point is never used that certainly will never
+    # use fixed-point either.
+    if_no_fp = [
+      "LIBC_CONF_PRINTF_DISABLE_FLOAT",
+      "LIBC_CONF_PRINTF_DISABLE_FIXED_POINT",
+    ]
+    if (no_floating_point) {
+      set += if_no_fp
+    } else {
+      unset += if_no_fp
+    }
+
+    moot = []
+  },
+  {
+    name = "qsort"
+    bad_macros = {
+      LIBC_CONF_QSORT_IMPL = "LIBC_QSORT_IMPL"
+    }
+    set = [ "LIBC_CONF_QSORT_IMPL=LIBC_QSORT_QUICK_SORT" ]
+    unset = []
+    moot = []
+  },
+  {
+    # This code is not actually being used yet.
+    name = "scanf"
+    set = []
+    unset = []
+    moot = [
+      "LIBC_CONF_SCANF_DISABLE_FLOAT",
+      "LIBC_CONF_SCANF_DISABLE_INDEX_MODE",
+      "LIBC_CONF_SCANF_PROVIDE_ISOC99_ALIASES",
+    ]
+  },
+  {
+    name = "string"
+    set = [
+      "LIBC_CONF_FIND_FIRST_CHARACTER_IMPL=element",
+      "LIBC_CONF_STRING_LENGTH_IMPL=element",
+      "LIBC_CONF_MEMCPY_X86_USE_NTA_STORES",
+    ]
+    unset = [
+      "LIBC_CONF_MEMSET_X86_USE_SOFTWARE_PREFETCHING",
+      "LIBC_CONF_USE_MEM_BUILTINS",
+    ]
+    moot = []
+  },
+  {
+    # This code is not actually being used yet.
+    name = "str_to_float"
+    set = []
+    unset = []
+    moot = [
+      "LIBC_CONF_STRTOFLOAT_DISABLE_CLINGER_FAST_PATH",
+      "LIBC_CONF_STRTOFLOAT_DISABLE_EISEL_LEMIRE",
+      "LIBC_CONF_STRTOFLOAT_DISABLE_SIMPLE_DECIMAL_CONVERSION",
+    ]
+  },
+  {
+    name = "wctype"
+    set = [ "LIBC_CONF_WCTYPE_MODE" ]
+    unset = []
+    moot = []
+  },
+]
+
+# These are whole category names where everything would be in the $moot list.
+moot_categories = [
+  "baremetal",
+  "codegen",  # Affects compiler switches, not defines.
+  "math",  # Not much used yet.
+  "setjmp",  # Not used from llvm-libc.
+  "pthread",  # Not used from llvm-libc.
+  "threads",  # Not used from llvm-libc.
+]
+
+all_category_names = moot_categories
+all_set = []
+all_unset = []
+all_moot = []
+foreach(category, config_categories) {
+  all_category_names += [ category.name ]
+  all_set += category.set
+  all_unset += category.unset
+  all_moot += category.moot
+}
+
+check = {
+  forward_variables_from(config_json, "*", all_category_names + moot_categories)
+}
+assert(check == {
+           },
+       "New config categories not enumerated: $check")
+obsolete_categories = []
+foreach(name, all_category_names + moot_categories) {
+  if (!defined(config_json[name])) {
+    obsolete_categories += [ name ]
+  }
+}
+assert(obsolete_categories == [],
+       "Old config categories are gone now: $obsolete_categories")
+
+config_defines = []
+all_known = []
+incomplete_categories = []
+
+# Now that the list of categories is verified to be complete, it can be used to
+# iterate through $config_json.
+foreach(category, config_categories) {
+  # Names in the unset and moot lists are always just names, but the set list
+  # can contain "NAME=VALUE" cases too.  $set keeps the values, while
+  # $names keeps just the names to check completeness vs the spec.
+  category.all_names = []
+  category.dup_names = []
+  foreach(option, category.unset + category.moot) {
+    if (category.all_names + [ option ] - [ option ] == category.all_names) {
+      category.all_names += [ option ]
+    } else {
+      category.dup_names += [ option ]
+    }
+  }
+  foreach(option, category.set) {
+    foreach(work,  # foreach as let
+            [
+              {
+                split = string_split(option, "=")
+                name = split[0]
+                macro = name
+                if (defined(category.bad_macros)) {
+                  bad = category.bad_macros
+                  if (defined(bad[macro])) {
+                    macro = bad[macro]
+                  }
+                }
+                if (macro == name) {
+                  # Common bad macro pattern not spelled out in bad_macros.
+                  macro = string_replace(name, "LIBC_CONF_", "LIBC_COPT_")
+                }
+                pieces = []
+                foreach(piece, split) {
+                  if (pieces == []) {
+                    piece = macro
+                  }
+                  pieces += [ piece ]
+                }
+                defines = [ string_join("=", pieces) ]
+              },
+            ]) {
+      if (category.all_names + [ work.name ] - [ work.name ] ==
+          category.all_names) {
+        category.all_names += [ work.name ]
+      } else {
+        category.dup_names += [ work.name ]
+      }
+      config_defines += work.defines
+    }
+  }
+
+  category.spec = {
+    forward_variables_from(config_json[category.name], "*")
+  }
+  category.spec_keys = []
+  category.obsolete = []
+  foreach(option, category.all_names) {
+    category.spec_keys += [ option ]
+    foreach(spec, [ category.spec ]) {  # foreach as let
+      if (!defined(spec[option])) {
+        category.obsolete += [ option ]
+      }
+    }
+  }
+  category.missing = {
+    forward_variables_from(category.spec, "*", category.spec_keys)
+  }
+
+  if (category.missing != {
+      } || category.obsolete != [] || category.dup_names != []) {
+    incomplete_categories += [ category ]
+  }
+
+  all_known += category.all_names
+}
+
+assert(incomplete_categories == [],
+       "Some config categories are incomplete: $incomplete_categories")
+
+config("config") {
+  visibility = [ "..:llvm-libc.config" ]
+  defines = config_defines
+}

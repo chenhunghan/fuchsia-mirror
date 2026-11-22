@@ -21,23 +21,8 @@ __END_CDECLS
 
 // clang-format off
 
-// PL011 registers.
-enum class Pl011Register : uint64_t {
-    DR      = 0x00,
-    FR      = 0x18,
-    IBRD    = 0x24,
-    FBRD    = 0x28,
-    LCR     = 0x2c,
-    CR      = 0x30,
-    IFLS    = 0x34,
-    IMSC    = 0x38,
-    ICR     = 0x44,
-};
-
 constexpr uint64_t kPl011PhysBase = 0x808300000;
 constexpr uint64_t kPl011Size     = 0x1000;
-
-constexpr uint16_t kPl011FlagRegisterTxFifoEmpty = 1u << 7;
 
 // clang-format on
 
@@ -55,10 +40,11 @@ zx_status_t Pl011::Read(uint64_t addr, IoValue* value) {
       return ZX_OK;
     }
     case Pl011Register::FR:
-      // Incoming data is immediately processed, so might as well always report
-      // that the TX FIFO is empty.
-      value->u16 = kPl011FlagRegisterTxFifoEmpty;
+      // Incoming TX data is immediately processed and we never receive RX data,
+      // so always report that both the RX and TX FIFOs are empty.
+      value->u16 = kPl011FlagRegisterRxFifoEmpty | kPl011FlagRegisterTxFifoEmpty;
       return ZX_OK;
+    case Pl011Register::DR:
     case Pl011Register::IMSC:
       value->u16 = 0;
       return ZX_OK;

@@ -144,6 +144,46 @@ pub fn supply_pager_vmo_pages<const N: usize>(
     Ok(pages)
 }
 
+/// Helper function used by `vm_mapping_page_fault_optimisation_test`.
+/// Given a mapping, check that a run of consecutive pages are mapped (indicated by
+/// `expected_mapped_page_count`) and that remaining pages are unmapped.
+///
+/// # Safety
+///
+/// The caller must ensure that the calling CPU has a valid, initialized current `Thread` whose
+/// active `VmAspace` remains valid for the duration of this call.
+pub unsafe fn verify_mapped_page_range(
+    base: usize,
+    mapping_size: usize,
+    expected_mapped_page_count: usize,
+) -> bool {
+    let run = unittest::subtest!(|| {
+        // SAFETY: By this function's `# Safety` contract, the calling CPU has a valid current
+        // `Thread` whose active `VmAspace` remains valid across the queries in this call.
+        let active_aspace =
+            unittest::unwrap_some!(unsafe { crate::kernel::thread::current_active_aspace() });
+
+        // All pages up to expected_mapped_page_count should have been faulted.
+        let mut offset = 0usize;
+        while offset < expected_mapped_page_count * page::SIZE {
+            let (_paddr_writable, mmu_flags) =
+                unittest::unwrap_ok!(active_aspace.arch_aspace().query(base + offset));
+            unittest::expect_true!((mmu_flags & ARCH_MMU_FLAG_PERM_READ) != 0);
+            offset += page::SIZE;
+        }
+
+        // Remaining pages should not have been faulted in.
+        while offset < mapping_size {
+            unittest::assert_err!(
+                active_aspace.arch_aspace().query(base + offset),
+                Status::NOT_FOUND
+            );
+            offset += page::SIZE;
+        }
+    });
+    run()
+}
+
 /// Verifies that `vmo` has `expected_bytes` tracked by continuous attribution.
 pub fn verify_continuous_attribution_bytes(vmo: &VmObject, expected_bytes: u64) -> bool {
     // SAFETY: `vmo.as_raw()` points to a live `VmObjectPaged`.
@@ -272,7 +312,7 @@ pub fn alloc_user(
 
     let vmo = VmObjectPaged::create(pmm::ALLOC_FLAG_ANY, 0, size as u64)?;
     let _ = vmo.set_name(name);
-    let mapping = aspace.root_vmar().unwrap().create_vm_mapping(
+    let mapping = aspace.root_vmar().unwrap().create_vm_mapping_no_overwrite(
         0,
         size,
         0,
@@ -280,7 +320,6 @@ pub fn alloc_user(
         VmObjectPaged::into_vm_object(vmo),
         0,
         ARCH_RW_USER_FLAGS,
-        name,
     )?;
 
     Ok(UserInOutPtr::new(ptr::with_exposed_provenance_mut(mapping.base)))

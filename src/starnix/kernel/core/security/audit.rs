@@ -142,6 +142,12 @@ impl AuditLogger {
         self.configuration.audit_mode == AuditMode::Disabled
     }
 
+    /// Returns the number of audit messages logged so far.
+    #[cfg(test)]
+    pub(super) fn audit_count(&self) -> u64 {
+        self.serial_counter.get() - 1
+    }
+
     /// Audit logging function that adds an audit message to the queue.
     ///
     /// The `audit_formatter` function is called only if the auditing is enabled.

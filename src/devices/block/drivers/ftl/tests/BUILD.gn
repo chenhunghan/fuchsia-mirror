@@ -48,6 +48,8 @@ test("ftl-test-bin") {
   include_dirs = [ "//src/devices/block/drivers/ftl" ]
   deps = [
     ":shared",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
     "//sdk/lib/driver/testing/cpp",
     "//sdk/lib/driver/testing/cpp:scoped_global_logger",
     "//src/devices/block/drivers/ftl:common",

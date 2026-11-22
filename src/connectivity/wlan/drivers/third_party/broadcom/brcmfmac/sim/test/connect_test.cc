@@ -165,10 +165,10 @@ class ConnectTest : public SimTest {
 
   // Event handlers
   void OnConnectConf(const fuchsia_wlan_fullmac::WlanFullmacImplIfcConnectConfRequest* resp);
-  void OnDisassocInd(const fuchsia_wlan_fullmac::WlanFullmacImplIfcDisassocIndRequest* ind);
+  void OnDisassocInd(fuchsia_wlan_fullmac::WlanFullmacImplIfcDisassocIndRequest* ind);
   void OnDisassocConf(const fuchsia_wlan_fullmac::WlanFullmacImplIfcDisassocConfRequest* resp);
   void OnDeauthConf(const fuchsia_wlan_fullmac::WlanFullmacImplIfcDeauthConfRequest* resp);
-  void OnDeauthInd(const fuchsia_wlan_fullmac::WlanFullmacImplIfcDeauthIndRequest* ind);
+  void OnDeauthInd(fuchsia_wlan_fullmac::WlanFullmacImplIfcDeauthIndRequest* ind);
   void OnSignalReport(const fuchsia_wlan_fullmac::WlanFullmacImplIfcSignalReportRequest* req);
 
  protected:
@@ -297,13 +297,13 @@ void ConnectInterface::DeauthConf(DeauthConfRequestView request,
 }
 void ConnectInterface::DeauthInd(DeauthIndRequestView request,
                                  DeauthIndCompleter::Sync& completer) {
-  const auto deauth_ind = fidl::ToNatural(*request);
+  auto deauth_ind = fidl::ToNatural(*request);
   test_->OnDeauthInd(&deauth_ind);
   completer.Reply();
 }
 void ConnectInterface::DisassocInd(DisassocIndRequestView request,
                                    DisassocIndCompleter::Sync& completer) {
-  const auto disassoc_ind = fidl::ToNatural(*request);
+  auto disassoc_ind = fidl::ToNatural(*request);
   test_->OnDisassocInd(&disassoc_ind);
   completer.Reply();
 }
@@ -433,21 +433,21 @@ void ConnectTest::OnDeauthConf(
   context_.deauth_conf_count++;
 }
 
-void ConnectTest::OnDeauthInd(const fuchsia_wlan_fullmac::WlanFullmacImplIfcDeauthIndRequest* ind) {
+void ConnectTest::OnDeauthInd(fuchsia_wlan_fullmac::WlanFullmacImplIfcDeauthIndRequest* ind) {
   context_.deauth_ind_count++;
   if (ind->locally_initiated().has_value() && ind->locally_initiated().value()) {
     context_.ind_locally_initiated_count++;
   }
-  client_ifc_.stats_.deauth_indications.push_back(*ind);
+  client_ifc_.stats_.deauth_indications.push_back(std::move(*ind));
 }
 
 void ConnectTest::OnDisassocInd(
-    const fuchsia_wlan_fullmac::WlanFullmacImplIfcDisassocIndRequest* ind) {
+    fuchsia_wlan_fullmac::WlanFullmacImplIfcDisassocIndRequest* ind) {
   context_.disassoc_ind_count++;
   if (ind->locally_initiated().has_value() && ind->locally_initiated().value()) {
     context_.ind_locally_initiated_count++;
   }
-  client_ifc_.stats_.disassoc_indications.push_back(*ind);
+  client_ifc_.stats_.disassoc_indications.push_back(std::move(*ind));
   if (start_reconnect_assoc_instant_) {
     StartReconnect();
   } else if (start_reconnect_assoc_) {

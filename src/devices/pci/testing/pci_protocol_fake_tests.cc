@@ -7,9 +7,9 @@
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/loop.h>
 #include <lib/async/cpp/task.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/fake-bti/cpp/fake-bti.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fit/function.h>
 #include <lib/pci/constants.h>
 #include <lib/sync/completion.h>

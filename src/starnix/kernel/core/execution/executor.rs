@@ -273,11 +273,8 @@ mod tests {
             assert!(!task.block_if_stopped());
 
             // Stop the task.
-            task.thread_group().set_stopped(
-                StopState::GroupStopping,
-                Some(SignalInfo::kernel(SIGSTOP)),
-                false,
-            );
+            task.thread_group()
+                .set_stopped(StopState::GroupStopping, Some(SignalInfo::kernel(SIGSTOP)));
 
             let thread = std::thread::spawn({
                 let task = task.weak_task();
@@ -289,11 +286,8 @@ mod tests {
                     }
 
                     // Continue the task.
-                    task.thread_group().set_stopped(
-                        StopState::Waking,
-                        Some(SignalInfo::kernel(SIGCONT)),
-                        false,
-                    );
+                    task.thread_group()
+                        .set_stopped(StopState::Waking, Some(SignalInfo::kernel(SIGCONT)));
                 }
             });
 
@@ -316,11 +310,8 @@ mod tests {
             assert!(!task.block_if_stopped());
 
             // Stop the task.
-            task.thread_group().set_stopped(
-                StopState::GroupStopping,
-                Some(SignalInfo::kernel(SIGSTOP)),
-                false,
-            );
+            task.thread_group()
+                .set_stopped(StopState::GroupStopping, Some(SignalInfo::kernel(SIGSTOP)));
 
             let thread = std::thread::spawn({
                 let task = task.weak_task();

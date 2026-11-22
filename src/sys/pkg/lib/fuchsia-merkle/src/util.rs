@@ -3,21 +3,30 @@
 // found in the LICENSE file.
 
 use bssl_crypto::digest::Sha256;
-use std::mem::size_of;
+use fuchsia_merkle_core::{Sha256State, make_identity};
 use storage_ptr_slice::PtrByteSlice;
 
-use crate::{BLOCK_SIZE, HASH_SIZE, Hash};
+#[cfg(not(all(target_arch = "aarch64", target_feature = "sha2")))]
+use crate::HASH_SIZE;
+use crate::{BLOCK_SIZE, Hash};
 
-pub const HASHES_PER_BLOCK: usize = BLOCK_SIZE / HASH_SIZE;
+pub(crate) struct BoringSslSha256(Sha256);
 
-type BlockIdentity = [u8; size_of::<u64>() + size_of::<u32>()];
+impl Sha256State for BoringSslSha256 {
+    #[inline]
+    fn new() -> Self {
+        Self(Sha256::new())
+    }
 
-/// Generate the bytes representing a block's identity.
-#[inline]
-fn make_identity(length: u32, level: u64, offset: u64) -> BlockIdentity {
-    let [o0, o1, o2, o3, o4, o5, o6, o7] = (offset | level).to_le_bytes();
-    let [l0, l1, l2, l3] = length.to_le_bytes();
-    [o0, o1, o2, o3, o4, o5, o6, o7, l0, l1, l2, l3]
+    #[inline]
+    fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
+    #[inline]
+    fn finalize(self) -> fuchsia_merkle_core::Hash {
+        fuchsia_merkle_core::Hash(self.0.digest())
+    }
 }
 
 /// Compute the merkle hash of a block of data.
@@ -30,20 +39,9 @@ fn make_identity(length: u32, level: u64, offset: u64) -> BlockIdentity {
 /// # Panics
 ///
 /// Panics if `block.len()` exceeds [`BLOCK_SIZE`] or if `offset` is not aligned to [`BLOCK_SIZE`]
+#[cfg(test)]
 pub fn hash_block(block: &[u8], offset: u64) -> Hash {
-    assert!(block.len() <= BLOCK_SIZE);
-    assert!(offset.is_multiple_of(BLOCK_SIZE as u64));
-
-    let mut hasher = Sha256::new();
-    hasher.update(&make_identity(block.len() as u32, 0, offset));
-    hasher.update(block);
-    // Zero fill block up to BLOCK_SIZE. As a special case, if the first data block is completely
-    // empty, it is not zero filled.
-    if block.len() != BLOCK_SIZE && !(block.is_empty() && offset == 0) {
-        update_with_zeros(&mut hasher, BLOCK_SIZE - block.len());
-    }
-
-    Hash::from(hasher.digest())
+    Hash::from_array(fuchsia_merkle_core::hash_block::<BoringSslSha256>(block, offset).0)
 }
 
 /// Hashes a single aligned block (4096 or 8192 bytes) from `data`.
@@ -609,30 +607,6 @@ mod arm64 {
     }
 }
 
-/// Updates `hasher` with `count` zeros.
-pub(crate) fn update_with_zeros(hasher: &mut Sha256, mut count: usize) {
-    const BUF_SIZE: usize = 512;
-    const ZEROS: [u8; BUF_SIZE] = [0; BUF_SIZE];
-    while count >= BUF_SIZE {
-        count -= BUF_SIZE;
-        hasher.update(&ZEROS);
-    }
-    if count > 0 {
-        hasher.update(&ZEROS[0..count]);
-    }
-}
-
-/// Creates a new [`Sha256`] for hashing blocks of hashes. The hasher is initialized with the
-/// block's identity.
-pub fn make_hash_hasher(bytes_per_hash: u32, level: u64, offset: u64) -> Sha256 {
-    debug_assert!(level > 0);
-    debug_assert!(bytes_per_hash > 0);
-    debug_assert!(offset.is_multiple_of(bytes_per_hash as u64));
-    let mut hasher = Sha256::new();
-    hasher.update(&make_identity(bytes_per_hash, level, offset));
-    hasher
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,10 +649,20 @@ mod tests {
 
                 let hash =
                     hash_block_aligned(offset, PtrByteSlice::from(&buf[..]), 4096, unaligned_len);
+                let core_hash = Hash::from_array(
+                    fuchsia_merkle_core::hash_block_aligned::<BoringSslSha256>(
+                        offset,
+                        &buf,
+                        4096,
+                        unaligned_len,
+                    )
+                    .0,
+                );
                 assert_eq!(
                     hash, ref_hash,
                     "Mismatch: offset={offset}, unaligned_len={unaligned_len}"
                 );
+                assert_eq!(core_hash, ref_hash);
             }
         }
     }
@@ -702,10 +686,20 @@ mod tests {
                     BLOCK_SIZE,
                     unaligned_len,
                 );
+                let core_hash = Hash::from_array(
+                    fuchsia_merkle_core::hash_block_aligned::<BoringSslSha256>(
+                        offset,
+                        &buf,
+                        BLOCK_SIZE,
+                        unaligned_len,
+                    )
+                    .0,
+                );
                 assert_eq!(
                     hash, ref_hash,
                     "Mismatch: offset={offset}, unaligned_len={unaligned_len}"
                 );
+                assert_eq!(core_hash, ref_hash);
             }
         }
     }
@@ -721,8 +715,19 @@ mod tests {
         buf[..unaligned_len].copy_from_slice(&full_data);
 
         let hash = hash_block_aligned(offset, PtrByteSlice::from(&buf[..]), 4096, unaligned_len);
+        let core_hash = Hash::from_array(
+            fuchsia_merkle_core::hash_block_aligned::<BoringSslSha256>(
+                offset,
+                &buf,
+                4096,
+                unaligned_len,
+            )
+            .0,
+        );
 
         assert_ne!(hash, ref_hash, "Unzeroed tail must result in mismatched hash");
+        assert_ne!(core_hash, ref_hash);
+        assert_eq!(core_hash, hash);
     }
 
     #[cfg(all(target_arch = "aarch64", target_feature = "sha2"))]

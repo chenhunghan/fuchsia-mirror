@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/test.gni")
 import("//build/testing/host_test_data.gni")
 
 shared_library("fostr_shared") {
@@ -18,38 +16,6 @@ if (is_host) {
     sources = [ "$root_out_dir/libfostr_shared.so" ]
     deps = [ ":fostr_shared($host_toolchain)" ]
   }
-}
-
-test("fostr-test-bin") {
-  output_name = "fostr_unittests"
-
-  sources = [
-    "test/fidl_types_unittests.cc",
-    "test/hex_dump_unittests.cc",
-    "test/indent_unittests.cc",
-    "test/zx_types_unittests.cc",
-  ]
-
-  deps = [
-    ":fostr",
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/incoming/cpp",
-    "//sdk/lib/fidl/hlcpp",
-    "//src/lib/fostr/fidl/fuchsia.example.fostr",
-    "//src/lib/fostr/fidl/fuchsia.example.fostr2",
-    "//src/lib/fsl",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/predicates",
-  ]
-}
-
-fuchsia_unittest_package("fostr-tests") {
-  package_name = "fostr_unittests"
-  manifest = "meta/fostr_unittests.cml"
-  deps = [ ":fostr-test-bin" ]
-  test_type = "system"
 }
 
 group("tests") {
@@ -112,4 +78,52 @@ source_set("fostr") {
   } else {
     public_deps = [ "//sdk/lib/fidl/hlcpp:hlcpp_base" ]
   }
+}
+
+cc_test_executable("fostr_unittests") {
+  sources = [
+    "test/fidl_types_unittests.cc",
+    "test/hex_dump_unittests.cc",
+    "test/indent_unittests.cc",
+    "test/zx_types_unittests.cc",
+  ]
+  deps = [
+    ":fostr",
+    "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//sdk/lib/component/incoming/cpp",
+    "//sdk/lib/fidl/hlcpp",
+    "//src/lib/fostr/fidl/fuchsia.example.fostr",
+    "//src/lib/fostr/fidl/fuchsia.example.fostr2",
+    "//src/lib/fsl",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/predicates",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+renamed_binary("fostr_unittests_packaged_bin") {
+  testonly = true
+  source = "$root_out_dir/fostr_unittests"
+  source_deps = [ ":fostr_unittests" ]
+  dest = "test/fostr_unittests"
+}
+
+fuchsia_component_manifest("fostr_unittests_manifest") {
+  testonly = true
+  component_name = "fostr_unittests"
+  manifest = "meta/fostr_unittests.cml"
+}
+
+fuchsia_test_component("fostr_unittests_component") {
+  cm_label = ":fostr_unittests_manifest"
+  deps = [ ":fostr_unittests_packaged_bin" ]
+  test_type = "system"
+}
+
+fuchsia_test_package("fostr-tests") {
+  package_name = "fostr_unittests-gn"
+  test_components = [ ":fostr_unittests_component" ]
 }

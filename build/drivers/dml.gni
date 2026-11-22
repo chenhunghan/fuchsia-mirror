@@ -242,9 +242,6 @@ template("fuchsia_driver_dml_rust_parser") {
 #   board_name (required)
 #     Name of the board (used for manifest and bind file names).
 #
-#   driver_dmls (required)
-#     List of driver DML files used to resolve metadata schemas.
-#
 template("fuchsia_board_dml") {
   assert(defined(invoker.dml), "dml must be defined for fuchsia_board_dml")
   assert(defined(invoker.board_name),
@@ -269,11 +266,6 @@ template("fuchsia_board_dml") {
       inputs += invoker.sources
     }
 
-    _has_driver_dmls = defined(invoker.driver_dmls)
-    if (_has_driver_dmls) {
-      inputs += invoker.driver_dmls
-    }
-
     outputs = [
       "$target_gen_dir/board-config.fidl",
       "$target_gen_dir/${_board_name}.bind",
@@ -290,14 +282,6 @@ template("fuchsia_board_dml") {
       "--cml-output",
       rebase_path(outputs[2], root_build_dir),
     ]
-    if (_has_driver_dmls) {
-      foreach(driver_dml, invoker.driver_dmls) {
-        args += [
-          "--driver-dml",
-          rebase_path(driver_dml, root_build_dir),
-        ]
-      }
-    }
   }
 
   compiled_action("${_action_target}_format_cml") {
@@ -363,8 +347,9 @@ template("fuchsia_board_dml") {
 #
 # This template runs a host DML parser dumper on the compiled
 # `board-config.fidl` produced by `dml_label` to generate a text-based
-# `.dml.parsed` representation (platform bus nodes, composite node specs, and
-# IOMMUs in publish order), and compares that output against `golden`.
+# `.dml.parsed` representation (`platform_bus_nodes` and
+# `composite_node_specs` sorted by name, and `iommus` sorted by ID), and
+# compares that output against `golden`.
 #
 # Parameters
 #

@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 """Contains all Mobly APIs used in Mobly Driver."""
 
+import copy
 import os
 from typing import Any
 
@@ -104,10 +105,12 @@ def new_testbed_config(
     #       "nodename":"fuchsia-54b2-030e-eb19",
     #       "ipv4":"192.168.42.112",
     #       "ipv6":"",
-    #       "fastboot_sernum":"3676a5a3",
+    #       "device_serial":"3676a5a3",
     #       "serial_socket":"/tmp/fuchsia-54b2-030e-eb19_mux",
     #       "ssh_key":"/etc/botanist/keys/pkey_infra",
-    #       "shared_data":"/etc/botanist/shared_data"
+    #       "shared_data":"/etc/botanist/shared_data",
+    #       "device_usb":"usb:cid:7",
+    #       "usb_socket_path":"/tmp/ffx_usb_driver_socketpath"
     #    },
     # LINT.ThenChange(//tools/botanist/targets/target.go)
            {
@@ -186,7 +189,7 @@ def new_testbed_config(
         del controller["type"]
         if api_infra.FUCHSIA_DEVICE == controller_type:
             # Add the "honeydew_config" field for every Fuchsia device, if exists.
-            controller[HONEYDEW_CONFIG_KEY] = honeydew_config
+            controller[HONEYDEW_CONFIG_KEY] = copy.deepcopy(honeydew_config)
 
             # Propagate shared_data to the ffx transport config
             if "shared_data" in controller:
@@ -221,10 +224,23 @@ def new_testbed_config(
                         f"Using '{shared_data}' instead."
                     )
 
-                honeydew_config = controller[HONEYDEW_CONFIG_KEY]
-                transports = honeydew_config.setdefault("transports", {})
+                controller_honeydew_config = controller[HONEYDEW_CONFIG_KEY]
+                transports = controller_honeydew_config.setdefault(
+                    "transports", {}
+                )
                 ffx = transports.setdefault("ffx", {})
                 ffx["shared_data"] = shared_data
+
+            # Propagate usb_socket_path to the ffx transport config
+            if "usb_socket_path" in controller:
+                usb_socket_path = controller.pop("usb_socket_path")
+                if usb_socket_path:
+                    controller_honeydew_config = controller[HONEYDEW_CONFIG_KEY]
+                    transports = controller_honeydew_config.setdefault(
+                        "transports", {}
+                    )
+                    ffx = transports.setdefault("ffx", {})
+                    ffx["usb_socket_path"] = usb_socket_path
 
             # Convert botanist key names to relative Honeydew key names for
             # fuchsia devices. This is done here so that Honeydew does not have

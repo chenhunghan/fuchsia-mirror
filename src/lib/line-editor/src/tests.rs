@@ -1102,3 +1102,83 @@ fn test_get_columns_ansi_cursor_col_1_uses_last_cols() {
     let cols = handle.join().unwrap();
     assert_eq!(cols, DEFAULT_COLUMN_COUNT);
 }
+
+#[test]
+fn test_visible_column_width_ignores_ansi_csi_sequences() {
+    assert_eq!(control::visible_column_width(b"bt> "), 4);
+    assert_eq!(control::visible_column_width(b"\x1b[34mbt>\x1b[0m "), 4);
+    assert_eq!(control::visible_column_width(b"\x1b[1;34mavrcp>\x1b[0m "), 7);
+    // Incomplete escape sequence is counted literally rather than dropped.
+    assert_eq!(control::visible_column_width(b"\x1b[34"), 4);
+}
+
+#[test]
+fn test_ansi_colored_prompt_cursor_column_alignment() {
+    let (mut r_in, mut w_in) = create_pipe();
+    let (mut r_out, mut w_out) = create_pipe();
+
+    w_in.write_all(b"connect\n").unwrap();
+    drop(w_in);
+
+    let mut editor = Editor::with_config(
+        Config::default()
+            .with_terminal_mode(TerminalMode::Tty)
+            .with_term_name(Some("xterm-256color"))
+            .with_column_width(ColumnWidth::Fixed(80)),
+    );
+    editor.set_hint_handler(|line: &BStr| {
+        if line == b"connect" {
+            Some(Hint::new(" <peer-id>").with_color(Color::Custom(90)))
+        } else {
+            None
+        }
+    });
+
+    let line = editor
+        .readline_from(
+            &mut r_in,
+            &mut w_out,
+            OperatingMode::Interactive,
+            b"\x1b[34mbt>\x1b[0m ".as_bstr(),
+        )
+        .unwrap();
+    drop(w_out);
+    assert_eq!(line, BString::from("connect"));
+
+    let mut output = Vec::new();
+    r_out.read_to_end(&mut output).unwrap();
+    let rendered = String::from_utf8_lossy(&output);
+    // Visible prompt width of "\x1b[34mbt>\x1b[0m " is 4 ("bt> "),
+    // plus "connect" (7) = column 11.
+    assert!(rendered.contains("\r\x1b[11C"), "rendered output was: {rendered:?}");
+    assert!(!rendered.contains("\r\x1b[20C"), "rendered output was: {rendered:?}");
+}
+
+#[test]
+fn test_completion_commits_before_cursor_navigation() {
+    let (mut r_in, mut w_in) = create_pipe();
+    let (_r_out, mut w_out) = create_pipe();
+
+    // Type 'h', TAB (completes "hello"), Left Arrow (\x1b[D), '!', Enter
+    w_in.write_all(b"h\t\x1b[D!\n").unwrap();
+    drop(w_in);
+
+    let mut editor = Editor::with_config(
+        Config::default()
+            .with_terminal_mode(TerminalMode::Tty)
+            .with_term_name(Some("xterm-256color"))
+            .with_column_width(ColumnWidth::Fixed(80)),
+    );
+    editor.set_completion_handler(|line: &BStr| {
+        if line.starts_with(b"h") {
+            vec![BString::from("hello"), BString::from("help")]
+        } else {
+            vec![]
+        }
+    });
+
+    let line = editor
+        .readline_from(&mut r_in, &mut w_out, OperatingMode::Interactive, b"> ".as_bstr())
+        .unwrap();
+    assert_eq!(line, BString::from("hell!o"));
+}

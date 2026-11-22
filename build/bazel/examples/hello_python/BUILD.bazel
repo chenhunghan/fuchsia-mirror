@@ -4,28 +4,28 @@
 
 """Package used to test that Python actions work properly."""
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 
 package(default_applicable_licenses = ["//:license"])
 
 py_library(
     name = "lib",
     srcs = ["lib.py"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
 )
 
 py_binary(
     name = "bin",
     srcs = ["bin.py"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [":lib"],
 )
 
 py_test(
     name = "test",
     srcs = ["test.py"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [":lib"],
 )
 

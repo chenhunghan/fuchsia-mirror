@@ -13,15 +13,15 @@
 
 namespace hid_input_report {
 
-fuchsia_input::wire::Unit HidUnitToLlcppUnit(hid::unit::UnitType unit);
+fuchsia_input::wire::Unit HidUnitToWireUnit(hid::unit::UnitType unit);
 
-zx_status_t HidSensorUsageToLlcppSensorType(hid::usage::Sensor usage,
-                                            fuchsia_input_report::wire::SensorType* type);
+zx_status_t HidSensorUsageToWireSensorType(hid::usage::Sensor usage,
+                                           fuchsia_input_report::wire::SensorType* type);
 
-zx_status_t HidLedUsageToLlcppLedType(hid::usage::LEDs usage,
-                                      fuchsia_input_report::wire::LedType* type);
+zx_status_t HidLedUsageToWireLedType(hid::usage::LEDs usage,
+                                     fuchsia_input_report::wire::LedType* type);
 
-fuchsia_input::wire::Axis LlcppAxisFromAttribute(const hid::Attributes& attrs);
+fuchsia_input::wire::Axis WireAxisFromAttribute(const hid::Attributes& attrs);
 
 }  // namespace hid_input_report
 

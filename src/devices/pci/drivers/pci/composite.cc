@@ -8,13 +8,16 @@
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/driver/legacy-bind-constants/legacy-bind-constants.h>
 
+#include <cstdio>
+#include <string>
+
 #include <bind/fuchsia/acpi/cpp/bind.h>
 #include <bind/fuchsia/cpp/bind.h>
+#include <bind/fuchsia/pci/cpp/bind.h>
 
 namespace pci {
 
-fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_view name,
-                                                                    const CompositeInfo& info) {
+fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(const CompositeInfo& info) {
   uint32_t kPciBindTopo = BIND_PCI_TOPO_PACK(info.bus_id, info.dev_id, info.func_id);
 
   const std::vector<fuchsia_driver_framework::BindRule2> kPciBindRules = {
@@ -26,6 +29,7 @@ fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_
       fdf::MakeAcceptBindRule(bind_fuchsia::PCI_INTERFACE, info.program_interface),
       fdf::MakeAcceptBindRule(bind_fuchsia::PCI_REVISION, info.revision_id),
       fdf::MakeAcceptBindRule(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+      fdf::MakeAcceptBindRule(bind_fuchsia_pci::SEGMENT, info.segment_group),
       fdf::MakeRejectBindRule(bind_fuchsia::COMPOSITE, 1u),
   };
 
@@ -38,6 +42,7 @@ fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_
       fdf::MakeProperty2(bind_fuchsia::PCI_INTERFACE, info.program_interface),
       fdf::MakeProperty2(bind_fuchsia::PCI_REVISION, info.revision_id),
       fdf::MakeProperty2(bind_fuchsia::PCI_TOPO, kPciBindTopo),
+      fdf::MakeProperty2(bind_fuchsia_pci::SEGMENT, info.segment_group),
   };
 
   std::vector<fuchsia_driver_framework::ParentSpec2> parents;
@@ -47,6 +52,8 @@ fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_
   }});
 
   if (info.has_acpi) {
+    // acpi doesn't publish a segment property on PCI device nodes, so the ACPI parent can only
+    // match by PCI_TOPO and is ambiguous across segments on multi-segment systems.
     const std::vector<fuchsia_driver_framework::BindRule2> kAcpiBindRules = {
         fdf::MakeAcceptBindRule(bind_fuchsia::PROTOCOL, bind_fuchsia_acpi::BIND_PROTOCOL_DEVICE),
         fdf::MakeAcceptBindRule(bind_fuchsia::ACPI_BUS_TYPE,
@@ -66,6 +73,9 @@ fuchsia_driver_framework::CompositeNodeSpec CreateCompositeNodeSpec(std::string_
     }});
   }
 
+  char name[sizeof("0000_00_00_0")];
+  snprintf(name, sizeof(name), "%04x_%02x_%02x_%01x", info.segment_group, info.bus_id, info.dev_id,
+           info.func_id);
   return fuchsia_driver_framework::CompositeNodeSpec{{
       .name = std::string(name),
       .parents2 = std::move(parents),

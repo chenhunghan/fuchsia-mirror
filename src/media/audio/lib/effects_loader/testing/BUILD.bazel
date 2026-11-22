@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "testing",
+    testonly = True,
+    srcs = [
+        "effects_loader_v1_test_base.cc",
+        "test_effects_v1.cc",
+    ],
+    hdrs = [
+        "effects_loader_v1_test_base.h",
+        "test_effects_v1.h",
+    ],
+    # Depends on Fuchsia-only //src/media/audio/lib/effects_loader and
+    # //src/media/audio/effects/test_effects:test_effects_v1_headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/media/audio:__subpackages__"],
+    deps = [
+        "//src/media/audio/effects/test_effects:test_effects_v1_headers",
+        "//src/media/audio/lib/effects_loader",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)

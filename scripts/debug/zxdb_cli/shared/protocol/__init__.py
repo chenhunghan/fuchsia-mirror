@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from pydantic import Field, TypeAdapter, create_model
 from shared.protocol.base import (
     PROTOCOL_VERSION,
+    THREAD_ID_ALIAS,
     BaseRequest,
     ProtocolRegistry,
     Response,
@@ -79,7 +80,11 @@ from shared.protocol.stack_trace import (
 from shared.protocol.start import StartRequest
 from shared.protocol.step_in import StepInRequest
 from shared.protocol.stop import StopRequest
-from shared.protocol.threads import ThreadsRequest
+from shared.protocol.threads import (
+    ThreadEntry,
+    ThreadsRequest,
+    ThreadsResponse,
+)
 from shared.protocol.tracepoint import (
     TracepointInfo,
     TracepointRequest,
@@ -133,6 +138,7 @@ ResponseType = (
     | MemReadResponse
     | DriverListResponse
     | TracepointResponse
+    | ThreadsResponse
     | DiagnoseHangResponse
     | dict[str, Any]
     | None
@@ -141,7 +147,9 @@ ResponseType = (
 __all__ = [
     "BaseRequest",
     "Response",
+    "THREAD_ID_ALIAS",
     "T_Resp",
+    "ThreadEntry",
     "ThreadInfo",
     "WatchpointInfo",
     "GetStateResponse",
@@ -197,6 +205,7 @@ __all__ = [
     "StepInRequest",
     "StopRequest",
     "ThreadsRequest",
+    "ThreadsResponse",
     "TracepointRequest",
     "VariablesRequest",
     "WaitForEventRequest",

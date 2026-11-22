@@ -5,7 +5,6 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_TEST_TEST_CODEC_PACKETS_H_
 #define SRC_MEDIA_CODEC_CODECS_TEST_TEST_CODEC_PACKETS_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <lib/syslog/cpp/macros.h>
 

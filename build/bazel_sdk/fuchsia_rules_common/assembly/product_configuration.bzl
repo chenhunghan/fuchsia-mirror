@@ -44,7 +44,8 @@ FEATURE_SET_LEVELS = struct(
     STANDARD = "standard",
 )
 
-COMMON_PRODUCT_ASSEMBLY_ATTRIBUTES = {
+# Attributes required by `product_configuration_common_impl()`.
+PRODUCT_CONFIGURATION_COMMON_ATTRS = {
     "product_config": attr.string(
         doc = "Raw json config. Used as a base template for the config.",
         default = "{}",
@@ -114,11 +115,13 @@ COMMON_PRODUCT_ASSEMBLY_ATTRIBUTES = {
     ),
 }
 
-def common_product_configuration_impl(ctx, assembly_config_binary, bootfs_files_package = None, repo_name = ""):
+def product_configuration_common_impl(ctx, assembly_config_binary, bootfs_files_package = None, repo_name = ""):
     """Common implementation for product configuration rules.
 
+    Calling rules must include `PRODUCT_CONFIGURATION_COMMON_ATTRS` in `attrs`.
+
     Args:
-        ctx: The context of the rule.
+        ctx: The context of the rule (with `PRODUCT_CONFIGURATION_COMMON_ATTRS`).
         assembly_config_binary: The path for the assembly_config tool.
         bootfs_files_package: FuchsiaPackageInfo provider instance for a package containing bootfs files.
         repo_name: The name of the repository that the product's packages will be published to.

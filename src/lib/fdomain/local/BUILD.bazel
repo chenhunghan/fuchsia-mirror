@@ -3,8 +3,17 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fdomain-local-tests",
+    ],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 rustc_library(
     name = "local",
@@ -55,4 +64,9 @@ rustc_library(
     ],
     with_unit_tests = True,
     deps = ["//src/lib/fidl/rust/fidl"],
+)
+
+fx_unittest_package(
+    name = "fdomain-local-tests",
+    unit_tests = [":local_test"],
 )

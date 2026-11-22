@@ -22,17 +22,51 @@ type PreviousBootData = resource table {
 
     /// An open, read-only file handle to the processed data file.
     /// The client can read the data directly from this channel.
+    ///
+    /// The bytes of the file are encoded as described by `compression`. Once
+    /// decompressed, they are in the format described by `format`.
     4: inspect client_end:fuchsia.io.File;
+
+    /// The format of the data in `inspect` once any `compression` has been
+    /// removed. Always set when `inspect` is set.
+    5: format InspectFormat;
+
+    /// The compression applied to the bytes of `inspect`. Always set when
+    /// `inspect` is set.
+    6: compression Compression;
 };
 
-/// File format for Inspect data.
+/// File format for Inspect data, after any [`Compression`] has been removed.
 type InspectFormat = flexible enum {
+    /// A JSON array of Inspect snapshots, in the same schema as the output of
+    /// `ffx --machine json inspect show`.
     JSON = 1;
 };
 
+/// Byte-level encoding applied to the file served in
+/// [`PreviousBootData.inspect`]. The decompressed bytes are in the
+/// [`InspectFormat`] reported alongside it.
+type Compression = flexible enum {
+    /// A single RFC 1950 "zlib" stream:
+    ///
+    ///   * a 2-byte header (CMF, FLG) with CM = 8 (DEFLATE) and FDICT = 0 (no
+    ///     preset dictionary);
+    ///   * one RFC 1951 DEFLATE stream;
+    ///   * a 4-byte big-endian Adler-32 checksum of the uncompressed data.
+    ZLIB_RFC_1950 = 1;
+};
+
 /// Options for configuring the watcher.
+///
+/// Both fields are required. The server replies with data only if it can
+/// satisfy every option; otherwise, including when either option is unset,
+/// it closes the channel with the epitaph `ZX_ERR_NOT_SUPPORTED`.
 type PreviousBootDataProviderOptions = table {
+    /// Required. The decompressed format that the client can parse.
     1: format InspectFormat;
+
+    /// Required. The compression that the client can decode.
+    2: compression Compression;
 };
 
 @discoverable
@@ -45,6 +79,9 @@ open protocol PreviousBootDataProvider {
     ///
     /// Clients should only call this method once per boot. This data does not
     /// change across a given boot.
+    ///
+    /// If `options` is incomplete or the server cannot satisfy it, the server
+    /// closes the channel with the epitaph `ZX_ERR_NOT_SUPPORTED`.
     flexible WatchPreviousBootData(struct {
         options PreviousBootDataProviderOptions;
     }) -> (resource struct {

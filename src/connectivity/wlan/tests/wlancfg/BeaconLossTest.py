@@ -53,6 +53,10 @@ class BeaconLossTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
 
         if not self.openwrt_ap and not self.access_point:
             raise signals.TestError("Requires at least one access point")
+        if self.openwrt_ap and not self.attenuators:
+            raise signals.TestError(
+                "Requires at least one attenuator when using an OpenWrt AP"
+            )
 
         if self.access_point:
             self.access_point.stop_all_aps()
@@ -75,15 +79,13 @@ class BeaconLossTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
     async def teardown_test(self) -> None:
         await self.dut.wlan_policy.ensure_clean_state()
         # ensure radio is on, in case the test failed while the radio was off
-        if self.in_use_interface:
-            if self.openwrt_ap:
-                self.openwrt_ap.reset_txpower(self.in_use_interface)
-            elif self.access_point:
-                self.access_point.iwconfig.ap_iwconfig(
-                    self.in_use_interface, "txpower on"
-                )
+        if self.in_use_interface and self.access_point:
+            self.access_point.iwconfig.ap_iwconfig(
+                self.in_use_interface, "txpower on"
+            )
         if self.access_point:
             self.access_point.stop_all_aps()
+        self.in_use_interface = None
         await super().teardown_test()
 
     async def beacon_loss(self, channel: BssChannel) -> None:
@@ -140,27 +142,35 @@ class BeaconLossTest(fuchsia_wlan_base_test.FuchsiaWlanBaseTest):
             self.log.info(
                 f"Iteration {i + 1}/{self.num_of_iterations}: Testing beacon loss on interface {self.in_use_interface}"
             )
-            # Turn off AP radio
-            self.log.info(
-                f"Turning off AP radio for interface: {self.in_use_interface}"
-            )
+            # Trigger beacon loss via attenuators or by turning off AP radio
             if self.openwrt_ap:
-                self.openwrt_ap.set_txpower(self.in_use_interface, 0)
+                for attenuator in self.attenuators:
+                    max_atten = attenuator.get_max_atten()
+                    self.log.info(
+                        f"Attenuating channel {attenuator.idx} on {attenuator.instrument.address} to {max_atten} dB"
+                    )
+                    attenuator.set_atten(max_atten)
             elif self.access_point:
+                self.log.info(
+                    f"Turning off AP radio for interface: {self.in_use_interface}"
+                )
                 self.access_point.iwconfig.ap_iwconfig(
                     self.in_use_interface, "txpower off"
                 )
             await self.dut.wlan_policy.wait_for_no_connections()
             self.log.info(f"DUT successfully disconnected from {self.ssid}")
 
-            # Turn on AP radio
-            self.log.info(
-                f"Turning on AP radio for interface: {self.in_use_interface}"
-            )
-            assert self.in_use_interface is not None
+            # Restore signal or turn on AP radio
             if self.openwrt_ap:
-                self.openwrt_ap.reset_txpower(self.in_use_interface)
+                self.log.info(
+                    f"Restoring attenuators to {fuchsia_wlan_base_test.DEFAULT_ATTENUATION} dB"
+                )
+                self.reset_attenuators()
             elif self.access_point:
+                self.log.info(
+                    f"Turning on AP radio for interface: {self.in_use_interface}"
+                )
+                assert self.in_use_interface is not None
                 self.access_point.iwconfig.ap_iwconfig(
                     self.in_use_interface, "txpower on"
                 )

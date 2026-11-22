@@ -350,7 +350,11 @@ impl TimerFile {
             };
             let new_interval = duration_from_timespec(timer_spec.it_interval)?;
 
-            self.timer.start(current_task, Some(file_object.weak_handle.clone()), new_deadline)?;
+            self.timer.start(
+                current_task,
+                Some(file_object.weak_handle().clone()),
+                new_deadline,
+            )?;
             tfi.set_deadline(new_deadline).set_interval(new_interval);
         }
 
@@ -458,7 +462,11 @@ impl FileOps for TimerFile {
                     .wait_one(zx::Signals::TIMER_SIGNALED, zx::MonotonicInstant::ZERO)
                     .is_ok()
                 {
-                    self.timer.start(current_task, Some(file.weak_handle.clone()), tfi.deadline)?;
+                    self.timer.start(
+                        current_task,
+                        Some(file.weak_handle().clone()),
+                        tfi.deadline,
+                    )?;
                 }
                 // The next deadline has not yet passed.
                 return error!(EAGAIN);
@@ -474,7 +482,7 @@ impl FileOps for TimerFile {
 
                 // The timer is set to clear the `ZX_TIMER_SIGNALED` signal until the next deadline
                 // is reached.
-                self.timer.start(current_task, Some(file.weak_handle.clone()), new_deadline)?;
+                self.timer.start(current_task, Some(file.weak_handle().clone()), new_deadline)?;
                 tfi.set_deadline(new_deadline);
 
                 /*count=*/
@@ -590,7 +598,7 @@ impl FileOps for TimerFile {
             && !guard.deadline.is_zero()
             && guard.deadline > self.timeline.now()
         {
-            match self.timer.start(current_task, Some(file.weak_handle.clone()), guard.deadline) {
+            match self.timer.start(current_task, Some(file.weak_handle().clone()), guard.deadline) {
                 Ok(()) => timer_signals.remove(zx::Signals::TIMER_SIGNALED),
                 Err(e) => log_warn!("timerfd: failed to re-arm prematurely signaled timer: {e:?}"),
             }

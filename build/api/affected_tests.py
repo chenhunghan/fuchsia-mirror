@@ -20,6 +20,15 @@ _DEBUG = False
 
 _SECONDARY_BUILD_DIR_PREFIX = "build/secondary/"
 
+# Jiri manifests and lockfiles live outside the Ninja/Bazel build graph,
+# because jiri materializes their contents into prebuilt/ or third_party/
+# before the build runs. A change to any of these paths must never be treated
+# as build-unaffected.
+_JIRI_MANIFEST_PREFIXES = (
+    "manifests/",
+    "vendor/google/manifests/",
+)
+
 # Linux caps any single command-line argument at 128 KiB (MAX_ARG_STRLEN,
 # hard-coded as PAGE_SIZE * 32) and the whole argv plus environment at
 # ARG_MAX (2 MiB under the default 8 MiB stack rlimit).
@@ -610,6 +619,14 @@ def find_tests_affected_by_changed_files(
             changed_sources.add(os.path.relpath(file, fuchsia_dir))
         else:
             changed_sources.add(str(file))
+
+    if any(
+        source.startswith(_JIRI_MANIFEST_PREFIXES) for source in changed_sources
+    ):
+        return AffectedTestsResult(
+            affected_tests=set(),
+            build_not_affected=False,
+        )
 
     build_dir = ninja_runner.build_dir
 

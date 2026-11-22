@@ -878,7 +878,7 @@ impl DiskBuilder {
         let length = compressed_buf.len() as u32;
 
         let header = zbi::Header {
-            r#type: zbi::Type::StorageRamdisk,
+            r#type: zbi::Type::STORAGE_RAMDISK,
             length,
             extra,
             flags: zbi::Flags::VERSION | ZBI_FLAGS_STORAGE_COMPRESSED,

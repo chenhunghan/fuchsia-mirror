@@ -1,0 +1,103 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":audio-driver-ctl-test-pkg"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "src",
+    srcs = [
+        "generated-source.cc",
+        "wav-common.cc",
+        "wav-sink.cc",
+        "wav-source.cc",
+    ],
+    hdrs = [
+        "generated-source.h",
+        "noise-source.h",
+        "sine-source.h",
+        "wav-common.h",
+        "wav-sink.h",
+        "wav-source.h",
+    ],
+    implementation_deps = ["//sdk/lib/fdio"],
+    # Headers unconditionally include Zircon (<zircon/types.h>, <lib/zx/clock.h>).
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fsl",
+        "//src/media/audio/drivers/lib/audio-proto-utils",
+        "//src/media/audio/drivers/lib/audio-utils",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["audio.cc"],
+    tags = ["manual"],
+    # Source includes FIDL and Zircon headers.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":src",
+        "//sdk/fidl/fuchsia.hardware.audio:fuchsia.hardware.audio_cpp",
+        "//sdk/lib/component/incoming/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "audio-driver-ctl",
+)
+
+fx_package(
+    name = "audio-driver-ctl",
+    package_repository_name = "fuchsia.com",
+    resources = [":bin_packaged"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_test_binary(
+    name = "audio-driver-ctl-test",
+    srcs = [
+        "noise-source-test.cc",
+        "sine-source-test.cc",
+    ],
+    # Headers unconditionally include Zircon and zxtest.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":src",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "audio-driver-ctl-test-pkg",
+    parallel = 4,
+    unit_tests = [":audio-driver-ctl-test"],
+)

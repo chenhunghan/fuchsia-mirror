@@ -1,0 +1,107 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Verify whether cpp should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+alias(
+    name = "cpp",
+    actual = ":ramdevice-client",
+    # Uses Fuchsia-only FIDL, fdio, fzl, and zx APIs.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/bringup:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/firmware:__subpackages__",
+        "//src/security:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//zircon/system/ulib/sysconfig-client/test:__pkg__",
+    ],
+)
+
+fx_cc_library(
+    name = "ramdevice-client",
+    srcs = [
+        "ramdisk.cc",
+        "ramnand.cc",
+    ],
+    hdrs = [
+        "include/ramdevice-client/ramdisk.h",
+        "include/ramdevice-client/ramnand.h",
+    ],
+    build_flags = ["//build/config/fuchsia:static_cpp_standard_library"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.hardware.ramdisk:fuchsia.hardware.ramdisk_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/ddk",
+        "//zircon/system/ulib/fzl",
+    ],
+    includes = ["include"],
+    public_configs = [":headers_config"],
+    # Uses Fuchsia-only FIDL, fdio, fzl, and zx APIs.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/bringup:__subpackages__",
+        "//src/devices:__subpackages__",
+        "//src/firmware:__subpackages__",
+        "//src/security:__subpackages__",
+        "//src/storage:__subpackages__",
+        "//zircon/system/ulib/sysconfig-client/test:__pkg__",
+    ],
+    deps = [
+        # <ramdevice-client/ramnand.h> has #include <fidl/fuchsia.device/cpp/wire.h>
+        "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
+        # <ramdevice-client/ramnand.h> has #include
+        # <fidl/fuchsia.hardware.nand/cpp/wire.h>
+        "//sdk/fidl/fuchsia.hardware.nand:fuchsia.hardware.nand_cpp",
+        # <ramdevice-client/ramdisk.h> has #include
+        # <fidl/fuchsia.storage.block/cpp/wire.h>
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+        # <ramdevice-client/ramnand.h> has #include <fbl/string.h>
+        "//zircon/system/ulib/fbl",
+        # <ramdevice-client/ramdisk.h> has #include <zircon/compiler.h>
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "ramdevice-client-test",
+    testonly = True,
+    srcs = ["ramnandctl.cc"],
+    hdrs = ["include/ramdevice-client-test/ramnandctl.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.hardware.ramdisk:fuchsia.hardware.ramdisk_cpp",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//src/lib/ddk",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+    includes = ["include"],
+    public_configs = [":headers_config"],
+    # Uses Fuchsia-only FIDL, fdio, fzl, and zx APIs.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <ramdevice-client-test/ramnandctl.h> has #include
+        # <ramdevice-client/ramnand.h>
+        ":ramdevice-client",
+        # <ramdevice-client/ramnand.h> has #include <fidl/fuchsia.device/cpp/wire.h>
+        "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
+        # <ramdevice-client/ramnand.h> has #include
+        # <fidl/fuchsia.hardware.nand/cpp/wire.h>
+        "//sdk/fidl/fuchsia.hardware.nand:fuchsia.hardware.nand_cpp",
+        "//zircon/system/ulib/fbl",
+    ],
+    alwayslink = True,
+)

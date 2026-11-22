@@ -11,13 +11,8 @@ if (is_host) {
     extra_args = [ "-v" ]
 
     environments = [
-      nuc7_env,
       nuc11_env,
-      {
-        dimensions = {
-          device_type = "Astro"
-        }
-      },
+      astro_env,
     ]
 
     # Runs on "main" builders (try and ci) in QEMU environments, but only on

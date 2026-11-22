@@ -7,6 +7,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <string.h>
+#include <sys/fsuid.h>
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <unistd.h>
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <format>
 #include <thread>
+#include <utility>
 
 #include <fbl/unique_fd.h>
 #include <gmock/gmock.h>
@@ -163,12 +165,14 @@ TEST_F(SysctlTest, AcceptRaRtTable) {
   }
 
   // Write then read back value for interface lo.
-  EXPECT_TRUE(files::WriteFile(kLo, kVal1));
+  auto scoped_lo = test_helper::ScopedSysctl::Create(kLo, kVal1);
+  ASSERT_THAT(scoped_lo, SyscallResultIsOk());
   EXPECT_TRUE(files::ReadFileToString(kLo, &accept_ra_rt_table_str));
   EXPECT_STREQ(accept_ra_rt_table_str.c_str(), kVal1);
 
   // Write then read back value for special file `default`.
-  EXPECT_TRUE(files::WriteFile(kDefault, kVal2));
+  auto scoped_default = test_helper::ScopedSysctl::Create(kDefault, kVal2);
+  ASSERT_THAT(scoped_default, SyscallResultIsOk());
   EXPECT_TRUE(files::ReadFileToString(kDefault, &accept_ra_rt_table_str));
   EXPECT_STREQ(accept_ra_rt_table_str.c_str(), kVal2);
 
@@ -194,7 +198,8 @@ TEST_F(SysctlTest, DisableIpv6) {
   ASSERT_TRUE(HasLoopbackAddress(AF_INET6, "::1"));
 
   const char kDisableIpv6[] = "/proc/sys/net/ipv6/conf/lo/disable_ipv6";
-  ASSERT_TRUE(files::WriteFile(kDisableIpv6, "1"));
+  auto scoped_disable = test_helper::ScopedSysctl::Create(kDisableIpv6, "1");
+  ASSERT_THAT(scoped_disable, SyscallResultIsOk());
 
   // IP configurations are applied synchronously at netstack, but netlink
   // watches for changes and updates addresses asynchronously. So we add some
@@ -233,7 +238,9 @@ TEST_F(SysctlTest, DisableIpv6Default) {
     GTEST_SKIP() << "Need CAP_NET_ADMIN to run SysctlTest";
   }
 
-  files::WriteFile("/proc/sys/net/ipv6/conf/default/disable_ipv6", "1");
+  auto scoped_default =
+      test_helper::ScopedSysctl::Create("/proc/sys/net/ipv6/conf/default/disable_ipv6", "1");
+  ASSERT_THAT(scoped_default, SyscallResultIsOk());
   auto tun = NewTunDevice("tun1");
   std::string disable_ipv6_str;
   int trial = 0;
@@ -242,6 +249,40 @@ TEST_F(SysctlTest, DisableIpv6Default) {
     ASSERT_LE(++trial, 100);
   }
   ASSERT_STREQ(disable_ipv6_str.c_str(), "1\n");
+}
+
+// Unlike other files, sysctl files are checked against the effective UID, not the filesystem UID.
+TEST_F(SysctlTest, ChecksOwnerAgainstEffectiveUid) {
+  if (!test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Need CAP_SYS_ADMIN to run this test";
+  }
+  // Owned by root, mode 0644.
+  constexpr char kPath[] = "/proc/sys/kernel/perf_event_paranoid";
+  constexpr uid_t kUid = 99;
+
+  test_helper::ForkHelper fork_helper;
+  // The filesystem UID owns the file, but the effective UID does not.
+  fork_helper.RunInForkedProcess([&]() {
+    ASSERT_THAT(setresuid(kUid, kUid, 0), SyscallSucceeds());
+    ASSERT_EQ(setfsuid(0), static_cast<int>(kUid));
+    ASSERT_EQ(setfsuid(-1), 0);
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYS_ADMIN));
+
+    EXPECT_THAT(open(kPath, O_WRONLY), SyscallFailsWithErrno(EACCES));
+  });
+  ASSERT_TRUE(fork_helper.WaitForChildren());
+
+  // The effective UID owns the file, but the filesystem UID does not.
+  fork_helper.RunInForkedProcess([&]() {
+    test_helper::UnsetCapabilityEffective(CAP_SYS_ADMIN);
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_SYS_ADMIN));
+    ASSERT_EQ(setfsuid(kUid), 0);
+    ASSERT_EQ(setfsuid(-1), static_cast<int>(kUid));
+
+    fbl::unique_fd fd(open(kPath, O_WRONLY));
+    EXPECT_TRUE(fd.is_valid()) << strerror(errno);
+  });
+  ASSERT_TRUE(fork_helper.WaitForChildren());
 }
 
 TEST_F(SysctlTest, DropCaches) {
@@ -266,8 +307,8 @@ TEST_F(SysctlTest, Swappiness) {
     GTEST_SKIP() << "Need CAP_SYS_ADMIN to run Swappiness";
   }
   const char kSwappiness[] = "/proc/sys/vm/swappiness";
-  std::string original;
-  ASSERT_TRUE(files::ReadFileToString(kSwappiness, &original)) << strerror(errno);
+  auto restore_swappiness = test_helper::ScopedSysctl::Create(kSwappiness);
+  ASSERT_THAT(restore_swappiness, SyscallResultIsOk());
 
   for (const char *value : {"0", "21", "200"}) {
     const std::string to_write = std::format("{}\n", value);
@@ -281,8 +322,60 @@ TEST_F(SysctlTest, Swappiness) {
     EXPECT_FALSE(files::WriteFile(kSwappiness, value)) << value;
     EXPECT_EQ(errno, EINVAL) << value;
   }
+}
 
-  EXPECT_TRUE(files::WriteFile(kSwappiness, original)) << strerror(errno);
+TEST_F(SysctlTest, NetCoreMemMaxRejectsInvalidAndOutOfRange) {
+  if (!test_helper::HasCapability(CAP_NET_ADMIN)) {
+    GTEST_SKIP() << "Need CAP_NET_ADMIN to run NetCoreMemMaxRejectsInvalidAndOutOfRange";
+  }
+  constexpr const char *kRmemMax = "/proc/sys/net/core/rmem_max";
+  constexpr const char *kWmemMax = "/proc/sys/net/core/wmem_max";
+  constexpr const char *kTcpRmem = "/proc/sys/net/ipv4/tcp_rmem";
+  constexpr const char *kTcpWmem = "/proc/sys/net/ipv4/tcp_wmem";
+
+  auto restore_tcp_rmem = test_helper::ScopedSysctl::Create(kTcpRmem);
+  ASSERT_THAT(restore_tcp_rmem, SyscallResultIsOk());
+  auto restore_tcp_wmem = test_helper::ScopedSysctl::Create(kTcpWmem);
+  ASSERT_THAT(restore_tcp_wmem, SyscallResultIsOk());
+  auto restore_rmem = test_helper::ScopedSysctl::Create(kRmemMax);
+  ASSERT_THAT(restore_rmem, SyscallResultIsOk());
+  auto restore_wmem = test_helper::ScopedSysctl::Create(kWmemMax);
+  ASSERT_THAT(restore_wmem, SyscallResultIsOk());
+
+  // Explicitly set TCP buffer ranges so TCP's send `min` is 2048 (below 3000) and `default` is
+  // 264096 regardless of prior test execution order.
+  ASSERT_TRUE(files::WriteFile(kTcpRmem, "256\t264096\t4194304\n")) << strerror(errno);
+  ASSERT_TRUE(files::WriteFile(kTcpWmem, "2048\t264096\t4194304\n")) << strerror(errno);
+
+  std::string expected_rmem;
+  std::string expected_wmem;
+  ASSERT_TRUE(files::ReadFileToString(kRmemMax, &expected_rmem)) << strerror(errno);
+  ASSERT_TRUE(files::ReadFileToString(kWmemMax, &expected_wmem)) << strerror(errno);
+
+  for (const char *path : {kRmemMax, kWmemMax}) {
+    for (const char *value : {"-1", "invalid", "0"}) {
+      EXPECT_FALSE(files::WriteFile(path, value)) << path << ": " << value;
+      EXPECT_EQ(errno, EINVAL) << path << ": " << value;
+    }
+  }
+
+  // 100 is below the minimum receive buffer size on both Linux (SOCK_MIN_RCVBUF) and Starnix
+  // (TCP/UDP/ICMP minimum 256).
+  EXPECT_FALSE(files::WriteFile(kRmemMax, "100"));
+  EXPECT_EQ(errno, EINVAL);
+
+  // 3000 is below SOCK_MIN_SNDBUF on Linux and between TCP SNDBUF_MIN (2048) and UDP/ICMP
+  // DEFAULT_DATAGRAM_MIN_SNDBUF (4096) on Starnix; it must be rejected with EINVAL without
+  // partially updating TCP's max send buffer size.
+  EXPECT_FALSE(files::WriteFile(kWmemMax, "3000"));
+  EXPECT_EQ(errno, EINVAL);
+
+  std::string after_rmem;
+  std::string after_wmem;
+  ASSERT_TRUE(files::ReadFileToString(kRmemMax, &after_rmem)) << strerror(errno);
+  ASSERT_TRUE(files::ReadFileToString(kWmemMax, &after_wmem)) << strerror(errno);
+  EXPECT_EQ(after_rmem, expected_rmem);
+  EXPECT_EQ(after_wmem, expected_wmem);
 }
 
 struct SysctlTestReadBackParam {
@@ -297,7 +390,23 @@ TEST_P(SysctlTestReadBack, ReadBack) {
   if (!test_helper::HasCapability(CAP_NET_ADMIN)) {
     GTEST_SKIP() << "Need CAP_NET_ADMIN to run SysctlTestReadBack";
   }
+  constexpr const char *kTcpRmem = "/proc/sys/net/ipv4/tcp_rmem";
+  constexpr const char *kTcpWmem = "/proc/sys/net/ipv4/tcp_wmem";
   const auto &[path, value] = GetParam();
+
+  test_helper::ScopedSysctl scoped_tcp_rmem;
+  test_helper::ScopedSysctl scoped_tcp_wmem;
+  auto restore_path = test_helper::ScopedSysctl::Create(path);
+  ASSERT_THAT(restore_path, SyscallResultIsOk()) << path;
+  if (path == "/proc/sys/net/core/rmem_max" || path == "/proc/sys/net/core/wmem_max") {
+    auto tcp_rmem = test_helper::ScopedSysctl::Create(kTcpRmem, "256\t264096\t4194304\n");
+    ASSERT_THAT(tcp_rmem, SyscallResultIsOk());
+    scoped_tcp_rmem = std::move(tcp_rmem.value());
+    auto tcp_wmem = test_helper::ScopedSysctl::Create(kTcpWmem, "2048\t264096\t4194304\n");
+    ASSERT_THAT(tcp_wmem, SyscallResultIsOk());
+    scoped_tcp_wmem = std::move(tcp_wmem.value());
+  }
+
   std::string to_write = std::format("{}\n", value);
   ASSERT_TRUE(files::WriteFile(path, to_write)) << strerror(errno);
   std::string to_read;
@@ -321,7 +430,9 @@ INSTANTIATE_TEST_SUITE_P(
         SysctlTestReadBackParam{"/proc/sys/net/ipv6/conf/default/use_tempaddr", "2"},
         SysctlTestReadBackParam{"/proc/sys/net/ipv6/conf/default/accept_ra_defrtr", "0"},
         SysctlTestReadBackParam{"/proc/sys/net/ipv6/conf/default/accept_ra_defrtr", "1"},
+        SysctlTestReadBackParam{"/proc/sys/net/core/rmem_max", "262144"},
         SysctlTestReadBackParam{"/proc/sys/net/core/rmem_max", "6291456"},
+        SysctlTestReadBackParam{"/proc/sys/net/core/wmem_max", "262144"},
         SysctlTestReadBackParam{"/proc/sys/net/core/wmem_max", "6291456"},
         SysctlTestReadBackParam{"/proc/sys/net/ipv4/tcp_rmem", "4096\t87380\t6291456"},
         SysctlTestReadBackParam{"/proc/sys/net/ipv4/tcp_wmem", "4096\t16384\t4194304"}),
@@ -386,12 +497,8 @@ class SysctlNodeTest : public testing::TestWithParam<SysctlNodeParam> {
     fbl::unique_fd fd(open(path.c_str(), O_WRONLY));
     ASSERT_THAT(fd.get(), SyscallSucceeds());
 
-    if (!GetParam().writable) {
-      EXPECT_THAT(write(fd.get(), val.data(), val.size()),
-                  SyscallFailsWithErrno(expected_write_errno));
-    } else {
-      EXPECT_THAT(write(fd.get(), val.data(), val.size()), SyscallSucceeds());
-    }
+    EXPECT_THAT(write(fd.get(), val.data(), val.size()),
+                SyscallSucceedsOrFailsWithErrno(GetParam().writable, expected_write_errno));
   }
 };
 

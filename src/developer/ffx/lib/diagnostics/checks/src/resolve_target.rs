@@ -310,6 +310,15 @@ mod test {
         let mut check = ResolveTarget::<_, MockResolver>::new(&env.context);
         let res = check.check(TargetInfoQuery::First, &mut notifier).await;
         assert!(res.is_err());
+        let output: String = notifier.into();
+        assert!(output.contains("#multicast-dns-resolution"));
+        assert!(output.contains("#usb-fastboot-discovery"));
+        assert!(output.contains("#usb-vsock-discovery"));
+        assert!(output.contains("#emulator-discovery"));
+        assert!(output.contains("#manual-target-discovery"));
+        assert!(output.contains("#fastboot-file-discovery"));
+        assert!(output.contains("#gce-discovery"));
+        assert!(output.contains("#uart-discovery"));
     }
 
     #[fuchsia::test]
@@ -338,14 +347,14 @@ mod test {
     #[fuchsia::test]
     async fn test_notify_for_discovery_sources_emulator() {
         let env = ffx_config::test_env()
-            .runtime_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, "/tmp/emu-test-path")
+            .runtime_config("shared_data", "/tmp/emu-test-shared")
             .build()
             .unwrap();
         let mut notifier = ffx_diagnostics::StringNotifier::new();
         let sources = DiscoverySources::EMULATOR;
         notify_for_discovery_sources(&env.context, sources, &mut notifier).unwrap();
         let output: String = notifier.into();
-        assert!(output.contains("Searching for emulators at /tmp/emu-test-path"));
+        assert!(output.contains("Searching for emulators at /tmp/emu-test-shared/emu/instances"));
         assert!(!output.contains("fastboot"));
     }
 
@@ -366,7 +375,7 @@ mod test {
     #[fuchsia::test]
     async fn test_notify_for_discovery_sources_both() {
         let env = ffx_config::test_env()
-            .runtime_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, "/tmp/emu-test-path")
+            .runtime_config("shared_data", "/tmp/emu-test-shared")
             .runtime_config(ffx_config::keys::FASTBOOT_FILE_PATH, "/tmp/fastboot-test.json")
             .build()
             .unwrap();
@@ -374,7 +383,7 @@ mod test {
         let sources = DiscoverySources::EMULATOR | DiscoverySources::FASTBOOT_FILE;
         notify_for_discovery_sources(&env.context, sources, &mut notifier).unwrap();
         let output: String = notifier.into();
-        assert!(output.contains("Searching for emulators at /tmp/emu-test-path"));
+        assert!(output.contains("Searching for emulators at /tmp/emu-test-shared/emu/instances"));
         assert!(output.contains("Checking fastboot file at /tmp/fastboot-test.json"));
     }
 

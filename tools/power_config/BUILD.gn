@@ -10,8 +10,3 @@ if (is_host) {
     bazel_output_path = "{{BAZEL_TARGET_OUT_DIR}}/power_config"
   }
 }
-
-group("tests") {
-  testonly = true
-  deps = [ "tests" ]
-}

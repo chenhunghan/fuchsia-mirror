@@ -48,6 +48,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "bt-avrcp-vol-control-tests",
-    package_name = "bt-avrcp-vol-control-tests",
     unit_tests = [":bt-avrcp-vol-control_test"],
 )

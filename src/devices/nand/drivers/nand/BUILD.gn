@@ -53,7 +53,6 @@ fuchsia_cc_driver("nand-driver") {
 }
 
 fuchsia_driver_component("nand") {
-  info = "meta/nand-info.json"
   component_name = "nand"
   dml_label = ":nand-dml"
   deps = [

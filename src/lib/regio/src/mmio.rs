@@ -235,6 +235,7 @@ where
     /// # Safety
     ///
     /// Same as [`MmioPtr::new`] for underlying offset pointer.
+    #[inline]
     pub const unsafe fn at<Layout, Access>(
         &self,
         offset: Offset<Layout, Access>,

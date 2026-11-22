@@ -71,33 +71,27 @@ type Network = table {
     };
     /// The transport type for the network.
     ///
-    /// Added in FuchsiaNetworkMonitorFs NetworkMessage version 2. Interpreted
-    /// as NetworkType::UNKNOWN when absent.
+    /// Required.
     4: network_type NetworkType;
     /// The capabilities for the network.
     ///
-    /// Added in FuchsiaNetworkMonitorFs NetworkMessage version 2. Interpreted
-    /// as an empty list when absent.
+    /// Interpreted as an empty list when absent.
     5: capabilities vector<NetworkCapability>:MAX;
     /// The level of connectivity for the network.
     ///
-    /// Added in FuchsiaNetworkMonitorFs NetworkMessage version 2. Interpreted
-    /// as ConnectivityState::NO_CONNECTIVITY when absent.
+    /// Required.
     6: connectivity ConnectivityState;
     /// The name of the underlying interface for the network.
     ///
-    /// Added in FuchsiaNetworkMonitorFs NetworkMessage version 2. Interpreted
-    /// as the empty string when absent.
+    /// Required.
     7: name fuchsia.net.interfaces.Name;
     /// Whether the underlying interface has a v4/v6 address assigned.
     ///
-    /// Added in FuchsiaNetworkMonitorFs NetworkMessage version 2. Interpreted
-    /// as no information is available when absent.
+    /// Interpreted as no information is available when absent.
     8: has_address ProtoProperties;
     /// Whether the underlying interface has a v4/v6 default route.
     ///
-    /// Added in FuchsiaNetworkMonitorFs NetworkMessage version 2. Interpereted
-    /// as no information is available when absent.
+    /// Interpreted as no information is available when absent.
     9: has_default_route ProtoProperties;
 };
 
@@ -122,7 +116,8 @@ closed protocol NetworkRegistry {
     }) -> () error flexible enum {
         /// The `network_id` was not specified in the Network table.
         MISSING_NETWORK_ID = 1;
-        /// The `info` was not specified in the Network table.
+        /// Required network information (e.g. `info`, `connectivity`, `name`,
+        /// or `network_type`) was not specified in the Network table.
         MISSING_NETWORK_INFO = 2;
         /// The `dns_servers` was not specified in the Network table.
         MISSING_NETWORK_DNS_SERVERS = 3;
@@ -140,7 +135,8 @@ closed protocol NetworkRegistry {
     }) -> () error flexible enum {
         /// The `network_id` was not specified in the Network table.
         MISSING_NETWORK_ID = 1;
-        /// The `info` was not specified in the Network table.
+        /// Required network information (e.g. `info`, `connectivity`, `name`,
+        /// or `network_type`) was not specified in the Network table.
         MISSING_NETWORK_INFO = 2;
         /// The `dns_servers` was not specified in the Network table.
         MISSING_NETWORK_DNS_SERVERS = 3;

@@ -1131,7 +1131,7 @@ const ConsoleContext::ThreadRecord* ConsoleContext::GetThreadRecord(const Thread
   int thread_id = found_thread_to_id->second;
 
   auto found_id_to_thread = target_record->id_to_thread.find(thread_id);
-  if (found_thread_to_id == target_record->thread_to_id.end()) {
+  if (found_id_to_thread == target_record->id_to_thread.end()) {
     FX_NOTREACHED();
     return nullptr;
   }

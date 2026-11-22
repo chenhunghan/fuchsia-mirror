@@ -18,6 +18,12 @@ pub const STREAM_SEGMENT_SIZE: &str = "stream-segment-size";
 pub const PARTITION_SIZE: &str = "partition-size";
 pub const PARTITION_START: &str = "partition-start";
 
+// GBL capability variable and async task OEM commands
+pub const VERSION_GBL_VAR: &str = "version-gbl";
+pub const GBL_ENABLE_ASYNC_TASK_COMMAND: &str = "gbl-enable-async-task";
+pub const GBL_DISABLE_ASYNC_TASK_COMMAND: &str = "gbl-disable-async-task";
+pub const GBL_SYNC_TASKS_COMMAND: &str = "gbl-sync-tasks";
+
 /// Returns whether a fastboot variable is safe to cache in memory.
 ///
 /// Only immutable variables describing hardware properties, static partition geometry,
@@ -29,6 +35,7 @@ pub fn is_cacheable_variable(name: &str) -> bool {
         "version"
         | "version-bootloader"
         | "version-baseband"
+        | "version-gbl"
         | "product"
         | "hw-revision"
         | "variant"

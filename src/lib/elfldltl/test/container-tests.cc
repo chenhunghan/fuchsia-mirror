@@ -197,9 +197,9 @@ TEST(ElfldltlContainerTests, StaticVectorErase) {
     auto to_erase_end = list.begin() + 7;
     EXPECT_EQ(*to_erase, 6);
     EXPECT_EQ(*to_erase_end, 8);
-    auto expected = {0, 1, 2, 3, 4, 9};
+    auto expected = {0, 1, 2, 3, 4, 8, 9};
     EXPECT_EQ(list.erase(to_erase, to_erase_end), to_erase);
-    EXPECT_TRUE(std::equal(list.begin(), list.end(), expected.begin()));
+    EXPECT_TRUE(std::equal(list.begin(), list.end(), expected.begin(), expected.end()));
   }
   {
     auto diag = ExpectOkDiagnostics();
@@ -208,8 +208,16 @@ TEST(ElfldltlContainerTests, StaticVectorErase) {
     auto to_erase_begin = list.begin() + 1;
     auto to_erase_end = list.begin() + 3;
     EXPECT_EQ(list.erase(to_erase_begin, to_erase_end), list.begin() + 1);
-    auto expected = {-2, 2, 15, 18};
-    EXPECT_TRUE(std::equal(list.begin(), list.end(), expected.begin()));
+    auto expected = {-2, 1, 2, 15, 18};
+    EXPECT_TRUE(std::equal(list.begin(), list.end(), expected.begin(), expected.end()));
+
+    // Empty range erase is a no-op, and erasing to end() works without UB.
+    EXPECT_EQ(list.erase(list.begin() + 2, list.begin() + 2), list.begin() + 2);
+    EXPECT_TRUE(std::equal(list.begin(), list.end(), expected.begin(), expected.end()));
+    EXPECT_EQ(list.erase(list.begin() + 2, list.end()), list.end());
+    auto expected_prefix = {-2, 1};
+    EXPECT_TRUE(
+        std::equal(list.begin(), list.end(), expected_prefix.begin(), expected_prefix.end()));
   }
 }
 
@@ -358,6 +366,10 @@ TEST(ElfldltlContainerTests, StaticVectorCorrectlyMoves) {
   static int count = 0;
   struct S {
     S() { count++; }
+    S(const S&) { count++; }
+    S(S&&) noexcept { count++; }
+    S& operator=(const S&) = default;
+    S& operator=(S&&) noexcept = default;
     ~S() { count--; }
   };
 
@@ -432,6 +444,106 @@ TEST(ElfldltlContainerTests, PreallocatedVectorDynamicExtent) {
     ExpectedSingleError expected("error", ": maximum", 5, " < requested", 6);
     vec.emplace_back(expected, "error", 1);
   }
+}
+
+TEST(ElfldltlContainerTests, PreallocatedVectorLifetimeAndMove) {
+  static int live_count = 0;
+  static constexpr uint32_t kLiveMagic = 0x5a5aa5a5;
+  struct Tracked {
+    uint32_t magic = kLiveMagic;
+    int value = 0;
+
+    Tracked() { ++live_count; }
+    explicit Tracked(int v) : value(v) { ++live_count; }
+    Tracked(const Tracked& other) : value(other.value) {
+      EXPECT_EQ(other.magic, kLiveMagic);
+      ++live_count;
+    }
+    Tracked(Tracked&& other) noexcept : value(other.value) {
+      EXPECT_EQ(other.magic, kLiveMagic);
+      other.value = -1;
+      ++live_count;
+    }
+    Tracked& operator=(const Tracked& other) {
+      EXPECT_EQ(magic, kLiveMagic);
+      EXPECT_EQ(other.magic, kLiveMagic);
+      value = other.value;
+      return *this;
+    }
+    Tracked& operator=(Tracked&& other) noexcept {
+      EXPECT_EQ(magic, kLiveMagic);
+      EXPECT_EQ(other.magic, kLiveMagic);
+      value = other.value;
+      other.value = -1;
+      return *this;
+    }
+    ~Tracked() {
+      EXPECT_EQ(magic, kLiveMagic);
+      magic = 0xdeadbeef;
+      --live_count;
+    }
+  };
+
+  auto diag = ExpectOkDiagnostics();
+  live_count = 0;
+
+  // Test resize, middle/gap insert, and emplace on uninitialized union storage.
+  {
+    elfldltl::StaticVector<10>::Container<Tracked> list;
+    ASSERT_TRUE(list.resize(diag, "", 3));
+    EXPECT_EQ(live_count, 3);
+    EXPECT_EQ(list.size(), 3u);
+
+    const Tracked to_insert[] = {Tracked{10}, Tracked{20}, Tracked{30}};
+    ASSERT_TRUE(
+        list.insert(diag, "", list.begin() + 2, std::begin(to_insert), std::end(to_insert)));
+    EXPECT_EQ(list.size(), 6u);
+    EXPECT_EQ(live_count, 6 + 3);
+    EXPECT_EQ(list[0].value, 0);
+    EXPECT_EQ(list[1].value, 0);
+    EXPECT_EQ(list[2].value, 10);
+    EXPECT_EQ(list[3].value, 20);
+    EXPECT_EQ(list[4].value, 30);
+    EXPECT_EQ(list[5].value, 0);
+  }
+  EXPECT_EQ(live_count, 0);
+
+  // Test PreallocatedVector move-construction and move-assignment across static
+  // and dynamic extents without double destruction or leaked elements.
+  alignas(Tracked) std::byte raw1[sizeof(Tracked) * 4]{};
+  alignas(Tracked) std::byte raw2[sizeof(Tracked) * 4]{};
+  std::span<Tracked, 4> span1{reinterpret_cast<Tracked*>(raw1), 4};
+  std::span<Tracked, 4> span2{reinterpret_cast<Tracked*>(raw2), 4};
+  {
+    elfldltl::PreallocatedVector<Tracked, 4> v1{span1};
+    ASSERT_TRUE(v1.emplace_back(diag, "", 11));
+    ASSERT_TRUE(v1.emplace_back(diag, "", 22));
+    EXPECT_EQ(live_count, 2);
+
+    elfldltl::PreallocatedVector<Tracked, 4> v2{std::move(v1)};
+    EXPECT_EQ(v1.size(), 0u);  // NOLINT(bugprone-use-after-move)
+    EXPECT_EQ(v2.size(), 2u);
+    EXPECT_EQ(live_count, 2);
+
+    elfldltl::PreallocatedVector<Tracked> dyn{std::move(v2)};
+    EXPECT_EQ(v2.size(), 0u);  // NOLINT(bugprone-use-after-move)
+    EXPECT_EQ(dyn.size(), 2u);
+    EXPECT_EQ(dyn[0].value, 11);
+    EXPECT_EQ(dyn[1].value, 22);
+    EXPECT_EQ(live_count, 2);
+
+    elfldltl::PreallocatedVector<Tracked> dyn2{std::span<Tracked>{span2}};
+    ASSERT_TRUE(dyn2.emplace_back(diag, "", 99));
+    EXPECT_EQ(live_count, 3);
+
+    dyn2 = std::move(dyn);
+    EXPECT_EQ(dyn.size(), 0u);  // NOLINT(bugprone-use-after-move)
+    EXPECT_EQ(dyn2.size(), 2u);
+    EXPECT_EQ(dyn2[0].value, 11);
+    EXPECT_EQ(dyn2[1].value, 22);
+    EXPECT_EQ(live_count, 2);
+  }
+  EXPECT_EQ(live_count, 0);
 }
 
 TEST(ElfldltlAllocCheckerContainerTests, Basic) {

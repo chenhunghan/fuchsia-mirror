@@ -2,6 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
 package(default_applicable_licenses = ["//:license"])
@@ -29,4 +38,29 @@ rustc_binary(
         "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:scopeguard",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "fake-hrtimer-rust-bin",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fake-hrtimer.cml",
+)
+
+fx_component(
+    name = "default",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
 )

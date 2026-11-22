@@ -3,12 +3,19 @@
 # found in the LICENSE file.
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_map")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests of this library stay in BUILD.gn for now, because they
-# depend on //src/lib/assembly/partitions_config, which is not in Bazel yet.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":config_schema_test"],
+    visibility = ["//src/lib/assembly:__pkg__"],
+)
+
 # LINT.IfChange(config_schema)
 rustc_library(
     name = "config_schema",
@@ -104,3 +111,43 @@ rustc_library(
     ],
 )
 # LINT.ThenChange(BUILD.gn:config_schema_test)
+
+# @bazel2gn:skip
+host_test_data_map(
+    name = "test_data",
+    testonly = True,
+    files_map = {
+        "test_data/32.99991231.0.1/board_configuration.json": "test_data/32.99991231.0.1/board_configuration.json",
+        "test_data/32.99991231.0.1/filesystems/vbmeta/key/testkey_atx_psk.pem": "test_data/32.99991231.0.1/filesystems/vbmeta/key/testkey_atx_psk.pem",
+        "test_data/32.99991231.0.1/filesystems/vbmeta/key_metadata/atx_metadata.bin": "test_data/32.99991231.0.1/filesystems/vbmeta/key_metadata/atx_metadata.bin",
+        "test_data/32.99991231.0.1/partitions_config/partitions_config.json": "test_data/32.99991231.0.1/partitions_config/partitions_config.json",
+        "test_data/maximal_board/board_configuration.json": "test_data/maximal_board/board_configuration.json",
+        "test_data/maximal_board/devicetree.dtb": "test_data/maximal_board/devicetree.dtb",
+        "test_data/maximal_board/devicetree_overlay.dtbo": "test_data/maximal_board/devicetree_overlay.dtbo",
+        "test_data/maximal_board/keys/vbmeta_key.pem": "test_data/maximal_board/keys/vbmeta_key.pem",
+        "test_data/maximal_board/keys/vbmeta_key_metadata.bin": "test_data/maximal_board/keys/vbmeta_key_metadata.bin",
+        "test_data/maximal_board/partitions_config/partitions_config.json": "test_data/maximal_board/partitions_config/partitions_config.json",
+        "test_data/maximal_board/scripts/input1.txt": "test_data/maximal_board/scripts/input1.txt",
+        "test_data/maximal_board/scripts/postprocess.sh": "test_data/maximal_board/scripts/postprocess.sh",
+        "test_data/maximal_board/zbi_extra_items.zbi": "test_data/maximal_board/zbi_extra_items.zbi",
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+# bazel2gn cannot translate `test_data`, so this test is wired into
+# //src/lib/assembly:host_tests in Bazel.
+# @bazel2gn:skip
+host_rustc_test(
+    name = "config_schema_test",
+    crate = ":config_schema",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    rustc_env = {
+        "TEST_DATA_DIR": ".",
+    },
+    test_data = [":test_data"],
+    deps = [
+        "//src/lib/assembly/partitions_config",
+        "//src/lib/assembly/util",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)

@@ -2,6 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
 package(default_applicable_licenses = ["//:license"])
@@ -24,4 +34,33 @@ rustc_binary(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "stop_watcher",
+)
+
+fx_component_manifest(
+    name = "stop-watcher-manifest",
+    testonly = True,
+    component_name = "stop_watcher",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/stop_watcher.cml",
+)
+
+fx_component(
+    name = "stop-watcher-component",
+    testonly = True,
+    compiled_manifest = ":stop-watcher-manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "stop_watcher",
+    testonly = True,
+    components = [":stop-watcher-component"],
+    visibility = ["//src/diagnostics/archivist/tests/integration/realm_factory:__pkg__"],
 )

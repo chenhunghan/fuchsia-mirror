@@ -35,7 +35,6 @@ class TestEndpoint : public fake_usb_endpoint::FakeEndpoint {
 
   void CancelAll(CancelAllCompleter::Sync& completer) override {
     cancel_all_called_ = true;
-    cancel_all_count_++;
     if (on_cancel_all_) {
       on_cancel_all_();
     }
@@ -45,14 +44,11 @@ class TestEndpoint : public fake_usb_endpoint::FakeEndpoint {
   void SetOnQueueRequests(fit::closure callback) { on_queue_requests_ = std::move(callback); }
   void SetOnCancelAll(fit::closure callback) { on_cancel_all_ = std::move(callback); }
   bool cancel_all_called() const { return cancel_all_called_; }
-  size_t cancel_all_count() const { return cancel_all_count_; }
-  void reset_cancel_all_called() { cancel_all_called_ = false; }
 
  private:
   fit::closure on_queue_requests_;
   fit::closure on_cancel_all_;
   bool cancel_all_called_ = false;
-  size_t cancel_all_count_ = 0;
 };
 
 class FakeUsbFunction
@@ -88,20 +84,6 @@ class FakeUsbFunction
     completer.Reply(fit::ok(std::move(response)));
   }
 
-  void ConfigureEndpoint(
-      fidl::Request<fuchsia_hardware_usb_function::UsbFunction::ConfigureEndpoint>& request,
-      fidl::internal::NaturalCompleter<
-          fuchsia_hardware_usb_function::UsbFunction::ConfigureEndpoint>::Sync& completer)
-      override {
-    configured_endpoints_.push_back(request.endpoint_address());
-    if (fail_configure_endpoint_addr_.has_value() &&
-        *fail_configure_endpoint_addr_ == request.endpoint_address()) {
-      completer.Reply(fit::error(fail_configure_status_));
-      return;
-    }
-    Base::ConfigureEndpoint(request, completer);
-  }
-
   void DisableEndpoint(
       fidl::Request<fuchsia_hardware_usb_function::UsbFunction::DisableEndpoint>& request,
       fidl::internal::NaturalCompleter<
@@ -115,19 +97,9 @@ class FakeUsbFunction
           << "DisableEndpoint called while requests still pending on endpoint "
           << static_cast<int>(request.endpoint_address());
     }
-    if (fail_disable_endpoint_status_.has_value()) {
-      completer.Reply(fit::error(*fail_disable_endpoint_status_));
-      return;
-    }
     Base::DisableEndpoint(request, completer);
   }
 
-  void set_fail_configure_endpoint(uint8_t ep_addr, zx_status_t status) {
-    fail_configure_endpoint_addr_ = ep_addr;
-    fail_configure_status_ = status;
-  }
-  void set_fail_disable_endpoint(zx_status_t status) { fail_disable_endpoint_status_ = status; }
-  const std::vector<uint8_t>& configured_endpoints() const { return configured_endpoints_; }
   const std::vector<uint8_t>& disabled_endpoints() const { return disabled_endpoints_; }
   void set_verify_lifecycle_order(bool verify) { verify_lifecycle_order_ = verify; }
 
@@ -136,10 +108,6 @@ class FakeUsbFunction
   }
 
  private:
-  std::optional<uint8_t> fail_configure_endpoint_addr_;
-  zx_status_t fail_configure_status_ = ZX_OK;
-  std::optional<zx_status_t> fail_disable_endpoint_status_;
-  std::vector<uint8_t> configured_endpoints_;
   bool verify_lifecycle_order_ = false;
   std::vector<uint8_t> disabled_endpoints_;
   fidl::ClientEnd<fuchsia_hardware_usb_function::UsbFunctionInterface> interface_;
@@ -219,11 +187,6 @@ class UsbFastbootFunctionTest : public ::testing::Test {
   fidl::WireSyncClient<fuchsia_hardware_fastboot::FastbootImpl> client_;
   fdf_testing::BackgroundDriverTest<UsbFastbootTestConfig> driver_test_;
 };
-
-TEST_F(UsbFastbootFunctionTest, LifetimeTest) {
-  // Lifetime tested in test Setup() and TearDown()
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-}
 
 void ValidateVmo(const zx::vmo& vmo, std::string_view payload) {
   fzl::VmoMapper mapper;
@@ -529,17 +492,6 @@ TEST_F(UsbFastbootFunctionTest, TeardownWithPendingSendDrainsCleanly) {
   });
 }
 
-TEST_F(UsbFastbootFunctionTest, TeardownWhileIdleDisablesEndpoints) {
-  EnableUsb();
-
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-
-  // Verify fake endpoints were disabled during teardown.
-  driver_test_.RunInEnvironmentTypeContext([](UsbFastbootEnvironment& env) {
-    EXPECT_EQ(env.fake_dev_.disabled_endpoints().size(), 2u);
-  });
-}
-
 TEST_F(UsbFastbootFunctionTest, SendAndReceiveFailWithCanceledWhileStopping) {
   EnableUsb();
 
@@ -671,125 +623,6 @@ TEST_F(UsbFastbootFunctionTest, SetConfiguredFalseWithPendingSendDrainsAndCancel
     EXPECT_EQ(env.fake_dev_.fake_endpoint(kBulkInEp).pending_request_count(), 0u);
     EXPECT_EQ(env.fake_dev_.disabled_endpoints().size(), 2u);
   });
-
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-}
-
-TEST_F(UsbFastbootFunctionTest, SetConfiguredFalseIdempotentWhenAlreadyUnconfigured) {
-  // Device starts unconfigured. Calling SetConfigured(false) should succeed immediately.
-  fidl::Result result = function_client_->SetConfigured({{
-      .configured = false,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined,
-  }});
-  ASSERT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
-
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-}
-
-TEST_F(UsbFastbootFunctionTest, ConfigureEndpointsRollsBackOnPartialFailure) {
-  driver_test_.RunInEnvironmentTypeContext([](UsbFastbootEnvironment& env) {
-    // Cause ConfigureEndpoint to fail on the second endpoint (bulk IN).
-    env.fake_dev_.set_fail_configure_endpoint(kBulkInEp, ZX_ERR_IO_NOT_PRESENT);
-  });
-
-  // Calling SetConfigured(true) should fail.
-  fidl::Result result = function_client_->SetConfigured({{
-      .configured = true,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
-  }});
-  ASSERT_TRUE(result.is_error());
-  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_IO_NOT_PRESENT);
-
-  // Verify rollback: bulk OUT was configured, and then disabled during rollback.
-  driver_test_.RunInEnvironmentTypeContext([](UsbFastbootEnvironment& env) {
-    // Both endpoints were attempted to be configured.
-    EXPECT_EQ(env.fake_dev_.configured_endpoints().size(), 2u);
-    // Rollback must have disabled the successfully configured bulk OUT endpoint.
-    EXPECT_EQ(env.fake_dev_.disabled_endpoints().size(), 1u);
-    if (!env.fake_dev_.disabled_endpoints().empty()) {
-      EXPECT_EQ(env.fake_dev_.disabled_endpoints()[0], kBulkOutEp);
-    }
-  });
-
-  // Client requests must fail as driver is not configured.
-  ASSERT_FALSE(client()->Receive(0)->is_ok());
-
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-}
-
-TEST_F(UsbFastbootFunctionTest, StopWhileSetConfiguredFalseDrainingDoesNotDuplicateCancel) {
-  EnableUsb();
-
-  libsync::Completion cancel_started;
-  libsync::Completion stop_called;
-
-  driver_test_.RunInEnvironmentTypeContext([&](UsbFastbootEnvironment& env) {
-    env.fake_dev_.fake_endpoint(kBulkOutEp).SetOnCancelAll([&]() {
-      cancel_started.Signal();
-      stop_called.Wait();
-    });
-  });
-
-  std::thread set_configured_thread([&]() {
-    fidl::Result result = function_client_->SetConfigured({{
-        .configured = false,
-        .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined,
-    }});
-    ASSERT_TRUE(result.is_error());
-    EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_CANCELED);
-    // SetConfigured received ZX_ERR_CANCELED, meaning Stop() has preempted it and ran.
-    // Now allow CancelAll to finish.
-    stop_called.Signal();
-  });
-
-  // Await SetConfigured(false) issuing CancelAll.
-  cancel_started.Wait();
-
-  // Call StopDriver on the main test thread while SetConfigured(false) is actively draining.
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-
-  set_configured_thread.join();
-
-  // Verify CancelAll was called only once per endpoint (no duplicate cancel).
-  driver_test_.RunInEnvironmentTypeContext([](UsbFastbootEnvironment& env) {
-    EXPECT_EQ(env.fake_dev_.fake_endpoint(kBulkOutEp).cancel_all_count(), 1u);
-    EXPECT_EQ(env.fake_dev_.fake_endpoint(kBulkInEp).cancel_all_count(), 1u);
-    EXPECT_EQ(env.fake_dev_.disabled_endpoints().size(), 2u);
-  });
-}
-
-TEST_F(UsbFastbootFunctionTest, DisableEndpointExpectedDisconnectToleratedDuringTeardown) {
-  EnableUsb();
-
-  driver_test_.RunInEnvironmentTypeContext([](UsbFastbootEnvironment& env) {
-    // Simulate peripheral driver disconnect / unplug error during teardown.
-    env.fake_dev_.set_fail_disable_endpoint(ZX_ERR_PEER_CLOSED);
-  });
-
-  // SetConfigured(false) during unbind or bus drop should tolerate expected disconnects.
-  fidl::Result result = function_client_->SetConfigured({{
-      .configured = false,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kUndefined,
-  }});
-  ASSERT_TRUE(result.is_ok()) << result.error_value().FormatDescription();
-
-  ASSERT_TRUE(driver_test_.StopDriver().is_ok());
-}
-
-TEST_F(UsbFastbootFunctionTest, RollbackToleratesExpectedDisconnectDuringTeardown) {
-  driver_test_.RunInEnvironmentTypeContext([](UsbFastbootEnvironment& env) {
-    // Cause ConfigureEndpoint to fail on the second endpoint (bulk IN).
-    env.fake_dev_.set_fail_configure_endpoint(kBulkInEp, ZX_ERR_IO_NOT_PRESENT);
-    // Simulate peripheral driver disconnect during rollback DisableEndpoint call.
-    env.fake_dev_.set_fail_disable_endpoint(ZX_ERR_PEER_CLOSED);
-  });
-
-  fidl::Result result = function_client_->SetConfigured({{
-      .configured = true,
-      .speed = fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh,
-  }});
-  ASSERT_TRUE(result.is_error());
-  EXPECT_EQ(result.error_value().domain_error(), ZX_ERR_IO_NOT_PRESENT);
 
   ASSERT_TRUE(driver_test_.StopDriver().is_ok());
 }

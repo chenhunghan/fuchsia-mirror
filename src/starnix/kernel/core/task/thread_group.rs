@@ -5,8 +5,8 @@
 use crate::device::terminal::{ControllingSession, ControllingTerminal, Terminal, TerminalSide};
 use crate::mutable_state::{state_accessor, state_implementation};
 use crate::ptrace::{
-    AtomicStopState, PtraceAllowedPtracers, PtraceEvent, PtraceOptions, PtraceStatus, PtraceTracer,
-    StopState, ZombiePtracees, ptrace_detach,
+    AtomicStopState, PtraceAllowedPtracers, PtraceEvent, PtraceOptions, PtraceTracer, StopState,
+    ZombiePtracees, ptrace_detach,
 };
 use crate::security;
 use crate::signals::syscalls::WaitingOptions;
@@ -17,7 +17,7 @@ use crate::signals::{
 use crate::task::memory_attribution::MemoryAttributionLifecycleEvent;
 use crate::task::{
     CurrentTask, ExitStatus, Kernel, Pid, PidEntry, PidTableGuard, Task, TaskFlags,
-    TaskMutableState, TaskPersistentInfo, TypedWaitQueue, WaitResult, ZombieProcess, ZombieState,
+    TaskPersistentInfo, TaskWriteGuard, TypedWaitQueue, WaitResult, ZombieProcess, ZombieState,
 };
 use crate::time::{IntervalTimerHandle, TimerTable};
 use fuchsia_rcu::subtle::RcuPtr;
@@ -36,11 +36,13 @@ use starnix_types::ownership::{OwnedRef, Releasable};
 use starnix_types::stats::TaskTimeStats;
 use starnix_types::time::{itimerspec_from_itimerval, timeval_from_duration};
 use starnix_uapi::auth::{CAP_SYS_ADMIN, CAP_SYS_RESOURCE};
+use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::personality::PersonalityFlags;
 use starnix_uapi::resource_limits::{Resource, ResourceLimits};
 use starnix_uapi::signals::{
-    SIGCHLD, SIGCONT, SIGHUP, SIGKILL, SIGTERM, SIGTTOU, SigSet, Signal, UncheckedSignal,
+    SIGCHLD, SIGCONT, SIGHUP, SIGKILL, SIGSTOP, SIGTERM, SIGTSTP, SIGTTIN, SIGTTOU, SigSet, Signal,
+    UncheckedSignal,
 };
 use starnix_uapi::user_address::UserAddress;
 use starnix_uapi::{
@@ -178,6 +180,11 @@ pub struct ThreadGroupMutableState {
 
     /// The controlling terminal of the thread group.
     pub controlling_terminal: Option<ControllingTerminal>,
+
+    /// Preserved controlling terminal device ID for an unreaped non-leader zombie whose
+    /// `controlling_terminal` reference was released on exit so `/proc/<pid>/stat` still reports
+    /// `tty_nr`.
+    zombie_controlling_terminal_device: Option<DeviceId>,
 
     pub did_exec: bool,
 
@@ -495,6 +502,16 @@ impl ThreadGroupParent {
         self.thread_group.upgrade().expect("ThreadGroupParent references must always be valid")
     }
 
+    /// Notifies the parent [`ThreadGroup`] that a child status transition occurred.
+    ///
+    /// Callers must not hold the child's [`ThreadGroup`] or [`Task`] locks.
+    pub(crate) fn notify_child_status(self) {
+        self.upgrade()
+            .write()
+            .lifecycle_waiters
+            .notify_value(ThreadGroupLifecycleWaitValue::ChildStatus);
+    }
+
     /// Returns the specific [`Task`] in the original parent [`ThreadGroup`] that created this
     /// process, or `None` if this process has been reparented.
     pub(super) fn creator_task(&self) -> Option<&Weak<Task>> {
@@ -672,6 +689,7 @@ impl ThreadGroup {
                     is_child_subreaper: false,
                     session,
                     controlling_terminal: None,
+                    zombie_controlling_terminal_device: None,
                     did_exec: false,
                     last_signal: None,
                     children_time_stats: Default::default(),
@@ -801,11 +819,7 @@ impl ThreadGroup {
         // Keep `current_task` unexited (`!TaskFlags::EXITED`) until after `ptrace_event` so it can
         // block in `PTRACE_EVENT_EXIT`.
         let current_tid = current_task.as_ref().map(|task| task.tid.clone());
-        state.terminate_tasks(
-            exit_status.clone(),
-            SignalInfo::forced(SIGKILL),
-            current_tid.as_ref(),
-        );
+        state.terminate_tasks(exit_status.clone(), current_tid.as_ref());
 
         // From <https://man7.org/linux/man-pages/man2/ptrace.2.html>:
         //
@@ -888,8 +902,12 @@ impl ThreadGroup {
             pids.kill_process(&self.leader, Arc::downgrade(task));
             pids.remove_task(&task.tid);
 
-            let disassociated_controlling_terminal =
-                if state.session == self.leader { state.controlling_terminal.take() } else { None };
+            let is_session_leader = state.session == self.leader;
+            let controlling_terminal = state.controlling_terminal.take();
+            if !is_session_leader {
+                state.zombie_controlling_terminal_device =
+                    controlling_terminal.as_ref().map(|t| t.terminal.device());
+            }
 
             // I have no idea if dropping the lock here is correct, and I don't want to think about
             // it. If problems do turn up with another thread observing an intermediate state of
@@ -902,14 +920,20 @@ impl ThreadGroup {
             // for an idea.
             std::mem::drop(state);
 
-            // Disassociate the controlling terminal when the session leader exits.
-            // This cannot be called while holding the ThreadGroup state lock.
-            if let Some(controlling_terminal) = disassociated_controlling_terminal {
-                controlling_terminal.terminal.disassociate_controlling_session_if(
-                    Some(&sid),
-                    Some(controlling_terminal.side),
-                );
+            // Disassociate the session when the session leader exits; this cannot be called while
+            // holding the ThreadGroup state lock.
+            if is_session_leader {
+                if let Some(controlling_terminal) = &controlling_terminal {
+                    controlling_terminal.terminal.disassociate_controlling_session_if(
+                        Some(&sid),
+                        Some(controlling_terminal.side),
+                    );
+                }
             }
+            // Explicitly drop the controlling terminal here (for both leaders and non-leaders) so
+            // any terminal devpts node is released before CurrentTask::exit() drains its delayed
+            // releaser, while non-leader zombies keep the DeviceId for /proc/<pid>/stat.
+            std::mem::drop(controlling_terminal);
 
             for notification in zombie_notifications {
                 notification.deliver(&mut pids);
@@ -1444,43 +1468,27 @@ impl ThreadGroup {
         })
     }
 
-    /// Check whether the stop state is compatible with `new_stopped`. If it is return it,
-    /// otherwise, return None.
-    fn check_stopped_state(
-        &self,
-        new_stopped: StopState,
-        finalize_only: bool,
-    ) -> Option<StopState> {
+    /// Check whether the stop state is compatible with `new_stopped`. If it is not, return the
+    /// current stop state; otherwise return `None`.
+    fn check_stopped_state(&self, new_stopped: StopState) -> Option<StopState> {
         let stopped = self.load_stopped();
-        if finalize_only && !stopped.is_stopping_or_stopped() {
-            return Some(stopped);
-        }
-
         if stopped.is_illegal_transition(new_stopped) {
             return Some(stopped);
         }
 
-        return None;
+        None
     }
 
-    /// Set the stop status of the process.  If you pass |siginfo| of |None|,
-    /// does not update the signal.  If |finalize_only| is set, will check that
-    /// the set will be a finalize (Stopping -> Stopped or Stopped -> Stopped)
-    /// before executing it.
+    /// Sets the stop status of the process. If `siginfo` is `None`, does not update the signal.
     ///
     /// Returns the latest stop state after any changes.
-    pub fn set_stopped(
-        &self,
-        new_stopped: StopState,
-        siginfo: Option<SignalInfo>,
-        finalize_only: bool,
-    ) -> StopState {
+    pub fn set_stopped(&self, new_stopped: StopState, siginfo: Option<SignalInfo>) -> StopState {
         // Perform an early return check to see if we can avoid taking the lock.
-        if let Some(stopped) = self.check_stopped_state(new_stopped, finalize_only) {
+        if let Some(stopped) = self.check_stopped_state(new_stopped) {
             return stopped;
         }
 
-        self.write().set_stopped(new_stopped, siginfo, finalize_only)
+        self.write().set_stopped(new_stopped, siginfo)
     }
 
     /// Returns the controlling terminal of this thread group, if any.
@@ -1763,214 +1771,6 @@ impl ThreadGroup {
         }
     }
 
-    /// For each task traced by this thread_group that matches the given
-    /// selector, acquire its TaskMutableState and ptracees lock and execute the
-    /// given function.
-    pub fn get_ptracees_and(
-        &self,
-        selector: &ProcessSelector,
-        f: &mut dyn FnMut(&Task, &TaskMutableState),
-    ) {
-        for task_ref in self
-            .ptracees
-            .lock()
-            .iter()
-            .filter(|info| selector.match_tid(&info.tid))
-            .filter_map(|info| info.tid.get_task().ok())
-        {
-            let task_state = task_ref.write();
-            if task_state.ptrace.is_some() {
-                f(&task_ref, &task_state);
-            }
-        }
-    }
-
-    /// Returns a tracee whose state has changed, so that waitpid can report on
-    /// it. If this returns a value, and the pid is being traced, the tracer
-    /// thread is deemed to have seen the tracee ptrace-stop for the purposes of
-    /// PTRACE_LISTEN.
-    pub fn get_waitable_ptracee(
-        &self,
-        selector: &ProcessSelector,
-        options: &WaitingOptions,
-        pids: &mut PidTableGuard<'_>,
-    ) -> Option<WaitResult> {
-        // This checks to see if the target is a zombie ptracee.
-        let waitable_entry = self.write().zombie_ptracees.get_waitable_entry(selector, options);
-        match waitable_entry {
-            None => (),
-            Some((zombie, None)) => return Some(zombie.to_wait_result()),
-            Some((zombie, Some((tg, z)))) => {
-                if let Some(tg) = tg.upgrade() {
-                    if Arc::as_ptr(&tg) != self as *const Self {
-                        tg.do_zombie_notifications(z, pids);
-                    } else {
-                        {
-                            let mut state = tg.write();
-                            state.children.remove(&z.task.pid);
-                            state
-                                .deferred_zombie_ptracers
-                                .retain(|dzp| dzp.tracee_pid != z.task.pid);
-                        }
-
-                        z.release(pids);
-                    };
-                }
-                return Some(zombie.to_wait_result());
-            }
-        }
-
-        let mut tasks = vec![];
-
-        // This checks to see if the target is a running ptracee.
-        self.get_ptracees_and(selector, &mut |task: &Task, _| {
-            tasks.push(task.weak_self.clone());
-        });
-        for task in tasks {
-            let Some(task_ref) = task.upgrade() else {
-                continue;
-            };
-
-            let process_state = &mut task_ref.thread_group().write();
-            let mut task_state = task_ref.write();
-            if task_state
-                .ptrace
-                .as_ref()
-                .is_some_and(|ptrace| ptrace.is_waitable(task_ref.load_stopped(), options))
-            {
-                // We've identified a potential target.  Need to return either
-                // the process's information (if we are in group-stop) or the
-                // thread's information (if we are in a different stop).
-
-                // The shared information:
-                let info = process_state.tasks.iter().next().unwrap().clone();
-                let uid = info.real_creds().uid;
-                let mut exit_status = None;
-                let exit_signal = process_state.exit_signal.clone();
-                let time_stats =
-                    process_state.base.time_stats() + process_state.children_time_stats;
-                let task_stopped = task_ref.load_stopped();
-
-                #[derive(PartialEq)]
-                enum ExitType {
-                    None,
-                    Cont,
-                    Stop,
-                    Kill,
-                }
-                if process_state.is_waitable() {
-                    let ptrace = &mut task_state.ptrace;
-                    // The information for processes, if we were in group stop.
-                    let process_stopped = process_state.base.load_stopped();
-                    let mut fn_type = ExitType::None;
-                    if process_stopped == StopState::Awake && options.wait_for_continued {
-                        fn_type = ExitType::Cont;
-                    }
-                    let mut event = ptrace
-                        .as_ref()
-                        .map_or(PtraceEvent::None, |ptrace| {
-                            ptrace.event_data.as_ref().map_or(PtraceEvent::None, |data| data.event)
-                        })
-                        .clone();
-                    // Tasks that are ptrace'd always get stop notifications.
-                    if process_stopped == StopState::GroupStopped
-                        && (options.wait_for_stopped || ptrace.is_some())
-                    {
-                        fn_type = ExitType::Stop;
-                    }
-                    if fn_type != ExitType::None {
-                        let signal = if options.keep_waitable_state {
-                            process_state.last_signal.as_ref().map(|siginfo| siginfo.signal)
-                        } else {
-                            process_state.last_signal.take().map(|siginfo| siginfo.signal)
-                        };
-                        if let Some(signal) = signal {
-                            if task_ref.thread_group().load_stopped() == StopState::GroupStopped
-                                && ptrace.as_ref().is_some_and(|ptrace| ptrace.is_seized())
-                                && event == PtraceEvent::None
-                            {
-                                event = PtraceEvent::Stop;
-                            }
-                            if signal == SIGKILL {
-                                fn_type = ExitType::Kill;
-                            }
-                            exit_status = match fn_type {
-                                ExitType::Stop => Some((
-                                    ExitStatus::Stop(signal, event),
-                                    process_state.base.leader.clone(),
-                                )),
-                                ExitType::Cont => Some((
-                                    ExitStatus::Continue(signal, event),
-                                    process_state.base.leader.clone(),
-                                )),
-                                ExitType::Kill => Some((
-                                    ExitStatus::Kill(signal),
-                                    process_state.base.leader.clone(),
-                                )),
-                                _ => None,
-                            };
-                        }
-                        // Clear the wait status of the ptrace, because we're
-                        // using the tg status instead.
-                        ptrace
-                            .as_mut()
-                            .map(|ptrace| ptrace.get_last_signal(options.keep_waitable_state));
-                    }
-                }
-                if exit_status.is_none() {
-                    if let Some(ptrace) = task_state.ptrace.as_mut() {
-                        // The information for the task, if we were in a non-group stop.
-                        let mut fn_type = ExitType::None;
-                        let event = ptrace
-                            .event_data
-                            .as_ref()
-                            .map_or(PtraceEvent::None, |event| event.event);
-                        if task_stopped == StopState::Awake {
-                            fn_type = ExitType::Cont;
-                        }
-                        if task_stopped.is_stopping_or_stopped()
-                            || ptrace.stop_status == PtraceStatus::Listening
-                        {
-                            fn_type = ExitType::Stop;
-                        }
-                        if fn_type != ExitType::None {
-                            if let Some(signal) =
-                                ptrace.get_last_signal(options.keep_waitable_state)
-                            {
-                                if signal == SIGKILL {
-                                    fn_type = ExitType::Kill;
-                                }
-                                exit_status = match fn_type {
-                                    ExitType::Stop => Some((
-                                        ExitStatus::Stop(signal, event),
-                                        task_ref.tid.clone(),
-                                    )),
-                                    ExitType::Cont => Some((
-                                        ExitStatus::Continue(signal, event),
-                                        task_ref.tid.clone(),
-                                    )),
-                                    ExitType::Kill => {
-                                        Some((ExitStatus::Kill(signal), task_ref.tid.clone()))
-                                    }
-                                    _ => None,
-                                };
-                            }
-                        }
-                    }
-                }
-                if let Some((exit_status, pid)) = exit_status {
-                    return Some(WaitResult {
-                        pid,
-                        uid,
-                        zombie_state: ZombieState { exit_status, time_stats },
-                        exit_signal,
-                    });
-                }
-            }
-        }
-        None
-    }
-
     /// Attempts to send an unchecked signal to this thread group.
     ///
     /// - `current_task`: The task that is sending the signal.
@@ -2108,6 +1908,13 @@ impl ThreadGroup {
         self.pending_signals.lock().is_any_allowed_by_mask(mask)
     }
 
+    pub fn has_signal_queued_where<F>(&self, predicate: F) -> bool
+    where
+        F: Fn(&SignalInfo) -> bool,
+    {
+        self.pending_signals.lock().iter().any(predicate)
+    }
+
     pub fn take_next_signal_where<F>(&self, predicate: F) -> Option<SignalInfo>
     where
         F: Fn(&SignalInfo) -> bool,
@@ -2116,6 +1923,16 @@ impl ThreadGroup {
         let r = signals.take_next_where(predicate);
         self.has_pending_signals.write(&signals).store(!signals.is_empty(), Ordering::Relaxed);
         r
+    }
+
+    /// Removes all queued process-directed signals for which `predicate` returns `true`.
+    pub fn remove_signals_where<F>(&self, predicate: F)
+    where
+        F: Fn(&SignalInfo) -> bool,
+    {
+        let mut signals = self.pending_signals.lock();
+        signals.remove_where(predicate);
+        self.has_pending_signals.write(&signals).store(!signals.is_empty(), Ordering::Relaxed);
     }
 
     /// Drive this `ThreadGroup` to exit, allowing it time to handle SIGTERM before sending SIGKILL.
@@ -2243,6 +2060,15 @@ pub enum WaitableChildResult {
 
 #[apply(state_implementation!)]
 impl ThreadGroupMutableState<Base = ThreadGroup> {
+    /// Returns the controlling terminal device ID of this thread group, including for unreaped
+    /// non-leader zombies whose `ControllingTerminal` reference was released on exit.
+    pub fn controlling_terminal_device(&self) -> Option<DeviceId> {
+        self.controlling_terminal
+            .as_ref()
+            .map(|t| t.terminal.device())
+            .or(self.zombie_controlling_terminal_device)
+    }
+
     /// Returns the parent-death [`Signal`] configured for this process via `PR_SET_PDEATHSIG`.
     pub fn parent_death_signal(&self) -> Option<Signal> {
         self.parent_death_signal
@@ -2611,28 +2437,17 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         non_running
     }
 
-    /// Set the stop status of the process.  If you pass |siginfo| of |None|,
-    /// does not update the signal.  If |finalize_only| is set, will check that
-    /// the set will be a finalize (Stopping -> Stopped or Stopped -> Stopped)
-    /// before executing it.
+    /// Transitions this [`ThreadGroup`] to `new_stopped` without releasing `self`.
     ///
-    /// Returns the latest stop state after any changes.
-    pub fn set_stopped(
-        mut self,
+    /// Returns the resulting stop state and the parent [`ThreadGroup`] to notify via
+    /// [`ThreadGroupParent::notify_child_status`] after all locks are dropped.
+    pub(crate) fn update_stopped_state(
+        &mut self,
         new_stopped: StopState,
         siginfo: Option<SignalInfo>,
-        finalize_only: bool,
-    ) -> StopState {
-        if let Some(stopped) = self.base.check_stopped_state(new_stopped, finalize_only) {
-            return stopped;
-        }
-
-        // Thread groups don't transition to group stop if they are waking, because waking
-        // means something told it to wake up (like a SIGCONT) but hasn't finished yet.
-        if self.base.load_stopped() == StopState::Waking
-            && (new_stopped == StopState::GroupStopping || new_stopped == StopState::GroupStopped)
-        {
-            return self.base.load_stopped();
+    ) -> (StopState, Option<ThreadGroupParent>) {
+        if let Some(stopped) = self.base.check_stopped_state(new_stopped) {
+            return (stopped, None);
         }
 
         // TODO(https://g-issues.fuchsia.dev/issues/306438676): When thread
@@ -2652,22 +2467,153 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         };
 
         let parent = (!new_stopped.is_in_progress()).then(|| self.parent.clone()).flatten();
+        (new_stopped, parent)
+    }
 
+    /// Finalizes an in-progress group stop into [`StopState::GroupStopped`] without releasing
+    /// `self`.
+    ///
+    /// If the [`ThreadGroup`] is no longer stopping or stopped, returns the current stop state
+    /// unchanged. Otherwise returns the resulting stop state and any parent [`ThreadGroup`] to
+    /// notify after all locks are dropped.
+    pub(crate) fn finalize_group_stop(&mut self) -> (StopState, Option<ThreadGroupParent>) {
+        let stopped = self.base.load_stopped();
+        if !stopped.is_stopping_or_stopped() {
+            return (stopped, None);
+        }
+        self.update_stopped_state(StopState::GroupStopped, /* siginfo = */ None)
+    }
+
+    /// Sets the stop status of the process. If `siginfo` is `None`, does not update the signal.
+    ///
+    /// Returns the latest stop state after any changes.
+    pub fn set_stopped(mut self, new_stopped: StopState, siginfo: Option<SignalInfo>) -> StopState {
+        let (stopped, parent) = self.update_stopped_state(new_stopped, siginfo);
         // Drop the lock before locking the parent.
         std::mem::drop(self);
         if let Some(parent) = parent {
-            let parent = parent.upgrade();
-            parent
-                .write()
-                .lifecycle_waiters
-                .notify_value(ThreadGroupLifecycleWaitValue::ChildStatus);
+            parent.notify_child_status();
         }
-
-        new_stopped
+        stopped
     }
 
     fn store_stopped(&mut self, state: StopState) {
         self.base.stop_state.write(self).store(state, Ordering::Relaxed)
+    }
+
+    /// Transitions this [`ThreadGroup`] to [`StopState::GroupStopping`] and interrupts all running
+    /// member [`Task`]s (except `stopping_task`) so they enter group-stop, unless a concurrent
+    /// `SIGCONT` arrived after `stopping_task` dequeued the stop signal.
+    #[allow(unused_mut, reason = "needed for some but not all macro outputs")]
+    pub(crate) fn stop_tasks(mut self, stopping_task: &Task, siginfo: SignalInfo) {
+        if !stopping_task.stop_in_delivery.swap(false, Ordering::AcqRel)
+            || self.base.check_stopped_state(StopState::GroupStopping).is_some()
+        {
+            return;
+        }
+        let tasks: Vec<Arc<Task>> = self
+            .tasks()
+            .into_iter()
+            .filter(|task| task.is_running() && task.tid != stopping_task.tid)
+            .collect();
+
+        self.set_stopped(StopState::GroupStopping, Some(siginfo));
+        for task in tasks {
+            task.interrupt();
+        }
+    }
+
+    fn conflicting_signal_predicate(signal: Signal) -> Option<fn(&SignalInfo) -> bool> {
+        // From <https://man7.org/linux/man-pages/man7/signal.7.html>:
+        //
+        //   If SIGCONT is sent to a process that is stopped, it wakes the process up. If any
+        //   of the stop signals (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU) are pending for the
+        //   process, they are discarded. Conversely, if any of the stop signals is sent to a
+        //   process, any pending SIGCONT signals are discarded.
+        if signal == SIGCONT {
+            Some(|info| matches!(info.signal, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU))
+        } else if matches!(signal, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
+            Some(|info| info.signal == SIGCONT)
+        } else {
+            None
+        }
+    }
+
+    fn clear_conflicting_signals_on_task(
+        task: &Task,
+        task_state: &mut TaskWriteGuard<'_>,
+        signal: Signal,
+    ) {
+        if let Some(predicate) = Self::conflicting_signal_predicate(signal) {
+            task_state.remove_signals_where(predicate);
+        }
+        if signal == SIGCONT {
+            task.stop_in_delivery.store(false, Ordering::Release);
+        }
+    }
+
+    fn wake_task_if_group_stopped(task_state: &mut TaskWriteGuard<'_>) -> bool {
+        let stopped = task_state.base.load_stopped();
+        if matches!(stopped, StopState::GroupStopping | StopState::GroupStopped) {
+            task_state.set_stopped(
+                StopState::Waking,
+                /* siginfo = */ None,
+                /* current_task = */ None,
+                /* event = */ None,
+            );
+            !task_state.is_ptrace_listening()
+        } else {
+            false
+        }
+    }
+
+    fn for_each_running_task(&self, mut f: impl FnMut(&Task, &mut TaskWriteGuard<'_>)) {
+        for task in self.tasks() {
+            if task.is_running() {
+                f(&task, &mut task.write());
+            }
+        }
+    }
+
+    #[allow(unused_mut, reason = "needed for some but not all macro outputs")]
+    fn finish_sigcont_stop_state(mut self, woke_any: bool, signal_info: SignalInfo) {
+        if woke_any {
+            self.set_stopped(StopState::Waking, Some(signal_info));
+        } else if self.base.load_stopped().is_stopping_or_stopped() {
+            self.set_stopped(StopState::Awake, Some(signal_info));
+        }
+    }
+
+    /// Clears pending signals across this [`ThreadGroup`] and all running member [`Task`]s that
+    /// conflict with `signal` (`SIGCONT` when `signal` is a stop signal, or stop signals when
+    /// `signal` is `SIGCONT`).
+    pub(crate) fn clear_conflicting_stop_or_continue_signals(&self, signal: Signal) {
+        let Some(predicate) = Self::conflicting_signal_predicate(signal) else {
+            return;
+        };
+
+        self.base.remove_signals_where(predicate);
+        self.for_each_running_task(|task, task_state| {
+            Self::clear_conflicting_signals_on_task(task, task_state, signal);
+        });
+    }
+
+    /// Discards pending stop signals (unless `SIGCONT` is ignored), wakes group-stopped member
+    /// [`Task`]s, and updates this [`ThreadGroup`]'s stop state.
+    #[allow(unused_mut, reason = "needed for some but not all macro outputs")]
+    pub(crate) fn wake_for_sigcont(mut self, signal_info: SignalInfo) {
+        if self.base.ignores_signal(&signal_info) {
+            return;
+        }
+        if let Some(predicate) = Self::conflicting_signal_predicate(SIGCONT) {
+            self.base.remove_signals_where(predicate);
+        }
+        let mut woke_any = false;
+        self.for_each_running_task(|task, task_state| {
+            Self::clear_conflicting_signals_on_task(task, task_state, SIGCONT);
+            woke_any |= Self::wake_task_if_group_stopped(task_state);
+        });
+        self.finish_sigcont_stop_state(woke_any, signal_info);
     }
 
     /// Synchronously transitions this [`ThreadGroup`] to [`ThreadGroupLifecycleState::Exiting`] and marks
@@ -2680,12 +2626,7 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
     /// wake and return to userspace, and that `process_mrelease(2)` cannot observe a non-running
     /// [`ThreadGroup`] before all member tasks are marked [`TaskFlags::EXITED`].
     #[allow(unused_mut, reason = "needed for some but not all macro outputs")]
-    fn terminate_tasks(
-        mut self,
-        exit_status: ExitStatus,
-        wake_signal: SignalInfo,
-        excluded_tid: Option<&Pid>,
-    ) {
+    fn terminate_tasks(mut self, exit_status: ExitStatus, excluded_tid: Option<&Pid>) {
         if self.base.is_running() {
             self.set_exiting(exit_status.clone());
         }
@@ -2704,11 +2645,7 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
             task_state.force_wake_for_exit();
         }
 
-        self.set_stopped(
-            StopState::ForceWaking,
-            Some(wake_signal),
-            /* finalize_only = */ false,
-        );
+        self.set_stopped(StopState::ForceWaking, /* siginfo = */ None);
 
         for task in tasks {
             task.interrupt();
@@ -2718,29 +2655,31 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
     #[allow(unused_mut, reason = "needed for some but not all macro outputs")]
     pub(crate) fn force_exit_for_sigkill(mut self, signal_info: SignalInfo) {
         let exit_status = ExitStatus::Kill(signal_info.signal);
-        self.terminate_tasks(exit_status, signal_info, /* excluded_tid = */ None);
+        self.terminate_tasks(exit_status, /* excluded_tid = */ None);
     }
 
     /// Sends the signal `signal_info` to this thread group.
     #[allow(unused_mut, reason = "needed for some but not all macro outputs")]
     pub fn send_signal(mut self, signal_info: SignalInfo) {
+        let any_task_ptraced = self
+            .tasks
+            .iter()
+            .filter_map(|info| info.tid.get_task().ok())
+            .any(|task| task.is_running() && task.read().is_ptraced());
         let ignores_signal = self.base.ignores_signal(&signal_info);
-        if ignores_signal
-            && (signal_info.signal == SIGKILL
-                || !self
-                    .tasks
-                    .iter()
-                    .filter_map(|info| info.tid.get_task().ok())
-                    .any(|task| task.is_running() && task.read().is_ptraced()))
-        {
+        if ignores_signal && (signal_info.signal == SIGKILL || !any_task_ptraced) {
             return;
         }
 
-        // TODO(https://fxbug.dev/573607334): Immediately transition the thread group to Exiting
-        // for other unblocked default-fatal signals (DeliveryAction::Terminate when not ptraced).
         if signal_info.signal == SIGKILL {
             self.force_exit_for_sigkill(signal_info);
             return;
+        }
+
+        if !ignores_signal {
+            if let Some(predicate) = Self::conflicting_signal_predicate(signal_info.signal) {
+                self.base.remove_signals_where(predicate);
+            }
         }
 
         let sigaction = self.base.signal_actions.get(signal_info.signal);
@@ -2752,6 +2691,7 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
         // saved mask, as it can be accepted later (see the `SigtimedwaitTest.IgnoredUnmaskedSignal`
         // gvisor test), or when a task is ptraced, for the signal-delivery-stop.
         let queue_on_group = action != DeliveryAction::Ignore
+            || any_task_ptraced
             || self
                 .tasks
                 .iter()
@@ -2761,66 +2701,75 @@ impl ThreadGroupMutableState<Base = ThreadGroup> {
                     let task_state = task.read();
                     task_state.is_signal_masked(signal_info.signal)
                         || task_state.is_signal_masked_by_saved_mask(signal_info.signal)
-                        || task_state.is_ptraced()
                 });
 
-        if queue_on_group {
+        let enqueued = if queue_on_group {
             let mut pending_signals = self.base.pending_signals.lock();
-            pending_signals.enqueue(signal_info.clone());
-            self.base.has_pending_signals.write(&pending_signals).store(true, Ordering::Relaxed);
-        }
+            let enqueued = pending_signals.enqueue(signal_info.clone());
+            self.base
+                .has_pending_signals
+                .write(&pending_signals)
+                .store(!pending_signals.is_empty(), Ordering::Relaxed);
+            enqueued
+        } else {
+            false
+        };
 
-        let tasks: Vec<Pid> = self.tasks.iter().map(|info| info.tid.clone()).collect();
-
-        // Set state to waking before interrupting any tasks.
-        if signal_info.signal == SIGCONT {
-            self.set_stopped(
-                StopState::Waking,
-                Some(signal_info.clone()),
-                /* finalize_only = */ false,
-            );
-        }
-
-        let mut has_interrupted_task = false;
-        for task in tasks.iter().flat_map(|pid| pid.get_task().ok()) {
-            if !task.is_running() {
-                continue;
-            }
-
+        let tasks: Vec<Arc<Task>> =
+            self.tasks().into_iter().filter(|task| task.is_running()).collect();
+        let mut task_to_interrupt = None;
+        let mut interrupt_all = false;
+        let mut woke_any = false;
+        for task in &tasks {
             let mut task_state = task.write();
 
-            if signal_info.signal == SIGCONT {
-                task_state.set_stopped(
-                    StopState::Waking,
-                    /* siginfo = */ None,
-                    /* current_task = */ None,
-                    /* event = */ None,
-                );
+            if !ignores_signal {
+                Self::clear_conflicting_signals_on_task(task, &mut task_state, signal_info.signal);
+                if signal_info.signal == SIGCONT {
+                    woke_any |= Self::wake_task_if_group_stopped(&mut task_state);
+                }
             }
 
             let is_masked = task_state.is_signal_masked(signal_info.signal);
             let was_masked = task_state.is_signal_masked_by_saved_mask(signal_info.signal);
 
-            let is_queued = (!ignores_signal
-                && (action != DeliveryAction::Ignore || is_masked || was_masked))
-                || task_state.is_ptraced();
+            let is_queued = enqueued
+                && ((!ignores_signal
+                    && (action != DeliveryAction::Ignore || is_masked || was_masked))
+                    || task_state.is_ptraced());
 
             if is_queued {
                 task_state.notify_signal_waiters(&signal_info.signal);
 
                 let is_fatal = action == DeliveryAction::Terminate && !task_state.is_ptraced();
 
-                if !is_masked
-                    && action.must_interrupt(Some(sigaction))
-                    && (!has_interrupted_task || is_fatal)
-                {
-                    // Interrupt every task if the action is fatal, or only one task for catchable
-                    // signals.
-                    drop(task_state);
-                    task.interrupt();
-                    has_interrupted_task = true;
+                if !is_masked && action.must_interrupt(Some(sigaction)) {
+                    if is_fatal {
+                        interrupt_all = true;
+                    } else if task_to_interrupt.is_none() && !task_state.run_state().is_killable() {
+                        task_to_interrupt = Some(Arc::clone(task));
+                    }
                 }
             }
+        }
+
+        // Transition the thread group to `Waking` after marking all member tasks as `Waking`
+        // under `self` so no woken sibling thread can observe a `GroupStopped` task state
+        // after another sibling has already finalized the thread group to `Awake`. If no task
+        // was group-stopped while the group was stopping/stopped, finalize straight to `Awake`
+        // so the group cannot wedge in `Waking` with no waking thread.
+        if !ignores_signal && signal_info.signal == SIGCONT {
+            self.finish_sigcont_stop_state(woke_any, signal_info);
+        } else {
+            drop(self);
+        }
+
+        if interrupt_all {
+            for task in tasks {
+                task.interrupt();
+            }
+        } else if let Some(task) = task_to_interrupt {
+            task.interrupt();
         }
     }
 }
@@ -2832,7 +2781,6 @@ mod test {
     use crate::signals::{dequeue_signal, send_signal};
     use crate::testing::*;
     use starnix_syscalls::SUCCESS;
-    use starnix_uapi::signals::SIGSTOP;
     use starnix_uapi::user_address::{UserAddress, UserRef};
     use starnix_uapi::{
         CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, PTRACE_CONT, PTRACE_KILL, PTRACE_O_EXITKILL,
@@ -3068,7 +3016,7 @@ mod test {
             // When `init` is ptraced, `SIGSTOP` is still queued so the tracer can observe
             // signal-delivery-stop, and is ignored if delivered after detach.
             current_task.write().set_stopped(StopState::Awake, None, None, None);
-            current_task.thread_group().set_stopped(StopState::Awake, None, false);
+            current_task.thread_group().set_stopped(StopState::Awake, None);
             assert_eq!(
                 current_task.thread_group().send_signal_unchecked(current_task, SIGSTOP.into()),
                 Ok(())
@@ -3493,7 +3441,7 @@ mod test {
             let child = parent.clone_task_for_test(0, Some(SIGCHLD));
             child.thread_group().setpgid(&child, &child, &child.pid).expect("setpgid");
 
-            child.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            child.thread_group().set_stopped(StopState::GroupStopped, None);
             assert_eq!(child.thread_group().load_stopped(), StopState::GroupStopped);
             assert!(!child.read().has_signal_pending(SIGHUP));
 
@@ -3514,7 +3462,7 @@ mod test {
             let leaf = middle.clone_task_for_test(0, Some(SIGCHLD));
             leaf.thread_group().setpgid(&leaf, &leaf, &leaf.pid).expect("setpgid");
 
-            leaf.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            leaf.thread_group().set_stopped(StopState::GroupStopped, None);
             assert_eq!(leaf.thread_group().load_stopped(), StopState::GroupStopped);
             assert!(!leaf.read().has_signal_pending(SIGHUP));
 
@@ -3644,7 +3592,7 @@ mod test {
             assert!(!child_pgid_entry.has_stopped_jobs(&scope));
 
             // Set stopped state on child thread group.
-            child.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            child.thread_group().set_stopped(StopState::GroupStopped, None);
             assert!(child_pgid_entry.has_stopped_jobs(&scope));
 
             // Verify kill_orphaned_pgrp delivers SIGHUP and SIGCONT.
@@ -3819,7 +3767,7 @@ mod test {
             assert!(!c1_pgid_entry.will_become_orphaned_pgrp(&scope, None));
 
             // Mark C1 as stopped. C2 and C3 remain running.
-            c1.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            c1.thread_group().set_stopped(StopState::GroupStopped, None);
             assert!(c1_pgid_entry.has_stopped_jobs(&scope));
 
             // When leader exits (ignored_tg = leader.thread_group()):
@@ -3872,7 +3820,7 @@ mod test {
             let scope = RcuReadScope::new();
 
             // Mark C1 as stopped.
-            c1.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            c1.thread_group().set_stopped(StopState::GroupStopped, None);
 
             // Simulate leader exiting (ignored_tg = leader.thread_group()).
             // C1's parent is leader (exiting).
@@ -3913,7 +3861,7 @@ mod test {
             assert_eq!(leader.thread_group().setpgid(&leader, &c2, &c1.pid), Ok(()));
 
             // Mark C1 as stopped.
-            c1.thread_group().set_stopped(StopState::GroupStopped, None, false);
+            c1.thread_group().set_stopped(StopState::GroupStopped, None);
 
             // Set C1's parent to None (as if C1 was reparented to init) and remove C1 from leader's children.
             leader.thread_group().write().children.remove(&c1.tid);

@@ -10,13 +10,14 @@ pub(crate) use crate::checker::{
 };
 pub(crate) use crate::md_element::DocContext;
 pub(crate) use crate::path_ext::DocPathExt;
+use crate::path_ext::normalize_path;
 use anyhow::{Context, Result, bail};
 use argh::FromArgs;
 use glob::glob;
 use serde_yaml::Value;
 use std::fs::{self, File};
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 mod checker;
 mod code_block_checker;
 mod include_checker;
@@ -88,8 +89,12 @@ pub(crate) mod mock_path_helper_module {
     }
 }
 
+/// Path on the published site where generated reference docs live. These docs are not part of
+/// the source tree, so links under this path are treated as published-site links.
+pub(crate) const DEFAULT_REFERENCE_FOLDER: &str = "/reference";
+
 /// Check the markdown documentation using a variety of checks.
-#[derive(Debug, FromArgs)]
+#[derive(Clone, Debug, FromArgs)]
 pub struct DocCheckerArgs {
     /// path to the root of the checkout of the project.
     #[argh(option, default = r#"PathBuf::from(".")"#)]
@@ -129,6 +134,11 @@ pub struct DocCheckerArgs {
     /// allow unreferenced hidden files (files starting with _) from being published.
     #[argh(switch)]
     pub allow_unreferenced_hidden: bool,
+
+    /// path on the published site where generated reference docs live.
+    /// Defaults to '/reference'.
+    #[argh(option, default = "PathBuf::from(DEFAULT_REFERENCE_FOLDER)")]
+    pub reference_folder: PathBuf,
 }
 
 #[fuchsia::main]
@@ -193,6 +203,14 @@ async fn main() -> Result<()> {
 /// The actual main function. It is refactored like this to make it easier
 /// to run it in a unit test.
 async fn do_main(opt: &DocCheckerArgs) -> Result<Option<Vec<DocCheckError>>> {
+    // Checkers compare root-relative paths component-wise, so make the reference folder
+    // root-relative and normalized once here (e.g. "reference/" becomes "/reference").
+    let reference_folder = normalize_path(&Path::new("/").join(&opt.reference_folder))
+        .with_context(|| format!("invalid reference folder: {:?}", opt.reference_folder))?;
+    if reference_folder == Path::new("/") {
+        bail!("invalid reference folder {:?}: must not be root '/'", opt.reference_folder);
+    }
+    let opt = &DocCheckerArgs { reference_folder, ..opt.clone() };
     let root_dir = &opt.root;
     let docs_project = &opt.project;
     let docs_dir = root_dir.join(&opt.docs_folder);
@@ -369,6 +387,7 @@ mod test {
             reference_docs_root: None,
             skip_link_check: false,
             allow_unreferenced_hidden: false,
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
         };
 
         // Bazel host_test runs in doc_checker_bin_test.runtime_dir, where
@@ -525,6 +544,83 @@ mod test {
                 bail!("Expected at least one more error. Missing error(s): {:?}", expected_errors);
             }
         }
+        Ok(())
+    }
+
+    #[fuchsia::test]
+    async fn test_do_main_reference_folder() -> Result<()> {
+        let temp_root = std::env::temp_dir()
+            .join(format!("doc_checker_main_ref_folder_{}", std::process::id()));
+        let docs_dir = temp_root.join("docs");
+        // Distinct from root/api_docs so post_check must resolve via reference_docs_root.
+        let ref_dir = temp_root.join("generated_ref");
+        std::fs::create_dir_all(&docs_dir)?;
+        std::fs::create_dir_all(&ref_dir)?;
+
+        std::fs::write(
+            docs_dir.join("_toc.yaml"),
+            "toc:\n- path: /docs/README.md\n  title: Docs\n- path: /api_docs/generated.md\n  title: API\n- include: /api_docs/_toc.yaml\n",
+        )?;
+        std::fs::write(
+            docs_dir.join("README.md"),
+            "# Docs\n\nSee [API](/api_docs/missing.md#sec).\n",
+        )?;
+        std::fs::write(
+            ref_dir.join("_toc.yaml"),
+            "toc:\n- path: /api_docs/generated.md\n  title: API\n",
+        )?;
+        std::fs::write(ref_dir.join("generated.md"), "# Generated\n")?;
+
+        let custom_opt = DocCheckerArgs {
+            root: temp_root.clone(),
+            project: "fuchsia".to_string(),
+            docs_folder: PathBuf::from("docs"),
+            check_external_links: false,
+            json: false,
+            allow_fuchsia_src_links: false,
+            reference_docs_root: Some(ref_dir),
+            skip_link_check: false,
+            allow_unreferenced_hidden: false,
+            // Relative path with trailing slash must normalize to "/api_docs".
+            reference_folder: PathBuf::from("api_docs/"),
+        };
+        let custom_result = do_main(&custom_opt).await;
+
+        let default_opt = DocCheckerArgs {
+            reference_folder: PathBuf::from(DEFAULT_REFERENCE_FOLDER),
+            ..custom_opt.clone()
+        };
+        let default_result = do_main(&default_opt).await;
+
+        let root_opt =
+            DocCheckerArgs { reference_folder: PathBuf::from("/"), ..custom_opt.clone() };
+        let root_err = do_main(&root_opt).await;
+
+        let escape_opt =
+            DocCheckerArgs { reference_folder: PathBuf::from("../outside"), ..custom_opt };
+        let escape_err = do_main(&escape_opt).await;
+
+        std::fs::remove_dir_all(&temp_root)?;
+
+        assert_eq!(custom_result?, None);
+
+        let default_errors = default_result?.expect("default /reference must reject /api_docs");
+        assert!(
+            default_errors.iter().any(|e| {
+                e.message
+                    .contains("in-tree link to /api_docs/generated.md must be in '/docs' or '/reference' directory")
+            }),
+            "expected _toc.yaml error for unconfigured /api_docs, got {default_errors:?}"
+        );
+        assert!(
+            default_errors.iter().any(|e| {
+                e.message.contains("in-tree link to /api_docs/missing.md#sec could not be found")
+            }),
+            "expected markdown link error for unconfigured /api_docs, got {default_errors:?}"
+        );
+
+        assert!(root_err.is_err());
+        assert!(escape_err.is_err());
         Ok(())
     }
 }

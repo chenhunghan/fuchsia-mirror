@@ -10,14 +10,13 @@
 #include <lib/fit/function.h>
 #include <lib/fit/result.h>
 #include <lib/stdcompat/span.h>
+#include <lib/vmo_store/vmo_store.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <stdint.h>
 
 #include <vector>
 
 #include <fbl/mutex.h>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace radar {
 

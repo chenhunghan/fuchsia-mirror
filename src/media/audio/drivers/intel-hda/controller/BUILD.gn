@@ -78,7 +78,7 @@ source_set("src") {
   ]
   deps = [
     ":ihda_controller_bind",
-    "//sdk/banjo/fuchsia.hardware.intelhda.codec:fuchsia.hardware.intelhda.codec_banjo_cpp",
+    "//sdk/lib/memory_barriers",
     "//src/devices/lib/acpi",
     "//src/devices/lib/driver",
     "//src/media/audio/drivers/lib/audio-driver-proto",
@@ -86,11 +86,12 @@ source_set("src") {
   ]
   public_deps = [
     "//sdk/fidl/fuchsia.hardware.intel.hda:fuchsia.hardware.intel.hda_cpp",
+    "//sdk/lib/component/outgoing/cpp",
     "//sdk/lib/driver/mmio/cpp",
+    "//sdk/lib/driver/pci/cpp",
     "//sdk/lib/fit",
     "//src/devices/bind/fuchsia:fuchsia_cpp",
     "//src/devices/bind/fuchsia.audio.intelhda:fuchsia.audio.intelhda_cpp",
-    "//src/devices/pci/lib/device-protocol-pci",
     "//src/lib/ddk",
     "//src/lib/ddktl",
     "//src/media/audio/drivers/lib/intel-hda",
@@ -132,7 +133,6 @@ fuchsia_cc_driver("intel-hda-driver") {
 fuchsia_driver_component("intel-hda") {
   component_name = "intel-hda"
   deps = [ ":intel-hda-driver" ]
-  info = "meta/intel-hda-info.json"
   dml_label = ":intel-hda-dml"
 }
 

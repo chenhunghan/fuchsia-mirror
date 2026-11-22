@@ -977,7 +977,7 @@ mod tests {
     use bt_rfcomm::ServerChannel;
     use bt_rfcomm::profile::build_rfcomm_protocol;
     use core::task::Poll;
-    use fidl_fuchsia_bluetooth_bredr::{ProfileMarker, ProfileRequestStream, ScoErrorCode};
+    use fidl_fuchsia_bluetooth_bredr::ScoErrorCode;
     use fidl_fuchsia_bluetooth_hfp::{
         CallDirection, CallRequest, CallRequestStream, CallState, NextCall, PeerHandlerMarker,
         PeerHandlerRequest, PeerHandlerRequestStream, PeerHandlerWatchNextCallResponder,
@@ -993,6 +993,7 @@ mod tests {
     use std::collections::HashSet;
     use std::pin::pin;
     use test_case::test_case;
+    use test_profile_server::{ConnectChannel, TestProfileServer};
 
     use crate::features::{AgFeatures, HfFeatures};
     use crate::peer::indicators::{AgIndicatorsReporting, HfIndicators};
@@ -1067,12 +1068,12 @@ mod tests {
         PeerTask,
         Sender<PeerRequest>,
         mpsc::Receiver<PeerRequest>,
-        ProfileRequestStream,
+        TestProfileServer,
         audio::TestControl,
         fidl_a2dp::ControllerRequestStream,
     ) {
         let (sender, receiver) = mpsc::channel(1);
-        let (proxy, stream) = fidl::endpoints::create_proxy_and_stream::<ProfileMarker>();
+        let (proxy, stream) = TestProfileServer::create_endpoints();
         let (a2dp_control_proxy, a2dp_request_stream) =
             fidl::endpoints::create_proxy_and_stream::<fidl_a2dp::ControllerMarker>();
         let test_audio = audio::TestControl::default();
@@ -1113,7 +1114,7 @@ mod tests {
         PeerTask,
         Sender<PeerRequest>,
         mpsc::Receiver<PeerRequest>,
-        ProfileRequestStream,
+        TestProfileServer,
         fidl_a2dp::ControllerRequestStream,
     ) {
         let (task, sender, receiver, request_stream, _, a2dp_request_stream) =
@@ -1857,24 +1858,13 @@ mod tests {
         exec.run_singlethreaded(sender.send(event.into())).expect("Send to succeed");
 
         // Get a connection request on the `profile` stream.
-        let result = exec.run_until_stalled(&mut profile.next());
-        let _channel = match result {
-            Poll::Ready(Some(Ok(bredr::ProfileRequest::Connect {
-                connection:
-                    bredr::ConnectParameters::Rfcomm(bredr::RfcommParameters {
-                        channel: Some(sc), ..
-                    }),
-                responder,
-                ..
-            }))) => {
-                assert_eq!(sc, u8::from(random_channel_number));
-                let (local, remote) = create_test_channels(transport);
-                let local = local.try_into().unwrap();
-                responder.send(Ok(local)).unwrap();
-
-                remote
-            }
-            x => panic!("unexpected result: {:?}", x),
+        let _channel = {
+            let mut connect_fut = pin!(profile.expect_connect_request());
+            exec.run_until_stalled(&mut connect_fut)
+                .expect("connect request ready")
+                .assert_peer(PeerId(1))
+                .assert_channel(ConnectChannel::RfcommChannel(u8::from(random_channel_number)))
+                .accept_with_transport(transport)
         };
 
         // Disable auto connect behavior
@@ -2005,7 +1995,7 @@ mod tests {
     }
 
     async fn expect_sco_connection(
-        profile_requests: &mut ProfileRequestStream,
+        profile_requests: &mut TestProfileServer,
         expected_initiator: bool,
         result: Result<(), ScoErrorCode>,
     ) -> Option<bredr::ScoConnectionRequestStream> {
@@ -2022,7 +2012,7 @@ mod tests {
     }
 
     async fn expect_sco_connection_with_parameters(
-        profile_requests: &mut ProfileRequestStream,
+        profile_requests: &mut TestProfileServer,
         expected_initiator: bool,
         accept_parameter_sets: &Vec<bredr::HfpParameterSet>,
         result: Result<(), ScoErrorCode>,
@@ -2092,7 +2082,7 @@ mod tests {
     fn setup_audio(
         exec: &mut fasync::TestExecutor,
         peer: &mut PeerTask,
-        profile_requests: &mut ProfileRequestStream,
+        profile_requests: &mut TestProfileServer,
     ) -> bredr::ScoConnectionRequestStream {
         let codecs = peer.get_codecs();
         let sco_connector = peer.sco_connector.clone();

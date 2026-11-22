@@ -79,7 +79,7 @@ type MessageType = strict enum : byte {
 /// a DHCP transaction.
 /// All DHCP option values must have a length which can fit within a single byte, i.e. less than 256.
 /// Options for which there is no reasonable administrator-configurable value have been omitted
-/// from this xunion. The omitted options are:
+/// from this union. The omitted options are:
 /// * Pad - never has a value
 /// * End - never has a value
 /// * RequestedIpAddress - value always selected by the DHCP client.

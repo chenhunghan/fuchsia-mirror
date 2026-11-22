@@ -163,6 +163,7 @@ struct PowerElementConfiguration {
 
   PowerElement element;
   std::vector<PowerDependency> dependencies;
+  std::optional<uint8_t> initial_level;
 };
 
 }  // namespace fdf_power

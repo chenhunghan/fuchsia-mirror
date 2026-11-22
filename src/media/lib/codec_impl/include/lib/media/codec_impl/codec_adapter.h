@@ -6,11 +6,10 @@
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_ADAPTER_H_
 
 #include <fidl/fuchsia.media/cpp/fidl.h>
-#include <fidl/fuchsia.media/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 #include <fuchsia/media/cpp/fidl.h>
 #include <fuchsia/mediacodec/cpp/fidl.h>
-#include <lib/fidl/cpp/hlcpp_conversion.h>
 #include <lib/sysmem-version/sysmem-version.h>
 #include <lib/zx/thread.h>
 
@@ -157,13 +156,13 @@ class CodecAdapter {
   // time of failure match the initial format details specified during Codec
   // creation).
   //
-  // The core codec can copy the initial_input_format_details during this call
-  // (using fidl::Clone() or similar), but as is the custom with references,
-  // should not stash the passed-in reference.
-  //
-  // TODO(dustingreen): Re-visit the lifetime rule and required copy here, once
-  // more is nailed down re. exactly how the core codec relates to CodecImpl.
-  virtual void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) = 0;
+  // The core codec may retain the shared_ptr without copying the underlying
+  // FormatDetails.
+  virtual void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details);
+  // Deprecated HLCPP soft-transition overload; prefer the natural overload above.
+  // Override exactly one of this pair; overriding neither panics at runtime.
+  virtual void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details);
 
   // The default implementation silently accepts OFF.  On any other value, the
   // default implementation fails the codec.
@@ -174,6 +173,9 @@ class CodecAdapter {
   // or input, and CodecImpl will enforce consistency of BufferCollection
   // constraints and BufferCollectionInfo_2 with the SecureMemoryMode specified
   // during codec creation.
+  virtual void CoreCodecSetSecureMemoryMode(
+      CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode);
+  // Deprecated HLCPP soft-transition overload; prefer the natural overload above.
   virtual void CoreCodecSetSecureMemoryMode(
       CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode);
 
@@ -321,13 +323,14 @@ class CodecAdapter {
   // The return value is in the same sequence as the CoreCodecGetBufferCollectionConstraints3Result
   // constraints_version field.
   //
-  // This method must be overridden if CoreCodecGetBufferCollectionConstraints3 is overridden.
-  //
   // This method must be overridden if IsSupportsDynamicBuffers() is true.
   //
   // This can get called on any thread, but not on the same stack as an outbound call to CodecImpl.
   virtual uint64_t CoreCodecGetConstraintsVersion(CodecPort port) {
-    ZX_PANIC("must be overridden when IsSupportsDynamicBuffers");
+    if (IsSupportsDynamicBuffers()) {
+      ZX_PANIC("must be overridden when IsSupportsDynamicBuffers");
+    }
+    return 0;
   }
 
   // There are no VMO handles in the buffer_collection_info. Those are instead
@@ -451,7 +454,11 @@ class CodecAdapter {
   //
   // Only permitted between CoreCodecStartStream() and CoreCodecStopStream().
   virtual void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) = 0;
+      std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details);
+  // Deprecated HLCPP soft-transition overload; prefer the natural overload above.
+  // Override exactly one of this pair; overriding neither panics at runtime.
+  virtual void CoreCodecQueueInputFormatDetails(
+      const fuchsia::media::FormatDetails& per_stream_override_format_details);
 
   // Only permitted between CoreCodecStartStream() and CoreCodecStopStream().
   virtual void CoreCodecQueueInputPacket(const CodecPacket* packet) = 0;
@@ -733,8 +740,12 @@ class CodecAdapter {
   // format, so a core codec need not call onCoreCodecOutputFormatChange()
   // unless the format change is mid-stream (but calling before the first packet
   // is allowed and not harmful).
+  virtual fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
+      uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal);
+  // Deprecated HLCPP soft-transition method; prefer CoreCodecGetOutputFormat2 above.
+  // Override exactly one of this pair; overriding neither panics at runtime.
   virtual fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) = 0;
+      uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal);
 
   // CoreCodecMidStreamOutputBufferReConfigPrepare()
   //

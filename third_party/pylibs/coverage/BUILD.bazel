@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Third-party license metadata is Bazel-only; GN tracks licensing via README.fuchsia.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:Apache-2.0"],
+    license_text = "src/LICENSE.txt",
+)
+
+py_library(
+    name = "coverage",
+    srcs = [
+        "src/coverage/__init__.py",
+        "src/coverage/annotate.py",
+        "src/coverage/bytecode.py",
+        "src/coverage/cmdline.py",
+        "src/coverage/collector.py",
+        "src/coverage/config.py",
+        "src/coverage/context.py",
+        "src/coverage/control.py",
+        "src/coverage/core.py",
+        "src/coverage/data.py",
+        "src/coverage/debug.py",
+        "src/coverage/disposition.py",
+        "src/coverage/env.py",
+        "src/coverage/exceptions.py",
+        "src/coverage/execfile.py",
+        "src/coverage/files.py",
+        "src/coverage/html.py",
+        "src/coverage/inorout.py",
+        "src/coverage/jsonreport.py",
+        "src/coverage/lcovreport.py",
+        "src/coverage/misc.py",
+        "src/coverage/multiproc.py",
+        "src/coverage/numbits.py",
+        "src/coverage/parser.py",
+        "src/coverage/patch.py",
+        "src/coverage/phystokens.py",
+        "src/coverage/plugin.py",
+        "src/coverage/plugin_support.py",
+        "src/coverage/pth_file.py",
+        "src/coverage/python.py",
+        "src/coverage/pytracer.py",
+        "src/coverage/regions.py",
+        "src/coverage/report.py",
+        "src/coverage/report_core.py",
+        "src/coverage/results.py",
+        "src/coverage/sqldata.py",
+        "src/coverage/sqlitedb.py",
+        "src/coverage/sysmon.py",
+        "src/coverage/templite.py",
+        "src/coverage/tomlconfig.py",
+        "src/coverage/types.py",
+        "src/coverage/version.py",
+        "src/coverage/xmlreport.py",
+    ],
+    imports = ["src"],
+    # Bazel only registers a host Python toolchain; GN python_library is not gated on is_host.
+    target_compatible_with = HOST_OS_CONSTRAINTS,  # @bazel2gn:skip
+    visibility = ["//:__subpackages__"],
+)

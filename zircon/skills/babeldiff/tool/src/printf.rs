@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Formatted output on both sides: a C++ printf-family call
 //! (`fprintf(&outfile, "%#" PRIx64 "\n", x)`) and the Rust formatting macro
 //! that replaces it (`writeln!(outfile, "{:#x}", x)`), compared by what

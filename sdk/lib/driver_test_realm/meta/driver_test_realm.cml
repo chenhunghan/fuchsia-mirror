@@ -48,6 +48,10 @@
             path: "/realm_builder_exposed_dir/fuchsia.driver.registrar.DriverRegistrar",
         },
         {
+            protocol: "fuchsia.driver.token.NodeBusTopology",
+            path: "/realm_builder_exposed_dir/fuchsia.driver.token.NodeBusTopology",
+        },
+        {
             protocol: "fuchsia.inspect.InspectSink",
             path: "/realm_builder_exposed_dir/fuchsia.inspect.InspectSink",
         },
@@ -160,6 +164,7 @@
                 "fuchsia.driver.framework.NodeManager",
                 "fuchsia.driver.registrar.DriverRegistrar",
                 "fuchsia.driver.test.Realm",
+                "fuchsia.driver.token.NodeBusTopology",
                 "fuchsia.system.state.Administrator",
             ],
             from: "self",

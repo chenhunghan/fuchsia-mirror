@@ -8,167 +8,33 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_KERNEL_SPINLOCK_H_
 #define ZIRCON_KERNEL_INCLUDE_KERNEL_SPINLOCK_H_
 
-#include <lib/fxt/interned_string.h>
-#include <lib/lockup_detector.h>
+#include <assert.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <zircon/compiler.h>
 
-#include <arch/arch_ops.h>
 #include <arch/interrupt.h>
-#include <arch/spinlock.h>
-#include <fbl/enum_bits.h>
+#include <arch/ops.h>
+#include <kernel/cpu.h>
 #include <kernel/lockdep.h>
 #include <kernel/spin_tracing_config.h>
 #include <kernel/spin_tracing_storage.h>
+#include <ktl/atomic.h>
 
-enum class SpinLockOptions : uint32_t {
+enum class SpinLockOptions : uint8_t {
   None = 0,
 
   // Enable integration with the lockup_detector to monitor spinlock critical sections.
   //
   // See //zircon/kernel/lib/lockup_detector/README.md.
   Monitored = (1 << 0),
-  TraceDisabled = (1 << 1),
 };
-FBL_ENABLE_ENUM_BITS(SpinLockOptions)
 
-// Rust code uses its own implementation of SpinLockBase, in
-// //zircon/kernel/kernel/spinlock.rs, which places its fields at the same
-// offsets as this one (though it may be over-aligned, and so larger), so that a
-// lock may be acquired and released from either language, and must be kept in
-// sync with it.
 template <SpinLockOptions Options>
-class TA_CAP("mutex") SpinLockBase
-    : public spin_tracing::LockNameStorage<spin_tracing::LockType::kSpinlock,
-                                           kSchedulerLockSpinTracingEnabled> {
- public:
-  constexpr SpinLockBase() = default;
-  explicit SpinLockBase(const fxt::InternedString& lock_name_string_ref)
-      : LockNameStorage{lock_name_string_ref.id()} {}
-
-  // Acquire the spinlock.
-  //
-  // Interrupts must already be disabled.
-  void Acquire() TA_ACQ() {
-    static_assert(!kIsMonitored, "spinlock is monitored, use Acquire(const char* name) instead");
-    DEBUG_ASSERT(arch_ints_disabled());
-    DEBUG_ASSERT(!arch_spin_lock_held(&spinlock_));
-
-    if constexpr (kIsTraceDisabled) {
-      arch_spin_lock_non_instrumented(&spinlock_);
-    } else {
-      arch_spin_lock_trace_instrumented(&spinlock_, this->encoded_lock_id());
-    }
-  }
-  // See |Acquire| above.
-  //
-  // |name| is the name of the critical section protected by this spinlock and
-  // must have static lifetime.
-  void Acquire(const char* name) TA_ACQ() {
-    static_assert(kIsMonitored, "spinlock is unmonitored, use Acquire() instead");
-    DEBUG_ASSERT(arch_ints_disabled());
-    DEBUG_ASSERT(!arch_spin_lock_held(&spinlock_));
-    LOCKUP_BEGIN(name);
-    if constexpr (kIsTraceDisabled) {
-      arch_spin_lock_non_instrumented(&spinlock_);
-    } else {
-      arch_spin_lock_trace_instrumented(&spinlock_, this->encoded_lock_id());
-    }
-  }
-
-  // Attempt to acquire the spinlock without waiting.
-  //
-  // Interrupts must already be disabled.
-  //
-  // Returns false when the lock is acquired, and true when the lock is not
-  // acquired.
-  //
-  // TryAcquire operations are not permitted to fail spuriously, even on
-  // architectures with weak memory ordering.  If a TryAcquire operation fails,
-  // it must be because the lock was actually observed to be held by another
-  // thread during the attempt.
-  bool TryAcquire() TA_TRY_ACQ(false) {
-    static_assert(!kIsMonitored, "spinlock is monitored, use TryAcquire(const char* name) instead");
-    return arch_spin_trylock(&spinlock_);
-  }
-  // See |TryAcquire| above.
-  bool TryAcquire(const char* name) TA_TRY_ACQ(false) {
-    static_assert(kIsMonitored, "spinlock is unmonitored, use TryAcquire() instead");
-    bool failed_to_acquire = arch_spin_trylock(&spinlock_);
-    if (!failed_to_acquire) {
-      LOCKUP_BEGIN(name);
-    }
-    return failed_to_acquire;
-  }
-
-  // Release the spinlock
-  //
-  // Interrupts must already be disabled.
-  void Release() TA_REL() {
-    arch_spin_unlock(&spinlock_);
-    if constexpr (kIsMonitored) {
-      LOCKUP_END();
-    }
-  }
-
-  // Returns true if held by the calling CPU.
-  //
-  // Interrupts must be disabled before calling this method, otherwise it could return true when it
-  // should return false.
-  bool IsHeld() const {
-    DEBUG_ASSERT(arch_ints_disabled());
-    return arch_spin_lock_held(&spinlock_);
-  }
-
-  // Returns true if unlocked (i.e. not held by any CPU). Primarity useful for
-  // asserting that locks are not being accessed incorrectly in destructors and
-  // cleanup paths.
-  //
-  // Note that this predicate does not synchronize other memory operations (i.e.
-  // it has relaxed atomic semantics).
-  bool IsUnlocked() const { return arch_spin_lock_unlocked(&spinlock_); }
-
-  // Just like |Acquire|, but saves interrupt state and disables interrupts.
-  void AcquireIrqSave(interrupt_saved_state_t& state) TA_ACQ() {
-    state = arch_interrupt_save();
-    Acquire();
-  }
-  void AcquireIrqSave(interrupt_saved_state_t& state, const char* name) TA_ACQ() {
-    state = arch_interrupt_save();
-    Acquire(name);
-  }
-
-  // Just like |Release|, but restores interrupt state after unlocking.
-  void ReleaseIrqRestore(interrupt_saved_state_t state) TA_REL() {
-    Release();
-    arch_interrupt_restore(state);
-  }
-
-  void AssertHeld() const TA_ASSERT() { DEBUG_ASSERT(IsHeld()); }
-
-  // Returns which cpu currently holds the spin lock, or INVALID_CPU if not held.
-  cpu_num_t HolderCpu() const { return arch_spin_lock_holder_cpu(&spinlock_); }
-
-  // SpinLocks cannot be copied or moved.
-  SpinLockBase(const SpinLockBase& am) = delete;
-  SpinLockBase& operator=(const SpinLockBase& am) = delete;
-  SpinLockBase(SpinLockBase&& c) = delete;
-  SpinLockBase& operator=(SpinLockBase&& c) = delete;
-
- private:
-  static constexpr bool kIsMonitored =
-      (Options & SpinLockOptions::Monitored) != SpinLockOptions::None;
-
-  static constexpr bool kIsTraceDisabled =
-      !kSchedulerLockSpinTracingEnabled ||
-      (Options & SpinLockOptions::TraceDisabled) != SpinLockOptions::None;
-
-  arch_spin_lock_t spinlock_;
-};
+class TA_CAP("mutex") SpinLockBase;
 
 using SpinLock = SpinLockBase<SpinLockOptions::None>;
 
-// MonitoredSpinLock in a SpinLock variant that's integrated with the lockup_detector.
+// MonitoredSpinLock is a SpinLock variant that's integrated with the lockup_detector.
 //
 // When used with |Guard|, the last argument passed to Guard's constructor should be a const char*
 // C-string with static lifetime that describes the critical section protected by the guard.
@@ -183,7 +49,128 @@ using SpinLock = SpinLockBase<SpinLockOptions::None>;
 // }
 //
 using MonitoredSpinLock = SpinLockBase<SpinLockOptions::Monitored>;
-using TraceDisabledSpinLock = SpinLockBase<SpinLockOptions::TraceDisabled>;
+
+// Rust implementations of SpinLockBase's methods (see kernel/spinlock.rs); the C++ methods of the
+// same name below are thin forwarders to these that carry the thread safety annotations. Each
+// requires what the C++ method requires of its callers, in particular that interrupts are disabled
+// on the calling CPU. The predicates take the lock word, as they do not depend on the lock's
+// options.
+extern "C" {
+void rust_spinlock_acquire(SpinLock& lock);
+// |name| must be a non-null C string with static lifetime.
+void rust_monitored_spinlock_acquire(MonitoredSpinLock& lock, const char* name) __NONNULL((2));
+// Return false when the lock is acquired, and true when the lock is not acquired.
+// |name| must be a non-null C string with static lifetime.
+bool rust_monitored_spinlock_try_acquire(MonitoredSpinLock& lock, const char* name) __NONNULL((2));
+void rust_spinlock_release(SpinLock* lock) __NONNULL((1));
+void rust_monitored_spinlock_release(MonitoredSpinLock* lock) __NONNULL((1));
+}  // extern "C"
+
+template <SpinLockOptions Options>
+class TA_CAP("mutex") alignas(8) SpinLockBase
+    : public spin_tracing::LockNameStorage<spin_tracing::LockType::kSpinlock,
+                                           kSchedulerLockSpinTracingEnabled> {
+ public:
+  // kernel/spinlock.rs implements the SpinLock and MonitoredSpinLock instantiations.
+  static_assert(Options == SpinLockOptions::None || Options == SpinLockOptions::Monitored,
+                "unsupported SpinLockOptions combination");
+
+  constexpr SpinLockBase() = default;
+
+  // Acquire the spinlock.
+  //
+  // Interrupts must already be disabled.
+  void Acquire() TA_ACQ() {
+    static_assert(!kIsMonitored, "spinlock is monitored, use Acquire(const char* name) instead");
+    rust_spinlock_acquire(*this);
+  }
+  // See |Acquire| above.
+  //
+  // |name| is the name of the critical section protected by this spinlock and
+  // must have static lifetime.
+  void Acquire(const char* name) TA_ACQ() {
+    static_assert(kIsMonitored, "spinlock is unmonitored, use Acquire() instead");
+    rust_monitored_spinlock_acquire(*this, name);
+  }
+
+  // Attempt to acquire the spinlock without waiting.
+  //
+  // Interrupts must already be disabled.
+  //
+  // Returns false when the lock is acquired, and true when the lock is not
+  // acquired.
+  //
+  // TryAcquire operations are not permitted to fail spuriously, even on
+  // architectures with weak memory ordering.  If a TryAcquire operation fails,
+  // it must be because the lock was actually observed to be held by another
+  // thread during the attempt.
+  bool TryAcquire(const char* name) TA_TRY_ACQ(false) {
+    static_assert(kIsMonitored, "spinlock is unmonitored");
+    return rust_monitored_spinlock_try_acquire(*this, name);
+  }
+
+  // Release the spinlock
+  //
+  // Interrupts must already be disabled.
+  void Release() TA_REL() {
+    if constexpr (kIsMonitored) {
+      rust_monitored_spinlock_release(this);
+    } else {
+      rust_spinlock_release(this);
+    }
+  }
+
+  // Returns true if held by the calling CPU.
+  //
+  // Interrupts must be disabled before calling this method, otherwise it could return true when it
+  // should return false.
+  bool IsHeld() const {
+    DEBUG_ASSERT(arch_ints_disabled());
+    return HolderCpu() == arch_curr_cpu_num();
+  }
+
+  // Just like |Acquire|, but saves interrupt state and disables interrupts.
+  void AcquireIrqSave(interrupt_saved_state_t& state, const char* name) TA_ACQ() {
+    state = arch_interrupt_save();
+    Acquire(name);
+  }
+
+  // Just like |Release|, but restores interrupt state after unlocking.
+  void ReleaseIrqRestore(interrupt_saved_state_t state) TA_REL() {
+    Release();
+    arch_interrupt_restore(state);
+  }
+
+  void AssertHeld() const TA_ASSERT() { DEBUG_ASSERT(IsHeld()); }
+
+  // Returns which cpu currently holds the spin lock, or INVALID_CPU if not held.
+  //
+  // Note that this predicate does not synchronize other memory operations (i.e.
+  // it has relaxed atomic semantics).
+  cpu_num_t HolderCpu() const { return spinlock_.load(ktl::memory_order_relaxed) - 1; }
+
+  // SpinLocks cannot be copied or moved.
+  SpinLockBase(const SpinLockBase& am) = delete;
+  SpinLockBase& operator=(const SpinLockBase& am) = delete;
+  SpinLockBase(SpinLockBase&& c) = delete;
+  SpinLockBase& operator=(SpinLockBase&& c) = delete;
+
+ private:
+  static constexpr bool kIsMonitored = Options == SpinLockOptions::Monitored;
+
+  // The lock word: the number of the holding CPU plus one, so that 0 means unheld. Only the Rust
+  // implementation writes it; C++ only performs the relaxed reads in the predicates above.
+  ktl::atomic<cpu_num_t> spinlock_;
+};
+
+// kernel/spinlock.rs asserts the same layout for its SpinLockBase, which the trampolines above
+// receive these objects as.
+static_assert(sizeof(ktl::atomic<cpu_num_t>) == sizeof(cpu_num_t));
+static_assert(alignof(ktl::atomic<cpu_num_t>) == alignof(cpu_num_t));
+static_assert(sizeof(SpinLock) == (kSchedulerLockSpinTracingEnabled ? 16 : 8));
+static_assert(alignof(SpinLock) == 8);
+static_assert(sizeof(MonitoredSpinLock) == sizeof(SpinLock));
+static_assert(alignof(MonitoredSpinLock) == alignof(SpinLock));
 
 // Declares a member of type |spinlock_type| in the struct or class |containing_type| with
 // instrumentation for runtime lock validation.
@@ -210,10 +197,6 @@ using TraceDisabledSpinLock = SpinLockBase<SpinLockOptions::TraceDisabled>;
 #define DECLARE_SINGLETON_SPINLOCK_WITH_TYPE(name, spinlock_type, ...) \
   LOCK_DEP_SINGLETON_LOCK(name, spinlock_type, ##__VA_ARGS__)
 
-// Just like |DECLARE_SINGLETON_SPINLOCK_WITH_TYPE| except the type SpinLock is implied.
-#define DECLARE_SINGLETON_SPINLOCK(name, ...) \
-  DECLARE_SINGLETON_SPINLOCK_WITH_TYPE(name, SpinLock, ##__VA_ARGS__)
-
 //
 // Configure lockdep flags and wrappers for SpinLock and MonitoredSpinLock.
 //
@@ -221,16 +204,12 @@ using TraceDisabledSpinLock = SpinLockBase<SpinLockOptions::TraceDisabled>;
 // Configure lockdep to check irq-safety rules.
 LOCK_DEP_TRAITS(SpinLock, lockdep::LockFlagsIrqSafe);
 LOCK_DEP_TRAITS(MonitoredSpinLock, lockdep::LockFlagsIrqSafe);
-LOCK_DEP_TRAITS(TraceDisabledSpinLock, lockdep::LockFlagsIrqSafe);
 
 // Option tag for acquiring a SpinLock WITHOUT saving irq state.
 struct NoIrqSave {};
 
 // Option tag for acquiring a SpinLock WITH saving irq state.
 struct IrqSave {};
-
-// Option tag for try-acquiring a SpinLock WITHOUT saving irq state.
-struct TryLockNoIrqSave {};
 
 // Lock policy for acquiring a SpinLock WITHOUT saving irq state.
 template <typename LockType>
@@ -253,7 +232,6 @@ struct NoIrqSavePolicy {
 // Configure Guard<SpinLock, NoIrqSave> to use the above policy to acquire and
 // release a SpinLock.
 LOCK_DEP_POLICY_OPTION(SpinLock, NoIrqSave, NoIrqSavePolicy<SpinLock>);
-LOCK_DEP_POLICY_OPTION(TraceDisabledSpinLock, NoIrqSave, NoIrqSavePolicy<TraceDisabledSpinLock>);
 
 // Lock policy for acquiring a MonitoredSpinLock WITHOUT saving irq state.
 struct NoIrqSaveMonitoredPolicy {
@@ -311,7 +289,6 @@ struct IrqSavePolicy {
 // Configure Guard<SpinLock, IrqSave> to use the above policy to acquire and
 // release a SpinLock.
 LOCK_DEP_POLICY_OPTION(SpinLock, IrqSave, IrqSavePolicy<SpinLock>);
-LOCK_DEP_POLICY_OPTION(TraceDisabledSpinLock, IrqSave, IrqSavePolicy<TraceDisabledSpinLock>);
 
 // Lock policy for acquiring a MonitoredSpinLock WITH saving irq state.
 struct IrqSaveMonitoredPolicy {
@@ -346,48 +323,5 @@ struct IrqSaveMonitoredPolicy {
 // Configure Guard<MonitoredSpinLock, IrqSave> to use the above policy to
 // acquire and release a MonitoredSpinLock.
 LOCK_DEP_POLICY_OPTION(MonitoredSpinLock, IrqSave, IrqSaveMonitoredPolicy);
-
-// Lock policy for try-acquiring a SpinLock WITHOUT saving irq state.
-struct TryLockNoIrqSavePolicy {
-  // No extra state required when not saving irq state.
-  struct State {};
-
-  // The lock list and validation is made atomic by interrupt disable before locking.
-  using ValidationGuard = lockdep::NullValidationGuard;
-
-  static void PreValidate(SpinLock* lock, State*) {}
-  static bool Acquire(SpinLock* lock, State*) TA_TRY_ACQ(true, lock) {
-    const bool failed = lock->TryAcquire();
-    return !failed;  // Guard uses true to indicate success.
-  }
-  static void Release(SpinLock* lock, State*) TA_REL(lock) { lock->Release(); }
-};
-
-// Configure Guard<SpinLock, TryLockNoIrqSave> to use the above policy to
-// acquire and release a SpinLock.
-LOCK_DEP_POLICY_OPTION(SpinLock, TryLockNoIrqSave, TryLockNoIrqSavePolicy);
-
-// Lock policy for try-acquiring a MonitoredSpinLock WITHOUT saving irq state.
-struct TryLockNoIrqSaveMonitoredPolicy {
-  struct State {
-    State() = delete;
-    explicit State(const char* name) : name(name) {}
-    const char* const name;
-  };
-
-  // The lock list and validation is made atomic by interrupt disable before locking.
-  using ValidationGuard = lockdep::NullValidationGuard;
-
-  static void PreValidate(MonitoredSpinLock* lock, State*) {}
-  static bool Acquire(MonitoredSpinLock* lock, State* state) TA_TRY_ACQ(true, lock) {
-    const bool failed = lock->TryAcquire(state->name);
-    return !failed;  // Guard uses true to indicate success.
-  }
-  static void Release(MonitoredSpinLock* lock, State*) TA_REL(lock) { lock->Release(); }
-};
-
-// Configure Guard<MonitoredSpinLock, TryLockNoIrqSave> to use the above policy
-// to acquire and release a MonitoredSpinLock.
-LOCK_DEP_POLICY_OPTION(MonitoredSpinLock, TryLockNoIrqSave, TryLockNoIrqSaveMonitoredPolicy);
 
 #endif  // ZIRCON_KERNEL_INCLUDE_KERNEL_SPINLOCK_H_

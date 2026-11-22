@@ -151,8 +151,8 @@ impl Stream for EncodedStream {
                 Poll::Ready(Ok(written)) => {
                     self.encoder_input_cursor = cursor + written;
                     self.unflushed_bytecount = self.unflushed_bytecount + written;
-                    // flush() if we have sent enough bytes to generate a frame
-                    if self.unflushed_bytecount > self.pcm_bytes_per_encoded_packet {
+                    // flush() if we have sent enough bytes to generate a packet
+                    if self.unflushed_bytecount >= self.pcm_bytes_per_encoded_packet {
                         // Attempt to flush.
                         if let Poll::Ready(Ok(())) = Pin::new(&mut self.encoder).poll_flush(cx) {
                             self.unflushed_bytecount = 0;

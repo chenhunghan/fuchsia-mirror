@@ -20,12 +20,12 @@ pub async fn datagram_socket(
         let response =
             result.map_err(|errno| std::io::Error::from_raw_os_error(errno.into_primitive()))?;
         let fd = match response {
-            fposix_socket::ProviderDatagramSocketResponse::DatagramSocket(client_end) => {
-                fdio::create_fd(client_end.into()).map_err(|status| status.into_io_error())
-            }
             fposix_socket::ProviderDatagramSocketResponse::SynchronousDatagramSocket(
                 client_end,
             ) => fdio::create_fd(client_end.into()).map_err(|status| status.into_io_error()),
+            fposix_socket::ProviderDatagramSocketResponseUnknown!() => {
+                Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
         }?;
         Ok(fd.into())
     }
@@ -45,12 +45,12 @@ pub async fn datagram_socket_with_options(
         let response =
             result.map_err(|errno| std::io::Error::from_raw_os_error(errno.into_primitive()))?;
         let fd = match response {
-            fposix_socket::ProviderDatagramSocketWithOptionsResponse::DatagramSocket(
-                client_end,
-            ) => fdio::create_fd(client_end.into()).map_err(|status| status.into_io_error()),
             fposix_socket::ProviderDatagramSocketWithOptionsResponse::SynchronousDatagramSocket(
                 client_end,
             ) => fdio::create_fd(client_end.into()).map_err(|status| status.into_io_error()),
+            fposix_socket::ProviderDatagramSocketWithOptionsResponseUnknown!() => {
+                Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+            }
         }?;
         Ok(fd.into())
     }

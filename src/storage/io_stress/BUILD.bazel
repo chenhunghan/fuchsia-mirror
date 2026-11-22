@@ -1,0 +1,189 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":io-stress-test_test",
+        ":io-stress-unittests",
+    ],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    testonly = True,
+    srcs = [
+        "src/lib.rs",
+        "src/parser.rs",
+        "src/stress.rs",
+        "src/workloads.rs",
+    ],
+    crate_name = "io_stress",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_rust",
+        "//sdk/fidl/fuchsia.memory.debug:fuchsia.memory.debug_rust",
+        "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace",
+        "//src/performance/lib/fuchsiaperf",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+rustc_test(
+    name = "io_stress_lib_test",
+    crate = ":lib",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_unittest_package(
+    name = "io-stress-unittests",
+    # Disabled on riscv64 due to QEMU timeouts, mirroring the `target_cpu != "riscv64"`
+    # guard in `group("tests")` in BUILD.gn; bazel2gn does not translate select() on
+    # build_only.
+    # @bazel2gn:skip
+    build_only = select({
+        "@platforms//cpu:riscv64": True,
+        "//conditions:default": False,
+    }),
+    unit_tests = [":io_stress_lib_test"],
+)
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "io_stress",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "io_stress",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "io_stress",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/io_stress.cml",
+)
+
+fx_component(
+    name = "io-stress-component",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+rustc_binary(
+    name = "suite_bin",
+    testonly = True,
+    srcs = ["src/suite.rs"],
+    binary_name = "io_stress_suite",
+    crate_root = "src/suite.rs",
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+fx_packaged_binary(
+    name = "suite_bin_packaged",
+    testonly = True,
+    binary = ":suite_bin",
+    binary_name = "io_stress_suite",
+)
+
+fx_component_manifest(
+    name = "suite_manifest",
+    testonly = True,
+    component_name = "io_stress_suite",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/io_stress_suite.cml",
+)
+
+fx_test_component(
+    name = "io-stress-suite-component",
+    compiled_manifest = ":suite_manifest",
+    test_type = "system",
+    deps = [":suite_bin_packaged"],
+)
+
+fx_package(
+    name = "io-stress-test",
+    testonly = True,
+    components = [":io-stress-component"],
+    test_components = [":io-stress-suite-component"],
+    validate_structured_config = False,
+)
+
+fx_test(
+    name = "io-stress-test_test",
+    # Disabled on riscv64 due to QEMU timeouts, mirroring the `target_cpu != "riscv64"`
+    # guard in `group("tests")` in BUILD.gn; bazel2gn does not translate select() on
+    # build_only.
+    # @bazel2gn:skip
+    build_only = select({
+        "@platforms//cpu:riscv64": True,
+        "//conditions:default": False,
+    }),
+    package = ":io-stress-test",
+    test_type = "system",
+)

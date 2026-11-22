@@ -10,7 +10,7 @@ use mapping::{
     RawMappingCommand,
 };
 use std::collections::HashMap;
-use vmo_fifo::SyncSender;
+use vmo_fifo::{Alignment, SyncSender};
 
 /// Manages a driver-backed `MapperSession` for an EROFS volume.
 pub struct VolumeMapper {
@@ -27,8 +27,11 @@ impl VolumeMapper {
         mapping_vmo: zx::Vmo,
         file_offset: u64,
     ) -> Result<Self, zx::Status> {
-        let sender =
-            SyncSender::<RawMappingCommand>::new(mapping_vmo, 8, PENDING_COMMANDS_CAPACITY)?;
+        let sender = SyncSender::<RawMappingCommand>::new(
+            mapping_vmo,
+            Alignment::SIZE_8B,
+            PENDING_COMMANDS_CAPACITY,
+        )?;
         Ok(Self {
             session,
             sender: Mutex::new(sender),

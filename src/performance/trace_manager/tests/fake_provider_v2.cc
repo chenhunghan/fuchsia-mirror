@@ -165,7 +165,12 @@ void FakeProviderV2::MarkResponsive() {
 }
 
 void FakeProviderV2::SendOnSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end) {
-  UpdateBufferHeaderAfterStopped();
+  if (buffering_mode_ != fuchsia_tracing::BufferingMode::kOneshot &&
+      wrapped_count == wrapped_count_) {
+    SwitchRollingBuffer();
+  } else {
+    UpdateBufferHeaderAfterStopped();
+  }
   ASSERT_TRUE(binding_.has_value());
   auto result = fidl::SendEvent(*binding_)->OnSaveBuffer(
       {{.wrapped_count = wrapped_count, .durable_data_end = durable_data_end}});
@@ -178,11 +183,52 @@ void FakeProviderV2::SendOnAlert(const std::string& alert_name) {
   ASSERT_TRUE(result.is_ok());
 }
 
+void FakeProviderV2::SwitchRollingBuffer() {
+  // Record where the buffer that is about to be saved ends.
+  UpdateBufferHeaderAfterStopped();
+  ++wrapped_count_;
+  buffer_next_ = 0;
+  WriteWrappedCountToHeader();
+  // The new current buffer starts out empty.
+  WriteZeroLengthRecord(CurrentBufferOffset());
+}
+
+void FakeProviderV2::WriteWrappedCountToHeader() {
+  size_t offset = offsetof(trace::internal::trace_buffer_header, wrapped_count);
+  zx_status_t status = buffer_vmo_.write(&wrapped_count_, offset, sizeof(wrapped_count_));
+  FX_DCHECK(status == ZX_OK) << "status=" << status;
+}
+
+size_t FakeProviderV2::CurrentBufferOffset() const {
+  if (buffering_mode_ == fuchsia_tracing::BufferingMode::kOneshot) {
+    return FakeProvider::kHeaderSize;
+  }
+  return FakeProvider::kHeaderSize + durable_buffer_size_ +
+         (wrapped_count_ & 1) * rolling_buffer_size_;
+}
+
 void FakeProviderV2::SendLateStopReply() {
   UpdateBufferHeaderAfterStopped();
   ASSERT_TRUE(stop_completer_.has_value());
   stop_completer_->Reply();
   stop_completer_.reset();
+}
+
+void FakeProviderV2::WriteBlobRecords(size_t num_bytes) {
+  constexpr size_t kRecordWords = 512;
+  constexpr size_t kPayloadBytes = trace::WordsToBytes(kRecordWords - 1);
+  std::vector<uint64_t> record(kRecordWords);
+  record[0] =
+      trace::BlobRecordFields::Type::Make(trace::ToUnderlyingType(trace::RecordType::kBlob)) |
+      trace::BlobRecordFields::RecordSize::Make(kRecordWords) |
+      trace::BlobRecordFields::NameStringRef::Make(TRACE_ENCODED_STRING_REF_EMPTY) |
+      trace::BlobRecordFields::BlobSize::Make(kPayloadBytes) |
+      trace::BlobRecordFields::BlobType::Make(0);
+  for (size_t written = 0; written < num_bytes; written += trace::WordsToBytes(kRecordWords)) {
+    ASSERT_LE(buffer_next_ + trace::WordsToBytes(kRecordWords), rolling_buffer_size_);
+    WriteRecordToBuffer(reinterpret_cast<uint8_t*>(record.data()),
+                        trace::WordsToBytes(kRecordWords));
+  }
 }
 
 void FakeProviderV2::InitializeBuffer() {
@@ -226,7 +272,11 @@ void FakeProviderV2::ComputeBufferSizes() {
   }
 }
 
-void FakeProviderV2::ResetBufferPointers() { buffer_next_ = 0; }
+void FakeProviderV2::ResetBufferPointers() {
+  buffer_next_ = 0;
+  wrapped_count_ = 0;
+  WriteWrappedCountToHeader();
+}
 
 void FakeProviderV2::InitBufferHeader() {
   trace::internal::trace_buffer_header header{};
@@ -255,7 +305,9 @@ void FakeProviderV2::InitBufferHeader() {
 }
 
 void FakeProviderV2::UpdateBufferHeaderAfterStopped() {
-  size_t offset = offsetof(trace::internal::trace_buffer_header, rolling_data_end[0]);
+  // Oneshot mode never switches buffers, so this is rolling_data_end[0] there.
+  size_t offset = offsetof(trace::internal::trace_buffer_header, rolling_data_end) +
+                  (wrapped_count_ & 1) * sizeof(uint64_t);
   buffer_vmo_.write(reinterpret_cast<uint8_t*>(&buffer_next_), offset, sizeof(uint64_t));
 }
 
@@ -270,21 +322,7 @@ void FakeProviderV2::WriteInitRecord() {
 }
 
 void FakeProviderV2::WriteRecordToBuffer(const uint8_t* data, size_t size) {
-  size_t offset;
-  switch (buffering_mode_) {
-    case fuchsia_tracing::BufferingMode::kOneshot:
-      offset = FakeProvider::kHeaderSize + buffer_next_;
-      break;
-    case fuchsia_tracing::BufferingMode::kCircular:
-    case fuchsia_tracing::BufferingMode::kStreaming:
-      offset = FakeProvider::kHeaderSize + durable_buffer_size_ + buffer_next_;
-      break;
-    default:
-      FX_NOTREACHED();
-      offset = 0;
-      break;
-  }
-  WriteBytes(data, offset, size);
+  WriteBytes(data, CurrentBufferOffset() + buffer_next_, size);
   buffer_next_ += size;
 }
 

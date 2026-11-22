@@ -1,0 +1,141 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":test_breakpoint_commands",
+        ":test_cli",
+        ":test_execution_commands",
+        ":test_inspection_commands",
+        ":test_lifecycle_commands",
+    ],
+    visibility = ["//scripts:__pkg__"],
+)
+
+py_library(
+    name = "cli_lib",
+    srcs = [
+        "__init__.py",
+        "cli.py",
+        "commands/__init__.py",
+        "commands/aspace.py",
+        "commands/async_backtrace.py",
+        "commands/attach.py",
+        "commands/base.py",
+        "commands/break_cmd.py",
+        "commands/console.py",
+        "commands/continue_cmd.py",
+        "commands/detach.py",
+        "commands/diagnose_hang.py",
+        "commands/driver_list.py",
+        "commands/evaluate.py",
+        "commands/finish.py",
+        "commands/get_state.py",
+        "commands/handles.py",
+        "commands/location_utils.py",
+        "commands/mem_read.py",
+        "commands/modules.py",
+        "commands/next_cmd.py",
+        "commands/pause.py",
+        "commands/schema.py",
+        "commands/stack_trace.py",
+        "commands/start.py",
+        "commands/step_in.py",
+        "commands/stop.py",
+        "commands/threads.py",
+        "commands/tracepoint.py",
+        "commands/variables.py",
+        "commands/wait_for_event.py",
+        "commands/watch_cmd.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/debug:__pkg__",
+        "//scripts/debug/zxdb_cli/tests:__pkg__",
+    ],
+    deps = [
+        "//scripts/debug/zxdb_cli/daemon_manager",
+        "//scripts/debug/zxdb_cli/shared:protocol_lib",
+        "//scripts/lib/fx_cmd",
+    ],
+)
+
+py_library(
+    name = "test_helpers",
+    testonly = True,
+    srcs = [
+        "tests/__init__.py",
+        "tests/helpers.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":cli_lib"],
+)
+
+# In Bazel, unlike GN, Python binaries are not zipped, so pydantic_core's
+# DSO stays in runfiles via //third_party/pylibs/pydantic without a
+# separate test_data target.
+host_py_test(
+    name = "test_cli",
+    testonly = True,
+    srcs = ["tests/test_cli.py"],
+    main = "tests/test_cli.py",
+    deps = [
+        ":cli_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_lifecycle_commands",
+    testonly = True,
+    srcs = ["commands/tests/test_lifecycle_commands.py"],
+    main = "commands/tests/test_lifecycle_commands.py",
+    deps = [
+        ":cli_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_execution_commands",
+    testonly = True,
+    srcs = ["commands/tests/test_execution_commands.py"],
+    main = "commands/tests/test_execution_commands.py",
+    deps = [
+        ":cli_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_inspection_commands",
+    testonly = True,
+    srcs = ["commands/tests/test_inspection_commands.py"],
+    main = "commands/tests/test_inspection_commands.py",
+    deps = [
+        ":cli_lib",
+        ":test_helpers",
+    ],
+)
+
+host_py_test(
+    name = "test_breakpoint_commands",
+    testonly = True,
+    srcs = ["commands/tests/test_breakpoint_commands.py"],
+    main = "commands/tests/test_breakpoint_commands.py",
+    deps = [
+        ":cli_lib",
+        ":test_helpers",
+    ],
+)

@@ -47,14 +47,12 @@ fx_cc_test_binary(
         # Always optimize speed, even if it's debug mode.
         "//build/config:optimize_speed",
     ],
-    # Bazel's @com_google_googletest//:gtest bundles both gtest and gmock, while
-    # GN separates //third_party/googletest:gmock and :gtest.
     deps = [
         ":software-compositor",
         "//sdk/lib/fit",
         "//src/lib/fxl/test:gtest_main",
         "@com_google_googletest//:gtest",
-    ],  # @bazel2gn:raw_overwrite:[ ":software-compositor", "//sdk/lib/fit", "//src/lib/fxl/test:gtest_main", "//third_party/googletest:gmock", "//third_party/googletest:gtest" ]
+    ],
 )
 
 fx_unittest_package(

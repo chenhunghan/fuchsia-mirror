@@ -6,7 +6,6 @@
 
 #include <stdint.h>
 
-#include <kernel/brwlock.h>
 #include <kernel/mutex.h>
 #include <kernel/spinlock.h>
 #include <lockdep/lockdep.h>
@@ -21,8 +20,6 @@ bool cpp_verify_mutex_id(const void* lock_ptr, const void* expected_id);
 bool cpp_verify_critical_mutex_id(const void* lock_ptr, const void* expected_id);
 bool cpp_verify_spinlock_id(const void* lock_ptr, const void* expected_id);
 bool cpp_verify_monitored_spinlock_id(const void* lock_ptr, const void* expected_id);
-bool cpp_verify_brwlock_id(const void* lock_ptr, const void* expected_id);
-bool cpp_verify_brwlock_no_pi_id(const void* lock_ptr, const void* expected_id);
 
 const void* cpp_get_test_singleton_mutex_ptr();
 size_t cpp_get_test_singleton_mutex_size();
@@ -54,16 +51,6 @@ bool cpp_verify_spinlock_id(const void* lock_ptr, const void* expected_id) {
 
 bool cpp_verify_monitored_spinlock_id(const void* lock_ptr, const void* expected_id) {
   const auto* lock = static_cast<const lockdep::Lock<MonitoredSpinLock>*>(lock_ptr);
-  return lock->id() == reinterpret_cast<lockdep::LockClassId>(expected_id);
-}
-
-bool cpp_verify_brwlock_id(const void* lock_ptr, const void* expected_id) {
-  const auto* lock = static_cast<const lockdep::Lock<BrwLockPi>*>(lock_ptr);
-  return lock->id() == reinterpret_cast<lockdep::LockClassId>(expected_id);
-}
-
-bool cpp_verify_brwlock_no_pi_id(const void* lock_ptr, const void* expected_id) {
-  const auto* lock = static_cast<const lockdep::Lock<BrwLockNoPi>*>(lock_ptr);
   return lock->id() == reinterpret_cast<lockdep::LockClassId>(expected_id);
 }
 

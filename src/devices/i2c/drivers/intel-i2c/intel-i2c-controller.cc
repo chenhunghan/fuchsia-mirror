@@ -13,7 +13,7 @@
 #include <lib/ddk/debug.h>
 #include <lib/ddk/device.h>
 #include <lib/ddk/driver.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fidl/cpp/wire/object_view.h>
 #include <stdlib.h>
 #include <string.h>

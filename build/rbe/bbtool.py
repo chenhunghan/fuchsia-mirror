@@ -17,9 +17,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import cas
-import cl_utils
-import fuchsia
+from build.rbe import cas, cl_utils, fuchsia
 
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent

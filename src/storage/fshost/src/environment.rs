@@ -495,8 +495,7 @@ impl Environment for FshostEnvironment {
             barriers_enabled: self.config.inline_crypto,
             ..Default::default()
         };
-        let serving_fs =
-            self.launcher.serve_fxblob(device.block_connector()?, Box::new(config)).await?;
+        let serving_fs = self.launcher.serve_fxblob(device.block_connector()?, config).await?;
         self.container = Some(Box::new(FxfsContainer::new(serving_fs)));
         if !self.gpt.is_serving() && !device.is_fshost_ramdisk() {
             // NB: If we've already found the system container, but not the GPT, we are probably
@@ -753,20 +752,25 @@ impl FilesystemLauncher {
     pub async fn serve_fxblob(
         &self,
         block_connector: Box<dyn BlockConnector>,
-        config: Box<dyn FSConfig>,
+        mut config: Fxfs,
     ) -> Result<ServingMultiVolumeFilesystem, Error> {
-        let mut fs =
-            fs_management::filesystem::Filesystem::from_boxed_config(block_connector, config);
-        if self.config.check_filesystems {
-            log::info!("fsck started for fxblob");
-            if let Err(error) = fs.fsck().await {
-                self.report_corruption("fxfs", &error);
+        // Fxfs checks the filesystem as part of starting it, which avoids replaying the journal
+        // twice.
+        let check = self.config.check_filesystems || config.fsck_before_start;
+        config.fsck_before_start = check;
+        let fs = fs_management::filesystem::Filesystem::from_boxed_config(
+            block_connector,
+            Box::new(config),
+        );
+        let fs = match fs.serve_multi_volume().await {
+            Ok(fs) => fs,
+            Err(error) => {
+                if check {
+                    self.report_corruption("fxfs", &error);
+                }
                 return Err(error);
-            } else {
-                log::info!("fsck completed OK for fxblob");
             }
-        }
-        let fs = fs.serve_multi_volume().await?;
+        };
         // Before we return the serving filesystem, handle installing any new blob volumes which
         // may have been flashed to the device.
         if fs.has_volume(BLOB_IMAGE_VOLUME_LABEL).await.context("checking for image volume")? {

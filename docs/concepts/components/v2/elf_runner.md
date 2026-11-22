@@ -4,7 +4,7 @@ The ELF runner is the runner responsible for launching
 [components][glossary.component] based on standard executable files (ELF
 format). It is a built-in runner and is available to all components.
 
-## Using the ELF Runner
+## Using the ELF runner {:#using-the-elf-runner}
 
 To use the ELF runner, the component's manifest must include a `program` block,
 containing:
@@ -44,7 +44,7 @@ The arguments set will be passed in the same order as declared in the manifest.
 }
 ```
 
-### Forwarding stdout and stderr streams
+### Forwarding stdout and stderr streams {:#forwarding-stdout-and-stderr-streams}
 
 The stdout and stderr streams of ELF components can be routed to the
 [LogSink service][logsink]. By default, the ELF runner only forwards these
@@ -81,7 +81,7 @@ Note: There are known issues where messages from `ZX_ASSERT_...` in C/C++
 components and `Error` objects returned in `main` in Rust components are lost
 when stdout/stderr forwarding is disabled.
 
-### Lifecycle
+### Lifecycle {:#lifecycle}
 
 Components have a [lifecycle][lifecycle]. Components run by the ELF runner can
 integrate with the lifecycle if you add a `lifecycle` attribute to your component
@@ -198,7 +198,7 @@ https://fuchsia.dev/reference/syscalls/job_set_policy#zx_job_pol_basic_v2_and_v1
 ```
 
 
-### Environment Variables
+### Environment variables {:#environment-variables}
 
 Environment variables can be set for ELF components by using the `environ`
 attribute. This field must be a vector of strings where each string contains
@@ -272,6 +272,6 @@ For a detailed explanation of how processes are created, please see
 [vmo-replace]: /reference/syscalls/vmo_replace_as_executable.md
 [fxb-72178]: https://bugs.fuchsia.dev/p/fuchsia/issues/detail?id=72178
 [fxb-72764]: https://bugs.fuchsia.dev/p/fuchsia/issues/detail?id=72764
-[logsink]: /docs/development/diagnostics/logs/recording.md#logsinksyslog
+[logsink]: /docs/development/diagnostics/logs/recording.md#logsink-syslog
 [security-allowlist]: /src/security/policy/component_manager_policy.json5
 [glossary-component-manifests]: /docs/glossary/README.md#component-manifest

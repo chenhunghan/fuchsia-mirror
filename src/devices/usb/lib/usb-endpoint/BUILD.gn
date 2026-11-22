@@ -15,6 +15,10 @@ config("enable-dfv2-compat-logging") {
   defines = [ "DFV2_COMPAT_LOGGING" ]
 }
 
+config("enable-syslog-logging") {
+  defines = [ "SYSLOG_LOGGING" ]
+}
+
 source_set("usb-endpoint-client") {
   public = [ "include/usb-endpoint/usb-endpoint-client.h" ]
   sources = [ "usb-endpoint-client.cc" ]
@@ -38,6 +42,20 @@ source_set("usb-endpoint-client-dfv2-compat-logging") {
   public_configs = [
     ":includes",
     ":enable-dfv2-compat-logging",
+  ]
+}
+
+source_set("usb-endpoint-client-syslog") {
+  public = [ "include/usb-endpoint/usb-endpoint-client.h" ]
+  sources = [ "usb-endpoint-client.cc" ]
+  public_deps = [
+    "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/devices/usb/lib/usb:usb-fidl-syslog",
+  ]
+  public_configs = [
+    ":includes",
+    ":enable-syslog-logging",
   ]
 }
 

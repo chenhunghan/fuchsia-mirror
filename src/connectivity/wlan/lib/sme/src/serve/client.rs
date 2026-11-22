@@ -314,7 +314,7 @@ async fn serve_sched_scan_session(
         futures::select! {
             scan_results = session_stream.next() => {
                 if let Some(vmo) = scan_results {
-                    txn_handle.send_on_scheduled_scan_matches_available(vmo)?;
+                    txn_handle.send_on_scheduled_scan_matches_available(vmo, None)?;
                 } else {
                     // Stream closed naturally (SME dropped sender because firmware stopped it).
                     txn_handle.shutdown_with_epitaph(Ok(()));
@@ -368,20 +368,20 @@ async fn serve_connect_txn_stream(
                 Some(event) => match event {
                     ConnectTransactionEvent::OnConnectResult { result, is_reconnect } => {
                         let connect_result = convert_connect_result(&result, is_reconnect);
-                        handle.send_on_connect_result(&connect_result)
+                        handle.send_on_connect_result(&connect_result, None)
                     }
                     ConnectTransactionEvent::OnRoamResult { result } => {
                         let roam_result = convert_roam_result(&result);
-                        handle.send_on_roam_result(&roam_result)
+                        handle.send_on_roam_result(&roam_result, None)
                     }
                     ConnectTransactionEvent::OnDisconnect { info } => {
-                        handle.send_on_disconnect(&info)
+                        handle.send_on_disconnect(&info, None)
                     }
                     ConnectTransactionEvent::OnSignalReport { ind } => {
                         handle.send_on_signal_report(&ind)
                     }
                     ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm } => {
-                        handle.send_on_rssi_threshold_breached(cur_rssi_dbm)
+                        handle.send_on_rssi_threshold_breached(cur_rssi_dbm, None)
                     }
                     ConnectTransactionEvent::OnChannelSwitched { info } => {
                         handle.send_on_channel_switched(&info)
@@ -696,7 +696,8 @@ mod tests {
                     code: fidl_ieee80211::StatusCode::Success,
                     is_credential_rejected: false,
                     is_reconnect: true,
-                }
+                },
+                wake_lease: None,
             }
         );
 
@@ -713,9 +714,15 @@ mod tests {
             .expect("expect sending ConnectTransactionEvent to succeed");
         assert_matches!(exec.run_until_stalled(&mut test_fut), Poll::Pending);
         let event = assert_matches!(poll_stream_fut(&mut exec, &mut fidl_client_fut), Poll::Ready(Some(Ok(event))) => event);
-        assert_matches!(event, fidl_sme::ConnectTransactionEvent::OnDisconnect { info: output_info } => {
-            assert_eq!(input_info, output_info);
-        });
+        assert_matches!(
+            event,
+            fidl_sme::ConnectTransactionEvent::OnDisconnect {
+                info: output_info,
+                wake_lease: None,
+            } => {
+                assert_eq!(input_info, output_info);
+            }
+        );
 
         // Test sending OnSignalReport
         let input_ind = fidl_internal::SignalReportIndication {
@@ -1029,7 +1036,8 @@ mod tests {
         assert_matches!(
             exec.run_until_stalled(&mut event_stream.next()),
             Poll::Ready(Some(Ok(fidl_sme::ConnectTransactionEvent::OnRssiThresholdBreached {
-                cur_rssi_dbm: -75
+                cur_rssi_dbm: -75,
+                wake_lease: None,
             })))
         );
     }

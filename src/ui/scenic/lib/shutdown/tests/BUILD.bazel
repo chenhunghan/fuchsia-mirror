@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "unittests",
+    srcs = ["shutdown_unittest.cc"],
+    gn_output_name = "scenic_shutdown_unittests",
+    visibility = ["//src/ui/scenic:__pkg__"],
+    deps = [
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/lib/fxl/test:gtest_main",
+        # Bazel dependents use the :loop_fixture alias instead of :gtest.
+        "//src/lib/testing/loop_fixture",  # @bazel2gn:path_overwrite://src/lib/testing/loop_fixture:gtest
+        "//src/ui/scenic/lib/shutdown",
+    ],
+)

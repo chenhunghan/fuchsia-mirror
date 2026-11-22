@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/icu:icu_source_set.bzl", "icu_source_set")
+load("//build/bazel/rules/icu:third_party_icu_headers.bzl", "third_party_icu_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+third_party_icu_headers(
+    name = "icu_headers",
+    headers = [
+        "third_party/icu/source/common/unicode/errorcode.h",
+        "third_party/icu/source/common/unicode/udata.h",
+        "third_party/icu/source/i18n/unicode/timezone.h",
+    ],
+    icu_assembly = True,
+)
+
+icu_source_set(
+    name = "cpp",
+    srcs = [
+        "icu_data.cc",
+        "icu_data.h",
+    ],
+    icu_deps = [":icu_headers"],
+    implementation_deps = ["//src/lib/fsl"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//zircon/system/ulib/zx"],
+)

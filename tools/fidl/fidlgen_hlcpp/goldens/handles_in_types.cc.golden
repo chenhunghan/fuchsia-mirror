@@ -159,7 +159,7 @@ UnionWithHandle::UnionWithHandle(UnionWithHandle&& other) : tag_(other.tag_) {
       new (&h_)::zx::vmo();
       h_ = std::move(other.h_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -177,7 +177,7 @@ UnionWithHandle& UnionWithHandle::operator=(UnionWithHandle&& other) {
         new (&h_)::zx::vmo();
         h_ = std::move(other.h_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -204,10 +204,10 @@ void UnionWithHandle::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<::zx::vmo>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &h_, offset + offsetof(fidl_union_t, envelope), ::fidl::HandleInformation{.object_type = ZX_OBJ_TYPE_VMO, .rights = 0x80000000});
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -216,11 +216,11 @@ void UnionWithHandle::Encode(::fidl::Encoder* encoder, size_t offset,
           &h_,
           encoder->Alloc(::fidl::EncodingInlineSize<::zx::vmo, ::fidl::Encoder>(encoder)), ::fidl::HandleInformation{.object_type = ZX_OBJ_TYPE_VMO, .rights = 0x80000000});
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::handlesintypes::UnionWithHandle::Tag::kUnknown: {
@@ -234,18 +234,18 @@ void UnionWithHandle::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void UnionWithHandle::Decode(::fidl::Decoder* _decoder, UnionWithHandle* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::handlesintypes::UnionWithHandle::Tag::kH: {
@@ -255,7 +255,7 @@ void UnionWithHandle::Decode(::fidl::Decoder* _decoder, UnionWithHandle* value, 
       break;
     }
     default: {
-      auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&xunion->envelope);
+      auto unknown_info = _decoder->EnvelopeUnknownDataInfo(&_union->envelope);
       value->unknown_data_.bytes.resize(unknown_info.num_bytes);
       value->unknown_data_.handles.resize(unknown_info.num_handles);
       ::fidl::DecodeUnknownDataContents(_decoder, &value->unknown_data_, unknown_info.value_offset);
@@ -285,7 +285,7 @@ UnionWithHandle& UnionWithHandle::set_h(::zx::vmo value) {
   h_ = std::move(value);
   return *this;
 }
-UnionWithHandle& UnionWithHandle::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles) {
+UnionWithHandle& UnionWithHandle::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles) {
   EnsureStorageInitialized(ordinal);
   unknown_data_.bytes = std::move(bytes);
   unknown_data_.handles = std::move(handles);
@@ -298,21 +298,21 @@ void UnionWithHandle::Destroy() {
       h_.~decltype(h_)();
       break;
 
-    case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid);
 }
 
-void UnionWithHandle::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void UnionWithHandle::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::handlesintypes::UnionWithHandle::Tag::Invalid):
         break;
       case ::test::handlesintypes::UnionWithHandle::Tag::kH:
         new (&h_)::zx::vmo();
@@ -494,7 +494,7 @@ EmptyResourceUnion::~EmptyResourceUnion() {
 
 EmptyResourceUnion::EmptyResourceUnion(EmptyResourceUnion&& other) : tag_(other.tag_) {
   switch (tag_) {
-    case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
       break;
     default:
       new (&unknown_data_) decltype(unknown_data_);
@@ -508,7 +508,7 @@ EmptyResourceUnion& EmptyResourceUnion::operator=(EmptyResourceUnion&& other) {
     Destroy();
     tag_ = other.tag_;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);
@@ -533,16 +533,16 @@ void EmptyResourceUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void EmptyResourceUnion::Decode(::fidl::Decoder* _decoder, EmptyResourceUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 }
 
 zx_status_t EmptyResourceUnion::Clone(EmptyResourceUnion* result) const {
@@ -557,7 +557,7 @@ zx_status_t EmptyResourceUnion::Clone(EmptyResourceUnion* result) const {
       return ZX_OK;
   }
 }
-EmptyResourceUnion& EmptyResourceUnion::SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles) {
+EmptyResourceUnion& EmptyResourceUnion::SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes, std::vector<zx::handle> handles) {
   EnsureStorageInitialized(ordinal);
   unknown_data_.bytes = std::move(bytes);
   unknown_data_.handles = std::move(handles);
@@ -566,21 +566,21 @@ EmptyResourceUnion& EmptyResourceUnion::SetUnknownData(fidl_xunion_tag_t ordinal
 
 void EmptyResourceUnion::Destroy() {
   switch (tag_) {
-    case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
       break;
     default:
       unknown_data_.~decltype(unknown_data_)();
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid);
 }
 
-void EmptyResourceUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void EmptyResourceUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::handlesintypes::EmptyResourceUnion::Tag::Invalid):
         break;
       default:
         new (&unknown_data_) decltype(unknown_data_);

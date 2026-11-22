@@ -38,14 +38,12 @@ fx_cc_library(
     alwayslink = True,
 )
 
-# TODO(https://fxbug.dev/503359085): Migrate to Bazel once
-# //src/devices/bin/driver_runtime is available in Bazel.
 fx_cc_library(
     name = "async",
     srcs = ["async.cc"],
     hdrs = ["async.h"],
     implementation_deps = [
-        "//src/devices/lib/driver:driver_runtime",  # @bazel2gn:path_overwrite://src/devices/bin/driver_runtime
+        "//src/devices/bin/driver_runtime",
     ],
     target_compatible_with = ["@platforms//os:fuchsia"],
     # fuchsia_cc_dso() in //src/lib/dso/fuchsia_dso.gni expands in callers' GN packages.

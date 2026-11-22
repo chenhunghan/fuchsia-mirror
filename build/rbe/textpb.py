@@ -13,11 +13,11 @@ import re
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 
 class TokenType(enum.Enum):
-    FIELD_NAME = 0  # includes trailing ':'
+    FIELD_NAME = 0  # includes trailing ':' (optional for bracketed extensions)
     START_BLOCK = 1  # '<' or '{'
     END_BLOCK = 2  # '>' or '}'
     STRING_VALUE = 3  # quoted text, e.g. "string"
@@ -32,74 +32,83 @@ class Token(object):
     type: TokenType
 
 
-_FIELD_NAME_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]*:")
-_SPACE_RE = re.compile(r"[ \t]+")
-_NEWLINE_RE = re.compile(r"\r?\n")
-_STRING_RE = re.compile(r'"(?:[^\\"]++|\\.)*+"')  # Allow escaped quotes inside
-_VALUE_RE = re.compile(
-    r"[^ \t\r\n,;{}<>#]+"
-)  # Value token excluding delimiters and comments
+TextProtoDict = dict[str, Any]
+TextProtoMapping = Mapping[str, Any]
+
+
+_IDENT_PATTERN = r"[a-zA-Z_][a-zA-Z0-9_]*"
+_EXT_IDENT_PATTERN = r"\[[a-zA-Z_](?:[a-zA-Z0-9_.-]++|/(?!/))*+\]"
+_FIELD_KEY_PATTERN = f"(?:{_IDENT_PATTERN}|{_EXT_IDENT_PATTERN})"
+# Possessive quantifiers (++ and *+) prevent backtracking inside string bodies,
+# ensuring O(N) fail-fast behavior on unterminated strings.
+_STRING_PATTERN = r'"(?:[^\\"\r\n]++|\\[^\r\n])*+"'
+# Value token excluding delimiters, brackets, quotes, and comments.
+# Note: Bracketed list syntax for repeated scalar values (e.g. `field: [a, b]`)
+# is not supported; repeated fields in RBE logs and LOAS textprotos repeat the
+# `field: value` entry instead.
+_VALUE_PATTERN = r'[^ \t\r\n,;{}<>#/\[\]"]+'
+_MAX_ERROR_SNIPPET_LEN = 100
+
+_IDENT_RE = re.compile(_IDENT_PATTERN)
+_FIELD_NAME_RE = re.compile(f"{_FIELD_KEY_PATTERN}:?")
+
+# Combined token specification for _lex_line().
+# Matching a single alternation regex with re.finditer() advances the scan
+# offset inside the C regex engine and dispatches via Match.lastgroup, avoiding
+# O(N^2) per-token substring slicing (line = line[len(tok):]) and sequential
+# per-token regex probes in Python.
+#
+# Ordering note:
+#   `FIELD_NAME` must precede `OTHER_VALUE` so `ident:` is lexed as a field name
+#   rather than a value token containing `:`. Because `_IDENT_PATTERN` in
+#   `FIELD_NAME` requires a trailing `:` (unlike `_EXT_IDENT_PATTERN`), unquoted
+#   identifiers without a colon (e.g. booleans `true`/`false`, enum names, or
+#   colon-less block field names) fall through to `OTHER_VALUE`.
+_TOKEN_SPEC = (
+    ("COMMENT", r"#|//"),
+    ("SEPARATOR", r"[,;]+"),
+    ("START_BLOCK", r"[<{]"),
+    ("END_BLOCK", r"[>}]"),
+    ("FIELD_NAME", f"(?:{_IDENT_PATTERN}:|{_EXT_IDENT_PATTERN}:?)"),
+    ("STRING_VALUE", _STRING_PATTERN),
+    ("OTHER_VALUE", _VALUE_PATTERN),
+    ("SPACE", r"[ \t]+"),
+    ("NEWLINE", r"\r?\n"),
+    ("MISMATCH", r"."),
+)
+_LEX_TOKEN_RE = re.compile(
+    "|".join(f"(?P<{name}>{pattern})" for name, pattern in _TOKEN_SPEC),
+    re.DOTALL,
+)
+_TOKEN_TYPE_BY_GROUP = {
+    "START_BLOCK": TokenType.START_BLOCK,
+    "END_BLOCK": TokenType.END_BLOCK,
+    "FIELD_NAME": TokenType.FIELD_NAME,
+    "STRING_VALUE": TokenType.STRING_VALUE,
+    "OTHER_VALUE": TokenType.OTHER_VALUE,
+    "SPACE": TokenType.SPACE,
+    "NEWLINE": TokenType.NEWLINE,
+}
+
+
+class ParseError(ValueError):
+    def __init__(self, msg: str):
+        super().__init__(msg)
 
 
 def _lex_line(line: str) -> Iterable[Token]:
-    while line:  # is not empty
-        next_char = line[0]
-
-        if next_char == "#":
+    for m in _LEX_TOKEN_RE.finditer(line):
+        kind = m.lastgroup
+        if kind == "COMMENT":
             # Comment extends to end of line
             break
-
-        if next_char in {",", ";"}:
+        if kind == "SEPARATOR":
             # Skip optional field separators
-            line = line[1:]
             continue
-
-        if next_char in {"<", "{"}:
-            yield Token(text=next_char, type=TokenType.START_BLOCK)
-            line = line[1:]
-            continue
-
-        if next_char in {">", "}"}:
-            yield Token(text=next_char, type=TokenType.END_BLOCK)
-            line = line[1:]
-            continue
-
-        field_match = _FIELD_NAME_RE.match(line)
-        if field_match:
-            field_name = field_match.group(0)
-            yield Token(text=field_name, type=TokenType.FIELD_NAME)
-            line = line[len(field_name) :]
-            continue
-
-        string_match = _STRING_RE.match(line)
-        if string_match:
-            string = string_match.group(0)
-            yield Token(text=string, type=TokenType.STRING_VALUE)
-            line = line[len(string) :]
-            continue
-
-        value_match = _VALUE_RE.match(line)
-        if value_match:
-            value = value_match.group(0)
-            yield Token(text=value, type=TokenType.OTHER_VALUE)
-            line = line[len(value) :]
-            continue
-
-        space_match = _SPACE_RE.match(line)
-        if space_match:
-            space = space_match.group(0)
-            yield Token(text=space, type=TokenType.SPACE)
-            line = line[len(space) :]
-            continue
-
-        newline_match = _NEWLINE_RE.match(line)
-        if newline_match:
-            newline = newline_match.group(0)
-            yield Token(text=newline, type=TokenType.NEWLINE)
-            line = line[len(newline) :]
-            continue
-
-        raise ValueError(f'[textpb.lex] Unrecognized text: "{line}"')
+        if kind == "MISMATCH" or kind is None:
+            snippet = line[m.start() : m.start() + _MAX_ERROR_SNIPPET_LEN]
+            raise ParseError(f'[textpb.lex] Unrecognized text: "{snippet}"')
+        yield Token(text=m.group(0), type=_TOKEN_TYPE_BY_GROUP[kind])
 
 
 def yield_verbose(items: Iterable[Any]) -> Iterable[Any]:
@@ -112,11 +121,6 @@ def _lex(lines: Iterable[str]) -> Iterable[Token]:
     """Divides proto text into tokens."""
     for line in lines:
         yield from _lex_line(line)
-
-
-class ParseError(ValueError):
-    def __init__(self, msg: str):
-        super().__init__(msg)
 
 
 def _auto_dict(values: Sequence[Any]) -> Any:
@@ -134,7 +138,7 @@ def _auto_dict(values: Sequence[Any]) -> Any:
     return values
 
 
-def _parse_block(tokens: Iterator[Token], top: bool) -> dict[str, Any]:
+def _parse_block(tokens: Iterator[Token], top: bool) -> TextProtoDict:
     """Parse text proto tokens into a structure.
 
     Args:
@@ -165,10 +169,18 @@ def _parse_block(tokens: Iterator[Token], top: bool) -> dict[str, Any]:
                 )
             break
 
-        if field.type != TokenType.FIELD_NAME:
+        if field.type == TokenType.FIELD_NAME:
+            has_colon = field.text.endswith(":")
+            key = field.text[:-1] if has_colon else field.text
+        elif (
+            field.type == TokenType.OTHER_VALUE
+            and _IDENT_RE.fullmatch(field.text) is not None
+        ):
+            has_colon = False
+            key = field.text
+        else:
             raise ParseError(f"Expected a field name, but got {field}.")
 
-        key = field.text[:-1]  # removes trailing ':'
         try:
             value_or_block = next(tokens)
         except StopIteration:
@@ -176,10 +188,10 @@ def _parse_block(tokens: Iterator[Token], top: bool) -> dict[str, Any]:
                 "Unexpected EOF, expecting a value or start-of-block."
             )
 
-        value: dict[str, Any] | Token
+        value: TextProtoDict | Token
         if value_or_block.type == TokenType.START_BLOCK:
             value = _parse_block(tokens, top=False)
-        elif value_or_block.type in {
+        elif has_colon and value_or_block.type in {
             TokenType.STRING_VALUE,
             TokenType.OTHER_VALUE,
         }:
@@ -193,11 +205,11 @@ def _parse_block(tokens: Iterator[Token], top: bool) -> dict[str, Any]:
     return {k: _auto_dict(v) for k, v in result.items()}
 
 
-def _parse_tokens(tokens: Iterator[Token]) -> dict[str, Any]:
+def _parse_tokens(tokens: Iterator[Token]) -> TextProtoDict:
     return _parse_block(tokens, top=True)
 
 
-def parse(lines: Iterable[str]) -> dict[str, Any]:
+def parse(lines: Iterable[str]) -> TextProtoDict:
     """Parse a text protobuf into a recursive dictionary.
 
     Args:
@@ -216,8 +228,72 @@ def parse(lines: Iterable[str]) -> dict[str, Any]:
     )
 
 
-_WHITESPACE_OR_COMMENT_RE = re.compile(r"(?:[ \t\r\n,;]+|#[^\r\n]*)*")
-_CANDIDATE_DELIM_RE = re.compile(r"""[{}<>"#]""")
+_COMMENT_PATTERN = r"(?:#|//)[^\r\n]*+"
+_WS_OR_COMMENT_PATTERN = rf"(?:[ \t\r\n,;]++|{_COMMENT_PATTERN})*+"
+_WHITESPACE_OR_COMMENT_RE = re.compile(_WS_OR_COMMENT_PATTERN)
+
+# Non-structural chunks skipped in a single C regex pass by _find_block_end():
+#   1. Runs of ordinary characters (excluding delimiters, quotes, and comments)
+#   2. Complete quoted string literals (ignoring any '{', '}', '<', '>', '#', '//' inside)
+#   3. Line comments ('#' or '//', ignoring any quotes or delimiters until end-of-line)
+#   4. Standalone '/' characters (e.g. inside '[type.googleapis.com/pkg.Message]')
+#
+# Performance note:
+#   Skipping complete string literals and comments inside C avoids returning to
+#   Python on every '"', '#', and '//' (eliminating thousands of Python<->C
+#   transitions and Python backslash-counting loops when skipping large
+#   submessages like `command` with 1,500+ quoted arguments).
+#   The chunk alternatives begin with mutually exclusive patterns
+#   ([^"{}<>#/], '"', '#' or '//', '/(?!/)'), and the possessive quantifiers
+#   (++ and *+) lock in each matched chunk so the engine never backtracks across
+#   already-scanned strings if a subsequent string is unterminated or a block is
+#   unclosed at EOF.
+_BLOCK_SKIP_CHUNKS = (
+    r'[^"{}<>#/]++',
+    _STRING_PATTERN,
+    _COMMENT_PATTERN,
+    r"/(?!/)",
+)
+_BLOCK_SKIP_PATTERN = f"(?:{'|'.join(_BLOCK_SKIP_CHUNKS)})*+"
+_NEXT_DELIM_RE = re.compile(rf'{_BLOCK_SKIP_PATTERN}([{{}}<>"])')
+_CLOSE_DELIM_BY_OPEN = {"{": "}", "<": ">"}
+
+# RHS alternatives after '<key>:' in _index_fields().
+_COLON_RHS_SPEC = (
+    ("block", r"[{<]"),
+    ("str", _STRING_PATTERN),
+    ("val", _VALUE_PATTERN),
+)
+_COLON_RHS_PATTERN = "|".join(
+    f"(?P<{name}>{pattern})" for name, pattern in _COLON_RHS_SPEC
+)
+
+# Fused single-step matcher for the hot loop of _index_fields().
+#
+# Performance note:
+#   Fuses 4 separate per-field regex matches (leading whitespace/comments, field
+#   identifier, post-colon whitespace/comments, and scalar value or opening
+#   block delimiter) into a single C regex invocation per field:
+#     - end_block:         closing '}' or '>' of the current block
+#     - block / str / val: '<key> : <rhs>' (colon present)
+#     - colonless_block:   '<key> { ... }' (colon omitted before submessage)
+#   Capturing `(?P<key>...)` prior to `:` extracts the field name directly in C
+#   without allocating an intermediate `key:` string slice. Dispatches via
+#   `Match.lastgroup` on the happy path and delegates syntax errors (`m is None`
+#   before EOF) to the cold `_raise_index_parse_error()` helper.
+_FIELD_STEP_BRANCHES = (
+    r"(?P<end_block>[>}])",
+    (
+        f"(?P<key>{_FIELD_KEY_PATTERN})"
+        r"(?:"
+        f":{_WS_OR_COMMENT_PATTERN}(?:{_COLON_RHS_PATTERN})"
+        f"|{_WS_OR_COMMENT_PATTERN}(?P<colonless_block>[{{<])"
+        r")"
+    ),
+)
+_FIELD_STEP_RE = re.compile(
+    f"{_WS_OR_COMMENT_PATTERN}(?:{'|'.join(_FIELD_STEP_BRANCHES)})"
+)
 
 
 @dataclasses.dataclass(slots=True)
@@ -249,7 +325,7 @@ def _find_block_end(
     """Finds the matching closing delimiter for a block starting at start_pos.
 
     Scans forward by balancing opening and closing delimiters ({}, <>) while
-    ignoring structural characters inside string literals and comments.
+    skipping string literals and comments in C via `_NEXT_DELIM_RE`.
 
     Performance note:
       If a caller traverses deeply nested submessages down to depth D, the
@@ -263,37 +339,20 @@ def _find_block_end(
       slowing down the common path. The stateless scanner is a deliberate
       trade-off favoring simplicity and zero allocations.
     """
-    close_map = {"{": "}", "<": ">"}
-    stack = [close_map[open_delim]]
+    stack = [_CLOSE_DELIM_BY_OPEN[open_delim]]
     pos = start_pos
-    quote_char = '"'
     while pos < end_pos:
-        m = _CANDIDATE_DELIM_RE.search(text, pos, end_pos)
-        if not m:
+        m = _NEXT_DELIM_RE.match(text, pos, end_pos)
+        if m is None:
             break
-        ch = m.group(0)
-        idx = m.start()
-        if ch == quote_char:
+        ch = m.group(1)
+        idx = m.end() - 1
+        if ch == '"':
+            raise ParseError(f"Unterminated string starting at {idx}")
+        if ch in "{<":
+            stack.append(_CLOSE_DELIM_BY_OPEN[ch])
             pos = idx + 1
-            while pos < end_pos:
-                end_q = text.find(quote_char, pos, end_pos)
-                if end_q == -1:
-                    raise ParseError(f"Unterminated string starting at {idx}")
-                bs_count = 0
-                b = end_q - 1
-                while b >= idx and text[b] == "\\":
-                    bs_count += 1
-                    b -= 1
-                pos = end_q + 1
-                if bs_count % 2 == 0:
-                    break
-        elif ch == "#":
-            nl = text.find("\n", idx + 1, end_pos)
-            pos = nl + 1 if nl != -1 else end_pos
-        elif ch in "{<":
-            stack.append(close_map[ch])
-            pos = idx + 1
-        elif ch in "}>":
+        else:  # ch in "}>"
             if not stack or ch != stack[-1]:
                 raise ParseError(
                     f"Mismatched end-of-block: got '{ch}', expected '{stack[-1] if stack else None}'"
@@ -301,10 +360,44 @@ def _find_block_end(
             stack.pop()
             pos = idx + 1
             if not stack:
-                return idx, idx + 1
-        else:
-            pos = idx + 1
+                return idx, pos
     raise ParseError("Unexpected EOF, missing '>' or '}' end-of-block")
+
+
+def _raise_index_parse_error(text: str, pos: int, end: int) -> NoReturn:
+    """Diagnoses and raises a ParseError when _FIELD_STEP_RE fails at pos."""
+    m_field = _FIELD_NAME_RE.match(text, pos, end)
+    if not m_field:
+        m_tok = _LEX_TOKEN_RE.match(text, pos, end)
+        tok = (
+            m_tok.group(0)[:_MAX_ERROR_SNIPPET_LEN]
+            if m_tok is not None
+            else text[pos]
+        )
+        raise ParseError(f"Expected a field name, but got '{tok}'.")
+
+    raw_field = m_field.group(0)
+    has_colon = raw_field.endswith(":")
+    key = raw_field[:-1] if has_colon else raw_field
+    pos = m_field.end()
+
+    m_ws = _WHITESPACE_OR_COMMENT_RE.match(text, pos, end)
+    if m_ws:
+        pos = m_ws.end()
+
+    if pos >= end:
+        raise ParseError("Unexpected EOF, expecting a value or start-of-block.")
+
+    next_ch = text[pos]
+    if not has_colon:
+        raise ParseError(
+            f"Expected ':' or start-of-block after field '{key}', but got '{next_ch}'."
+        )
+    if next_ch == '"':
+        raise ParseError(f"Unterminated string starting at {pos}")
+    if next_ch in "}>":
+        raise ParseError("Unexpected token: TokenType.END_BLOCK")
+    raise ParseError(f"Unexpected character: '{next_ch}'")
 
 
 def _index_fields(
@@ -324,94 +417,59 @@ def _index_fields(
     pos = start
     fields: dict[str, list[_FieldEntry]] = collections.defaultdict(list)
     while pos < end:
-        # Skip inter-field whitespace, comments, and optional separators (, ;)
-        m_ws = _WHITESPACE_OR_COMMENT_RE.match(text, pos, end)
-        if m_ws:
-            pos = m_ws.end()
-        if pos >= end:
-            break
+        m = _FIELD_STEP_RE.match(text, pos, end)
+        if m is None:
+            m_ws = _WHITESPACE_OR_COMMENT_RE.match(text, pos, end)
+            if m_ws:
+                pos = m_ws.end()
+            if pos >= end:
+                break
+            _raise_index_parse_error(text, pos, end)
 
-        # Check for closing delimiter of the current block
-        ch = text[pos]
-        if ch in "}>":
-            if top:
-                raise ParseError(
-                    "Unexpected end-of-block at top-level before EOF."
+        kind = m.lastgroup
+        if kind == "str":
+            fields[m.group("key")].append(
+                _FieldEntry(
+                    is_message=False,
+                    value_text=m.group("str"),
+                    token_type=TokenType.STRING_VALUE,
                 )
-            break
-
-        # Match the field identifier (e.g. "field_name:")
-        m_field = _FIELD_NAME_RE.match(text, pos, end)
-        if not m_field:
-            tok = (
-                text[pos : pos + 20].split()[0]
-                if text[pos : pos + 20].split()
-                else text[pos]
             )
-            raise ParseError(f"Expected a field name, but got '{tok}'.")
-
-        key = m_field.group(0)[:-1]
-        pos = m_field.end()
-
-        # Skip whitespace/comments between the field name and its value or block
-        m_ws = _WHITESPACE_OR_COMMENT_RE.match(text, pos, end)
-        if m_ws:
-            pos = m_ws.end()
-
-        if pos >= end:
-            raise ParseError(
-                "Unexpected EOF, expecting a value or start-of-block."
+            pos = m.end()
+        elif kind == "val":
+            fields[m.group("key")].append(
+                _FieldEntry(
+                    is_message=False,
+                    value_text=m.group("val"),
+                    token_type=TokenType.OTHER_VALUE,
+                )
             )
-
-        next_ch = text[pos]
-        if next_ch in "{<":
+            pos = m.end()
+        elif kind == "block" or kind == "colonless_block":
             # Submessage block: record the inner body span without descending
             # or parsing any nested fields inside it.
-            body_start = pos + 1
-            body_end, block_end = _find_block_end(
-                text, next_ch, body_start, end
+            body_start = m.end()
+            body_end, pos = _find_block_end(
+                text, text[body_start - 1], body_start, end
             )
-            fields[key].append(
+            fields[m.group("key")].append(
                 _FieldEntry(
                     is_message=True,
                     body_start=body_start,
                     body_end=body_end,
                 )
             )
-            pos = block_end
-        elif next_ch == '"':
-            # Quoted string value
-            m_str = _STRING_RE.match(text, pos, end)
-            if not m_str:
-                raise ParseError(f"Unterminated string starting at {pos}")
-            fields[key].append(
-                _FieldEntry(
-                    is_message=False,
-                    value_text=m_str.group(0),
-                    token_type=TokenType.STRING_VALUE,
+        else:  # kind == "end_block"
+            if top:
+                raise ParseError(
+                    "Unexpected end-of-block at top-level before EOF."
                 )
-            )
-            pos = m_str.end()
-        elif next_ch in "}>":
-            raise ParseError("Unexpected token: TokenType.END_BLOCK")
-        else:
-            # Unquoted scalar value (enum, number, boolean identifier)
-            m_val = _VALUE_RE.match(text, pos, end)
-            if not m_val:
-                raise ParseError(f"Unexpected character: '{next_ch}'")
-            fields[key].append(
-                _FieldEntry(
-                    is_message=False,
-                    value_text=m_val.group(0),
-                    token_type=TokenType.OTHER_VALUE,
-                )
-            )
-            pos = m_val.end()
+            break
 
     return fields
 
 
-class LazyMapping(Mapping[str, Any]):
+class LazyMapping(TextProtoMapping):
     """Lazy, hierarchical mapping representation of a text protobuf message.
 
     This class provides a drop-in replacement for the nested dictionary structure
@@ -539,7 +597,7 @@ class LazyMapping(Mapping[str, Any]):
             return False
         return dict(self.items()) == dict(other.items())
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self) -> TextProtoDict:
         """Recursively converts this LazyMapping into a standard Python dict."""
 
         def _conv(v: Any) -> Any:
@@ -573,6 +631,20 @@ def parse_lazy(text: str) -> LazyMapping:
       repeated (lists) or as key-value dictionaries.
     """
     return LazyMapping(text, start=0, end=len(text), top=True)
+
+
+def walk_messages(msg: TextProtoMapping) -> Iterator[TextProtoMapping]:
+    """Yields msg and all nested Mapping blocks within it in pre-order."""
+    yield msg
+    for values in msg.values():
+        if isinstance(values, Mapping):
+            yield from walk_messages(values)
+        elif isinstance(values, Sequence) and not isinstance(
+            values, (str, bytes)
+        ):
+            for item in values:
+                if isinstance(item, Mapping):
+                    yield from walk_messages(item)
 
 
 def _main_arg_parser() -> argparse.ArgumentParser:

@@ -9,5 +9,5 @@ definitions under test, for reference.
 On the other hand, certain FIDL constructs are used in the higher layers, but are not supported
 by the C bindings right now, e.g. tables. `fidlc` is able to generate the coding tables for FIDL
 tables, but cannot generate their binding APIs. In order to unit test the table code paths, we will
-generate and check in their LLCPP bindings `extra_messages.h` from `extra_messages.test.fidl`.
+generate and check in their C++ wire bindings `extra_messages.h` from `extra_messages.test.fidl`.
 

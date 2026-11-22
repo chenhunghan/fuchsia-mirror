@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fidl_fuchsia_component_runtime as fruntime;
-use fidl_fuchsia_component_sandbox as fsandbox;
+use fidl_fuchsia_component_runtime_common as fruntime;
+use fidl_fuchsia_component_sandbox_common as fsandbox;
 use moniker::Moniker;
 use std::fmt::{self, Debug, Display};
 use std::sync::Arc;

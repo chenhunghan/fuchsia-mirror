@@ -11,26 +11,23 @@
 //! [`TrackedCriticalMutex`]) and their lock policies, which are re-exported from
 //! `crate::ksync_kernel`.
 //!
-//! The C++ `Mutex` methods `~Mutex` and `AcquireCommon`, and the contended slow path of
-//! `ReleaseInternal`, forward to the `rust_mutex_*` functions at the bottom of this file. The
-//! uncontended release fast path exists twice: in C++ (`Mutex::ReleaseInternal` in
-//! `zircon/kernel/kernel/mutex.cc`), so that ThinLTO can inline it into C++ callers, and in Rust
-//! ([`Mutex::release`]), so that it is inlined into Rust callers. The two must stay in sync.
+//! The C++ `Mutex` and `CriticalMutex` are facades over opaque storage holding the Rust `Mutex`
+//! and `CriticalMutex` in place. All of their methods, including their constructors and
+//! destructors, forward to the `rust_*mutex_*` functions at the bottom of this file.
 
 use affine::Round;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
-use core::marker::{PhantomData, PhantomPinned};
-use core::mem::{align_of, offset_of, size_of};
+use core::mem::{MaybeUninit, align_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use ksync::{
-    ConstRawLock, ExclusiveLockPolicy, LockPolicy, LockdepTracked, RawLock,
-    impl_lockdep_tracked_lock_policy,
+    AdoptableLockPolicy, ExclusiveLockPolicy, LockPolicy, LockdepTracked, RawAssertHeldLock,
+    RawLock, RawUntrackedLock, RawUntrackedStatefulLock, impl_lockdep_tracked_lock_policy,
 };
 use mutex_bindings as bindings;
-use pin_init::{PinInit, pin_data, pin_init_from_closure, pinned_drop};
+use pin_init::{PinInit, pin_data, pin_init, pin_init_from_closure, pinned_drop};
 use zr::static_assert;
 use zx_types::{ZX_KOID_INVALID, zx_duration_mono_t, zx_status_t};
 
@@ -71,10 +68,6 @@ const STATE_FREE: usize = 0;
 /// Flag bit in `val` indicating that at least one thread is blocked waiting on the [`Mutex`].
 const STATE_FLAG_CONTESTED: usize = 1;
 
-static_assert!(MAGIC == bindings::MutexLayout_kMagic);
-static_assert!(STATE_FREE == bindings::MutexLayout_kStateFree);
-static_assert!(STATE_FLAG_CONTESTED == bindings::MutexLayout_kStateFlagContested);
-
 /// Whether `LK_DEBUGLEVEL > 0`.
 const LK_DEBUGLEVEL_GT_0: bool = !cfg!(lk_debuglevel = "0");
 
@@ -94,7 +87,7 @@ enum KernelMutexTracingLevel {
     /// Trace events are generated for all mutex interactions.
     #[allow(
         dead_code,
-        reason = "unsupported while the uncontended release fast paths are untraced; see below"
+        reason = "unsupported while the uncontended release fast path is untraced; see below"
     )]
     All,
 }
@@ -102,10 +95,8 @@ enum KernelMutexTracingLevel {
 /// By default, kernel mutex tracing is disabled.
 const KERNEL_MUTEX_TRACING_LEVEL: KernelMutexTracingLevel = KernelMutexTracingLevel::None;
 
-// Neither uncontended release fast path emits trace events: the C++ `Mutex::ReleaseInternal` in
-// `zircon/kernel/kernel/mutex.cc` (kept in C++ so that ThinLTO can inline it into C++ callers),
-// nor its Rust copy, `Mutex::release`.
-// Tracing all mutex interactions requires adding uncontended release tracing to both.
+// The uncontended release fast path in `Mutex::release` does not emit trace events.
+// Tracing all mutex interactions requires adding uncontended release tracing there.
 static_assert!(!matches!(KERNEL_MUTEX_TRACING_LEVEL, KernelMutexTracingLevel::All));
 
 /// The duration, in ticks, given to the synthetic complete events emitted by [`KTracer`].
@@ -253,9 +244,8 @@ impl TimesliceExtension for WithTimesliceExtension {
 
 /// Kernel mutex support.
 ///
-/// Layout-compatible with the C++ `Mutex` class, including its
-/// `spin_tracing::LockNameStorage` base, which is empty unless scheduler lock spin tracing or
-/// lock name tracing is enabled.
+/// The C++ `Mutex` is a facade over opaque storage holding a Rust `Mutex` in place, whose size
+/// and alignment are asserted against `mutex_bindings`.
 ///
 /// Every byte of a `Mutex` is interior-mutable (atomics or `UnsafeCell`, with no padding) so
 /// `&Mutex` carries no `Freeze` bytes. Once a releasing thread clears `val` (or detaches and
@@ -267,16 +257,14 @@ impl TimesliceExtension for WithTimesliceExtension {
 /// waits for the releasing thread to drop the inner [`OwnedWaitQueue`] lock.
 ///
 /// Instances are constructed, acquired, released and destroyed both through the C++ `Mutex` API
-/// and, by Rust `ksync::KMutex`, through the Rust API below. The C++ kernel unit tests in
-/// `mutex_tests.cc` cover this implementation through the `rust_mutex_*` FFI forwarders, and the
-/// `ksync` kernel tests and `mutex_spin_time_tests.rs` cover the Rust API.
+/// and, by Rust `ksync::KMutex`, through the Rust API below, which is covered by the unit tests in
+/// this file, the `ksync` kernel tests, and `mutex_spin_time_tests.rs`.
 #[pin_data(PinnedDrop)]
 #[repr(C)]
 pub struct Mutex {
-    /// Storage for the lock name and encoded lock ID used by lock tracing. Corresponds to the
-    /// C++ `spin_tracing::LockNameStorage` base class, and is zero-sized when
-    /// `MUTEX_NAME_TRACING_ENABLED` is false. Wrapped in `UnsafeCell` so `Mutex` has no `Freeze`
-    /// bytes.
+    /// Storage for the lock name and encoded lock ID used by lock tracing, which is zero-sized
+    /// when `MUTEX_NAME_TRACING_ENABLED` is false. Wrapped in `UnsafeCell` so `Mutex` has no
+    /// `Freeze` bytes.
     name_storage: UnsafeCell<MutexNameStorage>,
 
     /// Structure guard (`'mutx'` while live, zeroed on drop). Wrapped in `UnsafeCell` so
@@ -297,15 +285,10 @@ pub struct Mutex {
     val: AtomicPtr<Thread>,
     #[pin]
     wait: LazyOwnedWaitQueue,
-
-    /// No moving or copying allowed; wrapped in `PhantomData` so `Mutex` and types embedding it
-    /// stay FFI-safe (`improper_ctypes` rejects a bare `PhantomPinned`).
-    #[pin]
-    _pin: PhantomData<PhantomPinned>,
 }
 
-// SAFETY: `Mutex` has no thread-local ownership invariants and is `!Unpin`, so ownership of a
-// pinned `Mutex` can be transferred across threads.
+// SAFETY: `Mutex` has no thread-local ownership invariants and is `!Unpin` (`wait` is), so
+// ownership of a pinned `Mutex` can be transferred across threads.
 unsafe impl Send for Mutex {}
 // SAFETY: Shared accesses through `&Mutex` operate on the `maybe_acquired_on_cpu`, `val`, and
 // `wait` atomics, or perform volatile reads of `magic` while the mutex is live. `name_storage` is
@@ -327,22 +310,55 @@ impl Mutex {
     /// timeslice extension.
     pub const DEFAULT_TIMESLICE_EXTENSION: DurationMono = Self::SPIN_MAX_DURATION;
 
-    /// Creates an unlocked `Mutex`, matching a constant-initialized C++ `Mutex`.
+    /// Creates an unlocked `Mutex` with no lock class name.
     ///
-    /// When mutex name tracing is enabled, the lock ID is left as a placeholder (see
-    /// `MutexNameStorage::const_init`) rather than being assigned a unique ID as by the C++
-    /// default constructor.
-    pub const fn new() -> Self {
+    /// When mutex name tracing is enabled, this assigns the mutex a unique lock ID. This is why
+    /// `Mutex` cannot be constructed in a `const` context: statically allocated mutexes must
+    /// instead be initialized at runtime (for example, in a `LazyInit`).
+    #[inline]
+    pub fn new() -> Self {
+        Self::with_name_storage(MutexNameStorage::<MUTEX_NAME_TRACING_ENABLED>::new())
+    }
+
+    /// Creates an unlocked `Mutex` with the lock class name `name`.
+    ///
+    /// When mutex name tracing is enabled, this assigns the mutex a unique lock ID and records
+    /// `name` as its lock class name; otherwise `name` is ignored.
+    #[inline]
+    pub fn new_with_name(name: &'static InternedString) -> Self {
+        Self::with_name_storage(MutexNameStorage::<MUTEX_NAME_TRACING_ENABLED>::with_class_name(
+            name,
+        ))
+    }
+
+    /// Creates an unlocked `Mutex` with the given lock name storage.
+    #[inline]
+    fn with_name_storage(name_storage: MutexNameStorage) -> Self {
         Self {
-            name_storage: UnsafeCell::new(
-                MutexNameStorage::<MUTEX_NAME_TRACING_ENABLED>::const_init(IdStringRef::INVALID_ID),
-            ),
+            name_storage: UnsafeCell::new(name_storage),
             magic: UnsafeCell::new(fbl::Canary::new()),
             maybe_acquired_on_cpu: AtomicU32::new(INVALID_CPU),
             val: AtomicPtr::new(ptr::null_mut()),
             wait: LazyOwnedWaitQueue::new(),
-            _pin: PhantomData,
         }
+    }
+
+    /// Records the lock class name of `lcid` for mutex name tracing (when enabled).
+    ///
+    /// # Safety
+    ///
+    /// - For the duration of this call, the caller must ensure no other reference or concurrent
+    ///   access to this mutex's `name_storage` exists (for example, during single-threaded lock
+    ///   initialization before the mutex is shared).
+    /// - `lcid` must satisfy all preconditions of [`MutexNameStorage::set_lock_class_id`].
+    #[inline]
+    pub unsafe fn set_lock_class_id(&self, lcid: *const c_void) {
+        // SAFETY:
+        // - `self.name_storage.get()` is non-null, properly aligned, and points to an initialized
+        //   `MutexNameStorage`, and the caller guarantees exclusive access to `name_storage` for
+        //   the duration of this call, so forming `&mut *self.name_storage.get()` is valid.
+        // - The caller guarantees `lcid` satisfies `MutexNameStorage::set_lock_class_id`.
+        unsafe { (&mut *self.name_storage.get()).set_lock_class_id(lcid) };
     }
 
     /// Acquire the mutex, spinning for at most `spin_max_duration` before blocking.
@@ -352,7 +368,7 @@ impl Mutex {
     /// The caller must be in blockable thread context (so the current thread is live while it
     /// runs), hold no spinlocks, have no `ChainLockTransaction` active on the current CPU, and not
     /// already hold this mutex.
-    #[inline]
+    #[inline(always)]
     pub unsafe fn acquire(&self, spin_max_duration: DurationMono) {
         // SAFETY: Forwarded from the caller.
         unsafe { self.acquire_common(spin_max_duration, NoTimesliceExtension) };
@@ -360,8 +376,7 @@ impl Mutex {
 
     /// Release the mutex. Must be held by the current thread.
     ///
-    /// This is the Rust equivalent of the C++ `Mutex::ReleaseInternal()`, and must stay in sync
-    /// with it. As there, uncontended releases are not traced (see the static assertion on
+    /// Uncontended releases are not traced (see the static assertion on
     /// [`KERNEL_MUTEX_TRACING_LEVEL`]).
     ///
     /// Takes a `NonNull` rather than `&self` because, once the release is published, another
@@ -376,9 +391,9 @@ impl Mutex {
     /// blockable thread context and have no `ChainLockTransaction` active. The storage of `this`
     /// must not be freed or reused until the mutex's destruction ([`Mutex::destroy`]) has
     /// returned, which waits for a contended release to stop accessing it.
-    #[inline]
+    #[inline(always)]
     pub unsafe fn release(this: NonNull<Self>) {
-        {
+        let val_ptr = {
             // SAFETY: The caller guarantees `this` is live, and the release has not yet been
             // published. The reference does not outlive this scope.
             let mutex = unsafe { this.as_ref() };
@@ -390,7 +405,8 @@ impl Mutex {
             // Ordering: `Relaxed`, as `maybe_acquired_on_cpu` is only a best-effort hint for
             // spinners; see the comment near the start of `acquire_contended_mutex`.
             mutex.maybe_acquired_on_cpu.store(INVALID_CPU, Ordering::Relaxed);
-        }
+            NonNull::from(&mutex.val)
+        };
 
         let current_thread_ptr = thread::current_get();
 
@@ -403,7 +419,7 @@ impl Mutex {
         // SAFETY: The caller guarantees `this` is live until the release is published. No
         // reference to the whole `Mutex` is formed, and the reference to `val` is a temporary,
         // ending at this compare exchange, which publishes the release.
-        let result = unsafe { &(*this.as_ptr()).val }.compare_exchange(
+        let result = unsafe { val_ptr.as_ref() }.compare_exchange(
             Self::state_for_thread(current_thread_ptr),
             ptr::null_mut(),
             Ordering::Release,
@@ -416,7 +432,7 @@ impl Mutex {
             // whose state was observed to be the contested `old_mutex_state`. The remaining
             // requirements are forwarded from the caller.
             unsafe {
-                Self::release_contended_mutex(this, &*current_thread_ptr, old_mutex_state.addr())
+                Self::release_contended_mutex(this, current_thread_ptr, old_mutex_state.addr())
             };
         }
         // Otherwise we're done.  Since this mutex was uncontested, we know that we were not
@@ -429,11 +445,20 @@ impl Mutex {
         core::ptr::eq(self.holder(), thread::current_get())
     }
 
+    /// Panic unless the given lock is held.
+    ///
+    /// Can be used when thread safety analysis can't prove you are holding
+    /// a lock. The asserts may be optimized away in release builds.
+    #[inline(always)]
+    pub fn assert_held(&self) {
+        debug_assert!(self.is_held());
+    }
+
     /// Is the mutex contested i.e. is at least one thread blocked waiting on it?
     ///
     /// The contested flag does not track threads which are spin-waiting on the
     /// Mutex and have yet to enter a blocking phase.
-    #[inline]
+    #[inline(always)]
     pub fn is_contested(&self) -> bool {
         (self.val().addr() & STATE_FLAG_CONTESTED) != 0
     }
@@ -476,13 +501,13 @@ impl Mutex {
 
     /// Returns the encoded lock ID used by lock spin tracing.
     #[inline(always)]
-    fn encoded_lock_id(&self) -> EncodedLockId {
+    pub(crate) fn encoded_lock_id(&self) -> EncodedLockId {
         self.name_storage().encoded_lock_id()
     }
 
     /// Returns the string reference for this lock's class name.
     #[inline(always)]
-    fn class_name_ref(&self) -> IdStringRef {
+    pub(crate) fn class_name_ref(&self) -> IdStringRef {
         self.name_storage().class_name_ref()
     }
 
@@ -529,8 +554,8 @@ impl Mutex {
         thread.addr()
     }
 
-    /// The `Mutex`-specific body of `~Mutex`; the members are destroyed separately by whichever
-    /// language owns the instance.
+    /// The `Mutex`-specific part of dropping a `Mutex`, run by its `PinnedDrop` before its
+    /// members are dropped.
     ///
     /// # Safety
     ///
@@ -538,6 +563,7 @@ impl Mutex {
     /// by the current thread: it must be unlocked, with no threads blocked on or attempting to
     /// acquire it, and no thread may use it after this returns. Other threads may only still be
     /// finishing a release of it (see [`Mutex::release_contended_mutex`]).
+    #[inline]
     unsafe fn destroy(&self) {
         self.magic().assert();
         debug_assert!(!blocking_disallowed());
@@ -549,9 +575,9 @@ impl Mutex {
         // release_contended_mutex, so observing no queue happens-after the releasing thread's
         // last access to this mutex.
         while let Some(queue) = self.wait.peek() {
+            core::hint::cold_path();
             // SAFETY: Queues borrowed from the `OwnedWaitQueuePool` are never freed.
             if unsafe { queue.as_ref() }.lock().is_unlocked() {
-                core::hint::cold_path();
                 // `is_unlocked` is a `Relaxed` load. Pair it with the releasing thread's `Release`
                 // unlock of the queue (which follows its detach) so that, as above, destruction
                 // happens-after that thread's last access to this mutex.
@@ -634,14 +660,8 @@ impl Mutex {
                 // To ensure there is no gap between acquiring the mutex, and setting the timeslice
                 // extension, we optimistically set the timeslice extension first. Should acquiring
                 // the mutex fail we will roll it back.
-                //
-                // SAFETY: The caller guarantees we are in thread context, where the current thread
-                // is live while it runs. The reference is only formed when needed, keeping its
-                // validity checks off the fast path without a timeslice extension.
-                let current_thread: &Thread = unsafe { &*current_thread_ptr };
-                set_extension = current_thread
-                    .preemption_state()
-                    .set_timeslice_extension(timeslice_extension.value().0);
+                set_extension =
+                    thread::preempt_set_timeslice_extension(timeslice_extension.value());
             }
 
             // Fast path: The mutex is unlocked and uncontested. Try to acquire it immediately.
@@ -857,6 +877,7 @@ impl Mutex {
                     if (current_thread.preemption_state().preempts_pending() & current_cpu_mask)
                         != 0
                     {
+                        core::hint::cold_path();
                         // Reenable preemption to trigger a local reschedule and then disable it
                         // again.
                         preempt_disabler.enable();
@@ -1150,10 +1171,8 @@ impl Mutex {
 
     /// Release a lock contended by another thread.
     ///
-    /// This is the slowpath taken by the C++ `Mutex::ReleaseInternal()`, via
-    /// [`rust_mutex_release_contended`], and by [`Mutex::release`], when releasing a lock that is
-    /// being waited for by another thread. Each of those implements the uncontended fast path
-    /// itself, so that it can be inlined into callers in its own language.
+    /// This is the slowpath taken by [`Mutex::release`] when releasing a lock that is being
+    /// waited for by another thread.
     ///
     /// This function is deliberately kept out of line to keep the stack set up, tear down in the
     /// inlined release fastpath small.
@@ -1169,7 +1188,7 @@ impl Mutex {
     #[inline(never)]
     unsafe fn release_contended_mutex(
         this: NonNull<Self>,
-        current_thread: &Thread,
+        current_thread: *const Thread,
         old_mutex_state: usize,
     ) {
         lock_trace_duration!(
@@ -1244,11 +1263,12 @@ impl Mutex {
                     // SAFETY: `this` is live: the release has not been published and we hold the
                     // queue's lock. The reference to `val` is a temporary.
                     let current_state = unsafe { &*val_ptr }.load(Ordering::Relaxed);
-                    // SAFETY: `current_state` was loaded from the live `this.val`.
+                    // SAFETY: `current_state` was loaded from the live `this.val`, and the caller
+                    // guarantees `current_thread` points to the live current thread.
                     unsafe {
                         Self::panic_release_inconsistent_state(
                             this.as_ptr(),
-                            current_thread,
+                            &*current_thread,
                             expected_state,
                             old_mutex_state,
                             current_state,
@@ -1440,7 +1460,7 @@ impl Mutex {
         observed_state: usize,
         current_state: *mut Thread,
     ) -> ! {
-        // `observed_state` is passed as an integer (by C++, or by `Mutex::release`), so carries no
+        // `observed_state` is passed as an integer by `Mutex::release`, so carries no
         // provenance. Only name the other holder recorded in the reloaded state if it still
         // matches.
         let other_holder = if current_state.addr() == observed_state {
@@ -1484,35 +1504,22 @@ impl Mutex {
     }
 }
 
-static_assert!(Mutex::SPIN_MAX_DURATION.into_nanos() == bindings::MutexLayout_kSpinMaxDuration);
+static_assert!(Mutex::SPIN_MAX_DURATION.into_nanos() == bindings::Mutex_SPIN_MAX_DURATION);
 static_assert!(
-    Mutex::DEFAULT_TIMESLICE_EXTENSION.into_nanos()
-        == bindings::MutexLayout_kDefaultTimesliceExtension
+    Mutex::DEFAULT_TIMESLICE_EXTENSION.into_nanos() == bindings::Mutex_DEFAULT_TIMESLICE_EXTENSION
 );
 
 // The low bit of `val` holds `STATE_FLAG_CONTESTED`, so it must always be clear in a `Thread`
 // pointer.
 static_assert!(align_of::<Thread>() > STATE_FLAG_CONTESTED);
 
-// `maybe_acquired_on_cpu` is a C++ `ktl::atomic<cpu_num_t>`.
+// `maybe_acquired_on_cpu` holds a `cpu_num_t`.
 static_assert!(size_of::<AtomicU32>() == size_of::<cpu_num_t>());
-static_assert!(align_of::<AtomicU32>() == align_of::<cpu_num_t>());
 
-// Compile-time layout assertions against the `MutexLayout` constants and opaque `Mutex` type
-// generated by bindgen of `<kernel/mutex_layout.h>`. The C++ `spin_tracing::LockNameStorage` base
-// class is always at offset zero.
-static_assert!(size_of::<Mutex>() == bindings::MutexLayout_kSize);
-static_assert!(align_of::<Mutex>() == bindings::MutexLayout_kAlign);
+// Compile-time layout assertions against the opaque `Mutex` facade type generated by bindgen of
+// `<kernel/mutex.h>`, as the C++ `Mutex` stores a Rust `Mutex` in place.
 static_assert!(size_of::<Mutex>() == size_of::<bindings::Mutex>());
 static_assert!(align_of::<Mutex>() == align_of::<bindings::Mutex>());
-static_assert!(offset_of!(Mutex, name_storage) == 0);
-static_assert!(size_of::<UnsafeCell<MutexNameStorage>>() == bindings::MutexLayout_kNameStorageSize);
-static_assert!(offset_of!(Mutex, magic) == bindings::MutexLayout_kMagicOffset);
-static_assert!(
-    offset_of!(Mutex, maybe_acquired_on_cpu) == bindings::MutexLayout_kMaybeAcquiredOnCpuOffset
-);
-static_assert!(offset_of!(Mutex, val) == bindings::MutexLayout_kValOffset);
-static_assert!(offset_of!(Mutex, wait) == bindings::MutexLayout_kWaitOffset);
 // `Mutex` has no padding bytes, so all of its bytes are initialized (see
 // `Mutex::raw_storage_slice`).
 static_assert!(
@@ -1525,6 +1532,7 @@ static_assert!(
 );
 
 impl Default for Mutex {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -1533,14 +1541,15 @@ impl Default for Mutex {
 #[pinned_drop]
 impl PinnedDrop for Mutex {
     fn drop(self: Pin<&mut Self>) {
-        // SAFETY: Rust is destroying this `Mutex`, which it owns. Every thread that holds, is
-        // blocked on, or is attempting to acquire the mutex does so through a borrow of it, so
-        // none may remain once it is being dropped. Another thread may only still be finishing a
-        // release of it through a raw pointer, which `destroy` waits for; as `Mutex` is `!Unpin`,
-        // `Pin<&mut Self>` makes no uniqueness assertion that conflicts with that thread's
-        // accesses. As for the C++ `~Mutex`, a `Mutex` must be destroyed in thread context, which
-        // `destroy` debug-asserts, and `destroy` panics (when `LK_DEBUGLEVEL > 0`) if the mutex
-        // is still locked. The members are dropped after this returns.
+        // SAFETY: Whether dropped via Rust ownership or `rust_*mutex_destroy`, every thread that
+        // holds, is blocked on, or is attempting to acquire the mutex does so through a borrow or
+        // under a contract keeping the mutex alive (`KMutexGuard::from_raw` or C++ `Mutex`
+        // lifetime rules), so none remain once it is being dropped, and drops run in thread context
+        // (debug-asserted by `destroy`, which also panics when `LK_DEBUGLEVEL > 0` if still
+        // locked). Another thread may only still be finishing `release_contended_mutex` via raw
+        // pointers, which `destroy` waits for with `Acquire` synchronization before `Unpin` field
+        // drop glue (`Canary::drop`) runs; because `Mutex` is `!Unpin`, `Pin<&mut Self>` asserts no
+        // uniqueness that conflicts with that thread's accesses.
         unsafe { self.destroy() };
     }
 }
@@ -1571,26 +1580,47 @@ impl PinnedDrop for Mutex {
 /// * Interrupts may remain enabled while holding a `CriticalMutex`, avoiding
 ///   undesirable IRQ latency.
 ///
-/// Layout-compatible with the C++ `CriticalMutex` class, which privately inherits from `Mutex`
-/// and adds no fields of its own.
+/// Like the C++ `Mutex`, the C++ `CriticalMutex` is a facade over opaque storage holding a Rust
+/// `CriticalMutex` in place.
 #[pin_data]
 #[repr(transparent)]
 pub struct CriticalMutex {
-    /// The underlying [`Mutex`]. Corresponds to the C++ private `Mutex` base class.
+    /// The underlying [`Mutex`].
     #[pin]
     mutex: Mutex,
 }
 
-// Compile-time layout assertions against the `MutexLayout` constants and opaque `CriticalMutex`
-// type generated by bindgen of `<kernel/mutex_layout.h>`.
-static_assert!(size_of::<CriticalMutex>() == bindings::MutexLayout_kCriticalMutexSize);
-static_assert!(align_of::<CriticalMutex>() == bindings::MutexLayout_kCriticalMutexAlign);
+// Compile-time layout assertions against the opaque `CriticalMutex` facade type generated by
+// bindgen of `<kernel/mutex.h>`.
 static_assert!(size_of::<CriticalMutex>() == size_of::<bindings::CriticalMutex>());
 static_assert!(align_of::<CriticalMutex>() == align_of::<bindings::CriticalMutex>());
-// The C++ private `Mutex` base class is CriticalMutex's only base and is at offset zero.
-static_assert!(offset_of!(CriticalMutex, mutex) == 0);
+
+// `PinnedDrop` and `rust_*mutex_destroy` rely on `Mutex` and `CriticalMutex` being `!Unpin` (via
+// `#[pin] wait: LazyOwnedWaitQueue`).
+const _: () = {
+    trait AmbiguousIfUnpin<A> {
+        const VALID: () = ();
+    }
+    impl<T: ?Sized> AmbiguousIfUnpin<()> for T {}
+    impl<T: ?Sized + Unpin> AmbiguousIfUnpin<u8> for T {}
+    let () = <Mutex as AmbiguousIfUnpin<_>>::VALID;
+    let () = <CriticalMutex as AmbiguousIfUnpin<_>>::VALID;
+};
 
 impl CriticalMutex {
+    /// Creates an unlocked `CriticalMutex` with no lock class name. See [`Mutex::new`].
+    #[inline]
+    pub fn new() -> Self {
+        Self { mutex: Mutex::new() }
+    }
+
+    /// Creates an unlocked `CriticalMutex` with the lock class name `name`. See
+    /// [`Mutex::new_with_name`].
+    #[inline]
+    pub fn new_with_name(name: &'static InternedString) -> Self {
+        Self { mutex: Mutex::new_with_name(name) }
+    }
+
     /// Views `mutex` as a `CriticalMutex`.
     ///
     /// A `CriticalMutex` is a `Mutex` that is acquired with a timeslice extension, so the same
@@ -1611,7 +1641,7 @@ impl CriticalMutex {
     ///
     /// As for [`Mutex::acquire`].
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub unsafe fn acquire(&self, spin_max_duration: DurationMono) -> bool {
         // TODO(maniscalco): What's the right duration here?  Is it a function of
         // spin_max_duration?
@@ -1623,10 +1653,13 @@ impl CriticalMutex {
     /// Release the mutex. Must be held by the current thread. `should_clear` is the return value
     /// of the matching [`CriticalMutex::acquire`] call.
     ///
+    /// As for [`Mutex::release`], this holds no reference to the mutex across the point where the
+    /// release is published, and it does not access `*this` after `Mutex::release` returns.
+    ///
     /// # Safety
     ///
     /// As for [`Mutex::release`].
-    #[inline]
+    #[inline(always)]
     pub unsafe fn release(this: NonNull<Self>, should_clear: bool) {
         // SAFETY: `CriticalMutex` is a `repr(transparent)` wrapper around a `Mutex`, so `this`
         // points to the underlying `Mutex`. The remaining requirements are forwarded from the
@@ -1636,6 +1669,31 @@ impl CriticalMutex {
         if should_clear {
             thread::preempt_clear_timeslice_extension();
         }
+    }
+
+    /// See [`Mutex::is_held`].
+    #[inline(always)]
+    pub fn is_held(&self) -> bool {
+        self.mutex.is_held()
+    }
+
+    /// See [`Mutex::assert_held`].
+    #[inline(always)]
+    pub fn assert_held(&self) {
+        self.mutex.assert_held();
+    }
+
+    /// See [`Mutex::is_contested`].
+    #[inline(always)]
+    pub fn is_contested(&self) -> bool {
+        self.mutex.is_contested()
+    }
+}
+
+impl Default for CriticalMutex {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1670,19 +1728,41 @@ unsafe impl LockPolicy<Mutex> for Mutex {
     /// `lock` must be initialized and currently held by the calling thread with `state` produced
     /// by the corresponding `acquire` or `reacquire` call.
     #[inline]
-    unsafe fn release(lock: &Mutex, _state: &mut Self::GuardState) {
-        // SAFETY: The caller guarantees `lock` is live and held by the current thread, and the
-        // kernel only releases mutexes in blockable thread context with no `ChainLockTransaction`
-        // active (as `Mutex::release` debug-asserts). `lock` borrows the mutex for the whole call,
-        // so its storage cannot be freed or reused before the release has been published, and
-        // `destroy` waits for a contended release to stop accessing it. Holding `lock` across
-        // the point where the release is published is sound as `Mutex` has no `Freeze` bytes.
-        unsafe { Mutex::release(NonNull::from(lock)) };
+    unsafe fn release(lock: &Mutex, state: &mut Self::GuardState) {
+        // SAFETY: The caller upholds the `release_raw` contract: `lock` is live and held by the
+        // current thread, and it borrows the mutex for the whole call, so the mutex outlives the
+        // release. Holding `lock` across the point where the release is published is sound as
+        // `Mutex` has no `Freeze` bytes.
+        unsafe { Self::release_raw(NonNull::from(lock), state) };
+    }
+
+    /// Holds no reference to `*lock` across the point where the release is published. After
+    /// that point another thread may acquire, release and drop the mutex.
+    ///
+    /// # Safety
+    ///
+    /// As for `release`, except that `*lock` only needs to remain valid until the release is
+    /// published. Its storage must still not be freed or reused without first running the
+    /// `Mutex` destructor, which waits for a contended release to stop accessing it.
+    #[inline]
+    unsafe fn release_raw(lock: NonNull<Mutex>, _state: &mut Self::GuardState) {
+        // SAFETY: The caller guarantees `lock` is live until the release is published and held
+        // by the current thread, and the kernel only releases mutexes in blockable thread context
+        // with no `ChainLockTransaction` active (as `Mutex::release` debug-asserts).
+        // `Mutex::release` holds no reference to the mutex across the point where the release is
+        // published, and per the caller its storage is only freed or reused after the `Mutex`
+        // destructor, whose `destroy` waits for a contended release to stop accessing it.
+        unsafe { Mutex::release(lock) };
     }
 }
 
 // SAFETY: `Mutex::acquire` and `Mutex::release` enforce exclusive mutual exclusion on `Mutex`.
 unsafe impl ExclusiveLockPolicy<Mutex> for Mutex {}
+
+// SAFETY: `Mutex` has `GuardState = ()` and carries no stack-LIFO CPU or interrupt state, so
+// relocating acquisitions and releasing held mutexes in non-LIFO order on the acquiring thread
+// preserves all synchronization invariants.
+unsafe impl AdoptableLockPolicy<Mutex> for Mutex {}
 
 /// Lock policy for acquiring and releasing a `Mutex`, spinning for at most the given monotonic
 /// duration (in nanoseconds) before falling back to blocking.
@@ -1732,15 +1812,33 @@ unsafe impl LockPolicy<Mutex> for MutexSpinMaxDurationPolicy {
     /// `lock` must be initialized and currently held by the calling thread with `state` produced
     /// by the corresponding `acquire` or `reacquire` call.
     #[inline]
-    unsafe fn release(lock: &Mutex, _state: &mut Self::GuardState) {
+    unsafe fn release(lock: &Mutex, state: &mut Self::GuardState) {
+        // SAFETY: As for the default `Mutex` policy's `release`.
+        unsafe { Self::release_raw(NonNull::from(lock), state) };
+    }
+
+    /// Holds no reference to `*lock` across the point where the release is published. After
+    /// that point another thread may acquire, release and drop the mutex.
+    ///
+    /// # Safety
+    ///
+    /// As for `release`, except that `*lock` only needs to remain valid until the release is
+    /// published. Its storage must still not be freed or reused without first running the
+    /// `Mutex` destructor, which waits for a contended release to stop accessing it.
+    #[inline]
+    unsafe fn release_raw(lock: NonNull<Mutex>, _state: &mut Self::GuardState) {
         // SAFETY: A lock acquired by this policy is released the same way as by the default
-        // `Mutex` policy, whose `release` justifies this call.
-        unsafe { Mutex::release(NonNull::from(lock)) };
+        // `Mutex` policy, whose `release_raw` justifies this call.
+        unsafe { Mutex::release(lock) };
     }
 }
 
 // SAFETY: `Mutex::acquire` and `Mutex::release` enforce exclusive mutual exclusion on `Mutex`.
 unsafe impl ExclusiveLockPolicy<Mutex> for MutexSpinMaxDurationPolicy {}
+
+// SAFETY: `GuardState` stores only the `zx_duration_mono_t` spin timeout (relocated by value via
+// `core::mem::take`) and carries no stack-LIFO CPU or interrupt state.
+unsafe impl AdoptableLockPolicy<Mutex> for MutexSpinMaxDurationPolicy {}
 
 // Restricted to `TrackedMutex`, so that `TrackedCriticalMutex` cannot be acquired as a plain
 // `Mutex`.
@@ -1750,16 +1848,27 @@ impl_lockdep_tracked_lock_policy!(MutexSpinMaxDurationPolicy, Mutex, Mutex);
 unsafe impl RawLock for Mutex {
     type DefaultPolicy = Self;
 
+    /// Initializes the mutex in place, assigning it a unique lock ID and the lock class name of
+    /// `class_id` for mutex name tracing (when enabled).
+    ///
     /// # Safety
     ///
-    /// `_class_id` must be a valid lockdep lock class identifier or null; the returned `PinInit`
-    /// must be used to initialize pinned storage before the mutex is acquired.
+    /// `class_id` must be null or a valid static `LockClassId` that outlives the initialized
+    /// mutex; the returned `PinInit` must be used to initialize pinned storage before the mutex is
+    /// acquired.
     #[inline]
-    unsafe fn init(_class_id: *const c_void) -> impl PinInit<Self, core::convert::Infallible> {
-        // SAFETY: The closure initializes the provided slot in place before returning Ok(()).
+    unsafe fn init(class_id: *const c_void) -> impl PinInit<Self, core::convert::Infallible> {
+        // SAFETY:
+        // - `pin_init_from_closure` guarantees that `slot` is valid for writes and properly
+        //   aligned for `Self`, so `slot.write(mutex)` is valid and initializes `slot` before the
+        //   closure returns `Ok(())`.
+        // - The caller guarantees that `class_id` is null or a valid static `LockClassId`, as
+        //   `set_lock_class_id` requires.
         unsafe {
             pin_init_from_closure(move |slot: *mut Self| {
-                slot.write(Self::new());
+                let mut mutex = Self::new();
+                mutex.name_storage.get_mut().set_lock_class_id(class_id);
+                slot.write(mutex);
                 Ok(())
             })
         }
@@ -1771,8 +1880,26 @@ unsafe impl RawLock for Mutex {
     }
 }
 
-impl ConstRawLock for Mutex {
-    const INIT: Self = Self::new();
+impl RawAssertHeldLock for Mutex {
+    #[inline]
+    fn assert_held(&self) {
+        Self::assert_held(self);
+    }
+}
+
+impl RawUntrackedLock for Mutex {
+    /// # Safety
+    ///
+    /// As for [`RawUntrackedLock::release`] and [`Mutex::release`].
+    #[inline]
+    unsafe fn release(&self) {
+        // SAFETY: The caller upholds the `RawUntrackedLock::release` contract: the current thread
+        // holds `self`, satisfies the preconditions of `Mutex::release` (blockable thread context
+        // with no `ChainLockTransaction` active), and keeps the allocation backing `self` live
+        // until this call returns. Holding `self` across the release is sound as `Mutex` has no
+        // `Freeze` bytes.
+        unsafe { Self::release(NonNull::from(self)) };
+    }
 }
 
 /// Lock policy for acquiring and releasing a `Mutex` as a [`CriticalMutex`].
@@ -1812,18 +1939,149 @@ unsafe impl LockPolicy<Mutex> for CriticalMutexPolicy {
     /// produced by the corresponding `acquire` or `reacquire` call.
     #[inline]
     unsafe fn release(lock: &Mutex, should_clear: &mut Self::GuardState) {
-        // SAFETY: As for the default `Mutex` policy's `release`. `CriticalMutex` is a
+        // SAFETY: As for the default `Mutex` policy's `release`.
+        unsafe { Self::release_raw(NonNull::from(lock), should_clear) };
+    }
+
+    /// Holds no reference to `*lock` across the point where the release is published. After
+    /// that point another thread may acquire, release and drop the mutex.
+    ///
+    /// # Safety
+    ///
+    /// As for `release`, except that `*lock` only needs to remain valid until the release is
+    /// published. Its storage must still not be freed or reused without first running the
+    /// `Mutex` destructor, which waits for a contended release to stop accessing it.
+    #[inline]
+    unsafe fn release_raw(lock: NonNull<Mutex>, should_clear: &mut Self::GuardState) {
+        // SAFETY: As for the default `Mutex` policy's `release_raw`. `CriticalMutex` is a
         // `repr(transparent)` wrapper around a `Mutex`, which was acquired as a `CriticalMutex` by
         // the matching `acquire` or `reacquire`, which returned `should_clear`.
-        unsafe {
-            CriticalMutex::release(NonNull::from(lock).cast::<CriticalMutex>(), *should_clear)
-        };
+        // `CriticalMutex::release` documents that it does not access the mutex after
+        // `Mutex::release` returns.
+        unsafe { CriticalMutex::release(lock.cast::<CriticalMutex>(), *should_clear) };
     }
 }
 
 // SAFETY: `CriticalMutex::acquire` and `CriticalMutex::release` enforce exclusive mutual exclusion
 // on the `Mutex`.
 unsafe impl ExclusiveLockPolicy<Mutex> for CriticalMutexPolicy {}
+
+// SAFETY: `GuardState` stores only `should_clear: bool` for the scheduler timeslice-extension
+// preemption hint (relocated by value via `core::mem::take`); releasing outer and inner
+// `CriticalMutex` acquisitions in non-LIFO order (e.g. hand-over-hand traversal) is a benign
+// scheduling hint with no synchronization or interrupt-state hazard.
+unsafe impl AdoptableLockPolicy<Mutex> for CriticalMutexPolicy {}
+
+// SAFETY: `CriticalMutex::acquire` and `CriticalMutex::release` enforce mutual exclusion on
+// `CriticalMutex`.
+unsafe impl LockPolicy<CriticalMutex> for CriticalMutex {
+    type AcquireArgs = ();
+    type GuardState = bool;
+
+    /// # Safety
+    ///
+    /// `lock` must be initialized, the calling thread must not already hold `lock`, and the
+    /// caller must be in a thread context where blocking on a kernel critical mutex is permitted.
+    #[inline]
+    unsafe fn acquire(lock: &CriticalMutex, should_clear: &mut Self::GuardState, _args: ()) {
+        // SAFETY: Caller upholds the `LockPolicy::acquire` contract.
+        *should_clear = unsafe { lock.acquire(Mutex::SPIN_MAX_DURATION) };
+    }
+
+    /// # Safety
+    ///
+    /// `lock` must be initialized, `state` must have been previously populated by `acquire`, the
+    /// calling thread must not currently hold `lock`, and blocking on a kernel critical mutex must
+    /// be permitted.
+    #[inline]
+    unsafe fn reacquire(lock: &CriticalMutex, state: &mut Self::GuardState) {
+        // SAFETY: Caller upholds the `LockPolicy::reacquire` contract.
+        unsafe { <Self as LockPolicy<CriticalMutex>>::acquire(lock, state, ()) };
+    }
+
+    /// # Safety
+    ///
+    /// `lock` must be initialized and currently held by the calling thread with `should_clear`
+    /// produced by the corresponding `acquire` or `reacquire` call.
+    #[inline]
+    unsafe fn release(lock: &CriticalMutex, should_clear: &mut Self::GuardState) {
+        // SAFETY: As for the default `Mutex` policy's `release`. Holding `lock` across the release
+        // is sound as `CriticalMutex` is `repr(transparent)` over `Mutex` and has no `Freeze`
+        // bytes.
+        unsafe { Self::release_raw(NonNull::from(lock), should_clear) };
+    }
+
+    /// Holds no reference to `*lock` across the point where the release is published. After
+    /// that point another thread may acquire, release and drop the mutex.
+    ///
+    /// # Safety
+    ///
+    /// As for `release`, except that `*lock` only needs to remain valid until the release is
+    /// published. Its storage must still not be freed or reused without first running the
+    /// `Mutex` destructor, which waits for a contended release to stop accessing it.
+    #[inline]
+    unsafe fn release_raw(lock: NonNull<CriticalMutex>, should_clear: &mut Self::GuardState) {
+        // SAFETY: As for the default `Mutex` policy's `release_raw`, with `should_clear` produced
+        // by the matching `acquire` or `reacquire`. `CriticalMutex::release` documents that it
+        // does not access the mutex after `Mutex::release` returns.
+        unsafe { CriticalMutex::release(lock, *should_clear) };
+    }
+}
+
+// SAFETY: `CriticalMutex::acquire` and `CriticalMutex::release` enforce exclusive mutual exclusion
+// on `CriticalMutex`.
+unsafe impl ExclusiveLockPolicy<CriticalMutex> for CriticalMutex {}
+
+// SAFETY: As for `AdoptableLockPolicy<Mutex> for CriticalMutexPolicy`.
+unsafe impl AdoptableLockPolicy<CriticalMutex> for CriticalMutex {}
+
+// SAFETY: `CriticalMutex` is a physical kernel critical mutex with a unique storage address.
+unsafe impl RawLock for CriticalMutex {
+    type DefaultPolicy = Self;
+
+    /// # Safety
+    ///
+    /// `class_id` must be null or a valid static `LockClassId` that outlives the initialized
+    /// mutex; the returned `PinInit` must be used to initialize pinned storage before the mutex is
+    /// acquired.
+    #[inline]
+    unsafe fn init(class_id: *const c_void) -> impl PinInit<Self, core::convert::Infallible> {
+        pin_init!(Self {
+            // SAFETY: Forwarded from the caller.
+            mutex <- unsafe { <Mutex as RawLock>::init(class_id) },
+        })
+    }
+
+    #[inline]
+    fn as_mut_ptr(&self) -> *mut c_void {
+        <Mutex as RawLock>::as_mut_ptr(&self.mutex)
+    }
+}
+
+impl RawAssertHeldLock for CriticalMutex {
+    #[inline]
+    fn assert_held(&self) {
+        Self::assert_held(self);
+    }
+}
+
+impl RawUntrackedStatefulLock for CriticalMutex {
+    type State = bool;
+
+    /// # Safety
+    ///
+    /// As for [`RawUntrackedStatefulLock::release_with`] and [`CriticalMutex::release`].
+    #[inline]
+    unsafe fn release_with(&self, should_clear: Self::State) {
+        // SAFETY: The caller upholds the `RawUntrackedStatefulLock::release_with` contract: the
+        // current thread holds `self` with `should_clear` from its acquisition, satisfies the
+        // preconditions of `CriticalMutex::release` (blockable thread context with no
+        // `ChainLockTransaction` active), and keeps the allocation backing `self` live until this
+        // call returns. Holding `self` across the release is sound as `CriticalMutex` has no
+        // `Freeze` bytes.
+        unsafe { Self::release(NonNull::from(self), should_clear) };
+    }
+}
 
 /// Lockdep-tracked kernel mutex matching the Zircon C++ `Lock<Mutex>` layout.
 pub type TrackedMutex = LockdepTracked<Mutex>;
@@ -1861,26 +2119,58 @@ const _: () = {
 /// order `0` in the class's ordering.
 pub type CriticalMutexOrderedPolicy = ksync::OrderedLockPolicy<CriticalMutexPolicy>;
 
-/// C++ FFI entry point for the body of `Mutex::~Mutex()`; C++ destroys the members itself.
-///
-/// # Safety
-///
-/// `mutex` must point to a live `Mutex` that C++ is destroying on the current thread, in thread
-/// context. It must be unlocked, with no threads blocked on or attempting to acquire it, and must
-/// not be used after this returns (beyond C++ destroying its members). Other threads may only
-/// still be finishing a release of it (see [`Mutex::release_contended_mutex`]).
+/// C++ FFI entry point for `Mutex::Mutex()`.
 // SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
 // `zircon/kernel/include/kernel/mutex.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mutex_destroy(mutex: &Mutex) {
-    // SAFETY: Forwarded from the caller.
-    unsafe { mutex.destroy() };
+extern "C" fn rust_mutex_init(mutex: &mut MaybeUninit<Mutex>) {
+    mutex.write(Mutex::new());
 }
 
-/// C++ FFI entry point for `Mutex::AcquireCommon<false>()`.
+/// C++ FFI entry point for `Mutex::SetLockClassId()`.
 ///
-/// Returns nothing, unlike `AcquireCommon<false>()` which always returns false, so that the
-/// contended path can be a tail call and the uncontended path needs no stack frame.
+/// # Safety
+///
+/// The caller must uphold all preconditions of [`Mutex::set_lock_class_id`] on `mutex` and `lcid`.
+/// C++ calls this from the `lockdep::Lock<Mutex>` constructor, before the mutex is shared.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_mutex_set_lock_class_id(mutex: &Mutex, lcid: *const c_void) {
+    // SAFETY: The caller upholds the exclusivity and `lcid` preconditions of
+    // `Mutex::set_lock_class_id`.
+    unsafe { mutex.set_lock_class_id(lcid) };
+}
+
+/// C++ FFI entry point for `Mutex::~Mutex()`, which drops the Rust `Mutex` in place.
+///
+/// Takes a `NonNull` rather than a reference because other threads may still be finishing a
+/// release of the mutex (see [`Mutex::release_contended_mutex`]), which the drop waits for.
+///
+/// # Safety
+///
+/// - The caller must be in thread context.
+/// - `mutex` must be properly aligned for `Mutex`, valid for reads and writes of
+///   `size_of::<Mutex>()` bytes, and point to an initialized, pinned `Mutex`.
+/// - `*mutex` must be unlocked, with no threads blocked on or attempting to acquire it. No live
+///   references or concurrent accesses to `*mutex` may exist during this call, except for other
+///   threads finishing [`Mutex::release_contended_mutex`] through raw pointers.
+/// - `*mutex` is logically uninitialized once this call begins and must not be accessed or dropped
+///   again.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_mutex_destroy(mutex: NonNull<Mutex>) {
+    // SAFETY: `mutex` is non-null (`NonNull`), and the caller guarantees proper alignment,
+    // read/write validity, an initialized pinned `Mutex` in thread context, and no subsequent use.
+    // Because `Mutex` is `!Unpin`, `<Mutex as Drop>::drop(&mut self)` asserts no uniqueness over
+    // any thread finishing `release_contended_mutex` via raw pointers, and `PinnedDrop::drop`
+    // synchronizes (`Acquire`) with any such thread before `Unpin` field drop glue
+    // (`Canary::drop`) runs, leaving `*mutex` logically uninitialized.
+    unsafe { ptr::drop_in_place(mutex.as_ptr()) };
+}
+
+/// C++ FFI entry point for `Mutex::Acquire()`.
 ///
 /// # Safety
 ///
@@ -1890,54 +2180,709 @@ pub unsafe extern "C" fn rust_mutex_destroy(mutex: &Mutex) {
 // SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
 // `zircon/kernel/include/kernel/mutex.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mutex_acquire_common(mutex: &Mutex, spin_max_duration: DurationMono) {
+unsafe extern "C" fn rust_mutex_acquire(mutex: &Mutex, spin_max_duration: DurationMono) {
     // SAFETY: Forwarded from the caller.
-    unsafe { mutex.acquire_common(spin_max_duration, NoTimesliceExtension) };
+    unsafe { mutex.acquire(spin_max_duration) };
 }
 
-/// C++ FFI entry point for `Mutex::AcquireCommon<true>()`.
+/// C++ FFI entry point for `Mutex::Release()`.
+///
+/// Takes a `NonNull` rather than a reference because, once the release is published, another
+/// thread may acquire, release and destroy the mutex before this returns. C++ always passes
+/// `this`, which is never null.
 ///
 /// # Safety
 ///
-/// As for [`rust_mutex_acquire_common`].
+/// `mutex` must point to a live `Mutex` held by the current thread. The caller must be in
+/// blockable thread context and have no `ChainLockTransaction` active. The storage of `mutex`
+/// must not be freed or reused until `rust_mutex_destroy` has returned for it (which waits for a
+/// contended release to stop accessing it).
 // SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
 // `zircon/kernel/include/kernel/mutex.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mutex_acquire_common_with_timeslice_extension(
-    mutex: &Mutex,
+unsafe extern "C" fn rust_mutex_release(mutex: NonNull<Mutex>) {
+    // SAFETY: Forwarded from the caller.
+    unsafe { Mutex::release(mutex) }
+}
+
+/// C++ FFI entry point for `Mutex::IsHeld()`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_mutex_is_held(mutex: &Mutex) -> bool {
+    mutex.is_held()
+}
+
+/// C++ FFI entry point for `Mutex::AssertHeld()`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_mutex_assert_held(mutex: &Mutex) {
+    mutex.assert_held();
+}
+
+/// C++ FFI entry point for `CriticalMutex::CriticalMutex()`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_critical_mutex_init(mutex: &mut MaybeUninit<CriticalMutex>) {
+    mutex.write(CriticalMutex::new());
+}
+
+/// C++ FFI entry point for `CriticalMutex::SetLockClassId()`.
+///
+/// # Safety
+///
+/// The caller must uphold all preconditions of [`Mutex::set_lock_class_id`] on `mutex`'s inner
+/// `Mutex` and `lcid`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_critical_mutex_set_lock_class_id(
+    mutex: &CriticalMutex,
+    lcid: *const c_void,
+) {
+    // SAFETY: `&mutex.mutex` projects the inner `Mutex` of the valid `CriticalMutex` reference,
+    // and the caller upholds the exclusivity and `lcid` preconditions of `set_lock_class_id`.
+    unsafe { mutex.mutex.set_lock_class_id(lcid) };
+}
+
+/// C++ FFI entry point for `CriticalMutex::~CriticalMutex()`, which drops the Rust
+/// `CriticalMutex` in place.
+///
+/// # Safety
+///
+/// - The caller must be in thread context.
+/// - `mutex` must be properly aligned for `CriticalMutex`, valid for reads and writes of
+///   `size_of::<CriticalMutex>()` bytes, and point to an initialized, pinned `CriticalMutex`.
+/// - `*mutex` must be unlocked, with no threads blocked on or attempting to acquire it. No live
+///   references or concurrent accesses to `*mutex` may exist during this call, except for other
+///   threads finishing [`Mutex::release_contended_mutex`] through raw pointers.
+/// - `*mutex` is logically uninitialized once this call begins and must not be accessed or dropped
+///   again.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_critical_mutex_destroy(mutex: NonNull<CriticalMutex>) {
+    // SAFETY: `mutex` is non-null (`NonNull`), and the caller guarantees proper alignment,
+    // read/write validity, an initialized pinned `CriticalMutex` in thread context, and no
+    // subsequent use. `CriticalMutex` is `#[repr(transparent)]` over `Mutex` and `!Unpin`, so
+    // dropping it in place delegates to `Mutex`'s `PinnedDrop` without asserting uniqueness over
+    // any racing `release_contended_mutex` raw-pointer accesses, leaving `*mutex` uninitialized.
+    unsafe { ptr::drop_in_place(mutex.as_ptr()) };
+}
+
+/// C++ FFI entry point for `CriticalMutex::Acquire()`.
+///
+/// # Safety
+///
+/// As for [`rust_mutex_acquire`].
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn rust_critical_mutex_acquire(
+    mutex: &CriticalMutex,
     spin_max_duration: DurationMono,
-    timeslice_extension: DurationMono,
 ) -> bool {
     // SAFETY: Forwarded from the caller.
-    unsafe {
-        mutex.acquire_common(
-            spin_max_duration,
-            WithTimesliceExtension { value: timeslice_extension },
-        )
-    }
+    unsafe { mutex.acquire(spin_max_duration) }
 }
 
-/// C++ FFI entry point for the contended slow path of `Mutex::ReleaseInternal()`.
-///
-/// Takes a `NonNull` rather than a reference because the mutex may be destroyed by another
-/// thread before this returns. C++ always passes `this`, which is never null.
+/// C++ FFI entry point for `CriticalMutex::Release()`.
 ///
 /// # Safety
 ///
-/// `mutex` must point to a live `Mutex` held by `current_thread`, the current thread, whose state
-/// was observed to be the contested `old_mutex_state` by a failed uncontended release. The caller
-/// must be in blockable thread context and have no `ChainLockTransaction` active. The storage of
-/// `mutex` must not be freed or reused until `rust_mutex_destroy` has returned for it (which waits
-/// for this function to stop accessing it).
+/// As for [`rust_mutex_release`].
 // SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
 // `zircon/kernel/include/kernel/mutex.h`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_mutex_release_contended(
-    mutex: NonNull<Mutex>,
-    current_thread: &Thread,
-    old_mutex_state: usize,
+unsafe extern "C" fn rust_critical_mutex_release(
+    mutex: NonNull<CriticalMutex>,
+    should_clear: bool,
 ) {
-    // SAFETY: Forwarded from the caller. `mutex` stays live until its inner `OwnedWaitQueue` lock
-    // is released or the queue is detached, as `Mutex::destroy` waits for that.
-    unsafe { Mutex::release_contended_mutex(mutex, current_thread, old_mutex_state) }
+    // SAFETY: Forwarded from the caller.
+    unsafe { CriticalMutex::release(mutex, should_clear) }
+}
+
+/// C++ FFI entry point for `CriticalMutex::IsHeld()`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_critical_mutex_is_held(mutex: &CriticalMutex) -> bool {
+    mutex.is_held()
+}
+
+/// C++ FFI entry point for `CriticalMutex::AssertHeld()`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_critical_mutex_assert_held(mutex: &CriticalMutex) {
+    mutex.assert_held();
+}
+
+/// C++ FFI entry point for `CriticalMutex::IsContested()`.
+// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
+// `zircon/kernel/include/kernel/mutex.h`.
+#[unsafe(no_mangle)]
+extern "C" fn rust_critical_mutex_is_contested(mutex: &CriticalMutex) -> bool {
+    mutex.is_contested()
+}
+
+/// Mutex tests.
+#[cfg(ktest)]
+#[unittest::suite(name = "mutex")]
+mod tests {
+    use crate::kernel::spin_tracing::LockType;
+    use crate::kernel::thread::DEFAULT_PRIORITY;
+    use crate::platform_rs::timer::InstantMono;
+    use core::cell::Cell;
+    use core::sync::atomic::AtomicBool;
+    use debug::dprintf;
+    use ksync::KMutex;
+    use pin_init::stack_pin_init;
+    use unittest::{expect_eq, expect_false, expect_ne, expect_true, unwrap_ok};
+
+    /// Verifies acquiring and releasing a `Mutex`.
+    #[test]
+    fn mutex_lock_unlock() {
+        let mutex = Mutex::new();
+
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released immediately below.
+        unsafe {
+            mutex.acquire(Mutex::SPIN_MAX_DURATION);
+        }
+        // SAFETY: `mutex` is held by the current thread in blockable thread context with no
+        // `ChainLockTransaction` active, and stays live until `release` returns.
+        unsafe {
+            Mutex::release(NonNull::from(&mutex));
+        }
+
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released immediately below.
+        unsafe {
+            mutex.acquire(Mutex::SPIN_MAX_DURATION);
+        }
+        // SAFETY: `mutex` is held by the current thread in blockable thread context with no
+        // `ChainLockTransaction` active, and stays live until `release` returns.
+        unsafe {
+            Mutex::release(NonNull::from(&mutex));
+        }
+    }
+
+    /// Verifies the lock name storage set up by `Mutex` and `CriticalMutex` constructors.
+    #[test]
+    fn mutex_new_with_name() {
+        let name = resolve_string!("mutex_new_with_name_test");
+        let unnamed = Mutex::new();
+        let named = Mutex::new_with_name(name);
+        let unnamed_critical = CriticalMutex::new();
+        let named_critical = CriticalMutex::new_with_name(name);
+        let all = [&unnamed, &named, &unnamed_critical.mutex, &named_critical.mutex];
+
+        if MUTEX_NAME_TRACING_ENABLED {
+            // Each mutex is assigned a unique non-zero lock ID with `LockType::Mutex`, and only
+            // the named mutexes have a lock class name.
+            for (i, m) in all.iter().enumerate() {
+                expect_ne!(m.encoded_lock_id().id(), 0);
+                expect_eq!(m.encoded_lock_id().lock_type(), LockType::Mutex);
+                for other in &all[i + 1..] {
+                    expect_ne!(m.encoded_lock_id().id(), other.encoded_lock_id().id());
+                }
+            }
+            for m in [&unnamed, &unnamed_critical.mutex] {
+                expect_eq!(m.encoded_lock_id().class_name(), IdStringRef::INVALID_ID);
+                expect_eq!(m.class_name_ref().id(), IdStringRef::invalid().id());
+            }
+            for m in [&named, &named_critical.mutex] {
+                expect_eq!(m.encoded_lock_id().class_name(), name.id());
+                expect_eq!(m.class_name_ref().id(), name.id());
+            }
+        } else {
+            for m in all {
+                expect_eq!(m.encoded_lock_id().value(), EncodedLockId::INVALID.value());
+                expect_eq!(m.class_name_ref().id(), IdStringRef::disabled().id());
+            }
+        }
+    }
+
+    /// Verifies `set_lock_class_id` and the `rust_*mutex_*` FFI lifecycle entry points.
+    #[test]
+    fn mutex_ffi_lifecycle_and_set_lock_class_id() {
+        let class_name = resolve_string!("mutex_ffi_class_name");
+        let metadata_slot: *const InternedString = ptr::from_ref(class_name);
+        let null_metadata_slot: *const InternedString = ptr::null();
+
+        let mut unnamed_slot = MaybeUninit::<Mutex>::uninit();
+        let mut unnamed_crit_slot = MaybeUninit::<CriticalMutex>::uninit();
+
+        rust_mutex_init(&mut unnamed_slot);
+        rust_critical_mutex_init(&mut unnamed_crit_slot);
+
+        // SAFETY: Both slots were just initialized by `rust_*mutex_init` above and remain
+        // pinned on the stack until `rust_*mutex_destroy` drops them in place below.
+        let (unnamed, unnamed_crit) =
+            unsafe { (unnamed_slot.assume_init_ref(), unnamed_crit_slot.assume_init_ref()) };
+
+        // Null `lcid` and a metadata slot holding a null `InternedString` pointer are no-ops.
+        // SAFETY: Each mutex is uniquely owned on this thread with no concurrent accesses to its
+        // `name_storage`; `null_metadata_slot` is an aligned, initialized local `*const` pointer.
+        unsafe {
+            rust_mutex_set_lock_class_id(unnamed, ptr::null());
+            rust_mutex_set_lock_class_id(unnamed, ptr::from_ref(&null_metadata_slot).cast());
+            rust_critical_mutex_set_lock_class_id(unnamed_crit, ptr::null());
+            rust_critical_mutex_set_lock_class_id(
+                unnamed_crit,
+                ptr::from_ref(&null_metadata_slot).cast(),
+            );
+        }
+        if MUTEX_NAME_TRACING_ENABLED {
+            expect_eq!(unnamed.encoded_lock_id().class_name(), IdStringRef::INVALID_ID);
+            expect_eq!(unnamed_crit.mutex.encoded_lock_id().class_name(), IdStringRef::INVALID_ID);
+        }
+
+        // Valid `lcid` populates unnamed mutexes.
+        // SAFETY: Each mutex is uniquely owned on this thread with no concurrent accesses to its
+        // `name_storage`, and `metadata_slot` is an aligned, initialized local pointing to
+        // `class_name` in `__fxt_interned_string_table`.
+        unsafe {
+            rust_mutex_set_lock_class_id(unnamed, ptr::from_ref(&metadata_slot).cast());
+            rust_critical_mutex_set_lock_class_id(
+                unnamed_crit,
+                ptr::from_ref(&metadata_slot).cast(),
+            );
+        }
+
+        if MUTEX_NAME_TRACING_ENABLED {
+            for m in [unnamed, &unnamed_crit.mutex] {
+                expect_eq!(m.encoded_lock_id().class_name(), class_name.id());
+                expect_eq!(m.class_name_ref().id(), class_name.id());
+            }
+        } else {
+            for m in [unnamed, &unnamed_crit.mutex] {
+                expect_eq!(m.encoded_lock_id().value(), EncodedLockId::INVALID.value());
+                expect_eq!(m.class_name_ref().id(), IdStringRef::disabled().id());
+            }
+        }
+
+        // Exercise acquire, queries, and release through the FFI shims before in-place destroy.
+        expect_false!(rust_mutex_is_held(unnamed));
+        // SAFETY: Blockable thread context, no spinlocks or `ChainLockTransaction` active.
+        unsafe { rust_mutex_acquire(unnamed, Mutex::SPIN_MAX_DURATION) };
+        expect_true!(rust_mutex_is_held(unnamed));
+        rust_mutex_assert_held(unnamed);
+        // SAFETY: Held by current thread in blockable thread context; stays live across release.
+        unsafe { rust_mutex_release(NonNull::from(unnamed)) };
+        expect_false!(rust_mutex_is_held(unnamed));
+
+        expect_false!(rust_critical_mutex_is_held(unnamed_crit));
+        expect_false!(rust_critical_mutex_is_contested(unnamed_crit));
+        // SAFETY: Blockable thread context, no spinlocks or `ChainLockTransaction` active.
+        let should_clear =
+            unsafe { rust_critical_mutex_acquire(unnamed_crit, Mutex::SPIN_MAX_DURATION) };
+        expect_true!(rust_critical_mutex_is_held(unnamed_crit));
+        rust_critical_mutex_assert_held(unnamed_crit);
+        // SAFETY: Held by current thread with `should_clear` from `acquire`; stays live.
+        unsafe { rust_critical_mutex_release(NonNull::from(unnamed_crit), should_clear) };
+        expect_false!(rust_critical_mutex_is_held(unnamed_crit));
+
+        let unnamed_ptr = NonNull::from(&mut unnamed_slot).cast::<Mutex>();
+        let unnamed_crit_ptr = NonNull::from(&mut unnamed_crit_slot).cast::<CriticalMutex>();
+
+        // SAFETY: Each `MaybeUninit` slot holds an initialized, pinned, unlocked mutex in thread
+        // context with no live references, waiters, or subsequent accesses as a `Mutex`.
+        unsafe {
+            rust_mutex_destroy(unnamed_ptr);
+            rust_critical_mutex_destroy(unnamed_crit_ptr);
+        }
+
+        // Verify that full in-place drop glue (`Canary::drop`) ran and zeroed `magic`, rather than
+        // only `Mutex::destroy` (which leaves `magic` intact).
+        for slot in [unnamed_ptr, unnamed_crit_ptr.cast::<Mutex>()] {
+            let ptr = slot.as_ptr();
+            // SAFETY: `ptr` points to a live, aligned stack `MaybeUninit` slot (`CriticalMutex` is
+            // `#[repr(transparent)]` over `Mutex`), so `&raw const (*ptr).magic` stays in bounds
+            // without forming a reference. `UnsafeCell<fbl::Canary<MAGIC>>` has the layout of
+            // `u32` (`UnsafeCell` is `#[repr(transparent)]` and `Canary` is `#[repr(C)]` wrapping
+            // a single `u32` initialized to `MAGIC` by `rust_*mutex_init*` and overwritten with
+            // `0` by `Canary::drop`).
+            let magic = unsafe { (&raw const (*ptr).magic).cast::<u32>().read_volatile() };
+            expect_eq!(magic, 0);
+        }
+    }
+
+    /// Verifies `Mutex::is_held` before, during, and after holding a `Mutex`.
+    #[test]
+    fn mutex_is_held() {
+        let mutex = Mutex::new();
+
+        expect_false!(mutex.is_held(), "Lock not held");
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released below.
+        unsafe {
+            mutex.acquire(Mutex::SPIN_MAX_DURATION);
+        }
+        expect_true!(mutex.is_held(), "Lock held");
+        // SAFETY: `mutex` is held by the current thread in blockable thread context with no
+        // `ChainLockTransaction` active, and stays live until `release` returns.
+        unsafe {
+            Mutex::release(NonNull::from(&mutex));
+        }
+        expect_false!(mutex.is_held(), "Lock not held");
+    }
+
+    /// Verifies `Mutex::assert_held` succeeds when the `Mutex` is held.
+    #[test]
+    fn mutex_assert_held() {
+        let mutex = Mutex::new();
+
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released below.
+        unsafe {
+            mutex.acquire(Mutex::SPIN_MAX_DURATION);
+        }
+        mutex.assert_held(); // Lock is held: this should be a no-op.
+        // SAFETY: `mutex` is held by the current thread in blockable thread context with no
+        // `ChainLockTransaction` active, and stays live until `release` returns.
+        unsafe {
+            Mutex::release(NonNull::from(&mutex));
+        }
+    }
+
+    /// A struct with a guarded value.
+    #[ksync::guarded]
+    struct ObjectWithMutex {
+        #[mutex]
+        mu: KMutex<Mutex>,
+        #[guarded_by(mu)]
+        val: i32,
+    }
+
+    impl ObjectWithMutex {
+        fn new() -> impl PinInit<Self, core::convert::Infallible> {
+            pin_init!(Self {
+                mu <- KMutex::init(),
+                val: 0.into(),
+            })
+        }
+
+        /// # Safety
+        ///
+        /// As for [`Mutex::acquire`] on `self.mu`.
+        unsafe fn take_lock(&self) {
+            // SAFETY: Forwarded from the caller.
+            unsafe { self.mu.raw_mutex().acquire(Mutex::SPIN_MAX_DURATION) };
+        }
+    }
+
+    /// Verifies that `assert_held` grants compile-time access to `ksync`-guarded `Mutex` state.
+    #[test]
+    fn mutex_assert_held_compile() {
+        stack_pin_init!(let object = ObjectWithMutex::new());
+
+        // This shouldn't compile with ksync's compile-time lock checking.
+        #[cfg(enable_errors)]
+        {
+            object.val = 3;
+        }
+
+        // We take the lock, but Rust's type system can't see it.
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `object.mu` is not held and is released below.
+        unsafe {
+            object.take_lock();
+        }
+
+        // Without the assertion, Rust will object to setting "val".
+        #[cfg(not(enable_errors))]
+        // SAFETY: `take_lock()` acquired `object.mu` on the current thread above, `token` does not
+        // outlive the lock hold, and no other borrows of guarded fields on `object` exist.
+        let mut token = unsafe { object.mu.assert_held() };
+        // SAFETY: `token` was obtained from `object.mu` on this `object` instance.
+        *unsafe { object.guard_mu_mut(&mut token) }.val_mut() = 3;
+
+        // Without the assertion, Rust will object to releasing the lock.
+        // SAFETY: `object.mu` is held by the current thread in blockable thread context with no
+        // `ChainLockTransaction` active, no borrows of data guarded by this acquisition remain
+        // live, and `object` stays live until `release` returns.
+        unsafe {
+            object.mu.release(token);
+        }
+    }
+
+    /// Verifies acquiring and releasing a `CriticalMutex`.
+    #[test]
+    fn critical_mutex_lock_unlock() {
+        let mutex = CriticalMutex::new();
+
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released immediately below.
+        let mut should_clear = unsafe { mutex.acquire(Mutex::SPIN_MAX_DURATION) };
+        // SAFETY: `mutex` is held by the current thread with `should_clear` from `acquire`, in
+        // blockable thread context with no `ChainLockTransaction` active, and stays live until
+        // `release` returns.
+        unsafe {
+            CriticalMutex::release(NonNull::from(&mutex), should_clear);
+        }
+
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released immediately below.
+        should_clear = unsafe { mutex.acquire(Mutex::SPIN_MAX_DURATION) };
+        // SAFETY: `mutex` is held by the current thread with `should_clear` from `acquire`, in
+        // blockable thread context with no `ChainLockTransaction` active, and stays live until
+        // `release` returns.
+        unsafe {
+            CriticalMutex::release(NonNull::from(&mutex), should_clear);
+        }
+    }
+
+    /// Verifies `CriticalMutex::is_held` before, during, and after holding a `CriticalMutex`.
+    #[test]
+    fn critical_mutex_is_held() {
+        let mutex = CriticalMutex::new();
+
+        expect_false!(mutex.is_held(), "Lock not held");
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released below.
+        let should_clear = unsafe { mutex.acquire(Mutex::SPIN_MAX_DURATION) };
+        expect_true!(mutex.is_held(), "Lock held");
+        // SAFETY: `mutex` is held by the current thread with `should_clear` from `acquire`, in
+        // blockable thread context with no `ChainLockTransaction` active, and stays live until
+        // `release` returns.
+        unsafe {
+            CriticalMutex::release(NonNull::from(&mutex), should_clear);
+        }
+        expect_false!(mutex.is_held(), "Lock not held");
+    }
+
+    /// Verifies `CriticalMutex::assert_held` succeeds when the `CriticalMutex` is held.
+    #[test]
+    fn critical_mutex_assert_held() {
+        let mutex = CriticalMutex::new();
+
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `mutex` is not held and is released below.
+        let should_clear = unsafe { mutex.acquire(Mutex::SPIN_MAX_DURATION) };
+        mutex.assert_held(); // Lock is held: this should be a no-op.
+        // SAFETY: `mutex` is held by the current thread with `should_clear` from `acquire`, in
+        // blockable thread context with no `ChainLockTransaction` active, and stays live until
+        // `release` returns.
+        unsafe {
+            CriticalMutex::release(NonNull::from(&mutex), should_clear);
+        }
+    }
+
+    /// A struct with a guarded value.
+    #[ksync::guarded]
+    struct ObjectWithCriticalMutex {
+        #[mutex]
+        mu: KMutex<CriticalMutex>,
+        #[guarded_by(mu)]
+        val: i32,
+    }
+
+    impl ObjectWithCriticalMutex {
+        fn new() -> impl PinInit<Self, core::convert::Infallible> {
+            pin_init!(Self {
+                mu <- KMutex::init(),
+                val: 0.into(),
+            })
+        }
+
+        /// # Safety
+        ///
+        /// As for [`CriticalMutex::acquire`] on `self.mu`.
+        unsafe fn take_lock(&self) -> bool {
+            // SAFETY: Forwarded from the caller.
+            unsafe { self.mu.raw_mutex().acquire(Mutex::SPIN_MAX_DURATION) }
+        }
+    }
+
+    /// Verifies `assert_held` compile-time access to `ksync`-guarded `CriticalMutex` state.
+    #[test]
+    fn critical_mutex_assert_held_compile() {
+        stack_pin_init!(let object = ObjectWithCriticalMutex::new());
+
+        // This shouldn't compile with ksync's compile-time lock checking.
+        #[cfg(enable_errors)]
+        {
+            object.val = 3;
+        }
+
+        // We take the lock, but Rust's type system can't see it.
+        // SAFETY: Kernel unit tests run in blockable thread context with no spinlocks held and no
+        // `ChainLockTransaction` active, and `object.mu` is not held and is released below.
+        let should_clear = unsafe { object.take_lock() };
+
+        // Without the assertion, Rust will object to setting "val".
+        #[cfg(not(enable_errors))]
+        // SAFETY: `take_lock()` acquired `object.mu` on the current thread above, `token` does not
+        // outlive the lock hold, and no other borrows of guarded fields on `object` exist.
+        let mut token = unsafe { object.mu.assert_held() };
+        // SAFETY: `token` was obtained from `object.mu` on this `object` instance.
+        *unsafe { object.guard_mu_mut(&mut token) }.val_mut() = 3;
+
+        // Without the assertion, Rust will object to releasing the lock.
+        // SAFETY: `object.mu` is held by the current thread with `should_clear` from `take_lock`
+        // in blockable thread context with no `ChainLockTransaction` active, no borrows of data
+        // guarded by this acquisition remain live, and `object` stays live until `release_with`
+        // returns.
+        unsafe {
+            object.mu.release_with(should_clear, token);
+        }
+    }
+
+    #[ksync::guarded]
+    struct TestSingletonMutex {
+        #[mutex]
+        lock: KMutex<TrackedMutex>,
+    }
+
+    static TEST_SINGLETON_MUTEX: lazy_init::LazyInit<TestSingletonMutex, lazy_init::NoCheck> =
+        lazy_init::LazyInit::uninit();
+
+    fn test_singleton_mutex_init(_level: init::LkInitLevel) {
+        // SAFETY: lk init hooks run once during single-threaded early boot before any test runs.
+        unsafe {
+            let Ok(()) = Pin::static_ref(&TEST_SINGLETON_MUTEX)
+                .init_pin(pin_init!(TestSingletonMutex { lock <- KMutex::init() }));
+        }
+    }
+    init::lk_init_hook!(
+        test_singleton_mutex,
+        test_singleton_mutex_init,
+        init::LK_INIT_LEVEL_EARLIEST
+    );
+
+    /// Ensure that acquiring a singleton mutex is thread-safe the first time it is acquired.
+    #[test]
+    fn singleton_mutex_threadsafe() {
+        // We've previously had bugs where singleton mutexes were defined static and lazily
+        // initialised, leading to a bug where the first time a mutex was acquired, it could be
+        // held by multiple threads simultaneously.
+        //
+        // This test sets up N threads and races them acquiring the singleton mutex
+        // "TestSingletonMutex". While the test is safe to run multiple times, it can only exercise
+        // static initialisation once per boot.
+
+        // If we have already run print a warning that this test is unlikely to exercise anything.
+        static ALREADY_RUN: AtomicBool = AtomicBool::new(false);
+        if ALREADY_RUN.load(Ordering::SeqCst) {
+            dprintf!(
+                INFO,
+                "Test has already run this boot. \
+                 Subsequent runs will not exercise the mutex init code path again.\n"
+            );
+        }
+        ALREADY_RUN.store(true, Ordering::SeqCst);
+
+        // Start multiple threads, all attempting to race to acquire the singleton mutex.
+        struct ThreadState<'a> {
+            ready: AtomicBool,
+            should_start: &'a AtomicBool,
+            in_critical_section: &'a AtomicBool,
+        }
+
+        extern "C" fn worker_body(arg: *mut c_void) -> i32 {
+            // SAFETY: `arg` points to this worker's element of `states` on the stack of
+            // `singleton_mutex_threadsafe`, which joins all spawned workers before `states`,
+            // `should_start`, and `in_critical_section` go out of scope.
+            let state = unsafe { &*arg.cast::<ThreadState<'_>>() };
+
+            // Tell parent we are ready.
+            state.ready.store(true, Ordering::SeqCst);
+
+            // Spin until all threads are ready to start.
+            //
+            // We busy-wait here without yielding to try and synchronise threads on
+            // different CPUs as much as possible, so that they all race to acquire
+            // the mutex below.
+            //
+            // Ordering: `Relaxed` suffices as we wait for the parent's start flag; synchronization
+            // of the critical section is provided by `TestSingletonMutex` below.
+            while !state.should_start.load(Ordering::Relaxed) {}
+
+            {
+                // Acquire the mutex.
+                // SAFETY: `TEST_SINGLETON_MUTEX` is initialized at `LK_INIT_LEVEL_EARLIEST`
+                // before any test runs.
+                ksync::lock!(
+                    let _guard = unsafe { TEST_SINGLETON_MUTEX.get_unchecked() }.lock_lock()
+                );
+
+                // Ensure no other thread already has the mutex.
+                let other_thread_in_critical_section =
+                    state.in_critical_section.swap(true, Ordering::SeqCst);
+                assert!(
+                    !other_thread_in_critical_section,
+                    "Another thread was already in the critical section."
+                );
+
+                // Delay before releasing the mutex, to give other threads a chance to
+                // notice we are holding it.
+                let _ = thread::sleep_relative(DurationMono::from_millis(1));
+
+                let still_hold_critical_section =
+                    state.in_critical_section.swap(false, Ordering::SeqCst);
+                assert!(
+                    still_hold_critical_section,
+                    "Another thread released our critical section."
+                );
+            }
+
+            0
+        }
+
+        // Create worker threads and start them up.
+        const NUM_THREADS: usize = 4;
+        let should_start = AtomicBool::new(false);
+        let in_critical_section = AtomicBool::new(false);
+        let states: [ThreadState<'_>; NUM_THREADS] = core::array::from_fn(|_| ThreadState {
+            ready: AtomicBool::new(false),
+            should_start: &should_start,
+            in_critical_section: &in_critical_section,
+        });
+        let threads: [Cell<Option<ThreadPtr>>; NUM_THREADS] =
+            [const { Cell::new(None) }; NUM_THREADS];
+        let _cleanup = zr::defer(|| {
+            should_start.store(true, Ordering::SeqCst);
+            for thread in threads.iter().filter_map(Cell::take) {
+                // SAFETY: Each stored `ThreadPtr` was created below and has not been joined yet.
+                let _ = unsafe { thread.join(InstantMono::INFINITE) };
+            }
+        });
+        for (state, thread_slot) in states.iter().zip(&threads) {
+            // SAFETY: `worker_body` only accesses `state` through shared references, and `state`
+            // (along with `should_start` and `in_critical_section`) stays live until the thread is
+            // joined below (or by `_cleanup` on early return).
+            let thread = unsafe {
+                thread::create_with_priority(
+                    c"test_singleton_mutex".as_ptr(),
+                    worker_body,
+                    ptr::from_ref(state).cast_mut().cast(),
+                    DEFAULT_PRIORITY,
+                )
+            };
+            let thread = unwrap_ok!(thread, "Thread::Create failed.");
+            // SAFETY: `thread` was just created and has not been resumed or joined yet.
+            unsafe { thread.resume() };
+            thread_slot.set(Some(thread));
+        }
+
+        // Wait for all the threads to start.
+        for state in &states {
+            while !state.ready.load(Ordering::SeqCst) {
+                thread::r#yield();
+            }
+        }
+
+        // Let all the threads race.
+        should_start.store(true, Ordering::SeqCst);
+
+        // Wait for all the threads to finish.
+        for thread in threads.iter().filter_map(Cell::take) {
+            // SAFETY: Each stored `ThreadPtr` was created above and has not been joined yet.
+            let _ = unsafe { thread.join(InstantMono::INFINITE) };
+        }
+    }
 }

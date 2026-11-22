@@ -165,7 +165,7 @@ zx::result<> open_netdevice(async_dispatcher_t* dispatcher,
 
 zx::result<> netifc_open(async_dispatcher_t* dispatcher, std::string_view interface,
                          fit::callback<void(zx_status_t)> on_error) {
-  zx::result status = netifc_discover("/dev", interface);
+  zx::result status = netifc_discover(interface);
   if (status.is_error()) {
     printf("netifc: failed to discover interface %s\n", status.status_string());
     return status.take_error();

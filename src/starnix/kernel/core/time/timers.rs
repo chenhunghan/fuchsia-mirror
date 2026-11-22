@@ -42,11 +42,7 @@ struct TimerTableMutableState {
 
 impl Default for TimerTableMutableState {
     fn default() -> Self {
-        let signal_event =
-            SignalEvent::new(SignalEventValue(0), SIGALRM, SignalEventNotify::Signal);
-        let itimer_real =
-            IntervalTimer::new(0, Timeline::RealTime, TimerWakeup::Regular, signal_event)
-                .expect("Failed to create itimer_real");
+        let itimer_real = IntervalTimer::new_itimer_real();
         TimerTableMutableState {
             itimer_real,
             timers: Default::default(),

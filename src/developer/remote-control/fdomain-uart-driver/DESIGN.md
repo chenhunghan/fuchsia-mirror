@@ -21,11 +21,13 @@ target-specific architectural choices.
 
 ### 2.1 Component Startup & Session Loop
 
-1. **Boot Argument Gate**: On startup, `run_driver` queries
-   `fuchsia.boot/Arguments` for `dev.fdomain.uart` (default `false`). When
-   disabled, the component parks forever (`futures::future::pending()`) with
-   zero CPU or serial resource usage. When enabled, it reads
-   `dev.fdomain.uart.baud` (default `1000000`).
+1. **Boot Argument Gate**: On startup, `run_driver` reads structured
+   configuration capabilities `fuchsia.dev.fdomain.uart` (forwarded from boot
+   argument `dev.fdomain.uart`, default `false`) and
+   `fuchsia.dev.fdomain.uart.baud` (forwarded from `dev.fdomain.uart.baud`,
+   default `""`, which `parse_baud_rate` maps to `1000000`). When disabled, the
+   component parks forever (`futures::future::pending()`) with zero CPU or
+   serial resource usage.
 2. **Serial Discovery**: `open_serial_device` scans `/dev/class/serial` in
    lexicographical order, selects a host-facing UART, and configures `8N1` with
    `FlowControl::None` at the target baud rate.

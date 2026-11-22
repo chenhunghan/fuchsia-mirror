@@ -1961,6 +1961,109 @@ mod tests {
     }
 
     #[fuchsia::test]
+    fn shutdown_collection_preserves_dependent_order_after_destroying_child() {
+        let mut executor = fasync::TestExecutor::new();
+        let mut test_body = Box::pin(async move {
+            let components = vec![
+                ("root", ComponentDeclBuilder::new().child_default("container").build()),
+                (
+                    "container",
+                    ComponentDeclBuilder::new()
+                        .collection_default("coll")
+                        .child_default("c")
+                        .offer(
+                            OfferBuilder::service()
+                                .name("svc")
+                                .source(OfferSource::Collection("coll".parse().unwrap()))
+                                .target_static_child("c"),
+                        )
+                        .build(),
+                ),
+                ("a", component_decl_with_test_runner()),
+                ("b", component_decl_with_test_runner()),
+                ("c", component_decl_with_test_runner()),
+            ];
+            let test =
+                ActionsTest::new("root", components, Some(["container"].try_into().unwrap())).await;
+            let root = test.model.root();
+
+            test.create_dynamic_child("coll", "a").await;
+            test.create_dynamic_child("coll", "b").await;
+
+            let component_container = test.look_up(["container"].try_into().unwrap()).await;
+            let component_a = test.look_up(["container", "coll:a"].try_into().unwrap()).await;
+            let component_b = test.look_up(["container", "coll:b"].try_into().unwrap()).await;
+            let component_c = test.look_up(["container", "c"].try_into().unwrap()).await;
+            for component in [&component_container, &component_a, &component_b, &component_c] {
+                root.start_instance(&component.moniker, &StartReason::Eager)
+                    .await
+                    .expect("could not start instance");
+                assert!(component.is_started().await);
+            }
+
+            // Destroy one dynamic child ("coll:b") before shutting down "container"; the static
+            // offer from "coll" to "c" must still keep "coll:a" running until "c" stops.
+            component_container
+                .destroy_child("coll:b".try_into().unwrap(), component_b.incarnation_id())
+                .await
+                .expect("destroy failed");
+            assert!(!has_child(&component_container, "coll:b").await);
+            assert!(has_child(&component_container, "coll:a").await);
+
+            let component_container_info = ComponentInfo::new(component_container.clone()).await;
+            let component_a_info = ComponentInfo::new(component_a).await;
+            let component_c_info = ComponentInfo::new(component_c.clone()).await;
+
+            // Block "c"'s shutdown and verify "coll:a" does not shut down concurrently.
+            let (c_shutdown_completer, mock_c_shutdown) = MockAction::new(ActionKey::Shutdown);
+            let _c_notifier = component_c.actions().register_no_wait(mock_c_shutdown).await;
+            let container_shutdown = component_container
+                .actions()
+                .register_no_wait(ShutdownAction::new(ShutdownType::Instance))
+                .await;
+            _ = fasync::TestExecutor::poll_until_stalled(std::future::pending::<()>()).await;
+
+            component_a_info.check_not_shut_down(&test.runner).await;
+            component_c_info.check_not_shut_down(&test.runner).await;
+
+            c_shutdown_completer
+                .send(Err(ActionError::from(StopActionError::GetParentFailed)))
+                .unwrap();
+            container_shutdown.await.expect_err("shutdown succeeded while c failed");
+
+            // Now run the real shutdown and verify "c" stops strictly before "coll:a".
+            ActionsManager::register(
+                component_container_info.component.clone(),
+                ShutdownAction::new(ShutdownType::Instance),
+            )
+            .await
+            .expect("shutdown failed");
+            component_container_info.check_is_shut_down(&test.runner).await;
+            component_c_info.check_is_shut_down(&test.runner).await;
+            component_a_info.check_is_shut_down(&test.runner).await;
+
+            let events: Vec<_> = test
+                .test_hook
+                .lifecycle()
+                .into_iter()
+                .filter(|e| matches!(e, Lifecycle::Stop(_) | Lifecycle::Destroy(_)))
+                .collect();
+            assert_eq!(
+                events,
+                vec![
+                    Lifecycle::Stop(["container", "coll:b"].try_into().unwrap()),
+                    Lifecycle::Destroy(["container", "coll:b"].try_into().unwrap()),
+                    Lifecycle::Stop(["container", "c"].try_into().unwrap()),
+                    Lifecycle::Stop(["container", "coll:a"].try_into().unwrap()),
+                    Lifecycle::Destroy(["container", "coll:a"].try_into().unwrap()),
+                    Lifecycle::Stop(["container"].try_into().unwrap()),
+                ]
+            );
+        });
+        executor.run_until_stalled(&mut test_body).unwrap();
+    }
+
+    #[fuchsia::test]
     async fn shutdown_dynamic_offers() {
         let components = vec![
             ("root", ComponentDeclBuilder::new().child_default("container").build()),

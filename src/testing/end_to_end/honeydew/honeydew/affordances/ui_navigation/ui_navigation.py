@@ -476,7 +476,10 @@ async def run_uiautomator_task(
             raise
         except mobly_adb.Error:
             if hasattr(device.adb, "check_connection"):
-                await asyncio.to_thread(device.adb.check_connection)
+                await asyncio.to_thread(
+                    device.adb.check_connection,
+                    timeout=adb_transport._DEFAULT_CHECK_CONNECTION_TIMEOUT_SECS,
+                )
             _reset_uiautomator_device(device)
             raise
         except _UIAUTOMATOR_TASK_ERRORS:

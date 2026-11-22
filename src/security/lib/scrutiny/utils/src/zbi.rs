@@ -85,7 +85,7 @@ impl ZbiReader {
 
         // Parse the header and validate it is a ZBI.
         let container_header = read_header(&mut self.cursor)?;
-        if container_header.r#type != zbi::Type::Container {
+        if container_header.r#type != zbi::Type::CONTAINER {
             return Err(Error::new(ZbiError::InvalidContainerHeader(container_header.r#type)));
         }
         if container_header.magic != zbi::ITEM_MAGIC {
@@ -145,7 +145,7 @@ impl ZbiSeeker {
         const SEEK_ALIGNMENT: u64 = 4;
         let mut header = read_header(cursor)?;
         let mut cur_pos = cursor.position();
-        while header.r#type != zbi::Type::Container || header.magic != zbi::ITEM_MAGIC {
+        while header.r#type != zbi::Type::CONTAINER || header.magic != zbi::ITEM_MAGIC {
             cur_pos += SEEK_ALIGNMENT;
             cursor.set_position(cur_pos);
             header = read_header(cursor)?;
@@ -163,14 +163,14 @@ pub mod test {
 
     /// Returns raw bytes for a zbi container that has no sections.
     pub fn empty_zbi_bytes() -> Vec<u8> {
-        header_bytes(zbi::Type::Container, 0, 0, zbi::Flags::empty())
+        header_bytes(zbi::Type::CONTAINER, 0, 0, zbi::Flags::empty())
     }
 
     /// Returns raw bytes for a zbi container has exactly one section: a bootfs section containing no file entries.
     pub fn zbi_with_empty_bootfs_bytes() -> Vec<u8> {
         let section_data = empty_bootfs_bytes();
         let mut section_bytes = header_bytes(
-            zbi::Type::StorageBootfs,
+            zbi::Type::STORAGE_BOOTFS,
             section_data.len() as u32,
             0,
             zbi::Flags::empty(),
@@ -178,7 +178,7 @@ pub mod test {
         section_bytes.extend(&section_data);
 
         let mut zbi_bytes =
-            header_bytes(zbi::Type::Container, section_bytes.len() as u32, 0, zbi::Flags::empty());
+            header_bytes(zbi::Type::CONTAINER, section_bytes.len() as u32, 0, zbi::Flags::empty());
         zbi_bytes.extend(&section_bytes);
         zbi_bytes
     }
@@ -204,18 +204,18 @@ mod tests {
         let mut reader = ZbiReader::new(zbi_bytes);
         let sections = reader.parse().unwrap();
         assert_eq!(sections.len(), 1);
-        assert_eq!(sections[0].section_type, zbi::Type::StorageBootfs);
+        assert_eq!(sections[0].section_type, zbi::Type::STORAGE_BOOTFS);
         assert_eq!(sections[0].buffer, empty_bootfs_bytes());
     }
 
     #[test]
     fn test_zbi_sections() {
         let section_data: Vec<u8> = vec![0; 10];
-        let mut section_bytes = header_bytes(zbi::Type::Discard, 10, 10, zbi::Flags::empty());
+        let mut section_bytes = header_bytes(zbi::Type::DISCARD, 10, 10, zbi::Flags::empty());
         section_bytes.extend(&section_data);
 
         let mut zbi_bytes = header_bytes(
-            zbi::Type::Container,
+            zbi::Type::CONTAINER,
             u32::try_from(section_bytes.len()).unwrap(),
             0,
             zbi::Flags::empty(),
@@ -235,7 +235,7 @@ mod tests {
         let section_data = zstd::compress(&uncompressed_data, uncompressed_len, 3).unwrap();
 
         let mut section_bytes = header_bytes(
-            zbi::Type::Discard,
+            zbi::Type::DISCARD,
             u32::try_from(section_data.len()).unwrap(),
             4096,
             ZBI_FLAGS_STORAGE_COMPRESSED,
@@ -243,7 +243,7 @@ mod tests {
         section_bytes.extend(&section_data);
 
         let mut zbi_bytes = header_bytes(
-            zbi::Type::Container,
+            zbi::Type::CONTAINER,
             u32::try_from(section_bytes.len()).unwrap(),
             0,
             zbi::Flags::empty(),
@@ -261,16 +261,16 @@ mod tests {
         let section_data: Vec<u8> = vec![0; 7];
         let section_data_two: Vec<u8> = vec![0; 10];
 
-        let mut section_bytes = header_bytes(zbi::Type::Discard, 7, 7, zbi::Flags::empty());
+        let mut section_bytes = header_bytes(zbi::Type::DISCARD, 7, 7, zbi::Flags::empty());
         section_bytes.extend(&section_data);
         let padding_len = 8 - (section_bytes.len() % 8);
         let padding = vec![0; padding_len];
         section_bytes.extend(&padding);
-        section_bytes.extend(header_bytes(zbi::Type::Discard, 10, 10, zbi::Flags::empty()));
+        section_bytes.extend(header_bytes(zbi::Type::DISCARD, 10, 10, zbi::Flags::empty()));
         section_bytes.extend(&section_data_two);
 
         let mut zbi_bytes = header_bytes(
-            zbi::Type::Container,
+            zbi::Type::CONTAINER,
             u32::try_from(section_bytes.len()).unwrap(),
             0,
             zbi::Flags::empty(),

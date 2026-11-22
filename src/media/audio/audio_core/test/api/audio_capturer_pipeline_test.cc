@@ -9,13 +9,16 @@
 #include <zircon/types.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <set>
 #include <vector>
 
 #include "src/media/audio/audio_core/device_id.h"
+#include "src/media/audio/audio_core/test/api/ultrasound_test_shared.h"
 #include "src/media/audio/audio_core/testing/integration/hermetic_audio_test.h"
+#include "src/media/audio/lib/analysis/analysis.h"
 #include "src/media/audio/lib/analysis/generators.h"
 #include "src/media/audio/lib/test/comparators.h"
 
@@ -712,6 +715,192 @@ TEST_F(AudioLoopbackStressTest, SingleLongCapture) {
   opts.test_label = "check data";
   CompareAudioBuffers(AudioBufferSlice(&capture_buffer, 0, input.NumFrames()),
                       AudioBufferSlice(&input), opts);
+}
+
+class UltrasoundCapturerPipelineTest : public UltrasoundTest {
+ protected:
+  void SetUp() override {
+    UltrasoundTest::SetUp();
+    input_ = CreateInput();
+  }
+
+  void TearDown() override {
+    ExpectNoOverflowsOrUnderflows();
+    UltrasoundTest::TearDown();
+  }
+
+  VirtualInput<kSampleFormat>* input() const { return input_; }
+
+ private:
+  VirtualInput<kSampleFormat>* input_ = nullptr;
+};
+
+// Verifies UltrasoundCapturer attenuates a 1 kHz tone by >50 dB while preserving a 28 kHz tone.
+TEST_F(UltrasoundCapturerPipelineTest, FiltersAudibleFrequencies) {
+  auto capturer = CreateCapturer();
+
+  constexpr int64_t kPacketFrames = 960;  // 10ms at 96kHz
+  AudioBuffer<kSampleFormat> capture_buffer(kUltrasoundFormat, 0);
+  std::optional<int64_t> first_capture_pts;
+  std::optional<int64_t> last_capture_pts;
+
+  capturer->fidl().events().OnPacketProduced = [&capturer, &first_capture_pts, &last_capture_pts,
+                                                &capture_buffer](fuchsia::media::StreamPacket p) {
+    if (!first_capture_pts) {
+      first_capture_pts = p.pts;
+    }
+    last_capture_pts = p.pts;
+    auto data = capturer->SnapshotPacket(p);
+    capture_buffer.samples().insert(capture_buffer.samples().end(), data.samples().begin(),
+                                    data.samples().end());
+    capturer->fidl()->ReleasePacket(p);
+  };
+
+  capturer->fidl()->StartAsyncCapture(kPacketFrames);
+
+  constexpr int64_t kFftFrames = 4096;
+  constexpr int32_t kAudibleBin = 43;       // ~1007.8 Hz
+  constexpr int32_t kUltrasonicBin = 1195;  // ~28007.8 Hz
+
+  constexpr int64_t kTotalInputFrames = 48000;  // 500ms
+  AudioBuffer<kSampleFormat> input_buffer(kUltrasoundFormat, kTotalInputFrames);
+  for (int64_t frame = 0; frame < kTotalInputFrames; ++frame) {
+    double angle1 = 2.0 * M_PI * static_cast<double>(kAudibleBin) *
+                    static_cast<double>(frame % kFftFrames) / static_cast<double>(kFftFrames);
+    double angle2 = 2.0 * M_PI * static_cast<double>(kUltrasonicBin) *
+                    static_cast<double>(frame % kFftFrames) / static_cast<double>(kFftFrames);
+    float val = static_cast<float>(0.5 * std::cos(angle1) + 0.5 * std::cos(angle2));
+    for (int32_t ch = 0; ch < static_cast<int32_t>(kUltrasoundChannels); ++ch) {
+      input_buffer.samples()[input_buffer.SampleIndex(frame, ch)] = val;
+    }
+  }
+
+  // Write data to the input ring_buffer readable 100ms from now.
+  auto start_time = zx::clock::get_monotonic() + zx::msec(100);
+  auto input_frame = input()->RingBufferFrameAtTimestamp(start_time);
+  input()->WriteRingBufferAt(input_frame, AudioBufferSlice(&input_buffer));
+
+  // Wait until the input data has been captured.
+  auto end_time = start_time + zx::msec(500);
+  RunLoopUntil([&last_capture_pts, end_time] {
+    return last_capture_pts && last_capture_pts > end_time.get();
+  });
+
+  capturer->fidl().events().OnPacketProduced = nullptr;
+  capturer->fidl()->StopAsyncCapture(AddCallback("StopAsyncCapture"));
+  ExpectCallbacks();
+  Unbind(capturer);
+
+  ASSERT_TRUE(first_capture_pts);
+  auto data_start_frame =
+      kUltrasoundFormat.frames_per_ns().Scale(start_time.get() - *first_capture_pts);
+  // Pick an FFT window 100ms after data starts to ensure we are well into steady state.
+  int64_t slice_start = data_start_frame + 9600;
+  ASSERT_GE(slice_start, 0);
+  ASSERT_LE(slice_start + kFftFrames, capture_buffer.NumFrames());
+
+  auto mono_format = Format::Create<kSampleFormat>(1, kUltrasoundSampleRate).value();
+  for (uint32_t ch = 0; ch < kUltrasoundChannels; ++ch) {
+    AudioBuffer<kSampleFormat> mono_buffer(mono_format, kFftFrames);
+    for (int64_t i = 0; i < kFftFrames; ++i) {
+      mono_buffer.samples()[i] = capture_buffer.SampleAt(slice_start + i, ch);
+    }
+
+    auto results = MeasureAudioFreqs(AudioBufferSlice(&mono_buffer), {kAudibleBin, kUltrasonicBin});
+
+    // Audible tone (1 kHz) must be attenuated by > 50 dB relative to input amplitude of 0.5.
+    // 50 dB attenuation corresponds to factor 10^(-50/20) = 0.003162, so magnitude < 0.5 * 0.003162
+    // = 0.00158.
+    EXPECT_LT(results.magnitudes[kAudibleBin], 0.00158f) << "channel " << ch;
+
+    // Ultrasonic tone (28 kHz) must be preserved at unity gain (input amplitude was 0.5).
+    EXPECT_NEAR(results.magnitudes[kUltrasonicBin], 0.5f, 0.05f) << "channel " << ch;
+  }
+}
+
+// Verifies AudioCapturer attenuates 28 kHz ultrasound by >50 dB while preserving 1 kHz audio.
+TEST_F(UltrasoundCapturerPipelineTest, AudioCapturerFiltersUltrasoundFrequencies) {
+  fuchsia::media::AudioCapturerConfiguration config;
+  config.set_input(fuchsia::media::InputAudioCapturerConfiguration());
+  auto capturer = CreateAudioCapturer(kUltrasoundFormat, kBufferSize, std::move(config));
+
+  constexpr int64_t kPacketFrames = 960;  // 10ms at 96kHz
+  AudioBuffer<kSampleFormat> capture_buffer(kUltrasoundFormat, 0);
+  std::optional<int64_t> first_capture_pts;
+  std::optional<int64_t> last_capture_pts;
+
+  capturer->fidl().events().OnPacketProduced = [&capturer, &first_capture_pts, &last_capture_pts,
+                                                &capture_buffer](fuchsia::media::StreamPacket p) {
+    if (!first_capture_pts) {
+      first_capture_pts = p.pts;
+    }
+    last_capture_pts = p.pts;
+    auto data = capturer->SnapshotPacket(p);
+    capture_buffer.samples().insert(capture_buffer.samples().end(), data.samples().begin(),
+                                    data.samples().end());
+    capturer->fidl()->ReleasePacket(p);
+  };
+
+  capturer->fidl()->StartAsyncCapture(kPacketFrames);
+
+  constexpr int64_t kFftFrames = 4096;
+  constexpr int32_t kAudibleBin = 43;       // ~1007.8 Hz
+  constexpr int32_t kUltrasonicBin = 1195;  // ~28007.8 Hz
+
+  constexpr int64_t kTotalInputFrames = 48000;  // 500ms
+  AudioBuffer<kSampleFormat> input_buffer(kUltrasoundFormat, kTotalInputFrames);
+  for (int64_t frame = 0; frame < kTotalInputFrames; ++frame) {
+    double angle1 = 2.0 * M_PI * static_cast<double>(kAudibleBin) *
+                    static_cast<double>(frame % kFftFrames) / static_cast<double>(kFftFrames);
+    double angle2 = 2.0 * M_PI * static_cast<double>(kUltrasonicBin) *
+                    static_cast<double>(frame % kFftFrames) / static_cast<double>(kFftFrames);
+    float val = static_cast<float>(0.5 * std::cos(angle1) + 0.5 * std::cos(angle2));
+    for (int32_t ch = 0; ch < static_cast<int32_t>(kUltrasoundChannels); ++ch) {
+      input_buffer.samples()[input_buffer.SampleIndex(frame, ch)] = val;
+    }
+  }
+
+  // Write data to the input ring_buffer readable 100ms from now.
+  auto start_time = zx::clock::get_monotonic() + zx::msec(100);
+  auto input_frame = input()->RingBufferFrameAtTimestamp(start_time);
+  input()->WriteRingBufferAt(input_frame, AudioBufferSlice(&input_buffer));
+
+  // Wait until the input data has been captured.
+  auto end_time = start_time + zx::msec(500);
+  RunLoopUntil([&last_capture_pts, end_time] {
+    return last_capture_pts && last_capture_pts > end_time.get();
+  });
+
+  capturer->fidl().events().OnPacketProduced = nullptr;
+  capturer->fidl()->StopAsyncCapture(AddCallback("StopAsyncCapture"));
+  ExpectCallbacks();
+  Unbind(capturer);
+
+  ASSERT_TRUE(first_capture_pts);
+  auto data_start_frame =
+      kUltrasoundFormat.frames_per_ns().Scale(start_time.get() - *first_capture_pts);
+  // Pick an FFT window 100ms after data starts to ensure we are well into steady state.
+  int64_t slice_start = data_start_frame + 9600;
+  ASSERT_GE(slice_start, 0);
+  ASSERT_LE(slice_start + kFftFrames, capture_buffer.NumFrames());
+
+  auto mono_format = Format::Create<kSampleFormat>(1, kUltrasoundSampleRate).value();
+  for (uint32_t ch = 0; ch < kUltrasoundChannels; ++ch) {
+    AudioBuffer<kSampleFormat> mono_buffer(mono_format, kFftFrames);
+    for (int64_t i = 0; i < kFftFrames; ++i) {
+      mono_buffer.samples()[i] = capture_buffer.SampleAt(slice_start + i, ch);
+    }
+
+    auto results = MeasureAudioFreqs(AudioBufferSlice(&mono_buffer), {kAudibleBin, kUltrasonicBin});
+
+    // Audible tone (1 kHz) must be preserved at unity gain (input amplitude was 0.5).
+    EXPECT_NEAR(results.magnitudes[kAudibleBin], 0.5f, 0.05f) << "channel " << ch;
+
+    // Ultrasonic tone (28 kHz) must be attenuated by > 50 dB relative to input amplitude of 0.5.
+    // 50 dB attenuation corresponds to factor 10^(-50/20) = 0.003162, so magnitude < 0.5 * 0.003162
+    // = 0.00158.
+    EXPECT_LT(results.magnitudes[kUltrasonicBin], 0.00158f) << "channel " << ch;
+  }
 }
 
 }  // namespace media::audio::test

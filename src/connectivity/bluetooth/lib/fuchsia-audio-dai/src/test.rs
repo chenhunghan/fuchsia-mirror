@@ -14,7 +14,7 @@ use vfs::directory::entry_container::Directory;
 use vfs::{pseudo_directory, service};
 
 use crate::DigitalAudioInterface;
-use crate::driver::{ensure_dai_format_is_supported, ensure_pcm_format_is_supported};
+use crate::driver::ensure_pcm_format_is_supported;
 
 /// The status of the current device.  Retrievable via `TestHandle::status`.
 #[derive(Derivative, Clone, Debug)]
@@ -113,6 +113,24 @@ async fn handle_ring_buffer(mut requests: RingBufferRequestStream, handle: TestH
             x => unimplemented!("RingBuffer Request not implemented: {:?}", x),
         };
     }
+}
+
+fn ensure_dai_format_is_supported(
+    supported_formats: &[DaiSupportedFormats],
+    dai_format: &DaiFormat,
+) -> Result<(), anyhow::Error> {
+    for dai_supported in supported_formats.iter() {
+        if dai_supported.number_of_channels.contains(&dai_format.number_of_channels)
+            && dai_supported.sample_formats.contains(&dai_format.sample_format)
+            && dai_supported.frame_formats.contains(&dai_format.frame_format)
+            && dai_supported.frame_rates.contains(&dai_format.frame_rate)
+            && dai_supported.bits_per_slot.contains(&dai_format.bits_per_slot)
+            && dai_supported.bits_per_sample.contains(&dai_format.bits_per_sample)
+        {
+            return Ok(());
+        }
+    }
+    Err(format_err!("DAI does not support DAI format: {dai_format:?}"))
 }
 
 async fn test_handle_dai_requests(

@@ -38,8 +38,13 @@ class RebootCapableDevice(abc.ABC):
         """
 
     @abc.abstractmethod
-    def wait_for_offline(self) -> None:
-        """Wait for Fuchsia device to go offline."""
+    def wait_for_offline(self, timeout: float | None = None) -> None:
+        """Wait for Fuchsia device to go offline.
+
+        Args:
+            timeout: Maximum time in seconds to wait for the device to go
+                offline. If None (default), waits indefinitely.
+        """
 
     @abc.abstractmethod
     async def wait_for_online(self) -> None:
@@ -118,17 +123,36 @@ class FuchsiaDeviceAddressChange(abc.ABC):
     """Abstract base class which contains methods that let you register to run any custom logic
     when device address is changed."""
 
+    # TODO(b/582408121): Kept synchronous so `USB.after_connect()` can call
+    # `resolve_device_address()` synchronously (required while `Adb` is
+    # synchronous and calls `USB` methods from `Adb.__init__()`). All registered
+    # callbacks (`FFX.update_target_address` and
+    # `FuchsiaController.update_target_address`) are synchronous. If `Adb` and
+    # `USB` are later converted to async, revisit whether this should also
+    # support async callbacks.
+    @abc.abstractmethod
+    def resolve_device_address(self) -> None:
+        """Resolves the target address of Fuchsia device."""
+
     @abc.abstractmethod
     def register_for_on_device_address_change(
         self,
-        fn: Callable[[custom_types.TargetAddr], None]
-        | Callable[[custom_types.TargetAddr], Awaitable[None]],
+        fn: Callable[[custom_types.TargetAddr], None],
     ) -> None:
         """Register a function that will be called when a device address is changed.
 
         Args:
             fn: Function that need to be called when a device address is changed.
         """
+
+
+class HealthCheckCapable(abc.ABC):
+    """Abstract base class to be implemented by a device which supports the
+    health check operation."""
+
+    @abc.abstractmethod
+    def health_check(self) -> None:
+        """Ensure device is healthy."""
 
 
 class InspectCapableDevice(abc.ABC):

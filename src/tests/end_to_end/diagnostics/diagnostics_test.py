@@ -45,6 +45,8 @@ _BLOCK_DRIVERS: Dict[str, tuple[frozenset[str], str]] = {
                 "fuchsia-boot:///ufs#meta/ufs.cm",
                 "fuchsia-boot:///ufs-pci#meta/ufs-pci.cm",
                 "fuchsia-boot:///ufs-pdev#meta/ufs-pdev.cm",
+                "fuchsia-boot:///ufs-rust-pci#meta/ufs-rust-pci.cm",
+                "fuchsia-boot:///ufs-rust-pdev#meta/ufs-rust-pdev.cm",
             }
         ),
         "ufs",

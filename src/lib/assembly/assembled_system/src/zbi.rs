@@ -63,8 +63,12 @@ pub fn construct_zbi(
         zbi_builder.add_cmdline_arg(cmd);
     }
 
-    if let Some(args) = &product.board_driver_arguments {
-        zbi_builder.set_board_driver_arguments(args.clone());
+    if let Some(platform_id) = &product.platform_id {
+        zbi_builder.set_platform_id(platform_id.clone());
+    }
+
+    if let Some(board_info) = &product.driver_board_info {
+        zbi_builder.set_driver_board_info(board_info.clone());
     }
 
     // Below, we generate the package index used by early boot to resolve
@@ -202,6 +206,7 @@ mod tests {
     use crate::AssembledSystem;
     use crate::base_package::BasePackage;
 
+    use assembly_cli_args::AssemblyMode;
     use assembly_constants::BootfsDestination;
     use assembly_images_config::{PostProcessingScript, Zbi, ZbiCompression};
     use assembly_release_info::SystemReleaseInfo;
@@ -209,7 +214,7 @@ mod tests {
     use assembly_tool::{ToolCommandLog, ToolProvider};
     use camino::{Utf8Path, Utf8PathBuf};
     use fuchsia_hash::Hash;
-    use image_assembly_config::ImageAssemblyConfig;
+    use image_assembly_config::{DriverBoardInfo, ImageAssemblyConfig, PlatformId};
     use regex::Regex;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -270,6 +275,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         construct_zbi(
             zbi_tool,
@@ -302,6 +308,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         construct_zbi(
             zbi_tool,
@@ -356,6 +363,122 @@ mod tests {
     }
 
     #[test]
+    fn construct_with_platform_id_only_in_test_zbi_mode() {
+        let tmp = tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap();
+
+        let kernel_path = dir.join("kernel");
+        std::fs::write(&kernel_path, "fake kernel").unwrap();
+
+        let mut product_config = ImageAssemblyConfig::new_for_testing(&kernel_path);
+        product_config.platform_id =
+            Some(PlatformId { vendor_id: 0x12, product_id: 0x34, name: "test-board".into() });
+        product_config.driver_board_info = None;
+
+        let zbi_config = Zbi {
+            name: "fuchsia".into(),
+            compression: ZbiCompression::ZStd,
+            postprocessing_script: None,
+        };
+
+        let tools = FakeToolProvider::default();
+        let zbi_tool = tools.get_tool("zbi").unwrap();
+        let mut assembled_system = AssembledSystem {
+            images: Default::default(),
+            board_name: "test-board".into(),
+            partitions_config: None,
+            system_release_info: SystemReleaseInfo::new_for_testing(),
+            platform_tools: vec![],
+            delivery_blob_type: None,
+        };
+
+        construct_zbi(
+            zbi_tool,
+            &mut assembled_system,
+            dir,
+            &product_config,
+            &zbi_config,
+            None,
+            None::<Utf8PathBuf>,
+            AssemblyMode::TestZBI,
+        )
+        .unwrap();
+
+        let zbi_args: Vec<String> = tools
+            .log()
+            .commands
+            .borrow()
+            .iter()
+            .find(|command| command.tool == "./host_x64/zbi")
+            .unwrap()
+            .args
+            .clone();
+
+        let platform_id_idx = zbi_args.iter().position(|arg| arg == "--type=platform_id").unwrap();
+        assert_eq!(zbi_args[platform_id_idx + 1], dir.join("platform_id.bin").as_str());
+        assert!(!zbi_args.iter().any(|arg| arg == "--type=drv_board_info"));
+    }
+
+    #[test]
+    fn construct_with_platform_id_and_driver_board_info() {
+        let tmp = tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap();
+
+        let kernel_path = dir.join("kernel");
+        std::fs::write(&kernel_path, "fake kernel").unwrap();
+
+        let mut product_config = ImageAssemblyConfig::new_for_testing(&kernel_path);
+        product_config.platform_id =
+            Some(PlatformId { vendor_id: 0x12, product_id: 0x34, name: "test-board".into() });
+        product_config.driver_board_info = Some(DriverBoardInfo { revision: 0x56 });
+
+        let zbi_config = Zbi {
+            name: "fuchsia".into(),
+            compression: ZbiCompression::ZStd,
+            postprocessing_script: None,
+        };
+
+        let tools = FakeToolProvider::default();
+        let zbi_tool = tools.get_tool("zbi").unwrap();
+        let mut assembled_system = AssembledSystem {
+            images: Default::default(),
+            board_name: "test-board".into(),
+            partitions_config: None,
+            system_release_info: SystemReleaseInfo::new_for_testing(),
+            platform_tools: vec![],
+            delivery_blob_type: None,
+        };
+
+        construct_zbi(
+            zbi_tool,
+            &mut assembled_system,
+            dir,
+            &product_config,
+            &zbi_config,
+            None,
+            None::<Utf8PathBuf>,
+            AssemblyMode::BuildEverything,
+        )
+        .unwrap();
+
+        let zbi_args: Vec<String> = tools
+            .log()
+            .commands
+            .borrow()
+            .iter()
+            .find(|command| command.tool == "./host_x64/zbi")
+            .unwrap()
+            .args
+            .clone();
+
+        let platform_id_idx = zbi_args.iter().position(|arg| arg == "--type=platform_id").unwrap();
+        assert_eq!(zbi_args[platform_id_idx + 1], dir.join("platform_id.bin").as_str());
+        let board_info_idx =
+            zbi_args.iter().position(|arg| arg == "--type=drv_board_info").unwrap();
+        assert_eq!(zbi_args[board_info_idx + 1], dir.join("board_info.bin").as_str());
+    }
+
+    #[test]
     fn vendor_sign() {
         let tmp = tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
@@ -386,6 +509,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let signed_zbi_path =
             vendor_sign_zbi(signing_tool, &mut assembled_system, dir, &zbi, &zbi_path).unwrap();

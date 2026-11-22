@@ -34,12 +34,8 @@ fuchsia_test_package("display-pixel-ratio-test") {
       max_severity = "ERROR"
     }
     environments = [
-      {
-        dimensions = {
-          # Ensure the device has Vulkan.
-          device_type = "AEMU"
-        }
-      },
+      # Ensure the device has Vulkan.
+      aemu_env,
     ]
   }
 }

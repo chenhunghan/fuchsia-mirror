@@ -80,7 +80,6 @@ source "${_SCRIPT_ARGS_FILE}"
 readonly _REMOTE_SERVICES_BAZELRC="${_NINJA_BUILD_DIR}/regenerator_outputs/remote_services.bazelrc"
 
 readonly _GENERATE_INVOCATION_BAZELRC="${_SRCDIR}/scripts/generate_invocation_bazelrc.py"
-readonly _INVOCATION_BAZELRC="${_BAZEL_WORKSPACE}/invocation.bazelrc"
 readonly _VENDORING_BAZELRC="${_SRCDIR}/enable_vendor_mode.bazelrc"
 
 # Exported explicitly to be used by repository rules to reference the
@@ -108,10 +107,18 @@ _BAZEL_PRE_COMMAND_ARGS=()
 # to sub-build invocations.
 # If top-level fx bazel build, use FX_BUILD_UUID as the invocation id.
 # If sub-build under Ninja, generate a unique child invocation id.
-if [[ -z "${RESULTSTORE_PARENT_BUILD_ID:-}" && -n "${FX_BUILD_UUID:-}" ]]; then
+if [[ -n "${RESULTSTORE_PARENT_BUILD_ID:-}" ]]; then
+  # Sub-build with explicit parent ID.
+  readonly RESULTSTORE_invocation_id="$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')"
+elif [[ -n "${FX_BUILD_LOGDIR:-}" && -n "${FX_BUILD_UUID:-}" ]]; then
+  # Sub-build under fx build (e.g. Ninja action): FX_BUILD_UUID is the parent build ID.
+  export RESULTSTORE_PARENT_BUILD_ID="${FX_BUILD_UUID}"
+  readonly RESULTSTORE_invocation_id="$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')"
+elif [[ -n "${FX_BUILD_UUID:-}" ]]; then
+  # Top-level standalone fx bazel build.
   readonly RESULTSTORE_invocation_id="${FX_BUILD_UUID}"
 else
-  readonly RESULTSTORE_invocation_id="${RESULTSTORE_invocation_id:-$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')}"
+  readonly RESULTSTORE_invocation_id="$("${_PREBUILT_PYTHON3}" -S -c 'import uuid; print(uuid.uuid4())')"
 fi
 
 # The following step is sensitive to special environment variables:
@@ -141,9 +148,12 @@ fi
 readonly _BAZEL_INVOCATION_LOG_DIR="${_BAZEL_INVOCATION_LOG_PARENT}/${_BAZEL_INVOCATION_LOG_DIR_NAME}"
 mkdir -p "${_BAZEL_INVOCATION_LOG_DIR}"
 
+# invocation.bazelrc is scoped per-invocation in its dedicated log directory
+# to prevent concurrent Bazel sub-builds from colliding or unlinking it.
+readonly _INVOCATION_BAZELRC="${_BAZEL_INVOCATION_LOG_DIR}/invocation.bazelrc"
+
 function cleanup {
   local exit_code=$?
-  rm -f "${_INVOCATION_BAZELRC}"
   # Preserve the completed invocation's command.log (stdout/stderr stream from Bazel).
   if [[ -n "${_BAZEL_INVOCATION_LOG_DIR:-}" && -d "${_BAZEL_INVOCATION_LOG_DIR}" && -f "${_BAZEL_OUTPUT_BASE}/command.log" ]]; then
     cp -f "${_BAZEL_OUTPUT_BASE}/command.log" "${_BAZEL_INVOCATION_LOG_DIR}/command.log" 2>/dev/null || true
@@ -229,11 +239,6 @@ fi
 # and credential helpers will work, e.g. go/bazel-google-sso.
 _user="${USER:-unused-bazel-build-user}"
 
-_bazel_env=(
-    env USER="${_user}"
-    RESULTSTORE_PARENT_BUILD_ID="$RESULTSTORE_invocation_id"
-)
-
 _bazel_exec="${_BAZEL_BIN}"
 _bazel_install_dir="$(dirname "${_BAZEL_BIN}")"
 _bazel_install_base="${_bazel_install_dir}/install_base"
@@ -273,7 +278,6 @@ if [[ -f "${_BAZEL_BIN}-real" && -d "${_bazel_install_base}" ]]; then
 fi
 
 _bazel_command=(
-    "${_bazel_env[@]}"
     "${_bazel_exec}"
     "${_BAZEL_PRE_COMMAND_ARGS[@]}"
     "$@"
@@ -369,4 +373,17 @@ function wait-ignoring-signals {
   return "$status"
 }
 
-cd "${_BAZEL_WORKSPACE}" && wait-ignoring-signals "${_bazel_command[@]}"
+# Delegate to bazel_besproxy_wrap.py, which intercepts the Build Event Stream
+# (BES) with besproxy when Buildminder is active, or transparently passes
+# through to the raw Bazel command when inactive.
+readonly _BAZEL_BESPROXY_WRAP="${_SRCDIR}/scripts/bazel_besproxy_wrap.py"
+
+cd "${_BAZEL_WORKSPACE}" && wait-ignoring-signals \
+  env "PYTHONPATH=${_FUCHSIA_DIR}" \
+      "USER=${_user}" \
+      "RESULTSTORE_PARENT_BUILD_ID=${RESULTSTORE_invocation_id:-}" \
+  "${_PREBUILT_PYTHON3}" -S "${_BAZEL_BESPROXY_WRAP}" \
+  --fuchsia-dir="${_FUCHSIA_DIR}" \
+  --log-dir="${_BAZEL_INVOCATION_LOG_DIR}" \
+  -- \
+  "${_bazel_command[@]}"

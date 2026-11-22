@@ -1,0 +1,36 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN's bootfs_test() expects the binary at test/trace-reader-test-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/trace-reader-test-test", root_build_dir) destination = "test/trace-reader-test-test" label = get_label_info(":trace-reader-test", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "trace-reader-test",
+    srcs = [
+        "file_reader_tests.cc",
+        "reader_tests.cc",
+        "reader_tests.h",
+        "records_tests.cc",
+    ],
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+        "//conditions:default": [],
+    }),
+    gn_output_name = "trace-reader-test-test",
+    deps = [
+        "//sdk/lib/fit",
+        "//zircon/system/ulib/trace-engine:trace-engine-headers-for-reader",
+        "//zircon/system/ulib/trace-reader",
+        "//zircon/system/ulib/zxtest",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/lib/fdio",
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }),
+)

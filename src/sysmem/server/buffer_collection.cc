@@ -61,8 +61,6 @@ BufferCollection& BufferCollection::EmplaceInTree(
   // The token is passed in as a pointer because this method deletes token, but the caller must
   // provide non-nullptr token.
   ZX_DEBUG_ASSERT(token);
-  // This conversion from unique_ptr<> to RefPtr<> will go away once we move BufferCollection to
-  // LLCPP FIDL server binding.
   fbl::RefPtr<Node> node(
       fbl::AdoptRef(new BufferCollection(logical_buffer_collection, *token, server_end)));
   BufferCollection* buffer_collection_ptr = static_down_cast<BufferCollection*>(node.get());

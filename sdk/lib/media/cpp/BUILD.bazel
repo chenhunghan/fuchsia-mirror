@@ -7,6 +7,29 @@ load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library
 package(default_applicable_licenses = ["//:license"])
 
 idk_cc_source_library(
+    name = "cpp",
+    srcs = [
+        "type_converters.cc",
+    ],
+    hdrs = [
+        "type_converters.h",
+    ],
+    api_area = "Media",
+    category = "partner",
+    idk_name = "media_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = [
+        "//src/media:__subpackages__",
+    ],
+    deps = [
+        ":no_converters",
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+    ],
+)
+
+idk_cc_source_library(
     name = "no_converters",
     srcs = [
         "timeline_function.cc",

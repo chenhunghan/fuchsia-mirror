@@ -22,6 +22,7 @@ host_test_data_files(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
         "//src/developer/ffx:__subpackages__",
+        "//src/sys/pkg/lib/fuchsia-repo:__pkg__",
         "//tools/pbtool:__pkg__",
     ],
 )
@@ -43,6 +44,7 @@ host_test_data_files(
     visibility = [
         "//src/developer/ffx/plugins/repository/server/start:__pkg__",
         "//src/developer/ffx/plugins/target/update:__pkg__",
+        "//src/sys/pkg/lib/fuchsia-repo:__pkg__",
         "//tools/pbtool:__pkg__",
     ],
 )

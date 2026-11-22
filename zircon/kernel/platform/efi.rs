@@ -5,8 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use super::efi_ffi::{cpp_phys_handoff_efi_memory_attributes, cpp_phys_handoff_memory};
-use crate::kernel::thread;
+use crate::arch_rs::{InterruptDisableGuard, curr_cpu_num};
 use crate::kernel::types::PAddr;
+use crate::kernel::{scheduler, thread};
 use crate::vm::arch_vm_aspace::{
     ARCH_MMU_FLAG_CACHE_MASK, ARCH_MMU_FLAG_CACHED, ARCH_MMU_FLAG_PERM_EXECUTE,
     ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRITE, ARCH_MMU_FLAG_UNCACHED_DEVICE, ArchMmuFlags,
@@ -15,7 +16,7 @@ use crate::vm::vm_address_region::flag as vmar_flag;
 use crate::vm::vm_aspace::{Type, VmAspace};
 use crate::vm::vm_object_physical::VmObjectPhysical;
 use crate::vm::vmm;
-use core::mem::{align_of, size_of};
+use core::mem::{DropGuard, align_of, size_of};
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 use debug::dprintf;
@@ -54,8 +55,13 @@ static EFI_ASPACE: AtomicPtr<VmAspace> = AtomicPtr::new(ptr::null_mut());
 
 fn efi_init_hook(_level: init::LkInitLevel) {
     // Attempt to initialize EFI.
-    if let Some(efi_system_table) = Option::from(PhysHandoff::get().efi_system_table) {
-        let status = init_efi_services(efi_system_table);
+    // SAFETY: `gPhysHandoff` stays valid until `EndHandoff` clears it, which is after the
+    // `LK_INIT_LEVEL_PLATFORM - 1` hook runs.
+    let efi_system_table = Option::from(unsafe { PhysHandoff::get() }.efi_system_table);
+    if let Some(efi_system_table) = efi_system_table {
+        // SAFETY: `gPhysHandoff` and the hand-off memory it references stay valid and unmodified
+        // until `EndHandoff` clears it, which runs after `LK_INIT_LEVEL_PLATFORM - 1`.
+        let status = unsafe { init_efi_services(efi_system_table) };
         if let Err(status) = status {
             dprintf!(INFO, "Unable to initialize EFI services: {}\n", status.into_raw());
         } else {
@@ -70,7 +76,16 @@ fn efi_init_hook(_level: init::LkInitLevel) {
 init::lk_init_hook!(efi_init, efi_init_hook, init::LkInitLevel(init::LK_INIT_LEVEL_PLATFORM.0 - 1));
 
 /// Helper function that maps the region with size `size` at `base` into the given aspace.
-fn map_unaligned_region(
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - Nothing accesses `[aspace.base() + base.0, aspace.base() + base.0 + size)` in `aspace`, or
+///   the rest of any page (including any large page) it partly covers, in a way that relies on it
+///   staying mapped, and no Rust reference into that memory is live.
+/// - `gPhysHandoff` and the hand-off memory it references remain valid and unmodified during the
+///   call.
+unsafe fn map_unaligned_region(
     aspace: &VmAspace,
     base: PAddr,
     size: usize,
@@ -100,9 +115,9 @@ fn map_unaligned_region(
             false
         };
         let mut count = 0usize;
-        // SAFETY: `gPhysHandoff` stays valid until `EndHandoff` clears it, which is after the
-        // `LK_INIT_LEVEL_PLATFORM - 1` hook runs, and `count` is a live local that the callee
-        // fills in.
+        // SAFETY: The caller guarantees that `gPhysHandoff` and its hand-off memory are valid and
+        // unmodified during this call, so `cpp_phys_handoff_memory` returns a valid `Range` span
+        // of length `count` (or null when `count == 0`, handled by `zr::slice_from_raw_parts`).
         let memory =
             unsafe { zr::slice_from_raw_parts(cpp_phys_handoff_memory(&mut count), count) };
         // SAFETY: `PhysHandoff::memory` is documented as a normalized accounting of RAM: maximally
@@ -143,16 +158,20 @@ fn map_unaligned_region(
         vmar_flags |= vmar_flag::CAN_MAP_EXECUTE;
     }
 
-    let mapping_result = vmar.create_vm_mapping(
-        aligned_base.0,
-        aligned_size,
-        page::SHIFT as u8,
-        vmar_flags,
-        VmObjectPhysical::into_vm_object(vmo),
-        0,
-        arch_mmu_flags,
-        name.as_bytes(),
-    )?;
+    // SAFETY: The caller guarantees that nothing relies on the target range in `aspace`, or on the
+    // rest of any page it partly covers, staying mapped, and that no Rust reference into it is
+    // live.
+    let mapping_result = unsafe {
+        vmar.create_vm_mapping(
+            aligned_base.0,
+            aligned_size,
+            page::SHIFT as u8,
+            vmar_flags,
+            VmObjectPhysical::into_vm_object(vmo),
+            0,
+            arch_mmu_flags,
+        )
+    }?;
 
     mapping_result.mapping.map_range(0, aligned_size, true, false)?;
 
@@ -203,8 +222,13 @@ pub(super) fn for_each_memory_attribute_entry_safe(
 }
 
 /// Initialize data structures for EFI services.
+///
+/// # Safety
+///
+/// The caller must ensure that `gPhysHandoff` and the hand-off memory it references remain valid
+/// and unmodified for the duration of this call.
 #[sanitize(address = "off")]
-fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
+unsafe fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
     assert!(!EFI_SYSTEM_TABLE_SET.load(Ordering::Relaxed));
     if efi_system_table == 0
         || !(efi_system_table as usize).is_multiple_of(align_of::<EfiSystemTable>())
@@ -217,8 +241,8 @@ fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
     // before userboot runs.
     // There are plans to change this in the future, at which point we may need to revisit this.
     let mut size = 0usize;
-    // SAFETY: `gPhysHandoff` stays valid until `EndHandoff` clears it, which is after the
-    // `LK_INIT_LEVEL_PLATFORM - 1` hook runs, and `size` is a live local that the callee fills in.
+    // SAFETY: The caller guarantees `gPhysHandoff` and its hand-off memory are valid, and `size` is
+    // a live local that the callee fills in.
     let efi_memory_attributes = unsafe { cpp_phys_handoff_efi_memory_attributes(&mut size) };
     if size == 0 {
         dprintf!(CRITICAL, "EFI did not provide memory table, cannot map runtime services.\n");
@@ -237,9 +261,8 @@ fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
     let Some(efi_aspace) = VmAspace::create(Type::LowKernel, b"uefi") else {
         return Err(Status::NO_RESOURCES);
     };
-    let aspace_for_cleanup = efi_aspace.clone();
-    let mut cleanup = zr::defer(move || {
-        let _ = aspace_for_cleanup.destroy();
+    let efi_aspace = DropGuard::new(efi_aspace, |efi_aspace| {
+        let _ = efi_aspace.destroy();
     });
 
     // SAFETY: `efi_memory_attributes` is non-null and points to `size` bytes of hand-off memory
@@ -277,13 +300,18 @@ fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
             );
             return Err(Status::INVALID_ARGS);
         };
-        let result = map_unaligned_region(
-            &efi_aspace,
-            PAddr(desc.PhysicalStart as usize),
-            region_size as usize,
-            "efi_runtime",
-            arch_mmu_flags,
-        );
+        // SAFETY: `efi_aspace` is still being set up and has not been published or activated, so
+        // nothing relies on its mappings and no Rust reference into it is live; the caller
+        // guarantees `gPhysHandoff` and its hand-off memory are valid and unmodified.
+        let result = unsafe {
+            map_unaligned_region(
+                &efi_aspace,
+                PAddr(desc.PhysicalStart as usize),
+                region_size as usize,
+                "efi_runtime",
+                arch_mmu_flags,
+            )
+        };
         if let Err(result) = result {
             dprintf!(
                 CRITICAL,
@@ -298,7 +326,7 @@ fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
         Ok(())
     })?;
 
-    cleanup.cancel();
+    let efi_aspace = DropGuard::dismiss(efi_aspace);
     EFI_SYSTEM_TABLE_SET.store(true, Ordering::Relaxed);
     EFI_SYSTEM_TABLE.store(efi_system_table, Ordering::Relaxed);
     EFI_ASPACE.store(RefPtr::into_raw(efi_aspace).cast_mut(), Ordering::Release);
@@ -312,7 +340,7 @@ fn init_efi_services(efi_system_table: u64) -> Result<(), Status> {
 /// guard is dropped, the previous address space will be restored.
 ///
 /// Returns a guard for which [`EfiServicesActivation::valid`] is `false` if no EFI services are
-/// available.
+/// available or the calling CPU's scheduler is not active.
 ///
 /// WARNING: Callers accessing EFI runtime services while this guard is active must be tagged with
 /// `#[sanitize(address = "off")]` (the Rust equivalent of `NO_ASAN`) to avoid crashes when running
@@ -335,15 +363,21 @@ pub unsafe fn try_activate_efi_services() -> EfiServicesActivation {
         return EfiServicesActivation::default();
     }
     debug_assert!(EFI_SYSTEM_TABLE_SET.load(Ordering::Relaxed));
+    let has_current_thread = {
+        let _irqd = InterruptDisableGuard::new();
+        scheduler::peek_is_active(curr_cpu_num())
+    };
+    if !has_current_thread {
+        return EfiServicesActivation::default();
+    }
 
     // Switch into the address space where EFI services have been mapped.
-    // SAFETY: The reference is immediately converted to a pointer and stored; the caller keeps
-    // that aspace valid until the guard restores it.
-    let old_aspace = unsafe { thread::current_active_aspace() }.map(NonNull::from);
-    // SAFETY: `efi_aspace` is published once into `EFI_ASPACE` at the end of `init_efi_services`
-    // (and loaded with `Acquire` above), is never destroyed, and the caller restores the previous
-    // aspace through the guard.
-    unsafe { vmm::set_active_aspace(Some(&*efi_aspace)) };
+    // SAFETY: The calling CPU has a valid, initialized current thread, as its scheduler is active.
+    let old_aspace = unsafe { thread::current_active_aspace_ptr() };
+    // SAFETY: The calling CPU has a valid, initialized current thread. `efi_aspace` is published
+    // once into `EFI_ASPACE` at the end of `init_efi_services` (and loaded with `Acquire` above),
+    // is never destroyed, and the caller restores the previous aspace through the guard.
+    unsafe { vmm::set_active_aspace(NonNull::new(efi_aspace)) };
 
     // Return the services.
     let sys = ptr::with_exposed_provenance::<EfiSystemTable>(
@@ -353,8 +387,9 @@ pub unsafe fn try_activate_efi_services() -> EfiServicesActivation {
     // aspace that is now active, and this function is `#[sanitize(address = "off")]`.
     let runtime_services = unsafe { (*sys).RuntimeServices };
     let Some(services) = NonNull::new(runtime_services) else {
-        // SAFETY: `old_aspace` was the thread's active aspace above, and the caller keeps it valid.
-        unsafe { vmm::set_active_aspace(old_aspace.map(|p| p.as_ref())) };
+        // SAFETY: The calling CPU has a valid, initialized current thread, `old_aspace` was its
+        // active aspace above, and the caller keeps it valid.
+        unsafe { vmm::set_active_aspace(old_aspace) };
         return EfiServicesActivation::default();
     };
     EfiServicesActivation { previous_aspace: Some(old_aspace), services: Some(services) }
@@ -391,9 +426,10 @@ impl EfiServicesActivation {
         };
 
         // Restore the previous address space.
-        // SAFETY: `previous_aspace` was the thread's active aspace when this guard was created,
-        // and the caller of `try_activate_efi_services` keeps it valid until the guard is reset.
-        unsafe { vmm::set_active_aspace(previous_aspace.map(|p| p.as_ref())) };
+        // SAFETY: The calling CPU's current thread is the valid, initialized thread that created
+        // this guard (which is not `Send`), `previous_aspace` was its active aspace then, and the
+        // caller of `try_activate_efi_services` keeps it valid until the guard is reset.
+        unsafe { vmm::set_active_aspace(previous_aspace) };
     }
 
     /// Get pointer to EFI services.

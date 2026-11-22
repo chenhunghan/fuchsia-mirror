@@ -6,6 +6,7 @@ import os
 import os.path
 import struct
 import sys
+import tempfile
 import typing
 import unittest
 
@@ -143,6 +144,45 @@ class EndToEnd(unittest.IsolatedAsyncioTestCase):
     def test_context_creation_invalid_config_type(self) -> None:
         with self.assertRaises(TypeError):
             Context(config="not a dict")  # type: ignore
+        with self.assertRaises(TypeError):
+            Context(config=[], target="foo")  # type: ignore
+        with self.assertRaises(TypeError):
+            Context(config="not a dict", target="foo")  # type: ignore
+
+    def test_strict_context_creation_and_config_get(self) -> None:
+        with tempfile.TemporaryDirectory() as shared_data:
+            ctx = Context.strict(
+                config={
+                    "shared_data": shared_data,
+                    "ssh.priv": ["/keys/fuchsia_ed25519"],
+                    "some": {"nested": {"key": "strict_val"}},
+                },
+                target="id:SERIAL-A",
+            )
+            self.addCleanup(ctx.close)
+            self.assertEqual(
+                ctx.config_get_string("some.nested.key"), "strict_val"
+            )
+            self.assertEqual(
+                ctx.config_get_string("target.default"), "id:SERIAL-A"
+            )
+            self.assertIsNone(ctx.config_get_string("nonexistent.strict.key"))
+
+    def test_strict_context_rejects_invalid_config(self) -> None:
+        with self.assertRaises(RuntimeError):
+            Context.strict(config={}, target="id:SERIAL-A")
+
+    def test_strict_context_invalid_config_type(self) -> None:
+        with self.assertRaisesRegex(
+            TypeError, "`config` is required for a strict context"
+        ):
+            Context.strict(config=None)  # type: ignore
+        with self.assertRaises(TypeError):
+            Context.strict(config=[])  # type: ignore
+        with self.assertRaises(TypeError):
+            Context.strict(config=[], target="foo")  # type: ignore
+        with self.assertRaises(TypeError):
+            Context.strict(config="not a dict", target="foo")  # type: ignore
 
     def test_context_creation_conflicting_config_raises_error(
         self,

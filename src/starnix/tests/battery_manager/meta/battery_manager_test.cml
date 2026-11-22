@@ -1,0 +1,71 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    include: [
+        "//src/starnix/tests/run_as_root.shard.cml",
+        "//src/starnix/tests/starnix_test.shard.cml",
+    ],
+    program: {
+        binary: "data/tests/battery_manager_test_bin",
+        test_type: "syscall_libtest",
+    },
+    children: [
+        {
+            name: "container",
+            url: "#meta/battery_manager_container.cm",
+            environment: "#starnix_runner_env",
+        },
+        {
+            name: "battery_manager",
+            url: "battery-manager#meta/battery_manager.cm",
+        },
+        {
+            name: "fake_battery",
+            url: "#meta/fake_battery.cm",
+        },
+    ],
+    use: [
+        {
+            protocol: "fuchsia.component.runner.ComponentRunner",
+            from: "#container",
+        },
+    ],
+    offer: [
+        {
+            service: "fuchsia.hardware.power.battery.Service",
+            from: "#fake_battery",
+            to: "#battery_manager",
+        },
+        {
+            storage: "data",
+            from: "self",
+            to: "#battery_manager",
+        },
+        {
+            storage: "tmp",
+            from: "parent",
+            to: "#battery_manager",
+        },
+        {
+            directory: "pkg",
+            from: "framework",
+            as: "config",
+            to: "#battery_manager",
+        },
+        {
+            config: "fuchsia.power.SuspendEnabled",
+            from: "void",
+            to: "#battery_manager",
+            availability: "optional",
+        },
+        {
+            protocol: [
+                "fuchsia.power.battery.BatteryManager",
+                "fuchsia.power.battery.test.BatterySimulator",
+            ],
+            from: "#battery_manager",
+            to: "#kernel",
+        },
+    ],
+}

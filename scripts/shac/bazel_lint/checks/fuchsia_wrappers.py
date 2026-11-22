@@ -47,15 +47,15 @@ _WRAPPED_RULES: dict[str, _WrapperSpec] = {
         wrapper_name="fx_cc_library",
         wrapper_module="//build/bazel/rules/cc:fx_cc_library.bzl",
         disallowed_module_prefix=_CC_MODULE_PREFIX,
-        alt_wrapper_name="cc_*_library_zx",
-        alt_wrapper_module="//build/bazel/rules:zx_library.bzl",
+        alt_wrapper_name="fx_cc_{source,static}_library_zx",
+        alt_wrapper_module="//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl",
     ),
     "cc_shared_library": _WrapperSpec(
         wrapper_name="fx_cc_shared_library",
         wrapper_module="//build/bazel/rules/cc:fx_cc_shared_library.bzl",
         disallowed_module_prefix=_CC_MODULE_PREFIX,
-        alt_wrapper_name="cc_shared_library_zx",
-        alt_wrapper_module="//build/bazel/rules:zx_library.bzl",
+        alt_wrapper_name="fx_cc_shared_library_zx",
+        alt_wrapper_module="//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl",
     ),
     # We don't run C++ tests directly, so there is no need to use cc_test().
     "cc_test": _WrapperSpec(

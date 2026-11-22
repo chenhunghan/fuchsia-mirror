@@ -347,5 +347,5 @@ impl Driver for LabRootDriver {
         })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }

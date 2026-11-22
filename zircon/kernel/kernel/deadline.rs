@@ -142,18 +142,6 @@ zr::static_assert!(core::mem::align_of::<Deadline>() == 8);
 zr::static_assert!(core::mem::offset_of!(Deadline, when) == 0);
 zr::static_assert!(core::mem::offset_of!(Deadline, slack) == 8);
 
-/// FFI trampoline for [`Deadline::earliest`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_deadline_earliest(deadline: &Deadline) -> zx_types::zx_time_t {
-    deadline.earliest().0
-}
-
-/// FFI trampoline for [`Deadline::latest`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_deadline_latest(deadline: &Deadline) -> zx_types::zx_time_t {
-    deadline.latest().0
-}
-
 /// Unit tests for [`Deadline`].
 #[cfg(ktest)]
 #[unittest::suite(name = "deadline_rust")]

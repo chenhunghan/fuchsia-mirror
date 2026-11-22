@@ -85,8 +85,8 @@ class DwarfDieScanner {
 
   const DwarfUnit& unit_;
 
-  uint64_t die_count_ = 0;
-  uint64_t die_index_ = 0;
+  uint32_t die_count_ = 0;
+  uint32_t die_index_ = 0;
 
   const llvm::DWARFDebugInfoEntry* cur_die_ = nullptr;
 

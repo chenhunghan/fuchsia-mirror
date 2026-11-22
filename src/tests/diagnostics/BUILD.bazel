@@ -1,0 +1,79 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":log_settings_min_severity_test"],
+    visibility = ["//src/tests:__pkg__"],
+)
+
+rustc_test(
+    name = "log_settings_min_severity_bin",
+    srcs = ["src/log_settings_min_severity.rs"],
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:tracing",
+    ],
+)
+
+fx_packaged_binary(
+    name = "log_settings_min_severity_bin_packaged",
+    testonly = True,
+    binary = ":log_settings_min_severity_bin",
+    binary_name = "log_settings_min_severity_bin",
+)
+
+fx_component_manifest(
+    name = "log_settings_min_severity_manifest",
+    testonly = True,
+    component_name = "log_settings_min_severity",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default",
+    ],
+    manifest = "meta/log_settings_min_severity.cml",
+)
+
+fx_test_component(
+    name = "log_settings_min_severity_component",
+    compiled_manifest = ":log_settings_min_severity_manifest",
+    deps = [":log_settings_min_severity_bin_packaged"],
+)
+
+fx_package(
+    name = "log_settings_min_severity_package",
+    package_name = "log_settings_min_severity",
+    testonly = True,
+    test_components = [":log_settings_min_severity_component"],
+)
+
+# This test expects to observe its own TRACE-level log messages but does not
+# configure that as the static severity level in the binary. The test relies
+# on the configuration below to pass.
+fx_test(
+    name = "log_settings_min_severity_test",
+    min_log_severity = "TRACE",
+    package = ":log_settings_min_severity_package",
+)

@@ -105,7 +105,6 @@ fuchsia_driver_component("usb-audio") {
     ":usb-audio-driver",
     ":usb_audio_bind",
   ]
-  info = "meta/usb-audio-info.json"
   dml_label = ":usb-audio-dml"
 }
 

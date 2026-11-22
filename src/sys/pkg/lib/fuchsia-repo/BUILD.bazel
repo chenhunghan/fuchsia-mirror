@@ -2,13 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests (`:fuchsia-repo_test`) stay in BUILD.gn because they depend on
-# `//src/developer/ffx/lib/pkg:empty-repo-keys` and
-# `//src/developer/ffx/lib/pkg:empty-repo-metadata`, which are GN-only.
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":fuchsia-repo_host_test"],
+    visibility = ["//src/sys/pkg:__pkg__"],
+)
+
 rustc_library(
     name = "fuchsia-repo",
     srcs = [
@@ -40,6 +47,7 @@ rustc_library(
         "//conditions:default": [],
     }),
     rustc_env = {
+        # Bazel stages test_data relative to the test working directory ("."), whereas GN uses $relative_root_out_dir.
         "ROOT_OUT_DIR": ".",  # @bazel2gn:value_overwrite:$relative_root_out_dir
     },
     visibility = [
@@ -61,6 +69,7 @@ rustc_library(
         "//src/sys/pkg/lib/fuchsia-hash",
         "//src/sys/pkg/lib/fuchsia-merkle",
         "//src/sys/pkg/lib/fuchsia-pkg",
+        # Forked third-party crate lives under forks/tuf-0.3.0-beta14 in Bazel; GN aliases it at //third_party/rust_crates:tuf.
         "//third_party/rust_crates/forks/tuf-0.3.0-beta14:tuf",  # @bazel2gn:path_overwrite://third_party/rust_crates:tuf
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:bytes",
@@ -96,4 +105,45 @@ rustc_library(
         ],
         "//conditions:default": [],
     }),
+)
+
+rustc_test(
+    name = "fuchsia-repo_test",
+    crate = ":fuchsia-repo",
+    # Matches GN output_name.
+    crate_name = "fuchsia_repo_lib_test",
+    data = select({
+        "//build/bazel/platforms:is_host_os": [
+            "//src/developer/ffx/lib/pkg:empty-repo-keys",
+            "//src/developer/ffx/lib/pkg:empty-repo-metadata",
+        ],
+        "//conditions:default": [],
+    }),
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    # bazel2gn already inlines `rustenv` from `crate = ":fuchsia-repo"` into the GN `rustc_test`.
+    # @bazel2gn:skip
+    rustc_env = {
+        "ROOT_OUT_DIR": ".",
+    },
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:proptest",
+        "//third_party/rust_crates/vendor:test-case",
+    ] + select({
+        "//build/bazel/platforms:is_host_os": [
+            "//src/lib/fuchsia-hyper",
+            "//third_party/rust_crates/vendor:pretty_assertions",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+wrap_host_rust_test(
+    name = "fuchsia-repo_host_test",
+    binary_name = "fuchsia-repo_test",
+    test_data = [
+        "//src/developer/ffx/lib/pkg:empty-repo-keys",
+        "//src/developer/ffx/lib/pkg:empty-repo-metadata",
+    ],
 )

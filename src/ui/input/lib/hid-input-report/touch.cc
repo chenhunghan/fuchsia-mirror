@@ -300,19 +300,19 @@ ParseResult Touch::CreateDescriptor(fidl::AnyArena& allocator,
     fuchsia_input_report::wire::ContactInputDescriptor contact(allocator);
 
     if (config.position_x) {
-      contact.set_position_x(allocator, LlcppAxisFromAttribute(*config.position_x));
+      contact.set_position_x(allocator, WireAxisFromAttribute(*config.position_x));
     }
     if (config.position_y) {
-      contact.set_position_y(allocator, LlcppAxisFromAttribute(*config.position_y));
+      contact.set_position_y(allocator, WireAxisFromAttribute(*config.position_y));
     }
     if (config.pressure) {
-      contact.set_pressure(allocator, LlcppAxisFromAttribute(*config.pressure));
+      contact.set_pressure(allocator, WireAxisFromAttribute(*config.pressure));
     }
     if (config.contact_width) {
-      contact.set_contact_width(allocator, LlcppAxisFromAttribute(*config.contact_width));
+      contact.set_contact_width(allocator, WireAxisFromAttribute(*config.contact_width));
     }
     if (config.contact_height) {
-      contact.set_contact_height(allocator, LlcppAxisFromAttribute(*config.contact_height));
+      contact.set_contact_height(allocator, WireAxisFromAttribute(*config.contact_height));
     }
 
     input_contacts[i] = std::move(contact);

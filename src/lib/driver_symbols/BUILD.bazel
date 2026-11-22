@@ -56,7 +56,6 @@ fx_unittest_component(
 # @bazel2gn:skip
 fx_package(
     name = "driver-restricted-symbols-tests",
-    package_name = "driver-restricted-symbols-tests",
     test_components = [":driver_symbols_unittests"],
 )
 

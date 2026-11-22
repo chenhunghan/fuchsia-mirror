@@ -71,8 +71,7 @@ void FakeProvider::Start(StartRequest& request, StartCompleter::Sync& completer)
     // Don't reset the buffer pointer.
     FX_LOGS(DEBUG) << "Retaining buffer contents";
   } else {
-    // Our fake provider doesn't use the durable buffer, and only one of the
-    // rolling buffers.
+    // Our fake provider doesn't use the durable buffer.
     FX_LOGS(DEBUG) << "Clearing buffer contents";
     ResetBufferPointers();
     WriteInitRecord();
@@ -212,7 +211,12 @@ void FakeProvider::SendAlert(const char* alert_name) {
 }
 
 void FakeProvider::SendSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end) {
-  UpdateBufferHeaderAfterStopped();
+  if (buffering_mode_ != fuchsia_tracing::BufferingMode::kOneshot &&
+      wrapped_count == wrapped_count_) {
+    SwitchRollingBuffer();
+  } else {
+    UpdateBufferHeaderAfterStopped();
+  }
   trace_provider_packet_t packet{};
   packet.request = TRACE_PROVIDER_SAVE_BUFFER;
   packet.data32 = wrapped_count;
@@ -227,9 +231,43 @@ void FakeProvider::SendStoppedPacket() {
   SendFifoPacket(&packet);
 }
 
+void FakeProvider::SwitchRollingBuffer() {
+  // Record where the buffer that is about to be saved ends.
+  UpdateBufferHeaderAfterStopped();
+  ++wrapped_count_;
+  buffer_next_ = 0;
+  WriteWrappedCountToHeader();
+  // The new current buffer starts out empty.
+  WriteZeroLengthRecord(CurrentBufferOffset());
+}
+
+void FakeProvider::WriteWrappedCountToHeader() {
+  size_t offset = offsetof(trace::internal::trace_buffer_header, wrapped_count);
+  zx_status_t status = buffer_vmo_.write(&wrapped_count_, offset, sizeof(wrapped_count_));
+  FX_DCHECK(status == ZX_OK) << "status=" << status;
+}
+
+size_t FakeProvider::CurrentBufferOffset() const {
+  if (buffering_mode_ == fuchsia_tracing::BufferingMode::kOneshot) {
+    return kHeaderSize;
+  }
+  return kHeaderSize + durable_buffer_size_ + (wrapped_count_ & 1) * rolling_buffer_size_;
+}
+
 bool FakeProvider::SendFifoPacket(const trace_provider_packet_t* packet) {
   zx_status_t status = fifo_.write(sizeof(*packet), packet, 1, nullptr);
   return status == ZX_OK || status == ZX_ERR_PEER_CLOSED;
+}
+
+int FakeProvider::buffer_saved_count() {
+  // Nothing else reads the FIFO, so count the packets that have arrived since the last call.
+  trace_provider_packet_t packet;
+  while (fifo_.read(sizeof(packet), &packet, 1, nullptr) == ZX_OK) {
+    if (packet.request == TRACE_PROVIDER_BUFFER_SAVED) {
+      ++buffer_saved_count_;
+    }
+  }
+  return buffer_saved_count_;
 }
 
 void FakeProvider::InitializeBuffer() {
@@ -285,6 +323,8 @@ void FakeProvider::ComputeBufferSizes() {
 void FakeProvider::ResetBufferPointers() {
   FX_LOGS(DEBUG) << PrettyName() << ": Resetting buffer pointers";
   buffer_next_ = 0;
+  wrapped_count_ = 0;
+  WriteWrappedCountToHeader();
 }
 
 void FakeProvider::InitBufferHeader() {
@@ -320,7 +360,9 @@ void FakeProvider::InitBufferHeader() {
 
 void FakeProvider::UpdateBufferHeaderAfterStopped() {
   FX_LOGS(DEBUG) << PrettyName() << ": Updating buffer header, buffer pointer=" << buffer_next_;
-  size_t offset = offsetof(trace::internal::trace_buffer_header, rolling_data_end[0]);
+  // Oneshot mode never switches buffers, so this is rolling_data_end[0] there.
+  size_t offset = offsetof(trace::internal::trace_buffer_header, rolling_data_end) +
+                  (wrapped_count_ & 1) * sizeof(uint64_t);
   zx_status_t status =
       buffer_vmo_.write(reinterpret_cast<uint8_t*>(&buffer_next_), offset, sizeof(uint64_t));
   FX_DCHECK(status == ZX_OK) << "status=" << status;
@@ -354,21 +396,7 @@ void FakeProvider::WriteBlobRecord() {
 void FakeProvider::WriteRecordToBuffer(const uint8_t* data, size_t size) {
   FX_LOGS(DEBUG) << PrettyName() << ": Writing " << size << " bytes at nondurable buffer offset "
                  << buffer_next_;
-  size_t offset;
-  switch (buffering_mode_) {
-    case fuchsia_tracing::BufferingMode::kOneshot:
-      offset = kHeaderSize + buffer_next_;
-      break;
-    case fuchsia_tracing::BufferingMode::kCircular:
-    case fuchsia_tracing::BufferingMode::kStreaming:
-      offset = kHeaderSize + durable_buffer_size_ + buffer_next_;
-      break;
-    default:
-      FX_NOTREACHED();
-      offset = 0;
-      break;
-  }
-  WriteBytes(data, offset, size);
+  WriteBytes(data, CurrentBufferOffset() + buffer_next_, size);
   buffer_next_ += size;
 }
 

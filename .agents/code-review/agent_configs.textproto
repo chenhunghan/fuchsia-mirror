@@ -5,13 +5,12 @@
 # Gerrit CL Review Agent configuration exposing Fuchsia in-tree skills via the
 # Code Review Agent Configuration Service (CRACS).
 #
-# Skills referenced without a "/" resolve under .agents/skills/<name>/SKILL.md.
+# Skills referenced without a "/" resolve under //.agents/skills/<name>/SKILL.md.
 # Skills containing a "/" resolve relative to the fuchsia repository root.
 #
-# All entries must carry the "code-review-agent" tag. Most entries are
-# currently scoped to the vendor/google project while hosted agentic reviews
-# are being evaluated; subsystem-owned entries may be scoped to the fuchsia
-# project for their own paths.
+# Entries invoked automatically by the Gerrit CL Review Agent must carry the
+# "code-review-agent" tag. On-demand Gerrit Checks entries set automatic: false
+# and omit "code-review-agent" so they run only when manually triggered.
 
 # Default multi-perspective review agent for fuchsia CLs. Mirrors the
 # "turquoise-code-review-agent" entry in vendor/google; ids
@@ -55,6 +54,19 @@ configs: {
     project: "fuchsia"
     project: "vendor/google"
     path_regex: ".*\\.(c|cc|cpp|h|hpp)"
+  }
+}
+
+configs: {
+  id: "fuchsia-python-best-practices"
+  display_name: "Fuchsia Python Best Practices"
+  description: "Fuchsia Python coding conventions, immutability idioms, type annotation rules, exception handling, and unit test mocking."
+  tags: "code-review-agent"
+  skills: "fuchsia-python-best-practices"
+  include_filters: {
+    project: "fuchsia"
+    project: "vendor/google"
+    path_regex: ".*\\.py"
   }
 }
 
@@ -130,8 +142,9 @@ configs: {
 configs: {
   id: "fuchsia-lacewing-e2e-tests"
   display_name: "Fuchsia Lacewing E2E Test Guidelines"
-  description: "Timeouts, deadlines, cancellations, and exception handling in Lacewing end-to-end tests."
+  description: "Hardware/driver E2E test layering, GN setup gating, FIDL capability discovery, sticky override cleanup, timeouts, deadlines, and cancellations in Lacewing end-to-end tests."
   tags: "code-review-agent"
+  skills: "src/tests/end_to_end/.agents/skills/lacewing-hardware-e2e-tests"
   skills: "src/testing/end_to_end/.agents/skills/lacewing-timeouts-deadlines-cancellations"
   include_filters: {
     project: "fuchsia"
@@ -139,7 +152,7 @@ configs: {
     # fuchsia paths.
     path_regex: "src/(tests|testing)/end_to_end/.*\\.(py|gn|gni)"
     # vendor/google paths.
-    path_regex: "(tests/end_to_end|testing/lacewing)/.*\\.py"
+    path_regex: "(tests/end_to_end|testing/lacewing)/.*\\.(py|gn|gni)"
   }
 }
 
@@ -154,6 +167,118 @@ configs: {
     project: "vendor/google"
     path_regex: "docs/.*\\.md"
     path_regex: "docs/.*\\.yaml"
+  }
+  exclude_filters: {
+    path_regex: "docs/skills/.*"
+  }
+}
+
+configs: {
+  id: "fuchsia-skills-and-workflows"
+  display_name: "Fuchsia Skills & Workflows Review"
+  description: "Authoring and code review rubric for Fuchsia and Turquoise SKILL.md skills, saved dynamic workflows, and .agents discovery configurations."
+  tags: "code-review-agent"
+  skills: "docs/skills/fuchsia-skills-and-workflows"
+  include_filters: {
+    project: "fuchsia"
+    project: "vendor/google"
+    path_regex: "(.*/)?SKILL\\.md"
+    path_regex: "(.*/)?skills/.+/(references|scripts|assets|examples)/.*"
+    path_regex: "(.*/)?(\\.agents|_agents)/(skills|workflows|code-review)/.*"
+    path_regex: "(.*/)?(\\.agents|_agents)/(skills|workflows|plugins|agents|rules)\\.json"
+  }
+}
+
+configs: {
+  id: "fuchsia-bazel-guidelines"
+  display_name: "Fuchsia Bazel Guidelines"
+  description: "Fuchsia platform BUILD.bazel, target visibility, wrapper rules, host constraints, and test_suite() conventions."
+  tags: "code-review-agent"
+  skills: "build/bazel/.agents/skills/fuchsia-bazel-guidelines"
+  include_filters: {
+    project: "fuchsia"
+    # TODO(https://fxbug.dev/585597432): Cover "vendor/google" after tuning for
+    # Fuchsia Bazel SDK-using files.
+    path_regex: ".*\\.(bazel|bzl)"
+  }
+  exclude_filters: {
+    # TODO(https://fxbug.dev/585597432): Remove this exception after tuning.
+    path_regex: "build/bazel_sdk/.*"
+    # Vendored upstream repositories and sources.
+    path_regex: "third_party/bazel_vendor/.*"
+    path_regex: "third_party/bazel_registries/.*"
+    path_regex: "third_party/(rust_crates|golibs)/vendor/.*"
+    path_regex: "third_party/.*/src/.*"
+    # In-tree generated files that do not yet conform to the style guide.
+    # TODO(https://fxbug.dev/587131950): Clean up generated files and remove these exclusions.
+    path_regex: "third_party/rust_crates/(ask2patch|empty|forks|intree)/.*"
+    path_regex: "third_party/boringssl/BUILD\\.generated.*\\.bzl"
+  }
+}
+
+configs: {
+  id: "fuchsia-bzl-file-guidelines"
+  display_name: "Fuchsia .bzl File Guidelines"
+  description: "Fuchsia Starlark .bzl load visibility, private symbol naming, and file naming conventions."
+  tags: "code-review-agent"
+  skills: "build/bazel/.agents/skills/fuchsia-bzl-file-guidelines"
+  include_filters: {
+    project: "fuchsia"
+    # TODO(https://fxbug.dev/585597432): Cover "vendor/google" after tuning for
+    # Fuchsia Bazel SDK-using files.
+    path_regex: ".*\\.bzl"
+  }
+  exclude_filters: {
+    # TODO(https://fxbug.dev/585597432): Remove this exception after tuning.
+    path_regex: "build/bazel_sdk/.*"
+    # Vendored upstream repositories and sources.
+    path_regex: "third_party/bazel_vendor/.*"
+    path_regex: "third_party/bazel_registries/.*"
+    path_regex: "third_party/(rust_crates|golibs)/vendor/.*"
+    path_regex: "third_party/.*/src/.*"
+    # In-tree generated files that do not yet conform to the style guide.
+    # TODO(https://fxbug.dev/587131950): Clean up generated files and remove these exclusions.
+    path_regex: "third_party/rust_crates/(ask2patch|empty|forks|intree)/.*"
+    path_regex: "third_party/boringssl/BUILD\\.generated.*\\.bzl"
+  }
+}
+
+configs: {
+  id: "fuchsia-bazel-rules-and-macros-guidelines"
+  display_name: "Fuchsia Bazel Rules & Macros Guidelines"
+  description: "Starlark rules, symbolic and legacy macros, configurable select() attributes, depset/args performance, and .bzl conventions."
+  tags: "code-review-agent"
+  skills: "build/bazel/rules/.agents/skills/fuchsia-bazel-rules-and-macros-guidelines"
+  include_filters: {
+    project: "fuchsia"
+    # TODO(https://fxbug.dev/585597432): Cover "vendor/google" after tuning for
+    # Fuchsia Bazel SDK-using files.
+    path_regex: ".*\\.bzl"
+  }
+  exclude_filters: {
+    # TODO(https://fxbug.dev/585597432): Remove this exception after tuning.
+    path_regex: "build/bazel_sdk/(bazel_rules_fuchsia|tests)/.*"
+    # Vendored upstream repositories and sources.
+    path_regex: "third_party/bazel_vendor/.*"
+    path_regex: "third_party/bazel_registries/.*"
+    path_regex: "third_party/(rust_crates|golibs)/vendor/.*"
+    path_regex: "third_party/.*/src/.*"
+    # In-tree generated files that do not yet conform to the style guide.
+    # TODO(https://fxbug.dev/587131950): Clean up generated files and remove these exclusions.
+    path_regex: "third_party/rust_crates/(ask2patch|empty|forks|intree)/.*"
+    path_regex: "third_party/boringssl/BUILD\\.generated.*\\.bzl"
+  }
+}
+
+configs: {
+  id: "fuchsia-bazel-sdk-guidelines"
+  display_name: "Fuchsia Bazel SDK Guidelines"
+  description: "Fuchsia Bazel SDK repository boundaries, @fuchsia_rules_common layering, and intentional SDK style exceptions."
+  tags: "code-review-agent"
+  skills: "build/bazel_sdk/.agents/skills/fuchsia-bazel-sdk-guidelines"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "build/bazel_sdk/.*\\.(bazel|bzl|BUILD\\.template)"
   }
 }
 
@@ -172,19 +297,6 @@ configs: {
 }
 
 configs: {
-  id: "fuchsia-bazel-non-sdk-rules"
-  display_name: "Fuchsia Bazel Non-SDK Rules"
-  description: "Creating non-SDK in-tree Bazel rules and dependency boundaries."
-  tags: "code-review-agent"
-  skills: "build/bazel/skills/create-non-sdk-rule"
-  include_filters: {
-    project: "fuchsia"
-    path_regex: "build/bazel/rules/.*\\.(bzl|bazel)"
-    path_regex: "build/bazel_sdk/fuchsia_rules_common/.*\\.(bzl|bazel)"
-  }
-}
-
-configs: {
   id: "fuchsia-assembly-bundles"
   display_name: "Fuchsia Assembly Input Bundles"
   description: "Maintaining Assembly Input Bundle Bazel targets and GN inputs bridge."
@@ -197,16 +309,88 @@ configs: {
 }
 
 configs: {
-  id: "fuchsia-wlan-api-review"
+  id: "fuchsia-wlan-review-api"
   display_name: "Fuchsia WLAN FIDL API Review"
   description: "WLAN FIDL API review guidelines and layer stability boundaries."
   tags: "code-review-agent"
-  skills: "src/connectivity/wlan/.agents/skills/wlan-api-review"
+  skills: "src/connectivity/wlan/.agents/skills/wlan-review-api"
   include_filters: {
     project: "fuchsia"
     path_regex: "sdk/fidl/fuchsia\\.wlan\\..*\\.fidl"
     path_regex: "src/connectivity/wlan/.*\\.fidl"
     path_regex: "src/connectivity/wlan/(.*/)?FIDL\\.md"
+  }
+}
+
+configs: {
+  id: "fuchsia-wlan-review-stack"
+  display_name: "Fuchsia WLAN Stack & In-Tree Driver Review"
+  description: "WLAN stack and driver code review guidelines."
+  tags: "code-review-agent"
+  skills: "src/connectivity/wlan/.agents/skills/wlan-review-stack"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "src/connectivity/wlan/.*\\.(rs|c|cc|h|cml|bazel|bzl|gn|gni)"
+  }
+  exclude_filters: {
+    path_regex: "src/connectivity/wlan/tests/.*\\.(bazel|bzl|gn|gni|py)"
+  }
+}
+
+configs: {
+  id: "fuchsia-wlan-review-e2e"
+  display_name: "Fuchsia WLAN E2E & Honeydew Review"
+  description: "WLAN end-to-end test and Honeydew affordance code review guidelines."
+  tags: "code-review-agent"
+  skills: "src/connectivity/wlan/.agents/skills/wlan-review-e2e"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "src/connectivity/wlan/tests/.*\\.(py|gn|gni)"
+    path_regex: "src/testing/end_to_end/.*wlan.*/.*\\.(py|gn|gni)"
+    path_regex: "src/testing/end_to_end/mobly_controller/(.*access_point|attenuator|iperf)/.*\\.(py|gn|gni)"
+  }
+  include_filters: {
+    project: "vendor/google"
+    path_regex: "tests/end_to_end/wlan/.*\\.(py|gn|gni)"
+  }
+}
+
+configs: {
+  id: "fuchsia-wlan-review-simplification"
+  display_name: "Fuchsia WLAN Code Simplification"
+  description: "WLAN Rust and Python simplification suggestions: WLAN crate, test helper, and affordance reuse, state shape, and focused tests."
+  tags: "code-review-agent"
+  skills: "src/connectivity/wlan/.agents/skills/wlan-review-simplification"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "src/connectivity/wlan/.*\\.rs"
+    path_regex: "src/connectivity/wlan/tests/.*\\.py"
+    path_regex: "src/testing/end_to_end/.*wlan.*/.*\\.py"
+    path_regex: "src/testing/end_to_end/mobly_controller/(.*access_point|attenuator|iperf)/.*\\.py"
+  }
+  include_filters: {
+    project: "vendor/google"
+    path_regex: "tests/end_to_end/wlan/.*\\.py"
+  }
+}
+
+configs: {
+  id: "fuchsia-wlan-review-commit-message"
+  display_name: "Fuchsia WLAN Commit Message Review"
+  description: "WLAN commit message intent, supporting context links, and diff alignment."
+  tags: "code-review-agent"
+  skills: "src/connectivity/wlan/.agents/skills/wlan-review-commit-message"
+  include_filters: {
+    project: "fuchsia"
+    path_regex: "sdk/fidl/fuchsia\\.wlan\\..*"
+    path_regex: "src/connectivity/wlan/.*"
+    path_regex: "src/testing/end_to_end/.*wlan.*/.*"
+    path_regex: "src/testing/end_to_end/mobly_controller/(.*access_point|attenuator|iperf)/.*"
+  }
+  include_filters: {
+    project: "vendor/google"
+    path_regex: "(bundles/buildbot|connectivity|drivers|tests/end_to_end)/wlan/.*"
+    path_regex: "starnix/android/hal/wifi.*"
   }
 }
 
@@ -343,5 +527,18 @@ configs: {
   skills: "starnix-guidelines"
   include_filters: {
     path_regex: "(.*/)?starnix/.*"
+  }
+}
+
+configs: {
+  id: "fuchsia-code-simplification"
+  display_name: "Fuchsia Code Simplification"
+  description: "On-demand review for dead branches, duplicated helpers, abstraction altitude, and localized clarity simplifications."
+  automatic: false
+  skills: "code-simplification"
+  include_filters: {
+    project: "fuchsia"
+    project: "vendor/google"
+    path_regex: ".*\\.(rs|c|cc|cpp|h|hpp|py|go|gn|gni|bzl|bazel|fidl|cml)"
   }
 }

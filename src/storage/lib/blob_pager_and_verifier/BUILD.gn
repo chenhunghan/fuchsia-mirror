@@ -54,6 +54,7 @@ rustc_library("blob_pager_and_verifier") {
     ":*",
     "//src/storage/*",
     "//src/sys/pkg/bin/pkg-cache:*",
+    "//src/sys/pkg/testing/blobfs-ramdisk:*",
   ]
   deps = [
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
@@ -67,6 +68,8 @@ rustc_library("blob_pager_and_verifier") {
     "//src/storage/lib/mapping",
     "//src/storage/lib/profile",
     "//src/storage/lib/ptr_slice",
+    "//src/storage/lib/trace",
+    "//src/storage/lib/units",
     "//src/storage/lib/vfs/rust:vfs",
     "//src/storage/lib/vmo-blob",
     "//src/storage/lib/vmo-fifo",
@@ -101,6 +104,8 @@ rustc_test("blob_pager_and_verifier_test") {
     "//src/storage/lib/mapping",
     "//src/storage/lib/profile",
     "//src/storage/lib/ptr_slice",
+    "//src/storage/lib/trace",
+    "//src/storage/lib/units",
     "//src/storage/lib/vfs/rust:vfs",
     "//src/storage/lib/vmo-blob",
     "//src/storage/lib/vmo-fifo",

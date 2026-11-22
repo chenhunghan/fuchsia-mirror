@@ -35,9 +35,11 @@ python_library("elf") {
     "elfinfo.py",
     "verify_manifest_elf_binaries.py",
   ]
+  imports = [ ".." ]
   visibility = [
     ":*",
     "//build/bazel/debug_symbols/tests:*",
+    "//build/bazel/rules/packages/tools:*",
     "//build/components:*",
   ]
   enable_mypy = false

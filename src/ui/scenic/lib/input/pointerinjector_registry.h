@@ -8,6 +8,7 @@
 #include <fidl/fuchsia.ui.pointerinjector/cpp/wire.h>
 #include <lib/async/dispatcher.h>
 #include <lib/fidl/cpp/wire/server.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/sys/cpp/component_context.h>
@@ -21,6 +22,7 @@ namespace scenic_impl::input {
 
 using TouchInjectFunc = fit::function<void(InternalTouchEvent event, StreamId stream_id,
                                            const view_tree::Snapshot& snapshot)>;
+using TouchBeginBatchFunc = fit::function<fit::deferred_action<fit::closure>()>;
 using MouseInjectFunc = fit::function<void(InternalMouseEvent event, StreamId stream_id,
                                            const view_tree::Snapshot& snapshot)>;
 
@@ -35,7 +37,8 @@ class PointerinjectorRegistry : public fidl::WireServer<fuchsia_ui_pointerinject
                           MouseInjectFunc inject_mouse_exclusive,
                           MouseInjectFunc inject_mouse_hit_tested,
                           fit::function<void(StreamId stream_id)> cancel_mouse_stream,
-                          inspect::Node inspect_node = inspect::Node());
+                          inspect::Node inspect_node = inspect::Node(),
+                          TouchBeginBatchFunc begin_touch_batch = nullptr);
 
   void Bind(fidl::ServerEnd<fuchsia_ui_pointerinjector::Registry> server_end);
 
@@ -51,6 +54,7 @@ class PointerinjectorRegistry : public fidl::WireServer<fuchsia_ui_pointerinject
 
   const TouchInjectFunc inject_touch_exclusive_;
   const TouchInjectFunc inject_touch_hit_tested_;
+  const TouchBeginBatchFunc begin_touch_batch_;
   const MouseInjectFunc inject_mouse_exclusive_;
   const MouseInjectFunc inject_mouse_hit_tested_;
   const fit::function<void(StreamId stream_id)> cancel_mouse_stream_;

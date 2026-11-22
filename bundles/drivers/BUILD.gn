@@ -2,8 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/drivers/check_included_drivers.gni")
-import("//build/drivers/create_all_drivers_doc.gni")
+import("//build/drivers/assert_driver_components.gni")
 
 # Group including all drivers in the fuchsia repo except for templates.
 group("drivers-not-templates") {
@@ -28,23 +27,25 @@ group("drivers-not-templates") {
     "//src/power:drivers",
     "//src/sys/component_manager/tests/structured_config/client_integration/cpp_driver:receiver_component",
     "//src/ui/bundles:drivers",
-    "//zircon/third_party/dev/ethernet/e1000",
   ]
 }
 
 # Group including all drivers in the fuchsia repo. Useful for ensuring
 # all driver continue to build without needing to build every board.
-check_included_drivers("drivers-build-only") {
+group("drivers-build-only") {
   testonly = true
-  contains_all_drivers = true
   deps = [
+    ":drivers-build-only-assert-driver-components",
     ":drivers-not-templates",
     "//tools/create/goldens/my-driver-cpp:component",
   ]
 }
 
-# Group including all drivers to extract documentation from.
-create_all_drivers_doc("create_all_drivers_doc") {
+# Check that the drivers above are used through driver components.
+assert_driver_components("drivers-build-only-assert-driver-components") {
   testonly = true
-  deps = [ ":drivers-not-templates" ]
+  deps = [
+    ":drivers-not-templates",
+    "//tools/create/goldens/my-driver-cpp:component",
+  ]
 }

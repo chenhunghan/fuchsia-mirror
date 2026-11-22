@@ -54,7 +54,7 @@ We will also change the default in the compiler/toolchain when x86_64-fuchsia
 is passed as a target, so that any third-party code targeted at Fuchsia and
 built with the toolchain will benefit from the ABI.
 
-## Performance
+## Performance {:#performance}
 
 This proposal is expected to improve the performance of all compiled C/C++ code
 on the x86-64 platform. Initial microbenchmarks in perfcompare bear this out:

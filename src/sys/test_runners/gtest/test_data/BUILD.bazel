@@ -5,12 +5,20 @@
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["sample_tests_golden_events.rsf"],
-    visibility = ["//src/sys/test_manager/tests:__pkg__"],
+    visibility = [
+        "//src/sys/test_manager/tests:__pkg__",
+        "//src/sys/test_runners/gtest/tests:__pkg__",
+        "//src/sys/test_runners/gunit/tests:__pkg__",
+    ],
 )
 
 # We don't have gunit in-tree, so this main function will replace all gunit
@@ -200,3 +208,56 @@ fx_cc_test_binary(
     srcs = ["zxtest_env_setup_failure.cc"],
     deps = ["//zircon/system/ulib/zxtest"],
 )
+
+fx_packaged_binary(
+    name = "gunit_huge_runner_example_packaged_bin",
+    testonly = True,
+    binary = ":gunit_huge_runner_example",
+    binary_name = "gunit_huge_runner_example",
+)
+
+fx_packaged_binary(
+    name = "gunit_runner_no_tests_packaged_bin",
+    testonly = True,
+    binary = ":gunit_runner_no_tests",
+    binary_name = "gunit_runner_no_tests",
+)
+
+fx_packaged_binary(
+    name = "gunit_runner_sample_tests_packaged_bin",
+    testonly = True,
+    binary = ":gunit_runner_sample_tests",
+    binary_name = "gunit_runner_sample_tests",
+)
+
+fx_packaged_binary(
+    name = "gunit_runner_test_with_custom_args_packaged_bin",
+    testonly = True,
+    binary = ":gunit_runner_test_with_custom_args",
+    binary_name = "gunit_runner_test_with_custom_args",
+)
+
+fx_packaged_binary(
+    name = "gunit_runner_test_with_environ_packaged_bin",
+    testonly = True,
+    binary = ":gunit_runner_test_with_environ",
+    binary_name = "gunit_runner_test_with_environ",
+)
+
+# Synced manually with GN `group("gunit_all_bins")` in BUILD.gn (`bazel2gn`
+# does not translate `filegroup` or `fx_packaged_binary`).
+# LINT.IfChange(gunit_all_bins)
+# @bazel2gn:skip
+filegroup(
+    name = "gunit_all_bins",
+    testonly = True,
+    srcs = [
+        ":gunit_huge_runner_example_packaged_bin",
+        ":gunit_runner_no_tests_packaged_bin",
+        ":gunit_runner_sample_tests_packaged_bin",
+        ":gunit_runner_test_with_custom_args_packaged_bin",
+        ":gunit_runner_test_with_environ_packaged_bin",
+    ],
+    visibility = ["//src/sys/test_runners/gunit:__pkg__"],
+)
+# LINT.ThenChange(BUILD.gn:gunit_all_bins)

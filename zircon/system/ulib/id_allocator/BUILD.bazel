@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_source_library_zx(
+    name = "id_allocator",
+    srcs = ["id_allocator.cc"],
+    hdrs = ["include/id_allocator/id_allocator.h"],
+    implementation_deps = [
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+        "//zircon/system/ulib/zircon-internal",
+    ],
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        # <id_allocator/id_allocator.h> has #include <bitmap/bitmap.h>.
+        "//zircon/system/ulib/bitmap",
+        # <id_allocator/id_allocator.h> has #include <fbl/algorithm.h>.
+        "//zircon/system/ulib/fbl",
+    ],
+)

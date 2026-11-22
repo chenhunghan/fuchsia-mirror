@@ -12,8 +12,6 @@ vm_page_t* PmmNode::PaddrToPage(paddr_t addr) { return rust_pmm_node_paddr_to_pa
 
 vm_page_t* PmmNode::IndexToPage(uint32_t index) { return rust_pmm_node_index_to_page(this, index); }
 
-paddr_t PmmNode::IndexToPaddr(uint32_t index) { return rust_pmm_node_index_to_paddr(this, index); }
-
 PageQueues* PmmNode::GetPageQueues() { return rust_pmm_node_get_page_queues(this); }
 
 VmCompression* PmmNode::GetPageCompression() { return rust_pmm_node_get_page_compression(this); }

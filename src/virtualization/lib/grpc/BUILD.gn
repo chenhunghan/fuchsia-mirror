@@ -59,7 +59,7 @@ cc_test_executable("unittest") {
     ":grpc",
     ":test_proto",
     "//sdk/lib/async:async-cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//sdk/lib/virtualization/testing",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture",

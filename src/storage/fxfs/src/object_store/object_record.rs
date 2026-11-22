@@ -9,14 +9,17 @@ pub use legacy::{
 };
 
 // TODO(https://fxbug.dev/42178223): need validation after deserialization.
+use crate::errors::FxfsError;
 use crate::log::error;
 use crate::lsm_tree::types::{
-    FuzzyHash, Item, ItemRef, LayerKey, MergeType, OrdLowerBound, OrdUpperBound, SortByU64, Value,
+    Coalesce, FuzzyHash, Item, ItemRef, LayerKey, MergeType, OrdLowerBound, OrdUpperBound,
+    SortByU64, Value,
 };
 use crate::object_store::ProjectId;
 use crate::object_store::extent::{Extent, ExtentPartitionIterator};
-use crate::object_store::extent_record::{ExtentValue, ExtentValueV38};
+use crate::object_store::extent_record::{ExtentMode, ExtentValue, ExtentValueV38};
 use crate::serialized_types::Versioned;
+use anyhow::{Error, ensure};
 use fprint::TypeFingerprint;
 use fxfs_crypto::{WrappedKey, WrappingKeyId};
 use fxfs_macros::SerializeKey;
@@ -146,6 +149,13 @@ pub enum ObjectKeyDataV63 {
     /// Storage usage tracked for a POSIX user or group id.  Like `Project`, these records are only
     /// ever attached to the volume's root node, and their values are deltas that the merger sums.
     PosixOwner { owner: PosixOwnerV63 },
+}
+
+impl ObjectKeyData {
+    /// Creates an ObjectKeyData for a ProjectUsage entry.
+    pub fn project_usage(project_id: ProjectId) -> Self {
+        Self::Project { project_id, property: ProjectProperty::Usage }
+    }
 }
 
 #[derive(
@@ -345,10 +355,7 @@ impl ObjectKey {
 
     /// Creates an ObjectKey for a ProjectUsage entry.
     pub fn project_usage(object_id: u64, project_id: ProjectId) -> Self {
-        Self {
-            object_id,
-            data: ObjectKeyData::Project { project_id, property: ProjectProperty::Usage },
-        }
+        Self { object_id, data: ObjectKeyData::project_usage(project_id) }
     }
 
     /// Creates an ObjectKey for a per-user or per-group usage entry.
@@ -470,6 +477,103 @@ impl LayerKey for ObjectKey {
                 ObjectKeyData::Attribute(right_attr_id, AttributeKey::Extent(right_key)),
             ) if *left_attr_id == *right_attr_id => left_key.overlaps(right_key),
             (a, b) => a == b,
+        }
+    }
+}
+
+impl Coalesce<ObjectValue> for ObjectKey {
+    fn may_coalesce(item: ItemRef<'_, Self, ObjectValue>) -> bool {
+        matches!(
+            (&item.key.data, item.value),
+            (
+                ObjectKeyData::Attribute(_, AttributeKey::Extent(_)),
+                ObjectValue::Extent(
+                    ExtentValue::None
+                        | ExtentValue::Some { mode: ExtentMode::Raw | ExtentMode::Overwrite, .. }
+                ),
+            )
+        )
+    }
+
+    fn coalesce(
+        left: ItemRef<'_, Self, ObjectValue>,
+        right: ItemRef<'_, Self, ObjectValue>,
+    ) -> Result<Option<Item<Self, ObjectValue>>, Error> {
+        if left.key.object_id != right.key.object_id {
+            return Ok(None);
+        }
+        let (
+            ObjectKeyData::Attribute(left_attr_id, AttributeKey::Extent(left_extent)),
+            ObjectKeyData::Attribute(right_attr_id, AttributeKey::Extent(right_extent)),
+        ) = (&left.key.data, &right.key.data)
+        else {
+            return Ok(None);
+        };
+        if left_attr_id != right_attr_id {
+            return Ok(None);
+        }
+        ensure!(left_extent.end <= right_extent.start, FxfsError::Inconsistent);
+        if left_extent.start >= left_extent.end
+            || right_extent.start >= right_extent.end
+            || left_extent.end < right_extent.start
+        {
+            return Ok(None);
+        }
+        // Do not coalesce across `FuzzyHash` bucket boundaries (`EXTENT_HASH_BUCKET_SIZE` = 1 MiB):
+        // - `BloomFilterWriter` is sized from `layer_set.sum_len()`, which budgets ~1 hash per
+        //   record, and `fsck` skips Bloom-filter verification on `RangeKeyTooLarge` extents.
+        // - Keeping deletions within a single bucket in `merge_into` preserves per-bucket
+        //   `minor_iter` tombstone elision before `CoalescingIterator` runs.
+        if Extent(left_extent.start..right_extent.end).fuzzy_hash_partition().len() > 1 {
+            return Ok(None);
+        }
+        match (left.value, right.value) {
+            (ObjectValue::Extent(ExtentValue::None), ObjectValue::Extent(ExtentValue::None)) => {
+                Ok(Some(Item::new(
+                    ObjectKey::extent(
+                        left.key.object_id,
+                        *left_attr_id,
+                        left_extent.start..right_extent.end,
+                    ),
+                    ObjectValue::deleted_extent(),
+                )))
+            }
+            // Only `Raw` and `Overwrite` extents have fixed-size values; `Cow` and
+            // `OverwritePartial` carry per-block metadata (`Checksums` / `BitVec`) that could
+            // exceed the single-block serialized record limit if coalesced.
+            (
+                ObjectValue::Extent(ExtentValue::Some {
+                    device_offset: left_dev,
+                    mode: left_mode,
+                    key_id: left_key_id,
+                }),
+                ObjectValue::Extent(ExtentValue::Some {
+                    device_offset: right_dev,
+                    mode: right_mode,
+                    key_id: right_key_id,
+                }),
+            ) if left_key_id == right_key_id
+                && matches!(
+                    (left_mode, right_mode),
+                    (ExtentMode::Raw, ExtentMode::Raw)
+                        | (ExtentMode::Overwrite, ExtentMode::Overwrite)
+                )
+                && left_extent
+                    .end
+                    .checked_sub(left_extent.start)
+                    .and_then(|len| left_dev.checked_add(len))
+                    == Some(*right_dev) =>
+            {
+                Ok(Some(Item::new(
+                    ObjectKey::extent(
+                        left.key.object_id,
+                        *left_attr_id,
+                        left_extent.start..right_extent.end,
+                    ),
+                    left.value.clone(),
+                )))
+            }
+            _ => Ok(None),
         }
     }
 }
@@ -1293,9 +1397,7 @@ impl AttributeId {
     /// and [`BlobMetadata::write_to`] to access this attribute.
     pub const BLOB_METADATA: Self = Self(3);
 
-    /// Contains a serialized `BlobMetadataUnversioned` struct. This attribute may still exist on
-    /// blobs but should no longer be written. Use `AttributeId::BLOB_METADATA` instead.
-    pub const BLOB_MERKLE: Self = Self(1);
+    // Attribute ID 1 was previously used for unversioned blob metadata (`BLOB_MERKLE`).
 
     /// For fsverity files in Fxfs, we store the merkle tree of the verified file at a well-known
     /// attribute.

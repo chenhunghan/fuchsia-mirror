@@ -298,7 +298,7 @@ func buildImpl(
 	}
 
 	if jobserverPool {
-		ninjaExtraArgs = append(ninjaExtraArgs, "--jobserver")
+		ninjaExtraArgs = append(ninjaExtraArgs, "--jobserver-pool")
 	}
 
 	ninjaStartTime := time.Now()

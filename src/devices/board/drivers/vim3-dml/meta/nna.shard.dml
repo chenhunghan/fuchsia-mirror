@@ -59,7 +59,7 @@
             },
         },
         {
-            name: "nna_reset_level2",
+            name: "register-reset",
             service: "fuchsia.hardware.registers.Service",
             from: "#register-controller-1000",
             to: "#nna-ff100000",

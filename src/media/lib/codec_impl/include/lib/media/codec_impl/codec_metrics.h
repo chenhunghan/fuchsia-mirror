@@ -5,9 +5,9 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_METRICS_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_CODEC_METRICS_H_
 
+#include <fidl/fuchsia.io/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async/cpp/task.h>
-#include <lib/sys/cpp/service_directory.h>
 
 #include <memory>
 #include <unordered_map>
@@ -26,17 +26,17 @@ class CodecMetrics final {
   // A nop instance so unit tests don't need to wire up cobalt.
   CodecMetrics();
 
-  // !service_directory is ok.  If !service_directory, the instance will be a noop instance until
-  // SetServiceDirectory() is called.
-  CodecMetrics(std::shared_ptr<sys::ServiceDirectory> service_directory);
+  // !service_directory.is_valid() is ok.  If !service_directory.is_valid(), the instance will be a
+  // noop instance until SetServiceDirectory() is called.
+  explicit CodecMetrics(fidl::ClientEnd<fuchsia_io::Directory> service_directory);
 
   ~CodecMetrics();
 
-  // Set the ServiceDirectory from which to get fuchsia.metrics.MetricEventLoggerFactory.  This can
-  // be nullptr. This can be called again, regardless of whether there was already a previous
-  // ServiceDirectory. Previously-queued events may be lost (especially recently-queued events) when
-  // switching to a new ServiceDirectory.
-  void SetServiceDirectory(std::shared_ptr<sys::ServiceDirectory> service_directory);
+  // Set the service directory from which to get fuchsia.metrics.MetricEventLoggerFactory.  This can
+  // be an invalid ClientEnd. This can be called again, regardless of whether there was already a
+  // previous service directory. Previously-queued events may be lost (especially recently-queued
+  // events) when switching to a new service directory.
+  void SetServiceDirectory(fidl::ClientEnd<fuchsia_io::Directory> service_directory);
 
   // Log the event as EVENT_COUNT, with period_duration_micros 0, possibly aggregating with any
   // other calls to this method with the same component and event wihtin a short duration to limit

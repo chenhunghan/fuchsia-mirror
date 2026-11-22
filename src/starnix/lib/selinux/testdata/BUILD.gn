@@ -145,7 +145,6 @@ micro_policies = [
   "file_source_defaults_policy",
   "file_target_defaults_policy",
   "hooks_tests_policy",
-  "minimal_policy",
   "multiple_levels_and_categories_policy",
   "no_allow_a_attr_b_attr_class0_perm0_policy",
   "no_allow_a_t_b_attr_class0_perm0_policy",

@@ -27,31 +27,6 @@ pub unsafe extern "C" fn rust_x86_idle_state_mwait_hint(idle_state: &X86IdleStat
     idle_state.mwait_hint()
 }
 
-/// Marks `idle_state` as entered.
-///
-/// # Safety
-///
-/// `idle_state` must be a valid, aligned reference to an initialized `X86IdleState` for the
-/// duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_x86_idle_state_count_entry(idle_state: &X86IdleState) {
-    idle_state.count_entry();
-}
-
-/// Records `duration` spent in `idle_state`.
-///
-/// # Safety
-///
-/// `idle_state` must be a valid, aligned reference to an initialized `X86IdleState` for the
-/// duration of the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_x86_idle_state_record_duration(
-    idle_state: &X86IdleState,
-    duration: zx_duration_t,
-) {
-    idle_state.record_duration(duration);
-}
-
 /// Initializes `idle_states` in place from the supported C-state table `states`.
 ///
 /// # Safety

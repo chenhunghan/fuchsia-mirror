@@ -34,7 +34,10 @@
 #include <zircon/syscalls.h>
 #include <zircon/threads.h>
 
+#include <format>
+#include <limits>
 #include <sstream>
+#include <string>
 
 #include <bind/fuchsia/cpp/bind.h>
 #include <bind/fuchsia/designware/platform/cpp/bind.h>
@@ -42,6 +45,7 @@
 #include <hwreg/bitfields.h>
 
 #include "src/devices/usb/drivers/dwc3/dwc3-regs.h"
+#include "src/devices/usb/drivers/dwc3/dwc3_parser.h"
 
 namespace dwc3 {
 
@@ -588,61 +592,7 @@ zx::result<> Dwc3::Start(fdf::DriverContext context) {
 
 namespace {
 
-// Helper to find a value in dictionary.
-const std::optional<std::reference_wrapper<const fuchsia_driver_metadata::DictionaryValue>>
-FindMetadataValue(const fuchsia_driver_metadata::Dictionary& dict, std::string_view key) {
-  if (!dict.entries().has_value()) {
-    return std::nullopt;
-  }
-  for (const fuchsia_driver_metadata::DictionaryEntry& entry : *dict.entries()) {
-    if (entry.key() == key) {
-      return entry.value();
-    }
-  }
-  return std::nullopt;
-}
-
-// Helper to get an uint32 value.
-zx::result<uint32_t> GetUint32(const fuchsia_driver_metadata::Dictionary& dict,
-                               std::string_view key) {
-  std::optional maybe_val = FindMetadataValue(dict, key);
-  if (!maybe_val) {
-    return zx::error(ZX_ERR_NOT_FOUND);
-  }
-  const auto& val = maybe_val->get();
-  if (!val.int64().has_value()) {
-    fdf::error("Metadata key '{}' is not an integer", key);
-    return zx::error(ZX_ERR_INVALID_ARGS);
-  }
-  if (val.int64().value() > std::numeric_limits<uint32_t>::max() || val.int64().value() < 0) {
-    fdf::error("Metadata key '{}' value {} out of range for uint32", key, val.int64().value());
-    return zx::error(ZX_ERR_OUT_OF_RANGE);
-  }
-  return zx::ok(static_cast<uint32_t>(val.int64().value()));
-}
-
-// Helper to get a boolean value or check property presence.
-zx::result<bool> GetBool(const fuchsia_driver_metadata::Dictionary& dict, std::string_view key) {
-  std::optional maybe_val = FindMetadataValue(dict, key);
-  if (!maybe_val) {
-    return zx::error(ZX_ERR_NOT_FOUND);
-  }
-  const auto& val = maybe_val->get();
-  if (val.boolean().has_value()) {
-    return zx::ok(val.boolean().value());
-  }
-  if (val.int64().has_value()) {
-    return zx::ok(val.int64().value() != 0);
-  }
-  if (val.int64_vec().has_value()) {
-    if (val.int64_vec().value().empty()) {
-      return zx::ok(true);
-    }
-    return zx::ok(val.int64_vec().value().front() != 0);
-  }
-  fdf::error("Metadata key '{}' is not a valid boolean", key);
-  return zx::error(ZX_ERR_INVALID_ARGS);
-}
+constexpr std::string_view kDwc3ConfigId = "fuchsia.hardware.usb.dwc3.Config";
 
 }  // namespace
 
@@ -667,61 +617,44 @@ zx::result<> Dwc3::LoadMetadata(fdf::PDev& pdev) {
     }
   }
 
-  zx::result meta = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(
-      "fuchsia.driver.metadata.Dictionary");
-  if (meta.is_error()) {
-    if (meta.error_value() != ZX_ERR_NOT_FOUND) {
-      fdf::error("Failed to retrieve driver metadata: {}", meta.status_string());
-      return meta.take_error();
+  zx::result dict = pdev.GetFidlMetadata<fuchsia_driver_metadata::Dictionary>(kDwc3ConfigId);
+  if (dict.is_error()) {
+    if (dict.error_value() != ZX_ERR_NOT_FOUND) {
+      fdf::error("Failed to retrieve {} metadata: {}", kDwc3ConfigId, dict.status_string());
+      return dict.take_error();
     }
     return zx::ok();
   }
 
-  zx::result interrupt_moderation_us_res = GetUint32(*meta, "interrupt-moderation-us");
-  if (interrupt_moderation_us_res.is_error() &&
-      interrupt_moderation_us_res.error_value() != ZX_ERR_NOT_FOUND) {
-    return interrupt_moderation_us_res.take_error();
-  }
-  if (interrupt_moderation_us_res.is_ok()) {
-    uint32_t value = interrupt_moderation_us_res.value();
-    uint32_t imodi = value * 4;  // units of 250ns.
-    if (imodi < value || imodi > std::numeric_limits<uint16_t>::max()) {
-      fdf::error(
-          "Metadata key 'interrupt-moderation-us' value {} out of range for 16-bit IMODI register",
-          interrupt_moderation_us_res.value());
+  std::optional config = dwc3_metadata::Config::Parse(*dict);
+  ZX_ASSERT(config.has_value());
+
+  if (config->interrupt_moderation_us.has_value()) {
+    uint32_t value = *config->interrupt_moderation_us;
+    if (value > std::numeric_limits<uint16_t>::max() / 4) {
+      fdf::error("interrupt_moderation_us value {} out of range for 16-bit IMODI register", value);
       return zx::error(ZX_ERR_OUT_OF_RANGE);
     }
-    interrupt_moderation_ = imodi;
+    interrupt_moderation_ = value * 4;  // units of 250ns.
   } else {
     interrupt_moderation_ = 0;
   }
 
-  zx::result fladj_res = GetUint32(*meta, "quirk-frame-length-adjustment");
-  if (fladj_res.is_error() && fladj_res.error_value() == ZX_ERR_NOT_FOUND) {
-    fladj_res = GetUint32(*meta, "snps,quirk-frame-length-adjustment");
-  }
-  if (fladj_res.is_error() && fladj_res.error_value() != ZX_ERR_NOT_FOUND) {
-    return fladj_res.take_error();
-  }
-  if (fladj_res.is_ok()) {
-    fladj_ = fladj_res.value();
-    if (*fladj_ > 0x3fu) {
-      fdf::info(
-          "quirk-frame-length-adjustment value {:#x} exceeds maximum of 0x3f and will be masked",
-          *fladj_);
-    }
-  } else {
-    fladj_ = std::nullopt;
+  fladj_ = config->quirk_frame_length_adjustment;
+  if (fladj_.has_value() && *fladj_ > 0x3fu) {
+    fdf::info(
+        "quirk_frame_length_adjustment value {:#x} exceeds maximum of 0x3f and will be masked",
+        *fladj_);
   }
 
-  zx::result lpm_sel_res = GetBool(*meta, "gfladj-refclk-lpm-sel-quirk");
-  if (lpm_sel_res.is_error() && lpm_sel_res.error_value() == ZX_ERR_NOT_FOUND) {
-    lpm_sel_res = GetBool(*meta, "snps,gfladj-refclk-lpm-sel-quirk");
-  }
-  if (lpm_sel_res.is_error() && lpm_sel_res.error_value() != ZX_ERR_NOT_FOUND) {
-    return lpm_sel_res.take_error();
-  }
-  fladj_refclk_lpm_sel_ = lpm_sel_res.value_or(false);
+  fladj_refclk_lpm_sel_ = config->gfladj_refclk_lpm_sel_quirk.value_or(false);
+
+  fdf::info(
+      "Loaded dwc3 config: interrupt_moderation={} (250ns units), fladj={}, "
+      "gfladj_refclk_lpm_sel={}",
+      interrupt_moderation_,
+      fladj_.has_value() ? std::format("{:#x}", *fladj_) : std::string("none"),
+      fladj_refclk_lpm_sel_);
 
   return zx::ok();
 }
@@ -1524,6 +1457,10 @@ void Dwc3::StopController(StopControllerCompleter::Sync& completer) {
     zx::nanosleep(zx::deadline_after(zx::msec(50)));
   }
 
+  SetDeviceState((power_on_ && link_connected_) ? fpolicy::DeviceState::kPowered
+                                                : fpolicy::DeviceState::kNotAttached,
+                 0);
+
   completer.Reply(zx::ok());
 }
 
@@ -1550,14 +1487,23 @@ void Dwc3::ConfigureEndpoint(ConfigureEndpointRequest& request,
     return;
   }
 
+  // EpServer::QueueRequests() and QueueNextRequest() compute request lengths modulo the max packet
+  // size, so it must not be 0. USB 2.0 and 3.x cap the base wMaxPacketSize at 1024, even though the
+  // 11-bit DEPCFG field would accept up to 2047. Validate before the already-configured check so an
+  // invalid descriptor is never acknowledged with ZX_OK.
+  const uint16_t max_packet_size = usb_ep_max_packet(request.ep_descriptor());
+  if (max_packet_size == 0 || max_packet_size > kMaxPacketSizeLimit) {
+    fdf::error("dwc3: endpoint {} has invalid max packet size {}", ep_num, max_packet_size);
+    completer.Reply(zx::error(ZX_ERR_INVALID_ARGS));
+    return;
+  }
+
   if (uep->ep.enabled) {
     // Endpoint already configured, nothing to do.
     fdf::error("Endpoint({}) already configured!", uep->ep.ep_num);
     completer.Reply(zx::ok());
     return;
   }
-
-  uint16_t max_packet_size = usb_ep_max_packet(request.ep_descriptor());
 
   auto* const mmio = get_mmio();
   const uint32_t mdwidth = GHWPARAMS0::Get().ReadFrom(mmio).DWC_USB31_MDWIDTH();
@@ -1665,15 +1611,25 @@ void Dwc3::DisableEndpoint(DisableEndpointRequest& request,
   completer.Reply(zx::ok());
 }
 
-void Dwc3::EndpointSetStall(EndpointSetStallRequest& request,
-                            EndpointSetStallCompleter::Sync& completer) {
-  TRACE_DURATION("dwc3", "Dwc3::EndpointSetStall");
+void Dwc3::ApplyEndpointStall(Endpoint& ep, bool stall) {
+  if (stall) {
+    if (!ep.stalled) {
+      CmdEpSetStall(ep);
+    }
+  } else {
+    CmdEpClearStall(ep);
+  }
+  ep.stalled = stall;
+}
+
+template <typename Completer>
+void Dwc3::SetOrClearEndpointStall(uint8_t ep_address, bool stall, Completer& completer) {
   if (!power_on_ || disconnect_in_flight_) {
     completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
     return;
   }
 
-  const uint8_t ep_num = UsbAddressToEpNum(request.ep_address());
+  const uint8_t ep_num = UsbAddressToEpNum(ep_address);
   UserEndpoint* const uep = get_user_endpoint(ep_num);
 
   if (uep == nullptr) {
@@ -1681,35 +1637,61 @@ void Dwc3::EndpointSetStall(EndpointSetStallRequest& request,
     return;
   }
 
-  if (zx_status_t status = EpSetStall(uep->ep, true); status != ZX_OK) {
-    completer.Reply(zx::error(status));
-  } else {
-    completer.Reply(zx::ok());
+  if (!uep->ep.enabled) {
+    completer.Reply(zx::error(ZX_ERR_BAD_STATE));
+    return;
   }
+
+  if (!stall && !uep->ep.stalled) {
+    // TODO(https://fxbug.dev/585288393): Issue DEPCSTALL to reset the hardware data toggle /
+    // sequence number even when !ep.stalled once UsbPeripheral::SetConfiguration and SetInterface
+    // no longer call EndpointClearStall after functions have already queued RX requests.
+    completer.Reply(zx::ok());
+    return;
+  }
+
+  // Per the Synopsys DWC3 Databook, if a transfer is active or starting on the endpoint, end it
+  // first (returning active requests with ZX_ERR_IO_REFUSED so function drivers can re-queue them)
+  // and wait for DEPENDXFER to finish before issuing DEPSSTALL / DEPCSTALL or completing the EP0
+  // Status stage.
+  if (!IsEndpointIdle(*uep)) {
+    if (uep->server.has_value()) {
+      uep->server->CancelAll(ZX_ERR_IO_REFUSED);
+    }
+    const uint64_t config_gen = uep->configure_generation;
+    WaitForEndpointIdle(*uep, [this, uep, stall, config_gen,
+                               async_completer = completer.ToAsync()](bool idle) mutable {
+      if (!idle || !power_on_ || disconnect_in_flight_ || uep->configure_generation != config_gen) {
+        async_completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
+        return;
+      }
+      // When stalling (`stall`), setting `ep.stalled = true` inside NotifyEndpointIdle() guarantees
+      // UserEpQueueNext() will not start a new transfer while stalled. When clearing (`!stall`),
+      // HandleEpTransferEndedEvent / HandleEpTransferCompleteEvent invokes UserEpQueueNext() after
+      // all NotifyEndpointIdle() callbacks complete so subsequent callbacks still observe kIdle.
+      ApplyEndpointStall(uep->ep, stall);
+      async_completer.Reply(zx::ok());
+    });
+    return;
+  }
+
+  ApplyEndpointStall(uep->ep, stall);
+  if (!stall) {
+    UserEpQueueNext(*uep);
+  }
+  completer.Reply(zx::ok());
+}
+
+void Dwc3::EndpointSetStall(EndpointSetStallRequest& request,
+                            EndpointSetStallCompleter::Sync& completer) {
+  TRACE_DURATION("dwc3", "Dwc3::EndpointSetStall");
+  SetOrClearEndpointStall(request.ep_address(), /*stall=*/true, completer);
 }
 
 void Dwc3::EndpointClearStall(EndpointClearStallRequest& request,
                               EndpointClearStallCompleter::Sync& completer) {
   TRACE_DURATION("dwc3", "Dwc3::EndpointClearStall");
-  if (!power_on_ || disconnect_in_flight_) {
-    completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
-    return;
-  }
-
-  const uint8_t ep_num = UsbAddressToEpNum(request.ep_address());
-  UserEndpoint* const uep = get_user_endpoint(ep_num);
-
-  if (uep == nullptr) {
-    completer.Reply(zx::error(ZX_ERR_INVALID_ARGS));
-    return;
-  }
-
-  if (zx_status_t status = EpSetStall(uep->ep, false); status != ZX_OK) {
-    completer.Reply(zx::error(status));
-  } else {
-    UserEpQueueNext(*uep);
-    completer.Reply(zx::ok());
-  }
+  SetOrClearEndpointStall(request.ep_address(), /*stall=*/false, completer);
 }
 
 void Dwc3::CancelAll(CancelAllRequest& request, CancelAllCompleter::Sync& completer) {
@@ -1722,8 +1704,21 @@ void Dwc3::CancelAll(CancelAllRequest& request, CancelAllCompleter::Sync& comple
     return;
   }
 
-  uep->server->CancelAll(ZX_ERR_IO_REFUSED);
-  completer.Reply(zx::ok());
+  if (uep->server.has_value()) {
+    uep->server->CancelAll(ZX_ERR_IO_REFUSED);
+  }
+  if (IsEndpointIdle(*uep)) {
+    completer.Reply(zx::ok());
+    return;
+  }
+
+  WaitForEndpointIdle(*uep, [async_completer = completer.ToAsync()](bool idle) mutable {
+    if (!idle) {
+      async_completer.Reply(zx::error(ZX_ERR_IO_NOT_PRESENT));
+      return;
+    }
+    async_completer.Reply(zx::ok());
+  });
 }
 
 void Dwc3::EpServer::GetInfo(GetInfoCompleter::Sync& completer) {
@@ -2109,6 +2104,9 @@ void Dwc3::SetDeviceState(fpolicy::DeviceState state) { SetDeviceState(state, as
 void Dwc3::SetDeviceState(fpolicy::DeviceState state, uint8_t address) {
   TRACE_DURATION("dwc3", "{}", __func__);
 
+  if (state != fpolicy::DeviceState::kSuspended) {
+    pre_suspend_state_ = state;
+  }
   device_state_ = state;
   assigned_address_ = address;
 

@@ -37,7 +37,7 @@ const DOWN_ARROW: u8 = 0x42;
 #[cfg(feature = "console_enable_history")]
 const HISTORY_LEN: usize = 16;
 const LINE_LEN: usize = 128;
-const MAX_NUM_ARGS: usize = 16;
+pub const MAX_NUM_ARGS: usize = 16;
 const PANIC_LINE_LEN: usize = 32;
 
 #[cfg(feature = "console_enable_history")]
@@ -374,7 +374,7 @@ unsafe extern "C" fn cmd_and(argc: c_int, argv: *const CmdArgs, flags: u32) -> c
     let cmd = match match_command(args[1].as_str(), CMD_AVAIL_NORMAL) {
         Some(cmd) => cmd,
         None => {
-            kprintln!("comman#[cfg(console_enabled)]d \"{:s}\" not found", args[1].as_str());
+            kprintln!("command \"{:s}\" not found", args[1].as_str());
             return Status::NOT_FOUND.into_raw();
         }
     };
@@ -498,9 +498,9 @@ unsafe extern "C" fn cmd_history(_argc: c_int, _argv: *const CmdArgs, _flags: u3
 ///
 /// While `HISTORY_BUF` and `HISTORY_NEXT` use atomic operations to ensure safe visibility
 /// across threads without data races, individual byte writes in `add_history` are performed
-/// with `Ordering::Relaxed` without external locks. This preserves the#[cfg(console_enabled)] 1:1 concurrency model
-/// of the original console, which assumes a single active interactive console loop or serial
-/// input stream. If concurrent multi-writer console lines are introduced in the future,
+/// with `Ordering::Relaxed` without external locks. This preserves the 1:1 concurrency model of
+/// the original console, which assumes a single active interactive console loop or serial input
+/// stream. If concurrent multi-writer console lines are introduced in the future,
 /// writing to and traversing history would require external synchronization.
 #[cfg(feature = "console_enable_history")]
 pub fn add_history(line: &str) {
@@ -858,7 +858,6 @@ where
     let mut ret = Ok(());
 
     // Allocate large buffers on the heap to avoid kernel stack overflows.
-    const MAX_NUM_ARGS: usize = 16;
     let mut args = match kalloc::Box::<[CmdArgs; MAX_NUM_ARGS]>::try_new_zeroed() {
         Ok(b) => unsafe { b.assume_init() },
         Err(_) => return Err(zx_status::Status::NO_MEMORY),
@@ -1294,14 +1293,6 @@ pub unsafe extern "C" fn rust_console_run_script_locked(string: *const c_char) -
         return Status::INVALID_ARGS.into_raw();
     };
     console_run_script_locked(s)
-}
-
-/// # Safety
-///
-/// No special safety requirements, but marked unsafe to match C ABI export.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_kernel_shell_init() {
-    kernel_shell_init();
 }
 
 /// # Safety

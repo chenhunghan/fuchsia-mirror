@@ -811,5 +811,220 @@ TEST_F(SincSamplerOutputTest, ProcessRechannelizationQuad) {
   }
 }
 
+// Verifies kHighPassSincSampler filter lengths and rejection of mismatched or sub-46 kHz rates.
+TEST(SincSamplerTest, HighPassFilterLengthAndRateCheck) {
+  auto valid_format = CreateFormat(1, 96000, SampleType::kFloat32);
+  auto sampler = Sampler::Create(valid_format, valid_format, Sampler::Type::kHighPassSincSampler);
+  ASSERT_THAT(sampler, NotNull());
+  EXPECT_EQ(sampler->pos_filter_length(), Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+  EXPECT_EQ(sampler->neg_filter_length(), Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+
+  // Mismatched frame rates must be rejected
+  auto rate_48k_format = CreateFormat(1, 48000, SampleType::kFloat32);
+  EXPECT_THAT(Sampler::Create(valid_format, rate_48k_format, Sampler::Type::kHighPassSincSampler),
+              IsNull());
+  EXPECT_THAT(Sampler::Create(rate_48k_format, valid_format, Sampler::Type::kHighPassSincSampler),
+              IsNull());
+  EXPECT_THAT(SincSampler::Create(valid_format, rate_48k_format, /*high_pass=*/true), IsNull());
+
+  // Frame rates <= 2 * kUltrasoundMinFrequencyHz (46 kHz) must be rejected.
+  auto rate_44k_format = CreateFormat(1, 44100, SampleType::kFloat32);
+  EXPECT_THAT(
+      Sampler::Create(rate_44k_format, rate_44k_format, Sampler::Type::kHighPassSincSampler),
+      IsNull());
+  EXPECT_THAT(SincSampler::Create(rate_44k_format, rate_44k_format, /*high_pass=*/true), IsNull());
+}
+
+// Verifies kHighPassSincSampler attenuates DC/audible frequencies and preserves 26-31 kHz tones.
+TEST(SincSamplerTest, HighPassAttenuatesAudibleAndPreservesUltrasound) {
+  auto format = CreateFormat(1, 96000, SampleType::kFloat32);
+
+  const std::vector<double> test_frequencies = {0.0,     1000.0,  19500.0, 20000.0,
+                                                23000.0, 26000.0, 31000.0};
+  const std::vector<Fixed> test_offsets = {Fixed(0), Fixed::FromRaw(4096)};
+
+  constexpr int64_t kTotalSourceFrames = 600;
+  constexpr int64_t kDestFrames = 500;
+  constexpr int64_t kSteadyStateStart = 50;
+  constexpr int64_t kSteadyStateFrames = 400;
+
+  for (auto freq : test_frequencies) {
+    for (auto initial_offset : test_offsets) {
+      SCOPED_TRACE(testing::Message()
+                   << "freq = " << freq << ", offset = " << initial_offset.raw_value());
+
+      auto sampler = Sampler::Create(format, format, Sampler::Type::kHighPassSincSampler);
+      ASSERT_THAT(sampler, NotNull());
+
+      std::vector<float> source(kTotalSourceFrames);
+      double omega = 2.0 * M_PI * freq / 96000.0;
+      for (int64_t n = 0; n < kTotalSourceFrames; ++n) {
+        source[n] = static_cast<float>(std::cos(omega * static_cast<double>(n)));
+      }
+
+      std::vector<float> dest(kDestFrames, 0.0f);
+      Fixed source_offset = initial_offset;
+      int64_t dest_offset = 0;
+
+      sampler->Process({source.data(), &source_offset, kTotalSourceFrames},
+                       {dest.data(), &dest_offset, kDestFrames},
+                       {.type = GainType::kUnity, .scale = kUnityGainScale},
+                       /*accumulate=*/false);
+
+      ASSERT_EQ(dest_offset, kDestFrames);
+
+      // Measure max sample amplitude in steady-state region
+      float max_sample = 0.0f;
+      double sum_cos = 0.0;
+      double sum_sin = 0.0;
+      double sum_w = 0.0;
+      for (int64_t i = 0; i < kSteadyStateFrames; ++i) {
+        int64_t frame = kSteadyStateStart + i;
+        max_sample = std::max(max_sample, std::abs(dest[frame]));
+        double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * static_cast<double>(i) /
+                                         static_cast<double>(kSteadyStateFrames)));
+        double val = dest[frame] * w;
+        sum_cos += val * std::cos(omega * static_cast<double>(frame));
+        sum_sin += val * std::sin(omega * static_cast<double>(frame));
+        sum_w += w;
+      }
+      double measured_amplitude =
+          (freq == 0.0 ? 1.0 : 2.0) * std::sqrt(sum_cos * sum_cos + sum_sin * sum_sin) / sum_w;
+
+      if (freq <= 1000.0) {
+        EXPECT_LT(max_sample, 2e-5f);
+        EXPECT_LT(measured_amplitude, 2e-5);
+      } else if (freq == 19500.0) {
+        EXPECT_LT(max_sample, 0.007f);
+        EXPECT_LT(measured_amplitude, 0.007);
+      } else if (freq == 20000.0) {
+        EXPECT_LT(max_sample, 0.004f);
+        EXPECT_LT(measured_amplitude, 0.004);
+      } else if (freq == 23000.0) {
+        EXPECT_GE(measured_amplitude, 0.49);
+        EXPECT_LE(measured_amplitude, 0.51);
+      } else if (freq >= 26000.0) {
+        EXPECT_GE(measured_amplitude, 0.99);
+        EXPECT_LE(measured_amplitude, 1.01);
+      }
+    }
+  }
+}
+
+// Verifies kLowPassSincSampler filter lengths and rejection of sub-46 kHz source rates.
+TEST(SincSamplerTest, LowPassFilterLengthAndRateCheck) {
+  auto rate_96k_format = CreateFormat(1, 96000, SampleType::kFloat32);
+  auto rate_48k_format = CreateFormat(1, 48000, SampleType::kFloat32);
+  auto rate_16k_format = CreateFormat(1, 16000, SampleType::kFloat32);
+
+  // 96k -> 96k low-pass uses 28-frame side_length.
+  auto sampler_96k =
+      Sampler::Create(rate_96k_format, rate_96k_format, Sampler::Type::kLowPassSincSampler);
+  ASSERT_THAT(sampler_96k, NotNull());
+  EXPECT_EQ(sampler_96k->pos_filter_length(), Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+  EXPECT_EQ(sampler_96k->neg_filter_length(), Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+
+  // 96k -> 48k low-pass also uses 28-frame side_length.
+  auto sampler_48k =
+      Sampler::Create(rate_96k_format, rate_48k_format, Sampler::Type::kLowPassSincSampler);
+  ASSERT_THAT(sampler_48k, NotNull());
+  EXPECT_EQ(sampler_48k->pos_filter_length(), Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+  EXPECT_EQ(sampler_48k->neg_filter_length(), Fixed::FromRaw(SincFilter::kFracHighPassSideLength));
+
+  // 96k -> 16k low-pass uses the standard 96k->16k downsampling filter length (84 frames).
+  auto sampler_16k =
+      Sampler::Create(rate_96k_format, rate_16k_format, Sampler::Type::kLowPassSincSampler);
+  ASSERT_THAT(sampler_16k, NotNull());
+  EXPECT_EQ(sampler_16k->pos_filter_length(), SincFilter::Length(96000, 16000));
+  EXPECT_EQ(sampler_16k->neg_filter_length(), SincFilter::Length(96000, 16000));
+
+  // Source frame rates <= 2 * kAudioMaxFrequencyHz (46 kHz) must be rejected.
+  auto rate_44k_format = CreateFormat(1, 44100, SampleType::kFloat32);
+  EXPECT_THAT(Sampler::Create(rate_44k_format, rate_44k_format, Sampler::Type::kLowPassSincSampler),
+              IsNull());
+  EXPECT_THAT(Sampler::Create(rate_44k_format, rate_48k_format, Sampler::Type::kLowPassSincSampler),
+              IsNull());
+  EXPECT_THAT(
+      SincSampler::Create(rate_44k_format, rate_44k_format, /*high_pass=*/false, /*low_pass=*/true),
+      IsNull());
+
+  // Cannot be both high-pass and low-pass.
+  EXPECT_THAT(
+      SincSampler::Create(rate_96k_format, rate_96k_format, /*high_pass=*/true, /*low_pass=*/true),
+      IsNull());
+}
+
+// Verifies kLowPassSincSampler preserves DC/audible frequencies and attenuates >= 26 kHz tones.
+TEST(SincSamplerTest, LowPassPreservesAudibleAndAttenuatesUltrasound) {
+  auto format = CreateFormat(1, 96000, SampleType::kFloat32);
+
+  const std::vector<double> test_frequencies = {0.0,     1000.0,  19500.0, 20000.0,
+                                                23000.0, 26000.0, 31000.0};
+  const std::vector<Fixed> test_offsets = {Fixed(0), Fixed::FromRaw(4096)};
+
+  constexpr int64_t kTotalSourceFrames = 600;
+  constexpr int64_t kDestFrames = 500;
+  constexpr int64_t kSteadyStateStart = 50;
+  constexpr int64_t kSteadyStateFrames = 400;
+
+  for (auto freq : test_frequencies) {
+    for (auto initial_offset : test_offsets) {
+      SCOPED_TRACE(testing::Message()
+                   << "freq = " << freq << ", offset = " << initial_offset.raw_value());
+
+      auto sampler = Sampler::Create(format, format, Sampler::Type::kLowPassSincSampler);
+      ASSERT_THAT(sampler, NotNull());
+
+      std::vector<float> source(kTotalSourceFrames);
+      double omega = 2.0 * M_PI * freq / 96000.0;
+      for (int64_t n = 0; n < kTotalSourceFrames; ++n) {
+        source[n] = static_cast<float>(std::cos(omega * static_cast<double>(n)));
+      }
+
+      std::vector<float> dest(kDestFrames, 0.0f);
+      Fixed source_offset = initial_offset;
+      int64_t dest_offset = 0;
+
+      sampler->Process({source.data(), &source_offset, kTotalSourceFrames},
+                       {dest.data(), &dest_offset, kDestFrames},
+                       {.type = GainType::kUnity, .scale = kUnityGainScale},
+                       /*accumulate=*/false);
+
+      ASSERT_EQ(dest_offset, kDestFrames);
+
+      float max_sample = 0.0f;
+      double sum_cos = 0.0;
+      double sum_sin = 0.0;
+      double sum_w = 0.0;
+      for (int64_t i = 0; i < kSteadyStateFrames; ++i) {
+        int64_t frame = kSteadyStateStart + i;
+        max_sample = std::max(max_sample, std::abs(dest[frame]));
+        double w = 0.5 * (1.0 - std::cos(2.0 * M_PI * static_cast<double>(i) /
+                                         static_cast<double>(kSteadyStateFrames)));
+        double val = dest[frame] * w;
+        sum_cos += val * std::cos(omega * static_cast<double>(frame));
+        sum_sin += val * std::sin(omega * static_cast<double>(frame));
+        sum_w += w;
+      }
+      double measured_amplitude =
+          (freq == 0.0 ? 1.0 : 2.0) * std::sqrt(sum_cos * sum_cos + sum_sin * sum_sin) / sum_w;
+
+      if (freq <= 20000.0) {
+        EXPECT_GE(measured_amplitude, 0.99);
+        EXPECT_LE(measured_amplitude, 1.01);
+      } else if (freq == 23000.0) {
+        EXPECT_GE(measured_amplitude, 0.49);
+        EXPECT_LE(measured_amplitude, 0.51);
+      } else if (freq == 26000.0) {
+        EXPECT_LT(max_sample, 0.004f);
+        EXPECT_LT(measured_amplitude, 0.004);
+      } else if (freq >= 31000.0) {
+        EXPECT_LT(max_sample, 0.001f);
+        EXPECT_LT(measured_amplitude, 0.001);
+      }
+    }
+  }
+}
+
 }  // namespace
 }  // namespace media_audio

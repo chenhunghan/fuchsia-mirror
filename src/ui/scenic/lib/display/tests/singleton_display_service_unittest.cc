@@ -45,6 +45,8 @@ TEST(SingletonDisplayService, GetMetrics) {
   float dpr_x = 0.f;
   float dpr_y = 0.f;
   uint32_t refresh_rate = 0;
+  int64_t vsync_period_ns = 0;
+  bool has_vrr_config = false;
 
   singleton->GetMetrics([&](auto response) {
     auto& info = response.info();
@@ -59,6 +61,9 @@ TEST(SingletonDisplayService, GetMetrics) {
     dpr_y = info.recommended_device_pixel_ratio()->y();
     ASSERT_TRUE(info.maximum_refresh_rate_in_millihertz().has_value());
     refresh_rate = info.maximum_refresh_rate_in_millihertz().value();
+    ASSERT_TRUE(info.vsync_period().has_value());
+    vsync_period_ns = info.vsync_period().value();
+    has_vrr_config = info.vrr_config().has_value();
   });
 
   EXPECT_EQ(width_in_px, kWidthInPx);
@@ -68,6 +73,84 @@ TEST(SingletonDisplayService, GetMetrics) {
   EXPECT_EQ(dpr_x, 1.f);
   EXPECT_EQ(dpr_y, 1.f);
   EXPECT_EQ(refresh_rate, kRefreshRate);
+  EXPECT_EQ(vsync_period_ns, 1'000'000'000'000LL / kRefreshRate);
+  EXPECT_FALSE(has_vrr_config);
+}
+
+TEST(SingletonDisplayService, GetMetricsVariableRefreshRate) {
+  static constexpr uint32_t kRefreshRate = 117'794;
+  static constexpr int64_t kCalibratedVsyncPeriodNs = 4'244'698;
+  static constexpr int64_t kMinFrameIntervalNs = 8'489'396;
+  static constexpr int64_t kHeadsUpNs = 30'000'000;
+  static constexpr int64_t kTimeoutNs = 500'000'000;
+
+  fuchsia_hardware_display_types::VrrConfig hw_vrr_config;
+  hw_vrr_config.vsync_period(kCalibratedVsyncPeriodNs);
+  hw_vrr_config.min_frame_interval(kMinFrameIntervalNs);
+  hw_vrr_config.frame_interval_power_hints(
+      std::vector<fuchsia_hardware_display_types::FrameIntervalPowerHint>{
+          fuchsia_hardware_display_types::FrameIntervalPowerHint(16'978'792, 8'489'396),
+      });
+  hw_vrr_config.notify_expected_present_config(
+      fuchsia_hardware_display_types::NotifyExpectedPresentConfig(kHeadsUpNs, kTimeoutNs));
+
+  auto display = std::make_shared<Display>(
+      display::WireDisplayId{.value = 1},
+      WireDisplayMode{
+          .active_area = {.width = 1280, .height = 2856},
+          .refresh_rate_millihertz = kRefreshRate,
+          .flags = fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+      },
+      /*width_in_mm=*/70, /*height_in_mm=*/155, kMaxDisplayLayersCount,
+      std::vector{fuchsia_images2::wire::PixelFormat::kB8G8R8A8}, std::move(hw_vrr_config));
+  auto singleton = std::make_unique<SingletonDisplayService>(display);
+
+  std::optional<fuchsia_ui_display_singleton::Metrics> metrics;
+  singleton->GetMetrics([&](auto response) { metrics = std::move(response.info()); });
+
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->vsync_period(), kCalibratedVsyncPeriodNs);
+  ASSERT_TRUE(metrics->vrr_config().has_value());
+  EXPECT_EQ(metrics->vrr_config()->min_frame_interval(), kMinFrameIntervalNs);
+  ASSERT_TRUE(metrics->vrr_config()->frame_interval_power_hints().has_value());
+  ASSERT_EQ(metrics->vrr_config()->frame_interval_power_hints()->size(), 1u);
+  EXPECT_EQ(metrics->vrr_config()->frame_interval_power_hints()->at(0).frame_interval(),
+            16'978'792);
+  EXPECT_EQ(metrics->vrr_config()->frame_interval_power_hints()->at(0).average_refresh_period(),
+            8'489'396);
+  ASSERT_TRUE(metrics->vrr_config()->notify_expected_present_config().has_value());
+  EXPECT_EQ(metrics->vrr_config()->notify_expected_present_config()->heads_up(), kHeadsUpNs);
+  EXPECT_EQ(metrics->vrr_config()->notify_expected_present_config()->timeout(), kTimeoutNs);
+}
+
+TEST(SingletonDisplayService, GetMetricsVariableRefreshRateOmittedFields) {
+  // 120@240 VRR panel omitting `min_frame_interval` with an empty power-hint list: defaults
+  // `min_frame_interval` to `1e12 / refresh_rate_millihertz` (nominal 120 Hz) and omits
+  // `frame_interval_power_hints`.
+  fuchsia_hardware_display_types::VrrConfig hw_vrr_config;
+  hw_vrr_config.vsync_period(4'244'698);
+  hw_vrr_config.frame_interval_power_hints({});
+
+  auto display = std::make_shared<Display>(
+      display::WireDisplayId{.value = 1},
+      WireDisplayMode{
+          .active_area = {.width = 1280, .height = 2856},
+          .refresh_rate_millihertz = 117'794,
+          .flags = fuchsia_hardware_display_types::wire::ModeFlags::kVariableRefreshRate,
+      },
+      /*width_in_mm=*/70, /*height_in_mm=*/155, kMaxDisplayLayersCount,
+      std::vector{fuchsia_images2::wire::PixelFormat::kB8G8R8A8}, std::move(hw_vrr_config));
+  SingletonDisplayService singleton(display);
+
+  std::optional<fuchsia_ui_display_singleton::Metrics> metrics;
+  singleton.GetMetrics([&](auto response) { metrics = std::move(response.info()); });
+
+  ASSERT_TRUE(metrics.has_value());
+  EXPECT_EQ(metrics->vsync_period(), 4'244'698);
+  ASSERT_TRUE(metrics->vrr_config().has_value());
+  EXPECT_EQ(metrics->vrr_config()->min_frame_interval(), 1'000'000'000'000LL / 117'794);
+  EXPECT_FALSE(metrics->vrr_config()->frame_interval_power_hints().has_value());
+  EXPECT_FALSE(metrics->vrr_config()->notify_expected_present_config().has_value());
 }
 
 TEST(SingletonDisplayService, DevicePixelRatioChange) {

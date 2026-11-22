@@ -8,7 +8,7 @@
 #include <lib/ddk/debug.h>
 #include <lib/ddk/hw/inout.h>
 #include <librtc.h>
-#include <librtc_llcpp.h>
+#include <librtc_wire.h>
 #include <zircon/errors.h>
 
 #include <ddktl/device.h>

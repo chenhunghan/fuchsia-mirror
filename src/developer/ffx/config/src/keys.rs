@@ -37,8 +37,16 @@ pub const METRICS_UPLOAD_TIMEOUT_DEFAULT: f64 = 2.0;
 /// The location of the fastboot devices file. Defaults to ${HOME}/.fastboot/devices
 pub const FASTBOOT_FILE_PATH: &str = "fastboot.devices_file.path";
 
-/// The root directory for storing instance specific emulator data. Instances
-/// should create a subdirectory in this directory to store data.
+/// The root directories for storing instance specific emulator data. Instances
+/// are created in a subdirectory of the first directory; the remaining
+/// directories are only searched for existing instances. Defaults to
+/// `$SHARED_DATA/emu/instances`, then `$DATA/emu/instances` (which is skipped
+/// in strict mode) for instances created by older versions of ffx.
+///
+/// TODO(b/582463897): The `$DATA/emu/instances` entry, and the support for
+/// multiple instance roots, exist only so emulators started by older versions
+/// of ffx can still be found. Remove them after a transition period; the bug
+/// lists the code to clean up.
 pub const EMU_INSTANCE_ROOT_DIR: &'static str = "emu.instance_dir";
 
 /// The root directory for storing instance specific GCE data.
@@ -82,3 +90,13 @@ pub const LOG_CMD_COLOR: &str = "log_cmd.color";
 
 /// Whether or not to allow build-level configuration overrides for SDK host tools (sdk.overrides.*).
 pub const SDK_ALLOW_BUILD_HOST_TOOLS: &str = "sdk.overrides.allow-build-host-tools";
+
+// LINT.IfChange
+/// Whether or not to enforce agent session target ownership.
+pub const AGENT_TARGET_OWNERSHIP: &str = "agent.target_ownership";
+
+/// Optional override path for the directory storing per-target agent ownership lockfiles.
+/// When unset, defaults to `/run/user/<euid>/ffx/agent-locks` if `/run/user/<euid>` exists,
+/// or `/tmp/ffx-agent-locks-<euid>`.
+pub const AGENT_LOCK_DIR: &str = "agent.lock_dir";
+// LINT.ThenChange(../../docs/configuration.md, ../../data/config.json)

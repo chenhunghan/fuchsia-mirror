@@ -38,6 +38,21 @@
             protocol: [ "fuchsia.fshost.Recovery" ],
             availability: "optional",
         },
+        {
+            directory: "misc",
+            from: "parent",
+            rights: [ "r*" ],
+            path: "/misc",
+            availability: "optional",
+        },
+        {
+            config: "fuchsia.fastboot.UseAndroidBcb",
+            from: "parent",
+            key: "use_android_bcb",
+            type: "bool",
+            availability: "optional",
+            default: false,
+        },
         { service: "fuchsia.hardware.fastboot.Service" },
     ],
 }

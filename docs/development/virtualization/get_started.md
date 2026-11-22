@@ -12,7 +12,7 @@ above devices that boot into EL2. Virtualization is *not* available on AMD CPUs
 The following hardware will have the best availability:
 
 *   Pixelbook Go m3
-*   Intel NUC7 (NUC7i5DNHE)
+*   Intel NUC11 (NUC11TNHi5)
 *   x64 QEMU/Nested VMX
 
 Basic virtualization features will work when using the Fuchsia emulator with
@@ -198,9 +198,6 @@ $ fx test virtualization-gpu-tests
 $ fx test virtualization-input-tests
 ```
 
-[ref.bug467349022]:
-    https://b.corp.google.com/issues/467349022
-[ref.debian_guest_readme]:
-    https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/src/virtualization/packages/debian_guest/README.md
-[ref.termina]:
-    https://chromium.googlesource.com/chromiumos/overlays/board-overlays/+/master/project-termina/
+[ref.bug467349022]: https://b.corp.google.com/issues/467349022
+[ref.debian_guest_readme]: https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/src/virtualization/packages/debian_guest/README.md
+[ref.termina]: https://chromium.googlesource.com/chromiumos/overlays/board-overlays/+/master/project-termina/

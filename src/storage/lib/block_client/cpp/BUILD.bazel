@@ -23,11 +23,18 @@ cc_library(
     deps = [
         "//src/storage/lib/block_protocol:block_fifo",
         "//src/storage/lib/buffer",
-        "//zircon/system/ulib/fzl",
         "//zircon/third_party/ulib/safemath",
-        "@fuchsia_sdk//fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
         "@fuchsia_sdk//pkg/zx",
-    ],
+    ] + select({
+        "//build/bazel/platforms:is_fuchsia_platform": [
+            "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+            "//zircon/system/ulib/fzl",
+        ],
+        "//conditions:default": [
+            "@fuchsia_sdk//fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+            "@fuchsia_sdk//pkg/fzl",
+        ],
+    }),
 )
 
 cc_library(
@@ -47,9 +54,17 @@ cc_library(
         "//src/storage/lib/block_protocol:block_fifo",
         "//src/storage/lib/buffer",
         "//zircon/third_party/ulib/safemath",
-        "@fuchsia_sdk//fidl/fuchsia.io:fuchsia.io_cpp",
-        "@fuchsia_sdk//fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
-        "@fuchsia_sdk//pkg/fdio",
         "@fuchsia_sdk//pkg/zx",
-    ],
+    ] + select({
+        "//build/bazel/platforms:is_fuchsia_platform": [
+            "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+            "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+            "//sdk/lib/fdio",
+        ],
+        "//conditions:default": [
+            "@fuchsia_sdk//fidl/fuchsia.io:fuchsia.io_cpp",
+            "@fuchsia_sdk//fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+            "@fuchsia_sdk//pkg/fdio",
+        ],
+    }),
 )

@@ -4,8 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! A lazily-borrowed [`OwnedWaitQueue`], implementing the C++ `LazyOwnedWaitQueueImpl` declared in
-//! `<kernel/lazy_owned_wait_queue.h>`, which forwards to this implementation.
+//! A lazily-borrowed [`OwnedWaitQueue`].
 
 use core::ffi::c_void;
 use core::marker::{PhantomData, PhantomPinned};
@@ -13,6 +12,7 @@ use core::mem::{align_of, offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicPtr, Ordering};
+#[cfg(ktest)]
 use ksync::LockToken;
 use pin_init::{pin_data, pinned_drop};
 use zr::static_assert;
@@ -28,9 +28,9 @@ use crate::ksync_kernel::IrqSavePolicy;
 ///
 /// [`pool`](Self::pool) must return the same pool on every call for as long as `self` exists, and
 /// that pool must outlive `self`. In particular, the returned reference must not borrow from the
-/// storage of `self`, and must remain valid after `self` is destroyed.
-/// [`LazyOwnedWaitQueueImpl::release_locked_raw`] relies on this to recycle a queue to the pool
-/// that it was borrowed from after `self` may have been destroyed.
+/// storage of `self`, and must remain valid after `self` is destroyed (`release_locked_raw` in
+/// tests relies on this to recycle a queue to the pool that it was borrowed from after `self` may
+/// have been destroyed).
 pub unsafe trait OwqPoolAccess {
     /// Returns the pool to borrow queues from and recycle them to.
     ///
@@ -40,10 +40,13 @@ pub unsafe trait OwqPoolAccess {
 
 /// Global pool accessor policy, always selecting the global [`OwnedWaitQueuePool`].
 ///
-/// Occupies no storage, like the empty C++ `GlobalOwqPoolAccess` base.
+/// Occupies no storage.
 #[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
-pub struct GlobalOwqPoolAccess;
+pub struct GlobalOwqPoolAccess {
+    /// `improper_ctypes` rejects a fieldless struct.
+    _ffi: PhantomData<()>,
+}
 
 // SAFETY: `pool` always returns the global pool, which is never destroyed.
 unsafe impl OwqPoolAccess for GlobalOwqPoolAccess {
@@ -55,18 +58,17 @@ unsafe impl OwqPoolAccess for GlobalOwqPoolAccess {
 
 /// Local pool accessor policy for tests.
 ///
-/// Layout-compatible with the C++ `LocalOwqPoolAccess`.
-///
 /// Unlike [`GlobalOwqPoolAccess`], this has `Freeze` bytes (`pool`), so a
 /// [`LocalLazyOwnedWaitQueue`] must not be destroyed while another thread still holds a `&Self` to
 /// it, even one that only uses the `*_raw` functions.
-#[repr(C)]
-pub struct LocalOwqPoolAccess<'a> {
+#[cfg(ktest)]
+struct LocalOwqPoolAccess<'a> {
     pool: &'a OwnedWaitQueuePool,
 }
 
 // SAFETY: `pool` always returns `self.pool`, which is never modified after construction and
 // outlives `self` because it is borrowed for `'a`.
+#[cfg(ktest)]
 unsafe impl OwqPoolAccess for LocalOwqPoolAccess<'_> {
     #[inline]
     fn pool(&self) -> &OwnedWaitQueuePool {
@@ -76,9 +78,6 @@ unsafe impl OwqPoolAccess for LocalOwqPoolAccess<'_> {
 
 /// A wrapper class for [`OwnedWaitQueue`] that lazily borrows a queue from a pool
 /// when necessary.
-///
-/// Layout-compatible with the C++ `LazyOwnedWaitQueueImpl<PoolAccess>`, whose `PoolAccess` base
-/// precedes its pointer.
 ///
 /// # Invariants
 ///
@@ -105,32 +104,27 @@ pub struct LazyOwnedWaitQueueImpl<P: OwqPoolAccess> {
 pub type LazyOwnedWaitQueue = LazyOwnedWaitQueueImpl<GlobalOwqPoolAccess>;
 
 /// A [`LazyOwnedWaitQueueImpl`] that borrows from a specific [`OwnedWaitQueuePool`], for tests.
-pub type LocalLazyOwnedWaitQueue<'a> = LazyOwnedWaitQueueImpl<LocalOwqPoolAccess<'a>>;
+#[cfg(ktest)]
+type LocalLazyOwnedWaitQueue<'a> = LazyOwnedWaitQueueImpl<LocalOwqPoolAccess<'a>>;
 
-// These must match the sizes asserted against the C++ types in
-// `<kernel/lazy_owned_wait_queue.h>`.
 // LazyOwnedWaitQueue must be exactly pointer-sized.
 static_assert!(size_of::<LazyOwnedWaitQueue>() == size_of::<*mut c_void>());
 static_assert!(align_of::<LazyOwnedWaitQueue>() == align_of::<*mut c_void>());
 static_assert!(offset_of!(LazyOwnedWaitQueue, ptr) == 0);
-static_assert!(size_of::<LocalLazyOwnedWaitQueue<'static>>() == 2 * size_of::<*mut c_void>());
-static_assert!(align_of::<LocalLazyOwnedWaitQueue<'static>>() == align_of::<*mut c_void>());
-static_assert!(offset_of!(LocalLazyOwnedWaitQueue<'static>, ptr) == size_of::<*mut c_void>());
 
-// Both instantiations are shared between threads, e.g. by every thread contending on a `Mutex`.
+// LazyOwnedWaitQueue is shared between threads, e.g. by every thread contending on a `Mutex`.
 const _: () = {
     const fn assert_sync<T: Sync>() {}
     assert_sync::<LazyOwnedWaitQueue>();
+    #[cfg(ktest)]
     assert_sync::<LocalLazyOwnedWaitQueue<'static>>();
 };
 
 impl LazyOwnedWaitQueue {
     /// Creates an empty `LazyOwnedWaitQueue` that borrows from the global pool.
-    ///
-    /// Its bit pattern is all zeros, matching a constant-initialized C++ `LazyOwnedWaitQueue`.
     pub const fn new() -> Self {
         Self {
-            pool_access: GlobalOwqPoolAccess,
+            pool_access: GlobalOwqPoolAccess { _ffi: PhantomData },
             ptr: AtomicPtr::new(ptr::null_mut()),
             _pin: PhantomData,
         }
@@ -143,6 +137,7 @@ impl Default for LazyOwnedWaitQueue {
     }
 }
 
+#[cfg(ktest)]
 impl<'a> LocalLazyOwnedWaitQueue<'a> {
     /// Creates an empty `LocalLazyOwnedWaitQueue` that borrows from `pool`.
     pub const fn new(pool: &'a OwnedWaitQueuePool) -> Self {
@@ -159,8 +154,8 @@ impl<P: OwqPoolAccess> LazyOwnedWaitQueueImpl<P> {
     ///
     /// Callers should only call this when they are preparing to use the returned queue to block.
     /// Callers are responsible for coordinating amongst each other so that the last caller on each
-    /// `LazyOwnedWaitQueue` to *unblock* after calling this calls [`Self::detach`] or
-    /// [`Self::release_locked`] to recycle the queue to the pool.
+    /// `LazyOwnedWaitQueue` to *unblock* after calling this detaches the queue (via
+    /// [`Self::detach`] or [`Self::detach_raw`]) and recycles it to the pool.
     ///
     /// Thread-safe. Will not block but may acquire the pool spinlock.
     ///
@@ -218,7 +213,8 @@ impl<P: OwqPoolAccess> LazyOwnedWaitQueueImpl<P> {
     ///
     /// In addition to the requirements of [`Self::detach`], the attached queue (if any) must have
     /// no owner, and there must be no concurrent mutation of its owner or waiter fields.
-    pub unsafe fn release_locked(&self, token: &mut LockToken<'_, OwnedWaitQueuePoolLock>) {
+    #[cfg(ktest)]
+    unsafe fn release_locked(&self, token: &mut LockToken<'_, OwnedWaitQueuePoolLock>) {
         // SAFETY: `self` is a valid reference, and the caller upholds the requirements of
         // `release_locked`.
         unsafe { Self::release_locked_raw(self, token) }
@@ -234,7 +230,8 @@ impl<P: OwqPoolAccess> LazyOwnedWaitQueueImpl<P> {
     /// The attached queue (if any) must have no owner, there must be no concurrent mutation of its
     /// owner or waiter fields, and the caller must uphold the remaining requirements of
     /// [`Self::detach_raw`].
-    pub unsafe fn release_locked_raw(
+    #[cfg(ktest)]
+    unsafe fn release_locked_raw(
         this: *const Self,
         token: &mut LockToken<'_, OwnedWaitQueuePoolLock>,
     ) {
@@ -278,10 +275,10 @@ impl<P: OwqPoolAccess> LazyOwnedWaitQueueImpl<P> {
     }
 
     /// Like [`Self::detach`], but takes a raw pointer so that no reference to `*this` outlives
-    /// the detach, after which another thread may destroy `*this`. For example, the C++
-    /// `Mutex::~Mutex()` proceeds as soon as `peek` returns `None` or the detached queue's lock
-    /// is released, and releasers hold that lock across the detach, so the destroyer may proceed
-    /// as soon as the detach is visible.
+    /// the detach, after which another thread may destroy `*this`. For example, dropping a
+    /// [`Mutex`](crate::kernel::mutex::Mutex) (`Mutex::destroy`) proceeds as soon as `peek`
+    /// returns `None` or the detached queue's lock is released, and releasers hold that lock
+    /// across the detach, so the destroyer may proceed as soon as the detach is visible.
     ///
     /// # Safety
     ///
@@ -294,7 +291,7 @@ impl<P: OwqPoolAccess> LazyOwnedWaitQueueImpl<P> {
         // Ordering: `AcqRel`: the `Acquire` half pairs with the `Release` store in `get_slow`, so
         // that the detached queue is observed fully initialized, and the `Release` half orders
         // this thread's prior accesses to the queue and to `*this` before any thread that
-        // observes the null via `peek` (e.g. `Mutex::~Mutex()`) destroys `*this`.
+        // observes the null via `peek` (e.g. `Mutex::destroy`) destroys `*this`.
         // SAFETY: The caller guarantees that `this` is valid until the swap takes effect, and
         // `*this` is not accessed afterwards. `AtomicPtr` is entirely interior-mutable, so the
         // `&AtomicPtr` created for the swap carries no `dereferenceable` or protector obligation
@@ -322,9 +319,6 @@ impl<P: OwqPoolAccess> core::fmt::Debug for LazyOwnedWaitQueueImpl<P> {
 #[pinned_drop]
 impl<P: OwqPoolAccess> PinnedDrop for LazyOwnedWaitQueueImpl<P> {
     fn drop(self: Pin<&mut Self>) {
-        // The C++ shim destroys its trivially destructible `PoolAccess` base itself, so the
-        // policy must not have drop glue of its own.
-        const { assert!(!core::mem::needs_drop::<P>()) };
         // `peek` is an `Acquire` load, so that this destruction happens-after any
         // racing detacher's accesses.
         assert!(
@@ -332,124 +326,6 @@ impl<P: OwqPoolAccess> PinnedDrop for LazyOwnedWaitQueueImpl<P> {
             "Cannot destroy a LazyOwnedWaitQueue that has an OwnedWaitQueue."
         );
     }
-}
-
-/// Converts an optional queue to the nullable pointer returned to C++.
-#[inline]
-fn queue_to_raw(queue: Option<NonNull<OwnedWaitQueue>>) -> *mut OwnedWaitQueue {
-    queue.map_or(ptr::null_mut(), NonNull::as_ptr)
-}
-
-/// Defines the C++ FFI entry points for one instantiation of [`LazyOwnedWaitQueueImpl`].
-macro_rules! lazy_owned_wait_queue_ffi {
-    (
-        cpp_type: $cpp_type:literal,
-        rust_type: $ty:ty,
-        destroy: $destroy:ident,
-        get: $get:ident,
-        release_locked: $release_locked:ident,
-        detach: $detach:ident,
-        peek: $peek:ident $(,)?
-    ) => {
-        #[doc = concat!("C++ FFI entry point for `", $cpp_type, "::~LazyOwnedWaitQueueImpl()`.")]
-        ///
-        /// # Safety
-        ///
-        /// `lazy` must point to a valid, initialized object that will not be used again. No other
-        /// thread may access `*lazy`, except for a `detach_raw` that has already performed its
-        /// swap and does not access `*lazy` afterwards.
-        // SAFETY: Symbol name is unique across the kernel link unit and matches the C++
-        // declaration in `zircon/kernel/include/kernel/lazy_owned_wait_queue.h`.
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $destroy(lazy: *mut $ty) {
-            debug_assert!(!lazy.is_null());
-            // SAFETY: The caller guarantees `lazy` points to a valid, initialized object that will
-            // not be used again. A racing `detach_raw` that is still returning from its swap only
-            // holds a `&AtomicPtr`, and `Pin<&mut Self>` of this `!Unpin` type asserts no
-            // uniqueness, so this does not conflict with it.
-            unsafe { ptr::drop_in_place(lazy) };
-        }
-
-        #[doc = concat!("C++ FFI entry point for `", $cpp_type, "::Get()`.")]
-        // SAFETY: Symbol name is unique across the kernel link unit and matches the C++
-        // declaration in `zircon/kernel/include/kernel/lazy_owned_wait_queue.h`.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $get(lazy: &$ty) -> *mut OwnedWaitQueue {
-            lazy.get().as_ptr()
-        }
-
-        #[doc = concat!("C++ FFI entry point for `", $cpp_type, "::ReleaseLocked()`.")]
-        ///
-        /// Takes a raw pointer because another thread may destroy `*lazy` once its queue is
-        /// detached.
-        ///
-        /// # Safety
-        ///
-        /// `lazy` must point to a valid object from the start of the call until the queue is
-        /// detached, the caller must hold [`OwnedWaitQueuePoolLock`], and the caller must uphold
-        /// the requirements of [`LazyOwnedWaitQueueImpl::release_locked_raw`].
-        // SAFETY: Symbol name is unique across the kernel link unit and matches the C++
-        // declaration in `zircon/kernel/include/kernel/lazy_owned_wait_queue.h`.
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $release_locked(lazy: *const $ty) {
-            debug_assert!(!lazy.is_null());
-            // SAFETY: The caller holds `OwnedWaitQueuePoolLock` for the duration of this call
-            // (enforced in C++ by `TA_REQ(OwnedWaitQueuePoolLock::Get())`), and `token` does not
-            // outlive this function.
-            let mut token = unsafe { LockToken::new() };
-            // SAFETY: The caller guarantees that `lazy` is valid until the queue is detached and
-            // upholds the requirements of `release_locked_raw`.
-            unsafe { <$ty>::release_locked_raw(lazy, &mut token) };
-        }
-
-        #[doc = concat!("C++ FFI entry point for `", $cpp_type, "::Detach()`.")]
-        ///
-        /// Takes a raw pointer because another thread may destroy `*lazy` once its queue is
-        /// detached.
-        ///
-        /// # Safety
-        ///
-        /// `lazy` must point to a valid object from the start of the call until the queue is
-        /// detached, and the caller must uphold the requirements of
-        /// [`LazyOwnedWaitQueueImpl::detach_raw`].
-        // SAFETY: Symbol name is unique across the kernel link unit and matches the C++
-        // declaration in `zircon/kernel/include/kernel/lazy_owned_wait_queue.h`.
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $detach(lazy: *const $ty) -> *mut OwnedWaitQueue {
-            debug_assert!(!lazy.is_null());
-            // SAFETY: The caller guarantees that `lazy` is valid until the queue is detached and
-            // upholds the requirements of `detach_raw`.
-            queue_to_raw(unsafe { <$ty>::detach_raw(lazy) })
-        }
-
-        #[doc = concat!("C++ FFI entry point for `", $cpp_type, "::Peek()`.")]
-        // SAFETY: Symbol name is unique across the kernel link unit and matches the C++
-        // declaration in `zircon/kernel/include/kernel/lazy_owned_wait_queue.h`.
-        #[unsafe(no_mangle)]
-        pub extern "C" fn $peek(lazy: &$ty) -> *mut OwnedWaitQueue {
-            queue_to_raw(lazy.peek())
-        }
-    };
-}
-
-lazy_owned_wait_queue_ffi! {
-    cpp_type: "LazyOwnedWaitQueue",
-    rust_type: LazyOwnedWaitQueue,
-    destroy: rust_lazy_owned_wait_queue_destroy,
-    get: rust_lazy_owned_wait_queue_get,
-    release_locked: rust_lazy_owned_wait_queue_release_locked,
-    detach: rust_lazy_owned_wait_queue_detach,
-    peek: rust_lazy_owned_wait_queue_peek,
-}
-
-lazy_owned_wait_queue_ffi! {
-    cpp_type: "LocalLazyOwnedWaitQueue",
-    rust_type: LocalLazyOwnedWaitQueue<'_>,
-    destroy: rust_local_lazy_owned_wait_queue_destroy,
-    get: rust_local_lazy_owned_wait_queue_get,
-    release_locked: rust_local_lazy_owned_wait_queue_release_locked,
-    detach: rust_local_lazy_owned_wait_queue_detach,
-    peek: rust_local_lazy_owned_wait_queue_peek,
 }
 
 /// Tests for [`LazyOwnedWaitQueue`].

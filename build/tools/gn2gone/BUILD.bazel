@@ -4,7 +4,6 @@
 
 load("@fuchsia_build_config//:defs.bzl", "build_config")
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules:cipd_prebuilt.bzl", "cipd_prebuilt_file")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
@@ -16,6 +15,7 @@ package(default_applicable_licenses = ["//:license"])
 go_library(
     name = "gn2gone_lib",
     srcs = [
+        "emptygroups.go",
         "gnast.go",
         "index.go",
         "load.go",
@@ -25,7 +25,7 @@ go_library(
         "unsync.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/build/tools/gn2gone",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//build/tools/bazel2gn:bazel2gn_lib",
         "//third_party/golibs:go.starlark.net/syntax",
@@ -37,7 +37,7 @@ go_binary_host_tool(
     srcs = [
         "cmd/main.go",
     ],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":gn2gone_lib",
     ],
@@ -69,7 +69,7 @@ host_go_test(
     embed = [
         ":gn2gone_lib",
     ],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     test_data = [":gn2gone_test_data"],
     visibility = [
         "//build/tools:__pkg__",

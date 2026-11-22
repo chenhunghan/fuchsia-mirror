@@ -5,7 +5,7 @@
 import logging
 
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from honeydew.affordances.connectivity.wlan.utils.types import (
     KNOWN_COUNTRY_CODES,
 )

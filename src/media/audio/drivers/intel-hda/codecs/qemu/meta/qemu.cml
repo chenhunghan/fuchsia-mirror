@@ -17,6 +17,8 @@
         bind: "meta/bind/qemu.bindbc",
     },
     capabilities: [],
-    use: [],
+    use: [
+        { service: "fuchsia.hardware.intel.hda.CodecService" },
+    ],
     expose: [],
 }

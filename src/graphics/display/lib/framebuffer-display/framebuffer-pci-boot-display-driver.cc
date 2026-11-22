@@ -5,8 +5,8 @@
 #include "src/graphics/display/lib/framebuffer-display/framebuffer-pci-boot-display-driver.h"
 
 #include <fidl/fuchsia.boot/cpp/wire.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/logging/cpp/logger.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/image-format/image_format.h>
 #include <lib/zbi-format/zbi.h>
 #include <lib/zx/result.h>

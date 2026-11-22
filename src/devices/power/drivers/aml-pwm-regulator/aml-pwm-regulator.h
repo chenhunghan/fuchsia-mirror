@@ -23,7 +23,9 @@ class AmlPwmRegulator : public fidl::WireServer<fuchsia_hardware_vreg::Vreg> {
  public:
   explicit AmlPwmRegulator(const VregMetadata& metadata,
                            fidl::WireSyncClient<fuchsia_hardware_pwm::Pwm> pwm_proto_client);
+  // Publishes `global_id`, when present, as the child node's `fuchsia.ID`.
   static zx::result<std::unique_ptr<AmlPwmRegulator>> Create(const VregMetadata& metadata,
+                                                             std::optional<uint32_t> global_id,
                                                              AmlPwmRegulatorDriver& driver,
                                                              fdf::Namespace& incoming);
 

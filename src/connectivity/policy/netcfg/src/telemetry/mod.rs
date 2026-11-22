@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Clone, Debug)]
 pub struct NetworkEventMetadata {
     pub id: u64,
-    pub name: Option<String>,
+    pub name: String,
     pub transport: fnp_properties::NetworkType,
     pub is_fuchsia_provisioned: bool,
     pub connectivity_state: Option<fnp_properties::ConnectivityState>,
@@ -28,6 +28,7 @@ pub enum TelemetryEvent {
     DefaultNetworkChanged(NetworkEventMetadata),
     DefaultNetworkLost,
     NetworkChanged(NetworkEventMetadata),
+    NetworkRemoved(u64),
 }
 
 #[derive(Clone, Debug)]
@@ -70,7 +71,7 @@ impl TelemetrySender {
     }
 }
 
-const TELEMETRY_EVENT_BUFFER_SIZE: usize = 100;
+pub(crate) const TELEMETRY_EVENT_BUFFER_SIZE: usize = 100;
 
 pub fn serve_telemetry(
     telemetry_node: fuchsia_inspect::Node,
@@ -98,6 +99,9 @@ pub fn serve_telemetry(
                 }
                 TelemetryEvent::NetworkChanged(metadata) => {
                     processor.log_network_changed(metadata, &client);
+                }
+                TelemetryEvent::NetworkRemoved(network_id) => {
+                    processor.log_network_removed(network_id);
                 }
             }
         }

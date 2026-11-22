@@ -457,7 +457,7 @@ additionally impose the following constraints on this graph:
     -   In particular, parent/child relationships behave as one would expect; if
         element C depends on element P, then P may not depend on C.
 
-2.  <a name="min_level_operability">_Minimum level operability_</a>: The minimum
+2.  <a name="min-level-operability">_Minimum level operability_</a>: The minimum
     power level of any power element must always be operable, regardless of the
     current levels of other elements. Furthermore, it may have no power level
     dependencies.
@@ -515,7 +515,7 @@ This table translates to power elements, levels, and dependencies as follows:
 ![Clock depends on voltage rail](resources/0250_power_topology/clock-voltage-example.png "Diagram showing the relationship between two power elements, Clock on the left and Voltage rail on the right. The Clock power element has three power levels: 1.4 GHz, 1.5 GHz, and 1.6 GHz. The Voltage rail element also has three power levels: 600 mV, 800 mV, and 900 mV. The Clock power element depends upon the Voltage rail element, which is indicated by three separate directional arrows. The first connection Clock: 1.4 GHz to Voltage rail: 700mW, Clock 1.5 GHz to Voltage rail: 800 mW, and Clock 1.6 GHz to Voltage rail: 900 mW.")
 
 (Note that the dependency of (Clock Frequency, 1.4 GHz) on (Voltage, 700 mV)
-would [not technically](#min_level_operability) be included in the topology, but
+would [not technically](#min-level-operability) be included in the topology, but
 it is depicted for ease of comparison to the table.)
 
 <a name="video-call"></a>
@@ -782,7 +782,7 @@ level reactively. Because transitive dependencies on (U, RL) are also broken as
 soon as U's current level decreases, there is no clear ordering of level changes
 to impose as the system is driven to its new steady state.
 
-#### Dependency types
+#### Dependency types {#dependency-types}
 
 The formal descriptions above give rise to three distinct types of dependencies,
 which we assign names as follows:
@@ -832,7 +832,23 @@ Steps:
 
 <section class="unmanaged-element-demo">
 <div>
-<img src="resources/0250_power_topology/unmanaged-element-example-1.png" alt="Diagram showing the first of four steps in a sequence demonstrating the behavior of a system when an unmanaged element changes power levels. From left to right, a directional arrow with the caption 'Lease fulfilled` points to the Active power level of the first element, Audio Processor. The Audio Processor power element has two power levels: Inactive and Active. It is currently operating at the Active power level. Directional arrows representing assertive dependencies connect from the Active power level on Audio Processor to the Active power level of the Input Stream power element and the High power level of the System Activity power element. The Input Stream power element has two power levels: Inactive and Active. The System Activity power element has two power levels: Low and High. A dashed directional arrow, representing a basic dependency, connects from the Active power level on Input Stream to the Disengaged power level on the only unmanaged element in the diagram, Mute Switch. Mute Switch has two power levels: Engaged and Disengaged and is currently operating at the Disengaged power level.">
+<img src="resources/0250_power_topology/unmanaged-element-example-1.png"
+     alt="Diagram showing the first of four steps in a sequence demonstrating
+     the behavior of a system when an unmanaged element changes power levels.
+     From left to right, a directional arrow with the caption 'Lease fulfilled'
+     points to the Active power level of the first element, Audio Processor.
+     The Audio Processor power element has two power levels: Inactive and
+     Active. It is currently operating at the Active power level. Directional
+     arrows representing assertive dependencies connect from the Active power
+     level on Audio Processor to the Active power level of the Input Stream
+     power element and the High power level of the System Activity power
+     element. The Input Stream power element has two power levels: Inactive and
+     Active. The System Activity power element has two power levels: Low and
+     High. A dashed directional arrow, representing a basic dependency,
+     connects from the Active power level on Input Stream to the Disengaged
+     power level on the only unmanaged element in the diagram, Mute Switch.
+     Mute Switch has two power levels: Engaged and Disengaged and is currently
+     operating at the Disengaged power level.">
 
 Initially, a lease on (Audio Processor, Active) holds all managed elements at
 elevated power levels.
@@ -1368,29 +1384,26 @@ Windows
 -   [Power Framework (PoFx) Driver
     Samples][windows-pofx-driver-samples]{:.external}
 
-<!-- Reference links. There isn't a good way to write these without triggering
-mdlint warnings; see https://fxbug.dev/340348535. -->
+[power-topology-design-doc]: https://docs.google.com/document/d/1i0-lralxeTL7cswMIlZ9Q-E-yXKhDvb5GtYDy8iRces "Power Topology Design Doc"
 
-[power-topology-design-doc]:https://docs.google.com/document/d/1i0-lralxeTL7cswMIlZ9Q-E-yXKhDvb5GtYDy8iRces "Power Topology Design Doc"
+[power-broker-design-doc]: https://docs.google.com/document/d/1lx6gg3qCfuq3xUSwW0N7c_XHm3Yndp8FSGfjInNRG6o "Power Broker Design Doc"
 
-[power-broker-design-doc]:https://docs.google.com/document/d/1lx6gg3qCfuq3xUSwW0N7c_XHm3Yndp8FSGfjInNRG6o "Power Broker Design Doc"
+[sag-design-doc]: https://docs.google.com/document/d/1U7GUGnox6DADZgfxd5bQoKgi8706G8LMPPx1VjKW7wg "System Activity Governor Design Doc"
 
-[sag-design-doc]:https://docs.google.com/document/d/1U7GUGnox6DADZgfxd5bQoKgi8706G8LMPPx1VjKW7wg "System Activity Governor Design Doc"
+[compatibility-proposal]: https://docs.google.com/document/d/1K3x7YI3OwotLdXtB0u5L6HWApOcMr6tM7HVlsBX_M9o "Power Element/Level Compatibility"
 
-[compatibility-proposal]:https://docs.google.com/document/d/1K3x7YI3OwotLdXtB0u5L6HWApOcMr6tM7HVlsBX_M9o "Power Element/Level Compatibility"
+[linux-device-pm-basics]: https://www.kernel.org/doc/html/v4.17/driver-api/pm/devices.html "Linux: Device Power Management Basics"
 
-[linux-device-pm-basics]:https://www.kernel.org/doc/html/v4.17/driver-api/pm/devices.html "Linux: Device Power Management Basics"
+[sysfs-power-interface]: https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-devices-power "Linux: sysfs Power Interface"
 
-[sysfs-power-interface]:https://www.kernel.org/doc/Documentation/ABI/testing/sysfs-devices-power "Linux: sysfs Power Interface"
+[device-links]: https://www.kernel.org/doc/html/v4.13/driver-api/device_link.html "Linux: Device Links"
 
-[device-links]:https://www.kernel.org/doc/html/v4.13/driver-api/device_link.html "Linux: Device Links"
+[wysocki-talk]: https://www.youtube.com/watch?v=wvcM-Uf3DBU "Linux: Evolution of Suspend-to-Idle Support in the Linux Kernel"
 
-[wysocki-talk]:https://www.youtube.com/watch?v=wvcM-Uf3DBU "Linux: Evolution of Suspend-to-Idle Support in the Linux Kernel"
+[iokit-power]: https://developer.apple.com/library/archive/documentation/DeviceDrivers/Conceptual/IOKitFundamentals/PowerMgmt/PowerMgmt.html "Mac OS: Managing Power - IOKit Fundamentals"
 
-[iokit-power]:https://developer.apple.com/library/archive/documentation/DeviceDrivers/Conceptual/IOKitFundamentals/PowerMgmt/PowerMgmt.html "Mac OS: Managing Power - IOKit Fundamentals"
+[windows-pm-framework]: https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/overview-of-the-power-management-framework "Windows: Overview of the Power Management Framework"
 
-[windows-pm-framework]:https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/overview-of-the-power-management-framework "Windows: Overview of the Power Management Framework"
+[windows-device-power-states]: https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/device-power-states "Windows: Device Power States"
 
-[windows-device-power-states]:https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/device-power-states "Windows: Device Power States"
-
-[windows-pofx-driver-samples]:https://learn.microsoft.com/en-us/windows-hardware/drivers/samples/power-framework--pofx--driver-samples "Windows: Power Framework (PoFx) Driver Samples"
+[windows-pofx-driver-samples]: https://learn.microsoft.com/en-us/windows-hardware/drivers/samples/power-framework--pofx--driver-samples "Windows: Power Framework (PoFx) Driver Samples"

@@ -18,4 +18,5 @@ pub mod node;
 pub mod register;
 pub mod restart;
 pub mod show;
+pub mod suspend;
 pub mod test_node;

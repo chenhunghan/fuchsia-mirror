@@ -35,6 +35,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <fbl/unique_fd.h>
@@ -161,6 +162,161 @@ TEST_F(ProcUptimeTest, UptimeByChar) {
   EXPECT_LE(v3, v2);
 }
 
+struct Loadavg {
+  double load1 = 0;
+  double load5 = 0;
+  double load15 = 0;
+  uint64_t runnable = 0;
+  uint64_t existing = 0;
+  pid_t last_pid = 0;
+};
+
+class ProcLoadavgTest : public ProcTestBase {
+ protected:
+  Loadavg ReadLoadavg() {
+    std::string contents;
+    EXPECT_TRUE(files::ReadFileToString(proc_path() + "/loadavg", &contents)) << strerror(errno);
+    Loadavg result;
+    int consumed = 0;
+    EXPECT_EQ(sscanf(contents.c_str(), "%lf %lf %lf %" SCNu64 "/%" SCNu64 " %d\n%n", &result.load1,
+                     &result.load5, &result.load15, &result.runnable, &result.existing,
+                     &result.last_pid, &consumed),
+              6)
+        << contents;
+    EXPECT_EQ(static_cast<size_t>(consumed), contents.size()) << contents;
+    EXPECT_GE(result.load1, 0.0);
+    EXPECT_GE(result.load5, 0.0);
+    EXPECT_GE(result.load15, 0.0);
+    EXPECT_GE(result.runnable, 1u);
+    EXPECT_GE(result.existing, result.runnable);
+    EXPECT_GT(result.last_pid, 0);
+    return result;
+  }
+};
+
+TEST_F(ProcLoadavgTest, ReadFormat) { ReadLoadavg(); }
+
+TEST_F(ProcLoadavgTest, TaskCountTracksProcessesAndThreads) {
+  if (!test_helper::IsStarnix()) {
+    GTEST_SKIP()
+        << "Deterministic /proc/loadavg task accounting requires an isolated Starnix kernel";
+  }
+
+  constexpr size_t kNumChildren = 3;
+  constexpr size_t kNumThreads = 3;
+
+  const Loadavg before = ReadLoadavg();
+
+  int child_ready_pipe[2];
+  int child_exit_pipe[2];
+  ASSERT_THAT(pipe2(child_ready_pipe, O_CLOEXEC), SyscallSucceeds());
+  ASSERT_THAT(pipe2(child_exit_pipe, O_CLOEXEC), SyscallSucceeds());
+  fbl::unique_fd child_ready_read(child_ready_pipe[0]);
+  fbl::unique_fd child_ready_write(child_ready_pipe[1]);
+  fbl::unique_fd child_exit_read(child_exit_pipe[0]);
+  fbl::unique_fd child_exit_write(child_exit_pipe[1]);
+
+  std::vector<pid_t> child_pids;
+  auto cleanup_children = fit::defer([&] {
+    child_exit_write.reset();
+    for (pid_t pid : child_pids) {
+      kill(pid, SIGKILL);
+      waitpid(pid, nullptr, 0);
+    }
+  });
+
+  for (size_t i = 0; i < kNumChildren; ++i) {
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0) << strerror(errno);
+    if (pid == 0) {
+      child_ready_read.reset();
+      child_exit_write.reset();
+      char byte = 'r';
+      if (write(child_ready_write.get(), &byte, 1) != 1) {
+        _exit(1);
+      }
+      child_ready_write.reset();
+      if (read(child_exit_read.get(), &byte, 1) < 0) {
+        _exit(2);
+      }
+      _exit(0);
+    }
+    child_pids.push_back(pid);
+  }
+  child_ready_write.reset();
+  child_exit_read.reset();
+
+  for (size_t i = 0; i < kNumChildren; ++i) {
+    char byte = 0;
+    ASSERT_EQ(read(child_ready_read.get(), &byte, 1), 1) << strerror(errno);
+  }
+
+  // Each single-threaded child process adds exactly one task (its thread-group leader).
+  const Loadavg with_children = ReadLoadavg();
+  EXPECT_EQ(with_children.existing, before.existing + kNumChildren);
+  EXPECT_GE(with_children.last_pid, child_pids.back());
+
+  int thread_ready_pipe[2];
+  int thread_exit_pipe[2];
+  ASSERT_THAT(pipe2(thread_ready_pipe, O_CLOEXEC), SyscallSucceeds());
+  ASSERT_THAT(pipe2(thread_exit_pipe, O_CLOEXEC), SyscallSucceeds());
+  fbl::unique_fd thread_ready_read(thread_ready_pipe[0]);
+  fbl::unique_fd thread_ready_write(thread_ready_pipe[1]);
+  fbl::unique_fd thread_exit_read(thread_exit_pipe[0]);
+  fbl::unique_fd thread_exit_write(thread_exit_pipe[1]);
+
+  std::vector<std::thread> threads;
+  std::vector<pid_t> thread_tids(kNumThreads, 0);
+  auto cleanup_threads = fit::defer([&] {
+    thread_exit_write.reset();
+    for (std::thread& t : threads) {
+      if (t.joinable()) {
+        t.join();
+      }
+    }
+  });
+
+  for (size_t i = 0; i < kNumThreads; ++i) {
+    threads.emplace_back([&, i] {
+      thread_tids[i] = static_cast<pid_t>(syscall(SYS_gettid));
+      char byte = 't';
+      SAFE_SYSCALL(write(thread_ready_write.get(), &byte, 1));
+      SAFE_SYSCALL(read(thread_exit_read.get(), &byte, 1));
+    });
+  }
+
+  for (size_t i = 0; i < kNumThreads; ++i) {
+    char byte = 0;
+    ASSERT_EQ(read(thread_ready_read.get(), &byte, 1), 1) << strerror(errno);
+  }
+
+  const Loadavg with_threads = ReadLoadavg();
+  EXPECT_EQ(with_threads.existing, with_children.existing + kNumThreads);
+
+  cleanup_threads.call();
+  for (pid_t tid : thread_tids) {
+    std::string tid_dir = fxl::StringPrintf("%s/self/task/%d", proc_path().c_str(), tid);
+    while (access(tid_dir.c_str(), F_OK) == 0) {
+      usleep(1000);
+    }
+  }
+
+  const Loadavg after_threads = ReadLoadavg();
+  EXPECT_EQ(after_threads.existing, with_children.existing);
+
+  child_exit_write.reset();
+  for (pid_t pid : child_pids) {
+    int status = 0;
+    ASSERT_THAT(waitpid(pid, &status, 0), SyscallSucceeds());
+    EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0) << status;
+  }
+  child_pids.clear();
+  cleanup_children.cancel();
+
+  const Loadavg after_children = ReadLoadavg();
+  EXPECT_EQ(after_children.existing, before.existing);
+}
+
 class ProcSysNetTest : public ProcTestBase,
                        public ::testing::WithParamInterface<std::tuple<const char*, const char*>> {
  protected:
@@ -176,11 +332,21 @@ class ProcSysNetTest : public ProcTestBase,
     char buf[100] = {};
     sprintf(buf, path_fmt, dev);
     std::string path = proc_path() + "/sys/net" + buf;
+    auto sysctl = test_helper::ScopedSysctl::Create(path);
+    ASSERT_THAT(sysctl, SyscallResultIsOk()) << "path: " << path;
+    scoped_sysctl_ = std::move(sysctl.value());
     fd_.reset(open(path.c_str(), O_RDWR));
     ASSERT_TRUE(fd_.is_valid()) << "path: " + path + "; " + strerror(errno);
   }
 
+  void TearDown() override {
+    fd_.reset();
+    scoped_sysctl_.Restore();
+    ProcTestBase::TearDown();
+  }
+
   fbl::unique_fd fd_;
+  test_helper::ScopedSysctl scoped_sysctl_;
 };
 
 TEST_P(ProcSysNetTest, Write) {
@@ -360,6 +526,173 @@ TEST_F(ProcTaskDirTest, PidDirSetFsuidDoesntChangeOwnership) {
   });
 }
 
+class ProcPidOwnerTest : public ProcTestBase {
+ protected:
+  static constexpr uid_t kRealUid = 1000;
+  static constexpr gid_t kRealGid = 1001;
+  static constexpr uid_t kEffectiveUid = 2000;
+  static constexpr gid_t kEffectiveGid = 2001;
+  static constexpr uid_t kFsUid = 3000;
+  static constexpr gid_t kFsGid = 3001;
+
+  void SetUp() override {
+    ProcTestBase::SetUp();
+    if (!CanSetDistinctCreds()) {
+      GTEST_SKIP() << "Requires root with CAP_SETUID, CAP_SETGID, CAP_DAC_OVERRIDE, and "
+                      "CAP_DAC_READ_SEARCH";
+    }
+  }
+
+  static bool CanSetDistinctCreds() {
+    return geteuid() == 0 && getegid() == 0 && test_helper::HasCapability(CAP_SETUID) &&
+           test_helper::HasCapability(CAP_SETGID) && test_helper::HasCapability(CAP_DAC_OVERRIDE) &&
+           test_helper::HasCapability(CAP_DAC_READ_SEARCH);
+  }
+
+  // Gives the calling process distinct real (1000:1001), effective (2000:2001), and filesystem
+  // (3000:3001) IDs so tests can tell which IDs own /proc/<pid> entries. Retains
+  // CAP_DAC_OVERRIDE and CAP_DAC_READ_SEARCH so filesystem ID 3000 can still traverse 0500 fd
+  // and fdinfo directories owned by effective ID 2000, and marks the process dumpable so proc(5)
+  // keeps its /proc/<pid> entries owned by the effective IDs rather than root:root.
+  static void SetDistinctCreds() {
+    ASSERT_THAT(prctl(PR_SET_KEEPCAPS, 1), SyscallSucceeds());
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    // setresgid/setresuid set real, effective, and saved IDs, and always reset fsgid/fsuid to
+    // egid/euid. Pass kFsGid/kFsUid as the saved IDs so the unprivileged setfsgid/setfsuid calls
+    // below are allowed; setfsgid/setfsuid are the only syscalls that can make fsgid != egid and
+    // fsuid != euid.
+    ASSERT_THAT(setresgid(kRealGid, kEffectiveGid, kFsGid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kRealUid, kEffectiveUid, kFsUid), SyscallSucceeds());
+    ASSERT_EQ(setfsgid(kFsGid), static_cast<int>(kEffectiveGid));
+    ASSERT_EQ(setfsgid(-1), static_cast<int>(kFsGid));
+    ASSERT_EQ(setfsuid(kFsUid), static_cast<int>(kEffectiveUid));
+    ASSERT_EQ(setfsuid(-1), static_cast<int>(kFsUid));
+    test_helper::SetCapabilityEffective(CAP_DAC_OVERRIDE);
+    test_helper::SetCapabilityEffective(CAP_DAC_READ_SEARCH);
+    ASSERT_THAT(prctl(PR_SET_DUMPABLE, 1), SyscallSucceeds());
+  }
+
+  test_helper::ForkHelper fork_helper_;
+};
+
+TEST_F(ProcPidOwnerTest, TaskListDirOwnerRefreshesOnStat) {
+  fork_helper_.RunInForkedProcess([] {
+    fbl::unique_fd task_dir(open("/proc/self/task", O_RDONLY | O_DIRECTORY));
+    ASSERT_THAT(task_dir.get(), SyscallSucceeds());
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    // Keep `task_dir` open so `/proc/self/task` resolves to the existing directory entry rather
+    // than creating a new one, and use path-based `stat` because `fstat(task_dir.get(), ...)` does
+    // not refresh `/proc/<pid>/task`'s owner on Linux.
+    struct stat st{};
+    ASSERT_THAT(stat("/proc/self/task", &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kEffectiveUid);
+    EXPECT_EQ(st.st_gid, kEffectiveGid);
+  });
+}
+
+TEST_F(ProcPidOwnerTest, TidDirOwnerRefreshesOnStat) {
+  fork_helper_.RunInForkedProcess([] {
+    long tid = syscall(SYS_gettid);
+    ASSERT_THAT(tid, SyscallSucceeds());
+    std::string tid_path = fxl::StringPrintf("/proc/self/task/%ld", tid);
+    fbl::unique_fd tid_dir(open(tid_path.c_str(), O_RDONLY | O_DIRECTORY));
+    ASSERT_THAT(tid_dir.get(), SyscallSucceeds());
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    struct stat st{};
+    ASSERT_THAT(fstat(tid_dir.get(), &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kEffectiveUid);
+    EXPECT_EQ(st.st_gid, kEffectiveGid);
+  });
+}
+
+TEST_F(ProcPidOwnerTest, TidDirChildOwnedByCurrentEuid) {
+  fork_helper_.RunInForkedProcess([] {
+    long tid = syscall(SYS_gettid);
+    ASSERT_THAT(tid, SyscallSucceeds());
+    std::string tid_path = fxl::StringPrintf("/proc/self/task/%ld", tid);
+    fbl::unique_fd tid_dir(open(tid_path.c_str(), O_RDONLY | O_DIRECTORY));
+    ASSERT_THAT(tid_dir.get(), SyscallSucceeds());
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    // Stat the child relative to `tid_dir` without statting `tid_dir` itself first.
+    struct stat st{};
+    ASSERT_THAT(fstatat(tid_dir.get(), "stat", &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kEffectiveUid);
+    EXPECT_EQ(st.st_gid, kEffectiveGid);
+  });
+}
+
+TEST_F(ProcPidOwnerTest, PidDirOpenNoAtimeFollowsSetuidWithoutStat) {
+  fork_helper_.RunInForkedProcess([] {
+    struct stat st{};
+    ASSERT_THAT(stat("/proc/self", &st), SyscallSucceeds());
+
+    // Drop privileges without PR_SET_KEEPCAPS so CAP_FOWNER is cleared, then open /proc/self
+    // with O_NOATIME without statting it first.
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setgid(kEffectiveGid), SyscallSucceeds());
+    ASSERT_THAT(setuid(kEffectiveUid), SyscallSucceeds());
+    ASSERT_THAT(prctl(PR_SET_DUMPABLE, 1), SyscallSucceeds());
+    ASSERT_FALSE(test_helper::HasCapability(CAP_FOWNER));
+
+    fbl::unique_fd fd(open("/proc/self", O_RDONLY | O_DIRECTORY | O_NOATIME));
+    EXPECT_THAT(fd.get(), SyscallSucceeds());
+  });
+}
+
+TEST_F(ProcPidOwnerTest, FdLinkOwnedByEuid) {
+  fork_helper_.RunInForkedProcess([] {
+    test_helper::ScopedPipe pipe;
+    ASSERT_TRUE(pipe.ReadSide().is_valid());
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    std::string path = fxl::StringPrintf("/proc/self/fd/%d", pipe.ReadSide().get());
+    struct stat st{};
+    ASSERT_THAT(fstatat(AT_FDCWD, path.c_str(), &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kEffectiveUid);
+    EXPECT_EQ(st.st_gid, kEffectiveGid);
+  });
+}
+
+TEST_F(ProcPidOwnerTest, FdInfoOwnedByEuid) {
+  fork_helper_.RunInForkedProcess([] {
+    test_helper::ScopedPipe pipe;
+    ASSERT_TRUE(pipe.ReadSide().is_valid());
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    std::string path = fxl::StringPrintf("/proc/self/fdinfo/%d", pipe.ReadSide().get());
+    struct stat st{};
+    ASSERT_THAT(fstatat(AT_FDCWD, path.c_str(), &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kEffectiveUid);
+    EXPECT_EQ(st.st_gid, kEffectiveGid);
+  });
+}
+
+TEST_F(ProcPidOwnerTest, NsLinkOwnedByEuid) {
+  fork_helper_.RunInForkedProcess([] {
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    struct stat st{};
+    ASSERT_THAT(fstatat(AT_FDCWD, "/proc/self/ns/mnt", &st, AT_SYMLINK_NOFOLLOW),
+                SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, kEffectiveUid);
+    EXPECT_EQ(st.st_gid, kEffectiveGid);
+  });
+}
+
+TEST_F(ProcPidOwnerTest, NsTargetOwnedByRoot) {
+  fork_helper_.RunInForkedProcess([] {
+    ASSERT_NO_FATAL_FAILURE(SetDistinctCreds());
+
+    struct stat st{};
+    ASSERT_THAT(stat("/proc/self/ns/mnt", &st), SyscallSucceeds());
+    EXPECT_EQ(st.st_uid, 0u);
+    EXPECT_EQ(st.st_gid, 0u);
+  });
+}
+
 TEST_F(ProcTaskDirTest, PidDirCorrectIno) {
   const char kProcPath[] = "/proc/self/status";
   int fd;
@@ -489,6 +822,20 @@ TEST_F(ProcTaskDirTest, AttrDirListingFailsWithEnoentAfterExit) {
   // ENOENT.
   char buf[4096];
   EXPECT_THAT(syscall(SYS_getdents64, attr_fd.get(), buf, sizeof(buf)),
+              SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcTaskDirTest, FdDirLookupFailsWithEnoentAfterExit) {
+  fbl::unique_fd fd_dir = OpenTaskSubdirOfReapedChild("fd");
+  ASSERT_TRUE(fd_dir.is_valid());
+  EXPECT_THAT(fbl::unique_fd(openat(fd_dir.get(), "0", O_RDONLY)).get(),
+              SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcTaskDirTest, FdInfoDirLookupFailsWithEnoentAfterExit) {
+  fbl::unique_fd fdinfo_dir = OpenTaskSubdirOfReapedChild("fdinfo");
+  ASSERT_TRUE(fdinfo_dir.is_valid());
+  EXPECT_THAT(fbl::unique_fd(openat(fdinfo_dir.get(), "0", O_RDONLY)).get(),
               SyscallFailsWithErrno(ENOENT));
 }
 
@@ -1075,6 +1422,28 @@ TEST_F(ProcTaskDirTest, KthreadStatusSensibleOutput) {
   EXPECT_THAT(contents, Not(testing::HasSubstr("\nVmExe:")));
   EXPECT_THAT(contents, Not(testing::HasSubstr("\nVmSwap:")));
   EXPECT_THAT(contents, testing::HasSubstr("\nThreads:"));
+
+  // An idle kernel thread may briefly wake up; poll briefly so both `/proc/2/status` and
+  // `/proc/2/stat` observe it sleeping.
+  std::string stat;
+  bool status_sleeping = contents.find("\nState:\tS (sleeping)") != std::string::npos;
+  bool stat_sleeping = false;
+  for (int i = 0; i < 200; ++i) {
+    if (!status_sleeping && files::ReadFileToString("/proc/2/status", &contents) &&
+        contents.find("\nState:\tS (sleeping)") != std::string::npos) {
+      status_sleeping = true;
+    }
+    if (!stat_sleeping && files::ReadFileToString("/proc/2/stat", &stat) &&
+        stat.find(") S ") != std::string::npos) {
+      stat_sleeping = true;
+    }
+    if (status_sleeping && stat_sleeping) {
+      break;
+    }
+    usleep(10000);
+  }
+  EXPECT_TRUE(status_sleeping) << contents;
+  EXPECT_TRUE(stat_sleeping) << stat;
 }
 
 constexpr char kProcSelfFdPath[] = "/proc/self/fd/%d";
@@ -1438,8 +1807,7 @@ TEST_F(ProcfsTest, ProcSysKernelTaintedWriteRequiresSysAdmin) {
 class ProcSelfFdTest : public ProcTestBase {
  protected:
   std::string read_fd_link(int fd) {
-    constexpr char kProcSelfFdFormat[] = "/proc/self/fd/%d";
-    std::string path = fxl::StringPrintf(kProcSelfFdFormat, fd);
+    std::string path = fxl::StringPrintf(kProcSelfFdPath, fd);
 
     std::string links_to(PATH_MAX, 0);
     ssize_t result = SAFE_SYSCALL(readlink(path.c_str(), links_to.data(), links_to.capacity()));
@@ -1648,6 +2016,159 @@ TEST_F(ProcSelfFdTest, PerfEventFdName) {
   EXPECT_EQ(read_fd_link(perf_event_fd.get()), "anon_inode:[perf_event]");
 }
 
+struct ProcSelfFdEntryParam {
+  const char* name;
+  // The task directory that holds `fd` and `fdinfo`.
+  const char* task_dir;
+};
+
+// Tests for the fd/<N> and fdinfo/<N> entries of the calling task, reached through /proc/self
+// (thread group) or /proc/thread-self (which resolves to /proc/<pid>/task/<tid>).
+//
+// Each test looks an entry up before it changes the descriptor, so that the later lookup finds an
+// entry that already exists rather than a new one.
+class ProcSelfFdEntryTest : public ProcTestBase,
+                            public ::testing::WithParamInterface<ProcSelfFdEntryParam> {
+ protected:
+  static std::string fd_path(int fd) {
+    return fxl::StringPrintf("%s/fd/%d", GetParam().task_dir, fd);
+  }
+
+  static std::string fdinfo_path(int fd) {
+    return fxl::StringPrintf("%s/fdinfo/%d", GetParam().task_dir, fd);
+  }
+
+  static std::string read_fd_entry_link(int fd) {
+    std::string links_to(PATH_MAX, 0);
+    ssize_t result = readlink(fd_path(fd).c_str(), links_to.data(), links_to.size());
+    if (result < 0) {
+      return fxl::StringPrintf("readlink() failed: %s", strerror(errno));
+    }
+    links_to.resize(result);
+    return links_to;
+  }
+
+  // Returns the `flags:` field of fdinfo/<N>, without masking.
+  static std::optional<int> read_fdinfo_flags(int fd) {
+    std::string contents;
+    if (!files::ReadFileToString(fdinfo_path(fd), &contents)) {
+      return std::nullopt;
+    }
+    std::istringstream stream(contents);
+    std::string line;
+    while (std::getline(stream, line)) {
+      unsigned int flags = 0;
+      if (sscanf(line.c_str(), "flags:\t%o", &flags) == 1) {
+        return static_cast<int>(flags);
+      }
+    }
+    return std::nullopt;
+  }
+
+  // Checks that fd/<N> and fdinfo/<N> describe a descriptor for `target` opened with `open_flags`.
+  static void ExpectFdEntriesMatch(int fd, const std::string& target, int open_flags,
+                                   mode_t expected_mode) {
+    struct stat st{};
+    ASSERT_THAT(fstatat(AT_FDCWD, fd_path(fd).c_str(), &st, AT_SYMLINK_NOFOLLOW),
+                SyscallSucceeds());
+    EXPECT_EQ(st.st_mode, expected_mode);
+    EXPECT_EQ(read_fd_entry_link(fd), target);
+
+    std::optional<int> flags = read_fdinfo_flags(fd);
+    ASSERT_TRUE(flags.has_value());
+    EXPECT_EQ(*flags & O_ACCMODE, open_flags & O_ACCMODE);
+    EXPECT_EQ(*flags & O_PATH, open_flags & O_PATH);
+  }
+};
+
+// Validate that fd/<N> and fdinfo/<N> report the new mode, target and flags each time dup2()
+// replaces the descriptor in slot N. Each step re-reads entries that the previous step read.
+TEST_P(ProcSelfFdEntryTest, UpdatedAfterDup2) {
+  test_helper::ScopedTempFD file_a;
+  test_helper::ScopedTempFD file_b;
+  ASSERT_TRUE(file_a);
+  ASSERT_TRUE(file_b);
+
+  fbl::unique_fd slot_fd(open(file_a.name().c_str(), O_RDONLY));
+  ASSERT_TRUE(slot_fd.is_valid()) << strerror(errno);
+  {
+    SCOPED_TRACE("before dup2()");
+    ExpectFdEntriesMatch(slot_fd.get(), file_a.name(), O_RDONLY, S_IFLNK | 0500);
+  }
+
+  const struct {
+    std::string target;
+    int open_flags;
+    mode_t expected_mode;
+  } steps[] = {
+      {.target = file_b.name(), .open_flags = O_WRONLY, .expected_mode = S_IFLNK | 0300},
+      {.target = file_b.name(), .open_flags = O_RDWR, .expected_mode = S_IFLNK | 0700},
+      {.target = file_a.name(), .open_flags = O_PATH, .expected_mode = S_IFLNK | 0000},
+  };
+  for (const auto& [target, open_flags, expected_mode] : steps) {
+    SCOPED_TRACE(fxl::StringPrintf("dup2() of open_flags=0%o", open_flags));
+    fbl::unique_fd new_fd(open(target.c_str(), open_flags));
+    ASSERT_TRUE(new_fd.is_valid()) << strerror(errno);
+    ASSERT_THAT(dup2(new_fd.get(), slot_fd.get()), SyscallSucceeds());
+    ExpectFdEntriesMatch(slot_fd.get(), target, open_flags, expected_mode);
+  }
+}
+
+// Validate that fd/<N> and fdinfo/<N> are gone once N is closed.
+TEST_P(ProcSelfFdEntryTest, RemovedAfterClose) {
+  test_helper::ScopedTempFD file;
+  ASSERT_TRUE(file);
+
+  fbl::unique_fd fd(open(file.name().c_str(), O_RDONLY));
+  ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+  const int raw_fd = fd.get();
+  ASSERT_NO_FATAL_FAILURE(ExpectFdEntriesMatch(raw_fd, file.name(), O_RDONLY, S_IFLNK | 0500));
+
+  ASSERT_THAT(close(fd.release()), SyscallSucceeds());
+
+  struct stat st{};
+  EXPECT_THAT(fstatat(AT_FDCWD, fd_path(raw_fd).c_str(), &st, AT_SYMLINK_NOFOLLOW),
+              SyscallFailsWithErrno(ENOENT));
+  char buf[PATH_MAX];
+  EXPECT_THAT(readlink(fd_path(raw_fd).c_str(), buf, sizeof(buf)), SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(fbl::unique_fd(open(fdinfo_path(raw_fd).c_str(), O_RDONLY)).get(),
+              SyscallFailsWithErrno(ENOENT));
+}
+
+// Validate that fd/<N> and fdinfo/<N> describe the new descriptor after N is closed and reused.
+// Unlike RemovedAfterClose, nothing looks N up between close() and the reopen.
+TEST_P(ProcSelfFdEntryTest, UpdatedAfterSlotReuse) {
+  test_helper::ScopedTempFD file_a;
+  test_helper::ScopedTempFD file_b;
+  ASSERT_TRUE(file_a);
+  ASSERT_TRUE(file_b);
+
+  fbl::unique_fd slot_fd(open(file_a.name().c_str(), O_RDONLY));
+  ASSERT_TRUE(slot_fd.is_valid()) << strerror(errno);
+  const int raw_slot_fd = slot_fd.get();
+  {
+    SCOPED_TRACE("before close()");
+    ExpectFdEntriesMatch(raw_slot_fd, file_a.name(), O_RDONLY, S_IFLNK | 0500);
+  }
+
+  ASSERT_THAT(close(slot_fd.release()), SyscallSucceeds());
+
+  // open() returns the lowest free descriptor, which is the slot we just closed.
+  slot_fd.reset(open(file_b.name().c_str(), O_RDWR));
+  ASSERT_TRUE(slot_fd.is_valid()) << strerror(errno);
+  ASSERT_EQ(slot_fd.get(), raw_slot_fd);
+  {
+    SCOPED_TRACE("after reopen");
+    ExpectFdEntriesMatch(raw_slot_fd, file_b.name(), O_RDWR, S_IFLNK | 0700);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ProcSelfFdEntryTest, ProcSelfFdEntryTest,
+    ::testing::Values(ProcSelfFdEntryParam{.name = "Self", .task_dir = "/proc/self"},
+                      ProcSelfFdEntryParam{.name = "ThreadSelf", .task_dir = "/proc/thread-self"}),
+    [](const auto& info) { return info.param.name; });
+
 class ProcMmTest : public ProcTestBase, public ::testing::WithParamInterface<const char*> {};
 
 TEST_P(ProcMmTest, ReadBeforeAfterExec) {
@@ -1777,11 +2298,8 @@ TEST_P(ProcfsAccessTest, AccessDeniedToNonOwnerWithoutCapPtrace) {
 
     // Without CAP_SYS_PTRACE access should be denied if it requires ptrace.
     std::string path = fxl::StringPrintf("/proc/%d/%s", parent_pid, GetParam().path);
-    if (GetParam().requires_ptrace) {
-      EXPECT_THAT(open(path.c_str(), O_RDONLY), SyscallFailsWithErrno(EACCES));
-    } else {
-      EXPECT_THAT(open(path.c_str(), O_RDONLY), SyscallSucceeds());
-    }
+    fbl::unique_fd fd(open(path.c_str(), O_RDONLY));
+    EXPECT_THAT(fd.get(), SyscallSucceedsOrFailsWithErrno(!GetParam().requires_ptrace, EACCES));
   });
   ASSERT_TRUE(helper.WaitForChildren());
 }
@@ -1923,6 +2441,57 @@ void ForkZombie(pid_t* child_pid) {
   cleanup_child.cancel();
 }
 
+// Forks a child process that blocks until `ExitToZombie()` signals it to exit, and reaps the child
+// on destruction if `Reap()` has not already been called.
+class BlockedChild {
+ public:
+  BlockedChild() = default;
+  BlockedChild(const BlockedChild&) = delete;
+  BlockedChild& operator=(const BlockedChild&) = delete;
+
+  ~BlockedChild() {
+    if (pid_ > 0) {
+      kill(pid_, SIGKILL);
+      HANDLE_EINTR(waitpid(pid_, nullptr, 0));
+    }
+  }
+
+  void Start() {
+    ASSERT_EQ(pid_, -1);
+    test_helper::Rendezvous exit_now = test_helper::MakeRendezvous();
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+      exit_now.poker = {};
+      exit_now.holder.hold();
+      _exit(0);
+    }
+    pid_ = pid;
+    exit_poker_ = std::move(exit_now.poker);
+  }
+
+  void ExitToZombie() {
+    ASSERT_GT(pid_, 0);
+    ASSERT_TRUE(exit_poker_.is_valid());
+    exit_poker_.poke();
+    siginfo_t info{};
+    ASSERT_THAT(HANDLE_EINTR(waitid(P_PID, pid_, &info, WEXITED | WNOWAIT)), SyscallSucceeds());
+  }
+
+  void Reap() {
+    ASSERT_GT(pid_, 0);
+    pid_t pid = pid_;
+    pid_ = -1;
+    ASSERT_THAT(HANDLE_EINTR(waitpid(pid, nullptr, 0)), SyscallSucceeds());
+  }
+
+  pid_t pid() const { return pid_; }
+
+ private:
+  pid_t pid_ = -1;
+  test_helper::Poker exit_poker_;
+};
+
 std::string ReadLink(const std::string& path) {
   char buf[256];
   ssize_t len = readlink(path.c_str(), buf, sizeof(buf));
@@ -1948,6 +2517,84 @@ TEST_F(ProcfsTest, NsLinkReadlinkZombieFails) {
   std::string path = fxl::StringPrintf("/proc/%d/ns/mnt", child_pid);
   char buf[256];
   EXPECT_THAT(readlink(path.c_str(), buf, sizeof(buf)), SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcfsTest, FdInfoLookupZombieFailsWithEnoent) {
+  test_helper::ScopedPipe target_pipe;
+  ASSERT_TRUE(target_pipe.ReadSide().is_valid());
+  const int target_fd = target_pipe.ReadSide().get();
+  const std::string target_fd_name = std::to_string(target_fd);
+
+  BlockedChild child;
+  ASSERT_NO_FATAL_FAILURE(child.Start());
+
+  std::string fdinfo_dir_path = fxl::StringPrintf("/proc/%d/fdinfo", child.pid());
+  std::string fdinfo_path = fxl::StringPrintf("%s/%d", fdinfo_dir_path.c_str(), target_fd);
+  fbl::unique_fd fdinfo_dir(open(fdinfo_dir_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  ASSERT_THAT(fdinfo_dir.get(), SyscallSucceeds());
+
+  struct stat st{};
+  ASSERT_THAT(stat(fdinfo_path.c_str(), &st), SyscallSucceeds());
+
+  ASSERT_NO_FATAL_FAILURE(child.ExitToZombie());
+
+  EXPECT_THAT(fbl::unique_fd(open(fdinfo_path.c_str(), O_RDONLY)).get(),
+              SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(fbl::unique_fd(openat(fdinfo_dir.get(), target_fd_name.c_str(), O_RDONLY)).get(),
+              SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcfsTest, FdLookupZombieFailsWithEnoent) {
+  if (geteuid() != 0 && !test_helper::HasCapability(CAP_DAC_OVERRIDE)) {
+    GTEST_SKIP() << "Linux resets /proc/<pid>/fd (mode 0500) to root:root once mm is released on "
+                    "exit, requiring root or CAP_DAC_OVERRIDE to traverse.";
+  }
+
+  test_helper::ScopedPipe target_pipe;
+  ASSERT_TRUE(target_pipe.ReadSide().is_valid());
+  const int target_fd = target_pipe.ReadSide().get();
+  const std::string target_fd_name = std::to_string(target_fd);
+
+  BlockedChild child;
+  ASSERT_NO_FATAL_FAILURE(child.Start());
+
+  std::string fd_dir_path = fxl::StringPrintf("/proc/%d/fd", child.pid());
+  std::string fd_path = fxl::StringPrintf("%s/%d", fd_dir_path.c_str(), target_fd);
+  fbl::unique_fd fd_dir(open(fd_dir_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  ASSERT_THAT(fd_dir.get(), SyscallSucceeds());
+
+  struct stat st{};
+  ASSERT_THAT(fstatat(AT_FDCWD, fd_path.c_str(), &st, AT_SYMLINK_NOFOLLOW), SyscallSucceeds());
+
+  ASSERT_NO_FATAL_FAILURE(child.ExitToZombie());
+
+  EXPECT_THAT(fstatat(AT_FDCWD, fd_path.c_str(), &st, AT_SYMLINK_NOFOLLOW),
+              SyscallFailsWithErrno(ENOENT));
+  EXPECT_THAT(fstatat(fd_dir.get(), target_fd_name.c_str(), &st, AT_SYMLINK_NOFOLLOW),
+              SyscallFailsWithErrno(ENOENT));
+  char buf[256];
+  EXPECT_THAT(readlink(fd_path.c_str(), buf, sizeof(buf)), SyscallFailsWithErrno(ENOENT));
+}
+
+TEST_F(ProcfsTest, HeldFdSymlinkReadlinkZombieAndReaped) {
+  test_helper::ScopedPipe target_pipe;
+  ASSERT_TRUE(target_pipe.ReadSide().is_valid());
+  const int target_fd = target_pipe.ReadSide().get();
+
+  BlockedChild child;
+  ASSERT_NO_FATAL_FAILURE(child.Start());
+
+  std::string fd_path = fxl::StringPrintf("/proc/%d/fd/%d", child.pid(), target_fd);
+  fbl::unique_fd held_link(open(fd_path.c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC));
+  ASSERT_THAT(held_link.get(), SyscallSucceeds());
+  char buf[256];
+  ASSERT_THAT(readlinkat(held_link.get(), "", buf, sizeof(buf)), SyscallSucceeds());
+
+  ASSERT_NO_FATAL_FAILURE(child.ExitToZombie());
+  EXPECT_THAT(readlinkat(held_link.get(), "", buf, sizeof(buf)), SyscallFailsWithErrno(ENOENT));
+
+  ASSERT_NO_FATAL_FAILURE(child.Reap());
+  EXPECT_THAT(readlinkat(held_link.get(), "", buf, sizeof(buf)), SyscallFailsWithErrno(EACCES));
 }
 
 TEST_F(ProcfsTest, NsPidForChildrenLinksToPidNamespace) {
@@ -2300,6 +2947,146 @@ TEST(ProcHidePidTest, HidePidAndGidMountOptions) {
               SyscallFailsWithErrno(EINVAL));
 }
 
+struct ProcHidePidSubdirParam {
+  const char* name;
+  bool hold_child;
+};
+
+// Under hidepid=invisible, /proc/<pid> itself rejects lookups by an unprivileged caller with
+// ENOENT, whereas already-open subdirectory FDs (fd, fdinfo, ns, attr) continue to allow lookups
+// on both fresh entries (NewEntry) and pinned entries (HeldEntry).
+class ProcHidePidHeldSubdirTest : public ProcTestBase,
+                                  public ::testing::WithParamInterface<ProcHidePidSubdirParam> {
+ protected:
+  static constexpr uid_t kUnprivUid = 1000;
+  static constexpr gid_t kUnprivGid = 1000;
+
+  void SetUp() override {
+    ProcTestBase::SetUp();
+    if (!CanMountAndDropCreds()) {
+      GTEST_SKIP() << "Requires root with CAP_SYS_ADMIN, CAP_SETUID, CAP_SETGID, and "
+                      "CAP_DAC_OVERRIDE";
+    }
+    ASSERT_TRUE(target_pipe_.ReadSide().is_valid());
+    ASSERT_THAT(mount("proc", proc_dir_.path().c_str(), "proc", 0, "hidepid=invisible"),
+                SyscallSucceeds());
+    mounted_ = true;
+  }
+
+  void TearDown() override {
+    EXPECT_TRUE(fork_helper_.WaitForChildren());
+    if (mounted_) {
+      EXPECT_THAT(umount2(proc_dir_.path().c_str(), MNT_DETACH), SyscallSucceeds());
+    }
+    ProcTestBase::TearDown();
+  }
+
+  static bool CanMountAndDropCreds() {
+    return geteuid() == 0 && getegid() == 0 && test_helper::HasSysAdmin() &&
+           test_helper::HasCapability(CAP_SETUID) && test_helper::HasCapability(CAP_SETGID) &&
+           test_helper::HasCapability(CAP_DAC_OVERRIDE);
+  }
+
+  fbl::unique_fd OpenTargetDir(const char* subdir = nullptr) const {
+    std::string path =
+        subdir == nullptr
+            ? fxl::StringPrintf("%s/%d", proc_dir_.path().c_str(), getpid())
+            : fxl::StringPrintf("%s/%d/%s", proc_dir_.path().c_str(), getpid(), subdir);
+    return fbl::unique_fd(open(path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+  }
+
+  // Drops to kUnprivUid:kUnprivGid so hidepid=invisible hides the root-owned parent process, while
+  // retaining CAP_DAC_OVERRIDE so 0500 fd and fdinfo directories remain searchable.
+  static void DropToHiddenUserWithDacOverride() {
+    ASSERT_THAT(prctl(PR_SET_KEEPCAPS, 1), SyscallSucceeds());
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kUnprivGid, kUnprivGid, kUnprivGid), SyscallSucceeds());
+    ASSERT_THAT(setresuid(kUnprivUid, kUnprivUid, kUnprivUid), SyscallSucceeds());
+    test_helper::SetCapabilityEffective(CAP_DAC_OVERRIDE);
+  }
+
+  void ExpectSubdirLookupSucceeds(const char* subdir, const std::string& entry_name) {
+    fbl::unique_fd dir_fd = OpenTargetDir(subdir);
+    ASSERT_THAT(dir_fd.get(), SyscallSucceeds());
+    fbl::unique_fd held_child;
+    struct stat held_st{};
+    if (GetParam().hold_child) {
+      held_child.reset(openat(dir_fd.get(), entry_name.c_str(), O_PATH | O_NOFOLLOW));
+      ASSERT_THAT(held_child.get(), SyscallSucceeds());
+      ASSERT_THAT(fstatat(dir_fd.get(), entry_name.c_str(), &held_st, AT_SYMLINK_NOFOLLOW),
+                  SyscallSucceeds());
+    }
+    fork_helper_.RunInForkedProcess([&] {
+      ASSERT_NO_FATAL_FAILURE(DropToHiddenUserWithDacOverride());
+      struct stat st{};
+      ASSERT_THAT(fstatat(dir_fd.get(), entry_name.c_str(), &st, AT_SYMLINK_NOFOLLOW),
+                  SyscallSucceeds());
+      if (GetParam().hold_child) {
+        EXPECT_EQ(st.st_ino, held_st.st_ino);
+      }
+    });
+  }
+
+  int target_fd() const { return target_pipe_.ReadSide().get(); }
+
+  test_helper::ScopedTempDir proc_dir_;
+  test_helper::ScopedPipe target_pipe_;
+  test_helper::ForkHelper fork_helper_;
+  bool mounted_ = false;
+};
+
+TEST_P(ProcHidePidHeldSubdirTest, PidDirLookupFailsWithEnoent) {
+  fbl::unique_fd pid_dir = OpenTargetDir();
+  ASSERT_THAT(pid_dir.get(), SyscallSucceeds());
+  fbl::unique_fd held_child;
+  if (GetParam().hold_child) {
+    held_child.reset(openat(pid_dir.get(), "stat", O_PATH | O_NOFOLLOW));
+    ASSERT_THAT(held_child.get(), SyscallSucceeds());
+  }
+  fork_helper_.RunInForkedProcess([&] {
+    ASSERT_NO_FATAL_FAILURE(DropToHiddenUserWithDacOverride());
+    struct stat st{};
+    EXPECT_THAT(fstatat(pid_dir.get(), "stat", &st, AT_SYMLINK_NOFOLLOW),
+                SyscallFailsWithErrno(ENOENT));
+  });
+}
+
+TEST_P(ProcHidePidHeldSubdirTest, FdDirLookupSucceeds) {
+  ExpectSubdirLookupSucceeds("fd", std::to_string(target_fd()));
+}
+
+TEST_P(ProcHidePidHeldSubdirTest, FdInfoDirLookupSucceeds) {
+  ExpectSubdirLookupSucceeds("fdinfo", std::to_string(target_fd()));
+}
+
+TEST_P(ProcHidePidHeldSubdirTest, NsDirLinkLookupSucceeds) {
+  ExpectSubdirLookupSucceeds("ns", "mnt");
+}
+
+TEST_P(ProcHidePidHeldSubdirTest, NsDirTargetOpenFailsWithEacces) {
+  fbl::unique_fd ns_dir = OpenTargetDir("ns");
+  ASSERT_THAT(ns_dir.get(), SyscallSucceeds());
+  fbl::unique_fd held_target;
+  if (GetParam().hold_child) {
+    held_target.reset(openat(ns_dir.get(), "mnt", O_RDONLY));
+    ASSERT_THAT(held_target.get(), SyscallSucceeds());
+  }
+  fork_helper_.RunInForkedProcess([&] {
+    ASSERT_NO_FATAL_FAILURE(DropToHiddenUserWithDacOverride());
+    EXPECT_THAT(openat(ns_dir.get(), "mnt", O_RDONLY), SyscallFailsWithErrno(EACCES));
+  });
+}
+
+TEST_P(ProcHidePidHeldSubdirTest, AttrDirLookupSucceeds) {
+  ExpectSubdirLookupSucceeds("attr", "current");
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    ProcHidePidHeldSubdirTest, ProcHidePidHeldSubdirTest,
+    ::testing::Values(ProcHidePidSubdirParam{.name = "NewEntry", .hold_child = false},
+                      ProcHidePidSubdirParam{.name = "HeldEntry", .hold_child = true}),
+    [](const auto& info) { return info.param.name; });
+
 blksize_t ExpectedProcfsBlksize() {
   // Linux's procfs sets s_blocksize = 1024 in proc_fill_super, whereas Starnix sets st_blksize to
   // PAGE_SIZE so Bionic stdio buffers size to a full page.
@@ -2414,11 +3201,10 @@ TEST(ProcKallsymsTest, KptrRestrictControlsKernelSymbolAddresses) {
   }
 
   constexpr const char* kKptrRestrictPath = "/proc/sys/kernel/kptr_restrict";
-  std::string saved_kptr_restrict;
-  ASSERT_TRUE(files::ReadFileToString(kKptrRestrictPath, &saved_kptr_restrict));
-  auto restore_kptr_restrict =
-      fit::defer([&] { files::WriteFile(kKptrRestrictPath, saved_kptr_restrict); });
-  test_helper::ScopedPerfEventParanoid scoped_perf_paranoid(1);
+  auto scoped_kptr_restrict = test_helper::ScopedSysctl::Create(kKptrRestrictPath);
+  ASSERT_THAT(scoped_kptr_restrict, SyscallResultIsOk());
+  auto scoped_perf_paranoid = test_helper::ScopedSysctl::PerfEventParanoid(1);
+  ASSERT_THAT(scoped_perf_paranoid, SyscallResultIsOk());
 
   // Reject out-of-range, signed-positive, whitespace-only, non-UTF8, or malformed values with
   // EINVAL.
@@ -2743,6 +3529,19 @@ TEST(ProcfsMemoryStatsTest, MemoryStatsStayConsistentWhileMappingsChange) {
 
   stop_churn.call();
   EXPECT_EQ(churn_failures.load(), 0);
+}
+
+TEST_F(ProcTest, DeviceTreeSymlinkMatchesSysfs) {
+  if (access("/sys/firmware/devicetree/base", F_OK) == 0) {
+    struct stat st{};
+    ASSERT_THAT(fstatat(AT_FDCWD, "/proc/device-tree", &st, AT_SYMLINK_NOFOLLOW),
+                SyscallSucceeds());
+    EXPECT_TRUE(S_ISLNK(st.st_mode));
+  } else {
+    struct stat st{};
+    EXPECT_THAT(fstatat(AT_FDCWD, "/proc/device-tree", &st, AT_SYMLINK_NOFOLLOW),
+                SyscallFailsWithErrno(ENOENT));
+  }
 }
 
 }  // namespace

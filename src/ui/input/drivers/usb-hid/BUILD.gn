@@ -84,7 +84,6 @@ fuchsia_driver_component("usb-hid") {
   ]
   component_name = "usb-hid"
   deps = [ ":usb-hid-driver" ]
-  info = "meta/usb-hid-info.json"
   dml_label = ":usb-hid-dml"
 }
 
@@ -126,7 +125,6 @@ fuchsia_cc_driver("usb-one-endpoint-hid-fake-usb-driver") {
 fuchsia_driver_component("usb-one-endpoint-hid-fake-usb") {
   component_name = "usb-one-endpoint-hid-fake-usb"
   deps = [ ":usb-one-endpoint-hid-fake-usb-driver" ]
-  info = "meta/usb-one-endpoint-hid-fake-usb-info.json"
   dml_label = ":usb-one-endpoint-hid-fake-usb-dml"
 }
 
@@ -164,7 +162,6 @@ fuchsia_cc_driver("usb-two-endpoint-hid-fake-usb-driver") {
 fuchsia_driver_component("usb-two-endpoint-hid-fake-usb") {
   component_name = "usb-two-endpoint-hid-fake-usb"
   deps = [ ":usb-two-endpoint-hid-fake-usb-driver" ]
-  info = "meta/usb-two-endpoint-hid-fake-usb-info.json"
   dml_label = ":usb-two-endpoint-hid-fake-usb-dml"
 }
 
@@ -184,9 +181,12 @@ test("usb-hid-test") {
     "//sdk/fidl/fuchsia.hardware.usb.peripheral:fuchsia.hardware.usb.peripheral_cpp",
     "//sdk/fidl/fuchsia.hardware.usb.virtual.bus:fuchsia.hardware.usb.virtual.bus_cpp",
     "//sdk/lib/device-watcher/cpp",
+    "//sdk/lib/driver/compat/cpp",
+    "//sdk/lib/driver/testing/cpp",
     "//sdk/lib/fdio",
     "//sdk/lib/fdio-caller",
     "//src/devices/usb/lib/usb:usb-dfv2-compat-logging",
+    "//src/devices/usb/lib/usb-endpoint:fake-usb-endpoint-server",
     "//src/devices/usb/testing/usb-virtual-bus-launcher:usb-virtual-bus-launcher-dfv2-compat-logging",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/predicates",

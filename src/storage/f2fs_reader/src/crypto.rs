@@ -3,10 +3,9 @@
 // found in the LICENSE file.
 use crate::xattr;
 use aes::Block;
-use aes::cipher::inout::InOutBuf;
-use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, BlockModeDecrypt, KeyInit, KeyIvInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use anyhow::Error;
-use fscrypt::{Context, hkdf};
+use fscrypt::{Context, decrypt_filename_cts, hkdf};
 use siphasher::sip::SipHasher;
 use std::hash::Hasher;
 use zerocopy::{FromBytes, IntoBytes};
@@ -119,25 +118,19 @@ impl PerFileDecryptor {
     }
 
     /// Decrypt a filename (from a dentry or symlink).
-    pub fn decrypt_filename_data(&self, ino: u32, data: &mut [u8]) {
-        let mut iv = [0u8; 16];
+    pub fn decrypt_filename_data(
+        &self,
+        ino: u32,
+        data: &mut Vec<u8>,
+        max_len: usize,
+    ) -> Result<(), Error> {
+        let mut iv = [0u32; 4];
         if let Some(ino_hash_key) = self.ino_hash_key {
             let mut hasher = SipHasher::new_with_key(&ino_hash_key);
             hasher.write((ino as u64).as_bytes());
-            iv[..4].copy_from_slice(&hasher.finish().as_bytes()[..4]);
+            iv[0] = hasher.finish() as u32;
         }
-        // AES-256-CTS is used for filename encryption and symlinks but because we
-        // require POLICY_FLAGS_PAD_16, we never actually steal any ciphertext and
-        // so CTS is equivalent to swapping the last two blocks and using CBC instead.
-        let mut cbc = cbc::Decryptor::<aes::Aes256>::new((&self.cts_key).into(), (&iv).into());
-        let inout: InOutBuf<'_, '_, u8> = data.into();
-        let (mut blocks, tail): (InOutBuf<'_, '_, Block>, _) = inout.into_chunks();
-        debug_assert_eq!(tail.len(), 0);
-        let mut chunks = blocks.get_out();
-        if chunks.len() >= 2 {
-            chunks.swap(chunks.len() - 1, chunks.len() - 2);
-        }
-        cbc.decrypt_blocks(&mut chunks);
+        decrypt_filename_cts(&self.cts_key, &iv, data, max_len)
     }
 
     pub fn dirhash_key(&self) -> &[u8; 16] {

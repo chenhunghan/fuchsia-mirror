@@ -1,16 +1,34 @@
 Name: gfxstream
 URL: https://android.googlesource.com/platform/hardware/google/gfxstream/+/refs/heads/main
 Revision: e577e59d3aec0b1708f7f27887bb8564e0672804
-License: Apache 2.0
+Security Critical: yes
+
+License: Apache-2.0, BSD-2-Clause, BSD-2-Clause-NetBSD, BSD-3-Clause, BSL-1.0, CC-BY-4.0, HPND, ISC, LicenseRef-KhronosSpecCopyright, LicenseRef-MPLUS, MIT, MIT-0, Unlicense
 License File: src/LICENSE
-Description: Graphics Streaming Kit is a code generator that makes it easier to serialize and forward graphics API calls from one place to another.
-Revision is from `git merge-base JIRI_HEAD origin/main`.
-Local Modifications: git diff $(git merge-base JIRI_HEAD origin/main) JIRI_HEAD --name-status
-M	guest/BUILD.gn
-M	guest/fuchsia/fuchsia_stdio.cc
-M	guest/fuchsia/port.cc
-M	guest/mesa-gn/src/util/format/BUILD.gn
-M	guest/mesa-gn/src/vulkan/runtime/BUILD.gn
-M	guest/mesa-gn/src/vulkan/util/BUILD.gn
-M	guest/platform/fuchsia/os_dirent_fuchsia.cpp
-M	guest/vulkan/gfxstream_vk_fuchsia.cpp
+License File: src/codegen/vulkan/vulkan-docs-next/COPYING.adoc
+License File: src/codegen/vulkan/vulkan-docs-next/LICENSE.adoc
+License File: src/codegen/vulkan/vulkan-docs-next/LICENSES/LicenseRef-KhronosSpecCopyright.adoc
+License File: src/codegen/vulkan/vulkan-docs-next/LICENSES/LicenseRef-MPLUS.txt
+License File: src/codegen/vulkan/vulkan-docs-next/scripts/asciidoctor-chunker/LICENSE
+License File: src/third-party/astc-encoder/LICENSE.txt
+License File: src/third-party/fuchsia/LICENSE
+License File: src/third-party/renderdoc/LICENSE
+License File: src/third-party/stb/include/stb/LICENSE
+Generated Notice File: NOTICE.fuchsia
+Non-License File: src/MODULE_LICENSE_APACHE2
+Non-License File: src/guest/include/MODULE_LICENSE_MIT
+
+Description:
+  Graphics Streaming Kit is a code generator that makes it easier to serialize and forward graphics API calls from one place to another.
+  Revision is from `git merge-base JIRI_HEAD origin/main`.
+
+Local Modifications:
+  git diff $(git merge-base JIRI_HEAD origin/main) JIRI_HEAD --name-status
+  M	guest/BUILD.gn
+  M	guest/fuchsia/fuchsia_stdio.cc
+  M	guest/fuchsia/port.cc
+  M	guest/mesa-gn/src/util/format/BUILD.gn
+  M	guest/mesa-gn/src/vulkan/runtime/BUILD.gn
+  M	guest/mesa-gn/src/vulkan/util/BUILD.gn
+  M	guest/platform/fuchsia/os_dirent_fuchsia.cpp
+  M	guest/vulkan/gfxstream_vk_fuchsia.cpp

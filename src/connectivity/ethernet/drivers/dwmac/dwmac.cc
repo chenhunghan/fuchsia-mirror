@@ -9,11 +9,11 @@
 #include <fuchsia/hardware/ethernet/mac/c/banjo.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
-#include <lib/ddk/hw/arch_ops.h>
 #include <lib/ddk/platform-defs.h>
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/fit/defer.h>
 #include <lib/fzl/vmar-manager.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/zircon-internal/align.h>
 #include <lib/zx/clock.h>
 #include <stdio.h>
@@ -401,7 +401,7 @@ zx_status_t DWMacDevice::InitBuffers() {
   rx_tail_ = 0;
   rx_queued_ = 0;
 
-  hw_wmb();
+  WriteDataMemoryBarrier();
 
   desc_buffer_->LookupPhys(0, &tmpaddr);
   mmio_->Write32(static_cast<uint32_t>(tmpaddr), DW_MAC_DMA_TXDESCLISTADDR);
@@ -821,7 +821,7 @@ void DWMacDevice::NetworkDeviceImplStop(
     fbl::AutoLock lock(&state_lock_);
     // Disable TX and RX.
     DeInitDevice();
-    hw_mb();
+    DataMemoryBarrier();
     // Can now return any buffers.
     {
       std::lock_guard tx_lock{tx_lock_};
@@ -981,14 +981,14 @@ void DWMacDevice::NetworkDeviceImplQueueTx(
         DESC_TXCTRL_TXCHAIN | (static_cast<uint32_t>(data.length) & DESC_TXCTRL_SIZE1MASK);
     // Ensure our descriptor updates can be seen prior to the device observing that it owns the
     // buffer.
-    hw_wmb();
+    WriteDataMemoryBarrier();
     tx_descriptors_[tx_head_].txrx_status = DESC_TXSTS_OWNBYDMA;
     tx_head_ = (tx_head_ + 1) % kNumDesc;
 
     tx_counter_.fetch_add(1, std::memory_order_relaxed);
   }
   // Ensure the descriptor status is seen prior to notifying the device.
-  hw_wmb();
+  WriteDataMemoryBarrier();
   mmio_->Write32(~0, DW_MAC_DMA_TXPOLLDEMAND);
 }
 
@@ -1068,13 +1068,13 @@ void DWMacDevice::NetworkDeviceImplQueueRxSpace(
                   actual_regions);
 
     rx_descriptors_[rx_head_].dmamac_addr = static_cast<uint32_t>(region.phys_addr);
-    hw_wmb();
+    WriteDataMemoryBarrier();
     rx_descriptors_[rx_head_].txrx_status = DESC_RXSTS_OWNBYDMA;
 
     rx_head_ = (rx_head_ + 1) % kNumDesc;
     rx_queued_++;
   }
-  hw_wmb();
+  WriteDataMemoryBarrier();
   mmio_->Write32(~0, DW_MAC_DMA_RXPOLLDEMAND);
 }
 

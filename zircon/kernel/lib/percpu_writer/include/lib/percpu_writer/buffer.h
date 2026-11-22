@@ -27,7 +27,7 @@ using fxt::operator""_intern;
 // percpu_writer::Buffer wraps an SpscBuffer and adds functionality to track dropped trace records.
 class Buffer {
  public:
-  using BufferImpl = SpscBuffer<KernelAspaceAllocator, const char*>;
+  using BufferImpl = SpscBuffer<KernelAspaceAllocator>;
   using DroppedRecordStats = ::percpu_writer::DroppedRecordStats;
 
   const DroppedRecordStats& drop_stats() const { return drop_stats_; }
@@ -102,12 +102,11 @@ class Buffer {
   };
 
   // Initializes the underlying SpscBuffer and metadata.
-  zx_status_t Init(uint32_t size, const char* buffer_name,
-                   fxt::ThreadRef<fxt::RefType::kInline> assigned_cpu_ref) {
+  zx_status_t Init(uint32_t size, fxt::ThreadRef<fxt::RefType::kInline> assigned_cpu_ref) {
     // Allocate the KOIDs used to annotate CPU trace records.
     cpu_ref_ = assigned_cpu_ref;
     size_ = size;
-    return buffer_.Init(size, buffer_name);
+    return buffer_.Init(size);
   }
 
   // Drains the underlying SpscBuffer.

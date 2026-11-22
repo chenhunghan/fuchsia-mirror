@@ -112,7 +112,7 @@ while struct and constant names are one-based. For example,
 The `__ZX_INFO_TOPIC` encoding has 4 bits of version, so a single
 `zx_object_get_info()` topic can have at most 16 versions over its lifetime.
 
-### Syscalls without a version channel
+### Syscalls without a version channel {#syscalls-without-a-version-channel}
 
 A few syscalls take or return structs but have no version channel:
 
@@ -310,7 +310,7 @@ version, not just the newest one. For example, see how
 
 Run the core tests with `fx core-tests` and build with `fx build`.
 
-## Source compatibility
+## Source compatibility {#source-compatibility}
 
 The scheme above preserves ABI compatibility for all existing binaries. Source
 compatibility depends on the kind of change:
@@ -333,7 +333,7 @@ alias-based soft transition described in RFC-0074 instead:
 1. Migrate callers back to the unversioned names.
 1. Remove `_V1`.
 
-## Removing an old version
+## Removing an old version {#removing-an-old-version}
 
 You can remove an old version only after no binary built against a supported
 API level can still use it. Binaries that target a retired API level don't need
@@ -351,7 +351,7 @@ example, see the CL that removed `ZX_INFO_PROCESS_V1` (commit `934bcf504d3`).
 Don't renumber the remaining versions, and don't reuse the removed version
 number.
 
-## Process requirements
+## Process requirements {#process-requirements}
 
 * Changes to syscall structs are changes to the Zircon system interface and
   require `API-Review+1` from an [API Council][api-council] member.

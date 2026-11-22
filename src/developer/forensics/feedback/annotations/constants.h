@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_ANNOTATIONS_CONSTANTS_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_ANNOTATIONS_CONSTANTS_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 
 #include <set>
 #include <string>
@@ -17,8 +17,6 @@ namespace forensics::feedback {
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 constexpr const char kBuildBoardKey[] = "build.board";
 constexpr const char kBuildCompilationModeKey[] = "build.compilation-mode";
-constexpr const char kBuildVersionKey[] = "build.version";
-constexpr const char kBuildVersionPreviousBootKey[] = "build.version.previous-boot";
 constexpr const char kBuildPlatformVersionKey[] = "build.platform.version";
 constexpr const char kBuildPlatformVersionPreviousBootKey[] =
     "build.platform.version.previous-boot";
@@ -88,7 +86,7 @@ constexpr uint32_t kMaxNumDebugAnnotations = 128u;
 
 static_assert(kMaxNumPlatformAnnotations + kMaxNumNonPlatformAnnotations +
                       kMaxNumDebugAnnotations ==
-                  fuchsia::feedback::MAX_NUM_ANNOTATIONS2_PROVIDED,
+                  fuchsia_feedback::kMaxNumAnnotations2Provided,
               "Annotations must be allocated to the platform, non-platform components, and "
               "Feedback itself (for debugging)");
 

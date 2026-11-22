@@ -12,7 +12,7 @@
     children: [
         {
             name: "netstack",
-            url: "#meta/fake-netstack.cm",
+            url: "fake-netstack#meta/fake-netstack.cm",
         },
     ],
 }

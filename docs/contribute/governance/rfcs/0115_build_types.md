@@ -560,11 +560,11 @@ The Android operating system:
 [doc-auto-update]: /docs/gen/build_arguments.md#auto_update_packages
 [doc-base-packages]: /docs/concepts/packages/package.md#base-packages
 [doc-debugger]: /docs/development/idk/documentation/debugger.md
-[doc-dependency-sets]: /docs/development/build/software_assembly/build_configuration.md#dependency_sets
+[doc-dependency-sets]: /docs/development/build/software_assembly/build_configuration.md#dependency-sets
 [doc-iquery]: /docs/reference/diagnostics/consumers/iquery.md
 [doc-otas]: /docs/concepts/packages/ota.md
 [doc-package-flavor]: /docs/gen/build_arguments.md#package_flavor_selections
-[doc-paving]: /docs/development/build/fx.md#what-is-paving
+[doc-paving]: /docs/development/build/fx.md
 [doc-products]: /docs/development/build/software_assembly/build_configuration.md
 [doc-zircon]: /docs/concepts/kernel/README.md
 [doc-zx-assert]: /docs/gen/build_arguments.md#zx_assert_level
@@ -575,7 +575,7 @@ The Android operating system:
 [docs-testing]: /docs/development/testing/sl4f.md
 [fidl-metrics]: https://fuchsia.dev/reference/fidl/fuchsia.metrics
 [fidl-crash-reporter]: https://fuchsia.dev/reference/fidl/fuchsia.feedback#CrashReporter
-[fuchsia-repository]: /docs/concepts/packages/package_url.md#repository_root_verification_known_sources
+[fuchsia-repository]: /docs/concepts/packages/package_url.md#repository-root-verification-known-sources
 [glossary-zbi]: /docs/glossary/README.md#zircon-boot-image
 [glossary-zedboot]: /docs/glossary/README.md#zedboot
 [k-commands]: /docs/development/debugging/tips.md

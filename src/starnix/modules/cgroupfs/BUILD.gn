@@ -47,6 +47,7 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 rustc_library("cgroupfs") {
   sources = [
+    "controllers.rs",
     "cpuset.rs",
     "directory.rs",
     "events.rs",
@@ -76,6 +77,7 @@ rustc_library("cgroupfs") {
 
 rustc_test("starnix_modules_cgroupfs_lib_test") {
   sources = [
+    "controllers.rs",
     "cpuset.rs",
     "directory.rs",
     "events.rs",

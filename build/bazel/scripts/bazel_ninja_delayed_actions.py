@@ -368,6 +368,9 @@ def main() -> int:
         global_bazel_args,
         query_cache,
     )
+    # Track actions completed across all platforms in this batch.
+    completed_action_ids: set[int] = set()
+
     # This will raise an exception on failure.
     try:
         for platform_label, platform_targets in targets_by_platform.items():
@@ -446,14 +449,29 @@ def main() -> int:
             # Bazel report it twice.
             targets = list(dict.fromkeys(targets + extra_targets))
 
-            action_result = bazel_action_runner.run(
-                command="build",
-                platform_config=platform_config,
-                platform_label=platform_label,
-                targets=targets,
-                outputs=outputs,
-                time_profile=time_profile,
-            )
+            action_result: bazel_action_impl.BazelActionResult | None = None
+            build_exception: bazel_action_impl.BazelActionError | None = None
+            successful_targets: set[str] = set()
+            failed_targets: set[str] = set()
+            try:
+                action_result = bazel_action_runner.run(
+                    command="build",
+                    platform_config=platform_config,
+                    platform_label=platform_label,
+                    targets=targets,
+                    outputs=outputs,
+                    time_profile=time_profile,
+                    target_infos=platform_target_infos,
+                )
+                # When Bazel completes successfully, all requested targets in the batch succeeded.
+                successful_targets = set(targets)
+            except bazel_action_impl.BazelActionError as e:
+                action_result = e.partial_action_result
+                successful_targets = e.successful_targets
+                failed_targets = e.failed_targets
+                build_exception = e
+                if action_result is None:
+                    raise
 
             if global_bazel_args.auto_refresh_compdb:
                 compdb_file = (
@@ -556,6 +574,49 @@ def main() -> int:
                 raise bazel_action_impl.BazelActionError(str(e)) from e
 
             for owner, sources in sources_by_owner.items():
+
+                def is_target_in(
+                    target_label: str, target_set: set[str]
+                ) -> bool:
+                    return (
+                        target_label in target_set
+                        or build_utils.canonicalize_label(target_label)
+                        in target_set
+                        or build_utils.normalize_label(target_label)
+                        in target_set
+                    )
+
+                owner_extra_targets = extra_targets_by_owner.get(owner)
+                if owner_extra_targets:
+                    # Bazel expands test_suite() rules into constituent test targets under
+                    # --expand_test_suites=true, emitting TargetCompleted events for child tests
+                    # but never for the top-level test_suite itself.
+                    #
+                    # When a batch partially fails, Bazel may abort before scheduling or finishing
+                    # all child tests in the suite. Bazel does not emit failure events for unreached
+                    # or canceled child targets. Because a truncated BEP event stream cannot reliably
+                    # prove that all constituent tests completed, conservatively treat any action with
+                    # extra targets as incomplete on partial batch failure (build_exception is not None)
+                    # so Ninja never records a false-green stamp or skips unbuilt tests on incremental rebuilds.
+                    if build_exception is not None:
+                        is_owner_successful = False
+                    elif is_target_in(owner.target, failed_targets):
+                        is_owner_successful = False
+                    else:
+                        is_owner_successful = all(
+                            is_target_in(t, successful_targets)
+                            and not is_target_in(t, failed_targets)
+                            for t in owner_extra_targets
+                        )
+                else:
+                    is_owner_successful = is_target_in(
+                        owner.target, successful_targets
+                    ) and not is_target_in(owner.target, failed_targets)
+
+                if not is_owner_successful:
+                    # Do not write depfile or stamp for targets that failed or were unreached.
+                    continue
+
                 # Locate the action request and stamp path for this target.
                 action, stamp_path = target_request_map[owner]
                 target_info = platform_targets[owner.target]
@@ -628,6 +689,11 @@ def main() -> int:
                     with open(stamp_path, "w") as f:
                         f.write(f"{timestamp}\n")
 
+                completed_action_ids.add(action.action_id)
+
+            if build_exception:
+                raise build_exception
+
         rc = 0
 
     except bazel_action_impl.BazelActionError as e:
@@ -638,12 +704,92 @@ def main() -> int:
     if _DEBUG_TIME_PROFILE:
         time_profile.print(0.001)
 
-    response = DelayedActionsResponse(ninja_request.request_id, rc, "")
+    # Response Protocol v2: Compute per-action status for each action in the batch.
+    per_action_statuses = compute_per_action_statuses(
+        ninja_request.actions,
+        bazel_paths.ninja_build_dir,
+        completed_action_ids=completed_action_ids if rc != 0 else None,
+    )
+
+    if rc != 0 and all(s.status == 0 for s in per_action_statuses):
+        # Guard against false green builds: Bazel exited with a non-zero exit code,
+        # but every action in the batch happened to evaluate to status 0.
+        # Force status 1 for all actions so Ninja fails the build appropriately.
+        per_action_statuses = [
+            DelayedActionStatus(
+                action_id=action.action_id,
+                status=1,
+                output="Ninja delayed action failed: Bazel invocation failed but no specific action failure was identified.\n",
+            )
+            for action in ninja_request.actions
+        ]
+
+    response = DelayedActionsResponse(
+        request_id=ninja_request.request_id,
+        actions=per_action_statuses,
+    )
     write_file_if_changed(args.delayed_actions_response, response.to_json())
 
     # Done!  (Don't return the 'rc' from above, that's for the action itself,
     # here we need to return 0 to tell Ninja that the script exited successfully.)
     return 0
+
+
+def compute_per_action_statuses(
+    actions: list["DelayedAction"],
+    ninja_build_dir: Path,
+    completed_action_ids: set[int] | None = None,
+) -> list["DelayedActionStatus"]:
+    """Compute per-action status for a batch under Response Protocol v2.
+
+    Under Ninja Delayed Worker Protocol v2, the worker reports individual exit
+    codes for each action in the request rather than a single all-or-nothing status.
+
+    Succeeded actions: Target completed in Bazel, action_id is in completed_action_ids,
+    and all declared non-debugging output files and stamp exist on disk.
+    Ninja records .ninja_log, .ninja_deps, and unblocks unaffected downstream edges under -k.
+
+    Failed actions: Target failed or was unreached, or output files are missing on disk.
+    These receive status 1 along with a descriptive error message listing the missing
+    outputs, isolating the failure strictly to the true culprits.
+    """
+    statuses: list[DelayedActionStatus] = []
+    for action in actions:
+        is_completed = (
+            completed_action_ids is None
+            or action.action_id in completed_action_ids
+        )
+        missing_outputs: list[str] = []
+        for out in action.ninja_outputs:
+            if is_debugging_output(out):
+                continue
+            out_path = ninja_build_dir / out
+            if not out_path.exists():
+                missing_outputs.append(out)
+
+        if is_completed and not missing_outputs:
+            statuses.append(
+                DelayedActionStatus(
+                    action_id=action.action_id,
+                    status=0,
+                    output="",
+                )
+            )
+        else:
+            if not is_completed:
+                err_msg = "Ninja delayed action failed: target failed or was not completed by Bazel\n"
+            elif missing_outputs:
+                err_msg = f"Ninja delayed action failed: missing output files (relative to {ninja_build_dir}): {', '.join(missing_outputs)}\n"
+            else:
+                err_msg = "Ninja delayed action failed: target failed or was not completed by Bazel\n"
+            statuses.append(
+                DelayedActionStatus(
+                    action_id=action.action_id,
+                    status=1,
+                    output=err_msg,
+                )
+            )
+    return statuses
 
 
 @dataclasses.dataclass
@@ -698,19 +844,46 @@ class DelayedActionsRequest(object):
 
 
 @dataclasses.dataclass
-class DelayedActionsResponse(object):
-    request_id: int
+class DelayedActionStatus(object):
+    """Status for an individual action under Delayed Worker Response Protocol v2.
+
+    Fields:
+        action_id: 1-based index matching DelayedAction.action_id from the request.
+        status: Exit code (0 for success, non-zero for failure).
+        output: Diagnostic error message for failed actions, or empty string on success.
+    """
+
+    action_id: int
     status: int
-    output: str
+    output: str = ""
+
+
+@dataclasses.dataclass
+class DelayedActionsResponse(object):
+    """Response returned to Ninja describing the outcome of a batch of delayed actions.
+
+    Follows Ninja Delayed Worker Response Protocol v2 (fxr/1985076).
+    Top-level "status" and "output" are omitted in version 2, and "actions" is
+    mandatory.
+
+    Fields:
+        request_id: Integer matching DelayedActionsRequest.request_id.
+        actions: Per-action outcome list under Response Protocol v2.
+    """
+
+    request_id: int
+    actions: list[DelayedActionStatus] = dataclasses.field(default_factory=list)
 
     def to_json(self) -> str:
-        """Convert the response in the json format expected by Ninja.
-
-        This converts the response into the schema expected by Ninja.
-        """
-        as_dict = dataclasses.asdict(self)
-        as_dict["version"] = 1
-        return json.dumps(as_dict, indent=2)
+        """Convert the response into the JSON format expected by Ninja."""
+        return json.dumps(
+            {
+                "version": 2,
+                "request_id": self.request_id,
+                "actions": [dataclasses.asdict(a) for a in self.actions],
+            },
+            indent=2,
+        )
 
 
 # These are the suffixes of files we use to debug Bazel actions, and

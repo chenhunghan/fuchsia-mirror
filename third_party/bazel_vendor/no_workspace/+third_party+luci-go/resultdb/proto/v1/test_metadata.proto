@@ -1,0 +1,148 @@
+// Copyright 2020 The LUCI Authors.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package luci.resultdb.v1;
+
+import "google/protobuf/struct.proto";
+import "resultdb/proto/v1/common.proto";
+
+option go_package = "go.chromium.org/luci/resultdb/proto/v1;resultpb";
+option java_package = "com.google.luci.resultdb.v1";
+option java_multiple_files = true;
+
+// Information about a test metadata.
+message TestMetadataDetail {
+  // Can be used to refer to a test metadata, e.g. in ResultDB.QueryTestMetadata
+  // RPC.
+  // Format:
+  // "projects/{PROJECT}/refs/{REF_HASH}/tests/{URL_ESCAPED_TEST_ID}".
+  // where URL_ESCAPED_TEST_ID is test_id escaped with
+  // https://golang.org/pkg/net/url/#PathEscape. See also https://aip.dev/122.
+  //
+  // Output only.
+  string name = 1;
+
+  // The LUCI project.
+  string project = 2;
+
+  // A unique identifier of a test in a LUCI project.
+  // Refer to TestResult.test_id for details.
+  string test_id = 3;
+
+  // Hexadecimal encoded hash string of the source_ref.
+  // A given source_ref always hashes to the same ref_hash value.
+  string ref_hash = 12;
+
+  // A reference in the source control system where the test metadata comes from.
+  SourceRef source_ref = 4;
+
+  // Test metadata content.
+  TestMetadata testMetadata = 5;
+}
+
+// Information about a test.
+message TestMetadata {
+  // The original test name.
+  // This is useful for users who are familiar with the underlying test harness
+  // and want to re-run the test outside of the CI system.
+  //
+  // Size is limited to 16 KiB in UTF-8.
+  string name = 1;
+
+  // Where the test is defined, e.g. the file name.
+  // location.repo MUST be specified.
+  TestLocation location = 2;
+
+  // The issue tracker component associated with the test, if any.
+  // Bugs related to the test may be filed here.
+  BugComponent bug_component = 3;
+
+  // Deprecated: No longer required. Do not set.
+  string properties_schema = 4 [deprecated = true];
+
+  // Arbitrary JSON object that contains structured, domain-specific properties
+  // of the test.
+  //
+  // The serialized size must be <= 4096 bytes.
+  //
+  // The value must contain a field '@type' which is a URL/resource name
+  // that uniquely identifies the type of the source protocol buffer message.
+  // This string must contain at least one "/" character. The last segment of
+  // the URL's path must represent the fully qualified name of the type (e.g.
+  // foo.com/x/some.package.MyMessage). See
+  // https://protobuf.dev/reference/protobuf/google.protobuf/#any for details
+  // about the expected '@type' field.
+  //
+  // ResultDB will not validate the contents with respect to this schema, but
+  // downstream systems may depend on the '@type' field to inform how the
+  // contents are interpreted.
+  //
+  // If this field is specified, properties_schema must also be specified.
+  google.protobuf.Struct properties = 5;
+
+  // The test ID this test previously had.
+  string previous_test_id = 6;
+}
+
+// Location of the test definition.
+message TestLocation {
+  // Gitiles URL as the identifier for a repo.
+  // Format for Gitiles URL: https://<host>/<project>
+  // For example "https://chromium.googlesource.com/chromium/src"
+  // Must not end with ".git".
+  // Size is limited to 256 bytes in UTF-8.
+  // Required.
+  string repo = 1;
+
+  // Name of the file where the test is defined.
+  // For files in a repository, must start with "//"
+  // Example: "//components/payments/core/payment_request_data_util_unittest.cc"
+  // Size is limited to 512 bytes in UTF-8.
+  // MUST not use backslashes.
+  // Required.
+  string file_name = 2;
+
+  // One-based line number where the test is defined.
+  int32 line = 3;
+}
+
+// Represents a component in an issue tracker. A component is
+// a container for issues.
+message BugComponent {
+  oneof system {
+     // The Google Issue Tracker component.
+     IssueTrackerComponent issue_tracker = 1;
+
+     // The monorail component.
+     MonorailComponent monorail = 2;
+  }
+}
+
+// A component in Google Issue Tracker, sometimes known as Buganizer,
+// available at https://issuetracker.google.com.
+message IssueTrackerComponent {
+  // The Google Issue Tracker component ID.
+  int64 component_id = 1;
+}
+
+// A component in monorail issue tracker, available at
+// https://bugs.chromium.org.
+message MonorailComponent {
+  // The monorail project name.
+  string project = 1;
+  // The monorail component value. E.g. "Blink>Accessibility".
+  string value = 2;
+}

@@ -46,7 +46,6 @@ fuchsia_cc_driver("driver") {
 }
 
 fuchsia_driver_component("component") {
-  info = "meta/component-info.json"
   component_name = "chromiumos-ec-lpc"
   deps = [ ":driver" ]
   manifest = "meta/chromiumos-ec-lpc.cml"

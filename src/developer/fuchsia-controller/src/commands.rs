@@ -3,13 +3,12 @@
 // found in the LICENSE file.
 
 use crate::compat::FcTransportStatus;
-use crate::env_context::EnvContext;
+use crate::env_context::{EnvContext, EnvMode};
 use crate::ext_buffer::ExtBuffer;
 use crate::lib_context::LibContext;
 use fdomain_client::{AsHandleRef, HandleOp, MessageBuf, Peered};
 use fidl::Rights;
 use std::mem::MaybeUninit;
-use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::task::Poll;
 use zx_types;
@@ -44,7 +43,7 @@ pub(crate) enum LibraryCommand {
         calling_thread: std::thread::ThreadId,
         responder: Responder<CmdResult<Arc<EnvContext>>>,
         config_json: Option<String>,
-        isolate_dir: Option<PathBuf>,
+        mode: EnvMode,
     },
     OpenDeviceProxy {
         env: Arc<EnvContext>,
@@ -185,8 +184,8 @@ impl LibraryCommand {
                     }
                 }
             }
-            Self::CreateEnvContext { lib, calling_thread, responder, config_json, isolate_dir } => {
-                match EnvContext::new(Arc::downgrade(&lib), config_json, isolate_dir) {
+            Self::CreateEnvContext { lib, calling_thread, responder, config_json, mode } => {
+                match EnvContext::new(Arc::downgrade(&lib), config_json, mode) {
                     Ok(e) => {
                         responder.send(Ok(Arc::new(e))).unwrap();
                     }

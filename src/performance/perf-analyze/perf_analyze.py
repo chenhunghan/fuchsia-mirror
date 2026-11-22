@@ -17,6 +17,7 @@ import result_formatter
 from app_launch import AppLaunchPlugin
 from binder import BinderPlugin
 from cpu import CpuPlugin
+from critical_path import CriticalPathPlugin
 from plugins import AnalyzePlugin, PluginArgumentError
 from query import TpShell
 
@@ -144,7 +145,12 @@ def main(
 
     elif args.command == "analyze":
         if plugins is None:
-            plugins = [AppLaunchPlugin(), BinderPlugin(), CpuPlugin()]
+            plugins = [
+                AppLaunchPlugin(),
+                BinderPlugin(),
+                CpuPlugin(),
+                CriticalPathPlugin(),
+            ]
 
         if args.list_plugins:
             plugin_data = [

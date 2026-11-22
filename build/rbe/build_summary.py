@@ -13,7 +13,7 @@ import os
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from build.rbe import tablefmt, textpb
 
@@ -90,12 +90,12 @@ def get_action_category_and_metric(text: str) -> tuple[str | None, str]:
     return None, metric
 
 
-def _get_stat_name(stat: dict[str, Any]) -> str:
+def _get_stat_name(stat: textpb.TextProtoMapping) -> str:
     # based on textpb structure and stats.Stat_pb2 proto
     return stat["name"][0].text.strip('"')
 
 
-def _get_stat_count(stat: dict[str, Any]) -> int:
+def _get_stat_count(stat: textpb.TextProtoMapping) -> int:
     return int(stat["count"][0].text)
 
 
@@ -177,7 +177,7 @@ class RbeMetrics(object):
     bandwidth_metrics: dict[str, dict[str, Any]]
 
 
-def load_rbe_metrics(data: dict[str, Any]) -> RbeMetrics:
+def load_rbe_metrics(data: textpb.TextProtoMapping) -> RbeMetrics:
     """Extracts RBE metrics into a structure of tables."""
     # Construct a table by action type
     status_metrics: dict[str, dict[str, Any]] = collections.defaultdict(dict)
@@ -219,7 +219,7 @@ def load_rbe_metrics(data: dict[str, Any]) -> RbeMetrics:
 
 
 def build_summary_lines(
-    rbe_data: RbeMetrics, reproxy_logdir: str
+    rbe_data: RbeMetrics, reproxy_logdir: Path
 ) -> Iterable[str]:
     joint_table = prepare_summary_table(rbe_data)
 
@@ -348,12 +348,24 @@ def summarize_rbe_metrics_from_logdir(
         return None
 
 
-def main(argv: Sequence[str]) -> int:
-    args = _MAIN_ARG_PARSER.parse_args(argv)
+def print_build_summary(
+    reproxy_logdir: Path,
+    output_format: str = "table",
+    file: TextIO = sys.stdout,
+) -> int:
+    """Prints formatted RBE metrics summary to file.
 
-    rbe_metrics_txt = args.reproxy_logdir / RBE_METRICS_TXT
+    Args:
+        reproxy_logdir: Directory containing RBE metrics outputs (e.g. rbe_metrics.txt).
+        output_format: Output formatting style, either 'table' or 'json'.
+        file: Destination text stream to write the formatted summary to.
+
+    Returns:
+        0 on success, or 1 if an unhandled error or unknown format was encountered.
+    """
+    rbe_metrics_txt = reproxy_logdir / RBE_METRICS_TXT
     if not rbe_metrics_txt.exists():
-        print("No RBE metrics found.")
+        print("No RBE metrics found.", file=file)
         return 0
 
     with open(rbe_metrics_txt) as f:
@@ -362,7 +374,7 @@ def main(argv: Sequence[str]) -> int:
     rbe_data = load_rbe_metrics(data)
 
     def text_table_formatter(rbe_metrics: RbeMetrics) -> Iterable[str]:
-        yield from build_summary_lines(rbe_metrics, args.reproxy_logdir)
+        yield from build_summary_lines(rbe_metrics, reproxy_logdir)
 
     def json_lines_formatter(rbe_metrics: RbeMetrics) -> Iterable[str]:
         yield from json.dumps(
@@ -373,10 +385,18 @@ def main(argv: Sequence[str]) -> int:
         "table": text_table_formatter,
         "json": json_lines_formatter,
     }
-    for line in output_formatters[args.format](rbe_data):
-        print(line)
+    for line in output_formatters[output_format](rbe_data):
+        print(line, file=file)
 
     return 0
+
+
+def main(argv: Sequence[str]) -> int:
+    args = _MAIN_ARG_PARSER.parse_args(argv)
+    return print_build_summary(
+        reproxy_logdir=args.reproxy_logdir,
+        output_format=args.format,
+    )
 
 
 if __name__ == "__main__":

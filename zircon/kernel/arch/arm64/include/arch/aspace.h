@@ -8,7 +8,6 @@
 #ifndef ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ASPACE_H_
 #define ZIRCON_KERNEL_ARCH_ARM64_INCLUDE_ARCH_ASPACE_H_
 
-#include <zircon/compiler.h>
 #include <zircon/types.h>
 
 #include <arch/arm64/aspace-constants.h>
@@ -76,7 +75,6 @@ void rust_arm64_aspace_arch_set_asid(const ArmAspaceState& aspace, uint16_t asid
 void rust_arm64_aspace_context_switch(const ArmAspaceState* from, const ArmAspaceState* to);
 void rust_arm64_aspace_handoff_page_tables_from_physboot(VmPageDoublyLinkedList* mmu_pages);
 
-void rust_arm64_icache_force_clean_to_poc(ArmICacheState& state);
 void rust_arm64_icache_sync_addr(ArmICacheState& state, vaddr_t start, size_t len);
 void rust_arm64_icache_finish(ArmICacheState& state);
 
@@ -181,11 +179,6 @@ class ArmArchVmAspace final : public ArchVmAspaceInterface {
     rust_arm64_aspace_handoff_page_tables_from_physboot(mmu_pages);
   }
 
-  // ARM only has accessed flags on terminal page mappings. This means that FreeUnaccessed will
-  // only be able to free page tables where terminal accessed flags have been removed using
-  // HarvestAccessed.
-  static constexpr bool HasNonTerminalAccessedFlag() { return false; }
-
   static constexpr vaddr_t NextUserPageTableOffset(vaddr_t va) {
     // Work out the virtual address the next page table would start at by first masking the va down
     // to determine its index, then adding 1 and turning it back into a virtual address.
@@ -210,12 +203,6 @@ class ArmVmICacheConsistencyManager final : public ArchVmICacheConsistencyManage
     rust_arm64_icache_sync_addr(rust_state_, start, len);
   }
   void Finish() override { rust_arm64_icache_finish(rust_state_); }
-
-  // If a cache operation is going to be performed anyone on the addresses provided, then can avoid
-  // doing duplicate operations by insisting SyncAddr cleans to the PoC. If SyncAddr did not need
-  // to do any cache operation, due to CTR.IDC[28]=1, then this still forces it to do a clean to
-  // PoC. Note that the default clean, when CTR.IDC[28] = 0, is only to PoU.
-  void ForceCleanToPoC() { rust_arm64_icache_force_clean_to_poc(rust_state_); }
 
  private:
   ArmICacheState rust_state_ = {};

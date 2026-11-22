@@ -5,15 +5,18 @@
 
 import contextlib
 import io
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
 
-import bb_fetch_rbe_cas
-import bbtool
-import cl_utils
-import remotetool
-import reproxy_logs
+from build.rbe import (
+    bb_fetch_rbe_cas,
+    bbtool,
+    cl_utils,
+    remotetool,
+    reproxy_logs,
+)
 
 
 class MainArgParserTests(unittest.TestCase):
@@ -88,7 +91,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
             reproxy_logs, "lookup_output_file_digest", return_value=digest
         ) as mock_lookup:
             with mock.patch.object(
-                remotetool, "configure_remotetool", return_value=self.downloader
+                remotetool, "configure", return_value=self.downloader
             ) as mock_downloader:
                 with mock.patch.object(
                     bb_fetch_rbe_cas, "download_artifact", return_value=status
@@ -103,7 +106,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
                         status,
                     )
         mock_lookup.assert_called_once_with(log=reproxy_log, path=artifact_path)
-        mock_downloader.assert_called_once_with(cfg)
+        mock_downloader.assert_called_once_with(cfg, env=os.environ)
         mock_download.assert_called_once_with(self.downloader, digest, output)
 
     def test_digest_not_found(self) -> None:
@@ -134,7 +137,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
             reproxy_logs, "lookup_output_file_digest", return_value=digest
         ) as mock_lookup:
             with mock.patch.object(
-                remotetool, "configure_remotetool", return_value=self.downloader
+                remotetool, "configure", return_value=self.downloader
             ) as mock_downloader:
                 with mock.patch.object(
                     bb_fetch_rbe_cas, "download_artifact", return_value=status
@@ -149,7 +152,7 @@ class FetchArtifactFromReproxyLogTests(unittest.TestCase):
                         status,
                     )
         mock_lookup.assert_called_once_with(log=reproxy_log, path=artifact_path)
-        mock_downloader.assert_called_once_with(cfg)
+        mock_downloader.assert_called_once_with(cfg, env=os.environ)
         mock_download.assert_called_once_with(self.downloader, digest, output)
 
 

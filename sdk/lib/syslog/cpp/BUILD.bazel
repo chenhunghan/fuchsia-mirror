@@ -2,10 +2,38 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
 load("//build/bazel/rules/idk:idk_cc_prebuilt_library.bzl", "idk_cc_shared_library")
 load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":logging-cpp-tests-test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":logging_cpp_unittests_host_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
 
 # `deps` need to be defined before `fuchsia_deps` for bazel2gn to work properly, so tell buildifier
 # to leave this target alone.
@@ -69,6 +97,9 @@ idk_cc_source_library(
     visibility = ["//visibility:public"],
 )
 
+# In GN, the Bazel-built library replaces the GN-built one in the toolchain that
+# matches Bazel's build configuration. See //build/bazel/bazel_shared_library.gni.
+# @bazel2gn:raw_attribute:bazel_target = ":backend_fuchsia_globals_gn_outputs"
 idk_cc_shared_library(
     name = "backend_fuchsia_globals",
     srcs = [
@@ -97,4 +128,168 @@ idk_cc_shared_library(
     deps = [
         "//src/zircon/lib/zircon",
     ],
+)
+
+fx_cc_test_binary(
+    name = "logging_cpp_unittests",
+    srcs = [
+        "host/encoder.h",
+        "log_settings_unittest.cc",
+        "logging_unittest.cc",
+    ],
+    deps = [
+        ":cpp",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/uuid",
+        "@com_google_googletest//:gtest",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_cpp",
+            "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+            "//sdk/lib/async",
+            "//sdk/lib/async:async-cpp",
+            "//sdk/lib/async-loop:async-loop-cpp",
+            "//src/lib/diagnostics/fake-log-sink/cpp",
+            "//src/lib/fsl",
+            "//third_party/rapidjson",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
+host_test(
+    name = "logging_cpp_unittests_host_test",
+    binary = ":logging_cpp_unittests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_packaged_binary(
+    name = "logging_cpp_unittests_packaged",
+    testonly = True,
+    binary = ":logging_cpp_unittests",
+    binary_name = "logging_cpp_unittests",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "logging-cpp-unittests_manifest",
+    testonly = True,
+    component_name = "logging-cpp-unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:zxtest.shard.cml",
+    ],
+    manifest = "meta/logging_cpp_unittests.cml",
+)
+
+fx_test_component(
+    name = "logging-cpp-unittests",
+    compiled_manifest = ":logging-cpp-unittests_manifest",
+    deps = [":logging_cpp_unittests_packaged"],
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether logging_cpp_unittests_structured should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+# Uses Zircon/Fuchsia-only headers (<lib/zx/socket.h>) and fake-log-sink.
+fx_cc_test_binary(
+    name = "logging_cpp_unittests_structured",
+    srcs = ["log_structure_unittest.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":cpp",
+        "//src/lib/diagnostics/fake-log-sink/cpp",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "logging_cpp_unittests_structured_packaged",
+    testonly = True,
+    binary = ":logging_cpp_unittests_structured",
+    binary_name = "logging_cpp_unittests_structured",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "logging-cpp-unittests-structured_manifest",
+    testonly = True,
+    component_name = "logging-cpp-unittests-structured",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:zxtest.shard.cml",
+    ],
+    manifest = "meta/logging_cpp_unittests_structured.cml",
+)
+
+fx_test_component(
+    name = "logging-cpp-unittests-structured",
+    compiled_manifest = ":logging-cpp-unittests-structured_manifest",
+    deps = [":logging_cpp_unittests_structured_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "logging-cpp-from-void",
+    srcs = ["log_from_void.cc"],
+    deps = [
+        ":cpp",
+        "//src/lib/files",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "logging-cpp-from-void_packaged",
+    testonly = True,
+    binary = ":logging-cpp-from-void",
+    binary_name = "logging-cpp-from-void",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "from_void_test_root_manifest",
+    testonly = True,
+    component_name = "from_void_test_root",
+    includes = [
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/from_void_test_root.cml",
+)
+
+fx_component(
+    name = "from_void_test_root",
+    testonly = True,
+    compiled_manifest = ":from_void_test_root_manifest",
+    deps = [":logging-cpp-from-void_packaged"],
+)
+
+fx_component_manifest(
+    name = "logging-cpp-from-void-test_manifest",
+    testonly = True,
+    component_name = "logging-cpp-from-void-test",
+    manifest = "meta/logging_cpp_from_void_test.cml",
+)
+
+fx_test_component(
+    name = "logging-cpp-from-void-test",
+    compiled_manifest = ":logging-cpp-from-void-test_manifest",
+)
+
+fx_package(
+    name = "logging-cpp-tests",
+    testonly = True,
+    components = [":from_void_test_root"],
+    test_components = [
+        ":logging-cpp-unittests",
+        ":logging-cpp-unittests-structured",
+        ":logging-cpp-from-void-test",
+    ],
+)
+
+fx_test(
+    name = "logging-cpp-tests-test",
+    max_log_severity = "FATAL",
+    package = ":logging-cpp-tests",
 )

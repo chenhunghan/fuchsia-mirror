@@ -150,7 +150,7 @@ impl Driver for GoldfishRtcDriver {
         Ok(Self { _node: node, _scope: scope })
     }
 
-    async fn stop(&self) {}
+    async fn stop(self) {}
 }
 
 #[cfg(test)]

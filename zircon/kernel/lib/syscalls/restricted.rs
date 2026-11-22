@@ -30,7 +30,9 @@ pub fn sys_restricted_enter(
     if options != 0 {
         return Err(Status::INVALID_ARGS);
     }
-    restricted_enter(vector_table_ptr, context)?;
+    // SAFETY: Syscall entry runs on an initialized user thread in normal mode with no live
+    // references to its `RestrictedState`.
+    unsafe { restricted_enter(vector_table_ptr, context) }?;
     Ok(())
 }
 
@@ -66,7 +68,9 @@ pub fn sys_restricted_bind_state(
     // handle will fail, but that's OK. If that happens a ZX_EXCP_POLICY_CODE_HANDLE_LEAK will
     // be generated, at which point the caller will either be terminated or will need to handle
     // the exception (likely by retrying the operation with a valid out buffer).
-    thread_current_set_restricted_state(Some(rs));
+    // SAFETY: Syscall entry runs on an initialized user thread in normal mode with no live
+    // references to its current `RestrictedState`.
+    unsafe { thread_current_set_restricted_state(Some(rs)) };
 
     *out = user_handle;
     Ok(())
@@ -81,7 +85,9 @@ pub fn sys_restricted_unbind_state(options: u32) -> Result<(), Status> {
         return Err(Status::INVALID_ARGS);
     }
 
-    thread_current_set_restricted_state(None);
+    // SAFETY: Syscall entry runs on an initialized user thread in normal mode with no live
+    // references to its current `RestrictedState`.
+    unsafe { thread_current_set_restricted_state(None) };
     Ok(())
 }
 

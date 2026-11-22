@@ -11,6 +11,8 @@ use syn::{
     parse_macro_input,
 };
 
+mod permissions;
+
 fn add_trait_bounds(mut generics: Generics, bound: TypeParamBound) -> Generics {
     for param in generics.type_params_mut() {
         param.bounds.push(bound.clone());
@@ -549,4 +551,40 @@ fn gen_struct_validate(data: &syn::DataStruct) -> Result<proc_macro2::TokenStrea
 fn gen_enum_validate(data_enum: &syn::DataEnum) -> Result<proc_macro2::TokenStream> {
     validate_wire_enum(data_enum)?;
     Ok(quote! {})
+}
+
+/// Declares `KernelClass` from a list of kernel object classes.
+///
+/// Automatically derives `Clone`, `Copy`, `Debug`, `Eq`, `Hash`, and `PartialEq` on the generated
+/// enum; additional outer attributes (such as `#[repr(...)]` or `zerocopy` derives) may be placed
+/// on the type declaration. Each variant defaults its policy class name to the `snake_case` of the
+/// variant identifier unless overridden with a distinct non-empty `Variant("custom_name")`.
+#[proc_macro]
+pub fn declare_kernel_classes(input: TokenStream) -> TokenStream {
+    permissions::declare_kernel_classes_impl(input)
+}
+
+/// Declares a subset class type from `KernelClass` (either a wrapper struct around `KernelClass`
+/// with default `<Variant>Permission` aliases to `Common<Prefix>Permission`, or a composite enum
+/// over sub-classes) and implements `ForClass` for its common permission type.
+///
+/// Automatically derives `Clone`, `Copy`, `Debug`, `Eq`, `Hash`, and `PartialEq` on the generated
+/// type; additional outer attributes (such as `#[repr(...)]` or `zerocopy` derives) may be placed
+/// on the type declaration.
+#[proc_macro]
+pub fn subset_enum(input: TokenStream) -> TokenStream {
+    permissions::subset_enum_impl(input)
+}
+
+/// Declares an opaque permission type and `<Name>Set` alias for an SELinux object class or
+/// common permission base.
+///
+/// Automatically derives `Clone`, `Copy`, `Debug`, `Eq`, `Hash`, and `PartialEq` on the generated
+/// struct. Supports optional `for <KernelClass>` to associate the permission type with a specific
+/// `KernelClass` variant, and optional `extends <BasePermission>` to inherit permissions from a
+/// common permission base. Each permission defaults its policy name to the `snake_case` of the
+/// permission identifier unless overridden with a distinct non-empty `Variant("custom_name")`.
+#[proc_macro]
+pub fn class_permission_enum(input: TokenStream) -> TokenStream {
+    permissions::class_permission_enum_impl(input)
 }

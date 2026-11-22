@@ -16,6 +16,7 @@ from honeydew import affordances_capable, errors
 from honeydew.auxiliary_devices.power_switch import (
     power_switch as power_switch_interface,
 )
+from honeydew.transports import transport
 from honeydew.transports.fastboot import errors as fastboot_errors
 from honeydew.transports.fastboot import types as fastboot_types
 from honeydew.transports.ffx import errors as ffx_errors
@@ -73,7 +74,7 @@ def _get_fastboot_binary() -> str:
     return bin_path
 
 
-class Fastboot:
+class Fastboot(transport.Transport):
     """Provides methods for Host-(Fuchsia)Target interactions via Fastboot.
 
     Args:
@@ -122,18 +123,15 @@ class Fastboot:
         use_serial: bool = False,
         serial_transport: serial_interface.Serial | None = None,
         power_switch: power_switch_interface.PowerSwitch | None = None,
-        outlet: int | None = None,
     ) -> None:
         """Boot the device to fastboot mode from fuchsia mode.
 
         Args:
             use_serial: Use serial port on the device to boot into Fastboot mode.
-                If set to True, user need to also pass serial_transport, power_switch and outlet
-                args so that device can be power cycled.
+                If set to True, user need to also pass serial_transport and
+                power_switch args so that device can be power cycled.
             serial_transport: Implementation of Serial interface.
             power_switch: Implementation of PowerSwitch interface.
-            outlet (int): If required by power switch hardware, outlet on
-                power switch hardware where this fuchsia device is connected.
 
         Raises:
             FuchsiaStateError: Invalid state to perform this operation.
@@ -156,7 +154,6 @@ class Fastboot:
                 self._boot_to_fastboot_mode_using_serial(
                     serial_transport,
                     power_switch,
-                    outlet,
                 )
             else:
                 self._boot_to_fastboot_mode_using_ffx()
@@ -349,15 +346,12 @@ class Fastboot:
         self,
         serial_transport: serial_interface.Serial | None,
         power_switch: power_switch_interface.PowerSwitch | None,
-        outlet: int | None = None,
     ) -> None:
         """Boot the device to fastboot mode using serial.
 
         Args:
             serial_transport: Implementation of Serial interface.
             power_switch: Implementation of PowerSwitch interface.
-            outlet (int): If required by power switch hardware, outlet on
-                power switch hardware where this fuchsia device is connected.
 
         Raises:
             ValueError: Invalid args sent.
@@ -374,10 +368,10 @@ class Fastboot:
         self.ffx.notify_intentional_disconnect()
 
         _LOGGER.info("Powering off %s...", self._device_name)
-        power_switch.power_off(outlet)
+        power_switch.power_off()
 
         _LOGGER.info("Powering on %s...", self._device_name)
-        power_switch.power_on(outlet)
+        power_switch.power_on()
 
         _LOGGER.info(
             "Lacewing is booting the following device to fastboot mode: %s",

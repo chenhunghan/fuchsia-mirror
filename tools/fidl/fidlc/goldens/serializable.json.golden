@@ -26,7 +26,7 @@
         "SerializableStruct"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
         "line": 7,
         "column": 6,
         "length": 18
@@ -37,7 +37,7 @@
           "name": "serializable",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
             "line": 6,
             "column": 1,
             "length": 13
@@ -66,7 +66,7 @@
         "SerializableTable"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
         "line": 10,
         "column": 6,
         "length": 17
@@ -77,7 +77,7 @@
           "name": "serializable",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
             "line": 9,
             "column": 1,
             "length": 13
@@ -105,7 +105,7 @@
         "SerializableUnion"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
         "line": 13,
         "column": 6,
         "length": 17
@@ -116,7 +116,7 @@
           "name": "serializable",
           "arguments": [],
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
             "line": 12,
             "column": 1,
             "length": 13
@@ -141,7 +141,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/serializable.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/serializable.test.fidl",
             "line": 14,
             "column": 8,
             "length": 6

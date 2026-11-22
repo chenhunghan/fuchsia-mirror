@@ -30,7 +30,7 @@ void VmBytecodeForwardJumper::JumpToHere() {
   // If this hits you called JumpToHere() twice on the same object.
   FX_DCHECK(jump_source_index_ != VmOp::kBadJumpDest);
 
-  (*stream_)[jump_source_index_].SetJumpDest(stream_->size());
+  (*stream_)[jump_source_index_].SetJumpDest(static_cast<uint32_t>(stream_->size()));
 
   // Help catch usage errors later.
   jump_source_index_ = VmOp::kBadJumpDest;

@@ -8,6 +8,7 @@ use core::ffi::CStr;
 use core::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 use x86_idle_states_bindings::X86_CSTATE_C1_MWAIT_HINT;
+pub use x86_idle_states_bindings::kX86IdleStateMaskC1Only as X86_IDLE_STATE_MASK_C1_ONLY;
 use zx_types::zx_duration_t;
 
 use super::feature::{
@@ -20,7 +21,7 @@ const X86_CSTATE_C1_NAME: &CStr = c"C1";
 const IDLE_DURATION_FACTOR: zx_duration_t = 3;
 
 /// Returns a base C1 idle state descriptor with the given `exit_latency` (in us).
-const fn x86_cstate_c1(exit_latency: u32) -> x86_idle_state_t {
+pub const fn x86_cstate_c1(exit_latency: u32) -> x86_idle_state_t {
     x86_idle_state_t {
         name: X86_CSTATE_C1_NAME.as_ptr(),
         mwait_hint: X86_CSTATE_C1_MWAIT_HINT,
@@ -210,40 +211,6 @@ zr::static_assert!(core::mem::size_of::<X86IdleStates>() == 312);
 zr::static_assert!(core::mem::align_of::<X86IdleStates>() == 8);
 
 impl X86IdleStates {
-    /// Creates an `X86IdleStates` table from the static `states` descriptor.
-    ///
-    /// # Safety
-    ///
-    /// Every populated entry in `states.states` up to and including the terminating base `C1`
-    /// state must have a `name` pointer that is either null or points to a valid NUL-terminated
-    /// `'static` C string.
-    pub(super) unsafe fn new(states: &'static x86_idle_states_t) -> Self {
-        let num_states = x86_num_idle_states(states);
-        assert!(
-            num_states > 0,
-            "Invalid C-state configuration: Expected at least C1 to be defined."
-        );
-        let num_states = num_states as usize;
-        let state_entries = core::array::from_fn(|i| {
-            if i < num_states {
-                // SAFETY: Caller guarantees populated entries in `states.states` have valid
-                // `'static` NUL-terminated `name` C strings.
-                unsafe { X86IdleState::new(&states.states[i]) }
-            } else {
-                // Initialize trailing slots `i >= num_states` to `BASE_C1_STATE` so every element
-                // of `[X86IdleState; X86_MAX_CSTATES]` holds a valid `'static` reference.
-                X86IdleState::default()
-            }
-        });
-        Self {
-            states: state_entries,
-            num_states,
-            last_idle_duration: AtomicI64::new(0),
-            // Always allow C1
-            state_mask: AtomicU32::new(states.default_state_mask | 0x1),
-        }
-    }
-
     /// Initializes an `X86IdleStates` table in place from the static `states` descriptor.
     ///
     /// # Safety
@@ -252,11 +219,62 @@ impl X86IdleStates {
     /// - Every populated entry in `states.states` up to and including the terminating base `C1`
     ///   state must have a `name` pointer that is either null or points to a valid NUL-terminated
     ///   `'static` C string.
-    pub(super) unsafe fn init_ptr(this: *mut Self, states: &'static x86_idle_states_t) {
-        // SAFETY: `this` points to valid, writable storage for `Self`, and the caller guarantees
-        // `states` upholds `Self::new`'s safety precondition.
+    pub unsafe fn init_ptr(this: *mut Self, states: &'static x86_idle_states_t) {
+        let num_states = x86_num_idle_states(states);
+        assert!(
+            num_states > 0,
+            "Invalid C-state configuration: Expected at least C1 to be defined."
+        );
+        let num_states = num_states as usize;
+        // SAFETY: `this` points to valid, writable storage for `X86IdleStates`, and the caller
+        // guarantees `states` upholds `Self::new`'s safety precondition.
         unsafe {
-            this.write(Self::new(states));
+            let mut i = 0;
+            while i < num_states {
+                (&raw mut (*this).states[i]).write(X86IdleState::new(&states.states[i]));
+                i += 1;
+            }
+            while i < X86_MAX_CSTATES {
+                (&raw mut (*this).states[i]).write(X86IdleState::new(&BASE_C1_STATE));
+                i += 1;
+            }
+            (&raw mut (*this).num_states).write(num_states);
+            (&raw mut (*this).last_idle_duration).write(AtomicI64::new(0));
+            (&raw mut (*this).state_mask).write(AtomicU32::new(states.default_state_mask | 0x1));
+        }
+    }
+
+    /// Creates an `X86IdleStates` table from the static `states` descriptor.
+    ///
+    /// # Safety
+    ///
+    /// Every populated entry in `states.states` up to and including the terminating base `C1`
+    /// state must have a `name` pointer that is either null or points to a valid NUL-terminated
+    /// `'static` C string.
+    pub const unsafe fn new(states: &'static x86_idle_states_t) -> Self {
+        let num_states = x86_num_idle_states(states);
+        assert!(
+            num_states > 0,
+            "Invalid C-state configuration: Expected at least C1 to be defined."
+        );
+        let num_states = num_states as usize;
+        let mut table = [const {
+            // SAFETY: `BASE_C1_STATE.name` is a valid `'static` C string literal (`c"C1"`).
+            unsafe { X86IdleState::new(&BASE_C1_STATE) }
+        }; X86_MAX_CSTATES];
+        let mut i = 0;
+        while i < num_states {
+            // SAFETY: Caller guarantees populated entries in `states.states` have valid
+            // `'static` NUL-terminated `name` C strings.
+            table[i] = unsafe { X86IdleState::new(&states.states[i]) };
+            i += 1;
+        }
+        Self {
+            states: table,
+            num_states,
+            last_idle_duration: AtomicI64::new(0),
+            // Always allow C1
+            state_mask: AtomicU32::new(states.default_state_mask | 0x1),
         }
     }
 

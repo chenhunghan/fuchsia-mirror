@@ -18,6 +18,27 @@ from typing import Any, Callable, Dict, List
 
 SUCCESS_RE = re.compile("TEST SUCCESS$", re.MULTILINE)
 
+ELF_MAGIC = b"\x7fELF"
+ELFDATA2LSB = 1
+EM_X86_64 = 62
+
+
+def verify_x86_64_elf(path: pathlib.Path, package_path: str) -> None:
+    """Verifies that `path` is built for x86_64 if it is an ELF binary."""
+    with path.open("rb") as f:
+        header = f.read(20)
+    if len(header) < 20 or header[:4] != ELF_MAGIC:
+        return
+    e_machine = (
+        int.from_bytes(header[18:20], "little")
+        if header[5] == ELFDATA2LSB
+        else int.from_bytes(header[18:20], "big")
+    )
+    if e_machine != EM_X86_64:
+        raise ValueError(
+            f"Binary {path} ({package_path}) is not built for x86_64 (e_machine={e_machine})"
+        )
+
 
 def build_initrd(
     work_dir: pathlib.Path,
@@ -45,18 +66,12 @@ def build_initrd(
         dest_path.parent.mkdir(exist_ok=True, parents=True)
         # Verify that the binary is built for x86_64 if it is an ELF.
         if output_path.is_file():
-            file_out = subprocess.check_output(
-                ["file", "-b", str(output_path)], text=True
-            )
-            if "ELF" in file_out and "x86-64" not in file_out:
-                raise ValueError(
-                    f"Binary {output_path} ({package_path}) is not built for x86_64: {file_out.strip()}"
-                )
+            verify_x86_64_elf(output_path, package_path)
 
         shutil.copy(output_path, initrd_dir / dest_path)
 
     subprocess.run(
-        "find . | cpio --quiet -R +0:+0 -H newc -o | gzip -9 -n > ../initrd.img",
+        "find . | cpio --quiet -R +0:+0 -H newc -o | gzip -1 -n > ../initrd.img",
         shell=True,
         check=True,
         cwd=initrd_dir,
@@ -317,7 +332,7 @@ class TestSestarnixUserspaceOnLinux(unittest.TestCase):
             / "host_x64/obj/src/starnix/tests/selinux/userspace/qemu"
         )
 
-        append_args = f"console=ttyS0 security=selinux debug=all audit=1 audit_backlog_limit=0 panic=-1 -- data/tests/{test_name}_bin"
+        append_args = f"console=hvc0 quiet security=selinux audit=1 audit_backlog_limit=0 panic=1 -- data/tests/{test_name}_bin"
         if self.args.json or self.args.update_audit_expectations:
             append_args += " --json"
         if self.args.skip_audit:

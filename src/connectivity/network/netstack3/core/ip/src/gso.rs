@@ -21,9 +21,11 @@ use packet::{
 use packet_formats::icmp::{IcmpIpExt, IcmpMessage, IcmpPacketBuilder};
 use packet_formats::ip::{FragmentOffset, IpExt, IpPacket as _, IpProto};
 use packet_formats::ipv4::{
-    HDR_PREFIX_LEN, Ipv4Header, Ipv4Packet, Ipv4PacketBuilder, Ipv4PacketBuilderWithOptions,
+    HDR_PREFIX_LEN, Ipv4Header, Ipv4PacketBuilder, Ipv4PacketBuilderWithOptions,
 };
-use packet_formats::ipv6::{Ipv6Packet, Ipv6PacketBuilder, Ipv6PacketBuilderWithHbhOptions};
+use packet_formats::ipv6::{
+    Ipv6PacketBuilder, Ipv6PacketBuilderWithExtensionHeaders, Ipv6PacketBuilderWithHbhOptions,
+};
 use packet_formats::tcp::options::TcpOptionsRef;
 use packet_formats::tcp::{TcpParseArgs, TcpSegment, TcpSegmentBuilderWithOptions};
 use packet_formats::udp::UdpPacketBuilder;
@@ -40,7 +42,7 @@ pub enum GsoError {
     /// The packet doesn't carry a protocol that can be segmented in software.
     NotSegmentable,
     /// The packet carries headers that can't be faithfully replicated into
-    /// each segment, e.g. IPv4 options or IPv6 extension headers.
+    /// each segment, e.g. IPv4 options or an IPv6 Fragment header.
     UnsupportedHeaders,
     /// The packet's payload is longer than [`MAX_GSO_PAYLOAD_LEN`].
     PayloadTooLong,
@@ -53,23 +55,27 @@ pub trait GsoIpExt:
     + FragmentationIpExt
 {
     /// The IP header template for the segments of a forwarded packet.
-    type ForwardedSegmentBuilder: SegmentableIpPacketBuilder<Self>;
+    type ForwardedSegmentBuilder<'a>: SegmentableIpPacketBuilder<Self>;
 
     /// Returns a template IP header builder for the segments of `packet`.
     ///
     /// Returns an error if `packet` carries headers that can't be replicated
     /// into each segment.
+    //
+    // NB: impls must spell out `packet`'s type via `Self::Packet` (rather than
+    // a concrete packet type) to keep `'a` early-bound, matching this
+    // declaration.
     fn try_segmented_packet_builder<'a>(
-        packet: &Self::Packet<&'a [u8]>,
-    ) -> Result<Self::ForwardedSegmentBuilder, GsoError>;
+        packet: Self::Packet<&'a [u8]>,
+    ) -> Result<Self::ForwardedSegmentBuilder<'a>, GsoError>;
 }
 
 impl GsoIpExt for Ipv4 {
-    type ForwardedSegmentBuilder = Ipv4PacketBuilder;
+    type ForwardedSegmentBuilder<'a> = Ipv4PacketBuilder;
 
     fn try_segmented_packet_builder<'a>(
-        packet: &Ipv4Packet<&'a [u8]>,
-    ) -> Result<Ipv4PacketBuilder, GsoError> {
+        packet: <Self as IpExt>::Packet<&'a [u8]>,
+    ) -> Result<Self::ForwardedSegmentBuilder<'a>, GsoError> {
         // Options would have to be copied into every segment. Packets only
         // reach this path with `GsoInfo` attached by GRO, which refuses to
         // coalesce packets carrying options, so this is a defensive check.
@@ -81,37 +87,43 @@ impl GsoIpExt for Ipv4 {
         if packet.fragment_offset() != FragmentOffset::ZERO || packet.mf_flag() {
             return Err(GsoError::UnsupportedHeaders);
         }
-        Ok(Ipv4Header::builder(packet))
+        Ok(Ipv4Header::builder(&packet))
     }
 }
 
 impl GsoIpExt for Ipv6 {
-    type ForwardedSegmentBuilder = ForwardedIpv6SegmentBuilder;
+    type ForwardedSegmentBuilder<'a> = ForwardedIpv6SegmentBuilder<'a>;
 
     fn try_segmented_packet_builder<'a>(
-        packet: &Ipv6Packet<&'a [u8]>,
-    ) -> Result<ForwardedIpv6SegmentBuilder, GsoError> {
-        // Extension headers would have to be copied into every segment. Packets
-        // only reach this path with `GsoInfo` attached by GRO, which refuses to
-        // coalesce packets carrying extension headers, so this is a defensive
-        // check.
-        if packet.iter_extension_hdrs().next().is_some() {
-            return Err(GsoError::UnsupportedHeaders);
-        }
-        Ok(ForwardedIpv6SegmentBuilder(packet.builder()))
+        packet: <Self as IpExt>::Packet<&'a [u8]>,
+    ) -> Result<Self::ForwardedSegmentBuilder<'a>, GsoError> {
+        // A fragment doesn't carry a complete transport payload, so it can't
+        // be segmented. Packets only reach this path with `GsoInfo` attached
+        // by GRO, which refuses to coalesce packets carrying a Fragment
+        // header, so this is a defensive check.
+        //
+        // Any other extension headers are replicated verbatim into every
+        // segment.
+        packet
+            .into_builder_with_extension_headers()
+            .map(ForwardedIpv6SegmentBuilder)
+            .ok_or(GsoError::UnsupportedHeaders)
     }
 }
 
 /// The IP header of a segment of a forwarded IPv6 packet.
+///
+/// Carries the fixed header along with any extension headers of the forwarded
+/// packet, borrowed from the packet's bytes.
 ///
 /// Per RFC 8200 Section 4.5, routers don't fragment IPv6 packets, so unlike a
 /// bare [`Ipv6PacketBuilder`], segments built with this type refuse to be
 /// fragmented. Segments that don't fit the egress MTU instead fail to send,
 /// causing the forwarding path to generate an ICMPv6 Packet Too Big error.
 #[derive(Clone, Debug)]
-pub struct ForwardedIpv6SegmentBuilder(Ipv6PacketBuilder);
+pub struct ForwardedIpv6SegmentBuilder<'a>(Ipv6PacketBuilderWithExtensionHeaders<&'a [u8]>);
 
-impl SegmentableIpPacketBuilder<Ipv6> for ForwardedIpv6SegmentBuilder {
+impl<'a> SegmentableIpPacketBuilder<Ipv6> for ForwardedIpv6SegmentBuilder<'a> {
     type SegmentBuilder = Self;
 
     fn segment_builder(&self, _index: u16, _gso_info: GsoInfo) -> Self {
@@ -120,7 +132,7 @@ impl SegmentableIpPacketBuilder<Ipv6> for ForwardedIpv6SegmentBuilder {
     }
 }
 
-impl AsFragmentableIpPacketBuilder<Ipv6> for ForwardedIpv6SegmentBuilder {
+impl AsFragmentableIpPacketBuilder<Ipv6> for ForwardedIpv6SegmentBuilder<'_> {
     type Builder<'a>
         = <Ipv6PacketBuilder as AsFragmentableIpPacketBuilder<Ipv6>>::Builder<'a>
     where
@@ -131,21 +143,21 @@ impl AsFragmentableIpPacketBuilder<Ipv6> for ForwardedIpv6SegmentBuilder {
         // re-fragmented to their original size on egress (see the
         // `FragmentableIpSerializer` impl for `ForwardedPacket`). That never
         // applies here: segments only come from packets coalesced by GRO, and
-        // GRO doesn't coalesce fragmented packets (it rejects IPv6 packets with
-        // any extension headers, including the Fragment header), so a segmented
-        // packet can't have been reassembled.
+        // GRO doesn't coalesce fragmented packets (it rejects IPv6 packets
+        // carrying a Fragment header), so a segmented packet can't have been
+        // reassembled.
         Err(FragmentationError::NotAllowed)
     }
 }
 
-impl NestablePacketBuilder for ForwardedIpv6SegmentBuilder {
+impl NestablePacketBuilder for ForwardedIpv6SegmentBuilder<'_> {
     fn constraints(&self) -> PacketConstraints {
         let Self(builder) = self;
         builder.constraints()
     }
 }
 
-impl PacketBuilder<NetworkSerializationContext> for ForwardedIpv6SegmentBuilder {
+impl PacketBuilder<NetworkSerializationContext> for ForwardedIpv6SegmentBuilder<'_> {
     fn context_state(&self) -> <NetworkSerializationContext as SerializationContext>::ContextState {
         let Self(builder) = self;
         PacketBuilder::<NetworkSerializationContext>::context_state(builder)
@@ -209,7 +221,7 @@ where
     const SOURCE: GsoSource = GsoSource::Forwarded;
 
     type IpBuilder<'a>
-        = I::ForwardedSegmentBuilder
+        = I::ForwardedSegmentBuilder<'a>
     where
         Self: 'a;
     type TransportBuilder<'a>
@@ -672,7 +684,7 @@ fn segmenter_from_packet_bytes<I: GsoIpExt>(
     packet_bytes: &[u8],
     gso_info: GsoInfo,
 ) -> Result<
-    GsoSegmenter<I, I::ForwardedSegmentBuilder, ParsedForwardedTransport<'_, I::Addr>, &[u8]>,
+    GsoSegmenter<I, I::ForwardedSegmentBuilder<'_>, ParsedForwardedTransport<'_, I::Addr>, &[u8]>,
     GsoError,
 > {
     let mut buffer = packet_bytes;
@@ -680,13 +692,12 @@ fn segmenter_from_packet_bytes<I: GsoIpExt>(
     if packet.proto() != IpProto::Tcp.into() {
         return Err(GsoError::NotSegmentable);
     }
-    let ip_builder = I::try_segmented_packet_builder(&packet)?;
-
     let (src_ip, dst_ip) = (packet.src_ip(), packet.dst_ip());
     // Re-slice the IP bytes from `packet_bytes` for TCP parsing because
-    // `packet` is dropped at the end of the function.
+    // `packet` is consumed by `try_segmented_packet_builder`.
     let ip_body =
         &packet_bytes[packet.parse_metadata().header_len()..][..packet.parse_metadata().body_len()];
+    let ip_builder = I::try_segmented_packet_builder(packet)?;
     let mut tcp_bytes = ip_body;
     // GRO produced this packet after verifying the transport-layer checksums of
     // the source packets, so there's no need to verify the checksum of the
@@ -786,7 +797,15 @@ mod tests {
     use netstack3_base::testutil::{TEST_ADDRS_V4, TEST_ADDRS_V6, TestIpExt};
     use packet::{Buf, Serializer};
     use packet_formats::ip::{IpPacketBuilder as _, IpProto};
+    use packet_formats::ipv4::Ipv4Packet;
     use packet_formats::ipv4::options::Ipv4Option;
+    use packet_formats::ipv6::ext_hdrs::{
+        ExtensionHeaderOptionAction, HopByHopOption, HopByHopOptionData,
+    };
+    use packet_formats::ipv6::{
+        IPV6_FIXED_HDR_LEN, IPV6_PAYLOAD_LEN_BYTE_RANGE, Ipv6Packet,
+        Ipv6PacketBuilderWithFragmentHeader,
+    };
     use packet_formats::tcp::TcpSegmentBuilder;
     use packet_formats::tcp::options::{
         TcpOptions as _, TcpOptionsBuilder, TcpSackBlock, TimestampOption,
@@ -1126,16 +1145,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn rejects_ipv6_packet_with_extension_headers() {
-        use packet_formats::ipv6::Ipv6PacketBuilderWithHbhOptions;
-        use packet_formats::ipv6::ext_hdrs::{
-            ExtensionHeaderOptionAction, HopByHopOption, HopByHopOptionData,
-        };
-
+    /// Returns a serialized IPv6 TCP packet carrying a [`PAYLOAD_LEN`]-long
+    /// payload behind the IP builder returned by `ip_builder`.
+    fn new_ipv6_tcp_packet<IB>(ip_builder: impl FnOnce(Ipv6PacketBuilder) -> IB) -> Vec<u8>
+    where
+        IB: PacketBuilder<NetworkSerializationContext> + NestablePacketBuilder,
+    {
         let src_ip = TEST_ADDRS_V6.local_ip.get();
         let dst_ip = TEST_ADDRS_V6.remote_ip.get();
-        let packet = Buf::new(test_payload(PAYLOAD_LEN), ..)
+        Buf::new(test_payload(PAYLOAD_LEN), ..)
             .wrap_in(TcpSegmentBuilder::new(
                 src_ip,
                 dst_ip,
@@ -1145,27 +1163,63 @@ mod tests {
                 None,
                 u16::MAX,
             ))
-            .wrap_in(
-                Ipv6PacketBuilderWithHbhOptions::new(
-                    Ipv6PacketBuilder::new(src_ip, dst_ip, TTL, IpProto::Tcp.into()),
-                    &[HopByHopOption {
-                        action: ExtensionHeaderOptionAction::SkipAndContinue,
-                        mutable: false,
-                        data: HopByHopOptionData::RouterAlert { data: 0 },
-                    }],
-                )
-                .expect("create builder"),
-            )
+            .wrap_in(ip_builder(Ipv6PacketBuilder::new(src_ip, dst_ip, TTL, IpProto::Tcp.into())))
             .serialize_vec_outer(&mut NetworkSerializationContext::default())
+            .map_err(|(err, _serializer)| err)
             .expect("serialize packet")
             .unwrap_b()
-            .into_inner();
-        assert_eq!(
-            segmenter_from_packet_bytes::<Ipv6>(
-                &packet,
-                gso_info::<Ipv6>(Ipv4IdMode::Incrementing)
+            .into_inner()
+    }
+
+    #[test]
+    fn segments_ipv6_packet_with_extension_headers() {
+        let src_ip = TEST_ADDRS_V6.local_ip.get();
+        let dst_ip = TEST_ADDRS_V6.remote_ip.get();
+        let packet = new_ipv6_tcp_packet(|ip| {
+            Ipv6PacketBuilderWithHbhOptions::new(
+                ip,
+                &[HopByHopOption {
+                    action: ExtensionHeaderOptionAction::SkipAndContinue,
+                    mutable: false,
+                    data: HopByHopOptionData::RouterAlert { data: 0 },
+                }],
             )
-            .err(),
+            .expect("create builder")
+        });
+        // The fixed header plus an 8-byte Hop-by-Hop Options header.
+        let header_len = IPV6_FIXED_HDR_LEN + 8;
+
+        let segments = collect_segments(
+            segmenter_from_packet_bytes::<Ipv6>(&packet, gso_info::<Ipv6>(Ipv4IdMode::Fixed))
+                .expect("create segmenter"),
+        );
+        assert_eq!(segments.len(), NUM_SEGMENTS);
+
+        let (len_start, len_end) =
+            (IPV6_PAYLOAD_LEN_BYTE_RANGE.start, IPV6_PAYLOAD_LEN_BYTE_RANGE.end);
+        let mut collected = Vec::new();
+        for mut segment in segments {
+            // Everything but the payload length is reproduced verbatim.
+            assert_eq!(segment.as_ref()[..len_start], packet[..len_start]);
+            assert_eq!(segment.as_ref()[len_end..header_len], packet[len_end..header_len]);
+            let _ = segment.parse::<Ipv6Packet<_>>().expect("parse IP packet");
+            let tcp = segment
+                .parse_with::<_, TcpSegment<_>>(TcpParseArgs::new(src_ip, dst_ip))
+                .expect("parse TCP segment");
+            collected.extend_from_slice(tcp.body());
+        }
+        assert_eq!(collected, test_payload(PAYLOAD_LEN));
+    }
+
+    #[test]
+    fn rejects_ipv6_packet_with_fragment_header() {
+        // An atomic fragment: a complete packet that nonetheless carries a
+        // Fragment header.
+        let packet = new_ipv6_tcp_packet(|ip| {
+            Ipv6PacketBuilderWithFragmentHeader::new(ip, FragmentOffset::ZERO, false, 0x1234)
+        });
+        assert_eq!(
+            segmenter_from_packet_bytes::<Ipv6>(&packet, gso_info::<Ipv6>(Ipv4IdMode::Fixed)).err(),
             Some(GsoError::UnsupportedHeaders)
         );
     }

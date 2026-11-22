@@ -114,8 +114,6 @@ rustc_library(
     ],
 )
 
-# LINT.IfChange
-
 # @bazel2gn:skip
 gidl(
     name = "generate_conformance_test",
@@ -170,5 +168,3 @@ wrap_host_rust_test(
     test_args = ["--test-threads=1"],
     visibility = ["//src/lib/fidl_codec:__subpackages__"],
 )
-
-# LINT.ThenChange(BUILD.gn)

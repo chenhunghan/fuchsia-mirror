@@ -11,6 +11,7 @@ use std::ops::Range;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use storage_units::BlockSize;
 
 #[cfg(target_os = "fuchsia")]
 mod buffer_source {
@@ -122,9 +123,21 @@ mod buffer_source {
             }
         }
 
-        /// Commits the range in memory to avoid future page faults.
+        /// Commits the range in memory and installs writable page table entries to avoid future
+        /// page faults.
         pub fn commit_range(&self, range: Range<usize>) -> Result<(), zx::Status> {
-            self.vmo.op_range(zx::VmoOp::COMMIT, range.start as u64, range.len() as u64)
+            if range.start > self.size || range.end > self.size || range.start > range.end {
+                return Err(zx::Status::OUT_OF_RANGE);
+            }
+            if range.is_empty() {
+                return Ok(());
+            }
+            let aligned_start = storage_units::page_size().align_down(range.start as u64) as usize;
+            vmar_root_self().op_range(
+                zx::VmarOp::COMMIT,
+                (self.base as usize) + aligned_start,
+                range.end - aligned_start,
+            )
         }
 
         /// Zeroes out the range so the kerne can reclaim the pages.
@@ -309,7 +322,10 @@ impl<'a, A: TryAllocateBuffer<'a> + ?Sized> Future for BufferFuture<'a, A> {
 impl BufferAllocator {
     pub fn new(block_size: usize, source: BufferSource) -> Self {
         assert!(block_size <= source.size());
-        let allocator = BuddyAllocator::new(source.size(), block_size);
+        let allocator = BuddyAllocator::new(
+            source.size(),
+            BlockSize::new(block_size as u64).expect("block_size must be a non-zero power of two"),
+        );
         Self { block_size, source, inner: Mutex::new(allocator), event: Event::new() }
     }
 
@@ -494,6 +510,7 @@ mod tests {
     use rand::{RngExt as _, rng};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use storage_units::BlockSize;
 
     #[fuchsia::test]
     async fn test_odd_sized_buffer_source() {
@@ -600,8 +617,8 @@ mod tests {
     #[fuchsia::test(threads = 10)]
     async fn test_random_allocs_deallocs() {
         let source = BufferSource::new(16 * 1024 * 1024);
-        let bs = 512;
-        let allocator = Arc::new(BufferAllocator::new(bs, source));
+        let bs = BlockSize::SIZE_512B;
+        let allocator = Arc::new(BufferAllocator::new(bs.get() as usize, source));
 
         join_all((0..10).map(|_| {
             let allocator = allocator.clone();
@@ -622,7 +639,8 @@ mod tests {
                             // This way we don't bias towards larger allocations too much.
                             let order: usize = rng.random_range(order(1, bs)..order(65536 + 1, bs));
                             let size: usize = rng.random_range(
-                                bs * 2_usize.pow(order as u32)..bs * 2_usize.pow(order as u32 + 1),
+                                (bs * 2_u64.pow(order as u32)) as usize
+                                    ..(bs * 2_u64.pow(order as u32 + 1)) as usize,
                             );
                             if let Ok(mut buf) = allocator.try_allocate_buffer(size) {
                                 let val = rng.random::<u8>();
@@ -990,6 +1008,22 @@ mod tests {
         let vmo = source.vmo();
         let info = vmo.basic_info().expect("failed to get basic info");
         assert!(!info.rights.contains(zx::Rights::TRANSFER));
+    }
+
+    #[fuchsia::test]
+    #[cfg(target_os = "fuchsia")]
+    async fn test_commit_range() {
+        let page_size = zx::system_get_page_size() as usize;
+        let source = BufferSource::new(page_size * 4);
+        assert_eq!(source.vmo().info().unwrap().committed_bytes, 0);
+
+        source.commit_range(0..0).expect("commit empty range failed");
+        assert_eq!(source.vmo().info().unwrap().committed_bytes, 0);
+
+        source.commit_range(100..page_size + 100).expect("commit_range failed");
+        assert_eq!(source.vmo().info().unwrap().committed_bytes, (page_size * 2) as u64);
+
+        assert_eq!(source.commit_range(0..page_size * 4 + 1), Err(zx::Status::OUT_OF_RANGE));
     }
 
     #[fuchsia::test]

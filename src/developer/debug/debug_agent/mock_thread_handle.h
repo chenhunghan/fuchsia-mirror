@@ -6,6 +6,7 @@
 #define SRC_DEVELOPER_DEBUG_DEBUG_AGENT_MOCK_THREAD_HANDLE_H_
 
 #include <map>
+#include <utility>
 
 #include "src/developer/debug/debug_agent/thread_handle.h"
 
@@ -63,6 +64,7 @@ class MockThreadHandle final : public ThreadHandle {
   debug_ipc::ThreadRecord GetThreadRecord(zx_koid_t process_koid) const override;
   std::unique_ptr<SuspendHandle> Suspend() override;
   bool WaitForSuspension(TickTimePoint deadline) const override;
+  bool WaitForSuspensionSignal(TickTimePoint deadline) const override;
   std::optional<GeneralRegisters> GetGeneralRegisters() const override;
   void SetGeneralRegisters(const GeneralRegisters& regs) override;
   std::optional<DebugRegisters> GetDebugRegisters() const override;
@@ -86,7 +88,7 @@ class MockThreadHandle final : public ThreadHandle {
   zx_koid_t thread_koid_;
   std::string name_;
 
-  std::vector<debug::RegisterValue> registers_[static_cast<size_t>(debug::RegisterCategory::kLast)];
+  std::vector<debug::RegisterValue> registers_[std::to_underlying(debug::RegisterCategory::kLast)];
 
   State state_;
   bool single_step_ = false;

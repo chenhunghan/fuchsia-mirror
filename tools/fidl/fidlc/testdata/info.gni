@@ -43,6 +43,7 @@ import("//build/fidl/toolchain.gni")
 #   fidl_gen_dir (computed)
 #     The target's `target_gen_dir` in `fidl_toolchain`.
 #
+# LINT.IfChange
 # Please keep sorted by name.
 fidl_testdata_info = [
   {
@@ -544,3 +545,4 @@ foreach(info, _fidl_testdata_info) {
 
   fidl_testdata_info += [ info ]
 }
+# LINT.ThenChange(info.bzl)

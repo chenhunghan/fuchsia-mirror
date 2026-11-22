@@ -21,7 +21,7 @@
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "binder_policy"; }
+extern std::string GetTestPolicyName() { return "binder_policy"; }
 
 namespace starnix_binder {
 
@@ -219,11 +219,8 @@ TEST_P(ContextManagerPermission, BecomeServiceManager) {
   ASSERT_TRUE(RunSubprocessAs(label, [&] {
     fbl::unique_fd binder = OpenBinder(temp_dir_.path());
     EXPECT_TRUE(binder) << strerror(errno);
-    if (expect_success) {
-      EXPECT_THAT(ioctl(binder.get(), BINDER_SET_CONTEXT_MGR, 0), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(ioctl(binder.get(), BINDER_SET_CONTEXT_MGR, 0), SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(ioctl(binder.get(), BINDER_SET_CONTEXT_MGR, 0),
+                SyscallSucceedsOrFailsWithErrno(expect_success, EACCES));
   }));
 }
 

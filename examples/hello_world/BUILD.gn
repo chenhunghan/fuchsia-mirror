@@ -2,8 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
 group("hello_world") {
   testonly = true
   deps = [
@@ -15,8 +13,5 @@ group("hello_world") {
 
 group("hermetic_tests") {
   testonly = true
-  deps = [
-    "cpp:hermetic_tests",
-    "rust:hermetic_tests",
-  ]
+  deps = [ "rust:hermetic_tests" ]
 }

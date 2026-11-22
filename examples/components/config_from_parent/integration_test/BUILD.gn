@@ -20,6 +20,7 @@ rustc_test("rust_bin") {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-component-test",
+    "//src/sys/lib/cm_rust",
     "//third_party/rust_crates:anyhow",
   ]
 
@@ -34,7 +35,6 @@ executable("cpp_bin") {
   deps = [
     "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp_hlcpp_conversion",
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
     "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_hlcpp",
     "//sdk/lib/component/incoming/cpp",
@@ -59,18 +59,12 @@ fuchsia_test_component("cpp_test") {
 
 fuchsia_test_package("rust_config_from_parent_integration_test") {
   test_components = [ ":rust_test" ]
-  deps = [
-    "//examples/components/config_from_parent/rust:component",
-    "//examples/components/config_from_parent/rust:values_from_gn",
-  ]
+  deps = [ "//examples/components/config_from_parent/rust:component" ]
 }
 
 fuchsia_test_package("cpp_config_from_parent_integration_test") {
   test_components = [ ":cpp_test" ]
-  deps = [
-    "//examples/components/config_from_parent/cpp:component",
-    "//examples/components/config_from_parent/cpp:values_from_gn",
-  ]
+  deps = [ "//examples/components/config_from_parent/cpp:component" ]
 }
 
 group("hermetic_tests") {

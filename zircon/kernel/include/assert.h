@@ -125,11 +125,6 @@
     }                                                          \
   } while (0)
 
-// make sure static_assert() is defined, even in C
-#if !defined(static_assert)
-#define static_assert(e, msg) _Static_assert(e, msg)
-#endif
-
 #endif  // __cplusplus
 
 // implement _COND versions of DEBUG_ASSERT which only emit the body if

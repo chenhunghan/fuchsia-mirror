@@ -65,12 +65,12 @@ func NewRepeatableBuildConfig(
 	fs.Var(
 		repeatableBuildVar{c: c, kind: builderNameKind},
 		fmt.Sprintf("%sbuilder-name", prefix),
-		"Pave to the latest version of this builder",
+		"Pave to the latest version of this builder, optionally with @<product_bundle_name> (e.g. <builder>@core.x64)",
 	)
 	fs.Var(
 		repeatableBuildVar{c: c, kind: buildIdKind},
 		fmt.Sprintf("%sbuild-id", prefix),
-		"Pave to this specific build id, optionally with :<version_policy> (e.g. <build_id>:fromApiLevel)",
+		"Pave to this specific build id, optionally with :<version_policy> and/or @<product_bundle_name> (e.g. <build_id>:fromApiLevel@core.x64)",
 	)
 	fs.Var(
 		repeatableBuildVar{c: c, kind: fuchsiaBuildDirKind},
@@ -91,7 +91,7 @@ func NewRepeatableBuildConfig(
 		&c.productBundleName,
 		fmt.Sprintf("%sproduct-bundle-name", prefix),
 		"",
-		"Name of the product bundle to use",
+		"Name of the product bundle to use, for builds that don't specify their own with @<product_bundle_name>",
 	)
 
 	return c
@@ -135,7 +135,7 @@ func (c *RepeatableBuildConfig) GetBuilds(
 		case productBundleDirKind:
 			build = artifacts.NewProductBundleDirBuild(b.value)
 		}
-		productBundle, err := build.GetProductBundle(ctx, c.productBundleName)
+		productBundle, err := build.GetProductBundle(ctx, b.productBundleNameOr(c.productBundleName))
 		if err != nil {
 			return nil, err
 		}
@@ -175,6 +175,19 @@ type repeatableBuild struct {
 	kind          repeatableBuildKind
 	value         string
 	versionPolicy string
+
+	// The name of the product bundle to use from this build. If empty, the
+	// default from `-product-bundle-name` is used instead.
+	productBundleName string
+}
+
+// productBundleNameOr returns the product bundle name for this build, or
+// `defaultName` if the build doesn't specify one.
+func (b repeatableBuild) productBundleNameOr(defaultName string) string {
+	if b.productBundleName != "" {
+		return b.productBundleName
+	}
+	return defaultName
 }
 
 type repeatableBuildVar struct {
@@ -196,10 +209,30 @@ func (v repeatableBuildVar) Set(s string) error {
 
 	val := s
 	versionPolicy := string(ffx.FfxVersionPolicyLatest)
+	productBundleName := ""
+	if v.kind == buildIdKind || v.kind == builderNameKind {
+		// For builds from the archive, we allow a "@product_bundle_name" suffix
+		// to specify which of the build's product bundles to use. This allows
+		// builds that publish different product bundles (e.g. a single-product
+		// build and a multi-product build) to be used in the same test.
+		if before, after, ok := strings.Cut(val, "@"); ok {
+			if after == "" {
+				return fmt.Errorf("product bundle name cannot be empty in %s specifier: %q", v.kind, s)
+			}
+			if strings.Contains(after, "@") {
+				return fmt.Errorf("too many '@' parts in %s specifier: %q", v.kind, s)
+			}
+			if v.kind == buildIdKind && strings.Contains(after, ":") {
+				return fmt.Errorf("version policy must precede @<product_bundle_name> in %s specifier: %q", v.kind, s)
+			}
+			val = before
+			productBundleName = after
+		}
+	}
 	if v.kind == buildIdKind {
 		// For build IDs, we allow the format "build_id:version_policy" to specify a specific
 		// ffx version policy to use with this build.
-		parts := strings.Split(s, ":")
+		parts := strings.Split(val, ":")
 		val = parts[0]
 		if val == "" {
 			return fmt.Errorf("build ID cannot be empty")
@@ -214,7 +247,15 @@ func (v repeatableBuildVar) Set(s string) error {
 			}
 		}
 	}
+	if val == "" {
+		return fmt.Errorf("%s value cannot be empty", v.kind)
+	}
 
-	v.c.builds = append(v.c.builds, repeatableBuild{kind: v.kind, value: val, versionPolicy: versionPolicy})
+	v.c.builds = append(v.c.builds, repeatableBuild{
+		kind:              v.kind,
+		value:             val,
+		versionPolicy:     versionPolicy,
+		productBundleName: productBundleName,
+	})
 	return nil
 }

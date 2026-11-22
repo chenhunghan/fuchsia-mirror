@@ -72,8 +72,8 @@ source_set("src") {
 
   deps = [
     "../include",
+    "//sdk/lib/memory_barriers",
     "//src/graphics/magma:msd",
-    "//src/graphics/magma/lib/magma/platform:barriers",
     "//src/graphics/magma/lib/magma/platform:buffer",
     "//src/graphics/magma/lib/magma/platform:bus_mapper",
     "//src/graphics/magma/lib/magma/platform:device_header",

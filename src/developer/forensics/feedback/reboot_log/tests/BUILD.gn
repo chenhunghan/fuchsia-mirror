@@ -15,7 +15,7 @@ cc_test_executable("final_shutdown_info_unittest_exe") {
   sources = [ "final_shutdown_info_unittest.cc" ]
 
   deps = [
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
+    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
     "//src/developer/forensics/feedback/reboot_log",
     "//src/developer/forensics/testing:gpretty_printers",
     "//src/developer/forensics/testing:unit_test_fixture",

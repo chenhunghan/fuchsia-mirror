@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Where converted code lands: which Rust files each C++ file's functions
 //! went to. Each C++ file should become (roughly) one Rust file named after
 //! it, so a reviewer can put the two side by side. A C++ file split across

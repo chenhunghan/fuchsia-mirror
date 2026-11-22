@@ -4,7 +4,7 @@
 
 #include "lib/media/audio/cpp/perceived_level.h"
 
-#include <fuchsia/media/cpp/fidl.h>
+#include <fidl/fuchsia.media.audio/cpp/fidl.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <algorithm>
@@ -34,7 +34,7 @@ float PerceivedLevel::GainToLevel(float gain_db) {
 // static
 float PerceivedLevel::LevelToGain(float level) {
   if (level <= 0.0f) {
-    return fuchsia::media::audio::MUTED_GAIN_DB;
+    return fuchsia_media_audio::kMutedGainDb;
   }
 
   if (level >= 1.0f) {
@@ -64,7 +64,7 @@ float PerceivedLevel::LevelToGain(int level, int max_level) {
   FX_DCHECK(max_level > 0);
 
   if (level <= 0) {
-    return fuchsia::media::audio::MUTED_GAIN_DB;
+    return fuchsia_media_audio::kMutedGainDb;
   }
 
   if (level >= max_level) {

@@ -14,6 +14,7 @@ use ffx_config::EnvironmentContext;
 pub use ffx_futures::LocalBoxFuture as BoxFuture;
 use fho::{Result, user_error};
 use std::backtrace::Backtrace;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -47,11 +48,13 @@ pub trait EmulatorEngine: Send + Sync {
 
     /// Given a staged emulator instance, start it running. When the function returns, either the
     /// emulator will be running independently, or an error will be sent back explaining the failure.
+    /// Progress messages for the user are written to `out`.
     fn start<'a>(
         &'a mut self,
         _context: &'a EnvironmentContext,
         mut _emulator_cmd: Command,
-    ) -> BoxFuture<'a, Result<i32>> {
+        _out: &'a mut dyn Write,
+    ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async {
             let bt = Backtrace::force_capture();
             unimplemented!(
@@ -189,6 +192,12 @@ pub trait EmulatorEngine: Send + Sync {
             should not be used directly\n{:?}",
             bt
         )
+    }
+
+    /// Returns warnings for the user about a configuration which passed validation: settings which
+    /// are accepted, but which may cause the emulator to misbehave.
+    fn configuration_warnings(&self) -> Vec<String> {
+        vec![]
     }
 
     /// Returns the EngineType used when building this engine. Each engine implementation should

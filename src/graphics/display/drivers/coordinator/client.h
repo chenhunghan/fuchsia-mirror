@@ -178,6 +178,9 @@ class Client final : public fidl::WireServer<fuchsia_hardware_display::Coordinat
   void SetDisplayPowerMode(SetDisplayPowerModeRequestView request,
                            SetDisplayPowerModeCompleter::Sync& completer) override;
 
+  void NotifyExpectedPresent(NotifyExpectedPresentRequestView request,
+                             NotifyExpectedPresentCompleter::Sync& completer) override;
+
  private:
   display::ConfigCheckResult CheckConfigImpl();
 

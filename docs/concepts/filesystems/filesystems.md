@@ -74,7 +74,8 @@ redirect these requests to a local handle representing the “/bin” directory,
 rather than sending a request directly to the “bin” directory within the “root”
 directory. Namespaces, like all filesystem constructs, are not visible from the
 kernel: rather, they are implemented in client-side runtimes (such as
-[libfdio](/docs/concepts/filesystems/life_of_an_open.md#Fdio)) and are interposed between most client code
+[libfdio](/docs/concepts/filesystems/life_of_an_open.md#fdio)) and are
+interposed between most client code
 and the handles to remote filesystems.
 
 Since namespaces operate on handles, and most Fuchsia resources and services
@@ -161,7 +162,7 @@ These multi-path operations do the following:
 
 ## Filesystem Lifecycle
 
-### Mounting
+### Mounting {:#mounting}
 
 Fshost is responsible for mounting filesystems on the system. At time of
 writing, changes are underway to make filesystems run as components (although
@@ -217,7 +218,7 @@ typical filesystem. It can be mounted and unmounted, it appears to contain a
 single flat directory of hashes, and blobs can be accessed by operations like
 “open”, “read”, “stat” and “mmap”.
 
-### FVM
+### FVM {:#fvm}
 
 [Fuchsia Volume Manager](/src/storage/fvm/)
 is a "logical volume manager" that adds flexibility on top of existing block
@@ -278,7 +279,7 @@ The slice allocation table is made up of tightly packed slice entries
 
 FVM library can be found
 [here](/src/storage/fvm/). During
-[paving](/docs/development/build/fx.md#what-is-paving),
+[paving](/docs/development/build/fx.md),
 some partitions are copied from host to target. So the partitions and FVM
 file itself may be created on host. To do this there is host side utility
 [here](/src/storage/bin/fvm).

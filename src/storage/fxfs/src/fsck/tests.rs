@@ -6,10 +6,12 @@ use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem, Syn
 use crate::fsck::errors::{FsckError, FsckFatal, FsckIssue, FsckWarning};
 use crate::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
 use crate::lsm_tree::Query;
-use crate::lsm_tree::persistent_layer::PersistentLayerWriter;
-use crate::lsm_tree::types::{Item, ItemRef, Key, LayerIterator, LayerWriter, Value};
+use crate::lsm_tree::persistent_layer::{BloomFilterOptions, PersistentLayerWriter};
+use crate::lsm_tree::types::{
+    CoalescingIterator, Item, ItemRef, Key, LayerIterator, LayerWriter, Value,
+};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ReadObjectHandle, WriteObjectHandle};
-use crate::object_store::allocator::{AllocatorKey, AllocatorValue, CoalescingIterator};
+use crate::object_store::allocator::{AllocatorKey, AllocatorValue};
 use crate::object_store::data_object_handle::OverwriteOptions;
 use crate::object_store::directory::{
     self, Directory, MutableAttributesInternal, encrypt_filename,
@@ -33,6 +35,7 @@ use assert_matches::assert_matches;
 use fidl_fuchsia_io as fio;
 use fuchsia_async as fasync;
 use fuchsia_sync::Mutex;
+use futures::channel::oneshot;
 use futures::join;
 use fxfs_crypt_common::CryptBase;
 use fxfs_crypto::{Crypt, EncryptionKey, KeyPurpose, WrappingKeyId};
@@ -40,8 +43,9 @@ use fxfs_insecure_crypto::new_insecure_crypt;
 use mundane::hash::{Digest, Hasher, Sha256};
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use storage_device::DeviceHolder;
-use storage_device::fake_device::FakeDevice;
+use storage_device::fake_device::{FakeDevice, Op};
 use storage_units::BlockSize;
 use test_case::test_case;
 
@@ -180,7 +184,7 @@ async fn install_items_in_store<K: Key, V: Value>(
     {
         let mut writer = PersistentLayerWriter::<_, K, V>::new(
             Writer::new(&layer_handle).await,
-            items.as_ref().len(),
+            Some(BloomFilterOptions { num_items: items.as_ref().len() }),
             filesystem.block_size(),
         )
         .await
@@ -315,6 +319,128 @@ async fn test_extra_allocation() {
 }
 
 #[fuchsia::test]
+async fn test_fsck_before_open() {
+    let mut test = FsckTest::new().await;
+
+    let fs = test.filesystem.take().unwrap();
+    fs.close().await.expect("close failed");
+    let device = fs.take_device().await;
+    device.reopen(false);
+    let fs = FxFilesystemBuilder::new()
+        .fsck_before_open(true)
+        .open(device)
+        .await
+        .expect("open should succeed when fsck passes");
+
+    // Stage enough unqueued graveyard entries so that reaping them on a writable open fills a
+    // journal block (4 KiB) and triggers background device writes without calling sync/close.
+    let root_store = fs.root_store();
+    for _ in 0..16 {
+        let mut transaction = root_store
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+        for _ in 0..16 {
+            let handle = ObjectStore::create_object(
+                &root_store,
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object failed");
+            root_store.add_to_graveyard(&mut transaction, handle.object_id());
+        }
+        transaction.commit().await.expect("commit failed");
+    }
+
+    {
+        let mut transaction = root_store
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+        let end = fs.block_size().align_down(TEST_DEVICE_BLOCK_SIZE * TEST_DEVICE_BLOCK_COUNT);
+        fs.allocator()
+            .mark_allocated(&mut transaction, 4, end - fs.block_size()..end)
+            .expect("mark_allocated failed");
+        transaction.commit().await.expect("commit failed");
+    }
+    fs.close().await.expect("close failed");
+    let device = fs.take_device().await;
+    device.reopen(false);
+    let image = read_device(&device).await;
+
+    // Writable opens flush and reap the graveyard (writing to the device), but neither writes nor
+    // flushes should happen if fsck fails.
+    for read_only in [false, true] {
+        let mut snapshot = FakeDevice::from_image(
+            &mut std::io::Cursor::new(&image),
+            TEST_DEVICE_BLOCK_SIZE.get() as u32,
+        )
+        .expect("from_image failed");
+        snapshot.set_op_callback(|op| {
+            assert!(!matches!(op, Op::Write | Op::Flush), "Unexpected device mutation");
+            Ok(())
+        });
+        let holder = DeviceHolder::new(snapshot);
+        let taken = holder.take_when_dropped();
+        let err = FxFilesystemBuilder::new()
+            .read_only(read_only)
+            .fsck_before_open(true)
+            .open(holder)
+            .await
+            .map(|_| ())
+            .expect_err("open should fail when fsck fails");
+        assert!(
+            err.to_string().contains("Fsck failed")
+                && format!("{err:#}").contains("Fsck encountered 1 errors"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(read_device(&taken.await).await, image);
+    }
+
+    // Control: opening the same image without `fsck_before_open` flushes and writes via the
+    // background graveyard reaper.
+    let flushes = Arc::new(AtomicUsize::new(0));
+    let flushes_clone = flushes.clone();
+    let (wrote_tx, wrote_rx) = oneshot::channel();
+    let wrote_tx = Mutex::new(Some(wrote_tx));
+    let mut control = FakeDevice::from_image(
+        &mut std::io::Cursor::new(&image),
+        TEST_DEVICE_BLOCK_SIZE.get() as u32,
+    )
+    .expect("from_image failed");
+    control.set_op_callback(move |op| {
+        match op {
+            Op::Flush => {
+                flushes_clone.fetch_add(1, Ordering::Relaxed);
+            }
+            Op::Write => {
+                if let Some(tx) = wrote_tx.lock().take() {
+                    let _ = tx.send(());
+                }
+            }
+            Op::Read => {}
+        }
+        Ok(())
+    });
+    let fs = FxFilesystemBuilder::new()
+        .open(DeviceHolder::new(control))
+        .await
+        .expect("open without fsck should succeed");
+    assert!(flushes.load(Ordering::Relaxed) > 0, "expected flush on writable open");
+    fs.graveyard().flush().await;
+    wrote_rx.await.expect("expected graveyard reap to write to device");
+    fs.close().await.expect("close failed");
+}
+
+async fn read_device(device: &DeviceHolder) -> Vec<u8> {
+    let mut buf = device.allocate_buffer(device.size() as usize).await;
+    device.read(0, buf.as_mut()).await.expect("read failed");
+    buf.as_ref().to_vec()
+}
+
+#[fuchsia::test]
 async fn test_misaligned_allocation() {
     let mut test = FsckTest::new().await;
 
@@ -372,7 +498,7 @@ async fn test_malformed_allocation() {
             let mut writer =
                 PersistentLayerWriter::<_, AllocatorKey, AllocatorValue>::new_with_version(
                     Writer::new(&layer_handle).await,
-                    1,
+                    None,
                     fs.block_size(),
                     OLD_KEY_SERIALIZATION_VERSION,
                 )
@@ -2042,10 +2168,13 @@ async fn test_incorrect_merkle_tree_size_empty_file() {
             .create_child_file(&mut transaction, "verified file")
             .await
             .expect("Create child failed");
-        transaction
-            .commit_and_continue(|| {})
+        transaction = transaction
+            .commit()
             .await
-            .expect("commit_and_continue transaction failed");
+            .expect("commit transaction failed")
+            .continue_transaction()
+            .await
+            .expect("continue_transaction failed");
 
         object
             .enable_verity(fio::VerificationOptions {
@@ -2130,10 +2259,13 @@ async fn test_incorrect_merkle_tree_size_one_data_block() {
             .create_child_file(&mut transaction, "verified file")
             .await
             .expect("Create child failed");
-        transaction
-            .commit_and_continue(|| {})
+        transaction = transaction
+            .commit()
             .await
-            .expect("commit_and_continue transaction failed");
+            .expect("commit transaction failed")
+            .continue_transaction()
+            .await
+            .expect("continue_transaction failed");
 
         let mut buf = object.allocate_buffer(fs.block_size().get() as usize).await;
         buf.fill(1);
@@ -2223,10 +2355,13 @@ async fn test_incorrect_merkle_tree_size_data_unaligned() {
             .create_child_file(&mut transaction, "verified file")
             .await
             .expect("Create child failed");
-        transaction
-            .commit_and_continue(|| {})
+        transaction = transaction
+            .commit()
             .await
-            .expect("commit_and_continue transaction failed");
+            .expect("commit transaction failed")
+            .continue_transaction()
+            .await
+            .expect("continue_transaction failed");
 
         let mut buf = object.allocate_buffer((1 + 5 * fs.block_size()) as usize).await;
         buf.fill(1);
@@ -3935,6 +4070,92 @@ async fn test_project_non_root_usage_metadata() {
 }
 
 #[fuchsia::test]
+async fn test_project_usage_overflow() {
+    let mut test = FsckTest::new().await;
+    let large_size = (i64::MAX as u64) - 10;
+    let tipping_size = 100;
+    let (store_id, project_id, large_object_id, tipping_object_id) = {
+        let fs = test.filesystem();
+        let store = fs.root_store();
+        let store_id = store.store_object_id();
+        let root_directory =
+            Directory::open(&store, store.root_directory_object_id()).await.expect("open failed");
+        let project_id = ProjectId::new(8).unwrap();
+
+        let mut transaction = fs
+            .root_store()
+            .new_transaction(
+                lock_keys![
+                    LockKey::object(store_id, root_directory.object_id()),
+                    LockKey::ProjectId { store_object_id: store_id, project_id },
+                ],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+
+        let mut object_ids = Vec::new();
+        for (name, size) in [("small", 0), ("large", large_size), ("tipping", tipping_size)] {
+            let file = root_directory
+                .create_child_file(&mut transaction, name)
+                .await
+                .expect("create_child_file failed");
+            let mut mutation = transaction
+                .get_object_mutation(store_id, ObjectKey::object(file.object_id()))
+                .unwrap()
+                .clone();
+            if let ObjectValue::Object {
+                attributes: ObjectAttributes { project_id: child_pid, allocated_size, .. },
+                ..
+            } = &mut mutation.item.value
+            {
+                *child_pid = Some(project_id);
+                *allocated_size = size;
+            } else {
+                panic!("Unexpected object type");
+            }
+            transaction.add(store_id, Mutation::ObjectStore(mutation));
+            object_ids.push(file.object_id());
+        }
+
+        transaction.merge_bytes_and_nodes(
+            store_id,
+            ObjectKey::project_usage(root_directory.object_id(), project_id),
+            BytesAndNodes { bytes: 0, nodes: 3 },
+        );
+        transaction.commit().await.expect("commit failed");
+        (store_id, project_id, object_ids[1], object_ids[2])
+    };
+
+    test.remount().await.expect("Remount failed");
+    test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
+        .await
+        .expect_err("Fsck should fail on project usage overflow");
+
+    // ProjectUsageOverflow identifies `large_object_id` as the largest object, and
+    // ProjectUsageInconsistent is suppressed for the overflowed project.
+    assert!(test.errors().contains(&FsckIssue::Warning(FsckWarning::ProjectUsageOverflow(
+        store_id,
+        project_id,
+        large_object_id,
+        large_size,
+    ))));
+    assert!(test.errors().contains(&FsckIssue::Error(FsckError::AllocatedSizeMismatch(
+        store_id,
+        large_object_id,
+        0,
+        large_size,
+    ))));
+    assert!(test.errors().contains(&FsckIssue::Error(FsckError::AllocatedSizeMismatch(
+        store_id,
+        tipping_object_id,
+        0,
+        tipping_size,
+    ))));
+    assert_eq!(test.errors().len(), 3);
+}
+
+#[fuchsia::test]
 async fn test_zombie_file() {
     let mut test = FsckTest::new().await;
 
@@ -4194,7 +4415,7 @@ async fn test_full_disk(read_only: bool) {
         {
             let mut writer = PersistentLayerWriter::<_, AllocatorKey, AllocatorValue>::new(
                 Writer::new(&layer_handle).await,
-                1,
+                None,
                 fs.block_size(),
             )
             .await
@@ -4583,94 +4804,6 @@ async fn test_overwrite_extent_flag_not_set() {
 }
 
 #[fuchsia::test]
-async fn test_invalid_bloom_filter_for_allocator() {
-    let mut test = FsckTest::new().await;
-
-    {
-        let fs = test.filesystem();
-        let root_store = fs.root_store();
-        let device = fs.device();
-
-        let mut transaction = fs
-            .root_store()
-            .new_transaction(lock_keys![], Options::default())
-            .await
-            .expect("new_transaction failed");
-        let layer_handle = ObjectStore::create_object(
-            &root_store,
-            &mut transaction,
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("create_object failed");
-        transaction.commit().await.expect("commit failed");
-
-        {
-            // Fill persistent layers with enough items to start using bloom filter. The following
-            // value was chosen from trial and error. The minimum number of items to add is
-            // complicated to calculate. It depends on the serialized size of the item,
-            // `MINIMUM_DATA_BLOCKS_FOR_BLOOM_FILTER`, and `fs.block_size()`. See the
-            // `PersistentLayerWriter`'s implementation of`LayerWriter::write(..)` for details of
-            // of how the items are written to the persistent layer.
-            let item_count = 3000;
-            let mut items: Vec<Item<AllocatorKey, AllocatorValue>> = vec![];
-            for i in 0..item_count as u64 {
-                // The range per item needs to be disjoint to avoid them being merged.
-                items.push(Item::new(
-                    AllocatorKey {
-                        device_range: ((2 * i * 100 * 512)..(2 * i + 1) * 100 * 512).into(),
-                    },
-                    AllocatorValue::Abs { count: 1, owner_object_id: 1 },
-                ));
-            }
-
-            let mut writer = PersistentLayerWriter::<_, AllocatorKey, AllocatorValue>::new(
-                Writer::new(&layer_handle).await,
-                items.len(),
-                fs.block_size(),
-            )
-            .await
-            .expect("Writer::new failed");
-
-            // Write the items into the layer - requires a minimum amount of items before the bloom
-            // filter is used.
-            for item in AsRef::<Vec<Item<AllocatorKey, AllocatorValue>>>::as_ref(&items) {
-                writer.write(item.as_item_ref()).await.expect("write failed");
-            }
-
-            // Corrupt the bloom filter by clearing it. This will cause the filter to report that
-            // no items exist.
-            writer.bloom_filter().clear();
-
-            writer.complete().await.expect("flush failed");
-        }
-        let mut allocator_info = fs.allocator().info();
-        allocator_info.layers.push(layer_handle.object_id());
-        let mut allocator_info_vec = vec![];
-        allocator_info.serialize_with_version(&mut allocator_info_vec).expect("serialize failed");
-        let mut buf = device.allocate_buffer(allocator_info_vec.len()).await;
-        buf.copy_from_slice(&allocator_info_vec[..]);
-
-        let handle = ObjectStore::open_object(
-            &root_store,
-            fs.allocator().object_id(),
-            HandleOptions::default(),
-            None,
-        )
-        .await
-        .expect("open allocator handle failed");
-        let mut transaction = handle.new_transaction().await.expect("new_transaction failed");
-        handle.txn_write(&mut transaction, 0, buf.as_ref()).await.expect("txn_write failed");
-        transaction.commit().await.expect("commit failed");
-    }
-
-    test.remount().await.expect("remount failed");
-    test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::InvalidBloomFilter(..))]);
-}
-
-#[fuchsia::test]
 async fn test_invalid_bloom_filter_for_volume() {
     let mut test = FsckTest::new().await;
 
@@ -4721,7 +4854,7 @@ async fn test_invalid_bloom_filter_for_volume() {
 
             let mut writer = PersistentLayerWriter::<_, ObjectKey, ObjectValue>::new(
                 Writer::new(&layer_handle).await,
-                items.len(),
+                Some(BloomFilterOptions { num_items: items.len() }),
                 fs.block_size(),
             )
             .await
@@ -4735,7 +4868,7 @@ async fn test_invalid_bloom_filter_for_volume() {
 
             // Corrupt the bloom filter by clearing it. This will cause the filter to report that
             // no items exist.
-            writer.bloom_filter().clear();
+            writer.bloom_filter().unwrap().clear();
 
             writer.complete().await.expect("flush failed");
         }

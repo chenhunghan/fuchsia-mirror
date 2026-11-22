@@ -9,7 +9,7 @@ import("//build/rust/config.gni")
 import("//build/toolchain/toolchain_environment.gni")
 import("//build/zircon/c_utils.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
-import("//zircon/kernel/phys/kernel_elf_binary.gni")
+import("//zircon/kernel/phys/elf/kernel_elf_binary.gni")
 
 _kernel_executable_deps = [
   # main.rs always mounts the kernel's ksync raw lock implementations.

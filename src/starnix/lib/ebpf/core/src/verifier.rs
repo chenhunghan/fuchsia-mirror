@@ -64,6 +64,11 @@ const fn cmp_u64(a: u64, b: u64) -> Ordering {
 }
 
 #[inline]
+const fn saturating_inc_u32(x: u32) -> u32 {
+    if x < u32::MAX { x + 1 } else { u32::MAX }
+}
+
+#[inline]
 fn popcount_u64(mut x: u64) -> usize {
     let mut count = 0usize;
     while x != 0 {
@@ -1199,7 +1204,8 @@ pub enum Type {
     ReleasableParameter { id: MemoryId, inner: Box<Type> },
     /// A function parameter that will release the value.
     ReleaseParameter { id: MemoryId },
-    /// A function parameter that is not checked.
+    /// A function parameter that accepts any initialized scalar, or any initialized non-released
+    /// value when `allow_ptr_leaks` is enabled.
     AnyParameter,
 }
 
@@ -1402,6 +1408,12 @@ impl Type {
         if width == DataWidth::U64 { u64::MAX } else { 1u64.wrapping_shl(width.bits() as u32) - 1 }
     }
 
+    /// Return an unknown written scalar constrained to `width`.
+    fn unknown_written_scalar(width: DataWidth) -> Self {
+        let mask = Self::mask(width);
+        Self::ScalarValue(ScalarValueData::new(0, mask, 0, U64Range::new(0, mask)))
+    }
+
     /// Return the underlying `ScalarValueData` if `self` is a scalar with all bytes initialized.
     fn written_scalar(&self) -> Option<ScalarValueData> {
         match self {
@@ -1459,6 +1471,7 @@ impl Type {
                 }
                 Ok(())
             }
+            Self::NullOr { inner, .. } => (**inner).check_not_released(resources),
             _ => Ok(()),
         }
     }
@@ -2004,7 +2017,22 @@ impl Type {
                     next,
                 )
             }
-            (Type::AnyParameter, _) => Ok(()),
+            (Type::AnyParameter, _) => {
+                match self.check_not_released(&next.resources) {
+                    Ok(()) => {}
+                    Err(err) => return Err(err),
+                }
+                let allowed = if verification_context.calling_context.allow_ptr_leaks {
+                    self.is_initialized()
+                } else {
+                    self.is_written_scalar()
+                };
+                if allowed {
+                    Ok(())
+                } else {
+                    Err(VerifierErrorKind::HelperArgumentTypeMismatch(index))
+                }
+            }
             _ => Err(VerifierErrorKind::HelperArgumentTypeMismatch(index)),
         }
     }
@@ -2421,6 +2449,19 @@ fn prescan_step(
     }
 }
 
+/// Maximum number of jumps permitted along any single unpruned verification path, matching Linux's
+/// `BPF_COMPLEXITY_LIMIT_JMP_SEQ`.
+const MAX_JMP_SEQ: u32 = 8192;
+
+/// Maximum number of unexplored branch states queued simultaneously on the verifier worklist.
+#[doc(hidden)]
+pub const MAX_PENDING_STATES: usize = 8192;
+
+/// Maximum number of incomparable terminating contexts retained at a single prune-point PC,
+/// matching Linux's `BPF_COMPLEXITY_LIMIT_STATES`.
+#[doc(hidden)]
+pub const MAX_TERMINATING_CONTEXTS_PER_PC: usize = 64;
+
 /// Pure verification entry point independent of `std` collections and dynamic trait objects.
 ///
 /// Returned `VerifiedEbpfProgram` should be linked before execution. Note that `code` may be
@@ -2803,7 +2844,11 @@ fn verify_worklist_entry<L: CoreVerifierLogger>(
         return Ok(());
     }
 
-    if verification_context.iteration > 10 * BPF_MAX_INSTS {
+    if verification_context.iteration > 10 * BPF_MAX_INSTS
+        || context.path_depth > (BPF_MAX_INSTS as u32)
+        || context.jmp_seq > MAX_JMP_SEQ
+        || worklist.len > MAX_PENDING_STATES
+    {
         return error_and_log(
             logger,
             VerifierError { kind: VerifierErrorKind::ComplexityLimitExceeded, pc: None },
@@ -2819,7 +2864,7 @@ fn verify_worklist_entry<L: CoreVerifierLogger>(
     visited[context.pc] = true;
     verification_context.log_enabled = logger.is_enabled();
     verification_context.pending_log = None;
-    verification_context.pending_successors.clear();
+    verification_context.pending_successors = Vec::new();
     let inst = verification_context.code[context.pc];
     let visit_res = context.visit(verification_context, inst);
     if let Some((log_pc, opcode, log_ev)) =
@@ -2828,11 +2873,18 @@ fn verify_worklist_entry<L: CoreVerifierLogger>(
         logger.log_instruction(log_pc, opcode, log_ev);
     }
     if let Err(kind) = visit_res {
-        verification_context.pending_successors.clear();
+        verification_context.pending_successors = Vec::new();
         return error_and_log(logger, VerifierError { kind, pc: Some(context.pc) });
     }
 
     let num_succ = verification_context.pending_successors.len();
+    if worklist.len + num_succ > MAX_PENDING_STATES {
+        verification_context.pending_successors = Vec::new();
+        return error_and_log(
+            logger,
+            VerifierError { kind: VerifierErrorKind::ComplexityLimitExceeded, pc: None },
+        );
+    }
     if num_succ > 0 {
         let node_idx = arena.push(ExplorerNode {
             context,
@@ -2849,7 +2901,7 @@ fn verify_worklist_entry<L: CoreVerifierLogger>(
             }
             s_i += 1;
         }
-        verification_context.pending_successors.clear();
+        verification_context.pending_successors = Vec::new();
     } else if let Err(err) = terminate_context_chain(
         context,
         DataDependencies::default(),
@@ -3401,13 +3453,23 @@ impl Stack {
         }
         Ok(result)
     }
+
+    fn combine_slot_ordering(cur: Option<Ordering>, lhs: &Type, rhs: &Type) -> Option<Ordering> {
+        let Some(cur) = cur else {
+            return None;
+        };
+        let Some(ord) = lhs.partial_cmp(rhs) else {
+            return None;
+        };
+        associate_orderings(cur, ord)
+    }
 }
 
 /// Two types are ordered with `t1` > `t2` if a proof that a program in a state `t1` finish is also
 /// a proof that a program in a state `t2` finish.
 impl PartialOrd for Stack {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        let mut result = match ((self.mask & !other.mask) != 0, (!self.mask & other.mask) != 0) {
+        let result = match ((self.mask & !other.mask) != 0, (!self.mask & other.mask) != 0) {
             (true, true) => return None,
             (true, false) => Ordering::Less,
             (false, true) => Ordering::Greater,
@@ -3418,34 +3480,28 @@ impl PartialOrd for Stack {
             return Some(result);
         }
         if self.mask == other.mask {
+            let mut opt_res = Some(result);
             let mut i = 0usize;
-            while i < self.data.len() {
-                let Some(ord) = self.data[i].partial_cmp(&other.data[i]) else {
-                    return None;
-                };
-                let Some(next_res) = associate_orderings(result, ord) else {
-                    return None;
-                };
-                result = next_res;
+            while i < self.data.len() && opt_res.is_some() {
+                opt_res = Self::combine_slot_ordering(opt_res, &self.data[i], &other.data[i]);
                 i += 1;
             }
-            return Some(result);
+            return opt_res;
         }
+        let mut opt_res = Some(result);
         let mut pos_self = 0usize;
         let mut pos_other = 0usize;
         let mut index = 0usize;
-        while index < 64 {
+        while index < 64 && opt_res.is_some() {
             let b = Self::bit(index);
             let in_self = (self.mask & b) != 0;
             let in_other = (other.mask & b) != 0;
             if in_self && in_other {
-                let Some(ord) = self.data[pos_self].partial_cmp(&other.data[pos_other]) else {
-                    return None;
-                };
-                let Some(next_res) = associate_orderings(result, ord) else {
-                    return None;
-                };
-                result = next_res;
+                opt_res = Self::combine_slot_ordering(
+                    opt_res,
+                    &self.data[pos_self],
+                    &other.data[pos_other],
+                );
             }
             if in_self {
                 pos_self += 1;
@@ -3455,7 +3511,7 @@ impl PartialOrd for Stack {
             }
             index += 1;
         }
-        Some(result)
+        opt_res
     }
 }
 
@@ -3504,6 +3560,10 @@ pub struct ComputationContext {
     pub array_bounds: BoundsMap,
     /// The currently allocated resources.
     pub resources: IdSet,
+    /// Total dynamic instructions visited along the active path to this context.
+    pub path_depth: u32,
+    /// Total jump instructions visited along the active path to this context.
+    pub jmp_seq: u32,
 }
 
 impl Default for ComputationContext {
@@ -3525,6 +3585,8 @@ impl Default for ComputationContext {
             stack: Stack::default(),
             array_bounds: BoundsMap::new(),
             resources: IdSet::new(),
+            path_depth: 0,
+            jmp_seq: 0,
         }
     }
 }
@@ -3537,6 +3599,8 @@ impl Clone for ComputationContext {
             stack: self.stack.clone(),
             array_bounds: self.array_bounds.clone(),
             resources: self.resources.clone(),
+            path_depth: self.path_depth,
+            jmp_seq: self.jmp_seq,
         }
     }
 }
@@ -3631,6 +3695,8 @@ impl ComputationContext {
             stack: self.stack.clone(),
             array_bounds: self.array_bounds.clone(),
             resources: self.resources.clone(),
+            path_depth: saturating_inc_u32(self.path_depth),
+            jmp_seq: self.jmp_seq,
         })
     }
 
@@ -3641,13 +3707,14 @@ impl ComputationContext {
         verification_context: &VerificationContext,
         offset: i16,
     ) -> Result<Self, VerifierErrorKind> {
-        let result = match self.jump_with_offset(offset) {
+        let mut result = match self.jump_with_offset(offset) {
             Ok(r) => r,
             Err(err) => return Err(err),
         };
         if result.pc >= verification_context.code.len() {
             return Err(VerifierErrorKind::JumpOutOfBounds);
         }
+        result.jmp_seq = saturating_inc_u32(result.jmp_seq);
         Ok(result)
     }
 
@@ -3794,7 +3861,7 @@ impl ComputationContext {
                     field.offset,
                     field.width.bytes(),
                 ) {
-                    Ok(()) => (Type::UNKNOWN_SCALAR, None),
+                    Ok(()) => (Type::unknown_written_scalar(field.width), None),
                     Err(err) => return Err(err),
                 }
             }
@@ -3804,7 +3871,7 @@ impl ComputationContext {
                 };
                 let (return_type, is_32_bit_ptr_load) = match &field_desc.field_type {
                     FieldType::Scalar { .. } | FieldType::MutableScalar { .. } => {
-                        (Type::UNKNOWN_SCALAR, false)
+                        (Type::unknown_written_scalar(field.width), false)
                     }
                     FieldType::PtrToArray { id: array_id, is_32_bit } => (
                         Type::PtrToArray {
@@ -3854,7 +3921,7 @@ impl ComputationContext {
             Type::PtrToArray { ref id, offset } => {
                 let bound = self.array_bounds.get_or_zero(id);
                 match self.check_memory_access(offset, bound, field.offset, field.width.bytes()) {
-                    Ok(()) => (Type::UNKNOWN_SCALAR, None),
+                    Ok(()) => (Type::unknown_written_scalar(field.width), None),
                     Err(err) => return Err(err),
                 }
             }
@@ -4338,9 +4405,8 @@ impl ComputationContext {
                     Ok(None)
                 }
             }
-            JumpType::LooseComparaison | JumpType::StrictComparaison | JumpType::Unknown => {
-                Ok(None)
-            }
+            JumpType::LooseComparaison | JumpType::StrictComparaison => Ok(None),
+            JumpType::Unknown => Err(()),
         }
     }
 
@@ -4353,15 +4419,23 @@ impl ComputationContext {
         cond_op: BranchCondOp,
     ) -> Result<Option<bool>, VerifierErrorKind> {
         let inner1 = match op1.inner(self) {
-            Ok(t) => t,
+            Ok(t) => t.clone(),
             Err(err) => return Err(err),
         };
         let inner2 = match op2.inner(self) {
-            Ok(t) => t,
+            Ok(t) => t.clone(),
             Err(err) => return Err(err),
         };
+        if let (Type::ScalarValue(data1), Type::ScalarValue(data2)) = (&inner1, &inner2) {
+            return match cond_op.eval(*data1, *data2) {
+                Ok(v) => Ok(v),
+                Err(()) => Err(VerifierErrorKind::InvalidComparison),
+            };
+        }
+        if matches!(jump_type, JumpType::Unknown) {
+            return Err(VerifierErrorKind::InvalidComparison);
+        }
         let res = match (jump_width, inner1, inner2) {
-            (_, Type::ScalarValue(data1), Type::ScalarValue(data2)) => cond_op.eval(*data1, *data2),
             (JumpWidth::W64, Type::ScalarValue(data), Type::NullOr { .. }) if data.is_zero() => {
                 Ok(None)
             }
@@ -4388,40 +4462,40 @@ impl ComputationContext {
                 Type::PtrToMemory { id: id1, offset: x, buffer_size: b1, .. },
                 Type::PtrToMemory { id: id2, offset: y, buffer_size: b2, .. },
             ) if id1 == id2 => {
-                let in_bounds = x.max() <= *b1 && y.max() <= *b2;
-                Self::eval_same_region_ptr(jump_type, cond_op, *x, *y, in_bounds)
+                let in_bounds = x.max() <= b1 && y.max() <= b2;
+                Self::eval_same_region_ptr(jump_type, cond_op, x, y, in_bounds)
             }
             (
                 JumpWidth::W64,
                 Type::PtrToStruct { id: id1, offset: x, .. },
                 Type::PtrToStruct { id: id2, offset: y, .. },
             ) if id1 == id2 => {
-                Self::eval_same_region_ptr(jump_type, cond_op, *x, *y, x.is_zero() && y.is_zero())
+                Self::eval_same_region_ptr(jump_type, cond_op, x, y, x.is_zero() && y.is_zero())
             }
             (
                 JumpWidth::W64,
                 Type::PtrToArray { id: id1, offset: x },
                 Type::PtrToArray { id: id2, offset: y },
             ) if id1 == id2 => {
-                let bound = self.array_bounds.get_or_zero(id1);
+                let bound = self.array_bounds.get_or_zero(&id1);
                 Self::eval_same_region_ptr(
                     jump_type,
                     cond_op,
-                    *x,
-                    *y,
+                    x,
+                    y,
                     x.max() <= bound && y.max() <= bound,
                 )
             }
-            (JumpWidth::W64, Type::PtrToArray { id: id1, .. }, Type::PtrToEndArray { id: id2 })
-                if id1 == id2 =>
-            {
-                Ok(None)
-            }
-            (JumpWidth::W64, Type::PtrToEndArray { id: id1 }, Type::PtrToArray { id: id2, .. })
-                if id1 == id2 =>
-            {
-                Ok(None)
-            }
+            (
+                JumpWidth::W64,
+                Type::PtrToArray { id: id1, offset: x },
+                Type::PtrToEndArray { id: id2 },
+            ) if id1 == id2 && x.is_fully_initialized() => Ok(None),
+            (
+                JumpWidth::W64,
+                Type::PtrToEndArray { id: id1 },
+                Type::PtrToArray { id: id2, offset: y },
+            ) if id1 == id2 && y.is_fully_initialized() => Ok(None),
             _ => Err(()),
         };
         match res {
@@ -4516,10 +4590,11 @@ impl ComputationContext {
             verification_context.push_successor(constrained);
         }
         if skip_jump {
-            let fallthrough = match self.jump_with_offset(0) {
+            let mut fallthrough = match self.jump_with_offset(0) {
                 Ok(f) => f,
                 Err(err) => return Err(err),
             };
+            fallthrough.jmp_seq = saturating_inc_u32(fallthrough.jmp_seq);
             let constrained = match Self::apply_constraints_and_register(
                 fallthrough,
                 jump_type.invert(),
@@ -4535,6 +4610,21 @@ impl ComputationContext {
             verification_context.push_successor(constrained);
         }
         Ok(())
+    }
+
+    fn match_call_arg(
+        &self,
+        context: &VerificationContext,
+        param_type: &Type,
+        arg_index: usize,
+        next: &mut Self,
+    ) -> Result<(), VerifierErrorKind> {
+        let reg = (arg_index + 1) as u8;
+        let arg_val = match self.reg(reg) {
+            Ok(v) => v,
+            Err(err) => return Err(err),
+        };
+        arg_val.match_parameter_type(context, self, param_type, arg_index, next)
     }
 }
 
@@ -4722,6 +4812,47 @@ impl DataDependencies {
 struct DependencyTracker {
     context: ComputationContext,
     deps: DataDependencies,
+}
+
+impl DependencyTracker {
+    fn track_call_arg(&mut self, arg_index: usize, arg: &Type) -> Result<(), VerifierErrorKind> {
+        let reg = match self.context.reg((arg_index + 1) as Register) {
+            Ok(r) => r,
+            Err(err) => return Err(err),
+        };
+        let reg_inner = match reg.inner(&self.context) {
+            Ok(i) => i,
+            Err(err) => return Err(err),
+        };
+        let Type::PtrToStack { offset } = *reg_inner else {
+            return Ok(());
+        };
+        let maybe_input_size = match arg.stack_input_size(&self.context) {
+            Ok(sz) => sz,
+            Err(err) => return Err(err),
+        };
+        let Some(input_size) = maybe_input_size else {
+            return Ok(());
+        };
+        if input_size == 0 {
+            return Ok(());
+        }
+        match offset.check_valid_offset() {
+            Ok(()) => {}
+            Err(err) => return Err(err),
+        }
+        let end = offset.add_u64(input_size);
+        if input_size > (BPF_STACK_SIZE as u64) || !end.is_within_stack() {
+            return Err(VerifierErrorKind::StackAccessOutOfBounds);
+        }
+        let start_idx = offset.array_index();
+        let end_idx = end.array_index();
+        self.deps.add_stack_range(start_idx, end_idx);
+        if end.sub_index() != 0 {
+            self.deps.add_stack(end_idx);
+        }
+        Ok(())
+    }
 }
 
 impl BpfVisitor<VerificationContext> for DependencyTracker {
@@ -4978,42 +5109,20 @@ impl BpfVisitor<VerificationContext> for DependencyTracker {
         }
         // A helper reads the stack region each stack-input parameter argument
         // points at, so those stack slots are data dependencies, like load/store.
+        let mut loop_err: Option<VerifierErrorKind> = None;
         let mut arg_index = 0usize;
-        while arg_index < num_args {
-            let arg = &signature.args[arg_index];
-            let reg = match self.context.reg((arg_index + 1) as Register) {
-                Ok(r) => r,
-                Err(err) => return Err(err),
-            };
-            let reg_inner = match reg.inner(&self.context) {
-                Ok(i) => i,
-                Err(err) => return Err(err),
-            };
-            if let Type::PtrToStack { offset } = *reg_inner {
-                let maybe_input_size = match arg.stack_input_size(&self.context) {
-                    Ok(sz) => sz,
-                    Err(err) => return Err(err),
-                };
-                if let Some(input_size) = maybe_input_size {
-                    if input_size > 0 {
-                        match offset.check_valid_offset() {
-                            Ok(()) => {}
-                            Err(err) => return Err(err),
-                        }
-                        let end = offset.add_u64(input_size);
-                        if input_size > (BPF_STACK_SIZE as u64) || !end.is_within_stack() {
-                            return Err(VerifierErrorKind::StackAccessOutOfBounds);
-                        }
-                        let start_idx = offset.array_index();
-                        let end_idx = end.array_index();
-                        self.deps.add_stack_range(start_idx, end_idx);
-                        if end.sub_index() != 0 {
-                            self.deps.add_stack(end_idx);
-                        }
-                    }
+        while arg_index < num_args && loop_err.is_none() {
+            match self.track_call_arg(arg_index, &signature.args[arg_index]) {
+                Ok(()) => {
+                    arg_index += 1;
+                }
+                Err(err) => {
+                    loop_err = Some(err);
                 }
             }
-            arg_index += 1;
+        }
+        if let Some(err) = loop_err {
+            return Err(err);
         }
         // 0 is overwritten and 1 to 5 are scratch registers
         self.deps.registers &= !0b0011_1111;
@@ -5513,6 +5622,34 @@ fn compare_terminating_entry(
     }
 }
 
+/// Clones `contexts[start..end]` into a fresh `Vec`.
+fn clone_terminating_contexts_range(
+    contexts: &[TerminatingContext],
+    start: usize,
+    end: usize,
+) -> Vec<TerminatingContext> {
+    let mut out = Vec::new();
+    let mut i = start;
+    while i < end {
+        out.push(contexts[i].clone());
+        i += 1;
+    }
+    out
+}
+
+/// Appends `entry` while keeping `contexts.len() <= MAX_TERMINATING_CONTEXTS_PER_PC` by evicting
+/// the oldest entries from the front if needed.
+fn append_bounded_terminating_context(
+    contexts: &mut Vec<TerminatingContext>,
+    entry: TerminatingContext,
+) {
+    if contexts.len() >= MAX_TERMINATING_CONTEXTS_PER_PC {
+        let start = (contexts.len() - MAX_TERMINATING_CONTEXTS_PER_PC) + 1;
+        *contexts = clone_terminating_contexts_range(contexts, start, contexts.len());
+    }
+    contexts.push(entry);
+}
+
 impl TerminatingContexts {
     /// Returns the most recently inserted context that is greater than or equal to `context`.
     pub fn find_greater_or_equal(
@@ -5556,11 +5693,7 @@ impl TerminatingContexts {
             }
             if !keep {
                 if !any_removed {
-                    let mut j = 0;
-                    while j < i {
-                        new_contexts.push(self.contexts[j].clone());
-                        j += 1;
-                    }
+                    new_contexts = clone_terminating_contexts_range(&self.contexts, 0, i);
                     any_removed = true;
                 }
             } else if any_removed {
@@ -5571,10 +5704,10 @@ impl TerminatingContexts {
         let entry =
             TerminatingContext { computation_context: context, dependencies, known_scalars };
         if any_removed {
-            new_contexts.push(entry);
+            append_bounded_terminating_context(&mut new_contexts, entry);
             self.contexts = new_contexts;
         } else {
-            self.contexts.push(entry);
+            append_bounded_terminating_context(&mut self.contexts, entry);
         }
     }
 }
@@ -6409,24 +6542,20 @@ impl BpfVisitor<VerificationContext> for ComputationContext {
             Ok(n) => n,
             Err(err) => return Err(err),
         };
+        let mut loop_err: Option<VerifierErrorKind> = None;
         let mut arg_index = 0usize;
-        while arg_index < signature.args.len() {
-            let reg = (arg_index + 1) as u8;
-            let arg_val = match self.reg(reg) {
-                Ok(v) => v,
-                Err(err) => return Err(err),
-            };
-            match arg_val.match_parameter_type(
-                context,
-                self,
-                &signature.args[arg_index],
-                arg_index,
-                &mut next,
-            ) {
-                Ok(()) => {}
-                Err(err) => return Err(err),
+        while arg_index < signature.args.len() && loop_err.is_none() {
+            match self.match_call_arg(context, &signature.args[arg_index], arg_index, &mut next) {
+                Ok(()) => {
+                    arg_index += 1;
+                }
+                Err(err) => {
+                    loop_err = Some(err);
+                }
             }
-            arg_index += 1;
+        }
+        if let Some(err) = loop_err {
+            return Err(err);
         }
         let return_value = signature.return_value.clone();
         let invalidate_array_bounds = signature.invalidate_array_bounds;

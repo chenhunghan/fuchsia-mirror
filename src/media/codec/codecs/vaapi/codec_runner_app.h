@@ -5,13 +5,12 @@
 #ifndef SRC_MEDIA_CODEC_CODECS_VAAPI_CODEC_RUNNER_APP_H_
 #define SRC_MEDIA_CODEC_CODECS_VAAPI_CODEC_RUNNER_APP_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/component/incoming/cpp/protocol.h>
-#include <lib/fidl/cpp/interface_request.h>
+#include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/inspect/cpp/inspector.h>
-#include <lib/sys/cpp/component_context.h>
 #include <lib/syslog/cpp/log_level.h>
 #include <lib/syslog/cpp/log_settings.h>
 #include <lib/syslog/cpp/macros.h>
@@ -50,68 +49,70 @@ class CodecRunnerApp {
     codec_diagnostics_ =
         std::make_unique<CodecDiagnostics>("vaapi_codec_runner", loop_.dispatcher());
 
-    component_context_->outgoing()->AddPublicService(
-        fidl::InterfaceRequestHandler<fuchsia::mediacodec::CodecFactory>(
-            [this, codec_admission_control = codec_admission_control_.get()](
-                fidl::InterfaceRequest<fuchsia::mediacodec::CodecFactory> request) {
-              // We RemoveService() near the end of the present lambda, so it
-              // should be impossible to receive a second CodecFactory request.
-              FX_DCHECK(!codec_factory_);
+    zx::result<> add_result = outgoing_.AddUnmanagedProtocol<fuchsia_mediacodec::CodecFactory>(
+        [this, codec_admission_control = codec_admission_control_.get()](
+            fidl::ServerEnd<fuchsia_mediacodec::CodecFactory> request) {
+          // We RemoveProtocol() near the end of the present lambda, so it
+          // should be impossible to receive a second CodecFactory request.
+          FX_DCHECK(!codec_factory_);
 
-              auto sysmem_result = component::Connect<fuchsia_sysmem2::Allocator>();
-              ZX_ASSERT(sysmem_result.is_ok());
-              auto sysmem = std::move(sysmem_result.value());
-              codec_factory_ = std::make_unique<LocalSingleCodecFactory<Decoder, Encoder>>(
-                  loop_.dispatcher(), std::move(sysmem), std::move(request),
-                  [this](std::unique_ptr<CodecImpl> created_codec_instance) {
-                    ZX_DEBUG_ASSERT(!codec_instance_);
-                    if (!created_codec_instance) {
-                      // Drop factory and close factory channel on factory
-                      // failure to create instance.
-                      codec_factory_ = nullptr;
-                      // The codec_instance_ channel is the only reason for the
-                      // isolate to exist.
-                      loop_.Quit();
-                      return;
-                    }
-                    // Own codec implementation and bind it.
-                    codec_instance_ = std::move(created_codec_instance);
-                    codec_instance_->BindAsync([this] {
-                      // Drop codec implementation and close channel on
-                      // error.
-                      codec_instance_ = nullptr;
-                      // The codec_instance_ channel is the only reason for
-                      // the isolate to exist.
-                      loop_.Quit();
-                    });
-                    // Drop factory and close factory channel.
-                    codec_factory_ = nullptr;
-                  },
-                  codec_admission_control,
-                  [this](zx_status_t error) {
-                    // Drop factory and close factory channel on error.
-                    codec_factory_ = nullptr;
-                    // The codec_instance_ channel is the only reason for
-                    // the isolate to exist.  If codec_instance_ wasn't
-                    // created via the codec_factory_ before this point,
-                    // it'll never be created via codec_factory_.
-                    if (!codec_instance_) {
-                      loop_.Quit();
-                    }
-                  },
-                  codec_diagnostics_.get());
-              // This runner only expects a single Local Codec Factory to ever
-              // be requested.
-              //
-              // This call deletes the presently-running lambda, so nothing
-              // after this call can use the lambda's captures, including the
-              // "this" pointer implicitly.
-              component_context_->outgoing()
-                  ->RemovePublicService<fuchsia::mediacodec::CodecFactory>();
-            }));
+          auto sysmem_result = component::Connect<fuchsia_sysmem2::Allocator>();
+          ZX_ASSERT(sysmem_result.is_ok());
+          auto sysmem = std::move(sysmem_result.value());
+          codec_factory_ = std::make_unique<LocalSingleCodecFactory<Decoder, Encoder>>(
+              loop_.dispatcher(), std::move(sysmem), std::move(request),
+              [this](std::unique_ptr<CodecImpl> created_codec_instance) {
+                ZX_DEBUG_ASSERT(!codec_instance_);
+                if (!created_codec_instance) {
+                  // Drop factory and close factory channel on factory
+                  // failure to create instance.
+                  codec_factory_ = nullptr;
+                  // The codec_instance_ channel is the only reason for the
+                  // isolate to exist.
+                  loop_.Quit();
+                  return;
+                }
+                // Own codec implementation and bind it.
+                codec_instance_ = std::move(created_codec_instance);
+                codec_instance_->BindAsync([this] {
+                  // Drop codec implementation and close channel on
+                  // error.
+                  codec_instance_ = nullptr;
+                  // The codec_instance_ channel is the only reason for
+                  // the isolate to exist.
+                  loop_.Quit();
+                });
+                // Drop factory and close factory channel.
+                codec_factory_ = nullptr;
+              },
+              codec_admission_control,
+              [this](zx_status_t error) {
+                // Drop factory and close factory channel on error.
+                codec_factory_ = nullptr;
+                // The codec_instance_ channel is the only reason for
+                // the isolate to exist.  If codec_instance_ wasn't
+                // created via the codec_factory_ before this point,
+                // it'll never be created via codec_factory_.
+                if (!codec_instance_) {
+                  loop_.Quit();
+                }
+              },
+              codec_diagnostics_.get());
+          // This runner only expects a single Local Codec Factory to ever
+          // be requested.
+          //
+          // This call deletes the presently-running lambda, so nothing
+          // after this call can use the lambda's captures, including the
+          // "this" pointer implicitly.
+          ZX_ASSERT(outgoing_.RemoveProtocol<fuchsia_mediacodec::CodecFactory>().is_ok());
+        });
+    ZX_ASSERT(add_result.is_ok());
   }
 
-  void Serve() { component_context_->outgoing()->ServeFromStartupInfo(); }
+  void Serve() {
+    zx::result<> serve_result = outgoing_.ServeFromStartupInfo();
+    ZX_ASSERT(serve_result.is_ok());
+  }
 
   void Run() {
     loop_.Run();
@@ -125,11 +126,11 @@ class CodecRunnerApp {
     loop_.Shutdown();
   }
 
-  std::unique_ptr<sys::ComponentContext>& component_context() { return component_context_; }
+  component::OutgoingDirectory& outgoing() { return outgoing_; }
 
  private:
   async::Loop loop_{&kAsyncLoopConfigAttachToCurrentThread};
-  std::unique_ptr<sys::ComponentContext> component_context_{sys::ComponentContext::Create()};
+  component::OutgoingDirectory outgoing_{loop_.dispatcher()};
   std::unique_ptr<CodecAdmissionControl> codec_admission_control_;
   std::unique_ptr<LocalSingleCodecFactory<Decoder, Encoder>> codec_factory_;
   std::unique_ptr<CodecImpl> codec_instance_;

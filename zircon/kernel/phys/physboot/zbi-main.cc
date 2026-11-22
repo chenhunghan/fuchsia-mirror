@@ -10,6 +10,7 @@
 #include <lib/fit/function.h>
 #include <lib/zbitl/error-stdio.h>
 #include <lib/zbitl/view.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <zircon/assert.h>
 
@@ -21,18 +22,21 @@
 #include <ktl/span.h>
 #include <ktl/string_view.h>
 #include <ktl/utility.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
 #include <phys/boot-zbi/boot-zbi.h>
-#include <phys/elf-image.h>
+#include <phys/elf/image.h>
 #include <phys/handoff-prep/handoff-prep.h>
 #include <phys/handoff/handoff.h>
 #include <phys/kernel-package/kernel-package.h>
-#include <phys/log/log.h>
+#include <phys/memory/init.h>
+#include <phys/output/log.h>
+#include <phys/output/stdout.h>
+#include <phys/output/uart.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
-#include <phys/symbolize.h>
-#include <phys/uart/driver.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
+#include <phys/zbi-runtime/main.h>
 
 #include "before-init-memory.h"
 
@@ -71,7 +75,7 @@ void PatchElfKernel(ElfImage& kernel, const ArchPatchInfo& patch_info) {
              static_cast<uint32_t>(id));
   };
 
-  debugf("%s: Applying %zu patches...\n", gSymbolize->name(), kernel.patch_count());
+  printf("%s: Applying %zu patches...\n", gSymbolize->name(), kernel.patch_count());
   // Apply patches to the kernel image.
   auto result = kernel.ForEachPatch<CodePatchId>(apply_patch);
   if (result.is_error()) {
@@ -84,7 +88,7 @@ void PatchElfKernel(ElfImage& kernel, const ArchPatchInfo& patch_info) {
 }
 
 void RelocateElfKernel(ElfImage& kernel) {
-  debugf("%s: Relocating ELF kernel to [%#" PRIx64 ", %#" PRIx64 ")...\n", gSymbolize->name(),
+  printf("%s: Relocating ELF kernel to [%#" PRIx64 ", %#" PRIx64 ")...\n", gSymbolize->name(),
          kernel.load_address(), kernel.load_address() + kernel.vaddr_size());
   kernel.Relocate();
 }
@@ -93,7 +97,7 @@ void RelocateElfKernel(ElfImage& kernel) {
   KernelStorage::Bootfs package = kernel_storage.GetKernelPackage();
 
   ElfImage kernel;
-  debugf("%s: Locating ELF kernel in kernel package...\n", gSymbolize->name());
+  printf("%s: Locating ELF kernel in kernel package...\n", gSymbolize->name());
   if (auto result = kernel.Init(package, kElfPhysKernel, true); result.is_error()) {
     printf("%s: Cannot load ELF kernel \"%.*s/%.*s\" from STORAGE_KERNEL item BOOTFS: ",
            gSymbolize->name(), static_cast<int>(package.directory().size()),
@@ -104,7 +108,7 @@ void RelocateElfKernel(ElfImage& kernel) {
   }
 
   // Make sure the kernel was built to match this physboot binary.
-  kernel.AssertInterpMatchesBuildId(gSymbolize->name(), gSymbolize->build_id());
+  kernel.AssertInterpMatchesBuildId(gSymbolize->name(), *Self().build_id());
 
   if (kernel.machine() != elfldltl::ElfMachine::kNative) [[unlikely]] {
     ZX_PANIC("ELF kernel e_machine %#" PRIx16 " != expected %#" PRIx16 "\n",
@@ -137,9 +141,7 @@ void RelocateElfKernel(ElfImage& kernel) {
   // Prepare the handoff data structures.
   HandoffPrep prep(ktl::move(kernel));
 
-  if (BootOptions::Get()->phys_verbose) {
-    Allocation::GetPool().PrintMemoryRanges(gSymbolize->name());
-  }
+  Allocation::GetPool().PrintMemoryRanges(gSymbolize->name());
 
   prep.DoHandoff(uart, kernel_storage.zbi().storage(), package, patch_info, gBootTimes);
 }
@@ -149,15 +151,9 @@ void RelocateElfKernel(ElfImage& kernel) {
 [[noreturn]] void ZbiMain(void* zbi_ptr, EarlyBootZbi zbi, arch::EarlyTicks ticks) {
   gBootTimes.Set(PhysBootTimes::kZbiEntry, ticks);
 
-  // Symbolize uses its output for the panic path.  So that should not be
-  // redirected to the log code path.  Instead keep it pointed at a copy of the
-  // current stdout, which is just the console.
-  FILE console = *stdout;
-  Symbolize symbolize("physboot", &console);
-  if (BootOptions::Get()->phys_verbose) {
-    symbolize.Context();
-    LogSerial();
-  }
+  Symbolize symbolize("physboot");
+  symbolize.Context();
+  LogSerial();
 
   ArchPhysbootBeforeInitMemory();
 
@@ -181,10 +177,10 @@ void RelocateElfKernel(ElfImage& kernel) {
     Allocation::GetPool().PrintMemoryRanges(symbolize.name(), &log_file);
   }
 
-  // Now mirror all stdout to the log, and write debugf there even if verbose
-  // logging to stdout is disabled.
+  // Now capture all stdout in the log as well.  The log sees everything even
+  // if kernel.phys.verbose=false has muted the console.
   gLog = &log;
-  log.SetStdout();
+  gPhysStdout.set_log(FILE{&log});
 
   auto zbi_storage =
       zbitl::StorageFromRawHeader<ktl::span<ktl::byte>>(reinterpret_cast<zbi_header_t*>(zbi_ptr));

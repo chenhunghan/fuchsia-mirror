@@ -7,7 +7,6 @@
 
 use lock_order::lock::LockLevelFor;
 use lock_order::relation::LockBefore;
-use lock_order::wrap::LockedWrapperApi;
 use net_types::ip::Ip;
 use netstack3_base::{DeviceIdContext, TxMetadata};
 use netstack3_device::pure_ip::{
@@ -25,6 +24,8 @@ use netstack3_device::{
 };
 use netstack3_ip::nud::NudUserConfig;
 
+use crate::context::WrapLockLevel;
+use crate::context::prelude::*;
 use crate::device::integration;
 use crate::{BindingsContext, BindingsTypes, CoreCtx};
 
@@ -145,7 +146,8 @@ impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::PureIpDeviceTxQueu
 impl<BC: BindingsContext, L: LockBefore<crate::lock_ordering::PureIpDeviceTxDequeue>>
     TransmitDequeueContext<PureIpDevice, BC> for CoreCtx<'_, BC, L>
 {
-    type TransmitQueueCtx<'a> = CoreCtx<'a, BC, crate::lock_ordering::PureIpDeviceTxDequeue>;
+    type TransmitQueueCtx<'a> =
+        CoreCtx<'a, BC, WrapLockLevel<crate::lock_ordering::PureIpDeviceTxDequeue>>;
 
     fn with_dequed_packets_and_tx_queue_ctx<
         O,

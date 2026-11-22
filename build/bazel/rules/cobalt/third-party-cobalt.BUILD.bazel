@@ -1,0 +1,88 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+"""BUILD.bazel for @cobalt external repository."""
+
+load("@@//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+_REGISTRY_PROTO_NAMES = [
+    "cobalt_registry",
+    "metric_definition",
+    "project",
+    "report_definition",
+    "window_size",
+]
+
+_REGISTRY_PROTO_SRCS = [
+    "src/registry/%s.proto" % name
+    for name in _REGISTRY_PROTO_NAMES
+]
+
+_REGISTRY_PB_CC_OUTS = [
+    "src/registry/%s.pb.cc" % name
+    for name in _REGISTRY_PROTO_NAMES
+]
+
+_REGISTRY_PB_H_OUTS = [
+    "src/registry/%s.pb.h" % name
+    for name in _REGISTRY_PROTO_NAMES
+] + [
+    "third_party/cobalt/src/registry/%s.pb.h" % name
+    for name in _REGISTRY_PROTO_NAMES
+]
+
+genrule(
+    name = "cobalt_registry_proto_gen",
+    srcs = _REGISTRY_PROTO_SRCS,
+    outs = _REGISTRY_PB_CC_OUTS + _REGISTRY_PB_H_OUTS,
+    cmd = """
+        PROTO_ROOT=$$(dirname $$(dirname $$(dirname $(location src/registry/window_size.proto))))
+        $(execpath @com_google_protobuf//:protoc) \\
+            --proto_path="$$PROTO_ROOT" \\
+            --cpp_out=lite:$(RULEDIR) \\
+            $(SRCS)
+        mkdir -p $(RULEDIR)/third_party/cobalt/src/registry
+        cp $(RULEDIR)/src/registry/*.pb.h $(RULEDIR)/third_party/cobalt/src/registry/
+    """,
+    tools = ["@com_google_protobuf//:protoc"],
+)
+
+fx_cc_library(
+    name = "cobalt_registry_proto",
+    srcs = _REGISTRY_PB_CC_OUTS,
+    hdrs = _REGISTRY_PB_H_OUTS,
+    copts = ["-Wno-deprecated-declarations"],
+    defines = [
+        "PROTO_LITE",
+        "TQ_COBALT_USE_TINK",
+    ],
+    includes = ["."],
+    visibility = ["@//:__subpackages__"],
+    deps = ["@com_google_protobuf//:protobuf_lite"],
+)
+
+fx_cc_library(
+    name = "buckets_config",
+    srcs = [
+        "src/lib/client/cpp/buckets_config.cc",
+    ],
+    hdrs = [
+        "src/lib/client/cpp/buckets_config.h",
+        "third_party/cobalt/src/lib/client/cpp/buckets_config.h",
+    ],
+    copts = ["-Wno-deprecated-declarations"],
+    defines = [
+        "PROTO_LITE",
+        "TQ_COBALT_USE_TINK",
+    ],
+    includes = ["."],
+    textual_hdrs = [
+        "src/logging.h",
+    ],
+    visibility = ["@//:__subpackages__"],
+    deps = [
+        ":cobalt_registry_proto",
+        "@@//sdk/lib/syslog/cpp",
+    ],
+)

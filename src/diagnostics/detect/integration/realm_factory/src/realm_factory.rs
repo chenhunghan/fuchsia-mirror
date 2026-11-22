@@ -13,15 +13,14 @@ use fidl::endpoints::{ClientEnd, create_endpoints};
 use fidl_fuchsia_diagnostics as diagnostics;
 use fidl_fuchsia_feedback as fcrash;
 use fidl_fuchsia_io::R_STAR_DIR;
-use fidl_server::*;
 use fidl_test_detect_factory as ftest;
 use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use fuchsia_component_test::{
     Capability, ChildOptions, LocalComponentHandles, RealmBuilder, RealmInstance, Ref, Route,
 };
-use futures::StreamExt;
 use futures::lock::Mutex;
+use futures::{StreamExt, TryFutureExt, TryStreamExt};
 use log::{error, info};
 use std::sync::Arc;
 
@@ -206,6 +205,11 @@ async fn serve_mocks(
         inspect_data.push(contents);
     }
 
+    // Each connection to the crash reporter and the crash reporting product register is served by
+    // its own task. The tasks are aborted when `scope` is dropped, which happens when this
+    // component stops.
+    let scope = fasync::Scope::new();
+
     // Create the /config/data directory.
     let mut fs = ServiceFs::new();
     let mut dir_config = fs.dir("config");
@@ -217,10 +221,17 @@ async fn serve_mocks(
     // Serve crash reporter, crash reporting product register, and archive accessor.
     fs.dir("svc")
         .add_fidl_service(|stream: fcrash::CrashReporterRequestStream| {
-            serve_async_detached(stream, MockComponent { sender: Some(event_sender.clone()) });
+            let mock = MockComponent { sender: Some(event_sender.clone()) };
+            scope.spawn(
+                mock.serve_crash_reporter(stream).unwrap_or_else(|error| error!("{:?}", error)),
+            );
         })
         .add_fidl_service(|stream: fcrash::CrashReportingProductRegisterRequestStream| {
-            serve_async_detached(stream, MockComponent { sender: Some(event_sender.clone()) });
+            let mock = MockComponent { sender: Some(event_sender.clone()) };
+            scope.spawn(
+                mock.serve_crash_reporting_product_register(stream)
+                    .unwrap_or_else(|error| error!("{:?}", error)),
+            );
         })
         .add_fidl_service_at(
             "fuchsia.diagnostics.ArchiveAccessor.feedback",
@@ -240,9 +251,31 @@ pub struct MockComponent {
     sender: Option<TriageDetectEventSender>,
 }
 
-#[async_trait::async_trait]
-impl AsyncRequestHandler<fcrash::CrashReporterMarker> for MockComponent {
-    async fn handle_request(&self, request: fcrash::CrashReporterRequest) -> Result<(), Error> {
+impl MockComponent {
+    /// Serves the fuchsia.feedback.CrashReporter requests on `stream` until the client closes
+    /// the connection.
+    ///
+    /// Stops and returns an error if a FIDL error occurs while reading a request, or if handling
+    /// a request fails.
+    async fn serve_crash_reporter(
+        self,
+        mut stream: fcrash::CrashReporterRequestStream,
+    ) -> Result<(), Error> {
+        while let Some(request) = stream
+            .try_next()
+            .await
+            .context("error reading fuchsia.feedback.CrashReporter request")?
+        {
+            self.handle_crash_reporter_request(request)
+                .context("error handling fuchsia.feedback.CrashReporter request")?;
+        }
+        Ok(())
+    }
+
+    fn handle_crash_reporter_request(
+        &self,
+        request: fcrash::CrashReporterRequest,
+    ) -> Result<(), Error> {
         info!("received {:?}", request);
         match request {
             fcrash::CrashReporterRequest::FileReport { report, responder } => {
@@ -263,11 +296,28 @@ impl AsyncRequestHandler<fcrash::CrashReporterMarker> for MockComponent {
 
         Ok(())
     }
-}
 
-#[async_trait::async_trait]
-impl AsyncRequestHandler<fcrash::CrashReportingProductRegisterMarker> for MockComponent {
-    async fn handle_request(
+    /// Serves the fuchsia.feedback.CrashReportingProductRegister requests on `stream` until the
+    /// client closes the connection.
+    ///
+    /// Stops and returns an error if a FIDL error occurs while reading a request, or if handling
+    /// a request fails.
+    async fn serve_crash_reporting_product_register(
+        self,
+        mut stream: fcrash::CrashReportingProductRegisterRequestStream,
+    ) -> Result<(), Error> {
+        while let Some(request) = stream
+            .try_next()
+            .await
+            .context("error reading fuchsia.feedback.CrashReportingProductRegister request")?
+        {
+            self.handle_crash_reporting_product_register_request(request)
+                .context("error handling fuchsia.feedback.CrashReportingProductRegister request")?;
+        }
+        Ok(())
+    }
+
+    fn handle_crash_reporting_product_register_request(
         &self,
         request: fcrash::CrashReportingProductRegisterRequest,
     ) -> Result<(), Error> {

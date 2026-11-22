@@ -67,12 +67,12 @@ use kalloc::AllocError;
 use zx_status::Status;
 
 use crate::arm_smmu::common::{
-    ArmSmmuMode, DeviceAspace, PAGE_MASK, PAGE_SHIFT, PAGE_SIZE, SmmuEnv, TlbInvalidator,
+    ArmSmmuMode, DEFAULT_TCR_T0SZ, DEFAULT_TTBR0_ADDR_SPACE_SZ, DeviceAspace, PAGE_MASK,
+    PAGE_SHIFT, PAGE_SIZE, SmmuEnv, TlbInvalidator,
 };
-pub use crate::arm_smmu::common::{DEFAULT_TCR_T0SZ, DEFAULT_TTBR0_ADDR_SPACE_SZ};
 use crate::arm_smmu::v2::registers::gr1::{Cba2r, Cba2rVa64, Cbar, CbarS1TS2Bypass, CbarType};
 use crate::arm_smmu::v2::registers::s1cbr::{
-    Sctlr, Tcr, Tcr32Bit, Tcr64Bit, TcrExt32Bit, TcrTg0, TcrTg1, Tlbiasid, TlbivaAArch64,
+    Sctlr, Tcr, Tcr2, Tcr32Bit, Tcr64Bit, TcrExt32Bit, TcrTg0, TcrTg1, Tlbiasid, TlbivaAArch64,
     Tlbstatus, Tlbsync, Ttbr0_32Bit, Ttbr0_64Bit, Ttbr0Ext32Bit, Ttbr1_32Bit, Ttbr1_64Bit,
     Ttbr1Ext32Bit,
 };
@@ -124,7 +124,7 @@ pub struct TtbrInfo {
 
 /// [`TlbInvalidator`] adapter that forwards page/region invalidations from [`DeviceAspace`] to a
 /// [`ContextBank`].
-pub struct ContextBankInvalidator<'a>(pub &'a ContextBank);
+pub(crate) struct ContextBankInvalidator<'a>(&'a ContextBank);
 
 impl TlbInvalidator for ContextBankInvalidator<'_> {
     #[inline]
@@ -154,8 +154,8 @@ pub struct ContextBank {
 
 // SAFETY: The only `!Send` field of `ContextBank` is `list_node: DoublyLinkedListNode<ContextBank>`
 // (which contains `UnsafeCell<NodeLinks<Self>>`). `ContextBank` and any intrusive list containing
-// it are only accessed or transferred across threads while holding the owning `Smmu` or `SmmuBti`
-// synchronization lock.
+// it are only accessed or transferred across threads while holding the owning `SmmuV2` or
+// `SmmuV2Bti` synchronization lock.
 unsafe impl Send for ContextBank {}
 
 impl Drop for ContextBank {
@@ -215,63 +215,63 @@ impl ContextBank {
 
     /// Returns the hardware index (`0..num_cbs`) of this Context Bank.
     #[inline]
-    pub const fn cb_ndx(&self) -> u32 {
+    pub(crate) const fn cb_ndx(&self) -> u32 {
         self.cb_ndx
     }
 
     /// Returns the current [`BtiMode`] of this Context Bank.
     #[inline]
-    pub const fn mode(&self) -> BtiMode {
+    pub(crate) const fn mode(&self) -> BtiMode {
         self.mode
     }
 
     /// Returns the current [`AddrMode`] of this Context Bank.
     #[inline]
-    pub const fn addr_mode(&self) -> AddrMode {
+    pub(crate) const fn addr_mode(&self) -> AddrMode {
         self.addr_mode
     }
 
     /// Returns the `GR1` MMIO bank handle associated with this Context Bank.
     #[inline]
-    pub const fn gr1_base(&self) -> SmmuMmio {
+    pub(in crate::arm_smmu) const fn gr1_base(&self) -> SmmuMmio {
         self.gr1_base
     }
 
     /// Returns the per-Context-Bank (`SMMU_CBn_BASE`) MMIO bank handle.
     #[inline]
-    pub const fn cb_base(&self) -> SmmuMmio {
+    pub(in crate::arm_smmu) const fn cb_base(&self) -> SmmuMmio {
         self.cb_base
     }
 
     /// Returns the two [`TtbrInfo`] descriptors (`TTBR0` and `TTBR1`) for this Context Bank.
     #[inline]
-    pub const fn ttbrs(&self) -> &[TtbrInfo; 2] {
+    pub(crate) const fn ttbrs(&self) -> &[TtbrInfo; 2] {
         &self.ttbrs
     }
 
     /// Returns `true` if this Context Bank is currently linked into an intrusive doubly-linked
     /// list.
     #[inline]
-    pub fn in_container(&self) -> bool {
+    pub(crate) fn in_container(&self) -> bool {
         self.list_node.in_container()
     }
 
     /// Computes the unique 16-bit ASID assigned to hardware context bank `cb_ndx`.
     #[inline]
-    pub fn asid_for_cb_ndx(cb_ndx: u32) -> u16 {
+    pub(crate) fn asid_for_cb_ndx(cb_ndx: u32) -> u16 {
         debug_assert!(cb_ndx <= 0xFF);
         (cb_ndx as u16) | Self::UPPER_ASID_BITS
     }
 
     /// Returns the unique 16-bit ASID assigned to this Context Bank.
     #[inline]
-    pub fn asid(&self) -> u16 {
+    pub(crate) fn asid(&self) -> u16 {
         Self::asid_for_cb_ndx(self.cb_ndx)
     }
 
     /// Records the `TTBR0` bookkeeping fields from an attached [`DeviceAspace`].
     ///
-    /// Called by `SmmuBti` during BTI construction when attaching a newly created stage-1 address
+    /// Called by `SmmuV2Bti` during BTI construction when attaching a newly created stage-1 address
     /// space to its Context Bank.
     #[inline]
     pub(crate) fn attach_aspace(&mut self, aspace: &DeviceAspace) {
@@ -412,7 +412,7 @@ impl ContextBank {
 
     /// Validates `cb_ndx`, allocates a [`UniquePtr<ContextBank>`], and disables its hardware
     /// registers.
-    pub fn create_and_lockdown<S: SmmuController>(
+    pub(in crate::arm_smmu) fn create_and_lockdown<S: SmmuController>(
         smmu: &S,
         cb_ndx: u32,
     ) -> Result<UniquePtr<Self>, Status> {
@@ -422,9 +422,21 @@ impl ContextBank {
         Ok(cb)
     }
 
-    /// Validates `cb_ndx`, allocates a [`UniquePtr<ContextBank>`], and adopts its pre-existing
-    /// hardware register state.
-    pub fn create_and_adopt<S: SmmuController>(
+    /// Gives up a context bank which was adopted from the bootloader, without touching it.
+    ///
+    /// For the paths on which a bank was adopted but the BTI which would have held it could not
+    /// be created. The registers are left as the bootloader had them; this only puts the object
+    /// into the state its destructor expects.
+    pub(crate) fn abandon_adoption(&mut self) {
+        debug_assert_eq!(self.mode, BtiMode::Adopted);
+        self.gr1_base = SmmuMmio::null();
+        self.cb_base = SmmuMmio::null();
+        self.mode = BtiMode::Shutdown;
+    }
+
+    /// Validates `cb_ndx`, allocates a [`UniquePtr<ContextBank>`], and adopts its initial state
+    /// from the existing hardware registers.
+    pub(in crate::arm_smmu) fn create_and_adopt<S: SmmuController>(
         smmu: &S,
         cb_ndx: u32,
     ) -> Result<UniquePtr<Self>, Status> {
@@ -489,7 +501,7 @@ impl ContextBank {
 
     /// Returns the effective address space size in bytes for this Context Bank's current mode.
     #[inline]
-    pub fn aspace_size(&self) -> u64 {
+    pub(crate) fn aspace_size(&self) -> u64 {
         self.aspace_size_for_mode(self.mode)
     }
 
@@ -511,12 +523,7 @@ impl ContextBank {
         }
     }
 
-    /// Decodes a `TCR.TG1` field value (`reg_bits`) into log2 granule size bits.
-    ///
-    /// Temporary porting note: the C++ `AdoptRegisterState` passed `tcr.tg1()` (cast to `TcrTg0`)
-    /// into `DecodeGranuleSizeBits(TcrTg0)`, even though `TCR.TG0` and `TCR.TG1` use different
-    /// 2-bit hardware encodings (`TG0`: `00` = 4KB, `01` = 64KB, `10` = 16KB; `TG1`: `01` = 16KB,
-    /// `10` = 4KB, `11` = 64KB). Here `TG1` is decoded using [`TcrTg1`] when `TTBR1` is enabled.
+    /// Decodes `TCR.TG1`, whose encoding of the granule sizes differs from `TG0`'s.
     fn decode_tg1_granule_size_bits(&self, reg_bits: TcrTg1) -> u32 {
         match reg_bits {
             TcrTg1::Granule4KB => 12,  // 4KB
@@ -634,7 +641,8 @@ impl ContextBank {
                 if self.ttbrs[0].enabled || self.ttbrs[1].enabled {
                     dprintf!(
                         INFO,
-                        "WARNING - Bad addressing mode ({}) when decoding TTBR regions for context bank {}\n",
+                        "WARNING - Bad addressing mode ({}) when decoding TTBR regions for context \
+                         bank {}\n",
                         self.addr_mode as u32,
                         self.cb_ndx
                     );
@@ -660,10 +668,10 @@ impl ContextBank {
     /// Transitions this Context Bank's hardware configuration and bookkeeping to `target_mode`.
     ///
     /// Note: Exclusive access is statically enforced because every live [`ContextBank`] is owned
-    /// by `SmmuBti::context_bank` (`#[guarded_by(lock)]`) or exclusively held during `Smmu::init`
-    /// before BTI publication, so obtaining `&mut self` requires holding the owning lock (passing
-    /// only `smmu_name` for diagnostic logging).
-    pub fn set_mode(&mut self, smmu_name: &str, target_mode: BtiMode) {
+    /// by `SmmuV2Bti::context_bank` (`#[guarded_by(lock)]`) or exclusively held during
+    /// `SmmuV2::init` before BTI publication, so obtaining `&mut self` requires holding the owning
+    /// lock (passing only `smmu_name` for diagnostic logging).
+    pub(crate) fn set_mode(&mut self, smmu_name: &str, target_mode: BtiMode) {
         // Upper levels should ensure that we never call this method for:
         //
         // 1) Adopted context banks.
@@ -738,15 +746,10 @@ impl ContextBank {
             // accesses _should_ end up faulting, even though the HW is in translation mode. Said
             // another way, Fault mode is Translate mode but with no valid PTEs.
             BtiMode::Fault => {
-                // Temporary porting note: the C++ `SetMode` guarded this block with
-                // `#ifdef ZX_DEBUG_ASSERT_IMPLEMENTED`, and that macro is always defined (as 0
-                // when debug asserts are off), so the three register reads below happened in
-                // every build even though the asserts using them compiled away. Here they
-                // happen only in builds with debug assertions (`ZX_ASSERT_LEVEL > 1`), which is
-                // what the C++ evidently meant. In other builds the hardware therefore sees
-                // three fewer reads (TCR, SCTLR and CBAR) at the end of each transition to
-                // fault mode. None of the three has read side effects, and no register is
-                // written differently, so nothing about the context bank's behavior changes.
+                // Nothing more needs to be written. Read TCR, SCTLR and CBAR back to check that
+                // the faulting configuration took. The reads exist only to feed the assertions,
+                // so they are made only in builds with debug assertions; in other builds the
+                // registers are not touched here.
                 if cfg!(debug_assertions) {
                     let tcr = Tcr64Bit::read_from(&self.cb_base);
                     debug_assert!(
@@ -874,7 +877,20 @@ impl ContextBank {
         // Unconditionally disable page table walking for both TTBRs. If any transaction makes it
         // to this context bank, we want it to fail, and we definitely do not want it touching
         // stale TTBRs.
-        Tcr64Bit::read_from(&cb_base).set_epd0(1).set_epd1(1).write_to(&cb_base);
+        //
+        // Also make this bank's ASID the one the driver means. Stage 1 leaf descriptors are not
+        // global, so both the bank's TLB entries and every invalidation of them are matched by
+        // ASID: `A1 = 0` takes the ASID from `TTBR0`, and `TCR2.AS = 1` makes all 16 bits of it
+        // count. With `AS == 0` the upper 8 bits are treated as zero in the TLB, and must be
+        // written as zero in an invalidation (IHI 0062D.c sections 16.5.31, 16.5.32, 16.5.39),
+        // which the ASIDs used here are not. Neither field has a defined reset value.
+        Tcr64Bit::read_from(&cb_base).set_epd0(1).set_epd1(1).set_a1(0).write_to(&cb_base);
+        Tcr2::read_from(&cb_base).set_as_bit(1).write_to(&cb_base);
+        // `AS` is not read back. `SmmuV2::init` refuses anything but architecture version 2,
+        // which is what provides `TCR2` (SMMUv1 has no such register), and the specification
+        // gives 16-bit ASIDs to every SMMUv2 AArch64 context: section 1.6.5 says so, the field
+        // carries no condition, and there is no ID field for the ASID size. This bank is an
+        // AArch64 context because `CBA2R.VA64` was set just above.
         SmmuEnv::device_memory_barrier();
 
         // And explicitly _enable_ the MMU. When the MMU is enabled, but both TTBRs are disabled,
@@ -887,7 +903,8 @@ impl ContextBank {
             .set_m(1) // - MMU Enabled
             //.set_e(0)     // - Translation tables are expected to use little endian.
             //.set_uci(0)   // - Cache maintenance operations from EL0 are disabled.
-            .set_hupcf(1) // - Process all transactions independently, even with a pending fault IRQ.
+            // - Process all transactions independently, even with a pending fault IRQ.
+            .set_hupcf(1)
             //.set_cfie(0)  // - Disabled context fault interrupts by default.
             //.set_cfcfg(0) // - Terminate transactions when a fault occurs.
             //.set_cfre(0)  // - Do not return an ABORT during a fault. Just RAZ/WI instead.
@@ -920,7 +937,7 @@ impl ContextBank {
 
     /// Static helper that validates `cb_ndx` is available in `smmu` and disables its hardware
     /// registers.
-    pub fn disable_at<S: SmmuController>(smmu: &S, cb_ndx: u32) {
+    pub(in crate::arm_smmu) fn disable_at<S: SmmuController>(smmu: &S, cb_ndx: u32) {
         debug_assert!(cb_ndx < smmu.num_cbs());
         debug_assert!(smmu.available_cbs().test_bit(cb_ndx));
         Self::disable_regs(smmu.gr1_base(), smmu.get_cb_base(cb_ndx), cb_ndx);
@@ -988,13 +1005,14 @@ impl ContextBank {
         let assert_ttbrs_disabled = |cb_ndx: u32, ttbr0_disabled: bool, ttbr1_disabled: bool| {
             assert!(
                 smmu.op_mode() == ArmSmmuMode::Disabled || (ttbr0_disabled && ttbr1_disabled),
-                "{} ERROR: SMMU driver is not disabled (mode {}), but adopted Context Bank #{} has {}{}{} enabled!",
+                "{} ERROR: SMMU driver is not disabled (mode {}), but adopted Context Bank #{} \
+                 has {}{}{} enabled!",
                 smmu.name(),
                 arm_smmu_mode_to_string(smmu.op_mode()),
                 cb_ndx,
-                if ttbr0_disabled { "" } else { "TRBR0" },
+                if ttbr0_disabled { "" } else { "TTBR0" },
                 if ttbr0_disabled || ttbr1_disabled { "" } else { " and " },
-                if ttbr1_disabled { "" } else { "TRBR1" }
+                if ttbr1_disabled { "" } else { "TTBR1" }
             );
         };
 
@@ -1029,7 +1047,8 @@ impl ContextBank {
                     AddrMode::Mode32Bit | AddrMode::Invalid => {
                         dprintf!(
                             INFO,
-                            "{} : WARNING - bad addressing mode ({}) in adopted stage-2 only context bank ({})\n",
+                            "{} : WARNING - bad addressing mode ({}) in adopted stage-2 only \
+                             context bank ({})\n",
                             smmu.name(),
                             self.addr_mode as u32,
                             self.cb_ndx
@@ -1049,6 +1068,9 @@ impl ContextBank {
                         self.ttbrs[0].enabled = tcr.epd0() == 0;
                         self.ttbrs[1].enabled = tcr.epd1() == 0;
 
+                        // `TG0` and `TG1` are only meaningful when their respective `TTBR` is in
+                        // use (`TG1`'s reset value is a reserved encoding): do not warn about a
+                        // field nobody programmed.
                         self.ttbrs[0].granule_size_bits = if self.ttbrs[0].enabled {
                             self.decode_granule_size_bits(tcr.tg0())
                         } else {
@@ -1104,7 +1126,8 @@ impl ContextBank {
                     AddrMode::Invalid => {
                         dprintf!(
                             INFO,
-                            "{} : WARNING - bad addressing mode ({}) in adopted stage-1 context bank ({})\n",
+                            "{} : WARNING - bad addressing mode ({}) in adopted stage-1 context \
+                             bank ({})\n",
                             smmu.name(),
                             self.addr_mode as u32,
                             self.cb_ndx
@@ -1117,14 +1140,16 @@ impl ContextBank {
                 if ttbr.enabled {
                     dprintf!(
                         INFO,
-                        "{} : WARNING - Translation enabled and TTBR{} valid in adopted context bank ({}).\n",
+                        "{} : WARNING - Translation enabled and TTBR{} valid in adopted context \
+                         bank ({}).\n",
                         smmu.name(),
                         i,
                         self.cb_ndx
                     );
                     dprintf!(
                         INFO,
-                        "{} : WARNING - Make sure that PTE pages starting at TTBR{} paddr 0x{:x} are reserved.\n",
+                        "{} : WARNING - Make sure that PTE pages starting at TTBR{} paddr 0x{:x} \
+                         are reserved.\n",
                         smmu.name(),
                         i,
                         ttbr.ttbr_paddr
@@ -1140,7 +1165,7 @@ impl ContextBank {
     /// Forces the internal mode of this context bank to `mode` during test teardown (e.g., to
     /// transition an `Adopted` context bank to `Fault` before shutting it down).
     ///
-    /// Used by `Smmu::test_shutdown_and_destroy` (`#[cfg(test)]` / host tests) because `set_mode`
+    /// Used by `SmmuV2::test_shutdown_and_destroy` (`#[cfg(test)]` / host tests) because `set_mode`
     /// asserts that an `Adopted` context bank is never transitioned during normal operation.
     #[cfg(any(ktest, not(is_kernel)))]
     pub(crate) fn force_mode_for_test(&mut self, mode: BtiMode) {

@@ -680,6 +680,7 @@ class BTree {
     std::destroy_at(node);
     allocator_.deallocate(size, node);
   }
+  __NO_INLINE void clear_non_leaf();
 
   // Following are different methods to help update the augmented state in the tree. Various
   // helpers allow for updating single nodes, or updating and propagating as required all the way to
@@ -845,12 +846,20 @@ void BTree<Key, ValueType, Observer, Allocator, Traits, NodeSize, Validation, Va
     return;
   }
   if (root_->is_leaf()) {
-    empty_leaf(root_);
-    free_node(root_);
+    TreeNode* root = root_;
     root_ = nullptr;
+    empty_leaf(root);
+    free_node(root);
     return;
   }
 
+  clear_non_leaf();
+}
+
+template <typename Key, typename ValueType, typename Observer, typename Allocator, typename Traits,
+          size_t NodeSize, IteratorValidation Validation, TreeValidation Validator>
+void BTree<Key, ValueType, Observer, Allocator, Traits, NodeSize, Validation,
+           Validator>::clear_non_leaf() {
   // To avoid recursion we clear from right->left as this allows for gradually erasing elements
   // without needing to repeatedly shuffle the remaining values down each time one is erased.
   // Shuffling down would otherwise be necessary as there is no guarantee that the |path| does not

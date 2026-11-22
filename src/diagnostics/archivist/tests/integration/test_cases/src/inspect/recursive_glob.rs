@@ -46,6 +46,7 @@ async fn read_components_recursive_glob() {
 
     writer_b.set_health_ok().await.unwrap();
 
+    #[allow(clippy::collection_is_never_read)]
     let mut exposed_inspect = vec![];
     exposed_inspect.push(expose_nested_inspect(&realm_proxy, "child_a", "nested_one").await);
     exposed_inspect.push(expose_nested_inspect(&realm_proxy, "child_a", "nested_two").await);
@@ -105,6 +106,7 @@ async fn read_components_subtree_with_recursive_glob() {
 
     writer_b.set_health_ok().await.unwrap();
 
+    #[allow(clippy::collection_is_never_read)]
     let mut exposed_inspect = vec![];
     exposed_inspect.push(expose_nested_inspect(&realm_proxy, "child_a", "nested_one").await);
     exposed_inspect.push(expose_nested_inspect(&realm_proxy, "child_a", "nested_two").await);

@@ -27,7 +27,7 @@ func TestLoadFuzzersFromMissingFile(t *testing.T) {
 	build := newBaseBuild()
 
 	filename := invalidPath
-	build.Paths["fuzzers.json"] = filename
+	build.Paths["tests.json"] = filename
 	if err := build.LoadFuzzers(); err == nil {
 		t.Fatalf("expected failure for %q", filename)
 	}
@@ -39,7 +39,7 @@ func TestLoadFuzzersFromInvalidFile(t *testing.T) {
 	filename := createTempfileWithContents(t, "not valid json", "json")
 	defer os.Remove(filename)
 
-	build.Paths["fuzzers.json"] = filename
+	build.Paths["tests.json"] = filename
 	if err := build.LoadFuzzers(); err == nil {
 		t.Fatal("expected failure for invalid json")
 	}
@@ -51,7 +51,6 @@ func TestLoadFuzzersFromEmptyFile(t *testing.T) {
 	filename := createTempfileWithContents(t, "[]", "json")
 	defer os.Remove(filename)
 
-	build.Paths["fuzzers.json"] = filename
 	build.Paths["tests.json"] = filename
 
 	if err := build.LoadFuzzers(); err != nil {
@@ -66,26 +65,26 @@ func TestLoadFuzzersFromEmptyFile(t *testing.T) {
 func TestLoadFuzzersWithIncompleteMetadata(t *testing.T) {
 	build := newBaseBuild()
 
-	// Missing "fuzzer"
-	data := `[{"label": "//src/foo:bar", "package": "foo"}`
+	// Missing package_url
+	data := `[{"test": {"build_rule": "fuchsia_fuzzer_package"}}]`
 	filename := createTempfileWithContents(t, data, "json")
 	defer os.Remove(filename)
 
-	build.Paths["fuzzers.json"] = filename
+	build.Paths["tests.json"] = filename
 
 	if err := build.LoadFuzzers(); err == nil {
-		t.Fatal("expected failure for missing fuzzer in metadata")
+		t.Fatal("expected failure for missing package_url in metadata")
 	}
 
-	// Missing "package"
-	data = `[{"label": "//src/foo:bar", "fuzzer": "bar"}`
+	// Malformed package_url
+	data = `[{"test": {"build_rule": "fuchsia_fuzzer_package", "package_url": "fuchsia-pkg://fuchsia.com/foo"}}]`
 	filename = createTempfileWithContents(t, data, "json")
 	defer os.Remove(filename)
 
-	build.Paths["fuzzers.json"] = filename
+	build.Paths["tests.json"] = filename
 
 	if err := build.LoadFuzzers(); err == nil {
-		t.Fatal("expected failure for missing package in metadata")
+		t.Fatal("expected failure for malformed package_url in metadata")
 	}
 }
 
@@ -233,7 +232,6 @@ func TestSymbolize(t *testing.T) {
 
 	build := newBaseBuild()
 	build.Paths["symbolizer"] = "symbolizer"
-	build.Paths["llvm-symbolizer"] = "llvm-symbolizer"
 
 	// TODO(https://fxbug.dev/42121948): more realistic test data
 	inputData := "[1234.5][klog] INFO: {{{0x41}}}"
@@ -265,5 +263,72 @@ func TestStripLogPrefix(t *testing.T) {
 			t.Fatalf("unexpected log prefix stripping result for %q: got %q, want %q",
 				input, got, want)
 		}
+	}
+}
+
+func TestResolveProductBundleImages(t *testing.T) {
+	buildDir := t.TempDir()
+	pbRelDir := filepath.Join("obj", "products", "minimal", "product_bundle")
+	pbDir := filepath.Join(buildDir, pbRelDir)
+	if err := os.MkdirAll(pbDir, 0o755); err != nil {
+		t.Fatalf("error creating product bundle dir: %s", err)
+	}
+
+	pbManifest := `[
+  {
+    "name": "minimal.x64",
+    "path": "obj/products/minimal/product_bundle"
+  }
+]`
+	if err := os.WriteFile(filepath.Join(buildDir, "product_bundles.json"), []byte(pbManifest), 0o600); err != nil {
+		t.Fatalf("error writing product_bundles.json: %s", err)
+	}
+
+	pbJSON := `{
+  "version": "2",
+  "product_name": "minimal.x64",
+  "product_version": "unversioned",
+  "partitions": {
+    "hardware_revision": "x64"
+  },
+  "sdk_version": "1.0",
+  "system_a": [
+    {
+      "type": "blk",
+      "name": "fxfs.fastboot",
+      "path": "system_a/fxfs.sparse.blk"
+    },
+    {
+      "type": "zbi",
+      "name": "zircon-a",
+      "path": "system_a/fuchsia.zbi"
+    },
+    {
+      "type": "kernel",
+      "name": "qemu-kernel",
+      "path": "system_a/linux-x86-boot-shim.bin"
+    }
+  ]
+}`
+	if err := os.WriteFile(filepath.Join(pbDir, "product_bundle.json"), []byte(pbJSON), 0o600); err != nil {
+		t.Fatalf("error writing product_bundle.json: %s", err)
+	}
+
+	zbi, blk, kernel, err := resolveProductBundleImages(buildDir, "minimal", "x64")
+	if err != nil {
+		t.Fatalf("resolveProductBundleImages failed: %s", err)
+	}
+	if want := filepath.Join(pbDir, "system_a", "fuchsia.zbi"); zbi != want {
+		t.Errorf("got zbi %q, want %q", zbi, want)
+	}
+	if want := filepath.Join(pbDir, "system_a", "fxfs.sparse.blk"); blk != want {
+		t.Errorf("got blk %q, want %q", blk, want)
+	}
+	if want := filepath.Join(pbDir, "system_a", "linux-x86-boot-shim.bin"); kernel != want {
+		t.Errorf("got kernel %q, want %q", kernel, want)
+	}
+
+	if _, _, _, err := resolveProductBundleImages(buildDir, "nonexistent", "x64"); err == nil {
+		t.Errorf("expected error for nonexistent product bundle name, got nil")
 	}
 }

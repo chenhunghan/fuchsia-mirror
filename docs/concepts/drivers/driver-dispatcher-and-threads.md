@@ -160,12 +160,12 @@ this happens after `Driver::stop()`.
 
 <!-- Reference links -->
 
-[driver-host]: /docs/concepts/drivers/driver_framework.md#driver_host
+[driver-host]: /docs/concepts/drivers/driver_framework.md#driver-host
 [driver-framework]: /docs/concepts/drivers/driver_framework.md
 [fdf-dispatcher]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/runtime/include/lib/fdf/cpp/dispatcher.h
 [driver-transport]: /docs/development/languages/fidl/tutorials/cpp/topics/driver-transport.md
 [async-lib]: https://cs.opensource.google/fuchsia/fuchsia/+/main:/sdk/lib/async/README.md
-[driver-runtime]: /docs/concepts/drivers/driver_framework.md#driver_runtime
+[driver-runtime]: /docs/concepts/drivers/driver_framework.md#driver-runtime
 [async-cpp-task]: http://cs/fuchsia/sdk/lib/async/include/lib/async/cpp/task.h
 [async-cpp-wait]: http://cs/fuchsia/sdk/lib/async/include/lib/async/cpp/wait.h
 [driver-hook]: http://cs/fuchsia/src/lib/ddk/include/lib/ddk/driver.h

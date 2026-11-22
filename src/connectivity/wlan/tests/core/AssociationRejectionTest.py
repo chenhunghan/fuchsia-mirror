@@ -10,7 +10,7 @@ import fidl_fuchsia_wlan_ieee80211 as f_wlan_ieee80211
 import fidl_fuchsia_wlan_internal as fidl_security
 import fidl_fuchsia_wlan_sme as f_wlan_sme
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from legacy_access_point.access_point import AccessPoint, setup_ap
 from legacy_access_point.ap_lib.hostapd_constants import (
     AP_DEFAULT_CHANNEL_2G,

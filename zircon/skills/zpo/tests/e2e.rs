@@ -10,11 +10,13 @@
 //! standard library, change how FXT is imported, or change the shell's
 //! command line output.
 
+mod core_tests;
 mod fxt_writer;
 
 use fxt_writer::{BLOCKED, IDLE, Writer};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zpo::attribution::Bucket;
 use zpo::proc::HostRunner;
 use zpo::tp::queries;
 use zpo::tp::session::Sessions;
@@ -234,6 +236,32 @@ fn chunks_keep_rows_and_order() {
 }
 
 #[test]
+fn analysis_matches_the_hand_computed_attribution() {
+    let e = env(100_000);
+    let tr = zpo::trace_db::load(&e.sessions, &e.trace, &|_| {}).unwrap();
+    assert!(tr.has_rates);
+    let spec = zpo::tasks::parse("events:irq:42->slice:Present").unwrap();
+    let res =
+        zpo::analysis::analyze(&tr, spec, None, zpo::analysis::MAX_JOBS, zpo::analysis::MAX_DEPTH)
+            .unwrap();
+    assert_eq!(res.jobs.len(), JOBS as usize);
+    assert!(res.response_ns.iter().all(|&r| r == 19_000));
+    // Per job: app blocked on the irq thread [10, 19]: the irq thread waits
+    // for IRQ 42 (2), waits for a CPU (1) and runs (6); then app waits for a
+    // CPU (1) and runs (9).
+    let bb = res.attributions[0].by_bucket();
+    assert_eq!(bb.get(&Bucket::Run), Some(&15_000));
+    assert_eq!(bb.get(&Bucket::WakeLatency), Some(&2_000));
+    assert_eq!(bb.get(&Bucket::HwWait), Some(&2_000));
+    let hops: Vec<&String> = res.hops.keys().map(|k| &k.2).collect();
+    assert_eq!(hops, vec!["<- Echo.Ping"]);
+    let irq_u = tr.threads.values().find(|t| t.tid == IRQ_T as i64).unwrap().utid;
+    assert_eq!(res.threads[&irq_u].deadline_params, Some((50_000, 1_000_000)));
+    assert_eq!(res.hw_waits.keys().next().map(|k| k.1), Some(42));
+    tr.check().unwrap();
+}
+
+#[test]
 fn warm_sessions_start_and_stop() {
     let e = env(100_000);
     let name = e.sessions.ensure(&e.trace, &|_| {}).unwrap();
@@ -241,4 +269,147 @@ fn warm_sessions_start_and_stop() {
     assert_eq!(e.sessions.ensure(&e.trace, &|_| {}).unwrap(), name);
     e.sessions.kill(&name);
     assert!(!e.sessions.alive(&name));
+}
+
+#[test]
+fn unsymbolized_ipc_is_explained() {
+    let e = env_with(100_000, fixture_with_ipc_name("ChannelMessage"));
+    let tr = zpo::trace_db::load(&e.sessions, &e.trace, &|_| {}).unwrap();
+    assert!(zpo::analysis::ipc_unsymbolized(&tr));
+    let spec = zpo::tasks::parse("events:irq:42->ipc-in:Echo.Ping").unwrap();
+    let Err(err) =
+        zpo::analysis::analyze(&tr, spec, None, zpo::analysis::MAX_JOBS, zpo::analysis::MAX_DEPTH)
+    else {
+        panic!("an ipc-in: task matched on an unsymbolized trace");
+    };
+    let err = err.to_string();
+    assert!(err.contains("not symbolized"), "{err}");
+    // Tasks that do not use FIDL names still work.
+    let spec = zpo::tasks::parse("events:irq:42->slice:Present").unwrap();
+    assert_eq!(
+        zpo::analysis::analyze(&tr, spec, None, zpo::analysis::MAX_JOBS, zpo::analysis::MAX_DEPTH)
+            .unwrap()
+            .jobs
+            .len(),
+        JOBS as usize
+    );
+}
+
+// Measurement conclusions (the command line and the UI share one path).
+
+/// A session with one stress capture of the fixture, recorded on a device
+/// with one 4-CPU domain whose only role matches the irq thread's profile.
+fn mini_session(e: &Env, root: &Path) -> (zpo::runner::Ctx, PathBuf, zpo::topology::Topology) {
+    let topo = zpo::topology::Topology::parse(
+        "Domain d0\nlogical core count: 4\n + logical core id: 0\n + logical core id: 1\n \
+         + logical core id: 2\n + logical core id: 3\nrelative performance: 1000\ndomain_id: 0\n",
+        &[(
+            "mini.profiles".into(),
+            r#"{"scope": "board", "profiles": {"drv.irq": {"capacity": "50us", "period": "1ms", "affinity": [2, 3]}}}"#
+                .into(),
+        )],
+    )
+    .unwrap();
+    let sdir = root.join("sessions/mini");
+    let task = "events:irq:42->slice:Present";
+    zpo::runner::Session::new(&sdir, task, zpo::runner::LoadDef::manual()).save().unwrap();
+    std::fs::create_dir_all(sdir.join("baseline")).unwrap();
+    let info = serde_json::json!({"name": "baseline", "topology": topo, "captures": [
+        {"tag": "stress-1", "condition": "stress", "trace": e.trace.display().to_string()}]});
+    std::fs::write(sdir.join("baseline/measurement.json"), info.to_string()).unwrap();
+    let ctx = zpo::runner::Ctx {
+        fuchsia_dir: root.to_path_buf(),
+        sessions: Arc::new(Sessions::new(Arc::new(HostRunner), tp())),
+        ext_dirs: vec![],
+        checkout: Default::default(),
+        lessons: Default::default(),
+    };
+    (ctx, sdir, topo)
+}
+
+#[test]
+fn cli_and_ui_reach_the_same_conclusion() {
+    let e = env(100_000);
+    let root = tempfile::tempdir().unwrap();
+    let (ctx, sdir, topo) = mini_session(&e, root.path());
+    // `zpo session-analyze` and the UI's Analyze both run this.
+    let summ =
+        zpo::summary::analyze_measurement(&ctx, &sdir, "baseline", Arc::new(|_| {}), None).unwrap();
+    let props = summ["proposals"].as_array().unwrap().clone();
+    assert!(!props.is_empty(), "{summ}");
+    // The UI reads the written summary through the server.
+    let st =
+        Arc::new(zpo::server::State::new(root.path().join("sessions"), ctx.clone(), None).unwrap());
+    let ui = zpo::server::get_json(&st, "/api/session/mini/baseline/summary").unwrap();
+    assert_eq!(ui["verdict"], summ["verdict"]);
+    assert_eq!(ui["proposals"], summ["proposals"]);
+    // The command line prints the same numbers.
+    let text = zpo::summary::conclusion_text(&summ);
+    assert!(text.contains(summ["verdict"]["headline"].as_str().unwrap()), "{text}");
+    for p in &props {
+        let row = format!(
+            "{}: {}us / {}us",
+            p["label"].as_str().unwrap(),
+            p["capacity_us"],
+            p["period_us"]
+        );
+        assert!(text.contains(&row), "{row} not in {text}");
+    }
+    // `zpo analyze` on the same capture, with the options the measurement
+    // uses for a stress capture, concludes the same through the same function.
+    let tr = zpo::trace_db::load(&ctx.sessions, &e.trace, &|_| {}).unwrap();
+    let spec = zpo::tasks::parse("events:irq:42->slice:Present").unwrap();
+    let res = zpo::analysis::analyze(
+        &tr,
+        spec,
+        Some(&topo),
+        zpo::analysis::MAX_JOBS,
+        zpo::analysis::MAX_DEPTH,
+    )
+    .unwrap();
+    let opts = zpo::derive::DeriveOptions::with_window(None);
+    let c = zpo::verdict::conclude(&res, &tr, &topo, &opts, zpo::verdict::TAIL_Q, &ctx.lessons);
+    assert_eq!(summ["verdict"]["primary"], c.verdict.primary.as_str());
+    let caps: Vec<(String, i64, i64)> = c
+        .shown
+        .iter()
+        .map(|p| (p.label.clone(), p.capacity_ns / 1000, p.period_ns / 1000))
+        .collect();
+    let from_summary: Vec<(String, i64, i64)> = props
+        .iter()
+        .map(|p| {
+            let n = |k: &str| p[k].as_i64().unwrap();
+            (p["label"].as_str().unwrap().to_string(), n("capacity_us"), n("period_us"))
+        })
+        .collect();
+    assert_eq!(caps, from_summary);
+    // The irq thread runs with drv.irq's parameters, so its proposal keeps
+    // that role's CPUs.
+    let irq = c.proposals.iter().find(|p| p.label.contains("irq-thread")).unwrap();
+    assert_eq!(irq.affinity, vec![2, 3]);
+    assert!(irq.notes.iter().any(|n| n.contains("kept from drv.irq")), "{:?}", irq.notes);
+    assert!(!irq.notes.iter().any(|n| n == zpo::topology::NO_CORE_IDS_NOTE));
+    // The same capture on a device whose cpuctl does not report core IDs:
+    // the same capacities and affinities, and a note that the CPU fit was not
+    // checked.
+    let old = zpo::topology::Topology {
+        domains: topo
+            .domains
+            .iter()
+            .map(|d| zpo::topology::Domain { cpus: vec![], ..d.clone() })
+            .collect(),
+        roles: topo.roles.clone(),
+    };
+    assert!(!old.knows_cpus());
+    let props_new = zpo::derive::derive(&tr, &res, &topo, &opts);
+    let props_old = zpo::derive::derive(&tr, &res, &old, &opts);
+    assert_eq!(props_old.len(), props_new.len());
+    for (p, q) in props_new.iter().zip(&props_old) {
+        assert_eq!(
+            (p.capacity_ns, p.period_ns, &p.affinity),
+            (q.capacity_ns, q.period_ns, &q.affinity)
+        );
+        assert!(q.notes.iter().any(|n| n == zpo::topology::NO_CORE_IDS_NOTE), "{:?}", q.notes);
+    }
+    ctx.sessions.kill_started();
 }

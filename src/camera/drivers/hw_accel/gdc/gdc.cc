@@ -520,9 +520,9 @@ zx_status_t GdcDevice::Setup(void* /*ctx*/, zx_device_t* parent, std::unique_ptr
   }
 
   zx::result gdc_mmio = pdev.MapMmio(kGdc);
-  if (clk_mmio.is_error()) {
+  if (gdc_mmio.is_error()) {
     zxlogf(ERROR, "Failed to map gdc mmio: %s", gdc_mmio.status_string());
-    return clk_mmio.status_value();
+    return gdc_mmio.status_value();
     ;
   }
 

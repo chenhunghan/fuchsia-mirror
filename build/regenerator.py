@@ -635,12 +635,6 @@ def main() -> int:
         try:
             extra_ninja_build_inputs |= build_tests_json.build_tests_json(
                 build_dir,
-                with_bazel_tests=args_json.get(
-                    # LINT.IfChange(export_bazel_tests)
-                    "export_bazel_tests",
-                    True,
-                    # LINT.ThenChange(//build/config/export_bazel_tests.gni)
-                ),
                 quiet=args.quiet,
             )
         except RuntimeError as e:
@@ -769,6 +763,7 @@ def main() -> int:
         # need to run multiple builds concurrently from the same source checkout
         # but using different build directories.
 
+        # LINT.IfChange(convenience_symlinks)
         # These symlinks are useful for IDEs.
         for artifact in [
             "compile_commands.json",
@@ -800,6 +795,7 @@ def main() -> int:
             fuchsia_dir / "bazel-repos",
             build_dir / "gen" / "build" / "bazel" / "output_base" / "external",
         )
+        # LINT.ThenChange(//build/bazel/scripts/workspace_utils.py:convenience_symlinks)
 
     if not args.symlinks_only:
         result = regenerate()

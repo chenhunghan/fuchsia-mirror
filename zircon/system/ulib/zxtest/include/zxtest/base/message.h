@@ -5,50 +5,53 @@
 #ifndef ZXTEST_BASE_MESSAGE_H_
 #define ZXTEST_BASE_MESSAGE_H_
 
+#include <zircon/compiler.h>
 #include <zircon/status.h>
 
-#include <array>
+#include <concepts>
+#include <cstdarg>
 #include <iterator>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/types.h>
 
 namespace zxtest {
 
 namespace internal {
 
-inline std::string_view ToStringView(std::string_view str) { return str; }
+// A contiguous character range with a known size, such as std::string_view,
+// std::string, std::span<const char>, or a char array.
+template <typename T>
+concept SizedCharRange = requires(T&& str) {
+  { std::data(str) } -> std::convertible_to<const char*>;
+  { std::size(str) } -> std::convertible_to<size_t>;
+};
 
-// We avoid calling std::string_view's constructor of a single `const char*`
-// argument, as that will call std::char_traits<char>::length() which may not
-// support nullptrs.
-inline std::string_view ToStringView(const char* str) {
-  if (!str) {
-    return {};
-  }
-  return {str, strlen(str)};
+// Strings are compared like C strings, so a sized range ends at its first NUL
+// character (if any) but never reads past its size.
+constexpr std::string_view ToStringView(SizedCharRange auto&& str) {
+  std::string_view sv{std::data(str), std::size(str)};
+  return sv.substr(0, sv.find('\0'));
 }
 
-inline std::string_view ToStringView(char* str) {
-  return ToStringView(static_cast<const char*>(str));
+// C strings, including nullptr and other types that convert to const char*.
+template <std::convertible_to<const char*> T>
+  requires(!SizedCharRange<T>)
+constexpr std::string_view ToStringView(T&& str) {
+  const char* cstr = std::forward<T>(str);
+  return cstr ? std::string_view{cstr} : std::string_view{};
 }
 
-// Else, default to assuming that std::data will yield a C string.
-template <typename Stringlike>
-inline std::enable_if_t<!std::is_convertible_v<Stringlike, nullptr_t>, std::string_view>
-ToStringView(const Stringlike& str) {
-  static_assert(
-      std::is_convertible_v<decltype(std::data(std::declval<Stringlike&>())), const char*>);
-  return ToStringView(std::data(str));
-}
-
-template <typename Stringlike>
-inline std::enable_if_t<std::is_convertible_v<Stringlike, nullptr_t>, std::string_view>
-ToStringView(const Stringlike& str) {
-  return {};
+// Other types that convert (even explicitly) to std::string_view.
+template <typename T>
+  requires(!SizedCharRange<T> && !std::convertible_to<T, const char*> &&
+           std::constructible_from<std::string_view, T>)
+constexpr std::string_view ToStringView(T&& str) {
+  return ToStringView(std::string_view(std::forward<T>(str)));
 }
 
 }  // namespace internal
@@ -88,6 +91,10 @@ std::string ToHex(const void* ptr, size_t size);
 // just print whether the pointer is nullptr/empty/normal.
 std::string_view PrintVolatile(volatile const void* ptr, size_t size);
 
+std::string FormatDescriptionV(std::string_view desc, const char* fmt, va_list args);
+std::string FormatDescription(std::string_view desc, const char* fmt, ...) __PRINTFLIKE(2, 3);
+std::string PrintAsTuple(std::span<const std::string> tuple);
+
 }  // namespace internal
 
 // Specializations exist for primitive types, pointers and |std::string|.
@@ -102,25 +109,22 @@ std::string PrintValue(volatile const T& value) {
   return std::string{internal::PrintVolatile(&value, sizeof(value))};
 }
 
-// For pointers just print the address.
-template <typename T>
-std::string PrintValue(const T* value) {
-  if (value == nullptr) {
-    return "<nullptr>";
-  }
-  return std::string{fbl::StringPrintf("%p", static_cast<const void*>(value))};
-}
-
-// Explicit overloads for integers, floating point, char pointers, and strings.
+// Explicit overloads for generic and char pointers, integers, floating point, and strings.
 std::string PrintValue(int32_t value);
 std::string PrintValue(uint32_t value);
 std::string PrintValue(int64_t value);
-std::string PrintValue(uint64_t& value);
+std::string PrintValue(uint64_t value);
 std::string PrintValue(float value);
 std::string PrintValue(double value);
 std::string PrintValue(const char* value);
+std::string PrintValue(const void* value);
 inline std::string PrintValue(std::string str) { return str; }
 inline std::string PrintValue(std::string_view str) { return std::string{str}; }
+
+// All other pointers are treated like a void pointer.
+inline std::string PrintValue(const auto* value) {
+  return PrintValue(static_cast<const void*>(value));
+}
 
 // Print a string form of the status, can't be a specialization of PrintValue because zx_status_t is
 // a uint32_t.
@@ -128,38 +132,17 @@ std::string PrintStatus(zx_status_t status);
 
 // For tuples, recursively print the individual components.
 template <typename... Ts>
-std::string PrintValue(const std::tuple<Ts...>& value) {
-  const auto strings = std::apply(
-      [&](auto&&... elems) {
-        return std::array<std::string, sizeof...(Ts)>{
-            PrintValue(std::forward<decltype(elems)>(elems))...};
-      },
-      value);
-
-  // Total size of all string representations, plus:
-  // * 1 for the opening "{".
-  // * 1 for each " " between representations, plus a "," if it is not the last representation.
-  // * 2 for the closing " }".
-  size_t total_size = 0;
-  for (const auto& s : strings) {
-    total_size += s.size();
+inline std::string PrintValue(const std::tuple<Ts...>& value) {
+  if constexpr (sizeof...(Ts) == 0) {
+    return "{ }";
+  } else {
+    return std::apply(
+        []<typename... E>(E&&... elems) -> std::string {
+          const std::string strings[]{PrintValue(std::forward<E>(elems))...};
+          return internal::PrintAsTuple(strings);
+        },
+        value);
   }
-  total_size += 1 + ((2 * strings.size()) - 1) + 2;
-
-  char buffer[total_size];
-  size_t current = 0;
-  buffer[current++] = '{';
-  for (size_t index = 0; index < strings.size(); ++index) {
-    buffer[current++] = ' ';
-    std::memcpy(buffer + current, strings[index].data(), strings[index].size());
-    current += strings[index].size();
-    if (index + 1 < strings.size()) {
-      buffer[current++] = ',';
-    }
-  }
-  buffer[current++] = ' ';
-  buffer[current++] = '}';
-  return std::string(buffer, current);
 }
 
 template <typename StringTypeA, typename StringTypeB>

@@ -583,9 +583,15 @@ async fn supported_port_frame_types(
     let realm = sandbox.create_netstack_realm::<Netstack3, _>(name).expect("create realm");
     let (tun_device, network_device) = create_tun_device();
     let admin_device_control = install_device(&realm, network_device);
-    let (tun_port, network_port) =
-        create_tun_port_with(&tun_device, TUN_DEFAULT_PORT_ID, rx_frame_types, tx_frame_types, mac)
-            .await;
+    let (tun_port, network_port) = create_tun_port_with(
+        &tun_device,
+        TUN_DEFAULT_PORT_ID,
+        rx_frame_types,
+        tx_frame_types,
+        mac,
+        None,
+    )
+    .await;
     tun_port.set_online(true).await.expect("set port online");
     let fhardware_network::PortInfo { id, .. } = network_port.get_info().await.expect("get info");
     let port_id = id.expect("port id");

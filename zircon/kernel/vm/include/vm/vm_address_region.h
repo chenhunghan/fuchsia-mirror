@@ -7,30 +7,19 @@
 #ifndef ZIRCON_KERNEL_VM_INCLUDE_VM_VM_ADDRESS_REGION_H_
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_VM_ADDRESS_REGION_H_
 
-#include <assert.h>
-#include <lib/btree.h>
-#include <lib/crypto/prng.h>
-#include <lib/fit/function.h>
 #include <lib/zircon-internal/thread_annotations.h>
+#include <lib/zx/result.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <zircon/types.h>
 
-#include <fbl/canary.h>
-#include <fbl/intrusive_double_list.h>
-#include <fbl/intrusive_wavl_tree.h>
 #include <fbl/recycler.h>
 #include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
-#include <ffl/saturating_arithmetic.h>
-#include <kernel/ffi.h>
-#include <ktl/limits.h>
-#include <ktl/optional.h>
-#include <vm/vm_address_region_observer.h>
+#include <ktl/utility.h>
 #include <vm/vm_aspace.h>
 #include <vm/vm_constants.h>
-#include <vm/vm_cow_pages.h>
 #include <vm/vm_object.h>
-#include <vm/vm_page_list.h>
 
 // Creation flags for VmAddressRegion and VmMappings
 
@@ -81,23 +70,11 @@ enum class VmAddressRegionOpChildren : bool {
 class VmAddressRegionOrMapping;
 class VmAddressRegion;
 class VmMapping;
-class VmEnumerator;
-enum class VmAddressRegionEnumeratorType : bool;
-template <VmAddressRegionEnumeratorType, typename>
-class VmAddressRegionEnumerator;
-
-extern "C" {
-void* cpp_vm_address_region_or_mapping_state(VmAddressRegionOrMapping* region_or_mapping);
-void* cpp_vm_address_region_state(VmAddressRegion* vmar);
-void* cpp_vm_mapping_state(VmMapping* mapping);
-}
-
-class MultiPageRequest;
 
 // A VmAddressRegion represents a contiguous region of the virtual address
 // space.  It is partitioned by non-overlapping children of the following types:
 // 1) child VmAddressRegion
-// 2) child VmMapping (leafs that map VmObjects into the address space)
+// 2) child VmMapping (leaves that map VmObjects into the address space)
 // 3) gaps (logical, not actually objects).
 //
 // VmAddressRegionOrMapping represents a tagged union of the two types.
@@ -108,14 +85,45 @@ class MultiPageRequest;
 // DEAD, then the VmAddressRegion is invalid and has no meaning.
 //
 // All VmAddressRegion and VmMapping state is protected by the aspace lock.
-class VmAddressRegionOrMapping : public fbl::Recyclable<VmAddressRegionOrMapping> {
+class alignas(8) VmAddressRegionOrMapping : public fbl::RefCounted<VmAddressRegionOrMapping>,
+                                            public fbl::Recyclable<VmAddressRegionOrMapping> {
  public:
-  void AddRef() const;
-  bool Release() const;
-  void Adopt() const;
+  // accessors
+  vaddr_t base() const;
+  size_t size() const;
 
-  // If a VMO-mapping, unmap all pages and remove dependency on vm object it has a ref to.
-  // Otherwise recursively destroy child VMARs and transition to the DEAD state.
+ private:
+  VmAddressRegionOrMapping() = delete;
+  ~VmAddressRegionOrMapping() = delete;
+
+  DISALLOW_COPY_ASSIGN_AND_MOVE(VmAddressRegionOrMapping);
+
+  friend class fbl::Recyclable<VmAddressRegionOrMapping>;
+  void fbl_recycle();
+};
+
+extern "C" {
+void rust_vm_address_region_or_mapping_recycle(VmAddressRegionOrMapping* region_or_mapping);
+vaddr_t rust_vm_address_region_or_mapping_base(const VmAddressRegionOrMapping* region_or_mapping);
+size_t rust_vm_address_region_or_mapping_size(const VmAddressRegionOrMapping* region_or_mapping);
+}
+
+inline void VmAddressRegionOrMapping::fbl_recycle() {
+  rust_vm_address_region_or_mapping_recycle(this);
+}
+
+inline vaddr_t VmAddressRegionOrMapping::base() const {
+  return rust_vm_address_region_or_mapping_base(this);
+}
+inline size_t VmAddressRegionOrMapping::size() const {
+  return rust_vm_address_region_or_mapping_size(this);
+}
+
+// A representation of a contiguous range of virtual address space
+class VmAddressRegion final : public fbl::RefCounted<VmAddressRegion>,
+                              public fbl::Recyclable<VmAddressRegion> {
+ public:
+  // Recursively destroy child VMARs and transition to the DEAD state.
   //
   // Returns ZX_OK on success, ZX_ERR_BAD_STATE if already dead, and other
   // values on error (typically unmap failure).
@@ -127,649 +135,6 @@ class VmAddressRegionOrMapping : public fbl::Recyclable<VmAddressRegionOrMapping
   uint32_t flags() const;
   const fbl::RefPtr<VmAspace>& aspace() const;
 
-  // Subtype information and safe down-casting
-  bool is_mapping() const;
-  void AssertRegionOrMappingCanary() const;
-  fbl::RefPtr<VmAddressRegion> as_vm_address_region();
-  fbl::RefPtr<VmMapping> as_vm_mapping();
-  VmAddressRegion* as_vm_address_region_ptr();
-  const VmAddressRegion* as_vm_address_region_ptr() const;
-  VmMapping* as_vm_mapping_ptr();
-  const VmMapping* as_vm_mapping_ptr() const;
-  static fbl::RefPtr<VmAddressRegion> downcast_as_vm_address_region(
-      fbl::RefPtr<VmAddressRegionOrMapping>* region_or_map);
-  static fbl::RefPtr<VmMapping> downcast_as_vm_mapping(
-      fbl::RefPtr<VmAddressRegionOrMapping>* region_or_map);
-
-  // Dump debug info
-  void DumpLocked(uint depth, bool verbose) const TA_REQ(region_lock()) TA_REQ(lock());
-
-  // Expose our backing lock for annotation purposes.
-  Lock<CriticalMutex>* lock() const TA_RET_CAP(aspace()->lock()) { return aspace()->lock(); }
-  Lock<CriticalMutex>& lock_ref() const TA_RET_CAP(aspace()->lock()) {
-    return aspace()->lock_ref();
-  }
-  Lock<CriticalMutex>* region_lock() const TA_RET_CAP(aspace()->region_lock_) {
-    return aspace()->region_lock();
-  }
-  Lock<CriticalMutex>& region_lock_ref() const TA_RET_CAP(aspace()->region_lock_) {
-    return aspace()->region_lock_ref();
-  }
-
-  bool is_in_range(vaddr_t base, size_t size) const;
-
-  // Memory priorities that can be applied to VMARs and mappings to propagate to VMOs and page
-  // tables.
-  enum class MemoryPriority : bool {
-    // Default overcommit priority where reclamation is allowed.
-    DEFAULT,
-    // High priority prevents all reclamation.
-    HIGH,
-  };
-
-  enum class LifeCycleState : uint8_t {
-    // Initial state: not yet in the address space layout, so no Destroy() is needed
-    NOT_READY,
-    // Usual state: information is representative of the address space layout. Must be destroyed
-    // before the last reference is dropped.
-    ALIVE,
-    // Object is invalid
-    DEAD
-  };
-
-  // Returns true if the instance is alive and reporting information that
-  // reflects the address space layout. |aspace()->lock()| must be held.
-  bool IsAliveLocked() const TA_REQ(lock()) {
-    AssertRegionOrMappingCanary();
-    return state_locked() == LifeCycleState::ALIVE;
-  }
-
- private:
-  friend class fbl::Recyclable<VmAddressRegionOrMapping>;
-  friend void* ::cpp_vm_address_region_or_mapping_state(VmAddressRegionOrMapping*);
-  void fbl_recycle();
-
- protected:
-  // friend VmAddressRegion so it can access DestroyLocked
-  friend VmAddressRegion;
-  template <VmAddressRegionEnumeratorType, typename>
-  friend class VmAddressRegionEnumerator;
-
-  // destructor, should only be invoked from fbl_recycle
-  ~VmAddressRegionOrMapping();
-  friend fbl::RefPtr<VmAddressRegionOrMapping>;
-
-  LifeCycleState state_locked() const TA_REQ(lock());
-  LifeCycleState state_locked_region() const TA_REQ(region_lock());
-  void set_state_locked(LifeCycleState state) TA_REQ(lock()) TA_REQ(region_lock());
-  MemoryPriority memory_priority_locked() const TA_REQ(lock());
-  VmAddressRegion* parent_locked() const TA_REQ(lock());
-  void set_parent_locked(VmAddressRegion* parent) TA_REQ(lock());
-
-  VmAddressRegionOrMapping(vaddr_t base, size_t size, uint32_t flags, VmAspace* aspace,
-                           VmAddressRegion* parent, bool is_mapping);
-
-  // Check if the given *arch_mmu_flags* are allowed under this
-  // region's *flags()*
-  bool is_valid_mapping_flags(arch_mmu_flags_t arch_mmu_flags);
-
-  zx_status_t DestroyLocked() TA_REQ(lock()) TA_REQ(region_lock());
-
-  // Performs any actions necessary to apply a high memory priority over the given range.
-  // This method is always safe to call as it will internally check the memory priority status and
-  // skip if necessary, so the caller does not need to worry about races with a different memory
-  // priority being applied.
-  // As this may need to acquire the lock even to check the memory priority, if the caller knows
-  // they have not caused this to become high priority (i.e. they have called
-  // SetMemoryPriorityLocked with MemoryPriority::DEFAULT), then calling this should be skipped for
-  // performance.
-  // Memory that needs to be committed for a high memory priority are user pager backed pages and
-  // any compressed or loaned pages. Anonymous pages and copy-on-write pages do not allocated /
-  // committed.
-  // This method has no return value as it is entirely best effort and no part of its operation is
-  // needed for correctness.
-  void CommitHighMemoryPriority() TA_EXCL(lock());
-
-  // Transition from NOT_READY to ALIVE, and add references to self to related
-  // structures.
-  // On error no state is changed and no references are added.
-  zx_status_t Activate() TA_REQ(region_lock()) TA_REQ(lock());
-
-  OpaqueStorage<kVmAddressRegionOrMappingStateSize, kVmAddressRegionOrMappingStateAlign>
-      opaque_storage_;
-};
-
-extern "C" {
-void rust_vm_address_region_or_mapping_state_init(void* storage, vaddr_t base, size_t size,
-                                                  uint32_t flags, VmAspace* aspace,
-                                                  VmAddressRegion* parent, bool is_mapping);
-void rust_vm_address_region_or_mapping_destruct(VmAddressRegionOrMapping* region_or_mapping);
-void rust_vm_address_region_or_mapping_recycle(VmAddressRegionOrMapping* region_or_mapping);
-zx_status_t rust_vm_address_region_or_mapping_destroy(VmAddressRegionOrMapping* region_or_mapping);
-zx_status_t rust_vm_address_region_or_mapping_destroy_locked(
-    VmAddressRegionOrMapping* region_or_mapping);
-zx_status_t rust_vm_address_region_or_mapping_activate(VmAddressRegionOrMapping* region_or_mapping);
-void rust_vm_address_region_or_mapping_dump_locked(
-    const VmAddressRegionOrMapping* region_or_mapping, uint32_t depth, bool verbose);
-void rust_vm_address_region_or_mapping_commit_high_memory_priority(
-    VmAddressRegionOrMapping* region_or_mapping);
-vaddr_t rust_vm_address_region_or_mapping_base(const VmAddressRegionOrMapping* region_or_mapping);
-size_t rust_vm_address_region_or_mapping_size(const VmAddressRegionOrMapping* region_or_mapping);
-uint32_t rust_vm_address_region_or_mapping_flags(const VmAddressRegionOrMapping* region_or_mapping);
-const fbl::RefPtr<VmAspace>* rust_vm_address_region_or_mapping_aspace(
-    const VmAddressRegionOrMapping* region_or_mapping);
-void rust_vm_address_region_or_mapping_assert_canary(
-    const VmAddressRegionOrMapping* region_or_mapping);
-bool rust_vm_address_region_or_mapping_is_mapping(
-    const VmAddressRegionOrMapping* region_or_mapping);
-VmAddressRegionOrMapping::LifeCycleState rust_vm_address_region_or_mapping_state_locked(
-    const VmAddressRegionOrMapping* region_or_mapping);
-VmAddressRegionOrMapping::LifeCycleState rust_vm_address_region_or_mapping_state_locked_region(
-    const VmAddressRegionOrMapping* region_or_mapping);
-void rust_vm_address_region_or_mapping_set_state_locked(
-    VmAddressRegionOrMapping* region_or_mapping, VmAddressRegionOrMapping::LifeCycleState state);
-VmAddressRegionOrMapping::MemoryPriority rust_vm_address_region_or_mapping_memory_priority_locked(
-    const VmAddressRegionOrMapping* region_or_mapping);
-VmAddressRegion* rust_vm_address_region_or_mapping_parent_locked(
-    const VmAddressRegionOrMapping* region_or_mapping);
-void rust_vm_address_region_or_mapping_set_parent_locked(
-    VmAddressRegionOrMapping* region_or_mapping, VmAddressRegion* parent);
-bool rust_vm_address_region_or_mapping_is_in_range(
-    const VmAddressRegionOrMapping* region_or_mapping, vaddr_t base, size_t size);
-bool rust_vm_address_region_or_mapping_is_valid_mapping_flags(
-    const VmAddressRegionOrMapping* region_or_mapping, arch_mmu_flags_t arch_mmu_flags);
-fbl::RefCounted<VmAddressRegionOrMapping>* rust_vm_address_region_or_mapping_ref_counted(
-    const VmAddressRegionOrMapping* region_or_mapping);
-}
-
-inline void VmAddressRegionOrMapping::AddRef() const {
-  rust_vm_address_region_or_mapping_ref_counted(this)->AddRef();
-}
-inline bool VmAddressRegionOrMapping::Release() const {
-  return rust_vm_address_region_or_mapping_ref_counted(this)->Release();
-}
-inline void VmAddressRegionOrMapping::Adopt() const {
-  rust_vm_address_region_or_mapping_ref_counted(this)->Adopt();
-}
-
-inline vaddr_t VmAddressRegionOrMapping::base() const {
-  return rust_vm_address_region_or_mapping_base(this);
-}
-inline size_t VmAddressRegionOrMapping::size() const {
-  return rust_vm_address_region_or_mapping_size(this);
-}
-inline uint32_t VmAddressRegionOrMapping::flags() const {
-  return rust_vm_address_region_or_mapping_flags(this);
-}
-inline const fbl::RefPtr<VmAspace>& VmAddressRegionOrMapping::aspace() const {
-  return *rust_vm_address_region_or_mapping_aspace(this);
-}
-inline bool VmAddressRegionOrMapping::is_mapping() const {
-  return rust_vm_address_region_or_mapping_is_mapping(this);
-}
-inline void VmAddressRegionOrMapping::AssertRegionOrMappingCanary() const {
-  rust_vm_address_region_or_mapping_assert_canary(this);
-}
-inline VmAddressRegionOrMapping::LifeCycleState VmAddressRegionOrMapping::state_locked() const {
-  return rust_vm_address_region_or_mapping_state_locked(this);
-}
-inline VmAddressRegionOrMapping::LifeCycleState VmAddressRegionOrMapping::state_locked_region()
-    const {
-  return rust_vm_address_region_or_mapping_state_locked_region(this);
-}
-inline void VmAddressRegionOrMapping::set_state_locked(LifeCycleState state) {
-  rust_vm_address_region_or_mapping_set_state_locked(this, state);
-}
-inline VmAddressRegionOrMapping::MemoryPriority VmAddressRegionOrMapping::memory_priority_locked()
-    const {
-  return rust_vm_address_region_or_mapping_memory_priority_locked(this);
-}
-inline VmAddressRegion* VmAddressRegionOrMapping::parent_locked() const {
-  return rust_vm_address_region_or_mapping_parent_locked(this);
-}
-inline void VmAddressRegionOrMapping::set_parent_locked(VmAddressRegion* parent) {
-  rust_vm_address_region_or_mapping_set_parent_locked(this, parent);
-}
-inline bool VmAddressRegionOrMapping::is_in_range(vaddr_t base, size_t size) const {
-  return rust_vm_address_region_or_mapping_is_in_range(this, base, size);
-}
-inline bool VmAddressRegionOrMapping::is_valid_mapping_flags(arch_mmu_flags_t arch_mmu_flags) {
-  return rust_vm_address_region_or_mapping_is_valid_mapping_flags(this, arch_mmu_flags);
-}
-
-// A list of regions ordered by virtual address. Templated to allow for test code to avoid needing
-// to instantiate 'real' VmAddressRegionOrMapping instances.
-// TODO(https://fxbug.dev/503042881): The RegionList API is quite object reference focused, instead
-// of iterator focused, and this leads to a lot of theoretically redundant 'find' operations on the
-// btree. These APIs, and the VMAR logic using them, should be re-designed to be more iterator
-// based.
-template <typename T = VmAddressRegionOrMapping>
-class RegionList final {
- public:
-  using PtrType = fbl::RefPtr<T>;
-  using ChildList = btree::BTree<vaddr_t, PtrType, VmAddressRegionObserver>;
-
-  RegionList() = default;
-
-  // Remove *region* from the list, returns the removed region.
-  void RemoveRegion(T* region) {
-    auto it = regions_.find(region->base());
-    ASSERT(it.IsValid());
-    regions_.erase(it);
-  }
-
-  // Request the region to the left or right of the given region.
-  ChildList::iterator LeftOf(T* region) {
-    auto it = regions_.find(region->base());
-    DEBUG_ASSERT(it.IsValid());
-    it--;
-    return it;
-  }
-  ChildList::iterator RightOf(T* region) {
-    auto it = regions_.find(region->base());
-    DEBUG_ASSERT(it.IsValid());
-    it++;
-    return it;
-  }
-
-  // Insert *region* to the region list. On failure the region list is unmodified.
-  zx_status_t InsertRegion(fbl::RefPtr<T> region) {
-    const vaddr_t base = region->base();
-    return regions_.insert(base, ktl::move(region)).IsValid() ? ZX_OK : ZX_ERR_NO_MEMORY;
-  }
-
-  // Replaces the target region with a new region at the same address. Unlike insertion this cannot
-  // fail.
-  void ReplaceRegion(T* prev, fbl::RefPtr<T> region) {
-    ASSERT(prev->base() == region->base());
-    auto it = regions_.find(prev->base());
-    ASSERT(it.IsValid());
-    regions_.update(it, ktl::move(region));
-  }
-
-  // Use a static template to allow for returning a const and non-const pointer depending on the
-  // constness of self.
-  template <typename S>
-  static ktl::conditional_t<ktl::is_const_v<S>, const T, T>* FindRegion(S* self, vaddr_t addr) {
-    // Find the first region with a base greater than *addr*.  If a region
-    // exists for *addr*, it will be immediately before it.
-    auto itr = --self->regions_.upper_bound(addr);
-    if (!itr.IsValid()) {
-      return nullptr;
-    }
-    auto region = (*itr).second;
-    // Subregion size should never be zero unless during unmapping which should never overlap with
-    // this operation.
-    DEBUG_ASSERT(region->size() > 0);
-    vaddr_t region_end;
-    bool overflowed = add_overflow(region->base(), region->size() - 1, &region_end);
-    ASSERT(!overflowed);
-    if (region->base() > addr || addr > region_end) {
-      return nullptr;
-    }
-
-    return region;
-  }
-
-  // Find the region that covers addr, returns nullptr if not found.
-  const T* FindRegion(vaddr_t addr) const { return FindRegion(this, addr); }
-  T* FindRegion(vaddr_t addr) { return FindRegion(this, addr); }
-
-  template <typename S>
-  static ktl::conditional_t<ktl::is_const_v<S>, typename ChildList::const_iterator,
-                            typename ChildList::iterator>
-  IncludeOrHigher(S* self, vaddr_t base) {
-    // Find the first region with a base greater than *base*.  If a region
-    // exists for *base*, it will be immediately before it.
-    auto itr = self->regions_.upper_bound(base);
-    itr--;
-    if (!itr.IsValid()) {
-      itr = self->regions_.begin();
-    } else {
-      const T* region = (*itr).second;
-      if (base >= region->base() && base - region->base() >= region->size()) {
-        // If *base* isn't in this region, ignore it.
-        ++itr;
-      }
-    }
-    return itr;
-  }
-
-  // Find the region that contains |base|, or if that doesn't exist, the first region that contains
-  // an address greater than |base|.
-  ChildList::iterator IncludeOrHigher(vaddr_t base) { return IncludeOrHigher(this, base); }
-  ChildList::const_iterator IncludeOrHigher(vaddr_t base) const {
-    return IncludeOrHigher(this, base);
-  }
-
-  ChildList::iterator UpperBound(vaddr_t base) { return regions_.upper_bound(base); }
-  ChildList::const_iterator UpperBound(vaddr_t base) const { return regions_.upper_bound(base); }
-
-  // Check whether it would be valid to create a child in the range [base, base+size).
-  bool IsRangeAvailable(vaddr_t base, size_t size) const {
-    DEBUG_ASSERT(size > 0);
-
-    // Find the first region with base > *base*.  Since subregions_ has no
-    // overlapping elements, we just need to check this one and the prior
-    // child.
-
-    auto prev = regions_.upper_bound(base);
-    auto next = prev--;
-
-    if (prev.IsValid()) {
-      const T* p = (*prev).second;
-      vaddr_t prev_last_byte;
-      if (add_overflow(p->base(), p->size() - 1, &prev_last_byte)) {
-        return false;
-      }
-      if (prev_last_byte >= base) {
-        return false;
-      }
-    }
-
-    if (next.IsValid()) {
-      const T* n = (*next).second;
-      vaddr_t last_byte;
-      if (add_overflow(base, size - 1, &last_byte)) {
-        return false;
-      }
-      if (n->base() <= last_byte) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  // Returns the base address of an available spot in the address range that satisfies the given
-  // entropy, alignment, size, and upper limit requirements. If no spot is found that satisfies the
-  // given entropy (i.e. target_index), the number of candidate spots encountered is returned.
-  //
-  // See vm/vm_address_region_subtree_state.h for an explanation of the augmented state used by this
-  // method to perform efficient tree traversal.
-  struct FindSpotAtIndexFailed {
-    size_t candidate_spot_count;
-  };
-  fit::result<FindSpotAtIndexFailed, vaddr_t> FindSpotAtIndex(vaddr_t target_index,
-                                                              uint8_t align_pow2, size_t size,
-                                                              vaddr_t parent_base,
-                                                              size_t parent_size,
-                                                              vaddr_t upper_limit) const {
-    // Returns the number of addresses that satisfy the size and alignment in the given range,
-    // accounting for ranges that overlap the upper limit.
-    const auto spots_in_range = [align_pow2, size, upper_limit](vaddr_t aligned_base,
-                                                                size_t aligned_size) -> size_t {
-      DEBUG_ASSERT(aligned_base < upper_limit);
-
-      const size_t range_limit = ffl::SaturateAddAs<size_t>(aligned_base, aligned_size);
-      const size_t clamped_range_size =
-          range_limit < upper_limit ? aligned_size : aligned_size - (range_limit - upper_limit);
-
-      if (clamped_range_size >= size) {
-        return ((clamped_range_size - size) >> align_pow2) + 1;
-      }
-      return 0;
-    };
-
-    // Returns the given range with the base aligned and the size adjusted to maintain the same end
-    // address. If the aligned base address is greater than the end address, the returned size is
-    // zero.
-    struct AlignedRange {
-      vaddr_t base;
-      size_t size;
-    };
-    const auto align_range = [align_pow2](vaddr_t range_base, size_t range_size) -> AlignedRange {
-      const vaddr_t aligned_base = ROUNDUP(range_base, 1UL << align_pow2);
-      const size_t base_delta = aligned_base - range_base;
-      const size_t aligned_size = ffl::SaturateSubtractAs<size_t>(range_size, base_delta);
-      return {.base = aligned_base, .size = aligned_size};
-    };
-
-    // Track the number of candidate spots encountered.
-    size_t candidate_spot_count = 0;
-
-    // As we iterate through regions we remember the end of the last allocated region as the start
-    // of a potential gap.
-    vaddr_t next_gap_start = parent_base;
-    // Because an allocation can end at the very top of the 64-bit address space the calculation of
-    // the logical start of the next gap (end + 1) could overflow. To assist with debug validation
-    // we track this overflow explicitly.
-    bool next_gap_overflow = false;
-    // When we do find something record it here. Use UINT64_MAX, which can never be a valid base
-    // address, to track the difference between the walk terminating early with success, or
-    // completing with success (and hence not yet having a spot).
-    vaddr_t spot = UINT64_MAX;
-
-    // Helper to process a gap and count our spots. Returns true if a spot was found.
-    auto record_gap = [&](vaddr_t gap_base, size_t gap_size) -> bool {
-      const AlignedRange aligned_gap = align_range(gap_base, gap_size);
-      if (aligned_gap.base >= upper_limit) {
-        return false;
-      }
-      const size_t spot_count = spots_in_range(aligned_gap.base, aligned_gap.size);
-      candidate_spot_count += spot_count;
-      if (target_index < spot_count) {
-        spot = aligned_gap.base + (target_index << align_pow2);
-        return true;
-      }
-      target_index -= spot_count;
-      return false;
-    };
-
-    // Lambda passed to the walker for handling an intermediate btree node.
-    auto examine_subtree = [&](VmAddressRegionObserver::State state) -> zx_status_t {
-      if (next_gap_start < state.min_addr()) {
-        if (record_gap(next_gap_start, state.min_addr() - next_gap_start)) {
-          return ZX_ERR_STOP;
-        }
-      }
-      if (state.min_addr() >= upper_limit) {
-        return ZX_ERR_OUT_OF_RANGE;
-      }
-      if (auto max_gap = state.max_gap(); max_gap && *max_gap < size) {
-        // max_addr is inclusive, but already_visited is exclusive, so we add 1. Should this
-        // overflow then that means we have reached the end of the possible address space and will
-        // be handled when we check for trailing gaps at the end.
-        next_gap_overflow = add_overflow(state.max_addr, 1, &next_gap_start);
-        // This subtree has no gaps that would fit, so skip the entire subtree with ZX_ERR_NEXT.
-        return ZX_ERR_NEXT;
-      }
-      // Set already_visited to the start of the subtree as we are about to descend into it and we
-      // previously processed any gap up to min_addr.
-      next_gap_start = state.min_addr();
-      return ZX_OK;
-    };
-
-    // Lambda passed to the walker for handling leaf btree nodes.
-    auto examine_leaf = [&](VmAddressRegionObserver::State state, auto first,
-                            auto last) -> zx_status_t {
-      if (next_gap_start < state.min_addr()) {
-        if (record_gap(next_gap_start, state.min_addr() - next_gap_start)) {
-          return ZX_ERR_STOP;
-        }
-      }
-      if (state.min_addr() >= upper_limit) {
-        return ZX_ERR_OUT_OF_RANGE;
-      }
-      // No matter what happens, we will have processed till max_addr + 1. See examine_subtree for
-      // why explanation of +1 and overflow.
-      next_gap_overflow = add_overflow(state.max_addr, 1, &next_gap_start);
-      if (auto max_gap = state.max_gap(); max_gap && *max_gap < size) {
-        // No gaps in this leaf node what would fit, can skip the iteration and go to the next node.
-        return ZX_ERR_NEXT;
-      }
-      auto prev = first;
-      // The provided iterators are inclusive, so increment last to simplify our loop.
-      last++;
-      for (first++; first != last; first++) {
-        vaddr_t gap_start = (*prev).second->base() + (*prev).second->size();
-        vaddr_t gap_end = (*first).second->base();
-        if (gap_start < gap_end) {
-          if (record_gap(gap_start, gap_end - gap_start)) {
-            // Location found, can cease walking.
-            return ZX_ERR_STOP;
-          }
-        }
-        prev = first;
-      }
-      // Continue to the next node.
-      return ZX_ERR_NEXT;
-    };
-
-    // Walk the btree examining the augmented state to optimally skip irrelevant subtrees.
-    zx_status_t status = regions_.walk(examine_subtree, examine_leaf);
-    if (status != ZX_OK && status != ZX_ERR_OUT_OF_RANGE) {
-      return fit::error(FindSpotAtIndexFailed{candidate_spot_count});
-    }
-    // Check if we already found a spot or if we need to consider any trailing gap.
-    if (spot != UINT64_MAX) {
-      return fit::success{spot};
-    }
-    if (unlikely(next_gap_overflow)) {
-      vaddr_t parent_top;
-      // The next gap should only overflow if the parent region is the end of the 64-bit address
-      // space. There should also, therefore, not actually be any gap.
-      ASSERT(add_overflow(parent_base, parent_size, &parent_top));
-      ASSERT(parent_top == next_gap_start);
-    } else {
-      // Any potential remaining gap has not wrapped, but the parent could still be at the end of
-      // address space, so operate on its max_byte and not its top to avoid overflow.
-      const vaddr_t parent_max_byte = parent_base + (parent_size - 1);
-      if (next_gap_start <= parent_max_byte) {
-        const size_t remaining_size = parent_max_byte - next_gap_start + 1;
-        if (record_gap(next_gap_start, remaining_size)) {
-          return fit::success{spot};
-        }
-      }
-    }
-    return fit::error(FindSpotAtIndexFailed{candidate_spot_count});
-  }
-
-  // Get the allocation spot that is free and large enough for the aligned size.
-  zx_status_t GetAllocSpot(vaddr_t* alloc_spot, uint8_t align_pow2, uint8_t entropy, size_t size,
-                           vaddr_t parent_base, size_t parent_size, crypto::Prng* prng,
-                           vaddr_t upper_limit = ktl::numeric_limits<vaddr_t>::max()) const {
-    DEBUG_ASSERT(entropy < sizeof(size_t) * 8);
-
-    // The number of addresses to consider based on the configured entropy.
-    const size_t max_candidate_spaces = 1ul << entropy;
-
-    // We first pick an index in [0, max_candidate_spaces] and hope to find a spot there. If the
-    // number of available spots is less than the selected index, the attempt fails, returning the
-    // actual number of candidate spots found, and we try again in this smaller range.
-    //
-    // This is mathematically equivalent to randomly picking a spot within [0, candidate_spot_count]
-    // when selected_index <= candidate_spot_count.
-    //
-    // Prove as following:
-    // Define M = candidate_spot_count
-    // Define N = max_candidate_spaces (M < N, otherwise we can randomly allocate any spot from
-    // [0, max_candidate_spaces], thus allocate a specific slot has (1 / N) probability).
-    // Define slot X0 where X0 belongs to [1, M].
-    // Define event A: randomly pick a slot X in [1, N], N = X0.
-    // Define event B: randomly pick a slot X in [1, N], N belongs to [1, M].
-    // Define event C: randomly pick a slot X in [1, N], N = X0 when N belongs to [1, M].
-    // P(C) = P(A | B)
-    // Since when A happens, B definitely happens, so P(AB) = P(A)
-    // P(C) = P(A) / P(B) = (1 / N) / (M / N) = (1 / M)
-    // which is equal to the probability of picking a specific spot in [0, M].
-    vaddr_t selected_index = prng != nullptr ? prng->RandInt(max_candidate_spaces) : 0;
-
-    fit::result allocation_result =
-        FindSpotAtIndex(selected_index, align_pow2, size, parent_base, parent_size, upper_limit);
-    if (allocation_result.is_error()) {
-      const size_t candidate_spot_count = allocation_result.error_value().candidate_spot_count;
-      if (candidate_spot_count == 0) {
-        return ZX_ERR_NO_RESOURCES;
-      }
-
-      // If the number of available spaces is smaller than the selected index, pick again from the
-      // available range.
-      DEBUG_ASSERT(candidate_spot_count < max_candidate_spaces);
-      DEBUG_ASSERT(prng);
-      selected_index = prng->RandInt(candidate_spot_count);
-      allocation_result =
-          FindSpotAtIndex(selected_index, align_pow2, size, parent_base, parent_size, upper_limit);
-    }
-
-    DEBUG_ASSERT(allocation_result.is_ok());
-    *alloc_spot = allocation_result.value();
-    ASSERT_MSG(IS_ROUNDED(*alloc_spot, 1UL << align_pow2), "size=%zu align_pow2=%u alloc_spot=%zx",
-               size, align_pow2, *alloc_spot);
-    return ZX_OK;
-  }
-
-  // Returns whether the region list is empty.
-  bool IsEmpty() const { return regions_.is_empty(); }
-
-  // Returns the first element of the list.
-  T& front() {
-    DEBUG_ASSERT(!IsEmpty());
-    return *(*regions_.begin()).second;
-  }
-
-  ChildList::iterator begin() { return regions_.begin(); }
-  ChildList::const_iterator begin() const { return regions_.begin(); }
-
-  ChildList::iterator end() { return regions_.end(); }
-  ChildList::const_iterator end() const { return regions_.end(); }
-
-  size_t size_slow() const { return regions_.calculate_utilization_slow().stored_values; }
-
- private:
-  // list of memory regions, indexed by base address.
-  ChildList regions_;
-};
-
-using VmMappingProtectionRanges = btree::BTree<vaddr_t, arch_mmu_flags_t>;
-
-struct VmAddressRegionSubregionsCursor {
-  RegionList<VmAddressRegionOrMapping>::ChildList::iterator iter;
-};
-
-extern "C" {
-void cpp_vm_address_region_destruct(VmAddressRegion* vmar);
-VmAddressRegionOrMapping* cpp_vm_address_region_subregions_find_region(const VmAddressRegion* vmar,
-                                                                       vaddr_t addr);
-void cpp_vm_address_region_subregions_include_or_higher(
-    VmAddressRegion* vmar, vaddr_t base,
-    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
-zx_status_t cpp_vm_address_region_subregions_insert_region(VmAddressRegion* vmar,
-                                                           VmAddressRegionOrMapping* region);
-size_t cpp_vm_address_region_subregions_size_slow(const VmAddressRegion* vmar);
-void cpp_vm_address_region_subregions_remove_region(VmAddressRegion* vmar,
-                                                    VmAddressRegionOrMapping* region);
-void cpp_vm_address_region_subregions_replace_region(VmAddressRegion* vmar,
-                                                     VmAddressRegionOrMapping* prev,
-                                                     VmAddressRegionOrMapping* region);
-void cpp_vm_address_region_subregions_left_of(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* region,
-    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
-void cpp_vm_address_region_subregions_right_of(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* region,
-    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor);
-bool cpp_vm_address_region_subregions_cursor_is_valid(
-    const VmAddressRegionSubregionsCursor* cursor);
-VmAddressRegionOrMapping* cpp_vm_address_region_subregions_cursor_get(
-    const VmAddressRegionSubregionsCursor* cursor);
-void cpp_vm_address_region_subregions_cursor_next(VmAddressRegionSubregionsCursor* cursor);
-bool cpp_vm_address_region_subregions_is_empty(const VmAddressRegion* vmar);
-VmAddressRegionOrMapping* cpp_vm_address_region_subregions_front(VmAddressRegion* vmar);
-void cpp_vm_address_region_subregions_for_each(const VmAddressRegion* vmar,
-                                               void (*cb)(VmAddressRegionOrMapping*, void*),
-                                               void* ctx);
-VmMappingProtectionRanges* cpp_vm_mapping_rest_protection_ranges(VmMapping* mapping);
-const VmMappingProtectionRanges* cpp_vm_mapping_rest_protection_ranges_const(
-    const VmMapping* mapping);
-}
-
-// A representation of a contiguous range of virtual address space
-class VmAddressRegion final : public VmAddressRegionOrMapping,
-                              public fbl::Recyclable<VmAddressRegion> {
- public:
-  // Creates a root region.  This will span the entire aspace
-  static zx_status_t CreateRootLocked(VmAspace& aspace, uint32_t vmar_flags,
-                                      fbl::RefPtr<VmAddressRegion>* out)
-      TA_REQ(aspace.region_lock()) TA_REQ(aspace.lock());
   // Creates a subregion of this region
   zx_status_t CreateSubVmar(size_t offset, size_t size, uint8_t align_pow2, uint32_t vmar_flags,
                             const char* name, fbl::RefPtr<VmAddressRegion>* out);
@@ -779,7 +144,7 @@ class VmAddressRegion final : public VmAddressRegionOrMapping,
     // This will never be null
     fbl::RefPtr<VmMapping> mapping;
     // Represents the virtual address of |mapping| at the time of creation, which is equivalent to
-    // |mapping->base_locking()|.
+    // |mapping->base()|.
     vaddr_t base;
   };
   zx::result<MapResult> CreateVmMapping(size_t mapping_offset, size_t size, uint8_t align_pow2,
@@ -787,219 +152,108 @@ class VmAddressRegion final : public VmAddressRegionOrMapping,
                                         uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
                                         const char* name);
 
-  // Finds the child region that contains the given addr.  If addr is in a gap,
-  // returns nullptr.  This is a non-recursive search.
-  fbl::RefPtr<VmAddressRegionOrMapping> FindRegion(vaddr_t addr);
-
-  // Applies the given memory priority to this VMAR, which may or may not result in a change. Up to
-  // the derived type to know how to apply and update the memory priority.
-  zx_status_t SetMemoryPriorityLocked(MemoryPriority priority) TA_REQ(lock());
-
-  // Unmap a subset of the region of memory in the containing address space,
-  // returning it to this region to allocate.  If a subregion is entirely in
-  // the range, and op_children is Yes, that subregion is destroyed. If a subregion is partially in
-  // the range, Unmap() will fail.
-  zx_status_t Unmap(vaddr_t base, size_t size, VmAddressRegionOpChildren op_children);
-
   // Change protections on a subset of the region of memory in the containing
   // address space. If the requested range overlaps with a subregion and op_children is No,
   // Protect() will fail, otherwise the mapping permissions in the sub-region may only be reduced.
   zx_status_t Protect(vaddr_t base, size_t size, arch_mmu_flags_t new_arch_mmu_flags,
                       VmAddressRegionOpChildren op_children);
 
-  // Reserve a memory region within this VMAR. This region is already mapped in the page table with
-  // |arch_mmu_flags|. VMAR should create a VmMapping for this region even though no physical pages
-  // need to be allocated for this region.
-  zx_status_t ReserveSpace(const char* name, size_t base, size_t size,
-                           arch_mmu_flags_t arch_mmu_flags);
-
-  const char* name() const;
   bool has_parent() const;
 
-  // Recursively traverses the regions for a given virtual address and returns a raw pointer to a
-  // mapping if one is found. The returned pointer is only valid as long as the aspace lock remains
-  // held.
-  VmMapping* FindMappingLocked(vaddr_t va) TA_REQ(lock());
-
-  // Apply a memory priority to this VMAR and all of its subregions.
-  zx_status_t SetMemoryPriority(MemoryPriority priority);
-
-  // Recursively compute the amount of attributed memory within this region
-  using AttributionCounts = VmObject::AttributionCounts;
-  AttributionCounts GetAttributedMemory() const;
-
-  // Traverses this vmar (and any sub-vmars) starting at this node, in depth-first pre-order. See
-  // VmEnumerator for more details. If this vmar is not alive (in the LifeCycleState sense) or
-  // otherwise not enumerable this returns ZX_ERR_BAD_STATE, otherwise the result of enumeration is
-  // returned.
-  zx_status_t EnumerateChildren(VmEnumerator* ve) TA_EXCL(lock());
-
- protected:
-  friend class VmAspace;
-  friend lazy_init::Access;
-  friend void vm_init_preheap();
-
-  // Should be considered private and Create...() should be used instead.
-  VmAddressRegion(VmAspace& aspace, vaddr_t base, size_t size, uint32_t vmar_flags);
-  VmAddressRegion(VmAddressRegion& parent, vaddr_t base, size_t size, uint32_t vmar_flags,
-                  const char* name);
-
-  // constructor for use in creating the kernel aspace singleton
-  explicit VmAddressRegion(VmAspace& kernel_aspace);
-
-  friend class VmAddressRegionOrMapping;
-  template <VmAddressRegionEnumeratorType, typename>
-  friend class VmAddressRegionEnumerator;
-
-  ~VmAddressRegion();
-  friend void ::cpp_vm_address_region_destruct(VmAddressRegion*);
-  friend void* ::cpp_vm_address_region_state(VmAddressRegion*);
-  friend VmAddressRegionOrMapping* ::cpp_vm_address_region_subregions_find_region(
-      const VmAddressRegion*, vaddr_t);
-  friend void ::cpp_vm_address_region_subregions_include_or_higher(
-      VmAddressRegion*, vaddr_t, ffi::Uninitialized<VmAddressRegionSubregionsCursor>*);
-  friend zx_status_t(::cpp_vm_address_region_subregions_insert_region)(VmAddressRegion*,
-                                                                       VmAddressRegionOrMapping*);
-  friend void ::cpp_vm_address_region_subregions_remove_region(VmAddressRegion*,
-                                                               VmAddressRegionOrMapping*);
-  friend void ::cpp_vm_address_region_subregions_replace_region(VmAddressRegion*,
-                                                                VmAddressRegionOrMapping*,
-                                                                VmAddressRegionOrMapping*);
-  friend void ::cpp_vm_address_region_subregions_left_of(
-      VmAddressRegion*, VmAddressRegionOrMapping*,
-      ffi::Uninitialized<VmAddressRegionSubregionsCursor>*);
-  friend void ::cpp_vm_address_region_subregions_right_of(
-      VmAddressRegion*, VmAddressRegionOrMapping*,
-      ffi::Uninitialized<VmAddressRegionSubregionsCursor>*);
-  friend size_t(::cpp_vm_address_region_subregions_size_slow)(const VmAddressRegion*);
-  friend bool ::cpp_vm_address_region_subregions_is_empty(const VmAddressRegion*);
-  friend VmAddressRegionOrMapping* ::cpp_vm_address_region_subregions_front(VmAddressRegion*);
-  friend void ::cpp_vm_address_region_subregions_for_each(
-      const VmAddressRegion*, void (*)(VmAddressRegionOrMapping*, void*), void*);
-
  private:
-  friend class fbl::Recyclable<VmAddressRegion>;
-  void fbl_recycle();
+  VmAddressRegion() = delete;
+  ~VmAddressRegion() = delete;
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmAddressRegion);
 
-  void AssertCanary() const;
-  OpaqueStorage<kVmAddressRegionStateSize, kVmAddressRegionStateAlign> opaque_storage_;
-
-  // Helpers to share code between CreateSubVmar and CreateVmMapping
-  zx_status_t CreateSubVmarInternal(size_t offset, size_t size, uint8_t align_pow2,
-                                    uint32_t vmar_flags, fbl::RefPtr<VmObject> vmo,
-                                    uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-                                    const char* name, vaddr_t* base_out,
-                                    fbl::RefPtr<VmAddressRegionOrMapping>* out);
-  zx_status_t CreateSubVmarInner(size_t offset, size_t size, uint8_t align_pow2,
-                                 uint32_t vmar_flags, fbl::RefPtr<VmObject> vmo,
-                                 uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-                                 const char* name, vaddr_t* base_out,
-                                 fbl::RefPtr<VmAddressRegionOrMapping>* out);
-
-  // Create a new VmMapping within this region, overwriting any existing
-  // mappings that are in the way.  If the range crosses a subregion, the call
-  // fails.
-  zx_status_t OverwriteVmMappingLocked(vaddr_t base, size_t size, uint32_t vmar_flags,
-                                       fbl::RefPtr<VmObject> vmo, uint64_t vmo_offset,
-                                       arch_mmu_flags_t arch_mmu_flags,
-                                       fbl::RefPtr<VmAddressRegionOrMapping>* out)
-      TA_REQ(region_lock()) TA_REQ(lock());
-
-  // Implementation for Unmap() and OverwriteVmMapping() that does not hold
-  // the aspace lock. If |can_destroy_regions| is true, then this may destroy
-  // VMARs that it completely covers.
-  zx_status_t UnmapInternalLocked(vaddr_t base, size_t size, bool can_destroy_regions)
-      TA_REQ(region_lock()) TA_REQ(lock());
-
-  // If the allocation between the given children can be met this returns a virtual address of the
-  // base address of that allocation, otherwise a nullopt is returned.
-  ktl::optional<vaddr_t> CheckGapLockedRegion(const VmAddressRegionOrMapping* prev,
-                                              const VmAddressRegionOrMapping* next,
-                                              vaddr_t search_base, vaddr_t align,
-                                              size_t region_size, size_t min_gap,
-                                              arch_mmu_flags_t arch_mmu_flags)
-      TA_REQ(region_lock());
-
-  // search for a spot to allocate for a region of a given size
-  zx_status_t AllocSpotLockedRegion(size_t size, uint8_t align_pow2,
-                                    arch_mmu_flags_t arch_mmu_flags, vaddr_t* spot,
-                                    vaddr_t upper_limit = ktl::numeric_limits<vaddr_t>::max())
-      TA_REQ(region_lock());
-
-  const RegionList<VmAddressRegionOrMapping>& subregions_locked() const
-      TA_REQ(lock()) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return subregions_;
-  }
-
-  const RegionList<VmAddressRegionOrMapping>& subregions_locked_region() const
-      TA_REQ(region_lock()) TA_NO_THREAD_SAFETY_ANALYSIS {
-    return subregions_;
-  }
-
-  RegionList<VmAddressRegionOrMapping> subregions_ TA_GUARDED(lock()) TA_GUARDED(region_lock());
+  friend class fbl::Recyclable<VmAddressRegion>;
+  void fbl_recycle();
 };
 
 extern "C" {
-void rust_vm_address_region_state_init(void* storage, const char* name);
-void rust_vm_address_region_destruct(void* storage);
-const char* rust_vm_address_region_name(const VmAddressRegion* vmar);
-void rust_vm_address_region_assert_canary(const VmAddressRegion* vmar);
+zx_status_t rust_vm_address_region_destroy(VmAddressRegion* vmar);
+vaddr_t rust_vm_address_region_base(const VmAddressRegion* vmar);
+size_t rust_vm_address_region_size(const VmAddressRegion* vmar);
+uint32_t rust_vm_address_region_flags(const VmAddressRegion* vmar);
+const fbl::RefPtr<VmAspace>* rust_vm_address_region_aspace(const VmAddressRegion* vmar);
 bool rust_vm_address_region_has_parent(const VmAddressRegion* vmar);
-VmAddressRegion* rust_vm_address_region_create_root(VmAspace* aspace, vaddr_t base, size_t size,
-                                                    uint32_t vmar_flags);
-VmAddressRegion* rust_vm_address_region_create_child(VmAddressRegion* parent, vaddr_t base,
-                                                     size_t size, uint32_t vmar_flags,
-                                                     const char* name);
+zx_status_t rust_vm_address_region_create_sub_vmar(VmAddressRegion* vmar, size_t offset,
+                                                   size_t size, uint8_t align_pow2,
+                                                   uint32_t vmar_flags, const char* name,
+                                                   VmAddressRegion** out);
+zx_status_t rust_vm_address_region_create_vm_mapping(VmAddressRegion* vmar, size_t mapping_offset,
+                                                     size_t size, uint8_t align_pow2,
+                                                     uint32_t vmar_flags, VmObject* vmo,
+                                                     uint64_t vmo_offset,
+                                                     arch_mmu_flags_t arch_mmu_flags,
+                                                     vaddr_t* out_base, VmMapping** out_mapping);
 void rust_vm_address_region_recycle(VmAddressRegion* vmar);
-zx_status_t rust_vm_address_region_unmap(VmAddressRegion* vmar, vaddr_t base, size_t size,
-                                         VmAddressRegionOpChildren op_children);
-zx_status_t rust_vm_address_region_unmap_internal_locked(VmAddressRegion* vmar, vaddr_t base,
-                                                         size_t size, bool can_destroy_regions);
 zx_status_t rust_vm_address_region_protect(VmAddressRegion* vmar, vaddr_t base, size_t size,
                                            arch_mmu_flags_t new_arch_mmu_flags,
                                            VmAddressRegionOpChildren op_children);
-VmAddressRegion* rust_vm_address_region_kernel_root_init(VmAspace* kernel_aspace);
-VmAddressRegion* rust_vm_address_region_kernel_heap_init(VmAddressRegion* parent, vaddr_t base,
-                                                         size_t size, uint32_t vmar_flags,
-                                                         const char* name);
-VmAddressRegionOrMapping* rust_vm_address_region_find_region(const VmAddressRegion* vmar,
-                                                             vaddr_t addr);
-VmMapping* rust_vm_address_region_find_mapping_locked(const VmAddressRegion* vmar, vaddr_t va);
-void rust_vm_address_region_get_attributed_memory(const VmAddressRegion* vmar,
-                                                  VmObject::AttributionCounts* out_counts);
-zx_status_t rust_vm_address_region_set_memory_priority(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping::MemoryPriority priority);
-zx_status_t rust_vm_address_region_set_memory_priority_locked(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping::MemoryPriority priority);
 }
 
-inline const char* VmAddressRegion::name() const { return rust_vm_address_region_name(this); }
-inline void VmAddressRegion::AssertCanary() const { rust_vm_address_region_assert_canary(this); }
+inline void VmAddressRegion::fbl_recycle() { rust_vm_address_region_recycle(this); }
+inline zx_status_t VmAddressRegion::Destroy() { return rust_vm_address_region_destroy(this); }
+inline vaddr_t VmAddressRegion::base() const { return rust_vm_address_region_base(this); }
+inline size_t VmAddressRegion::size() const { return rust_vm_address_region_size(this); }
+inline uint32_t VmAddressRegion::flags() const { return rust_vm_address_region_flags(this); }
+inline const fbl::RefPtr<VmAspace>& VmAddressRegion::aspace() const {
+  return *rust_vm_address_region_aspace(this);
+}
+inline zx_status_t VmAddressRegion::CreateSubVmar(size_t offset, size_t size, uint8_t align_pow2,
+                                                  uint32_t vmar_flags, const char* name,
+                                                  fbl::RefPtr<VmAddressRegion>* out) {
+  VmAddressRegion* vmar;
+  zx_status_t status = rust_vm_address_region_create_sub_vmar(this, offset, size, align_pow2,
+                                                              vmar_flags, name, &vmar);
+  if (status != ZX_OK) {
+    return status;
+  }
+  *out = fbl::ImportFromRawPtr(vmar);
+  return ZX_OK;
+}
+inline zx::result<VmAddressRegion::MapResult> VmAddressRegion::CreateVmMapping(
+    size_t mapping_offset, size_t size, uint8_t align_pow2, uint32_t vmar_flags,
+    fbl::RefPtr<VmObject> vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
+    const char* /*name*/) {
+  vaddr_t base;
+  VmMapping* mapping;
+  zx_status_t status = rust_vm_address_region_create_vm_mapping(
+      this, mapping_offset, size, align_pow2, vmar_flags, fbl::ExportToRawPtr(&vmo), vmo_offset,
+      arch_mmu_flags, &base, &mapping);
+  if (status != ZX_OK) {
+    return zx::error{status};
+  }
+  return zx::ok(MapResult{.mapping = fbl::ImportFromRawPtr(mapping), .base = base});
+}
+inline zx_status_t VmAddressRegion::Protect(vaddr_t base, size_t size,
+                                            arch_mmu_flags_t new_arch_mmu_flags,
+                                            VmAddressRegionOpChildren op_children) {
+  return rust_vm_address_region_protect(this, base, size, new_arch_mmu_flags, op_children);
+}
 inline bool VmAddressRegion::has_parent() const { return rust_vm_address_region_has_parent(this); }
 
-extern "C" {
-void cpp_vm_mapping_destruct(VmMapping* mapping);
-}
-
 // A representation of the mapping of a VMO into the address space
-class VmMapping final : public VmAddressRegionOrMapping, public fbl::Recyclable<VmMapping> {
+class VmMapping final : public fbl::RefCounted<VmMapping>, public fbl::Recyclable<VmMapping> {
  public:
-  enum class Mergeable : bool { YES = true, NO = false };
+  // Unmap all pages and remove dependency on vm object it has a ref to.
+  //
+  // Returns ZX_OK on success, ZX_ERR_BAD_STATE if already dead, and other
+  // values on error (typically unmap failure).
+  zx_status_t Destroy() TA_EXCL(lock());
+
+  // accessors
+  vaddr_t base() const;
+  size_t size() const;
+  const fbl::RefPtr<VmAspace>& aspace() const;
+
+  // Expose our backing lock for annotation purposes.
+  Lock<CriticalMutex>* lock() const TA_RET_CAP(aspace()->lock()) { return aspace()->lock(); }
 
   // Accessors for VMO-mapping state
   // These can be read under either lock (both locks being held for writing).
-  arch_mmu_flags_t arch_mmu_flags_locked(vaddr_t offset) const TA_REQ(lock());
   uint64_t object_offset() const;
-
-  // Intended to be used from VmEnumerator callbacks where the aspace()->lock() will be held.
-  fbl::RefPtr<VmObject> vmo_locked() const TA_REQ(lock()) { return object_locked(); }
-  fbl::RefPtr<VmObject> vmo() const TA_EXCL(lock());
-
-  // Convenience wrapper for vmo()->DecommitRange() with the necessary
-  // offset modification and locking.
-  zx_status_t DecommitRange(size_t offset, size_t len) TA_EXCL(lock());
 
   // Map in pages from the underlying vm object, optionally committing pages as it goes.
   // |ignore_existing| controls whether existing hardware mappings in the specified range should be
@@ -1009,51 +263,17 @@ class VmMapping final : public VmAddressRegionOrMapping, public fbl::Recyclable<
   zx_status_t MapRange(size_t offset, size_t len, bool commit, bool ignore_existing = false)
       TA_EXCL(lock());
 
-  using AttributionCounts = VmObject::AttributionCounts;
-  AttributionCounts GetAttributedMemory() const;
-
-  // Unlocked convenience wrapper of UnmapLocked for testing.
-  zx_status_t DebugUnmap(vaddr_t base, size_t size) TA_EXCL(lock());
-
-  // Unlocked convenience wrapper of ProtectLocked for testing.
+  // Unlocked convenience wrapper of `VmMapping::protect_locked` for testing.
   zx_status_t DebugProtect(vaddr_t base, size_t size, arch_mmu_flags_t new_arch_mmu_flags)
       TA_EXCL(lock());
 
-  // Page fault in an address within the mapping. The requested address must be paged aligned. If
-  // |additional_pages| is non-zero, then up to that many additional pages may be resolved using the
-  // same |pf_flags|. It is not an error for the |additional_pages| to span beyond the mapping or
-  // underlying VMO, although the range will get truncated internally. As such only the page
-  // containing va is required to be resolved, and this method may return ZX_OK if any number,
-  // including zero, of the additional pages are resolved.
-  // |object| is required to be this mapping's object, with the requirement that if the aspace
-  // lock() is not held over the call to this function, then the caller is required to ensure that
-  // |object| will remain alive for the duration of the call.
-  // As the |additional_pages| are resolved with the same |pf_flags| they may trigger copy-on-write
-  // or other allocations in the underlying VMO.
-  // If this returns ZX_ERR_SHOULD_WAIT, then the caller should wait on |page_request|
-  // and try again. In addition to a status this returns how many pages got mapped in.
-  // This may return ZX_ERR_UNAVAILABLE if the aspace lock() is not held and means that the mapping
-  // was destroyed before the page fault could be handled.
-  // If ZX_OK is returned then the number of pages mapped in is guaranteed to be >0.
-  // If |additional_pages| was non-zero, then the maximum number of pages that will be mapped is
-  // |additional_pages + 1|. Otherwise the maximum number of pages that will be mapped is
-  // kPageFaultMaxOptimisticPages.
-  ktl::pair<zx_status_t, uint32_t> PageFault(vaddr_t va, uint pf_flags, size_t additional_pages,
-                                             VmObject* object, MultiPageRequest* page_request);
-
-  // Convenience wrapper around PageFault that can be called with the aspace lock held and will
-  // never return ZX_ERR_UNAVAILABLE.
-  ktl::pair<zx_status_t, uint32_t> PageFaultLocked(vaddr_t va, uint pf_flags,
-                                                   size_t additional_pages,
-                                                   MultiPageRequest* page_request) TA_REQ(lock());
-
-  // Apis intended for use by VmObject
+  // APIs intended for use by VmObject
 
   // |assert_object_lock| exists to satisfy clang capability analysis since there are circumstances
   // when the object lock is actually being held, but it was not acquired by dereferencing the
   // object. In this scenario we need to explain to the analysis that the lock held is actually the
   // same as the object lock, and even though we otherwise have no intention of using the object,
-  // the only way to do this is to notionally dereferencing it to compare the lock.
+  // the only way to do this is to notionally dereference it to compare the lock.
   // Since this is asserting that the lock is held, and not just returning a reference to the lock,
   // this method is logically correct since the object pointer itself is only modified if the
   // object lock is held.
@@ -1069,7 +289,7 @@ class VmMapping final : public VmAddressRegionOrMapping, public fbl::Recyclable<
 
   // Unmap any pages that map the passed in vmo range from the arch aspace.
   // May not intersect with this range.
-  // If |only_has_zero_pages| is true then the caller is asserting that it knows that any mappings
+  // If |options| has OnlyHasZeroPages then the caller is asserting that it knows that any mappings
   // in the region will only be for the shared zero page.
   void AspaceUnmapLockedObject(uint64_t offset, uint64_t len, UnmapOptions options) const
       TA_REQ(object_locked()->lock());
@@ -1084,109 +304,28 @@ class VmMapping final : public VmAddressRegionOrMapping, public fbl::Recyclable<
   void AspaceDebugUnpinLockedObject(uint64_t offset, uint64_t len) const
       TA_REQ(object_locked()->lock());
 
-  // Marks this mapping as being a candidate for merging, and will immediately attempt to merge with
-  // any neighboring mappings. Making a mapping mergeable essentially indicates that you will no
-  // longer use this specific VmMapping instance to refer to the referenced region, and will access
-  // the region via the parent vmar in the future, and so the region merely needs to remain valid
-  // through some VmMapping.
-  // For this the function requires you to hand in your last remaining refptr to the mapping.
-  static void MarkMergeable(fbl::RefPtr<VmMapping> mapping);
-
-  // The maximum number of pages that a page fault can optimistically extend the fault to include.
-  // This is defined and exposed here for the purposes of unittests.
-  static constexpr uint64_t kPageFaultMaxOptimisticPages = kVmMappingPageFaultMaxOptimisticPages;
-
-  // TODO(https://fxbug.dev/42106188): Informs the mapping that a write is going to be performed to
-  // the backing VMO, even if the VMO is not writable. This gives the mapping an opportunity to
-  // create a private clone of the VMO if necessary and use that to back a new mapping instead,
-  // providing a way to 'safely' perform the write. On success a RefPtr is returned either to the
-  // current mapping, or to a new mapping if one was created. If a new mapping was created then this
-  // mapping is no longer valid.
-  zx::result<fbl::RefPtr<VmMapping>> ForceWritable();
-
- protected:
-  ~VmMapping();
-  friend void ::cpp_vm_mapping_destruct(VmMapping*);
-  friend void* ::cpp_vm_mapping_state(VmMapping*);
-  friend VmMappingProtectionRanges* ::cpp_vm_mapping_rest_protection_ranges(VmMapping*);
-  friend const VmMappingProtectionRanges* ::cpp_vm_mapping_rest_protection_ranges_const(
-      const VmMapping*);
-
  private:
-  friend class fbl::Recyclable<VmMapping>;
-  friend lazy_init::Access;
-  void fbl_recycle();
+  VmMapping() = delete;
+  ~VmMapping() = delete;
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmMapping);
 
-  OpaqueStorage<kVmMappingStateSize, kVmMappingStateAlign> opaque_storage_;
+  friend class fbl::Recyclable<VmMapping>;
+  void fbl_recycle();
 
   const fbl::RefPtr<VmObject>& object_locked() const TA_REQ(lock());
-
-  // allow VmAddressRegion to manipulate VmMapping internals for construction
-  // and bookkeeping
-  friend class VmAddressRegion;
-  friend class VmAddressRegionOrMapping;
-
-  // private constructors, use VmAddressRegion::Create...() instead
-  VmMapping(VmAddressRegion& parent, bool private_clone, vaddr_t base, size_t size,
-            uint32_t vmar_flags, fbl::RefPtr<VmObject> vmo, uint64_t vmo_offset,
-            arch_mmu_flags_t arch_mmu_flags, Mergeable mergeable);
-  VmMapping(VmAddressRegion& parent, bool private_clone, vaddr_t base, size_t size,
-            uint32_t vmar_flags, fbl::RefPtr<VmObject> vmo, uint64_t vmo_offset,
-            arch_mmu_flags_t first_mmu_flags, btree::BTree<vaddr_t, arch_mmu_flags_t>&& ranges,
-            Mergeable mergeable);
-
-  // If MemoryPriority::HIGH, then disable dynamic reclamation within this region. If
-  // MemoryPriority::DEFAULT, move towards allowing reclamation.
-  void SetMemoryPriorityLocked(VmAddressRegion::MemoryPriority priority) TA_REQ(lock())
-      TA_EXCL(object_locked()->lock());
-
-  // The protection flags of this mapping are tracked as a series of contiguous
-  // virtual address ranges. Since the base address of the mapping is known (`base()`),
-  // we only need to store the flags for the first range, and then the start address
-  // and flags for any subsequent ranges where the protections change.
-  //
-  // The first region's flags are the MMU flags for the interval starting
-  // exactly at `base()`. If `protection_ranges_` is empty, these flags apply to the
-  // entire mapping: [base(), base() + size()).
-  //
-  // `protection_ranges_` is a B-Tree that records any transitions in protection.
-  // Each entry consists of a `vaddr_t` key and an `arch_mmu_flags_t` value.
-  // A node (addr, flags) means that the range starting at `addr` has the protections
-  // `flags`, up until the address of the next node in the tree, or `base() + size()`
-  // if it is the last node.
-  //
-  // This can be read with either lock held, but requires both locks to write it.
-  btree::BTree<vaddr_t, arch_mmu_flags_t> rest_protection_ranges_ TA_GUARDED(lock())
-      TA_GUARDED(object_locked()->lock());
 };
 
 extern "C" {
-void rust_vm_mapping_state_init(void* storage, VmObject* vmo, uint64_t vmo_offset,
-                                arch_mmu_flags_t first_mmu_flags, bool private_clone,
-                                VmMapping::Mergeable mergeable);
-void rust_vm_mapping_destruct(VmMapping* mapping);
+zx_status_t rust_vm_mapping_destroy(VmMapping* mapping);
+vaddr_t rust_vm_mapping_base(const VmMapping* mapping);
+size_t rust_vm_mapping_size(const VmMapping* mapping);
+const fbl::RefPtr<VmAspace>* rust_vm_mapping_aspace(const VmMapping* mapping);
 const fbl::RefPtr<VmObject>* rust_vm_mapping_object(const VmMapping* mapping);
 uint64_t rust_vm_mapping_object_offset(const VmMapping* mapping);
-arch_mmu_flags_t rust_vm_mapping_arch_mmu_flags_locked(const VmMapping* mapping, vaddr_t offset);
-VmObject* rust_vm_mapping_vmo(const VmMapping* mapping);
-VmMapping* rust_vm_mapping_create(VmAddressRegion* parent, bool private_clone, vaddr_t base,
-                                  size_t size, uint32_t vmar_flags, VmObject* vmo,
-                                  uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-                                  VmMapping::Mergeable mergeable);
 void rust_vm_mapping_recycle(VmMapping* mapping);
-zx_status_t rust_vm_mapping_decommit_range(VmMapping* mapping, size_t offset, size_t len);
-void rust_vm_mapping_set_mem_priority_locked(VmMapping* mapping,
-                                             VmAddressRegion::MemoryPriority priority);
 zx_status_t rust_vm_mapping_map_range(VmMapping* mapping, size_t offset, size_t len, bool commit,
                                       bool ignore_existing);
-zx_status_t rust_vm_mapping_page_fault(VmMapping* mapping, vaddr_t va, uint pf_flags,
-                                       size_t additional_pages, VmObject* object,
-                                       MultiPageRequest* page_request, uint32_t* out_mapped);
-zx_status_t rust_vm_mapping_page_fault_locked(VmMapping* mapping, vaddr_t va, uint pf_flags,
-                                              size_t additional_pages,
-                                              MultiPageRequest* page_request, uint32_t* out_mapped);
 zx_status_t rust_vm_mapping_debug_protect(VmMapping* mapping, vaddr_t base, size_t size,
                                           arch_mmu_flags_t new_arch_mmu_flags);
 void rust_vm_mapping_aspace_unmap_locked_object(const VmMapping* mapping, uint64_t offset,
@@ -1195,37 +334,19 @@ void rust_vm_mapping_aspace_remove_write_locked_object(const VmMapping* mapping,
                                                        uint64_t len);
 void rust_vm_mapping_aspace_debug_unpin_locked_object(const VmMapping* mapping, uint64_t offset,
                                                       uint64_t len);
-zx_status_t rust_vm_mapping_debug_unmap(VmMapping* mapping, vaddr_t base, size_t size);
-void rust_vm_mapping_mark_mergeable(VmMapping* mapping);
-void rust_vm_mapping_get_attributed_memory(const VmMapping* mapping,
-                                           VmObject::AttributionCounts* out_counts);
-zx_status_t rust_vm_mapping_force_writable(VmMapping* mapping, VmMapping** out_mapping);
 }
 
+inline void VmMapping::fbl_recycle() { rust_vm_mapping_recycle(this); }
+inline zx_status_t VmMapping::Destroy() { return rust_vm_mapping_destroy(this); }
+inline vaddr_t VmMapping::base() const { return rust_vm_mapping_base(this); }
+inline size_t VmMapping::size() const { return rust_vm_mapping_size(this); }
+inline const fbl::RefPtr<VmAspace>& VmMapping::aspace() const {
+  return *rust_vm_mapping_aspace(this);
+}
 inline const fbl::RefPtr<VmObject>& VmMapping::object_locked() const {
   return *rust_vm_mapping_object(this);
 }
 inline uint64_t VmMapping::object_offset() const { return rust_vm_mapping_object_offset(this); }
-inline arch_mmu_flags_t VmMapping::arch_mmu_flags_locked(vaddr_t offset) const {
-  return rust_vm_mapping_arch_mmu_flags_locked(this, offset);
-}
-inline ktl::pair<zx_status_t, uint32_t> VmMapping::PageFault(vaddr_t va, uint pf_flags,
-                                                             size_t additional_pages,
-                                                             VmObject* object,
-                                                             MultiPageRequest* page_request) {
-  __UNINITIALIZED uint32_t mapped;
-  zx_status_t status = rust_vm_mapping_page_fault(this, va, pf_flags, additional_pages, object,
-                                                  page_request, &mapped);
-  return {status, mapped};
-}
-inline ktl::pair<zx_status_t, uint32_t> VmMapping::PageFaultLocked(vaddr_t va, uint pf_flags,
-                                                                   size_t additional_pages,
-                                                                   MultiPageRequest* page_request) {
-  __UNINITIALIZED uint32_t mapped;
-  zx_status_t status = rust_vm_mapping_page_fault_locked(this, va, pf_flags, additional_pages,
-                                                         page_request, &mapped);
-  return {status, mapped};
-}
 inline zx_status_t VmMapping::MapRange(size_t offset, size_t len, bool commit,
                                        bool ignore_existing) {
   return rust_vm_mapping_map_range(this, offset, len, commit, ignore_existing);
@@ -1244,108 +365,10 @@ inline void VmMapping::AspaceRemoveWriteLockedObject(uint64_t offset, uint64_t l
 inline void VmMapping::AspaceDebugUnpinLockedObject(uint64_t offset, uint64_t len) const {
   rust_vm_mapping_aspace_debug_unpin_locked_object(this, offset, len);
 }
-inline zx_status_t VmMapping::DebugUnmap(vaddr_t base, size_t size) {
-  return rust_vm_mapping_debug_unmap(this, base, size);
-}
-inline void VmMapping::MarkMergeable(fbl::RefPtr<VmMapping> mapping) {
-  rust_vm_mapping_mark_mergeable(fbl::ExportToRawPtr(&mapping));
-}
 
-// Interface for walking a VmAspace-rooted VmAddressRegion/VmMapping tree.
-// Override this class and pass an instance to VmAddressRegion::EnumerateChildren().
-// VmAddressRegion::EnumerateChildren() will call the On* methods in depth-first pre-order.
-// ZX_ERR_NEXT and ZX_ERR_STOP can be used to control iteration, with any other status becoming the
-// return value of this method. The root VmAspace's lock is held during the traversal and passed in
-// to the callbacks as |guard|. A callback is permitted to temporarily drop the lock, using
-// |CallUnlocked|, although doing so invalidates the pointers and to use them without the lock held,
-// of after it is reacquired, they should first be turned into a RefPtr, with the caveat that they
-// might now refer to a dead, aka unmapped, object.
-class VmEnumerator {
- public:
-  // |depth| will be 0 for the root VmAddressRegion.
-  virtual zx_status_t OnVmAddressRegion(VmAddressRegion* vmar, uint depth,
-                                        Guard<CriticalMutex>& guard) TA_REQ(vmar->lock()) {
-    return ZX_ERR_NEXT;
-  }
-
-  // |vmar| is the parent of |map|.
-  virtual zx_status_t OnVmMapping(VmMapping* map, VmAddressRegion* vmar, uint depth,
-                                  Guard<CriticalMutex>& guard) TA_REQ(map->lock())
-      TA_REQ(vmar->lock()) {
-    return ZX_ERR_NEXT;
-  }
-
- protected:
-  VmEnumerator() = default;
-  ~VmEnumerator() = default;
-};
-
-// Now that all the sub-classes are defined finish declaring some inline VmAddressRegionOrMapping
-// methods.
-inline fbl::RefPtr<VmAddressRegion> VmAddressRegionOrMapping::as_vm_address_region() {
-  AssertRegionOrMappingCanary();
-  if (is_mapping()) {
-    return nullptr;
-  }
-  return fbl::RefPtr<VmAddressRegion>(static_cast<VmAddressRegion*>(this));
-}
-
-inline VmAddressRegion* VmAddressRegionOrMapping::as_vm_address_region_ptr() {
-  AssertRegionOrMappingCanary();
-  if (unlikely(is_mapping())) {
-    return nullptr;
-  }
-  return static_cast<VmAddressRegion*>(this);
-}
-
-inline const VmAddressRegion* VmAddressRegionOrMapping::as_vm_address_region_ptr() const {
-  AssertRegionOrMappingCanary();
-  if (unlikely(is_mapping())) {
-    return nullptr;
-  }
-  return static_cast<const VmAddressRegion*>(this);
-}
-
-inline fbl::RefPtr<VmAddressRegion> VmAddressRegionOrMapping::downcast_as_vm_address_region(
-    fbl::RefPtr<VmAddressRegionOrMapping>* region_or_map) {
-  DEBUG_ASSERT(region_or_map);
-  if ((*region_or_map)->is_mapping()) {
-    return nullptr;
-  }
-  return fbl::RefPtr<VmAddressRegion>::Downcast(ktl::move(*region_or_map));
-}
-
-inline fbl::RefPtr<VmMapping> VmAddressRegionOrMapping::as_vm_mapping() {
-  AssertRegionOrMappingCanary();
-  if (!is_mapping()) {
-    return nullptr;
-  }
-  return fbl::RefPtr<VmMapping>(static_cast<VmMapping*>(this));
-}
-
-inline VmMapping* VmAddressRegionOrMapping::as_vm_mapping_ptr() {
-  AssertRegionOrMappingCanary();
-  if (unlikely(!is_mapping())) {
-    return nullptr;
-  }
-  return static_cast<VmMapping*>(this);
-}
-
-inline const VmMapping* VmAddressRegionOrMapping::as_vm_mapping_ptr() const {
-  AssertRegionOrMappingCanary();
-  if (unlikely(!is_mapping())) {
-    return nullptr;
-  }
-  return static_cast<const VmMapping*>(this);
-}
-
-inline fbl::RefPtr<VmMapping> VmAddressRegionOrMapping::downcast_as_vm_mapping(
-    fbl::RefPtr<VmAddressRegionOrMapping>* region_or_map) {
-  DEBUG_ASSERT(region_or_map);
-  if (!(*region_or_map)->is_mapping()) {
-    return nullptr;
-  }
-  return fbl::RefPtr<VmMapping>::Downcast(ktl::move(*region_or_map));
+// Now that VmAddressRegion is defined, finish declaring inline methods that use it.
+inline fbl::RefPtr<VmAddressRegion> VmAspace::RootVmar() {
+  return fbl::ImportFromRawPtr(rust_vm_aspace_root_vmar(this));
 }
 
 #endif  // ZIRCON_KERNEL_VM_INCLUDE_VM_VM_ADDRESS_REGION_H_

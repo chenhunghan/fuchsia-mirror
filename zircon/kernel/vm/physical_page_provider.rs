@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use core::mem::DropGuard;
 use core::pin::Pin;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
@@ -16,7 +17,7 @@ use crate::platform_rs::timer::DurationMono;
 use crate::vm::anonymous_page_request::AnonymousPageRequest;
 use crate::vm::page::{VmPageDoublyLinkedList, VmPagePtr};
 use crate::vm::page_source::{
-    PageProviderTag, PageRequest, PageRequestType, PageSource, PageSourceProperties,
+    PageProvider, PageProviderTag, PageRequest, PageRequestType, PageSource, PageSourceProperties,
 };
 use crate::vm::page_state::VmPageState;
 use crate::vm::physical_page_borrowing_config::PhysicalPageBorrowingConfig;
@@ -29,7 +30,6 @@ use crate::ksync_kernel::TrackedMutex;
 use fbl::{DoublyLinkedList, DoublyLinkedListContainable};
 use ksync::{KMutex, guarded, kcell_init};
 use page_bindings::{vm_page_state, vm_page_t};
-use page_source_bindings::PageSource as CppPageSource;
 use pin_init::{PinInit, pin_data, pin_init, pinned_drop, stack_pin_init};
 use vm_constants_rs as constants;
 use vm_cow_pages_bindings::VmCowPages as CppVmCowPages;
@@ -102,7 +102,7 @@ pub struct PhysicalPageProvider {
     cow_pages: AtomicPtr<CppVmCowPages>,
 
     /// Same write-once discipline as `phys_base`.
-    page_source: AtomicPtr<CppPageSource>,
+    page_source: AtomicPtr<PageSource>,
 
     /// To cease loaning pages all pages first become owned by the physical page provider and get
     /// collected in `free_list`, upon which they can be returned (i.e. freed) to the PMM.
@@ -161,7 +161,7 @@ impl PhysicalPageProvider {
     fn init_ptrs(
         &self,
         cow_pages: *mut CppVmCowPages,
-        page_source: *mut CppPageSource,
+        page_source: *mut PageSource,
         phys_base: u64,
     ) {
         debug_assert!(!cow_pages.is_null());
@@ -179,9 +179,14 @@ impl PhysicalPageProvider {
     ///
     /// Called under lock of contiguous VMO that needs the pages.  The request is later processed
     /// at the start of `wait_on_event`.
-    fn send_async_request(&self, request: &PageRequest) {
+    ///
+    /// # Safety
+    ///
+    /// `request` must not currently be in any `PageProviderTag` list, and must remain valid and
+    /// owned by this provider until cleared or swapped out (or the provider closes).
+    unsafe fn send_async_request(&self, request: &PageRequest) {
         debug_assert_ne!(self.phys_base.load(Ordering::Acquire), Self::INVALID_PHYS_BASE);
-        debug_assert_eq!(request.request_type(), PageRequestType::READ);
+        debug_assert_eq!(PageProvider::get_request_type(request), PageRequestType::Read);
         ksync::lock!(let mut guard = self.lock_mtx());
         let fields = guard.as_mut().fields_mut();
         assert!(!*fields.closed);
@@ -205,13 +210,19 @@ impl PhysicalPageProvider {
     }
 
     /// Removes a previously queued asynchronous request.
-    fn clear_async_request(&self, request: &PageRequest) {
+    ///
+    /// # Safety
+    ///
+    /// `request` must currently be owned by this provider (queued in `pending_requests` or
+    /// already dequeued by `dequeue_request`).
+    unsafe fn clear_async_request(&self, request: &PageRequest) {
         debug_assert_ne!(self.phys_base.load(Ordering::Acquire), Self::INVALID_PHYS_BASE);
-        debug_assert_eq!(request.request_type(), PageRequestType::READ);
+        debug_assert_eq!(PageProvider::get_request_type(request), PageRequestType::Read);
         ksync::lock!(let mut guard = self.lock_mtx());
         let fields = guard.as_mut().fields_mut();
         assert!(!*fields.closed);
-        if request.in_container() {
+        // SAFETY: `mtx` is held, serializing access to this provider's `PageProviderTag` list.
+        if unsafe { request.in_container() } {
             // SAFETY: `PageSource` routes a request back to the same provider that queued it, so
             // a request in a `PageProviderTag` list is in this `pending_requests`.
             let _ = unsafe { fields.pending_requests.erase(request) };
@@ -224,14 +235,21 @@ impl PhysicalPageProvider {
     }
 
     /// Swaps an old request node with a new request node in the pending queue.
-    fn swap_async_request(&self, old: &PageRequest, new_req: &PageRequest) {
+    ///
+    /// # Safety
+    ///
+    /// `old` must currently be owned by this provider. `new_req` must not be in any
+    /// `PageProviderTag` list, and must remain valid and owned by this provider until cleared or
+    /// swapped out (or the provider closes).
+    unsafe fn swap_async_request(&self, old: &PageRequest, new_req: &PageRequest) {
         debug_assert_ne!(self.phys_base.load(Ordering::Acquire), Self::INVALID_PHYS_BASE);
-        debug_assert_eq!(old.request_type(), PageRequestType::READ);
-        debug_assert_eq!(new_req.request_type(), PageRequestType::READ);
+        debug_assert_eq!(PageProvider::get_request_type(old), PageRequestType::Read);
+        debug_assert_eq!(PageProvider::get_request_type(new_req), PageRequestType::Read);
         ksync::lock!(let mut guard = self.lock_mtx());
         let fields = guard.as_mut().fields_mut();
         assert!(!*fields.closed);
-        if old.in_container() {
+        // SAFETY: `mtx` is held, serializing access to this provider's `PageProviderTag` list.
+        if unsafe { old.in_container() } {
             let mut pending_requests = fields.pending_requests;
             // SAFETY: `PageSource` routes both requests to the provider that queued `old`, so
             // `old` is only ever in this `pending_requests`, and `new_req` is a fresh request
@@ -269,7 +287,7 @@ impl PhysicalPageProvider {
         assert!(!page_source.is_null());
         // SAFETY: `page_source` is written exactly once by `init_ptrs` and never modified
         // afterwards, and the `PageSource` that owns this provider outlives it.
-        let page_source = unsafe { PageSource::from_raw_ref(page_source) };
+        let page_source = unsafe { &*page_source };
         debug_assert!(page_source.paged_vmo_lock_is_held());
         // This marks the pages loaned, and makes them FREE_LOANED for potential use by other
         // clients that are ok with getting loaned pages when allocating. Must hold the
@@ -372,12 +390,12 @@ impl PhysicalPageProvider {
         // SAFETY: We just checked there is a pending request.
         let request = unsafe { request.unwrap_unchecked() };
         // SAFETY: `pop_front` yields a request that was queued by `send_async_request` and that
-        // C++ keeps alive at least until it is cleared from the queue, which cannot happen while
-        // we hold `mtx`.
+        // `PageSource` keeps alive at least until it is cleared from the queue, which cannot
+        // happen while we hold `mtx`.
         let request = unsafe { request.as_ref() };
-        debug_assert_eq!(request.request_type(), PageRequestType::READ);
-        let offset = request.offset();
-        let length = request.len();
+        debug_assert_eq!(PageProvider::get_request_type(request), PageRequestType::Read);
+        let offset = PageProvider::get_request_offset(request);
+        let length = PageProvider::get_request_len(request);
         debug_assert!(range_check::in_range_max(offset, length, self.size));
         Some((offset, length))
     }
@@ -396,7 +414,8 @@ impl PhysicalPageProvider {
         // VMOs' `paged_vmo_lock` (which are part of the active working set) between the LRU thread
         // and this unloaning thread.
         PhysicalPageBorrowingConfig::get().notify_unloan_started();
-        let _cleanup = zr::defer(|| PhysicalPageBorrowingConfig::get().notify_unloan_finished());
+        let _cleanup =
+            DropGuard::new((), |()| PhysicalPageBorrowingConfig::get().notify_unloan_finished());
 
         let phys_base = self.phys_base.load(Ordering::Acquire);
         debug_assert_ne!(phys_base, Self::INVALID_PHYS_BASE);
@@ -563,8 +582,7 @@ impl PhysicalPageProvider {
         };
         // SAFETY: `page_source` points to the `PageSource` that owns this provider, and so
         // outlives it.
-        let page_source =
-            unsafe { PageSource::from_raw_ref(self.page_source.load(Ordering::Acquire)) };
+        let page_source = unsafe { &*self.page_source.load(Ordering::Acquire) };
         let phys_base = self.phys_base.load(Ordering::Acquire);
 
         // When `wait_on_event` is called, we know that the event being waited on is associated
@@ -643,17 +661,13 @@ impl PhysicalPageProvider {
 
                 // Any pages that do not get supplied for any reason, due to failures from supply
                 // or because we got detached, should be re-loaned.
-                struct ReclaimUnprocessedGuard<'a> {
-                    splice_list: Pin<&'a mut VmPageSpliceList>,
-                    contiguous_pages: Pin<&'a mut VmPageDoublyLinkedList>,
-                    provider: &'a PhysicalPageProvider,
-                }
-                impl Drop for ReclaimUnprocessedGuard<'_> {
-                    fn drop(&mut self) {
+                let mut guard = DropGuard::new(
+                    (splice_list.as_mut(), contiguous_pages.as_mut()),
+                    move |(mut splice_list, mut contiguous_pages)| {
                         // Pop all remaining content off of this splice list, appending any pages
                         // to `contiguous_pages`.
-                        while !self.splice_list.is_processed() {
-                            let mut page_or_marker = self.splice_list.as_mut().pop();
+                        while !splice_list.is_processed() {
+                            let mut page_or_marker = splice_list.as_mut().pop();
                             if page_or_marker.is_page() {
                                 let p = page_or_marker.release_page();
                                 // SAFETY: `p` was just released from the splice list, which had
@@ -663,15 +677,13 @@ impl PhysicalPageProvider {
                                 debug_assert!(!page.get_node().in_container());
                                 // SAFETY: `p` is a valid page that is not in any container, and
                                 // the pages backing `VmPage`s outlive their membership in
-                                // `self.contiguous_pages`.
-                                unsafe {
-                                    self.contiguous_pages.as_mut().push_back_raw(p.as_non_null())
-                                };
+                                // `contiguous_pages`.
+                                unsafe { contiguous_pages.as_mut().push_back_raw(p.as_non_null()) };
                             }
                         }
 
-                        if !self.contiguous_pages.is_empty() {
-                            ksync::lock!(let _guard = self.provider.lock_loaned_state_lock());
+                        if !contiguous_pages.is_empty() {
+                            ksync::lock!(let _guard = self.lock_loaned_state_lock());
                             // We're about to return these pages to the PMM.  There is no need to
                             // delay their reuse because we know these pages would have never been
                             // involved in a DMA, because they have never been pinned, because we
@@ -680,19 +692,13 @@ impl PhysicalPageProvider {
                             let delay_reuse = PmmOptDelayReuse::Default;
                             // SAFETY: The pages in `contiguous_pages` are valid and owned by us.
                             unsafe {
-                                pmm::node().begin_loan(self.contiguous_pages.as_mut(), delay_reuse);
+                                pmm::node().begin_loan(contiguous_pages.as_mut(), delay_reuse);
                             }
                         }
-                    }
-                }
+                    },
+                );
 
-                let mut guard = ReclaimUnprocessedGuard {
-                    splice_list: splice_list.as_mut(),
-                    contiguous_pages: contiguous_pages.as_mut(),
-                    provider: self,
-                };
-
-                let ReclaimUnprocessedGuard { splice_list, contiguous_pages, .. } = &mut guard;
+                let (splice_list, contiguous_pages) = &mut *guard;
                 let status = VmPageSpliceList::create_from_page_list(
                     supply_length,
                     contiguous_pages.as_mut(),
@@ -706,7 +712,7 @@ impl PhysicalPageProvider {
                     // Do not attempt to then supply the pages, move to the next range.
                     continue;
                 }
-                debug_assert!(guard.contiguous_pages.is_empty());
+                debug_assert!(contiguous_pages.is_empty());
 
                 // First take the VMO lock before taking our lock to ensure lock ordering is
                 // correct. As we hold a reference we know that even if racing with `on_close` this
@@ -733,7 +739,7 @@ impl PhysicalPageProvider {
                         let supply_result = cow_ref.supply_pages_locked(
                             cow_lock.token(),
                             VmCowRange::new(supply_offset, supply_length),
-                            guard.splice_list.as_mut(),
+                            splice_list.as_mut(),
                             SupplyOptions::PhysicalPageProvider,
                             deferred.as_mut(),
                             None,
@@ -811,8 +817,13 @@ impl PhysicalPageProvider {
         );
         printer.begin_list(max_items as usize);
         for req in fields.pending_requests.iter() {
-            debug_assert_eq!(req.request_type(), PageRequestType::READ);
-            dump::emit!(printer, "  pending req [0x{:x}, 0x{:x})", req.offset(), req.len());
+            debug_assert_eq!(PageProvider::get_request_type(req), PageRequestType::Read);
+            dump::emit!(
+                printer,
+                "  pending req [0x{:x}, 0x{:x})",
+                PageProvider::get_request_offset(req),
+                PageProvider::get_request_len(req)
+            );
         }
         printer.end_list();
     }
@@ -892,7 +903,7 @@ pub unsafe extern "C" fn rust_physical_page_provider_destroy(storage: *mut core:
 pub unsafe extern "C" fn rust_physical_page_provider_init_ptrs(
     storage: *mut core::ffi::c_void,
     cow_pages: *mut CppVmCowPages,
-    page_source: *mut CppPageSource,
+    page_source: *mut PageSource,
     phys_base: u64,
 ) {
     // SAFETY: `storage` points to an initialized `PhysicalPageProvider`.
@@ -909,35 +920,64 @@ pub unsafe extern "C" fn rust_physical_page_provider_properties(
     state.properties()
 }
 
+/// FFI for `PhysicalPageProvider::send_async_request`.
+///
+/// # Safety
+///
+/// `storage` must point to an initialized `PhysicalPageProvider`. `request` must not currently be
+/// in any `PageProviderTag` list, and must remain valid and owned by this provider until cleared
+/// or swapped out (or the provider closes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_physical_page_provider_send_async_request(
     storage: *mut core::ffi::c_void,
     request: &PageRequest,
 ) {
-    // SAFETY: `storage` points to an initialized `PhysicalPageProvider`.
-    let state = unsafe { &*(storage as *const PhysicalPageProvider) };
-    state.send_async_request(request);
+    // SAFETY: `storage` points to an initialized `PhysicalPageProvider`, and the caller upholds
+    // the `send_async_request` contract for `request`.
+    unsafe {
+        let state = &*(storage as *const PhysicalPageProvider);
+        state.send_async_request(request);
+    }
 }
 
+/// FFI for `PhysicalPageProvider::clear_async_request`.
+///
+/// # Safety
+///
+/// `storage` must point to an initialized `PhysicalPageProvider`, and `request` must currently be
+/// owned by this provider.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_physical_page_provider_clear_async_request(
     storage: *mut core::ffi::c_void,
     request: &PageRequest,
 ) {
-    // SAFETY: `storage` points to an initialized `PhysicalPageProvider`.
-    let state = unsafe { &*(storage as *const PhysicalPageProvider) };
-    state.clear_async_request(request);
+    // SAFETY: `storage` points to an initialized `PhysicalPageProvider`, and the caller upholds
+    // the `clear_async_request` contract for `request`.
+    unsafe {
+        let state = &*(storage as *const PhysicalPageProvider);
+        state.clear_async_request(request);
+    }
 }
 
+/// FFI for `PhysicalPageProvider::swap_async_request`.
+///
+/// # Safety
+///
+/// `storage` must point to an initialized `PhysicalPageProvider`. `old_req` must currently be
+/// owned by this provider, and `new_req` must not be in any `PageProviderTag` list and must remain
+/// valid and owned by this provider until cleared or swapped out (or the provider closes).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rust_physical_page_provider_swap_async_request(
     storage: *mut core::ffi::c_void,
     old_req: &PageRequest,
     new_req: &PageRequest,
 ) {
-    // SAFETY: `storage` points to an initialized `PhysicalPageProvider`.
-    let state = unsafe { &*(storage as *const PhysicalPageProvider) };
-    state.swap_async_request(old_req, new_req);
+    // SAFETY: `storage` points to an initialized `PhysicalPageProvider`, and the caller upholds
+    // the `swap_async_request` contract for `old_req` and `new_req`.
+    unsafe {
+        let state = &*(storage as *const PhysicalPageProvider);
+        state.swap_async_request(old_req, new_req);
+    }
 }
 
 #[unsafe(no_mangle)]

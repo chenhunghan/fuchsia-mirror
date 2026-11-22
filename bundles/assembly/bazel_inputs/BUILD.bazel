@@ -70,11 +70,6 @@ prebuilt_package(
 )
 
 prebuilt_package(
-    name = "ufsutil.bootfs_files_package",
-    archive = "@gn_targets//bundles/assembly/bazel_inputs:ufsutil.bootfs_files_package",
-)
-
-prebuilt_package(
     name = "spmi-ctl.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:spmi-ctl.bootfs_files_package",
 )
@@ -102,9 +97,4 @@ prebuilt_package(
 prebuilt_package(
     name = "bootstrap_realm_vsock_development_access.bootfs_files_package",
     archive = "@gn_targets//bundles/assembly/bazel_inputs:bootstrap_realm_vsock_development_access.bootfs_files_package",
-)
-
-prebuilt_package(
-    name = "testing_support.bootfs_files_package",
-    archive = "@gn_targets//bundles/assembly/bazel_inputs:testing_support.bootfs_files_package",
 )

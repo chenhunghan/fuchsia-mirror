@@ -119,6 +119,10 @@ void PortableUITest::SetUpRealmBase() {
       .name = "fuchsia.ui.test.SuspendEnabled",
       .value = ConfigValue::Bool(suspend_enabled()),
   });
+  configurations.push_back({
+      .name = "fuchsia.ui.test.Renderer",
+      .value = ConfigValue(renderer()),
+  });
   realm_builder_.AddConfiguration(std::move(configurations));
   realm_builder_.AddRoute(Route{
       .capabilities =
@@ -129,6 +133,7 @@ void PortableUITest::SetUpRealmBase() {
               component_testing::Config{.name = "fuchsia.ui.test.DisplayRefreshRateMillihertz"},
               component_testing::Config{.name = "fuchsia.ui.test.DevicePixelRatio"},
               component_testing::Config{.name = "fuchsia.ui.test.SuspendEnabled"},
+              component_testing::Config{.name = "fuchsia.ui.test.Renderer"},
           },
       .source = component_testing::SelfRef{},
       .targets = {kTestUIStackRef},

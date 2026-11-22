@@ -10,30 +10,53 @@ use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use libarch::arm64::{ExceptionClass, ExceptionSyndromeRegister};
-use zx_status::Status;
 
-use super::Iframe;
 use super::vm::is_kernel_address;
+use super::{Iframe, arm64_mmu_translate};
 use crate::kernel::types::{PAddr, VAddr};
 
-/// Register state captured for the crashlog (`crashlog_regs_t`).
-pub type CrashlogRegs = arm64_crashlog_bindings::crashlog_regs_t;
+/// Register state captured for the crashlog on arm64.
+#[derive(Clone, Copy, Debug)]
+pub struct CrashlogRegs {
+    /// Pointer to the faulting interrupt frame (`null` if unavailable).
+    pub iframe: *const Iframe,
+    /// On arm64, the ESR and FAR are important for diagnosing kernel crashes, but
+    /// are not included in [`Iframe`].
+    pub esr: u32,
+    /// Fault Address Register (`FAR_EL1`) value at crash time.
+    pub far: u64,
+    /// User read/write thread ID register (`TPIDR_EL0`).
+    pub tpidr_el0: u64,
+    /// EL1 software thread ID register (`TPIDR_EL1`).
+    pub tpidr_el1: u64,
+    /// User read-only thread ID register (`TPIDRRO_EL0`).
+    pub tpidrro_el0: u64,
+}
 
-// `regs.iframe` is read as an `Iframe`, whose field offsets mod.rs pins to `iframe_t`'s.
-zr::static_assert!(size_of::<arm64_crashlog_bindings::iframe_t>() == size_of::<Iframe>());
-zr::static_assert!(align_of::<arm64_crashlog_bindings::iframe_t>() == align_of::<Iframe>());
+impl CrashlogRegs {
+    /// Returns an empty [`CrashlogRegs`] with a null `iframe` and zeroed registers.
+    pub const fn empty() -> Self {
+        Self {
+            iframe: core::ptr::null(),
+            esr: 0,
+            far: 0,
+            tpidr_el0: 0,
+            tpidr_el1: 0,
+            tpidrro_el0: 0,
+        }
+    }
+}
+
+impl Default for CrashlogRegs {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 unsafe extern "C" {
     // Bounds of the kernel's code, from kernel.ld. Only their addresses are used.
     static __code_start: [u8; 0];
     static __code_end: [u8; 0];
-
-    fn arm64_mmu_translate(
-        va: VAddr,
-        pa: &mut PAddr,
-        user: bool,
-        write: bool,
-    ) -> Result<(), Status>;
 }
 
 /// Labels of `Iframe::r`, x0-x29.
@@ -60,19 +83,17 @@ impl fmt::Display for AltHex18 {
 ///
 /// # Safety
 ///
-/// `regs.iframe` must be null or point at an `iframe_t` that stays live, and is not written,
-/// for the duration of the call.
+/// The caller must ensure that `regs.iframe` is either null or aligned and pointing to a valid,
+/// initialized [`Iframe`] that stays live and unmutated for the duration of the call.
 pub unsafe fn render_crashlog_registers(target: &mut impl Write, regs: &CrashlogRegs) {
     if regs.iframe.is_null() {
         let _ = writeln!(target, "missing");
         return;
     }
 
-    // SAFETY: `regs.iframe` is non-null, so the caller guarantees it points at a live `iframe_t`
-    // that nothing writes during this call. `Iframe` has `iframe_t`'s layout: mod.rs pins its size
-    // and every field offset to the values regs.h asserts for `iframe_t`, and the asserts above
-    // tie it to the binding's size and alignment.
-    let iframe = unsafe { &*regs.iframe.cast::<Iframe>() };
+    // SAFETY: `regs.iframe` is non-null, so the caller guarantees it points at a live `Iframe`
+    // that nothing writes during this call.
+    let iframe = unsafe { &*regs.iframe };
 
     // Labels are right-aligned to the width of the longest, `tpidrro_el0`.
     for (label, &value) in GPR_LABELS.iter().zip(&iframe.r) {
@@ -125,13 +146,9 @@ pub unsafe fn render_crashlog_registers(target: &mut impl Write, regs: &Crashlog
 
                 if !is_kernel_address(vaddr.0) {
                     let _ = writeln!(target, "ELR[{offset:+}] = non-kernel");
-                } else if
-                // SAFETY: `arm64_mmu_translate` accepts any `va`.
-                unsafe {
-                    arm64_mmu_translate(
-                        vaddr, &mut paddr, /* user */ false, /* write */ false,
-                    )
-                }
+                } else if arm64_mmu_translate(
+                    vaddr, &mut paddr, /* user */ false, /* write */ false,
+                )
                 .is_err()
                 {
                     let _ = writeln!(target, "ELR[{offset:+}] = bad addr");

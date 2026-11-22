@@ -9,8 +9,13 @@
 #define ZIRCON_KERNEL_DEV_HDCP_AMLOGIC_S912_INCLUDE_DEV_HDCP_AMLOGIC_S912_INIT_H_
 
 #include <lib/zbi-format/driver-config.h>
+#include <zircon/compiler.h>
+
+__BEGIN_CDECLS
 
 // Initializes the driver.
 void AmlogicS912HdcpInit(const zbi_dcfg_amlogic_hdcp_driver_t& config);
+
+__END_CDECLS
 
 #endif  // ZIRCON_KERNEL_DEV_HDCP_AMLOGIC_S912_INCLUDE_DEV_HDCP_AMLOGIC_S912_INIT_H_

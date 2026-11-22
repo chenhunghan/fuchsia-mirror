@@ -113,7 +113,6 @@ impl Supplicant {
         Ok(Supplicant { auth_method, esssa, auth_cfg })
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn start(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         self.esssa.initiate(update_sink)
     }
@@ -124,7 +123,6 @@ impl Supplicant {
         self.esssa.reset_security_associations();
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_frame<B: SplitByteSlice>(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -133,7 +131,6 @@ impl Supplicant {
         self.esssa.on_eapol_frame(update_sink, frame)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_conf(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -142,7 +139,6 @@ impl Supplicant {
         self.esssa.on_eapol_conf(update_sink, result)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_rsna_retransmission_timeout(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -158,7 +154,6 @@ impl Supplicant {
         self.esssa.incomplete_reason()
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     fn extract_sae_key(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         if let Some(pmk) = extract_pmk_helper(&update_sink) {
             self.esssa.on_pmk_available(update_sink, pmk)?;
@@ -166,7 +161,6 @@ impl Supplicant {
         Ok(())
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_pmk_available(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -177,12 +171,10 @@ impl Supplicant {
         self.extract_sae_key(update_sink)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_sae_handshake_ind(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         self.auth_method.on_sae_handshake_ind(update_sink).map_err(Error::AuthError)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_sae_frame_rx(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -192,7 +184,6 @@ impl Supplicant {
         self.extract_sae_key(update_sink)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_sae_timeout(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -201,12 +192,10 @@ impl Supplicant {
         self.auth_method.on_sae_timeout(update_sink, event_id).map_err(Error::AuthError)
     }
 
-    #[allow(clippy::result_large_err, reason = "using existing Error type")]
     pub fn initiate_owe(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         self.auth_method.initiate_owe(update_sink).map_err(Error::AuthError)
     }
 
-    #[allow(clippy::result_large_err, reason = "using existing Error type")]
     pub fn on_owe_public_key_rx(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -330,7 +319,6 @@ impl Authenticator {
         }
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     /// `initiate(...)` must be called when the Authenticator should start establishing a
     /// security association with a client.
     /// The Authenticator must always initiate the security association in the current system as
@@ -342,7 +330,6 @@ impl Authenticator {
         self.esssa.initiate(update_sink)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     /// Entry point for all incoming EAPOL frames. Incoming frames can be corrupted, invalid or of
     /// unsupported types; the Authenticator will filter and drop all unexpected frames.
     /// Outbound EAPOL frames, status and key updates will be pushed into the `update_sink`.
@@ -355,7 +342,6 @@ impl Authenticator {
         self.esssa.on_eapol_frame(update_sink, frame)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_conf(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -364,7 +350,6 @@ impl Authenticator {
         self.esssa.on_eapol_conf(update_sink, result)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     fn extract_sae_key(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         if let Some(pmk) = extract_pmk_helper(&update_sink) {
             self.esssa.on_pmk_available(update_sink, pmk)?;
@@ -372,12 +357,10 @@ impl Authenticator {
         Ok(())
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_sae_handshake_ind(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         self.auth_method.on_sae_handshake_ind(update_sink).map_err(Error::AuthError)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_sae_frame_rx(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -399,7 +382,7 @@ pub enum Error {
     #[error("passphrase is not valid UTF-8; failed to parse after byte at index: {:x}", _0)]
     InvalidPassphraseEncoding(usize),
     #[error("the config `{:?}` is incompatible with the auth method `{:?}`", _0, _1)]
-    IncompatibleConfig(auth::Config, String),
+    IncompatibleConfig(Box<auth::Config>, String),
     #[error("invalid bit size; must be a multiple of 8 but was {}", _0)]
     InvalidBitSize(usize),
     #[error("nonce could not be generated")]
@@ -555,7 +538,7 @@ pub enum Error {
     #[error("rsne error, {}", _0)]
     RsneError(rsne::Error),
     #[error("rsne invalid subset, supplicant: {:?}, authenticator: {:?}", _0, _1)]
-    RsneInvalidSubset(rsne::Rsne, rsne::Rsne),
+    RsneInvalidSubset(Box<rsne::Rsne>, Box<rsne::Rsne>),
     #[error("error, {}", _0)]
     GenericError(String),
 }

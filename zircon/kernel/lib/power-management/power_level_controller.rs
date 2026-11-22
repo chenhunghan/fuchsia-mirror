@@ -13,9 +13,10 @@ use zx_status::Status;
 
 /// Supported power level control interfaces.
 #[repr(u64)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum ControlInterface {
     /// In-kernel CPU driver control interface.
+    #[default]
     CpuDriver = 0,
     /// ARM Power State Coordination Interface (PSCI).
     ArmPsci = 1,
@@ -41,7 +42,7 @@ pub const fn to_string(control_interface: ControlInterface) -> &'static str {
 
 /// Represents a requested power level update to be executed at a later stage.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct PowerLevelUpdateRequest {
     /// Domain ID where the request is originating from.
     pub domain_id: u32,

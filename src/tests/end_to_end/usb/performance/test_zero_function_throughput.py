@@ -4,15 +4,15 @@
 """Measures USB 2.0 bulk throughput of the Fuchsia USB device stack.
 
 The device under test runs the usb-zero-function driver, and the Linux host
-it is plugged into generates the traffic over a real USB cable using
-userspace usbdevfs bulk transfers (without loading the Linux usbtest kernel
-driver):
+it is plugged into generates the traffic over a real USB cable using the
+userspace usbdevfs asynchronous URB pipeline (without loading the Linux
+usbtest kernel driver):
 
-- Bulk OUT (host to device): 64 KiB bulk OUT transfers on Configuration 1
+- Bulk OUT (host to device): pipelined 64 KiB bulk OUT URBs on Configuration 1
   (source/sink).
-- Bulk IN (device to host): 64 KiB bulk IN transfers on Configuration 1
+- Bulk IN (device to host): pipelined 64 KiB bulk IN URBs on Configuration 1
   (source/sink).
-- Bidirectional: 64 KiB bulk loopback transfers on Configuration 2
+- Bidirectional: pipelined 64 KiB bulk loopback URBs on Configuration 2
   (loopback).
 
 Each case publishes Rate and WallTime fuchsiaperf metrics. As with other
@@ -30,14 +30,13 @@ but does not check them against these criteria.
 import logging
 import math
 import pathlib
-import time
 
 import perf_publish.publish as publish
 import test_data
 import zero_function
 from mobly import asserts, test_runner
 from reporting import metrics
-from testusb import TestParams, TestResult, TestStatus, USBTestIoctlBackend
+from testusb import TestParams, TestStatus, USBTestIoctlBackend
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -54,7 +53,8 @@ class ZeroFunctionThroughputTest(zero_function.ZeroFunctionBaseTest):
     """Measures sustained bulk DMA throughput across USB 2.0 endpoints using usb-zero-function."""
 
     # All three benchmarks drive bulk endpoints directly from userspace via
-    # usbdevfs, so the Linux usbtest kernel driver is never needed.
+    # usbdevfs asynchronous URBs, so the Linux usbtest kernel driver is never
+    # needed.
     LOAD_USBTEST_DRIVER: bool = False
 
     async def setup_class(self) -> None:
@@ -74,65 +74,15 @@ class ZeroFunctionThroughputTest(zero_function.ZeroFunctionBaseTest):
             self._total_transfer_bytes / (1024 * 1024),
         )
 
-    def _run_bulk(
-        self,
-        backend: USBTestIoctlBackend,
-        params: TestParams,
-        config_val: int,
-        use_out: bool,
-        use_in: bool,
-        metric_suite: str,
-    ) -> TestResult:
-        """Runs synchronous bulk transfers via USBDEVFS_BULK."""
-        if use_out and use_in:
-            return backend.run_bulk_loopback(params, test_name=metric_suite)
-        asserts.assert_true(
-            backend.set_configuration(config_val),
-            f"Failed to set Configuration {config_val}",
-        )
-        ep_out, ep_in, claim_ifnum = backend._find_endpoints(
-            config_val=config_val
-        )
-        ep = ep_out if use_out else ep_in
-        asserts.assert_is_not_none(ep, "Bulk endpoint not found")
-        assert ep is not None
-        dev = zero_function.LoopbackDevice(
-            backend, ep_out or 0, ep_in or 0, 512
-        )
-        payload: bytes | int = (
-            bytes(params.length) if use_out else params.length
-        )
-        with backend.claimed_interface(
-            claim_ifnum if claim_ifnum is not None else backend.ifnum
-        ):
-            start = time.perf_counter()
-            for i in range(params.iterations):
-                data = dev.bulk(ep, payload, timeout=params.timeout_ms)
-                # LoopbackDevice.bulk() already fails short OUT writes, but
-                # returns short IN reads, which would inflate the rate.
-                if use_in and len(data) != params.length:
-                    asserts.fail(
-                        f"Bulk IN transfer {i} was short: requested "
-                        f"{params.length} bytes, received {len(data)} bytes"
-                    )
-            elapsed = time.perf_counter() - start
-        return TestResult(
-            test_id=0,
-            test_name=metric_suite,
-            status=TestStatus.PASS,
-            duration_secs=elapsed,
-            iterations_completed=params.iterations,
-            bytes_transferred=params.iterations * params.length,
-        )
-
     def _run_and_publish(
         self,
         metric_suite: str,
         config_val: int,
         use_out: bool,
         use_in: bool,
+        verify_loopback: bool = False,
     ) -> None:
-        """Runs a bulk transfer benchmark and publishes fuchsiaperf metrics."""
+        """Runs a pipelined bulk transfer benchmark and publishes fuchsiaperf metrics."""
         directions = int(use_out) + int(use_in)
         bytes_per_iteration = _TRANSFER_LENGTH * directions
         iterations = max(
@@ -147,13 +97,13 @@ class ZeroFunctionThroughputTest(zero_function.ZeroFunctionBaseTest):
             device_path=self.require_dev_node()
         ) as backend:
             assert isinstance(backend, USBTestIoctlBackend)
-            result = self._run_bulk(
-                backend=backend,
-                params=params,
+            result = backend.run_pipelined_bulk(
+                params,
                 config_val=config_val,
                 use_out=use_out,
                 use_in=use_in,
-                metric_suite=metric_suite,
+                verify_loopback=verify_loopback,
+                test_name=metric_suite,
             )
 
         asserts.assert_equal(
@@ -236,6 +186,7 @@ class ZeroFunctionThroughputTest(zero_function.ZeroFunctionBaseTest):
                 config_val=2,
                 use_out=True,
                 use_in=True,
+                verify_loopback=True,
             )
         finally:
             # Log instead of raising: if the device wedged, the reset fails

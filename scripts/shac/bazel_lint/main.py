@@ -77,6 +77,7 @@ def _check_file(
         content,
         rel_path,
         allowlist=allowlist,
+        root=root,
     )
 
 

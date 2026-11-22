@@ -130,10 +130,11 @@ void BlockingConnectionAdapter::Start() {
       lock.unlock();
 
       if (!this->underlying_->Write(packet.release())) {
-        break;
+        // Keep the write thread running across transient USB disconnects and resets; it exits
+        // when Stop() sets |stopped_|.
+        FX_LOGS(DEBUG) << Serial().c_str() << " write failed";
       }
     }
-    std::call_once(this->error_flag_, [this]() { transport_->HandleError("write failed"); });
   });
 
   started_ = true;
@@ -242,6 +243,12 @@ void BlockingConnectionAdapter::Stop() {
 bool BlockingConnectionAdapter::Write(std::unique_ptr<apacket> packet) {
   {
     std::lock_guard<std::mutex> lock(this->mutex_);
+    if (stopped_) {
+      // Drop packets queued on a stopped connection without reporting a transport write error, so
+      // send_packet() on a service thread does not Kick() a replacement connection started by
+      // Adb::Reset().
+      return true;
+    }
     write_queue_.emplace_back(std::move(packet));
   }
 
@@ -281,11 +288,11 @@ bool FdConnection::DispatchWrite(void* buf, size_t len) {
   }
 #endif
 
-  if (!adb_) {
+  auto* adb_base = static_cast<adb::AdbBase*>(adb());
+  if (!adb_base) {
     return false;
   }
-  auto* adb = static_cast<adb::AdbBase*>(adb_);
-  return adb->SendUsbPacket(reinterpret_cast<uint8_t*>(buf), len);
+  return adb_base->SendUsbPacket(reinterpret_cast<uint8_t*>(buf), len);
 }
 
 bool FdConnection::Read(apacket* packet) {
@@ -363,7 +370,7 @@ bool FdConnection::DoTlsHandshake(/*RSA*/ char* key, std::string* auth_key) {
 }
 
 void FdConnection::Close() {
-  adb_ = nullptr;
+  adb_.store(nullptr, std::memory_order_relaxed);
   /*
   adb_shutdown(fd_.get());
   fd_.reset();
@@ -695,20 +702,29 @@ static void transport_destroy(atransport* t) {
 atransport::~atransport() {}
 
 int atransport::Write(apacket* p) {
-  return this->connection()->Write(std::unique_ptr<apacket>(p)) ? 0 : -1;
+  auto connection = this->connection();
+  if (!connection) {
+    put_apacket(p);
+    return 0;
+  }
+  return connection->Write(std::unique_ptr<apacket>(p)) ? 0 : -1;
 }
 
 void atransport::Reset() {
   if (!kicked_.exchange(true)) {
     FX_LOGS(DEBUG) << "resetting transport" << this << this->serial.c_str();
-    this->connection()->Reset();
+    if (auto connection = this->connection()) {
+      connection->Reset();
+    }
   }
 }
 
 void atransport::Kick() {
   if (!kicked_.exchange(true)) {
     FX_LOGS(DEBUG) << "kicking transport" << this << this->serial.c_str();
-    this->connection()->Stop();
+    if (auto connection = this->connection()) {
+      connection->Stop();
+    }
   }
 }
 
@@ -721,7 +737,11 @@ void atransport::SetConnectionState(ConnectionState state) {
 }
 
 void atransport::SetConnection(std::shared_ptr<Connection> connection) {
+  if (connection) {
+    connection->SetTransport(this);
+  }
   std::lock_guard<std::mutex> lock(mutex_);
+  kicked_ = false;
   connection_ = std::shared_ptr<Connection>(std::move(connection));
 }
 

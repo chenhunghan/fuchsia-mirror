@@ -7,8 +7,8 @@ use anyhow::Error;
 use fidl::endpoints::create_request_stream;
 use fidl_fuchsia_bluetooth::{ChannelMode, ChannelParameters};
 use fidl_fuchsia_bluetooth_bredr::{
-    Attribute, Channel, ConnectParameters, ConnectionReceiverRequest,
-    ConnectionReceiverRequestStream, DataElement, Information, L2capParameters,
+    Attribute, Channel, ConnectParameters, ConnectionReceiver2Request,
+    ConnectionReceiver2RequestStream, DataElement, Information, L2capParameters,
     ProfileAdvertiseRequest, ProfileDescriptor, ProfileMarker, ProfileProxy, ProfileSearchRequest,
     ProtocolDescriptor, ProtocolIdentifier, SearchResultsRequest, SearchResultsRequestStream,
     ServiceClassProfileIdentifier, ServiceDefinition,
@@ -372,7 +372,7 @@ impl ProfileServerFacade {
 
     /// Monitor the connection request stream, printing outputs when connections happen.
     pub async fn monitor_connection_receiver(
-        mut requests: ConnectionReceiverRequestStream,
+        mut requests: ConnectionReceiver2RequestStream,
         end_signal: oneshot::Receiver<()>,
     ) -> Result<(), Error> {
         let tag = "ProfileServerFacade::monitor_connection_receiver";
@@ -395,8 +395,15 @@ impl ProfileServerFacade {
                         },
                         Some(Ok(r)) => r,
                     };
-                    let ConnectionReceiverRequest::Connected { peer_id, channel, .. } = request else {
+                    let ConnectionReceiver2Request::Connected { payload, responder } = request else {
                         fx_err_and_bail!(&with_line!(tag), "unknown method")
+                    };
+                    responder.send()?;
+                    let Some(peer_id) = payload.peer_id else {
+                        fx_err_and_bail!(&with_line!(tag), "missing peer_id")
+                    };
+                    let Some(channel) = payload.channel else {
+                        fx_err_and_bail!(&with_line!(tag), "missing channel")
                     };
                     let peer_id: PeerId = peer_id.into();
                     info!(
@@ -595,7 +602,7 @@ impl ProfileServerFacade {
             Some(server) => {
                 let _ = server.advertise(ProfileAdvertiseRequest {
                     services: Some(service_defs),
-                    receiver: Some(connect_client),
+                    connection_receiver: Some(connect_client),
                     ..Default::default()
                 });
             }

@@ -701,7 +701,7 @@ impl VmObject {
         &self,
         offset: u64,
         pf_flags: u32,
-        page_request: Option<Pin<&mut MultiPageRequest>>,
+        page_request: Option<Pin<&MultiPageRequest>>,
     ) -> Result<(VmPagePtr, PAddr), Status> {
         let req_ptr = match page_request {
             Some(req) => req.as_raw(),

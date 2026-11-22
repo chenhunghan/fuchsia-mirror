@@ -17,6 +17,7 @@ load(
 )
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+load("@rules_cc//cc/common:cc_shared_library_info.bzl", "CcSharedLibraryInfo")
 load(
     ":providers.bzl",
     "BuildFlagsInfo",
@@ -103,11 +104,9 @@ def _final_cc_build_flags_impl(ctx):
             final_infos.append(info)
 
     if ctx.attr.target_type != "cxx_common":
-        link_inputs = depset([
-            f
-            for info in final_infos
-            for f in info.link_inputs
-        ])
+        all_link_files = []
+        for info in final_infos:
+            all_link_files.extend(info.link_inputs)
         cc_infos = [
             cc_info
             for info in final_infos
@@ -133,16 +132,44 @@ def _final_cc_build_flags_impl(ctx):
             direct_cc_infos = cc_infos,
             cc_infos = cc_infos,
         )
+
+        # cc_shared_library cannot accept :<name>.final_build_flags in `deps`,
+        # and `additional_linker_inputs` ignores `CcInfo(linking_context)`.
+        # When `include_link_deps = True`, serialize `link_deps` into
+        # `extra_cpp_link_items` / `extra_cpp_link_flags` and add `link_dep_files`
+        # to `DefaultInfo.files` so `additional_linker_inputs` stages them.
+        # Keep this gated on `include_link_deps` so `cc_binary` (which also puts
+        # :<name>.final_build_flags in `additional_linker_inputs` for `link_inputs`)
+        # does not stage unused PIC static archives alongside non-PIC archives.
+        # See "Supporting `cc_shared_library()` targets" in build_flags/README.md.
+        if ctx.attr.include_link_deps:
+            extra_cpp_link_items, extra_cpp_link_flags, link_dep_files = _compute_link_deps_flags(
+                ctx.label,
+                merged_cc_info.linking_context,
+                ctx.attr.existing_deps,
+                ctx.attr.existing_dynamic_deps,
+            )
+            all_link_files.extend(link_dep_files)
+        else:
+            extra_cpp_link_items = []
+            extra_cpp_link_flags = []
+        link_inputs = depset(all_link_files)
         cc_info = CcInfo(linking_context = merged_cc_info.linking_context)
         runfiles = ctx.runfiles().merge_all(runfiles_list)
     else:
         link_inputs = depset()
         cc_info = CcInfo()
         runfiles = ctx.runfiles()
+        extra_cpp_link_items = []
+        extra_cpp_link_flags = []
 
     return [
         DefaultInfo(files = link_inputs, runfiles = runfiles),
-        BuildFlagsListInfo(infos = final_infos),
+        BuildFlagsListInfo(
+            infos = final_infos,
+            extra_cpp_link_flags = extra_cpp_link_flags,
+            extra_cpp_link_items = extra_cpp_link_items,
+        ),
         cc_info,
     ]
 
@@ -166,6 +193,25 @@ _final_cc_build_flags = rule(
             doc = "The type of target being wrapped.",
             mandatory = True,
             values = list(BUILD_FLAGS_CC_TARGET_TYPES),
+        ),
+        # The three attributes below exist only because cc_shared_library cannot
+        # accept :<name>.final_build_flags in `deps`, requiring manual
+        # link-response-file serialization and deduplication against `deps` and
+        # `dynamic_deps` (see "Supporting `cc_shared_library()` targets" in
+        # build_flags/README.md).
+        "include_link_deps": attr.bool(
+            doc = "Whether to serialize BuildFlagsInfo.link_deps into extra_cpp_link_items/extra_cpp_link_flags and DefaultInfo.files (for cc_shared_library, where :<name>.final_build_flags cannot be passed in deps).",
+            default = False,
+        ),
+        "existing_deps": attr.label_list(
+            doc = "Existing deps on the wrapped cc_shared_library target so manually serialized link_deps do not duplicate libraries linked via deps.",
+            providers = [CcInfo],
+            default = [],
+        ),
+        "existing_dynamic_deps": attr.label_list(
+            doc = "Existing dynamic_deps on the wrapped cc_shared_library target so manually serialized link_deps do not re-bundle libraries exported via dynamic_deps.",
+            providers = [CcSharedLibraryInfo],
+            default = [],
         ),
         "_use_default_build_flags": attr.label(
             default = "@fuchsia_rules_common//build_flags:use_default_build_flags",
@@ -224,13 +270,136 @@ def _compute_build_flags_for_cc_action(build_flags_infos, action_kind):
         ))
     return result
 
+def _compute_link_deps_flags(target_label, linking_context, existing_deps, existing_dynamic_deps):
+    """Serialize link_deps for cc_shared_library link response files.
+
+    Because cc_shared_library cannot accept :<name>.final_build_flags in `deps`,
+    linker inputs from BuildFlagsInfo.link_deps must be injected via
+    `user_link_flags`, bypassing cc_shared_library's native deduplication and PIC
+    checks. This helper deduplicates against `existing_deps` (`deps`) and
+    `existing_dynamic_deps` (including transitive `dynamic_deps` and `exports`)
+    so shared libraries do not get duplicate symbols or re-bundle exported
+    libraries, and validates that static archives have PIC variants. See
+    "Supporting `cc_shared_library()` targets" in build_flags/README.md.
+    """
+    if not linking_context.linker_inputs:
+        return [], [], []
+
+    already_linked_owners = {}
+    already_linked_files = {}
+    for dep in existing_deps:
+        for li in dep[CcInfo].linking_context.linker_inputs.to_list():
+            already_linked_owners[str(li.owner)] = True
+            for lib in li.libraries:
+                for f in (
+                    lib.pic_static_library,
+                    lib.static_library,
+                    lib.interface_library,
+                    lib.dynamic_library,
+                ) + tuple(lib.pic_objects or ()) + tuple(lib.objects or ()):
+                    if f:
+                        already_linked_files[f] = True
+
+    # Inspect exports and direct linker inputs across direct and transitive
+    # dynamic_deps. Note that CcSharedLibraryInfo.link_once_static_libs
+    # (libraries privately linked into an upstream DSO without being exported)
+    # is intentionally neither skipped nor rejected: link_deps models per-DSO
+    # hidden runtime archives (like GN's toolchain_variant.link_deps) that each
+    # shared library links independently without linkable_more_than_once tags.
+    for dyn_dep in existing_dynamic_deps:
+        dyn_info = dyn_dep[CcSharedLibraryInfo]
+        for entry in [dyn_info] + dyn_info.dynamic_deps.to_list():
+            for exp in entry.exports:
+                already_linked_owners[exp] = True
+            if entry.linker_input:
+                already_linked_owners[str(entry.linker_input.owner)] = True
+                for lib in entry.linker_input.libraries:
+                    for f in (
+                        lib.pic_static_library,
+                        lib.static_library,
+                        lib.interface_library,
+                        lib.dynamic_library,
+                    ) + tuple(lib.pic_objects or ()) + tuple(lib.objects or ()):
+                        if f:
+                            already_linked_files[f] = True
+
+    items = []
+    flags = []
+    link_files = []
+    for li in linking_context.linker_inputs.to_list():
+        if str(li.owner) in already_linked_owners:
+            continue
+        for lib in li.libraries:
+            # Replicate cc_shared_library's PIC requirement when bypassing native linking.
+            if lib.static_library and not lib.pic_static_library and not (lib.interface_library or lib.dynamic_library or lib.pic_objects):
+                fail(
+                    "In {}, link_deps library {} provides only a non-PIC static archive ({}), which cannot be linked into cc_shared_library.".format(
+                        target_label,
+                        li.owner,
+                        lib.static_library.short_path,
+                    ),
+                )
+            lib_file = lib.pic_static_library or lib.interface_library or lib.dynamic_library
+            if lib_file and lib_file not in already_linked_files:
+                already_linked_files[lib_file] = True
+                link_files.append(lib_file)
+                if lib.pic_static_library and lib.alwayslink:
+                    # build_flags() is Fuchsia in-tree only (Linux and Fuchsia
+                    # hosts/targets), which all use ELF/ld.lld semantics.
+                    items.extend(["-Wl,--whole-archive", lib_file, "-Wl,--no-whole-archive"])
+                    flags.extend(["-Wl,--whole-archive", lib_file.path, "-Wl,--no-whole-archive"])
+                else:
+                    items.append(lib_file)
+                    flags.append(lib_file.path)
+            elif lib.pic_objects:
+                # Bazel 8's _PRIVATE_STARLARKIFICATION_ALLOWLIST gates
+                # cc_common.create_library_to_link(pic_objects=...), so only
+                # internal @rules_cc targets (e.g. with supports_start_end_lib)
+                # can reach this branch without pic_static_library. Preserve
+                # lazy-linking semantics unless alwayslink is set.
+                new_objs = []
+                for obj in lib.pic_objects:
+                    if obj not in already_linked_files:
+                        already_linked_files[obj] = True
+                        link_files.append(obj)
+                        new_objs.append(obj)
+                if new_objs:
+                    if not lib.alwayslink:
+                        items.append("-Wl,--start-lib")
+                        flags.append("-Wl,--start-lib")
+                    for obj in new_objs:
+                        items.append(obj)
+                        flags.append(obj.path)
+                    if not lib.alwayslink:
+                        items.append("-Wl,--end-lib")
+                        flags.append("-Wl,--end-lib")
+            elif lib.objects:
+                fail(
+                    "In {}, link_deps library {} provides only non-PIC objects ({}), which cannot be linked into cc_shared_library.".format(
+                        target_label,
+                        li.owner,
+                        lib.objects[0].short_path,
+                    ),
+                )
+        link_files.extend(li.additional_inputs)
+        items.extend(li.user_link_flags)
+        flags.extend(li.user_link_flags)
+    return items, flags, link_files
+
 def _cc_response_file_internal_impl(ctx):
-    build_flags_infos = ctx.attr.final_build_flags[BuildFlagsListInfo].infos
-    flags = _compute_build_flags_for_cc_action(build_flags_infos, ctx.attr.action_kind)
+    list_info = ctx.attr.final_build_flags[BuildFlagsListInfo]
+    flags = list(_compute_build_flags_for_cc_action(list_info.infos, ctx.attr.action_kind))
+    extra_items = []
+    if ctx.attr.action_kind == ACTION_KIND_CPP_LINK:
+        extra_items = getattr(list_info, "extra_cpp_link_items", None) or []
+
     output = ctx.actions.declare_file(ctx.label.name)
     args = ctx.actions.args()
     args.set_param_file_format("shell")
     args.add_all(flags)
+    if extra_items:
+        # File items keep execution-time path mapping in RBE sandboxes.
+        args.add_all(extra_items)
     ctx.actions.write(output, args)
 
     # Ensure the response files are part of the compiler sandbox by
@@ -280,6 +449,7 @@ def _cc_response_file(target_name, action_kind, final_build_flags, testonly):
         name = name,
         action_kind = action_kind,
         final_build_flags = final_build_flags,
+        tags = ["manual"],
         testonly = testonly,
     )
     return name
@@ -365,11 +535,16 @@ def wrap_cc_macro_args_with_build_flags(
 
     # Compute the final set of build flags for this target.
     final_build_flags_name = name + ".final_build_flags"
+    is_cc_shared_library = (cc_rule_name == "cc_shared_library")
     _final_cc_build_flags(
         name = final_build_flags_name,
         build_flags = build_flags,
         disable_build_flags = disable_build_flags,
         target_type = target_type,
+        include_link_deps = is_cc_shared_library,
+        existing_deps = (kwargs.get("deps") or []) if is_cc_shared_library else [],
+        existing_dynamic_deps = (kwargs.get("dynamic_deps") or []) if is_cc_shared_library else [],
+        tags = ["manual"],
         testonly = testonly,
     )
 
@@ -394,10 +569,13 @@ def wrap_cc_macro_args_with_build_flags(
         if cc_rule_name == "cc_shared_library":
             # @rules_cc's cc_shared_library rule links existing cc_library deps
             # without compiling sources of its own. It accepts custom linker
-            # options via user_link_flags (rather than linkopts) and requires
-            # deps to be standard cc_library targets, so final_build_flags_name
-            # is not added to deps (extra_linker_flags(link_deps = ...) is not
-            # supported for cc_shared_library).
+            # options via user_link_flags (rather than linkopts) and enforces
+            # export/ownership constraints on deps, so final_build_flags_name
+            # cannot be added to deps. Instead, final_build_flags_name is added
+            # to additional_linker_inputs while link_response_name forwards
+            # link_deps library paths and user_link_flags (via
+            # _final_cc_build_flags(include_link_deps=True)). See "Supporting
+            # `cc_shared_library()` targets" in build_flags/README.md.
             result["user_link_flags"] = ["@$(location :{})".format(link_response_name)] + (kwargs.get("user_link_flags") or [])
             return result
 
@@ -438,19 +616,15 @@ def wrap_cc_macro_args_with_build_flags(
     # TODO(https://fxbug.dev/1650836). Use "additional_compiler_inputs" when Bazel 9.1 or higher
     # is used (Fuchsia hasn't upgraded yet). In the meantime, the workaround is to export CcInfo
     # providers from the response file targets and add them to 'deps'.
+    # Also attach final_build_flags_name unconditionally so BuildFlagsLabelsInfo
+    # inspection works consistently across all target types (cxx_common exports
+    # an empty CcInfo()), and linking targets propagate CcInfo from link_deps.
     result["deps"] = (kwargs.get("deps") or []) + [
         ":" + common_response_name,
         ":" + cxx_response_name,
         ":" + conly_response_name,
+        ":" + final_build_flags_name,
     ]
-
-    if target_type != "cxx_common":
-        # Propagate CcInfo(linking_context = ...) from extra_linker_flags()
-        # targets (link_deps and executable_link_deps) collected by
-        # final_build_flags_name.
-        result["deps"] = result["deps"] + [
-            ":" + final_build_flags_name,
-        ]
 
     return result
 

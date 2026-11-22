@@ -116,6 +116,13 @@ class SupplicantStaIfaceCallbackServer(
             logger.info("Association rejected: %s", request)
         self.state_change_queue.put_nowait(request)
 
+    def on_network_not_found(
+        self,
+        request: fidl_wlanix.SupplicantStaIfaceCallbackOnNetworkNotFoundRequest,
+    ) -> None:
+        if self.verbose:
+            logger.info("Network not found: %s", request)
+
     async def __aenter__(self) -> SupplicantStaIfaceCallbackContext:
         super().__init__(channel=self.server)
 

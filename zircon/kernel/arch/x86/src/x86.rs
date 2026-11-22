@@ -9,6 +9,8 @@ use core::ffi::c_void;
 use zx_status::Status;
 use zx_types::zx_status_t;
 
+use crate::kernel::thread::Thread;
+
 /// # Safety
 ///
 /// The caller must ensure that:
@@ -239,6 +241,15 @@ mod ffi {
         ///
         /// At least 264 bytes of kernel stack space must be available below `%rsp`.
         pub(super) fn x86_ras_fill();
+
+        /// Overwrites the CPU's microarchitectural buffers (`verw`).
+        // SAFETY: `mds_buff_overwrite` (`arch/x86/asm.S`) only copies `%ds` to an 8-byte temporary
+        // slot allocated on the stack (`subq $8, %rsp` / `addq $8, %rsp`), executes the
+        // non-privileged `verw (%rsp)` instruction (which is valid in all processor modes and only
+        // modifies caller-saved `RFLAGS.ZF` while flushing microarchitectural buffers when
+        // `MD_CLEAR` is supported), and returns via `RET_AND_SPECULATION_POSTFENCE` while
+        // preserving `%rsp`, callee-saved registers, and all other memory.
+        pub(super) safe fn mds_buff_overwrite();
     }
 }
 
@@ -288,6 +299,41 @@ pub fn x86_ras_fill() {
     // SAFETY: `x86_ras_fill` (`ops.S`) uses 264 bytes of temporary kernel stack space and restores
     // `%rcx` and `%rsp` before returning.
     unsafe { ffi::x86_ras_fill() };
+}
+
+/// Overwrites the CPU's microarchitectural buffers, to mitigate MDS and TAA (`mds_buff_overwrite`).
+#[inline]
+pub fn mds_buff_overwrite() {
+    ffi::mds_buff_overwrite();
+}
+
+/// Returns the user `fs_base` of `thread` (`thread->arch().fs_base`).
+///
+/// # Safety
+///
+/// The caller must ensure that `thread` points to a live `Thread` whose `arch.fs_base` is
+/// initialized and is not concurrently mutated or exclusively borrowed (`&mut ArchThread`) during
+/// this call.
+#[inline]
+pub unsafe fn x86_thread_fs_base(thread: *const Thread) -> usize {
+    // SAFETY: The caller guarantees that `thread` points to a live `Thread` whose `arch.fs_base`
+    // is initialized and not concurrently mutated or exclusively borrowed.
+    unsafe { (*super::thread::thread_arch_const(thread)).fs_base }
+}
+
+/// Returns the buffer that holds the saved extended register state of `thread`
+/// (`thread->arch().extended_register_buffer`).
+///
+/// # Safety
+///
+/// `thread` must point to a live `Thread`.
+#[inline]
+pub unsafe fn x86_thread_extended_register_buffer(thread: *mut Thread) -> *mut u8 {
+    // SAFETY: The caller guarantees that `thread` points to a live `Thread`, so projecting to its
+    // embedded `arch_thread` stays in bounds. No reference is created.
+    unsafe {
+        (&raw mut (*super::thread::thread_arch(thread)).extended_register_buffer).cast::<u8>()
+    }
 }
 
 /// Safely reads a 64-bit Model Specific Register (MSR) with fault recovery.
@@ -511,7 +557,7 @@ pub unsafe fn x86_lgdt(base: *const c_void) {
 /// # Safety
 ///
 /// The caller must ensure that the current privilege level is CPL 0.
-#[inline]
+#[inline(always)]
 pub unsafe fn wbinvd() {
     // SAFETY: `wbinvd` writes back modified cache lines and invalidates internal caches at CPL 0.
     unsafe {
@@ -526,7 +572,7 @@ pub unsafe fn wbinvd() {
 /// The caller must ensure that the current privilege level is CPL 0 and `sel` selects a valid,
 /// non-busy 64-bit TSS descriptor in the current GDT whose backing `Tss64` remains valid while
 /// loaded.
-#[inline]
+#[inline(always)]
 pub unsafe fn x86_ltr(sel: u16) {
     // SAFETY: Caller guarantees `sel` is a valid non-busy TSS selector in the current GDT.
     unsafe {
@@ -537,19 +583,6 @@ pub unsafe fn x86_ltr(sel: u16) {
         );
     }
 }
-
-/// Offset of `direct` (`x86_percpu*`) in `x86_percpu` (`arch/x86/mp.h`).
-pub const PERCPU_DIRECT_OFFSET: usize = 0x0;
-/// Offset of `cpu_num` (`cpu_num_t`) in `x86_percpu` (`arch/x86/mp.h`).
-pub const PERCPU_CPU_NUM_OFFSET: usize = 0x58;
-/// Offset of `num_spinlocks` (`uint32_t`) in `x86_percpu` (`arch/x86/mp.h`).
-pub const PERCPU_NUM_SPINLOCKS_OFFSET: usize = 0x5c;
-/// Offset of `default_tss` (`tss_t`) in `x86_percpu` (`arch/x86/mp.h`).
-pub const PERCPU_DEFAULT_TSS_OFFSET: usize = 0x70;
-/// Offset of `default_tss.rsp0` (`PERCPU_KERNEL_SP_OFFSET`) in `x86_percpu` (`arch/x86/mp.h`).
-pub const PERCPU_KERNEL_SP_OFFSET: usize = 0x74;
-/// Offset of `interrupt_stacks.nmi` in `x86_percpu` (`arch/x86/mp.h`).
-pub const PERCPU_INTERRUPT_STACKS_NMI_OFFSET: usize = 0x20e0;
 
 /// Reads a 64-bit value from `%gs:[OFFSET]`.
 ///
@@ -680,5 +713,152 @@ pub unsafe fn x86_cli() {
     // compiler memory barrier without an out-of-line `compiler_fence` call.
     unsafe {
         core::arch::asm!("cli", options(nostack, preserves_flags));
+    }
+}
+
+/// Writes `val` to the `%ds` data segment selector register.
+///
+/// # Safety
+///
+/// The caller must ensure that `val` is a valid data segment selector (or the null selector `0` in
+/// 64-bit mode).
+#[inline(always)]
+pub unsafe fn set_ds(val: u16) {
+    // SAFETY: Caller guarantees `val` is a valid `%ds` selector.
+    unsafe {
+        core::arch::asm!("mov ds, {:x}", in(reg) val, options(nostack, preserves_flags));
+    }
+}
+
+/// Writes `val` to the `%es` extra segment selector register.
+///
+/// # Safety
+///
+/// The caller must ensure that `val` is a valid data segment selector (or the null selector `0` in
+/// 64-bit mode).
+#[inline(always)]
+pub unsafe fn set_es(val: u16) {
+    // SAFETY: Caller guarantees `val` is a valid `%es` selector.
+    unsafe {
+        core::arch::asm!("mov es, {:x}", in(reg) val, options(nostack, preserves_flags));
+    }
+}
+
+/// Writes `val` to the `%fs` segment selector register.
+///
+/// # Safety
+///
+/// The caller must ensure that `val` is a valid data segment selector (or the null selector `0` in
+/// 64-bit mode). Note that loading `%fs` may clobber `%fs.base`.
+#[inline(always)]
+pub unsafe fn set_fs(val: u16) {
+    // SAFETY: Caller guarantees `val` is a valid `%fs` selector.
+    unsafe {
+        core::arch::asm!("mov fs, {:x}", in(reg) val, options(nostack, preserves_flags));
+    }
+}
+
+/// Reads the `%gs` segment selector register.
+#[inline(always)]
+pub fn get_gs() -> u16 {
+    let val: u16;
+    // SAFETY: Reading the `%gs` selector has no stack or flag side effects.
+    unsafe {
+        core::arch::asm!("mov {:x}, gs", out(reg) val, options(nostack, preserves_flags));
+    }
+    val
+}
+
+/// Writes `val` to the `%gs` segment selector register.
+///
+/// # Safety
+///
+/// The caller must ensure that `val` is a valid segment selector (or the null selector `0` in
+/// 64-bit mode), interrupts are disabled on the current CPU, and kernel `%gs.base` (`IA32_GS_BASE`)
+/// is restored before re-enabling interrupts or performing any subsequent `%gs`-relative per-CPU
+/// access, because loading `%gs` clobbers `%gs.base`.
+#[inline(always)]
+pub unsafe fn set_gs(val: u16) {
+    // SAFETY: Caller guarantees `val` is a valid `%gs` selector, interrupts are disabled, and
+    // `%gs.base` is restored afterwards.
+    unsafe {
+        core::arch::asm!("mov gs, {:x}", in(reg) val, options(nostack, preserves_flags));
+    }
+}
+
+/// Reads the `%fs.base` register using the `rdfsbase` instruction (`_readfsbase_u64`).
+///
+/// # Safety
+///
+/// The caller must ensure that `CR4.FSGSBASE` is enabled on the current CPU.
+#[inline(always)]
+pub unsafe fn read_fsbase() -> u64 {
+    let val: u64;
+    // SAFETY: Caller guarantees `CR4.FSGSBASE` is enabled; `rdfsbase` has no stack or flag side
+    // effects.
+    unsafe {
+        core::arch::asm!("rdfsbase {}", out(reg) val, options(nostack, preserves_flags));
+    }
+    val
+}
+
+/// Writes `val` to the `%fs.base` register using the `wrfsbase` instruction (`_writefsbase_u64`).
+///
+/// # Safety
+///
+/// The caller must ensure that `CR4.FSGSBASE` is enabled on the current CPU and `val` is a
+/// canonical virtual address.
+#[inline(always)]
+pub unsafe fn write_fsbase(val: u64) {
+    // SAFETY: Caller guarantees `CR4.FSGSBASE` is enabled and `val` is a canonical address.
+    unsafe {
+        core::arch::asm!("wrfsbase {}", in(reg) val, options(nostack, preserves_flags));
+    }
+}
+
+/// Saves and returns the current `RFLAGS` register (`x86_save_flags`).
+///
+/// We use `pushfq; pop` to initialize the full output register. Note that the
+/// instruction `pushf` does not initialize the upper 32 bits, but does
+/// increment `rsp` by 8, resulting in uninitialized bits. To ensure we
+/// cleanly initialize the full output, we use `pushfq` here.
+#[inline(always)]
+pub fn x86_save_flags() -> u64 {
+    let state: u64;
+    // SAFETY: `pushfq; pop` saves `RFLAGS` without altering flags; red-zone is disabled in kernel
+    // builds.
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) state,
+            options(preserves_flags),
+        );
+    }
+    state
+}
+
+/// Restores the `RFLAGS` register from `flags` (`x86_restore_flags`).
+///
+/// # Safety
+///
+/// The caller must ensure that `flags` is a valid `RFLAGS` value for the current privilege level
+/// and interrupt context. Specifically:
+/// - `(flags & X86_FLAGS_DF) == 0` (direction flag must be clear).
+/// - `(flags & X86_FLAGS_AC) == 0` outside user-copy windows (alignment check).
+/// - `TF == 0` (trap flag).
+/// - `NT == 0` (nested task).
+/// - `CPL == 0` if modifying privileged flags.
+/// - No spinlocks or `InterruptDisableGuard`s are held if setting `IF == 1`.
+#[inline(always)]
+pub unsafe fn x86_restore_flags(flags: u64) {
+    debug_assert_eq!(flags & super::registers::X86_FLAGS_DF, 0);
+    // SAFETY: Caller guarantees `flags` is valid for the current context.
+    unsafe {
+        core::arch::asm!(
+            "push {}",
+            "popfq",
+            in(reg) flags,
+        );
     }
 }

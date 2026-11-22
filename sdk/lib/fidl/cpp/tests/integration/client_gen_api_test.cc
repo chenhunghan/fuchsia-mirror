@@ -8,6 +8,8 @@
 #include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
 
+#include <memory>
+
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/predicates/status.h"
@@ -15,6 +17,7 @@
 namespace {
 
 using ::fidl_cpp_constraint_protocol_test::Constraint;
+using ::test_basic_protocol::Resources;
 using ::test_basic_protocol::Values;
 
 // An integration-style test that verifies that user-supplied async callbacks
@@ -300,6 +303,128 @@ TEST(SharedClient, UafRaceOnWriteErrorDuringTeardown) {
     thread_teardown.join();
     loop.Shutdown();
   }
+}
+
+TEST(Client, DoNotInvokeErrorHandlerAfterDestroyOnOneWayEncodeError) {
+  auto [local, remote] = fidl::Endpoints<Resources>::Create();
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+
+  struct Owner : public fidl::AsyncEventHandler<Resources> {
+    Owner(fidl::ClientEnd<Resources> client_end, async_dispatcher_t* dispatcher)
+        : client(std::move(client_end), dispatcher, /*event_handler=*/this) {}
+
+    void on_fidl_error(::fidl::UnbindInfo error) final {
+      ADD_FAILURE() << "on_fidl_error must not be called after client destruction: " << error;
+    }
+
+    fidl::Client<Resources> client;
+  };
+
+  auto owner = std::make_unique<Owner>(std::move(local), loop.dispatcher());
+  fit::result<fidl::OneWayError> result = owner->client->OneWay({{.h = zx::handle{}}});
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.error_value().reason(), fidl::Reason::kEncodeError);
+
+  // Destroy the owner (and its fidl::Client + borrowed AsyncEventHandler) on
+  // the dispatcher thread before running the queued teardown task.
+  owner.reset();
+
+  loop.RunUntilIdle();
+}
+
+TEST(WireClient, DoNotInvokeErrorHandlerAfterDestroyOnOneWayEncodeError) {
+  auto [local, remote] = fidl::Endpoints<Resources>::Create();
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+
+  struct Owner : public fidl::WireAsyncEventHandler<Resources> {
+    Owner(fidl::ClientEnd<Resources> client_end, async_dispatcher_t* dispatcher)
+        : client(std::move(client_end), dispatcher, /*event_handler=*/this) {}
+
+    void on_fidl_error(::fidl::UnbindInfo error) final {
+      ADD_FAILURE() << "on_fidl_error must not be called after client destruction: " << error;
+    }
+
+    fidl::WireClient<Resources> client;
+  };
+
+  auto owner = std::make_unique<Owner>(std::move(local), loop.dispatcher());
+  fidl::OneWayStatus status = owner->client->OneWay(zx::handle{});
+  ASSERT_FALSE(status.ok());
+  EXPECT_EQ(status.reason(), fidl::Reason::kEncodeError);
+
+  owner.reset();
+
+  loop.RunUntilIdle();
+}
+
+TEST(Client, DoNotInvokeErrorHandlerAfterDestroyOnTwoWayEncodeError) {
+  using ::fidl_cpp_constraint_protocol_test::Bits;
+  auto [local, remote] = fidl::Endpoints<Constraint>::Create();
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+
+  struct Owner : public fidl::AsyncEventHandler<Constraint> {
+    Owner(fidl::ClientEnd<Constraint> client_end, async_dispatcher_t* dispatcher)
+        : client(std::move(client_end), dispatcher, /*event_handler=*/this) {}
+
+    void on_fidl_error(::fidl::UnbindInfo error) final {
+      ADD_FAILURE() << "on_fidl_error must not be called after client destruction: " << error;
+    }
+
+    fidl::Client<Constraint> client;
+  };
+
+  bool callback_called = false;
+  auto owner = std::make_unique<Owner>(std::move(local), loop.dispatcher());
+  static_assert(Bits::TryFrom(0xff) == std::nullopt, "0xff should have invalid bits");
+  owner->client->Echo({{.bits = Bits(0xff)}})
+      .ThenExactlyOnce([&](fidl::Result<Constraint::Echo>& result) {
+        callback_called = true;
+        ASSERT_TRUE(result.is_error());
+        EXPECT_EQ(result.error_value().reason(), fidl::Reason::kEncodeError);
+      });
+
+  owner.reset();
+
+  loop.RunUntilIdle();
+  EXPECT_TRUE(callback_called);
+}
+
+TEST(SharedClient, OwnedErrorHandlerStillInvokedAfterDestroyOnEncodeError) {
+  auto [local, remote] = fidl::Endpoints<Resources>::Create();
+  async::Loop loop(&kAsyncLoopConfigNeverAttachToThread);
+
+  bool error_called = false;
+  bool handler_destroyed = false;
+
+  struct EventHandler : public fidl::AsyncEventHandler<Resources> {
+    EventHandler(bool& error_called, bool& handler_destroyed)
+        : error_called(error_called), handler_destroyed(handler_destroyed) {}
+
+    ~EventHandler() override { handler_destroyed = true; }
+
+    void on_fidl_error(::fidl::UnbindInfo error) final {
+      EXPECT_FALSE(handler_destroyed);
+      EXPECT_EQ(error.reason(), fidl::Reason::kEncodeError);
+      error_called = true;
+    }
+
+    bool& error_called;
+    bool& handler_destroyed;
+  };
+
+  fidl::SharedClient client(std::move(local), loop.dispatcher(),
+                            std::make_unique<EventHandler>(error_called, handler_destroyed));
+  fit::result<fidl::OneWayError> result = client->OneWay({{.h = zx::handle{}}});
+  ASSERT_TRUE(result.is_error());
+  EXPECT_EQ(result.error_value().reason(), fidl::Reason::kEncodeError);
+
+  client = {};
+  EXPECT_FALSE(error_called);
+  EXPECT_FALSE(handler_destroyed);
+
+  loop.RunUntilIdle();
+  EXPECT_TRUE(error_called);
+  EXPECT_TRUE(handler_destroyed);
 }
 
 }  // namespace

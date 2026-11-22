@@ -2,9 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":diagnostics-log-tests"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":diagnostics_log_lib_host_test"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
 
 LIB_SRCS = [
     "src/fuchsia/filter.rs",
@@ -115,4 +138,52 @@ rustc_test(
         ],
         "//conditions:default": ["//third_party/rust_crates/vendor:regex"],
     }),
+)
+
+wrap_host_rust_test(
+    name = "diagnostics_log_lib_host_test",
+    binary_name = "diagnostics_log_lib_test",
+    test_args = ["--test-threads=1"],
+    visibility = ["//visibility:private"],
+)
+
+fx_packaged_binary(
+    name = "diagnostics_log_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":diagnostics_log_lib_test",
+    binary_name = "diagnostics_log_lib_test",
+)
+
+fx_component_manifest(
+    name = "diagnostics-log-tests-manifest",
+    testonly = True,
+    component_name = "diagnostics-log-tests",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:next-vdso.shard.cml",
+    ],
+    manifest = "meta/test.cml",
+)
+
+fx_test_component(
+    name = "diagnostics-log-tests-component",
+    compiled_manifest = ":diagnostics-log-tests-manifest",
+    deps = [":diagnostics_log_lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "diagnostics-log-tests-package",
+    package_name = "diagnostics-log-tests",
+    components = [
+        "//src/lib/diagnostics/log/rust/rust-crasher:component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":diagnostics-log-tests-component"],
+)
+
+fx_test(
+    name = "diagnostics-log-tests",
+    max_log_severity = "ERROR",
+    package = ":diagnostics-log-tests-package",
 )

@@ -44,8 +44,6 @@
 // size due to the 40-bit physical address range on Cortex-A53.
 #define MMU_GUEST_SIZE_SHIFT 36
 
-#define MMU_MAX_PAGE_SIZE_SHIFT 48
-
 #define MMU_KERNEL_PAGE_SIZE_SHIFT      (PAGE_SIZE_SHIFT)
 #define MMU_USER_PAGE_SIZE_SHIFT        (USER_PAGE_SIZE_SHIFT)
 #define MMU_GUEST_PAGE_SIZE_SHIFT       (USER_PAGE_SIZE_SHIFT)
@@ -84,8 +82,6 @@
 #else
 #error User address space size must be larger than page size
 #endif
-#define MMU_USER_PAGE_TABLE_ENTRIES_TOP (0x1 << (MMU_USER_SIZE_SHIFT - MMU_USER_TOP_SHIFT))
-#define MMU_USER_PAGE_TABLE_ENTRIES (0x1 << (MMU_USER_PAGE_SIZE_SHIFT - 3))
 
 #if MMU_KERNEL_SIZE_SHIFT > MMU_LX_X(MMU_KERNEL_PAGE_SIZE_SHIFT, 0)
 #define MMU_KERNEL_TOP_SHIFT MMU_LX_X(MMU_KERNEL_PAGE_SIZE_SHIFT, 0)
@@ -98,23 +94,7 @@
 #else
 #error Kernel address space size must be larger than page size
 #endif
-#define MMU_KERNEL_PAGE_TABLE_ENTRIES_TOP (0x1 << (MMU_KERNEL_SIZE_SHIFT - MMU_KERNEL_TOP_SHIFT))
 #define MMU_KERNEL_PAGE_TABLE_ENTRIES (0x1 << (MMU_KERNEL_PAGE_SIZE_SHIFT - 3))
-
-#if MMU_IDENT_SIZE_SHIFT > MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 0)
-#define MMU_IDENT_TOP_SHIFT MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 0)
-#elif MMU_IDENT_SIZE_SHIFT > MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 1)
-#define MMU_IDENT_TOP_SHIFT MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 1)
-#elif MMU_IDENT_SIZE_SHIFT > MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 2)
-#define MMU_IDENT_TOP_SHIFT MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 2)
-#elif MMU_IDENT_SIZE_SHIFT > MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 3)
-#define MMU_IDENT_TOP_SHIFT MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 3)
-#else
-#error Ident address space size must be larger than page size
-#endif
-#define MMU_IDENT_PAGE_TABLE_ENTRIES_TOP_SHIFT (MMU_IDENT_SIZE_SHIFT - MMU_IDENT_TOP_SHIFT)
-#define MMU_IDENT_PAGE_TABLE_ENTRIES_TOP (0x1 << MMU_IDENT_PAGE_TABLE_ENTRIES_TOP_SHIFT)
-#define MMU_IDENT_PAGE_TABLE_ENTRIES (0x1 << (MMU_IDENT_PAGE_SIZE_SHIFT - 3))
 
 #if MMU_GUEST_SIZE_SHIFT > MMU_LX_X(MMU_GUEST_PAGE_SIZE_SHIFT, 0)
 #define MMU_GUEST_TOP_SHIFT MMU_LX_X(MMU_GUEST_PAGE_SIZE_SHIFT, 0)
@@ -127,8 +107,6 @@
 #else
 #error Guest physical address space size must be larger than page size
 #endif
-#define MMU_GUEST_PAGE_TABLE_ENTRIES_TOP (0x1 << (MMU_GUEST_SIZE_SHIFT - MMU_GUEST_TOP_SHIFT))
-#define MMU_GUEST_PAGE_TABLE_ENTRIES (0x1 << (MMU_GUEST_PAGE_SIZE_SHIFT - 3))
 
 #define MMU_PTE_DESCRIPTOR_BLOCK_MAX_SHIFT      (30)
 
@@ -138,16 +116,10 @@
 #define BM(base, count, val) (((val) & ((0x1 << (count)) - 1)) << (base))
 #endif
 
-#define MMU_SH_NON_SHAREABLE                    (0)
-#define MMU_SH_OUTER_SHAREABLE                  (2)
 #define MMU_SH_INNER_SHAREABLE                  (3)
 
-#define MMU_RGN_NON_CACHEABLE                   (0)
 #define MMU_RGN_WRITE_BACK_ALLOCATE             (1)
-#define MMU_RGN_WRITE_THROUGH_NO_ALLOCATE       (2)
-#define MMU_RGN_WRITE_BACK_NO_ALLOCATE          (3)
 
-#define MMU_TCR_TBI1                            BM(38, 1, 1)
 #define MMU_TCR_TBI0                            BM(37, 1, 1)
 #define MMU_TCR_AS                              BM(36, 1, 1)
 #define MMU_TCR_IPS(size)                       BM(32, 3, (size))
@@ -155,7 +127,6 @@
 #define MMU_TCR_SH1(shareability_flags)         BM(28, 2, (shareability_flags))
 #define MMU_TCR_ORGN1(cache_flags)              BM(26, 2, (cache_flags))
 #define MMU_TCR_IRGN1(cache_flags)              BM(24, 2, (cache_flags))
-#define MMU_TCR_EPD1                            BM(23, 1, 1)
 #define MMU_TCR_A1                              BM(22, 1, 1)
 #define MMU_TCR_T1SZ(size)                      BM(16, 6, (size))
 #define MMU_TCR_TG0(granule_size)               BM(14, 2, (granule_size))
@@ -187,24 +158,14 @@
 // Output address mask
 #define MMU_PTE_OUTPUT_ADDR_MASK                BM(12, 36, 0xfffffffff)
 
-// Table attrs
-#define MMU_PTE_ATTR_NS_TABLE                   BM(63, 1, 1)
-#define MMU_PTE_ATTR_AP_TABLE_NO_WRITE          BM(62, 1, 1)
-#define MMU_PTE_ATTR_AP_TABLE_NO_EL0            BM(61, 1, 1)
-#define MMU_PTE_ATTR_UXN_TABLE                  BM(60, 1, 1)
-#define MMU_PTE_ATTR_PXN_TABLE                  BM(59, 1, 1)
-
 // Block/Page attrs
 #define MMU_PTE_ATTR_RES_SOFTWARE               BM(55, 4, 0xf)
 #define MMU_PTE_ATTR_UXN                        BM(54, 1, 1)
 #define MMU_PTE_ATTR_PXN                        BM(53, 1, 1)
-#define MMU_PTE_ATTR_CONTIGUOUS                 BM(52, 1, 1)
 
 #define MMU_PTE_ATTR_NON_GLOBAL                 BM(11, 1, 1)
 #define MMU_PTE_ATTR_AF                         BM(10, 1, 1)
 
-#define MMU_PTE_ATTR_SH_NON_SHAREABLE           BM(8, 2, 0)
-#define MMU_PTE_ATTR_SH_OUTER_SHAREABLE         BM(8, 2, 2)
 #define MMU_PTE_ATTR_SH_INNER_SHAREABLE         BM(8, 2, 3)
 
 #define MMU_PTE_ATTR_AP_P_RW_U_NA               BM(6, 2, 0)
@@ -260,7 +221,7 @@
 #define MMU_MAIR_ATTR3                  MMU_MAIR_ATTR(3, 0x44)
 #define MMU_PTE_ATTR_NORMAL_UNCACHED    MMU_PTE_ATTR_ATTR_INDEX(3)
 
-// LINT.ThenChange(/zircon/kernel/arch/arm64/phys/address-space.cc)
+// LINT.ThenChange(/zircon/kernel/phys/address-space/arm64-address-space.cc)
 
 #define MMU_MAIR_ATTR4                  (0)
 #define MMU_MAIR_ATTR5                  (0)
@@ -347,55 +308,6 @@
 // Furthermore, this only covers what's required by ARMv8.0.
 #define MMU_VTCR_EL2_FLAGS (MMU_VTCR_EL2_RES1 | MMU_VTCR_EL2_SL0_DEFAULT | MMU_VTCR_FLAGS_GUEST)
 
-#define MMU_PTE_KERNEL_RWX_FLAGS \
-    (MMU_PTE_ATTR_UXN | \
-     MMU_PTE_ATTR_AF | \
-     MMU_PTE_ATTR_SH_INNER_SHAREABLE | \
-     MMU_PTE_ATTR_NORMAL_MEMORY | \
-     MMU_PTE_ATTR_AP_P_RW_U_NA)
-
-#define MMU_PTE_KERNEL_RO_FLAGS \
-    (MMU_PTE_ATTR_UXN | \
-     MMU_PTE_ATTR_PXN | \
-     MMU_PTE_ATTR_AF | \
-     MMU_PTE_ATTR_SH_INNER_SHAREABLE | \
-     MMU_PTE_ATTR_NORMAL_MEMORY | \
-     MMU_PTE_ATTR_AP_P_RO_U_NA)
-
-#define MMU_PTE_KERNEL_DATA_FLAGS \
-    (MMU_PTE_ATTR_UXN | \
-     MMU_PTE_ATTR_PXN | \
-     MMU_PTE_ATTR_AF | \
-     MMU_PTE_ATTR_SH_INNER_SHAREABLE | \
-     MMU_PTE_ATTR_NORMAL_MEMORY | \
-     MMU_PTE_ATTR_AP_P_RW_U_NA)
-
-#define MMU_INITIAL_MAP_STRONGLY_ORDERED \
-    (MMU_PTE_ATTR_UXN | \
-     MMU_PTE_ATTR_PXN | \
-     MMU_PTE_ATTR_AF | \
-     MMU_PTE_ATTR_STRONGLY_ORDERED | \
-     MMU_PTE_ATTR_AP_P_RW_U_NA)
-
-#define MMU_INITIAL_MAP_DEVICE \
-    (MMU_PTE_ATTR_UXN | \
-     MMU_PTE_ATTR_PXN | \
-     MMU_PTE_ATTR_AF | \
-     MMU_PTE_ATTR_DEVICE | \
-     MMU_PTE_ATTR_AP_P_RW_U_NA)
-
-#if MMU_IDENT_SIZE_SHIFT > MMU_LX_X(MMU_IDENT_PAGE_SIZE_SHIFT, 2)
-#define MMU_PTE_IDENT_DESCRIPTOR MMU_PTE_L012_DESCRIPTOR_BLOCK
-#else
-#define MMU_PTE_IDENT_DESCRIPTOR MMU_PTE_L3_DESCRIPTOR_PAGE
-#endif
-#define MMU_PTE_IDENT_FLAGS \
-    (MMU_PTE_IDENT_DESCRIPTOR | \
-     MMU_PTE_KERNEL_RWX_FLAGS)
-#define MMU_PTE_IDENT_DEVICE_FLAGS \
-    (MMU_PTE_IDENT_DESCRIPTOR | \
-     MMU_INITIAL_MAP_DEVICE)
-
 /* TLBI VADDR mask, VA[55:12], bits [43:0] */
 #define TLBI_VADDR_MASK                BM(0, 44, 0xfffffffffff)
 
@@ -403,17 +315,13 @@
 
 #ifndef __ASSEMBLER__
 
-#include <assert.h>
-#include <sys/types.h>
-#include <zircon/compiler.h>
-
-#include <arch/arm64.h>
+#include <stdint.h>
 
 using pte_t = uint64_t;
 
 // dedicated address space ids
 const uint16_t MMU_ARM64_UNUSED_ASID = 0;
-const uint16_t MMU_ARM64_GLOBAL_ASID = 1;  // NOTE: keep in sync with start.S
+const uint16_t MMU_ARM64_GLOBAL_ASID = 1;  // NOTE: keep in sync with secondary.S
 const uint16_t MMU_ARM64_FIRST_USER_ASID = 2;
 // User asids should not overlap with the unused or global asid sentinels.
 static_assert(MMU_ARM64_FIRST_USER_ASID > MMU_ARM64_UNUSED_ASID);
@@ -428,17 +336,6 @@ static_assert(((USER_ASPACE_BASE + USER_RESTRICTED_ASPACE_SIZE) &
 // max address space id for 8 and 16 bit asid ranges
 const uint16_t MMU_ARM64_MAX_USER_ASID_8 = (1u << 8) - 1;
 const uint16_t MMU_ARM64_MAX_USER_ASID_16 = (1u << 16) - 1;
-
-// Physical addresses of the kernel(/upper) and lower root page tables,
-// saved in start.S.
-extern paddr_t root_kernel_page_table_phys;
-extern paddr_t root_lower_page_table_phys;
-
-// use built-in virtual to physical translation instructions to query
-// the physical address of a virtual address
-extern "C" zx_status_t arm64_mmu_translate(vaddr_t va, paddr_t* pa, bool user, bool write);
-
-extern "C" void arm64_mmu_early_init();
 
 #endif  // __ASSEMBLER__
 

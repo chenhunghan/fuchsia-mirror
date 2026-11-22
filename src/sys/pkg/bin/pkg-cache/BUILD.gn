@@ -11,27 +11,6 @@ import("//build/toolchain/concurrent_jobs.gni")
 import("//src/storage/fshost/generated_fshost_config.gni")
 import("//src/sys/pkg/bin/grand-swd-binary/gsb.gni")
 
-fuchsia_structured_config_values2("config_values_from_gn") {
-  cm_label = ":manifest"
-  component_name = "pkg-cache"
-  output_component_name = "pkg-cache-config"
-  values = {
-    # TODO(https://fxbug.dev/331302451) Populate this correctly.
-    all_packages_executable = false
-    require_system_image = true
-    enable_upgradable_packages = false
-  }
-  visibility = [ ":*" ]
-}
-
-group("production-component-and-config") {
-  testonly = true
-  public_deps = [
-    ":component",
-    ":config_values_from_gn",
-  ]
-}
-
 # Assembly consumes this package through its bazel_inputs export: a Bazel
 # package would ship the vfs Rust dylib, whose debug symbols the Bazel
 # build does not export yet.
@@ -94,6 +73,7 @@ rustc_binary("bin") {
   sources = [
     "src/base_package_resolver.rs",
     "src/blob_fetcher.rs",
+    "src/blob_fetcher/queue.rs",
     "src/blob_fetcher/retry.rs",
     "src/cache_service.rs",
     "src/cache_service/missing_blobs.rs",
@@ -108,6 +88,7 @@ rustc_binary("bin") {
     "src/index.rs",
     "src/index/package.rs",
     "src/index/retained.rs",
+    "src/index/upgradable.rs",
     "src/index/writing.rs",
     "src/main.rs",
     "src/ota_downloader.rs",
@@ -117,7 +98,6 @@ rustc_binary("bin") {
     "src/retained_packages_service.rs",
     "src/root_dir.rs",
     "src/test_utils.rs",
-    "src/upgradable_packages.rs",
   ]
   configs += [ "//build/config/rust:bootfs" ]
   output_name = "pkg_cache"
@@ -138,7 +118,6 @@ rustc_binary("bin") {
     "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
     "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
     "//sdk/rust/zx",
-    "//src/lib/async-utils",
     "//src/lib/cobalt/rust/builders",
     "//src/lib/collections/sorted-vec-map",
     "//src/lib/diagnostics/inspect/contrib/rust",
@@ -171,7 +150,6 @@ rustc_binary("bin") {
     "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
     "//src/sys/pkg/lib/package-directory",
     "//src/sys/pkg/lib/system-image",
-    "//src/sys/pkg/lib/work-queue",
     "//third_party/rust_crates:anyhow",
     "//third_party/rust_crates:async-lock",
     "//third_party/rust_crates:futures",
@@ -196,6 +174,7 @@ rustc_test("bin_test") {
   sources = [
     "src/base_package_resolver.rs",
     "src/blob_fetcher.rs",
+    "src/blob_fetcher/queue.rs",
     "src/blob_fetcher/retry.rs",
     "src/cache_service.rs",
     "src/cache_service/missing_blobs.rs",
@@ -210,6 +189,7 @@ rustc_test("bin_test") {
     "src/index.rs",
     "src/index/package.rs",
     "src/index/retained.rs",
+    "src/index/upgradable.rs",
     "src/index/writing.rs",
     "src/main.rs",
     "src/ota_downloader.rs",
@@ -219,7 +199,6 @@ rustc_test("bin_test") {
     "src/retained_packages_service.rs",
     "src/root_dir.rs",
     "src/test_utils.rs",
-    "src/upgradable_packages.rs",
   ]
   edition = "2024"
   deps = [
@@ -237,7 +216,6 @@ rustc_test("bin_test") {
            "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
            "//sdk/fidl/fuchsia.update:fuchsia.update_rust",
            "//sdk/rust/zx",
-           "//src/lib/async-utils",
            "//src/lib/cobalt/rust/builders",
            "//src/lib/collections/sorted-vec-map",
            "//src/lib/diagnostics/inspect/contrib/rust",
@@ -270,7 +248,6 @@ rustc_test("bin_test") {
            "//src/sys/pkg/lib/metrics:cobalt_sw_delivery_registry_rustlib",
            "//src/sys/pkg/lib/package-directory",
            "//src/sys/pkg/lib/system-image",
-           "//src/sys/pkg/lib/work-queue",
            "//third_party/rust_crates:anyhow",
            "//third_party/rust_crates:async-lock",
            "//third_party/rust_crates:futures",
@@ -315,9 +292,12 @@ fuchsia_component("component") {
   cm_label = ":manifest"
   visibility = [
     ":*",
+    "//src/security/tests/pkg_test/tests:*",
     "//src/sys/pkg/lib/isolated-swd:*",
     "//src/sys/pkg/tests/isolated-ota:*",
     "//src/sys/pkg/tests/pkg-cache:*",
+    "//src/sys/pkg/tests/pkg-cache-as-base-resolver/as-a-component-resolver:*",
+    "//src/sys/pkg/tests/pkg-resolver:*",
   ]
   deps = [ ":bin" ]
 }

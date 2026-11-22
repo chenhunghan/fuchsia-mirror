@@ -242,7 +242,7 @@ fidl::internal::WireCompleterBase<::test_nullable::SimpleProtocol::Add>::WireCom
 
 ::fidl::internal::TransactionalRequest<::test_nullable::SimpleProtocol::Add>::TransactionalRequest(int32_t a, int32_t b)
     : body(::test_nullable::wire::SimpleProtocolAddRequest{a, b}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_nullable::kSimpleProtocol_Add_Ordinal, ::test_nullable::kSimpleProtocol_Add_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_nullable::kSimpleProtocol_Add_Ordinal, ::test_nullable::kSimpleProtocol_Add_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -268,7 +268,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_nullable::SimpleProtocol::Add>::TransactionalResponse(int32_t sum)
     : body(::fidl::WireResponse<::test_nullable::SimpleProtocol::Add>(sum)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_nullable::kSimpleProtocol_Add_Ordinal, ::test_nullable::kSimpleProtocol_Add_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_nullable::kSimpleProtocol_Add_Ordinal, ::test_nullable::kSimpleProtocol_Add_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_nullable::SimpleProtocol::Add>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_nullable::kSimpleProtocol_Add_Ordinal, ::test_nullable::kSimpleProtocol_Add_DynamicFlags);

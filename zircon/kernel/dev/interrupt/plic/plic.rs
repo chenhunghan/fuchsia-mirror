@@ -276,21 +276,23 @@ pub fn plic_init_post_vm(config: &DcfgRiscvPlicDriver) {
     assert!(config.num_irqs > 0);
     assert!(config.num_irqs as usize <= MAX_INTERRUPTS);
 
-    let mut plic_base_void: *mut c_void = core::ptr::null_mut();
     let aspace = VmAspace::kernel_aspace();
-    unsafe {
+    // SAFETY: The cache policy in the flags is appropriate for all mappings of the physical range,
+    // and creating this mapping is sound.
+    let plic_base = unsafe {
         aspace
             .alloc_physical(
                 b"plic",
                 config.size_bytes as usize,
-                &mut plic_base_void,
+                None,
                 page::SHIFT as u8,
                 PAddr(config.mmio_phys as usize),
                 0,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE | ARCH_MMU_FLAG_UNCACHED_DEVICE,
             )
-            .expect("Could not allocate PLIC mmio region");
-    }
+            .expect("Could not allocate PLIC mmio region")
+    };
+    let plic_base_void: *mut c_void = core::ptr::with_exposed_provenance_mut(plic_base);
 
     let num_irqs = config.num_irqs;
     let size = config.size_bytes as usize;

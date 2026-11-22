@@ -575,6 +575,38 @@ class VerifyTestsJsonParityTest(unittest.TestCase):
         rendered_twice = vtp.build_product_args_gn(rendered)
         self.assertEqual(rendered, rendered_twice)
 
+        # Synthetic `# planter-managed` test label lines (single-line and
+        # gn-formatted multi-line) are stripped from both product and scoped
+        # `args.gn` so host-only baseline `BUILD.gn` files are never evaluated
+        # in `$default_toolchain` via `target_labels` and severed parent
+        # `group("tests")` edges are never masked.
+        with_planter_managed = (
+            original
+            + "max_build_concurrency = 192\n"
+            + 'target_labels += [ "//src/foo/subtool:tests" ]'
+            + "  # planter-managed test label (task sample-subtool)\n"
+            + "# planter-managed test label (task sample-wrapped)\n"
+            + "target_labels +=\n"
+            + '    [ "//src/bar/subtool:tests" ]\n'
+        )
+        rendered_pm = vtp.build_product_args_gn(with_planter_managed)
+        self.assertIn("max_build_concurrency = 192", rendered_pm)
+        self.assertIn(
+            'target_labels += ["//bundles/buildbot/core"]', rendered_pm
+        )
+        self.assertIn('host_labels += ["//bundles/buildbot/host"]', rendered_pm)
+        self.assertNotIn("subtool:tests", rendered_pm)
+        self.assertNotIn("planter-managed", rendered_pm)
+
+        scoped_pm = vtp.build_scoped_args_gn(
+            with_planter_managed,
+            host_roots=["//src/foo/subtool:tests"],
+            device_roots=[],
+        )
+        self.assertIn('host_labels += ["//src/foo/subtool:tests"]', scoped_pm)
+        self.assertNotIn("target_labels +=", scoped_pm)
+        self.assertNotIn("planter-managed", scoped_pm)
+
     def test_02_blind_spot_1_severed_parent_tests_edge_caught_immediately(
         self,
     ) -> None:
@@ -982,7 +1014,7 @@ class VerifyTestsJsonParityTest(unittest.TestCase):
     def _init_git_repo(self, root: pathlib.Path) -> None:
         for cmd in (
             ["git", "init", "-q"],
-            ["git", "config", "user.email", "test@example.com"],
+            ["git", "config", "user.email", "test-user"],
             ["git", "config", "user.name", "Test User"],
         ):
             subprocess.run(cmd, cwd=root, check=True)
@@ -1489,6 +1521,379 @@ class VerifyTestsJsonParityTest(unittest.TestCase):
                 if str(f.get("severity", "")).lower() == "error"
             ]
             self.assertEqual(cq_errors, [])
+
+    def test_16_unmigrated_gn_package_with_unchanged_bazel_is_not_case1(
+        self,
+    ) -> None:
+        gn = 'group("tests") {\n  deps = [ ":foo_bind_test" ]\n}\n'
+        gn_edited = 'group("tests") {\n  deps = []\n}\n'
+        license_bazel = 'fuchsia_licenses(name = "pkg")\n'
+        self.assertEqual(
+            vtp.detect_package_mode(
+                gn, gn_edited, license_bazel, before_bazel=license_bazel
+            ),
+            "gn_only",
+        )
+        # A newly written BUILD.bazel next to a kept GN file stays Case 1.
+        self.assertEqual(
+            vtp.detect_package_mode(gn, gn_edited, license_bazel),
+            "case1_full_removal",
+        )
+        # Deleting BUILD.gn stays Case 1 even if BUILD.bazel is unchanged.
+        self.assertEqual(
+            vtp.detect_package_mode(
+                gn, None, license_bazel, before_bazel=license_bazel
+            ),
+            "case1_full_removal",
+        )
+
+    def test_15_multiline_planter_managed_args_gn_and_large_scoped_error(
+        self,
+    ) -> None:
+        mixed_plus_eq = (
+            "host_labels += [\n"
+            '  "//bundles/buildbot/host",\n'
+            '  "//src/foo:tests",  # planter-managed\n'
+            "  # planter-managed test label (task bar)\n"
+            '  "//src/bar:tests",\n'
+            "]\n"
+        )
+        stripped_plus_eq = vtp.strip_planter_managed_args_gn(mixed_plus_eq)
+        self.assertIn('"//bundles/buildbot/host"', stripped_plus_eq)
+        self.assertNotIn("//src/foo:tests", stripped_plus_eq)
+        self.assertNotIn("//src/bar:tests", stripped_plus_eq)
+        self.assertNotIn("planter-managed", stripped_plus_eq)
+
+        preceding_eq_only = (
+            "host_labels = [\n"
+            "  # planter-managed\n"
+            '  "//src/foo:tests",\n'
+            "]\n"
+        )
+        self.assertEqual(
+            vtp.strip_planter_managed_args_gn(preceding_eq_only),
+            "host_labels = []\n",
+        )
+
+        preceding_eq_mixed = (
+            "host_labels = [\n"
+            "  # planter-managed\n"
+            '  "//src/foo:tests",\n'
+            '  "//src/keep:tests",\n'
+            "]\n"
+        )
+        stripped_eq_mixed = vtp.strip_planter_managed_args_gn(
+            preceding_eq_mixed
+        )
+        self.assertIn('"//src/keep:tests"', stripped_eq_mixed)
+        self.assertNotIn("//src/foo:tests", stripped_eq_mixed)
+
+        compound_args = (
+            "host_labels = base_labels + [\n"
+            '  "//src/foo:tests",  # planter-managed\n'
+            "]\n"
+            'developer_test_labels = dev_base + [ "//src/bar:tests" ]  # planter-managed\n'
+            "target_labels += extra_base + [\n"
+            '  "//src/baz:baz",  # planter-managed\n'
+            "]\n"
+            'universe_package_labels = ["//src/keep:pkg"] + ["//src/drop:pkg"]  # planter-managed\n'
+        )
+        self.assertEqual(
+            vtp.strip_planter_managed_args_gn(compound_args),
+            "host_labels = base_labels + []\n"
+            "developer_test_labels = dev_base + []\n"
+            "target_labels += extra_base + []\n"
+            'universe_package_labels = ["//src/keep:pkg"] + []\n',
+        )
+
+        sh_path = _CHECKS_DIR / "tests_json_parity.sh"
+        sh_txt = sh_path.read_text(encoding="utf-8")
+        self.assertIn("elif total_scoped > 8:", sh_txt)
+        self.assertIn(
+            'scoped developer-root `fx gen` failed: "',
+            sh_txt,
+        )
+
+    def test_16_resolve_highest_enclosing_groups_bounds_gn_refs_and_stops_at_product_roots(
+        self,
+    ) -> None:
+        # 1. `test_data` fixture binaries transitively reachable from
+        #    `//bundles/buildbot/core` must NOT climb into `//:all_package_manifest_paths`
+        #    or `//build/images/...`, must memoize `gn_refs_fn` across sibling
+        #    targets, and must emit no redundant scoped developer roots.
+        calls: list[str] = []
+        refs_graph = {
+            "//src/sys/test_runners/gtest/test_data:sample_a": [
+                "//src/sys/test_runners/gtest/test_data:gtest-test-data"
+            ],
+            "//src/sys/test_runners/gtest/test_data:sample_b": [
+                "//src/sys/test_runners/gtest/test_data:gtest-test-data"
+            ],
+            "//src/sys/test_runners/gtest/test_data:gtest-test-data": [
+                "//src/sys/test_runners/gtest:tests"
+            ],
+            "//bundles/buildbot/core:hermetic_tests": [
+                "//:all_package_manifest_paths",
+                "//build/images/fuchsia:fuchsia",
+            ],
+            "//:all_package_manifest_paths": ["//:default"],
+        }
+
+        def tracked_refs(lbl: str) -> list[str]:
+            calls.append(lbl)
+            return refs_graph.get(lbl, [])
+
+        gn_files = {
+            "src/sys/test_runners/gtest/test_data": (
+                'test("sample_a") { sources = [ "a.cc" ] }\n'
+                'test("sample_b") { sources = [ "b.cc" ] }\n'
+                'fuchsia_package("gtest-test-data") { deps = [ ":sample_a", ":sample_b" ] }\n'
+            ),
+            "src/sys/test_runners/gtest": (
+                'group("tests") { deps = [ "test_data:gtest-test-data" ] }\n'
+            ),
+            "src/sys": 'group("tests") { deps = [ "test_runners/gtest:tests" ] }\n',
+            "bundles/buildbot/core": (
+                'group("hermetic_tests") { deps = [ "//src/sys:tests" ] }\n'
+            ),
+        }
+        uncovered = [
+            {
+                "label": "//src/sys/test_runners/gtest/test_data:sample_a",
+                "is_host": False,
+            },
+            {
+                "label": "//src/sys/test_runners/gtest/test_data:sample_b",
+                "is_host": False,
+            },
+        ]
+        host_roots, dev_roots = vtp.resolve_highest_enclosing_groups(
+            uncovered, tracked_refs, gn_files
+        )
+        self.assertEqual(host_roots, [])
+        self.assertEqual(dev_roots, [])
+        self.assertNotIn("//:all_package_manifest_paths", calls)
+        self.assertNotIn("//bundles/buildbot/core:hermetic_tests", calls)
+        self.assertEqual(
+            calls.count(
+                "//src/sys/test_runners/gtest/test_data:gtest-test-data"
+            ),
+            1,
+        )
+
+        # 2. Enclosing groups do not climb into non-group ZBI/assembly targets,
+        #    and `max_gn_refs_calls` caps total subprocess invocations.
+        chain_calls = 0
+
+        def runaway_refs(lbl: str) -> list[str]:
+            nonlocal chain_calls
+            chain_calls += 1
+            idx = (
+                int(lbl.rsplit("_", 1)[-1])
+                if "_" in lbl and lbl.rsplit("_", 1)[-1].isdigit()
+                else 0
+            )
+            return [f"//src/other:non_group_{idx + 1}"]
+
+        h2, d2 = vtp.resolve_highest_enclosing_groups(
+            [{"label": "//src/leaf:my_bin_test", "is_host": False}],
+            runaway_refs,
+            {"src/leaf": 'test("my_bin_test") {}\ngroup("tests") {}\n'},
+            max_gn_refs_calls=5,
+        )
+        self.assertEqual(chain_calls, 5)
+        self.assertEqual(d2, ["//src/leaf:tests"])
+        self.assertEqual(h2, [])
+
+        # Verify that a consolidated C++ test binary (`<stem>_tests_bin`) wrapped
+        # by `host_test` in GN without `gn_output_name` matches a baseline
+        # `test("<stem>_tests")` host entry 1:1 in Case 2 dual-build.
+        host_before = _host_entry(
+            "host_x64/widget_tests",
+            label="//src/lib/widget:widget_tests(//build/toolchain:host_x64)",
+            source_label="//src/lib/widget:widget_tests",
+        )
+        host_bz_after = _host_entry(
+            "host_x64/widget_tests_host_test",
+            label="@@//src/lib/widget:widget_tests_host_test",
+            source_label="//src/lib/widget:widget_tests_host_test",
+        )
+        host_gn_after = _host_entry(
+            "host_x64/widget_tests_bin",
+            label="//src/lib/widget:widget_tests_bin(//build/toolchain:host_x64)",
+            source_label="//src/lib/widget:widget_tests_bin",
+        )
+        widget_states = {
+            "//src/lib/widget": vtp.PackageState(
+                pkg_dir="src/lib/widget",
+                before_gn='if (is_host) { test("widget_tests") {} }\n',
+                after_gn=(
+                    'if (is_host) { host_test("widget_tests_host_test") {} }\n'
+                    "## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##\n"
+                    'cc_test_executable("widget_tests_bin") {}\n'
+                ),
+                after_bazel='fx_cc_test_binary(name = "widget_tests_bin")\n',
+            )
+        }
+        self.assertEqual(
+            vtp.verify_parity(
+                [host_before],
+                [host_bz_after, host_gn_after],
+                widget_states,
+            ),
+            [],
+        )
+
+    def test_17_test_pilot_os_linux_component_url_parity(self) -> None:
+        # Under `use_test_pilot = true`, GN `fuchsia_test_package` and
+        # `fuchsia_unittest_package` emit `os = "linux"` alongside a
+        # `fuchsia-pkg://` URL and device environments, while Bazel `fx_test`
+        # emits `os = "fuchsia"` for the same component URL.
+        def _pilot_gn_device_entry(
+            pkg: str,
+            label: str = "//src/foo:foo-tests(//build/toolchain/fuchsia:x64)",
+            source_label: str = "//src/foo:foo-tests",
+            max_severity: str = "WARN",
+        ) -> dict[str, Any]:
+            rec = _device_entry(
+                pkg,
+                label=label,
+                source_label=source_label,
+                max_severity=max_severity,
+            )
+            rec["test"]["os"] = "linux"
+            rec["test"]["path"] = f"{pkg}_foo_test.cm_test.sh"
+            return rec
+
+        # 1. Untouched `-gn` dual-build device package + untouched co-located
+        #    host unit test + GN device test package must never collide in the
+        #    host pool or report false `test_dropped_from_tests_json` /
+        #    `test_environments_lost` findings.
+        untouched_gn_dual = _pilot_gn_device_entry(
+            "other-tests-gn",
+            label="//src/other:other-tests(//build/toolchain/fuchsia:x64)",
+            source_label="//src/other:other-tests",
+        )
+        untouched_bz_dev = _device_entry(
+            "other-tests",
+            label="@@//src/other:other-tests",
+            source_label="//src/other:other-tests",
+        )
+        co_gn_dev = _pilot_gn_device_entry(
+            "mixed-tests",
+            label="//src/mixed:mixed-tests(//build/toolchain/fuchsia:x64)",
+            source_label="//src/mixed:mixed-tests",
+        )
+        co_bz_host = _host_entry(
+            "//src/mixed:mixed_host_test",
+            label="@@//src/mixed:mixed_host_test",
+            source_label="//src/mixed:mixed_host_test",
+        )
+        untouched_pool = [
+            untouched_gn_dual,
+            untouched_bz_dev,
+            co_gn_dev,
+            co_bz_host,
+        ]
+        self.assertEqual(vtp.verify_parity(untouched_pool, untouched_pool), [])
+
+        # 2. Case 2 dual-build migration of a `use_test_pilot` GN test package
+        #    (`os = "linux"`) to Bazel `fx_unittest_package` (`os = "fuchsia"`)
+        #    plus `-gn` GN copy (`os = "linux"`) passes cleanly and still
+        #    enforces `max_severity` parity.
+        before_mig = [_pilot_gn_device_entry("foo-tests", max_severity="ERROR")]
+        after_bz = _device_entry(
+            "foo-tests",
+            label="@@//src/foo:foo-tests",
+            source_label="//src/foo:foo-tests",
+            max_severity="ERROR",
+        )
+        after_gn_dual = _pilot_gn_device_entry(
+            "foo-tests-gn",
+            max_severity="ERROR",
+        )
+        dual_states = {
+            "//src/foo": vtp.PackageState(
+                pkg_dir="src/foo",
+                before_gn='fuchsia_unittest_package("foo-tests") {}',
+                after_gn=(
+                    'group("tests") { deps = [ ":foo-tests" ] }\n'
+                    "## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##\n"
+                    'fuchsia_unittest_package("foo-tests") {\n'
+                    '  package_name = "foo-tests-gn"\n'
+                    "}\n"
+                ),
+                after_bazel='fx_unittest_package(name = "foo-tests")',
+            )
+        }
+        self.assertEqual(
+            vtp.verify_parity(
+                before_mig, [after_bz, after_gn_dual], dual_states
+            ),
+            [],
+        )
+        after_bz_bad_sev = _device_entry(
+            "foo-tests",
+            label="@@//src/foo:foo-tests",
+            source_label="//src/foo:foo-tests",
+            max_severity="WARN",
+        )
+        sev_errs = vtp.verify_parity(
+            before_mig, [after_bz_bad_sev, after_gn_dual], dual_states
+        )
+        self.assertEqual(len(sev_errs), 1)
+        self.assertEqual(sev_errs[0]["category"], "test_max_severity_changed")
+
+    def test_17_resolve_highest_enclosing_groups_foreach_parent_and_bare_subdir_dep(
+        self,
+    ) -> None:
+        # Leaf rustc_test packaged by a parent foreach loop (like
+        # //src/connectivity/network/tests/fidl/interfaces) must resolve via
+        # the enclosing parent `:tests` group and bare `"tests"` subdir dep,
+        # never falling back to the private leaf target itself.
+        gn_files = {
+            "src/net/tests/fidl/interfaces": (
+                'rustc_test("interfaces") {\n'
+                '  sources = [ "src/lib.rs" ]\n'
+                '  visibility = [ "//src/net/tests/fidl:*" ]\n'
+                "}\n"
+            ),
+            "src/net/tests/fidl": (
+                'non_sharded_tests = [{ label = "interfaces" }]\n'
+                "foreach(test, non_sharded_tests) {\n"
+                "  _label = test.label\n"
+                '  fuchsia_test_component("netstack-${_label}") {\n'
+                "    deps = [ _label ]\n"
+                "  }\n"
+                "}\n"
+                'group("tests") { deps = all_non_sharded }\n'
+            ),
+            "src/net/tests": 'group("tests") { deps = [ "fidl:tests" ] }\n',
+            "src/net": 'group("tests") { deps = [ "tests" ] }\n',
+        }
+        uncovered = [
+            {
+                "label": "//src/net/tests/fidl/interfaces:interfaces",
+                "is_host": False,
+            }
+        ]
+        # 1. Off-CQ tree climbs to highest enclosing group //src/net:tests.
+        host_roots, dev_roots = vtp.resolve_highest_enclosing_groups(
+            uncovered, lambda _lbl: [], gn_files
+        )
+        self.assertEqual(host_roots, [])
+        self.assertEqual(dev_roots, ["//src/net:tests"])
+
+        # 2. When wired under //bundles/buildbot/core, no scoped root is emitted.
+        cq_gn_files = dict(gn_files)
+        cq_gn_files[
+            "bundles/buildbot/core"
+        ] = 'group("no_e2e_dep") { deps = [ "//src/net:tests" ] }\n'
+        h2, d2 = vtp.resolve_highest_enclosing_groups(
+            uncovered, lambda _lbl: [], cq_gn_files
+        )
+        self.assertEqual(h2, [])
+        self.assertEqual(d2, [])
 
 
 def main() -> None:

@@ -167,14 +167,14 @@ In your driver's initialization, call
 to obtain a [BTI](/docs/reference/kernel_objects/bus_transaction_initiator.md) handle:
 
 ```cpp
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 
 zx_status_t Pci::GetBti(uint32_t index,
                         zx::bti* out_bti);
 ```
 
 The **GetBti()**
-function lives on the `ddk::Pci` class (just like all the other PCI functions
+function lives on the `fdf::Pci` class (just like all the other PCI functions
 discussed above) and takes an `index` parameter (reserved for future use, use `0`).
 It returns a [BTI](/docs/reference/kernel_objects/bus_transaction_initiator.md)
 object through the `out_bti` pointer argument.
@@ -332,7 +332,7 @@ done with the memory transaction to unpin and revoke access to the memory pages 
 
 ## Advanced topics
 
-### Cache Coherency
+### Cache coherency {:#cache-coherency}
 
 On fully DMA-coherent architectures, hardware ensures the data in the CPU cache is the same
 as the data in main memory without software intervention. Not all architectures are

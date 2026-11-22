@@ -1,0 +1,40 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(allow_non_snake_case)
+# @bazel2gn:skip
+build_flags(
+    name = "allow_non_snake_case",
+    rustflags = ["-Anon_snake_case"],
+)
+# LINT.ThenChange(BUILD.gn:allow_non_snake_case)
+
+# Remove //build/config/rust:cap_lints in GN so cap_lints_allow takes effect
+# (rustc honors the first --cap-lints flag; in Bazel, build_flags precede the
+# macro's --cap-lints flag).
+# TODO(https://fxbug.dev/566966051): Switch to disable_build_flags in rustc_library.
+# @bazel2gn:raw_attribute:configs += [ "//build/config/rust:cap_lints" ]
+# @bazel2gn:raw_attribute:configs -= [ "//build/config/rust:cap_lints" ]
+rustc_library(
+    name = "binder_ndk_sys",
+    srcs = ["third_party/binder_ndk_sys/lib.rs"],
+    build_flags = [
+        "//build/config/rust:cap_lints_allow",
+        "//src/lib/android:android_rust_config",
+        ":allow_non_snake_case",
+    ],
+    crate_root = "third_party/binder_ndk_sys/lib.rs",
+    disable_clippy = True,
+    edition = "2021",
+    visibility = [
+        "//src/lib/android/binder/rust/rpcbinder:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = ["//third_party/rust_crates/vendor:libc"],
+)

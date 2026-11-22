@@ -8,6 +8,7 @@ import (
 	"embed"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ func NewGenerator(formatter fidlgen.Formatter) *Generator {
 		"ConstValue":               ConstValue,
 		"BitsAttributes":           BitsAttributes,
 		"EnumAttributes":           EnumAttributes,
+		"EnumMemberName":           EnumMemberName,
 		"StructAttributes":         StructAttributes,
 		"OverlayAttributes":        OverlayAttributes,
 		"DescribeType": func(desc zither.TypeDescriptor) string {
@@ -111,10 +113,14 @@ func (gen Generator) DeclCallback(decl zither.Decl) {
 	t := new(traits)
 	switch decl.(type) {
 	case *zither.Enum:
+		e := decl.(*zither.Enum)
 		t.debug = true
 		t.eq = true
 		t.hash = true
 		t.intoBytes = true
+		// A flexible enum is emitted as a transparent newtype around its
+		// subtype, in which every value is valid.
+		t.fromBytes = !e.Strict
 	case *zither.Bits, *zither.Handle:
 		t.debug = true
 		t.eq = true
@@ -338,7 +344,8 @@ func ConstValue(c zither.Const) string {
 	if c.Element != nil {
 		switch c.Kind {
 		case zither.TypeKindEnum:
-			return zither.UpperCamelCase(c.Element.Decl) + "::" + zither.UpperCamelCase(c.Element.Member)
+			e := c.Element.Decl.(*zither.Enum)
+			return zither.UpperCamelCase(e) + "::" + EnumMemberName(*e, c.Element.Member)
 		case zither.TypeKindBits:
 			if c.Element.Member != nil {
 				return zither.UpperCamelCase(c.Element.Decl) + "::" + zither.UpperCaseWithUnderscores(c.Element.Member)
@@ -368,8 +375,14 @@ func ConstValue(c zither.Const) string {
 
 func layoutAttributes(decl zither.Decl) []string {
 	repr := "#[repr(C)]"
+	flexibleEnum := false
 	if e, ok := decl.(*zither.Enum); ok {
-		repr = fmt.Sprintf("#[repr(%s)]", ScalarTypeName(e.Subtype))
+		if e.Strict {
+			repr = fmt.Sprintf("#[repr(%s)]", ScalarTypeName(e.Subtype))
+		} else {
+			repr = "#[repr(transparent)]"
+			flexibleEnum = true
+		}
 	} else if _, ok := decl.(*zither.Overlay); ok {
 		// A repr(u64) enum where all variants are repr(C) will stil in effect
 		// be repr(C) itself.
@@ -378,6 +391,11 @@ func layoutAttributes(decl zither.Decl) []string {
 
 	t := extraTraits[decl.GetName().String()]
 	supported := append(defaultTraits, t.supported()...)
+	if flexibleEnum {
+		// Debug is implemented by hand for flexible enums, so that known
+		// values are rendered by name.
+		supported = slices.DeleteFunc(supported, func(trait string) bool { return trait == "Debug" })
+	}
 	sort.Strings(supported)
 
 	return []string{
@@ -387,6 +405,16 @@ func layoutAttributes(decl zither.Decl) []string {
 }
 
 func EnumAttributes(e zither.Enum) []string { return layoutAttributes(&e) }
+
+// EnumMemberName gives the Rust name of an enum member: strict enums are
+// emitted as Rust enums with UpperCamelCase variants, while flexible enums
+// are emitted as newtypes with UPPER_CASE associated constants.
+func EnumMemberName(e zither.Enum, m zither.Member) string {
+	if e.Strict {
+		return zither.UpperCamelCase(m)
+	}
+	return zither.UpperCaseWithUnderscores(m)
+}
 
 func BitsAttributes() []string {
 	// The default traits are already implicitly derived via the bitflags!

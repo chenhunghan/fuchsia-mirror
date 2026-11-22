@@ -5,27 +5,13 @@
 // https://opensource.org/licenses/MIT
 
 use core::ffi::c_int;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct File {
-    write: unsafe extern "C" fn(
-        *mut core::ffi::c_void,
-        *const core::ffi::c_char,
-        usize,
-    ) -> core::ffi::c_int,
-    ptr: *mut core::ffi::c_void,
-}
-
-unsafe extern "C" {
-    static mut gStdout: File;
-}
+use libc::stdio::{FILE, stdout};
 
 struct CapturerState {
     buf: *mut u8,
     buf_size: usize,
     len: usize,
-    original_stdout: Option<File>,
+    original_stdout: Option<FILE>,
 }
 
 struct SyncUnsafeCell<T>(core::cell::UnsafeCell<T>);
@@ -67,19 +53,31 @@ unsafe fn test_capture_stdout_start(buf: *mut u8, size: usize) {
     state.buf_size = size;
     state.len = 0;
     unsafe { *state.buf = 0 };
+    // SAFETY:
+    // - `stdout()` points to the static `gStdout`, which is valid, aligned, and initialized.
+    // - No data race (test-only assumption, not enforced): tests run sequentially and
+    //   nothing else writes to `stdout` while it is swapped. This also makes
+    //   `write_callback`'s `&mut CAPTURER_STATE` access exclusive.
+    // - `write_callback` meets `FILE::new`'s contract: it ignores `ptr` and writes only
+    //   within `buf[..buf_size]`, which the caller keeps valid until
+    //   `test_capture_stdout_stop`.
     unsafe {
-        state.original_stdout = Some(gStdout);
-        gStdout = File { write: write_callback, ptr: core::ptr::null_mut() };
+        state.original_stdout = Some(core::ptr::replace(
+            stdout(),
+            FILE::new(Some(write_callback), core::ptr::null_mut()),
+        ));
     }
 }
 
 unsafe fn test_capture_stdout_stop() {
     let state = unsafe { &mut *CAPTURER_STATE.0.get() };
-    if let Some(orig) = state.original_stdout {
+    if let Some(orig) = state.original_stdout.take() {
+        // SAFETY:
+        // - `stdout()` is valid and race-free, as in `test_capture_stdout_start`.
+        // - `orig` was taken from `gStdout`, so it still meets `FILE::new`'s contract.
         unsafe {
-            gStdout = orig;
+            *stdout() = orig;
         }
-        state.original_stdout = None;
     }
     state.buf = core::ptr::null_mut();
     state.buf_size = 0;

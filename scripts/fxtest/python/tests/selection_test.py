@@ -286,6 +286,53 @@ class SelectTestsTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(device_selected.has_device_test())
 
+    async def test_select_host_and_device_with_pure_device_test_path(
+        self,
+    ) -> None:
+        """Test that pure device tests with path are classified as device tests."""
+        pure_device_test = test_list_file.Test(
+            build=tests_json_file.TestEntry(
+                test=tests_json_file.TestSection(
+                    name="fuchsia-pkg://fuchsia.com/foo#meta/bar.cm",
+                    label="//src/tests:foo($toolchain)",
+                    os="linux",
+                    package_url="fuchsia-pkg://fuchsia.com/foo#meta/bar.cm",
+                    path="foo_bar_test.sh",
+                ),
+                environments=[
+                    tests_json_file.EnvironmentEntry(
+                        dimensions=tests_json_file.DimensionsEntry(
+                            device_type="AEMU"
+                        )
+                    )
+                ],
+                expects_ssh=True,
+            ),
+        )
+        tests = [
+            pure_device_test,
+            self._make_host_test("src/tests2", "baz"),
+        ]
+
+        exec_env = self._make_exec_env()
+
+        host_selected = await selection.select_tests(
+            tests, [], exec_env, selection.SelectionMode.HOST
+        )
+        self.assertEqual(
+            [t.name() for t in host_selected.selected], ["host_x64/baz"]
+        )
+        self.assertFalse(host_selected.has_device_test())
+
+        device_selected = await selection.select_tests(
+            tests, [], exec_env, selection.SelectionMode.DEVICE
+        )
+        self.assertEqual(
+            [t.name() for t in device_selected.selected],
+            ["fuchsia-pkg://fuchsia.com/foo#meta/bar.cm"],
+        )
+        self.assertTrue(device_selected.has_device_test())
+
     async def test_select_all_fails_on_exact(self) -> None:
         """Test that empty selection fails if exact_match is used"""
         tests = [

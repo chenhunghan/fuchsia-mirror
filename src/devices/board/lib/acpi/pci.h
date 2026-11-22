@@ -4,7 +4,8 @@
 
 #ifndef SRC_DEVICES_BOARD_LIB_ACPI_PCI_H_
 #define SRC_DEVICES_BOARD_LIB_ACPI_PCI_H_
-#include <fuchsia/hardware/pciroot/c/banjo.h>
+
+#include <lib/async/dispatcher.h>
 #include <lib/ddk/device.h>
 
 #include <vector>
@@ -12,10 +13,15 @@
 #include <acpica/acpi.h>
 
 #include "src/devices/board/lib/acpi/acpi.h"
-#include "src/devices/board/lib/acpi/manager.h"
+namespace acpi {
 
-zx_status_t pci_init(zx_device_t* parent, ACPI_HANDLE object,
-                     acpi::UniquePtr<ACPI_DEVICE_INFO> info, acpi::Manager* acpi,
-                     std::vector<pci_bdf_t> acpi_bdfs);
+class Manager;
+
+}  // namespace acpi
+
+// Publishes the PCI root described by |object|, serving it on |dispatcher|.
+zx_status_t pci_init(zx_device_t* parent, async_dispatcher_t* dispatcher, ACPI_HANDLE object,
+                     acpi::UniquePtr<ACPI_DEVICE_INFO> info, acpi::Manager* manager,
+                     std::vector<ACPI_PCI_ID> acpi_bdfs);
 
 #endif  // SRC_DEVICES_BOARD_LIB_ACPI_PCI_H_

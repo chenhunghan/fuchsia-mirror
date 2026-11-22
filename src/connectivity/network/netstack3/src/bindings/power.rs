@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::pin::pin;
 
 use fidl::endpoints::{ControlHandle as _, Responder as _};
+use fidl_fuchsia_power_broker as fbroker;
 use fidl_fuchsia_power_system as fpower_system;
 use futures::channel::mpsc;
 use futures::future::{Future, OptionFuture};
@@ -19,12 +20,64 @@ use thiserror::Error;
 
 use element::InternalLessor;
 use suspension_block::{SuspensionBlock, SuspensionBlockControl};
-pub(crate) use transmit_suspension_handler::TransmitSuspensionHandler;
+pub(crate) use transmit_suspension_handler::{PowerDependencyToken, TransmitSuspensionHandler};
+
+#[cfg(test)]
+pub(crate) use element::InternalPowerElement;
 
 use crate::bindings::BindingsCtx;
 use crate::bindings::power::element::InternalLease;
 use crate::bindings::util::ResultExt;
 use crate::bindings::waker::WakeGroups;
+
+/// The source of suspend blocker request streams for [`PowerWorker`].
+pub(crate) enum SuspendBlockerSource {
+    System,
+    #[cfg(test)]
+    Custom(futures::stream::BoxStream<'static, fpower_system::SuspendBlockerRequestStream>),
+}
+
+impl SuspendBlockerSource {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        stream: impl Stream<Item = fpower_system::SuspendBlockerRequestStream> + Send + 'static,
+    ) -> Self {
+        Self::Custom(stream.boxed())
+    }
+
+    pub(crate) fn into_stream(
+        self,
+        suspend_enabled: bool,
+    ) -> impl Stream<Item = fpower_system::SuspendBlockerRequestStream> {
+        match self {
+            Self::System => {
+                if suspend_enabled {
+                    futures::stream::unfold((), async |()| match open_suspension_blocker().await {
+                        Ok(s) => Some((s, ())),
+                        Err(e) => {
+                            error!(
+                                "failed to register suspend blocker, \
+                                proceeding with suspension disabled: {e}"
+                            );
+                            None
+                        }
+                    })
+                    .boxed()
+                } else {
+                    futures::stream::empty().boxed()
+                }
+            }
+            #[cfg(test)]
+            Self::Custom(stream) => stream,
+        }
+    }
+}
+
+impl Default for SuspendBlockerSource {
+    fn default() -> Self {
+        Self::System
+    }
+}
 
 pub(crate) struct PowerWorker {
     work_stream: mpsc::UnboundedReceiver<SinkWork>,
@@ -32,34 +85,29 @@ pub(crate) struct PowerWorker {
 }
 
 impl PowerWorker {
-    pub(crate) fn new() -> (Self, PowerWorkerSink) {
+    pub(crate) fn new(suspend_enabled: bool) -> (Self, PowerWorkerSink) {
         let (work_sink, work_stream) = mpsc::unbounded();
         let suspension_control = SuspensionBlockControl::new();
         let suspension_block = suspension_control.issuer();
-        let this = Self { work_stream, suspension_control };
-        (this, PowerWorkerSink { work_sink, suspension_block })
-    }
-
-    pub(crate) async fn run(self, suspend_enabled: bool, wake_groups: WakeGroups<BindingsCtx>) {
-        let stream = if suspend_enabled {
-            futures::stream::unfold((), async |()| match open_suspension_blocker().await {
-                Ok(s) => Some((s, ())),
+        let topology = if suspend_enabled {
+            match fuchsia_component::client::connect_to_protocol::<fbroker::TopologyMarker>() {
+                Ok(proxy) => Some(proxy),
                 Err(e) => {
                     error!(
-                        "failed to register suspend blocker, \
-                        proceeding with suspension disabled: {e}"
+                        "failed to connect to power broker topology, \
+                        proceeding without driver power leases: {e:#}"
                     );
                     None
                 }
-            })
-            .left_stream()
+            }
         } else {
-            futures::stream::empty().right_stream()
+            None
         };
-        self.run_inner(stream, wake_groups).await
+        let this = Self { work_stream, suspension_control };
+        (this, PowerWorkerSink { work_sink, suspension_block, topology })
     }
 
-    async fn run_inner(
+    pub(crate) async fn run(
         self,
         suspend_blocker_stream: impl Stream<Item = fpower_system::SuspendBlockerRequestStream>,
         wake_groups: WakeGroups<BindingsCtx>,
@@ -310,6 +358,9 @@ impl SuspensionState {
 pub(crate) struct PowerWorkerSink {
     work_sink: mpsc::UnboundedSender<SinkWork>,
     suspension_block: SuspensionBlock,
+    /// Shared `fuchsia.power.broker.Topology` connection; `None` if suspension
+    /// is disabled or connecting failed.
+    topology: Option<fbroker::TopologyProxy>,
 }
 
 impl PowerWorkerSink {
@@ -403,7 +454,7 @@ mod tests {
 
     impl FakeDeps {
         fn new(wake_groups: WakeGroups<BindingsCtx>) -> (Self, PowerWorkerSink, fasync::Task<()>) {
-            let (worker, sink) = PowerWorker::new();
+            let (worker, sink) = PowerWorker::new(false);
             let (proxy, stream) =
                 fidl::endpoints::create_proxy_and_stream::<fpower_system::SuspendBlockerMarker>();
             let (suspend_blocker_sink, suspend_blocker_stream) = mpsc::unbounded();
@@ -411,7 +462,7 @@ mod tests {
             let fake_deps = FakeDeps { suspend_blocker_sink, suspend_blocker: proxy };
             let task = fasync::Task::spawn(
                 worker
-                    .run_inner(suspend_blocker_stream, wake_groups)
+                    .run(suspend_blocker_stream, wake_groups)
                     .map(|()| panic!("worker finished unexpectedly")),
             );
             (fake_deps, sink, task)
@@ -593,5 +644,24 @@ mod tests {
         drop((suspend_blocker_sink, suspend_blocker));
         assert_eq!(pe.wait_level_change().await, BinaryPowerLevel::On);
         let _guard = sink.suspension_block.try_guard().expect("acquire guard");
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn suspend_blocker_source() {
+        // Suspend disabled should produce an empty stream.
+        let mut empty_stream = pin!(SuspendBlockerSource::System.into_stream(false));
+        assert!(empty_stream.next().await.is_none());
+
+        // Custom stream yields the injected stream.
+        let (sender, receiver) = mpsc::unbounded();
+        let (_proxy, stream) =
+            fidl::endpoints::create_proxy_and_stream::<fpower_system::SuspendBlockerMarker>();
+        sender.unbounded_send(stream).expect("send stream");
+        drop(sender);
+
+        let mut custom_stream =
+            pin!(SuspendBlockerSource::new_for_test(receiver).into_stream(false));
+        assert!(custom_stream.next().await.is_some());
+        assert!(custom_stream.next().await.is_none());
     }
 }

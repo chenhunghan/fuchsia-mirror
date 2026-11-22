@@ -23,6 +23,9 @@ class E2eTest : public TestWithLoop,
   Session& session() const { return *session_; }
   MockConsole& console() const { return *console_; }
 
+ protected:
+  void SetUp() override;
+
  private:
   Err ConnectToDebugAgent();
 

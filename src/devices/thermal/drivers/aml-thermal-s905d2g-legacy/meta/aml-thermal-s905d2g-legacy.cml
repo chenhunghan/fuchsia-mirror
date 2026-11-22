@@ -11,6 +11,9 @@
         compat: "driver/aml-thermal-s905d2g-legacy.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
     },
+    capabilities: [
+        { service: "fuchsia.hardware.thermal.Service" },
+    ],
     use: [
         {
             service: [
@@ -19,5 +22,11 @@
             ],
         },
         { protocol: "fuchsia.kernel.MmioResource" },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.thermal.Service",
+            from: "self",
+        },
     ],
 }

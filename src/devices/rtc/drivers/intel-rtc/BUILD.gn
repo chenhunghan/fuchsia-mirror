@@ -33,7 +33,7 @@ common_deps = [
   "//src/devices/lib/acpi",
   "//src/devices/lib/driver",
   "//src/devices/rtc/lib/rtc",
-  "//src/devices/rtc/lib/rtc:rtc_llcpp",
+  "//src/devices/rtc/lib/rtc:rtc_wire",
   "//src/lib/ddk",
   "//src/lib/ddktl",
   "//zircon/third_party/ulib/safemath",
@@ -51,7 +51,6 @@ fuchsia_cc_driver("intel-rtc-driver") {
 
 fuchsia_driver_component("intel-rtc") {
   dml_label = ":intel-rtc-dml"
-  info = "meta/intel-rtc-info.json"
   component_name = "intel-rtc"
   deps = [ ":intel-rtc-driver" ]
 }
@@ -119,9 +118,6 @@ fuchsia_test_with_expectations_package("rtc-periodic-interrupt-test") {
     # Tests use actual RTC driver, test its interrupts and enable and disable
     # interrupts. They might accidentally step on each other if run in parallel.
     parallel = 1
-    environments = [
-      nuc7_env,
-      nuc11_env,
-    ]
+    environments = [ nuc11_env ]
   }
 }

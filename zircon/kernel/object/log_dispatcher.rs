@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::counters::define_kcounter;
-use crate::debuglog_rs::{DlogReaderStorage, dlog_record_t, dlog_write};
+use crate::debuglog_rs::{DlogReader, PersistLog, dlog_record_t, dlog_write};
 use crate::ksync_kernel::TrackedCriticalMutex;
 use fbl::Canary;
 use ksync::{KMutex, guarded};
@@ -17,7 +17,7 @@ use zx_types::{
     ZX_RIGHT_WRITE, zx_rights_t,
 };
 
-use super::log_dispatcher_ffi::{cpp_log_dispatcher_create, rust_log_dispatcher_notify};
+use super::log_dispatcher_ffi::cpp_log_dispatcher_create;
 use super::{DispatcherOps, KernelHandle};
 
 use object_constants_rs as object_constants;
@@ -54,7 +54,7 @@ pub struct LogDispatcherState {
 
     #[pin]
     #[guarded_by(lock)]
-    reader: DlogReaderStorage,
+    reader: DlogReader,
 
     flags: u32,
 
@@ -63,8 +63,9 @@ pub struct LogDispatcherState {
 }
 
 impl LogDispatcherState {
+    /// Creates a `PinInit` initializer for `LogDispatcherState`.
     pub fn init(
-        dispatcher: *const LogDispatcher,
+        _dispatcher: *const LogDispatcher,
         flags: u32,
     ) -> impl PinInit<Self, core::convert::Infallible> {
         DISPATCHER_LOG_CREATE_COUNT.add(1);
@@ -72,16 +73,7 @@ impl LogDispatcherState {
             canary: Canary::new(),
             flags,
             lock <- KMutex::init(),
-            reader <- ksync::kcell_init(
-                // SAFETY: `dispatcher` points to the valid `LogDispatcher` enclosing this state.
-                unsafe {
-                    DlogReaderStorage::init(
-                        *flags,
-                        rust_log_dispatcher_notify,
-                        dispatcher.cast_mut().cast(),
-                    )
-                }
-            ),
+            reader <- ksync::kcell_init(DlogReader::new()),
         })
     }
 
@@ -96,8 +88,12 @@ impl PinnedDrop for LogDispatcherState {
         DISPATCHER_LOG_DESTROY_COUNT.add(1);
         let this = self.project();
         if (*this.flags & ZX_LOG_FLAG_READABLE) != 0 {
-            let reader_pin = this.reader.get_pinned_mut();
-            reader_pin.disconnect();
+            let reader_ptr =
+                core::ptr::from_ref(this.reader.into_ref().get_ref()).cast::<DlogReader>();
+            // SAFETY: `KCell<T, _>` is `#[repr(transparent)]` over `UnsafeCell<T>`, `self.reader`
+            // is structurally pinned, and `DlogReader::disconnect` synchronizes internal mutation
+            // via atomics and `DLog::readers_lock`.
+            unsafe { core::pin::Pin::new_unchecked(&*reader_ptr) }.disconnect();
         }
     }
 }
@@ -110,6 +106,21 @@ crate::object::dispatcher::impl_dispatcher_facade_with_state!(
 );
 
 impl LogDispatcher {
+    /// Callback invoked by `DlogReader` when new log records arrive.
+    ///
+    /// # Safety
+    ///
+    /// `cookie` must point to a valid `LogDispatcher`.
+    unsafe fn notify(cookie: *mut core::ffi::c_void) {
+        // SAFETY: `cookie` was passed during `DlogReader::initialize` in `create` and points to
+        // the `LogDispatcher`, which disconnects `reader` in `LogDispatcherState::drop` before
+        // destruction.
+        unsafe {
+            let dispatcher = cookie.cast::<Self>();
+            (*dispatcher).update_state(0, ZX_LOG_READABLE);
+        }
+    }
+
     /// Returns default rights for a LogDispatcher given creation `flags`.
     fn default_rights(flags: u32) -> zx_rights_t {
         if (flags & ZX_LOG_FLAG_READABLE) != 0 {
@@ -124,12 +135,34 @@ impl LogDispatcher {
         let rights = Self::default_rights(flags);
         // SAFETY: `cpp_log_dispatcher_create` initializes `handle` on success.
         let handle = unsafe { KernelHandle::create(|out| cpp_log_dispatcher_create(flags, out)) }?;
+        if (flags & ZX_LOG_FLAG_READABLE) != 0 {
+            let dispatcher_ptr = fbl::RefPtr::as_ptr(handle.dispatcher());
+            // Ideally we would take the lock here, however `notify` may be called from
+            // `initialize`, so locking could cause a re-entrant cycle. We haven't had the
+            // opportunity to escape the pointer at this point so nothing else should have the lock
+            // anyway.
+            //
+            // SAFETY: We have exclusive access to `dispatcher_ptr` before `handle` escapes,
+            // `(*dispatcher_ptr).state().reader` (`#[repr(transparent)]` `KCell<DlogReader, _>`) is
+            // structurally pinned inside the heap-allocated `LogDispatcher`, `LogDispatcherState`
+            // disconnects `reader` in `drop` before `LogDispatcher` is destroyed, and
+            // `dlog_init_early` has completed.
+            unsafe {
+                let reader_ptr =
+                    core::ptr::from_ref(&(*dispatcher_ptr).state().reader).cast::<DlogReader>();
+                core::pin::Pin::new_unchecked(&*reader_ptr).initialize(
+                    Some(Self::notify),
+                    dispatcher_ptr.cast_mut().cast(),
+                    None,
+                );
+            }
+        }
         Ok((handle, rights))
     }
 
     /// Writes `bytes` to debuglog with given options/flags.
     pub fn write(&self, severity: u32, flags: u32, bytes: &[u8]) -> Result<(), Status> {
-        dlog_write(severity, self.state().flags() | flags, bytes)
+        dlog_write(severity, self.state().flags() | flags, bytes, PersistLog::Yes)
     }
 
     /// Reads a record from debuglog.
@@ -138,10 +171,11 @@ impl LogDispatcher {
             return Err(Status::BAD_STATE);
         }
 
-        ksync::lock!(let mut guard = self.state().lock_lock());
-        let mut fields = guard.as_mut().fields_mut();
-        let mut actual = 0;
-        let res = fields.reader.as_mut().read(0, record, &mut actual);
+        ksync::lock!(let guard = self.state().lock_lock());
+        // SAFETY: `self.state().reader` is structurally pinned inside the heap-allocated
+        // `LogDispatcher` and is never moved.
+        let reader = unsafe { core::pin::Pin::new_unchecked(guard.reader()) };
+        let res = reader.read(0, record).map(|_| ());
         if res == Err(Status::SHOULD_WAIT) {
             self.update_state_locked(guard.token(), ZX_LOG_READABLE, 0);
         }

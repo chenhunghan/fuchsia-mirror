@@ -31,7 +31,6 @@ fidl("fuchsia.posix.socket.raw") {
   sources = [ "socket.fidl" ]
   sdk_area = "Netstack"
   sdk_category = "prebuilt"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

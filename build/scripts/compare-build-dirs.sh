@@ -90,7 +90,13 @@ unspecified_files=()
 # These files exist in only one of the two dirs.
 missing_files=()
 
+# The diff_* functions below read `identical`, a local variable of the calling
+# diff_file_relpath() that's visible through Bash's dynamic scoping. It's set
+# when the prepass hashes show the two files are the same, so the functions
+# can skip spawning a diff tool.
+
 function diff_json() {
+  [[ "$identical" == 1 ]] && return 0
   debug "diff_json $1 $2"
   # Most files are identical, so skip spawning jq twice plus diff.
   cmp -s "$1" "$2" && return 0
@@ -101,17 +107,20 @@ function diff_json() {
 }
 
 function diff_text() {
+  [[ "$identical" == 1 ]] && return 0
   debug "diff_text $1 $2"
   diff -u "$1" "$2"
 }
 
 function diff_binary() {
+  [[ "$identical" == 1 ]] && return 0
   # cmp is faster, as it terminates at first byte difference.
   debug "diff_binary $1 $2"
   cmp "$1" "$2" || "$detail_diff" "${detail_diff_opts[@]}" "$1" "$2"
 }
 
 function diff_zip() {
+  [[ "$identical" == 1 ]] && return 0
   # cmp is faster, as it terminates at first byte difference.
   debug "diff_zip $1 $2"
   cmp "$1" "$2" || "$detail_diff" "${detail_diff_opts[@]}" "$1" "$2"
@@ -147,7 +156,9 @@ function diff_file_relpath() {
   # one could also use an all-inclusive diff tool like https://diffoscope.org/
   local -r left="$1/$3"
   local -r right="$2/$3"
-  local -r common_path="$3"
+  # The prepass keys its lookups by paths without a leading "./", so strip it
+  # in case it came from a RELPATH argument.
+  local -r common_path="${3#./}"
   local -r filebase="${common_path##*/}"  # basename
   local -r subdir="${common_path%/*}" # dirname
 
@@ -164,6 +175,13 @@ function diff_file_relpath() {
     missing_files+=("$common_path")
     return
   }
+
+  # Most files match, so skip spawning a diff tool per file when the
+  # precomputed hashes already show that the two files are identical.
+  local identical=0
+  local -r left_hash="${left_hashes["$common_path"]-}"
+  [[ -n "$left_hash" && "$left_hash" == "${right_hashes["$common_path"]-}" ]] &&
+    identical=1
 
   local expect=""
 
@@ -252,7 +270,14 @@ function diff_file_relpath() {
     recovery-eng_blobs.json) expect="diff"; diff_json "$left" "$right" ;;  # diffs: bytes, merkle, size (ordering)
     *.zbi.json) expect=unknown; diff_json "$left" "$right" ;;  # diffs: crc32, size
     *.vbmeta) expect="skip" ;; # Always timestamped in the digital signature
-    product_bundle.json) expect="diff"; diff_json "$left" "$right" ;;  # update package hash, due to vbmeta
+    product_bundle.json)
+      case "$common_path" in
+        # Checked-in test data copied by //tools/make-fuchsia-vol's tests.
+        */make-fuchsia-vol_test_data/product_bundle.json) expect="match"; diff_json "$left" "$right" ;;
+        */tools/make-fuchsia-vol/test_data/product_bundle.json) expect="match"; diff_json "$left" "$right" ;;
+        *) expect="diff"; diff_json "$left" "$right" ;;  # update package hash, due to vbmeta
+      esac
+      ;;
     update_packages.manifest.json) expect="diff"; diff_json "$left" "$right" ;;  # hashes
     ota_manifest) expect="diff"; diff_binary "$left" "$right" ;;  # vbmeta hash
     root.json)
@@ -412,23 +437,7 @@ function diff_file_relpath() {
     stdout-*) expect="ignore" ;;
     stderr-*) expect="ignore" ;;
 
-    # bazel runfile MANIFESTs contain absolute paths
-    MANIFEST)
-      case "$subdir" in
-        *.runfiles) expect="ignore" ;;
-      esac
-      ;;
-
     *.runfiles_manifest) expect="ignore" ;;  # absolute paths
-
-    # bazel repo-mapping files seem to differ:
-    # rules_license only appears in remote builds.
-    # Don't know why, but these are not important build artifacts.
-    _repo_mapping)
-      case "$subdir" in
-        *.runfiles) expect="ignore" ;;
-      esac
-      ;;
 
     *.repo_mapping) expect="ignore" ;;
 
@@ -497,7 +506,9 @@ function diff_file_relpath() {
       magic=""
       LC_ALL=C read -r -N 4 magic < "$left"
       if [[ "$magic" == $'\x7fELF' || "$magic" == $'\xca\xfe\xba'* ]]
-      then file_type="$(file -b "$left")"
+      then
+        file_type="${left_types["$common_path"]-}"
+        [[ -n "$file_type" ]] || file_type="$(file -b "$left")"
       fi
       case "$file_type" in
         # Binary examples:
@@ -577,8 +588,11 @@ function diff_dir_recursive() {
     amber-files/repository/blobs/) return ;;
     amber-files/repository/targets/) return ;;
 
-    # bazel runfiles dirs use absolute symlinks, so ignore those
-    *.runfiles) return ;;
+    # Bazel runfiles trees are symlinks to test inputs (mostly sources and
+    # prebuilts, plus outputs that are compared where they're built), some of
+    # them absolute, so ignore those. diff_select() passes directories with a
+    # trailing slash.
+    *.runfiles/) return ;;
     *) ;;  # continue
   esac
 
@@ -592,7 +606,13 @@ function diff_dir_recursive() {
 
 diff_output_file="$(mktemp)"
 readonly diff_output_file
-trap 'rm -f "$diff_output_file"' EXIT
+# Scratch space for the prepass below.
+work_dir="$(mktemp -d)"
+readonly work_dir
+trap 'rm -rf "$diff_output_file" "$work_dir"' EXIT
+# Background jobs in a non-interactive shell ignore SIGINT, so kill them
+# explicitly to make Ctrl-C stop the prepass.
+trap 'trap - INT TERM; kill 0 2>/dev/null; exit 130' INT TERM
 
 # Make globs over empty dirs expand to nothing, so diff_dir_recursive()
 # doesn't need to spawn `ls` per directory to detect them.
@@ -619,6 +639,89 @@ while [[ "$#" -ne 0 ]]; do
   shift
 done
 
+# Spawning a diff tool for each of the ~120k mostly identical files dominated
+# the run time, so hash both trees up front in parallel and let
+# diff_file_relpath() skip files whose hashes match.
+declare -A left_hashes=()
+declare -A right_hashes=()
+# Likewise, `file` was spawned for each of the ~20k ELF binaries to classify
+# them, so run `file` over the left tree up front too and keep the binary
+# types.
+declare -A left_types=()
+
+function parallel_over_tree() {
+  # $1 is a directory, $2 is the path under it ("." or RELPATH), $3 is the
+  # output file, and the rest is a command to run on batches of file paths.
+  # Skip the same directories that diff_dir_recursive() skips, and follow
+  # symlinks like the comparison does. Each batch writes to its own file
+  # because parallel writers to one file interleave their records.
+  local -r dir="$1" start="$2" out="$3"
+  shift 3
+  local batch_dir
+  batch_dir="$(mktemp -d -p "$work_dir")" || return
+  (cd "$dir" &&
+    find -L "$start" \
+      \( -type d \( -name '*.runfiles' \
+        -o -path '*/amber-files/repository/blobs' \
+        -o -path '*/amber-files/repository/targets' \) -prune \) \
+      -o -type f -print0 2>/dev/null |
+    xargs -0 -r -P "$jobs" -n 256 \
+      sh -c 'out="$(mktemp -p "$0")" && exec "$@" > "$out" 2>/dev/null' \
+      "$batch_dir" "$@")
+  # Not a glob: with nullglob and no batches, `cat` would read stdin.
+  find "$batch_dir" -type f -exec cat {} + > "$out"
+}
+
+function load_types() {
+  # $1 is a file of `file -N -0` output ("PATH\0: TYPE\n" records). Only keep
+  # the binary types that diff_file_relpath() looks up, to keep the array
+  # small.
+  local path type
+  while IFS= read -r -d '' path && IFS= read -r type
+  do
+    type="${type#: }"
+    path="${path#./}"
+    [[ -n "$path" ]] || continue
+    case "$type" in
+      ELF* | Mach-O*) left_types["$path"]="$type" ;;
+    esac
+  done < "$1"
+}
+
+function load_hashes() {
+  # $1 is a file of `sha1sum -z` output, $2 is the name of an associative
+  # array to fill with relative path -> hash.
+  local -n hashes="$2"
+  local entry path
+  while IFS= read -r -d '' entry
+  do
+    # Each record is a 40-character hash, a two-character separator ("  " in
+    # text mode or " *" in binary mode), and the path.
+    path="${entry:42}"
+    path="${path#./}"
+    [[ -n "$path" ]] || continue
+    hashes["$path"]="${entry:0:40}"
+  done < "$1"
+}
+
+if [[ "${#ARGS[@]}" -ge 2 ]]
+then
+  # Three passes run at once, so split the CPUs between them.
+  jobs="$(( $(nproc 2>/dev/null || echo 3) / 3 ))"
+  [[ "$jobs" -ge 1 ]] || jobs=1
+  hash_start="${ARGS[2]:-.}"
+  parallel_over_tree "${ARGS[0]}" "$hash_start" "$work_dir/left.sha1" sha1sum -z -- &
+  parallel_over_tree "${ARGS[1]}" "$hash_start" "$work_dir/right.sha1" sha1sum -z -- &
+  parallel_over_tree "${ARGS[0]}" "$hash_start" "$work_dir/left.types" file -N -0 -- &
+  wait
+  load_hashes "$work_dir/left.sha1" left_hashes 2>/dev/null
+  load_hashes "$work_dir/right.sha1" right_hashes 2>/dev/null
+  load_types "$work_dir/left.types" 2>/dev/null
+  # Without these, comparisons still work but are much slower, so make a
+  # broken prepass visible.
+  echo "Prepass: hashed ${#left_hashes[@]} + ${#right_hashes[@]} files, found ${#left_types[@]} binaries"
+fi
+
 case "${#ARGS[@]}" in
   2)
     diff_dir_recursive "${ARGS[@]}"
@@ -635,20 +738,15 @@ esac
 echo "======== COMPARISON SUMMARY ========"
 exit_status=0
 
-if test "${#unexpected_diffs[@]}" != 0
-then
-  echo "UNEXPECTED DIFFS: (action: fix source of difference)"
-  for path in "${unexpected_diffs[@]}"
-  do echo "  $path"
-  done
-  echo "end of UNEXPECTED DIFFS"
-  echo
-  exit_status=1
-else
-  echo "No UNEXPECTED DIFFS found (good)"
-fi
+# Informational findings come first so the fatal ones are at the end of the
+# log, next to the exit status.
+echo "---- INFORMATIONAL FINDINGS (these don't fail the comparison) ----"
 
-# Good news: these files matched
+# Good news: these files matched. A match is never a determinism problem,
+# only a classification that's looser than it needs to be, and diff
+# classifications are mostly by file name, so new files that share a name
+# with a known-diffing output often show up here. Report them without
+# failing so they can be cleaned up without blocking anyone.
 if test "${#unexpected_matches[@]}" != 0
 then
   echo "UNEXPECTED MATCHES: (action: make these expect=\"match\" now?)"
@@ -657,26 +755,8 @@ then
   done
   echo "end of UNEXPECTED MATCHES"
   echo
-  exit_status=1
-else
-  echo "No UNEXPECTED MATCHES found (good)"
+  # Leave exit status as it were.
 fi
-
-# Make sure all cases are covered.
-if test "${#unspecified_files[@]}" != 0
-then
-  echo "UNSPECIFIED FILES: (action: classify into {match,diff,unknown,ignore,skip})"
-  for path in "${unspecified_files[@]}"
-  do echo "  $path"
-  done
-  echo "end of UNSPECIFIED FILES"
-  echo
-  exit_status=1
-fi
-
-[[ "$exit_status" == 0 ]] ||
-  echo "ACTION: investigate the above, perhaps file a go/fuchsia-build-bug."
-echo "The rest of this report is FYI only, no action is required."
 
 # This group mismatched, but we didn't know what to expect.
 if test "${#unclassified_diffs[@]}" != 0
@@ -741,6 +821,36 @@ if [[ "$hidden_lists" == 1 ]]
 then
   echo "Rerun with --verbose to list all files and show all diffs."
 fi
+
+echo
+echo "---- FATAL FINDINGS (these fail the comparison) ----"
+if test "${#unexpected_diffs[@]}" != 0
+then
+  echo "UNEXPECTED DIFFS: (action: fix source of difference)"
+  for path in "${unexpected_diffs[@]}"
+  do echo "  $path"
+  done
+  echo "end of UNEXPECTED DIFFS"
+  echo
+  exit_status=1
+else
+  echo "No UNEXPECTED DIFFS found (good)"
+fi
+
+# Make sure all cases are covered.
+if test "${#unspecified_files[@]}" != 0
+then
+  echo "UNSPECIFIED FILES: (action: classify into {match,diff,unknown,ignore,skip})"
+  for path in "${unspecified_files[@]}"
+  do echo "  $path"
+  done
+  echo "end of UNSPECIFIED FILES"
+  echo
+  exit_status=1
+fi
+
+[[ "$exit_status" == 0 ]] ||
+  echo "ACTION: investigate the above, perhaps file a go/fuchsia-build-bug."
 
 echo "Exiting with status $exit_status"
 exit "$exit_status"

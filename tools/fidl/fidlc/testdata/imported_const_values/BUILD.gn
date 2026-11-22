@@ -4,12 +4,20 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 fidl_golden_library("test.importedconstvalues") {
   sources = [ "example.test.fidl" ]
   experimental_flags = [ "output_index_json" ]
   public_deps = [ ":test.dependent" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
 
 fidl_golden_library("test.dependent") {
   sources = [ "dependent.test.fidl" ]
+  excluded_checks = [
+    "invalid-case-for-decl-name",
+    "invalid-copyright-for-platform-source-library",
+    "string-bounds-not-specified",
+  ]
 }
+# LINT.ThenChange(BUILD.bazel)

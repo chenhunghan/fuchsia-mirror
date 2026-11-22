@@ -323,6 +323,24 @@ pub enum CacheType {
     Unified = 3,
 }
 
+impl CacheType {
+    /// Returns the human-readable cache type string (`arch::ToString(X86CacheType)`).
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Null => "Null",
+            Self::Data => "Data",
+            Self::Instruction => "Instruction",
+            Self::Unified => "Unified",
+        }
+    }
+}
+
+impl fmt::Display for CacheType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // TODO(https://github.com/rust-lang/rust/issues/113521): These values should
 // be generic over subleaf.
 
@@ -955,9 +973,10 @@ pub enum Microarchitecture {
     AmdFamilyZen3,
 }
 
-impl fmt::Display for Microarchitecture {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
+impl Microarchitecture {
+    /// Returns the human-readable microarchitecture name (`arch::ToString(Microarchitecture)`).
+    pub const fn as_str(&self) -> &'static str {
+        match self {
             Self::Unknown => "Unknown",
             Self::IntelCore2 => "Intel Core 2",
             Self::IntelNehalem => "Intel Nehalem",
@@ -984,16 +1003,217 @@ impl fmt::Display for Microarchitecture {
             Self::AmdFamilyJaguar => "AMD Jaguar",
             Self::AmdFamilyZen => "AMD Zen 1-2",
             Self::AmdFamilyZen3 => "AMD Zen 3-4",
-        })
+        }
+    }
+}
+
+impl fmt::Display for Microarchitecture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Leaf/Function 0x6, EAX
+///
+/// [intel/vol2]: Table 3-8.  Information Returned by CPUID Instruction.
+/// [amd/vol3]: E.3.5  Function 6h--Power Management Related Features.
+pub const THERMAL_AND_POWER_FEATURE_FLAGS_A: CpuidValue<
+    0x6,
+    0x0,
+    EAX,
+    ThermalAndPowerFeatureFlagsA,
+> = CpuidValue::new();
+
+layout!({
+    /// Layout for [`THERMAL_AND_POWER_FEATURE_FLAGS_A`].
+    pub struct ThermalAndPowerFeatureFlagsA(u32);
+    {
+        // Bits [31:21] are reserved.
+        let __ @ 31..21;
+        let ignoring_idle_logical_processor_hwp @ 20;
+        let hw_feedback @ 19;
+        let fast_access_mode @ 18;
+        let flexible_hwp @ 17;
+        let hwp_peci_override @ 16;
+        let hwp_capabilities @ 15;
+        let turbo_max @ 14;
+        let hdc @ 13;
+        // Bit 12 is reserved.
+        let __ @ 12;
+        let hwp_package_level_request @ 11;
+        let hwp_epp @ 10;
+        let hwp_activity_window @ 9;
+        let hwp_notification @ 8;
+        let hwp @ 7;
+        let ptm @ 6;
+        let ecmd @ 5;
+        let pln @ 4;
+        // Bit 3 is reserved.
+        let __ @ 3;
+        let arat @ 2;
+        let turbo @ 1;
+        let digital_temperature_sensor @ 0;
+    }
+});
+
+/// Leaf/Function 0xa, EAX
+///
+/// [intel/vol2]: Table 3-8.  Information Returned by CPUID Instruction.
+pub const PERFORMANCE_MONITORING_A: CpuidValue<0xa, 0x0, EAX, PerformanceMonitoringA> =
+    CpuidValue::new();
+
+layout!({
+    /// Layout for [`PERFORMANCE_MONITORING_A`].
+    pub struct PerformanceMonitoringA(u32);
+    {
+        let ebx_vector_length @ 31..24;
+        let general_counter_width @ 23..16;
+        let num_general_counters @ 15..8;
+        let version @ 7..0;
+    }
+});
+
+/// Leaf/Function 0xa, EDX
+///
+/// [intel/vol2]: Table 3-8.  Information Returned by CPUID Instruction.
+pub const PERFORMANCE_MONITORING_D: CpuidValue<0xa, 0x0, EDX, PerformanceMonitoringD> =
+    CpuidValue::new();
+
+layout!({
+    /// Layout for [`PERFORMANCE_MONITORING_D`].
+    pub struct PerformanceMonitoringD(u32);
+    {
+        let __ @ 31..16;
+        let anythread_deprecation @ 15;
+        let __ @ 14..13;
+        let fixed_counter_width @ 12..5;
+        let num_fixed_counters @ 4..0;
+    }
+});
+
+/// Leaf/Function 0x4000_0000, EAX
+///
+/// [intel/vol2]: Table 3-8.  Information Returned by CPUID Instruction.
+pub const MAX_HYPERVISOR_LEAF: CpuidValue<0x4000_0000, 0x0, EAX, u32> = CpuidValue::new();
+
+/// Leaf/Function 0x8000_0000, EAX
+///
+/// [intel/vol2]: Table 3-8.  Information Returned by CPUID Instruction.
+/// [amd/vol3]: E.4.1  Function 8000_0000h--Maximum Extended Function Number and Vendor String.
+pub const MAX_EXTENDED_LEAF: CpuidValue<0x8000_0000, 0x0, EAX, u32> = CpuidValue::new();
+
+/// Leaf/Function 0x8000_0007, EDX
+///
+/// [amd/vol3]: E.4.6  Function 8000_0007h--Processor Power Management and RAS Capabilities.
+pub const ADVANCED_POWER_FEATURE_FLAGS: CpuidValue<
+    0x8000_0007,
+    0x0,
+    EDX,
+    AdvancedPowerFeatureFlags,
+> = CpuidValue::new();
+
+layout!({
+    /// Layout for [`ADVANCED_POWER_FEATURE_FLAGS`].
+    pub struct AdvancedPowerFeatureFlags(u32);
+    {
+        // Bits [31:13] are reserved.
+        let __ @ 31..13;
+        let proc_power_reporting @ 12;
+        let proc_feedback_interface @ 11;
+        let eff_freq @ 10;
+        let cpb @ 9;
+        let tsc_invariant @ 8;
+        let hw_pstate @ 7;
+        let has_100mhz_steps @ 6;
+        // Bit 5 is reserved.
+        let __ @ 5;
+        let tm @ 4;
+        let ttp @ 3;
+        let vid @ 2;
+        let fid @ 1;
+        let ts @ 0;
+    }
+});
+
+/// Holds the 12-byte hypervisor vendor string (`arch::HypervisorName`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HypervisorName([u8; 12]);
+
+impl HypervisorName {
+    /// Reads the hypervisor vendor string from CPUID leaf `0x4000_0000` if
+    /// `FEATURE_FLAGS_C.hypervisor` is set.
+    pub fn from_cpuid(io: &impl Cpuid) -> Self {
+        // Check if we are actually within a hypervisor.
+        if io.read(FEATURE_FLAGS_C).hypervisor() {
+            let raw = io.read_raw(0x4000_0000, 0);
+            let ebx = raw.ebx.to_le_bytes();
+            let ecx = raw.ecx.to_le_bytes();
+            let edx = raw.edx.to_le_bytes();
+            Self([
+                ebx[0], ebx[1], ebx[2], ebx[3], //
+                ecx[0], ecx[1], ecx[2], ecx[3], //
+                edx[0], edx[1], edx[2], edx[3], //
+            ])
+        } else {
+            Self([0u8; 12])
+        }
+    }
+
+    /// Returns a string representation of name of the hypervisor, valid for as long as the
+    /// associated `HypervisorName` is in scope.
+    pub fn name(&self) -> &str {
+        nul_trimmed_str(&self.0)
+    }
+}
+
+/// Holds the 48-byte processor brand string (`arch::ProcessorName`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessorName([u8; 48]);
+
+impl ProcessorName {
+    /// Reads the processor brand string from CPUID leaves `0x8000_0002..=0x8000_0004`.
+    pub fn from_cpuid(io: &impl Cpuid) -> Self {
+        // The name string needs leaves 0x8000_0002-0x8000_0004.
+        let mut buf = [0u8; 48];
+        if io.read(MAX_EXTENDED_LEAF) >= 0x8000_0004 {
+            for (i, leaf) in (0x8000_0002..=0x8000_0004).enumerate() {
+                let raw = io.read_raw(leaf, 0);
+                let chunk = &mut buf[i * 16..(i + 1) * 16];
+                chunk[0..4].copy_from_slice(&raw.eax.to_le_bytes());
+                chunk[4..8].copy_from_slice(&raw.ebx.to_le_bytes());
+                chunk[8..12].copy_from_slice(&raw.ecx.to_le_bytes());
+                chunk[12..16].copy_from_slice(&raw.edx.to_le_bytes());
+            }
+        }
+        Self(buf)
+    }
+
+    /// Returns a string representation of name of the processor, valid for as long as the
+    /// associated `ProcessorName` is in scope.
+    pub fn name(&self) -> &str {
+        nul_trimmed_str(&self.0)
+    }
+}
+
+/// Returns `bytes` up to the first NUL, truncated to its longest valid UTF-8 prefix.
+fn nul_trimmed_str(bytes: &[u8]) -> &str {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    let bytes = &bytes[..len];
+    match str::from_utf8(bytes) {
+        Ok(s) => s,
+        // `valid_up_to()` marks the end of the longest valid UTF-8 prefix, which always parses.
+        Err(e) => str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or_default(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use regio::testing::x86::FakeCpuid;
+
     use super::*;
 
     // Basic exercise of the above utilities.
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[cfg(target_arch = "x86")]
     #[test]
     fn feature_detection() {
         use regio::x86::DirectCpuid;
@@ -1004,8 +1224,6 @@ mod tests {
 
     #[test]
     fn amd_vendor_string() {
-        use regio::testing::x86::FakeCpuid;
-
         // EBX, ECX, EDX copied verbatim from the manual.
         let mut cpuid = FakeCpuid::new();
         cpuid
@@ -1022,5 +1240,34 @@ mod tests {
         assert_eq!(info.phys_addr_bits(), 0x27);
         assert_eq!(info.linear_addr_bits(), 0x30);
         assert_eq!(info.guest_phys_addr_bits(), 0x2b);
+    }
+
+    #[test]
+    fn hypervisor_and_processor_names() {
+        const HYP_B: CpuidValue<0x4000_0000, 0x0, EBX, u32> = CpuidValue::new();
+        const HYP_C: CpuidValue<0x4000_0000, 0x0, ECX, u32> = CpuidValue::new();
+        const HYP_D: CpuidValue<0x4000_0000, 0x0, EDX, u32> = CpuidValue::new();
+        const BRAND_2A: CpuidValue<0x8000_0002, 0x0, EAX, u32> = CpuidValue::new();
+        const BRAND_2B: CpuidValue<0x8000_0002, 0x0, EBX, u32> = CpuidValue::new();
+
+        let mut cpuid = FakeCpuid::new();
+        assert_eq!(HypervisorName::from_cpuid(&cpuid).name(), "");
+        assert_eq!(ProcessorName::from_cpuid(&cpuid).name(), "");
+
+        let mut feat_c = FeatureFlagsC::from(0);
+        feat_c.set_hypervisor(true);
+        cpuid
+            .set(FEATURE_FLAGS_C, feat_c)
+            .set(HYP_B, u32::from_le_bytes(*b"KVMK"))
+            .set(HYP_C, u32::from_le_bytes(*b"VMKV"))
+            .set(HYP_D, u32::from_le_bytes(*b"M\0\0\0"))
+            .set(MAX_EXTENDED_LEAF, 0x8000_0004)
+            .set(BRAND_2A, u32::from_le_bytes(*b"Zirc"))
+            .set(BRAND_2B, u32::from_le_bytes(*b"on\0\0"));
+
+        assert_eq!(HypervisorName::from_cpuid(&cpuid).name(), "KVMKVMKVM");
+        assert_eq!(ProcessorName::from_cpuid(&cpuid).name(), "Zircon");
+        assert_eq!(CacheType::Unified.as_str(), "Unified");
+        assert_eq!(Microarchitecture::IntelSkylake.as_str(), "Intel Skylake");
     }
 }

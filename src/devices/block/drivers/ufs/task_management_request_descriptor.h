@@ -11,7 +11,7 @@
 
 namespace ufs {
 
-// UFSHCI Specification Version 3.0, section 6.2.1 "UTP Task Management Request Descriptor".
+// UFSHCI 3.0 section 6.2.1 / UFSHCI 4.0 section 6.3.1 "UTP Task Management Request Descriptor".
 struct TaskManagementRequestDescriptor {
   uint32_t dwords[20];
 

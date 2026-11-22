@@ -35,7 +35,7 @@ Afterwards, you should add the GN dependency for your test's language:
     **Add the Rust Realm Builder library to your `BUILD.gn` file**
 
     ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/realm_builder/rust/BUILD.gn" region_tag="realm_builder_dep_rust" adjust_indentation="auto" %}
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/realm_builder/rust/BUILD.bazel" region_tag="realm_builder_dep_rust" adjust_indentation="auto" %}
     ```
 
 * {C++}
@@ -43,7 +43,7 @@ Afterwards, you should add the GN dependency for your test's language:
     **Add the C++ Realm Builder library to your `BUILD.gn` file**
 
     ```gn
-    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/realm_builder/cpp/BUILD.gn" region_tag="realm_builder_dep_cpp" adjust_indentation="auto" %}
+    {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/realm_builder/cpp/BUILD.bazel" region_tag="realm_builder_dep_cpp" adjust_indentation="auto" %}
     ```
 
 ## Initialize Realm Builder {#init-realm}

@@ -5166,7 +5166,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayBasic>::TransactionalRequest(uint8_t uint8, uint16_t uint16, uint32_t uint32, uint64_t uint64, int8_t int8, int16_t int16, int32_t int32, int64_t int64, float float32, double float64, ::fidl::StringView string, ::fidl::StringView opt_string)
     : body(::test_typesinprotocols::wire::Basic { uint8, uint16, uint32, uint64, int8, int16, int32, int64, float32, float64, string, opt_string } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_OneWayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_OneWayBasic_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5193,7 +5193,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayBasic>::TransactionalRequest(uint8_t uint8, uint16_t uint16, uint32_t uint32, uint64_t uint64, int8_t int8, int16_t int16, int32_t int32, int64_t int64, float float32, double float64, ::fidl::StringView string, ::fidl::StringView opt_string)
     : body(::test_typesinprotocols::wire::Basic { uint8, uint16, uint32, uint64, int8, int16, int32, int64, float32, float64, string, opt_string } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayBasic_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5219,7 +5219,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayBasic>::TransactionalResponse(uint8_t uint8, uint16_t uint16, uint32_t uint32, uint64_t uint64, int8_t int8, int16_t int16, int32_t int32, int64_t int64, float float32, double float64, ::fidl::StringView string, ::fidl::StringView opt_string)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayBasic>(uint8, uint16, uint32, uint64, int8, int16, int32, int64, float32, float64, string, opt_string)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayBasic_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayBasic>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayBasic_DynamicFlags);
@@ -5284,7 +5284,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorBasic>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorBasicResult ProtocolErrorBasicResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorBasic>(ProtocolErrorBasicResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorBasic_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorBasic>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorBasic_DynamicFlags);
@@ -5329,7 +5329,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventBasic>::TransactionalEvent(uint8_t uint8, uint16_t uint16, uint32_t uint32, uint64_t uint64, int8_t int8, int16_t int16, int32_t int32, int64_t int64, float float32, double float64, ::fidl::StringView string, ::fidl::StringView opt_string)
     : body{ uint8, uint16, uint32, uint64, int8, int16, int32, int64, float32, float64, string, opt_string } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventBasic_Ordinal, ::test_typesinprotocols::kProtocol_EventBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventBasic_Ordinal, ::test_typesinprotocols::kProtocol_EventBasic_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventBasic>::TransactionalEvent() {
@@ -5360,7 +5360,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayCompound>::TransactionalRequest(::test_typesinprotocols::wire::Bits bits, ::test_typesinprotocols::wire::Enum enum_, const ::test_typesinprotocols::wire::Struct& struct_, ::test_typesinprotocols::wire::Table table, ::test_typesinprotocols::wire::Union union_, ::fidl::ObjectView<::test_typesinprotocols::wire::Struct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::Union> opt_union)
     : body(::test_typesinprotocols::wire::Compound { bits, enum_, struct_, table, union_, opt_struct, opt_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_OneWayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_OneWayCompound_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5387,7 +5387,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayCompound>::TransactionalRequest(::test_typesinprotocols::wire::Bits bits, ::test_typesinprotocols::wire::Enum enum_, const ::test_typesinprotocols::wire::Struct& struct_, ::test_typesinprotocols::wire::Table table, ::test_typesinprotocols::wire::Union union_, ::fidl::ObjectView<::test_typesinprotocols::wire::Struct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::Union> opt_union)
     : body(::test_typesinprotocols::wire::Compound { bits, enum_, struct_, table, union_, opt_struct, opt_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayCompound_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5413,7 +5413,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayCompound>::TransactionalResponse(::test_typesinprotocols::wire::Bits bits, ::test_typesinprotocols::wire::Enum enum_, const ::test_typesinprotocols::wire::Struct& struct_, ::test_typesinprotocols::wire::Table table, ::test_typesinprotocols::wire::Union union_, ::fidl::ObjectView<::test_typesinprotocols::wire::Struct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::Union> opt_union)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayCompound>(bits, enum_, struct_, table, union_, opt_struct, opt_union)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayCompound_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayCompound>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayCompound_DynamicFlags);
@@ -5478,7 +5478,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorCompound>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorCompoundResult ProtocolErrorCompoundResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorCompound>(ProtocolErrorCompoundResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorCompound_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorCompound>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorCompound_DynamicFlags);
@@ -5523,7 +5523,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventCompound>::TransactionalEvent(::test_typesinprotocols::wire::Bits bits, ::test_typesinprotocols::wire::Enum enum_, const ::test_typesinprotocols::wire::Struct& struct_, ::test_typesinprotocols::wire::Table table, ::test_typesinprotocols::wire::Union union_, ::fidl::ObjectView<::test_typesinprotocols::wire::Struct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::Union> opt_union)
     : body{ bits, enum_, struct_, table, union_, opt_struct, opt_union } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventCompound_Ordinal, ::test_typesinprotocols::kProtocol_EventCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventCompound_Ordinal, ::test_typesinprotocols::kProtocol_EventCompound_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventCompound>::TransactionalEvent() {
@@ -5554,7 +5554,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayArrayBasic>::TransactionalRequest(const ::fidl::Array<uint8_t, 5>& array_uint8, const ::fidl::Array<uint16_t, 5>& array_uint16, const ::fidl::Array<uint32_t, 5>& array_uint32, const ::fidl::Array<uint64_t, 5>& array_uint64, const ::fidl::Array<int8_t, 5>& array_int8, const ::fidl::Array<int16_t, 5>& array_int16, const ::fidl::Array<int32_t, 5>& array_int32, const ::fidl::Array<int64_t, 5>& array_int64, const ::fidl::Array<float, 5>& array_float32, const ::fidl::Array<double, 5>& array_float64, const ::fidl::Array<::fidl::StringView, 5>& array_string, const ::fidl::Array<::fidl::StringView, 5>& array_opt_string)
     : body(::test_typesinprotocols::wire::ArrayBasic { array_uint8, array_uint16, array_uint32, array_uint64, array_int8, array_int16, array_int32, array_int64, array_float32, array_float64, array_string, array_opt_string } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_OneWayArrayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_OneWayArrayBasic_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5581,7 +5581,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayArrayBasic>::TransactionalRequest(const ::fidl::Array<uint8_t, 5>& array_uint8, const ::fidl::Array<uint16_t, 5>& array_uint16, const ::fidl::Array<uint32_t, 5>& array_uint32, const ::fidl::Array<uint64_t, 5>& array_uint64, const ::fidl::Array<int8_t, 5>& array_int8, const ::fidl::Array<int16_t, 5>& array_int16, const ::fidl::Array<int32_t, 5>& array_int32, const ::fidl::Array<int64_t, 5>& array_int64, const ::fidl::Array<float, 5>& array_float32, const ::fidl::Array<double, 5>& array_float64, const ::fidl::Array<::fidl::StringView, 5>& array_string, const ::fidl::Array<::fidl::StringView, 5>& array_opt_string)
     : body(::test_typesinprotocols::wire::ArrayBasic { array_uint8, array_uint16, array_uint32, array_uint64, array_int8, array_int16, array_int32, array_int64, array_float32, array_float64, array_string, array_opt_string } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5607,7 +5607,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayArrayBasic>::TransactionalResponse(const ::fidl::Array<uint8_t, 5>& array_uint8, const ::fidl::Array<uint16_t, 5>& array_uint16, const ::fidl::Array<uint32_t, 5>& array_uint32, const ::fidl::Array<uint64_t, 5>& array_uint64, const ::fidl::Array<int8_t, 5>& array_int8, const ::fidl::Array<int16_t, 5>& array_int16, const ::fidl::Array<int32_t, 5>& array_int32, const ::fidl::Array<int64_t, 5>& array_int64, const ::fidl::Array<float, 5>& array_float32, const ::fidl::Array<double, 5>& array_float64, const ::fidl::Array<::fidl::StringView, 5>& array_string, const ::fidl::Array<::fidl::StringView, 5>& array_opt_string)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayArrayBasic>(array_uint8, array_uint16, array_uint32, array_uint64, array_int8, array_int16, array_int32, array_int64, array_float32, array_float64, array_string, array_opt_string)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayArrayBasic>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayBasic_DynamicFlags);
@@ -5672,7 +5672,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorArrayBasic>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorArrayBasicResult ProtocolErrorArrayBasicResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorArrayBasic>(ProtocolErrorArrayBasicResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayBasic_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorArrayBasic>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayBasic_DynamicFlags);
@@ -5717,7 +5717,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventArrayBasic>::TransactionalEvent(const ::fidl::Array<uint8_t, 5>& array_uint8, const ::fidl::Array<uint16_t, 5>& array_uint16, const ::fidl::Array<uint32_t, 5>& array_uint32, const ::fidl::Array<uint64_t, 5>& array_uint64, const ::fidl::Array<int8_t, 5>& array_int8, const ::fidl::Array<int16_t, 5>& array_int16, const ::fidl::Array<int32_t, 5>& array_int32, const ::fidl::Array<int64_t, 5>& array_int64, const ::fidl::Array<float, 5>& array_float32, const ::fidl::Array<double, 5>& array_float64, const ::fidl::Array<::fidl::StringView, 5>& array_string, const ::fidl::Array<::fidl::StringView, 5>& array_opt_string)
     : body{ array_uint8, array_uint16, array_uint32, array_uint64, array_int8, array_int16, array_int32, array_int64, array_float32, array_float64, array_string, array_opt_string } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_EventArrayBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventArrayBasic_Ordinal, ::test_typesinprotocols::kProtocol_EventArrayBasic_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventArrayBasic>::TransactionalEvent() {
@@ -5748,7 +5748,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayArrayCompound>::TransactionalRequest(const ::fidl::Array<::test_typesinprotocols::wire::Bits, 5>& array_bits, const ::fidl::Array<::test_typesinprotocols::wire::Enum, 5>& array_enum, const ::fidl::Array<::test_typesinprotocols::wire::Struct, 5>& array_struct, const ::fidl::Array<::test_typesinprotocols::wire::Table, 5>& array_table, const ::fidl::Array<::test_typesinprotocols::wire::Union, 5>& array_union, const ::fidl::Array<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>, 5>& array_opt_struct, const ::fidl::Array<::fidl::WireOptional<::test_typesinprotocols::wire::Union>, 5>& array_opt_union)
     : body(::test_typesinprotocols::wire::ArrayCompound { array_bits, array_enum, array_struct, array_table, array_union, array_opt_struct, array_opt_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_OneWayArrayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_OneWayArrayCompound_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5775,7 +5775,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayArrayCompound>::TransactionalRequest(const ::fidl::Array<::test_typesinprotocols::wire::Bits, 5>& array_bits, const ::fidl::Array<::test_typesinprotocols::wire::Enum, 5>& array_enum, const ::fidl::Array<::test_typesinprotocols::wire::Struct, 5>& array_struct, const ::fidl::Array<::test_typesinprotocols::wire::Table, 5>& array_table, const ::fidl::Array<::test_typesinprotocols::wire::Union, 5>& array_union, const ::fidl::Array<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>, 5>& array_opt_struct, const ::fidl::Array<::fidl::WireOptional<::test_typesinprotocols::wire::Union>, 5>& array_opt_union)
     : body(::test_typesinprotocols::wire::ArrayCompound { array_bits, array_enum, array_struct, array_table, array_union, array_opt_struct, array_opt_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5801,7 +5801,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayArrayCompound>::TransactionalResponse(const ::fidl::Array<::test_typesinprotocols::wire::Bits, 5>& array_bits, const ::fidl::Array<::test_typesinprotocols::wire::Enum, 5>& array_enum, const ::fidl::Array<::test_typesinprotocols::wire::Struct, 5>& array_struct, const ::fidl::Array<::test_typesinprotocols::wire::Table, 5>& array_table, const ::fidl::Array<::test_typesinprotocols::wire::Union, 5>& array_union, const ::fidl::Array<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>, 5>& array_opt_struct, const ::fidl::Array<::fidl::WireOptional<::test_typesinprotocols::wire::Union>, 5>& array_opt_union)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayArrayCompound>(array_bits, array_enum, array_struct, array_table, array_union, array_opt_struct, array_opt_union)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayArrayCompound>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayCompound_DynamicFlags);
@@ -5866,7 +5866,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorArrayCompound>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorArrayCompoundResult ProtocolErrorArrayCompoundResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorArrayCompound>(ProtocolErrorArrayCompoundResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayCompound_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorArrayCompound>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayCompound_DynamicFlags);
@@ -5911,7 +5911,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventArrayCompound>::TransactionalEvent(const ::fidl::Array<::test_typesinprotocols::wire::Bits, 5>& array_bits, const ::fidl::Array<::test_typesinprotocols::wire::Enum, 5>& array_enum, const ::fidl::Array<::test_typesinprotocols::wire::Struct, 5>& array_struct, const ::fidl::Array<::test_typesinprotocols::wire::Table, 5>& array_table, const ::fidl::Array<::test_typesinprotocols::wire::Union, 5>& array_union, const ::fidl::Array<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>, 5>& array_opt_struct, const ::fidl::Array<::fidl::WireOptional<::test_typesinprotocols::wire::Union>, 5>& array_opt_union)
     : body{ array_bits, array_enum, array_struct, array_table, array_union, array_opt_struct, array_opt_union } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_EventArrayCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventArrayCompound_Ordinal, ::test_typesinprotocols::kProtocol_EventArrayCompound_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventArrayCompound>::TransactionalEvent() {
@@ -5942,7 +5942,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayVectorBasic>::TransactionalRequest(::fidl::VectorView<uint8_t> vector_uint8, ::fidl::VectorView<uint16_t> vector_uint16, ::fidl::VectorView<uint32_t> vector_uint32, ::fidl::VectorView<uint64_t> vector_uint64, ::fidl::VectorView<int8_t> vector_int8, ::fidl::VectorView<int16_t> vector_int16, ::fidl::VectorView<int32_t> vector_int32, ::fidl::VectorView<int64_t> vector_int64, ::fidl::VectorView<float> vector_float32, ::fidl::VectorView<double> vector_float64, ::fidl::VectorView<::fidl::StringView> vector_string, ::fidl::VectorView<::fidl::StringView> vector_opt_string)
     : body(::test_typesinprotocols::wire::VectorBasic { vector_uint8, vector_uint16, vector_uint32, vector_uint64, vector_int8, vector_int16, vector_int32, vector_int64, vector_float32, vector_float64, vector_string, vector_opt_string } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_OneWayVectorBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_OneWayVectorBasic_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5969,7 +5969,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayVectorBasic>::TransactionalRequest(::fidl::VectorView<uint8_t> vector_uint8, ::fidl::VectorView<uint16_t> vector_uint16, ::fidl::VectorView<uint32_t> vector_uint32, ::fidl::VectorView<uint64_t> vector_uint64, ::fidl::VectorView<int8_t> vector_int8, ::fidl::VectorView<int16_t> vector_int16, ::fidl::VectorView<int32_t> vector_int32, ::fidl::VectorView<int64_t> vector_int64, ::fidl::VectorView<float> vector_float32, ::fidl::VectorView<double> vector_float64, ::fidl::VectorView<::fidl::StringView> vector_string, ::fidl::VectorView<::fidl::StringView> vector_opt_string)
     : body(::test_typesinprotocols::wire::VectorBasic { vector_uint8, vector_uint16, vector_uint32, vector_uint64, vector_int8, vector_int16, vector_int32, vector_int64, vector_float32, vector_float64, vector_string, vector_opt_string } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -5995,7 +5995,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayVectorBasic>::TransactionalResponse(::fidl::VectorView<uint8_t> vector_uint8, ::fidl::VectorView<uint16_t> vector_uint16, ::fidl::VectorView<uint32_t> vector_uint32, ::fidl::VectorView<uint64_t> vector_uint64, ::fidl::VectorView<int8_t> vector_int8, ::fidl::VectorView<int16_t> vector_int16, ::fidl::VectorView<int32_t> vector_int32, ::fidl::VectorView<int64_t> vector_int64, ::fidl::VectorView<float> vector_float32, ::fidl::VectorView<double> vector_float64, ::fidl::VectorView<::fidl::StringView> vector_string, ::fidl::VectorView<::fidl::StringView> vector_opt_string)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayVectorBasic>(vector_uint8, vector_uint16, vector_uint32, vector_uint64, vector_int8, vector_int16, vector_int32, vector_int64, vector_float32, vector_float64, vector_string, vector_opt_string)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayVectorBasic>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorBasic_DynamicFlags);
@@ -6060,7 +6060,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorVectorBasic>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorVectorBasicResult ProtocolErrorVectorBasicResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorVectorBasic>(ProtocolErrorVectorBasicResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorBasic_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorVectorBasic>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorBasic_DynamicFlags);
@@ -6105,7 +6105,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventVectorBasic>::TransactionalEvent(::fidl::VectorView<uint8_t> vector_uint8, ::fidl::VectorView<uint16_t> vector_uint16, ::fidl::VectorView<uint32_t> vector_uint32, ::fidl::VectorView<uint64_t> vector_uint64, ::fidl::VectorView<int8_t> vector_int8, ::fidl::VectorView<int16_t> vector_int16, ::fidl::VectorView<int32_t> vector_int32, ::fidl::VectorView<int64_t> vector_int64, ::fidl::VectorView<float> vector_float32, ::fidl::VectorView<double> vector_float64, ::fidl::VectorView<::fidl::StringView> vector_string, ::fidl::VectorView<::fidl::StringView> vector_opt_string)
     : body{ vector_uint8, vector_uint16, vector_uint32, vector_uint64, vector_int8, vector_int16, vector_int32, vector_int64, vector_float32, vector_float64, vector_string, vector_opt_string } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_EventVectorBasic_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventVectorBasic_Ordinal, ::test_typesinprotocols::kProtocol_EventVectorBasic_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventVectorBasic>::TransactionalEvent() {
@@ -6136,7 +6136,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayVectorCompound>::TransactionalRequest(::fidl::VectorView<::test_typesinprotocols::wire::Bits> vector_bits, ::fidl::VectorView<::test_typesinprotocols::wire::Enum> vector_enum, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::Table> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::Union> vector_union, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> vector_opt_struct, ::fidl::VectorView<::fidl::WireOptional<::test_typesinprotocols::wire::Union>> vector_opt_union)
     : body(::test_typesinprotocols::wire::VectorCompound { vector_bits, vector_enum, vector_struct, vector_table, vector_union, vector_opt_struct, vector_opt_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_OneWayVectorCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_OneWayVectorCompound_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6163,7 +6163,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayVectorCompound>::TransactionalRequest(::fidl::VectorView<::test_typesinprotocols::wire::Bits> vector_bits, ::fidl::VectorView<::test_typesinprotocols::wire::Enum> vector_enum, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::Table> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::Union> vector_union, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> vector_opt_struct, ::fidl::VectorView<::fidl::WireOptional<::test_typesinprotocols::wire::Union>> vector_opt_union)
     : body(::test_typesinprotocols::wire::VectorCompound { vector_bits, vector_enum, vector_struct, vector_table, vector_union, vector_opt_struct, vector_opt_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6189,7 +6189,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayVectorCompound>::TransactionalResponse(::fidl::VectorView<::test_typesinprotocols::wire::Bits> vector_bits, ::fidl::VectorView<::test_typesinprotocols::wire::Enum> vector_enum, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::Table> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::Union> vector_union, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> vector_opt_struct, ::fidl::VectorView<::fidl::WireOptional<::test_typesinprotocols::wire::Union>> vector_opt_union)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayVectorCompound>(vector_bits, vector_enum, vector_struct, vector_table, vector_union, vector_opt_struct, vector_opt_union)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayVectorCompound>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorCompound_DynamicFlags);
@@ -6254,7 +6254,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorVectorCompound>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorVectorCompoundResult ProtocolErrorVectorCompoundResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorVectorCompound>(ProtocolErrorVectorCompoundResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorCompound_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorVectorCompound>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorCompound_DynamicFlags);
@@ -6299,7 +6299,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventVectorCompound>::TransactionalEvent(::fidl::VectorView<::test_typesinprotocols::wire::Bits> vector_bits, ::fidl::VectorView<::test_typesinprotocols::wire::Enum> vector_enum, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::Table> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::Union> vector_union, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> vector_opt_struct, ::fidl::VectorView<::fidl::WireOptional<::test_typesinprotocols::wire::Union>> vector_opt_union)
     : body{ vector_bits, vector_enum, vector_struct, vector_table, vector_union, vector_opt_struct, vector_opt_union } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_EventVectorCompound_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventVectorCompound_Ordinal, ::test_typesinprotocols::kProtocol_EventVectorCompound_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventVectorCompound>::TransactionalEvent() {
@@ -6330,7 +6330,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayVectorOptional>::TransactionalRequest(::fidl::VectorView<uint8_t> opt_vector_uint8, ::fidl::VectorView<::fidl::StringView> opt_vector_string, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> opt_vector_struct, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> opt_vector_opt_struct)
     : body(::test_typesinprotocols::wire::VectorOptional { opt_vector_uint8, opt_vector_string, opt_vector_struct, opt_vector_opt_struct } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_OneWayVectorOptional_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_OneWayVectorOptional_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6357,7 +6357,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayVectorOptional>::TransactionalRequest(::fidl::VectorView<uint8_t> opt_vector_uint8, ::fidl::VectorView<::fidl::StringView> opt_vector_string, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> opt_vector_struct, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> opt_vector_opt_struct)
     : body(::test_typesinprotocols::wire::VectorOptional { opt_vector_uint8, opt_vector_string, opt_vector_struct, opt_vector_opt_struct } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6383,7 +6383,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayVectorOptional>::TransactionalResponse(::fidl::VectorView<uint8_t> opt_vector_uint8, ::fidl::VectorView<::fidl::StringView> opt_vector_string, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> opt_vector_struct, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> opt_vector_opt_struct)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayVectorOptional>(opt_vector_uint8, opt_vector_string, opt_vector_struct, opt_vector_opt_struct)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayVectorOptional>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayVectorOptional_DynamicFlags);
@@ -6448,7 +6448,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorVectorOptional>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorVectorOptionalResult ProtocolErrorVectorOptionalResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorVectorOptional>(ProtocolErrorVectorOptionalResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorOptional_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorOptional_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorVectorOptional>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_ErrorVectorOptional_DynamicFlags);
@@ -6493,7 +6493,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventVectorOptional>::TransactionalEvent(::fidl::VectorView<uint8_t> opt_vector_uint8, ::fidl::VectorView<::fidl::StringView> opt_vector_string, ::fidl::VectorView<::test_typesinprotocols::wire::Struct> opt_vector_struct, ::fidl::VectorView<::fidl::ObjectView<::test_typesinprotocols::wire::Struct>> opt_vector_opt_struct)
     : body{ opt_vector_uint8, opt_vector_string, opt_vector_struct, opt_vector_opt_struct } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_EventVectorOptional_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventVectorOptional_Ordinal, ::test_typesinprotocols::kProtocol_EventVectorOptional_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventVectorOptional>::TransactionalEvent() {
@@ -6524,7 +6524,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayArrayVectorNested>::TransactionalRequest(const ::fidl::Array<::fidl::Array<uint8_t, 5>, 5>& array_array_uint8, const ::fidl::Array<::fidl::VectorView<uint8_t>, 5>& array_vector_uint8, ::fidl::VectorView<::fidl::Array<uint8_t, 5>> vector_array_uint8, ::fidl::VectorView<::fidl::VectorView<uint8_t>> vector_vector_uint8)
     : body(::test_typesinprotocols::wire::ArrayVectorNested { array_array_uint8, array_vector_uint8, vector_array_uint8, vector_vector_uint8 } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_OneWayArrayVectorNested_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_OneWayArrayVectorNested_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6551,7 +6551,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayArrayVectorNested>::TransactionalRequest(const ::fidl::Array<::fidl::Array<uint8_t, 5>, 5>& array_array_uint8, const ::fidl::Array<::fidl::VectorView<uint8_t>, 5>& array_vector_uint8, ::fidl::VectorView<::fidl::Array<uint8_t, 5>> vector_array_uint8, ::fidl::VectorView<::fidl::VectorView<uint8_t>> vector_vector_uint8)
     : body(::test_typesinprotocols::wire::ArrayVectorNested { array_array_uint8, array_vector_uint8, vector_array_uint8, vector_vector_uint8 } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -6577,7 +6577,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayArrayVectorNested>::TransactionalResponse(const ::fidl::Array<::fidl::Array<uint8_t, 5>, 5>& array_array_uint8, const ::fidl::Array<::fidl::VectorView<uint8_t>, 5>& array_vector_uint8, ::fidl::VectorView<::fidl::Array<uint8_t, 5>> vector_array_uint8, ::fidl::VectorView<::fidl::VectorView<uint8_t>> vector_vector_uint8)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayArrayVectorNested>(array_array_uint8, array_vector_uint8, vector_array_uint8, vector_vector_uint8)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayArrayVectorNested>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayArrayVectorNested_DynamicFlags);
@@ -6642,7 +6642,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorArrayVectorNested>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorArrayVectorNestedResult ProtocolErrorArrayVectorNestedResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorArrayVectorNested>(ProtocolErrorArrayVectorNestedResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayVectorNested_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayVectorNested_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorArrayVectorNested>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_ErrorArrayVectorNested_DynamicFlags);
@@ -6687,7 +6687,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventArrayVectorNested>::TransactionalEvent(const ::fidl::Array<::fidl::Array<uint8_t, 5>, 5>& array_array_uint8, const ::fidl::Array<::fidl::VectorView<uint8_t>, 5>& array_vector_uint8, ::fidl::VectorView<::fidl::Array<uint8_t, 5>> vector_array_uint8, ::fidl::VectorView<::fidl::VectorView<uint8_t>> vector_vector_uint8)
     : body{ array_array_uint8, array_vector_uint8, vector_array_uint8, vector_vector_uint8 } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_EventArrayVectorNested_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventArrayVectorNested_Ordinal, ::test_typesinprotocols::kProtocol_EventArrayVectorNested_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventArrayVectorNested>::TransactionalEvent() {
@@ -6718,7 +6718,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayResource>::TransactionalRequest(::zx::handle&& handle, ::zx::vmo&& vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& server_end, ::test_typesinprotocols::wire::ResourceStruct&& struct_, ::test_typesinprotocols::wire::ResourceTable table, ::test_typesinprotocols::wire::ResourceUnion union_, ::zx::handle&& opt_handle, ::zx::vmo&& opt_vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& opt_client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& opt_server_end, ::fidl::ObjectView<::test_typesinprotocols::wire::ResourceStruct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::ResourceUnion> opt_union, ::fidl::Array<::zx::handle, 5>&& array_handle, ::fidl::Array<::zx::vmo, 5>&& array_vmo, ::fidl::Array<::fidl::ClientEnd<::test_typesinprotocols::Protocol>, 5>&& array_client_end, ::fidl::Array<::fidl::ServerEnd<::test_typesinprotocols::Protocol>, 5>&& array_server_end, ::fidl::Array<::test_typesinprotocols::wire::ResourceStruct, 5>&& array_struct, ::fidl::Array<::test_typesinprotocols::wire::ResourceTable, 5>&& array_table, ::fidl::Array<::test_typesinprotocols::wire::ResourceUnion, 5>&& array_union, ::fidl::VectorView<::zx::handle> vector_handle, ::fidl::VectorView<::zx::vmo> vector_vmo, ::fidl::VectorView<::fidl::ClientEnd<::test_typesinprotocols::Protocol>> vector_client_end, ::fidl::VectorView<::fidl::ServerEnd<::test_typesinprotocols::Protocol>> vector_server_end, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceStruct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceTable> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceUnion> vector_union)
     : body(::test_typesinprotocols::wire::Resource { std::move(handle), std::move(vmo), std::move(client_end), std::move(server_end), std::move(struct_), table, std::move(union_), std::move(opt_handle), std::move(opt_vmo), std::move(opt_client_end), std::move(opt_server_end), opt_struct, std::move(opt_union), std::move(array_handle), std::move(array_vmo), std::move(array_client_end), std::move(array_server_end), std::move(array_struct), std::move(array_table), std::move(array_union), vector_handle, vector_vmo, vector_client_end, vector_server_end, vector_struct, vector_table, vector_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_OneWayResource_Ordinal, ::test_typesinprotocols::kProtocol_OneWayResource_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_OneWayResource_Ordinal, ::test_typesinprotocols::kProtocol_OneWayResource_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::OneWayResource>::_CloseHandles() {
         body._CloseHandles();
@@ -6748,7 +6748,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayResource>::TransactionalRequest(::zx::handle&& handle, ::zx::vmo&& vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& server_end, ::test_typesinprotocols::wire::ResourceStruct&& struct_, ::test_typesinprotocols::wire::ResourceTable table, ::test_typesinprotocols::wire::ResourceUnion union_, ::zx::handle&& opt_handle, ::zx::vmo&& opt_vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& opt_client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& opt_server_end, ::fidl::ObjectView<::test_typesinprotocols::wire::ResourceStruct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::ResourceUnion> opt_union, ::fidl::Array<::zx::handle, 5>&& array_handle, ::fidl::Array<::zx::vmo, 5>&& array_vmo, ::fidl::Array<::fidl::ClientEnd<::test_typesinprotocols::Protocol>, 5>&& array_client_end, ::fidl::Array<::fidl::ServerEnd<::test_typesinprotocols::Protocol>, 5>&& array_server_end, ::fidl::Array<::test_typesinprotocols::wire::ResourceStruct, 5>&& array_struct, ::fidl::Array<::test_typesinprotocols::wire::ResourceTable, 5>&& array_table, ::fidl::Array<::test_typesinprotocols::wire::ResourceUnion, 5>&& array_union, ::fidl::VectorView<::zx::handle> vector_handle, ::fidl::VectorView<::zx::vmo> vector_vmo, ::fidl::VectorView<::fidl::ClientEnd<::test_typesinprotocols::Protocol>> vector_client_end, ::fidl::VectorView<::fidl::ServerEnd<::test_typesinprotocols::Protocol>> vector_server_end, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceStruct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceTable> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceUnion> vector_union)
     : body(::test_typesinprotocols::wire::Resource { std::move(handle), std::move(vmo), std::move(client_end), std::move(server_end), std::move(struct_), table, std::move(union_), std::move(opt_handle), std::move(opt_vmo), std::move(opt_client_end), std::move(opt_server_end), opt_struct, std::move(opt_union), std::move(array_handle), std::move(array_vmo), std::move(array_client_end), std::move(array_server_end), std::move(array_struct), std::move(array_table), std::move(array_union), vector_handle, vector_vmo, vector_client_end, vector_server_end, vector_struct, vector_table, vector_union } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayResource_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayResource_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayResource_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayResource_DynamicFlags);
     }
     void ::fidl::internal::TransactionalRequest<::test_typesinprotocols::Protocol::TwoWayResource>::_CloseHandles() {
         body._CloseHandles();
@@ -6777,7 +6777,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayResource>::TransactionalResponse(::zx::handle&& handle, ::zx::vmo&& vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& server_end, ::test_typesinprotocols::wire::ResourceStruct&& struct_, ::test_typesinprotocols::wire::ResourceTable table, ::test_typesinprotocols::wire::ResourceUnion union_, ::zx::handle&& opt_handle, ::zx::vmo&& opt_vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& opt_client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& opt_server_end, ::fidl::ObjectView<::test_typesinprotocols::wire::ResourceStruct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::ResourceUnion> opt_union, ::fidl::Array<::zx::handle, 5>&& array_handle, ::fidl::Array<::zx::vmo, 5>&& array_vmo, ::fidl::Array<::fidl::ClientEnd<::test_typesinprotocols::Protocol>, 5>&& array_client_end, ::fidl::Array<::fidl::ServerEnd<::test_typesinprotocols::Protocol>, 5>&& array_server_end, ::fidl::Array<::test_typesinprotocols::wire::ResourceStruct, 5>&& array_struct, ::fidl::Array<::test_typesinprotocols::wire::ResourceTable, 5>&& array_table, ::fidl::Array<::test_typesinprotocols::wire::ResourceUnion, 5>&& array_union, ::fidl::VectorView<::zx::handle> vector_handle, ::fidl::VectorView<::zx::vmo> vector_vmo, ::fidl::VectorView<::fidl::ClientEnd<::test_typesinprotocols::Protocol>> vector_client_end, ::fidl::VectorView<::fidl::ServerEnd<::test_typesinprotocols::Protocol>> vector_server_end, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceStruct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceTable> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceUnion> vector_union)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::TwoWayResource>(std::move(handle), std::move(vmo), std::move(client_end), std::move(server_end), std::move(struct_), table, std::move(union_), std::move(opt_handle), std::move(opt_vmo), std::move(opt_client_end), std::move(opt_server_end), opt_struct, std::move(opt_union), std::move(array_handle), std::move(array_vmo), std::move(array_client_end), std::move(array_server_end), std::move(array_struct), std::move(array_table), std::move(array_union), vector_handle, vector_vmo, vector_client_end, vector_server_end, vector_struct, vector_table, vector_union)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayResource_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayResource_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_TwoWayResource_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayResource_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::TwoWayResource>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_TwoWayResource_Ordinal, ::test_typesinprotocols::kProtocol_TwoWayResource_DynamicFlags);
@@ -6845,7 +6845,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorResource>::TransactionalResponse(::test_typesinprotocols::wire::ProtocolErrorResourceResult ProtocolErrorResourceResult)
     : body(::fidl::WireResponse<::test_typesinprotocols::Protocol::ErrorResource>(std::move(ProtocolErrorResourceResult))) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorResource_Ordinal, ::test_typesinprotocols::kProtocol_ErrorResource_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_ErrorResource_Ordinal, ::test_typesinprotocols::kProtocol_ErrorResource_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_typesinprotocols::Protocol::ErrorResource>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_ErrorResource_Ordinal, ::test_typesinprotocols::kProtocol_ErrorResource_DynamicFlags);
@@ -6893,7 +6893,7 @@ return MakeReply(::test_typesinprotocols::wire::ProtocolErrorResourceResult::Wit
 
     ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventResource>::TransactionalEvent(::zx::handle&& handle, ::zx::vmo&& vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& server_end, ::test_typesinprotocols::wire::ResourceStruct&& struct_, ::test_typesinprotocols::wire::ResourceTable table, ::test_typesinprotocols::wire::ResourceUnion union_, ::zx::handle&& opt_handle, ::zx::vmo&& opt_vmo, ::fidl::ClientEnd<::test_typesinprotocols::Protocol>&& opt_client_end, ::fidl::ServerEnd<::test_typesinprotocols::Protocol>&& opt_server_end, ::fidl::ObjectView<::test_typesinprotocols::wire::ResourceStruct> opt_struct, ::fidl::WireOptional<::test_typesinprotocols::wire::ResourceUnion> opt_union, ::fidl::Array<::zx::handle, 5>&& array_handle, ::fidl::Array<::zx::vmo, 5>&& array_vmo, ::fidl::Array<::fidl::ClientEnd<::test_typesinprotocols::Protocol>, 5>&& array_client_end, ::fidl::Array<::fidl::ServerEnd<::test_typesinprotocols::Protocol>, 5>&& array_server_end, ::fidl::Array<::test_typesinprotocols::wire::ResourceStruct, 5>&& array_struct, ::fidl::Array<::test_typesinprotocols::wire::ResourceTable, 5>&& array_table, ::fidl::Array<::test_typesinprotocols::wire::ResourceUnion, 5>&& array_union, ::fidl::VectorView<::zx::handle> vector_handle, ::fidl::VectorView<::zx::vmo> vector_vmo, ::fidl::VectorView<::fidl::ClientEnd<::test_typesinprotocols::Protocol>> vector_client_end, ::fidl::VectorView<::fidl::ServerEnd<::test_typesinprotocols::Protocol>> vector_server_end, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceStruct> vector_struct, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceTable> vector_table, ::fidl::VectorView<::test_typesinprotocols::wire::ResourceUnion> vector_union)
     : body{ std::move(handle), std::move(vmo), std::move(client_end), std::move(server_end), std::move(struct_), table, std::move(union_), std::move(opt_handle), std::move(opt_vmo), std::move(opt_client_end), std::move(opt_server_end), opt_struct, std::move(opt_union), std::move(array_handle), std::move(array_vmo), std::move(array_client_end), std::move(array_server_end), std::move(array_struct), std::move(array_table), std::move(array_union), vector_handle, vector_vmo, vector_client_end, vector_server_end, vector_struct, vector_table, vector_union } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_typesinprotocols::kProtocol_EventResource_Ordinal, ::test_typesinprotocols::kProtocol_EventResource_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_typesinprotocols::kProtocol_EventResource_Ordinal, ::test_typesinprotocols::kProtocol_EventResource_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_typesinprotocols::Protocol::EventResource>::TransactionalEvent() {

@@ -4,7 +4,6 @@
 
 #include "codec_adapter_vp9.h"
 
-#include <lib/fidl/cpp/clone.h>
 #include <lib/memory_barriers/memory_barriers.h>
 #include <lib/sync/cpp/completion.h>
 #include <lib/trace/event.h>
@@ -34,7 +33,7 @@ namespace amlogic_decoder {
 //     output buffers once the client has configured Codec output config based
 //     on the format info.  Wire up so that
 //     onCoreCodecMidStreamOutputConstraintsChange() gets called and so that
-//     CoreCodecBuildNewOutputConstraints() will pick up the correct current
+//     CoreCodecGetBufferCollectionConstraints3() will pick up the correct current
 //     format info (whether still mid-stream, or at the start of a new stream
 //     that's starting before the mid-stream format change was processed for the
 //     old stream).
@@ -215,7 +214,7 @@ bool CodecAdapterVp9::IsCoreCodecHwBased(CodecPort port) {
 zx::unowned_bti CodecAdapterVp9::CoreCodecBti() { return zx::unowned_bti(video_->bti()); }
 
 void CodecAdapterVp9::CoreCodecInit(
-    const fuchsia::media::FormatDetails& initial_input_format_details) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
   zx_status_t result = input_processing_loop_.StartThread(
       "CodecAdapterVp9::input_processing_thread_", &input_processing_thread_);
   if (result != ZX_OK) {
@@ -227,14 +226,14 @@ void CodecAdapterVp9::CoreCodecInit(
   device_->SetThreadProfile(zx::unowned_thread(thrd_get_zx_handle(input_processing_thread_)),
                             ThreadRole::kVp9InputProcessing);
 
-  initial_input_format_details_ = fidl::Clone(initial_input_format_details);
+  initial_input_format_details_ = std::move(initial_input_format_details);
 
   // TODO(dustingreen): We do most of the setup in CoreCodecStartStream()
   // currently, but we should do more here and less there.
 }
 
 void CodecAdapterVp9::CoreCodecSetSecureMemoryMode(
-    CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode) {
+    CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode) {
   secure_memory_mode_[port] = secure_memory_mode;
   secure_memory_mode_set_[port] = true;
   if (port == kOutputPort) {
@@ -261,27 +260,34 @@ void CodecAdapterVp9::CoreCodecSetSecureMemoryMode(
   }
 }
 
-fuchsia_sysmem2::BufferCollectionConstraints
-CodecAdapterVp9::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
+std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
+CodecAdapterVp9::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
   fuchsia_sysmem2::BufferCollectionConstraints result;
 
-  // The CodecImpl won't hand us the sysmem token, so we shouldn't expect to
-  // have the token here.
-  ZX_DEBUG_ASSERT(!partial_settings.has_sysmem_token());
+  uint32_t min_buffer_count = 0;
+  uint32_t max_buffer_count = 0;
+  uint32_t coded_width = 0;
+  uint32_t coded_height = 0;
+  uint32_t stride = 0;
+  {  // scope lock
+    std::lock_guard<std::mutex> lock(lock_);
+    if (port == kInputPort) {
+      // Input buffer counts are fixed (previously these were picked up from the values set by the
+      // default implementation of the now-removed CoreCodecBuildNewInputConstraints()).
+      min_buffer_count_[kInputPort] = kInputBufferCountForCodecMin;
+      max_buffer_count_[kInputPort] = kInputBufferCountForCodecMax;
+    }
+    min_buffer_count = min_buffer_count_[port];
+    max_buffer_count = max_buffer_count_[port];
+    coded_width = coded_width_;
+    coded_height = coded_height_;
+    stride = stride_;
+  }  // ~lock
 
-  if (port == kInputPort) {
-    // We don't override CoreCodecBuildNewInputConstraints() for now, so use same values that were
-    // set by default implementation of CoreCodecBuildNewInputConstraints().
-    min_buffer_count_[kInputPort] = kInputBufferCountForCodecMin;
-    max_buffer_count_[kInputPort] = kInputBufferCountForCodecMax;
-  }
+  ZX_DEBUG_ASSERT(min_buffer_count != 0);
+  ZX_DEBUG_ASSERT(max_buffer_count != 0);
 
-  ZX_DEBUG_ASSERT(min_buffer_count_[port] != 0);
-  ZX_DEBUG_ASSERT(max_buffer_count_[port] != 0);
-
-  result.min_buffer_count_for_camping() = min_buffer_count_[port];
+  result.min_buffer_count_for_camping() = min_buffer_count;
 
   // Some slack is nice overall, but avoid having each participant ask for
   // dedicated slack.  Using sysmem the client will ask for it's own buffers for
@@ -289,7 +295,7 @@ CodecAdapterVp9::CoreCodecGetBufferCollectionConstraints2(
   // behalf of the client.
   ZX_DEBUG_ASSERT(!result.min_buffer_count_for_dedicated_slack().has_value());
   ZX_DEBUG_ASSERT(!result.min_buffer_count_for_shared_slack().has_value());
-  result.max_buffer_count() = max_buffer_count_[port];
+  result.max_buffer_count() = max_buffer_count;
 
   uint32_t per_packet_buffer_bytes_min;
   uint32_t per_packet_buffer_bytes_max;
@@ -299,7 +305,7 @@ CodecAdapterVp9::CoreCodecGetBufferCollectionConstraints2(
   } else {
     ZX_DEBUG_ASSERT(port == kOutputPort);
     // NV12, based on min stride.
-    per_packet_buffer_bytes_min = stride_ * coded_height_ * 3 / 2;
+    per_packet_buffer_bytes_min = stride * coded_height * 3 / 2;
     // At least for now, don't cap the per-packet buffer size for output.  The
     // HW only cares about the portion we set up for output anyway, and the
     // client has no way to force output to occur into portions of the output
@@ -402,8 +408,8 @@ CodecAdapterVp9::CoreCodecGetBufferCollectionConstraints2(
     // larger range of dimensions that includes the required range indicated
     // here (via a-priori knowledge of the potential stream dimensions), an
     // initiator is free to do so.
-    image_constraints.required_min_size() = {coded_width_, coded_height_};
-    image_constraints.required_max_size() = {coded_width_, coded_height_};
+    image_constraints.required_min_size() = {coded_width, coded_height};
+    image_constraints.required_max_size() = {coded_width, coded_height};
 
     // Sysmem2 doesn't have required_min_bytes_per_row or
     // required_max_bytes_per_row (at least for now). If those later prove to be
@@ -422,7 +428,7 @@ CodecAdapterVp9::CoreCodecGetBufferCollectionConstraints2(
   // We don't have to fill out usage - CodecImpl takes care of that.
   ZX_DEBUG_ASSERT(!result.usage().has_value());
 
-  return result;
+  return CoreCodecGetBufferCollectionConstraints3Result{.constraints = std::move(result)};
 }
 
 void CodecAdapterVp9::CoreCodecSetBufferCollectionInfo(
@@ -474,7 +480,7 @@ void CodecAdapterVp9::OnFrameReady(std::shared_ptr<VideoFrame> frame) {
   ZX_DEBUG_ASSERT(total_size_bytes <= buffer->size());
 
   if (total_size_bytes > std::numeric_limits<uint32_t>::max()) {
-    OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+    OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
     return;
   }
 
@@ -514,7 +520,7 @@ void CodecAdapterVp9::OnFrameReady(std::shared_ptr<VideoFrame> frame) {
 
 void CodecAdapterVp9::OnError() {
   LOG(ERROR, "CodecAdapterVp9::OnError()");
-  OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+  OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
 }
 
 void CodecAdapterVp9::OnEos() { OnCoreCodecEos(); }
@@ -586,11 +592,11 @@ void CodecAdapterVp9::CoreCodecStartStream() {
 }
 
 void CodecAdapterVp9::CoreCodecQueueInputFormatDetails(
-    const fuchsia::media::FormatDetails& per_stream_override_format_details) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details) {
   // TODO(dustingreen): Consider letting the client specify profile/level info
   // in the FormatDetails at least optionally, and possibly sizing input
   // buffer constraints and/or other buffers based on that.
-  QueueInputItem(CodecInputItem::FormatDetails(per_stream_override_format_details));
+  QueueInputItem(CodecInputItem::FormatDetails(std::move(per_stream_override_format_details)));
 }
 
 void CodecAdapterVp9::CoreCodecQueueInputPacket(const CodecPacket* packet) {
@@ -717,7 +723,7 @@ void CodecAdapterVp9::CoreCodecResetStreamAfterCurrentFrame() {
 
   if (is_input_end_of_stream_queued_to_core_) {
     // We don't handle this corner case of a corner case.  Fail the stream instead.
-    events_->onCoreCodecFailStream(fuchsia::media::StreamError::EOS_PROCESSING);
+    events_->onCoreCodecFailStream(fuchsia_media::StreamError::kEosProcessing);
     return;
   }
 
@@ -824,55 +830,32 @@ void CodecAdapterVp9::CoreCodecEnsureBuffersNotConfigured(CodecPort port) {
   buffer_settings_[port] = std::nullopt;
 }
 
-std::unique_ptr<const fuchsia::media::StreamOutputConstraints>
-CodecAdapterVp9::CoreCodecBuildNewOutputConstraints(
-    uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-    bool buffer_constraints_action_required) {
+fuchsia_media::StreamOutputFormat CodecAdapterVp9::CoreCodecGetOutputFormat2(
+    uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
   // bear.vp9 decodes into 320x192 YUV buffers, but the video display
   // dimensions are 320x180.  A the bottom of the buffer only .25 of the last
   // 16 height macroblock row is meant to be displayed.
   //
   // This decoder produces NV12.
+  fuchsia_media::StreamOutputFormat result;
+  result.stream_lifetime_ordinal(stream_lifetime_ordinal);
+  auto& format_details = result.format_details().emplace();
+  format_details.format_details_version_ordinal(new_output_format_details_version_ordinal);
+  format_details.mime_type("video/raw");
 
-  auto config = std::make_unique<fuchsia::media::StreamOutputConstraints>();
-
-  config->set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-
-  auto* constraints = config->mutable_buffer_constraints();
-
-  // For the moment, there will be only one StreamOutputConstraints, and it'll
-  // need output buffers configured for it.
-  ZX_DEBUG_ASSERT(buffer_constraints_action_required);
-  config->set_buffer_constraints_action_required(buffer_constraints_action_required);
-  constraints->set_buffer_constraints_version_ordinal(
-      new_output_buffer_constraints_version_ordinal);
-
-  return config;
-}
-
-fuchsia::media::StreamOutputFormat CodecAdapterVp9::CoreCodecGetOutputFormat(
-    uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
-  fuchsia::media::StreamOutputFormat result;
-  result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-  result.mutable_format_details()->set_format_details_version_ordinal(
-      new_output_format_details_version_ordinal);
-  result.mutable_format_details()->set_mime_type("video/raw");
-
-  fuchsia::images2::ImageFormat image_format;
-  image_format.set_pixel_format(fuchsia::images2::PixelFormat::NV12);
-  image_format.set_size(
-      fuchsia::math::SizeU{.width = output_coded_width_, .height = output_coded_height_});
+  fuchsia_images2::ImageFormat image_format;
+  image_format.pixel_format(fuchsia_images2::PixelFormat::kNv12);
+  image_format.size(fuchsia_math::SizeU(output_coded_width_, output_coded_height_));
   DLOG("vp9 coded_width: %u coded_height: %u", output_coded_width_, output_coded_height_);
-  image_format.set_bytes_per_row(output_stride_);
-  image_format.set_display_rect(fuchsia::math::RectU{
-      .x = 0, .y = 0, .width = output_display_width_, .height = output_display_height_});
-  image_format.set_color_space(fuchsia::images2::ColorSpace::REC709);
+  image_format.bytes_per_row(output_stride_);
+  image_format.display_rect(
+      fuchsia_math::RectU(0, 0, output_display_width_, output_display_height_));
+  image_format.color_space(fuchsia_images2::ColorSpace::kRec709);
   if (kHasSar) {
-    image_format.set_pixel_aspect_ratio(
-        fuchsia::math::SizeU{.width = kSarWidth, .height = kSarHeight});
+    image_format.pixel_aspect_ratio(fuchsia_math::SizeU(kSarWidth, kSarHeight));
   }
 
-  result.mutable_format_details()->set_image_format(std::move(image_format));
+  format_details.image_format(std::move(image_format));
 
   return result;
 }
@@ -1063,14 +1046,14 @@ void CodecAdapterVp9::SubmitDataToStreamBuffer(zx_paddr_t paddr_base, uint32_t p
                                   IsPortSecure(kInputPort));
     if (status != ZX_OK) {
       LOG(ERROR, "video_->SetProtected(kParser) failed - status: %d", status);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     // Pass nullptr because we'll handle syncing updates manually.
     status = video_->parser()->InitializeEsParser(nullptr);
     if (status != ZX_OK) {
       DECODE_ERROR("InitializeEsParser failed - status: %d", status);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     uint32_t size = paddr_size ? paddr_size : vaddr_size;
@@ -1081,7 +1064,7 @@ void CodecAdapterVp9::SubmitDataToStreamBuffer(zx_paddr_t paddr_base, uint32_t p
       // kVp9InputBufferEmpty to continue copying the remainder.
       DECODE_ERROR("Empty space in stream buffer %d too small for video data (%lu)",
                    video_->GetStreamBufferEmptySpace(), size + sizeof(kFlushThroughZeroes));
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     video_->parser()->SyncFromDecoderInstance(video_->current_instance());
@@ -1093,27 +1076,27 @@ void CodecAdapterVp9::SubmitDataToStreamBuffer(zx_paddr_t paddr_base, uint32_t p
     }
     if (status != ZX_OK) {
       DECODE_ERROR("Parsing video failed - status: %d", status);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     status = video_->parser()->WaitForParsingCompleted(ZX_SEC(10));
     if (status != ZX_OK) {
       DECODE_ERROR("Parsing video timed out - status: %d", status);
       video_->parser()->CancelParsing();
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     status = video_->parser()->ParseVideo(kFlushThroughZeroes, sizeof(kFlushThroughZeroes));
     if (status != ZX_OK) {
       DECODE_ERROR("Parsing flush-through zeros failed - status: %d", status);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     status = video_->parser()->WaitForParsingCompleted(ZX_SEC(10));
     if (status != ZX_OK) {
       DECODE_ERROR("Parsing flush-through zeros timed out - status: %d", status);
       video_->parser()->CancelParsing();
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
 
@@ -1123,13 +1106,13 @@ void CodecAdapterVp9::SubmitDataToStreamBuffer(zx_paddr_t paddr_base, uint32_t p
     status = video_->ProcessVideoNoParser(vaddr_base, vaddr_size);
     if (status != ZX_OK) {
       LOG(ERROR, "video_->ProcessVideoNoParser() (data) failed - status: %d", status);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
     status = video_->ProcessVideoNoParser(kFlushThroughZeroes, sizeof(kFlushThroughZeroes));
     if (status != ZX_OK) {
       LOG(ERROR, "video_->ProcessVideoNoParser() (zeroes) failed - status: %d", status);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
   }
@@ -1199,7 +1182,7 @@ void CodecAdapterVp9::ReadMoreInputData(Vp9Decoder* decoder) {
     if (item.is_format_details()) {
       // TODO(dustingreen): Be more strict about what the input format actually
       // is, and less strict about it matching the initial format.
-      ZX_ASSERT(fidl::Equals(item.format_details(), initial_input_format_details_));
+      ZX_ASSERT(item.format_details2() == *initial_input_format_details_);
       continue;
     }
 
@@ -1254,7 +1237,7 @@ void CodecAdapterVp9::ReadMoreInputData(Vp9Decoder* decoder) {
           paddr_base, len, static_cast<uint32_t>(max_after_size), &after_repack_len);
       if (status != ZX_OK) {
         LOG(ERROR, "TeeVp9AddHeaders() failed - status: %d", status);
-        OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+        OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
         return;
       }
 
@@ -1291,7 +1274,7 @@ void CodecAdapterVp9::ReadMoreInputData(Vp9Decoder* decoder) {
         uint8_t* vp9_frame_header = vaddr_base + kVp9AmlvHeaderSize;
         if (vp9_frame_header >= vaddr_base + vaddr_size) {
           LOG(ERROR, "frame_type parsing failed");
-          OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_DATA_PARSING);
+          OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderDataParsing);
           return;
         }
         auto is_key_frame_result = IsVp9KeyFrame(*vp9_frame_header);
@@ -1339,7 +1322,7 @@ void CodecAdapterVp9::ReadMoreInputData(Vp9Decoder* decoder) {
     uint32_t increased_size = after_repack_len - len;
     if ((after_repack_len < len) || (increased_size % 16 != 0) || (increased_size < 16)) {
       LOG(ERROR, "Repack gave bad size 0x%x from 0x%x", after_repack_len, len);
-      OnCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      OnCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return;
     }
 
@@ -1610,7 +1593,7 @@ void CodecAdapterVp9::OnCoreCodecEos() {
   events_->onCoreCodecOutputEndOfStream(false);
 }
 
-void CodecAdapterVp9::OnCoreCodecFailStream(fuchsia::media::StreamError error) {
+void CodecAdapterVp9::OnCoreCodecFailStream(fuchsia_media::StreamError error) {
   {  // scope lock
     std::lock_guard<std::mutex> lock(lock_);
     is_stream_failed_ = true;
@@ -1630,12 +1613,12 @@ CodecPacket* CodecAdapterVp9::GetFreePacket(const CodecBuffer* buffer) {
 
 bool CodecAdapterVp9::IsPortSecureRequired(CodecPort port) {
   ZX_DEBUG_ASSERT(secure_memory_mode_set_[port]);
-  return secure_memory_mode_[port] == fuchsia::mediacodec::SecureMemoryMode::ON;
+  return secure_memory_mode_[port] == fuchsia_mediacodec::SecureMemoryMode::kOn;
 }
 
 bool CodecAdapterVp9::IsPortSecurePermitted(CodecPort port) {
   ZX_DEBUG_ASSERT(secure_memory_mode_set_[port]);
-  return secure_memory_mode_[port] != fuchsia::mediacodec::SecureMemoryMode::OFF;
+  return secure_memory_mode_[port] != fuchsia_mediacodec::SecureMemoryMode::kOff;
 }
 
 bool CodecAdapterVp9::IsPortSecure(CodecPort port) {

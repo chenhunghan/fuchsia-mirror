@@ -8,10 +8,7 @@ use super::dispatcher::Dispatcher;
 use super::exception_dispatcher::ExceptionDispatcher;
 use super::job_dispatcher::JobDispatcher;
 use super::thread_dispatcher::{AutoBlocked, Blocked, ThreadDispatcher};
-use crate::arch_rs::{
-    ArchExceptionContext, arch_dump_exception_context, arch_exception_context_user_synth_code,
-    arch_exception_context_user_synth_data,
-};
+use crate::arch_rs::{ArchExceptionContext, arch_dump_exception_context};
 use crate::kernel::thread::with_exception_context;
 use core::ptr::NonNull;
 use debug::ltracef;
@@ -94,7 +91,14 @@ impl<'a> ExceptionHandlerIterator<'a> {
     /// `false` if there are no more to try (retaining the last non-`NEXT` delivery error in
     /// `result` if sending to a valid channel failed). Do not call this function again after it
     /// returns `false`.
-    fn next(&mut self, result: &mut Result<(), Status>) -> bool {
+    ///
+    /// # Safety
+    ///
+    /// * `self.thread` must be the current user thread, stopped inside [`with_exception_context`]
+    ///   with saved user state (and any non-null `suspended_general_regs` frame valid, writable,
+    ///   and unaliased for the duration of the call).
+    /// * No thread lock, dispatcher lock, spinlock, or active `ChainLockTransaction` may be held.
+    unsafe fn next(&mut self, result: &mut Result<(), Status>) -> bool {
         loop {
             let sent;
 
@@ -116,24 +120,25 @@ impl<'a> ExceptionHandlerIterator<'a> {
                         &self.exception,
                     );
                     self.next_method = ExceptionDeliveryMethod::JobChannel;
-                    self.next_job = Some(self.thread.process().job());
+                    self.next_job = Some(self.thread.process().job().clone());
                 }
                 ExceptionDeliveryMethod::RestrictedModeVectoredException => {
-                    let rs_ptr = crate::kernel::thread::current_restricted_state();
-                    let mut rs_ptr = NonNull::new(rs_ptr)
+                    // SAFETY: Exception delivery runs on an initialized user thread.
+                    let rs_ptr = unsafe { crate::kernel::thread::current_restricted_state() };
+                    let rs_ptr = NonNull::new(rs_ptr)
                         .expect("restricted exception without bound RestrictedState");
-                    // SAFETY: `rs_ptr` is owned exclusively by the current thread.
-                    let rs = unsafe { rs_ptr.as_mut() };
 
                     let report =
                         self.exception.fill_report().expect("failed to fill exception report");
                     // SAFETY: `has_restricted_in_thread_handler()` verified that the current user
-                    // thread is in restricted mode, `rs` is its bound `RestrictedState`, and
-                    // `dispatch_user_exception` installed the thread's exception context for the
-                    // duration of `exception_handler_worker`.
+                    // thread is in restricted mode, `rs_ptr` is its bound `RestrictedState` with
+                    // exclusive access, and caller guarantees the current thread is stopped inside
+                    // `with_exception_context` with saved user state and no thread lock, spinlock,
+                    // or active `ChainLockTransaction` held (`handle_exception` releases all locks
+                    // before returning).
                     unsafe {
                         crate::kernel::restricted::redirect_restricted_exception_to_normal_mode(
-                            rs, &report,
+                            rs_ptr, &report,
                         );
                     }
 
@@ -161,7 +166,7 @@ impl<'a> ExceptionHandlerIterator<'a> {
                         self.next_method = ExceptionDeliveryMethod::SecondChanceDebugChannel;
                     } else {
                         self.next_method = ExceptionDeliveryMethod::JobChannel;
-                        self.next_job = Some(self.thread.process().job());
+                        self.next_job = Some(self.thread.process().job().clone());
                     }
                 }
                 ExceptionDeliveryMethod::JobChannel => {
@@ -171,7 +176,7 @@ impl<'a> ExceptionHandlerIterator<'a> {
                     };
                     (*result, sent) =
                         self.thread.handle_exception(job.exceptionate(), &self.exception);
-                    self.next_job = job.parent();
+                    self.next_job = job.parent().cloned();
                 }
             }
 
@@ -196,23 +201,31 @@ impl<'a> ExceptionHandlerIterator<'a> {
 ///
 /// # Safety
 ///
-/// `context` must point to a valid, initialized `arch_exception_context_t` for the current thread.
+/// The caller must ensure that:
+/// * `thread` is the current user thread, stopped inside [`with_exception_context`] for `context`.
+/// * If `context.frame` is non-null, it points to a valid, aligned, initialized, writable `Iframe`
+///   that outlives this call without conflicting Rust references.
+/// * Interrupts are enabled, blocking is permitted, and no spinlocks, thread lock, dispatcher
+///   locks, lockdep-tracked locks, or active `ChainLockTransaction` are held.
 unsafe fn exception_handler_worker(
     exception_type: u32,
-    context: *const ArchExceptionContext,
+    context: &ArchExceptionContext,
     thread: &ThreadDispatcher,
 ) -> (Result<(), Status>, bool) {
-    debug_assert!(!context.is_null());
-
     let mut processed = false;
 
-    // SAFETY: Caller guarantees `context` points to a valid `arch_exception_context_t`.
+    // SAFETY: Discharged by this function's `# Safety` contract for `context.frame`.
     let report = unsafe { ExceptionDispatcher::build_arch_report(exception_type, context) };
 
     // SAFETY: `report` and `context` outlive `_exception_cleaner` below, which calls
     // `exception.clear()` on all exit paths before `report` goes out of scope.
     let Some(exception) = (unsafe {
-        ExceptionDispatcher::create(RefPtr::from_ref(thread), exception_type, &report, context)
+        ExceptionDispatcher::create(
+            RefPtr::from_ref(thread),
+            exception_type,
+            &report,
+            core::ptr::from_ref(context),
+        )
     }) else {
         core::hint::cold_path();
         // No memory to create the exception, we just have to drop it which
@@ -237,7 +250,10 @@ unsafe fn exception_handler_worker(
 
     let mut iter = ExceptionHandlerIterator::new(thread, exception.clone());
     let mut result: Result<(), Status> = Err(Status::NEXT);
-    while iter.next(&mut result) {
+    // SAFETY: Caller guarantees `thread` (`iter.thread`) is the current user thread stopped inside
+    // `with_exception_context` with saved user state and no thread lock, dispatcher lock, spinlock,
+    // or active `ChainLockTransaction` held (preserved across each `iter.next` iteration).
+    while unsafe { iter.next(&mut result) } {
         ltracef!("handler returned {}\n", Status::result_into_raw(result));
 
         // ZX_ERR_NEXT means the handler wants to pass it up to the next in the
@@ -249,6 +265,7 @@ unsafe fn exception_handler_worker(
 
         // ZX_ERR_STOP means the handler wants to kill the thread.
         if result == Err(Status::STOP) {
+            core::hint::cold_path();
             processed = true;
             debug_assert!(thread.is_current());
             ThreadDispatcher::kill_current();
@@ -304,13 +321,12 @@ fn c_str_bytes(buf: &[u8; ZX_MAX_NAME_LEN]) -> &[u8] {
 ///
 /// # Safety
 ///
-/// `arch_context` must point to a valid, initialized `arch_exception_context_t` for the current
-/// thread.
+/// The caller must ensure all preconditions of [`arch_dump_exception_context`] for `arch_context`.
 unsafe fn dump_exception_context(
     exception_type: u32,
     thread: &ThreadDispatcher,
     pname: &[u8; ZX_MAX_NAME_LEN],
-    arch_context: *const ArchExceptionContext,
+    arch_context: &ArchExceptionContext,
 ) {
     let tname = get_task_name(thread);
     kprintln!(
@@ -320,7 +336,7 @@ unsafe fn dump_exception_context(
         thread.get_koid(),
         c_str_bytes(pname),
     );
-    // SAFETY: Caller guarantees `arch_context` points to a valid `arch_exception_context_t`.
+    // SAFETY: Discharged by this function's `# Safety` contract.
     unsafe {
         arch_dump_exception_context(arch_context);
     }
@@ -339,16 +355,22 @@ unsafe fn dump_exception_context(
 ///
 /// # Safety
 ///
-/// * `arch_context` must point to a valid, initialized `arch_exception_context_t` for the current
-///   thread that outlives this call.
-/// * If `(*arch_context).frame` is non-null, it must point to a valid, initialized, writable
-///   `iframe_t` that outlives this call without conflicting Rust references (since
-///   [`with_exception_context`] exposes it to debugger reads and writes).
-/// * No thread lock, dispatcher lock, spinlock, or active `ChainLockTransaction` may be held.
+/// The caller must ensure that:
+/// * The calling CPU is executing at kernel privilege level (`CPL == 0` with `RFLAGS.DF == 0` on
+///   x86-64, `EL1` on ARM64, `S-mode` on RISC-V) with its per-CPU state initialized and
+///   `ConstructFirstThread` completed (`THREAD_RUNNING` current thread whose `KernelStack` metadata
+///   is not concurrently modified), interrupts enabled, and blocking permitted.
+/// * `arch_context` describes the current thread, and if `arch_context.frame` is non-null, it
+///   points to a valid, aligned, initialized, writable `Iframe` that outlives this call without
+///   conflicting Rust references (since [`with_exception_context`] exposes it to debugger reads and
+///   writes, and on x86-64 if it is a kernel-mode frame within the current thread's kernel stack,
+///   `[frame, min(frame + 256, stack_top))` is mapped).
+/// * No thread lock, dispatcher lock, spinlock, lockdep-tracked lock, or active
+///   `ChainLockTransaction` is held.
 // TODO(dje): Support unwinding from this exception and introducing a different exception?
 pub unsafe fn dispatch_user_exception(
     exception_type: u32,
-    arch_context: *const ArchExceptionContext,
+    arch_context: &ArchExceptionContext,
 ) -> Result<(), Status> {
     ltracef!("type {}, context {:p}\n", exception_type, arch_context);
 
@@ -365,9 +387,11 @@ pub unsafe fn dispatch_user_exception(
     // its user register state available to debuggers and exception handlers while the thread is
     // "in exception".
     // SAFETY: `thread` was obtained from `ThreadDispatcher::try_get_current()` above so the
-    // current thread is a user thread, and the caller guarantees `arch_context` (and any non-null
-    // `(*arch_context).frame`) is valid for the current thread without conflicting references and
-    // that no thread lock, dispatcher lock, spinlock, or active `ChainLockTransaction` is held.
+    // current thread is a user thread, the caller guarantees `arch_context` (and any non-null
+    // `arch_context.frame`) is valid for the current thread without conflicting references and that
+    // no thread lock, dispatcher lock, spinlock, or active `ChainLockTransaction` is held, and
+    // `with_exception_context` saves user state and releases the thread lock before invoking
+    // `exception_handler_worker`.
     let (result, processed) = unsafe {
         with_exception_context(arch_context, || {
             exception_handler_worker(exception_type, arch_context, &thread)
@@ -422,22 +446,14 @@ pub unsafe fn dispatch_user_exception(
 
     // Either the current thread or its whole process was killed, we can now stop
     // it from running.
-    ThreadDispatcher::exit_current();
+    // SAFETY: Discharged by `dispatch_user_exception`'s `# Safety` contract (running user thread
+    // after `ConstructFirstThread` with interrupts enabled, blocking permitted, and no locks or
+    // `ChainLockTransaction` held).
+    unsafe { ThreadDispatcher::exit_current() };
 }
 
 /// Prints the common architecture-independent fields in `arch_exception_context`.
-///
-/// # Safety
-///
-/// `context` must point to a valid, initialized `arch_exception_context_t`.
-pub unsafe fn dump_common_exception_context(context: *const ArchExceptionContext) {
-    // SAFETY: Caller guarantees `context` points to a valid `arch_exception_context_t`.
-    let (synth_code, synth_data) = unsafe {
-        (
-            arch_exception_context_user_synth_code(context),
-            arch_exception_context_user_synth_data(context),
-        )
-    };
+pub fn dump_common_exception_context(context: &ArchExceptionContext) {
     // Print the common fields in arch_exception_context.
     //
     // In case of a page fault exception, the error code is typecast from zx_status_t to uint32_t
@@ -445,8 +461,8 @@ pub unsafe fn dump_common_exception_context(context: *const ArchExceptionContext
     // debugging easier.
     kprintln!(
         "synth_code {:u} ({}), synth_data {:u}",
-        synth_code,
-        synth_code as zx_status_t,
-        synth_data,
+        context.user_synth_code,
+        context.user_synth_code as zx_status_t,
+        context.user_synth_data,
     );
 }

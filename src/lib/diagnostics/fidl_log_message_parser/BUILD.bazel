@@ -1,0 +1,67 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Uses Zircon VMO/stream types (<lib/zx/...>) and Fuchsia FIDL C++ bindings.
+fx_cc_library(
+    name = "fidl_log_message_parser",
+    srcs = ["log_message.cc"],
+    hdrs = ["log_message.h"],
+    # TODO(https://fxbug.dev/570694755): log_message.h uses angled
+    # workspace-root `#include <src/...>`, which GN resolves via root `-I.`
+    # while Bazel only adds `-iquote .`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    implementation_deps = ["//zircon/system/ulib/zx"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/developer/debug/debug_agent:__pkg__",
+        "//src/developer/forensics/feedback_data:__subpackages__",
+        "//src/lib/diagnostics:__subpackages__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/async",
+        "//sdk/lib/fit",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:log_decoder_api",
+    ],
+    alwayslink = True,
+)
+
+# Uses Zircon VMO/time types (<lib/zx/...>) and Fuchsia FIDL C++ bindings.
+fx_cc_library(
+    name = "test_support",
+    testonly = True,
+    srcs = ["test_support.cc"],
+    hdrs = ["test_support.h"],
+    # TODO(https://fxbug.dev/570694755): test_support.cc includes log_message.h
+    # which uses angled workspace-root `#include <src/...>`, resolved via `-I.`
+    # in GN while Bazel only adds `-iquote .`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    implementation_deps = [
+        ":fidl_log_message_parser",
+        "//src/lib/fsl",
+        "//third_party/rapidjson",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/developer/forensics/testing/stubs:__pkg__",
+        "//src/lib/diagnostics/fidl_log_message_parser/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics:fuchsia.diagnostics_cpp",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/fit-promise",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)

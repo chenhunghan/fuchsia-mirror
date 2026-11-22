@@ -5,14 +5,15 @@
 use anyhow::{Error, format_err};
 use fidl::prelude::*;
 use fidl_fuchsia_hardware_audio::*;
+use fidl_fuchsia_media as media;
+use fuchsia_async as fasync;
 use futures::StreamExt;
 use futures::future::MaybeDone;
 use log::info;
 use std::sync::Arc;
-use {fidl_fuchsia_media as media, fuchsia_async as fasync};
 
 use crate::DigitalAudioInterface;
-use crate::driver::{ensure_dai_format_is_supported, ensure_pcm_format_is_supported};
+use crate::driver::{dai_format_supporting_pcm_format, ensure_pcm_format_is_supported};
 
 pub struct DaiAudioDevice {
     /// Shared reference to the DigitalAudioInterface this device will run on.
@@ -49,8 +50,8 @@ impl DaiAudioDevice {
         })
     }
 
-    pub fn config(&mut self, dai_format: DaiFormat, pcm_format: PcmFormat) -> Result<(), Error> {
-        ensure_dai_format_is_supported(&self.dai_formats[..], &dai_format)?;
+    pub fn config(&mut self, pcm_format: PcmFormat) -> Result<(), Error> {
+        let dai_format = dai_format_supporting_pcm_format(&self.dai_formats, &pcm_format)?;
         ensure_pcm_format_is_supported(&self.pcm_formats[..], &pcm_format)?;
         self.configured_formats = Some((dai_format, pcm_format));
         Ok(())
@@ -216,19 +217,6 @@ mod tests {
     use super::*;
     use crate::test::test_digital_audio_interface;
 
-    const SUPPORTED_DAI_FORMAT: DaiFormat = DaiFormat {
-        number_of_channels: 1,
-        channels_to_use_bitmask: 1,
-        sample_format: DaiSampleFormat::PcmSigned,
-        frame_format: DaiFrameFormat::FrameFormatStandard(DaiFrameFormatStandard::Tdm1),
-        frame_rate: 16000,
-        bits_per_slot: 16,
-        bits_per_sample: 16,
-    };
-
-    const UNSUPPORTED_DAI_FORMAT: DaiFormat =
-        DaiFormat { number_of_channels: 4, ..SUPPORTED_DAI_FORMAT };
-
     const SUPPORTED_PCM_FORMAT: PcmFormat = PcmFormat {
         number_of_channels: 1,
         sample_format: SampleFormat::PcmSigned,
@@ -253,17 +241,14 @@ mod tests {
     #[fixture(fix_audio_device)]
     #[fuchsia::test]
     async fn configure_format_is_supported(mut dai: DaiAudioDevice) {
-        let result = dai.config(UNSUPPORTED_DAI_FORMAT, SUPPORTED_PCM_FORMAT);
-        assert!(result.is_err());
-
-        let result = dai.config(SUPPORTED_DAI_FORMAT, UNSUPPORTED_PCM_FORMAT);
-        assert!(result.is_err());
-
-        let result = dai.config(SUPPORTED_DAI_FORMAT, SUPPORTED_PCM_FORMAT);
+        let result = dai.config(SUPPORTED_PCM_FORMAT);
         assert!(result.is_ok());
 
-        // Can reconfigure.
-        let result = dai.config(SUPPORTED_DAI_FORMAT, SUPPORTED_PCM_FORMAT);
+        let result = dai.config(UNSUPPORTED_PCM_FORMAT);
+        assert!(result.is_err());
+
+        // Can reconfigure if there was an error.
+        let result = dai.config(SUPPORTED_PCM_FORMAT);
         assert!(result.is_ok());
     }
 
@@ -277,7 +262,7 @@ mod tests {
         let (proxy, mut requests) =
             fidl::endpoints::create_proxy_and_stream::<AudioDeviceEnumeratorMarker>();
 
-        let _ = dai.config(SUPPORTED_DAI_FORMAT, SUPPORTED_PCM_FORMAT).unwrap();
+        let _ = dai.config(SUPPORTED_PCM_FORMAT).unwrap();
 
         let _ = dai
             .start(proxy, TEST_DEVICE_NAME, TEST_DEVICE_ID.clone(), TEST_MANUFACTURER, TEST_PRODUCT)

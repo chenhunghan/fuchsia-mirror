@@ -74,9 +74,9 @@ then opened to tq-eng for general discussion before RFC._
 This change involves changes to the bootfs and /boot directory, to the
 BootResolver, to the BootUrl, and to product assembly.
 
-### <a id="bootfs_changes" /> bootfs Changes
+### bootfs changes {:#bootfs-changes}
 
-#### Image Changes
+#### Image changes
 
 A fuchsia bootfs package will be represented by a meta.far file in bootfs, which
 the bootfs directory entry will name `blob/<merkle root of meta.far>`. Every
@@ -116,7 +116,7 @@ Everything else amounts just to a new directory entry for a bootfs file that was
 already present. The bootfs will, conservatively, increase by ~70KiB compressed
 on x64 architecture.
 
-#### /boot Changes
+#### /boot changes
 
 A new subdirectory will be introduced to /boot, called /blob. All files in the
 bootfs image whose names are prefixed with /blob will be placed there. When
@@ -129,7 +129,7 @@ that is "laid out" as all its dependencies expect. Eventually, we aim to
 converge even component manager into a meta.far encoding that relies on the
 SWD stack for resolution.
 
-### BootResolver Changes
+### BootResolver changes
 
 The core work for package-namespacing bootfs components *heavily* overlaps with
 the work done by package-resolver. A human-readable package name must be mapped
@@ -167,14 +167,14 @@ gracefully when sitting on the bootfs (namely those that require mutability; eg
 open_blob_for_write, delete_blob), however no mutability is required during the
 package_directory::serve execution.
 
-### BootUrl Changes
+### BootUrl changes
 
 BootUrl currently does not use the host or path sections of its url, as there is
 no repository nor packaging to encode. This means that, rather than introduce a
 new url scheme and resolver, we can instead introduce the new component loading
 in the existing BootResolver with the existing fuchsia-boot scheme. The presence
 or absence of a package-path in the url will become the indicator that the new
-resolution pathway described in "BootResolver Changes" should be used.
+resolution pathway described in "BootResolver changes" should be used.
 
 Examples:
 
@@ -187,7 +187,7 @@ this URL as a packaged component, for which a mapping from "my_package" to the
 merkle root of the meta.far for my_package exists and should be used to
 construct a namespace specific to "my_package"'s namespace.
 
-### Product/Image Assembly Changes
+### Product/image assembly changes
 
 Bootfs image construction is accomplished by a 2-phase execution of work done
 by the build system and then the image assembly system.
@@ -217,7 +217,7 @@ While iterating over these blob objects, we will check to see which of the blobs
 is the identifier for the package meta.far and will add a mapping from the
 package name to the meta.far's merkle root to a map. At the end of bootfs image
 creation, the map will be written in json format to the "pkg_map" file described
-in the [bootfs Changes](#bootfs_changes) section above.
+in the [bootfs changes](#bootfs-changes) section above.
 
 We choose to implement this transformation at the Image Assembly level for three
 reasons:
@@ -232,7 +232,7 @@ operate on "packages".
 
 ## Implementation
 
-### <a id="feature_impl" /> Feature Implementation
+### Feature implementation {:#feature-impl}
 
 Image assembly changes, bootfs changes, BootResolver changes,
 and BootUrl changes can all be done at the same time.
@@ -268,14 +268,14 @@ incrementally. Migration for a given component is as follows;
 
 ## Performance
 
-### System Size
+### System size
 The bootfs image will, conservatively, increase by ~70KiB compressed
 on x64 architecture. This is because once all components are migrated to
 packages, the bootfs size will grow by the newly added meta.fars and
 the new pkg_map file. Everything else amounts just to a renaming of
 a directory entry for a bootfs file that was prior to packagification.
 
-### Runtime Implications
+### Runtime implications
 Today, the entire bootfs is parsed into a directory eagerly at component_manager
 startup. After migration, we end up deferring the parsing work equivalent to the
 set up of acomponent's namespace within /boot until that component is started.
@@ -294,13 +294,13 @@ wrong. The presence of blobs in bootfs means that, if we want to, we can
 protect ourselves from this case by doing runtime verification of the bootfs
 blobs. We do not plan to do this initially.
 
-### Buildtime Implications
+### Buildtime implications
 The buildtime performance for zbi construction is unchanged; after migration
 rather than walking the destination-entry manifests for every dep included
 in bootfs, we instead walk the package manifests to encode the blobs. In
 practice, we walk the exact same number of artifacts.
 
-## Backwards Compatibility
+## Backwards compatibility
 
 Many changes involved in this proposal are self-contained within the bootfs.
 There is no smaller granularity for updating units of execution within the
@@ -316,7 +316,7 @@ errors. Given how product assembly constructs the bootfs, however, there is
 no way for this state to arise today.
 
 Similarly, the changes to the semantics of the BootUrl described in [Feature
-Implementation](#feature_impl) will not diverge from the feature
+implementation](#feature-impl) will not diverge from the feature
 implementation or migrations because it too is contained within the bootfs.
 
 ## Security considerations
@@ -397,7 +397,7 @@ label and into the new label. Eventually, we will need to merge these lists
 and if drivers have not yet been migrated to proper components, we will
 need to revist the complexity of the fuchsia-driver-package template.
 
-### Implement in the Product- or Image-Assembly Operation
+### Implement in the product- or image-assembly operation
 
 *   Should the parsing of package manifests for bootfs components be done at the
     product assembly or image assembly level? In other words, should we defer

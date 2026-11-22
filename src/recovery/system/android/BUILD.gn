@@ -30,6 +30,7 @@ bin_base = {
     "//src/recovery/lib/bootloader-message",
     "//src/recovery/lib/recovery-ui",
     "//src/recovery/system:recovery_android_config",
+    "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
     "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
     "//src/storage/lib/block_client/rust",
     "//src/storage/lib/vfs/rust:vfs",

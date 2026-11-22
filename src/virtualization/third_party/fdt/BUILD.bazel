@@ -1,0 +1,59 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(warnings)
+# build_flags() definitions are hand-ported rather than synced by bazel2gn.
+# @bazel2gn:skip
+build_flags(
+    name = "warnings",
+    cflags = ["-Wno-sign-compare"],
+)
+# LINT.ThenChange(BUILD.gn:warnings)
+
+fx_cc_library(
+    name = "fdt",
+    srcs = [
+        "fdt.c",
+        "fdt_addresses.c",
+        "fdt_empty_tree.c",
+        "fdt_overlay.c",
+        "fdt_ro.c",
+        "fdt_rw.c",
+        "fdt_strerror.c",
+        "fdt_sw.c",
+        "fdt_wip.c",
+        "libfdt_internal.h",
+    ],
+    hdrs = [
+        "fdt.h",
+        "libfdt.h",
+        "libfdt_env.h",
+    ],
+    build_flags = [":warnings"],
+    # GN uses //build/config:Wno-conversion and //build/config:Wno-extra-semi
+    # (not yet migrated to Bazel build_flags); Bazel passes the flags directly
+    # via copts.
+    copts = [
+        "-Wno-conversion",
+        "-Wno-extra-semi",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/config:Wno-conversion", "//build/config:Wno-extra-semi" ]
+    includes = ["."],
+    # For bazel2gn conversion only.
+    public_configs = [":fdt_config"],
+    # In GN, fdt is not wrapped in if (is_fuchsia) because it is only
+    # depended on by Fuchsia-only targets; Bazel builds //...:all on host,
+    # where fdt_ro.c's unguarded strnlen() call fails under -std=c11.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/virtualization/bin/vmm:__pkg__",
+        "//src/virtualization/third_party:__pkg__",
+    ],
+    alwayslink = True,
+)

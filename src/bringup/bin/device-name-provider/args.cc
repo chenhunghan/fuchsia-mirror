@@ -50,8 +50,6 @@ int ParseArgs(int argc, char** argv, const device_name_provider_config::Config& 
     return err;
   }
 
-  out->devdir = kDefaultDevdir;
-
   while (argc > 1) {
     if (!strcmp(argv[1], "--nodename")) {
       if (argc < 3) {
@@ -61,17 +59,7 @@ int ParseArgs(int argc, char** argv, const device_name_provider_config::Config& 
       out->nodename = argv[2];
       argv++;
       argc--;
-    }
-    if (!strcmp(argv[1], "--devdir")) {
-      if (argc < 3) {
-        *error = "netsvc: missing argument to --devdir";
-        return -1;
-      }
-      out->devdir = argv[2];
-      argv++;
-      argc--;
-    }
-    if (!strcmp(argv[1], "--namegen")) {
+    } else if (!strcmp(argv[1], "--namegen")) {
       if (argc < 3) {
         *error = "netsvc: missing argument to --namegen";
         return -1;

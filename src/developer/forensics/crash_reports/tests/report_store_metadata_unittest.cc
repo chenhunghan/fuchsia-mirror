@@ -205,7 +205,7 @@ TEST_F(ReportStoreMetadataTest, AddAndDelete) {
 }
 
 TEST_F(ReportStoreMetadataTest, RecreateFromFilesystem_FailsInitially) {
-  testing::ScopedMemFsManager scoped_mem_fs;
+  ScopedMemFsManager scoped_mem_fs;
   ReportStoreMetadata metadata("/cache/delayed/path", StorageSize::Gigabytes(1u));
   ASSERT_FALSE(metadata.IsDirectoryUsable());
 

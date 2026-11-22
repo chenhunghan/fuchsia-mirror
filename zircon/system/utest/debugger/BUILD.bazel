@@ -1,0 +1,102 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":debugger-tests"],
+    visibility = ["//zircon/system/utest:__pkg__"],
+)
+
+# To run this test, either
+#   * add debugger-test-pkg to your universe and run `fx test` (preferred).
+#   * add debugger-bootfs-test to dev_bootfs_labels and run `fx shell /boot/test/debugger-test`.
+# GN's bootfs_test() expects the binary at test/debugger-test via distribution_entries metadata, which cc_test_executable() omits.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/debugger-test", root_build_dir) destination = "test/debugger-test" label = get_label_info(":debugger-test", "label_with_toolchain") } ] }
+fx_cc_test_binary(
+    name = "debugger-test",
+    srcs = [
+        "crash-and-recover.cc",
+        "crash-and-recover.h",
+        "debugger.cc",
+        "debugger.h",
+        "dyn_break_on_load.cc",
+        "hw-breakpoint-test.cc",
+        "inferior.cc",
+        "inferior.h",
+        "inferior-control.cc",
+        "inferior-control.h",
+        "main.cc",
+        "reg-get-set-test.cc",
+        "start-thread-reg-access.cc",
+        "suspend-on-start.cc",
+        "suspended-reg-access.cc",
+        "utils.cc",
+        "utils.h",
+        "watchpoint-test.cc",
+    ],
+    build_flags = ["//build/config:all_source"],
+    data = ["//zircon/system/utest/dlopen-indirect-deps:dlopen-indirect-deps-test-module"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//sdk/lib/tbi",
+        "//src/lib/debug:backtrace-request",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/test-utils",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "debugger-test-packaged",
+    testonly = True,
+    binary = ":debugger-test",
+    binary_name = "debugger-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "debugger-test-manifest",
+    testonly = True,
+    component_name = "debugger-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/elf:create_raw_processes_ambient_exec.shard.cml",
+    ],
+    manifest = "meta/debugger-test.cml",
+)
+
+fx_test_component(
+    name = "debugger-test-component",
+    compiled_manifest = ":debugger-test-manifest",
+    deps = [":debugger-test-packaged"],
+)
+
+fx_package(
+    name = "debugger-test-pkg",
+    package_name = "debugger-test",
+    testonly = True,
+    test_components = [":debugger-test-component"],
+)
+
+fx_test(
+    name = "debugger-tests",
+    package = ":debugger-test-pkg",
+)

@@ -724,10 +724,47 @@ impl Associated {
             });
 
             // Client is disassociating. The ESS-SA must be kept alive but reset.
-            if let Protection::Rsna(rsna) | Protection::LegacyWpa(rsna) = &mut protection {
-                // Reset the state of the ESS-SA and its replay counter to zero per IEEE 802.11-2016 12.7.2.
-                rsna.supplicant.reset();
-            }
+            let owe_public_key = match &mut protection {
+                Protection::Rsna(rsna) | Protection::LegacyWpa(rsna) => {
+                    // Reset the state of the ESS-SA and its replay counter to zero per IEEE 802.11-2016 12.7.2.
+                    rsna.supplicant.reset();
+                    match rsna.supplicant.get_auth_cfg() {
+                        // OWE uses a new ephemeral key pair for each association.
+                        auth::Config::Owe => match initiate_owe(rsna) {
+                            Ok(owe_public_key) => Some(Box::new(owe_public_key)),
+                            Err(e) => {
+                                let msg = format!(
+                                    "Failed to initiate OWE after DisassociateInd, disconnecting: {e}"
+                                );
+                                error!("{}", msg);
+                                state_change_ctx.set_msg(msg);
+                                send_deauthenticate_request(
+                                    &self.latest_ap_state.bssid,
+                                    &context.mlme_sink,
+                                );
+                                let timeout = context.timer.schedule(event::DeauthenticateTimeout);
+                                return Err(Disconnecting {
+                                    cfg: self.cfg,
+                                    action: PostDisconnectAction::ReportConnectFinished {
+                                        sink: self.connect_txn_sink,
+                                        result: AssociationFailure {
+                                            bss_protection: self.latest_ap_state.protection(),
+                                            code: fidl_ieee80211::StatusCode::OweHandshakeFailure,
+                                        }
+                                        .into(),
+                                    },
+                                    _timeout: Some(timeout),
+                                    _wake_lease: context
+                                        .power_manager
+                                        .take_wake_lease("sme-disconnecting"),
+                                });
+                            }
+                        },
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
 
             context.att_id += 1;
             let cmd = ConnectCommand {
@@ -736,7 +773,10 @@ impl Associated {
                 protection,
                 authentication: self.authentication,
             };
-            let req = fidl_mlme::ReconnectRequest { peer_sta_address: cmd.bss.bssid.to_array() };
+            let req = fidl_mlme::ReconnectRequest {
+                peer_sta_address: cmd.bss.bssid.to_array(),
+                owe_public_key,
+            };
             context.mlme_sink.send(MlmeRequest::Reconnect(req));
             Ok(Connecting {
                 cfg: self.cfg,
@@ -1324,9 +1364,9 @@ impl ClientState {
                     MlmeEvent::OnWmmStatusResp { .. } => (),
                     MlmeEvent::DeauthenticateConf { resp } => {
                         warn!(
-                            "Unexpected MLME message while Idle: {:?} for BSSID {:?}",
+                            "Unexpected MLME message while Idle: {:?} for BSSID {}",
                             mlme_event_name(&event),
-                            resp.peer_sta_address
+                            Bssid::from(resp.peer_sta_address)
                         );
                     }
                     _ => warn!("Unexpected MLME message while Idle: {:?}", mlme_event_name(&event)),
@@ -1341,12 +1381,12 @@ impl ClientState {
                         Err(disconnecting) => transition.to(disconnecting).into(),
                     }
                 }
-                MlmeEvent::DeauthenticateInd { ind } => {
+                MlmeEvent::DeauthenticateInd { ind, .. } => {
                     let (transition, connecting) = state.release_data();
                     let idle = connecting.on_deauthenticate_ind(ind, &mut state_change_ctx);
                     transition.to(idle).into()
                 }
-                MlmeEvent::DisassociateInd { ind } => {
+                MlmeEvent::DisassociateInd { ind, .. } => {
                     let (transition, connecting) = state.release_data();
                     let disconnecting =
                         connecting.on_disassociate_ind(ind, &mut state_change_ctx, context);
@@ -1373,7 +1413,7 @@ impl ClientState {
                     }
                     transition.to(connecting).into()
                 }
-                MlmeEvent::EapolInd { ind } => {
+                MlmeEvent::EapolInd { ind, .. } => {
                     let (transition, mut connecting) = state.release_data();
                     connecting.eapol_cache.push(ind);
                     transition.to(connecting).into()
@@ -1381,14 +1421,14 @@ impl ClientState {
                 _ => state.into(),
             },
             Self::Associated(mut state) => match event {
-                MlmeEvent::DisassociateInd { ind } => {
+                MlmeEvent::DisassociateInd { ind, .. } => {
                     let (transition, associated) = state.release_data();
                     match associated.on_disassociate_ind(ind, &mut state_change_ctx, context) {
                         Ok(connecting) => transition.to(connecting).into(),
                         Err(disconnecting) => transition.to(disconnecting).into(),
                     }
                 }
-                MlmeEvent::DeauthenticateInd { ind } => {
+                MlmeEvent::DeauthenticateInd { ind, .. } => {
                     let (transition, associated) = state.release_data();
                     let idle = associated.on_deauthenticate_ind(ind, &mut state_change_ctx);
                     transition.to(idle).into()
@@ -1413,7 +1453,7 @@ impl ClientState {
                     }
                     state.into()
                 }
-                MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm } => {
+                MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm, .. } => {
                     state
                         .connect_txn_sink
                         .send(ConnectTransactionEvent::OnRssiThresholdBreached { cur_rssi_dbm });
@@ -1421,7 +1461,7 @@ impl ClientState {
                     state.last_signal_report_time = now();
                     state.into()
                 }
-                MlmeEvent::EapolInd { ind } => {
+                MlmeEvent::EapolInd { ind, .. } => {
                     let (transition, associated) = state.release_data();
                     match associated.on_eapol_ind(ind, &mut state_change_ctx, context) {
                         Ok(associated) => transition.to(associated).into(),
@@ -1450,7 +1490,7 @@ impl ClientState {
                     state.on_wmm_status_resp(status, resp);
                     state.into()
                 }
-                MlmeEvent::RoamStartInd { ind } => {
+                MlmeEvent::RoamStartInd { ind, .. } => {
                     _ = state_change_ctx.replace(StateChangeContext::Msg(
                         "Fullmac-initiated roam initiated".to_owned(),
                     ));
@@ -1491,14 +1531,14 @@ impl ClientState {
                     }
                     transition.to(roaming).into()
                 }
-                MlmeEvent::DisassociateInd { ind } => {
+                MlmeEvent::DisassociateInd { ind, .. } => {
                     let (transition, roaming) = state.release_data();
                     match roaming.on_disassociate_ind(ind, &mut state_change_ctx, context) {
                         Ok(roaming) => transition.to(roaming).into(),
                         Err(disconnecting) => transition.to(disconnecting).into(),
                     }
                 }
-                MlmeEvent::DeauthenticateInd { ind } => {
+                MlmeEvent::DeauthenticateInd { ind, .. } => {
                     let (transition, roaming) = state.release_data();
                     match roaming.on_deauthenticate_ind(ind, &mut state_change_ctx) {
                         Ok(roaming) => transition.to(roaming).into(),
@@ -1530,7 +1570,7 @@ impl ClientState {
                         },
                     }
                 }
-                MlmeEvent::RoamResultInd { ind } => {
+                MlmeEvent::RoamResultInd { ind, .. } => {
                     let (transition, roaming) = state.release_data();
 
                     match roam_handle_result(
@@ -1555,7 +1595,7 @@ impl ClientState {
                         },
                     }
                 }
-                MlmeEvent::EapolInd { ind } => {
+                MlmeEvent::EapolInd { ind, .. } => {
                     let (transition, mut roaming) = state.release_data();
                     roaming.eapol_cache.push(ind);
                     transition.to(roaming).into()
@@ -2409,9 +2449,21 @@ fn connect_cmd_inspect_summary(cmd: &ConnectCommand) -> String {
 }
 
 fn send_deauthenticate_request(bssid: &Bssid, mlme_sink: &MlmeSink) {
+    send_deauthenticate_request_with_reason(
+        bssid,
+        fidl_ieee80211::ReasonCode::StaLeaving,
+        mlme_sink,
+    );
+}
+
+fn send_deauthenticate_request_with_reason(
+    bssid: &Bssid,
+    reason_code: fidl_ieee80211::ReasonCode,
+    mlme_sink: &MlmeSink,
+) {
     mlme_sink.send(MlmeRequest::Deauthenticate(fidl_mlme::DeauthenticateRequest {
         peer_sta_address: bssid.to_array(),
-        reason_code: fidl_ieee80211::ReasonCode::StaLeaving,
+        reason_code,
     }));
 }
 
@@ -3228,6 +3280,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
                 locally_initiated: false,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(deauth_ind, &mut h.context);
         assert_matches!(connect_txn_stream1.try_recv(), Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: false }) => {
@@ -3266,6 +3319,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::PeerkeyMismatch,
                 locally_initiated: false,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(disassoc_ind, &mut h.context);
         let state = exchange_deauth(state, &mut h);
@@ -3522,8 +3576,10 @@ mod tests {
             dst_addr: fake_device_info().sta_addr,
             data: test_utils::eapol_key_frame().into(),
         };
-        let state =
-            state.on_mlme_event(MlmeEvent::EapolInd { ind: eapol_ind.clone() }, &mut h.context);
+        let state = state.on_mlme_event(
+            MlmeEvent::EapolInd { ind: eapol_ind.clone(), wake_lease: None },
+            &mut h.context,
+        );
         assert_matches!(state, ClientState::Connecting(_));
 
         // Finish connection. The cached EAPOL frame should be processed.
@@ -3694,6 +3750,7 @@ mod tests {
                 dst_addr: fake_device_info().sta_addr,
                 data: test_utils::eapol_key_frame().into(),
             },
+            wake_lease: None,
         };
         let mut state = state.on_mlme_event(eapol_ind, &mut h.context);
 
@@ -3812,6 +3869,7 @@ mod tests {
                 dst_addr: fake_device_info().sta_addr,
                 data: test_utils::eapol_key_frame().into(),
             },
+            wake_lease: None,
         };
 
         let rsna_response_deadline =
@@ -3970,8 +4028,10 @@ mod tests {
             dst_addr: fake_device_info().sta_addr,
             data: test_utils::eapol_key_frame().into(),
         };
-        let mut state =
-            state.on_mlme_event(MlmeEvent::EapolInd { ind: eapol_ind.clone() }, &mut h.context);
+        let mut state = state.on_mlme_event(
+            MlmeEvent::EapolInd { ind: eapol_ind.clone(), wake_lease: None },
+            &mut h.context,
+        );
         expect_eapol_req(&mut h.mlme_stream, bss.bssid);
         expect_stream_empty(&mut h.mlme_stream, "unexpected event in mlme stream");
 
@@ -3999,8 +4059,10 @@ mod tests {
             assert!(!h.executor.wake_expired_timers());
             // Setup mock response to transmit another EAPOL frame
             suppl_mock.set_on_eapol_frame_updates(tx_eapol_frame_update_sink.clone());
-            state =
-                state.on_mlme_event(MlmeEvent::EapolInd { ind: eapol_ind.clone() }, &mut h.context);
+            state = state.on_mlme_event(
+                MlmeEvent::EapolInd { ind: eapol_ind.clone(), wake_lease: None },
+                &mut h.context,
+            );
             expect_eapol_req(&mut h.mlme_stream, bss.bssid);
             expect_stream_empty(&mut h.mlme_stream, "unexpected event in mlme stream");
             rsna_retransmission_deadline =
@@ -4209,6 +4271,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: (*selected_bss).clone().into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_roaming(&state);
@@ -4223,7 +4286,7 @@ mod tests {
             association_id: 42,
             association_ies,
         };
-        let roam_result_ind_event = MlmeEvent::RoamResultInd { ind: ind.clone() };
+        let roam_result_ind_event = MlmeEvent::RoamResultInd { ind: ind.clone(), wake_lease: None };
         let state = state.on_mlme_event(roam_result_ind_event, &mut h.context);
         assert_matches!(&state, ClientState::Associated(state) => {
             assert_matches!(&state.link_state, LinkState::LinkUp { .. });
@@ -4255,6 +4318,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: target_bss.clone().into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_matches!(state, ClientState::Disconnecting(_));
@@ -4359,6 +4423,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: selected_bss.clone().into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_roaming(&state);
@@ -4375,7 +4440,7 @@ mod tests {
             association_id: 42,
             association_ies,
         };
-        let roam_result_ind_event = MlmeEvent::RoamResultInd { ind: ind.clone() };
+        let roam_result_ind_event = MlmeEvent::RoamResultInd { ind: ind.clone(), wake_lease: None };
         let state = state.on_mlme_event(roam_result_ind_event, &mut h.context);
 
         assert_matches!(&state, ClientState::Associated(state)  => {
@@ -4600,6 +4665,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
 
@@ -4727,6 +4793,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: selected_bss.into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
 
@@ -4769,6 +4836,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: (*selected_bss).into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_idle(state);
@@ -4808,6 +4876,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: (*selected_bss).into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_connecting(state, &original_bss);
@@ -4849,6 +4918,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: (*selected_bss).into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_disconnecting(state);
@@ -4915,6 +4985,7 @@ mod tests {
                 association_id: 0,
                 association_ies: Vec::new(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_result_ind, &mut h.context);
 
@@ -4960,6 +5031,7 @@ mod tests {
                 association_id: 0,
                 association_ies: Vec::new(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_result_ind, &mut h.context);
 
@@ -5258,6 +5330,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
                 locally_initiated: false,
             },
+            wake_lease: None,
         };
 
         let state = state.on_mlme_event(disassociate_ind, &mut h.context);
@@ -5287,6 +5360,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnacceptablePowerCapability,
                 locally_initiated: true,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(disassociate_ind, &mut h.context);
         assert_eq!(*h.fake_power_manager.calls.lock(), vec!["sme-disconnecting"]);
@@ -5319,6 +5393,109 @@ mod tests {
     }
 
     #[test]
+    fn owe_disassoc_ind_reconnects_with_new_owe_public_key() {
+        let mut h = TestHelper::new();
+        let (supplicant, suppl_mock) = mock_owe_supplicant();
+        let (cmd, mut connect_txn_stream) = connect_command_owe(supplicant);
+        let bss = (*cmd.bss).clone();
+        let state = link_up_state(cmd);
+
+        // SME should generate a new OWE key pair for the reassociation.
+        suppl_mock.set_initiate_owe_updates(vec![SecAssocUpdate::TxOwePublicKey {
+            group_id: 19,
+            key: vec![0xdd; 32],
+        }]);
+        let disassociate_ind = MlmeEvent::DisassociateInd {
+            ind: fidl_mlme::DisassociateIndication {
+                peer_sta_address: bss.bssid.to_array(),
+                reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
+                locally_initiated: false,
+            },
+            wake_lease: None,
+        };
+        let state = state.on_mlme_event(disassociate_ind, &mut h.context);
+        assert_matches!(&state, ClientState::Connecting(_));
+        let info = assert_matches!(
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnDisconnect { info }) => info
+        );
+        assert!(info.is_sme_reconnecting);
+        assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Reconnect(req)) => {
+            assert_eq!(req, fidl_mlme::ReconnectRequest {
+                peer_sta_address: bss.bssid.to_array(),
+                owe_public_key: Some(Box::new(fidl_internal::OwePublicKey {
+                    group: 19,
+                    key: vec![0xdd; 32],
+                })),
+            });
+        });
+
+        // (mlme->sme) The AP's public key in the ConnectConf completes the new OWE exchange.
+        suppl_mock.set_on_owe_public_key_rx_updates(vec![SecAssocUpdate::Key(Key::Pmk(
+            vec![0xbb; 32].into(),
+        ))]);
+        suppl_mock
+            .set_start_updates(vec![SecAssocUpdate::Status(SecAssocStatus::PmkSaEstablished)]);
+        let connect_conf = create_connect_conf_with_ies(
+            bss.bssid,
+            fidl_ieee80211::StatusCode::Success,
+            vec![
+                0xff, 7, 32, // Diffie Hellman Param Element header (including the length)
+                19, 0, // Group
+                0xcc, 0xcc, 0xcc,
+                0xcc, // AP's public key (invalid len, but doesn't affect test)
+            ],
+        );
+        let state = state.on_mlme_event(connect_conf, &mut h.context);
+        assert!(suppl_mock.is_supplicant_started());
+        assert_matches!(&state, ClientState::Associated(state) => {
+            assert_matches!(&state.link_state, LinkState::EstablishingRsna { .. });
+        });
+    }
+
+    #[test]
+    fn owe_disassoc_ind_fails_reconnect_if_initiate_owe_fails() {
+        let mut h = TestHelper::new();
+        let (supplicant, suppl_mock) = mock_owe_supplicant();
+        let (cmd, mut connect_txn_stream) = connect_command_owe(supplicant);
+        let bss = (*cmd.bss).clone();
+        let state = link_up_state(cmd);
+
+        suppl_mock.set_initiate_owe_failure(format_err!("OWE initiation failed"));
+        let disassociate_ind = MlmeEvent::DisassociateInd {
+            ind: fidl_mlme::DisassociateIndication {
+                peer_sta_address: bss.bssid.to_array(),
+                reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
+                locally_initiated: false,
+            },
+            wake_lease: None,
+        };
+        let state = state.on_mlme_event(disassociate_ind, &mut h.context);
+
+        // SME should not reconnect with the old key pair. It disconnects instead.
+        assert_matches!(&state, ClientState::Disconnecting(_));
+        assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Deauthenticate(_)));
+        let info = assert_matches!(
+            connect_txn_stream.try_recv(),
+            Ok(ConnectTransactionEvent::OnDisconnect { info }) => info
+        );
+        assert!(info.is_sme_reconnecting);
+        let state = state.on_mlme_event(
+            MlmeEvent::DeauthenticateConf {
+                resp: fidl_mlme::DeauthenticateConfirm { peer_sta_address: bss.bssid.to_array() },
+            },
+            &mut h.context,
+        );
+        assert_idle(state);
+        assert_matches!(connect_txn_stream.try_recv(), Ok(ConnectTransactionEvent::OnConnectResult { result, is_reconnect: true }) => {
+            assert_eq!(result, AssociationFailure {
+                bss_protection: bss.protection(),
+                code: fidl_ieee80211::StatusCode::OweHandshakeFailure,
+            }.into());
+        });
+    }
+
+    #[test]
     fn do_not_log_disconnect_ctx_on_disassoc_from_non_link_up() {
         let mut h = TestHelper::new();
         let (supplicant, _suppl_mock) = mock_psk_supplicant();
@@ -5331,6 +5508,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnacceptablePowerCapability,
                 locally_initiated: true,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(disassociate_ind, &mut h.context);
         assert_connecting(
@@ -5364,6 +5542,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::LeavingNetworkDeauth,
                 locally_initiated: true,
             },
+            wake_lease: None,
         };
 
         let _state = state.on_mlme_event(deauth_ind, &mut h.context);
@@ -5407,6 +5586,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::ReasonInactivity,
                 locally_initiated: true,
             },
+            wake_lease: None,
         };
 
         let state = state.on_mlme_event(deauth_ind, &mut h.context);
@@ -5474,6 +5654,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::ReasonInactivity,
                 locally_initiated: true,
             },
+            wake_lease: None,
         };
 
         let state = state.on_mlme_event(disassoc_ind, &mut h.context);
@@ -6022,7 +6203,7 @@ mod tests {
         let state = link_up_state(cmd);
 
         let state = state.on_mlme_event(
-            MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm: -77 },
+            MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm: -77, wake_lease: None },
             &mut h.context,
         );
         assert_matches!(
@@ -6048,6 +6229,7 @@ mod tests {
                 original_association_maintained: false,
                 selected_bss: selected_bss.clone().into(),
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(roam_start_ind, &mut h.context);
         assert_roaming(&state);
@@ -6064,7 +6246,8 @@ mod tests {
             association_id: 42,
             association_ies,
         };
-        let state = state.on_mlme_event(MlmeEvent::RoamResultInd { ind }, &mut h.context);
+        let state =
+            state.on_mlme_event(MlmeEvent::RoamResultInd { ind, wake_lease: None }, &mut h.context);
         assert_matches!(&state, ClientState::Associated(state) => {
             assert_matches!(&state.link_state, LinkState::LinkUp { .. });
         });
@@ -6131,6 +6314,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
                 locally_initiated: false,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(disassociate_ind, &mut h.context);
         assert_matches!(&state, ClientState::Connecting(_));
@@ -6138,6 +6322,7 @@ mod tests {
         assert!(!h.fake_power_manager.is_lease_dropped("sme-connecting"));
         assert_matches!(h.mlme_stream.try_recv(), Ok(MlmeRequest::Reconnect(req)) => {
             assert_eq!(&req.peer_sta_address, bss.bssid.as_array());
+            assert_eq!(req.owe_public_key, None);
         });
 
         // 2. Associate succeeds, enters EstablishingRsna
@@ -6194,6 +6379,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
                 locally_initiated: false,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(disassociate_ind, &mut h.context);
         assert!(!h.fake_power_manager.is_lease_dropped("sme-connecting"));
@@ -6250,6 +6436,7 @@ mod tests {
                 reason_code: fidl_ieee80211::ReasonCode::UnspecifiedReason,
                 locally_initiated: false,
             },
+            wake_lease: None,
         };
         let state = state.on_mlme_event(disassociate_ind, &mut h.context);
         assert!(!h.fake_power_manager.is_lease_dropped("sme-connecting"));
@@ -6301,7 +6488,8 @@ mod tests {
             association_id: 42,
             association_ies: vec![],
         };
-        let state = state.on_mlme_event(MlmeEvent::RoamResultInd { ind }, &mut h.context);
+        let state =
+            state.on_mlme_event(MlmeEvent::RoamResultInd { ind, wake_lease: None }, &mut h.context);
         assert_matches!(&state, ClientState::Associated(state) => {
             assert_matches!(&state.link_state, LinkState::EstablishingRsna { .. });
         });
@@ -6360,7 +6548,8 @@ mod tests {
             association_id: 42,
             association_ies: vec![],
         };
-        let state = state.on_mlme_event(MlmeEvent::RoamResultInd { ind }, &mut h.context);
+        let state =
+            state.on_mlme_event(MlmeEvent::RoamResultInd { ind, wake_lease: None }, &mut h.context);
         assert_matches!(&state, ClientState::Disconnecting(_));
         assert!(h.fake_power_manager.was_lease_held_at_take("sme-roaming", "sme-disconnecting"));
         assert!(h.fake_power_manager.is_lease_dropped("sme-roaming"));
@@ -6665,6 +6854,7 @@ mod tests {
                 dst_addr: fake_device_info().sta_addr,
                 data,
             },
+            wake_lease: None,
         }
     }
 

@@ -4,6 +4,7 @@
 
 #include "src/developer/forensics/crash_reports/snapshot_collector.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/async/cpp/executor.h>
 #include <lib/fit/function.h>
 #include <lib/zx/time.h>
@@ -146,8 +147,8 @@ class SnapshotCollectorTest : public UnitTestFixture {
         .channel = ErrorOrString("some channel"),
     };
 
-    fuchsia::feedback::CrashReport report;
-    report.set_program_name(kProgramName);
+    fuchsia_feedback::CrashReport report;
+    report.program_name(kProgramName);
 
     const std::optional<ProgramShortname> shortened_program_name =
         ProgramShortname::Create(kProgramName);

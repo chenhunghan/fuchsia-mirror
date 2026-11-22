@@ -1,7 +1,7 @@
 Vulkan Development
 ==================
 
-## Runtime dependencies
+## Runtime dependencies {:#runtime-dependencies}
 
 The magma driver and libraries should already be built into a complete Fuchsia
 image. The correct driver will be built and loaded based on the
@@ -46,7 +46,7 @@ suboptimal performance.  Not included in `vulkan/client.shard.cml`, so it must b
 - `fuchsia.media.ProfileProvider` - deprecated; replaced by `fuchsia.scheduler.RoleManager`.
 
 Test components can receive these capabilities by being executed in a
-[non-hermetic realm](/docs/development/testing/components/test_runner_framework.md#non-hermetic_tests):
+[non-hermetic realm](/docs/development/testing/components/test_runner_framework.md#non-hermetic-tests):
 
 ```gn
 # BUILD.gn

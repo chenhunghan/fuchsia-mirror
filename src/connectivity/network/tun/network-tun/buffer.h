@@ -8,10 +8,9 @@
 #include <fidl/fuchsia.hardware.network.driver/cpp/driver/wire.h>
 #include <fidl/fuchsia.net.tun/cpp/wire.h>
 #include <lib/stdcompat/span.h>
+#include <lib/vmo_store/vmo_store.h>
 
 #include <array>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace network {
 namespace tun {

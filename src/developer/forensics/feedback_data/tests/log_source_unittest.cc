@@ -4,11 +4,12 @@
 
 #include "src/developer/forensics/feedback_data/log_source.h"
 
-#include <fuchsia/logger/cpp/fidl.h>
+#include <fidl/fuchsia.logger/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/syslog/cpp/log_level.h>
 #include <lib/zx/time.h>
 
+#include <format>
 #include <memory>
 #include <vector>
 
@@ -19,7 +20,6 @@
 #include "src/developer/forensics/testing/stubs/diagnostics_archive.h"
 #include "src/developer/forensics/testing/stubs/diagnostics_batch_iterator.h"
 #include "src/developer/forensics/testing/unit_test_fixture.h"
-#include "src/lib/fxl/strings/string_printf.h"
 
 namespace forensics::feedback_data {
 namespace {
@@ -29,31 +29,31 @@ using ::testing::ElementsAreArray;
 constexpr zx::duration kTimestamp = zx::sec(1234);
 
 LogSink::MessageOr BuildOutputLogMessage(const std::string& text) {
-  return ::fpromise::ok(testing::BuildLogMessage(FUCHSIA_LOG_INFO, text, kTimestamp, {}));
+  return ::fpromise::ok(BuildLogMessage(FUCHSIA_LOG_INFO, text, kTimestamp, {}));
 }
 
-std::string BuildInputLogMessage(const std::string& message) {
-  constexpr char fmt[] = R"JSON(
+std::string BuildInputLogMessage(const std::string& text) {
+  const zx::time_boot timestamp = kLogMessageBaseTimestamp + kTimestamp;
+  return std::format(R"JSON(
 [
-  {
-    "metadata": {
-      "timestamp": %zu,
+  {{
+    "metadata": {{
+      "timestamp": {},
       "severity": "INFO",
-      "pid": 7559,
-      "tid": 7687
-    },
-    "payload": {
-      "root": {
-      "message": {
-        "value": "%s"
-        }
-      }
-    }
-  }
+      "pid": {},
+      "tid": {}
+    }},
+    "payload": {{
+      "root": {{
+      "message": {{
+        "value": "{}"
+        }}
+      }}
+    }}
+  }}
 ]
-)JSON";
-
-  return fxl::StringPrintf(fmt, kTimestamp.get(), message.c_str());
+)JSON",
+                     timestamp.get(), kLogMessageProcessId, kLogMessageThreadId, text);
 }
 
 bool operator==(const std::vector<LogSink::MessageOr>& lhs,
@@ -68,13 +68,13 @@ bool operator==(const std::vector<LogSink::MessageOr>& lhs,
     }
 
     if (lhs[i].is_error()) {
-      return lhs[i].error() == rhs[i].error();
+      if (lhs[i].error() != rhs[i].error()) {
+        return false;
+      }
+      continue;
     }
-    const ::fuchsia::logger::LogMessage& l = lhs[i].value();
-    const ::fuchsia::logger::LogMessage& r = rhs[i].value();
 
-    if (!(l.pid == r.pid) && (l.tid == r.tid) && (l.time == r.time) && (l.severity == r.severity) &&
-        (l.dropped_logs == r.dropped_logs) && (l.tags == r.tags) && (l.msg == r.msg)) {
+    if (lhs[i].value() != rhs[i].value()) {
       return false;
     }
   }
@@ -105,31 +105,28 @@ TEST_F(LogSourceTest, WritesToSink) {
   LogSource source(dispatcher(), services(), &sink);
 
   const std::vector<std::vector<std::string>> batches({
-      {
-          BuildInputLogMessage("line 0"),
-          BuildInputLogMessage("line 1"),
-          BuildInputLogMessage("line 2"),
-          BuildInputLogMessage("line 3"),
-
-      },
-      {
-          BuildInputLogMessage("line 4"),
-          BuildInputLogMessage("line 5"),
-          BuildInputLogMessage("line 6"),
-          BuildInputLogMessage("line 7"),
-      },
-      {BuildInputLogMessage("line 8")},
-      {BuildInputLogMessage("line 9")},
-      {BuildInputLogMessage("line A")},
-      {BuildInputLogMessage("line B")},
-      {BuildInputLogMessage("line C")},
-      {BuildInputLogMessage("line D")},
+      {"line 0", "line 1", "line 2", "line 3"},
+      {"line 4", "line 5", "line 6", "line 7"},
+      {"line 8"},
+      {"line 9"},
+      {"line A"},
+      {"line B"},
+      {"line C"},
+      {"line D"},
       {},
   });
 
+  std::vector<std::vector<std::string>> json_batches;
+  for (const std::vector<std::string>& batch : batches) {
+    std::vector<std::string>& json_batch = json_batches.emplace_back();
+    for (const std::string& line : batch) {
+      json_batch.push_back(BuildInputLogMessage(line));
+    }
+  }
+
   stubs::DiagnosticsArchive archive(
       dispatcher(), std::make_unique<stubs::DiagnosticsBatchIteratorDelayedBatches>(
-                        dispatcher(), batches, kTimeWaitForLimitedLogs, kArchivePeriod));
+                        dispatcher(), json_batches, kTimeWaitForLimitedLogs, kArchivePeriod));
 
   InjectServiceProvider(&archive, "fuchsia.diagnostics.ArchiveAccessor.logs");
 

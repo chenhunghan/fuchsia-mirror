@@ -6,7 +6,7 @@
 
 #include <fidl/fuchsia.hardware.acpi/cpp/wire.h>
 #include <lib/ddk/metadata.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/fit/defer.h>
 #include <lib/fzl/vmo-mapper.h>
 #include <string.h>
@@ -144,7 +144,12 @@ zx::result<> IntelDsp::ParseNhlt() {
 }
 
 zx::result<> IntelDsp::Init(zx_device_t* dsp_dev) {
-  zx::result result = Bind(dsp_dev, "intel-sst-dsp");
+  zx::result channel = CodecGetDispatcherChannel();
+  if (channel.is_error()) {
+    LOG(ERROR, "Error getting DSP codec channel");
+    return channel.take_error();
+  }
+  zx::result result = BindWithChannel(dsp_dev, std::move(channel.value()), "intel-sst-dsp");
   if (!result.is_ok()) {
     LOG(ERROR, "Error binding DSP device");
     return zx::error(result.status_value());
@@ -188,21 +193,18 @@ MMIO_PTR adsp_fw_registers_t* IntelDsp::fw_regs() const {
       static_cast<MMIO_PTR uint8_t*>(mapped_regs_->get()) + SKL_ADSP_SRAM0_OFFSET);
 }
 
-zx_status_t IntelDsp::CodecGetDispatcherChannel(zx_handle_t* remote_endpoint_out) {
-  if (!remote_endpoint_out)
-    return ZX_ERR_INVALID_ARGS;
-
+zx::result<zx::channel> IntelDsp::CodecGetDispatcherChannel() {
   zx::channel channel_local;
   zx::channel channel_remote;
   zx_status_t res = zx::channel::create(0, &channel_local, &channel_remote);
   if (res != ZX_OK) {
-    return res;
+    return zx::error(res);
   }
 
   fbl::AutoLock lock(&codec_driver_channel_lock_);
   fbl::RefPtr<Channel> channel = Channel::Create(std::move(channel_local));
   if (channel == nullptr) {
-    return ZX_ERR_NO_MEMORY;
+    return zx::error(ZX_ERR_NO_MEMORY);
   }
 
   codec_driver_channel_ = std::move(channel);
@@ -214,14 +216,10 @@ zx_status_t IntelDsp::CodecGetDispatcherChannel(zx_handle_t* remote_endpoint_out
   res = codec_driver_channel_->BeginWait(controller_->dispatcher());
   if (res != ZX_OK) {
     codec_driver_channel_.reset();
-    return res;
+    return zx::error(res);
   }
 
-  // If things went well, release the reference to the remote endpoint
-  // from the zx::channel instance into the unmanaged world of DDK
-  // protocols.
-  *remote_endpoint_out = channel_remote.release();
-  return ZX_OK;
+  return zx::ok(std::move(channel_remote));
 }
 
 void IntelDsp::ChannelSignalled(async_dispatcher_t* dispatcher, async::WaitBase* wait,
@@ -604,7 +602,7 @@ zx_status_t IntelDsp::Boot() {
   if (!IsCoreEnabled(ADSP_REG_ADSPCS_CORE0_MASK)) {
     LOG(ERROR, "Failed to start core 0");
     ResetCore(ADSP_REG_ADSPCS_CORE0_MASK);
-    return st;
+    return ZX_ERR_INTERNAL;
   }
 
   LOG(DEBUG, "DSP core 0 booted!");
@@ -722,7 +720,7 @@ zx_status_t IntelDsp::LoadFirmware() {
   // Now check whether we received the FW Ready IPC. Receiving this IPC indicates the
   // IPC system is ready. Both FW_STATUS = ADSP_FW_STATUS_STATE_ENTER_BASE_FW and
   // receiving the IPC are required for the DSP to be operational.
-  sync_completion_wait(&firmware_ready_, INTEL_ADSP_BASE_FW_INIT_TIMEOUT_NSEC);
+  st = sync_completion_wait(&firmware_ready_, INTEL_ADSP_BASE_FW_INIT_TIMEOUT_NSEC);
   if (st != ZX_OK) {
     LOG(ERROR, "Error waiting for FW Ready IPC (err %d, fw_status = 0x%08x)", st,
         REG_RD(&fw_regs()->fw_status));

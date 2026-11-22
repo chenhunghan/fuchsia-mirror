@@ -39,99 +39,11 @@
             "bug": "https://fxbug.dev/570203009"
         },
         {
-            "path": "build/bazel/config/toolchain_tags/BUILD.bazel",
-            "targets": [
-                "asan",
-                "cfi",
-                "hwasan",
-                "instrumented",
-                "lsan",
-                "lto",
-                "tsan",
-                "ubsan"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/asan/BUILD.bazel",
-            "targets": [
-                "asan",
-                "false",
-                "true"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/cfi/BUILD.bazel",
-            "targets": [
-                "cfi",
-                "false",
-                "true"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/hwasan/BUILD.bazel",
-            "targets": [
-                "false",
-                "hwasan",
-                "true"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/instrumented/BUILD.bazel",
-            "targets": [
-                "false",
-                "instrumented",
-                "true"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/lsan/BUILD.bazel",
-            "targets": [
-                "false",
-                "lsan",
-                "true"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/lto/BUILD.bazel",
-            "targets": [
-                "false",
-                "lto",
-                "true"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/tsan/BUILD.bazel",
-            "targets": [
-                "false",
-                "true",
-                "tsan"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "build/bazel/config/toolchain_tags/ubsan/BUILD.bazel",
-            "targets": [
-                "false",
-                "true",
-                "ubsan"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
             "path": "build/bazel/config/variables/BUILD.bazel",
             "targets": [
                 "compress_debuginfo",
                 "debuginfo",
                 "dwarf_version",
-                "is_coverage",
-                "is_profile",
                 "optimize"
             ],
             "bug": "https://fxbug.dev/570203009"
@@ -309,7 +221,6 @@
                 "iris_env",
                 "nelson_env",
                 "nuc11_env",
-                "nuc7_env",
                 "qemu_env",
                 "sherlock_env",
                 "sorrel_env",
@@ -622,13 +533,6 @@
             "path": "src/connectivity/lib/net-declare/BUILD.bazel",
             "targets": [
                 "net-declare"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "src/connectivity/network/lib/udp_serde/BUILD.bazel",
-            "targets": [
-                "udp_serde"
             ],
             "bug": "https://fxbug.dev/570203009"
         },
@@ -1183,16 +1087,6 @@
             "path": "src/ui/input/lib/input-report-reader/BUILD.bazel",
             "targets": [
                 "input-report-reader"
-            ],
-            "bug": "https://fxbug.dev/570203009"
-        },
-        {
-            "path": "src/zircon/lib/zircon/BUILD.bazel",
-            "targets": [
-                "headers",
-                "zircon",
-                "zircon.as-needed",
-                "zircon_idk"
             ],
             "bug": "https://fxbug.dev/570203009"
         },

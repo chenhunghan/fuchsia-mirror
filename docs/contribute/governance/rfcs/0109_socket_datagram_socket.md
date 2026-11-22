@@ -178,7 +178,7 @@ type SendMsgPayload = table {
 ```
 
 Note: The actual data format and serialization protocol is bespoke and
-specified in detail under [Serialization Protocol](#serialization-protocol). In
+specified in detail under [Serialization protocol](#serialization-protocol). In
 this section, it's sufficient to presuppose the above format and serialization
 using [FIDL at rest][fidl-at-rest].
 
@@ -375,7 +375,7 @@ it whenever a new control message is added. If and when the results suggest
 that the tradeoff is no longer worth making, we can revert to the slow path
 (which we'll need to keep around anyway in order to support ICMP datagrams).
 
-### Serialization Protocol
+### Serialization protocol {:#serialization-protocol}
 
 The simplest way to perform I/O over the zircon socket is to define a single
 FIDL table to hold the UDP payload and its metadata and serialize it using [FIDL

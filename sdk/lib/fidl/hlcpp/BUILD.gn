@@ -62,8 +62,6 @@ hlcpp_bindings_libraries_visibility = [
   "//src/connectivity/ethernet/drivers/asix-88179:*",
   "//src/connectivity/network/testing/netemul/network-context/fidl:*",
   "//src/connectivity/network/testing/netemul/sync-manager/fidl:*",
-  "//src/developer/forensics/exceptions/fidl:*",
-  "//src/developer/forensics/public/fakes:*",
   "//src/diagnostics/validator/inspect/fidl:*",
   "//src/diagnostics/validator/logs/fidl:*",
   "//src/lib/fake-clock/fidl:*",

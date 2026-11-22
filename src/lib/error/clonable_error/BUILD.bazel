@@ -33,7 +33,6 @@ rustc_test(
 
 fx_unittest_package(
     name = "clonable_error_tests",
-    package_name = "clonable_error_tests",
     unit_tests = [":clonable_error_test"],
     visibility = ["//src/lib:__pkg__"],
 )

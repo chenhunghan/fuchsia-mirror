@@ -12,7 +12,7 @@
 
 namespace debug_agent {
 
-class ZirconProcessHandle final : public ProcessHandle, public debug::ZirconExceptionWatcher {
+class ZirconProcessHandle final : public ProcessHandle, private debug::ZirconExceptionWatcher {
  public:
   explicit ZirconProcessHandle(zx::process p);
 
@@ -63,6 +63,7 @@ class ZirconProcessHandle final : public ProcessHandle, public debug::ZirconExce
 
   // Handle for watching the process exceptions.
   debug::MessageLoop::WatchHandle process_watch_handle_;
+  bool exception_channel_claimed_ = false;
 };
 
 }  // namespace debug_agent

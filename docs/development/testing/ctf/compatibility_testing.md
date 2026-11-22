@@ -26,7 +26,7 @@ CTF fundamentally consists of the following parts:
 CTF was originally proposed as [RFC 0015][rfc-0015], and the project
 code is located at [`//sdk/ctf`][sdk-ctf-directory].
 
-## Motivation
+## Motivation {:#motivation}
 
 The Fuchsia platform defines a surface area consisting of a number of
 FIDL protocols which are exposed in the Fuchsia SDK. Developers may

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 use crate::error::MessageError;
-use crate::{ExtendedMetadata, MessageFormatter};
+use crate::{MessageFormatter, MessageParser, TagMetadata};
 use bumpalo::Bump;
 use bumpalo::collections::{String as BumpaloString, Vec as BumpaloVec};
 use diagnostics_data::{ExtendedMoniker, Severity};
@@ -167,6 +167,36 @@ pub struct LogMessage<'a> {
 // These are allocated using the Bumpalo allocator.
 const_assert!(!std::mem::needs_drop::<LogMessage<'_>>());
 
+fn extract_moniker_tag(moniker: &ExtendedMoniker) -> Option<&str> {
+    match moniker {
+        ExtendedMoniker::ComponentManager => Some(moniker.as_str()),
+        ExtendedMoniker::ComponentInstance(m) => m.leaf().map(AsRef::as_ref),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfiMetadata {
+    pub moniker_tag: Option<FlyStr>,
+}
+
+impl TagMetadata for FfiMetadata {
+    fn from_manifest(moniker: &str, _url: &str) -> Option<Self> {
+        let parsed = ExtendedMoniker::parse_str(moniker).ok()?;
+        let moniker_tag = extract_moniker_tag(&parsed).map(FlyStr::new);
+        Some(Self { moniker_tag })
+    }
+
+    fn unknown_rolled_out(_rolled_out_logs: u64) -> Self {
+        Self { moniker_tag: Some(FlyStr::new("UNKNOWN")) }
+    }
+
+    fn with_rolled_out(&self, _rolled_out_logs: u64) -> Self {
+        self.clone()
+    }
+}
+
+pub type FfiMessageParser = MessageParser<FfiMetadata>;
+
 pub struct CPPLogMessageBuilder<'a> {
     severity: u8,
     tags: BumpaloVec<'a, CppString<'a>>,
@@ -175,7 +205,7 @@ pub struct CPPLogMessageBuilder<'a> {
     dropped: u64,
     file: Option<CppString<'a>>,
     line: Option<u64>,
-    moniker: Option<BumpaloString<'a>>,
+    moniker_tag: Option<CppString<'a>>,
     message: Option<CppString<'a>>,
     timestamp: i64,
     kvps: BumpaloVec<'a, CppKeyValue<'a>>,
@@ -183,6 +213,23 @@ pub struct CPPLogMessageBuilder<'a> {
 }
 
 impl<'a> CPPLogMessageBuilder<'a> {
+    fn new(severity: Severity, timestamp: BootInstant, allocator: &'a Bump) -> Self {
+        Self {
+            severity: severity as u8,
+            tags: BumpaloVec::new_in(allocator),
+            pid: None,
+            tid: None,
+            dropped: 0,
+            file: None,
+            line: None,
+            moniker_tag: None,
+            message: None,
+            timestamp: timestamp.into_nanos(),
+            kvps: BumpaloVec::new_in(allocator),
+            allocator,
+        }
+    }
+
     fn set_raw_severity(mut self, raw_severity: u8) -> Self {
         self.severity = raw_severity;
         self
@@ -260,8 +307,8 @@ impl<'a> CPPLogMessageBuilder<'a> {
         self
     }
 
-    fn set_moniker(mut self, value: &str) -> Self {
-        self.moniker = Some(BumpaloString::from_str_in(value, self.allocator));
+    fn set_moniker_tag(mut self, tag: CppString<'a>) -> Self {
+        self.moniker_tag = Some(tag);
         self
     }
 
@@ -271,16 +318,7 @@ impl<'a> CPPLogMessageBuilder<'a> {
         let file: CppString<'a> = self.file.unwrap_or_default();
         let line: u64 = self.line.unwrap_or(0);
         let message: CppString<'a> = self.message.unwrap_or_default();
-
-        let moniker_tag: CppString<'a> = match &self.moniker {
-            Some(moniker) => match moniker.split('/').next_back() {
-                Some(name) if name != "." => {
-                    BumpaloString::from_str_in(name, allocator).into_bump_str().into()
-                }
-                _ => CppString::default(),
-            },
-            None => CppString::default(),
-        };
+        let moniker_tag: CppString<'a> = self.moniker_tag.unwrap_or_default();
 
         let tags: &[_] = allocator.alloc_slice_fill_iter(self.tags.drain(..));
         let kvps: &[_] = allocator.alloc_slice_fill_iter(self.kvps.drain(..));
@@ -301,47 +339,15 @@ impl<'a> CPPLogMessageBuilder<'a> {
     }
 }
 
-struct CPPLogMessageBuilderBuilder<'a>(&'a Bump);
-
-impl<'a> CPPLogMessageBuilderBuilder<'a> {
-    fn configure(
-        self,
-        _component_url: Option<FlyStr>,
-        moniker: Option<ExtendedMoniker>,
-        severity: Severity,
-        timestamp: BootInstant,
-    ) -> Result<CPPLogMessageBuilder<'a>, MessageError> {
-        Ok(CPPLogMessageBuilder {
-            severity: severity as u8,
-            tags: BumpaloVec::new_in(self.0),
-            pid: None,
-            tid: None,
-            dropped: 0,
-            file: None,
-            timestamp: timestamp.into_nanos(),
-            line: None,
-            allocator: self.0,
-            kvps: BumpaloVec::new_in(self.0),
-            moniker: moniker.map(|value| bumpalo::format!(in self.0,"{}", value)),
-            message: None,
-        })
-    }
-}
-
-pub fn build_logs_data<'a>(
+fn build_logs_data_with_moniker_tag<'a>(
     input: &Record<'a>,
-    source: Option<ExtendedMetadata>,
+    moniker_tag: Option<CppString<'a>>,
     allocator: &'a Bump,
 ) -> Result<&'a mut LogMessage<'a>, MessageError> {
-    let builder = CPPLogMessageBuilderBuilder(allocator);
     let (raw_severity, severity) = Severity::parse_exact(input.severity);
-    let (maybe_moniker, maybe_url, _) = source
-        .map(|value| (Some(value.moniker), Some(value.url), Some(value.rolled_out_logs)))
-        .unwrap_or((None, None, None));
-    let mut builder =
-        builder.configure(maybe_url.map(FlyStr::new), None, severity, input.timestamp)?;
-    if let Some(moniker) = maybe_moniker {
-        builder = builder.set_moniker(moniker.as_ref());
+    let mut builder = CPPLogMessageBuilder::new(severity, input.timestamp, allocator);
+    if let Some(moniker_tag) = moniker_tag {
+        builder = builder.set_moniker_tag(moniker_tag);
     }
     if let Some(raw_severity) = raw_severity {
         builder = builder.set_raw_severity(raw_severity);
@@ -377,6 +383,17 @@ pub fn build_logs_data<'a>(
     Ok(builder.build())
 }
 
+pub fn build_logs_data<'a>(
+    input: &Record<'a>,
+    source: Option<&FfiMetadata>,
+    allocator: &'a Bump,
+) -> Result<&'a mut LogMessage<'a>, MessageError> {
+    let moniker_tag = source
+        .and_then(|meta| meta.moniker_tag.as_deref())
+        .map(|tag| BumpaloString::from_str_in(tag, allocator).into_bump_str().into());
+    build_logs_data_with_moniker_tag(input, moniker_tag, allocator)
+}
+
 /// Constructs a `CPPLogsMessage` from the provided bytes, assuming the bytes
 /// are in the format specified as in the [log encoding], and come from
 /// an Archivist LogStream with moniker, URL, and dropped logs output enabled.
@@ -391,10 +408,10 @@ pub fn ffi_from_extended_record<'a>(
     allocator: &'a Bump,
 ) -> Result<(&'a mut LogMessage<'a>, &'a [u8]), MessageError> {
     let (input, remaining) = diagnostics_log_encoding::parse::parse_record(bytes)?;
-    let (source, new_remaining) = if remaining.len() >= 16 {
+    let (moniker_tag, new_remaining) = if remaining.len() >= 16 {
         let moniker_len = u32::from_le_bytes(remaining[0..4].try_into().unwrap()) as usize;
         let component_url_len = u32::from_le_bytes(remaining[4..8].try_into().unwrap()) as usize;
-        let rolled_out_logs = u64::from_le_bytes(remaining[8..16].try_into().unwrap());
+        let _rolled_out_logs = u64::from_le_bytes(remaining[8..16].try_into().unwrap());
         let mut offset: usize = 16;
 
         // NOTE: This addition is safe as all platforms Fuchsia supports are 64-bit,
@@ -409,31 +426,32 @@ pub fn ffi_from_extended_record<'a>(
 
         let moniker = str::from_utf8(&remaining[offset..offset + moniker_len])?;
         offset += moniker_padded_len;
-        let url = str::from_utf8(&remaining[offset..offset + component_url_len])?;
+        let _url = str::from_utf8(&remaining[offset..offset + component_url_len])?;
         offset += component_url_padded_len;
-        (
-            Some(ExtendedMetadata {
-                moniker: ExtendedMoniker::parse_str(moniker)?,
-                url: url.into(),
-                rolled_out_logs,
-            }),
-            &remaining[offset..],
-        )
+
+        let parsed_moniker = ExtendedMoniker::parse_str(moniker)?;
+        let moniker_tag = match parsed_moniker {
+            ExtendedMoniker::ComponentManager => Some(moniker),
+            ExtendedMoniker::ComponentInstance(m) if m.is_root() => None,
+            ExtendedMoniker::ComponentInstance(_) => moniker.rsplit('/').next(),
+        };
+        (moniker_tag.map(CppString::from), &remaining[offset..])
     } else {
         (None, remaining)
     };
-    let record = build_logs_data(&input, source, allocator)?;
+    let record = build_logs_data_with_moniker_tag(&input, moniker_tag, allocator)?;
     Ok((record, new_remaining))
 }
 
 pub struct CPPMessageFormatter<'a>(pub &'a Bump);
 impl<'a> MessageFormatter<'a> for &CPPMessageFormatter<'a> {
     type Result = &'a mut LogMessage<'a>;
+    type Metadata = FfiMetadata;
 
     fn format(
         &mut self,
         record: &Record<'a>,
-        metadata: Option<ExtendedMetadata>,
+        metadata: Option<&Self::Metadata>,
     ) -> Result<Self::Result, MessageError> {
         build_logs_data(record, metadata, self.0)
     }
@@ -442,7 +460,6 @@ impl<'a> MessageFormatter<'a> for &CPPMessageFormatter<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::MessageParser;
     use bumpalo::Bump;
     use diagnostics_log_encoding::encode::{Encoder, EncoderOpts};
     use diagnostics_log_encoding::zx::BootInstant;
@@ -459,7 +476,7 @@ mod test {
 
     #[fuchsia::test]
     fn test_short_read() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
         let bytes = vec![0u8; 7];
@@ -469,7 +486,7 @@ mod test {
 
     #[fuchsia::test]
     fn test_normal_parsing() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
 
@@ -496,7 +513,7 @@ mod test {
 
     #[fuchsia::test]
     fn test_escaping_in_kvp() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
 
@@ -560,7 +577,7 @@ mod test {
     fn test_control_message_tags() {
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
 
         let tag_id = 0;
 
@@ -587,8 +604,7 @@ mod test {
         assert!(log.is_none());
 
         let tag_data = parser.tag_map.get(&tag_id).unwrap();
-        assert_eq!(tag_data.moniker, ExtendedMoniker::parse_str("test/moniker").unwrap());
-        assert_eq!(tag_data.url, "fuchsia-pkg://test");
+        assert_eq!(tag_data, &FfiMetadata { moniker_tag: Some(FlyStr::new("moniker")) });
 
         let rolled_out_record = Record {
             timestamp: BootInstant::from_nanos(73),
@@ -611,11 +627,12 @@ mod test {
 
         let log2_msg = log2.unwrap();
         assert_eq!(&*log2_msg.message, "");
+        assert_eq!(&*log2_msg.moniker_tag, "moniker");
         assert_eq!(log2_msg.kvps.len, 1);
         assert_eq!(&*log2_msg.kvps[0].key, "rolled_out");
         assert!(matches!(log2_msg.kvps[0].value, CppValue::UnsignedInt(5)));
         let tag_data2 = parser.tag_map.get(&tag_id).unwrap();
-        assert_eq!(tag_data2.moniker, ExtendedMoniker::parse_str("test/moniker").unwrap());
+        assert_eq!(tag_data2, &FfiMetadata { moniker_tag: Some(FlyStr::new("moniker")) });
 
         let normal_record = Record {
             timestamp: BootInstant::from_nanos(74),
@@ -639,11 +656,62 @@ mod test {
         assert_eq!(&*log_msg3.message, "some log with tag");
         assert_eq!(log_msg3.tags.len(), 0);
         assert_eq!(&*log_msg3.moniker_tag, "moniker");
+
+        let normal_record2 = Record {
+            timestamp: BootInstant::from_nanos(75),
+            severity: 0x30,
+            arguments: vec![Argument::message("second log reusing cached tag")],
+        };
+
+        let mut buffer4 = Cursor::new(vec![0u8; 1024]);
+        let mut encoder4 = Encoder::new(&mut buffer4, EncoderOpts::default());
+        encoder4.write_record(normal_record2).unwrap();
+
+        let len4 = buffer4.position() as usize;
+        let mut bytes4 = buffer4.into_inner();
+        bytes4.truncate(len4);
+
+        overwrite_header_tag(&mut bytes4, tag_id);
+
+        let (log4, _) = parser.parse_next(&bytes4, &formatter).unwrap();
+        let log_msg4 = &log4.unwrap();
+        assert_eq!(&*log_msg4.message, "second log reusing cached tag");
+        assert_eq!(&*log_msg4.moniker_tag, "moniker");
+    }
+
+    #[fuchsia::test]
+    fn test_rolled_out_unmapped_tag_uses_unknown_moniker_tag() {
+        let allocator = Bump::new();
+        let formatter = CPPMessageFormatter(&allocator);
+        let mut parser = FfiMessageParser::default();
+
+        let rolled_out_record = Record {
+            timestamp: BootInstant::from_nanos(80),
+            severity: 0x30,
+            arguments: vec![Argument::new("rolled_out", 3u64)],
+        };
+
+        let mut buffer = Cursor::new(vec![0u8; 1024]);
+        let mut encoder = Encoder::new(&mut buffer, EncoderOpts::default());
+        encoder.write_record(rolled_out_record).unwrap();
+
+        let len = buffer.position() as usize;
+        let mut bytes = buffer.into_inner();
+        bytes.truncate(len);
+
+        overwrite_header_tag(&mut bytes, 42 | LOG_CONTROL_BIT);
+
+        let (log, _) = parser.parse_next(&bytes, &formatter).unwrap();
+        let log_msg = log.expect("rolled_out record should yield a log message");
+        assert_eq!(&*log_msg.moniker_tag, "UNKNOWN");
+        assert_eq!(log_msg.kvps.len, 1);
+        assert_eq!(&*log_msg.kvps[0].key, "rolled_out");
+        assert!(matches!(log_msg.kvps[0].value, CppValue::UnsignedInt(3)));
     }
 
     #[fuchsia::test]
     fn test_message_with_kvps() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
 
@@ -680,7 +748,7 @@ mod test {
 
     #[fuchsia::test]
     fn test_file_line_message_with_kvps() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
 
@@ -721,7 +789,7 @@ mod test {
 
     #[fuchsia::test]
     fn test_only_kvps() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
 
@@ -754,7 +822,7 @@ mod test {
 
     #[fuchsia::test]
     fn test_zero_copy_string_borrowing() {
-        let mut parser = MessageParser::default();
+        let mut parser = FfiMessageParser::default();
         let allocator = Bump::new();
         let formatter = CPPMessageFormatter(&allocator);
 
@@ -796,39 +864,102 @@ mod test {
 
     #[fuchsia::test]
     fn test_moniker_tag() {
+        assert_eq!(
+            FfiMetadata::from_manifest("core/foo", "fuchsia-pkg://test"),
+            Some(FfiMetadata { moniker_tag: Some(FlyStr::new("foo")) })
+        );
+        assert_eq!(
+            FfiMetadata::from_manifest(".", "fuchsia-pkg://test"),
+            Some(FfiMetadata { moniker_tag: None })
+        );
+        assert_eq!(
+            FfiMetadata::from_manifest("/", "fuchsia-pkg://test"),
+            Some(FfiMetadata { moniker_tag: None })
+        );
+        assert_eq!(
+            FfiMetadata::from_manifest("./", "fuchsia-pkg://test"),
+            Some(FfiMetadata { moniker_tag: None })
+        );
+        assert_eq!(
+            FfiMetadata::from_manifest("<component_manager>", "fuchsia-pkg://test"),
+            Some(FfiMetadata { moniker_tag: Some(FlyStr::new("<component_manager>")) })
+        );
+        assert_eq!(
+            FfiMetadata::from_manifest("core/coll:child", "fuchsia-pkg://test"),
+            Some(FfiMetadata { moniker_tag: Some(FlyStr::new("coll:child")) })
+        );
+        assert_eq!(FfiMetadata::from_manifest("", "fuchsia-pkg://test"), None);
+
+        let parsed = ExtendedMoniker::parse_str("core/foo").unwrap();
+        assert_eq!(extract_moniker_tag(&parsed), Some("foo"));
+        let root = ExtendedMoniker::parse_str(".").unwrap();
+        assert_eq!(extract_moniker_tag(&root), None);
+        assert_eq!(
+            extract_moniker_tag(&ExtendedMoniker::ComponentManager),
+            Some("<component_manager>")
+        );
+
         let allocator = Bump::new();
-        let builder = CPPLogMessageBuilder {
-            severity: 0x30,
-            tags: BumpaloVec::new_in(&allocator),
-            pid: None,
-            tid: None,
-            dropped: 0,
-            file: None,
-            line: None,
-            moniker: Some(BumpaloString::from_str_in("core/foo", &allocator)),
-            message: None,
-            timestamp: 0,
-            kvps: BumpaloVec::new_in(&allocator),
-            allocator: &allocator,
-        };
-        let msg = builder.build();
+        let msg = CPPLogMessageBuilder::new(Severity::Info, BootInstant::from_nanos(0), &allocator)
+            .set_moniker_tag(CppString::from("foo"))
+            .build();
         assert_eq!(&*msg.moniker_tag, "foo");
 
-        let root_builder = CPPLogMessageBuilder {
-            severity: 0x30,
-            tags: BumpaloVec::new_in(&allocator),
-            pid: None,
-            tid: None,
-            dropped: 0,
-            file: None,
-            line: None,
-            moniker: Some(BumpaloString::from_str_in(".", &allocator)),
-            message: None,
-            timestamp: 0,
-            kvps: BumpaloVec::new_in(&allocator),
-            allocator: &allocator,
+        let root_msg =
+            CPPLogMessageBuilder::new(Severity::Info, BootInstant::from_nanos(0), &allocator)
+                .build();
+        assert_eq!(&*root_msg.moniker_tag, "");
+    }
+
+    #[fuchsia::test]
+    fn test_ffi_from_extended_record_zero_copy_moniker_tag() {
+        let allocator = Bump::new();
+        let encode_extended = |moniker: &str, url: &str| {
+            let record = Record {
+                timestamp: BootInstant::from_nanos(100),
+                severity: 0x30,
+                arguments: vec![Argument::message("extended")],
+            };
+            let mut buffer = Cursor::new(vec![0u8; 1024]);
+            let mut encoder = Encoder::new(&mut buffer, EncoderOpts::default());
+            encoder.write_record(record).unwrap();
+            let len = buffer.position() as usize;
+            let mut bytes = buffer.into_inner();
+            bytes.truncate(len);
+
+            let moniker_bytes = moniker.as_bytes();
+            let url_bytes = url.as_bytes();
+            bytes.extend_from_slice(&(moniker_bytes.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&(url_bytes.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(&0u64.to_le_bytes());
+            bytes.extend_from_slice(moniker_bytes);
+            let moniker_pad = ((moniker_bytes.len() + 7) & !7) - moniker_bytes.len();
+            bytes.resize(bytes.len() + moniker_pad, 0);
+            bytes.extend_from_slice(url_bytes);
+            let url_pad = ((url_bytes.len() + 7) & !7) - url_bytes.len();
+            bytes.resize(bytes.len() + url_pad, 0);
+            bytes
         };
-        let root_msg = root_builder.build();
+
+        let bytes = encode_extended(
+            "core/network/netstack",
+            "fuchsia-pkg://fuchsia.com/netstack#meta/netstack.cm",
+        );
+        let (log_message, remaining) = ffi_from_extended_record(&bytes, &allocator).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(&*log_message.moniker_tag, "netstack");
+
+        let bytes_start = bytes.as_ptr() as usize;
+        let bytes_end = bytes_start + bytes.len();
+        let moniker_ptr = log_message.moniker_tag.inner.ptr as usize;
+        assert!(
+            bytes_start <= moniker_ptr && moniker_ptr < bytes_end,
+            "moniker_tag pointer must borrow directly from incoming extended record buffer"
+        );
+
+        let root_bytes = encode_extended(".", "fuchsia-pkg://fuchsia.com/root#meta/root.cm");
+        let (root_msg, root_remaining) = ffi_from_extended_record(&root_bytes, &allocator).unwrap();
+        assert!(root_remaining.is_empty());
         assert_eq!(&*root_msg.moniker_tag, "");
     }
 

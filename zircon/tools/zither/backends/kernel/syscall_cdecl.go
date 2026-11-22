@@ -35,30 +35,19 @@ const syscallCDeclTemplate = `
 	))
 `
 
-// PointerView distinguishes how pointers passed across syscall boundaries are
-// treated in user- and kernel-space.
-type PointerView int
-
-const (
-	PointerViewUserspace PointerView = iota
-	PointerViewKernel
-)
-
 // SyscallCDecl generates a macro-friendly representation of the syscall,
 // minor variations of which are used across generated syscall-related
 // sources.
-func SyscallCDecl(syscall zither.Syscall, ptrView PointerView, macroName func(zither.Syscall) string) string {
+func SyscallCDecl(syscall zither.Syscall, macroName func(zither.Syscall) string) string {
 	tmpl := template.New("SyscallCDeclTemplate").Funcs(template.FuncMap{
 		"Attributes": cDeclAttributes,
 		"LastParameterIndex": func(syscall zither.Syscall) int {
 			return len(syscall.Parameters) - 1
 		},
-		"Macro":      macroName,
-		"Name":       zither.LowerCaseWithUnderscores,
-		"ReturnType": cDeclReturnType,
-		"ParameterType": func(param zither.SyscallParameter) string {
-			return cDeclParameterType(param, ptrView)
-		},
+		"Macro":         macroName,
+		"Name":          zither.LowerCaseWithUnderscores,
+		"ReturnType":    cDeclReturnType,
+		"ParameterType": cDeclParameterType,
 	})
 	template.Must(tmpl.Parse(syscallCDeclTemplate))
 	buf := new(bytes.Buffer)
@@ -106,44 +95,16 @@ func passedAsPointer(param zither.SyscallParameter) bool {
 	return kind.IsPointerLike() || kind == zither.TypeKindStruct
 }
 
-func cDeclParameterType(param zither.SyscallParameter, ptrView PointerView) string {
+func cDeclParameterType(param zither.SyscallParameter) string {
 	kind := param.Type.Kind
 
 	typ := c.DescribeType(param.Type).Type
 	if passedAsPointer(param) {
-		isPointer := kind.IsPointerLike()
-		isConst := param.IsStrictInput()
-		switch ptrView {
-		case PointerViewUserspace:
-			if !isPointer {
-				typ += "*"
-			}
-			if isConst {
-				typ = "const " + typ
-			}
-		case PointerViewKernel:
-			elementType := typ
-			if kind == zither.TypeKindVoidPointer {
-				elementType = "void"
-			} else if isPointer {
-				elementType = c.DescribeType(*param.Type.ElementType).Type
-			}
-			if isConst {
-				elementType = "const " + elementType
-			}
-
-			switch param.Orientation {
-			case zither.ParameterOrientationIn:
-				typ = fmt.Sprintf("user_in_ptr<%s>", elementType)
-			case zither.ParameterOrientationOut:
-				if kind == zither.TypeKindHandle && !param.HasTag(zither.ParameterTagDecayedFromVector) {
-					typ += "*"
-				} else {
-					typ = fmt.Sprintf("user_out_ptr<%s>", elementType)
-				}
-			case zither.ParameterOrientationInOut:
-				typ = fmt.Sprintf("user_inout_ptr<%s>", elementType)
-			}
+		if !kind.IsPointerLike() {
+			typ += "*"
+		}
+		if param.IsStrictInput() {
+			typ = "const " + typ
 		}
 	}
 

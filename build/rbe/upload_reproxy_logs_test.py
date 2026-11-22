@@ -11,11 +11,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import reproxy_logs
-import upload_reproxy_logs
 from api.log import log_pb2
 from api.stat import stat_pb2
 from api.stats import stats_pb2
+from build.rbe import reproxy_logs, upload_reproxy_logs
 
 # Most tests here are testing for python syntax/semantic errors.
 

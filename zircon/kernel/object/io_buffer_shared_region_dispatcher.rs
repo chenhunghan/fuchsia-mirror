@@ -128,7 +128,7 @@ impl IoBufferSharedRegionDispatcher {
         let kernel_vmar = VmAspace::kernel_aspace()
             .root_vmar()
             .expect("kernel aspace root VMAR must be initialized");
-        let mapping = kernel_vmar.create_vm_mapping(
+        let mapping = kernel_vmar.create_vm_mapping_no_overwrite(
             0,
             size as usize,
             0,
@@ -136,7 +136,6 @@ impl IoBufferSharedRegionDispatcher {
             VmObjectPaged::into_vm_object(vmo.clone()),
             0,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            b"IOBuffer shared region",
         )?;
 
         mapping.mapping.map_range(0, size as usize, true, false)?;
@@ -319,7 +318,8 @@ impl IoBufferSharedRegionDispatcher {
             };
 
             // Handle the fault and then retry.
-            soft_fault(fault.pf_va, fault.pf_flags)?;
+            // SAFETY: Called in user thread context after dropping the shared region lock.
+            unsafe { soft_fault(fault.pf_va, fault.pf_flags) }?;
         }
     }
 }

@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.media/cpp/hlcpp_conversion.h>
+#include <fidl/fuchsia.mediacodec/cpp/hlcpp_conversion.h>
 #include <lib/media/codec_impl/codec_adapter.h>
 #include <zircon/assert.h>
 
@@ -32,6 +34,21 @@ CodecAdapter::CoreCodecMetricsImplementation() {
   return std::nullopt;
 }
 
+void CodecAdapter::CoreCodecInit(
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
+  CoreCodecInit(fidl::NaturalToHLCPP(fuchsia_media::FormatDetails(*initial_input_format_details)));
+}
+
+void CodecAdapter::CoreCodecInit(
+    const fuchsia::media::FormatDetails& initial_input_format_details) {
+  ZX_PANIC("CoreCodecInit not implemented");
+}
+
+void CodecAdapter::CoreCodecSetSecureMemoryMode(
+    CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode) {
+  CoreCodecSetSecureMemoryMode(port, fidl::NaturalToHLCPP(secure_memory_mode));
+}
+
 void CodecAdapter::CoreCodecSetSecureMemoryMode(
     CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode) {
   if (secure_memory_mode != fuchsia::mediacodec::SecureMemoryMode::OFF) {
@@ -44,6 +61,17 @@ void CodecAdapter::CoreCodecSetSecureMemoryMode(
   return;
 }
 
+void CodecAdapter::CoreCodecQueueInputFormatDetails(
+    std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details) {
+  CoreCodecQueueInputFormatDetails(
+      fidl::NaturalToHLCPP(fuchsia_media::FormatDetails(*per_stream_override_format_details)));
+}
+
+void CodecAdapter::CoreCodecQueueInputFormatDetails(
+    const fuchsia::media::FormatDetails& per_stream_override_format_details) {
+  ZX_PANIC("CoreCodecQueueInputFormatDetails not implemented");
+}
+
 std::unique_ptr<const fuchsia::media::StreamBufferConstraints>
 CodecAdapter::CoreCodecBuildNewInputConstraints() {
   ZX_PANIC("never called");
@@ -54,6 +82,17 @@ CodecAdapter::CoreCodecBuildNewOutputConstraints(
     uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
     bool buffer_constraints_action_required) {
   ZX_PANIC("never called");
+}
+
+fuchsia_media::StreamOutputFormat CodecAdapter::CoreCodecGetOutputFormat2(
+    uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
+  return fidl::HLCPPToNatural(
+      CoreCodecGetOutputFormat(stream_lifetime_ordinal, new_output_format_details_version_ordinal));
+}
+
+fuchsia::media::StreamOutputFormat CodecAdapter::CoreCodecGetOutputFormat(
+    uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
+  ZX_PANIC("CoreCodecGetOutputFormat not implemented");
 }
 
 void CodecAdapter::CoreCodecResetStreamAfterCurrentFrame() {

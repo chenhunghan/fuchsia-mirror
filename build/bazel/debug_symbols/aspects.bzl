@@ -264,6 +264,14 @@ def _collect_debug_symbols_manifest_aspect_impl(target, aspect_ctx):
             if attr.target_type in ("cxx_executable", "rust_executable"):
                 for info in active_deps:
                     dep_infos.extend(info.executable_link_dep_infos.to_list())
+    elif hasattr(attr, "target_under_test"):
+        # Do not traverse into `target_under_test` of Starlark analysis test
+        # rules (`analysistest.make`). Those fixtures exist only to inspect
+        # providers and actions during analysis (often under synthetic
+        # `config_settings` or mock toolchains) and must not have their binary
+        # outputs materialized via `debug_symbol_files` or recorded in
+        # `.debug_symbols.json`.
+        dep_infos = []
     else:
         dep_infos = [
             dep[DebugSymbolManifestInfo]

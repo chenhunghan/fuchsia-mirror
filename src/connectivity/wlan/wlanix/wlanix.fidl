@@ -4,6 +4,7 @@
 @available(added=HEAD)
 library fuchsia.wlan.wlanix;
 
+using fuchsia.power.system;
 using fuchsia.wlan.ieee80211;
 using fuchsia.wlan.stats;
 using zx;
@@ -301,6 +302,11 @@ open protocol SupplicantStaIfaceCallback {
         3: status_code fuchsia.wlan.ieee80211.StatusCode;
         4: timed_out bool;
     });
+
+    /// A connect scan finished without finding the selected network.
+    flexible OnNetworkNotFound(table {
+        1: ssid fuchsia.wlan.ieee80211.Ssid;
+    });
 };
 
 type StaIfaceCallbackState = flexible enum : uint32 {
@@ -370,6 +376,8 @@ open protocol SupplicantStaNetwork {
         1: key_idx int32;
     });
     flexible Select() -> () error zx.Status;
+    /// Stops any connect attempt or connection started by this network's Select.
+    flexible Disable() -> ();
 };
 
 type Nl80211Message = flexible union {
@@ -410,6 +418,13 @@ open protocol Nl80211 {
 open protocol Nl80211Multicast {
     flexible Message(resource table {
         1: message Nl80211Message;
+        /// Populated when this multicast notification is emitted while wlanix holds a wake lease
+        /// (e.g. scan completion, scheduled scan events, or MLME connect/roam/disconnect events)
+        /// so the system remains awake until the notification is delivered.
+        ///
+        /// Receivers that need the system to stay awake while processing the message must acquire
+        /// their own wake lease or wakeup source before dropping this token.
+        2: wake_lease fuchsia.power.system.LeaseToken;
     });
 };
 

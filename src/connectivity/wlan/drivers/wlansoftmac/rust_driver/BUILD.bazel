@@ -3,8 +3,16 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":wlansoftmac-rust-tests"],
+    visibility = ["//src/connectivity/wlan:__pkg__"],
+)
 
 rustc_library(
     name = "wlansoftmac-rust",
@@ -30,4 +38,25 @@ rustc_library(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+rustc_test(
+    name = "wlansoftmac-rust_test",
+    crate = ":wlansoftmac-rust",
+    # Sets GN output_name via bazel2gn for fuchsia_unittest_package binary naming.
+    crate_name = "wlansoftmac_rust_lib_test",
+    link_deps = ["//src/devices/bin/driver_runtime"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "wlansoftmac-rust-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":wlansoftmac-rust_test"],
 )

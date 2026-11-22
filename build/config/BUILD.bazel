@@ -3,11 +3,26 @@
 # found in the LICENSE file.
 
 load("@bazel_skylib//lib:selects.bzl", "selects")
-load("@fuchsia_build_info//:args.bzl", "clang_ml_inliner")
+load(
+    "@fuchsia_build_info//:args.bzl",
+    "call_graph_section",
+    "clang_embed_bitcode",
+    "clang_enable_error_reproducers",
+    "clang_toolchain_version",
+    "deny_warnings",
+    "enable_frame_pointers",
+    "experimental_cxx_version",
+    "rustc_version_string",
+    "stack_clash_protection",
+    "time_trace",
+    "use_ccache",
+)
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("@fuchsia_rules_common//build_flags:compiler_build_flags.bzl", "compiler_build_flags")
 load(
     "@fuchsia_rules_common//build_flags:default_flag_values.bzl",
+    "DEFAULT_WARNINGS_DEFINES",
+    "IN_TREE_DEFAULT_WARNINGS_CFLAGS",
     "THREAD_SAFETY_CFLAGS",
     "THREAD_SAFETY_DEFINES",
 )
@@ -21,11 +36,44 @@ load(":dwarf_version.bzl", "dwarf_version_build_flags")
 
 package(default_applicable_licenses = ["//:license"])
 
+# LINT.IfChange(in_tree_clang_prefix_map)
+# The list of "-fdebug-prefix-map={FROM}={TO}" flags below ensures that the
+# source file paths embedded in DWARF debug sections within compiled binaries
+# respect the GN-based convention of using a "../../" prefix for checked-in
+# source files. By default, Bazel actions run relative to the execroot and
+# would embed a source path like "src/foo/lib.cc" instead of
+# "../../src/foo/lib.cc".
+#
+# Note that the following flags are matched in reverse order by Clang (the last
+# matching entry wins), so specific guard prefixes must appear after the ""
+# catch-all entry.
+_IN_TREE_DEBUG_PREFIX_MAP_FLAGS = [
+    "-fdebug-prefix-map={}={}".format(old, new)
+    for old, new in (
+        ("", "../../"),  # Fallback: prepend "../../" to checkout-relative paths.
+        (".", "."),  # Preserve "." (-ffile-compilation-dir=.) instead of "../../.".
+        ("./", "../../"),  # Strip "./" (from -iquote .) so "./foo" -> "../../foo".
+        ("./bazel-out/", "bazel-out/"),  # Guard -iquote . ./bazel-out/ lookups.
+        ("./external/", "external/"),  # Guard -iquote . ./external/ lookups.
+        ("./fuchsia_build_generated/", "fuchsia_build_generated/"),  # Guard -iquote . GN-bridged lookups.
+        ("../", "../"),  # Avoid doubling "../" on already-relative parent paths.
+        ("bazel-out/", "bazel-out/"),  # Keep generated outputs unprefixed.
+        ("external/", "external/"),  # Keep external repository files unprefixed.
+        ("fuchsia_build_generated/", "fuchsia_build_generated/"),  # Keep GN-bridged files.
+        ("/", "/"),  # Keep absolute sysroot/toolchain paths unchanged.
+    )
+]
+# LINT.ThenChange(
+#   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/toolchain_utils.bzl:in_tree_clang_prefix_map,
+#   //build/beads/scripts/normalize_clang_args.py:in_tree_clang_prefix_map,
+#   //build/beads/scripts/normalize_clang_args_test.py:in_tree_clang_prefix_map,
+# )
+
 # LINT.IfChange(relative_paths)
 # NOTE: This assumes is_gcc=false && is_pecoff=false in Bazel.
-compiler_build_flags(
+build_flags(
     name = "relative_paths",
-    c_family_flags = [
+    cflags = [
         # Make builds independent of the absolute file path. -ffile-prefix-map= can
         # be used to the same effect, but it requires putting the absolute path to
         # the build directory in the compile command, thus making it dependent on
@@ -42,6 +90,16 @@ compiler_build_flags(
         # have a prefix matching `absolute_path` and hence be mapped to
         # `relative_path` in the debugging information, so this should actually be
         # superfluous for purposes of the debugging information.
+        "-no-canonical-prefixes",
+
+        # Strip the leading "./" added when Clang resolves quoted headers via
+        # @rules_cc's `-iquote .` so header and main-file `__FILE__` strings
+        # both expand to `<path>` (fuchsia_logging::StripDots strips "../" but
+        # not "./") without prefixing bazel-out/ or external/ with "../../".
+        "-fmacro-prefix-map=./=",
+    ] + _IN_TREE_DEBUG_PREFIX_MAP_FLAGS,
+    ldflags = [
+        "-ffile-compilation-dir=.",
         "-no-canonical-prefixes",
     ],
     # `-Zremap-cwd-prefix` ensures that absolute paths do not leak into
@@ -191,12 +249,22 @@ compiler_build_flags(
     name = "icf",
     # This changes C/C++ semantics and might be incompatible with third-party
     # code that relies on function pointers comparison.
-    # TODO(https://fxbug,dev/572722205): Consider --icf=safe.
+    # TODO(https://fxbug.dev/572722205): Consider --icf=safe.
     # Assume GN condition 'is_pecoff == false && linker == "lld"' is always true in Bazel.
     linker_flags = ["--icf=all"],
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(BUILD.gn:icf)
+
+# LINT.IfChange(all_source)
+# "_ALL_SOURCE" is used by some system headers to expose more features (say in
+# fcntl.h) beyond those strictly defined in standard.
+build_flags(
+    name = "all_source",
+    defines = ["_ALL_SOURCE"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:all_source)
 
 # LINT.IfChange(auto_var_init)
 # NOTE: This assumes is_gcc=false in Bazel.
@@ -446,6 +514,54 @@ build_flags(
 #   //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/sanitizer.bzl:clang_sanitizer,
 # )
 
+# LINT.IfChange(default_frame_pointers)
+config_setting(
+    name = "is_linux_host_flavor",
+    constraint_values = [
+        "@platforms//os:linux",
+        "//build/bazel/platforms:linux_flavor_host",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+selects.config_setting_group(
+    name = "is_uninstrumented_host_toolchain",
+    match_all = [
+        ":is_linux_host_flavor",
+        "//build/bazel/config/variant_features/instrumented:false",
+        "//build/bazel/config/variant_features/fuzzer:false",
+        "//build/bazel/config/variant_features/lto:false",
+        "//build/bazel/config/variant_features/cfi:false",
+    ],
+)
+
+selects.config_setting_group(
+    name = "standalone_lsan",
+    match_all = [
+        "//build/bazel/config/variant_features/lsan:true",
+        "//build/bazel/config/variant_features/hwasan:false",
+    ],
+)
+
+selects.config_setting_group(
+    name = "sanitizer_overrides_frame_pointers",
+    match_any = [
+        "//build/bazel/config/variant_features/asan:true",
+        ":standalone_lsan",
+    ],
+)
+
+build_flags(
+    name = "default_frame_pointers",
+    subflags = select({
+        ":sanitizer_overrides_frame_pointers": [],
+        ":is_uninstrumented_host_toolchain": [":no_frame_pointers"],
+        "//conditions:default": [":frame_pointers"] if enable_frame_pointers else [":no_frame_pointers"],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:default_frame_pointers)
+
 # LINT.IfChange(standalone)
 # This should be used by executables that avoid the normal libc dependencies.
 # These must also omit toolchain-provided instrumentation runtimes that will
@@ -465,7 +581,7 @@ build_flags(
         # Make sure the unwinder isn't implicitly brought in for any reason.
         "-unwindlib=none",
     ],
-    subflags = ["//build/config/zircon:nolibc"],
+    subflags = ["//build/config/zircon:nolibc-nostartfiles"],
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(BUILD.gn:standalone)
@@ -560,13 +676,9 @@ build_flags(
 
 build_flags(
     name = "optimize_size",
-    cflags = ["-Os"] + (
-        [
-            # `release` uses AOT model embedded inside the compiler.
-            "-mllvm",
-            "-enable-ml-inliner=release",
-        ] if clang_ml_inliner else []
-    ),
+    # NOTE: -mllvm -enable-ml-inliner=release is injected by ml_inliner_feature in
+    # toolchain_utils.bzl so per-target features = ["-ml_inliner"] opt-outs work.
+    cflags = ["-Os"],
     ldflags = ["-Os"],
     rustflags = ["-Copt-level=s"],
 
@@ -609,8 +721,8 @@ build_flags(
 selects.config_setting_group(
     name = "toolchain_is_instrumented_or_lto",
     match_any = [
-        "//build/bazel/config/toolchain_tags/instrumented:true",
-        "//build/bazel/config/toolchain_tags/lto:true",
+        "//build/bazel/config/variant_features/instrumented:true",
+        "//build/bazel/config/variant_features/lto:true",
     ],
 )
 
@@ -669,3 +781,339 @@ compiler_build_flags(
     visibility = ["//visibility:public"],
 )
 # LINT.ThenChange(BUILD.gn:no-stack-protector)
+
+# LINT.IfChange(sdk_extra_warnings)
+# Code that goes into the SDK or otherwise contributes to the SDK surface area
+# in source form will be compiled in many different environments. As such, we
+# should compile it with stricter warnings in fuchsia.git.
+build_flags(
+    name = "sdk_extra_warnings",
+    cflags_cc = [
+        "-Wnon-virtual-dtor",
+        "-Wshadow",
+        "-Wctad-maybe-unsupported",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Same as `sdk_extra_warnings`, but intended to be added to the configuration of
+# test targets that exercise SDK headers, to verify that the public headers of
+# SDK libraries build under a stricter set of warnings.
+build_flags(
+    name = "test_exercising_sdk_headers",
+    subflags = [":sdk_extra_warnings"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:sdk_extra_warnings)
+
+# LINT.IfChange(color_diagnostics)
+# NOTE: This assumes is_gcc == false in Bazel.
+compiler_build_flags(
+    name = "color_diagnostics",
+    c_family_flags = ["-fcolor-diagnostics"],
+    linker_flags = ["--color-diagnostics"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:color_diagnostics)
+
+# LINT.IfChange(crash_diagnostics)
+# NOTE: This assumes is_gcc == false in Bazel. -fcrash-diagnostics-dir is omitted
+# as incompatible with Bazel sandboxing.
+compiler_build_flags(
+    name = "crash_diagnostics",
+    c_family_flags = ["-fcrash-diagnostics=all"] + (
+        ["-gen-reproducer=error"] if clang_enable_error_reproducers else []
+    ),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:crash_diagnostics)
+
+# LINT.IfChange(call-graph-section)
+# NOTE: This assumes is_gcc == false && is_elf == true in Bazel.
+compiler_build_flags(
+    name = "call-graph-section",
+    c_family_flags = ["-fexperimental-call-graph-section"] if call_graph_section else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:call-graph-section)
+
+# LINT.IfChange(stack-size-section)
+# NOTE: This assumes is_gcc == false in Bazel.
+compiler_build_flags(
+    name = "stack-size-section",
+    c_family_flags = ["-fstack-size-section"],
+    rust_linker_llvm_flags = ["--stack-size-section"],
+    rustflags = ["-Zemit-stack-sizes"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:stack-size-section)
+
+# LINT.IfChange(stack-clash-protection)
+selects.config_setting_group(
+    name = "is_linux_or_fuchsia",
+    match_any = [
+        "@platforms//os:fuchsia",
+        "@platforms//os:linux",
+    ],
+)
+
+selects.config_setting_group(
+    name = "is_64bit_target_cpu",
+    match_any = [
+        "@platforms//cpu:arm64",
+        "@platforms//cpu:riscv64",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "supports_stack_clash_protection",
+    match_all = [
+        ":is_linux_or_fuchsia",
+        ":is_64bit_target_cpu",
+    ],
+)
+
+build_flags(
+    name = "stack-clash-protection",
+    cflags = select({
+        ":supports_stack_clash_protection": ["-fstack-clash-protection"],
+        "//conditions:default": [],
+    }) if stack_clash_protection else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:stack-clash-protection)
+
+# LINT.IfChange(time-trace)
+# NOTE: This assumes is_gcc == false in Bazel.
+build_flags(
+    name = "time-trace",
+    cflags = ["-ftime-trace"] if time_trace else [],
+    ldflags = ["-ftime-trace"] if time_trace else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:time-trace)
+
+# LINT.IfChange(rust-depinfo)
+build_flags(
+    name = "rust-depinfo",
+    rustflags = ["-Zbinary-dep-depinfo"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:rust-depinfo)
+
+# LINT.IfChange(toolchain_version_stamp)
+build_flags(
+    name = "toolchain_version_stamp",
+    defines = ['TOOLCHAIN_VERSION="{}"'.format(clang_toolchain_version)] if clang_toolchain_version else [],
+    rustflags = ['--cfg=__rust_toolchain="{}"'.format(rustc_version_string)],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:toolchain_version_stamp)
+
+# LINT.IfChange(cpu_baseline)
+compiler_build_flags(
+    name = "cpu_baseline",
+    compiler_subflags = select({
+        "@platforms//cpu:arm": ["//build/config/arm"],
+        "@platforms//cpu:arm64": ["//build/config/arm64"],
+        "@platforms//cpu:riscv64": ["//build/config/riscv64"],
+        "@platforms//cpu:x86_64": ["//build/config/x64"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:cpu_baseline)
+
+# LINT.IfChange(clang_defaults)
+# NOTE: This assumes is_elf == true in Bazel. The x64 assembly-only flag
+# `-Wa,--mrelax-relocations=yes` is injected on assemble actions in
+# cc_features.bzl because build_flags() has no separate asmflags attribute.
+build_flags(
+    name = "clang_defaults",
+    cflags_cc = select({
+        "@platforms//os:linux": ["-stdlib=libc++"],
+        "//conditions:default": [],
+    }),
+    ldflags = select({
+        "@platforms//os:linux": [
+            "-stdlib=libc++",
+            "--start-no-unused-arguments",
+            "-unwindlib=libunwind",
+            "-rtlib=compiler-rt",
+            "--end-no-unused-arguments",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(
+#     BUILD.gn:clang_defaults,
+#     //build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/cc_features.bzl:clang_defaults,
+# )
+
+# LINT.IfChange(embed_bitcode)
+build_flags(
+    name = "embed_bitcode",
+    cflags = [
+        "-Xclang",
+        "-fembed-bitcode=all",
+    ] if clang_embed_bitcode else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:embed_bitcode)
+
+# LINT.IfChange(fast-math)
+# -ffast-math enables 4 sets of optimizations:
+#     no-math-errno, no-rounding-math, unsafe-math-optimizations, finite-math-only
+# This config sets the first 3. Use one of the subsequent configs to disable/enable the last one.
+build_flags(
+    name = "fast-math-baseline",
+    cflags = [
+        "-fno-math-errno",
+        "-fno-rounding-math",
+
+        # Enables six targeted optimizations: approx-func, associative-math,
+        # reciprocal-math, no-signed-zeros, no-trapping-math and fp-contract=fast
+        "-funsafe-math-optimizations",
+
+        # -ffinite-math-only is set (or cleared) elsewhere.
+    ],
+    visibility = ["//visibility:public"],
+)
+
+# Disables finite-math-only, but sets all other fast-math optimizations. Allow
+# inf/nan to be used (while avoiding UB), with the other float-based
+# optimizations.
+build_flags(
+    name = "fast-math",
+    cflags = [
+        "-fno-finite-math-only",  # Implies honor-infinities and honor-nans.
+    ],
+    subflags = [":fast-math-baseline"],
+    visibility = ["//visibility:public"],
+)
+
+# Enables finite-math-only, along with all other fast-math optimizations.
+# To be used when inf/nan are guaranteed to NOT be encountered.
+build_flags(
+    name = "fast-math-no-inf-nan",
+    cflags = [
+        "-ffinite-math-only",  # Implies no-honor-infinities and no-honor-nans.
+    ],
+    subflags = [":fast-math-baseline"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:fast-math)
+
+# LINT.IfChange(ffp_contract)
+build_flags(
+    name = "ffp_contract",
+    cflags = ["-ffp-contract=off"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:ffp_contract)
+
+# LINT.IfChange(gnuc_version)
+# NOTE: This assumes is_gcc == false in Bazel.
+build_flags(
+    name = "gnuc_version",
+    cflags = select({
+        "@platforms//os:linux": ["-fgnuc-version=6"],
+        "//conditions:default": ["-fgnuc-version=16.1"],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:gnuc_version)
+
+# LINT.IfChange(compiler)
+# NOTE: This assumes is_gcc == false in Bazel.
+build_flags(
+    name = "compiler",
+    cflags_cc = ["-fvisibility-inlines-hidden"],
+    subflags = [
+        ":color_diagnostics",
+        ":crash_diagnostics",
+        ":time-trace",
+        ":toolchain_version_stamp",
+        ":call-graph-section",
+        ":stack-size-section",
+        ":stack-clash-protection",
+        ":rust-depinfo",
+        ":clang_defaults",
+        ":embed_bitcode",
+        ":gnuc_version",
+        ":ffp_contract",
+    ] + select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:compiler"],
+        "@platforms//os:linux": ["//build/config/linux:compiler"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:compiler)
+
+# LINT.IfChange(release)
+build_flags(
+    name = "release",
+    defines = ["NDEBUG=1"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:release)
+
+# LINT.IfChange(Wno-unused-template)
+build_flags(
+    name = "Wno-unused-template",
+    cflags = ["-Wno-unused-template"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:Wno-unused-template)
+
+# LINT.IfChange(Wno-unused-but-set-variable)
+build_flags(
+    name = "Wno-unused-but-set-variable",
+    cflags = ["-Wno-unused-but-set-variable"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:Wno-unused-but-set-variable)
+
+# LINT.IfChange(Wno-deprecated-this-capture)
+build_flags(
+    name = "Wno-deprecated-this-capture",
+    cflags_cc = ["-Wno-deprecated-this-capture"],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:Wno-deprecated-this-capture)
+
+# LINT.IfChange(default_warnings)
+# NOTE: This assumes is_gcc == false in Bazel.
+build_flags(
+    name = "default_warnings",
+    cflags = IN_TREE_DEFAULT_WARNINGS_CFLAGS,
+    defines = DEFAULT_WARNINGS_DEFINES,
+    subflags = [
+        ":Wno-deprecated-this-capture",
+        ":Wno-unused-but-set-variable",
+        ":Wno-unused-template",
+    ],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(
+#     BUILD.gn:default_warnings,
+#     //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:default_warnings,
+# )
+
+# LINT.IfChange(werror)
+# NOTE: This assumes is_pecoff == false in Bazel.
+# Matches BUILD.gn:werror: deny_warnings only gates Rust -Dwarnings, while
+# C/C++ -Werror and -Wa,--fatal-warnings are gated only on not use_ccache.
+compiler_build_flags(
+    name = "werror",
+    cflags = ([] if use_ccache else [
+        "-Werror",
+        "-Wa,--fatal-warnings",
+    ] + (["-Wno-error=deprecated-declarations"] if experimental_cxx_version else [])),
+    rustflags = ["-Dwarnings"] if deny_warnings else [],
+    visibility = ["//visibility:public"],
+)
+# LINT.ThenChange(BUILD.gn:werror)

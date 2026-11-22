@@ -5,7 +5,7 @@
 #ifndef SRC_DEVICES_USB_DRIVERS_XHCI_REGISTERS_H_
 #define SRC_DEVICES_USB_DRIVERS_XHCI_REGISTERS_H_
 
-#include <lib/ddk/hw/arch_ops.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <zircon/types.h>
 
 #include <hwreg/bitfields.h>
@@ -142,7 +142,7 @@ class Control : public hwreg::RegisterBase<Control, uint32_t> {
   void ToTrb(TRB* trb) {
     hwreg::RegisterMmio io(&trb->control);
     WriteTo(&io);
-    hw_mb();
+    DataMemoryBarrier();
   }
 
   static auto FromTRB(TRB* trb) {
@@ -534,6 +534,8 @@ class CONFIG : public hwreg::RegisterBase<CONFIG, uint32_t> {
 // Section 5.4.8
 class PORTSC : public hwreg::RegisterBase<PORTSC, uint32_t> {
  public:
+  // Port config error change
+  DEF_BIT(23, CEC);
   // Port link change
   DEF_BIT(22, PLC);
   // Port reset change

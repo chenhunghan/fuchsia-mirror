@@ -20,8 +20,7 @@ class Handle;
 extern "C" {
 void rust_kernel_mapped_vmo_new(void* storage);
 void rust_kernel_mapped_vmo_drop_in_place(void* storage);
-zx_status_t rust_kernel_mapped_vmo_init(void* storage, VmObject* vmo, size_t offset, size_t size,
-                                        const char* name, size_t name_len);
+zx_status_t rust_kernel_mapped_vmo_init(void* storage, VmObject* vmo, size_t offset, size_t size);
 Handle* rust_kernel_mapped_vmo_publish(const void* storage, const char* vmo_name,
                                        size_t vmo_name_len, size_t stream_size);
 vaddr_t rust_kernel_mapped_vmo_base_locking(const void* storage);
@@ -38,9 +37,8 @@ class KernelMappedVmo {
   DISALLOW_COPY_ASSIGN_AND_MOVE(KernelMappedVmo);
 
   // Initialize with a kernel mapping from the VMO.
-  zx_status_t Init(fbl::RefPtr<VmObject> vmo, size_t offset, size_t size, const char* name) {
-    return rust_kernel_mapped_vmo_init(&storage_, fbl::ExportToRawPtr(&vmo), offset, size, name,
-                                       name ? __builtin_strlen(name) : 0);
+  zx_status_t Init(fbl::RefPtr<VmObject> vmo, size_t offset, size_t size) {
+    return rust_kernel_mapped_vmo_init(&storage_, fbl::ExportToRawPtr(&vmo), offset, size);
   }
 
   // Publish this VMO to userland as a read-only handle using the given name

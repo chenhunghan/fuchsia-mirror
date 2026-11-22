@@ -1,0 +1,21 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+/dts-v1/;
+
+/ {
+    model = "Starnix Test";
+    compatible = "fuchsia,starnix-test";
+    #address-cells = <2>;
+    #size-cells = <2>;
+
+    chosen {
+        bootargs = "console=ttyS0";
+    };
+
+    memory@80000000 {
+        device_type = "memory";
+        reg = <0x0 0x80000000 0x0 0x10000000>;
+    };
+};

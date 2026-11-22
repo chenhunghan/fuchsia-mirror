@@ -27,12 +27,12 @@ extern const FidlCodedTable fidl_test_coding_NewerSimpleTableTable;
 extern const FidlCodedTable fidl_test_coding_SimpleTableTable;
 extern const FidlCodedTable fidl_test_coding_ResourceSimpleTableTable;
 extern const FidlCodedTable fidl_test_coding_fuchsia_SmallerTableOfStructWithHandleTable;
-extern const FidlCodedXUnion fidl_test_coding_SampleUnionTable;
-extern const FidlCodedXUnion fidl_test_coding_SampleXUnionTable;
-extern const FidlCodedXUnion fidl_test_coding_SampleStrictXUnionTable;
-extern const FidlCodedStruct fidl_test_coding_SampleXUnionStructTable;
-extern const FidlCodedStruct fidl_test_coding_SampleStrictXUnionStructTable;
-extern const FidlCodedStruct fidl_test_coding_SampleNullableXUnionStructTable;
+extern const FidlCodedUnion fidl_test_coding_SampleUnionTable;
+extern const FidlCodedUnion fidl_test_coding_SampleFlexibleUnionTable;
+extern const FidlCodedUnion fidl_test_coding_SampleStrictUnionTable;
+extern const FidlCodedStruct fidl_test_coding_SampleFlexibleUnionStructTable;
+extern const FidlCodedStruct fidl_test_coding_SampleStrictUnionStructTable;
+extern const FidlCodedStruct fidl_test_coding_SampleNullableFlexibleUnionStructTable;
 
 extern const FidlCodedBits fidl_test_coding_Int32BitsTable;
 extern const FidlCodedStruct fidl_test_coding_Int32BitsStructTable;
@@ -52,7 +52,7 @@ extern const FidlCodedStruct fidl_test_coding_Uint64EnumStructTable;
 extern const FidlCodedStruct fidl_test_coding_LinearizerTestVectorOfUint32RequestTable;
 extern const FidlCodedStruct fidl_test_coding_LinearizerTestVectorOfStringRequestTable;
 
-extern const FidlCodedStruct fidl_test_coding_LLCPPStyleUnionStructTable;
+extern const FidlCodedStruct fidl_test_coding_WireStyleUnionStructTable;
 
 extern const FidlCodedStruct fidl_test_coding_Uint32VectorStructTable;
 extern const FidlCodedStruct fidl_test_coding_StringStructTable;
@@ -67,14 +67,14 @@ extern const FidlCodedStruct fidl_test_coding_OptionalBoolStructTable;
 
 namespace fidl {
 
-class LLCPPStyleUnion {
+class WireStyleUnion {
  public:
-  LLCPPStyleUnion() : ordinal_(Ordinal::Invalid), envelope_{} {}
+  WireStyleUnion() : ordinal_(Ordinal::Invalid), envelope_{} {}
 
-  LLCPPStyleUnion(LLCPPStyleUnion&&) = default;
-  LLCPPStyleUnion& operator=(LLCPPStyleUnion&&) = default;
+  WireStyleUnion(WireStyleUnion&&) = default;
+  WireStyleUnion& operator=(WireStyleUnion&&) = default;
 
-  ~LLCPPStyleUnion() { reset_ptr(nullptr); }
+  ~WireStyleUnion() { reset_ptr(nullptr); }
 
   void set_Primitive(::fidl::ObjectView<int32_t> elem) {
     ordinal_ = Ordinal::kPrimitive;
@@ -82,7 +82,7 @@ class LLCPPStyleUnion {
   }
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kPrimitive = 1,  // 0x1
   };
@@ -98,9 +98,9 @@ class LLCPPStyleUnion {
   ::fidl::UntypedEnvelope envelope_;
 };
 
-struct LLCPPStyleUnionStruct {
+struct WireStyleUnionStruct {
   FIDL_ALIGNDECL
-  LLCPPStyleUnion u;
+  WireStyleUnion u;
 };
 
 using SimpleTable = fidl::VectorView<fidl_envelope_t>;
@@ -141,7 +141,7 @@ struct SmallerTableOfStructEnvelopes {
   alignas(FIDL_ALIGNMENT) fidl_envelope_t b;
 };
 
-struct SampleXUnion {
+struct SampleFlexibleUnion {
   FIDL_ALIGNDECL
   fidl_union_t header;
 
@@ -156,7 +156,7 @@ struct SampleXUnion {
   FIDL_ALIGNDECL
   int32_t raw_int;
 };
-struct SampleXUnionV2 {
+struct SampleFlexibleUnionV2 {
   FIDL_ALIGNDECL
   fidl_union_t header;
 
@@ -171,11 +171,11 @@ struct SampleXUnionV2 {
   FIDL_ALIGNDECL
   int32_t raw_int;
 };
-constexpr uint32_t kSampleXUnionIntStructOrdinal = 1;
-constexpr uint32_t kSampleXUnionSimpleTableOrdinal = 2;
-constexpr uint32_t kSampleXUnionRawIntOrdinal = 3;
+constexpr uint32_t kSampleFlexibleUnionIntStructOrdinal = 1;
+constexpr uint32_t kSampleFlexibleUnionSimpleTableOrdinal = 2;
+constexpr uint32_t kSampleFlexibleUnionRawIntOrdinal = 3;
 
-struct SampleStrictXUnion {
+struct SampleStrictUnion {
   FIDL_ALIGNDECL
   fidl_union_t header;
 
@@ -190,31 +190,31 @@ struct SampleStrictXUnion {
   FIDL_ALIGNDECL
   int32_t raw_int;
 };
-constexpr uint32_t kSampleStrictXUnionIntStructOrdinal = 1;
-constexpr uint32_t kSampleStrictXUnionSimpleTableOrdinal = 2;
-constexpr uint32_t kSampleStrictXUnionRawIntOrdinal = 3;
+constexpr uint32_t kSampleStrictUnionIntStructOrdinal = 1;
+constexpr uint32_t kSampleStrictUnionSimpleTableOrdinal = 2;
+constexpr uint32_t kSampleStrictUnionRawIntOrdinal = 3;
 
-struct SampleXUnionStruct {
+struct SampleFlexibleUnionStruct {
   FIDL_ALIGNDECL
-  SampleXUnion xu;
+  SampleFlexibleUnion xu;
 };
-struct SampleXUnionV2Struct {
+struct SampleFlexibleUnionV2Struct {
   FIDL_ALIGNDECL
-  SampleXUnionV2 xu;
-};
-
-struct SampleStrictXUnionStruct {
-  FIDL_ALIGNDECL
-  SampleStrictXUnion xu;
+  SampleFlexibleUnionV2 xu;
 };
 
-struct SampleNullableXUnionStruct {
+struct SampleStrictUnionStruct {
   FIDL_ALIGNDECL
-  SampleXUnion opt_xu;
+  SampleStrictUnion xu;
 };
-struct SampleNullableXUnionV2Struct {
+
+struct SampleNullableFlexibleUnionStruct {
   FIDL_ALIGNDECL
-  SampleXUnionV2 opt_xu;
+  SampleFlexibleUnion opt_xu;
+};
+struct SampleNullableFlexibleUnionV2Struct {
+  FIDL_ALIGNDECL
+  SampleFlexibleUnionV2 opt_xu;
 };
 
 struct Uint32VectorStruct {

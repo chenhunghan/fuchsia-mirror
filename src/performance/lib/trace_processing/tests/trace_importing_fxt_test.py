@@ -5,9 +5,12 @@
 """Unit tests for trace_importing_fxt.py."""
 
 import contextlib
+import gc
 import json
 import pathlib
+import sys
 import tempfile
+import types
 import unittest
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -86,32 +89,58 @@ class QueriesTest(unittest.TestCase):
         )
 
     def test_get_slices_with_filtering(self) -> None:
-        # 1. Filter by pattern
+        # 1. Filter by pattern uses full-match semantics: "Read" matches "Read"
+        # but not "ReadSubBegin", while "Read.*" matches both.
         importer_filtered = trace_importing_fxt._FxtImporter(
             self.session, patterns={"Read"}
         )
         events, _, _ = importer_filtered.get_slices()
         self.assertGreater(len(events), 0)
         for event in events:
-            self.assertIn("Read", event.name)
+            self.assertEqual(event.name, "Read")
 
-        # 2. Filter by category
+        importer_prefix = trace_importing_fxt._FxtImporter(
+            self.session, patterns={"Read.*"}
+        )
+        prefix_events, _, _ = importer_prefix.get_slices()
+        self.assertIn("ReadSubBegin", {e.name for e in prefix_events})
+
+        # 2. Filter by category (both with patterns=None and patterns=set())
         all_events, _, _ = self.importer.get_slices()
         target_cat = all_events[0].category
-        importer_cat = trace_importing_fxt._FxtImporter(
-            self.session, categories={target_cat}
-        )
-        cat_events, _, _ = importer_cat.get_slices()
-        self.assertGreater(len(cat_events), 0)
-        for event in cat_events:
-            self.assertEqual(event.category, target_cat)
+        patterns_opts: tuple[set[str] | None, ...] = (None, set())
+        for patterns_arg in patterns_opts:
+            importer_cat = trace_importing_fxt._FxtImporter(
+                self.session, patterns=patterns_arg, categories={target_cat}
+            )
+            cat_events, _, _ = importer_cat.get_slices()
+            self.assertGreater(len(cat_events), 0)
+            for event in cat_events:
+                self.assertEqual(event.category, target_cat)
 
-        # 3. Empty pattern set (discards all events)
+        # 3. Empty pattern set with no categories discards all events.
         importer_empty = trace_importing_fxt._FxtImporter(
             self.session, patterns=set()
         )
         empty_events, _, _ = importer_empty.get_slices()
         self.assertEqual(len(empty_events), 0)
+
+        # 4. Wildcard pattern r".*" short-circuits filtering (including when
+        # combined with categories under OR semantics).
+        importer_wildcard = trace_importing_fxt._FxtImporter(
+            self.session, patterns={r".*"}, categories={target_cat}
+        )
+        self.assertTrue(importer_wildcard._filter.include_all)
+        self.assertEqual(importer_wildcard._filter.name_patterns, frozenset())
+        self.assertEqual(importer_wildcard._filter.categories, frozenset())
+        wildcard_events, _, _ = importer_wildcard.get_slices()
+        self.assertEqual(len(wildcard_events), len(all_events))
+        all_counters = self.importer.get_counter_events().events
+        self.assertGreater(len(all_counters), 0)
+        self.assertEqual(
+            len(importer_wildcard.get_counter_events().events),
+            len(all_counters),
+        )
 
     def test_get_pid_to_name(self) -> None:
         processes = self.importer.get_pid_to_name()
@@ -212,6 +241,302 @@ class QueriesTest(unittest.TestCase):
         self.assertIsInstance(counters.events[0], trace_model.CounterEvent)
         self.assertEqual(counters.events[0].name, "cpu_usage")
 
+    def test_get_args_map_scoping_and_prewrapped_proxies(self) -> None:
+        all_args = self.importer._get_args_map()
+        self.assertGreater(len(all_args), 0)
+        for arg_proxy in all_args.values():
+            self.assertIsInstance(arg_proxy, types.MappingProxyType)
+            for key in arg_proxy:
+                self.assertIs(key, sys.intern(key))
+
+        # Empty pattern set with no categories short-circuits without querying SQL.
+        empty_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns=set()
+        )
+        with mock.patch.object(
+            empty_importer, "_query_as", wraps=empty_importer._query_as
+        ) as mock_empty_query:
+            self.assertEqual(empty_importer._get_args_map(), {})
+        mock_empty_query.assert_not_called()
+
+        # Filtered importer restricts args SQL via `arg_set_id IN (...)` (keeping
+        # `global_instant`'s arg set while excluding `process_instant`,
+        # `thread_instant`, and flow/track arg sets) and preserves slice/counter
+        # `.args` identically to unfiltered import.
+        filtered_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns={"^global_instant$", "^Read$", "cpu_usage"}
+        )
+        with mock.patch.object(
+            filtered_importer, "_query_as", wraps=filtered_importer._query_as
+        ) as mock_filtered_query:
+            filtered_args = filtered_importer._get_args_map()
+        mock_filtered_query.assert_called_once()
+        _, executed_sql = mock_filtered_query.call_args[0]
+        self.assertIn("AND arg_set_id IN (", executed_sql)
+        self.assertGreater(len(filtered_args), 0)
+        self.assertLess(len(filtered_args), len(all_args))
+        for arg_set_id, proxy in filtered_args.items():
+            self.assertEqual(proxy, all_args[arg_set_id])
+
+        unfiltered_events_by_key = {
+            (type(e), e.category, e.name, e.start, e.pid, e.tid): e
+            for e in (
+                *self.importer.get_slices().events,
+                *self.importer.get_counter_events().events,
+            )
+        }
+        filtered_slices = filtered_importer.get_slices().events
+        filtered_counters = filtered_importer.get_counter_events().events
+        self.assertGreater(len(filtered_slices), 0)
+        self.assertGreater(len(filtered_counters), 0)
+        self.assertTrue(any(bool(e.args) for e in filtered_slices))
+        self.assertTrue(any(bool(e.args) for e in filtered_counters))
+
+        filtered_proxies = tuple(filtered_args.values())
+        for event in (*filtered_slices, *filtered_counters):
+            event_key = (
+                type(event),
+                event.category,
+                event.name,
+                event.start,
+                event.pid,
+                event.tid,
+            )
+            self.assertIn(event_key, unfiltered_events_by_key)
+            self.assertEqual(
+                event.args, unfiltered_events_by_key[event_key].args
+            )
+        # Slices reuse pre-wrapped MappingProxyType instances from the args map.
+        # Counter events merge metric values from `counter.value` into separate
+        # mappings rather than reusing `_args_map` entries directly.
+        for slice_event in filtered_slices:
+            if slice_event.args:
+                self.assertTrue(
+                    any(slice_event.args is proxy for proxy in filtered_proxies)
+                )
+
+    def test_get_counter_events_with_filtering(self) -> None:
+        # Empty pattern set returns no counter events.
+        empty_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns=set()
+        )
+        self.assertEqual(empty_importer.get_counter_events().events, [])
+
+        # Non-empty pattern set keeps matching counter tracks (`cpu_usage`) and
+        # excludes non-matching tracks.
+        matching_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns={"cpu_usage"}
+        )
+        matching_events = matching_importer.get_counter_events().events
+        self.assertGreater(len(matching_events), 0)
+        self.assertEqual(
+            [event.name for event in matching_events],
+            ["cpu_usage"] * len(matching_events),
+        )
+
+        # Partial substring pattern ("cpu") and arg_key suffix pattern
+        # (".*percentage") do not match "cpu_usage:average_cpu_percentage:0"
+        # under event_name full-match anchoring, whereas "cpu.*" and explicit
+        # "^cpu_usage$" do.
+        for non_matching_pat in ("cpu", ".*percentage"):
+            partial_importer = trace_importing_fxt._FxtImporter(
+                self.session, patterns={non_matching_pat}
+            )
+            self.assertEqual(partial_importer.get_counter_events().events, [])
+
+        for matching_pat in ("cpu.*", "^cpu_usage$"):
+            regex_importer = trace_importing_fxt._FxtImporter(
+                self.session, patterns={matching_pat}
+            )
+            self.assertEqual(
+                [
+                    event.name
+                    for event in regex_importer.get_counter_events().events
+                ],
+                ["cpu_usage"] * len(matching_events),
+            )
+
+        # Category-only filter with empty patterns returns no counter events.
+        category_only_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns=set(), categories={"io"}
+        )
+        self.assertEqual(category_only_importer.get_counter_events().events, [])
+
+        # Colon-containing counter event names (e.g. "Demand:Constant:CPU:3")
+        # are right-split consistently with `_parse_counter_track`.
+        colon_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns={"Demand:Constant"}
+        )
+        colon_filter = colon_importer._counter_filter_sql("ct")
+        assert colon_filter is not None
+        matched_tracks = tuple(
+            row["name"]
+            for row in self.session.run_query(
+                "WITH ct(name) AS (VALUES"
+                " ('Demand:Constant:CPU:3'),"
+                " ('Demand:Variable:CPU:3'),"
+                " ('Demand:CPU:3'))"
+                f" SELECT ct.name FROM ct WHERE {colon_filter}"
+            )
+        )
+        self.assertSequenceEqual(matched_tracks, ("Demand:Constant:CPU:3",))
+
+        non_matching_importer = trace_importing_fxt._FxtImporter(
+            self.session, patterns={"^Read$"}
+        )
+        self.assertEqual(non_matching_importer.get_counter_events().events, [])
+
+    def test_get_counter_events_streaming_grouping_and_track_cache(
+        self,
+    ) -> None:
+        fresh_importer = trace_importing_fxt._FxtImporter(self.session)
+        fresh_importer._args_map = {
+            10: types.MappingProxyType({"unit": "bytes", "zram_bytes": -1.0}),
+            11: types.MappingProxyType({"source": "kernel"}),
+        }
+        mock_rows = (
+            # ts=1000: two metrics on track_id=0 merge into one CounterEvent
+            # (including merging `extra_args` from both rows); track_id=1 stays
+            # separate; plain track without ':' uses "value".
+            trace_importing_fxt._CounterRow(
+                1000, 128.0, "kmem_stats_a:zram_bytes:0", 1, 2, 10, 100
+            ),
+            trace_importing_fxt._CounterRow(
+                1000, 256.0, "kmem_stats_a:free_bytes:0", 1, 2, 11, 101
+            ),
+            trace_importing_fxt._CounterRow(
+                1000, 512.0, "kmem_stats_a:zram_bytes:1", 1, 2, None, 102
+            ),
+            trace_importing_fxt._CounterRow(
+                1000, 0.75, "cpu_load", 0, 0, None, 103
+            ),
+            # ts=2000: repeated track names hit parsed_tracks cache and flush a
+            # separate timestamp window.
+            trace_importing_fxt._CounterRow(
+                2000, 64.0, "kmem_stats_a:zram_bytes:0", 1, 2, None, 104
+            ),
+            trace_importing_fxt._CounterRow(
+                2000, 0.5, "cpu_load", 0, 0, None, 105
+            ),
+            # ts=3000: repeated single-entry scalar value reuses the cached
+            # MappingProxyType instance from ts=1000.
+            trace_importing_fxt._CounterRow(
+                3000, 0.75, "cpu_load", 0, 0, None, 106
+            ),
+        )
+        with mock.patch.object(
+            fresh_importer, "_query_as", return_value=iter(mock_rows)
+        ):
+            events = fresh_importer.get_counter_events().events
+
+        expected: list[trace_model.Event] = [
+            trace_model.CounterEvent(
+                0,
+                category="",
+                name="kmem_stats_a",
+                start=trace_time.TimePoint(1000),
+                pid=1,
+                tid=2,
+                args={
+                    "unit": "bytes",
+                    "source": "kernel",
+                    "zram_bytes": 128.0,
+                    "free_bytes": 256.0,
+                },
+            ),
+            trace_model.CounterEvent(
+                1,
+                category="",
+                name="kmem_stats_a",
+                start=trace_time.TimePoint(1000),
+                pid=1,
+                tid=2,
+                args={"zram_bytes": 512.0},
+            ),
+            trace_model.CounterEvent(
+                0,
+                category="",
+                name="cpu_load",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"value": 0.75},
+            ),
+            trace_model.CounterEvent(
+                0,
+                category="",
+                name="kmem_stats_a",
+                start=trace_time.TimePoint(2000),
+                pid=1,
+                tid=2,
+                args={"zram_bytes": 64.0},
+            ),
+            trace_model.CounterEvent(
+                0,
+                category="",
+                name="cpu_load",
+                start=trace_time.TimePoint(2000),
+                pid=0,
+                tid=0,
+                args={"value": 0.5},
+            ),
+            trace_model.CounterEvent(
+                0,
+                category="",
+                name="cpu_load",
+                start=trace_time.TimePoint(3000),
+                pid=0,
+                tid=0,
+                args={"value": 0.75},
+            ),
+        ]
+        test_utils.assertEventListsEqual(self, events, expected)
+        self.assertIs(events[2].args, events[5].args)
+        self.assertIsNot(events[2].args, events[4].args)
+
+    def test_wrap_args_type_discrimination_and_cache_limit(self) -> None:
+        fresh_importer = trace_importing_fxt._FxtImporter(self.session)
+
+        # 1. Numerically equal values of distinct scalar types (int, float, bool)
+        # must not collide in `_single_arg_cache`.
+        proxy_int = fresh_importer._wrap_args({"v": 0})
+        proxy_float = fresh_importer._wrap_args({"v": 0.0})
+        proxy_bool = fresh_importer._wrap_args({"v": False})
+
+        self.assertIs(proxy_int, fresh_importer._wrap_args({"v": 0}))
+        self.assertIs(proxy_float, fresh_importer._wrap_args({"v": 0.0}))
+        self.assertIs(proxy_bool, fresh_importer._wrap_args({"v": False}))
+        self.assertIsNot(proxy_int, proxy_float)
+        self.assertIsNot(proxy_int, proxy_bool)
+        self.assertIsNot(proxy_float, proxy_bool)
+        self.assertIs(type(proxy_int["v"]), int)
+        self.assertIs(type(proxy_float["v"]), float)
+        self.assertIs(type(proxy_bool["v"]), bool)
+
+        # 2. Once `_single_arg_cache` reaches `_MAX_SINGLE_ARG_CACHE_SIZE`,
+        # `_wrap_args` still returns a read-only `MappingProxyType` without
+        # growing the cache past the limit.
+        fresh_importer._single_arg_cache.clear()
+        for i in range(trace_importing_fxt._MAX_SINGLE_ARG_CACHE_SIZE):
+            fresh_importer._wrap_args({"k": i})
+        self.assertEqual(
+            len(fresh_importer._single_arg_cache),
+            trace_importing_fxt._MAX_SINGLE_ARG_CACHE_SIZE,
+        )
+
+        overflow_proxy = fresh_importer._wrap_args(
+            {"k": trace_importing_fxt._MAX_SINGLE_ARG_CACHE_SIZE}
+        )
+        self.assertIsInstance(overflow_proxy, types.MappingProxyType)
+        self.assertEqual(
+            overflow_proxy,
+            {"k": trace_importing_fxt._MAX_SINGLE_ARG_CACHE_SIZE},
+        )
+        self.assertEqual(
+            len(fresh_importer._single_arg_cache),
+            trace_importing_fxt._MAX_SINGLE_ARG_CACHE_SIZE,
+        )
+
     def test_get_counter_events_preserves_track_id(self) -> None:
         fresh_importer = trace_importing_fxt._FxtImporter(self.session)
         fresh_importer._args_map = {}
@@ -223,7 +548,10 @@ class QueriesTest(unittest.TestCase):
                 1000, 360.0, "Rate:CPU:3", 0, 0, None, 11
             ),
             trace_importing_fxt._CounterRow(
-                1000, 0.75, "cpu_load", 0, 0, None, 12
+                1000, 250.0, "Demand:Constant:CPU:3", 0, 0, None, 12
+            ),
+            trace_importing_fxt._CounterRow(
+                1000, 0.75, "cpu_load", 0, 0, None, 13
             ),
         ]
         with mock.patch.object(
@@ -234,36 +562,84 @@ class QueriesTest(unittest.TestCase):
         expected: list[trace_model.Event] = [
             trace_model.CounterEvent(
                 0,
-                trace_model.Event(
-                    category="",
-                    name="Rate",
-                    start=trace_time.TimePoint(1000),
-                    pid=0,
-                    tid=0,
-                    args={"CPU": 1000.0},
-                ),
+                category="",
+                name="Rate",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"CPU": 1000.0},
             ),
             trace_model.CounterEvent(
                 3,
-                trace_model.Event(
-                    category="",
-                    name="Rate",
-                    start=trace_time.TimePoint(1000),
-                    pid=0,
-                    tid=0,
-                    args={"CPU": 360.0},
-                ),
+                category="",
+                name="Rate",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"CPU": 360.0},
+            ),
+            trace_model.CounterEvent(
+                3,
+                category="",
+                name="Demand:Constant",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"CPU": 250.0},
             ),
             trace_model.CounterEvent(
                 0,
-                trace_model.Event(
-                    category="",
-                    name="cpu_load",
-                    start=trace_time.TimePoint(1000),
-                    pid=0,
-                    tid=0,
-                    args={"value": 0.75},
-                ),
+                category="",
+                name="cpu_load",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"value": 0.75},
+            ),
+        ]
+        test_utils.assertEventListsEqual(self, events, expected)
+
+    def test_get_counter_events_keeps_colon_named_counters_separate(
+        self,
+    ) -> None:
+        # Counters whose event names share a colon-separated prefix must stay
+        # separate events, even when sampled at the same timestamp on the same CPU.
+        fresh_importer = trace_importing_fxt._FxtImporter(self.session)
+        fresh_importer._args_map = {}
+        mock_rows = [
+            trace_importing_fxt._CounterRow(
+                1000, 250.0, "Demand:Constant:CPU:3", 0, 0, None, 10
+            ),
+            trace_importing_fxt._CounterRow(
+                1000, 0.5, "Demand:Constant:Normalized:3", 0, 0, None, 11
+            ),
+            trace_importing_fxt._CounterRow(
+                1000, 900.0, "Demand:Total:CPU:3", 0, 0, None, 12
+            ),
+        ]
+        with mock.patch.object(
+            fresh_importer, "_query_as", return_value=iter(mock_rows)
+        ):
+            events = fresh_importer.get_counter_events().events
+
+        expected: list[trace_model.Event] = [
+            trace_model.CounterEvent(
+                3,
+                category="",
+                name="Demand:Constant",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"CPU": 250.0, "Normalized": 0.5},
+            ),
+            trace_model.CounterEvent(
+                3,
+                category="",
+                name="Demand:Total",
+                start=trace_time.TimePoint(1000),
+                pid=0,
+                tid=0,
+                args={"CPU": 900.0},
             ),
         ]
         test_utils.assertEventListsEqual(self, events, expected)
@@ -551,18 +927,14 @@ class QueriesTest(unittest.TestCase):
         return trace_model.DurationEvent(
             duration=trace_time.TimeDelta.from_microseconds(duration_us),
             parent=parent,
-            child_durations=(),
-            child_flows=(),
-            base=trace_model.Event(
-                category=category,
-                name=name,
-                start=trace_time.TimePoint.from_epoch_delta(
-                    trace_time.TimeDelta.from_microseconds(start_us)
-                ),
-                pid=pid,
-                tid=tid,
-                args={},
+            category=category,
+            name=name,
+            start=trace_time.TimePoint.from_epoch_delta(
+                trace_time.TimeDelta.from_microseconds(start_us)
             ),
+            pid=pid,
+            tid=tid,
+            args={},
         )
 
     @staticmethod
@@ -584,8 +956,12 @@ class QueriesTest(unittest.TestCase):
                 phase=phase,
                 enclosing_duration=dur,
                 previous_flow=prev,
-                next_flow=None,
-                base=dur,
+                category=dur.category,
+                name=dur.name,
+                start=dur.start,
+                pid=dur.pid,
+                tid=dur.tid,
+                args=dur.args,
             )
             if prev is not None:
                 prev.next_flow = flow
@@ -607,10 +983,12 @@ class QueriesTest(unittest.TestCase):
                 assert event.duration is not None
                 return trace_model.DurationEvent(
                     duration=event.duration,
-                    parent=None,
-                    child_durations=(),
-                    child_flows=(),
-                    base=event,
+                    category=event.category,
+                    name=event.name,
+                    start=event.start,
+                    pid=event.pid,
+                    tid=event.tid,
+                    args=event.args,
                 )
         raise AssertionError(f"DurationEvent {name!r} (pid={pid}) not found")
 
@@ -836,3 +1214,69 @@ class QueriesTest(unittest.TestCase):
         # After context manager exits, querying closed session raises RuntimeError
         with self.assertRaises(RuntimeError):
             session.run_query("SELECT count(*) FROM slice")
+
+    def test_create_model_pauses_gc_and_restores_it(self) -> None:
+        self.addCleanup(gc.enable if gc.isenabled() else gc.disable)
+        for initially_enabled in (True, False):
+            for fails in (False, True):
+                with self.subTest(
+                    initially_enabled=initially_enabled, fails=fails
+                ):
+                    gc_enabled_during_import: list[bool] = []
+
+                    def spy(*args: Any) -> mock.Mock:
+                        gc_enabled_during_import.append(gc.isenabled())
+                        if fails:
+                            raise RuntimeError("boom")
+                        return mock.Mock()
+
+                    if initially_enabled:
+                        gc.enable()
+                    else:
+                        gc.disable()
+                    with (
+                        mock.patch.object(
+                            trace_importing_fxt,
+                            "construct_model",
+                            side_effect=spy,
+                        ),
+                        (
+                            self.assertRaises(RuntimeError)
+                            if fails
+                            else contextlib.nullcontext()
+                        ),
+                    ):
+                        trace_importing_fxt.create_model_from_tp_session(
+                            self.session
+                        )
+                    self.assertEqual(gc_enabled_during_import, [False])
+                    self.assertEqual(gc.isenabled(), initially_enabled)
+
+
+class ParseCounterTrackTest(unittest.TestCase):
+    """Tests for splitting Perfetto counter track names."""
+
+    def test_parse_counter_track(self) -> None:
+        cases = (
+            ("cpu_load", ("cpu_load", "value", None)),
+            (
+                "kmem_stats_a:zram_bytes",
+                ("kmem_stats_a:zram_bytes", "value", None),
+            ),
+            ("Rate:CPU:3", ("Rate", "CPU", 3)),
+            ("Demand:Constant:CPU:3", ("Demand:Constant", "CPU", 3)),
+            # Names not ending in a numeric counter ID are kept whole.
+            ("a:b:c", ("a:b:c", "value", None)),
+            # So are names with a numeric suffix but fewer than three parts.
+            ("cpu_load:0", ("cpu_load:0", "value", None)),
+            (
+                "cpu_usage:average_cpu_percentage:0",
+                ("cpu_usage", "average_cpu_percentage", 0),
+            ),
+        )
+        for track_name, expected in cases:
+            with self.subTest(track_name=track_name):
+                self.assertEqual(
+                    trace_importing_fxt._parse_counter_track(track_name),
+                    expected,
+                )

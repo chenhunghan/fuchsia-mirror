@@ -66,7 +66,7 @@ async fn run_boot_items(mut stream: fboot::ItemsRequestStream) {
                 responder.send(None, 0).unwrap();
             }
             fboot::ItemsRequest::Get2 { type_, extra: _, responder } => {
-                if type_ == zbi::Type::PlatformId as u32 {
+                if type_ == zbi::Type::PLATFORM_ID.as_raw() {
                     let platform_id = zbi::PlatformId {
                         vid: PDEV_VID_TEST,
                         pid: PDEV_PID_PBUS_TEST,

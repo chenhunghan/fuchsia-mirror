@@ -58,6 +58,7 @@ where
         _guard: &AppendLockWriteGuard<'_>,
         _node: &FsNode,
         _current_task: &CurrentTask,
+        _file: Option<&FileObject>,
         _length: u64,
     ) -> Result<(), Errno> {
         // TODO(tbodt): Is this right? This is the minimum to handle O_TRUNC
@@ -122,10 +123,7 @@ impl<Ops: BytesFileOps> FileOps for BytesFile<Ops> {
         data: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
         let content = self.0.read(current_task)?;
-        if offset >= content.len() {
-            return Ok(0);
-        }
-        data.write(&content[offset..])
+        data.write_tail(&content, offset)
     }
 
     fn write(

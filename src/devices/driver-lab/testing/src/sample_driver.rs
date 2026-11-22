@@ -18,7 +18,7 @@ use fuchsia_async as fasync;
 use fuchsia_component::server::ServiceFs;
 use futures::StreamExt;
 use log::{info, warn};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 /// Read-only device identification register (`0x00`).
 pub const REG_DEVICE_ID: u64 = 0x00;
@@ -61,7 +61,7 @@ struct LabSampleDriver {
     _scope: fasync::Scope,
     _mapping: Arc<mapped_vmo::Mapping>,
     _lab: EmbeddedLabServer,
-    irq_canceller: Mutex<Option<zx::Interrupt>>,
+    irq_canceller: Option<zx::Interrupt>,
 }
 
 driver_register!(LabSampleDriver);
@@ -219,20 +219,12 @@ impl Driver for LabSampleDriver {
         });
 
         info!("lab_sample_driver started with embedded fuchsia.driver.lab.Service");
-        Ok(Self {
-            _node: node,
-            _scope: scope,
-            _mapping: mapping,
-            _lab: lab,
-            irq_canceller: Mutex::new(irq_canceller),
-        })
+        Ok(Self { _node: node, _scope: scope, _mapping: mapping, _lab: lab, irq_canceller })
     }
 
-    async fn stop(&self) {
-        if let Ok(mut guard) = self.irq_canceller.lock() {
-            if let Some(irq) = guard.take() {
-                let _ = irq.destroy();
-            }
+    async fn stop(self) {
+        if let Some(irq) = self.irq_canceller {
+            let _ = irq.destroy();
         }
     }
 }

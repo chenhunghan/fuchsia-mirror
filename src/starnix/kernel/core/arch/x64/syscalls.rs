@@ -207,7 +207,8 @@ pub fn sys_getdents(
     user_buffer: UserAddress,
     user_capacity: usize,
 ) -> Result<usize, Errno> {
-    let file = current_task.files().get(fd)?;
+    let file = current_task.get_file(fd)?;
+    crate::task::confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let mut offset = file.offset.copy();
     let mut sink = DirentSink32::new(current_task, &mut *offset, user_buffer, user_capacity);
     let result = file.readdir(current_task, &mut sink);
@@ -249,8 +250,10 @@ pub fn sys_lstat(
     user_path: UserCString,
     buffer: UserRef<uapi::stat>,
 ) -> Result<(), Errno> {
-    // TODO(https://fxbug.dev/42172993): Add the `AT_NO_AUTOMOUNT` flag once it is supported in
-    // `sys_newfstatat`.
+    // `sys_newfstatat` always implies `AT_NO_AUTOMOUNT`. From
+    // https://man7.org/linux/man-pages/man2/stat.2.html:
+    //
+    //   AT_NO_AUTOMOUNT [...] Since Linux 4.11 this flag is implied.
     sys_newfstatat(current_task, FdNumber::AT_FDCWD, user_path, buffer.into(), AT_SYMLINK_NOFOLLOW)
 }
 
@@ -337,8 +340,10 @@ pub fn sys_stat(
     user_path: UserCString,
     buffer: UserRef<uapi::stat>,
 ) -> Result<(), Errno> {
-    // TODO(https://fxbug.dev/42172993): Add the `AT_NO_AUTOMOUNT` flag once it is supported in
-    // `sys_newfstatat`.
+    // `sys_newfstatat` always implies `AT_NO_AUTOMOUNT`. From
+    // https://man7.org/linux/man-pages/man2/stat.2.html:
+    //
+    //   AT_NO_AUTOMOUNT [...] Since Linux 4.11 this flag is implied.
     sys_newfstatat(current_task, FdNumber::AT_FDCWD, user_path, buffer.into(), 0)
 }
 

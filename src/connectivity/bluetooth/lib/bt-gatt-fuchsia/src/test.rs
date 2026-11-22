@@ -786,3 +786,25 @@ async fn periodic_advertising_sync_filter_empty_info() {
     let mut next_report_fut = sync_stream.next();
     assert!(fasync::TestExecutor::poll_until_stalled(&mut next_report_fut).await.is_pending());
 }
+
+#[fuchsia::test(allow_stalls = false)]
+async fn client_wait_for_disconnect() {
+    let (mut requests, central) = create_test_central();
+
+    let Poll::Ready(Ok(client)) =
+        fasync::TestExecutor::poll_until_stalled(central.connect(PeerId(1))).await
+    else {
+        panic!("Expected the client to be returned");
+    };
+
+    let connection_request_stream = match requests.next().await {
+        Some(Ok(fidl_le::CentralRequest::Connect { handle, .. })) => handle.into_stream(),
+        request => panic!("Expected a Connect request and got {request:?}"),
+    };
+
+    let mut disconnect_fut = Box::pin(client.wait_for_disconnect());
+    assert!(fasync::TestExecutor::poll_until_stalled(&mut disconnect_fut).await.is_pending());
+
+    drop(connection_request_stream);
+    assert!(fasync::TestExecutor::poll_until_stalled(&mut disconnect_fut).await.is_ready());
+}

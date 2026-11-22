@@ -11,7 +11,7 @@ use fidl_fuchsia_io as fio;
 use fxfs::errors::FxfsError;
 use fxfs::lsm_tree::Query;
 use fxfs::lsm_tree::types::{ItemRef, LayerIterator};
-use fxfs::object_handle::{ObjectHandle, ObjectProperties};
+use fxfs::object_handle::ObjectProperties;
 use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{
     AttributeId, AttributeKey, DirType, FSCRYPT_KEY_ID, HandleOptions, ObjectAttributes,
@@ -252,6 +252,8 @@ impl Node for FxSymlink {
                 .map_err(map_to_status)?;
         }
 
+        let link_count = if self.to_be_purged() && props.refs == 1 { 0 } else { props.refs };
+
         Ok(attributes!(
             requested_attributes,
             Mutable {
@@ -273,8 +275,9 @@ impl Node for FxSymlink {
                 abilities: fio::Operations::GET_ATTRIBUTES | fio::Operations::UPDATE_ATTRIBUTES,
                 content_size: props.data_attribute_size,
                 storage_size: props.allocated_size,
-                link_count: props.refs,
+                link_count: link_count,
                 id: self.object_id(),
+                change_time: props.change_time.as_nanos(),
                 verity_enabled: false,
             }
         ))

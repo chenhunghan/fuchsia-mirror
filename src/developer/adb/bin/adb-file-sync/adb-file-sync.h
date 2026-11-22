@@ -25,7 +25,7 @@ class AdbFileSync : public AdbFileSyncBase,
             sys::ServiceDirectory::CreateFromNamespace(), dispatcher)),
         config_(std::move(config)) {}
 
-  static zx_status_t StartService(adb_file_sync_config::Config config);
+  static zx_status_t StartService(adb_file_sync_config::Config config, async::Loop& loop);
   void OnUnbound(fidl::UnbindInfo info, fidl::ServerEnd<fuchsia_hardware_adb::Provider> server_end);
 
   void ConnectToService(fuchsia_hardware_adb::wire::ProviderConnectToServiceRequest* request,

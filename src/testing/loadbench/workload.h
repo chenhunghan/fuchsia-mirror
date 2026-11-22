@@ -7,6 +7,7 @@
 
 #include <lib/syslog/cpp/macros.h>
 #include <lib/zx/time.h>
+#include <zircon/syscalls/profile.h>
 
 #include <optional>
 #include <unordered_map>
@@ -28,6 +29,8 @@ struct WorkerConfig {
       name = other.name;
       group = other.group;
       priority = other.priority;
+      affinity = other.affinity;
+      actions.clear();
       for (auto& action : other.actions) {
         actions.emplace_back(action->Copy());
       }
@@ -39,6 +42,7 @@ struct WorkerConfig {
     zx::duration capacity;
     zx::duration deadline;
     zx::duration period;
+    bool critical{false};
   };
 
   using PriorityType = std::variant<std::monostate, int, DeadlineParams>;
@@ -46,6 +50,7 @@ struct WorkerConfig {
   std::string name;
   std::string group;
   PriorityType priority;
+  std::optional<zx_cpu_set_t> affinity;
   std::vector<std::unique_ptr<Action>> actions;
 };
 

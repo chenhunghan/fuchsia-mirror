@@ -3,9 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_host_tool.gni")
-import("//build/compiled_action.gni")
 import("//build/go/golden_go_proto.gni")
-import("//build/testing/golden_files.gni")
 
 if (is_host) {
   golden_go_proto("stardoc_output") {
@@ -19,74 +17,11 @@ if (is_host) {
     install_host_tool = true
     deps = [ ":stardoc_output" ]
   }
-
-  compiled_action("generate_goldens") {
-    testonly = true
-    tool = ":bin"
-    tool_output_name = "bazel-docgen"
-    sources = [ "testdata/test_lib.textproto" ]
-
-    args = [
-      "--proto",
-      rebase_path("testdata/test_lib.textproto", root_build_dir),
-      "--out_dir",
-      rebase_path("${target_gen_dir}/goldens", root_build_dir),
-      "--base_path",
-      "some/path",  # This should match the golden files
-    ]
-    outputs = [
-      "${target_gen_dir}/goldens/_toc.yaml",
-      "$target_gen_dir/goldens/README.md",
-      "$target_gen_dir/goldens/example_rule.md",
-      "$target_gen_dir/goldens/some_function.md",
-      "$target_gen_dir/goldens/empty_function.md",
-      "$target_gen_dir/goldens/FooInfo.md",
-      "$target_gen_dir/goldens/empty_repo.md",
-    ]
-  }
-
-  golden_files("bazeldoc_golden_tests") {
-    testonly = true
-    deps = [ ":generate_goldens" ]
-    comparisons = [
-      {
-        golden = "goldens/_toc.yaml.golden"
-        candidate = "$target_gen_dir/goldens/_toc.yaml"
-      },
-      {
-        golden = "goldens/README.md.golden"
-        candidate = "$target_gen_dir/goldens/README.md"
-      },
-      {
-        golden = "goldens/example_rule.md.golden"
-        candidate = "$target_gen_dir/goldens/example_rule.md"
-      },
-      {
-        golden = "goldens/some_function.md.golden"
-        candidate = "$target_gen_dir/goldens/some_function.md"
-      },
-      {
-        golden = "goldens/empty_function.md.golden"
-        candidate = "$target_gen_dir/goldens/empty_function.md"
-      },
-      {
-        golden = "goldens/FooInfo.md.golden"
-        candidate = "$target_gen_dir/goldens/FooInfo.md"
-      },
-      {
-        golden = "goldens/empty_repo.md.golden"
-        candidate = "$target_gen_dir/goldens/empty_repo.md"
-      },
-    ]
-  }
 }
 
 group("tests") {
   testonly = true
-  deps = [
-    ":bazeldoc_golden_tests($host_toolchain)",
-    ":stardoc_output($host_toolchain)",
-  ]
+  deps = [ ":stardoc_output($host_toolchain)" ]
 }
 
 group("bazel-docgen") {

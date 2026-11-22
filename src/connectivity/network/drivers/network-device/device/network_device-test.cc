@@ -7,6 +7,7 @@
 #include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/syslog/cpp/log_settings.h>
 
 #include <chrono>
 #include <future>
@@ -16,7 +17,6 @@
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
-#include <sdk/lib/syslog/cpp/log_settings.h>
 
 #include "device_interface.h"
 #include "lib/sync/completion.h"

@@ -110,6 +110,7 @@ rustc_library("lib") {
     ":*",
     "//src/devices/usb/bin/usb-cli:*",
     "//src/sys/component_manager/tests/boot:*",
+    "//tools/fidl/example-tester:*",
   ]
   deps = []
   deps += [

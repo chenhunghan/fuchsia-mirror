@@ -5,7 +5,7 @@
 """Benchmark comparing textpb.parse (eager) vs. textpb.parse_lazy.
 
 Run directly via:
-    PYTHONPATH=build/rbe python3 build/rbe/textpb_benchmark.py
+    PYTHONPATH=. python3 build/rbe/textpb_benchmark.py
 """
 
 import argparse
@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import NamedTuple
 
-import textpb
+from build.rbe import textpb
 
 
 class BenchmarkResult(NamedTuple):

@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest", "fx_test_component")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":settings_common_tests"],
+    visibility = ["//src/settings:__pkg__"],
+)
+
+rustc_library(
+    name = "settings_common",
+    srcs = [
+        "src/clock.rs",
+        "src/config.rs",
+        "src/config/default_settings.rs",
+        "src/inspect.rs",
+        "src/inspect/config_logger.rs",
+        "src/inspect/event.rs",
+        "src/inspect/listener_logger.rs",
+        "src/lib.rs",
+        "src/service_context.rs",
+        "src/trace.rs",
+        "src/utils.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//src/settings:__subpackages__"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/derive",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/settings/inspect_utils:settings_inspect_utils",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:glob",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+# The bare binary only runs inside its custom-manifest
+# component; the test runs through the :settings_common_tests fx_test.
+rustc_test(
+    name = "settings_common_lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":settings_common",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/settings/test_common:settings_test_common",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+resource(
+    name = "tests_config",
+    srcs = [
+        "testdata/fake_config_data.json",
+        "testdata/fake_invalid_config_data.json",
+    ],
+    outputs = ["settings_common_tests_config_data/{{source_file_part}}"],
+)
+
+fx_packaged_binary(
+    name = "settings_common_lib_test_packaged_bin",
+    testonly = True,
+    binary = ":settings_common_lib_test",
+    binary_name = "settings_common_lib_test",
+)
+
+fx_component_manifest(
+    name = "settings_common_tests_manifest",
+    testonly = True,
+    component_name = "settings_common_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/settings_common_tests.cml",
+)
+
+fx_test_component(
+    name = "settings_common_tests_component",
+    compiled_manifest = ":settings_common_tests_manifest",
+    deps = [":settings_common_lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "settings_common_tests-package",
+    package_name = "settings_common_tests",
+    resources = [":tests_config"],
+    test_components = [":settings_common_tests_component"],
+)
+
+fx_test(
+    name = "settings_common_tests",
+    max_log_severity = "ERROR",
+    package = ":settings_common_tests-package",
+)

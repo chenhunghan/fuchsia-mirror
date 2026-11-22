@@ -1,0 +1,27 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO
+rustc_library(
+    name = "helper",
+    srcs = ["helper/lib.rs"],
+    crate_root = "helper/lib.rs",
+    edition = "2024",
+    proc_macro_deps = ["//src/lib/fuzzing/rust:fuzz"],
+)
+
+# Fake tool to demostrate that fuzzers can exist alongside Rust binaries.
+rustc_binary(
+    name = "toy_example_bin",
+    srcs = ["src/main.rs"],
+    binary_name = "toy_example",
+    edition = "2024",
+    proc_macro_deps = ["//src/lib/fuzzing/rust:fuzz"],
+    deps = [":helper"],
+)

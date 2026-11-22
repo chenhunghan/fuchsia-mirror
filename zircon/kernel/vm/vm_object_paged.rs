@@ -13,13 +13,12 @@ use super::vm_cow_pages::{
 use super::vm_object::{RangeChangeOp, VmObject, VmObjectLockClass, VmObjectReadWriteOptions};
 use crate::user_copy::{UserInIovec, UserOutIovec};
 use core::marker::PhantomPinned;
-use core::mem::ManuallyDrop;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
 use core::ptr::NonNull;
 use fbl::{IsOpaqueRefCounted, RefPtr};
 use ksync::LockToken;
-use pin_init::PinInit;
-use vm_cow_pages_bindings::VmCowPagesLookupCursorResult;
+use pin_init::{PinInit, pin_init_from_closure};
 use vm_object_paged_bindings as bindings;
 use zr::Opaque;
 use zx_status::Status;
@@ -79,7 +78,8 @@ impl VmObjectPaged {
             bindings::cpp_vm_object_paged_create(pmm_alloc_flags, options, size, &mut status)
         };
         Status::ok(status)?;
-        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+        // SAFETY: on `ZX_OK`, `raw` points to a live `VmObjectPaged` and carries one reference.
+        Ok(unsafe { RefPtr::from_raw(raw.cast::<Self>()) })
     }
 
     /// Create a VMO backed by a contiguous range of physical memory.  The
@@ -101,7 +101,8 @@ impl VmObjectPaged {
             )
         };
         Status::ok(status)?;
-        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+        // SAFETY: on `ZX_OK`, `raw` points to a live `VmObjectPaged` and carries one reference.
+        Ok(unsafe { RefPtr::from_raw(raw.cast::<Self>()) })
     }
 
     /// Create a new paged VMO backed by an external `PageSource`.
@@ -118,8 +119,8 @@ impl VmObjectPaged {
             bindings::cpp_vm_object_paged_create_external(src_raw, options, size, &mut status)
         };
         Status::ok(status)?;
-        // SAFETY: `raw` is a valid `VmObjectPaged` pointer on `ZX_OK`.
-        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+        // SAFETY: on `ZX_OK`, `raw` points to a live `VmObjectPaged` and carries one reference.
+        Ok(unsafe { RefPtr::from_raw(raw.cast::<Self>()) })
     }
 
     /// Resets any pager VMO modification statistics.
@@ -173,8 +174,8 @@ impl VmObjectPaged {
             )
         };
         Status::ok(status)?;
-        // SAFETY: On `ZX_OK`, `raw` is a valid `VmObjectPaged` exported from `fbl::RefPtr`.
-        unsafe { Self::from_raw(raw).ok_or(Status::NO_MEMORY) }
+        // SAFETY: on `ZX_OK`, `raw` points to a live `VmObjectPaged` and carries one reference.
+        Ok(unsafe { RefPtr::from_raw(raw.cast::<Self>()) })
     }
 
     /// Exposed for testing.
@@ -193,8 +194,7 @@ impl VmObjectPaged {
 
     #[inline]
     pub(super) fn lock_order(&self) -> u64 {
-        // SAFETY: `self.as_raw()` is a valid `VmObjectPaged` pointer.
-        unsafe { bindings::cpp_vm_object_paged_lock_order(self.as_raw()) }
+        self.cow_pages().lock_order()
     }
 
     /// See the comments on `PriorityChanger` for how to use this object.
@@ -212,9 +212,8 @@ impl VmObjectPaged {
     /// Marks the VMO as modified if the VMO tracks modified state (only supported for pager-backed
     /// VMOs).
     #[inline]
-    pub fn mark_modified_locked(&self, _token: &mut LockToken<'_, VmObjectLockClass>) {
-        // SAFETY: `self.as_raw()` is a valid `VmObjectPaged` pointer and the VMO lock is held.
-        unsafe { bindings::cpp_vm_object_paged_mark_modified_locked(self.as_raw()) }
+    pub fn mark_modified_locked(&self, token: &mut LockToken<'_, VmObjectLockClass>) {
+        self.cow_pages().mark_modified_locked(token)
     }
 
     /// Gets a reference to a [`LookupCursor`] for the specified range in the VMO. The returned
@@ -225,12 +224,19 @@ impl VmObjectPaged {
     /// can assume that all offsets up to `max_len` can be queried. Pages returned by the cursor
     /// itself might be from this VMO or a parent, depending on actual cursor methods used.
     ///
+    /// `offset` and `max_len` must be page-aligned, and `max_len` must be non-zero.
+    ///
     /// See [`LookupCursor`].
     ///
     /// # Safety
     ///
-    /// The caller must ensure `token` is for the lock of this VMO, `offset` and `max_len` are
-    /// page-aligned, and `max_len` is non-zero.
+    /// * The caller must ensure `token` is for the lock of this VMO.
+    /// * The cow pages of this VMO must be `LifeCycle::Alive` and must not be a hidden node.
+    /// * A method of the cursor may acquire the lock of each ancestor of those cow pages in turn,
+    ///   so whenever one is called the conditions for those acquisitions must hold: the thread is
+    ///   in a blockable context with no spinlocks held and no active `ChainLockTransaction`, the
+    ///   caller holds the lock of none of those ancestors, and (under lockdep) every `VmCowPages`
+    ///   lock the caller holds has a lock order below that of each of them.
     #[inline]
     pub unsafe fn get_lookup_cursor_locked<'a>(
         &'a self,
@@ -238,25 +244,74 @@ impl VmObjectPaged {
         offset: u64,
         max_len: u64,
     ) -> impl PinInit<LookupCursor<'a>, Status> {
-        let vmo = self.as_raw();
-        let init = move |cursor: *mut VmCowPagesLookupCursorResult| {
-            // SAFETY: `vmo` is a live `VmObjectPaged` whose lock is held, `offset` and `max_len`
-            // are page-aligned, `max_len` is non-zero, and `cursor` is valid for writing a
-            // `VmCowPagesLookupCursorResult`.
-            let status = unsafe {
-                bindings::cpp_vm_object_paged_get_lookup_cursor_locked(
-                    cursor.cast(),
-                    vmo,
-                    offset,
-                    max_len,
-                )
-            };
-            Status::ok(status)
+        let init = move |slot: *mut LookupCursor<'a>| {
+            // Move the token out of the closure, so that the cursor borrows it for `'a` rather
+            // than reborrowing it for the duration of this call.
+            let token = token;
+            // SAFETY: Per the contract of `pin_init_from_closure`, `slot` is valid, pinned,
+            // uninitialized storage for a `LookupCursor`. Per `# Safety` `token` is for the lock of
+            // this VMO, and the callee's other conditions are the last two of `# Safety`.
+            unsafe { self.init_lookup_cursor_locked(slot, token, offset, max_len) }
         };
-        // SAFETY: `init` initializes the result with a cursor when it returns `Ok`, and leaves it
-        // uninitialized when it returns `Err`. `token` is for the lock of the `VmCowPages` of this
-        // VMO, and that `VmCowPages` outlives `'a`.
-        unsafe { LookupCursor::new(token, init) }
+        // SAFETY: `init` initializes `slot` when it returns `Ok`, and leaves it uninitialized when
+        // it returns `Err`.
+        unsafe { pin_init_from_closure(init) }
+    }
+
+    /// Initializes `slot` with the cursor that `get_lookup_cursor_locked` describes. On `Err`,
+    /// `slot` is left uninitialized.
+    ///
+    /// # Safety
+    ///
+    /// `slot` must be valid, pinned, uninitialized storage for a `LookupCursor`, and `token` must
+    /// be for the lock of this VMO. The last two conditions of `get_lookup_cursor_locked` must hold
+    /// as well.
+    // Out of line so that the initializer returned by `get_lookup_cursor_locked` is a single call
+    // that takes its arguments in registers. Otherwise every caller keeps the captured arguments
+    // on its stack for an out-of-line copy of the initializer.
+    #[inline(never)]
+    unsafe fn init_lookup_cursor_locked<'a>(
+        &'a self,
+        slot: *mut LookupCursor<'a>,
+        token: &'a mut LockToken<'_, VmObjectLockClass>,
+        offset: u64,
+        max_len: u64,
+    ) -> Result<(), Status> {
+        // The cow range is `offset` and `max_len` translated by the page-aligned offset of this
+        // VMO in its cow pages, so it is page aligned as `offset` and `max_len` are.
+        let Some(cow_range) = self.get_cow_range(offset, max_len) else {
+            core::hint::cold_path();
+            return Err(Status::OUT_OF_RANGE);
+        };
+        // SAFETY: Per `# Safety` `slot` is valid, pinned, uninitialized storage for a
+        // `LookupCursor`, and `token` is for the lock of this VMO, which is the lock of its cow
+        // pages. The callee's last two conditions are the ones `# Safety` takes over from
+        // `get_lookup_cursor_locked`, which states them for the cow pages of this VMO.
+        unsafe { self.cow_pages().get_lookup_cursor_locked(token, cow_range).__pinned_init(slot) }
+    }
+
+    /// Translate a range in this `VmObject` to a `VmCowRange` in its cow pages.
+    ///
+    /// The translated range might extend beyond the end of the cow pages object. This function
+    /// will return `None` if the translated range might have included pages in the cow pages that
+    /// should not be referenced by this `VmObject` (e.g., if this `VmObject` is a slice
+    /// reference).
+    #[inline]
+    fn get_cow_range(&self, offset: u64, len: u64) -> Option<VmCowRange> {
+        let mut cow_range = MaybeUninit::<VmCowRange>::uninit();
+        // SAFETY: `self.as_raw()` is a valid `VmObjectPaged`, and `cow_range` is valid for
+        // writing a `VmCowRange`, which has the layout of the C++ `VmCowRange`.
+        let in_range = unsafe {
+            bindings::cpp_vm_object_paged_get_cow_range(
+                self.as_raw(),
+                offset,
+                len,
+                cow_range.as_mut_ptr().cast(),
+            )
+        };
+        // SAFETY: `cpp_vm_object_paged_get_cow_range` initializes `cow_range` when it returns
+        // true.
+        in_range.then(|| unsafe { cow_range.assume_init() })
     }
 
     /// Debug helper to fetch backing page pointer.
@@ -274,8 +329,7 @@ impl VmObjectPaged {
         let raw_base = unsafe { bindings::cpp_vm_object_paged_as_vm_object(this.as_raw()) };
         // SAFETY: `raw_base` points to a valid ref-counted `VmObject` whose
         // reference count is owned by `this`.
-        unsafe { VmObject::from_raw(raw_base) }
-            .expect("RefPtr guarantees this is non-null and valid")
+        unsafe { RefPtr::from_raw(VmObject::ptr_from_raw(raw_base)) }
     }
 
     /// Reads data from the VMO into user vectors.

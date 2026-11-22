@@ -4,7 +4,7 @@
 
 use crate::{HEADER, escape_text, md_path};
 use anyhow::{Context, Result, bail};
-use ffx_command::{CliArgsInfo, ErrorCodeInfo, FlagInfo, SubCommandInfo};
+use ffx_command::{CliArgsInfo, ErrorCodeInfo, FlagInfo, PositionalInfo, SubCommandInfo};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -77,8 +77,8 @@ pub(crate) fn write_formatted_output_for_ffx(
     Ok((value.name.into(), value.description.into(), output_md_path))
 }
 
-fn write_command(
-    output_writer: &mut BufWriter<File>,
+fn write_command<W: Write>(
+    output_writer: &mut BufWriter<W>,
     level: usize,
     parent_cmd: &str,
     command: &CliArgsInfo,
@@ -96,6 +96,9 @@ fn write_command(
     writeln!(output_writer, "```\n")?;
 
     write_flags(output_writer, &command.flags)?;
+    if command.commands.is_empty() {
+        write_positionals(output_writer, &command.positionals)?;
+    }
     write_subcommand_list(
         output_writer,
         &format!("{parent_cmd} {}", command.name.to_lowercase()),
@@ -170,6 +173,33 @@ fn build_usage_string(parent_cmd: &str, value: &CliArgsInfo) -> Result<String> {
     Ok(String::from_utf8(buf)?)
 }
 
+fn escape_table_cell(raw: &str) -> String {
+    escape_text(raw).replace('|', "\\|").replace("\r\n", " ").replace(['\r', '\n'], " ")
+}
+
+fn write_positionals<W: Write>(
+    output_writer: &mut BufWriter<W>,
+    positionals: &[PositionalInfo],
+) -> Result<()> {
+    let visible_positionals: Vec<_> = positionals.iter().filter(|p| !p.hidden).collect();
+    if visible_positionals.is_empty() {
+        return Ok(());
+    }
+    writeln!(output_writer, "__Positional Arguments__ | &nbsp;")?;
+    writeln!(output_writer, "------------------------ | ------")?;
+
+    for pos in visible_positionals {
+        writeln!(
+            output_writer,
+            "| <nobr>{}</nobr> | {}",
+            escape_table_cell(&pos.name),
+            escape_table_cell(&pos.description)
+        )?;
+    }
+    writeln!(output_writer, "\n")?;
+    Ok(())
+}
+
 fn write_flags<W: Write>(output_writer: &mut BufWriter<W>, flags: &Vec<FlagInfo>) -> Result<()> {
     if flags.is_empty() {
         writeln!(output_writer, "\n")?;
@@ -202,7 +232,10 @@ fn write_flags<W: Write>(output_writer: &mut BufWriter<W>, flags: &Vec<FlagInfo>
     Ok(())
 }
 
-fn write_examples(output_writer: &mut BufWriter<File>, examples: &Vec<String>) -> Result<()> {
+fn write_examples<W: Write>(
+    output_writer: &mut BufWriter<W>,
+    examples: &Vec<String>,
+) -> Result<()> {
     if examples.is_empty() {
         writeln!(output_writer, "\n")?;
         return Ok(());
@@ -215,7 +248,7 @@ fn write_examples(output_writer: &mut BufWriter<File>, examples: &Vec<String>) -
     Ok(())
 }
 
-fn write_notes(output_writer: &mut BufWriter<File>, notes: &Vec<String>) -> Result<()> {
+fn write_notes<W: Write>(output_writer: &mut BufWriter<W>, notes: &Vec<String>) -> Result<()> {
     if notes.is_empty() {
         writeln!(output_writer, "\n")?;
         return Ok(());
@@ -228,7 +261,10 @@ fn write_notes(output_writer: &mut BufWriter<File>, notes: &Vec<String>) -> Resu
     Ok(())
 }
 
-fn write_errors(output_writer: &mut BufWriter<File>, errors: &Vec<ErrorCodeInfo>) -> Result<()> {
+fn write_errors<W: Write>(
+    output_writer: &mut BufWriter<W>,
+    errors: &Vec<ErrorCodeInfo>,
+) -> Result<()> {
     if errors.is_empty() {
         writeln!(output_writer, "\n")?;
         return Ok(());
@@ -289,7 +325,7 @@ pub(crate) fn list_subtool_files(subtool_manifest: &PathBuf) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ffx_command::{Optionality, PositionalInfo};
+    use ffx_command::Optionality;
 
     #[test]
     fn test_write_subcommand_list() {
@@ -318,6 +354,113 @@ mod tests {
 
     #[test]
     fn test_write_examples() {}
+
+    #[test]
+    fn test_write_positionals() {
+        let test_data = [
+            (vec![], ""),
+            (
+                vec![PositionalInfo {
+                    name: "hidden_only".into(),
+                    description: "should not render".into(),
+                    optionality: Optionality::Optional,
+                    hidden: true,
+                }],
+                "",
+            ),
+            (
+                vec![
+                    PositionalInfo {
+                        name: "arg1".into(),
+                        description: "first positional".into(),
+                        optionality: Optionality::Required,
+                        hidden: false,
+                    },
+                    PositionalInfo {
+                        name: "arg2".into(),
+                        description: "hidden positional".into(),
+                        optionality: Optionality::Optional,
+                        hidden: true,
+                    },
+                ],
+                r#"__Positional Arguments__ | &nbsp;
+------------------------ | ------
+| <nobr>arg1</nobr> | first positional
+
+
+"#,
+            ),
+            (
+                vec![PositionalInfo {
+                    name: "interest|selector".into(),
+                    description: "one of FATAL|ERROR|WARN.\nMay be [repeated] {here}.".into(),
+                    optionality: Optionality::Repeating,
+                    hidden: false,
+                }],
+                r#"__Positional Arguments__ | &nbsp;
+------------------------ | ------
+| <nobr>interest\|selector</nobr> | one of FATAL\|ERROR\|WARN. May be \[repeated] &#123;here&#125;.
+
+
+"#,
+            ),
+        ];
+
+        for (positionals, expected) in test_data {
+            let buf = Vec::<u8>::new();
+            let mut writer = BufWriter::new(buf);
+            write_positionals(&mut writer, &positionals).expect("write_positionals");
+            writer.flush().expect("flush buffer");
+            let actual = String::from_utf8(writer.get_ref().to_vec()).expect("string from utf8");
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn test_write_command_positionals() {
+        let parent_with_subcommands = CliArgsInfo {
+            name: "ffx".into(),
+            description: "Fuchsia CLI".into(),
+            commands: vec![SubCommandInfo {
+                name: "sub".into(),
+                command: CliArgsInfo {
+                    name: "sub".into(),
+                    description: "leaf subcommand".into(),
+                    positionals: vec![PositionalInfo {
+                        name: "target".into(),
+                        description: "leaf positional".into(),
+                        optionality: Optionality::Required,
+                        hidden: false,
+                    }],
+                    ..Default::default()
+                },
+            }],
+            positionals: vec![PositionalInfo {
+                name: "subcommand".into(),
+                description: "".into(),
+                optionality: Optionality::Greedy,
+                hidden: false,
+            }],
+            ..Default::default()
+        };
+
+        let buf = Vec::<u8>::new();
+        let mut writer = BufWriter::new(buf);
+        write_command(&mut writer, 1, "", &parent_with_subcommands).expect("write_command");
+        writer.flush().expect("flush buffer");
+        let actual = String::from_utf8(writer.get_ref().to_vec()).expect("string from utf8");
+
+        let (parent_section, sub_section) =
+            actual.split_once("## sub ").expect("subcommand section present");
+        assert!(
+            !parent_section.contains("__Positional Arguments__"),
+            "parent command with subcommands must not emit positional table:\n{parent_section}"
+        );
+        assert!(parent_section.contains("Usage: ffx [subcommand...]"));
+        assert!(parent_section.contains("__Subcommands__"));
+        assert!(sub_section.contains("__Positional Arguments__"));
+        assert!(sub_section.contains("| <nobr>target</nobr> | leaf positional"));
+    }
 
     #[test]
     fn test_write_flags() {

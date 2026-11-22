@@ -4,8 +4,5 @@
 
 group("tests") {
   testonly = true
-  deps = [
-    "debug-dash-launcher:tests",
-    "stash_ctl:tests",
-  ]
+  deps = [ "debug-dash-launcher:tests" ]
 }

@@ -296,6 +296,36 @@ TEST_F(VirtioGpuTest, ImportVmo) {
   });
 }
 
+class FailingWaitBufferCollection
+    : public fidl::testing::WireTestBase<fuchsia_sysmem2::BufferCollection> {
+ public:
+  void CheckAllBuffersAllocated(CheckAllBuffersAllocatedCompleter::Sync& completer) override {
+    completer.Reply(fit::ok());
+  }
+
+  void WaitForAllBuffersAllocated(WaitForAllBuffersAllocatedCompleter::Sync& completer) override {
+    completer.Reply(fit::error(fuchsia_sysmem2::wire::Error::kNoMemory));
+  }
+
+  void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
+    ADD_FAILURE() << "Unexpected call to " << name;
+  }
+};
+
+TEST_F(VirtioGpuTest, GetSysmemMetadataWaitForAllBuffersAllocatedError) {
+  FailingWaitBufferCollection failing_collection;
+  auto [collection_client, collection_server] =
+      fidl::Endpoints<fuchsia_sysmem2::BufferCollection>::Create();
+  fidl::BindServer(dispatcher(), std::move(collection_server), &failing_collection);
+
+  ImportedBufferCollection imported_buffer_collection(std::move(collection_client));
+  PerformBlockingWork([&] {
+    zx::result<SysmemBufferInfo> sysmem_buffer_info_result =
+        imported_buffer_collection.GetSysmemMetadata(/*buffer_index=*/0);
+    EXPECT_STATUS(sysmem_buffer_info_result, zx::error(ZX_ERR_INTERNAL));
+  });
+}
+
 TEST_F(VirtioGpuTest, SetBufferCollectionConstraints) {
   // Import buffer collection.
   auto token_endpoints = fidl::Endpoints<fuchsia_sysmem2::BufferCollectionToken>::Create();

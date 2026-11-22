@@ -21,8 +21,9 @@ use crate::kernel::types::{
     BOOT_CPU_ID, PAddr, cpu_mask_t, cpu_num_t, cpu_num_to_mask, highest_cpu_set, lowest_cpu_set,
 };
 use crate::pdev_interrupt::{
-    InterruptControllerOps, InterruptHandler, InterruptPolarity, InterruptTriggerMode,
-    InterruptVector, MsiBlock, pdev_invoke_int_if_present, register_interrupt_controller,
+    INTERRUPT_VALID_KERNEL, InterruptControllerOps, InterruptHandler, InterruptPolarity,
+    InterruptTriggerMode, InterruptVector, MsiBlock, pdev_invoke_int_if_present,
+    register_interrupt_controller,
 };
 use crate::root_resource_filter::root_resource_filter_add_deny_region;
 use crate::vm::arch_vm_aspace::{
@@ -424,8 +425,18 @@ impl InterruptControllerOps for Gicv2 {
         Ok(())
     }
 
-    fn is_valid(&self, vector: InterruptVector, _flags: u32) -> bool {
-        vector.0 < MAX_IRQS.load(Ordering::Relaxed)
+    fn is_valid(&self, vector: InterruptVector, flags: u32) -> bool {
+        if vector.0 >= MAX_IRQS.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        if vector.0 < 16 {
+            // INTIDs 0-15 are SGIs.
+            // GICv2 does not support user-space non-kernel SGIs.
+            return (flags & INTERRUPT_VALID_KERNEL) != 0;
+        }
+
+        true
     }
 
     fn base_vector(&self) -> InterruptVector {
@@ -651,23 +662,28 @@ extern "C" fn sgi_halt_handler(_: *mut c_void) {
 }
 
 /// Maps a physical region into the kernel address space, returning its virtual address.
-fn map_region(phys_base: u64, size: usize, name: &[u8]) -> Result<*mut c_void, Status> {
-    let mut ptr: *mut c_void = core::ptr::null_mut();
+///
+/// # Safety
+///
+/// `[phys_base, phys_base + size)` rounded up to page boundaries is a physical range for which
+/// `ARCH_MMU_FLAG_UNCACHED_DEVICE` is appropriate for all mappings, and creating a read-write
+/// kernel mapping of it is sound.
+unsafe fn map_region(phys_base: u64, size: usize, name: &[u8]) -> Result<*mut c_void, Status> {
     let aspace = VmAspace::kernel_aspace();
-    // SAFETY: `ptr` is a valid out parameter and the requested region is a device aperture
-    // handed to us by the boot loader.
-    unsafe {
+    // SAFETY: The caller guarantees that uncached-device is appropriate for all mappings of the
+    // physical range, and that creating this mapping is sound.
+    let base = unsafe {
         aspace.alloc_physical(
             name,
             size,
-            &mut ptr,
+            None,
             page::SHIFT as u8,
             PAddr(phys_base as usize),
             0,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE | ARCH_MMU_FLAG_UNCACHED_DEVICE,
-        )?;
-    }
-    Ok(ptr)
+        )?
+    };
+    Ok(core::ptr::with_exposed_provenance_mut(base))
 }
 
 // Init hooks
@@ -730,7 +746,9 @@ pub unsafe extern "C" fn rust_arm_gicv2_init_post_vm(config: &DcfgArmGicV2Driver
 
     // Map the mmio region.
     let mmio_phys = MMIO_PHYS.load(Ordering::Relaxed);
-    let gic_base = match map_region(mmio_phys, mmio_size, b"gicv2") {
+    // SAFETY: Uncached-device is appropriate for all mappings of the GICv2 MMIO range, and
+    // creating a read-write kernel mapping of it is sound.
+    let gic_base = match unsafe { map_region(mmio_phys, mmio_size, b"gicv2") } {
         Ok(ptr) => ptr,
         Err(status) => panic!("Could not allocate GICv2 mmio region: {}\n", status.into_raw()),
     };
@@ -770,7 +788,10 @@ pub unsafe extern "C" fn rust_arm_gicv2_init_post_vm(config: &DcfgArmGicV2Driver
     let msi_frame_phys = MSI_FRAME_PHYS.load(Ordering::Relaxed);
     if USE_MSI.load(Ordering::Relaxed) && msi_frame_phys != 0 {
         // map in the gicv2m aperture
-        let frame_base = match map_region(msi_frame_phys, regs::GICV2M_FRAME_REG_SIZE, b"gicv2m") {
+        // SAFETY: Uncached-device is appropriate for all mappings of the GICv2m frame, and
+        // creating a read-write kernel mapping of it is sound.
+        let frame = unsafe { map_region(msi_frame_phys, regs::GICV2M_FRAME_REG_SIZE, b"gicv2m") };
+        let frame_base = match frame {
             Ok(ptr) => ptr,
             Err(status) => {
                 panic!("Could not allocate GICv2m mmio region: {}\n", status.into_raw())

@@ -35,6 +35,7 @@ use thiserror::Error;
 
 use crate::bindings::devices::{NetdeviceAllocator, StaticCommonInfo, TxTask};
 use crate::bindings::interfaces_admin::{InterfaceOptions, maybe_create_local_route_tables};
+use crate::bindings::power::PowerDependencyToken;
 use crate::bindings::stats_sampler::{InterfaceStatusBufferedState, InterfaceStatusSampler};
 use crate::bindings::sync::CoreRwLock;
 use crate::bindings::util::{IntoFidl, NeedsDataNotifier, ScopeExt as _};
@@ -71,6 +72,11 @@ impl MaybeContiguousBuffer for RxBuffer {
             assert_eq!(read_len, frame_length);
             Some(BufferSlice::Linearized(slice))
         }
+    }
+
+    fn as_contiguous(&self) -> Option<&[u8]> {
+        let Self(buf) = self;
+        buf.as_slice()
     }
 }
 
@@ -596,6 +602,20 @@ impl DeviceHandler {
         // FIDL bindings protect us from getting an invalid handle, getting the
         // KOID from a handle that is open always succeeds.
         let port_identity_koid = Some(port_identity.koid().expect("extract port id event"));
+        let power_dependency_token = if ns.ctx.bindings_ctx().config.suspend_enabled {
+            port_proxy
+                .get_power_dependency_token()
+                .await?
+                .map(|token| {
+                    PowerDependencyToken::try_new(token).ok_or_else(|| {
+                        warn!("not installing port with non-duplicable power dependency token");
+                        Error::ConfigurationNotSupported
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
 
         let mut status_stream =
             netdevice_client::client::new_port_status_stream(&port_proxy, None)?;
@@ -816,7 +836,13 @@ impl DeviceHandler {
                 }
             };
 
-            let tx_task = TxTask::new(ctx.clone(), core_id.clone(), tx_watcher, tx_task_state);
+            let tx_task = TxTask::new(
+                ctx.clone(),
+                core_id.clone(),
+                tx_watcher,
+                tx_task_state,
+                power_dependency_token,
+            );
             match &core_id {
                 DeviceId::PureIp(device) => {
                     ctx.api().transmit_queue::<PureIpDevice>().set_configuration(

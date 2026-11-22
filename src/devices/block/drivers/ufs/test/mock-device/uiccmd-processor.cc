@@ -2,12 +2,121 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "uiccmd-processor.h"
+
 #include <lib/driver/logging/cpp/logger.h>
+
+#include <algorithm>
 
 #include "ufs-mock-device.h"
 
 namespace ufs {
 namespace ufs_mock_device {
+namespace {
+
+MibKey DecodeMibKey(uint32_t ucmdarg1, bool peer) {
+  const auto arg1 = UicCommandArgument1Reg::Get().FromValue(ucmdarg1);
+  return MibKey{
+      .attribute = static_cast<uint16_t>(arg1.mib_attribute()),
+      .peer = peer,
+      .selector = static_cast<uint16_t>(arg1.gen_selector_index()),
+  };
+}
+
+void FailDmeCommand(UfsMockDevice &mock_device) {
+  UicCommandArgument2Reg::Get()
+      .ReadFrom(mock_device.GetRegisters())
+      .set_result_code(UicCommandArgument2Reg::GenericErrorCode::kFailure)
+      .WriteTo(mock_device.GetRegisters());
+}
+
+}  // namespace
+
+void UicCmdProcessor::SetMibValue(uint16_t attribute, uint32_t value, bool peer,
+                                  uint16_t selector) {
+  std::lock_guard<std::mutex> lock(lock_);
+  mib_[MibKey{.attribute = attribute, .peer = peer, .selector = selector}] = value;
+}
+
+std::optional<uint32_t> UicCmdProcessor::GetMibValue(uint16_t attribute, bool peer,
+                                                     uint16_t selector) const {
+  std::lock_guard<std::mutex> lock(lock_);
+  const auto it = mib_.find(MibKey{.attribute = attribute, .peer = peer, .selector = selector});
+  if (it == mib_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::vector<DmeSetRecord> UicCmdProcessor::GetDmeSetLog(
+    std::initializer_list<uint16_t> attributes) const {
+  std::lock_guard<std::mutex> lock(lock_);
+  if (attributes.size() == 0) {
+    return set_log_;
+  }
+  std::vector<DmeSetRecord> filtered;
+  for (const DmeSetRecord &record : set_log_) {
+    if (std::find(attributes.begin(), attributes.end(), record.key.attribute) != attributes.end()) {
+      filtered.push_back(record);
+    }
+  }
+  return filtered;
+}
+
+std::vector<uint32_t> UicCmdProcessor::GetDmeSets(uint16_t attribute, bool peer,
+                                                  uint16_t selector) const {
+  std::lock_guard<std::mutex> lock(lock_);
+  const MibKey target{.attribute = attribute, .peer = peer, .selector = selector};
+  std::vector<uint32_t> values;
+  for (const DmeSetRecord &record : set_log_) {
+    if (record.key == target) {
+      values.push_back(record.value);
+    }
+  }
+  return values;
+}
+
+uint32_t UicCmdProcessor::GetDmeGetCount(uint16_t attribute, bool peer, uint16_t selector) const {
+  std::lock_guard<std::mutex> lock(lock_);
+  const auto it =
+      get_counts_.find(MibKey{.attribute = attribute, .peer = peer, .selector = selector});
+  return it == get_counts_.end() ? 0 : it->second;
+}
+
+void UicCmdProcessor::FailDmeSet(uint16_t attribute, bool peer, uint16_t selector) {
+  std::lock_guard<std::mutex> lock(lock_);
+  failing_sets_.insert(MibKey{.attribute = attribute, .peer = peer, .selector = selector});
+}
+
+void UicCmdProcessor::ResetExtra() {
+  std::lock_guard<std::mutex> lock(lock_);
+  mib_.clear();
+  set_log_.clear();
+  get_counts_.clear();
+  failing_sets_.clear();
+}
+
+std::optional<uint32_t> UicCmdProcessor::RecordGetAndLookup(const MibKey &key) {
+  std::lock_guard<std::mutex> lock(lock_);
+  ++get_counts_[key];
+  const auto it = mib_.find(key);
+  if (it == mib_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+bool UicCmdProcessor::RecordSetOrFail(const MibKey &key, uint32_t value) {
+  std::lock_guard<std::mutex> lock(lock_);
+  if (failing_sets_.contains(key)) {
+    return false;
+  }
+  set_log_.push_back(DmeSetRecord{.key = key, .value = value});
+  if (auto it = mib_.find(key); it != mib_.end()) {
+    it->second = value;
+  }
+  return true;
+}
 
 void UicCmdProcessor::HandleUicCmd(UicCommandOpcode value) {
   uint32_t ucmdarg1 =
@@ -37,9 +146,15 @@ void UicCmdProcessor::HandleUicCmd(UicCommandOpcode value) {
 
 void UicCmdProcessor::DefaultDmeGetHandler(UfsMockDevice &mock_device, uint32_t ucmdarg1,
                                            uint32_t ucmdarg2, uint32_t ucmdarg3) {
+  const MibKey key = DecodeMibKey(ucmdarg1, /*peer=*/false);
+  if (std::optional<uint32_t> seeded = mock_device.GetUicCmdProcessor().RecordGetAndLookup(key);
+      seeded.has_value()) {
+    UicCommandArgument3Reg::Get().FromValue(*seeded).WriteTo(mock_device.GetRegisters());
+    return;
+  }
+
   uint32_t mib_value = 0;
-  auto mib_attribute = UicCommandArgument1Reg::Get().FromValue(ucmdarg1).mib_attribute();
-  switch (mib_attribute) {
+  switch (key.attribute) {
     case PA_MaxRxHSGear:
       mib_value = kMaxGear;
       break;
@@ -83,6 +198,9 @@ void UicCmdProcessor::DefaultDmeGetHandler(UfsMockDevice &mock_device, uint32_t 
     case PA_LocalVerInfo:
       mib_value = kUniproVersion;
       break;
+    case PA_Hibern8Time:
+      mib_value = kHibern8Time;
+      break;
     case PA_TActivate:
       mib_value = kTActivate;
       break;
@@ -90,7 +208,7 @@ void UicCmdProcessor::DefaultDmeGetHandler(UfsMockDevice &mock_device, uint32_t 
       mib_value = kGranularity;
       break;
     default:
-      fdf::error("UFS MOCK: Get attribute 0x{:x} is not supported", mib_attribute);
+      fdf::error("UFS MOCK: Get attribute 0x{:x} is not supported", key.attribute);
       break;
   }
   UicCommandArgument3Reg::Get().FromValue(mib_value).WriteTo(mock_device.GetRegisters());
@@ -98,8 +216,13 @@ void UicCmdProcessor::DefaultDmeGetHandler(UfsMockDevice &mock_device, uint32_t 
 
 void UicCmdProcessor::DefaultDmeSetHandler(UfsMockDevice &mock_device, uint32_t ucmdarg1,
                                            uint32_t ucmdarg2, uint32_t ucmdarg3) {
-  auto mib_attribute = UicCommandArgument1Reg::Get().FromValue(ucmdarg1).mib_attribute();
-  switch (mib_attribute) {
+  const MibKey key = DecodeMibKey(ucmdarg1, /*peer=*/false);
+  if (!mock_device.GetUicCmdProcessor().RecordSetOrFail(key, ucmdarg3)) {
+    FailDmeCommand(mock_device);
+    return;
+  }
+
+  switch (key.attribute) {
     case PA_MaxRxHSGear:
     case PA_ConnectedTxDataLanes:
     case PA_ConnectedRxDataLanes:
@@ -122,6 +245,7 @@ void UicCmdProcessor::DefaultDmeSetHandler(UfsMockDevice &mock_device, uint32_t 
     case DME_LocalTC0ReplayTimeOutVal:
     case DME_LocalAFC0ReqTimeOutVal:
     case PA_TxHsAdaptType:
+    case PA_Hibern8Time:
     case PA_TActivate:
     case PA_Granularity:
       break;
@@ -143,16 +267,25 @@ void UicCmdProcessor::DefaultDmeSetHandler(UfsMockDevice &mock_device, uint32_t 
       }
       break;
     default:
-      fdf::error("UFS MOCK: Set attribute 0x{:x} is not supported", mib_attribute);
+      fdf::error("UFS MOCK: Set attribute 0x{:x} is not supported", key.attribute);
       break;
   }
 }
 
 void UicCmdProcessor::DefaultDmePeerGetHandler(UfsMockDevice &mock_device, uint32_t ucmdarg1,
                                                uint32_t ucmdarg2, uint32_t ucmdarg3) {
+  const MibKey key = DecodeMibKey(ucmdarg1, /*peer=*/true);
+  if (std::optional<uint32_t> seeded = mock_device.GetUicCmdProcessor().RecordGetAndLookup(key);
+      seeded.has_value()) {
+    UicCommandArgument3Reg::Get().FromValue(*seeded).WriteTo(mock_device.GetRegisters());
+    return;
+  }
+
   uint32_t mib_value = 0;
-  auto mib_attribute = UicCommandArgument1Reg::Get().FromValue(ucmdarg1).mib_attribute();
-  switch (mib_attribute) {
+  switch (key.attribute) {
+    case PA_MaxRxHSGear:
+      mib_value = kMaxGear;
+      break;
     case PA_TActivate:
       mib_value = kTActivate;
       break;
@@ -160,7 +293,7 @@ void UicCmdProcessor::DefaultDmePeerGetHandler(UfsMockDevice &mock_device, uint3
       mib_value = kGranularity;
       break;
     default:
-      fdf::error("UFS MOCK: Peer Get attribute 0x{:x} is not supported", mib_attribute);
+      fdf::error("UFS MOCK: Peer Get attribute 0x{:x} is not supported", key.attribute);
       break;
   }
   UicCommandArgument3Reg::Get().FromValue(mib_value).WriteTo(mock_device.GetRegisters());
@@ -168,13 +301,18 @@ void UicCmdProcessor::DefaultDmePeerGetHandler(UfsMockDevice &mock_device, uint3
 
 void UicCmdProcessor::DefaultDmePeerSetHandler(UfsMockDevice &mock_device, uint32_t ucmdarg1,
                                                uint32_t ucmdarg2, uint32_t ucmdarg3) {
-  auto mib_attribute = UicCommandArgument1Reg::Get().FromValue(ucmdarg1).mib_attribute();
-  switch (mib_attribute) {
+  const MibKey key = DecodeMibKey(ucmdarg1, /*peer=*/true);
+  if (!mock_device.GetUicCmdProcessor().RecordSetOrFail(key, ucmdarg3)) {
+    FailDmeCommand(mock_device);
+    return;
+  }
+
+  switch (key.attribute) {
     case PA_TActivate:
     case PA_Granularity:
       break;
     default:
-      fdf::error("UFS MOCK: Peer Set attribute 0x{:x} is not supported", mib_attribute);
+      fdf::error("UFS MOCK: Peer Set attribute 0x{:x} is not supported", key.attribute);
       break;
   }
 }

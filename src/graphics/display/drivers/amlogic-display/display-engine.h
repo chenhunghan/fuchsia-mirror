@@ -20,9 +20,10 @@
 #include <memory>
 #include <span>
 
-#include <fbl/intrusive_double_list.h>
+#include <fbl/auto_lock.h>
 #include <fbl/mutex.h>
 
+#include "src/graphics/display/drivers/amlogic-display/capture-image-info.h"
 #include "src/graphics/display/drivers/amlogic-display/capture.h"
 #include "src/graphics/display/drivers/amlogic-display/common.h"
 #include "src/graphics/display/drivers/amlogic-display/hot-plug-detection.h"
@@ -148,6 +149,22 @@ class DisplayEngine final : public display::DisplayEngineInterface {
     video_input_unit_ = std::move(video_input_unit);
   }
 
+  void SetVpuForTesting(std::unique_ptr<Vpu> vpu) { vpu_ = std::move(vpu); }
+
+  void SetDisplayAttachedForTesting(bool display_attached) {
+    fbl::AutoLock lock(&display_mutex_);
+    display_attached_ = display_attached;
+  }
+
+  void SetFullyInitializedForTesting() { set_fully_initialized(); }
+
+  void OnCaptureCompleteForTesting() { OnCaptureComplete(); }
+
+  const zx::bti& bti_for_testing() const { return bti_; }
+
+  // Returns nullptr if not found.
+  const ImageInfo* FindImportedImageForTesting(display::DriverImageId image_id);
+
  private:
   void PopulatePanelType() __TA_REQUIRES(display_mutex_);
 
@@ -232,9 +249,19 @@ class DisplayEngine final : public display::DisplayEngineInterface {
   // Emits engine events over the EngineListener interface.
   display::DisplayEngineEventsInterface& engine_events_ __TA_GUARDED(display_mutex_);
 
-  // Points to the next capture target image to capture displayed contents into.
-  // Stores nullptr if capture is not going to be performed.
-  ImageInfo* current_capture_target_image_ __TA_GUARDED(capture_mutex_) = nullptr;
+  // The ID of the active capture target image, or `kInvalidDriverCaptureImageId`
+  // if capture is not currently in progress.
+  display::DriverCaptureImageId current_capture_target_image_id_ __TA_GUARDED(capture_mutex_) =
+      display::kInvalidDriverCaptureImageId;
+
+  // True iff the currently applied display configuration scans out an AFBC
+  // image.
+  //
+  // VDIN1 display capture and AFBC scanout are mutually exclusive. The MAFBC
+  // decoder follows client-controlled body offsets in the AFBC headers, so
+  // capturing its output would let a client read arbitrary physical memory on
+  // boards without an IOMMU. See https://fxbug.dev/520582239.
+  bool current_image_is_afbc_ __TA_GUARDED(capture_mutex_) = false;
 
   // Imported sysmem buffer collections.
   std::unordered_map<display::DriverBufferCollectionId,
@@ -242,8 +269,15 @@ class DisplayEngine final : public display::DisplayEngineInterface {
       buffer_collections_;
 
   // Imported Images
-  fbl::DoublyLinkedList<std::unique_ptr<ImageInfo>> imported_images_ __TA_GUARDED(image_mutex_);
-  fbl::DoublyLinkedList<std::unique_ptr<ImageInfo>> imported_captures_ __TA_GUARDED(capture_mutex_);
+  ImageInfo::HashTable imported_images_ __TA_GUARDED(image_mutex_);
+  display::DriverImageId next_imported_image_id_ __TA_GUARDED(image_mutex_) =
+      display::DriverImageId(1);
+
+  CaptureImageInfo::HashTable imported_captures_ __TA_GUARDED(capture_mutex_);
+  // Capture image IDs start far above display image IDs so the two namespaces
+  // are easy to tell apart in logs and debuggers.
+  display::DriverCaptureImageId next_imported_capture_image_id_ __TA_GUARDED(capture_mutex_) =
+      display::DriverCaptureImageId(1'000'000'001);
 
   // Monitoring. We create a named "amlogic-display" node to allow for easier filtering
   // of inspect tree when defining selectors and metrics.

@@ -72,7 +72,7 @@ zx_status_t EventRingSegmentTable::AddSegment(zx_paddr_t paddr) {
   entry.address_high = static_cast<uint32_t>(paddr >> 32);
   entry.size = static_cast<uint16_t>(page_size_ / kMinERSTEntries);
   entries_[offset_] = entry;
-  hw_mb();
+  DataMemoryBarrier();
   offset_++;
   erst_size_.set_TableSize(offset_).WriteTo(&mmio_.value());
   erst_pressure_++;
@@ -195,9 +195,9 @@ zx_status_t EventRing::AddSegment(bool initialization) {
 fpromise::promise<void, zx_status_t> EventRing::HandlePortStatusChangeEvent(uint8_t port_id) {
   auto sc = PORTSC::Get(cap_length_, port_id).ReadFrom(mmio_);
   fdf::info(
-      "xhci: HandlePortStatusChangeEvent port={} PORTSC=0x{:08x} (CCS={} PED={} PR={} PLS={} Speed={} CSC={} PRC={})",
+      "xhci: HandlePortStatusChangeEvent port={} PORTSC=0x{:08x} (CCS={} PED={} PR={} PLS={} Speed={} CSC={} PRC={} PLC={} CEC={})",
       port_id, sc.reg_value(), sc.CCS(), sc.PED(), sc.PR(), static_cast<uint32_t>(sc.PLS()),
-      sc.PortSpeed(), sc.CSC(), sc.PRC());
+      sc.PortSpeed(), sc.CSC(), sc.PRC(), sc.PLC(), sc.CEC());
   std::optional<fpromise::promise<void, zx_status_t>> pending_enumeration;
   // Read status bits
   bool needs_enum = false;
@@ -217,7 +217,7 @@ fpromise::promise<void, zx_status_t> EventRing::HandlePortStatusChangeEvent(uint
       if (!hci_->GetPortState(port_id).is_connected) {
         // USB 2.0 requires a port reset to advance to U0
         Usb2DeviceAttach(port_id);
-        sc.set_CSC(false);
+        sc.set_CSC(false).set_PLC(false).set_CEC(false);
         needs_enum = true;
         fdf::debug("Port {} is a USB 2 device and will be enumerated.", port_id);
       } else if (!hci_->GetPortState(port_id).link_active && sc.PR()) {
@@ -303,9 +303,19 @@ fpromise::promise<void, zx_status_t> EventRing::HandlePortStatusChangeEvent(uint
   if (sc.CSC()) {
     // Connect status change
     hci_->GetPortState(port_id).retry = false;
+  }
+  // Per Intel xHCI 1.2 Specification Section 4.19.2 and Section 5.4.8 (Table 5-27,
+  // https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf),
+  // Port Status Change Event Generation (PSCEG) is the logical OR of all PORTSC change bits
+  // (CSC, PEC, WRC, OCC, PRC, PLC, CEC), and the controller only emits a Port Status Change Event
+  // TRB on a 0-to-1 transition of PSCEG. Clear PLC and CEC even when CSC is 0 so an uncleared
+  // link-state or config-error change bit cannot leave PSCEG asserted and suppress future port
+  // status change events.
+  if (sc.CSC() || sc.PLC() || sc.CEC()) {
     PORTSC::Get(cap_length_, port_id)
         .FromValue(0)
         .set_CCS(sc.CCS())
+        .set_CEC(sc.CEC())
         .set_PLC(sc.PLC())
         .set_PortSpeed(sc.PortSpeed())
         .set_PIC(sc.PIC())
@@ -313,6 +323,9 @@ fpromise::promise<void, zx_status_t> EventRing::HandlePortStatusChangeEvent(uint
         .set_PP(sc.PP())
         .set_CSC(sc.CSC())
         .WriteTo(mmio_);
+    if (sc.CEC()) {
+      fdf::warn("Port {} config error change cleared.", static_cast<int>(port_id));
+    }
   }
   if (sc.PEC()) {
     return fpromise::make_error_promise<zx_status_t>(ZX_ERR_BAD_STATE);
@@ -480,8 +493,12 @@ void EventRing::ScheduleTask(fpromise::promise<void, zx_status_t> promise) {
     // a fatal error in xHCI. When this occurs, we should immediately
     // attempt to shutdown the controller. This error cannot be recovered from.
     if (status == ZX_ERR_BAD_STATE) {
-      fdf::error("Scheduled task returned a fatal error, shutting down");
-      hci_->Shutdown(status);
+      if (hci_ && hci_->Running()) {
+        fdf::error("Scheduled task returned a fatal error, shutting down");
+        hci_->Shutdown(status);
+      } else {
+        fdf::warn("Scheduled task returned ZX_ERR_BAD_STATE during shutdown; ignoring");
+      }
     } else if (status != ZX_ERR_IO_NOT_PRESENT) {
       fdf::warn("Scheduled task failed: {}", zx_status_get_string(status));
     }
@@ -651,7 +668,7 @@ std::optional<Control> EventRing::CurrentErdp() {
       }
 
       // Barrier to ensure that the read of erdp_virt_ is ordered after the above validity check.
-      hw_rmb();
+      ReadDataMemoryBarrier();
       return Control::FromTRB(erdp_virt_);
     }
   }
@@ -663,7 +680,7 @@ std::optional<Control> EventRing::CurrentErdp() {
 
   // Barrier to ensure that all subsequent reads from erdp_virt_ are after the above cycle bit
   // check.
-  hw_rmb();
+  ReadDataMemoryBarrier();
 
   return control;
 }
@@ -816,6 +833,11 @@ zx_status_t EventRing::HandleCommandCompletionInterrupt() {
   std::unique_ptr<TRBContext> context;
   zx_status_t status = command_ring_->CompleteTRB(trb, &context);
   if (status != ZX_OK) {
+    if (status == ZX_ERR_CANCELED && hci_->IsHaltedOrStopping()) {
+      fdf::warn(
+          "Ignoring command completion on already-drained command ring while halted/stopping");
+      return ZX_OK;
+    }
     fdf::error("command_ring_->CompleteTRB(): {}", zx_status_get_string(status));
     hci_->Shutdown(ZX_ERR_BAD_STATE);
     return ZX_ERR_BAD_STATE;
@@ -842,12 +864,12 @@ void EventRing::HandleTransferInterrupt() {
   transfer_event_->Insert(transfer_event->CompletionCode());
 
   uint8_t slot_id = static_cast<uint8_t>(transfer_event->SlotID());
-  if (slot_id < 1 || slot_id > hci_->GetDeviceState().size()) {
-    fdf::warn("Invalid slot ID {} in transfer event (max slots: {})", slot_id,
-              hci_->GetDeviceState().size());
+  const size_t max_slots = hci_->DeviceStateCount();
+  if (slot_id < 1 || slot_id > max_slots) {
+    fdf::warn("Invalid slot ID {} in transfer event (max slots: {})", slot_id, max_slots);
     return;
   }
-  auto device_state = hci_->GetDeviceState()[slot_id - 1];
+  auto device_state = hci_->GetDeviceState(slot_id - 1);
   if (!device_state) {
     fdf::warn("Device state invalid");
     return;
@@ -896,7 +918,15 @@ void EventRing::HandleTransferInterrupt() {
                transfer_event->EndpointID());
     std::unique_ptr<TRBContext> context;
     ring.CompleteTRB(nullptr, &context);
-    ep->RequestComplete(ZX_ERR_IO_MISSED_DEADLINE, 0, std::move(*context->request));
+    l.release();
+    if (!context) {
+      fdf::warn("Missed service error on slot {} endpoint {} with no pending TRB",
+                transfer_event->SlotID(), transfer_event->EndpointID());
+      return;
+    }
+    if (context->request.has_value()) {
+      ep->RequestComplete(ZX_ERR_IO_MISSED_DEADLINE, 0, std::move(*context->request));
+    }
 
     // set resynchronize_ to wait for next successful transfer.
     resynchronize_ = true;
@@ -907,14 +937,19 @@ void EventRing::HandleTransferInterrupt() {
     fdf::debug("Transfer ring stall on slot {} endpoint {}", transfer_event->SlotID(),
                transfer_event->EndpointID());
     ring.set_stall(true);
-    auto completions = ring.TakePendingTRBs();
 
-    // A stall error may not have an associated transfer TRB. Section 4.17.4.
+    // Per Intel xHCI 1.2 Sections 4.10.2.1, 4.17.4, and 6.4.2.1 (Table 6-37), a Stall Error
+    // Transfer Event halts the endpoint and (when its TRB Pointer is non-zero) identifies the
+    // stalled Transfer TRB at the head of the Transfer Ring. Complete that head TD into `context`
+    // before draining any trailing TDs with TakePendingTRBs(), so `pending_trbs_` is not emptied
+    // before CompleteTRB() inspects it. See:
+    // https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf
     std::unique_ptr<TRBContext> context;
     if (erdp_virt_->ptr) {
       TRB* trb = ring.PhysToVirt(erdp_virt_->ptr);
       ring.CompleteTRB(trb, &context);
     }
+    auto completions = ring.TakePendingTRBs();
     l.release();
 
     if (context) {
@@ -954,6 +989,13 @@ void EventRing::HandleTransferInterrupt() {
   if (transfer_event->CompletionCode() == CommandCompletionEvent::ShortPacket) {
     TRB* last_trb = trb;
     zx_status_t status = ring.HandleShortPacket(trb, transfer_event->TransferLength(), &last_trb);
+    if (status != ZX_OK && (device_state->IsDisconnecting() || hci_->IsHaltedOrStopping())) {
+      fdf::warn(
+          "Ignoring short packet on already-drained ring for slot {} endpoint {} while "
+          "halted/stopping: {}",
+          transfer_event->SlotID(), transfer_event->EndpointID(), zx_status_get_string(status));
+      return;
+    }
 
     // If the TRB is not at the head of the pending list then we're out of sync with the device,
     // which indicates a bug in the driver.
@@ -973,7 +1015,9 @@ void EventRing::HandleTransferInterrupt() {
       if (!completion) {
         break;
       }
-      ep->RequestComplete(ZX_ERR_IO_MISSED_DEADLINE, 0, std::move(*completion->request));
+      if (completion->request.has_value()) {
+        ep->RequestComplete(ZX_ERR_IO_MISSED_DEADLINE, 0, std::move(*completion->request));
+      }
     }
   });
   if (resynchronize_) {
@@ -981,6 +1025,25 @@ void EventRing::HandleTransferInterrupt() {
     // Resynchronize (4.11.2.5.2). Just find the next successful TRB.
     resynchronize_completions = ring.TakePendingTRBsUntil(trb);
   }
+
+  // TODO(https://fxbug.dev/578577141): Handle Stopped completions on bulk and interrupt
+  // endpoints too. They are currently left to the catch-all below, which completes them
+  // with ZX_ERR_IO_INVALID and a warning instead of ZX_ERR_CANCELED.
+  if ((transfer_event->CompletionCode() == CommandCompletionEvent::Stopped ||
+       transfer_event->CompletionCode() == CommandCompletionEvent::StoppedLengthInvalid ||
+       transfer_event->CompletionCode() == CommandCompletionEvent::StoppedShortPacket) &&
+      ring.IsIsochronous()) {
+    // Stopped (codes 26/27/28) are the normal result of Stop Endpoint cancelling in-flight
+    // isochronous TRBs during ring buffer teardown. Leave the TRB in the pending list so that
+    // UsbHciCancelAllAsync drains and completes all pending requests after the Stop Endpoint
+    // command completes, avoiding RequestComplete calls (and resulting FIDL callbacks) from
+    // within the event ring handler.
+    l.release();
+    return;
+  }
+
+  // Read while the ring lock is still held; the error path below runs after it is released.
+  const bool is_isochronous = ring.IsIsochronous();
 
   // If the TRB is not at the head of the pending list then we're out of sync with the device, which
   // indicates a bug in the driver.
@@ -990,13 +1053,22 @@ void EventRing::HandleTransferInterrupt() {
   // TODO(https://fxbug.dev/42059338): Once we reliably keep track of TRBs, this error handling
   // should be removed and replaced by: ZX_ASSERT(status == ZX_OK).
   if (status != ZX_OK) {
+    if (status == ZX_ERR_CANCELED &&
+        (device_state->IsDisconnecting() || hci_->IsHaltedOrStopping())) {
+      l.release();
+      fdf::warn(
+          "Ignoring transfer completion (code {}) on already-drained ring for slot {} endpoint {} "
+          "while halted/stopping",
+          transfer_event->CompletionCode(), transfer_event->SlotID(), transfer_event->EndpointID());
+      return;
+    }
     fdf::error("Lost a TRB! Completion code is {}", transfer_event->CompletionCode());
 
     auto completions = ring.TakePendingTRBs();
     l.release();
 
     // CompleteTRB already popped the head off the list, so complete it first.
-    if (context) {
+    if (context && context->request.has_value()) {
       ep->RequestComplete(ZX_ERR_IO, 0, std::move(*context->request));
     }
 
@@ -1012,7 +1084,9 @@ void EventRing::HandleTransferInterrupt() {
         fdf::error("Current TRB was found at index {}", index);
         found = true;
       }
-      ep->RequestComplete(ZX_ERR_IO, 0, std::move(*completion->request));
+      if (completion->request.has_value()) {
+        ep->RequestComplete(ZX_ERR_IO, 0, std::move(*completion->request));
+      }
       index++;
     }
     if (!found) {
@@ -1026,9 +1100,18 @@ void EventRing::HandleTransferInterrupt() {
 
   if ((transfer_event->CompletionCode() != CommandCompletionEvent::Success) &&
       (transfer_event->CompletionCode() != CommandCompletionEvent::ShortPacket)) {
-    // asix-88179 will stall the endpoint if we're sending data too fast. The driver expects us to
-    // give it a ZX_ERR_IO_INVALID response when this happens.
-    fdf::warn("transfer_event->CompletionCode() == {}", transfer_event->CompletionCode());
+    // DataBuffer Error (code 2) on an isochronous endpoint means the controller could not
+    // buffer an incoming microframe. It is expected and non-fatal under load: isochronous
+    // transfers are loss-tolerant and need no retry or endpoint reset. Do not log it. At high
+    // channel counts it occurs hundreds to thousands of times per second, and each log call is
+    // a syscall on the event ring interrupt thread that delays later events, including the
+    // command completions RunSynchronously callers are waiting on.
+    if (transfer_event->CompletionCode() != CommandCompletionEvent::DataBufferError ||
+        !is_isochronous) {
+      // asix-88179 will stall the endpoint if we're sending data too fast. The driver expects us
+      // to give it a ZX_ERR_IO_INVALID response when this happens.
+      fdf::warn("transfer_event->CompletionCode() == {}", transfer_event->CompletionCode());
+    }
     ep->RequestComplete(ZX_ERR_IO_INVALID, 0, std::move(*context->request));
     return;
   }
@@ -1078,6 +1161,7 @@ void EventRing::Usb2DeviceAttach(uint16_t port_id) {
   PORTSC::Get(cap_length_, port_id)
       .FromValue(0)
       .set_CCS(sc.CCS())
+      .set_CEC(sc.CEC())
       .set_PLC(sc.PLC())
       .set_PortSpeed(sc.PortSpeed())
       .set_PIC(sc.PIC())

@@ -4,12 +4,15 @@
 
 #include "src/camera/drivers/bus/aml_mipicsi/aml_mipi.h"
 
+#include <lib/async/default.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
+#include <lib/fdf/dispatcher.h>
 #include <stdint.h>
 #include <threads.h>
 #include <zircon/types.h>
 
+#include <array>
 #include <memory>
 
 #include "src/camera/drivers/bus/aml_mipicsi/aml_mipi_regs.h"
@@ -97,9 +100,40 @@ zx_status_t AmlMipiDevice::Init() {
   }
   adap_irq_ = std::move(irq.value());
 
-  zx_status_t status = DdkAdd(ddk::DeviceAddArgs("aml-mipi"));
+  fdf_dispatcher_t* fdf_dispatcher = fdf_dispatcher_get_current_dispatcher();
+  async_dispatcher_t* dispatcher = fdf_dispatcher
+                                       ? fdf_dispatcher_get_async_dispatcher(fdf_dispatcher)
+                                       : async_get_default_dispatcher();
+  outgoing_ = component::OutgoingDirectory(dispatcher);
+
+  auto endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  fuchsia_hardware_mipicsi::Service::InstanceHandler handler({
+      .device = bindings_.CreateHandler(this, dispatcher, fidl::kIgnoreBindingClosure),
+  });
+  zx::result result = outgoing_->AddService<fuchsia_hardware_mipicsi::Service>(std::move(handler));
+  if (result.is_error()) {
+    zxlogf(ERROR, "Failed to add mipicsi service to outgoing directory: %s",
+           result.status_string());
+    bindings_.RemoveAll();
+    outgoing_.reset();
+    return result.status_value();
+  }
+  result = outgoing_->Serve(std::move(endpoints.server));
+  if (result.is_error()) {
+    zxlogf(ERROR, "Failed to serve outgoing directory: %s", result.status_string());
+    bindings_.RemoveAll();
+    outgoing_.reset();
+    return result.status_value();
+  }
+
+  std::array offers = {fuchsia_hardware_mipicsi::Service::Name};
+  zx_status_t status = DdkAdd(ddk::DeviceAddArgs("aml-mipi")
+                                  .set_fidl_service_offers(offers)
+                                  .set_outgoing_dir(endpoints.client.TakeChannel()));
   if (status != ZX_OK) {
     zxlogf(ERROR, "Failed to add device: %s", zx_status_get_string(status));
+    bindings_.RemoveAll();
+    outgoing_.reset();
     return status;
   }
 
@@ -118,8 +152,8 @@ void AmlMipiDevice::MipiCsi2Reset() {
   csi_host0_mmio_->Write32(0, MIPI_CSI_CSI2_RESETN);    // csi2 reset
 }
 
-void AmlMipiDevice::MipiPhyInit(const mipi_info_t* info) {
-  if (info->ui_value <= 1) {
+void AmlMipiDevice::MipiPhyInit(const fuchsia_hardware_mipicsi::wire::MipiInfo& info) {
+  if (info.ui_value <= 1) {
     aphy0_mmio_->Write32(0x0b440585, HI_CSI_PHY_CNTL0);
   } else {
     aphy0_mmio_->Write32(0x0b440581, HI_CSI_PHY_CNTL0);
@@ -141,7 +175,7 @@ void AmlMipiDevice::MipiPhyInit(const mipi_info_t* info) {
 
   // No documentation for this regisgter.
   // hs settle = 160 ns --(85 ns + 6*UI<x<145 ns + 10*UI)
-  uint32_t settle = ((85 + 145 + (16 * info->ui_value)) / 2) / 5;
+  uint32_t settle = ((85 + 145 + (16 * info.ui_value)) / 2) / 5;
   csi_phy0_mmio_->Write32(settle, MIPI_PHY_THS_SETTLE);
 
   csi_phy0_mmio_->Write32(0x4e20, MIPI_PHY_TINIT);  // >100us
@@ -159,13 +193,13 @@ void AmlMipiDevice::MipiPhyInit(const mipi_info_t* info) {
   csi_phy0_mmio_->Write32(0x00000123, MIPI_PHY_MUX_CTRL1);
 
   // NOTE: Possible bug in reference code. Leaving it here for future reference.
-  // uint32_t data32 = ((~(info->channel)) & 0xf) | (0 << 4); //enable lanes
-  // digital clock data32 |= ((0x10 | info->channel) << 5);        //mipi_chpu
+  // uint32_t data32 = ((~(info.channel)) & 0xf) | (0 << 4); //enable lanes
+  // digital clock data32 |= ((0x10 | info.channel) << 5);        //mipi_chpu
   // to analog
   csi_phy0_mmio_->Write32(0, MIPI_PHY_CTRL);
 }
 
-void AmlMipiDevice::MipiCsi2Init(const mipi_info_t* info) {
+void AmlMipiDevice::MipiCsi2Init(const fuchsia_hardware_mipicsi::wire::MipiInfo& info) {
   // csi2 reset
   csi_host0_mmio_->Write32(0, MIPI_CSI_CSI2_RESETN);
   // release csi2 reset
@@ -173,13 +207,36 @@ void AmlMipiDevice::MipiCsi2Init(const mipi_info_t* info) {
   // release DPHY reset
   csi_host0_mmio_->Write32(0xffffffff, MIPI_CSI_DPHY_RSTZ);
   // set lanes
-  csi_host0_mmio_->Write32((info->lanes - 1) & 3, MIPI_CSI_N_LANES);
+  csi_host0_mmio_->Write32((info.lanes - 1) & 3, MIPI_CSI_N_LANES);
   // enable power
   csi_host0_mmio_->Write32(0xffffffff, MIPI_CSI_PHY_SHUTDOWNZ);
 }
 
-zx_status_t AmlMipiDevice::MipiCsiInit(const mipi_info_t* mipi_info,
-                                       const mipi_adap_info_t* adap_info) {
+void AmlMipiDevice::Init(InitRequestView request, InitCompleter::Sync& completer) {
+  zx_status_t status = MipiCsiInit(request->mipi_info, request->adap_info);
+  if (status != ZX_OK) {
+    completer.ReplyError(status);
+  } else {
+    completer.ReplySuccess();
+  }
+}
+
+void AmlMipiDevice::DeInit(DeInitCompleter::Sync& completer) {
+  zx_status_t status = MipiCsiDeInit();
+  if (status != ZX_OK) {
+    completer.ReplyError(status);
+  } else {
+    completer.ReplySuccess();
+  }
+}
+
+zx_status_t AmlMipiDevice::MipiCsiInit(
+    const fuchsia_hardware_mipicsi::wire::MipiInfo& mipi_info,
+    const fuchsia_hardware_mipicsi::wire::MipiAdapInfo& adap_info) {
+  if (mipi_info.lanes < 1 || mipi_info.lanes > 4 || mipi_info.ui_value > (UINT32_MAX - 230) / 16) {
+    return ZX_ERR_INVALID_ARGS;
+  }
+
   // Setup MIPI CSI PHY CLK to 200MHz.
   // Setup MIPI ISP CLK to 667MHz.
   InitMipiClock();
@@ -227,6 +284,8 @@ zx_status_t AmlMipiDevice::Bind(void* ctx, zx_device_t* parent) {
 }
 
 AmlMipiDevice::~AmlMipiDevice() {
+  bindings_.RemoveAll();
+  outgoing_.reset();
   adap_irq_.destroy();
   running_.store(false);
   if (irq_thread_.has_value()) {

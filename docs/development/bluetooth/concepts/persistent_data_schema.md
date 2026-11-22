@@ -71,7 +71,7 @@ Key   | Value Type                                  | Description
 ------|---------------------------------------------|-----------------------------------------
 value | Array of Number (8-bits)                    | 16-octet key in little-endian byte order
 
-#### Peer key {#key}
+#### Peer key {#peer-key}
 
 128-bit key that represents a pairing-related secret from the peer. A common key that uses this
 schema is the peer's Identity Resolving Key (IRK).

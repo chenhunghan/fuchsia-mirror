@@ -31,10 +31,19 @@ assert_eq_size!(usize, u64);
 
 /// Generate a delivery blob of the specified `delivery_type` for `data` using default parameters.
 pub fn generate(delivery_type: DeliveryBlobType, data: &[u8]) -> Vec<u8> {
+    generate_with_mode(delivery_type, data, CompressionMode::Attempt)
+}
+
+/// Generate a delivery blob of the specified `delivery_type` for `data` using the specified `mode`.
+pub fn generate_with_mode(
+    delivery_type: DeliveryBlobType,
+    data: &[u8],
+    mode: CompressionMode,
+) -> Vec<u8> {
     match delivery_type {
-        DeliveryBlobType::Type1 => Type1Blob::generate(data, CompressionMode::Attempt),
-        DeliveryBlobType::Type2 => Type2Blob::generate(data, CompressionMode::Attempt),
-        DeliveryBlobType::Type3 => Type3Blob::generate(data, CompressionMode::Attempt),
+        DeliveryBlobType::Type1 => Type1Blob::generate(data, mode),
+        DeliveryBlobType::Type2 => Type2Blob::generate(data, mode),
+        DeliveryBlobType::Type3 => Type3Blob::generate(data, mode),
         _ => panic!("Unsupported delivery blob type: {:?}", delivery_type),
     }
 }
@@ -805,5 +814,25 @@ mod tests {
             DeliveryBlobError::InvalidType
         );
         assert!(DeliveryBlob::parse(&type3_blob, true).unwrap().is_some());
+    }
+
+    #[test]
+    fn generate_with_mode_types_and_modes() {
+        let data: Vec<u8> = vec![0x42; 1024];
+        for delivery_type in
+            [DeliveryBlobType::Type1, DeliveryBlobType::Type2, DeliveryBlobType::Type3]
+        {
+            let uncompressed = generate_with_mode(delivery_type, &data, CompressionMode::Never);
+            let (header, _) = DeliveryBlob::parse(&uncompressed, true).unwrap().unwrap();
+            assert_eq!(header.header.delivery_type, delivery_type);
+            assert!(!header.is_compressed);
+            assert_eq!(decompress(&uncompressed).unwrap(), data);
+
+            let compressed = generate_with_mode(delivery_type, &data, CompressionMode::Always);
+            let (header, _) = DeliveryBlob::parse(&compressed, true).unwrap().unwrap();
+            assert_eq!(header.header.delivery_type, delivery_type);
+            assert!(header.is_compressed);
+            assert_eq!(decompress(&compressed).unwrap(), data);
+        }
     }
 }

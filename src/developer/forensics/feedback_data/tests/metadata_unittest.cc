@@ -174,20 +174,19 @@ class RedactorForTest : public RedactorBase {
 class MetadataTest : public UnitTestFixture {
  protected:
   void SetUp() override {
-    FX_CHECK(files::WriteFile(files::JoinPath("/cache", kUtcBootDifferenceFile),
+    FX_CHECK(files::WriteFile(kPreviousUtcBootDifferencePath,
                               std::to_string(kPreviousBootUtcBootDifference.get())));
   }
 
   void TearDown() override {
-    files::DeletePath(files::JoinPath("/tmp", kUtcBootDifferenceFile), /*recursive=*/false);
-    files::DeletePath(files::JoinPath("/cache", kUtcBootDifferenceFile), /*recursive=*/false);
+    files::DeletePath(kPreviousUtcBootDifferencePath, /*recursive=*/false);
+    files::DeletePath(kCurrentUtcBootDifferencePath, /*recursive=*/false);
   }
 
   void SetUpMetadata(const std::set<std::string>& annotation_allowlist,
                      const feedback::AttachmentKeys& attachment_allowlist) {
-    metadata_ = std::make_unique<Metadata>(
-        dispatcher(), &clock_, &utc_clock_ready_watcher_, &redactor_,
-        /*is_first_instance=*/true, annotation_allowlist, attachment_allowlist);
+    metadata_ = std::make_unique<Metadata>(dispatcher(), &clock_, &utc_clock_ready_watcher_,
+                                           &redactor_, annotation_allowlist, attachment_allowlist);
 
     utc_clock_ready_watcher_.StartClock();
   }

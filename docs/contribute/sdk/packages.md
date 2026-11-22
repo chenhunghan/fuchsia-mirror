@@ -11,7 +11,7 @@ The steps are:
 1. [Explore package contents](#explore-package-contents).
 1. [Contribute to an API in the SDK](#contribute-to-an-api-in-the-sdk).
 
-## Prerequisites {:.numbered}
+## Prerequisites {:#prerequisites .numbered}
 
 For a package to be included in the Fuchsia SDK, the package must be created
 in the category of `partner` or `public`. (For more information, see
@@ -185,8 +185,8 @@ To contribute a package to the Fuchsia API surface, follow the guidelines below:
 
 [packages]: /docs/concepts/packages/package.md
 [api-surface]: /docs/glossary/README.md#fuchsia-api-surface
-[idk]:/docs/development/idk/README.md
-[promoting-api]: /docs/contribute/sdk/README.md#promoting_an_api_to_the_partner_category
+[idk]: /docs/development/idk/README.md
+[promoting-api]: /docs/contribute/sdk/README.md#promoting-to-partner
 [sdk-fuchsia-package-gni]: /build/packages/sdk_fuchsia_package.gni
 [package-contents]: /docs/concepts/packages/package.md#structure-of-a-package
 [example-gerrit-change-01]: http://fxrev.dev/c/fuchsia/+/895023

@@ -5,6 +5,8 @@
 #ifndef SRC_DEVELOPER_DEBUG_DEBUG_AGENT_DEBUGGED_PROCESS_H_
 #define SRC_DEVELOPER_DEBUG_DEBUG_AGENT_DEBUGGED_PROCESS_H_
 
+#include <zircon/types.h>
+
 #include <map>
 #include <memory>
 #include <vector>
@@ -113,12 +115,20 @@ class DebuggedProcess : public ProcessHandleObserver {
   std::vector<DebuggedThread*> GetThreads() const;
 
   // Populates the thread map with the current threads for this process.
-  // This function does not notify the client of thread start, but rather updates the internal
-  // thread state according to the underlying zircon truth.
-  void PopulateCurrentThreads();
+  // This function notifies the client of newly discovered threads. When |running_thread_koid|
+  // matches a newly discovered thread, that thread is reported as running without querying OS
+  // state.
+  void PopulateCurrentThreads(zx_koid_t running_thread_koid = ZX_KOID_INVALID);
 
   // Returns the information for all current threads. This gets minimal stacks.
   std::vector<debug_ipc::ThreadRecord> GetThreadRecords() const;
+
+  // ProcessHandleObserver implementation.
+  void OnProcessTerminated() override;
+  void OnThreadStarting(std::unique_ptr<ExceptionHandle> exception) override;
+  void OnThreadExiting(std::unique_ptr<ExceptionHandle> exception) override;
+  void OnException(std::unique_ptr<ExceptionHandle> exception) override;
+  void OnProcessStarting(std::unique_ptr<ProcessHandle> new_process_handle) override;
 
   // Checks if a breakpoint at the given address is the loader's internal one.
   // If it is, handles it and returns true. If it's not, does nothing and returns false.
@@ -200,20 +210,6 @@ class DebuggedProcess : public ProcessHandleObserver {
 
   bool from_limbo() const { return from_limbo_; }
 
- protected:
-  // ProcessHandleObserver implementation.
-  //
-  // These are protected so that they can be called from MockProcess. In normal operation these are
-  // called by the ProcessHandle implementation, but we don't want to have to construct fake
-  // instances of platform specific exception objects when we can just use our own abstractions
-  // here. This provides a simpler interface for testing the higher level objects without exposing
-  // the API outside of tests.
-  void OnProcessTerminated() override;
-  void OnThreadStarting(std::unique_ptr<ExceptionHandle> exception) override;
-  void OnThreadExiting(std::unique_ptr<ExceptionHandle> exception) override;
-  void OnException(std::unique_ptr<ExceptionHandle> exception) override;
-  void OnProcessStarting(std::unique_ptr<ProcessHandle> new_process_handle) override;
-
  private:
   void OnStdout(bool close);
   void OnStderr(bool close);
@@ -269,7 +265,7 @@ class DebuggedProcess : public ProcessHandleObserver {
   // occurs then the process will exit normally.
   bool is_weakly_attached_ = false;
 
-#if defined(__linux__)
+#ifdef __linux__
   // On Linux we need to manually set a breakpoint in the loader to observe module loads (Fuchsia
   // uses a process property to signal the loader to do it for us).
   uint64_t dl_debug_addr_ = 0;

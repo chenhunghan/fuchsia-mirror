@@ -7,7 +7,7 @@
 
 #include <cstdio>
 #include <limits>
-#include <memory>
+#include <vector>
 
 #include <zxtest/zxtest.h>
 
@@ -128,7 +128,7 @@ TEST(NullParameters, validate_v2_null_validate_parameters) {
 }
 
 // The Walker tests are disabled for host because they depend on fidl
-// generated LLCPP code that can't run on host.
+// generated C++ wire code that can't run on host.
 
 // TODO(https://fxbug.dev/42129678): Move this test to GIDL.
 #ifdef __Fuchsia__
@@ -450,65 +450,68 @@ TEST(Structs, validate_v2_nested_nullable_structs) {
   EXPECT_NULL(error, "%s", error);
 }
 
-TEST(Xunions, validate_v2_valid_empty_nullable_xunion) {
-  SampleNullableXUnionV2Struct message = {};
+TEST(Unions, validate_v2_valid_empty_nullable_union) {
+  SampleNullableFlexibleUnionV2Struct message = {};
 
   const char* error = nullptr;
   auto status = internal__fidl_validate__v2__may_break(
-      &fidl_test_coding_SampleNullableXUnionStructTable, &message, sizeof(fidl_union_t), 0, &error);
+      &fidl_test_coding_SampleNullableFlexibleUnionStructTable, &message, sizeof(fidl_union_t), 0,
+      &error);
   EXPECT_EQ(status, ZX_OK);
   EXPECT_NULL(error, "%s", error);
 }
 
-TEST(Xunions, validate_v2_empty_nonnullable_xunion) {
-  SampleXUnionV2Struct message = {};
-
-  const char* error = nullptr;
-  auto status = internal__fidl_validate__v2__may_break(&fidl_test_coding_SampleXUnionStructTable,
-                                                       &message, sizeof(fidl_union_t), 0, &error);
-  EXPECT_EQ(status, ZX_ERR_INVALID_ARGS);
-  EXPECT_NOT_NULL(error);
-  EXPECT_STREQ(error, "non-nullable xunion is absent");
-}
-
-TEST(Xunions, validate_v2_empty_nullable_xunion_nonzero_ordinal) {
-  SampleNullableXUnionV2Struct message = {};
-  message.opt_xu.header.tag = kSampleXUnionIntStructOrdinal;
+TEST(Unions, validate_v2_empty_nonnullable_union) {
+  SampleFlexibleUnionV2Struct message = {};
 
   const char* error = nullptr;
   auto status = internal__fidl_validate__v2__may_break(
-      &fidl_test_coding_SampleNullableXUnionStructTable, &message, sizeof(fidl_union_t), 0, &error);
+      &fidl_test_coding_SampleFlexibleUnionStructTable, &message, sizeof(fidl_union_t), 0, &error);
   EXPECT_EQ(status, ZX_ERR_INVALID_ARGS);
   EXPECT_NOT_NULL(error);
-  EXPECT_STREQ(error, "empty xunion must have zero as ordinal");
+  EXPECT_STREQ(error, "non-nullable union is absent");
 }
 
-TEST(Xunions, validate_v2_nonempty_xunion_zero_ordinal) {
-  SampleXUnionV2Struct message = {};
+TEST(Unions, validate_v2_empty_nullable_union_nonzero_ordinal) {
+  SampleNullableFlexibleUnionV2Struct message = {};
+  message.opt_xu.header.tag = kSampleFlexibleUnionIntStructOrdinal;
+
+  const char* error = nullptr;
+  auto status = internal__fidl_validate__v2__may_break(
+      &fidl_test_coding_SampleNullableFlexibleUnionStructTable, &message, sizeof(fidl_union_t), 0,
+      &error);
+  EXPECT_EQ(status, ZX_ERR_INVALID_ARGS);
+  EXPECT_NOT_NULL(error);
+  EXPECT_STREQ(error, "empty union must have zero as ordinal");
+}
+
+TEST(Unions, validate_v2_nonempty_union_zero_ordinal) {
+  SampleFlexibleUnionV2Struct message = {};
   message.xu.header.envelope = (fidl_envelope_t){.num_bytes = 8, .num_handles = 0};
 
   const char* error = nullptr;
   auto status = internal__fidl_validate__v2__may_break(
-      &fidl_test_coding_SampleXUnionStructTable, &message, sizeof(SampleXUnionV2Struct), 0, &error);
+      &fidl_test_coding_SampleFlexibleUnionStructTable, &message,
+      sizeof(SampleFlexibleUnionV2Struct), 0, &error);
   EXPECT_EQ(status, ZX_ERR_INVALID_ARGS);
   EXPECT_NOT_NULL(error);
-  EXPECT_STREQ(error, "xunion with zero as ordinal must be empty");
+  EXPECT_STREQ(error, "union with zero as ordinal must be empty");
 }
 
-TEST(Xunions, validate_v2_nonempty_nullable_xunion_zero_ordinal) {
-  SampleNullableXUnionV2Struct message = {};
+TEST(Unions, validate_v2_nonempty_nullable_union_zero_ordinal) {
+  SampleNullableFlexibleUnionV2Struct message = {};
   message.opt_xu.header.envelope = (fidl_envelope_t){.num_bytes = 8, .num_handles = 0};
 
   const char* error = nullptr;
   auto status = internal__fidl_validate__v2__may_break(
-      &fidl_test_coding_SampleNullableXUnionStructTable, &message,
-      sizeof(SampleNullableXUnionV2Struct), 0, &error);
+      &fidl_test_coding_SampleNullableFlexibleUnionStructTable, &message,
+      sizeof(SampleNullableFlexibleUnionV2Struct), 0, &error);
   EXPECT_EQ(status, ZX_ERR_INVALID_ARGS);
   EXPECT_NOT_NULL(error);
-  EXPECT_STREQ(error, "xunion with zero as ordinal must be empty");
+  EXPECT_STREQ(error, "union with zero as ordinal must be empty");
 }
 
-TEST(Xunions, validate_v2_strict_xunion_unknown_ordinal) {
+TEST(Unions, validate_v2_strict_union_unknown_ordinal) {
   uint8_t bytes[] = {
       0xf0, 0x05, 0xc1, 0x0a,                          // invalid ordinal
       0x00, 0x00, 0x00, 0x00,                          // padding
@@ -519,13 +522,13 @@ TEST(Xunions, validate_v2_strict_xunion_unknown_ordinal) {
 
   const char* error = nullptr;
   auto status = internal__fidl_validate__v2__may_break(
-      &fidl_test_coding_SampleStrictXUnionStructTable, bytes, sizeof(bytes), 0, &error);
+      &fidl_test_coding_SampleStrictUnionStructTable, bytes, sizeof(bytes), 0, &error);
   EXPECT_EQ(status, ZX_ERR_INVALID_ARGS);
   EXPECT_NOT_NULL(error);
-  EXPECT_STREQ(error, "strict xunion has unknown ordinal");
+  EXPECT_STREQ(error, "strict union has unknown ordinal");
 }
 
-TEST(Xunions, validate_v2_flexible_xunion_unknown_ordinal) {
+TEST(Unions, validate_v2_flexible_union_unknown_ordinal) {
   uint8_t bytes[] = {
       0xf0, 0x05, 0xc1, 0x0a,                          // invalid ordinal
       0x00, 0x00, 0x00, 0x00,                          // padding
@@ -535,8 +538,8 @@ TEST(Xunions, validate_v2_flexible_xunion_unknown_ordinal) {
   };
 
   const char* error = nullptr;
-  auto status = internal__fidl_validate__v2__may_break(&fidl_test_coding_SampleXUnionStructTable,
-                                                       bytes, sizeof(bytes), 0, &error);
+  auto status = internal__fidl_validate__v2__may_break(
+      &fidl_test_coding_SampleFlexibleUnionStructTable, bytes, sizeof(bytes), 0, &error);
   EXPECT_EQ(status, ZX_OK);
   EXPECT_NULL(error);
 }
@@ -735,8 +738,8 @@ TEST(Enums, validate_v2_invalid_uint64_enum) {
 }
 
 TEST(Primitives, validate_v2_primitives_struct) {
-  // TODO(https://fxbug.dev/42129903): Use generated types - primitive struct fields actually have null type.
-  // The following coding table is equivalent to this FIDL struct definition:
+  // TODO(https://fxbug.dev/42129903): Use generated types - primitive struct fields actually have
+  // null type. The following coding table is equivalent to this FIDL struct definition:
   //
   // struct PrimitiveStruct {
   //   bool b;
@@ -796,12 +799,11 @@ TEST(Primitives, validate_v2_primitives_struct) {
       .name = "fidl.test.coding/PrimitiveStruct",
   };
 
-  uint8_t data[kPrimitiveStructCodingTable.coded_struct().size_v2];
-  memset(data, 0, sizeof(data));
+  std::vector<uint8_t> data(kPrimitiveStructCodingTable.coded_struct().size_v2, 0);
 
   const char* error = nullptr;
   auto status = internal__fidl_validate__v2__may_break(
-      &kPrimitiveStructCodingTable, data, static_cast<uint32_t>(sizeof(data)), 0, &error);
+      &kPrimitiveStructCodingTable, data.data(), static_cast<uint32_t>(data.size()), 0, &error);
   EXPECT_EQ(status, ZX_OK);
   EXPECT_NULL(error);
 }

@@ -1,0 +1,84 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":digest-unit-tests_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "digest",
+    srcs = [
+        "digest.cc",
+        "hash-list.cc",
+        "merkle-tree.cc",
+        "node-digest.cc",
+    ],
+    disable_build_flags = select({
+        "@platforms//os:fuchsia": ["//build/config/fuchsia:fdio_config"],
+        "//conditions:default": [],
+    }),
+    gn_output_name = "digest-unit-tests",
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/lib/digest",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//third_party/boringssl",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "digest_packaged",
+    testonly = True,
+    binary = ":digest",
+    binary_name = "digest-unit-tests",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "digest-unit-tests-manifest",
+    testonly = True,
+    component_name = "digest-unit-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "digest-unit-tests.cml",
+)
+
+fx_test_component(
+    name = "digest-unit-tests-component",
+    compiled_manifest = ":digest-unit-tests-manifest",
+    deps = [":digest_packaged"],
+)
+
+fx_package(
+    name = "digest-unit-tests",
+    testonly = True,
+    test_components = [":digest-unit-tests-component"],
+)
+
+fx_test(
+    name = "digest-unit-tests_test",
+    package = ":digest-unit-tests",
+)

@@ -1,0 +1,135 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":kernel-collector-unittests_test"],
+    visibility = ["//src/memory:__pkg__"],
+)
+
+# Fuchsia-only binary linking Zircon, fdio, and Fuchsia component runtime crates.
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/kernel_collector.rs",
+        "src/main.rs",
+        "src/region.rs",
+    ],
+    binary_name = "kernel-collector",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.memory.heapdump.client:fuchsia.memory.heapdump.client_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fdio/rust:fdio",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/memory/heapdump/lib/heapdump_snapshot",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "kernel-collector",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    component_name = "kernel-collector",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/kernel_collector.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component-manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "kernel-collector",
+    components = [":component"],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged_bin",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "kernel_collector_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "kernel-collector-unittests-manifest",
+    testonly = True,
+    component_name = "kernel-collector-unittests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/syslog:use.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/kernel_collector_unittests.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_test_component(
+    name = "kernel-collector-unittests-component",
+    compiled_manifest = ":kernel-collector-unittests-manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [":bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "kernel-collector-unittests",
+    test_components = [":kernel-collector-unittests-component"],
+)
+
+# Run with `fx test kernel-collector-unittests`.
+fx_test(
+    name = "kernel-collector-unittests_test",
+    package = ":kernel-collector-unittests",
+)

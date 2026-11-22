@@ -39,6 +39,9 @@ class EndpointServer : public fidl::Server<fuchsia_hardware_usb_endpoint::Endpoi
                fidl::ServerEnd<fuchsia_hardware_usb_endpoint::Endpoint> server_end);
 
   // fuchsia_hardware_usb_new.Endpoint protocol implementation.
+  void GetAlignmentInfo(GetAlignmentInfoCompleter::Sync& completer) override {
+    completer.Reply(fit::as_error(ZX_ERR_NOT_SUPPORTED));
+  }
   void RegisterVmos(RegisterVmosRequest& request, RegisterVmosCompleter::Sync& completer) final;
   void UnregisterVmos(UnregisterVmosRequest& request,
                       UnregisterVmosCompleter::Sync& completer) final;

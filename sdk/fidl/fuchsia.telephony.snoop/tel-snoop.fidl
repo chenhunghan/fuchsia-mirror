@@ -18,7 +18,7 @@ type QmiMessage = struct {
     opaque_bytes array<uint8, 256>;
 };
 
-//TODO(jiamingw): change it to xunion after transport driver is converted to LLCPP
+//TODO(jiamingw): change it to flexible union after transport driver is converted to LLCPP
 type Message = strict union {
     1: qmi_message QmiMessage;
 };

@@ -6,6 +6,15 @@ import("//build/python/python_host_test.gni")
 
 assert(is_host, "These tests are only applicable on the host toolchain.")
 
+# TODO(https://fxbug.dev/570694755): Remove these hand-written GN copies once
+# bazel2gn supports host_py_test() or //build/config/BUILDCONFIG.gn drops
+# //src/testing/end_to_end/libs:tests from e2e_lib_unit_tests.
+# LINT.IfChange(e2e_libs_tests)
+python_host_test("errors_test") {
+  main_source = "errors_test.py"
+  libraries = [ "//src/testing/end_to_end/libs:libs" ]
+}
+
 python_host_test("exception_utils_test") {
   main_source = "exception_utils_test.py"
   libraries = [ "//src/testing/end_to_end/libs:libs" ]
@@ -13,25 +22,28 @@ python_host_test("exception_utils_test") {
 
 python_host_test("ip_utils_test") {
   main_source = "ip_utils_test.py"
-  libraries = [
-    "//src/testing/end_to_end/libs:libs",
-    "//third_party/mobly",
-  ]
+  libraries = [ "//src/testing/end_to_end/libs:libs" ]
 }
 
 python_host_test("job_test") {
   main_source = "job_test.py"
-  libraries = [
-    "//src/testing/end_to_end/libs:libs",
-    "//third_party/mobly",
-  ]
+  libraries = [ "//src/testing/end_to_end/libs:libs" ]
 }
+
+python_host_test("ssh_connection_test") {
+  main_source = "ssh_connection_test.py"
+  libraries = [ "//src/testing/end_to_end/libs:libs" ]
+}
+
+# LINT.ThenChange(BUILD.bazel:e2e_libs_tests)
 
 group("tests") {
   testonly = true
   deps = [
+    ":errors_test",
     ":exception_utils_test",
     ":ip_utils_test",
     ":job_test",
+    ":ssh_connection_test",
   ]
 }

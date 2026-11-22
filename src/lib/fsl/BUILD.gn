@@ -2,43 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/testing/cc_test_executable.gni")
-
-cc_test_executable("fsl_unittests") {
+group("tests") {
   testonly = true
-
-  sources = [
-    "handles/object_info_unittest.cc",
-    "io/device_watcher_unittest.cc",
-    "io/redirection_unittest.cc",
-    "socket/blocking_drain_unittest.cc",
-    "socket/files_unittest.cc",
-    "socket/socket_drainer_unittest.cc",
-    "socket/strings_unittest.cc",
-    "tasks/fd_waiter_unittest.cc",
-    "types/type_converters_unittest.cc",
-    "vmo/file_unittest.cc",
-    "vmo/shared_vmo_unittest.cc",
-    "vmo/strings_unittest.cc",
-    "vmo/vector_unittest.cc",
-  ]
-
-  deps = [
-    ":fsl",
-    "//sdk/lib/fit",
-    "//src/lib/fxl/test:gtest_main",
-    "//src/lib/testing/loop_fixture",
-    "//src/storage/lib/vfs/cpp",
-    "//third_party/googletest:gtest",
-  ]
-}
-
-fuchsia_unittest_package("fsl_tests") {
-  deps = [
-    ":fsl_unittests",
-    "//src/sys/test_runners:tmp_storage",
-  ]
+  deps = [ ":fsl_tests" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -67,7 +33,7 @@ fuchsia_unittest_package("fsl_tests") {
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 static_library("fsl") {
-  visibility = [ "*" ]
+  visibility = [ "//*" ]
   public_deps = [
     "//src/lib/fsl/handles",
     "//src/lib/fsl/io",
@@ -76,4 +42,40 @@ static_library("fsl") {
     "//src/lib/fsl/types",
     "//src/lib/fsl/vmo",
   ]
+}
+
+cc_test_executable("fsl_unittests") {
+  sources = [
+    "//src/lib/fsl/handles/object_info_unittest.cc",
+    "//src/lib/fsl/io/device_watcher_unittest.cc",
+    "//src/lib/fsl/io/redirection_unittest.cc",
+    "//src/lib/fsl/socket/blocking_drain_unittest.cc",
+    "//src/lib/fsl/socket/files_unittest.cc",
+    "//src/lib/fsl/socket/socket_drainer_unittest.cc",
+    "//src/lib/fsl/socket/strings_unittest.cc",
+    "//src/lib/fsl/tasks/fd_waiter_unittest.cc",
+    "//src/lib/fsl/types/type_converters_unittest.cc",
+    "//src/lib/fsl/vmo/file_unittest.cc",
+    "//src/lib/fsl/vmo/shared_vmo_unittest.cc",
+    "//src/lib/fsl/vmo/sized_vmo_unittest.cc",
+    "//src/lib/fsl/vmo/strings_unittest.cc",
+    "//src/lib/fsl/vmo/vector_unittest.cc",
+  ]
+  deps = [
+    ":fsl",
+    "//sdk/lib/fit",
+    "//src/lib/fxl/test:gtest_main",
+    "//src/lib/testing/loop_fixture",
+    "//src/storage/lib/vfs/cpp",
+    "//third_party/googletest:gtest",
+  ]
+  deps += [ "//src/sys/test_runners:tmp_storage" ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_package("fsl_tests") {
+  package_name = "fsl_tests-gn"
+  component_name = "fsl_tests"
+  deps = [ ":fsl_unittests" ]
 }

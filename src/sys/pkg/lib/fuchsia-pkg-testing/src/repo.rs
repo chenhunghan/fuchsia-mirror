@@ -189,6 +189,7 @@ impl Repository {
     fn blobs_dir(&self) -> PathBuf {
         match self.delivery_blob_type {
             DeliveryBlobType::Type1 => self.dir.path().join("repository/blobs/1"),
+            DeliveryBlobType::Type2 => self.dir.path().join("repository/blobs/2"),
             t => panic!("Unsupported delivery blob type: {:?}", t),
         }
     }
@@ -227,23 +228,24 @@ impl Repository {
     /// Reads the contents of requested delivery blob from the repository.
     pub fn read_delivery_blob(
         &self,
-        delivery_blob_type: u32,
+        delivery_blob_type: DeliveryBlobType,
         merkle_root: &Hash,
     ) -> Result<Vec<u8>, io::Error> {
         fs::read(
-            self.dir.path().join(format!("repository/blobs/{delivery_blob_type}/{merkle_root}")),
+            self.dir
+                .path()
+                .join(format!("repository/blobs/{}/{merkle_root}", u32::from(delivery_blob_type))),
         )
     }
 
     /// Writes a blob with the given merkle and data (which may not match), into the repository's
     /// blobs directory, without any compression.
     pub fn write_blob(&self, merkle_root: &Hash, blob: &[u8]) -> Result<usize, Error> {
-        let blob_data_to_write = match self.delivery_blob_type {
-            DeliveryBlobType::Type1 => {
-                delivery_blob::Type1Blob::generate(blob, delivery_blob::CompressionMode::Never)
-            }
-            t => panic!("Unsupported delivery blob type: {:?}", t),
-        };
+        let blob_data_to_write = delivery_blob::generate_with_mode(
+            self.delivery_blob_type,
+            blob,
+            delivery_blob::CompressionMode::Never,
+        );
         let () = fs::write(self.blobs_dir().join(format!("{merkle_root}")), &blob_data_to_write)
             .with_context(|| format!("writing blob: {merkle_root}"))?;
         Ok(blob_data_to_write.len())
@@ -254,10 +256,7 @@ impl Repository {
     pub fn overwrite_uncompressed_delivery_blob(&self, merkle_root: &Hash) -> Result<usize, Error> {
         let blob =
             self.read_blob(merkle_root).with_context(|| format!("reading blob: {merkle_root}"))?;
-        let delivery_blob =
-            delivery_blob::Type1Blob::generate(&blob, delivery_blob::CompressionMode::Never);
-        let () = fs::write(self.blobs_dir().join(format!("{merkle_root}")), &delivery_blob)?;
-        Ok(delivery_blob.len())
+        self.write_blob(merkle_root, &blob)
     }
 
     /// Returns the path of the base of the repository.
@@ -362,12 +361,15 @@ mod tests {
 
     use super::*;
     use crate::package::PackageBuilder;
+    use test_case::test_case;
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_repo_builder() {
+    async fn test_repo_builder(delivery_blob_type: DeliveryBlobType) {
         let same_contents = b"same contents";
         let repo = RepositoryBuilder::new()
-            .delivery_blob_type(DeliveryBlobType::Type1)
+            .delivery_blob_type(delivery_blob_type)
             .add_package(
                 PackageBuilder::new("rolldice")
                     .add_resource_at("bin/rolldice", "#!/boot/bin/sh\necho 4\n".as_bytes())
@@ -408,8 +410,8 @@ mod tests {
         let same_contents_merkle = fuchsia_merkle::root_from_slice(same_contents);
         assert_eq!(repo.read_blob(&same_contents_merkle).unwrap(), same_contents);
         assert_eq!(
-            repo.read_delivery_blob(1, &same_contents_merkle).unwrap(),
-            delivery_blob::generate(delivery_blob::DeliveryBlobType::Type1, same_contents)
+            repo.read_delivery_blob(delivery_blob_type, &same_contents_merkle).unwrap(),
+            delivery_blob::generate(delivery_blob_type, same_contents)
         );
 
         let packages = repo.list_packages().unwrap();

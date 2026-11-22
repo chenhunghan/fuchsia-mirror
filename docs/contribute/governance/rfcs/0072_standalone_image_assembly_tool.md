@@ -38,7 +38,7 @@ The package in BlobFS, identified to `pkgfs` by its content identity, which
 contains the base system, (e.g. `/system`).  This is called the `system_image`
 package in the current build.  See [this][pkgfs-cmd] for more information.
 
-### BlobFS
+### BlobFS {:#blobfs}
 [BlobFS][blobfs-docs] is Fuchsia's [content-addressed](#content-addressing)
 filesystem.
 
@@ -48,7 +48,7 @@ perform the assembly process (e.g partition tables, flash-block
 sizes, device bootloader images for flashing onto the device or including in the
 update package, etc.).
 
-### Content-Addressing
+### Content-addressing {:#content-addressing}
 Content-addressing is a way of identifying a thing based on a
 cryptographically-secure hash of its contents.  On Fuchsia, this is used by
 [BlobFS](#blobfs), [pkgfs][pkgfs], and other parts of the system to identify
@@ -58,7 +58,7 @@ files in a secure manner.
 The FVM image is the block-device image for the
 [Fuchsia Volume Manager](/docs/glossary/README.md#Fuchsia-volume-manager).
 
-### System Image Artifacts
+### System image artifacts {:#system-image-artifacts}
 The set of final output artifacts that are created by the build which contain
 Fuchsia.  This is the larger set of artifacts which are used to deliver Fuchsia
 to devices via different means (OTA, flashing, paving, etc.)
@@ -193,7 +193,7 @@ instructed to create:
 - vbmeta
 - fvm flash image
 
-#### Results Manifests
+#### Results manifests {:#results-manifests}
 
 The following manifests are produced, when the tool is instructed to create the
 output files that are described within the manifests.
@@ -303,6 +303,6 @@ The `ffx` interface for this tool will need to be documented.
 [ffx plugin]: /docs/development/tools/ffx/development/README.md
 [merkle-roots]: /docs/concepts/security/merkleroot.md
 [pkgfs]: /docs/concepts/packages/garbage_collection.md
-[pkgfs-cmd]: /docs/reference/kernel/kernel_cmdline.md#zirconsystempkgfscmdcommand
+[pkgfs-cmd]: /docs/reference/kernel/kernel_cmdline.md#zircon-system-pkgfs-cmd
 [update-pkg]: /docs/concepts/packages/update_pkg.md
 [zircon]: /docs/concepts/kernel/README.md

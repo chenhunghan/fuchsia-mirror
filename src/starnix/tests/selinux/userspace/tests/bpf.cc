@@ -149,11 +149,7 @@ TEST_P(BpfMapCreateTest, Create) {
 
   ASSERT_TRUE(RunSubprocessAs(label.c_str(), [&] {
     fbl::unique_fd fd = CreateArrayMap();
-    if (should_succeed) {
-      EXPECT_THAT(fd.get(), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(fd.get(), SyscallSucceedsOrFailsWithErrno(should_succeed, EACCES));
   }));
 }
 
@@ -181,11 +177,7 @@ TEST_P(BpfProgLoadTest, Load) {
 
   ASSERT_TRUE(RunSubprocessAs(label, [&] {
     fbl::unique_fd fd = LoadProgram();
-    if (should_succeed) {
-      EXPECT_THAT(fd.get(), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(fd.get(), SyscallSucceedsOrFailsWithErrno(should_succeed, EACCES));
   }));
 }
 
@@ -226,11 +218,7 @@ TEST_P(BpfCapabilityAuditTest, MapCreate) {
 
   ASSERT_TRUE(RunSubprocessAs(label, [&] {
     fbl::unique_fd fd = CreateLruHashMap();
-    if (should_succeed) {
-      EXPECT_THAT(fd.get(), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(fd.get(), SyscallFailsWithErrno(EPERM));
-    }
+    EXPECT_THAT(fd.get(), SyscallSucceedsOrFailsWithErrno(should_succeed, EPERM));
   }));
 }
 
@@ -260,11 +248,7 @@ TEST_P(BpfMapTest, Map) {
   ASSERT_TRUE(RunSubprocessAs(label.c_str(), [&] {
     intptr_t result = reinterpret_cast<intptr_t>(
         mmap(nullptr, getpagesize(), map_flags, MAP_SHARED, mappable_map_fd.get(), 0));
-    if (should_succeed) {
-      EXPECT_THAT(result, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(result, SyscallSucceedsOrFailsWithErrno(should_succeed, EACCES));
   }));
 }
 
@@ -331,11 +315,7 @@ TEST_P(BpfPinTest, PinnedMap) {
           .file_flags = flags,
       };
       int result = bpf(BPF_OBJ_GET, &attr);
-      if (map_should_succeed) {
-        EXPECT_THAT(result, SyscallSucceeds());
-      } else {
-        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-      }
+      EXPECT_THAT(result, SyscallSucceedsOrFailsWithErrno(map_should_succeed, EACCES));
       if (result >= 0) {
         close(result);
       }
@@ -368,11 +348,7 @@ TEST_P(BpfPinTest, PinnedProg) {
           .file_flags = flags,
       };
       int result = bpf(BPF_OBJ_GET, &attr);
-      if (prog_should_succeed) {
-        EXPECT_THAT(result, SyscallSucceeds());
-      } else {
-        EXPECT_THAT(result, SyscallFailsWithErrno(EACCES));
-      }
+      EXPECT_THAT(result, SyscallSucceedsOrFailsWithErrno(prog_should_succeed, EACCES));
       if (result >= 0) {
         close(result);
       }
@@ -453,11 +429,7 @@ TEST_P(BpfFcntlLockTest, DoesNotRequireFileLock) {
       lock_ret = fcntl(fd.get(), cmd, &fl);
     }
 
-    if (cmd == F_SETLEASE) {
-      EXPECT_THAT(lock_ret, SyscallFailsWithErrno(EINVAL));
-    } else {
-      EXPECT_THAT(lock_ret, SyscallSucceeds());
-    }
+    EXPECT_THAT(lock_ret, SyscallSucceedsOrFailsWithErrno(cmd != F_SETLEASE, EINVAL));
   }));
 
   EXPECT_THAT(unlink(PIN_PATH), SyscallSucceeds());
@@ -513,4 +485,4 @@ TEST(BpfFlockTest, DoesNotRequireFileLock) {
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() { return "bpf_policy"; }
+extern std::string GetTestPolicyName() { return "bpf_policy"; }

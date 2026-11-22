@@ -11,7 +11,6 @@ fidl_library(
     srcs = [
         "wlantap.fidl",
     ],
-    enable_hlcpp = True,
     # TODO(https://fxbug.dev/42111344): Remove lint exclusions by fixing known FIDL lint violations in this target
     excluded_checks = [
         "event-names-must-start-with-on",

@@ -21,15 +21,17 @@ fuchsia_test_package("omaha-client-integration-tests") {
   deps = [
     ":omaha-client-test-driver",
     "//src/cobalt/bin/testing/fake_cobalt:component_v2",
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/sys/pkg/bin/omaha-client:component",
     "//src/sys/pkg/bin/system-update-committer:component",
     "//src/sys/pkg/bin/system-updater:component",
     "//src/sys/pkg/testing:fake-ssl-certs",
     "//src/sys/stash:stash2_v2",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
 
   test_specs = {
     log_settings = {

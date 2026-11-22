@@ -150,11 +150,8 @@ enum PendingShrink {
     None,
 
     /// The file needs to be shrunk during the next flush. After shrinking the file, the file may
-    /// then also need to be trimmed. We also stash whether or not we need to update the
-    /// has_overwrite_extents metadata flag during the shrink, because we get rid of the in-memory
-    /// tracking of the overwrite extents immediately but we can't update the on-disk metadata
-    /// until the next flush.
-    ShrinkTo(u64, Option<bool>),
+    /// then also need to be trimmed.
+    ShrinkTo(u64),
 
     /// The file needs to be trimmed during the next flush.
     NeedsTrim,
@@ -821,7 +818,7 @@ impl PagedObjectHandle {
         ctime: Option<Timestamp>,
     ) -> Result<(), Error> {
         if let Some(content_size) = content_size {
-            self.handle.txn_update_size(transaction, content_size, None).await?;
+            self.handle.txn_update_size(transaction, content_size).await?;
         }
         let attributes = fio::MutableNodeAttributes {
             creation_time: crtime.map(|t| t.as_nanos()),
@@ -996,11 +993,8 @@ impl PagedObjectHandle {
 
         defer! { self.inner.lock().flushing = false; }
 
-        if let PendingShrink::ShrinkTo(size, update_has_overwrite_extents) = pending_shrink {
-            let needs_trim = self
-                .shrink_file(size, update_has_overwrite_extents)
-                .await
-                .context("Failed to shrink file")?;
+        if let PendingShrink::ShrinkTo(size) = pending_shrink {
+            let needs_trim = self.shrink_file(size).await.context("Failed to shrink file")?;
             self.inner.lock().pending_shrink =
                 if needs_trim { PendingShrink::NeedsTrim } else { PendingShrink::None };
         }
@@ -1117,15 +1111,10 @@ impl PagedObjectHandle {
     }
 
     /// Returns true if the file still needs to be trimmed.
-    async fn shrink_file(
-        &self,
-        new_size: u64,
-        update_has_overwrite_extents: Option<bool>,
-    ) -> Result<bool, Error> {
+    async fn shrink_file(&self, new_size: u64) -> Result<bool, Error> {
         let mut transaction = self.new_transaction(None).await?;
 
-        let needs_trim =
-            self.handle.shrink(&mut transaction, new_size, update_has_overwrite_extents).await?.0;
+        let needs_trim = self.handle.shrink(&mut transaction, new_size).await?.0;
 
         let (mtime, crtime) = {
             let mut inner = self.inner.lock();
@@ -1173,7 +1162,7 @@ impl PagedObjectHandle {
         // doing it the other way around is worse - there is a potential for mark_dirty calls to
         // come in between set_stream_size and locking inner, and if those pages are in the
         // previously allocated range they won't have reservations for them.
-        let update_has_overwrite_extents = self.handle.truncate_overwrite_ranges(new_size)?;
+        self.handle.truncate_overwrite_ranges(new_size)?;
 
         let vmo = self.vmo.temp_clone();
         // This unblock is to break an executor ordering deadlock situation. Vmo::set_stream_size()
@@ -1186,16 +1175,11 @@ impl PagedObjectHandle {
         let mut inner = self.inner.lock();
         if new_size < previous_content_size {
             inner.pending_shrink = match inner.pending_shrink {
-                PendingShrink::None => {
-                    PendingShrink::ShrinkTo(new_size, update_has_overwrite_extents)
+                PendingShrink::None => PendingShrink::ShrinkTo(new_size),
+                PendingShrink::ShrinkTo(size) => {
+                    PendingShrink::ShrinkTo(std::cmp::min(size, new_size))
                 }
-                PendingShrink::ShrinkTo(size, previous_update) => {
-                    let update = update_has_overwrite_extents.or(previous_update);
-                    PendingShrink::ShrinkTo(std::cmp::min(size, new_size), update)
-                }
-                PendingShrink::NeedsTrim => {
-                    PendingShrink::ShrinkTo(new_size, update_has_overwrite_extents)
-                }
+                PendingShrink::NeedsTrim => PendingShrink::ShrinkTo(new_size),
             }
         }
 
@@ -1667,8 +1651,9 @@ mod tests {
     use fuchsia_fs::file;
     use futures::join;
     use fxfs::filesystem::{FxFilesystemBuilder, OpenFxFilesystem};
-    use fxfs::object_store::NewChildStoreOptions;
+    use fxfs::fsck::fsck_volume;
     use fxfs::object_store::volume::root_volume;
+    use fxfs::object_store::{AttributeKey, NewChildStoreOptions, ObjectKey, ObjectValue};
     use refaults_vmo::PageFaultCounter;
     use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
     use std::sync::{Weak, mpsc};
@@ -2522,6 +2507,95 @@ mod tests {
         let attrs = get_attributes_checked(&file, fio::NodeAttributesQuery::STORAGE_SIZE).await;
         // The trim transaction was retried and the extents were freed.
         assert_eq!(attrs.immutable_attributes.storage_size.unwrap(), 0);
+
+        close_file_checked(file).await;
+        close_dir_checked(root).await;
+        volume.volume().terminate().await;
+        fs.close().await.expect("close filesystem failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_retry_trim_transaction_overwrite_extents() {
+        let fail_transaction_after = AtomicI64::new(i64::MAX);
+        let (mut hooks, fs_hooks) = fxfs::hooks::Hooks::new();
+        hooks.set_pre_commit(|_| {
+            if fail_transaction_after.fetch_sub(1, Ordering::Relaxed) < 1 {
+                bail!("Intentionally fail transaction")
+            } else {
+                Ok(())
+            }
+        });
+        let (fs, volume) = open_filesystem_with_hooks(fs_hooks).await;
+        let root = open_volume(&volume);
+
+        let file = open_file_checked(
+            &root,
+            FILE_NAME,
+            fio::Flags::FLAG_MAYBE_CREATE
+                | fio::PERM_READABLE
+                | fio::PERM_WRITABLE
+                | fio::Flags::PROTOCOL_FILE,
+            &Default::default(),
+        )
+        .await;
+
+        let store = volume.volume().store();
+        let has_overwrite_extents_flag = |object_id: u64| async move {
+            let item = store
+                .tree()
+                .find(&ObjectKey::attribute(object_id, AttributeId::DATA, AttributeKey::Attribute))
+                .await
+                .expect("find attribute")
+                .expect("attribute missing");
+            match item.value {
+                ObjectValue::Attribute { has_overwrite_extents, .. } => has_overwrite_extents,
+                other => panic!("expected ObjectValue::Attribute, got {other:?}"),
+            }
+        };
+
+        // Pre-allocate every other page to generate lots of small overwrite extents that will
+        // require multiple transactions to be freed.
+        let page_size = page_size();
+        let write_count: u64 = 256;
+        for i in 0..write_count {
+            file.allocate(page_size * 2 * i, page_size.get(), fio::AllocateMode::empty())
+                .await
+                .unwrap()
+                .map_err(zx::ok)
+                .unwrap_or_else(|e| panic!("Allocate {} failed {:?}", i, e));
+        }
+        file.sync().await.unwrap().map_err(zx::ok).unwrap();
+        let initial_attrs = get_attributes_checked(
+            &file,
+            fio::NodeAttributesQuery::ID | fio::NodeAttributesQuery::STORAGE_SIZE,
+        )
+        .await;
+        let file_id = initial_attrs.immutable_attributes.id.unwrap();
+        let initial_storage_size = initial_attrs.immutable_attributes.storage_size.unwrap();
+        assert_geq!(initial_storage_size, write_count * page_size);
+        assert!(has_overwrite_extents_flag(file_id).await);
+
+        file.resize(0).await.unwrap().map_err(zx::ok).unwrap();
+
+        // Allow the shrink transaction, fail the trim transaction.
+        fail_transaction_after.store(1, Ordering::Relaxed);
+        file.sync().await.unwrap().expect_err("flush should have failed");
+        fail_transaction_after.store(i64::MAX, Ordering::Relaxed);
+
+        // Some overwrite extents remain untrimmed, so `has_overwrite_extents` must stay true and
+        // fsck must pass.
+        let attrs = get_attributes_checked(&file, fio::NodeAttributesQuery::STORAGE_SIZE).await;
+        assert_ne!(attrs.immutable_attributes.storage_size.unwrap(), 0);
+        assert_lt!(attrs.immutable_attributes.storage_size.unwrap(), initial_storage_size);
+        assert!(has_overwrite_extents_flag(file_id).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck before retry");
+
+        // Retry completes trimming and clears `has_overwrite_extents`.
+        file.sync().await.unwrap().map_err(zx::ok).unwrap();
+        let attrs = get_attributes_checked(&file, fio::NodeAttributesQuery::STORAGE_SIZE).await;
+        assert_eq!(attrs.immutable_attributes.storage_size.unwrap(), 0);
+        assert!(!has_overwrite_extents_flag(file_id).await);
+        fsck_volume(&fs, store.store_object_id(), None).await.expect("fsck after retry");
 
         close_file_checked(file).await;
         close_dir_checked(root).await;

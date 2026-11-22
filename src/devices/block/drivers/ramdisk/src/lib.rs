@@ -219,7 +219,7 @@ impl Driver for RamdiskController {
         Ok(RamdiskController { scope })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         self.scope.shutdown();
     }
 }

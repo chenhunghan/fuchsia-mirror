@@ -533,7 +533,7 @@ mod test {
     mod fragmented_payload {
         use super::*;
 
-        use proptest::prelude::Rng as _;
+        use proptest::prelude::RngExt as _;
         use proptest::strategy::{Just, Strategy};
 
         const TEST_STORAGE: usize = 5;

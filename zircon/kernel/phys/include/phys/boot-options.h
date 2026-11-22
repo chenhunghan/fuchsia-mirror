@@ -23,8 +23,9 @@ void InstallBootOptions(const BootOptions*);
 // additional legacy command-line when relevant.
 //
 // This function does not explicitly modify global state. It is the
-// responsibility of the caller to use InstallBootOptions() and call
-// `SetUartConsole(boot_options.serial)`.
+// responsibility of the caller to use InstallBootOptions() and to install
+// `SetUartDriver(boot_options.serial)` as the console (see
+// <phys/output/stdout.h>).
 //
 // |legacy_cmdline| override cmdline items contained in the ZBI.
 //

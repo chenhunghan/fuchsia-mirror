@@ -6,6 +6,10 @@
 
 #include <stdlib.h>
 
+#include <string>
+#include <string_view>
+#include <vector>
+
 #include <gtest/gtest.h>
 
 #include "src/developer/debug/zxdb/client/remote_api_test.h"
@@ -15,6 +19,19 @@
 namespace zxdb {
 
 class AnalyticsEventTest : public RemoteAPITest {};
+
+TEST_F(AnalyticsEventTest, SessionStartedRecordsRunByAgent) {
+  for (bool run_by_agent : {true, false}) {
+    SessionStarted event("1234");
+    event.SetRunByAgent(run_by_agent);
+
+    ASSERT_TRUE(event.parameters_opt());
+    auto parameters = *event.parameters_opt();
+
+    ASSERT_NE(parameters.find("is_agent_env"), parameters.end());
+    EXPECT_EQ(std::get<bool>(parameters.find("is_agent_env")->second), run_by_agent);
+  }
+}
 
 TEST_F(AnalyticsEventTest, DoNotLeakUsername) {
   const std::string kUsername = "BobAlice";
@@ -115,4 +132,57 @@ TEST_F(AnalyticsEventTest, DoNotLeakUsername) {
   EXPECT_STREQ(std::get<std::string>(parameters.find("error_message")->second).c_str(),
                "$USER$USER");
 }
+
+namespace {
+
+TEST(ObfuscateUserTest, ReplacesAllOccurrencesAndPreservesSuffix) {
+  ScopedTestEnv env;
+  ASSERT_EQ(env.Set("USER", "BobAlice"), 0);
+
+  struct TestCase {
+    std::string_view input;
+    std::string_view expected;
+  };
+  const std::vector<TestCase> kCases = {
+      // Middle-of-string replacement must preserve suffixes longer than 40 characters.
+      {
+          .input = "/home/BobAlice/projects/fuchsia/src/developer/debug/zxdb/client/"
+                   "analytics_event.cc:123",
+          .expected =
+              "/home/$USER/projects/fuchsia/src/developer/debug/zxdb/client/analytics_event.cc:123",
+      },
+      // An escaped double quote immediately after the username must not truncate the tail.
+      {
+          .input = "Error in \\\"/tmp/BobAlice\\\" while loading symbols from build directory",
+          .expected = "Error in \\\"/tmp/$USER\\\" while loading symbols from build directory",
+      },
+      {.input = "BobAlice", .expected = "$USER"},
+      {.input = "BobAlice failed early", .expected = "$USER failed early"},
+      {.input = "Failed for BobAlice", .expected = "Failed for $USER"},
+      {
+          .input = "BobAlice met BobAlice and BobAliceBobAlice",
+          .expected = "$USER met $USER and $USER$USER",
+      },
+  };
+
+  for (const auto& test_case : kCases) {
+    EXPECT_EQ(ObfuscateUser(test_case.input), test_case.expected) << "input=" << test_case.input;
+  }
+}
+
+TEST(ObfuscateUserTest, HandlesEmptyUnsetAndSelfReferentialEnv) {
+  ScopedTestEnv env;
+
+  ASSERT_EQ(env.Set("USER", ""), 0);
+  EXPECT_EQ(ObfuscateUser("/home/alice/project/main.cc"), "/home/alice/project/main.cc");
+  EXPECT_EQ(ObfuscateUser(""), "");
+
+  ASSERT_EQ(env.Unset("USER"), 0);
+  EXPECT_EQ(ObfuscateUser("/home/alice/project/main.cc"), "/home/alice/project/main.cc");
+
+  ASSERT_EQ(env.Set("USER", "USER"), 0);
+  EXPECT_EQ(ObfuscateUser("USER /home/USER/USER"), "$USER /home/$USER/$USER");
+}
+
+}  // namespace
 }  // namespace zxdb

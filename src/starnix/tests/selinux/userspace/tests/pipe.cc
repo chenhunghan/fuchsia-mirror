@@ -87,11 +87,11 @@ TEST(PipeTest, WrongDirectionReturnsEbadfBeforePermissionCheck) {
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
+extern std::string GetTestPolicyName() { return "pipe_policy"; }
+
+extern void DoPrePolicyLoadWork() {
   // Create a pipe prior to policy load, to allow the test to validate the post-policy label.
   int pipe_before_policy[2];
   EXPECT_THAT(pipe(pipe_before_policy), SyscallSucceeds());
   g_before_policy_pipe = pipe_before_policy[0];
-
-  return "pipe_policy";
 }

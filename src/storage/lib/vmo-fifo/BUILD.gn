@@ -70,6 +70,9 @@ rustc_library("vmo-fifo") {
     "//src/lib/fuchsia-sync",
     "//src/storage/lib/buddy_allocator",
     "//src/storage/lib/ptr_slice",
+    "//src/storage/lib/units",
+    "//third_party/rust_crates:event-listener",
+    "//third_party/rust_crates:scopeguard",
     "//third_party/rust_crates:zerocopy",
   ]
 }

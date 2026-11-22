@@ -183,11 +183,12 @@ async fn avrcp_search_and_connect(mut tf: AvrcpIntegrationTest) {
         .unwrap();
 
     let _channel = match connect_requests.select_next_some().await.unwrap() {
-        bredr::ConnectionReceiverRequest::Connected { peer_id, channel, .. } => {
-            assert_eq!(tf.avrcp_observer.peer_id(), peer_id.into());
-            channel
+        bredr::ConnectionReceiver2Request::Connected { payload, responder, .. } => {
+            responder.send().unwrap();
+            assert_eq!(tf.avrcp_observer.peer_id(), payload.peer_id.unwrap().into());
+            payload.channel.unwrap()
         }
-        bredr::ConnectionReceiverRequest::_UnknownMethod { .. } => {
+        bredr::ConnectionReceiver2Request::_UnknownMethod { .. } => {
             panic!("unknown method")
         }
     };
@@ -321,11 +322,12 @@ async fn avrcp_disallows_handler_double_sets(mut tf: AvrcpIntegrationTest) {
         .unwrap();
 
     let _channel = match connect_requests.select_next_some().await.unwrap() {
-        bredr::ConnectionReceiverRequest::Connected { peer_id, channel, .. } => {
-            assert_eq!(tf.avrcp_observer.peer_id(), peer_id.into());
-            channel
+        bredr::ConnectionReceiver2Request::Connected { payload, responder, .. } => {
+            responder.send().unwrap();
+            assert_eq!(tf.avrcp_observer.peer_id(), payload.peer_id.unwrap().into());
+            payload.channel.unwrap()
         }
-        bredr::ConnectionReceiverRequest::_UnknownMethod { .. } => {
+        bredr::ConnectionReceiver2Request::_UnknownMethod { .. } => {
             panic!("unknown method");
         }
     };
@@ -413,11 +415,12 @@ async fn avrcp_remote_receives_set_absolute_volume_request(mut tf: AvrcpIntegrat
         .expect("Failed to get controller for mock peer");
 
     let channel: Channel = match connect_requests.select_next_some().await.unwrap() {
-        bredr::ConnectionReceiverRequest::Connected { peer_id, channel, .. } => {
-            assert_eq!(tf.avrcp_observer.peer_id(), peer_id.into());
-            channel.try_into().unwrap()
+        bredr::ConnectionReceiver2Request::Connected { payload, responder, .. } => {
+            responder.send().unwrap();
+            assert_eq!(tf.avrcp_observer.peer_id(), payload.peer_id.unwrap().into());
+            payload.channel.unwrap().try_into().unwrap()
         }
-        bredr::ConnectionReceiverRequest::_UnknownMethod { .. } => {
+        bredr::ConnectionReceiver2Request::_UnknownMethod { .. } => {
             panic!("unknown method")
         }
     };

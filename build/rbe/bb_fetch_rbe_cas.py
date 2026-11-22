@@ -15,11 +15,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-import bbtool
-import cl_utils
-import fuchsia
-import remotetool
-import reproxy_logs
+from build.rbe import bbtool, cl_utils, fuchsia, remotetool, reproxy_logs
 
 # This requires python pb2 in build/rbe/proto (generated).
 
@@ -129,7 +125,7 @@ def fetch_artifact_from_reproxy_log(
     if verbose:
         msg(f"Digest of {artifact_path} is {digest}")
 
-    downloader = remotetool.configure_remotetool(cfg)
+    downloader = remotetool.configure(cfg, env=os.environ)
 
     output = output or Path(artifact_path.name)
     exit_code = download_artifact(downloader, digest, output)

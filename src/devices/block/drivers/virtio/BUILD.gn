@@ -36,7 +36,6 @@ fuchsia_driver_component("virtio_block") {
     ":virtio_block-driver",
     ":virtio_block_bind",
   ]
-  info = "meta/virtio_block-info.json"
   manifest = "meta/virtio_block.cml"
 }
 
@@ -108,7 +107,6 @@ fuchsia_cc_driver("virtio_scsi-driver") {
 fuchsia_driver_component("virtio_scsi") {
   component_name = "virtio_scsi"
   deps = [ ":virtio_scsi-driver" ]
-  info = "meta/virtio_scsi-info.json"
   manifest = "meta/virtio_scsi.cml"
 }
 

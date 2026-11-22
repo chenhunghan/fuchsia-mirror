@@ -5,9 +5,13 @@
 #ifndef LIB_SYS_COMPONENT_CPP_TESTING_INTERNAL_REALM_H_
 #define LIB_SYS_COMPONENT_CPP_TESTING_INTERNAL_REALM_H_
 
-#include <fuchsia/component/cpp/fidl.h>
-#include <fuchsia/component/decl/cpp/fidl.h>
-#include <lib/fidl/cpp/interface_handle.h>
+#include <fidl/fuchsia.component.decl/cpp/fidl.h>
+#include <fidl/fuchsia.component/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
+#include <lib/async/dispatcher.h>
+#include <lib/fidl/cpp/client.h>
+#include <lib/fit/function.h>
+#include <lib/fit/result.h>
 #include <lib/sys/cpp/component_context.h>
 
 #include <memory>
@@ -16,20 +20,25 @@
 namespace component_testing {
 namespace internal {
 
-fuchsia::component::RealmSyncPtr CreateRealmPtr(const sys::ComponentContext* context);
-fuchsia::component::RealmSyncPtr CreateRealmPtr(std::shared_ptr<sys::ServiceDirectory> svc);
-fidl::InterfaceHandle<fuchsia::io::Directory> OpenExposedDir(
-    fuchsia::component::Realm_Sync* realm, const fuchsia::component::decl::ChildRef& child_ref);
+fidl::SyncClient<fuchsia_component::Realm> CreateRealmClient(
+    fidl::UnownedClientEnd<fuchsia_io::Directory> svc);
+fidl::SyncClient<fuchsia_component::Realm> CreateRealmClient(const sys::ComponentContext* context);
+fidl::SyncClient<fuchsia_component::Realm> CreateRealmClient(
+    std::shared_ptr<sys::ServiceDirectory> svc);
 
-void CreateChild(fuchsia::component::Realm_Sync* realm,
-                 fidl::InterfaceRequest<fuchsia::component::Controller> controller,
-                 std::string collection, std::string name, std::string url);
+fidl::ClientEnd<fuchsia_io::Directory> OpenExposedDir(
+    const fidl::SyncClient<fuchsia_component::Realm>& realm,
+    const fuchsia_component_decl::ChildRef& child_ref);
 
-void DestroyChild(fuchsia::component::Realm_Sync* realm,
-                  fuchsia::component::decl::ChildRef child_ref);
-void DestroyChild(
-    fuchsia::component::Realm* realm, fuchsia::component::decl::ChildRef child_ref,
-    fit::function<void(fuchsia::component::Realm_DestroyChild_Result)> callback = nullptr);
+void CreateChild(const fidl::SyncClient<fuchsia_component::Realm>& realm,
+                 fidl::ServerEnd<fuchsia_component::Controller> controller, std::string collection,
+                 std::string name, std::string url);
+
+void DestroyChild(const fidl::SyncClient<fuchsia_component::Realm>& realm,
+                  fuchsia_component_decl::ChildRef child_ref);
+void DestroyChild(fidl::UnownedClientEnd<fuchsia_io::Directory> svc, async_dispatcher_t* dispatcher,
+                  fuchsia_component_decl::ChildRef child_ref,
+                  fit::function<void(fit::result<fuchsia_component::Error>)> callback);
 
 }  // namespace internal
 }  // namespace component_testing

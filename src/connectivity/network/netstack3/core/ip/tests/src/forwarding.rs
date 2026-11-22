@@ -39,7 +39,7 @@ fn select_device_for_gateway<I: TestIpExt>(on_link_route: bool) {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: I::TEST_ADDRS.local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU.into()).unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         )
@@ -134,7 +134,7 @@ fn add_gateway_route<I: TestIpExt>(test_case: AddGatewayRouteTestCase) {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: I::TEST_ADDRS.local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU.into()).unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         )
@@ -192,7 +192,7 @@ fn test_route_tracks_interface_metric<I: TestIpExt>() {
         EthernetCreationProperties {
             tx_offload_spec: Default::default(),
             mac: I::TEST_ADDRS.local_mac,
-            max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU).unwrap(),
+            max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU.into()).unwrap(),
         },
         metric,
     );
@@ -235,7 +235,8 @@ fn test_route_resolution_respects_source_address_matcher<I: TestIpExt + netstack
                 EthernetCreationProperties {
                     tx_offload_spec: Default::default(),
                     mac: I::TEST_ADDRS.local_mac,
-                    max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU).unwrap(),
+                    max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU.into())
+                        .unwrap(),
                 },
                 DEFAULT_INTERFACE_METRIC,
             )
@@ -389,7 +390,8 @@ fn route_resolution_with_marks<I: TestIpExt + netstack3_core::IpExt>() {
                 EthernetCreationProperties {
                     tx_offload_spec: Default::default(),
                     mac: I::TEST_ADDRS.local_mac,
-                    max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU).unwrap(),
+                    max_frame_size: MaxEthernetFrameSize::from_mtu(I::MINIMUM_LINK_MTU.into())
+                        .unwrap(),
                 },
                 DEFAULT_INTERFACE_METRIC,
             )

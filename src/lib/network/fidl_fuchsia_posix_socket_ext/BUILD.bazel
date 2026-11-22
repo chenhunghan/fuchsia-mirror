@@ -12,8 +12,8 @@ package(default_applicable_licenses = ["//:license"])
 # because the test depends on
 # `//src/connectivity/network/testing/netemul/rust:lib` and
 # `//src/connectivity/network/tests/integration/common:netstack_testing_common`
-# and packages `//src/connectivity/network/netstack3:component-debug` and
-# `//src/connectivity/network/testing/netemul/service:netemul-sandbox`, which
+# and subpackages `//src/connectivity/network/netstack3:package-debug` and
+# `//src/connectivity/network/testing/netemul/service:package`, which
 # have no Bazel build yet.
 rustc_library(
     name = "fidl_fuchsia_posix_socket_ext",

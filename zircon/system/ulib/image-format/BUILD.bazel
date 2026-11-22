@@ -1,0 +1,55 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+# The `<lib/image-format/image_format.h>` API, without an implementation.
+#
+# For targets such as source sets that use the API and leave the choice among
+# implementations (such as `:image-format` or a planned Rust-backed
+# implementation) to the linkage units (executables or shared libraries) that
+# include them. Each linkage unit using this must also depend on one
+# implementation; without one it fails to link with undefined symbols, and
+# linking multiple implementations causes duplicate-symbol errors or symbol
+# shadowing.
+fx_cc_library(
+    name = "api",
+    hdrs = ["include/lib/image-format/image_format.h"],
+    includes = ["include"],
+    public_configs = [":api.config"],
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.images2:fuchsia.images2_cpp",
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp",
+        "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+        "//sdk/lib/fit-promise",
+        "//zircon/system/ulib/sysmem-version",
+        "//zircon/third_party/ulib/safemath",
+    ] + select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": ["//zircon/system/public"],
+    }),
+    alwayslink = True,
+)
+
+fx_cc_source_library_zx(
+    name = "image-format",
+    srcs = ["image_format.cc"],
+    hdrs = ["include/lib/image-format/image_format.h"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = [
+        "-Wno-conversion",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/config:Wno-conversion" ]
+    implementation_deps = [
+        "//sdk/lib/fidl",
+        "//sdk/lib/zbi-format",
+        "//zircon/system/ulib/fbl",
+    ],
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = [":api"],
+)

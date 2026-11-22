@@ -8,6 +8,7 @@
 group("tests") {
   testonly = true
   deps = [
+    "previous_boot_logs/tests",
     "reboot_log/tests",
     "tests",
   ]
@@ -90,15 +91,13 @@ source_set("main_service") {
     ":namespace_init",
     ":network_watcher",
     ":stop_signals",
-    ":system_time_tracker",
+    "previous_boot_logs",
     "reboot_log",
     "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_cpp",
-    "//sdk/fidl/fuchsia.feedback:fuchsia.feedback_hlcpp",
     "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp",
     "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
     "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
     "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
-    "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_hlcpp",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/component/incoming/cpp",
     "//sdk/lib/fit",
@@ -127,7 +126,6 @@ source_set("main_service") {
     "//src/developer/forensics/feedback/attachments:inspect",
     "//src/developer/forensics/feedback/attachments:kernel_log",
     "//src/developer/forensics/feedback/attachments:previous_boot_inspect",
-    "//src/developer/forensics/feedback/attachments:previous_boot_log",
     "//src/developer/forensics/feedback/attachments:process_tree",
     "//src/developer/forensics/feedback_data:constants",
     "//src/developer/forensics/feedback_data:data_provider",
@@ -218,28 +216,5 @@ source_set("stop_signals") {
     "//zircon/system/ulib/zx",
   ]
 
-  deps = [
-    "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp_hlcpp_conversion",
-    "//sdk/lib/syslog/cpp",
-  ]
-}
-
-source_set("system_time_tracker") {
-  sources = [
-    "system_time_tracker.cc",
-    "system_time_tracker.h",
-  ]
-
-  public_deps = [
-    "//sdk/lib/async:async-cpp",
-    "//src/lib/timekeeper",
-  ]
-
-  deps = [
-    "//sdk/lib/syslog/cpp",
-    "//src/developer/forensics/feedback:constants",
-    "//src/lib/files",
-    "//src/lib/fxl",
-    "//third_party/rapidjson",
-  ]
+  deps = [ "//sdk/lib/syslog/cpp" ]
 }

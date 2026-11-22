@@ -17,27 +17,32 @@ two main drawbacks:
    `(offset + block_size - 1) / block_size` or `offset & !(block_size - 1)`) is
    repetitive and prone to integer overflow bugs near `u64::MAX`.
 
-`storage_units` guarantees that block sizes are powers of two and stores the
-alignment bitmask (`size - 1`), replacing division and modulo with single-cycle
+`storage_units` guarantees that block sizes are powers of two and packs the
+alignment bitmask (`size - 1`) and bit shift (`trailing_ones`) into a single
+`u64` (`(mask << 32) | shift`), replacing division and modulo with single-cycle
 bit shifts and masks while providing overflow-safe alignment helpers.
 
 ## Core Types
 
-* **[`GenericBlockSize<T: BlockSizeSpec>`](src/lib.rs)**: A power-of-two block
-  size parameterized by a [`BlockSizeSpec`](src/lib.rs) that supplies the
-  size, bitmask, and shift.
-* **[`BlockSize`](src/lib.rs)** (`GenericBlockSize<MaskShiftSpec>`): A dynamic
-  or constant block size backed by a packed mask-shift (`MaskShiftSpec`),
-  supporting power-of-two sizes up to 4 GiB (`1 << 32`).
-  * Predefined constants: `SIZE_512B`, `SIZE_1KIB`, `SIZE_2KIB`, `SIZE_4KIB`,
+* **[`BlockSize<T = UniversalBlockSizeTag>`](src/lib.rs)**: A power-of-two block
+  size (up to 2 GiB, `1 << 31`) backed by a packed mask-shift representation and
+  parameterized by an [`AnyBlockSizeTag`](src/lib.rs).
+  * Predefined constants on `BlockSize<UniversalBlockSizeTag>`: `SIZE_1B`,
+    `SIZE_2B`, `SIZE_4B`, `SIZE_8B`, `SIZE_16B`, `SIZE_32B`, `SIZE_64B`,
+    `SIZE_128B`, `SIZE_256B`, `SIZE_512B`, `SIZE_1KIB`, `SIZE_2KIB`, `SIZE_4KIB`,
     `SIZE_8KIB`, `SIZE_16KIB`, `SIZE_32KIB`, `SIZE_64KIB`, `SIZE_128KIB`,
     `SIZE_256KIB`, `SIZE_512KIB`, `SIZE_1MIB`.
+* **[`BlockSizeTag`](src/lib.rs) and [`AnyBlockSizeTag`](src/lib.rs)**:
+  Domain-specific tags implement [`BlockSizeTag`](src/lib.rs), which
+  automatically implements the sealed [`AnyBlockSizeTag`](src/lib.rs) supertrait
+  and provides `From<BlockSize<T>> for BlockSize<UniversalBlockSizeTag>`.
 * **[`page_size()`](src/page.rs)** *(Fuchsia targets)*: Returns the Fuchsia
-  system memory page size as a [`PageSize`](src/page.rs). It caches the
-  `MaskShiftSpec` representation of `zx::system_get_page_size()` in a relaxed
-  atomic on first use to avoid repeated syscalls/vDSO lookups.
+  system memory page size as a [`PageSize`](src/page.rs)
+  (`BlockSize<PageSizeTag>`). It caches the packed mask-shift representation of
+  `zx::system_get_page_size()` in a relaxed atomic on first use to avoid
+  repeated syscalls/vDSO lookups.
 
-### Why is `GenericBlockSize<T>` Generic Over `BlockSizeSpec`?
+### Why is `BlockSize<T>` Generic Over a Tag?
 
 A filesystem typically deals with multiple distinct domains of block alignment
 simultaneously:
@@ -49,15 +54,18 @@ simultaneously:
 
 If all block sizes shared a single concrete type, the type system could not
 distinguish *which* domain a byte offset or range was aligned to. By
-parameterizing [`GenericBlockSize<T: BlockSizeSpec>`](src/lib.rs) over a
-specification type `T`, subsystems can define distinct types such as
-`FxfsBlockSize`, `DeviceBlockSize`, `JournalBlockSize`, or `LayerBlockSize`.
+parameterizing [`BlockSize<T>`](src/lib.rs) over a [`BlockSizeTag`](src/lib.rs)
+`T`, subsystems can define distinct types such as `FxfsBlockSize`,
+`DeviceBlockSize`, `JournalBlockSize`, or `LayerBlockSize`. Tags are typically
+zero-sized types, or small `Copy` values (such as a device or volume ID) when
+disambiguating multiple runtime instances of a domain.
 
 In this hierarchy, **[`BlockSize`](src/lib.rs)**
-(`GenericBlockSize<MaskShiftSpec>`) acts as a **universal block size**: it
+(`BlockSize<UniversalBlockSizeTag>`) acts as a **universal block size**: it
 represents a runtime power-of-two block size when you need to align values or
 perform block arithmetic, but do not need (or cannot statically know) a
-domain-specific type tag.
+domain-specific type tag. Any `BlockSize<T>` where `T: BlockSizeTag` can be
+converted into `BlockSize<UniversalBlockSizeTag>` via `From` / `Into`.
 
 ## Operations & Helpers
 
@@ -73,13 +81,18 @@ domain-specific type tag.
   boundary and returns the total block count without overflowing `u64`.
 * `bs.align_range_outwards(range) -> Option<Range<u64>>`: Aligns `range.start`
   down and `range.end` up to block boundaries.
+* `bs.checked_mul(blocks) -> Option<u64>`: Multiplies `blocks` by `bs`,
+  returning `None` on `u64` overflow.
+* `bs.saturating_mul(blocks) -> u64`: Multiplies `blocks` by `bs`, saturating at
+  `u64::MAX` on overflow.
 
 ### Arithmetic & Comparisons
 
-`GenericBlockSize` implements standard arithmetic (`+`, `-`, `*`, `/`, `%` and
-their assignment counterparts) and comparison traits (`PartialEq`, `Eq`,
-`PartialOrd`, `Ord`, `Hash`) with `u64` values and across different
-`BlockSizeSpec` types:
+`BlockSize<T>` implements standard arithmetic (`+`, `-`, `*`, `/`, `%` and
+their assignment counterparts) with `u64`, as well as comparison and hashing
+traits (`PartialEq`, `Eq`, `PartialOrd`, `Ord`, `Hash`) between two
+`BlockSize<T>` values of the same tag type `T` (ordered by byte size first, then
+`tag`) and directly against `u64`:
 
 * **Division (`bytes / bs`)**: Compiles to `bytes >> bs.shift()`.
 * **Remainder (`bytes % bs`)**: Compiles to `bytes & bs.mask()`.
@@ -110,8 +123,8 @@ let bytes = blocks * bs;    // 12288
 ## Future Work
 
 Planned additions to `storage_units` include newtypes parameterized by `T:
-BlockSizeSpec` that encode both block alignment and alignment domain invariants
-directly in the type system:
+AnyBlockSizeTag` that encode both block alignment and alignment domain
+invariants directly in the type system:
 
 * **`BlockAligned<T>`**: Represents a byte offset or byte count guaranteed to
   be a multiple of the block size `T`.
@@ -120,10 +133,10 @@ directly in the type system:
 * **`BlockCount<T>`**: Represents an explicit count of blocks of size `T`
   rather than raw bytes.
 
-Because these types are generic over `T: BlockSizeSpec`, a byte count aligned
-to the device block size (`BlockAligned<DeviceBlockSize>`) will be a distinct
+Because these types are generic over `T: AnyBlockSizeTag`, a byte count aligned
+to the device block size (`BlockAligned<DeviceBlockSizeTag>`) will be a distinct
 type from a byte count aligned to the filesystem block size
-(`BlockAligned<FxfsBlockSize>`). Accepting these types in function signatures
+(`BlockAligned<FxfsBlockSizeTag>`). Accepting these types in function signatures
 in place of raw `u64` values eliminates redundant runtime `is_aligned` checks
 and prevents accidentally passing values aligned to the wrong block size at
 compile time.

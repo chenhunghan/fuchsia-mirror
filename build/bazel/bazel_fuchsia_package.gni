@@ -64,6 +64,7 @@ template("bazel_fuchsia_package") {
   # is where other GN templates expect to find the package's
   # package_manifest.json, i.e. $target_out_dir/$target_name.
   package_out_dir = "$target_out_dir/$target_name"
+  rebased_package_out_dir = rebase_path(package_out_dir, target_out_dir)
 
   bazel_build_action(target_name) {
     forward_variables_from(invoker,
@@ -86,11 +87,11 @@ template("bazel_fuchsia_package") {
     package_outputs = [
       {
         package_label = bazel_target
-        archive = "$package_name.far"
+        archive = "$rebased_package_out_dir/$package_name.far"
 
         # Derived from `package_out_dir` above so that the extraction
         # directory and the package metadata always agree.
-        package_out_dir = rebase_path(package_out_dir, target_out_dir)
+        package_out_dir = rebased_package_out_dir
         copy_debug_symbols = true
       },
     ]
@@ -98,6 +99,27 @@ template("bazel_fuchsia_package") {
     metadata = {
       if (defined(invoker.metadata)) {
         forward_variables_from(invoker.metadata, "*")
+      }
+
+      # Match fuchsia_package() metadata barriers so package and distribution
+      # walks do not traverse into bazel_action() dependencies.
+      if (!defined(package_barrier)) {
+        package_barrier = []
+      }
+      if (!defined(distribution_entries_barrier)) {
+        distribution_entries_barrier = []
+      }
+      if (!defined(component_id_index_barrier)) {
+        component_id_index_barrier = []
+      }
+      if (!defined(test_component_manifest_barrier)) {
+        test_component_manifest_barrier = []
+      }
+      if (!defined(test_components_barrier)) {
+        test_components_barrier = []
+      }
+      if (!defined(test_component_manifest_program_barrier)) {
+        test_component_manifest_program_barrier = []
       }
 
       # Package metadata, see define_package_metadata().

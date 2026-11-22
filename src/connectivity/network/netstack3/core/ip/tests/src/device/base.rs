@@ -67,7 +67,8 @@ fn enable_disable_ipv4() {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         );
@@ -779,7 +780,8 @@ fn add_ipv4_addr_with_dad(order: Ipv4DadTestOrder) {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         );
@@ -1031,7 +1033,8 @@ fn notify_on_dad_failure_ipv4(case: Ipv4DadFailureTestCase, expect_conflict: boo
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         );
@@ -1181,7 +1184,8 @@ fn ipv4_ignores_tentative_addresses(case: Ipv4TentativeAddrTestCase) {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         );
@@ -1389,7 +1393,8 @@ fn ipv4_dad_conflict_with_dad_disabled() {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         );
@@ -1631,7 +1636,8 @@ fn update_ipv4_configuration_return() {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         )
@@ -1766,7 +1772,8 @@ fn update_ipv6_configuration_return() {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv6::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv6::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         )
@@ -1957,7 +1964,8 @@ fn configure_link_local_address_generation(enable_stable_addresses: bool) {
             EthernetCreationProperties {
                 tx_offload_spec: Default::default(),
                 mac: local_mac,
-                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU).unwrap(),
+                max_frame_size: MaxEthernetFrameSize::from_mtu(Ipv4::MINIMUM_LINK_MTU.get())
+                    .unwrap(),
             },
             DEFAULT_INTERFACE_METRIC,
         )

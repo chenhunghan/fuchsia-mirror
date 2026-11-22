@@ -1,5 +1,9 @@
 {
+    "agent": {
+        "target_ownership": false
+    },
     "connectivity": {
+        "enable_usb": true,
         "usb_socket_path": "$XDG_RUNTIME_DIR/ffx_usb.sock",
         "uart": {
             "baud": 1000000

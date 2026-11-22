@@ -48,6 +48,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "char_collection_tests",
-    package_name = "char_collection_tests",
     unit_tests = [":char_collection_test"],
 )

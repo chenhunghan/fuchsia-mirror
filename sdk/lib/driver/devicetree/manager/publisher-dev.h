@@ -19,8 +19,7 @@ class PublisherDev : public PublisherInterface {
       : pbus_(pbus), mgr_(mgr), fdf_node_(fdf_node) {}
 
   zx::result<> AddPbusNode(fuchsia_hardware_platform_bus::Node& pbus_node,
-                           std::vector<std::optional<std::string>> metadata_text = {},
-                           std::vector<std::optional<std::string>> power_config_text = {}) override;
+                           std::vector<std::optional<std::string>> metadata_text = {}) override;
 
   zx::result<> AddBoardChildNode(BoardChildNode args) override;
 

@@ -11,5 +11,7 @@ test_suite(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//src/lib/analytics/cpp/core_dev_tools:analytics_cpp_core_dev_tools_unittests",
+        "//src/lib/analytics/cpp/google_analytics_4:host_tests",
+        "//src/lib/analytics/cpp/metric_properties:host_tests",
     ],
 )

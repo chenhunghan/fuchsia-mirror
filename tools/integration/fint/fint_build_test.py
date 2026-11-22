@@ -23,14 +23,6 @@ protobuf_wheel = fuchsia_root / "prebuilt" / "third_party" / "protobuf-py3"
 if protobuf_wheel.exists() and str(protobuf_wheel) not in sys.path:
     sys.path.insert(0, str(protobuf_wheel))
 
-# Bypass strict protobuf gencode/runtime version check to align prebuilts at build-time (see b/537501139)
-try:
-    import google.protobuf.runtime_version as rv
-
-    rv.ValidateProtobufRuntimeVersion = lambda *args, **kwargs: None
-except ImportError:
-    pass
-
 import contextlib
 import io
 import json
@@ -1776,6 +1768,12 @@ class NinjaBuildWrapTest(unittest.TestCase):
             stamp_path = tmp_path / fint_build.LAST_NINJA_BUILD_SUCCESS_STAMP
             stamp_path.write_text("old-content")
 
+            source_sentinel = tmp_path / "source_force_nonhermetic_rebuild"
+            source_sentinel.write_text("do not truncate")
+            os.utime(source_sentinel, (0, 0))
+            sentinel = tmp_path / fint_build.FORCE_NONHERMETIC_REBUILD_SENTINEL
+            sentinel.hardlink_to(source_sentinel)
+
             host = fint_build.HostProperties(os="linux", cpu="x64")
             ctx = fint_build.BuildContext(static_spec, context_spec, host)
             with mock.patch.object(
@@ -1786,10 +1784,11 @@ class NinjaBuildWrapTest(unittest.TestCase):
                     self.assertFalse(stamp_path.exists())
 
                     # Rebuild sentinel should be touched on incremental builds
-                    sentinel = (
-                        tmp_path / fint_build.FORCE_NONHERMETIC_REBUILD_SENTINEL
+                    # without truncating hard-linked source files.
+                    self.assertGreater(sentinel.stat().st_mtime, 0)
+                    self.assertEqual(
+                        source_sentinel.read_text(), "do not truncate"
                     )
-                    self.assertTrue(sentinel.exists())
 
                     run.exit_code = 0
 

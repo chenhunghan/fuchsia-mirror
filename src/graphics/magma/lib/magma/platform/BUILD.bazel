@@ -1,0 +1,222 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:transformer=deps
+_COMMON_DEPS = select({
+    "@platforms//os:fuchsia": ["//zircon/system/ulib/zx"],
+    "//conditions:default": [],
+})
+
+fx_cc_library(
+    name = "handle_header",
+    hdrs = ["platform_handle.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = ["//src/graphics/magma/lib/magma/platform/zircon:__pkg__"],
+    deps = [
+        ":port_header",
+    ] + _COMMON_DEPS,
+)
+
+fx_cc_library(
+    name = "handle",
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//src/graphics/magma/lib/magma/platform/zircon:handle"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/graphics/lib/magma/src/libmagma:__pkg__",
+        "//src/graphics/magma/lib/magma/test_util:__pkg__",
+        "//src/graphics/magma/tests/unit_tests:__pkg__",
+    ],
+    deps = [
+        ":handle_header",
+        ":port",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "interrupt_header",
+    hdrs = ["platform_interrupt.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = [
+        "//src/graphics/drivers/msd-arm-mali/src:__pkg__",
+        "//src/graphics/magma/lib/magma/platform/zircon:__pkg__",
+    ],
+    deps = ["//src/graphics/magma/lib/magma/util:macros"],
+)
+
+fx_cc_library(
+    name = "thread_header",
+    hdrs = ["platform_thread.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = [
+        "//src/graphics/magma/lib/magma/platform/zircon:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+fx_cc_library(
+    name = "thread",
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//src/graphics/magma/lib/magma/platform/zircon:thread"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/graphics/drivers/msd-arm-mali/src:__pkg__",
+        "//src/graphics/drivers/msd-intel-gen/src:__pkg__",
+        "//src/graphics/drivers/msd-vsi-vip/src:__pkg__",
+        "//src/graphics/lib/magma/src/libmagma:__pkg__",
+        "//src/graphics/magma/lib/magma/platform/zircon:__pkg__",
+        "//src/graphics/magma/lib/magma/util:__pkg__",
+        "//src/graphics/magma/tests/unit_tests:__pkg__",
+    ],
+    deps = [":thread_header"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "event_header",
+    hdrs = ["platform_event.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = ["//src/graphics/magma/lib/magma/platform/zircon:__pkg__"],
+    deps = ["//src/graphics/magma/lib/magma/util:status"],
+)
+
+fx_cc_library(
+    name = "event",
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//src/graphics/magma/lib/magma/platform/zircon:event"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/graphics/drivers/msd-arm-mali/src:__pkg__",
+        "//src/graphics/drivers/msd-intel-gen/src:__pkg__",
+        "//src/graphics/drivers/msd-vsi-vip/src:__pkg__",
+        "//src/graphics/magma/lib/magma_service/sys_driver/tests:__pkg__",
+        "//src/graphics/magma/tests/unit_tests:__pkg__",
+    ],
+    deps = [":event_header"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "logger_provider_header",
+    hdrs = ["platform_logger_provider.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = [
+        "//src/graphics/lib/magma/src/libmagma:__pkg__",
+        "//src/graphics/lib/magma/src/libmagma_virt:__pkg__",
+        "//src/graphics/magma:__subpackages__",
+        "//src/graphics/tests/vkext:__pkg__",
+    ],
+    deps = [":handle_header"],
+)
+
+fx_cc_library(
+    name = "logger_header",
+    hdrs = ["platform_logger.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = [
+        "//src/graphics/drivers:__subpackages__",
+        "//src/graphics/lib/magma/src/libmagma:__pkg__",
+        "//src/graphics/lib/magma/src/libmagma_virt:__pkg__",
+        "//src/graphics/magma:__subpackages__",
+        "//src/graphics/tests/vkext:__pkg__",
+    ],
+)
+
+fx_cc_library(
+    name = "logger_impl",
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//src/graphics/magma/lib/magma/platform/zircon:logger"],
+        "@platforms//os:linux": ["//src/graphics/magma/lib/magma/platform/linux:logger"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/graphics/lib/magma/src/libmagma:__pkg__",
+        "//src/graphics/lib/magma/src/libmagma_virt:__pkg__",
+        "//src/graphics/magma/lib/magma/test_util:__pkg__",
+        "//src/graphics/magma/lib/magma_client/mock:__pkg__",
+        "//src/graphics/tests/vkext:__pkg__",
+    ],
+    deps = [
+        ":logger_header",
+        ":logger_provider_header",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "object_header",
+    hdrs = ["platform_object.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = ["//src/graphics/magma/lib/magma/platform/zircon:__pkg__"],
+    deps = _COMMON_DEPS,
+)
+
+fx_cc_library(
+    name = "object",
+    implementation_deps = select({
+        "@platforms//os:fuchsia": ["//src/graphics/magma/lib/magma/platform/zircon:object"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/graphics/magma/lib/magma/platform/zircon:__pkg__",
+        "//src/graphics/magma/lib/magma_service/sys_driver:__pkg__",
+    ],
+    deps = [":object_header"],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "semaphore_header",
+    hdrs = ["platform_semaphore.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = ["//src/graphics/magma/lib/magma/platform/zircon:__pkg__"],
+    deps = [
+        ":object",
+        "//src/graphics/magma/lib/magma/util:macros",
+        "//src/graphics/magma/lib/magma/util:status",
+    ] + _COMMON_DEPS,
+)
+
+fx_cc_library(
+    name = "port_header",
+    hdrs = ["platform_port.h"],
+    includes = ["../../.."],
+    public_configs = [":platform_include_config"],
+    visibility = ["//src/graphics/magma/lib/magma/platform/zircon:__pkg__"],
+    deps = ["//src/graphics/magma/lib/magma/util:status"],
+)
+
+fx_cc_library(
+    name = "port",
+    implementation_deps = [
+        ":object",
+    ] + select({
+        "@platforms//os:fuchsia": ["//src/graphics/magma/lib/magma/platform/zircon:port"],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/graphics/drivers/msd-arm-mali/src:__pkg__",
+        "//src/graphics/drivers/msd-arm-mali/tests/hardware:__pkg__",
+        "//src/graphics/drivers/msd-arm-mali/tests/unit_tests:__pkg__",
+        "//src/graphics/magma/tests/unit_tests:__pkg__",
+    ],
+    deps = [":port_header"],
+    alwayslink = True,
+)

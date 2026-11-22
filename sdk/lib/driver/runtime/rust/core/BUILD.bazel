@@ -3,8 +3,19 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fdf_rust_core_integration_tests",
+        ":fdf_rust_core_tests",
+    ],
+    visibility = ["//sdk/lib/driver/runtime/rust:__pkg__"],
+)
 
 rustc_library(
     name = "core",
@@ -30,4 +41,50 @@ rustc_library(
         "//sdk/lib/driver/runtime/rust/fdf_sys",
         "//sdk/rust/zx",
     ],
+)
+
+rustc_test(
+    name = "core_test",
+    crate = ":core",
+    # Sets the GN `output_name` of the test binary, keeping it distinct from
+    # other `lib_test` binaries in the generated GN unittest package.
+    crate_name = "fdf_core_lib_test",
+    link_deps = ["//src/devices/bin/driver_runtime"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+# Dispatcher tests, which use the driver test helpers in fdf_env. These are
+# integration tests rather than unit tests, as fdf_env itself depends on this
+# library.
+rustc_test(
+    name = "core_integration_test",
+    srcs = ["tests/dispatcher.rs"],
+    crate_name = "fdf_core_integration_test",
+    crate_root = "tests/dispatcher.rs",
+    edition = "2024",
+    link_deps = ["//src/devices/bin/driver_runtime"],
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":core",
+        "//sdk/lib/async/rust",
+        "//sdk/lib/async/rust/dispatcher",
+        "//sdk/lib/driver/runtime/rust/env",
+        "//sdk/rust/zx",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_unittest_package(
+    name = "fdf_rust_core_tests",
+    unit_tests = [":core_test"],
+)
+
+fx_unittest_package(
+    name = "fdf_rust_core_integration_tests",
+    unit_tests = [":core_integration_test"],
 )

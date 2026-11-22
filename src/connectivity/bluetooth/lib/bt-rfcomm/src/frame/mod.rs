@@ -105,7 +105,7 @@ impl Encodable for UserData {
         if buf.len() < self.encoded_len() {
             return Err(FrameParseError::BufferTooSmall);
         }
-        buf.copy_from_slice(&self.information);
+        buf[..self.encoded_len()].copy_from_slice(&self.information);
         Ok(())
     }
 }
@@ -319,19 +319,14 @@ impl Frame {
         let mut header_size = 2 + if is_two_octet_length { 2 } else { 1 };
         let mut credits = None;
         if frame_type.has_credit_octet(credit_based_flow, poll_final, dlci) {
-            if buf.len() < header_size {
-                return Err(FrameParseError::BufferTooSmall);
-            }
-            credits = Some(buf[header_size]);
+            let credit_octet = *buf.get(header_size).ok_or(FrameParseError::BufferTooSmall)?;
+            credits = Some(credit_octet);
             header_size += 1;
         }
 
         // Check the FCS before parsing the body of the packet.
         let fcs_index = header_size + usize::from(length);
-        if buf.len() <= fcs_index {
-            return Err(FrameParseError::BufferTooSmall);
-        }
-        let fcs = buf[fcs_index];
+        let fcs = *buf.get(fcs_index).ok_or(FrameParseError::BufferTooSmall)?;
         if !verify_fcs(fcs, &buf[..frame_type.fcs_octets()]) {
             return Err(FrameParseError::FCSCheckFailed);
         }
@@ -416,6 +411,17 @@ impl Frame {
             credits: None,
         }
     }
+
+    /// Returns the credit octet to encode with this frame, if applicable.
+    fn credit_octet(&self) -> Option<u8> {
+        self.credits.filter(|_| {
+            self.data.marker().has_credit_octet(
+                /* credit_based_flow= */ true,
+                self.poll_final,
+                self.dlci,
+            )
+        })
+    }
 }
 
 impl Encodable for Frame {
@@ -423,13 +429,13 @@ impl Encodable for Frame {
 
     fn encoded_len(&self) -> usize {
         // Address + Control + FCS + (optional) Credits + 1 or 2 octets for Length + Frame data.
-        3 + self.credits.map_or(0, |_| 1)
+        3 + self.credit_octet().map_or(0, |_| 1)
             + if is_two_octet_length(self.data.encoded_len()) { 2 } else { 1 }
             + self.data.encoded_len()
     }
 
     fn encode(&self, buf: &mut [u8]) -> Result<(), FrameParseError> {
-        if buf.len() != self.encoded_len() {
+        if buf.len() < self.encoded_len() {
             return Err(FrameParseError::BufferTooSmall);
         }
 
@@ -447,6 +453,12 @@ impl Encodable for Frame {
         } else {
             self.role
         };
+
+        let data_length = self.data.encoded_len();
+        if data_length > MAX_INFORMATION_LENGTH {
+            return Err(FrameParseError::FrameTooLarge(data_length));
+        }
+
         // The C/R bit of the Address Field depends on the frame type:
         //   - For UIH frames, the C/R bit is based on GSM Section 5.4.3.1.
         //   - For other frames, the C/R bit is determined by Table 1 in GSM Section 5.2.1.2.
@@ -470,10 +482,6 @@ impl Encodable for Frame {
         buf[FRAME_CONTROL_IDX] = control_field.0;
 
         // Information Field.
-        let data_length = self.data.encoded_len();
-        if data_length > MAX_INFORMATION_LENGTH {
-            return Err(FrameParseError::FrameTooLarge(data_length));
-        }
         let is_two_octet_length = is_two_octet_length(data_length);
         let mut first_octet_length = InformationField(0);
         first_octet_length.set_length(data_length as u8);
@@ -489,13 +497,12 @@ impl Encodable for Frame {
         let mut header_size = 2 + if is_two_octet_length { 2 } else { 1 };
 
         // Encode the credits for this frame, if applicable.
-        let credit_based_flow = self.credits.is_some();
-        if self.data.marker().has_credit_octet(credit_based_flow, self.poll_final, self.dlci) {
-            buf[header_size] = self.credits.unwrap();
+        if let Some(credits) = self.credit_octet() {
+            buf[header_size] = credits;
             header_size += 1;
         }
 
-        let fcs_idx = header_size + data_length as usize;
+        let fcs_idx = header_size + data_length;
 
         // Frame data.
         self.data.encode(&mut buf[header_size..fcs_idx])?;
@@ -514,7 +521,7 @@ mod tests {
     use super::*;
 
     use assert_matches::assert_matches;
-    use mux_commands::{MuxCommandParams, RemotePortNegotiationParams};
+    use mux_commands::{FlowControlParams, MuxCommandParams, RemotePortNegotiationParams};
 
     #[test]
     fn test_is_mux_startup_frame() {
@@ -1105,5 +1112,150 @@ mod tests {
         };
         let mut buf = vec![0; frame.encoded_len()];
         assert_matches!(frame.encode(&mut buf[..]), Err(FrameParseError::FrameTooLarge(32768)));
+    }
+
+    #[test]
+    fn parse_four_byte_two_octet_length_uih_with_credits_returns_buffer_too_small() {
+        let crashing_inputs: [&[u8]; 3] = [
+            // Minimal crafted packet: DLCI=2, C/R=0, EA=0, UIH P/F=1, 2-octet length = 0.
+            &[0x08, 0xFF, 0x00, 0x00],
+            // Spec-like crafted packet: DLCI=2, C/R=1, EA=1, UIH P/F=1, 2-octet length = 0.
+            &[0x0B, 0xFF, 0x00, 0x00],
+            // Upper edge: DLCI=61, C/R=1, EA=1, UIH P/F=1, 2-octet max length = 32767.
+            &[0xF7, 0xFF, 0xFE, 0xFF],
+        ];
+        for role in [Role::Initiator, Role::Responder] {
+            for input in crashing_inputs {
+                assert_matches!(
+                    Frame::parse(role, /* credit_based_flow= */ true, input),
+                    Err(FrameParseError::BufferTooSmall)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encode_user_data_oversized_buffer_preserves_trailing_bytes() {
+        const SENTINEL: u8 = 0xAA;
+        let data = UserData { information: vec![0x01, 0x02, 0x03] };
+        let mut buf = [SENTINEL; 6];
+        assert!(data.encode(&mut buf).is_ok());
+        assert_eq!(buf, [0x01, 0x02, 0x03, SENTINEL, SENTINEL, SENTINEL]);
+    }
+
+    #[test]
+    fn encode_frame_oversized_buffer_preserves_trailing_bytes() {
+        const SENTINEL: u8 = 0xAA;
+        let frames = vec![
+            Frame::make_sabm_command(Role::Unassigned, DLCI::MUX_CONTROL_DLCI),
+            Frame::make_user_data_frame(
+                Role::Initiator,
+                DLCI::try_from(3).unwrap(),
+                UserData { information: vec![0x01, 0x02] },
+                Some(5),
+            ),
+            Frame::make_user_data_frame(
+                Role::Responder,
+                DLCI::try_from(61).unwrap(),
+                UserData { information: vec![0x77; 130] },
+                Some(12),
+            ),
+        ];
+
+        for frame in frames {
+            let len = frame.encoded_len();
+            let mut exact = vec![0; len];
+            assert!(frame.encode(&mut exact).is_ok());
+
+            let mut oversized = vec![SENTINEL; len + 5];
+            assert!(frame.encode(&mut oversized).is_ok());
+            assert_eq!(&oversized[..len], &exact[..]);
+            assert_eq!(&oversized[len..], &[SENTINEL; 5]);
+
+            let parsed = Frame::parse(frame.role, frame.credits.is_some(), &oversized[..len])
+                .expect("encoded prefix should parse");
+            assert_eq!(parsed.dlci, frame.dlci);
+            assert_eq!(parsed.data, frame.data);
+            assert_eq!(parsed.credits, frame.credits);
+        }
+    }
+
+    #[test]
+    fn frame_encoded_len_matches_encode_when_credits_not_applicable() {
+        let user_dlci = DLCI::try_from(3).unwrap();
+
+        // Case 1: UIH user data with credits=Some, but poll_final=false (no credit octet on wire).
+        let uih_no_pf = Frame {
+            role: Role::Initiator,
+            dlci: user_dlci,
+            data: FrameData::UnnumberedInfoHeaderCheck(UIHData::User(UserData {
+                information: vec![0x11, 0x22],
+            })),
+            poll_final: false,
+            command_response: CommandResponse::Command,
+            credits: Some(5),
+        };
+        assert_eq!(uih_no_pf.encoded_len(), 3 + 1 + 2);
+
+        // Case 2: UIH mux command on DLCI 0 with poll_final=true and credits=Some.
+        let mux_cmd = MuxCommand {
+            params: MuxCommandParams::FlowControlOn(FlowControlParams {}),
+            command_response: CommandResponse::Command,
+        };
+        let uih_mux_dlci0 = Frame {
+            role: Role::Initiator,
+            dlci: DLCI::MUX_CONTROL_DLCI,
+            data: FrameData::UnnumberedInfoHeaderCheck(UIHData::Mux(mux_cmd.clone())),
+            poll_final: true,
+            command_response: CommandResponse::Command,
+            credits: Some(5),
+        };
+        assert_eq!(uih_mux_dlci0.encoded_len(), 3 + 1 + mux_cmd.encoded_len());
+
+        // Case 3: Non-UIH frame (SABM) on user DLCI with poll_final=true and credits=Some.
+        let sabm_with_credits = Frame {
+            role: Role::Initiator,
+            dlci: user_dlci,
+            data: FrameData::SetAsynchronousBalancedMode,
+            poll_final: true,
+            command_response: CommandResponse::Command,
+            credits: Some(5),
+        };
+        assert_eq!(sabm_with_credits.encoded_len(), 4);
+
+        for frame in [uih_no_pf, uih_mux_dlci0, sabm_with_credits] {
+            let mut buf = vec![0xAA; frame.encoded_len()];
+            assert!(frame.encode(&mut buf).is_ok());
+
+            let expected_fcs = calculate_fcs(&buf[..frame.data.marker().fcs_octets()]);
+            assert_eq!(buf[frame.encoded_len() - 1], expected_fcs);
+
+            let parsed = Frame::parse(frame.role, /* credit_based_flow= */ true, &buf)
+                .expect("encoded frame should round-trip cleanly");
+            assert_eq!(parsed.credits, None);
+            assert_eq!(parsed.data, frame.data);
+            assert_eq!(parsed.dlci, frame.dlci);
+        }
+    }
+
+    #[test]
+    fn encode_frame_too_large_does_not_mutate_buffer() {
+        const SENTINEL: u8 = 0xAA;
+        let frame = Frame {
+            role: Role::Initiator,
+            dlci: DLCI::try_from(5).unwrap(),
+            data: FrameData::UnnumberedInfoHeaderCheck(UIHData::User(UserData {
+                information: vec![0; MAX_INFORMATION_LENGTH + 1],
+            })),
+            poll_final: true,
+            command_response: CommandResponse::Command,
+            credits: None,
+        };
+        let mut buf = vec![SENTINEL; frame.encoded_len()];
+        assert_matches!(
+            frame.encode(&mut buf[..]),
+            Err(FrameParseError::FrameTooLarge(n)) if n == MAX_INFORMATION_LENGTH + 1
+        );
+        assert!(buf.iter().all(|&b| b == SENTINEL), "buffer must not be mutated on error");
     }
 }

@@ -73,7 +73,6 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("component") {
   component_name = "usb-fastboot-function"
   deps = [ ":driver" ]
-  info = "meta/usb_fastboot_function-info.json"
   dml_label = ":usb-fastboot-function-dml"
 }
 

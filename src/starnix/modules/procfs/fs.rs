@@ -131,7 +131,8 @@ impl ProcFs {
         let proc_fs = ProcFs::default();
         proc_fs.set_mount_params(params);
         let kernel = current_task.kernel();
-        let fs = FileSystem::new(kernel, CacheMode::Uncached, proc_fs, options)?;
+        let fs =
+            FileSystem::new(kernel, CacheMode::Cached(kernel.fs_cache_config()), proc_fs, options)?;
         let root_ino = fs.allocate_ino();
         fs.create_root_with_info(
             root_ino,

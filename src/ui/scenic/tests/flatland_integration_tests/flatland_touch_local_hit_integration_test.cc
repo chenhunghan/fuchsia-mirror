@@ -14,6 +14,11 @@
 #include <lib/ui/scenic/cpp/view_ref_pair.h>
 #include <zircon/status.h>
 
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <utility>
 #include <vector>
 
 #include <zxtest/zxtest.h>
@@ -189,6 +194,63 @@ class FlatlandTouchLocalHitIntegrationTest : public ScenicCtfTest {
         });
   }
 
+  // Starts a recursive `TouchSource::Watch()` loop that collects all received events into
+  // `out_events`.
+  void StartWatchLoop(SimpleWatcherClient<fup::TouchSource>& touch_source,
+                      std::vector<fup::TouchEvent>& out_events,
+                      fup::TouchResponseType response_type = fup::TouchResponseType::kMaybe) {
+    const size_t index = touch_watch_loops_.size();
+    touch_watch_loops_.emplace_back();
+    touch_watch_loops_.at(index) = [this, &touch_source, &out_events, response_type,
+                                    index](std::vector<fup::TouchEvent> events) {
+      std::vector<fup::TouchResponse> responses;
+      for (auto& event : events) {
+        if (event.pointer_sample().has_value()) {
+          fup::TouchResponse response;
+          response.response_type(response_type);
+          responses.emplace_back(std::move(response));
+        } else {
+          responses.emplace_back(fup::TouchResponse{});
+        }
+      }
+      std::move(events.begin(), events.end(), std::back_inserter(out_events));
+
+      touch_source->Watch({{.responses = std::move(responses)}})
+          .Then([this, index](fidl::Result<fup::TouchSource::Watch>& result) {
+            if (result.is_ok()) {
+              touch_watch_loops_.at(index)(std::move(result->events()));
+            }
+          });
+    };
+    touch_source->Watch({{.responses = {}}})
+        .Then([this, index](fidl::Result<fup::TouchSource::Watch>& result) {
+          if (result.is_ok()) {
+            touch_watch_loops_.at(index)(std::move(result->events()));
+          }
+        });
+  }
+
+  // Returns `nullptr` (after recording a test failure) if the upgrade fails, so callers can
+  // `ASSERT_NE()` instead of waiting on a client that will never be created.
+  std::unique_ptr<SimpleWatcherClient<fupa::TouchSourceWithLocalHit>> UpgradeTouchSource(
+      fidl::ClientEnd<fup::TouchSource> original) {
+    std::unique_ptr<SimpleWatcherClient<fupa::TouchSourceWithLocalHit>> upgraded;
+    bool upgrade_done = false;
+    local_hit_registry_->Upgrade({{.original = std::move(original)}})
+        .Then([this, &upgraded, &upgrade_done](fidl::Result<fupa::LocalHit::Upgrade>& result) {
+          upgrade_done = true;
+          ASSERT_TRUE(result.is_ok());
+          ASSERT_FALSE(result->error().has_value());
+          ASSERT_TRUE(result->augmented().is_valid());
+          upgraded = std::make_unique<SimpleWatcherClient<fupa::TouchSourceWithLocalHit>>(
+              std::move(result->augmented()), dispatcher(), FailOnClose("Touch source closed"));
+        });
+    RunLoopUntil([&upgraded, &upgrade_done] {
+      return upgrade_done && (upgraded == nullptr || upgraded->is_bound());
+    });
+    return upgraded;
+  }
+
   // Convenience function, we assume the test constructs topologies with one level of N children.
   // Prereq: |parent_of_viewport_transform| is created and connected to the view's root.
   fuv::ViewRef CreateAndAddChildView(
@@ -273,6 +335,7 @@ class FlatlandTouchLocalHitIntegrationTest : public ScenicCtfTest {
 
   // Holds watch loops so they stay alive through the duration of the test.
   std::vector<std::function<void(std::vector<fupa::TouchEventWithLocalHit>)>> watch_loops_;
+  std::vector<std::function<void(std::vector<fup::TouchEvent>)>> touch_watch_loops_;
 };
 
 // In this test we set up three views beneath the root, 1 and its two children 2 and 3, giving us
@@ -340,19 +403,8 @@ TEST_F(FlatlandTouchLocalHitIntegrationTest, InjectedInput_ShouldBeCorrectlyTran
   BlockingPresent(this, *view3_instance);
 
   // Upgrade View 1's touch source
-  std::unique_ptr<SimpleWatcherClient<fupa::TouchSourceWithLocalHit>> touch_source_with_local_hit;
-  local_hit_registry_->Upgrade({{.original = std::move(view1_touch_source_client_end)}})
-      .Then([this, &touch_source_with_local_hit](fidl::Result<fupa::LocalHit::Upgrade>& result) {
-        ASSERT_TRUE(result.is_ok());
-        ASSERT_FALSE(result->error().has_value());
-        ASSERT_TRUE(result->augmented().is_valid());
-        touch_source_with_local_hit =
-            std::make_unique<SimpleWatcherClient<fupa::TouchSourceWithLocalHit>>(
-                std::move(result->augmented()), dispatcher(), FailOnClose("Touch source closed"));
-      });
-  RunLoopUntil([&touch_source_with_local_hit] {
-    return touch_source_with_local_hit != nullptr && touch_source_with_local_hit->is_bound();
-  });
+  auto touch_source_with_local_hit = UpgradeTouchSource(std::move(view1_touch_source_client_end));
+  ASSERT_NE(touch_source_with_local_hit, nullptr);
 
   std::vector<fupa::TouchEventWithLocalHit> child_events;
   StartWatchLoop(*touch_source_with_local_hit, child_events);
@@ -386,6 +438,228 @@ TEST_F(FlatlandTouchLocalHitIntegrationTest, InjectedInput_ShouldBeCorrectlyTran
   EXPECT_EQ(child_events.at(5).local_point()[0], 2.5f);  // View 3
   EXPECT_EQ(child_events.at(6).local_point()[0], 6.5f);  // View 1
   EXPECT_EQ(child_events.at(7).local_point()[0], 0.0f);  // No View
+}
+
+// Verifies that when an embedded child View sets its root transform to `kSemanticallyInvisible`,
+// `TouchSourceWithLocalHit::Watch()` reports `ZX_KOID_INVALID` (rather than exposing the parent
+// View) while regular `TouchSource` dispatch still delivers the touch stream to the child View.
+TEST_F(FlatlandTouchLocalHitIntegrationTest,
+       SemanticallyInvisibleChild_DoesNotExposeParentInLocalHit) {
+  // Declare event vectors before bound clients so `StartWatchLoop()` references outlive them.
+  std::vector<fupa::TouchEventWithLocalHit> parent_events;
+  std::vector<fup::TouchEvent> child_events;
+
+  std::unique_ptr<FlatlandClientWithEventHandler> parent_instance;
+  auto [parent_touch_source_client_end, parent_touch_source_server_end] =
+      fidl::CreateEndpoints<fup::TouchSource>().value();
+  const auto parent_ref =
+      CreateAndAddChildView(*root_instance_, /*viewport_transform_id=*/fuc::TransformId(2),
+                            /*viewport_spec=*/fuchsia_math::Rect(0, 0, 7, 7),
+                            /*parent_of_viewport_transform=*/kRootTransform,
+                            /*viewport_content_id=*/fuc::ContentId(2), parent_instance,
+                            std::move(parent_touch_source_server_end));
+  const zx_koid_t parent_koid = ExtractKoid(parent_ref);
+
+  std::unique_ptr<FlatlandClientWithEventHandler> child_instance;
+  auto [child_touch_source_client_end, child_touch_source_server_end] =
+      fidl::CreateEndpoints<fup::TouchSource>().value();
+  SimpleWatcherClient<fup::TouchSource> child_touch_source(
+      std::move(child_touch_source_client_end), dispatcher(), FailOnClose("Touch source closed"));
+  CreateAndAddChildView(*parent_instance, /*viewport_transform_id=*/fuc::TransformId(2),
+                        /*viewport_spec=*/fuchsia_math::Rect(1, 1, 3, 3),
+                        /*parent_of_viewport_transform=*/kRootTransform,
+                        /*viewport_content_id=*/fuc::ContentId(2), child_instance,
+                        std::move(child_touch_source_server_end));
+
+  ASSERT_TRUE(
+      (*child_instance)
+          ->SetInfiniteHitRegion({{.transform_id = kRootTransform,
+                                   .hit_test = fuc::HitTestInteraction::kSemanticallyInvisible}})
+          .is_ok());
+  BlockingPresent(this, *child_instance);
+  // `SetInfiniteHitRegion()` does not set `Flatland::view_tree_dirty_`, so a leaf session
+  // (`links_to_children_.empty()`) presenting alone does not recompute the `ViewTree` snapshot;
+  // present `parent_instance` to trigger recomputation.
+  BlockingPresent(this, *parent_instance);
+
+  auto parent_touch_source = UpgradeTouchSource(std::move(parent_touch_source_client_end));
+  ASSERT_NE(parent_touch_source, nullptr);
+
+  StartWatchLoop(*parent_touch_source, parent_events, fup::TouchResponseType::kMaybe);
+  StartWatchLoop(child_touch_source, child_events, fup::TouchResponseType::kYes);
+
+  RegisterInjector(scenic::cpp::CloneViewRef(root_view_ref_),
+                   scenic::cpp::CloneViewRef(parent_ref));
+
+  // Stream 1: Inside the semantically invisible child's viewport `[1..4, 1..4]`.
+  Inject(2.5f, 2.5f, fupi::EventPhase::kAdd);
+  RunLoopUntil([&parent_events, &child_events] {
+    return parent_events.size() >= 2u && child_events.size() >= 2u;
+  });
+  ASSERT_EQ(parent_events.size(), 2u);
+  ASSERT_EQ(child_events.size(), 2u);
+
+  ASSERT_TRUE(parent_events.at(0).touch_event().pointer_sample().has_value());
+  EXPECT_EQ(parent_events.at(0).touch_event().pointer_sample()->phase(), fup::EventPhase::kAdd);
+  EXPECT_EQ(parent_events.at(0).local_viewref_koid(), ZX_KOID_INVALID);
+  EXPECT_EQ(parent_events.at(0).local_point()[0], 0.0f);
+  EXPECT_EQ(parent_events.at(0).local_point()[1], 0.0f);
+  ASSERT_TRUE(parent_events.at(1).touch_event().interaction_result().has_value());
+  EXPECT_EQ(parent_events.at(1).touch_event().interaction_result()->status(),
+            fup::TouchInteractionStatus::kDenied);
+
+  ASSERT_TRUE(child_events.at(0).pointer_sample().has_value());
+  EXPECT_EQ(child_events.at(0).pointer_sample()->phase(), fup::EventPhase::kAdd);
+  // Check `kGranted` before injecting `kRemove` because `TouchSourceBase` sends no `kRemove` to a
+  // `kDenied` contender.
+  ASSERT_TRUE(child_events.at(1).interaction_result().has_value());
+  ASSERT_EQ(child_events.at(1).interaction_result()->status(),
+            fup::TouchInteractionStatus::kGranted);
+
+  Inject(2.5f, 2.5f, fupi::EventPhase::kRemove);
+  RunLoopUntil([&child_events] { return child_events.size() >= 3u; });
+  ASSERT_EQ(child_events.size(), 3u);
+
+  ASSERT_TRUE(child_events.at(2).pointer_sample().has_value());
+  EXPECT_EQ(child_events.at(2).pointer_sample()->phase(), fup::EventPhase::kRemove);
+  EXPECT_EQ(parent_events.size(), 2u);
+
+  // Stream 2: Outside the child's viewport, inside the parent View `[0..7, 0..7]`.
+  Inject(5.5f, 5.5f, fupi::EventPhase::kAdd);
+  Inject(5.5f, 5.5f, fupi::EventPhase::kRemove);
+  RunLoopUntil([&parent_events] { return parent_events.size() >= 4u; });
+  ASSERT_EQ(parent_events.size(), 4u);
+
+  EXPECT_EQ(parent_events.at(2).local_viewref_koid(), parent_koid);
+  EXPECT_EQ(parent_events.at(2).local_point()[0], 5.5f);
+  EXPECT_EQ(parent_events.at(2).local_point()[1], 5.5f);
+  EXPECT_EQ(parent_events.at(3).local_viewref_koid(), parent_koid);
+  EXPECT_EQ(parent_events.at(3).local_point()[0], 5.5f);
+  EXPECT_EQ(parent_events.at(3).local_point()[1], 5.5f);
+  EXPECT_EQ(child_events.size(), 3u);
+}
+
+// Verifies that when a parent View places a semantically invisible shield transform above an
+// embedded child View, `TouchSourceWithLocalHit::Watch()` passes through the shield to report the
+// child View (and the parent's lower transform outside the child), while the parent's shield still
+// intercepts regular `TouchSource` dispatch.
+TEST_F(FlatlandTouchLocalHitIntegrationTest,
+       SemanticallyInvisibleParentShield_ExposesEmbeddedChildInLocalHit) {
+  // Declare event vectors before bound clients so `StartWatchLoop()` references outlive them.
+  std::vector<fupa::TouchEventWithLocalHit> observer_events;
+  std::vector<fup::TouchEvent> parent_events;
+  std::vector<fup::TouchEvent> child_events;
+
+  std::unique_ptr<FlatlandClientWithEventHandler> observer_instance;
+  auto [observer_touch_source_client_end, observer_touch_source_server_end] =
+      fidl::CreateEndpoints<fup::TouchSource>().value();
+  const auto observer_ref =
+      CreateAndAddChildView(*root_instance_, /*viewport_transform_id=*/fuc::TransformId(2),
+                            /*viewport_spec=*/fuchsia_math::Rect(0, 0, 7, 7),
+                            /*parent_of_viewport_transform=*/kRootTransform,
+                            /*viewport_content_id=*/fuc::ContentId(2), observer_instance,
+                            std::move(observer_touch_source_server_end));
+
+  std::unique_ptr<FlatlandClientWithEventHandler> parent_instance;
+  auto [parent_touch_source_client_end, parent_touch_source_server_end] =
+      fidl::CreateEndpoints<fup::TouchSource>().value();
+  SimpleWatcherClient<fup::TouchSource> parent_touch_source(
+      std::move(parent_touch_source_client_end), dispatcher(), FailOnClose("Touch source closed"));
+  const auto parent_ref =
+      CreateAndAddChildView(*observer_instance, /*viewport_transform_id=*/fuc::TransformId(2),
+                            /*viewport_spec=*/fuchsia_math::Rect(0, 0, 7, 7),
+                            /*parent_of_viewport_transform=*/kRootTransform,
+                            /*viewport_content_id=*/fuc::ContentId(2), parent_instance,
+                            std::move(parent_touch_source_server_end));
+  const zx_koid_t parent_koid = ExtractKoid(parent_ref);
+
+  std::unique_ptr<FlatlandClientWithEventHandler> child_instance;
+  auto [child_touch_source_client_end, child_touch_source_server_end] =
+      fidl::CreateEndpoints<fup::TouchSource>().value();
+  SimpleWatcherClient<fup::TouchSource> child_touch_source(
+      std::move(child_touch_source_client_end), dispatcher(), FailOnClose("Touch source closed"));
+  const auto child_ref =
+      CreateAndAddChildView(*parent_instance, /*viewport_transform_id=*/fuc::TransformId(2),
+                            /*viewport_spec=*/fuchsia_math::Rect(1, 1, 3, 3),
+                            /*parent_of_viewport_transform=*/kRootTransform,
+                            /*viewport_content_id=*/fuc::ContentId(2), child_instance,
+                            std::move(child_touch_source_server_end));
+  const zx_koid_t child_koid = ExtractKoid(child_ref);
+
+  // Attach `kShieldTransform` after the child's viewport transform so it sits on top of the child
+  // View in `parent_instance`'s subtree.
+  const fuc::TransformId kShieldTransform(3);
+  ASSERT_TRUE((*parent_instance)->CreateTransform({{.transform_id = kShieldTransform}}).is_ok());
+  ASSERT_TRUE((*parent_instance)
+                  ->AddChild({{.parent_transform_id = kRootTransform,
+                               .child_transform_id = kShieldTransform}})
+                  .is_ok());
+  ASSERT_TRUE(
+      (*parent_instance)
+          ->SetInfiniteHitRegion({{.transform_id = kShieldTransform,
+                                   .hit_test = fuc::HitTestInteraction::kSemanticallyInvisible}})
+          .is_ok());
+  BlockingPresent(this, *parent_instance);
+  BlockingPresent(this, *child_instance);
+  BlockingPresent(this, *observer_instance);
+
+  auto observer_touch_source = UpgradeTouchSource(std::move(observer_touch_source_client_end));
+  ASSERT_NE(observer_touch_source, nullptr);
+
+  StartWatchLoop(*observer_touch_source, observer_events, fup::TouchResponseType::kMaybe);
+  StartWatchLoop(parent_touch_source, parent_events, fup::TouchResponseType::kYes);
+  StartWatchLoop(child_touch_source, child_events, fup::TouchResponseType::kYes);
+
+  RegisterInjector(scenic::cpp::CloneViewRef(root_view_ref_),
+                   scenic::cpp::CloneViewRef(observer_ref));
+
+  // Stream 1: Over the embedded child View `[1..4, 1..4]` (translated by `(1, 1)`).
+  Inject(2.5f, 2.5f, fupi::EventPhase::kAdd);
+  RunLoopUntil([&observer_events, &parent_events] {
+    return observer_events.size() >= 2u && parent_events.size() >= 2u;
+  });
+  ASSERT_EQ(observer_events.size(), 2u);
+  ASSERT_EQ(parent_events.size(), 2u);
+
+  EXPECT_EQ(observer_events.at(0).local_viewref_koid(), child_koid);
+  EXPECT_EQ(observer_events.at(0).local_point()[0], 1.5f);
+  EXPECT_EQ(observer_events.at(0).local_point()[1], 1.5f);
+  // Check `kGranted` before injecting `kRemove` because `TouchSourceBase` sends no `kRemove` to a
+  // `kDenied` contender.
+  ASSERT_TRUE(parent_events.at(1).interaction_result().has_value());
+  ASSERT_EQ(parent_events.at(1).interaction_result()->status(),
+            fup::TouchInteractionStatus::kGranted);
+
+  Inject(2.5f, 2.5f, fupi::EventPhase::kRemove);
+  RunLoopUntil([&parent_events] { return parent_events.size() >= 3u; });
+  ASSERT_EQ(parent_events.size(), 3u);
+
+  ASSERT_TRUE(parent_events.at(2).pointer_sample().has_value());
+  EXPECT_EQ(parent_events.at(2).pointer_sample()->phase(), fup::EventPhase::kRemove);
+  EXPECT_TRUE(child_events.empty());
+
+  // Stream 2: Outside the child View, over the parent View `[0..7, 0..7]`.
+  Inject(5.5f, 5.5f, fupi::EventPhase::kAdd);
+  RunLoopUntil([&observer_events, &parent_events] {
+    return observer_events.size() >= 4u && parent_events.size() >= 5u;
+  });
+  ASSERT_EQ(observer_events.size(), 4u);
+  ASSERT_EQ(parent_events.size(), 5u);
+
+  EXPECT_EQ(observer_events.at(2).local_viewref_koid(), parent_koid);
+  EXPECT_EQ(observer_events.at(2).local_point()[0], 5.5f);
+  EXPECT_EQ(observer_events.at(2).local_point()[1], 5.5f);
+  ASSERT_TRUE(parent_events.at(4).interaction_result().has_value());
+  ASSERT_EQ(parent_events.at(4).interaction_result()->status(),
+            fup::TouchInteractionStatus::kGranted);
+
+  Inject(5.5f, 5.5f, fupi::EventPhase::kRemove);
+  RunLoopUntil([&parent_events] { return parent_events.size() >= 6u; });
+  ASSERT_EQ(parent_events.size(), 6u);
+
+  ASSERT_TRUE(parent_events.at(5).pointer_sample().has_value());
+  EXPECT_EQ(parent_events.at(5).pointer_sample()->phase(), fup::EventPhase::kRemove);
+  EXPECT_TRUE(child_events.empty());
 }
 
 }  // namespace integration_tests

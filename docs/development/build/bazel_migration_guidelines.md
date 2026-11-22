@@ -143,7 +143,7 @@ are impossible to express in the Bazel language.
 [gn-depfiles]: https://gn.googlesource.com/gn/+/main/docs/reference.md#var_depfile
 
 
-## Dependencies between the GN and Bazel graphs
+## Dependencies between the GN and Bazel graphs {:#dependencies-between-the-gn-and-bazel-graphs}
 
 Due to the high-cost of crossing the GN/Bazel boundary, dependency chains that
 look like `GN -> Bazel -> GN -> Bazel -> GN` result in significantly slower
@@ -175,7 +175,7 @@ Until then, a few practical consequences follow:
   build.
 
 
-## Exposing platform libraries as SDK atoms
+## Exposing platform libraries as SDK atoms {:#exposing-platform-libraries-as-sdk-atoms}
 
 For a target to be visible in `@fuchsia_sdk`, the following must be true:
 
@@ -225,7 +225,7 @@ target definitions that need to be tracked for the rest of the migration.
 
 [fuchsia-build-discuss]: mailto:fuchsia-build-discuss@google.com
 
-## Document History
+## Document history {:#document-history}
 
 2025-03-06: Fix example on how to export Bazel package to GN.
 2025-02-21: Initial version

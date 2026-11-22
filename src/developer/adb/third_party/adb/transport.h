@@ -202,13 +202,16 @@ struct FdConnection : public BlockingConnection {
 
   void Close() override;
   virtual void Reset() override final { Close(); }
-  virtual void* adb() override final { return adb_; }
+  virtual void* adb() override final { return adb_.load(std::memory_order_relaxed); }
 
  private:
   bool DispatchRead(void* buf, size_t len);
   bool DispatchWrite(void* buf, size_t len);
 
-  void* adb_;
+  // Set at construction and cleared in Close() to skip writes after shutdown begins. The pointee's
+  // lifetime is guaranteed by BlockingConnectionAdapter::Stop() joining |write_thread_| before
+  // Adb is destroyed.
+  std::atomic<void*> adb_;
   // unique_fd fd_;
   // std::unique_ptr<adb::tls::TlsConnection> tls_;
 };
@@ -294,7 +297,7 @@ class atransport : public std::enable_shared_from_this<atransport> {
 
   const TransportId id;
 
-  bool online = false;
+  std::atomic<bool> online = false;
   TransportType type = kTransportAny;
 
   // Used to identify transports for clients.

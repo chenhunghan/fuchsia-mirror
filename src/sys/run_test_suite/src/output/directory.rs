@@ -53,6 +53,7 @@ struct EntityEntry {
     /// start and stop events.
     timer: MonotonicTimer,
     tags: Option<Vec<TestTag>>,
+    runner: Option<String>,
 }
 
 enum MonotonicTimer {
@@ -85,6 +86,7 @@ impl DirectoryReporter {
                 children: vec![],
                 timer: MonotonicTimer::Unknown,
                 tags: None,
+                runner: None,
             },
         );
         let new_self = Self {
@@ -116,6 +118,7 @@ impl DirectoryReporter {
                 common: Cow::Borrowed(&suite_entry.common),
                 cases: vec![],
                 tags: suite_entry.tags.as_ref().map(Cow::Borrowed).unwrap_or(Cow::Owned(vec![])),
+                runner: suite_entry.runner.as_deref().map(Cow::Borrowed),
             };
             for case_entity_id in suite_entry.children.iter() {
                 suite_result.cases.push(directory::TestCaseResult {
@@ -176,6 +179,7 @@ impl Reporter for DirectoryReporter {
                 children: vec![],
                 timer: MonotonicTimer::Unknown,
                 tags: None,
+                runner: None,
             },
         );
 
@@ -185,7 +189,12 @@ impl Reporter for DirectoryReporter {
     fn set_entity_info(&self, entity: &EntityId, info: &EntityInfo) {
         let mut entries = self.entries.lock();
         let entry = entries.get_mut(entity).expect("Setting info for entity that does not exist");
-        entry.tags = info.tags.clone();
+        if let Some(tags) = &info.tags {
+            entry.tags = Some(tags.clone());
+        }
+        if let Some(runner) = &info.runner {
+            entry.runner = Some(runner.clone());
+        }
     }
 
     fn entity_started(&self, entity: &EntityId, timestamp: Timestamp) -> Result<(), Error> {
@@ -363,7 +372,7 @@ mod test {
     use fixture::fixture;
     use tempfile::tempdir;
     use test_output_directory::testing::{
-        assert_run_result, ExpectedDirectory, ExpectedSuite, ExpectedTestCase, ExpectedTestRun,
+        ExpectedDirectory, ExpectedSuite, ExpectedTestCase, ExpectedTestRun, assert_run_result,
     };
 
     fn version_variants<F>(_name: &str, test_fn: F)
@@ -723,5 +732,54 @@ mod test {
                 )
                 .with_suite(ExpectedSuite::new("no-start-suite", directory::Outcome::NotStarted)),
         );
+    }
+
+    #[fixture(version_variants)]
+    #[fuchsia::test]
+    fn runner_and_tags_recorded(version: SchemaVersion) {
+        let tags = vec![TestTag { key: "realm".to_string(), value: "system".to_string() }];
+        // Setting one of tags or runner must not clear the other, in either order.
+        for runner_first in [false, true] {
+            let dir = tempdir().expect("create temp directory");
+            let run_reporter = RunReporter::new(
+                DirectoryReporter::new(dir.path().to_path_buf(), version)
+                    .expect("create run reporter"),
+            );
+            let suite_reporter = run_reporter.new_suite("suite").expect("create new suite");
+            if runner_first {
+                suite_reporter.set_runner("gtest_runner".to_string());
+                suite_reporter.set_tags(tags.clone());
+            } else {
+                suite_reporter.set_tags(tags.clone());
+                suite_reporter.set_runner("gtest_runner".to_string());
+            }
+            suite_reporter.finished().expect("finish suite");
+            run_reporter.finished().expect("finish test run");
+
+            let run_result = directory::TestRunResult::from_dir(dir.path()).expect("parse result");
+            assert_eq!(run_result.suites.len(), 1);
+            let suite = &run_result.suites[0];
+            assert_eq!(
+                suite.runner.as_deref(),
+                Some("gtest_runner"),
+                "runner_first: {runner_first}"
+            );
+            assert_eq!(*suite.tags, tags, "runner_first: {runner_first}");
+        }
+    }
+
+    #[fixture(version_variants)]
+    #[fuchsia::test]
+    fn runner_absent_by_default(version: SchemaVersion) {
+        let dir = tempdir().expect("create temp directory");
+        let run_reporter = RunReporter::new(
+            DirectoryReporter::new(dir.path().to_path_buf(), version).expect("create run reporter"),
+        );
+        let suite_reporter = run_reporter.new_suite("suite").expect("create new suite");
+        suite_reporter.finished().expect("finish suite");
+        run_reporter.finished().expect("finish test run");
+
+        let run_result = directory::TestRunResult::from_dir(dir.path()).expect("parse result");
+        assert_eq!(run_result.suites[0].runner, None);
     }
 }

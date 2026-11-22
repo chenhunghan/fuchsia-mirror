@@ -1,1 +1,1 @@
-include /sdk/lib/c/OWNERS
+include /sdk/lib/c/scudo/OWNERS

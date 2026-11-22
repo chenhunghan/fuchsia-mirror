@@ -133,7 +133,12 @@ if (is_host) {
     testonly = true
     deps = [
       ":ffx_emulator_tests($host_toolchain)",
+      "commands/console:tests",
       "commands/list:tests",
+      "commands/screenshot:tests",
+      "commands/show:tests",
+      "commands/snapshot:tests",
+      "commands/start:tests",
       "configuration:tests",
       "engines:tests",
     ]

@@ -55,8 +55,7 @@ otError otPlatRadioSleep(otInstance* aInstance) {
 }
 
 otError otPlatRadioReceive(otInstance* aInstance, uint8_t aChannel) {
-  OT_UNUSED_VARIABLE(aInstance);
-  return Platform::Get().radio().Receive(aChannel);
+  return Platform::Get().radio().Receive(aInstance, aChannel);
 }
 
 otRadioFrame* otPlatRadioGetTransmitBuffer(otInstance* aInstance) {

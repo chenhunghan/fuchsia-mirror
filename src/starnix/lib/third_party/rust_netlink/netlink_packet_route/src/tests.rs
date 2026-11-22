@@ -50,6 +50,30 @@ fn test_get_link() {
     assert_eq!(buffer.as_slice(), raw);
 }
 
+#[test]
+fn test_parse_get_link_dump_with_rtgenmsg() {
+    // Some clients dump links with only a 1-byte `struct rtgenmsg` (AF_UNSPEC)
+    // as the header, so nlmsg_len is 17.
+    let raw: Vec<u8> = vec![
+        0x11, 0x00, 0x00, 0x00, 0x12, 0x00, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00,
+    ];
+
+    let mut header = NetlinkHeader::default();
+    header.length = 17;
+    header.message_type = 18;
+    header.flags = 0x0301;
+
+    let expected = NetlinkMessage::new(
+        header,
+        NetlinkPayload::from(RouteNetlinkMessage::GetLink(LinkMessage::default())),
+    );
+
+    for mode in [RouteNetlinkMessageParseMode::Relaxed, RouteNetlinkMessageParseMode::Strict] {
+        assert_eq!(NetlinkMessage::deserialize(&raw, mode).unwrap(), expected);
+    }
+}
+
 // Note: the following packet captures were performed with an old version of
 // iproute2 obtained by checking out
 // https://github.com/iproute2/iproute2/commit/b45e300024bb0936a41821ad75117dc08b65669f

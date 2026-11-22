@@ -80,6 +80,7 @@ idk_cc_source_library(
         "//src/lib/fidl/c/walker_tests:__pkg__",
         "//src/lib/fidl/llcpp:__subpackages__",
         "//tools/fidlcat:__subpackages__",
+        "//zircon/system/ulib/trace-provider/test:__pkg__",
     ],  # @bazel2gn:raw_overwrite:[ "//*" ]
     deps = ["//src/zircon/lib/zircon"],
     non_fuchsia_deps = ["//zircon/system/public"],

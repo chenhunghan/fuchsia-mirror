@@ -398,6 +398,9 @@ struct CfiEntry {
       bytes = bytes.subspan(data_size->size_bytes);
       cie.augmentation_data = bytes.first(data_size->value);
       cie.initial_instructions = bytes.subspan(data_size->value);
+      // Reset `bytes` to `cie.augmentation_data` so the following loop consumes
+      // from the CIE augmentation data rather than initial_instructions.
+      bytes = cie.augmentation_data;
     } else {
       // This will be reduced later.
       cie.augmentation_data = bytes;
@@ -416,8 +419,12 @@ struct CfiEntry {
           bytes = bytes.subspan(1);
           if (!cie.fde_augmentation_sized &&
               cie.fde_augmentation_data_size != CfiCie::kUnknownAugmentation) {
-            cie.fde_augmentation_data_size +=
-                EncodedPtr::EncodedSize(cie.lsda_encoding, cie.address_size);
+            uint8_t size = EncodedPtr::EncodedSize(cie.lsda_encoding, cie.address_size);
+            if (size == EncodedPtr::kDynamicSize) {
+              cie.fde_augmentation_data_size = CfiCie::kUnknownAugmentation;
+            } else {
+              cie.fde_augmentation_data_size += size;
+            }
           }
           break;
 
@@ -428,7 +435,13 @@ struct CfiEntry {
           }
           uint8_t encoding = static_cast<uint8_t>(bytes.front());
           bytes = bytes.subspan(1);
-          if (auto personality = EncodedPtr::Read<Elf>(encoding, bytes)) {
+          const size_t ptr_offset =
+              data_.initial_length_size() + (bytes.data() - data_.contents().data());
+          if (auto personality = EncodedPtr::Read<Elf>(encoding, bytes, cie.address_size)) {
+            bytes = bytes.subspan(personality->encoded_size);
+            if (EncodedPtr::Signed(encoding)) {
+              personality->ptr = std::bit_cast<uint64_t>(personality->sptr);
+            }
             cie.personality = personality->ptr;
           } else [[unlikely]] {
             return truncated();
@@ -437,10 +450,9 @@ struct CfiEntry {
             case EncodedPtr::kAbs:
               break;
             case EncodedPtr::kPcrel:
-              // Add in the vaddr of CIE and the distance from there to here.
-              cie.personality += vaddr;
-              cie.personality += data_.initial_length_size();
-              cie.personality += bytes.data() - data_.contents().data();
+              // Add in the vaddr of CIE and the distance from there to the
+              // encoded personality pointer.
+              cie.personality += vaddr + ptr_offset;
               break;
             default:
               diag.FormatError("DWARF CFI uses invalid personality routine encoding ", encoding,
@@ -576,6 +588,9 @@ struct CfiEntry {
                        std::forward<ErrorArgs>(error_args)...);
       return std::nullopt;
     } else {
+      if (bytes.size_bytes() < cie.fde_augmentation_data_size) [[unlikely]] {
+        return truncated(cie.lsda_encoding);
+      }
       fde.augmentation_data = bytes.first(cie.fde_augmentation_data_size);
       bytes = bytes.subspan(cie.fde_augmentation_data_size);
     }
@@ -585,9 +600,14 @@ struct CfiEntry {
 
     // The only part of the augmentation data we know about is the LSDA.  When
     // there is no LSDA, the empty EncodedPtr has a zero .ptr anyway.
+    const uint64_t lsda_vaddr = vaddr + data_.initial_length_size() +
+                                (fde.augmentation_data.data() - data_.contents().data());
     auto lsda = EncodedPtr::Read<Elf>(cie.lsda_encoding, fde.augmentation_data, cie.address_size);
     if (!lsda) [[unlikely]] {
       return truncated(cie.lsda_encoding);
+    }
+    if (cie.lsda_encoding != EncodedPtr::kOmit && !normalize(lsda_vaddr, *lsda)) [[unlikely]] {
+      return std::nullopt;
     }
     fde.lsda = lsda->ptr;
 

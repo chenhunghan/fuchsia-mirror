@@ -11,6 +11,7 @@
 #include <lib/trace/event.h>
 #include <lib/zx/time.h>
 
+#include <optional>
 #include <queue>
 
 #include "src/lib/fxl/macros.h"
@@ -31,6 +32,8 @@ using OnFramePresented = fit::function<void(
     PresentTimestamps present_times)>;
 using RenderScheduledFrame =
     fit::function<void(uint64_t frame_number, zx::time presentation_time, FramePresentedCallback)>;
+using NotifyExpectedPresentCallback =
+    fit::function<void(zx::time expected_present_time, zx::duration frame_interval)>;
 
 // TODOs can be found in the frame scheduler epic: https://fxbug.dev/42098599. Any new bugs filed
 // concerning the frame scheduler should be added to it as well.
@@ -53,7 +56,8 @@ class DefaultFrameScheduler final : public FrameScheduler {
   // `session_updaters` will be called in this order for every event.
   void Initialize(std::shared_ptr<const VsyncTiming> vsync_timing, UpdateSessions update_sessions,
                   OnCpuWorkDone on_cpu_work_done, OnFramePresented on_frame_presented,
-                  RenderScheduledFrame render_scheduled_frame);
+                  RenderScheduledFrame render_scheduled_frame,
+                  NotifyExpectedPresentCallback notify_expected_present = nullptr);
 
   // `FrameScheduler`
   void SetRenderContinuously(bool render_continuously) override;
@@ -68,11 +72,21 @@ class DefaultFrameScheduler final : public FrameScheduler {
                                 bool squashable, bool schedule_asap) override;
 
   // `FrameScheduler`
+  void NotifyExpectedPresent(SessionId session_id, zx::time expected_present_time,
+                             zx::duration frame_interval, bool schedule_asap) override;
+
+  // `FrameScheduler`
   std::vector<FuturePresentationInfo> GetFuturePresentationInfos(
       zx::duration requested_prediction_span) override;
 
   // `FrameScheduler`
   void RemoveSession(SessionId session_id) override;
+
+  // Returns the scheduled frame wakeup time while `frame_render_task_` is pending, or
+  // `std::nullopt` when no frame wakeup is scheduled. Main thread only.
+  std::optional<zx::time> next_wakeup() const {
+    return frame_render_task_.is_pending() ? std::optional<zx::time>(wakeup_time_) : std::nullopt;
+  }
 
   constexpr static zx::duration kMinPredictedFrameDuration = zx::msec(0);
   constexpr static zx::duration kInitialRenderDuration = zx::msec(5);
@@ -91,8 +105,8 @@ class DefaultFrameScheduler final : public FrameScheduler {
   // If `schedule_asp` is given, immediately starts the render.
   void RequestFrame(zx::time requested_presentation_time, bool schedule_asap);
 
-  // Check if there are pending updates, and if there are then find the lowest next requested
-  // presentation time among all sessions and use it to request another frame.
+  // Check if there are pending updates across updatable sessions, and if so request a frame for
+  // whichever session's next update requires the earliest wakeup.
   void HandleNextFrameRequest();
 
   // Update the global scene and then draw it... maybe.  There are multiple reasons why this might
@@ -164,6 +178,7 @@ class DefaultFrameScheduler final : public FrameScheduler {
   OnCpuWorkDone on_cpu_work_done_;
   OnFramePresented on_frame_presented_;
   RenderScheduledFrame render_scheduled_frame_;
+  NotifyExpectedPresentCallback notify_expected_present_;
 
   // State.
   // Frame number is 1-based so that `last_presented_frame_number_` can remain unsigned.

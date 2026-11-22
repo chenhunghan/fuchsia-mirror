@@ -46,30 +46,30 @@ pub use socket::{Socket, SocketDisposition, SocketReadStream, SocketWriter};
 pub use vmo::Vmo;
 
 // Unsupported handle types.
-#[rustfmt::skip]
+pub use Handle as Bti;
 pub use Handle as Clock;
-#[rustfmt::skip]
-pub use Handle as Exception;
-#[rustfmt::skip]
-pub use Handle as Fifo;
-#[rustfmt::skip]
-pub use Handle as Iob;
-#[rustfmt::skip]
-pub use Handle as Job;
-#[rustfmt::skip]
-pub use Handle as Process;
-#[rustfmt::skip]
-pub use Handle as Resource;
-#[rustfmt::skip]
-pub use Handle as Stream;
-#[rustfmt::skip]
-pub use Handle as Thread;
-#[rustfmt::skip]
-pub use Handle as Vmar;
-#[rustfmt::skip]
 pub use Handle as Counter;
-#[rustfmt::skip]
+pub use Handle as DebugLog;
+pub use Handle as Exception;
+pub use Handle as Fifo;
+pub use Handle as Guest;
+pub use Handle as Interrupt;
+pub use Handle as Iob;
+pub use Handle as Iommu;
+pub use Handle as Job;
+pub use Handle as Msi;
+pub use Handle as Pager;
+pub use Handle as Pmt;
 pub use Handle as Port;
+pub use Handle as Process;
+pub use Handle as Profile;
+pub use Handle as Resource;
+pub use Handle as Stream;
+pub use Handle as SuspendToken;
+pub use Handle as Thread;
+pub use Handle as Timer;
+pub use Handle as Vcpu;
+pub use Handle as Vmar;
 
 use proto::f_domain_ordinals as ordinals;
 

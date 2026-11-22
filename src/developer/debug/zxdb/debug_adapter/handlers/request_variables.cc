@@ -42,7 +42,7 @@ class VariableResponseContext : public fxl::RefCountedThreadSafe<VariableRespons
   explicit VariableResponseContext(
       DebugAdapterContext* context, dap::VariablesRequest request,
       std::function<void(dap::ResponseOrError<dap::VariablesResponse>)> callback,
-      fxl::RefPtr<EvalContext> eval_context, int pending_evals)
+      fxl::RefPtr<EvalContext> eval_context, int64_t pending_evals)
       : context(context),
         request(std::move(request)),
         callback(std::move(callback)),
@@ -73,7 +73,7 @@ class VariableResponseContext : public fxl::RefCountedThreadSafe<VariableRespons
   dap::VariablesRequest request;
   std::function<void(dap::ResponseOrError<dap::VariablesResponse>)> callback;
   fxl::RefPtr<EvalContext> eval_context;
-  int pending_evals = 0;
+  int64_t pending_evals = 0;
   dap::VariablesResponse response;
 
  private:
@@ -96,7 +96,7 @@ class VariableResponseContext : public fxl::RefCountedThreadSafe<VariableRespons
     return var;
   }
 
-  int ChildReference(std::unique_ptr<FormatNode> node) const {
+  int64_t ChildReference(std::unique_ptr<FormatNode> node) const {
     if (!node->children().empty()) {
       VariablesRecord* record = context->VariablesRecordForID(request.variablesReference);
       FX_CHECK(record);
@@ -106,7 +106,7 @@ class VariableResponseContext : public fxl::RefCountedThreadSafe<VariableRespons
     return 0;
   }
 
-  int ChildReference(const fxl::WeakPtr<FormatNode>& node) const {
+  int64_t ChildReference(const fxl::WeakPtr<FormatNode>& node) const {
     if (!node->children().empty()) {
       VariablesRecord* record = context->VariablesRecordForID(request.variablesReference);
       FX_CHECK(record);
@@ -131,9 +131,9 @@ Err PopulateVariableValues(
     Frame* frame, const dap::VariablesRequest& req, DebugAdapterContext* ctx,
     std::function<void(dap::ResponseOrError<dap::VariablesResponse>)> callback,
     std::map<std::string, fxl::RefPtr<Variable>>& vars) {
-  int start_index = req.start.value(0);
-  int end_index = vars.size();
-  int count = req.count.value(0);
+  int64_t start_index = req.start.value(0);
+  int64_t end_index = static_cast<int64_t>(vars.size());
+  int64_t count = req.count.value(0);
   if (count) {
     end_index = std::min(start_index + count, end_index);
   }
@@ -149,7 +149,7 @@ Err PopulateVariableValues(
   }
 
   auto it = vars.begin();
-  for (auto i = 0; i < end_index; i++, it++) {
+  for (int64_t i = 0; i < end_index; i++, it++) {
     FX_CHECK(it != vars.end());
     // Skip until start index.
     if (i < start_index) {
@@ -195,9 +195,9 @@ Err PopulateChildren(Frame* frame, const dap::VariablesRequest& req, DebugAdapte
     return Err();
   }
 
-  int start_index = req.start.value(0);
-  int end_index = node_ptr->children().size();
-  int count = req.count.value(0);
+  int64_t start_index = req.start.value(0);
+  int64_t end_index = static_cast<int64_t>(node_ptr->children().size());
+  int64_t count = req.count.value(0);
   if (count) {
     end_index = std::min(start_index + count, end_index);
   }

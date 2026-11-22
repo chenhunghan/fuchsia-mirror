@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::realm::{Durability, get_all_instances, get_resolved_declaration};
+use crate::realm::{Durability, GetDeclarationError, get_all_instances, get_resolved_declaration};
 use anyhow::{Result, bail};
 use cm_rust::offer::{OfferDeclCommon, OfferTarget};
 use flex_fuchsia_sys2 as fsys;
@@ -72,7 +72,18 @@ async fn get_all_collections_of_instance(
     moniker: &Moniker,
     realm_query: &fsys::RealmQueryProxy,
 ) -> Result<Vec<Collection>> {
-    let manifest = get_resolved_declaration(moniker, realm_query).await?;
+    let manifest = match get_resolved_declaration(moniker, realm_query).await {
+        Ok(manifest) => manifest,
+        Err(
+            GetDeclarationError::InstanceNotFound(_)
+            | GetDeclarationError::InstanceNotResolved(_)
+            | GetDeclarationError::BadUrl(_)
+            | GetDeclarationError::ResolveFailed(_)
+            | GetDeclarationError::PackageOpenFailed(_)
+            | GetDeclarationError::PackageReadFailed(_),
+        ) => return Ok(vec![]),
+        Err(err) => return Err(err.into()),
+    };
     let mut collections = vec![];
 
     for collection in manifest.collections {
@@ -199,5 +210,101 @@ mod tests {
         assert_eq!(collection.durability, Durability::Transient);
         assert!(collection.environment.is_none());
         assert_eq!(collection.offered_capabilities, vec!["fuchsia.foo.bar"]);
+    }
+
+    #[fuchsia::test]
+    async fn get_all_collections_skips_unresolvable_instance() {
+        let query = serve_realm_query_with_decl_errors(
+            vec![
+                fsys::Instance {
+                    moniker: Some("./my_foo".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/foo#meta/foo.cm".to_string()),
+                    instance_id: Some("1234567890".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some("fuchsia-pkg://fuchsia.com/foo#meta/foo.cm".to_string()),
+                        execution_info: None,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/debugger".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/debugger#meta/debugger.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/debugger#meta/debugger.cm".to_string(),
+                        ),
+                        execution_info: None,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/pkg_open_failed".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/pkg_open#meta/pkg_open.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/pkg_open#meta/pkg_open.cm".to_string(),
+                        ),
+                        execution_info: None,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/pkg_read_failed".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/pkg_read#meta/pkg_read.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/pkg_read#meta/pkg_read.cm".to_string(),
+                        ),
+                        execution_info: None,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                fsys::Instance {
+                    moniker: Some("./core/bad_url".to_string()),
+                    url: Some("fuchsia-pkg://fuchsia.com/bad_url#meta/bad_url.cm".to_string()),
+                    resolved_info: Some(fsys::ResolvedInfo {
+                        resolved_url: Some(
+                            "fuchsia-pkg://fuchsia.com/bad_url#meta/bad_url.cm".to_string(),
+                        ),
+                        execution_info: None,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ],
+            HashMap::from([(
+                "./my_foo".to_string(),
+                fdecl::Component {
+                    collections: Some(vec![fdecl::Collection {
+                        name: Some("coll1".to_string()),
+                        durability: Some(fdecl::Durability::Transient),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::from([
+                ("./core/debugger".to_string(), fsys::GetDeclarationError::ResolveFailed),
+                (
+                    "./core/pkg_open_failed".to_string(),
+                    fsys::GetDeclarationError::PackageOpenFailed,
+                ),
+                (
+                    "./core/pkg_read_failed".to_string(),
+                    fsys::GetDeclarationError::PackageReadFailed,
+                ),
+                ("./core/bad_url".to_string(), fsys::GetDeclarationError::BadUrl),
+            ]),
+        );
+
+        let mut collections = get_all_collections(&query).await.unwrap();
+        assert_eq!(collections.len(), 1);
+        let collection = collections.remove(0);
+        assert_eq!(collection.name, "coll1");
+        assert_eq!(collection.moniker, Moniker::parse_str("/my_foo").unwrap());
     }
 }

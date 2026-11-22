@@ -3,16 +3,44 @@
 // found in the LICENSE file.
 {
     include: [
+        "//src/connectivity/network/testing/netemul/service/meta/collection.shard.cml",
         "//src/connectivity/network/testing/netemul/service/meta/common.shard.cml",
         "//src/sys/test_runners/rust/default.shard.cml",
     ],
     program: {
         binary: "bin/netemul_sandbox_bin_test",
     },
+    children: [
+        {
+            name: "realm_builder_server",
+            url: "#meta/realm_builder_server.cm",
+        },
+    ],
     use: [
+        {
+            protocol: "fuchsia.component.Realm",
+            from: "framework",
+        },
         {
             protocol: [ "fuchsia.diagnostics.ArchiveAccessor" ],
             from: "parent",
+        },
+    ],
+    offer: [
+        {
+            protocol: "fuchsia.net.tun.Control",
+            from: "#network-tun",
+            to: "#netemul",
+        },
+        {
+            protocol: "fuchsia.netemul.network.NetworkContext",
+            from: "#network-context",
+            to: "#netemul",
+        },
+        {
+            directory: "custom_artifacts",
+            from: "self",
+            to: "#netemul",
         },
     ],
 }

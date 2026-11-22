@@ -1,0 +1,80 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO(https://fxbug.dev/570694755): Verify whether lib should use target_compatible_with (was not gated by if (is_fuchsia) in GN).
+fx_cc_library(
+    name = "lib",
+    srcs = ["fake_a11y_manager.cc"],
+    hdrs = ["fake_a11y_manager.h"],
+    # Uses Zircon/FIDL headers and Fuchsia-only a11y/view dependencies.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_hlcpp",
+        "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/ui/a11y/lib/magnifier",
+        "//src/ui/a11y/lib/view",
+        "//src/ui/a11y/testing/fidl:test.accessibility_hlcpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "fake_a11y_manager",
+    # Uses Zircon/FIDL headers and Fuchsia-only sys/cpp and async-loop-default.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.ui.composition:fuchsia.ui.composition_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "fake_a11y_manager",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "fake-a11y-manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/fake_a11y_manager.cml",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_component(
+    name = "fake-a11y-manager",
+    compiled_manifest = ":manifest",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/ui/testing/ui_test_realm:__pkg__",
+        "//src/ui/tests/integration_input_tests/factory-reset-handler:__pkg__",
+    ],
+    deps = [":bin_packaged"],
+)

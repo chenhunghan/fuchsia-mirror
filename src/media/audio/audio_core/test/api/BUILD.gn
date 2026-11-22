@@ -45,7 +45,8 @@ loadable_module("audio_core_api_test_effects") {
 source_set("audio_api_pipeline_test_shared") {
   testonly = true
   sources = [ "audio_renderer_pipeline_test_shared.h" ]
-  deps = [
+  public_deps = [
+    ":audio_api_test_shared",
     "//src/media/audio/audio_core/testing/integration:hermetic_pipeline_test",
   ]
 }
@@ -99,7 +100,11 @@ audio_core_api_test_component("audio-capturer-error-test") {
 
 audio_core_api_test_component("audio-capturer-pipeline-test") {
   source = "audio_capturer_pipeline_test.cc"
-  executable_deps = [ "//sdk/lib/media/audio/cpp" ]
+  executable_deps = [
+    ":audio_api_test_shared",
+    "//sdk/lib/media/audio/cpp",
+    "//src/media/audio/lib/analysis",
+  ]
   test_type = "system"
 }
 

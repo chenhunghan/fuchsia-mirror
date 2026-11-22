@@ -1,0 +1,83 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "calculator_next_server",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//examples/fidl/calculator/fidl:calculator_rust_next",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fidl/rust_next/fidl_next",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    crate = ":bin",
+    edition = "2024",
+    tags = ["manual"],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "calculator_next_server",
+)
+
+fx_component_manifest(
+    name = "component-manifest",
+    component_name = "server",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/server.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":component-manifest",
+    visibility = ["//examples/fidl/calculator:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "server",
+    components = [":component"],
+)
+
+fx_unittest_package(
+    name = "calculator-server-rust-next-unittests",
+    unit_tests = [":bin_test"],
+    visibility = ["//examples/fidl/calculator:__pkg__"],
+)

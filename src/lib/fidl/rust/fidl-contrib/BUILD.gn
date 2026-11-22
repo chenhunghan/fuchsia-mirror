@@ -75,7 +75,6 @@ if (is_fuchsia) {
              "//src/lib/fuchsia-component-test",
              "//third_party/rust_crates:anyhow",
            ]
-    deps += [ "//src/lib/fuchsia-component-test:includes" ]
     output_name = "fidl_contrib_lib_test"
   }
 }

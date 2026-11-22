@@ -272,7 +272,7 @@ Evolution][ftp-049].
 [fec]: /docs/contribute/governance/eng_council.md
 [fidl-team]: /src/fidl/OWNERS
 [ftp-001]: /docs/contribute/governance/rfcs/0018_ftp_process.md
-[ftp-024-backwards-compatibility]: /docs/contribute/governance/rfcs/0024_mandatory_source_compatibility.md#backwards_compatibility
+[ftp-024-backwards-compatibility]: /docs/contribute/governance/rfcs/0024_mandatory_source_compatibility.md#backwards-compatibility
 [ftp-049-criteria]: /docs/contribute/governance/rfcs/0049_fidl_tuning_process_evolution.md#criteria
 [ftp-049-motivation]: /docs/contribute/governance/rfcs/0049_fidl_tuning_process_evolution.md#motivation
 [ftp-049-reviewing]: /docs/contribute/governance/rfcs/0049_fidl_tuning_process_evolution.md#reviewing
@@ -280,9 +280,9 @@ Evolution][ftp-049].
 [ftp-template]: /docs/contribute/governance/deprecated-ftp-template.md
 [google-doc]: https://www.google.com/docs/about/
 [rfc-process-criteria]: /docs/contribute/governance/rfcs/0001_rfc_process.md#criteria
-[rfc-process-draft]: /docs/contribute/governance/rfcs/0001_rfc_process.md#drafts
+[rfc-process-draft]: /docs/contribute/governance/rfcs/0001_rfc_process.md#draft
 [rfc-process-iterate]: /docs/contribute/governance/rfcs/0001_rfc_process.md#iterate
-[rfc-process-prior-art]: /docs/contribute/governance/rfcs/0001_rfc_process.md#prior_art_and_references
+[rfc-process-prior-art]: /docs/contribute/governance/rfcs/0001_rfc_process.md#prior-art-and-references
 [rfc-process-socialize]: /docs/contribute/governance/rfcs/0001_rfc_process.md#socialize
 [rfc-process]: /docs/contribute/governance/rfcs/0001_rfc_process.md
 [rfc-0006]: /docs/contribute/governance/rfcs/0006_addendum_to_rfc_process_for_zircon.md

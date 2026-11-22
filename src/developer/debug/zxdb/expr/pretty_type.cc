@@ -420,8 +420,8 @@ void PrettyArray::Format(FormatNode* node, const FormatOptions& options,
                       FX_DCHECK(type);
                     }
 
-                    FormatArrayNode(weak_node.get(), results[0].value(), len, type, options,
-                                    context, std::move(cb));
+                    FormatArrayNode(weak_node.get(), results[0].value(), static_cast<int>(len),
+                                    type, options, context, std::move(cb));
                   });
 }
 

@@ -4,8 +4,12 @@
 
 #include "src/developer/debug/zxdb/console/command_parser.h"
 
+#include <span>
+#include <type_traits>
+
 #include <gtest/gtest.h>
 
+#include "src/developer/debug/zxdb/client/analytics_event.h"
 #include "src/developer/debug/zxdb/common/err.h"
 #include "src/developer/debug/zxdb/console/command.h"
 #include "src/developer/debug/zxdb/console/nouns.h"
@@ -17,8 +21,6 @@ namespace {
 bool CompletionContains(const std::vector<std::string>& suggestions, const std::string& contains) {
   return std::find(suggestions.begin(), suggestions.end(), contains) != suggestions.end();
 }
-
-}  // namespace
 
 TEST(CommandParser, Tokenizer) {
   std::vector<CommandToken> output;
@@ -259,6 +261,30 @@ TEST(CommandParser, VerbSwitches) {
   EXPECT_TRUE(err.has_error());
   EXPECT_EQ("Argument needed for \"-s\". Usage: mem-read [ --size=<bytes> ] <address-expression>",
             err.msg());
+
+  // Repeating a non-multi-value switch overwrites the previous value, and an inline switch value
+  // ("--size=123") does not bleed into a subsequent short switch ("-s 456").
+  err = ParseCommand("mem-read --size=123 -s 456 next", &output);
+  EXPECT_FALSE(err.has_error()) << err.msg();
+  EXPECT_EQ(1u, output.switches().size());
+  EXPECT_EQ("456", output.GetSwitchValue(size_switch->id));
+  ASSERT_EQ(1u, output.GetSwitchValues(size_switch->id).size());
+  EXPECT_EQ("456", output.GetSwitchValues(size_switch->id)[0]);
+  ASSERT_EQ(1u, output.args().size());
+  EXPECT_EQ("next", output.args()[0]);
+
+  // Multi-value switch accumulation and CommandReport generation on Command.
+  output.AddSwitch(size_switch->id, "789");
+  EXPECT_EQ("789", output.GetSwitchValue(size_switch->id));
+  std::span<const std::string> size_values = output.GetSwitchValues(size_switch->id);
+  ASSERT_EQ(2u, size_values.size());
+  EXPECT_EQ("456", size_values[0]);
+  EXPECT_EQ("789", size_values[1]);
+
+  CommandReport report = output.BuildReport();
+  ASSERT_EQ(2u, report.switches.size());
+  EXPECT_EQ("456", report.switches[0].value);
+  EXPECT_EQ("789", report.switches[1].value);
 }
 
 // Some verbs take all arguments as one large string, ignoring whitespace. "print" is one of these.
@@ -291,6 +317,74 @@ TEST(CommandParser, OneParam) {
 
   // A quoted path should continue to work regardless of the OneParam setting.
   EXPECT_EQ("\"path/has a/space/mini.dmp\"", output.args()[0]);
+}
+
+TEST(CommandParser, MultiValueSwitches) {
+  static_assert(!std::is_constructible_v<SwitchRecord, int, bool, const char*, bool>);
+  static_assert(std::is_constructible_v<SwitchRecord, int, bool, const char*, char>);
+  static_assert(std::is_constructible_v<SwitchRecord, int, bool, const char*>);
+
+  constexpr int kSingleSwitch = 1;
+  constexpr int kExprSwitch = 2;
+  constexpr int kTagSwitch = 3;
+  constexpr int kUnsetSwitch = 99;
+
+  VerbRecord test_verb(nullptr, {"test-verb"}, "Short help",
+                       "test-verb [ -s <val> ] [ -e <expr> ... ] [ --tag=<tag> ... ] <arg>", "Help",
+                       CommandGroup::kGeneral);
+  test_verb.switches.emplace_back(kSingleSwitch, true, "single", 's');
+  test_verb.switches.push_back(SwitchRecord::MultiValue(kExprSwitch, "expr", 'e'));
+  test_verb.switches.push_back(SwitchRecord::MultiValue(kTagSwitch, "tag"));
+
+  EXPECT_EQ(0, test_verb.switches[2].ch);
+  EXPECT_TRUE(test_verb.switches[2].has_value);
+  EXPECT_TRUE(test_verb.switches[2].multi_value);
+
+  std::map<Verb, VerbRecord> verbs;
+  verbs.emplace(Verb::kPrint, std::move(test_verb));
+
+  Command output;
+  Err err = ParseCommandForTest(
+      "test-verb --expr=first -s old -e second -ethird --single=new --expr fourth "
+      "--tag=alpha --tag beta MyArg",
+      verbs, &output);
+  ASSERT_FALSE(err.has_error()) << err.msg();
+
+  EXPECT_EQ("new", output.GetSwitchValue(kSingleSwitch));
+  std::span<const std::string> single_values = output.GetSwitchValues(kSingleSwitch);
+  ASSERT_EQ(1u, single_values.size());
+  EXPECT_EQ("new", single_values[0]);
+
+  EXPECT_EQ("fourth", output.GetSwitchValue(kExprSwitch));
+  std::span<const std::string> expr_values = output.GetSwitchValues(kExprSwitch);
+  ASSERT_EQ(4u, expr_values.size());
+  EXPECT_EQ("first", expr_values[0]);
+  EXPECT_EQ("second", expr_values[1]);
+  EXPECT_EQ("third", expr_values[2]);
+  EXPECT_EQ("fourth", expr_values[3]);
+
+  EXPECT_EQ("beta", output.GetSwitchValue(kTagSwitch));
+  std::span<const std::string> tag_values = output.GetSwitchValues(kTagSwitch);
+  ASSERT_EQ(2u, tag_values.size());
+  EXPECT_EQ("alpha", tag_values[0]);
+  EXPECT_EQ("beta", tag_values[1]);
+
+  EXPECT_TRUE(output.GetSwitchValues(kUnsetSwitch).empty());
+
+  ASSERT_EQ(1u, output.args().size());
+  EXPECT_EQ("MyArg", output.args()[0]);
+
+  // Long-only multi-value switch does not register a short character.
+  err = ParseCommandForTest("test-verb -t foo", verbs, &output);
+  EXPECT_TRUE(err.has_error());
+
+  // Multi-value switches require an argument on each occurrence.
+  err = ParseCommandForTest("test-verb -e first -e", verbs, &output);
+  EXPECT_TRUE(err.has_error());
+  EXPECT_EQ(
+      "Argument needed for \"-e\". Usage: "
+      "test-verb [ -s <val> ] [ -e <expr> ... ] [ --tag=<tag> ... ] <arg>",
+      err.msg());
 }
 
 TEST(CommandParser, Completions) {
@@ -328,5 +422,7 @@ TEST(CommandParser, Completions) {
   EXPECT_TRUE(CompletionContains(comp, "set language"));
   EXPECT_EQ(1u, comp.size());
 }
+
+}  // namespace
 
 }  // namespace zxdb

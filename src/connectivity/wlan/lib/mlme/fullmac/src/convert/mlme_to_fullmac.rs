@@ -7,6 +7,7 @@ use fidl_fuchsia_wlan_driver as fidl_driver_common;
 use fidl_fuchsia_wlan_fullmac as fidl_fullmac;
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_ieee80211::MAX_SSID_BYTE_LEN;
+use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_mlme as fidl_mlme;
 
 pub fn convert_scan_request(
@@ -51,11 +52,7 @@ pub fn convert_connect_request(
         wep_key: req.wep_key.clone().map(|key| convert_set_key_descriptor_legacy(&key)),
         security_ie: Some(req.security_ie),
         wep_key_desc: req.wep_key.map(|key| convert_set_key_descriptor(&key)),
-        owe_public_key: req.owe_public_key.map(|key| fidl_fullmac::WlanFullmacOwePublicKey {
-            group: Some(key.group),
-            key: Some(key.key),
-            ..Default::default()
-        }),
+        owe_public_key: req.owe_public_key.map(|key| convert_owe_public_key(*key)),
         ..Default::default()
     }
 }
@@ -65,6 +62,17 @@ pub fn convert_reconnect_request(
 ) -> fidl_fullmac::WlanFullmacImplReconnectRequest {
     fidl_fullmac::WlanFullmacImplReconnectRequest {
         peer_sta_address: Some(req.peer_sta_address),
+        owe_public_key: req.owe_public_key.map(|key| convert_owe_public_key(*key)),
+        ..Default::default()
+    }
+}
+
+fn convert_owe_public_key(
+    key: fidl_internal::OwePublicKey,
+) -> fidl_fullmac::WlanFullmacOwePublicKey {
+    fidl_fullmac::WlanFullmacOwePublicKey {
+        group: Some(key.group),
+        key: Some(key.key),
         ..Default::default()
     }
 }
@@ -336,7 +344,6 @@ pub fn convert_set_apf_packet_filter_enabled_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fidl_fuchsia_wlan_internal as fidl_internal;
 
     fn fake_bss_description() -> fidl_ieee80211::BssDescription {
         fidl_ieee80211::BssDescription {
@@ -465,6 +472,46 @@ mod tests {
                 auth_type: Some(fidl_fullmac::WlanAuthType::OpenSystem),
                 sae_password: Some(vec![]),
                 security_ie: Some(vec![]),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_convert_reconnect_request_no_owe_public_key() {
+        let mlme = fidl_mlme::ReconnectRequest {
+            peer_sta_address: [1, 2, 3, 4, 5, 6],
+            owe_public_key: None,
+        };
+
+        assert_eq!(
+            convert_reconnect_request(mlme),
+            fidl_fullmac::WlanFullmacImplReconnectRequest {
+                peer_sta_address: Some([1, 2, 3, 4, 5, 6]),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_convert_reconnect_request_with_owe_public_key() {
+        let mlme = fidl_mlme::ReconnectRequest {
+            peer_sta_address: [1, 2, 3, 4, 5, 6],
+            owe_public_key: Some(Box::new(fidl_internal::OwePublicKey {
+                group: 19,
+                key: vec![88, 99],
+            })),
+        };
+
+        assert_eq!(
+            convert_reconnect_request(mlme),
+            fidl_fullmac::WlanFullmacImplReconnectRequest {
+                peer_sta_address: Some([1, 2, 3, 4, 5, 6]),
+                owe_public_key: Some(fidl_fullmac::WlanFullmacOwePublicKey {
+                    group: Some(19),
+                    key: Some(vec![88, 99]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }
         );

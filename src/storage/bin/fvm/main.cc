@@ -475,8 +475,8 @@ int main(int argc, char** argv) {
       }
 
       auto decompressed_reader_or = storage::volume_image::FdReader::Create(tmp_path);
-      if (reader_or.is_error()) {
-        fprintf(stderr, "%s\n", reader_or.error().c_str());
+      if (decompressed_reader_or.is_error()) {
+        fprintf(stderr, "%s\n", decompressed_reader_or.error().c_str());
         return EXIT_FAILURE;
       }
       total_size = decompressed_reader_or.value().length() - header.header_length;

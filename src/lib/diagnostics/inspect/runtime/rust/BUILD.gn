@@ -2,105 +2,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_test.gni")
-
-# Kept in GN because `lib_test` depends on `//src/lib/fuchsia-component-test`
-# (which bundles the unmigrated GN-only
-# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`),
-# and `inspect_test_component_default` is depended on by the GN-only
-# `//src/lib/diagnostics/reader/rust:diagnostics-reader-tests` package.
-rustc_test("lib_test") {
-  output_name = "inspect_runtime_lib_test"
-  edition = "2024"
-
-  deps = [
-    "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
-    "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
-    "//sdk/rust/zx",
-    "//src/lib/diagnostics/hierarchy/rust",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/diagnostics/reader/rust",
-    "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component-test",
-    "//src/lib/fuchsia-component/client",
-    "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:assert_matches",
-    "//third_party/rust_crates:futures",
-    "//third_party/rust_crates:log",
-    "//third_party/rust_crates:pin-project",
-
-    # TODO(https://fxbug.dev/42161852): Remove this dep during post-migration cleanup.
-    "//src/sys/lib/component-events",
-  ]
-
-  if (current_build_target_api_level == "PLATFORM" ||
-      current_build_target_api_level == "HEAD") {
-    deps += [ "//third_party/rust_crates:thiserror" ]
-  }
-
-  sources = [
-    "src/lib.rs",
-    "src/service.rs",
-  ]
-
-  configs += [ "//build/config/rust/lints:clippy_warn_all" ]
-}
-
-fuchsia_unittest_package("inspect-runtime-tests") {
-  manifest = "meta/inspect_runtime_lib_test.cml"
-  deps = [
-    ":inspect_test_component",
-    ":lib_test",
-  ]
-}
-
-rustc_binary("inspect_test_component_bin") {
-  testonly = true
-  edition = "2024"
-  source_root = "test/main.rs"
-
-  deps = [
-    ":inspect_test_component_config_bindings",
-    "//src/lib/diagnostics/inspect/runtime/rust",
-    "//src/lib/diagnostics/inspect/rust",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//third_party/rust_crates:futures",
-  ]
-
-  sources = [ "test/main.rs" ]
-
-  configs += [ "//build/config/rust/lints:clippy_warn_all" ]
-}
-
-fuchsia_component_manifest("inspect_test_component_manifest") {
-  component_name = "inspect_test_component"
-  manifest = "meta/inspect_test_component.cml"
-}
-
-fuchsia_structured_config_rust_lib("inspect_test_component_config_bindings") {
-  cm_label = ":inspect_test_component_manifest"
-}
-
-fuchsia_component("inspect_test_component") {
-  testonly = true
-  deps = [ ":inspect_test_component_bin" ]
-  cm_label = ":inspect_test_component_manifest"
-}
-
-group("inspect_test_component_default") {
-  testonly = true
-  public_deps = [ ":inspect_test_component" ]
-}
-
 group("tests") {
   testonly = true
-  deps = [ ":inspect-runtime-tests" ]
+  deps = [ ":inspect-runtime-tests-package" ]
 }
 
 group("rust") {
@@ -170,4 +74,106 @@ rustc_library("lib") {
       current_build_target_api_level == "HEAD") {
     deps += [ "//third_party/rust_crates:thiserror" ]
   }
+}
+if (is_fuchsia) {
+  rustc_test("lib_test") {
+    sources = [
+      "src/lib.rs",
+      "src/service.rs",
+    ]
+    edition = "2024"
+    deps = []
+    deps += [
+      "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_rust",
+      "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+      "//sdk/rust/zx",
+      "//src/lib/diagnostics/inspect/rust",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component/client",
+      "//third_party/rust_crates:anyhow",
+      "//third_party/rust_crates:futures",
+      "//third_party/rust_crates:log",
+      "//third_party/rust_crates:pin-project",
+    ]
+    if (current_build_target_api_level == "PLATFORM" ||
+        current_build_target_api_level == "HEAD") {
+      deps += [ "//third_party/rust_crates:thiserror" ]
+    }
+    deps += [
+      "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+      "//src/lib/diagnostics/reader/rust",
+      "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-component-test",
+      "//src/sys/lib/component-events",
+      "//third_party/rust_crates:assert_matches",
+    ]
+    output_name = "inspect_runtime_lib_test"
+    lint_config = "//build/config/rust/lints:clippy_warn_all"
+  }
+}
+
+fuchsia_component_manifest("inspect-runtime-tests-manifest") {
+  testonly = true
+  component_name = "inspect-runtime-tests"
+  manifest = "meta/inspect_runtime_lib_test.cml"
+}
+
+fuchsia_test_component("inspect-runtime-tests-component") {
+  cm_label = ":inspect-runtime-tests-manifest"
+  deps = [ ":lib_test" ]
+}
+
+fuchsia_test_package("inspect-runtime-tests-package") {
+  package_name = "inspect-runtime-tests-gn"
+  test_components = [ ":inspect-runtime-tests-component" ]
+  deps = [
+    ":inspect_test_component",
+    "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+  ]
+}
+
+fuchsia_component_manifest("inspect_test_component_manifest") {
+  component_name = "inspect_test_component"
+  manifest = "meta/inspect_test_component.cml"
+}
+
+fuchsia_structured_config_rust_lib("inspect_test_component_config_bindings") {
+  cm_label = ":inspect_test_component_manifest"
+}
+
+rustc_binary("inspect_test_component_bin") {
+  testonly = true
+  sources = [ "test/main.rs" ]
+  source_root = "test/main.rs"
+  edition = "2024"
+  lint_config = "//build/config/rust/lints:clippy_warn_all"
+  deps = [
+    ":inspect_test_component_config_bindings",
+    "//src/lib/diagnostics/inspect/runtime/rust",
+    "//src/lib/diagnostics/inspect/rust",
+    "//src/lib/fuchsia",
+    "//src/lib/fuchsia-async",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+fuchsia_component("inspect_test_component") {
+  testonly = true
+  cm_label = ":inspect_test_component_manifest"
+  visibility = [
+    ":*",
+    "//src/lib/diagnostics/reader/rust:*",
+  ]
+  deps = [ ":inspect_test_component_bin" ]
+}
+
+group("inspect_test_component_default") {
+  testonly = true
+  public_deps = [ ":inspect_test_component" ]
+  visibility = [
+    ":*",
+    "//src/lib/diagnostics/reader/rust:*",
+  ]
 }

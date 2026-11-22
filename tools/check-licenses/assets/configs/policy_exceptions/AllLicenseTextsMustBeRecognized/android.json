@@ -2,8 +2,8 @@
     "policy_exceptions": {
         "AllLicenseTextsMustBeRecognized": [
             {
-                "bug": "TODO: b/missing",
-                "description": "Migrated from legacy _config.json",
+                "bug": "b/585200385",
+                "description": "Android platform repositories include empty marker files (MODULE_LICENSE_*) and notice generation scripts alongside their primary NOTICE/LICENSE files.",
                 "paths": [
                     "prebuilt/third_party/android/aemu/release-gfxstream/linux-x64/LICENSE",
                     "prebuilt/third_party/android/aemu/release-gfxstream/linux-x64/NOTICE.csv",

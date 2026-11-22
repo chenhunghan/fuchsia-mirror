@@ -19,6 +19,7 @@ func TestMassTestFailureCheck(t *testing.T) {
 			{Name: "test 1", Status: runtests.TestFailure},
 			{Name: "test 2", Status: runtests.TestAborted},
 			{Name: "test 3", Status: runtests.TestAborted},
+			{Name: "exonerated test", Status: runtests.TestExonerated},
 		},
 	}
 	to := TestingOutputs{

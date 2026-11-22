@@ -15,12 +15,10 @@
 namespace fdf_devicetree {
 
 zx::result<> PublisherHost::AddPbusNode(fuchsia_hardware_platform_bus::Node& pbus_node,
-                                        std::vector<std::optional<std::string>> metadata_text,
-                                        std::vector<std::optional<std::string>> power_config_text) {
+                                        std::vector<std::optional<std::string>> metadata_text) {
   pbus_nodes_.push_back(pbus_node);
-  pbus_nodes_with_metadata_.push_back({.node = std::move(pbus_node),
-                                       .metadata_text = std::move(metadata_text),
-                                       .power_config_text = std::move(power_config_text)});
+  pbus_nodes_with_metadata_.push_back(
+      {.node = std::move(pbus_node), .metadata_text = std::move(metadata_text)});
   return zx::ok();
 }
 

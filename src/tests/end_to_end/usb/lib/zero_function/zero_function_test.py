@@ -219,7 +219,7 @@ class ZeroFunctionBaseTestLifecycleTest(unittest.IsolatedAsyncioTestCase):
             log_status_on_failure=False,
             disable_controlmaster=True,
         )
-        dut.fuchsia_controller.after_usb_reconnect.assert_called_once()
+        dut.usb.after_connect.assert_called_once()
         mock_controller.unload_driver.assert_called_once()
 
     async def test_teardown_class_raises_if_restore_fails(self) -> None:

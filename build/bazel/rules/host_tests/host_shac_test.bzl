@@ -4,7 +4,7 @@
 
 """Macro for defining `host_test()` targets that run `shac test`."""
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load(":host_test.bzl", "host_test")
 
 def _host_shac_test_impl(name, visibility, src, data):
@@ -21,7 +21,7 @@ def _host_shac_test_impl(name, visibility, src, data):
             "//:prebuilt/tools/shac/shac",
             "//:shac.textproto",
         ],
-        target_compatible_with = HOST_CONSTRAINTS,
+        target_compatible_with = HOST_OS_CONSTRAINTS,
         # shac runs unmocked subprocesses in its own nsjail sandbox, which
         # can't create nested namespaces inside Bazel's linux-sandbox.
         tags = ["no-sandbox"],

@@ -10,6 +10,7 @@ use super::mmu::{
     ArmArchVmAspace, ArmAspaceType, ArmVmICacheConsistencyManager, PageAllocFn,
     aspace_type_from_flags,
 };
+use crate::kernel::types::PAddr;
 use crate::vm::arch_vm_aspace::{ExistingEntryAction, NonTerminalAction, TerminalAction};
 use crate::vm::page::VmPageDoublyLinkedList;
 use zx_status::Status;
@@ -134,25 +135,25 @@ unsafe extern "C" fn rust_arm64_aspace_destroy(aspace: &ArmArchVmAspace) -> Resu
 /// Maps `count` physical pages from `phys` at `vaddr`.
 ///
 /// # Safety
-/// When `count > 0 && !phys.is_null()`, `phys` must be aligned to `align_of::<u64>()` and valid
-/// for `count` reads of initialized `u64` physical addresses (`count > 0` requires non-null
+/// When `count > 0 && !phys.is_null()`, `phys` must be aligned to `align_of::<PAddr>()` and valid
+/// for `count` reads of initialized `PAddr` physical addresses (`count > 0` requires non-null
 /// `phys`), and mapping those pages at `vaddr` with `mmu_flags` and `existing_action` must satisfy
 /// `ArmArchVmAspace::map`.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn rust_arm64_aspace_map(
     aspace: &ArmArchVmAspace,
     vaddr: usize,
-    phys: *const u64,
+    phys: *const PAddr,
     count: usize,
     mmu_flags: u8,
     existing_action: ExistingEntryAction,
 ) -> Result<(), Status> {
-    let phys_slice: &[u64] = if count == 0 || phys.is_null() {
+    let phys_slice: &[PAddr] = if count == 0 || phys.is_null() {
         assert_eq!(count, 0, "null phys array with non-zero count");
         &[]
     } else {
-        // SAFETY: Caller guarantees `phys` is aligned to `align_of::<u64>()` and valid for `count`
-        // reads of initialized `u64` physical addresses.
+        // SAFETY: Caller guarantees `phys` is aligned to `align_of::<PAddr>()` and valid for
+        // `count` reads of initialized `PAddr` physical addresses.
         unsafe { core::slice::from_raw_parts(phys, count) }
     };
     // SAFETY: Caller upholds `ArmArchVmAspace::map` preconditions for `vaddr` and `phys_slice`.
@@ -336,12 +337,6 @@ unsafe extern "C" fn rust_arm64_aspace_handoff_page_tables_from_physboot(
         let pinned = core::pin::Pin::new_unchecked(&mut *mmu_pages);
         ArmArchVmAspace::handoff_page_tables_from_physboot(pinned);
     }
-}
-
-/// Forces subsequent `sync_addr` calls on `state` to clean data caches to PoC.
-#[unsafe(no_mangle)]
-extern "C" fn rust_arm64_icache_force_clean_to_poc(state: &mut ArmVmICacheConsistencyManager) {
-    state.force_clean_to_poc();
 }
 
 /// Cleans/invalidates caches across kernel virtual range `[start, start + len)`.

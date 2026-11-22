@@ -26,6 +26,10 @@ class MdnsTransceiver : public Mdns::Transceiver {
 
   ~MdnsTransceiver();
 
+  // Sets the network media on which interface transceivers may be started. Must be called before
+  // |Start|.
+  void SetEnabledMedia(Media enabled_media);
+
   //  Mdns::Transceiver implementation.
   void SetVerbose(bool verbose) override;
 
@@ -78,6 +82,7 @@ class MdnsTransceiver : public Mdns::Transceiver {
   // Determines if |address| identifies one of the NICs in |interface_transceivers_by_address_|.
   bool IsLocalInterfaceAddress(const inet::IpAddress& address);
 
+  Media enabled_media_ = Media::kBoth;
   fuchsia::net::interfaces::WatcherPtr interface_watcher_;
   fit::closure link_change_callback_;
   InboundMessageCallback inbound_message_callback_;

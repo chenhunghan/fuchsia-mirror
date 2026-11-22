@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+
+package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "launch_context_provider.shard",
+    includes = ["//sdk/lib/syslog:offer.shard"],
+    shard = "launch_context_provider.shard.cml",
+    visibility = ["//src/ui:__subpackages__"],
+)
+
+# `context_provider.cm` may be launched from "#realm_builder".
+# Does not cover use of fuchsia.web.ContextProvider.Create`.
+expect_includes(
+    name = "launch_context_provider",
+    includes = [":launch_context_provider.shard"],
+    visibility = [
+        "//src/ui/a11y/lib/semantics/tests:__pkg__",
+        "//src/ui/tests/integration_input_tests/virtual-keyboard:__pkg__",
+    ],
+)

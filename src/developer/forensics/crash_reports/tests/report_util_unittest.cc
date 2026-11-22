@@ -4,6 +4,8 @@
 
 #include "src/developer/forensics/crash_reports/report_util.h"
 
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
+
 #include <map>
 #include <string>
 
@@ -30,8 +32,8 @@ TEST(MakeReport, AddsSnapshotAnnotations) {
       {"snapshot_annotation_key", ErrorOrString("snapshot_annotation_value")},
   };
 
-  fuchsia::feedback::CrashReport crash_report;
-  crash_report.set_program_name("program_name");
+  fuchsia_feedback::CrashReport crash_report;
+  crash_report.program_name("program_name");
 
   Product product{
       .name = "product_name",
@@ -54,8 +56,8 @@ TEST(MakeReport, AddsCrashServerAnnotationsWithoutReportTime) {
       {feedback::kDeviceFeedbackIdKey, ErrorOrString("device_id")},
   };
 
-  fuchsia::feedback::CrashReport crash_report;
-  crash_report.set_program_name("program_name");
+  fuchsia_feedback::CrashReport crash_report;
+  crash_report.program_name("program_name");
 
   Product product{
       .name = "product_name",
@@ -81,8 +83,8 @@ TEST(MakeReport, AddsCrashServerAnnotationsWithReportTime) {
       {feedback::kDeviceFeedbackIdKey, ErrorOrString("device_id")},
   };
 
-  fuchsia::feedback::CrashReport crash_report;
-  crash_report.set_program_name("program_name");
+  fuchsia_feedback::CrashReport crash_report;
+  crash_report.program_name("program_name");
 
   Product product{
       .name = "product_name",
@@ -104,8 +106,8 @@ TEST(MakeReport, AddsCrashServerAnnotationsWithReportTime) {
 }
 
 TEST(MakeReport, AddsRequiredAnnotations) {
-  fuchsia::feedback::CrashReport crash_report;
-  crash_report.set_program_name("program_name");
+  fuchsia_feedback::CrashReport crash_report;
+  crash_report.program_name("program_name");
 
   Product product{
       .name = "product_name",
@@ -137,7 +139,6 @@ TEST(SnapshotAnnotationsTest, GetReportAnnotations_EmptySnapshotAnnotations) {
 
 TEST(SnapshotAnnotationsTest, GetReportAnnotations_Snapshot) {
   const feedback::Annotations startup_annotations = {
-      {feedback::kBuildVersionKey, ErrorOrString("version")},
       {feedback::kBuildPlatformVersionKey, ErrorOrString("platform-version")},
       {feedback::kSystemUpdateChannelCurrentKey, ErrorOrString("channel")},
       {feedback::kBuildBoardKey, ErrorOrString("board")},
@@ -151,7 +152,6 @@ TEST(SnapshotAnnotationsTest, GetReportAnnotations_Snapshot) {
               UnorderedElementsAreArray({
                   Pair(feedback::kOSVersionKey, "platform-version"),
                   Pair(feedback::kOSChannelKey, "channel"),
-                  Pair(feedback::kBuildVersionKey, "version"),
                   Pair(feedback::kBuildPlatformVersionKey, "platform-version"),
                   Pair(feedback::kSystemUpdateChannelCurrentKey, "channel"),
                   Pair(feedback::kBuildBoardKey, "board"),
@@ -180,9 +180,9 @@ TEST(SnapshotAnnotationsTest, GetReportAnnotations_Product) {
 }
 
 TEST(MakeReport, AddsWeight) {
-  fuchsia::feedback::CrashReport crash_report;
-  crash_report.set_program_name("program_name");
-  crash_report.set_weight(5);
+  fuchsia_feedback::CrashReport crash_report;
+  crash_report.program_name("program_name");
+  crash_report.weight(5);
 
   Product product{
       .name = "product_name",

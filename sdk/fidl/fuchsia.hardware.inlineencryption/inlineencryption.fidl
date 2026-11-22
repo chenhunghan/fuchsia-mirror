@@ -1,6 +1,8 @@
 // Copyright 2025 The Fuchsia Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
+// TODO(https://fxbug.dev/588524487): Make these open protocols with flexible methods.
 @available(added=HEAD)
 library fuchsia.hardware.inlineencryption;
 
@@ -48,9 +50,19 @@ closed protocol Device {
     }) error zx.Status;
 };
 
+/// Static capabilities reported by a hardware inline encryption controller.
+type ControllerProperties = table {
+    /// If true, indicates that this controller supports `Controller.RestoreKeys` which shall
+    /// re-import all active hardware wrapped keys after a power-down or reset clears the slots.
+    1: supports_restore_keys bool;
+};
+
 /// Protocol used between block drivers and hardware inline encryption controllers.
 @discoverable
 closed protocol Controller {
+    /// Returns the static capabilities of this controller.
+    strict GetProperties() -> (ControllerProperties);
+
     strict ProgramKeySlot(resource struct {
         wrapped_key vector<uint8>:MAX;
         data_unit_size uint32;
@@ -69,8 +81,9 @@ closed protocol Controller {
         slot uint8;
     }) -> () error zx.Status;
 
-    /// Re-imports active hardware-wrapped keys into the inline encryption engine after a host
-    /// controller power-down clears volatile keyslot registers.
+    /// Re-imports all active hardware wrapped keys into the inline encryption engine after a
+    /// host controller power-down. Callers should check the `supports_restore_keys` field
+    /// first via `GetProperties` to ensure that the controller supports key restoration.
     strict RestoreKeys() -> () error zx.Status;
 };
 

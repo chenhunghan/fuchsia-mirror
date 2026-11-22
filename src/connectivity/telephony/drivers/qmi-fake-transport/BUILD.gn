@@ -63,5 +63,4 @@ fuchsia_driver_component("fake_qmi_driver") {
     ":fake_qmi_driver-driver",
     ":qmi_fake_bind",
   ]
-  info = "meta/fake_qmi_driver-info.json"
 }

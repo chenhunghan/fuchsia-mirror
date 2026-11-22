@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Keep mypy enabled on the GN copy so downstream GN consumers that run mypy
+# continue receiving type information from `reporting`.
+# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+    name = "reporting",
+    testonly = True,
+    srcs = [
+        "__init__.py",
+        "metrics.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)

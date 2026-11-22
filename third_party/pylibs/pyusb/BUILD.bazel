@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# GN does not use per-package license() targets.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:BSD-3-Clause"],
+    license_text = "src/LICENSE",
+)
+
+py_library(
+    name = "pyusb",
+    srcs = [
+        "src/usb/__init__.py",
+        "src/usb/_debug.py",
+        "src/usb/_interop.py",
+        "src/usb/_lookup.py",
+        "src/usb/_objfinalizer.py",
+        "src/usb/backend/__init__.py",
+        "src/usb/backend/libusb0.py",
+        "src/usb/backend/libusb1.py",
+        "src/usb/backend/openusb.py",
+        "src/usb/control.py",
+        "src/usb/core.py",
+        "src/usb/legacy.py",
+        "src/usb/libloader.py",
+        "src/usb/util.py",
+    ],
+    imports = ["src"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//third_party/PyMonsoon:__pkg__",
+    ],
+)

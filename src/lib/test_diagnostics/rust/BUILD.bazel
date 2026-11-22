@@ -92,7 +92,6 @@ rustc_test(
 
 fx_unittest_package(
     name = "test_diagnostics_unittests",
-    package_name = "test_diagnostics_unittests",
     unit_tests = [":test_diagnostics_test"],
     visibility = ["//src/lib:__pkg__"],
 )

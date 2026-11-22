@@ -1,0 +1,343 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fidl_llcpp_dispatcher_handle_ownership_tests",
+        ":fidl_llcpp_flexible_tests",
+        ":fidl_llcpp_gen_api_tests",
+        ":fidl_llcpp_handle_raii_tests",
+        ":fidl_llcpp_handle_rights_tests",
+        ":fidl_llcpp_header_coding_tests",
+        ":fidl_llcpp_protocol_tests",
+        ":fidl_llcpp_unknown_interactions_tests",
+        ":fidl_llcpp_v2_integration_tests",
+        ":fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_test",
+    ],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "llcpptest.dispatcher.handle.ownership.test",
+    testonly = True,
+    srcs = ["dispatcher_handle_ownership.test.fidl"],
+    visibility = ["//src/lib/fidl/llcpp/tests:__subpackages__"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_dispatcher_handle_ownership_tests_bin",
+    srcs = ["dispatcher_handle_ownership_test.cc"],
+    deps = [
+        ":llcpptest.dispatcher.handle.ownership.test_cpp_testing",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_dispatcher_handle_ownership_tests",
+    unit_tests = [":fidl_llcpp_dispatcher_handle_ownership_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_unknown_interactions_tests_bin",
+    srcs = ["unknown_interactions_tests.cc"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/testing/fidl/protocols_tests:test.unknown.interactions_cpp_testing",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_unknown_interactions_tests",
+    unit_tests = [":fidl_llcpp_unknown_interactions_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_gen_api_tests_bin",
+    srcs = [
+        "client_gen_api_test.cc",
+        "server_gen_api_test.cc",
+        "sync_event_handler_test.cc",
+    ],
+    deps = [
+        ":fidl.test.coding.fuchsia_cpp_testing",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/testing/fidl/protocols_tests:test.basic.protocol_cpp",
+        "//sdk/testing/fidl/protocols_tests:test.basic.protocol_cpp_testing",
+        "//sdk/testing/fidl/protocols_tests:test.empty.protocol_cpp",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_gen_api_tests",
+    unit_tests = [":fidl_llcpp_gen_api_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "fidl.test.coding.fuchsia",
+    testonly = True,
+    srcs = ["llcpp.test.fidl"],
+    visibility = [
+        "//sdk/lib/fidl/cpp/tests:__subpackages__",
+        "//src/lib/fidl/contrib/tests:__subpackages__",
+        "//src/lib/fidl/llcpp/tests:__subpackages__",
+    ],
+)
+
+fidl_library(
+    name = "llcpptest.flexible.test",
+    testonly = True,
+    srcs = ["flexible.test.fidl"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_flexible_tests_bin",
+    srcs = ["flexible_test.cc"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    deps = [
+        ":llcpptest.flexible.test_cpp_testing",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fidl/llcpp/tests:types_test_utils",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_flexible_tests",
+    unit_tests = [":fidl_llcpp_flexible_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "llcpptest.handlerights.test",
+    testonly = True,
+    srcs = ["handle_rights.test.fidl"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_handle_rights_tests_bin",
+    srcs = ["handle_rights_test.cc"],
+    deps = [
+        ":llcpptest.handlerights.test_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fidl/llcpp/tests:types_test_utils",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_handle_rights_tests",
+    unit_tests = [":fidl_llcpp_handle_rights_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "llcpptest.protocol.test",
+    testonly = True,
+    srcs = ["protocol.test.fidl"],
+    visibility = ["//src/lib/fidl/llcpp/tests:__subpackages__"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_protocol_tests_bin",
+    srcs = [
+        "caller_allocating_test.cc",
+        "protocol_test.cc",
+        "sync_client_error_tests.cc",
+    ],
+    deps = [
+        ":llcpptest.protocol.test_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/testing/fidl/protocols_tests:test.empty.protocol_cpp",
+        "//sdk/testing/fidl/protocols_tests:test.error.methods_cpp",
+        "//src/lib/fidl/llcpp/tests:arena_checker",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_protocol_tests",
+    unit_tests = [":fidl_llcpp_protocol_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "llcpptest.handleraii.test",
+    testonly = True,
+    srcs = ["handle_raii.test.fidl"],
+    deps = ["//zircon/vdso/zx"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_handle_raii_tests_bin",
+    srcs = ["handle_raii_test.cc"],
+    deps = [
+        ":llcpptest.handleraii.test_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fidl/llcpp/tests:types_test_utils",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_handle_raii_tests",
+    unit_tests = [":fidl_llcpp_handle_raii_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fidl_library(
+    name = "llcpptest.v2integration.test",
+    testonly = True,
+    srcs = ["v2_integration.test.fidl"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_v2_integration_tests_bin",
+    srcs = ["v2_integration_test.cc"],
+    deps = [
+        ":llcpptest.v2integration.test_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_v2_integration_tests",
+    unit_tests = [":fidl_llcpp_v2_integration_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "fidl_llcpp_header_coding_tests_bin",
+    srcs = ["header_coding_test.cc"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/testing/fidl/protocols_tests:test.basic.protocol_cpp",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fidl_llcpp_header_coding_tests",
+    unit_tests = [":fidl_llcpp_header_coding_tests_bin"],
+    visibility = ["//src/lib:__pkg__"],
+)
+
+# TODO(https://fxbug.dev/503359085): Migrate to Bazel once
+# //sdk/lib/driver/testing/cpp and //src/devices/bin/driver_runtime
+# are available in Bazel.
+fx_cc_test_binary(
+    name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_bin",
+    srcs = ["zircon_channel_client_over_driver_dispatcher_test.cc"],
+    deps = [
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_cpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//sdk/testing/fidl/protocols_tests:test.empty.protocol_cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/sync:sync-cpp",
+        # TODO(https://fxbug.dev/447151364): Remove once idk_cc_shared_library
+        # propagates runtime_deps for //src/devices/bin/driver_runtime.
+        "//zircon/system/ulib/trace",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_packaged_bin",
+    testonly = True,
+    binary = ":fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_bin",
+    binary_name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_manifest",
+    component_name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:death_test.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests.cml",
+)
+
+fx_test_component(
+    name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_component",
+    compiled_manifest = ":fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_manifest",
+    deps = [":fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests",
+    testonly = True,
+    test_components = [":fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_component"],
+)
+
+fx_test(
+    name = "fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests_test",
+    package = ":fidl_llcpp_zircon_channel_client_over_driver_dispatcher_tests",
+)

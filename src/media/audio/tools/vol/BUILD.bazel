@@ -37,7 +37,6 @@ fx_packaged_binary(
 
 fx_package(
     name = "vol",
-    package_name = "vol",
     package_repository_name = "fuchsia.com",
     resources = [":bin_packaged"],
     visibility = ["//bundles/assembly:__subpackages__"],

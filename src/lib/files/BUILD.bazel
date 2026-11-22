@@ -46,7 +46,13 @@ cc_library(
         "//sdk/lib/fit",
         "//sdk/lib/utf-utils",
         "//src/lib/fxl:memory",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+            "//sdk/lib/fdio",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = [
         "//examples:__subpackages__",
         "//sdk/lib:__subpackages__",
@@ -62,7 +68,6 @@ cc_library(
     alwayslink = True,
 )
 
-# @bazel2gn:raw_attribute:deps += [ "//third_party/googletest:gmock" ]
 fx_cc_test_binary(
     name = "files_unittests",
     srcs = [
@@ -81,7 +86,13 @@ fx_cc_test_binary(
         "//src/lib/fxl:strings",
         "//src/lib/fxl/test:gtest_main",
         "@com_google_googletest//:gtest",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+            "//sdk/lib/fdio",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 fx_packaged_binary(

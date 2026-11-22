@@ -158,7 +158,6 @@ LINUX_FUNCVI(netif_stop_queue)
 LINUX_FUNCVI(cfg80211_crit_proto_stopped)
 LINUX_FUNCVI(cfg80211_check_combinations)
 LINUX_FUNCVI(cfg80211_connect_done)
-LINUX_FUNCVV(cfg80211_michael_mic_failure)
 LINUX_FUNCVI(netif_carrier_off)
 
 #define netdev_for_each_mc_addr(a, b) for (({BRCMF_INFO("Calling netdev_for_each_mc_addr"); \
@@ -174,11 +173,6 @@ enum {
     NETIF_F_IP_CSUM,
     CHECKSUM_PARTIAL,
     CHECKSUM_UNNECESSARY,
-};
-
-enum nl80211_key_type {
-    NL80211_KEYTYPE_GROUP,
-    NL80211_KEYTYPE_PAIRWISE,
 };
 
 struct brcmfmac_pd_cc_entry {

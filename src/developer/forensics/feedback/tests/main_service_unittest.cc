@@ -5,14 +5,22 @@
 #include "src/developer/forensics/feedback/main_service.h"
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/fidl.h>
+#include <fidl/fuchsia.hardware.power.statecontrol/cpp/test_base.h>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include "src/developer/forensics/feedback/reboot_log/graceful_shutdown_info.h"
+#include "src/developer/forensics/testing/stubs/fidl_server.h"
 #include "src/developer/forensics/testing/unit_test_fixture.h"
 #include "src/developer/forensics/utils/redact/redactor.h"
+#include "src/lib/files/file.h"
+#include "src/lib/files/path.h"
+#include "src/lib/files/scoped_temp_dir.h"
 #include "src/lib/fxl/strings/substitute.h"
 #include "src/lib/timekeeper/async_test_clock.h"
+#include "src/lib/timekeeper/test_clock.h"
 
 namespace forensics::feedback {
 namespace {
@@ -39,14 +47,12 @@ class MainServiceTest : public UnitTestFixture {
                       MainService::Options{
                           "",
                           "",
-                          "",
-                          /*enable_periodic_system_time_writes=*/false,
                           LastReboot::Options{
                               .is_first_instance = kIsFirstInstance,
                               .reboot_log = RebootLog(FinalShutdownInfo(FinalShutdownReason::kCold,
                                                                         /*uptime=*/zx::sec(100),
                                                                         /*runtime=*/zx::sec(90)),
-                                                      "reboot log"),
+                                                      "reboot log", /*uptime_from_logs=*/false),
                               .oom_crash_reporting_delay = zx::sec(1),
                           },
                           CrashReports::Options{
@@ -57,7 +63,6 @@ class MainServiceTest : public UnitTestFixture {
                           FeedbackData::Options{
                               .snapshot_config{},
                               .snapshot_exclusion_config{},
-                              .is_first_instance = kIsFirstInstance,
                               .limit_inspect_data = false,
                               .delete_previous_boot_logs_time = std::nullopt,
                           },
@@ -250,6 +255,102 @@ TEST_F(MainServiceTest, FeedbackData) {
                                            ProtocolMatcher("DataProvider", 1u, 0u),
                                        }))),
                              })));
+}
+
+class FakeShutdownWatcherRegister
+    : public stubs::SingleBindingFidlServer<
+          fuchsia_hardware_power_statecontrol::ShutdownWatcherRegister> {
+ public:
+  void RegisterWatcher(RegisterWatcherRequest& request,
+                       RegisterWatcherCompleter::Sync& completer) override {
+    watcher_ = std::move(request.watcher());
+    completer.Reply();
+  }
+
+  fidl::ClientEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> TakeWatcher() {
+    return std::move(watcher_);
+  }
+
+ private:
+  fidl::ClientEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> watcher_;
+};
+
+using MainServiceShutdownTest = UnitTestFixture;
+
+TEST_F(MainServiceShutdownTest, WritesGracefulShutdownInfo) {
+  FakeShutdownWatcherRegister shutdown_watcher_register;
+  InjectServiceProvider(&shutdown_watcher_register);
+
+  timekeeper::TestClock clock;
+  clock.SetBoot(zx::time_boot(zx::msec(2000).get()));
+  clock.SetMonotonic(zx::time_monotonic(zx::msec(1500).get()));
+
+  cobalt::Logger cobalt(dispatcher(), services(), &clock);
+  auto redactor = std::make_unique<forensics::IdentityRedactor>(inspect::BoolProperty());
+
+  files::ScopedTempDir tmp_dir;
+  const std::string graceful_shutdown_info_path =
+      files::JoinPath(tmp_dir.path(), "graceful_shutdown_info.json");
+
+  MainService main_service(
+      dispatcher(), services(), &clock, &InspectRoot(), &cobalt,
+      /*startup_annotations=*/{}, /*lifecycle_channel=*/{}, std::move(redactor),
+      MainService::Options{
+          /*local_device_id_path=*/"",
+          graceful_shutdown_info_path,
+          LastReboot::Options{
+              .is_first_instance = kIsFirstInstance,
+              .reboot_log = RebootLog(FinalShutdownInfo(FinalShutdownReason::kCold,
+                                                        /*uptime=*/zx::sec(100),
+                                                        /*runtime=*/zx::sec(90)),
+                                      "reboot log", /*uptime_from_logs=*/false),
+              .oom_crash_reporting_delay = zx::sec(1),
+          },
+          CrashReports::Options{
+              .build_type_config = BuildTypeConfig{},
+              .snapshot_store_max_archives_size = StorageSize::Bytes(0),
+              .snapshot_collector_window_duration = zx::sec(0),
+          },
+          FeedbackData::Options{
+              .snapshot_config = {},
+              .snapshot_exclusion_config = {},
+              .limit_inspect_data = false,
+              .delete_previous_boot_logs_time = std::nullopt,
+          },
+      });
+
+  RunLoopUntilIdle();
+
+  fidl::ClientEnd<fuchsia_hardware_power_statecontrol::ShutdownWatcher> watcher_client_end =
+      shutdown_watcher_register.TakeWatcher();
+  ASSERT_TRUE(watcher_client_end.is_valid());
+
+  fidl::Client watcher(std::move(watcher_client_end), dispatcher());
+  bool on_shutdown_responded = false;
+  watcher
+      ->OnShutdown({fuchsia_hardware_power_statecontrol::ShutdownOptions({
+          .action = fuchsia_hardware_power_statecontrol::ShutdownAction::kReboot,
+          .reasons = std::vector{fuchsia_hardware_power_statecontrol::ShutdownReason::kUserRequest},
+      })})
+      .Then(
+          [&on_shutdown_responded](
+              const fidl::Result<fuchsia_hardware_power_statecontrol::ShutdownWatcher::OnShutdown>&
+                  result) {
+            EXPECT_TRUE(result.is_ok());
+            on_shutdown_responded = true;
+          });
+
+  RunLoopUntilIdle();
+  EXPECT_TRUE(on_shutdown_responded);
+
+  std::string contents;
+  ASSERT_TRUE(files::ReadFileToString(graceful_shutdown_info_path, &contents));
+  EXPECT_EQ(FromJson(contents), (GracefulShutdownInfo{
+                                    .action = GracefulShutdownAction::kReboot,
+                                    .reasons = {GracefulShutdownReason::kUserRequest},
+                                    .uptime = zx::msec(2000),
+                                    .runtime = zx::msec(1500),
+                                }));
 }
 
 }  // namespace

@@ -2,10 +2,51 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
 package(default_applicable_licenses = ["//:license"])
 
+# TODO(https://fxbug.dev/570694755): bazel2gn translates alias() to group(),
+# while GN callers use config("kernel_library_config") maintained above the
+# sentinel in BUILD.gn.
+# @bazel2gn:skip
 alias(
     name = "kernel_library_config",
     actual = "//src/starnix/config:starnix_clippy_lints",
     visibility = ["//src/starnix:__subpackages__"],
+)
+
+py_binary(
+    name = "generate_container_config_component",
+    srcs = ["generate_container_config_component.py"],
+    main = "generate_container_config_component.py",
+    # Bazel only registers a host Python toolchain, and //third_party/pyjson5 is
+    # host-only.
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/starnix/tests/gvisor:__pkg__",
+        "//src/starnix/tests/remotevol:__subpackages__",
+        "//src/starnix/tests/syscalls/cpp:__pkg__",
+        "//src/storage/fshost/integration:__pkg__",
+        "//src/storage/fshost/testing:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = ["//third_party/pyjson5"],
+)
+
+py_binary(
+    name = "generate_container_config_shard",
+    srcs = ["generate_container_config_shard.py"],
+    main = "generate_container_config_shard.py",
+    # Bazel only registers a host Python toolchain, and //third_party/pyjson5 is
+    # host-only.
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/starnix/tests/gvisor:__pkg__",
+        "//src/starnix/tests/remotevol:__subpackages__",
+        "//src/starnix/tests/syscalls/cpp:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = ["//third_party/pyjson5"],
 )

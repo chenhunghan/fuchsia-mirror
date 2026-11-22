@@ -83,6 +83,15 @@ _TEMPLATE_SUBTARGET_SUFFIXES = {
     ],
 }
 
+# Target types that are excluded from being chosen as migration candidates.
+# TODO(https://fxbug.dev/583972572): Remove once support is implemented.
+_EXCLUDED_TARGET_TYPES = frozenset(
+    {
+        "fuchsia_cc_driver",
+        "fuchsia_rust_driver",
+    }
+)
+
 # Toolchain shorthands for convenience.
 _TOOLCHAIN_SHORTHANDS = {
     "host": "//build/toolchain:host_x64",
@@ -345,6 +354,10 @@ def targets_from_gn_file(
             continue
 
         target_type, target_name = match.group(1), match.group(2)
+        # Skip driver target types that cannot be migrated to Bazel.
+        # TODO(https://fxbug.dev/583972572): Remove once support is implemented.
+        if target_type in _EXCLUDED_TARGET_TYPES:
+            continue
         # Skip targets that are not in the target_types we care about.
         # It's still necessary to do previous parsing to extract shared variables.
         if target_types and target_type not in target_types:

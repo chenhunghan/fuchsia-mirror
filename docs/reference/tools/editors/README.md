@@ -22,7 +22,7 @@ your development setup, consider the following guides:
   base, you may want to exclude some directories from being watched for file
   changes.
 
-### fuchsia.code-workspace
+### fuchsia.code-workspace {#fuchsia-code-workspace}
 
 This file in the root directory of fuchsia.git contains recommended configuration
 defaults for using VS Code on Fuchsia. If you use this workspace file (either
@@ -89,7 +89,7 @@ Each language may have extra configuration. See more for
 ### Kakoune configuration
 
 For installation and usage information see
-[Kakoune for Fuchsia development][#kakoune].
+[Kakoune for Fuchsia development][kakoune].
 
 [vs-code-download]: https://code.visualstudio.com/docs/setup/setup-overview
 [settings-precedence]: https://code.visualstudio.com/docs/getstarted/settings#_settings-precedence

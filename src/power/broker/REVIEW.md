@@ -125,11 +125,18 @@ again) and blurs distinct states (`PoweringDown`, `deactivating`, `pending`, and
   enforced, and disorderly power-downs scope teardown to unsatisfied reverse
   branches).
 - In `tests/integration`, before asserting that an element did *not* receive a
-  `SetLevel` (`executor.run_until_stalled(&mut runner_next).is_pending()`),
-  reply with `assert_send_response_updates_level_to` so `Status.WatchPowerLevel`
-  proves the broker processed the reply (after consuming the initial immediate
-  `WatchPowerLevel` value). Hanging-get coalescing tests intentionally skip
-  intermediate `WatchPowerLevel` calls.
+  `SetLevel` (`TestElement::assert_no_set_level`, or
+  `executor.run_until_stalled(&mut runner_next).is_pending()`), reply with
+  `TestElement::complete_set_level` so `Status.WatchPowerLevel` proves the
+  broker processed the reply (after consuming the initial immediate
+  `WatchPowerLevel` value via `TestElementBuilder::build` or
+  `TestElement::accept_set_level`). Hanging-get coalescing tests intentionally
+  skip intermediate `WatchPowerLevel` calls.
+- Before point-in-time `TestLease::assert_satisfied` / `assert_pending` checks
+  following a broker-side transition, round-trip
+  `TestElement::current_power_level` so queued `LeaseToken` signal updates run
+  on Power Broker's executor, and use `TestLease::await_pending` (polling) to
+  wait for `Satisfied`-to-`Pending` transitions.
 - Use `>= 3` levels (`[0, 1, 2]`) when testing hanging-get coalescing, and use
   `TestExecutor::new_with_fake_time()` in `main.rs` `StuckDetector` unit tests
   rather than real-time sleeps.
@@ -138,28 +145,28 @@ again) and blurs distinct states (`PoweringDown`, `deactivating`, `pending`, and
 indexes retain no orphaned entries and that refactors preserve orderly and
 disorderly transition invariants. Because Power Broker runs as a child component
 in integration tests, sending a `SetLevel` reply only queues the FIDL message;
-a negative `run_until_stalled(&mut runner_next).is_pending()` check passes
-vacuously unless `WatchPowerLevel` confirms the broker processed the reply
-first. Two-state elements (`[0, 1]`) hide intermediate coalescing bugs, and fake
-time keeps multi-second watchdog unit tests fast and deterministic.
+a negative `assert_no_set_level` (`run_until_stalled(...).is_pending()`) check
+passes vacuously unless `WatchPowerLevel` confirms the broker processed the
+reply first. Two-state elements (`[0, 1]`) hide intermediate coalescing bugs,
+and fake time keeps multi-second watchdog unit tests fast and deterministic.
+`monitor_lease` updates `LEASE_SIGNAL_SATISFIED` from a separate broker task
+that can run after the `WatchPowerLevel` reply for the same transition, and
+Zircon cannot wait for a signal to clear, so sampling a `LeaseToken` without
+another round-trip or waiting on `OnSignals` for it to become pending is racy.
 
 ```rust
-// Bad: Checking that dependent_runner has no pending SetLevel right after
+// Bad: Checking that dependent has no pending SetLevel right after
 // responder.send() passes vacuously before the broker processes the reply.
-let responder =
-    assert_set_level_required_eq_and_return_responder(parent_runner.try_next(), 0).await;
+let responder = executor.run_singlethreaded(parent.expect_set_level(0));
 responder.send().expect("set_level resp failed");
-let mut dep_next = dependent_runner.try_next();
-assert!(executor.run_until_stalled(&mut dep_next).is_pending());
+dependent.assert_no_set_level(&mut executor);
 
-// Good: After consuming `parent_status`'s initial level during setup, await
-// WatchPowerLevel via assert_send_response_updates_level_to before the negative
-// run_until_stalled check.
-let responder =
-    assert_set_level_required_eq_and_return_responder(parent_runner.try_next(), 0).await;
-assert_send_response_updates_level_to(responder, &parent_status, 0).await;
-let mut dep_next = dependent_runner.try_next();
-assert!(executor.run_until_stalled(&mut dep_next).is_pending());
+// Good: After consuming `parent`'s initial level during setup, await
+// WatchPowerLevel via TestElement::complete_set_level before the negative
+// assert_no_set_level check.
+let responder = executor.run_singlethreaded(parent.expect_set_level(0));
+executor.run_singlethreaded(parent.complete_set_level(responder, 0));
+dependent.assert_no_set_level(&mut executor);
 ```
 
 *Provenance:

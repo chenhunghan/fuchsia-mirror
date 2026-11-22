@@ -100,8 +100,9 @@ TEST(Formatting, struct_ptr_types) {
   EXPECT_NAME_EQ("struct_ptr_level_0?", &struct_ptr_level_0_struct_pointer, 1024);
 }
 
-TEST(Formatting, xunion_types) {
-  EXPECT_NAME_EQ("fidl.test.coding/SampleXUnion", &fidl_test_coding_SampleXUnionTable, 1024);
+TEST(Formatting, union_types) {
+  EXPECT_NAME_EQ("fidl.test.coding/SampleFlexibleUnion", &fidl_test_coding_SampleFlexibleUnionTable,
+                 1024);
 }
 
 TEST(Formatting, table_types) {

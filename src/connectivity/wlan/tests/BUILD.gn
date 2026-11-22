@@ -2,9 +2,31 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//src/connectivity/wlan/tests/wlan_python_architecture_test.gni")
+
+if (is_host) {
+  wlan_python_architecture_test("architecture_test") {
+    main_source = "architecture_test.py"
+    tracked_gn_files = [
+      "//src/connectivity/wlan/tests/common/BUILD.gn",
+      "//src/connectivity/wlan/tests/core/BUILD.gn",
+      "//src/connectivity/wlan/tests/utils/BUILD.gn",
+      "//src/connectivity/wlan/tests/wlancfg/BUILD.gn",
+      "//src/connectivity/wlan/tests/wlancfg/wmm_testing/BUILD.gn",
+      "//src/connectivity/wlan/tests/wlanix/BUILD.gn",
+      "//src/connectivity/wlan/tests/wlanix/power/BUILD.gn",
+      "//src/connectivity/wlan/tests/wlanix/wlanix_testing/BUILD.gn",
+      "//src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/wlan_policy/tests/BUILD.gn",
+      "//src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/wlan_policy_ap/tests/BUILD.gn",
+    ]
+    extra_python_sources = [ "//src/testing/end_to_end/mobly_base_tests/fuchsia_wlan_base_test/__init__.py" ]
+  }
+}
+
 group("tests") {
   testonly = true
   deps = [
+    ":architecture_test($host_toolchain)",
     "drivers-only/fullmac-tests",
     "helpers/realm-factory:realm-factory-tests",
     "helpers/testcontroller-driver:tests",

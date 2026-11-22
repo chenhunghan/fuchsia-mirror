@@ -17,7 +17,7 @@
 // implemented.
 #define PAN_SYSREG s3_0_c4_c2_3
 
-// Saves register state into the psci_cpu_resume_context pointed to by
+// Saves register state into the PsciCpuResumeContext (psci.rs) pointed to by
 // \context_reg.  Clobbers x4-x17, so \context_reg must not be one of them.
 .macro save_resume_context context_reg
   mrs x4, daif
@@ -88,39 +88,43 @@
   stp x4, xzr, [\context_reg, (14 * 16)]
 .endm
 
-// int64_t psci_do_suspend(psci_call_proc psci_call_routine,
-//                         uint32_t power_state,
-//                         paddr_t entry,
-//                         psci_cpu_resume_context* context);
+// Declared in psci.rs as:
+// fn psci_do_suspend(psci_call: PsciCallProc,
+//                    power_state: u32,
+//                    entry: u64,
+//                    context: *mut PsciCpuResumeContext) -> i64;
 .function psci_do_suspend, global
-  // x0 - psci_call_routine
+  // x0 - psci_call
   // w1 - power_state
   // x2 - entry
   // x3 - context
   save_resume_context x3
 
-  // We're about to call psci_call_routine(PSCI64_CPU_SUSPEND, power_state,
+  // We're about to call psci_call(PSCI64_CPU_SUSPEND, power_state,
   // entry, context), which will either return or branch to |entry|.  Before
   // issuing the call, stash the lr on the stack so that we can restore it after
   // the PSCI call returns and then return to *our* caller.
   mov x5, x0
   movlit w0, PSCI64_CPU_SUSPEND
+  // Zero-extend power_state from w1 into x1 for PsciCallProc's u64 arg0.
+  mov w1, w1
   push_regs lr, xzr
   blr x5
   pop_regs lr, xzr
   ret
 .end_function
 
-// int64_t psci_do_system_suspend(psci_call_proc psci_call_routine,
-//                                paddr_t entry,
-//                                psci_cpu_resume_context* context);
+// Declared in psci.rs as:
+// fn psci_do_system_suspend(psci_call: PsciCallProc,
+//                           entry: u64,
+//                           context: *mut PsciCpuResumeContext) -> i64;
 .function psci_do_system_suspend, global
-  // x0 - psci_call_routine
+  // x0 - psci_call
   // x1 - entry
   // x2 - context
   save_resume_context x2
 
-  // We're about to call psci_call_routine(PSCI64_SYSTEM_SUSPEND, entry,
+  // We're about to call psci_call(PSCI64_SYSTEM_SUSPEND, entry,
   // context, 0), which will either return or branch to |entry|.  Before
   // issuing the call, stash the lr on the stack so that we can restore it after
   // the PSCI call returns and then return to *our* caller.
@@ -133,7 +137,10 @@
   ret
 .end_function
 
-// void psci_do_resume(psci_cpu_resume_context* context);
+// Not declared in Rust; called from secondary.S on the arm64_secondary_resume_start
+// path, with the PsciCpuResumeContext (psci.rs) that psci_do_suspend or
+// psci_do_system_suspend filled, as if declared:
+// fn psci_do_resume(context: *mut PsciCpuResumeContext);
 //
 // Caller is expected to have enabled caches and mmu (including setting up
 // ttbr0_el1, ttbr1_el1, mair_el1, tcr_el1), as well as spsel.

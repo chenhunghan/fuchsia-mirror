@@ -8,7 +8,6 @@
 #include <fidl/fuchsia.io/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async/cpp/task.h>
-#include <lib/sys/cpp/service_directory.h>
 
 #include <memory>
 #include <unordered_map>
@@ -134,18 +133,18 @@ class MetricsBuffer final : public std::enable_shared_from_this<MetricsBuffer> {
   // SetServiceDirectory() to enable and start logging.
   static std::shared_ptr<MetricsBuffer> Create(uint32_t project_id);
 
-  // !service_directory is ok.  If !service_directory, the instance will be a nop instance until
-  // SetServiceDirectory() is called.
+  // !service_directory.is_valid() is ok.  If !service_directory.is_valid(), the instance will be a
+  // nop instance until SetServiceDirectory() is called.
   static std::shared_ptr<MetricsBuffer> Create(
-      uint32_t project_id, std::shared_ptr<sys::ServiceDirectory> service_directory);
+      uint32_t project_id, fidl::ClientEnd<fuchsia_io::Directory> service_directory);
 
   ~MetricsBuffer() __TA_EXCLUDES(lock_);
 
-  // Set the ServiceDirectory from which to get fuchsia.metrics.MetricEventLoggerFactory.  This can
-  // be nullptr. This can be called again, regardless of whether there was already a previous
-  // ServiceDirectory. Previously-queued events may be lost (especially recently-queued events) when
-  // switching to a new ServiceDirectory.
-  void SetServiceDirectory(std::shared_ptr<sys::ServiceDirectory> service_directory)
+  // Set the service directory from which to get fuchsia.metrics.MetricEventLoggerFactory.  This can
+  // be an invalid ClientEnd. This can be called again, regardless of whether there was already a
+  // previous service directory. Previously-queued events may be lost (especially recently-queued
+  // events) when switching to a new service directory.
+  void SetServiceDirectory(fidl::ClientEnd<fuchsia_io::Directory> service_directory)
       __TA_EXCLUDES(lock_);
 
   // This specifies the minimum amount of time between logging batches to cobalt.  If enough
@@ -186,7 +185,7 @@ class MetricsBuffer final : public std::enable_shared_from_this<MetricsBuffer> {
 
   explicit MetricsBuffer(uint32_t project_id) __TA_EXCLUDES(lock_);
 
-  MetricsBuffer(uint32_t project_id, std::shared_ptr<sys::ServiceDirectory> service_directory)
+  MetricsBuffer(uint32_t project_id, fidl::ClientEnd<fuchsia_io::Directory> service_directory)
       __TA_EXCLUDES(lock_);
 
   class MetricKey {

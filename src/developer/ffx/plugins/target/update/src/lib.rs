@@ -1422,10 +1422,11 @@ mod tests {
 
     struct TestCommitObserver {
         events: Vec<CommitEvent>,
+        on_warning: Option<futures::channel::oneshot::Sender<()>>,
     }
     impl TestCommitObserver {
-        fn new() -> Self {
-            Self { events: vec![] }
+        fn new(on_warning: Option<futures::channel::oneshot::Sender<()>>) -> Self {
+            Self { events: vec![], on_warning }
         }
         fn take_events(&mut self) -> Vec<CommitEvent> {
             self.events.drain(..).collect()
@@ -1433,6 +1434,11 @@ mod tests {
     }
     impl CommitObserver for TestCommitObserver {
         fn on_event(&mut self, event: CommitEvent) -> std::io::Result<()> {
+            if event == CommitEvent::Warning
+                && let Some(tx) = self.on_warning.take()
+            {
+                let _ = tx.send(());
+            }
             self.events.push(event);
             Ok(())
         }
@@ -1441,6 +1447,8 @@ mod tests {
     #[fuchsia::test]
     async fn test_wait_for_commit() {
         let client = fdomain_local::local_client_empty();
+
+        // Commit completes before the warning duration expires.
         let client_clone = Arc::clone(&client);
         let proxy = fake_async_proxy(Arc::clone(&client), async move |req| {
             let CommitStatusProviderRequest::IsCurrentSystemCommitted { responder } = req;
@@ -1448,19 +1456,30 @@ mod tests {
             let (lhs, rhs) = client_clone.create_event_pair();
             let () = responder.send(lhs).unwrap();
 
-            fuchsia_async::Timer::new(Duration::from_millis(500)).await;
-
             let () = rhs.signal_peer(Signals::NONE, Signals::USER_0).await.unwrap();
-
-            ()
         });
-
-        let mut observer = TestCommitObserver::new();
-
-        handle_wait_for_commit(&proxy, &mut observer, Duration::from_millis(1000)).await.unwrap();
+        let mut observer = TestCommitObserver::new(None);
+        handle_wait_for_commit(&proxy, &mut observer, Duration::from_secs(60)).await.unwrap();
         assert_eq!(observer.take_events(), &[CommitEvent::Begin, CommitEvent::End]);
 
-        handle_wait_for_commit(&proxy, &mut observer, Duration::from_millis(50)).await.unwrap();
+        // Warning fires before commit completes.
+        let (warning_tx, warning_rx) = futures::channel::oneshot::channel();
+        let mut warning_rx = Some(warning_rx);
+        let client_clone = Arc::clone(&client);
+        let proxy = fake_async_proxy(Arc::clone(&client), async move |req| {
+            let CommitStatusProviderRequest::IsCurrentSystemCommitted { responder } = req;
+
+            let (lhs, rhs) = client_clone.create_event_pair();
+            let () = responder.send(lhs).unwrap();
+
+            if let Some(rx) = warning_rx.take() {
+                let _ = rx.await;
+            }
+
+            let () = rhs.signal_peer(Signals::NONE, Signals::USER_0).await.unwrap();
+        });
+        let mut observer = TestCommitObserver::new(Some(warning_tx));
+        handle_wait_for_commit(&proxy, &mut observer, Duration::from_millis(1)).await.unwrap();
         assert_eq!(
             observer.take_events(),
             &[CommitEvent::Begin, CommitEvent::Warning, CommitEvent::End]

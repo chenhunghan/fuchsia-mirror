@@ -103,6 +103,13 @@
 ##   --skip-auth-check        Bypass pre-flight build service authentication
 ##                            checks.
 ##
+##   --auth-mode=MODE         Authentication mode for remote build services
+##                            (RBE, ResultStore): 'auto' (default), 'user',
+##                            'machine' or 'none'. 'machine' uses the GCE
+##                            metadata server credentials of the host, e.g. on
+##                            a cloud VM without gcert or gcloud credentials.
+##                            Can also be set with FX_BUILD_AUTH_MODE.
+##
 ##   --resultstore[=VAL]      Enable uploading build events to ResultStore.
 ##                            VAL can be 'all', 'ninja', 'bazel', or 'none'.
 ##                            If VAL is omitted, 'all' is assumed.
@@ -132,6 +139,13 @@
 ##
 ##   --fidl                   Alias for --toolchain=fidl
 ##                            (incompatible with Bazel build mode)
+##
+##   --export-test-package=PATH
+##                            With --fuchsia_platform, also export the Bazel
+##                            test package manifest PATH (relative to the build
+##                            directory) after building, even if it's not in
+##                            bazel_test_packages.list. `fx test` uses this for
+##                            tests that aren't in tests.json.
 ##
 ##   -- [ARGS...]             Pass all following arguments directly to Ninja or
 ##                            Bazel.
@@ -341,6 +355,7 @@ function _array_to_json_list {
 
 function main {
   local gn_targets=() extra_switches=() bazel_targets=() fx_gen_switches=()
+  local export_test_packages=()
   local log_file is_logging fint_params_path
   local no_checks
   local verbose
@@ -415,6 +430,19 @@ function main {
 
       --skip-auth-check)
         skip_auth_check=1
+        ;;
+
+      --auth-mode)
+        if [[ $# -lt 2 ]]; then
+          fx-error "Missing --auth-mode argument, see --help."
+          return 1
+        fi
+        extra_switches+=("$1" "$2")
+        shift
+        ;;
+
+      --auth-mode=*)
+        extra_switches+=("$1")
         ;;
 
       --resultstore)
@@ -495,6 +523,11 @@ function main {
       --fuchsia_platform)
         assert_build_mode "bazel"
         extra_switches+=("--config=fuchsia_platform")
+        ;;
+
+      --export-test-package=*)
+        assert_build_mode "bazel"
+        export_test_packages+=(--extra-manifest "${1#--*=}")
         ;;
 
       --config=*)
@@ -699,6 +732,11 @@ function main {
       fi
     done
 
+    if [[ "${#export_test_packages[@]}" -gt 0 && -z "${has_bazel_fuchsia_platform_flag}" ]]; then
+      fx-error "--export-test-package requires --fuchsia_platform."
+      exit 1
+    fi
+
     local gn_targets_dir
     if [[ -n "${has_bazel_host_flag}" || -n "${has_bazel_fuchsia_platform_flag}" ]]; then
       # Expose the gn_targets inputs declared on //build/bazel/{target,host}_tests
@@ -754,6 +792,17 @@ function main {
     exit-with-message
   fi
 
+  case "${FX_BUILD_AUTH_MODE:-auto}" in
+    auto|user) ;;
+    # Machine credentials come from the host's metadata server, and 'none'
+    # uses no credentials: neither needs the user credential preflight.
+    machine|none) skip_auth_check=1 ;;
+    *)
+      fx-error "Invalid auth mode '${FX_BUILD_AUTH_MODE}', expected one of: auto, user, machine, none."
+      return 1
+      ;;
+  esac
+
   # When using any remote build services, do a quick authentication
   # check before starting the build.
   if [[ "$skip_auth_check" == 0 ]]; then
@@ -780,7 +829,10 @@ function main {
       if [[ -n "${has_bazel_fuchsia_platform_flag}" ]]; then
         ninja_targets+=(
           phony/zircon/public/sysroot_sdk/sysroot_for_fuchsia_platform
-          phony/build/bazel/target_tests/target_tests.bazel_inputs
+          # Use GN's label alias rather than the phony/ path: GN omits the
+          # phony/ target when the group has no deps, while always emitting
+          # the label alias.
+          build/bazel/target_tests:target_tests.bazel_inputs
         )
       fi
       if [[ -n "${has_bazel_host_flag}" ]]; then
@@ -849,7 +901,8 @@ function main {
         "${FUCHSIA_DIR}/scripts/fuchsia-vendored-python" -S \
           "${FUCHSIA_DIR}/build/bazel/scripts/bazel_test_packages.py" \
           --ninja-build-dir "${FUCHSIA_BUILD_DIR}" \
-          --incremental
+          --incremental \
+          "${export_test_packages[@]}"
         status=$?
       fi
 

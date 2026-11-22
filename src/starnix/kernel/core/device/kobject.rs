@@ -14,9 +14,9 @@ use derivative::Derivative;
 use starnix_logging::track_stub;
 use starnix_rcu::{RcuHashMap, RcuReadScope};
 use starnix_uapi::device_id::DeviceId;
+use starnix_uapi::error;
 use starnix_uapi::errors::Errno;
 use starnix_uapi::open_flags::OpenFlags;
-use starnix_uapi::{errno, error};
 use std::sync::{Arc, Weak};
 
 /// Higher-level view of a device.
@@ -145,12 +145,17 @@ impl Device {
     }
 
     pub fn dir(&self) -> Option<Arc<SimpleDirectory>> {
+        self.dir.upgrade().filter(|dir| !dir.is_removed())
+    }
+
+    #[cfg(test)]
+    pub(super) fn raw_dir(&self) -> Option<Arc<SimpleDirectory>> {
         self.dir.upgrade()
     }
 
     /// Modifies this device's sysfs directory if the device is still registered in sysfs.
     pub fn edit_dir(&self, kernel: &Kernel, callback: impl FnOnce(&SimpleDirectoryMutator)) {
-        if let Some(dir) = self.dir.upgrade() {
+        if let Some(dir) = self.dir() {
             dir.edit(kernel.device_registry.objects.fs(), callback);
         }
     }
@@ -172,28 +177,74 @@ impl Device {
         Self::glue_dir_name_for(self.parent(), self.subsystem())
     }
 
+    /// Path components from this device up to (and including) `"devices"` under the sysfs root,
+    /// ordered from leaf to root.
+    fn path_components(&self) -> impl Iterator<Item = &FsStr> {
+        std::iter::successors(Some(self), |dev| dev.parent())
+            .flat_map(|dev| std::iter::once(dev.name()).chain(dev.glue_dir_name()))
+            .chain(std::iter::once(FsStr::new(b"devices")))
+    }
+
     /// Relative path to the device from a directory `depth` levels below the sysfs root.
     pub fn path_from_depth(&self, depth: usize) -> FsString {
         let mut builder = PathBuilder::new();
-        for current in std::iter::successors(Some(self), |dev| dev.parent()) {
-            builder.prepend_element(current.name());
-            if let Some(glue_dir) = current.glue_dir_name() {
-                builder.prepend_element(glue_dir);
-            }
+        for component in self.path_components() {
+            builder.prepend_element(component);
         }
-        builder.prepend_element(b"devices".into());
         for _ in 0..depth {
             builder.prepend_element(b"..".into());
         }
         builder.build_relative()
     }
 
-    pub fn uevent_properties(&self, separator: char) -> FsString {
-        let props = self.get_uevent_properties_list();
-        flatten_uevent_properties(props, separator)
+    /// Relative target path for this device's `subsystem` symlink
+    /// (`/sys/devices/.../<dev>/subsystem`), or `None` if the device is not associated with a bus
+    /// or class subsystem.
+    pub(super) fn subsystem_symlink_target(&self) -> Option<FsString> {
+        let subsystem = self.subsystem()?;
+        let mut builder = PathBuilder::new();
+        builder.prepend_element(subsystem.name());
+        match subsystem {
+            Subsystem::Bus(_) => builder.prepend_element(b"bus".into()),
+            Subsystem::Class(_) => builder.prepend_element(b"class".into()),
+        }
+        for _ in self.path_components() {
+            builder.prepend_element(b"..".into());
+        }
+        Some(builder.build_relative())
     }
 
-    pub fn get_uevent_properties_list(&self) -> UEventProperties {
+    // Linux uses the name "uevent" for two distinct interfaces:
+    // 1. Live event broadcasts on `NETLINK_KOBJECT_UEVENT` sockets
+    //    (`get_netlink_uevent_properties_list`), which wrap the device's properties in a routing
+    //    envelope (`ACTION`, `SEQNUM`, `DEVPATH`, `SUBSYSTEM`, and `SYNTH_UUID`) so socket
+    //    listeners can identify which device and subsystem the event applies to.
+    // 2. The per-device `/sys/.../uevent` file (`get_sysfs_uevent_properties_list`): writing an
+    //    action name to it triggers a synthetic netlink broadcast, whereas reading from it returns
+    //    only the device's own static metadata (`MAJOR`, `MINOR`, `DEVNAME`, `DEVTYPE`, and
+    //    subsystem-provided properties) without the netlink routing headers.
+
+    /// Returns the device's own static `KEY=VALUE` metadata exposed when reading `/sys/.../uevent`
+    /// (omitting netlink broadcast headers such as `DEVPATH`, `SUBSYSTEM`, and `SYNTH_UUID`).
+    fn get_sysfs_uevent_properties_list(&self) -> UEventProperties {
+        let mut props = vec![];
+
+        if let Some(metadata) = &self.metadata {
+            props.push((b"MAJOR".into(), metadata.devt.major().to_string().into()));
+            props.push((b"MINOR".into(), metadata.devt.minor().to_string().into()));
+            props.push((b"DEVNAME".into(), metadata.devname.clone()));
+            let scope = RcuReadScope::new();
+            for (key, value) in metadata.properties.iter(&scope) {
+                props.push((key.clone(), value.clone()));
+            }
+        }
+
+        props
+    }
+
+    /// Returns the `KEY=VALUE` properties for a `NETLINK_KOBJECT_UEVENT` broadcast message
+    /// (excluding per-dispatch `ACTION` and `SEQNUM`, which the netlink listener prepends).
+    pub fn get_netlink_uevent_properties_list(&self) -> UEventProperties {
         let mut props = vec![];
 
         // TODO(https://fxbug.dev/42078277): Pass the synthetic UUID when available.
@@ -208,15 +259,9 @@ impl Device {
             props.push((b"SUBSYSTEM".into(), subsystem.name().to_owned()));
         }
 
-        if let Some(metadata) = &self.metadata {
-            props.push((b"DEVNAME".into(), metadata.devname.clone()));
+        if self.metadata.is_some() {
             props.push((b"SYNTH_UUID".into(), b"0".into()));
-            props.push((b"MAJOR".into(), metadata.devt.major().to_string().into()));
-            props.push((b"MINOR".into(), metadata.devt.minor().to_string().into()));
-            let scope = RcuReadScope::new();
-            for (key, value) in metadata.properties.iter(&scope) {
-                props.push((key.clone(), value.clone()));
-            }
+            props.extend(self.get_sysfs_uevent_properties_list());
         }
 
         props
@@ -305,9 +350,9 @@ impl FileOps for UEventFile {
         offset: usize,
         data: &mut dyn OutputBuffer,
     ) -> Result<usize, Errno> {
-        let content = self.device.uevent_properties('\n');
-        let content_bytes: &[u8] = content.as_ref();
-        data.write(content_bytes.get(offset..).ok_or_else(|| errno!(EINVAL))?)
+        let content =
+            flatten_uevent_properties(self.device.get_sysfs_uevent_properties_list(), '\n');
+        data.write_tail(content.as_ref(), offset)
     }
 
     fn write(
@@ -422,13 +467,20 @@ mod tests {
         );
 
         assert_eq!(
-            device.uevent_properties('\n'),
+            flatten_uevent_properties(device.get_netlink_uevent_properties_list(), '\n'),
             b"DEVPATH=/devices/bus_dev/class/device\n\
              SUBSYSTEM=class\n\
-             DEVNAME=devname\n\
              SYNTH_UUID=0\n\
              MAJOR=1\n\
              MINOR=2\n\
+             DEVNAME=devname\n\
+             DEVTYPE=disk\n"
+        );
+        assert_eq!(
+            flatten_uevent_properties(device.get_sysfs_uevent_properties_list(), '\n'),
+            b"MAJOR=1\n\
+             MINOR=2\n\
+             DEVNAME=devname\n\
              DEVTYPE=disk\n"
         );
     }
@@ -455,13 +507,19 @@ mod tests {
         );
 
         assert_eq!(
-            device.uevent_properties('\n'),
+            flatten_uevent_properties(device.get_netlink_uevent_properties_list(), '\n'),
             b"DEVPATH=/devices/bus_dev/class/device\n\
              SUBSYSTEM=class\n\
-             DEVNAME=devname\n\
              SYNTH_UUID=0\n\
              MAJOR=1\n\
-             MINOR=2\n"
+             MINOR=2\n\
+             DEVNAME=devname\n"
+        );
+        assert_eq!(
+            flatten_uevent_properties(device.get_sysfs_uevent_properties_list(), '\n'),
+            b"MAJOR=1\n\
+             MINOR=2\n\
+             DEVNAME=devname\n"
         );
     }
 
@@ -476,7 +534,15 @@ mod tests {
             dir.clone(),
         );
         assert_eq!(root_device.path_from_depth(0), b"devices/platform");
-        assert_eq!(root_device.uevent_properties('\n'), b"DEVPATH=/devices/platform\n");
+        assert_eq!(root_device.subsystem_symlink_target(), None);
+        assert_eq!(
+            flatten_uevent_properties(root_device.get_netlink_uevent_properties_list(), '\n'),
+            b"DEVPATH=/devices/platform\n"
+        );
+        assert_eq!(
+            flatten_uevent_properties(root_device.get_sysfs_uevent_properties_list(), '\n'),
+            b""
+        );
 
         let platform_bus = Bus::new("platform".into(), SimpleDirectory::new());
         let soc_device = Device::new(
@@ -488,10 +554,15 @@ mod tests {
         );
         assert_eq!(soc_device.path_from_depth(0), b"devices/platform/soc");
         assert_eq!(soc_device.path_from_depth(3), b"../../../devices/platform/soc");
+        assert_eq!(soc_device.subsystem_symlink_target(), Some("../../../bus/platform".into()));
         assert_eq!(
-            soc_device.uevent_properties('\n'),
+            flatten_uevent_properties(soc_device.get_netlink_uevent_properties_list(), '\n'),
             b"DEVPATH=/devices/platform/soc\n\
              SUBSYSTEM=platform\n"
+        );
+        assert_eq!(
+            flatten_uevent_properties(soc_device.get_sysfs_uevent_properties_list(), '\n'),
+            b""
         );
 
         let drm_class = Class::new("drm".into(), SimpleDirectory::new());
@@ -503,6 +574,7 @@ mod tests {
             dir.clone(),
         );
         assert_eq!(card0.path_from_depth(0), b"devices/platform/soc/drm/card0");
+        assert_eq!(card0.subsystem_symlink_target(), Some("../../../../../class/drm".into()));
 
         let connector = Device::new(
             "sde-conn-0-DSI-1".into(),
@@ -516,9 +588,17 @@ mod tests {
             b"devices/platform/soc/drm/card0/sde-conn-0-DSI-1"
         );
         assert_eq!(
-            connector.uevent_properties('\n'),
+            connector.subsystem_symlink_target(),
+            Some("../../../../../../class/drm".into())
+        );
+        assert_eq!(
+            flatten_uevent_properties(connector.get_netlink_uevent_properties_list(), '\n'),
             b"DEVPATH=/devices/platform/soc/drm/card0/sde-conn-0-DSI-1\n\
              SUBSYSTEM=drm\n"
+        );
+        assert_eq!(
+            flatten_uevent_properties(connector.get_sysfs_uevent_properties_list(), '\n'),
+            b""
         );
 
         // Bus device parented under a class device does not insert a glue directory,
@@ -531,6 +611,10 @@ mod tests {
             dir.clone(),
         );
         assert_eq!(child_bus_dev.path_from_depth(0), b"devices/platform/soc/drm/card0/aux_dev");
+        assert_eq!(
+            child_bus_dev.subsystem_symlink_target(),
+            Some("../../../../../../bus/platform".into())
+        );
 
         let wakeup_class = Class::new("wakeup".into(), SimpleDirectory::new());
         let grandchild_class_dev = Device::new(
@@ -544,10 +628,14 @@ mod tests {
             grandchild_class_dev.path_from_depth(0),
             b"devices/platform/soc/drm/card0/aux_dev/wakeup/wakeup0"
         );
+        assert_eq!(
+            grandchild_class_dev.subsystem_symlink_target(),
+            Some("../../../../../../../../class/wakeup".into())
+        );
     }
 
     #[::fuchsia::test]
-    fn test_get_uevent_properties_list() {
+    fn test_get_netlink_uevent_properties_list() {
         let virtual_device = Device::new(
             "virtual".into(),
             /* parent = */ None,
@@ -566,11 +654,11 @@ mod tests {
             SimpleDirectory::new(),
         );
 
-        let props = device.get_uevent_properties_list();
+        let props = device.get_netlink_uevent_properties_list();
 
-        // Now we have metadata, so we expect more properties (DEVNAME, SYNTH_UUID, MAJOR, MINOR).
+        // Now we have metadata, so we expect more properties (SYNTH_UUID, MAJOR, MINOR, DEVNAME).
         // Original count was 2 (DEVPATH, SUBSYSTEM).
-        // Now we add: DEVNAME, SYNTH_UUID, MAJOR, MINOR. Total 6.
+        // Now we add: SYNTH_UUID, MAJOR, MINOR, DEVNAME. Total 6.
         assert_eq!(props.len(), 6);
         assert_eq!(props[0], ("DEVPATH".into(), "/devices/virtual/android_usb/android0".into()));
         assert_eq!(props[1], ("SUBSYSTEM".into(), "android_usb".into()));
@@ -580,7 +668,7 @@ mod tests {
         properties.insert("ABC".into(), "XYZ".into());
         properties.insert("FOO".into(), "BAR".into());
 
-        let mut props = device.get_uevent_properties_list();
+        let mut props = device.get_netlink_uevent_properties_list();
 
         assert_eq!(props.len(), 9);
         // The properties from the metadata HashMap are in non-deterministic order.

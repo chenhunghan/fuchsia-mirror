@@ -1,0 +1,585 @@
+[
+  {
+    "FileSummary": {
+      "File": "test_readelf_output.so",
+      "Format": "elf64-x86-64",
+      "Arch": "x86_64",
+      "AddressSize": "64bit",
+      "LoadName": "<Not found>"
+    },
+    "DynamicSymbols": [
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "",
+            "Value": 0
+          },
+          "Value": 0,
+          "Size": 0,
+          "Binding": {
+            "Name": "Local",
+            "Value": 0
+          },
+          "Type": {
+            "Name": "None",
+            "Value": 0
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": "Undefined",
+            "Value": 0
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "external_function",
+            "Value": 29
+          },
+          "Value": 0,
+          "Size": 0,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "None",
+            "Value": 0
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": "Undefined",
+            "Value": 0
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "rec_b",
+            "Value": 19
+          },
+          "Value": 5856,
+          "Size": 60,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "vla",
+            "Value": 25
+          },
+          "Value": 5920,
+          "Size": 61,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "add",
+            "Value": 47
+          },
+          "Value": 5984,
+          "Size": 70,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "helper_alias",
+            "Value": 74
+          },
+          "Value": 5712,
+          "Size": 77,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "leaf",
+            "Value": 1
+          },
+          "Value": 5632,
+          "Size": 72,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "helper",
+            "Value": 6
+          },
+          "Value": 5712,
+          "Size": 77,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "rec_a",
+            "Value": 13
+          },
+          "Value": 5792,
+          "Size": 61,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "mul",
+            "Value": 51
+          },
+          "Value": 6064,
+          "Size": 70,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "call_through",
+            "Value": 55
+          },
+          "Value": 6144,
+          "Size": 94,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      },
+      {
+        "Symbol": {
+          "Name": {
+            "Name": "entry",
+            "Value": 68
+          },
+          "Value": 6240,
+          "Size": 188,
+          "Binding": {
+            "Name": "Global",
+            "Value": 1
+          },
+          "Type": {
+            "Name": "Function",
+            "Value": 2
+          },
+          "Other": {
+            "Value": 0,
+            "Flags": []
+          },
+          "Section": {
+            "Name": ".text",
+            "Value": 9
+          }
+        }
+      }
+    ],
+    "CallGraph": [
+      {
+        "Function": {
+          "Names": [
+            "leaf"
+          ],
+          "Address": 5632,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 5174074510188755522,
+          "DirectCallees": [],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "helper",
+            "helper_alias"
+          ],
+          "Address": 5712,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 5174074510188755522,
+          "DirectCallees": [
+            {
+              "Names": [
+                "leaf"
+              ],
+              "Address": 5632
+            }
+          ],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "rec_a"
+          ],
+          "Address": 5792,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 5174074510188755522,
+          "DirectCallees": [
+            {
+              "Names": [
+                "rec_b"
+              ],
+              "Address": 5856
+            },
+            {
+              "Names": [
+                "leaf"
+              ],
+              "Address": 5632
+            }
+          ],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "rec_b"
+          ],
+          "Address": 5856,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 5174074510188755522,
+          "DirectCallees": [
+            {
+              "Names": [
+                "rec_a"
+              ],
+              "Address": 5792
+            },
+            {
+              "Names": [
+                "leaf"
+              ],
+              "Address": 5632
+            }
+          ],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "vla"
+          ],
+          "Address": 5920,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 5174074510188755522,
+          "DirectCallees": [
+            {
+              "Address": 0
+            }
+          ],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "add"
+          ],
+          "Address": 5984,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 7851337950398898133,
+          "DirectCallees": [],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "mul"
+          ],
+          "Address": 6064,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 7851337950398898133,
+          "DirectCallees": [],
+          "IndirectTypeIDs": []
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "call_through"
+          ],
+          "Address": 6144,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 9378441996248313636,
+          "DirectCallees": [],
+          "IndirectTypeIDs": [
+            7851337950398898133
+          ]
+        }
+      },
+      {
+        "Function": {
+          "Names": [
+            "entry"
+          ],
+          "Address": 6240,
+          "Version": 0,
+          "IsIndirectTarget": true,
+          "TypeID": 5174074510188755522,
+          "DirectCallees": [
+            {
+              "Names": [
+                "helper",
+                "helper_alias"
+              ],
+              "Address": 5712
+            },
+            {
+              "Names": [
+                "rec_a"
+              ],
+              "Address": 5792
+            },
+            {
+              "Names": [
+                "vla"
+              ],
+              "Address": 5920
+            },
+            {
+              "Names": [
+                "call_through"
+              ],
+              "Address": 6144
+            }
+          ],
+          "IndirectTypeIDs": []
+        }
+      }
+    ],
+    "StackSizes": [
+      {
+        "Entry": {
+          "Functions": [
+            "leaf"
+          ],
+          "Address": 5632,
+          "Size": 24
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "helper",
+            "helper_alias"
+          ],
+          "Address": 5712,
+          "Size": 40
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "rec_a"
+          ],
+          "Address": 5792,
+          "Size": 24
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "rec_b"
+          ],
+          "Address": 5856,
+          "Size": 40
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "add"
+          ],
+          "Address": 5984,
+          "Size": 40
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "mul"
+          ],
+          "Address": 6064,
+          "Size": 72
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "call_through"
+          ],
+          "Address": 6144,
+          "Size": 56
+        }
+      },
+      {
+        "Entry": {
+          "Functions": [
+            "entry"
+          ],
+          "Address": 6240,
+          "Size": 152
+        }
+      }
+    ]
+  }
+]

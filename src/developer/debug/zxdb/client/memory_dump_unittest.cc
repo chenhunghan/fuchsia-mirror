@@ -37,12 +37,12 @@ TEST(MemoryDump, Valid) {
 
   // Invalid block.
   input[0].address = begin1;
-  input[0].size = begin2 - begin1;
+  input[0].size = static_cast<uint32_t>(begin2 - begin1);
   input[0].valid = false;
 
   // Valid block filled with cycling bytes.
   input[1].address = begin2;
-  input[1].size = begin3 - begin2;
+  input[1].size = static_cast<uint32_t>(begin3 - begin2);
   input[1].valid = true;
   for (uint64_t i = 0; i < input[1].size; i++) {
     input[1].data.push_back(static_cast<uint8_t>(i % 0x100));
@@ -50,7 +50,7 @@ TEST(MemoryDump, Valid) {
 
   // Invalid block.
   input[2].address = begin3;
-  input[2].size = end - begin3;
+  input[2].size = static_cast<uint32_t>(end - begin3);
   input[2].valid = false;
 
   MemoryDump dump(std::move(input));
@@ -114,21 +114,21 @@ TEST(MemoryDump, ReadBytes) {
 
   // Valid blocks filled with cycling bytes.
   input[0].address = begin1;
-  input[0].size = begin2 - begin1;
+  input[0].size = static_cast<uint32_t>(begin2 - begin1);
   input[0].valid = true;
   for (uint64_t i = 0; i < input[0].size; i++) {
     input[0].data.push_back(static_cast<uint8_t>(i % 0x100));
   }
 
   input[1].address = begin2;
-  input[1].size = begin3 - begin2;
+  input[1].size = static_cast<uint32_t>(begin3 - begin2);
   input[1].valid = true;
   for (uint64_t i = 0; i < input[1].size; i++) {
     input[1].data.push_back(static_cast<uint8_t>(i % 0x100));
   }
 
   input[2].address = begin3;
-  input[2].size = end - begin3;
+  input[2].size = static_cast<uint32_t>(end - begin3);
   input[2].valid = true;
   for (uint64_t i = 0; i < input[2].size; i++) {
     input[2].data.push_back(static_cast<uint8_t>(i % 0x100));
@@ -181,14 +181,14 @@ TEST(MemoryDump, ReadBytesErrors) {
 
   // Valid block filled with cycling bytes.
   input[0].address = begin1;
-  input[0].size = begin2 - begin1;
+  input[0].size = static_cast<uint32_t>(begin2 - begin1);
   input[0].valid = true;
   for (uint64_t i = 0; i < input[1].size; i++) {
     input[0].data.push_back(static_cast<uint8_t>(i % 0x100));
   }
 
   input[1].address = begin2;
-  input[1].size = begin3 - begin2;
+  input[1].size = static_cast<uint32_t>(begin3 - begin2);
   input[1].valid = true;
   for (uint64_t i = 0; i < input[1].size; i++) {
     input[1].data.push_back(static_cast<uint8_t>(i % 0x100));
@@ -196,7 +196,7 @@ TEST(MemoryDump, ReadBytesErrors) {
 
   // Invalid block.
   input[2].address = begin3;
-  input[2].size = end - begin3;
+  input[2].size = static_cast<uint32_t>(end - begin3);
   input[2].valid = false;
 
   MemoryDump dump(std::move(input));

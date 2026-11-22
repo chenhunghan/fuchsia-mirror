@@ -32,11 +32,17 @@ namespace display_coordinator {
 
 DisplayInfo::DisplayInfo(display::DisplayId display_id,
                          fbl::Vector<display::PixelFormat> pixel_formats,
-                         fbl::Vector<display::ModeAndId> preferred_modes)
+                         fbl::Vector<display::ModeAndId> preferred_modes,
+                         fbl::Vector<fuchsia_hardware_display_types::VrrConfig> mode_vrr_configs)
     : IdMappable(display_id),
       preferred_modes(std::move(preferred_modes)),
+      mode_vrr_configs(std::move(mode_vrr_configs)),
       pixel_formats(std::move(pixel_formats)) {
   ZX_DEBUG_ASSERT(display_id != display::kInvalidDisplayId);
+  if (this->mode_vrr_configs.is_empty()) {
+    this->mode_vrr_configs.resize(this->preferred_modes.size());
+  }
+  ZX_DEBUG_ASSERT(this->mode_vrr_configs.size() == this->preferred_modes.size());
 }
 
 DisplayInfo::~DisplayInfo() = default;
@@ -66,7 +72,23 @@ zx::result<std::unique_ptr<DisplayInfo>> DisplayInfo::Create(AddedDisplayInfo ad
     return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
+  if (!added_display_info.preferred_mode_vrr_configs.is_empty() &&
+      added_display_info.preferred_mode_vrr_configs.size() != preferred_modes.size()) {
+    fdf::error(
+        "Failed to create DisplayInfo: preferred_mode_vrr_configs size ({}) does not match "
+        "preferred_modes size ({}).",
+        added_display_info.preferred_mode_vrr_configs.size(), preferred_modes.size());
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+
   fbl::AllocChecker alloc_checker;
+  if (added_display_info.preferred_mode_vrr_configs.is_empty()) {
+    added_display_info.preferred_mode_vrr_configs.resize(preferred_modes.size(), &alloc_checker);
+    if (!alloc_checker.check()) {
+      fdf::error("Failed to allocate mode VRR configs");
+      return zx::error(ZX_ERR_NO_MEMORY);
+    }
+  }
   fbl::Vector<display::ModeAndId> preferred_modes_and_ids;
   preferred_modes_and_ids.reserve(preferred_modes.size(), &alloc_checker);
   if (!alloc_checker.check()) {
@@ -92,7 +114,7 @@ zx::result<std::unique_ptr<DisplayInfo>> DisplayInfo::Create(AddedDisplayInfo ad
 
   auto display_info = fbl::make_unique_checked<DisplayInfo>(
       &alloc_checker, display_id, std::move(added_display_info.pixel_formats),
-      std::move(preferred_modes_and_ids));
+      std::move(preferred_modes_and_ids), std::move(added_display_info.preferred_mode_vrr_configs));
   if (!alloc_checker.check()) {
     fdf::error("Failed to allocate DisplayInfo for display ID: {}", display_id.value());
     return zx::error(ZX_ERR_NO_MEMORY);
@@ -114,16 +136,23 @@ std::string DisplayInfo::GetMonitorName() const { return {}; }
 
 std::string DisplayInfo::GetMonitorSerial() const { return {}; }
 
-std::optional<zx::duration> DisplayInfo::GetCommittedModeVsyncInterval() const {
-  if (committed_mode_id == display::kInvalidModeId) {
+std::optional<zx::duration> DisplayInfo::GetModeVsyncInterval(display::ModeId mode_id) const {
+  if (mode_id == display::kInvalidModeId) {
     return std::nullopt;
   }
 
   const auto mode_it = std::find_if(
       preferred_modes.begin(), preferred_modes.end(),
-      [&](const display::ModeAndId& mode_and_id) { return mode_and_id.id() == committed_mode_id; });
+      [&](const display::ModeAndId& mode_and_id) { return mode_and_id.id() == mode_id; });
   if (mode_it == preferred_modes.end()) {
     return std::nullopt;
+  }
+
+  const size_t mode_index = static_cast<size_t>(mode_it - preferred_modes.begin());
+  if (mode_index < mode_vrr_configs.size() &&
+      mode_vrr_configs[mode_index].vsync_period().has_value() &&
+      *mode_vrr_configs[mode_index].vsync_period() > 0) {
+    return zx::nsec(*mode_vrr_configs[mode_index].vsync_period());
   }
 
   const int32_t refresh_rate_millihertz = mode_it->mode().refresh_rate_millihertz();
@@ -135,6 +164,10 @@ std::optional<zx::duration> DisplayInfo::GetCommittedModeVsyncInterval() const {
   // the refresh rate in millihertz.
   static constexpr int64_t kNanosecondsPerMillihertzPeriod = 1'000'000'000'000;
   return zx::nsec(kNanosecondsPerMillihertzPeriod / refresh_rate_millihertz);
+}
+
+std::optional<zx::duration> DisplayInfo::GetCommittedModeVsyncInterval() const {
+  return GetModeVsyncInterval(committed_mode_id);
 }
 
 }  // namespace display_coordinator

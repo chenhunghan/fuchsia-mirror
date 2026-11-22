@@ -75,7 +75,6 @@ impl Drop for Library {
 #[derive(Debug)]
 pub(super) struct Loader {
     lib_dir: fio::DirectoryProxy,
-    scope: fasync::Scope,
 }
 
 static LOADER_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -107,7 +106,7 @@ impl Loader {
         let loader_thread = thread::spawn(move || {
             let mut executor = fasync::LocalExecutor::default();
             executor.run_singlethreaded(async move {
-                let loader = Rc::new(Self { lib_dir, scope: fasync::Scope::new() });
+                let loader = Rc::new(Self { lib_dir });
                 _ = loader.run_loader(ld_server).await;
             });
         });
@@ -143,46 +142,63 @@ impl Loader {
         let this = Rc::downgrade(self);
         let lib_dirs = vec![Clone::clone(&self.lib_dir)];
         async move {
-            let mut search_dirs = lib_dirs.clone();
-            let mut stream = request.into_stream();
-            while let Some(req) = stream.try_next().await? {
-                let this = this.upgrade().unwrap();
-                match req {
-                    fldsvc::LoaderRequest::Done { control_handle } => {
-                        control_handle.shutdown();
-                    }
-                    fldsvc::LoaderRequest::LoadObject { object_name, responder } => {
-                        match Self::load_object(&search_dirs, &object_name).await {
-                            Ok(vmo) => {
-                                responder.send(zx::sys::ZX_OK, Some(vmo))?;
-                            }
-                            Err(err) => {
-                                warn!(err:?; "loader failed to load object");
-                                responder.send(zx::sys::ZX_ERR_NOT_FOUND, None)?;
+            let mut search_dirs = Rc::new(lib_dirs.clone());
+            let scope = fasync::Scope::new();
+            // Dropped when `run_loader` exits, cancelling any cloned loaders when their parent
+            // loader closes without `scope.join().await` waiting on open cloned channels.
+            let clone_scope = fasync::Scope::new();
+            let res: Result<(), anyhow::Error> = async {
+                let mut stream = request.into_stream();
+                while let Some(req) = stream.try_next().await? {
+                    let this = this.upgrade().unwrap();
+                    match req {
+                        fldsvc::LoaderRequest::Done { control_handle } => {
+                            control_handle.shutdown();
+                        }
+                        fldsvc::LoaderRequest::LoadObject { object_name, responder } => {
+                            let search_dirs = Rc::clone(&search_dirs);
+                            scope.spawn_local(async move {
+                                let send_res =
+                                    match Self::load_object(&search_dirs, &object_name).await {
+                                        Ok(vmo) => responder.send(zx::sys::ZX_OK, Some(vmo)),
+                                        Err(err) => {
+                                            warn!(err:?; "loader failed to load object");
+                                            responder.send(zx::sys::ZX_ERR_NOT_FOUND, None)
+                                        }
+                                    };
+                                if let Err(err) = send_res
+                                    && !err.is_closed()
+                                {
+                                    warn!(err:%; "loader failed to send LoadObject response");
+                                }
+                            });
+                        }
+                        fldsvc::LoaderRequest::Config { config, responder } => {
+                            match library_loader::parse_config_string(&lib_dirs, &config) {
+                                Ok(new_search_path) => {
+                                    search_dirs = Rc::new(new_search_path);
+                                    responder.send(zx::sys::ZX_OK)?;
+                                }
+                                Err(err) => {
+                                    warn!(err:%; "loader failed to parse config");
+                                    responder.send(zx::sys::ZX_ERR_INVALID_ARGS)?;
+                                }
                             }
                         }
-                    }
-                    fldsvc::LoaderRequest::Config { config, responder } => {
-                        match library_loader::parse_config_string(&lib_dirs, &config) {
-                            Ok(new_search_path) => {
-                                search_dirs = new_search_path;
-                                responder.send(zx::sys::ZX_OK)?;
-                            }
-                            Err(err) => {
-                                warn!(err:%; "loader failed to parse config");
-                                responder.send(zx::sys::ZX_ERR_INVALID_ARGS)?;
-                            }
+                        fldsvc::LoaderRequest::Clone { loader, responder } => {
+                            clone_scope.spawn_local(async move {
+                                _ = this.run_loader(loader).await;
+                            });
+                            responder.send(zx::sys::ZX_OK)?;
                         }
-                    }
-                    fldsvc::LoaderRequest::Clone { loader, responder } => {
-                        self.scope.spawn_local(async move {
-                            _ = this.run_loader(loader);
-                        });
-                        responder.send(zx::sys::ZX_OK)?;
-                    }
-                };
+                    };
+                }
+                Ok(())
             }
-            Ok(())
+            .await;
+            scope.join().await;
+            drop(clone_scope);
+            res
         }
         .inspect_err(|err| {
             warn!(err:%; "failed to serve loader service");

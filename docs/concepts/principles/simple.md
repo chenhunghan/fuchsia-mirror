@@ -13,7 +13,7 @@ Fuchsia provides the core foundations of an operating system—like hardware
 access, resource management, and software abstraction—in a coherent way,
 creating a robust, stable platform for products.
 
-## Bring your own runtime
+## Bring your own runtime {:#bring-your-own-runtime}
 
 **Fuchsia Interface Definition Language ([FIDL][glossary.FIDL]) allows diverse clients and
 services to interoperate**

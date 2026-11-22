@@ -22,7 +22,10 @@ cc_library(
     includes = [
         "include",
     ],
-    deps = [
-        "//zircon/system/public",
-    ],
+    deps = select({
+        "@platforms//os:fuchsia": [],
+        "//conditions:default": [
+            "//zircon/system/public",
+        ],
+    }),
 )

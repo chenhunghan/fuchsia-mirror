@@ -423,7 +423,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_union::TestProtocol::StrictUnionHenceResponseMayBeStackAllocated>::TransactionalResponse(::test_union::wire::StrictBoundedUnion xu)
     : body(::fidl::WireResponse<::test_union::TestProtocol::StrictUnionHenceResponseMayBeStackAllocated>(xu)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_union::kTestProtocol_StrictUnionHenceResponseMayBeStackAllocated_Ordinal, ::test_union::kTestProtocol_StrictUnionHenceResponseMayBeStackAllocated_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_union::kTestProtocol_StrictUnionHenceResponseMayBeStackAllocated_Ordinal, ::test_union::kTestProtocol_StrictUnionHenceResponseMayBeStackAllocated_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_union::TestProtocol::StrictUnionHenceResponseMayBeStackAllocated>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_union::kTestProtocol_StrictUnionHenceResponseMayBeStackAllocated_Ordinal, ::test_union::kTestProtocol_StrictUnionHenceResponseMayBeStackAllocated_DynamicFlags);
@@ -485,7 +485,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_union::TestProtocol::FlexibleUnionHenceResponseMustBeHeapAllocated>::TransactionalResponse(::test_union::wire::OlderSimpleUnion xu)
     : body(::fidl::WireResponse<::test_union::TestProtocol::FlexibleUnionHenceResponseMustBeHeapAllocated>(xu)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_union::kTestProtocol_FlexibleUnionHenceResponseMustBeHeapAllocated_Ordinal, ::test_union::kTestProtocol_FlexibleUnionHenceResponseMustBeHeapAllocated_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_union::kTestProtocol_FlexibleUnionHenceResponseMustBeHeapAllocated_Ordinal, ::test_union::kTestProtocol_FlexibleUnionHenceResponseMustBeHeapAllocated_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_union::TestProtocol::FlexibleUnionHenceResponseMustBeHeapAllocated>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_union::kTestProtocol_FlexibleUnionHenceResponseMustBeHeapAllocated_Ordinal, ::test_union::kTestProtocol_FlexibleUnionHenceResponseMustBeHeapAllocated_DynamicFlags);

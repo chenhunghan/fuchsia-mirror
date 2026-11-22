@@ -3,10 +3,8 @@
 // found in the LICENSE file.
 
 #include <assert.h>
-#include <fuchsia/hardware/pciroot/c/banjo.h>
 #include <lib/ddk/debug.h>
 #include <lib/pci/constants.h>
-#include <lib/pci/pciroot.h>
 #include <stdio.h>
 
 #include <array>
@@ -34,6 +32,8 @@
 // driver.
 
 namespace {
+
+constexpr uint8_t kNoParent = fuchsia_hardware_pci_root::wire::kIrqRoutingNoParent;
 
 struct PortInfo {
   uint8_t dev_id;
@@ -111,14 +111,15 @@ acpi_legacy_irq PrtEntryToIrq(ACPI_HANDLE object, ACPI_PCI_ROUTING_TABLE* entry)
   return new_irq;
 }
 
-void AddIrqToAccounting(acpi_legacy_irq irq, AcpiPciroot::Context* context,
+void AddIrqToAccounting(acpi_legacy_irq irq, acpi::PciRootInfo* info,
+                        std::unordered_map<uint32_t, acpi_legacy_irq>* irqs,
                         ACPI_PCI_ROUTING_TABLE* entry, std::optional<PortInfo> port,
                         uint8_t local_dev_id) {
   // The first time we find an irq in a PRT it should be stored in the root's
-  // context so that later it can be passed to the PCI bus driver.
-  auto vector_entry = context->irqs.find(irq.vector);
-  if (vector_entry == context->irqs.end()) {
-    context->irqs[irq.vector] = irq;
+  // map so that later the interrupt can be created and passed to the PCI bus driver.
+  auto vector_entry = irqs->find(irq.vector);
+  if (vector_entry == irqs->end()) {
+    (*irqs)[irq.vector] = irq;
     zxlogf(DEBUG, "added vector %#x { %s } from PRT", irq.vector, im_to_str(irq.options));
   } else if (vector_entry->second.options != irq.options) {
     // This may not be fatal, but it would represent a misconfiguration that
@@ -129,35 +130,35 @@ void AddIrqToAccounting(acpi_legacy_irq irq, AcpiPciroot::Context* context,
     zxlogf(WARNING, "Multiple IRQ configurations found in PRT for vector %#x!", irq.vector);
   }
 
-  auto& routing_vec = context->routing;
+  auto& routing_vec = info->routing;
   auto find_fn = [local_dev_id, port](auto& e) -> bool {
-    return ((port) ? port->dev_id : PCI_IRQ_ROUTING_NO_PARENT) == e.port_device_id &&
-           ((port) ? port->func_id : PCI_IRQ_ROUTING_NO_PARENT) == e.port_function_id &&
+    return ((port) ? port->dev_id : kNoParent) == e.port_device_id &&
+           ((port) ? port->func_id : kNoParent) == e.port_function_id &&
            local_dev_id == e.device_id;
   };
 
   // Lastly, based on the device / function address provided we need to update the routing
   // table to reflect the new information we've found. If we have a valid device / function
   // address then we can update that entry, otherwise a new entry needs to be made for that
-  // combination of port and child device. This would be easier in a map, but a vector allows us to
-  // directly point to the backing storage in the pciroot protocol implementation.
+  // combination of port and child device. This would be easier in a map, but a vector can be
+  // handed to the bus driver as-is.
   if (auto found_entry = std::find_if(routing_vec.begin(), routing_vec.end(), find_fn);
       found_entry != std::end(routing_vec)) {
     found_entry->pins[entry->Pin] = static_cast<uint8_t>(irq.vector);
   } else {
-    pci_irq_routing_entry_t new_entry = {
-        .port_device_id = (port) ? port->dev_id : static_cast<uint8_t>(PCI_IRQ_ROUTING_NO_PARENT),
-        .port_function_id =
-            (port) ? port->func_id : static_cast<uint8_t>(PCI_IRQ_ROUTING_NO_PARENT),
+    fuchsia_hardware_pci_root::wire::IrqRoutingEntry new_entry = {
+        .port_device_id = (port) ? port->dev_id : kNoParent,
+        .port_function_id = (port) ? port->func_id : kNoParent,
         .device_id = local_dev_id,
-        .pins = {0},
+        .pins = {},
     };
     new_entry.pins[entry->Pin] = static_cast<uint8_t>(irq.vector);
     routing_vec.push_back(new_entry);
   }
 }
 
-ACPI_STATUS ReadPciRoutingTable(ACPI_HANDLE object, AcpiPciroot::Context* context,
+ACPI_STATUS ReadPciRoutingTable(ACPI_HANDLE object, acpi::PciRootInfo* info,
+                                std::unordered_map<uint32_t, acpi_legacy_irq>* irqs,
                                 std::optional<PortInfo> port) {
   acpi::AcpiBuffer<ACPI_PCI_ROUTING_TABLE> irt_buffer;
   ACPI_STATUS status = AcpiGetIrqRoutingTable(object, &irt_buffer);
@@ -186,12 +187,12 @@ ACPI_STATUS ReadPciRoutingTable(ACPI_HANDLE object, AcpiPciroot::Context* contex
     // be 0. If not, the entry is strange and we'll warn / skip it.
     if (port && dev_id != 0) {
       zxlogf(WARNING, "PRT entry for root %.*s unexpected contains device address: %#x",
-             static_cast<int>(sizeof(context->name)), context->name, dev_id);
+             static_cast<int>(sizeof(info->name)), info->name, dev_id);
       continue;
     }
 
     acpi_legacy_irq new_irq = PrtEntryToIrq(object, &entry);
-    AddIrqToAccounting(new_irq, context, &entry, port, dev_id);
+    AddIrqToAccounting(new_irq, info, irqs, &entry, port, dev_id);
   }
 
   return AE_OK;
@@ -201,13 +202,13 @@ ACPI_STATUS ReadPciRoutingTable(ACPI_HANDLE object, AcpiPciroot::Context* contex
 
 namespace acpi {
 
-ACPI_STATUS GetPciRootIrqRouting(acpi::Acpi* acpi, ACPI_HANDLE root_obj,
-                                 AcpiPciroot::Context* context) {
+ACPI_STATUS GetPciRootIrqRouting(acpi::Acpi* acpi, ACPI_HANDLE root_obj, acpi::PciRootInfo* info,
+                                 std::unordered_map<uint32_t, acpi_legacy_irq>* irqs) {
   // Start with the Root's _PRT. The spec requires that one exists.
-  ACPI_STATUS status = ReadPciRoutingTable(root_obj, context, std::nullopt);
+  ACPI_STATUS status = ReadPciRoutingTable(root_obj, info, irqs, std::nullopt);
   if (status != AE_OK) {
     zxlogf(DEBUG, "Couldn't find an IRQ routing table for root %.*s",
-           static_cast<int>(sizeof(context->name)), context->name);
+           static_cast<int>(sizeof(info->name)), info->name);
     return status;
   }
 
@@ -228,7 +229,7 @@ ACPI_STATUS GetPciRootIrqRouting(acpi::Acpi* acpi, ACPI_HANDLE root_obj,
              reinterpret_cast<char*>(&res->Name));
       // Ignore the return value of this, since if child is not a root port, it
       // will fail and we don't care.
-      ReadPciRoutingTable(child, context, port);
+      ReadPciRoutingTable(child, info, irqs, port);
     }
   }
 

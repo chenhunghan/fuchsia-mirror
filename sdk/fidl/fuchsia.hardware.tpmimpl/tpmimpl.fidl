@@ -50,3 +50,7 @@ closed protocol TpmImpl {
         data vector<uint8>:TPM_MAX_DATA_TRANSFER;
     }) -> () error zx.Status;
 };
+
+service Service {
+    device client_end:TpmImpl;
+};

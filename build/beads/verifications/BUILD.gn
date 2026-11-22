@@ -106,6 +106,27 @@ if (is_host) {
   # correctly type-checked by the python_library() target above that
   # includes it in its sources.
 
+  python_library("verify_package_cutover_lib") {
+    testonly = true
+    sources = [ "verify_package_cutover.py" ]
+    library_deps = [
+      "//build/beads/scripts:compare_utils",
+      "//build/beads/scripts:cutover_utils",
+      "//build/beads/scripts:flags_differences",
+    ]
+  }
+
+  python_build_time_tests("verify_package_cutover_test") {
+    tests = [ "verify_package_cutover_test.py" ]
+    deps = [ ":verify_package_cutover_lib" ]
+    inputs = [
+      "//build/beads/planter/machinery/checks/cutover_consistency.sh",
+      "CUTOVER_NORMALIZATIONS.md",
+      "cutover_categories.json",
+      "cutover_normalizations.json",
+    ]
+  }
+
   python_build_time_tests("verify_multi_build_configs_test") {
     tests = [ "verify_multi_build_configs_test.py" ]
     deps = [ ":verify_multi_build_configs_lib" ]
@@ -165,7 +186,10 @@ if (is_host) {
 
   group("tests") {
     testonly = true
-    deps = [ ":verify_multi_build_configs_test" ]
+    deps = [
+      ":verify_multi_build_configs_test",
+      ":verify_package_cutover_test",
+    ]
     if (select_variant == []) {
       # Avoid running command comparison at build time in variant builds for
       # now, as host Rust sanitizer variant flags are not yet forwarded to

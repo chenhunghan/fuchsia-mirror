@@ -19,7 +19,7 @@
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "selinuxfs_policy"; }
+extern std::string GetTestPolicyName() { return "selinuxfs_policy"; }
 
 namespace {
 
@@ -287,8 +287,12 @@ TEST(SeLinuxFsContext, ValidatesFieldValues) {
   EXPECT_THAT(ValidateContext("test_selinuxfs_u:bad_value:test_selinuxfs_t:s0:c0-s2:c0.c2"),
               SyscallResultIsErrno(EINVAL));
 
-  // Context type/domain must be defined by the policy.
+  // Context type/domain must be a concrete type defined by the policy, not an attribute.
   EXPECT_THAT(ValidateContext("test_selinuxfs_u:test_selinuxfs_r:bad_value:s0:c0-s2:c0.c2"),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(ValidateContext("test_selinuxfs_u:test_selinuxfs_r:test_selinuxfs_a:s0:c0-s2:c0.c2"),
+              SyscallResultIsErrno(EINVAL));
+  EXPECT_THAT(ValidateContext("test_selinuxfs_u:object_r:test_selinuxfs_a:s0:c0-s2:c0.c2"),
               SyscallResultIsErrno(EINVAL));
 
   // Context low & high sensitivities must be defined by the policy.

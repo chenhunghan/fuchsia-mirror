@@ -1,0 +1,218 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":audio_lib_processing_death_unittests_test",
+        ":audio_lib_processing_unittests",
+    ],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "coefficient_table",
+    srcs = ["coefficient_table.cc"],
+    hdrs = ["coefficient_table.h"],
+    visibility = ["//src/media/audio/audio_core/test/api:__pkg__"],
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/syslog/cpp",
+        "//src/media/audio/lib/format2:fixed",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "processing",
+    srcs = [
+        "filter.cc",
+        "point_sampler.cc",
+        "position_manager.cc",
+        "sampler.cc",
+        "sinc_sampler.cc",
+    ],
+    hdrs = [
+        "channel_strip.h",
+        "coefficient_table_cache.h",
+        "filter.h",
+        "flags.h",
+        "gain.h",
+        "point_sampler.h",
+        "position_manager.h",
+        "sampler.h",
+        "sinc_sampler.h",
+    ],
+    build_flags = [
+        # Building without optimizations causes significant slowdowns for these
+        # components; the additional CPU load may lead to audio glitches on debug
+        # builds. These config settings enable the needed code optimization while
+        # maintaining other 'debug' aspects (e.g. DCHECK is still enabled).
+        "//build/config:optimize_speed",
+        # Allow some of our loops to be vectorized by the compiler.
+        "//build/config:fast-math",
+    ],
+    disable_build_flags = ["//build/config:default_optimize"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.audio:fuchsia.audio_cpp",
+        "//sdk/lib/syslog/cpp",
+        "//zircon/system/ulib/trace",
+    ],
+    visibility = ["//src/media/audio:__subpackages__"],
+    deps = [
+        ":coefficient_table",
+        "//src/lib/fxl",
+        "//src/media/audio/lib/format2",
+    ],
+    alwayslink = True,
+)
+
+# Any executable which uses `processing` (either directly or transitively) must
+# also include either `prebuilt_coefficient_tables` or
+# `empty_coefficient_tables` below. The decision of which tables to include is
+# usually left to the top-most build rule (i.e., the executable), since that
+# rule often has the most insight into system constraints, such as code size.
+#
+# Bazel-only counterpart of the GN `shared_library("prebuilt_coefficient_tables")`,
+# which stays hand-written in BUILD.gn.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "prebuilt_coefficient_tables",
+    srcs = [":coefficient_table_data_prebuilt.cc"],
+    implementation_deps = [":coefficient_table"],
+    visibility = ["//src/media/audio:__subpackages__"],
+)
+
+# Bazel-only counterpart of the GN `shared_library("empty_coefficient_tables")`,
+# which stays hand-written in BUILD.gn.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "empty_coefficient_tables",
+    srcs = ["coefficient_table_data_empty.cc"],
+    implementation_deps = [":coefficient_table"],
+)
+
+# This executable is run automatically as part of the build deps for
+# `prebuilt_coefficient_tables`. It can also be run manually - the binary can be
+# found adjacent to other host tools.
+fx_cc_binary(
+    name = "gen_audio_filter_coefficient_tables",
+    srcs = [
+        "coefficient_table.cc",
+        "coefficient_table.h",
+        "gen_coefficient_tables.cc",
+    ],
+    defines = ["BUILDING_FUCHSIA_AUDIO_HOST_TOOL=1"],
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//src/media/audio/lib/format2:fixed",
+    ],
+)
+
+compiled_action(
+    name = "build_coefficient_table_data_prebuilt_cc",
+    outs = ["coefficient_table_data_prebuilt.cc"],
+    args = ["$(location :coefficient_table_data_prebuilt.cc)"],
+    tool = ":gen_audio_filter_coefficient_tables",
+)
+
+fx_cc_test_binary(
+    name = "unittest-bin",
+    srcs = [
+        "channel_strip_unittest.cc",
+        "coefficient_table_cache_unittest.cc",
+        "coefficient_table_unittest.cc",
+        "filter_unittest.cc",
+        "gain_unittest.cc",
+        "point_sampler_unittest.cc",
+        "position_manager_unittest.cc",
+        "sampler_unittest.cc",
+        "sinc_sampler_unittest.cc",
+    ],
+    gn_output_name = "audio_lib_processing_unittests",
+    deps = [
+        ":coefficient_table",
+        ":prebuilt_coefficient_tables",
+        ":processing",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/media/audio/lib/format2",
+        "//zircon/system/ulib/trace",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_lib_processing_unittests",
+    parallel = 4,
+    unit_tests = [":unittest-bin"],
+)
+
+fx_cc_test_binary(
+    name = "death-unittest-bin",
+    srcs = ["sampler_death_unittest.cc"],
+    gn_output_name = "audio_lib_processing_death_unittests",
+    deps = [
+        ":prebuilt_coefficient_tables",
+        ":processing",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/media/audio/lib/format2",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "death_unittest_packaged_bin",
+    testonly = True,
+    binary = ":death-unittest-bin",
+    binary_name = "audio_lib_processing_death_unittests",
+)
+
+fx_component_manifest(
+    name = "audio_lib_processing_death_unittests_manifest",
+    testonly = True,
+    component_name = "audio_lib_processing_death_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:death_test.shard.cml",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/audio_libprocessing_death_unittests.cml",
+)
+
+fx_test_component(
+    name = "audio_lib_processing_death_unittests_component",
+    compiled_manifest = ":audio_lib_processing_death_unittests_manifest",
+    deps = [":death_unittest_packaged_bin"],
+)
+
+fx_package(
+    name = "audio_lib_processing_death_unittests",
+    testonly = True,
+    test_components = [":audio_lib_processing_death_unittests_component"],
+)
+
+fx_test(
+    name = "audio_lib_processing_death_unittests_test",
+    max_log_severity = "FATAL",
+    package = ":audio_lib_processing_death_unittests",
+    parallel = 4,
+)

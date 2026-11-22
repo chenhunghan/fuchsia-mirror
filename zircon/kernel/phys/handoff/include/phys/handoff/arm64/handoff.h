@@ -37,6 +37,10 @@ static_assert(sizeof(ArchTempThreadAbi) + ZX_TLS_UNSAFE_SP_OFFSET ==
 
 struct ArchPatchInfo {
   Arm64AlternateVbar alternate_vbar = Arm64AlternateVbar::kNone;
+
+  // This selects the "lse/...", "lse-a55/...", or "llsc/..." alternative for
+  // each of the -moutline-atomics functions (never kAuto).
+  Arm64Atomics atomics = Arm64Atomics::kLlsc;
 };
 
 // This holds (or points to) all arm64-specific data that is handed off from
@@ -70,8 +74,8 @@ struct ArchPhysHandoff {
   // (ZBI_TYPE_KERNEL_DRIVER, ZBI_KERNEL_DRIVER_GENERIC32_WATCHDOG) payload.
   stdbind::optional<zbi_dcfg_generic32_watchdog_t> generic32_watchdog_driver;
 
-  // (ZBI_TYPE_KERNEL_DRIVER, ZBI_KERNEL_DRIVER_ARM_SMMU) payload.
-  PhysHandoffTemporarySpan<const zbi_dcfg_arm_smmu_driver_t> arm_smmu_drivers;
+  // (ZBI_TYPE_KERNEL_DRIVER, ZBI_KERNEL_DRIVER_ARM_SMMU_V2) payload.
+  PhysHandoffTemporarySpan<const zbi_dcfg_arm_smmu_v2_driver_t> arm_smmu_drivers;
 
   // (ZBI_TYPE_KERNEL_DRIVER, ZBI_KERNEL_DRIVER_MOTMOT_POWER) payload.
   bool motmot_power_driver = false;

@@ -45,7 +45,6 @@ static CONTROLLER_ALLOWLISTS: Map<&'static str, Set<&'static str>> = phf_map! {
         "driver_runner_test",
     },
     "ScheduleUnbind" => phf_set! {
-        "bt-emulator",
         "driver_runner_test",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/ddk-lifecycle-test.cm",
         "No_class_name_but_driver_url_is_fuchsia-boot:///dtr#meta/fvm.cm",

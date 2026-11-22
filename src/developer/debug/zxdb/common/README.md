@@ -46,7 +46,6 @@ Public headers expose these foundational types and utilities:
 - `zxdb::int128_t`, `zxdb::uint128_t`, `zxdb::to_string`, `zxdb::to_hex_string`,
   `zxdb::to_bin_string<T>`: 128-bit integer types and numeric string formatters
   (`int128_t.h`, `string_util.h`).
-- `zxdb::CheckedAdd`: Overflow-checked integer addition (`checked_math.h`).
 - `zxdb::Reversed`, `zxdb::RefPtrTo`: Range-for reverse iterator adapter and
   `fxl::RefPtr<T>` conversion helper (`adapters.h`, `ref_ptr_to.h`).
 - `zxdb::ExtractLastFileComponent`, `zxdb::IsPathAbsolute`,

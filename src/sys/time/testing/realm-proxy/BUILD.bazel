@@ -27,9 +27,7 @@ rustc_binary(
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN's `//src/lib/fuchsia-component-test` group bundles the Rust library
-        # with the unmigrated `realm_builder_server_component`.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/sys/time/testing:timekeeper_integration",
         "//src/sys/time/testing/fidl/test.time.realm:fidl_rust",
         "//src/testing/realm_proxy",

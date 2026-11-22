@@ -393,7 +393,6 @@ impl State {
         }
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_rsna_response_timeout(&self) -> Result<(), Error> {
         match self {
             State::AwaitingMsg1 { .. } => Err(Error::EapolHandshakeNotStarted),

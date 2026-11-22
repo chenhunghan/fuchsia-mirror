@@ -190,11 +190,11 @@ impl PiconetMember {
     pub fn register_service_advertisement(
         &self,
         service_defs: Vec<bredr::ServiceDefinition>,
-    ) -> Result<bredr::ConnectionReceiverRequestStream, Error> {
+    ) -> Result<bredr::ConnectionReceiver2RequestStream, Error> {
         let (connect_client, connect_requests) = f_end::create_request_stream();
         let _ = self.profile_svc.advertise(bredr::ProfileAdvertiseRequest {
             services: Some(service_defs),
-            receiver: Some(connect_client),
+            connection_receiver: Some(connect_client),
             ..Default::default()
         });
 

@@ -53,7 +53,7 @@ transactions (for example, `fidl::VectorView`).
 
 To find out whether your driver talks to other drivers co-located in the
 same process (in which case you need to [migrate the driver to use the
-driver runtime](#update-the-dfv1-driver-to-use-the-driver-runtime)), check
+driver runtime][update-driver-runtime]), check
 the component manifest file (`.cml`) of the driver and look for the
 `colocate` field, for example:
 
@@ -142,7 +142,7 @@ calls and optimize them into using asynchronous calls.
 If there are unit tests based on the Banjo APIs for your driver, you'll
 need to create a mock FIDL client (or server depending on whether you're
 testing server or client) in the test class. For more information, see
-[Update the DFv1 driver's unit tests to use FIDL](#update-the-dfv1-drivers-unit-tests-to-use-fidl).
+[Update the DFv1 driver's unit tests to use FIDL][update-unit-tests].
 
 <!-- Reference links -->
 

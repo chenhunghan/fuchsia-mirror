@@ -111,16 +111,45 @@ std::unique_ptr<Mixer> Mixer::Select(const fuchsia::media::AudioStreamType& sour
     return nullptr;
   }
 
-  if (resampler == Resampler::SampleAndHold &&
+  if ((resampler == Resampler::SampleAndHold || resampler == Resampler::HighPassWindowedSinc) &&
       source_format.frames_per_second != dest_format.frames_per_second) {
     FX_LOGS(WARNING) << "Mixer frame rates (" << source_format.frames_per_second << ":"
                      << dest_format.frames_per_second
-                     << ") must be equal, for the SampleAndHold resampler";
+                     << ") must be equal, for the SampleAndHold or HighPassWindowedSinc resampler";
     return nullptr;
   }
 
-  const auto sampler_type = (resampler == Resampler::WindowedSinc) ? Sampler::Type::kSincSampler
-                                                                   : Sampler::Type::kDefault;
+  if (resampler == Resampler::HighPassWindowedSinc &&
+      source_format.frames_per_second <= 2 * Sampler::kUltrasoundMinFrequencyHz) {
+    FX_LOGS(WARNING) << "HighPassWindowedSinc mixer frame rate (" << source_format.frames_per_second
+                     << ") must exceed " << 2 * Sampler::kUltrasoundMinFrequencyHz;
+    return nullptr;
+  }
+
+  if (resampler == Resampler::LowPassWindowedSinc &&
+      source_format.frames_per_second <= 2 * Sampler::kAudioMaxFrequencyHz) {
+    FX_LOGS(WARNING) << "LowPassWindowedSinc mixer source frame rate ("
+                     << source_format.frames_per_second << ") must exceed "
+                     << 2 * Sampler::kAudioMaxFrequencyHz;
+    return nullptr;
+  }
+
+  Sampler::Type sampler_type = Sampler::Type::kDefault;
+  switch (resampler) {
+    case Resampler::WindowedSinc:
+      sampler_type = Sampler::Type::kSincSampler;
+      break;
+    case Resampler::HighPassWindowedSinc:
+      sampler_type = Sampler::Type::kHighPassSincSampler;
+      break;
+    case Resampler::LowPassWindowedSinc:
+      sampler_type = Sampler::Type::kLowPassSincSampler;
+      break;
+    case Resampler::Default:
+    case Resampler::SampleAndHold:
+      sampler_type = Sampler::Type::kDefault;
+      break;
+  }
   auto mixer = Sampler::Create(ToNewFormat(source_format), ToNewFormat(dest_format), sampler_type);
   if (mixer) {
     return std::make_unique<Mixer>(mixer, gain_limits);

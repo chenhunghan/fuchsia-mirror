@@ -1,0 +1,151 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//src/lib/testing/expectation/rules:fx_generated_expectations.bzl",
+    "fx_generated_expectations",
+)
+load(
+    "//src/lib/testing/sharding/rules:fx_sharded_test_package.bzl",
+    "fx_sharded_test_package",
+)
+load(
+    ":rules_test.bzl",
+    "sharded_fx_test_analysis_test",
+    "sharding_rules_test_suite",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+sharding_rules_test_suite(
+    name = "tests",
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+fx_sharded_test_package(
+    name = "sharding-example-package",
+    includes = ["//src/lib/testing/sharding:meta/client.shard"],
+    manifest = "//src/lib/testing/sharding/tests/example_sharded_test:meta/example-test.cml",
+    num_shards = 3,
+    shard_part_regex = r"section_(\d+)::case_.+",
+    tags = ["manual"],
+    deps = ["//src/lib/testing/sharding/tests/example_sharded_test:underlying_test_to_be_sharded_packaged"],
+)
+
+fx_test(
+    name = "sharding_example_package_test",
+    package = ":sharding-example-package",
+    visibility = ["//src/lib/testing/sharding:__pkg__"],
+)
+
+sharded_fx_test_analysis_test(
+    name = "sharding_example_package_analysis_test",
+    expected_component_names = [
+        "sharding-example-package_shard_0_of_3",
+        "sharding-example-package_shard_1_of_3",
+        "sharding-example-package_shard_2_of_3",
+    ],
+    expected_package_urls = [
+        "fuchsia-pkg://fuchsia.com/sharding-example-package#meta/sharding-example-package_shard_0_of_3.cm",
+        "fuchsia-pkg://fuchsia.com/sharding-example-package#meta/sharding-example-package_shard_1_of_3.cm",
+        "fuchsia-pkg://fuchsia.com/sharding-example-package#meta/sharding-example-package_shard_2_of_3.cm",
+    ],
+    target_under_test = ":sharding_example_package_test",
+)
+
+fx_sharded_test_package(
+    name = "sharding-expectations-package",
+    expectations = "//src/lib/testing/sharding/tests/example_sharded_test:example_expectations.json5",
+    includes = ["//src/lib/testing/sharding:meta/client_with_expectations.shard"],
+    manifest = "//src/lib/testing/sharding/tests/example_sharded_test:meta/example-test-with-expectations.cml",
+    num_shards = 3,
+    tags = ["manual"],
+    deps = ["//src/lib/testing/sharding/tests/example_sharded_test:underlying_test_to_be_sharded_with_failures_packaged"],
+)
+
+fx_test(
+    name = "sharding_expectations_package_test",
+    package = ":sharding-expectations-package",
+    visibility = ["//src/lib/testing/sharding:__pkg__"],
+)
+
+sharded_fx_test_analysis_test(
+    name = "sharding_expectations_package_analysis_test",
+    expected_component_names = [
+        "sharding-expectations-package_shard_0_of_3",
+        "sharding-expectations-package_shard_1_of_3",
+        "sharding-expectations-package_shard_2_of_3",
+    ],
+    expected_package_urls = [
+        "fuchsia-pkg://fuchsia.com/sharding-expectations-package#meta/sharding-expectations-package_shard_0_of_3.cm",
+        "fuchsia-pkg://fuchsia.com/sharding-expectations-package#meta/sharding-expectations-package_shard_1_of_3.cm",
+        "fuchsia-pkg://fuchsia.com/sharding-expectations-package#meta/sharding-expectations-package_shard_2_of_3.cm",
+    ],
+    target_under_test = ":sharding_expectations_package_test",
+)
+
+# Exercises `package_name`, custom `component_name`,
+# `fx_generated_expectations()`, `treatment_of_cases_with_error_logs`,
+# `fx_test(max_log_severity = ...)`, and `select()` on `expectations` and
+# `deps`.
+fx_generated_expectations(
+    name = "generated_example_expectations",
+    includes = [
+        "//src/lib/testing/sharding/tests/example_sharded_test:example_expectations.json5",
+    ],
+    tags = ["manual"],
+)
+
+fx_sharded_test_package(
+    name = "sharding-variant-package.package",
+    package_name = "sharding-variant-package",
+    component_name = "custom-sharded-test",
+    expectations = select({
+        "//conditions:default": ":generated_example_expectations",
+    }),
+    includes = ["//src/lib/testing/sharding:meta/client_with_expectations.shard"],
+    manifest = "//src/lib/testing/sharding/tests/example_sharded_test:meta/example-test-with-expectations.cml",
+    num_shards = 2,
+    tags = ["manual"],
+    treatment_of_cases_with_error_logs = "RUN_ONLY_CASES_WITH_ERROR_LOGS",
+    deps = select({
+        "//conditions:default": ["//src/lib/testing/sharding/tests/example_sharded_test:underlying_test_to_be_sharded_with_failures_packaged"],
+    }),
+)
+
+fx_test(
+    name = "sharding_variant_package_test",
+    max_log_severity = "ERROR",
+    package = ":sharding-variant-package.package",
+    tags = ["manual"],
+)
+
+sharded_fx_test_analysis_test(
+    name = "sharding_variant_package_analysis_test",
+    expected_component_names = [
+        "custom-sharded-test_shard_0_of_2",
+        "custom-sharded-test_shard_1_of_2",
+    ],
+    expected_max_log_severity = "ERROR",
+    expected_package_urls = [
+        "fuchsia-pkg://fuchsia.com/sharding-variant-package#meta/custom-sharded-test_shard_0_of_2.cm",
+        "fuchsia-pkg://fuchsia.com/sharding-variant-package#meta/custom-sharded-test_shard_1_of_2.cm",
+    ],
+    target_under_test = ":sharding_variant_package_test",
+)
+
+test_suite(
+    name = "quick_build_only_tests",
+    tests = [
+        ":sharding_example_package_analysis_test",
+        ":sharding_example_package_test",
+        ":sharding_expectations_package_analysis_test",
+        ":sharding_expectations_package_test",
+        ":sharding_variant_package_analysis_test",
+        ":sharding_variant_package_test",
+        ":tests",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)

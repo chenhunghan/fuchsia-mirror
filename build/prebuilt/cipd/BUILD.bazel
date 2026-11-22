@@ -22,6 +22,13 @@ cipd_prebuilt_directory(
 )
 
 cipd_prebuilt_file(
+    name = "dtc",
+    path = "//prebuilt/third_party/dtc/%s/dtc" % build_config.host_tag,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+)
+
+cipd_prebuilt_file(
     name = "gn",
     path = "//prebuilt/third_party/gn/%s/gn" % build_config.host_tag,
     target_compatible_with = HOST_OS_CONSTRAINTS,
@@ -38,6 +45,13 @@ cipd_prebuilt_file(
 cipd_prebuilt_file(
     name = "shac",
     path = "//prebuilt/tools/shac/shac",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+)
+
+cipd_prebuilt_file(
+    name = "ssh",
+    path = "//prebuilt/third_party/openssh-portable/%s/bin/ssh" % build_config.host_tag,
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//:__subpackages__"],
 )

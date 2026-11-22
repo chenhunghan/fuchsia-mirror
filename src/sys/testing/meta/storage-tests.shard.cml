@@ -39,6 +39,9 @@
                 "fuchsia.kernel.VmexResource",
                 "fuchsia.process.Launcher",
 
+                // Needed for storage benchmarks and filesystems setting thread roles.
+                "fuchsia.scheduler.RoleManager",
+
                 // Tests can produce trace.
                 "fuchsia.tracing.provider.Registry",
             ],

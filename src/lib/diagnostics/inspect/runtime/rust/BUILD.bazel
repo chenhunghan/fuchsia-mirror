@@ -3,18 +3,31 @@
 # found in the LICENSE file.
 
 load("@fuchsia_build_info//:args.bzl", "current_build_target_api_level")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# NOTE: `lib_test`, `inspect-runtime-tests`, and `inspect_test_component`
-# remain in BUILD.gn above the sentinel because `lib_test` depends on
-# `//src/lib/fuchsia-component-test` (which bundles the unmigrated GN-only
-# `//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component`),
-# and `inspect_test_component_default` is depended on by the GN-only
-# `//src/lib/diagnostics/reader/rust:diagnostics-reader-tests` package.
-# TODO(https://fxbug.dev/42161852): Remove this dep during post-migration cleanup.
-#
+test_suite(
+    name = "tests",
+    tests = [":inspect-runtime-tests"],
+    visibility = ["//src/lib/diagnostics:__pkg__"],
+)
+
 # Restrict visibility to local targets. Clients looking to use the
 # inspect_runtime library should depend on `:rust` or, in rare circumstances,
 # `:unchecked_includes`.
@@ -62,4 +75,121 @@ alias(
     name = "rust",
     actual = ":lib",
     visibility = ["//:__subpackages__"],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Only used by bazel2gn, to keep the GN `output_name` of the test binary.
+    crate_name = "inspect_runtime_lib_test",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/diagnostics/hierarchy/rust:diagnostics-hierarchy",
+        "//src/lib/diagnostics/reader/rust",
+        "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        # TODO(https://fxbug.dev/42161852): Remove this dep during post-migration cleanup.
+        "//src/sys/lib/component-events",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lib_test_packaged_bin",
+    testonly = True,
+    binary = ":lib_test",
+    binary_name = "inspect_runtime_lib_test",
+)
+
+fx_component_manifest(
+    name = "inspect-runtime-tests-manifest",
+    testonly = True,
+    component_name = "inspect-runtime-tests",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/inspect_runtime_lib_test.cml",
+)
+
+fx_test_component(
+    name = "inspect-runtime-tests-component",
+    compiled_manifest = ":inspect-runtime-tests-manifest",
+    deps = [":lib_test_packaged_bin"],
+)
+
+fx_package(
+    name = "inspect-runtime-tests-package",
+    package_name = "inspect-runtime-tests",
+    components = [
+        ":inspect_test_component",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":inspect-runtime-tests-component"],
+)
+
+fx_test(
+    name = "inspect-runtime-tests",
+    package = ":inspect-runtime-tests-package",
+)
+
+fx_component_manifest(
+    name = "inspect_test_component_manifest",
+    component_name = "inspect_test_component",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/inspect_test_component.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "inspect_test_component_config_bindings",
+    cm_label = ":inspect_test_component_manifest",
+)
+
+rustc_binary(
+    name = "inspect_test_component_bin",
+    testonly = True,
+    srcs = ["test/main.rs"],
+    crate_root = "test/main.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        ":inspect_test_component_config_bindings",
+        # GN depends on the default `//src/lib/diagnostics/inspect/runtime/rust`
+        # (:rust) group; Bazel uses the same-package `:rust` alias.
+        ":rust",  # @bazel2gn:path_overwrite://src/lib/diagnostics/inspect/runtime/rust
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+    ],
+)
+
+fx_packaged_binary(
+    name = "inspect_test_component_bin_packaged",
+    testonly = True,
+    binary = ":inspect_test_component_bin",
+    binary_name = "inspect_test_component_bin",
+)
+
+fx_component(
+    name = "inspect_test_component",
+    testonly = True,
+    compiled_manifest = ":inspect_test_component_manifest",
+    visibility = ["//src/lib/diagnostics/reader/rust:__pkg__"],
+    deps = [":inspect_test_component_bin_packaged"],
+)
+
+alias(
+    name = "inspect_test_component_default",
+    testonly = True,
+    actual = ":inspect_test_component",
+    visibility = ["//src/lib/diagnostics/reader/rust:__pkg__"],
 )

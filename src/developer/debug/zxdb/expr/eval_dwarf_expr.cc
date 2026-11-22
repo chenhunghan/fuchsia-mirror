@@ -70,7 +70,7 @@ void DwarfExprEvalToValue(const fxl::RefPtr<EvalContext>& context, DwarfExprEval
     DwarfStackEntry result = eval.GetResult();
     if (!result.TreatAsUnsigned())
       return cb(Err("DWARF expression produced an unexpected type."));
-    ResolvePointer(context, result.unsigned_value(), type,
+    ResolvePointer(context, static_cast<uint64_t>(result.unsigned_value()), type,
                    [cb = std::move(cb)](ErrOrValue value) mutable { cb(std::move(value)); });
   }
 }

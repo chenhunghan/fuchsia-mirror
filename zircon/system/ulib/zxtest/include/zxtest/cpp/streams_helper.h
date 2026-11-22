@@ -2,11 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef ZIRCON_SYSTEM_ULIB_ZXTEST_INCLUDE_ZXTEST_CPP_STREAMS_HELPER_H_
-#define ZIRCON_SYSTEM_ULIB_ZXTEST_INCLUDE_ZXTEST_CPP_STREAMS_HELPER_H_
+#ifndef ZXTEST_CPP_STREAMS_HELPER_H_
+#define ZXTEST_CPP_STREAMS_HELPER_H_
 
+#include <memory>
+#include <ostream>
 #include <span>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
 
 #include <zxtest/base/assertion.h>
 #include <zxtest/base/types.h>
@@ -24,10 +29,8 @@ struct Tag {};
 
 class StreamableBase {
  public:
-  explicit StreamableBase(const zxtest::SourceLocation location)
-      : stream_(std::stringstream("")), location_(location) {
-    LIB_ZXTEST_CHECK_RUNNING();
-  }
+  explicit StreamableBase(zxtest::SourceLocation location);
+  ~StreamableBase();
 
   // Lower precedence operator that returns void, such that the following
   // expressions are valid in functions that return void:
@@ -39,50 +42,45 @@ class StreamableBase {
 
   template <typename T>
   StreamableBase& operator<<(T t) {
-    stream_ << t;
+    EnsureStream() << t;
+    return *this;
+  }
+
+  StreamableBase& operator<<(std::ostream& (*manip)(std::ostream&)) {
+    manip(EnsureStream());
     return *this;
   }
 
  protected:
-  std::stringstream stream_;
+  std::ostream& EnsureStream();
+  std::string GetText() const;
+  const zxtest::SourceLocation& location() const { return location_; }
+
+ private:
+  std::unique_ptr<std::stringstream> stream_;
   const zxtest::SourceLocation location_;
 };
 
 class StreamableFail : public StreamableBase {
  public:
-  StreamableFail(const zxtest::SourceLocation location, bool is_fatal,
-                 const std::span<zxtest::Message*> traces)
-      : StreamableBase(location), is_fatal_(is_fatal), traces_(traces) {}
-
-  ~StreamableFail() {
-    zxtest::Runner::GetInstance()->NotifyAssertion(
-        zxtest::Assertion(stream_.str(), location_, is_fatal_, traces_));
-  }
+  StreamableFail(zxtest::SourceLocation location, bool is_fatal);
+  StreamableFail(zxtest::SourceLocation location, bool is_fatal,
+                 std::span<zxtest::Message*> traces);
+  ~StreamableFail();
 
  private:
   bool is_fatal_ = false;
   std::span<zxtest::Message*> traces_;
+  bool has_explicit_traces_ = false;
 };
 
 class StreamableAssertion : public StreamableBase {
  public:
   StreamableAssertion(std::string_view actual_val, std::string_view expected_val,
                       const char* actual_symbol, const char* expected_symbol,
-                      const zxtest::SourceLocation location, bool is_fatal,
-                      const std::span<zxtest::Message*> traces)
-      : StreamableBase(location),
-        actual_value_(actual_val),
-        expected_value_(expected_val),
-        actual_symbol_(actual_symbol),
-        expected_symbol_(expected_symbol),
-        is_fatal_(is_fatal),
-        traces_(traces) {}
-
-  ~StreamableAssertion() {
-    zxtest::Runner::GetInstance()->NotifyAssertion(
-        zxtest::Assertion(stream_.str(), expected_symbol_, expected_value_, actual_symbol_,
-                          actual_value_, location_, is_fatal_, traces_));
-  }
+                      zxtest::SourceLocation location, bool is_fatal,
+                      std::span<zxtest::Message*> traces);
+  ~StreamableAssertion();
 
  private:
   const std::string actual_value_;
@@ -95,35 +93,46 @@ class StreamableAssertion : public StreamableBase {
 
 class StreamableSkip : public StreamableBase {
  public:
-  explicit StreamableSkip(const zxtest::SourceLocation location) : StreamableBase(location) {}
-
-  ~StreamableSkip() {
-    zxtest::Message message(stream_.str(), location_);
-    zxtest::Runner::GetInstance()->SkipCurrent(message);
-  }
+  explicit StreamableSkip(zxtest::SourceLocation location);
+  ~StreamableSkip();
 };
 
-// Evaluates a condition and returns true if it is satisfied. If it is not, will create an assertion
-// and notify the global runner instance.
+std::unique_ptr<StreamableAssertion> CreateStreamableAssertion(
+    const char* actual_symbol, FormatFn actual_printer, const char* expected_symbol,
+    FormatFn expected_printer, zxtest::SourceLocation location, bool is_fatal);
+
+std::unique_ptr<StreamableAssertion> EvaluateBoolConditionForStream(bool actual, bool expected,
+                                                                    const char* actual_symbol,
+                                                                    const char* expected_symbol,
+                                                                    zxtest::SourceLocation location,
+                                                                    bool is_fatal);
+
+std::unique_ptr<StreamableAssertion> EvaluateStatusConditionForStream(
+    zx_status_t actual, zx_status_t expected, bool expect_eq, const char* actual_symbol,
+    const char* expected_symbol, zxtest::SourceLocation location, bool is_fatal);
+
+std::unique_ptr<StreamableAssertion> EvaluateBytesConditionForStream(
+    const void* actual, const void* expected, size_t size, bool expect_eq,
+    const char* actual_symbol, const char* expected_symbol, zxtest::SourceLocation location,
+    bool is_fatal);
+
+// Evaluates a condition and returns nullptr if it is satisfied. If it is not, creates a
+// StreamableAssertion that notifies the global runner instance on destruction.
 template <typename Actual, typename Expected, typename CompareOp, typename PrintActual,
           typename PrintExpected>
 std::unique_ptr<StreamableAssertion> EvaluateConditionForStream(
     const Actual& actual, const Expected& expected, const char* actual_symbol,
-    const char* expected_symbol, const zxtest::SourceLocation& location, bool is_fatal,
+    const char* expected_symbol, zxtest::SourceLocation location, bool is_fatal,
     const CompareOp& compare, const PrintActual& print_actual,
     const PrintExpected& print_expected) {
   if (compare(actual, expected)) {
     return nullptr;
   }
 
-  // Report the assertion error.
-  std::string actual_value = print_actual(actual);
-  std::string expected_value = print_expected(expected);
-  return std::make_unique<StreamableAssertion>(actual_value, expected_value, actual_symbol,
-                                               expected_symbol, location, is_fatal,
-                                               zxtest::Runner::GetInstance()->GetScopedTraces());
+  return CreateStreamableAssertion(actual_symbol, FormatFn(actual, print_actual), expected_symbol,
+                                   FormatFn(expected, print_expected), location, is_fatal);
 }
 
 }  // namespace zxtest::internal
 
-#endif  // ZIRCON_SYSTEM_ULIB_ZXTEST_INCLUDE_ZXTEST_CPP_STREAMS_HELPER_H_
+#endif  // ZXTEST_CPP_STREAMS_HELPER_H_

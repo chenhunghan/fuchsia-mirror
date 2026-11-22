@@ -82,10 +82,20 @@ converted to `fuchsia` relative paths.
 
 ### Missing `alt` text for images
 
-Images must have meaningful `alt` text.
+Images must have `alt` text. `doc-checker` reports Markdown images that have
+neither `alt` text nor a title. Code review checks whether `alt` text describes
+the image. See [Alt text][alt-text].
+
+#### Incorrect
 
 ```markdown
-![Diagram of the state transitions](/docs/state-machine.png "State machine")
+![](/docs/state-machine.png)
+```
+
+#### Correct
+
+```markdown
+![A component moves from Stopped to Starting to Running](/docs/state-machine.png "State machine")
 ```
 
 ### Direct links to hidden files
@@ -260,7 +270,7 @@ TBD: _What is the use of ___supported_cpu_architecture.yaml___?_
 
 List of supported systems configurations.
 
-See [Supported system config list](/docs/contribute/governance/rfcs/0130_supported_hardware.md#initial_supported_sys_configyaml_list)
+See [Supported system config list](/docs/contribute/governance/rfcs/0130_supported_hardware.md#initial-supported-sys-config-list)
 
 ### Structure of_tools.yaml
 
@@ -272,13 +282,14 @@ See: [source code](https://source.corp.google.com/fuchsia/tools/doc_checker/src/
 
 This file defines the redirection rules for deprecated documents.
 
-See: [Redirect the pages to the deprecation notice](/docs/contribute/docs/deprecating-docs.md#redirect_the_pages_to_the_deprecation_notice).
+See: [Redirect the pages to the deprecation notice](/docs/contribute/docs/deprecating-docs.md#redirect-the-pages-to-the-deprecation-notice).
 
 ### Structure of _glossary.yaml
 
 This file defines the glossary of Fuchsia terminology.
 
-See: [Adding a glossary term](/docs/contribute/docs/glossary-entries.md#add_a_glossary_entry)
+See: [Adding a glossary
+term](/docs/contribute/docs/glossary-entries.md#add-a-glossary-entry)
 
 ## External link checks
 
@@ -296,3 +307,5 @@ enabled by adding the `--check-external-links` flag.
 The `hl` parameter indicates the user's host language. This parameter should
  not be included in the URL since it disables the automatic redirection to
  translated pages if they exist.
+
+[alt-text]: /docs/contribute/docs/adding-diagrams.md#alt-text

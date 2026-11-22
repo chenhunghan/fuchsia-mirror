@@ -288,6 +288,25 @@ impl GlobalPolicyChecker {
                 moniker: target_moniker.to_owned(),
             })
     }
+
+    /// Returns Ok(()) if `target_moniker` is allowed to have `startup=EAGER` set along a
+    /// root-reachable static chain.
+    ///
+    /// Unlike security-boundary allowlists (where an absent list denies all), `None` intentionally
+    /// leaves eager startup unrestricted for standalone test realms and nested `component_manager`
+    /// configs; all assembled products populate `Some(...)` from
+    /// `component_manager_policy_base.json5`.
+    pub fn eager_startup_allowed(&self, target_moniker: &Moniker) -> Result<(), PolicyError> {
+        let Some(allowlist) = &self.policy.child_policy.eager_startup else {
+            return Ok(());
+        };
+        allowlist.iter().any(|entry| entry.matches(target_moniker)).then_some(()).ok_or_else(|| {
+            PolicyError::ChildPolicyDisallowed {
+                policy: "eager_startup".to_owned(),
+                moniker: target_moniker.to_owned(),
+            }
+        })
+    }
 }
 
 /// Evaluates security policy relative to a specific Component (based on that Component's
@@ -403,6 +422,7 @@ mod tests {
                     AllowlistEntryBuilder::build_exact_from_moniker(&allowed1),
                     AllowlistEntryBuilder::build_exact_from_moniker(&allowed2),
                 ],
+                eager_startup: None,
             },
         });
         assert_vmex_allowed_matches!(policy, allowed1, Ok(()));
@@ -447,7 +467,7 @@ mod tests {
             },
             capability_policy: HashMap::new(),
             debug_capability_policy: HashMap::new(),
-            child_policy: ChildPolicyAllowlists { reboot_on_terminate: vec![] },
+            child_policy: ChildPolicyAllowlists::default(),
         });
         assert_create_raw_processes_allowed_matches!(policy, allowed1, Ok(()));
         assert_create_raw_processes_allowed_matches!(policy, allowed2, Ok(()));
@@ -500,7 +520,7 @@ mod tests {
             },
             capability_policy: HashMap::new(),
             debug_capability_policy: HashMap::new(),
-            child_policy: ChildPolicyAllowlists { reboot_on_terminate: vec![] },
+            child_policy: ChildPolicyAllowlists::default(),
         });
         assert_critical_allowed_matches!(policy, allowed1, Ok(()));
         assert_critical_allowed_matches!(policy, allowed2, Ok(()));
@@ -549,6 +569,7 @@ mod tests {
                     AllowlistEntryBuilder::build_exact_from_moniker(&allowed1),
                     AllowlistEntryBuilder::build_exact_from_moniker(&allowed2),
                 ],
+                eager_startup: None,
             },
         });
         assert_reboot_allowed_matches!(policy, allowed1, Ok(()));
@@ -556,5 +577,63 @@ mod tests {
         assert_reboot_disallowed!(policy, Moniker::root());
         assert_reboot_disallowed!(policy, allowed1.parent().unwrap());
         assert_reboot_disallowed!(policy, allowed1.child(ChildName::try_from("baz").unwrap()));
+    }
+
+    #[test]
+    fn global_policy_checker_eager_startup_policy_allowed() {
+        let allowed1 = Moniker::try_from(["core", "eager_one"]).unwrap();
+        let allowed2 = Moniker::try_from(["bootstrap", "eager_two"]).unwrap();
+
+        // Unconfigured (`None`) allows all monikers (for standalone test configs).
+        let unconfigured = Arc::new(SecurityPolicy::default());
+        assert_matches!(
+            GlobalPolicyChecker::new(unconfigured.clone()).eager_startup_allowed(&allowed1),
+            Ok(())
+        );
+        assert_matches!(
+            GlobalPolicyChecker::new(unconfigured)
+                .eager_startup_allowed(&Moniker::try_from(["core", "unlisted"]).unwrap()),
+            Ok(())
+        );
+
+        // Empty configured list (`Some(vec![])`) denies all monikers.
+        let deny_all = Arc::new(SecurityPolicy {
+            child_policy: ChildPolicyAllowlists {
+                reboot_on_terminate: vec![],
+                eager_startup: Some(vec![]),
+            },
+            ..Default::default()
+        });
+        assert_matches!(
+            GlobalPolicyChecker::new(deny_all).eager_startup_allowed(&allowed1),
+            Err(PolicyError::ChildPolicyDisallowed { policy, .. }) if policy == "eager_startup"
+        );
+
+        // Nonempty configured list allows only matching monikers.
+        let policy = Arc::new(SecurityPolicy {
+            child_policy: ChildPolicyAllowlists {
+                reboot_on_terminate: vec![],
+                eager_startup: Some(vec![
+                    AllowlistEntryBuilder::build_exact_from_moniker(&allowed1),
+                    AllowlistEntryBuilder::build_exact_from_moniker(&allowed2),
+                ]),
+            },
+            ..Default::default()
+        });
+        let checker = GlobalPolicyChecker::new(policy);
+        assert_matches!(checker.eager_startup_allowed(&allowed1), Ok(()));
+        assert_matches!(checker.eager_startup_allowed(&allowed2), Ok(()));
+        assert_matches!(
+            checker.eager_startup_allowed(&Moniker::root()),
+            Err(PolicyError::ChildPolicyDisallowed { .. })
+        );
+        assert_matches!(
+            checker.eager_startup_allowed(&allowed1.parent().unwrap()),
+            Err(PolicyError::ChildPolicyDisallowed { .. })
+        );
+        assert_matches!(
+            checker.eager_startup_allowed(&allowed1.child(ChildName::try_from("baz").unwrap())),
+            Err(PolicyError::ChildPolicyDisallowed { .. })
+        );
     }
 }

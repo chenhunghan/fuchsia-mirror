@@ -5,7 +5,6 @@
 #include "device_ctx.h"
 
 #include <fidl/fuchsia.hardware.mediacodec/cpp/wire.h>
-#include <fuchsia/io/cpp/fidl.h>
 #include <lib/ddk/driver.h>
 #include <lib/sync/completion.h>
 #include <lib/zx/profile.h>
@@ -17,7 +16,6 @@
 
 #include "amlogic-video.h"
 #include "macros.h"
-#include "sdk/lib/sys/cpp/service_directory.h"
 
 namespace amlogic_decoder {
 
@@ -136,8 +134,7 @@ void DeviceCtx::GetCodecFactory(GetCodecFactoryRequestView request,
 
 void DeviceCtx::SetAuxServiceDirectory(SetAuxServiceDirectoryRequestView request,
                                        SetAuxServiceDirectoryCompleter::Sync& completer) {
-  driver_->SetAuxServiceDirectory(
-      fidl::InterfaceHandle<fuchsia::io::Directory>(request->service_directory.TakeChannel()));
+  driver_->SetAuxServiceDirectory(std::move(request->service_directory));
 }
 
 void DeviceCtx::handle_unknown_method(

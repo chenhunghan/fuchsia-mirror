@@ -42,6 +42,7 @@ fx_cc_library(
         "@fuchsia_sdk//fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.powerdomain:fuchsia.hardware.powerdomain_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.reset:fuchsia.hardware.reset_cpp",
+        "@fuchsia_sdk//pkg/async-cpp",
         "@fuchsia_sdk//pkg/driver_component_cpp",
         "@fuchsia_sdk//pkg/driver_logging_cpp",
         "@fuchsia_sdk//pkg/driver_metadata_cpp",
@@ -50,6 +51,8 @@ fx_cc_library(
         "@fuchsia_sdk//pkg/driver_runtime",
         "@fuchsia_sdk//pkg/fit",
         "@fuchsia_sdk//pkg/hwreg",
+        "@fuchsia_sdk//pkg/inspect",
+        "@fuchsia_sdk//pkg/inspect_component_cpp",
         "@fuchsia_sdk//pkg/zx",
     ],
 )
@@ -90,13 +93,14 @@ fuchsia_cc_test(
         "@fuchsia_sdk//fidl/fuchsia.hardware.pin:fuchsia.hardware.pin_cpp",
         "@fuchsia_sdk//pkg/async_patterns_testing_cpp",
         "@fuchsia_sdk//pkg/driver_fake_clock_cpp",
+        "@fuchsia_sdk//pkg/driver_fake_mmio_reg_cpp",
         "@fuchsia_sdk//pkg/driver_fake_platform_device_cpp",
         "@fuchsia_sdk//pkg/driver_fake_powerdomain_cpp",
-        "@fuchsia_sdk//pkg/driver_fake_reset_cpp",
         "@fuchsia_sdk//pkg/driver_testing_cpp",
         "@fuchsia_sdk//pkg/fit",
+        "@fuchsia_sdk//pkg/fit-promise",
+        "@fuchsia_sdk//pkg/inspect",
         "@fuchsia_sdk//pkg/zx",
-        "@internal_sdk//pkg/fake-mmio-reg",
     ],
 )
 

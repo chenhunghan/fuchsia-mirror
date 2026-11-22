@@ -394,22 +394,33 @@ zx_status_t Imx227Device::CycleResetOnAndOff() {
 }
 
 zx_status_t Imx227Device::InitMipiCsi(uint32_t mode) {
-  mipi_info_t mipi_info;
-  mipi_adap_info_t adap_info;
-
+  fuchsia_hardware_mipicsi::wire::MipiInfo mipi_info = {};
   mipi_info.lanes = available_modes[mode].lanes;
   mipi_info.ui_value = 1000 / available_modes[mode].mbps;
   if ((1000 % available_modes[mode].mbps) != 0) {
     mipi_info.ui_value += 1;
   }
 
-  adap_info.format = MIPI_IMAGE_FORMAT_AM_RAW10;
-  adap_info.resolution.x = available_modes[mode].resolution_in.x;
-  adap_info.resolution.y = available_modes[mode].resolution_in.y;
-  adap_info.path = MIPI_PATH_PATH0;
-  adap_info.mode = MIPI_MODES_DIR_MODE;
-  auto status = mipi_.Init(&mipi_info, &adap_info);
-  return status;
+  fuchsia_hardware_mipicsi::wire::MipiAdapInfo adap_info = {
+      .resolution =
+          {
+              .x = available_modes[mode].resolution_in.x,
+              .y = available_modes[mode].resolution_in.y,
+          },
+      .format = fuchsia_hardware_mipicsi::wire::MipiImageFormat::kAmRaw10,
+      .mode = fuchsia_hardware_mipicsi::wire::MipiModes::kDirMode,
+      .path = fuchsia_hardware_mipicsi::wire::MipiPath::kPath0,
+  };
+  fidl::WireResult result = mipi_->Init(mipi_info, adap_info);
+  if (!result.ok()) {
+    zxlogf(ERROR, "Failed to send Init to mipicsi: %s", result.status_string());
+    return result.status();
+  }
+  if (result->is_error()) {
+    zxlogf(ERROR, "Init failed on mipicsi: %s", zx_status_get_string(result->error_value()));
+    return result->error_value();
+  }
+  return ZX_OK;
 }
 
 fpromise::result<int32_t, zx_status_t> Imx227Device::GetTemperature() {
@@ -633,9 +644,20 @@ zx_status_t Imx227Device::Create(zx_device_t* parent, std::unique_ptr<Imx227Devi
     return gpio_cam_rst.error_value();
   }
 
+  constexpr char kMipicsiFragmentName[] = "mipicsi";
+  zx::result mipi =
+      ddk::Device<void>::DdkConnectFragmentFidlProtocol<fuchsia_hardware_mipicsi::Service::Device>(
+          parent, kMipicsiFragmentName);
+  if (mipi.is_error()) {
+    zxlogf(ERROR, "Failed to connect to mipicsi protocol from fragment %s: %s",
+           kMipicsiFragmentName, mipi.status_string());
+    return mipi.error_value();
+  }
+
   auto sensor_device = std::make_unique<Imx227Device>(
       parent, std::move(clock_client.value()), std::move(gpio_vana_enable.value()),
-      std::move(gpio_vdig_enable.value()), std::move(gpio_cam_rst.value()));
+      std::move(gpio_vdig_enable.value()), std::move(gpio_cam_rst.value()),
+      std::move(mipi.value()));
 
   zx_status_t status = sensor_device->InitPdev();
   if (status != ZX_OK) {

@@ -209,7 +209,6 @@ local_font_bundle("noto-cjk-test-fonts-local") {
 }
 
 local_font_bundle("test-fonts-downstream-local") {
-  testonly = true
   asset_names = [
     "Roboto-Regular.ttf",
     "Roboto-Light.ttf",
@@ -222,7 +221,6 @@ local_font_bundle("test-fonts-downstream-local") {
 # Font collection for semi-hermetic downstream tests (e.g. Chromium) that need
 # to use a fixed set of fonts.
 font_collection("downstream-test-fonts-collection") {
-  testonly = true
   product_config_path = "downstream-test-fonts-collection.fontcfg.json5"
   manifest_prefix = "downstream_test_fonts"
   local_font_bundles = [ ":test-fonts-downstream-local" ]

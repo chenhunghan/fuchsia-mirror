@@ -52,14 +52,9 @@ devicetree_fragment("khadas-vim3-board") {
   ]
 }
 
-devicetree_fragment("vim3-power-config") {
-  sources = [ "dts/vim3-power-config.dtsi" ]
-  deps = [ ":khadas-vim3-board" ]
-}
-
 devicetree("vim3") {
   sources = [ "dts/vim3.dts" ]
-  deps = [ ":vim3-power-config" ]
+  deps = [ ":khadas-vim3-board" ]
   golden = "dts/vim3.golden.dts"
 
   # Suppressing warnings for bus@ffd00000 and video-decoder@ffd00000 which both

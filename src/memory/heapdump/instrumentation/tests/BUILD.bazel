@@ -1,0 +1,88 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//lib:selects.bzl", "selects")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":cpp-tests-test"],
+    visibility = ["//src/memory:__pkg__"],
+)
+
+# Note: Fuchsia-only target matching Zircon/FIDL headers and instrumentation dep via target_compatible_with.
+# @bazel2gn:raw_attribute:exclude_toolchain_tags = [ "heapdump" ]
+fx_cc_test_binary(
+    name = "bind",
+    srcs = ["bind_test.cc"],
+    # Needed for ASSERT_DEATH and ASSERT_EXIT tests.
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.memory.heapdump.process:fuchsia.memory.heapdump.process_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/memory/heapdump/instrumentation",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_unittest_component(
+    name = "bind-test",
+    binary = ":bind",
+)
+
+# Note: Fuchsia-only target matching instrumentation dep via target_compatible_with.
+fx_cc_test_binary(
+    name = "stats",
+    srcs = ["stats_test.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//src/memory/heapdump/instrumentation",
+    ],
+)
+
+fx_unittest_component(
+    name = "stats-test",
+    binary = ":stats",
+)
+
+fx_package(
+    name = "cpp-tests",
+    package_name = "heapdump-instrumentation-cpp-tests",
+    test_components = [
+        ":bind-test",
+        ":stats-test",
+    ],
+)
+
+# @bazel2gn:skip
+selects.config_setting_group(
+    name = "is_asan_or_hwasan",
+    match_any = [
+        "//build/bazel/config/variant_features/asan:true",
+        "//build/bazel/config/variant_features/hwasan:true",
+    ],
+)
+
+fx_test(
+    name = "cpp-tests-test",
+    # TODO(https://fxbug.dev/42073131): ASAN builds use a different allocator
+    # that heapdump's instrumentation does not support yet.
+    # @bazel2gn:skip
+    build_only = select({
+        ":is_asan_or_hwasan": True,
+        "//conditions:default": False,
+    }),
+    package = ":cpp-tests",
+)

@@ -11,7 +11,7 @@ load("@fuchsia_rules_common//packages:providers.bzl", "FuchsiaPackageInfo")
 def _relative_file_name(ctx, filename):
     return ctx.label.name + "_expanded/" + filename
 
-def unpack_prebuilt_package_impl(ctx, package_tool, package_tool_is_ffx = False, packaged_components = []):
+def unpack_prebuilt_package_common_impl(ctx, package_tool, package_tool_is_ffx = False, packaged_components = []):
     """Unpacks a prebuilt package archive (.far).
 
     Args:

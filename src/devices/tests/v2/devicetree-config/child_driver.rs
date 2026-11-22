@@ -47,7 +47,7 @@ impl Driver for ChildDriver {
         Ok(ChildDriver)
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("Child driver stopping");
     }
 }

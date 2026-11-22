@@ -1,5 +1,7 @@
 Name: fiat
+URL: https://boringssl.googlesource.com/boringssl
+Revision: 66da97b9420113c1cab4ca567b4f4d6f2aa2178c
+Security Critical: yes
 
+License: Apache-2.0
 License File: LICENSE
- -> License File Format: Single License
- -> License Classifications: Copyright, MIT

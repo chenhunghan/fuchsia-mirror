@@ -1,0 +1,61 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":base_test",
+        ":common_test",
+        ":infra_test",
+        ":local_test",
+    ],
+    visibility = ["//src/testing:__pkg__"],
+)
+
+# Disable synthetic __init__.py generation in ancestor directories so
+# //src/testing/end_to_end/mobly_driver does not shadow the mobly_driver
+# package when //src/testing/end_to_end is on sys.path via //src/testing/end_to_end/libs.
+host_py_test(
+    name = "common_test",
+    srcs = ["common_test.py"],
+    legacy_create_init = False,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/mobly_driver"],
+)
+
+host_py_test(
+    name = "local_test",
+    srcs = ["local_test.py"],
+    legacy_create_init = False,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/testing/end_to_end/mobly_driver",
+        "//third_party/parameterized",
+    ],
+)
+
+host_py_test(
+    name = "infra_test",
+    srcs = ["infra_test.py"],
+    legacy_create_init = False,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = ["//src/testing/end_to_end/mobly_driver"],
+)
+
+host_py_test(
+    name = "base_test",
+    srcs = ["base_test.py"],
+    legacy_create_init = False,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/testing/end_to_end/mobly_driver",
+        "//third_party/parameterized",
+    ],
+)

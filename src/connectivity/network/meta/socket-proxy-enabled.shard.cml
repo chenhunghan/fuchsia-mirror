@@ -47,6 +47,14 @@
             to: "#socket-proxy",
             dependency: "weak",
         },
+        {
+            // netcfg only uses Provider for its pass-through SocketProviderConnector,
+            // which socket-proxy replaces here.
+            protocol: "fuchsia.posix.socket.Provider",
+            from: "void",
+            to: "#netcfg",
+            availability: "optional",
+        },
     ],
     expose: [
         {

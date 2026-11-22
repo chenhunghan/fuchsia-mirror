@@ -9,7 +9,7 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "host_tests",
     tests = [],  # Include all tests in the package.
-    visibility = ["//examples:__pkg__"],
+    visibility = ["//examples:__subpackages__"],
 )
 
 host_rustc_test(

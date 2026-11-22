@@ -4,16 +4,18 @@
 
 #include "transfer_request_processor.h"
 
-#include <lib/ddk/hw/arch_ops.h>
 #include <lib/driver/logging/cpp/logger.h>
 #include <lib/fit/defer.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/trace/event.h>
 
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <span>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <safemath/checked_math.h>
 #include <safemath/safe_conversions.h>
@@ -82,9 +84,6 @@ std::tuple<uint16_t, uint32_t> TransferRequestProcessor::PreparePrdt<ScsiCommand
 
   FillPrdt(prdt, buffer_phys, prdt_entry_count, data_transfer_length);
 
-  // TODO(https://fxbug.dev/42075643): Enable unmmap and write buffer command. Umap and writebuffer
-  // must set the xfer->count value differently.
-
   return {prdt_offset, prdt_entry_count};
 }
 
@@ -110,7 +109,7 @@ zx::result<> TransferRequestProcessor::Init() {
   }
 
   // Start Utp Transfer Request list.
-  hw_wmb();
+  WriteDataMemoryBarrier();
   UtrListRunStopReg::Get().FromValue(0).set_value(true).WriteTo(&register_);
 
   return zx::ok();
@@ -194,19 +193,25 @@ zx::result<std::unique_ptr<ResponseType>> TransferRequestProcessor::SendRequestU
   if (status != ZX_OK) {
     std::lock_guard<std::mutex> lock(slot_lock_);
     RequestSlot &request_slot = slots_.GetSlot(slot_num);
-    request_slot.completion_cb = nullptr;
-    // admin_slot_lock_ is held for the whole wait and StopHostControllerForPowerDown() runs under
-    // it, so the controller cannot have lost power here; the check is purely defensive.
-    uint32_t doorbell = controller_.IsHardwarePoweredOff() ? 0 : ReadDoorBellRegister();
-    if (doorbell & (1u << slot_num)) {
-      SetSlotStateLocked(slot_num, SlotState::kTimeout);
-    } else {
-      if (zx::result<> result = ClearSlotLocked(request_slot); result.is_error()) {
-        return result.take_error();
+    if (request_slot.state == SlotState::kScheduled) {
+      request_slot.completion_cb = nullptr;
+      // admin_slot_lock_ is held for the whole wait and StopHostControllerForPowerDown() runs
+      // under it, so the controller cannot have lost power here; keep the slot in
+      // SlotState::kTimeout with its PMT pinned while UTRLDBR[31] remains set.
+      uint32_t doorbell = controller_.IsHardwarePoweredOff() ? 0 : ReadDoorBellRegister();
+      if (doorbell & (1u << slot_num)) {
+        SetSlotStateLocked(slot_num, SlotState::kTimeout);
+      } else {
+        if (zx::result<> result = ClearSlotLocked(request_slot); result.is_error()) {
+          return result.take_error();
+        }
       }
+      return zx::error(status);
     }
-    return zx::error(status);
   }
+  // If the wait timed out just as ProcessCompletionOfAdminRequests() claimed the slot under
+  // slot_lock_, wait for it to finish invoking the completion callback outside slot_lock_.
+  sync_completion_wait(&wait_context->complete, ZX_TIME_INFINITE);
   if (wait_context->completion_status != ZX_OK) {
     return zx::error(wait_context->completion_status);
   }
@@ -243,9 +248,9 @@ void TransferRequestProcessor::SendRequestUsingSlot(
   {
     std::lock_guard<std::mutex> lock(slot_lock_);
     RequestSlot &request_slot = slots_.GetSlot(slot);
-    if (request_slot.state != SlotState::kReserved ||
+    if (request_slot.state != SlotState::kReserved || controller_.IsHardwarePoweredOff() ||
         (slot != kAdminCommandSlotNumber && slot_allocation_blocked_)) {
-      request_slot.completion_cb = std::move(completion_cb);
+      error_cb = std::move(completion_cb);
       status = ZX_ERR_CANCELED;
     } else {
       const uint16_t response_offset = request.GetResponseOffset();
@@ -257,6 +262,11 @@ void TransferRequestProcessor::SendRequestUsingSlot(
       request_slot.dma_length = dma_length;
       request_slot.is_read = (request.GetDataDirection() == DataDirection::kDeviceToHost);
       request_slot.is_scsi_command = std::is_base_of_v<ScsiCommandUpiu, RequestType>;
+      if constexpr (std::is_base_of_v<ScsiCommandUpiu, RequestType>) {
+        request_slot.scsi_opcode = static_cast<uint8_t>(request.GetOpcode());
+      } else {
+        request_slot.scsi_opcode = 0;
+      }
       request_slot.response_upiu_offset = response_offset;
 
       constexpr size_t kStackPaddrCapacity = 32;
@@ -290,6 +300,7 @@ void TransferRequestProcessor::SendRequestUsingSlot(
             fdf::error("Failed to pin IO buffer: {}", zx_status_get_string(pin_status));
             status = pin_status;
           } else {
+            request_slot.pinned_page_count = page_count;
             // Ensure that any cached writes are written out to RAM before we issue the request.
             // For writes, CLEAN is sufficient and cheaper. For reads, CLEAN_INVALIDATE ensures
             // pending writes are flushed and cache lines are cleared before DMA.
@@ -337,13 +348,13 @@ void TransferRequestProcessor::SendRequestUsingSlot(
     }
 
     if (status != ZX_OK) {
-      error_cb = std::move(request_slot.completion_cb);
+      if (!error_cb) {
+        error_cb = std::move(request_slot.completion_cb);
+      }
       if (request_slot.state != SlotState::kFree) {
         if (zx::result<> clear_res = ClearSlotLocked(request_slot); clear_res.is_error()) {
           fdf::error("Failed to clear slot[{}]: {}", slot, clear_res);
         }
-      } else {
-        request_slot.completion_cb = nullptr;
       }
     }
   }
@@ -396,11 +407,7 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
       slots_.GetDescriptorBuffer<ResponseUpiu>(slot_num, request_slot.response_upiu_offset));
 
   zx::result<> request_result = zx::ok();
-  if (completion_status == ZX_ERR_TIMED_OUT) {
-    status_message.host_status_code = scsi::HostStatusCode::kTimeout;
-    status_message.scsi_status_code = scsi::StatusCode::GOOD;
-    request_result = zx::error(ZX_ERR_TIMED_OUT);
-  } else if (completion_status != ZX_OK) {
+  if (completion_status != ZX_OK) {
     request_result = zx::error(completion_status);
   } else {
     request_result = CheckResponse(slot_num, response);
@@ -438,13 +445,6 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
     request_result = controller_.ScsiComplete(status_message, sense_data);
   }
 
-  if (completion_status == ZX_ERR_TIMED_OUT && (ReadDoorBellRegister() & (1u << slot_num))) {
-    // Hardware still owns the slot; do not unpin PMT memory until hardware doorbell clears
-    // or controller reset / task abort finishes.
-    SetSlotStateLocked(slot_num, SlotState::kTimeout);
-    return ZX_ERR_TIMED_OUT;
-  }
-
   // Unpin data buffer before signalling request completion to the upper layer. This is
   // necessary because the filesystem is allowed to transfer pages directly out of this
   // buffer.
@@ -455,9 +455,10 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
         request_result = zx::error(unpin_status);
       }
     }
+    request_slot.pinned_page_count = 0;
   }
 
-  if (response.GetHeader().event_alert()) {
+  if (completion_status == ZX_OK && response.GetHeader().event_alert()) {
     if (zx::result result = controller_.GetDeviceManager().PostExceptionEventsTask();
         result.is_error()) {
       fdf::error("Failed to handle Exception Event slot[{}]: {}", slot_num, result.status_string());
@@ -467,21 +468,31 @@ zx_status_t TransferRequestProcessor::UpiuCompletion(uint8_t slot_num, RequestSl
   return request_result.status_value();
 }
 
+TransferRequestProcessor::TimeoutRegisterSnapshot
+TransferRequestProcessor::CaptureTimeoutRegisters() {
+  if (controller_.IsHardwarePoweredOff()) {
+    return {};
+  }
+  // Note: UECPA..UECDME are hardware read-to-clear registers (UFSHCI 3.0 sections 5.3.5-5.3.9 /
+  // UFSHCI 4.0 sections 5.3.6-5.3.10), so each register is read once into a local variable here.
+  return TimeoutRegisterSnapshot{
+      .hcs = HostControllerStatusReg::Get().ReadFrom(&register_).reg_value(),
+      .is = InterruptStatusReg::Get().ReadFrom(&register_).reg_value(),
+      .utrldbr = UtrListDoorBellReg::Get().ReadFrom(&register_).reg_value(),
+      .uecpa = HostUicErrorCodePhyAdapterLayerReg::Get().ReadFrom(&register_).reg_value(),
+      .uecdl = HostUicErrorCodeDataLinkLayerReg::Get().ReadFrom(&register_).reg_value(),
+      .uecn = HostUicErrorCodeNetworkLayerReg::Get().ReadFrom(&register_).reg_value(),
+      .uect = HostUicErrorCodeTransportLayerReg::Get().ReadFrom(&register_).reg_value(),
+      .uecdme = HostUicErrorCodeReg::Get().ReadFrom(&register_).reg_value(),
+  };
+}
+
 void TransferRequestProcessor::RequestCompletion(uint8_t slot_num, RequestSlot &request_slot,
-                                                 bool is_timeout,
+                                                 zx_status_t completion_status,
                                                  fit::callback<void(zx_status_t)> &cb,
                                                  zx_status_t &status) {
-  zx_status_t completion_status = ZX_OK;
-  if (is_timeout) {
-    // UTRLDBR bit is still set: tell the host controller to abandon the slot
-    // *before* UpiuCompletion() unpins the client VMO and completes the block
-    // op, otherwise a late DATA-IN UPIU will DMA into freed pages.
-    // UFSHCI 3.0 5.4.4: UTRLCLR is W0C - write 0 to the slot bit to clear it.
-    UtrListClearReg::Get().FromValue(~(1u << slot_num)).WriteTo(&register_);
-    SetSlotStateLocked(slot_num, SlotState::kTimeout);
-    completion_status = ZX_ERR_TIMED_OUT;
-  } else if (request_slot.data_vmo->is_valid() && request_slot.is_read &&
-             request_slot.dma_length > 0) {
+  if (completion_status == ZX_OK && request_slot.data_vmo->is_valid() && request_slot.is_read &&
+      request_slot.dma_length > 0) {
     // Clean and invalidate the cache so that the next CPU read picks up data written to main memory
     // by the controller (discarding any speculative CPU prefetches during DMA).
     completion_status =
@@ -500,60 +511,101 @@ void TransferRequestProcessor::RequestCompletion(uint8_t slot_num, RequestSlot &
         "(Possibly a UNIT_ATTENTION condition)",
         slot_num);
   } else if (status != ZX_OK) {
-    fdf::debug("Failed to complete request, slot[{}]: {}", slot_num, zx_status_get_string(status));
+    fdf::error("Failed to complete request, slot[{}]: {}", slot_num, zx_status_get_string(status));
   }
   request_slot.result = status;
 
   cb = std::move(request_slot.completion_cb);
 
-  if (!is_timeout) {
-    UtrListCompletionNotificationReg::Get()
-        .FromValue(0)
-        .set_notification(1u << slot_num)
-        .WriteTo(&register_);
+  UtrListCompletionNotificationReg::Get()
+      .FromValue(0)
+      .set_notification(1u << slot_num)
+      .WriteTo(&register_);
 
-    if (zx::result result = ClearSlotLocked(request_slot); result.is_error()) {
-      fdf::error("Failed to clear slot[{}]: {}", slot_num, result);
-    }
+  if (zx::result result = ClearSlotLocked(request_slot); result.is_error()) {
+    fdf::error("Failed to clear slot[{}]: {}", slot_num, result);
   }
 }
 
-bool TransferRequestProcessor::ProcessSlotCompletion(uint8_t slot_num, uint32_t doorbell,
-                                                     fit::callback<void(zx_status_t)> &cb,
-                                                     zx_status_t &status) {
-  bool is_completed = false;
+bool TransferRequestProcessor::ProcessSlotCompletion(
+    uint8_t slot_num, uint32_t doorbell, fit::callback<void(zx_status_t)> &cb, zx_status_t &status,
+    std::optional<TimeoutRegisterSnapshot> *timeout_snapshot) {
   RequestSlot &request_slot = slots_.GetSlot(slot_num);
-  if (request_slot.state == SlotState::kScheduled) {
-    auto descriptor = slots_.GetRequestDescriptor<TransferRequestDescriptor>(slot_num);
-    if (!(doorbell & (1u << slot_num))) {
-      // Hardware cleared doorbell; ensure descriptor DMA writes are visible before checking status.
-      // Tight spin-wait for DMA write-posting interconnect buffer settling (typically < 100ns).
-      // hw_rmb() is a hardware load barrier (std::atomic_thread_fence only orders accesses within
-      // the C++ memory model, not against the controller's DMA writes).
-      for (uint32_t retry = 0;
-           retry < kOverallCompletionRetries &&
-           descriptor->overall_command_status() == OverallCommandStatus::kInvalid;
-           ++retry) {
-        hw_rmb();
-      }
-      if (descriptor->overall_command_status() == OverallCommandStatus::kInvalid) {
-        if (zx_clock_get_monotonic() >= request_slot.deadline) {
-          fdf::warn("Doorbell cleared for slot[{}] but OCS remained invalid and deadline passed",
-                    slot_num);
-          RequestCompletion(slot_num, request_slot, /*is_timeout=*/true, cb, status);
-          return true;
-        }
-        return false;
-      }
-      hw_rmb();
-      RequestCompletion(slot_num, request_slot, /*is_timeout=*/false, cb, status);
-      is_completed = true;
-    } else if (request_slot.deadline < zx_clock_get_monotonic()) {
-      RequestCompletion(slot_num, request_slot, /*is_timeout=*/true, cb, status);
-      is_completed = true;
-    }
+  if (request_slot.state != SlotState::kScheduled) {
+    return false;
   }
-  return is_completed;
+
+  auto descriptor = slots_.GetRequestDescriptor<TransferRequestDescriptor>(slot_num);
+  if (!(doorbell & (1u << slot_num))) {
+    // Hardware cleared doorbell; ensure descriptor DMA writes are visible before checking status.
+    // Tight spin-wait for DMA write-posting interconnect buffer settling (typically < 100ns).
+    // ReadDataMemoryBarrier() is a hardware load barrier (std::atomic_thread_fence only orders
+    // accesses within the C++ memory model, not against the controller's DMA writes).
+    for (uint32_t retry = 0; retry < kOverallCompletionRetries &&
+                             descriptor->overall_command_status() == OverallCommandStatus::kInvalid;
+         ++retry) {
+      ReadDataMemoryBarrier();
+    }
+    if (descriptor->overall_command_status() == OverallCommandStatus::kInvalid) {
+      if (zx_clock_get_monotonic() >= request_slot.deadline) {
+        fdf::error("Doorbell cleared for slot[{}] but OCS remained invalid past deadline",
+                   slot_num);
+        RequestCompletion(slot_num, request_slot, ZX_ERR_IO, cb, status);
+        return true;
+      }
+      return false;
+    }
+    ReadDataMemoryBarrier();
+    RequestCompletion(slot_num, request_slot, ZX_OK, cb, status);
+    return true;
+  }
+
+  if (slot_num != kAdminCommandSlotNumber) {
+    const zx_time_t now = zx_clock_get_monotonic();
+    if (now < request_slot.deadline) {
+      return false;
+    }
+    // An I/O slot is never aborted on elapsed time. UTRLDBR, SlotState::kScheduled, the pinned PMT
+    // and the client bio all stay intact for as long as the hardware holds the request:
+    // - Writing UTRLCLR and unpinning while the controller still owns the PRDT would let a late
+    //   completion DMA into pages that have been handed back to the filesystem.
+    // - Fxfs cannot absorb an I/O error (it would terminate its journal), whereas a wedged
+    //   transfer is diagnosed by the periodic log lines below and handled by the storage and
+    //   userpager watchdogs on eng/userdebug builds.
+    // A late hardware completion, however long it takes, still clears UTRLDBR and completes
+    // cleanly above.
+    ZX_DEBUG_ASSERT(timeout_snapshot != nullptr);
+    if (!timeout_snapshot->has_value()) {
+      timeout_snapshot->emplace(CaptureTimeoutRegisters());
+    }
+    const TimeoutRegisterSnapshot &regs = **timeout_snapshot;
+    timeout_log_count_.fetch_add(1, std::memory_order_acq_rel);
+    fdf::error(
+        "UTP transfer slot[{}] (opcode=0x{:02x}) still scheduled past {}ms timeout; leaving "
+        "DMA pinned (HCS=0x{:08x} IS=0x{:08x} UTRLDBR=0x{:08x} UECPA=0x{:08x} UECDL=0x{:08x} "
+        "UECN=0x{:08x} UECT=0x{:08x} UECDME=0x{:08x})",
+        slot_num, request_slot.scsi_opcode, GetTimeout().to_msecs(), regs.hcs, regs.is,
+        regs.utrldbr, regs.uecpa, regs.uecdl, regs.uecn, regs.uect, regs.uecdme);
+    // Re-arm the deadline so the IoLoop timeout task logs again after another command timeout.
+    request_slot.deadline = zx_time_add_duration(now, GetTimeout().get());
+  }
+  return false;
+}
+
+void TransferRequestProcessor::QuarantineSlotPmtLocked(uint8_t slot_num,
+                                                       RequestSlot &request_slot) {
+  // HCE failed to clear, so hardware DMA may still be active; closing the PMT handle without
+  // calling unpin() leaves its physical pages quarantined by the kernel BTI so DMA cannot corrupt
+  // recycled physical pages even after the aborted bio completes on teardown.
+  const size_t pages = request_slot.pinned_page_count;
+  request_slot.pinned_page_count = 0;
+  request_slot.pmt.reset();
+  quarantined_pmt_count_.fetch_add(1, std::memory_order_acq_rel);
+  quarantined_page_count_.fetch_add(pages, std::memory_order_acq_rel);
+  fdf::error(
+      "Quarantining {} DMA page(s) for aborted UTP slot[{}] (opcode=0x{:02x}) because HCE failed "
+      "to clear",
+      pages, slot_num, request_slot.scsi_opcode);
 }
 
 uint32_t TransferRequestProcessor::ProcessCompletionOfAdminRequests() {
@@ -607,6 +659,8 @@ uint32_t TransferRequestProcessor::ProcessCompletionOfIoRequests() {
   }
 
   uint32_t completion_count = 0;
+  // UECPA..UECDME are read-to-clear, so the register snapshot is captured at most once per pass.
+  std::optional<TimeoutRegisterSnapshot> timeout_snapshot;
   while (active_slots != 0) {
     const uint8_t slot_num = static_cast<uint8_t>(std::countr_zero(active_slots));
     active_slots &= active_slots - 1;
@@ -617,7 +671,7 @@ uint32_t TransferRequestProcessor::ProcessCompletionOfIoRequests() {
       if (controller_.IsHardwarePoweredOff()) {
         return completion_count;
       }
-      if (ProcessSlotCompletion(slot_num, doorbell, cb, status)) {
+      if (ProcessSlotCompletion(slot_num, doorbell, cb, status, &timeout_snapshot)) {
         completion_count++;
       }
     }
@@ -626,6 +680,39 @@ uint32_t TransferRequestProcessor::ProcessCompletionOfIoRequests() {
     }
   }
   return completion_count;
+}
+
+void TransferRequestProcessor::AbortInflightIoRequests(bool controller_stopped,
+                                                       zx_status_t abort_status) {
+  std::vector<fit::callback<void(zx_status_t)>> callbacks;
+  {
+    std::lock_guard<std::mutex> lock(slot_lock_);
+    ForEachAllocatedSlotLocked(
+        [&](uint8_t slot_num, RequestSlot &request_slot) TA_REQ(slot_lock_) {
+          if (request_slot.completion_cb) {
+            callbacks.push_back(std::move(request_slot.completion_cb));
+          }
+          if (!controller_stopped && request_slot.pmt.is_valid()) {
+            QuarantineSlotPmtLocked(slot_num, request_slot);
+          }
+          if (zx::result<> result = ClearSlotLocked(request_slot); result.is_error()) {
+            fdf::error("Failed to clear aborted I/O slot[{}]: {}", slot_num, result);
+          }
+        },
+        /*excluded_mask=*/(1u << kAdminCommandSlotNumber));
+    RequestSlot &admin_slot = slots_.GetSlot(kAdminCommandSlotNumber);
+    if (admin_slot.state == SlotState::kTimeout) {
+      if (!controller_stopped && admin_slot.pmt.is_valid()) {
+        QuarantineSlotPmtLocked(kAdminCommandSlotNumber, admin_slot);
+      }
+      if (zx::result<> result = ClearSlotLocked(admin_slot); result.is_error()) {
+        fdf::error("Failed to clear timed-out admin slot: {}", result);
+      }
+    }
+  }
+  for (auto &cb : callbacks) {
+    cb(abort_status);
+  }
 }
 
 TransferRequestProcessor::IoSlotState TransferRequestProcessor::GetIoSlotState() {

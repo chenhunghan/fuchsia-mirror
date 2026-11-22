@@ -46,7 +46,7 @@ struct ::fidl::internal::WireCodingTraits<{{ .WireTransactionalEvent }}, ::fidl:
   {{ if .ResponseArgs }}
     {{ .WireTransactionalEvent }}::{{ .WireTransactionalEvent.Self }}({{ RenderParams .ResponseArgs }})
     : body{ {{ RenderForwardParams .ResponseArgs }} } {
-      ::fidl::InitTxnHeader(&header, 0, {{ .OrdinalName }}, {{ .DynamicFlagsName }});
+      ::fidl::InitTxnHeader(&this->header, 0, {{ .OrdinalName }}, {{ .DynamicFlagsName }});
     }
   {{- end }}
 

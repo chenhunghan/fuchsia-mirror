@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/arch/intrin.h>
 #include <lib/fit/defer.h>
 #include <lib/maybe-standalone-test/maybe-standalone.h>
 #include <lib/zx/bti.h>
@@ -10,6 +11,8 @@
 #include <zircon/syscalls.h>
 #include <zircon/syscalls/iommu.h>
 
+#include <atomic>
+#include <cinttypes>
 #include <thread>
 
 #include <zxtest/zxtest.h>
@@ -1394,6 +1397,60 @@ TEST(Snapshot, ResizeSnapshotRace) {
     // them the hidden node will still have content and trigger a kernel panic. If things went well
     // then nothing will happen.
   };
+}
+
+// This is a regression test for https://fxbug.dev/587516127
+TEST(Snapshot, TreeWalkNextChildUafRace) {
+  const size_t page_size = zx_system_get_page_size();
+  constexpr uint64_t kSentinel = 0x1122334455667788ULL;
+  constexpr uint64_t kUnrelated = 0xdeadbeefcafebabeULL;
+
+  UserPager pager;
+  ASSERT_TRUE(pager.Init());
+  Vmo* root;
+  ASSERT_TRUE(pager.CreateVmoWithOptions(0, ZX_VMO_RESIZABLE, &root));
+  ASSERT_TRUE(root->Resize(1));
+
+  size_t iter = 0;
+  for (vmo_test::TestLimiter limiter(5000, zx::sec(30)); !limiter.Finished();
+       limiter.next(), ++iter) {
+    ASSERT_OK(root->vmo().write(&kSentinel, 0, sizeof(kSentinel)));
+
+    auto c1 = root->Clone(0, page_size, ZX_VMO_CHILD_SNAPSHOT_MODIFIED, ZX_VM_PERM_READ);
+    ASSERT_NOT_NULL(c1);
+    const auto* ptr = reinterpret_cast<const volatile uint64_t*>(c1->base_addr());
+    ASSERT_EQ(uint64_t{*ptr}, kSentinel);
+
+    // Insert hidden parent H: root -> H -> [c2, c1].
+    zx::vmo c2;
+    ASSERT_OK(c1->vmo().create_child(ZX_VMO_CHILD_SNAPSHOT_MODIFIED, 0, page_size, &c2));
+
+    std::atomic<bool> ready{false};
+    zx_status_t zero_status = ZX_ERR_INTERNAL;
+    std::thread zero_thread([&] {
+      ready.store(true, std::memory_order_release);
+      zero_status = root->vmo().op_range(ZX_VMO_OP_ZERO, 0, page_size, nullptr, 0);
+    });
+    while (!ready.load(std::memory_order_acquire)) {
+      arch::Yield();
+    }
+    for (size_t s = 0; s < (iter % 64) * 8; ++s) {
+      arch::Yield();
+    }
+    c2.reset();
+    zero_thread.join();
+    ASSERT_OK(zero_status);
+
+    zx::vmo unrelated;
+    ASSERT_OK(zx::vmo::create(16 * page_size, 0, &unrelated));
+    for (size_t i = 0; i < 16; ++i) {
+      ASSERT_OK(unrelated.write(&kUnrelated, i * page_size, sizeof(kUnrelated)));
+    }
+
+    const uint64_t observed = *ptr;
+    ASSERT_TRUE(observed == 0u || observed == kSentinel,
+                "c1 read 0x%016" PRIx64 " from an unrelated VMO's page", observed);
+  }
 }
 
 }  // namespace pager_tests

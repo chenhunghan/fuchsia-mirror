@@ -433,9 +433,11 @@ type HitTestInteraction = flexible enum : uint8 {
     /// and accessibility hit testing.
     DEFAULT = 0;
 
-    /// Some use cases require that a hit region to interact with regular hit testing, but not
-    /// interact with accessibility hit testing. Here, "semantics" refers to accessibility's
-    /// semantic tree data, which describes UI elements in a View.
+    /// Interacts with regular hit testing, but is skipped by accessibility hit testing so hits can
+    /// pass through to Transforms behind it in the same View and to any Views embedded inside that
+    /// View. Never passes accessibility hit tests through to a parent or sibling View behind that
+    /// View. Here, "semantics" refers to accessibility's semantic tree data, which describes UI
+    /// elements in a View.
     SEMANTICALLY_INVISIBLE = 1;
 };
 
@@ -800,21 +802,26 @@ closed protocol Flatland {
     /// Precedence rules
     ///   Within a Transform, if multiple hit regions overlap, the hit test examines each
     ///   intersecting hit region for a possible interaction. Thus, for a regular hit test R and an
-    ///   accessibility hit test A, where R and A both intersect two hit regions D ([`DEFAULT`]) and
-    ///   S ([`SEMANTICALLY_INVISIBLE`]) on the same Transform, (1) R interacts with both D and S,
-    ///   and (2) A only interacts with D. Generally, hit regions that overlap in a single Transform
-    ///   can cause confusing behavior.
+    ///   accessibility hit test A, where R and A both intersect two hit regions D
+    ///   ([`HitTestInteraction.DEFAULT`]) and S ([`HitTestInteraction.SEMANTICALLY_INVISIBLE`]) on
+    ///   the same Transform, (1) R interacts with both D and S, and (2) A only interacts with D.
+    ///   Generally, hit regions that overlap in a single Transform can cause confusing behavior.
     ///
     ///   Within a View, for a given hit test, the front-most Transform's hit regions take
     ///   precedence over those behind. This follows the expected reverse "render order" of
     ///   Transforms (described in [`CreateTransform`]), where a user expects to interact with
-    ///   Content that is visible, or front-most.
+    ///   Content that is visible, or front-most. For an accessibility hit test, if a Transform's
+    ///   intersecting hit regions are all [`HitTestInteraction.SEMANTICALLY_INVISIBLE`], that
+    ///   Transform is skipped in favor of Transforms behind it in the same View.
     ///
     ///   Across Flatland sessions, for a given hit test, the front-most session's front-most
     ///   Transform's hit regions take precedence over those behind. This follows the expected
     ///   reverse "render order" of views, where a user expects to interact with the View that is
     ///   visible, or front-most. For example, if a child View owns Content that is rendered over
-    ///   the parent View, the user expects to interact with the child's Content.
+    ///   the parent View, the user expects to interact with the child's Content. For an
+    ///   accessibility hit test, skipping a [`HitTestInteraction.SEMANTICALLY_INVISIBLE`] region on
+    ///   a View can pass hits through to that same View and any Views embedded inside it, but never
+    ///   to a parent or sibling View behind it.
     strict SetHitRegions(struct {
         transform_id TransformId;
         /// Each region's [`HitRegion.region.width`] and [`HitRegion.region.height`] field must be a

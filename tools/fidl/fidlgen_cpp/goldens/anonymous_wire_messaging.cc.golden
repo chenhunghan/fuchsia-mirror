@@ -267,7 +267,7 @@ void fidl::internal::WireBufferCompleterImpl<::test_anonymous::SomeProtocol::Som
 
 ::fidl::internal::TransactionalRequest<::test_anonymous::SomeProtocol::SomeMethod>::TransactionalRequest(::test_anonymous::wire::UnionMember union_member, ::test_anonymous::wire::TableMember table_member)
     : body(::test_anonymous::wire::SomeProtocolSomeMethodRequest{union_member, table_member}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_anonymous::kSomeProtocol_SomeMethod_Ordinal, ::test_anonymous::kSomeProtocol_SomeMethod_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_anonymous::kSomeProtocol_SomeMethod_Ordinal, ::test_anonymous::kSomeProtocol_SomeMethod_DynamicFlags);
 }
 
 template <bool IsRecursive>
@@ -292,7 +292,7 @@ template struct ::fidl::internal::WireCodingTraits<::fidl::internal::Transaction
 
 ::fidl::internal::TransactionalResponse<::test_anonymous::SomeProtocol::SomeMethod>::TransactionalResponse(::test_anonymous::wire::SomeProtocolSomeMethodResult SomeProtocolSomeMethodResult)
     : body(::fidl::WireResponse<::test_anonymous::SomeProtocol::SomeMethod>(SomeProtocolSomeMethodResult)) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_anonymous::kSomeProtocol_SomeMethod_Ordinal, ::test_anonymous::kSomeProtocol_SomeMethod_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_anonymous::kSomeProtocol_SomeMethod_Ordinal, ::test_anonymous::kSomeProtocol_SomeMethod_DynamicFlags);
 }
 ::fidl::internal::TransactionalResponse<::test_anonymous::SomeProtocol::SomeMethod>::TransactionalResponse() {
   ::fidl::InitTxnHeader(&header, 0, ::test_anonymous::kSomeProtocol_SomeMethod_Ordinal, ::test_anonymous::kSomeProtocol_SomeMethod_DynamicFlags);

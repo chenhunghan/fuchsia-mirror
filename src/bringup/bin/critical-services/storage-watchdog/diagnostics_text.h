@@ -66,11 +66,28 @@ class LogTail {
 std::vector<std::string> InspectLines(std::span<const std::string> batches,
                                       size_t max_bytes_per_component, size_t max_bytes);
 
-// The debuglog ring space that writing |lines| takes.
+// Monotonic ZX_INFO_TASK_RUNTIME durations (in nanoseconds) for a process or thread.
+struct TaskRuntimeSample {
+  int64_t cpu_ns = 0;
+  int64_t queue_ns = 0;
+  int64_t page_fault_ns = 0;
+  int64_t lock_contention_ns = 0;
+};
+
+// Formats the positive deltas between two TaskRuntimeSamples (e.g. "cpu=+1.2ms queue=+248.5ms"),
+// or an empty string if none of the four counters advanced.
+std::string FormatTaskRuntimeDelta(const TaskRuntimeSample& before, const TaskRuntimeSample& after);
+
+// The debuglog ring space that writing newline-terminated |text| or |lines| takes.
+size_t DebuglogCost(std::string_view text);
 size_t DebuglogCost(std::span<const std::string> lines);
 
 // The newest |lines| that fit in |budget| bytes of debuglog ring.
 std::span<const std::string> NewestWithinBudget(std::span<const std::string> lines, size_t budget);
+
+// The first |texts| that fit in |budget| bytes of debuglog ring. Each text is one or more
+// newline-terminated lines that are kept or dropped together.
+std::span<const std::string> FirstWithinBudget(std::span<const std::string> texts, size_t budget);
 
 }  // namespace storage_watchdog
 

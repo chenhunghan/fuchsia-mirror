@@ -10,13 +10,13 @@ if (is_host) {
     sources = [ "main_build.py" ]
     library_deps = [
       ":build_timeout",
+      ":lock_utils_lib",
       ":properties_lib",
       ":pstree_lib",
       ":python_subprocess_lib",
       ":signal_utils_lib",
       ":top_build_wrap_lib",
-      "//build/auth:gcloud",
-      "//build/auth:gcloud_creds",
+      "//build/auth:auth_env",
       "//build/bazel/scripts:bazel_invocation",
       "//build/profile:procfs",
       "//build/rbe:build_summary",
@@ -24,8 +24,13 @@ if (is_host) {
       "//build/rbe:rbe_profile",
       "//build/rbe:rbe_settings",
       "//build/resultstore:rs_profile",
+      "//build/scripts/python_forkserver:setting",
     ]
-    data_deps = [ "//build/auth:select_auth_method" ]
+  }
+
+  python_library("lock_utils_lib") {
+    sources = [ "lock_utils.py" ]
+    library_deps = [ "//build/profile:procfs" ]
   }
 
   python_library("python_subprocess_lib") {
@@ -73,6 +78,9 @@ if (is_host) {
     sources = [ "top_build_wrap.py" ]
     library_deps = [
       ":python_subprocess_lib",
+      "//build/profile:profile_wrap",
+      "//build/rbe:reproxy_wrap",
+      "//build/resultstore:rsproxy_wrap",
       "//build/tui:build_tui_wrap",
     ]
   }
@@ -85,13 +93,20 @@ if (is_host) {
     sources = [ "service_profile.py" ]
   }
 
+  python_build_time_tests("lock_utils_test") {
+    tests = [ "lock_utils_test.py" ]
+    deps = [
+      ":lock_utils_lib",
+      "//build/profile:procfs_test_utils",
+    ]
+  }
+
   python_build_time_tests("main_build_test") {
     tests = [ "main_build_test.py" ]
     deps = [
       ":main_build_lib",
-      "//build/auth:apt",
+      "//build/auth:auth_env",
       "//build/auth:gcloud",
-      "//build/auth:gcloud_creds",
     ]
   }
 
@@ -154,7 +169,10 @@ if (is_host) {
 
   python_build_time_tests("top_build_wrap_test") {
     tests = [ "top_build_wrap_test.py" ]
-    deps = [ ":top_build_wrap_lib" ]
+    deps = [
+      ":top_build_wrap_lib",
+      "//build/resultstore:rsclient",
+    ]
   }
 
   python_build_time_tests("ninjatrace2json_test") {
@@ -168,6 +186,7 @@ group("tests") {
   deps = [
     ":build_timeout_test($host_toolchain)",
     ":graceful_timeout_test($host_toolchain)",
+    ":lock_utils_test($host_toolchain)",
     ":main_build_test($host_toolchain)",
     ":managed_process_test($host_toolchain)",
     ":ninjatrace2json_test($host_toolchain)",
@@ -177,5 +196,6 @@ group("tests") {
     ":service_profile_test($host_toolchain)",
     ":signal_utils_test($host_toolchain)",
     ":top_build_wrap_test($host_toolchain)",
+    "python_forkserver:tests",
   ]
 }

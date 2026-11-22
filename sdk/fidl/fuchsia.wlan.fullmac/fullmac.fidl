@@ -4,6 +4,7 @@
 @available(added=HEAD)
 library fuchsia.wlan.fullmac;
 
+using fuchsia.power.system;
 using fuchsia.wlan.common;
 using fuchsia.wlan.driver;
 using fuchsia.wlan.ieee80211 as ieee80211;
@@ -181,8 +182,10 @@ closed protocol WlanFullmacImplIfc {
     }) -> ();
     /// Indicates to MLME that an individual scan within the scheduled scan plan has been completed
     /// and results are available.
-    strict OnScheduledScanMatchesAvailable(table {
+    strict OnScheduledScanMatchesAvailable(resource table {
         1: txn_id uint64;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        2: wake_lease fuchsia.power.system.LeaseToken;
     });
     /// Indicates to MLME that scheduled scanning has been stopped by the firmware.
     strict OnScheduledScanStoppedByFirmware(table {
@@ -219,7 +222,7 @@ closed protocol WlanFullmacImplIfc {
     }) -> ();
     /// Report that a fullmac-initiated roam attempt is in progress.
     /// Fullmac must send this start indication for all roam attempts.
-    strict RoamStartInd(table {
+    strict RoamStartInd(resource table {
         /// BSSID of the target BSS. Required.
         1: selected_bssid ieee80211.MacAddr;
         /// Full BSS description of the target BSS. Required.
@@ -234,9 +237,11 @@ closed protocol WlanFullmacImplIfc {
         /// target BSS, in order to avoid losing the original association if authentication with the
         /// target BSS fails.
         3: original_association_maintained bool;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        4: wake_lease fuchsia.power.system.LeaseToken;
     }) -> ();
     /// Report the result of a fullmac-initiated roam attempt.
-    strict RoamResultInd(table {
+    strict RoamResultInd(resource table {
         /// BSSID of the target BSS. Required.
         1: selected_bssid ieee80211.MacAddr;
         /// Result of the roam attempt. Required.
@@ -255,6 +260,8 @@ closed protocol WlanFullmacImplIfc {
         5: association_id uint16;
         /// IEs for this association with the AP. Required if `status_code` is success.
         6: association_ies vector<uint8>:MAX;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        7: wake_lease fuchsia.power.system.LeaseToken;
     }) -> ();
     strict AuthInd(table {
         1: peer_sta_address ieee80211.MacAddr;
@@ -264,7 +271,7 @@ closed protocol WlanFullmacImplIfc {
         1: peer_sta_address ieee80211.MacAddr;
     }) -> ();
     /// Report that the driver deauthenticated.
-    strict DeauthInd(table {
+    strict DeauthInd(resource table {
         /// MAC address of the peer. Required.
         1: peer_sta_address ieee80211.MacAddr;
         /// Reason code for deauthentication. Required.
@@ -272,6 +279,8 @@ closed protocol WlanFullmacImplIfc {
         /// locally_initiated is true if deauth is initiated from the device,
         /// and is false if it's initiated remotely (e.g. due to deauth frame)
         3: locally_initiated bool;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        4: wake_lease fuchsia.power.system.LeaseToken;
     }) -> ();
     strict AssocInd(table {
         1: peer_sta_address ieee80211.MacAddr;
@@ -293,7 +302,7 @@ closed protocol WlanFullmacImplIfc {
         1: status zx.Result;
     }) -> ();
     /// Report that disassociation with the specified peer occurred (IEEE 802.11-2020 6.3.9.3).
-    strict DisassocInd(table {
+    strict DisassocInd(resource table {
         /// Address of the peer that was disassociated. Required.
         1: peer_sta_address ieee80211.MacAddr;
         /// Reason for the disassociation. Required.
@@ -303,6 +312,8 @@ closed protocol WlanFullmacImplIfc {
         /// or vendor driver started the disassociation); false if the disassociation was initiated
         /// externally (e.g. due to receipt of a disassociate frame from an AP).
         3: locally_initiated bool;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        4: wake_lease fuchsia.power.system.LeaseToken;
     }) -> ();
     /// Report the result of a WlanFullmacImpl::StartBss request.
     strict StartConf(table {
@@ -328,23 +339,37 @@ closed protocol WlanFullmacImplIfc {
     strict OnChannelSwitch(struct {
         ind WlanFullmacChannelSwitchInfo;
     }) -> ();
+    /// Reports a Michael MIC failure on a received TKIP frame
+    /// (IEEE 802.11-2020 6.3.21.1).
+    strict OnMichaelMicFailure(table {
+        /// MAC address of the peer. In client mode, the connected BSSID. Required.
+        1: peer_sta_address ieee80211.MacAddr;
+        /// Type of key the failure was detected on. Only
+        /// [`fuchsia.wlan.ieee80211/KeyType.PAIRWISE`] and
+        /// [`fuchsia.wlan.ieee80211/KeyType.GROUP`] are valid. Required.
+        2: key_type ieee80211.KeyType;
+    }) -> ();
 
     // MLME extensions
     strict SignalReport(struct {
         ind WlanFullmacSignalReportIndication;
     }) -> ();
     /// Report that the monitored RSSI crossed a configured threshold.
-    strict OnRssiThresholdBreached(table {
+    strict OnRssiThresholdBreached(resource table {
         1: cur_rssi_dbm int8;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        2: wake_lease fuchsia.power.system.LeaseToken;
     });
     /// Report that an EAPoL frame was received.
-    strict EapolInd(table {
+    strict EapolInd(resource table {
         /// The address of the sender. Required.
         1: src_addr ieee80211.MacAddr;
         /// The address of the intended destination. Required.
         2: dst_addr ieee80211.MacAddr;
         /// The bytes of the EAPoL frame data. Required.
         3: data vector<uint8>:MAX;
+        /// Optional wake lease to prevent system suspension while the platform processes the event.
+        4: wake_lease fuchsia.power.system.LeaseToken;
     }) -> ();
     /// Inform the platform that the PMK is available after a driver-handled SAE handshake.
     strict OnPmkAvailable(table {
@@ -502,6 +527,12 @@ open protocol WlanFullmacImpl {
     }) -> ();
     strict Reconnect(table {
         1: peer_sta_address ieee80211.MacAddr;
+
+        /// OWE public key used for Diffie Hellman exchange during reassociation.
+        /// This is only populated for the OWE security type, otherwise this field is empty.
+        /// Each association uses a new ephemeral key pair, so when present, this key replaces the
+        /// owe_public_key from the original Connect request.
+        2: owe_public_key WlanFullmacOwePublicKey;
     }) -> ();
     /// Initiate a roam attempt, which moves association to a different BSS within the ESS.
     strict Roam(table {

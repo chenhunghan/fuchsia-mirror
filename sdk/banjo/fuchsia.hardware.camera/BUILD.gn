@@ -35,7 +35,6 @@ fidl("fuchsia.hardware.camera") {
     "//sdk/banjo/fuchsia.hardware.camera.sensor:*",
     "//sdk/banjo/fuchsia.hardware.ge2d:*",
     "//sdk/banjo/fuchsia.hardware.isp:*",
-    "//sdk/banjo/fuchsia.hardware.mipicsi:*",
     "//src/camera/drivers/sensors/imx227:*",
     "//vendor/*",
   ]

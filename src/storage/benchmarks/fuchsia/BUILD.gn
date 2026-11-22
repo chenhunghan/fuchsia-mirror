@@ -94,6 +94,7 @@ rustc_binary("fuchsia-storage-benchmarks") {
     "//src/storage/benchmarks:framework",
     "//src/storage/lib/delivery_blob",
     "//src/storage/lib/trace",
+    "//src/storage/lib/units",
     "//src/sys/pkg/lib/fuchsia-pkg-testing",
     "//third_party/rust_crates:argh",
     "//third_party/rust_crates:async-trait",
@@ -212,9 +213,10 @@ foreach(fs,
       # that device type.
       astro_env,
 
-      # Minfs and Blobfs aren't enabled on Sorrel because they are slow to run
-      # and aren't used on that device. F2fs's minimum partition size with FVM
-      # is too large for Sorrel.
+      # Minfs and Blobfs aren't enabled on Iris or Sorrel because they are slow
+      # to run and aren't used on those devices. F2fs isn't used on Iris and its
+      # minimum partition size with FVM is too large for Sorrel.
+      iris_env,
       sorrel_env,
     ]
   }
@@ -235,6 +237,10 @@ foreach(fs,
       # These benchmarks aren't enabled on Astro to avoid extra flash wear on
       # that device type.
       astro_env,
+
+      # Iris does not yet support finding or creating a test partition in the
+      # system GPT (b/579569526).
+      iris_env,
     ]
   }
 }

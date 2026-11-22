@@ -2,45 +2,85 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+fx_cc_library(
     name = "buffer",
     srcs = [
         "array_buffer.cc",
         "block_buffer.cc",
-        "blocking_ring_buffer.cc",
-        "mapped_vmo.cc",
-        "owned_vmoid.cc",
-        "resizeable_vmo_buffer.cc",
-        "ring_buffer.cc",
-        "vmo_buffer.cc",
-    ],
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "blocking_ring_buffer.cc",
+            "mapped_vmo.cc",
+            "owned_vmoid.cc",
+            "resizeable_vmo_buffer.cc",
+            "ring_buffer.cc",
+            "vmo_buffer.cc",
+        ],
+        "//conditions:default": [],
+    }),
     hdrs = [
         "array_buffer.h",
         "block_buffer.h",
         "block_buffer_view.h",
         "blocking_ring_buffer.h",
-        "mapped_vmo.h",
-        "owned_vmoid.h",
-        "resizeable_vmo_buffer.h",
         "ring_buffer.h",
-        "vmo_bitmap_storage.h",
-        "vmo_buffer.h",
-        "vmoid_registry.h",
-    ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
-    deps = [
-        "//src/storage/lib/operation",
-        "//zircon/system/ulib/fzl",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "mapped_vmo.h",
+            "owned_vmoid.h",
+            "resizeable_vmo_buffer.h",
+            "vmo_bitmap_storage.h",
+            "vmo_buffer.h",
+            "vmoid_registry.h",
+        ],
+        "//conditions:default": [],
+    }),
+    implementation_deps = [
         "//zircon/third_party/ulib/safemath",
-        "@fuchsia_sdk//fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
-        "@fuchsia_sdk//pkg/fdio",
-        "@fuchsia_sdk//pkg/zx",
+    ] + select({
+        "//build/bazel/platforms:is_fuchsia_platform": [
+            "//sdk/lib/fdio",
+        ],
+        "//build/bazel/platforms:is_fuchsia_with_sdk_rules": [
+            # Bazel targets built with SDK rules (at an SDK API level rather
+            # than PLATFORM) cannot build //sdk/lib/fdio's transitive
+            # //sdk/lib/zxio dep and must use @fuchsia_sdk//pkg/fdio instead;
+            # GN only builds platform targets and uses //sdk/lib/fdio.
+            # @bazel2gn:skip
+            "@fuchsia_sdk//pkg/fdio",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = [
+        "//src/devices/block/drivers/ahci:__pkg__",
+        "//src/storage/bin/dd:__pkg__",
+        "//src/storage/blobfs:__subpackages__",
+        "//src/storage/f2fs:__subpackages__",
+        "//src/storage/lib:__subpackages__",
+        "//src/storage/minfs:__pkg__",
     ],
+    deps = [
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//src/storage/lib/operation",
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//build/bazel/platforms:is_fuchsia_platform": [
+            "//zircon/system/ulib/fzl",
+        ],
+        "//build/bazel/platforms:is_fuchsia_with_sdk_rules": [
+            # Bazel targets built with SDK rules use the SDK copy of fzl.
+            # @bazel2gn:skip
+            "@fuchsia_sdk//pkg/fzl",
+        ],
+        "//conditions:default": [],
+    }),
+    alwayslink = True,
 )

@@ -47,6 +47,7 @@ class BuildTestsJsonTest(unittest.TestCase):
             BazelPaths(self.source_dir, self.build_dir).execroot,
             self.build_dir,
         )
+        (self.build_dir / "bazel_host_test_suites.txt").write_text("")
         (self.build_dir / "ungrouped_bazel_target_test_suites.txt").write_text(
             ""
         )
@@ -72,7 +73,6 @@ class BuildTestsJsonTest(unittest.TestCase):
         tests_from_metadata: list[T.Any],
         test_groups: list[T.Any],
         product_bundles: list[T.Any],
-        with_bazel_tests: bool = False,
         command_runner: CommandRunner | None = None,
         all_test_environments: dict[str, T.Any] | None = None,
         default_test_environments: dict[str, T.Any] | None = None,
@@ -145,12 +145,8 @@ class BuildTestsJsonTest(unittest.TestCase):
         product_bundles_path = self.build_dir / "product_bundles.json"
         product_bundles_path.write_text(product_bundles_str)
 
-        if with_bazel_tests:
-            (self.build_dir / "bazel_host_test_suites.txt").write_text(
-                "//fake/test1\n//fake/test2"
-            )
         inputs = build_tests_json.build_tests_json(
-            self.build_dir, with_bazel_tests, command_runner
+            self.build_dir, command_runner
         )
 
         tests_string = (self.build_dir / "tests.json").read_text()
@@ -287,6 +283,9 @@ class BuildTestsJsonTest(unittest.TestCase):
         self.assertEqual(expected_tests_json, tests)
 
     def test_bazel_tests(self) -> None:
+        (self.build_dir / "bazel_host_test_suites.txt").write_text(
+            "//fake/test1\n//fake/test2"
+        )
         # Prepare mock runner for bazel cquery
         mock_runner = MockCommandRunner()
         test1 = {
@@ -331,7 +330,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             [dummy_host_test],
             [],
             [],
-            with_bazel_tests=True,
             command_runner=mock_runner,
         )
 
@@ -388,8 +386,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             "//fake/device_tests"
         )
         mock_runner = MockCommandRunner()
-        # Host test cquery, which finds no tests.
-        mock_runner.push_result(stdout="")
         mock_runner.push_result(
             stdout=json.dumps(
                 {
@@ -411,7 +407,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             [],
             [],
             [],
-            with_bazel_tests=True,
             command_runner=mock_runner,
             default_test_environments={
                 "target_cpu": "arm64",
@@ -437,8 +432,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             "//fake/device_tests"
         )
         mock_runner = MockCommandRunner()
-        # Host test cquery, which finds no tests.
-        mock_runner.push_result(stdout="")
         # Device test cquery returning two tests:
         # 1) A test specifying AEMU, QEMU (with 1cpu emulator config), NUC11
         #    (x64, filtered out by allowed_device_types = ["AEMU", "QEMU"]),
@@ -490,7 +483,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             [],
             [],
             [],
-            with_bazel_tests=True,
             command_runner=mock_runner,
         )
 
@@ -514,7 +506,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             "//fake/device_tests"
         )
         mock_runner = MockCommandRunner()
-        mock_runner.push_result(stdout="")
         mock_runner.push_result(
             stdout=json.dumps(
                 {
@@ -543,7 +534,6 @@ class BuildTestsJsonTest(unittest.TestCase):
                 [],
                 [],
                 [],
-                with_bazel_tests=True,
                 command_runner=mock_runner,
             )
 
@@ -560,8 +550,6 @@ class BuildTestsJsonTest(unittest.TestCase):
         )
 
         mock_runner = MockCommandRunner()
-        # Host test cquery finds no tests.
-        mock_runner.push_result(stdout="")
         # Device test cquery covering both groups' suite files.
         mock_runner.push_result(
             stdout=json.dumps(
@@ -601,7 +589,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             [],
             test_groups,
             product_bundles,
-            with_bazel_tests=True,
             command_runner=mock_runner,
             default_test_environments={
                 "target_cpu": "arm64",
@@ -621,6 +608,9 @@ class BuildTestsJsonTest(unittest.TestCase):
         self.assertNotIn("build_only", tests[0])
 
     def test_full(self) -> None:
+        (self.build_dir / "bazel_host_test_suites.txt").write_text(
+            "//fake/test1\n//fake/test2"
+        )
         tests_from_metadata = [
             {
                 "test": {"name": "test1", "cpu": "x64"},
@@ -663,7 +653,6 @@ class BuildTestsJsonTest(unittest.TestCase):
             tests_from_metadata,
             test_groups,
             product_bundles,
-            with_bazel_tests=True,
             command_runner=mock_runner,
         )
 
@@ -711,27 +700,23 @@ class BuildTestsJsonTest(unittest.TestCase):
 
     def test_ninja_inputs(self) -> None:
         (inputs, _) = self._test([], [], [])
+        starlark_dir = (
+            Path(build_tests_json.__file__).parent / "bazel/scripts/../starlark"
+        )
         self.assertEqual(
             {
-                Path(self.build_dir / "tests_from_metadata.json"),
-                Path(
-                    self.build_dir
-                    / "obj"
-                    / "tests"
-                    / "product_bundle_test_groups.json"
-                ),
-                Path(
-                    self.build_dir
-                    / "obj"
-                    / "tests"
-                    / "all_test_environments.json"
-                ),
-                Path(
-                    self.build_dir
-                    / "obj"
-                    / "tests"
-                    / "default_test_environments.json"
-                ),
+                self.build_dir / "tests_from_metadata.json",
+                self.build_dir
+                / "obj"
+                / "tests"
+                / "product_bundle_test_groups.json",
+                self.build_dir / "obj" / "tests" / "all_test_environments.json",
+                self.build_dir
+                / "obj"
+                / "tests"
+                / "default_test_environments.json",
+                starlark_dir / "FuchsiaHostTestInfo.cquery",
+                starlark_dir / "FuchsiaTestInfo.cquery",
             },
             inputs,
         )

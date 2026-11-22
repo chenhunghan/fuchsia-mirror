@@ -3,13 +3,75 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 
 package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "branch-bin",
+    srcs = ["branch.cc"],
+    # TODO(https://fxbug.dev/570694755): Remove copts = ["-I."] once `branch.cc`
+    # updates its repo-root angle-bracket include.
+    copts = ["-I."],
+    deps = [
+        "//examples/components/services/fidl:fuchsia.examples.services_hlcpp",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_hlcpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_packaged_binary(
+    name = "branch-bin_packaged",
+    testonly = True,
+    binary = ":branch-bin",
+    binary_name = "branch_bin_cpp",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "branch_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/branch.cml",
+)
+
+fx_component(
+    name = "branch_component",
+    testonly = True,
+    compiled_manifest = ":branch_manifest",
+    deps = [":branch-bin_packaged"],
+)
+
+fx_package(
+    name = "branch",
+    testonly = True,
+    components = [":branch_component"],
+    visibility = ["//examples/components/services:__pkg__"],
+)
 
 fx_cc_binary(
     name = "provider-bin",
     srcs = ["provider.cc"],
-    gn_output_name = "provider_bin_cpp",
     deps = [
         "//examples/components/services/fidl:fuchsia.examples.services_cpp",
         "//sdk/lib/async-loop:async-loop-cpp",
@@ -17,4 +79,54 @@ fx_cc_binary(
         "//sdk/lib/component/outgoing/cpp",
         "//sdk/lib/syslog/cpp",
     ],
+)
+
+fx_packaged_binary(
+    name = "provider-bin_packaged",
+    binary = ":provider-bin",
+    binary_name = "provider_bin_cpp",
+)
+
+fx_component_manifest(
+    name = "provider-a_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/provider-a.cml",
+)
+
+fx_component(
+    name = "provider-a_component",
+    testonly = True,
+    compiled_manifest = ":provider-a_manifest",
+    deps = [":provider-bin_packaged"],
+)
+
+fx_package(
+    name = "provider-a",
+    testonly = True,
+    components = [":provider-a_component"],
+    visibility = ["//examples/components/services:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "provider-b_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/provider-b.cml",
+)
+
+fx_component(
+    name = "provider-b_component",
+    testonly = True,
+    compiled_manifest = ":provider-b_manifest",
+    deps = [":provider-bin_packaged"],
+)
+
+fx_package(
+    name = "provider-b",
+    testonly = True,
+    components = [":provider-b_component"],
+    visibility = ["//examples/components/services:__pkg__"],
 )

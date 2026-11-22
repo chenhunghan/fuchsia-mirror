@@ -17,6 +17,7 @@
 #include <lib/driver/component/cpp/node_add_args.h>
 #include <lib/fit/function.h>
 #include <lib/inspect/cpp/inspect.h>
+#include <lib/vmo_store/vmo_store.h>
 
 #include <array>
 #include <deque>
@@ -31,7 +32,6 @@
 #include <usb/usb.h>
 
 #include "src/connectivity/ethernet/lib/rndis/rndis.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace fnetdev = fuchsia_hardware_network_driver;
 

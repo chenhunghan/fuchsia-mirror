@@ -13,7 +13,8 @@ mod heap_wrapper;
 #[path = "profile/profile.rs"]
 mod profile;
 
-pub use heap_wrapper::get_heap_profile;
+pub use cmpctmalloc::{HEAP_MAX_ALLOC_SIZE, cmpct_set_fill_on_alloc_threshold};
+pub use heap_wrapper::{get_heap_profile, heap_init};
 pub(crate) use heap_wrapper::{heap_get_info as get_info, profile_track_alloc, profile_track_free};
 
 /// Kernel console `heap` command implementation.

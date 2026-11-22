@@ -22,6 +22,7 @@ if (is_fuchsia) {
     image_use_vbmeta = false
     image_has_fxfs_blob = true
     generate_image_metadata = false
+    generate_size_report = false
   }
 
   packages_from_product_assembler("bazel_assembly_cache_packages.list") {

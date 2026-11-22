@@ -19,7 +19,10 @@ class Buffer final {
   Buffer() {}
 
   // Oops. No length check!
-  void Write(const uint8_t *data, size_t size) { memcpy(data_.get(), data, size); }
+  void Write(const uint8_t *data, size_t size) {
+    memcpy(data_.get(), data, size);
+    asm volatile("" : : "r"(data_.get()) : "memory");
+  }
 
  private:
   std::unique_ptr<uint8_t[]> data_;

@@ -4,117 +4,8 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/components.gni")
 import("//build/devicetree/devicetree.gni")
 import("//build/testing/host_test_data.gni")
-
-# Real device produced device tree binary format files. These files are the
-# blobs obtained from such devices. Reconstructed 'dts' files live along the
-# 'dtb' files but are not exported.
-#
-# NOTE: Do NOT regenerate 'dtb' files from the dts file, this might change the
-# structure of the blob obtained from the device.
-dtb_real = [
-  "banana-pi-f3.dtb",
-  "crosvm-arm.dtb",
-  "muntjac.dtb",
-  "qemu-arm-gic2.dtb",
-  "qemu-arm-gic3.dtb",
-  "qemu-riscv.dtb",
-  "sifive-hifive-unmatched.dtb",
-  "vision-five-2.dtb",
-  "khadas-vim3.dtb",
-]
-
-# Synthetic devicetree source files meant for testing, they are not required to
-# reflect any real node.
-dts_synthetic = [
-  "synthetic/arm_gic2_no_msi.dts",
-  "synthetic/arm_gic3_stride.dts",
-  "synthetic/arm_qcom_rng.dts",
-  "synthetic/arm_qcom_rng_configured.dts",
-  "synthetic/arm_gic3_four_stride.dts",
-  "synthetic/arm_gic3_subsumed_stride.dts",
-  "synthetic/arm_idle_states.dts",
-  "synthetic/arm_idle_states_and_domain.dts",
-  "synthetic/arm_idle_states_multiple.dts",
-  "synthetic/arm_idle_states_multiple_with_invalid.dts",
-  "synthetic/arm_idle_states_power_domains.dts",
-  "synthetic/arm_timer.dts",
-  "synthetic/arm_timer_no_frequency_override.dts",
-  "synthetic/arm_timer_mmio_no_frequency_override.dts",
-  "synthetic/arm_timer_mmio_invalid_frames.dts",
-  "synthetic/arm_timer_mmio_no_frames.dts",
-  "synthetic/arm_timer_mmio.dts",
-  "synthetic/chosen.dts",
-  "synthetic/chosen_with_console.dts",
-  "synthetic/chosen_with_serial_alias.dts",
-  "synthetic/chosen_no_uart_interrupts.dts",
-  "synthetic/chosen_with_console_aml.dts",
-  "synthetic/chosen_with_console_and_stdout_path.dts",
-  "synthetic/chosen_with_reg_offset.dts",
-  "synthetic/chosen_with_translation.dts",
-  "synthetic/chosen_unknown_intc.dts",
-  "synthetic/chosen_with_kaslr_only.dts",
-  "synthetic/chosen_with_rng_only.dts",
-  "synthetic/chosen_with_kaslr_and_rng.dts",
-  "synthetic/complex_no_properties.dts",
-  "synthetic/complex_with_alias.dts",
-  "synthetic/complex_with_alias_first.dts",
-  "synthetic/cpus_arm.dts",
-  "synthetic/cpus_arm_dynamiq.dts",
-  "synthetic/cpus_arm_no_cpu_map.dts",
-  "synthetic/cpus_arm_single_cell.dts",
-  "synthetic/cpus_riscv.dts",
-  "synthetic/cpus_riscv_nested_clusters.dts",
-  "synthetic/cpus_no_cpu_map_riscv.dts",
-  "synthetic/empty.dts",
-  "synthetic/memory_complex.dts",
-  "synthetic/serial_number.dts",
-  "synthetic/serial_number_bootargs.dts",
-  "synthetic/memory.dts",
-  "synthetic/memory_reservations.dts",
-  "synthetic/plic_riscv.dts",
-  "synthetic/psci-hvc.dts",
-  "synthetic/psci-smc.dts",
-  "synthetic/ramoops.dts",
-  "synthetic/reserved_memory.dts",
-  "synthetic/simple_with_properties.dts",
-  "synthetic/simple_with_status.dts",
-  "synthetic/smmu_bad_irq.dts",
-  "synthetic/smmu_defaults.dts",
-  "synthetic/smmu_multi.dts",
-  "synthetic/smmu_overflow.dts",
-  "synthetic/smmu_simple.dts",
-  "synthetic/qcom_msm_watchdog.dts",
-  "synthetic/qcom_msm_watchdog_multiple_regs.dts",
-]
-
-# Compile the synthetic source file to get blobs.
-dtb_synthetic = []
-dtb_synthetic_deps = []
-foreach(dts_file, dts_synthetic) {
-  dtb_target = get_path_info(dts_file, "name")
-
-  dtb(dtb_target) {
-    sources = [ dts_file ]
-  }
-  dtb_synthetic += get_target_outputs(":$dtb_target")
-  dtb_synthetic_deps += [ ":$dtb_target" ]
-}
-
-dtb_all = dtb_real + dtb_synthetic
-
-# Check for no overlapping files, so we guarantee that they all fit in the same
-# subdirectory.
-filenames = []
-foreach(dtb, dtb_all) {
-  curr = [ get_path_info(dtb, "file") ]
-  assert(filenames + curr - curr == filenames,
-         "dtb_all file names must be unique. '${curr[0]}' is duplicated.")
-  filenames += curr
-  curr = []
-}
 
 if (is_host) {
   runtime_path = "test_data/devicetree"
@@ -124,20 +15,521 @@ if (is_host) {
 
 # Provides relative path from the executable to the repository directory.
 # The expected path is platform specific.
+# LINT.IfChange(data_path)
 config("data_path") {
   defines = [ "LIB_DEVICETREE_DATA=\"$runtime_path\"" ]
 }
 
+# LINT.ThenChange(BUILD.bazel:data_path)
+
 if (is_host) {
+  # Real device produced device tree binary format files. These files are the
+  # blobs obtained from such devices. Reconstructed 'dts' files live along the
+  # 'dtb' files but are not exported.
+  #
+  # NOTE: Do NOT regenerate 'dtb' files from the dts file, this might change the
+  # structure of the blob obtained from the device.
+  dtb_real = [
+    "banana-pi-f3.dtb",
+    "crosvm-arm.dtb",
+    "muntjac.dtb",
+    "qemu-arm-gic2.dtb",
+    "qemu-arm-gic3.dtb",
+    "qemu-riscv.dtb",
+    "sifive-hifive-unmatched.dtb",
+    "vision-five-2.dtb",
+    "khadas-vim3.dtb",
+  ]
+
+  # Synthetic devicetree source files meant for testing, they are not required
+  # to reflect any real node.
+  dts_synthetic = [
+    "synthetic/arm_gic2_no_msi.dts",
+    "synthetic/arm_gic3_stride.dts",
+    "synthetic/arm_qcom_rng.dts",
+    "synthetic/arm_qcom_rng_configured.dts",
+    "synthetic/arm_gic3_four_stride.dts",
+    "synthetic/arm_gic3_subsumed_stride.dts",
+    "synthetic/arm_idle_states.dts",
+    "synthetic/arm_idle_states_and_domain.dts",
+    "synthetic/arm_idle_states_multiple.dts",
+    "synthetic/arm_idle_states_multiple_with_invalid.dts",
+    "synthetic/arm_idle_states_power_domains.dts",
+    "synthetic/arm_timer.dts",
+    "synthetic/arm_timer_no_frequency_override.dts",
+    "synthetic/arm_timer_mmio_no_frequency_override.dts",
+    "synthetic/arm_timer_mmio_invalid_frames.dts",
+    "synthetic/arm_timer_mmio_no_frames.dts",
+    "synthetic/arm_timer_mmio.dts",
+    "synthetic/chosen.dts",
+    "synthetic/chosen_with_console.dts",
+    "synthetic/chosen_with_serial_alias.dts",
+    "synthetic/chosen_no_uart_interrupts.dts",
+    "synthetic/chosen_with_console_aml.dts",
+    "synthetic/chosen_with_console_and_stdout_path.dts",
+    "synthetic/chosen_with_reg_offset.dts",
+    "synthetic/chosen_with_translation.dts",
+    "synthetic/chosen_unknown_intc.dts",
+    "synthetic/chosen_with_kaslr_only.dts",
+    "synthetic/chosen_with_rng_only.dts",
+    "synthetic/chosen_with_kaslr_and_rng.dts",
+    "synthetic/complex_no_properties.dts",
+    "synthetic/complex_with_alias.dts",
+    "synthetic/complex_with_alias_first.dts",
+    "synthetic/cpus_arm.dts",
+    "synthetic/cpus_arm_dynamiq.dts",
+    "synthetic/cpus_arm_no_cpu_map.dts",
+    "synthetic/cpus_arm_single_cell.dts",
+    "synthetic/cpus_riscv.dts",
+    "synthetic/cpus_riscv_nested_clusters.dts",
+    "synthetic/cpus_no_cpu_map_riscv.dts",
+    "synthetic/empty.dts",
+    "synthetic/memory_complex.dts",
+    "synthetic/serial_number.dts",
+    "synthetic/serial_number_bootargs.dts",
+    "synthetic/memory.dts",
+    "synthetic/memory_reservations.dts",
+    "synthetic/plic_riscv.dts",
+    "synthetic/psci-hvc.dts",
+    "synthetic/psci-smc.dts",
+    "synthetic/ramoops.dts",
+    "synthetic/reserved_memory.dts",
+    "synthetic/simple_with_properties.dts",
+    "synthetic/simple_with_status.dts",
+    "synthetic/smmu_bad_irq.dts",
+    "synthetic/smmu_defaults.dts",
+    "synthetic/smmu_multi.dts",
+    "synthetic/smmu_overflow.dts",
+    "synthetic/smmu_simple.dts",
+    "synthetic/qcom_msm_watchdog.dts",
+    "synthetic/qcom_msm_watchdog_multiple_regs.dts",
+  ]
+
+  dtb_synthetic = []
+  dtb_synthetic_deps = []
+  foreach(dts_file, dts_synthetic) {
+    dtb_target = get_path_info(dts_file, "name")
+    dtb_synthetic += [ "$target_out_dir/$dtb_target.dtb" ]
+    dtb_synthetic_deps += [ ":$dtb_target" ]
+  }
+
+  dtb_all = dtb_real + dtb_synthetic
+
+  # Check for no overlapping files, so we guarantee that they all fit in the
+  # same subdirectory.
+  filenames = []
+  foreach(dtb, dtb_all) {
+    curr = [ get_path_info(dtb, "file") ]
+    assert(filenames + curr - curr == filenames,
+           "dtb_all file names must be unique. '${curr[0]}' is duplicated.")
+    filenames += curr
+    curr = []
+  }
+
   host_test_data("data") {
     sources = dtb_all
     outputs = [ "$root_out_dir/$runtime_path/{{source_file_part}}" ]
     deps = dtb_synthetic_deps
   }
-} else {
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+dtb("arm_gic2_no_msi") {
+  sources = [ "synthetic/arm_gic2_no_msi.dts" ]
+}
+
+dtb("arm_gic3_stride") {
+  sources = [ "synthetic/arm_gic3_stride.dts" ]
+}
+
+dtb("arm_qcom_rng") {
+  sources = [ "synthetic/arm_qcom_rng.dts" ]
+}
+
+dtb("arm_qcom_rng_configured") {
+  sources = [ "synthetic/arm_qcom_rng_configured.dts" ]
+}
+
+dtb("arm_gic3_four_stride") {
+  sources = [ "synthetic/arm_gic3_four_stride.dts" ]
+}
+
+dtb("arm_gic3_subsumed_stride") {
+  sources = [ "synthetic/arm_gic3_subsumed_stride.dts" ]
+}
+
+dtb("arm_idle_states") {
+  sources = [ "synthetic/arm_idle_states.dts" ]
+}
+
+dtb("arm_idle_states_and_domain") {
+  sources = [ "synthetic/arm_idle_states_and_domain.dts" ]
+}
+
+dtb("arm_idle_states_multiple") {
+  sources = [ "synthetic/arm_idle_states_multiple.dts" ]
+}
+
+dtb("arm_idle_states_multiple_with_invalid") {
+  sources = [ "synthetic/arm_idle_states_multiple_with_invalid.dts" ]
+}
+
+dtb("arm_idle_states_power_domains") {
+  sources = [ "synthetic/arm_idle_states_power_domains.dts" ]
+}
+
+dtb("arm_timer") {
+  sources = [ "synthetic/arm_timer.dts" ]
+}
+
+dtb("arm_timer_no_frequency_override") {
+  sources = [ "synthetic/arm_timer_no_frequency_override.dts" ]
+}
+
+dtb("arm_timer_mmio_no_frequency_override") {
+  sources = [ "synthetic/arm_timer_mmio_no_frequency_override.dts" ]
+}
+
+dtb("arm_timer_mmio_invalid_frames") {
+  sources = [ "synthetic/arm_timer_mmio_invalid_frames.dts" ]
+}
+
+dtb("arm_timer_mmio_no_frames") {
+  sources = [ "synthetic/arm_timer_mmio_no_frames.dts" ]
+}
+
+dtb("arm_timer_mmio") {
+  sources = [ "synthetic/arm_timer_mmio.dts" ]
+}
+
+dtb("chosen") {
+  sources = [ "synthetic/chosen.dts" ]
+}
+
+dtb("chosen_with_console") {
+  sources = [ "synthetic/chosen_with_console.dts" ]
+}
+
+dtb("chosen_with_serial_alias") {
+  sources = [ "synthetic/chosen_with_serial_alias.dts" ]
+}
+
+dtb("chosen_no_uart_interrupts") {
+  sources = [ "synthetic/chosen_no_uart_interrupts.dts" ]
+}
+
+dtb("chosen_with_console_aml") {
+  sources = [ "synthetic/chosen_with_console_aml.dts" ]
+}
+
+dtb("chosen_with_console_and_stdout_path") {
+  sources = [ "synthetic/chosen_with_console_and_stdout_path.dts" ]
+}
+
+dtb("chosen_with_reg_offset") {
+  sources = [ "synthetic/chosen_with_reg_offset.dts" ]
+}
+
+dtb("chosen_with_translation") {
+  sources = [ "synthetic/chosen_with_translation.dts" ]
+}
+
+dtb("chosen_unknown_intc") {
+  sources = [ "synthetic/chosen_unknown_intc.dts" ]
+}
+
+dtb("chosen_with_kaslr_only") {
+  sources = [ "synthetic/chosen_with_kaslr_only.dts" ]
+}
+
+dtb("chosen_with_rng_only") {
+  sources = [ "synthetic/chosen_with_rng_only.dts" ]
+}
+
+dtb("chosen_with_kaslr_and_rng") {
+  sources = [ "synthetic/chosen_with_kaslr_and_rng.dts" ]
+}
+
+dtb("complex_no_properties") {
+  sources = [ "synthetic/complex_no_properties.dts" ]
+}
+
+dtb("complex_with_alias") {
+  sources = [ "synthetic/complex_with_alias.dts" ]
+}
+
+dtb("complex_with_alias_first") {
+  sources = [ "synthetic/complex_with_alias_first.dts" ]
+}
+
+dtb("cpus_arm") {
+  sources = [ "synthetic/cpus_arm.dts" ]
+}
+
+dtb("cpus_arm_dynamiq") {
+  sources = [ "synthetic/cpus_arm_dynamiq.dts" ]
+}
+
+dtb("cpus_arm_no_cpu_map") {
+  sources = [ "synthetic/cpus_arm_no_cpu_map.dts" ]
+}
+
+dtb("cpus_arm_single_cell") {
+  sources = [ "synthetic/cpus_arm_single_cell.dts" ]
+}
+
+dtb("cpus_riscv") {
+  sources = [ "synthetic/cpus_riscv.dts" ]
+}
+
+dtb("cpus_riscv_nested_clusters") {
+  sources = [ "synthetic/cpus_riscv_nested_clusters.dts" ]
+}
+
+dtb("cpus_no_cpu_map_riscv") {
+  sources = [ "synthetic/cpus_no_cpu_map_riscv.dts" ]
+}
+
+dtb("empty") {
+  sources = [ "synthetic/empty.dts" ]
+}
+
+dtb("memory_complex") {
+  sources = [ "synthetic/memory_complex.dts" ]
+}
+
+dtb("serial_number") {
+  sources = [ "synthetic/serial_number.dts" ]
+}
+
+dtb("serial_number_bootargs") {
+  sources = [ "synthetic/serial_number_bootargs.dts" ]
+}
+
+dtb("memory") {
+  sources = [ "synthetic/memory.dts" ]
+}
+
+dtb("memory_reservations") {
+  sources = [ "synthetic/memory_reservations.dts" ]
+}
+
+dtb("plic_riscv") {
+  sources = [ "synthetic/plic_riscv.dts" ]
+}
+
+dtb("psci-hvc") {
+  sources = [ "synthetic/psci-hvc.dts" ]
+}
+
+dtb("psci-smc") {
+  sources = [ "synthetic/psci-smc.dts" ]
+}
+
+dtb("ramoops") {
+  sources = [ "synthetic/ramoops.dts" ]
+}
+
+dtb("reserved_memory") {
+  sources = [ "synthetic/reserved_memory.dts" ]
+}
+
+dtb("simple_with_properties") {
+  sources = [ "synthetic/simple_with_properties.dts" ]
+}
+
+dtb("simple_with_status") {
+  sources = [ "synthetic/simple_with_status.dts" ]
+}
+
+dtb("smmu_bad_irq") {
+  sources = [ "synthetic/smmu_bad_irq.dts" ]
+}
+
+dtb("smmu_defaults") {
+  sources = [ "synthetic/smmu_defaults.dts" ]
+}
+
+dtb("smmu_multi") {
+  sources = [ "synthetic/smmu_multi.dts" ]
+}
+
+dtb("smmu_overflow") {
+  sources = [ "synthetic/smmu_overflow.dts" ]
+}
+
+dtb("smmu_simple") {
+  sources = [ "synthetic/smmu_simple.dts" ]
+}
+
+dtb("qcom_msm_watchdog") {
+  sources = [ "synthetic/qcom_msm_watchdog.dts" ]
+}
+
+dtb("qcom_msm_watchdog_multiple_regs") {
+  sources = [ "synthetic/qcom_msm_watchdog_multiple_regs.dts" ]
+}
+if (is_fuchsia) {
   resource("data") {
-    sources = dtb_all
-    outputs = [ "$runtime_path/{{source_file_part}}" ]
-    deps = dtb_synthetic_deps
+    sources = [
+      "$target_out_dir/arm_gic2_no_msi.dtb",
+      "$target_out_dir/arm_gic3_four_stride.dtb",
+      "$target_out_dir/arm_gic3_stride.dtb",
+      "$target_out_dir/arm_gic3_subsumed_stride.dtb",
+      "$target_out_dir/arm_idle_states.dtb",
+      "$target_out_dir/arm_idle_states_and_domain.dtb",
+      "$target_out_dir/arm_idle_states_multiple.dtb",
+      "$target_out_dir/arm_idle_states_multiple_with_invalid.dtb",
+      "$target_out_dir/arm_idle_states_power_domains.dtb",
+      "$target_out_dir/arm_qcom_rng.dtb",
+      "$target_out_dir/arm_qcom_rng_configured.dtb",
+      "$target_out_dir/arm_timer.dtb",
+      "$target_out_dir/arm_timer_mmio.dtb",
+      "$target_out_dir/arm_timer_mmio_invalid_frames.dtb",
+      "$target_out_dir/arm_timer_mmio_no_frames.dtb",
+      "$target_out_dir/arm_timer_mmio_no_frequency_override.dtb",
+      "$target_out_dir/arm_timer_no_frequency_override.dtb",
+      "$target_out_dir/chosen.dtb",
+      "$target_out_dir/chosen_no_uart_interrupts.dtb",
+      "$target_out_dir/chosen_unknown_intc.dtb",
+      "$target_out_dir/chosen_with_console.dtb",
+      "$target_out_dir/chosen_with_console_aml.dtb",
+      "$target_out_dir/chosen_with_console_and_stdout_path.dtb",
+      "$target_out_dir/chosen_with_kaslr_and_rng.dtb",
+      "$target_out_dir/chosen_with_kaslr_only.dtb",
+      "$target_out_dir/chosen_with_reg_offset.dtb",
+      "$target_out_dir/chosen_with_rng_only.dtb",
+      "$target_out_dir/chosen_with_serial_alias.dtb",
+      "$target_out_dir/chosen_with_translation.dtb",
+      "$target_out_dir/complex_no_properties.dtb",
+      "$target_out_dir/complex_with_alias.dtb",
+      "$target_out_dir/complex_with_alias_first.dtb",
+      "$target_out_dir/cpus_arm.dtb",
+      "$target_out_dir/cpus_arm_dynamiq.dtb",
+      "$target_out_dir/cpus_arm_no_cpu_map.dtb",
+      "$target_out_dir/cpus_arm_single_cell.dtb",
+      "$target_out_dir/cpus_no_cpu_map_riscv.dtb",
+      "$target_out_dir/cpus_riscv.dtb",
+      "$target_out_dir/cpus_riscv_nested_clusters.dtb",
+      "$target_out_dir/empty.dtb",
+      "$target_out_dir/memory.dtb",
+      "$target_out_dir/memory_complex.dtb",
+      "$target_out_dir/memory_reservations.dtb",
+      "$target_out_dir/plic_riscv.dtb",
+      "$target_out_dir/psci-hvc.dtb",
+      "$target_out_dir/psci-smc.dtb",
+      "$target_out_dir/qcom_msm_watchdog.dtb",
+      "$target_out_dir/qcom_msm_watchdog_multiple_regs.dtb",
+      "$target_out_dir/ramoops.dtb",
+      "$target_out_dir/reserved_memory.dtb",
+      "$target_out_dir/serial_number.dtb",
+      "$target_out_dir/serial_number_bootargs.dtb",
+      "$target_out_dir/simple_with_properties.dtb",
+      "$target_out_dir/simple_with_status.dtb",
+      "$target_out_dir/smmu_bad_irq.dtb",
+      "$target_out_dir/smmu_defaults.dtb",
+      "$target_out_dir/smmu_multi.dtb",
+      "$target_out_dir/smmu_overflow.dtb",
+      "$target_out_dir/smmu_simple.dtb",
+      "banana-pi-f3.dtb",
+      "crosvm-arm.dtb",
+      "khadas-vim3.dtb",
+      "muntjac.dtb",
+      "qemu-arm-gic2.dtb",
+      "qemu-arm-gic3.dtb",
+      "qemu-riscv.dtb",
+      "sifive-hifive-unmatched.dtb",
+      "vision-five-2.dtb",
+    ]
+    outputs = [ "data/{{source_file_part}}" ]
+    visibility = [
+      ":*",
+      "//sdk/lib/devicetree/testing:*",
+    ]
+    deps = [
+      ":arm_gic2_no_msi",
+      ":arm_gic3_four_stride",
+      ":arm_gic3_stride",
+      ":arm_gic3_subsumed_stride",
+      ":arm_idle_states",
+      ":arm_idle_states_and_domain",
+      ":arm_idle_states_multiple",
+      ":arm_idle_states_multiple_with_invalid",
+      ":arm_idle_states_power_domains",
+      ":arm_qcom_rng",
+      ":arm_qcom_rng_configured",
+      ":arm_timer",
+      ":arm_timer_mmio",
+      ":arm_timer_mmio_invalid_frames",
+      ":arm_timer_mmio_no_frames",
+      ":arm_timer_mmio_no_frequency_override",
+      ":arm_timer_no_frequency_override",
+      ":chosen",
+      ":chosen_no_uart_interrupts",
+      ":chosen_unknown_intc",
+      ":chosen_with_console",
+      ":chosen_with_console_aml",
+      ":chosen_with_console_and_stdout_path",
+      ":chosen_with_kaslr_and_rng",
+      ":chosen_with_kaslr_only",
+      ":chosen_with_reg_offset",
+      ":chosen_with_rng_only",
+      ":chosen_with_serial_alias",
+      ":chosen_with_translation",
+      ":complex_no_properties",
+      ":complex_with_alias",
+      ":complex_with_alias_first",
+      ":cpus_arm",
+      ":cpus_arm_dynamiq",
+      ":cpus_arm_no_cpu_map",
+      ":cpus_arm_single_cell",
+      ":cpus_no_cpu_map_riscv",
+      ":cpus_riscv",
+      ":cpus_riscv_nested_clusters",
+      ":empty",
+      ":memory",
+      ":memory_complex",
+      ":memory_reservations",
+      ":plic_riscv",
+      ":psci-hvc",
+      ":psci-smc",
+      ":qcom_msm_watchdog",
+      ":qcom_msm_watchdog_multiple_regs",
+      ":ramoops",
+      ":reserved_memory",
+      ":serial_number",
+      ":serial_number_bootargs",
+      ":simple_with_properties",
+      ":simple_with_status",
+      ":smmu_bad_irq",
+      ":smmu_defaults",
+      ":smmu_multi",
+      ":smmu_overflow",
+      ":smmu_simple",
+    ]
   }
 }

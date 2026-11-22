@@ -56,7 +56,11 @@ rustc_library("line-editor") {
   edition = "2024"
   visibility = [
     ":*",
-    "//src/zircon/bin/zxsh:*",
+    "//src/connectivity/bluetooth/lib/bt-repl:*",
+    "//src/connectivity/lowpan/tools/lowpanctl:*",
+    "//src/developer/zxsh:*",
+    "//src/power/battery-manager/battery-cli:*",
+    "//vendor/google/*",
   ]
   deps = [
     "//third_party/rust_crates:bstr",

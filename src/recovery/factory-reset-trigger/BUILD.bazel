@@ -65,7 +65,6 @@ fx_component(
 
 fx_package(
     name = "factory-reset-trigger",
-    package_name = "factory-reset-trigger",
     components = [
         ":factory-reset-trigger-component",
     ],

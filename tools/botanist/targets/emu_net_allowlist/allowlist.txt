@@ -1,0 +1,39 @@
+# Host names that emulators with opt-in internet access (`aemu_internet_env`)
+# may reach through botanist's emulator network proxy (emuNetProxy). All other
+# guest network requests are blocked.
+#
+# Format: one entry per line. An entry is either an exact host name, such as
+# `accounts.google.com`, or a wildcard of the form `*.example.com`, which
+# matches any subdomain of example.com but not example.com itself. Use
+# wildcards only for host names that are randomized per request (for example,
+# CDN hosts). Lines starting with `#` are comments.
+#
+# Changes to this file require approval from the OWNERS in this directory.
+# Explain why each new entry is needed in the change description.
+
+# Google account sign-in and device registration.
+android.clients.google.com
+www.google.com
+www.googleapis.com
+staging-phosphor-pa.sandbox.googleapis.com
+
+# Firebase Cloud Messaging, which Gmail and Calendar use to trigger sync.
+android.googleapis.com
+firebaseinstallations.googleapis.com
+
+# Android network validation (captive portal checks). Apps defer sync until
+# the network is validated.
+clients3.google.com
+connectivitycheck.gstatic.com
+www.gstatic.com
+
+# Gmail and Calendar sync and the data that the apps load with it.
+calendarsync-pa.googleapis.com
+geller-pa.googleapis.com
+inbox.google.com
+peoplestack-pa.googleapis.com
+taskassist-pa.googleapis.com
+tasks-pa.googleapis.com
+
+# Google Play services on first boot.
+play.googleapis.com

@@ -5,7 +5,6 @@ library fuchsia.driver.framework;
 
 using fuchsia.device.fs;
 using fuchsia.component;
-using fuchsia.component.sandbox;
 using fuchsia.component.decl;
 using fuchsia.io;
 
@@ -207,8 +206,13 @@ type NodeAddArgs = resource table {
     /// This can be used to provide additional offers, through a dictionary, to the driver that is
     /// bound to this node. The user MUST use the |offers2| field to specify |dictionary_offer|
     /// type offers for offers that exist in this dictionary.
+    ///
+    /// The handle must reference a dictionary that was created with
+    /// `fuchsia.component.runtime/Capabilities.DictionaryCreate` or obtained from an API such as
+    /// `fuchsia.component/Realm.GetChildOutputDictionary`. The |dictionary_offer| capabilities are
+    /// looked up in the dictionary when the node is added.
     @available(added=HEAD)
-    9: offers_dictionary fuchsia.component.sandbox.DictionaryRef;
+    9: offers_dictionary zx.Handle:<EVENTPAIR, zx.RIGHTS_BASIC>;
 
     /// An identifier for the driver host which a driver that binds to this node should live in.
     /// All drivers which specify the same identifier will be colocated into the same driver host.

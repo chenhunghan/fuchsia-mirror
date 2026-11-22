@@ -45,12 +45,12 @@ type StructWithSomeFieldsRemovedFromCodingTables = struct {
     bar uint16; // removed
 };
 
-type MyXUnion = flexible union {
+type MyUnion = flexible union {
     1: foo bool;
     2: bar int32;
 };
 
-type MyStrictXUnion = strict union {
+type MyStrictUnion = strict union {
     1: foo bool;
     2: bar int32;
 };
@@ -87,7 +87,7 @@ type NumberCollision = struct {
 };
 
 // fidlc will only expose coding tables for message types.
-// However, we can obtain the coding tables for SomeStruct/MyXUnion etc. via the coding table
+// However, we can obtain the coding tables for SomeStruct/MyUnion etc. via the coding table
 // for request message types, by defining dummy methods which take a single desired argument.
 closed protocol Coding {
     strict SomeStruct(struct {
@@ -97,31 +97,31 @@ closed protocol Coding {
         s StructWithSomeFieldsRemovedFromCodingTables;
     });
 
-    // Various trickery to avoid directly refering a xunion/table inline,
+    // Various trickery to avoid directly refering a union/table inline,
     // which is not supported in the C bindings.
-    strict MyXUnion(struct {
-        x MyXUnion:optional;
+    strict MyUnion(struct {
+        x MyUnion:optional;
     });
-    strict MyStrictXUnion(struct {
-        x MyStrictXUnion:optional;
+    strict MyStrictUnion(struct {
+        x MyStrictUnion:optional;
     });
 
     // Ensuring support for multiple uses of the same nullable type.
-    strict MyXUnion2(struct {
-        x MyXUnion:optional;
+    strict MyUnion2(struct {
+        x MyUnion:optional;
     });
-    strict MyStrictXUnion2(struct {
-        x MyStrictXUnion:optional;
+    strict MyStrictUnion2(struct {
+        x MyStrictUnion:optional;
     });
 
     strict VectorOfMyTable(struct {
         t vector<MyTable>;
     });
-    strict VectorOfMyXUnion(struct {
-        x vector<MyXUnion>;
+    strict VectorOfMyUnion(struct {
+        x vector<MyUnion>;
     });
-    strict VectorOfMyStrictXUnion(struct {
-        x vector<MyStrictXUnion>;
+    strict VectorOfMyStrictUnion(struct {
+        x vector<MyStrictUnion>;
     });
 
     strict MyBits(struct {
@@ -135,9 +135,9 @@ closed protocol Coding {
         x NumberCollision;
     });
 
-    strict ForeignXUnions(struct {
-        tx deplib.MyXUnionA;
+    strict ForeignUnions(struct {
+        tx deplib.MyUnionA;
     }) -> (struct {
-        rx deplib.MyXUnionA:optional;
+        rx deplib.MyUnionA:optional;
     });
 };

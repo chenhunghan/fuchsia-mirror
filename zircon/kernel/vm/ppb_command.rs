@@ -7,7 +7,7 @@ use crate::console::{CMD_AVAIL_NORMAL, CmdArgs, static_command};
 use crate::kernel::deadline::{Deadline, TimerSlack};
 use crate::kernel::event::Event;
 use crate::kernel::thread::{self, LOW_PRIORITY, ThreadPtr};
-use crate::ksync_kernel::declare_singleton_mutex;
+use crate::ksync_kernel::TrackedMutex;
 use crate::platform_rs::timer::{DurationMono, InstantMono};
 use crate::vm::physical_page_borrowing_config::PhysicalPageBorrowingConfig;
 use crate::vm::pmm;
@@ -15,19 +15,41 @@ use core::ffi::{c_int, c_void};
 use core::pin::Pin;
 use core::ptr;
 use kprint::kprintln;
-use ksync::{KCell, lock};
-use lazy_init::LazyInit;
+use ksync::{KCell, KMutex, lock};
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::pin_init;
 use zx_status::Status;
 
-declare_singleton_mutex!(PpbStatsLock);
-static PPB_STATS_THREAD: KCell<Option<ThreadPtr>, PpbStatsLock> = KCell::new(None);
+#[ksync::guarded]
+struct PpbStatsState {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+    #[guarded_by(lock)]
+    thread: Option<ThreadPtr>,
+}
+
+static PPB_STATS: LazyInit<PpbStatsState, NoCheck> = LazyInit::uninit();
+
+impl PpbStatsState {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `PPB_STATS` is initialized at `LK_INIT_LEVEL_EARLIEST` before any console
+        // command can access it.
+        unsafe { PPB_STATS.get_unchecked() }
+    }
+}
+
 /// Initialized in place by `ppb_stats_init_func`, since an `Event` must be pinned.
 static PPB_STATS_THREAD_STOP_EVENT: LazyInit<Event> = LazyInit::uninit();
 
 fn ppb_stats_init_func(_level: init::LkInitLevel) {
     // SAFETY: Single-threaded initialization during early boot, before any console command can
-    // access the event.
+    // access the lock or event.
     unsafe {
+        let _ = Pin::static_ref(&PPB_STATS).init_pin(pin_init!(PpbStatsState {
+            lock <- KMutex::init(),
+            thread: KCell::new(None),
+        }));
         let _ = Pin::static_ref(&PPB_STATS_THREAD_STOP_EVENT).init_pin(Event::init_unsignaled());
     }
 }
@@ -74,8 +96,7 @@ fn cmd_ppb_stats_on() {
     let local_ppb_stats_thread;
     {
         // scope guard
-        lock!(let mut guard = PpbStatsLock::lock());
-        let token = guard.token_mut();
+        lock!(let mut guard = PpbStatsState::get().lock_lock());
         // SAFETY: `ppb_stats_thread` is a valid thread entry point that ignores its argument.
         let stats_thread = unsafe {
             thread::create_with_priority(
@@ -87,10 +108,7 @@ fn cmd_ppb_stats_on() {
         };
         assert!(stats_thread.is_ok());
         let stats_thread = stats_thread.unwrap();
-        // SAFETY: `PpbStatsLock` is a singleton mutex and `token` proves it is held.
-        unsafe {
-            *PPB_STATS_THREAD.get_mut(token) = Some(stats_thread);
-        }
+        *guard.as_mut().thread_mut() = Some(stats_thread);
         local_ppb_stats_thread = stats_thread;
     } // ~guard
     // SAFETY: The thread was just created above. Console commands are serialized by the console
@@ -104,14 +122,12 @@ fn cmd_ppb_stats_off() {
     let local_ppb_stats_thread;
     {
         // scope guard
-        lock!(let mut guard = PpbStatsLock::lock());
-        let token = guard.token_mut();
-        // SAFETY: `PpbStatsLock` is a singleton mutex and `token` proves it is held.
-        local_ppb_stats_thread = unsafe { PPB_STATS_THREAD.get_mut(token) }.take();
+        lock!(let mut guard = PpbStatsState::get().lock_lock());
+        local_ppb_stats_thread = guard.as_mut().thread_mut().take();
     } // ~guard
     PPB_STATS_THREAD_STOP_EVENT.signal();
     let local_ppb_stats_thread = local_ppb_stats_thread.expect("ppb stats thread is not running");
-    // SAFETY: The thread was taken out of `PPB_STATS_THREAD` under `PpbStatsLock`, so no other
+    // SAFETY: The thread was taken out of `PPB_STATS.thread` under `PPB_STATS.lock`, so no other
     // caller can join it.
     let retcode = unsafe { local_ppb_stats_thread.join(InstantMono::INFINITE) };
     debug_assert!(retcode == Ok(0));

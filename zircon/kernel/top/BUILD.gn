@@ -33,28 +33,17 @@ source_set("debug") {
 }
 
 source_set("handoff") {
-  sources = [
-    "handoff.cc",
-    "handoff_ffi.cc",
-  ]
+  sources = [ "handoff_ffi.cc" ]
   deps = [
-    "//src/lib/zbitl",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/boot-options",
     "//zircon/kernel/lib/code-patching:self-test",
-    "//zircon/kernel/lib/counters",
-    "//zircon/kernel/lib/init",
     "//zircon/kernel/lib/thread-stack",
-    "//zircon/kernel/object",
     "//zircon/kernel/phys/handoff",
-    "//zircon/kernel/platform",
-    "//zircon/kernel/vm",
-    "//zircon/system/ulib/fbl",
   ]
 }
 
-source_set("main") {
-  sources = [ "main.cc" ]
+group("main") {
   deps = [
     "//zircon/kernel/dev:init",
     "//zircon/kernel/lib/arch",
@@ -62,16 +51,13 @@ source_set("main") {
     "//zircon/kernel/lib/console:console_rs",
     "//zircon/kernel/lib/counters",
     "//zircon/kernel/lib/counters:counters-rs",
-    "//zircon/kernel/lib/cxxabi-dynamic-init:headers",
     "//zircon/kernel/lib/heap",
-    "//zircon/kernel/lib/init",
+    "//zircon/kernel/lib/io",
     "//zircon/kernel/lib/jtrace",
     "//zircon/kernel/lib/lockdep:lockdep-rs",
     "//zircon/kernel/lib/lockup_detector",
-    "//zircon/kernel/lib/perfmon:perfmon_rs",
     "//zircon/kernel/lib/thread_sampler",
     "//zircon/kernel/lib/userabi",
-    "//zircon/kernel/phys/handoff",
     "//zircon/kernel/platform",
     "//zircon/kernel/platform:platform-rs",
     "//zircon/kernel/vm",
@@ -90,20 +76,30 @@ kernel_rust_mod("top_rust") {
     "boot_constants.rs",
     "debug.rs",
     "debug_ffi.rs",
+    "handoff.rs",
     "init.rs",
+    "main.rs",
     "mod.rs",
     "version.rs",
   ]
   deps = [
+    "//sdk/rust/zx-types",
     "//src/lib/kprint",
     "//src/lib/zr",
     "//third_party/rust_crates:zerocopy",
+    "//zircon/kernel/dev:init",
     "//zircon/kernel/dev/hw_rng",
+    "//zircon/kernel/lib/arch:arch-rs",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
     "//zircon/kernel/lib/crashlog",
+    "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/init:init_rust",
     "//zircon/kernel/lib/libc",
     "//zircon/kernel/lib/libc:rust",
+    "//zircon/kernel/lib/page:page-rs",
+    "//zircon/kernel/phys/handoff:handoff-rs",
     "//zircon/kernel/platform",
     "//zircon/kernel/platform:platform-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
   ]
 }

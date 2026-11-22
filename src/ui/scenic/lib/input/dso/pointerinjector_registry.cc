@@ -77,9 +77,10 @@ PointerinjectorRegistry::PointerinjectorRegistry(
     async_dispatcher_t* input_dispatcher,
     std::shared_ptr<view_tree::SnapshotHolder> snapshot_holder,
     TouchInjectFunc inject_touch_exclusive, TouchInjectFunc inject_touch_hit_tested,
-    inspect::Node inspect_node)
+    inspect::Node inspect_node, TouchBeginBatchFunc begin_touch_batch)
     : inject_touch_exclusive_(std::move(inject_touch_exclusive)),
       inject_touch_hit_tested_(std::move(inject_touch_hit_tested)),
+      begin_touch_batch_(std::move(begin_touch_batch)),
       snapshot_holder_(std::move(snapshot_holder)),
       input_dispatcher_(input_dispatcher),
       inspect_node_(std::move(inspect_node)) {
@@ -156,7 +157,14 @@ void PointerinjectorRegistry::Register(RegisterRequestView request, fdf::Arena& 
               TRACE_DURATION("input", "TouchInjector::inject_");
               inject_func(std::move(event), stream_id, snapshot);
             },
-            std::move(on_channel_closed)));
+            std::move(on_channel_closed),
+            /*begin_batch=*/
+            [&begin_touch_batch = begin_touch_batch_]() -> fit::deferred_action<fit::closure> {
+              if (begin_touch_batch) {
+                return begin_touch_batch();
+              }
+              return fit::defer<fit::closure>([] {});
+            }));
     FX_CHECK(success) << "Injector already exists.";
   } else {
     FX_NOTREACHED();

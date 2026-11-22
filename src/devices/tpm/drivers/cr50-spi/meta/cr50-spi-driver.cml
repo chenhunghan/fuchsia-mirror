@@ -14,11 +14,18 @@
         compat: "driver/cr50-spi-driver.so",
         bind: "meta/bind/cr50-spi.bindbc",
     },
-    capabilities: [],
+    capabilities: [
+        { service: "fuchsia.hardware.tpmimpl.Service" },
+    ],
     use: [
         { service: "fuchsia.hardware.acpi.Service" },
         { service: "fuchsia.hardware.interrupt.Service" },
         { service: "fuchsia.hardware.spi.Service" },
     ],
-    expose: [],
+    expose: [
+        {
+            service: "fuchsia.hardware.tpmimpl.Service",
+            from: "self",
+        },
+    ],
 }

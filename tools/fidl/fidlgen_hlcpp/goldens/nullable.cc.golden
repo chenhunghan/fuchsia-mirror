@@ -314,7 +314,7 @@ SimpleUnion::SimpleUnion(SimpleUnion&& other) : tag_(other.tag_) {
     case ::test::nullable::SimpleUnion::Tag::kB:
       b_ = std::move(other.b_);
       break;
-    case static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
+    case static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
       break;
   }
 }
@@ -330,7 +330,7 @@ SimpleUnion& SimpleUnion::operator=(SimpleUnion&& other) {
       case ::test::nullable::SimpleUnion::Tag::kB:
         b_ = std::move(other.b_);
         break;
-      case static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
         break;
     }
   }
@@ -358,10 +358,10 @@ void SimpleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
       if (::fidl::EncodingInlineSize<int32_t>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &a_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -370,21 +370,21 @@ void SimpleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &a_,
           encoder->Alloc(::fidl::EncodingInlineSize<int32_t, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     case ::test::nullable::SimpleUnion::Tag::kB: {
       if (::fidl::EncodingInlineSize<float>(encoder) <= FIDL_ENVELOPE_INLINING_SIZE_THRESHOLD) {
         ::fidl::Encode(encoder, &b_, offset + offsetof(fidl_union_t, envelope));
 
-        fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-        xunion->tag = tag_;
-        xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-        xunion->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
+        fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+        _union->tag = tag_;
+        _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+        _union->envelope.flags = FIDL_ENVELOPE_FLAGS_INLINING_MASK;
         break;
       }
 
@@ -393,11 +393,11 @@ void SimpleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
           &b_,
           encoder->Alloc(::fidl::EncodingInlineSize<float, ::fidl::Encoder>(encoder)));
 
-      fidl_union_t* xunion = encoder->GetPtr<fidl_union_t>(offset);
-      xunion->tag = tag_;
-      xunion->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
-      xunion->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
-      xunion->envelope.flags = 0;
+      fidl_union_t* _union = encoder->GetPtr<fidl_union_t>(offset);
+      _union->tag = tag_;
+      _union->envelope.num_bytes = static_cast<uint32_t>(encoder->CurrentLength() - length_before);
+      _union->envelope.num_handles = static_cast<uint16_t>(encoder->CurrentHandleCount() - handles_before);
+      _union->envelope.flags = 0;
       break;
     }
     default:
@@ -406,18 +406,18 @@ void SimpleUnion::Encode(::fidl::Encoder* encoder, size_t offset,
 }
 
 void SimpleUnion::Decode(::fidl::Decoder* _decoder, SimpleUnion* value, size_t offset) {
-  fidl_union_t* xunion = _decoder->GetPtr<fidl_union_t>(offset);
+  fidl_union_t* _union = _decoder->GetPtr<fidl_union_t>(offset);
 
-  if (xunion->envelope.num_bytes == 0 &&
-      xunion->envelope.num_handles == 0 &&
-      xunion->envelope.flags == 0) {
-    value->EnsureStorageInitialized(static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid));
+  if (_union->envelope.num_bytes == 0 &&
+      _union->envelope.num_handles == 0 &&
+      _union->envelope.flags == 0) {
+    value->EnsureStorageInitialized(static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid));
     return;
   }
 
-  value->EnsureStorageInitialized(xunion->tag);
+  value->EnsureStorageInitialized(_union->tag);
 
-  size_t value_offset = _decoder->EnvelopeValueOffset(&xunion->envelope);
+  size_t value_offset = _decoder->EnvelopeValueOffset(&_union->envelope);
 
   switch (value->tag_) {
     case ::test::nullable::SimpleUnion::Tag::kA: {
@@ -471,15 +471,15 @@ void SimpleUnion::Destroy() {
     default:
       break;
   }
-  tag_ = static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid);
+  tag_ = static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid);
 }
 
-void SimpleUnion::EnsureStorageInitialized(::fidl_xunion_tag_t tag) {
+void SimpleUnion::EnsureStorageInitialized(::fidl_union_tag_t tag) {
   if (tag_ != tag) {
     Destroy();
     tag_ = tag;
     switch (tag_) {
-      case static_cast<fidl_xunion_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::nullable::SimpleUnion::Tag::Invalid):
         break;
       case ::test::nullable::SimpleUnion::Tag::kA:
         new (&a_) int32_t();

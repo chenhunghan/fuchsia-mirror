@@ -4,19 +4,6 @@
 
 import("//build/python/python_library.gni")
 
-group("tests") {
-  testonly = true
-  deps = [
-    ":tests-no-e2e",
-    "e2e:tests",
-  ]
-}
-
-group("tests-no-e2e") {
-  testonly = true
-  deps = [ "//build/bazel/bazel_sdk:tests" ]
-}
-
 if (is_host) {
   # Python scripts in this directory that aren't part of any other Python
   # target, usually because they're run directly by action() or Bazel rules.

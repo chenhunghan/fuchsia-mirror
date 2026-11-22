@@ -16,12 +16,20 @@ pub use state::{
 pub mod options;
 pub use options::{Initiator, Options};
 
+extern crate fidl_fuchsia_net_http_common as fidl_fuchsia_net_http;
+#[cfg(not(target_os = "fuchsia"))]
+extern crate fidl_fuchsia_pkg_common as fidl_fuchsia_pkg;
+#[cfg(not(target_os = "fuchsia"))]
+extern crate fidl_fuchsia_update_installer_common as fidl_fuchsia_update_installer;
+
 use fdomain_client::fidl::Proxy;
 use fdomain_fuchsia_update_installer as fd_installer;
+#[cfg(target_os = "fuchsia")]
 use fidl::endpoints::{ClientEnd, ServerEnd};
+use fidl_fuchsia_update_installer::UpdateNotStartedReason;
+#[cfg(target_os = "fuchsia")]
 use fidl_fuchsia_update_installer::{
     InstallerProxy, MonitorMarker, MonitorRequest, MonitorRequestStream, RebootControllerMarker,
-    UpdateNotStartedReason,
 };
 use futures::prelude::*;
 use futures::task::{Context, Poll};
@@ -57,6 +65,7 @@ pub enum MonitorUpdateAttemptError {
 }
 
 /// An update attempt.
+#[cfg(target_os = "fuchsia")]
 #[pin_project(project = UpdateAttemptProj)]
 #[derive(Debug)]
 pub struct UpdateAttempt {
@@ -89,6 +98,7 @@ pub struct UpdateAttemptMonitorFDomain {
 }
 
 /// A monitor of an update attempt.
+#[cfg(target_os = "fuchsia")]
 #[pin_project(project = UpdateAttemptMonitorProj)]
 pub struct UpdateAttemptMonitor {
     /// Server end of a fidl_fuchsia_update_installer.Monitor protocol.
@@ -96,6 +106,7 @@ pub struct UpdateAttemptMonitor {
     stream: MonitorRequestStream,
 }
 
+#[cfg(target_os = "fuchsia")]
 impl UpdateAttempt {
     /// Getter for the attempt_id.
     pub fn attempt_id(&self) -> &str {
@@ -127,6 +138,7 @@ impl UpdateAttemptMonitorFDomain {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl UpdateAttemptMonitor {
     fn new() -> Result<(ClientEnd<MonitorMarker>, Self), fidl::Error> {
         let (monitor_client_end, stream) =
@@ -143,6 +155,7 @@ impl UpdateAttemptMonitor {
 
 /// Checks if an update can be started and returns the UpdateAttempt containing
 /// the attempt_id and MonitorRequestStream to the client.
+#[cfg(target_os = "fuchsia")]
 pub async fn start_update(
     update_url: &http::Uri,
     options: Options,
@@ -193,6 +206,7 @@ pub async fn start_update_fdomain(
 
 /// Monitors the running update attempt given by `attempt_id`, or any running update attempt if no
 /// `attempt_id` is provided.
+#[cfg(target_os = "fuchsia")]
 pub async fn monitor_update(
     attempt_id: Option<&str>,
     installer_proxy: &InstallerProxy,
@@ -204,12 +218,14 @@ pub async fn monitor_update(
     if attached { Ok(Some(monitor)) } else { Ok(None) }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl fmt::Debug for UpdateAttemptMonitor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UpdateAttemptMonitor").field("stream", &"MonitorRequestStream").finish()
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl Stream for UpdateAttemptMonitor {
     type Item = Result<State, MonitorUpdateAttemptError>;
 
@@ -250,6 +266,7 @@ impl Stream for UpdateAttemptMonitorFDomain {
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl Stream for UpdateAttempt {
     type Item = Result<State, MonitorUpdateAttemptError>;
 
@@ -268,7 +285,7 @@ impl Stream for UpdateAttemptFDomain {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "fuchsia"))]
 mod tests {
     use super::*;
     use assert_matches::assert_matches;

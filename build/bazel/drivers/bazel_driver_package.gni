@@ -46,6 +46,7 @@ template("bazel_driver_package") {
   # is where other GN templates expect to find the package's
   # package_manifest.json, i.e. $target_out_dir/$target_name.
   package_out_dir = "$target_out_dir/$target_name"
+  rebased_package_out_dir = rebase_path(package_out_dir, target_out_dir)
 
   bazel_build_action(bazel_build_target) {
     forward_variables_from(invoker,
@@ -73,17 +74,17 @@ template("bazel_driver_package") {
     package_outputs = [
       {
         package_label = bazel_target
-        archive = "$package_name.far"
+        archive = "$rebased_package_out_dir/$package_name.far"
 
         # Derived from `package_out_dir` above so that the extraction
         # directory and the package metadata always agree.
-        package_out_dir = rebase_path(package_out_dir, target_out_dir)
+        package_out_dir = rebased_package_out_dir
         copy_debug_symbols = true
       },
     ]
 
     metadata = {
-      # Used by the check_included_drivers template.
+      # Used by the assert_driver_components template.
       fuchsia_driver_labels =
           [ get_label_info(":$target_name", "label_no_toolchain") ]
     }

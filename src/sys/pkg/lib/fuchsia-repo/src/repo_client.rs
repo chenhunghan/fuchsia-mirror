@@ -511,6 +511,10 @@ where
     ) -> BoxFuture<'a, Result<Option<SystemTime>>> {
         self.tuf_client.remote_repo().blob_modification_time(path)
     }
+
+    fn blob_type(&self) -> delivery_blob::DeliveryBlobType {
+        self.tuf_client.remote_repo().blob_type()
+    }
 }
 
 pub(crate) async fn get_tuf_client<R>(
@@ -587,12 +591,14 @@ mod tests {
     use crate::repository::PmRepository;
     use crate::test_utils::{
         PKG1_BIN_HASH, PKG1_HASH, PKG1_LIB_HASH, PKG2_HASH, make_pm_repository,
-        make_readonly_empty_repository, repo_key, repo_private_key,
+        make_pm_repository_with_type, make_readonly_empty_repository, repo_key, repo_private_key,
     };
     use assert_matches::assert_matches;
     use camino::{Utf8Path, Utf8PathBuf};
+    use delivery_blob::DeliveryBlobType;
     use pretty_assertions::assert_eq;
     use std::fs::{self, create_dir_all};
+    use test_case::test_case;
     use tuf::repo_builder::RepoBuilder as TufRepoBuilder;
     use tuf::repository::FileSystemRepositoryBuilder;
 
@@ -664,19 +670,24 @@ mod tests {
         );
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_list_packages() {
+    async fn test_list_packages(delivery_blob_type: DeliveryBlobType) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
-        let mut repo = RepoClient::from_trusted_remote(Box::new(make_pm_repository(&dir).await))
-            .await
-            .unwrap();
+        let mut repo = RepoClient::from_trusted_remote(Box::new(
+            make_pm_repository_with_type(&dir, delivery_blob_type).await,
+        ))
+        .await
+        .unwrap();
         repo.update().await.unwrap();
 
         // Look up the timestamp for the meta.far for the modified setting.
-        let pkg1_modified = get_modtime(dir.join("repository/blobs/1").join(PKG1_HASH));
-        let pkg2_modified = get_modtime(dir.join("repository/blobs/1").join(PKG2_HASH));
+        let blob_dir = dir.join(format!("repository/blobs/{}", u32::from(delivery_blob_type)));
+        let pkg1_modified = get_modtime(blob_dir.join(PKG1_HASH));
+        let pkg2_modified = get_modtime(blob_dir.join(PKG2_HASH));
 
         let mut packages = repo.list_packages().await.unwrap();
 
@@ -743,17 +754,19 @@ mod tests {
         let _repo = RepoClient::from_trusted_remote(backend).await.unwrap();
     }
 
+    #[test_case(DeliveryBlobType::Type1)]
+    #[test_case(DeliveryBlobType::Type2)]
     #[fuchsia::test]
-    async fn test_show_package() {
+    async fn test_show_package(delivery_blob_type: DeliveryBlobType) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
 
-        let backend = make_pm_repository(&dir).await;
+        let backend = make_pm_repository_with_type(&dir, delivery_blob_type).await;
         let mut repo = RepoClient::from_trusted_remote(backend).await.unwrap();
         repo.update().await.unwrap();
 
         // Look up the timestamps for the blobs.
-        let blob_dir = dir.join("repository/blobs/1");
+        let blob_dir = dir.join(format!("repository/blobs/{}", u32::from(delivery_blob_type)));
         let meta_far_modified = get_modtime(blob_dir.join(PKG1_HASH));
 
         let bin_modified = get_modtime(blob_dir.join(PKG1_BIN_HASH));

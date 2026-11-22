@@ -29,17 +29,16 @@ kernel_rust_mod("persistent-debuglog-rs") {
   sources = [ "persistent_debuglog.rs" ]
   deps = [
     "//sdk/rust/zx-status",
+    "//src/lib/kalloc",
     "//src/lib/kprint",
     "//src/lib/ksync",
     "//src/lib/lazy_init",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
     "//zircon/kernel/lib/console:console_rs",
+    "//zircon/kernel/lib/init:init_rust",
   ]
-  test_deps = [
-    "//src/lib/kalloc",
-    "//zircon/kernel/lib/unittest:unittest-rs",
-  ]
+  test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }
 
 config("config") {

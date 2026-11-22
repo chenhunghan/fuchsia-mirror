@@ -168,7 +168,7 @@ impl Node {
                 fdf::NodeError::Internal
             })?;
 
-            let dictionary_id =
+            let dictionary =
                 dictionary_util.import_dictionary(offers_dictionary).await.map_err(|e| {
                     error!("failed to import dictionary: {}", e);
                     fdf::NodeError::Internal
@@ -183,7 +183,7 @@ impl Node {
 
             for dictionary_offer_service in dictionary_offer_services {
                 let dir_connector = dictionary_util
-                    .dictionary_dir_connector_route(dictionary_id, &dictionary_offer_service)
+                    .dictionary_dir_connector_route(&dictionary, &dictionary_offer_service)
                     .await
                     .map_err(|e| {
                         error!("failed to route dictionary: {}", e);

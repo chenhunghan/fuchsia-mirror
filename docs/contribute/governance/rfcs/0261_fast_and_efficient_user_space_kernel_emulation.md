@@ -50,7 +50,7 @@ _Socialization:_ This proposal has been socialized with the kernel and Starnix
 teams over email, chat, and multiple Kernel Evolution Working Group (KEWG)
 sessions.
 
-## Goals
+## Goals {:#goals}
 
 The following goals guide the design of this system.
 
@@ -94,7 +94,7 @@ Zircon processes will have a region of their address space that's common to all.
 To a guest kernel developer, the shared region will make the guest kernel
 look and feel more like a single multi-threaded program.
 
-### Element 1: restricted mode
+### Element 1: restricted mode {:#element-1-restricted-mode}
 
 This is the core element.
 
@@ -157,7 +157,7 @@ beyond the general purpose registers is the responsibility of normal mode code.
 For example, the Zircon kernel will not clear or load floating point or vector
 registers.  x86's `fs.base` and `gs.base`, arm64's `tpidr_el0`, and riscv64's
 `tp` are all are considered to be general purpose registers.  See section
-[Enter](#Enter) for details.
+[Enter](#enter) for details.
 
 Once a thread has entered restricted mode, it only has access to its register
 state and the mappings in the restricted region.
@@ -181,7 +181,7 @@ and restricted mode.
 In order to improve performance, the Zircon kernel and the guest kernel use
 shared memory, the mode state VMO, to communicate register state and other
 details about a thread when it transitions between normal mode and restricted
-mode.  See [Prepare](#Prepare) for details.
+mode.  See [Prepare](#prepare) for details.
 
 ##### Entering restricted mode
 
@@ -192,7 +192,7 @@ syscalls, faults, and exceptions to the right place (to the kernel or to normal
 mode).
 
 Entering restricted mode from normal mode is performed with a new dedicated
-syscall ([zx_thread_enter_restricted](#Enter)).  Before calling, the user mode
+syscall ([zx_thread_enter_restricted](#enter)).  Before calling, the user mode
 supervisor first fills in a struct containing the register values to be used in
 restricted mode.  The struct is located in the mode state VMO.
 
@@ -207,7 +207,7 @@ state they care about.  Furthermore, the Zircon kernel does not attempt to
 restore any restricted mode register state other than the general purpose
 (integer) registers.  Restoring more is up to the caller.  For exactly what is
 included in the general purpose registers, see `zx_restricted_state_t` in the
-[Enter](#Enter) section.
+[Enter](#enter) section.
 
 ##### Leaving restricted mode
 
@@ -237,7 +237,7 @@ in restricted mode generates an exception (e.g. hits a breakpoint) a Zircon
 debug exception is generated as usual without forcing the thread out of
 restricted mode.  However, if no debugger is attached, the exception will cause
 the thread to leave restricted mode where it can be handled by the user mode
-supervisor.  See also [Leaving by exception](#Leaving-by-exception).
+supervisor.  See also [Leaving by exception](#leaving-by-exception).
 
 With that context out of the way, let's discuss how a thread leaves restricted
 mode and returns to normal mode.  There are two ways, leaving by syscall and
@@ -282,7 +282,7 @@ perform a cheaper "mask/unmask" operation on the normal half of the address
 space using `TCR_EL1.T0SZ`, thereby preserving more TLB entries common to both
 normal and restricted mode.
 
-##### Leaving by exception
+##### Leaving by exception {:#leaving-by-exception}
 
 As mentioned earlier, when executing in restricted mode, resolvable page faults
 will be transparently handled by the Zircon kernel.  That is, while the thread
@@ -475,7 +475,7 @@ re-enter without needing to re-prepare, regardless of whether it left for
 `ZX_RESTRICTED_REASON_SYSCALL`, `ZX_RESTRICTED_REASON_EXCEPTION`, or
 `ZX_RESTRICTED_REASON_KICK` (`zx_thread_kick_restricted`).
 
-##### Prepare
+##### Prepare {:#prepare}
 
 ```c
 zx_status_t zx_thread_prepare_restricted(uint32_t options, zx_handle_t* out_vmo);
@@ -514,7 +514,7 @@ This call may fail with:
 > is handled, a caller can recover from this state by calling prepare again with
 > a valid `out_vmo`.
 
-##### Enter
+##### Enter {:#enter}
 
 ```c
 status_t zx_thread_enter_restricted(uint32_t options,
@@ -855,7 +855,7 @@ limits on what mappings kernel code can access or execute.  They are designed to
 make it more difficult to exploit kernel bugs.  Because restricted mode is a
 software construct and because the guest kernel runs in user mode, we cannot
 directly leverage these features in a user mode supervisor.  See also the
-discussion of alternate mappings in [Alternatives](#Alternatives).
+discussion of alternate mappings in [Alternatives](#alternatives).
 
 ## Privacy considerations
 
@@ -939,7 +939,7 @@ These changes affect several kernel components and increase the
 complexity of the kernel.  While the design strives to compartmentalize and
 minimize this new complexity, this is still a non-zero cost.
 
-### Alternatives
+### Alternatives {:#alternatives}
 
 *Hypervisor* - An alternative to this software-only design is to leverage the
 hardware's hypervisor features to allow a "guest kernel" to issue Zircon
@@ -960,7 +960,7 @@ involves eliminating the shared region and requiring that each supervisor
 process coordinate with each other via IPC or some "manually managed" explicit
 mappings.  This alternative has the advantage of making it more difficult to
 compromise one process using another (improved isolation), but would make it
-more difficult to implement many aspects of a guest kernel (see [Goals](#Goals),
+more difficult to implement many aspects of a guest kernel (see [Goals](#goals),
 "Natural and simplified programming model").  The coordination overhead across
 process would also likely impact performance.
 

@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+
+package(default_applicable_licenses = [":license"])
+
+# Bazel license() metadata has no GN equivalent.
+# @bazel2gn:skip
+license(
+    name = "license",
+    license_kinds = ["@rules_license//licenses/spdx:Apache-2.0"],
+    license_text = "src/LICENSE",
+)
+
+# TODO(https://fxbug.dev/570694755): Verify whether pyjson5 should use target_compatible_with (was not gated by if (is_host) in GN).
+py_library(
+    name = "pyjson5",
+    srcs = [
+        "src/json5/__init__.py",
+        "src/json5/__main__.py",
+        "src/json5/host.py",
+        "src/json5/lib.py",
+        "src/json5/parser.py",
+        "src/json5/tool.py",
+        "src/json5/version.py",
+    ],
+    imports = ["src"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//src/starnix/build:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+)

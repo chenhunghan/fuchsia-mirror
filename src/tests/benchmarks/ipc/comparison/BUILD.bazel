@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = [
+        "batch_case.cc",
+        "batch_case.h",
+        "config.h",
+        "main.cc",
+        "sequential_case.cc",
+        "sequential_case.h",
+        "stream_case.cc",
+        "stream_case.h",
+        "timer.h",
+        "vmo_case.cc",
+        "vmo_case.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/lib/async-default",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/syslog/cpp",
+        "//src/tests/benchmarks/ipc/comparison/fidl:test.ipc_cpp",
+        "//zircon/system/ulib/perftest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "ipc_comparison_bench",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    testonly = True,
+    component_name = "ipc_comparison_bench",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/ipc_comparison_bench.cml",
+)
+
+fx_test_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "ipc_comparison_bench",
+    testonly = True,
+    test_components = [":component"],
+)

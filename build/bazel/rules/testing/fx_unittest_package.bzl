@@ -22,6 +22,8 @@ def _fx_unittest_package_impl(
         **kwargs):
     if testonly != None and not testonly:
         fail("`fx_unittest_package()` targets are always testonly.")
+    if package_name == name:
+        fail("The specified `package_name` (`%s`) matches the default. `package_name` only needs to be specified when overriding the default." % package_name)
     tags = tags or []
     package_name = package_name or name
 
@@ -67,7 +69,6 @@ fx_unittest_package = macro(
     ```bazel
     fx_unittest_package(
         name = "foo-test",
-        package_name = "foo-test",
         unit_tests = [":foo_lib_test"],
     )
     ```
@@ -78,7 +79,8 @@ fx_unittest_package = macro(
         "package_name": attr.string(
             doc = """ An optional name of the Fuchsia package.
 
-            Defaults to `name` to match the behavior of `fx_package`.
+            Defaults to `name` to match the behavior of `fx_package`. Only set
+            this when it differs from `name`.
             """,
             # Otherwise an unset value reaches the impl as an always-truthy
             # select(), and the `name` fallback never applies.

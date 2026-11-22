@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load(":linux_resource.bzl", "linux_resource")
 
 package(default_applicable_licenses = ["//:license"])
@@ -12,6 +13,19 @@ exports_files(
         "container.shard.cml",
         "container_config.shard.cml",
     ],
+    visibility = [
+        "//src/starnix:__subpackages__",
+        "//vendor/google:__subpackages__",
+    ],
+)
+
+cml_shard(
+    name = "container.shard",
+    includes = [
+        "container_config.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    shard = "container.shard.cml",
     visibility = [
         "//src/starnix:__subpackages__",
         "//vendor/google:__subpackages__",

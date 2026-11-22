@@ -72,7 +72,7 @@ pub async fn with_netcfg_owned_device<
         .expect("create netstack realm");
     // Add a device to the realm.
     let network = sandbox.create_network(name).await.expect("create network");
-    let _endpoint = add_device_to_devfs(&network, &realm, name.to_string(), None).await;
+    let _endpoint = publish_device_service(&network, &realm, "ep".to_string(), None).await;
 
     // Make sure the Netstack got the new device added.
     let (interface_state, if_id, if_name) = verify_interface_added(&realm).await;
@@ -90,29 +90,29 @@ pub async fn with_netcfg_owned_device<
     if_name
 }
 
-/// Add a device into devfs to be fully managed by netcfg. Netcfg will discover
-/// and install the device into the Netstack. We cannot assume that netcfg has
-/// observed and installed the device as a result of this function, that
-/// condition must be observed via the interfaces watcher.
+/// Publish a device to the realm's `fuchsia.hardware.network.Service` to be
+/// fully managed by netcfg. Netcfg will discover and install the device into
+/// the Netstack. We cannot assume that netcfg has observed and installed the
+/// device as a result of this function, that condition must be observed via the
+/// interfaces watcher.
 ///
 /// Returns the new endpoint that was added to the realm.
-pub async fn add_device_to_devfs<'a>(
+pub async fn publish_device_service<'a>(
     network: &'a TestNetwork<'a>,
     realm: &'a TestRealm<'a>,
     name: String,
     endpoint_config: Option<fnetemul_network::EndpointConfig>,
 ) -> TestEndpoint<'a> {
     let endpoint = match endpoint_config {
-        Some(config) => network.create_endpoint_with(name, config).await,
-        None => network.create_endpoint(name).await,
+        Some(config) => network.create_endpoint_with(name.clone(), config).await,
+        None => network.create_endpoint(name.clone()).await,
     }
     .expect("create endpoint");
     endpoint.set_link_up(true).await.expect("set link up");
-    let endpoint_mount_path = netemul::devfs_device_path("ep");
-    let endpoint_mount_path = endpoint_mount_path.as_path();
-    realm.add_virtual_device(&endpoint, endpoint_mount_path).await.unwrap_or_else(|e| {
-        panic!("add virtual device {}: {:?}", endpoint_mount_path.display(), e)
-    });
+    realm
+        .add_virtual_device(&endpoint, &name)
+        .await
+        .unwrap_or_else(|e| panic!("add virtual device {name}: {e:?}"));
     endpoint
 }
 

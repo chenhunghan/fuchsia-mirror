@@ -1,0 +1,52 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules:stamp_group.bzl", "stamp_group")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+stamp_group(
+    name = "test_data",
+    testonly = True,
+    stamp = "test_data.stamp",
+    visibility = [
+        "//:__pkg__",
+        "//src/sys/test_runners/rust/tests:__pkg__",
+    ],
+    deps = [
+        ":rust-test-runner-example",
+        "//src/sys/test_runners/rust/test_data/huge-rust-tests",
+        "//src/sys/test_runners/rust/test_data/no-rust-tests",
+        "//src/sys/test_runners/rust/test_data/sample-rust-tests",
+    ],
+)
+
+fx_package(
+    name = "rust-test-runner-example",
+    testonly = True,
+    # Inlines components from `:echo-example` and
+    # `//src/sys/test_runners/rust/test_data/concurrency-test` because
+    # `fx_package(components)` requires `FuchsiaComponentInfo` providers.
+    components = [
+        "//src/sys/component_manager/testing/echo_server",
+        "//src/sys/test_runners:echo_server_for_concurrency_test",
+        "//src/sys/test_runners/rust/test_data/concurrency-test:concurrency_test_component",
+        "//src/sys/test_runners/rust/test_data/concurrency-test:concurrency_test_driver_component",
+        "//src/sys/test_runners/rust/test_data/echo-integration-test",
+        "//src/sys/test_runners/rust/test_data/huge-rust-tests",
+        "//src/sys/test_runners/rust/test_data/no-rust-tests",
+        "//src/sys/test_runners/rust/test_data/sample-rust-tests",
+    ],
+)
+
+stamp_group(
+    name = "echo-example",
+    testonly = True,
+    stamp = "echo-example.stamp",
+    deps = [
+        "//src/sys/component_manager/testing/echo_server",
+        "//src/sys/test_runners/rust/test_data/echo-integration-test",
+    ],
+)

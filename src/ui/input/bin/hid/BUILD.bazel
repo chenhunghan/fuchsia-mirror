@@ -1,0 +1,34 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN places this legacy Zircon binary under $root_out_dir/zircon-migrated.
+# @bazel2gn:raw_attribute:output_dir = "$root_out_dir/zircon-migrated"
+fx_cc_binary(
+    name = "hid",
+    srcs = [
+        "main.cc",
+        "report.cc",
+    ],
+    build_flags = ["//build/config:all_source"],
+    # In GN, hid is not wrapped in top-level if (is_fuchsia), as GN only
+    # instantiates it from Fuchsia-only targets; Bazel builds //...:all on host.
+    # @bazel2gn:skip
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.input:fuchsia.hardware.input_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fdio-caller",
+        "//src/lib/listnode",
+        "//src/ui/input/lib/hid-parser",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/zx",
+    ],
+)

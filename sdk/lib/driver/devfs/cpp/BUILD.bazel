@@ -2,9 +2,39 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
 load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":devfs-exporter-cpp-test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "cpp_test",
+    srcs = ["devfs_exporter_test.cc"],
+    gn_output_name = "devfs-exporter-cpp-test",
+    deps = [
+        ":cpp",
+        "//sdk/fidl/fuchsia.device.fs:fuchsia.device.fs_hlcpp",
+        "//sdk/fidl/fuchsia.logger:fuchsia.logger_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/driver/component/cpp:test_base",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+    ],
+)
+
+fx_unittest_package(
+    name = "devfs-exporter-cpp-test",
+    unit_tests = [":cpp_test"],
+)
 
 idk_cc_source_library(
     name = "cpp",

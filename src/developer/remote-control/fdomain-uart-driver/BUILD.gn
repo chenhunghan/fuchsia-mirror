@@ -17,7 +17,7 @@ rustc_library("lib") {
   with_unit_tests = true
 
   deps = [
-    "//sdk/fidl/fuchsia.boot:fuchsia.boot_rust",
+    ":fdomain_uart_driver_config",
     "//sdk/fidl/fuchsia.hardware.serial:fuchsia.hardware.serial_rust",
     "//src/developer/lib/uart_fpl",
     "//src/developer/remote-control/fidl:fuchsia.developer.remotecontrol.connector_rust",
@@ -53,9 +53,17 @@ rustc_binary("bin") {
   sources = [ "src/main.rs" ]
 }
 
-fuchsia_component("component") {
+fuchsia_component_manifest("manifest") {
   component_name = "fdomain-uart-driver"
   manifest = "meta/fdomain_uart_driver.cml"
+}
+
+fuchsia_structured_config_rust_lib("fdomain_uart_driver_config") {
+  cm_label = ":manifest"
+}
+
+fuchsia_component("component") {
+  cm_label = ":manifest"
   deps = [ ":bin" ]
 }
 

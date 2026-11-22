@@ -76,7 +76,7 @@ def native_cc_test(): native.cc_test(name = "native_test")
         ),
         testing.finding(
             level = "error",
-            message = _load_msg("cc_library", "@rules_cc//cc:defs.bzl", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "cc_*_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _load_msg("cc_library", "@rules_cc//cc:defs.bzl", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "fx_cc_{source,static}_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl"),
             filepath = "src/BUILD.bazel",
             line = 1,
             col = 45,
@@ -92,7 +92,7 @@ def native_cc_test(): native.cc_test(name = "native_test")
         ),
         testing.finding(
             level = "error",
-            message = _load_msg("cc_library", "@@rules_cc//cc:cc_library.bzl", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "cc_*_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _load_msg("cc_library", "@@rules_cc//cc:cc_library.bzl", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "fx_cc_{source,static}_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl"),
             filepath = "src/BUILD.bazel",
             line = 2,
             col = 39,
@@ -108,7 +108,7 @@ def native_cc_test(): native.cc_test(name = "native_test")
         ),
         testing.finding(
             level = "error",
-            message = _call_msg("cc_library", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "cc_*_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _call_msg("cc_library", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "fx_cc_{source,static}_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl"),
             filepath = "src/BUILD.bazel",
             line = 4,
             col = 1,
@@ -132,7 +132,7 @@ def native_cc_test(): native.cc_test(name = "native_test")
         ),
         testing.finding(
             level = "error",
-            message = _load_msg("cc_library", "@rules_cc//cc:defs.bzl", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "cc_*_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _load_msg("cc_library", "@rules_cc//cc:defs.bzl", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "fx_cc_{source,static}_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl"),
             filepath = "src/defs.bzl",
             line = 2,
             col = 55,
@@ -156,7 +156,7 @@ def native_cc_test(): native.cc_test(name = "native_test")
         ),
         testing.finding(
             level = "error",
-            message = _call_msg("cc_library", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "cc_*_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _call_msg("cc_library", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "fx_cc_{source,static}_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl"),
             filepath = "src/defs.bzl",
             line = 4,
             col = 23,
@@ -180,7 +180,7 @@ def native_cc_test(): native.cc_test(name = "native_test")
         ),
         testing.finding(
             level = "error",
-            message = _call_msg("cc_library", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "cc_*_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _call_msg("cc_library", "fx_cc_library", "//build/bazel/rules/cc:fx_cc_library.bzl", alt_wrapper = "fx_cc_{source,static}_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_{source,static}_library_zx.bzl"),
             filepath = "src/defs.bzl",
             line = 7,
             col = 22,
@@ -211,7 +211,7 @@ def native_cc_shared_lib(): native.cc_shared_library(name = "native_shared_lib")
     asserts.eq(res.findings, (
         testing.finding(
             level = "error",
-            message = _load_msg("cc_shared_library", "@rules_cc//cc:defs.bzl", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "cc_shared_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _load_msg("cc_shared_library", "@rules_cc//cc:defs.bzl", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "fx_cc_shared_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl"),
             filepath = "src/BUILD.bazel",
             line = 2,
             col = 32,
@@ -219,7 +219,7 @@ def native_cc_shared_lib(): native.cc_shared_library(name = "native_shared_lib")
         ),
         testing.finding(
             level = "error",
-            message = _call_msg("cc_shared_library", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "cc_shared_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _call_msg("cc_shared_library", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "fx_cc_shared_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl"),
             filepath = "src/BUILD.bazel",
             line = 3,
             col = 1,
@@ -227,7 +227,7 @@ def native_cc_shared_lib(): native.cc_shared_library(name = "native_shared_lib")
         ),
         testing.finding(
             level = "error",
-            message = _load_msg("cc_shared_library", "@@rules_cc//cc:cc_shared_library.bzl", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "cc_shared_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _load_msg("cc_shared_library", "@@rules_cc//cc:cc_shared_library.bzl", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "fx_cc_shared_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl"),
             filepath = "src/defs.bzl",
             line = 2,
             col = 46,
@@ -235,7 +235,7 @@ def native_cc_shared_lib(): native.cc_shared_library(name = "native_shared_lib")
         ),
         testing.finding(
             level = "error",
-            message = _call_msg("cc_shared_library", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "cc_shared_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _call_msg("cc_shared_library", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "fx_cc_shared_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl"),
             filepath = "src/defs.bzl",
             line = 3,
             col = 30,
@@ -243,7 +243,7 @@ def native_cc_shared_lib(): native.cc_shared_library(name = "native_shared_lib")
         ),
         testing.finding(
             level = "error",
-            message = _call_msg("cc_shared_library", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "cc_shared_library_zx", alt_module = "//build/bazel/rules:zx_library.bzl"),
+            message = _call_msg("cc_shared_library", "fx_cc_shared_library", "//build/bazel/rules/cc:fx_cc_shared_library.bzl", alt_wrapper = "fx_cc_shared_library_zx", alt_module = "//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl"),
             filepath = "src/defs.bzl",
             line = 4,
             col = 29,
@@ -496,10 +496,12 @@ def test_allowed_wrappers_and_unwrapped_symbols():
         "src/BUILD.bazel": """
 load("@rules_cc//cc:defs.bzl", "CcInfo", "cc_common", "cc_import")
 load("@rules_rust//crate_universe:defs.bzl", "crates_vendor")
-load("//build/bazel/rules:zx_library.bzl", "cc_shared_library_zx", "cc_source_library_zx", "cc_static_library_zx")
 load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 load("//build/bazel/rules/cc:fx_cc_shared_library.bzl", "fx_cc_shared_library")
+load("//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl", "fx_cc_shared_library_zx")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+load("//build/bazel/rules/cc:fx_cc_static_library_zx.bzl", "fx_cc_static_library_zx")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_dylib.bzl", "rustc_dylib")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
@@ -510,9 +512,9 @@ load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 fx_cc_binary(name = "cc_bin")
 fx_cc_library(name = "cc_lib")
 fx_cc_shared_library(name = "cc_shared_lib")
-cc_shared_library_zx(name = "zx_shared_lib")
-cc_source_library_zx(name = "zx_source_lib")
-cc_static_library_zx(name = "zx_static_lib")
+fx_cc_shared_library_zx(name = "zx_shared_lib")
+fx_cc_source_library_zx(name = "zx_source_lib")
+fx_cc_static_library_zx(name = "zx_static_lib")
 cc_import(name = "imported")
 rustc_binary(name = "rust_bin")
 rustc_dylib(name = "rust_dylib")

@@ -20,7 +20,7 @@ pub(crate) mod tx;
 /// The maximum number of elements that can be in the RX queue.
 const MAX_RX_QUEUED_LEN: usize = 10000;
 /// The maximum number of elements that can be in the TX queue.
-const MAX_TX_QUEUED_LEN: usize = 10000;
+pub const MAX_TX_QUEUED_LEN: usize = 10000;
 
 /// Error returned when the receive queue is full.
 #[derive(Debug, PartialEq, Eq)]

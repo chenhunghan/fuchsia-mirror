@@ -65,7 +65,6 @@ fidl_library(
     name = "fuchsia.feedback.testing",
     testonly = True,
     srcs = ["query.test.fidl"],
-    enable_hlcpp = True,
     visibility = [
         "//src/developer/forensics:__subpackages__",
         "//src/power/system-activity-governor:__subpackages__",

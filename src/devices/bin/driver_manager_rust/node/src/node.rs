@@ -13,13 +13,14 @@ use driver_manager_shutdown::{NodeRemovalTracker, NodeShutdownCoordinator, Remov
 use driver_manager_types::{
     Collection, NodeOffer, OfferTransport, ShutdownState, StartRequestReceiver,
 };
-use fidl_fuchsia_component_sandbox::AggregateSource;
+use fidl_fuchsia_component_runtime::AggregateSource;
 use fidl_fuchsia_device_fs as fdevfs;
 use fidl_fuchsia_driver_development as fdd;
 use fidl_fuchsia_driver_framework as fdf;
 use fidl_fuchsia_driver_host as fdh;
 use flyweights::FlyStr;
 use fuchsia_async::{self as fasync};
+use fuchsia_component::runtime::Dictionary;
 use futures::channel::oneshot;
 use log::{debug, warn};
 use std::cell::RefCell;
@@ -250,10 +251,7 @@ pub(crate) struct NodeCore {
 }
 
 impl NodeCore {
-    pub(crate) fn set_subtree_dictionary(
-        &mut self,
-        dictionary: fidl_fuchsia_component_sandbox::CapabilityId,
-    ) {
+    pub(crate) fn set_subtree_dictionary(&mut self, dictionary: Dictionary) {
         if matches!(self.dictionary, NodeDictionary::Standard(_)) {
             panic!("Cannot set subtree dictionary on nodes with standard dictionaries");
         }
@@ -281,13 +279,11 @@ impl NodeCore {
         matches!(self.node_type, NodeTypeVariant::Composite { .. })
     }
 
-    pub(crate) fn dictionary_to_export(
-        &self,
-    ) -> Option<fidl_fuchsia_component_sandbox::CapabilityId> {
-        match self.dictionary {
+    pub(crate) fn dictionary_to_export(&self) -> Option<Dictionary> {
+        match &self.dictionary {
             NodeDictionary::None => None,
-            NodeDictionary::Standard(d) => Some(d),
-            NodeDictionary::Subtree(d) => Some(d),
+            NodeDictionary::Standard(d) => Some(d.clone()),
+            NodeDictionary::Subtree(d) => Some(d.clone()),
         }
     }
 
@@ -303,7 +299,7 @@ impl NodeCore {
             if let Some(connector) = dictionary_offer.dir_connector.take() {
                 sources.entry(dictionary_offer.service_name.clone()).or_default().push(
                     AggregateSource {
-                        dir_connector: Some(connector),
+                        dir_connector: Some(connector.handle),
                         source_instance_filter: Some(
                             dictionary_offer.source_instance_filter.clone(),
                         ),
@@ -316,10 +312,7 @@ impl NodeCore {
         sources
     }
 
-    pub(crate) fn set_standard_dictionary(
-        &mut self,
-        dictionary: fidl_fuchsia_component_sandbox::CapabilityId,
-    ) {
+    pub(crate) fn set_standard_dictionary(&mut self, dictionary: Dictionary) {
         self.dictionary = NodeDictionary::Standard(dictionary);
     }
 
@@ -683,7 +676,7 @@ impl Node {
         true
     }
 
-    pub fn set_subtree_dictionary(&self, dictionary: fidl_fuchsia_component_sandbox::CapabilityId) {
+    pub fn set_subtree_dictionary(&self, dictionary: Dictionary) {
         self.core.borrow_mut().set_subtree_dictionary(dictionary);
     }
 
@@ -699,15 +692,13 @@ impl Node {
         self.has_subtree_dictionary()
     }
 
-    pub async fn prepare_dictionary(
-        &self,
-    ) -> Option<fidl_fuchsia_component_sandbox::DictionaryRef> {
+    pub async fn prepare_dictionary(&self) -> Option<zx::EventPair> {
         let dictionary_util = self.node_manager.get_dictionary_util().ok()?;
 
-        let to_export = self.core.borrow().dictionary_to_export();
+        let to_copy = self.core.borrow().dictionary_to_export();
 
-        if let Some(d) = to_export {
-            return dictionary_util.copy_export_dictionary(d).await.ok();
+        if let Some(d) = to_copy {
+            return dictionary_util.copy_dictionary(&d).await.ok();
         }
 
         let sources = self.core.borrow_mut().take_dictionary_offer_sources();
@@ -715,9 +706,11 @@ impl Node {
         let aggregate_dictionary =
             dictionary_util.create_aggregate_dictionary(sources).await.ok()?;
 
-        self.core.borrow_mut().set_standard_dictionary(aggregate_dictionary);
+        // Store the dictionary before waiting for the copy, so that a concurrent call uses it
+        // instead of building another one from the offer sources, which have already been taken.
+        self.core.borrow_mut().set_standard_dictionary(aggregate_dictionary.clone());
 
-        dictionary_util.copy_export_dictionary(aggregate_dictionary).await.ok()
+        dictionary_util.copy_dictionary(&aggregate_dictionary).await.ok()
     }
 
     pub fn remove(

@@ -1,0 +1,1 @@
+non-library data that _c_extension_shlib_data must filter out

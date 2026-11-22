@@ -73,6 +73,7 @@ rustc_library(
         "//third_party/rust_crates/vendor:hyper",
         "//third_party/rust_crates/vendor:hyper-rustls",
         "//third_party/rust_crates/vendor:hyper-util",
+        "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:rustls",
         "//third_party/rust_crates/vendor:socket2",
         "//third_party/rust_crates/vendor:tokio",
@@ -80,6 +81,8 @@ rustc_library(
     ] + select({
         "@platforms//os:fuchsia": [
             "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
+            "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
+            "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
             "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
             "//sdk/rust/zx",
             "//src/lib/fdio/rust:fdio",
@@ -93,7 +96,6 @@ rustc_library(
         ],
         "//conditions:default": [
             "//src/developer/ffx/lib/netext:lib",
-            "//third_party/rust_crates/vendor:log",
             "//third_party/rust_crates/vendor:rustls-native-certs",
         ],
     }),

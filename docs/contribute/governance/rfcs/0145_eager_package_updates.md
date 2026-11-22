@@ -255,7 +255,7 @@ into this first stage of work:
 *   The package contains executable machine code
 *   It requires channel and staged rollout support
 
-### Prerequisite properties of updatable packages
+### Prerequisite properties of updatable packages {:#prerequisite-properties-of-updatable-packages}
 
 This section details the types of packages that the proposed design will
 support in the short term. We expect that over the long term, we'll relax many
@@ -436,7 +436,7 @@ For devices with both a committed update and a [fallback
 version](#fallback-versions-of-package-required-for-early-boot) of a package, we
 should use the channel information from the committed update even if the
 fallback version is newer (even if the committed version is older than the
-[backstop version](#rollback-protection)), to avoid overwriting channel
+[backstop version](#rollback-prevention)), to avoid overwriting channel
 assignments by updating the backstop version. We must still validate the
 signature on the committed response before we use its channel information.
 
@@ -506,7 +506,7 @@ A diagram of this flow follows:
 A download failure must prevent the CUP result of an update check from being
 committed. New resolves will continue to use the previously committed version.
 
-#### Space management and garbage collection
+#### Space management and garbage collection {:#space-management-and-garbage-collection}
 
 We need to maintain a couple of space-related invariants while downloading
 updates for packages:
@@ -622,7 +622,7 @@ A diagram of this flow follows:
 ![Updatable package resolution
 flow](resources/0145_eager_package_updates/resolution-flow.png)
 
-#### Controls on executability
+#### Controls on executability {:#controls-on-executability}
 
 `pkg-resolver` being part of the active resolution path on production devices
 means it will need to participate in [FVX][fvx] enforcement. The list of keys
@@ -639,7 +639,7 @@ on user* builds the only packages which can contain executable code are either:
 The specific implementation of these controls will be the subject of a follow-on
 document.
 
-### Verification of downloaded metadata across reboots
+### Verification of downloaded metadata across reboots {:#verification-of-downloaded-metadata-across-reboots}
 
 #### Signature Verification and Auditability
 
@@ -665,7 +665,7 @@ response to get the value of the persisted merkle root. However, we believe we
 can mitigate this risk in implementation with isolation of the components that
 actually do the parsing.
 
-#### Rollback Prevention
+#### Rollback prevention {:#rollback-prevention}
 
 This solution relies on rollback protection provided by vbmeta, using
 version-based backstopping. If the intended version number in the CUP response
@@ -689,7 +689,7 @@ which generated the system image. We have no current requirements for updating
 packages not previously known to the system image, but we should design with
 them in mind.
 
-### Fallback versions of package required for early boot
+### Fallback versions of package required for early boot {:#fallback-versions-of-package-required-for-early-boot}
 
 Some packages in updatable packages may be required during the boot process, or
 before a device has network (for instance, they may provide a user interface to
@@ -738,7 +738,7 @@ three versions of a package which includes a fallback version: a fallback
 version in the current system image, a committed version that's been downloaded
 and may be running, and a new fallback version in the new system image.
 
-#### When to use a fallback version
+#### When to use a fallback version {:#when-to-use-a-fallback-version}
 
 Our CUP module will return a directory of the fallback version if and only if
 based on CUP metadata, the fallback version is _newer_ (has a larger version
@@ -934,7 +934,7 @@ This change does introduce potential disk usage increases, in the form of
 additional space required to store packages and a small amount of
 additional space required to store package metadata. Those considerations
 are detailed in the section on [space
-management](#appendix-space-management-guarantees-and-garbage-collection).
+management](#space-management-and-garbage-collection).
 
 ## Ergonomics
 
@@ -998,7 +998,7 @@ Omaha protocol preserves privacy.
 ## Testing
 
 Qualification of package releases is covered in [the relevant
-section](#updatable-package-qualification).
+section](#prerequisite-properties-of-updatable-packages).
 
 The changes detailed in the implementation section will need to be extensively
 tested. In particular, we'll need to add support for an in-tree Omaha server so
@@ -1027,7 +1027,7 @@ least:
 * How to configure updates
 * What an Omaha server implementation requires
 
-## Future work
+## Future work {:#future-work}
 
 ### Update Notification API
 
@@ -1183,7 +1183,7 @@ There is a possibility that no matter how good our size checking is during the
 release process, we will eventually break our size checking process and devices
 will run out of space attempting to download an update. See our [space
 management and garbage
-collection](#appendix-space-management-guarantees-and-garbage-collection)
+collection](#space-management-and-garbage-collection)
 section for more information on how to manage this.
 
 **As an alternative** to checking size limits by mimicking the compression done
@@ -1206,7 +1206,7 @@ to SWD and Storage codebases.
 [fuchsia-supported-arch]: https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/fidl/fuchsia.hwinfo/hwinfo.fidl;l=9;drc=e3b39f2b57e720770773b857feca4f770ee0619e
 [fvx]: /docs/concepts/security/verified_execution.md
 [garbage-collection]: /docs/concepts/packages/garbage_collection.md
-[indirect-verification]: /docs/concepts/security/verified_execution.md#direct_vs_indirect_verification
+[indirect-verification]: /docs/concepts/security/verified_execution.md#direct-vs-indirect-verification
 [omaha-cohort]: https://github.com/google/omaha/blob/ebc25b2b3d77eed3d9a122bcfd89a66f6f192e4b/doc/ServerProtocolV3.md#app-response
 [omaha-cup]: https://github.com/google/omaha/blob/ebc25b2b3d77eed3d9a122bcfd89a66f6f192e4b/doc/ClientUpdateProtocol.md
 [omaha-e2e-vbmeta]: https://cs.opensource.google/fuchsia/fuchsia/+/main:src/testing/host-target-testing/updater/updater.go;drc=bf2c499132832e547ff658f9626dee9245c507df;l=212

@@ -29,7 +29,7 @@ Zircon actively manages the following resources:
 + [Stream](/docs/reference/kernel_objects/stream.md)
 + [IOBuffer](/docs/reference/kernel_objects/io_buffer.md)
 
-### Tasks
+### Tasks {:#tasks}
 
 + [Process](/docs/reference/kernel_objects/process.md)
 + [Thread](/docs/reference/kernel_objects/thread.md)
@@ -67,7 +67,7 @@ Zircon actively manages the following resources:
 + [Bus Transaction Initiator](/docs/reference/kernel_objects/bus_transaction_initiator.md)
 + [Pinned Memory Token](/docs/reference/kernel_objects/pinned_memory_token.md)
 
-## Kernel object lifetime
+## Kernel object lifetime {:#kernel-object-lifetime}
 
 Kernel objects are [reference-counted]. Most kernel objects are
 created during a 'create' syscall and are held alive by the first handle,
@@ -161,7 +161,7 @@ can have two different handles to the same object with different rights.
 [`zx_handle_close`]: /reference/syscalls/handle_close.md
 [`zx_handle_close_many`]: /reference/syscalls/handle_close_many.md
 [`zx_handle_duplicate`]: /reference/syscalls/handle_duplicate.md
-[`zx_thread_exit`]:/reference/syscalls/thread_exit.md
+[`zx_thread_exit`]: /reference/syscalls/thread_exit.md
 [`zx_task_kill`]: /reference/syscalls/task_kill.md
 [VMOs]: /docs/reference/kernel_objects/vm_object.md
 [VMARs]: /docs/reference/kernel_objects/vm_address_region.md

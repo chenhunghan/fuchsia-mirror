@@ -9,6 +9,7 @@ use drivers_only_common::sme_helpers::{
 };
 use fidl_fuchsia_wlan_fullmac as fidl_fullmac;
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
+use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_sme as fidl_sme;
 use fullmac_helpers::config::FullmacDriverConfig;
 use fullmac_helpers::recorded_request_stream::FullmacRequest;
@@ -77,7 +78,12 @@ async fn test_start_2ghz_bss_success() {
     let chosen_channel = *supported_channels.choose(&mut rand::rng()).unwrap();
     let sme_ap_config = fidl_sme::ApConfig {
         ssid: random_ssid(),
-        password: random_password(),
+        authentication: fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(random_password()),
+            ))),
+        },
         radio_cfg: fidl_sme::RadioConfig {
             phy: *phy_types.choose(&mut rand::rng()).unwrap(),
             primary: chosen_channel,
@@ -160,7 +166,12 @@ async fn test_start_bss_fail_non_ascii_password() {
 
     let sme_ap_config = fidl_sme::ApConfig {
         ssid: random_ssid(),
-        password: vec![1, 2, 3],
+        authentication: fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Wpa2Personal,
+            credentials: Some(Box::new(fidl_internal::Credentials::Wpa(
+                fidl_internal::WpaCredentials::Passphrase(vec![1, 2, 3]),
+            ))),
+        },
         radio_cfg: fidl_sme::RadioConfig {
             phy: fidl_ieee80211::WlanPhyType::Ofdm,
             primary: fidl_ieee80211::ChannelNumber {
@@ -184,7 +195,10 @@ async fn test_start_bss_fail_bad_channel() {
 
     let sme_ap_config = fidl_sme::ApConfig {
         ssid: random_ssid(),
-        password: vec![],
+        authentication: fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: None,
+        },
         radio_cfg: fidl_sme::RadioConfig {
             phy: fidl_ieee80211::WlanPhyType::Ofdm,
             primary: fidl_ieee80211::ChannelNumber {

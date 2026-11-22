@@ -12,7 +12,7 @@ isolation, and commit hooks for Fuchsia developers.
 
 ```text
 tools/agents/
-├── BUILD.gn                         # GN build definitions with python_library("agents_lib")
+├── BUILD.bazel                      # Bazel build definitions with py_library("agents_lib")
 ├── DEVELOPMENT.md                   # Developer & architecture documentation
 ├── OWNERS                           # Tool ownership
 ├── README.md                        # User-facing guide for fx agents
@@ -227,39 +227,46 @@ When writing tests that interact with Git:
 
 ---
 
-## GN Build Packaging & Testing Guidelines
+## Bazel Build Packaging & Testing Guidelines
 
-### GN Build Rules (`tools/agents/BUILD.gn`)
+### Bazel Build Rules (`tools/agents/BUILD.bazel`)
 
 The package is structured as a host Python library and individual host unit tests prefixed with
 `agents_` to prevent target name collisions across the Fuchsia build graph:
 
-```gn
-import("//build/python/python_host_test.gni")
-import("//build/python/python_library.gni")
+```bazel
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
 
-if (is_host) {
-  python_library("agents_lib") {
-    library_name = "agents"
-    source_root = "."
-    sources = [ ... ]
-  }
+py_library(
+    name = "agents_lib",
+    srcs = [ ... ],
+    # Makes the package importable as `agents`.
+    imports = [".."],
+)
 
-  python_library("agents_testing") {
-    testonly = true
-    library_name = "agents_testing"
-    source_root = "testing"
-    sources = [ "base.py", "workspace.py" ]
-  }
+py_library(
+    name = "agents_testing",
+    testonly = True,
+    # testing/*.py, staged under _agents_testing_pkg/agents_testing/ with
+    # copy_file() so tests can `import agents_testing`.
+    srcs = [ ... ],
+    imports = ["_agents_testing_pkg"],
+)
 
-  python_host_test("agents_setup_test") {
-    main_source = "tests/setup_test.py"
-    libraries = [ ":agents_lib", ":agents_testing" ]
-  }
-}
+host_py_test(
+    name = "agents_setup_test",
+    srcs = ["tests/setup_test.py"],
+    main = "tests/setup_test.py",
+    deps = [
+        ":agents_lib",
+        ":agents_testing",
+    ],
+)
 ```
 
-See [`tools/agents/BUILD.gn`](BUILD.gn) for the full list of library sources and test targets.
+All test targets are listed in the `host_tests` test suite. See
+[`tools/agents/BUILD.bazel`](BUILD.bazel) for the full list of library sources and test targets.
 
 ### Test Infrastructure & Common Fixtures (`agents_testing`)
 
@@ -289,17 +296,21 @@ The standard, golden path workflow for configuring and running the test suite:
 
 1. **Configure tests in build** (one-time setup if not already in `args.gn`):
    ```bash
-   fx add-host-test //tools/agents:tests
+   fx add-host-test //tools:bazel_tests
    ```
 2. **Build and run all tool tests**:
    ```bash
    fx test //tools/agents
    ```
 
-> **Note**: `//tools/agents:tests` is the GN aggregator target (`group("tests")`) used when
-> configuring build targets (`fx add-host-test` or in `args.gn`). For running tests with `fx test`,
-> provide the directory path `//tools/agents` (or `tools/agents`), which matches all test target
-> labels declared under that directory.
+> **Note**: `//tools:bazel_tests` is the GN target that includes all Bazel host tests under
+> `//tools`, including `//tools/agents:host_tests`. For running tests with `fx test`, provide the
+> directory path `//tools/agents` (or `tools/agents`), which matches all test target labels
+> declared under that directory. To run the tests directly with Bazel, without editing `args.gn`:
+>
+> ```bash
+> fx bazel test --config=host //tools/agents:host_tests
+> ```
 
 ### Running Individual Sub-Tests
 
@@ -384,7 +395,8 @@ To add a new subcommand `fx agents <subcommand>`:
        <subcommand>.register_subcommand(subparsers)
        return parser
    ```
-4. **Update `BUILD.gn`**: Add `"commands/<subcommand>.py"` to `_agents_sources` in
-   `tools/agents/BUILD.gn`.
-5. **Add Tests**: Create `tools/agents/tests/<subcommand>_test.py` and declare
-   `python_host_test("agents_<subcommand>_test")` in `BUILD.gn`.
+4. **Update `BUILD.bazel`**: Add `"commands/<subcommand>.py"` to the `srcs` of `agents_lib` in
+   `tools/agents/BUILD.bazel`.
+5. **Add Tests**: Create `tools/agents/tests/<subcommand>_test.py`, declare
+   `host_py_test(name = "agents_<subcommand>_test")` in `BUILD.bazel`, and add it to the
+   `host_tests` test suite.

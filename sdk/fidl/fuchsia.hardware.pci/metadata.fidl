@@ -4,6 +4,13 @@
 
 library fuchsia.hardware.pci;
 
+/// An address of a PCI device.
+type Address = struct {
+    bus uint8;
+    device uint8;
+    function uint8;
+};
+
 @available(added=HEAD)
 type UseIntxWorkaroundType = struct {};
 

@@ -24,15 +24,16 @@ driver_bind_rules("cr50-spi_bind") {
 
 common_deps = [
   ":cr50-spi_bind",
-  "//sdk/banjo/fuchsia.hardware.tpmimpl:fuchsia.hardware.tpmimpl_banjo_cpp",
   "//sdk/fidl/fuchsia.hardware.spi:fuchsia.hardware.spi_cpp",
   "//sdk/fidl/fuchsia.hardware.tpmimpl:fuchsia.hardware.tpmimpl_cpp",
   "//sdk/lib/async:async-cpp",
   "//sdk/lib/async-loop:async-loop-cpp",
+  "//sdk/lib/component/outgoing/cpp",
   "//src/devices/lib/acpi",
   "//src/devices/lib/driver",
   "//src/lib/ddktl",
   "//zircon/system/ulib/inspect",
+  "//zircon/system/ulib/sync",
   "//zircon/system/ulib/zx",
 ]
 
@@ -44,7 +45,6 @@ fuchsia_cc_driver("fuchsia_driver") {
 }
 
 fuchsia_driver_component("cr50-spi-driver") {
-  info = "meta/cr50-spi-driver-info.json"
   deps = [ ":fuchsia_driver" ]
   dml_label = ":cr50-spi-driver-dml"
 }
@@ -61,6 +61,7 @@ test("cr50-spi-test-bin") {
     "cr50-spi.cc",
   ]
   deps = common_deps + [
+           "//sdk/lib/component/incoming/cpp",
            "//sdk/lib/inspect/testing/cpp:zxtest",
            "//src/devices/lib/acpi/mock:mock-acpi",
            "//src/devices/testing/mock-ddk",

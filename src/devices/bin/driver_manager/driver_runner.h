@@ -7,7 +7,7 @@
 
 #include <fidl/fuchsia.component/cpp/wire.h>
 #include <fidl/fuchsia.driver.crash/cpp/wire.h>
-#include <fidl/fuchsia.driver.development/cpp/wire.h>
+#include <fidl/fuchsia.driver.development/cpp/fidl.h>
 #include <fidl/fuchsia.driver.host/cpp/wire.h>
 #include <fidl/fuchsia.driver.index/cpp/wire.h>
 #include <fidl/fuchsia.driver.token/cpp/fidl.h>
@@ -87,7 +87,7 @@ class DriverRunner : public fidl::WireServer<fuchsia_driver_framework::Composite
   // |Dynamic_linker_args| should be set if dynamic linking is available.
   DriverRunner(fidl::ClientEnd<fuchsia_component::Realm> realm,
                fidl::ClientEnd<fuchsia_component::Introspector> introspector,
-               fidl::ClientEnd<fuchsia_component_sandbox::CapabilityStore> capability_store,
+               fidl::ClientEnd<fuchsia_component_runtime::Capabilities> capabilities,
                fidl::ClientEnd<fuchsia_driver_index::DriverIndex> driver_index,
                inspect::ComponentInspector& inspect, LoaderServiceFactory loader_service_factory,
                async_dispatcher_t* dispatcher, bool enable_test_shutdown_delays,
@@ -137,6 +137,8 @@ class DriverRunner : public fidl::WireServer<fuchsia_driver_framework::Composite
 
   // CompositeManagerBridge interface
   void BindNodesForCompositeNodeSpec() override;
+  void BindNodesForCompositeNodeSpec(
+      cpp20::span<const fuchsia_driver_framework::ParentSpec2> parent_specs) override;
   void AddSpecToDriverIndex(fuchsia_driver_framework::wire::CompositeNodeSpec group,
                             AddToIndexCallback callback) override;
 
@@ -179,6 +181,9 @@ class DriverRunner : public fidl::WireServer<fuchsia_driver_framework::Composite
   void RebindCompositesWithDriver(const std::string& url,
                                   fit::callback<void(size_t)> complete_callback);
 
+  void StartSuspendSession(const fuchsia_driver_development::NodeTarget& target,
+                           zx::eventpair token, fit::callback<void(zx::result<>)> cb);
+
   bool IsTestShutdownDelayEnabled() const override { return enable_test_shutdown_delays_; }
   std::weak_ptr<std::mt19937> GetShutdownTestRng() const override {
     return shutdown_test_delay_rng_;
@@ -206,15 +211,14 @@ class DriverRunner : public fidl::WireServer<fuchsia_driver_framework::Composite
   zx::result<uint32_t> RestartNodesColocatedWithDriverUrl(
       std::string_view url, fuchsia_driver_development::RestartRematchFlags rematch_flags);
 
-  void RestartWithDictionary(fidl::StringView moniker,
-                             fuchsia_component_sandbox::wire::DictionaryRef dictionary,
+  void RestartWithDictionary(fidl::StringView moniker, zx::eventpair dictionary,
                              zx::eventpair reset_eventpair);
 
   /// Restarts driver components bound to the node identified by |moniker|, providing
   /// custom power dependencies, CPU token override, and targeted child node power token overrides.
   /// Releasing |release_fence| reverts all temporary overrides and restarts the drivers again.
   void RestartWithDictionaryAndPowerDependencies(
-      std::string moniker, fuchsia_component_sandbox::DictionaryRef dictionary,
+      std::string moniker, zx::eventpair dictionary,
       std::vector<fuchsia_power_broker::LevelDependency> power_dependencies,
       std::optional<zx::event> cpu_token_override,
       std::vector<fuchsia_driver_development::NodePowerTokenOverride> node_power_token_overrides,
@@ -380,8 +384,11 @@ class DriverRunner : public fidl::WireServer<fuchsia_driver_framework::Composite
   MemoryAttributor memory_attributor_;
 
   fidl::Client<fuchsia_hardware_power_statecontrol::Admin> statecontrol_admin_;
-  std::unordered_map<std::string, std::vector<fit::callback<void(zx::result<>)>>>
-      pending_driver_host_destructions_;
+  struct PendingDriverHostDestruction {
+    bool destroy_called = false;
+    std::vector<fit::callback<void(zx::result<>)>> callbacks;
+  };
+  std::unordered_map<std::string, PendingDriverHostDestruction> pending_driver_host_destructions_;
 };
 
 Collection ToCollection(const Node& node, fuchsia_driver_framework::DriverPackageType package_type);

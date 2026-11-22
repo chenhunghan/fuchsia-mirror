@@ -21,15 +21,18 @@ cc_test_executable("unittests") {
     "median_duration_predictor_unittest.cc",
     "pessimistic_duration_predictor_unittest.cc",
     "present2_helper_unittest.cc",
+    "vsync_timing_unittest.cc",
   ]
   deps = [
     "//sdk/lib/fit-promise",
     "//sdk/lib/inspect/testing/cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture:gtest",
+    "//src/ui/scenic/lib/scheduling:duration_predictors",
     "//src/ui/scenic/lib/scheduling:frame_scheduler",
     "//src/ui/scenic/lib/scheduling:id",
     "//src/ui/scenic/lib/scheduling:present_helpers",
+    "//src/ui/scenic/lib/scheduling:vsync_timing",
     "//src/ui/scenic/lib/utils",
     "//third_party/googletest:gmock",
     "//zircon/system/ulib/inspect",

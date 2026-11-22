@@ -183,7 +183,7 @@ void RunDisassembleVerb(const Command& cmd, fxl::RefPtr<CommandContext> cmd_cont
     Location location = frame->GetLocation();
 
     // Schedule memory request.
-    process->ReadMemory(location.address() + offset, size,
+    process->ReadMemory(location.address() + offset, static_cast<uint32_t>(size),
                         [cmd_context, options, weak_process](const Err& err, MemoryDump dump) {
                           CompleteDisassemble(cmd_context, err, std::move(dump),
                                               std::move(weak_process), options);
@@ -220,7 +220,7 @@ void RunDisassembleVerb(const Command& cmd, fxl::RefPtr<CommandContext> cmd_cont
 
           // Schedule memory request.
           weak_process->ReadMemory(
-              location.address(), size,
+              location.address(), static_cast<uint32_t>(size),
               [cmd_context, options, weak_process](const Err& err, MemoryDump dump) {
                 CompleteDisassemble(cmd_context, err, std::move(dump), std::move(weak_process),
                                     options);

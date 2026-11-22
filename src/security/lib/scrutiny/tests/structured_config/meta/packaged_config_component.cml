@@ -1,0 +1,23 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+{
+    program: {
+        runner: "elf",
+    },
+    config: {
+        immutable_packaged_config: {
+            type: "string",
+            max_size: 50,
+        },
+
+        // This config field is mutable-by-parent, which scrutiny should not allow
+        // in statically-defined config policies because policy-specified values could be
+        // overridden at runtime.
+        mutable_by_parent_config: {
+            type: "string",
+            max_size: 100,
+            mutability: [ "parent" ],
+        },
+    },
+}

@@ -64,26 +64,27 @@ pub trait AsDiagnosticMessage {
 // than have the string handling happen in here.
 impl AsDiagnosticMessage for DiscoverySources {
     fn as_diagnostic_message_with_env<E: agents::EnvironmentSource>(&self, env: &E) -> String {
-        match *self {
-            DiscoverySources::MDNS => {
-                let link = doc_link_with_env(
-                    "development/tools/ffx/workflows/network-connectivity/device-discovery#multicast-dns-resolution",
-                    env,
-                );
-                format!("For mDNS debugging, see: {link}")
-            }
-            DiscoverySources::EMULATOR
-            | DiscoverySources::MANUAL
-            | DiscoverySources::FASTBOOT_FILE
-            | DiscoverySources::USB_VSOCK
-            | DiscoverySources::USB_FASTBOOT
-            | DiscoverySources::GCE
-            | DiscoverySources::UART => String::new(),
+        let (label, section) = match *self {
+            DiscoverySources::MDNS => ("mDNS", "multicast-dns-resolution"),
+            DiscoverySources::USB_FASTBOOT => ("USB Fastboot", "usb-fastboot-discovery"),
+            DiscoverySources::USB_VSOCK => ("USB VSOCK", "usb-vsock-discovery"),
+            DiscoverySources::EMULATOR => ("emulator", "emulator-discovery"),
+            DiscoverySources::MANUAL => ("manual target", "manual-target-discovery"),
+            DiscoverySources::FASTBOOT_FILE => ("fastboot file", "fastboot-file-discovery"),
+            DiscoverySources::GCE => ("GCE", "gce-discovery"),
+            DiscoverySources::UART => ("UART", "uart-discovery"),
             b => panic!(
                 "Un-handled bit type: {b:?}. This may be a failure from the discovery library of ffx. Please report this to {}",
                 errors::BUG_REPORT_URL
             ),
-        }
+        };
+        let link = doc_link_with_env(
+            &format!(
+                "development/tools/ffx/workflows/network-connectivity/device-discovery#{section}"
+            ),
+            env,
+        );
+        format!("For {label} debugging, see: {link}")
     }
 }
 
@@ -419,21 +420,36 @@ mod tests {
 
     #[test]
     fn test_as_diagnostic_message() {
-        let mdns = DiscoverySources::MDNS;
-
         let non_agent_env: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
-        assert_eq!(
-            mdns.as_diagnostic_message_with_env(&non_agent_env),
-            "For mDNS debugging, see: https://fuchsia.dev/fuchsia-src/development/tools/ffx/workflows/network-connectivity/device-discovery#multicast-dns-resolution"
-        );
-
         let mut agent_env = std::collections::HashMap::new();
         agent_env.insert("ANTIGRAVITY_AGENT".to_string(), "1".to_string());
-        assert_eq!(
-            mdns.as_diagnostic_message_with_env(&agent_env),
-            "For mDNS debugging, see: //docs/development/tools/ffx/workflows/network-connectivity/device-discovery.md#multicast-dns-resolution"
-        );
+
+        let cases = [
+            (DiscoverySources::MDNS, "mDNS", "multicast-dns-resolution"),
+            (DiscoverySources::USB_FASTBOOT, "USB Fastboot", "usb-fastboot-discovery"),
+            (DiscoverySources::USB_VSOCK, "USB VSOCK", "usb-vsock-discovery"),
+            (DiscoverySources::EMULATOR, "emulator", "emulator-discovery"),
+            (DiscoverySources::MANUAL, "manual target", "manual-target-discovery"),
+            (DiscoverySources::FASTBOOT_FILE, "fastboot file", "fastboot-file-discovery"),
+            (DiscoverySources::GCE, "GCE", "gce-discovery"),
+            (DiscoverySources::UART, "UART", "uart-discovery"),
+        ];
+
+        for (source, label, section) in cases {
+            assert_eq!(
+                source.as_diagnostic_message_with_env(&non_agent_env),
+                format!(
+                    "For {label} debugging, see: https://fuchsia.dev/fuchsia-src/development/tools/ffx/workflows/network-connectivity/device-discovery#{section}"
+                )
+            );
+            assert_eq!(
+                source.as_diagnostic_message_with_env(&agent_env),
+                format!(
+                    "For {label} debugging, see: //docs/development/tools/ffx/workflows/network-connectivity/device-discovery.md#{section}"
+                )
+            );
+        }
     }
 
     #[test]

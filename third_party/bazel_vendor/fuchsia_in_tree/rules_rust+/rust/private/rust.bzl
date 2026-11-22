@@ -34,6 +34,7 @@ load(
     ":rustc.bzl",
     "UnstableSelfProfileInfo",
     "collect_extra_rustc_flags",
+    "is_extra_rustc_flags_disabled",
     "is_no_std",
     "rustc_compile_action",
 )
@@ -304,6 +305,8 @@ def _rust_library_common(ctx, crate_type):
         deps += transform_link_deps(ctx.attr.link_deps)
     proc_macro_deps = transform_deps(ctx.attr.proc_macro_deps)
 
+    disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
+
     return rustc_compile_action(
         ctx = ctx,
         attr = ctx.attr,
@@ -326,12 +329,17 @@ def _rust_library_common(ctx, crate_type):
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             rustc_env = ctx.attr.rustc_env,
             rustc_env_files = ctx.files.rustc_env_files,
+            default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files),
+            default_rustc_flags_files = ctx.files.default_rustc_flags_files,
+            rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files),
+            rustc_flags_files = ctx.files.rustc_flags_files,
+            disable_extra_rustc_flags = disable_extra_rustc_flags,
             is_test = False,
             data = depset(ctx.files.data),
             compile_data = depset(compile_data),
             compile_data_targets = depset(ctx.attr.compile_data),
             owner = ctx.label,
-            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = False),
+            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = False, disable_extra_rustc_flags = disable_extra_rustc_flags),
         ),
     )
 
@@ -374,6 +382,8 @@ def _rust_binary_impl(ctx):
         )
         rustc_rmeta_output = generate_output_diagnostics(ctx, rust_metadata)
 
+    disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
+
     providers = rustc_compile_action(
         ctx = ctx,
         attr = ctx.attr,
@@ -394,12 +404,17 @@ def _rust_binary_impl(ctx):
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             rustc_env = ctx.attr.rustc_env,
             rustc_env_files = ctx.files.rustc_env_files,
+            default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files),
+            default_rustc_flags_files = ctx.files.default_rustc_flags_files,
+            rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files),
+            rustc_flags_files = ctx.files.rustc_flags_files,
+            disable_extra_rustc_flags = disable_extra_rustc_flags,
             is_test = False,
             data = depset(ctx.files.data),
             compile_data = depset(compile_data),
             compile_data_targets = depset(ctx.attr.compile_data),
             owner = ctx.label,
-            cfgs = _collect_cfgs(ctx, toolchain, crate_root, ctx.attr.crate_type, crate_is_test = False),
+            cfgs = _collect_cfgs(ctx, toolchain, crate_root, ctx.attr.crate_type, crate_is_test = False, disable_extra_rustc_flags = disable_extra_rustc_flags),
         ),
     )
 
@@ -489,7 +504,47 @@ def _rust_test_impl(ctx):
             compile_data_targets = depset(ctx.attr.compile_data, transitive = [crate.compile_data_targets])
         else:
             compile_data_targets = depset(ctx.attr.compile_data)
-        rustc_env_files = ctx.files.rustc_env_files + crate.rustc_env_files
+        crate_default_rustc_flags_cfgs = getattr(crate, "default_rustc_flags_cfgs", [])
+        crate_default_rustc_flags_files = getattr(crate, "default_rustc_flags_files", [])
+        crate_rustc_flags_cfgs = getattr(crate, "rustc_flags_cfgs", [])
+        crate_rustc_flags_files = getattr(crate, "rustc_flags_files", [])
+        crate_rustc_env_files = getattr(crate, "rustc_env_files", [])
+        crate_disable_extra_rustc_flags = getattr(crate, "disable_extra_rustc_flags", False)
+
+        self_disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
+        extra_flags_feature = getattr(toolchain, "extra_rustc_flags_feature", "")
+        target_explicitly_disables_extra_flags = bool(extra_flags_feature) and ("-" + extra_flags_feature) in getattr(ctx.attr, "features", [])
+        replace_crate_rustc_flags_files = getattr(ctx.attr, "replace_crate_rustc_flags_files", False)
+        replace_default_rustc_flags_files = replace_crate_rustc_flags_files or (
+            self_disable_extra_rustc_flags and (
+                bool(ctx.files.default_rustc_flags_files) or target_explicitly_disables_extra_flags
+            )
+        )
+        own_default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files)
+        own_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files)
+        if replace_crate_rustc_flags_files:
+            default_rustc_flags_files = ctx.files.default_rustc_flags_files
+            default_rustc_flags_cfgs = own_default_rustc_flags_cfgs
+            rustc_flags_files = ctx.files.rustc_flags_files
+            rustc_flags_cfgs = own_rustc_flags_cfgs
+            inherited_cfgs = []
+            rustc_env_files = ctx.files.rustc_env_files
+        else:
+            if replace_default_rustc_flags_files:
+                default_rustc_flags_files = ctx.files.default_rustc_flags_files
+                default_rustc_flags_cfgs = own_default_rustc_flags_cfgs
+                inherited_cfgs = crate_rustc_flags_cfgs
+            else:
+                default_rustc_flags_files = [f for f in crate_default_rustc_flags_files if f not in ctx.files.default_rustc_flags_files] + ctx.files.default_rustc_flags_files
+                default_rustc_flags_cfgs = [c for c in crate_default_rustc_flags_cfgs if c not in own_default_rustc_flags_cfgs] + own_default_rustc_flags_cfgs
+                inherited_cfgs = crate_default_rustc_flags_cfgs + [c for c in crate_rustc_flags_cfgs if c not in crate_default_rustc_flags_cfgs]
+            rustc_flags_files = [f for f in crate_rustc_flags_files if f not in ctx.files.rustc_flags_files] + ctx.files.rustc_flags_files
+            rustc_flags_cfgs = [c for c in crate_rustc_flags_cfgs if c not in own_rustc_flags_cfgs] + own_rustc_flags_cfgs
+
+            # Append test env files after crate env files so test values override
+            # in process_wrapper's sequential env_from_files lookup, matching rustc_env.
+            rustc_env_files = [f for f in crate_rustc_env_files if f not in ctx.files.rustc_env_files] + ctx.files.rustc_env_files
+        disable_extra_rustc_flags = self_disable_extra_rustc_flags or crate_disable_extra_rustc_flags
 
         # crate.rustc_env is already expanded upstream in rust_library rule implementation
         rustc_env = dict(crate.rustc_env)
@@ -520,12 +575,25 @@ def _rust_test_impl(ctx):
             edition = crate.edition,
             rustc_env = rustc_env,
             rustc_env_files = rustc_env_files,
+            default_rustc_flags_cfgs = default_rustc_flags_cfgs,
+            default_rustc_flags_files = default_rustc_flags_files,
+            rustc_flags_cfgs = rustc_flags_cfgs,
+            rustc_flags_files = rustc_flags_files,
+            disable_extra_rustc_flags = disable_extra_rustc_flags,
             is_test = True,
             compile_data = depset(compile_data),
             compile_data_targets = compile_data_targets,
             wrapped_crate_type = crate.type,
             owner = ctx.label,
-            cfgs = _collect_cfgs(ctx, toolchain, crate.root, crate_type, crate_is_test = True),
+            cfgs = _collect_cfgs(
+                ctx,
+                toolchain,
+                crate.root,
+                crate_type,
+                crate_is_test = True,
+                disable_extra_rustc_flags = disable_extra_rustc_flags,
+                extra_cfgs = inherited_cfgs,
+            ),
         )
     else:
         crate_name = compute_crate_name(ctx.workspace_name, ctx.label, toolchain, ctx.attr.crate_name)
@@ -561,6 +629,8 @@ def _rust_test_impl(ctx):
         else:
             rustc_env = {}
 
+        disable_extra_rustc_flags = is_extra_rustc_flags_disabled(ctx, toolchain)
+
         # Target is a standalone crate. Build the test binary as its own crate.
         crate_info_dict = dict(
             name = crate_name,
@@ -578,11 +648,16 @@ def _rust_test_impl(ctx):
             edition = get_edition(ctx.attr, toolchain, ctx.label),
             rustc_env = rustc_env,
             rustc_env_files = ctx.files.rustc_env_files,
+            default_rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.default_rustc_flags_files),
+            default_rustc_flags_files = ctx.files.default_rustc_flags_files,
+            rustc_flags_cfgs = _collect_flags_files_cfgs(ctx, ctx.attr.rustc_flags_files),
+            rustc_flags_files = ctx.files.rustc_flags_files,
+            disable_extra_rustc_flags = disable_extra_rustc_flags,
             is_test = True,
             compile_data = depset(compile_data),
             compile_data_targets = depset(ctx.attr.compile_data),
             owner = ctx.label,
-            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = True),
+            cfgs = _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test = True, disable_extra_rustc_flags = disable_extra_rustc_flags),
         )
 
     providers = rustc_compile_action(
@@ -889,6 +964,28 @@ _COMMON_ATTRS = {
             file of arguments to rustc: `@$(location //package:target)`.
         """),
     ),
+    "default_rustc_flags_files": attr.label_list(
+        doc = dedent("""\
+            Files containing default toolchain compiler flags passed to rustc as `@file` before `lint_config`.
+
+            Targets may also provide `platform_common.TemplateVariableInfo` with
+            `RUSTC_FLAGS_FILE_CFGS` containing newline-delimited `--cfg` specs (without
+            the `--cfg=` prefix) so `_collect_cfgs` includes them when
+            `@rules_rust//rust/settings:collect_cfgs` is enabled.
+        """),
+        allow_files = True,
+    ),
+    "rustc_flags_files": attr.label_list(
+        doc = dedent("""\
+            Files containing additional compiler flags passed to rustc as `@file`.
+
+            Targets may also provide `platform_common.TemplateVariableInfo` with
+            `RUSTC_FLAGS_FILE_CFGS` containing newline-delimited `--cfg` specs (without
+            the `--cfg=` prefix) so `_collect_cfgs` includes them when
+            `@rules_rust//rust/settings:collect_cfgs` is enabled.
+        """),
+        allow_files = True,
+    ),
     # TODO(stardoc): How do we provide additional documentation to an inherited attribute?
     # "name": attr.string(
     #     doc = "This name will also be used as the name of the crate built by this rule.",
@@ -1025,6 +1122,18 @@ _RUST_TEST_ATTRS = {
             Flag to dynamically link the standard library as a Rust dylib .so object when building this test.
 
             Default is false. This is often required when testing a target that depends on a Rust ABI dylib.
+        """),
+    ),
+    "replace_crate_rustc_flags_files": attr.bool(
+        mandatory = False,
+        default = False,
+        doc = dedent("""\
+            When true on `rust_test(crate = ...)`, do not inherit `default_rustc_flags_files`,
+            `rustc_flags_files`, `rustc_env_files`, or their `--cfg` entries from `crate`;
+            use only the response and environment files configured on this `rust_test` target.
+
+            Useful for wrapper macros that merge and filter the wrapped crate's flags into
+            dedicated test response/env files so opted-out crate flags do not leak back in.
         """),
     ),
     "use_libtest_harness": attr.bool(
@@ -1885,11 +1994,25 @@ def _replace_illlegal_chars(name):
         name = name.replace(illegal_char, "_")
     return name
 
-def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test):
+def _collect_flags_files_cfgs(ctx, targets):
+    """Extract `--cfg` specs from `TemplateVariableInfo["RUSTC_FLAGS_FILE_CFGS"]` on `targets` when `collect_cfgs` is enabled."""
+    if not (hasattr(ctx.attr, "_collect_cfgs") and ctx.attr._collect_cfgs[BuildSettingInfo].value):
+        return []
+    cfgs = {}
+    for flags_file_target in targets:
+        if platform_common.TemplateVariableInfo in flags_file_target:
+            raw_cfgs = flags_file_target[platform_common.TemplateVariableInfo].variables.get("RUSTC_FLAGS_FILE_CFGS", "")
+            for cfg in raw_cfgs.splitlines():
+                if cfg:
+                    cfgs[cfg] = True
+    return list(cfgs)
+
+def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test, disable_extra_rustc_flags = False, extra_cfgs = []):
     """Collect all cfg flags for a crate but only when @rules_rust//rust/settings:collect_cfgs is set.
 
-    Cfgs are gathered from the target's own attributes (e.g., rustc_flags, crate_features, etc.), as
-    well as from the toolchain (e.g., toolchain.extra_rustc_flags).
+    Cfgs are gathered from the target's own attributes (e.g., rustc_flags, crate_features,
+    default_rustc_flags_files, rustc_flags_files, etc.), as well as from the toolchain
+    (e.g., toolchain.extra_rustc_flags) and any wrapped crate's cfgs.
 
     Args:
         ctx (ctx): The current rule's context object.
@@ -1897,6 +2020,8 @@ def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test):
         crate_root (File): The root file of the crate.
         crate_type (str): The crate type.
         crate_is_test (bool): Whether the crate is a test target or not.
+        disable_extra_rustc_flags (bool): Whether toolchain extra flags are disabled.
+        extra_cfgs (List[str]): Additional cfg values inherited from a wrapped crate.
 
     Returns:
         List[str]: All cfg flags for the target (or empty list if build setting is unset).
@@ -1910,8 +2035,19 @@ def _collect_cfgs(ctx, toolchain, crate_root, crate_type, crate_is_test):
     if is_no_std(ctx, toolchain, crate_is_test):
         cfgs['feature="no_std"'] = True
 
-    rustc_flags = getattr(ctx.attr, "rustc_flags", []) + collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type)
+    rustc_flags = getattr(ctx.attr, "rustc_flags", []) + collect_extra_rustc_flags(ctx, toolchain, crate_root, crate_type, disable_extra_rustc_flags = disable_extra_rustc_flags)
     cfgs |= {flag.removeprefix("--cfg="): True for flag in rustc_flags if flag.startswith("--cfg=")}
     cfgs |= {value: True for (flag, value) in zip(rustc_flags[:-1], rustc_flags[1:]) if flag == "--cfg"}
+    for cfg in extra_cfgs:
+        cfgs[cfg] = True
+
+    # Response files cannot be read during Starlark analysis, so targets can expose
+    # their `--cfg` specs (without `--cfg=`, one per line) via
+    # TemplateVariableInfo["RUSTC_FLAGS_FILE_CFGS"].
+    for cfg in _collect_flags_files_cfgs(
+        ctx,
+        getattr(ctx.attr, "default_rustc_flags_files", []) + getattr(ctx.attr, "rustc_flags_files", []),
+    ):
+        cfgs[cfg] = True
 
     return list(cfgs)

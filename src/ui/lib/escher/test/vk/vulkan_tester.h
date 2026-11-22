@@ -5,6 +5,7 @@
 #ifndef SRC_UI_LIB_ESCHER_TEST_VK_VULKAN_TESTER_H_
 #define SRC_UI_LIB_ESCHER_TEST_VK_VULKAN_TESTER_H_
 
+#include "src/ui/lib/escher/escher.h"
 #include "src/ui/lib/escher/renderer/frame.h"
 #include "src/ui/lib/escher/vk/command_buffer.h"
 #include "src/ui/lib/escher/vk/shader_program.h"
@@ -64,6 +65,10 @@ class VulkanTester {
   }
 
   static void SetQueueForTest(const FramePtr& frame, vk::Queue queue) { frame->queue_ = queue; }
+
+  static bool WaitOnOldestPendingCommandBuffer(Escher* escher, uint64_t timeout_nanoseconds) {
+    return escher->WaitOnOldestPendingCommandBuffer(timeout_nanoseconds);
+  }
 
   const ShaderProgramPtr& ClearPipelineStash(const ShaderProgramPtr& program) {
     if (program) {

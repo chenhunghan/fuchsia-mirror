@@ -48,6 +48,9 @@ template("rust_syscall_test") {
     deps = _deps
   }
 
+  _is_machina = defined(invoker.test_target_kernel) &&
+                invoker.test_target_kernel == "linux"
+
   # Generate the component manifest
   _manifest_label = "${target_name}.cml"
   _manifest_file = "$target_gen_dir/${_manifest_label}"
@@ -67,17 +70,24 @@ template("rust_syscall_test") {
       _includes = invoker.includes
     }
 
-    contents = {
-      include = [
-        "//src/starnix/tests/syscalls/rust/meta/syscalls_libtest.shard.cml",
-      ]
-      include += _includes
-      program = _program
+    if (_is_machina) {
+      _program.test_type = "syscall_libtest"
+      contents = {
+        include =
+            [ "//src/starnix/tests/machina_test_with_expectations.shard.cml" ] +
+            _includes
+        program = _program
+      }
+    } else {
+      contents = {
+        include = [
+          "//src/starnix/tests/syscalls/rust/meta/syscalls_libtest.shard.cml",
+        ]
+        include += _includes
+        program = _program
+      }
     }
   }
-
-  _is_machina = defined(invoker.test_target_kernel) &&
-                invoker.test_target_kernel == "linux"
 
   # Define the test component
   starnix_linux_test_component(target_name) {
@@ -85,6 +95,7 @@ template("rust_syscall_test") {
     test_binary = _test_binary_name
     manifest = _manifest_file
     deps = [ ":${_manifest_label}" ]
+    is_machina_test = _is_machina
     if (_is_machina) {
       not_needed([ "_resources" ])
 

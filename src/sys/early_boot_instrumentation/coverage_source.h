@@ -6,6 +6,7 @@
 #define SRC_SYS_EARLY_BOOT_INSTRUMENTATION_COVERAGE_SOURCE_H_
 
 #include <fidl/fuchsia.boot/cpp/wire.h>
+#include <lib/vfs/cpp/pseudo_dir.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/result.h>
 #include <lib/zx/vmo.h>
@@ -13,7 +14,6 @@
 #include <string_view>
 
 #include <fbl/unique_fd.h>
-#include <sdk/lib/vfs/cpp/pseudo_dir.h>
 
 namespace early_boot_instrumentation {
 

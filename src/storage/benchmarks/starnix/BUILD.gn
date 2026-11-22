@@ -50,6 +50,7 @@ rustc_binary("test_fxblob_bin") {
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
+    "//src/lib/fuchsia-runtime",
     "//src/storage/benchmarks:framework",
     "//src/storage/benchmarks/fuchsia:framework",
     "//src/storage/erofs/serializer",
@@ -134,7 +135,6 @@ fuchsia_test_package("storage-starnix-benchmarks") {
   subpackages = [
     "//src/starnix/kernel:starnix_kernel_package",
     "//src/starnix/containers/debian:debian_package",
-    "//src/storage/erofs/component:erofs",
   ]
   test_specs = {
     build_only = true
@@ -166,7 +166,10 @@ fuchsia_component_perf_test("storage_starnix_erofs_benchmarks") {
   expected_metric_names_filepath = "//src/tests/end_to_end/perf/expected_metric_names/fuchsia.storage.starnix_erofs.txt"
   use_component_builtin_args = true
   test_type = "storage"
-  environments = starnix_benchmark_environments
+
+  # Iris does not yet support finding or creating a test partition in the
+  # system GPT (b/579569526).
+  environments = starnix_benchmark_environments - [ iris_env ]
 }
 
 fuchsia_component_perf_test("storage_starnix_tmp_benchmarks") {

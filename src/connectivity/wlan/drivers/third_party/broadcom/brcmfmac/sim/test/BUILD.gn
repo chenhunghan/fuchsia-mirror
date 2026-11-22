@@ -260,6 +260,7 @@ cc_test_executable("disconnect_test") {
     ":sim_test",
     "//sdk/fidl/fuchsia.wlan.ieee80211:fuchsia.wlan.ieee80211_cpp",
     "//src/connectivity/wlan/drivers/lib/macaddr",
+    "//src/connectivity/wlan/drivers/third_party/broadcom/brcmfmac:core",
     "//src/connectivity/wlan/lib/common/cpp:common",
   ]
 

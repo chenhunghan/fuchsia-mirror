@@ -15,11 +15,11 @@ import fuchsia_controller_py
 from fidl import GlobalHandleWaker
 from fuchsia_controller_py import Channel, Context, FcTransportStatus, ZxStatus
 from honeydew import affordances_capable
-from honeydew.affordances.connectivity.wlan import wlan_policy
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
-from honeydew.affordances.location import Location
+from honeydew.affordances.connectivity.wlan.wlan_policy import wlan_policy
+from honeydew.affordances.location import location
 from honeydew.errors import NotSupportedError
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.fuchsia_controller import (
@@ -137,7 +137,7 @@ class WlanPolicyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.location_obj = mock.MagicMock(
-            spec=Location,
+            spec=location.Location,
             autospec=True,
         )
 

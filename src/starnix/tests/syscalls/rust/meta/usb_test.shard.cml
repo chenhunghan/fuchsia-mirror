@@ -16,5 +16,10 @@
             from: "#fake_usb_device",
             to: "#kernel",
         },
+        {
+            protocol: [ "fuchsia.posix.socket.Provider" ],
+            from: "#netstack",
+            to: "#fake_usb_device",
+        },
     ],
 }

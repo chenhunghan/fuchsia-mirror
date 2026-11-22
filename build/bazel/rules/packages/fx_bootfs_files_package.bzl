@@ -90,6 +90,9 @@ fx_bootfs_files_package = macro(
     inherit_attrs = build_fuchsia_package,
     doc = """Produces a Fuchsia package of BootFS files for `assembly_input_bundle(bootfs_files_package = ...)`.
 
+    Defaults `target_compatible_with` to `["@platforms//os:fuchsia"]` unless explicitly
+    overridden (for example with `target_compatible_with = []`).
+
     This is the Bazel equivalent of GN's `bootfs_files_for_assembly()` paired with
     `fuchsia_package()` for Assembly Input Bundles:
     - `components` accepts non-test `fx_component()` targets whose manifests are
@@ -120,13 +123,16 @@ fx_bootfs_files_package = macro(
     """,
     attrs = {
         "package_name": attr.string(
-            doc = """An optional name to use for this package, defaults to target `name`.""",
+            doc = """An optional name to use for this package, defaults to target `name`.
+
+            Only set this when it differs from `name`.""",
             configurable = False,
         ),
-        # Hide internal or non-applicable `COMMON_BUILD_FUCHSIA_PACKAGE_ATTRIBUTES` attributes.
+        # Hide internal or non-applicable `BUILD_FUCHSIA_PACKAGE_COMMON_ATTRS` attributes.
         "collected_resources": None,
         "package_repository_name": None,
         "processed_binaries": None,
+        "required_package_components_check": None,
         "subpackages": None,
         "test_components": None,
         "tools": None,

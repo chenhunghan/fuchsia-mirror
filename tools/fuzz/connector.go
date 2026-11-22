@@ -188,8 +188,15 @@ func (c *SSHConnector) initializeFfx() (returnErr error) {
 		return fmt.Errorf("error making isolate dir: %s", err)
 	}
 
+	// Configure SSH key and external subtool search path in the isolate directory
+	if _, err := c.FfxRun("", "config", "set", "ssh.priv", c.Key); err != nil {
+		return fmt.Errorf("error setting ffx ssh key: %s", err)
+	}
+	if _, err := c.FfxRun("", "config", "set", "ffx.subtool-search-paths", filepath.Dir(c.ffxPath)); err != nil {
+		return fmt.Errorf("error setting ffx subtool search paths: %s", err)
+	}
+
 	// Add the target to ffx
-	// Note: The SSH private key is configured here and stored in the isolate directory for subsequent ffx calls.
 	addr := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	if _, err := c.FfxRun("", "-c", "ssh.priv="+c.Key, "target", "add", addr); err != nil {
 		return fmt.Errorf("error adding target to ffx: %s", err)
@@ -321,7 +328,7 @@ func (c *SSHConnector) Command(name string, args ...string) InstanceCmd {
 
 // GetSysLog will fetch the syslog by running a remote command
 func (c *SSHConnector) GetSysLog(pid int) (string, error) {
-	cmd := c.Command("log_listener", "--dump_logs", "--pid", strconv.Itoa(pid))
+	cmd := c.Command("log_listener", "dump", "--pid", strconv.Itoa(pid))
 
 	out, err := cmd.Output()
 	if err != nil {

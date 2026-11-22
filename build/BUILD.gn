@@ -23,6 +23,7 @@ group("tests") {
     ":bazel_host_tests",
     ":build_tests_json_tests($host_toolchain)",
     ":regenerator_tests($host_toolchain)",
+    ":subbuild_tests($host_toolchain)",
     ":target_metadata_test($host_toolchain)",
     ":type_checked_scripts($host_toolchain)",
     ":type_checked_toolchain_copy($host_toolchain)",
@@ -49,6 +50,7 @@ group("tests") {
     "rust:tests",
     "scripts:tests",
     "sdk:tests",
+    "toolchain:tests",
     "tools:tests",
     "tracer:tests",
     "tui:tests",
@@ -81,6 +83,15 @@ if (is_host) {
       "//build/bazel/scripts:bazel_tests_utils",
       "//build/python/modules/serialization",
     ]
+  }
+
+  python_library("subbuild") {
+    sources = [ "subbuild.py" ]
+  }
+
+  python_build_time_tests("subbuild_tests") {
+    tests = [ "subbuild_test.py" ]
+    deps = [ ":subbuild" ]
   }
 
   # Python scripts under //build that aren't part of any other Python target,
@@ -116,7 +127,6 @@ if (is_host) {
       "bazel/bazel_idk/prebuild_info.py",
       "bazel/bazel_sdk/compare_bazel_sdks.py",
       "bazel/bazel_sdk/idk_to_bazel_sdk.py",
-      "bazel/config/toolchain_tags/update.py",
       "bazel/debug_symbols/tests/check_debug_binaries.py",
       "bazel/drivers/verify_driver_package.py",
       "bazel/examples/hello_python/bin.py",
@@ -129,6 +139,14 @@ if (is_host) {
       "bazel/rules/host_tests/tests/py/test_with_py_binary.py",
       "bazel/rules/host_tests/tests/py/test_with_py_library.py",
       "bazel/rules/host_tests/tests/py/test_with_unittests.py",
+      "bazel/rules/python/build_py_zipapp.py",
+      "bazel/rules/python/tests/lib/zipapp_test_lib.py",
+      "bazel/rules/python/tests/py_data_package_zipapp_main.py",
+      "bazel/rules/python/tests/py_zipapp_binary_test.py",
+      "bazel/rules/python/tests/verify_py_zipapp_binary.py",
+      "bazel/rules/python/tests/zipapp_test_async_main.py",
+      "bazel/rules/python/tests/zipapp_test_helper.py",
+      "bazel/rules/python/tests/zipapp_test_main.py",
       "bazel/rules/tests/verify_bazel_tool_paths.py",
       "bazel/scripts/manual/uprev_bazel_vendor_dep.py",
       "beads/.agent/skills/analyzing_migration_dag/scripts/analyze_migration_dag.py",
@@ -150,8 +168,6 @@ if (is_host) {
       "dist/convert_manifest_to_fini.py",
       "dist/distribution-manifest-copy.py",
       "drivers/assert_driver_components.py",
-      "drivers/check_included_drivers.py",
-      "drivers/create_driver_doc.py",
       "drivers/create_driver_manifest.py",
       "fidl/gen_ir_root_out.py",
       "fidl/gen_response_file.py",
@@ -191,16 +207,23 @@ if (is_host) {
       "scripts/count_build_targets.py",
       "scripts/count_critical_actions.py",
       "scripts/generate_target_metadata.py",
+      "scripts/python_forkserver/example/toy_action.py",
       "sdk/compute_atom_api.py",
       "sdk/filter_host_tools_from_sdk_api.py",
       "sdk/generate_prebuild_idk/generate_prebuild_idk_validation.py",
       "sdk/generate_sysroot_idk_atom.py",
       "sdk/generate_version_history/generate_version_history_unittest.py",
       "sdk/verify_final_manifest.py",
-      "subbuild.py",
       "testing/boot_tests/create_efi_partition_config.py",
       "testing/boot_tests/rebase_metadata_paths.py",
       "testing/copy_unstripped_binaries.py",
+      "testing/formal_verification/extraction.py",
+      "testing/formal_verification/extraction_test.py",
+      "testing/formal_verification/lake_audit.py",
+      "testing/formal_verification/lake_audit_test.py",
+      "testing/formal_verification/verify.py",
+      "testing/formal_verification/verify_test.py",
+      "testing/golden_test.py",
       "testing/python_build_time_tests.py",
       "testing/run_target_test_and_host_script.py",
       "testing/verify_files_match.py",
@@ -351,6 +374,19 @@ group("non_hermetic_deps") {
 
   # TODO(https://fxbug.dev/42060773): Hermetic deps checking is disabled on build_id_entry
   visibility += [ "//third_party/intel/media-driver/fuchsia:*" ]
+
+  # TODO(https://fxbug.dev/42060773): Hermetic deps checking is disabled on
+  # build_id_entry, which is used by bazel_shared_library_import() for
+  # Bazel-built shared libraries (see //build/bazel/bazel_shared_library.gni).
+  visibility += [
+    "//sdk/lib/async-default:async-default.build_id",
+    "//sdk/lib/fdio:fdio.build_id",
+    "//sdk/lib/svc:svc.build_id",
+    "//sdk/lib/syslog/cpp:backend_fuchsia_globals.build_id",
+    "//sdk/lib/vfs/internal:vfs_internal.build_id",
+    "//third_party/boringssl:crypto-shared.build_id",
+    "//zircon/system/ulib/trace-engine:trace-engine.build_id",
+  ]
 
   # These repos are not in the default checkout.
   visibility += [
@@ -541,12 +577,10 @@ group("deprecated_zx_wrapper_allowlist") {
     "//src/devices/lib/synchronous-executor:*",
     "//src/devices/lib/thermal/cpp:*",
     "//src/devices/lib/ti:*",
-    "//src/devices/pci/lib/device-protocol-pci:*",
     "//src/devices/pci/lib/pci:*",
     "//src/devices/rtc/lib/rtc:*",
     "//src/devices/testing/fake-bti:*",
     "//src/devices/testing/fake-dma-buffer:*",
-    "//src/devices/testing/fake-mmio-reg:*",
     "//src/devices/testing/fake-msi:*",
     "//src/devices/testing/fake-object:*",
     "//src/devices/testing/fake-resource:*",
@@ -570,7 +604,6 @@ group("deprecated_zx_wrapper_allowlist") {
     "//third_party/android/platform/external/avb:*",
     "//third_party/lz4:*",
     "//zircon/kernel/arch/x86/phys:*",
-    "//zircon/kernel/dev/coresight:*",
     "//zircon/kernel/lib/acpi_lite:*",
     "//zircon/kernel/lib/arch:*",
     "//zircon/kernel/lib/arch/arm64:*",
@@ -628,7 +661,6 @@ group("deprecated_zx_wrapper_allowlist") {
     "//zircon/system/ulib/task-utils:*",
     "//zircon/system/ulib/test-exceptions:*",
     "//zircon/system/ulib/test-utils:*",
-    "//zircon/system/ulib/tftp:*",
     "//zircon/system/ulib/thread-safe-deleter:*",
     "//zircon/system/ulib/trace:*",
     "//zircon/system/ulib/trace-engine:*",

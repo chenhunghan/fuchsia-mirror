@@ -67,7 +67,7 @@ class Object {
         break;
       }
       default: {
-        ZX_PANIC("Unknown object type: %" PRIu64, static_cast<fidl_xunion_tag_t>(object.Which()));
+        ZX_PANIC("Unknown object type: %" PRIu64, static_cast<fidl_union_tag_t>(object.Which()));
       }
     }
   }

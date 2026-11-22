@@ -17,14 +17,13 @@ use zx_status::Status;
 use super::apic::ApicInterruptDeliveryMode;
 use super::bootstrap16::{X86ApBootstrapData, x86_bootstrap16_acquire, x86_bootstrap16_release};
 use super::lapic::apic_send_ipi;
-use super::mp_ffi::x86_apic_id_to_cpu_num;
-use super::smp_ffi::{
-    X86_SECONDARY_CPU_LONG_MODE_ENTRY, lk_init_secondary_cpus, x86_allocate_ap_structures,
-};
+use super::mp::{allocate_ap_structures, apic_id_to_cpu_num};
+use super::smp_ffi::X86_SECONDARY_CPU_LONG_MODE_ENTRY;
 use crate::kernel::mp::{self, cpu_num_t};
 use crate::kernel::scheduler;
 use crate::kernel::thread::{self, Thread};
 use crate::platform_rs::timer::DurationMono;
+use crate::top::main::lk_init_secondary_cpus;
 
 const MB: usize = 1024 * 1024;
 
@@ -40,8 +39,7 @@ const MB: usize = 1024 * 1024;
 pub unsafe fn x86_init_smp(apic_ids: *mut u32, num_cpus: u32) {
     assert!(num_cpus >= 1 && num_cpus <= u32::from(u8::MAX));
     // SAFETY: Caller guarantees `apic_ids` points to `num_cpus` valid APIC IDs.
-    let status = unsafe { x86_allocate_ap_structures(apic_ids, num_cpus as u8) };
-    if Status::ok(status).is_err() {
+    if unsafe { allocate_ap_structures(apic_ids, num_cpus as u8) }.is_err() {
         tracef!("Failed to allocate structures for APs");
         return;
     }
@@ -82,8 +80,7 @@ pub unsafe fn x86_bringup_aps(apic_ids: *const u32, count: u32) -> Result<(), St
     // Sanity check the given ids
     let mut waiting_mask = 0u32;
     for &apic_id in apic_ids_slice {
-        // SAFETY: `x86_apic_id_to_cpu_num` is a read-only lookup into the APIC ID table.
-        let cpu = unsafe { x86_apic_id_to_cpu_num(apic_id) };
+        let cpu = apic_id_to_cpu_num(apic_id);
         debug_assert!(cpu > 0);
         if cpu <= 0 {
             core::hint::cold_path();
@@ -96,7 +93,7 @@ pub unsafe fn x86_bringup_aps(apic_ids: *const u32, count: u32) -> Result<(), St
         waiting_mask |= mp::cpu_num_to_mask(cpu as cpu_num_t);
     }
 
-    let entry64 = core::ptr::addr_of!(X86_SECONDARY_CPU_LONG_MODE_ENTRY).addr();
+    let entry64 = (&raw const X86_SECONDARY_CPU_LONG_MODE_ENTRY).addr();
     let (bootstrap_aperture, bootstrap_instr_ptr) = x86_bootstrap16_acquire(entry64)?;
     APS_STILL_BOOTING.store(waiting_mask, Ordering::SeqCst);
     let bootstrap_data = bootstrap_aperture.cast::<X86ApBootstrapData>();
@@ -191,8 +188,7 @@ pub unsafe fn x86_bringup_aps(apic_ids: *const u32, count: u32) -> Result<(), St
         core::hint::cold_path();
         kprintln!("Failed to boot CPUs: mask {:x}", failed_aps);
         for (i, &apic_id) in apic_ids_slice.iter().enumerate() {
-            // SAFETY: `x86_apic_id_to_cpu_num` is a read-only lookup into the APIC ID table.
-            let cpu = unsafe { x86_apic_id_to_cpu_num(apic_id) };
+            let cpu = apic_id_to_cpu_num(apic_id);
             let mask = mp::cpu_num_to_mask(cpu as cpu_num_t);
             if (failed_aps & mask) == 0 {
                 continue;

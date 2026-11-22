@@ -16,9 +16,14 @@
 
 namespace ot_rcp {
 
-RcpInstance::RcpInstance(async_dispatcher_t* dispatcher, uint32_t node_id, RcpToHostFn rcp_to_host)
-    : dispatcher_(dispatcher), node_id_(node_id), rcp_to_host_(std::move(rcp_to_host)) {
-  platform_.emplace(dispatcher_, node_id_);
+RcpInstance::RcpInstance(async_dispatcher_t* dispatcher, uint32_t node_id, RcpToHostFn rcp_to_host,
+                         std::unique_ptr<RadioMedium> radio_medium)
+    : dispatcher_(dispatcher),
+      node_id_(node_id),
+      radio_medium_(std::move(radio_medium)),
+      rcp_to_host_(std::move(rcp_to_host)) {
+  ZX_ASSERT(radio_medium_ != nullptr);
+  platform_.emplace(dispatcher_, node_id_, *radio_medium_);
   FX_LOGS(INFO) << "Starting ot-rcp-fuchsia, node id " << node_id_ << ", EUI-64 0x" << std::hex
                 << platform_->eui64();
 }
@@ -39,7 +44,7 @@ void RcpInstance::Teardown() {
 void RcpInstance::Reset(otPlatResetReason reason) {
   Teardown();
   // `Teardown()` destroyed the Platform; a fresh one starts from the power-on configuration.
-  platform_.emplace(dispatcher_, node_id_);
+  platform_.emplace(dispatcher_, node_id_, *radio_medium_);
   platform_->set_reset_reason(reason);
 
   instance_ = otInstanceInitSingle();

@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
       "data": "test.requestflexibleenvelope",
       "start_offset": 8,
       "end_offset": 36
@@ -20,7 +20,7 @@
       "identifier": "test.requestflexibleenvelope/FlexibleFoo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
         "data": "FlexibleFoo",
         "start_offset": 44,
         "end_offset": 55
@@ -31,7 +31,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "s",
             "start_offset": 82,
             "end_offset": 83
@@ -45,7 +45,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "i",
             "start_offset": 99,
             "end_offset": 100
@@ -61,7 +61,7 @@
       "identifier": "test.requestflexibleenvelope/StrictFoo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
         "data": "StrictFoo",
         "start_offset": 117,
         "end_offset": 126
@@ -72,7 +72,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "s",
             "start_offset": 151,
             "end_offset": 152
@@ -86,7 +86,7 @@
           "name": "i",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "i",
             "start_offset": 168,
             "end_offset": 169
@@ -108,7 +108,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "s",
             "start_offset": 388,
             "end_offset": 389
@@ -119,7 +119,7 @@
             "type_identifier": "test.requestflexibleenvelope/FlexibleFoo",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
               "data": "FlexibleFoo",
               "start_offset": 390,
               "end_offset": 401
@@ -136,7 +136,7 @@
           "name": "f",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "f",
             "start_offset": 431,
             "end_offset": 432
@@ -147,7 +147,7 @@
             "type_identifier": "test.requestflexibleenvelope/StrictFoo",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
               "data": "StrictFoo",
               "start_offset": 433,
               "end_offset": 442
@@ -164,7 +164,7 @@
           "name": "s",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "s",
             "start_offset": 266,
             "end_offset": 267
@@ -175,7 +175,7 @@
             "type_identifier": "test.requestflexibleenvelope/StrictFoo",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
               "data": "StrictFoo",
               "start_offset": 268,
               "end_offset": 277
@@ -192,7 +192,7 @@
           "name": "f",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "f",
             "start_offset": 307,
             "end_offset": 308
@@ -203,7 +203,7 @@
             "type_identifier": "test.requestflexibleenvelope/FlexibleFoo",
             "type_referenced_at": {
               "is_virtual": false,
-              "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+              "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
               "data": "FlexibleFoo",
               "start_offset": 309,
               "end_offset": 320
@@ -218,7 +218,7 @@
       "identifier": "test.requestflexibleenvelope/Protocol",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
         "data": "Protocol",
         "start_offset": 197,
         "end_offset": 205
@@ -228,7 +228,7 @@
           "identifier": "RequestStrictResponseFlexible",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "RequestStrictResponseFlexible",
             "start_offset": 219,
             "end_offset": 248
@@ -246,7 +246,7 @@
           "identifier": "RequestFlexibleResponseStrict",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/request_flexible_envelope.test.fidl",
             "data": "RequestFlexibleResponseStrict",
             "start_offset": 341,
             "end_offset": 370

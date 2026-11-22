@@ -115,9 +115,9 @@ ordinals are explicitly specified in the FIDL definition (in this example, 1 for
 Encoding refers to the process of serializing values from a target language into
 the FIDL wire format.
 
-For the C family of bindings (HLCPP, LLCPP), encode can have a more specific
-meaning of taking bytes matching the layout of the FIDL wire format and patching
-pointers and handles by replacing them with
+For the C family of bindings (HLCPP and the new C++ bindings), encode can have
+a more specific meaning of taking bytes matching the layout of the FIDL wire
+format and patching pointers and handles by replacing them with
 `FIDL_ALLOC_PRESENT`/`FIDL_ALLOC_ABSENT` or
 `FIDL_HANDLE_PRESENT`/`FIDL_HANDLE_ABSENT` in-place, moving handles into an
 out-of-band handle table.
@@ -127,9 +127,10 @@ out-of-band handle table.
 Decoding refers to the process of deserializing values from raw bytes in the
 FIDL wire format into a value in a target language.
 
-For the C family of bindings (HLCPP, LLCPP), decode can have a more specific
-meaning of taking bytes matching the layout of the FIDL wire format and patching
-pointers and handles by replacing `FIDL_ALLOC_PRESENT`/`FIDL_ALLOC_ABSENT` or
+For the C family of bindings (HLCPP and the new C++ bindings), decode can have
+a more specific meaning of taking bytes matching the layout of the FIDL wire
+format and patching pointers and handles by replacing
+`FIDL_ALLOC_PRESENT`/`FIDL_ALLOC_ABSENT` or
 `FIDL_HANDLE_PRESENT`/`FIDL_HANDLE_ABSENT` with the "real" pointer/handle
 values in-place, moving handles out of an out-of-band handle table.
 

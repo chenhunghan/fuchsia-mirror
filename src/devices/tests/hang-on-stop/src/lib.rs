@@ -19,7 +19,7 @@ impl Driver for HangOnStopDriver {
         Ok(Self { _node: node })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         info!("hang-on-stop: Hanging shutdown as requested...");
         futures::future::pending::<()>().await;
     }

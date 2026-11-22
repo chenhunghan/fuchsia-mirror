@@ -2,11 +2,30 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
 load("//build/bazel/rules/fidl:fidl_library.bzl", "fidl_library")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/component:config.bzl", "component_config")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":utc-time-tests"],
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)
 
 fidl_library(
     name = "componentmanager.test",
@@ -37,6 +56,13 @@ rustc_binary(
     ],
 )
 
+fx_packaged_binary(
+    name = "maintainer_packaged_bin",
+    testonly = True,
+    binary = ":maintainer_bin",
+    binary_name = "utc_time_maintainer_bin",
+)
+
 rustc_binary(
     name = "time_client_bin",
     testonly = True,
@@ -55,24 +81,149 @@ rustc_binary(
     ],
 )
 
+fx_packaged_binary(
+    name = "time_client_packaged_bin",
+    testonly = True,
+    binary = ":time_client_bin",
+    binary_name = "utc_time_client_bin",
+)
+
 rustc_test(
     name = "integration_test_bin",
     srcs = ["integration_test.rs"],
     crate_name = "utc_time_integration_test",
     crate_root = "integration_test.rs",
     edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-component",
-        # In GN, `//src/lib/fuchsia-component-test` is a group that forwards
-        # `:fuchsia-component-test-lib` and also pulls in `:includes` and the
-        # GN-only `realm_builder_server_component` into `utc-time-tests`.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/storage/lib/vfs/rust:vfs",
         "//src/sys/lib/component-events",
         "//third_party/rust_crates/vendor:anyhow",
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "integration_test_packaged_bin",
+    testonly = True,
+    binary = ":integration_test_bin",
+    binary_name = "utc_time_integration_test",
+)
+
+fx_component_manifest(
+    name = "integration-test-component-manifest",
+    testonly = True,
+    component_name = "integration-test-component",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/fuchsia-component-test:meta/nested_component_manager.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/integration-test.cml",
+)
+
+fx_test_component(
+    name = "integration-test-component",
+    compiled_manifest = ":integration-test-component-manifest",
+    deps = [":integration_test_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "maintainer-component-manifest",
+    testonly = True,
+    component_name = "maintainer-component",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/maintainer.cml",
+)
+
+fx_component(
+    name = "maintainer-component",
+    testonly = True,
+    compiled_manifest = ":maintainer-component-manifest",
+    deps = [":maintainer_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "time-client-manifest",
+    testonly = True,
+    component_name = "time-client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/time_client.cml",
+)
+
+fx_component(
+    name = "time-client",
+    testonly = True,
+    compiled_manifest = ":time-client-manifest",
+    deps = [":time_client_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "realm-manifest",
+    testonly = True,
+    component_name = "realm",
+    includes = [
+        "//src/sys/component_manager:meta/passthrough_diagnostics.shard.cml",
+        "//src/sys/component_manager/tests:meta/elf_runner_and_environment.shard",
+    ],
+    manifest = "meta/realm.cml",
+)
+
+fx_component(
+    name = "realm",
+    testonly = True,
+    compiled_manifest = ":realm-manifest",
+)
+
+component_config(
+    name = "component_manager_config",
+    testonly = True,
+    srcs = ["cm_config.json5"],
+)
+
+fx_component_manifest(
+    name = "component_manager-manifest",
+    testonly = True,
+    component_name = "component_manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "//src/sys/component_manager:meta/component_manager.cml",
+)
+
+fx_component(
+    name = "component_manager",
+    testonly = True,
+    compiled_manifest = ":component_manager-manifest",
+    deps = [
+        ":component_manager_config",
+        "//src/sys/component_manager:bin_with_tracing_packaged",
+    ],
+)
+
+fx_package(
+    name = "utc-time-tests-package",
+    package_name = "utc-time-tests",
+    components = [
+        ":component_manager",
+        ":maintainer-component",
+        ":realm",
+        ":time-client",
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":integration-test-component"],
+)
+
+# Run with `fx test utc-time-tests`.
+fx_test(
+    name = "utc-time-tests",
+    package = ":utc-time-tests-package",
 )

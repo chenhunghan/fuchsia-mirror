@@ -21,13 +21,19 @@ pub use input_event_relay::*;
 pub use input_file::*;
 pub use test_injection::{InputDeviceRegistry, serve_input_device_registry};
 
+use fidl_fuchsia_ui_views as fuiviews;
 use starnix_core::task::Kernel;
 use std::sync::Arc;
 
 /// Helper to obtain or initialize the shared `DirectInputManager` for a `Kernel`.
-pub fn get_or_init_direct_input(kernel: &Kernel) -> Arc<DirectInputManager> {
-    (*kernel
-        .expando
-        .get_or_init(|| DirectInputManager::connect_and_start(kernel.weak_self.clone(), None)))
+///
+/// `view_ref` is only used when the manager is created by this call.
+pub fn get_or_init_direct_input(
+    kernel: &Kernel,
+    view_ref: Option<fuiviews::ViewRef>,
+) -> Arc<DirectInputManager> {
+    (*kernel.expando.get_or_init(|| {
+        DirectInputManager::connect_and_start(kernel.weak_self.clone(), None, view_ref)
+    }))
     .clone()
 }

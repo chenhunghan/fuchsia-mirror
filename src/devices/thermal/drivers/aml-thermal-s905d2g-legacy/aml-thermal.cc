@@ -4,10 +4,12 @@
 
 #include "aml-thermal.h"
 
+#include <lib/async/default.h>
 #include <lib/ddk/binding_driver.h>
 #include <lib/ddk/debug.h>
 #include <lib/ddk/metadata.h>
 #include <lib/driver/platform-device/cpp/pdev.h>
+#include <lib/fdf/dispatcher.h>
 #include <string.h>
 #include <threads.h>
 #include <zircon/errors.h>
@@ -15,6 +17,7 @@
 #include <zircon/syscalls/smc.h>
 #include <zircon/types.h>
 
+#include <array>
 #include <utility>
 
 #include <bind/fuchsia/amlogic/platform/cpp/bind.h>
@@ -222,11 +225,42 @@ zx_status_t AmlThermal::Create(void* ctx, zx_device_t* device) {
     return status;
   }
 
+  fdf_dispatcher_t* fdf_dispatcher = fdf_dispatcher_get_current_dispatcher();
+  async_dispatcher_t* dispatcher = fdf_dispatcher
+                                       ? fdf_dispatcher_get_async_dispatcher(fdf_dispatcher)
+                                       : async_get_default_dispatcher();
+  thermal_device->outgoing_ = component::OutgoingDirectory(dispatcher);
+
+  auto endpoints = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  fuchsia_hardware_thermal::Service::InstanceHandler handler({
+      .device =
+          [dev =
+               thermal_device.get()](fidl::ServerEnd<fuchsia_hardware_thermal::Device> server_end) {
+            fidl::BindServer(dev->loop_.dispatcher(), std::move(server_end), dev);
+          },
+  });
+  zx::result result =
+      thermal_device->outgoing_->AddService<fuchsia_hardware_thermal::Service>(std::move(handler));
+  if (result.is_error()) {
+    zxlogf(ERROR, "aml-thermal: Failed to add service to outgoing directory: %s",
+           result.status_string());
+    return result.status_value();
+  }
+  result = thermal_device->outgoing_->Serve(std::move(endpoints.server));
+  if (result.is_error()) {
+    zxlogf(ERROR, "aml-thermal: Failed to serve outgoing directory: %s", result.status_string());
+    return result.status_value();
+  }
+
+  std::array offers = {fuchsia_hardware_thermal::Service::Name};
   zx_device_str_prop_t props[] = {
       ddk::MakeStrProperty(bind_fuchsia::PLATFORM_DEV_DID,
                            bind_fuchsia_amlogic_platform::BIND_PLATFORM_DEV_DID_THERMAL_PLL)};
-  status = thermal_device->DdkAdd(
-      ddk::DeviceAddArgs("thermal").set_str_props(props).set_proto_id(ZX_PROTOCOL_THERMAL));
+  status = thermal_device->DdkAdd(ddk::DeviceAddArgs("thermal")
+                                      .set_str_props(props)
+                                      .set_proto_id(ZX_PROTOCOL_THERMAL)
+                                      .set_fidl_service_offers(offers)
+                                      .set_outgoing_dir(endpoints.client.TakeChannel()));
   if (status != ZX_OK) {
     zxlogf(ERROR, "aml-thermal: Could not create thermal device: %d", status);
     return status;
@@ -238,12 +272,6 @@ zx_status_t AmlThermal::Create(void* ctx, zx_device_t* device) {
 }
 
 zx_status_t AmlThermal::StartConnectDispatchThread() { return loop_.StartThread(); }
-
-zx_status_t AmlThermal::ThermalConnect(zx::channel chan) {
-  fidl::BindServer(loop_.dispatcher(),
-                   fidl::ServerEnd<fuchsia_hardware_thermal::Device>(std::move(chan)), this);
-  return ZX_OK;
-}
 
 void AmlThermal::GetInfo(GetInfoCompleter::Sync& completer) {
   completer.Reply(ZX_ERR_NOT_SUPPORTED, {});
@@ -308,7 +336,11 @@ void AmlThermal::GetSensorName(GetSensorNameCompleter::Sync& completer) {
   completer.Reply(fidl::StringView::FromExternal(kTemperatureSensorName));
 }
 
-void AmlThermal::DdkRelease() { delete this; }
+void AmlThermal::DdkRelease() {
+  outgoing_.reset();
+  loop_.Shutdown();
+  delete this;
+}
 
 zx_status_t AmlThermal::PopulateClusterDvfsTable(
     const zx::resource& smc_resource, const aml_thermal_info_t& aml_info,

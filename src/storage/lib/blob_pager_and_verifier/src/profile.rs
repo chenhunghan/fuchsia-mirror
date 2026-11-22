@@ -10,6 +10,7 @@ use futures::future::{BoxFuture, join_all};
 use std::collections::{HashMap, HashSet, hash_map};
 use std::sync::Arc;
 use storage_profile::{BlobMessage, FileMessage, Message};
+use storage_units::page_size;
 
 // Matches the 4 KiB block alignment used by Fxfs on-disk profile files and `mapping::BLOCK_SIZE`
 // in the block driver (`BlobMessage` and `FileMessage` entries are packed into 4 KiB blocks
@@ -50,7 +51,7 @@ impl ReplayHandle {
         // Create async_channel. An async task reads the profile, opens the blobs, and populates
         // the channel, then `REPLAY_THREADS` blocking threads consume it and prefetch pages.
         let mut replay_threads = Vec::with_capacity(REPLAY_THREADS);
-        let page_size = zx::system_get_page_size() as u64;
+        let page_size = page_size().get();
         for _ in 0..REPLAY_THREADS {
             let receiver = receiver.clone();
             replay_threads.push(fasync::unblock(move || {
@@ -432,7 +433,7 @@ mod tests {
                 std::thread::spawn(move || {
                     let mut sender = SyncSender::<RawDeliveryCommand>::new(
                         delivery_vmo,
-                        zx::system_get_page_size() as usize,
+                        page_size().into(),
                         mapping::PENDING_DELIVERY_COMMANDS_CAPACITY,
                     )
                     .expect("SyncSender::new failed");

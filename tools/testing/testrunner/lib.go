@@ -380,8 +380,12 @@ func execute(
 	if err := finalize(localTester, localSinks); err != nil && finalError == nil {
 		finalError = err
 	}
-	if err := finalize(fuchsiaTester, fuchsiaSinks); err != nil && finalError == nil {
-		finalError = err
+	// FuchsiaSerialTester does not support snapshots or data sinks, so skip
+	// finalize to avoid unnecessary serial reconnects at teardown.
+	if _, isSerial := fuchsiaTester.(*FuchsiaSerialTester); !isSerial {
+		if err := finalize(fuchsiaTester, fuchsiaSinks); err != nil && finalError == nil {
+			finalError = err
+		}
 	}
 	return finalError
 }
@@ -611,6 +615,10 @@ type connectionError struct {
 	error
 }
 
+func (e connectionError) Unwrap() error {
+	return e.error
+}
+
 func isConnectionError(err error) bool {
 	var connErr connectionError
 	return errors.As(err, &connErr)
@@ -738,6 +746,8 @@ func runTestOnce(
 	logger.Debugf(ctx, "test timeout: %v, orig timeout: %v\n", test.Timeout, origTest.Timeout)
 
 	startTime := clock.Now(ctx)
+	isMultiplied := !collectOutputsOnPass || (test.Runs > 1 && test.RunAlgorithm != testsharder.StopOnSuccess)
+	multipliedTag := build.TestTag{Key: runtests.MultipliedRunTagKey, Value: "true"}
 
 	if err := t.SetupTest(ctx, test); err != nil {
 		result := BaseTestResultFromTest(test)
@@ -747,6 +757,9 @@ func runTestOnce(
 		result.StartTime = startTime
 		result.EndTime = clock.Now(ctx)
 		result.Affected = test.Affected
+		if isMultiplied {
+			result.Tags = append(result.Tags, multipliedTag)
+		}
 		return result, nil
 	}
 
@@ -841,7 +854,6 @@ func runTestOnce(
 		}
 		result.OutputFiles = []string{}
 		result.OutputDir = ""
-		multipliedTag := build.TestTag{Key: "is_multiplied_run", Value: "true"}
 		result.Tags = append(result.Tags, multipliedTag)
 		for i, tc := range result.Cases {
 			tc.OutputFiles = []string{}
@@ -921,6 +933,12 @@ func runTestOnce(
 		}
 		if len(result.OutputFiles) > 0 {
 			result.OutputDir = outDir
+		}
+	}
+	if isMultiplied {
+		result.Tags = append(result.Tags, multipliedTag)
+		for i := range result.Cases {
+			result.Cases[i].Tags = append(result.Cases[i].Tags, multipliedTag)
 		}
 	}
 

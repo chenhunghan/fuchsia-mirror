@@ -292,6 +292,28 @@ impl Graph {
         Ok(())
     }
 
+    /// [`Self::initialize_system_topology`] for a flat array of `zbi_topology_node_t`s whose
+    /// encoding has not been checked, such as the one physboot hands off.
+    ///
+    /// Returns `Err(Status::INVALID_ARGS)` if `nodes` is null, `count` is 0 or any node is not a
+    /// valid `zbi::TopologyNode`.
+    ///
+    /// # Safety
+    ///
+    /// If `count > 0`, `nodes` must be non-null and point to `count` readable
+    /// `zbi_topology_node_t`-sized elements. Their contents need not be valid.
+    pub unsafe fn initialize_system_topology_from_raw(
+        nodes: *const zbi::TopologyNode,
+        count: usize,
+    ) -> Result<(), Status> {
+        if count == 0 || nodes.is_null() {
+            return Err(Status::INVALID_ARGS);
+        }
+        // SAFETY: `nodes` is non-null and the caller guarantees it points to `count` elements.
+        let slice = unsafe { flat_nodes_from_raw(nodes, count) }?;
+        Self::initialize_system_topology(slice)
+    }
+
     /// Initializes the given topology `Graph` instance from the given flat
     /// topology. Performs validation on the flat topology before updating the
     /// `graph` with the unflattened data. If validation fails an error is
@@ -627,26 +649,6 @@ unsafe fn flat_nodes_from_raw<'a>(
         kprint::kprintln!("Error validating topology : Invalid node encoding.");
         Status::INVALID_ARGS
     })
-}
-
-/// Initializes the global system topology graph from a flat array of `zbi_topology_node_t`s.
-///
-/// # Safety
-///
-/// If `count > 0`, `nodes` must be non-null and point to `count` readable
-/// `zbi_topology_node_t`-sized elements. Their contents need not be valid.
-#[allow(improper_ctypes_definitions)]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_system_topology_initialize_system_topology(
-    nodes: *const zbi::TopologyNode,
-    count: usize,
-) -> Result<(), Status> {
-    if count == 0 || nodes.is_null() {
-        return Err(Status::INVALID_ARGS);
-    }
-    // SAFETY: `nodes` is non-null and the caller guarantees it points to `count` elements.
-    let slice = unsafe { flat_nodes_from_raw(nodes, count) }?;
-    Graph::initialize_system_topology(slice)
 }
 
 /// Initializes the given `Graph` instance from a flat array of `zbi_topology_node_t`s.

@@ -29,8 +29,8 @@ use starnix_uapi::{
     IP6T_SO_GET_ENTRIES, IP6T_SO_GET_INFO, IP6T_SO_GET_REVISION_MATCH, IP6T_SO_GET_REVISION_TARGET,
     IPT_SO_GET_ENTRIES, IPT_SO_GET_INFO, IPT_SO_GET_REVISION_MATCH, IPT_SO_GET_REVISION_TARGET,
     IPT_SO_SET_ADD_COUNTERS, IPT_SO_SET_REPLACE, SOL_IP, SOL_IPV6, errno, error, ip6t_entry,
-    ip6t_get_entries, ip6t_getinfo, ipt_entry, ipt_get_entries, ipt_getinfo,
-    nf_inet_hooks_NF_INET_NUMHOOKS, xt_counters, xt_counters_info,
+    ip6t_get_entries, ip6t_getinfo, ip6t_replace, ipt_entry, ipt_get_entries, ipt_getinfo,
+    ipt_replace, nf_inet_hooks_NF_INET_NUMHOOKS, xt_counters, xt_counters_info,
     xt_entry_target__bindgen_ty_1__bindgen_ty_1 as xt_entry_target, xt_error_target,
     xt_get_revision, xt_standard_target,
 };
@@ -41,6 +41,10 @@ use std::ops::{Deref as _, Index, IndexMut};
 use zerocopy::{FromBytes, IntoBytes};
 
 const NAMESPACE_ID_PREFIX: &str = "starnix";
+
+/// Maximum size in bytes accepted for an `IPT_SO_SET_REPLACE` or `IPT_SO_SET_ADD_COUNTERS` buffer
+/// to prevent unbounded kernel allocations from user-controlled `optlen` values.
+const MAX_IPTABLES_OPTVAL_SIZE: usize = 8 * 1024 * 1024;
 
 const IPT_ENTRY_SIZE: u16 = size_of::<ipt_entry>() as u16;
 const IP6T_ENTRY_SIZE: u16 = size_of::<ip6t_entry>() as u16;
@@ -636,7 +640,7 @@ impl IpTables {
         current_task: &CurrentTask,
         socket: &SocketHandle,
         optname: u32,
-        mut optval: Vec<u8>,
+        optval: SockOptValue,
     ) -> Result<Vec<u8>, Errno> {
         security::check_task_capable(current_task, CAP_NET_ADMIN)?;
 
@@ -651,8 +655,7 @@ impl IpTables {
             // Returns information about the table specified by `optval`.
             IPT_SO_GET_INFO => {
                 if socket.domain == SocketDomain::Inet {
-                    let (mut info, _) =
-                        ipt_getinfo::read_from_prefix(&*optval).map_err(|_| errno!(EINVAL))?;
+                    let mut info: ipt_getinfo = optval.read(current_task)?;
                     let Ok(table_id) = TableId::try_from(&info.name) else {
                         return error!(EINVAL);
                     };
@@ -665,8 +668,7 @@ impl IpTables {
                     info.size = table.size;
                     Ok(info.as_bytes().to_vec())
                 } else {
-                    let (mut info, _) =
-                        ip6t_getinfo::read_from_prefix(&*optval).map_err(|_| errno!(EINVAL))?;
+                    let mut info: ip6t_getinfo = optval.read(current_task)?;
                     let Ok(table_id) = TableId::try_from(&info.name) else {
                         return error!(EINVAL);
                     };
@@ -684,51 +686,32 @@ impl IpTables {
             // Returns the entries of the table specified by `optval`.
             IPT_SO_GET_ENTRIES => {
                 if socket.domain == SocketDomain::Inet {
-                    let (get_entries, _) =
-                        ipt_get_entries::read_from_prefix(&*optval).map_err(|_| errno!(EINVAL))?;
-                    let Ok(table_id) = TableId::try_from(&get_entries.name) else {
-                        return error!(EINVAL);
-                    };
-                    let mut entry_bytes = self.state.read().ipv4[table_id].entries.clone();
-
-                    if entry_bytes.len() > get_entries.size as usize {
-                        log_warn!("Entries are longer than expected so truncating.");
-                        entry_bytes.truncate(get_entries.size as usize);
-                    }
-
-                    optval.truncate(std::mem::size_of::<ipt_get_entries>());
-                    optval.append(&mut entry_bytes);
+                    self.get_entries::<ipt_get_entries>(
+                        current_task,
+                        socket.domain,
+                        optval,
+                        |entries| (&entries.name, entries.size),
+                    )
                 } else {
-                    let (get_entries, _) =
-                        ip6t_get_entries::read_from_prefix(&*optval).map_err(|_| errno!(EINVAL))?;
-                    let Ok(table_id) = TableId::try_from(&get_entries.name) else {
-                        return error!(EINVAL);
-                    };
-                    let mut entry_bytes = self.state.read().ipv6[table_id].entries.clone();
-
-                    if entry_bytes.len() > get_entries.size as usize {
-                        log_warn!("Entries are longer than expected so truncating.");
-                        entry_bytes.truncate(get_entries.size as usize);
-                    }
-
-                    optval.truncate(std::mem::size_of::<ip6t_get_entries>());
-                    optval.append(&mut entry_bytes);
+                    self.get_entries::<ip6t_get_entries>(
+                        current_task,
+                        socket.domain,
+                        optval,
+                        |entries| (&entries.name, entries.size),
+                    )
                 }
-                Ok(optval)
             }
 
             // Returns the revision match. Currently stubbed to return a max version number.
             IPT_SO_GET_REVISION_MATCH | IP6T_SO_GET_REVISION_MATCH => {
-                let (mut revision, _) =
-                    xt_get_revision::read_from_prefix(&*optval).map_err(|_| errno!(EINVAL))?;
+                let mut revision: xt_get_revision = optval.read(current_task)?;
                 revision.revision = u8::MAX;
                 Ok(revision.as_bytes().to_vec())
             }
 
             // Returns the revision target. Currently stubbed to return a max version number.
             IPT_SO_GET_REVISION_TARGET | IP6T_SO_GET_REVISION_TARGET => {
-                let (mut revision, _) =
-                    xt_get_revision::read_from_prefix(&*optval).map_err(|_| errno!(EINVAL))?;
+                let mut revision: xt_get_revision = optval.read(current_task)?;
                 revision.revision = u8::MAX;
                 Ok(revision.as_bytes().to_vec())
             }
@@ -749,26 +732,39 @@ impl IpTables {
     ) -> Result<(), Errno> {
         security::check_task_capable(current_task, CAP_NET_ADMIN)?;
 
-        let mut bytes = optval.to_vec(current_task)?;
         match optname {
             // Replaces the [`IpTable`] specified by `user_opt`.
             IPT_SO_SET_REPLACE => {
                 // TODO(https://fxbug.dev/407842082): The following logic needs to be fixed.
                 if socket.domain == SocketDomain::Inet {
-                    self.replace_ipv4_table(current_task, bytes)
+                    self.replace_ipv4_table(current_task, optval)
                 } else {
-                    self.replace_ipv6_table(current_task, bytes)
+                    self.replace_ipv6_table(current_task, optval)
                 }
             }
 
             // Sets the counters of the [`IpTable`] specified by `user_opt`.
             IPT_SO_SET_ADD_COUNTERS => {
-                let (counters_info, _) =
-                    xt_counters_info::read_from_prefix(&*bytes).map_err(|_| errno!(EINVAL))?;
-
+                let bytes = Self::read_optval_with_header::<xt_counters_info>(
+                    current_task,
+                    &optval,
+                    |info| (info.num_counters as usize).checked_mul(size_of::<xt_counters>()),
+                )?;
+                let (counters_info, counters_bytes) =
+                    xt_counters_info::read_from_prefix(&bytes).map_err(|_| errno!(EINVAL))?;
                 let Ok(table_id) = TableId::try_from(&counters_info.name) else {
                     return error!(EINVAL);
                 };
+
+                let mut counters =
+                    Vec::with_capacity(counters_bytes.len() / size_of::<xt_counters>());
+                for chunk in counters_bytes.chunks(size_of::<xt_counters>()) {
+                    counters
+                        .push(xt_counters::read_from_prefix(chunk).map_err(|_| errno!(EINVAL))?.0);
+                }
+                if counters.len() != counters_info.num_counters as usize {
+                    return error!(EINVAL);
+                }
 
                 let mut state = self.state.write();
                 let entry: &mut IpTable = match socket.domain {
@@ -777,12 +773,6 @@ impl IpTables {
                 };
 
                 entry.num_counters = counters_info.num_counters;
-                let mut counters = vec![];
-                bytes = bytes.split_off(std::mem::size_of::<xt_counters_info>());
-                for chunk in bytes.chunks(std::mem::size_of::<xt_counters>()) {
-                    counters
-                        .push(xt_counters::read_from_prefix(chunk).map_err(|_| errno!(EINVAL))?.0);
-                }
                 entry.counters = counters;
                 Ok(())
             }
@@ -791,7 +781,67 @@ impl IpTables {
         }
     }
 
-    fn replace_ipv4_table(&self, current_task: &CurrentTask, bytes: Vec<u8>) -> Result<(), Errno> {
+    fn get_entries<H: FromBytes>(
+        &self,
+        current_task: &CurrentTask,
+        domain: SocketDomain,
+        optval: SockOptValue,
+        header_fields: impl FnOnce(&H) -> (&[starnix_uapi::c_char; 32], u32),
+    ) -> Result<Vec<u8>, Errno> {
+        if optval.len() < size_of::<H>() {
+            return error!(EINVAL);
+        }
+        let mut result = optval.read_bytes(current_task, size_of::<H>())?;
+        let (header, _) = H::read_from_prefix(&result).map_err(|_| errno!(EINVAL))?;
+        let (name, expected_entry_size) = header_fields(&header);
+        let Ok(table_id) = TableId::try_from(name) else {
+            return error!(EINVAL);
+        };
+        let mut entry_bytes = {
+            let state = self.state.read();
+            match domain {
+                SocketDomain::Inet => state.ipv4[table_id].entries.clone(),
+                _ => state.ipv6[table_id].entries.clone(),
+            }
+        };
+
+        if entry_bytes.len() > expected_entry_size as usize {
+            log_warn!("Entries are longer than expected so truncating.");
+            entry_bytes.truncate(expected_entry_size as usize);
+        }
+
+        result.append(&mut entry_bytes);
+        Ok(result)
+    }
+
+    fn read_optval_with_header<H: FromBytes>(
+        current_task: &CurrentTask,
+        optval: &SockOptValue,
+        payload_size_fn: impl FnOnce(&H) -> Option<usize>,
+    ) -> Result<Vec<u8>, Errno> {
+        if optval.len() < size_of::<H>() || optval.len() > MAX_IPTABLES_OPTVAL_SIZE {
+            return error!(EINVAL);
+        }
+        let bytes = optval.read_bytes(current_task, optval.len())?;
+        let (header, _) = H::read_from_prefix(&bytes).map_err(|_| errno!(EINVAL))?;
+        let expected_size = payload_size_fn(&header)
+            .and_then(|s| s.checked_add(size_of::<H>()))
+            .ok_or_else(|| errno!(EINVAL))?;
+        if bytes.len() != expected_size {
+            return error!(EINVAL);
+        }
+        Ok(bytes)
+    }
+
+    fn replace_ipv4_table(
+        &self,
+        current_task: &CurrentTask,
+        optval: SockOptValue,
+    ) -> Result<(), Errno> {
+        let bytes =
+            Self::read_optval_with_header::<ipt_replace>(current_task, &optval, |replace| {
+                Some(replace.size as usize)
+            })?;
         let mut ebpf_state = IpTablesEbpfState::new(current_task);
         let table =
             iptables_utils::IpTable::from_ipt_replace(&mut ebpf_state, bytes).map_err(|e| {
@@ -804,7 +854,15 @@ impl IpTables {
         Ok(())
     }
 
-    fn replace_ipv6_table(&self, current_task: &CurrentTask, bytes: Vec<u8>) -> Result<(), Errno> {
+    fn replace_ipv6_table(
+        &self,
+        current_task: &CurrentTask,
+        optval: SockOptValue,
+    ) -> Result<(), Errno> {
+        let bytes =
+            Self::read_optval_with_header::<ip6t_replace>(current_task, &optval, |replace| {
+                Some(replace.size as usize)
+            })?;
         let mut ebpf_state = IpTablesEbpfState::new(current_task);
         let table =
             iptables_utils::IpTable::from_ip6t_replace(&mut ebpf_state, bytes).map_err(|e| {

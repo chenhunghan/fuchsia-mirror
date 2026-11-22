@@ -1,0 +1,541 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_cc//cc:defs.bzl", "cc_import")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/host:defs.bzl", "cc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+load("//build/bazel/rules/python:py_data_package.bzl", "py_data_package")
+load("//build/bazel/rules/python:py_zipapp_binary.bzl", "py_zipapp_binary")
+load("//build/bazel/rules/python:python_c_extension.bzl", "python_c_extension")
+load("//build/bazel/rules/testing:defs.bzl", "analysis_failure_test")
+load(
+    ":py_data_package_analysis_test.bzl",
+    "py_data_package_providers_test",
+)
+load(
+    ":python_c_extension_test.bzl",
+    "c_extension_shlib_data_test",
+    "c_extension_shlib_test",
+    "python_c_extension_lib_test",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+_LINUX_HOST_CONSTRAINTS = [
+    "@platforms//os:linux",
+    "//build/bazel/platforms:linux_flavor_host",
+]
+
+# --- Test suites ---
+
+test_suite(
+    name = "host_tests",
+    tests = [
+        ":py_data_package_test",
+        ":py_zipapp_binary_test",
+        ":python_c_extension_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+test_suite(
+    name = "analysis_tests",
+    tests = [
+        ":c_ext_compat_list_analysis_test",
+        ":c_ext_compat_select_analysis_test",
+        ":c_ext_minimal_lib_analysis_test",
+        ":c_ext_trailing_slash_stubs_analysis_test",
+        ":c_ext_with_stubs_lib_analysis_test",
+        ":c_ext_with_stubs_shlib_analysis_test",
+        ":c_ext_with_stubs_shlib_data_analysis_test",
+        ":dotted_package_providers_test",
+        ":invalid_default_name_ident_test",
+        ":invalid_duplicate_dest_test",
+        ":invalid_empty_inputs_test",
+        ":invalid_imports_escape_test",
+        ":invalid_init_dest_test",
+        ":invalid_package_dir_dotdot_test",
+        ":invalid_package_dir_ident_test",
+        ":invalid_slash_dest_test",
+        ":subpackage_providers_test",
+    ],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+# --- py_zipapp_binary tests ---
+
+host_py_test(
+    name = "py_zipapp_binary_test",
+    srcs = ["py_zipapp_binary_test.py"],
+    test_data = [
+        ":zipapp_test_async_bin",
+        ":zipapp_test_bin",
+    ],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_library(
+    name = "zipapp_test_lib",
+    testonly = True,
+    srcs = ["lib/zipapp_test_lib.py"],
+    imports = ["lib"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+py_zipapp_binary(
+    name = "zipapp_test_bin",
+    testonly = True,
+    srcs = ["zipapp_test_helper.py"],
+    data_package_name = "zipapp_test_data",
+    data_sources = ["data/greeting.txt"],
+    main = "zipapp_test_main.py",
+    deps = [":zipapp_test_lib"],
+)
+
+py_zipapp_binary(
+    name = "zipapp_test_async_bin",
+    testonly = True,
+    main = "zipapp_test_async_main.py",
+    output_name = "zipapp_test_async.pyz",
+    unbuffered_output = True,
+    deps = [":zipapp_test_lib"],
+)
+
+# --- py_data_package end-to-end runtime tests ---
+
+host_py_test(
+    name = "py_data_package_test",
+    testonly = True,
+    srcs = ["py_data_package_test.py"],
+    test_data = [":py_data_package_zipapp_bin"],
+    deps = [
+        ":dotted_data",
+        ":host_test_isolated_data",
+        ":pkg_with_data_lib",
+        ":runfiles_carrier_pkg",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+py_zipapp_binary(
+    name = "py_data_package_zipapp_bin",
+    testonly = True,
+    main = "py_data_package_zipapp_main.py",
+    deps = [
+        ":dotted_data",
+        ":pkg_with_data_lib",
+        ":zipapp_isolated_data",
+    ],
+)
+
+# --- py_data_package fixtures & provider analysis tests ---
+
+# 1. Subpackage attached to an existing py_library, staging source files, an
+#    untyped generated `.py` data file (skipped by `"no-pyrefly"`), and a
+#    renamed C++ host binary.
+cc_binary_host_tool(
+    name = "echo_tool_bin",
+    testonly = True,
+    srcs = ["echo_tool.cc"],
+)
+
+write_file(
+    name = "untyped_py_data",
+    testonly = True,
+    out = "gen_bad_data.py",
+    content = ["x: int = 'bad'\n"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+py_data_package(
+    name = "pkg_data",
+    testonly = True,
+    srcs = [
+        "data/greeting.txt",
+        ":untyped_py_data",
+    ],
+    package_dir = "lib/pkg_with_data/data",
+    srcs_map = {
+        "renamed_echo_tool": ":echo_tool_bin",
+    },
+)
+
+py_data_package_providers_test(
+    name = "subpackage_providers_test",
+    expected_data_short_paths = [
+        "build/bazel/rules/python/tests/lib/pkg_with_data/data/gen_bad_data.py",
+        "build/bazel/rules/python/tests/lib/pkg_with_data/data/greeting.txt",
+        "build/bazel/rules/python/tests/lib/pkg_with_data/data/renamed_echo_tool",
+    ],
+    expected_transitive_source_short_paths = [
+        "build/bazel/rules/python/tests/lib/pkg_with_data/data/__init__.py",
+    ],
+    target_under_test = ":pkg_data",
+)
+
+py_library(
+    name = "pkg_with_data_lib",
+    testonly = True,
+    srcs = [
+        "lib/pkg_with_data/__init__.py",
+        "lib/pkg_with_data/reader.py",
+    ],
+    imports = ["lib"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [":pkg_data"],
+)
+
+# 2. Multiple standalone `test_data` packages in one BUILD.bazel isolated under
+#    distinct `package_dir` / `imports` prefixes (plus predeclared OutputFile
+#    labels in `srcs` and `srcs_map`).
+py_data_package(
+    name = "host_test_isolated_data",
+    testonly = True,
+    srcs = [":gen_bad_data.py"],
+    imports = ["host_test_isolated_data"],
+    package_dir = "host_test_isolated_data/test_data",
+    srcs_map = {
+        "isolated.txt": "data/greeting.txt",
+        "predeclared.py": ":gen_bad_data.py",
+    },
+)
+
+py_data_package(
+    name = "zipapp_isolated_data",
+    testonly = True,
+    srcs = ["data/extra.txt"],
+    imports = ["zipapp_isolated_data"],
+    package_dir = "zipapp_isolated_data/test_data",
+)
+
+# 3. Nested package path (`dotted_pkg.nested`) under a custom `imports` root.
+py_data_package(
+    name = "dotted_data",
+    testonly = True,
+    imports = ["dotted_data"],
+    package_dir = "dotted_data/dotted_pkg/nested",
+    srcs_map = {
+        "custom.txt": "data/greeting.txt",
+    },
+)
+
+py_data_package_providers_test(
+    name = "dotted_package_providers_test",
+    expected_data_short_paths = [
+        "build/bazel/rules/python/tests/dotted_data/dotted_pkg/nested/custom.txt",
+    ],
+    expected_imports = [
+        "_main/build/bazel/rules/python/tests/dotted_data",
+    ],
+    expected_transitive_source_short_paths = [
+        "build/bazel/rules/python/tests/dotted_data/dotted_pkg/nested/__init__.py",
+    ],
+    target_under_test = ":dotted_data",
+)
+
+# 4. Default `package_dir` (`name`), `imports = ["."]`, and transitive
+#    `default_runfiles` propagation from an executable target.
+fx_cc_binary(
+    name = "carrier_cc_bin",
+    testonly = True,
+    srcs = ["echo_tool.cc"],
+    data = ["data/extra.txt"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+py_data_package(
+    name = "runfiles_carrier_pkg",
+    testonly = True,
+    srcs = [":carrier_cc_bin"],
+    imports = ["."],
+)
+
+# --- py_data_package negative analysis tests ---
+
+py_data_package(
+    name = "invalid_empty_inputs",
+    testonly = True,
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_empty_inputs_test",
+    expected_message = "At least one of `srcs` or `srcs_map` must be non-empty.",
+    target_under_test = ":invalid_empty_inputs",
+)
+
+py_data_package(
+    name = "invalid_package_dir_dotdot",
+    testonly = True,
+    srcs = ["data/greeting.txt"],
+    package_dir = "../escape",
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_package_dir_dotdot_test",
+    expected_message = "`package_dir` must not contain empty, '.', or '..' segments",
+    target_under_test = ":invalid_package_dir_dotdot",
+)
+
+py_data_package(
+    name = "invalid_package_dir_ident",
+    testonly = True,
+    srcs = ["data/greeting.txt"],
+    package_dir = "sub/bad-name",
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_package_dir_ident_test",
+    expected_message = "Leaf directory of `package_dir` must be a valid Python identifier",
+    target_under_test = ":invalid_package_dir_ident",
+)
+
+py_data_package(
+    name = "invalid-default-name",
+    testonly = True,
+    srcs = ["data/greeting.txt"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_default_name_ident_test",
+    expected_message = "Leaf directory of `package_dir` must be a valid Python identifier",
+    target_under_test = ":invalid-default-name",
+)
+
+py_data_package(
+    name = "invalid_imports_escape",
+    testonly = True,
+    srcs = ["data/greeting.txt"],
+    imports = ["../../../../../../escape"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_imports_escape_test",
+    expected_message = "escapes the repository root",
+    target_under_test = ":invalid_imports_escape",
+)
+
+py_data_package(
+    name = "invalid_init_dest",
+    testonly = True,
+    srcs_map = {"__init__.py": "data/greeting.txt"},
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_init_dest_test",
+    expected_message = "Data resource filename cannot be '__init__.py'",
+    target_under_test = ":invalid_init_dest",
+)
+
+py_data_package(
+    name = "invalid_slash_dest",
+    testonly = True,
+    srcs_map = {"sub/file.txt": "data/greeting.txt"},
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_slash_dest_test",
+    expected_message = "Data resource filename must be a plain filename without '/'",
+    target_under_test = ":invalid_slash_dest",
+)
+
+py_data_package(
+    name = "invalid_duplicate_dest",
+    testonly = True,
+    srcs = ["data/greeting.txt"],
+    srcs_map = {"greeting.txt": "data/extra.txt"},
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "invalid_duplicate_dest_test",
+    expected_message = "Duplicate data resource filename",
+    target_under_test = ":invalid_duplicate_dest",
+)
+
+# --- python_c_extension tests ---
+
+fx_cc_library(
+    name = "c_ext_static_helper",
+    testonly = True,
+    srcs = ["c_extension/helper.cc"],
+    hdrs = ["c_extension/helper.h"],
+    data = ["c_extension/non_lib_data.txt"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+fx_cc_binary(
+    name = "libc_ext_shared_helper.so",
+    testonly = True,
+    srcs = [
+        "c_extension/shared_helper.cc",
+        "c_extension/shared_helper.h",
+    ],
+    linkshared = True,
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+)
+
+cc_import(
+    name = "c_ext_shared_helper",
+    testonly = True,
+    hdrs = ["c_extension/shared_helper.h"],
+    shared_library = ":libc_ext_shared_helper.so",
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+)
+
+python_c_extension(
+    name = "c_ext_with_stubs",
+    testonly = True,
+    srcs = ["c_extension/ext_with_stubs.cc"],
+    defines = [
+        "Py_LIMITED_API=0x030b00f0",
+        "PY_SSIZE_T_CLEAN",
+        "EXT_TEST_DEFINE_VAL=42",
+    ],
+    stubs = [
+        "__init__.pyi",
+        "sub/__init__.pyi",
+    ],
+    stubs_root = "c_extension/stubs",
+    deps = [
+        ":c_ext_shared_helper",
+        ":c_ext_static_helper",
+    ],
+)
+
+python_c_extension(
+    name = "c_ext_minimal",
+    testonly = True,
+    srcs = ["c_extension/ext_minimal.cc"],
+)
+
+python_c_extension(
+    name = "c_ext_compat_list",
+    testonly = True,
+    srcs = ["c_extension/ext_minimal.cc"],
+    target_compatible_with = ["@platforms//os:linux"],
+)
+
+python_c_extension(
+    name = "c_ext_compat_select",
+    testonly = True,
+    srcs = ["c_extension/ext_minimal.cc"],
+    target_compatible_with = select({"//conditions:default": []}),
+)
+
+python_c_extension(
+    name = "c_ext_trailing_slash_stubs",
+    testonly = True,
+    srcs = ["c_extension/ext_minimal.cc"],
+    stubs = ["__init__.pyi"],
+    stubs_root = "./c_extension/stubs/",
+)
+
+host_py_test(
+    name = "python_c_extension_test",
+    testonly = True,
+    srcs = ["python_c_extension_test.py"],
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    deps = [
+        ":c_ext_minimal",
+        ":c_ext_with_stubs",
+        "@rules_python//python/runfiles",
+    ],
+)
+
+python_c_extension_lib_test(
+    name = "c_ext_with_stubs_lib_analysis_test",
+    expected_constraints = _LINUX_HOST_CONSTRAINTS,
+    expected_import = "_main/build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage",
+    expected_pyi_files = [
+        "build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage/c_ext_with_stubs/__init__.pyi",
+        "build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage/c_ext_with_stubs/sub/__init__.pyi",
+    ],
+    expected_runfile_substrings = [
+        "libc_ext_with_stubs.so",
+        "libc_ext_shared_helper.so",
+        "_c_ext_with_stubs_py_stage/c_ext_with_stubs/__init__.pyi",
+        "_c_ext_with_stubs_py_stage/c_ext_with_stubs/sub/__init__.pyi",
+    ],
+    expected_search_path = "build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage",
+    expected_staged_init = "build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage/c_ext_with_stubs/__init__.py",
+    expected_testonly = True,
+    forbidden_runfile_substrings = ["non_lib_data.txt"],
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":c_ext_with_stubs",
+)
+
+python_c_extension_lib_test(
+    name = "c_ext_minimal_lib_analysis_test",
+    expected_constraints = _LINUX_HOST_CONSTRAINTS,
+    expected_import = "_main/build/bazel/rules/python/tests/_c_ext_minimal_py_stage",
+    expected_pyi_files = [],
+    expected_runfile_substrings = ["libc_ext_minimal.so"],
+    expected_search_path = "build/bazel/rules/python/tests/_c_ext_minimal_py_stage",
+    expected_staged_init = "build/bazel/rules/python/tests/_c_ext_minimal_py_stage/c_ext_minimal/__init__.py",
+    expected_testonly = True,
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":c_ext_minimal",
+)
+
+python_c_extension_lib_test(
+    name = "c_ext_compat_list_analysis_test",
+    expected_constraints = _LINUX_HOST_CONSTRAINTS,
+    expected_import = "_main/build/bazel/rules/python/tests/_c_ext_compat_list_py_stage",
+    expected_staged_init = "build/bazel/rules/python/tests/_c_ext_compat_list_py_stage/c_ext_compat_list/__init__.py",
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":c_ext_compat_list",
+)
+
+python_c_extension_lib_test(
+    name = "c_ext_compat_select_analysis_test",
+    expected_constraints = _LINUX_HOST_CONSTRAINTS,
+    expected_import = "_main/build/bazel/rules/python/tests/_c_ext_compat_select_py_stage",
+    expected_staged_init = "build/bazel/rules/python/tests/_c_ext_compat_select_py_stage/c_ext_compat_select/__init__.py",
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":c_ext_compat_select",
+)
+
+python_c_extension_lib_test(
+    name = "c_ext_trailing_slash_stubs_analysis_test",
+    expected_constraints = _LINUX_HOST_CONSTRAINTS,
+    expected_import = "_main/build/bazel/rules/python/tests/_c_ext_trailing_slash_stubs_py_stage",
+    expected_pyi_files = [
+        "build/bazel/rules/python/tests/_c_ext_trailing_slash_stubs_py_stage/c_ext_trailing_slash_stubs/__init__.pyi",
+    ],
+    expected_staged_init = "build/bazel/rules/python/tests/_c_ext_trailing_slash_stubs_py_stage/c_ext_trailing_slash_stubs/__init__.py",
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":c_ext_trailing_slash_stubs",
+)
+
+c_extension_shlib_data_test(
+    name = "c_ext_with_stubs_shlib_data_analysis_test",
+    expected_runfile_substrings = [
+        "libc_ext_with_stubs.so",
+        "libc_ext_shared_helper.so",
+    ],
+    expected_shlib_short_path = "build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage/c_ext_with_stubs/libc_ext_with_stubs.so",
+    forbidden_runfile_substrings = ["non_lib_data.txt"],
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":c_ext_with_stubs_shlib_data",
+)
+
+c_extension_shlib_test(
+    name = "c_ext_with_stubs_shlib_analysis_test",
+    expected_define = "EXT_TEST_DEFINE_VAL=42",
+    expected_shlib_short_path = "build/bazel/rules/python/tests/_c_ext_with_stubs_py_stage/c_ext_with_stubs/libc_ext_with_stubs.so",
+    target_compatible_with = _LINUX_HOST_CONSTRAINTS,
+    target_under_test = ":_c_ext_with_stubs_py_stage/c_ext_with_stubs/libc_ext_with_stubs.so",
+)

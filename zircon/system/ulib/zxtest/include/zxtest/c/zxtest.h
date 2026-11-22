@@ -226,6 +226,10 @@ __END_CDECLS
 
 #define LIB_ZXTEST_AUTO_VAR_TYPE(var) __typeof__(var)
 
+// The type that the usual arithmetic conversions give both values, as for the comparison
+// operators themselves.  Arrays decay to pointers.
+#define LIB_ZXTEST_COMMON_VAR_TYPE(expected, actual) __typeof__(0 ? (expected) : (actual))
+
 // Basic macros for assertions.
 
 // Used to cleanup allocated buffers for formatted messages.
@@ -290,9 +294,12 @@ static void zxtest_clean_buffer(char** buffer) { free(*buffer); }
     }                                                                                              \
   } while (0)
 
-#define LIB_ZXTEST_CHECK_VAR(op, expected, actual, fatal, file, line, desc, ...)               \
-  LIB_ZXTEST_CHECK_VAR_COERCE(op, expected, actual, LIB_ZXTEST_AUTO_VAR_TYPE(expected), fatal, \
-                              file, line, desc, ##__VA_ARGS__)
+#define LIB_ZXTEST_CHECK_VAR(op, expected, actual, fatal, file, line, desc, ...)                  \
+  LIB_ZXTEST_CHECK_VAR_COERCE(op, expected, actual, LIB_ZXTEST_COMMON_VAR_TYPE(expected, actual), \
+                              fatal, file, line, desc, ##__VA_ARGS__)
+
+#define LIB_ZXTEST_CHECK_BOOL(expected, actual, fatal, file, line, desc, ...) \
+  LIB_ZXTEST_CHECK_VAR(LIB_ZXTEST_BOOL, expected, actual, fatal, file, line, desc, ##__VA_ARGS__)
 
 #define LIB_ZXTEST_FAIL_NO_RETURN(fatal, desc, ...)                         \
   do {                                                                      \

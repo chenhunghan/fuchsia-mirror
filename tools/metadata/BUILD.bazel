@@ -4,6 +4,7 @@
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -20,4 +21,28 @@ go_library(
         "//third_party/golibs:google.golang.org/protobuf/reflect/protoreflect",
         "//third_party/golibs:google.golang.org/protobuf/runtime/protoimpl",
     ],
+)
+
+go_library(
+    name = "metadata",
+    srcs = [
+        "metadata.go",
+    ],
+    importpath = "go.fuchsia.dev/fuchsia/tools/metadata",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":proto_lib",
+        "//third_party/golibs:google.golang.org/protobuf/encoding/prototext",
+    ],
+)
+
+host_go_test(
+    name = "metadata_tests",
+    srcs = [
+        "metadata_test.go",
+    ],
+    embed = [":metadata"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
 )

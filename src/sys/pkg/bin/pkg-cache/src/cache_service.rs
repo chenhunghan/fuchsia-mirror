@@ -233,70 +233,18 @@ async fn get(
     needed_blobs: ServerEnd<NeededBlobsMarker>,
     dir: ServerEnd<fio::DirectoryMarker>,
     scope: package_directory::ExecutionScope,
-    cobalt_sender: ProtocolSender<MetricEvent>,
-    node: &finspect::Node,
-) -> Result<(), Status> {
-    let guard = package_index.start_writing(meta_far_blob.blob_id.into(), gc_protection).await;
-    let get_ret = get_impl(
-        package_index,
-        base_packages,
-        cache_packages,
-        executability_restrictions,
-        blobfs,
-        root_dir_factory,
-        open_packages,
-        meta_far_blob,
-        gc_protection,
-        needed_blobs,
-        dir,
-        scope,
-        cobalt_sender,
-        node,
-    )
-    .await;
-    let stop_ret = package_index.stop_writing(guard).await;
-    match (get_ret, stop_ret) {
-        (get_ret, Ok(())) => get_ret,
-        (Ok(()), Err(e)) => {
-            error!("stopping the write of {meta_far_blob:?}: {:#}", anyhow!(e));
-            Err(Status::INTERNAL)
-        }
-        (Err(get_err), Err(stop_err)) => {
-            error!(
-                "erroring stopping the write of {meta_far_blob:?}: {:#}, \
-                the get failed first so that error will be returned",
-                anyhow!(stop_err)
-            );
-            Err(get_err)
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-/// Fetch a package and optionally open it.
-async fn get_impl(
-    package_index: &PackageIndex,
-    base_packages: &BaseIndex,
-    cache_packages: &CacheIndex,
-    executability_restrictions: system_image::ExecutabilityRestrictions,
-    blobfs: &blobfs::Client,
-    root_dir_factory: &crate::RootDirFactory,
-    open_packages: &crate::RootDirCache,
-    meta_far_blob: BlobInfo,
-    gc_protection: fpkg::GcProtection,
-    needed_blobs: ServerEnd<NeededBlobsMarker>,
-    dir: ServerEnd<fio::DirectoryMarker>,
-    scope: package_directory::ExecutionScope,
     mut cobalt_sender: ProtocolSender<MetricEvent>,
     node: &finspect::Node,
 ) -> Result<(), Status> {
+    let pkg: Hash = meta_far_blob.blob_id.into();
+    let _writing_guard = package_index.start_writing(pkg, gc_protection).await;
+
     let () = node.record_int("started-time", zx::MonotonicInstant::get().into_nanos());
     let () = node.record_string("meta-far-id", meta_far_blob.blob_id.to_string());
     let () = node.record_uint("meta-far-length", meta_far_blob.length);
     let () = node.record_string("gc-protection", format!("{gc_protection:?}"));
 
     let needed_blobs = needed_blobs.into_stream();
-    let pkg: Hash = meta_far_blob.blob_id.into();
 
     let flags = executability_status(executability_restrictions, base_packages, pkg).into();
     match gc_protection {
@@ -1010,9 +958,9 @@ mod serve_needed_blobs_tests {
             Task::spawn(async move {
                 let (root_dir_factory, _) = crate::root_dir::new_test(blobfs.clone()).await;
 
-                let guard =
+                let _writing_guard =
                     package_index.start_writing(meta_blob_info.blob_id.into(), gc_protection).await;
-                let res = serve_needed_blobs(
+                serve_needed_blobs(
                     stream,
                     meta_blob_info,
                     gc_protection,
@@ -1022,9 +970,7 @@ mod serve_needed_blobs_tests {
                     &inspector.root().create_child("test-node-name"),
                 )
                 .await
-                .map(|_| ());
-                let () = package_index.stop_writing(guard).await.unwrap();
-                res
+                .map(|_| ())
             }),
             proxy,
             blobfs_mock,
@@ -2436,6 +2382,9 @@ mod serve_needed_blobs_tests {
 mod get_handler_tests {
     use super::*;
     use crate::{COBALT_CONNECTOR_BUFFER_SIZE, CobaltConnectedService, ProtocolConnector};
+    use futures::poll;
+    use std::pin::pin;
+    use std::task::Poll;
 
     #[fuchsia::test]
     async fn everything_closed() {
@@ -2446,7 +2395,7 @@ mod get_handler_tests {
         let package_index = PackageIndex::new(blobfs.clone(), None);
         let (root_dir_factory, open_packages) = crate::root_dir::new_test(blobfs.clone()).await;
 
-        assert_matches::assert_matches!(
+        std::assert_matches!(
             get(
                 &package_index,
                 &BaseIndex::new_test_only(HashSet::new(), vec![]),
@@ -2470,6 +2419,59 @@ mod get_handler_tests {
             )
             .await,
             Err(Status::UNAVAILABLE)
+        );
+    }
+
+    #[fuchsia::test]
+    async fn dropping_in_flight_get_cleans_up_writing_index() {
+        let (_needed_blobs_proxy, needed_blobs_server_end) =
+            fidl::endpoints::create_proxy::<NeededBlobsMarker>();
+        let package_hash = Hash::from([7; 32]);
+        let meta_blob_info = BlobInfo { blob_id: package_hash.into(), length: 0 };
+        let (blobfs, _, _, _) = blobfs::Client::new_test();
+        let inspector = fuchsia_inspect::Inspector::default();
+        let package_index = PackageIndex::new(blobfs.clone(), None);
+        let (root_dir_factory, open_packages) = crate::root_dir::new_test(blobfs.clone()).await;
+        let base_packages = BaseIndex::new_test_only(HashSet::new(), vec![]);
+        let cache_packages = CacheIndex::new_test_only(HashSet::new(), vec![]);
+        let get_node = inspector.root().create_child("get");
+
+        {
+            let mut get_fut = pin!(get(
+                &package_index,
+                &base_packages,
+                &cache_packages,
+                system_image::ExecutabilityRestrictions::DoNotEnforce,
+                &blobfs,
+                &root_dir_factory,
+                &open_packages,
+                meta_blob_info,
+                fpkg::GcProtection::OpenPackageTracking,
+                needed_blobs_server_end,
+                fidl::endpoints::create_endpoints().1,
+                package_directory::ExecutionScope::new(),
+                ProtocolConnector::new_with_buffer_size(
+                    CobaltConnectedService,
+                    COBALT_CONNECTOR_BUFFER_SIZE,
+                )
+                .serve_and_log_errors()
+                .0,
+                &get_node,
+            ));
+            std::assert_matches!(poll!(&mut get_fut), Poll::Pending);
+            let initialized = package_index.wait_until_upgradable_packages_initialized().await;
+            assert_eq!(
+                package_index.acquire_gc_lock(initialized).await.protected_blobs().await,
+                HashSet::from([package_hash])
+            );
+            // `get_fut` drops here while waiting on `needed_blobs`, simulating cancellation of an
+            // in-flight `PackageCache.Get` future.
+        }
+
+        let initialized = package_index.wait_until_upgradable_packages_initialized().await;
+        assert_eq!(
+            package_index.acquire_gc_lock(initialized).await.protected_blobs().await,
+            HashSet::new()
         );
     }
 }

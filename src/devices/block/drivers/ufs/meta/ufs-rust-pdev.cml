@@ -3,57 +3,14 @@
 // found in the LICENSE file.
 {
     include: [
+        "//src/devices/block/drivers/ufs/meta/ufs-rust.shard.cml",
         "driver/platform-device.shard.cml",
-        "driver_component/driver.shard.cml",
-        "inspect/client.shard.cml",
-        "syslog/client.shard.cml",
     ],
     program: {
-        runner: "driver",
-        binary: "driver/ufs_rust.so",
         bind: "meta/bind/ufs-pdev-bind.bindbc",
-        default_dispatcher_scheduler_role: "fuchsia.devices.storage.ufs.worker",
-        allowed_scheduler_roles: [
-            "fuchsia.devices.storage.ufs.irq",
-            "fuchsia.devices.storage.ufs.worker",
-        ],
     },
-    capabilities: [
-        { service: "fuchsia.hardware.block.volume.Service" },
-        { service: "fuchsia.hardware.rpmb.Service" },
-        { service: "fuchsia.hardware.ufs.Service" },
-    ],
     use: [
         { service: "fuchsia.hardware.ufs.phy.Service" },
         { service: "fuchsia.hardware.interconnect.PathService" },
-        { protocol: "fuchsia.scheduler.RoleManager" },
-        {
-            config: "fuchsia.storage.ufs.EnableAutoHibernate",
-            key: "enable_auto_hibernate",
-            type: "bool",
-            availability: "optional",
-            default: true,
-        },
-        {
-            config: "fuchsia.storage.ufs.AutoHibernateTimerUs",
-            key: "auto_hibernate_timer_us",
-            type: "uint32",
-            availability: "optional",
-            default: 2000,
-        },
-    ],
-    expose: [
-        {
-            service: "fuchsia.hardware.block.volume.Service",
-            from: "self",
-        },
-        {
-            service: "fuchsia.hardware.rpmb.Service",
-            from: "self",
-        },
-        {
-            service: "fuchsia.hardware.ufs.Service",
-            from: "self",
-        },
     ],
 }

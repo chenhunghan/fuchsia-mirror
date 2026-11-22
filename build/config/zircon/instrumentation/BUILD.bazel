@@ -13,7 +13,7 @@ compiler_build_flags(
     name = "ubsan-trap",
     # If the toolchain configs already enable ubsan, don't change anything.
     c_family_flags = select({
-        "//build/bazel/config/toolchain_tags/ubsan:true": [],
+        "//build/bazel/config/variant_features/ubsan:true": [],
         "//conditions:default": [
             "-fsanitize=undefined",
             "-fsanitize-trap=undefined",

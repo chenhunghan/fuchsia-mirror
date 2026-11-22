@@ -15,5 +15,4 @@ llvm_libc_source_set("compiler") {
 
   no_test_functions = functions
   test_sources = [ "stack_chk_guard_test.cpp" ]
-  test_deps = [ "../string:memset" ]
 }

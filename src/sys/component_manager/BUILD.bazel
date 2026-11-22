@@ -4,6 +4,7 @@
 
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("//build/bazel/rbe:rbe.bzl", "RBE_USE_LARGE_WORKER")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_compiled_manifest",
@@ -31,8 +32,19 @@ exports_files(
     ],
     visibility = [
         "//bundles/assembly:__subpackages__",
+        "//src/lib/fuchsia-component-test/tests:__pkg__",
         "//src/sys/component_manager/tests:__subpackages__",
     ],
+)
+
+cml_shard(
+    name = "meta/component-framework-tests.shard",
+    includes = [
+        "//sdk/lib/trace:offer.shard",
+        "//src/sys/testing:meta/test-memfs.shard",
+    ],
+    shard = "meta/component-framework-tests.shard.cml",
+    visibility = ["//:__subpackages__"],
 )
 
 # "opt-level=z" saves 400 KiB compared to "s" on component framework binary
@@ -186,7 +198,7 @@ _COMPONENT_MANAGER_DEPS = [
     "//src/lib/trace/rust:trace",
     "//src/lib/versioning/version-history/rust",
     "//src/lib/versioning/version-history/rust/data",
-    "//src/performance/memory/scudo:rust",
+    "//src/memory/lib/scudo:rust",
     "//src/power/shutdown-shim:lib",
     "//src/storage/lib/vfs/rust:vfs",
     "//src/sys/component_manager/lib/builtins",
@@ -206,10 +218,8 @@ _COMPONENT_MANAGER_DEPS = [
     "//src/sys/lib/component_id_index",
     "//src/sys/lib/config_encoder",
     "//src/sys/lib/elf_runner",
-    "//src/sys/lib/fidl-fuchsia-component-abi-ext",
     "//src/sys/lib/fuchsia-bootfs",
     "//src/sys/lib/fuchsia-zbi",
-    "//src/sys/lib/mem_util",
     "//src/sys/lib/moniker",
     "//src/sys/lib/namespace",
     "//src/sys/lib/routing",
@@ -417,7 +427,10 @@ fx_packaged_binary(
     name = "bin_with_tracing_packaged",
     binary = ":bin_with_tracing",
     binary_name = "component_manager_with_tracing",
-    visibility = ["//src/sys/component_manager:__subpackages__"],
+    visibility = [
+        "//src/lib/fuchsia-component-test/tests:__pkg__",
+        "//src/sys/component_manager:__subpackages__",
+    ],
 )
 
 # @bazel2gn:skip
@@ -467,7 +480,11 @@ fx_component(
     name = "component-manager-realm-builder-cmp",
     testonly = True,
     compiled_manifest = ":component-manager-realm-builder-cmp-manifest",
-    visibility = ["//src/sys/component_manager:__subpackages__"],
+    visibility = [
+        "//examples/components/runner/colocated/integration_tests:__pkg__",
+        "//src/lib/fuchsia-component-test/tests:__pkg__",
+        "//src/sys/component_manager:__subpackages__",
+    ],
     deps = [
         ":bin_with_tracing_packaged",
         ":component_manager_realm_builder_config",
@@ -481,7 +498,10 @@ fx_component(
     name = "component-manager-realm-builder-debug-cmp",
     testonly = True,
     compiled_manifest = ":component-manager-realm-builder-cmp-manifest",
-    visibility = ["//src/sys/component_manager/tests:__subpackages__"],
+    visibility = [
+        "//src/lib/fuchsia-component-test/tests:__pkg__",
+        "//src/sys/component_manager/tests:__subpackages__",
+    ],
     deps = [
         ":bin_with_tracing_packaged",
         ":component_id_index_for_debug_config",
@@ -542,6 +562,7 @@ test_suite(
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
         "//src/sys/component_manager/stress_tests:component-manager-stress-tests",
+        "//src/sys/component_manager/stress_tests_alt:tests",
         "//src/sys/component_manager/tests/abi_compatibility:abi_compatibility_tests",
         "//src/sys/component_manager/tests/binder:binder_integration_test",
         "//src/sys/component_manager/tests/builtin_dispatcher_component:builtin_dispatcher_component_test",
@@ -565,6 +586,7 @@ test_suite(
         "//src/sys/component_manager/tests/ota_health_verification:ota-health-verification-test",
         "//src/sys/component_manager/tests/panic-test:component_manager_panic_test",
         "//src/sys/component_manager/tests/pkg_from_framework:pkg_from_framework_test",
+        "//src/sys/component_manager/tests/realm:tests",
         "//src/sys/component_manager/tests/reboot_on_terminate:reboot_on_terminate_test",
         "//src/sys/component_manager/tests/resolvers/cast:cast_resolver_test",
         "//src/sys/component_manager/tests/resolvers/custom:component-manager-test-resolver",
@@ -577,6 +599,8 @@ test_suite(
         "//src/sys/component_manager/tests/shutdown:shutdown_integration_test",
         "//src/sys/component_manager/tests/stop_with_escrow:stop_with_escrow_integration_test",
         "//src/sys/component_manager/tests/storage:storage_integration_test",
+        "//src/sys/component_manager/tests/structured_config/client_integration/rust:tests",
+        "//src/sys/component_manager/tests/utc-time:tests",
     ],
 )
 

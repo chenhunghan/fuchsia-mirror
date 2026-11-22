@@ -208,7 +208,9 @@ where
     unsafe fn recycle(ptr: NonNull<Self>) {
         // SAFETY: `ptr` is verified to be valid and dereferenceable.
         // We release the region back to its owner.
-        // `owner` is guaranteed to outlive all regions in flight.
+        // `RegionAllocator::drop` aborts without unwinding if any allocated regions remain in
+        // flight, so as long as `RegionAllocator::drop` does not run concurrently with
+        // `Region::recycle` on another thread, `owner` outlives all regions in flight.
         unsafe {
             let owner = ptr.as_ref().owner;
             owner.as_ref().release_region(ptr);
@@ -260,12 +262,30 @@ impl<M: RawLock> WavlTreeKeyable<RegionKey> for Region<M> {
 }
 
 #[fbl::ref_counted]
-#[pin_init::pin_data]
+#[pin_init::pin_data(PinnedDrop)]
 #[derive(fbl::Recyclable)]
 #[repr(C)]
 pub struct RegionPool<M: RawLock> {
     #[pin]
-    allocator: fbl::SlabAllocator<Region<M>, M, { REGION_POOL_SLAB_SIZE }>,
+    allocator: fbl::SlabAllocator<Region<M>, M, { REGION_POOL_SLAB_SIZE }, true>,
+}
+
+/// Aborts without unwinding if a `RegionPool` is dropped while regions remain allocated,
+/// preventing `SlabAllocator::drop` from freeing slabs backing live regions.
+#[cold]
+#[inline(never)]
+extern "C" fn abort_pool_with_live_regions(live_count: usize) -> ! {
+    panic!("RegionPool destroyed with {} regions still allocated", live_count);
+}
+
+#[pin_init::pinned_drop]
+impl<M: RawLock> pin_init::PinnedDrop for RegionPool<M> {
+    fn drop(self: core::pin::Pin<&mut Self>) {
+        let obj_count = self.allocator.obj_count();
+        if obj_count != 0 {
+            abort_pool_with_live_regions(obj_count);
+        }
+    }
 }
 
 impl<M: RawLock> RegionPool<M> {
@@ -311,20 +331,14 @@ pub struct RegionAllocator<M: RawLock> {
     mu: KMutex<M>,
 
     #[pin]
-    // TODO(https://fxbug.dev/536051491): Remove this once WavlTree is pin-aware.
-    #[ksync(unpinned)]
     #[guarded_by(mu)]
     allocated_regions_by_base: WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
 
     #[pin]
-    // TODO(https://fxbug.dev/536051491): Remove this once WavlTree is pin-aware.
-    #[ksync(unpinned)]
     #[guarded_by(mu)]
     avail_regions_by_base: WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
 
     #[pin]
-    // TODO(https://fxbug.dev/536051491): Remove this once WavlTree is pin-aware.
-    #[ksync(unpinned)]
     #[guarded_by(mu)]
     avail_regions_by_size: WavlTree<RegionKey, NonNull<Region<M>>, SortBySize, TrackingSize>,
 
@@ -393,12 +407,12 @@ where
 
     pub fn reset(&self) {
         lock!(let mut guard = self.lock_mu());
-        let fields = guard.as_mut().fields_mut();
+        let mut fields = guard.as_mut().fields_mut();
 
         debug_assert!(fields.allocated_regions_by_base.is_empty());
 
-        fields.avail_regions_by_base.clear();
-        while let Some(region_ptr) = fields.avail_regions_by_size.pop_front() {
+        fields.avail_regions_by_base.as_mut().clear();
+        while let Some(region_ptr) = fields.avail_regions_by_size.as_mut().pop_front() {
             // SAFETY: The popped `region_ptr` is a valid pointer to a `Region` that was stored in
             // the allocator's available trees.  It has been removed from `avail_regions_by_size`,
             // and `avail_regions_by_base` was cleared, so there are no other references to it.
@@ -418,10 +432,10 @@ where
         lock!(let mut guard = self.lock_mu());
         let mut fields = guard.as_mut().fields_mut();
 
-        self.add_subtract_sanity_check_locked_mut(fields.allocated_regions_by_base, &region)?;
+        self.add_subtract_sanity_check_locked(&fields.allocated_regions_by_base, &region)?;
 
         if allow_overlap != AllowOverlap::Yes {
-            let intersects = self.intersects_locked(fields.avail_regions_by_base, &region)?;
+            let intersects = self.intersects_locked(&fields.avail_regions_by_base, &region)?;
             if intersects {
                 return Err(Status::INVALID_ARGS);
             }
@@ -442,9 +456,9 @@ where
         let region_end = to_subtract.end()?;
 
         lock!(let mut guard = self.lock_mu());
-        let fields = guard.as_mut().fields_mut();
+        let mut fields = guard.as_mut().fields_mut();
 
-        self.add_subtract_sanity_check_locked_mut(fields.allocated_regions_by_base, &to_subtract)?;
+        self.add_subtract_sanity_check_locked(&fields.allocated_regions_by_base, &to_subtract)?;
 
         let mut region = to_subtract;
 
@@ -453,7 +467,8 @@ where
         let mut before_end = 0;
 
         {
-            let mut before_cursor = fields.avail_regions_by_base.upper_bound(&region.base);
+            let mut before_cursor =
+                fields.avail_regions_by_base.as_mut().upper_bound_mut(&region.base);
             before_cursor.move_prev();
 
             if let Some(before) = before_cursor.get() {
@@ -473,7 +488,7 @@ where
                 if region.base == before.base() && region_end == before_end {
                     let removed_ptr = before_cursor.erase().unwrap();
                     let key = before.key_size;
-                    fields.avail_regions_by_size.erase(&key);
+                    fields.avail_regions_by_size.as_mut().erase(&key);
                     // SAFETY: `removed_ptr` has been removed from all indices and can be safely
                     // destroyed.
                     unsafe {
@@ -491,7 +506,7 @@ where
                         RegionSpan { base: region_end, size: before_end - region_end },
                     )?;
                     let key = before.key_size;
-                    let first_ptr = fields.avail_regions_by_size.erase(&key).unwrap();
+                    let first_ptr = fields.avail_regions_by_size.as_mut().erase(&key).unwrap();
 
                     // SAFETY: `first_ptr` is a valid pointer to a `Region`. Exclusivity is
                     // guaranteed because we hold the allocator lock, and although the region
@@ -508,9 +523,9 @@ where
                     // SAFETY: We insert the modified `first_ptr` and newly created `second_ptr`
                     // back into the WavlTree indices.  The trees will now own these pointers.
                     unsafe {
-                        fields.avail_regions_by_size.insert_raw(first_ptr);
-                        fields.avail_regions_by_base.insert_raw(second_ptr);
-                        fields.avail_regions_by_size.insert_raw(second_ptr);
+                        fields.avail_regions_by_size.as_mut().insert_raw(first_ptr);
+                        fields.avail_regions_by_base.as_mut().insert_raw(second_ptr);
+                        fields.avail_regions_by_size.as_mut().insert_raw(second_ptr);
                     }
                     return Ok(());
                 }
@@ -518,10 +533,10 @@ where
                 // Case 3: Trim front
                 if region.base == before.base() {
                     let key = before.key_size;
-                    let bptr = fields.avail_regions_by_size.erase(&key).unwrap();
+                    let bptr = fields.avail_regions_by_size.as_mut().erase(&key).unwrap();
                     // SAFETY: `bptr` is a valid pointer to a `Region`.
                     let base = unsafe { bptr.as_ref().base() };
-                    fields.avail_regions_by_base.erase(&base);
+                    fields.avail_regions_by_base.as_mut().erase(&base);
 
                     // SAFETY: `bptr` is a valid pointer to a `Region`. Exclusivity is guaranteed
                     // because we have erased the region from both the size and base available trees
@@ -536,15 +551,15 @@ where
                     // SAFETY: Re-inserting the trimmed region pointer back into the available
                     // indices is safe.
                     unsafe {
-                        fields.avail_regions_by_size.insert_raw(bptr);
-                        fields.avail_regions_by_base.insert_raw(bptr);
+                        fields.avail_regions_by_size.as_mut().insert_raw(bptr);
+                        fields.avail_regions_by_base.as_mut().insert_raw(bptr);
                     }
                     return Ok(());
                 }
 
                 // Case 4: Trim end
                 let key = before.key_size;
-                let bptr = fields.avail_regions_by_size.erase(&key).unwrap();
+                let bptr = fields.avail_regions_by_size.as_mut().erase(&key).unwrap();
                 // SAFETY: `bptr` is a valid pointer to a `Region`. Exclusivity is guaranteed
                 // because we hold the allocator lock, and although the region remains in
                 // `avail_regions_by_base` (its base address is unchanged), we have erased it from
@@ -558,7 +573,7 @@ where
                 // SAFETY: Re-inserting the trimmed region pointer back into the available index is
                 // safe.
                 unsafe {
-                    fields.avail_regions_by_size.insert_raw(bptr);
+                    fields.avail_regions_by_size.as_mut().insert_raw(bptr);
                 }
                 return Ok(());
             }
@@ -569,7 +584,8 @@ where
         }
 
         {
-            let mut before_cursor = fields.avail_regions_by_base.upper_bound(&region.base);
+            let mut before_cursor =
+                fields.avail_regions_by_base.as_mut().upper_bound_mut(&region.base);
             before_cursor.move_prev();
             if before_cursor.get().is_some() {
                 let before = before_cursor.get().unwrap();
@@ -579,7 +595,7 @@ where
                         let removed_ptr = before_cursor.erase().unwrap();
                         // SAFETY: `removed_ptr` is a valid pointer.
                         let key = unsafe { removed_ptr.as_ref().key_size };
-                        fields.avail_regions_by_size.erase(&key);
+                        fields.avail_regions_by_size.as_mut().erase(&key);
                         // SAFETY: `removed_ptr` has been removed from all indices and can be safely
                         // destroyed.
                         unsafe {
@@ -587,7 +603,7 @@ where
                         }
                     } else {
                         let key = before.key_size;
-                        let bptr = fields.avail_regions_by_size.erase(&key).unwrap();
+                        let bptr = fields.avail_regions_by_size.as_mut().erase(&key).unwrap();
                         // SAFETY: `bptr` is a valid pointer to a `Region`. Exclusivity is
                         // guaranteed because we hold the allocator lock, and although the region
                         // remains in `avail_regions_by_base` (its base address is unchanged), we
@@ -601,7 +617,7 @@ where
                         // SAFETY: Re-inserting the trimmed region pointer back into the available
                         // index is safe.
                         unsafe {
-                            fields.avail_regions_by_size.insert_raw(bptr);
+                            fields.avail_regions_by_size.as_mut().insert_raw(bptr);
                         }
                     }
                     region.base = before_end;
@@ -610,7 +626,7 @@ where
             }
         } // before_cursor dropped
 
-        let mut after_cursor = fields.avail_regions_by_base.upper_bound(&region.base);
+        let mut after_cursor = fields.avail_regions_by_base.as_mut().upper_bound_mut(&region.base);
         while after_cursor.get().is_some() {
             let after = after_cursor.get().unwrap();
             if after.base() >= region_end {
@@ -624,7 +640,7 @@ where
                 let trim_ptr = after_cursor.erase().unwrap();
                 // SAFETY: `trim_ptr` is a valid pointer.
                 let key = unsafe { trim_ptr.as_ref().key_size };
-                fields.avail_regions_by_size.erase(&key);
+                fields.avail_regions_by_size.as_mut().erase(&key);
 
                 // SAFETY: `trim_ptr` is a valid pointer to a `Region`. Exclusivity is guaranteed
                 // because we have erased the region from both the size and base available trees
@@ -638,8 +654,8 @@ where
                 // SAFETY: Re-inserting the trimmed region pointer back into the available indices
                 // is safe.
                 unsafe {
-                    fields.avail_regions_by_size.insert_raw(trim_ptr);
-                    fields.avail_regions_by_base.insert_raw(trim_ptr);
+                    fields.avail_regions_by_size.as_mut().insert_raw(trim_ptr);
+                    fields.avail_regions_by_base.as_mut().insert_raw(trim_ptr);
                 }
                 break;
             }
@@ -647,7 +663,7 @@ where
             let trim_ptr = after_cursor.erase().unwrap();
             // SAFETY: `trim_ptr` is a valid pointer.
             let key = unsafe { trim_ptr.as_ref().key_size };
-            fields.avail_regions_by_size.erase(&key);
+            fields.avail_regions_by_size.as_mut().erase(&key);
 
             region.base = after_end;
             region.size = region_end - region.base;
@@ -751,8 +767,8 @@ where
         region: RegionSpan,
         which: TestRegionSet,
     ) -> Result<bool, Status> {
-        lock!(let mut guard = self.lock_mu());
-        let fields = guard.as_mut().fields_mut();
+        lock!(let guard = self.lock_mu());
+        let fields = guard.fields();
         let tree = match which {
             TestRegionSet::Allocated => fields.allocated_regions_by_base,
             TestRegionSet::Available => fields.avail_regions_by_base,
@@ -765,8 +781,8 @@ where
         region: RegionSpan,
         which: TestRegionSet,
     ) -> Result<bool, Status> {
-        lock!(let mut guard = self.lock_mu());
-        let fields = guard.as_mut().fields_mut();
+        lock!(let guard = self.lock_mu());
+        let fields = guard.fields();
         let tree = match which {
             TestRegionSet::Allocated => fields.allocated_regions_by_base,
             TestRegionSet::Available => fields.avail_regions_by_base,
@@ -830,9 +846,9 @@ where
 
     // Private helpers
 
-    fn add_subtract_sanity_check_locked_mut(
+    fn add_subtract_sanity_check_locked(
         &self,
-        allocated_tree: &mut WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
+        allocated_tree: &WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
         region: &RegionSpan,
     ) -> Result<(), Status> {
         if self.intersects_locked(allocated_tree, region)? {
@@ -854,8 +870,14 @@ where
 
         // SAFETY: `region_ptr` is guaranteed to be a valid pointer in the allocated set.
         let region = unsafe { region_ptr.as_ref() };
-        let removed = fields.allocated_regions_by_base.erase(&region.base());
-        debug_assert!(removed.is_some());
+        assert!(region.node_base.in_container());
+        assert!(!region.node_size.in_container());
+        let removed = fields.allocated_regions_by_base.as_mut().erase(&region.base());
+        assert_eq!(
+            removed,
+            Some(region_ptr),
+            "Released region was not present in the allocator's allocated set",
+        );
 
         self.add_region_to_avail_locked(&mut fields, region_ptr, AllowOverlap::No);
     }
@@ -873,7 +895,8 @@ where
         let original_region_base = region_base;
 
         {
-            let mut before_cursor = fields.avail_regions_by_base.upper_bound(&region_base);
+            let mut before_cursor =
+                fields.avail_regions_by_base.as_mut().upper_bound_mut(&region_base);
             before_cursor.move_prev();
 
             if before_cursor.get().is_some() {
@@ -890,7 +913,7 @@ where
                     let removed_ptr = before_cursor.erase().unwrap();
                     // SAFETY: `removed_ptr` is a valid pointer to a `Region`.
                     let key = unsafe { removed_ptr.as_ref().key_size };
-                    fields.avail_regions_by_size.erase(&key);
+                    fields.avail_regions_by_size.as_mut().erase(&key);
                     // SAFETY: `removed_ptr` has been removed from all indices and is ready to be
                     // destroyed.
                     unsafe {
@@ -900,7 +923,8 @@ where
             }
         } // before_cursor dropped
 
-        let mut after_cursor = fields.avail_regions_by_base.upper_bound(&original_region_base);
+        let mut after_cursor =
+            fields.avail_regions_by_base.as_mut().upper_bound_mut(&original_region_base);
         while after_cursor.get().is_some() {
             let after = after_cursor.get().unwrap();
             let should_merge = match allow_overlap {
@@ -917,7 +941,7 @@ where
             let removed_ptr = after_cursor.erase().unwrap();
             // SAFETY: `removed_ptr` is a valid pointer to a `Region`.
             let key = unsafe { removed_ptr.as_ref().key_size };
-            fields.avail_regions_by_size.erase(&key);
+            fields.avail_regions_by_size.as_mut().erase(&key);
             // SAFETY: `removed_ptr` has been removed from all indices and is ready to be destroyed.
             unsafe {
                 Self::destroy_region_raw(fields.region_pool, removed_ptr);
@@ -940,8 +964,8 @@ where
 
         // SAFETY: Inserting a valid region pointer back into the available indices is safe.
         unsafe {
-            fields.avail_regions_by_base.insert_raw(region_ptr);
-            fields.avail_regions_by_size.insert_raw(region_ptr);
+            fields.avail_regions_by_base.as_mut().insert_raw(region_ptr);
+            fields.avail_regions_by_size.as_mut().insert_raw(region_ptr);
         }
     }
 
@@ -952,7 +976,7 @@ where
         base: u64,
         size: u64,
     ) -> Result<UniquePtr<Region<M>>, Status> {
-        let mut source_cursor = fields.avail_regions_by_size.find_cursor(&source_key);
+        let mut source_cursor = fields.avail_regions_by_size.as_mut().find_cursor_mut(&source_key);
         let source_ref = source_cursor.get().ok_or(Status::BAD_STATE)?;
         let source_base = source_ref.base();
         let source_size = source_ref.size();
@@ -967,11 +991,11 @@ where
             let region_ptr = source_cursor.erase().unwrap();
             // SAFETY: `region_ptr` is a valid pointer to a `Region`.
             let base = unsafe { region_ptr.as_ref().base() };
-            fields.avail_regions_by_base.erase(&base);
+            fields.avail_regions_by_base.as_mut().erase(&base);
             // SAFETY: Inserting `region_ptr` into the allocated tree is safe as it's been removed
             // from available trees.
             unsafe {
-                fields.allocated_regions_by_base.insert_raw(region_ptr);
+                fields.allocated_regions_by_base.as_mut().insert_raw(region_ptr);
             }
             // SAFETY: `region_ptr` is a valid, uniquely owned allocation, so wrapping it in
             // `UniquePtr` is safe.
@@ -980,7 +1004,7 @@ where
             let after_region_ptr = source_cursor.erase().unwrap();
             // SAFETY: `after_region_ptr` is a valid pointer to a `Region`.
             let after_base = unsafe { after_region_ptr.as_ref().base() };
-            fields.avail_regions_by_base.erase(&after_base);
+            fields.avail_regions_by_base.as_mut().erase(&after_base);
 
             // The allocator lock is held. We allocate a new region raw.
             let before_region_ptr =
@@ -1000,9 +1024,9 @@ where
             // SAFETY: Re-inserting `after_region_ptr` back into available indices and inserting
             // `before_region_ptr` into the allocated index is safe.
             unsafe {
-                fields.avail_regions_by_size.insert_raw(after_region_ptr);
-                fields.avail_regions_by_base.insert_raw(after_region_ptr);
-                fields.allocated_regions_by_base.insert_raw(before_region_ptr);
+                fields.avail_regions_by_size.as_mut().insert_raw(after_region_ptr);
+                fields.avail_regions_by_base.as_mut().insert_raw(after_region_ptr);
+                fields.allocated_regions_by_base.as_mut().insert_raw(before_region_ptr);
             }
             // SAFETY: `before_region_ptr` is a valid, uniquely owned allocation, so wrapping it in
             // `UniquePtr` is safe.
@@ -1028,8 +1052,8 @@ where
             // SAFETY: Re-inserting `before_region_ptr` back into available size index and inserting
             // `after_region_ptr` into the allocated index is safe.
             unsafe {
-                fields.avail_regions_by_size.insert_raw(before_region_ptr);
-                fields.allocated_regions_by_base.insert_raw(after_region_ptr);
+                fields.avail_regions_by_size.as_mut().insert_raw(before_region_ptr);
+                fields.allocated_regions_by_base.as_mut().insert_raw(after_region_ptr);
             }
             // SAFETY: `after_region_ptr` is a valid, uniquely owned allocation, so wrapping it in
             // `UniquePtr` is safe.
@@ -1068,10 +1092,10 @@ where
             // back into available indices, and inserting `region_ptr` into the allocated index is
             // safe.
             unsafe {
-                fields.avail_regions_by_size.insert_raw(before_region_ptr);
-                fields.avail_regions_by_size.insert_raw(after_region_ptr);
-                fields.avail_regions_by_base.insert_raw(after_region_ptr);
-                fields.allocated_regions_by_base.insert_raw(region_ptr);
+                fields.avail_regions_by_size.as_mut().insert_raw(before_region_ptr);
+                fields.avail_regions_by_size.as_mut().insert_raw(after_region_ptr);
+                fields.avail_regions_by_base.as_mut().insert_raw(after_region_ptr);
+                fields.allocated_regions_by_base.as_mut().insert_raw(region_ptr);
             }
             // SAFETY: `region_ptr` is a valid, uniquely owned allocation, so wrapping it in
             // `UniquePtr` is safe.
@@ -1081,7 +1105,7 @@ where
 
     fn intersects_locked(
         &self,
-        tree: &mut WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
+        tree: &WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
         region: &RegionSpan,
     ) -> Result<bool, Status> {
         region.validate()?;
@@ -1105,7 +1129,7 @@ where
 
     fn contained_by_locked(
         &self,
-        tree: &mut WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
+        tree: &WavlTree<u64, NonNull<Region<M>>, SortByBase, TrackingSize>,
         region: &RegionSpan,
     ) -> Result<bool, Status> {
         region.validate()?;
@@ -1183,22 +1207,33 @@ impl<M: RawLock> RegionAllocator<M> {
     }
 }
 
+/// Panicking inside an `extern "C"` function aborts without unwinding even on `panic = "unwind"`
+/// targets, preventing stack unwinding from running `RegionAllocator` field destructors or
+/// dropping surviving `UniquePtr<Region<M>>` handles against a destroyed allocator.
+#[cold]
+#[inline(never)]
+extern "C" fn abort_with_live_regions(live_count: usize) -> ! {
+    panic!("RegionAllocator destroyed with {} allocated regions still in flight", live_count);
+}
+
 #[pin_init::pinned_drop]
 impl<M: RawLock> pin_init::PinnedDrop for RegionAllocator<M> {
     fn drop(self: core::pin::Pin<&mut Self>) {
-        // SAFETY: We can obtain a mutable reference to the fields during drop because we are in
-        // the drop implementation, and no other references can exist.
-        let this = unsafe { self.get_unchecked_mut() };
-        let allocated_regions_by_base = this.allocated_regions_by_base.get_inner_mut();
-        let avail_regions_by_base = this.avail_regions_by_base.get_inner_mut();
-        let avail_regions_by_size = this.avail_regions_by_size.get_inner_mut();
+        // We are being dropped, so we have exclusive access to every field without taking `mu`.
+        // The trees are reached through pin projection and stay pinned.
+        let this = self.project();
+        let allocated_regions_by_base = this.allocated_regions_by_base.get_pinned_mut();
+        let mut avail_regions_by_base = this.avail_regions_by_base.get_pinned_mut();
+        let mut avail_regions_by_size = this.avail_regions_by_size.get_pinned_mut();
         let region_pool = this.region_pool.get_inner_mut();
 
-        debug_assert!(allocated_regions_by_base.is_empty());
+        if !allocated_regions_by_base.is_empty() {
+            abort_with_live_regions(allocated_regions_by_base.len());
+        }
         debug_assert_eq!(avail_regions_by_base.len(), avail_regions_by_size.len());
 
-        avail_regions_by_base.clear();
-        while let Some(region_ptr) = avail_regions_by_size.pop_front() {
+        avail_regions_by_base.as_mut().clear();
+        while let Some(region_ptr) = avail_regions_by_size.as_mut().pop_front() {
             // SAFETY: Popping the regions and destroying them is safe because the allocator itself
             // is being dropped, and no other references to these regions exist.
             unsafe {

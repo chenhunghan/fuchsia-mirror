@@ -290,9 +290,21 @@ TEST_F(DisplayManagerMockTest, SelectPreferredModeWithVariableRefreshRate) {
   display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
                                                    std::move(listener_server));
 
+  fidl::Arena arena;
+  std::vector<fuchsia_hardware_display_types::wire::VrrConfig> mode_vrr_configs = {
+      fuchsia_hardware_display_types::wire::VrrConfig::Builder(arena)
+          .vsync_period(8'489'396)
+          .min_frame_interval(8'489'396)
+          .Build(),
+      fuchsia_hardware_display_types::wire::VrrConfig{},
+  };
+
   const WireDisplayInfo kDisplayInfo = {
       .id = kDisplayId,
       .modes = fidl::VectorView<WireDisplayMode>::FromExternal(modes),
+      .mode_vrr_configs =
+          fidl::VectorView<fuchsia_hardware_display_types::wire::VrrConfig>::FromExternal(
+              mode_vrr_configs),
       .pixel_format =
           fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(&pixel_format, 1),
       .manufacturer_name = "manufacturer",
@@ -320,6 +332,100 @@ TEST_F(DisplayManagerMockTest, SelectPreferredModeWithVariableRefreshRate) {
             kPreferredMode.refresh_rate_millihertz);
   EXPECT_EQ(default_display->maximum_refresh_rate_in_millihertz(),
             kPreferredMode.refresh_rate_millihertz);
+  EXPECT_EQ(default_display->vsync_period(), zx::nsec(8'489'396));
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), zx::nsec(8'489'396));
+  ASSERT_TRUE(default_display->vrr_config().has_value());
+  EXPECT_EQ(default_display->vrr_config()->min_frame_interval(), 8'489'396);
+
+  // Simulate VRR self-refresh skipping VSync events (e.g. a 33ms 30fps cadence and a 500ms idle
+  // gap): `vsync_interval()` stays locked to the display's calibrated VSync period instead of
+  // drifting from timestamp deltas.
+  ASSERT_TRUE(mock_display_coordinator.listener()
+                  .sync()
+                  ->OnVsync(kDisplayId, zx::time_monotonic(10'000'000), {1u}, {0})
+                  .ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), zx::nsec(8'489'396));
+
+  ASSERT_TRUE(mock_display_coordinator.listener()
+                  .sync()
+                  ->OnVsync(kDisplayId, zx::time_monotonic(43'957'584), {1u}, {0})
+                  .ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), zx::nsec(8'489'396));
+
+  ASSERT_TRUE(mock_display_coordinator.listener()
+                  .sync()
+                  ->OnVsync(kDisplayId, zx::time_monotonic(543'957'584), {1u}, {0})
+                  .ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_EQ(default_display->vsync_timing()->last_vsync_time(), zx::time(543'957'584));
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), zx::nsec(8'489'396));
+}
+
+TEST_F(DisplayManagerMockTest, FixedRateDisplaySmoothsEmpiricalVsyncIntervals) {
+  static const display::WireDisplayId kDisplayId = {.value = 1};
+  static const WireDisplayMode kFixed60HzMode = {
+      .active_area = {.width = 1024, .height = 768},
+      .refresh_rate_millihertz = 60'000,
+  };
+  std::vector<WireDisplayMode> modes = {kFixed60HzMode};
+  auto pixel_format = fuchsia_images2::PixelFormat::kR8G8B8A8;
+
+  auto [coordinator_client, coordinator_server] =
+      fidl::Endpoints<fuchsia_hardware_display::Coordinator>::Create();
+  auto [listener_client, listener_server] =
+      fidl::Endpoints<fuchsia_hardware_display::CoordinatorListener>::Create();
+  display_manager()->BindDefaultDisplayCoordinator(dispatcher(), std::move(coordinator_client),
+                                                   std::move(listener_server));
+
+  const WireDisplayInfo kDisplayInfo = {
+      .id = kDisplayId,
+      .modes = fidl::VectorView<WireDisplayMode>::FromExternal(modes),
+      .pixel_format =
+          fidl::VectorView<fuchsia_images2::wire::PixelFormat>::FromExternal(&pixel_format, 1),
+      .manufacturer_name = "manufacturer",
+      .monitor_name = "model",
+      .monitor_serial = "0001",
+      .horizontal_size_mm = 120,
+      .vertical_size_mm = 100,
+      .using_fallback_size = false,
+  };
+
+  MockDisplayCoordinator mock_display_coordinator(kDisplayInfo);
+  mock_display_coordinator.Bind(std::move(coordinator_server), std::move(listener_client));
+  mock_display_coordinator.SendOnDisplayChangedRequest();
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  const Display* default_display = display_manager()->default_display();
+  ASSERT_NE(default_display, nullptr);
+  EXPECT_FALSE(default_display->vrr_config().has_value());
+  // Seeded from the mode's nominal 60Hz period before any VSync arrives.
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), zx::nsec(16'666'666));
+
+  // First VSync establishes `last_vsync_time` without treating `timestamp - 0` as an interval.
+  zx::time_monotonic t(10'000'000);
+  ASSERT_TRUE(mock_display_coordinator.listener().sync()->OnVsync(kDisplayId, t, {1u}, {0}).ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), zx::nsec(16'666'666));
+
+  // Simulate an uncalibrated fixed-rate or emulator display whose runtime VSync ticks at 16.98ms
+  // with a single +3ms / -3ms IRQ jitter pair.
+  constexpr zx::duration kEmpiricalPeriod = zx::nsec(16'980'000);
+  for (int i = 0; i < 3; ++i) {
+    t += kEmpiricalPeriod;
+    ASSERT_TRUE(mock_display_coordinator.listener().sync()->OnVsync(kDisplayId, t, {1u}, {0}).ok());
+    EXPECT_TRUE(RunLoopUntilIdle());
+  }
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), kEmpiricalPeriod);
+
+  t += kEmpiricalPeriod + zx::msec(3);
+  ASSERT_TRUE(mock_display_coordinator.listener().sync()->OnVsync(kDisplayId, t, {1u}, {0}).ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  t += kEmpiricalPeriod - zx::msec(3);
+  ASSERT_TRUE(mock_display_coordinator.listener().sync()->OnVsync(kDisplayId, t, {1u}, {0}).ok());
+  EXPECT_TRUE(RunLoopUntilIdle());
+  EXPECT_EQ(default_display->vsync_timing()->vsync_interval(), kEmpiricalPeriod);
 }
 
 TEST(DisplayManager, ICanHazDisplayMode) {

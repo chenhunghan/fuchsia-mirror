@@ -81,7 +81,7 @@ rust_library(
     }),
     version = "0.14.0",
     deps = [
-        "//third_party/rust_crates/vendor/elliptic-curve-0.14.1:elliptic_curve",
+        "//third_party/rust_crates/vendor/elliptic-curve-0.14.3:elliptic_curve",
         "//third_party/rust_crates/vendor/primefield-0.14.0:primefield",
         "//third_party/rust_crates/vendor/serdect-0.4.3:serdect",
         "//third_party/rust_crates/vendor/wnaf-0.14.1:wnaf",

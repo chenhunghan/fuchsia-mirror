@@ -51,7 +51,18 @@ load("//build/testing/environments:device_types.bzl", "device_types")
 load(":fx_bootfs_files_package_test.bzl", "verify_bootfs_files_package")
 load(":fx_test_validation_tests.bzl", "fx_test_validation_tests")
 load(":gn_visibility_test.bzl", "gn_visibility_test")
-load(":rules.bzl", "verify_names_in_fx_package")
+load(
+    ":package_validation_tests.bzl",
+    "expect_elf_failure_inputs_test",
+    "expect_package_validation_failure",
+    "package_validations_test",
+)
+load(
+    ":rules.bzl",
+    "verify_fx_test_subpackage_files",
+    "verify_names_in_fx_package",
+    "verify_target_compatible_with",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -337,11 +348,23 @@ fx_component(
 )
 
 fx_package(
+    name = "example_leaf_subpackage",
+    package_name = "fx-leaf-subpackage-example",
+    testonly = True,
+    components = [
+        ":example_subpackage_component",
+    ],
+)
+
+fx_package(
     name = "example_subpackage",
     package_name = "fx-subpackage-example",
     testonly = True,
     components = [
-        ":example_subpackage_component",
+        ":example_helper_component",
+    ],
+    subpackages = [
+        ":example_leaf_subpackage",
     ],
 )
 
@@ -368,6 +391,17 @@ verify_fx_test_unstripped_binaries(
         "example_second_test_bin",
         "example_test_bin",
         "libfdio.so",
+    ],
+    test = ":example_test_with_subpackage",
+)
+
+verify_fx_test_subpackage_files(
+    name = "verify_example_test_with_subpackage_files",
+    testonly = True,
+    package = ":example_test_package_with_subpackage",
+    subpackages = [
+        ":example_subpackage",
+        ":example_leaf_subpackage",
     ],
     test = ":example_test_with_subpackage",
 )
@@ -435,6 +469,136 @@ fx_test_validation_tests(
     package = ":example_test_package",
 )
 
+# Tests the build-time validations of `fx_package()`, which match those of
+# GN's `fuchsia_package()`. Each invalid package below opts out of the
+# validation that it fails, so building it tests the opt-out, and an
+# `expect_package_validation_failure()` runs that validation on it directly to
+# check that it fails. Every other package in this file passes both
+# validations.
+
+package_validations_test(
+    name = "verify_example_test_package_validations",
+    expect_elf_binaries = True,
+    expect_structured_config = True,
+    target_under_test = ":example_test_package",
+)
+
+filegroup(
+    name = "example_missing_libs_bin_file",
+    testonly = True,
+    srcs = [":example_test_bin"],
+    tags = ["manual"],
+)
+
+# Unlike `fx_packaged_binary()`, `resource()` neither strips the binary nor
+# adds the shared libraries that it needs to the package.
+resource(
+    name = "example_missing_libs_bin_resource",
+    testonly = True,
+    src = ":example_missing_libs_bin_file",
+    dest = "test/example_missing_libs_bin",
+    tags = ["manual"],
+)
+
+fx_package(
+    name = "example_missing_libs_package",
+    testonly = True,
+    resources = [":example_missing_libs_bin_resource"],
+    tags = ["manual"],
+    validate_elf_binaries = False,
+)
+
+package_validations_test(
+    name = "verify_example_missing_libs_package_validations",
+    expect_elf_binaries = False,
+    expect_structured_config = True,
+    target_under_test = ":example_missing_libs_package",
+)
+
+expect_package_validation_failure(
+    name = "example_missing_libs_package_missing_dependency",
+    testonly = True,
+    expected_message = "test/example_missing_libs_bin missing dependency lib/",
+    package = ":example_missing_libs_package",
+    validation = "elf_binaries",
+)
+
+expect_package_validation_failure(
+    name = "example_missing_libs_package_no_debug_file",
+    testonly = True,
+    expected_message = "No debug file with build-id",
+    package = ":example_missing_libs_package",
+    validation = "elf_binaries",
+)
+
+fx_component_manifest(
+    name = "example_missing_config_values_manifest",
+    component_name = "example_missing_config_values",
+    manifest = "meta/example_missing_config_values.cml",
+    tags = ["manual"],
+)
+
+fx_component(
+    name = "example_missing_config_values_component",
+    compiled_manifest = ":example_missing_config_values_manifest",
+    tags = ["manual"],
+)
+
+fx_package(
+    name = "example_missing_config_values_package",
+    components = [":example_missing_config_values_component"],
+    tags = ["manual"],
+    validate_structured_config = False,
+)
+
+package_validations_test(
+    name = "verify_example_missing_config_values_package_validations",
+    expect_elf_binaries = True,
+    expect_structured_config = False,
+    target_under_test = ":example_missing_config_values_package",
+)
+
+expect_package_validation_failure(
+    name = "example_missing_config_values_package_invalid_config",
+    expected_message = "meta/example_missing_config_values.cm: Validating structured configuration",
+    package = ":example_missing_config_values_package",
+    validation = "structured_config",
+)
+
+# Analyzed (not executed, hence `manual`) by the test below to verify that
+# `expect_package_validation_failure()` forwards `prebuilt_unstripped_files`
+# (such as sysroot `ld.so.1`) when `package` contains `fx_packaged_binary()`.
+expect_package_validation_failure(
+    name = "example_test_package_elf_failure_check",
+    testonly = True,
+    expected_message = "unused",
+    package = ":example_test_package",
+    tags = ["manual"],
+    validation = "elf_binaries",
+)
+
+expect_elf_failure_inputs_test(
+    name = "verify_expect_failure_forwards_prebuilt_unstripped_files",
+    package = ":example_test_package",
+    target_under_test = ":example_test_package_elf_failure_check",
+)
+
+filegroup(
+    name = "package_validation_tests",
+    testonly = True,
+    srcs = [
+        ":example_missing_config_values_package",
+        ":example_missing_config_values_package_invalid_config",
+        ":example_missing_libs_package",
+        ":example_missing_libs_package_missing_dependency",
+        ":example_missing_libs_package_no_debug_file",
+        ":verify_example_missing_config_values_package_validations",
+        ":verify_example_missing_libs_package_validations",
+        ":verify_example_test_package_validations",
+        ":verify_expect_failure_forwards_prebuilt_unstripped_files",
+    ],
+)
+
 filegroup(
     name = "build_only_tests",
     testonly = True,
@@ -446,6 +610,7 @@ filegroup(
         ":example_test_with_internet_environment",
         ":example_test_with_selected_environments",
         ":fx_test_validation_tests",
+        ":package_validation_tests",
         ":verify_example_build_only_test",
         ":verify_example_test_default_environments",
         ":verify_example_test_with_custom_environments",
@@ -476,8 +641,13 @@ filegroup(
         ":example_expect_includes_package",
         ":example_expect_includes_unittest_package",
         ":example_gtest_unittest_package",
+        ":example_missing_required_package_component_failure_test",
+        ":example_missing_required_package_component_test_failure_test",
         ":example_multi_component_test",
         ":example_multi_unittest_package",
+        ":example_required_package_component_alias_package",
+        ":example_required_package_component_in_subpackage_failure_test",
+        ":example_required_package_component_package",
         ":example_resource_bin_dir_failure_test",
         ":example_resource_cc_binary_failure_test",
         ":example_resource_from_filegroup",
@@ -487,7 +657,10 @@ filegroup(
         ":example_rust_dylib_unittest_package",
         ":example_rust_shared_lib_dep_unittest_package",
         ":example_rust_unittest_package",
+        ":example_shared_name_package_a",
+        ":example_shared_name_package_b",
         ":example_test",
+        ":example_test_package_with_subpackage",
         ":example_test_with_subpackage",
         ":example_test_with_test_type",
         ":example_unenforced_omitted_package",
@@ -499,12 +672,15 @@ filegroup(
         ":example_zxtest_unittest_package",
         ":gn_visibility_pattern_matches_test",
         ":verify_example_bootfs_files_package_full",
+        ":verify_example_bootfs_files_package_full_target_compatible_with",
         ":verify_example_bootfs_files_package_resources_only",
+        ":verify_example_bootfs_files_package_unconstrained_target_compatible_with",
         ":verify_example_cc_test_unittest_package_unstripped_binaries",
         ":verify_example_cc_test_unstripped_binaries",
         ":verify_example_compiled_manifest_paths",
         ":verify_example_custom_names_package",
         ":verify_example_default_name_package",
+        ":verify_example_default_name_package_target_compatible_with",
         ":verify_example_default_name_test_package",
         ":verify_example_disabled_extra_linker_flags_unstripped_binaries",
         ":verify_example_extra_linker_flags_shared_lib_unstripped_binaries",
@@ -516,10 +692,15 @@ filegroup(
         ":verify_example_rust_runner_shard",
         ":verify_example_rust_shared_lib_dep_unittest_package_unstripped_binaries",
         ":verify_example_rust_unittest_package_unstripped_binaries",
+        ":verify_example_select_compatible_package_target_compatible_with",
+        ":verify_example_shared_name_package_a",
+        ":verify_example_shared_name_package_b",
         ":verify_example_test_default_realm",
         ":verify_example_test_unstripped_binaries",
+        ":verify_example_test_with_subpackage_files",
         ":verify_example_test_with_subpackage_unstripped_binaries",
         ":verify_example_test_with_test_type",
+        ":verify_example_unconstrained_package_target_compatible_with",
         ":verify_example_unittest_package_default_name_realms",
         ":verify_example_unittest_package_realms",
         ":verify_example_unittest_package_with_packaged_binary_resource_unstripped_binaries",
@@ -857,6 +1038,129 @@ fx_package(
     package_name = "fx-expect-includes-package-example",
     testonly = True,
     components = [":example_expect_includes_component"],
+)
+
+# `expect_includes(required_package_components = ...)`: every package that
+# contains a component depending on this target must also contain
+# `:example_helper_component`, like the Realm Builder server for
+# `//src/lib/fuchsia-component-test`.
+expect_includes(
+    name = "example_requires_helper_includes",
+    enforce = False,
+    includes = ["meta/example_unenforced.shard.cml"],
+    required_package_components = [
+        "//build/bazel/rules/packages/tests:example_helper_component",
+    ],
+)
+
+fx_cc_binary(
+    name = "example_requires_helper_bin",
+    testonly = True,
+    srcs = ["example_test.cc"],
+    aspect_hints = [":example_requires_helper_includes"],
+    tags = ["manual"],
+)
+
+fx_packaged_binary(
+    name = "example_requires_helper_packaged_bin",
+    testonly = True,
+    binary = ":example_requires_helper_bin",
+    binary_name = "example_requires_helper",
+)
+
+fx_component_manifest(
+    name = "example_requires_helper_manifest",
+    testonly = True,
+    component_name = "example_requires_helper",
+    manifest = "meta/example_helper.cml",
+)
+
+fx_component(
+    name = "example_requires_helper_component",
+    testonly = True,
+    compiled_manifest = ":example_requires_helper_manifest",
+    deps = [":example_requires_helper_packaged_bin"],
+)
+
+alias(
+    name = "example_helper_component_alias",
+    actual = ":example_helper_component",
+)
+
+# Tests that a package containing the required component passes analysis, also
+# when the required component is listed through an `alias()`.
+fx_package(
+    name = "example_required_package_component_package",
+    testonly = True,
+    components = [
+        ":example_helper_component",
+        ":example_requires_helper_component",
+    ],
+)
+
+fx_package(
+    name = "example_required_package_component_alias_package",
+    testonly = True,
+    components = [
+        ":example_helper_component_alias",
+        ":example_requires_helper_component",
+    ],
+)
+
+# Tests that a package missing the required component fails analysis.
+fx_package(
+    name = "example_missing_required_package_component_package",
+    testonly = True,
+    components = [":example_requires_helper_component"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_missing_required_package_component_failure_test",
+    expected_message = "//build/bazel/rules/packages/tests:example_helper_component (required by //build/bazel/rules/packages/tests:example_requires_helper_component)",
+    target_under_test = ":example_missing_required_package_component_package",
+)
+
+# Tests that the required component in a subpackage does not satisfy the
+# requirement, because the requiring manifest refers to it by a relative URL.
+fx_package(
+    name = "example_required_package_component_subpackage",
+    testonly = True,
+    components = [":example_helper_component"],
+    tags = ["manual"],
+)
+
+fx_package(
+    name = "example_required_package_component_in_subpackage_package",
+    testonly = True,
+    components = [":example_requires_helper_component"],
+    subpackages = [":example_required_package_component_subpackage"],
+    tags = ["manual"],
+)
+
+analysis_failure_test(
+    name = "example_required_package_component_in_subpackage_failure_test",
+    expected_message = "is missing components required by its components",
+    target_under_test = ":example_required_package_component_in_subpackage_package",
+)
+
+# Tests that requirements also apply to `test_components`.
+fx_test_component(
+    name = "example_requires_helper_test_component",
+    compiled_manifest = ":example_requires_helper_manifest",
+    deps = [":example_requires_helper_packaged_bin"],
+)
+
+fx_package(
+    name = "example_missing_required_package_component_test_package",
+    tags = ["manual"],
+    test_components = [":example_requires_helper_test_component"],
+)
+
+analysis_failure_test(
+    name = "example_missing_required_package_component_test_failure_test",
+    expected_message = "(required by //build/bazel/rules/packages/tests:example_requires_helper_test_component)",
+    target_under_test = ":example_missing_required_package_component_test_package",
 )
 
 # Tests that an unenforced `expect_includes(enforce = False)` shard does not
@@ -1459,6 +1763,44 @@ verify_names_in_fx_package(
     package = ":example_custom_names_package",
 )
 
+# Tests that two `fx_package()` targets in the same directory can share
+# `package_name` without colliding on `.far` archive outputs.
+fx_package(
+    name = "example_shared_name_package_a",
+    package_name = "example_shared_package_name",
+    testonly = True,
+    components = [":example_default_name_component"],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+fx_package(
+    name = "example_shared_name_package_b",
+    package_name = "example_shared_package_name",
+    testonly = True,
+    components = [":example_helper_component"],
+    visibility = ["//build/bazel/rules/tests:__pkg__"],
+)
+
+verify_names_in_fx_package(
+    name = "verify_example_shared_name_package_a",
+    testonly = True,
+    expected_component_names = ["example_helper"],
+    expected_far_name = "example_shared_package_name.far",
+    expected_far_short_path = "build/bazel/rules/packages/tests/example_shared_name_package_a_pkg/example_shared_package_name.far",
+    expected_package_name = "example_shared_package_name",
+    package = ":example_shared_name_package_a",
+)
+
+verify_names_in_fx_package(
+    name = "verify_example_shared_name_package_b",
+    testonly = True,
+    expected_component_names = ["example_helper"],
+    expected_far_name = "example_shared_package_name.far",
+    expected_far_short_path = "build/bazel/rules/packages/tests/example_shared_name_package_b_pkg/example_shared_package_name.far",
+    expected_package_name = "example_shared_package_name",
+    package = ":example_shared_name_package_b",
+)
+
 # Tests `fx_bootfs_files_package()` with resources only (including rebasing
 # `meta/...` resources to `bootfs/meta/...` and not injecting runtime shared
 # libraries when no binaries are packaged).
@@ -1575,4 +1917,55 @@ analysis_failure_test(
     name = "example_bootfs_files_package_test_component_failure_test",
     expected_message = "Please use `test_components` for test components.",
     target_under_test = ":example_bootfs_files_package_test_component",
+)
+
+# Verify `fx_package()` defaults `target_compatible_with` to Fuchsia unless
+# overridden by `[]` or a `select()`.
+verify_target_compatible_with(
+    name = "verify_example_default_name_package_target_compatible_with",
+    expected = ["@platforms//os:fuchsia"],
+    target = ":example_default_name_package",
+)
+
+fx_package(
+    name = "example_unconstrained_package",
+    resources = [":example_bootfs_config_resource"],
+    target_compatible_with = [],
+)
+
+verify_target_compatible_with(
+    name = "verify_example_unconstrained_package_target_compatible_with",
+    expected = [],
+    target = ":example_unconstrained_package",
+)
+
+fx_package(
+    name = "example_select_compatible_package",
+    resources = [":example_bootfs_config_resource"],
+    target_compatible_with = select({"//conditions:default": []}),
+)
+
+verify_target_compatible_with(
+    name = "verify_example_select_compatible_package_target_compatible_with",
+    expected = [],
+    target = ":example_select_compatible_package",
+)
+
+verify_target_compatible_with(
+    name = "verify_example_bootfs_files_package_full_target_compatible_with",
+    testonly = True,
+    expected = ["@platforms//os:fuchsia"],
+    target = ":example_bootfs_files_package_full",
+)
+
+fx_bootfs_files_package(
+    name = "example_bootfs_files_package_unconstrained",
+    resources = [":example_bootfs_config_resource"],
+    target_compatible_with = [],
+)
+
+verify_target_compatible_with(
+    name = "verify_example_bootfs_files_package_unconstrained_target_compatible_with",
+    expected = [],
+    target = ":example_bootfs_files_package_unconstrained",
 )

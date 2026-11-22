@@ -66,7 +66,8 @@ template("_cuckoo_product_bundle") {
       "//src/sys/early_boot_instrumentation/test:early-boot-collector-stub",
     ]
     test_specs = {
-      if (defined(invoker.disabled) && invoker.disabled) {
+      if ((defined(invoker.disabled) && invoker.disabled) ||
+          (defined(invoker.build_only) && invoker.build_only)) {
         # A disabled test is still built.
         build_only = true
       } else {
@@ -250,6 +251,7 @@ template("kernel_zbi_test") {
         _cuckoo_product_bundle(cuckoo_target_name) {
           forward_variables_from(invoker,
                                  [
+                                   "build_only",
                                    "disabled",
                                    "environments",
                                    "timeout",

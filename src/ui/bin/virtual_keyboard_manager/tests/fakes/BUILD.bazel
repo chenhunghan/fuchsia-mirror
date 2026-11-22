@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "fakes",
+    testonly = True,
+    srcs = [
+        "fake_keyboard_focus_controller.cc",
+    ],
+    hdrs = [
+        "fake_keyboard_focus_controller.h",
+    ],
+    implementation_deps = [
+        "//src/lib/fsl",
+    ],
+    # Fuchsia-only: uses Zircon types (zx_koid_t), HLCPP FIDL, and //sdk/lib/sys/cpp/testing:cpp.
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/ui/bin/virtual_keyboard_manager/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_hlcpp",
+        "//sdk/lib/sys/cpp/testing:cpp",
+    ],
+    alwayslink = True,
+)

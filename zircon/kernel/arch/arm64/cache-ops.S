@@ -7,8 +7,6 @@
 
 
 #include <asm.h>
-#include <arch/ops.h>
-#include <arch/defines.h>
 
 .text
 

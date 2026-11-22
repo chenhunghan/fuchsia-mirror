@@ -362,6 +362,20 @@ def capture_hardware_profile(
         pass
 
 
+def get_current_user() -> str:
+    """Returns the current user name, or "" if it cannot be determined.
+
+    In sandboxed CI containers (such as Swarming bots running under synthetic UIDs),
+    the current UID may not exist in /etc/passwd. If LOGNAME/USER/LNAME/USERNAME
+    are also unset, getpass.getuser() raises (KeyError before Python 3.13,
+    OSError since).
+    """
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return ""
+
+
 def main() -> None:
     """Core command-line execution entry point for the utility."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -383,10 +397,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    try:
-        username = getpass.getuser()
-    except KeyError:
-        username = ""
+    username = get_current_user()
 
     capture_hardware_profile(
         args.output,

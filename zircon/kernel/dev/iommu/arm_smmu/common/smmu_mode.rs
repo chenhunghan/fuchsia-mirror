@@ -270,6 +270,22 @@ pub fn validate_smmu_mode_string(mode_string: &str) -> bool {
     validate_smmu_mode_bytes(mode_string.as_bytes())
 }
 
+/// Checks the `"kernel.arm-smmu-mode"` boot option configured in [`boot_options::BootOptions`]
+/// and logs a warning if it contains any parse errors.
+///
+/// The SMMU drivers tolerate parse errors by falling back to default operational modes, so this
+/// function is diagnostic only.
+pub fn warn_on_invalid_boot_options() {
+    let mode_bytes = &boot_options::BootOptions::get().arm_smmu_mode;
+    if !validate_smmu_mode_bytes(mode_bytes) {
+        debug::dprintf!(
+            INFO,
+            "WARNING - Parse errors present in kernel.arm-smmu-mode string \"{}\"\n",
+            super::EscapedName::new(mode_bytes)
+        );
+    }
+}
+
 /// Returns `true` if the NUL-terminated C string `mode_string` is a syntactically valid
 /// `"kernel.arm-smmu-mode"` specification.
 ///

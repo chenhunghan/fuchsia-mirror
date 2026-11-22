@@ -99,7 +99,6 @@ fuchsia_cc_driver("v1_test") {
 
 fuchsia_driver_component("compat_v1_test") {
   deps = [ ":v1_test" ]
-  info = "meta/compat_v1_test-info.json"
   manifest = "meta/compat_v1_test.cml"
 }
 
@@ -122,7 +121,6 @@ fuchsia_cc_driver("v1_create_test") {
 
 fuchsia_driver_component("compat_v1_create_test") {
   deps = [ ":v1_create_test" ]
-  info = "meta/compat_v1_create_test-info.json"
   manifest = "meta/compat_v1_create_test.cml"
 }
 
@@ -138,7 +136,6 @@ fuchsia_cc_driver("v1_missing_test") {
 
 fuchsia_driver_component("compat_v1_missing_test") {
   deps = [ ":v1_missing_test" ]
-  info = "meta/compat_v1_missing_test-info.json"
   manifest = "meta/compat_v1_missing_test.cml"
 }
 
@@ -157,7 +154,6 @@ fuchsia_cc_driver("v1_device_add_null_test") {
 
 fuchsia_driver_component("compat_v1_device_add_null_test") {
   deps = [ ":v1_device_add_null_test" ]
-  info = "meta/compat_v1_device_add_null-info.json"
   manifest = "meta/compat_v1_device_add_null_test.cml"
 }
 

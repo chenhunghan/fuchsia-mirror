@@ -477,12 +477,13 @@ PyObject *handle_create(PyObject *self, PyObject *args) {
 PyObject *context_create(PyObject *self, PyObject *args) {
   const char *config_json = nullptr;
   const char *isolate = nullptr;
-  if (!PyArg_ParseTuple(args, "zs", &config_json, &isolate)) {
+  int strict = 0;
+  if (!PyArg_ParseTuple(args, "zzp", &config_json, &isolate, &strict)) {
     return nullptr;
   }
   ffx_env_context_t *env_context;
-  fc_status_t status =
-      create_ffx_env_context(&env_context, mod::get_module_state()->ctx, config_json, isolate);
+  fc_status_t status = create_ffx_env_context(&env_context, mod::get_module_state()->ctx,
+                                              config_json, isolate, strict != 0);
   if (status != FC_OK) {
     mod::set_python_exception(status);
     return nullptr;

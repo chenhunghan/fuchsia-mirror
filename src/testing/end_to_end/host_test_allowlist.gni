@@ -4,10 +4,13 @@
 
 # Used by Honeydew's Fuchsia Controller WLAN affordance
 wlan_fidls_allowlist = [
+  "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework",
+  "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token",
   "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf",
   "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter",
   "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers",
   "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin",
+  "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources",
   "//sdk/fidl/fuchsia.net.root:fuchsia.net.root",
   "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin",
   "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker",
@@ -24,6 +27,12 @@ battery_fidls_allowlist = [
   "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker",
 ]
 
+# Used by Honeydew's Fuchsia Controller Thread affordance
+thread_fidls_allowlist = [
+  "//sdk/fidl/fuchsia.factory.lowpan:fuchsia.factory.lowpan",
+  "//sdk/fidl/fuchsia.lowpan.experimental:fuchsia.lowpan.experimental",
+]
+
 # These are FIDL libraries that are temporarily allowed to be depended on by the
 # Lacewing framework (and tests that are SDK-bound). Ideally, we'll be able to
 # remove this list altogether when Honeydew is only using SDK-supported FIDL
@@ -34,8 +43,9 @@ battery_fidls_allowlist = [
 #
 # TODO(https://fxbug.dev/326090508): Stabilize and/or add these to the SDK or
 # remove usage.
-host_test_fidl_allowlist = [
-                             # Used by Fuchsia Controller
-                             "//src/developer/ffx/fidl:fuchsia.developer.ffx",
-                             "//src/testing/sl4f/fidl:fuchsia.test.audio",
-                           ] + wlan_fidls_allowlist + battery_fidls_allowlist
+host_test_fidl_allowlist =
+    [
+      # Used by Fuchsia Controller
+      "//src/developer/ffx/fidl:fuchsia.developer.ffx",
+      "//src/testing/sl4f/fidl:fuchsia.test.audio",
+    ] + wlan_fidls_allowlist + battery_fidls_allowlist + thread_fidls_allowlist

@@ -38,7 +38,7 @@ _Socialization:_ The design was discussed in a chat thread, as part of the
 solution to a problem that the Connectivity team were facing with the netemul
 tests.
 
-## Design
+## Design {:#design}
 
 This proposal consists of the following changes to the Zircon syscall interface:
 

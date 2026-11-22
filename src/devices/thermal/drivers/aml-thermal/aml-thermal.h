@@ -6,7 +6,6 @@
 #define SRC_DEVICES_THERMAL_DRIVERS_AML_THERMAL_AML_THERMAL_H_
 
 #include <fidl/fuchsia.hardware.thermal/cpp/fidl.h>
-#include <fuchsia/hardware/thermal/cpp/banjo.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/ddk/device.h>
@@ -26,7 +25,7 @@ class AmlThermal;
 using DeviceType =
     ddk::Device<AmlThermal, ddk::Messageable<fuchsia_hardware_thermal::Device>::Mixin>;
 
-class AmlThermal : public DeviceType, public ddk::ThermalProtocol<AmlThermal, ddk::base_protocol> {
+class AmlThermal : public DeviceType {
  public:
   DISALLOW_COPY_AND_ASSIGN_ALLOW_MOVE(AmlThermal);
   AmlThermal(zx_device_t* device, std::unique_ptr<thermal::AmlTSensor> tsensor,
@@ -41,9 +40,6 @@ class AmlThermal : public DeviceType, public ddk::ThermalProtocol<AmlThermal, dd
 
   // Ddk Hooks
   void DdkRelease();
-
-  // Implements ZX_PROTOCOL_THERMAL
-  zx_status_t ThermalConnect(zx::channel ch);
 
  private:
   void GetTemperatureCelsius(GetTemperatureCelsiusCompleter::Sync& completer) override;

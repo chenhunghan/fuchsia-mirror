@@ -296,9 +296,11 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
             FullmacDriverEvent::OnScanEnd { end } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::OnScanEnd { end });
             }
-            FullmacDriverEvent::OnScheduledScanMatchesAvailable { txn_id } => {
-                self.mlme_event_sink
-                    .send(fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable { txn_id });
+            FullmacDriverEvent::OnScheduledScanMatchesAvailable { txn_id, wake_lease } => {
+                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable {
+                    txn_id,
+                    wake_lease,
+                });
             }
             FullmacDriverEvent::OnScheduledScanStoppedByFirmware { txn_id } => {
                 self.mlme_event_sink
@@ -326,13 +328,13 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
                 }
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::RoamConf { conf });
             }
-            FullmacDriverEvent::RoamStartInd { ind } => {
+            FullmacDriverEvent::RoamStartInd { ind, wake_lease } => {
                 if *mac_role == fidl_common::WlanMacRole::Client {
                     self.set_link_state(fidl_mlme::ControlledPortState::Closed)?;
                 }
-                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::RoamStartInd { ind });
+                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::RoamStartInd { ind, wake_lease });
             }
-            FullmacDriverEvent::RoamResultInd { ind } => {
+            FullmacDriverEvent::RoamResultInd { ind, wake_lease } => {
                 if *mac_role == fidl_common::WlanMacRole::Client {
                     // Like for connect, SME will open the controlled port for a protected BSS.
                     if !self.is_bss_protected
@@ -341,7 +343,7 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
                         self.set_link_state(fidl_mlme::ControlledPortState::Open)?;
                     }
                 }
-                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::RoamResultInd { ind });
+                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::RoamResultInd { ind, wake_lease });
             }
             FullmacDriverEvent::AuthInd { ind } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::AuthenticateInd { ind });
@@ -352,11 +354,12 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
                 }
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::DeauthenticateConf { resp });
             }
-            FullmacDriverEvent::DeauthInd { ind } => {
+            FullmacDriverEvent::DeauthInd { ind, wake_lease } => {
                 if *mac_role == fidl_common::WlanMacRole::Client {
                     self.set_link_state(fidl_mlme::ControlledPortState::Closed)?;
                 }
-                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::DeauthenticateInd { ind });
+                self.mlme_event_sink
+                    .send(fidl_mlme::MlmeEvent::DeauthenticateInd { ind, wake_lease });
             }
             FullmacDriverEvent::AssocInd { ind } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::AssociateInd { ind });
@@ -367,11 +370,12 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
                 }
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::DisassociateConf { resp });
             }
-            FullmacDriverEvent::DisassocInd { ind } => {
+            FullmacDriverEvent::DisassocInd { ind, wake_lease } => {
                 if *mac_role == fidl_common::WlanMacRole::Client {
                     self.set_link_state(fidl_mlme::ControlledPortState::Closed)?;
                 }
-                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::DisassociateInd { ind });
+                self.mlme_event_sink
+                    .send(fidl_mlme::MlmeEvent::DisassociateInd { ind, wake_lease });
             }
             FullmacDriverEvent::StartConf { resp } => {
                 if resp.result_code == fidl_mlme::StartResultCode::Success {
@@ -391,15 +395,20 @@ impl<D: DeviceOps> MlmeMainLoop<D> {
             FullmacDriverEvent::OnChannelSwitch { resp } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::OnChannelSwitched { info: resp });
             }
+            FullmacDriverEvent::OnMichaelMicFailure { ind } => {
+                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::OnMichaelMicFailure { ind });
+            }
             FullmacDriverEvent::SignalReport { ind } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::SignalReport { ind });
             }
-            FullmacDriverEvent::OnRssiThresholdBreached { cur_rssi_dbm } => {
-                self.mlme_event_sink
-                    .send(fidl_mlme::MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm });
+            FullmacDriverEvent::OnRssiThresholdBreached { cur_rssi_dbm, wake_lease } => {
+                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::OnRssiThresholdBreached {
+                    cur_rssi_dbm,
+                    wake_lease,
+                });
             }
-            FullmacDriverEvent::EapolInd { ind } => {
-                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::EapolInd { ind });
+            FullmacDriverEvent::EapolInd { ind, wake_lease } => {
+                self.mlme_event_sink.send(fidl_mlme::MlmeEvent::EapolInd { ind, wake_lease });
             }
             FullmacDriverEvent::OnPmkAvailable { info } => {
                 self.mlme_event_sink.send(fidl_mlme::MlmeEvent::OnPmkAvailable { info });
@@ -623,6 +632,10 @@ mod handle_mlme_request_tests {
         let mut h = TestHelper::set_up();
         let fidl_req = wlan_sme::MlmeRequest::Reconnect(fidl_mlme::ReconnectRequest {
             peer_sta_address: [1u8; 6],
+            owe_public_key: Some(Box::new(fidl_internal::OwePublicKey {
+                group: 19,
+                key: vec![2u8, 3, 4],
+            })),
         });
 
         h.mlme.handle_mlme_request(fidl_req).unwrap();
@@ -633,6 +646,11 @@ mod handle_mlme_request_tests {
             driver_req,
             fidl_fullmac::WlanFullmacImplReconnectRequest {
                 peer_sta_address: Some([1u8; 6]),
+                owe_public_key: Some(fidl_fullmac::WlanFullmacOwePublicKey {
+                    group: Some(19),
+                    key: Some(vec![2u8, 3, 4]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }
         );
@@ -1448,6 +1466,30 @@ mod handle_driver_event_tests {
     }
 
     #[test]
+    fn test_on_scheduled_scan_matches_available() {
+        let (mut h, mut test_fut) = TestHelper::set_up();
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
+        let req = fidl_fullmac::WlanFullmacImplIfcOnScheduledScanMatchesAvailableRequest {
+            txn_id: Some(42u64),
+            wake_lease: Some(wake_lease),
+            ..Default::default()
+        };
+        h.fullmac_ifc_proxy.on_scheduled_scan_matches_available(req).unwrap();
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
+        let (txn_id, wake_lease) = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::OnScheduledScanMatchesAvailable { txn_id, wake_lease } => (txn_id, wake_lease)
+        );
+        assert_eq!(txn_id, 42u64);
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
+    }
+
+    #[test]
     fn test_connect_conf() {
         let (mut h, mut test_fut) = TestHelper::set_up();
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
@@ -1604,14 +1646,17 @@ mod handle_driver_event_tests {
         h.fake_device.lock().query_device_info_mock.as_mut().unwrap().role = Some(mac_role);
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
         let deauth_ind = fidl_fullmac::WlanFullmacImplIfcDeauthIndRequest {
             peer_sta_address: Some([1u8; 6]),
             reason_code: Some(fidl_ieee80211::ReasonCode::LeavingNetworkDeauth),
             locally_initiated: Some(true),
+            wake_lease: Some(wake_lease),
             ..Default::default()
         };
         assert_matches!(
-            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.deauth_ind(&deauth_ind)),
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.deauth_ind(deauth_ind)),
             Poll::Ready(Ok(()))
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
@@ -1628,7 +1673,10 @@ mod handle_driver_event_tests {
         }
 
         let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
-        let ind = assert_matches!(event, fidl_mlme::MlmeEvent::DeauthenticateInd { ind } => ind);
+        let (ind, wake_lease) = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::DeauthenticateInd { ind, wake_lease } => (ind, wake_lease)
+        );
         assert_eq!(
             ind,
             fidl_mlme::DeauthenticateIndication {
@@ -1637,6 +1685,7 @@ mod handle_driver_event_tests {
                 locally_initiated: true,
             }
         );
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
     }
 
     #[test]
@@ -1717,14 +1766,17 @@ mod handle_driver_event_tests {
         h.fake_device.lock().query_device_info_mock.as_mut().unwrap().role = Some(mac_role);
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
         let disassoc_ind = fidl_fullmac::WlanFullmacImplIfcDisassocIndRequest {
             peer_sta_address: Some([1u8; 6]),
             reason_code: Some(fidl_ieee80211::ReasonCode::LeavingNetworkDeauth),
             locally_initiated: Some(true),
+            wake_lease: Some(wake_lease),
             ..Default::default()
         };
         assert_matches!(
-            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.disassoc_ind(&disassoc_ind)),
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.disassoc_ind(disassoc_ind)),
             Poll::Ready(Ok(()))
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
@@ -1741,7 +1793,10 @@ mod handle_driver_event_tests {
         }
 
         let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
-        let ind = assert_matches!(event, fidl_mlme::MlmeEvent::DisassociateInd { ind } => ind);
+        let (ind, wake_lease) = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::DisassociateInd { ind, wake_lease } => (ind, wake_lease)
+        );
         assert_eq!(
             ind,
             fidl_mlme::DisassociateIndication {
@@ -1750,6 +1805,7 @@ mod handle_driver_event_tests {
                 locally_initiated: true,
             }
         );
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
     }
 
     #[test_case(fidl_fullmac::StartResult::Success, true, fidl_mlme::StartResultCode::Success; "success start result")]
@@ -1881,21 +1937,83 @@ mod handle_driver_event_tests {
         );
     }
 
+    #[test_case(
+        fidl_ieee80211::KeyType::Pairwise,
+        fidl_mlme::KeyType::Pairwise;
+        "pairwise"
+    )]
+    #[test_case(
+        fidl_ieee80211::KeyType::Group,
+        fidl_mlme::KeyType::Group;
+        "group"
+    )]
+    #[fuchsia::test(add_test_attr = false)]
+    fn test_on_michael_mic_failure(
+        fullmac_key_type: fidl_ieee80211::KeyType,
+        expected_mlme_key_type: fidl_mlme::KeyType,
+    ) {
+        let (mut h, mut test_fut) = TestHelper::set_up();
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let mic_failure = fidl_fullmac::WlanFullmacImplIfcOnMichaelMicFailureRequest {
+            peer_sta_address: Some([1u8; 6]),
+            key_type: Some(fullmac_key_type),
+            ..Default::default()
+        };
+        assert_matches!(
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.on_michael_mic_failure(&mic_failure)),
+            Poll::Ready(Ok(()))
+        );
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
+        let ind = assert_matches!(event, fidl_mlme::MlmeEvent::OnMichaelMicFailure { ind } => ind);
+        assert_eq!(
+            ind,
+            fidl_mlme::MichaelMicFailureIndication {
+                peer_sta_address: [1u8; 6],
+                key_type: expected_mlme_key_type,
+            }
+        );
+    }
+
+    #[test]
+    fn test_on_michael_mic_failure_igtk_dropped() {
+        let (mut h, mut test_fut) = TestHelper::set_up();
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        let mic_failure = fidl_fullmac::WlanFullmacImplIfcOnMichaelMicFailureRequest {
+            peer_sta_address: Some([1u8; 6]),
+            key_type: Some(fidl_ieee80211::KeyType::Igtk),
+            ..Default::default()
+        };
+        assert_matches!(
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.on_michael_mic_failure(&mic_failure)),
+            Poll::Ready(Ok(()))
+        );
+        assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
+
+        assert_matches!(h.mlme_event_receiver.try_recv(), Err(_));
+    }
+
     #[test]
     fn test_roam_start_ind() {
         let (mut h, mut test_fut) =
             TestHelper::set_up_with_link_state(fidl_mlme::ControlledPortState::Open);
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
         let selected_bss = create_bss_descriptions();
         let roam_start_ind = fidl_fullmac::WlanFullmacImplIfcRoamStartIndRequest {
             selected_bssid: Some(selected_bss.bssid.clone()),
             selected_bss: Some(selected_bss.clone()),
             original_association_maintained: Some(false),
+            wake_lease: Some(wake_lease),
             ..Default::default()
         };
         assert_matches!(
-            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.roam_start_ind(&roam_start_ind)),
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.roam_start_ind(roam_start_ind)),
             Poll::Ready(Ok(()))
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
@@ -1909,7 +2027,10 @@ mod handle_driver_event_tests {
         );
 
         let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
-        let ind = assert_matches!(event, fidl_mlme::MlmeEvent::RoamStartInd { ind } => ind);
+        let (ind, wake_lease) = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::RoamStartInd { ind, wake_lease } => (ind, wake_lease)
+        );
 
         // SME is notified of the roam start.
         assert_eq!(
@@ -1920,6 +2041,7 @@ mod handle_driver_event_tests {
                 original_association_maintained: false,
             }
         );
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
     }
 
     #[test]
@@ -1952,6 +2074,8 @@ mod handle_driver_event_tests {
         let (mut h, mut test_fut) = TestHelper::set_up();
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
         let selected_bss = create_bss_descriptions();
         let original_association_maintained = false;
         let target_bss_authenticated = true;
@@ -1965,11 +2089,12 @@ mod handle_driver_event_tests {
             target_bss_authenticated: Some(target_bss_authenticated),
             association_id: Some(association_id),
             association_ies: Some(association_ies.clone()),
+            wake_lease: Some(wake_lease),
             ..Default::default()
         };
 
         assert_matches!(
-            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.roam_result_ind(&roam_result_ind)),
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.roam_result_ind(roam_result_ind)),
             Poll::Ready(Ok(()))
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
@@ -1983,7 +2108,10 @@ mod handle_driver_event_tests {
         );
 
         let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
-        let ind = assert_matches!(event, fidl_mlme::MlmeEvent::RoamResultInd { ind } => ind);
+        let (ind, wake_lease) = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::RoamResultInd { ind, wake_lease } => (ind, wake_lease)
+        );
 
         // SME is notified of the roam result.
         assert_eq!(
@@ -1997,6 +2125,7 @@ mod handle_driver_event_tests {
                 association_ies,
             }
         );
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
     }
 
     #[test]
@@ -2088,19 +2217,23 @@ mod handle_driver_event_tests {
         let (mut h, mut test_fut) = TestHelper::set_up();
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
         let breach_req = fidl_fullmac::WlanFullmacImplIfcOnRssiThresholdBreachedRequest {
             cur_rssi_dbm: Some(-75),
+            wake_lease: Some(wake_lease),
             ..Default::default()
         };
-        h.fullmac_ifc_proxy.on_rssi_threshold_breached(&breach_req).unwrap();
+        h.fullmac_ifc_proxy.on_rssi_threshold_breached(breach_req).unwrap();
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
         let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
-        let cur_rssi_dbm = assert_matches!(
+        let (cur_rssi_dbm, wake_lease) = assert_matches!(
             event,
-            fidl_mlme::MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm } => cur_rssi_dbm
+            fidl_mlme::MlmeEvent::OnRssiThresholdBreached { cur_rssi_dbm, wake_lease } => (cur_rssi_dbm, wake_lease)
         );
         assert_eq!(cur_rssi_dbm, -75);
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
     }
 
     #[test]
@@ -2108,20 +2241,26 @@ mod handle_driver_event_tests {
         let (mut h, mut test_fut) = TestHelper::set_up();
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
+        let (wake_lease, _peer) = zx::EventPair::create();
+        let expected_koid = wake_lease.koid().unwrap();
         let eapol_ind = fidl_fullmac::WlanFullmacImplIfcEapolIndRequest {
             src_addr: Some([1u8; 6]),
             dst_addr: Some([2u8; 6]),
             data: Some(vec![3u8; 4]),
+            wake_lease: Some(wake_lease),
             ..Default::default()
         };
         assert_matches!(
-            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.eapol_ind(&eapol_ind)),
+            h.exec.run_until_stalled(&mut h.fullmac_ifc_proxy.eapol_ind(eapol_ind)),
             Poll::Ready(Ok(()))
         );
         assert_matches!(h.exec.run_until_stalled(&mut test_fut), Poll::Pending);
 
         let event = assert_matches!(h.mlme_event_receiver.try_recv(), Ok(ev) => ev);
-        let ind = assert_matches!(event, fidl_mlme::MlmeEvent::EapolInd { ind } => ind);
+        let (ind, wake_lease) = assert_matches!(
+            event,
+            fidl_mlme::MlmeEvent::EapolInd { ind, wake_lease } => (ind, wake_lease)
+        );
         assert_eq!(
             ind,
             fidl_mlme::EapolIndication {
@@ -2130,6 +2269,7 @@ mod handle_driver_event_tests {
                 data: vec![3u8; 4],
             }
         );
+        assert_eq!(wake_lease.unwrap().koid().unwrap(), expected_koid);
     }
 
     #[test]

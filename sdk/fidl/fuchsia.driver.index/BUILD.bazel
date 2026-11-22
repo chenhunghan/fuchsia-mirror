@@ -12,7 +12,6 @@ fidl_library(
         "development.fidl",
         "driver_index.fidl",
     ],
-    enable_hlcpp = True,
     visibility = ["//visibility:public"],
     deps = [
         "//sdk/fidl/fuchsia.driver.development",

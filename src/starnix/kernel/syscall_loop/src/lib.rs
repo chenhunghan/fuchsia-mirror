@@ -277,6 +277,18 @@ fn process_restricted_exit(
                 let exception_report =
                     unsafe { zx::ExceptionReport::from_raw(*exception_report_raw) };
                 let exception_result = current_task.process_exception(&exception_report);
+                if matches!(
+                    exception_report.ty,
+                    zx::ExceptionType::PolicyError(zx::PolicyCode::SpinDetection { .. })
+                ) {
+                    // Zircon delivers this exception to Starnix and to nothing else, so ask
+                    // crashsvc for a backtrace, as it prints for a spin detection outside of
+                    // restricted mode. The unwinder follows the CFI of the restricted mode
+                    // trampoline into the restricted mode frames, as far as the task's own
+                    // unwind information allows. This call is kept as far up in the call
+                    // stack as possible to avoid additional frames that are always the same.
+                    debug::backtrace_request_current_thread();
+                }
                 process_completed_exception(current_task, exception_result, exception_report);
             }
         }
@@ -361,7 +373,7 @@ pub fn execute_syscall(current_task: &mut CurrentTask, error_context: &mut Optio
         current_task.thread_state.arch_width(),
     );
 
-    let _syscall_trace = starnix_core::task::begin_syscall_trace(|| syscall_decl.trace_name());
+    let _syscall_trace = starnix_core::task::begin_syscall_trace(syscall_decl);
     let syscall = new_syscall(syscall_decl, current_task);
 
     log_syscall!(current_task, "{syscall:?}");

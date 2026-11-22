@@ -74,6 +74,8 @@ _LIB_SRCS = [
     "src/subcommands/restart/mod.rs",
     "src/subcommands/show/args.rs",
     "src/subcommands/show/mod.rs",
+    "src/subcommands/suspend/args.rs",
+    "src/subcommands/suspend/mod.rs",
     "src/subcommands/test_node/args.rs",
     "src/subcommands/test_node/mod.rs",
     "src/subcommands/test_node/subcommands/add/args.rs",
@@ -97,6 +99,7 @@ _COMMON_DEPS = [
     "//sdk/rust/zx-status",
     "//src/developer/ffx/lib/safe_string:lib",
     "//src/devices/lib/bind",
+    "//src/lib/fidl/rust/fidl",
     "//third_party/rust_crates/forks/prettytable-rs:prettytable",
     "//third_party/rust_crates/vendor:ansi_term",
     "//third_party/rust_crates/vendor:anyhow",
@@ -160,6 +163,7 @@ rustc_test(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
     ],
 )
 
@@ -182,6 +186,7 @@ host_rustc_test(
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
     ],
 )
 

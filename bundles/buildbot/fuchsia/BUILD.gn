@@ -4,6 +4,7 @@
 
 import("//build/assembly/product_bundle.gni")
 import("//build/assembly/product_bundle_test_group.gni")
+import("//build/testing/device_types.gni")
 import("//build/testing/environments.gni")
 import("//bundles/buildbot/target_tests.gni")
 
@@ -14,6 +15,9 @@ declare_args() {
   # postsubmit
   is_postsubmit = false
 }
+
+_is_gce = allowed_test_device_types == [ device_types.gce ]
+not_needed([ "_is_gce" ])
 
 group("fuchsia") {
   testonly = true
@@ -29,6 +33,9 @@ group("fuchsia") {
     # are not being run by another bot (i.e., during bringup of a new CPU
     # architecture).
     ":additional_build_targets",
+
+    # All the host tests
+    "//bundles/buildbot/host($host_toolchain)",
   ]
   if (target_cpu == "arm64") {
     deps += [
@@ -107,7 +114,11 @@ if (target_cpu == "arm64") {
   # Included so that there are _some_ tests to run on
   product_bundle_test_group("minimal.arm64-hermetic_examples") {
     product_bundle_name = "minimal.arm64"
-    environments = [ c4a_env ]
+    if (_is_gce) {
+      build_only = true
+    } else {
+      environments = [ c4a_env ]
+    }
     target_tests = [ "//examples:hermetic_tests" ]
   }
 }
@@ -138,11 +149,15 @@ if (target_cpu == "x64") {
     product_bundle_test_group("core.x64-lacewing") {
       product_bundle_name = "core.x64"
 
-      allowed_environments = [ aemu_env ]
+      if (_is_gce) {
+        build_only = true
+      } else {
+        allowed_environments = [ aemu_env ]
 
-      if (is_postsubmit) {
-        # Only run tests on nuc11 in post-submit to reduce load on the nuc11s
-        allowed_environments += [ nuc11_env ]
+        if (is_postsubmit) {
+          # Only run tests on nuc11 in post-submit to reduce load on the nuc11s
+          allowed_environments += [ nuc11_env ]
+        }
       }
 
       host_tests = [ "//src/testing/end_to_end:core_x64_stable_tests" ]
@@ -170,7 +185,9 @@ if (target_cpu == "arm64") {
   product_bundle_test_group("core.arm64") {
     product_bundle_name = "core.arm64"
 
-    if (is_postsubmit || is_release) {
+    if (_is_gce) {
+      allowed_environments = [ gce_env ]
+    } else if (is_postsubmit || is_release) {
       allowed_environments = [ c4a_env ]
     } else {
       build_only = true
@@ -195,7 +212,9 @@ if (target_cpu == "x64") {
     # Presubmit only runs tests in release mode, under the assumption
     # that if the tests pass in release mode, they will likely
     # pass in the others.
-    if (is_postsubmit || is_release) {
+    if (_is_gce) {
+      allowed_environments = [ gce_env ]
+    } else if (is_postsubmit || is_release) {
       allowed_environments = [
         aemu_env,
         qemu_env,

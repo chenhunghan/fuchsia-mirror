@@ -407,20 +407,19 @@ mod tests {
     use bt_channel_test_support::{Transport, create_test_channels};
     use bt_rfcomm::profile::build_rfcomm_protocol;
     use fidl::endpoints::Proxy;
-    use fidl_fuchsia_bluetooth::ErrorCode;
-    use fidl_fuchsia_bluetooth_bredr::{ProfileMarker, ProfileRequestStream};
     use fidl_fuchsia_bluetooth_rfcomm_test::{RfcommTestMarker, RfcommTestRequestStream};
     use fixture::fixture;
     use test_case::test_case;
+    use test_profile_server::TestProfileServer;
 
-    type TestFixture = (RfcommManager, ProfileRequestStream, RfcommTestRequestStream);
+    type TestFixture = (RfcommManager, TestProfileServer, RfcommTestRequestStream);
 
     async fn setup_rfcomm_mgr<F, Fut>(_name: &str, test: F)
     where
         F: FnOnce(TestFixture) -> Fut,
         Fut: futures::Future<Output = ()>,
     {
-        let (profile, profile_server) = fidl::endpoints::create_proxy_and_stream::<ProfileMarker>();
+        let (profile, profile_server) = TestProfileServer::create_endpoints();
         let (rfcomm_test, rfcomm_test_server) =
             fidl::endpoints::create_proxy_and_stream::<RfcommTestMarker>();
 
@@ -433,42 +432,14 @@ mod tests {
         assert_eq!(read_result, expected_data);
     }
 
-    async fn expect_advertisement_and_search(
-        profile: &mut ProfileRequestStream,
-    ) -> (
-        bredr::SearchResultsProxy,
-        (bredr::ConnectionReceiverProxy, bredr::ProfileAdvertiseResponder),
-    ) {
-        let mut search_request = None;
-        let mut advertisement = None;
-        while let Some(req) = profile.next().await {
-            match req {
-                Ok(bredr::ProfileRequest::Advertise { payload, responder, .. }) => {
-                    let connect_proxy = payload.receiver.unwrap().into_proxy();
-                    advertisement = Some((connect_proxy, responder));
-                }
-                Ok(bredr::ProfileRequest::Search { payload, .. }) => {
-                    search_request = Some(payload.results.unwrap().into_proxy())
-                }
-                x => panic!("Expected one Advertise and Search but got: {:?}", x),
-            }
-            if search_request.is_some() && advertisement.is_some() {
-                break;
-            }
-        }
-        (search_request.expect("just set"), advertisement.expect("just set"))
-    }
-
     #[fixture(setup_rfcomm_mgr)]
     #[fuchsia::test]
     async fn initiate_rfcomm_channel_to_peer_is_ok(
         (rfcomm_mgr, mut profile_server, mut rfcomm_test_server): TestFixture,
     ) {
         // Keep the `bredr.Profile` requests alive - one advertisement and search.
-        let _profile_requests = {
-            assert_matches!(rfcomm_mgr.advertise(), Ok(_));
-            expect_advertisement_and_search(&mut profile_server).await
-        };
+        assert_matches!(rfcomm_mgr.advertise(), Ok(_));
+        profile_server.expect_search_and_advertise().await;
 
         // Can establish RFCOMM channel to peer.
         let remote_id = PeerId(123);
@@ -476,18 +447,8 @@ mod tests {
         let mut peer_channel = {
             let ch_fut =
                 Box::pin(rfcomm_mgr.outgoing_rfcomm_channel(remote_id, random_channel_number));
-
             let profile_fut = async {
-                match profile_server.next().await {
-                    Some(Ok(bredr::ProfileRequest::Connect { responder, .. })) => {
-                        let (left, right) = Channel::create_socket_pair();
-                        let _ = responder
-                            .send(left.try_into().map_err(|_e| ErrorCode::Failed))
-                            .unwrap();
-                        right
-                    }
-                    x => panic!("Expected connect request, got: {:?}", x),
-                }
+                profile_server.expect_connect_request().await.assert_peer(remote_id).accept()
             };
 
             match futures::future::join(ch_fut, profile_fut).await {
@@ -527,25 +488,15 @@ mod tests {
         (rfcomm_mgr, mut profile_server, _rfcomm_test_server): TestFixture,
     ) {
         // Keep the `bredr.Profile` requests alive - one advertisement and search.
-        let (_search_proxy, (connect_proxy, _adv_fut)) = {
-            assert_matches!(rfcomm_mgr.advertise(), Ok(_));
-            expect_advertisement_and_search(&mut profile_server).await
-        };
+        assert_matches!(rfcomm_mgr.advertise(), Ok(_));
+        profile_server.expect_search_and_advertise().await;
 
         // Peer connects to us.
         let remote_id = PeerId(8978);
         let random_channel_number = ServerChannel::try_from(7).unwrap();
-        let (_peer_channel, local_channel) = Channel::create_socket_pair();
         let protocol: Vec<bredr::ProtocolDescriptor> =
             build_rfcomm_protocol(random_channel_number).iter().map(Into::into).collect();
-        assert_matches!(
-            connect_proxy.connected(
-                &remote_id.into(),
-                local_channel.try_into().unwrap(),
-                &protocol,
-            ),
-            Ok(_)
-        );
+        let _peer_channel = profile_server.send_connected(remote_id, protocol);
     }
 
     #[fixture(setup_rfcomm_mgr)]
@@ -554,10 +505,8 @@ mod tests {
         (rfcomm_mgr, mut profile_server, mut rfcomm_test_server): TestFixture,
     ) {
         // Keep the `bredr.Profile` requests alive - one advertisement and search.
-        let _profile_requests = {
-            assert_matches!(rfcomm_mgr.advertise(), Ok(_));
-            expect_advertisement_and_search(&mut profile_server).await
-        };
+        assert_matches!(rfcomm_mgr.advertise(), Ok(_));
+        profile_server.expect_search_and_advertise().await;
 
         // Even though there are no active RFCOMM channels established, a client can still request
         // to disconnect the session - expect it to be received.
@@ -576,10 +525,8 @@ mod tests {
         (rfcomm_mgr, mut profile_server, _rfcomm_test_server): TestFixture,
     ) {
         // Keep the `bredr.Profile` requests alive - one advertisement and search.
-        let _profile_requests = {
-            assert_matches!(rfcomm_mgr.advertise(), Ok(_));
-            expect_advertisement_and_search(&mut profile_server).await
-        };
+        assert_matches!(rfcomm_mgr.advertise(), Ok(_));
+        profile_server.expect_search_and_advertise().await;
 
         // RLS updates pertain to a specific RFCOMM channel. Expect an error if an RLS request is
         // sent for a non existent channel.
@@ -594,12 +541,10 @@ mod tests {
         (rfcomm_mgr, mut profile_server, _rfcomm_test_server): TestFixture,
     ) {
         // Keep the `bredr.Profile` requests alive - one advertisement and search.
-        let (search_proxy, (connect_proxy, _advertise_fut)) = {
-            assert_matches!(rfcomm_mgr.advertise(), Ok(_));
-            expect_advertisement_and_search(&mut profile_server).await
-        };
-        assert!(!search_proxy.is_closed());
-        assert!(!connect_proxy.is_closed());
+        assert_matches!(rfcomm_mgr.advertise(), Ok(_));
+        profile_server.expect_search_and_advertise().await;
+        assert!(!profile_server.results().unwrap().is_closed());
+        assert!(!profile_server.receiver().unwrap().is_closed());
 
         // Clearing services should unregister advertisement and search (transitively closing the
         // FIDL channels).
@@ -610,10 +555,8 @@ mod tests {
         rfcomm_mgr.clear_services();
 
         // Can register again.
-        let _profile = {
-            assert_matches!(rfcomm_mgr.advertise(), Ok(_));
-            expect_advertisement_and_search(&mut profile_server).await
-        };
+        assert_matches!(rfcomm_mgr.advertise(), Ok(_));
+        profile_server.expect_search_and_advertise().await;
     }
 
     #[test_case(Transport::Socket ; "socket")]

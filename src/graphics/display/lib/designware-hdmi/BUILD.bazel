@@ -1,0 +1,71 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":designware-hdmi-tests"],
+    visibility = ["//src/graphics/display:__pkg__"],
+)
+
+fx_cc_library(
+    name = "hdmi-transmitter-controller",
+    hdrs = [
+        "color-param.h",
+        "hdmi-transmitter-controller.h",
+    ],
+    deps = [
+        "//sdk/lib/driver/mmio/cpp",
+        "//src/graphics/display/lib/api-types/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "hdmi-transmitter-controller-impl",
+    srcs = ["hdmi-transmitter-controller-impl.cc"],
+    hdrs = [
+        "ddc-controller-regs.h",
+        "hdmi-transmitter-controller-impl.h",
+        "regs.h",
+    ],
+    visibility = ["//src/graphics/display/drivers/amlogic-display:__pkg__"],
+    deps = [
+        ":hdmi-transmitter-controller",
+        "//sdk/lib/driver/logging/cpp",
+        "//src/graphics/display/lib/edid",
+        "//zircon/system/ulib/hwreg",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "designware-hdmi-tests-bin",
+    srcs = [
+        "ddc-controller-regs-test.cc",
+        "hdmi-transmitter-controller-impl-test.cc",
+    ],
+    gn_output_name = "designware-hdmi-tests",
+    deps = [
+        ":hdmi-transmitter-controller-impl",
+        "//sdk/lib/driver/mmio/cpp",
+        "//sdk/lib/driver/mock-mmio/cpp",
+        "//sdk/lib/driver/testing/cpp:scoped_global_logger",
+        "//src/graphics/display/lib/edid-values",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/zx",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "designware-hdmi-tests",
+    unit_tests = [":designware-hdmi-tests-bin"],
+)

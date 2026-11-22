@@ -80,9 +80,7 @@ dmlc compile-board <board.dml> \
   --out-dir <out_dir> \
   --cml-output <board.cml> \
   --bind-output <board.bind> \
-  --fidl-output <board-config.fidl> \
-  --driver-dml <driver1.dml> \
-  --driver-dml <driver2.dml>
+  --fidl-output <board-config.fidl>
 ```
 
 Options:
@@ -91,7 +89,6 @@ Options:
 * `--cml-output`: Path to the generated board `.cml`.
 * `--bind-output`: Path to the generated board `.bind`.
 * `--fidl-output`: Path to the serialized `fuchsia.hardware.platform.bus/BoardConfig` FIDL binary.
-* `--driver-dml`: Additional driver DML files providing metadata schemas.
 
 ---
 

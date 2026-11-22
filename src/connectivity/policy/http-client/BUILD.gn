@@ -30,7 +30,6 @@ group("tests") {
 fuchsia_package("package") {
   package_name = "http-client"
   deps = [ ":component" ]
-  visibility = [ "//bundles/assembly/*" ]
 }
 
 fuchsia_package("google_package") {
@@ -49,8 +48,8 @@ resource("fake-ssl-certs") {
   visibility = [ ":*" ]
 }
 
-# Kept in GN because `http-client-test` packages
-# `//src/connectivity/network/dns:component` and subpackages
+# Kept in GN because `http-client-test` subpackages
+# `//src/connectivity/network/dns:package` and
 # `//src/connectivity/network/netstack3:package-for-tests`, which have no
 # Bazel build yet.
 fuchsia_unittest_package("http-client-test") {
@@ -59,9 +58,11 @@ fuchsia_unittest_package("http-client-test") {
   deps = [
     ":fake-ssl-certs",
     ":http_client_bin_test",
-    "//src/connectivity/network/dns:component",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+  ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -169,21 +170,25 @@ rustc_test("http_client_bin_test") {
 fuchsia_component_manifest("manifest") {
   component_name = "http-client"
   manifest = "meta/http_client.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_component("component") {
   cm_label = ":manifest"
   deps = [ ":http_client" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_component_manifest("google_manifest") {
   component_name = "google-http-client"
   manifest = "meta/google_http_client.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_component("google_component") {
   cm_label = ":google_manifest"
   deps = [ ":http_client" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_structured_config_rust_lib("http_client_config") {

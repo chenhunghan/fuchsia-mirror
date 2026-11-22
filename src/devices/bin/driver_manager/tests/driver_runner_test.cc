@@ -18,6 +18,8 @@
 #include <lib/inspect/testing/cpp/inspect.h>
 #include <lib/sync/cpp/completion.h>
 
+#include <memory>
+
 #include <bind/fuchsia/platform/cpp/bind.h>
 
 #include "gmock/gmock.h"
@@ -69,7 +71,7 @@ class DriverRunnerTest : public DriverRunnerTestBase, public ::testing::WithPara
              driver_loader::Loader::DynamicLinkingPassiveAbi dl_passive_abi) mutable {};
       dynamic_linker_ = driver_loader::Loader::Create(dispatcher(), std::move(load_driver_handler));
       driver_runner_.emplace(
-          ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilityStore(),
+          ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilities(),
           driver_index_->Connect(), inspector_, &LoaderFactory, dispatcher(), false,
           driver_manager::OfferInjector{{
               .power_inject_offer = false,
@@ -81,7 +83,7 @@ class DriverRunnerTest : public DriverRunnerTestBase, public ::testing::WithPara
               std::move(driver_host_runner)},
           std::move(cpu_element_mgr));
     } else {
-      driver_runner_.emplace(ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilityStore(),
+      driver_runner_.emplace(ConnectToRealm(), ConnectToIntrospector(), ConnectToCapabilities(),
                              driver_index_->Connect(), inspector_, &LoaderFactory, dispatcher(),
                              false,
                              driver_manager::OfferInjector{{
@@ -166,8 +168,6 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesAndCpuOverride) {
   // Create a dictionary and power dependencies.
   zx::eventpair d_ep1, d_ep2;
   ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &d_ep1, &d_ep2));
-  fuchsia_component_sandbox::wire::DictionaryRef dict_ref;
-  dict_ref.token = std::move(d_ep1);
 
   zx::event token;
   ASSERT_EQ(zx::event::create(0, &token), ZX_OK);
@@ -195,8 +195,8 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesAndCpuOverride) {
   ASSERT_EQ(zx::event::create(0, &cpu_override_token), ZX_OK);
 
   driver_runner().RestartWithDictionaryAndPowerDependencies(
-      "dev.second", fidl::ToNatural(std::move(dict_ref)), std::move(power_deps),
-      std::move(cpu_override_token), {}, std::move(release_fence2));
+      "dev.second", std::move(d_ep1), std::move(power_deps), std::move(cpu_override_token), {},
+      std::move(release_fence2));
 
   // Our driver should get closed.
   while (!stop_listener.is_stopped()) {
@@ -343,8 +343,6 @@ TEST_P(DriverRunnerTest, RestartWithCpuTokenOverrideOnly) {
   // Create a dictionary and power dependencies.
   zx::eventpair d_ep1, d_ep2;
   ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &d_ep1, &d_ep2));
-  fuchsia_component_sandbox::wire::DictionaryRef dict_ref;
-  dict_ref.token = std::move(d_ep1);
 
   zx::event cpu_override_token;
   ASSERT_EQ(zx::event::create(0, &cpu_override_token), ZX_OK);
@@ -362,9 +360,9 @@ TEST_P(DriverRunnerTest, RestartWithCpuTokenOverrideOnly) {
     return false;
   });
 
-  driver_runner().RestartWithDictionaryAndPowerDependencies(
-      "dev.second", fidl::ToNatural(std::move(dict_ref)), {}, std::move(cpu_override_token), {},
-      std::move(release_fence2));
+  driver_runner().RestartWithDictionaryAndPowerDependencies("dev.second", std::move(d_ep1), {},
+                                                            std::move(cpu_override_token), {},
+                                                            std::move(release_fence2));
 
   // Our driver should get closed.
   while (!stop_listener.is_stopped()) {
@@ -511,8 +509,6 @@ TEST_P(DriverRunnerTest, RestartWithNodePowerTokenOverrides) {
 
   zx::eventpair d_ep1, d_ep2;
   ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &d_ep1, &d_ep2));
-  fuchsia_component_sandbox::wire::DictionaryRef dict_ref;
-  dict_ref.token = std::move(d_ep1);
 
   zx::event override_token;
   ASSERT_EQ(zx::event::create(0, &override_token), ZX_OK);
@@ -542,9 +538,9 @@ TEST_P(DriverRunnerTest, RestartWithNodePowerTokenOverrides) {
     return false;
   });
 
-  driver_runner().RestartWithDictionaryAndPowerDependencies(
-      "dev.second", fidl::ToNatural(std::move(dict_ref)), {}, std::nullopt, std::move(overrides),
-      std::move(release_fence2));
+  driver_runner().RestartWithDictionaryAndPowerDependencies("dev.second", std::move(d_ep1), {},
+                                                            std::nullopt, std::move(overrides),
+                                                            std::move(release_fence2));
 
   while (!stop_listener.is_stopped()) {
     RunLoopUntilIdle();
@@ -1239,6 +1235,7 @@ TEST_P(DriverRunnerTest, RestartNodesCrossColocatedWithDriverUrl) {
                                 .use_dynamic_linker = use_dynamic_linker(),
                             },
                             std::move(start_handler2), third_driver_config);
+  driver2->SetDontCloseBindingInStop();
   StopListener& stop_listener2 = ServeStopListener(std::move(controller2));
 
   EXPECT_EQ(0u, driver_runner().bind_manager().NumOrphanedResources());
@@ -1260,12 +1257,39 @@ TEST_P(DriverRunnerTest, RestartNodesCrossColocatedWithDriverUrl) {
   EXPECT_EQ(1u, count.value());
   EXPECT_TRUE(RunLoopUntilIdle());
 
+  // dev.second has finished stopping, but dev.third's driver is still in Stop(), so the shared
+  // driver host component must not be destroyed yet, while its colocation name is already cleared
+  // so restarting nodes do not reuse the dying host.
   EXPECT_TRUE(stop_listener1.is_stopped());
+  EXPECT_FALSE(stop_listener2.is_stopped());
+  EXPECT_EQ(
+      nullptr,
+      static_cast<driver_manager::NodeManager&>(driver_runner()).GetDriverHost("shared-host"));
+  realm().AssertDestroyedChildren({
+      CreateChildRef("dev.second", "boot-drivers"),
+  });
+
+  // Queue creation of the new "shared-host" while dev.third is still in Stop(), then finish
+  // stopping dev.third so that DestroyDriverHostComponent runs after the new host is queued and
+  // preserves the new host's colocation name.
+  PrepareRealmForStartDriverHost(false);
+  zx::result new_host = static_cast<driver_manager::NodeManager&>(driver_runner())
+                            .CreateDriverHost(false, "shared-host");
+  ASSERT_EQ(ZX_OK, new_host.status_value());
+  EXPECT_EQ(
+      new_host.value(),
+      static_cast<driver_manager::NodeManager&>(driver_runner()).GetDriverHost("shared-host"));
+
+  driver2->CloseBinding();
+  EXPECT_TRUE(RunLoopUntilIdle());
   EXPECT_TRUE(stop_listener2.is_stopped());
+  EXPECT_EQ(
+      new_host.value(),
+      static_cast<driver_manager::NodeManager&>(driver_runner()).GetDriverHost("shared-host"));
 
   StopDriverComponent(std::move(root_driver->controller));
 
-  // The node was destroyed twice, along with the host.
+  // The nodes were destroyed twice, along with the old and recreated shared host.
   realm().AssertDestroyedChildren({
       CreateChildRef("root", "boot-drivers"),
       CreateChildRef("dev.second", "boot-drivers"),
@@ -3050,6 +3074,246 @@ TEST_P(DriverRunnerTest, DriverDevelopmentRunHealthCheck) {
   StopDriverComponent(std::move(root_driver->controller));
 }
 
+TEST_P(DriverRunnerTest, DriverDevelopmentGetNodeInfoDisambiguator) {
+  SetupDriverRunner();
+
+  auto root_driver = StartRootDriver();
+  ASSERT_EQ(ZX_OK, root_driver.status_value());
+
+  // Populate DriverHostComponent's cached process_info_ asynchronously before GetNodeInfo(), which
+  // otherwise calls GetProcessKoid() synchronously on the same single-threaded test dispatcher as
+  // TestDriverHost.
+  auto& node_token = root_driver->driver->node_token();
+  ASSERT_TRUE(node_token.has_value());
+  zx::event token_copy;
+  ASSERT_EQ(ZX_OK, node_token->duplicate(ZX_RIGHT_SAME_RIGHTS, &token_copy));
+  auto debug_client = fidl::WireClient<fuchsia_driver_token::Debug>(ConnectToDebug(), dispatcher());
+  auto koid_cached = std::make_shared<bool>(false);
+  debug_client->GetHostKoid(std::move(token_copy))
+      .ThenExactlyOnce(
+          [koid_cached](fidl::WireUnownedResult<fuchsia_driver_token::Debug::GetHostKoid>& result) {
+            ASSERT_TRUE(result.ok());
+            ASSERT_TRUE(result->is_ok());
+            *koid_cached = true;
+          });
+  EXPECT_TRUE(RunLoopUntilIdle());
+  ASSERT_TRUE(*koid_cached);
+
+  auto child_colon = root_driver->driver->AddChild("dev:0", false, false);
+  auto child_dot = root_driver->driver->AddChild("dev.0", false, false);
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  std::shared_ptr<Node> colon_node;
+  std::shared_ptr<Node> dot_node;
+  for (const auto& child : driver_runner().root_node()->children()) {
+    if (child->name() == "dev:0") {
+      colon_node = child;
+    } else if (child->name() == "dev.0") {
+      dot_node = child;
+    }
+  }
+  ASSERT_NE(nullptr, colon_node);
+  ASSERT_NE(nullptr, dot_node);
+  ASSERT_EQ("dev.dev_0", colon_node->MakeComponentMoniker());
+  ASSERT_EQ("dev.dev_0", dot_node->MakeComponentMoniker());
+  ASSERT_NE(colon_node->MakeDisambiguator(), dot_node->MakeDisambiguator());
+
+  driver_manager::DriverDevelopmentService service(driver_runner(), dispatcher());
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_driver_development::Manager>::Create();
+  fidl::ServerBinding<fuchsia_driver_development::Manager> binding(
+      dispatcher(), std::move(server_end), &service, fidl::kIgnoreBindingClosure);
+  fidl::WireClient<fuchsia_driver_development::Manager> client(std::move(client_end), dispatcher());
+
+  auto [iter_client_end, iter_server_end] =
+      fidl::Endpoints<fuchsia_driver_development::NodeInfoIterator>::Create();
+  ASSERT_TRUE(client->GetNodeInfo({}, std::move(iter_server_end), /*exact_match=*/false).ok());
+
+  std::vector<fuchsia_driver_development::NodeInfo> infos;
+  bool done = false;
+  fidl::WireClient<fuchsia_driver_development::NodeInfoIterator> iter_client(
+      std::move(iter_client_end), dispatcher());
+  while (!done) {
+    auto batch_received = std::make_shared<bool>(false);
+    iter_client->GetNext().ThenExactlyOnce(
+        [&infos, &done, batch_received](
+            fidl::WireUnownedResult<fuchsia_driver_development::NodeInfoIterator::GetNext>&
+                result) {
+          ASSERT_TRUE(result.ok());
+          if (result->nodes.empty()) {
+            done = true;
+          } else {
+            for (const auto& node : result->nodes) {
+              infos.push_back(fidl::ToNatural(node));
+            }
+          }
+          *batch_received = true;
+        });
+    EXPECT_TRUE(RunLoopUntilIdle());
+    ASSERT_TRUE(*batch_received);
+  }
+
+  ASSERT_EQ(3u, infos.size());
+  std::optional<std::string> root_disambiguator;
+  std::vector<std::string> colliding_disambiguators;
+  for (const auto& info : infos) {
+    ASSERT_TRUE(info.moniker().has_value());
+    ASSERT_TRUE(info.disambiguator().has_value());
+    EXPECT_FALSE(info.disambiguator()->empty());
+    if (*info.moniker() == "root") {
+      root_disambiguator = *info.disambiguator();
+    } else if (*info.moniker() == "dev.dev_0") {
+      colliding_disambiguators.push_back(*info.disambiguator());
+    } else {
+      FAIL() << "Unexpected node moniker: " << *info.moniker();
+    }
+  }
+  ASSERT_TRUE(root_disambiguator.has_value());
+  EXPECT_EQ(driver_runner().root_node()->MakeDisambiguator(), *root_disambiguator);
+  EXPECT_THAT(colliding_disambiguators,
+              testing::UnorderedElementsAre(colon_node->MakeDisambiguator(),
+                                            dot_node->MakeDisambiguator()));
+
+  StopDriverComponent(std::move(root_driver->controller));
+}
+
+TEST_P(DriverRunnerTest, DriverDevelopmentStartSuspendSession) {
+  auto cleanup = fit::defer([this]() { realm().ClearCreateChildHandlers(); });
+
+  auto topology_endpoints = fidl::Endpoints<fuchsia_power_broker::Topology>::Create();
+  TestTopology test_topology(dispatcher());
+  test_topology.Bind(std::move(topology_endpoints.server));
+
+  auto cpu_endpoints = fidl::Endpoints<fuchsia_power_system::CpuElementManager>::Create();
+  TestCpuElementManager test_cpu_element_manager(dispatcher());
+  test_cpu_element_manager.Bind(std::move(cpu_endpoints.server));
+
+  SetupDriverRunnerWithPower(std::move(topology_endpoints.client), std::move(cpu_endpoints.client));
+
+  auto root_driver = StartRootDriver(/*suspend_enabled=*/true);
+  ASSERT_EQ(ZX_OK, root_driver.status_value());
+
+  PrepareRealmForSecondDriverComponentStart();
+  std::shared_ptr<CreatedChild> child = root_driver->driver->AddChild("second", false, false);
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  auto did_bind = std::make_shared<bool>(false);
+  child->node_controller.value()->WaitForDriver().Then(
+      [did_bind](fidl::Result<fuchsia_driver_framework::NodeController::WaitForDriver>& result) {
+        if (result.is_ok() && result.value().driver_started_node_token().has_value()) {
+          *did_bind = true;
+          return;
+        }
+        ZX_ASSERT_MSG(false, "WaitForDriver failed");
+      });
+  auto [driver, controller] = StartSecondDriver("dev.second", false, false, false, {}, true);
+  EXPECT_TRUE(*did_bind);
+
+  std::shared_ptr<Node> second_node;
+  for (const auto& n : driver_runner().root_node()->children()) {
+    if (n->name() == "second") {
+      second_node = n;
+      break;
+    }
+  }
+  ASSERT_NE(nullptr, second_node);
+
+  driver_runner().BootupDoneForTesting();
+  test_topology.SetAllDriversLevel(1);
+  EXPECT_TRUE(RunLoopUntilIdle());
+
+  zx::event root_power_token = driver_runner().root_node()->DuplicatePowerToken();
+  zx::event second_power_token = second_node->DuplicatePowerToken();
+  ASSERT_TRUE(root_power_token.is_valid());
+  ASSERT_TRUE(second_power_token.is_valid());
+  ASSERT_TRUE(test_topology.element_control().HasDependencyOn(second_power_token));
+  ASSERT_FALSE(test_topology.element_control().HasDependencyOn(root_power_token));
+
+  driver_manager::DriverDevelopmentService service(driver_runner(), dispatcher());
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_driver_development::Manager>::Create();
+  fidl::ServerBinding<fuchsia_driver_development::Manager> binding(
+      dispatcher(), std::move(server_end), &service, fidl::kIgnoreBindingClosure);
+  fidl::WireClient<fuchsia_driver_development::Manager> client(std::move(client_end), dispatcher());
+
+  auto start_suspend = [&](fidl::AnyArena& arena, std::string_view moniker,
+                           std::optional<std::string_view> disambiguator,
+                           zx::eventpair* out_client_token) -> zx::result<> {
+    zx::eventpair client_token, server_token;
+    EXPECT_EQ(ZX_OK, zx::eventpair::create(0, &client_token, &server_token));
+    auto builder = fuchsia_driver_development::wire::NodeTarget::Builder(arena).moniker(
+        fidl::StringView::FromExternal(moniker));
+    if (disambiguator.has_value()) {
+      builder.disambiguator(fidl::StringView::FromExternal(*disambiguator));
+    }
+    auto call_result = std::make_shared<std::optional<zx::result<>>>();
+    client->StartSuspendSession(builder.Build(), std::move(server_token))
+        .ThenExactlyOnce(
+            [call_result](
+                fidl::WireUnownedResult<fuchsia_driver_development::Manager::StartSuspendSession>&
+                    result) {
+              ASSERT_TRUE(result.ok());
+              if (result->is_ok()) {
+                *call_result = zx::ok();
+              } else {
+                *call_result = zx::error(result->error_value());
+              }
+            });
+    EXPECT_TRUE(RunLoopUntilIdle());
+    EXPECT_TRUE(call_result->has_value());
+    if (*call_result && (*call_result)->is_ok()) {
+      *out_client_token = std::move(client_token);
+    }
+    return call_result->value_or(zx::error(ZX_ERR_INTERNAL));
+  };
+
+  // 1. Target by moniker only (optional disambiguator omitted).
+  {
+    fidl::Arena arena;
+    zx::eventpair client_token;
+    zx::result<> res = start_suspend(arena, "dev.second", std::nullopt, &client_token);
+    EXPECT_EQ(ZX_OK, res.status_value());
+    EXPECT_FALSE(test_topology.element_control().HasDependencyOn(second_power_token));
+    EXPECT_TRUE(test_topology.element_control().HasDependencyOn(root_power_token));
+
+    client_token.reset();
+    EXPECT_TRUE(RunLoopUntilIdle());
+    EXPECT_TRUE(test_topology.element_control().HasDependencyOn(second_power_token));
+    EXPECT_FALSE(test_topology.element_control().HasDependencyOn(root_power_token));
+  }
+
+  // 2. Mismatched disambiguator verifies DriverDevelopmentService forwards disambiguator over
+  // FIDL instead of dropping it.
+  {
+    fidl::Arena arena;
+    zx::eventpair client_token;
+    std::string wrong_disambiguator = second_node->MakeDisambiguator() == "0000000000000000"
+                                          ? "1111111111111111"
+                                          : "0000000000000000";
+    zx::result<> res = start_suspend(arena, "dev.second", wrong_disambiguator, &client_token);
+    EXPECT_EQ(ZX_ERR_NOT_FOUND, res.status_value());
+    EXPECT_TRUE(test_topology.element_control().HasDependencyOn(second_power_token));
+    EXPECT_FALSE(test_topology.element_control().HasDependencyOn(root_power_token));
+  }
+
+  // 3. Matching disambiguator succeeds and resumes cleanly when the token is dropped.
+  {
+    fidl::Arena arena;
+    zx::eventpair client_token;
+    std::string disambiguator = second_node->MakeDisambiguator();
+    zx::result<> res = start_suspend(arena, "dev.second", disambiguator, &client_token);
+    EXPECT_EQ(ZX_OK, res.status_value());
+    EXPECT_FALSE(test_topology.element_control().HasDependencyOn(second_power_token));
+    EXPECT_TRUE(test_topology.element_control().HasDependencyOn(root_power_token));
+
+    client_token.reset();
+    EXPECT_TRUE(RunLoopUntilIdle());
+    EXPECT_TRUE(test_topology.element_control().HasDependencyOn(second_power_token));
+    EXPECT_FALSE(test_topology.element_control().HasDependencyOn(root_power_token));
+  }
+
+  ServeStopListener(std::move(controller));
+  StopDriverComponent(std::move(root_driver->controller));
+}
+
 TEST_P(DriverRunnerTest, InspectHealthChecks) {
   SetupDriverRunner();
 
@@ -3267,8 +3531,6 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesRootWithoutPowerElementChil
 
   zx::eventpair d_ep1, d_ep2;
   ASSERT_EQ(ZX_OK, zx::eventpair::create(0, &d_ep1, &d_ep2));
-  fuchsia_component_sandbox::wire::DictionaryRef dict_ref;
-  dict_ref.token = std::move(d_ep1);
 
   zx::event token;
   ASSERT_EQ(zx::event::create(0, &token), ZX_OK);
@@ -3297,8 +3559,8 @@ TEST_P(DriverRunnerTest, RestartWithPowerDependenciesRootWithoutPowerElementChil
   // Restart the subtree rooted at "root" (where root has NO power element, but child "second"
   // DOES).
   driver_runner().RestartWithDictionaryAndPowerDependencies(
-      "root", fidl::ToNatural(std::move(dict_ref)), std::move(power_deps),
-      std::move(cpu_override_token), {}, std::move(release_fence2));
+      "root", std::move(d_ep1), std::move(power_deps), std::move(cpu_override_token), {},
+      std::move(release_fence2));
 
   while (!stop_listener_second.is_stopped() || !stop_listener_root.is_stopped()) {
     RunLoopUntilIdle();

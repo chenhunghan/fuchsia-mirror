@@ -42,9 +42,6 @@ non_sharded_tests = [
 ]
 
 _common_test_package_deps = [
-  # netemul-sandbox is used to create hermetic test realms.
-  "//src/connectivity/network/testing/netemul/service:netemul-sandbox",
-
   # the expectation-comparer is used to support pass/fail/skip expectations.
   "//src/lib/testing/expectation:expectation_comparer",
 ]
@@ -52,6 +49,9 @@ _common_test_package_deps = [
 _common_test_subpackages = [
   # some tests run the DHCP client along with the hermetic netstack.
   "//src/connectivity/network/dhcpv4/client/bindings:package",
+
+  # netemul-sandbox is used to create hermetic test realms.
+  "//src/connectivity/network/testing/netemul/service:package",
 ]
 
 _non_log_less_subpackages =

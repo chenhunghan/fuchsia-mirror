@@ -138,6 +138,7 @@ impl Into<TimeMetricDimensionTrack> for Track {
 pub enum StartClockSource {
     Rtc,
     External(Role),
+    Backstop,
 }
 
 /// The strategies that can be used to align a clock with the estimated UTC.

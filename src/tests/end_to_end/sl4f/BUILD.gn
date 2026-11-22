@@ -32,14 +32,11 @@ dart_test("sl4f_test") {
   non_dart_deps = [ ":runtime_deps($host_toolchain)" ]
 
   environments = [
-    nuc7_env,
     nuc11_env,
 
     # The astro environment has tags as it is still to be run on an FYI builder.
     {
-      dimensions = {
-        device_type = "Astro"
-      }
+      dimensions = astro_env.dimensions
       tags = [ "e2e-fyi" ]
     },
   ]
@@ -61,9 +58,7 @@ dart_test("sl4f_test_astro_only") {
   environments = [
     # The astro environment has tags as it is still to be run on an FYI builder.
     {
-      dimensions = {
-        device_type = "Astro"
-      }
+      dimensions = astro_env.dimensions
       tags = [ "e2e-fyi" ]
     },
   ]

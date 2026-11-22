@@ -862,8 +862,8 @@ class ZirconPlatformConnectionClient : public PlatformConnectionClient {
                                                          const magma_buffer_offset* offsets,
                                                          uint64_t offset_count) override {
     DASSERT(sizeof(*offsets) == sizeof(fuchsia_gpu_magma::wire::BufferRange));
-    // The LLCPP FIDL bindings don't take const pointers, but they don't modify the data unless it
-    // contains handles.
+    // The C++ wire FIDL bindings don't take const pointers, but they don't modify the data unless
+    // it contains handles.
     auto fidl_offsets = const_cast<fuchsia_gpu_magma::wire::BufferRange*>(
         reinterpret_cast<const fuchsia_gpu_magma::wire::BufferRange*>(offsets));
     magma_status_t result = client_.AddPerformanceCounterBufferOffsetsToPool(

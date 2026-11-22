@@ -60,10 +60,13 @@ func (git *Git) GetURL(ctx context.Context, dir string) (string, error) {
 	result := output.String()
 	result = strings.TrimSpace(result)
 
-	// Turquoise repos return "sso" urls, so convert them to
+	// Turquoise repos return "sso" or "rpc" urls, so convert them to
 	// http links that a user can view in a browser.
 	result = strings.ReplaceAll(result,
 		"sso://turquoise-internal",
+		"https://turquoise-internal.googlesource.com")
+	result = strings.ReplaceAll(result,
+		"rpc://turquoise-internal",
 		"https://turquoise-internal.googlesource.com")
 
 	return result, nil

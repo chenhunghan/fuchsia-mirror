@@ -41,7 +41,8 @@ int TestMain() {
     }
   }
 
-  const int argc = static_cast<int>(argv.size());
+  int argc = static_cast<int>(argv.size());
+  argv.push_back(nullptr);
   return RUN_ALL_TESTS(argc, const_cast<char**>(argv.data()));
 }
 

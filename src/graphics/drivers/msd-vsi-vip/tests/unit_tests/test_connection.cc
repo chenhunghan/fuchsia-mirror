@@ -250,3 +250,13 @@ TEST_F(TestMsdVsiConnection, ReleaseMappingOnDestruction) {
   EXPECT_EQ(1u, submitted_batches_.size());
   EXPECT_FALSE(submitted_batches_[0]->IsCommandBuffer());
 }
+
+TEST_F(TestMsdVsiConnection, MapBufferTooLarge) {
+  constexpr uint64_t kLargeBufferSize = 1ull << 32;
+  std::shared_ptr<MsdVsiBuffer> buffer = MsdVsiBuffer::Create(kLargeBufferSize, "large_test");
+  ASSERT_NE(buffer, nullptr);
+
+  EXPECT_EQ(
+      MAGMA_STATUS_INVALID_ARGS,
+      connection_->MapBufferGpu(buffer, 0x10000, 0 /* page_offset */, 1 /* page_count */).get());
+}

@@ -21,7 +21,9 @@ kernel_rust_mod("iris-rs") {
     "//src/lib/kalloc",
     "//src/lib/ksync",
     "//src/lib/regio",
+    "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
+    "//zircon/kernel/dev/psci:psci-rs",
     "//zircon/kernel/lib/debug",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
@@ -32,6 +34,5 @@ source_set("iris") {
   deps = [
     ":iris-rs",
     "//zircon/kernel/dev/pdev/power",
-    "//zircon/kernel/dev/psci",
   ]
 }

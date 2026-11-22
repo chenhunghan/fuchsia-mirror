@@ -16,7 +16,7 @@ use cm_config::{
 };
 use cm_rust::{CapabilityTypeName, ProtocolDecl, StorageDecl, StorageDirectorySource};
 use cm_types::Name;
-use fidl_fuchsia_component_decl as fdecl;
+use fidl_fuchsia_component_decl_common as fdecl;
 use moniker::{ExtendedMoniker, Moniker};
 use routing::component_instance::ComponentInstanceInterface;
 use routing::policy::GlobalPolicyChecker;
@@ -708,7 +708,7 @@ impl CapabilityAllowlistPolicyBuilder {
             },
             capability_policy: self.capability_policy.clone(),
             debug_capability_policy: self.debug_capability_policy.clone(),
-            child_policy: ChildPolicyAllowlists { reboot_on_terminate: vec![] },
+            child_policy: ChildPolicyAllowlists::default(),
             ..Default::default()
         }
     }

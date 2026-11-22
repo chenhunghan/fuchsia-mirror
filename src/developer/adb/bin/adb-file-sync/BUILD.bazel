@@ -2,9 +2,147 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":adb-file-sync-test"],
+    visibility = ["//src/developer:__pkg__"],
+)
 
 exports_files(
     ["meta/adb-file-sync.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "adb-file-sync",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/adb-file-sync.cml",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "adb-file-sync-config",
+    cm_label = ":manifest",
+)
+
+fx_cc_binary(
+    name = "adb-file-sync",
+    srcs = [
+        "adb-file-sync.cc",
+        "adb-file-sync.h",
+        "main.cc",
+    ],
+    deps = [
+        ":adb-file-sync-config",
+        "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_cpp",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//sdk/lib/zxio",
+        "//src/developer/adb/third_party/adb-file-sync",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "adb-file-sync_packaged",
+    binary = ":adb-file-sync",
+    binary_name = "adb-file-sync",
+)
+
+fx_component(
+    name = "adb-file-sync-component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/developer/adb:__subpackages__"],
+    deps = [":adb-file-sync_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "adb-file-sync-test-bin",
+    srcs = ["adb-file-sync-test.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.adb:fuchsia.hardware.adb_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_testing",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_cpp_testing",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_hlcpp",
+        # TODO(https://fxbug.dev/584376026): Drop path_overwrite once
+        # //sdk/lib/sys/component/cpp/testing:cpp migrates to Bazel; in GN, :cpp
+        # is an umbrella group bundling :cpp_library, realm_builder_server_component,
+        # and ASan container-overflow suppression.
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",  # @bazel2gn:path_overwrite://sdk/lib/sys/component/cpp/testing:cpp
+        "//src/developer/adb/third_party/adb-file-sync",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "adb-file-sync-test-bin_packaged",
+    testonly = True,
+    binary = ":adb-file-sync-test-bin",
+    binary_name = "adb-file-sync-test-bin",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "adb-file-sync-test-manifest",
+    testonly = True,
+    component_name = "adb_file_sync_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/adb-file-sync-test.cml",
+)
+
+fx_test_component(
+    name = "adb-file-sync-test-component",
+    compiled_manifest = ":adb-file-sync-test-manifest",
+    deps = [":adb-file-sync-test-bin_packaged"],
+)
+
+fx_package(
+    name = "adb-file-sync-test_package",
+    package_name = "adb-file-sync-test",
+    testonly = True,
+    components = [
+        ":adb-file-sync-component",
+        # In GN, realm_builder_server_component is pulled in transitively via
+        # //sdk/lib/sys/component/cpp/testing:cpp.
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",  # @bazel2gn:skip
+    ],
+    test_components = [":adb-file-sync-test-component"],
+)
+
+fx_test(
+    name = "adb-file-sync-test",
+    package = ":adb-file-sync-test_package",
 )

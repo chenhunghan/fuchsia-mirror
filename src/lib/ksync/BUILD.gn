@@ -65,6 +65,7 @@ rustc_library("ksync") {
       "//src/lib/fuchsia-sync",
       "//third_party/rust_crates:lock_api",
     ]
+    test_deps = [ "//third_party/rust_crates:libc" ]
   }
 }
 

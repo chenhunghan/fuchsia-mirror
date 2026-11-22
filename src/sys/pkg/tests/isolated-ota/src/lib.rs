@@ -289,6 +289,25 @@ impl TestExecutor<TestResult> for IsolatedOtaTestExecutor {
             )
             .await
             .unwrap();
+        realm_builder
+            .add_route(
+                Route::new()
+                    .capability(
+                        Capability::protocol_by_name("fuchsia.storage.block.Mapper").optional(),
+                    )
+                    .capability(
+                        Capability::protocol_by_name("fuchsia.storage.mapping.MappingProvider")
+                            .optional(),
+                    )
+                    .capability(
+                        Capability::configuration("fuchsia.pkgcache.UseDriverBlobPaging")
+                            .optional(),
+                    )
+                    .from(Ref::void())
+                    .to(&pkg_component),
+            )
+            .await
+            .unwrap();
 
         realm_builder
             .add_capability(cm_rust::CapabilityDecl::Config(cm_rust::ConfigurationDecl {

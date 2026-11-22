@@ -4,6 +4,8 @@
 
 #include "src/bringup/bin/critical-services/crashsvc/crashsvc.h"
 
+#include <lib/async-loop/cpp/loop.h>
+#include <lib/async-loop/default.h>
 #include <lib/async/cpp/task.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/exception.h>
@@ -15,6 +17,9 @@
 #include <zircon/syscalls/exception.h>
 #include <zircon/types.h>
 
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
 #include <memory>
 
 #include <inspector/inspector.h>
@@ -40,6 +45,61 @@ constexpr auto kHeldExceptionTimeout = zx::min(10);
 
 using ExceptionHook =
     fit::function<ExceptionDisposition(const zx::process&, const zx_exception_report_t&)>;
+
+enum class BacktraceTarget : uint8_t {
+  kCurrentThread,
+  kSpecificThread,
+  kAllThreads,
+};
+
+// Runs non-watchdog backtrace dumps on a dedicated thread and bounds concurrency to one in-flight
+// dump so repeated backtrace_request() calls while a userpager is stalled cannot block crashsvc's
+// exception dispatcher or accumulate threads.
+class BacktraceWorker {
+ public:
+  ~BacktraceWorker() { loop_.Shutdown(); }
+
+  zx_status_t Start() { return loop_.StartThread("crashsvc-backtrace"); }
+
+  void Dump(zx::exception exception, zx::process process, zx::thread thread, BacktraceTarget target,
+            zx_koid_t target_koid) {
+    if (in_flight_.exchange(true, std::memory_order_acq_rel)) {
+      const std::string process_name = fsl::GetObjectName(process.get());
+      fprintf(stdout, "crashsvc: skipping dump of process \"%s\" (dump already in flight)\n",
+              process_name.c_str());
+      return;
+    }
+
+    const zx_status_t status = async::PostTask(
+        loop_.dispatcher(), [this, exception = std::move(exception), process = std::move(process),
+                             thread = std::move(thread), target, target_koid] mutable {
+          switch (target) {
+            case BacktraceTarget::kCurrentThread:
+              inspector_print_debug_info(stdout, process.get(), thread.get());
+              break;
+            case BacktraceTarget::kSpecificThread:
+              inspector_print_debug_info_for_thread(stdout, process.get(), target_koid);
+              break;
+            case BacktraceTarget::kAllThreads:
+              inspector_print_debug_info_for_all_threads(stdout, process.get());
+              break;
+          }
+          fflush(stdout);
+          // Clear the gate before closing |exception| so a caller that immediately issues another
+          // backtrace request upon resuming is not dropped as concurrent.
+          in_flight_.store(false, std::memory_order_release);
+          exception.reset();
+        });
+    if (status != ZX_OK) {
+      in_flight_.store(false, std::memory_order_release);
+      LogError("failed to post backtrace request task", status);
+    }
+  }
+
+ private:
+  std::atomic<bool> in_flight_ = false;
+  async::Loop loop_{&kAsyncLoopConfigNeverAttachToThread};
+};
 
 // Cleans up and resumes a thread in a manual backtrace request.
 //
@@ -71,7 +131,7 @@ bool ResumeIfBacktraceRequest(const zx::thread& thread, const zx::exception& exc
 
 void HandOffException(
     async_dispatcher_t* dispatcher, zx::exception exception, const zx_exception_info_t& info,
-    ExceptionHandler& handler, bool& early_bailout,
+    ExceptionHandler& handler, BacktraceWorker& backtrace_worker, bool& early_bailout,
     fit::function<bool(const zx::process&, std::string_view)>& backtrace_request_hook,
     ExceptionHook& exception_hook) {
   zx::process process;
@@ -93,22 +153,59 @@ void HandOffException(
     LogError("failed to get general registers", info, status);
   }
 
-  // If this is a backtrace request, we print the requested thread(s) and then return.
+  // If this is a backtrace request, print the requested thread(s) on |backtrace_worker| and return
+  // so crashsvc's exception loop stays responsive even if unwinding faults on a wedged userpager.
   if (ResumeIfBacktraceRequest(thread, exception, info, &regs)) {
     if (backtrace_request_hook &&
         backtrace_request_hook(process, fsl::GetObjectName(thread.get()))) {
       // Releasing |exception| resumes the thread.
       return;
     }
+
+    BacktraceTarget target = BacktraceTarget::kAllThreads;
+    zx_koid_t target_koid = ZX_KOID_INVALID;
     if (is_backtrace_request_current_thread(&regs)) {
-      inspector_print_debug_info(stdout, process.get(), thread.get());
+      target = BacktraceTarget::kCurrentThread;
     } else if (is_backtrace_request_specific_thread(&regs)) {
-      inspector_print_debug_info_for_thread(stdout, process.get(),
-                                            get_backtrace_request_koid(&regs));
-    } else {
-      inspector_print_debug_info_for_all_threads(stdout, process.get());
+      target = BacktraceTarget::kSpecificThread;
+      target_koid = get_backtrace_request_koid(&regs);
     }
+
+    backtrace_worker.Dump(std::move(exception), std::move(process), std::move(thread), target,
+                          target_koid);
     return;
+  }
+
+  // A spin detection report from the kernel is a request to show where the thread was executing,
+  // not a crash: print the thread and let it continue.
+  if (info.type == ZX_EXCP_POLICY_ERROR) {
+    zx_exception_report_t report = {};
+    if (thread.get_info(ZX_INFO_THREAD_EXCEPTION_REPORT, &report, sizeof(report), nullptr,
+                        nullptr) == ZX_OK &&
+        report.context.synth_code == ZX_EXCP_POLICY_CODE_SPIN_DETECTION) {
+      // Mark the exception as handled first, so that the thread resumes when |exception| is
+      // released, including when |backtrace_worker| drops the dump because one is in flight.
+      const uint32_t state = ZX_EXCEPTION_STATE_HANDLED;
+      if (const zx_status_t status =
+              exception.set_property(ZX_PROP_EXCEPTION_STATE, &state, sizeof(state));
+          status != ZX_OK) {
+        // The thread cannot be resumed, so releasing |exception| terminates its process. Fall
+        // through and handle this as the crash it is about to become.
+        LogError("failed to resume from spin detection report", info, status);
+      } else {
+        fprintf(stdout,
+                "crashsvc: kernel reported thread \"%s\" in process \"%s\" for keeping CPU %u busy "
+                "while other threads on it did not run; printing it and resuming\n",
+                fsl::GetObjectName(thread.get()).c_str(), fsl::GetObjectName(process.get()).c_str(),
+                report.context.synth_data);
+        // Print on |backtrace_worker| so that a slow unwind does not block the exception loop.
+        // The thread stays in the exception until the dump is done; other threads in its process
+        // run.
+        backtrace_worker.Dump(std::move(exception), std::move(process), std::move(thread),
+                              BacktraceTarget::kCurrentThread, ZX_KOID_INVALID);
+        return;
+      }
+    }
   }
 
   // Dump the crash info to the logs whether we have a FIDL handler or not.
@@ -236,12 +333,19 @@ zx::result<std::unique_ptr<async::Wait>> start_crashsvc(
     fit::function<bool(const zx::process& process, std::string_view thread_name)>
         backtrace_request_hook,
     ExceptionHook exception_hook) {
+  auto backtrace_worker = std::make_unique<BacktraceWorker>();
+  if (const zx_status_t status = backtrace_worker->Start(); status != ZX_OK) {
+    LogError("Failed to start backtrace worker, crashsvc won't start", status);
+    return zx::error(status);
+  }
+
   std::unique_ptr wait = std::make_unique<async::Wait>(
       exception_channel.get(), ZX_CHANNEL_READABLE | ZX_CHANNEL_PEER_CLOSED, /*options=*/0u,
       [exception_channel = std::move(exception_channel),
        handler = std::make_unique<ExceptionHandler>(dispatcher, std::move(exception_handler_svc),
                                                     kExceptionHandlerTimeout),
-       early_bailout = false, backtrace_request_hook = std::move(backtrace_request_hook),
+       backtrace_worker = std::move(backtrace_worker), early_bailout = false,
+       backtrace_request_hook = std::move(backtrace_request_hook),
        exception_hook = std::move(exception_hook)](async_dispatcher_t* dispatcher,
                                                    async::Wait* wait, zx_status_t status,
                                                    const zx_packet_signal_t* signal) mutable {
@@ -264,8 +368,8 @@ zx::result<std::unique_ptr<async::Wait>> start_crashsvc(
           return;
         }
 
-        HandOffException(dispatcher, std::move(exception), info, *handler, early_bailout,
-                         backtrace_request_hook, exception_hook);
+        HandOffException(dispatcher, std::move(exception), info, *handler, *backtrace_worker,
+                         early_bailout, backtrace_request_hook, exception_hook);
 
         if (const zx_status_t status = wait->Begin(dispatcher); status != ZX_OK) {
           LogError("Failed to restart wait, crashsvc won't continue", status);

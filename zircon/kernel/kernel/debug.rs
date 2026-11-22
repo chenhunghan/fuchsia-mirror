@@ -23,8 +23,7 @@ use crate::kernel::percpu::{CpuStats, PerCpu};
 use crate::kernel::recurring_callback::StaticRecurringCallback;
 use crate::kernel::scheduler;
 use crate::kernel::thread::{
-    Backtrace, DEFAULT_PRIORITY, Thread, ThreadPtr, create_with_priority, reschedule,
-    thread_id_to_thread_slow,
+    Backtrace, DEFAULT_PRIORITY, Thread, create_with_priority, reschedule, thread_id_to_thread_slow,
 };
 use crate::kernel::types::cpu_num_t;
 use crate::platform_rs::timer::{InstantMono, current_mono_time, zx_sec};
@@ -64,16 +63,15 @@ unsafe extern "C" fn cmd_thread(argc: c_int, argv: *const CmdArgs, flags: u32) -
             // Note that the practice of dumping info about a thread by direct kernel
             // address is inherently dangerous.  No validation of the pointer is
             // currently done.
-            ksync::lock!(let _list_lock_guard = Thread::get_list_lock().lock());
-            // SAFETY: `_list_lock_guard` holds `Thread::get_list_lock()`, and diagnostic command
-            // inspects `t` while holding the list lock.
+            ksync::lock!(let list_lock_guard = Thread::get_list_lock().lock());
+            // SAFETY: `thread::init_early()` completed during early boot before the console runs,
+            // `list_lock_guard` holds `Thread::get_list_lock()`, and diagnostic command inspects
+            // `t` while holding the list lock.
             unsafe {
                 let t = if is_kernel_address(argv[2].arg_uint as usize) {
-                    ThreadPtr::from_raw(ptr::with_exposed_provenance_mut::<Thread>(
-                        argv[2].arg_uint as usize,
-                    ))
+                    ptr::with_exposed_provenance::<Thread>(argv[2].arg_uint as usize).as_ref()
                 } else {
-                    thread_id_to_thread_slow(argv[2].arg_uint as zx_koid_t)
+                    thread_id_to_thread_slow(argv[2].arg_uint as zx_koid_t, list_lock_guard.token())
                 };
                 if let Some(t) = t {
                     let mut bt = Backtrace::default();
@@ -88,13 +86,14 @@ unsafe extern "C" fn cmd_thread(argc: c_int, argv: *const CmdArgs, flags: u32) -
             return usage();
         }
 
-        // SAFETY: Diagnostic command dumps raw kernel thread address provided by operator, or
-        // calls `dump_tid_during_panic` when `CMD_FLAG_PANIC` is set.
+        // SAFETY: `thread::init_early()` completed during early boot before the console runs;
+        // diagnostic command dumps raw kernel thread address provided by operator, or calls
+        // `dump_tid_during_panic` when `CMD_FLAG_PANIC` is set.
         unsafe {
             if is_kernel_address(argv[2].arg_uint as usize) {
-                if let Some(t) = ThreadPtr::from_raw(ptr::with_exposed_provenance_mut::<Thread>(
-                    argv[2].arg_uint as usize,
-                )) {
+                if let Some(t) =
+                    ptr::with_exposed_provenance::<Thread>(argv[2].arg_uint as usize).as_ref()
+                {
                     t.dump(true);
                 }
             } else if (flags & CMD_FLAG_PANIC) != 0 {
@@ -105,8 +104,9 @@ unsafe extern "C" fn cmd_thread(argc: c_int, argv: *const CmdArgs, flags: u32) -
         }
     } else if argv[1].as_str() == "list" {
         kprintln!("thread list:");
-        // SAFETY: `argv[2].arg_str` is a valid C string when `argc >= 3`, and
-        // `dump_all_during_panic` is only called when `CMD_FLAG_PANIC` is set.
+        // SAFETY: `thread::init_early()` completed during early boot before the console runs,
+        // `argv[2].arg_str` is a valid C string when `argc >= 3`, and `dump_all_during_panic` is
+        // only called when `CMD_FLAG_PANIC` is set.
         unsafe {
             let match_owner =
                 (argc >= 3 && !argv[2].arg_str.is_null()).then(|| CStr::from_ptr(argv[2].arg_str));
@@ -118,8 +118,9 @@ unsafe extern "C" fn cmd_thread(argc: c_int, argv: *const CmdArgs, flags: u32) -
         }
     } else if argv[1].as_str() == "list_full" {
         kprintln!("thread list:");
-        // SAFETY: `argv[2].arg_str` is a valid C string when `argc >= 3`, and
-        // `dump_all_during_panic` is only called when `CMD_FLAG_PANIC` is set.
+        // SAFETY: `thread::init_early()` completed during early boot before the console runs,
+        // `argv[2].arg_str` is a valid C string when `argc >= 3`, and `dump_all_during_panic` is
+        // only called when `CMD_FLAG_PANIC` is set.
         unsafe {
             let match_owner =
                 (argc >= 3 && !argv[2].arg_str.is_null()).then(|| CStr::from_ptr(argv[2].arg_str));
@@ -290,22 +291,30 @@ fn threadload_callback() {
 }
 
 fn threadq_callback() {
+    let _irqd = InterruptDisableGuard::new();
     kprintln!("----------------------------------------------------");
     for (i, percpu) in PerCpu::iter() {
         if scheduler::peek_is_active(i) {
             kprintln!("thread queue cpu {:2}:", i);
-            percpu.scheduler.dump(false);
+            // SAFETY: Interrupts are disabled by `_irqd`, this callback holds no scheduler
+            // `queue_lock_`, and console recurring callbacks only run after `stdout()` is
+            // initialized.
+            unsafe { percpu.scheduler.dump(false) };
         }
     }
     kprintln!("");
 }
 
 fn threadq_stats_callback() {
+    let _irqd = InterruptDisableGuard::new();
     kprintln!("----------------------------------------------------");
     for (i, percpu) in PerCpu::iter() {
         if scheduler::peek_is_active(i) {
             kprintln!("thread queue cpu {:2}:", i);
-            percpu.scheduler.dump(true);
+            // SAFETY: Interrupts are disabled by `_irqd`, this callback holds no scheduler
+            // `queue_lock_`, and console recurring callbacks only run after `stdout()` is
+            // initialized.
+            unsafe { percpu.scheduler.dump(true) };
         }
     }
     kprintln!("");

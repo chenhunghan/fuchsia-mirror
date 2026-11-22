@@ -17,7 +17,9 @@ use crate::registers::{
     HostControllerStatusReg, InterruptStatusReg, PowerModeStatus, UicCommandArgument1Reg,
     UicCommandArgument2Reg, UicCommandArgument3Reg, UicCommandReg,
 };
+use fuchsia_async as fasync;
 use mmio::{Mmio, ReadableRegister, Register, WritableRegister};
+use std::hint::spin_loop;
 
 /// UIC command opcodes (UFSHCI 3.0/4.0 section 5.6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,7 +113,7 @@ pub async fn poll_until<T>(
 /// # Errors
 ///
 /// Returns `Timeout` if `step` has not returned `Some` after `timeout`.
-pub(crate) async fn poll_until_with_interval<T>(
+pub async fn poll_until_with_interval<T>(
     timeout: zx::MonotonicDuration,
     interval: zx::MonotonicDuration,
     step: impl FnMut() -> Option<T>,
@@ -139,10 +141,10 @@ async fn poll_with_spin_and_interval<T>(
             return Err(UfsError::Timeout);
         }
         if now < spin_until {
-            std::hint::spin_loop();
+            spin_loop();
             continue;
         }
-        fuchsia_async::Timer::new(zx::MonotonicInstant::after(interval)).await;
+        fasync::Timer::new(zx::MonotonicInstant::after(interval)).await;
     }
 }
 
@@ -187,24 +189,41 @@ pub fn clear_interrupt_status<M: Mmio>(mmio: &mut M, select: impl FnOnce(&mut In
     clear.write(mmio);
 }
 
-/// Maps `HCS.UPMCRS` after a power mode or hibernate change to a result.
+/// Checks the host controller's power-mode-change status (`HCS.UPMCRS`) after a UIC command.
+///
+/// Hibernate enter and exit accept any successful status, because auto-hibernate may already have
+/// parked the link. Every other command must report a locally initiated change (`PowerLocal`).
 pub fn check_power_mode_status<M: Mmio>(
     mmio: &M,
     opcode: UicCommandOpcode,
 ) -> Result<(), UfsError> {
-    let hcs = HostControllerStatusReg::read(mmio);
-    match hcs.power_mode_status() {
-        Some(PowerModeStatus::PowerLocal) => Ok(()),
-        Some(
-            PowerModeStatus::PowerOk
-            | PowerModeStatus::PowerRemote
-            | PowerModeStatus::PowerBusy
-            | PowerModeStatus::PowerErrorCap
-            | PowerModeStatus::PowerFatalError,
-        )
-        | None => Err(UfsError::UicError {
-            opcode: opcode as u8,
-            code: hcs.uic_power_mode_change_request_status(),
-        }),
+    let controller_status = HostControllerStatusReg::read(mmio);
+    if let Some(power_mode_status) = controller_status.power_mode_status() {
+        match opcode {
+            UicCommandOpcode::DmeHibernateEnter | UicCommandOpcode::DmeHibernateExit => {
+                if power_mode_status.is_success() {
+                    return Ok(());
+                }
+            }
+            UicCommandOpcode::DmeGet
+            | UicCommandOpcode::DmeSet
+            | UicCommandOpcode::DmePeerGet
+            | UicCommandOpcode::DmePeerSet
+            | UicCommandOpcode::DmePowerOn
+            | UicCommandOpcode::DmePowerOff
+            | UicCommandOpcode::DmeEnable
+            | UicCommandOpcode::DmeReset
+            | UicCommandOpcode::DmeEndpointReset
+            | UicCommandOpcode::DmeLinkStartup
+            | UicCommandOpcode::DmeTestMode => {
+                if power_mode_status == PowerModeStatus::PowerLocal {
+                    return Ok(());
+                }
+            }
+        };
     }
+    Err(UfsError::UicError {
+        opcode: opcode as u8,
+        code: controller_status.uic_power_mode_change_request_status(),
+    })
 }

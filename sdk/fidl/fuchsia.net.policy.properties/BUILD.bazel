@@ -17,6 +17,7 @@ fidl_library(
         "//sdk/fidl/fuchsia.net",
         "//sdk/fidl/fuchsia.net.interfaces",
         "//sdk/fidl/fuchsia.net.name",
+        "//sdk/fidl/fuchsia.net.resources",
         "//sdk/fidl/fuchsia.posix.socket",
     ],
 )

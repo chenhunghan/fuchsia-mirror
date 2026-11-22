@@ -9,8 +9,8 @@
 #include <lib/component/outgoing/cpp/outgoing_directory.h>
 #include <lib/ddk/device.h>
 #include <lib/ddk/io-buffer.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zircon-internal/thread_annotations.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/pmt.h>

@@ -41,7 +41,8 @@ use netstack3_ip::icmp::{EchoTransportContextMarker, IcmpRxCounters};
 use netstack3_ip::socket::SocketHopLimits;
 use netstack3_ip::{
     IpHeaderInfo, IpLayerIpExt, IpTransportContext, LocalDeliveryPacketInfo,
-    MulticastMembershipHandler, ReceiveIpPacketMeta, SocketMetadata, TransportIpContext,
+    MulticastMembershipHandler, PmtuHandler, PmtuSrcAddr, ReceiveIpPacketMeta, SocketMetadata,
+    TransportIpContext, path_mtu,
 };
 use packet::{BufferMut, NestablePacketBuilder as _, ParsablePacket as _, ParseBuffer};
 use packet_formats::icmp::{IcmpEchoReply, IcmpEchoRequest, IcmpPacketBuilder, IcmpPacketRaw};
@@ -1085,8 +1086,8 @@ impl<I: IpExt, BC: IcmpEchoBindingsContext<I, CC::DeviceId>, CC: IcmpEchoBoundSt
 
     fn receive_icmp_error(
         core_ctx: &mut CC,
-        _bindings_ctx: &mut BC,
-        _device: &CC::DeviceId,
+        bindings_ctx: &mut BC,
+        device: &CC::DeviceId,
         original_src_ip: Option<SpecifiedAddr<I::Addr>>,
         original_dst_ip: SpecifiedAddr<I::Addr>,
         mut original_body: &[u8],
@@ -1128,26 +1129,61 @@ impl<I: IpExt, BC: IcmpEchoBindingsContext<I, CC::DeviceId>, CC: IcmpEchoBoundSt
             return;
         };
 
+        #[derive(Debug)]
+        enum MatchedSocket {
+            Connected,
+            Listener,
+        }
+
         core_ctx.with_icmp_ctx_and_sockets_mut(|core_ctx, sockets| {
-            if let Some(conn) = sockets.socket_map.conns().get_by_addr(&ConnAddr {
-                ip: ConnIpAddr { local: (original_src_ip, id), remote: (original_dst_ip, ()) },
-                device: None,
-            }) {
-                // NB: At the moment bindings has no need to consume ICMP
-                // errors, so we swallow them here.
-                debug!(
-                    "ICMP received ICMP error {:?} from {:?}, to {:?} on socket {:?}",
-                    err, original_dst_ip, original_src_ip, conn
-                );
-                CounterContext::<IcmpRxCounters<I>>::counters(core_ctx)
-                    .error_delivered_to_socket
-                    .increment()
-            } else {
+            // Identify the socket that likely sent the original packet,
+            // preferring connected sockets over listening sockets.
+            let mut addrs_to_search = AddrVecIter::<I, CC::WeakDeviceId, IcmpAddrSpec>::with_device(
+                ConnIpAddr { local: (original_src_ip, id), remote: (original_dst_ip, ()) }.into(),
+                device.downgrade(),
+            );
+            let matched = addrs_to_search.find_map(|addr_vec| match addr_vec {
+                AddrVec::Conn(c) => {
+                    sockets.socket_map.conns().get_by_addr(&c).map(|_| MatchedSocket::Connected)
+                }
+                AddrVec::Listen(l) => {
+                    sockets.socket_map.listeners().get_by_addr(&l).map(|_| MatchedSocket::Listener)
+                }
+            });
+            let Some(matched) = matched else {
                 trace!(
                     "IcmpIpTransportContext::receive_icmp_error: Got ICMP error message for \
                     nonexistent ICMP echo socket; either the socket responsible has since been \
                     removed, or the error message was sent in error or corrupted"
                 );
+                return;
+            };
+            // Only update the PMTU cache if the error reports a valid PMTU.
+            // The error is delivered to the socket regardless.
+            if let Some(pmtu) = path_mtu::pmtu_from_icmp_error::<I>(err) {
+                if let Some(src_ip) = PmtuSrcAddr::new_from_socket_ip_addr(original_src_ip) {
+                    let _: I::Mtu = PmtuHandler::<I, _>::update_pmtu_if_less(
+                        core_ctx,
+                        bindings_ctx,
+                        src_ip,
+                        original_dst_ip,
+                        pmtu,
+                    );
+                }
+            }
+            match matched {
+                MatchedSocket::Connected => {
+                    // NB: At the moment bindings has no need to consume ICMP
+                    // errors, so we swallow them here.
+                    debug!(
+                        "ICMP received ICMP error {err:?} from {original_dst_ip:?}, \
+                        to {original_src_ip:?} on connected socket"
+                    );
+                    CounterContext::<IcmpRxCounters<I>>::counters(core_ctx)
+                        .error_delivered_to_socket
+                        .increment();
+                }
+                MatchedSocket::Listener => {}
             }
         })
     }
@@ -1278,19 +1314,20 @@ mod tests {
     use ip_test_macro::ip_test;
     use net_declare::net_ip_v6;
     use net_types::Witness;
-    use net_types::ip::Ipv6;
+    use net_types::ip::{IpMtu as _, Ipv6, Mtu};
     use netstack3_base::socket::StrictlyZonedAddr;
     use netstack3_base::testutil::{
         FakeBindingsCtx, FakeCoreCtx, FakeDeviceId, FakeSendToken, FakeWeakDeviceId, TestIpExt,
     };
     use netstack3_base::{CtxPair, Icmpv4ErrorCode, Icmpv6ErrorCode, NetworkSerializationContext};
     use netstack3_ip::socket::testutil::{FakeDeviceConfig, FakeIpSocketCtx, InnerFakeIpSocketCtx};
-    use netstack3_ip::{LocalDeliveryPacketInfo, SendIpPacketMeta};
+    use netstack3_ip::{LocalDeliveryPacketInfo, PmtuDstAddr, SendIpPacketMeta};
     use packet::{Buf, EmptyBuf, NestableSerializer as _, Serializer};
     use packet_formats::icmp::{
         IcmpDestUnreachable, IcmpPacket, IcmpParseArgs, IcmpZeroCode, Icmpv4DestUnreachableCode,
         Icmpv6DestUnreachableCode,
     };
+    use test_case::test_case;
 
     use super::*;
 
@@ -1789,14 +1826,92 @@ mod tests {
             original_body.as_ref(),
             I::map_ip_out(
                 (),
-                |()| {
-                    Icmpv4ErrorCode::DestUnreachable(
-                        Icmpv4DestUnreachableCode::DestNetworkUnreachable,
-                        IcmpDestUnreachable::default(),
+                |()| Icmpv4ErrorCode::DestUnreachable {
+                    code: Icmpv4DestUnreachableCode::DestNetworkUnreachable,
+                    message: IcmpDestUnreachable::default(),
+                    original_packet_length: u16::try_from(
+                        packet_formats::ipv4::HDR_PREFIX_LEN + original_body.as_ref().len(),
                     )
+                    .unwrap(),
                 },
                 |()| Icmpv6ErrorCode::DestUnreachable(Icmpv6DestUnreachableCode::AddrUnreachable),
             ),
         )
+    }
+
+    #[derive(Copy, Clone, Debug)]
+    enum SocketState {
+        NoSocket,
+        Listener,
+        Connected,
+    }
+
+    #[ip_test(I)]
+    #[test_case(SocketState::NoSocket; "no socket")]
+    #[test_case(SocketState::Listener; "listener")]
+    #[test_case(SocketState::Connected; "connected")]
+    fn receive_icmp_pmtu_error<I: TestIpExt + IpExt>(socket_state: SocketState) {
+        let mut ctx = FakeIcmpCtx::<I>::default();
+        let mut api = IcmpEchoSocketApi::<I, _>::new(ctx.as_mut());
+
+        let local_ip = I::TEST_ADDRS.local_ip;
+        let remote_ip = I::TEST_ADDRS.remote_ip;
+        let pmtu_src = PmtuSrcAddr::new(local_ip.get()).unwrap();
+        let pmtu_dst = PmtuDstAddr::try_from(remote_ip).unwrap();
+        let pmtu = I::Mtu::new(Mtu::new(1300)).unwrap();
+
+        let sock = api.create();
+        match socket_state {
+            SocketState::NoSocket => {}
+            SocketState::Listener => {
+                api.bind(&sock, Some(ZonedAddr::Unzoned(local_ip)), Some(ICMP_ID)).unwrap();
+            }
+            SocketState::Connected => {
+                api.bind(&sock, Some(ZonedAddr::Unzoned(local_ip)), Some(ICMP_ID)).unwrap();
+                api.connect(&sock, Some(ZonedAddr::Unzoned(remote_ip)), REMOTE_ID).unwrap();
+            }
+        }
+
+        let deliver_error = |ctx: &mut FakeIcmpCtx<I>, mtu: Mtu| {
+            let original_body = Buf::new([1, 2, 3, 4], ..)
+                .wrap_in(IcmpPacketBuilder::<I, _>::new(
+                    *local_ip,
+                    *remote_ip,
+                    IcmpZeroCode,
+                    IcmpEchoRequest::new(ICMP_ID.get(), SEQ_NUM),
+                ))
+                .serialize_vec_outer(&mut NetworkSerializationContext::default())
+                .unwrap()
+                .unwrap_b();
+            let CtxPair { core_ctx, bindings_ctx } = ctx;
+            <IcmpEchoIpTransportContext as IpTransportContext<I, _, _>>::receive_icmp_error(
+                core_ctx,
+                bindings_ctx,
+                &FakeDeviceId,
+                Some(local_ip),
+                remote_ip,
+                original_body.as_ref(),
+                netstack3_ip::path_mtu::testutil::new_pmtu_error::<I>(mtu),
+            )
+        };
+
+        let (expected_pmtu, delivered) = match socket_state {
+            SocketState::NoSocket => (None, 0),
+            SocketState::Listener => (Some(pmtu), 0),
+            SocketState::Connected => (Some(pmtu), 1),
+        };
+
+        // An error reporting an MTU below the minimum link MTU must be
+        // delivered to a connected socket without updating the PMTU cache.
+        let invalid_mtu = Mtu::new(u32::from(I::MINIMUM_LINK_MTU.get()) - 1);
+        deliver_error(&mut ctx, invalid_mtu);
+        assert_eq!(ctx.core_ctx.state.rx_counters.error_delivered_to_socket.get(), delivered);
+        assert_eq!(ctx.core_ctx.state.ip_socket_ctx.get_pmtu(pmtu_src, pmtu_dst), None);
+
+        // An error reporting a valid MTU must be delivered to a connected
+        // socket, and update the PMTU cache for listening or connected sockets.
+        deliver_error(&mut ctx, pmtu.get());
+        assert_eq!(ctx.core_ctx.state.rx_counters.error_delivered_to_socket.get(), 2 * delivered);
+        assert_eq!(ctx.core_ctx.state.ip_socket_ctx.get_pmtu(pmtu_src, pmtu_dst), expected_pmtu);
     }
 }

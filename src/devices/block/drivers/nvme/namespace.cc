@@ -59,31 +59,6 @@ zx_status_t Namespace::AddNamespace() {
   return ZX_OK;
 }
 
-zx::result<std::unique_ptr<Namespace>> Namespace::Bind(Nvme* controller, uint32_t namespace_id) {
-  if (namespace_id == 0 || namespace_id == ~0u) {
-    fdf::error("Attempted to create namespace with invalid id {}.", namespace_id);
-    return zx::error(ZX_ERR_INVALID_ARGS);
-  }
-
-  fbl::AllocChecker ac;
-  auto ns = fbl::make_unique_checked<Namespace>(&ac, controller, namespace_id);
-  if (!ac.check()) {
-    fdf::error("Failed to allocate memory for namespace {}.", namespace_id);
-    return zx::error(ZX_ERR_NO_MEMORY);
-  }
-
-  zx_status_t status = ns->Init();
-  if (status != ZX_OK) {
-    return zx::error(status);
-  }
-
-  status = ns->AddNamespace();
-  if (status != ZX_OK) {
-    return zx::error(status);
-  }
-  return zx::ok(std::move(ns));
-}
-
 namespace {
 
 void PopulateNamespaceInspect(const IdentifyNvmeNamespace& ns, const fbl::String& namespace_name,
@@ -125,55 +100,61 @@ void PopulateNamespaceInspect(const IdentifyNvmeNamespace& ns, const fbl::String
 
 }  // namespace
 
-zx_status_t Namespace::Init() {
+zx::result<std::unique_ptr<Namespace>> Namespace::Bind(Nvme* controller, uint32_t namespace_id) {
+  if (namespace_id == 0 || namespace_id == ~0u) {
+    fdf::error("Attempted to create namespace with invalid id {}.", namespace_id);
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+
   zx::vmo admin_data;
   const uint32_t kPageSize = zx_system_get_page_size();
   zx_status_t status = zx::vmo::create(kPageSize, 0, &admin_data);
   if (status != ZX_OK) {
     fdf::error("Failed to create vmo: {}", zx_status_get_string(status));
-    return status;
+    return zx::error(status);
   }
 
   fzl::VmoMapper mapper;
   status = mapper.Map(admin_data);
   if (status != ZX_OK) {
     fdf::error("Failed to map vmo: {}", zx_status_get_string(status));
-    return status;
+    return zx::error(status);
   }
 
   // Identify namespace.
   IdentifySubmission identify_ns;
-  identify_ns.namespace_id = namespace_id_;
+  identify_ns.namespace_id = namespace_id;
   identify_ns.set_structure(IdentifySubmission::IdentifyCns::kIdentifyNamespace);
   zx::result<Completion> completion =
-      controller_->DoAdminCommandSync(identify_ns, admin_data.borrow());
+      controller->DoAdminCommandSync(identify_ns, admin_data.borrow());
   if (completion.is_error()) {
-    fdf::error("Failed to identify namespace {}: {}", namespace_id_, completion.status_string());
-    return completion.status_value();
+    fdf::error("Failed to identify namespace {}: {}", namespace_id, completion.status_string());
+    return completion.take_error();
   }
 
-  auto ns = static_cast<IdentifyNvmeNamespace*>(mapper.start());
+  auto ns_identify = static_cast<IdentifyNvmeNamespace*>(mapper.start());
 
-  block_info_.device_flags |=
+  block_server::PartitionInfo block_info = {};
+  block_info.device_flags |=
       static_cast<uint32_t>(fuchsia_storage_block::wire::DeviceFlag::kFuaSupport);
-  block_info_.block_count = ns->n_sze;
-  auto& fmt = ns->lba_formats[ns->lba_format_index()];
-  block_info_.block_size = fmt.lba_data_size_bytes();
+  block_info.block_count = ns_identify->n_sze;
+  auto& fmt = ns_identify->lba_formats[ns_identify->lba_format_index()];
+  block_info.block_size = fmt.lba_data_size_bytes();
 
   if (fmt.metadata_size_bytes()) {
     fdf::error("NVMe drive uses LBA format with metadata ({} bytes), which we do not support.",
                fmt.metadata_size_bytes());
-    return ZX_ERR_NOT_SUPPORTED;
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
   // The NVMe spec only mentions a lower bound. The upper bound may be a false requirement.
-  if ((block_info_.block_size < 512) || (block_info_.block_size > 32768)) {
-    fdf::error("Cannot handle LBA size of {}.", block_info_.block_size);
-    return ZX_ERR_NOT_SUPPORTED;
+  if ((block_info.block_size < 512) || (block_info.block_size > 32768)) {
+    fdf::error("Cannot handle LBA size of {}.", block_info.block_size);
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
 
   // NVME r/w commands operate in block units, maximum of 64K blocks.
-  const uint32_t max_bytes_per_cmd = block_info_.block_size * 65536;
-  uint32_t max_transfer_bytes = controller_->max_data_transfer_bytes();
+  const uint32_t max_bytes_per_cmd = block_info.block_size * 65536;
+  uint32_t max_transfer_bytes = controller->max_data_transfer_bytes();
   if (max_transfer_bytes == 0) {
     max_transfer_bytes = max_bytes_per_cmd;
   } else {
@@ -185,22 +166,31 @@ zx_status_t Namespace::Init() {
   const uint32_t prp_restricted_transfer_bytes = QueuePair::kMaxTransferPages * kPageSize;
   max_transfer_bytes = std::min(max_transfer_bytes, prp_restricted_transfer_bytes);
 
-  block_info_.max_transfer_size = max_transfer_bytes;
+  block_info.max_transfer_size = max_transfer_bytes;
 
   // Convert to block units.
-  max_transfer_blocks_ = max_transfer_bytes / block_info_.block_size;
+  const uint32_t max_transfer_blocks = max_transfer_bytes / block_info.block_size;
 
-  PopulateNamespaceInspect(*ns, NamespaceName(), controller_->atomic_write_unit_normal(),
-                           controller_->atomic_write_unit_power_fail(), max_transfer_bytes,
-                           block_info_.block_size, &controller_->inspect_node(),
-                           &controller_->inspect());
-
-  {
-    fbl::AutoLock lock(&lock_);
-    block_server_.emplace(block_info_, this);
+  if (controller->has_inspector()) {
+    PopulateNamespaceInspect(
+        *ns_identify, NamespaceName(namespace_id), controller->atomic_write_unit_normal(),
+        controller->atomic_write_unit_power_fail(), max_transfer_bytes, block_info.block_size,
+        &controller->inspect_node(), &controller->inspect());
   }
 
-  return ZX_OK;
+  fbl::AllocChecker ac;
+  auto ns = fbl::make_unique_checked<Namespace>(&ac, controller, namespace_id, block_info,
+                                                max_transfer_blocks);
+  if (!ac.check()) {
+    fdf::error("Failed to allocate memory for namespace {}.", namespace_id);
+    return zx::error(ZX_ERR_NO_MEMORY);
+  }
+
+  status = ns->AddNamespace();
+  if (status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok(std::move(ns));
 }
 
 zx::result<std::reference_wrapper<IoCommand>> Namespace::AllocateIoCommand() {
@@ -228,18 +218,18 @@ void Namespace::FreeIoCommand(IoCommand* io_cmd) {
 }
 
 void Namespace::StopBlockServer(fit::callback<void()> callback) {
-  fbl::AutoLock lock(&lock_);
-  shutdown_ = true;
-  pool_cond_.Broadcast();
-  if (block_server_) {
-    block_server_->DestroyAsync([this, callback = std::move(callback)]() mutable {
-      fbl::AutoLock lock(&lock_);
-      block_server_.reset();
-      callback();
-    });
-  } else {
-    callback();
+  {
+    fbl::AutoLock lock(&lock_);
+    shutdown_ = true;
+    pool_cond_.Broadcast();
   }
+  block_server_.DestroyAsync([this, callback = std::move(callback)]() mutable {
+    {
+      fbl::AutoLock lock(&lock_);
+      block_server_stopped_ = true;
+    }
+    callback();
+  });
 }
 
 Namespace::~Namespace() {
@@ -248,17 +238,21 @@ Namespace::~Namespace() {
         NamespaceName().c_str());
   }
   fbl::AutoLock lock(&lock_);
-  if (block_server_) {
+  if (!block_server_stopped_) {
     fdf::warn("Namespace destroyed with active block server connection.");
+    shutdown_ = true;
+    pool_cond_.Broadcast();
   }
 }
 
 void Namespace::OnRequests(std::span<block_server::Request> requests) {
   for (const auto& request : requests) {
-    fbl::AutoLock lock(&lock_);
-    zx::result<std::reference_wrapper<IoCommand>> alloc_result = AllocateIoCommand();
+    zx::result<std::reference_wrapper<IoCommand>> alloc_result = [&]() {
+      fbl::AutoLock lock(&lock_);
+      return AllocateIoCommand();
+    }();
     if (alloc_result.is_error()) {
-      block_server_->SendReply(request.request_id, alloc_result.take_error());
+      block_server_.SendReply(request.request_id, alloc_result.take_error());
       continue;
     }
     IoCommand& io_cmd = alloc_result.value().get();
@@ -316,9 +310,12 @@ void Namespace::OnRequests(std::span<block_server::Request> requests) {
 fdf::Logger& Namespace::logger() const { return controller_->logger(); }
 
 void Namespace::CompleteIoCommand(IoCommand* io_cmd, zx_status_t status) {
-  fbl::AutoLock lock(&lock_);
-  block_server_->SendReply(*io_cmd->request_id, zx::make_result(status));
-  FreeIoCommand(io_cmd);
+  const block_server::RequestId request_id = *io_cmd->request_id;
+  block_server_.SendReply(request_id, zx::make_result(status));
+  {
+    fbl::AutoLock lock(&lock_);
+    FreeIoCommand(io_cmd);
+  }
 }
 
 void Namespace::ServeRequests(fidl::ServerEnd<fuchsia_storage_block::Block> server_end) {
@@ -326,7 +323,7 @@ void Namespace::ServeRequests(fidl::ServerEnd<fuchsia_storage_block::Block> serv
   if (shutdown_) {
     return;
   }
-  block_server_->Serve(std::move(server_end));
+  block_server_.Serve(std::move(server_end));
 }
 
 void Namespace::Get(GetCompleter::Sync& completer) {

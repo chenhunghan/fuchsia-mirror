@@ -25,17 +25,15 @@ rustc_library(
         "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
         "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_rust",
         "//sdk/fidl/fuchsia.metrics.test:fuchsia.metrics.test_rust",
-        "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
         "//sdk/fidl/fuchsia.time.external:fuchsia.time.external_rust",
+        "//sdk/fidl/fuchsia.time:fuchsia.time_rust",
         "//sdk/rust/zx",
         "//src/lib/async-utils",
         "//src/lib/fake-clock/fidl:fidl_rust",
         "//src/lib/fidl/rust/fidl",
         "//src/lib/fuchsia-async",
         "//src/lib/fuchsia-component",
-        # GN's `//src/lib/fuchsia-component-test` group bundles the Rust library
-        # with the unmigrated `realm_builder_server_component`.
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-sync",
         "//src/storage/lib/vfs/rust:vfs",
         "//src/sys/time/lib/push-source",

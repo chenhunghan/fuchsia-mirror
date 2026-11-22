@@ -10,7 +10,7 @@
 //
 // See the .cc file for full documentation references.
 
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/zx/result.h>
 #include <zircon/types.h>
 

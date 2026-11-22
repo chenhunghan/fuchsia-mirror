@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = ["//src/connectivity/network/tests/getifaddrs:tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+fx_cc_library(
+    name = "os",
+    hdrs = ["os.h"],
+    visibility = [
+        "//src/connectivity/network/tests/benchmarks/socket-loopback:__pkg__",
+        "//src/connectivity/network/tests/external_network:__pkg__",
+        "//src/connectivity/network/tests/getifaddrs:__pkg__",
+        "//src/connectivity/network/tests/socket:__pkg__",
+    ],
+)

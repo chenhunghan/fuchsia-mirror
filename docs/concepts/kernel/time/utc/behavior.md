@@ -15,7 +15,7 @@ receive a handle to the clock.
 synchronizing against either a Real Time Clock (RTC) or an external source
 generally accessible over the network.
 
-## Differences from other operating systems
+## Differences from other operating systems {:#differences-from-other-operating-systems}
 
 UTC time on Fuchsia differs from time on most other operating systems in that
 it enforces a backstop time. The backstop time is set to the time of the latest

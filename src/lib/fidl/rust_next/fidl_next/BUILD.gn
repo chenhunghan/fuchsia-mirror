@@ -2,15 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/fidl/fidl.gni")
 import("//build/rust/fidl_rust_next.gni")
-import("//build/rust/rustc_library.gni")
-import("//build/rust/rustc_test.gni")
-
-fuchsia_unittest_package("fidl_next_test_package") {
-  deps = [ ":fidl_next_internal_test" ]
-}
 
 group("tests") {
   testonly = true
@@ -50,7 +42,7 @@ rustc_library("fidl_next_internal") {
   sources = [ "src/lib.rs" ]
   crate_name = "fidl_next"
   edition = "2024"
-  with_unit_tests = true
+  visibility = [ "//*" ]
   deps = [
     "//src/lib/fidl/rust_next/fidl_next_bind",
     "//src/lib/fidl/rust_next/fidl_next_codec",
@@ -62,4 +54,21 @@ rustc_library("fidl_next_internal") {
 group("fidl_next") {
   public_deps = [ ":fidl_next_internal" ]
   visibility = fidl_rust_next_allowlist
+}
+
+rustc_test("fidl_next_internal_test") {
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+  deps = [
+    "//src/lib/fidl/rust_next/fidl_next_bind",
+    "//src/lib/fidl/rust_next/fidl_next_codec",
+    "//src/lib/fidl/rust_next/fidl_next_protocol",
+    "//src/lib/fidl/rust_next/fidl_next_util",
+  ]
+}
+
+fuchsia_unittest_package("fidl_next_test_package") {
+  package_name = "fidl_next_test_package-gn"
+  component_name = "fidl_next_test_package"
+  deps = [ ":fidl_next_internal_test" ]
 }

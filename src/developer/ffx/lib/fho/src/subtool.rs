@@ -5,8 +5,9 @@
 use crate::{FhoEnvironment, TryFromEnv};
 use argh::{ArgsInfo, CommandInfo, FromArgs, SubCommand, SubCommands};
 use ffx_command::{
-    Error, FfxCommandLine, FfxContext, LocalBoxFuture, MetricsSession, Result, ToolRunner,
-    ToolSuite, analytics_command, check_strict_constraints, send_enhanced_analytics, user_error,
+    Error, FfxCommandLine, FfxContext, LocalBoxFuture, MetricsSession, Result, TargetNeed,
+    ToolRunner, ToolSuite, analytics_command, check_strict_constraints, send_enhanced_analytics,
+    user_error,
 };
 use ffx_config::EnvironmentContext;
 use ffx_config::environment::ExecutableKind;
@@ -36,7 +37,7 @@ where
 
     fn supports_structured_output(&self) -> bool;
     fn has_schema(&self) -> bool;
-    fn requires_target() -> bool;
+    fn target_need() -> TargetNeed;
 
     fn from_env(env: FhoEnvironment, cmd: Self::Command) -> impl Future<Output = Result<Self>>
     where
@@ -259,7 +260,7 @@ impl<T: FfxTool<E>, E: Into<Error> + 'static> FhoTool<T, E> {
         ffx: FfxCommandLine,
         tool: T::Command,
     ) -> Result<Box<Self>> {
-        check_strict_constraints(&ffx.global, Some(context), T::requires_target())?;
+        check_strict_constraints(&ffx.global, Some(context), T::target_need())?;
 
         let env = FhoEnvironment::new(context, &ffx);
         ffx_diagnostics_analytics_state::set_command_line_context(env.ffx_command(), &tool);
@@ -444,5 +445,98 @@ mod tests {
         let suite = FhoSuite::<FakeTool>::from_env(&config_env.context).unwrap();
         let ffx = FfxCommandLine::new(None, &["ffx", "fake", "stuff"]).expect("test ffx cmd");
         assert_eq!(suite.subcommand_chain(&ffx), vec!["fake"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_inferred_target_need_and_overrides() {
+        use crate::{Deferred, TryFromEnvWith, deferred};
+        use std::marker::PhantomData;
+        use std::rc::Rc;
+        use std::sync::Arc;
+
+        struct NeedsTarget;
+        impl TryFromEnv for NeedsTarget {
+            const TARGET_NEED: TargetNeed = TargetNeed::Required;
+            type Error = std::convert::Infallible;
+            async fn try_from_env(_: &FhoEnvironment) -> std::result::Result<Self, Self::Error> {
+                Ok(Self)
+            }
+        }
+
+        // Generic decorator whose output type is inferred from the field type, like `moniker`.
+        struct WithTarget<P>(PhantomData<fn() -> P>);
+        fn with_target<P>() -> WithTarget<P> {
+            WithTarget(PhantomData)
+        }
+        impl<P: Default + 'static> TryFromEnvWith for WithTarget<P> {
+            const TARGET_NEED: TargetNeed = TargetNeed::Required;
+            type Output = P;
+            type Error = std::convert::Infallible;
+            async fn try_from_env_with(
+                self,
+                _: &FhoEnvironment,
+            ) -> std::result::Result<P, Self::Error> {
+                Ok(P::default())
+            }
+        }
+
+        macro_rules! test_tool {
+            ($(#[$attr:meta])* $name:ident { $($body:tt)* }) => {
+                #[derive(FfxTool)]
+                $(#[$attr])*
+                struct $name {
+                    #[command]
+                    _cmd: FakeCommand,
+                    $($body)*
+                }
+                impl FfxMain for $name {
+                    type Writer = TestWriter;
+                    type Error = Error;
+                    async fn main(self, _: Self::Writer) -> Result<()> {
+                        Ok(())
+                    }
+                }
+            };
+        }
+
+        test_tool!(NoTarget { _ctx: EnvironmentContext });
+        test_tool!(Direct { _t: NeedsTarget });
+        test_tool!(DeferredField { _d: Deferred<NeedsTarget, std::convert::Infallible> });
+        test_tool!(WithField {
+            #[with(with_target())]
+            _p: String
+        });
+        test_tool!(WithDeferredField {
+            #[with(deferred(with_target()))]
+            _p: Deferred<String, std::convert::Infallible>
+        });
+        test_tool!(
+            #[target(None)]
+            OverrideNone { _t: NeedsTarget }
+        );
+        test_tool!(
+            #[target(Optional)]
+            OverrideOptional { _t: NeedsTarget }
+        );
+        test_tool!(
+            #[target(Required)]
+            OverrideRequired {}
+        );
+
+        assert_eq!(<Arc<NeedsTarget> as TryFromEnv>::TARGET_NEED, TargetNeed::Required);
+        assert_eq!(<Rc<NeedsTarget> as TryFromEnv>::TARGET_NEED, TargetNeed::Required);
+        assert_eq!(<Box<NeedsTarget> as TryFromEnv>::TARGET_NEED, TargetNeed::Required);
+        assert_eq!(
+            <std::result::Result<NeedsTarget, std::convert::Infallible> as TryFromEnv>::TARGET_NEED,
+            TargetNeed::Required,
+        );
+        assert_eq!(NoTarget::target_need(), TargetNeed::None);
+        assert_eq!(Direct::target_need(), TargetNeed::Required);
+        assert_eq!(DeferredField::target_need(), TargetNeed::Optional);
+        assert_eq!(WithField::target_need(), TargetNeed::Required);
+        assert_eq!(WithDeferredField::target_need(), TargetNeed::Optional);
+        assert_eq!(OverrideNone::target_need(), TargetNeed::None);
+        assert_eq!(OverrideOptional::target_need(), TargetNeed::Optional);
+        assert_eq!(OverrideRequired::target_need(), TargetNeed::Required);
     }
 }

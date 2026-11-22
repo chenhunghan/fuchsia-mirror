@@ -2,11 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <cinttypes>
+#include <format>
 #include <sstream>
 
-#include <fbl/string_buffer.h>
-#include <fbl/string_printf.h>
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
 #include <zxtest/base/assertion.h>
@@ -18,8 +16,8 @@ namespace zxtest::internal {
 
 namespace {
 
-fbl::String FormatTimeMs(uint64_t time_ms) {
-  return fbl::StringPrintf("%" PRIu64 ".%03" PRIu64 "s", time_ms / 1000, time_ms % 1000);
+std::string FormatTimeMs(uint64_t time_ms) {
+  return std::format("{}.{:03}s", time_ms / 1000, time_ms % 1000);
 }
 
 class CustomFileSinkWriter {
@@ -196,9 +194,9 @@ void JsonReporter::OnTestSkip(const TestCase& test_case, const TestInfo& test) {
   json.Key("result");
   json.String("SKIPPED");
 
-  auto format_time = FormatTimeMs(timers_.test.GetElapsedTime());
+  std::string format_time = FormatTimeMs(timers_.test.GetElapsedTime());
   json.Key("time");
-  json.String(format_time.c_str());
+  json.String(format_time);
 
   json.Key("skipped");
   json.StartArray();
@@ -230,9 +228,9 @@ void JsonReporter::OnTestFailure(const TestCase& test_case, const TestInfo& test
     json.Key("result");
     json.String("COMPLETED");
 
-    auto format_time = FormatTimeMs(timers_.test.GetElapsedTime());
+    std::string format_time = FormatTimeMs(timers_.test.GetElapsedTime());
     json.Key("time");
-    json.String(format_time.c_str());
+    json.String(format_time);
   }
   json.EndObject();
 
@@ -254,9 +252,9 @@ void JsonReporter::OnTestSuccess(const TestCase& test_case, const TestInfo& test
     json.Key("result");
     json.String("COMPLETED");
 
-    auto format_time = FormatTimeMs(timers_.test.GetElapsedTime());
+    std::string format_time = FormatTimeMs(timers_.test.GetElapsedTime());
     json.Key("time");
-    json.String(format_time.c_str());
+    json.String(format_time);
   }
   json.EndObject();
   test_entered = false;
@@ -277,8 +275,8 @@ void JsonReporter::OnTestCaseEnd(const TestCase& test_case) {
     json.Uint64(suite_skipped_count);
 
     json.Key("time");
-    auto format_time = FormatTimeMs(timers_.test_suite.GetElapsedTime());
-    json.String(format_time.c_str());
+    std::string format_time = FormatTimeMs(timers_.test_suite.GetElapsedTime());
+    json.String(format_time);
   }
 
   json.EndObject();
@@ -300,8 +298,8 @@ void JsonReporter::OnProgramEnd(const Runner& runner) {
     json.Uint64(run_skipped_count);
 
     json.Key("time");
-    auto format_time = FormatTimeMs(timers_.program.GetElapsedTime());
-    json.String(format_time.c_str());
+    std::string format_time = FormatTimeMs(timers_.program.GetElapsedTime());
+    json.String(format_time);
   }
 
   json.EndObject();

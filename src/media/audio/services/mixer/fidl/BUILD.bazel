@@ -1,0 +1,120 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":audio_services_mixer_fidl_unittests"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "fidl",
+    srcs = [
+        "clock_registry.cc",
+        "consumer_node.cc",
+        "custom_node.cc",
+        "gain_control_server.cc",
+        "graph_creator_server.cc",
+        "graph_mix_thread.cc",
+        "graph_server.cc",
+        "mixer_node.cc",
+        "node.cc",
+        "producer_node.cc",
+        "reachability.cc",
+        "real_clock_factory.cc",
+        "splitter_node.cc",
+        "stream_sink_client.cc",
+        "stream_sink_server.cc",
+        "synthetic_clock_factory.cc",
+        "synthetic_clock_server.cc",
+    ],
+    hdrs = [
+        "clock_registry.h",
+        "consumer_node.h",
+        "custom_node.h",
+        "gain_control_server.h",
+        "graph_creator_server.h",
+        "graph_detached_thread.h",
+        "graph_mix_thread.h",
+        "graph_server.h",
+        "graph_thread.h",
+        "mixer_node.h",
+        "node.h",
+        "producer_node.h",
+        "ptr_decls.h",
+        "reachability.h",
+        "real_clock_factory.h",
+        "splitter_node.h",
+        "stream_sink_client.h",
+        "stream_sink_server.h",
+        "synthetic_clock_factory.h",
+        "synthetic_clock_server.h",
+    ],
+    implementation_deps = ["//sdk/lib/syslog/cpp"],
+    visibility = ["//src/media/audio/services/mixer/fidl:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.audio:fuchsia.audio_cpp",
+        "//sdk/fidl/fuchsia.audio.mixer:fuchsia.audio.mixer_cpp",
+        "//sdk/fidl/fuchsia.mediastreams:fuchsia.mediastreams_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/fit-promise",
+        "//src/media/audio/services/common",
+        "//src/media/audio/services/mixer/common",
+        "//src/media/audio/services/mixer/mix",
+        "//zircon/system/ulib/trace",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "fidl_unittests",
+    srcs = [
+        "clock_registry_unittest.cc",
+        "consumer_node_unittest.cc",
+        "custom_node_unittest.cc",
+        "gain_control_server_unittest.cc",
+        "graph_creator_server_unittest.cc",
+        "graph_server_unittest.cc",
+        "mixer_node_unittest.cc",
+        "node_unittest.cc",
+        "producer_node_unittest.cc",
+        "reachability_unittest.cc",
+        "real_clock_factory_unittest.cc",
+        "splitter_node_unittest.cc",
+        "stream_sink_client_unittest.cc",
+        "stream_sink_server_unittest.cc",
+        "synthetic_clock_factory_unittest.cc",
+        "synthetic_clock_server_unittest.cc",
+    ],
+    gn_output_name = "audio_services_mixer_fidl_unittests",
+    deps = [
+        ":fidl",
+        "//sdk/fidl/fuchsia.audio.mixer:fuchsia.audio.mixer_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/async-testing",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/media/audio/lib/clock/testing",
+        "//src/media/audio/lib/processing:prebuilt_coefficient_tables",
+        "//src/media/audio/services/common/testing",
+        "//src/media/audio/services/mixer/fidl/testing",
+        "//src/media/audio/services/mixer/mix",
+        "//src/media/audio/services/mixer/mix/testing",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_services_mixer_fidl_unittests",
+    parallel = 4,
+    unit_tests = [":fidl_unittests"],
+)

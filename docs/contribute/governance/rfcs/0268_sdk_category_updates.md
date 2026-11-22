@@ -70,7 +70,7 @@ This RFC does not attempt to address theoretical or very uncommon scenarios,
 such as those described in [issue 369892217].
 
 
-## Design
+## Design {:#design}
 
 As in [RFC-0165], the new categories are in order of monotonically increasing
 audience. Existing categories that are replaced are indicated in parentheses.
@@ -458,7 +458,7 @@ the platform and host tools have different ranges of compatible API levels.
 [existing SDK categories documentation]: https://cs.opensource.google/fuchsia/fuchsia/+/main:docs/contribute/sdk/categories.md;drc=7b061d17cca1907a4cdd22793dd84091b339a1a2
 [compatibility tests]: /docs/development/testing/ctf/overview.md
 [test realm factory]: /docs/development/testing/components/test_realm_factory.md
-[RealmFactory SDK requirements]: /docs/development/testing/components/test_realm_factory.md#realmfactory_sdk_requirements
+[RealmFactory SDK requirements]: /docs/development/testing/components/test_realm_factory.md#realmfactory-sdk-requirements
 [FIDL platform]: /docs/reference/fidl/language/versioning.md#concepts
 [Supported]: /docs/concepts/versioning/api_levels.md#supported
 [Sunset]: /docs/concepts/versioning/api_levels.md#sunset

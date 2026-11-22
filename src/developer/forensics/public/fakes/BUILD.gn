@@ -64,7 +64,6 @@ executable("fake_crash_reporter_exe") {
 fidl("fuchsia.feedback.testing") {
   testonly = true
   sources = [ "query.test.fidl" ]
-  enable_hlcpp = true
   visibility = [
     ":*",
     "//src/developer/forensics/*",

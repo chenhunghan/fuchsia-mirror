@@ -28,6 +28,6 @@ This document outlines the plan for migrating the remaining DFv1 drivers to DFv2
 **Reasoning**: The USB stack is notoriously complex. Migrating the core bus and hub drivers requires a deep understanding of the USB protocol and the driver framework's interaction with it.
 
 ## 6. Board Drivers
-**Drivers**: `astro`, `nelson`, `sherlock`, `x86`, `machina`, `qemu-arm64`, `qemu-riscv64`
+**Drivers**: `astro`, `nelson`, `sherlock`, `x86`
 **Difficulty**: Very Hard
 **Reasoning**: Board drivers are the root of the device tree for specific platforms. They handle platform initialization and resource allocation. Migrating them is high risk and requires understanding the platform's specific boot sequence and hardware layout.

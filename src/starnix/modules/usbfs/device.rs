@@ -876,13 +876,13 @@ impl UsbEndpointClient {
         proxy: &fusb_endpoint::EndpointSynchronousProxy,
         vmo_id: u64,
     ) -> Result<zx::Vmo, Errno> {
-        let vmo_infos = [fusb_endpoint::VmoInfo {
+        let vmo_infos = vec![fusb_endpoint::VmoInfo {
             id: Some(vmo_id),
             size: Some(ENDPOINT_VMO_SIZE),
             ..Default::default()
         }];
         let mut vmos = proxy
-            .register_vmos(&vmo_infos, zx::MonotonicInstant::INFINITE)
+            .register_vmos(vmo_infos, zx::MonotonicInstant::INFINITE)
             .map_err(|e| fidl_error_to_errno(&e))?;
         vmos.pop().and_then(|h| h.vmo).ok_or_else(|| errno!(EIO))
     }
@@ -3678,11 +3678,7 @@ impl FileOps for UsbDeviceFile {
         if self.device.disconnected.load(Ordering::Acquire) {
             return error!(ENODEV);
         }
-        let descriptors = &self.device.raw_descriptors;
-        if offset >= descriptors.len() {
-            return Ok(0);
-        }
-        data.write(&descriptors[offset..])
+        data.write_tail(&self.device.raw_descriptors, offset)
     }
 
     fn write(

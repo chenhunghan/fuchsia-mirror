@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_test(
+    name = "stressor-bin",
+    srcs = [
+        "environment.rs",
+        "instance_actor.rs",
+        "main.rs",
+        "volume.rs",
+        "volume_actor.rs",
+        "vslice.rs",
+    ],
+    crate_name = "fvm_stressor",
+    crate_root = "main.rs",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:async-trait",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/storage/stress-tests:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/rust/zx",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/stress-tests/utils",
+        "//src/sys/lib/stress-test",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)

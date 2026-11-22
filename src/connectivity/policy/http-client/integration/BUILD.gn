@@ -56,11 +56,12 @@ fuchsia_test_package("http-client-integration-tests") {
     ":config_idle_1ms",
     ":config_never_idle",
     ":fake-ssl-certs",
-
-    # The component under test.
-    "../:component",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-debug" ]
+  subpackages = [
+    # The component under test.
+    "../:package",
+    "//src/connectivity/network/netstack3:package-debug",
+  ]
 }
 
 # A component providing configuration that the http client should never stop

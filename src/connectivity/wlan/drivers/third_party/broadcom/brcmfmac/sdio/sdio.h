@@ -264,6 +264,8 @@ struct brcmf_sdio_dev {
   uint32_t txglomsz;
   bool wowl_enabled;
   enum brcmf_sdiod_state state;
+  // Set while brcmf_sdio_suspend() holds drvr->fw_reloading for brcmf_sdio_resume() to release.
+  bool suspended;
 };
 
 /* sdio core registers */
@@ -443,6 +445,7 @@ zx_status_t brcmf_sdio_firmware_callback(brcmf_pub* drvr, const void* firmware,
                                          size_t nvram_size);
 void brcmf_sdio_remove(struct brcmf_sdio* bus);
 void brcmf_sdio_reset(struct brcmf_sdio* bus);
+zx_status_t brcmf_sdio_recovery(struct brcmf_bus* bus);
 void brcmf_sdio_isr(struct brcmf_sdio* bus);
 
 void brcmf_sdio_wd_timer(struct brcmf_sdio* bus, bool active);

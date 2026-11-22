@@ -9,16 +9,12 @@ from unittest import mock
 import fidl_fuchsia_hardware_power_source as f_power_source
 from fidl import GlobalHandleWaker
 from honeydew import affordances_capable, errors
-from honeydew.affordances.drivers.hardware.power import (
-    PowerSource,
-    PowerSourceRequestError,
-    Role,
-    SourceType,
-    Spec,
-    Status,
+from honeydew.affordances.drivers.hardware.power import power
+from honeydew.affordances.drivers.hardware.power.utils import (
+    errors as power_errors,
 )
-from honeydew.affordances.drivers.hardware.power.utils.errors import (
-    PowerSourceDeviceNotFoundError,
+from honeydew.affordances.drivers.hardware.power.utils import (
+    types as power_types,
 )
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.fuchsia_controller import errors as fc_errors
@@ -51,7 +47,7 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
             autospec=True,
         )
 
-        self.power_source = PowerSource(
+        self.power_source = power.PowerSource(
             device_name="fuchsia-test-device",
             ffx=self.ffx_obj,
             fuchsia_controller=self.fc_transport_obj,
@@ -63,7 +59,7 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         """Test verify_supported raises NotSupportedError when capability missing."""
         self.ffx_obj.run.return_value = ""
         with self.assertRaises(errors.NotSupportedError):
-            PowerSource(
+            power.PowerSource(
                 device_name="fuchsia-test-device",
                 ffx=self.ffx_obj,
                 fuchsia_controller=self.fc_transport_obj,
@@ -93,7 +89,7 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spec.name, "Main AC Adapter")
         self.assertEqual(spec.manufacturer, "FuchsiaCorp")
         self.assertEqual(spec.model_name, "AC-100")
-        self.assertEqual(spec.type, SourceType.AC)
+        self.assertEqual(spec.type, power_types.SourceType.AC)
 
     async def test_make_ready_raises_on_connection_error(self) -> None:
         """Test make_ready raises PowerSourceDeviceNotFoundError when
@@ -102,7 +98,7 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
             fc_errors.FuchsiaControllerError("error")
         )
 
-        with self.assertRaises(PowerSourceDeviceNotFoundError):
+        with self.assertRaises(power_errors.PowerSourceDeviceNotFoundError):
             await self.power_source.make_ready()
 
     async def test_make_ready_propagates_unexpected_exceptions(self) -> None:
@@ -125,7 +121,7 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.power_source._proxy = mock_proxy
         self.power_source._ready = True
 
-        with self.assertRaises(PowerSourceRequestError):
+        with self.assertRaises(power_errors.PowerSourceRequestError):
             await self.power_source.get_spec()
 
     async def test_get_status_success(self) -> None:
@@ -159,7 +155,9 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(status.current_role.sink)
         assert status.current_role.sink is not None
         self.assertEqual(status.current_role.sink.name, "USB Host")
-        self.assertEqual(status.current_role.sink.type, SourceType.USB)
+        self.assertEqual(
+            status.current_role.sink.type, power_types.SourceType.USB
+        )
 
     async def test_get_status_error(self) -> None:
         """Test get_status raises PowerSourceRequestError when driver returns error."""
@@ -171,7 +169,7 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.power_source._proxy = mock_proxy
         self.power_source._ready = True
 
-        with self.assertRaises(PowerSourceRequestError):
+        with self.assertRaises(power_errors.PowerSourceRequestError):
             await self.power_source.get_status()
 
     async def test_set_role_success(self) -> None:
@@ -184,7 +182,9 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.power_source._proxy = mock_proxy
         self.power_source._ready = True
 
-        role = Role.with_sink(name="Wall Charger", source_type=SourceType.AC)
+        role = power_types.Role.with_sink(
+            name="Wall Charger", source_type=power_types.SourceType.AC
+        )
         await self.power_source.set_role(role)
         mock_proxy.set_role.assert_called_once()
 
@@ -198,8 +198,8 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.power_source._proxy = mock_proxy
         self.power_source._ready = True
 
-        with self.assertRaises(PowerSourceRequestError):
-            await self.power_source.set_role(Role.with_auto())
+        with self.assertRaises(power_errors.PowerSourceRequestError):
+            await self.power_source.set_role(power_types.Role.with_auto())
 
     async def test_watch_success(self) -> None:
         """Test watch returns updated Status."""
@@ -232,48 +232,50 @@ class PowerSourceTests(unittest.IsolatedAsyncioTestCase):
         self.power_source._proxy = mock_proxy
         self.power_source._ready = True
 
-        with self.assertRaises(PowerSourceRequestError):
+        with self.assertRaises(power_errors.PowerSourceRequestError):
             await self.power_source.watch()
 
     async def test_type_conversions(self) -> None:
         """Test round-trip FIDL type conversions."""
         # Roles
-        r_auto = Role.with_auto()
+        r_auto = power_types.Role.with_auto()
         fidl_auto = r_auto.to_fidl()
-        self.assertEqual(Role.from_fidl(fidl_auto), r_auto)
+        self.assertEqual(power_types.Role.from_fidl(fidl_auto), r_auto)
 
-        r_source = Role.with_source()
+        r_source = power_types.Role.with_source()
         fidl_source = r_source.to_fidl()
-        self.assertEqual(Role.from_fidl(fidl_source), r_source)
+        self.assertEqual(power_types.Role.from_fidl(fidl_source), r_source)
 
-        r_disc = Role.with_disconnected()
+        r_disc = power_types.Role.with_disconnected()
         fidl_disc = r_disc.to_fidl()
-        self.assertEqual(Role.from_fidl(fidl_disc), r_disc)
+        self.assertEqual(power_types.Role.from_fidl(fidl_disc), r_disc)
 
-        r_sink = Role.with_sink(name="Test", source_type=SourceType.BATTERY)
+        r_sink = power_types.Role.with_sink(
+            name="Test", source_type=power_types.SourceType.BATTERY
+        )
         fidl_sink = r_sink.to_fidl()
-        self.assertEqual(Role.from_fidl(fidl_sink), r_sink)
+        self.assertEqual(power_types.Role.from_fidl(fidl_sink), r_sink)
 
         # Spec
-        spec = Spec(
+        spec = power_types.Spec(
             name="Power Supply",
             supported_roles=[r_auto, r_sink],
             manufacturer="Vendor",
             model_name="V1",
-            type=SourceType.USB,
+            type=power_types.SourceType.USB,
         )
         fidl_spec = spec.to_fidl()
-        self.assertEqual(Spec.from_fidl(fidl_spec), spec)
+        self.assertEqual(power_types.Spec.from_fidl(fidl_spec), spec)
 
         # Status
-        status = Status(
+        status = power_types.Status(
             present=True,
             voltage_uv=12000000,
             current_ua=3000000,
             current_role=r_sink,
         )
         fidl_status = status.to_fidl()
-        self.assertEqual(Status.from_fidl(fidl_status), status)
+        self.assertEqual(power_types.Status.from_fidl(fidl_status), status)
 
 
 if __name__ == "__main__":

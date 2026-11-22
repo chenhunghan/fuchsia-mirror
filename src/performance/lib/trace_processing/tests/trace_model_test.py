@@ -54,15 +54,16 @@ class TraceModelTest(unittest.TestCase):
         child_durations: Sequence[trace_model.DurationEvent] = (),
         child_flows: Sequence[trace_model.FlowEvent] = (),
     ) -> trace_model.DurationEvent:
-        base = trace_model.Event(
-            "cat", name, trace_time.TimePoint(start), 1, 2, None
-        )
         return trace_model.DurationEvent(
             duration=trace_time.TimeDelta(duration),
             parent=parent,
             child_durations=child_durations,
             child_flows=child_flows,
-            base=base,
+            category="cat",
+            name=name,
+            start=trace_time.TimePoint(start),
+            pid=1,
+            tid=2,
         )
 
     def _make_flow(
@@ -75,16 +76,17 @@ class TraceModelTest(unittest.TestCase):
         previous_flow: trace_model.FlowEvent | None = None,
         next_flow: trace_model.FlowEvent | None = None,
     ) -> trace_model.FlowEvent:
-        base = trace_model.Event(
-            "cat", name, trace_time.TimePoint(start), 1, 2, None
-        )
         return trace_model.FlowEvent(
             id=flow_id,
             phase=phase,
             enclosing_duration=enclosing_duration,
             previous_flow=previous_flow,
             next_flow=next_flow,
-            base=base,
+            category="cat",
+            name=name,
+            start=trace_time.TimePoint(start),
+            pid=1,
+            tid=2,
         )
 
     def _make_model(self, events: list[trace_model.Event]) -> trace_model.Model:
@@ -236,31 +238,78 @@ class TraceModelTest(unittest.TestCase):
         self.assertEqual(e2.args, {"a": 1, "b": 2})
         self.assert_args_not_modifiable(e1)
 
-    def test_event_subclass_construction_uses_base_args(self) -> None:
-        t0 = trace_time.TimePoint(0)
-        d0 = trace_time.TimeDelta(0)
-        for base_args in (None, {"k": "v"}):
-            base = trace_model.Event("cat", "name", t0, 1, 2, base_args)
-            subclass_events: list[trace_model.Event] = [
-                trace_model.InstantEvent(
-                    trace_model.InstantEventScope.GLOBAL, base
-                ),
-                trace_model.CounterEvent(1, base),
-                trace_model.DurationEvent(d0, None, [], [], base),
-                trace_model.AsyncEvent(1, d0, base),
-                trace_model.FlowEvent(
-                    "f1",
-                    trace_model.FlowEventPhase.START,
-                    None,
-                    None,
-                    None,
-                    base,
-                ),
-            ]
-            for event in subclass_events:
-                with self.subTest(cls=type(event).__name__, args=base_args):
-                    self.assertEqual(event.args, base_args or {})
-                    self.assertIs(event.args, base.args)
+    def test_event_subclass_keyword_init_invariants(self) -> None:
+        # Verify the non-trivial memory/aliasing invariants on direct keyword
+        # construction: category/name interning, zero-copy reuse of pre-wrapped
+        # MappingProxyType args, and __slots__ (no per-instance __dict__).
+        t0 = trace_time.TimePoint(42)
+        d0 = trace_time.TimeDelta(10)
+        cat_a = "".join(("dynamic", "_cat"))
+        cat_b = "".join(("dynamic", "_cat"))
+        name_a = "".join(("dynamic", "_name"))
+        name_b = "".join(("dynamic", "_name"))
+        self.assertIsNot(cat_a, cat_b)
+        self.assertIsNot(name_a, name_b)
+
+        prewrapped_args = types.MappingProxyType({"shared": 7})
+        events: tuple[trace_model.Event, ...] = (
+            trace_model.InstantEvent(
+                trace_model.InstantEventScope.THREAD,
+                category=cat_a,
+                name=name_a,
+                start=t0,
+                pid=10,
+                tid=20,
+                args=prewrapped_args,
+            ),
+            trace_model.CounterEvent(
+                0,
+                category=cat_b,
+                name=name_b,
+                start=t0,
+                pid=10,
+                tid=20,
+                args=prewrapped_args,
+            ),
+            trace_model.DurationEvent(
+                d0,
+                category=cat_b,
+                name=name_b,
+                start=t0,
+                pid=10,
+                tid=20,
+                args=prewrapped_args,
+            ),
+            trace_model.AsyncEvent(
+                1,
+                d0,
+                category=cat_b,
+                name=name_b,
+                start=t0,
+                pid=10,
+                tid=20,
+                args=prewrapped_args,
+            ),
+            trace_model.FlowEvent(
+                "f1",
+                trace_model.FlowEventPhase.START,
+                category=cat_b,
+                name=name_b,
+                start=t0,
+                pid=10,
+                tid=20,
+                args=prewrapped_args,
+            ),
+        )
+
+        first = events[0]
+        for event in events:
+            with self.subTest(cls=type(event).__name__):
+                self.assertIs(event.category, first.category)
+                self.assertIs(event.name, first.name)
+                self.assertIs(event.args, prewrapped_args)
+                self.assert_args_not_modifiable(event)
+                self.assertFalse(hasattr(event, "__dict__"))
 
     def test_scheduling_record_args_immutable_mapping(self) -> None:
         t0 = trace_time.TimePoint(0)

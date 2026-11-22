@@ -319,7 +319,7 @@ zx_status_t AmlCpu::Init(fidl::ClientEnd<fuchsia_hardware_clock::Clock> plldiv16
     fidl::WireResult register_result = pwr_->RegisterPowerDomain(min_voltage, max_voltage);
     if (!register_result.ok()) {
       fdf::error("Failed to send RegisterPowerDomain request: {}", register_result.status_string());
-      return voltage_range_result.status();
+      return register_result.status();
     }
 
     if (register_result->is_error()) {

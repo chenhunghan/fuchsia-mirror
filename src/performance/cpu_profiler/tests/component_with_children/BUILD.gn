@@ -2,50 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
-executable("parent_bin") {
+# //src/performance/cpu_profiler/tests:cpu_profiler_integration_test still
+# uses this package as a GN subpackage.
+# LINT.IfChange
+bazel_fuchsia_package("component_with_children") {
   testonly = true
-  output_name = "parent"
-
-  sources = [ "parent.cc" ]
-
-  deps = [
-    "//examples/fidl/fuchsia.examples:fuchsia.examples_cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/incoming/cpp",
-    "//sdk/lib/syslog/cpp",
-  ]
-}
-
-executable("child_bin") {
-  testonly = true
-
-  sources = [ "child.cc" ]
-
-  deps = [
-    "//examples/fidl/fuchsia.examples:fuchsia.examples_cpp",
-    "//sdk/lib/async-loop:async-loop-cpp",
-    "//sdk/lib/async-loop:async-loop-default",
-    "//sdk/lib/component/outgoing/cpp",
-    "//sdk/lib/syslog/cpp",
-  ]
-}
-
-fuchsia_component("child") {
-  testonly = true
-  manifest = "meta/child.cml"
-  deps = [ ":child_bin" ]
-}
-
-fuchsia_package_with_single_component("component_with_children") {
-  testonly = true
-  manifest = "meta/component_with_children.cml"
-  component_name = "component_with_children"
+  bazel_config = "fuchsia_platform"
   package_name = "component_with_children"
-  deps = [
-    ":child",
-    ":parent_bin",
-  ]
 }
+# LINT.ThenChange(BUILD.bazel)

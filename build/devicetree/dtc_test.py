@@ -147,6 +147,32 @@ class RunDtcTest(unittest.TestCase):
             ],
         )
 
+    @mock.patch.object(dtc, "subprocess", autospec=True, spec_set=True)
+    def test_success_without_dep_file(self, mock_subprocess: mock.Mock) -> None:
+        mock_subprocess.run.return_value = subprocess.CompletedProcess(
+            (), 0, "", ""
+        )
+        with open(self.includes) as includes_file:
+            args = argparse.Namespace(
+                dtc_path="dtc",
+                src_file=self.src,
+                dest_file=self.dest,
+                dep_file="-",
+                includes_file=includes_file,
+            )
+            self.assertFalse(dtc.dts_compile(args, []))
+
+        self.assertSequenceEqual(
+            mock_subprocess.run.call_args.args[0],
+            (
+                "dtc",
+                "--force",
+                "--out=" + self.dest,
+                "--include=gen/include_dir",
+                self.src,
+            ),
+        )
+
     def test_forced_error_fails_with_context(self) -> None:
         result, _, err = self.compile_with(0, DUPLICATE_LABEL_STDERR)
         self.assertTrue(result)

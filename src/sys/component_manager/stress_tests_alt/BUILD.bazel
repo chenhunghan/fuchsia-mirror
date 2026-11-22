@@ -2,9 +2,27 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":component-manager-stress-tests-short_test"],
+    visibility = ["//src/sys/component_manager:__pkg__"],
+)
 
 rustc_binary(
     name = "unreliable_echo_server_bin",
@@ -23,6 +41,28 @@ rustc_binary(
     ],
 )
 
+fx_packaged_binary(
+    name = "unreliable_echo_server_packaged_bin",
+    testonly = True,
+    binary = ":unreliable_echo_server_bin",
+    binary_name = "unreliable_echo_server",
+)
+
+fx_component_manifest(
+    name = "unreliable_echo_server_manifest",
+    testonly = True,
+    component_name = "unreliable_echo_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/unreliable_echo_server.cml",
+)
+
+fx_component(
+    name = "unreliable_echo_server",
+    testonly = True,
+    compiled_manifest = ":unreliable_echo_server_manifest",
+    deps = [":unreliable_echo_server_packaged_bin"],
+)
+
 rustc_binary(
     name = "unreliable_echo_client_bin",
     testonly = True,
@@ -37,6 +77,31 @@ rustc_binary(
         "//src/lib/fuchsia-component",
         "//third_party/rust_crates/vendor:rand",
     ],
+)
+
+fx_packaged_binary(
+    name = "unreliable_echo_client_packaged_bin",
+    testonly = True,
+    binary = ":unreliable_echo_client_bin",
+    binary_name = "unreliable_echo_client",
+)
+
+fx_component_manifest(
+    name = "unreliable_echo_client_manifest",
+    testonly = True,
+    component_name = "unreliable_echo_client",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/unreliable_echo_client.cml",
+)
+
+fx_component(
+    name = "unreliable_echo_client",
+    testonly = True,
+    compiled_manifest = ":unreliable_echo_client_manifest",
+    deps = [":unreliable_echo_client_packaged_bin"],
 )
 
 rustc_binary(
@@ -63,4 +128,86 @@ rustc_binary(
         "//third_party/rust_crates/vendor:log",
         "//third_party/rust_crates/vendor:rand",
     ],
+)
+
+fx_packaged_binary(
+    name = "actor_packaged_bin",
+    testonly = True,
+    binary = ":actor-bin",
+    binary_name = "cm_actor",
+)
+
+fx_component_manifest(
+    name = "actor_manifest",
+    testonly = True,
+    component_name = "actor",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/stress_test/actor:default.shard.cml",
+    ],
+    manifest = "meta/actor.cml",
+)
+
+fx_component(
+    name = "actor",
+    testonly = True,
+    compiled_manifest = ":actor_manifest",
+    deps = [":actor_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "no_binary_manifest",
+    testonly = True,
+    component_name = "no_binary",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:offer.shard",
+    ],
+    manifest = "meta/no_binary.cml",
+)
+
+fx_component(
+    name = "no_binary",
+    testonly = True,
+    compiled_manifest = ":no_binary_manifest",
+)
+
+fx_component_manifest(
+    name = "test_short_manifest",
+    testonly = True,
+    component_name = "test_short",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/stress_test:default.shard.cml",
+    ],
+    manifest = "meta/test_short.cml",
+)
+
+fx_test_component(
+    name = "test_short",
+    compiled_manifest = ":test_short_manifest",
+)
+
+# This test package is designed to run a small number of operations on CQ bots.
+# This ensures that these tests cannot break due to CL changes.
+fx_package(
+    name = "component-manager-stress-tests-short",
+    testonly = True,
+    components = [
+        ":actor",
+        ":no_binary",
+        ":unreliable_echo_client",
+        ":unreliable_echo_server",
+        # https://fxbug.dev/42052321: Dep included for affected tests presubmit
+        "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    ],
+    test_components = [":test_short"],
+)
+
+fx_test(
+    name = "component-manager-stress-tests-short_test",
+    environments = ["//build/testing/environments:emu_env"],
+    max_log_severity = "ERROR",
+    package = ":component-manager-stress-tests-short",
 )

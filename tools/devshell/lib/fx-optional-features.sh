@@ -3,24 +3,47 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+# Single source of truth for optional features, read by both bash functions
+# below and tools/devshell/fx_cli/fx_builtins.py.
+# Format: "<feature_name>|<default:enabled|disabled>|<help_line>"
+# Repeat a feature row for multi-line help descriptions.
+_FX_OPTIONAL_FEATURES_SPEC=(
+  "fxtest_auto_publishes_packages|enabled|Enables 'fx test' to automatically publish packages to the package"
+  "fxtest_auto_publishes_packages|enabled|repository server."
+  "incremental|enabled|Packages are published and served incrementally by 'fx serve'"
+  "incremental|enabled|as they are built. Explicit 'fx build' is not required for most operations."
+  "incremental_legacy|disabled|Packages are published and served incrementally by 'fx serve'"
+  "incremental_legacy|disabled|as they are built using the legacy incremental publisher. Explicit"
+  "incremental_legacy|disabled|'fx build' is not required for most operations."
+  "incremental_new|disabled|Packages are published and served incrementally by 'fx serve'"
+  "incremental_new|disabled|as they are built. Explicit 'fx build' is not required for most operations."
+  "legacy_fastboot|disabled|Device provisioning based on legacy fastboot instead of ffx."
+)
+
 function list_optional_features {
-  echo \
-    "fxtest_auto_publishes_packages" \
-    "incremental" \
-    "incremental_legacy" \
-    "incremental_new" \
-    "legacy_fastboot"
+  local entry name prev="" out=()
+  for entry in "${_FX_OPTIONAL_FEATURES_SPEC[@]}"; do
+    name="${entry%%|*}"
+    if [[ "${name}" != "${prev}" ]]; then
+      out+=("${name}")
+      prev="${name}"
+    fi
+  done
+  echo "${out[@]}"
 }
 
 # Return 0 (true) if the default of the given feature is enabled, 1 (false) otherwise.
 function is_feature_enabled_by_default {
-  case "$1" in
-  "fxtest_auto_publishes_publishes") return 0;;
-  "incremental") return 0 ;;
-  "incremental_legacy") return 1 ;;
-  "incremental_new") return 1 ;;
-  "legacy_fastboot") return 1 ;;
-  esac
+  local entry name rest default_state
+  for entry in "${_FX_OPTIONAL_FEATURES_SPEC[@]}"; do
+    name="${entry%%|*}"
+    if [[ "${name}" == "$1" ]]; then
+      rest="${entry#*|}"
+      default_state="${rest%%|*}"
+      [[ "${default_state}" == "enabled" ]]
+      return $?
+    fi
+  done
 
   # global default is enabled
   return 0
@@ -28,33 +51,15 @@ function is_feature_enabled_by_default {
 
 _FX_INDENT="      "
 function help_optional_feature {
-  local h=()
-  case "$1" in
-  "fxtest_auto_publishes_packages")
-    h=(
-      "Enables 'fx test' to automatically publish packages to the package"
-      "repository server."
-      )
-    ;;
-  "incremental_legacy")
-    h=(
-      "Packages are published and served incrementally by 'fx serve'"
-      "as they are built using the legacy incremental publisher. Explicit"
-      "'fx build' is not required for most operations."
-      )
-    ;;
-  "incremental" | "incremental_new")
-    h=(
-      "Packages are published and served incrementally by 'fx serve'"
-      "as they are built. Explicit 'fx build' is not required for most operations."
-      )
-    ;;
-  "legacy_fastboot")
-    h=(
-      "Device provisioning based on legacy fastboot instead of ffx."
-      )
-    ;;
-  esac
+  local entry name rest help_line h=()
+  for entry in "${_FX_OPTIONAL_FEATURES_SPEC[@]}"; do
+    name="${entry%%|*}"
+    if [[ "${name}" == "$1" ]]; then
+      rest="${entry#*|}"
+      help_line="${rest#*|}"
+      h+=("${help_line}")
+    fi
+  done
   printf "${_FX_INDENT}${_FX_INDENT}%s\n" "${h[@]}"
 }
 

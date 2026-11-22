@@ -35,10 +35,12 @@ if (is_host) {
       "__init__.py",
       "lib.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/lib/ffx_cmd:*",
       "//src/testing/end_to_end/honeydew:*",
     ]
+    enable_mypy = false
   }
 }

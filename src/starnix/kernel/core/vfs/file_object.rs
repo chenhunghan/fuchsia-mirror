@@ -18,9 +18,9 @@ use crate::vfs::fsverity::{
 };
 pub use crate::vfs::pipe::{SpliceInputBuffer, SpliceOutputBuffer};
 use crate::vfs::{
-    ActiveNamespaceNode, DirentSink, EpollFileObject, EpollKey, FallocMode, FdTableId, FileMapping,
-    FileSystemHandle, FileWriteGuardMode, FsNodeHandle, FsString, FscryptPolicyFlags,
-    NamespaceNode, RecordLockCommand, RecordLockOwner,
+    ActiveNamespaceNode, AppendLockWriteGuard, DirentSink, EpollFileObject, EpollKey, FallocMode,
+    FdTableId, FileMapping, FileSystemHandle, FileWriteGuardMode, FsNodeHandle, FsString,
+    FscryptPolicyFlags, NamespaceNode, RecordLockCommand, RecordLockOwner,
 };
 use starnix_crypt::EncryptionKeyId;
 use starnix_lifecycle::{ObjectReleaser, ReleaserAction};
@@ -30,6 +30,7 @@ use starnix_uapi::mount_flags::MountFlags;
 use starnix_uapi::user_address::ArchSpecific;
 
 use fidl::endpoints::ProtocolMarker as _;
+use fuchsia_rcu::rcu_drop;
 use linux_uapi::{FSCRYPT_MODE_AES_256_CTS, FSCRYPT_MODE_AES_256_XTS};
 use starnix_logging::{CATEGORY_STARNIX_MM, impossible_error, log_error, track_stub};
 use starnix_sync::{
@@ -264,7 +265,7 @@ pub trait FileOps: Send + Sync + AsAny + 'static {
     ///
     /// Files whose `mmap()` maps memory that can't be executable, e.g. memory shared with Starnix,
     /// must return `false`, so that `PROT_EXEC` isn't implied when mapping them (e.g. by the
-    /// `READ_IMPLIES_EXEC` personality).
+    /// `READ_IMPLIES_EXEC` personality) and `me` isn't reported in `/proc/[pid]/smaps`.
     fn can_map_executable(&self) -> bool {
         true
     }
@@ -344,6 +345,23 @@ pub trait FileOps: Send + Sync + AsAny + 'static {
         _arg: u64,
     ) -> Result<SyscallResult, Errno> {
         default_fcntl(cmd)
+    }
+
+    /// Manipulates allocated disk space for this open file.
+    ///
+    /// Callers should use [`FileObject::fallocate`], which validates the byte range, acquires the
+    /// append lock, clears SUID/SGID bits, and updates timestamps. Implementations must call
+    /// [`FsNode::check_size_limit`] after validating `mode` when `RLIMIT_FSIZE` applies.
+    fn fallocate(
+        &self,
+        _guard: &AppendLockWriteGuard<'_>,
+        _file: &FileObject,
+        _current_task: &CurrentTask,
+        _mode: FallocMode,
+        _offset: u64,
+        _length: u64,
+    ) -> Result<(), Errno> {
+        error!(EOPNOTSUPP)
     }
 
     /// Return a handle that allows access to this file descritor through the zxio protocols.
@@ -591,6 +609,18 @@ impl<T: FileOps + CloseFreeSafe, P: Deref<Target = T> + Send + Sync + 'static> F
         arg: u64,
     ) -> Result<SyscallResult, Errno> {
         self.deref().fcntl(file, current_task, cmd, arg)
+    }
+
+    fn fallocate(
+        &self,
+        guard: &AppendLockWriteGuard<'_>,
+        file: &FileObject,
+        current_task: &CurrentTask,
+        mode: FallocMode,
+        offset: u64,
+        length: u64,
+    ) -> Result<(), Errno> {
+        self.deref().fallocate(guard, file, current_task, mode, offset, length)
     }
 
     fn to_handle(
@@ -1139,7 +1169,7 @@ pub fn default_vfs_ioctl(
             } else {
                 // Don't deadlock! update_attributes will also lock the attributes.
                 std::mem::drop(attributes);
-                file.node().update_attributes(current_task, |info| {
+                file.node().update_attributes(current_task, /* force = */ false, |info| {
                     info.encryption_policy = Some(new_policy);
                     Ok(())
                 })?;
@@ -1242,11 +1272,16 @@ pub fn default_mmap(
         let base_prot_flags = (prot_flags | ProtectionFlags::READ) - ProtectionFlags::WRITE;
         let memory =
             file.ops.get_memory(file, current_task, Some(min_memory_size), base_prot_flags)?;
-        if !prot_flags.contains(ProtectionFlags::WRITE) {
-            fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "GetPrivateReadOnlyVmo");
-            // Read-only private mapping: Avoid eagerly creating a child VMO clone.
-            // Map the underlying file VMO directly. If the mapping is later made writable
-            // via mprotect(PROT_WRITE), it will be lazily cloned in MemoryManager::protect().
+        // Writable private mappings of plain VMOs are mapped lazily too. Unmodified private file
+        // mappings lack `WRITE` in the user VMAR (see `Mapping::vmar_flags()`), so the first write
+        // faults and the memory manager creates the copy-on-write child then. Mappings that are
+        // never written, including in forked processes, never need one.
+        let can_map_lazy = !prot_flags.contains(ProtectionFlags::WRITE)
+            || (!options.contains(MappingOptions::ANONYMOUS) && memory.as_vmo().is_some());
+        if can_map_lazy {
+            fuchsia_trace::duration!(CATEGORY_STARNIX_MM, "GetPrivateLazyVmo");
+            // Map the file VMO directly. The memory manager moves the mapping onto a copy-on-write
+            // child when it is first written or made writable with mprotect(PROT_WRITE).
             options |= MappingOptions::LAZY_PRIVATE_FILE;
             let write_rights = zx::Rights::WRITE | zx::Rights::RESIZE;
             if memory.get_rights().intersects(write_rights) {
@@ -1629,10 +1664,24 @@ impl std::ops::Deref for FileObject {
     }
 }
 
+/// Weak self-reference to the `Arc<FileReleaser>` allocation of a `FileObject`.
+///
+/// Besides letting a `FileObject` retrieve its `FileHandle`, this keeps the allocation alive
+/// (with strong count 0) until an RCU grace period after the `FileObject` is dropped. `FdTable`
+/// RCU readers may call `rcu_ptr_upgrade` on a raw pointer to this allocation after its fd slot
+/// has been cleared, and clearing a slot does not defer a weak reference of its own.
+struct RcuWeakFileHandle(WeakFileHandle);
+
+impl Drop for RcuWeakFileHandle {
+    fn drop(&mut self) {
+        rcu_drop(std::mem::take(&mut self.0));
+    }
+}
+
 pub struct FileObjectState {
     /// Weak reference to the `FileHandle` of this `FileObject`. This allows to retrieve the
-    /// `FileHandle` from a `FileObject`.
-    pub weak_handle: WeakFileHandle,
+    /// `FileHandle` from a `FileObject`. See `RcuWeakFileHandle`.
+    weak_handle: RcuWeakFileHandle,
 
     /// A unique identifier for this file object.
     pub id: FileObjectId,
@@ -1677,6 +1726,11 @@ pub type WeakFileHandle = Weak<FileReleaser>;
 pub type FileHandleKey = WeakKey<FileReleaser>;
 
 impl FileObjectState {
+    /// Weak reference to the `FileHandle` of this `FileObject`.
+    pub fn weak_handle(&self) -> &WeakFileHandle {
+        &self.weak_handle.0
+    }
+
     /// The FsNode from which this FileObject was created.
     pub fn node(&self) -> &FsNodeHandle {
         &self.name.entry.node
@@ -1760,7 +1814,7 @@ impl FileObject {
             Self {
                 ops,
                 state: FileObjectState {
-                    weak_handle: weak_handle.clone(),
+                    weak_handle: RcuWeakFileHandle(weak_handle.clone()),
                     id,
                     name: name.into_active(),
                     fs,
@@ -1775,6 +1829,9 @@ impl FileObject {
             }
             .into()
         });
+        // `FdTable` relies on `weak_handle` pointing at this allocation to keep it alive for
+        // concurrent RCU readers.
+        debug_assert!(std::ptr::eq(file.weak_handle().as_ptr(), Arc::as_ptr(&file)));
         file.notify(InotifyMask::OPEN);
 
         file.ops().open(&file, current_task)?;
@@ -1783,7 +1840,7 @@ impl FileObject {
 
     pub fn max_access_for_memory_mapping(&self) -> Access {
         let mut access = Access::EXIST;
-        if self.can_exec() {
+        if self.can_exec() && self.ops().can_map_executable() {
             access |= Access::EXEC;
         }
         let flags = self.flags.load(Ordering::Relaxed);
@@ -1958,7 +2015,12 @@ impl FileObject {
     }
 
     /// Common wrapper work for `write`, `write_at`, and `splice_write`.
-    fn write_fn<W>(&self, current_task: &CurrentTask, write: W) -> Result<usize, Errno>
+    fn write_fn<W>(
+        &self,
+        current_task: &CurrentTask,
+        available: usize,
+        write: W,
+    ) -> Result<usize, Errno>
     where
         W: FnOnce() -> Result<usize, Errno>,
     {
@@ -1966,7 +2028,9 @@ impl FileObject {
             return error!(EBADF);
         }
         security::file_permission(current_task, self, security::PermissionFlags::WRITE)?;
-        self.node().clear_suid_and_sgid_bits(current_task)?;
+        if available > 0 {
+            self.node().clear_privilege_bits(current_task)?;
+        }
         let bytes_written = write()?;
         self.node().update_ctime_mtime();
 
@@ -2001,7 +2065,7 @@ impl FileObject {
             if !self.ops().is_seekable() {
                 return error!(ESPIPE);
             }
-            self.write_fn(current_task, || {
+            self.write_fn(current_task, available, || {
                 if self.flags().contains(OpenFlags::APPEND) {
                     let _guard = self.node().append_lock.write(current_task)?;
                     // According to LTP test pwrite04:
@@ -2020,7 +2084,7 @@ impl FileObject {
                 }
             })
         } else {
-            self.write_fn(current_task, || {
+            self.write_fn(current_task, available, || {
                 if !self.ops().has_persistent_offsets() {
                     return write_common(0);
                 }
@@ -2138,6 +2202,10 @@ impl FileObject {
         if prot_flags.contains(ProtectionFlags::EXEC) && !self.can_exec() {
             return error!(EPERM);
         }
+        // Only anonymous mappings can grow down.
+        if options.contains(MappingOptions::GROWSDOWN) {
+            return error!(EINVAL);
+        }
         self.ops().mmap(self, current_task, addr, memory_offset, length, prot_flags, options)
     }
 
@@ -2206,7 +2274,7 @@ impl FileObject {
         if !self.can_write() {
             return error!(EINVAL);
         }
-        self.node().ftruncate(current_task, length)?;
+        self.node().ftruncate(current_task, self, length)?;
         self.name.entry.notify_ignoring_excl_unlink(InotifyMask::MODIFY);
         Ok(())
     }
@@ -2236,9 +2304,20 @@ impl FileObject {
             return error!(EBADF);
         }
 
+        // Only check `MAX_LFS_FILESIZE` bounds here; the filesystem enforces `RLIMIT_FSIZE` after
+        // validating `mode`.
+        checked_add_offset_and_length(offset as usize, length as usize)
+            .map_err(|_| errno!(EFBIG))?;
+
         security::file_permission(current_task, self, security::PermissionFlags::WRITE)?;
 
-        self.node().fallocate(current_task, mode, offset, length)?;
+        let node = self.node();
+        let guard = node.ops().append_lock_write(node, current_task)?;
+        self.ops().fallocate(&guard, self, current_task, mode, offset, length)?;
+        node.clear_privilege_bits(current_task)?;
+        node.update_ctime_mtime();
+        std::mem::drop(guard);
+
         self.notify(InotifyMask::MODIFY);
         Ok(())
     }
@@ -2268,7 +2347,7 @@ impl FileObject {
     /// Upgrades the weak reference to return the strong [`FileHandle`] referencing this
     /// [`FileObject`].
     pub fn to_file_handle(&self) -> FileHandle {
-        self.weak_handle.upgrade().expect("FileObject is alive, so weak_handle must upgrade")
+        self.weak_handle().upgrade().expect("FileObject is alive, so weak_handle must upgrade")
     }
 
     /// Creates a [`FileMapping`] for this file, acquiring the specified write guard mode on the
@@ -2376,14 +2455,14 @@ impl FileObject {
     }
 
     pub fn extra_fdinfo(&self, current_task: &CurrentTask) -> Option<FsString> {
-        let file = self.weak_handle.upgrade()?;
+        let file = self.weak_handle().upgrade()?;
         self.ops().extra_fdinfo(&file, current_task)
     }
 
     /// Register the fd number of an `EpollFileObject` that listens to events from this
     /// `FileObject`.
     pub fn register_epfd(&self, file: &FileHandle) {
-        self.epoll_files.lock().insert(WeakKey::from(file), file.weak_handle.clone());
+        self.epoll_files.lock().insert(WeakKey::from(file), file.weak_handle().clone());
     }
 
     pub fn unregister_epfd(&self, file: &FileHandle) {
@@ -2417,6 +2496,7 @@ impl Releasable for FileObject {
         let event =
             if state.can_write() { InotifyMask::CLOSE_WRITE } else { InotifyMask::CLOSE_NOWRITE };
         state.notify(event);
+        // Dropping `state` defers dropping `weak_handle` to RCU. See `RcuWeakFileHandle`.
     }
 }
 
@@ -2503,19 +2583,34 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::device::mem::{DevNull, mem_device_init, new_null_file};
     use crate::fs::tmpfs::TmpFs;
     use crate::task::CurrentTask;
     use crate::task::dynamic_thread_spawner::SpawnRequestBuilder;
     use crate::testing::*;
-    use crate::vfs::MountInfo;
     use crate::vfs::buffers::{VecInputBuffer, VecOutputBuffer};
-    use starnix_uapi::auth::FsCred;
+    use crate::vfs::fs_registry::FsRegistry;
+    use crate::vfs::memory_regular::MemoryRegularFile;
+    use crate::vfs::pipe::{new_pipe, register_pipe_fs};
+    use crate::vfs::{Anon, MountInfo, XattrOp};
+    use linux_uapi::{
+        VFS_CAP_FLAGS_EFFECTIVE, VFS_CAP_REVISION_2, XATTR_NAME_CAPS, vfs_cap_data,
+        vfs_cap_data__bindgen_ty_1,
+    };
+    use starnix_uapi::auth::{CAP_FSETID, CAP_NET_RAW};
     use starnix_uapi::device_id::DeviceId;
+    use starnix_uapi::errno;
     use starnix_uapi::file_mode::FileMode;
     use starnix_uapi::open_flags::OpenFlags;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use zerocopy::{FromBytes, IntoBytes, LE, U64};
+
+    const MODE_REGULAR_UNPRIVILEGED: u32 = 0o644;
+    const MODE_REGULAR_EXECUTABLE: u32 = 0o755;
+    const MODE_REGULAR_SUID: u32 = 0o4755;
+    const MODE_CHAR_DEVICE: u32 = 0o666;
+    const TEST_PAYLOAD: &[u8] = b"hello";
 
     #[::fuchsia::test]
     async fn test_append_truncate_race() {
@@ -2532,7 +2627,6 @@ mod tests {
                         name,
                         FileMode::IFREG | FileMode::ALLOW_ALL,
                         DeviceId::NONE,
-                        FsCred::root(),
                     )
                 })
                 .expect("create_node failed");
@@ -2589,6 +2683,203 @@ mod tests {
 
             let _ = write_thread().unwrap();
             let _ = truncate_thread().unwrap();
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn zero_byte_write_does_not_strip_suid_killpriv() {
+        spawn_kernel_and_run(async |current_task| {
+            let mut creds = (*current_task.current_creds()).as_ref().clone();
+            creds.cap_effective &= !CAP_FSETID;
+            current_task.set_creds(creds);
+
+            let entry = current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "suid_test".into(),
+                    FileMode::IFREG | FileMode::from_bits(MODE_REGULAR_SUID),
+                    DeviceId::NONE,
+                )
+                .expect("create_node")
+                .entry;
+            let file = entry.open_anonymous(&current_task, OpenFlags::RDWR).expect("open");
+
+            assert!(!file.node().has_no_privileges());
+            assert!(file.node().info().mode.contains(FileMode::ISUID));
+
+            let mut empty = VecInputBuffer::new(&[]);
+            let written = file.write(&current_task, &mut empty).expect("write 0");
+            assert_eq!(written, 0);
+            assert!(file.node().info().mode.contains(FileMode::ISUID));
+
+            let mut non_empty = VecInputBuffer::new(TEST_PAYLOAD);
+            let written = file.write(&current_task, &mut non_empty).expect("write data");
+            assert_eq!(written, TEST_PAYLOAD.len());
+            assert!(!file.node().info().mode.contains(FileMode::ISUID));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn chmod_suid_after_open_strips_on_write_killpriv() {
+        spawn_kernel_and_run(async |current_task| {
+            let entry = current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "chmod_after_open".into(),
+                    FileMode::IFREG | FileMode::from_bits(MODE_REGULAR_UNPRIVILEGED),
+                    DeviceId::NONE,
+                )
+                .expect("create_node")
+                .entry;
+            let file = entry.open_anonymous(&current_task, OpenFlags::RDWR).expect("open");
+
+            assert!(file.node().has_no_privileges());
+            assert!(!file.node().info().mode.contains(FileMode::ISUID));
+
+            let mount = file.name.to_passive().mount;
+            file.node()
+                .chmod(&current_task, &mount, FileMode::from_bits(MODE_REGULAR_SUID))
+                .expect("chmod");
+            assert!(!file.node().has_no_privileges());
+            assert!(file.node().info().mode.contains(FileMode::ISUID));
+
+            let mut creds = (*current_task.current_creds()).as_ref().clone();
+            creds.cap_effective &= !CAP_FSETID;
+            current_task.set_creds(creds);
+
+            let mut payload = VecInputBuffer::new(TEST_PAYLOAD);
+            let written = file.write(&current_task, &mut payload).expect("write data");
+            assert_eq!(written, TEST_PAYLOAD.len());
+            assert!(!file.node().info().mode.contains(FileMode::ISUID));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn write_clears_file_capabilities_without_suid_killpriv() {
+        spawn_kernel_and_run(async |current_task| {
+            let entry = current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "file_caps".into(),
+                    FileMode::IFREG | FileMode::from_bits(MODE_REGULAR_EXECUTABLE),
+                    DeviceId::NONE,
+                )
+                .expect("create_node")
+                .entry;
+            let file = entry.open_anonymous(&current_task, OpenFlags::RDWR).expect("open");
+
+            assert!(file.node().has_no_privileges());
+            assert!(!file.node().info().mode.contains(FileMode::ISUID));
+            assert!(!file.node().info().mode.contains(FileMode::ISGID));
+
+            let (permitted_low, permitted_high) = CAP_NET_RAW.as_abi_v3();
+            let cap_data = vfs_cap_data {
+                magic_etc: (VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE).to_le(),
+                data: [
+                    vfs_cap_data__bindgen_ty_1 { permitted: permitted_low.to_le(), inheritable: 0 },
+                    vfs_cap_data__bindgen_ty_1 {
+                        permitted: permitted_high.to_le(),
+                        inheritable: 0,
+                    },
+                ],
+            };
+            let mount = file.name.to_passive().mount;
+            let cap_xattr = XATTR_NAME_CAPS.to_bytes().into();
+            file.node()
+                .set_xattr(&current_task, &mount, cap_xattr, cap_data.as_bytes(), XattrOp::Create)
+                .expect("set_xattr");
+            assert!(!file.node().has_no_privileges());
+            assert!(
+                file.node()
+                    .get_xattr(
+                        &current_task,
+                        &mount,
+                        cap_xattr,
+                        std::mem::size_of::<vfs_cap_data>()
+                    )
+                    .is_ok()
+            );
+
+            let mut empty = VecInputBuffer::new(&[]);
+            let written = file.write(&current_task, &mut empty).expect("write 0");
+            assert_eq!(written, 0);
+            assert!(
+                file.node()
+                    .get_xattr(
+                        &current_task,
+                        &mount,
+                        cap_xattr,
+                        std::mem::size_of::<vfs_cap_data>()
+                    )
+                    .is_ok()
+            );
+
+            let mut payload = VecInputBuffer::new(TEST_PAYLOAD);
+            let written = file.write(&current_task, &mut payload).expect("write data");
+            assert_eq!(written, TEST_PAYLOAD.len());
+            assert_eq!(
+                file.node().get_xattr(
+                    &current_task,
+                    &mount,
+                    cap_xattr,
+                    std::mem::size_of::<vfs_cap_data>(),
+                ),
+                Err(errno!(ENODATA)),
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn non_regular_and_private_files_skip_killpriv_check() {
+        spawn_kernel_and_run(async |current_task| {
+            let kernel = current_task.kernel();
+            register_pipe_fs(kernel.expando.get::<FsRegistry>().as_ref());
+            mem_device_init(&kernel).expect("mem_device_init");
+
+            let (_pipe_out, pipe_in) = new_pipe(&current_task).expect("new_pipe");
+            assert!(pipe_in.node().has_no_privileges());
+
+            let anon_file =
+                Anon::new_file(&current_task, Box::new(DevNull), OpenFlags::RDWR, "[null]")
+                    .expect("new_file");
+            assert!(anon_file.node().has_no_privileges());
+
+            let private_anon_file = new_null_file(&current_task, OpenFlags::RDWR);
+            assert!(private_anon_file.node().has_no_privileges());
+
+            let private_regular_file = MemoryRegularFile::new_private_file_with_ops(
+                &current_task,
+                Box::new(DevNull),
+                0,
+                OpenFlags::RDWR,
+                "[private_reg]",
+            );
+            assert!(private_regular_file.node().is_reg());
+            assert!(private_regular_file.node().is_private());
+            assert!(private_regular_file.node().has_no_privileges());
+
+            let chr_node = current_task
+                .fs()
+                .root()
+                .create_node(
+                    &current_task,
+                    "null_chr".into(),
+                    FileMode::IFCHR | FileMode::from_bits(MODE_CHAR_DEVICE),
+                    DeviceId::NULL,
+                )
+                .expect("create_node");
+            let chr_file = chr_node.open(&current_task, OpenFlags::RDWR).expect("open chr");
+            assert!(chr_file.node().has_no_privileges());
         })
         .await;
     }

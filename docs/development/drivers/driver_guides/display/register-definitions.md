@@ -268,7 +268,7 @@ Scoped enums that are only intended to be used by encoding-normalizing helpers
 are not covered by this guideline, because the higher-level driver code is best
 served by logging normalized values.
 
-### Precondition checks
+### Precondition checks {:#precondition-checks}
 
 Every method must check that its preconditions are met, when it is feasible to
 do so. Precondition checks have two big benefits.

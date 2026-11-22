@@ -32,13 +32,12 @@ fuchsia_cc_driver("pl031-rtc-driver") {
     "//sdk/lib/driver/mmio/cpp",
     "//sdk/lib/driver/platform-device/cpp",
     "//src/devices/lib/driver:driver_runtime",
-    "//src/devices/rtc/lib/rtc:rtc_llcpp",
+    "//src/devices/rtc/lib/rtc:rtc_wire",
   ]
 }
 
 fuchsia_driver_component("pl031-rtc") {
   dml_label = ":pl031-rtc-dml"
-  info = "meta/pl031-rtc-info.json"
   component_name = "pl031-rtc"
   deps = [ ":pl031-rtc-driver" ]
 }

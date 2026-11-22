@@ -80,14 +80,18 @@ void RuntimeDirHelper::AddJobIdFile(zx_koid_t job) {
 }
 
 fidl::ClientEnd<fuchsia_io::Directory> RuntimeDirHelper::GetScopedDirectoryHandle(zx_koid_t job) {
+  auto [client_end, server_end] = *fidl::CreateEndpoints<fuchsia_io::Directory>();
+  ServeScopedDirectory(job, std::move(server_end));
+  return std::move(client_end);
+}
+
+void RuntimeDirHelper::ServeScopedDirectory(zx_koid_t job,
+                                            fidl::ServerEnd<fuchsia_io::Directory> server_end) {
   FX_CHECK(root_dir_client_.is_valid());
   FX_CHECK(!root_dir_);
 
-  auto [client_end, server_end] = *fidl::CreateEndpoints<fuchsia_io::Directory>();
   FX_CHECK(root_dir_client_->Open(MakeDirOpenRequest(std::to_string(job), std::move(server_end)))
                .is_ok());
-
-  return std::move(client_end);
 }
 
 }  // namespace testing

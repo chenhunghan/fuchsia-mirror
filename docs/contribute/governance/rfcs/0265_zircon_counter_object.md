@@ -387,7 +387,7 @@ one that is designed to satisfy one or two cases.  Our intention is that as more
 use cases arise we'll either evolve or replace this object and not create a
 proliferation of similar-but-not-quite-the-same objects.
 
-See also [Future Directions](#Future-Directions).
+See also [Future directions](#future-directions).
 
 ### Unsigned count
 
@@ -405,7 +405,7 @@ We considered an alternative where an initial value could be passed to the
 create method.  However, callers can accomplish the same thing by simply calling
 add before allowing the handle to "escape" so we deemed it unnecessary.
 
-## Future Directions
+## Future directions {:#future-directions}
 
 In the near to medium term we do not anticipate wide spread adoption of
 `zx::counter`.  At some point in the future, we may replace `zx::counter` (and

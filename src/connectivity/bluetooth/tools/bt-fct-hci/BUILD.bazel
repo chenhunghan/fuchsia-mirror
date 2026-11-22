@@ -1,0 +1,57 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":bt-fct-hci-unittests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/hci.rs",
+        "src/main.rs",
+        "src/types.rs",
+    ],
+    binary_name = "bt-fct-hci",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.bluetooth:fuchsia.hardware.bluetooth_rust",
+        "//src/connectivity/bluetooth/lib/packet-encoding",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:hex",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    # Match the crate_name of the previous GN `rustc_binary(with_unit_tests = true)`
+    # target (`output_name = "bt-fct-hci"`).
+    crate_name = "bt_fct_hci_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//src/connectivity/bluetooth/lib/bt-fidl-mocks"],
+)
+
+fx_unittest_package(
+    name = "bt-fct-hci-unittests",
+    unit_tests = [":bin_test"],
+)

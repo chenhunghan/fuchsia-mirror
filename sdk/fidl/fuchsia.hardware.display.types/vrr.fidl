@@ -1,0 +1,83 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+library fuchsia.hardware.display.types;
+
+using zx;
+
+const MAX_COUNT_FRAME_INTERVAL_POWER_HINTS uint32 = 32;
+
+/// Maps a target presentation cadence to the physical panel's average refresh
+/// period when panel self-refresh or frame insertion causes extra panel scans.
+///
+/// Display engines should only populate entries for frame intervals that
+/// require the panel to run at a higher refresh rate than `frame_interval` due
+/// to self-refresh or frame insertion (`average_refresh_period < frame_interval`).
+/// For unlisted intervals, clients assume `average_refresh_period` equals
+/// `frame_interval`.
+type FrameIntervalPowerHint = struct {
+    /// Target presentation interval between consecutive frames.
+    ///
+    /// Valid entries have `frame_interval` greater than or equal to the mode's
+    /// effective `min_frame_interval`.
+    frame_interval zx.DurationMono;
+
+    /// Average physical refresh period of the panel at `frame_interval`.
+    ///
+    /// Valid entries have positive `average_refresh_period` strictly less than
+    /// `frame_interval`.
+    average_refresh_period zx.DurationMono;
+};
+
+/// Advance-notice parameters for waking or retiming a variable-refresh-rate
+/// display after idle periods or cadence transitions.
+type NotifyExpectedPresentConfig = struct {
+    /// Minimum lead time ahead of `expected_present_time` for calling
+    /// `NotifyExpectedPresent`.
+    ///
+    /// Valid configurations have positive `heads_up`.
+    heads_up zx.DurationMono;
+
+    /// Idle duration since the previous committed frame after which a client
+    /// should call `NotifyExpectedPresent` before presenting the next frame,
+    /// even if the presentation cadence has not changed.
+    ///
+    /// A value of `0` requests hints before every presented frame.
+    /// Valid configurations have non-negative `timeout`.
+    timeout zx.DurationMono;
+};
+
+/// Extended capabilities for a [`Mode`] with [`ModeFlags.VARIABLE_REFRESH_RATE`].
+///
+/// Empty/unpopulated for fixed-refresh modes.
+type VrrConfig = table {
+    /// Nominal VSync (TE) scheduling grid period for this mode.
+    ///
+    /// Defaults to the reciprocal of [`Mode.refresh_rate_millihertz`]
+    /// (`(1e12 / refresh_rate_millihertz)` nanoseconds) when omitted.
+    /// When present, must be positive.
+    1: vsync_period zx.DurationMono;
+
+    /// Minimum interval between two presented frames.
+    ///
+    /// Defaults to the reciprocal of [`Mode.refresh_rate_millihertz`]
+    /// (`(1e12 / refresh_rate_millihertz)` nanoseconds) when omitted.
+    /// When present, must be positive and greater than or equal to the
+    /// effective `vsync_period`.
+    ///
+    /// On panels that latch frames strictly on a fixed VSync (TE) grid,
+    /// implementations should set an integer multiple `N * vsync_period`
+    /// (`N >= 1`). Represented as a duration rather than a ratio so
+    /// continuous-blanking VRR displays can express arbitrary minimum
+    /// intervals directly.
+    2: min_frame_interval zx.DurationMono;
+
+    /// Optional power hints for intervals incurring self-refresh overhead,
+    /// ordered by strictly ascending `frame_interval`. Should be omitted when
+    /// no supported frame interval incurs extra self-refresh scans.
+    3: frame_interval_power_hints
+            vector<FrameIntervalPowerHint>:MAX_COUNT_FRAME_INTERVAL_POWER_HINTS;
+
+    /// Present iff the display engine consumes `NotifyExpectedPresent` hints.
+    4: notify_expected_present_config NotifyExpectedPresentConfig;
+};

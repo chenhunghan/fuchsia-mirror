@@ -40,7 +40,8 @@ use crate::object_store::object_record::{
 use crate::object_store::transaction::{AssocObj, Options, ReservationOptions};
 use crate::object_store::tree::MajorCompactable;
 use crate::object_store::{
-    DataObjectHandle, HandleOptions, HandleOwner, Mutation, ObjectKey, ObjectStore, ObjectValue,
+    DataObjectHandle, HandleOptions, LocalHandleOwner, Mutation, ObjectKey, ObjectStore,
+    ObjectValue,
 };
 use crate::range::RangeExt;
 use crate::serialized_types::{
@@ -364,7 +365,7 @@ async fn read(
 
 /// Write a super-block to the given file handle.
 /// Requires that the filesystem is fully loaded and writable as this may require allocation.
-async fn write<S: HandleOwner>(
+async fn write<S: LocalHandleOwner>(
     super_block_header: &SuperBlockHeader,
     items: LayerSet<ObjectKey, ObjectValue>,
     handle: DataObjectHandle<S>,
@@ -640,14 +641,14 @@ impl SuperBlockHeader {
     }
 }
 
-struct SuperBlockWriter<S: HandleOwner> {
+struct SuperBlockWriter<S: LocalHandleOwner> {
     handle: DataObjectHandle<S>,
     writer: JournalWriter,
     existing_extents: VecDeque<FileExtent>,
     size: u64,
 }
 
-impl<S: HandleOwner> SuperBlockWriter<S> {
+impl<S: LocalHandleOwner> SuperBlockWriter<S> {
     /// Create a new writer, outputs FXFS magic, version and SuperBlockHeader.
     /// On success, the writer is ready to accept root parent store mutations.
     pub async fn new(
@@ -1018,7 +1019,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_generation_comparison_wrapping() {
-        const BLOCK_SIZE: BlockSize = BlockSize::new(MIN_SUPER_BLOCK_SIZE as u32).unwrap();
+        const BLOCK_SIZE: BlockSize = BlockSize::new(MIN_SUPER_BLOCK_SIZE).unwrap();
         let device =
             DeviceHolder::new(FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, BLOCK_SIZE.get() as u32));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
@@ -1111,7 +1112,7 @@ mod tests {
         device.reopen(false);
 
         let manager = SuperBlockManager::new();
-        let (mut header, _) =
+        let (mut header, root_parent) =
             manager.load((*device).clone(), BLOCK_SIZE).await.expect("load failed");
 
         {
@@ -1122,12 +1123,12 @@ mod tests {
             // Then the next write will be to A, and should be 0.
             header.generation = u64::MAX - 1;
             manager
-                .save(header.clone(), (*fs).clone(), fs.root_parent_store().tree().layer_set())
+                .save(header.clone(), (*fs).clone(), root_parent.tree().layer_set())
                 .await
                 .expect("save 1 failed");
             header.generation = u64::MAX;
             manager
-                .save(header, (*fs).clone(), fs.root_parent_store().tree().layer_set())
+                .save(header, (*fs).clone(), root_parent.tree().layer_set())
                 .await
                 .expect("save 2 failed");
             fs.close().await.expect("close failed");
@@ -1373,7 +1374,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_invalid_object_ids_validation() {
-        const BLOCK_SIZE: BlockSize = BlockSize::new(MIN_SUPER_BLOCK_SIZE as u32).unwrap();
+        const BLOCK_SIZE: BlockSize = BlockSize::new(MIN_SUPER_BLOCK_SIZE).unwrap();
         let device =
             DeviceHolder::new(FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, BLOCK_SIZE.get() as u32));
         let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");

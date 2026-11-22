@@ -29,6 +29,10 @@ zx::result<> DisplayEngineInterface::SetMinimumRgb(uint8_t minimum_rgb) {
   return zx::error(ZX_ERR_NOT_SUPPORTED);
 }
 
+void DisplayEngineInterface::NotifyExpectedPresent(display::DisplayId display_id,
+                                                   zx::time_monotonic expected_present_time,
+                                                   zx::duration frame_interval) {}
+
 display::ConfigCheckResult DisplayEngineInterface::CheckConfiguration(
     display::DisplayId display_id, display::ModeId display_mode_id,
     std::span<const display::DriverLayer> layers) {

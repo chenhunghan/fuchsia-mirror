@@ -13,7 +13,7 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).parent
 
-from build.bazel.scripts import bazel_tests_utils
+from build.bazel.scripts import bazel_tests_utils, build_utils
 from build.bazel.scripts.bazel_test_packages import export_path_for_manifest
 from build.bazel.scripts.build_utils import BazelPaths, MockCommandRunner
 
@@ -301,6 +301,332 @@ class BazelTestsUtilsTest(unittest.TestCase):
             / "ungrouped_bazel_target_test_suites.txt"
         ).write_text("\n".join(suites))
 
+    def _discover_tests_runner(
+        self, query_stdout: str, host_stdout: str, device_stdout: str
+    ) -> MockCommandRunner:
+        """Return a runner that fakes discover_tests()'s Bazel commands.
+
+        The query and cquery expressions are recorded in self.query_expression
+        and self.cquery_expressions, keyed by --config flag, since they're
+        passed in temporary files.
+        """
+        self.query_expression = ""
+        self.cquery_expressions: dict[str, str] = {}
+
+        def command_filter(args: list[str]) -> build_utils.CommandResult:
+            query_file = next(
+                a.removeprefix("--query_file=")
+                for a in args
+                if a.startswith("--query_file=")
+            )
+            if "cquery" not in args:
+                self.query_expression = Path(query_file).read_text()
+                return build_utils.CommandResult(0, query_stdout, "")
+            config = next(a for a in args if a.startswith("--config="))
+            self.cquery_expressions[config] = Path(query_file).read_text()
+            stdout = host_stdout if config == "--config=host" else device_stdout
+            return build_utils.CommandResult(0, stdout, "")
+
+        mock_runner = MockCommandRunner()
+        mock_runner.set_command_filter(command_filter)
+        return mock_runner
+
+    def test_discover_tests(self) -> None:
+        mock_runner = self._discover_tests_runner(
+            query_stdout="host_test rule //src/host:host_test\n"
+            "fx_test rule //src/device:device_test\n",
+            host_stdout=json.dumps(
+                {
+                    "label": "@@//src/host:host_test",
+                    "launcher_execroot_path": "bin/host_test",
+                    "runtime_deps_json_execroot_path": "bin/host_test.json",
+                    "os": "linux",
+                    "cpu": "x86_64",
+                    "list_cases_argument": "",
+                }
+            ),
+            device_stdout=json.dumps(
+                {
+                    "label": "@@//src/device:device_test",
+                    "package_manifest_execroot_path": "bazel-out/device/package_manifest.json",
+                    "os": "fuchsia",
+                    "cpu": "x64",
+                    "test_components": [
+                        {
+                            "component_name": "device_test",
+                            "package_url": "fuchsia-pkg://fuchsia.com/device-test#meta/device_test.cm",
+                        }
+                    ],
+                }
+            ),
+        )
+
+        tests = bazel_tests_utils.discover_tests(
+            self.bazel_paths,
+            [
+                "//src/host:host_test",
+                "//src/device:device_test",
+            ],
+            command_runner=mock_runner,
+        )
+
+        self.assertEqual(
+            [t["test"]["label"] for t in tests],
+            ["@@//src/host:host_test", "@@//src/device:device_test"],
+        )
+        self.assertEqual(tests[1]["environments"], [])
+
+        query, host_cquery, device_cquery = mock_runner.commands
+        self.assertNotIn("--keep_going", query)
+        self.assertEqual(
+            self.query_expression,
+            "set(//src/host:host_test //src/device:device_test)",
+        )
+        self.assertIn("--config=host", host_cquery)
+        self.assertIn("--config=fuchsia_platform", device_cquery)
+        self.assertEqual(
+            self.cquery_expressions,
+            {
+                "--config=host": "set(//src/host:host_test)",
+                "--config=fuchsia_platform": "set(//src/device:device_test)",
+            },
+        )
+        gn_targets_dir = (
+            self.bazel_paths.ninja_build_dir
+            / "build/bazel/tests_json.gn_targets"
+        )
+        # Every command must override @gn_targets identically, or Bazel
+        # reloads all packages that depend on it between commands.
+        for command in (query, host_cquery, device_cquery):
+            self.assertIn(
+                f"--override_repository=gn_targets+={gn_targets_dir}",
+                command,
+            )
+
+        # Unlike generate_tests_json(), this must not change what `fx build`
+        # publishes.
+        self.assertFalse(
+            (
+                self.bazel_paths.ninja_build_dir / "bazel_test_packages.list"
+            ).exists()
+        )
+
+    def test_discover_tests_shorthand_label(self) -> None:
+        mock_runner = self._discover_tests_runner(
+            query_stdout="host_test rule //src/host:host\n",
+            host_stdout=json.dumps(
+                {
+                    "label": "@@//src/host:host",
+                    "launcher_execroot_path": "bin/host",
+                    "runtime_deps_json_execroot_path": "bin/host.json",
+                    "os": "linux",
+                    "cpu": "x86_64",
+                    "list_cases_argument": "",
+                }
+            ),
+            device_stdout="",
+        )
+
+        tests = bazel_tests_utils.discover_tests(
+            self.bazel_paths, ["@//src/host/"], command_runner=mock_runner
+        )
+
+        self.assertEqual(
+            [t["test"]["label"] for t in tests], ["@@//src/host:host"]
+        )
+        self.assertEqual(
+            self.query_expression,
+            "set(//src/host:host)",
+        )
+
+    def test_discover_tests_rejects_target_patterns(self) -> None:
+        for pattern in ("//src/...", "@//...", "//src/foo:all", "//src/foo:*"):
+            with self.subTest(pattern=pattern):
+                mock_runner = MockCommandRunner()
+                with self.assertRaisesRegex(
+                    bazel_tests_utils.TestDiscoveryError,
+                    re.escape(
+                        f"Target patterns like '{pattern}' aren't supported yet."
+                    ),
+                ):
+                    bazel_tests_utils.discover_tests(
+                        self.bazel_paths,
+                        [pattern],
+                        command_runner=mock_runner,
+                    )
+                self.assertEqual(mock_runner.commands, [])
+
+    def test_discover_tests_test_os_filter(self) -> None:
+        mock_runner = self._discover_tests_runner(
+            query_stdout="host_test rule //src/host:host_test\n"
+            "fx_test rule //src/device:device_test\n",
+            host_stdout=json.dumps(
+                {
+                    "label": "@@//src/host:host_test",
+                    "launcher_execroot_path": "bin/host_test",
+                    "runtime_deps_json_execroot_path": "bin/host_test.json",
+                    "os": "linux",
+                    "cpu": "x86_64",
+                    "list_cases_argument": "",
+                }
+            ),
+            device_stdout="",
+        )
+
+        tests = bazel_tests_utils.discover_tests(
+            self.bazel_paths,
+            ["//src/host:host_test"],
+            test_os="host",
+            command_runner=mock_runner,
+        )
+        self.assertEqual(
+            [t["test"]["label"] for t in tests], ["@@//src/host:host_test"]
+        )
+        # Only the host cquery ran; switching to fuchsia_platform was avoided.
+        self.assertEqual(list(self.cquery_expressions), ["--config=host"])
+
+        device_only_runner = MockCommandRunner()
+        device_only_runner.push_result(
+            stdout="fx_test rule //src/device:device_test\n"
+        )
+        with self.assertRaisesRegex(
+            bazel_tests_utils.TestDiscoveryError,
+            re.escape("'//src/device:device_test' is a device test."),
+        ):
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/device:device_test"],
+                test_os="host",
+                command_runner=device_only_runner,
+            )
+
+    def test_discover_tests_incompatible_target(self) -> None:
+        explicit_runner = self._discover_tests_runner(
+            query_stdout="fx_test rule //src/sys:profile_incompatible_test\n",
+            host_stdout="",
+            device_stdout=json.dumps(
+                {
+                    "incompatible": True,
+                    "label": "@@//src/sys:profile_incompatible_test",
+                }
+            ),
+        )
+        with self.assertRaisesRegex(
+            bazel_tests_utils.TestDiscoveryError,
+            "Target '//src/sys:profile_incompatible_test' is incompatible",
+        ):
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/sys:profile_incompatible_test"],
+                command_runner=explicit_runner,
+            )
+
+    def test_discover_tests_rejects_test_suite(self) -> None:
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(stdout="test_suite rule //src/suite:my_suite\n")
+
+        with self.assertRaisesRegex(
+            bazel_tests_utils.TestDiscoveryError,
+            re.escape(
+                "'//src/suite:my_suite' is a test_suite target, not an fx_test() or host_test()."
+            ),
+        ):
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/suite:my_suite"],
+                command_runner=mock_runner,
+            )
+
+    def test_discover_tests_not_a_test(self) -> None:
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(
+            stdout="host_test rule //src/host:host_test\n"
+            "cc_test rule //src/host:cc_test\n"
+        )
+
+        with self.assertRaisesRegex(
+            bazel_tests_utils.TestDiscoveryError,
+            re.escape(
+                "'//src/host:cc_test' is a cc_test target, not an fx_test() or host_test()."
+            ),
+        ):
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/host:host_test", "//src/host:cc_test"],
+                command_runner=mock_runner,
+            )
+
+    def test_discover_tests_empty_labels(self) -> None:
+        tests = bazel_tests_utils.discover_tests(
+            self.bazel_paths,
+            [],
+        )
+        self.assertEqual(tests, [])
+
+    def test_discover_tests_rejects_relative_labels(self) -> None:
+        for label in ("src/foo:bar_test", ":bar_test", "@repo//foo:bar", "//"):
+            with self.subTest(label=label):
+                mock_runner = MockCommandRunner()
+                with self.assertRaisesRegex(
+                    bazel_tests_utils.TestDiscoveryError,
+                    re.escape(
+                        f"'{label}' must be an absolute label in the main repository"
+                    ),
+                ):
+                    bazel_tests_utils.discover_tests(
+                        self.bazel_paths, [label], command_runner=mock_runner
+                    )
+                self.assertEqual(mock_runner.commands, [])
+
+    def test_discover_tests_malformed_query_output(self) -> None:
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(stdout="unexpected\n")
+        with self.assertRaisesRegex(RuntimeError, "Unexpected line"):
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/foo:bar_test"],
+                command_runner=mock_runner,
+            )
+
+    def test_discover_tests_analysis_failure(self) -> None:
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(stdout="host_test rule //src/foo:bar_test\n")
+        mock_runner.push_result(
+            returncode=1,
+            stderr="Loading: 0 packages loaded\n"
+            "ERROR: /src/foo/BUILD.bazel:3:10: in host_test rule //src/foo:bar_test: oops\n",
+        )
+        with self.assertRaises(bazel_tests_utils.TestDiscoveryError) as cm:
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/foo:bar_test"],
+                command_runner=mock_runner,
+            )
+        self.assertEqual(
+            str(cm.exception),
+            "/src/foo/BUILD.bazel:3:10: in host_test rule //src/foo:bar_test: oops",
+        )
+
+    def test_discover_tests_query_failure(self) -> None:
+        mock_runner = MockCommandRunner()
+        mock_runner.push_result(
+            returncode=7,
+            stderr="WARNING: FX_BUILD_LOGDIR is not set.\n"
+            "Loading: 0 packages loaded\n"
+            "ERROR: no such target '//src/foo:bar_test'\n",
+        )
+
+        with self.assertRaises(bazel_tests_utils.TestDiscoveryError) as cm:
+            bazel_tests_utils.discover_tests(
+                self.bazel_paths,
+                ["//src/foo:bar_test"],
+                command_runner=mock_runner,
+            )
+        # Only the error line is kept, without Bazel's progress output.
+        self.assertEqual(
+            str(cm.exception), "no such target '//src/foo:bar_test'"
+        )
+
     def test_generate_device_tests_json(self) -> None:
         self._setUpDeviceTests(["//fake/device_tests"])
 
@@ -558,7 +884,9 @@ class BazelTestsUtilsTest(unittest.TestCase):
             "//src/barriered:barriered_test\n"
         )
         group1_file = self.bazel_paths.ninja_build_dir / "group1_suites.txt"
-        group1_file.write_text("//src/top:top_test\n//src/group:suite\n")
+        # List the suite first to check that the group's tests follow the
+        # cquery's order rather than the order of the group's labels.
+        group1_file.write_text("//src/group:suite\n//src/top:top_test\n")
 
         barriered_build_dir = self.bazel_paths.fuchsia_dir / "src/barriered"
         barriered_build_dir.mkdir(parents=True)
@@ -583,20 +911,37 @@ class BazelTestsUtilsTest(unittest.TestCase):
 
         mock_runner = MockCommandRunner()
         # Single cquery over the union of all suites.
-        mock_runner.push_result(
-            stdout="\n".join(
-                [
-                    make_cquery_entry("top_test", "@@//src/top:top_test"),
-                    make_cquery_entry("suite_test", "@@//src/group:suite_test"),
-                    make_cquery_entry(
-                        "barriered_test", "@@//src/barriered:barriered_test"
-                    ),
-                ]
-            )
+        cquery_stdout = "\n".join(
+            [
+                make_cquery_entry("top_test", "@@//src/top:top_test"),
+                make_cquery_entry("suite_test", "@@//src/group:suite_test"),
+                make_cquery_entry(
+                    "barriered_test", "@@//src/barriered:barriered_test"
+                ),
+            ]
         )
-        # Loading-phase `bazel query` to expand `//src/group:suite` (not needed
-        # for `//src/top:top_test`, which is already a direct fx_test label).
-        mock_runner.push_result(stdout="@@//src/group:suite_test\n")
+        # Then one loading-phase `bazel query` to expand group1, which
+        # contains a test_suite() label.
+        query_expressions: list[str] = []
+
+        def command_filter(args: list[str]) -> build_utils.CommandResult:
+            if "cquery" in args:
+                return build_utils.CommandResult(
+                    returncode=0, stdout=cquery_stdout, stderr=""
+                )
+            query_file = next(
+                a.removeprefix("--query_file=")
+                for a in args
+                if a.startswith("--query_file=")
+            )
+            query_expressions.append(Path(query_file).read_text())
+            return build_utils.CommandResult(
+                returncode=0,
+                stdout="//src/group:suite_test\n//src/top:top_test\n",
+                stderr="",
+            )
+
+        mock_runner.set_command_filter(command_filter)
 
         result = bazel_tests_utils.generate_tests_json(
             self.bazel_paths,
@@ -607,11 +952,14 @@ class BazelTestsUtilsTest(unittest.TestCase):
         grouped_tests = result.grouped_tests
         inputs = result.inputs
 
-        # Exactly 1 cquery + 1 loading-phase query for the test_suite().
+        # Exactly 1 cquery + 1 loading-phase query for the group.
         self.assertEqual(len(mock_runner.commands), 2)
         self.assertIn("cquery", mock_runner.commands[0])
-        self.assertIn("query", mock_runner.commands[1])
-        self.assertIn("tests(//src/group:suite)", mock_runner.commands[1])
+        self.assertIn(" query ", mock_runner.commands[1])
+        self.assertEqual(
+            query_expressions,
+            ["tests(set(//src/group:suite //src/top:top_test))"],
+        )
 
         self.assertEqual(
             [t["test"]["source_label"] for t in tests_json],
@@ -648,6 +996,32 @@ class BazelTestsUtilsTest(unittest.TestCase):
             },
         )
         self.assertIn(barriered_build_file, inputs)
+
+    def test_generate_device_tests_json_group_query_failure(self) -> None:
+        self._setUpDeviceTests(["//src/top:top_test"])
+        group1_file = self.bazel_paths.ninja_build_dir / "group1_suites.txt"
+        group1_file.write_text("//src/group:suite\n")
+
+        def command_filter(args: list[str]) -> build_utils.CommandResult:
+            if "cquery" in args:
+                return build_utils.CommandResult(
+                    returncode=0, stdout="", stderr=""
+                )
+            return build_utils.CommandResult(
+                returncode=1, stdout="", stderr="Bazel error"
+            )
+
+        mock_runner = MockCommandRunner()
+        mock_runner.set_command_filter(command_filter)
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Failed to run bazel query: Bazel error"
+        ):
+            bazel_tests_utils.generate_tests_json(
+                self.bazel_paths,
+                command_runner=mock_runner,
+                extra_device_suite_files=[group1_file],
+            )
 
     def test_generate_device_tests_json_log_settings(self) -> None:
         self._setUpDeviceTests(["//fake/device_tests"])

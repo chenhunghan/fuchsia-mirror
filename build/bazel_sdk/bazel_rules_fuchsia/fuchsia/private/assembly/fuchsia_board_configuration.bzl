@@ -313,15 +313,64 @@ _fuchsia_board_configuration = rule(
     },
 )
 
+_VALID_ARCHS = ["x64", "arm64", "riscv64"]
+
+def _arch_compatibility(arch, target_compatible_with):
+    """Returns `target_compatible_with`, restricted to the given CPU architecture.
+
+    The cpu_* targets are config_setting_groups (they also match the legacy
+    --cpu flag), not constraint_values, so they can't be listed in
+    target_compatible_with directly.
+
+    Args:
+        arch: The CPU architecture, one of _VALID_ARCHS.
+        target_compatible_with: The caller's target_compatible_with, or None.
+
+    Returns:
+        The combined target_compatible_with value.
+    """
+    if type(arch) != "string" or arch not in _VALID_ARCHS:
+        fail("`arch` must be one of {}, got: {}".format(_VALID_ARCHS, repr(arch)))
+    return (target_compatible_with or []) + select({
+        "@rules_fuchsia//fuchsia/constraints:cpu_" + arch: [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    })
+
 def fuchsia_board_configuration(
         name,
         filesystems = {},
         platform = {},
         kernel = {},
         hardware_info = {},
+        arch = None,
+        target_compatible_with = None,
         **kwargs):
-    """A board configuration that takes a dict for the filesystems config."""
+    """A board configuration that takes a dict for the filesystems config.
+
+    Args:
+        name: The target name.
+        filesystems: A dict for the filesystems config.
+        platform: A dict for the platform config.
+        kernel: A dict for the kernel config.
+        hardware_info: A dict for the hardware info.
+        arch: Optional CPU architecture of the board ("x64", "arm64" or
+            "riscv64"). When set, the board is only compatible with that CPU,
+            and so are all targets that depend on it. When unset, the
+            architecture is taken from the target platform.
+        target_compatible_with: The usual Bazel meaning. Combined with the
+            restriction from `arch`, if set.
+        **kwargs: Other attributes of the underlying rule.
+    """
     filesystem_labels = extract_labels(filesystems)
+
+    if arch != None:
+        target_compatible_with = _arch_compatibility(arch, target_compatible_with)
+    else:
+        arch = select({
+            "@rules_fuchsia//fuchsia/constraints:cpu_x64": "x64",
+            "@rules_fuchsia//fuchsia/constraints:cpu_arm64": "arm64",
+            "@rules_fuchsia//fuchsia/constraints:cpu_riscv64": "riscv64",
+        })
 
     _fuchsia_board_configuration(
         name = name,
@@ -330,11 +379,8 @@ def fuchsia_board_configuration(
         kernel = json.encode_indent(kernel, indent = "    "),
         hardware_info = json.encode_indent(hardware_info, indent = "    "),
         filesystems_labels = filesystem_labels,
-        arch = select({
-            "@rules_fuchsia//fuchsia/constraints:cpu_x64": "x64",
-            "@rules_fuchsia//fuchsia/constraints:cpu_arm64": "arm64",
-            "@rules_fuchsia//fuchsia/constraints:cpu_riscv64": "riscv64",
-        }),
+        arch = arch,
+        target_compatible_with = target_compatible_with,
         **kwargs
     )
 
@@ -364,13 +410,31 @@ _fuchsia_prebuilt_board_configuration = rule(
 def fuchsia_prebuilt_board_configuration(
         *,
         directory = None,
+        arch = None,
+        target_compatible_with = None,
         **kwargs):
-    """A board configuration that has been prebuilt and exists in a specific folder."""
+    """A board configuration that has been prebuilt and exists in a specific folder.
+
+    Args:
+        directory: Deprecated alias for `files`.
+        arch: Optional CPU architecture of the board ("x64", "arm64" or
+            "riscv64"). When set, the board is only compatible with that CPU,
+            and so are all targets that depend on it.
+        target_compatible_with: The usual Bazel meaning. Combined with the
+            restriction from `arch`, if set.
+        **kwargs: Other attributes of the underlying rule, such as `name`
+            and `files`.
+    """
 
     # TODO(chandarren): Migrate users to use `files` instead.
     if directory:
         kwargs["files"] = directory
-    _fuchsia_prebuilt_board_configuration(**kwargs)
+    if arch != None:
+        target_compatible_with = _arch_compatibility(arch, target_compatible_with)
+    _fuchsia_prebuilt_board_configuration(
+        target_compatible_with = target_compatible_with,
+        **kwargs
+    )
 
 def _fuchsia_hybrid_board_configuration_impl(ctx):
     board_config_dir = ctx.actions.declare_directory(ctx.label.name)

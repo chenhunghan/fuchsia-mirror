@@ -116,6 +116,7 @@ def direct_macro(): native.filegroup(name = "direct_target", target_compatible_w
 
 def test_allowed_host_constraints():
     res = _run_host_constraints_test({
+        "REPO.bazel": 'ignore_directories(["third_party/foo"])\n',
         "src/BUILD.bazel": """
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 

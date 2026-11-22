@@ -433,6 +433,7 @@ impl PortWaiter {
         deadline: zx::MonotonicInstant,
     ) -> Result<(), Errno> {
         let is_waiting = deadline.into_nanos() > 0;
+        let is_killable = run_state.is_killable();
 
         let callback = || {
             // We are susceptible to spurious wakeups because interrupt() posts a message to the port
@@ -448,8 +449,11 @@ impl PortWaiter {
             loop {
                 let wait_result = self.wait_internal(deadline);
                 if let Err(errno) = &wait_result {
-                    if errno.code == EINTR && !is_waiting {
-                        continue; // Spurious wakeup.
+                    if errno.code == EINTR
+                        && (!is_waiting
+                            || (is_killable && !current_task.read().has_fatal_signal_pending()))
+                    {
+                        continue; // Spurious or non-fatal wakeup.
                     }
                 }
                 return wait_result;
@@ -634,6 +638,18 @@ impl Waiter {
         self.inner.wait_until(
             current_task,
             RunState::Waiter(WaiterRef::from_port(&self.inner)),
+            zx::MonotonicInstant::INFINITE,
+        )
+    }
+
+    /// Waits until the waiter is woken up, interrupting only for fatal signals or process
+    /// termination.
+    ///
+    /// Non-fatal signals do not interrupt this wait.
+    pub fn wait_killable(&self, current_task: &CurrentTask) -> Result<(), Errno> {
+        self.inner.wait_until(
+            current_task,
+            RunState::KillableWaiter(WaiterRef::from_port(&self.inner)),
             zx::MonotonicInstant::INFINITE,
         )
     }

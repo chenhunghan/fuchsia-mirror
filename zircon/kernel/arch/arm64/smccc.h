@@ -33,18 +33,11 @@
 
 #else  // clang-format on
 
-#include <lib/arch/arm64/smccc.h>
-
 #include <cstdint>
 
 constexpr uint32_t kMovW0SmcccArchWorkaround3 = 0x32013be0;
 constexpr uint32_t kMovW0SmcccArchWorkaround1 = 0x320183e0;
 constexpr uint32_t kMovW0PsciVersion = 0x52b08000;
-
-// This is defined in assembly.  The first argument is the Function Identifier
-// and the other arguments vary by function.
-extern "C" uint64_t ArmSmcccCall(arch::ArmSmcccFunction function, uint64_t arg1 = 0,
-                                 uint64_t arg2 = 0, uint64_t arg3 = 0);
 
 #endif
 

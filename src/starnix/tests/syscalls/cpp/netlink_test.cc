@@ -263,8 +263,9 @@ TEST(RouteNetlinkSocket, AddDropMulticastGroup) {
 
   ASSERT_TRUE(MY_NLMSG_OK(nlmsg, len));
   ASSERT_EQ(nlmsg->nlmsg_type, RTM_DELADDR);
-  rtmsg* rtm = reinterpret_cast<rtmsg*>(NLMSG_DATA(nlmsg));
-  ASSERT_EQ(rtm->rtm_family, AF_INET);
+  ifaddrmsg* ifa = reinterpret_cast<ifaddrmsg*>(NLMSG_DATA(nlmsg));
+  ASSERT_EQ(ifa->ifa_family, AF_INET);
+  EXPECT_EQ(ifa->ifa_scope, RT_SCOPE_HOST);
 
   nlmsg = NLMSG_NEXT(nlmsg, len);
 
@@ -282,8 +283,9 @@ TEST(RouteNetlinkSocket, AddDropMulticastGroup) {
   // Assert that the content of the second message indicates the new loopback
   // address being added.
   ASSERT_EQ(nlmsg->nlmsg_type, RTM_NEWADDR);
-  rtm = reinterpret_cast<rtmsg*>(NLMSG_DATA(nlmsg));
-  ASSERT_EQ(rtm->rtm_family, AF_INET);
+  ifa = reinterpret_cast<ifaddrmsg*>(NLMSG_DATA(nlmsg));
+  ASSERT_EQ(ifa->ifa_family, AF_INET);
+  EXPECT_EQ(ifa->ifa_scope, RT_SCOPE_HOST);
 
   // Now we should have run out of messages.
   nlmsg = NLMSG_NEXT(nlmsg, len);
@@ -446,6 +448,137 @@ TEST_P(RouteNetlinkSocketNewAddr, AddSubnetRoute) {
   }
 
   ASSERT_EQ(expect_subnet_route, target_route_seen);
+}
+
+TEST_F(RouteNetlinkSocketTestWithInterface, GetAddrScope) {
+  const uint32_t if_index = if_nametoindex(kTestIfName);
+  ASSERT_GT(if_index, 0u);
+  const uint32_t lo_index = if_nametoindex("lo");
+  ASSERT_GT(lo_index, 0u);
+
+  struct TestAddr {
+    uint8_t family;
+    const char* addr;
+    uint8_t prefix;
+    uint8_t expected_scope;
+    bool seen = false;
+  };
+
+  std::vector<TestAddr> added_addrs = {
+      {.family = AF_INET, .addr = "192.0.2.1", .prefix = 24, .expected_scope = RT_SCOPE_UNIVERSE},
+      {.family = AF_INET, .addr = "169.254.1.2", .prefix = 16, .expected_scope = RT_SCOPE_UNIVERSE},
+      {.family = AF_INET6,
+       .addr = "2001:db8::1",
+       .prefix = 64,
+       .expected_scope = RT_SCOPE_UNIVERSE},
+      {.family = AF_INET6, .addr = "fd00::1", .prefix = 64, .expected_scope = RT_SCOPE_UNIVERSE},
+      {.family = AF_INET6, .addr = "fe80::1", .prefix = 64, .expected_scope = RT_SCOPE_LINK},
+      {.family = AF_INET6, .addr = "fec0::1", .prefix = 64, .expected_scope = RT_SCOPE_SITE},
+  };
+
+  for (const auto& entry : added_addrs) {
+    test_helper::NetlinkEncoder encoder(RTM_NEWADDR, NLM_F_REQUEST | NLM_F_ACK);
+    struct ifaddrmsg ifa = {
+        .ifa_family = entry.family,
+        .ifa_prefixlen = entry.prefix,
+        .ifa_flags = IFA_F_PERMANENT,
+        .ifa_scope = RT_SCOPE_UNIVERSE,
+        .ifa_index = if_index,
+    };
+    uint8_t addrbuf[sizeof(in6_addr)];
+    ASSERT_EQ(inet_pton(entry.family, entry.addr, &addrbuf), 1);
+    auto addr = std::span(addrbuf, entry.family == AF_INET ? sizeof(in_addr) : sizeof(in6_addr));
+    encoder.Write(ifa);
+    encoder.BeginNla(IFA_ADDRESS);
+    encoder.WriteSpan(addr);
+    encoder.EndNla();
+    encoder.BeginNla(IFA_LOCAL);
+    encoder.WriteSpan(addr);
+    encoder.EndNla();
+    ASSERT_THAT(SendMsg(encoder), SyscallSucceeds());
+
+    char recv_buf[4096];
+    ssize_t len = recv(nl_sock_.get(), recv_buf, sizeof(recv_buf), 0);
+    ASSERT_GT(len, 0) << strerror(errno);
+    const nlmsghdr* nlh = reinterpret_cast<const nlmsghdr*>(recv_buf);
+    ASSERT_TRUE(MY_NLMSG_OK(nlh, len));
+    ASSERT_EQ(nlh->nlmsg_type, NLMSG_ERROR);
+    const nlmsgerr* err = reinterpret_cast<const nlmsgerr*>(NLMSG_DATA(nlh));
+    ASSERT_EQ(err->error, 0) << "RTM_NEWADDR failed for " << entry.addr;
+  }
+
+  test_helper::NetlinkEncoder dump_encoder(RTM_GETADDR, NLM_F_REQUEST | NLM_F_DUMP);
+  dump_encoder.Write(ifaddrmsg{.ifa_family = AF_UNSPEC});
+  ASSERT_THAT(SendMsg(dump_encoder), SyscallSucceeds());
+
+  bool lo_v4_seen = false;
+  bool lo_v6_seen = false;
+  bool done = false;
+  char buf[8192];
+  while (!done) {
+    ssize_t len = recv(nl_sock_.get(), buf, sizeof(buf), 0);
+    ASSERT_GT(len, 0) << strerror(errno);
+    for (nlmsghdr* nlh = reinterpret_cast<nlmsghdr*>(buf); MY_NLMSG_OK(nlh, len);
+         nlh = NLMSG_NEXT(nlh, len)) {
+      if (nlh->nlmsg_type == NLMSG_DONE) {
+        done = true;
+        break;
+      }
+      ASSERT_NE(nlh->nlmsg_type, NLMSG_ERROR);
+      ASSERT_EQ(nlh->nlmsg_type, RTM_NEWADDR);
+
+      const ifaddrmsg* ifa = reinterpret_cast<const ifaddrmsg*>(NLMSG_DATA(nlh));
+      int rta_len = IFA_PAYLOAD(nlh);
+      const void* ifa_addr_data = nullptr;
+      size_t ifa_addr_len = 0;
+      for (rtattr* rta = IFA_RTA(ifa); RTA_OK(rta, rta_len); rta = RTA_NEXT(rta, rta_len)) {
+        if (rta->rta_type == IFA_ADDRESS) {
+          ifa_addr_data = RTA_DATA(rta);
+          ifa_addr_len = RTA_PAYLOAD(rta);
+          break;
+        }
+      }
+      ASSERT_NE(ifa_addr_data, nullptr);
+
+      if (ifa->ifa_index == lo_index) {
+        if (ifa->ifa_family == AF_INET && ifa_addr_len == sizeof(in_addr)) {
+          in_addr lo_v4;
+          inet_pton(AF_INET, "127.0.0.1", &lo_v4);
+          if (memcmp(ifa_addr_data, &lo_v4, sizeof(in_addr)) == 0) {
+            EXPECT_EQ(ifa->ifa_scope, RT_SCOPE_HOST);
+            lo_v4_seen = true;
+          }
+        } else if (ifa->ifa_family == AF_INET6 && ifa_addr_len == sizeof(in6_addr)) {
+          in6_addr lo_v6;
+          inet_pton(AF_INET6, "::1", &lo_v6);
+          if (memcmp(ifa_addr_data, &lo_v6, sizeof(in6_addr)) == 0) {
+            EXPECT_EQ(ifa->ifa_scope, RT_SCOPE_HOST);
+            lo_v6_seen = true;
+          }
+        }
+      } else if (ifa->ifa_index == if_index) {
+        for (auto& entry : added_addrs) {
+          if (entry.family != ifa->ifa_family) {
+            continue;
+          }
+          uint8_t expected_bytes[sizeof(in6_addr)];
+          ASSERT_EQ(inet_pton(entry.family, entry.addr, &expected_bytes), 1);
+          size_t expected_len = entry.family == AF_INET ? sizeof(in_addr) : sizeof(in6_addr);
+          if (ifa_addr_len == expected_len &&
+              memcmp(ifa_addr_data, expected_bytes, expected_len) == 0) {
+            EXPECT_EQ(ifa->ifa_scope, entry.expected_scope) << "for address " << entry.addr;
+            entry.seen = true;
+          }
+        }
+      }
+    }
+  }
+
+  EXPECT_TRUE(lo_v4_seen);
+  EXPECT_TRUE(lo_v6_seen);
+  for (const auto& entry : added_addrs) {
+    EXPECT_TRUE(entry.seen) << "missing address " << entry.addr;
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(

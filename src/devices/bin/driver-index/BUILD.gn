@@ -51,7 +51,6 @@ fuchsia_driver_component("test-bind-component") {
     ":fake-driver",
     ":test-bind",
   ]
-  info = "meta/test-bind-component-info.json"
   dml_label = ":test-bind-component-dml"
 }
 
@@ -70,7 +69,6 @@ fuchsia_driver_component("test-bind2-component") {
     ":fake-driver2",
     ":test-bind2",
   ]
-  info = "meta/test-bind2-component-info.json"
   dml_label = ":test-bind2-component-dml"
 }
 
@@ -89,7 +87,6 @@ fuchsia_driver_component("test-fallback-component") {
     ":fake-fallback-driver",
     ":test-fallback-bind",
   ]
-  info = "meta/test-fallback-component-info.json"
   dml_label = ":test-fallback-component-dml"
 }
 
@@ -160,6 +157,7 @@ rustc_binary("bin") {
   output_name = "driver_index"
   configs += [ "//build/config/rust:bootfs" ]
   edition = "2024"
+  assert_no_deps = [ "//third_party/rust_crates:regex" ]
   deps = [
     ":driver_index_config",
     "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",

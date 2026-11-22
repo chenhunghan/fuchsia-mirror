@@ -29,7 +29,7 @@ writable. Though writable code pages have been considered a security threat for
 a long time, allowing code to remain readable has been shown to expose
 applications to needless risk. Specifically, reading code pages is often a first
 step in an attack chain, and preventing code from being read hinders
-adversaries. See [Readable Code Security](#readable-code-security). Moreover,
+adversaries. See [Readable code security](#readable-code-security). Moreover,
 supporting execute-only pages fits well with Fuchsia’s permissions model and
 more strongly aligns with the principle of least privilege: often code doesn’t
 need to be read, but just be executed.
@@ -61,7 +61,7 @@ architecture agnostic. When hardware and toolchain support matures for other
 architectures, they would all easily be able to take advantage of execute-only
 support in Fuchsia.
 
-### Permissions of Code Pages
+### Permissions of code pages {:#permissions-of-code-pages}
 
 Initially, computers supported direct memory access to physical memory without
 any checks or protections. The introduction of MMUs provided a key abstraction,
@@ -93,7 +93,7 @@ permissive. Similarly, executable pages rarely ever need to be read [See
 exceptions](#readable-code). Allowing read operations on executable pages is
 generally unnecessary and should not be the default.
 
-### Readable Code
+### Readable code {:#readable-code}
 
 Because of ARM’s fixed instruction width, immediate values have size
 constraints. For this reason loads are done using PC-Relative addressing. To get
@@ -133,7 +133,7 @@ a:
     .long 305419896
 ```
 
-### XOM and PAN
+### XOM and PAN {:#xom-and-pan}
 
 Privileged access never (PAN) is a security feature on ARM chips that prevents
 normal memory access to user pages from kernel mode. It helps protect against
@@ -217,7 +217,7 @@ transition to supporting binaries with execute-only segments and userspace
 programs which allocate execute-only memory will require a way to check if the
 OS can map execute-only pages prior to requesting them.
 
-### Readable Code Security
+### Readable code security {:#readable-code-security}
 
 Many attacks rely on finding out information about the process through reading
 code pages to find “gadgets”, or executable code of interest. Address space
@@ -370,14 +370,14 @@ where that is necessary.
 
 There is no expected impact in performance.
 
-## Security
+## Security {:#security}
 
 Until XOM is implemented in the kernel a binary with ‘--x’ segments will be just
 as secure as an equivalent binary using ‘r-x’ segments. Once XOM is supported
 both by hardware and the OS, programs which elect to use execute-only memory
-will become more secure. See sections [Permissions of Code
-Pages](#permissions-of-code-pages), [XOM and PAN](#xom-and-pan) and [Readable
-Code Security](#readable-code-security).
+will become more secure. See sections [Permissions of code
+pages](#permissions-of-code-pages), [XOM and PAN](#xom-and-pan) and [Readable
+code security](#readable-code-security).
 
 ## Privacy
 
@@ -439,7 +439,7 @@ will strip read permissions from any executable segment, and there is no way to
 mark a single section as needed to be read. Programs which want this behavior
 will need to opt out of execute-only completely.
 
-## Risks
+## Risks {:#risks}
 
 It is possible that the clang driver defaults to using `--execute-only` and code
 that reads from a ‘--x’ segment won’t be broken until hardware and kernel

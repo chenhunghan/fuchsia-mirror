@@ -90,18 +90,25 @@ fuchsia_component("component") {
   component_name = "dns_resolver"
   manifest = "meta/dns_resolver.cml"
   deps = [ ":bin" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_package("package") {
   package_name = "dns-resolver"
   deps = [ ":component" ]
-  visibility = [ "//bundles/assembly/*" ]
 }
 
 fuchsia_component("component_with_fake_time") {
   component_name = "dns_resolver_with_fake_time"
   manifest = "meta/dns_resolver_with_fake_time.cml"
   deps = [ ":bin_with_fake_time" ]
+  testonly = true
+  visibility = [ ":*" ]
+}
+
+fuchsia_package("package_with_fake_time") {
+  package_name = "dns-resolver-with-fake-time"
+  deps = [ ":component_with_fake_time" ]
   testonly = true
 }
 
@@ -143,6 +150,7 @@ rustc_library("lib") {
     "src/async_resolver.rs",
     "src/config.rs",
     "src/lib.rs",
+    "src/metrics_recorder.rs",
     "src/tcp.rs",
     "src/test_util.rs",
     "src/udp.rs",
@@ -154,12 +162,14 @@ rustc_library("lib") {
   deps = [
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
     "//sdk/rust/zx",
+    "//src/lib/diagnostics/inspect/rust",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-sync",
     "//src/lib/network/fidl_fuchsia_net_ext",
     "//third_party/rust_crates:futures",
     "//third_party/rust_crates:hickory-net",
     "//third_party/rust_crates:hickory-resolver",
+    "//third_party/rust_crates:metrics",
     "//third_party/rust_crates:trust-dns-proto",
     "//third_party/rust_crates:trust-dns-resolver",
   ]
@@ -170,6 +180,7 @@ rustc_test("lib_test") {
     "src/async_resolver.rs",
     "src/config.rs",
     "src/lib.rs",
+    "src/metrics_recorder.rs",
     "src/tcp.rs",
     "src/test_util.rs",
     "src/udp.rs",
@@ -179,18 +190,25 @@ rustc_test("lib_test") {
   deps = [
            "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
            "//sdk/rust/zx",
+           "//src/lib/diagnostics/inspect/rust",
            "//src/lib/fuchsia-async",
            "//src/lib/fuchsia-sync",
            "//src/lib/network/fidl_fuchsia_net_ext",
            "//third_party/rust_crates:futures",
            "//third_party/rust_crates:hickory-net",
            "//third_party/rust_crates:hickory-resolver",
+           "//third_party/rust_crates:metrics",
            "//third_party/rust_crates:trust-dns-proto",
            "//third_party/rust_crates:trust-dns-resolver",
-         ] +
-         [
+         ] + [
+           "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+           "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+           "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
            "//src/connectivity/lib/net-declare",
+           "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",
+           "//src/lib/fidl/rust/fidl",
            "//src/lib/fuchsia",
+           "//src/lib/fuchsia-component",
            "//third_party/rust_crates:hickory-proto",
          ]
   configs += [ "//build/config/rust/lints:deny_unused_results" ]

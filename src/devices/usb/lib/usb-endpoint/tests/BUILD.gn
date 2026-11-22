@@ -33,6 +33,26 @@ fuchsia_unittest_component("usb-endpoint-test") {
   deps = [ ":usb-endpoint-test-bin" ]
 }
 
+test("usb-endpoint-client-syslog-test-bin") {
+  output_name = "usb-endpoint-client-syslog-test"
+  sources = [ "usb-endpoint-client-syslog-test.cc" ]
+  deps = [
+    "//sdk/fidl/fuchsia.hardware.usb.endpoint:fuchsia.hardware.usb.endpoint_cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//src/devices/usb/lib/usb-endpoint:fake-usb-endpoint-server-zxtest",
+    "//src/devices/usb/lib/usb-endpoint:usb-endpoint-client-syslog",
+    "//zircon/system/ulib/sync:sync-cpp",
+    "//zircon/system/ulib/zxtest",
+  ]
+}
+
+fuchsia_unittest_component("usb-endpoint-client-syslog-test") {
+  deps = [ ":usb-endpoint-client-syslog-test-bin" ]
+}
+
 fuchsia_test_package("usb-endpoint-tests") {
-  test_components = [ ":usb-endpoint-test" ]
+  test_components = [
+    ":usb-endpoint-client-syslog-test",
+    ":usb-endpoint-test",
+  ]
 }

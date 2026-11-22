@@ -164,7 +164,7 @@ async fn download_blob_body_timeout() {
     assert_eq!(result.unwrap_err(), fpkg::ResolveError::UnavailableBlob);
 }
 
-// TODO(https://fxbug.dev/543563954): Add this feature to pkg-cache then copy the test.
+// TODO(https://fxbug.dev/542690944): Already migrated.
 // Verify that the pkg-resolver stops downloading content blobs when a package fails to resolve.
 // Steps:
 //  1.  Resolve a package that has at least 3*MAX_CONCURRENT_BLOB_FETCHES + 1 unique content blobs.

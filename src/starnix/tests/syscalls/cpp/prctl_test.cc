@@ -6,14 +6,19 @@
 #include <grp.h>
 #include <signal.h>
 #include <sys/fsuid.h>
+#include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
+#include <unistd.h>
 
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -26,9 +31,17 @@
 #include <asm/prctl.h>
 #endif
 
+#include "src/lib/files/file.h"
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
+
+#ifndef PR_SET_VMA
+#define PR_SET_VMA 0x53564d41
+#endif
+#ifndef PR_SET_VMA_ANON_NAME
+#define PR_SET_VMA_ANON_NAME 0
+#endif
 
 // These are missing from our sys/prctl.h.
 #define PR_CAP_AMBIENT 47
@@ -584,6 +597,40 @@ TEST(PrctlTest, AmbientCapabilitiesBasicOperations) {
               0);
   });
 }
+
+struct PrctlCapInvalidArgCase {
+  const char *name;
+  int option;
+  unsigned long arg2;
+  unsigned long arg3;
+  unsigned long arg4;
+  unsigned long arg5;
+};
+
+class PrctlCapInvalidArgTest : public ::testing::TestWithParam<PrctlCapInvalidArgCase> {};
+
+TEST_P(PrctlCapInvalidArgTest, FailsWithEinval) {
+  const PrctlCapInvalidArgCase &param = GetParam();
+  EXPECT_THAT(prctl(param.option, param.arg2, param.arg3, param.arg4, param.arg5),
+              SyscallFailsWithErrno(EINVAL));
+}
+
+constexpr PrctlCapInvalidArgCase kPrctlCapInvalidArgCases[] = {
+    {"AmbientClearAllNonZeroArg3", PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 1, 0, 0},
+    {"AmbientClearAllNonZeroArg4", PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 1, 0},
+    {"AmbientClearAllNonZeroArg5", PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 1},
+#if defined(__LP64__)
+    {"AmbientHighOpBits", PR_CAP_AMBIENT, (1UL << 32) | PR_CAP_AMBIENT_IS_SET, CAP_CHOWN, 0, 0},
+    {"AmbientHighCapBits", PR_CAP_AMBIENT, PR_CAP_AMBIENT_IS_SET, (1UL << 32) | CAP_CHOWN, 0, 0},
+    {"CapbsetReadHighCapBits", PR_CAPBSET_READ, (1UL << 32) | CAP_CHOWN, 0, 0, 0},
+#endif  // defined(__LP64__)
+};
+
+INSTANTIATE_TEST_SUITE_P(PrctlTest, PrctlCapInvalidArgTest,
+                         ::testing::ValuesIn(kPrctlCapInvalidArgCases),
+                         [](const ::testing::TestParamInfo<PrctlCapInvalidArgCase> &info) {
+                           return info.param.name;
+                         });
 
 TEST(PrctlTest, Dumpable) {
   test_helper::ForkHelper helper;
@@ -1187,9 +1234,7 @@ TEST(PrctlTest, PDeathSigClearedOnCredentialChange) {
   helper.RunInForkedProcess([] {
     ASSERT_THAT(prctl(PR_SET_PDEATHSIG, SIGUSR1), SyscallSucceeds());
 
-    SAFE_SYSCALL(setgroups(0, nullptr));
-    SAFE_SYSCALL(setresgid(kUser1Gid, kUser1Gid, kUser1Gid));
-    SAFE_SYSCALL(setresuid(kUser1Uid, kUser1Uid, kUser1Uid));
+    ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(kUser1Uid, kUser1Gid));
 
     int pdeathsig = -1;
     ASSERT_THAT(prctl(PR_GET_PDEATHSIG, &pdeathsig), SyscallSucceeds());
@@ -1233,9 +1278,7 @@ TEST(PrctlTest, PDeathSigExec) {
     test_helper::ForkHelper helper;
     helper.RunInForkedProcess([&] {
       SAFE_SYSCALL(dup2(out_fd.get(), STDOUT_FILENO));
-      SAFE_SYSCALL(setgroups(0, nullptr));
-      SAFE_SYSCALL(setresgid(kUser1Gid, kUser1Gid, kUser1Gid));
-      SAFE_SYSCALL(setresuid(kUser1Uid, kUser1Uid, kUser1Uid));
+      ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(kUser1Uid, kUser1Gid));
       SAFE_SYSCALL(prctl(PR_SET_PDEATHSIG, SIGUSR1));
 
       char *const argv[] = {
@@ -1376,5 +1419,135 @@ TEST(ArchPrctlTest, GetSetGs) {
 }
 
 #endif  // defined(__x86_64__)
+
+class PrSetVmaAnonNameTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    page_size_ = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+    auto probe = ASSERT_RESULT_SUCCESS_AND_RETURN(Map(1));
+    const int result = SetName(probe.mapping(), page_size_, "probe");
+    const int error = errno;
+    if (!test_helper::IsStarnix() && result != 0 && error == EINVAL) {
+      GTEST_SKIP() << "PR_SET_VMA_ANON_NAME needs CONFIG_ANON_VMA_NAME.";
+    }
+    ASSERT_EQ(result, 0) << strerror(error);
+  }
+
+  static int SetName(void *addr, size_t length, const char *name) {
+    return prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, length, name);
+  }
+
+  // Returns the /proc/self/maps entry that contains `addr`.
+  static std::optional<test_helper::MemoryMapping> MapsEntryAt(const void *addr) {
+    std::string maps;
+    if (!files::ReadFileToString("/proc/self/maps", &maps)) {
+      return std::nullopt;
+    }
+    return test_helper::find_memory_mapping(reinterpret_cast<uintptr_t>(addr), maps);
+  }
+
+  fit::result<int, test_helper::ScopedMMap> Map(size_t pages) const {
+    return test_helper::ScopedMMap::MMap(nullptr, pages * page_size_, PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  }
+
+  size_t page_size() const { return page_size_; }
+
+  // Returns the address `pages` pages after `base`.
+  uint8_t *PageAt(uint8_t *base, size_t pages) const { return base + (pages * page_size_); }
+
+ private:
+  size_t page_size_ = 0;
+};
+
+TEST_F(PrSetVmaAnonNameTest, NamingPartOfMappingSplitsIt) {
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(Map(4));
+  auto *base = static_cast<uint8_t *>(mapping.mapping());
+  ASSERT_EQ(SetName(PageAt(base, 1), 2 * page_size(), "split_test"), 0) << strerror(errno);
+
+  std::optional<test_helper::MemoryMapping> named = MapsEntryAt(PageAt(base, 1));
+  ASSERT_TRUE(named.has_value());
+  EXPECT_EQ(named->start, reinterpret_cast<uintptr_t>(PageAt(base, 1)));
+  EXPECT_EQ(named->end, reinterpret_cast<uintptr_t>(PageAt(base, 3)));
+  EXPECT_EQ(named->pathname, "[anon:split_test]");
+
+  std::optional<test_helper::MemoryMapping> before = MapsEntryAt(base);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_EQ(before->end, reinterpret_cast<uintptr_t>(PageAt(base, 1)));
+  EXPECT_EQ(before->pathname, "");
+
+  std::optional<test_helper::MemoryMapping> after = MapsEntryAt(PageAt(base, 3));
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->start, reinterpret_cast<uintptr_t>(PageAt(base, 3)));
+  EXPECT_EQ(after->pathname, "");
+}
+
+TEST_F(PrSetVmaAnonNameTest, RenamingWholeMappingReplacesName) {
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(Map(2));
+  auto *base = static_cast<uint8_t *>(mapping.mapping());
+  ASSERT_EQ(SetName(base, 2 * page_size(), "first_name"), 0) << strerror(errno);
+  ASSERT_EQ(SetName(base, 2 * page_size(), "second_name"), 0) << strerror(errno);
+
+  std::optional<test_helper::MemoryMapping> entry = MapsEntryAt(base);
+  ASSERT_TRUE(entry.has_value());
+  EXPECT_EQ(entry->start, reinterpret_cast<uintptr_t>(base));
+  EXPECT_EQ(entry->end, reinterpret_cast<uintptr_t>(PageAt(base, 2)));
+  EXPECT_EQ(entry->pathname, "[anon:second_name]");
+}
+
+TEST_F(PrSetVmaAnonNameTest, RenamingToSameNameDoesNotSplitMapping) {
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(Map(2));
+  auto *base = static_cast<uint8_t *>(mapping.mapping());
+  ASSERT_EQ(SetName(base, 2 * page_size(), "same_name"), 0) << strerror(errno);
+  ASSERT_EQ(SetName(base, 2 * page_size(), "same_name"), 0) << strerror(errno);
+  // Renaming a sub-range to the same name keeps a single mapping.
+  ASSERT_EQ(SetName(base, page_size(), "same_name"), 0) << strerror(errno);
+
+  std::optional<test_helper::MemoryMapping> entry = MapsEntryAt(base);
+  ASSERT_TRUE(entry.has_value());
+  EXPECT_EQ(entry->start, reinterpret_cast<uintptr_t>(base));
+  EXPECT_EQ(entry->end, reinterpret_cast<uintptr_t>(PageAt(base, 2)));
+  EXPECT_EQ(entry->pathname, "[anon:same_name]");
+}
+
+TEST_F(PrSetVmaAnonNameTest, ClearingNameRemovesIt) {
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(Map(2));
+  auto *base = static_cast<uint8_t *>(mapping.mapping());
+  ASSERT_EQ(SetName(base, 2 * page_size(), "cleared_name"), 0) << strerror(errno);
+  ASSERT_EQ(SetName(base, 2 * page_size(), nullptr), 0) << strerror(errno);
+
+  std::optional<test_helper::MemoryMapping> entry = MapsEntryAt(base);
+  ASSERT_TRUE(entry.has_value());
+  EXPECT_EQ(entry->pathname, "");
+}
+
+TEST_F(PrSetVmaAnonNameTest, InvalidRangesFail) {
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(Map(3));
+  auto *base = static_cast<uint8_t *>(mapping.mapping());
+
+  // The start address must be page-aligned.
+  EXPECT_EQ(SetName(base + 1, page_size(), "unaligned"), -1);
+  EXPECT_EQ(errno, EINVAL);
+
+  // Every page in the range must be mapped. Linux still names the mapped parts before returning
+  // ENOMEM, so side effects on mapping names are intentionally not checked here.
+  ASSERT_EQ(munmap(PageAt(base, 1), page_size()), 0);
+  EXPECT_EQ(SetName(base, 3 * page_size(), "hole_in_middle"), -1);
+  EXPECT_EQ(errno, ENOMEM);
+  EXPECT_EQ(SetName(PageAt(base, 1), 2 * page_size(), "hole_at_start"), -1);
+  EXPECT_EQ(errno, ENOMEM);
+}
+
+TEST_F(PrSetVmaAnonNameTest, FileMappingCannotBeNamed) {
+  // Use a regular file. Recent Linux kernels allow naming memfd mappings.
+  test_helper::ScopedTempFD file;
+  ASSERT_TRUE(file.is_valid());
+  ASSERT_EQ(ftruncate(file.fd(), static_cast<off_t>(page_size())), 0) << strerror(errno);
+  auto mapping = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, page_size(), PROT_READ | PROT_WRITE, MAP_PRIVATE, file.fd(), 0));
+
+  EXPECT_EQ(SetName(mapping.mapping(), page_size(), "file"), -1);
+  EXPECT_EQ(errno, EBADF);
+}
 
 }  // namespace

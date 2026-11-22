@@ -7,7 +7,7 @@ use capability_source::CapabilitySource;
 use cm_rust::offer::OfferDeclCommon;
 use cm_rust::{Availability, CapabilityTypeName, ExposeDeclCommon, SourceName, UseDeclCommon};
 use cm_types::Name;
-use fidl_fuchsia_component_runtime::RouteRequest;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
 use moniker::Moniker;
 use routing::bedrock::request_metadata::{
     config_metadata, dictionary_metadata, directory_metadata, event_stream_metadata,

@@ -5,6 +5,7 @@
 
 import io
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -14,7 +15,7 @@ from unittest import mock
 import service_profile
 
 
-class DummyProfile:
+class FakeProfile:
     def __init__(
         self,
         endpoint: str,
@@ -26,9 +27,10 @@ class DummyProfile:
         self.threads = threads
         self.name = name
         self.auth_type = auth_type
+        self.quota_project = "fake-quota-proj"
 
     @classmethod
-    def from_dict(cls, data: service_profile.JSONObject) -> DummyProfile:
+    def from_dict(cls, data: service_profile.JSONObject) -> FakeProfile:
         return cls(
             endpoint=str(data.get("endpoint", "")),
             threads=int(str(data.get("threads", 0))),
@@ -71,7 +73,7 @@ class TestServiceProfileManager(unittest.TestCase):
             config_relpath=self.config_relpath,
         )
         self.manager = service_profile.ServiceProfileManager(
-            DummyProfile, self.spec
+            FakeProfile, self.spec
         )
 
     def tearDown(self) -> None:
@@ -218,20 +220,46 @@ class TestServiceProfileManager(unittest.TestCase):
         self.assertEqual(ret, 0)
         self.assertEqual(buf.getvalue().strip(), "none")
 
-    def test_workspace_symlinks_empty_when_no_active_config(self) -> None:
-        symlinks = self.manager.workspace_symlinks(self.fuchsia_dir)
-        self.assertEqual(symlinks, [])
-
-    def test_workspace_symlinks_present_when_active_config_exists(self) -> None:
-        self.manager.select(self.fuchsia_dir, "custom")
-        symlinks = self.manager.workspace_symlinks(self.fuchsia_dir)
-        expected = [
-            service_profile.WorkspaceSymlink(
-                workspace_relpath=self.config_relpath,
-                target_path=self.fuchsia_dir / self.config_relpath,
+    def test_cli_quota_project_subcommand(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            ret = self.manager.main(
+                [f"--fuchsia-dir={self.fuchsia_dir}", "quota-project"], {}
             )
-        ]
-        self.assertEqual(symlinks, expected)
+        self.assertEqual(ret, 0)
+        self.assertEqual(buf.getvalue().strip(), "fake-quota-proj")
+
+    @mock.patch.object(os, "execvpe", autospec=True)
+    def test_run_with_profile_sets_profile_env_var(
+        self, mock_exec: mock.MagicMock
+    ) -> None:
+        ret = self.manager.main(
+            [
+                f"--fuchsia-dir={self.fuchsia_dir}",
+                "run",
+                "-p",
+                "custom",
+                "--",
+                "true",
+            ],
+            {},
+        )
+        self.assertEqual(ret, 0)
+        mock_exec.assert_called_once()
+        env = mock_exec.call_args.args[2]
+        self.assertEqual(env["MY_ENDPOINT"], "https://custom.example.com")
+        self.assertEqual(env["MYSERVICE_PROFILE"], "custom")
+
+    @mock.patch.object(os, "execvpe", autospec=True)
+    def test_run_without_profile_leaves_profile_env_var_unset(
+        self, mock_exec: mock.MagicMock
+    ) -> None:
+        ret = self.manager.main(
+            [f"--fuchsia-dir={self.fuchsia_dir}", "run", "--", "true"], {}
+        )
+        self.assertEqual(ret, 0)
+        mock_exec.assert_called_once()
+        self.assertNotIn("MYSERVICE_PROFILE", mock_exec.call_args.args[2])
 
 
 if __name__ == "__main__":

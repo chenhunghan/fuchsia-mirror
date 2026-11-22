@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/host_tests:host_test_data.bzl", "host_test_data_files")
+load("//build/bazel/rules/packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+# Copies shaders needed for escher linux tests to a specific test data
+# directory near the test binary.
+host_test_data_files(
+    name = "host_assets",
+    testonly = True,
+    srcs = ["bbb_frame.yuv"],
+    dest_dir = "test_data/escher/assets",
+)
+
+resource(
+    name = "escher_examples_assets",
+    src = "bbb_frame.yuv",
+    dest = "data/assets/bbb_frame.yuv",
+    visibility = ["//src/ui/lib/escher:__pkg__"],
+)

@@ -3,7 +3,14 @@
 # found in the LICENSE file.
 
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component_manifest")
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fidl_config_client_lib_source",
+    "rust_config_client_lib_source",
+)
 load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -22,7 +29,11 @@ rustc_binary_host_tool(
     ],
     edition = "2024",
     target_compatible_with = HOST_OS_CONSTRAINTS,
-    visibility = ["//build/bazel/rules/components:__pkg__"],
+    visibility = [
+        "//build/bazel/rules/components:__pkg__",
+        "//build/bazel/rules/packages:__pkg__",
+        "//build/bazel/rules/packages/tests:__pkg__",
+    ],
     deps = [
         "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
         "//src/lib/assembly/validate_package",
@@ -39,4 +50,83 @@ rustc_binary_host_tool(
         "//tools/lib/config_client",
         "//tools/lib/config_value_file",
     ],
+)
+
+# Config library golden tests.
+fx_component_manifest(
+    name = "config_manifest",
+    testonly = True,
+    includes = ["//src/sys/component_manager/tests/structured_config:all_config_types.shard.cml"],
+    manifest = "goldens/config_manifest.cml",
+)
+
+fidl_config_client_lib_source(
+    name = "fidl_config_lib",
+    testonly = True,
+    compiled_manifest = ":config_manifest",
+    fidl_library_name = "my.config.lib",
+)
+
+rust_config_client_lib_source(
+    name = "rust_config_lib",
+    testonly = True,
+    compiled_manifest = ":config_manifest",
+    fidl_library_name = "my.config.lib",
+)
+
+genrule(
+    name = "cpp_elf_config_lib",
+    testonly = True,
+    srcs = [":config_manifest"],
+    outs = [
+        "cpp_elf_config_lib.cc",
+        "cpp_elf_config_lib.h",
+    ],
+    cmd = "$(execpath :configc) cpp --cm $(execpath :config_manifest) " +
+          "--h-output $(execpath cpp_elf_config_lib.h) " +
+          "--cc-output $(execpath cpp_elf_config_lib.cc) " +
+          "--namespace cpp_elf_config_lib --fidl-library-name my.config.lib " +
+          "--clang-format $(execpath @fuchsia_clang//:bin/clang-format)",
+    tools = [
+        ":configc",
+        "@fuchsia_clang//:bin/clang-format",
+    ],
+)
+
+genrule(
+    name = "example_values",
+    testonly = True,
+    srcs = [
+        ":config_manifest",
+        "goldens/config_values.json5",
+    ],
+    outs = ["example_values.cvf"],
+    cmd = "$(execpath :configc) cvf --cm $(execpath :config_manifest) " +
+          "--values $(execpath goldens/config_values.json5) --output $@",
+    tools = [":configc"],
+)
+
+genrule(
+    name = "dump_example_values",
+    testonly = True,
+    srcs = [
+        ":config_manifest",
+        ":example_values",
+    ],
+    outs = ["dumped_values.json"],
+    cmd = "$(execpath :configc) dump-values --cm $(execpath :config_manifest) " +
+          "--cvf $(execpath :example_values) --output $@",
+    tools = [":configc"],
+)
+
+golden_test(
+    name = "golden_tests",
+    goldens = {
+        "goldens/config.cc.elf.golden": ":cpp_elf_config_lib.cc",
+        "goldens/config.fidl.golden": ":fidl_config_lib",
+        "goldens/config.h.elf.golden": ":cpp_elf_config_lib.h",
+        "goldens/config.rs.golden": ":rust_config_lib",
+        "goldens/dumped_values.json.golden": ":dump_example_values",
+    },
+    visibility = ["//tools:__pkg__"],
 )

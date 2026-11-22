@@ -19,7 +19,7 @@ or to do a more thorough job of optimizing the parameters).
 The following tunable parameters control how fast jitterentropy runs, and how fast it collects
 entropy:
 
-### [`kernel.jitterentropy.ll`](/docs/reference/kernel/kernel_cmdline.md#kernel-jitterentropy-ll-num)
+### [kernel.jitterentropy.ll](/docs/gen/boot-options.md)
 
 "`ll`" stands for "LFSR loops". Jitterentropy uses a (deliberately inefficient implementation of a)
 LFSR to exercise the CPU, as part of its noise generation. The inner loop shifts the LFSR 64 times;
@@ -35,7 +35,7 @@ loops in a "random-ish" way. As described in [the basic config doc](config-basic
 the use of `kernel.jitterentropy.ll=0`.
 
 
-### [`kernel.jitterentropy.ml`](/docs/reference/kernel/kernel_cmdline.md#kernel-jitterentropy-ml-num)
+### [kernel.jitterentropy.ml](/docs/gen/boot-options.md)
 
 "`ml`" stands for "memory access loops". Jitterentropy walks through a moderately large chunk of
 RAM, reading and writing each byte. The size of the chunk and access pattern are controlled by the
@@ -47,7 +47,7 @@ this on RPi3 and qemu-arm64 so far.
 Much like `kernel.jitterentropy.ll`, if you set `kernel.jitterentropy.ml=0`, then jitterentropy will
 choose a "random-ish" value for the memory access loop count. I also discourage this.
 
-### [`kernel.jitterentropy.bs`](/docs/reference/kernel/kernel_cmdline.md#kernel-jitterentropy-bs-num)
+### [kernel.jitterentropy.bs](/docs/gen/boot-options.md)
 
 "`bs`" stands for "block size". Jitterentropy divides its chunk of RAM into blocks of this size. The
 memory access loop starts with byte 0 of block zero, then "byte -1" of block 1 (which is actually
@@ -57,7 +57,7 @@ so on. This pattern ensures that every byte gets hit, and most accesses go into 
 I have usually tested jitterentropy with `kernel.jitterentropy.bs=64`, based on the size of a cache
 line. I haven't tested yet to see whether there's a better option on some/all platforms.
 
-### [`kernel.jitterentropy.bc`](/docs/reference/kernel/kernel_cmdline.md#kernel-jitterentropy-bc-num)
+### [kernel.jitterentropy.bc](/docs/gen/boot-options.md)
 
 "`bc`" stands for "block count". Jitterentropy uses this many blocks of RAM, each of size
 `kernel.jitterentropy.bs`, in its memory access loops.
@@ -70,7 +70,7 @@ in the comment before `jent_memaccess` suggests choosing the block size and coun
 used is bigger than L1. Confusingly, the default values in upstream jitterentropy (block size = 32,
 block count = 64) aren't big enough to overflow L1.
 
-## Tuning process
+## Tuning process {:#tuning-process}
 
 The basic idea is simple: on a particular target device, try different values for the parameters.
 Collect a large amount of data for each parameter set (ideally around 1MB), then
@@ -84,18 +84,19 @@ monotonic and has a high enough resolution and variability). A more accurate tes
 for each set of parameters: once to collect around 1MB of data for analysis, and a second time to
 boot with the "right" amount of entropy (as computed according to the entropy estimate in the first
 phase, with appropriate safety margins, etc. See
-["Determining the entropy\_per\_1000\_bytes statistic"](#determining-the-entropy_per_1000_bytes-statistic),
+["Determining the entropy\_per\_1000\_bytes
+statistic"](#determining-the-entropy-per-1000-bytes-statistic),
 below). This second phase of testing simulates a real boot, including the startup tests. After
 completing the second phase, choose the parameter set that boots fastest. Of course, each phase of
 testing should be repeated a few times to reduce random variations.
 
-## Determining the entropy\_per\_1000\_bytes statistic
+## Determining the entropy\_per\_1000\_bytes statistic {:#determining-the-entropy-per-1000-bytes-statistic}
 
-The `crypto::entropy::Collector` interface in
-[kernel/lib/crypto/include/lib/crypto/entropy/collector.h](/zircon/kernel/lib/crypto/include/lib/crypto/entropy/collector.h)
-requires a parameter `entropy_per_1000_bytes` from its instantiations. The value relevant to
+The `crypto::entropy::Collector` trait in
+[kernel/lib/crypto/entropy/collector.rs](/zircon/kernel/lib/crypto/entropy/collector.rs)
+requires a parameter `entropy_per_1000_bytes` from its implementations. The value relevant to
 jitterentropy is currently hard-coded in
-[kernel/lib/crypto/entropy/jitterentropy\_collector.cpp](/zircon/kernel/lib/crypto/entropy/jitterentropy_collector.cc).
+[kernel/lib/crypto/entropy/jitterentropy\_collector.rs](/zircon/kernel/lib/crypto/entropy/jitterentropy_collector.rs).
 This value is meant to measure how much min-entropy is contained in each byte of data produced by
 jitterentropy (since the bytes aren't independent and uniformly distributed, this will be less than
 8 bits). The "per 1000 bytes" part simply makes it possible to specify fractional amounts of
@@ -113,43 +114,6 @@ apply a safety factor (i.e. divide the entropy estimate by 2), and update the va
 
 Note that eventually `entropy_per_1000_bytes` should probably be configured somewhere instead of
 hard-coded in jitterentropy\_collector.cpp. Kernel cmdlines or even a preprocessor symbol could work.
-
-## Notes about the testing script
-
-The `scripts/entropy-test/jitterentropy/test-tunable` script automates the practice of looping
-through a large test matrix. The downside is that tests run in sequence on a single machine, so (1)
-an error will stall the test pipeline so supervision *is* required, and (2) the machine is being
-constantly rebooted rather than cold-booted (plus it's a netboot-reboot), which could conceivably
-confound the tests. Still, it beats hitting power-off/power-on a thousand times by hand!
-
-Some happy notes:
-
-1. When netbooting, the script leaves bootserver on while waiting for netcp to successfully export
-   the data file. If the system hangs, you can power it off and back on, and the existing bootserver
-   process will restart the failed test.
-
-2. If the test is going to run (say) 16 combinations of parameters 10 times each, it will go like
-   this:
-
-       test # 0: ml = 1   ll = 1  bc = 1  bs = 1
-       test # 1: ml = 1   ll = 1  bc = 1  bs = 64
-       test # 2: ml = 1   ll = 1  bc = 32 bs = 1
-       test # 3: ml = 1   ll = 1  bc = 32 bs = 64
-       ...
-       test #15: ml = 128 ll = 16 bc = 32 bs = 64
-       test #16: ml = 1   ll = 1  bc = 1  bs = 1
-       test #17: ml = 1   ll = 1  bc = 1  bs = 64
-       ...
-
-   (The output files are numbered starting with 0, so I started with 0 above.)
-
-   So, if test #17 fails, you can delete tests #16 and #17, and re-run 9 more iterations of each
-   test. You can at least keep the complete results from the first iteration. In theory, the tests
-   could be smarter and also keep the existing result from test #16, but the current shell scripts
-   aren't that sophisticated.
-
-The scripts don't do a two-phase process like I suggested in the ["Tuning process"](#tuning-process)
-section above. It's certainly possible, but again the existing scripts aren't that sophisticated.
 
 ## Open questions
 

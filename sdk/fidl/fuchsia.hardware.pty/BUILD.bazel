@@ -11,7 +11,6 @@ fidl_library(
     srcs = ["pty.fidl"],
     api_area = "Drivers",
     category = "prebuilt",
-    enable_hlcpp = True,
     stable = True,
     visibility = ["//visibility:public"],
     # TODO(https://fxbug.dev/42169676): Remove this dependency since this target does

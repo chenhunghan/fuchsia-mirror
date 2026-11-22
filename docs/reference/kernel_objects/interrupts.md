@@ -85,7 +85,7 @@ virtual interrupt has serviced its hardware and acknowledged the interrupt, the
 GPIO driver can then re-enable the interrupt in the proper GPIO register bank,
 and wait for a new IRQ via the shared physical interrupt.
 
-### Waiting for and acknowledging interrupts
+### Waiting for and acknowledging interrupts {:#waiting-for-and-acknowledging-interrupts}
 
 Users may wait for an interrupt to be requested via an interrupt object either
 synchronously, by blocking a thread on the interrupt object, or asynchronously,
@@ -191,7 +191,8 @@ The rules pertaining to the `ZX_VIRTUAL_INTERRUPT_UNTRIGGERED` signal are:
 + A call to `zx_interrupt_trigger()` will cause an interrupt object to enter the
   triggered state, and de-assert the `ZX_VIRTUAL_INTERRUPT_UNTRIGGERED` signal.
 + The signal will remain de-asserted until it has become acknowledged by the
-  consumer.  See ("Waiting for and acknowledging interrupts")[#waiting-for-and-acknowledging-interrupts].
+  consumer.  See ["Waiting for and acknowledging
+  interrupts"](#waiting-for-and-acknowledging-interrupts).
 + Observers of the signal use the standard `zx_object_wait_one()`,
   `zx_object_wait_many()`, and `zx_object_wait_async()` syscalls.
 

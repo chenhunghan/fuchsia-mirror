@@ -185,6 +185,17 @@ const debug::RegisterID kDWARFReg5ID = debug::RegisterID::kARMv8_x5;
 const debug::RegisterID kDWARFReg6ID = debug::RegisterID::kARMv8_x6;
 const debug::RegisterID kDWARFReg9ID = debug::RegisterID::kARMv8_x9;
 
+TEST_F(DwarfExprEvalTest, FloatStackEntryEquality) {
+  auto float_type = MakeFloatType();
+  EXPECT_EQ(DwarfStackEntry(float_type, 1.0f), DwarfStackEntry(float_type, 1.0f));
+  EXPECT_NE(DwarfStackEntry(float_type, 1.0f), DwarfStackEntry(float_type, 2.0f));
+
+  float nan = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_NE(DwarfStackEntry(float_type, nan), DwarfStackEntry(float_type, 1.0f));
+  EXPECT_NE(DwarfStackEntry(float_type, 1.0f), DwarfStackEntry(float_type, nan));
+  EXPECT_NE(DwarfStackEntry(float_type, nan), DwarfStackEntry(float_type, nan));
+}
+
 }  // namespace
 
 TEST_F(DwarfExprEvalTest, NoResult) {

@@ -64,7 +64,7 @@ DDK_PROTOCOL_DEF(USB_DBC,                 44,   "usb-dbc", 0) // Debug Capabilit
 DDK_PROTOCOL_DEF(USB_TESTER,              45,   "usb-tester", 0)
 // 46 was usb-fwloader
 DDK_PROTOCOL_DEF(BT_HCI,                  47,   "bt-hci", 0)
-DDK_PROTOCOL_DEF(BT_EMULATOR,             48,   "bt-emulator", 0)  // Bluetooth hardware emulator interface
+// 48 was bt-emulator
 DDK_PROTOCOL_DEF(BT_TRANSPORT,            49,   "bt-transport", 0)
 DDK_PROTOCOL_DEF(BT_HOST,                 50,   "bt-host", 0)
 DDK_PROTOCOL_DEF(BT_GATT_SVC,             51,   "bt-gatt-svc", 0)
@@ -109,7 +109,6 @@ DDK_PROTOCOL_DEF(INTEL_GPU_CORE,          92,   "intel-gpu-core", 0)
 DDK_PROTOCOL_DEF(IOMMU,                   93,   "iommu", 0)
 DDK_PROTOCOL_DEF(NAND,                    94,   "nand", 0)
 DDK_PROTOCOL_DEF(RAW_NAND,                95,   "rawnand", 0)
-DDK_PROTOCOL_DEF(BAD_BLOCK,               96,   "bad-block", PF_NOPUB)
 DDK_PROTOCOL_DEF(MAILBOX,                 97,   "mailbox", PF_NOPUB)
 DDK_PROTOCOL_DEF(SCPI,                    98,   "scpi", PF_NOPUB)
 DDK_PROTOCOL_DEF(BACKLIGHT,               99,   "backlight", 0)

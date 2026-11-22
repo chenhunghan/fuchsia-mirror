@@ -36,11 +36,15 @@ import("//build/python/python_action.gni")
 #
 #   product_bundle (optional)
 #     [label] The product_bundle target to run the tests against.
-#     This is preferred over `product_bundle_name`.
+#     This is preferred over `product_bundle_name`. The product bundle name
+#     is inferred from the name of this label, unless `product_bundle_name`
+#     is also provided.
 #
-#   product_bundle_name (optional; default = target_name)
-#     [str] The name of the product bundle to assign the tests to.
-#     DEPRECATED: Use `product_bundle` instead.
+#   product_bundle_name (optional; default = name of `product_bundle`, or
+#                        target_name if `product_bundle` is not provided)
+#     [str] The name of the product bundle to assign the tests to. If
+#     `product_bundle` is also provided, this overrides the name inferred
+#     from that label (the label is still added as a dependency).
 #
 #   environments (optional)
 #     [list of scopes] The environments that all tests in this group must use,
@@ -74,9 +78,6 @@ template("product_bundle_test_group") {
   assert(defined(invoker.tests) || defined(invoker.target_tests) ||
              defined(invoker.host_tests),
          "Either 'tests' or 'target_tests' or 'host_tests' must be defined")
-  assert(
-      !(defined(invoker.product_bundle) && defined(invoker.product_bundle_name)),
-      "Cannot define both 'product_bundle' and 'product_bundle_name) in ${target_name}")
 
   # The test_spec should always be generate in the default toolchain even if
   # these are e2e (host) tests, because we want to avoid accidentally creating
@@ -90,11 +91,15 @@ template("product_bundle_test_group") {
   } else {
     _product_bundle_deps = []
     if (defined(invoker.product_bundle)) {
+      _product_bundle_deps += [ invoker.product_bundle ]
+    }
+    if (defined(invoker.product_bundle_name)) {
+      # An explicit name always wins, even over the name inferred from
+      # `product_bundle`.
+      _product_bundle_name = invoker.product_bundle_name
+    } else if (defined(invoker.product_bundle)) {
       # The name of the product bundle is the name of the target.
       _product_bundle_name = get_label_info(invoker.product_bundle, "name")
-      _product_bundle_deps += [ invoker.product_bundle ]
-    } else if (defined(invoker.product_bundle_name)) {
-      _product_bundle_name = invoker.product_bundle_name
     } else {
       # The default product_bundle_name is the target_name.
       _product_bundle_name = target_name

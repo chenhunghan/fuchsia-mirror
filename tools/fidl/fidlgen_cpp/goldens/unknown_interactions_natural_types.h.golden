@@ -311,9 +311,9 @@ class UnknownInteractionsProtocolStrictTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsProtocolStrictTwoWayUnionResponse(UnknownInteractionsProtocolStrictTwoWayUnionResponse&& other) noexcept;
@@ -452,7 +452,7 @@ class UnknownInteractionsProtocolStrictTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -561,7 +561,7 @@ class UnknownInteractionsProtocolStrictTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -618,9 +618,9 @@ class UnknownInteractionsProtocolStrictTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsProtocolStrictTwoWayUnionErrResponse&& other) noexcept;
@@ -668,7 +668,7 @@ class UnknownInteractionsProtocolStrictTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -766,7 +766,7 @@ class UnknownInteractionsProtocolStrictTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -875,7 +875,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -984,7 +984,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayFieldsResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -1041,9 +1041,9 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsProtocolFlexibleTwoWayUnionResponse(UnknownInteractionsProtocolFlexibleTwoWayUnionResponse&& other) noexcept;
@@ -1091,7 +1091,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -1189,7 +1189,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayTableResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -1299,7 +1299,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1419,7 +1419,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1486,9 +1486,9 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse(UnknownInteractionsProtocolFlexibleTwoWayUnionErrResponse&& other) noexcept;
@@ -1537,7 +1537,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1646,7 +1646,7 @@ class UnknownInteractionsProtocolFlexibleTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1764,9 +1764,9 @@ class UnknownInteractionsProtocolStrictEventUnionRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsProtocolStrictEventUnionRequest(UnknownInteractionsProtocolStrictEventUnionRequest&& other) noexcept;
@@ -1904,9 +1904,9 @@ class UnknownInteractionsProtocolFlexibleEventUnionRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsProtocolFlexibleEventUnionRequest(UnknownInteractionsProtocolFlexibleEventUnionRequest&& other) noexcept;
@@ -2044,9 +2044,9 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse(UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse&& other) noexcept;
@@ -2185,7 +2185,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -2294,7 +2294,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -2351,9 +2351,9 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResponse&& other) noexcept;
@@ -2401,7 +2401,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -2499,7 +2499,7 @@ class UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -2607,9 +2607,9 @@ class UnknownInteractionsAjarProtocolStrictEventUnionRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsAjarProtocolStrictEventUnionRequest(UnknownInteractionsAjarProtocolStrictEventUnionRequest&& other) noexcept;
@@ -2747,9 +2747,9 @@ class UnknownInteractionsAjarProtocolFlexibleEventUnionRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsAjarProtocolFlexibleEventUnionRequest(UnknownInteractionsAjarProtocolFlexibleEventUnionRequest&& other) noexcept;
@@ -2887,9 +2887,9 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse(UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse&& other) noexcept;
@@ -3028,7 +3028,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3137,7 +3137,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3194,9 +3194,9 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResponse&& other) noexcept;
@@ -3244,7 +3244,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3342,7 +3342,7 @@ class UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3450,9 +3450,9 @@ class UnknownInteractionsClosedProtocolStrictEventUnionRequest {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsClosedProtocolStrictEventUnionRequest(UnknownInteractionsClosedProtocolStrictEventUnionRequest&& other) noexcept;
@@ -3590,9 +3590,9 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse(UnknownInteractionsDriverProtocolStrictTwoWayUnionResponse&& other) noexcept;
@@ -3731,7 +3731,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3840,7 +3840,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -3897,9 +3897,9 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResponse&& other) noexcept;
@@ -3947,7 +3947,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4045,7 +4045,7 @@ class UnknownInteractionsDriverProtocolStrictTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -4154,7 +4154,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -4263,7 +4263,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -4320,9 +4320,9 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResponse&& other) noexcept;
@@ -4370,7 +4370,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -4468,7 +4468,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayTableResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kFrameworkErr = 3,  // 0x3
   };
@@ -4578,7 +4578,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4698,7 +4698,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4765,9 +4765,9 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse(UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResponse&& other) noexcept;
@@ -4816,7 +4816,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -4925,7 +4925,7 @@ class UnknownInteractionsDriverProtocolFlexibleTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -5043,9 +5043,9 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionResponse&& other) noexcept;
@@ -5184,7 +5184,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5293,7 +5293,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5350,9 +5350,9 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResponse&& other) noexcept;
@@ -5400,7 +5400,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5498,7 +5498,7 @@ class UnknownInteractionsAjarDriverProtocolStrictTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5606,9 +5606,9 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionResponse&& other) noexcept;
@@ -5747,7 +5747,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5856,7 +5856,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayFieldsErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -5913,9 +5913,9 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kSomeField = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse(UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResponse&& other) noexcept;
@@ -5963,7 +5963,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayUnionErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };
@@ -6061,7 +6061,7 @@ class UnknownInteractionsClosedDriverProtocolStrictTwoWayTableErrResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
   };

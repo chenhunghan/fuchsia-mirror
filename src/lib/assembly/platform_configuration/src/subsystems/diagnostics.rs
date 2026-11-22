@@ -13,7 +13,8 @@ use assembly_config_schema::platform_settings::diagnostics_config::{
 };
 use assembly_config_schema::platform_settings::storage_config::StorageConfig;
 use assembly_constants::{
-    BoardFeature, BootfsDestination, BootfsPackageDestination, FileEntry, PackageSetDestination,
+    BoardFeature, BootfsDestination, BootfsPackageDestination, FileEntry, KernelArg,
+    PackageSetDestination,
 };
 use assembly_util::read_config;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -22,6 +23,7 @@ use sampler_config::assembly::{
 };
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
+use std::time::Duration;
 
 const ALLOWED_SERIAL_LOG_COMPONENTS: &[&str] = &[
     "/bootstrap/**",
@@ -37,6 +39,20 @@ const ALLOWED_SERIAL_LOG_COMPONENTS: &[&str] = &[
 ];
 
 const DENIED_SERIAL_LOG_TAGS: &[&str] = &["NUD"];
+
+// A hardware watchdog reset or power-button reset during a storage stall bypasses normal crashlog
+// generation, losing the in-memory debuglog. Reserve 128 KiB of persistent RAM (matching the
+// debuglog tail size in a kernel crashlog) so recent logs survive across the reset.
+//
+// Today this persists kernel logs and `zx_debug_write` output (including serial-forwarded component
+// logs). Userspace debuglog writes, such as the storage stall watchdog's backtrace dump, also
+// require `DLog::Write` persistence.
+const PERSISTENT_DLOG_TARGET_SIZE_BYTES: u32 = 128 * 1024;
+
+// Abort wedged userpager faults after 60s (instead of Zircon's 300s default) when the storage
+// stall watchdog is enabled, so non-fxfs pager stalls are caught after one minute. This is a
+// multiple of Zircon's default 20s `kernel.userpager.overtime_wait_seconds` check interval.
+const USERPAGER_OVERTIME_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub(crate) struct DiagnosticsSubsystemConfig<'a> {
     pub diagnostics: &'a DiagnosticsConfig,
@@ -260,6 +276,13 @@ impl<'a> DefineSubsystemConfiguration<DiagnosticsSubsystemConfig<'a>> for Diagno
             "fuchsia.diagnostics.StorageStallWatchdogEnabled",
             Config::new(ConfigValueType::Bool, storage_stall_watchdog_enabled.into()),
         )?;
+        if storage_stall_watchdog_enabled {
+            builder.kernel_arg(KernelArg::UserpagerOvertimeTimeoutSeconds(
+                USERPAGER_OVERTIME_TIMEOUT.as_secs(),
+            ));
+            builder
+                .kernel_arg(KernelArg::PersistentDlogTargetSize(PERSISTENT_DLOG_TARGET_SIZE_BYTES));
+        }
 
         match context.feature_set_level {
             FeatureSetLevel::Bootstrap | FeatureSetLevel::Utility | FeatureSetLevel::Embeddable => {
@@ -1441,6 +1464,19 @@ mod tests {
                 config.configuration_capabilities["fuchsia.diagnostics.StorageStallWatchdogEnabled"]
                     .value(),
                 Value::Bool(expected),
+                "{build_type:?}, product_enabled={product_enabled}"
+            );
+            assert_eq!(
+                config.kernel_args.contains(&format!(
+                    "kernel.userpager.overtime_timeout_seconds={}",
+                    USERPAGER_OVERTIME_TIMEOUT.as_secs()
+                )),
+                expected,
+                "{build_type:?}, product_enabled={product_enabled}"
+            );
+            assert_eq!(
+                config.kernel_args.contains("kernel.persistent-dlog.target-size=131072"),
+                expected,
                 "{build_type:?}, product_enabled={product_enabled}"
             );
         }

@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/nonzero.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/nonzero.test.fidl",
       "data": "test.nonzero",
       "start_offset": 173,
       "end_offset": 185

@@ -18,10 +18,10 @@
 
 #include "src/developer/forensics/feedback_data/constants.h"
 #include "src/developer/forensics/utils/log_format.h"
+#include "src/developer/forensics/utils/numbered_entries.h"
 #include "src/lib/files/directory.h"
 #include "src/lib/files/file.h"
 #include "src/lib/files/path.h"
-#include "src/lib/fxl/strings/string_number_conversions.h"
 
 namespace forensics {
 namespace feedback_data {
@@ -235,21 +235,9 @@ fit::result<ReaderError, ConcatenateResult> Concatenate(const std::string& logs_
     return fit::error(ReaderError::kIoError);
   }
 
-  std::vector<std::string> dir_contents;
-  files::ReadDirContents(logs_dir, &dir_contents);
-
-  // Only read the files the writer created, which are named after their number.
-  std::vector<size_t> file_nums;
-  for (const std::string& fname : dir_contents) {
-    size_t file_num = 0;
-    if (fxl::StringToNumberWithError(fname, &file_num)) {
-      file_nums.push_back(file_num);
-    }
-  }
-
-  // Sort the files based on the number the previous writer assigned them. The lower the number,
-  // the older the file.
-  std::sort(file_nums.begin(), file_nums.end());
+  // Only read the files the writer created, which are named after their number. The lower the
+  // number, the older the file.
+  const std::vector<uint64_t> file_nums = GetNumberedEntries(logs_dir, EntryType::kFile);
 
   std::string uncompressed_log;
   uncompressed_log.reserve(max_decompressed_size.ToBytes());
@@ -258,7 +246,7 @@ fit::result<ReaderError, ConcatenateResult> Concatenate(const std::string& logs_
   buffer.reserve(max_decompressed_size.ToBytes());
 
   uint64_t total_compressed_log_size{0};
-  for (const size_t file_num : file_nums) {
+  for (const uint64_t file_num : file_nums) {
     const std::string path = files::JoinPath(logs_dir, std::to_string(file_num));
     if (!files::ReadFileToString(path, &buffer)) {
       continue;
@@ -298,6 +286,31 @@ fit::result<ReaderError, ConcatenateResult> Concatenate(const std::string& logs_
       .first_timestamp = post_processed.first_timestamp,
       .last_timestamp = post_processed.last_timestamp,
   });
+}
+
+std::optional<zx::time_boot> ApproximateLastTimestamp(const std::string& logs_dir,
+                                                      Decoder* decoder) {
+  // Check the files from newest to oldest because the newest file may not have a timestamp yet,
+  // e.g., right after the writer started a new file.
+  const std::vector<uint64_t> file_nums = GetNumberedEntries(logs_dir, EntryType::kFile);
+  for (auto it = file_nums.rbegin(); it != file_nums.rend(); ++it) {
+    std::string encoded_log;
+    if (!files::ReadFileToString(files::JoinPath(logs_dir, std::to_string(*it)), &encoded_log)) {
+      continue;
+    }
+
+    const std::string log = decoder->Decode(encoded_log);
+    std::optional<zx::time_boot> last_timestamp;
+    for (std::string_view line = log; !line.empty(); line = ToNextLine(line)) {
+      last_timestamp = std::max(last_timestamp, ParseLogHeader(line));
+    }
+
+    if (last_timestamp.has_value()) {
+      return last_timestamp;
+    }
+  }
+
+  return std::nullopt;
 }
 
 }  // namespace system_log_recorder

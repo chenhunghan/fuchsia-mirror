@@ -5,6 +5,7 @@ use crate::crypto::PerFileDecryptor;
 use crate::superblock::BLOCK_SIZE;
 use anyhow::{Context, Error, anyhow, ensure};
 use enumn::N;
+use fscrypt::MAX_FILENAME_LEN;
 use fscrypt::proxy_filename::ProxyFilename;
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, Ref, Unaligned};
 
@@ -103,10 +104,7 @@ fn get_dir_entries(
         let filename = if is_encrypted {
             if let Some(decryptor) = decryptor {
                 let mut filename = raw_filename.clone();
-                decryptor.decrypt_filename_data(ino, &mut filename);
-                while filename.last() == Some(&0) {
-                    filename.pop();
-                }
+                decryptor.decrypt_filename_data(ino, &mut filename, MAX_FILENAME_LEN)?;
                 let filename_str = if is_casefolded {
                     // We must have valid UTF-8 for casefolding.
                     String::from_utf8(filename)

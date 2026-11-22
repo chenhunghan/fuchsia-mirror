@@ -1,0 +1,74 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/python:python_c_extension.bzl", "python_c_extension")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange(python_config)
+# @bazel2gn:skip
+build_flags(
+    name = "python_config",
+    defines = [
+        "Py_LIMITED_API=0x030b00f0",
+        "PY_SSIZE_T_CLEAN",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:python_config)
+
+# LINT.IfChange(fuchsia_controller_abi_config)
+# @bazel2gn:skip
+build_flags(
+    name = "fuchsia_controller_abi_config",
+    include_dirs = ["src/developer/fuchsia-controller/cpp"],
+)
+# LINT.ThenChange(BUILD.gn:fuchsia_controller_abi_config)
+
+fx_cc_library(
+    name = "fuchsia_controller_abi",
+    hdrs = [
+        "fuchsia_controller_abi/abi.h",
+        "fuchsia_controller_abi/utils.h",
+    ],
+    build_flags = [
+        ":fuchsia_controller_abi_config",
+        ":python_config",
+    ],
+    # Propagate defines and include path to Bazel dependents, matching GN public_configs.
+    defines = [
+        "Py_LIMITED_API=0x030b00f0",
+        "PY_SSIZE_T_CLEAN",
+    ],
+    includes = ["."],
+    # If you need to add include directories, use `public_configs` or `configs`
+    public_configs = [
+        ":fuchsia_controller_abi_config",
+        ":python_config",
+    ],
+)
+
+python_c_extension(
+    name = "fuchsia_controller_internal",
+    srcs = [
+        "fuchsia_controller_internal/error.cc",
+        "fuchsia_controller_internal/error.h",
+        "fuchsia_controller_internal/fuchsia_controller.h",
+        "fuchsia_controller_internal/fuchsia_controller_py.cc",
+        "fuchsia_controller_internal/macros.h",
+        "fuchsia_controller_internal/mod.cc",
+        "fuchsia_controller_internal/mod.h",
+    ],
+    stubs = ["__init__.pyi"],
+    stubs_root = "fuchsia_controller_internal",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":fuchsia_controller_abi",
+        "//sdk/fidl/fuchsia.fdomain:fuchsia.fdomain_cpp",
+        "//sdk/lib/zircon-assert",
+        "//src/developer/fuchsia-controller:lib",
+        "//zircon/system/public",
+    ],
+)

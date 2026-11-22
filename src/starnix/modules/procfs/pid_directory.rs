@@ -9,9 +9,7 @@ use starnix_core::mm::{
     ProcPagemapFile, ProcSmapsFile, ProcSmapsRollupFile, SelfStatsCacheMode,
 };
 use starnix_core::security;
-use starnix_core::task::{
-    CurrentTask, Pid, Task, TaskContainer, TaskEntryScope, TaskStateCode, path_from_root,
-};
+use starnix_core::task::{CurrentTask, Pid, Task, TaskContainer, TaskEntryScope, path_from_root};
 use starnix_core::vfs::buffers::{InputBuffer, OutputBuffer};
 use starnix_core::vfs::pseudo::dynamic_file::{DynamicFile, DynamicFileBuf, DynamicFileSource};
 use starnix_core::vfs::pseudo::simple_file::{
@@ -22,7 +20,7 @@ use starnix_core::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use starnix_core::vfs::pseudo::vec_directory::{VecDirectory, VecDirectoryEntry};
 use starnix_core::vfs::{
     CallbackSymlinkNode, CheckAccessReason, CloseFreeSafe, DirEntry, DirEntryOps,
-    DirectoryEntryType, DirentSink, FdFlags, FdNumber, FdTable, FileObject, FileOps,
+    DirectoryEntryType, DirentSink, FdFlags, FdNumber, FileHandle, FileObject, FileOps,
     FileSystemHandle, FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString,
     MountNamespaceFile, Namespace, ProcMountinfoFile, ProcMountsFile, SeekTarget, StatxFlags,
     SymlinkTarget, default_seek, emit_dotdot, fileops_impl_directory, fileops_impl_noop_sync,
@@ -35,7 +33,7 @@ use starnix_sync::{DynamicLockDepRwLock, LockDepReadGuard};
 use starnix_task_command::TaskCommand;
 use starnix_types::time::duration_to_scheduler_clock;
 use starnix_uapi::auth::{
-    CAP_SYS_NICE, CAP_SYS_RESOURCE, PTRACE_MODE_ATTACH_FSCREDS, PTRACE_MODE_NOAUDIT,
+    CAP_SYS_NICE, CAP_SYS_RESOURCE, FsCred, PTRACE_MODE_ATTACH_FSCREDS, PTRACE_MODE_NOAUDIT,
     PTRACE_MODE_READ_FSCREDS, PtraceAccessMode,
 };
 use starnix_uapi::errors::Errno;
@@ -104,7 +102,10 @@ fn task_entries(scope: TaskEntryScope) -> &'static [(&'static [u8], FileMode)] {
 ///
 /// It pre-allocates a range of inode numbers (`inode_range`) for all its child entries to mark
 /// them as unchanged when re-accessed.
-/// The `creds` stored within is applied to the directory node itself and child entries.
+///
+/// Child entries are owned by the task's effective uid/gid at the time they are looked up. The
+/// directory node itself also refreshes its owner on stat, so it reflects credential changes made
+/// after it was created.
 pub struct TaskDirectory {
     target: TaskContainer,
     inode_range: Range<ino_t>,
@@ -126,6 +127,24 @@ impl Deref for TaskDirectoryNode {
     }
 }
 
+/// Refreshes `node`'s `uid`/`gid` to `task`'s effective uid and gid.
+fn update_task_node_info(node: &FsNode, task: &Task) {
+    let need_update = {
+        let creds = task.real_creds().euid_as_fscred();
+        let info = node.info();
+        info.uid != creds.uid || info.gid != creds.gid
+    };
+    if need_update {
+        node.update_info(|info| {
+            // Read the creds again under the lock. Otherwise a refresh that read them before a
+            // concurrent credential change could overwrite the new owner with the old one.
+            let creds = task.real_creds().euid_as_fscred();
+            info.uid = creds.uid;
+            info.gid = creds.gid;
+        });
+    }
+}
+
 impl TaskDirectory {
     fn new(fs: &FileSystemHandle, task: &Arc<Task>, target: TaskContainer) -> FsNodeHandle {
         let creds = task.real_creds().euid_as_fscred();
@@ -143,26 +162,70 @@ impl TaskDirectory {
     }
 }
 
+/// Resolves `target` and checks that `hidepid=invisible` on `node`'s procfs mount lets
+/// `current_task` see it.
+///
+/// Returns `Ok(None)` if the task has exited (so that a caller revalidating a `DirEntry` evicts
+/// it), or `Err(ENOENT)` if `hidepid=invisible` hides the task from `current_task`.
+fn resolve_visible_task(
+    target: &TaskContainer,
+    current_task: &CurrentTask,
+    node: &FsNode,
+) -> Result<Option<Arc<Task>>, Errno> {
+    let Ok(task) = target.get_task() else {
+        return Ok(None);
+    };
+    if let Some(proc_fs) = node.fs().downcast_ops::<ProcFs>() {
+        if !proc_fs.has_pid_permissions(current_task, &task, HidePid::Invisible) {
+            return error!(ENOENT);
+        }
+    }
+    Ok(Some(task))
+}
+
+/// Revalidates `/proc/<pid>` and `/proc/<pid>/task/<tid>` `DirEntry`s against task liveness and
+/// `hidepid=invisible`, and updates `uid`/`gid` on credential changes.
 struct TaskDirectoryDirEntryOps {
     target: TaskContainer,
 }
 
 impl DirEntryOps for TaskDirectoryDirEntryOps {
     fn revalidate(&self, current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
-        let Ok(target_task) = self.target.get_task() else {
+        let Some(task) = resolve_visible_task(&self.target, current_task, &dir_entry.node)? else {
             return Ok(false);
         };
-        if let Some(proc_fs) = dir_entry.node.fs().downcast_ops::<ProcFs>() {
-            if !proc_fs.has_pid_permissions(current_task, &target_task, HidePid::Invisible) {
-                return error!(ENOENT);
-            }
-        }
+        update_task_node_info(&dir_entry.node, &task);
+        Ok(true)
+    }
+}
+
+/// Revalidates `/proc/<pid>` child `DirEntry`s against task liveness and updates `uid`/`gid` on
+/// credential changes.
+///
+/// Unlike [`TaskDirectoryDirEntryOps`], this does not check `hidepid`: path walks through
+/// `/proc/<pid>` or `task/<tid>` already enforce `hidepid` on the parent directory, while lookups
+/// through an already-open subdirectory FD (`attr`, `fd`, `fdinfo`, `ns`) remain allowed.
+struct TaskChildDirEntryOps {
+    target: TaskContainer,
+}
+
+impl DirEntryOps for TaskChildDirEntryOps {
+    fn revalidate(&self, _current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
+        let Ok(task) = self.target.get_task() else {
+            return Ok(false);
+        };
+        update_task_node_info(&dir_entry.node, &task);
         Ok(true)
     }
 }
 
 macro_rules! task_dir_impl_readonly {
     () => {
+        // Used for `/proc/<pid>` and `/proc/<pid>/task/<tid>`, whose parents (`ProcDirectory` and
+        // `TaskListDirectory`) do not implement `create_child_dir_entry_ops`. For
+        // `TaskListDirectory` (`/proc/<pid>/task`), `DirEntry` creation prefers the parent
+        // `TaskDirectoryNode::create_child_dir_entry_ops` (`TaskChildDirEntryOps`), which is safe
+        // because `/proc/<pid>`'s `check_access` already enforces `hidepid`.
         fn create_dir_entry_ops(&self) -> Box<dyn DirEntryOps> {
             Box::new(TaskDirectoryDirEntryOps { target: self.target.clone() })
         }
@@ -198,12 +261,8 @@ macro_rules! task_dir_impl_readonly {
             info: &'a DynamicLockDepRwLock<FsNodeInfo>,
             _flags: StatxFlags,
         ) -> Result<LockDepReadGuard<'a, FsNodeInfo>, Errno> {
-            if let (Some(proc_fs), Ok(target_task)) =
-                (node.fs().downcast_ops::<ProcFs>(), self.target.get_task())
-            {
-                if !proc_fs.has_pid_permissions(current_task, &target_task, HidePid::Invisible) {
-                    return error!(ENOENT);
-                }
+            if let Some(target_task) = resolve_visible_task(&self.target, current_task, node)? {
+                update_task_node_info(node, &target_task);
             }
             Ok(info.read())
         }
@@ -214,6 +273,14 @@ macro_rules! task_dir_impl_readonly {
 
 impl FsNodeOps for TaskDirectoryNode {
     task_dir_impl_readonly!();
+
+    // Revalidate direct children (`stat`, `fd`, `attr`, `task`, ...) against task liveness and
+    // credential changes. `DirEntry` creation prefers these parent ops over a child node's own
+    // `create_dir_entry_ops` (including `TaskListDirectory` for `/proc/<pid>/task`), which is safe
+    // because `/proc/<pid>`'s `check_access` already enforces `hidepid`.
+    fn create_child_dir_entry_ops(&self) -> Option<Box<dyn DirEntryOps>> {
+        Some(Box::new(TaskChildDirEntryOps { target: self.target.clone() }))
+    }
 
     fn create_file_ops(
         &self,
@@ -230,9 +297,9 @@ impl FsNodeOps for TaskDirectoryNode {
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let _task = self.target.get_task()?;
+        let task = self.target.get_task()?;
         let target = self.target.clone();
-        let creds = entry.node.info().cred();
+        let creds = task.real_creds().euid_as_fscred();
         let fs = entry.node.fs();
         let (mode, ino) = task_entries(self.target.scope)
             .iter()
@@ -382,8 +449,96 @@ pub fn pid_directory(
 }
 
 /// Creates an [`FsNode`] that represents the `/proc/<pid>/task/<tid>` directory for `task`.
-fn tid_directory(fs: &FileSystemHandle, task: &Arc<Task>) -> FsNodeHandle {
-    TaskDirectory::new(fs, task, TaskContainer::from_task(task))
+fn tid_directory(
+    current_task: &CurrentTask,
+    fs: &FileSystemHandle,
+    task: &Arc<Task>,
+) -> FsNodeHandle {
+    let fs_node = TaskDirectory::new(fs, task, TaskContainer::from_task(task));
+    security::task_to_fs_node(current_task, task, &fs_node);
+    fs_node
+}
+
+/// Derives the symlink's mode from the mode in which the file was opened.
+///
+/// Readable and/or writable file descriptors also set execute permission on the symlink
+/// (0500 for O_RDONLY, 0300 for O_WRONLY, 0700 for O_RDWR, and 0000 for O_PATH).
+fn fd_symlink_mode(flags: OpenFlags) -> FileMode {
+    let mut access = Access::from_open_flags(flags);
+    if access.is_nontrivial() {
+        access |= Access::EXEC;
+    }
+    FileMode::IFLNK | access.user_mode()
+}
+
+/// Resolves the task, FD number, and open file for `fd_as_str` in `target`, returning `ENOENT` if
+/// `fd_as_str` is not a valid FD number, the task has exited (including unreaped zombies whose
+/// `FdTable` has been released), or the FD is no longer open.
+fn resolve_open_fd(
+    target: &TaskContainer,
+    fd_as_str: &FsStr,
+) -> Result<(Arc<Task>, FdNumber, FileHandle), Errno> {
+    let fd = FdNumber::from_fs_str(fd_as_str).map_err(|_| errno!(ENOENT))?;
+    let task = target.get_task().map_err(|_| errno!(ENOENT))?;
+    let files = task.files().map_err(|_| errno!(ENOENT))?;
+    let file = files.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
+    Ok((task, fd, file))
+}
+
+/// Resolves the task, FD number, and open file behind a `/proc/<pid>/{fd,fdinfo}/<fd>` `DirEntry`.
+///
+/// Returns `None` if the task has exited or the FD is no longer open, so that the caller evicts
+/// the entry.
+fn resolve_open_fd_entry(
+    target: &TaskContainer,
+    dir_entry: &DirEntry,
+) -> Option<(Arc<Task>, FdNumber, FileHandle)> {
+    resolve_open_fd(target, dir_entry.local_name(&RcuReadScope::new())).ok()
+}
+
+/// Revalidates `/proc/<pid>/fd/<fd>` symlinks against task and FD liveness, refreshing `uid`/`gid`
+/// and updating the symlink mode when the FD number now refers to a file opened with a different
+/// access mode (e.g. after `dup2()`, or `close()` and reopen).
+struct FdDirEntryOps {
+    target: TaskContainer,
+}
+
+impl DirEntryOps for FdDirEntryOps {
+    fn revalidate(&self, _current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
+        let Some((task, fd, file)) = resolve_open_fd_entry(&self.target, dir_entry) else {
+            return Ok(false);
+        };
+        let need_update = {
+            let creds = task.real_creds().euid_as_fscred();
+            let mode = fd_symlink_mode(file.flags());
+            let info = dir_entry.node.info();
+            info.uid != creds.uid || info.gid != creds.gid || info.mode != mode
+        };
+        if !need_update {
+            return Ok(true);
+        }
+        let Ok(running_state) = task.running_state() else {
+            return Ok(false);
+        };
+        let current_file = {
+            // Hold `running_state.files` across `update_info` so `unshare(CLONE_FILES)` cannot swap
+            // out the task's `FdTable` mid-update.
+            let files_guard = running_state.files.lock();
+            files_guard.as_ref().and_then(|files| {
+                dir_entry.node.update_info(|info| {
+                    // Re-read the FD and credentials so a stalled refresh cannot overwrite a newer
+                    // mode (e.g. after `dup2()`) or owner with a stale one.
+                    let current_file = files.table.get_allowing_opath(fd).ok()?;
+                    let creds = task.real_creds().euid_as_fscred();
+                    info.uid = creds.uid;
+                    info.gid = creds.gid;
+                    info.mode = fd_symlink_mode(current_file.flags());
+                    Some(current_file)
+                })
+            })
+        };
+        Ok(current_file.is_some())
+    }
 }
 
 /// `FdDirectory` implements the directory listing operations for a `proc/<pid>/fd` directory.
@@ -403,16 +558,21 @@ impl FdDirectory {
 impl FsNodeOps for FdDirectory {
     fs_node_impl_dir_readonly!();
 
+    fn create_child_dir_entry_ops(&self) -> Option<Box<dyn DirEntryOps>> {
+        Some(Box::new(FdDirEntryOps { target: self.target.clone() }))
+    }
+
     fn create_file_ops(
         &self,
         _node: &FsNode,
         _current_task: &CurrentTask,
         _flags: OpenFlags,
     ) -> Result<Box<dyn FileOps>, Errno> {
-        let task = self.target.get_task()?;
-        let entries =
-            task.files().map_or_else(|_| Vec::new(), |files| fds_to_directory_entries(&files));
-        Ok(VecDirectory::new_file(entries))
+        let _task = self.target.get_task()?;
+        Ok(Box::new(FdDirectoryFileOps {
+            target: self.target.clone(),
+            entry_type: DirectoryEntryType::LNK,
+        }))
     }
 
     fn lookup(
@@ -421,26 +581,20 @@ impl FsNodeOps for FdDirectory {
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let fd = FdNumber::from_fs_str(name).map_err(|_| errno!(ENOENT))?;
-        let task = self.target.get_task()?;
-        // Make sure that the file descriptor exists before creating the node.
-        let file = task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
-        // Derive the symlink's mode from the mode in which the file was opened.
-        // Readable and/or writable file descriptors also set execute permission on the symlink
-        // (0500 for O_RDONLY, 0300 for O_WRONLY, 0700 for O_RDWR, and 0000 for O_PATH).
-        let mut access = Access::from_open_flags(file.flags());
-        if access.is_nontrivial() {
-            access |= Access::EXEC;
-        }
-        let mode = FileMode::IFLNK | access.user_mode();
+        // Make sure that the task is alive and the file descriptor exists before creating the node.
+        let (task, fd, file) = resolve_open_fd(&self.target, name)?;
+        let mode = fd_symlink_mode(file.flags());
         let target = self.target.clone();
         Ok(entry.node.fs().create_node_and_allocate_node_id(
             CallbackSymlinkNode::new(move || {
-                let task = target.get_task()?;
-                let file = task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
+                // On Linux, reading a held `fd/<n>` symlink fails with `EACCES` once the task is
+                // reaped, and `ENOENT` on an unreaped zombie or closed descriptor.
+                let task = target.get_task().map_err(|_| errno!(EACCES))?;
+                let files = task.files().map_err(|_| errno!(ENOENT))?;
+                let file = files.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
                 Ok(SymlinkTarget::Node(file.name.to_passive()))
             }),
-            FsNodeInfo::new(mode, task.real_fscred()),
+            FsNodeInfo::new(mode, task.real_creds().euid_as_fscred()),
         ))
     }
 }
@@ -595,6 +749,10 @@ impl AttrDirectory {
 
 impl FsNodeOps for AttrDirectory {
     fs_node_impl_dir_readonly!();
+
+    fn create_child_dir_entry_ops(&self) -> Option<Box<dyn DirEntryOps>> {
+        Some(Box::new(TaskChildDirEntryOps { target: self.target.clone() }))
+    }
 
     fn create_file_ops(
         &self,
@@ -777,8 +935,9 @@ impl FsNodeOps for NsSymlinkNode {
     }
 }
 
-/// Revalidates `/proc/<pid>/ns` entries against task liveness and, for `<ns>:[<id>]` entries,
-/// ptrace access and namespace ID changes on unshare or setns.
+/// Revalidates `/proc/<pid>/ns` entries against task liveness. Link entries also refresh
+/// `uid`/`gid`; `<ns>:[<id>]` entries instead check ptrace access and namespace ID changes on
+/// unshare or setns.
 struct NsDirEntryOps {
     target: TaskContainer,
 }
@@ -793,7 +952,11 @@ impl DirEntryOps for NsDirEntryOps {
         let parsed = parse_ns_entry_name(dir_entry.local_name(&RcuReadScope::new()));
         match parsed {
             None => Ok(false),
-            Some((_ns_type, None)) => Ok(true),
+            Some((_ns_type, None)) => {
+                // Only the links follow the task's owner; `<ns>:[<id>]` entries stay root-owned.
+                update_task_node_info(&dir_entry.node, &task);
+                Ok(true)
+            }
             Some((ns_type, Some(id))) => {
                 // Linux requires ptrace access to read or follow a `/proc/<pid>/ns` link but not
                 // to look up the link itself (e.g. `lstat`). Starnix follows the link by looking
@@ -858,13 +1021,15 @@ impl FsNodeOps for NsDirectory {
         let Some(id) = id else {
             return Ok(entry.node.fs().create_node_and_allocate_node_id(
                 NsSymlinkNode { target: self.target.clone(), ns_type },
-                FsNodeInfo::new(mode!(IFLNK, 0o777), task.real_fscred()),
+                FsNodeInfo::new(mode!(IFLNK, 0o777), task.real_creds().euid_as_fscred()),
             ));
         };
 
         // See `NsDirEntryOps::revalidate`.
         check_ns_ptrace_access(current_task, &task)?;
-        let node_info = FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred());
+        // Unlike the `/proc/<pid>/ns/<name>` link, the namespace file it resolves to is owned by
+        // root, whichever task it was reached through, as on Linux.
+        let node_info = FsNodeInfo::new(mode!(IFREG, 0o444), FsCred::root());
         // The ID must be the target's current one, so a stale name (e.g. after the target
         // unshares) is not resolved and cached as if it were current.
         match ns_type {
@@ -893,6 +1058,22 @@ impl FsNodeOps for NsDirectory {
     }
 }
 
+/// Revalidates `/proc/<pid>/fdinfo/<fd>` regular files against task and FD liveness,
+/// refreshing `uid`/`gid`.
+struct FdInfoDirEntryOps {
+    target: TaskContainer,
+}
+
+impl DirEntryOps for FdInfoDirEntryOps {
+    fn revalidate(&self, _current_task: &CurrentTask, dir_entry: &DirEntry) -> Result<bool, Errno> {
+        let Some((task, _fd, _file)) = resolve_open_fd_entry(&self.target, dir_entry) else {
+            return Ok(false);
+        };
+        update_task_node_info(&dir_entry.node, &task);
+        Ok(true)
+    }
+}
+
 /// `FdInfoDirectory` implements the directory listing operations for a `proc/<pid>/fdinfo`
 /// directory.
 ///
@@ -911,6 +1092,10 @@ impl FdInfoDirectory {
 impl FsNodeOps for FdInfoDirectory {
     fs_node_impl_dir_readonly!();
 
+    fn create_child_dir_entry_ops(&self) -> Option<Box<dyn DirEntryOps>> {
+        Some(Box::new(FdInfoDirEntryOps { target: self.target.clone() }))
+    }
+
     fn create_file_ops(
         &self,
         _node: &FsNode,
@@ -922,9 +1107,10 @@ impl FsNodeOps for FdInfoDirectory {
             .check_ptrace_access_mode(PTRACE_MODE_READ_FSCREDS, &task)
             .map_err(|_| errno!(EACCES))?;
 
-        let entries =
-            task.files().map_or_else(|_| Vec::new(), |files| fds_to_directory_entries(&files));
-        Ok(VecDirectory::new_file(entries))
+        Ok(Box::new(FdDirectoryFileOps {
+            target: self.target.clone(),
+            entry_type: DirectoryEntryType::REG,
+        }))
     }
 
     fn lookup(
@@ -933,15 +1119,13 @@ impl FsNodeOps for FdInfoDirectory {
         _current_task: &CurrentTask,
         name: &FsStr,
     ) -> Result<FsNodeHandle, Errno> {
-        let task = self.target.get_task()?;
-        let fd = FdNumber::from_fs_str(name).map_err(|_| errno!(ENOENT))?;
         // Verify that the FD exists at lookup time. We intentionally do not store the
         // `FileHandle` in `FdInfoFile` to avoid pinning the file in memory after the FD is
         // closed, and to reflect live `FD_CLOEXEC` flags and closed/reassigned FDs on read.
-        task.files()?.get_allowing_opath(fd).map_err(|_| errno!(ENOENT))?;
+        let (task, fd, _file) = resolve_open_fd(&self.target, name)?;
         Ok(entry.node.fs().create_node_and_allocate_node_id(
             FdInfoFile::new_node(self.target.clone(), fd),
-            FsNodeInfo::new(mode!(IFREG, 0o444), task.real_fscred()),
+            FsNodeInfo::new(mode!(IFREG, 0o444), task.real_creds().euid_as_fscred()),
         ))
     }
 }
@@ -977,17 +1161,57 @@ impl DynamicFileSource for FdInfoFile {
     }
 }
 
-fn fds_to_directory_entries(files: &FdTable) -> Vec<VecDirectoryEntry> {
-    let mut buf = itoa::Buffer::new();
-    let mut entries = Vec::new();
-    files.for_each_fd(|fd| {
-        entries.push(VecDirectoryEntry {
-            entry_type: DirectoryEntryType::DIR,
-            name: buf.format(fd.raw()).as_bytes().into(),
-            inode: None,
-        });
-    });
-    entries
+const FD_READDIR_BATCH_SIZE: usize = 64;
+
+struct FdDirectoryFileOps {
+    target: TaskContainer,
+    entry_type: DirectoryEntryType,
+}
+
+impl FileOps for FdDirectoryFileOps {
+    fileops_impl_directory!();
+    fileops_impl_noop_sync!();
+    fileops_impl_unbounded_seek!();
+
+    fn readdir(
+        &self,
+        file: &FileObject,
+        _current_task: &CurrentTask,
+        sink: &mut dyn DirentSink,
+    ) -> Result<(), Errno> {
+        let task = self.target.get_task().map_err(|_| errno!(ENOENT))?;
+        emit_dotdot(file, sink)?;
+
+        let Ok(files) = task.files() else {
+            return Ok(());
+        };
+        let mut next_fd = usize::try_from(sink.offset().saturating_sub(2)).unwrap_or(usize::MAX);
+        let mut buf = itoa::Buffer::new();
+        let mut batch = [FdNumber::from_raw(0); FD_READDIR_BATCH_SIZE];
+        loop {
+            // Collect a batch of descriptor numbers while `fill_fd_batch` holds its `RcuReadScope`
+            // so `sink.add` (which writes to user memory) runs outside the RCU read section.
+            let count = files.fill_fd_batch(next_fd, &mut batch);
+            if count == 0 {
+                break;
+            }
+            for &fd in &batch[..count] {
+                let raw = fd.raw();
+                let name = buf.format(raw);
+                sink.add(
+                    file.fs.allocate_ino(),
+                    raw as off_t + 3,
+                    self.entry_type,
+                    name.as_bytes().into(),
+                )?;
+            }
+            if count < batch.len() {
+                break;
+            }
+            next_fd = batch[count - 1].raw() as usize + 1;
+        }
+        Ok(())
+    }
 }
 
 /// Directory that lists the task IDs (tid) in a process. Located at `/proc/<pid>/task/`.
@@ -1070,7 +1294,7 @@ impl FsNodeOps for TaskListDirectory {
             }
         }
 
-        Ok(tid_directory(&entry.node.fs(), &task))
+        Ok(tid_directory(current_task, &entry.node.fs(), &task))
     }
 }
 
@@ -1185,7 +1409,7 @@ impl PtraceCheckedNode {
         SimpleFileNode::new(move |current_task: &CurrentTask| {
             let task = target.get_task()?;
             // proc-pid nodes for kthreads do not require ptrace access checks.
-            if task.mm().is_ok() || task.state_code() == TaskStateCode::Zombie {
+            if task.mm().is_ok() || !task.is_running() {
                 current_task.check_ptrace_access_mode(mode, &task).map_err(|_| errno!(EACCES))?;
             }
             create_ops(current_task, task)
@@ -1466,13 +1690,13 @@ impl FileOps for MemFile {
 const STUBBED_MEM_BYTES: usize = 4096;
 
 // Workaround for b/525059309: Zircon VMAR walks (`ZX_INFO_VMAR_MAPS`) are extremely
-// slow and cause Perfetto's `traced_probes` watchdog timeouts and `lmkd` `cmd_procs_prio`
-// VMAR lock contention when sweeping thread status files. We bypass them when the reader
-// is `traced_probes` or `lmkd` by returning a 1 page/KB stub.
+// slow and cause Perfetto's `traced` / `traced_probes` watchdog timeouts and `lmkd`
+// `cmd_procs_prio` VMAR lock contention when sweeping thread status files. We bypass them
+// when the reader is `traced`, `traced_probes`, or `lmkd`.
 fn should_skip_memory_stats(current_task: &CurrentTask) -> bool {
     let comm = current_task.persistent_info.command_guard();
     let name = comm.comm_name();
-    name == b"traced_probes" || name == b"lmkd"
+    name == b"traced" || name == b"traced_probes" || name == b"lmkd"
 }
 fn stub_memory_stats() -> MemoryStats {
     MemoryStats {
@@ -1487,6 +1711,7 @@ fn stub_memory_stats() -> MemoryStats {
         vm_exe: STUBBED_MEM_BYTES,
         vm_swap: 0,
         vm_lck: 0,
+        rss_locked: 0,
     }
 }
 
@@ -1581,11 +1806,7 @@ impl DynamicFileSource for StatFile {
             session = tg_state.session.id;
 
             // TTY device ID.
-            tty_nr = tg_state
-                .controlling_terminal
-                .as_ref()
-                .map(|t| t.terminal.device().bits())
-                .unwrap_or(0) as i32;
+            tty_nr = tg_state.controlling_terminal_device().map(|d| d.bits()).unwrap_or(0) as i32;
 
             cutime = duration_to_scheduler_clock(tg_state.children_time_stats.user_time);
             cstime = duration_to_scheduler_clock(tg_state.children_time_stats.system_time);
@@ -1607,17 +1828,7 @@ impl DynamicFileSource for StatFile {
         }
 
         if let Ok(mm) = task.mm() {
-            // TODO(b/525059309): Bypassed for traced_probes due to VMAR walk slowness. Re-enable when optimized.
-            let mem_stats = if should_skip_memory_stats(current_task) {
-                stub_memory_stats()
-            } else {
-                mm.get_stats(current_task, SelfStatsCacheMode::AllowCached)
-            };
             let page_size = *PAGE_SIZE as usize;
-            vsize = mem_stats.vm_size;
-            rss = mem_stats.vm_rss / page_size;
-            rsslim = task.thread_group().limits.lock().get(Resource::RSS).rlim_max;
-
             {
                 let mm_state = mm.state.read();
                 startstack = mm_state.stack_start.ptr();
@@ -1625,7 +1836,21 @@ impl DynamicFileSource for StatFile {
                 arg_end = mm_state.argv_end.ptr();
                 env_start = mm_state.environ_start.ptr();
                 env_end = mm_state.environ_end.ptr();
+                let (vm_size, vm_rss) = if should_skip_memory_stats(current_task) {
+                    mm.get_stat_vsize_and_rss(&mm_state)
+                } else {
+                    // Releases `mm_state` before walking the Zircon mappings.
+                    let mem_stats = mm.get_stats_locked(
+                        current_task,
+                        mm_state,
+                        SelfStatsCacheMode::AllowCached,
+                    );
+                    (mem_stats.vm_size, mem_stats.vm_rss)
+                };
+                vsize = vm_size;
+                rss = vm_rss / page_size;
             }
+            rsslim = task.thread_group().limits.lock().get(Resource::RSS).rlim_max;
         }
 
         // The man page describes that the following fields have "... values displayed as 0" if the
@@ -1651,6 +1876,7 @@ impl DynamicFileSource for StatFile {
             exit_code = 0;
         }
 
+        sink.reserve(512);
         write!(sink, "{pid} (")?;
         sink.write(comm.comm_name());
         writeln!(
@@ -1734,12 +1960,13 @@ impl DynamicFileSource for StatusFile {
                 task_state.signal_mask().0,
                 task_state.task_specific_pending_signals().0,
                 task_state.no_new_privs() as u8,
-                task_state.state_code(),
+                task_state.unrefined_state_code(),
                 task_state.ptrace.as_ref().and_then(|p| p.core_state.thread_group.upgrade()),
             )
         };
         // The tracer's `Arc<ThreadGroup>` is dropped here, outside of the task lock.
         let tracer_pid = tracer_tg.map_or(0, |tg| tg.leader.id);
+        let state_code = task.refine_state_code(state_code);
 
         let thread_group = task.thread_group();
         let shdpnd = thread_group.pending_signals.lock().pending().0;
@@ -1991,19 +2218,28 @@ impl BytesFileOps for ClearRefsFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert_matches::assert_matches;
-    use starnix_core::mm::DumpPolicy;
-    use starnix_core::task::{ExitStatus, KernelFeatures};
-    use starnix_core::testing::{
-        anon_test_file, create_task, spawn_kernel_and_run, spawn_kernel_with_features_and_run,
+    use crate::testing::{
+        assert_cached_lookup, cached_entry_survives, lookup_no_follow,
+        spawn_kernel_with_cached_procfs, spawn_kernel_with_cached_procfs_and_options,
+        spawn_kernel_with_procfs, spawn_kernel_with_procfs_and_options,
     };
+    use assert_matches::assert_matches;
+    use starnix_core::device::terminal::{TerminalSide, TtyState};
+    use starnix_core::mm::DumpPolicy;
+    use starnix_core::task::dynamic_thread_spawner::SpawnRequestBuilder;
+    use starnix_core::task::{ExitStatus, KernelFeatures, TaskStateCode};
+    use starnix_core::testing::{
+        anon_test_file, create_task, map_memory_anywhere, spawn_kernel_and_run,
+        spawn_kernel_with_features_and_run,
+    };
+    use starnix_core::vfs::fs_args::MountParams;
     use starnix_core::vfs::{
-        FileSystemOptions, LookupContext, NamespaceNode, SymlinkMode, VecOutputBuffer, WhatToMount,
+        FileSystemOptions, LookupContext, NamespaceNode, SymlinkMode, VecOutputBuffer,
     };
     use starnix_uapi::auth::{CAP_DAC_OVERRIDE, Credentials};
-    use starnix_uapi::mount_flags::MountpointFlags;
     use starnix_uapi::signals::SIGCHLD;
-    use starnix_uapi::{SIG_IGN, gid_t, sigaction_t, uid_t};
+    use starnix_uapi::{CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, SIG_IGN, gid_t, sigaction_t, uid_t};
+    use test_case::test_case;
 
     #[::fuchsia::test]
     async fn test_fdinfo_file_lazy_and_cloexec() {
@@ -2095,39 +2331,82 @@ mod tests {
         .await;
     }
 
-    async fn spawn_kernel_with_procfs<F>(features: KernelFeatures, f: F)
-    where
-        F: AsyncFnOnce(&mut CurrentTask) + Send + Sync + 'static,
-    {
+    #[::fuchsia::test]
+    async fn test_stat_file_avoids_zx_vmar_walk() {
         spawn_kernel_with_features_and_run(
             async move |current_task| {
-                let proc_fs = crate::proc_fs(current_task, FileSystemOptions::default())
-                    .expect("create procfs");
-                let root = current_task.lookup_path_from_root("/".into()).expect("root");
-                let _ = root
-                    .entry
-                    .create_dir_for_testing(current_task, "proc".into())
-                    .expect("mkdir /proc");
-                let proc_mount_point = root
-                    .lookup_child(current_task, &mut LookupContext::default(), "proc".into())
-                    .expect("lookup /proc");
-                proc_mount_point
-                    .mount(WhatToMount::Fs(proc_fs), MountpointFlags::empty())
-                    .expect("mount proc");
-                f(current_task).await;
+                let page_size = *PAGE_SIZE as usize;
+                let mm = current_task.mm().unwrap();
+                current_task.set_command_name(TaskCommand::new(b"traced"));
+                let stat_file = anon_test_file(
+                    current_task,
+                    Box::new(DynamicFile::new(StatFile {
+                        target: TaskContainer::from_task(&current_task.task),
+                    })),
+                    OpenFlags::RDONLY,
+                );
+                let read_stat_vsize_and_rss = || -> (usize, usize) {
+                    let mut buf = VecOutputBuffer::new(512);
+                    let n = stat_file.read_at(current_task, 0, &mut buf).expect("read stat");
+                    let text = std::str::from_utf8(&buf.data()[..n]).unwrap().trim_end();
+                    let comm_end = text.rfind(')').expect("comm end");
+                    let after_comm: Vec<&str> = text[comm_end + 1..].split_whitespace().collect();
+                    // Fields after `)` start at field 3 (`state`); `vsize` is field 23 (index 20)
+                    // and `rss` is field 24 (index 21).
+                    let vsize = after_comm[20].parse::<usize>().expect("vsize");
+                    let rss = after_comm[21].parse::<usize>().expect("rss");
+                    (vsize, rss)
+                };
+
+                assert!(mm.cached_stats.lock().is_none());
+                let addr = map_memory_anywhere(current_task, 4 * *PAGE_SIZE);
+                current_task.write_memory(addr, &[1u8; 8]).unwrap();
+                current_task.write_memory((addr + 2 * page_size).unwrap(), &[1u8; 8]).unwrap();
+
+                // 1. Reading `/proc/[pid]/stat` on the `should_skip_memory_stats` fast path when
+                // `cached_stats` is `None` must not trigger a `ZX_INFO_VMAR_MAPS` walk (which would
+                // populate `cached_stats`), reports exact `vsize`, and reports a 1-page fallback
+                // `rss`.
+                let (vsize_uncached, rss_uncached) = read_stat_vsize_and_rss();
+                assert!(mm.cached_stats.lock().is_none());
+                assert_eq!(vsize_uncached, mm.get_total_usage());
+                assert_eq!(rss_uncached, 1);
+
+                // 2. Once `cached_stats` is populated (e.g. by `/proc/[pid]/status`), `/proc/[pid]/stat`
+                // uses the cached `vm_rss` (including 0) even if the entry is older than
+                // `CACHE_TTL`, and clamps `rss * page_size <= vsize` after `munmap`.
+                *mm.cached_stats.lock() = Some((
+                    zx::MonotonicInstant::INFINITE_PAST,
+                    MemoryStats { vm_rss: 0, ..Default::default() },
+                ));
+                let (_, rss_zero) = read_stat_vsize_and_rss();
+                assert_eq!(rss_zero, 0);
+
+                *mm.cached_stats.lock() = Some((
+                    zx::MonotonicInstant::INFINITE_PAST,
+                    MemoryStats { vm_rss: vsize_uncached - page_size, ..Default::default() },
+                ));
+                let (vsize_cached, rss_cached) = read_stat_vsize_and_rss();
+                assert_eq!(vsize_cached, vsize_uncached);
+                assert_eq!(rss_cached, (vsize_uncached - page_size) / page_size);
+
+                mm.unmap(addr, 2 * page_size).unwrap();
+                let (vsize_after_unmap, rss_after_unmap) = read_stat_vsize_and_rss();
+                assert_eq!(vsize_after_unmap, vsize_uncached - 2 * page_size);
+                assert_eq!(rss_after_unmap, vsize_after_unmap / page_size);
+
+                // 3. General callers populate `cached_stats` via `get_stats_locked` under a single
+                // `mm.state.read()` acquisition.
+                *mm.cached_stats.lock() = None;
+                current_task.set_command_name(TaskCommand::new(b"app_reader"));
+                let (vsize_populated, rss_populated) = read_stat_vsize_and_rss();
+                assert!(mm.cached_stats.lock().is_some());
+                assert_eq!(vsize_populated, vsize_after_unmap);
+                assert!(rss_populated >= 1);
             },
-            features,
+            KernelFeatures { cached_zx_map_info_bytes: 4096, ..Default::default() },
         )
         .await;
-    }
-
-    fn lookup_no_follow(current_task: &CurrentTask, path: &str) -> Result<NamespaceNode, Errno> {
-        let (parent, basename) = current_task.lookup_parent(
-            &mut LookupContext::default(),
-            &current_task.fs().root(),
-            path.into(),
-        )?;
-        parent.lookup_child(current_task, &mut LookupContext::new(SymlinkMode::NoFollow), basename)
     }
 
     /// Returns the target of the `/proc/<pid>/ns` link at `path`.
@@ -2828,6 +3107,677 @@ mod tests {
                 let name = name.to_string();
                 assert_eq!(attr_entry(current_task, &name).entry.node.ino, ino, "{name}");
             }
+        })
+        .await;
+    }
+
+    struct TestDirentSink {
+        offset: off_t,
+        max_entries: Option<usize>,
+        entries: Vec<(FsString, DirectoryEntryType)>,
+    }
+
+    impl TestDirentSink {
+        fn new(offset: off_t, max_entries: Option<usize>) -> Self {
+            Self { offset, max_entries, entries: Vec::new() }
+        }
+    }
+
+    impl DirentSink for TestDirentSink {
+        fn add(
+            &mut self,
+            _inode_num: ino_t,
+            offset: off_t,
+            entry_type: DirectoryEntryType,
+            name: &FsStr,
+        ) -> Result<(), Errno> {
+            if let Some(max) = self.max_entries {
+                if self.entries.len() >= max {
+                    return error!(ENOSPC);
+                }
+            }
+            self.offset = offset;
+            self.entries.push((name.into(), entry_type));
+            Ok(())
+        }
+
+        fn offset(&self) -> off_t {
+            self.offset
+        }
+    }
+
+    #[::fuchsia::test]
+    async fn test_fd_directory_file_ops_streaming_and_resume() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let target_file = anon_test_file(
+                current_task,
+                Box::new(BytesFile::new(b"".to_vec())),
+                OpenFlags::RDONLY,
+            );
+            let _fd0 = current_task
+                .files()
+                .add(current_task, target_file.clone(), FdFlags::empty())
+                .expect("add fd0");
+            let fd1 = current_task
+                .files()
+                .add(current_task, target_file.clone(), FdFlags::empty())
+                .expect("add fd1");
+            let _fd2 = current_task
+                .files()
+                .add(current_task, target_file.clone(), FdFlags::empty())
+                .expect("add fd2");
+            // Create a gap at fd 1.
+            current_task.files().close(fd1).expect("close fd1");
+
+            let dir_file = current_task
+                .open_file("/proc/self/fd".into(), OpenFlags::RDONLY | OpenFlags::DIRECTORY)
+                .expect("open fd dir");
+
+            // First batch stops after ".", "..", and "0".
+            let mut sink1 = TestDirentSink::new(0, Some(3));
+            assert_eq!(dir_file.readdir(current_task, &mut sink1), error!(ENOSPC));
+            assert_eq!(
+                sink1.entries,
+                vec![
+                    (FsString::from("."), DirectoryEntryType::DIR),
+                    (FsString::from(".."), DirectoryEntryType::DIR),
+                    (FsString::from("0"), DirectoryEntryType::LNK),
+                ]
+            );
+            assert_eq!(sink1.offset(), 3);
+
+            // Second batch resumes from offset 3 and emits "2".
+            let mut sink2 = TestDirentSink::new(sink1.offset(), None);
+            dir_file.readdir(current_task, &mut sink2).expect("readdir resume");
+            assert_eq!(sink2.entries, vec![(FsString::from("2"), DirectoryEntryType::LNK)]);
+            assert_eq!(sink2.offset(), 5);
+
+            // Open more descriptors than `FD_READDIR_BATCH_SIZE` to exercise multi-batch iteration
+            // and resuming mid-way through a subsequent batch.
+            let mut expected_fds = vec![0i32, 2i32];
+            for _ in 0..(FD_READDIR_BATCH_SIZE + 5) {
+                let fd = current_task
+                    .files()
+                    .add(current_task, target_file.clone(), FdFlags::empty())
+                    .expect("add extra fd");
+                expected_fds.push(fd.raw());
+            }
+            expected_fds.sort_unstable();
+
+            // Stop 2 FDs into the second `FD_READDIR_BATCH_SIZE` chunk (plus "." and "..").
+            let first_chunk_len = FD_READDIR_BATCH_SIZE + 4;
+            let mut sink3 = TestDirentSink::new(0, Some(first_chunk_len));
+            assert_eq!(dir_file.readdir(current_task, &mut sink3), error!(ENOSPC));
+            assert_eq!(sink3.entries.len(), first_chunk_len);
+
+            let mut sink4 = TestDirentSink::new(sink3.offset(), None);
+            dir_file.readdir(current_task, &mut sink4).expect("readdir multi-batch resume");
+
+            let mut all_entries = sink3.entries;
+            all_entries.extend(sink4.entries);
+            let mut expected_entries = vec![
+                (FsString::from("."), DirectoryEntryType::DIR),
+                (FsString::from(".."), DirectoryEntryType::DIR),
+            ];
+            expected_entries.extend(
+                expected_fds
+                    .iter()
+                    .map(|fd| (FsString::from(fd.to_string()), DirectoryEntryType::LNK)),
+            );
+            assert_eq!(all_entries, expected_entries);
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_fd_readdir_zombie_emits_only_dots() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let fd_file = {
+                let target_task = create_task(current_task.kernel(), "fd_zombie_target");
+                let target_file = anon_test_file(
+                    &target_task,
+                    Box::new(BytesFile::new(b"".to_vec())),
+                    OpenFlags::RDONLY,
+                );
+                let _fd = target_task
+                    .files()
+                    .add(&target_task, target_file, FdFlags::empty())
+                    .expect("add fd");
+                let target_pid = target_task.get_pid();
+                let fd_file = current_task
+                    .open_file(
+                        format!("/proc/{target_pid}/fd").as_str().into(),
+                        OpenFlags::RDONLY | OpenFlags::DIRECTORY,
+                    )
+                    .expect("open fd dir");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                fd_file
+            };
+            let mut sink = TestDirentSink::new(0, None);
+            fd_file.readdir(current_task, &mut sink).expect("readdir zombie fd dir");
+            assert_eq!(
+                sink.entries,
+                vec![
+                    (FsString::from("."), DirectoryEntryType::DIR),
+                    (FsString::from(".."), DirectoryEntryType::DIR),
+                ]
+            );
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_fd_readdir_reaped_task_returns_enoent() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            current_task
+                .thread_group()
+                .signal_actions
+                .set(SIGCHLD, sigaction_t { sa_handler: SIG_IGN, ..Default::default() });
+            let fd_file = {
+                let target_task = create_task(current_task.kernel(), "fd_reaped_target");
+                let target_pid = target_task.get_pid();
+                let fd_file = current_task
+                    .open_file(
+                        format!("/proc/{target_pid}/fd").as_str().into(),
+                        OpenFlags::RDONLY | OpenFlags::DIRECTORY,
+                    )
+                    .expect("open fd dir");
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+                fd_file
+            };
+            let mut sink = TestDirentSink::new(0, None);
+            assert_matches!(
+                fd_file.readdir(current_task, &mut sink),
+                Err(e) if e == errno!(ENOENT)
+            );
+            assert!(sink.entries.is_empty());
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_proc_pid_directory_cache_cleared_on_exit() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let task = create_task(current_task.kernel(), "test-task");
+            let _entry = lookup_no_follow(&task, "/proc/self/stat").expect("lookup stat");
+            let running_state = Arc::clone(task.running_state());
+            assert!(running_state.proc_pid_directory_cache.lock().is_some());
+            drop(task);
+            assert!(running_state.proc_pid_directory_cache.lock().is_none());
+            // Dropping `TaskRunningState` on a non-task thread after the task has exited must not
+            // panic in the delayed releaser.
+            std::thread::spawn(move || {
+                drop(running_state);
+            })
+            .join()
+            .expect("join thread");
+        })
+        .await;
+    }
+
+    /// Returns the path of `name` in `current_task`'s own `/proc/<pid>` directory.
+    fn own_proc_path(current_task: &CurrentTask, name: &str) -> String {
+        format!("/proc/{}/{name}", current_task.get_pid())
+    }
+
+    /// Adds a file opened with `flags` to `current_task`'s FD table and returns its FD.
+    fn add_test_fd(current_task: &CurrentTask, flags: OpenFlags) -> FdNumber {
+        let file = anon_test_file(current_task, Box::new(BytesFile::new(vec![])), flags);
+        current_task.files().add(current_task, file, FdFlags::empty()).expect("add fd")
+    }
+
+    /// Makes `fd` refer to a new file opened with `flags`, and returns that file.
+    fn replace_test_fd(current_task: &CurrentTask, fd: FdNumber, flags: OpenFlags) -> FileHandle {
+        let file = anon_test_file(current_task, Box::new(BytesFile::new(vec![])), flags);
+        current_task.files().insert(current_task, fd, file.clone()).expect("insert fd");
+        file
+    }
+
+    /// Looks up `/proc/<pid>/fd/<fd>` for a new `O_RDONLY` FD, makes the FD refer to a file opened
+    /// with `flags` while holding the entry, and returns the mode of the entry that a second
+    /// lookup returns.
+    fn fd_mode_after_replace(current_task: &CurrentTask, flags: OpenFlags) -> FileMode {
+        let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+        let path = own_proc_path(current_task, &format!("fd/{}", fd.raw()));
+        let _held = lookup_no_follow(current_task, &path).expect("lookup fd");
+        replace_test_fd(current_task, fd, flags);
+        lookup_no_follow(current_task, &path).expect("re-lookup fd").entry.node.info().mode
+    }
+
+    #[::fuchsia::test]
+    async fn test_fd_entry_reused_after_fd_replace() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+            let path = own_proc_path(current_task, &format!("fd/{}", fd.raw()));
+            let held = lookup_no_follow(current_task, &path).expect("lookup fd");
+            replace_test_fd(current_task, fd, OpenFlags::RDWR);
+            let relookup = lookup_no_follow(current_task, &path).expect("re-lookup fd");
+            assert!(Arc::ptr_eq(&held.entry, &relookup.entry));
+        })
+        .await;
+    }
+
+    #[test_case(OpenFlags::RDWR, mode!(IFLNK, 0o700); "rdwr")]
+    #[test_case(OpenFlags::PATH, mode!(IFLNK, 0o000); "opath")]
+    #[::fuchsia::test]
+    async fn test_fd_entry_mode_follows_replaced_file(flags: OpenFlags, expected: FileMode) {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            assert_eq!(fd_mode_after_replace(current_task, flags), expected);
+        })
+        .await;
+    }
+
+    #[test_case("fd")]
+    #[test_case("fdinfo")]
+    #[::fuchsia::test]
+    async fn test_fd_dir_entry_relookup_after_close_fails(dir: &'static str) {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+            let path = own_proc_path(current_task, &format!("{dir}/{}", fd.raw()));
+            let _held = lookup_no_follow(current_task, &path).expect("lookup entry");
+            current_task.files().close(fd).expect("close fd");
+            assert_matches!(lookup_no_follow(current_task, &path), Err(e) if e == errno!(ENOENT));
+        })
+        .await;
+    }
+
+    /// Creates a task with an open FD, looks up `/proc/<pid>/<subpath>` while it is alive, and
+    /// exits the task (reaping it when `reap` is true, or leaving it as an unreaped zombie
+    /// otherwise), returning the held [`NamespaceNode`] and the FD number.
+    fn lookup_before_task_exit(
+        current_task: &CurrentTask,
+        reap: bool,
+        subpath: impl FnOnce(FdNumber) -> String,
+    ) -> (NamespaceNode, FdNumber) {
+        if reap {
+            current_task
+                .thread_group()
+                .signal_actions
+                .set(SIGCHLD, sigaction_t { sa_handler: SIG_IGN, ..Default::default() });
+        }
+        let target_task = create_task(current_task.kernel(), "exited_target");
+        let fd = add_test_fd(&target_task, OpenFlags::RDONLY);
+        let path = format!("/proc/{}/{}", target_task.get_pid(), subpath(fd));
+        let held = lookup_no_follow(current_task, &path).expect("lookup before exit");
+        target_task.write().set_exiting(ExitStatus::Exit(0));
+        (held, fd)
+    }
+
+    #[test_case("fd", false; "fd_zombie")]
+    #[test_case("fdinfo", false; "fdinfo_zombie")]
+    #[test_case("fd", true; "fd_reaped")]
+    #[test_case("fdinfo", true; "fdinfo_reaped")]
+    #[::fuchsia::test]
+    async fn test_fd_dir_lookup_exited_task_returns_enoent(dir: &'static str, reap: bool) {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let (held_dir, fd) = lookup_before_task_exit(current_task, reap, |_| dir.to_string());
+            let fd_name = fd.raw().to_string();
+            assert_matches!(
+                held_dir.lookup_child(
+                    current_task,
+                    &mut LookupContext::default(),
+                    fd_name.as_str().into(),
+                ),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    #[test_case(false, errno!(ENOENT); "zombie")]
+    #[test_case(true, errno!(EACCES); "reaped")]
+    #[::fuchsia::test]
+    async fn test_fd_symlink_readlink_exited_task(reap: bool, expected: Errno) {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let (held_link, _fd) =
+                lookup_before_task_exit(current_task, reap, |fd| format!("fd/{}", fd.raw()));
+            assert_matches!(held_link.readlink(current_task), Err(e) if e == expected);
+        })
+        .await;
+    }
+
+    /// Looks up `path`, changes the creds with `set_distinct_creds` while holding the entry, and
+    /// returns the owner of the entry that a second lookup returns, without refreshing it on stat.
+    fn owner_after_relookup(current_task: &CurrentTask, path: &str) -> (uid_t, gid_t) {
+        let _held = lookup_no_follow(current_task, path).expect(path);
+        set_distinct_creds(current_task);
+        owner(&lookup_no_follow(current_task, path).expect(path))
+    }
+
+    #[test_case("stat"; "pid_stat")]
+    #[test_case("fd"; "fd_dir")]
+    #[test_case("ns/mnt"; "ns_link")]
+    #[test_case("attr/current"; "attr_entry")]
+    #[::fuchsia::test]
+    async fn test_pid_entry_owner_refreshes_on_relookup(subpath: &'static str) {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let path = own_proc_path(current_task, subpath);
+            assert_eq!(owner_after_relookup(current_task, &path), (2000, 2001));
+        })
+        .await;
+    }
+
+    #[test_case("fd")]
+    #[test_case("fdinfo")]
+    #[::fuchsia::test]
+    async fn test_fd_dir_entry_owner_refreshes_on_relookup(dir: &'static str) {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+            let path = own_proc_path(current_task, &format!("{dir}/{}", fd.raw()));
+            assert_eq!(owner_after_relookup(current_task, &path), (2000, 2001));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_tid_dir_child_owner_refreshes_on_relookup() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let path =
+                own_proc_path(current_task, &format!("task/{}/stat", current_task.get_tid()));
+            assert_eq!(owner_after_relookup(current_task, &path), (2000, 2001));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_ns_target_owner_stays_root_on_relookup() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let ns_id = current_task.fs().namespace().id;
+            let path = own_proc_path(current_task, &format!("ns/mnt:[{ns_id}]"));
+            assert_eq!(owner_after_relookup(current_task, &path), (0, 0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_tid_entry_relookup_after_thread_exit_fails() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let (tid_path, _held) = {
+                let thread = current_task
+                    .clone_task_for_test((CLONE_THREAD | CLONE_VM | CLONE_SIGHAND) as u64, None);
+                let tid_path = own_proc_path(current_task, &format!("task/{}", thread.get_tid()));
+                let held = lookup_no_follow(current_task, &tid_path).expect("lookup tid");
+                thread.write().set_exiting(ExitStatus::Exit(0));
+                (tid_path, held)
+            };
+            // The process is still alive, so this fails only if the entry has thread-scoped ops.
+            assert_matches!(
+                lookup_no_follow(current_task, &tid_path),
+                Err(e) if e == errno!(ENOENT)
+            );
+        })
+        .await;
+    }
+
+    fn hidepid_invisible_options() -> FileSystemOptions {
+        let params = MountParams::parse(b"hidepid=invisible".into()).expect("parse mount params");
+        FileSystemOptions { params, ..Default::default() }
+    }
+
+    #[::fuchsia::test]
+    async fn test_hidepid_invisible_hides_held_pid_dir() {
+        spawn_kernel_with_procfs_and_options(
+            KernelFeatures::default(),
+            hidepid_invisible_options(),
+            async move |current_task| {
+                let target_task = create_task(current_task.kernel(), "hidden_target");
+                let path = format!("/proc/{}", target_task.get_pid());
+                let _held = lookup_no_follow(current_task, &path).expect("lookup pid dir");
+                current_task.set_creds(Credentials::with_ids(1000, 1000));
+                assert_matches!(
+                    lookup_no_follow(current_task, &path),
+                    Err(e) if e == errno!(ENOENT)
+                );
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+            },
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_proc_self() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            assert_cached_lookup(current_task, "/proc/self");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_proc_self_resolves_per_task() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            // Cache `/proc/self` and this task's `/proc/<pid>` subtree.
+            assert_cached_lookup(current_task, "/proc/self");
+            current_task.lookup_path_from_root("/proc/self/stat".into()).expect("own stat");
+            let child = current_task.clone_task_for_test(0, Some(SIGCHLD));
+            let resolved = child.lookup_path_from_root("/proc/self".into()).expect("child self");
+            let own_dir = lookup_no_follow(&child, &format!("/proc/{}", child.get_pid()))
+                .expect("child pid dir");
+            assert!(Arc::ptr_eq(&resolved.entry, &own_dir.entry));
+            child.write().set_exiting(ExitStatus::Exit(0));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_fd_entry_retained_across_fd_replace() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+            let path = own_proc_path(current_task, &format!("fd/{}", fd.raw()));
+            let weak = Arc::downgrade(&assert_cached_lookup(current_task, &path).entry);
+            replace_test_fd(current_task, fd, OpenFlags::RDWR);
+            let relookup = lookup_no_follow(current_task, &path).expect("re-lookup fd");
+            assert!(Arc::ptr_eq(&weak.upgrade().expect("retained"), &relookup.entry));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_fd_readlink_follows_replaced_file() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+            let path = own_proc_path(current_task, &format!("fd/{}", fd.raw()));
+            assert_cached_lookup(current_task, &path);
+            let file = replace_test_fd(current_task, fd, OpenFlags::RDWR);
+            let entry = lookup_no_follow(current_task, &path).expect("re-lookup fd");
+            assert_matches!(
+                entry.readlink(current_task).expect("readlink"),
+                SymlinkTarget::Node(target) if Arc::ptr_eq(&target.entry, &file.name.entry)
+            );
+        })
+        .await;
+    }
+
+    #[test_case("fd")]
+    #[test_case("fdinfo")]
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_fd_close_evicts_entry(dir: &'static str) {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+            let path = own_proc_path(current_task, &format!("{dir}/{}", fd.raw()));
+            let close = || current_task.files().close(fd).expect("close fd");
+            assert!(!cached_entry_survives(current_task, &path, close));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_fd_dir_owner_refreshes_after_setuid() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            let path = own_proc_path(current_task, "fd");
+            assert_cached_lookup(current_task, &path);
+            set_distinct_creds(current_task);
+            assert_eq!(owner(&lookup_no_follow(current_task, &path).expect("fd")), (2000, 2001));
+        })
+        .await;
+    }
+
+    /// Caches `<task_dir>/fd/<n>` as root, drops all capabilities with `set_creds` while keeping
+    /// the task dumpable, and returns the result of walking `<task_dir>/fd/<n>` again through the
+    /// cached `0500` `fd` directory.
+    fn lookup_cached_fd_after_privilege_drop(
+        current_task: &CurrentTask,
+        task_dir: &str,
+    ) -> Result<NamespaceNode, Errno> {
+        let fd = add_test_fd(current_task, OpenFlags::RDONLY);
+        let path = format!("{task_dir}/fd/{}", fd.raw());
+        assert_cached_lookup(current_task, &path);
+        current_task.set_creds(Credentials::with_ids(1000, 1000));
+        current_task.mm().expect("mm").dumpable.store(DumpPolicy::User);
+        lookup_no_follow(current_task, &path)
+    }
+
+    #[test_case("/proc/self"; "proc_self")]
+    #[test_case("/proc/thread-self"; "proc_thread_self")]
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_fd_traversal_after_setuid(task_dir: &'static str) {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            assert_matches!(lookup_cached_fd_after_privilege_drop(current_task, task_dir), Ok(_));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_unshare_evicts_stale_ns_target() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            let old_id = current_task.fs().namespace().id;
+            let path = own_proc_path(current_task, &format!("ns/mnt:[{old_id}]"));
+            let unshare = || current_task.fs().unshare_namespace();
+            assert!(!cached_entry_survives(current_task, &path, unshare));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_task_exit_evicts_pid_entry() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            // Auto-reap child tasks when they exit so dropping AutoReleasableTask reaps them.
+            current_task
+                .thread_group()
+                .signal_actions
+                .set(SIGCHLD, sigaction_t { sa_handler: SIG_IGN, ..Default::default() });
+            let target_task = create_task(current_task.kernel(), "exit_target");
+            let path = format!("/proc/{}", target_task.get_pid());
+            // Moving `target_task` into the closure reaps it when the closure returns.
+            let exit = move || target_task.write().set_exiting(ExitStatus::Exit(0));
+            assert!(!cached_entry_survives(current_task, &path, exit));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_thread_exit_evicts_tid_entry() {
+        spawn_kernel_with_cached_procfs(async move |current_task| {
+            let thread = current_task
+                .clone_task_for_test((CLONE_THREAD | CLONE_VM | CLONE_SIGHAND) as u64, None);
+            let path = own_proc_path(current_task, &format!("task/{}", thread.get_tid()));
+            let exit = move || thread.write().set_exiting(ExitStatus::Exit(0));
+            assert!(!cached_entry_survives(current_task, &path, exit));
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_procfs_dcache_hidepid_invisible_hides_cached_pid_dir() {
+        spawn_kernel_with_cached_procfs_and_options(
+            hidepid_invisible_options(),
+            async move |current_task| {
+                let target_task = create_task(current_task.kernel(), "hidden_target");
+                let path = format!("/proc/{}", target_task.get_pid());
+                assert_cached_lookup(current_task, &path);
+                current_task.set_creds(Credentials::with_ids(1000, 1000));
+                assert_matches!(lookup_no_follow(current_task, &path), Err(e) if e == errno!(ENOENT));
+                target_task.write().set_exiting(ExitStatus::Exit(0));
+            },
+        )
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_kthread_stat_and_status_report_sleeping() {
+        spawn_kernel_and_run(async move |current_task| {
+            let (task_sender, task_receiver) = std::sync::mpsc::channel();
+            let (release_sender, release_receiver) = std::sync::mpsc::channel::<()>();
+            let req = SpawnRequestBuilder::new()
+                .with_sync_closure(move |kthread| {
+                    task_sender.send(kthread.weak_task()).unwrap();
+                    let _ = release_receiver.recv();
+                })
+                .build();
+            current_task.kernel().kthreads.spawner().spawn_from_request(req);
+
+            let task = task_receiver.recv().unwrap().upgrade().expect("kthread is alive");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while task.state_code() != TaskStateCode::Sleeping
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            let target = TaskContainer::from_task(&task);
+            let stat_file = anon_test_file(
+                current_task,
+                Box::new(DynamicFile::new(StatFile { target: target.clone() })),
+                OpenFlags::RDONLY,
+            );
+            let status_file = anon_test_file(
+                current_task,
+                Box::new(DynamicFile::new(StatusFile { target })),
+                OpenFlags::RDONLY,
+            );
+
+            let mut stat_buf = VecOutputBuffer::new(512);
+            let stat_n = stat_file.read_at(current_task, 0, &mut stat_buf).expect("read stat");
+            let stat_text = std::str::from_utf8(&stat_buf.data()[..stat_n]).unwrap().to_string();
+
+            let mut status_buf = VecOutputBuffer::new(2048);
+            let status_n =
+                status_file.read_at(current_task, 0, &mut status_buf).expect("read status");
+            let status_text =
+                std::str::from_utf8(&status_buf.data()[..status_n]).unwrap().to_string();
+
+            let _ = release_sender.send(());
+            assert!(stat_text.contains(") S "), "{stat_text:?}");
+            assert!(status_text.lines().any(|l| l == "State:\tS (sleeping)"), "{status_text:?}");
+        })
+        .await;
+    }
+
+    #[::fuchsia::test]
+    async fn test_proc_stat_preserves_tty_nr_for_non_leader_zombie() {
+        spawn_kernel_with_procfs(KernelFeatures::default(), async move |current_task| {
+            let tty_state = Arc::new(TtyState::default());
+            let terminal = tty_state
+                .get_next_terminal(current_task.fs().root().entry.clone(), FsCred::root())
+                .expect("get_next_terminal");
+            let expected_tty_nr = terminal.device().bits() as i32;
+
+            let leader = create_task(current_task.kernel(), "leader");
+            leader
+                .thread_group()
+                .set_controlling_terminal(&leader, &terminal, TerminalSide::Replica, false, true)
+                .expect("set_controlling_terminal");
+
+            let child = leader.clone_task_for_test(0, Some(SIGCHLD));
+            let child_pid = child.get_pid();
+            let child_tg = Arc::clone(child.thread_group());
+            // Drop the child so it exits and remains an unreaped zombie under `leader`.
+            std::mem::drop(child);
+            assert!(child_tg.controlling_terminal().is_none());
+
+            let stat_file = current_task
+                .open_file(format!("/proc/{child_pid}/stat").as_str().into(), OpenFlags::RDONLY)
+                .expect("open zombie stat");
+            let mut buf = VecOutputBuffer::new(1024);
+            let n = stat_file.read_at(current_task, 0, &mut buf).expect("read zombie stat");
+            let text = String::from_utf8(buf.data()[..n].to_vec()).expect("utf8");
+            // Fields after ") " start at field 3 (state), so index 4 is field 7 (tty_nr).
+            let after_comm = text.rsplit_once(") ").expect("stat comm").1;
+            let fields: Vec<&str> = after_comm.split_whitespace().collect();
+            assert_eq!(fields[0], "Z");
+            assert_eq!(fields[4].parse::<i32>().expect("tty_nr"), expected_tty_nr);
+
+            std::mem::drop(child_tg);
+            std::mem::drop(leader);
         })
         .await;
     }

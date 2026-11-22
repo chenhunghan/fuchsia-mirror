@@ -374,6 +374,7 @@
             "memory_monitor.cm",
             "memory_monitor2.cm",
             "memory_pressure_signaler.cm",
+            "memory_sampler.cm",
         ],
         vmo: [],
         event_code: 86,

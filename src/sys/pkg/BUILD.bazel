@@ -15,9 +15,22 @@ exports_files(
 )
 
 test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/sys/pkg/testing/mock-omaha-server-fuchsia:tests",
+        "//src/sys/pkg/tests/null-update-checker:tests",
+        "//src/sys/pkg/tests/system-update-checker:tests",
+        "//src/sys/pkg/tests/system-update-committer:tests",
+    ],
+)
+
+test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//src/sys/pkg/bin/package-tool:package-tool_test",
+        "//src/sys/pkg/lib/fuchsia-merkle:host_tests",
+        "//src/sys/pkg/lib/fuchsia-repo:host_tests",
     ],
 )

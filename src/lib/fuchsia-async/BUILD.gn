@@ -4,11 +4,11 @@
 
 import("//build/components.gni")
 import("//build/product.gni")
-import("//build/rust/rustc_binary.gni")
-import("//build/rust/rustc_library.gni")
 import("//build/testing/environments.gni")
-import("//build/testing/host_test.gni")
 
+# Kept in GN above the sentinel because
+# `//src/connectivity/network/netstack3:package-for-tests` is not yet migrated
+# to Bazel.
 fuchsia_unittest_package("fuchsia-async-tests") {
   manifest = "meta/fuchsia_async_lib_test.cml"
   deps = [ ":fuchsia-async_test" ]
@@ -34,6 +34,11 @@ group("tests") {
     ":fuchsia-async-tests",
     ":fuchsia-async_test($host_toolchain)",
   ]
+}
+
+group("benchmarks") {
+  testonly = true
+  deps = [ "benchmarks" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -115,15 +120,7 @@ rustc_library("fuchsia-async") {
     link_deps = []
   }
   proc_macro_deps = [ "//src/lib/fuchsia-async-macro" ]
-  test_deps = []
-  test_deps += [ "//third_party/rust_crates:assert_matches" ]
-  if (is_fuchsia) {
-    test_deps += [
-      "//third_party/rust_crates:futures-test",
-      "//third_party/rust_crates:rand",
-    ]
-  }
-  with_unit_tests = true
+  visibility = [ "//*" ]
   deps = []
   deps += [
     "//src/lib/fuchsia-sync",
@@ -146,4 +143,90 @@ rustc_library("fuchsia-async") {
       "//third_party/rust_crates:tokio",
     ]
   }
+}
+
+rustc_test("fuchsia-async_test") {
+  sources = []
+  sources += [
+    "src/condition.rs",
+    "src/handle/mod.rs",
+    "src/lib.rs",
+    "src/net/mod.rs",
+    "src/runtime/epoch.rs",
+    "src/runtime/instrument.rs",
+    "src/runtime/mod.rs",
+    "src/runtime/scope.rs",
+    "src/test_support.rs",
+  ]
+  if (is_fuchsia) {
+    sources += [
+      "src/handle/zircon/channel.rs",
+      "src/handle/zircon/fifo.rs",
+      "src/handle/zircon/mod.rs",
+      "src/handle/zircon/on_interrupt.rs",
+      "src/handle/zircon/on_signals.rs",
+      "src/handle/zircon/rwhandle.rs",
+      "src/handle/zircon/socket.rs",
+      "src/net/fuchsia/mod.rs",
+      "src/net/fuchsia/tcp.rs",
+      "src/net/fuchsia/udp.rs",
+      "src/runtime/fuchsia/executor/atomic_future.rs",
+      "src/runtime/fuchsia/executor/atomic_future/hooks.rs",
+      "src/runtime/fuchsia/executor/atomic_future/spawnable_future.rs",
+      "src/runtime/fuchsia/executor/common.rs",
+      "src/runtime/fuchsia/executor/local.rs",
+      "src/runtime/fuchsia/executor/mod.rs",
+      "src/runtime/fuchsia/executor/packets.rs",
+      "src/runtime/fuchsia/executor/scope.rs",
+      "src/runtime/fuchsia/executor/send.rs",
+      "src/runtime/fuchsia/executor/time.rs",
+      "src/runtime/fuchsia/mod.rs",
+      "src/runtime/fuchsia/task.rs",
+      "src/runtime/fuchsia/timer.rs",
+    ]
+  } else {
+    sources += [
+      "src/net/portable/mod.rs",
+      "src/net/portable/udp.rs",
+      "src/runtime/portable.rs",
+      "src/runtime/portable/scope.rs",
+    ]
+  }
+  edition = "2024"
+  if (is_fuchsia) {
+    link_deps = [ "//sdk/lib/fdio" ]
+  } else {
+    link_deps = []
+  }
+  proc_macro_deps = [ "//src/lib/fuchsia-async-macro" ]
+  deps = []
+  deps += [
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates:futures",
+    "//third_party/rust_crates:pin-project-lite",
+    "//third_party/rust_crates:smallvec",
+  ]
+  if (is_fuchsia) {
+    deps += [
+      "//sdk/rust/zx",
+      "//third_party/rust_crates:crossbeam",
+      "//third_party/rust_crates:libc",
+      "//third_party/rust_crates:rustc-hash",
+      "//third_party/rust_crates:socket2",
+      "//third_party/rust_crates:zerocopy",
+    ]
+  } else {
+    deps += [
+      "//third_party/rust_crates:futures-lite",
+      "//third_party/rust_crates:tokio",
+    ]
+  }
+  deps += [ "//third_party/rust_crates:assert_matches" ]
+  if (is_fuchsia) {
+    deps += [
+      "//third_party/rust_crates:futures-test",
+      "//third_party/rust_crates:rand",
+    ]
+  }
+  output_name = "fuchsia_async_lib_test"
 }

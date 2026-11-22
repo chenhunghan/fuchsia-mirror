@@ -1,0 +1,9 @@
+# Verify AnyParameter rejects a partially initialized scalar.
+-- asm
+or %r3, 1
+mov %r1, %r3
+call 112
+mov %r0, 0
+exit
+-- error
+invalid parameter for helper at index 0

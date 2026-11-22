@@ -9,8 +9,9 @@ use capability_source::CapabilitySource;
 use cm_rust::{CapabilityTypeName, FidlIntoNative, GenericRef, NativeIntoFidl};
 use cm_rust_derive as _;
 use cm_types::RelativePath;
-use fidl_fuchsia_component_runtime as fruntime;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_runtime_common as fruntime;
+use fidl_fuchsia_io_common as fio;
 use moniker::{ChildName, Moniker};
 use router_error::RouterError;
 use runtime_capabilities::{
@@ -183,9 +184,12 @@ impl IntermediateRouter {
             }
             CapabilityTypeName::EventStream => {
                 match (event_stream_scope_moniker, event_stream_scope) {
-                    (Some(moniker), Some(scope)) => TypeSpecificProperties::EventStream(Box::new(
-                        EventStreamProperties { moniker, scope },
-                    )),
+                    (Some(moniker), Some(scope)) => {
+                        TypeSpecificProperties::EventStream(Box::new(EventStreamProperties {
+                            moniker,
+                            scope,
+                        }))
+                    }
                     (None, None) => TypeSpecificProperties::None,
                     _ => panic!(
                         "event_stream_scope_moniker and event_stream_scope must both be Some or both be None"
@@ -486,12 +490,12 @@ impl IntermediateRouter {
         let Some(default_availability) = self.availability else {
             return Ok(());
         };
-        let request_availability: fidl_fuchsia_component_decl::Availability = *request
-            .availability
-            .as_ref()
-            .ok_or_else(|| RoutingError::RouteRequestMissingField {
-                moniker: self.moniker.clone().into(),
-                missing_field: "availability".to_string(),
+        let request_availability: fdecl::Availability =
+            *request.availability.as_ref().ok_or_else(|| {
+                RoutingError::RouteRequestMissingField {
+                    moniker: self.moniker.clone().into(),
+                    missing_field: "availability".to_string(),
+                }
             })?;
         let request_availability: cm_rust::Availability = request_availability.fidl_into_native();
         let new_availability = crate::availability::advance(

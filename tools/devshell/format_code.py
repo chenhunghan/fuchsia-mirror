@@ -41,6 +41,15 @@ def _parse_args(
         help="Format all tracked files in the repository.",
     )
     parser.add_argument(
+        "--all-repositories",
+        dest="all_repos",
+        action="store_true",
+        help=(
+            "Run in every active repository in the checkout, not only the"
+            " one enclosing the current directory."
+        ),
+    )
+    parser.add_argument(
         "--only",
         action="append",
         default=[],
@@ -70,6 +79,12 @@ def _parse_args(
         action="store_true",
         help="Print shac commands without executing.",
     )
+    # TODO(b/584784107): Remove this shim and the check below after 2027-03-31.
+    parser.add_argument(
+        "--args",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
         "files",
         nargs="*",
@@ -79,10 +94,18 @@ def _parse_args(
     if "--" in argv:
         sep_index = argv.index("--")
         args, extra_args = parser.parse_known_args(argv[:sep_index])
-        return args, (*extra_args, *argv[sep_index + 1 :])
+        shac_args = (*extra_args, *argv[sep_index + 1 :])
+    else:
+        args, extra_args = parser.parse_known_args(argv)
+        shac_args = tuple(extra_args)
 
-    args, extra_args = parser.parse_known_args(argv)
-    return args, tuple(extra_args)
+    if args.args:
+        parser.error(
+            "the '--args' flag is retired; run"
+            " 'fx gn format out/default/args.gn' instead."
+        )
+
+    return args, shac_args
 
 
 def main(argv: Sequence[str]) -> None:
@@ -117,6 +140,7 @@ def main(argv: Sequence[str]) -> None:
         build_dir,
         cwd,
         all_files=args.all,
+        all_repos=args.all_repos,
         only_checks=only_checks,
         skip_checks=skip_checks,
         explicit_files=explicit_files,

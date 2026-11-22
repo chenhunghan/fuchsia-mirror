@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
 load(
     "//build/bazel/rules/components:fx_component.bzl",
@@ -25,19 +26,36 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
+cml_shard(
+    name = "lib.shard",
+    shard = "lib.shard.cml",
+    visibility = ["//src/sys/test_runners:__subpackages__"],
+)
+
+exports_files(
+    ["lib.shard.cml"],
+    visibility = ["//src/sys/test_runners:__subpackages__"],
+)
+
 exports_files(
     ["tmp_storage.shard.cml"],
     visibility = [
         "//examples/components/storage:__pkg__",
         "//examples/tests/rust:__pkg__",
         "//src/connectivity/bluetooth/core/bt-gap:__pkg__",
+        "//src/developer/zxsh:__pkg__",
         "//src/diagnostics/lib/sampler-config:__pkg__",
+        "//src/diagnostics/log_listener:__pkg__",
         "//src/lib/files:__pkg__",
+        "//src/lib/fxl:__pkg__",
         "//src/media/audio/lib/wav:__pkg__",
+        "//src/media/audio/services/ffxdaemon:__pkg__",
+        "//src/settings/light:__pkg__",
         "//src/settings/storage:__pkg__",
         "//src/sys/component_manager/lib/builtins:__pkg__",
         "//src/sys/fuzzing/common:__pkg__",
         "//src/sys/fuzzing/fuzzctl:__pkg__",
+        "//src/sys/lib/elf_runner:__pkg__",
         "//src/sys/pkg/bin/system-update-checker:__pkg__",
         "//src/sys/pkg/bin/system-updater:__pkg__",
         "//src/sys/pkg/lib/eager-package-config:__pkg__",
@@ -50,9 +68,14 @@ exports_files(
         "//src/sys/pkg/lib/update-package:__pkg__",
         "//src/sys/pkg/testing/mock-resolver:__pkg__",
         "//src/sys/pkg/tests/far:__pkg__",
+        "//src/sys/pkg/tests/pkgdir/test_realm_proxy:__pkg__",
+        "//src/sys/pkg/tests/system-update-checker:__pkg__",
+        "//src/sys/pkg/tests/system-update-committer:__pkg__",
         "//src/sys/run_test_suite:__subpackages__",
         "//src/sys/test_manager/debug_data_processor:__pkg__",
-        "//src/zircon/bin/zxsh:__pkg__",
+        "//src/sys/test_runners/gunit:__pkg__",
+        "//src/virtualization/bin/vmm/device:__pkg__",
+        "//zircon/system/ulib/debugdata/test:__pkg__",
     ],
 )
 
@@ -229,6 +252,7 @@ fx_component_manifest(
 filegroup(
     name = "test-with-process-launcher",
     testonly = True,
+    visibility = ["//src/sys/test_runners:__subpackages__"],
 )
 
 fx_test_component(

@@ -565,13 +565,13 @@ class StatusUnion final {
   static StatusUnion WithStatusArray(::std::array<int32_t, 10>&&);
   static StatusUnion WithStatusVector(::std::vector<int32_t>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
     kStatusVector = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<StatusUnion> New();
@@ -623,7 +623,7 @@ class StatusUnion final {
     return status_vector_;
   }
   StatusUnion& set_status_vector(::std::vector<int32_t> value);
-  StatusUnion& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  StatusUnion& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::zxtypes::StatusUnion::Tag Which() const {
     switch (tag_) {
@@ -639,7 +639,7 @@ class StatusUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -653,9 +653,9 @@ class StatusUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::StatusUnion::Tag::Invalid);
   union {
     int32_t status_;
     ::std::array<int32_t, 10> status_array_;
@@ -685,13 +685,13 @@ class StatusUnionAlias final {
   static StatusUnionAlias WithStatusArray(::std::array<int32_t, 10>&&);
   static StatusUnionAlias WithStatusVector(::std::vector<int32_t>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
     kStatusVector = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<StatusUnionAlias> New();
@@ -743,7 +743,7 @@ class StatusUnionAlias final {
     return status_vector_;
   }
   StatusUnionAlias& set_status_vector(::std::vector<int32_t> value);
-  StatusUnionAlias& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  StatusUnionAlias& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::zxtypes::StatusUnionAlias::Tag Which() const {
     switch (tag_) {
@@ -759,7 +759,7 @@ class StatusUnionAlias final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -773,9 +773,9 @@ class StatusUnionAlias final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusUnionAlias::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::StatusUnionAlias::Tag::Invalid);
   union {
     int32_t status_;
     ::std::array<int32_t, 10> status_array_;
@@ -856,12 +856,12 @@ class StatusProtocol_A_Result final {
   static StatusProtocol_A_Result WithErr(int32_t&&);
   static StatusProtocol_A_Result WithFrameworkErr(::fidl::FrameworkErr&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<StatusProtocol_A_Result> New();
@@ -920,7 +920,7 @@ class StatusProtocol_A_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -952,9 +952,9 @@ class StatusProtocol_A_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusProtocol_A_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::StatusProtocol_A_Result::Tag::Invalid);
   union {
     ::test::zxtypes::StatusProtocol_A_Response response_;
     int32_t err_;
@@ -1034,12 +1034,12 @@ class StatusProtocol_B_Result final {
   static StatusProtocol_B_Result WithErr(int32_t&&);
   static StatusProtocol_B_Result WithFrameworkErr(::fidl::FrameworkErr&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<StatusProtocol_B_Result> New();
@@ -1098,7 +1098,7 @@ class StatusProtocol_B_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1130,9 +1130,9 @@ class StatusProtocol_B_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusProtocol_B_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::StatusProtocol_B_Result::Tag::Invalid);
   union {
     ::test::zxtypes::StatusProtocol_B_Response response_;
     int32_t err_;
@@ -1546,13 +1546,13 @@ class ResultUnion final {
   static ResultUnion WithResultArray(::std::array<int32_t, 10>&&);
   static ResultUnion WithResultVector(::std::vector<int32_t>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
     kResultVector = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ResultUnion> New();
@@ -1604,7 +1604,7 @@ class ResultUnion final {
     return result_vector_;
   }
   ResultUnion& set_result_vector(::std::vector<int32_t> value);
-  ResultUnion& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  ResultUnion& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::zxtypes::ResultUnion::Tag Which() const {
     switch (tag_) {
@@ -1620,7 +1620,7 @@ class ResultUnion final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -1634,9 +1634,9 @@ class ResultUnion final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultUnion::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::ResultUnion::Tag::Invalid);
   union {
     int32_t result_;
     ::std::array<int32_t, 10> result_array_;
@@ -1666,13 +1666,13 @@ class ResultUnionAlias final {
   static ResultUnionAlias WithResultArray(::std::array<int32_t, 10>&&);
   static ResultUnionAlias WithResultVector(::std::vector<int32_t>&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
     kUnknown = 0,
 
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
     kResultVector = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ResultUnionAlias> New();
@@ -1724,7 +1724,7 @@ class ResultUnionAlias final {
     return result_vector_;
   }
   ResultUnionAlias& set_result_vector(::std::vector<int32_t> value);
-  ResultUnionAlias& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  ResultUnionAlias& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::zxtypes::ResultUnionAlias::Tag Which() const {
     switch (tag_) {
@@ -1740,7 +1740,7 @@ class ResultUnionAlias final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -1754,9 +1754,9 @@ class ResultUnionAlias final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultUnionAlias::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::ResultUnionAlias::Tag::Invalid);
   union {
     int32_t result_;
     ::std::array<int32_t, 10> result_array_;
@@ -1837,12 +1837,12 @@ class ResultProtocol_A_Result final {
   static ResultProtocol_A_Result WithErr(int32_t&&);
   static ResultProtocol_A_Result WithFrameworkErr(::fidl::FrameworkErr&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ResultProtocol_A_Result> New();
@@ -1901,7 +1901,7 @@ class ResultProtocol_A_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1933,9 +1933,9 @@ class ResultProtocol_A_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultProtocol_A_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::ResultProtocol_A_Result::Tag::Invalid);
   union {
     ::test::zxtypes::ResultProtocol_A_Response response_;
     int32_t err_;
@@ -2015,12 +2015,12 @@ class ResultProtocol_B_Result final {
   static ResultProtocol_B_Result WithErr(int32_t&&);
   static ResultProtocol_B_Result WithFrameworkErr(::fidl::FrameworkErr&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ResultProtocol_B_Result> New();
@@ -2079,7 +2079,7 @@ class ResultProtocol_B_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -2111,9 +2111,9 @@ class ResultProtocol_B_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultProtocol_B_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::zxtypes::ResultProtocol_B_Result::Tag::Invalid);
   union {
     ::test::zxtypes::ResultProtocol_B_Response response_;
     int32_t err_;
@@ -2386,7 +2386,7 @@ struct Equality<::test::zxtypes::StatusTableAlias> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::StatusUnion> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::StatusUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::StatusUnion>
@@ -2398,9 +2398,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::StatusUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::StatusUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2430,7 +2430,7 @@ struct Equality<::test::zxtypes::StatusUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::StatusUnion::Tag::Invalid):
         return true;
       case ::test::zxtypes::StatusUnion::Tag::kStatus:
         return ::fidl::Equals(_lhs.status_, _rhs.status_);
@@ -2444,7 +2444,7 @@ struct Equality<::test::zxtypes::StatusUnion> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::StatusUnionAlias> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::StatusUnionAlias> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::StatusUnionAlias>
@@ -2456,9 +2456,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::StatusUnionAlias>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::StatusUnionAlias>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2488,7 +2488,7 @@ struct Equality<::test::zxtypes::StatusUnionAlias> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusUnionAlias::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::StatusUnionAlias::Tag::Invalid):
         return true;
       case ::test::zxtypes::StatusUnionAlias::Tag::kStatus:
         return ::fidl::Equals(_lhs.status_, _rhs.status_);
@@ -2546,7 +2546,7 @@ struct Equality<::test::zxtypes::StatusProtocol_A_Response> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::StatusProtocol_A_Result> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::StatusProtocol_A_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::StatusProtocol_A_Result>
@@ -2558,9 +2558,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::StatusProtocol_A_Result>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::StatusProtocol_A_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2590,7 +2590,7 @@ struct Equality<::test::zxtypes::StatusProtocol_A_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusProtocol_A_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::StatusProtocol_A_Result::Tag::Invalid):
         return true;
       case ::test::zxtypes::StatusProtocol_A_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -2649,7 +2649,7 @@ struct Equality<::test::zxtypes::StatusProtocol_B_Response> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::StatusProtocol_B_Result> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::StatusProtocol_B_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::StatusProtocol_B_Result>
@@ -2661,9 +2661,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::StatusProtocol_B_Result>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::StatusProtocol_B_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2693,7 +2693,7 @@ struct Equality<::test::zxtypes::StatusProtocol_B_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::StatusProtocol_B_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::StatusProtocol_B_Result::Tag::Invalid):
         return true;
       case ::test::zxtypes::StatusProtocol_B_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -2912,7 +2912,7 @@ struct Equality<::test::zxtypes::ResultTableAlias> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::ResultUnion> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::ResultUnion> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::ResultUnion>
@@ -2924,9 +2924,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::ResultUnion>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::ResultUnion>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2956,7 +2956,7 @@ struct Equality<::test::zxtypes::ResultUnion> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultUnion::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::ResultUnion::Tag::Invalid):
         return true;
       case ::test::zxtypes::ResultUnion::Tag::kResult:
         return ::fidl::Equals(_lhs.result_, _rhs.result_);
@@ -2970,7 +2970,7 @@ struct Equality<::test::zxtypes::ResultUnion> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::ResultUnionAlias> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::ResultUnionAlias> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::ResultUnionAlias>
@@ -2982,9 +2982,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::ResultUnionAlias>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::ResultUnionAlias>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -3014,7 +3014,7 @@ struct Equality<::test::zxtypes::ResultUnionAlias> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultUnionAlias::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::ResultUnionAlias::Tag::Invalid):
         return true;
       case ::test::zxtypes::ResultUnionAlias::Tag::kResult:
         return ::fidl::Equals(_lhs.result_, _rhs.result_);
@@ -3072,7 +3072,7 @@ struct Equality<::test::zxtypes::ResultProtocol_A_Response> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::ResultProtocol_A_Result> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::ResultProtocol_A_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::ResultProtocol_A_Result>
@@ -3084,9 +3084,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::ResultProtocol_A_Result>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::ResultProtocol_A_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -3116,7 +3116,7 @@ struct Equality<::test::zxtypes::ResultProtocol_A_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultProtocol_A_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::ResultProtocol_A_Result::Tag::Invalid):
         return true;
       case ::test::zxtypes::ResultProtocol_A_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -3175,7 +3175,7 @@ struct Equality<::test::zxtypes::ResultProtocol_B_Response> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::zxtypes::ResultProtocol_B_Result> : public std::true_type {};
+struct IsFidlUnion<::test::zxtypes::ResultProtocol_B_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::zxtypes::ResultProtocol_B_Result>
@@ -3187,9 +3187,9 @@ struct CodingTraits<std::unique_ptr<::test::zxtypes::ResultProtocol_B_Result>> {
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::zxtypes::ResultProtocol_B_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -3219,7 +3219,7 @@ struct Equality<::test::zxtypes::ResultProtocol_B_Result> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::zxtypes::ResultProtocol_B_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::zxtypes::ResultProtocol_B_Result::Tag::Invalid):
         return true;
       case ::test::zxtypes::ResultProtocol_B_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);

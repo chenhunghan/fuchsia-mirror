@@ -115,7 +115,7 @@ fn stringify_linear_histogram<T: Clone + std::fmt::Display + Zero>(
     values[1] = histogram.step;
     if let Some(indexes) = histogram.indexes {
         for (index, count) in indexes.iter().zip(histogram.counts) {
-            values[index + 2] = count.clone();
+            values[index + 2] = count;
         }
     } else {
         for (index, count) in histogram.counts.iter().enumerate() {
@@ -134,7 +134,7 @@ fn stringify_exponential_histogram<T: Clone + std::fmt::Display + Zero>(
     values[2] = histogram.step_multiplier;
     if let Some(indexes) = histogram.indexes {
         for (index, count) in indexes.iter().zip(histogram.counts) {
-            values[index + 3] = count.clone();
+            values[index + 3] = count;
         }
     } else {
         for (index, count) in histogram.counts.iter().enumerate() {
@@ -785,10 +785,10 @@ impl Data {
             return Err(format_err!("Internal error! Do not try to delete node 0."));
         }
         if let Some(node) = self.nodes.remove(&id) {
-            for child in node.children.clone().iter() {
+            for child in node.children.iter() {
                 self.make_tombstone_node(*child)?;
             }
-            for property in node.properties.clone().iter() {
+            for property in node.properties.iter() {
                 self.make_tombstone_property(*property)?;
             }
         } else {

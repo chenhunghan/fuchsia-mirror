@@ -43,6 +43,7 @@ class RuntimeDirHelper {
   void AddJobIdFile(zx_koid_t job);
 
   fidl::ClientEnd<fuchsia_io::Directory> GetScopedDirectoryHandle(zx_koid_t job);
+  void ServeScopedDirectory(zx_koid_t job, fidl::ServerEnd<fuchsia_io::Directory> server_end);
 
  private:
   async::Loop loop_;

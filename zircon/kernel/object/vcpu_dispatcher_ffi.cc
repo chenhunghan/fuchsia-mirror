@@ -7,13 +7,10 @@
 #include <zircon/errors.h>
 #include <zircon/types.h>
 
-#include <arch/hypervisor.h>
 #include <fbl/alloc_checker.h>
 #include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
-#include <ktl/unique_ptr.h>
 #include <ktl/utility.h>
-#include <object/guest_dispatcher.h>
 #include <object/handle.h>
 #include <object/vcpu_dispatcher.h>
 
@@ -22,11 +19,9 @@ extern "C" {
 zx_status_t cpp_vcpu_dispatcher_create(
     GuestDispatcher* guest_dispatcher_raw, Vcpu* vcpu_raw,
     ffi::Uninitialized<KernelHandle<VcpuDispatcher>>* handle_out) {
-  fbl::RefPtr<GuestDispatcher> guest_dispatcher = fbl::ImportFromRawPtr(guest_dispatcher_raw);
-  ktl::unique_ptr<Vcpu> vcpu(vcpu_raw);
+  // Ownership of `guest_dispatcher_raw` and `vcpu_raw` passes to the dispatcher only on success.
   fbl::AllocChecker ac;
-  KernelHandle new_handle(
-      fbl::AdoptRef(new (&ac) VcpuDispatcher(ktl::move(guest_dispatcher), ktl::move(vcpu))));
+  KernelHandle new_handle(fbl::AdoptRef(new (&ac) VcpuDispatcher(guest_dispatcher_raw, vcpu_raw)));
   if (!ac.check()) {
     return ZX_ERR_NO_MEMORY;
   }

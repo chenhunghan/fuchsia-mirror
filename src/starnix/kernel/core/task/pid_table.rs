@@ -636,12 +636,12 @@ impl PidTable {
         self.num_tasks.load(Ordering::Relaxed)
     }
 
-    /// Returns the process ids for all processes, including zombies.
-    pub fn process_ids(&self) -> Vec<pid_t> {
+    /// Returns the [`Pid`]s for all processes, including zombies.
+    pub fn process_ids(&self) -> Vec<Pid> {
         let scope = RcuReadScope::new();
         self.idr
             .iter(&scope)
-            .flat_map(|(_, entry)| entry.process.is_some(&scope).then_some(entry.id))
+            .flat_map(|(_, entry)| entry.process.is_some(&scope).then(|| entry.clone()))
             .collect()
     }
 

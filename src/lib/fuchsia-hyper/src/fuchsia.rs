@@ -7,10 +7,12 @@ use crate::{
     HyperConnectorFuture, SocketOptions, TcpOptions, TcpStream, connect_and_bind_device,
     parse_ip_addr,
 };
-use fidl::endpoints::{ClientEnd, create_endpoints};
+use fidl::endpoints::create_proxy;
 use fidl_connector::{Connect, ServiceReconnector};
 use fidl_fuchsia_net_name::{LookupIpOptions, LookupMarker, LookupProxy, LookupResult};
-use fidl_fuchsia_posix_socket::{Domain, ProviderMarker, StreamSocketProtocol};
+use fidl_fuchsia_net_policy_socketproxy as fnp_socketproxy;
+use fidl_fuchsia_net_resources as fnet_resources;
+use fidl_fuchsia_posix_socket::{Domain, ProviderMarker, ProviderProxy, StreamSocketProtocol};
 use fuchsia_async::net;
 
 use futures::future::{Future, FutureExt};
@@ -66,6 +68,54 @@ impl HyperConnector {
             provider: RealServiceConnector::new(),
         }
     }
+
+    pub(crate) fn from_options_and_provider(
+        tcp_options: TcpOptions,
+        socket_options: SocketOptions,
+        socket_provider: ProviderProxy,
+    ) -> Self {
+        Self {
+            tcp_options,
+            socket_options,
+            provider: RealServiceConnector::new_with_socket_provider(socket_provider),
+        }
+    }
+}
+
+/// Connects to a socket provider bound to the given network token.
+///
+/// Because the connection request is pipelined, returning success does not
+/// guarantee the token is valid. If the token is invalid or the network goes
+/// away, the server closes the returned proxy with an epitaph and subsequent
+/// socket calls fail.
+pub fn connect_network_socket_provider(
+    network_token: &fnet_resources::NetworkToken,
+) -> io::Result<ProviderProxy> {
+    let network_token = fnet_resources::NetworkToken {
+        value: network_token
+            .value
+            .duplicate_handle(zx::Rights::SAME_RIGHTS)
+            .map_err(|err| io::Error::other(format!("failed to duplicate network token: {err}")))?,
+    };
+    let connector = fuchsia_component::client::connect_to_protocol::<
+        fnp_socketproxy::SocketProviderConnectorMarker,
+    >()
+    .map_err(|err| {
+        io::Error::other(format!("failed to connect to SocketProviderConnector service: {err}"))
+    })?;
+    let (provider_proxy, provider_server_end) = create_proxy::<ProviderMarker>();
+    connector
+        .connect(
+            fnp_socketproxy::SocketProviderOptions {
+                network_token: Some(network_token),
+                ..Default::default()
+            },
+            provider_server_end,
+        )
+        .map_err(|err| {
+            io::Error::other(format!("failed to call SocketProviderConnector.Connect: {err}"))
+        })?;
+    Ok(provider_proxy)
 }
 
 impl Service<Uri> for HyperConnector {
@@ -132,7 +182,7 @@ impl<F: Future + 'static> hyper::rt::Executor<F> for LocalExecutor {
 }
 
 pub(crate) trait ProviderConnector {
-    fn connect(&self) -> Result<ClientEnd<ProviderMarker>, io::Error>;
+    fn connect(&self) -> Result<ProviderProxy, io::Error>;
 }
 
 trait LookupConnector {
@@ -141,23 +191,35 @@ trait LookupConnector {
 
 #[derive(Clone)]
 struct RealServiceConnector {
+    // Pre-connected `ProviderProxy` reused across all socket requests when set.
+    socket_provider: Option<ProviderProxy>,
     name_lookup_connector: ServiceReconnector<LookupMarker>,
 }
 
 impl RealServiceConnector {
     fn new() -> Self {
-        RealServiceConnector { name_lookup_connector: ServiceReconnector::<LookupMarker>::new() }
+        RealServiceConnector {
+            socket_provider: None,
+            name_lookup_connector: ServiceReconnector::<LookupMarker>::new(),
+        }
+    }
+
+    fn new_with_socket_provider(socket_provider: ProviderProxy) -> Self {
+        RealServiceConnector {
+            socket_provider: Some(socket_provider),
+            name_lookup_connector: ServiceReconnector::<LookupMarker>::new(),
+        }
     }
 }
 
 impl ProviderConnector for RealServiceConnector {
-    fn connect(&self) -> Result<ClientEnd<ProviderMarker>, io::Error> {
-        let (client_end, server_end) = create_endpoints::<ProviderMarker>();
-        fuchsia_component::client::connect_channel_to_protocol::<ProviderMarker>(server_end.into())
-            .map_err(|err| {
-                io::Error::other(format!("failed to connect to socket provider service: {}", err))
-            })?;
-        Ok(client_end)
+    fn connect(&self) -> Result<ProviderProxy, io::Error> {
+        if let Some(socket_provider) = &self.socket_provider {
+            return Ok(socket_provider.clone());
+        }
+        fuchsia_component::client::connect_to_protocol::<ProviderMarker>().map_err(|err| {
+            io::Error::other(format!("failed to connect to socket provider service: {}", err))
+        })
     }
 }
 
@@ -169,14 +231,15 @@ impl LookupConnector for RealServiceConnector {
     }
 }
 
-async fn connect_to_addr<T: ProviderConnector + LookupConnector + 'static>(
+async fn connect_to_addr<T: ProviderConnector + LookupConnector>(
     provider: T,
     host: &str,
     port: u16,
     bind_device: Option<&str>,
 ) -> Result<net::TcpStream, io::Error> {
     if let Some(addr) = parse_ip_addr_with_provider(&provider, host, port).await? {
-        return connect_and_bind_device(&provider, addr, bind_device)?.await;
+        return connect_and_bind_device(ProviderConnector::connect(&provider)?, addr, bind_device)
+            .await;
     }
 
     happy_eyeballs::happy_eyeballs(
@@ -228,7 +291,7 @@ async fn parse_ip_addr_with_provider(
     port: u16,
 ) -> Result<Option<SocketAddr>, io::Error> {
     parse_ip_addr(host, port, |zone_id| async {
-        let proxy = provider.connect()?.into_proxy();
+        let proxy = provider.connect()?;
         let id = proxy
             .interface_name_to_index(zone_id)
             .await
@@ -254,14 +317,14 @@ async fn parse_ip_addr_with_provider(
     .await
 }
 
-pub(crate) fn stream_socket<T: ProviderConnector>(
-    provider: &T,
+pub(crate) async fn stream_socket(
+    socket_provider: &ProviderProxy,
     domain: Domain,
     proto: StreamSocketProtocol,
 ) -> io::Result<socket2::Socket> {
-    let socket_provider = provider.connect()?.into_sync_proxy();
     let sock = socket_provider
-        .stream_socket(domain, proto, zx::MonotonicInstant::INFINITE)
+        .stream_socket(domain, proto)
+        .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
         .map_err(|e| std::io::Error::from_raw_os_error(e.into_primitive()))?;
 
@@ -273,18 +336,17 @@ mod test {
     use super::*;
     use crate::*;
     use assert_matches::assert_matches;
-    use fidl::endpoints::{create_proxy_and_stream, create_request_stream};
+    use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_net_name::{LookupError, LookupRequest};
     use fidl_fuchsia_posix_socket::ProviderRequest;
     use fuchsia_async::net::TcpListener;
     use fuchsia_async::{self as fasync, LocalExecutor};
     use futures::prelude::*;
-    use std::cell::RefCell;
 
     struct PanicConnector;
 
     impl ProviderConnector for PanicConnector {
-        fn connect(&self) -> Result<ClientEnd<ProviderMarker>, io::Error> {
+        fn connect(&self) -> Result<ProviderProxy, io::Error> {
             panic!("should not be trying to talk to the Provider service")
         }
     }
@@ -376,7 +438,7 @@ mod test {
         struct ErrorConnector;
 
         impl ProviderConnector for ErrorConnector {
-            fn connect(&self) -> Result<ClientEnd<ProviderMarker>, io::Error> {
+            fn connect(&self) -> Result<ProviderProxy, io::Error> {
                 Err(io::Error::other("something bad happened"))
             }
         }
@@ -387,7 +449,7 @@ mod test {
 
     #[fasync::run_singlethreaded(test)]
     async fn test_parse_ipv6_addr_handles_large_interface_indices() {
-        let (client_end, mut stream) = create_request_stream::<ProviderMarker>();
+        let (proxy, mut stream) = create_proxy_and_stream::<ProviderMarker>();
 
         let provider_fut = async move {
             while let Some(req) = stream.try_next().await.unwrap_or(None) {
@@ -401,24 +463,88 @@ mod test {
         };
 
         struct ErrorConnector {
-            client_end: RefCell<Option<ClientEnd<ProviderMarker>>>,
+            proxy: ProviderProxy,
         }
 
         impl ProviderConnector for ErrorConnector {
-            fn connect(&self) -> Result<ClientEnd<ProviderMarker>, io::Error> {
-                let client_end = self.client_end.borrow_mut().take().unwrap();
-                Ok(client_end)
+            fn connect(&self) -> Result<ProviderProxy, io::Error> {
+                Ok(self.proxy.clone())
             }
         }
 
-        let connector = ErrorConnector { client_end: RefCell::new(Some(client_end)) };
-
-        let parse_ip_fut = parse_ip_addr_with_provider(&connector, "[fe80::1:2:3:4%25lo]", 8080);
+        let parse_ip_fut = async move {
+            let connector = ErrorConnector { proxy };
+            parse_ip_addr_with_provider(&connector, "[fe80::1:2:3:4%25lo]", 8080).await
+        };
 
         // Join the two futures to make sure they both complete.
         let ((), res) = future::join(provider_fut, parse_ip_fut).await;
 
         assert_matches!(res, Err(err) if err.kind() == io::ErrorKind::Other);
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn hyper_connector_reuses_configured_socket_provider() {
+        let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0);
+        let listener = TcpListener::bind(&addr).unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (provider_proxy, mut provider_stream) = create_proxy_and_stream::<ProviderMarker>();
+        let real_provider =
+            fuchsia_component::client::connect_to_protocol::<ProviderMarker>().unwrap();
+
+        let provider_fut = async move {
+            let mut stream_socket_calls = 0usize;
+            while let Some(req) = provider_stream.try_next().await.unwrap() {
+                match req {
+                    ProviderRequest::StreamSocket { domain, proto, responder } => {
+                        stream_socket_calls += 1;
+                        let res = real_provider.stream_socket(domain, proto).await.unwrap();
+                        responder.send(res).unwrap();
+                    }
+                    other => panic!("unexpected ProviderRequest: {other:?}"),
+                }
+            }
+            stream_socket_calls
+        };
+
+        let client_fut = async move {
+            let mut connector = HyperConnector::from_options_and_provider(
+                TcpOptions::default(),
+                SocketOptions::default(),
+                provider_proxy,
+            );
+            let uri = format!("http://{addr}").parse::<hyper::Uri>().unwrap();
+            let mut accept_stream = listener.accept_stream();
+
+            // Connect twice to verify the ProviderProxy is reused.
+            let (_io1, _server1) =
+                future::try_join(connector.call(uri.clone()), accept_stream.try_next())
+                    .await
+                    .unwrap();
+            let (_io2, _server2) =
+                future::try_join(connector.call(uri), accept_stream.try_next()).await.unwrap();
+        };
+
+        let (calls, ()) = future::join(provider_fut, client_fut).await;
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn builder_ignores_bind_device_with_socket_provider() {
+        let _exec = LocalExecutor::default();
+        let with_device = SocketOptions { bind_device: Some("eth0".to_string()) };
+        let without_device = SocketOptions { bind_device: None };
+
+        assert!(!check_conflicting_socket_options(&without_device));
+        assert!(check_conflicting_socket_options(&with_device));
+
+        let (provider_proxy, _provider_stream) = create_proxy_and_stream::<ProviderMarker>();
+        let mut builder = HttpClient::<http_body_util::Full<hyper::body::Bytes>>::builder()
+            .socket_options(with_device)
+            .socket_provider(provider_proxy);
+        let connector = builder.connector();
+        assert_eq!(connector.socket_options.bind_device, None);
     }
 
     struct ProxyConnector<T> {

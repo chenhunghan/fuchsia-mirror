@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 use fidl::prelude::*;
+use fidl_fuchsia_driver_token as fdriver_token;
 use fidl_fuchsia_hardware_network as fhardware_network;
 use fidl_fuchsia_net_tun as fnet_tun;
-use fidl_fuchsia_netemul_network as fnetemul_network;
 use futures::{Future, FutureExt as _, StreamExt as _, TryStreamExt as _};
 use net_declare::{fidl_mac, std_ip_v6};
 use net_types::Witness as _;
@@ -14,17 +14,15 @@ use netemul::RealmUdpSocket as _;
 use netstack_testing_common::interfaces::TestInterfaceExt as _;
 use netstack_testing_common::realms::{Netstack3, TestSandboxExt as _};
 use netstack_testing_macros::netstack_test;
-use netsvc_proto::{debuglog, netboot, tftp};
+use netsvc_proto::{debuglog, netboot};
 use packet::{
     FragmentedBuffer as _, InnerPacketBuilder as _, MaybeReuseBufferProvider,
     NestablePacketBuilder as _, NoOpSerializationContext, ParseBuffer as _, Serializer,
 };
 use std::borrow::Cow;
-use std::convert::{TryFrom as _, TryInto as _};
+use std::convert::TryInto as _;
 use std::num::NonZeroU16;
 use test_case::test_case;
-use zerocopy::byteorder::native_endian::U32;
-use zerocopy::{FromBytes, Immutable, KnownLayout, Ref, Unaligned};
 
 const NETSVC_URL: &str = "#meta/netsvc.cm";
 const NETSVC_NAME: &str = "netsvc";
@@ -33,8 +31,6 @@ const NAME_PROVIDER_URL: &str = "#meta/device-name-provider.cm";
 const NAME_PROVIDER_NAME: &str = "device-name-provider";
 
 const MOCK_SERVICES_NAME: &str = "mock";
-
-const DEV_NETWORK_DIRECTORY: &str = "dev-class-network";
 
 const PRIMARY_INTERFACE_CONFIGURATION: &str = "fuchsia.network.PrimaryInterface";
 const NAMEGEN_CONFIGURATION: &str = "fuchsia.zircon.namegen";
@@ -49,10 +45,6 @@ const BOOT_ITEM_INTERFACE_FLIP_LOW_MAC_BIT_CONFIGURATION: &str =
     "fuchsia.device.BootItemInterfaceFlipLowMacBit";
 
 const BUFFER_SIZE: usize = 2048;
-
-const MOCK_BOARD_NAME: &str = "mock-board";
-const MOCK_BOOTLOADER_VENDOR: &str = "mock-bootloader-vendor";
-const MOCK_BOARD_REVISION: u32 = 0xDEADBEEF;
 
 const LOG_MSG_PID: u64 = 1234;
 const LOG_MSG_TID: u64 = 6789;
@@ -75,12 +67,10 @@ where
 
     enum Services {
         Log(fidl_fuchsia_logger::LogRequestStream),
-        SysInfo(fidl_fuchsia_sysinfo::SysInfoRequestStream),
     }
 
     let mut fs = ServiceFs::new();
-    let _: &mut ServiceFsDir<'_, _> =
-        fs.dir("svc").add_fidl_service(Services::Log).add_fidl_service(Services::SysInfo);
+    let _: &mut ServiceFsDir<'_, _> = fs.dir("svc").add_fidl_service(Services::Log);
     let _: &mut ServiceFs<_> = fs.serve_connection(server_end).expect("serve connection");
 
     let fs = fs.for_each_concurrent(None, |r| async move {
@@ -104,8 +94,11 @@ where
                             pid: LOG_MSG_PID,
                             tid: LOG_MSG_TID,
                             time: zx::BootInstant::from_nanos(
-                                zx::BootDuration::from_seconds(v).into_nanos()),
-                            severity: fidl_fuchsia_logger::LOG_LEVEL_DEFAULT.into_primitive().into(),
+                                zx::BootDuration::from_seconds(v).into_nanos(),
+                            ),
+                            severity: fidl_fuchsia_logger::LOG_LEVEL_DEFAULT
+                                .into_primitive()
+                                .into(),
                             dropped_logs: 0,
                             tags: vec![LOG_MSG_TAG.to_string()],
                             msg: LOG_MSG_CONTENTS.to_string(),
@@ -119,32 +112,6 @@ where
                                     .expect("failed to send log to listener");
                             })
                             .await;
-                    })
-                    .await;
-            }
-            Services::SysInfo(rs) => {
-                let () = rs
-                    .for_each(|req| {
-                        futures::future::ready(
-                            match req.expect("request stream error") {
-                                fidl_fuchsia_sysinfo::SysInfoRequest::GetBoardName { responder } => {
-                                    responder.send(zx::sys::ZX_OK, Some(MOCK_BOARD_NAME))
-                                }
-                                fidl_fuchsia_sysinfo::SysInfoRequest::GetBoardRevision { responder } => {
-                                    responder.send(zx::sys::ZX_OK, MOCK_BOARD_REVISION)
-                                }
-                                fidl_fuchsia_sysinfo::SysInfoRequest::GetBootloaderVendor { responder } => {
-                                    responder.send(zx::sys::ZX_OK, Some(MOCK_BOOTLOADER_VENDOR))
-                                }
-                                r @ fidl_fuchsia_sysinfo::SysInfoRequest::GetInterruptControllerInfo {
-                                    ..
-                                } => panic!("unsupported request {:?}", r),
-                                r @ fidl_fuchsia_sysinfo::SysInfoRequest::GetSerialNumber {
-                                    ..
-                                } => panic!("unsupported request {:?}", r),
-                            }
-                                .expect("failed to send response"),
-                        )
                     })
                     .await;
             }
@@ -162,10 +129,30 @@ where
                     name: Some(NETSVC_NAME.to_string()),
                     program_args: Some(args.into_iter().map(Into::into).collect()),
                     uses: Some(fidl_fuchsia_netemul::ChildUses::Capabilities(vec![
-                        fidl_fuchsia_netemul::Capability::NetemulDevfs(
-                            fidl_fuchsia_netemul::DevfsDep {
-                                name: Some(DEV_NETWORK_DIRECTORY.to_string()),
-                                subdir: Some(netemul::NETDEVICE_DEVFS_PATH.to_string()),
+                        fidl_fuchsia_netemul::Capability::ChildDep(
+                            fidl_fuchsia_netemul::ChildDep {
+                                name: Some(
+                                    fidl_fuchsia_netemul::NETEMUL_SERVICES_COMPONENT_NAME
+                                        .to_string(),
+                                ),
+                                capability: Some(fidl_fuchsia_netemul::ExposedCapability::Service(
+                                    fhardware_network::ServiceMarker::SERVICE_NAME.to_string(),
+                                )),
+                                ..Default::default()
+                            },
+                        ),
+                        fidl_fuchsia_netemul::Capability::ChildDep(
+                            fidl_fuchsia_netemul::ChildDep {
+                                name: Some(
+                                    fidl_fuchsia_netemul::NETEMUL_SERVICES_COMPONENT_NAME
+                                        .to_string(),
+                                ),
+                                capability: Some(
+                                    fidl_fuchsia_netemul::ExposedCapability::Protocol(
+                                        fdriver_token::NodeBusTopologyMarker::PROTOCOL_NAME
+                                            .to_string(),
+                                    ),
+                                ),
                                 ..Default::default()
                             },
                         ),
@@ -242,18 +229,6 @@ where
                                 ..Default::default()
                             },
                         ),
-                        fidl_fuchsia_netemul::Capability::ChildDep(
-                            fidl_fuchsia_netemul::ChildDep {
-                                name: Some(MOCK_SERVICES_NAME.to_string()),
-                                capability: Some(
-                                    fidl_fuchsia_netemul::ExposedCapability::Protocol(
-                                        fidl_fuchsia_sysinfo::SysInfoMarker::PROTOCOL_NAME
-                                            .to_string(),
-                                    ),
-                                ),
-                                ..Default::default()
-                            },
-                        ),
                         fidl_fuchsia_netemul::Capability::LogSink(fidl_fuchsia_netemul::Empty {}),
                     ])),
                     eager: Some(true),
@@ -265,10 +240,30 @@ where
                     )),
                     name: Some(NAME_PROVIDER_NAME.to_string()),
                     uses: Some(fidl_fuchsia_netemul::ChildUses::Capabilities(vec![
-                        fidl_fuchsia_netemul::Capability::NetemulDevfs(
-                            fidl_fuchsia_netemul::DevfsDep {
-                                name: Some(DEV_NETWORK_DIRECTORY.to_string()),
-                                subdir: Some(netemul::NETDEVICE_DEVFS_PATH.to_string()),
+                        fidl_fuchsia_netemul::Capability::ChildDep(
+                            fidl_fuchsia_netemul::ChildDep {
+                                name: Some(
+                                    fidl_fuchsia_netemul::NETEMUL_SERVICES_COMPONENT_NAME
+                                        .to_string(),
+                                ),
+                                capability: Some(fidl_fuchsia_netemul::ExposedCapability::Service(
+                                    fhardware_network::ServiceMarker::SERVICE_NAME.to_string(),
+                                )),
+                                ..Default::default()
+                            },
+                        ),
+                        fidl_fuchsia_netemul::Capability::ChildDep(
+                            fidl_fuchsia_netemul::ChildDep {
+                                name: Some(
+                                    fidl_fuchsia_netemul::NETEMUL_SERVICES_COMPONENT_NAME
+                                        .to_string(),
+                                ),
+                                capability: Some(
+                                    fidl_fuchsia_netemul::ExposedCapability::Protocol(
+                                        fdriver_token::NodeBusTopologyMarker::PROTOCOL_NAME
+                                            .to_string(),
+                                    ),
+                                ),
                                 ..Default::default()
                             },
                         ),
@@ -381,10 +376,7 @@ async fn with_netsvc_and_netstack_full<F1, F2, Fut2, X, A, V>(
     let ep = network.create_endpoint(&netsvc_name).await.expect("create endpoint");
     let () = ep.set_link_up(true).await.expect("set link up");
 
-    let () = netsvc_realm
-        .add_virtual_device(&ep, netemul::devfs_device_path("ep").as_path())
-        .await
-        .expect("add virtual device");
+    let () = netsvc_realm.add_virtual_device(&ep, "ep").await.expect("add virtual device");
 
     let netstack_realm =
         sandbox.create_netstack_realm::<Netstack3, _>(&ns_name).expect("create netstack realm");
@@ -607,22 +599,6 @@ where
     assert_eq!(sent, b.len());
 }
 
-async fn read_message<'a, P, B>(
-    buffer: &'a mut B,
-    sock: &fuchsia_async::net::UdpSocket,
-    expect_src: std::net::SocketAddr,
-) -> P
-where
-    P: packet::ParsablePacket<&'a [u8], ()>,
-    P::Error: std::fmt::Debug,
-    B: packet::ParseBufferMut,
-{
-    let (n, addr) = sock.recv_from(buffer.as_mut()).await.expect("recv from failed");
-    assert_eq!(addr, expect_src);
-    let () = buffer.shrink_back_to(n);
-    buffer.parse::<P>().expect("parse failed")
-}
-
 async fn can_discover_inner(sock: fuchsia_async::net::UdpSocket, scope_id: u32) {
     let _: std::net::Ipv6Addr = discover(&sock, scope_id).await;
 }
@@ -719,128 +695,6 @@ async fn debuglog(name: &str) {
         debuglog_inner,
     )
     .await
-}
-
-async fn get_board_info_inner(sock: fuchsia_async::net::UdpSocket, scope_id: u32) {
-    const BOARD_NAME_FILE: &str = "<<image>>board_info";
-    let device = discover(&sock, scope_id).await;
-    let socket_addr = std::net::SocketAddrV6::new(
-        device,
-        tftp::INCOMING_PORT.get(),
-        /* flowinfo */ 0,
-        scope_id,
-    )
-    .into();
-
-    // Request a very large timeout to make sure we don't get flakes.
-    const TIMEOUT_OPTION_SECS: u8 = u8::MAX;
-
-    #[repr(C)]
-    #[derive(KnownLayout, FromBytes, Immutable, Unaligned)]
-    // Defined in zircon/system/public/zircon/boot/netboot.h.
-    struct BoardInfo {
-        board_name: [u8; 32],
-        board_revision: U32,
-        mac_address: [u8; 6],
-        _padding: [u8; 2],
-    }
-
-    let () = send_message(
-        tftp::TransferRequestBuilder::new_with_options(
-            tftp::TransferDirection::Read,
-            BOARD_NAME_FILE,
-            tftp::TftpMode::OCTET,
-            [
-                tftp::TftpOption::TransferSize(u64::MAX).not_forced(),
-                tftp::TftpOption::Timeout(TIMEOUT_OPTION_SECS).not_forced(),
-            ],
-        )
-        .into_serializer(),
-        &sock,
-        socket_addr,
-    )
-    .await;
-
-    // After the first message, everything must happen on a different port.
-    let socket_addr = std::net::SocketAddrV6::new(
-        device,
-        tftp::OUTGOING_PORT.get(),
-        /* flowinfo */ 0,
-        scope_id,
-    )
-    .into();
-
-    expect_oack(
-        &sock,
-        socket_addr,
-        tftp::AllOptions {
-            window_size: None,
-            block_size: None,
-            timeout: Some(tftp::Forceable { value: TIMEOUT_OPTION_SECS, forced: false }),
-            transfer_size: Some(tftp::Forceable {
-                value: u64::try_from(std::mem::size_of::<BoardInfo>()).expect("doesn't fit u64"),
-                forced: false,
-            }),
-        },
-    )
-    .await;
-
-    // Acknowledge options by sending an ack.
-    let () = send_message(
-        tftp::AckPacketBuilder::new(/* block */ 0).into_serializer(),
-        &sock,
-        socket_addr,
-    )
-    .await;
-
-    {
-        let mut buffer = [0u8; BUFFER_SIZE];
-        let mut pb = &mut buffer[..];
-        let data = read_message::<tftp::TftpPacket<_>, _>(&mut pb, &sock, socket_addr)
-            .await
-            .into_data()
-            .expect("unexpected message");
-        assert_eq!(data.block(), 1);
-        assert_eq!(data.payload().len(), std::mem::size_of::<BoardInfo>());
-        let board_info = Ref::<_, BoardInfo>::from_bytes(data.payload().as_ref())
-            .expect("failed to get board info");
-        let BoardInfo { board_name, board_revision, mac_address, _padding } = &*board_info;
-        // mac_address is not filled by netsvc.
-        assert_eq!(mac_address, [0u8; 6].as_ref());
-        assert_eq!(board_revision.get(), MOCK_BOARD_REVISION);
-        let board_name =
-            board_name.split(|b| *b == 0).next().expect("failed to find null termination");
-        let board_name = std::str::from_utf8(board_name).expect("failed to parse board name");
-
-        let expected_board_name = if cfg!(target_arch = "x86_64") {
-            // netsvc overrides the board name on x64 boards 🤷.
-            "x64"
-        } else {
-            MOCK_BOARD_NAME
-        };
-        assert_eq!(board_name, expected_board_name);
-    }
-}
-
-#[netstack_test]
-async fn get_board_info(name: &str) {
-    with_netsvc_and_netstack(name, get_board_info_inner).await;
-}
-
-async fn expect_oack(
-    sock: &fuchsia_async::net::UdpSocket,
-    socket_addr: std::net::SocketAddr,
-    options: tftp::AllOptions,
-) {
-    let mut buffer = [0u8; BUFFER_SIZE];
-    let mut pb = &mut buffer[..];
-    let oack = read_message::<tftp::TftpPacket<_>, _>(&mut pb, &sock, socket_addr)
-        .await
-        .into_oack()
-        .expect("unexpected response");
-
-    let all_options = oack.options().collect();
-    assert_eq!(all_options, options);
 }
 
 #[netstack_test]
@@ -949,10 +803,8 @@ async fn survives_device_removal(name: &str) {
                 .await
                 .expect("create endpoint");
             let () = ep.set_link_up(true).await.expect("set link up");
-            let () = netsvc_realm
-                .add_virtual_device(&ep, netemul::devfs_device_path(&ep_name).as_path())
-                .await
-                .expect("add virtual device");
+            let () =
+                netsvc_realm.add_virtual_device(&ep, &ep_name).await.expect("add virtual device");
 
             // Wait until we observe any netsvc packet with the source mac set to
             // our endpoint, as proof that it is alive.
@@ -1038,36 +890,10 @@ async fn starts_device_in_multicast_promiscuous(name: &str) {
         }
     );
 
-    // Add the device to devfs and wait for netsvc to set it to multicast
-    // promiscuous.
+    // Publish the device to fuchsia.hardware.network.Service and wait for netsvc
+    // to set it to multicast promiscuous.
 
-    let (client_end, connector_stream) = fidl::endpoints::create_request_stream();
-    let () = netsvc_realm
-        .add_raw_device(netemul::devfs_device_path("ep").as_path(), client_end)
-        .await
-        .expect("add virtual device");
-
-    let netdevice = netdevice.into_proxy();
-    let netdevice = &netdevice;
-    let connector_fut = connector_stream.for_each_concurrent(None, |r| async move {
-        match r.expect("connector error") {
-            fnetemul_network::DeviceProxy_Request::ServeDevice { req, control_handle: _ } => {
-                netdevice.clone(req).expect("clone failed")
-            }
-            fnetemul_network::DeviceProxy_Request::ServeController { req, control_handle: _ } => {
-                let rs = req.into_stream();
-                rs.for_each(|req| async move {
-                    match req.expect("request error") {
-                        fidl_fuchsia_device::ControllerRequest::GetTopologicalPath {
-                            responder,
-                        } => responder.send(Ok("some_topopath")).expect("send topopath response"),
-                        req => panic!("unexpected request {:?}", req),
-                    }
-                })
-                .await
-            }
-        };
-    });
+    let () = netsvc_realm.add_raw_device("ep", netdevice).await.expect("add virtual device");
 
     let new_state = futures::select! {
         state = mac_state_stream.next() => state,
@@ -1076,7 +902,6 @@ async fn starts_device_in_multicast_promiscuous(name: &str) {
             panic!("netsvc stopped unexpectedly with {:?}", e);
         },
         () = services.fuse() => panic!("ServiceFs ended unexpectedly"),
-        () = connector_fut.fuse() => panic!("connector future ended unexpectedly"),
     };
 
     assert_matches::assert_matches!(
@@ -1159,4 +984,158 @@ async fn replies_to_ping(name: &str, unicast: bool) {
         },
     )
     .await
+}
+
+#[netstack_test]
+async fn filters_interface_by_bus_topology(name: &str) {
+    let netsvc_name = format!("{name}-netsvc");
+    let ns_name = format!("{name}-netstack");
+    const IGNORED_EP: &str = "ignored-ep";
+    const SELECTED_EP: &str = "selected-ep";
+
+    let mut component_event_stream = netstack_testing_common::get_component_stopped_event_stream()
+        .await
+        .expect("get event stream");
+
+    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
+    let args = DEFAULT_NETSVC_ARGS.into_iter().chain(["--interface", "/selected-ep"]);
+    let (netsvc_realm, services) = create_netsvc_realm(&sandbox, &netsvc_name, args);
+
+    let netsvc_stopped_fut = netstack_testing_common::wait_for_component_stopped_with_stream(
+        &mut component_event_stream,
+        &netsvc_realm,
+        NETSVC_NAME,
+        None,
+    );
+
+    // Add a non-matching endpoint on an isolated network first so netsvc must
+    // reject it via NodeToken + NodeBusTopology rather than picking the first
+    // enumerated service instance.
+    let ignored_network =
+        sandbox.create_network("ignored-net").await.expect("create ignored network");
+    let ignored_ep = ignored_network.create_endpoint(IGNORED_EP).await.expect("create ignored ep");
+    let () = ignored_ep.set_link_up(true).await.expect("set ignored ep link up");
+    let () = netsvc_realm
+        .add_virtual_device(&ignored_ep, IGNORED_EP)
+        .await
+        .expect("add ignored virtual device");
+
+    let network = sandbox.create_network("net").await.expect("create network");
+    let selected_ep = network.create_endpoint(SELECTED_EP).await.expect("create selected ep");
+    let () = selected_ep.set_link_up(true).await.expect("set selected ep link up");
+    let () = netsvc_realm
+        .add_virtual_device(&selected_ep, SELECTED_EP)
+        .await
+        .expect("add selected virtual device");
+
+    let netstack_realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(&ns_name).expect("create netstack realm");
+    let interface: netemul::TestInterface<'_> =
+        netstack_realm.join_network(&network, &ns_name).await.expect("join network");
+    interface.apply_nud_flake_workaround().await.expect("nud flake workaround");
+
+    let _: net_types::ip::Ipv6Addr = netstack_testing_common::interfaces::wait_for_v6_ll(
+        &netstack_realm
+            .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
+            .expect("connect to protocol"),
+        interface.id(),
+    )
+    .await
+    .expect("wait ll address");
+
+    let sock = fuchsia_async::net::UdpSocket::bind_in_realm(
+        &netstack_realm,
+        std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::UNSPECIFIED,
+            0,
+            /* flowinfo */ 0,
+            /* scope id */ 0,
+        )
+        .into(),
+    )
+    .await
+    .expect("bind in realm");
+    let () = sock.as_ref().set_multicast_loop_v6(false).expect("failed to disable multicast loop");
+
+    let scope_id: u32 = interface.id().try_into().expect("interface ID doesn't fit u32");
+    let discover_fut = discover(&sock, scope_id);
+    let _device: std::net::Ipv6Addr = futures::select! {
+        r = netsvc_stopped_fut.fuse() => {
+            let e: component_events::events::Stopped = r.expect("failed to observe stopped event");
+            panic!("netsvc stopped unexpectedly with {:?}", e);
+        },
+        () = services.fuse() => panic!("ServiceFs ended unexpectedly"),
+        addr = discover_fut.fuse() => addr,
+    };
+}
+
+#[netstack_test]
+async fn filters_interface_by_bus_topology_no_match(name: &str) {
+    let netsvc_name = format!("{name}-netsvc");
+    let ns_name = format!("{name}-netstack");
+    const EP_NAME: &str = "ep";
+
+    let mut component_event_stream = netstack_testing_common::get_component_stopped_event_stream()
+        .await
+        .expect("get event stream");
+
+    let sandbox = netemul::TestSandbox::new().expect("create sandbox");
+    let args = DEFAULT_NETSVC_ARGS.into_iter().chain(["--interface", "/nonexistent-ep"]);
+    let (netsvc_realm, services) = create_netsvc_realm(&sandbox, &netsvc_name, args);
+
+    let netsvc_stopped_fut = netstack_testing_common::wait_for_component_stopped_with_stream(
+        &mut component_event_stream,
+        &netsvc_realm,
+        NETSVC_NAME,
+        None,
+    );
+
+    let network = sandbox.create_network("net").await.expect("create network");
+    let ep = network.create_endpoint(EP_NAME).await.expect("create ep");
+    let () = ep.set_link_up(true).await.expect("set ep link up");
+    let () = netsvc_realm.add_virtual_device(&ep, EP_NAME).await.expect("add virtual device");
+
+    let netstack_realm =
+        sandbox.create_netstack_realm::<Netstack3, _>(&ns_name).expect("create netstack realm");
+    let interface: netemul::TestInterface<'_> =
+        netstack_realm.join_network(&network, &ns_name).await.expect("join network");
+    interface.apply_nud_flake_workaround().await.expect("nud flake workaround");
+
+    let _: net_types::ip::Ipv6Addr = netstack_testing_common::interfaces::wait_for_v6_ll(
+        &netstack_realm
+            .connect_to_protocol::<fidl_fuchsia_net_interfaces::StateMarker>()
+            .expect("connect to protocol"),
+        interface.id(),
+    )
+    .await
+    .expect("wait ll address");
+
+    let sock = fuchsia_async::net::UdpSocket::bind_in_realm(
+        &netstack_realm,
+        std::net::SocketAddrV6::new(
+            std::net::Ipv6Addr::UNSPECIFIED,
+            0,
+            /* flowinfo */ 0,
+            /* scope id */ 0,
+        )
+        .into(),
+    )
+    .await
+    .expect("bind in realm");
+    let () = sock.as_ref().set_multicast_loop_v6(false).expect("failed to disable multicast loop");
+
+    let scope_id: u32 = interface.id().try_into().expect("interface ID doesn't fit u32");
+    let discover_fut = discover(&sock, scope_id);
+    let timeout_fut = fuchsia_async::Timer::new(std::time::Duration::from_secs(5));
+    futures::select! {
+        r = netsvc_stopped_fut.fuse() => {
+            let e: component_events::events::Stopped = r.expect("failed to observe stopped event");
+            panic!("netsvc stopped unexpectedly with {:?}", e);
+        },
+        () = services.fuse() => panic!("ServiceFs ended unexpectedly"),
+        addr = discover_fut.fuse() => {
+            panic!("unexpectedly discovered netsvc at {addr} despite --interface filter");
+        },
+        () = timeout_fut.fuse() => {},
+    }
 }

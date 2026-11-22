@@ -310,6 +310,10 @@ impl InterfaceFactoryBase<TcpNetworkInterface<MultithreadedTokioAsyncWrapper<Tcp
                 .to_string(),
         ))
     }
+
+    fn supports_gbl_async_tasks(&self) -> bool {
+        true
+    }
 }
 
 impl InterfaceFactory<TcpNetworkInterface<MultithreadedTokioAsyncWrapper<TcpStream>>>

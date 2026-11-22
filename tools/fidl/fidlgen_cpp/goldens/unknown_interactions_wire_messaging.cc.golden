@@ -3621,7 +3621,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayFields>::TransactionalResponse(int32_t some_field)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayFields>(some_field)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFields_DynamicFlags);
@@ -3686,7 +3686,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionResponse UnknownInteractionsProtocolStrictTwoWayUnionResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayUnion>(UnknownInteractionsProtocolStrictTwoWayUnionResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnion_DynamicFlags);
@@ -3751,7 +3751,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayTableResponse UnknownInteractionsProtocolStrictTwoWayTableResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayTable>(UnknownInteractionsProtocolStrictTwoWayTableResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTable_DynamicFlags);
@@ -3816,7 +3816,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayErrResult UnknownInteractionsProtocolStrictTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayErr>(UnknownInteractionsProtocolStrictTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayErr_DynamicFlags);
@@ -3881,7 +3881,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayFieldsErrResult UnknownInteractionsProtocolStrictTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayFieldsErr>(UnknownInteractionsProtocolStrictTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayFieldsErr_DynamicFlags);
@@ -3946,7 +3946,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayUnionErrResult UnknownInteractionsProtocolStrictTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayUnionErr>(UnknownInteractionsProtocolStrictTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayUnionErr_DynamicFlags);
@@ -4011,7 +4011,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictTwoWayTableErrResult UnknownInteractionsProtocolStrictTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayTableErr>(UnknownInteractionsProtocolStrictTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::StrictTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictTwoWayTableErr_DynamicFlags);
@@ -4076,7 +4076,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWay>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayResult UnknownInteractionsProtocolFlexibleTwoWayResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWay>(UnknownInteractionsProtocolFlexibleTwoWayResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWay_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWay_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWay_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWay_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWay>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWay_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWay_DynamicFlags);
@@ -4141,7 +4141,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayFields>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayFieldsResult UnknownInteractionsProtocolFlexibleTwoWayFieldsResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayFields>(UnknownInteractionsProtocolFlexibleTwoWayFieldsResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFields_DynamicFlags);
@@ -4206,7 +4206,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionResult UnknownInteractionsProtocolFlexibleTwoWayUnionResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayUnion>(UnknownInteractionsProtocolFlexibleTwoWayUnionResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnion_DynamicFlags);
@@ -4271,7 +4271,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayTableResult UnknownInteractionsProtocolFlexibleTwoWayTableResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayTable>(UnknownInteractionsProtocolFlexibleTwoWayTableResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTable_DynamicFlags);
@@ -4336,7 +4336,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayErrResult UnknownInteractionsProtocolFlexibleTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayErr>(UnknownInteractionsProtocolFlexibleTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayErr_DynamicFlags);
@@ -4401,7 +4401,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayFieldsErr>(UnknownInteractionsProtocolFlexibleTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayFieldsErr_DynamicFlags);
@@ -4466,7 +4466,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayUnionErr>(UnknownInteractionsProtocolFlexibleTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayUnionErr_DynamicFlags);
@@ -4531,7 +4531,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleTwoWayTableErrResult UnknownInteractionsProtocolFlexibleTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayTableErr>(UnknownInteractionsProtocolFlexibleTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleTwoWayTableErr_DynamicFlags);
@@ -4594,7 +4594,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::StrictEventFields>::TransactionalEvent(int32_t some_field)
     : body{ some_field } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventFields_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::StrictEventFields>::TransactionalEvent() {
@@ -4621,7 +4621,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::StrictEventUnion>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictEventUnionRequest UnknownInteractionsProtocolStrictEventUnionRequest)
     : body{ UnknownInteractionsProtocolStrictEventUnionRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventUnion_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::StrictEventUnion>::TransactionalEvent() {
@@ -4648,7 +4648,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::StrictEventTable>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsProtocolStrictEventTableRequest UnknownInteractionsProtocolStrictEventTableRequest)
     : body{ UnknownInteractionsProtocolStrictEventTableRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_StrictEventTable_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::StrictEventTable>::TransactionalEvent() {
@@ -4693,7 +4693,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleEventFields>::TransactionalEvent(int32_t some_field)
     : body{ some_field } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventFields_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleEventFields>::TransactionalEvent() {
@@ -4720,7 +4720,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleEventUnion>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleEventUnionRequest UnknownInteractionsProtocolFlexibleEventUnionRequest)
     : body{ UnknownInteractionsProtocolFlexibleEventUnionRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventUnion_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleEventUnion>::TransactionalEvent() {
@@ -4747,7 +4747,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsProtocolFl
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleEventTable>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsProtocolFlexibleEventTableRequest UnknownInteractionsProtocolFlexibleEventTableRequest)
     : body{ UnknownInteractionsProtocolFlexibleEventTableRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsProtocol_FlexibleEventTable_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsProtocol::FlexibleEventTable>::TransactionalEvent() {
@@ -7635,7 +7635,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayFields>::TransactionalResponse(int32_t some_field)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayFields>(some_field)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFields_DynamicFlags);
@@ -7700,7 +7700,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayUnion>(UnknownInteractionsAjarProtocolStrictTwoWayUnionResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnion_DynamicFlags);
@@ -7765,7 +7765,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayTableResponse UnknownInteractionsAjarProtocolStrictTwoWayTableResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayTable>(UnknownInteractionsAjarProtocolStrictTwoWayTableResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTable_DynamicFlags);
@@ -7830,7 +7830,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayErrResult UnknownInteractionsAjarProtocolStrictTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayErr>(UnknownInteractionsAjarProtocolStrictTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayErr_DynamicFlags);
@@ -7895,7 +7895,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayFieldsErr>(UnknownInteractionsAjarProtocolStrictTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayFieldsErr_DynamicFlags);
@@ -7960,7 +7960,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayUnionErr>(UnknownInteractionsAjarProtocolStrictTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayUnionErr_DynamicFlags);
@@ -8025,7 +8025,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayTableErr>(UnknownInteractionsAjarProtocolStrictTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictTwoWayTableErr_DynamicFlags);
@@ -8088,7 +8088,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictEventFields>::TransactionalEvent(int32_t some_field)
     : body{ some_field } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventFields_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictEventFields>::TransactionalEvent() {
@@ -8115,7 +8115,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictEventUnion>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictEventUnionRequest UnknownInteractionsAjarProtocolStrictEventUnionRequest)
     : body{ UnknownInteractionsAjarProtocolStrictEventUnionRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventUnion_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictEventUnion>::TransactionalEvent() {
@@ -8142,7 +8142,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictEventTable>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolStrictEventTableRequest UnknownInteractionsAjarProtocolStrictEventTableRequest)
     : body{ UnknownInteractionsAjarProtocolStrictEventTableRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_StrictEventTable_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::StrictEventTable>::TransactionalEvent() {
@@ -8187,7 +8187,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::FlexibleEventFields>::TransactionalEvent(int32_t some_field)
     : body{ some_field } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventFields_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::FlexibleEventFields>::TransactionalEvent() {
@@ -8214,7 +8214,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::FlexibleEventUnion>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolFlexibleEventUnionRequest UnknownInteractionsAjarProtocolFlexibleEventUnionRequest)
     : body{ UnknownInteractionsAjarProtocolFlexibleEventUnionRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventUnion_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::FlexibleEventUnion>::TransactionalEvent() {
@@ -8241,7 +8241,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsAjarProtoc
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::FlexibleEventTable>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsAjarProtocolFlexibleEventTableRequest UnknownInteractionsAjarProtocolFlexibleEventTableRequest)
     : body{ UnknownInteractionsAjarProtocolFlexibleEventTableRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsAjarProtocol_FlexibleEventTable_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsAjarProtocol::FlexibleEventTable>::TransactionalEvent() {
@@ -10724,7 +10724,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayFields>::TransactionalResponse(int32_t some_field)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayFields>(some_field)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFields_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayFields>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFields_DynamicFlags);
@@ -10789,7 +10789,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayUnion>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayUnion>(UnknownInteractionsClosedProtocolStrictTwoWayUnionResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnion_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayUnion>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnion_DynamicFlags);
@@ -10854,7 +10854,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayTable>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayTableResponse UnknownInteractionsClosedProtocolStrictTwoWayTableResponse)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayTable>(UnknownInteractionsClosedProtocolStrictTwoWayTableResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTable_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayTable>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTable_DynamicFlags);
@@ -10919,7 +10919,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayErrResult UnknownInteractionsClosedProtocolStrictTwoWayErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayErr>(UnknownInteractionsClosedProtocolStrictTwoWayErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayErr_DynamicFlags);
@@ -10984,7 +10984,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayFieldsErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayFieldsErr>(UnknownInteractionsClosedProtocolStrictTwoWayFieldsErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFieldsErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFieldsErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayFieldsErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFieldsErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayFieldsErr_DynamicFlags);
@@ -11049,7 +11049,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayUnionErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayUnionErr>(UnknownInteractionsClosedProtocolStrictTwoWayUnionErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnionErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnionErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayUnionErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnionErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayUnionErr_DynamicFlags);
@@ -11114,7 +11114,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayTableErr>::TransactionalResponse(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult)
     : body(::fidl::WireResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayTableErr>(UnknownInteractionsClosedProtocolStrictTwoWayTableErrResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTableErr_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTableErr_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictTwoWayTableErr>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTableErr_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictTwoWayTableErr_DynamicFlags);
@@ -11177,7 +11177,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictEventFields>::TransactionalEvent(int32_t some_field)
     : body{ some_field } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventFields_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventFields_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventFields_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictEventFields>::TransactionalEvent() {
@@ -11204,7 +11204,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictEventUnion>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictEventUnionRequest UnknownInteractionsClosedProtocolStrictEventUnionRequest)
     : body{ UnknownInteractionsClosedProtocolStrictEventUnionRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventUnion_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventUnion_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventUnion_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictEventUnion>::TransactionalEvent() {
@@ -11231,7 +11231,7 @@ return MakeReply(::test_unknowninteractions::wire::UnknownInteractionsClosedProt
 
     ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictEventTable>::TransactionalEvent(::test_unknowninteractions::wire::UnknownInteractionsClosedProtocolStrictEventTableRequest UnknownInteractionsClosedProtocolStrictEventTableRequest)
     : body{ UnknownInteractionsClosedProtocolStrictEventTableRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventTable_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventTable_Ordinal, ::test_unknowninteractions::kUnknownInteractionsClosedProtocol_StrictEventTable_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_unknowninteractions::UnknownInteractionsClosedProtocol::StrictEventTable>::TransactionalEvent() {

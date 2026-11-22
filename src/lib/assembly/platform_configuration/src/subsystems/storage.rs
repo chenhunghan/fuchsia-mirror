@@ -341,15 +341,6 @@ impl DefineSubsystemConfiguration<(&StorageConfig, &StorageToolsConfig, &Recover
             builder.platform_bundle("ufs_pdev_driver")?;
         }
 
-        // In engineering builds, include the ufsutil CLI tool when UFS device
-        // support is enabled.
-        if (context.board_config.provides_feature(BoardFeature::UfsPci)
-            || context.board_config.provides_feature(BoardFeature::UfsPdev))
-            && context.build_type == &BuildType::Eng
-        {
-            builder.platform_bundle("ufsutil")?;
-        }
-
         Ok(())
     }
 }
@@ -676,5 +667,68 @@ mod tests {
         )
         .unwrap();
         assert!(!embeddable_builder.build().bundles.contains("sdmmc_driver"));
+    }
+
+    #[test]
+    fn test_ufs_driver_bundles_gated_on_board_features() {
+        let storage_config = StorageConfig::default();
+
+        // Default board includes fshost_eng on eng builds without UFS driver AIBs.
+        let default_board = BoardConfig::default();
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&default_board, gendir_path);
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+        let completed = builder.build();
+        assert!(completed.bundles.contains("fshost_eng"));
+        assert!(!completed.bundles.contains("ufs_pci_driver"));
+        assert!(!completed.bundles.contains("ufs_pdev_driver"));
+        assert!(!completed.bundles.contains("ufsutil"));
+
+        // BoardFeature::UfsPci adds ufs_pci_driver without a separate ufsutil AIB.
+        let pci_board = BoardConfig {
+            provided_features: vec![BoardFeature::UfsPci.as_ref().to_string()],
+            ..Default::default()
+        };
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&pci_board, gendir_path);
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+        let completed = builder.build();
+        assert!(completed.bundles.contains("ufs_pci_driver"));
+        assert!(!completed.bundles.contains("ufs_pdev_driver"));
+        assert!(!completed.bundles.contains("ufsutil"));
+
+        // BoardFeature::UfsPdev adds ufs_pdev_driver without a separate ufsutil AIB.
+        let pdev_board = BoardConfig {
+            provided_features: vec![BoardFeature::UfsPdev.as_ref().to_string()],
+            ..Default::default()
+        };
+        let gendir = tempdir().unwrap();
+        let gendir_path = Utf8Path::from_path(gendir.path()).unwrap();
+        let context = setup_test_context(&pdev_board, gendir_path);
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+        StorageSubsystemConfig::define_configuration(
+            &context,
+            &(&storage_config, &StorageToolsConfig::default(), &RecoveryConfig::default()),
+            &mut builder,
+        )
+        .unwrap();
+        let completed = builder.build();
+        assert!(!completed.bundles.contains("ufs_pci_driver"));
+        assert!(completed.bundles.contains("ufs_pdev_driver"));
+        assert!(!completed.bundles.contains("ufsutil"));
     }
 }

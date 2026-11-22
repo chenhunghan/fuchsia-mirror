@@ -40,7 +40,6 @@ fidl_library(
     name = "test.empty.protocol",
     testonly = True,
     srcs = ["empty_protocol.test.fidl"],
-    enable_hlcpp = True,
     visibility = [
         "//src/lib/fidl/llcpp/tests/dispatcher:__pkg__",
         "//src/lib/fidl/llcpp/tests/integration:__pkg__",
@@ -52,7 +51,6 @@ fidl_library(
     name = "test.error.methods",
     testonly = True,
     srcs = ["error_methods.test.fidl"],
-    enable_hlcpp = True,
     visibility = [
         "//sdk/lib/fidl/cpp/tests/integration:__pkg__",
         "//src/lib/fidl/contrib/tests/fpromise:__pkg__",
@@ -66,7 +64,6 @@ fidl_library(
     name = "test.basic.protocol",
     testonly = True,
     srcs = ["basic_protocol.test.fidl"],
-    enable_hlcpp = True,
     visibility = [
         "//sdk/lib/fidl/cpp/tests/integration:__pkg__",
         "//src/lib/fidl/contrib/tests/fpromise:__pkg__",

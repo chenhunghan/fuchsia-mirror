@@ -17,8 +17,8 @@ use mapping::{
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use storage_device::buffer::{BufferFuture, MutableBufferRef};
-use storage_units::BlockSize;
-use vmo_fifo::AsyncSender;
+use storage_units::{BlockSize, page_size};
+use vmo_fifo::{Alignment, AsyncSender};
 use zx;
 
 struct MappedVmo {
@@ -29,8 +29,8 @@ struct MappedVmo {
 
 impl MappedVmo {
     fn new(vmo: zx::Vmo, len: usize) -> Result<Self, zx::Status> {
-        let page_size = zx::system_get_page_size() as usize;
-        let aligned_len = len.next_multiple_of(page_size);
+        let aligned_len =
+            page_size().align_up(len as u64).ok_or(zx::Status::INVALID_ARGS)? as usize;
         let vaddr = if aligned_len > 0 {
             fuchsia_runtime::vmar_root_self().map(
                 0,
@@ -83,8 +83,7 @@ impl MappedVmo {
 impl Drop for MappedVmo {
     fn drop(&mut self) {
         if self.vaddr != 0 {
-            let page_size = zx::system_get_page_size() as usize;
-            let aligned_len = self.len.next_multiple_of(page_size);
+            let aligned_len = page_size().align_up(self.len as u64).unwrap() as usize;
             // SAFETY: self.vaddr was mapped by vmar_root_self().map with aligned_len.
             unsafe {
                 let _ = fuchsia_runtime::vmar_root_self().unmap(self.vaddr, aligned_len);
@@ -255,7 +254,7 @@ impl LayerPagerImpl {
         let mapping_vmo = zx::Vmo::create(MAPPING_VMO_SIZE)?;
         let sender = AsyncSender::<RawMappingCommand>::new(
             mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS)?,
-            8,
+            Alignment::SIZE_8B,
             PENDING_COMMANDS_CAPACITY,
         )?;
 

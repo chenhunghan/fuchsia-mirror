@@ -9,6 +9,7 @@
 #include <lib/ddk/metadata.h>
 #include <lib/ddk/platform-defs.h>
 #include <lib/fpromise/result.h>
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/zx/clock.h>
 #include <math.h>
 #include <string.h>
@@ -89,13 +90,6 @@ void AmlG12TdmDai::Connect(ConnectRequestView request, ConnectCompleter::Sync& c
       delay_info_sent_ = false;
     });
   });
-}
-
-zx_status_t AmlG12TdmDai::DaiConnect(zx::channel channel) {
-  async::PostTask(loop_.dispatcher(), [this, channel = std::move(channel)]() mutable {
-    dai_binding_.emplace(this, std::move(channel), loop_.dispatcher());
-  });
-  return ZX_OK;
 }
 
 void AmlG12TdmDai::Reset(ResetCallback callback) {
@@ -255,9 +249,7 @@ zx_status_t AmlG12TdmDai::InitBuffer(size_t size) {
   // Make sure the DMA is stopped before releasing quarantine.
   aml_audio_->Stop();
   // Make sure that all reads/writes have gone through.
-#if defined(__aarch64__)
-  __asm__ volatile("dsb sy" : : : "memory");
-#endif
+  BarrierBeforeRelease();
   auto status = bti_.release_quarantine();
   if (status != ZX_OK) {
     zxlogf(ERROR, "could not release quarantine bti - %d", status);

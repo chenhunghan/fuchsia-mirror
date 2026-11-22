@@ -65,7 +65,7 @@ pub mod ffi_format {
 
     use super::*;
     use diagnostics_data::{LogsField, Severity};
-    use diagnostics_message::MessageParser;
+    use diagnostics_message::ffi::FfiMessageParser;
     use diagnostics_reader::{ToComponentSelectorArguments, ToSelectorArguments};
     use fidl_fuchsia_diagnostics::{
         BatchIteratorMarker, BatchIteratorProxy, ClientSelectorConfiguration, DataType,
@@ -81,7 +81,7 @@ pub mod ffi_format {
     /// Streams log messages from a BatchIterator and parses them into `TestLogMessage`.
     fn stream_messages(
         iterator: BatchIteratorProxy,
-        parser: MessageParser,
+        parser: FfiMessageParser,
     ) -> BoxStream<'static, TestLogMessage> {
         let state = (iterator, parser, Vec::new());
         futures::stream::unfold(state, |(iterator, mut parser, mut pending)| async move {
@@ -178,7 +178,7 @@ pub mod ffi_format {
                 server_end,
             )
             .unwrap();
-        let mut stream = stream_messages(iterator.clone(), MessageParser::default());
+        let mut stream = stream_messages(iterator.clone(), FfiMessageParser::default());
         let mut messages = Vec::new();
         while let Some(msg) = stream.next().await {
             messages.push(msg);
@@ -388,7 +388,7 @@ pub mod ffi_format {
                     server_end,
                 )
                 .unwrap();
-            stream_messages(iterator, MessageParser::default())
+            stream_messages(iterator, FfiMessageParser::default())
         }
     }
 

@@ -2,16 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 import("//build/testing/perf/test.gni")
 
-fuchsia_package("rust-inspect-benchmarks") {
-  deps = [
-    "reader:reader-component",
-    "snapshot_filter:snapshot-filter-component",
-    "writer:writer-component",
-  ]
+# LINT.IfChange
+bazel_fuchsia_package("rust-inspect-benchmarks") {
+  bazel_config = "fuchsia_platform"
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 fuchsia_component_perf_test("rust-inspect-reader-benchmark") {
   package = ":rust-inspect-benchmarks"

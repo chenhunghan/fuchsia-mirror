@@ -62,9 +62,6 @@ def project_root_dir() -> Path:
         d = next
 
 
-# This script starts/stops reproxy around a command.
-REPROXY_WRAP = _SCRIPT_DIR_REL / "fuchsia-reproxy-wrap.sh"
-
 ##########################################################################
 ### Prebuilt tools
 ##########################################################################

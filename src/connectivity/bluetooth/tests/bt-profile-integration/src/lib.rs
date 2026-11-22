@@ -8,7 +8,7 @@ use bt_test_harness::profile::ProfileHarness;
 use fidl::endpoints::create_request_stream;
 use fidl_fuchsia_bluetooth::{ErrorCode, MAJOR_DEVICE_CLASS_MISCELLANEOUS};
 use fidl_fuchsia_bluetooth_bredr::{
-    ConnectParameters, ConnectionReceiverRequestStream, DataElement, L2capParameters, PSM_AVDTP,
+    ConnectParameters, ConnectionReceiver2RequestStream, DataElement, L2capParameters, PSM_AVDTP,
     ProfileAdvertiseRequest, ProfileDescriptor, ProfileSearchRequest, ProtocolDescriptor,
     ProtocolIdentifier, SearchResultsRequest, SearchResultsRequestStream,
     ServiceClassProfileIdentifier, ServiceDefinition,
@@ -60,13 +60,15 @@ pub fn a2dp_sink_service_definition() -> ServiceDefinition {
     }
 }
 
-fn add_service(profile: &ProfileHarness) -> Result<ConnectionReceiverRequestStream, anyhow::Error> {
+fn add_service(
+    profile: &ProfileHarness,
+) -> Result<ConnectionReceiver2RequestStream, anyhow::Error> {
     let service_defs = vec![service_definition_for_testing()];
     let (connect_client, connect_requests) = create_request_stream();
 
     let _ = profile.aux().profile.advertise(ProfileAdvertiseRequest {
         services: Some(service_defs),
-        receiver: Some(connect_client),
+        connection_receiver: Some(connect_client),
         ..Default::default()
     });
     Ok(connect_requests)

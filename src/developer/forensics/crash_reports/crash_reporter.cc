@@ -5,7 +5,6 @@
 #include "src/developer/forensics/crash_reports/crash_reporter.h"
 
 #include <fidl/fuchsia.feedback/cpp/fidl.h>
-#include <fidl/fuchsia.feedback/cpp/hlcpp_conversion.h>
 #include <lib/async/cpp/task.h>
 #include <lib/fit/defer.h>
 #include <lib/fit/result.h>
@@ -257,9 +256,9 @@ void CrashReporter::File(fuchsia_feedback::CrashReport report, const bool is_hou
 
   auto p =
       snapshot_collector_
-          .GetReport(kSnapshotTimeout, fidl::NaturalToHLCPP(std::move(report)),
-                     std::move(*program_shortname), report_id, current_time, product,
-                     is_hourly_snapshot, reporting_policy_watcher_->CurrentPolicy())
+          .GetReport(kSnapshotTimeout, std::move(report), std::move(*program_shortname), report_id,
+                     current_time, product, is_hourly_snapshot,
+                     reporting_policy_watcher_->CurrentPolicy())
           .then([this, report_id, is_hourly_snapshot,
                  callback = std::move(callback)](fpromise::result<Report>& result) mutable {
             if (is_hourly_snapshot) {

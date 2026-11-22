@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":stdio-test-pkg"],
+    visibility = ["//zircon/system/utest:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "stdio-test",
+    srcs = [
+        "stdio.c",
+        "util.c",
+        "util.h",
+    ],
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/test-utils",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "stdio-test_packaged_bin",
+    testonly = True,
+    binary = ":stdio-test",
+    binary_name = "stdio-test",
+    install_root = "test/",
+)
+
+fx_cc_binary(
+    name = "stdio-test-util",
+    srcs = ["test-util.cc"],
+    deps = ["//sdk/lib/fdio"],
+)
+
+fx_packaged_binary(
+    name = "stdio-test-util_packaged_bin",
+    testonly = True,
+    binary = ":stdio-test-util",
+    binary_name = "stdio-test-util",
+)
+
+fx_component_manifest(
+    name = "stdio-test-manifest",
+    testonly = True,
+    component_name = "stdio-test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "stdio-test.cml",
+)
+
+fx_test_component(
+    name = "stdio-test-component",
+    compiled_manifest = ":stdio-test-manifest",
+    deps = [
+        ":stdio-test-util_packaged_bin",
+        ":stdio-test_packaged_bin",
+    ],
+)
+
+fx_package(
+    name = "stdio-test-package",
+    package_name = "stdio-test",
+    test_components = [":stdio-test-component"],
+)
+
+fx_test(
+    name = "stdio-test-pkg",
+    package = ":stdio-test-package",
+)

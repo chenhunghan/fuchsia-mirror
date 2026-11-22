@@ -1862,6 +1862,26 @@ func (r *Root) DeclInfo() DeclInfoMap {
 			info.Resourceness = new(Resourceness)
 			*info.Resourceness = resDecl.GetResourceness()
 		}
+		switch d := decl.(type) {
+		case *Bits:
+			info.TypeShapeV2 = &d.Type.TypeShapeV2
+		case *Enum:
+			size := d.Type.NumberOfBytes()
+			info.TypeShapeV2 = &TypeShape{
+				InlineSize: size,
+				Alignment:  size,
+			}
+		case *NewType:
+			info.TypeShapeV2 = &d.Type.TypeShapeV2
+		case *Overlay:
+			info.TypeShapeV2 = &d.TypeShapeV2
+		case *Struct:
+			info.TypeShapeV2 = &d.TypeShapeV2
+		case *Table:
+			info.TypeShapeV2 = &d.TypeShapeV2
+		case *Union:
+			info.TypeShapeV2 = &d.TypeShapeV2
+		}
 		m[decl.GetName()] = info
 	})
 	for _, l := range r.Libraries {

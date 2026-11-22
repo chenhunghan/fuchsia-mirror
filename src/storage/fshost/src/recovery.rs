@@ -95,7 +95,7 @@ impl RecoveryOps {
         let mut container: Box<dyn Container> = if self.config.fxfs_blob {
             Box::new(FxfsContainer::new(
                 self.launcher
-                    .serve_fxblob(device, Box::new(Fxfs::dynamic_child()))
+                    .serve_fxblob(device, Fxfs::dynamic_child())
                     .await
                     .context("serving Fxblob")?,
             ))
@@ -300,7 +300,11 @@ impl RecoveryOps {
             .create_volume(
                 BLOB_VOLUME_LABEL,
                 CreateOptions::default(),
-                MountOptions { as_blob: Some(true), ..Default::default() },
+                MountOptions {
+                    as_blob: Some(true),
+                    use_driver_blob_paging: Some(self.config.use_driver_blob_paging),
+                    ..Default::default()
+                },
             )
             .await
             .context("creating blob volume")?;
@@ -332,7 +336,11 @@ impl RecoveryOps {
         let blob_volume = serving_fxfs
             .open_volume(
                 BLOB_VOLUME_LABEL,
-                MountOptions { as_blob: Some(true), ..Default::default() },
+                MountOptions {
+                    as_blob: Some(true),
+                    use_driver_blob_paging: Some(self.config.use_driver_blob_paging),
+                    ..Default::default()
+                },
             )
             .await
             .context("mounting blob volume")?;

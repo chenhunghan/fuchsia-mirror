@@ -14,10 +14,10 @@ use zx_status::Status;
 
 use super::energy_model::{POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT, PowerDomain, PowerDomainSet};
 pub use super::power_level_controller::PowerLevelUpdateRequest;
-use super::{ControlInterface, ProcessingRate, Utilization};
+use super::{ProcessingRate, Utilization};
 
-/// PowerState encapsulates the current power level, power domain, and energy model for an
-/// individual processor.
+/// PowerState encapsulates the current active power level, current idle state index, power domain,
+/// and energy model for an individual processor.
 ///
 /// Instances of PowerState are not safe for concurrent use and must be protected by an external
 /// lock associated with the owning processor.
@@ -30,11 +30,16 @@ pub struct PowerState {
     /// The power domain the processor belongs to.
     domain: Option<RefPtr<PowerDomain>>,
 
-    /// The power level when the processor is actively running.
+    /// The 0-based active power level index (`0..active_levels().len()`) when the processor is
+    /// actively running.
     active_power_level: Option<u8>,
 
-    /// Represents the power level that needs be to transitioned to.
+    /// The 0-based active power level index that needs to be transitioned to.
     desired_active_power_level: Option<u8>,
+
+    /// The 0-based idle state index (`0..idle_states().len()`) for this processor (`0` = shallowest
+    /// idle state, typically WFI).
+    idle_state_index: u8,
 
     /// The current normalized utilization of the processor.
     normalized_utilization: Utilization,
@@ -52,6 +57,7 @@ impl PowerState {
             domain: None,
             active_power_level: None,
             desired_active_power_level: None,
+            idle_state_index: 0,
             normalized_utilization: Utilization::from_raw(0),
         }
     }
@@ -92,65 +98,56 @@ impl PowerState {
         self.domain().as_ref().is_some_and(|domain| domain.scheduler_control_enabled())
     }
 
-    /// Returns the active power level when device is not idle.
+    /// Returns the 0-based active power level index when the processor is not idle.
     #[inline]
     pub const fn active_power_level(&self) -> Option<u8> {
         self.active_power_level
     }
 
-    /// Returns the active power level the device is in the process of transitioning to.
+    /// Returns the 0-based active power level index the processor is in the process of
+    /// transitioning to.
     #[inline]
     pub const fn desired_active_power_level(&self) -> Option<u8> {
         self.desired_active_power_level
     }
 
-    /// Returns the maximum (i.e. highest power, lowest latency) idle power level.
+    /// Returns the current 0-based idle state index (`0` = shallowest idle state).
     #[inline]
-    pub fn max_idle_power_level(&self) -> Option<u8> {
-        if let Some(domain) = self.domain() {
-            return domain.model().max_idle_power_level();
-        }
-        None
+    pub const fn idle_state_index(&self) -> u8 {
+        self.idle_state_index
     }
 
-    /// Returns the power coefficient of the current active power level. Returns zero if there is no
-    /// active power level or no domain is set.
+    /// Returns the active power of the current active power level in nanowatts. Returns zero if
+    /// there is no active power level or no domain is set.
     #[inline]
     pub fn active_power_coefficient_nw(&self) -> u64 {
         if let (Some(domain), Some(active_power_level)) = (self.domain(), self.active_power_level) {
-            return domain.model().levels()[active_power_level as usize].power_coefficient_nw();
+            return domain.model().active_levels()[active_power_level as usize].active_power_nw();
         }
         0
     }
 
-    /// Returns the power coefficient of the maximum idle power level. Returns zero if there is no
-    /// idle power level or no domain is set.
+    /// Returns the steady-state idle power consumption in nanowatts at the current
+    /// `idle_state_index` and `active_power_level`. Returns zero if no domain is set, no idle
+    /// state is configured, or the current idle state is `ClockGated` and `active_power_level` is
+    /// `None`.
     #[inline]
-    pub fn max_idle_power_coefficient_nw(&self) -> u64 {
+    pub fn idle_power_nw(&self) -> u64 {
         if let Some(domain) = self.domain() {
-            return domain.model().max_idle_power_coefficient_nw().unwrap_or(0);
+            return domain.model().idle_power_nw(
+                self.idle_state_index as usize,
+                self.active_power_level.map(usize::from),
+            );
         }
         0
     }
 
-    /// Returns the control interface of the maximum idle power level. Returns `None` if there is no
-    /// idle power level or no domain is set.
-    #[inline]
-    pub fn max_idle_power_level_interface(&self) -> Option<ControlInterface> {
-        if let Some(domain) = self.domain() {
-            return domain.model().max_idle_power_level_interface();
-        }
-        None
-    }
-
-    /// Returns true if the given power level is valid active power level
+    /// Returns true if the given 0-based power level index is a valid active power level
     /// (`IsValidActivePowerLevel`).
     #[inline]
     pub fn is_valid_active_power_level(&self, power_level: u8) -> bool {
         if let Some(domain) = self.domain() {
-            let model = domain.model();
-            let level = power_level as usize;
-            return level >= model.idle_levels_len() && level < model.levels_len();
+            return (power_level as usize) < domain.model().active_levels().len();
         }
         false
     }
@@ -169,7 +166,7 @@ impl PowerState {
     #[inline]
     pub fn active_processing_rate(&self) -> ProcessingRate {
         if let (Some(domain), Some(active_power_level)) = (self.domain(), self.active_power_level) {
-            return domain.model().levels()[active_power_level as usize].processing_rate();
+            return domain.model().active_levels()[active_power_level as usize].processing_rate();
         }
         ProcessingRate::from_raw(0)
     }
@@ -181,10 +178,9 @@ impl PowerState {
     #[inline]
     pub fn preceding_active_processing_rate(&self) -> ProcessingRate {
         if let (Some(domain), Some(active_power_level)) = (self.domain(), self.active_power_level) {
-            let model = domain.model();
             let index = active_power_level as usize;
-            if index > model.idle_levels_len() {
-                return model.levels()[index - 1].processing_rate();
+            if index > 0 {
+                return domain.model().active_levels()[index - 1].processing_rate();
             }
         }
         ProcessingRate::from_raw(0)
@@ -204,7 +200,7 @@ impl PowerState {
         if let Some(domain) = self.domain()
             && let Some(level) = self.target_active_power_level()
         {
-            return domain.model().levels()[level as usize].processing_rate();
+            return domain.model().active_levels()[level as usize].processing_rate();
         }
         ProcessingRate::from_raw(0)
     }
@@ -217,10 +213,9 @@ impl PowerState {
         if let Some(domain) = self.domain()
             && let Some(level) = self.target_active_power_level()
         {
-            let model = domain.model();
             let index = level as usize;
-            if index > model.idle_levels_len() {
-                return model.levels()[index - 1].processing_rate();
+            if index > 0 {
+                return domain.model().active_levels()[index - 1].processing_rate();
             }
         }
         ProcessingRate::from_raw(0)
@@ -230,10 +225,10 @@ impl PowerState {
     /// preceding it (i.e. is not the lowest active power level).
     #[inline]
     pub fn has_preceding_target_power_level(&self) -> bool {
-        if let Some(domain) = self.domain()
+        if self.domain().is_some()
             && let Some(level) = self.target_active_power_level()
         {
-            return (level as usize) > domain.model().idle_levels_len();
+            return level > 0;
         }
         false
     }
@@ -267,14 +262,16 @@ impl PowerState {
 
         self.active_power_level = None;
         self.desired_active_power_level = None;
+        self.idle_state_index = 0;
         self.domain = domain;
 
         if let Some(domain) = &self.domain {
             let control_argument_result = domain.controller().get_current_power_level(domain.id());
             if let Ok(control_argument) = control_argument_result {
-                let level = domain
-                    .model()
-                    .find_power_level(domain.controller().control_interface(), control_argument);
+                let level = domain.model().find_active_power_level(
+                    domain.controller().control_interface(),
+                    control_argument,
+                );
                 self.active_power_level = level;
                 self.desired_active_power_level = level;
             }
@@ -294,13 +291,13 @@ impl PowerState {
     }
 
     /// Posts a request to transition the power domain associated with this power state to a given
-    /// active power level from the current energy model (`RequestTransition`).
+    /// 0-based active power level from the current energy model (`RequestTransition`).
     ///
-    /// Ignored when no domain is set. Asserts that the requested power level is an active power
-    /// level.
+    /// Ignored when no domain is set. Asserts that `active_power_level` is in bounds of
+    /// `domain.model().active_levels()`.
     ///
     /// `cpu_num` is the CPU associated with this power state.
-    /// `active_power_level` is the desired power level.
+    /// `active_power_level` is the desired 0-based active power level index.
     pub fn request_transition(
         &mut self,
         cpu_num: u32,
@@ -313,11 +310,7 @@ impl PowerState {
         self.active_power_level?;
 
         let model = domain.model();
-        assert!(
-            (active_power_level as usize) >= model.idle_levels_len()
-                && (active_power_level as usize) < model.levels_len(),
-            "ASSERT FAILED"
-        );
+        assert!((active_power_level as usize) < model.active_levels().len(), "ASSERT FAILED");
 
         if self.desired_active_power_level == Some(active_power_level) {
             return None;
@@ -325,7 +318,7 @@ impl PowerState {
 
         self.desired_active_power_level = Some(active_power_level);
 
-        let level = &model.levels()[active_power_level as usize];
+        let level = &model.active_levels()[active_power_level as usize];
 
         let mut transition = PowerLevelUpdateRequest {
             domain_id: domain.id(),
@@ -343,16 +336,15 @@ impl PowerState {
         Some(transition)
     }
 
-    /// Updates the active power level of this power state (`UpdateActivePowerLevel`). Typically
-    /// called in response to the power level controller completing a power level transition
-    /// request.
+    /// Updates the 0-based active power level of this power state (`UpdateActivePowerLevel`).
+    /// Typically called in response to the power level controller completing a power level
+    /// transition request.
     pub fn update_active_power_level(&mut self, level: u8) -> Result<(), Status> {
         let Some(domain) = &self.domain else {
             return Err(Status::BAD_STATE);
         };
 
-        let model = domain.model();
-        if (level as usize) < model.idle_levels_len() || (level as usize) >= model.levels_len() {
+        if (level as usize) >= domain.model().active_levels().len() {
             return Err(Status::OUT_OF_RANGE);
         }
 
@@ -375,5 +367,142 @@ impl PowerState {
         }
         self.normalized_utilization += utilization_delta;
         self.normalized_utilization
+    }
+}
+
+/// Unit tests for per-processor power state tracking.
+#[cfg(test)]
+mod tests {
+
+    use super::super::ControlInterface;
+    use super::super::energy_model::{
+        ActivePowerLevelConfig, EnergyModel, IdlePowerModel, IdlePowerStateConfig, IdleStateFlags,
+        POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT, PowerDomain, PowerDomainConfig, PowerDomainSet,
+    };
+    use super::PowerState;
+
+    /// Verifies that domain-independent active levels target `cpu_num`.
+    #[test]
+    fn domain_independent_active_transition_targets_cpu() {
+        let active_levels = [
+            ActivePowerLevelConfig {
+                options: POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT,
+                processing_rate: 100,
+                active_power_nw: 1_000_000,
+                static_power_nw: 100_000,
+                control_interface: ControlInterface::CpuDriver,
+                control_argument: 10,
+                diagnostic_name: "opp0",
+            },
+            ActivePowerLevelConfig {
+                options: POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT,
+                processing_rate: 200,
+                active_power_nw: 2_000_000,
+                static_power_nw: 200_000,
+                control_interface: ControlInterface::CpuDriver,
+                control_argument: 20,
+                diagnostic_name: "opp1",
+            },
+        ];
+        let config = PowerDomainConfig {
+            domain_id: 123,
+            cpu_mask: 0x0f,
+            active_levels: &active_levels,
+            idle_states: &[],
+            active_transitions: &[],
+        };
+        let mut model = EnergyModel::create_from_config(&config, 0).expect("valid model");
+        let domain = PowerDomain::create_for_test(123, 0x0f, &mut model).expect("valid domain");
+        let mut domain_set = PowerDomainSet::create_for_test(Some(&domain));
+
+        let mut state = PowerState::new();
+        state.update_power_domain_set(&mut domain_set, 2);
+        assert!(state.update_active_power_level(0).is_ok());
+
+        let req = state.request_transition(2, 1).expect("expected transition request");
+        assert_eq!(req.domain_id, 123);
+        assert_eq!(req.target_id, 2);
+        assert_eq!(req.control_argument, 20);
+        assert_eq!(req.options, POWER_LEVEL_OPTIONS_DOMAIN_INDEPENDENT as u32);
+    }
+
+    /// Verifies `PowerState::idle_power_nw` across `ClockGated` and `PowerGated` states.
+    #[test]
+    fn idle_power_nw_tracks_opp_and_power_gated_residual() {
+        let active_levels = [
+            ActivePowerLevelConfig {
+                options: 0,
+                processing_rate: 100,
+                active_power_nw: 1_000_000,
+                static_power_nw: 150_000,
+                control_interface: ControlInterface::CpuDriver,
+                control_argument: 0,
+                diagnostic_name: "opp0",
+            },
+            ActivePowerLevelConfig {
+                options: 0,
+                processing_rate: 200,
+                active_power_nw: 2_500_000,
+                static_power_nw: 400_000,
+                control_interface: ControlInterface::CpuDriver,
+                control_argument: 1,
+                diagnostic_name: "opp1",
+            },
+        ];
+        let clock_gated_idle = [IdlePowerStateConfig::ARM_WFI];
+        let power_gated_idle = [IdlePowerStateConfig {
+            power_model: IdlePowerModel::PowerGated { residual_power_nw: 25_000 },
+            entry_latency_ns: 1_000,
+            exit_latency_ns: 2_000,
+            min_residency_ns: 10_000,
+            scope_cpu_mask: 0x03,
+            flags: IdleStateFlags::LOCAL_TIMER_STOPS,
+            control_interface: ControlInterface::ArmPsci,
+            control_argument: 0x0100_0001,
+            diagnostic_name: "c2",
+        }];
+
+        let mut state = PowerState::new();
+        let set_domain_idle_states =
+            |state: &mut PowerState, domain_id: u32, idle_states: &[IdlePowerStateConfig<'_>]| {
+                let mut model = EnergyModel::create_from_config(
+                    &PowerDomainConfig {
+                        domain_id,
+                        cpu_mask: 0x03,
+                        active_levels: &active_levels,
+                        idle_states,
+                        active_transitions: &[],
+                    },
+                    0,
+                )
+                .expect("valid energy model");
+                let domain = PowerDomain::create_for_test(domain_id, 0x03, &mut model)
+                    .expect("valid domain");
+                let mut domain_set = PowerDomainSet::create_for_test(Some(&domain));
+                state.update_power_domain_set(&mut domain_set, 0);
+            };
+
+        // ClockGated idle state tracks the active OPP's static_power_nw.
+        set_domain_idle_states(&mut state, 1, &clock_gated_idle);
+        assert_eq!(state.idle_state_index(), 0);
+        assert_eq!(state.idle_power_nw(), 0);
+
+        assert!(state.update_active_power_level(0).is_ok());
+        assert_eq!(state.idle_power_nw(), 150_000);
+        assert!(state.update_active_power_level(1).is_ok());
+        assert_eq!(state.idle_power_nw(), 400_000);
+
+        // PowerGated idle state reports residual_power_nw regardless of active OPP.
+        set_domain_idle_states(&mut state, 2, &power_gated_idle);
+        assert_eq!(state.idle_power_nw(), 25_000);
+        assert!(state.update_active_power_level(0).is_ok());
+        assert_eq!(state.idle_power_nw(), 25_000);
+        assert!(state.update_active_power_level(1).is_ok());
+        assert_eq!(state.idle_power_nw(), 25_000);
+
+        // Empty idle_states slice reports 0 nW.
+        set_domain_idle_states(&mut state, 3, &[]);
+        assert!(state.update_active_power_level(1).is_ok());
+        assert_eq!(state.idle_power_nw(), 0);
     }
 }

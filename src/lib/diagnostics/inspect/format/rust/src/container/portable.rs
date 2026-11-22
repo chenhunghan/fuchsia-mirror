@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{BlockContainer, CopyBytes, ReadBytes, WriteBytes, constants};
+use crate::{BlockContainer, CopyBytes, ReadBytes, WriteBytes};
 
 #[derive(Debug)]
 pub struct Container {
@@ -16,8 +16,11 @@ impl Container {
         Ok((Self { buffer }, ()))
     }
 
-    pub fn read_only(buffer: &[u8]) -> Self {
-        let vmo_size = std::cmp::min(buffer.len(), constants::MAX_VMO_SIZE);
+    pub fn read_only_with_max_size(buffer: &[u8], max_size: Option<usize>) -> Self {
+        let vmo_size = match max_size {
+            Some(max_size) => std::cmp::min(buffer.len(), max_size),
+            None => buffer.len(),
+        };
         Self { buffer: buffer[..vmo_size].to_vec() }
     }
 }

@@ -282,8 +282,8 @@ Err OutputSourceContext(Process* process, std::unique_ptr<SourceFileProvider> fi
     source_opts.active_line = location.file_line().line();
     source_opts.highlight_line = source_opts.active_line;
     source_opts.highlight_column = location.column();
-    source_opts.first_line = source_opts.active_line - context.first;
-    source_opts.last_line = source_opts.active_line + context.second;
+    source_opts.first_line = source_opts.active_line - static_cast<int>(context.first);
+    source_opts.last_line = source_opts.active_line + static_cast<int>(context.second);
     source_opts.dim_others = true;
     source_opts.module_for_time_warning = GetWeakModuleForLocation(process, location);
 
@@ -325,7 +325,7 @@ Err OutputSourceContext(Process* process, std::unique_ptr<SourceFileProvider> fi
     size_t size = options.max_instructions * arch_info.max_instr_len();
 
     process->ReadMemory(
-        start_address, size,
+        start_address, static_cast<uint32_t>(size),
         [options, weak_process = process->GetWeakPtr(), file_provider = std::move(file_provider)](
             const Err& in_err, MemoryDump dump) {
           if (!weak_process)
@@ -409,7 +409,7 @@ Err FormatSourceContext(const std::string& file_name_for_display, const std::str
 
   std::vector<std::vector<OutputBuffer>> rows;
   for (size_t i = 0; i < context.size(); i++) {
-    int line_number = first_line + i;
+    int line_number = first_line + static_cast<int>(i);
 
     rows.emplace_back();
     std::vector<OutputBuffer>& row = rows.back();
@@ -584,8 +584,8 @@ Err FormatBreakpointContext(const Location& location, const SourceFileProvider& 
 
   FormatSourceOpts opts;
   opts.SetLanguageFromFileName(location.file_line().file());
-  opts.first_line = line - context.first;
-  opts.last_line = line + context.second;
+  opts.first_line = line - static_cast<int>(context.first);
+  opts.last_line = line + static_cast<int>(context.second);
   opts.highlight_line = line;
   opts.bp_lines[line] = enabled;
   return FormatSourceFileContext(location.file_line(), file_provider, opts, out);

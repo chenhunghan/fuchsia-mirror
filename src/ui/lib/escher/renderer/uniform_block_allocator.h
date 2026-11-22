@@ -32,7 +32,7 @@ class UniformBlockAllocator {
   // immediately freed then the behavior is effectively identical to Reset().
   //
   // NOTE: the caller is responsible for returning the buffers to the pool
-  // before the pool is destroyed (this is enforced by ResourceManager DCHECKs).
+  // before the pool is destroyed (this is enforced by the `Owner` `FX_CHECK` in all build modes).
   // The caller must therefore know something about the lifetime of the pool (or
   // at least the lifetime of this allocator, since the pool is required to
   // outlive this allocator).

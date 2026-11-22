@@ -2913,7 +2913,29 @@ bool LogicalBufferCollection::CheckSanitizeBufferCollectionConstraints(
     ZX_DEBUG_ASSERT(constraints.usage().has_value());
     if (!CheckSanitizeImageFormatConstraints(stage, *constraints.usage(),
                                              image_format_constraints[i])) {
-      return false;
+      if (stage != CheckSanitizeStage::kAggregated) {
+        return false;
+      }
+      const auto format = PixelFormatAndModifierFromConstraints(image_format_constraints[i]);
+      LogInfo(FROM_HERE,
+              "removing incompatible aggregated format: pixel_format: %u "
+              "pixel_format_modifier: 0x%" PRIx64,
+              fidl::ToUnderlying(format.pixel_format),
+              fidl::ToUnderlying(format.pixel_format_modifier));
+
+      if (i != image_format_constraints.size() - 1) {
+        image_format_constraints[i] =
+            std::move(image_format_constraints[image_format_constraints.size() - 1]);
+      }
+      image_format_constraints.resize(image_format_constraints.size() - 1);
+      --i;
+
+      // 1 -> 0 is an error (in contrast to initially 0 which is not an error)
+      if (image_format_constraints.empty()) {
+        LogError(FROM_HERE,
+                 "after removing incompatible aggregated format(s), zero formats remaining");
+        return false;
+      }
     }
   }
 
@@ -3289,9 +3311,13 @@ bool LogicalBufferCollection::CheckSanitizeImageFormatConstraints(
                fidl::ToUnderlying(pixel_format_and_modifier.pixel_format_modifier));
       return false;
     }
-    uint32_t stride_bytes_per_width_pixel =
+    const uint32_t stride_bytes_per_width_pixel =
         ImageFormatStrideBytesPerWidthPixel(pixel_format_and_modifier);
-    uint32_t sample_alignment = ImageFormatSampleAlignment(pixel_format_and_modifier);
+    const uint32_t sample_alignment = ImageFormatSampleAlignment(pixel_format_and_modifier);
+    const uint32_t format_row_bytes_divisor =
+        ImageFormatRowBytesMinDivisor(pixel_format_and_modifier);
+    const uint32_t pixel_boundary_divisor =
+        *constraints.require_bytes_per_row_at_pixel_boundary() ? stride_bytes_per_width_pixel : 1;
 
     constraints.size_alignment()->width() =
         std::max(constraints.size_alignment()->width(),
@@ -3300,17 +3326,10 @@ bool LogicalBufferCollection::CheckSanitizeImageFormatConstraints(
         std::max(constraints.size_alignment()->height(),
                  ImageFormatSurfaceHeightMinDivisor(pixel_format_and_modifier));
 
-    auto combine_bytes_per_row_divisor_result =
-        CombineBytesPerRowDivisor(*constraints.bytes_per_row_divisor(), sample_alignment);
-    if (!combine_bytes_per_row_divisor_result.is_ok()) {
-      LogError(FROM_HERE, "!combine_bytes_per_row_divisor_result.is_ok()");
-      return false;
-    }
-    constraints.bytes_per_row_divisor() = *combine_bytes_per_row_divisor_result;
-
-    if (*constraints.require_bytes_per_row_at_pixel_boundary()) {
-      auto combine_bytes_per_row_divisor_result = CombineBytesPerRowDivisor(
-          *constraints.bytes_per_row_divisor(), stride_bytes_per_width_pixel);
+    for (const uint32_t divisor :
+         {sample_alignment, format_row_bytes_divisor, pixel_boundary_divisor}) {
+      const auto combine_bytes_per_row_divisor_result =
+          CombineBytesPerRowDivisor(*constraints.bytes_per_row_divisor(), divisor);
       if (!combine_bytes_per_row_divisor_result.is_ok()) {
         LogError(FROM_HERE, "!combine_bytes_per_row_divisor_result.is_ok()");
         return false;
@@ -3323,15 +3342,6 @@ bool LogicalBufferCollection::CheckSanitizeImageFormatConstraints(
 
     constraints.min_bytes_per_row() =
         std::max(*constraints.min_bytes_per_row(), *constraints.bytes_per_row_divisor());
-    ZX_DEBUG_ASSERT(constraints.min_size()->width() > 0);
-    uint32_t minimum_row_bytes = 0;
-    // If this call fails, it means we'll be failing the collection soon anyway, but don't fail
-    // the collection here since this error would be less specific in the log.
-    if (ImageFormatMinimumRowBytes(constraints, constraints.min_size()->width(),
-                                   &minimum_row_bytes)) {
-      constraints.min_bytes_per_row() =
-          std::max(constraints.min_bytes_per_row().value(), minimum_row_bytes);
-    }
   }
 
   // Avoid requiring clients to round up if the client is just using a min as-is. This must be done
@@ -3408,6 +3418,24 @@ bool LogicalBufferCollection::CheckSanitizeImageFormatConstraints(
   if (constraints.min_bytes_per_row().value() > constraints.max_bytes_per_row().value()) {
     LogError(FROM_HERE, "min_bytes_per_row > max_bytes_per_row");
     return false;
+  }
+
+  // Evaluate ImageFormatMinimumRowBytesChecked after min/max alignment rounding and min <= max
+  // checks so those report more specific errors first and row-byte checks see rounded bounds.
+  if (!is_format_do_not_care) {
+    ZX_DEBUG_ASSERT(constraints.min_size()->width() > 0);
+    uint32_t minimum_row_bytes = 0;
+    if (!ImageFormatMinimumRowBytesChecked(constraints, constraints.min_size()->width())
+             .AssignIfValid(&minimum_row_bytes)) {
+      LogError(FROM_HERE,
+               "ImageFormatMinimumRowBytesChecked() failed for min_size.width=%u (e.g. > "
+               "max_bytes_per_row %u or overflow)",
+               constraints.min_size()->width(), *constraints.max_bytes_per_row());
+      return false;
+    }
+    constraints.min_bytes_per_row() = std::max(*constraints.min_bytes_per_row(), minimum_row_bytes);
+    ZX_DEBUG_ASSERT(*constraints.min_bytes_per_row() % *constraints.bytes_per_row_divisor() == 0);
+    ZX_DEBUG_ASSERT(*constraints.min_bytes_per_row() <= *constraints.max_bytes_per_row());
   }
 
   uint32_t min_width_times_min_height;
@@ -3499,6 +3527,33 @@ bool LogicalBufferCollection::CheckSanitizeImageFormatConstraints(
     if (required_max_size.height() > constraints.max_size()->height()) {
       LogError(FROM_HERE, "required_max_size_list[n].height > max_size.height");
       return false;
+    }
+  }
+
+  if (!is_format_do_not_care) {
+    if (constraints.required_max_size()->width() > 0) {
+      const uint32_t effective_width =
+          std::max(constraints.min_size()->width(), constraints.required_max_size()->width());
+      if (!ImageFormatMinimumRowBytesChecked(constraints, effective_width).IsValid()) {
+        LogError(FROM_HERE,
+                 "ImageFormatMinimumRowBytesChecked() failed for "
+                 "required_max_size.width=%u (effective_width=%u, max_bytes_per_row=%u)",
+                 constraints.required_max_size()->width(), effective_width,
+                 *constraints.max_bytes_per_row());
+        return false;
+      }
+    }
+    for (const auto& required_max_size : *constraints.required_max_size_list()) {
+      const uint32_t effective_width =
+          std::max(constraints.min_size()->width(), required_max_size.width());
+      if (!ImageFormatMinimumRowBytesChecked(constraints, effective_width).IsValid()) {
+        LogError(FROM_HERE,
+                 "ImageFormatMinimumRowBytesChecked() failed for "
+                 "required_max_size_list[n].width=%u (effective_width=%u, "
+                 "max_bytes_per_row=%u)",
+                 required_max_size.width(), effective_width, *constraints.max_bytes_per_row());
+        return false;
+      }
     }
   }
 
@@ -3775,11 +3830,11 @@ bool LogicalBufferCollection::AccumulateConstraintImageFormats(
       auto c_pixel_format_and_modifier = PixelFormatAndModifierFromConstraints(c[ci]);
       if (ImageFormatIsPixelFormatEqual(acc_pixel_format_and_modifier,
                                         c_pixel_format_and_modifier)) {
-        // Move last entry into the entry we're consuming, since LLCPP FIDL tables don't have any
-        // way to detect that they've been moved out of, so we need to keep c tightly packed with
-        // not-moved-out-of entries.  We don't need to adjust ci to stay at the same entry for the
-        // next iteration of the loop because by this point we know we're done scanning c in this
-        // iteration of the ai loop.
+        // Move last entry into the entry we're consuming, since FIDL C++ natural tables don't have
+        // any way to detect that they've been moved out of, so we need to keep c tightly packed
+        // with not-moved-out-of entries.  We don't need to adjust ci to stay at the same entry for
+        // the next iteration of the loop because by this point we know we're done scanning c in
+        // this iteration of the ai loop.
         fuchsia_sysmem2::ImageFormatConstraints old_c_ci = std::move(c[ci]);
         if (ci != c.size() - 1) {
           c[ci] = std::move(c[c.size() - 1]);
@@ -4353,28 +4408,23 @@ LogicalBufferCollection::GenerateUnpopulatedBufferCollectionInfo(
         return fpromise::error(ZX_ERR_NOT_SUPPORTED);
       }
 
-      uint32_t one_row_non_padding_bytes;
-      if (!CheckMul(ImageFormatStrideBytesPerWidthPixel(pixel_format_and_modifier),
-                    min_image.size()->width())
-               .AssignIfValid(&one_row_non_padding_bytes)) {
-        LogError(FROM_HERE, "stride_bytes_per_width_pixel * size.width failed");
-        return fpromise::error(ZX_ERR_NOT_SUPPORTED);
-      }
-      uint32_t bytes_per_row;
-      if (!CheckRoundUp(
-               std::max(one_row_non_padding_bytes, *image_format_constraints.min_bytes_per_row()),
-               *image_format_constraints.bytes_per_row_divisor())
+      uint32_t bytes_per_row = 0;
+      if (!ImageFormatMinimumRowBytesChecked(image_format_constraints, min_image.size()->width())
                .AssignIfValid(&bytes_per_row)) {
-        LogError(FROM_HERE, "bytes_per_row_divisor caused bytes_per_row round_up overflow");
-        return fpromise::error(ZX_ERR_NOT_SUPPORTED);
-      }
-      min_image.bytes_per_row() = bytes_per_row;
-      if (*min_image.bytes_per_row() > *image_format_constraints.max_bytes_per_row()) {
         LogError(FROM_HERE,
-                 "bytes_per_row_divisor caused bytes_per_row > "
-                 "max_bytes_per_row");
+                 "ImageFormatMinimumRowBytesChecked() failed for min_image.size.width=%u "
+                 "(required_max_size.width=%u, max_bytes_per_row=%u)",
+                 min_image.size()->width(), required_max_size.width(),
+                 *image_format_constraints.max_bytes_per_row());
         return fpromise::error(ZX_ERR_NOT_SUPPORTED);
       }
+      // Defense-in-depth: verify format-agnostic row-byte postconditions before sizing the VMO.
+      // Avoid assuming bytes_per_row >= StrideBytesPerWidthPixel * width here so future
+      // sub-byte-per-pixel block-compressed formats remain encapsulated in image-format.
+      ZX_ASSERT(bytes_per_row >= *image_format_constraints.min_bytes_per_row());
+      ZX_ASSERT(bytes_per_row % *image_format_constraints.bytes_per_row_divisor() == 0);
+      ZX_ASSERT(bytes_per_row <= *image_format_constraints.max_bytes_per_row());
+      min_image.bytes_per_row() = bytes_per_row;
 
       uint32_t min_image_width_times_height;
       if (!CheckMul(min_image.size()->width(), min_image.size()->height())
@@ -4398,7 +4448,16 @@ LogicalBufferCollection::GenerateUnpopulatedBufferCollectionInfo(
       // color_space.type is a valid value.
       min_image.color_space() = image_format_constraints.color_spaces()->at(0);
 
-      uint64_t image_min_size_bytes = ImageFormatImageSize(min_image);
+      uint64_t image_min_size_bytes = 0;
+      if (!ImageFormatImageSizeChecked(min_image).AssignIfValid(&image_min_size_bytes)) {
+        LogError(FROM_HERE,
+                 "ImageFormatImageSizeChecked() failed for pixel_format=%u modifier=0x%" PRIx64
+                 " size={%u, %u} bytes_per_row=%u",
+                 fidl::ToUnderlying(*min_image.pixel_format()),
+                 fidl::ToUnderlying(*min_image.pixel_format_modifier()), min_image.size()->width(),
+                 min_image.size()->height(), *min_image.bytes_per_row());
+        return fpromise::error(ZX_ERR_NOT_SUPPORTED);
+      }
 
       if (image_min_size_bytes > min_size_bytes) {
         if (image_min_size_bytes > max_size_bytes) {

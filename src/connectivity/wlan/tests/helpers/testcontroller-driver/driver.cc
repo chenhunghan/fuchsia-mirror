@@ -56,7 +56,7 @@ class WlanFullmacImplIfcBridgeServer
       OnScheduledScanMatchesAvailableRequest& request,
       OnScheduledScanMatchesAvailableCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
-    auto result = bridge_client_->OnScheduledScanMatchesAvailable(request);
+    auto result = bridge_client_->OnScheduledScanMatchesAvailable(std::move(request));
     if (result.is_error()) {
       FDF_SLOG(ERROR, "Failed to forward OnScheduledScanMatchesAvailable",
                KV("status", result.error_value().FormatDescription()));
@@ -75,7 +75,7 @@ class WlanFullmacImplIfcBridgeServer
   void OnRssiThresholdBreached(OnRssiThresholdBreachedRequest& request,
                                OnRssiThresholdBreachedCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
-    auto result = bridge_client_->OnRssiThresholdBreached(request);
+    auto result = bridge_client_->OnRssiThresholdBreached(std::move(request));
     if (result.is_error()) {
       FDF_SLOG(ERROR, "Failed to forward OnRssiThresholdBreached",
                KV("status", result.error_value().FormatDescription()));
@@ -107,8 +107,8 @@ class WlanFullmacImplIfcBridgeServer
   }
   void DeauthInd(DeauthIndRequest& request, DeauthIndCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
-    bridge_client_->DeauthInd(request).Then(
-        ForwardResult<WlanFullmacImplIfc::DeauthInd>(completer.ToAsync()));
+    bridge_client_->DeauthInd(std::move(request))
+        .Then(ForwardResult<WlanFullmacImplIfc::DeauthInd>(completer.ToAsync()));
   }
   void AssocInd(AssocIndRequest& request, AssocIndCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
@@ -119,8 +119,8 @@ class WlanFullmacImplIfcBridgeServer
   }
   void DisassocInd(DisassocIndRequest& request, DisassocIndCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
-    bridge_client_->DisassocInd(request).Then(
-        ForwardResult<WlanFullmacImplIfc::DisassocInd>(completer.ToAsync()));
+    bridge_client_->DisassocInd(std::move(request))
+        .Then(ForwardResult<WlanFullmacImplIfc::DisassocInd>(completer.ToAsync()));
   }
   void StartConf(StartConfRequest& request, StartConfCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
@@ -143,6 +143,12 @@ class WlanFullmacImplIfcBridgeServer
     bridge_client_->OnChannelSwitch(request).Then(
         ForwardResult<WlanFullmacImplIfc::OnChannelSwitch>(completer.ToAsync()));
   }
+  void OnMichaelMicFailure(OnMichaelMicFailureRequest& request,
+                           OnMichaelMicFailureCompleter::Sync& completer) override {
+    WLAN_TRACE_DURATION();
+    bridge_client_->OnMichaelMicFailure(request).Then(
+        ForwardResult<WlanFullmacImplIfc::OnMichaelMicFailure>(completer.ToAsync()));
+  }
   void SignalReport(SignalReportRequest& request, SignalReportCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
     bridge_client_->SignalReport(request).Then(
@@ -150,8 +156,8 @@ class WlanFullmacImplIfcBridgeServer
   }
   void EapolInd(EapolIndRequest& request, EapolIndCompleter::Sync& completer) override {
     WLAN_TRACE_DURATION();
-    bridge_client_->EapolInd(request).Then(
-        ForwardResult<WlanFullmacImplIfc::EapolInd>(completer.ToAsync()));
+    bridge_client_->EapolInd(std::move(request))
+        .Then(ForwardResult<WlanFullmacImplIfc::EapolInd>(completer.ToAsync()));
   }
   void OnPmkAvailable(OnPmkAvailableRequest& request,
                       OnPmkAvailableCompleter::Sync& completer) override {}

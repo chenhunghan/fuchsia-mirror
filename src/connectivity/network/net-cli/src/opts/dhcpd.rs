@@ -4,7 +4,6 @@
 
 use argh::{ArgsInfo, FromArgs};
 
-use fidl_fuchsia_net_ext::MacAddress as MacAddr;
 use std::net::Ipv4Addr;
 
 #[derive(ArgsInfo, FromArgs, Clone, Debug, PartialEq)]
@@ -1608,8 +1607,6 @@ pub enum Parameter {
     IpAddrs(IpAddrs),
     AddressPool(AddressPool),
     LeaseLength(LeaseLength),
-    PermittedMacs(PermittedMacs),
-    StaticallyAssignedAddrs(StaticallyAssignedAddrs),
     ArpProbe(ArpProbe),
     BoundDevices(BoundDevices),
 }
@@ -1620,10 +1617,6 @@ impl Into<flex_fuchsia_net_dhcp::ParameterName> for Parameter {
             Parameter::IpAddrs(_) => flex_fuchsia_net_dhcp::ParameterName::IpAddrs,
             Parameter::AddressPool(_) => flex_fuchsia_net_dhcp::ParameterName::AddressPool,
             Parameter::LeaseLength(_) => flex_fuchsia_net_dhcp::ParameterName::LeaseLength,
-            Parameter::PermittedMacs(_) => flex_fuchsia_net_dhcp::ParameterName::PermittedMacs,
-            Parameter::StaticallyAssignedAddrs(_) => {
-                flex_fuchsia_net_dhcp::ParameterName::StaticallyAssignedAddrs
-            }
             Parameter::ArpProbe(_) => flex_fuchsia_net_dhcp::ParameterName::ArpProbe,
             Parameter::BoundDevices(_) => flex_fuchsia_net_dhcp::ParameterName::BoundDeviceNames,
         }
@@ -1636,8 +1629,6 @@ impl Into<flex_fuchsia_net_dhcp::Parameter> for Parameter {
             Parameter::IpAddrs(v) => v.into(),
             Parameter::AddressPool(v) => v.into(),
             Parameter::LeaseLength(v) => v.into(),
-            Parameter::PermittedMacs(v) => v.into(),
-            Parameter::StaticallyAssignedAddrs(v) => v.into(),
             Parameter::ArpProbe(v) => v.into(),
             Parameter::BoundDevices(v) => v.into(),
         }
@@ -1693,61 +1684,6 @@ impl Into<flex_fuchsia_net_dhcp::Parameter> for AddressPool {
             ..Default::default()
         };
         flex_fuchsia_net_dhcp::Parameter::AddressPool(pool)
-    }
-}
-
-/// The client MAC addresses which the server will issue leases to.
-#[derive(Clone, Debug, ArgsInfo, FromArgs, PartialEq)]
-#[argh(subcommand, name = "permitted-macs")]
-pub struct PermittedMacs {
-    /// the client MAC addresses which the server will issue leases to. By default,
-    /// the server will not have a permitted MAC list, in which case it will attempt to
-    /// issue a lease to every client which requests one. If permitted_macs has a non-zero length
-    /// then the server will only respond to lease requests from clients with a MAC in the list.
-    #[argh(option)]
-    macs: Vec<MacAddr>,
-}
-
-impl Into<flex_fuchsia_net_dhcp::Parameter> for PermittedMacs {
-    fn into(self) -> flex_fuchsia_net_dhcp::Parameter {
-        let addrs: Vec<flex_fuchsia_net::MacAddress> =
-            self.macs.into_iter().map(fidl_fuchsia_net_ext::MacAddress::into).collect();
-        flex_fuchsia_net_dhcp::Parameter::PermittedMacs(addrs)
-    }
-}
-
-/// Addresses in the AddressPool which will only be leased to specified clients.
-/// Assigned addresses will be paired with hosts in order, e.g. hosts (A, B, C) and addresses (1, 2, 3)
-/// pair as ((A, 1), (B, 2), (C, 3)).
-#[derive(Clone, Debug, ArgsInfo, FromArgs, PartialEq)]
-#[argh(subcommand, name = "statically-assigned-addrs")]
-pub struct StaticallyAssignedAddrs {
-    /// hosts which will be leased the addresses reserved by `assigned_addrs`.
-    #[argh(option)]
-    hosts: Vec<MacAddr>,
-    /// addresses in the AddressPool which will not be leased to clients. Typically, a network
-    /// administrator will statically assign these addresses to always-on network
-    /// devices which should always have the same IP address, such as network printers.
-    #[argh(option)]
-    assigned_addrs: Vec<Ipv4Addr>,
-}
-
-impl Into<flex_fuchsia_net_dhcp::Parameter> for StaticallyAssignedAddrs {
-    fn into(self) -> flex_fuchsia_net_dhcp::Parameter {
-        let assignments: Vec<flex_fuchsia_net_dhcp::StaticAssignment> = self
-            .hosts
-            .into_iter()
-            .zip(self.assigned_addrs)
-            .map(|(host, addr)| {
-                (host.into(), flex_fuchsia_net::Ipv4Address { addr: addr.octets() })
-            })
-            .map(|(host, assigned_addr)| flex_fuchsia_net_dhcp::StaticAssignment {
-                host: Some(host),
-                assigned_addr: Some(assigned_addr),
-                ..Default::default()
-            })
-            .collect();
-        flex_fuchsia_net_dhcp::Parameter::StaticallyAssignedAddrs(assignments)
     }
 }
 

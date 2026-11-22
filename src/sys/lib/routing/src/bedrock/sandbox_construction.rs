@@ -27,8 +27,8 @@ use cm_rust::{
     GenericRef, SourceName, SourcePath, UseDeclCommon,
 };
 use cm_types::{BorrowedName, IterablePath, Name, RelativePath};
-use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_runtime as fruntime;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_runtime_common as fruntime;
 use fuchsia_sync::Mutex;
 use log::warn;
 use moniker::{ChildName, Moniker};
@@ -838,8 +838,15 @@ fn new_intermediate_router_inner(
         }
         GenericRef::Collection(_) => unimplemented!(),
         GenericRef::Framework => Arc::downgrade(&*sandbox.framework_router.lock()).into(),
-        GenericRef::Capability(_) => {
-            Arc::downgrade(&sandbox.capability_sourced_capabilities_dict).into()
+        GenericRef::Capability(name) => {
+            match sandbox.capability_sourced_capabilities_dict.get(name) {
+                Some(Capability::Dictionary(d)) => Arc::downgrade(&d).into(),
+                _ => {
+                    static EMPTY_DICT: std::sync::LazyLock<Arc<Dictionary>> =
+                        std::sync::LazyLock::new(Dictionary::new);
+                    Arc::downgrade(&EMPTY_DICT).into()
+                }
+            }
         }
         GenericRef::Debug => Arc::downgrade(&sandbox.component_input.environment().debug()).into(),
         GenericRef::Void => {
@@ -1070,20 +1077,7 @@ where
     &'a D: Into<CapabilityTypeName> + Into<RouteVerb>,
 {
     let source = decl.to_source();
-    let source_path = match &source {
-        GenericRef::Capability(name)
-            if decl.source_path().basename.as_str() == "fuchsia.component.StorageAdmin"
-                || decl.source_path().basename.as_str() == "fuchsia.sys2.StorageAdmin" =>
-        {
-            let mut path: RelativePath =
-                decl.source_path().iter_segments().collect::<Vec<_>>().into();
-            path = path.parent().unwrap_or(path);
-            let not_too_long = path.push(name.clone());
-            assert!(not_too_long);
-            path
-        }
-        _ => decl.source_path().iter_segments().collect::<Vec<_>>().into(),
-    };
+    let source_path = decl.source_path().iter_segments().collect::<Vec<_>>().into();
     let moniker = component.component.moniker();
     let router = new_intermediate_router_inner(
         moniker.clone(),

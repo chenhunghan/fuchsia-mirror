@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_REBOOT_LOG_FINAL_SHUTDOWN_INFO_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_REBOOT_LOG_FINAL_SHUTDOWN_INFO_H_
 
-#include <fuchsia/feedback/cpp/fidl.h>
+#include <fidl/fuchsia.feedback/cpp/fidl.h>
 #include <lib/zx/time.h>
 
 #include <optional>
@@ -115,10 +115,10 @@ class FinalShutdownInfo {
   // Returns the string representation of the reboot reason.
   std::string ToRebootReasonString() const;
 
-  // Returns the reboot reason, translated into fuchsia::feedback::RebootReason. Returns
+  // Returns the reboot reason, translated into fuchsia_feedback::RebootReason. Returns
   // std::nullopt if an appropriate translation isn't possible.
   // TODO(https://fxbug.dev/441569016): Spontaneous reasons shouldn't all map to brief power loss.
-  std::optional<fuchsia::feedback::RebootReason> ToFidlRebootReason() const;
+  std::optional<fuchsia_feedback::RebootReason> ToFidlRebootReason() const;
 
   // Returns the reboot reason, translated into cobalt::LastRebootReason.
   cobalt::LastRebootReason ToCobaltLastRebootReason() const;

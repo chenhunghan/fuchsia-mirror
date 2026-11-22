@@ -39,9 +39,12 @@ const (
 	UseFFXTestParallel Experiment = "use_ffx_test_parallel"
 	ForceFFXUSB        Experiment = "force_ffx_usb"
 	UseFFXRepository   Experiment = "use_ffx_repository"
+	// UseSerialTargetID enables discovering target serial numbers and using
+	// them as stable target identifiers.
+	UseSerialTargetID Experiment = "use_serial_target_id"
 )
 
-var SupportedExperiments = []Experiment{UseFFXTestParallel, ForceFFXUSB, UseFFXRepository}
+var SupportedExperiments = []Experiment{UseFFXTestParallel, ForceFFXUSB, UseFFXRepository, UseSerialTargetID}
 
 // GetLoggerCtx returns a new context with the logger of the provided ctx.
 func GetLoggerCtx(ctx context.Context) context.Context {

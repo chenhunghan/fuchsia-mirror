@@ -1,0 +1,169 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+# This target exists to expose the <lib/zbitl/decompress.h>
+# header to internal.decompress-zstd below only, without the
+# rest of the zbitl headers, in order to remove GN include
+# check errors.
+fx_cc_library_headers(
+    name = "headers.decompress",
+    hdrs = [
+        "include/lib/zbitl/decompress.h",
+        "include/lib/zbitl/storage-traits.h",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        # Both headers include <lib/fit/result.h>.
+        "//sdk/lib/fit",
+
+        # <lib/zbitl/storage-traits.h> includes <zircon/assert.h>
+        # and <lib/zbi-format/zbi.h>
+        "//sdk/lib/zbi-format",
+        "//sdk/lib/zircon-assert",
+    ],
+)
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/lib/zbitl/asm.h",
+        "include/lib/zbitl/checking.h",
+        "include/lib/zbitl/efi.h",
+        "include/lib/zbitl/error-stdio.h",
+        "include/lib/zbitl/error-string.h",
+        "include/lib/zbitl/fd.h",
+        "include/lib/zbitl/image.h",
+        "include/lib/zbitl/item.h",
+        "include/lib/zbitl/items/bootfs.h",
+        "include/lib/zbitl/items/bootloader-file.h",
+        "include/lib/zbitl/items/cpu-topology.h",
+        "include/lib/zbitl/items/debugdata.h",
+        "include/lib/zbitl/items/graphics.h",
+        "include/lib/zbitl/items/kernel.h",
+        "include/lib/zbitl/json.h",
+        "include/lib/zbitl/memory.h",
+        "include/lib/zbitl/stdio.h",
+        "include/lib/zbitl/view.h",
+        "include/lib/zbitl/vmo.h",
+    ],
+    visibility = [
+        "//zircon/kernel/lib/code-patching:__pkg__",
+        "//zircon/kernel/phys:__subpackages__",
+    ],
+    deps = [
+        # Decompress headers were moved to separate target. See comment above.
+        ":headers.decompress",
+
+        # <lib/zbitl/items/kernel.h> has #include <zbi/asm/zbi.h>.
+        "//sdk/fidl/zbi:zbi_zither.asm",
+
+        # Many files have #include <lib/zbi-format/zbi.h>.
+        "//sdk/lib/zbi-format",
+
+        # <lib/zbitl/item.h> has #include
+        # <lib/zbi-format/internal/deprecated-cpu.h>.
+        "//sdk/lib/zbi-format:internal",
+
+        # <lib/zbitl/asm.h> has #include <lib/arch/asm.h>.
+        "//zircon/kernel/lib/arch:headers",
+
+        # <lib/zbitl/efi.h> has #include <efi/protocol/file.h>.
+        "//zircon/kernel/lib/efi:headers",  # @bazel2gn:path_overwrite://zircon/kernel/lib/efi$headers_dep
+
+        # <lib/zbitl/items/bootfs.h> has #include <fbl/alloc_checker.h>.
+        "//zircon/system/ulib/fbl",  # @bazel2gn:path_overwrite://zircon/system/ulib/fbl$headers_dep
+
+        # <lib/zbitl/view.h> has #include <lib/cksum.h>.
+        "//zircon/third_party/ulib/cksum",  # @bazel2gn:path_overwrite://zircon/third_party/ulib/cksum$headers_dep
+    ],
+)
+
+# LINT.IfChange(zbitl)
+# TODO(https://fxbug.dev/456186319): The kernel build is not yet supported in
+# Bazel, and bazel2gn cannot express `is_kernel` (under which `is_fuchsia` is
+# also true). Keep the GN target in BUILD.gn in sync with this definition.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "zbitl",
+    srcs = [
+        "checking.cc",
+        "cpu-topology.cc",
+        "debugdata.cc",
+        "efi.cc",
+        "fd.cc",
+        "item.cc",
+        "stdio.cc",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "mapvmo.cc",
+            "vmo.cc",
+            "vmo-read.cc",
+        ],
+        "//conditions:default": [],
+    }),
+    implementation_deps = [
+        ":headers",
+        ":internal.decompress-zstd",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+        "//zircon/third_party/ulib/cksum",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            "//zircon/system/ulib/zircon-internal",
+        ],
+        "//conditions:default": [],
+    }),
+    # GN visibility remains unrestricted while unmigrated GN and kernel callers
+    # exist; Bazel visibility is narrowed to migrated callers.
+    # Includes //src/sys/early_boot_instrumentation.
+    visibility = [
+        "//src/sys/early_boot_instrumentation:__pkg__",
+        "//src/sys/early_boot_instrumentation/test:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = [
+        ":headers",
+    ] + select({
+        "@platforms//os:fuchsia": [
+            # <lib/zbitl/vmo.h> has #include <lib/zx/vmo.h>.
+            "//zircon/system/ulib/zx",
+        ],
+        "//conditions:default": [],
+    }),
+)
+# LINT.ThenChange(BUILD.gn:zbitl)
+
+# LINT.IfChange(internal_decompress_zstd)
+# TODO(https://fxbug.dev/456186319): The kernel build is not yet supported in
+# Bazel, and bazel2gn cannot express `is_kernel`. Keep the GN target in
+# BUILD.gn in sync with this definition.
+# @bazel2gn:skip
+fx_cc_library(
+    name = "internal.decompress-zstd",
+    srcs = [
+        "default-allocator.cc",
+        "zstd.cc",
+        "zstd-streaming.cc",
+    ],
+    defines = ["ZSTD_STATIC_LINKING_ONLY"],
+    implementation_deps = [
+        ":headers",
+        "//third_party/zstd:zstd-decompress-standalone",
+    ],
+    includes = ["include"],
+    deps = [
+        # Sources include <lib/zbitl/decompress.h>
+        ":headers.decompress",
+
+        # zstd-streaming.cc includes <zircon/assert.h>
+        "//sdk/lib/zircon-assert",
+    ],
+    alwayslink = True,
+)
+# LINT.ThenChange(BUILD.gn:internal_decompress_zstd)

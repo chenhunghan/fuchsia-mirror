@@ -191,7 +191,7 @@ In various OOP languages, you would write this as follows:
   }
   ```
 
-## Component manifests as classes
+## Component manifests as classes {:#component-manifests-as-classes}
 
 The core concept of OOP is the **object**, which contains both data
 and methods that operate on that data. [Class-based OOP][class-oop]

@@ -149,6 +149,28 @@
                 "AllInetTests/UdpSocketTest.DisconnectAfterBindToUnspecAndConnect/1",
                 "IPv4UDPSockets/IPv4UDPUnboundSocketTest.IpMulticastIPPacketInfo/*",
                 "IPv4UDPSockets/IPv4UDPUnboundSocketTest.SendWithProtNoneBufEfaults/*",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/4",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/5",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/6",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/7",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/8",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/9",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/10",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/11",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/16",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/17",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/18",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/19",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/20",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/21",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/22",
+                "AllIPSockets/TcpUdpSocketPairTest.ShutdownWrFollowedBySendIsError/23",
+                "AllFamilies/SocketMultiProtocolInetLoopbackTest.DualStackV6AnyReuseAddrDoesNotReserveV4Any/TCP",
+                "AllFamilies/SocketMultiProtocolInetLoopbackTest.DualStackV6AnyReuseAddrDoesNotReserveV4Any/UDP",
+                "AllFamilies/SocketMultiProtocolInetLoopbackTest.DualStackV6AnyReuseAddrListenReservesV4Any/TCP",
+                "AllFamilies/SocketMultiProtocolInetLoopbackTest.DualStackV6AnyReuseAddrListenReservesV4Any/UDP",
+                "AllFamilies/SocketMultiProtocolInetLoopbackTest.DualStackV6AnyWithListenReservesEverything/TCP",
+                "AllFamilies/SocketMultiProtocolInetLoopbackTest.DualStackV6AnyWithListenReservesEverything/UDP",
             ],
         },
         {
@@ -170,11 +192,9 @@
                 "CPUAcctCgroup.IndirectCharge",
                 "CPUAcctCgroup.NoDoubleAccounting",
                 "CPUCgroup.ControlFilesHaveDefaultValues",
-                "Cgroup.AllControllersExplicit",
                 "Cgroup.AllControllersImplicit",
                 "Cgroup.CantRenameControlFile",
                 "Cgroup.CgroupsCannotMountTwice",
-                "Cgroup.ControllersMustBeInUniqueHierarchy",
                 "Cgroup.Create",
                 "Cgroup.CrossDirRenameNotAllowed",
                 "Cgroup.DuplicateUnlinkOnDirFD",
@@ -183,9 +203,7 @@
                 "Cgroup.MigrateToSubcontainerThread",
                 "Cgroup.MkdirWithPermissions",
                 "Cgroup.MoptAllMustBeExclusive",
-                "Cgroup.MountRace",
                 "Cgroup.MountsForAllControllers",
-                "Cgroup.MountSucceeds",
                 "Cgroup.OnlyContainsControllerSpecificFiles",
                 "Cgroup.PIDZeroMovesSelf",
 
@@ -194,13 +212,11 @@
                 "Cgroup.ProcsAndTasks",
                 "Cgroup.Rename",
                 "Cgroup.RenameNameCollision",
-                "Cgroup.SeparateMounts",
                 "Cgroup.Statfs",
                 "Cgroup.StatfsCgroupDir",
                 "Cgroup.SubcontainerInitiallyEmpty",
                 "Cgroup.SubcontainersHaveIndependentState",
                 "Cgroup.TIDZeroMovesSelf",
-                "Cgroup.UnmountFreesControllers",
                 "Cgroup.UnmountRepeated",
                 "CpusetCgroup.Defaults",
                 "CpusetCgroup.SetEmptyMask",
@@ -218,23 +234,19 @@
                 "PIDsCgroup.LimitEnforced",
                 "PIDsCgroup.MigrationCanExceedLimit",
                 "PIDsCgroup.SetInvalidLimit",
-                "ProcCgroup.MultiControllerHierarchy",
                 "ProcCgroup.PIDCgroupMatchesCgroups",
-                "ProcCgroup.ProcfsReportsCgroupfsMountOptions",
                 "ProcCgroups.Empty",
                 "ProcCgroups.ProcCgroupsEntries",
-                "ProcCgroups.ProcfsReportsTasksCgroup",
-                "ProcCgroups.ProcfsRreportsHierarchyID",
-                "ProcCgroups.UnmountRemovesEntries",
                 "ProcDevices.ExpectedLines",
-                "ProcPIDCgroup.Empty",
                 "ProcPIDCgroup.Entries",
-                "ProcPIDCgroup.UnmountRemovesEntries",
 
                 // clock_nanosleep_test
                 "ClockNanosleepProcessTest.SleepFiveSeconds",
 
                 // epoll_test
+                // TODO(https://fxbug.dev/586789080): Support epoll on /dev/random and /dev/urandom.
+                "EpollTest.WatchOpenRandomDevice",
+
                 // TODO(https://fxbug.dev/581946201): Validate event pointer and target pollability in Linux epoll_ctl order.
                 "EpollTest.BadEventPointerCheckedFirst",
                 "EpollTest.RegularFiles",
@@ -320,6 +332,10 @@
                 "FcntlSignalTest.SetSigDupUnregisterNew",
                 "FcntlLockTest.GetLockRespectsPIDNamespace",
 
+                // fifo_test
+                // TODO(https://fxbug.dev/585101988): Report FIFO POLLHUP per open reader using writer generation.
+                "FifoTest.HangupDependsOnWhenReaderOpened",
+
                 // fork_test
                 "ForkTest.Affinity",
                 "CloneTest.NewUserMountNamespace",
@@ -329,6 +345,10 @@
                 // TODO(https://fxbug.dev/519607444): CLONE_NEWPID not supported.
                 "CloneTest.CloneParentOrThreadWithExitSignalFails",
                 "CloneTest.CloneParentInitProcessFails",
+
+                // TODO(https://fxbug.dev/584255296): Support CLONE_NEWNS in clone3 and return EPERM before ENOSYS.
+                "CloneTest.Clone3NewNamespaceWithoutCapSysAdmin",
+                "CloneTest.Clone3NewUserAndNewNamespaceWithoutCapSysAdmin",
 
                 // fpsig_mut_test
                 // TODO(https://fxbug.dev/302340440): Save XMM registers in signal handlers on x64.
@@ -340,6 +360,12 @@
                 "PrivateFutexTest.WakeOp0Or",
                 "PrivateFutexTest.WakeOp0Andn",
                 "PrivateFutexTest.WakeOp0Xor",
+
+                // TODO(https://fxbug.dev/584255830): Reject mixing PI and ordinary futex waiters with EINVAL.
+                "SharedPrivate/PrivateAndSharedFutexTest.PIWaiters/0",
+                "SharedPrivate/PrivateAndSharedFutexTest.PIWaiters/1",
+                "SharedPrivate/PrivateAndSharedFutexTest.PIWithOrdinaryWaiter/0",
+                "SharedPrivate/PrivateAndSharedFutexTest.PIWithOrdinaryWaiter/1",
 
                 // getdents_test
                 // Assumes structure of root directory.
@@ -363,7 +389,6 @@
                 "Inotify.Xattr",
 
                 // ioctl_test
-                "IoctlTest/IoctlTestSIOCGIFCONF.ValidateNoArrayGetsLength/*",
                 "IoctlTest.FIOASYNCFails",
                 "IoctlTest.FIOASYNCHandlesFuseFD",
                 "IoctlTest.FIOASYNCSucceeds",
@@ -395,6 +420,9 @@
                 "IPTablesBasic.GetEntriesShortBuffer",
                 "IPTablesTest.GetInfoNonexistentTable",
                 "IPTablesTest.GetEntriesNonexistentTable",
+
+                // TODO(https://fxbug.dev/528464338): Support SO_MARK and netfilter mark matching.
+                "IPTablesBasic.GetRevisionMatchMark",
 
                 // ip6tables_test
                 "IP6TablesBasic.GetRevision",
@@ -432,6 +460,14 @@
                 // lseek_test
                 // Assumes structure of root directory.
                 "LseekTest.EtcPasswdDup",
+
+                // link_test
+                // TODO(https://fxbug.dev/474544848): New failing tests.
+                "LinkTest.LinkAtWithEmptyPathNeedsNoCapForSameCreds",
+                "LinkTest.LinkAtWithEmptyPathNeedsNoCapForAtFcwd",
+
+                // TODO(https://fxbug.dev/528473076): Requires CLONE_NEWUSER.
+                "LinkTest.LinkAtWithEmptyPathNeedsCapDacReadSearch",
 
                 // madvise_test
                 "MadviseDontneedTest.CleansPrivateFilePage",
@@ -485,28 +521,10 @@
                 "MountTest.MountNamespaceSlavesNewUserNamespace",
                 "MountTest.MountTmpfsMagicValIgnored",
                 "MountTest.MountWithStrictAtime",
-                "MountTest.OverlayfsDirectoryRenameInUserNamespace",
-
-                // TODO(https://fxbug.dev/582346862): Support /proc/self/uid_map for overlayfs sticky-dir whiteout rename test.
-                "MountTest.OverlayfsRenameOverWhiteoutInStickyDir",
-
-                // TODO(https://fxbug.dev/578126744): Apply clone_private_mount checks to overlay layers.
-                "MountTest.LockedMountStopsOverlayLowerdir",
-                "MountTest.LockedMountStopsOverlayOfSysfs",
-                "MountTest.LockedMountStopsOverlayUpperdir",
-                "MountTest.OverlayRefusesLayerFromAnotherMountNamespace",
-
-                // TODO(https://fxbug.dev/565372315): Starnix tmpfs rejects mode=1777 and overlayfs lacks stacking limits.
-                "MountTest.OverlayfsRejectedAsUpperdir",
-                "MountTest.OverlayfsStackingDepthLimit",
-
-                // TODO(https://fxbug.dev/564605982)
-                "MountTest.OverlayfsSecurityCapabilityTranslatesRootID",
                 "MountTest.PropagateChildUmountEvent",
                 "MountTest.ReuseGroupIDs",
                 "MountTest.SlaveMaster",
                 "MountTest.TmpfsDirectoryAllocCheck",
-                "MountTest.TmpfsEmptySizeAllocCheck",
                 "MountTest.TmpfsHardLinkAllocCheck",
                 "MountTest.TmpfsSizeAllocationMultiplePages",
                 "MountTest.TmpfsSizeMmap",
@@ -528,6 +546,10 @@
 
                 // TODO(https://fxbug.dev/537429210): Starnix does not support nr_blocks option.
                 "MountTest.TmpfsNrBlocksAllocation",
+
+                // mremap_test
+                // TODO(https://fxbug.dev/586788473): Return EFAULT when MREMAP_FIXED with old_size 0 unmaps source.
+                "MremapTest.MustMove_CopyOntoSource",
 
                 // msgqueue_test
                 // TODO(https://fxbug.dev/529448634): Requires SysV message queues.
@@ -568,6 +590,17 @@
                 "NetworkNamespaceTest.LoopbackExists",
                 "NetworkNamespaceTest.Setns",
 
+                // TODO(https://fxbug.dev/468074994): Support network namespaces.
+                "NetworkNamespaceTest.LoopbackStartsDown",
+                "NetworkNamespaceTest.LoopbackAddressesAddedOnUp",
+                "NetworkNamespaceTest.IPv6FlushedOnDown",
+                "NetworkNamespaceTest.LinkChangeFlagsLikeLinux",
+                "NetworkNamespaceTest.LoopbackUpAcrossSave",
+
+                // open_test
+                // TODO(https://fxbug.dev/584256561): Return ENOTDIR when opening symlink to directory with trailing slash and O_DIRECTORY|O_NOFOLLOW.
+                "OpenTest.SymlinkDirectoryNoFollow",
+
                 // open_create_test
                 // TODO(https://fxbug.dev/578125840): Return ENOENT when creating a file in a deleted directory.
                 "CreateTest.CreateInDeletedDirFails",
@@ -590,6 +623,16 @@
                 // packet_socket_test
                 "PacketSocketNoCapTest.CreationFailsWithEPERM",
 
+                // partial_bad_buffer_test
+                "PartialBadBufferTest.PreadBig",
+                "PartialBadBufferTest.PreadSmall",
+                "PartialBadBufferTest.PreadvBig",
+                "PartialBadBufferTest.PreadvSmall",
+                "PartialBadBufferTest.ReadBig",
+                "PartialBadBufferTest.ReadSmall",
+                "PartialBadBufferTest.ReadvBig",
+                "PartialBadBufferTest.ReadvSmall",
+
                 // ping_socket_test
                 "PingSocket.ReceiveIPPacketInfo",
                 "PingSocket.ReceiveTOS",
@@ -600,10 +643,6 @@
                 "PingSockets/Fixture.Bind/ICMP_socket_V4MulticastAllHosts",
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6Multicast",
                 "PingSockets/Fixture.Bind/ICMPv6_socket_V6MulticastInterfaceLocalAllNodes",
-
-                // TODO(https://fxbug.dev/572921953): Check ping payload size limit before faulting user buffer.
-                "IP/PingSocketPayloadTest.PayloadTooLarge/0",
-                "IP/PingSocketPayloadTest.PayloadTooLarge/1",
 
                 // pivot_root_test
                 "PivotRootTest.LockedNewRootFails",
@@ -617,6 +656,17 @@
                 "PrctlTest.PDeathSig",
                 "PrctlTest.OrphansReparentedToSubreaper",
 
+                // Failing new tests from gvisor.
+                "PrctlTest.TaggedAddrCtrl",
+
+                // priority_test
+                // TODO(https://fxbug.dev/528464949): Support ioprio_set and ioprio_get.
+                "IoprioTest.BasicSetGet",
+                "IoprioTest.ChildPID",
+                "IoprioTest.InvalidClassesAndData",
+                "IoprioTest.RtRequiresCapability",
+                "IoprioTest.ValidWho",
+
                 // processes_test
                 "Processes.SetPGIDOfZombie",
 
@@ -627,6 +677,22 @@
                 "ProcPidFile.SubprocessRunning",
                 "ProcPidFile.SubprocessZombie",
                 "ProcPidFile.SubprocessExited",
+
+                // TODO(https://fxbug.dev/528464354): Make /proc/sys/kernel/hostname and domainname pollable.
+                "ProcSysKernelDomainname.EpollNotifiesOnChange",
+                "ProcSysKernelHostname.EpollLatchesAndWakesAllSubscribers",
+                "ProcSysKernelHostname.EpollNotifiesOnChange",
+
+                // TODO(https://fxbug.dev/566839792): Implement /proc/sys/user/max_user_namespaces and CLONE_NEWUSER.
+                "ProcSysUserMaxUserNamespaces.HasNumericValue",
+                "ProcSysUserMaxUserNamespaces.WriteUpdatesValue",
+                "ProcSysUserMaxUserNamespaces.RejectsNegativeValue",
+                "ProcSysUserMaxUserNamespaces.WriteRequiresCapSysResource",
+                "ProcSysUserMaxUserNamespaces.WriteDoesNotAffectParentNamespace",
+                "ProcSysUserMaxUserNamespaces.LimitBlocksNestedUserNamespace",
+                "ProcSysUserMaxUserNamespaces.RecursiveLimitBlocksGrandchild",
+                "ProcSysUserMaxUserNamespaces.ExitedNamespaceReleasesCharge",
+                "ProcSysUserMaxUserNamespaces.RefusedNestingReleasesPartialCharge",
 
                 // TODO(https://fxbug.dev/576397884): Emit FDSize in /proc/[pid]/status.
                 "ProcPidStatusTest.InvalidCloseDoesNotGrowFDTable",
@@ -641,6 +707,10 @@
                 // TODO(https://fxbug.dev/578125841): Reject noncanonical fd and invalid task directory names.
                 "ProcSelfFd.NoncanonicalNames",
                 "ProcTask.InvalidTaskNames",
+
+                // TODO(https://fxbug.dev/585101896): Return EPERM for write checks on immutable proc task directories.
+                "ProcTask.ImmutableTaskDirectories",
+                "ProcTask.TaskDirCannotBeDeleted",
 
                 // TODO(https://fxbug.dev/578599318): Preserve procfs lookup errors during creation, link, and rename.
                 "ProcTest.Create",
@@ -658,7 +728,6 @@
                 "ProcSysKernelDomainname.MatchesUname",
                 "ProcSysVmMaxmapCount.HasNumericValue",
                 "ProcSysVmOvercommitMemory.HasNumericValue",
-                "ProcSysKernelKeysMax.*",
                 "Proc.PidReuse",
                 "Proc.PidTidIOAccounting",
 
@@ -702,6 +771,13 @@
                 "ProcSysNetIpv4Sack.CanReadAndWrite",
                 "ProcSysNetIpv4Recovery.CanReadAndWrite",
 
+                // TODO(https://fxbug.dev/365094116): Investigate and re-enable
+                "ProcSysNetPortRange.CanReadAndWrite",
+
+                // TODO(https://fxbug.dev/584255018): Implement /proc/sys/net/ipv6/conf/*/keep_addr_on_down.
+                "ProcSysNetIpv6KeepAddrOnDown.Exists",
+                "ProcSysNetIpv6KeepAddrOnDown.CanReadAndWrite",
+
                 // proc_net_udp_test
                 "ProcNetUDP.Exists",
                 "ProcNetUDP.BoundSocketStateClosed",
@@ -725,6 +801,9 @@
                 // proc_pid_smaps_test
                 "ProcPidSmapsTest.GvisorFields",
 
+                // TODO(https://fxbug.dev/588451878): Track MADV_DONTDUMP and report dd in /proc/[pid]/smaps VmFlags.
+                "ProcPidSmapsTest.DontDump",
+
                 // proc_pid_uid_gid_map_test
                 "All/ProcSelfUidGidMapTest.TrailingNewlineAndNULIgnored/UID",
                 "All/ProcSelfUidGidMapTest.IsInitiallyEmpty/UID",
@@ -740,6 +819,17 @@
                 "All/ProcPidUidGidMapTest.MapAnyIDsPrivileged/GID",
                 "All/ProcPidUidGidMapTest.MapAnyIDsPrivileged/UID",
                 "All/ProcSelfUidGidMapTest.IdentityMapOwnID/GID",
+
+                // pty_test
+                // TODO(https://fxbug.dev/584255298): Report foreground process group ID (tpgid) in /proc/[pid]/stat.
+                "JobControlTest.ProcStatControllingTTY",
+                "JobControlTest.ProcStatControllingTTYMaster",
+                "JobControlTest.ProcStatNoControllingTTY",
+
+                // TODO(https://fxbug.dev/566839736): Flush replica input queue on TCSETSF and TCSETSF2.
+                "PtyTest.TCSETSFFlushesOnlyReplicaInput",
+                "PtyTest.TCSETSFOnMasterFlushesReplicaInput",
+                "PtyTest.TCSETSF2FlushesReplicaInput",
 
                 // ptrace tests
                 "PtraceTest.ChangeRegSetInOptSyscall",
@@ -784,6 +874,11 @@
                 // TODO(https://fxbug.dev/322874521): Requires setitimer(ITIMER_VIRTUAL).
                 "SigIretTest.CheckRcxR11",
 
+                // signalfd_test
+                // TODO(https://fxbug.dev/586788852): Wake signalfd epoll waiters when signal mask changes.
+                "Signalfd/SignalfdTest.SetMask/kSigno",
+                "Signalfd/SignalfdTest.SetMask/kSignoMax",
+
                 // socket_abstract_test - https://fxbug.dev/297460498
                 "AbstractUnixSockets/AllSocketPairTest.SetSocketRecvBufForceAboveMax/*",
 
@@ -816,6 +911,13 @@
                 "BindToDeviceTest/BindToDeviceSequenceTest.BindWithReuse/*",
                 "BindToDeviceTest/BindToDeviceSequenceTest.BindAndReleaseDifferentDevice/*",
                 "BindToDeviceTest/BindToDeviceSequenceTest.CannotBindTo0AfterMixingReuseAddrAndNotReuseAddr/*",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindDoubleReuseAddrReusePortThenReuseAddr/1",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindDoubleReuseAddrReusePortThenReusePort/1",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindReuseAddrReusePortThenReuseAddr/1",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindReuseAddrReusePortThenReusePort/1",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindReuseAddrThenReuseAddr/1",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindReuseAddrThenReuseAddrReusePortThenReuseAddr/*",
+                "BindToDeviceTest/BindToDeviceSequenceTest.BindReusePortThenReuseAddrReusePort/1",
 
                 // socket_bind_to_device_test
                 "BindToDeviceTest/BindToDeviceTest.GetsockoptDefault/*",
@@ -843,6 +945,10 @@
                 "FilesystemUnixSockets/UnixSocketPairTest.TIOCINQSucceeds/[234589]",
                 "FilesystemUnixSockets/UnixSocketPairTest.TIOCINQSucceeds/1[01]",
                 "FilesystemUnixSockets/UnixSocketPairTest.TIOCOUTQSucceeds/*",
+
+                // socket_inet_loopback_isolated_test
+                // TODO(https://fxbug.dev/414851239): Fix and re-enable
+                "AllFamilies/SocketMultiProtocolInetLoopbackIsolatedTest.DualStackV6AnyBindAgain/TCP",
 
                 // socket_inet_loopback_nogotsan_test
                 "AllFamilies/SocketMultiProtocolInetLoopbackTest.UDPBindMayBindOtherBoundPortsReuseAddr/UDP",
@@ -914,6 +1020,7 @@
                 "NetlinkRouteTest.LinkInfoKind",
                 "NetlinkRouteTest.LinkMulticastGroupNamespaced",
                 "NetlinkRouteTest.LinkedToNetns",
+                "NetlinkRouteTest.VethAdd",
                 "NetlinkRouteTest.VethAddShortPeerIfInfoMsg",
                 "NetlinkRouteTest.VethOperStateUpWhenBothEndsUp",
                 "NetlinkRouteTest.DeleteRouteRemovesFirstMatchOnly",
@@ -928,7 +1035,13 @@
                 "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteWithoutOif/*",
                 "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteViaAddress/*",
                 "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.NewRouteLowestIndex/*",
+                "NetlinkRouteTest.LinkDownIPv6MulticastGroups",
+                "NetlinkRouteTest.VethLinkLocalAddrOnUpDown",
                 "NetworkNamespaceTest.CloneNewNetWithCloneNewUserDoesNotNeedCapSysAdmin",
+
+                // TODO(https://fxbug.dev/584255299): Dump RTM_GETROUTE routes in Linux FIB order.
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.GetRouteDumpOrder/0",
+                "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.GetRouteDumpOrder/1",
 
                 // TODO(https://fxbug.dev/578125962): Support RTNLGRP address/route notifications and route type validation.
                 "NetlinkRouteIpv4AndIpv6Tests/NetlinkRouteIpInvariantTest.AddressMulticastGroup/*",
@@ -973,6 +1086,7 @@
 
                 // socket_unix_unbound_stream_test
                 "AllUnixDomainSockets/UnixStreamSocketPairTest.SinglePeek/*",
+                "AllUnixDomainSockets/UnixStreamSocketPairTest.ZeroLengthMessageFDDiscarded/*",
 
                 // stat_test
                 "StatTest.StatxMntId",
@@ -994,6 +1108,10 @@
                 // semaphore_test
                 "SemaphoreTest.*",
                 "SempahoreTest.*",
+
+                // sendfile_socket_test
+                // TODO(https://fxbug.dev/582347521): Support SO_LINGER on stream sockets.
+                "AddressFamily/SendFileTest.Shutdown/1",
 
                 // tcp_socket_test
                 "AllInetTests/SimpleTcpSocketTest.SetSocketAttachDetachFilter/*",
@@ -1024,9 +1142,6 @@
                 // socket_ipv6_unbound_test
                 "IPv6UnboundSockets/IPv6UnboundSocketTest.ZeroHopLimit/0",
                 "IPv6UnboundSockets/IPv6UnboundSocketTest.ZeroHopLimit/1",
-
-                // timers_test
-                "IntervalTimerTest.RealTimeSignalsAreNotDuplicated",
 
                 // udp_socket_test
                 "AllInetTests/UdpSocketTest.RecvErrorConnRefused/*",
@@ -1071,17 +1186,31 @@
                 // write_test
                 "WriteTest.WriteExceedsRLimit",
 
+                // truncate_test
+                // TODO(https://fxbug.dev/528473076): Requires CLONE_NEWUSER.
+                "TruncateTest.TruncateNonWriteable",
+
+                // uidgid_test
+                // Failing new tests from gvisor.
+                "ProcSelfSetgroupsTest.AllowAfterDenyFails",
+                "ProcSelfSetgroupsTest.BadValueReturnsEINVAL",
+                "ProcSelfSetgroupsTest.ChildUserNamespaceInheritsDeny",
+                "ProcSelfSetgroupsTest.DenyAfterGidMapFails",
+                "ProcSelfSetgroupsTest.DenyTogglesReadback",
+                "ProcSelfSetgroupsTest.ExistsAndInheritsParentState",
+                "ProcSelfSetgroupsTest.SetgroupsSyscallFailsAfterDeny",
+                "ProcSelfSetgroupsTest.SetgroupsSyscallFailsBeforeGidMap",
+
                 // xattr_test
                 "XattrTest.SecurityCapacityXattr",
-                "XattrTest.UnknownPrefixRequiresReadPermission",
+
+                // TODO(https://fxbug.dev/528473076): Requires CLONE_NEWUSER.
+                "XattrTest.TrustedNamespaceWithCapSysAdminInNewUserns",
 
                 // fuse_test
                 "FuseTest.CloneDevice",
                 "FuseTest.CloneToConnectedDeviceFails",
                 "FuseTest.CloneFromUnconnectedDeviceFails",
-
-                // TODO(https://fxbug.dev/322875414): Implement FUSE fallocate.
-                "FuseTest.Fallocate",
 
                 // partial usercopy
                 "WriteTest.PartialWriteSIGSEGV",
@@ -1125,40 +1254,13 @@
         {
             type: "skip",
             matchers: [
-                // TODO(https://fxbug.dev/528464338): Support SO_MARK and netfilter mark matching.
-                "IPTablesBasic.GetRevisionMatchMark",
-
-                // TODO(https://fxbug.dev/528464949): Support ioprio_set and ioprio_get.
-                "IoprioTest.BasicSetGet",
-                "IoprioTest.ChildPID",
-                "IoprioTest.InvalidClassesAndData",
-                "IoprioTest.RtRequiresCapability",
-                "IoprioTest.ValidWho",
-
-                // TODO(https://fxbug.dev/528464354): Make /proc/sys/kernel/hostname and domainname pollable.
-                "ProcSysKernelDomainname.EpollNotifiesOnChange",
-                "ProcSysKernelHostname.EpollLatchesAndWakesAllSubscribers",
-                "ProcSysKernelHostname.EpollNotifiesOnChange",
-
-                // TODO(https://fxbug.dev/528465482): Support sched_setattr and sched_getattr.
-                "SchedAttrTest.BasicSetGet",
-                "SchedAttrTest.ChildPID",
-                "SchedAttrTest.ImpossiblePIDReturnsESRCH",
-                "SchedAttrTest.InvalidArgs",
-                "SchedAttrTest.InvalidPIDReturnsEINVAL",
-                "SchedAttrTest.StructSizeE2BIG",
-                "SchedSetschedulerTest.BasicSetGet",
-
                 // TODO(https://fxbug.dev/530576820): De-flake and re-enable.
                 "AIOTest.CloneVm",
 
                 // Passes on arm64, fails on x64.
                 "SysretTest.BadRsp",
 
-                // madvise_test
-                "MadviseDontforkTest.AddressLength",
-                "MadviseDontforkTest.DontforkAnonPrivate",
-                "MadviseDontforkTest.DontforkShared",
+                // madvise_test hugepage subrange tests time out.
                 "MadviseDontneedHugePageSubrangeTest.OneHugePagePartial",
                 "MadviseDontneedHugePageSubrangeTest.OneHugePageWhole",
                 "MadviseDontneedHugePageSubrangeTest.ThreeHugePagesPartialEnd",
@@ -1168,18 +1270,12 @@
                 "MadviseDontneedHugePageSubrangeTest.TwoHugePagesPartialStart",
                 "MadviseDontneedHugePageSubrangeTest.TwoHugePagesPartialStartAndEnd",
                 "MadviseDontneedTest.CleansPrivateFileHugePageSubrange",
-                "MadviseDontneedTest.DoesNotModifySharedAnonPage",
-                "MadviseDontneedTest.DoesNotModifySharedFilePage",
-                "MadviseDontneedTest.IgnoresPermissions",
-                "MadviseDontneedTest.ZerosCOWAnonPageInCallerOnly",
-                "MadviseDontneedTest.ZerosPrivateAnonPage",
 
                 // These tests hang.
                 "Syscall32Bit.Sysenter",
                 "Syscall32Bit.Int80",
                 "Syscall32Bit.Syscall",
                 "Call32Bit.Disallowed",
-                "ChrootTest.ProcMemSelfMapsNoEscapeProcOpen",
                 "ConcurrencyTest.MultiProcessConcurrency",
                 "ElfTest.PIE",
                 "ElfTest.PIENonZeroStart",
@@ -1241,34 +1337,11 @@
                 // Times out.
                 "ItimerTest.DeliversSIGPROFToThreadsRoughlyFairlyIdle",
 
-                // Passes in debian image, remove.
+                // Opening 65k ICMP sockets exhausts Netstack/system resources and crashes the target.
                 "PingSocket.ICMPPortExhaustion",
-                "Pipes/PipeTest.ZeroSize/*",
-                "PollTest.BlockingEventPOLLRDNORM",
-                "PollTest.BlockingEventPOLLWRNORM",
-                "ProcTask.TaskDirCannotBeDeleted",
-                "SigaltstackTest.WalksOffBottom",
-                "Signalfd/SignalfdTest.Blocking/*",
-                "Signalfd/SignalfdTest.ThreadGroup/*",
-                "AddressFamily/SendFileTest.SendMultiple/*",
-                "AddressFamily/SendFileTest.Shutdown/*",
-                "BindToDeviceTest/BindToDeviceDistributionTest.Tcp/*",
-                "BindToDeviceTest/BindToDeviceDistributionTest.Udp/*",
-                "AllConnectedSockets/DataTransferStressTest.BigDataTransfer/*",
-                "AllUnixDomainSockets/UnboundDgramUnixSocketPairTest.ZeroWriteAllowed/*",
-                "AllUnixDomainSockets/UnixStreamSocketPairTest.ZeroLengthMessageFDDiscarded/*",
-                "TeeTest.BlockingWrite",
-                "TeeTest.MultiPage",
-                "TeeTest.Blocking",
-                "TimerTest.ProcessKilledOnCPUHardLimit",
-                "TimerTest.ProcessKilledOnCPUSoftLimit",
-                "TimerTest.ProcessPingedRepeatedlyAfterCPUSoftLimit",
 
                 // These tests are flaky.
-                "ExceptionTest.IOAccessFault",
-                "MountTest.BindToSelf",
                 "PselectTest.SignalMaskBlocksSignal",
-                "UnameTest.Sanity",
 
                 // T These tests have different outcomes in socket_domain_test and
                 // socket_ip_tcp_loopback_test.
@@ -1303,15 +1376,8 @@
                 // libpthread.  See h//g/grte/c/AOZW4ySVadE/m/NhMQgRs-5r8J
                 "RobustFutexTest.PthreadMutexAttr",
 
-                // socket_bind_to_device_test
-                "BindToDeviceTest*",
-
-                // partial_bad_buffer_test
-                // Passes in debian image, remove.
-                "PartialBadBufferTest*",
-
-                // TODO(https://fxbug.dev/495996345): Implement SIGCONT that aborts an ongoing stop.
-                "SigstopTest.SIGCONTAbortsSIGSTOP",
+                // socket_bind_to_device_distribution_test times out.
+                "BindToDeviceTest/BindToDeviceDistributionTest.*",
 
                 // exec_binary_test
                 // Passes on x86 and fails on arm.
@@ -1329,8 +1395,11 @@
                 // TODO(b/2974389 Re-enable once timers are implemented.
                 "PpollTest.SignalMaskBlocksSignal",
 
+                // TODO(https://fxbug.dev/586788966): Convert existing group-stop into waitable ptrace-stop on PTRACE_ATTACH/PTRACE_SEIZE.
+                "Seize/PtraceAttachTest.AttachingConvertsGroupStopToPtraceStop/0",
+                "Seize/PtraceAttachTest.AttachingConvertsGroupStopToPtraceStop/1",
+
                 // These tests hang / hard crash
-                "PtraceTest.AttachingConvertsGroupStopToPtraceStop",
                 "PtraceTest.SingleStep",
 
                 // TODO(https://fxbug.dev/328690720) Re-enable once flake is resolved.
@@ -1354,83 +1423,26 @@
                 // TODO(https://fxbug.dev/353534690) deflake
                 "AllInetTests/RawPacketTest.SendFrom*/*",
 
-                // TODO(https://fxbug.dev/358451956) deflake
-                "ChrootTest.ProcMountsMountinfoNoEscape",
-
-                // TODO(https://fxbug.dev/358452019) deflake
-                "SigstopTest.Correctness",
-
-                // TODO(https://fxbug.dev/365094116): Investigate and re-enable
+                // TODO(https://fxbug.dev/365094116): Aborts proc_net_test mid-run.
                 "ProcSysNetIpv4IpForward.CanReadAndWrite",
-                "ProcSysNetPortRange.CanReadAndWrite",
 
-                // TODO(https://fxbug.dev/379127911): Investigate and re-enable
+                // TODO(https://fxbug.dev/379127911): RLIMIT_CPU is not enforced, so child processes spin until timeout.
+                "TimerTest.ProcessKilledOnCPUHardLimit",
+                "TimerTest.ProcessKilledOnCPUSoftLimit",
+                "TimerTest.ProcessPingedRepeatedlyAfterCPUSoftLimit",
                 "TimerTest.RlimitCpuInheritedAcrossFork",
-
-                // TODO(https://fxbug.dev/397205797): Fix and re-enable
-                "ExecTest.Setpgid",
-
-                // TODO(https://fxbug.dev/414851239): Fix and re-enable
-                "AllFamilies/SocketMultiProtocolInetLoopbackIsolatedTest.DualStackV6AnyCloseAndBindAgain/UDP",
-                "AllFamilies/SocketMultiProtocolInetLoopbackIsolatedTest.DualStackV6AnyBindAgain/UDP",
-                "AllFamilies/SocketMultiProtocolInetLoopbackIsolatedTest.DualStackV6AnyBindAgain/TCP",
-
-                // TODO(https://fxbug.dev/429143932): Investigate and re-enable
-                "PreadvTest.MMConcurrencyStress",
 
                 // TODO(https://fxbug.dev/361175318): FUTEX_TRYLOCK_PI is not supported yet
                 "SharedPrivate/PrivateAndSharedFutexTest.PITryLock*",
-
-                // TODO(https://fxbug.dev/468074994): Investigate and re-enable.
-                "NetlinkRouteTest.VethAdd",
-
-                // TODO(https://fxbug.dev/474544848): New failing tests.
-                "LinkTest.LinkAtWithEmptyPathNeedsNoCapForSameCreds",
-                "LinkTest.LinkAtWithEmptyPathNeedsNoCapForAtFcwd",
-
-                // TODO(https://fxbug.dev/528473076): Requires CLONE_NEWUSER.
-                "LinkTest.LinkAtWithEmptyPathNeedsCapDacReadSearch",
-                "TruncateTest.TruncateNonWriteable",
-                "XattrTest.TrustedNamespaceWithCapSysAdminInNewUserns",
 
                 // TODO(https://fxbug.dev/487789159): Crashing somewhere in the forked process logic.
                 "GetSockOpt/GetSockOptRequiresCapNetAdminTest.Validate/*",
                 "GetSockOptRequiresCapNetAdminTests/GetSockOptRequiresCapNetAdminTest.*",
                 "SetSockOpt/SetSockOptRequiresCapNetAdminTest.*",
 
-                // Test behavior change by kernel version
-                "MemfdTest.SealWriteWithMmap",
-
-                // Failing new tests from gvisor.
-                "PrctlTest.TaggedAddrCtrl",
-                "ProcSelfSetgroupsTest.AllowAfterDenyFails",
-                "ProcSelfSetgroupsTest.BadValueReturnsEINVAL",
-                "ProcSelfSetgroupsTest.ChildUserNamespaceInheritsDeny",
-                "ProcSelfSetgroupsTest.DenyAfterGidMapFails",
-                "ProcSelfSetgroupsTest.DenyTogglesReadback",
-                "ProcSelfSetgroupsTest.ExistsAndInheritsParentState",
-                "ProcSelfSetgroupsTest.SetgroupsSyscallFailsAfterDeny",
-                "ProcSelfSetgroupsTest.SetgroupsSyscallFailsBeforeGidMap",
-
                 // TODO(https://fxbug.dev/297440106): Races on child exit.
                 "AffinityTest.SetAffinityOtherUidRequiresCapSysNice",
                 "SetpriorityTest.OtherUidRequiresCapSysNice",
-
-                // TODO(https://fxbug.dev/566839792): Implement /proc/sys/user/max_user_namespaces and CLONE_NEWUSER.
-                "ProcSysUserMaxUserNamespaces.HasNumericValue",
-                "ProcSysUserMaxUserNamespaces.WriteUpdatesValue",
-                "ProcSysUserMaxUserNamespaces.RejectsNegativeValue",
-                "ProcSysUserMaxUserNamespaces.WriteRequiresCapSysResource",
-                "ProcSysUserMaxUserNamespaces.WriteDoesNotAffectParentNamespace",
-                "ProcSysUserMaxUserNamespaces.LimitBlocksNestedUserNamespace",
-                "ProcSysUserMaxUserNamespaces.RecursiveLimitBlocksGrandchild",
-                "ProcSysUserMaxUserNamespaces.ExitedNamespaceReleasesCharge",
-                "ProcSysUserMaxUserNamespaces.RefusedNestingReleasesPartialCharge",
-
-                // TODO(https://fxbug.dev/566839736): Flush replica input queue on TCSETSF and TCSETSF2.
-                "PtyTest.TCSETSFFlushesOnlyReplicaInput",
-                "PtyTest.TCSETSFOnMasterFlushesReplicaInput",
-                "PtyTest.TCSETSF2FlushesReplicaInput",
 
                 // TODO(https://fxbug.dev/568844571): Preserve x0 on arm64 SECCOMP_RET_TRAP (passes on x64, fails on arm64).
                 "SeccompTest.RetTrapCausesSIGSYS",

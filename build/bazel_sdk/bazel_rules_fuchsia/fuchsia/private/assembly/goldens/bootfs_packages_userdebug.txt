@@ -32,8 +32,6 @@ driver_manager
 ?fxfs-crypt
 gpio
 ?gpt2
-?hid
-?hid-input-report
 i2c
 kernel-args-forwarder
 ?kernel_debug_broker
@@ -46,7 +44,7 @@ pkg-cache
 platform-bus
 ?power
 power-manager
-?process-resolver
+process-resolver
 ?ptysvc
 ?pwm
 ?realtek-8211f

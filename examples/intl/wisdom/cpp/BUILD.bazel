@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_packaged_binary(
+    name = "intl_wisdom_client_packaged",
+    binary = "//examples/intl/wisdom/cpp/client:intl_wisdom_client",
+    binary_name = "intl_wisdom_client",
+)
+
+fx_component_manifest(
+    name = "intl_wisdom_client_cpp_manifest",
+    component_name = "wisdom_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/intl_wisdom_client.cml",
+)
+
+fx_component(
+    name = "intl_wisdom_client_cpp",
+    compiled_manifest = ":intl_wisdom_client_cpp_manifest",
+    visibility = ["//examples/intl/wisdom/tests:__pkg__"],
+    deps = [
+        # Cross-package fx_packaged_binary cannot be unwrapped automatically by bazel2gn.
+        ":intl_wisdom_client_packaged",  # @bazel2gn:path_overwrite://examples/intl/wisdom/cpp/client:intl_wisdom_client
+    ],
+)
+
+fx_packaged_binary(
+    name = "intl_wisdom_server_packaged",
+    binary = "//examples/intl/wisdom/cpp/server:intl_wisdom_server",
+    binary_name = "intl_wisdom_server",
+)
+
+fx_component_manifest(
+    name = "intl_wisdom_server_cpp_manifest",
+    component_name = "wisdom_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/intl_wisdom_server.cml",
+)
+
+fx_component(
+    name = "intl_wisdom_server_cpp",
+    compiled_manifest = ":intl_wisdom_server_cpp_manifest",
+    visibility = ["//examples/intl/wisdom/tests:__pkg__"],
+    deps = [
+        # Cross-package fx_packaged_binary cannot be unwrapped automatically by bazel2gn.
+        ":intl_wisdom_server_packaged",  # @bazel2gn:path_overwrite://examples/intl/wisdom/cpp/server:intl_wisdom_server
+    ],
+)

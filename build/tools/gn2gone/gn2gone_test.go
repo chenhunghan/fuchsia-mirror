@@ -6,6 +6,7 @@ package gn2gone
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -667,7 +668,12 @@ func TestDualTestedOwnLibrary(t *testing.T) {
 }
 `,
 		"app/BUILD.gn": `executable("app") {
-  deps = [ "//lib/a" ]
+  deps = [
+    "//lib/a",
+    "//lib/fidl",
+    "//lib/fwd",
+    "//zircon/system/ulib/insp",
+  ]
 }
 `,
 		// Has its own library: not BLOCKED_DUAL_TESTED.
@@ -787,6 +793,77 @@ go_test("fuzzer_smoke_test") {
   deps = [ "//lib/a" ]
 }
 `,
+		// Above-sentinel forwarding group in an ancestor sentinel directory
+		// (like //src/ui/input/lib/injector) used by GN (//app): its tests
+		// stay BLOCKED_DUAL_TESTED.
+		"lib/fwd/BUILD.gn": `group("fwd") {
+  public_deps = [ ":lib" ]
+}
+
+` + sentinel + `source_set("lib") {
+}
+`,
+		"lib/fwd/tests/BUILD.gn": sentinel + `go_test("fwd_test") {
+  deps = [ "//lib/fwd" ]
+}
+`,
+		// An above-sentinel forwarding group that nothing outside the test's
+		// own synced section uses does not make the synced library GN-built.
+		"lib/deadfwd/BUILD.gn": `group("deadfwd") {
+  public_deps = [ ":lib" ]
+}
+
+` + sentinel + `source_set("lib") {
+}
+`,
+		"lib/deadfwd/tests/BUILD.gn": sentinel + `go_test("deadfwd_test") {
+  deps = [ "//lib/deadfwd" ]
+}
+`,
+		// An above-sentinel forwarding group reaching a non-private
+		// hand-written library above the sentinel is unconditionally GN-built.
+		"lib/fwdhw/BUILD.gn": `group("fwdhw") {
+  public_deps = [ ":hw_lib" ]
+}
+
+source_set("hw_lib") {
+}
+
+` + sentinel + `go_library("unused") {
+}
+`,
+		"lib/fwdhw/tests/BUILD.gn": sentinel + `go_test("fwdhw_test") {
+  deps = [ "//lib/fwdhw" ]
+}
+`,
+		// Zircon utest/<name> pairs with ulib/<name> (like
+		// //zircon/system/utest/inspector -> //zircon/system/ulib/inspector).
+		"zircon/system/ulib/insp/BUILD.gn": sentinel + `source_set("insp") {
+}
+`,
+		"zircon/system/utest/insp/BUILD.gn": sentinel + `go_test("insp_test") {
+  deps = [ "//zircon/system/ulib/insp" ]
+}
+`,
+		// File-scope dependency variable list below the sentinel (like
+		// handle_test_deps in //src/lib/fidl/rust/handle_tests): bare
+		// directory labels inside it resolve as target deps.
+		"lib/fidl/BUILD.gn": sentinel + `rustc_library("fidl") {
+}
+`,
+		"lib/handle_tests/BUILD.gn": sentinel + `handle_test_deps = [
+  "//lib/fidl",
+  "//lib/hw:hw_cpp",
+]
+
+rustc_test("fidl_rust_handle_tests_bin") {
+  deps = handle_test_deps + [ "//third_party:extra" ]
+}
+
+rustc_library("fidl_handle_tests") {
+  deps = handle_test_deps
+}
+`,
 	})
 	idx := load(t, root)
 	got := map[string]State{}
@@ -794,23 +871,36 @@ go_test("fuzzer_smoke_test") {
 		got[r.Dir] = r.State
 	}
 	want := map[string]State{
-		"lib/a":           StateBlocked,
-		"lib/a-tests":     StateBlockedDualTested,
-		"lib/a/fuzzer":    StateBlockedDualTested,
-		"lib/a/staticlib": StateReady,
-		"lib/a/sub":       StateReady,
-		"lib/a/tests":     StateBlockedDualTested,
-		"lib/anc":         StateReady,
-		"lib/anc/test":    StateBlockedDualTested,
-		"lib/hw/test":     StateBlockedDualTested,
-		"lib/mock":        StateBlockedDualTested,
-		"lib/pm-tests":    StateBlockedDualTested,
-		"lib/privabove":   StateReady,
-		"lib/a/withbin":   StateBlockedDualTested,
-		"lib/a/wrapper":   StateBlockedDualTested,
+		"lib/a":                    StateBlocked,
+		"lib/a-tests":              StateBlockedDualTested,
+		"lib/a/fuzzer":             StateBlockedDualTested,
+		"lib/a/staticlib":          StateReady,
+		"lib/a/sub":                StateReady,
+		"lib/a/tests":              StateBlockedDualTested,
+		"lib/anc":                  StateReady,
+		"lib/anc/test":             StateBlockedDualTested,
+		"lib/deadfwd":              StateBlocked,
+		"lib/deadfwd/tests":        StateReady,
+		"lib/fidl":                 StateBlocked,
+		"lib/fwd":                  StateBlocked,
+		"lib/fwd/tests":            StateBlockedDualTested,
+		"lib/fwdhw":                StateReady,
+		"lib/fwdhw/tests":          StateBlockedDualTested,
+		"lib/handle_tests":         StateBlockedDualTested,
+		"lib/hw/test":              StateBlockedDualTested,
+		"lib/mock":                 StateBlockedDualTested,
+		"lib/pm-tests":             StateBlockedDualTested,
+		"lib/privabove":            StateReady,
+		"lib/a/withbin":            StateBlockedDualTested,
+		"lib/a/wrapper":            StateBlockedDualTested,
+		"zircon/system/ulib/insp":  StateBlocked,
+		"zircon/system/utest/insp": StateBlockedDualTested,
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("states diff (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{"//lib/fidl:fidl", "//lib/hw:hw"}, idx.Scan("lib/handle_tests").UnderTest); diff != "" {
+		t.Errorf("handle_tests UnderTest diff (-want +got):\n%s", diff)
 	}
 }
 
@@ -1266,6 +1356,13 @@ rustc_library(
     srcs = ["lib.rs"],
     output_name = "y_rlib_gn",
 )
+
+fx_cc_shared_library(
+    name = "y_so",
+    gn_public_configs = [":cfg"],
+    gn_public_deps = [":y_headers"],
+    deps = [":y_lib"],
+)
 `,
 		"lib/BUILD.gn": `group("tests") {
   testonly = true
@@ -1371,6 +1468,11 @@ rustc_library(
     name = "y_rlib",
     srcs = ["lib.rs"],
 )
+
+fx_cc_shared_library(
+    name = "y_so",
+    deps = [":y_lib"],
+)
 `
 	if diff := cmp.Diff(wantBazel, string(gotBazel)); diff != "" {
 		t.Errorf("lib/y/BUILD.bazel after Apply() diff (-want +got):\n%s", diff)
@@ -1400,5 +1502,282 @@ func TestUnsyncWaves(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, f)); !os.IsNotExist(err) {
 			t.Errorf("%s still exists after UnsyncWaves (err=%v)", f, err)
 		}
+	}
+}
+
+func TestEmptyGroups(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".gn": `buildconfig = "//build/BUILDCONFIG.gn"
+default_args = {
+  dir_pw = "//"
+}
+`,
+		// Root BUILD.gn empty test group + local caller.
+		"BUILD.gn": `group("root_tests") {
+  testonly = true
+  deps = []
+}
+
+group("all") {
+  testonly = true
+  deps = [ ":root_tests" ]
+}
+`,
+		// Plain BUILD.gn empty group with bare-dir relative static caller and
+		// non-dep bare-dir list caller, plus parent group("tests") that must
+		// not false-match.
+		"tools/BUILD.gn": `group("tests") {
+  testonly = true
+  deps = [ "tests" ]
+}
+
+_dirs = [ "tests" ]
+`,
+		"tools/tests/BUILD.gn": `group("tests") {
+  testonly = true
+  deps = []
+}
+`,
+		// Plain BUILD.gn empty group with omitted deps and dynamic callers
+		// (bare-dir list + dynamic prefix), plus Bazel label and visibility
+		// references that must not count.
+		"lib/nodps/BUILD.gn": `group("tests") {
+  testonly = true
+}
+`,
+		"ffx/BUILD.gn": `_tools = [ "//lib/nodps" ]
+foreach(t, [ "//lib/nodps:tests" ]) {
+  print(t)
+}
+bazel_test_suite("b") {
+  host_tests = [ "//lib/nodps:tests" ]
+}
+group("vis") {
+  visibility = [ "//lib/nodps:tests" ]
+  deps = [
+    "//lib/nodps:$x",
+    "//:root_tests",
+    "$dir_pw/sdk/cpp:tests",
+  ]
+}
+`,
+		// Above-sentinel empty test group: discovered, and deps on the default
+		// target "//sdk/cpp" must not match ":tests".
+		"sdk/cpp/BUILD.gn": `group("tests") {
+  testonly = true
+  deps = []
+}
+
+` + sentinel + `source_set("cpp") {
+}
+`,
+		"app/BUILD.gn": `executable("app") {
+  deps = [ "//sdk/cpp" ]
+}
+`,
+		// Below-sentinel static caller sets FromSentinelDir.
+		"synced_caller/BUILD.gn": sentinel + `group("tests") {
+  testonly = true
+  deps = [ "//sdk/cpp:tests" ]
+}
+`,
+		// Generated file header is captured.
+		"gen/BUILD.gn": `# DO NOT EDIT. Generated by tool.
+group("tests") {
+  testonly = true
+  deps = []
+}
+`,
+		// Excluded cases:
+		// 1. Below-sentinel empty test group.
+		"excluded/below/BUILD.gn": sentinel + `group("tests") {
+  testonly = true
+  deps = []
+}
+`,
+		// 2. Non-IsTestGroup (wrong name, missing testonly, extra attrs),
+		//    conditional, internal if/foreach, top-level foreach/template,
+		//    opaque deps.
+		"excluded/misc/BUILD.gn": `group("placeholder") {
+  deps = []
+}
+
+group("tests") {
+  deps = []
+}
+
+group("licensed_tests") {
+  testonly = true
+  applicable_licenses = [ ":lic" ]
+  deps = []
+}
+
+group("data_tests") {
+  testonly = true
+  data_deps = [ ":something" ]
+  deps = []
+}
+
+if (target_cpu == "riscv64") {
+  group("cond_tests") {
+    testonly = true
+  }
+}
+
+group("inner_if_tests") {
+  testonly = true
+  deps = []
+  if (is_linux) {
+  }
+}
+
+group("inner_foreach_tests") {
+  testonly = true
+  deps = []
+  foreach(x, items) {
+  }
+}
+
+group("opaque_tests") {
+  testonly = true
+  deps = some_var
+}
+
+foreach(x, items) {
+  group("loop_tests") {
+    testonly = true
+    deps = []
+  }
+}
+
+template("tmpl") {
+  group("tmpl_tests") {
+    testonly = true
+    deps = []
+  }
+}
+`,
+	})
+
+	idx := load(t, root)
+	got := idx.EmptyGroups()
+
+	type summary struct {
+		Label           string
+		File            string
+		Dir             string
+		Line            int
+		Region          Region
+		GeneratedHeader string
+		Callers         []string
+		DynamicCallers  []string
+	}
+	var gotSummaries []summary
+	for _, g := range got {
+		s := summary{
+			Label:           g.Label,
+			File:            g.File,
+			Dir:             g.Dir,
+			Line:            g.Line,
+			Region:          g.Region,
+			GeneratedHeader: g.GeneratedHeader,
+			DynamicCallers:  g.DynamicCallers,
+		}
+		for _, c := range g.Callers {
+			s.Callers = append(s.Callers, c.String())
+		}
+		gotSummaries = append(gotSummaries, s)
+	}
+	want := []summary{
+		{
+			Label:  "//:root_tests",
+			File:   "BUILD.gn",
+			Dir:    "",
+			Line:   1,
+			Region: RegionExternal,
+			Callers: []string{
+				`BUILD.gn:8 group("all") deps ":root_tests" -> :root_tests`,
+				`ffx/BUILD.gn:12 group("vis") deps "//:root_tests" -> :root_tests`,
+			},
+		},
+		{
+			Label:           "//gen:tests",
+			File:            "gen/BUILD.gn",
+			Dir:             "gen",
+			Line:            2,
+			Region:          RegionExternal,
+			GeneratedHeader: "DO NOT EDIT. Generated by tool.",
+		},
+		{
+			Label:  "//lib/nodps:tests",
+			File:   "lib/nodps/BUILD.gn",
+			Dir:    "lib/nodps",
+			Line:   1,
+			Region: RegionExternal,
+			Callers: []string{
+				`ffx/BUILD.gn:2 "//lib/nodps:tests" -> :tests`,
+			},
+			DynamicCallers: []string{"ffx/BUILD.gn:1", "ffx/BUILD.gn:11"},
+		},
+		{
+			Label:  "//sdk/cpp:tests",
+			File:   "sdk/cpp/BUILD.gn",
+			Dir:    "sdk/cpp",
+			Line:   1,
+			Region: RegionAbove,
+			Callers: []string{
+				`ffx/BUILD.gn:13 group("vis") deps "$dir_pw/sdk/cpp:tests" -> :tests [var_substituted]`,
+				`synced_caller/BUILD.gn:7 group("tests") deps "//sdk/cpp:tests" -> :tests (synced in //synced_caller)`,
+			},
+		},
+		{
+			Label:  "//tools/tests:tests",
+			File:   "tools/tests/BUILD.gn",
+			Dir:    "tools/tests",
+			Line:   1,
+			Region: RegionExternal,
+			Callers: []string{
+				`tools/BUILD.gn:3 group("tests") deps "tests" -> :tests`,
+			},
+			DynamicCallers: []string{"tools/BUILD.gn:6"},
+		},
+	}
+	if diff := cmp.Diff(want, gotSummaries); diff != "" {
+		t.Errorf("EmptyGroups() diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestEmptyGroupsDynamicPrefixCap(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"sdk/lib/d00/BUILD.gn": `group("tests") {
+  testonly = true
+  deps = []
+}
+`,
+		"caller/BUILD.gn": `group("c") {
+  deps = [
+    "//sdk/lib/$target_name:tests",
+    "//sdk/lib/d0$n:tests",
+  ]
+}
+`,
+	}
+	for i := 1; i <= maxDynamicDirs; i++ {
+		files[fmt.Sprintf("sdk/lib/d%02d/BUILD.gn", i)] = `group("other") {}
+`
+	}
+	writeTree(t, root, files)
+	idx := load(t, root)
+	got := idx.EmptyGroups()
+	if len(got) != 1 {
+		t.Fatalf("len(EmptyGroups()) = %d, want 1", len(got))
+	}
+	// "//sdk/lib/$target_name:tests" spans 51 BUILD.gn dirs (> maxDynamicDirs)
+	// and must be dropped; "//sdk/lib/d0$n:tests" spans 10 (<= maxDynamicDirs)
+	// and must be kept.
+	if diff := cmp.Diff([]string{"caller/BUILD.gn:4"}, got[0].DynamicCallers); diff != "" {
+		t.Errorf("DynamicCallers diff (-want +got):\n%s", diff)
 	}
 }

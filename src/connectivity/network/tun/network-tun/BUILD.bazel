@@ -2,9 +2,158 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":network-tun-test"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
 
 exports_files(
     ["meta/network-tun.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+cml_shard(
+    name = "meta/network-tun-test.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "meta/network-tun-test.shard.cml",
+    visibility = [
+        "//src/connectivity/lib:__subpackages__",
+        "//src/connectivity/network:__subpackages__",
+        "//src/connectivity/weave/weavestack/tests:__pkg__",
+    ],
+)
+
+fx_cc_library(
+    name = "src",
+    srcs = [
+        "buffer.cc",
+        "config.cc",
+        "device_adapter.cc",
+        "mac_adapter.cc",
+        "port_adapter.cc",
+        "state.cc",
+        "tun_ctl.cc",
+        "tun_device.cc",
+        "tun_pair.cc",
+    ],
+    hdrs = [
+        "buffer.h",
+        "config.h",
+        "device_adapter.h",
+        "mac_adapter.h",
+        "port_adapter.h",
+        "state.h",
+        "tun_ctl.h",
+        "tun_device.h",
+        "tun_pair.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp",
+        "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fit",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/network/drivers/network-device/device",
+        "//src/connectivity/network/drivers/network-device/mac",
+        "//src/lib/fsl",
+        "//src/lib/vmo_store",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/svc",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = [
+        "main.cc",
+        "minimal_driver_runtime.cc",
+        "minimal_driver_runtime.h",
+    ],
+    gn_output_name = "network_tun",
+    deps = [
+        ":src",
+        "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+        "//src/devices/bin/driver_runtime",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "network_tun",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "network-tun",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/network-tun.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "network-tun",
+    components = [":component"],
+    package_repository_name = "fuchsia.com",
+    visibility = [
+        "//bundles/assembly:__subpackages__",
+        "//src/connectivity/lib/network-device/cpp:__pkg__",
+        "//src/connectivity/network/testing/netemul:__subpackages__",
+        "//src/connectivity/network/tests/benchmarks/socket-tun:__pkg__",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "network_tun_unittest",
+    srcs = [
+        "buffer_unittest.cc",
+        "network_tun_unittest.cc",
+    ],
+    deps = [
+        ":src",
+        "//sdk/lib/driver/testing/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/fzl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "network-tun-test",
+    max_log_severity = "ERROR",
+    unit_tests = [":network_tun_unittest"],
 )

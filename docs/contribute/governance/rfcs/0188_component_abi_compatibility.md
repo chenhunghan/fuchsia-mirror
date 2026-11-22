@@ -125,7 +125,8 @@ target ABI revisions will be represented for components in the future and the
 timeframe for developments.
 
 How ABI revisions are supported for non-packaged components is addressed
-separately in the [ABI Revisions and Non-Packaged Components](#abi-revisions-and-non-packaged-components) section.
+separately in the [ABI revisions and non-packaged
+components](#abi-revisions-and-non-packaged-components) section.
 
 ### Overview
 
@@ -171,7 +172,7 @@ type Component = resource table {
 ...
 ```
 
-The [Tech Debt](#tech-debt) section will discuss the how this field will become
+The [Tech debt](#tech-debt) section will discuss the how this field will become
 redundant if the component's target ABI revision becomes included in a data
 source already represented in FIDL, such as the component manifest.
 
@@ -224,7 +225,7 @@ component resolution, and whether an error can be returned directly to a user
 or can only be logged for discoverability. The [Ergonomics](#ergonomics) section
 goes into more detail on how warnings and errors may be surfaced to the user.
 
-### ABI Revisions and Non-Packaged Components
+### ABI revisions and non-packaged components {:#abi-revisions-and-non-packaged-components}
 This RFC does not define how non-packaged components, such as web components,
 represent ABI revisions. The meaning of ABI compatibility for such components
 will be considered separately, and does not affect the initial rollout of this
@@ -259,7 +260,7 @@ Specifically, the changes needed for the boot component resolver are:
 - The boot component resolver includes the ABI revision value into the resolved
   component representation returned to the resolve action handler.
 
-## Implementation
+## Implementation {:#implementation}
 
 This design is implemented in two phases:
 
@@ -278,7 +279,7 @@ tools like [`ffx component`][ffx-component].
 
 No notable impact to performance.
 
-## Ergonomics
+## Ergonomics {:#ergonomics}
 
 Component Manager is responsible for surfacing warnings or errors from component
 resolution as a result of missing or incompatible target ABI revisions. All
@@ -339,7 +340,7 @@ to describe:
 
 Additionally, in-source documentation will be written as needed.
 
-## Drawbacks
+## Drawbacks {:#drawbacks}
 
 ### Component Resolvers Read Package Metadata to Retrieve The Component's Target ABI Revision
 A component's target ABI revision is derived from its package target ABI
@@ -438,7 +439,8 @@ __Pros__:
 * Avoids introducing a new FIDL field to
   `fuchsia.component.resolution.Component`, which may become tech debt if
   component target ABI revisions become included in a data source also
-  represented in FIDL, like the component manifest. The [Tech Debt](#tech-debt) section goes
+  represented in FIDL, like the component manifest. The
+  [Tech debt](#tech-debt) section goes
   into this scenario in more detail.
 
 __Cons__:
@@ -449,7 +451,7 @@ __Cons__:
   packaged and non-packaged components.
 * It's unknown how long this temporary fix will be in place.
 
-## Unknowns
+## Unknowns {:#unknowns}
 
 ### If/How/When Component-Specific Target ABI Revisions will be Defined in the Future
 
@@ -459,7 +461,7 @@ unknown. There are also no commitments about the data source that will store
 component target ABI revisions in the future; whether the ABI will be included
 in the component manifest is an open question.
 
-## Tech Debt
+## Tech debt {:#tech-debt}
 This design does not make assumptions of how component target ABI revisions will
 be defined in the future and risks introducing tech-debt.
 

@@ -35,8 +35,15 @@ use fidl_fuchsia_net_policy_properties::{self as fnp_properties, ProtoProperties
 
 const DEFAULT_NETWORK_FILE_NAME: &str = "default";
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub(crate) enum VersionedProperties {
+    #[default]
+    V2,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub(crate) struct NetworkMessage {
+    pub(crate) version: VersionedProperties,
     pub(crate) netid: u32,
     pub(crate) mark: u32,
     pub(crate) handle: u64,
@@ -44,8 +51,19 @@ pub(crate) struct NetworkMessage {
     pub(crate) dnsv4: Vec<Ipv4Addr>,
     #[serde(with = "addr_list")]
     pub(crate) dnsv6: Vec<Ipv6Addr>,
-    #[serde(flatten)]
-    pub(crate) versioned_properties: VersionedProperties,
+    #[serde(with = "transport_list")]
+    pub(crate) transports: Vec<TransportType>,
+    #[serde(with = "capability_list")]
+    pub(crate) capabilities: Vec<NetworkCapability>,
+    pub(crate) name: String,
+    // Whether or not there is a v4/v6 address assigned for
+    // the underlying link properties.
+    pub(crate) addrv4: bool,
+    pub(crate) addrv6: bool,
+    // Whether or not there is a v4/v6 default route for
+    // the underlying link properties.
+    pub(crate) defaultv4: bool,
+    pub(crate) defaultv6: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize_repr, PartialEq, Serialize_repr)]
@@ -106,28 +124,6 @@ pub(crate) enum NetworkCapability {
     LocalNetwork = 36,
     NotBandwidthConstrained = 37,
     PrioritizeUnifiedCommunications = 38,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "version")]
-pub(crate) enum VersionedProperties {
-    #[default]
-    V1,
-    V2 {
-        #[serde(with = "transport_list")]
-        transports: Vec<TransportType>,
-        #[serde(with = "capability_list")]
-        capabilities: Vec<NetworkCapability>,
-        name: String,
-        // Whether or not there is a v4/v6 address assigned for
-        // the underlying link properties.
-        addrv4: bool,
-        addrv6: bool,
-        // Whether or not there is a v4/v6 default route for
-        // the underlying link properties.
-        defaultv4: bool,
-        defaultv6: bool,
-    },
 }
 
 pub struct FuchsiaNetworkMonitorFs;
@@ -379,28 +375,6 @@ impl BytesFileOps for DefaultNetworkIdFile {
 
 impl From<&NetworkMessage> for fnp_properties::Network {
     fn from(message: &NetworkMessage) -> Self {
-        let (transports, capabilities, name, addrv4, addrv6, defaultv4, defaultv6) =
-            match &message.versioned_properties {
-                VersionedProperties::V1 => (None, None, None, None, None, None, None),
-                VersionedProperties::V2 {
-                    transports,
-                    capabilities,
-                    name,
-                    addrv4,
-                    addrv6,
-                    defaultv4,
-                    defaultv6,
-                } => (
-                    Some(transports),
-                    Some(capabilities),
-                    Some(name),
-                    Some(addrv4),
-                    Some(addrv6),
-                    Some(defaultv4),
-                    Some(defaultv6),
-                ),
-            };
-
         Self {
             network_id: Some(message.netid),
             info: Some(fnp_properties::NetworkInfo::Starnix(fnp_properties::StarnixNetworkInfo {
@@ -427,30 +401,28 @@ impl From<&NetworkMessage> for fnp_properties::Network {
                 ),
                 ..Default::default()
             }),
-            network_type: transports
-                .map(|transport_list| consolidate_transport_types_to_network_type(transport_list)),
-            capabilities: capabilities.map(|capability_list| convert_capabilities(capability_list)),
-            connectivity: capabilities
-                .map(|capability_list| convert_connectivity_state(capability_list)),
-            name: name.cloned(),
-            has_address: Some(proto_properties_from_v4_v6(addrv4.copied(), addrv6.copied())),
+            network_type: Some(consolidate_transport_types_to_network_type(&message.transports)),
+            capabilities: Some(convert_capabilities(&message.capabilities)),
+            connectivity: Some(convert_connectivity_state(&message.capabilities)),
+            name: Some(message.name.clone()),
+            has_address: Some(proto_properties_from_v4_v6(message.addrv4, message.addrv6)),
             has_default_route: Some(proto_properties_from_v4_v6(
-                defaultv4.copied(),
-                defaultv6.copied(),
+                message.defaultv4,
+                message.defaultv6,
             )),
             ..Default::default()
         }
     }
 }
 
-fn proto_properties_from_v4_v6(v4: Option<bool>, v6: Option<bool>) -> ProtoProperties {
+fn proto_properties_from_v4_v6(v4: bool, v6: bool) -> ProtoProperties {
     let mut properties = ProtoProperties::empty();
 
-    if Some(true) == v4 {
+    if v4 {
         properties |= ProtoProperties::V4;
     }
 
-    if Some(true) == v6 {
+    if v6 {
         properties |= ProtoProperties::V6;
     }
     properties
@@ -473,7 +445,9 @@ fn maybe_network_type_from_transport_type(
     value: TransportType,
 ) -> Option<fnp_properties::NetworkType> {
     match value {
-        TransportType::Ethernet => Some(fnp_properties::NetworkType::Ethernet),
+        // Treat USB the same as Ethernet since both represent wired connections
+        // to the device.
+        TransportType::Ethernet | TransportType::Usb => Some(fnp_properties::NetworkType::Ethernet),
         TransportType::Wifi => Some(fnp_properties::NetworkType::Wifi),
         TransportType::Bluetooth => Some(fnp_properties::NetworkType::Bluetooth),
         TransportType::Cellular => Some(fnp_properties::NetworkType::Cellular),
@@ -481,7 +455,6 @@ fn maybe_network_type_from_transport_type(
         | TransportType::WifiAware
         | TransportType::Lowpan
         | TransportType::Test
-        | TransportType::Usb
         | TransportType::Thread
         | TransportType::Satellite => {
             log_warn!("Known NetworkType {value:?} is not currently supported");
@@ -595,53 +568,101 @@ mod tests {
     use test_case::test_case;
 
     #[::fuchsia::test]
-    fn network_message_serde() {
+    fn network_message_serde_version2() {
         let network = NetworkMessage {
+            version: VersionedProperties::V2,
             netid: 123,
             mark: 456,
             handle: 789,
             dnsv4: vec![std_ip_v4!("192.168.0.1")],
             dnsv6: vec![std_ip_v6!("2001:db8::1")],
-            versioned_properties: VersionedProperties::V1,
+            transports: vec![
+                TransportType::Cellular,
+                TransportType::Wifi,
+                TransportType::Bluetooth,
+                TransportType::Ethernet,
+                TransportType::Vpn,
+                TransportType::WifiAware,
+                TransportType::Lowpan,
+                TransportType::Test,
+                TransportType::Usb,
+                TransportType::Thread,
+                TransportType::Satellite,
+            ],
+            capabilities: vec![
+                NetworkCapability::Trusted,
+                NetworkCapability::Internet,
+                NetworkCapability::Validated,
+            ],
+            name: "test01".to_string(),
+            addrv4: false,
+            addrv6: true,
+            defaultv4: false,
+            defaultv6: true,
         };
         serde_helper(network);
     }
 
     #[::fuchsia::test]
-    fn network_message_serde_version2() {
-        let network = NetworkMessage {
-            netid: 123,
-            mark: 456,
-            handle: 789,
-            dnsv4: vec![std_ip_v4!("192.168.0.1")],
-            dnsv6: vec![std_ip_v6!("2001:db8::1")],
-            versioned_properties: VersionedProperties::V2 {
-                transports: vec![
-                    TransportType::Cellular,
-                    TransportType::Wifi,
-                    TransportType::Bluetooth,
-                    TransportType::Ethernet,
-                    TransportType::Vpn,
-                    TransportType::WifiAware,
-                    TransportType::Lowpan,
-                    TransportType::Test,
-                    TransportType::Usb,
-                    TransportType::Thread,
-                    TransportType::Satellite,
-                ],
-                capabilities: vec![
-                    NetworkCapability::Trusted,
-                    NetworkCapability::Internet,
-                    NetworkCapability::Validated,
-                ],
-                name: "test01".to_string(),
-                addrv4: false,
-                addrv6: true,
-                defaultv4: false,
-                defaultv6: true,
-            },
-        };
-        serde_helper(network);
+    fn network_message_serde_missing_version_rejected() {
+        let json = r#"{
+            "netid": 123,
+            "mark": 456,
+            "handle": 789,
+            "dnsv4": ["192.168.0.1"],
+            "dnsv6": ["2001:db8::1"],
+            "transports": [],
+            "capabilities": [],
+            "name": "test",
+            "addrv4": false,
+            "addrv6": false,
+            "defaultv4": false,
+            "defaultv6": false
+        }"#;
+
+        assert!(serde_json::from_str::<NetworkMessage>(json).is_err());
+    }
+
+    #[::fuchsia::test]
+    fn network_message_serde_v1_rejected() {
+        let json = r#"{
+            "netid": 123,
+            "mark": 456,
+            "handle": 789,
+            "dnsv4": ["192.168.0.1"],
+            "dnsv6": ["2001:db8::1"],
+            "version": "V1",
+            "transports": [],
+            "capabilities": [],
+            "name": "test",
+            "addrv4": false,
+            "addrv6": false,
+            "defaultv4": false,
+            "defaultv6": false
+        }"#;
+
+        assert!(serde_json::from_str::<NetworkMessage>(json).is_err());
+    }
+
+    #[::fuchsia::test]
+    fn network_message_serde_invalid_version_rejected() {
+        let json = r#"{
+            "netid": 123,
+            "mark": 456,
+            "handle": 789,
+            "dnsv4": ["192.168.0.1"],
+            "dnsv6": ["2001:db8::1"],
+            "version": "V9999",
+            "transports": [],
+            "capabilities": [],
+            "name": "test",
+            "addrv4": false,
+            "addrv6": false,
+            "defaultv4": false,
+            "defaultv6": false
+        }"#;
+
+        assert!(serde_json::from_str::<NetworkMessage>(json).is_err());
     }
 
     #[::fuchsia::test]
@@ -663,20 +684,19 @@ mod tests {
         }"#;
 
         let expected = NetworkMessage {
+            version: VersionedProperties::V2,
             netid: 123,
             mark: 456,
             handle: 789,
             dnsv4: vec![std_ip_v4!("192.168.0.1")],
             dnsv6: vec![std_ip_v6!("2001:db8::1")],
-            versioned_properties: VersionedProperties::V2 {
-                transports: vec![TransportType::Wifi, TransportType::Ethernet],
-                capabilities: vec![NetworkCapability::NotMetered],
-                name: "test01".to_string(),
-                addrv4: false,
-                addrv6: false,
-                defaultv4: false,
-                defaultv6: false,
-            },
+            transports: vec![TransportType::Wifi, TransportType::Ethernet],
+            capabilities: vec![NetworkCapability::NotMetered],
+            name: "test01".to_string(),
+            addrv4: false,
+            addrv6: false,
+            defaultv4: false,
+            defaultv6: false,
         };
 
         let deserialized: NetworkMessage = serde_json::from_str(json).unwrap();
@@ -703,8 +723,14 @@ mod tests {
 
         let deserialized: NetworkMessage = serde_json::from_str(json).unwrap();
         assert_eq!(
-            deserialized.versioned_properties,
-            VersionedProperties::V2 {
+            deserialized,
+            NetworkMessage {
+                version: VersionedProperties::V2,
+                netid: 100,
+                mark: 65536,
+                handle: 432932703437,
+                dnsv4: vec![],
+                dnsv6: vec![],
                 transports: vec![
                     TransportType::Test,
                     TransportType::Usb,
@@ -741,6 +767,8 @@ mod tests {
         "bluetooth")]
     #[test_case(vec![TransportType::Ethernet], fnp_properties::NetworkType::Ethernet;
         "ethernet")]
+    #[test_case(vec![TransportType::Usb], fnp_properties::NetworkType::Ethernet;
+        "usb")]
     #[test_case(
         vec![
             TransportType::Wifi,
@@ -754,17 +782,16 @@ mod tests {
             TransportType::WifiAware,
             TransportType::Vpn,
             TransportType::Test,
-            TransportType::Usb,
             TransportType::Thread,
             TransportType::Satellite,
         ],
         fnp_properties::NetworkType::Unknown; "none_applicable")]
     #[test_case(
         vec![
-            TransportType::Usb,
+            TransportType::Test,
             TransportType::Wifi,
         ],
-        fnp_properties::NetworkType::Wifi; "supported_transport_after_usb")]
+        fnp_properties::NetworkType::Wifi; "supported_transport_after_unsupported")]
     #[::fuchsia::test]
     fn test_consolidate_transport_types_to_network_type(
         transports: Vec<TransportType>,

@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 
+#include <fbl/algorithm.h>
 #include <fbl/alloc_checker.h>
 
 #include "src/graphics/display/drivers/amlogic-display/board-resources.h"
@@ -263,15 +264,15 @@ void VideoInputUnit::SetColorCorrection(uint32_t rdma_table_idx,
              coef00_01, coef02_10, coef11_12, coef20_21, coef22);
 }
 
-void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer,
+void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer, const ImageInfo& image_info,
                                  const display::Mode& display_mode,
                                  const display::ColorConversion& color_conversion,
                                  display::DriverConfigStamp config_stamp) {
   // TODO(https://fxbug.dev/401286733): color layers not yet supported.
   ZX_DEBUG_ASSERT_MSG(layer.image_source().width() != 0, "Solid color fill layers not supported");
   ZX_DEBUG_ASSERT_MSG(layer.image_source().height() != 0, "Solid color fill layers not supported");
+  ZX_DEBUG_ASSERT(layer.image_id() == image_info.id);
 
-  ImageInfo* info = reinterpret_cast<ImageInfo*>(layer.image_id().value());
   const int next_table_idx = rdma_->GetNextAvailableRdmaTableIndex();
   if (next_table_idx < 0) {
     fdf::error("No table available!");
@@ -279,7 +280,7 @@ void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer,
   }
 
   fdf::trace("Table index {} used", next_table_idx);
-  fdf::trace("AFBC {}", info->is_afbc ? "enabled" : "disabled");
+  fdf::trace("AFBC {}", image_info.is_afbc ? "enabled" : "disabled");
 
   PixelGridSize2D display_contents_size = {.width = display_mode.active_area().width(),
                                            .height = display_mode.active_area().height()};
@@ -296,17 +297,17 @@ void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer,
   }
 
   auto cfg_w0 = osd1_registers.blk0_cfg_w0.FromValue(0);
-  if (info->is_afbc) {
+  if (image_info.is_afbc) {
     // AFBC: Enable sourcing from mali + configure as big endian
     cfg_w0.set_mali_src_en(1).set_little_endian(0);
   } else {
-    uint8_t canvas_index = info->canvas_idx;
+    uint8_t canvas_index = image_info.canvas_idx;
     // Update CFG_W0 with correct Canvas Index
     cfg_w0.set_mali_src_en(0).set_little_endian(1).set_tbl_addr(canvas_index);
   }
   cfg_w0.set_blk_mode(OsdBlk0CfgW0Reg::kBlockMode32Bit);
 
-  switch (info->pixel_format.pixel_format) {
+  switch (image_info.pixel_format.pixel_format) {
     case fuchsia_images2::PixelFormat::kR8G8B8A8:
       cfg_w0.set_color_matrix(OsdBlk0CfgW0Reg::kColorMatrixAbgr8888);
       break;
@@ -317,7 +318,7 @@ void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer,
       // This should never happen. The image validity is guaranteed in
       // ImportImage() / CheckConfiguration().
       ZX_ASSERT_MSG(false, "Unsupported image format %u",
-                    static_cast<uint32_t>(info->pixel_format.pixel_format));
+                    static_cast<uint32_t>(image_info.pixel_format.pixel_format));
       return;
   }
 
@@ -365,22 +366,22 @@ void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer,
   }
 
   // Use linear address for AFBC, Canvas otherwise
-  osd_ctrl_stat_val.set_osd_mem_mode(info->is_afbc ? 1 : 0);
+  osd_ctrl_stat_val.set_osd_mem_mode(image_info.is_afbc ? 1 : 0);
   osd_ctrl_stat2_val.set_pending_status_cleanup(1);
 
   rdma_->SetRdmaTableValue(next_table_idx, IDX_CTRL_STAT, osd_ctrl_stat_val.reg_value());
   rdma_->SetRdmaTableValue(next_table_idx, IDX_CTRL_STAT2, osd_ctrl_stat2_val.reg_value());
 
-  if (info->is_afbc) {
+  if (image_info.is_afbc) {
     // Line Stride calculation based on vendor code
-    auto a = fbl::round_up(fbl::round_up(info->image_width * 4, 16u) / 16, 2u);
+    auto a = fbl::round_up(fbl::round_up(image_info.image_width * 4, 16u) / 16, 2u);
     auto r = osd1_registers.blk2_cfg_w4.FromValue(0).set_linear_stride(a).reg_value();
     rdma_->SetRdmaTableValue(next_table_idx, IDX_BLK2_CFG_W4, r);
 
     // Set AFBC's Physical address since it does not use Canvas
     rdma_->SetRdmaTableValue(next_table_idx, IDX_AFBC_HEAD_BUF_ADDR_LOW,
-                             (info->paddr & 0xFFFFFFFF));
-    rdma_->SetRdmaTableValue(next_table_idx, IDX_AFBC_HEAD_BUF_ADDR_HIGH, (info->paddr >> 32));
+                             (image_info.paddr & 0xFFFFFFFF));
+    rdma_->SetRdmaTableValue(next_table_idx, IDX_AFBC_HEAD_BUF_ADDR_HIGH, (image_info.paddr >> 32));
 
     // Set OSD to unpack Mali source
     auto upackreg = osd1_registers.mali_unpack_ctrl.ReadFrom(&vpu_mmio_).set_mali_unpack_en(1);
@@ -431,11 +432,11 @@ void VideoInputUnit::FlipOnVsync(const display::DriverLayer& layer,
                            (config_stamp.value() & 0xFFFFFFFF));
 
   rdma_->FlushRdmaTable(next_table_idx);
-  if (info->is_afbc) {
+  if (image_info.is_afbc) {
     rdma_->FlushAfbcRdmaTable();
   }
 
-  rdma_->ExecRdmaTable(next_table_idx, config_stamp, info->is_afbc);
+  rdma_->ExecRdmaTable(next_table_idx, config_stamp, image_info.is_afbc);
 }
 
 void VideoInputUnit::ConfigOsdLayers(PixelGridSize2D layer_image_size,

@@ -94,6 +94,10 @@ class BindManager {
       NodeBindingInfoResultCallback result_callback =
           [](fidl::VectorView<fuchsia_driver_development::wire::NodeBindingInfo>) {});
 
+  // Attempts to bind only available multibind and orphaned resources whose properties can match
+  // at least one entry in |parent_specs|.
+  void TryBindForParentSpecs(cpp20::span<const fuchsia_driver_framework::ParentSpec2> parent_specs);
+
   void RecordInspect(inspect::Inspector& inspector) const;
 
   std::vector<fuchsia_driver_development::wire::CompositeNodeInfo> GetCompositeListInfo(
@@ -125,6 +129,15 @@ class BindManager {
   // Should only be called when |bind_resource_set_.is_bind_ongoing()| is true and there are
   // orphaned resources.
   void TryBindAllAvailableInternal(std::shared_ptr<BindResultTracker> tracker);
+
+  // Collects available multibind and orphaned resources whose properties conservatively match at
+  // least one parent spec in |parent_specs|.
+  std::vector<BindRequest> CollectMatchingAvailableResources(
+      cpp20::span<const fuchsia_driver_framework::ParentSpec2> parent_specs) const;
+
+  static bool MayResourceMatchAnyParentSpec(
+      const Resource& resource,
+      cpp20::span<const fuchsia_driver_framework::ParentSpec2> parent_specs);
 
   // Process any pending bind requests that were queued during an ongoing bind process.
   // Should only be called when |bind_resource_set_.is_bind_ongoing()| is true.
@@ -158,6 +171,11 @@ class BindManager {
 
   // Queue of TryBindAllAvailable() callbacks pending for the next TryBindAllAvailable() trigger.
   std::vector<NodeBindingInfoResultCallback> pending_orphan_rebind_callbacks_;
+
+  // Accumulated parent specs from CompositeNodeSpecManager::AddSpec calls that arrived while a
+  // bind process was ongoing. Evaluated once the ongoing wave completes unless superseded by a
+  // full TryBindAllAvailable() request.
+  std::vector<fuchsia_driver_framework::ParentSpec2> pending_spec_bind_filters_;
 
   // Queue of Bind() calls that are made while there's an ongoing bind process. Once the process
   // is complete, ProcessPendingBindRequests() goes through the queue.

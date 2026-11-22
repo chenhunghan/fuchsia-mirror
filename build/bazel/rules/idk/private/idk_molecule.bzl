@@ -176,8 +176,7 @@ idk_host_tool_molecule_for_current_host_cpu = rule(
     attrs = {
         "deps": attr.label_list(
             doc = """Atoms and other molecules the molecule depends on.
-            All must be `target_compatible_with` `HOST_OS_CONSTRAINTS` or
-            `HOST_CONSTRAINTS`.
+            All must be `target_compatible_with` `HOST_OS_CONSTRAINTS`.
             """,
             providers = [[FuchsiaIdkAtomInfo], [FuchsiaIdkMoleculeInfo]],
             mandatory = True,

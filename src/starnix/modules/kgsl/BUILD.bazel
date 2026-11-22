@@ -24,14 +24,6 @@ test_suite(
     visibility = ["//src/starnix:__pkg__"],
 )
 
-# TODO(https://fxbug.dev/42085293): Placeholder filegroup for
-# //src/starnix/modules/kgsl/uapi_manual, which is a GN-only golden-file check
-# group with no Bazel target yet; remove once migrated to Bazel.
-# @bazel2gn:skip
-filegroup(
-    name = "uapi_manual",
-)
-
 rustc_library(
     name = "kgsl",
     srcs = [
@@ -39,12 +31,6 @@ rustc_library(
         "init.rs",
         "lib.rs",
         "util.rs",
-    ],
-    aspect_hints = [
-        # TODO(https://fxbug.dev/42085293): Preserve GN dependency on the
-        # GN-only //src/starnix/modules/kgsl/uapi_manual golden check group;
-        # remove placeholder filegroup once migrated to Bazel.
-        ":uapi_manual",  # @bazel2gn:path_overwrite://src/starnix/modules/kgsl/uapi_manual
     ],
     # This flag affects the return value of a signal ioctl used by certain
     # container binaries to direct them to use kgsl-based or magma-based drivers.
@@ -76,12 +62,6 @@ rustc_library(
 
 rustc_test(
     name = "kgsl_test",
-    aspect_hints = [
-        # TODO(https://fxbug.dev/42085293): Preserve GN dependency on the
-        # GN-only //src/starnix/modules/kgsl/uapi_manual golden check group;
-        # remove placeholder filegroup once migrated to Bazel.
-        ":uapi_manual",  # @bazel2gn:path_overwrite://src/starnix/modules/kgsl/uapi_manual
-    ],
     crate = ":kgsl",
     crate_features = (["starnix-kgsl-enable"] if starnix_kgsl_enable else []) + (
         ["starnix-kgsl-debug"] if starnix_kgsl_debug else []

@@ -92,6 +92,32 @@ def _test_package_and_archive_name():
         archive_name = "some_other_archive.far",
     )
 
+    fuchsia_package(
+        name = "shared_name_pkg_a",
+        package_name = "shared_package_name",
+        tags = ["manual"],
+    )
+
+    fuchsia_package(
+        name = "shared_name_pkg_b",
+        package_name = "shared_package_name",
+        tags = ["manual"],
+    )
+
+    name_test(
+        name = "name_test_shared_name_pkg_a",
+        target_under_test = ":shared_name_pkg_a",
+        package_name = "shared_package_name",
+        archive_name = "shared_package_name.far",
+    )
+
+    name_test(
+        name = "name_test_shared_name_pkg_b",
+        target_under_test = ":shared_name_pkg_b",
+        package_name = "shared_package_name",
+        archive_name = "shared_package_name.far",
+    )
+
 def _mock_component(name, is_driver):
     make_fake_component_manifest(
         name = name + "_manifest",
@@ -150,6 +176,51 @@ dependencies_test = analysistest.make(
     attrs = {
         "expected_components": attr.string_list(),
         "expected_drivers": attr.string_list(),
+    },
+)
+
+def _subpackage_files_test_impl(ctx):
+    env = analysistest.begin(ctx)
+
+    target_under_test = analysistest.target_under_test(env)
+    package_info = target_under_test[FuchsiaPackageInfo]
+    package_files = {f: True for f in package_info.files}
+    default_files = {f: True for f in target_under_test[DefaultInfo].files.to_list()}
+
+    asserts.equals(
+        env,
+        len(package_files),
+        len(package_info.files),
+    )
+
+    for subpackage in ctx.attr.expected_subpackages:
+        subpackage_info = subpackage[FuchsiaPackageInfo]
+        expected_files = (
+            [subpackage_info.package_manifest, subpackage_info.meta_far] +
+            [r.src for r in subpackage_info.package_resources] +
+            subpackage_info.files
+        )
+        for f in expected_files:
+            asserts.true(
+                env,
+                f in package_files,
+                "Expected subpackage file {} in FuchsiaPackageInfo.files".format(f.short_path),
+            )
+            asserts.true(
+                env,
+                f in default_files,
+                "Expected subpackage file {} in DefaultInfo.files".format(f.short_path),
+            )
+
+    return analysistest.end(env)
+
+subpackage_files_test = analysistest.make(
+    _subpackage_files_test_impl,
+    attrs = {
+        "expected_subpackages": attr.label_list(
+            providers = [FuchsiaPackageInfo],
+            mandatory = True,
+        ),
     },
 )
 
@@ -221,6 +292,40 @@ def _test_package_deps():
         expected_drivers = [
             "meta/driver_1.cm",
             "meta/driver_2.cm",
+        ],
+    )
+
+    fuchsia_package(
+        name = "subpackage_with_nested_subpackage_1",
+        tags = ["manual"],
+        components = [":component_2"],
+        subpackages = [":single_driver"],
+    )
+
+    fuchsia_package(
+        name = "subpackage_with_nested_subpackage_2",
+        tags = ["manual"],
+        components = [":driver_2"],
+        subpackages = [":single_driver"],
+    )
+
+    fuchsia_package(
+        name = "package_with_transitive_subpackages",
+        tags = ["manual"],
+        components = [":component_1"],
+        subpackages = [
+            ":subpackage_with_nested_subpackage_1",
+            ":subpackage_with_nested_subpackage_2",
+        ],
+    )
+
+    subpackage_files_test(
+        name = "subpackage_files_test_transitive",
+        target_under_test = ":package_with_transitive_subpackages",
+        expected_subpackages = [
+            ":subpackage_with_nested_subpackage_1",
+            ":subpackage_with_nested_subpackage_2",
+            ":single_driver",
         ],
     )
 
@@ -400,9 +505,12 @@ def fuchsia_package_test_suite(name, **kwargs):
         tests = [
             ":name_test_names_provided",
             ":name_test_empty_package",
+            ":name_test_shared_name_pkg_a",
+            ":name_test_shared_name_pkg_b",
             ":dependencies_test_single_component",
             ":dependencies_test_single_driver",
             ":dependencies_test_composite",
+            ":subpackage_files_test_transitive",
             ":next_api_level",
             ":failure_test_retired_api_level",
             ":failure_test_unknown_numerical_api_level",

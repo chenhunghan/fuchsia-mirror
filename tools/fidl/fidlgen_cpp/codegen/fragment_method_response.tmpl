@@ -88,7 +88,7 @@ struct ::fidl::internal::WireCodingTraits<{{ .WireTransactionalResponse }}, ::fi
   {{ if .ResponseArgs }}
     {{ .WireTransactionalResponse }}::{{ .WireTransactionalResponse.Self }}({{ RenderParams .ResponseArgs }})
     : body({{ .WireResponse }}({{ RenderForwardParams .ResponseArgs }})) {
-      ::fidl::InitTxnHeader(&header, 0, {{ .OrdinalName }}, {{ .DynamicFlagsName }});
+      ::fidl::InitTxnHeader(&this->header, 0, {{ .OrdinalName }}, {{ .DynamicFlagsName }});
     }
   {{- end }}
   {{ .WireTransactionalResponse }}::{{ .WireTransactionalResponse.Self }}() {

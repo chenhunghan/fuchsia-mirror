@@ -7,7 +7,7 @@ use crate::security;
 use crate::task::CurrentTask;
 use crate::vfs::buffers::{InputBuffer, InputBufferExt as _, OutputBuffer};
 use crate::vfs::socket::syscalls::CMsgHdrPtr;
-use crate::vfs::socket::{SocketAddress, SocketMessageFlags};
+use crate::vfs::socket::{SocketAddress, SocketDomain, SocketMessageFlags};
 use crate::vfs::{FdFlags, FdNumber, FileHandle, FsString};
 use byteorder::{ByteOrder, NativeEndian};
 use starnix_uapi::auth::{CAP_SETGID, CAP_SETUID, CAP_SYS_ADMIN};
@@ -189,50 +189,58 @@ impl AncillaryData {
         }
     }
 
-    /// Creates a new `AncillaryData` instance representing the data in `message`.
-    ///
-    /// # Parameters
-    /// - `current_task`: The current task. Used to interpret SCM_RIGHTS messages.
-    /// - `message`: The message header to parse.
-    pub fn from_cmsg(current_task: &CurrentTask, message: ControlMsg) -> Result<Self, Errno> {
-        match (message.level, message.r#type) {
-            (SOL_SOCKET, SCM_RIGHTS | SCM_CREDENTIALS) => {
-                Ok(AncillaryData::Unix(UnixControlData::new(current_task, message)?))
+    /// Parses `message` into an `AncillaryData` item for `domain`, returning `Ok(None)` when the
+    /// control message is ignored for that socket domain.
+    pub fn from_cmsg(
+        current_task: &CurrentTask,
+        domain: SocketDomain,
+        message: ControlMsg,
+    ) -> Result<Option<Self>, Errno> {
+        let data = match (domain, message.level, message.r#type) {
+            (SocketDomain::Unix, SOL_SOCKET, SCM_RIGHTS | SCM_CREDENTIALS)
+            | (SocketDomain::Netlink, SOL_SOCKET, SCM_CREDENTIALS) => {
+                AncillaryData::Unix(UnixControlData::new(current_task, message)?)
             }
-            (SOL_IP, IP_TOS) => Ok(AncillaryData::Ip(syncio::ControlMessage::IpTos(
+            (SocketDomain::Netlink, SOL_SOCKET, SCM_RIGHTS) => return error!(EINVAL),
+            // `SCM_RIGHTS` and `SCM_CREDENTIALS` use `cmsg_level` `SOL_SOCKET` for historical
+            // reasons, even though they only apply to `AF_UNIX` (and `SCM_CREDENTIALS` to
+            // `AF_NETLINK`). Other socket domains silently ignore them without inspecting their
+            // payload.
+            (_, SOL_SOCKET, SCM_RIGHTS | SCM_CREDENTIALS) => return Ok(None),
+            (_, SOL_IP, IP_TOS) => AncillaryData::Ip(syncio::ControlMessage::IpTos(
                 u8::read_from_prefix(&message.data[..]).map_err(|_| errno!(EINVAL))?.0,
-            ))),
-            (SOL_IP, IP_TTL) => Ok(AncillaryData::Ip(syncio::ControlMessage::IpTtl(
+            )),
+            (_, SOL_IP, IP_TTL) => AncillaryData::Ip(syncio::ControlMessage::IpTtl(
                 read_u8_value_from_int_cmsg(&message.data).ok_or_else(|| errno!(EINVAL))?,
-            ))),
-            (SOL_IP, IP_RECVORIGDSTADDR) => {
-                Ok(AncillaryData::Ip(syncio::ControlMessage::IpRecvOrigDstAddr(
+            )),
+            (_, SOL_IP, IP_RECVORIGDSTADDR) => {
+                AncillaryData::Ip(syncio::ControlMessage::IpRecvOrigDstAddr(
                     <[u8; size_of::<uapi::sockaddr_in>()]>::read_from_prefix(&message.data[..])
                         .map_err(|_| errno!(EINVAL))?
                         .0,
-                )))
+                ))
             }
-            (SOL_IP, IP_PKTINFO) => {
+            (_, SOL_IP, IP_PKTINFO) => {
                 let (pktinfo, _) = uapi::in_pktinfo::read_from_prefix(&message.data[..])
                     .map_err(|_| errno!(EINVAL))?;
-                Ok(AncillaryData::Ip(syncio::ControlMessage::IpPacketInfo {
+                AncillaryData::Ip(syncio::ControlMessage::IpPacketInfo {
                     iface: pktinfo.ipi_ifindex,
                     local_addr: pktinfo.ipi_spec_dst.s_addr.to_ne_bytes(),
                     header_destination_addr: pktinfo.ipi_addr.s_addr.to_ne_bytes(),
-                }))
+                })
             }
-            (SOL_IPV6, IPV6_TCLASS) => Ok(AncillaryData::Ip(syncio::ControlMessage::Ipv6Tclass(
+            (_, SOL_IPV6, IPV6_TCLASS) => AncillaryData::Ip(syncio::ControlMessage::Ipv6Tclass(
                 read_u8_value_from_int_cmsg(&message.data).ok_or_else(|| errno!(EINVAL))?,
-            ))),
-            (SOL_IPV6, IPV6_HOPLIMIT) => {
-                Ok(AncillaryData::Ip(syncio::ControlMessage::Ipv6HopLimit(
+            )),
+            (_, SOL_IPV6, IPV6_HOPLIMIT) => {
+                AncillaryData::Ip(syncio::ControlMessage::Ipv6HopLimit(
                     read_u8_value_from_int_cmsg(&message.data).ok_or_else(|| errno!(EINVAL))?,
-                )))
+                ))
             }
-            (SOL_IPV6, IPV6_PKTINFO) => {
+            (_, SOL_IPV6, IPV6_PKTINFO) => {
                 let (pktinfo, _) = uapi::in6_pktinfo::read_from_prefix(&message.data[..])
                     .map_err(|_| errno!(EINVAL))?;
-                Ok(AncillaryData::Ip(syncio::ControlMessage::Ipv6PacketInfo {
+                AncillaryData::Ip(syncio::ControlMessage::Ipv6PacketInfo {
                     local_addr: pktinfo
                         .ipi6_addr
                         .as_bytes()
@@ -240,12 +248,16 @@ impl AncillaryData {
                         .ok()
                         .ok_or_else(|| errno!(EINVAL))?,
                     iface: pktinfo.ipi6_ifindex as u32,
-                }))
+                })
             }
-            (level, type_) => {
-                error!(EINVAL, format!("invalid cmsg_level/type: 0x{:x}/0x{:x}", level, type_))
+            (_, level, type_) => {
+                return error!(
+                    EINVAL,
+                    format!("invalid cmsg_level/type: 0x{:x}/0x{:x}", level, type_)
+                );
             }
-        }
+        };
+        Ok(Some(data))
     }
 
     pub fn into_controlmsg(

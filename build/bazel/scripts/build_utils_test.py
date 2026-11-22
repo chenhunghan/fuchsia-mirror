@@ -5,6 +5,7 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -944,7 +945,21 @@ class BazelCommandWithBazelWrapperTest(unittest.TestCase):
         cls._python_bin_dir = cls._python_dir / "bin"
         cls._python_bin_dir.mkdir(parents=True)
         cls._python_exe = cls._python_bin_dir / "python3"
-        cls._python_exe.write_text("#!/bin/sh\nexit 0\n")
+        # Mock Python interpreter:
+        # - When invoked for generate_invocation_bazelrc.py, exit 0 to bypass
+        #   generating invocation.bazelrc in this isolated test workspace.
+        # - For all other invocations (e.g. bazel_besproxy_wrap.py), delegate
+        #   to the real Python binary running this test so the wrapper script
+        #   executes and passes through to mock bazel_bin.
+        mock_py_script = f"""#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    *generate_invocation_bazelrc.py) exit 0 ;;
+  esac
+done
+exec {sys.executable} -S "$@"
+"""
+        cls._python_exe.write_text(mock_py_script)
         cls._python_exe.chmod(cls._python_exe.stat().st_mode | stat.S_IEXEC)
 
         # Symlink real wrapper.bazel.sh to tmpdir so readlink -f resolves to the real source tree.
@@ -989,6 +1004,9 @@ _BAZEL_LOGS_DIRNAME="{bazel_inv.BAZEL_LOGS_DIRNAME}"
         # Set FX_BUILD_LOGDIR to self._tmpdir_path to prevent wrapper.bazel.sh
         # from printing a warning about missing log dir to stderr.
         env["FX_BUILD_LOGDIR"] = str(self._tmpdir_path)
+        # Prevent wrapper.bazel.sh from activating besproxy during unit tests,
+        # avoiding undeclared prebuilt/rsclient access under fsatrace.
+        env["FX_INTERNAL_BAZEL_BESPROXY"] = "0"
         for k, v in env_updates.items():
             if v is None:
                 env.pop(k, None)

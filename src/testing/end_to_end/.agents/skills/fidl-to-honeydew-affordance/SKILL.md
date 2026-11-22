@@ -25,19 +25,23 @@ the following modular structure:
 
 ```
 src/testing/end_to_end/honeydew/honeydew/affordances/<domain>/<affordance_name>/
-├── __init__.py               # Main affordance class (implements AsyncLazyReady)
+├── __init__.py               # Empty (license header only)
+├── <affordance_name>.py      # Main affordance class (implements AsyncLazyReady)
 ├── utils/
 │   ├── __init__.py
 │   ├── errors.py             # Custom exceptions mapping FIDL error enums/failures
 │   └── types.py              # Frozen dataclasses with from_fidl() and to_fidl()
 └── tests/
-    ├── __init__.py
-    ├── BUILD.gn              # GN build targets for unit tests
-    ├── unit_tests.py         # IsolatedAsyncioTestCase with mocked FuchsiaController
-    └── functional_tests.py   # Mobly E2E tests against real/emulated hardware
+    ├── unit_tests/
+    │   ├── BUILD.gn                  # GN build targets for unit tests
+    │   └── <affordance_name>_test.py # IsolatedAsyncioTestCase with mocked FuchsiaController
+    └── functional_tests/
+        ├── BUILD.gn                  # GN build targets for functional tests
+        └── test_<affordance_name>.py # Mobly E2E tests against real/emulated hardware
 ```
 
 In addition, the affordance is integrated into:
+
 - `src/testing/end_to_end/honeydew/honeydew/fuchsia_device/fuchsia_device.py`:
   Expose the affordance via an `@properties.Affordance` property on
   `FuchsiaDevice`.
@@ -45,12 +49,47 @@ In addition, the affordance is integrated into:
   the FIDL Python IR dependencies (`<fidl_target>_python`) to
   `honeydew_fidl_ir_and_deps`, and the unit tests to `group("unit_tests")`.
 
+### Single vs. Multiple Implementations & IDE Navigation
+
+* **Single-Implementation Affordance (Default)**: Implement the concrete
+  affordance class directly in `<affordance_name>.py` with an empty
+  `__init__.py` marking the package (inheriting from `AsyncLazyReady` or
+  `affordance.Affordance`). Do **not** create an intermediate Abstract Base
+  Class (ABC) or a separate `<affordance_name>_using_fc.py` file when only one
+  implementation exists, as an unnecessary ABC causes IDE "Go to Definition" to
+  jump to abstract method stubs instead of the implementation.
+* **Multi-Implementation Affordance (2+ implementations)**: Only when an
+  affordance has multiple concrete implementations (e.g.,
+  `hello_fuchsia_using_fc.py` and `hello_fuchsia_using_ffx.py`), define an ABC
+  named `<AffordanceName>` in `<affordance_name>.py` with `@abc.abstractmethod`
+  methods (and an empty `__init__.py`) to enforce the public API contract across
+  implementations, place each concrete implementation in
+  `<affordance_name>_using_<impl>.py`, define `class
+  Implementation(enum.StrEnum)` in `types.py` when the implementation is
+  selected via `honeydew_config`, and annotate `@properties.Affordance` on
+  `FuchsiaDevice` as returning `-> <affordance_name>.<AffordanceName>`.
+* **Transitioning (1 ↔ 2 implementations)**:
+  * **1 → 2**: Move the existing implementation from `<affordance_name>.py` to
+    `<affordance_name>_using_<impl1>.py`, add
+    `<affordance_name>_using_<impl2>.py`, replace `<affordance_name>.py` with
+    the ABC `class <AffordanceName>` (keeping `__init__.py` empty), and if
+    selectable via `honeydew_config`, add `class Implementation(enum.StrEnum)`
+    in `types.py` and update `FuchsiaDevice.<affordance_name>` to read
+    `config["affordances"]["<affordance_name>"]["implementation"]`. If the 1st
+    implementation is in `honeydew` and the 2nd is in `ghoneydew`, also add
+    `<affordance_name>.<AffordanceName>` to `_CROSS_REPO_ABCS` in `honeydew`'s
+    `architecture_test.py`.
+  * **2 → 1**: Delete the removed implementation file and its unit test, and
+    consolidate the remaining concrete class `<AffordanceName>Using<Impl>` back
+    into `<affordance_name>.py` as `class <AffordanceName>`.
+
 ---
 
 ## 2. Step-by-Step Translation Workflow
 
 ### Step 1: Analyze the FIDL Specification
 Inspect `sdk/fidl/<library>/<file>.fidl` to identify:
+
 1.  **Types (`struct`, `table`, `enum`, `union`)**: Note optional vs required
     fields, nested types, Zircon primitives (e.g., `zx.Duration`, `zx.Time`),
     and byte vectors.
@@ -67,20 +106,20 @@ Inspect `sdk/fidl/<library>/<file>.fidl` to identify:
 
 Honeydew decouples test code from raw FIDL bindings by wrapping FIDL tables and
 structs in immutable Python dataclasses:
+
 - Use `@dataclass(frozen=True)` for data structures.
 - Provide `@classmethod def from_fidl(cls, fidl: ...) -> Self` to parse FIDL
   structures into Python types.
 - Provide `def to_fidl(self) -> ...` if the affordance sends data back to the
   device.
 - Convert raw FIDL types into idiomatic Python types:
-  - Byte vectors (`vector<uint8>` / `string`) $\to$ `str` or `bytes`.
-  - `zx.Duration` (nanoseconds) $\to$ `datetime.timedelta`.
-  - FIDL flexible/strict enums $\to$ Python `enum.IntEnum` or validated
-    attributes.
-  - Nested tables $\to$ nested dataclasses with `None` defaults for unset
-    fields.
+  - Byte vectors (`vector<uint8>` / `string`) → `str` or `bytes`.
+  - `zx.Duration` (nanoseconds) → `datetime.timedelta`.
+  - FIDL flexible/strict enums → Python `enum.IntEnum` or validated attributes.
+  - Nested tables → nested dataclasses with `None` defaults for unset fields.
 
 #### Generic Pattern:
+
 ```python
 import enum
 from dataclasses import dataclass
@@ -124,11 +163,13 @@ class FooStatus:
 
 Create a domain-specific exception hierarchy inheriting from
 `honeydew.errors.HoneydewError`:
+
 - Define a base exception for the affordance (e.g. `Honeydew<Affordance>Error`).
 - Define specific exceptions for protocol-level errors, state mismatches, device
   not found, or transport timeouts.
 
 #### Generic Pattern:
+
 ```python
 from honeydew import errors
 import fidl_fuchsia_example_foo as f_foo
@@ -148,9 +189,10 @@ class FooDeviceNotFoundError(HoneydewFooError):
 
 ---
 
-### Step 4: Implement Affordance Class (`__init__.py`)
+### Step 4: Implement Affordance Class (`<affordance_name>.py`)
 
 The main class should:
+
 1.  Inherit from `AsyncLazyReady` to enable asynchronous lazy connection
     management.
 2.  Accept standard dependencies in `__init__`: `device_name`, `ffx`,
@@ -158,8 +200,8 @@ The main class should:
 3.  Call `self.verify_supported()` in `__init__` (checking capabilities via `ffx
     component capability` or devfs).
 4.  Register reboot and close hooks:
-   - `reboot_affordance.register_for_on_device_boot(self.make_ready)`
-   - `fuchsia_device_close.register_for_on_device_close(self._close)`
+    - `reboot_affordance.register_for_on_device_boot(self.make_ready)`
+    - `fuchsia_device_close.register_for_on_device_close(self._close)`
 5.  Implement `make_ready(self)` to connect to the FIDL proxy using
     `self._fc_transport.connect_device_proxy(...)` or devfs channel.
 6.  Decorate public methods with `@ensure_ready`.
@@ -167,6 +209,7 @@ The main class should:
     result unions.
 
 #### Generic Pattern:
+
 ```python
 import logging
 from fuchsia_controller_py import FcTransportStatus, ZxStatus
@@ -234,7 +277,9 @@ class Foo(AsyncLazyReady):
             raise FooDeviceNotFoundError(f"Failed to connect to {_FOO_MONIKER}") from err
 
     async def _close(self) -> None:
-        """Clean up proxy connection on device close."""
+        """Clean up proxy connection and background event tasks on device close/suspend."""
+        self._ready = False
+        # If make_ready() spawned background event-stream asyncio.Tasks, cancel and await them here.
         self._proxy = None
 
     @ensure_ready
@@ -253,25 +298,32 @@ class Foo(AsyncLazyReady):
 
 ---
 
-### Step 5: Implement Unit Tests (`tests/unit_tests.py`) & GN (`tests/BUILD.gn`)
+### Step 5: Implement Unit Tests (`tests/unit_tests/<affordance_name>_test.py`) & GN (`tests/unit_tests/BUILD.gn`)
 
 Unit tests verify conversion logic, state management, and error handling in
 isolation:
+
 - Inherit from `unittest.IsolatedAsyncioTestCase`.
 - Reset `GlobalHandleWaker()._reset_for_testing()` in `asyncSetUp()`.
 - Mock `FuchsiaController`, `FFX`, and the FIDL proxy.
 
-#### Example `tests/BUILD.gn`:
+#### Example `tests/unit_tests/BUILD.gn`:
+
 ```gn
 import("//build/python/python_host_test.gni")
 
-assert(is_host, "Python only supported in host toolchains.")
+if (is_host) {
+  python_host_test("<affordance_name>_test") {
+    main_source = "<affordance_name>_test.py"
+    libraries = [ "//src/testing/end_to_end/honeydew" ]
+    main_callable = "unittest.main"
+    extra_args = [ "-v" ]
+  }
+}
 
-python_host_test("unit_tests") {
-  main_source = "unit_tests.py"
-  libraries = [ "//src/testing/end_to_end/honeydew" ]
-  main_callable = "unittest.main"
-  extra_args = [ "-v" ]
+group("tests") {
+  testonly = true
+  public_deps = [ ":<affordance_name>_test($host_toolchain)" ]
 }
 ```
 
@@ -280,22 +332,49 @@ python_host_test("unit_tests") {
 ### Step 6: Update Honeydew Wiring
 
 1.  **`src/testing/end_to_end/honeydew/BUILD.gn`**:
-   - Add new source files to `sources` under
-     `python_library("honeydew_no_testonly")`.
-   - Add FIDL Python bindings under `group("honeydew_fidl_ir_and_deps")`:
+    - Add new source files to `sources` under
+      `python_library("honeydew_no_testonly")`.
+    - Add FIDL Python bindings under `group("honeydew_fidl_ir_and_deps")`:
+
      ```gn
      "//sdk/fidl/<library>:<library>_python",
      ```
-     > [!NOTE]
-     > Do not add FIDL dependencies directly to `group("honeydew")`. Adding them to `group("honeydew_fidl_ir_and_deps")` ensures non-test targets that depend on `honeydew_no_testonly` receive the bindings at runtime.
-     > If the FIDL library is unstable (`stable = false` or not in partner SDK), add it to `host_test_allowlist.gni` and `src/developer/ffx/build/ffx_subtool_allowlist.gni` (`ffx_subtool_fidl_partner_unstable_allowlist`) to satisfy IDK compatibility checks.
-   - Add unit test targets to `group("unit_tests")`:
+
+      > [!NOTE]
+      > Do not add FIDL dependencies directly to `group("honeydew")`. Adding them to `group("honeydew_fidl_ir_and_deps")` ensures non-test targets that depend on `honeydew_no_testonly` receive the bindings at runtime.
+      > If the FIDL library is unstable (`stable = false` or not in partner SDK), add it to `host_test_allowlist.gni` and `src/developer/ffx/build/ffx_subtool_allowlist.gni` (`ffx_subtool_fidl_partner_unstable_allowlist`) to satisfy IDK compatibility checks.
+
+    - Add unit test targets to `group("unit_tests")`:
+
      ```gn
-     "honeydew/affordances/<domain>/<name>/tests:unit_tests($host_toolchain)",
+     "honeydew/affordances/<domain>/<name>/tests/unit_tests:tests",
      ```
+
 2.  **`src/testing/end_to_end/honeydew/honeydew/fuchsia_device/fuchsia_device.py`**:
-   - Import the affordance module.
-   - Expose via `@properties.Affordance`.
+    - Import the affordance module.
+    - Expose via `@properties.Affordance` annotated with `->
+      <name>_affordance.<Name>`:
+      * For a **single-implementation** affordance, instantiate and return the
+        concrete `<name>_affordance.<Name>` directly.
+      * For a **multi-implementation** affordance selectable via
+        `honeydew_config`:
+        1.  Define `class Implementation(enum.StrEnum)` in `<name>/types.py`
+            (with `FUCHSIA_CONTROLLER = "fuchsia-controller"` and `FFX =
+            "ffx"`).
+        2.  Add a `_get_<name>_affordance_implementation()` helper on
+            `FuchsiaDevice` that reads `common.read_from_dict(self._config,
+            key_path=("affordances", "<name>", "implementation"),
+            should_exist=should_exist)` and parses `<name>_types.Implementation`
+            (raising `errors.ConfigError` on invalid values).
+        3.  Annotate `def <name>(self) -> <name>_affordance.<Name>:` with the
+            ABC and branch on `self._get_<name>_affordance_implementation()` to
+            return `<Name>UsingFc` or `<Name>UsingFfx`.
+        4.  In `tests/functional_tests/BUILD.gn`, define a `python_mobly_test`
+            target per implementation passing `honeydew_config = { affordances =
+            { <name> = { implementation = "<impl>" } } }`.
+        5.  In `fuchsia_device_test.py`, add unit tests for the default
+            implementation, `test_<name>_implementation_selection`, and
+            `test_<name>_invalid_config`.
 
 ---
 
@@ -303,13 +382,17 @@ python_host_test("unit_tests") {
 
 Refer to the following in-tree implementations for complete, production-grade
 examples:
-* **WLAN Affordances**:
+
+* **WLAN Affordances (Single-Implementation Async FIDL)**:
   [`src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/`](//src/testing/end_to_end/honeydew/honeydew/affordances/connectivity/wlan/)
-* **Driver Battery Affordance**:
-  [`src/testing/end_to_end/honeydew/honeydew/affordances/drivers/battery/`](//src/testing/end_to_end/honeydew/honeydew/affordances/drivers/battery/)
+* **Driver Battery Affordance (Single-Implementation Async FIDL)**:
+  [`src/testing/end_to_end/honeydew/honeydew/affordances/drivers/battery_manager/`](//src/testing/end_to_end/honeydew/honeydew/affordances/drivers/battery_manager/)
   * `utils/types.py`: Mapping `fuchsia.hardware.power.battery` &
     `fuchsia.hardware.power.source` tables.
   * `utils/errors.py`: Mapping FIDL `fuchsia.hardware.power.source.Error` enums.
-  * `__init__.py`: Async battery affordance with `get_spec()`, `get_status()`,
-    and hanging `watch()`.
+  * `battery_manager.py`: Async battery affordance with `get_spec()`,
+    `get_status()`, and hanging `watch()`.
   * `tests/unit_tests.py`: Mocked unit test suite.
+* **Minimal `HelloFuchsia` Affordance (Multi-Implementation `Fuchsia-Controller`
+  + `FFX`)**:
+  * [`src/testing/end_to_end/honeydew/honeydew/affordances/hello_fuchsia/`](//src/testing/end_to_end/honeydew/honeydew/affordances/hello_fuchsia/)

@@ -82,10 +82,8 @@ fn platform_current_raw_ticks_synchronized<const FLAGS: u8>() -> zx_ticks_t {
     ticks
 }
 
-// One C ABI entry point per form of synchronized tick access: the C++
-// `platform_current_raw_ticks_synchronized<Flags>()` specializations in
-// generic_riscv64_ffi.cc forward to these, so the flags stay compile-time on
-// both sides.
+// One C ABI entry point per form of synchronized tick access referenced by
+// `platform_current_raw_ticks_synchronized<Flags>()` in <platform/timer.h>.
 macro_rules! define_raw_ticks_exports {
     ($($name:ident = $flags:expr;)*) => {$(
         #[doc = concat!("`platform_current_raw_ticks_synchronized` for flags ", stringify!($flags), ".")]
@@ -98,58 +96,29 @@ macro_rules! define_raw_ticks_exports {
 
 define_raw_ticks_exports! {
     rust_platform_current_raw_ticks_synchronized_0 = GET_TICKS_SYNC_FLAG_NONE;
-    rust_platform_current_raw_ticks_synchronized_1 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS;
-    rust_platform_current_raw_ticks_synchronized_2 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES;
     rust_platform_current_raw_ticks_synchronized_3 =
         GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS | GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES;
-    rust_platform_current_raw_ticks_synchronized_4 = GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS;
     rust_platform_current_raw_ticks_synchronized_5 =
         GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS;
-    rust_platform_current_raw_ticks_synchronized_6 =
-        GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS;
-    rust_platform_current_raw_ticks_synchronized_7 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS
-        | GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS;
-    rust_platform_current_raw_ticks_synchronized_8 = GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
-    rust_platform_current_raw_ticks_synchronized_9 =
-        GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
     rust_platform_current_raw_ticks_synchronized_10 =
         GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
-    rust_platform_current_raw_ticks_synchronized_11 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS
-        | GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
-    rust_platform_current_raw_ticks_synchronized_12 =
-        GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
-    rust_platform_current_raw_ticks_synchronized_13 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
-    rust_platform_current_raw_ticks_synchronized_14 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
-    rust_platform_current_raw_ticks_synchronized_15 = GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_LOADS
-        | GET_TICKS_SYNC_FLAG_AFTER_PREVIOUS_STORES
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_LOADS
-        | GET_TICKS_SYNC_FLAG_BEFORE_SUBSEQUENT_STORES;
 }
 
-/// Converts an `arch::EarlyTicks` sample (its `time` field, a raw `rdtime`
+/// Converts an [`libarch::EarlyTicks`] sample (its `time` field, a raw `rdtime`
 /// value) to monotonic ticks.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_convert_early_ticks(sample_time: u64) -> zx_instant_mono_ticks_t {
-    // The C++ adds a uint64_t and a zx_ticks_t, so the sum wraps.
-    (sample_time as zx_ticks_t).wrapping_add(timer_get_mono_ticks_offset())
+pub fn platform_convert_early_ticks(sample: libarch::EarlyTicks) -> zx_instant_mono_ticks_t {
+    // Sum wraps modulo 2^64 to apply a signed monotonic offset to the raw u64 counter.
+    (sample.time as zx_ticks_t).wrapping_add(timer_get_mono_ticks_offset())
 }
 
 /// Arms the oneshot timer of the current CPU to fire at `deadline` raw ticks.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_set_oneshot_timer(deadline: zx_ticks_t) -> Result<(), Status> {
+pub fn platform_set_oneshot_timer(deadline: zx_ticks_t) -> Result<(), Status> {
     debug_assert!(timer_is_initialized());
     riscv_sbi_set_oneshot_timer(deadline)
 }
 
 /// Stops the timer of the current CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_stop_timer() {
+pub fn platform_stop_timer() {
     debug_assert!(timer_is_initialized());
     let _ = riscv_sbi_timer_stop();
 }
@@ -160,33 +129,9 @@ pub fn platform_shutdown_timer() {
     let _ = riscv_sbi_timer_shutdown();
 }
 
-/// FFI entry point for [`platform_shutdown_timer`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_shutdown_timer() {
-    platform_shutdown_timer();
-}
-
-/// Suspending the timer of the current CPU is not supported on this platform.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_suspend_timer_curr_cpu() -> Result<(), Status> {
-    Err(Status::NOT_SUPPORTED)
-}
-
-/// Resuming the timer of the current CPU is not supported on this platform.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_resume_timer_curr_cpu() -> Result<(), Status> {
-    Err(Status::NOT_SUPPORTED)
-}
-
 /// Whether user mode may read the tick registers directly.
 pub fn platform_usermode_can_access_tick_registers() -> bool {
     // If the cpu claims to have Zicntr support, then it's relatively cheap for user
     // space to access the time CSR via rdtime instruction.
     feature::has_zicntr()
-}
-
-/// FFI entry point for [`platform_usermode_can_access_tick_registers`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_usermode_can_access_tick_registers() -> bool {
-    platform_usermode_can_access_tick_registers()
 }

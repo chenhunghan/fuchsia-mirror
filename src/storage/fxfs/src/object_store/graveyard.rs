@@ -758,24 +758,24 @@ mod tests {
         transaction.commit().await.expect("commit failed");
 
         let object_id = {
-            let mut transaction = handle.new_transaction().await.expect("new_transaction failed");
+            let transaction = handle.new_transaction().await.expect("new_transaction failed");
+
+            // Stop the background graveyard reaper before writing so the abort tombstone queued
+            // when `transaction` is dropped below is not processed before `fs.close()`, mimicking
+            // an unclean shutdown mid-write that `initial_reap` must clean up on reopen.
+            fs.graveyard().wait_for_reap().await;
 
             // `write_new_attr` splits writes exceeding `WRITE_ATTR_BATCH_SIZE` into batches across
             // multiple transactions, adding the attribute to the graveyard in the first transaction
-            // and removing it in the final (uncommitted) transaction. This write spans three
-            // transactions; defusing the returned guard before dropping the final transaction below
-            // mimics the write being interrupted by an unclean shutdown.
-            if let Some(guard) = handle
+            // and removing it in the final (uncommitted) transaction.
+            let _transaction = handle
                 .write_new_attr(
-                    &mut transaction,
+                    transaction,
                     AttributeId::TEST_ID,
                     &vec![0; 3 * WRITE_ATTR_BATCH_SIZE],
                 )
                 .await
-                .expect("failed to write attribute")
-            {
-                scopeguard::ScopeGuard::into_inner(guard);
-            }
+                .expect("failed to write attribute");
 
             handle.object_id()
             // Drop the transaction to simulate interrupting the attribute creation as well as to
@@ -856,7 +856,7 @@ mod tests {
     // the check space callback), rather than borrowing unbounded metadata space.
     #[fuchsia::test]
     async fn test_graveyard_borrowed_metadata_space_fails_compaction() {
-        let reclaim_size = 65536;
+        let reclaim_size = 32768;
         // 200,000 blocks of 512 bytes = 100 MiB device.
         let device = DeviceHolder::new(FakeDevice::new(200000, TEST_DEVICE_BLOCK_SIZE));
         let (mut hooks, fs_hooks) = Hooks::new();

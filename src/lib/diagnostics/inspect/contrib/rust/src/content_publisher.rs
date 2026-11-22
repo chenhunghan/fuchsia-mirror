@@ -54,8 +54,15 @@ impl Stream for ContentPublisher {
                 Poll::Ready(Some(Ok(TreeRequest::GetContent { responder }))) => {
                     return Poll::Ready(Some(ContentResponder { responder }));
                 }
+                #[cfg(fuchsia_api_level_at_least = "HEAD")]
+                Poll::Ready(Some(Ok(TreeRequest::OpenBlobChild { responder, .. }))) => {
+                    // `ContentPublisher` does not support `BlobProperty`; reply `NOT_FOUND` rather
+                    // than dropping `responder` (whose `Drop` impl shuts down the `Tree` channel).
+                    let _ = responder.send(Err(zx::Status::NOT_FOUND.into_raw()));
+                    continue;
+                }
                 Poll::Ready(Some(Ok(_))) => {
-                    // Ignore other requests (e.g. ListChildHost, OpenChild).
+                    // Ignore other requests (e.g. ListChildNames, OpenChild, ListBlobChildNames).
                     // This is a minimal server that only supports GetContent.
                     continue;
                 }
@@ -74,7 +81,7 @@ impl Stream for ContentPublisher {
 ///
 /// This can be thought of like a lazy node, but for the root.
 ///
-/// - Lazy nodes are _not supported_ in Inspectors exposed this way.
+/// - Lazy nodes and `BlobProperty` values are _not supported_ in Inspectors exposed this way.
 ///
 /// Usage:
 ///
@@ -160,6 +167,43 @@ mod tests {
         // Verify the dynamic data was successfully retrieved
         assert_data_tree!(hierarchy, root: {
             dynamic_data: 1i64,
+            status: "ok",
+        });
+    }
+
+    #[cfg(fuchsia_api_level_at_least = "HEAD")]
+    #[fuchsia::test]
+    async fn test_content_publisher_open_blob_child_not_found() {
+        let (sink_client, mut sink_stream) =
+            fidl::endpoints::create_request_stream::<InspectSinkMarker>();
+
+        let mut publisher =
+            content_publisher(PublishOptions { inspect_sink_client: sink_client }).unwrap();
+
+        let tree_proxy = match sink_stream.next().await {
+            Some(Ok(InspectSinkRequest::Publish { payload, .. })) => {
+                payload.tree.expect("tree channel missing").into_proxy()
+            }
+            _ => panic!("Expected Publish request"),
+        };
+
+        let _task = fasync::Task::spawn(async move {
+            while let Some(responder) = publisher.next().await {
+                let inspector = Inspector::default();
+                inspector.root().record_string("status", "ok");
+                responder.send(inspector).expect("failed to send inspector");
+            }
+        });
+
+        // `OpenBlobChild` replies with `NOT_FOUND` rather than dropping the responder and closing
+        // the `Tree` channel, so subsequent `GetContent` reads continue to succeed.
+        assert_eq!(
+            tree_proxy.open_blob_child("events-0").await.expect("open_blob_child FIDL call"),
+            Err(zx::Status::NOT_FOUND.into_raw())
+        );
+
+        let hierarchy = read(&tree_proxy).await.expect("tree channel remained open");
+        assert_data_tree!(hierarchy, root: {
             status: "ok",
         });
     }

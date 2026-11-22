@@ -6,6 +6,11 @@ load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
 
 package(default_applicable_licenses = ["//:license"])
 
+exports_files(
+    ["libunwind_info_test_data.targetso"],
+    visibility = ["//src/lib/unwinder:__pkg__"],
+)
+
 # Use this target to regenerate libunwind_info_test_data.so.
 # This binary is only intended to be built for 32-bit Arm Linux (aarch32).
 fx_cc_binary(

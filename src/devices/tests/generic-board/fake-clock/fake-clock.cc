@@ -17,6 +17,19 @@
 
 namespace fake_clock {
 
+namespace {
+
+constexpr uint32_t ComputeControllerId(std::string_view name) {
+  uint32_t hash = 2166136261u;
+  for (unsigned char byte : name) {
+    hash ^= byte;
+    hash *= 16777619u;
+  }
+  return hash == 0 ? 1u : hash;
+}
+
+}  // namespace
+
 class FakeClockDevice : public fidl::Server<fuchsia_hardware_clock::Clock> {
  public:
   FakeClockDevice(uint32_t id, std::string name, fit::closure on_enable = nullptr)
@@ -143,9 +156,15 @@ class FakeClockDriver : public fdf::DriverBase2,
     }
     fdf::info("fake-clock registered as interrupt controller successfully!");
 
+    zx::result dev_info = pdev.GetDeviceInfo();
+    if (dev_info.is_error()) {
+      fdf::error("Failed to get pdev device info: {}", dev_info);
+      return dev_info.take_error();
+    }
+
     std::vector<fuchsia_driver_framework::NodeProperty2> irq_props{
         fdf::MakeProperty2("fuchsia.NAME", "interrupt-controller"),
-        fdf::MakeProperty2("fuchsia.ID", 1u),
+        fdf::MakeProperty2("fuchsia.ID", ComputeControllerId(dev_info->name)),
     };
     auto irq_child = AddChild("interrupt-controller", irq_props, {});
     if (irq_child.is_error()) {

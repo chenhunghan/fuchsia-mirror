@@ -7,6 +7,7 @@ package(default_applicable_licenses = ["//:license"])
 exports_files(
     [
         "fuchsia_udp.config",
+        "wired_only.config",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

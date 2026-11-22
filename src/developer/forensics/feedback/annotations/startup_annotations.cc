@@ -40,16 +40,6 @@ ErrorOrString ReadAnnotation(const std::string& filepath, FormatFn format = Iden
   return ErrorOrString(std::string(fxl::TrimString(*formatted, "\r\n")));
 }
 
-ErrorOrString ReadAnnotationWithFallback(const std::string& filepath,
-                                         const std::string& fallback_filepath) {
-  std::string content;
-  if (!files::ReadFileToString(filepath, &content)) {
-    FX_LOGS(WARNING) << "Failed to read content from " << filepath;
-    return ReadAnnotation(fallback_filepath);
-  }
-  return ErrorOrString(std::string(fxl::TrimString(content, "\r\n")));
-}
-
 ErrorOrString BoardName() {
   zx::result client_end = component::Connect<fuchsia_sysinfo::SysInfo>();
   if (client_end.is_error()) {
@@ -88,13 +78,10 @@ Annotations GetStartupAnnotations(const FinalShutdownInfo& final_shutdown_info,
       {kBuildProductKey, ReadAnnotation(kBuildProductPath)},
       {kBuildLatestCommitDateKey, ReadAnnotation(kBuildCommitDatePath)},
       {kBuildPlatformBackstopKey, ReadAnnotation(kBuildMinUtcStampPath, FormatSecondsSinceEpoch)},
-      {kBuildVersionKey, ReadAnnotation(kCurrentBuildVersionPath)},
-      {kBuildVersionPreviousBootKey, ReadAnnotation(kPreviousBuildVersionPath)},
       {kBuildPlatformVersionKey, ReadAnnotation(kCurrentBuildPlatformVersionPath)},
       {kBuildPlatformVersionPreviousBootKey, ReadAnnotation(kPreviousBuildPlatformVersionPath)},
       {kBuildProductVersionKey, ReadAnnotation(kCurrentBuildProductVersionPath)},
-      {kBuildProductVersionPreviousBootKey,
-       ReadAnnotationWithFallback(kPreviousBuildProductVersionPath, kPreviousBuildVersionPath)},
+      {kBuildProductVersionPreviousBootKey, ReadAnnotation(kPreviousBuildProductVersionPath)},
       {kDeviceBoardNameKey, BoardName()},
       {kDeviceNumCPUsKey, ErrorOrString(NumCPUs())},
       {kSystemBootIdCurrentKey, ReadAnnotation(kCurrentBootIdPath)},

@@ -41,6 +41,17 @@ pub enum OfferDecl {
     Config(OfferConfigurationDecl),
 }
 
+// `OfferDecl` instances referencing collections remain resident in `ResolvedInstanceState`.
+// Large variants (`Service`, `Directory`, `EventStream`) are boxed to avoid bloating the enum.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<OfferDecl>() <= 88);
+};
+#[cfg(all(target_pointer_width = "64", fuchsia_api_level_at_least = "HEAD"))]
+const _: () = {
+    assert!(std::mem::size_of::<OfferDecl>() == 88);
+};
+
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(FidlDecl, OfferDeclCommon, Debug, Clone, PartialEq, Eq)]
 #[fidl_decl(fidl_table = "fdecl::OfferEventStream", source_path = "name_only")]

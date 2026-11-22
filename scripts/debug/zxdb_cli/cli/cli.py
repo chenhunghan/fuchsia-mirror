@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Mapping
 from typing import Any, Final
 
 from cli.commands import (
@@ -47,11 +48,6 @@ from shared.protocol import (
     serialize,
 )
 
-# The maximum number of seconds that we will wait for the daemon to start.
-# In particular, this is how long we will wait for the daemon to write into
-# the pipe FD that we pass to it when we start the new process.
-DAEMON_STARTUP_TIMEOUT_SECS: Final[float] = 10.0
-
 # Socket read timeout floor and extra grace beyond a request's internal timeout
 # so the daemon has time to return a structured timeout response before the UDS
 # client disconnects.
@@ -59,12 +55,52 @@ DEFAULT_READ_TIMEOUT_SECS: Final[float] = 15.0
 READ_TIMEOUT_GRACE_SECS: Final[float] = 5.0
 
 
+_COMMAND_CLASSES = (
+    # keep-sorted start
+    aspace.Command,
+    async_backtrace.Command,
+    attach.Command,
+    break_cmd.Command,
+    console.Command,
+    continue_cmd.Command,
+    detach.Command,
+    diagnose_hang.Command,
+    driver_list.Command,
+    evaluate.Command,
+    finish.Command,
+    get_state.Command,
+    handles.Command,
+    mem_read.Command,
+    modules.Command,
+    next_cmd.Command,
+    pause.Command,
+    schema.Command,
+    stack_trace.Command,
+    start.Command,
+    step_in.Command,
+    stop.Command,
+    threads.Command,
+    tracepoint.Command,
+    variables.Command,
+    wait_for_event.Command,
+    watch_cmd.Command,
+    # keep-sorted end
+)
+
+
 def request_to_namespace(req: BaseRequest[Any]) -> argparse.Namespace:
     """Converts a BaseRequest to argparse.Namespace for command executors."""
     return argparse.Namespace(**req.model_dump())
 
 
-async def main(args: list[str]) -> int:
+def _build_parser() -> (
+    tuple[
+        argparse.ArgumentParser,
+        Mapping[str, type[BaseCommand]],
+        Mapping[str, str],
+    ]
+):
+    """Constructs the CLI argument parser, subparser command map, and alias table."""
     parser = argparse.ArgumentParser(description="fx debug cli")
     parser.add_argument("--json", help="JSON request string")
     parser.add_argument(
@@ -74,53 +110,68 @@ async def main(args: list[str]) -> int:
     )
     subparsers = parser.add_subparsers(dest="command", required=False)
 
-    # Statically register commands.
     commands: dict[str, type[BaseCommand]] = {}
-    command_classes: list[type[BaseCommand]] = [
-        # keep-sorted start
-        aspace.Command,
-        async_backtrace.Command,
-        attach.Command,
-        break_cmd.Command,
-        console.Command,
-        continue_cmd.Command,
-        detach.Command,
-        diagnose_hang.Command,
-        driver_list.Command,
-        evaluate.Command,
-        finish.Command,
-        get_state.Command,
-        handles.Command,
-        mem_read.Command,
-        modules.Command,
-        next_cmd.Command,
-        pause.Command,
-        schema.Command,
-        stack_trace.Command,
-        start.Command,
-        step_in.Command,
-        stop.Command,
-        threads.Command,
-        tracepoint.Command,
-        variables.Command,
-        wait_for_event.Command,
-        watch_cmd.Command,
-        # keep-sorted end
-    ]
-    for cmd_class in command_classes:
+    for cmd_class in _COMMAND_CLASSES:
         existing_choices = set(subparsers.choices.keys())
         cmd_class.register_cli(subparsers)
         new_choices = set(subparsers.choices.keys()) - existing_choices
         for choice in new_choices:
             commands[choice] = cmd_class
 
-    alias_map: dict[str, str] = {
+    alias_map = {
         alias: cmd_class.COMMAND_NAME
-        for cmd_class in command_classes
+        for cmd_class in _COMMAND_CLASSES
         for alias in getattr(cmd_class, "ALIASES", [])
         if cmd_class.COMMAND_NAME
     }
+    return parser, commands, alias_map
 
+
+async def _dispatch_json_command(
+    raw_json: str,
+    commands: Mapping[str, type[BaseCommand]],
+    alias_map: Mapping[str, str],
+) -> tuple[BaseRequest[Any] | None, int | None]:
+    """Parses and executes or constructs a request from a --json payload."""
+    data = json.loads(raw_json)
+    if not isinstance(data, dict):
+        raise ValueError("JSON payload must be an object")
+    if "command" in data and data["command"] in alias_map:
+        data["command"] = alias_map[data["command"]]
+
+    req = make_request(data)
+    cmd_cls = commands.get(req.command)
+    if cmd_cls is not None:
+        exit_code = await cmd_cls.execute(request_to_namespace(req))
+        if exit_code is not None:
+            return req, exit_code
+    return req, None
+
+
+async def _dispatch_cli_command(
+    parsed_args: argparse.Namespace,
+    commands: Mapping[str, type[BaseCommand]],
+) -> tuple[BaseRequest[Any] | None, int | None]:
+    """Executes or constructs a request from parsed CLI subcommand arguments."""
+    cmd_cls = commands.get(parsed_args.command)
+    if cmd_cls is not None:
+        exit_code = await cmd_cls.execute(parsed_args)
+        if exit_code is not None:
+            return None, exit_code
+
+    try:
+        args_dict = dict(vars(parsed_args))
+        if cmd_cls is not None and cmd_cls.COMMAND_NAME:
+            args_dict["command"] = cmd_cls.COMMAND_NAME
+        req = make_request(args_dict)
+    except (ValueError, ValidationError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return None, 1
+    return req, None
+
+
+async def main(args: list[str]) -> int:
+    parser, commands, alias_map = _build_parser()
     parsed_args = parser.parse_args(args)
 
     if parsed_args.json and parsed_args.command:
@@ -139,42 +190,23 @@ async def main(args: list[str]) -> int:
     req: BaseRequest[Any] | None = None
     if parsed_args.json:
         try:
-            data = json.loads(parsed_args.json)
-            if not isinstance(data, dict):
-                raise ValueError("JSON payload must be an object")
-
-            if "command" in data and data["command"] in alias_map:
-                data["command"] = alias_map[data["command"]]
-            req = make_request(data)
-
-            cmd_cls: type[BaseCommand] | None = commands.get(req.command)
-            if cmd_cls is not None:
-                exit_code = await cmd_cls.execute(request_to_namespace(req))
-                if exit_code is not None:
-                    return exit_code
-        except (ValueError, ValidationError) as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-    elif parsed_args.command:
-        cmd_cls = commands.get(parsed_args.command)
-        if cmd_cls is not None:
-            exit_code = await cmd_cls.execute(parsed_args)
+            req, exit_code = await _dispatch_json_command(
+                parsed_args.json, commands, alias_map
+            )
             if exit_code is not None:
                 return exit_code
-
-        try:
-            args_dict = vars(parsed_args)
-            if cmd_cls is not None and cmd_cls.COMMAND_NAME:
-                args_dict["command"] = cmd_cls.COMMAND_NAME
-            req = make_request(args_dict)
         except (ValueError, ValidationError) as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+    else:
+        req, exit_code = await _dispatch_cli_command(parsed_args, commands)
+        if exit_code is not None:
+            return exit_code
 
     assert req is not None
     assert isinstance(req, BaseRequest)
     if parsed_args.ack_seq is not None:
-        req.ack_seq = parsed_args.ack_seq
+        req = req.model_copy(update={"ack_seq": parsed_args.ack_seq})
     return await send_command(req)
 
 

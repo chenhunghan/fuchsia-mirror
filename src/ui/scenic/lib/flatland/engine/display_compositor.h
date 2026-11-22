@@ -21,7 +21,7 @@
 
 #include "src/lib/fxl/synchronization/thread_annotations.h"
 #include "src/ui/scenic/lib/allocation/buffer_collection_importer.h"
-#include "src/ui/scenic/lib/display/coordinator_proxy.h"
+#include "src/ui/scenic/lib/display/coordinator_proxy/coordinator_proxy.h"
 #include "src/ui/scenic/lib/display/display.h"
 #include "src/ui/scenic/lib/display/fidl_id_types.h"
 #include "src/ui/scenic/lib/flatland/engine/color_conversion_state_machine.h"

@@ -79,9 +79,11 @@ PointerinjectorRegistry::PointerinjectorRegistry(
     std::shared_ptr<view_tree::SnapshotHolder> snapshot_holder,
     TouchInjectFunc inject_touch_exclusive, TouchInjectFunc inject_touch_hit_tested,
     MouseInjectFunc inject_mouse_exclusive, MouseInjectFunc inject_mouse_hit_tested,
-    fit::function<void(StreamId stream_id)> cancel_mouse_stream, inspect::Node inspect_node)
+    fit::function<void(StreamId stream_id)> cancel_mouse_stream, inspect::Node inspect_node,
+    TouchBeginBatchFunc begin_touch_batch)
     : inject_touch_exclusive_(std::move(inject_touch_exclusive)),
       inject_touch_hit_tested_(std::move(inject_touch_hit_tested)),
+      begin_touch_batch_(std::move(begin_touch_batch)),
       inject_mouse_exclusive_(std::move(inject_mouse_exclusive)),
       inject_mouse_hit_tested_(std::move(inject_mouse_hit_tested)),
       cancel_mouse_stream_(std::move(cancel_mouse_stream)),
@@ -177,7 +179,14 @@ void PointerinjectorRegistry::Register(RegisterRequestView request,
                   TRACE_DURATION("input", "TouchInjector::inject_");
                   inject_func(std::move(event), stream_id, snapshot);
                 },
-                std::move(on_channel_closed)));
+                std::move(on_channel_closed),
+                /*begin_batch=*/
+                [&begin_touch_batch = begin_touch_batch_]() -> fit::deferred_action<fit::closure> {
+                  if (begin_touch_batch) {
+                    return begin_touch_batch();
+                  }
+                  return fit::defer<fit::closure>([] {});
+                }));
     FX_CHECK(success) << "Injector already exists.";
   } else if (settings.device_type == fuchsia_ui_pointerinjector::wire::DeviceType::kMouse) {
     const auto [_, success] = injectors_.emplace(

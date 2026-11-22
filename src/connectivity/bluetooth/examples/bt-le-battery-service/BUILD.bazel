@@ -79,7 +79,6 @@ fuchsia_structured_config_rust_lib(
 
 fx_package(
     name = "bt-le-battery-service",
-    package_name = "bt-le-battery-service",
     components = [":component"],
 )
 

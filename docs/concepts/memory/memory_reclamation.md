@@ -17,7 +17,8 @@ amount of free memory larger than a certain threshold. Fuchsia uses several
 memory reclamation techniques, both within the kernel and in userspace. This
 guide describes how these memory reclamation techniques work. Fuchsia also
 provides a set of tools to analyze and dump memory usage (see
-[Memory usage analysis tools](/docs/development/kernel/memory/memory.md#userspace_memory)).
+[Memory usage analysis
+tools](/docs/development/kernel/memory/memory.md#userspace-memory)).
 
 ## Pager-backed memory eviction
 
@@ -129,7 +130,7 @@ if (lock_state.discarded_size > 0) {
 }
 ```
 
-## Memory pressure signals
+## Memory pressure signals {:#memory-pressure-signals}
 
 Fuchsia provides userspace processes the ability to directly control their
 memory consumption in response to system-wide available memory. Clients can
@@ -306,7 +307,7 @@ free memory: 7253.5M
 
 The memory availability states are numbered starting from 0, and are a superset
 of the levels mentioned previously for [memory pressure
-signals](#memory_pressure_signals).
+signals](#memory-pressure-signals).
 
 -   `OOM` is state 0. This is the free memory level below which the kernel
     decides to reboot the system.

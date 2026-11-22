@@ -1,0 +1,1627 @@
+<!doctype html>
+<!-- Copyright 2026 The Fuchsia Authors. All rights reserved.
+     Use of this source code is governed by a BSD-style license that can be
+     found in the LICENSE file. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>zpo - Zircon Profile Optimizer</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ee; --muted:#9aa3b2; --acc:#4f8cff;
+          --run:#f2b134; --sched:#4f8cff; --hw:#b56cff; --thr:#ff5c5c; --ok:#3ccf91; --unk:#666; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:16px; padding:12px 20px; border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:20;}
+  header h1 { font-size:18px; margin:0; letter-spacing:.3px; }
+  header .why { margin-left:auto; background:#22304d; border:1px solid #35508a; color:#cfe0ff; padding:6px 10px; border-radius:6px; text-decoration:none; font-weight:600;}
+  main { display:grid; grid-template-columns: 320px minmax(0, 1fr); gap:0; min-height:calc(100vh - 50px); }
+  nav { border-right:1px solid var(--line); padding:14px; background:#13161c; }
+  section { padding:18px 24px; max-width:1200px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:14px; }
+  .card h2 { margin:0 0 10px; font-size:15px; color:#cfd6e4; }
+  .muted { color:var(--muted); }
+  label { display:block; font-size:12px; color:var(--muted); margin-top:8px; }
+  input, select, textarea { width:100%; background:#0f1218; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 9px; font:inherit; }
+  textarea { min-height:70px; }
+  button { background:var(--acc); color:white; border:0; border-radius:6px; padding:8px 12px; font:inherit; font-weight:600; cursor:pointer; }
+  button.secondary { background:#2a2f3a; }
+  button.danger { background:#7a2b2b; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .sess { padding:8px 10px; border-radius:8px; cursor:pointer; border:1px solid transparent; }
+  .sess:hover { background:#1c2029; }
+  .sess.active { border-color:var(--acc); background:#1a2234; }
+  .sess .t { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .verdict { font-size:16px; font-weight:700; padding:12px 14px; border-radius:8px; border:1px solid var(--line); }
+  .verdict.own_work { background:#122a2e; border-color:#2a6a70; }
+  .verdict.scheduling, .verdict.throttled { background:#14264a; border-color:#2b4a8a; }
+  .verdict.hardware { background:#2e1a4a; border-color:#5a3a8a; }
+  .verdict.fine { background:#133626; border-color:#1f6a48; }
+  .bar { display:flex; height:22px; border-radius:6px; overflow:hidden; border:1px solid var(--line); }
+  .bar div { height:100%; }
+  .legend span { display:inline-flex; align-items:center; gap:6px; margin-right:14px; font-size:12px; color:var(--muted);}
+  .legend i { width:12px; height:12px; border-radius:3px; display:inline-block; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .finding { border-left:3px solid var(--line); padding:6px 10px; margin:8px 0; }
+  .finding.high { border-color:var(--thr); } .finding.medium { border-color:var(--run); } .finding.low, .finding.info { border-color:var(--muted); }
+  .finding .title { font-weight:600; }
+  .log { background:#0b0d11; border:1px solid var(--line); border-radius:8px; padding:10px; font:12px/1.4 ui-monospace, Menlo, Consolas, monospace; max-height:260px; overflow:auto; white-space:pre-wrap; }
+  .prompt { background:#3a2d12; border:1px solid #c58b1a; padding:12px 14px; border-radius:8px; font-size:16px; }
+  .tl { position:relative; height:auto; }
+  .tl .seg { position:absolute; height:16px; border-radius:3px; opacity:.9; min-width:1.5px; }
+  .tl .lab { position:absolute; left:0; font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:270px; }
+  code { background:#0b0d11; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .pill { display:inline-block; padding:1px 7px; border-radius:10px; font-size:11px; background:#2a2f3a; color:#cfd6e4; margin-left:6px;}
+  .pill.ok { background:#1f6a48; } .pill.bad { background:#7a2b2b; }
+  details summary { cursor:pointer; color:var(--muted); }
+  .steps { display:flex; gap:8px; margin:0 0 14px; }
+  .steps div { flex:1; padding:8px 10px; border-radius:8px; background:#171a21; border:1px solid var(--line); font-size:12px; color:var(--muted); cursor:pointer; }
+  .steps div:hover { border-color:var(--acc); }
+  .steps div.done { color:var(--fg); }
+  .steps div.on { background:#1a2234; }
+  .steps div.disabled { opacity:.35; cursor:default; pointer-events:none; }
+  .nowrap { white-space:nowrap; }
+  @keyframes flash { 0%,100% { box-shadow:0 0 0 0 rgba(79,140,255,0); } 50% { box-shadow:0 0 0 6px rgba(79,140,255,.6); } }
+  .flash { animation: flash 0.8s ease-in-out 3; }
+  .mrow { display:flex; gap:12px; align-items:center; padding:10px 12px; border:1px solid var(--line); border-radius:8px; margin:6px 0; }
+  .mrow.next { border-color:var(--acc); background:#1a2234; } .mrow.later { opacity:.55; } .mrow.done .dot { color:var(--ok); }
+  .mrow .dot { width:18px; text-align:center; font-weight:700; }
+  .x { display:inline-block; width:22px; height:22px; line-height:20px; text-align:center; border-radius:11px; color:var(--muted); cursor:pointer; font-size:16px; margin-left:6px; }
+  .x:hover { background:#7a2b2b; color:#fff; }
+  .pbar { height:8px; background:#0f1218; border:1px solid var(--line); border-radius:6px; overflow:hidden; margin:4px 0; }
+  .pbar div { height:100%; background:var(--acc); transition:width .6s; }
+  .substeps { display:flex; gap:8px; margin:4px 0 10px; } .sub { flex:1; padding:6px 10px; border-radius:8px; border:1px solid var(--line); font-size:12px; color:var(--muted); }
+  .sub.on { border-color:var(--acc); color:var(--fg); background:#1a2234; } .sub.done { color:var(--ok); }
+  .steps div.on { border-color:var(--acc); color:var(--fg); }
+  .taskbox { border:1px solid var(--line); border-radius:8px; padding:12px; background:#12151b; margin-top:6px; }
+  .subpanel { margin-top:12px; padding-top:12px; border-top:1px solid var(--line); }
+  .hint { font-size:12px; color:var(--muted); margin-top:4px; }
+  .err { color:var(--thr); font-weight:600; margin-left:6px; }
+  input.invalid, textarea.invalid { border-color:var(--thr); }
+  label.chk { display:flex; gap:8px; align-items:center; color:var(--fg); font-size:13px; margin-top:14px; cursor:pointer; }
+  label.chk input { width:auto; margin:0; }
+  header .dev { padding:4px 10px; border-radius:14px; font-size:12px; border:1px solid var(--line); }
+  header .dev.ok { background:#133626; border-color:#1f6a48; color:#9ff0c6; }
+  header .dev.bad { background:#3a1414; border-color:#7a2b2b; color:#ff9b9b; }
+  header .dev.unk { background:#2a2f3a; color:var(--muted); }
+  .md h1,.md h2,.md h3 { font-size:14px; margin:10px 0 4px; } .md ul { margin:4px 0 4px 18px; } .md p { margin:4px 0; } .md code { background:#0b0d11; }
+  a { color:#9ec1ff; } a.muted { color:var(--muted); }
+  .stage { display:inline-block; padding:2px 8px; border-radius:10px; background:#2a2f3a; margin-right:6px; font-size:12px; } .stage.on { background:var(--acc); color:#fff; } .stage.done { background:#1f6a48; color:#fff; }
+  .meashead { font-size:17px; margin:0 0 10px; }
+  button.btn-s { padding:3px 8px; font-size:12px; }
+  /* Analyze step: KPI strip, one row anatomy (label | bar | stats), condition toggle, measurement tabs */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(210px, 1fr)); gap:12px; margin-bottom:14px; }
+  .kpi { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px; }
+  .kpi .l { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; font-weight:600; }
+  .kpi .v { font-size:22px; font-weight:700; margin-top:4px; font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .kpi .s { font-size:12px; color:var(--muted); }
+  .csub { font-size:13px; color:var(--muted); margin:-6px 0 12px; }
+  .segc { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .segc button { background:#12151b; color:var(--muted); border:0; border-right:1px solid var(--line); border-radius:0; padding:6px 12px; font-size:13px; }
+  .segc button:last-child { border-right:0; } .segc button.on { background:var(--acc); color:#fff; }
+  .mtabs { display:flex; gap:6px; margin:4px 0 12px; border-bottom:1px solid var(--line); }
+  .mtabs button { background:transparent; color:var(--muted); border:1px solid transparent; border-bottom:0; border-radius:8px 8px 0 0; padding:8px 14px; margin-bottom:-1px; }
+  .mtabs button:hover { color:var(--fg); } .mtabs button.on { color:var(--fg); background:var(--panel); border-color:var(--line); }
+  .rgrid { display:grid; grid-template-columns:max-content minmax(0,1fr) max-content; column-gap:12px; }
+  .rgrid.two { grid-template-columns:max-content minmax(0,1fr); }
+/* Function table: long names; the label column is capped and the hover card has the full text. */
+.rgrid.fn { grid-template-columns:minmax(0,55%) minmax(120px,1fr) max-content; }
+.rgrid.fn .rl .b { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+details.rfd { margin-top:10px; background:#12151b; border:1px solid #343b49; border-radius:8px; padding:9px 14px; }
+details.rfd:hover { border-color:var(--acc); }
+details.rfd summary { color:var(--fg); font-weight:600; display:flex; align-items:center; gap:8px; list-style:none; }
+details.rfd summary::-webkit-details-marker { display:none; }
+details.rfd summary::before { content:'▸'; color:var(--muted); font-size:13px; transition:transform .12s; }
+details.rfd[open] summary::before { transform:rotate(90deg); }
+details.rfd .rfprev { margin-left:auto; font-weight:400; font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+details.rfd[open] .rfprev { display:none; }
+details.rfd > .rfbody { margin-top:10px; padding-top:10px; border-top:1px solid var(--line); }
+.rfcol { font:12px ui-monospace, Menlo, Consolas, monospace; border-bottom:1px dotted #5a6375; padding-bottom:1px; white-space:nowrap; }
+.rfcol[data-tip] { cursor:help; }
+  .rrow { display:grid; grid-template-columns:subgrid; grid-column:1/-1; align-items:center; padding:8px 0; border-bottom:1px solid var(--line); }
+  .rrow:last-child { border-bottom:0; }
+  .rrow .rl { min-width:0; }
+  .rrow .rl .a { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .rrow .rl .b { font-size:11px; color:var(--muted); font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .rrow .rbar { position:relative; height:26px; background:#12151b; border:1px solid var(--line); border-radius:6px; overflow:hidden; isolation:isolate; }
+  .rrow .rs { text-align:right; font-size:13px; white-space:nowrap; font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .pb { position:absolute; top:5px; bottom:5px; left:0; border-radius:0 4px 4px 0; }
+  .mk { position:absolute; top:0; bottom:0; width:2px; z-index:5; }
+  .mk.dash { width:0; border-left:2px dashed var(--ok); }
+  .legend i.ln { width:12px; height:3px; border-radius:0; } .legend i.dl { width:12px; height:0; border-top:2px dashed var(--ok); border-radius:0; background:none; }
+  .callout { margin-top:12px; padding:10px 14px; background:#12151b; border:1px solid var(--line); border-radius:8px; font-size:13px; color:var(--muted); }
+  .callout b { color:var(--fg); }
+  .lane { position:relative; height:30px; background:#12151b; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .lane .s { position:absolute; top:5px; bottom:5px; border-radius:3px; min-width:2px; }
+  .axis { display:flex; justify-content:space-between; font-size:11px; color:var(--muted); padding:0 2px 4px; border-bottom:1px solid var(--line); font-family:ui-monospace, Menlo, Consolas, monospace; }
+  .good { color:var(--ok); } .bad { color:var(--thr); }
+  .nextbox { padding:10px 12px; border-radius:8px; border:1px solid; }
+  .nextbox.ok { background:rgba(60,207,145,.10); border-color:rgba(60,207,145,.45); }
+  .nextbox.warn { background:rgba(242,177,52,.10); border-color:rgba(242,177,52,.45); }
+  .nextbox.act { background:rgba(79,140,255,.10); border-color:rgba(79,140,255,.45); }
+  .nextbox.err { background:rgba(255,92,92,.10); border-color:rgba(255,92,92,.45); }
+  /* on-diagram labels + rich hover card */
+  .lbar > div { display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  .lbar > div span, .lane .s span { font-size:11px; font-weight:700; color:#0f1115; white-space:nowrap; overflow:hidden; text-overflow:clip; padding:0 3px; }
+  .lane .s { display:flex; align-items:center; justify-content:center; overflow:hidden; }
+  .lane .s.blk { background:repeating-linear-gradient(135deg, #2a2f3a 0 4px, #1c2029 4px 8px); border:1px solid #3a4150; }
+  .lane .s.blk span { color:var(--muted); font-weight:600; }
+  .legend i.blkk { background:repeating-linear-gradient(135deg, #2a2f3a 0 3px, #1c2029 3px 6px); border:1px solid #3a4150; }
+  .mkl { position:absolute; top:1px; left:4px; font-size:10px; line-height:12px; font-weight:700; font-family:ui-monospace, Menlo, monospace; white-space:nowrap; background:#0f1115; border-radius:3px; padding:0 3px; }
+  .mk.dash .mkl { top:auto; bottom:1px; }
+  #tip { position:fixed; z-index:50; display:none; max-width:460px; background:#0b0d11; border:1px solid #3a4150; border-radius:8px; padding:9px 11px; font-size:12px; line-height:1.45; box-shadow:0 6px 24px rgba(0,0,0,.5); pointer-events:none; }
+  #tip .tipt { border-collapse:collapse; margin-top:4px; width:auto; font-size:12px; }
+  #tip .tipt td { border:0; padding:1px 10px 1px 0; vertical-align:top; } #tip .tipt td:first-child { color:var(--muted); white-space:nowrap; }
+  [data-tip] { cursor:default; }
+  .modalbg { position:fixed; inset:0; z-index:60; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; }
+  .modal { background:var(--panel); border:1px solid #3a4150; border-radius:10px; padding:18px 20px; width:min(480px, calc(100vw - 32px)); box-shadow:0 10px 40px rgba(0,0,0,.6); }
+  .modal h3 { margin:0 0 10px; font-size:16px; overflow-wrap:anywhere; }
+  .ldots i { font-style:normal; }
+  .modal .mbody { font-size:14px; color:var(--muted); overflow-wrap:anywhere; } .modal .mbody p { margin:8px 0; } .modal .mbody b { color:var(--fg); }
+  .modal code { word-break:break-all; }
+  .modal .minput { margin-top:6px; }
+  /* "Open … in Perfetto ↗": a small outlined button, so it reads as an action next to a heading. */
+  a.pflink { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border:1px solid #35508a; border-radius:6px; background:#1a2234;
+             color:#cfe0ff; font-size:12px; font-weight:600; text-decoration:none; white-space:nowrap; line-height:1.5; }
+  a.pflink:hover { border-color:var(--acc); background:#22304d; color:#fff; }
+  a.pflink .pfi { display:inline-block; width:8px; height:8px; border-radius:2px; background:var(--acc); }
+  .errbox { margin-top:10px; font-size:14px; color:var(--muted); }
+  .errbox .et { color:#ff9b9b; font-weight:600; } .errbox .et .mono { font-weight:400; font-family:ui-monospace, Menlo, Consolas, monospace; font-size:13px; }
+  .errbox p { margin:8px 0; } .errbox b { color:var(--fg); } .errbox code { word-break:break-all; }
+  /* Lost connection / no token: a notice over the page that does not block it. */
+  .connbanner { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:60; max-width:min(720px, calc(100vw - 32px));
+                background:#4a1f1f; border:1px solid #c0504d; color:#ffd7d7; padding:10px 16px; border-radius:8px; font-size:14px; box-shadow:0 6px 24px rgba(0,0,0,.5); }
+  button.stopx { background:#c62828; padding:4px 10px; font-size:16px; line-height:1.2; }
+</style>
+</head>
+<body>
+<header>
+  <h1>zpo · Zircon Profile Optimizer</h1>
+  <span class="dev unk" id="devinfo">Device: Connecting…</span>
+  <span class="dev unk mono" id="checkout" style="display:none"></span>
+  <a class="why" id="whylink" href="#" target="_blank" style="display:none">Why? → Scheduler lesson series</a>
+  <a class="why" style="margin-left:0" href="https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/zircon/skills/zpo/README.md" target="_blank">Docs</a>
+  <button class="secondary" id="reportbtn" style="display:none" title="Download this session's results as one HTML file that opens without zpo" onclick="downloadReport(this)">Download Report</button>
+  <button class="stopx" id="stopbtn" style="display:none" title="Stop the zpo server" onclick="stopServer()">✕</button>
+</header>
+<div class="connbanner" id="connbanner" style="display:none"></div>
+<main>
+  <nav>
+    <div class="row" style="justify-content:space-between"><b>Sessions</b><button class="secondary" onclick="showNew()">+ New</button></div>
+    <div id="sessions"></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+    <div class="muted" style="font-size:12px">
+      A <b>session</b> = one task + how to load it. Measure a <b>baseline</b>, read the verdict, fix code or apply a profile, measure a <b>candidate</b>, and let the <b>gate</b> decide.
+    </div>
+  </nav>
+  <section id="content"></section>
+</main>
+
+<script>
+const $ = (s, el=document) => el.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// A value as a JavaScript string literal inside an HTML attribute such as
+// onclick="f(${jsq(x)})": JSON-quoted, then HTML-escaped, so no quote or
+// backslash in a session or measurement name can end the string early.
+const jsq = s => esc(JSON.stringify(String(s ?? '')));
+// Only http(s) links are rendered, so a `javascript:` URL cannot run.
+// True in a `zpo report --format html` page, which defines ZPO_STATIC.
+const isStatic = () => typeof ZPO_STATIC !== 'undefined';
+const safeUrl = u => /^https?:\/\//i.test(u || '') ? u : '';
+const us = ns => (ns/1e3).toLocaleString(undefined, {maximumFractionDigits:1});
+const COLORS = {run:'var(--run)', preempted:'var(--sched)', wake_latency:'#86b3ff', throttled:'var(--thr)', hw_wait:'var(--hw)', blocked_unknown:'var(--unk)', blocked_on:'transparent'};
+const BUCKETS = {
+  run: {what: 'executing its own instructions', fix: 'optimize the code'},
+  preempted: {what: 'runnable, but another thread had the CPU', fix: 'a deadline profile'},
+  wake_latency: {what: 'woken, waiting to get a CPU', fix: 'a deadline profile / affinity'},
+  throttled: {what: 'deadline budget used up for this period', fix: 'raise the capacity'},
+  hw_wait: {what: 'blocked on an interrupt or timer', fix: 'a protocol or hardware change'},
+  blocked_unknown: {what: 'blocked; the waker is outside the trace', fix: 'a bigger trace buffer or more depth'},
+};
+let sessions = [], current = null, lessons = {};
+// The optional coding agent (from an extension; see the README).
+let agentInfo = {available: false, name: ''};
+const agentName = () => agentInfo.name || 'the agent';
+// Which roles file Apply edits is decided by the build (see the README), so it is named generically.
+const profilesName = () => 'the board\'s .profiles file';
+
+// The token arrives once, in the link's fragment (#t=...), which browsers never send over the network. The page keeps
+// it in this origin's localStorage (another zpo server on the machine has another port, so another origin), drops it
+// from the address bar, and sends it as X-Zpo-Token on every request. memToken covers a browser without storage.
+const TOKEN_KEY = 'zpo_token';
+let memToken = '';
+function readToken() {
+  const t = new URLSearchParams(location.hash.slice(1)).get('t');
+  if (!t) return;
+  memToken = t;
+  try { localStorage.setItem(TOKEN_KEY, t); } catch (e) {}
+  history.replaceState(null, '', location.pathname + location.search);
+}
+function token() {
+  try { return localStorage.getItem(TOKEN_KEY) || memToken; } catch (e) { return memToken; }
+}
+// The headers of every request to zpo.
+const zpoHeaders = () => ({'X-Zpo': '1', 'X-Zpo-Token': token()});
+
+async function api(path, body) {
+  const headers = zpoHeaders();
+  let r;
+  try {
+    r = await fetch(path, body ? {method:'POST', headers:{...headers, 'Content-Type':'application/json'}, body: JSON.stringify(body)} : {headers});
+  } catch (e) { connLost(); return {error: lostText()}; }
+  if (!fromZpo(r)) { connLost(); return {error: lostText()}; }
+  let j;
+  try { j = await r.json(); } catch (e) { return {error: `bad response (${r.status})`}; }
+  if (r.status === 403 && j.signed_in === false) connBanner('auth');
+  return j;
+}
+
+// Every zpo response carries `X-Zpo: 1`. A proxy in front of zpo (such as the one that serves this page from another
+// origin) answers with its own error page when zpo is down, so a response without the header means "unreachable",
+// whatever its status.
+const fromZpo = r => r.headers.get('X-Zpo') === '1';
+
+// The name of the machine zpo runs on, from the server (`hostname -f`, as in the link it printed); behind a proxy the
+// page's own address does not say. The service worker keeps /api/info, so a reload while zpo is down still knows it.
+let serverHost = '';
+const hostName = () => esc(serverHost || 'the machine running zpo');
+const lostText = () => `Lost the connection to zpo on ${serverHost || 'the machine running zpo'}.`;
+async function loadInfo() {
+  if (isStatic()) return;
+  const r = await api('/api/info');
+  if (r.host) serverHost = r.host;
+}
+
+// The connection to the server: 'ok', 'lost' (the server cannot be reached) or 'auth' (it refuses this page). Anything
+// but 'ok' shows a banner and polls /api/ping every 3 s; once it answers, the banner goes and the view is refreshed.
+// While 'ok', a heartbeat pings every 5 s when the page is visible, so an idle page notices a stopped server too.
+let connState = 'ok', connTimer = null, serverStopped = false, booted = false;
+function connBanner(state) {
+  connState = state;
+  const b = $('#connbanner');
+  if (state === 'ok') { b.style.display = 'none'; return; }
+  b.innerHTML = state === 'auth' ? 'This page does not have the zpo server\'s token. Open the link <code>zpo ui start</code> prints.'
+    : `${serverStopped ? `The zpo server on ${hostName()} was stopped.` : `Lost the connection to zpo on ${hostName()}.`} Run <code>zpo ui start</code> there; this page reconnects on its own.`;
+  b.style.display = '';
+  if (!connTimer) connTimer = setInterval(checkConn, 3000);
+}
+function connLost() { if (connState !== 'auth') connBanner('lost'); }
+async function checkConn() {
+  let r;
+  try { r = await fetch('/api/ping', {headers: zpoHeaders()}); } catch (e) { connLost(); return; }
+  if (!fromZpo(r)) { connLost(); return; }
+  if (r.status === 403) { connBanner('auth'); return; }
+  if (!r.ok) return;
+  const j = await r.json().catch(() => ({}));
+  if (j.host) serverHost = j.host;
+  if (connState === 'ok') return;
+  clearInterval(connTimer); connTimer = null; serverStopped = false;
+  connBanner('ok');
+  // A page that loaded while zpo was down (from the service worker's copy) never finished starting: start over.
+  if (!booted) { location.reload(); return; }
+  pollDevice(); refresh();
+}
+function startHeartbeat() {
+  if (isStatic()) return;
+  setInterval(() => { if (connState === 'ok' && document.visibilityState === 'visible') checkConn(); }, 5000);
+}
+
+// The red X: stops the server after asking.
+async function stopServer() {
+  if (!(await confirmModal({title: 'Stop the zpo server?', danger: true, ok: 'Yes', cancel: 'No',
+      html: `<p>The page stops working until you run <code>zpo ui start</code> again on ${hostName()}.</p>`}))) return;
+  const r = await api('/api/shutdown', {});
+  if (r.error) { if (!r.static_report && connState === 'ok') await alertModal({title: 'Could Not Stop the Server', html: `<p>${esc(r.error)}</p>`}); return; }
+  serverStopped = true;
+  connBanner('lost');
+}
+
+// The top bar's server buttons; a static report has no server.
+function updateTopBar() {
+  $('#stopbtn').style.display = isStatic() ? 'none' : '';
+  updateReportButton();
+}
+
+// Saves a fetched file: downloads need the token header, which a plain link cannot send.
+function saveBlob(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+// The .fxt link of a capture.
+async function downloadTrace(meas, tag) {
+  let r;
+  const enc = encodeURIComponent;
+  try { r = await fetch(`/api/session/${enc(current)}/${enc(meas)}/trace/${enc(tag)}`, {headers: zpoHeaders()}); } catch (e) { connLost(); return; }
+  if (!fromZpo(r)) { connLost(); return; }
+  if (r.status === 403) { connBanner('auth'); return; }
+  if (!r.ok) { await alertModal({title: 'Could Not Download the Trace', html: `<p>The server answered ${r.status}.</p>`}); return; }
+  saveBlob(await r.blob(), `${current}-${meas}-${tag}.fxt`);
+}
+
+// Download Report: the current session's static HTML report, offered once the session has an analyzed measurement
+// with a summary (`report_available`; see report_html::session_has_report).
+function updateReportButton() {
+  const s = (Array.isArray(sessions) ? sessions : []).find(x => x.name === current);
+  $('#reportbtn').style.display = !isStatic() && s && s.report_available ? '' : 'none';
+}
+async function downloadReport(btn) {
+  if (!current) return;
+  const name = current, label = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = 'Preparing the report' + DOTS;
+  try {
+    let r;
+    try { r = await fetch(`/api/session/${encodeURIComponent(name)}/report.html`, {headers: zpoHeaders()}); } catch (e) { connLost(); return; }
+    if (!fromZpo(r)) { connLost(); return; }
+    if (r.status === 403) { connBanner('auth'); return; }
+    if (!r.ok) {
+      const j = await r.json().catch(() => ({}));
+      await alertModal({title: 'Could Not Download the Report', html: `<p>${esc(j.error || `The server answered ${r.status}.`)}</p>`});
+      return;
+    }
+    saveBlob(await r.blob(), `zpo-${name}.html`);
+  } finally { btn.disabled = false; btn.innerHTML = label; }
+}
+
+async function refresh() {
+  const list = await api('/api/sessions');
+  if (!Array.isArray(list)) return;  // the banner says why
+  sessions = list;
+  updateTopBar();
+  const nav = $('#sessions');
+  nav.innerHTML = sessions.map(s => `<div class="sess ${current===s.name?'active':''}" onclick="openSession(${jsq(s.name)})">
+      <div style="display:flex;align-items:center"><b style="flex:1">${esc(s.name)}</b> <span class="pill">${s.measurements.length} meas.</span>
+        <span class="x" title="Rename this session" style="font-size:13px" onclick="event.stopPropagation();renameSession(${jsq(s.name)})">✎</span>
+        <span class="x" title="Delete this session and all its recordings" onclick="event.stopPropagation();deleteSession(${jsq(s.name)})">×</span></div>
+      <div class="t">${esc(s.task)}</div></div>`).join('') || '<div class="muted">None yet</div>';
+  if (current) await renderSession();
+}
+
+// Step 1 (Define): choose the task and how to load the device.
+// 1. what should be faster (task kind + its inputs, scoped agent help), deadline; 2. how it is exercised;
+// then the name. Missing or bad fields get a red "* reason" after their label, but only fields that were on screen at
+// the last Create click: switching to another task kind or load mode does not flag its still-empty fields.
+const KIND_HINT = {
+  events: 'From a start event to the next end event, e.g. touch interrupt to report delivered.',
+  fidl: 'From the client sending the request until the reply arrives.',
+  thread: 'From the thread waking up until it blocks for its next piece of work.',
+};
+const eventFormsTip = () => tipRows([['<code>irq:&lt;n&gt;</code>', 'an interrupt'], ['<code>ipc:&lt;lib/Protocol.Method&gt;</code>', 'a FIDL message is sent'],
+  ['<code>ipc-in:&lt;Method&gt;</code>', 'it arrives at the receiver'], ['<code>slice:&lt;Name&gt;</code>', 'a trace slice begins'],
+  ['<code>slice-end:&lt;Name&gt;</code>', 'it ends']]) + '<div class="muted" style="margin-top:4px">Each end event pairs with the latest start event before it.</div>';
+const WINDOW_TIP = 'If whatever consumes this task\'s output has a deadline (a 16.6 ms frame, an audio buffer, a sensor report rate), enter it: it becomes the scheduling period and the pass line. Without one, the period comes from profiles already on the path (or the measured arrival rate) and candidates are judged by whether they got better.';
+const PROFILE_TIP = 'Adds one capture per condition that samples the processes on the task\'s chain every 100 µs. Results then show where the slowest jobs spend their run time, by function. Sampling adds overhead, so these captures are kept out of the comparison.';
+let defKind = 'events', defShown = new Set(), defOrig = null;
+
+function showNew(edit) {
+  window._editingSession = edit ? edit.name : null;
+  // A static report has no server to check the spec, so Step 1 shows the session's own.
+  defShown = new Set(); defOrig = null; defCheck = {task: edit ? edit.task : '', errors: {}};
+  if (!edit) { current = null; refresh(); }
+  const err = id => `<span class="err" id="err_${id}"></span>`;
+  $('#content').innerHTML = `
+  ${edit ? sessionHeader(edit, 1) : '<div class="steps"><div class="on">1 · Define</div><div class="disabled">2 · Measure</div><div class="disabled">3 · Results</div></div>'}
+  <div id="defform">
+  <div class="card"><h2>1. What Should Be Faster?</h2>
+    <div class="taskbox">
+      <div class="segc" id="n_kindc">${[['events', 'Two trace events'], ['fidl', 'A FIDL request'], ['thread', 'A thread']].map(([k, l]) => `<button type="button" data-k="${k}" onclick="setKind('${k}')">${l}</button>`).join('')}</div>
+      <div class="hint" id="n_kind_hint"></div>
+      <div id="kind_events"><div class="row">
+        <div style="flex:1"><label>Start event ${err('start')}</label><input id="n_start" placeholder="e.g. irq:716"></div>
+        <div style="flex:1"><label>End event ${err('end')}</label><input id="n_end" placeholder="e.g. ipc-in:fuchsia.input.report/InputReportsReaderV2.OnInputReports"></div></div>
+        <div class="hint"><span ${tipAttr(eventFormsTip())} style="text-decoration:underline dotted;cursor:help">Event forms</span>: irq, ipc, ipc-in, slice, slice-end.</div></div>
+      <div id="kind_fidl" style="display:none"><label>FIDL method ${err('fidl')}</label><input id="n_fidl" placeholder="e.g. fuchsia.hardware.spi/Device.ReceiveVector"></div>
+      <div id="kind_thread" style="display:none"><label>Thread (process/thread, globs allowed) ${err('thread')}</label><input id="n_thread" placeholder="e.g. driver-host-#input/fdf-dispatcher-thread-3*"></div>
+      <div class="row" style="flex-wrap:nowrap;margin-top:10px"><span class="hint" style="margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Spec: <code id="n_spec_preview"></code></span>
+        ${agentInfo.available ? `<button type="button" class="secondary btn-s" style="flex-shrink:0" title="Record a short trace while you exercise the task and let ${esc(agentName())} propose these fields" onclick="discover()">Don't know the names? Ask ${esc(agentName())}</button>` : ''}</div>
+      <div id="discoverbox"></div>
+    </div>
+    <label>Response-time target (optional) ${err('window')}</label><input id="n_window" placeholder="e.g. 850us or 16.6ms">
+    <div class="hint">Becomes the scheduling period and the pass line. <span ${tipAttr(esc(WINDOW_TIP))} style="text-decoration:underline dotted;cursor:help">More</span></div>
+  </div>
+  <div class="card"><h2>2. How Is It Exercised?</h2>
+    <input type="hidden" id="n_mode" value="manual">
+    <div class="segc" id="n_modec">${[['manual', 'Manual: I use the device when prompted'], ['automated', 'Automated: a host command']].map(([k, l]) => `<button type="button" data-k="${k}" onclick="setMode('${k}')">${l}</button>`).join('')}</div>
+    <div id="manualbox"><label>Instructions, one per line, shown in turn (optional; default "Exercise the task now.")</label><textarea id="n_instr" placeholder="e.g. Swipe and tap continuously on the screen until told to stop."></textarea></div>
+    <div id="autobox" style="display:none"><label>Host command (runs in the Fuchsia checkout) ${err('cmd')}</label><input id="n_cmd" placeholder="e.g. fx test //src/ui/tests/..."></div>
+    <label class="chk"><input type="checkbox" id="n_stress" checked> Also measure with every core busy (loadgen on all cores)</label>
+    <label class="chk" ${tipAttr(esc(PROFILE_TIP))}><input type="checkbox" id="n_profile"> Also record a CPU profile, to see which functions the time goes to</label>
+    <div class="hint" id="n_cost" style="margin-top:10px"></div>
+    <details id="n_more" style="margin-top:8px"><summary class="muted" style="font-size:13px">More options…</summary><div class="row">
+      <div style="flex:1"><label>Seconds per capture ${err('dur')}</label><input id="n_dur" value="15"></div>
+      <div style="flex:1"><label>Repeats ${err('rep')}</label><input id="n_rep" value="2"></div>
+      <div style="flex:1"><label>Trace buffer (MB) ${err('buf')}</label><input id="n_buf" value="512"></div></div></details>
+  </div>
+  <div class="card">
+    <label style="margin-top:0">Session name ${err('name')}</label><input id="n_name" placeholder="e.g. touch-read">
+    <div class="nextbox warn" id="n_editwarn" style="display:none;margin-top:12px"></div>
+    <div class="row" style="margin-top:12px"><button id="n_submit" onclick="createSession()">${edit ? 'Save Changes' : 'Create Session'}</button>
+      ${edit ? `<button class="secondary" onclick="openSession(${jsq(edit.name)})">Cancel</button>` : ''}
+      <span class="err" id="err_submit" style="margin:0"></span></div>
+  </div></div>`;
+  $('#defform').addEventListener('input', defChanged);
+  $('#defform').addEventListener('change', defChanged);
+  setKind('events'); setMode('manual');
+  if (edit) {
+    $('#n_name').value = edit.name; setTask(edit.task_fields); $('#n_window').value = edit.window || '';
+    setMode(edit.load.mode);
+    $('#n_instr').value = (edit.load.instructions||[]).join('\n'); $('#n_cmd').value = edit.load.command || '';
+    $('#n_dur').value = edit.load.duration_s; $('#n_rep').value = edit.repeats; $('#n_buf').value = edit.trace_buffer_mb || 512;
+    $('#n_stress').checked = !!edit.stress;
+    $('#n_profile').checked = !!edit.profile;
+    defOrig = defSnapshot();
+  }
+  defChanged();
+  initTips();
+}
+function editSession() { const s = sessions.find(x => x.name === current); if (s) showNew(s); }
+let view = 2;              // current step page (1..3)
+let viewMeas = null;       // measurement shown in the Results tabs
+async function gotoStep(n) {
+  if (n === 1) return editSession();
+  view = Math.min(n, 3); await refresh();
+}
+
+function setKind(k) {
+  defKind = k;
+  document.querySelectorAll('#n_kindc button').forEach(b => b.classList.toggle('on', b.dataset.k === k));
+  ['events', 'fidl', 'thread'].forEach(x => $('#kind_' + x).style.display = x === k ? '' : 'none');
+  $('#n_kind_hint').textContent = KIND_HINT[k];
+  defChanged();
+}
+function setMode(m) {
+  $('#n_mode').value = m;
+  document.querySelectorAll('#n_modec button').forEach(b => b.classList.toggle('on', b.dataset.k === m));
+  $('#manualbox').style.display = m === 'manual' ? '' : 'none';
+  $('#autobox').style.display = m === 'automated' ? '' : 'none';
+  defChanged();
+}
+function kindChanged() { defChanged(); }
+// Everything that defines what is measured and how; the name is not part of it.
+function defSnapshot() {
+  const v = id => $('#n_' + id).value.trim();
+  return JSON.stringify([defKind, v('start'), v('end'), v('fidl'), v('thread'), v('window'), v('mode'), v('instr'), v('cmd'),
+                         v('dur'), v('rep'), v('buf'), $('#n_stress').checked]);
+}
+// The fields currently on screen (the selected task kind and load mode, plus the common ones).
+function defActiveFields() {
+  return ['name', 'window', 'dur', 'rep', 'buf', ...(defKind === 'events' ? ['start', 'end'] : [defKind]), ...($('#n_mode').value === 'automated' ? ['cmd'] : [])];
+}
+// The form as the server reads it, for POST /api/sessions and /api/sessions/validate.
+function defBody() {
+  const v = id => $('#n_' + id).value;
+  return {name: v('name').trim(), old_name: window._editingSession || '', task_kind: defKind, start: v('start'), end: v('end'),
+    fidl: v('fidl'), thread: v('thread'), window: v('window').trim(), load_mode: v('mode'), instructions: v('instr'),
+    load_command: v('cmd'), duration: v('dur'), repeats: v('rep'), buffer_mb: v('buf'), stress: $('#n_stress').checked,
+    profile: $('#n_profile').checked};
+}
+// The server's view of the form: the task spec it composes and field -> reason for every field it would reject
+// (the same checks as saving and `zpo session-init`). The latest answer wins.
+let defCheck = {task: '', errors: {}}, defSeq = 0;
+async function defValidate() {
+  if (typeof ZPO_STATIC !== 'undefined') return;
+  const seq = ++defSeq, r = await api('/api/sessions/validate', defBody());
+  if (seq !== defSeq || !r || r.error) return;
+  defCheck = r; defRender();
+}
+function defChanged() {
+  if (!$('#n_spec_preview')) return;
+  const reps = parseInt($('#n_rep').value) || 0, dur = parseFloat($('#n_dur').value) || 0, conds = $('#n_stress').checked ? 2 : 1;
+  const prof = $('#n_profile').checked ? conds : 0, caps = reps * conds + prof;
+  $('#n_cost').textContent = caps && dur ? `Each measurement records ${caps} capture${caps > 1 ? 's' : ''} of ${dur} s${prof ? `, ${prof} of them with the CPU profile` : ''} (${(caps * dur / 60).toFixed(caps * dur < 60 ? 1 : 0)} min of recording, plus setup).` : '';
+  const edit = sessions.find(x => x.name === window._editingSession), nm = edit ? edit.measurements.length : 0;
+  const warn = $('#n_editwarn'), dirty = defOrig && nm && defSnapshot() !== defOrig;
+  warn.style.display = dirty ? '' : 'none';
+  if (dirty) warn.innerHTML = `This session has ${nm} measurement${nm > 1 ? 's' : ''}. Changing what is measured or how makes ${nm > 1 ? 'them' : 'it'} incomparable; measure a new baseline after saving.`;
+  defRender();
+  defValidate();
+}
+function defRender() {
+  if (!$('#n_spec_preview')) return;
+  $('#n_spec_preview').textContent = defCheck.task || '…';
+  const e = defCheck.errors || {}, bad = id => defShown.has(id) && e[id];
+  for (const id of ['name', 'start', 'end', 'fidl', 'thread', 'window', 'cmd', 'dur', 'rep', 'buf']) {
+    const m = $('#err_' + id); if (m) m.textContent = bad(id) ? `* ${e[id]}` : '';
+    const f = $('#n_' + id); if (f) f.classList.toggle('invalid', !!bad(id));
+  }
+  if (bad('dur') || bad('rep') || bad('buf')) $('#n_more').open = true;
+}
+// Fills the task fields from the server's parse of a spec (`task_fields`).
+function setTask(f) {
+  if (!f || !f.kind) return;
+  $('#n_start').value = f.start || ''; $('#n_end').value = f.end || ''; $('#n_fidl').value = f.fidl || ''; $('#n_thread').value = f.thread || '';
+  setKind(f.kind);
+}
+async function createSession() {
+  defShown = new Set(defActiveFields());
+  $('#err_submit').textContent = '';
+  await defValidate();
+  const errs = defCheck.errors || {}, hidden = Object.keys(errs).filter(k => !defShown.has(k));
+  if (hidden.length) $('#err_submit').textContent = '* ' + hidden.map(k => `${k}: ${errs[k]}`).join('; ');
+  if (Object.keys(errs).length) return;
+  const b = defBody();
+  if (watching && !(await confirmModal({title: 'Cancel the run in progress?', danger: true,
+      html: '<p>Saving changes this session, so the run in progress is cancelled and its partial recordings are discarded.</p>',
+      ok: 'Cancel Run and Save', cancel: 'Keep Running'}))) return;
+  const r = await api('/api/sessions', b);
+  if (r.ok) { current = r.name; view = 2; await refresh(); }
+  else if (r.errors) { defCheck = {task: defCheck.task, errors: r.errors}; defRender(); }
+  else $('#err_submit').textContent = `* ${r.error || 'could not save'}`;
+}
+async function renameSession(name) {
+  const next = await promptModal({title: 'Rename Session', html: `<p>New name for <b>${esc(name)}</b> (letters, digits, - _ . only):</p>`,
+                                  value: name, ok: 'Rename'});
+  if (!next || next === name) return;
+  const r = await api(`/api/session/${encodeURIComponent(name)}/rename`, {new_name: next});
+  if (r.ok) {
+    if (current === name) current = r.name;
+    await refresh();
+  } else if (!r.static_report) await alertModal({title: 'Could Not Rename the Session', html: `<p>${esc(r.error || 'The server did not say why.')}</p>`});
+}
+
+// Landing step for a session: Results once something has been analyzed, otherwise Measure.
+function landingStep(name) { const s = sessions.find(x => x.name === name); return s && s.measurements.some(m => m.analyzed) ? 3 : 2; }
+function openSession(name) { current = name; view = landingStep(name); viewMeas = null; rfOpen = false; watching = null; watchingBox = null; refresh(); }
+
+function sessionHeader(s, step) {
+  const names = ['', 'Define ✎', 'Measure', 'Results'];
+  const analyzed = s.measurements.filter(m => m.analyzed).length;
+  const done = {1:true, 2:s.measurements.length>0, 3:analyzed>0};
+  return `<div class="steps">${[1,2,3].map(i => `<div class="${step===i?'on':''} ${done[i]?'done':''}" onclick="gotoStep(${i})">${i} · ${names[i]}</div>`).join('')}</div>`;
+}
+
+async function renderSession() {
+  const s = sessions.find(x => x.name === current); if (!s) return;
+  const meas = s.measurements, analyzed = meas.filter(m => m.analyzed);
+  if (!viewMeas || !analyzed.some(m => m.name === viewMeas)) viewMeas = analyzed.length ? analyzed[analyzed.length-1].name : null;
+  let html = sessionHeader(s, view);
+  if (view === 2) {
+    const plan = measurePlan(s);           // [{name,label,state}]
+    const next = plan.find(p => p.state === 'next');
+    const caps = capturePlan(s), nreg = caps.filter(c => !c.tag.startsWith('profile-')).length;
+    html += `<div class="card" id="measurebox"><h2>Measure</h2>
+      <div class="muted">Each measurement records the task ${nreg === 1 ? 'once' : nreg + ' times'}: ${s.stress ? 'on an idle system and again with every CPU core kept busy' : 'on the system as it is'}${s.repeats>1?`, ${s.repeats}× each`:''}.${s.profile ? ` Then once more per condition with the CPU profile, which is kept out of the comparison.` : ''} You first measure the <b>baseline</b> (the device as it is now). After each change you make (a code fix or an applied profile), you measure the next <b>candidate</b> and compare it with the baseline in Results.</div>
+      <div style="margin-top:12px">
+      ${plan.map(p => `<div class="mrow ${p.state}">
+          <div class="dot">${p.state==='done'?'✓':p.state==='next'?'▶':'·'}</div>
+          <div style="flex:1"><b>${esc(p.label)}</b> <span class="muted">${p.hint}</span></div>
+          ${p.state==='done'?`<button class="secondary" onclick="viewMeas=${jsq(p.name)};gotoStep(3)">Results →</button> <button class="secondary" title="Discard this recording and record it again" onclick="remeasure(${jsq(p.name)}, this)">Re-measure</button> <span class="x" title="Delete this measurement" onclick="deleteMeasurement(${jsq(p.name)})">×</span>`:''}
+          ${p.state==='done'&&!p.analyzed?`<span class="pill bad">Verdict missing</span> <button class="secondary" title="The recording exists but its verdict was not computed (interrupted run). Recompute it." onclick="analyze(${jsq(p.name)})">Compute verdict</button>`:''}
+          ${p.state==='next'?`<button id="measurebtn" onclick="measure(${jsq(p.name)}, this)">▶ Measure ${esc(p.label)}</button>`:''}
+        </div>`).join('')}
+      </div></div>
+      <div id="jobbox"></div>`;
+    window._capturePlan = caps;  } else if (view === 3) {
+    if (!viewMeas) {
+      html += `<div class="card muted">No analyzed measurement yet. Go to <a href="#" onclick="gotoStep(2);return false">Measure</a> and measure a baseline.</div>`;
+    } else {
+      // Every measurement on one scale, then one measurement at a time via tabs; see renderAnalyze().
+      html += `<div id="jobbox"></div><div id="analyze"><div class="card muted">Loading the verdicts${DOTS}</div></div>`;
+    }
+  }
+  $('#content').innerHTML = html;
+  if (!watching) { const js = await api('/api/jobs'); const run = js.find(x => x.state === 'running' && x.session === current); if (run) { watching = run.id; watchingBox = /^(explain|resolve roles) /.test(run.kind) ? 'jobbox_llm' : null; updateAgentButtons(); } }
+  if (view === 2 || view === 3) pollJobs();
+  if (view === 3 && viewMeas) showAllSummaries(measOrder(analyzed).map(m => m.name));
+}
+
+// Measurement order: baseline first, then candidate-N by N (not alphabetical: candidate-10 after candidate-9).
+function measRank(n) { if (n === 'baseline') return -1; const m = n.match(/^candidate-(\d+)$/); return m ? parseInt(m[1]) : 1e9; }
+function measOrder(ms) { return [...ms].sort((a, b) => measRank(a.name) - measRank(b.name) || a.name.localeCompare(b.name)); }
+// A measurement's display name, HTML-escaped.
+// A measurement's name for people, as plain text and as HTML.
+function measText(n) { const m = n.match(/^candidate-(\d+)$/); return n === 'baseline' ? 'Baseline' : m ? `Candidate ${m[1]}` : n; }
+const measLabel = n => esc(measText(n));
+
+async function showAllSummaries(names) {
+  const sess = current, enc = encodeURIComponent;
+  const [gates, ...ds] = await Promise.all([api(`/api/session/${enc(sess)}/gates`), ...names.map(n => api(`/api/session/${enc(sess)}/${enc(n)}/summary`))]);
+  if (sess !== current || view !== 3) return;   // the user moved on while this was loading
+  const s = sessions.find(x => x.name === current);
+  anData = {session: s, gates: Array.isArray(gates) ? gates : [], ms: names.map((n, i) => ({name: n, d: ds[i]})).filter(m => !m.d.error)};
+  if (!anData.ms.length) { const b = $('#analyze'); if (b) b.innerHTML = `<div class="card muted">Could not load any verdict: ${esc(ds[0] && ds[0].error)}</div>`; return; }
+  if (anCond.session !== current) anCond = {session: current, c: s && s.stress ? 'stress' : 'idle'};
+  renderAnalyze();
+}
+
+// Opens a capture in ui.perfetto.dev without uploading it: the page streams the .fxt from this
+// server into the Perfetto tab (Perfetto v59+ postMessage API). localhost and some other hosts
+// are trusted there, so no confirmation prompt. opts.vis = [start, end] in raw trace ns;
+// opts.pins = regexes for dev.perfetto.PinTracksByRegex. Must run inside the click (popup blockers).
+// Regroups a download into 32 MB chunks before Perfetto sees it. Perfetto v59's wasm engine sets aside a fresh 33 MB
+// buffer for every chunk it receives (wasm_bridge.ts, MAX_WRITE_SIZE), so the small network chunks of a proxied
+// download (thousands per trace) exhaust its 16 GB memory and it crashes in PagedMemory::Allocate. Its own file
+// loader feeds 32 MB slices (TRACE_SLICE_SIZE), so this matches the path Perfetto exercises itself.
+const PERFETTO_CHUNK = 32 * 1024 * 1024;
+function perfettoChunks(body) {
+  let buf = new Uint8Array(PERFETTO_CHUNK), n = 0;
+  return body.pipeThrough(new TransformStream({
+    transform(chunk, out) {
+      for (let off = 0; off < chunk.byteLength;) {
+        const k = Math.min(PERFETTO_CHUNK - n, chunk.byteLength - off);
+        buf.set(chunk.subarray(off, off + k), n);
+        n += k; off += k;
+        if (n === PERFETTO_CHUNK) { out.enqueue(buf); buf = new Uint8Array(PERFETTO_CHUNK); n = 0; }
+      }
+    },
+    flush(out) { if (n) out.enqueue(buf.slice(0, n)); },
+  }));
+}
+function openInPerfetto(meas, tag, opts = {}) {
+  // Encoded with encodeURIComponent (spaces as %20, not URLSearchParams' '+'), so the pin
+  // patterns survive however the UI decodes its fragment.
+  const q = [];
+  if (opts.vis) q.push(`visStart=${opts.vis[0]}`, `visEnd=${opts.vis[1]}`);
+  if (opts.pins && opts.pins.length) q.push('startupCommands=' + encodeURIComponent(JSON.stringify(
+      opts.pins.map(re => ({id: 'dev.perfetto.PinTracksByRegex', args: [re]})))));
+  const w = window.open('https://ui.perfetto.dev/#!/' + (q.length ? '?' + q.join('&') : ''));
+  if (!w) return;
+  const enc = encodeURIComponent;
+  let sent = false;
+  const onMsg = async e => {
+    if (e.source !== w || e.data !== 'PONG' || sent) return;
+    sent = true; clearInterval(ping); window.removeEventListener('message', onMsg);
+    const r = await fetch(`/api/session/${enc(current)}/${enc(meas)}/trace/${enc(tag)}`, {headers: zpoHeaders()});
+    if (!r.ok || !r.body) { w.close(); return; }
+    const stream = perfettoChunks(r.body);
+    w.postMessage({perfetto: {stream, title: `${current} · ${measText(meas)} · ${tag}`,
+                              bytesTotal: +r.headers.get('content-length') || 0}}, '*', [stream]);
+  };
+  window.addEventListener('message', onMsg);
+  const ping = setInterval(() => { try { w.postMessage('PING', '*'); } catch (err) { clearInterval(ping); } }, 100);
+  setTimeout(() => clearInterval(ping), 60000);
+}
+// Perfetto names thread tracks "<thread name> <tid>"; zpo labels them "process/thread[koid]".
+function perfettoPin(label) {
+  const m = String(label).match(/^[^/]+\/(.+)\[(\d+)\]$/);
+  return m ? `^${m[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ${m[2]}$` : null;
+}
+// The slowest job of measurement M: its capture, zoomed with a margin, critical-path threads pinned.
+function openSlowestInPerfetto(mname) {
+  const M = (anData.ms || []).find(m => m.name === mname); if (!M) return;
+  const d = M.d, sj = d.slowest_job || {};
+  const tag = d.report_capture || ((d.captures || []).filter(c => c.condition === d.condition && c.jobs).map(c => c.tag).sort()[0]);
+  if (!tag) return;
+  const threads = [...new Set([sj.thread, ...(sj.segments || []).filter(x => x.bucket !== 'blocked_on').map(x => x.thread)])];
+  let vis = null;
+  if (sj.t0_ns != null && sj.t1_ns != null) {
+    const pad = Math.max(1e6, Math.round((sj.t1_ns - sj.t0_ns) * 0.2));
+    vis = [sj.t0_ns - pad, sj.t1_ns + pad];
+  }
+  openInPerfetto(mname, tag, {vis, pins: threads.map(perfettoPin).filter(Boolean)});
+}
+// The CPU profile capture behind "Where the Run Time Goes, by Function" for one condition: zoomed to the slowest
+// job in that capture when the analysis recorded it, with the sampled threads pinned (samples show on their tracks).
+function openProfileInPerfetto(mname, cond) {
+  const M = (anData.ms || []).find(m => m.name === mname); if (!M) return;
+  const t = ((M.d.run_functions || {})[cond]) || {};
+  if (!t.tag) return;
+  const sj = t.slowest_job, threads = new Set(sj ? sj.threads : []);
+  (t.functions || []).slice(0, 10).forEach(f => threads.add(f.thread));
+  let vis = null;
+  if (sj && sj.t0_ns != null) {
+    const pad = Math.max(1e6, Math.round((sj.t1_ns - sj.t0_ns) * 0.2));
+    vis = [sj.t0_ns - pad, sj.t1_ns + pad];
+  }
+  openInPerfetto(mname, t.tag, {vis, pins: [...threads].map(perfettoPin).filter(Boolean)});
+}
+async function uploadTrace(name, tag, btn) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = 'Uploading…';
+  const r = await api(`/api/session/${encodeURIComponent(current)}/upload-trace`, {name, tag});
+  if (r.ok) { window.open(r.url, '_blank'); btn.outerHTML = `<a href="${esc(r.url)}" target="_blank">Open in Trace Viewer ↗</a>`; }
+  else { btn.disabled = false; btn.textContent = label; if (!r.static_report) await alertModal({title: 'Could Not Upload the Trace', html: `<p>${esc(r.error || 'The server did not say why.')}</p>`}); }
+}
+
+function capturePlan(s) {
+  const conds = ['idle'].concat(s.stress ? ['stress'] : []);
+  const out = [];
+  for (let r = 1; r <= s.repeats; r++) for (const c of conds) out.push({tag: `${c}-${r}`, label: (c === 'idle' ? 'Idle system' : 'Every core busy') + (s.repeats > 1 ? ` · run ${r}` : '')});
+  if (s.profile) for (const c of conds) out.push({tag: `profile-${c}-1`, label: `CPU profile · ${c === 'idle' ? 'Idle system' : 'Every core busy'}`});
+  return out;
+}
+function measurePlan(s) {
+  const have = Object.fromEntries(s.measurements.map(m => [m.name, m]));
+  const rows = [];
+  const push = (name, label, hint) => rows.push({name, label, hint, analyzed: !!(have[name]&&have[name].analyzed), state: have[name] ? 'done' : (rows.some(r => r.state === 'next') ? 'later' : 'next')});
+  push('baseline', 'Baseline', 'the device as it is now');
+  let i = 1;
+  while (have[`candidate-${i}`]) { push(`candidate-${i}`, `Candidate ${i}`, 'after a change'); i++; }
+  push(`candidate-${i}`, `Candidate ${i}`, 'after your next change (code fix or applied profile)');
+  return rows;
+}
+async function deleteSession(name) {
+  if (!(await confirmModal({title: 'Delete Session?', danger: true, ok: 'Delete Session',
+      html: `<p><b>${esc(name)}</b> and all of its recordings and results are deleted. This cannot be undone.</p>`}))) return;
+  const r = await api(`/api/session/${encodeURIComponent(name)}/delete`, {});
+  if (r.error) { if (!r.static_report) await alertModal({title: 'Could Not Delete the Session', html: `<p>${esc(r.error)}</p>`}); return; }
+  if (current === name) { current = null; watching = null; }
+  await refresh();
+  if (!current) { if (sessions.length) { current = sessions[0].name; view = landingStep(current); refresh(); } else showNew(); }
+}
+async function deleteMeasurement(name) {
+  if (!(await confirmModal({title: 'Delete Measurement?', danger: true, ok: 'Delete Measurement',
+      html: `<p><b>${measLabel(name)}</b> is deleted: its recordings, its verdict and any comparisons that use it.</p>`}))) return;
+  const r = await api(`/api/session/${encodeURIComponent(current)}/discard`, {name});
+  if (r.error) { if (!r.static_report) await alertModal({title: 'Could Not Delete the Measurement', html: `<p>${esc(r.error)}</p>`}); return; }
+  if (viewMeas === name) viewMeas = null;
+  refresh();
+}
+async function remeasure(name, btn) {
+  if (!(await withSetupChecks(btn, cpuFitConfirmed))) return;
+  if (!(await confirmModal({title: `Record ${measLabel(name)} Again?`, danger: true, ok: 'Discard and Record Again',
+      html: `<p>The current recordings and verdict for <b>${measLabel(name)}</b> are discarded first.</p>`}))) return;
+  const r = await api(`/api/session/${encodeURIComponent(current)}/discard`, {name});
+  if (r.error) { if (!r.static_report) await alertModal({title: 'Could Not Discard the Measurement', html: `<p>${esc(r.error)}</p>`}); return; }
+  await refresh();
+  measure(name);
+}
+
+let watching = null, watchingBox = null;
+function jobBox() { return (watchingBox && $('#' + watchingBox)) || $('#jobbox2') || $('#jobbox'); }
+async function startJob(path, body, boxId) {
+  watchingBox = boxId || null;
+  const box = jobBox();
+  if (box) {
+    box.innerHTML = `<div class="card" style="border-color:var(--acc)"><h2>Starting background job… <span class="pill">Running</span></h2><div style="font-size:18px;margin:8px 0">Starting${dots()}</div></div>`;
+    box.scrollIntoView({behavior:'smooth', block:'nearest'});
+  }
+  const r = await api(path, body);
+  if (r.job) { watching = r.job; updateAgentButtons(); pollJobs(); }
+  else {
+    if (box) box.innerHTML = '';
+    if (!r.static_report) await alertModal({title: 'Could Not Start', html: `<p>${esc(r.error || 'The server did not start the job and did not say why.')}</p>`});
+  }
+}
+// Before the first measurement of a page load: if the device's cpuctl does not report which CPUs are in each
+// performance domain, say that proposals will skip the CPU fit check and let the user cancel. Asked once per page
+// load (the simplest place to keep the answer); a device that did not answer is asked again next time.
+let cpuFitOk = false;
+async function cpuFitConfirmed() {
+  if (cpuFitOk || isStatic()) return true;
+  const r = await api('/api/cpu-fit');
+  if (r.checked === false && !(await confirmModal({title: esc(r.title), html: `<p>${md(r.message)}</p>`,
+      ok: 'Measure Anyway', cancel: 'Cancel'}))) return false;
+  if (r.checked !== undefined) cpuFitOk = true;
+  return true;
+}
+// While `check` runs, the clicked button says "Running setup checks" with animated dots and is disabled; it is
+// restored afterwards, also after Cancel or an error.
+async function withSetupChecks(btn, check) {
+  if (!btn) return check();
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = 'Running setup checks' + DOTS;
+  try { return await check(); } finally { btn.disabled = false; btn.innerHTML = label; }
+}
+async function measure(name, btn) {
+  if (!(await withSetupChecks(btn, cpuFitConfirmed))) return;
+  startJob(`/api/session/${encodeURIComponent(current)}/measure`, {name});
+}
+function analyze(name) { startJob(`/api/session/${encodeURIComponent(current)}/analyze`, {name}); }
+// In-page dialogs (the browser's confirm()/alert()/prompt() cannot format text and title themselves with the
+// host name). Every one resolves when closed: Escape and a click outside count as Cancel.
+//   confirmModal -> true only for the OK button; danger: true makes OK red (deletes, discards).
+//   alertModal   -> one OK button, for errors.
+//   promptModal  -> the trimmed text on OK or Enter, null on Cancel.
+function modal({title, html = '', ok = 'OK', cancel = 'Cancel', danger = false, input = null}) {
+  return new Promise(resolve => {
+    const bg = document.createElement('div'); bg.className = 'modalbg';
+    bg.innerHTML = `<div class="modal" role="dialog" aria-modal="true"><h3>${title}</h3><div class="mbody">${html}</div>
+      ${input ? `<input class="minput" value="${esc(input.value || '')}" placeholder="${esc(input.placeholder || '')}">` : ''}
+      <div class="row" style="justify-content:flex-end;margin-top:16px">${cancel ? `<button class="secondary" data-a="0">${esc(cancel)}</button>` : ''}<button class="${danger ? 'danger' : ''}" data-a="1">${esc(ok)}</button></div></div>`;
+    const field = bg.querySelector('.minput');
+    const done = v => { bg.remove(); document.removeEventListener('keydown', key, true); resolve(v); };
+    const yes = () => done(field ? field.value.trim() : true), no = () => done(field ? null : false);
+    const key = e => { if (e.key === 'Escape') { e.preventDefault(); no(); } else if (e.key === 'Enter' && field && document.activeElement === field) { e.preventDefault(); yes(); } };
+    bg.addEventListener('click', e => { if (e.target === bg) return cancel ? no() : yes(); const a = e.target.dataset && e.target.dataset.a; if (a) a === '1' ? yes() : no(); });
+    document.addEventListener('keydown', key, true);
+    document.body.appendChild(bg);
+    if (field) { field.focus(); field.select(); } else (bg.querySelector('button.secondary') || bg.querySelector('button')).focus();
+  });
+}
+const confirmModal = o => modal(o);
+const alertModal = o => modal({ok: 'OK', ...o, cancel: null});
+const promptModal = o => modal({ok: 'OK', ...o, input: {value: o.value, placeholder: o.placeholder}});
+// Before any fx build: if the checkout's build directory does not look like an image for the device's board,
+// say so and let the user decide. A warning, never a refusal (the check is a guess from args.gn).
+// Resolves 'ok' (looks right), 'confirmed' (user chose to build anyway) or null (cancelled).
+async function buildDirConfirmed() {
+  const c = await api('/api/build-dir');
+  if (!c || c.looks_ok !== false) return 'ok';
+  const dir = c.dir_rel || c.dir || '';
+  const help = c.help_url || 'https://fuchsia.googlesource.com/fuchsia/+/refs/heads/main/zircon/skills/zpo/README.md#prerequisites';
+  const yes = await confirmModal({
+    title: c.board ? `This doesn't look like an ${esc(c.board[0].toUpperCase() + c.board.slice(1))} build` : 'This may not be a build for the device',
+    html: `<p><code>${esc(dir)}</code> builds <b>${esc(c.builds)}</b>, so zpo probably can't flash the result to the device.</p>
+      <p>To build for the device, point the checkout at its build first:<br><code>fx use out/&lt;dir&gt;</code> or <code>fx set …</code>
+      (<a href="${esc(help)}" target="_blank">Prerequisites</a>)</p>`,
+    ok: `Build ${c.builds} anyway`, cancel: 'Cancel'});
+  return yes ? 'confirmed' : null;
+}
+async function ota(build) {
+  if (isStatic()) { await api('/api/session/static/ota', {build}); return; }  // shows the static-report notice
+  const bd = await buildDirConfirmed();
+  if (!bd) return;
+  if (bd === 'ok' && !(await confirmModal({title: 'Build and Update the Device?', ok: 'Build + OTA',
+      html: '<p>Runs <code>fx build</code> on the current checkout and installs the result on the device, which then reboots (a few minutes).</p>'}))) return;  // the warning already asked
+  startJob(`/api/session/${encodeURIComponent(current)}/ota`, {build});
+}
+async function runGate() {
+  const btn = document.querySelector('#gatebox button');
+  if (btn) { btn.disabled = true; btn.textContent = 'Comparing…'; }
+  const r = await api(`/api/session/${encodeURIComponent(current)}/gate`, {candidate: $('#g_cand').value, baseline: $('#g_base').value});
+  if (btn) { btn.disabled = false; btn.textContent = 'Compare'; }
+  if (r.error) { if (!r.static_report) await alertModal({title: 'Could Not Compare', html: `<p>${esc(r.error)}</p>`}); return; }
+  refresh();
+}
+
+async function ack() { await api(`/api/jobs/${watching}/ack`, {}); }
+async function cancelJob() {
+  if (!watching) return;
+  const job = watching;
+  if (await confirmModal({title: 'Cancel the Run in Progress?', danger: true, ok: 'Cancel Run', cancel: 'Keep Running',
+      html: '<p>Its partial recordings are discarded.</p>'})) await api(`/api/jobs/${job}/cancel`, {});
+}
+// Ask / Ask Again and Confirm Role Names wait for the session's running job: the server refuses them (409) rather
+// than cancel it. Rendered disabled while `watching`, and updated in place when a job starts or ends.
+const AGENT_WAIT_HINT = 'Available when the current run finishes';
+const agentBtnAttrs = () => `class="secondary agentbtn"${watching ? ' disabled' : ''}`;
+const agentHint = () => `<span class="hint agenthint" style="margin:0;${watching ? '' : 'display:none'}">${AGENT_WAIT_HINT}</span>`;
+function updateAgentButtons() {
+  document.querySelectorAll('.agentbtn').forEach(b => { b.disabled = !!watching; });
+  document.querySelectorAll('.agenthint').forEach(h => { h.style.display = watching ? '' : 'none'; });
+}
+function explain(name) { const sel = $('#llm_model'); startJob(`/api/session/${encodeURIComponent(current)}/explain`, {name, model: sel ? sel.value : undefined}, 'jobbox_llm'); }
+function resolveRoles(name) { startJob(`/api/session/${encodeURIComponent(current)}/resolve-roles`, {name}, 'jobbox_llm'); }
+async function discover() {
+  $('#discoverbox').innerHTML = `<div class="subpanel" id="jobbox"><h3 style="font-size:14px;margin:0 0 4px">Ask ${esc(agentName())} for the Names</h3>
+    <div class="hint">Describe the task, exercise it on the device for 10 s, and ${esc(agentName())} proposes the fields above (1-2 minutes; nothing changes on the device).</div>
+    <label>Describe the task <span class="err" id="err_desc"></span></label><input id="d_desc" placeholder='e.g. "touch read path", "audio output underruns", "camera preview frame"'>
+    <div class="row" style="margin-top:8px"><button onclick="discoverStart()">Start</button><button class="secondary" onclick="$('#discoverbox').innerHTML=''">Cancel</button></div></div>`;
+}
+async function discoverStart() {
+  const desc = $('#d_desc').value.trim();
+  $('#err_desc').textContent = desc ? '' : '* required'; $('#d_desc').classList.toggle('invalid', !desc);
+  if (!desc) return;
+  const r = await api('/api/discover', {description: desc, duration: 10});
+  if (!r.job) { if (!r.static_report) $('#err_desc').textContent = '* ' + (r.error || 'could not start'); return; }
+  watching = r.job;
+  const stages = ['describe','record trace','extract facts',agentName() + ' proposes'];
+  const poll = async () => {
+    const j = await api(`/api/jobs/${watching}`);
+    const box = $('#jobbox'); if (!box) return;
+    const log = j.log.join('\n');
+    let st = 1; if (/opened .*\.fxt/.test(log)) st = 2; if (/asking the agent/.test(log)) st = 3; if (j.state !== 'running') st = 4;
+    box.innerHTML = `<h3 style="font-size:14px;margin:0 0 4px">Ask ${esc(agentName())} for the Names <span class="pill">${({running:'Running',done:'Done',error:'Error'})[j.state]||j.state}</span></h3>
+      <div style="margin:6px 0 10px">${stages.map((s,i)=>`<span class="stage ${i<st?'done':i===st?'on':''}">${i+1} ${s}</span>`).join('')}</div>
+      ${j.prompt?`<div class="prompt">${esc(j.prompt)}<div class="muted" style="font-size:13px;margin-top:4px">Click when you are ready; recording starts immediately and lasts 10 s.</div><div style="margin-top:8px"><button onclick="ack()">I'm Doing It: Record Now</button></div></div>`:''}
+      ${j.state==='running'&&!j.prompt?`<div class="muted">${st===1?'recording…':st===2?'reading the trace…':esc(agentName()) + ' is reasoning over the trace facts (this is the slow part, ~1 min)…'}</div>`:''}
+      ${j.result?`<div style="margin-top:8px">${md(j.result.discover_md)}</div><div class="row" style="margin-top:8px"><button onclick="useDiscovered()">Use These Fields</button><span class="err" id="err_disc"></span><details><summary>Trace facts given to ${esc(agentName())}</summary><pre class="log">${esc(j.result.facts)}</pre></details></div>`:''}
+      ${j.error?`<div class="log" style="color:#ff9b9b">${esc(j.error)}</div>`:''}`;
+    if (j.result && j.result.discover_md) { const m = j.result.discover_md.match(/`((?:events|fidl|thread):[^`]+)`/); window._discovered = m ? m[1] : null; }
+    if (j.state === 'running') setTimeout(poll, 1500); else watching = null;
+  };
+  poll();
+}
+async function useDiscovered() {
+  if (!window._discovered) { $('#err_disc').textContent = '* no spec found; copy it manually'; return; }
+  const r = await api('/api/sessions/validate', {task: window._discovered});
+  setTask(r.task_fields);
+}
+
+function secsSince(hms) {  // "HH:MM:SS" (server local time) -> seconds elapsed, best effort
+  if (!hms) return 0; const [h,m,s] = hms.split(':').map(Number); const now = new Date();
+  let d = (now.getHours()*3600+now.getMinutes()*60+now.getSeconds()) - (h*3600+m*60+s); if (d < 0) d += 86400; return d;
+}
+// Animated "..." for labels that wait. Always three dots, two of them hidden in turn, so the label keeps the width of
+// its full text instead of resizing on every step; one timer animates every `.ldots` on the page.
+const DOTS = '<span class="ldots"><i>.</i><i>.</i><i>.</i></span>';
+function dots() { return DOTS; }
+setInterval(() => {
+  const n = 1 + Math.floor(Date.now() / 600) % 3;
+  document.querySelectorAll('.ldots').forEach(e => e.querySelectorAll('i').forEach((d, k) => { d.style.visibility = k < n ? 'visible' : 'hidden'; }));
+}, 200);
+// Makes https:// URLs in already-escaped text clickable (e.g. the README link in a build-dir error).
+function linkify(escaped) { return escaped.replace(/https:\/\/[^\s<]+[^\s<.,;:)]/g, u => `<a href="${u}" target="_blank">${u}</a>`); }
+// "Starting in N s" / "Recording for N s" count down in the browser. Polls arrive irregularly (the server is busy
+// while ffx traces), so they only fix when the status started: the earliest estimate wins, since network delay
+// only ever makes an estimate late.
+let cdState = null;  // {seq, start (performance.now() ms), rec, n}
+function countdownFrom(j) {
+  const m = j.state === 'running' && !j.prompt && (j.status || '').match(/^(Starting in|Recording for) (\d+) s/);
+  if (!m) { cdState = null; return null; }
+  const start = performance.now() - (j.status_age_s || 0) * 1000;
+  if (!cdState || cdState.seq !== j.status_seq) cdState = {seq: j.status_seq, start, rec: m[1] === 'Recording for', n: parseInt(m[2])};
+  else cdState.start = Math.min(cdState.start, start);
+  return cdState;
+}
+function countdownText(c) {
+  const t = (performance.now() - c.start) / 1000;
+  if (!c.rec) { const left = Math.ceil(c.n - t); return left > 0 ? `Starting in ${left} s…` : 'Starting the trace - keep going…'; }
+  // The server only says "Recording for N s" once ffx is recording, so this is the session's duration exactly.
+  const left = Math.ceil(c.n - t);
+  return left > 0 ? `Recording - keep going for ${left} s` : 'Saving the trace - you can stop';
+}
+// Redraws the countdown on every animation frame (cheap: text only changes once a second). Frames keep coming while
+// the mouse moves, unlike setTimeout, which Chrome delays behind input when the page has a mousemove handler.
+let cdFrame = null;
+function tickCountdown() {
+  if (cdFrame !== null || !cdState) return;
+  const frame = () => {
+    if (!cdState) { cdFrame = null; return; }
+    const el = $('#job_status');
+    if (el) { const txt = countdownText(cdState); if (el.textContent !== txt) el.textContent = txt; el.style.display = ''; }
+    cdFrame = requestAnimationFrame(frame);
+  };
+  cdFrame = requestAnimationFrame(frame);
+}
+function jobTitle(kind) {
+  if (kind.startsWith('measure ')) return 'Recording: ' + kind.split('/').pop();
+  if (kind.startsWith('analyze ')) return 'Analyzing: ' + kind.split('/').pop();
+  if (kind.startsWith('apply ')) return 'Applying Profile, Building & Updating Device (OTA)';
+  if (kind.startsWith('ota ')) return 'Building & Updating Device (OTA)';
+  if (kind.startsWith('explain ')) return 'Asking ' + agentName() + ' to Explain the Verdict';
+  if (kind.startsWith('resolve roles ')) return 'Confirming Role Names From Source (' + agentName() + ')';
+  return kind;
+}
+// The job's status line as HTML (it may end in animated dots), or null.
+function statusLine(j) {
+  const cd = countdownFrom(j);
+  if (j.state === 'done') {
+    if (j.kind.startsWith('apply ') || j.kind.startsWith('ota ')) return esc('OTA complete - device reconnected and profiles verified on device.');
+    return 'Finished.';
+  }
+  if (j.state === 'cancelled') return 'Cancelled.';
+  if (j.state === 'error') return 'Failed - see the details below.';
+  if (j.prompt) return null;
+  let st = j.status || 'Setting up, please wait…';
+  if (cd) return esc(countdownText(cd));
+  if (st.startsWith('Cancel')) return esc(st);
+  if (st.startsWith('Starting the trace')) return 'Starting the trace - keep going…';
+  if (st.startsWith('Done')) return 'Done - you can stop.';
+  if (st.startsWith('Analyzing')) return 'Analyzing traces' + dots();
+  const base = st.replace(/(?:\.\.\.|…)$/, '');
+  return esc(base) + dots();
+}
+function substepsHtml(j) {
+  if (!j.kind.startsWith('measure ') || !window._capturePlan) return '';
+  const caps = j.captures || {};
+  return window._capturePlan.map(c => { const st = caps[c.tag] === 'done' ? 'done' : caps[c.tag] === 'start' ? 'on' : (j.state !== 'running' ? 'done' : ''); return `<div class="sub ${st}"><span>${st==='done'?'✓':st==='on'?'▶':'·'}</span> ${esc(c.label)}</div>`; }).join('');
+}
+function pbarHtml(j) {
+  if (j.state !== 'running' || !j.progress) return '';
+  return `<div class="pbar"><div style="width:${Math.round(100*(j.progress.k+0.5)/j.progress.n)}%"></div></div><div class="muted" style="font-size:12px">${esc(j.progress.label)} · step ${j.progress.k+1} of ${j.progress.n}</div>`;
+}
+// A known failure (device.UserFacingError.info), laid out like the pre-build warning: what happened,
+// the likely cause (only when zpo has one), what to try, and the raw tool output folded away.
+function errorInfoHtml(e) {
+  const code = s => `<code>${esc(s)}</code>`;
+  return `<div class="errbox">
+    <div class="et">${esc(e.title)}${e.reason ? `: <span class="mono">${esc(e.reason)}</span>` : ''}</div>
+    ${e.cause ? `<p><b>Likely cause:</b> ${esc(e.cause)}</p>` : ''}
+    ${e.fix_lead ? `<p>${esc(e.fix_lead)}<br>${(e.fix || []).map(code).join(` ${esc(e.fix_join || 'or')} `)}${e.help_url ? ` (<a href="${esc(e.help_url)}" target="_blank">Prerequisites</a>)` : ''}</p>` : ''}
+    ${(e.output || []).length ? `<details><summary class="muted">${esc(e.output_label || 'Output')}</summary><div class="log">${esc(e.output.join('\n'))}</div></details>` : ''}
+  </div>`;
+}
+function renderJobCard(j, wasOpen) {
+  const sl = statusLine(j);
+  const isMeasure = j.kind.startsWith('measure ');
+  const isOtaDone = j.state === 'done' && (j.kind.startsWith('apply ') || j.kind.startsWith('ota '));
+  const subst = isMeasure && window._capturePlan ? `<div class="substeps" id="job_substeps">${substepsHtml(j)}</div>` : '';
+  return `<div class="card" id="jobcard_${esc(j.id)}" data-state="${esc(j.state)}" data-prompt="${j.prompt?'1':'0'}" style="border-color:${j.state==='done'?'var(--ok)':j.state==='error'?'var(--thr)':'var(--acc)'}"><h2>${esc(jobTitle(j.kind))} <span class="pill ${j.state==='done'?'ok':j.state==='error'?'bad':''}">${({running:'Running',done:'Done',error:'Error',cancelled:'Cancelled'})[j.state]||j.state}</span></h2>
+    ${subst}
+    ${j.prompt?`<div class="prompt">${esc(j.prompt)}<div class="muted" style="font-size:13px;margin-top:4px">Start doing it, then click - recording begins a moment after the click and the page will count down.</div><div style="margin-top:8px"><button onclick="ack()">I'm Doing It - Go</button></div></div>`:''}
+    <div id="job_status" style="font-size:18px;margin:8px 0;${sl?'':'display:none'}">${sl||''}</div>
+    ${isOtaDone?`<div class="row" style="margin:10px 0"><button onclick="gotoStep(2)">Go to Step 2 (Measure) →</button></div>`:''}
+    <div id="job_pbar">${pbarHtml(j)}</div>
+    <details id="job_details" ${wasOpen?'open':''}><summary class="muted">Details (commands run)</summary><div class="log" id="job_log">${esc((j.log||[]).join('\n'))}</div></details>
+    ${j.state==='running'?`<div style="margin-top:8px"><button class="secondary" onclick="cancelJob()">Cancel</button></div>`:''}
+    ${j.error_info ? errorInfoHtml(j.error_info) : j.error?`<div style="color:#ff9b9b;margin-top:8px;white-space:pre-wrap">${linkify(esc(j.error.split('\nTraceback')[0]))}</div>${j.error.includes('\nTraceback')?`<details><summary class="muted">Traceback</summary><div class="log">${esc('Traceback'+j.error.split('\nTraceback').slice(1).join('\nTraceback'))}</div></details>`:''}`:''}</div>`;
+}
+async function pollJobs() {
+  if (!watching) return;
+  let j;
+  try { j = await api(`/api/jobs/${watching}`); } catch (e) { setTimeout(pollJobs, 1500); return; }  // transient fetch error: keep polling
+  if (!j.state) { watching = null; refresh(); return; }           // job unknown (server restarted)
+  const box = jobBox(); if (!box) return;
+  const existing = box.querySelector(`#jobcard_${j.id}`);
+  if (existing && existing.dataset.state === j.state && existing.dataset.prompt === (j.prompt ? '1' : '0')) {
+    const sl = statusLine(j);
+    const stEl = existing.querySelector('#job_status');
+    if (stEl && stEl.innerHTML !== (sl || '')) stEl.innerHTML = sl || '';
+    if (stEl) stEl.style.display = sl ? '' : 'none';
+    const subEl = existing.querySelector('#job_substeps');
+    if (subEl) subEl.innerHTML = substepsHtml(j);
+    const pbEl = existing.querySelector('#job_pbar');
+    if (pbEl) pbEl.innerHTML = pbarHtml(j);
+    const logEl = existing.querySelector('#job_log');
+    const len = (j.log || []).length;
+    if (logEl && box._logLen !== len) {
+      const atBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 30;
+      logEl.textContent = (j.log || []).join('\n');
+      box._logLen = len;
+      if (atBottom) logEl.scrollTop = logEl.scrollHeight;
+    }
+  } else {
+    const wasOpen = !!(box.querySelector('details') && box.querySelector('details').open);
+    box.innerHTML = renderJobCard(j, wasOpen);
+    box._logLen = (j.log || []).length;
+    const det = box.querySelector('#job_details'), logEl = box.querySelector('#job_log');
+    if (logEl) logEl.scrollTop = logEl.scrollHeight;
+    if (det && logEl) det.addEventListener('toggle', () => { if (det.open) logEl.scrollTop = logEl.scrollHeight; });
+  }
+  tickCountdown();
+  if (j.state === 'running') setTimeout(pollJobs, 500);
+  else {
+    const kind = j.kind; watching = null; watchingBox = null; updateAgentButtons(); pollDevice();
+    if (j.state === 'done' && (kind.startsWith('apply ') || kind.startsWith('ota '))) return;
+    if (j.state === 'error') return;
+    if (j.state === 'done' && kind.startsWith('measure ')) {
+      const mname = kind.split('/').pop();
+      viewMeas = mname;
+      view = 3;
+    }
+    refresh();
+  }
+}
+
+// Step 3 (Results): the analysis, proposed profiles and gate.
+// (a) "Did it get faster?": every analyzed measurement on one scale, idle/stress toggle, gate checks.
+// (b) Measurement tabs (default: latest) driving 1. tail, 2. work vs. capacity (+ apply), 3. slowest job,
+//     4. what to do next (the agent, Build + OTA).
+let anData = null, anCond = {session: null, c: 'stress'};
+const COND_LABEL = {idle: 'Idle system', stress: 'Every core busy'};
+
+// "driver-host-#input/fdf-dispatcher-thread-1:fuchsia[40532]" -> {proc:"#input", th:"dispatcher-1", koid:"40532"}
+function threadParts(label) {
+  const m = String(label).match(/^([^/]+)\/([^\[]+?)(?::[^\[]*)?(?:\[(\d+)\])?$/);
+  if (!m) return {proc: String(label), th: '', koid: ''};
+  return {proc: m[1].replace(/^driver-host-/, '').replace(/\.cm$/, ''),
+          th: m[2].replace(/^fdf-dispatcher-thread-/, 'dispatcher-').replace(/^initial-thread$/, 'main'), koid: m[3] || ''};
+}
+// Short display names, e.g. "#input · touch". The role is zpo's best guess (from the parameters in effect and
+// the names); without one the thread name is used. Collisions get the thread, then the koid, appended.
+function shortNames(labels, proposals) {
+  const role = Object.fromEntries((proposals || []).map(p => [p.label, p.roles && p.roles[0] ? p.roles[0].role : null]));
+  const out = {};
+  for (const l of labels) {
+    const t = threadParts(l), r = role[l], leaf = r ? r.split('.').pop() : null;
+    const name = leaf && leaf !== t.proc ? leaf : t.th;
+    out[l] = {a: t.th || leaf ? `${t.proc} · ${name}` : t.proc, t, role: r,
+              title: `${l}${r ? `\nlikely role: ${r} (guessed from the parameters in effect and the names; confirm before applying)` : ''}`};
+  }
+  for (const extra of ['th', 'koid']) {
+    const cnt = {}; Object.values(out).forEach(x => cnt[x.a] = (cnt[x.a] || 0) + 1);
+    for (const l of labels) if (cnt[out[l].a] > 1 && out[l].t[extra] && !out[l].a.endsWith(out[l].t[extra]) && !out[l].a.includes(`(${out[l].t[extra]})`))
+      out[l].a += ` (${out[l].t[extra]})`;
+  }
+  return out;
+}
+// Rich hover details: any element with data-tip="<escaped html>" shows it in a floating card.
+const tipAttr = html => `data-tip="${esc(html)}"`;
+const tipRows = rows => `<table class="tipt">${rows.filter(Boolean).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</table>`;
+function initTips() {
+  if (window._tipInit) return; window._tipInit = true;
+  const el = document.createElement('div'); el.id = 'tip'; document.body.appendChild(el);
+  document.addEventListener('mousemove', e => {
+    const t = e.target.closest && e.target.closest('[data-tip]');
+    if (!t) { el.style.display = 'none'; return; }
+    if (el._src !== t) { el.innerHTML = t.dataset.tip; el._src = t; }
+    el.style.display = 'block';
+    const r = el.getBoundingClientRect(), pad = 14;
+    let x = e.clientX + pad, y = e.clientY + pad;
+    if (x + r.width > window.innerWidth - 8) x = e.clientX - r.width - pad;
+    if (y + r.height > window.innerHeight - 8) y = e.clientY - r.height - pad;
+    el.style.left = Math.max(8, x) + 'px'; el.style.top = Math.max(8, y) + 'px';
+  });
+  document.addEventListener('scroll', () => { el.style.display = 'none'; }, true);
+}
+const BSHORT = {run: 'run', preempted: 'preempted', wake_latency: 'wait for CPU', throttled: 'throttled', hw_wait: 'HW wait', blocked_unknown: 'unknown'};
+// Text inside a bar segment, sized to what fits: full label, just the value, or nothing.
+function inLabel(pct, full, brief) { return pct >= 9 ? full : pct >= 4.5 ? brief : ''; }
+
+// A gate result always carries its status (improved | neutral | regressed).
+function gateSt(g) { return g ? g.status : null; }
+function gateStatus(d) { return gateSt(d.vs_baseline); }
+function gatePill(st) { return st ? ` <span class="pill ${st==='improved'?'ok':st==='regressed'?'bad':''}">${st.toUpperCase()}</span>` : ''; }
+// The gate appends every number to the headline; they are in the comparison card, so keep one sentence.
+function shortHeadline(v) { return v.headline.replace(/\s*\([^)]*\d[^)]*\)\s*/g, ' ').replace(/\s+\./g, '.').trim(); }
+
+function pctRow({a, b = '', tip = '', p50, p90, p99, max, markers = [], stats}) {
+  const w = v => Math.min(100, Math.max(0, v / max * 100)).toFixed(2);
+  const t = tip ? tipAttr(tip) : '';
+  return `<div class="rrow" ${t}><div class="rl"><div class="a">${a}</div>${b ? `<div class="b">${b}</div>` : ''}</div>
+    <div class="rbar">
+      <div class="pb" style="width:${w(p99)}%;background:var(--run);opacity:.85"></div>
+      <div class="pb" style="width:${w(p90)}%;background:#6d63f0"></div>
+      <div class="pb" style="width:${w(p50)}%;background:var(--sched)"></div>
+      ${markers.map(m => `<div class="mk ${m.dash?'dash':''}" style="left:${w(m.at)}%;${m.dash?'':`background:${m.color}`}">${m.label ? `<span class="mkl" style="color:${m.dash ? 'var(--ok)' : m.color}">${esc(m.label)}</span>` : ''}</div>`).join('')}
+    </div><div class="rs">${stats}</div></div>`;
+}
+const PCT_LEGEND = `<span><i style="background:var(--sched)"></i>p50</span><span><i style="background:#6d63f0"></i>p90</span><span><i style="background:var(--run)"></i>p99</span>`;
+
+function responseRows(ms, cond, s, base) {
+  const CL = COND_LABEL[cond] || cond, bc = (base.d.by_condition || {})[cond] || {};
+  const pct = (a, b) => b ? Math.round((a - b) / b * 100) : 0, sgn = v => (v > 0 ? '+' : '') + v;
+  const win = s.window_ns;
+  const max = Math.max(1, win || 0, ...ms.map(m => ((m.d.by_condition || {})[cond] || {}).p99 || 0)) * (win ? 1.16 : 1);
+  return `<div class="legend" style="margin:10px 0 2px">${PCT_LEGEND}${win ? `<span><i class="ln" style="background:var(--thr)"></i>response-time target ${esc(s.window)}</span>` : ''}</div>
+    <div class="rgrid">${ms.map(m => { const c = (m.d.by_condition || {})[cond] || {p50: 0, p90: 0, p99: 0};
+      const dd = m === base ? '' : ` <b class="${c.p90 < bc.p90 ? 'good' : 'bad'}">${sgn(pct(c.p90, bc.p90))}%</b>`;
+      const caps = (m.d.captures || []).filter(x => x.condition === cond);
+      const dl = (x, y) => m === base ? '' : ` <span class="${x < y ? 'good' : 'bad'}">${sgn(pct(x, y))}%</span>`;
+      const st = gateStatus(m.d);
+      const tip = `<b>${measLabel(m.name)} · ${CL}</b>${st ? ` <span class="pill ${st==='improved'?'ok':st==='regressed'?'bad':''}">${st.toUpperCase()}</span>` : ''}` + tipRows([
+        ['p50', `${us(c.p50)} µs${dl(c.p50, bc.p50)}`], ['p90', `${us(c.p90)} µs${dl(c.p90, bc.p90)}`], ['p99', `${us(c.p99)} µs${dl(c.p99, bc.p99)}`],
+        ['jobs', `${(c.n || 0).toLocaleString()} (${caps.length} run${caps.length === 1 ? '' : 's'} pooled)`],
+        ...caps.map(x => [esc(x.tag), `p50 ${us(x.p50)} · p90 ${us(x.p90)} · p99 ${us(x.p99)} µs · ${x.jobs} jobs`]),
+        ['verdict', esc(shortHeadline(m.d.verdict))]]);
+      return pctRow({a: `${measLabel(m.name)}${gatePill(st)}`, tip,
+        p50: c.p50, p90: c.p90, p99: c.p99, max, markers: win ? [{at: win, color: 'var(--thr)', label: `target ${s.window}`}] : [],
+        stats: `<span style="color:var(--sched)">${us(c.p50)}</span> / <span style="color:#a39cff">${us(c.p90)}</span> / <b style="color:var(--run)">${us(c.p99)} µs</b>${dd}`}); }).join('')}</div>`;
+}
+
+async function renderAnalyze() {
+  const box = $('#analyze'); if (!box || !anData) return;
+  const s = anData.session || {}, ms = anData.ms, base = ms[0], latest = ms[ms.length - 1], multi = ms.length > 1;
+  const conds = [...new Set(ms.flatMap(m => Object.keys(m.d.by_condition || {})))].sort((x, y) => (x === 'idle' ? -1 : y === 'idle' ? 1 : 0));
+  if (!conds.includes(anCond.c)) anCond.c = conds[conds.length - 1] || 'idle';
+  const cond = anCond.c, CL = COND_LABEL[cond] || cond;
+  const bc = (base.d.by_condition || {})[cond] || {}, lc = (latest.d.by_condition || {})[cond] || {};
+  const pct = (a, b) => b ? Math.round((a - b) / b * 100) : 0;
+  const sgn = v => (v > 0 ? '+' : '') + v;
+  let h = '';
+
+  // KPI strip (latest measurement vs. baseline)
+  const lsh = latest.d.verdict.shares_tail || {}, top = Object.keys(lsh).sort((x, y) => lsh[y] - lsh[x])[0];
+  const kpi = (l, v, sub, cls = '') => `<div class="kpi"><div class="l">${l}</div><div class="v ${cls}">${v}</div><div class="s">${sub}</div></div>`;
+  h += `<div class="kpis">
+    ${kpi(`p90 response · ${CL}`, `${us(lc.p90 || 0)} µs`, multi ? `${measLabel(latest.name)}: <b>${sgn(pct(lc.p90, bc.p90))}%</b> vs. baseline (${us(bc.p90 || 0)} µs)` : 'baseline', multi ? (lc.p90 < bc.p90 ? 'good' : 'bad') : '')}
+    ${kpi(`p99 response · ${CL}`, `${us(lc.p99 || 0)} µs`, multi ? `<b>${sgn(pct(lc.p99, bc.p99))}%</b> vs. baseline (${us(bc.p99 || 0)} µs)` : 'baseline', multi ? (lc.p99 < bc.p99 ? 'good' : 'bad') : '')}
+    ${kpi('Biggest share of the p90 tail', top ? `${top} ${Math.round(lsh[top] * 100)}%` : '-', top && BUCKETS[top] ? `${BUCKETS[top].what} → ${BUCKETS[top].fix}` : '')}
+    ${kpi('Jobs measured', (lc.n || 0).toLocaleString(), `${measLabel(latest.name)} · ${CL} · ${s.repeats || '?'} run${s.repeats > 1 ? 's' : ''} pooled`)}
+  </div>`;
+
+  // (a) Did it get faster? (only shown once there is a candidate to compare against baseline)
+  if (multi) {
+    h += `<div class="card"><div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div><h2 style="margin-bottom:2px">Did It Get Faster? Response Time per Measurement</h2><div class="muted" style="font-size:13px">End-to-end task latency across measurements.</div></div>
+        ${conds.length > 1 ? `<div class="segc">${conds.map(c => `<button class="${c === cond ? 'on' : ''}" onclick="anCond.c=${jsq(c)};renderAnalyze()">${esc(COND_LABEL[c] || c)}</button>`).join('')}</div>` : ''}</div>
+      ${responseRows(ms, cond, s, base)}
+      ${(() => { const g = latest.d.vs_baseline, st = gateStatus(latest.d); if (!g) return '';
+          const isManual = s.load && s.load.mode === 'manual';
+          const okBody = isManual
+            ? "The target got faster beyond bootstrap noise and no other deadline thread's p99 wait regressed." + manualSampleNote(g.neutral)
+            : "The target got faster beyond bootstrap noise and nothing else regressed (load throughput, every deadline thread's p99 wait).";
+          return `<div class="callout"><b>Gate: ${measLabel(latest.name)} is ${st.toUpperCase()} vs. baseline.</b> ${st === 'improved'
+            ? esc(okBody)
+            : st === 'regressed' ? `<span style="color:#ff9b9b">${esc(regressionSummary(g.regressions))}</span> The numbers are below.` : esc('No significant change in either direction.' + manualSampleNote(g.neutral))}</div>`; })()}
+      ${gateDetails(anData, latest)}
+    </div>`;
+  }
+
+  // (b) Measurement tabs
+  if (!ms.some(m => m.name === viewMeas)) viewMeas = latest.name;
+  h += `<div class="mtabs">${ms.map(m => `<button class="${m.name === viewMeas ? 'on' : ''}" onclick="viewMeas=${jsq(m.name)};renderAnalyze()">${measLabel(m.name)}${gatePill(gateStatus(m.d))}</button>`).join('')}</div>`;
+  const M = ms.find(m => m.name === viewMeas), d = M.d, v = d.verdict, sh = v.shares_tail || {};
+  const bk = Object.keys(BUCKETS).filter(k => sh[k]);
+  const tip = k => `${k}: ${BUCKETS[k].what} → ${BUCKETS[k].fix}`;
+
+  // 1. Where does the p90 tail go?
+  const f0 = (v.findings || [])[0], nf = (v.findings || []).length;
+  h += `<div class="card"><h2>1. Where Does the p90 Tail Go?</h2>
+    <div class="verdict ${esc(v.primary)}" style="margin-bottom:12px">${esc(shortHeadline(v))}</div>
+    <div class="bar lbar">${bk.map(k => { const pc = sh[k] * 100, bs = (d.buckets || {})[k] || {};
+      const t = `<b>${k}</b> - ${pc.toFixed(1)}% of the p90 tail` + tipRows([['doing', esc(BUCKETS[k].what)], ['shrink it with', esc(BUCKETS[k].fix)],
+        bs.n ? ['per job', `p50 ${us(bs.p50)} · p90 ${us(bs.p90)} · p99 ${us(bs.p99)} · max ${us(bs.max)} µs`] : null]);
+      return `<div ${tipAttr(t)} style="width:${pc}%;background:${COLORS[k]}"><span>${inLabel(pc, `${BSHORT[k]} ${Math.round(pc)}%`, `${Math.round(pc)}%`)}</span></div>`; }).join('')}</div>
+    <div class="legend" style="margin-top:8px">${bk.map(k => `<span ${tipAttr(`<b>${k}</b>: ${esc(BUCKETS[k].what)}<br>shrink it with ${esc(BUCKETS[k].fix)}`)}><i style="background:${COLORS[k]}"></i>${k} ${Math.round(sh[k] * 100)}%</span>`).join('')}</div>
+    ${f0 ? `<div class="callout"><b>${esc(f0.title)}.</b> ${nf > 1 ? `${nf - 1} more finding${nf > 2 ? 's' : ''} under More details below.` : 'Details under More details below.'}</div>` : ''}
+    ${runFunctionsDetails(d, s)}
+  </div>`;
+
+  // 2. Does each thread's work fit its capacity? (+ apply the proposed capacities when the verdict recommends it)
+  window._proposals = d.proposals || [];
+  const anyChange = window._proposals.some(p => p.changed);
+  const props = window._proposals.filter(p => p.work_per_period_ns && p.period_us);
+  const applyOn = Boolean(v.recommend_profiles && anyChange && props.length);
+  if (props.length) {
+    const showProp = p => Boolean(v.recommend_profiles && p.changed);
+    const pn = shortNames(props.map(p => p.label), d.proposals);
+    const pmax = Math.max(1, ...props.map(p => Math.max(p.work_per_period_ns.p99 || 0, p.existing ? p.existing[0] : 0, showProp(p) ? p.capacity_us * 1e3 : 0))) * 1.16;
+    const over = props.filter(p => p.existing && p.work_per_period_ns.p99 > p.existing[0]);
+    const capLesson = safeUrl(lessons.links && lessons.links.capacity);
+    h += `<div class="card"><h2 style="display:flex;align-items:baseline;gap:10px">2. Does Each Thread's Work Fit Its Capacity? ${capLesson ? `<a href="${esc(capLesson)}" target="_blank" style="font-size:12px;font-weight:400;color:#6b7385">Why? → lesson 4.1</a>` : ''}</h2>
+      <div class="legend" style="margin-bottom:2px">${PCT_LEGEND}<span><i class="ln" style="background:var(--thr)"></i>capacity (exceeded)</span><span><i class="ln" style="background:var(--ok)"></i>capacity (fits)</span>${props.some(showProp) ? '<span><i class="dl"></i>proposed capacity</span>' : ''}</div>
+      <div class="rgrid">${props.map(p => { const w = p.work_per_period_ns, cap = p.existing ? p.existing[0] : null, ex = cap && w.p99 > cap, nm = pn[p.label], sp = showProp(p);
+        const mk = []; if (cap) mk.push({at: cap, color: ex ? 'var(--thr)' : 'var(--ok)', label: `${cap / 1e3} µs`});
+        if (sp) mk.push({at: p.capacity_us * 1e3, dash: true, label: `${p.capacity_us} µs`});
+        const hr = cap ? cap / w.p99 : null;
+        const tip = `<b>${esc(nm.a)}</b><div class="muted mono" style="font-size:11px;margin-bottom:4px">${esc(p.label)}</div>` + tipRows([
+          nm.role ? ['likely role', `<span class="mono">${esc(nm.role)}</span> <span class="muted">(guess; confirm before applying)</span>`] : null,
+          ['current', cap ? `${cap / 1e3} µs / ${p.existing[1] / 1e3} µs (${Math.round(100 * cap / p.existing[1])}% util)` : 'no deadline profile'],
+          sp ? ['proposed', `<b class="good">${p.capacity_us} µs / ${p.period_us} µs</b> (${Math.round(100 * p.utilization)}% util), CPUs ${(p.affinity || []).join(', ')}`] : null,
+          ['work / period', `p50 ${us(w.p50 || 0)} · p90 ${us(w.p90 || 0)} · p99 ${us(w.p99 || 0)} · max ${us(w.max || 0)} µs`],
+          hr ? ['headroom', `<span class="${hr < 1 ? 'bad' : ''}">${hr.toFixed(2)}× (capacity ÷ p99 work)</span>`] : null,
+          ...(p.notes || []).map((n, i) => [i ? '' : 'notes', esc(n)])]);
+        return pctRow({a: esc(nm.a), tip, b: `${cap ? `${cap / 1e3} µs / ${p.existing[1] / 1e3} µs` : 'no deadline profile'}${sp ? ` → <b class="good">${p.capacity_us} µs</b>` : ''}`,
+          p50: w.p50 || 0, p90: w.p90 || 0, p99: w.p99 || 0, max: pmax, markers: mk,
+          stats: `${us(w.p50 || 0)} / ${us(w.p90 || 0)} / <b style="color:var(--run)">${us(w.p99 || 0)} µs</b>${hr ? ` <span class="${hr < 1 ? 'bad' : 'muted'}">(${hr.toFixed(2)}×)</span>` : ''}`}); }).join('')}</div>
+      <div class="callout">${over.length ? `<b>${over.map(p => esc(pn[p.label].a)).join(', ')}: p99 work is larger than the capacity</b> (red line inside the bar). The thread runs out of budget mid-period and waits for the next one; that is the <b>throttled</b> share in section 1.${props.some(showProp) ? ' The dashed line is the capacity zpo proposes; apply it below.' : ''}`
+        : `<b>Every thread's p99 work fits inside its current capacity</b> (green line right of the bar). The profiles are not what limits this chain.`}</div>
+      ${applyOn ? applyPanel(d, M.name) : ''}
+    </div>`;
+  }
+
+  // 3. Anatomy of the slowest job
+  const tl = d.slowest_job;
+  if (tl) {
+    const tot = Math.max(tl.total_us || 0, 1e-6), rows = tl.segments;
+    const threads = [...new Set(rows.filter(x => x.bucket !== 'blocked_on').map(x => x.thread))];
+    const tn = shortNames([...new Set([...threads, ...rows.filter(x => x.bucket === 'blocked_on').map(x => x.detail)])], d.proposals);
+    const prof = Object.fromEntries((d.proposals || []).map(p => [p.label, p.existing]));
+    const zoomed = tl.t0_ns != null;
+    const pfTip = zoomed ? 'Opens the capture in ui.perfetto.dev, zoomed to this job with its threads pinned. The trace is streamed from your machine; nothing is uploaded.'
+      : 'Opens the capture in ui.perfetto.dev with this job\'s threads pinned. Compute the verdict again (step 2) to also zoom to the job. Nothing is uploaded.';
+    h += `<div class="card"><h2 style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">3. Anatomy of the Slowest Job - ${tot.toFixed(0)} µs ${isStatic() ? '' : `<a href="#" class="pflink" ${tipAttr(esc(pfTip))} onclick="openSlowestInPerfetto(${jsq(M.name)});return false"><i class="pfi"></i>Open this job in Perfetto ↗</a>`}</h2>
+      <div class="rgrid two"><div class="axis" style="align-self:end">Thread (capacity / period)</div><div><div style="text-align:center;font-size:11px;color:var(--muted);margin-bottom:2px">Elapsed time</div><div class="axis"><span>0</span><span>${(tot / 4).toFixed(0)}</span><span>${(tot / 2).toFixed(0)}</span><span>${(tot * 3 / 4).toFixed(0)}</span><span>${tot.toFixed(0)} µs</span></div></div>
+      ${threads.map(t => { const e = prof[t], nm = tn[t];
+        return `<div class="rrow" style="padding:6px 0;border:0"><div class="rl" ${tipAttr(`<b>${esc(nm.a)}</b><div class="mono muted" style="font-size:11px">${esc(t)}</div>${nm.role ? `<div class="muted" style="font-size:12px;margin-top:4px">likely role ${esc(nm.role)} (guess)</div>` : ''}`)}><div class="a">${esc(nm.a)}</div><div class="b">${e ? `${e[0] / 1e3} µs / ${e[1] / 1e3} µs` : 'no deadline profile seen'}</div></div>
+          <div class="lane">${rows.filter(x => x.thread === t).map(x => { const wp = Math.max(.25, Math.min(100, x.dur_us / tot * 100)), lp = Math.max(0, Math.min(100 - wp, x.t0_us / tot * 100));
+            const blk = x.bucket === 'blocked_on', on = blk ? (tn[x.detail] || {a: x.detail}).a : '';
+            const what = blk ? `waiting on ${on}` : x.bucket === 'hw_wait' ? (x.detail ? `HW wait (${x.detail})` : 'HW wait') : BSHORT[x.bucket];
+            const tp = `<b>${esc(what)}</b> - ${x.dur_us.toFixed(1)} µs` + tipRows([['thread', esc(nm.a)], ['from', `${x.t0_us.toFixed(1)} µs → ${(x.t0_us + x.dur_us).toFixed(1)} µs`],
+              ['share of job', `${(x.dur_us / tot * 100).toFixed(1)}%`], x.cpu >= 0 ? ['CPU', String(x.cpu)] : null,
+              blk ? ['woken by', `<span class="mono">${esc(x.detail)}</span>`] : x.detail ? ['detail', esc(x.detail)] : null,
+              !blk && BUCKETS[x.bucket] ? ['shrink it with', esc(BUCKETS[x.bucket].fix)] : null]);
+            const lbl = inLabel(wp, blk ? `→ ${on}` : `${what} ${x.dur_us.toFixed(0)} µs`, blk ? '' : `${x.dur_us.toFixed(0)} µs`);
+            return `<div class="s ${blk ? 'blk' : ''}" ${tipAttr(tp)} style="left:${lp.toFixed(3)}%;width:${wp.toFixed(3)}%;${blk ? '' : `background:${COLORS[x.bucket]}`}"><span>${esc(lbl)}</span></div>`; }).join('')}</div></div>`; }).join('')}</div>
+      <div class="legend" style="margin-top:10px">${Object.keys(BUCKETS).map(k => `<span ${tipAttr(`<b>${k}</b>: ${esc(BUCKETS[k].what)}<br>shrink it with ${esc(BUCKETS[k].fix)}`)}><i style="background:${COLORS[k]}"></i>${k}</span>`).join('')}<span><i class="blkk"></i>blocked, waiting on another thread</span></div>
+    </div>`;
+  }
+
+  // 4. What to do next
+  h += nextSteps(d, M.name);
+
+  // More details (findings, color meanings, captures & traces, proposals, full report)
+  const traces = Object.fromEntries((d.traces || []).map(t => [t.tag, t]));
+  const traceCell = c => {
+    const t = traces[c.tag];
+    if (!t || !t.exists) return '<span class="muted">-</span>';
+    const dl = `<a class="muted" style="margin-left:8px" href="#" onclick="downloadTrace(${jsq(M.name)},${jsq(c.tag)});return false" title="Download the raw .fxt (open it locally in ui.perfetto.dev; nothing is uploaded)">.fxt</a>`;
+    const local = `<button class="secondary btn-s" style="margin-right:8px" title="Streams this capture from your machine into ui.perfetto.dev; nothing is uploaded. The Perfetto tab cannot download it: use the .fxt link." onclick="openInPerfetto(${jsq(M.name)},${jsq(c.tag)})">Open in Perfetto (local)</button>`;
+    return local + (t.url ? `<a href="${esc(t.url)}" target="_blank">Open in Trace Viewer ↗</a>`
+                  : `<button class="secondary btn-s" title="Uploads this capture with 'ffx trace upload' (your own credentials) to the internal Fuchsia Trace Viewer and opens it. The link is remembered." onclick="uploadTrace(${jsq(M.name)},${jsq(c.tag)},this)">Open in Trace Viewer</button>`) + dl;
+  };
+  h += `<div class="card"><details><summary>More details… (findings, what the colors mean, captures &amp; traces, profile proposals, full report)</summary>
+    <h3 style="font-size:14px;margin:14px 0 6px">Findings</h3>
+    ${(v.findings || []).map(f => `<div class="finding ${esc(f.severity)}"><div class="title">${esc(f.title)}</div><div>${esc(f.detail)}</div>${safeUrl(f.lesson) ? `<a href="${esc(safeUrl(f.lesson))}" target="_blank" class="muted">why? → lesson</a>` : ''}</div>`).join('') || '<div class="muted">None.</div>'}
+    <h3 style="font-size:14px;margin:14px 0 6px">What the Colors Mean</h3>
+    <table><tr><th>bucket</th><th>what the chain was doing</th><th>what shrinks it</th></tr>${Object.keys(BUCKETS).map(k => `<tr><td><span class="legend"><span style="margin:0"><i style="background:${COLORS[k]}"></i>${k}</span></span></td><td>${esc(BUCKETS[k].what)}</td><td>${esc(BUCKETS[k].fix)}</td></tr>`).join('')}</table>
+    <h3 style="font-size:14px;margin:14px 0 6px">Captures</h3>
+    <table><tr><th>capture</th><th>condition</th><th class="num">jobs</th><th class="num">p50 µs</th><th class="num">p90 µs</th><th class="num">p99 µs</th><th>verdict</th><th>trace</th></tr>
+    ${d.captures.map(c => c.jobs ? `<tr><td>${esc(c.tag)}</td><td>${esc(c.condition)}</td><td class="num">${c.jobs}</td><td class="num">${us(c.p50)}</td><td class="num">${us(c.p90)}</td><td class="num">${us(c.p99)}</td><td>${esc(c.verdict)}</td><td>${traceCell(c)}</td></tr>`
+      : `<tr><td>${esc(c.tag)}</td><td>${esc(c.condition)}</td><td class="num">0</td><td colspan="4" style="color:var(--thr)">The task did not run during this recording (nothing to analyze). Re-measure in step 2 and make sure the task is being exercised.</td><td>${traceCell(c)}</td></tr>`).join('')}
+    ${(d.traces || []).filter(t => t.profile).map(t => { const rf = (d.run_functions || {})[t.condition] || {};
+      return `<tr><td>${esc(t.tag)} <span class="pill">CPU profile</span></td><td>${esc(t.condition)}</td><td class="num">${rf.jobs != null ? rf.jobs : '-'}</td><td colspan="4" class="muted">Kept out of the comparison (sampling adds overhead). ${rf.samples ? `${rf.samples.toLocaleString()} samples on the slowest jobs' run time.` : esc(rf.error || '')}</td><td>${traceCell(t)}</td></tr>`; }).join('')}</table>
+    ${window._proposals.length ? `<h3 style="font-size:14px;margin:14px 0 6px">Profile Proposals</h3>${proposalsTable(d)}
+      ${!applyOn && anyChange ? `<div class="muted" style="margin:10px 0 4px">Not recommended for this verdict: change the work first. You can still apply a proposal; the comparison decides.</div>${applyPanel(d, M.name)}` : ''}` : ''}
+    <h3 style="font-size:14px;margin:14px 0 6px">Full Report (Markdown)</h3><pre class="log" style="max-height:600px">${esc(d.report_md)}</pre>
+  </details></div>`;
+
+  box.innerHTML = h;
+  initTips();
+  window._proposals.forEach((p, i) => { const sel = $(`#role_${i}`); if (sel) sel.onchange = () => { $(`#rolex_${i}`).style.display = sel.value === '' ? '' : 'none'; }; });
+  if (!watching) {  // re-show the last Apply / OTA result so its "Go to Measure" stays reachable
+    const js = await api('/api/jobs');
+    const last = js.filter(x => x.session === current).pop();
+    if (last && last.state === 'done' && (last.kind.startsWith('apply ') || last.kind.startsWith('ota '))) {
+      const full = await api(`/api/jobs/${last.id}`);
+      const jb = $('#jobbox2'); if (jb && !full.error) jb.innerHTML = renderJobCard(full, false);
+    }
+  }
+}
+
+// Where the run time goes, by function (collapsible inside section 1 for sessions with "Also record a CPU profile").
+// d.run_functions is condition -> cpu_profile::run_functions() (src/cpu_profile.rs): samples inside the run segments of the slowest 10% of jobs.
+let rfCond = {session: null, c: null}, rfOpen = false;
+// "_dw_spi_driver_rustc::spi_device::DwSpiDeviceInner::exchange_pio_loop" -> "DwSpiDeviceInner::exchange_pio_loop"
+function tailName(s) { const p = String(s).split('::').filter(x => x !== '«impl»' && x !== 'λ'); return p.slice(-2).join('::') || String(s); }
+function runFunctionsDetails(d, s) {
+  const rf = d.run_functions;
+  if (!rf && !s.profile) return '';
+  const swatch = '<i style="width:10px;height:10px;border-radius:3px;background:var(--run);display:inline-block;flex:none"></i>';
+  const sumHtml = prev => `<summary>${swatch}<span>Where the Run Time Goes, by Function</span>${prev ? `<span class="rfprev">${prev}</span>` : ''}</summary>`;
+  if (!rf || !Object.keys(rf).length) return `<details id="rf_details" class="rfd" ${rfOpen || d.run_functions_error ? 'open' : ''} ontoggle="rfOpen=this.open">${sumHtml('')}<div class="rfbody ${d.run_functions_error ? 'nextbox warn' : 'muted'}">${d.run_functions_error
+    ? `This measurement has no CPU profile: ${esc(d.run_functions_error)}.`
+    : 'This measurement was recorded without the CPU profile. Measure again to see which functions the run time goes to.'}</div></details>`;
+  const conds = Object.keys(rf).sort((x, y) => (x === 'idle' ? -1 : y === 'idle' ? 1 : 0));
+  if (rfCond.session !== current || !conds.includes(rfCond.c)) rfCond = {session: current, c: conds.includes(anCond.c) ? anCond.c : conds[conds.length - 1]};
+  const t = rf[rfCond.c], n = t.samples || 0;
+  const toggle = conds.length > 1 ? `<div class="segc">${conds.map(c => `<button class="${c === rfCond.c ? 'on' : ''}" onclick="rfCond.c=${jsq(c)};renderAnalyze()">${esc(COND_LABEL[c] || c)}</button>`).join('')}</div>` : '';
+  const srcNote = `From a separate capture that sampled ${esc((t.processes || []).join(', ') || 'the chain')} every ${t.period_us || 100} µs; kept out of the comparison.`;
+  if (t.error || !n) return `<details id="rf_details" class="rfd" ${rfOpen ? 'open' : ''} ontoggle="rfOpen=this.open">${sumHtml('')}<div class="rfbody"><div class="row" style="justify-content:space-between;align-items:flex-start"><div class="muted" style="font-size:13px;flex:1">${srcNote}</div>${toggle}</div><div class="nextbox warn" style="margin-top:8px">${esc(t.error || 'No samples landed on the chain\'s run time.')}</div></div></details>`;
+  const pc = x => 100 * x / n, fns = t.functions || [], max = Math.max(1, ...fns.map(f => pc(f.total)));
+  const topOwn = fns.find(f => !f.kernel && f.name !== '[unmapped]');
+  const prev = topOwn
+    ? `top own code: ${esc(tailName(topOwn.context || topOwn.name))} (${pc(topOwn.self).toFixed(1)}%) · ${n.toLocaleString()} samples`
+    : fns[0] ? `top: ${esc(fns[0].name)} (${pc(fns[0].self).toFixed(1)}%) · ${n.toLocaleString()} samples` : `${n.toLocaleString()} samples`;
+  const rows = fns.map(f => {
+    const th = threadParts(f.thread), where = f.context || (f.caller || '').replace(/ \([^)]*\)$/, '');
+    const tip = `<b class="mono">${esc(f.name)}</b>` + tipRows([
+      ['self', `${pc(f.self).toFixed(1)}% (${f.self} samples): the leaf frame was this function`],
+      ['total', `${pc(f.total).toFixed(1)}%: this function was anywhere on the stack`],
+      ['binary', esc(f.binary)], ['thread', `<span class="mono">${esc(f.thread)}</span>`],
+      f.caller ? ['called from', `<span class="mono">${esc(f.caller)}</span>`] : null,
+      f.context ? ['in', `<span class="mono">${esc(f.context)}</span> <span class="muted">(nearest frame that is not library code)</span>`] : null,
+      f.full !== f.name ? ['full name', `<span class="mono" style="font-size:11px">${esc(f.full)}</span>`] : null])
+      + `<div class="muted" style="font-size:12px;margin-top:6px">Most common stack (root first):</div><div class="mono" style="font-size:11px;white-space:pre">${esc((f.stack || []).join('\n'))}</div>`;
+    return `<div class="rrow" ${tipAttr(tip)}><div class="rl"><div class="a mono">${esc(f.name)}</div>
+        <div class="b">${esc(th.proc)}${th.th ? ` · ${esc(th.th)}` : ''}${where ? ` · in ${esc(tailName(where))}` : ''}</div></div>
+      <div class="rbar"><div class="pb" style="width:${(pc(f.total) / max * 100).toFixed(2)}%;background:#6d63f0;opacity:.45"></div><div class="pb" style="width:${(pc(f.self) / max * 100).toFixed(2)}%;background:${f.kernel ? 'var(--sched)' : 'var(--run)'}"></div></div>
+      <div class="rs"><b>${pc(f.self).toFixed(1)}%</b> <span class="muted">/ ${pc(f.total).toFixed(1)}%</span></div></div>`; }).join('');
+  const few = n < 100 ? ' Few samples, so treat the order as a hint.' : '';
+  const aboutTip = `<b>About these samples</b>` + tipRows([
+    ['jobs', `the slowest 10% (${t.jobs}), ${(t.run_ms || 0).toFixed(1)} ms of their run time${t.jobs_without_samples ? `; ${t.jobs_without_samples} got no sample` : ''}`],
+    ['sampled', `${esc((t.processes || []).join(', ') || 'the chain')}, every ${t.period_us || 100} µs`],
+    ['capture', `${esc(t.tag || 'profile')}, a separate capture kept out of the comparison (sampling adds overhead)`],
+  ]) + (few ? `<div class="muted" style="margin-top:6px">${few.trim()}</div>` : '');
+  const off = Math.abs(t.clock_offset_ns || 0);
+  const pfTip = (t.slowest_job
+      ? `Opens the CPU profile capture (${esc(t.tag)}) in ui.perfetto.dev, zoomed to its slowest job, with the sampled threads pinned.`
+      : `Opens the CPU profile capture (${esc(t.tag)}) in ui.perfetto.dev with the sampled threads pinned. Compute the verdict again (step 2) to also zoom to its slowest job.`)
+    + ' Samples show as markers on the thread tracks; select one for its stack, or drag over a range for a flame graph. The trace is streamed from your machine; nothing is uploaded.'
+    + (off ? `<br><br>The device had been suspended, and ffx profiler does not tag its clock, so Perfetto draws the samples ${(off / 1e9).toFixed(1)} s away from the thread activity they belong to. zpo corrects this in the table above.` : '');
+  const pfLink = isStatic() ? '' : `<a href="#" class="pflink" ${tipAttr(pfTip)} onclick="openProfileInPerfetto(${jsq(viewMeas)},${jsq(rfCond.c)});return false"><i class="pfi"></i>Open this profile in Perfetto ↗</a>`;
+  const colTip = `<b>Share of the ${n.toLocaleString()} slow-job run samples</b>` + tipRows([
+    ['<b style="color:var(--fg)">self</b>', 'this function was the leaf frame on CPU at the sample'],
+    ['total', 'this function was anywhere on the call stack (executing itself or waiting on a callee)'],
+  ]) + `<div class="muted" style="margin-top:6px"><b style="color:var(--fg)">Why they often match:</b> rows are ranked by <b style="color:var(--fg)">self</b>, so top entries are mostly syscalls and leaf helpers that call no other userspace code <span class="nowrap">(self = total)</span>. Non-leaf callers further down diverge.</div>`;
+  return `<details id="rf_details" class="rfd" ${rfOpen ? 'open' : ''} ontoggle="rfOpen=this.open">${sumHtml(prev)}
+    <div class="rfbody">
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div style="flex:1;min-width:260px">
+          <div class="muted" style="font-size:13px">${n.toLocaleString()} samples from the slowest ${t.jobs} jobs · <span class="rfcol" style="font-family:inherit" ${tipAttr(aboutTip)}>About these samples</span>${n < 100 ? ` · <span style="color:var(--run)">few samples: treat the order as a hint</span>` : ''}</div>
+        </div>
+        <div class="row" style="gap:10px">${pfLink}${toggle}</div>
+      </div>
+      <div class="row" style="justify-content:space-between;align-items:baseline;margin:8px 0 2px">
+        <div class="legend"><span><i style="background:var(--run)"></i>self, in the function</span><span><i style="background:var(--sched)"></i>self, in a syscall</span><span><i style="background:#6d63f0;opacity:.45"></i>total, anywhere on the stack</span></div>
+        <span class="rfcol" ${tipAttr(colTip)}><b>self</b> <span class="muted">/ total</span></span>
+      </div>
+      <div class="rgrid fn">${rows}</div>
+      <div class="callout">${Math.round(100 * (t.kernel_share || 0))}% of these samples are in the kernel. Rows named <b>in kernel: zx_…</b> are syscalls. The line under each row names the nearest code that is not library code. Hover a row for its full stack.</div>
+    </div>
+  </details>`;
+}
+
+// "baseline-vs-candidate-1" -> "Baseline vs. Candidate 1"
+function gateTitle(n) { const [a, b] = n.split('-vs-'); return b ? `${measText(a)} vs. ${measText(b)}` : n; }
+// Gate regression strings -> one sentence, e.g. "The target is slower at p50/p90/p99 on an idle system and under full CPU load."
+const COND_PHRASE = {idle: 'on an idle system', stress: 'under full CPU load'};
+function regressionSummary(lines) {
+  const tgt = {}, thr = [], few = [], parts = []; let waits = 0, other = 0, m;
+  for (const l of lines || []) {
+    if ((m = l.match(/^(\w+) target p(\d+):/))) (tgt[m[1]] = tgt[m[1]] || []).push('p' + m[2]);
+    else if ((m = l.match(/^(\w+): jobs per capture fell/))) thr.push(m[1]);
+    else if ((m = l.match(/^(\w+): too few manual events/))) few.push(m[1]);
+    else if (/p99 runnable wait/.test(l)) waits++;
+    else other++;
+  }
+  const cp = c => COND_PHRASE[c] || `under ${c}`, conds = Object.keys(tgt);
+  if (conds.length) parts.push(conds.every(c => tgt[c].join() === tgt[conds[0]].join())
+    ? `the target is slower at ${tgt[conds[0]].join('/')} ${conds.map(cp).join(' and ')}`
+    : `the target is slower (${conds.map(c => `${tgt[c].join('/')} ${cp(c)}`).join('; ')})`);
+  if (thr.length) parts.push(`the load ran fewer jobs ${thr.map(cp).join(' and ')}`);
+  if (few.length) parts.push(`too few manual events were recorded ${few.map(cp).join(' and ')}`);
+  if (waits) parts.push(`${waits} other deadline thread${waits > 1 ? 's' : ''} waited longer for a CPU`);
+  if (other) parts.push(`${other} other check${other > 1 ? 's' : ''} got worse`);
+  const t = parts.join('; ');
+  return t ? t[0].toUpperCase() + t.slice(1) + '.' : 'Something got worse.';
+}
+function manualSampleNote(lines) {
+  const cp = c => COND_PHRASE[c] || `under ${c}`, items = []; let m;
+  for (const l of lines || []) {
+    if ((m = l.match(/^(\w+): (\d+) vs\. (\d+) events per capture \(manual input\)/))) {
+      items.push(`${cp(m[1])} (${Number(m[2]).toLocaleString()} vs. ${Number(m[3]).toLocaleString()}/capture)`);
+    }
+  }
+  return items.length ? ` Manual input recorded fewer events ${items.join(' and ')}.` : '';
+}
+// Every gate (stored files plus the baseline comparison each candidate summary carries), each with its check lines,
+// and the row to compare any two measurements.
+function gateDetails(an, latest) {
+  const gates = [...(an.gates || [])];
+  for (const m of an.ms) if (m.d.vs_baseline && !gates.some(g => g.name === `baseline-vs-${m.name}`)) gates.push({name: `baseline-vs-${m.name}`, ...m.d.vs_baseline});
+  const lines = g => [...(g.improvements || []).map(l => ['+', '#9ff0c6', l]), ...(g.regressions || []).map(l => ['−', '#ff9b9b', l]), ...(g.neutral || []).map(l => ['=', 'var(--muted)', l])];
+  const opts = sel => an.ms.map(m => `<option value="${esc(m.name)}" ${m.name === sel ? 'selected' : ''}>${measLabel(m.name)}</option>`).join('');
+  return `<details ${gateStatus(latest.d) === 'regressed' ? 'open' : ''} style="margin-top:10px"><summary class="muted">Every check, and other comparisons</summary>
+    ${gates.map(g => { const ls = lines(g);
+      return `<div style="margin:12px 0 0"><b>${esc(gateTitle(g.name))}</b>${gatePill(gateSt(g))} <span class="muted" style="font-size:12px">${(g.improvements || []).length} better · ${(g.regressions || []).length} worse · ${(g.neutral || []).length} unchanged</span>
+        <table style="margin-top:6px"><tr><th>check</th><th>result</th></tr>${ls.map(([sym, col, l]) => { const k = l.indexOf(':');
+          return `<tr><td>${esc(k > 0 ? l.slice(0, k) : '')}</td><td style="color:${col}">${sym} ${esc(k > 0 ? l.slice(k + 1).trim() : l)}</td></tr>`; }).join('')}</table></div>`; }).join('')}
+    <div class="row" id="gatebox" style="margin-top:12px"><span class="muted">Compare</span>
+      <select id="g_base" style="width:auto">${opts('baseline')}</select><span class="muted">vs.</span>
+      <select id="g_cand" style="width:auto">${opts(latest.name)}</select>
+      <button class="secondary" onclick="runGate()">Compare</button></div>
+  </details>`;
+}
+// The proposed changes with their controls. Element ids (#ap_i, #role_i, #rolex_i) index d.proposals and must
+// appear once on the page: here, either under section 2 or in More details, never both.
+function applyPanel(d, name) {
+  const ps = d.proposals.map((p, i) => ({p, i})).filter(({p}) => p.changed)
+    .sort((a, b) => (b.p.recommended ? 1 : 0) - (a.p.recommended ? 1 : 0) || a.i - b.i);
+  const pn = shortNames(d.proposals.map(p => p.label), d.proposals);
+  return `<div style="margin-top:14px"><h3 style="font-size:14px;margin:0 0 6px">Apply the Proposed Capacities</h3>
+    <table><tr><th></th><th>thread</th><th>capacity / period</th><th>role name in ${esc(profilesName())}</th></tr>
+    ${ps.map(({p, i}) => `<tr>
+      <td style="width:1%"><input type="checkbox" id="ap_${i}" ${p.recommended ? 'checked' : ''} style="width:auto;margin:0"></td>
+      <td ${tipAttr(`<b>${esc(pn[p.label].a)}</b><div class="muted mono" style="font-size:11px">${esc(p.label)}</div>` + tipRows([['affinity', (p.affinity || []).join(', ')], ...(p.notes || []).map((n, ni) => [ni ? '' : 'notes', esc(n)])]))} class="nowrap"><label for="ap_${i}" style="margin:0;color:var(--fg);cursor:pointer">${esc(pn[p.label].a)}</label>${p.recommended ? '<span class="pill ok">culprit</span>' : ''}</td>
+      <td class="nowrap">${p.existing ? `${p.existing[0] / 1e3} µs` : '<span class="muted">none</span>'} → <b class="good">${p.capacity_us} µs</b> / ${p.period_us} µs</td>
+      <td><select id="role_${i}" style="width:auto;font-size:12px;padding:3px 6px">${p.roles.map(r => `<option value="${esc(r.role)}" title="${esc(r.why)}">${esc(r.role)}</option>`).join('')}<option value="">other…</option></select>
+        <input id="rolex_${i}" placeholder="role name" style="display:none;width:200px;margin-left:6px;padding:3px 6px;font-size:12px"></td></tr>`).join('')}</table>
+    <div class="row" style="margin-top:10px">
+      <button onclick="applySelected(${jsq(name)})">Apply Selected → Edit ${esc(profilesName())}, Build, OTA</button>
+      ${agentInfo.available ? `<button ${agentBtnAttrs()} onclick="resolveRoles(${jsq(name)})">Confirm Role Names From Source (${esc(agentName())})</button>${agentHint()}` : ''}
+      <span class="err" id="ap_err" style="margin:0"></span>
+    </div></div>`;
+}
+function proposalsTable(d) {
+  const pn = shortNames(d.proposals.map(p => p.label), d.proposals);
+  return `<table><tr><th>thread</th><th>current</th><th>work / period (p50 · p90 · p99 · max µs)</th><th>proposal</th></tr>
+    ${d.proposals.map(p => `<tr>
+      <td title="${esc(pn[p.label].title)}"><b>${esc(pn[p.label].a)}</b><div class="muted mono" style="font-size:11px">${esc(p.label)}</div>${p.recommended ? '<span class="pill ok">culprit</span>' : ''}</td>
+      <td>${p.existing ? `<b>${p.existing[0]/1000} µs / ${p.existing[1]/1000} µs</b><div class="muted" style="font-size:12px">Deadline · ${Math.round(100*p.existing[0]/p.existing[1])}% util</div>` : '<b>Fair priority</b><div class="muted" style="font-size:12px">No deadline profile</div>'}</td>
+      <td class="num">${us(p.work_per_period_ns.p50||0)} · ${us(p.work_per_period_ns.p90||0)} · ${us(p.work_per_period_ns.p99||0)} · ${us(p.work_per_period_ns.max||0)}</td>
+      <td><b>${p.capacity_us} µs / ${p.period_us} µs</b> ${p.changed ? (p.existing ? '<span class="pill ok">Update</span>' : '<span class="pill ok">New</span>') : '<span class="pill">Unchanged</span>'}
+          <div class="muted" style="font-size:12px">Deadline · ${Math.round(p.utilization*100)}% util · CPUs ${p.affinity.join(', ')}</div>
+          <details style="margin-top:2px"><summary style="font-size:12px">Notes &amp; ${esc(profilesName())} entry</summary>${p.notes.map(n => `<div class="muted" style="font-size:12px">· ${esc(n)}</div>`).join('')}<div style="margin-top:4px"><code>${esc(p.profiles_json)}</code></div></details></td></tr>`).join('')}</table>`;
+}
+// 4. What to do next: one sentence for the verdict, Build + OTA, and ask the agent.
+async function setAgentAllowlisted(on) {
+  const r = await api('/api/prefs', {key: 'agent_tp_allowlisted', value: on});
+  if (!r.error) refresh();
+}
+function nextSteps(d, name) {
+  const v = d.verdict, meas = '<a href="#" onclick="gotoStep(2);return false">measure a candidate</a>';
+  const copy = v.recommend_profiles
+    ? `Apply the proposed capacities in section 2. zpo edits <code>${esc(profilesName())}</code>, runs <code>fx build</code> and pushes the build to the device; then ${meas}.`
+    : v.primary === 'fine'
+    ? `Nothing dominates the tail; this chain is in good shape. To go further, change the code, then Build + OTA and ${meas}.`
+    : v.primary === 'hardware'
+    ? `No profile change is proposed; the remaining time is spent waiting on hardware. Change the protocol or hardware path, then Build + OTA and ${meas}.`
+    : `No profile change is proposed; the remaining time is the chain's own code. Change the code, then Build + OTA and ${meas}.`;
+  // Own code: point at the function table, or at the switch that produces it.
+  const sess = (anData && anData.session) || {};
+  const fnHint = v.primary !== 'own_work' ? ''
+    : d.run_functions ? ' Expand <a href="#rf_details" onclick="const e=$(\'#rf_details\');if(e){e.open=true;e.scrollIntoView({behavior:\'smooth\',block:\'nearest\'});}return false">Where the Run Time Goes, by Function</a> in section 1 to see which functions.'
+    : sess.profile ? '' : ' Turn on <i>Also record a CPU profile</i> in <a href="#" onclick="gotoStep(1);return false">Define</a> to see which functions.';
+  const lesson = safeUrl(lessons.links && (lessons.links[v.primary] || lessons.links.capacity));
+  // Trace queries: on when the agent's commands run without asking (see src/trace_context.rs).
+  const acc = d.agent_trace_access || {allowed: false, reason: '', rule: ''};
+  const access = acc.allowed
+    ? `<div class="hint">Trace queries on: ${esc(acc.reason)}.${acc.via === 'pref' ? ' <a href="#" onclick="setAgentAllowlisted(false);return false">Undo</a>' : ''}</div>`
+    : `<div class="nextbox warn" style="margin-top:8px;font-size:13px">${esc(agentName())} can also query the recorded traces, which makes its answers much more precise, if it may run this command without asking (its allow list): <code>${esc(acc.rule)}</code>. Without it, ${esc(agentName())} works from the report and a summary of the traces.
+        <label class="chk" style="margin-top:8px"><input type="checkbox" onchange="setAgentAllowlisted(this.checked)"> I've added it</label></div>`;
+  const askBox = `<div class="muted">${esc(agentName())} reads the report, your Fuchsia checkout and ${acc.allowed ? 'the recorded traces' : 'a summary of the recorded traces'}, and points at what to change first (${acc.allowed ? 'up to ~10 minutes with trace queries' : '1-2 minutes'}, advisory).</div>
+    ${access}
+    <div class="row" style="margin-top:10px"><button ${agentBtnAttrs()} onclick="explain(${jsq(name)})">${d.explain_md ? 'Ask Again' : 'Ask ' + esc(agentName())}</button>${modelPicker(d)}${agentHint()}</div>
+    <div id="jobbox_llm"></div>
+    <div id="explainbox" style="margin-top:10px">${explainHtml(d)}</div>`;
+  const worse = gateStatus(d) === 'regressed';
+  const regs = (d.vs_baseline && d.vs_baseline.regressions) || [];
+  const targetSlower = regs.some(l => /^\w+ target p\d+:/.test(l));
+  const onlyTooFew = regs.length > 0 && regs.every(l => /too few manual events/.test(l));
+  const otaRow = cls => `<div class="row" style="margin-top:10px"><button ${cls ? `class="${cls}"` : ''} onclick="ota(true)">Build + OTA the Current Checkout</button></div>`;
+  const undo = !worse ? '' : onlyTooFew
+    ? `<div class="nextbox err"><b>${measLabel(name)} recorded too few manual events to compare.</b> Re-run ${meas} while interacting continuously during each capture.</div><div class="muted" style="font-size:12px;margin:12px 0 4px">After that</div>`
+    : `<div class="nextbox err"><b>${targetSlower ? `${measLabel(name)} is slower than the baseline.` : `${measLabel(name)} failed the regression gate (${esc(regressionSummary(regs).replace(/\.$/, ''))}).`}</b> Undo the change that produced it (revert the edit to ${esc(profilesName())} or the code change), Build + OTA, and ${meas} to confirm you are back to the baseline before trying anything else.</div>${otaRow('')}
+    <div class="muted" style="font-size:12px;margin:12px 0 4px">After that</div>`;
+  return `<div class="card"><h2 style="display:flex;align-items:baseline;gap:10px">4. What To Do Next ${lesson ? `<a href="${esc(lesson)}" target="_blank" style="font-size:12px;font-weight:400;color:#6b7385">Why? → lesson</a>` : ''}</h2>
+    ${undo}<div class="nextbox ${v.recommend_profiles ? 'act' : v.primary === 'fine' ? 'ok' : 'warn'}">${copy}${fnHint}</div>
+    ${v.recommend_profiles || (worse && !onlyTooFew) ? '' : otaRow(v.primary === 'fine' ? 'secondary' : '')}
+    ${agentInfo.available ? `<details ${d.explain_md || !v.recommend_profiles ? 'open' : ''} style="margin-top:14px"><summary>Ask ${esc(agentName())} Where the Time Goes</summary><div style="margin-top:8px">${askBox}</div></details>`
+      : d.explain_md ? `<details open style="margin-top:14px"><summary>Where the Time Goes (saved agent answer)</summary><div style="margin-top:8px">${explainHtml(d)}</div></details>` : ''}
+  </div><div id="jobbox2"></div>`;
+}
+
+function modelPicker(d) {
+  const groups = (d.llm_model_groups || []).filter(g => g && g[1] && g[1].length);
+  if (!groups.length) return '';
+  const cur = d.llm_model_default || groups[0][1][0][0];
+  const opts = groups.map(([g, ms]) => `<optgroup label="${esc(g)}">${ms.map(([k,v])=>`<option value="${esc(k)}" ${k===cur?'selected':''}>${esc(v)}</option>`).join('')}</optgroup>`).join('');
+  return `<span class="muted" style="font-size:12px;margin-left:4px">model <select id="llm_model" style="width:auto;font-size:12px;padding:3px 6px">${opts}</select></span>`;
+}
+function explainHtml(d) {
+  if (!d.explain_md) return '';
+  const m = d.explain_meta || {}, models = d.llm_models || {};
+  const pill = m.model ? `<span class="pill" style="margin-left:0">${esc(m.model_name || models[m.model] || m.model)}</span>` : '';
+  return `<div class="row" style="margin-bottom:6px">${pill}${m.when?`<span class="muted" style="font-size:12px">${esc(m.when)}</span>`:''}</div>
+    <div style="max-height:700px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:10px">${md(d.explain_md)}</div>`;
+}
+
+async function applySelected(mname) {
+  if (isStatic()) { await api('/api/session/static/apply', {}); return; }  // shows the static-report notice
+  // Inline checks (like Define's): every ticked row needs a role, and at least one row must be ticked.
+  const changes = [], missing = [];
+  $('#ap_err').textContent = '';
+  window._proposals.forEach((p,i) => {
+    const cb = $(`#ap_${i}`), sel = $(`#role_${i}`), other = $(`#rolex_${i}`);
+    if (other) other.classList.remove('invalid');
+    if (!cb || !cb.checked) return;
+    const role = (sel && sel.value) || (other && other.value.trim());
+    if (!role) { missing.push(p.label); if (other) other.classList.add('invalid'); return; }
+    changes.push({role, capacity_us: p.capacity_us, period_us: p.period_us, affinity: p.affinity, label: p.label});
+  });
+  if (missing.length) { $('#ap_err').textContent = `* enter a role name for ${missing.length === 1 ? 'the highlighted thread' : `the ${missing.length} highlighted threads`}`; return; }
+  if (!changes.length) { $('#ap_err').textContent = '* tick at least one thread'; return; }
+  // The build finds the roles file to edit and makes the image that carries the change, so check it first.
+  const c = await api('/api/build-dir');
+  if (c && c.looks_ok === false) {
+    if (!(await confirmModal({title: 'Applying Needs a Build for the Device', ok: 'Proceed', cancel: 'Cancel',
+        html: `<p>${esc(c.needs_build || '')}</p><p class="muted">${esc(c.warning || '')}</p>`}))) return;
+  } else if (!(await confirmModal({title: 'Apply the Proposed Capacities?', ok: 'Apply, Build + OTA',
+      html: `<p>Edits the board's roles file in your checkout, runs <code>fx build</code> and installs the result on the device, which then reboots.</p>
+        <p>${changes.map(c => `<code>${esc(c.role)}</code> → <b>${c.capacity_us} µs / ${c.period_us} µs</b>`).join('<br>')}</p>`}))) return;
+  startJob(`/api/session/${encodeURIComponent(current)}/apply`, {changes, ota: true});
+}
+
+
+// The Fuchsia checkout every fx/ffx call, Apply and Build + OTA use; fixed for the server's lifetime.
+async function showCheckout() {
+  const el = $('#checkout'), c = await api('/api/checkout');
+  if (!c || !c.path) return;
+  el.style.display = '';
+  el.className = `dev mono ${c.exists ? 'unk' : 'bad'}`;
+  el.textContent = `Checkout: ${c.display}`;
+  el.title = `${c.path}\nFound via ${c.source}. Start zpo with --fuchsia-dir PATH to use another checkout.`
+    + (c.exists ? '' : '\nNo .jiri_root here: this is not a Fuchsia checkout.');
+}
+async function pollDevice() {
+  const el = $('#devinfo');
+  try {
+    const d = await api('/api/device');
+    if (d.ok && d.build && d.build.system_image) { el.className = 'dev ok'; el.textContent = `● Device: Connected - ${d.build.product} ${d.build.version} · image ${d.build.system_image.slice(0,10)}`; el.title = 'ffx target reachable; build identity read from the device'; }
+    else if (d.ok) { el.className = 'dev unk'; el.textContent = '● Device: Reachable, build info unavailable'; el.title = ''; }
+    else { el.className = 'dev bad'; el.textContent = '● Device: Not found'; el.title = d.error || 'ffx target list shows nothing'; }
+  } catch (e) { el.className = 'dev unk'; el.textContent = '● Device: Unknown (UI server unreachable?)'; }
+}
+function md(t) {  // tiny markdown renderer for agent output
+  let h = esc(t);
+  h = h.replace(/```([\s\S]*?)```/g, (m, c) => `<pre>${c}</pre>`);
+  h = h.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  h = h.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  h = h.replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
+  h = h.replace(/^### (.*)$/gm, '<h3>$1</h3>').replace(/^## (.*)$/gm, '<h2>$1</h2>').replace(/^# (.*)$/gm, '<h1>$1</h1>');
+  h = h.replace(/^(?:[-*] .*(?:\n|$))+/gm, b => '<ul>' + b.trim().split('\n').map(l => `<li>${l.replace(/^[-*] /, '')}</li>`).join('') + '</ul>');
+  h = h.replace(/^(?:\d+\. .*(?:\n|$))+/gm, b => '<ol>' + b.trim().split('\n').map(l => `<li>${l.replace(/^\d+\. /, '')}</li>`).join('') + '</ol>');
+  return '<div class="md">' + h.replace(/\n\n/g, '<p></p>').replace(/\n/g, '<br>') + '</div>';
+}
+
+(async () => {
+  readToken();
+  updateTopBar();
+  // Keeps a copy of the page for reloads while zpo is down (see /sw.js). Browsers allow it on HTTPS and localhost.
+  if (!isStatic() && 'serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  await loadInfo();
+  startHeartbeat();
+  lessons = await api('/api/lessons') || {};
+  if (safeUrl(lessons.url)) {
+    const why = document.getElementById('whylink');
+    why.href = safeUrl(lessons.url);
+    why.style.display = '';
+  }
+  agentInfo = await api('/api/agent');
+  showCheckout();
+  pollDevice(); setInterval(pollDevice, 20000);
+  await refresh();
+  if (!sessions.length) showNew(); else { current = sessions[0].name; view = landingStep(current); refresh(); }
+  booted = connState === 'ok';
+})();
+</script>
+</body>
+</html>

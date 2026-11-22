@@ -36,7 +36,6 @@ fidl("fuchsia.bluetooth.bredr") {
   ]
   sdk_area = "Bluetooth"
   sdk_category = "partner"
-  enable_hlcpp = true
   stable = true
   visibility = [ "*" ]
   public_deps = [

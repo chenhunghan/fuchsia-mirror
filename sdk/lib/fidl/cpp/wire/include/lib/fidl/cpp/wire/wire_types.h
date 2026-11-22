@@ -255,6 +255,11 @@ using AnyEncodeResult = fit::pinned_inline_any<EncodeResult, /* Reserve */ 2048,
 std::vector<uint8_t> ConcatMetadataAndMessage(fidl::WireFormatMetadata metadata,
                                               fidl::OutgoingMessage& message);
 
+fit::result<fidl::Error, cpp20::span<uint8_t>> PersistToBuffer(size_t inline_size,
+                                                               TopLevelEncodeFn encode_fn,
+                                                               void* value,
+                                                               cpp20::span<uint8_t> buffer);
+
 fit::result<fidl::Error, std::tuple<fidl::WireFormatMetadata, cpp20::span<uint8_t>>>
 SplitMetadataAndMessage(cpp20::span<uint8_t> persisted);
 
@@ -422,6 +427,46 @@ fit::result<fidl::Error, std::vector<uint8_t>> Persist(const FidlType& value) {
   }
   return fit::ok(
       internal::ConcatMetadataAndMessage(encoded.wire_format_metadata(), encoded.message()));
+}
+
+// |Persist| encodes a wire domain object |FidlType| into a caller-supplied
+// |buffer| without heap allocations, following the [convention for FIDL data
+// persistence][persistence-convention]: the wire format metadata followed by
+// the encoded bytes. |FidlType| needs to satisfy these requirements:
+//
+// - |FidlType| is a wire struct/union/table.
+// - |FidlType| is not a resource type.
+//
+// |buffer.data()| must be aligned to |FIDL_ALIGNMENT|, and |buffer| must not
+// overlap |value| or any out-of-line data referenced by |value|. On success,
+// returns the subspan of |buffer| containing the persisted bytes.
+//
+// Example:
+//
+//     fuchsia_my_lib::wire::SomeType obj = ...;
+//     FIDL_ALIGNDECL uint8_t storage[256];
+//     fit::result result = fidl::Persist(obj, cpp20::span(storage));
+//     if (result.is_error()) {
+//       // Handle errors...
+//     }
+//     cpp20::span<uint8_t> data = result.value();
+//
+// [persistence-convention]:
+// https://fuchsia.dev/fuchsia-src/contribute/governance/rfcs/0120_standalone_use_of_fidl_wire_format?hl=en#convention_for_data_persistence
+template <typename FidlType, internal::EnableIfWireType<FidlType> = nullptr>
+fit::result<fidl::Error, cpp20::span<uint8_t>> Persist(const FidlType& value,
+                                                       cpp20::span<uint8_t> buffer) {
+  static_assert(fidl::IsFidlType<FidlType>::value, "|FidlType| must be a FIDL domain object.");
+  static_assert(
+      !fidl::IsResource<FidlType>::value,
+      "|FidlType| cannot be a resource type. Resources cannot be persisted. "
+      "If you need to send resource types to another process, consider using a FIDL protocol.");
+
+  // Const safety: because there are no handles in non-resource types,
+  // encoding will not mutate the input tree of values.
+  return internal::PersistToBuffer(internal::TopLevelCodingTraits<FidlType>::kInlineSize,
+                                   internal::MakeTopLevelEncodeFn<FidlType>(),
+                                   const_cast<FidlType*>(&value), buffer);
 }
 
 // |InplaceUnpersist| borrows a sequence of bytes stored in the [convention for

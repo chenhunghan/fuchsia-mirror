@@ -6,7 +6,6 @@
 #define LIB_DRIVER_DEVICETREE_MANAGER_NODE_H_
 
 #include <fidl/fuchsia.driver.framework/cpp/fidl.h>
-#include <fidl/fuchsia.hardware.power/cpp/fidl.h>
 #include <lib/devicetree/devicetree.h>
 #include <lib/zx/result.h>
 #include <zircon/errors.h>
@@ -96,9 +95,6 @@ class Node {
 
   virtual void AddSmc(const fuchsia_hardware_platform_bus::Smc& smc);
 
-  virtual void AddPowerConfig(const fuchsia_hardware_power::PowerElementConfiguration& config,
-                              std::optional<std::string> fidl_text = std::nullopt);
-
   // Registers an iommu with the platform bus.
   virtual zx::result<> RegisterIommu(uint32_t iommu_id,
                                      const fuchsia_hardware_platform_bus::Iommu& iommu) {
@@ -161,9 +157,6 @@ class Node {
 
   // Stores text representation of metadata for golden file generation.
   std::vector<std::optional<std::string>> metadata_text_;
-
-  // Stores text representation of power config for golden file generation.
-  std::vector<std::optional<std::string>> power_config_text_;
 
   // Properties of the nodes after they have been transformed in the device group.
   std::vector<fuchsia_driver_framework::NodeProperty2> node_properties_;

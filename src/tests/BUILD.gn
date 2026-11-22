@@ -2,6 +2,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
+
 group("tests") {
   testonly = true
 
@@ -11,9 +13,9 @@ group("tests") {
   # E2E tests, by contrast, must be added directly to the product they test, so
   # that they get executed only against their product, and not others.
   deps = [
+    ":bazel_tests",
     "assembly:tests",
     "coverage:tests",
-    "diagnostics:tests",
     "disable_shell:tests",
     "disable_syscalls:tests",
     "dlog:tests",
@@ -31,6 +33,7 @@ group("tests") {
     "end_to_end/package_manager:tests",
     "end_to_end/reboot_hang:tests",
     "end_to_end/usb/lib:tests",
+    "fidl/dynsuite/channel_util:tests",
     "kernel_cprng:tests",
     "kernel_crashlog:tests",
     "kernel_lockup_detector:tests",
@@ -41,4 +44,9 @@ group("tests") {
     "reboot:tests",
     "shutdown:tests",
   ]
+}
+
+bazel_test_suite("bazel_tests") {
+  target_tests = [ "//src/tests:tests" ]
+  host_tests = [ "//src/tests:host_tests" ]
 }

@@ -14,6 +14,8 @@
 #include <vm/page_source.h>
 #include <vm/vm_constants.h>
 
+class VmCowPages;
+
 // Page provider implementation that provides requested loaned physical pages.
 //
 // This is used by contiguous VMOs which have had pages decommitted, when the pages are again

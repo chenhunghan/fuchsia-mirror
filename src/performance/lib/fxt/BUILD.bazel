@@ -1,0 +1,89 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":fxt_tests"],
+    visibility = ["//src/performance:__pkg__"],
+)
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/lib/fxt/argument.h",
+        "include/lib/fxt/fields.h",
+        "include/lib/fxt/interned_category.h",
+        "include/lib/fxt/interned_string.h",
+        "include/lib/fxt/map_macro.h",
+        "include/lib/fxt/map_macro_internal.h",
+        "include/lib/fxt/record_types.h",
+        "include/lib/fxt/section_symbols.h",
+        "include/lib/fxt/serializer.h",
+        "include/lib/fxt/string_ref.h",
+        "include/lib/fxt/thread_ref.h",
+        "include/lib/fxt/trace_base.h",
+        "include/lib/fxt/writer_internal.h",
+    ],
+    visibility = [
+        "//src/lib/lockdep:__pkg__",
+        "//zircon/kernel/lib/ktrace:__pkg__",
+        "//zircon/kernel/lib/percpu_writer:__pkg__",
+    ],
+    deps = [
+        "//sdk/lib/fit",
+        "//sdk/lib/stdcompat",
+        "//zircon/kernel/lib/special-sections",
+        # <fxt/writer.h> has #include <lib/zx/result.h>
+        # <fxt/serializer.h> has #include <lib/zx/result.h>
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_library(
+    name = "fxt",
+    public_configs = [":config"],
+    visibility = [
+        "//src/lib/kstring:__pkg__",
+        "//src/lib/lockdep:__pkg__",
+        "//src/performance/cpu_profiler:__subpackages__",
+        "//src/performance/ktrace_provider:__pkg__",
+        "//src/testing/loadbench:__pkg__",
+        "//zircon/system/utest/core/thread-sampler:__pkg__",
+    ],
+    deps = [":headers"],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "fxt_tests_app",
+    srcs = [
+        "deduction_tests.cc",
+        "fields_tests.cc",
+        "interned_category_tests.cc",
+        "interned_string_tests.cc",
+        "macro_tests.cc",
+        "serializer_test.cc",
+        "trace_base_tests.cc",
+    ],
+    gn_output_name = "fxt_tests",
+    deps = [
+        ":fxt",
+        "//sdk/lib/fdio",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "fxt_tests",
+    unit_tests = [":fxt_tests_app"],
+)

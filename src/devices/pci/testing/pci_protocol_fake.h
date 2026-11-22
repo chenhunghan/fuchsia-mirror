@@ -9,7 +9,7 @@
 #include <lib/async-loop/default.h>
 #include <lib/async-loop/loop.h>
 #include <lib/async/cpp/task.h>
-#include <lib/device-protocol/pci.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/sync/completion.h>
 #include <lib/zx/bti.h>
 #include <lib/zx/interrupt.h>

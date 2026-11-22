@@ -64,7 +64,7 @@ constexpr uint64_t kHandoffVirtualAddress = 0xffff'ffff'0000'0000;
 class PhysBootTimes {
  public:
   // These are various time points sampled during physboot's work.
-  // kernel/top/handoff.cc has a kcounter corresponding to each of these.
+  // kernel/top/handoff.rs has a kcounter corresponding to each of these.
   // When a new time point is added here, a new kcounter must be added
   // there to make that sample visible anywhere.
   enum Index : size_t {
@@ -119,8 +119,11 @@ struct PhysVmo : public PhysVmObject {
   }
 
   void Log(const char* prefix) const {
-    printf("%s: | [0x%016" PRIx64 ", 0x%016" PRIx64 ") | VMO  | %-*s|\n",  //
-           prefix, addr, addr + stream_size, static_cast<int>(name.size() - 3), name.data());
+    std::string_view vmo_name{name.data(), name.size()};
+    vmo_name = vmo_name.substr(0, vmo_name.find('\0'));
+    printf("%s: | [0x%016" PRIx64 ", 0x%016" PRIx64 ") | VMO  | %-*.*s|\n",  //
+           prefix, addr, addr + stream_size, static_cast<int>(name.size() - 3),
+           static_cast<int>(vmo_name.size()), vmo_name.data());
   }
 
   // The physical address of the memory.
@@ -287,7 +290,7 @@ static_assert(std::is_default_constructible_v<PhysVmar>);
 struct PhysElfImage {
   struct Info {
     uintptr_t relative_entry_point = 0;  // Add to VMAR base address.
-    std::optional<size_t> stack_size;
+    stdbind::optional<size_t> stack_size;
   };
 
   // This value in .vmar.mappings[n].paddr indicates the mapping is for
@@ -449,7 +452,9 @@ static_assert(std::is_default_constructible_v<PhysHandoff>);
 
 extern "C" {
 
-const PhysHandoff* cpp_phys_handoff_get();
+void cpp_phys_vmo_log(const PhysVmo* vmo, const char* prefix);
+void cpp_phys_handoff_call_init_array(const PhysHandoff* handoff);
+const PhysVmo* cpp_phys_handoff_extra_vmos(const PhysHandoff* handoff, size_t* count);
 
 // Accessors for individual PhysHandoff fields, for Rust callers that cannot see
 // through the PhysHandoffSpan and stdbind::optional templates.
@@ -459,15 +464,34 @@ const zbi_topology_node_t* cpp_phys_handoff_cpu_topology(size_t* count);
 const memalloc::Range* cpp_phys_handoff_memory(size_t* count);
 const uint8_t* cpp_phys_handoff_efi_memory_attributes(size_t* size);
 const MappedMmioRange* cpp_phys_handoff_periph_ranges(size_t* count);
+const PhysVmar* cpp_phys_handoff_vmars(const PhysHandoff& handoff, size_t* count);
+const PhysVmar* cpp_phys_handoff_temporary_vmar(const PhysHandoff& handoff);
+const PhysVmar* cpp_phys_handoff_heap_vmar(const PhysHandoff& handoff);
 // Copies the platform ID into *out and returns true, or returns false if none
 // was handed off.
 bool cpp_phys_handoff_platform_id(zbi_platform_id_t* out);
+// Returns a pointer to the handoff entropy pool in place if present, or nullptr
+// if no pool was handed off.
+const crypto::EntropyPool* cpp_phys_handoff_entropy_pool();
+// Resets the handoff entropy pool in place, running ~EntropyPool() to shred its
+// contents with mandatory_memset.
+void cpp_phys_handoff_reset_entropy_pool();
 
 // MappedMmioRange accessors, for Rust callers: bindgen leaves the
 // PhysHandoffSpan base opaque, and paddr_ is private.
 uint64_t cpp_mapped_mmio_range_paddr(const MappedMmioRange& range);
 uintptr_t cpp_mapped_mmio_range_vaddr(const MappedMmioRange& range);
 size_t cpp_mapped_mmio_range_size_bytes(const MappedMmioRange& range);
+
+// PhysVmar and PhysMapping::Permissions accessors, for Rust callers: bindgen
+// leaves PhysHandoffSpan and std::bitset opaque, and blocks C++ methods.
+const PhysMapping* cpp_phys_vmar_mappings(const PhysVmar& vmar, size_t* count);
+// Constructs a `PhysMapping::Permissions` in-place in the uninitialized storage at `out`.
+void cpp_phys_vmar_permissions(const PhysVmar& vmar, PhysMapping::Permissions* out);
+void cpp_phys_vmar_log(const PhysVmar& vmar, const char* prefix);
+bool cpp_phys_mapping_permissions_readable(const PhysMapping::Permissions& perms);
+bool cpp_phys_mapping_permissions_writable(const PhysMapping::Permissions& perms);
+bool cpp_phys_mapping_permissions_executable(const PhysMapping::Permissions& perms);
 
 }  // extern "C"
 

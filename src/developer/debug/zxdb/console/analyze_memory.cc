@@ -118,7 +118,7 @@ void MemoryAnalysis::SetStack(const Stack& stack) {
     const std::vector<debug::RegisterValue>* regs =
         stack[i]->GetRegisterCategorySync(debug::RegisterCategory::kGeneral);
     FX_DCHECK(regs);  // Always expect general registers to be available.
-    AddRegisters(i, *regs);
+    AddRegisters(static_cast<int>(i), *regs);
 
     // TODO(brettw) make this work when the frame base is asynchronous.
     if (auto bp = stack[i]->GetBasePointer())
@@ -229,7 +229,7 @@ void MemoryAnalysis::AddRegisters(int frame_no, const std::vector<debug::Registe
     if (r.data.size() > sizeof(uint64_t))
       continue;  // Weird register, don't bother.
 
-    uint64_t value = r.GetValue();
+    uint64_t value = static_cast<uint64_t>(r.GetValue());
     std::string reg_desc;
 
     if (frame_no == 0) {

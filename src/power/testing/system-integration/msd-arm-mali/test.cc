@@ -131,6 +131,7 @@ TEST_F(PowerSystemIntegration, SuspendResume) {
   // Bind driver with power token overrides for target child node "arm-mali-0".
   fence_ = PrepareDriverWithPowerTokenOverrides("gpu-ffe40000", "/aml-gpu-package#meta/aml-gpu.cm",
                                                 /*expect_new_koid=*/true, {"arm-mali-0"});
+  ASSERT_TRUE(fence_.is_valid());
 
   // Duration to sleep must be << 1 second, or else the command submission may timeout.
   const auto kPollDuration = zx::msec(50);

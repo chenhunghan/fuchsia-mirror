@@ -158,7 +158,7 @@ If instead of fixing it right away, you file a bug, title the bug with
 the description. Comment about the access violation if you know where it is
 coming from.
 
-## Common issues and how to fix them
+## Common issues and how to fix them {:#common-issues-and-how-to-fix-them}
 
 ### Missing inputs/outputs
 

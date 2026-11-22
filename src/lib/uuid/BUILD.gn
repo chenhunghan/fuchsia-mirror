@@ -2,22 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-import("//build/test.gni")
+import("//build/testing/host_test.gni")
 
-test("uuid_unittests") {
-  sources = [ "uuid_unittest.cc" ]
-
-  deps = [
-    ":uuid",
-    "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gtest",
-    "//third_party/re2",
-  ]
-}
-
-fuchsia_unittest_package("uuid_tests") {
-  deps = [ ":uuid_unittests" ]
+if (is_host) {
+  host_test("uuid_unittests_host_test") {
+    binary_path = "$root_out_dir/uuid_unittests"
+    target = get_label_info(":uuid_unittests", "label_with_toolchain")
+    deps = [ ":uuid_unittests" ]
+  }
 }
 
 group("tests") {
@@ -25,7 +17,7 @@ group("tests") {
 
   deps = [
     ":uuid_tests",
-    ":uuid_unittests($host_toolchain)",
+    ":uuid_unittests_host_test($host_toolchain)",
   ]
 }
 
@@ -57,6 +49,34 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 source_set("uuid") {
   sources = [ "uuid.cc" ]
   public = [ "uuid.h" ]
-  visibility = [ "*" ]
+  visibility = [
+    ":*",
+    "//sdk/lib/syslog/cpp:*",
+    "//src/bringup/*",
+    "//src/developer/*",
+    "//src/firmware/*",
+    "//src/lib/analytics/cpp/core_dev_tools:*",
+    "//src/storage/*",
+    "//src/zircon/*",
+    "//vendor/google/*",
+  ]
   public_deps = [ "//src/lib/fxl:string_printf" ]
+}
+
+cc_test_executable("uuid_unittests") {
+  sources = [ "uuid_unittest.cc" ]
+  deps = [
+    ":uuid",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+    "//third_party/re2",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_package("uuid_tests") {
+  package_name = "uuid_tests-gn"
+  component_name = "uuid_tests"
+  deps = [ ":uuid_unittests" ]
 }

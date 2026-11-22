@@ -9,6 +9,7 @@ import("//zircon/kernel/kernel_rust_mod.gni")
 
 library_headers("headers") {
   headers = [ "dev/timer/armv7_mmio_timer.h" ]
+  public_deps = [ "//sdk/lib/zbi-format" ]
 }
 
 kernel_rust_mod("armv7-mmio-timer-rs") {
@@ -37,12 +38,6 @@ kernel_rust_mod("armv7-mmio-timer-rs") {
 }
 
 source_set("armv7_mmio_timer") {
-  sources = []
-  public_deps = [
-    ":headers",
-    "//sdk/lib/zbi-format",
-    "//zircon/kernel/dev/interrupt",
-    "//zircon/system/ulib/affine",
-  ]
+  public_deps = [ ":headers" ]
   deps = [ ":armv7-mmio-timer-rs" ]
 }

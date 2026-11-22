@@ -16,7 +16,7 @@ Note: For more information, see [documentation widgets][documentation-widgets].
 
 Additionally, Fuchsia has a main filterable [glossary page][glossary-index].
 
-## Add a glossary entry
+## Add a glossary entry {:#add-a-glossary-entry}
 
 To add a glossary definition, you need to edit the
 [glossary.yaml][glossary-yaml] to include information about your definition:

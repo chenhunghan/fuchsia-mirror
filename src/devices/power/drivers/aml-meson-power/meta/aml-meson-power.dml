@@ -16,6 +16,8 @@
                 Domain: {
                     type: "object",
                     properties: {
+                        // Set by DML board metadata mappings, where `id` is the global ID.
+                        domain: { type: "uint32" },
                         id: { type: "uint32" },
                         name: {
                             type: "string",

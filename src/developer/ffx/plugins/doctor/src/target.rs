@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::ShowToolWrapper;
 use crate::doctor_ledger::{LedgerMode, LedgerNode, LedgerNodeGuard, LedgerOutcome};
 use crate::single_target_diagnostics::run_single_target_diagnostics;
 use anyhow::Result;
@@ -13,6 +12,13 @@ use std::io::Write;
 use std::time::Duration;
 use timeout::timeout;
 
+#[allow(async_fn_in_trait)]
+#[mockall::automock]
+pub trait ShowTargetRunner {
+    async fn allocate(&mut self, target_spec: Option<String>) -> fho::Result<()>;
+    async fn run(&mut self) -> fho::Result<(String, String)>;
+}
+
 pub fn target_name(target: &TargetHandle) -> String {
     target.node_name.clone().unwrap_or_else(|| ffx_target::UNKNOWN_TARGET_NAME.to_string())
 }
@@ -21,7 +27,7 @@ pub async fn check_single_target_locally<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
     target: &TargetHandle,
     env_context: &EnvironmentContext,
-    show_tool: Option<&mut ShowToolWrapper>,
+    show_tool: &mut impl ShowTargetRunner,
     retry_delay: Duration,
 ) -> Result<()> {
     let done = check_product_state(ledger, target);
@@ -123,57 +129,55 @@ pub async fn run_target_diagnostics<W: Write>(
 pub async fn show_target<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
     target: &TargetHandle,
-    show_tool: Option<&mut ShowToolWrapper>,
+    show_tool: &mut impl ShowTargetRunner,
 ) {
-    if let Some(show_tool) = show_tool {
-        let mut node =
-            ledger.add_node("Running `ffx target show` against device", LedgerMode::Automatic);
-        match show_tool.allocate(target.node_name.clone()).await {
-            Ok(_) => {
-                node.add(LedgerNode::new(
-                    "Allocating proxies for `target show`".to_string(),
-                    LedgerMode::Verbose,
-                ))
-                .set_outcome(LedgerOutcome::Success);
-                match show_tool.run().await {
-                    Ok((stdout, stderr)) => {
+    let mut node =
+        ledger.add_node("Running `ffx target show` against device", LedgerMode::Automatic);
+    match show_tool.allocate(target.node_name.clone()).await {
+        Ok(_) => {
+            node.add(LedgerNode::new(
+                "Allocating proxies for `target show`".to_string(),
+                LedgerMode::Verbose,
+            ))
+            .set_outcome(LedgerOutcome::Success);
+            match show_tool.run().await {
+                Ok((stdout, stderr)) => {
+                    node.add(LedgerNode::new(
+                        "Executing `ffx target show`".to_string(),
+                        LedgerMode::Verbose,
+                    ))
+                    .set_outcome(LedgerOutcome::Success);
+                    node.add(LedgerNode::new(
+                        format!("stdout:\n\t{}", stdout.replace("\n", "\n\t"),),
+                        LedgerMode::Verbose,
+                    ))
+                    .set_outcome(LedgerOutcome::Info);
+                    if !stderr.is_empty() {
                         node.add(LedgerNode::new(
-                            "Executing `ffx target show`".to_string(),
-                            LedgerMode::Verbose,
-                        ))
-                        .set_outcome(LedgerOutcome::Success);
-                        node.add(LedgerNode::new(
-                            format!("stdout:\n\t{}", stdout.replace("\n", "\n\t"),),
+                            format!("stderr:\n\t{}", stderr.replace("\n", "\n\t")),
                             LedgerMode::Verbose,
                         ))
                         .set_outcome(LedgerOutcome::Info);
-                        if !stderr.is_empty() {
-                            node.add(LedgerNode::new(
-                                format!("stderr:\n\t{}", stderr.replace("\n", "\n\t")),
-                                LedgerMode::Verbose,
-                            ))
-                            .set_outcome(LedgerOutcome::Info);
-                        }
-                    }
-                    Err(e) => {
-                        node.add_node(
-                            &format!("Error executing `target show`: {:?}", e),
-                            LedgerMode::Verbose,
-                        )
-                        .set_outcome(LedgerOutcome::Failure);
                     }
                 }
+                Err(e) => {
+                    node.add_node(
+                        &format!("Error executing `target show`: {:?}", e),
+                        LedgerMode::Verbose,
+                    )
+                    .set_outcome(LedgerOutcome::Failure);
+                }
             }
-            Err(e) => {
-                node.add_node(
-                    &format!("Error while setting up `target show`: {:?}", e),
-                    LedgerMode::Normal,
-                )
-                .set_outcome(LedgerOutcome::Failure);
-            }
-        };
-        node.set_outcome(LedgerOutcome::Info);
-    }
+        }
+        Err(e) => {
+            node.add_node(
+                &format!("Error while setting up `target show`: {:?}", e),
+                LedgerMode::Normal,
+            )
+            .set_outcome(LedgerOutcome::Failure);
+        }
+    };
+    node.set_outcome(LedgerOutcome::Info);
 }
 
 pub fn check_product_state<W: Write>(
@@ -207,7 +211,7 @@ pub async fn check_targets_locally<W: Write>(
     ledger: &mut LedgerNodeGuard<'_, W>,
     target_str: &str,
     env_context: &EnvironmentContext,
-    mut show_tool: Option<ShowToolWrapper>,
+    mut show_tool: impl ShowTargetRunner,
     retry_delay: Duration,
 ) -> Result<()> {
     let query =
@@ -224,7 +228,7 @@ pub async fn check_targets_locally<W: Write>(
         target_str,
         query.as_ref(),
         env_context,
-        show_tool.as_mut(),
+        &mut show_tool,
         retry_delay,
     )
     .await
@@ -236,7 +240,7 @@ async fn check_discovered_targets<W: Write>(
     target_str: &str,
     query: Option<&TargetInfoQuery>,
     env_context: &EnvironmentContext,
-    mut show_tool: Option<&mut ShowToolWrapper>,
+    show_tool: &mut impl ShowTargetRunner,
     retry_delay: Duration,
 ) -> Result<()> {
     if targets.is_empty() {
@@ -266,14 +270,8 @@ async fn check_discovered_targets<W: Write>(
     for target in targets_to_check {
         let mut target_node =
             ledger.add_node(&format!("{prefix}{}", target_name(target)), LedgerMode::Normal);
-        check_single_target_locally(
-            &mut target_node,
-            target,
-            env_context,
-            show_tool.as_deref_mut(),
-            retry_delay,
-        )
-        .await?;
+        check_single_target_locally(&mut target_node, target, env_context, show_tool, retry_delay)
+            .await?;
     }
     Ok(())
 }
@@ -499,6 +497,13 @@ mod tests {
         }
     }
 
+    fn unused_mock_show_target_runner() -> MockShowTargetRunner {
+        let mut mock = MockShowTargetRunner::new();
+        mock.expect_allocate().never();
+        mock.expect_run().never();
+        mock
+    }
+
     #[fuchsia::test]
     async fn test_check_discovered_targets_empty() {
         let test_env = ffx_config::test_env().build().unwrap();
@@ -509,13 +514,14 @@ mod tests {
             LedgerViewMode::Verbose,
         );
 
+        let mut mock_show = unused_mock_show_target_runner();
         check_discovered_targets(
             &mut ledger.root_guard(),
             vec![],
             "some-target",
             None,
             &test_env.context,
-            None,
+            &mut mock_show,
             Duration::from_millis(100),
         )
         .await
@@ -540,13 +546,14 @@ mod tests {
             make_fastboot_target("target-b", "serial-b"),
         ];
 
+        let mut mock_show = unused_mock_show_target_runner();
         check_discovered_targets(
             &mut ledger.root_guard(),
             targets,
             "",
             None,
             &test_env.context,
-            None,
+            &mut mock_show,
             Duration::from_millis(100),
         )
         .await
@@ -574,13 +581,14 @@ mod tests {
         ];
         let query = TargetInfoQuery::try_from("target-a").unwrap();
 
+        let mut mock_show = unused_mock_show_target_runner();
         check_discovered_targets(
             &mut ledger.root_guard(),
             targets,
             "target-a",
             Some(&query),
             &test_env.context,
-            None,
+            &mut mock_show,
             Duration::from_millis(100),
         )
         .await
@@ -608,13 +616,14 @@ mod tests {
         ];
         let query = TargetInfoQuery::try_from("non-existent-device").unwrap();
 
+        let mut mock_show = unused_mock_show_target_runner();
         check_discovered_targets(
             &mut ledger.root_guard(),
             targets,
             "non-existent-device",
             Some(&query),
             &test_env.context,
-            None,
+            &mut mock_show,
             Duration::from_millis(100),
         )
         .await
@@ -647,11 +656,164 @@ mod tests {
                 &mut ledger.root_guard(),
                 "uart:",
                 &test_env.context,
-                None,
+                unused_mock_show_target_runner(),
                 Duration::from_millis(100),
             ))
             .await
             .is_err()
         );
+    }
+
+    #[fuchsia::test]
+    async fn test_show_target_success() {
+        let mut buf = Vec::new();
+        let target = TargetHandle {
+            node_name: Some("fuchsia-target-node".to_string()),
+            state: TargetState::Unknown,
+            manual: false,
+        };
+        let mut mock_show = MockShowTargetRunner::new();
+        mock_show
+            .expect_allocate()
+            .with(mockall::predicate::eq(Some("fuchsia-target-node".to_string())))
+            .times(1)
+            .returning(|_| Ok(()));
+        mock_show.expect_run().times(1).returning(|| {
+            Ok(("Target: fuchsia-target-node\nBoard: x64".to_string(), String::new()))
+        });
+
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Verbose,
+            );
+            show_target(&mut ledger.root_guard(), &target, &mut mock_show).await;
+        }
+
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("[i] Running `ffx target show` against device"),
+            "output: {output}"
+        );
+        assert!(output.contains("[✓] Allocating proxies for `target show`"), "output: {output}");
+        assert!(output.contains("[✓] Executing `ffx target show`"), "output: {output}");
+        assert!(
+            output.contains("[i] stdout:\n\tTarget: fuchsia-target-node\n\tBoard: x64"),
+            "output: {output}"
+        );
+        assert!(!output.contains("stderr:"), "output: {output}");
+    }
+
+    #[fuchsia::test]
+    async fn test_show_target_success_with_stderr() {
+        let mut buf = Vec::new();
+        let target = TargetHandle { node_name: None, state: TargetState::Unknown, manual: false };
+        let mut mock_show = MockShowTargetRunner::new();
+        mock_show
+            .expect_allocate()
+            .with(mockall::predicate::eq(None))
+            .times(1)
+            .returning(|_| Ok(()));
+        mock_show.expect_run().times(1).returning(|| {
+            Ok(("Target: unknown".to_string(), "warning line 1\nwarning line 2".to_string()))
+        });
+
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Verbose,
+            );
+            show_target(&mut ledger.root_guard(), &target, &mut mock_show).await;
+        }
+
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("[i] Running `ffx target show` against device"),
+            "output: {output}"
+        );
+        assert!(output.contains("[✓] Allocating proxies for `target show`"), "output: {output}");
+        assert!(output.contains("[✓] Executing `ffx target show`"), "output: {output}");
+        assert!(output.contains("[i] stdout:\n\tTarget: unknown"), "output: {output}");
+        assert!(
+            output.contains("[i] stderr:\n\twarning line 1\n\twarning line 2"),
+            "output: {output}"
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_show_target_allocate_error() {
+        let mut buf = Vec::new();
+        let target = TargetHandle {
+            node_name: Some("fuchsia-target-node".to_string()),
+            state: TargetState::Unknown,
+            manual: false,
+        };
+        let mut mock_show = MockShowTargetRunner::new();
+        mock_show
+            .expect_allocate()
+            .with(mockall::predicate::eq(Some("fuchsia-target-node".to_string())))
+            .times(1)
+            .returning(|_| Err(fho::user_error!("failed to allocate proxies")));
+        mock_show.expect_run().times(0);
+
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Verbose,
+            );
+            show_target(&mut ledger.root_guard(), &target, &mut mock_show).await;
+        }
+
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("[i] Running `ffx target show` against device"),
+            "output: {output}"
+        );
+        assert!(output.contains("[✗] Error while setting up `target show`:"), "output: {output}");
+        assert!(output.contains("failed to allocate proxies"), "output: {output}");
+        assert!(!output.contains("[✓] Allocating proxies for `target show`"), "output: {output}");
+        assert!(!output.contains("[✓] Executing `ffx target show`"), "output: {output}");
+    }
+
+    #[fuchsia::test]
+    async fn test_show_target_run_error() {
+        let mut buf = Vec::new();
+        let target = TargetHandle {
+            node_name: Some("fuchsia-target-node".to_string()),
+            state: TargetState::Unknown,
+            manual: false,
+        };
+        let mut mock_show = MockShowTargetRunner::new();
+        mock_show
+            .expect_allocate()
+            .with(mockall::predicate::eq(Some("fuchsia-target-node".to_string())))
+            .times(1)
+            .returning(|_| Ok(()));
+        mock_show
+            .expect_run()
+            .times(1)
+            .returning(|| Err(fho::user_error!("failed to run target show")));
+
+        {
+            let mut ledger = DoctorLedger::new(
+                &mut buf,
+                Box::new(RecordLedgerView::new()),
+                LedgerViewMode::Verbose,
+            );
+            show_target(&mut ledger.root_guard(), &target, &mut mock_show).await;
+        }
+
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("[i] Running `ffx target show` against device"),
+            "output: {output}"
+        );
+        assert!(output.contains("[✓] Allocating proxies for `target show`"), "output: {output}");
+        assert!(output.contains("[✗] Error executing `target show`:"), "output: {output}");
+        assert!(output.contains("failed to run target show"), "output: {output}");
+        assert!(!output.contains("[✓] Executing `ffx target show`"), "output: {output}");
     }
 }

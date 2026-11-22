@@ -4,34 +4,30 @@
 # found in the LICENSE file.
 """Validates a merged review result JSON file and renders it as Markdown.
 
-The report layout is the standard AI code review report: a decision headline,
-summary, scope and evaluated skills, then findings grouped by file and
-numbered in display order.
+The report layout uses progressive disclosure: a verdict headline, brief
+summary, metadata bullets, and findings grouped by severity (blocking issues
+before suggestions) and numbered sequentially in display order.
 
 Usage:
   render_report.py --review_result_file=FILE [--workspace=DIR]
-      [--min_confidence=N] [--effort=quick|standard|deep]
+      [--min_confidence=N] [--effort=quick|standard|deep|simplify]
 """
 
 import argparse
+import html
 import itertools
 import json
 import os
 import re
 import sys
+import types
 
 DECISIONS = {
-    "approved": "✅ **Approved** — All checks pass.",
-    "changes_requested": (
-        "❌ **Changes requested** — See inline comments for details."
-    ),
-    "approved_with_suggestions": (
-        "✅ **Approved with minor suggestions** — See inline comments for"
-        " optional improvements."
-    ),
+    "approved": "🟢 **Approved**",
+    "changes_requested": "❌ **Changes requested**",
+    "approved_with_suggestions": "🟢 **Approved with minor suggestions**",
     "not_applicable": (
-        "ℹ️ **N/A** — My review skills don't apply to the contents of this"
-        " change."
+        "ℹ️ **Not applicable** (no review skills apply to this change)"
     ),
 }
 
@@ -40,15 +36,44 @@ SEVERITIES = {
     "suggestion": "**💡 Suggestion**",
 }
 
+_SEVERITY_SECTIONS = types.MappingProxyType(
+    {
+        "blocking": "### Blocking issues",
+        "suggestion": "### Suggestions",
+    }
+)
+
 EFFORTS = {
     "quick": "Quick",
     "standard": "Standard",
     "deep": "Deep",
+    "simplify": "Simplify",
 }
+
+_SHORT_FILENAME_THRESHOLD = 24
+_MAX_PACKAGE_DEPTH = 4
+_DEFAULT_TRACE_TITLE = "Supporting details"
+_PACKAGE_ROOT_MARKERS = (
+    "BUILD.gn",
+    "BUILD.bazel",
+    "BUILD",
+    "Cargo.toml",
+    "SKILL.md",
+)
+_STRUCTURED_KEYS = (
+    "headline",
+    "why",
+    "details",
+    "action",
+    "trace",
+    "trace_title",
+)
 
 _PRE_EXISTING_PREFIX_RE = re.compile(
     r"^(?:\[pre-?existing\]\s*:?\s*)+", re.IGNORECASE
 )
+_BULLET_PREFIX_RE = re.compile(r"^[-*+]\s+")
+_ORDERED_PREFIX_RE = re.compile(r"^(\d+[.)]\s+)(?=\S)")
 
 
 class ReportError(ValueError):
@@ -59,6 +84,12 @@ def _normalize(value):
     return str(value or "").strip().lower()
 
 
+def _non_negative_int(value, label):
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ReportError(f"{label} must be a non-negative integer")
+    return value
+
+
 def _positive_int_or_none(finding, key, index):
     value = finding.get(key)
     if value is None:
@@ -66,6 +97,100 @@ def _positive_int_or_none(finding, key, index):
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ReportError(f"findings[{index}].{key} must be a positive integer")
     return value
+
+
+def _clean_required_text(
+    value,
+    label,
+    strip_pre_existing=False,
+    single_line=False,
+):
+    if value is None:
+        raise ReportError(f"{label} must not be empty")
+    if not isinstance(value, str):
+        raise ReportError(f"{label} must be a string")
+    text = " ".join(value.split()) if single_line else value.strip()
+    if strip_pre_existing:
+        text = _PRE_EXISTING_PREFIX_RE.sub("", text)
+        text = " ".join(text.split()) if single_line else text.strip()
+    if not text:
+        raise ReportError(f"{label} must not be empty")
+    return text
+
+
+def _clean_optional_str(finding, key, index, single_line=False):
+    value = finding.get(key)
+    if value is None:
+        finding.pop(key, None)
+        return None
+    if not isinstance(value, str):
+        raise ReportError(f"findings[{index}].{key} must be a string")
+    cleaned = " ".join(value.split()) if single_line else value.strip()
+    if not cleaned:
+        finding.pop(key, None)
+        return None
+    finding[key] = cleaned
+    return cleaned
+
+
+def _clean_string_list(finding, key, index):
+    items = finding.get(key)
+    if items is None:
+        return None
+    if not isinstance(items, list):
+        raise ReportError(f"findings[{index}].{key} must be a list of strings")
+    cleaned = []
+    for item_index, item in enumerate(items):
+        if not isinstance(item, str) or not item.strip():
+            raise ReportError(
+                f"findings[{index}].{key}[{item_index}] must be a non-empty"
+                " string"
+            )
+        cleaned.append(item.strip())
+    return cleaned
+
+
+def _validate_challenger_counts(payload):
+    kept = payload.get("challenger_kept")
+    total = payload.get("challenger_total")
+    if kept is None and total is None:
+        return
+    if kept is None or total is None:
+        raise ReportError(
+            "challenger_kept and challenger_total must be provided together"
+        )
+    _non_negative_int(kept, "challenger_kept")
+    _non_negative_int(total, "challenger_total")
+    if kept > total:
+        raise ReportError("challenger_kept must be <= challenger_total")
+
+
+def _validate_finding_body(finding, index, pre_existing):
+    if any(key in finding for key in _STRUCTURED_KEYS):
+        finding["headline"] = _clean_required_text(
+            finding.get("headline"),
+            f"findings[{index}].headline",
+            strip_pre_existing=pre_existing,
+            single_line=True,
+        )
+        finding["why"] = _clean_required_text(
+            finding.get("why"), f"findings[{index}].why"
+        )
+        details = _clean_string_list(finding, "details", index)
+        if details is not None:
+            finding["details"] = details
+        _clean_optional_str(finding, "action", index)
+        trace = _clean_string_list(finding, "trace", index)
+        if trace is not None:
+            finding["trace"] = trace
+        _clean_optional_str(finding, "trace_title", index, single_line=True)
+        return
+
+    finding["comment"] = _clean_required_text(
+        finding.get("comment"),
+        f"findings[{index}].comment",
+        strip_pre_existing=pre_existing,
+    )
 
 
 def validate(payload):
@@ -103,6 +228,7 @@ def validate(payload):
             )
         else:
             payload["effort"] = norm_effort
+    _validate_challenger_counts(payload)
     findings = payload.get("findings")
     if findings is None:
         findings = []
@@ -123,11 +249,9 @@ def validate(payload):
                 f"findings[{index}].pre_existing must be a boolean"
             )
         finding["severity"] = "suggestion" if pre_existing else severity
-        raw_comment = str(finding.get("comment") or "").strip()
-        if pre_existing:
-            raw_comment = _PRE_EXISTING_PREFIX_RE.sub("", raw_comment).strip()
-        if not raw_comment:
-            raise ReportError(f"findings[{index}].comment must not be empty")
+        _validate_finding_body(finding, index, bool(pre_existing))
+        if "file_path" in finding:
+            _clean_optional_str(finding, "file_path", index, single_line=True)
         confidence = finding.get("confidence")
         if confidence is not None:
             if (
@@ -145,6 +269,12 @@ def validate(payload):
             raise ReportError(
                 f"findings[{index}].line_end must be >= line_start"
             )
+    skills = payload.get("agent_skills")
+    if skills is not None:
+        if not isinstance(skills, list) or not all(
+            isinstance(s, str) for s in skills
+        ):
+            raise ReportError("agent_skills must be a list of strings")
     skipped = payload.get("skipped_files")
     if skipped is not None:
         if not isinstance(skipped, list) or not all(
@@ -164,30 +294,78 @@ def _file_uri(file_path, workspace_root):
     return f"file:///{full_path.lstrip('/')}"
 
 
-def _location_link(finding, workspace_root):
+def _initial_suffix_index(parts, workspace_root):
+    if len(parts) <= 1:
+        return 0
+    if workspace_root and os.path.isdir(workspace_root):
+        min_idx = max(0, len(parts) - _MAX_PACKAGE_DEPTH)
+        for idx in range(len(parts) - 2, min_idx - 1, -1):
+            candidate_dir = os.path.join(workspace_root, *parts[: idx + 1])
+            if any(
+                os.path.isfile(os.path.join(candidate_dir, marker))
+                for marker in _PACKAGE_ROOT_MARKERS
+            ):
+                return idx
+    if len(parts[-1]) >= _SHORT_FILENAME_THRESHOLD:
+        return len(parts) - 1
+    return len(parts) - 2
+
+
+def _collect_distinct_part_tuples(report):
+    seen = {}
+    for finding in report.get("findings") or ():
+        path = finding.get("file_path")
+        if path is not None:
+            parts = tuple(p for p in path.split("/") if p)
+            if parts:
+                seen[parts] = None
+    for entry in report.get("reviewed_files") or ():
+        if isinstance(entry, dict) and isinstance(
+            raw := entry.get("file_path"), str
+        ):
+            cleaned = " ".join(raw.split())
+            parts = tuple(p for p in cleaned.split("/") if p)
+            if parts:
+                seen[parts] = None
+    return tuple(seen)
+
+
+def _build_short_paths(report, workspace_root):
+    indices = {
+        parts: _initial_suffix_index(parts, workspace_root)
+        for parts in _collect_distinct_part_tuples(report)
+    }
+    while True:
+        by_suffix = {}
+        for parts, idx in indices.items():
+            by_suffix.setdefault(parts[idx:], []).append(parts)
+        progressed = False
+        for group in by_suffix.values():
+            if len(group) > 1:
+                for parts in group:
+                    if indices[parts] > 0:
+                        indices[parts] -= 1
+                        progressed = True
+        if not progressed:
+            break
+    return {parts: "/".join(parts[idx:]) for parts, idx in indices.items()}
+
+
+def _short_location_link(finding, workspace_root, short_paths):
     path = finding["file_path"]
     target = _file_uri(path, workspace_root)
+    parts = tuple(part for part in path.split("/") if part)
+    short_path = short_paths.get(parts, path) if parts else path
     start = finding.get("line_start")
     if start is None:
-        return f"[`{path}`]({target})"
-    anchor = label = f"L{start}"
+        return f"[{short_path}]({target})"
+    anchor = f"L{start}"
+    label = f"{short_path}:{start}"
     end = finding.get("line_end")
     if end is not None and end != start:
         anchor = f"{anchor}-L{end}"
         label = f"{label}-{end}"
-    snippet = str(finding.get("code_snippet") or "").strip()
-    if not snippet:
-        return f"[**{label}**]({target}#{anchor})"
-    # Keep only the first line so the link stays on one line.
-    first_line = snippet.splitlines()[0].strip()
-    if "\n" in snippet:
-        first_line = f"{first_line} ..."
-    # Use a longer backtick run than any in the snippet so it can't end the
-    # code span early.
-    ticks = "`" * (_longest_backtick_run(first_line) + 1)
-    if ticks == "`":
-        return f"[**{label}** `{first_line}`]({target}#{anchor})"
-    return f"[**{label}** {ticks} {first_line} {ticks}]({target}#{anchor})"
+    return f"[{label}]({target}#{anchor})"
 
 
 def _render_rule(finding):
@@ -200,34 +378,119 @@ def _render_rule(finding):
     return ""
 
 
-def _render_finding(finding, workspace_root):
+def _render_diff_block(diff, indent):
+    # The fence must be longer than any backtick run in the diff.
+    fence = "`" * max(3, _longest_backtick_run(diff) + 1)
+    lines = ["", f"{indent}{fence}diff"]
+    lines.extend(f"{indent}{line}" for line in diff.splitlines())
+    lines.append(f"{indent}{fence}")
+    return lines
+
+
+def _strip_bullet_prefix(text):
+    raw_lines = text.splitlines()
+    if (rest := _BULLET_PREFIX_RE.sub("", raw_lines[0], count=1)).strip():
+        raw_lines[0] = rest
+    return "\n".join(raw_lines)
+
+
+def _render_list_item(item_indent, marker, text):
+    cont_indent = f"{item_indent}{' ' * len(marker)}"
+    raw_lines = text.splitlines()
+    lines = [f"{item_indent}{marker}{raw_lines[0]}"]
+    for line in raw_lines[1:]:
+        lines.append(f"{cont_indent}{line}" if line.strip() else "")
+    return lines
+
+
+def _render_bullet(bullet_indent, text):
+    return _render_list_item(bullet_indent, "- ", text)
+
+
+def _render_trace_items(indent, trace):
+    lines = []
+    prev_ordered = None
+    for item in trace:
+        raw_lines = item.splitlines()
+        match = _ORDERED_PREFIX_RE.match(raw_lines[0])
+        is_ordered = match is not None
+        if prev_ordered is not None and prev_ordered != is_ordered:
+            lines.append("")
+        if match is not None:
+            marker = match.group(1)
+            body = "\n".join((raw_lines[0][len(marker) :], *raw_lines[1:]))
+            lines.extend(_render_list_item(indent, marker, body))
+        else:
+            lines.extend(_render_bullet(indent, _strip_bullet_prefix(item)))
+        prev_ordered = is_ordered
+    return lines
+
+
+def _render_finding(finding, workspace_root, short_paths):
+    prefix = f"{finding['finding_id']}. "
+    indent = " " * len(prefix)
     badge = SEVERITIES[finding["severity"]]
+    pre = " [Pre-existing]" if finding.get("pre_existing") else ""
     conf = (
         f" (Confidence: {finding['confidence']}%)"
         if finding.get("confidence") is not None
         else ""
     )
+    provenance = f"{badge}{pre}{conf}{_render_rule(finding)}"
     loc = (
-        f" {_location_link(finding, workspace_root)}"
-        if finding.get("file_path")
+        _short_location_link(finding, workspace_root, short_paths)
+        if finding.get("file_path") is not None
         else ""
     )
-    comment = str(finding["comment"]).strip()
-    if finding.get("pre_existing"):
-        body = _PRE_EXISTING_PREFIX_RE.sub("", comment).strip()
-        comment = f"[Pre-existing] {body}"
-    lines = [
-        f"- **#{finding['finding_id']}**{loc}",
-        "",
-        f"  {badge}{conf}{_render_rule(finding)}: {comment}",
-    ]
+
+    if finding.get("headline") is not None:
+        header = (
+            f"{prefix}**{finding['headline']}** ({loc})"
+            if loc
+            else f"{prefix}**{finding['headline']}**"
+        )
+        lines = [header, "", f"{indent}{provenance}", ""]
+        lines.extend(
+            _render_bullet(indent, f"**Why it matters:** {finding['why']}")
+        )
+        for detail in finding.get("details") or ():
+            lines.extend(
+                _render_bullet(f"{indent}  ", _strip_bullet_prefix(detail))
+            )
+        if (action := finding.get("action")) is not None:
+            lines.extend(_render_bullet(indent, f"**Action:** {action}"))
+        if (diff := finding.get("suggested_diff")) is not None and diff:
+            lines.extend(_render_diff_block(diff, indent))
+        trace = finding.get("trace")
+        if trace:
+            raw_title = finding.get("trace_title")
+            trace_title = html.escape(
+                raw_title if raw_title is not None else _DEFAULT_TRACE_TITLE,
+                quote=False,
+            )
+            lines.extend(
+                [
+                    "",
+                    f"{indent}<details>",
+                    f"{indent}<summary>{trace_title}</summary>",
+                    "",
+                ]
+            )
+            lines.extend(_render_trace_items(indent, trace))
+            lines.append(f"{indent}</details>")
+        lines.append("")
+        return lines
+
+    lines = (
+        [f"{prefix}{loc}", "", f"{indent}{provenance}", ""]
+        if loc
+        else [f"{prefix}{provenance}", ""]
+    )
+    for line in finding["comment"].splitlines():
+        lines.append(f"{indent}{line}" if line.strip() else "")
     diff = finding.get("suggested_diff")
     if diff:
-        # The fence must be longer than any backtick run in the diff.
-        fence = "`" * max(3, _longest_backtick_run(diff) + 1)
-        lines.extend(["", f"  {fence}diff"])
-        lines.extend(f"  {line}" for line in diff.splitlines())
-        lines.append(f"  {fence}")
+        lines.extend(_render_diff_block(diff, indent))
     lines.append("")
     return lines
 
@@ -240,6 +503,14 @@ def _recompute_decision(current_decision, findings):
     if findings:
         return "approved_with_suggestions"
     return "approved"
+
+
+def _format_decision(decision, n_blocking, n_suggestions):
+    base = DECISIONS[decision]
+    if decision in ("changes_requested", "approved_with_suggestions"):
+        noun = "suggestion" if n_suggestions == 1 else "suggestions"
+        return f"{base} ({n_blocking} blocking, {n_suggestions} {noun})"
+    return base
 
 
 def _meets_min_confidence(finding, min_confidence, require_score):
@@ -255,7 +526,7 @@ def _format_skipped_files(skipped):
     preview = ", ".join(f"`{p}`" for p in skipped[:5])
     if count > 5:
         preview = f"{preview}, +{count - 5} more"
-    return f"- **Skipped Files**: {count} {noun} matched skip globs ({preview})"
+    return f"- **Skipped files**: {count} {noun} matched skip globs ({preview})"
 
 
 def render(payload, workspace_root="", min_confidence=None, effort=None):
@@ -278,6 +549,9 @@ def render(payload, workspace_root="", min_confidence=None, effort=None):
         report["findings"] = [
             f for f in report["findings"] if f["severity"] == "blocking"
         ]
+    elif report.get("effort") == "simplify":
+        for finding in report["findings"]:
+            finding["severity"] = "suggestion"
     if min_confidence is not None:
         if not 0 <= min_confidence <= 100:
             raise ReportError("min_confidence must be between 0 and 100")
@@ -289,28 +563,12 @@ def render(payload, workspace_root="", min_confidence=None, effort=None):
     report["decision"] = _recompute_decision(
         report["decision"], report["findings"]
     )
-    lines = ["## Code Review", "", DECISIONS[report["decision"]], ""]
-    if report.get("summary"):
-        lines.extend([report["summary"], ""])
-    if report.get("scope"):
-        lines.append(f"- **Scope**: {report['scope']}")
-    if report.get("effort"):
-        lines.append(f"- **Effort**: {EFFORTS[report['effort']]}")
-    skills = report.get("agent_skills") or []
-    if skills:
-        lines.append(
-            "- **Skills Evaluated**: " + ", ".join(f"`{s}`" for s in skills)
-        )
-    skipped = report.get("skipped_files") or []
-    if skipped:
-        lines.append(_format_skipped_files(skipped))
-    lines.append("")
-
-    # Findings without a file sort first; within a file, file-level findings
-    # sort before line findings.
+    # Blocking findings always appear before suggestions; within each group,
+    # sort by file path and line range.
     ordered = sorted(
         report["findings"],
         key=lambda f: (
+            0 if f["severity"] == "blocking" else 1,
             f.get("file_path") or "",
             f.get("line_start") or 0,
             f.get("line_end") or 0,
@@ -319,15 +577,48 @@ def render(payload, workspace_root="", min_confidence=None, effort=None):
     for index, finding in enumerate(ordered, start=1):
         finding["finding_id"] = str(index)
 
-    for file_path, group in itertools.groupby(
-        ordered, key=lambda f: f.get("file_path") or ""
+    n_blocking = sum(1 for f in ordered if f["severity"] == "blocking")
+    n_suggestions = len(ordered) - n_blocking
+
+    lines = [
+        "## Code review",
+        "",
+        _format_decision(report["decision"], n_blocking, n_suggestions),
+        "",
+    ]
+    summary = str(report.get("summary") or "").strip()
+    if summary:
+        lines.extend([summary, ""])
+    meta_lines = []
+    scope = " ".join(str(report.get("scope") or "").split())
+    if scope:
+        meta_lines.append(f"- **Scope**: {scope}")
+    if report.get("effort"):
+        effort_line = f"- **Effort**: {EFFORTS[report['effort']]}"
+        if report.get("challenger_total") and not is_quick:
+            kept = report["challenger_kept"]
+            total = report["challenger_total"]
+            effort_line += (
+                f" (challenger kept {kept} of {total} Round-1 draft findings)"
+            )
+        meta_lines.append(effort_line)
+    skills = report.get("agent_skills") or []
+    if skills:
+        meta_lines.append("- **Skills evaluated**: " + ", ".join(skills))
+    skipped = report.get("skipped_files") or []
+    if skipped:
+        meta_lines.append(_format_skipped_files(skipped))
+    if meta_lines:
+        lines.extend(meta_lines)
+        lines.append("")
+
+    short_paths = _build_short_paths(report, workspace_root)
+    for severity, group in itertools.groupby(
+        ordered, key=lambda f: f["severity"]
     ):
-        lines.extend(["---", ""])
-        if file_path:
-            uri = _file_uri(file_path, workspace_root)
-            lines.extend([f"### [`{file_path}`]({uri})", ""])
+        lines.extend(["---", "", _SEVERITY_SECTIONS[severity], ""])
         for finding in group:
-            lines.extend(_render_finding(finding, workspace_root))
+            lines.extend(_render_finding(finding, workspace_root, short_paths))
 
     report["findings"] = ordered
     return "\n".join(lines).rstrip() + "\n"

@@ -59,7 +59,7 @@ use starnix_modules::{
 };
 
 use starnix_task_command::TaskCommand;
-use starnix_uapi::errors::{ENOENT, SourceContext};
+use starnix_uapi::errors::{ENOENT, Errno, SourceContext};
 use starnix_uapi::open_flags::OpenFlags;
 use starnix_uapi::resource_limits::Resource;
 use starnix_uapi::{errno, tid_t};
@@ -324,6 +324,26 @@ pub struct ContainerProgram {
     pub stop_last_on_shutdown: Vec<String>,
 }
 
+impl ContainerProgram {
+    /// Compiles `task_role_overrides` from this container's `program` block into [`RoleOverrides`].
+    pub fn build_role_overrides(&self) -> Result<RoleOverrides, Error> {
+        let mut task_mappings = RoleOverrides::new();
+        for m in &self.task_role_overrides {
+            task_mappings
+                .add(&m.role)
+                .with_process(m.process.as_deref())
+                .with_thread(m.thread.as_deref())
+                .with_cgroup(m.cgroup.as_deref())
+                .with_is_leader(m.is_leader.as_ref().map(|v| **v))
+                .with_min_nice(m.min_nice.as_ref().map(|v| **v))
+                .with_max_nice(m.max_nice.as_ref().map(|v| **v))
+                .with_uclamp_min(m.uclamp_min.map(|UclampRange(min, max)| (min, max)))
+                .with_system_mode(m.system_mode.as_deref());
+        }
+        task_mappings.build().context("adding custom task role")
+    }
+}
+
 /// Inclusive `[min, max]` range (`0..=1024`) for matching a task's `uclamp.min` (`sched_util_min`).
 ///
 /// Supports `"min..=max"`, `"min-max"`, `"min"` (interpreted as `min..=1024`), or `["min", "max"]`
@@ -392,16 +412,31 @@ impl<'de> Deserialize<'de> for UclampRange {
     }
 }
 
-/// Specifies a role override for a class of tasks whose process and thread names match provided
-/// patterns.
+/// Specifies a role override for a class of tasks whose process, thread, cgroup, or scheduler
+/// state attributes match provided filters.
+///
+/// Rules are sorted at container startup by [`RoleOverridesBuilder::build`] into a 4-layer
+/// `(process, thread)` identity waterfall:
+/// 1. `process` and `thread` both specified (`ProcessAndThread`)
+/// 2. `thread` only (`Thread`)
+/// 3. `process` only (`Process`)
+/// 4. neither `process` nor `thread` specified (`Unidentified`)
+///
+/// Within each identity layer, rules with a `cgroup` filter precede rules without `cgroup`, and
+/// rules with state modifiers (`is_leader`, `min_nice`, `max_nice`, `uclamp_min`, `system_mode`)
+/// precede unqualified baseline rules, using `.cml` declaration order only as a tie-breaker within
+/// the same bucket. To leave `process` or `thread` unconstrained so a rule is placed in a lower
+/// identity layer, omit the field (`None`) rather than specifying a catch-all regex such as
+/// `".+"` or `".*"`.
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TaskSchedulerMapping {
     /// The role name to use for tasks matching the provided patterns.
     role: String,
-    /// A regular expression that will be matched against the process' command.
-    process: String,
-    /// A regular expression that will be matched against the thread's command.
-    thread: String,
+    /// An optional regular expression that will be matched against the process' command.
+    process: Option<String>,
+    /// An optional regular expression that will be matched against the thread's command.
+    thread: Option<String>,
     /// An optional regular expression that will be matched against the task's cgroup path.
     cgroup: Option<String>,
     /// An optional filter matching whether the task is the thread-group leader (`tid == pid`).
@@ -421,7 +456,7 @@ impl std::fmt::Debug for TaskSchedulerMapping {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "process `{}` thread `{}` cgroup `{:?}` is_leader `{:?}` min_nice `{:?}` max_nice `{:?}` uclamp_min `{:?}` system_mode `{:?}` role `{}`",
+            "process `{:?}` thread `{:?}` cgroup `{:?}` is_leader `{:?}` min_nice `{:?}` max_nice `{:?}` uclamp_min `{:?}` system_mode `{:?}` role `{}`",
             self.process,
             self.thread,
             self.cgroup,
@@ -676,7 +711,7 @@ async fn get_bootitems() -> Result<std::vec::Vec<u8>, Error> {
         connect_to_protocol::<fboot::ItemsMarker>().context("Failed to connect to boot items")?;
 
     let items_response = items
-        .get2(zbi::Type::Devicetree.into(), None)
+        .get2(zbi::Type::DEVICETREE.into(), None)
         .await
         .context("FIDL: Failed to get devicetree item")?
         .map_err(|e| anyhow!("Failed to get devicetree item {:?}", e))?;
@@ -869,21 +904,7 @@ async fn create_container(
 
     // Check whether we actually have access to a role manager by trying to set our own
     // thread's role.
-    let mut task_mappings = RoleOverrides::new();
-    for m in &start_info.program.task_role_overrides {
-        task_mappings.add_with_filters(
-            m.process.clone(),
-            m.thread.clone(),
-            m.cgroup.clone(),
-            m.is_leader.as_ref().map(|v| **v),
-            m.min_nice.as_ref().map(|v| **v),
-            m.max_nice.as_ref().map(|v| **v),
-            m.uclamp_min.map(|UclampRange(min, max)| (min, max)),
-            m.system_mode.clone(),
-            m.role.clone(),
-        );
-    }
-    let task_mappings = task_mappings.build().context("adding custom task role")?;
+    let task_mappings = start_info.program.build_role_overrides()?;
     if !modules.is_enabled("system_mode")
         && start_info.program.task_role_overrides.iter().any(|m| m.system_mode.is_some())
     {
@@ -1213,10 +1234,24 @@ fn init_remote_block_devices(kernel: &Kernel) -> Result<(), Error> {
         }
         let name = entry.file_name();
         let name_str = name.to_str().unwrap();
-        kernel
+        match kernel
             .remote_block_device_registry
             .create_remote_block_device(kernel, &name_str, client_end)
-            .with_source_context(|| format!("creating remote block device: {name_str}"))?;
+        {
+            Ok(()) => (),
+            Err(err) if err.downcast_ref::<Errno>().is_some_and(|e| *e == ENOENT) => {
+                // `fshost` may publish grouping subdirectories (such as `/block/ota` or
+                // `/block/bootmanager`) alongside top-level block service directories under
+                // `/block`. Because `fdio::service_connect` is pipelined, non-block
+                // subdirectories surface `ENOENT` when `RemoteBlockClient` connects.
+                log_debug!("Skipping non-block directory entry at {}", path);
+                continue;
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_source_context(|| format!("creating remote block device: {name_str}"));
+            }
+        }
     }
     Ok(())
 }
@@ -1306,9 +1341,20 @@ async fn serve_task_provider(mut job_requests: TaskProviderRequestStream) -> Res
 
 #[cfg(test)]
 mod test {
-    use super::{TaskSchedulerMapping, UclampRange, parse_rlimits, wait_for_init_file};
+    use super::{
+        ContainerProgram, TaskSchedulerMapping, UclampRange, init_remote_block_devices,
+        parse_rlimits, wait_for_init_file,
+    };
+    use fidl::endpoints::{DiscoverableProtocolMarker as _, RequestStream as _, ServerEnd};
     use fidl_fuchsia_data::{Dictionary, DictionaryEntry, DictionaryValue};
-    use futures::{SinkExt, StreamExt};
+    use fidl_fuchsia_io as fio;
+    use fidl_fuchsia_storage_block::{
+        BlockInfo, BlockMarker, BlockRequest, BlockRequestStream, DeviceFlag, SessionRequest, VmoId,
+    };
+    use futures::channel::oneshot;
+    use futures::{SinkExt, StreamExt, TryStreamExt as _};
+    use starnix_core::fs::sysfs::BlockDeviceInfo as _;
+    use starnix_core::task::{DEFAULT_SYSTEM_MODE, SchedulerManager, SchedulerState};
     use starnix_core::testing::spawn_kernel_and_run;
     use starnix_core::vfs::FdNumber;
     use starnix_uapi::CLONE_FS;
@@ -1317,6 +1363,7 @@ mod test {
     use starnix_uapi::resource_limits::Resource;
     use starnix_uapi::signals::SIGCHLD;
     use starnix_uapi::vfs::ResolveFlags;
+    use std::sync::Arc;
 
     #[fuchsia::test]
     fn test_parse_rlimits() {
@@ -1430,10 +1477,6 @@ mod test {
                     value: Some(Box::new(DictionaryValue::Str("boosted_role".to_string()))),
                 },
                 DictionaryEntry {
-                    key: "process".to_string(),
-                    value: Some(Box::new(DictionaryValue::Str(".+".to_string()))),
-                },
-                DictionaryEntry {
                     key: "thread".to_string(),
                     value: Some(Box::new(DictionaryValue::Str("^RenderThread$".to_string()))),
                 },
@@ -1454,6 +1497,8 @@ mod test {
             DictionaryValue::Str("1..=1024".to_string()),
         ))
         .expect("deserialize 1..=1024");
+        assert_eq!(mapping.process, None);
+        assert_eq!(mapping.thread.as_deref(), Some("^RenderThread$"));
         assert_eq!(mapping.uclamp_min, Some(UclampRange(1, 1024)));
         assert_eq!(mapping.system_mode.as_deref(), Some("^(LAUNCH|GAME)$"));
 
@@ -1516,6 +1561,359 @@ mod test {
                 err_msg.contains(expected_err),
                 "for {invalid_vec:?}: expected error containing {expected_err:?}, got {err_msg:?}"
             );
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_build_role_overrides_forwards_all_filters() {
+        let entry = |key: &str, value: DictionaryValue| DictionaryEntry {
+            key: key.to_string(),
+            value: Some(Box::new(value)),
+        };
+        let str_entry = |key: &str, val: &str| entry(key, DictionaryValue::Str(val.to_string()));
+
+        let program_dict = Dictionary {
+            entries: Some(vec![
+                str_entry("name", "test_container"),
+                entry("init", DictionaryValue::StrVec(vec![])),
+                entry(
+                    "task_role_overrides",
+                    DictionaryValue::ObjVec(vec![
+                        Dictionary {
+                            entries: Some(vec![
+                                str_entry("role", "role.leader"),
+                                str_entry("process", "^app$"),
+                                str_entry("thread", "^app$"),
+                                str_entry("cgroup", "^/top-app$"),
+                                str_entry("is_leader", "true"),
+                            ]),
+                            ..Default::default()
+                        },
+                        Dictionary {
+                            entries: Some(vec![
+                                str_entry("role", "role.filtered"),
+                                str_entry("process", "^app$"),
+                                str_entry("thread", "^worker$"),
+                                str_entry("min_nice", "-4"),
+                                str_entry("max_nice", "4"),
+                                str_entry("uclamp_min", "100..=500"),
+                                str_entry("system_mode", "^LAUNCH$"),
+                            ]),
+                            ..Default::default()
+                        },
+                    ]),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let program: ContainerProgram =
+            runner::serde::deserialize_program(&program_dict).expect("deserialize program");
+        let overrides = program.build_role_overrides().expect("build role overrides");
+
+        let default_state = SchedulerState::for_tests("SCHED_NORMAL", 0, 0, 0).expect("state");
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "app",
+                "/top-app",
+                true,
+                &default_state,
+                DEFAULT_SYSTEM_MODE,
+            )
+            .expect("resolve")
+            .0,
+            "role.leader"
+        );
+        // Non-leader (even with inherited command name) or different cgroup must not match
+        // `role.leader`.
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "app",
+                "/top-app",
+                false,
+                &default_state,
+                DEFAULT_SYSTEM_MODE,
+            )
+            .expect("resolve")
+            .0,
+            "fuchsia.starnix.fair.16"
+        );
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "app",
+                "/",
+                true,
+                &default_state,
+                DEFAULT_SYSTEM_MODE,
+            )
+            .expect("resolve")
+            .0,
+            "fuchsia.starnix.fair.16"
+        );
+
+        let matching_worker =
+            SchedulerState::for_tests("SCHED_NORMAL", 4, 0, 250).expect("matching worker");
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "worker",
+                "/",
+                false,
+                &matching_worker,
+                "LAUNCH",
+            )
+            .expect("resolve"),
+            ("role.filtered", true)
+        );
+        // Mismatched system_mode, uclamp_min, or nice bounds must fall back.
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "worker",
+                "/",
+                false,
+                &matching_worker,
+                DEFAULT_SYSTEM_MODE,
+            )
+            .expect("resolve"),
+            ("fuchsia.starnix.fair.14", true)
+        );
+        let low_uclamp = SchedulerState::for_tests("SCHED_NORMAL", 0, 0, 99).expect("low uclamp");
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides,
+                "app",
+                "worker",
+                "/",
+                false,
+                &low_uclamp,
+                "LAUNCH",
+            )
+            .expect("resolve")
+            .0,
+            "fuchsia.starnix.fair.16"
+        );
+        let high_nice = SchedulerState::for_tests("SCHED_NORMAL", 5, 0, 250).expect("high nice");
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides, "app", "worker", "/", false, &high_nice, "LAUNCH",
+            )
+            .expect("resolve")
+            .0,
+            "fuchsia.starnix.fair.13"
+        );
+        let low_nice = SchedulerState::for_tests("SCHED_NORMAL", -5, 0, 250).expect("low nice");
+        assert_eq!(
+            SchedulerManager::resolve_role_name_for_tests(
+                &overrides, "app", "worker", "/", false, &low_nice, "LAUNCH",
+            )
+            .expect("resolve")
+            .0,
+            "fuchsia.starnix.fair.18"
+        );
+
+        // Unknown fields in `task_role_overrides` must be rejected during deserialization rather
+        // than silently producing an unconstrained catch-all rule.
+        let unknown_field_dict = Dictionary {
+            entries: Some(vec![str_entry("role", "custom_role"), str_entry("threads", "^foo$")]),
+            ..Default::default()
+        };
+        let err = runner::serde::deserialize_program::<TaskSchedulerMapping>(&unknown_field_dict)
+            .expect_err("unknown field in TaskSchedulerMapping must fail");
+        assert!(format!("{err:#}").contains("unknown field `threads`"), "{err:#}");
+    }
+
+    async fn serve_fake_block(
+        mut requests: BlockRequestStream,
+        block_count: u64,
+        block_size: u32,
+        scope: vfs::ExecutionScope,
+    ) {
+        const BLOCK_FIFO_ELEM_BYTES: usize = 64;
+        const BLOCK_FIFO_DEPTH: usize = 16;
+
+        while let Ok(Some(request)) = requests.try_next().await {
+            match request {
+                BlockRequest::GetInfo { responder } => {
+                    let info = BlockInfo {
+                        block_count,
+                        block_size,
+                        max_transfer_size: u32::MAX,
+                        flags: DeviceFlag::empty(),
+                    };
+                    let _ = responder.send(Ok(&info));
+                }
+                BlockRequest::OpenSession { session, .. } => {
+                    scope.spawn(async move {
+                        let (_server_fifo, client_fifo) = zx::Fifo::<
+                            [u8; BLOCK_FIFO_ELEM_BYTES],
+                            [u8; BLOCK_FIFO_ELEM_BYTES],
+                        >::create(
+                            BLOCK_FIFO_DEPTH
+                        )
+                        .expect("create block fifo");
+                        let mut client_fifo =
+                            Some(zx::Fifo::from(zx::NullableHandle::from(client_fifo)));
+                        let mut next_vmo_id: u16 = 1;
+                        let mut session_stream = session.into_stream();
+                        while let Ok(Some(session_req)) = session_stream.try_next().await {
+                            match session_req {
+                                SessionRequest::GetFifo { responder } => match client_fifo.take() {
+                                    Some(fifo) => {
+                                        let _ = responder.send(Ok(fifo));
+                                    }
+                                    None => {
+                                        let _ =
+                                            responder.send(Err(zx::Status::BAD_STATE.into_raw()));
+                                    }
+                                },
+                                SessionRequest::AttachVmo { responder, .. } => {
+                                    let vmo_id = VmoId { id: next_vmo_id };
+                                    next_vmo_id += 1;
+                                    let _ = responder.send(Ok(&vmo_id));
+                                }
+                                SessionRequest::Close { responder } => {
+                                    let _ = responder.send(Ok(()));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn block_service_dir(
+        block_count: u64,
+        block_size: u32,
+    ) -> Arc<vfs::directory::immutable::Simple> {
+        vfs::pseudo_directory! {
+            BlockMarker::PROTOCOL_NAME => vfs::service::endpoint(move |scope, channel| {
+                let inner_scope = scope.clone();
+                scope.spawn(async move {
+                    let stream = BlockRequestStream::from_channel(channel);
+                    serve_fake_block(stream, block_count, block_size, inner_scope).await;
+                });
+            }),
+        }
+    }
+
+    struct ScopedBlockNamespace {
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        server_thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl ScopedBlockNamespace {
+        fn bind(dir: Arc<vfs::directory::immutable::Simple>) -> Self {
+            let (client_end, server_end) =
+                fidl::endpoints::create_endpoints::<fio::DirectoryMarker>();
+            let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+            let server_thread = std::thread::spawn(move || {
+                let mut executor = fuchsia_async::LocalExecutor::default();
+                executor.run_singlethreaded(async move {
+                    let scope = vfs::ExecutionScope::new();
+                    vfs::directory::serve_on(dir, fio::PERM_READABLE, scope.clone(), server_end);
+                    let _ = shutdown_rx.await;
+                    scope.shutdown();
+                    scope.wait().await;
+                });
+            });
+            let ns = fdio::Namespace::installed().expect("installed namespace");
+            ns.bind("/block", client_end).expect("bind /block in test namespace");
+            Self { shutdown_tx: Some(shutdown_tx), server_thread: Some(server_thread) }
+        }
+    }
+
+    impl Drop for ScopedBlockNamespace {
+        fn drop(&mut self) {
+            if let Ok(ns) = fdio::Namespace::installed() {
+                let _ = ns.unbind("/block");
+            }
+            drop(self.shutdown_tx.take());
+            if let Some(handle) = self.server_thread.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_init_remote_block_devices() {
+        // Subcase 1: grouping subdirectories (`bootmanager`, `ota`) are skipped while top-level
+        // block service directories (`misc`, `tee_persist`) are registered.
+        {
+            const BLOCK_SIZE: u32 = 512;
+            const MISC_BLOCKS: u64 = 2;
+            const PERSIST_BLOCKS: u64 = 4;
+            const NESTED_BLOCKS: u64 = 8;
+
+            let _bound_block = ScopedBlockNamespace::bind(vfs::pseudo_directory! {
+                "bootmanager" => vfs::pseudo_directory! {
+                    "devinfo" => block_service_dir(NESTED_BLOCKS, BLOCK_SIZE),
+                },
+                "misc" => block_service_dir(MISC_BLOCKS, BLOCK_SIZE),
+                "ota" => vfs::pseudo_directory! {
+                    "zircon_a" => block_service_dir(NESTED_BLOCKS, BLOCK_SIZE),
+                    "zircon_b" => vfs::pseudo_directory! {},
+                },
+                "tee_persist" => block_service_dir(PERSIST_BLOCKS, BLOCK_SIZE),
+            });
+
+            spawn_kernel_and_run(async move |current_task| {
+                let kernel = current_task.kernel();
+                init_remote_block_devices(kernel)
+                    .expect("init_remote_block_devices should skip grouping subdirectories");
+
+                let registry = &kernel.remote_block_device_registry;
+                let mut registered_sizes: Vec<usize> = (0..8)
+                    .filter_map(|minor| registry.open(minor).ok())
+                    .map(|dev| dev.size().expect("device size"))
+                    .collect();
+                registered_sizes.sort_unstable();
+                assert_eq!(
+                    registered_sizes,
+                    vec![
+                        (MISC_BLOCKS as usize) * (BLOCK_SIZE as usize),
+                        (PERSIST_BLOCKS as usize) * (BLOCK_SIZE as usize),
+                    ],
+                    "only top-level block service entries should be registered"
+                );
+            })
+            .await;
+        }
+
+        // Subcase 2: non-ENOENT failures on real block entries still fail initialization.
+        {
+            let _bound_block = ScopedBlockNamespace::bind(vfs::pseudo_directory! {
+                "broken_disk" => vfs::pseudo_directory! {
+                    BlockMarker::PROTOCOL_NAME => vfs::service::endpoint(move |_scope, channel| {
+                        let server_end: ServerEnd<BlockMarker> =
+                            channel.into_zx_channel().into();
+                        let _ = server_end.close_with_epitaph(zx::Status::IO);
+                    }),
+                },
+            });
+
+            spawn_kernel_and_run(async move |current_task| {
+                let err = init_remote_block_devices(current_task.kernel())
+                    .expect_err("non-ENOENT block failure must fail initialization");
+                let err_msg = format!("{err:#}");
+                assert!(
+                    err_msg.contains("creating remote block device: broken_disk"),
+                    "unexpected error chain: {err_msg}"
+                );
+            })
+            .await;
         }
     }
 }

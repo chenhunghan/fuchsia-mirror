@@ -18,6 +18,12 @@ load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
 
+test_suite(
+    name = "tests",
+    tests = [":log-command-test"],
+    visibility = ["//src/diagnostics:__pkg__"],
+)
+
 _COMMON_SRCS = [
     "src/filter.rs",
     "src/fxt_streamer.rs",
@@ -157,5 +163,4 @@ fx_package(
 fx_test(
     name = "log-command-test",
     package = ":log-command-test-package",
-    visibility = ["//src/diagnostics:__pkg__"],
 )

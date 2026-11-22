@@ -132,7 +132,7 @@ The above declares a structure called `MyRequest` with three members: an
 unsigned 32-bit integer called `serial`, a string called `key`, and a vector of
 unsigned 32-bit integers called `options`
 
-### Messaging Models
+### Messaging models {#messaging-models}
 
 In order to understand FIDL's messaging, we need to break things up into two
 layers, and clarify some definitions.

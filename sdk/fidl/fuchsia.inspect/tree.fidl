@@ -4,6 +4,7 @@
 @available(added=7)
 library fuchsia.inspect;
 using fuchsia.mem;
+using zx;
 
 /// Maximum length of an Inspect Tree, specified by the format.
 const MAX_TREE_NAME_LENGTH uint64 = 2040;
@@ -13,6 +14,15 @@ const MAX_TREE_NAME_LENGTH uint64 = 2040;
 const MAX_TREE_NAME_LIST_SIZE uint64 = 64;
 
 alias TreeName = string:MAX_TREE_NAME_LENGTH;
+
+/// A read-only VMO handle returned by [`Tree.OpenBlobChild`].
+///
+/// Note: New methods on [`Tree`] transfer a typed read-only VMO handle directly
+/// rather than `fuchsia.mem.Buffer` (used by the older [`Tree.GetContent`]
+/// method) because `fuchsia.mem.Buffer` is deprecated for new FIDL APIs.
+@available(added=HEAD)
+alias BlobVmo
+        = zx.Handle:<VMO, zx.RIGHTS_BASIC | zx.Rights.GET_PROPERTY | zx.Rights.READ | zx.Rights.MAP>;
 
 /// The content of a specific Inspect Tree.
 type TreeContent = resource table {
@@ -72,4 +82,38 @@ closed(removed=25) open(added=25) protocol Tree {
         child_name TreeName;
         tree server_end:Tree;
     });
+
+    /// Iterate over the names of Blob children (`BlobProperty`) of this Tree.
+    ///
+    /// The underlying list of blob children may change in between calls to
+    /// ListBlobChildNames and OpenBlobChild.
+    @available(added=HEAD)
+    flexible ListBlobChildNames(resource struct {
+        tree_iterator server_end:TreeNameIterator;
+    });
+
+    /// Open a Blob child by `child_name` (the `content` field of a
+    /// `LINK_VALUE` block with `LinkNodeDisposition::Blob`).
+    ///
+    /// Returns a read-only VMO handle (`BlobVmo`) containing the 32-byte "BLOB"
+    /// header (which stores the logical byte length in `vmo_size`) followed by
+    /// the raw payload bytes. Readers MUST bound reads using `vmo_size` inside
+    /// the 32-byte "BLOB" header rather than `zx_vmo_get_size` or
+    /// `ZX_PROP_VMO_CONTENT_SIZE`, because Copy-on-Write (`Frozen`) and `Live`
+    /// blob VMOs are padded up to page boundaries and their VMO size properties
+    /// include trailing padding bytes.
+    ///
+    /// Returns `zx.Status.NOT_FOUND` if no blob child with `child_name` exists,
+    /// or `zx.Status.UNAVAILABLE` if the blob VMO cannot currently be
+    /// snapshotted or duplicated.
+    ///
+    /// Note: Unlike `GetContent`, this method returns a typed VMO handle
+    /// directly instead of `fuchsia.mem.Buffer`, since `fuchsia.mem.Buffer` is
+    /// deprecated for new FIDL APIs.
+    @available(added=HEAD)
+    flexible OpenBlobChild(struct {
+        child_name TreeName;
+    }) -> (resource struct {
+        vmo BlobVmo;
+    }) error zx.Status;
 };

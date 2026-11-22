@@ -15,7 +15,9 @@ rustc_library(
     visibility = [
         "//src/storage/lib:__subpackages__",
     ],
-    deps = [],
+    deps = [
+        "//src/storage/lib/units",
+    ],
 )
 
 rustc_test(

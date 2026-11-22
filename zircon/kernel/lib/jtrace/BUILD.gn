@@ -94,7 +94,7 @@ kernel_rust_mod("jtrace-rs") {
     "//zircon/kernel/lib/arch:arch-rs",
     "//zircon/kernel/lib/console:console_rs",
     "//zircon/kernel/lib/debug",
-    "//zircon/kernel/lib/libc:rust",
+    "//zircon/kernel/lib/io:io-rs",
     "//zircon/system/ulib/affine/rust:affine",
     "//zircon/system/ulib/pretty/rust:pretty",
   ]

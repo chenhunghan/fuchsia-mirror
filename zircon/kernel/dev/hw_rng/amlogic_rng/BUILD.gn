@@ -21,15 +21,14 @@ kernel_rust_mod("amlogic_rng-rs") {
     "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/regio",
     "//src/lib/zr",
+    "//zircon/system/ulib/explicit-memory:explicit-memory-rs",
   ]
 }
 
 source_set("amlogic_rng") {
-  sources = [ "amlogic_rng_ffi.cc" ]
   public_deps = [ ":headers" ]
   deps = [
     ":amlogic_rng-rs",
     "//zircon/kernel/dev/hw_rng",
-    "//zircon/system/ulib/explicit-memory",
   ]
 }

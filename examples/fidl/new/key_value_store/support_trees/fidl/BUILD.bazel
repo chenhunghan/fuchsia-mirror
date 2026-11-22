@@ -24,7 +24,5 @@ fidl_library(
         "wrong-prefix-for-platform-source-library",
         "vector-bounds-not-specified",
     ],
-    visibility = [
-        "//examples/fidl/new/key_value_store/support_trees:__subpackages__",
-    ],
+    visibility = ["//examples/fidl/new/key_value_store/support_trees:__subpackages__"],
 )

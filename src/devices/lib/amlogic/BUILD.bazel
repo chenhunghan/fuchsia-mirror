@@ -83,13 +83,15 @@ cc_library(
         "include/soc/aml-t931/t931-hw.h",
         "include/soc/aml-t931/t931-pwm.h",
     ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
     includes = [
         "include",
     ],
     target_compatible_with = ["@platforms//os:fuchsia"],
     deps = [
-        "//zircon/system/ulib/fzl",
         "@fuchsia_sdk//pkg/driver_mmio_cpp",
+        "@fuchsia_sdk//pkg/fzl",
         "@fuchsia_sdk//pkg/hwreg",
         "@fuchsia_sdk//pkg/sync",
         "@fuchsia_sdk//pkg/zx",

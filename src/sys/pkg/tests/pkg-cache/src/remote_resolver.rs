@@ -10,7 +10,8 @@
 //! protection, unlike the -full resolver which has additional logic for base package short
 //! circuiting and cache fallback, etc.
 
-use diagnostics_assertions::assert_data_tree;
+use delivery_blob::DeliveryBlobType;
+use diagnostics_assertions::{assert_data_tree, tree_assertion};
 use fidl_fuchsia_pkg as fpkg;
 use fuchsia_async as fasync;
 use futures::future::FutureExt as _;
@@ -22,9 +23,13 @@ use std::sync::Arc;
 
 // Creates a repo that contains `pkg`, resolves `pkg`, and verifies the resolved package directory
 // against `pkg`.
-async fn verify_resolution(pkg: &fuchsia_pkg_testing::Package) {
+async fn verify_resolution(
+    pkg: &fuchsia_pkg_testing::Package,
+    delivery_blob_type: DeliveryBlobType,
+) {
     let repo = Arc::new(
         fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .delivery_blob_type(delivery_blob_type)
             .add_package(pkg)
             .build()
             .await
@@ -35,7 +40,11 @@ async fn verify_resolution(pkg: &fuchsia_pkg_testing::Package) {
         served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
 
     let env = crate::TestEnv::builder()
-        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(&repo_config, &[pkg]))
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages_with_type(
+            &repo_config,
+            &[pkg],
+            delivery_blob_type,
+        ))
         .build()
         .await;
 
@@ -43,37 +52,46 @@ async fn verify_resolution(pkg: &fuchsia_pkg_testing::Package) {
         env.resolve_ota("fuchsia-pkg://example.org/test-package").await.unwrap();
 
     let () = pkg.verify_contents(&package).await.unwrap();
+    let () = env.stop().await;
 }
 
+#[test_case::test_case(DeliveryBlobType::Type1)]
+#[test_case::test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn metafar_only() {
+async fn metafar_only(delivery_blob_type: DeliveryBlobType) {
     let pkg = fuchsia_pkg_testing::PackageBuilder::new("test-package").build().await.unwrap();
-    let () = verify_resolution(&pkg).await;
+    let () = verify_resolution(&pkg, delivery_blob_type).await;
 }
 
+#[test_case::test_case(DeliveryBlobType::Type1)]
+#[test_case::test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn empty_blob() {
+async fn empty_blob(delivery_blob_type: DeliveryBlobType) {
     let pkg = fuchsia_pkg_testing::PackageBuilder::new("test-package")
         .add_resource_at("empty-blob", "".as_bytes())
         .build()
         .await
         .unwrap();
-    let () = verify_resolution(&pkg).await;
+    let () = verify_resolution(&pkg, delivery_blob_type).await;
 }
 
+#[test_case::test_case(DeliveryBlobType::Type1)]
+#[test_case::test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn duplicate_blob() {
+async fn duplicate_blob(delivery_blob_type: DeliveryBlobType) {
     let pkg = fuchsia_pkg_testing::PackageBuilder::new("test-package")
         .add_resource_at("small-blob", "blob-contents".as_bytes())
         .add_resource_at("duplicate-blob", "blob-contents".as_bytes())
         .build()
         .await
         .unwrap();
-    let () = verify_resolution(&pkg).await;
+    let () = verify_resolution(&pkg, delivery_blob_type).await;
 }
 
+#[test_case::test_case(DeliveryBlobType::Type1)]
+#[test_case::test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn large_blob() {
+async fn large_blob(delivery_blob_type: DeliveryBlobType) {
     let pkg = fuchsia_pkg_testing::PackageBuilder::new("test-package")
         .add_resource_at(
             "large-blob",
@@ -82,18 +100,20 @@ async fn large_blob() {
         .build()
         .await
         .unwrap();
-    let () = verify_resolution(&pkg).await;
+    let () = verify_resolution(&pkg, delivery_blob_type).await;
 }
 
+#[test_case::test_case(DeliveryBlobType::Type1)]
+#[test_case::test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn many_blobs() {
+async fn many_blobs(delivery_blob_type: DeliveryBlobType) {
     let mut pkg = fuchsia_pkg_testing::PackageBuilder::new("test-package");
     let mut rng = rand::rngs::StdRng::from_seed([0u8; 32]);
     for i in 0..200 {
         pkg = pkg.add_resource_at(format!("blob-{i}"), RngReader(&mut rng).take(10));
     }
     let pkg = pkg.build().await.unwrap();
-    let () = verify_resolution(&pkg).await;
+    let () = verify_resolution(&pkg, delivery_blob_type).await;
 }
 
 #[fuchsia::test]
@@ -804,4 +824,478 @@ async fn resolve_marks_retained_package_complete() {
             },
         }
     );
+}
+
+#[fuchsia::test]
+async fn failed_resolve_stops_fetching_blobs() {
+    const MAX_CONCURRENT_BLOB_FETCHES: u16 = 2;
+    const CONTENT_BLOB_COUNT: usize = 10;
+
+    let pkg_many_blobs = {
+        let mut pkg = fuchsia_pkg_testing::PackageBuilder::new("many-blobs");
+        for i in 0..CONTENT_BLOB_COUNT {
+            pkg = pkg.add_resource_at(format!("blob_{i}"), format!("contents_{i}").as_bytes());
+        }
+        pkg.build().await.unwrap()
+    };
+    let pkg_different = fuchsia_pkg_testing::PackageBuilder::new("different-hash")
+        .add_resource_at("diff_blob_0", &b"diff_contents_0"[..])
+        .add_resource_at("diff_blob_1", &b"diff_contents_1"[..])
+        .build()
+        .await
+        .unwrap();
+
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&pkg_many_blobs)
+            .add_package(&pkg_different)
+            .build()
+            .await
+            .unwrap(),
+    );
+
+    let (fail_blocker, mut blocked_failing_fetch) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseHeaders::new();
+    let (hang_blocker, mut blocked_other_fetches) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodies::new();
+    let content_blob_paths: std::collections::HashSet<String> =
+        pkg_many_blobs.content_blob_files().map(|b| format!("/blobs/1/{}", b.merkle)).collect();
+    let failing_path = Arc::new(fuchsia_sync::Mutex::new(None::<String>));
+    let fail_first_blob = fuchsia_pkg_testing::serve::responder::Filter::new(
+        {
+            let content_blob_paths = content_blob_paths.clone();
+            let failing_path = Arc::clone(&failing_path);
+            move |req: &http::Request<_>| {
+                let path = req.uri().path();
+                content_blob_paths.contains(path)
+                    && failing_path.lock().get_or_insert_with(|| path.to_owned()) == path
+            }
+        },
+        fuchsia_pkg_testing::serve::responder::Chain::new(vec![
+            Box::new(fail_blocker),
+            Box::new(fuchsia_pkg_testing::serve::responder::StaticResponseCode::not_found()),
+        ]),
+    );
+    let block_other_blobs = fuchsia_pkg_testing::serve::responder::Filter::new(
+        {
+            let failing_path = Arc::clone(&failing_path);
+            move |req: &http::Request<_>| {
+                let path = req.uri().path();
+                content_blob_paths.contains(path) && failing_path.lock().as_deref() != Some(path)
+            }
+        },
+        hang_blocker,
+    );
+    let (diff_blocker, mut blocked_diff_fetches) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodies::new();
+    let diff_blob_paths = pkg_different
+        .content_blob_files()
+        .map(|b| format!("/blobs/1/{}", b.merkle).into())
+        .collect();
+    let block_diff_blobs =
+        fuchsia_pkg_testing::serve::responder::ForPaths::new(diff_blob_paths, diff_blocker);
+
+    let served_repository = Arc::clone(&repo)
+        .server()
+        .response_overrider(fail_first_blob)
+        .response_overrider(block_other_blobs)
+        .response_overrider(block_diff_blobs)
+        .start()
+        .expect("Starting server succeeds");
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
+    let env = crate::TestEnv::builder()
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(
+            &repo_config,
+            &[&pkg_many_blobs, &pkg_different],
+        ))
+        .blob_fetch_concurrency_limit(MAX_CONCURRENT_BLOB_FETCHES)
+        .build()
+        .await;
+
+    let (_many_dir, server_end) = fidl::endpoints::create_proxy();
+    let many_fut = env
+        .proxies
+        .ota_package_resolver
+        .resolve("fuchsia-pkg://example.org/many-blobs", server_end);
+
+    // Wait for both concurrency slots to block on the server, then fail one with 404 while keeping
+    // the other blocked on the server.
+    let failing_1 = blocked_failing_fetch.next().await.unwrap();
+    let still_blocked_2 = blocked_other_fetches.next().await.unwrap();
+    failing_1.unblock();
+    assert_eq!(many_fut.await.unwrap(), Err(fpkg::ResolveError::UnavailableBlob));
+
+    // Dropping the remaining `WorkFuture`s when `Resolve` fails cancels `still_blocked_2` (plus at
+    // most one more fetch if the queue driver filled the freed slot before `PackageFetcher` woke to
+    // drop `futs`) and removes the remaining pending content blobs without starting them.
+    let hierarchy = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            root: contains {
+                blob_fetcher: contains {
+                    active: {},
+                    queue: {
+                        length: 0u64,
+                    },
+                }
+            }
+        ))
+        .await;
+    let recent = hierarchy.get_child_by_path(&["blob_fetcher", "recent"]).unwrap();
+    let results: Vec<_> = recent
+        .children
+        .iter()
+        .map(|c| (c.name.as_str(), c.get_property("result").and_then(|p| p.string()).unwrap()))
+        .collect();
+    assert!(
+        matches!(results.len(), 3 | 4),
+        "expected 3 or 4 recent fetches out of {} blobs, got {}: {results:?}",
+        CONTENT_BLOB_COUNT + 1,
+        results.len()
+    );
+    assert_eq!(results.iter().filter(|(_, r)| r.starts_with("success:")).count(), 1);
+    assert_eq!(results.iter().filter(|(_, r)| r.starts_with("error:")).count(), 1);
+    assert_eq!(results.iter().filter(|(_, r)| *r == "cancelled").count(), results.len() - 2);
+
+    // Resolve another 2-blob package while `still_blocked_2` is held and wait for both of its
+    // content blobs to arrive concurrently at the server, proving both concurrency slots are free.
+    let (diff_dir, server_end) = fidl::endpoints::create_proxy();
+    let diff_fut = env
+        .proxies
+        .ota_package_resolver
+        .resolve("fuchsia-pkg://example.org/different-hash", server_end);
+    let diff_unblock_1 = blocked_diff_fetches.next().await.unwrap();
+    let diff_unblock_2 = blocked_diff_fetches.next().await.unwrap();
+    diff_unblock_1.unblock();
+    diff_unblock_2.unblock();
+    let _: fpkg::ResolutionContext = diff_fut.await.unwrap().unwrap();
+    let () = pkg_different.verify_contents(&diff_dir).await.unwrap();
+
+    assert!(blocked_failing_fetch.next().now_or_never().is_none());
+    let _: Result<_, _> = blocked_other_fetches.try_recv();
+    assert!(blocked_other_fetches.try_recv().is_err(), "expected at most 1 extra HTTP request");
+    drop(still_blocked_2);
+}
+
+#[test_case::test_case(blobfs_ramdisk::Implementation::CppBlobfs; "blobfs")]
+#[test_case::test_case(blobfs_ramdisk::Implementation::Fxblob; "fxblob")]
+#[fuchsia::test]
+async fn failed_resolve_does_not_prevent_other_resolve_from_fetching_shared_blob(
+    blobfs_impl: blobfs_ramdisk::Implementation,
+) {
+    let shared_contents = "shared-blob-contents".as_bytes();
+    let pkg1 = fuchsia_pkg_testing::PackageBuilder::new("package1")
+        .add_resource_at("shared-blob", shared_contents)
+        .add_resource_at("failing-blob", "failing-blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let pkg2 = fuchsia_pkg_testing::PackageBuilder::new("package2")
+        .add_resource_at("shared-blob", shared_contents)
+        .add_resource_at("pkg2-blob", "pkg2-blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let shared_blob_merkle = pkg1.meta_contents().unwrap().contents()["shared-blob"];
+    let failing_blob_merkle = pkg1.meta_contents().unwrap().contents()["failing-blob"];
+    let pkg2_blob_merkle = pkg2.meta_contents().unwrap().contents()["pkg2-blob"];
+
+    let (blocker, shared_unblocker_receiver) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodyOnce::new();
+    let block_shared = fuchsia_pkg_testing::serve::responder::ForPath::new(
+        format!("/blobs/1/{shared_blob_merkle}"),
+        blocker,
+    );
+    let (fail_blocker, mut blocked_failing_fetches) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseHeaders::new();
+    let block_then_404_failing = fuchsia_pkg_testing::serve::responder::ForPath::new(
+        format!("/blobs/1/{failing_blob_merkle}"),
+        fuchsia_pkg_testing::serve::responder::Chain::new(vec![
+            Box::new(fail_blocker),
+            Box::new(fuchsia_pkg_testing::serve::responder::StaticResponseCode::not_found()),
+        ]),
+    );
+    let (notify_pkg2_blob, mut pkg2_blob_requested) =
+        fuchsia_pkg_testing::serve::responder::NotifyWhenRequested::new();
+    let notify_pkg2_blob = fuchsia_pkg_testing::serve::responder::ForPath::new(
+        format!("/blobs/1/{pkg2_blob_merkle}"),
+        notify_pkg2_blob,
+    );
+
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&pkg1)
+            .add_package(&pkg2)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let served_repository = Arc::clone(&repo)
+        .server()
+        .response_overrider(block_shared)
+        .response_overrider(block_then_404_failing)
+        .response_overrider(notify_pkg2_blob)
+        .start()
+        .unwrap();
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
+    let env = crate::TestEnv::builder()
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(
+            &repo_config,
+            &[&pkg1, &pkg2],
+        ))
+        .blobfs_impl(blobfs_impl)
+        .blob_fetch_concurrency_limit(3)
+        .build()
+        .await;
+
+    let (_pkg1_dir, server_end) = fidl::endpoints::create_proxy();
+    let pkg1_fut =
+        env.proxies.ota_package_resolver.resolve("fuchsia-pkg://example.org/package1", server_end);
+
+    // Wait for pkg1 to start fetching both shared-blob and failing-blob.
+    let unblock_shared = shared_unblocker_receiver.await.unwrap();
+    let failing_unblocker = blocked_failing_fetches.next().await.unwrap();
+
+    // Start pkg2 and wait until it requests pkg2-blob; since `push_all` enqueues shared-blob and
+    // pkg2-blob under a single lock acquisition, pkg2 has already attached to the in-flight
+    // shared-blob fetch in `blob_fetcher`.
+    let (pkg2_dir, server_end) = fidl::endpoints::create_proxy();
+    let pkg2_fut =
+        env.proxies.ota_package_resolver.resolve("fuchsia-pkg://example.org/package2", server_end);
+    let () = pkg2_blob_requested.next().await.unwrap();
+
+    // Unblock failing-blob (404), which fails pkg1 while leaving the shared in-flight fetch of
+    // shared-blob running uninterrupted for pkg2.
+    let () = failing_unblocker.unblock();
+    assert_eq!(pkg1_fut.await.unwrap(), Err(fpkg::ResolveError::UnavailableBlob));
+
+    // Unblocking the original shared-blob download completes pkg2 without a second HTTP request
+    // (`BlockResponseBodyOnce` panics if requested more than once).
+    let () = unblock_shared();
+    let _: fpkg::ResolutionContext = pkg2_fut.await.unwrap().unwrap();
+    let () = pkg2.verify_contents(&pkg2_dir).await.unwrap();
+}
+
+#[test_case::test_case(blobfs_ramdisk::Implementation::CppBlobfs; "blobfs")]
+#[test_case::test_case(blobfs_ramdisk::Implementation::Fxblob; "fxblob")]
+#[fuchsia::test]
+async fn failed_resolve_cancels_in_flight_blob_and_unblocks_other_mirror_resolve(
+    blobfs_impl: blobfs_ramdisk::Implementation,
+) {
+    let shared_contents = "shared-blob-contents".as_bytes();
+    let pkg1 = fuchsia_pkg_testing::PackageBuilder::new("package1")
+        .add_resource_at("shared-blob", shared_contents)
+        .add_resource_at("failing-blob", "failing-blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let pkg2 = fuchsia_pkg_testing::PackageBuilder::new("package2")
+        .add_resource_at("shared-blob", shared_contents)
+        .add_resource_at("pkg2-blob", "pkg2-blob-contents".as_bytes())
+        .build()
+        .await
+        .unwrap();
+    let shared_blob_merkle = pkg1.meta_contents().unwrap().contents()["shared-blob"];
+    let failing_blob_merkle = pkg1.meta_contents().unwrap().contents()["failing-blob"];
+    let pkg2_blob_merkle = pkg2.meta_contents().unwrap().contents()["pkg2-blob"];
+
+    let (blocker1, mut blocked_shared_repo1) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodies::new();
+    let block_shared_repo1 = fuchsia_pkg_testing::serve::responder::ForPath::new(
+        format!("/blobs/1/{shared_blob_merkle}"),
+        blocker1,
+    );
+    let (fail_blocker, mut blocked_failing_fetches) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseHeaders::new();
+    let block_then_404_failing = fuchsia_pkg_testing::serve::responder::ForPath::new(
+        format!("/blobs/1/{failing_blob_merkle}"),
+        fuchsia_pkg_testing::serve::responder::Chain::new(vec![
+            Box::new(fail_blocker),
+            Box::new(fuchsia_pkg_testing::serve::responder::StaticResponseCode::not_found()),
+        ]),
+    );
+    let (notify_pkg2_blob, mut pkg2_blob_requested) =
+        fuchsia_pkg_testing::serve::responder::NotifyWhenRequested::new();
+    let notify_pkg2_blob = fuchsia_pkg_testing::serve::responder::ForPath::new(
+        format!("/blobs/1/{pkg2_blob_merkle}"),
+        notify_pkg2_blob,
+    );
+
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&pkg1)
+            .add_package(&pkg2)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let served_repo1 = Arc::clone(&repo)
+        .server()
+        .response_overrider(block_shared_repo1)
+        .response_overrider(block_then_404_failing)
+        .start()
+        .unwrap();
+    let served_repo2 =
+        Arc::clone(&repo).server().response_overrider(notify_pkg2_blob).start().unwrap();
+    let repo1_config = served_repo1.make_repo_config("fuchsia-pkg://example1.org".parse().unwrap());
+    let repo2_config = served_repo2.make_repo_config("fuchsia-pkg://example2.org".parse().unwrap());
+    let authority = crate::MockPkgAuthority::from_repo_config_and_packages(&repo1_config, &[&pkg1])
+        .add_lookup_response(
+            "fuchsia-pkg://example2.org/package2",
+            Ok((*pkg2.hash(), format!("{}/1", repo2_config.mirrors()[0].blob_mirror_url()))),
+        );
+    let env = crate::TestEnv::builder()
+        .pkg_authority(authority)
+        .blobfs_impl(blobfs_impl)
+        .blob_fetch_concurrency_limit(3)
+        .build()
+        .await;
+
+    let (_pkg1_dir, server_end) = fidl::endpoints::create_proxy();
+    let pkg1_fut =
+        env.proxies.ota_package_resolver.resolve("fuchsia-pkg://example1.org/package1", server_end);
+
+    // Wait for pkg1 to open shared-blob for write in blobfs and block on its response body from
+    // repo1.
+    let shared_unblocker_repo1 = blocked_shared_repo1.next().await.unwrap();
+    let failing_unblocker = blocked_failing_fetches.next().await.unwrap();
+
+    // Start pkg2 from repo2 (different mirror URL, so shared-blob cannot merge and queues behind
+    // pkg1's in-flight download). Waiting for pkg2-blob to be requested guarantees `push_all` has
+    // already queued shared-blob as well.
+    let (pkg2_dir, server_end) = fidl::endpoints::create_proxy();
+    let pkg2_fut =
+        env.proxies.ota_package_resolver.resolve("fuchsia-pkg://example2.org/package2", server_end);
+    let () = pkg2_blob_requested.next().await.unwrap();
+
+    // Fail pkg1 while keeping `shared_unblocker_repo1` blocked on the server!
+    // `pkg-cache` must cancel `http-client`'s in-flight `DownloadBlob` (dropping its `BlobWriter`
+    // in blobfs) and then allow pkg2 to download and write shared-blob from repo2.
+    let () = failing_unblocker.unblock();
+    assert_eq!(pkg1_fut.await.unwrap(), Err(fpkg::ResolveError::UnavailableBlob));
+
+    let _: fpkg::ResolutionContext = pkg2_fut.await.unwrap().unwrap();
+    let () = pkg2.verify_contents(&pkg2_dir).await.unwrap();
+    drop(shared_unblocker_repo1);
+}
+
+#[fuchsia::test]
+async fn second_resolve_of_same_package_not_blocked_by_intervening_resolve() {
+    let pkg0 = fuchsia_pkg_testing::PackageBuilder::new("package0")
+        .add_resource_at("blob_0", &b"pkg0_blob_0"[..])
+        .add_resource_at("blob_1", &b"pkg0_blob_1"[..])
+        .build()
+        .await
+        .unwrap();
+    let pkg1 = fuchsia_pkg_testing::PackageBuilder::new("package1").build().await.unwrap();
+
+    let (blocker0, mut blocked_pkg0) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodies::new();
+    let pkg0_content_paths =
+        pkg0.content_blob_files().map(|b| format!("/blobs/1/{}", b.merkle).into()).collect();
+    let (blocker1, mut blocked_pkg1) =
+        fuchsia_pkg_testing::serve::responder::BlockResponseBodies::new();
+
+    let repo = Arc::new(
+        fuchsia_pkg_testing::RepositoryBuilder::from_template_dir(crate::EMPTY_REPO_PATH)
+            .add_package(&pkg0)
+            .add_package(&pkg1)
+            .build()
+            .await
+            .unwrap(),
+    );
+    let served_repository = Arc::clone(&repo)
+        .server()
+        .response_overrider(fuchsia_pkg_testing::serve::responder::ForPaths::new(
+            pkg0_content_paths,
+            blocker0,
+        ))
+        .response_overrider(fuchsia_pkg_testing::serve::responder::ForPath::new(
+            format!("/blobs/1/{}", pkg1.hash()),
+            blocker1,
+        ))
+        .start()
+        .unwrap();
+    let repo_config =
+        served_repository.make_repo_config("fuchsia-pkg://example.org".parse().unwrap());
+    let env = crate::TestEnv::builder()
+        .pkg_authority(crate::MockPkgAuthority::from_repo_config_and_packages(
+            &repo_config,
+            &[&pkg0, &pkg1],
+        ))
+        .blob_fetch_concurrency_limit(1)
+        .build()
+        .await;
+
+    // 1. Request resolve of package0: its meta.far downloads, and one of its two content blobs
+    // occupies the single concurrency slot while the other waits at package0's priority.
+    let (pkg0_dir_1, server_end) = fidl::endpoints::create_proxy();
+    let pkg0_fut_1 =
+        env.proxies.ota_package_resolver.resolve("fuchsia-pkg://example.org/package0", server_end);
+    let unblock_pkg0_a = blocked_pkg0.next().await.unwrap();
+
+    // 2. Request resolve of package1 and wait for its meta.far fetch to queue behind package0's
+    // content blobs (`length == 3`: two content blobs for package0 + one meta.far for package1).
+    let (pkg1_dir, server_end) = fidl::endpoints::create_proxy();
+    let pkg1_fut =
+        env.proxies.ota_package_resolver.resolve("fuchsia-pkg://example.org/package1", server_end);
+    let _ = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            "root": contains {
+                "blob_fetcher": contains {
+                    "queue": {
+                        "length": 3u64,
+                    }
+                }
+            }
+        ))
+        .await;
+
+    // 3. Request a second resolve of package0 at lower priority than package1 (via the full
+    // resolver, also exercising coalescing across different GC protections) while package0's
+    // content blobs are still in flight and queued.
+    let (pkg0_dir_2, server_end) = fidl::endpoints::create_proxy();
+    let pkg0_fut_2 =
+        env.proxies.full_package_resolver.resolve("fuchsia-pkg://example.org/package0", server_end);
+
+    // Wait for the second resolve of package0 to record `known_outstanding_blobs: 2` and then
+    // evaluate the lazy `blob_fetcher.queue` node on `pkg-cache`'s single-threaded executor. Since
+    // there is no `.await` between updating `known_outstanding_blobs` and `blob_fetcher.push_all`,
+    // `pkg-cache` must have yielded after `push_all` (coalescing onto package0's active and queued
+    // content blob fetches) before serving `queue`.
+    let _ = env
+        .wait_for_and_return_inspect_state(tree_assertion!(
+            "root": contains {
+                "blob_fetcher": contains {
+                    "queue": contains {},
+                },
+                "package_fetcher": contains {
+                    "2": contains {
+                        "package_hash": pkg0.hash().to_string(),
+                        "known_outstanding_blobs": 2u64,
+                    },
+                },
+            }
+        ))
+        .await;
+
+    // 4. Unblock package0's first content blob: package0's second content blob (higher priority
+    // than package1) claims the single slot next. Unblock package0's second content blob so
+    // package1 immediately claims and blocks the sole concurrency slot: both resolves of package0
+    // complete without waiting for package1!
+    let () = unblock_pkg0_a.unblock();
+    let unblock_pkg0_b = blocked_pkg0.next().await.unwrap();
+    let () = unblock_pkg0_b.unblock();
+    let unblock_pkg1 = blocked_pkg1.next().await.unwrap();
+    let _: fpkg::ResolutionContext = pkg0_fut_1.await.unwrap().unwrap();
+    let _: fpkg::ResolutionContext = pkg0_fut_2.await.unwrap().unwrap();
+    let () = pkg0.verify_contents(&pkg0_dir_1).await.unwrap();
+    let () = pkg0.verify_contents(&pkg0_dir_2).await.unwrap();
+
+    // 5. Unblock package1 and verify it completes as well, with each blob only fetched once.
+    let () = unblock_pkg1.unblock();
+    let _: fpkg::ResolutionContext = pkg1_fut.await.unwrap().unwrap();
+    let () = pkg1.verify_contents(&pkg1_dir).await.unwrap();
+    assert_eq!(served_repository.history().lock().len(), 4);
 }

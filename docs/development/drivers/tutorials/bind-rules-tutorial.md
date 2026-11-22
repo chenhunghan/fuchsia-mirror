@@ -30,7 +30,7 @@ extend uint fuchsia.BIND_PLATFORM_DEV_VID {
 
 With the new bind system, VIDs can be potentially represented by string values or even enums.
 
-## Looking up node properties
+## Looking up node properties {:#looking-up-node-properties}
 
 ### Using ffx driver list-devices
 The command `ffx driver list-devices -v` prints the properties of every device in the tree in the format:

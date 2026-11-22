@@ -25,7 +25,6 @@ group("pci") {
     "//src/graphics/drivers/misc/goldfish_address_space:address_space_driver",
     "//src/media/audio/drivers/intel-hda/controller:intel-hda",
     "//src/ui/input/drivers/virtio:virtio_input",
-    "//zircon/third_party/dev/ethernet/e1000",
   ]
 
   if (target_cpu == "x64") {

@@ -18,9 +18,8 @@ use anyhow::{Context as _, Error, bail, ensure};
 use async_trait::async_trait;
 use fidl::endpoints::ServerEnd;
 use fidl_fuchsia_fxfs::{
-    BytesAndNodes, DebugRequest, DebugRequestStream, FileBackedVolumeProviderRequest,
-    FileBackedVolumeProviderRequestStream, ProjectIdRequest, ProjectIdRequestStream,
-    ProjectIterToken,
+    BytesAndNodes, FileBackedVolumeProviderRequest, FileBackedVolumeProviderRequestStream,
+    ProjectIdRequest, ProjectIdRequestStream, ProjectIterToken,
 };
 use fidl_fuchsia_io as fio;
 use fs_inspect::{FsInspectVolume, VolumeData};
@@ -31,7 +30,7 @@ use futures::channel::oneshot;
 use futures::stream::{self, FusedStream, Stream};
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use fxfs::errors::FxfsError;
-use fxfs::filesystem::{self, SyncOptions, TruncateGuard};
+use fxfs::filesystem::{self, SyncOptions};
 use fxfs::future_with_guard::FutureWithGuard;
 use fxfs::log::*;
 use fxfs::object_handle::{ObjectHandle as _, ReadObjectHandle};
@@ -41,16 +40,17 @@ use fxfs::object_store::project_id::ProjectIdExt;
 use fxfs::object_store::transaction::{LockKey, Options, lock_keys};
 use fxfs::object_store::{
     AttributeId, AttributeKey, DataObjectHandle, DirType, HandleOptions, HandleOwner,
-    ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectStoreTrait, ObjectValue, ProjectId,
+    ObjectDescriptor, ObjectKey, ObjectKind, ObjectStore, ObjectValue, ProjectId,
 };
 use refaults_vmo::PageFaultCounter;
 use scopeguard::ScopeGuard;
 use std::future::Future;
 use std::pin::pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+#[cfg(any(test, feature = "testing"))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
-use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
 use storage_profile::MAX_PROFILE_VMO_SIZE;
 use storage_units::BlockSize;
 use vfs::directory::entry::DirectoryEntry;
@@ -65,8 +65,6 @@ const DIRENT_CACHE_LIMIT: usize = 2000;
 /// The read ahead/around size to target. Increase reads to be this size within the restrictions of
 /// the format for the target object.
 pub const READ_AHEAD_SIZE: u64 = 128 * 1024;
-
-const BLOB_TRANSFER_VMO_SIZE: usize = 32 * 1024 * 1024;
 
 const PROFILE_DIRECTORY: &str = "profiles";
 
@@ -163,17 +161,17 @@ pub struct FxVolume {
     /// The number of dirty bytes in pager backed VMOs that belong to this volume. VolumesDirectory
     /// holds a count for all volumes. This count is only used for tracing.
     pager_dirty_byte_count: AtomicU64,
+}
 
-    /// A trusted buffer allocator used for reading and decompressing blobs. Unlike the underlying
-    /// block device's buffer allocator (whose VMOs are shared with drivers and thus untrusted),
-    /// this allocator uses VMOs without the TRANSFER right. This prevents foreign processes or
-    /// drivers from mutating memory concurrently, allowing us to safely extract Rust slices
-    /// (`try_as_slice`/`try_as_mut_slice`) and perform zero-copy Merkle tree verification without
-    /// heap copies.
-    blob_allocator: OnceLock<Arc<BufferAllocator>>,
-
-    /// True if blob page requests for this volume are handled in the block driver.
-    use_driver_blob_paging: AtomicBool,
+/// Indicates whether an unlinked object must be purged immediately by the caller or has open
+/// connections and will be purged when its last connection closes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
+pub(super) enum PurgeAction {
+    /// No open connections exist in the node cache; the caller must purge the object now.
+    PurgeNow,
+    /// Open connections exist and the node has been marked to be purged when closed.
+    Defer,
 }
 
 #[fxfs_trace::trace]
@@ -203,33 +201,11 @@ impl FxVolume {
             poisoned: AtomicBool::new(false),
             page_fault_counter,
             pager_dirty_byte_count: AtomicU64::new(0),
-            blob_allocator: OnceLock::new(),
-            use_driver_blob_paging: AtomicBool::new(false),
         })
-    }
-
-    pub fn use_driver_blob_paging(&self) -> bool {
-        self.use_driver_blob_paging.load(Ordering::Relaxed)
-    }
-
-    pub fn set_use_driver_blob_paging(&self, enabled: bool) {
-        self.use_driver_blob_paging.store(enabled, Ordering::Relaxed);
     }
 
     pub fn store(&self) -> &Arc<ObjectStore> {
         &self.store
-    }
-
-    /// Returns the trusted buffer allocator for this volume, initializing it on first access.
-    /// This is primarily used by `BlobDirectory` and `FxBlob` to perform zero-copy decompression
-    /// and Merkle verification safely.
-    pub fn blob_allocator(&self) -> &Arc<BufferAllocator> {
-        self.blob_allocator.get_or_init(|| {
-            Arc::new(BufferAllocator::new(
-                self.store().block_size().get() as usize,
-                BufferSource::new_trusted(BLOB_TRANSFER_VMO_SIZE),
-            ))
-        })
     }
 
     pub fn cache(&self) -> &NodeCache {
@@ -665,23 +641,22 @@ impl FxVolume {
         }
     }
 
-    /// Removes resources associated with |object_id| (which ought to be a file), if there are no
-    /// open connections to that file.
+    /// If `object_id` is currently open in the node cache, marks it to be purged when its last open
+    /// connection closes; otherwise returns [`PurgeAction::PurgeNow`] so the caller purges it
+    /// immediately.
     ///
-    /// This must be called *after committing* a transaction which deletes the last reference to
-    /// |object_id|, since before that point, new connections could be established.
-    pub(super) async fn maybe_purge_file(
-        &self,
-        object_id: u64,
-        truncate_guard: Option<&TruncateGuard<'_>>,
-    ) -> Result<(), Error> {
+    /// This must be called inside the commit callback of a transaction that deletes the last
+    /// reference to `object_id` (after removing it from any `dirent_cache`), while transaction
+    /// locks are still held, so that a concurrent `link_into` on an open handle cannot observe
+    /// `to_be_purged() == false` after the last link has been removed.
+    #[must_use]
+    pub(super) fn mark_to_be_purged_if_open(&self, object_id: u64) -> PurgeAction {
         if let Some(node) = self.cache.get(object_id) {
-            node.clone().mark_to_be_purged();
-            return Ok(());
+            node.mark_to_be_purged();
+            PurgeAction::Defer
+        } else {
+            PurgeAction::PurgeNow
         }
-        // If this fails, the graveyard should clean it up on next mount.
-        self.store.purge(object_id, truncate_guard).await?;
-        Ok(())
     }
 
     /// Starts the background work task.  This task will periodically:
@@ -1050,34 +1025,6 @@ impl FxVolume {
         self.store.clear_caches();
     }
 
-    pub async fn handle_debug_requests(
-        this: Weak<Self>,
-        scope: ExecutionScope,
-        mut requests: DebugRequestStream,
-    ) -> Result<(), Error> {
-        while let Some(request) = requests.try_next().await? {
-            // Try and get an active guard before upgrading.
-            let Some(_guard) = scope.try_active_guard() else { bail!("Volume shutting down") };
-            let Some(this) = this.upgrade() else { bail!("FxVolume dropped") };
-
-            match request {
-                DebugRequest::ClearCaches { responder } => {
-                    this.clear_caches();
-                    let fs = this.store.filesystem();
-                    let fs = fs.ensure_local();
-                    fs.root_store().clear_caches();
-                    fs.root_parent_store().clear_caches();
-                    fs.allocator().tree().clear_cache();
-                    responder.send(Ok(()))?;
-                }
-                DebugRequest::Compact { responder } => {
-                    responder.send(Err(zx::Status::NOT_SUPPORTED.into_raw()))?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     // Maximum entries to fit based on 64KiB message size minus 16 bytes of header, 16 bytes
     // of vector header, 16 bytes for the optional token header, and 8 bytes of token value.
     // https://fuchsia.dev/fuchsia-src/development/languages/fidl/guides/max-out-pagination
@@ -1127,17 +1074,11 @@ impl Drop for FxVolume {
     }
 }
 
-impl HandleOwner for FxVolume {}
+impl HandleOwner for FxVolume {
+    type Store = ObjectStore;
 
-impl AsRef<ObjectStore> for FxVolume {
-    fn as_ref(&self) -> &ObjectStore {
+    fn store(&self) -> &ObjectStore {
         &self.store
-    }
-}
-
-impl AsRef<dyn ObjectStoreTrait> for FxVolume {
-    fn as_ref(&self) -> &dyn ObjectStoreTrait {
-        &*self.store
     }
 }
 
@@ -1286,7 +1227,6 @@ fn info_to_filesystem_info(
 mod tests {
     use super::DIRENT_CACHE_LIMIT;
     use crate::fuchsia::file::FxFile;
-    use crate::fuchsia::fxblob::testing::{self as blob_testing, BlobFixture};
     use crate::fuchsia::memory_pressure::MemoryPressureLevel;
     use crate::fuchsia::pager::PagerBacked;
     use crate::fuchsia::profile::{RECORDED, new_profile_state};
@@ -1296,7 +1236,6 @@ mod tests {
     };
     use crate::fuchsia::volume::{FxVolume, MemoryPressureConfig, MemoryPressureLevelConfig};
     use crate::fuchsia::volumes_directory::VolumesDirectory;
-    use delivery_blob::CompressionMode;
     use fidl_fuchsia_fs_startup::CreateOptions;
     use fidl_fuchsia_fxfs::{BytesAndNodes, ProjectIdMarker};
     use fidl_fuchsia_io as fio;
@@ -2778,110 +2717,6 @@ mod tests {
     }
 
     #[fuchsia::test(threads = 10)]
-    async fn test_profile_blob() {
-        let mut hashes = Vec::new();
-        let device = {
-            let fixture = blob_testing::new_blob_fixture().await;
-
-            for i in 0..3u64 {
-                let hash =
-                    fixture.write_blob(i.to_string().as_bytes(), CompressionMode::Never).await;
-                hashes.push(hash);
-            }
-            fixture.close().await
-        };
-        device.ensure_unique();
-
-        device.reopen(false);
-        let mut device = {
-            let fixture = blob_testing::open_blob_fixture(device).await;
-            fixture
-                .volume()
-                .volume()
-                .record_and_replay_profile(new_profile_state(true), "foo")
-                .await
-                .expect("Recording");
-
-            // Page in the zero offsets only to avoid readahead strangeness.
-            let mut writable = [0u8];
-            for hash in &hashes {
-                let vmo = fixture.get_blob_vmo(*hash).await;
-                vmo.read(&mut writable, 0).expect("Vmo read");
-            }
-            fixture.volume().volume().stop_profile_tasks().await;
-            fixture.close().await
-        };
-
-        // Do this multiple times to ensure that the re-recording doesn't drop anything.
-        for i in 0..3 {
-            device.ensure_unique();
-            device.reopen(false);
-            let fixture = blob_testing::open_blob_fixture(device).await;
-            {
-                // Ensure that nothing is paged in right now.
-                for hash in &hashes {
-                    let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                    assert_eq!(blob.vmo().info().unwrap().populated_bytes, 0);
-                }
-
-                fixture
-                    .volume()
-                    .volume()
-                    .record_and_replay_profile(new_profile_state(true), "foo")
-                    .await
-                    .expect("Replaying");
-
-                // Move the file in flight to ensure a new version lands to be used next time.
-                {
-                    let store = fixture.volume().volume().store();
-                    let store_id = store.store_object_id();
-                    let dir = fixture.volume().volume().get_profile_directory().await.unwrap();
-                    let old_file = dir.lookup("foo").await.unwrap().unwrap().0;
-                    let mut transaction = store
-                        .new_transaction(
-                            lock_keys!(
-                                LockKey::object(store_id, dir.object_id()),
-                                LockKey::object(store_id, old_file),
-                            ),
-                            Options::default(),
-                        )
-                        .await
-                        .unwrap();
-                    replace_child(&mut transaction, Some((&dir, "foo")), (&dir, &i.to_string()))
-                        .await
-                        .expect("Replace old profile.");
-                    transaction.commit().await.unwrap();
-                    assert!(
-                        dir.lookup("foo").await.unwrap().is_none(),
-                        "Old profile should be moved"
-                    );
-                }
-
-                // Await all data being played back by checking that things have paged in.
-                async {
-                    for hash in &hashes {
-                        // Fetch vmo this way as well to ensure that the open is counting the file
-                        // as used in the current recording.
-                        let _vmo = fixture.get_blob_vmo(*hash).await;
-                        let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                        while blob.vmo().info().unwrap().populated_bytes == 0 {
-                            fasync::Timer::new(Duration::from_millis(25)).await;
-                        }
-                    }
-                }
-                .on_timeout(std::time::Duration::from_secs(120), || {
-                    panic!("Replay did not page in for all VMOs")
-                })
-                .await;
-
-                // Complete the recording.
-                fixture.volume().volume().stop_profile_tasks().await;
-            }
-            device = fixture.close().await;
-        }
-    }
-
-    #[fuchsia::test(threads = 10)]
     async fn test_profile_file() {
         let mut hashes = Vec::new();
         let crypt_file_id;
@@ -2968,7 +2803,7 @@ mod tests {
             fixture
                 .volume()
                 .volume()
-                .record_and_replay_profile(new_profile_state(false), "foo")
+                .record_and_replay_profile(new_profile_state(), "foo")
                 .await
                 .expect("Recording");
 
@@ -3038,7 +2873,7 @@ mod tests {
                 fixture
                     .volume()
                     .volume()
-                    .record_and_replay_profile(new_profile_state(false), "foo")
+                    .record_and_replay_profile(new_profile_state(), "foo")
                     .await
                     .expect("Replaying");
 
@@ -3119,13 +2954,39 @@ mod tests {
 
     #[fuchsia::test(threads = 10)]
     async fn test_profile_update() {
-        let mut hashes = Vec::new();
+        async fn get_file(volume: &Arc<FxVolume>, id: u64) -> Arc<FxFile> {
+            volume
+                .get_or_load_node(id, ObjectDescriptor::File, None)
+                .await
+                .expect("Opening file internally")
+                .into_any()
+                .downcast::<FxFile>()
+                .expect("Should be file")
+        }
+
+        let mut ids = Vec::new();
         let device = {
-            let fixture = blob_testing::new_blob_fixture().await;
+            let fixture = TestFixture::new().await;
             for i in 0..2u64 {
-                let hash =
-                    fixture.write_blob(i.to_string().as_bytes(), CompressionMode::Never).await;
-                hashes.push(hash);
+                let file_proxy = open_file_checked(
+                    fixture.root(),
+                    &i.to_string(),
+                    fio::Flags::FLAG_MUST_CREATE
+                        | fio::PERM_WRITABLE
+                        | fio::Flags::PERM_GET_ATTRIBUTES,
+                    &Default::default(),
+                )
+                .await;
+                file_proxy.write(i.to_string().as_bytes()).await.unwrap().expect("Writing file");
+                let id = file_proxy
+                    .get_attributes(fio::NodeAttributesQuery::ID)
+                    .await
+                    .unwrap()
+                    .expect("Get id")
+                    .1
+                    .id
+                    .expect("Reading id in response");
+                ids.push((i, id));
             }
             fixture.close().await
         };
@@ -3133,12 +2994,16 @@ mod tests {
 
         device.reopen(false);
         let device = {
-            let fixture = blob_testing::open_blob_fixture(device).await;
+            let fixture = TestFixture::open(
+                device,
+                TestFixtureOptions { format: false, ..Default::default() },
+            )
+            .await;
 
             {
                 let volume = fixture.volume().volume();
                 volume
-                    .record_and_replay_profile(new_profile_state(true), "foo")
+                    .record_and_replay_profile(new_profile_state(), "foo")
                     .await
                     .expect("Recording");
 
@@ -3146,10 +3011,15 @@ mod tests {
 
                 // Page in the zero offsets only to avoid readahead strangeness.
                 {
-                    let mut writable = [0u8];
-                    let hash = &hashes[0];
-                    let vmo = fixture.get_blob_vmo(*hash).await;
-                    vmo.read(&mut writable, 0).expect("Vmo read");
+                    let (i, _) = &ids[0];
+                    let file_proxy = open_file_checked(
+                        fixture.root(),
+                        &i.to_string(),
+                        fio::PERM_READABLE,
+                        &Default::default(),
+                    )
+                    .await;
+                    file_proxy.read(1).await.unwrap().expect("Reading file");
                 }
 
                 // The recording happens asynchronously, so we must wait.  This is crude, but it's
@@ -3165,27 +3035,24 @@ mod tests {
 
         device.ensure_unique();
         device.reopen(false);
-        let fixture = blob_testing::open_blob_fixture(device).await;
+        let fixture =
+            TestFixture::open(device, TestFixtureOptions { format: false, ..Default::default() })
+                .await;
         {
             // Need to get the root vmo to check committed bytes.
             // Ensure that nothing is paged in right now.
-            for hash in &hashes {
-                let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                assert_eq!(blob.vmo().info().unwrap().populated_bytes, 0);
+            let volume = fixture.volume().volume().clone();
+            for (_, id) in &ids {
+                assert_eq!(get_file(&volume, *id).await.vmo().info().unwrap().populated_bytes, 0);
             }
 
-            let volume = fixture.volume().volume();
-
-            volume
-                .record_and_replay_profile(new_profile_state(true), "foo")
-                .await
-                .expect("Replaying");
+            volume.record_and_replay_profile(new_profile_state(), "foo").await.expect("Replaying");
 
             // Await all data being played back by checking that things have paged in.
             async {
-                let hash = &hashes[0];
-                let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                while blob.vmo().info().unwrap().populated_bytes == 0 {
+                let (_, id) = &ids[0];
+                let file = get_file(&volume, *id).await;
+                while file.vmo().info().unwrap().populated_bytes == 0 {
                     fasync::Timer::new(Duration::from_millis(25)).await;
                 }
             }
@@ -3198,10 +3065,15 @@ mod tests {
 
             // Record the new profile that will overwrite it.
             {
-                let mut writable = [0u8];
-                let hash = &hashes[1];
-                let vmo = fixture.get_blob_vmo(*hash).await;
-                vmo.read(&mut writable, 0).expect("Vmo read");
+                let (i, _) = &ids[1];
+                let file_proxy = open_file_checked(
+                    fixture.root(),
+                    &i.to_string(),
+                    fio::PERM_READABLE,
+                    &Default::default(),
+                )
+                .await;
+                file_proxy.read(1).await.unwrap().expect("Reading file");
             }
 
             // The recording happens asynchronously, so we must wait.  This is crude, but it's only
@@ -3217,27 +3089,24 @@ mod tests {
 
         device.ensure_unique();
         device.reopen(false);
-        let fixture = blob_testing::open_blob_fixture(device).await;
+        let fixture =
+            TestFixture::open(device, TestFixtureOptions { format: false, ..Default::default() })
+                .await;
         {
             // Need to get the root vmo to check committed bytes.
             // Ensure that nothing is paged in right now.
-            for hash in &hashes {
-                let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                assert_eq!(blob.vmo().info().unwrap().populated_bytes, 0);
+            let volume = fixture.volume().volume().clone();
+            for (_, id) in &ids {
+                assert_eq!(get_file(&volume, *id).await.vmo().info().unwrap().populated_bytes, 0);
             }
 
-            fixture
-                .volume()
-                .volume()
-                .record_and_replay_profile(new_profile_state(true), "foo")
-                .await
-                .expect("Replaying");
+            volume.record_and_replay_profile(new_profile_state(), "foo").await.expect("Replaying");
 
             // Await all data being played back by checking that things have paged in.
             async {
-                let hash = &hashes[1];
-                let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                while blob.vmo().info().unwrap().populated_bytes == 0 {
+                let (_, id) = &ids[1];
+                let file = get_file(&volume, *id).await;
+                while file.vmo().info().unwrap().populated_bytes == 0 {
                     fasync::Timer::new(Duration::from_millis(25)).await;
                 }
             }
@@ -3247,13 +3116,12 @@ mod tests {
             .await;
 
             // Complete the recording.
-            fixture.volume().volume().stop_profile_tasks().await;
+            volume.stop_profile_tasks().await;
 
-            // Verify that first blob was not paged in as the it should be dropped from the profile.
+            // Verify that first file was not paged in as it should be dropped from the profile.
             {
-                let hash = &hashes[0];
-                let blob = fixture.get_blob(*hash).await.expect("Opening blob");
-                assert_eq!(blob.vmo().info().unwrap().populated_bytes, 0);
+                let (_, id) = &ids[0];
+                assert_eq!(get_file(&volume, *id).await.vmo().info().unwrap().populated_bytes, 0);
             }
         }
         fixture.close().await;

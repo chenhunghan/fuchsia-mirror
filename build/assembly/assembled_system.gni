@@ -77,9 +77,6 @@ import("//src/developer/ffx/build/ffx_action.gni")
 #
 # Image Assembly parameters:
 #
-#   assembly_include_account_in_fvm (optional; default: false)
-#     [bool] Whether to include an account partition in the FVM image.
-#
 #   ramdisk_in_zbi (optional)
 #     [bool] Whether the FVM or Fxfs image should be embedded into the ZBI as a ramdisk.
 #
@@ -628,11 +625,6 @@ template("assembled_system") {
       "--outdir",
       rebase_path(files.outdir, root_build_dir),
     ]
-
-    if (defined(invoker.assembly_include_account_in_fvm) &&
-        invoker.assembly_include_account_in_fvm) {
-      args += [ "--include-account" ]
-    }
 
     if (defined(invoker.assembly_mode)) {
       args += [

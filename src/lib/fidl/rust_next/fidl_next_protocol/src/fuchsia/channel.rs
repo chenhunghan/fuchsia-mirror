@@ -35,8 +35,12 @@ impl Shared {
     }
 }
 
+/// Default initial capacity in chunks (256 bytes) for channel buffers.
+const DEFAULT_CHUNK_CAPACITY: usize = 256 / CHUNK_SIZE;
+/// Default initial capacity in handles for channel buffers.
+const DEFAULT_HANDLE_CAPACITY: usize = 8;
+
 /// A channel buffer that contains handles and chunks.
-#[derive(Default)]
 pub struct Buffer {
     /// The chunks of the buffer.
     pub chunks: Vec<Chunk>,
@@ -44,10 +48,19 @@ pub struct Buffer {
     pub handles: Vec<NullableHandle>,
 }
 
+impl Default for Buffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Buffer {
-    /// New buffer.
+    /// New buffer with the default initial capacity.
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            chunks: Vec::with_capacity(DEFAULT_CHUNK_CAPACITY),
+            handles: Vec::with_capacity(DEFAULT_HANDLE_CAPACITY),
+        }
     }
 }
 
@@ -267,8 +280,8 @@ impl Transport for Channel {
                 ZX_ERR_PEER_CLOSED => return Poll::Ready(Err(None)),
                 ZX_ERR_BUFFER_TOO_SMALL => {
                     let min_chunks = (actual_bytes as usize).div_ceil(CHUNK_SIZE);
-                    buffer.chunks.reserve(min_chunks - buffer.chunks.capacity());
-                    buffer.handles.reserve(actual_handles as usize - buffer.handles.capacity());
+                    buffer.chunks.reserve(min_chunks);
+                    buffer.handles.reserve(actual_handles as usize);
                 }
                 ZX_ERR_SHOULD_WAIT => {
                     if matches!(shared.channel.need_readable(cx)?, Poll::Pending) {
@@ -297,14 +310,18 @@ impl NonBlockingTransport for Channel {
             )
         };
 
+        // SAFETY: `zx_channel_write` unconditionally consumes all handles in
+        // `handles` on both success and failure. `NullableHandle` is a
+        // transparent `zx_handle_t` wrapper with no heap allocation or drop
+        // side effects other than closing the handle, so setting `len` to `0`
+        // prevents `Buffer`'s `Drop` from double-closing consumed handles
+        // (`ZX_POL_BAD_HANDLE`).
+        unsafe {
+            future_state.buffer.handles.set_len(0);
+        }
+
         match result {
-            ZX_OK => {
-                // Handles were written to the channel, so we must not drop them.
-                unsafe {
-                    future_state.buffer.handles.set_len(0);
-                }
-                Ok(())
-            }
+            ZX_OK => Ok(()),
             ZX_ERR_PEER_CLOSED => Err(None),
             _ => Err(Some(Status::err_from_raw(result))),
         }
@@ -313,12 +330,20 @@ impl NonBlockingTransport for Channel {
 
 #[cfg(test)]
 mod tests {
-    use fidl_next_codec::{AsDecoder as _, DecoderExt as _, EncoderExt as _};
-    use fuchsia_async as fasync;
-    use zx::{Channel, Instant, NullableHandle, Signals, WaitResult};
+    use core::pin::pin;
 
-    use crate::fuchsia::channel::Buffer;
+    use fidl_next_codec::{AsDecoder as _, CHUNK_SIZE, DecoderExt as _, EncoderExt as _};
+    use fuchsia_async as fasync;
+    use futures::future::poll_fn;
+    use zx::{Channel, EventPair, Instant, NullableHandle, Rights, Signals, Status, WaitResult};
+
+    use crate::fuchsia::channel::{
+        Buffer, DEFAULT_CHUNK_CAPACITY, DEFAULT_HANDLE_CAPACITY, Exclusive, Shared,
+    };
     use crate::testing::*;
+    use crate::{
+        ClientDispatcher, Flexibility, NonBlockingTransport as _, ProtocolError, Transport as _,
+    };
 
     #[fasync::run_singlethreaded(test)]
     async fn close_on_drop() {
@@ -473,5 +498,173 @@ mod tests {
             check_end.wait_one(Signals::CHANNEL_PEER_CLOSED, Instant::INFINITE_PAST),
             WaitResult::Ok(Signals::CHANNEL_PEER_CLOSED),
         );
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn send_immediately_with_handles_on_peer_closed_does_not_double_close() {
+        let (client_end, server_end) = Channel::create();
+        drop(server_end);
+
+        let (shared, _exclusive) = client_end.split();
+        let (send_eventpair, peer_eventpair) = EventPair::create();
+
+        let mut buffer = Channel::acquire(&shared);
+        buffer
+            .encode_next(HandleAndBoolean { handle: send_eventpair.into_handle(), boolean: true })
+            .expect("encoding should succeed");
+
+        let mut future_state = Channel::begin_send(&shared, buffer);
+        assert_eq!(Channel::send_immediately(&mut future_state, &shared), Err(None));
+        assert!(future_state.buffer.handles.is_empty());
+        drop(future_state);
+
+        assert_eq!(
+            peer_eventpair.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+            WaitResult::Ok(Signals::EVENTPAIR_PEER_CLOSED),
+        );
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn send_immediately_with_handles_on_write_error_does_not_double_close() {
+        let (client_end, _server_end) = Channel::create();
+        let read_only_channel = client_end
+            .replace_handle(Rights::READ | Rights::WAIT)
+            .expect("replacing rights should succeed");
+
+        let (shared, _exclusive) = read_only_channel.split();
+        let (send_eventpair, peer_eventpair) = EventPair::create();
+
+        let mut buffer = Channel::acquire(&shared);
+        buffer
+            .encode_next(HandleAndBoolean { handle: send_eventpair.into_handle(), boolean: true })
+            .expect("encoding should succeed");
+
+        let mut future_state = Channel::begin_send(&shared, buffer);
+        assert_eq!(
+            Channel::send_immediately(&mut future_state, &shared),
+            Err(Some(Status::ACCESS_DENIED)),
+        );
+        assert!(future_state.buffer.handles.is_empty());
+        drop(future_state);
+
+        assert_eq!(
+            peer_eventpair.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+            WaitResult::Ok(Signals::EVENTPAIR_PEER_CLOSED),
+        );
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn client_send_two_way_with_handles_on_peer_closed_does_not_double_close() {
+        let (client_end, server_end) = Channel::create();
+        let client_dispatcher = ClientDispatcher::new(client_end);
+        let client = client_dispatcher.client();
+        drop(server_end);
+
+        let (send_eventpair, peer_eventpair) = EventPair::create();
+        let result = client
+            .send_two_way(
+                42,
+                Flexibility::Strict,
+                HandleAndBoolean { handle: send_eventpair.into_handle(), boolean: true },
+            )
+            .expect("encoding should succeed")
+            .send_immediately();
+        assert!(matches!(result, Err(ProtocolError::PeerClosed)));
+
+        assert_eq!(
+            peer_eventpair.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+            WaitResult::Ok(Signals::EVENTPAIR_PEER_CLOSED),
+        );
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn dropping_unsent_send_state_closes_handles() {
+        let (client_end, _server_end) = Channel::create();
+        let (shared, _exclusive) = client_end.split();
+        let (send_eventpair, peer_eventpair) = EventPair::create();
+
+        let mut buffer = Channel::acquire(&shared);
+        buffer
+            .encode_next(HandleAndBoolean { handle: send_eventpair.into_handle(), boolean: true })
+            .expect("encoding should succeed");
+        let future_state = Channel::begin_send(&shared, buffer);
+
+        assert_eq!(
+            peer_eventpair.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+            WaitResult::TimedOut(Signals::NONE),
+        );
+
+        drop(future_state);
+
+        assert_eq!(
+            peer_eventpair.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+            WaitResult::Ok(Signals::EVENTPAIR_PEER_CLOSED),
+        );
+    }
+
+    async fn recv_once(
+        shared: &Shared,
+        exclusive: &mut Exclusive,
+    ) -> Result<Buffer, Option<Status>> {
+        let mut future_state = pin!(Channel::begin_recv(shared, exclusive));
+        poll_fn(|cx| Channel::poll_recv(future_state.as_mut(), cx, shared, exclusive)).await
+    }
+
+    #[fasync::run_singlethreaded(test)]
+    async fn recv_across_default_capacity_boundaries() {
+        let buffer = Buffer::new();
+        assert!(buffer.chunks.capacity() >= DEFAULT_CHUNK_CAPACITY);
+        assert!(buffer.handles.capacity() >= DEFAULT_HANDLE_CAPACITY);
+
+        let default_bytes = DEFAULT_CHUNK_CAPACITY * CHUNK_SIZE;
+        let (send_end, recv_end) = Channel::create();
+        let (shared, mut exclusive) = recv_end.split();
+
+        let cases = [
+            // Fits within default capacity.
+            (0, 0),
+            (16, 0),
+            (default_bytes, DEFAULT_HANDLE_CAPACITY),
+            // Exceeds byte capacity only (handles <= DEFAULT_HANDLE_CAPACITY).
+            (default_bytes + CHUNK_SIZE, 0),
+            (default_bytes + CHUNK_SIZE, 2),
+            // Exceeds handle capacity only (bytes <= default_bytes).
+            (0, DEFAULT_HANDLE_CAPACITY + 1),
+            (16, DEFAULT_HANDLE_CAPACITY + 4),
+            // Exceeds both capacities.
+            (default_bytes * 4, DEFAULT_HANDLE_CAPACITY * 2),
+        ];
+
+        for (byte_count, handle_count) in cases {
+            let expected_bytes: Vec<u8> = (0..byte_count).map(|i| (i % 251) as u8).collect();
+            let mut send_handles = Vec::with_capacity(handle_count);
+            let mut peer_handles = Vec::with_capacity(handle_count);
+            for _ in 0..handle_count {
+                let (send_eventpair, peer_eventpair) = EventPair::create();
+                send_handles.push(send_eventpair.into_handle());
+                peer_handles.push(peer_eventpair);
+            }
+            send_end.write(&expected_bytes, &mut send_handles).expect("write should succeed");
+
+            let received = recv_once(&shared, &mut exclusive).await.expect("recv should succeed");
+            let received_bytes: Vec<u8> =
+                received.chunks.iter().flat_map(|chunk| chunk.to_le_bytes()).collect();
+            assert_eq!(received_bytes, expected_bytes);
+            assert_eq!(received.handles.len(), handle_count);
+
+            for peer in &peer_handles {
+                assert_eq!(
+                    peer.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+                    WaitResult::TimedOut(Signals::NONE),
+                );
+            }
+            drop(received);
+            for peer in &peer_handles {
+                assert_eq!(
+                    peer.wait_one(Signals::EVENTPAIR_PEER_CLOSED, Instant::INFINITE_PAST),
+                    WaitResult::Ok(Signals::EVENTPAIR_PEER_CLOSED),
+                );
+            }
+        }
     }
 }

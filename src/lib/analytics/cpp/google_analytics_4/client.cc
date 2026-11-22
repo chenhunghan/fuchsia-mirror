@@ -96,8 +96,8 @@ std::string GeneratePostBody(const Measurement& measurement) {
 
 Client::Client(size_t batch_size)
     : batch_(
-          [=](std::vector<std::unique_ptr<Event>> event_ptrs) {
-            this->AddEvents(std::move(event_ptrs), batch_size);
+          [batch_size, this](std::vector<std::unique_ptr<Event>> event_ptrs) {
+            AddEvents(std::move(event_ptrs), batch_size);
           },
           batch_size) {}
 

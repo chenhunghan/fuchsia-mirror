@@ -13,7 +13,7 @@ import("//build/toolchain/toolchain_environment.gni")
 import("//zircon/kernel/phys/phys_executable.gni")
 import("//zircon/kernel/phys/qemu.gni")
 import("//zircon/kernel/phys/shim_executable.gni")
-import("//zircon/kernel/phys/zbi_executable.gni")
+import("//zircon/kernel/phys/zbi-runtime/zbi_executable.gni")
 
 # The legacy shims can be booted directly by QEMU and other things.
 legacy_shims = [
@@ -38,18 +38,19 @@ if (toolchain_environment == "kernel.phys") {
     sources = [ "legacy-boot-shim.cc" ]
     public_deps = [
       ":stdout",
-      "..:legacy-boot",
       "//src/lib/zbitl",
       "//zircon/kernel/lib/arch",
       "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/libc",
-      "//zircon/kernel/phys:address-space",
-      "//zircon/kernel/phys:symbolize",
+      "//zircon/kernel/phys/address-space",
       "//zircon/kernel/phys/boot-zbi",
+      "//zircon/kernel/phys/elf",
       "//zircon/kernel/phys/lib/boot-shim",
+      "//zircon/kernel/phys/linuxboot-runtime",
+      "//zircon/kernel/phys/memory:headers",
+      "//zircon/kernel/phys/output",
       "//zircon/kernel/phys/runtime",
-      "//zircon/kernel/phys/uart",
       "//zircon/system/ulib/hwreg",
     ]
     friend = [ ":legacy-boot-shim-tests" ]
@@ -59,12 +60,10 @@ if (toolchain_environment == "kernel.phys") {
     sources = [ "stdout.cc" ]
     public = [ "stdout.h" ]
     deps = [
-      "//zircon/kernel/arch/x86/phys:legacy-boot",
       "//zircon/kernel/lib/boot-options",
       "//zircon/kernel/phys:boot-options",
-      "//zircon/kernel/phys:stdio",
       "//zircon/kernel/phys/lib/boot-shim",
-      "//zircon/kernel/phys/uart",
+      "//zircon/kernel/phys/linuxboot-runtime",
     ]
   }
 
@@ -76,7 +75,7 @@ if (toolchain_environment == "kernel.phys") {
           sources = [ "linux-x86-boot-shim.cc" ]
           deps = [
             ":legacy-boot-shim",
-            "..:${shim.format}",
+            "//zircon/kernel/phys/linuxboot-runtime",
           ]
         }
       }
@@ -100,6 +99,7 @@ test("legacy-boot-shim-tests") {
   deps = [
     "//zircon/kernel/phys/lib/boot-shim",
     "//zircon/kernel/phys/lib/boot-shim:boot-shim-test",
+    "//zircon/kernel/phys/linuxboot-runtime:headers.x86",
     "//zircon/system/ulib/zxtest",
   ]
 }

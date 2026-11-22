@@ -66,6 +66,15 @@ where
         tokio::io::AsyncWrite::poll_write(Pin::new(&mut *inner), cx, buf)
     }
 
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<futures::io::Result<usize>> {
+        let mut inner = self.0.borrow_mut();
+        tokio::io::AsyncWrite::poll_write_vectored(Pin::new(&mut *inner), cx, bufs)
+    }
+
     fn poll_flush(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -133,6 +142,15 @@ where
     ) -> Poll<futures::io::Result<usize>> {
         let mut inner = self.0.lock().unwrap();
         tokio::io::AsyncWrite::poll_write(Pin::new(&mut *inner), cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<futures::io::Result<usize>> {
+        let mut inner = self.0.lock().unwrap();
+        tokio::io::AsyncWrite::poll_write_vectored(Pin::new(&mut *inner), cx, bufs)
     }
 
     fn poll_flush(

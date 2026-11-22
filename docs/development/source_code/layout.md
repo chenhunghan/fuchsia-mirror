@@ -176,7 +176,7 @@ additionally depend on the `testing` directory in that area and ancestors:
 
  * `(../)+testing/` (testonly=true targets only)
 
-### Canonical targets
+### Canonical targets {:#canonical-targets}
 
 Each area and subarea must define the following canonical target in their
 top-level BUILD.gn file:
@@ -300,7 +300,7 @@ populated from CIPD).
     * `llvm/` *
  * `tools/`
     * `banjo/`
-    * `fidl/bin/backend/{c,cpp,dart,go,llcpp,rust}`
+    * `fidl/{fidlgen_cpp,fidlgen_hlcpp,fidlgen_python,fidlgen_rust,fidlgen_rust_next,fidlgen_syzkaller}`
     * `fidl/bin/frontend/`
     * `fidl/docs/`
     * `fidl/examples/`

@@ -8,8 +8,12 @@
 #include <lib/async/cpp/executor.h>
 #include <lib/async/cpp/wait.h>
 #include <lib/async/default.h>
+#include <lib/fit/defer.h>
+#include <zircon/syscalls.h>
 
 #include <cstdint>
+#include <functional>
+#include <latch>
 #include <thread>
 
 #include "src/ui/lib/escher/test/common/gtest_escher.h"
@@ -17,12 +21,14 @@
 #include "src/ui/scenic/lib/allocation/id.h"
 #include "src/ui/scenic/lib/flatland/buffers/util.h"
 #include "src/ui/scenic/lib/flatland/global_resolved_layers.h"
+#include "src/ui/scenic/lib/flatland/image_import/testing/image_import_test_peer.h"
 #include "src/ui/scenic/lib/flatland/renderer/null_renderer.h"
 #include "src/ui/scenic/lib/flatland/renderer/tests/common.h"
 #include "src/ui/scenic/lib/flatland/renderer/vk_renderer.h"
 // TODO(https://fxbug.dev/42179449): Remove dependency on screen_capture.
 #include "gmock/gmock.h"
 #include "src/ui/scenic/lib/screen_capture/screen_capture.h"
+#include "src/ui/scenic/lib/utils/check_is_on_thread.h"
 #include "src/ui/scenic/lib/utils/helpers.h"
 #include "src/ui/scenic/tests/utils/promise.h"
 
@@ -3189,6 +3195,1210 @@ TEST(VkRendererTest, GetNormalizedUvRect) {
     EXPECT_EQ(uv_rect.clockwise_uvs[2], glm::vec2(1.f, 1.f));
     EXPECT_EQ(uv_rect.clockwise_uvs[3], glm::vec2(0.f, 1.f));
   }
+}
+
+class VkRendererGpuSlotTest : public RendererTest {
+ protected:
+  static constexpr uint32_t kDefaultTargetWidth = 32;
+  static constexpr uint32_t kDefaultTargetHeight = 16;
+
+  struct AllocatedClientCollection {
+    allocation::GlobalBufferCollectionId id = allocation::kInvalidId;
+    std::unique_ptr<Renderer::GpuCollection> gpu_collection;
+    fidl::SyncClient<fuchsia_sysmem2::BufferCollection> collection_ptr;
+    fuchsia_sysmem2::BufferCollectionInfo info;
+    uint64_t per_buffer_bytes = 0;
+  };
+
+  void TearDown() override {
+    for (auto& img : armed_images_) {
+      if (img) {
+        ImageImportTestPeer::ClearForDestruction(*img);
+      }
+    }
+    armed_images_.clear();
+    for (auto& col : armed_collections_) {
+      if (col) {
+        ImageImportTestPeer::ClearCollectionForDestruction(*col);
+      }
+    }
+    armed_collections_.clear();
+    renderer_.reset();
+    escher_.reset();
+    RendererTest::TearDown();
+  }
+
+  bool InitRenderer(bool use_protected_memory = false) {
+    auto [escher, renderer] = CreateEscherAndPrewarmedRenderer(use_protected_memory);
+    if (!escher) {
+      return false;
+    }
+    escher_ = std::move(escher);
+    renderer_ = std::move(renderer);
+    sysmem_allocator_ = CreateSysmemAllocatorClient(loop_.dispatcher());
+    return true;
+  }
+
+  void SetupRenderTarget(uint32_t width = kDefaultTargetWidth,
+                         uint32_t height = kDefaultTargetHeight) {
+    // Vulkan drivers require a minimum extent (commonly 60x40) for render targets
+    // to satisfy image view and framebuffer creation constraints across all test platforms.
+    constexpr uint32_t kMinRenderTargetWidth = 60;
+    constexpr uint32_t kMinRenderTargetHeight = 40;
+    const uint32_t alloc_width = std::max(width, kMinRenderTargetWidth);
+    const uint32_t alloc_height = std::max(height, kMinRenderTargetHeight);
+    const auto target_id = SetupBufferCollection(
+        loop_, 1, alloc_width, alloc_height, BufferCollectionUsage::kRenderTarget, renderer_.get(),
+        sysmem_allocator_, &target_info_, target_ptr_);
+    render_target_ = {
+        .collection_id = target_id,
+        .identifier = allocation::GenerateUniqueImageId(),
+        .vmo_index = 0,
+        .width = width,
+        .height = height,
+    };
+    ASSERT_TRUE(RunPromise(
+        loop_, renderer_->ImportBufferImage(render_target_, BufferCollectionUsage::kRenderTarget)));
+  }
+
+  std::shared_ptr<ImportedCollection> MakeGpuOnlyCollection(AllocatedClientCollection& client_col) {
+    auto collection = std::make_shared<ImportedCollection>(client_col.id);
+    ImageImportTestPeer::SetGpuCollection(*collection, std::move(client_col.gpu_collection));
+    ImageImportTestPeer::SetCollectionState(
+        *collection, ImportedCollection::State::kGpuOnly,
+        fuchsia_hardware_display_types::wire::kImageTilingTypeLinear, client_col.per_buffer_bytes,
+        static_cast<uint32_t>(client_col.info.buffers()->size()));
+    armed_collections_.push_back(collection);
+    return collection;
+  }
+
+  std::shared_ptr<ImportedImage> MakeReadyImage(
+      const ImageMetadata& metadata, std::shared_ptr<ImportedCollection> collection,
+      std::unique_ptr<Renderer::GpuImage> gpu_image,
+      ImageReadinessPolicy policy = ImageReadinessPolicy::kWaitForImports) {
+    auto image = std::make_shared<ImportedImage>(metadata, policy, nullptr, nullptr);
+    ImageImportTestPeer::SetCollection(*image, std::move(collection));
+    ImageImportTestPeer::SetReadyGpuImage(*image, std::move(gpu_image));
+    armed_images_.push_back(image);
+    return image;
+  }
+
+  static ResolvedLayer MakeImageLayer(ImportedImage* image, float x, float y, float width,
+                                      float height) {
+    return ResolvedLayer{
+        .geometry =
+            SrcToDest(types::RectangleF({.x = x, .y = y, .width = width, .height = height})),
+        .blend_mode = BlendMode::kReplace(),
+        .content =
+            ResolvedLayer::ImageContent{
+                .image_id = image ? image->id() : allocation::kInvalidImageId,
+                .width = static_cast<uint32_t>(width),
+                .height = static_cast<uint32_t>(height),
+                .image = image,
+            },
+    };
+  }
+
+  void AllocateClientCollection(
+      AllocatedClientCollection* out, uint32_t image_count, uint32_t width, uint32_t height,
+      fuchsia_images2::PixelFormat format = fuchsia_images2::PixelFormat::kR8G8B8A8) {
+    out->id = allocation::GenerateUniqueBufferCollectionId();
+    auto [dup_token, local_token] = SysmemTokens::Create(sysmem_allocator_);
+    ASSERT_TRUE(dup_token.is_valid());
+    ASSERT_TRUE(local_token.is_valid());
+
+    auto gpu_collection_result = renderer_->CreateGpuCollection(out->id, std::move(dup_token));
+    ASSERT_TRUE(gpu_collection_result.is_ok());
+    out->gpu_collection = std::move(gpu_collection_result.value());
+
+    auto [buffer_usage, memory_constraints] = GetUsageAndMemoryConstraintsForCpuWriteOften();
+    out->collection_ptr = CreateBufferCollectionSyncPtrAndSetConstraints(
+        sysmem_allocator_, std::move(local_token), image_count, width, height,
+        std::move(buffer_usage), format, std::make_optional(std::move(memory_constraints)),
+        std::make_optional(fuchsia_images2::PixelFormatModifier::kLinear));
+    ASSERT_TRUE(out->collection_ptr.is_valid());
+
+    auto wait_result = out->collection_ptr->WaitForAllBuffersAllocated();
+    ASSERT_TRUE(wait_result.is_ok());
+    out->info = std::move(wait_result->buffer_collection_info().value());
+    out->per_buffer_bytes = ImportedCollection::VmoBytesPerBuffer(
+        out->info.settings()->buffer_settings()->size_bytes().value());
+  }
+
+  static void FillSolidRgbaBuffer(fuchsia_sysmem2::BufferCollectionInfo& info, uint32_t vmo_index,
+                                  uint32_t width, uint32_t height, const uint8_t rgba[4]) {
+    MapHostPointer(info, vmo_index, HostPointerAccessMode::kWriteOnly,
+                   [&](uint8_t* vmo_host, uint32_t /*num_bytes*/) {
+                     const uint32_t pixels_per_row =
+                         utils::GetPixelsPerRow(info.settings().value(), width);
+                     for (uint32_t y = 0; y < height; ++y) {
+                       for (uint32_t x = 0; x < width; ++x) {
+                         memcpy(&vmo_host[(y * pixels_per_row + x) * kBytesPerRGBAPixel], rgba,
+                                kBytesPerRGBAPixel);
+                       }
+                     }
+                   });
+  }
+
+  void ForEachLinearTargetPixel(
+      const std::function<void(uint32_t x, uint32_t y, glm::ivec4 pixel)>& check) {
+    MapHostPointer(target_info_, render_target_.vmo_index, HostPointerAccessMode::kReadOnly,
+                   [&](const uint8_t* vmo_host, uint32_t num_bytes) {
+                     std::vector<uint8_t> linear_vals(num_bytes);
+                     sRGBtoLinear(vmo_host, linear_vals.data(), num_bytes);
+                     const uint32_t target_stride = utils::GetPixelsPerRow(
+                         target_info_.settings().value(), render_target_.width);
+                     for (uint32_t y = 0; y < render_target_.height; ++y) {
+                       for (uint32_t x = 0; x < render_target_.width; ++x) {
+                         SCOPED_TRACE(::testing::Message() << "x=" << x << " y=" << y);
+                         check(x, y, GetPixel(linear_vals.data(), target_stride, x, y));
+                       }
+                     }
+                   });
+  }
+
+  async::TestLoop loop_;
+  utils::ScopedThreadDispatcherSetter dispatcher_setter_{loop_.dispatcher(), loop_.dispatcher()};
+  fidl::WireClient<fuchsia_sysmem2::Allocator> sysmem_allocator_;
+  std::unique_ptr<escher::Escher> escher_;
+  std::unique_ptr<VkRenderer> renderer_;
+  fuchsia_sysmem2::BufferCollectionInfo target_info_;
+  fidl::SyncClient<fuchsia_sysmem2::BufferCollection> target_ptr_;
+  ImageMetadata render_target_;
+  std::vector<std::shared_ptr<ImportedImage>> armed_images_;
+  std::vector<std::shared_ptr<ImportedCollection>> armed_collections_;
+};
+
+VK_TEST_F(VkRendererGpuSlotTest, CreateGpuImageOffMainConcurrentWithRenderWrapsAndRendersPixels) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget());
+
+  AllocatedClientCollection client_col;
+  ASSERT_NO_FATAL_FAILURE(
+      AllocateClientCollection(&client_col, /*image_count=*/1, /*width=*/60, /*height=*/40));
+
+  constexpr uint32_t kTexWidth = 4;
+  constexpr uint32_t kTexHeight = 2;
+  const uint8_t kRed[] = {255u, 0u, 0u, 255u};
+  FillSolidRgbaBuffer(client_col.info, /*vmo_index=*/0, kTexWidth, kTexHeight, kRed);
+
+  const ImageMetadata client_metadata = {.collection_id = client_col.id,
+                                         .identifier = allocation::GenerateUniqueImageId(),
+                                         .vmo_index = 0,
+                                         .width = kTexWidth,
+                                         .height = kTexHeight};
+
+  // Run `CreateGpuImage()` on a worker thread concurrently with `Render()` on the main thread.
+  fit::result<ImportImageError, std::unique_ptr<Renderer::GpuImage>> worker_result =
+      fit::error(ImportImageError::kGpuImportFailed);
+  std::thread worker([&] {
+    worker_result = renderer_->CreateGpuImage(client_metadata, *client_col.gpu_collection,
+                                              client_col.per_buffer_bytes);
+  });
+
+  TestLayerInfo warmup_solid = {
+      .metadata = {.identifier = allocation::kInvalidImageId},
+      .blend_mode = BlendMode::kPremultipliedAlpha(),
+      .multiply_color = {0.f, 0.f, 1.f, 1.f},
+  };
+  SrcToDest warmup_rect(types::RectangleF({.x = 0, .y = 0, .width = 2.f, .height = 2.f}));
+  renderer_->Render(render_target_, MakeLayers({warmup_rect}, {warmup_solid}), {});
+  renderer_->WaitIdle();
+
+  worker.join();
+  ASSERT_TRUE(worker_result.is_ok());
+  std::unique_ptr<Renderer::GpuImage> gpu_image = std::move(worker_result.value());
+  ASSERT_NE(gpu_image, nullptr);
+  EXPECT_FALSE(gpu_image->WasSampled());
+
+  auto imported_collection = MakeGpuOnlyCollection(client_col);
+  auto imported_image = MakeReadyImage(client_metadata, imported_collection, std::move(gpu_image));
+
+  // Reference the same `ImportedImage*` across two layers in one frame to verify lazy texture
+  // wrapping, `WasSampled()`, and deduplicated layout transitions on the first frame.
+  ResolvedLayer layer_a =
+      MakeImageLayer(imported_image.get(), 2.f, 2.f, static_cast<float>(kTexWidth),
+                     static_cast<float>(kTexHeight));
+  ResolvedLayer layer_b =
+      MakeImageLayer(imported_image.get(), 10.f, 2.f, static_cast<float>(kTexWidth),
+                     static_cast<float>(kTexHeight));
+  std::vector<ResolvedLayer> layers = {layer_a, layer_b};
+
+  renderer_->Render(render_target_, layers, {});
+  renderer_->WaitIdle();
+  EXPECT_EQ(renderer_->layout_transitions_for_testing(), 1u);
+  ASSERT_NE(imported_image->gpu_image(), nullptr);
+  EXPECT_TRUE(imported_image->gpu_image()->WasSampled());
+
+  const auto expect_two_red_rects = [&](uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2) {
+    uint32_t red_pixels = 0;
+    uint32_t black_pixels = 0;
+    ForEachLinearTargetPixel([&](uint32_t x, uint32_t y, glm::ivec4 pixel) {
+      const bool in_rect_a = (x >= x1 && x < x1 + kTexWidth && y >= y1 && y < y1 + kTexHeight);
+      const bool in_rect_b = (x >= x2 && x < x2 + kTexWidth && y >= y2 && y < y2 + kTexHeight);
+      if (in_rect_a || in_rect_b) {
+        EXPECT_EQ(pixel, glm::ivec4(255, 0, 0, 255));
+        ++red_pixels;
+      } else if (pixel == glm::ivec4(0, 0, 0, 0)) {
+        ++black_pixels;
+      }
+    });
+    EXPECT_EQ(red_pixels, 2 * kTexWidth * kTexHeight);
+    EXPECT_EQ(black_pixels, kDefaultTargetWidth * kDefaultTargetHeight - red_pixels);
+  };
+  expect_two_red_rects(2, 2, 10, 2);
+
+  // Move both layers and render a second time to verify cached `escher::Texture` reuse.
+  layers[0].geometry = SrcToDest(types::RectangleF({.x = 4.f,
+                                                    .y = 8.f,
+                                                    .width = static_cast<float>(kTexWidth),
+                                                    .height = static_cast<float>(kTexHeight)}));
+  layers[1].geometry = SrcToDest(types::RectangleF({.x = 14.f,
+                                                    .y = 8.f,
+                                                    .width = static_cast<float>(kTexWidth),
+                                                    .height = static_cast<float>(kTexHeight)}));
+  renderer_->Render(render_target_, layers, {});
+  renderer_->WaitIdle();
+  EXPECT_EQ(renderer_->layout_transitions_for_testing(), 1u);
+  expect_two_red_rects(4, 8, 14, 8);
+}
+
+VK_TEST_F(VkRendererGpuSlotTest, CreateGpuImageValidatesBoundsAndDestroysUnwrappedSlotCleanly) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+
+  // Invalid `CreateGpuCollection()` arguments return `kCollectionFailed`.
+  auto [unused_dup, unused_local] = SysmemTokens::Create(sysmem_allocator_);
+  auto bad_col_id = renderer_->CreateGpuCollection(allocation::kInvalidId, std::move(unused_dup));
+  ASSERT_TRUE(bad_col_id.is_error());
+  EXPECT_EQ(bad_col_id.error_value(), ImportImageError::kCollectionFailed);
+  EXPECT_EQ(fidl::WireCall(unused_local)->Release().status(), ZX_OK);
+
+  auto bad_col_token =
+      renderer_->CreateGpuCollection(allocation::GenerateUniqueBufferCollectionId(),
+                                     fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>{});
+  ASSERT_TRUE(bad_col_token.is_error());
+  EXPECT_EQ(bad_col_token.error_value(), ImportImageError::kCollectionFailed);
+
+  // A closed/unwriteable token channel makes `SetConstraintsAndCreateVulkanBufferCollection()`
+  // fail and return `kCollectionFailed`.
+  auto [closed_client, closed_server] =
+      fidl::Endpoints<fuchsia_sysmem2::BufferCollectionToken>::Create();
+  closed_server.reset();
+  zx::channel unwriteable_channel;
+  ASSERT_EQ(closed_client.channel().replace(ZX_RIGHT_READ, &unwriteable_channel), ZX_OK);
+  auto bad_vk_col = renderer_->CreateGpuCollection(
+      allocation::GenerateUniqueBufferCollectionId(),
+      fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>(std::move(unwriteable_channel)));
+  ASSERT_TRUE(bad_vk_col.is_error());
+  EXPECT_EQ(bad_vk_col.error_value(), ImportImageError::kCollectionFailed);
+
+  AllocatedClientCollection client_col;
+  ASSERT_NO_FATAL_FAILURE(
+      AllocateClientCollection(&client_col, /*image_count=*/1, /*width=*/32, /*height=*/32));
+
+  const ImageMetadata valid_meta = {.collection_id = client_col.id,
+                                    .identifier = allocation::GenerateUniqueImageId(),
+                                    .vmo_index = 0,
+                                    .width = 16,
+                                    .height = 16};
+
+  // Invalid `ImageMetadata` returns `kGpuImportFailed` (tested one field at a time).
+  const struct {
+    const char* name;
+    ImageMetadata meta;
+  } invalid_meta_cases[] = {
+      {"invalid_collection_id",
+       {.collection_id = allocation::kInvalidId,
+        .identifier = valid_meta.identifier,
+        .vmo_index = 0,
+        .width = 16,
+        .height = 16}},
+      {"invalid_identifier",
+       {.collection_id = client_col.id,
+        .identifier = allocation::kInvalidImageId,
+        .vmo_index = 0,
+        .width = 16,
+        .height = 16}},
+      {"zero_width",
+       {.collection_id = client_col.id,
+        .identifier = valid_meta.identifier,
+        .vmo_index = 0,
+        .width = 0,
+        .height = 16}},
+      {"zero_height",
+       {.collection_id = client_col.id,
+        .identifier = valid_meta.identifier,
+        .vmo_index = 0,
+        .width = 16,
+        .height = 0}},
+  };
+  for (const auto& test_case : invalid_meta_cases) {
+    SCOPED_TRACE(test_case.name);
+    auto bad_meta_res = renderer_->CreateGpuImage(test_case.meta, *client_col.gpu_collection,
+                                                  client_col.per_buffer_bytes);
+    ASSERT_TRUE(bad_meta_res.is_error());
+    EXPECT_EQ(bad_meta_res.error_value(), ImportImageError::kGpuImportFailed);
+  }
+
+  // `vmo_index` >= `bufferCount` is rejected before image creation.
+  const ImageMetadata bad_index = {.collection_id = client_col.id,
+                                   .identifier = allocation::GenerateUniqueImageId(),
+                                   .vmo_index = 1,
+                                   .width = 16,
+                                   .height = 16};
+  auto bad_index_result =
+      renderer_->CreateGpuImage(bad_index, *client_col.gpu_collection, client_col.per_buffer_bytes);
+  ASSERT_TRUE(bad_index_result.is_error());
+  EXPECT_EQ(bad_index_result.error_value(), ImportImageError::kInvalidVmoIndex);
+
+  // `per_buffer_bytes == 0` fails immediately before `vkCreateImage()`.
+  auto zero_bytes_res =
+      renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection, /*per_buffer_bytes=*/0);
+  ASSERT_TRUE(zero_bytes_res.is_error());
+  EXPECT_EQ(zero_bytes_res.error_value(), ImportImageError::kImageTooLarge);
+
+  // `per_buffer_bytes` smaller than `vkGetImageMemoryRequirements()` is rejected before allocation.
+  // Find exact memory requirement boundary.
+  uint64_t low = 1;
+  uint64_t high = client_col.per_buffer_bytes;
+  while (low < high) {
+    const uint64_t mid = low + (high - low) / 2;
+    auto probe = renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection, mid);
+    if (probe.is_error() && probe.error_value() == ImportImageError::kImageTooLarge) {
+      low = mid + 1;
+    } else {
+      high = mid;
+    }
+  }
+  const uint64_t exact_required_bytes = low;
+  ASSERT_GT(exact_required_bytes, 1u);
+
+  // Exact required bytes minus 1 fails with `kImageTooLarge`.
+  auto too_large_boundary =
+      renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection, exact_required_bytes - 1);
+  ASSERT_TRUE(too_large_boundary.is_error());
+  EXPECT_EQ(too_large_boundary.error_value(), ImportImageError::kImageTooLarge);
+
+  // Exactly matching size succeeds.
+  auto exact_fit =
+      renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection, exact_required_bytes);
+  ASSERT_TRUE(exact_fit.is_ok());
+  EXPECT_NE(exact_fit.value(), nullptr);
+  exact_fit.value().reset();
+
+  // Valid `CreateGpuImage()` destroyed on main without ever calling `Render()` exercises the
+  // `!WasSampled()` raw-Vulkan cleanup path under validation layers.
+  auto unwrapped_result = renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection,
+                                                    client_col.per_buffer_bytes);
+  ASSERT_TRUE(unwrapped_result.is_ok());
+  EXPECT_NE(unwrapped_result.value(), nullptr);
+  EXPECT_FALSE(unwrapped_result.value()->WasSampled());
+  unwrapped_result.value().reset();
+
+  // Destroying an unsampled `VkGpuImage` slot on a worker thread (where
+  // `async_get_default_dispatcher() == nullptr`) is safe and touches no main-only state.
+  auto off_main_result = renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection,
+                                                   client_col.per_buffer_bytes);
+  ASSERT_TRUE(off_main_result.is_ok());
+  ASSERT_NE(off_main_result.value(), nullptr);
+  EXPECT_FALSE(off_main_result.value()->WasSampled());
+  std::thread off_main_reaper(
+      [slot = std::move(off_main_result.value())]() mutable { slot.reset(); });
+  off_main_reaper.join();
+}
+
+VK_TEST_F(VkRendererGpuSlotTest, RenderSkipsFailedGpuImportAndRecordsOmittedLayerCount) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget());
+
+  auto failed_image = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = allocation::GenerateUniqueBufferCollectionId(),
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kWaitForImports, nullptr, nullptr);
+  ImageImportTestPeer::SetGpuFailed(*failed_image);
+
+  ResolvedLayer failed_layer = {
+      .geometry = SrcToDest(types::RectangleF({.x = 0.f, .y = 0.f, .width = 4.f, .height = 4.f})),
+      .content =
+          ResolvedLayer::ImageContent{
+              .image_id = failed_image->id(),
+              .width = 4,
+              .height = 4,
+              .image = failed_image.get(),
+          },
+  };
+  ResolvedLayer solid_green_layer = {
+      .geometry = SrcToDest(types::RectangleF({.x = 8.f, .y = 4.f, .width = 4.f, .height = 4.f})),
+      .blend_mode = BlendMode::kPremultipliedAlpha(),
+      .content = ResolvedLayer::SolidColorContent{.color = {0.f, 1.f, 0.f, 1.f}},
+  };
+
+  OmittedLayerTracker::ReasonCounts counts{};
+  const std::vector<ResolvedLayer> layers = {failed_layer, solid_green_layer};
+  renderer_->Render(render_target_, layers, {.omitted_layer_counts = &counts});
+  renderer_->WaitIdle();
+
+  EXPECT_EQ(counts[OmittedLayerTracker::ReasonIndex(OmittedLayerReason::kGpuImportFailed)], 1u);
+
+  // Default `RenderArgs{}` leaves `omitted_layer_counts` null and must not crash.
+  renderer_->Render(render_target_, layers, {});
+  renderer_->WaitIdle();
+
+  ForEachLinearTargetPixel([&](uint32_t x, uint32_t y, glm::ivec4 pixel) {
+    if (x >= 8 && x < 12 && y >= 4 && y < 8) {
+      EXPECT_EQ(pixel, glm::ivec4(0, 255, 0, 255));
+    } else {
+      EXPECT_EQ(pixel, glm::ivec4(0, 0, 0, 0));
+    }
+  });
+
+  ImageImportTestPeer::ClearForDestruction(*failed_image);
+}
+
+VK_TEST_F(VkRendererGpuSlotTest, RenderSkipsReleasedGpuImageWithoutCounting) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget());
+
+  AllocatedClientCollection client_col;
+  ASSERT_NO_FATAL_FAILURE(
+      AllocateClientCollection(&client_col, /*image_count=*/2, /*width=*/16, /*height=*/16));
+  const uint8_t kRed[] = {255u, 0u, 0u, 255u};
+  const uint8_t kBlue[] = {0u, 0u, 255u, 255u};
+  FillSolidRgbaBuffer(client_col.info, /*vmo_index=*/0, 4, 4, kRed);
+  FillSolidRgbaBuffer(client_col.info, /*vmo_index=*/1, 4, 4, kBlue);
+
+  const ImageMetadata valid_meta = {.collection_id = client_col.id,
+                                    .identifier = allocation::GenerateUniqueImageId(),
+                                    .vmo_index = 0,
+                                    .width = 4,
+                                    .height = 4};
+  const ImageMetadata released_ready_meta = {.collection_id = client_col.id,
+                                             .identifier = allocation::GenerateUniqueImageId(),
+                                             .vmo_index = 1,
+                                             .width = 4,
+                                             .height = 4};
+  auto valid_slot = renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection,
+                                              client_col.per_buffer_bytes);
+  ASSERT_TRUE(valid_slot.is_ok());
+  auto released_ready_slot = renderer_->CreateGpuImage(
+      released_ready_meta, *client_col.gpu_collection, client_col.per_buffer_bytes);
+  ASSERT_TRUE(released_ready_slot.is_ok());
+
+  auto imported_collection = MakeGpuOnlyCollection(client_col);
+  auto valid_image = MakeReadyImage(valid_meta, imported_collection, std::move(valid_slot.value()),
+                                    ImageReadinessPolicy::kOptimistic);
+
+  // Case 1: `ClearForDestruction()` (`gpu == kReleased`, `released == true`).
+  auto cleared_image = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = client_col.id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::ClearForDestruction(*cleared_image);
+
+  // Case 2: `gpu == kReleased` with `released == false` (isolates the `word.gpu == kReleased`
+  // guard).
+  auto gpu_released_only = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = client_col.id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetWord(*gpu_released_only, ImportWord{.display = ImportState::kReleased,
+                                                              .gpu = ImportState::kReleased,
+                                                              .released = false,
+                                                              .allocated = true});
+
+  // Case 3: `released == true` while `gpu == kReady` (released before main-thread cleanup runs).
+  auto released_while_ready =
+      MakeReadyImage(released_ready_meta, imported_collection,
+                     std::move(released_ready_slot.value()), ImageReadinessPolicy::kOptimistic);
+  ImportWord released_ready_word = released_while_ready->word();
+  released_ready_word.released = true;
+  ImageImportTestPeer::SetWord(*released_while_ready, released_ready_word);
+
+  // Case 4: `released == true` while `gpu == kQueued` (released before import ran).
+  auto released_while_queued = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = client_col.id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetWord(*released_while_queued, ImportWord{.display = ImportState::kQueued,
+                                                                  .gpu = ImportState::kQueued,
+                                                                  .released = true,
+                                                                  .allocated = false});
+
+  // Case 5: `released == true` while `gpu == kFailed` (must not increment omitted-layer counts).
+  auto released_while_failed = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = client_col.id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetGpuFailed(*released_while_failed);
+  ImportWord released_failed_word = released_while_failed->word();
+  released_failed_word.released = true;
+  ImageImportTestPeer::SetWord(*released_while_failed, released_failed_word);
+
+  const std::vector<ResolvedLayer> layers = {
+      MakeImageLayer(cleared_image.get(), 0.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(gpu_released_only.get(), 4.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(released_while_ready.get(), 8.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(valid_image.get(), 12.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(released_while_queued.get(), 16.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(released_while_failed.get(), 20.f, 0.f, 4.f, 4.f),
+  };
+  EXPECT_FALSE(renderer_->RequiresRenderInProtected(layers));
+
+  OmittedLayerTracker::ReasonCounts vk_counts{};
+  renderer_->Render(render_target_, layers, {.omitted_layer_counts = &vk_counts});
+  renderer_->WaitIdle();
+  EXPECT_THAT(vk_counts, ::testing::Each(0u));
+  EXPECT_FALSE(released_while_ready->gpu_image()->WasSampled());
+
+  ForEachLinearTargetPixel([&](uint32_t x, uint32_t y, glm::ivec4 pixel) {
+    if (x >= 12 && x < 16 && y < 4) {
+      EXPECT_EQ(pixel, glm::ivec4(255, 0, 0, 255));
+    } else {
+      EXPECT_EQ(pixel, glm::ivec4(0, 0, 0, 0));
+    }
+  });
+
+  ImageImportTestPeer::ClearForDestruction(*released_while_failed);
+}
+
+VK_TEST_F(VkRendererGpuSlotTest,
+          RequiresRenderInProtectedHandlesUnprotectedReadyReleasedAndFailedImages) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+
+  AllocatedClientCollection client_col;
+  ASSERT_NO_FATAL_FAILURE(
+      AllocateClientCollection(&client_col, /*image_count=*/1, /*width=*/16, /*height=*/16));
+  const ImageMetadata valid_meta = {.collection_id = client_col.id,
+                                    .identifier = allocation::GenerateUniqueImageId(),
+                                    .vmo_index = 0,
+                                    .width = 4,
+                                    .height = 4};
+  auto slot = renderer_->CreateGpuImage(valid_meta, *client_col.gpu_collection,
+                                        client_col.per_buffer_bytes);
+  ASSERT_TRUE(slot.is_ok());
+
+  auto imported_collection = MakeGpuOnlyCollection(client_col);
+  auto ready_image = MakeReadyImage(valid_meta, imported_collection, std::move(slot.value()),
+                                    ImageReadinessPolicy::kOptimistic);
+
+  auto failed_image = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = client_col.id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetGpuFailed(*failed_image);
+
+  auto released_image = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = client_col.id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::ClearForDestruction(*released_image);
+
+  const std::vector<ResolvedLayer> layers = {
+      MakeImageLayer(ready_image.get(), 0.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(failed_image.get(), 0.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(released_image.get(), 0.f, 0.f, 4.f, 4.f),
+  };
+  EXPECT_FALSE(renderer_->RequiresRenderInProtected(layers));
+}
+
+VK_TEST_F(VkRendererGpuSlotTest,
+          ProtectedImportedImageRequiresProtectedAndUnprotectedRenderEmitsBlackWithoutSampling) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  if (!InitRenderer(/*use_protected_memory=*/true)) {
+    FX_LOGS(WARNING) << "Protected memory not supported. Test skipped.";
+    GTEST_SKIP();
+  }
+
+  constexpr uint32_t kDim = 32;
+  const fuchsia_sysmem2::BufferMemoryConstraints secure_mem = [] {
+    fuchsia_sysmem2::BufferMemoryConstraints c;
+    c.secure_required(true);
+    c.cpu_domain_supported(false);
+    c.ram_domain_supported(false);
+    c.inaccessible_domain_supported(true);
+    return c;
+  }();
+  const fuchsia_sysmem2::BufferUsage secure_usage = [] {
+    fuchsia_sysmem2::BufferUsage u;
+    u.vulkan(fuchsia_sysmem2::kVulkanImageUsageTransferSrc);
+    return u;
+  }();
+
+  // Allocate a protected client collection through `CreateGpuCollection()`.
+  const auto client_col_id = allocation::GenerateUniqueBufferCollectionId();
+  auto [client_dup, client_local] = SysmemTokens::Create(sysmem_allocator_);
+  auto gpu_col_res = renderer_->CreateGpuCollection(client_col_id, std::move(client_dup));
+  ASSERT_TRUE(gpu_col_res.is_ok());
+
+  auto client_col_ptr = CreateBufferCollectionSyncPtrAndSetConstraints(
+      sysmem_allocator_, std::move(client_local), /*image_count=*/1, kDim, kDim, secure_usage,
+      fuchsia_images2::PixelFormat::kB8G8R8A8, std::make_optional(secure_mem),
+      std::make_optional(fuchsia_images2::PixelFormatModifier::kLinear));
+  auto client_wait = client_col_ptr->WaitForAllBuffersAllocated();
+  ASSERT_TRUE(client_wait.is_ok());
+  const auto& client_info = client_wait->buffer_collection_info().value();
+  ASSERT_TRUE(client_info.settings()->buffer_settings()->is_secure().value());
+  const uint64_t per_buffer_bytes = ImportedCollection::VmoBytesPerBuffer(
+      client_info.settings()->buffer_settings()->size_bytes().value());
+
+  const ImageMetadata protected_meta = {.collection_id = client_col_id,
+                                        .identifier = allocation::GenerateUniqueImageId(),
+                                        .vmo_index = 0,
+                                        .width = kDim,
+                                        .height = kDim};
+  auto slot_res = renderer_->CreateGpuImage(protected_meta, *gpu_col_res.value(), per_buffer_bytes);
+  ASSERT_TRUE(slot_res.is_ok());
+
+  AllocatedClientCollection protected_col = {
+      .id = client_col_id,
+      .gpu_collection = std::move(gpu_col_res.value()),
+      .collection_ptr = std::move(client_col_ptr),
+      .info = std::move(client_wait->buffer_collection_info().value()),
+      .per_buffer_bytes = per_buffer_bytes,
+  };
+  auto imported_collection = MakeGpuOnlyCollection(protected_col);
+  auto protected_image =
+      MakeReadyImage(protected_meta, imported_collection, std::move(slot_res.value()),
+                     ImageReadinessPolicy::kOptimistic);
+
+  const ResolvedLayer protected_layer = MakeImageLayer(
+      protected_image.get(), 0.f, 0.f, static_cast<float>(kDim), static_cast<float>(kDim));
+  const std::vector<ResolvedLayer> layers = {protected_layer};
+  EXPECT_TRUE(renderer_->RequiresRenderInProtected(layers));
+
+  // A protected image whose `released` bit is set does not force the frame into protected mode.
+  ImportWord orig_word = protected_image->word();
+  ImportWord released_word = orig_word;
+  released_word.released = true;
+  ImageImportTestPeer::SetWord(*protected_image, released_word);
+  EXPECT_FALSE(renderer_->RequiresRenderInProtected(layers));
+  ImageImportTestPeer::SetWord(*protected_image, orig_word);
+
+  // Unprotected `Render()` emits opaque black without wrapping or layout-transitioning the slot.
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget(kDim, kDim));
+  renderer_->Render(render_target_, layers, {});
+  renderer_->WaitIdle();
+  EXPECT_FALSE(protected_image->gpu_image()->WasSampled());
+  EXPECT_EQ(renderer_->layout_transitions_for_testing(), 0u);
+  ForEachLinearTargetPixel([](uint32_t /*x*/, uint32_t /*y*/, glm::ivec4 pixel) {
+    EXPECT_EQ(pixel, glm::ivec4(0, 0, 0, 255));
+  });
+
+  // Protected `Render()` wraps and renders the protected slot cleanly.
+  auto [rt_dup, rt_local] = SysmemTokens::Create(sysmem_allocator_);
+  const auto protected_rt_col_id = allocation::GenerateUniqueBufferCollectionId();
+  ASSERT_TRUE(RunPromise(loop_, renderer_->ImportBufferCollection(
+                                    protected_rt_col_id, sysmem_allocator_, std::move(rt_dup),
+                                    BufferCollectionUsage::kRenderTarget, std::nullopt)));
+  auto protected_rt_col_ptr = CreateBufferCollectionSyncPtrAndSetConstraints(
+      sysmem_allocator_, std::move(rt_local), /*image_count=*/1, kDim, kDim, secure_usage,
+      fuchsia_images2::PixelFormat::kR8G8B8A8, std::make_optional(secure_mem),
+      std::make_optional(fuchsia_images2::PixelFormatModifier::kLinear));
+  ASSERT_TRUE(protected_rt_col_ptr->WaitForAllBuffersAllocated().is_ok());
+
+  const ImageMetadata protected_rt = {.collection_id = protected_rt_col_id,
+                                      .identifier = allocation::GenerateUniqueImageId(),
+                                      .vmo_index = 0,
+                                      .width = kDim,
+                                      .height = kDim};
+  ASSERT_TRUE(RunPromise(
+      loop_, renderer_->ImportBufferImage(protected_rt, BufferCollectionUsage::kRenderTarget)));
+  renderer_->Render(protected_rt, layers, {});
+  renderer_->WaitIdle();
+  EXPECT_TRUE(protected_image->gpu_image()->WasSampled());
+  EXPECT_EQ(renderer_->layout_transitions_for_testing(), 1u);
+}
+
+VK_TEST_F(VkRendererGpuSlotTest, ConcurrentCreateGpuImageOnSameCollectionSucceedsAndRendersBoth) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget());
+
+  AllocatedClientCollection client_col;
+  ASSERT_NO_FATAL_FAILURE(
+      AllocateClientCollection(&client_col, /*image_count=*/2, /*width=*/16, /*height=*/16));
+  constexpr uint32_t kTexSize = 4;
+  const uint8_t kRed[] = {255u, 0u, 0u, 255u};
+  const uint8_t kGreen[] = {0u, 255u, 0u, 255u};
+  FillSolidRgbaBuffer(client_col.info, /*vmo_index=*/0, kTexSize, kTexSize, kRed);
+  FillSolidRgbaBuffer(client_col.info, /*vmo_index=*/1, kTexSize, kTexSize, kGreen);
+
+  const ImageMetadata meta_0 = {.collection_id = client_col.id,
+                                .identifier = allocation::GenerateUniqueImageId(),
+                                .vmo_index = 0,
+                                .width = kTexSize,
+                                .height = kTexSize};
+  const ImageMetadata meta_1 = {.collection_id = client_col.id,
+                                .identifier = allocation::GenerateUniqueImageId(),
+                                .vmo_index = 1,
+                                .width = kTexSize,
+                                .height = kTexSize};
+
+  fit::result<ImportImageError, std::unique_ptr<Renderer::GpuImage>> res_0 =
+      fit::error(ImportImageError::kGpuImportFailed);
+  fit::result<ImportImageError, std::unique_ptr<Renderer::GpuImage>> res_1 =
+      fit::error(ImportImageError::kGpuImportFailed);
+  std::latch start_gate(2);
+  std::thread t0([&] {
+    start_gate.arrive_and_wait();
+    res_0 =
+        renderer_->CreateGpuImage(meta_0, *client_col.gpu_collection, client_col.per_buffer_bytes);
+  });
+  std::thread t1([&] {
+    start_gate.arrive_and_wait();
+    res_1 =
+        renderer_->CreateGpuImage(meta_1, *client_col.gpu_collection, client_col.per_buffer_bytes);
+  });
+  t0.join();
+  t1.join();
+  ASSERT_TRUE(res_0.is_ok());
+  ASSERT_TRUE(res_1.is_ok());
+
+  auto imported_collection = MakeGpuOnlyCollection(client_col);
+  auto img_0 = MakeReadyImage(meta_0, imported_collection, std::move(res_0.value()),
+                              ImageReadinessPolicy::kOptimistic);
+  auto img_1 = MakeReadyImage(meta_1, imported_collection, std::move(res_1.value()),
+                              ImageReadinessPolicy::kOptimistic);
+
+  const std::vector<ResolvedLayer> layers = {
+      MakeImageLayer(img_0.get(), 0.f, 0.f, 4.f, 4.f),
+      MakeImageLayer(img_1.get(), 8.f, 0.f, 4.f, 4.f),
+  };
+  renderer_->Render(render_target_, layers, {});
+  renderer_->WaitIdle();
+
+  ForEachLinearTargetPixel([&](uint32_t x, uint32_t y, glm::ivec4 pixel) {
+    if (x < 4 && y < 4) {
+      EXPECT_EQ(pixel, glm::ivec4(255, 0, 0, 255));
+    } else if (x >= 8 && x < 12 && y < 4) {
+      EXPECT_EQ(pixel, glm::ivec4(0, 255, 0, 255));
+    } else {
+      EXPECT_EQ(pixel, glm::ivec4(0, 0, 0, 0));
+    }
+  });
+}
+
+VK_TEST_F(VkRendererGpuSlotTest, CreateGpuImageImportsAndRenders1x1Image) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  ASSERT_TRUE(InitRenderer());
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget());
+
+  // Vulkan's memory requirements for a 1x1 image can exceed sysmem's `size_bytes` (e.g. 256 vs 64
+  // bytes on Intel and Lavapipe). The import must succeed because the image still fits in the VMO.
+  AllocatedClientCollection client_col;
+  ASSERT_NO_FATAL_FAILURE(
+      AllocateClientCollection(&client_col, /*image_count=*/1, /*width=*/1, /*height=*/1));
+  EXPECT_EQ(client_col.per_buffer_bytes % zx_system_get_page_size(), 0u);
+  EXPECT_GE(client_col.per_buffer_bytes,
+            client_col.info.settings()->buffer_settings()->size_bytes().value());
+  const uint8_t kRed[] = {255u, 0u, 0u, 255u};
+  FillSolidRgbaBuffer(client_col.info, /*vmo_index=*/0, /*width=*/1, /*height=*/1, kRed);
+
+  const ImageMetadata meta = {.collection_id = client_col.id,
+                              .identifier = allocation::GenerateUniqueImageId(),
+                              .vmo_index = 0,
+                              .width = 1,
+                              .height = 1};
+  auto res =
+      renderer_->CreateGpuImage(meta, *client_col.gpu_collection, client_col.per_buffer_bytes);
+  ASSERT_TRUE(res.is_ok()) << "error " << static_cast<uint32_t>(res.error_value());
+
+  auto imported_collection = MakeGpuOnlyCollection(client_col);
+  auto img = MakeReadyImage(meta, imported_collection, std::move(res.value()));
+
+  const std::vector<ResolvedLayer> layers = {MakeImageLayer(img.get(), 0.f, 0.f, 4.f, 4.f)};
+  renderer_->Render(render_target_, layers, {});
+  renderer_->WaitIdle();
+
+  ForEachLinearTargetPixel([&](uint32_t x, uint32_t y, glm::ivec4 pixel) {
+    if (x < 4 && y < 4) {
+      EXPECT_EQ(pixel, glm::ivec4(255, 0, 0, 255));
+    } else {
+      EXPECT_EQ(pixel, glm::ivec4(0, 0, 0, 0));
+    }
+  });
+}
+
+VK_TEST_F(VkRendererGpuSlotTest, CreateGpuImageWrapsAndRendersNv12WithYuvSampler) {
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(VirtualGpu);
+  // TODO(https://fxbug.dev/321072153): Enable on SoftwareGpu once Lavapipe supports multiplane YUV
+  // images.
+  SKIP_TEST_IF_ESCHER_USES_DEVICE(SoftwareGpu);
+  ASSERT_TRUE(InitRenderer());
+
+  constexpr uint32_t kDim = 32;
+  ASSERT_NO_FATAL_FAILURE(SetupRenderTarget(kDim, kDim));
+
+  AllocatedClientCollection yuv_col;
+  ASSERT_NO_FATAL_FAILURE(AllocateClientCollection(&yuv_col, /*image_count=*/1, kDim, kDim,
+                                                   fuchsia_images2::PixelFormat::kNv12));
+
+  constexpr uint32_t kNumPixels = kDim * kDim;
+  const uint8_t kFuchsiaYuvValues[] = {110u, 192u, 192u};
+  const uint8_t kFuchsiaRgbaValues[] = {228u, 68u, 246u, 255u};
+  MapHostPointer(yuv_col.info, /*vmo_index=*/0, HostPointerAccessMode::kWriteOnly,
+                 [&](uint8_t* vmo_host, uint32_t /*num_bytes*/) {
+                   for (uint32_t i = 0; i < kNumPixels; ++i) {
+                     vmo_host[i] = kFuchsiaYuvValues[0];
+                   }
+                   for (uint32_t i = kNumPixels; i < kNumPixels + kNumPixels / 2; i += 2) {
+                     vmo_host[i] = kFuchsiaYuvValues[1];
+                     vmo_host[i + 1] = kFuchsiaYuvValues[2];
+                   }
+                 });
+
+  const ImageMetadata yuv_meta = {.collection_id = yuv_col.id,
+                                  .identifier = allocation::GenerateUniqueImageId(),
+                                  .vmo_index = 0,
+                                  .width = kDim,
+                                  .height = kDim};
+  auto slot_res =
+      renderer_->CreateGpuImage(yuv_meta, *yuv_col.gpu_collection, yuv_col.per_buffer_bytes);
+  ASSERT_TRUE(slot_res.is_ok());
+
+  auto imported_collection = MakeGpuOnlyCollection(yuv_col);
+  auto yuv_image = MakeReadyImage(yuv_meta, imported_collection, std::move(slot_res.value()),
+                                  ImageReadinessPolicy::kOptimistic);
+
+  const ResolvedLayer yuv_layer =
+      MakeImageLayer(yuv_image.get(), 0.f, 0.f, static_cast<float>(kDim), static_cast<float>(kDim));
+  renderer_->Render(render_target_, std::span<const ResolvedLayer>(&yuv_layer, 1), {});
+  renderer_->WaitIdle();
+
+  MapHostPointer(target_info_, render_target_.vmo_index, HostPointerAccessMode::kReadOnly,
+                 [&](const uint8_t* vmo_host, uint32_t /*num_bytes*/) {
+                   const uint32_t target_stride =
+                       utils::GetPixelsPerRow(target_info_.settings().value(), kDim);
+                   for (uint32_t y = 0; y < kDim; ++y) {
+                     for (uint32_t x = 0; x < kDim; ++x) {
+                       SCOPED_TRACE(::testing::Message() << "x=" << x << " y=" << y);
+                       EXPECT_EQ(GetPixel(vmo_host, target_stride, x, y),
+                                 glm::ivec4(kFuchsiaRgbaValues[0], kFuchsiaRgbaValues[1],
+                                            kFuchsiaRgbaValues[2], kFuchsiaRgbaValues[3]));
+                     }
+                   }
+                 });
+}
+
+TEST(NullRendererGpuSlotTest, CreateGpuCollectionCreateGpuImageAndRenderErrorAndReadyPaths) {
+  async::TestLoop loop;
+  utils::ScopedThreadDispatcherSetter dispatcher_setter(loop.dispatcher(), loop.dispatcher());
+
+  NullRenderer renderer;
+
+  // `CreateGpuCollection()` invalid ID, invalid token, and valid token.
+  auto [dup_for_bad_id, server_for_bad_id] =
+      fidl::Endpoints<fuchsia_sysmem2::BufferCollectionToken>::Create();
+  auto bad_id = renderer.CreateGpuCollection(allocation::kInvalidId, std::move(dup_for_bad_id));
+  ASSERT_TRUE(bad_id.is_error());
+  EXPECT_EQ(bad_id.error_value(), ImportImageError::kCollectionFailed);
+
+  auto bad_token =
+      renderer.CreateGpuCollection(allocation::GenerateUniqueBufferCollectionId(),
+                                   fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken>{});
+  ASSERT_TRUE(bad_token.is_error());
+  EXPECT_EQ(bad_token.error_value(), ImportImageError::kCollectionFailed);
+
+  const auto col_id = allocation::GenerateUniqueBufferCollectionId();
+  auto [valid_client, valid_server] =
+      fidl::Endpoints<fuchsia_sysmem2::BufferCollectionToken>::Create();
+  auto col_res = renderer.CreateGpuCollection(col_id, std::move(valid_client));
+  ASSERT_TRUE(col_res.is_ok());
+  ASSERT_NE(col_res.value(), nullptr);
+
+  // Assert `CreateGpuCollection()` sent `Release()` on the token.
+  fidl_message_header_t release_header{};
+  uint32_t actual_bytes = 0;
+  uint32_t actual_handles = 0;
+  EXPECT_EQ(valid_server.channel().read(0, &release_header, nullptr, sizeof(release_header), 0,
+                                        &actual_bytes, &actual_handles),
+            ZX_OK);
+  EXPECT_GE(actual_bytes, sizeof(fidl_message_header_t));
+  EXPECT_EQ(release_header.ordinal, fuchsia_sysmem2::BufferCollectionToken::Release::kOrdinal);
+
+  // An unwriteable token causes `Release()` to fail.
+  auto [bad_client, bad_server] = fidl::Endpoints<fuchsia_sysmem2::BufferCollectionToken>::Create();
+  zx::channel unwriteable_channel;
+  ASSERT_EQ(bad_client.channel().replace(ZX_RIGHT_READ, &unwriteable_channel), ZX_OK);
+  fidl::ClientEnd<fuchsia_sysmem2::BufferCollectionToken> unwriteable_token(
+      std::move(unwriteable_channel));
+  auto bad_status_res = renderer.CreateGpuCollection(allocation::GenerateUniqueBufferCollectionId(),
+                                                     std::move(unwriteable_token));
+  ASSERT_TRUE(bad_status_res.is_error());
+  EXPECT_EQ(bad_status_res.error_value(), ImportImageError::kCollectionFailed);
+
+  const ImageMetadata valid_meta = {.collection_id = col_id,
+                                    .identifier = allocation::GenerateUniqueImageId(),
+                                    .vmo_index = 0,
+                                    .width = 8,
+                                    .height = 8};
+
+  // Test invalid metadata checks one field at a time.
+  const struct {
+    const char* name;
+    ImageMetadata meta;
+  } invalid_meta_cases[] = {
+      {"invalid_collection_id",
+       {.collection_id = allocation::kInvalidId,
+        .identifier = valid_meta.identifier,
+        .vmo_index = 0,
+        .width = 8,
+        .height = 8}},
+      {"invalid_identifier",
+       {.collection_id = col_id,
+        .identifier = allocation::kInvalidImageId,
+        .vmo_index = 0,
+        .width = 8,
+        .height = 8}},
+      {"zero_width",
+       {.collection_id = col_id,
+        .identifier = valid_meta.identifier,
+        .vmo_index = 0,
+        .width = 0,
+        .height = 8}},
+      {"zero_height",
+       {.collection_id = col_id,
+        .identifier = valid_meta.identifier,
+        .vmo_index = 0,
+        .width = 8,
+        .height = 0}},
+  };
+  for (const auto& test_case : invalid_meta_cases) {
+    SCOPED_TRACE(test_case.name);
+    auto bad_meta_res = renderer.CreateGpuImage(test_case.meta, *col_res.value(),
+                                                /*per_buffer_bytes=*/4096);
+    ASSERT_TRUE(bad_meta_res.is_error());
+    EXPECT_EQ(bad_meta_res.error_value(), ImportImageError::kGpuImportFailed);
+  }
+
+  auto zero_bytes = renderer.CreateGpuImage(valid_meta, *col_res.value(), /*per_buffer_bytes=*/0);
+  ASSERT_TRUE(zero_bytes.is_error());
+  EXPECT_EQ(zero_bytes.error_value(), ImportImageError::kImageTooLarge);
+
+  auto img_res = renderer.CreateGpuImage(valid_meta, *col_res.value(), /*per_buffer_bytes=*/4096);
+  ASSERT_TRUE(img_res.is_ok());
+  ASSERT_NE(img_res.value(), nullptr);
+
+  // `Render()` on `kReady` and `kFailed` layers (both with and without `omitted_layer_counts`).
+  auto imported_collection = std::make_shared<ImportedCollection>(col_id);
+  ImageImportTestPeer::SetGpuCollection(*imported_collection, std::move(col_res.value()));
+  ImageImportTestPeer::SetCollectionState(
+      *imported_collection, ImportedCollection::State::kGpuOnly,
+      fuchsia_hardware_display_types::wire::kImageTilingTypeLinear, 4096, 1);
+
+  auto ready_image = std::make_shared<ImportedImage>(valid_meta, ImageReadinessPolicy::kOptimistic,
+                                                     nullptr, nullptr);
+  ImageImportTestPeer::SetCollection(*ready_image, imported_collection);
+  ImageImportTestPeer::SetReadyGpuImage(*ready_image, std::move(img_res.value()));
+
+  auto failed_image = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = col_id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 8,
+                    .height = 8},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetGpuFailed(*failed_image);
+
+  auto disarm = fit::defer([&] {
+    ImageImportTestPeer::ClearForDestruction(*failed_image);
+    ImageImportTestPeer::ClearForDestruction(*ready_image);
+    ImageImportTestPeer::ClearCollectionForDestruction(*imported_collection);
+  });
+
+  const std::vector<ResolvedLayer> layers = {
+      ResolvedLayer{
+          .geometry =
+              SrcToDest(types::RectangleF({.x = 0.f, .y = 0.f, .width = 8.f, .height = 8.f})),
+          .content =
+              ResolvedLayer::ImageContent{
+                  .image_id = ready_image->id(),
+                  .width = 8,
+                  .height = 8,
+                  .image = ready_image.get(),
+              },
+      },
+      ResolvedLayer{
+          .geometry =
+              SrcToDest(types::RectangleF({.x = 8.f, .y = 0.f, .width = 8.f, .height = 8.f})),
+          .content =
+              ResolvedLayer::ImageContent{
+                  .image_id = failed_image->id(),
+                  .width = 8,
+                  .height = 8,
+                  .image = failed_image.get(),
+              },
+      },
+  };
+  EXPECT_FALSE(renderer.RequiresRenderInProtected(layers));
+  EXPECT_FALSE(ready_image->gpu_image()->WasSampled());
+
+  zx::event release_fence;
+  ASSERT_EQ(zx::event::create(0, &release_fence), ZX_OK);
+  OmittedLayerTracker::ReasonCounts counts{};
+  renderer.Render(
+      ImageMetadata{}, layers,
+      {.release_fences = std::span<zx::event>(&release_fence, 1), .omitted_layer_counts = &counts});
+  EXPECT_EQ(counts[OmittedLayerTracker::ReasonIndex(OmittedLayerReason::kGpuImportFailed)], 1u);
+  EXPECT_EQ(release_fence.wait_one(ZX_EVENT_SIGNALED, zx::time::infinite_past(), nullptr), ZX_OK);
+  EXPECT_TRUE(ready_image->gpu_image()->WasSampled());
+
+  // Default `RenderArgs{}` leaves `omitted_layer_counts` null and must not crash.
+  renderer.Render(ImageMetadata{}, layers, {});
+}
+
+TEST(NullRendererGpuSlotTest, RenderSkipsReleasedGpuImageWithoutCounting) {
+  async::TestLoop loop;
+  utils::ScopedThreadDispatcherSetter dispatcher_setter(loop.dispatcher(), loop.dispatcher());
+
+  NullRenderer null_renderer;
+  const auto col_id = allocation::GenerateUniqueBufferCollectionId();
+  auto [valid_client, valid_server] =
+      fidl::Endpoints<fuchsia_sysmem2::BufferCollectionToken>::Create();
+  auto col_res = null_renderer.CreateGpuCollection(col_id, std::move(valid_client));
+  ASSERT_TRUE(col_res.is_ok());
+
+  const ImageMetadata valid_meta = {.collection_id = col_id,
+                                    .identifier = allocation::GenerateUniqueImageId(),
+                                    .vmo_index = 0,
+                                    .width = 4,
+                                    .height = 4};
+  const ImageMetadata released_ready_meta = {.collection_id = col_id,
+                                             .identifier = allocation::GenerateUniqueImageId(),
+                                             .vmo_index = 1,
+                                             .width = 4,
+                                             .height = 4};
+  auto valid_slot =
+      null_renderer.CreateGpuImage(valid_meta, *col_res.value(), /*per_buffer_bytes=*/4096);
+  ASSERT_TRUE(valid_slot.is_ok());
+  auto released_ready_slot = null_renderer.CreateGpuImage(released_ready_meta, *col_res.value(),
+                                                          /*per_buffer_bytes=*/4096);
+  ASSERT_TRUE(released_ready_slot.is_ok());
+
+  auto imported_collection = std::make_shared<ImportedCollection>(col_id);
+  ImageImportTestPeer::SetGpuCollection(*imported_collection, std::move(col_res.value()));
+  ImageImportTestPeer::SetCollectionState(
+      *imported_collection, ImportedCollection::State::kGpuOnly,
+      fuchsia_hardware_display_types::wire::kImageTilingTypeLinear, 4096, 2);
+
+  auto valid_image = std::make_shared<ImportedImage>(valid_meta, ImageReadinessPolicy::kOptimistic,
+                                                     nullptr, nullptr);
+  ImageImportTestPeer::SetCollection(*valid_image, imported_collection);
+  ImageImportTestPeer::SetReadyGpuImage(*valid_image, std::move(valid_slot.value()));
+
+  auto cleared_image = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = col_id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::ClearForDestruction(*cleared_image);
+
+  auto gpu_released_only = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = col_id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetWord(*gpu_released_only, ImportWord{.display = ImportState::kReleased,
+                                                              .gpu = ImportState::kReleased,
+                                                              .released = false,
+                                                              .allocated = true});
+
+  auto released_while_ready = std::make_shared<ImportedImage>(
+      released_ready_meta, ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetCollection(*released_while_ready, imported_collection);
+  ImageImportTestPeer::SetReadyGpuImage(*released_while_ready,
+                                        std::move(released_ready_slot.value()));
+  ImportWord released_ready_word = released_while_ready->word();
+  released_ready_word.released = true;
+  ImageImportTestPeer::SetWord(*released_while_ready, released_ready_word);
+
+  auto released_while_queued = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = col_id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetWord(*released_while_queued, ImportWord{.display = ImportState::kQueued,
+                                                                  .gpu = ImportState::kQueued,
+                                                                  .released = true,
+                                                                  .allocated = false});
+
+  auto released_while_failed = std::make_shared<ImportedImage>(
+      ImageMetadata{.collection_id = col_id,
+                    .identifier = allocation::GenerateUniqueImageId(),
+                    .vmo_index = 0,
+                    .width = 4,
+                    .height = 4},
+      ImageReadinessPolicy::kOptimistic, nullptr, nullptr);
+  ImageImportTestPeer::SetGpuFailed(*released_while_failed);
+  ImportWord released_failed_word = released_while_failed->word();
+  released_failed_word.released = true;
+  ImageImportTestPeer::SetWord(*released_while_failed, released_failed_word);
+
+  auto disarm = fit::defer([&] {
+    ImageImportTestPeer::ClearForDestruction(*released_while_failed);
+    ImageImportTestPeer::ClearForDestruction(*released_while_ready);
+    ImageImportTestPeer::ClearForDestruction(*valid_image);
+    ImageImportTestPeer::ClearCollectionForDestruction(*imported_collection);
+  });
+
+  const auto make_layer = [](ImportedImage* image, float x) {
+    return ResolvedLayer{
+        .geometry = SrcToDest(types::RectangleF({.x = x, .y = 0.f, .width = 4.f, .height = 4.f})),
+        .blend_mode = BlendMode::kReplace(),
+        .content =
+            ResolvedLayer::ImageContent{
+                .image_id = image->id(),
+                .width = 4,
+                .height = 4,
+                .image = image,
+            },
+    };
+  };
+
+  const std::vector<ResolvedLayer> layers = {
+      make_layer(cleared_image.get(), 0.f),          make_layer(gpu_released_only.get(), 4.f),
+      make_layer(released_while_ready.get(), 8.f),   make_layer(valid_image.get(), 12.f),
+      make_layer(released_while_queued.get(), 16.f), make_layer(released_while_failed.get(), 20.f),
+  };
+  EXPECT_FALSE(null_renderer.RequiresRenderInProtected(layers));
+
+  OmittedLayerTracker::ReasonCounts null_counts{};
+  null_renderer.Render(ImageMetadata{}, layers, {.omitted_layer_counts = &null_counts});
+  EXPECT_THAT(null_counts, ::testing::Each(0u));
+  EXPECT_TRUE(valid_image->gpu_image()->WasSampled());
+  EXPECT_FALSE(released_while_ready->gpu_image()->WasSampled());
 }
 
 }  // namespace flatland

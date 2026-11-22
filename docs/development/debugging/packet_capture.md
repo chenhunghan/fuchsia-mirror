@@ -83,8 +83,6 @@ workflows. The following table lists noteworthy signatures.
 | Bootserver           | port 33331                   | NETBOOT_PORT_ADVERT                        |
 | Bootserver           | port 33332                   | NETBOOT_PORT_CMD_START                     |
 | Bootserver           | port 33339                   | NETBOOT_PORT_CMD_END                       |
-| Bootserver           | port 33340                   | NETBOOT_PORT_TFTP_OUTGOING                 |
-| Bootserver           | port 33341                   | NETBOOT_PORT_TFTP_INCOMING                 |
 | target netsvc addr   | fe80::xxxx:xxff:fexx:xxxx%XX | fx device-finder list --netboot            |
 | host link-local addr | fe80::xxxx:xxxx:xxxx:xxxx%XX | fx device-finder list --ipv4=false --local |
 | target netstack addr | fe80::xxxx:xxxx:xxxx:xxxx%XX | fx get-device-addr                         |

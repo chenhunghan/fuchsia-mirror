@@ -29,6 +29,11 @@ extend uint fuchsia.BIND_PLATFORM_DEV_PID {
   SORREL = 0x16,
   MAPLE = 0x17,
   KUDZU = 0x18,
+  HICKORY = 0x19,
+  SPRUCE = 0x1A,
+  DOGWOOD = 0x1B,
+  WINEBERRY = 0x1C,
+  ALDER = 0x1D,
 };
 
 extend uint fuchsia.BIND_PLATFORM_DEV_DID {

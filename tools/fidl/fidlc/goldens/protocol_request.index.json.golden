@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
       "data": "test.protocolrequest",
       "start_offset": 8,
       "end_offset": 28
@@ -25,7 +25,7 @@
           "name": "r",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "r",
             "start_offset": 222,
             "end_offset": 223
@@ -44,7 +44,7 @@
           "name": "c",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "c",
             "start_offset": 135,
             "end_offset": 136
@@ -63,7 +63,7 @@
           "name": "c",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "c",
             "start_offset": 297,
             "end_offset": 298
@@ -82,7 +82,7 @@
           "name": "r",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "r",
             "start_offset": 379,
             "end_offset": 380
@@ -99,7 +99,7 @@
       "identifier": "test.protocolrequest/Child",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
         "data": "Child",
         "start_offset": 47,
         "end_offset": 52
@@ -111,7 +111,7 @@
       "identifier": "test.protocolrequest/Parent",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
         "data": "Parent",
         "start_offset": 74,
         "end_offset": 80
@@ -121,7 +121,7 @@
           "identifier": "GetChild",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "GetChild",
             "start_offset": 94,
             "end_offset": 102
@@ -135,7 +135,7 @@
           "identifier": "GetChildRequest",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "GetChildRequest",
             "start_offset": 174,
             "end_offset": 189
@@ -149,7 +149,7 @@
           "identifier": "TakeChild",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "TakeChild",
             "start_offset": 261,
             "end_offset": 270
@@ -163,7 +163,7 @@
           "identifier": "TakeChildRequest",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/protocol_request.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/protocol_request.test.fidl",
             "data": "TakeChildRequest",
             "start_offset": 336,
             "end_offset": 352

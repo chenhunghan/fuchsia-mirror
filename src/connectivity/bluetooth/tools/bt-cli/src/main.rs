@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use anyhow::{Context as _, Error, format_err};
+use bt_repl::{CommandSet, ReplControl, ReplHandler};
 use fidl_fuchsia_bluetooth::{HostId as FidlHostId, PeerId as FidlPeerId};
 use fidl_fuchsia_bluetooth_sys::{
     AccessMarker, AccessProxy, BondableMode, HostWatcherMarker, HostWatcherProxy,
@@ -15,20 +16,16 @@ use fuchsia_bluetooth::types::{HostId, HostInfo, Peer, PeerId, addresses_to_cust
 use fuchsia_component::client::connect_to_protocol;
 use fuchsia_sync::Mutex;
 use futures::channel::mpsc;
-use futures::{FutureExt, Sink, SinkExt, Stream, StreamExt, TryFutureExt, select};
+use futures::{FutureExt, StreamExt, TryFutureExt, select};
 use prettytable::{Row, Table, format, row};
 use regex::Regex;
-use rustyline::error::ReadlineError;
-use rustyline::history::DefaultHistory;
-use rustyline::{CompletionType, Config, EditMode, Editor};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::pin::pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::thread;
 
-use crate::commands::{Cmd, CmdHelper, ReplControl};
+use crate::commands::{Cmd, command_source};
 use crate::types::{DeviceClass, MajorClass, MinorClass, TryInto};
 
 mod commands;
@@ -84,7 +81,7 @@ async fn set_active_host<'a>(
     host_svc: &'a HostWatcherProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Err(format_err!("usage: {}", Cmd::SetController.cmd_help()));
+        return Err(format_err!("usage: {}", Cmd::SetController.usage()));
     }
     println!("Setting active controller");
     let host_id = HostId::from_str(args[0])?;
@@ -100,7 +97,7 @@ async fn set_local_name<'a>(
     access_svc: &'a AccessProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", Cmd::SetLocalName.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::SetLocalName.usage()));
     }
     println!("Setting local name of the active controller");
     match access_svc.set_local_name(args[0]) {
@@ -139,30 +136,42 @@ async fn set_device_class<'a>(
 }
 
 fn match_peer<'a>(pattern: &'a str, peer: &Peer) -> bool {
-    let pattern_upper = &pattern.to_uppercase();
-    peer.id.to_string().to_uppercase().contains(pattern_upper)
-        || peer.address.to_string().to_uppercase().contains(pattern_upper)
-        || peer.name.as_ref().is_some_and(|p| p.contains(pattern))
+    let pattern_lower = &pattern.to_lowercase();
+    peer.id.to_string().to_lowercase().contains(pattern_lower)
+        || peer.address.to_string().to_lowercase().contains(pattern_lower)
+        || peer.name.as_ref().is_some_and(|p| p.to_lowercase().contains(pattern_lower))
 }
 
-/// Order connected peers as greater than unconnected peers and bonded peers greater than unbonded
-/// peers.
+/// Order named peers as greater than unnamed peers, connected peers as greater than unconnected
+/// peers, and bonded peers as greater than unbonded peers, so more relevant peers appear last in
+/// the output.
 fn cmp_peers(a: &Peer, b: &Peer) -> Ordering {
-    (a.connected, a.bonded).cmp(&(b.connected, b.bonded))
+    (a.name.is_some(), a.connected, a.bonded).cmp(&(b.name.is_some(), b.connected, b.bonded))
 }
 
 fn get_peers<'a>(args: &'a [&'a str], state: &Mutex<State>, full_details: bool) -> String {
-    let find = match args.len() {
-        0 => "",
-        1 => args[0],
-        _ => return format!("usage: {}", Cmd::ListPeers.cmd_help()),
-    };
+    let cmd = if full_details { Cmd::ShowPeers } else { Cmd::ListPeers };
+    let mut named_only = false;
+    let mut find: Option<&str> = None;
+    for &arg in args {
+        match arg {
+            "--named-only" | "-n" => named_only = true,
+            _ if arg.starts_with('-') => return format!("usage: {}", cmd.usage()),
+            _ if find.is_none() => find = Some(arg),
+            _ => return format!("usage: {}", cmd.usage()),
+        }
+    }
     let state = state.lock();
     if state.peers.is_empty() {
         return String::from("No known peers");
     }
-    let mut peers: Vec<&Peer> = state.peers.values().filter(|p| match_peer(&find, p)).collect();
-    peers.sort_by(|a, b| cmp_peers(&*a, &*b));
+    let find = find.unwrap_or("");
+    let mut peers: Vec<&Peer> = state
+        .peers
+        .values()
+        .filter(|p| (!named_only || p.name.is_some()) && match_peer(find, p))
+        .collect();
+    peers.sort_by(|a, b| cmp_peers(a, b));
     let matched = format!("Showing {}/{} peers\n", peers.len(), state.peers.len());
     if peers.is_empty() {
         return matched;
@@ -176,7 +185,7 @@ fn get_peers<'a>(args: &'a [&'a str], state: &Mutex<State>, full_details: bool) 
 
     // Create table of results
     let mut table = Table::new();
-    table.set_format(*format::consts::FORMAT_NO_BORDER);
+    table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
     let _ = table.set_titles(row![
         "PeerId",
         "Address",
@@ -189,13 +198,13 @@ fn get_peers<'a>(args: &'a [&'a str], state: &Mutex<State>, full_details: bool) 
     for val in peers.into_iter() {
         let _ = table.add_row(peer_to_table_row(val));
     }
-    [matched, format!("{}", table)].join("\n")
+    format!("{matched}{table}")
 }
 
 /// Get the string representation of a peer from either an identifier or address
 fn get_peer<'a>(args: &'a [&'a str], state: &Mutex<State>) -> String {
     if args.len() != 1 {
-        return format!("usage: {}", Cmd::Peer.cmd_help());
+        return format!("usage: {}", Cmd::Peer.usage());
     }
 
     to_identifier(state, args[0])
@@ -258,7 +267,8 @@ async fn connect<'a>(
     with_pairing: Option<&'a PairingProxy>,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", Cmd::Connect.cmd_help()));
+        let cmd = if with_pairing.is_some() { Cmd::Bond } else { Cmd::Connect };
+        return Ok(format!("usage: {}", cmd.usage()));
     }
     // `args[0]` is the identifier of the peer to connect to
     let peer_id = match to_identifier(state, args[0]) {
@@ -290,7 +300,7 @@ async fn connect<'a>(
 
 fn parse_disconnect<'a>(args: &'a [&'a str], state: &'a Mutex<State>) -> Result<PeerId, String> {
     if args.len() != 1 {
-        return Err(format!("usage: {}", Cmd::Disconnect.cmd_help()));
+        return Err(format!("usage: {}", Cmd::Disconnect.usage()));
     }
     // `args[0]` is the identifier of the peer to connect to
     match to_identifier(state, args[0]) {
@@ -350,7 +360,7 @@ fn parse_pairing_transport(transport: &str) -> Result<TechnologyType, String> {
 
 fn parse_pair(args: &[&str], state: &Mutex<State>) -> Result<(FidlPeerId, PairingOptions), String> {
     if args.len() < 3 || args.len() > 4 {
-        return Err(format!("usage: {}", Cmd::Pair.cmd_help()));
+        return Err(format!("usage: {}", Cmd::Pair.usage()));
     }
     // `args[0]` is the identifier of the peer to connect to
     let peer_id = match to_identifier(state, args[0]) {
@@ -421,13 +431,13 @@ async fn allow_pairing(args: &[&str], access_svc: &PairingProxy) -> Result<Strin
         0 => (InputCapability::None, OutputCapability::None),
         2 => (
             InputCapability::from_str(args[0]).map_err(|_| {
-                format_err!("unknown input capability: {}", Cmd::AllowPairing.cmd_help())
+                format_err!("unknown input capability: {}", Cmd::AllowPairing.usage())
             })?,
             OutputCapability::from_str(args[1]).map_err(|_| {
-                format_err!("unknown output capability: {}", Cmd::AllowPairing.cmd_help())
+                format_err!("unknown output capability: {}", Cmd::AllowPairing.usage())
             })?,
         ),
-        _ => return Err(format_err!("usage: {}", Cmd::AllowPairing.cmd_help())),
+        _ => return Err(format_err!("usage: {}", Cmd::AllowPairing.usage())),
     };
     let (delegate_task, mut receiver) = create_pairing_task(input_cap, output_cap, access_svc)?;
 
@@ -451,7 +461,7 @@ async fn forget<'a>(
     access_svc: &'a AccessProxy,
 ) -> Result<String, Error> {
     if args.len() != 1 {
-        return Ok(format!("usage: {}", Cmd::Forget.cmd_help()));
+        return Ok(format!("usage: {}", Cmd::Forget.usage()));
     }
     // `args[0]` is the identifier of the remote device to connect to
     let peer_id = match to_identifier(state, args[0]) {
@@ -540,144 +550,47 @@ impl State {
     }
 }
 
-async fn parse_and_handle_cmd(
-    bt_svc: &AccessProxy,
-    host_svc: &HostWatcherProxy,
-    pairing_svc: &PairingProxy,
+/// Handles the commands entered into the bt-cli REPL.
+struct BtCliHandler {
+    access_svc: AccessProxy,
+    host_svc: HostWatcherProxy,
+    pairing_svc: PairingProxy,
     state: Arc<Mutex<State>>,
-    line: String,
-) -> Result<ReplControl, Error> {
-    match parse_cmd(line) {
-        ParseResult::Valid((cmd, args)) => {
-            handle_cmd(bt_svc, host_svc, pairing_svc, state, cmd, args).await
+}
+
+impl ReplHandler for BtCliHandler {
+    type Command = Cmd;
+
+    async fn handle(&mut self, cmd: Cmd, args: &[&str]) -> Result<ReplControl, Error> {
+        let access_svc = &self.access_svc;
+        let host_svc = &self.host_svc;
+        let pairing_svc = &self.pairing_svc;
+        let state = &self.state;
+        let res = match cmd {
+            Cmd::Connect => connect(args, state, access_svc, None).await,
+            Cmd::Bond => connect(args, state, access_svc, Some(pairing_svc)).await,
+            Cmd::Disconnect => disconnect(args, state, access_svc).await,
+            Cmd::Pair => pair(args, state, access_svc).await,
+            Cmd::AllowPairing => allow_pairing(args, pairing_svc).await,
+            Cmd::Forget => forget(args, state, access_svc).await,
+            Cmd::StartDiscovery => set_discovery(true, state, access_svc).await,
+            Cmd::StopDiscovery => set_discovery(false, state, access_svc).await,
+            Cmd::Discoverable => set_discoverable(true, access_svc, state).await,
+            Cmd::NotDiscoverable => set_discoverable(false, access_svc, state).await,
+            Cmd::ListPeers => Ok(get_peers(args, state, false)),
+            Cmd::ShowPeers => Ok(get_peers(args, state, true)),
+            Cmd::Peer => Ok(get_peer(args, state)),
+            Cmd::ListControllers => get_hosts(state).await,
+            Cmd::SetController => set_active_host(args, host_svc).await,
+            Cmd::SetLocalName => set_local_name(args, access_svc).await,
+            Cmd::SetDeviceClass => set_device_class(args, access_svc).await,
+            Cmd::Controller => get_active_host(state).await,
+        }?;
+        if !res.is_empty() {
+            println!("{}", res);
         }
-        ParseResult::Empty => Ok(ReplControl::Continue),
-        ParseResult::Error(err) => {
-            println!("{}", err);
-            Ok(ReplControl::Continue)
-        }
+        Ok(ReplControl::Continue)
     }
-}
-
-enum ParseResult<T> {
-    Valid(T),
-    Empty,
-    Error(String),
-}
-
-/// Parse a single raw input command from a user into the command type and argument list
-fn parse_cmd(line: String) -> ParseResult<(Cmd, Vec<String>)> {
-    let components: Vec<_> = line.trim().split_whitespace().collect();
-    match components.split_first() {
-        Some((raw_cmd, args)) => match raw_cmd.parse() {
-            Ok(cmd) => {
-                let args = args.iter().map(|s| s.to_string()).collect();
-                ParseResult::Valid((cmd, args))
-            }
-            Err(_) => ParseResult::Error(format!("\"{}\" is not a valid command", raw_cmd)),
-        },
-        None => ParseResult::Empty,
-    }
-}
-
-/// Handle a single raw input command from a user and indicate whether the command should
-/// result in continuation or breaking of the read evaluate print loop.
-async fn handle_cmd(
-    access_svc: &AccessProxy,
-    host_svc: &HostWatcherProxy,
-    pairing_svc: &PairingProxy,
-    state: Arc<Mutex<State>>,
-    cmd: Cmd,
-    args: Vec<String>,
-) -> Result<ReplControl, Error> {
-    let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let args: &[&str] = &*args;
-    let res = match cmd {
-        Cmd::Connect => connect(args, &state, &access_svc, None).await,
-        Cmd::Bond => connect(args, &state, &access_svc, Some(&pairing_svc)).await,
-        Cmd::Disconnect => disconnect(args, &state, &access_svc).await,
-        Cmd::Pair => pair(args, &state, &access_svc).await,
-        Cmd::AllowPairing => allow_pairing(args, &pairing_svc).await,
-        Cmd::Forget => forget(args, &state, &access_svc).await,
-        Cmd::StartDiscovery => set_discovery(true, &state, &access_svc).await,
-        Cmd::StopDiscovery => set_discovery(false, &state, &access_svc).await,
-        Cmd::Discoverable => set_discoverable(true, &access_svc, &state).await,
-        Cmd::NotDiscoverable => set_discoverable(false, &access_svc, &state).await,
-        Cmd::ListPeers => Ok(get_peers(args, &state, false)),
-        Cmd::ShowPeers => Ok(get_peers(args, &state, true)),
-        Cmd::Peer => Ok(get_peer(args, &state)),
-        Cmd::ListControllers => get_hosts(&state).await,
-        Cmd::SetController => set_active_host(args, &host_svc).await,
-        Cmd::SetLocalName => set_local_name(args, &access_svc).await,
-        Cmd::SetDeviceClass => set_device_class(args, &access_svc).await,
-        Cmd::Controller => get_active_host(&state).await,
-        Cmd::Help => Ok(Cmd::help_msg().to_string()),
-        Cmd::Exit | Cmd::Quit => return Ok(ReplControl::Break),
-    }?;
-    if res != "" {
-        println!("{}", res);
-    }
-    Ok(ReplControl::Continue)
-}
-
-/// Generates a rustyline `Editor` in a separate thread to manage user input. This input is returned
-/// as a `Stream` of lines entered by the user.
-///
-/// The thread exits and the `Stream` is exhausted when an error occurs on stdin or the user
-/// sends a ctrl-c or ctrl-d sequence.
-///
-/// Because rustyline shares control over output to the screen with other parts of the system, a
-/// `Sink` is passed to the caller to send acknowledgements that a command has been processed and
-/// that rustyline should handle the next line of input.
-fn cmd_stream(
-    state: Arc<Mutex<State>>,
-) -> (
-    thread::JoinHandle<Result<(), Error>>,
-    impl Stream<Item = String>,
-    impl Sink<(), Error = mpsc::SendError>,
-) {
-    // Editor thread and command processing thread must be synchronized so that output
-    // is printed in the correct order.
-    let (mut cmd_sender, cmd_receiver) = mpsc::channel(0);
-    let (ack_sender, mut ack_receiver) = mpsc::channel(0);
-
-    let repl_thread = thread::spawn(move || -> Result<(), Error> {
-        let mut exec = fasync::LocalExecutorBuilder::new().build();
-
-        let fut = async {
-            let config = Config::builder()
-                .auto_add_history(true)
-                .history_ignore_space(true)
-                .completion_type(CompletionType::List)
-                .edit_mode(EditMode::Emacs)
-                .build();
-            let c = CmdHelper::new(state);
-            let mut rl: Editor<CmdHelper, DefaultHistory> = Editor::with_config(config)?;
-            rl.set_helper(Some(c));
-            loop {
-                let readline = rl.readline(PROMPT);
-                match readline {
-                    Ok(line) => {
-                        cmd_sender.try_send(line)?;
-                    }
-                    Err(ReadlineError::Eof) | Err(ReadlineError::Interrupted) => {
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        println!("Error: {:?}", e);
-                        return Err(e.into());
-                    }
-                }
-                // wait until processing thread is finished evaluating the last command
-                // before running the next loop in the repl
-                if ack_receiver.next().await.is_none() {
-                    return Ok(());
-                };
-            }
-        };
-        exec.run_singlethreaded(fut)
-    });
-    (repl_thread, cmd_receiver, ack_sender)
 }
 
 async fn watch_peers(access_svc: AccessProxy, state: Arc<Mutex<State>>) -> Result<(), Error> {
@@ -727,32 +640,6 @@ async fn watch_hosts(host_svc: HostWatcherProxy, state: Arc<Mutex<State>>) -> Re
     }
 }
 
-/// REPL execution
-async fn run_repl(
-    access_svc: AccessProxy,
-    host_svc: HostWatcherProxy,
-    pairing_svc: PairingProxy,
-    state: Arc<Mutex<State>>,
-) -> Result<(), Error> {
-    // `cmd_stream` blocks on input in a separate thread and passes commands and acks back to
-    // the main thread via async channels.
-    let (repl_thread, mut commands, mut acks) = cmd_stream(state.clone());
-
-    while let Some(cmd) = commands.next().await {
-        match parse_and_handle_cmd(&access_svc, &host_svc, &pairing_svc, state.clone(), cmd).await {
-            Ok(ReplControl::Continue) => {} // continue silently
-            Ok(ReplControl::Break) => break,
-            Err(e) => println!("Error handling command: {}", e),
-        }
-        acks.send(()).await?;
-    }
-    // Close out the streams, which will cause the REPL thread to terminate.
-    drop(commands);
-    drop(acks);
-    let _ = repl_thread.join();
-    Ok(())
-}
-
 #[fuchsia::main(logging = false)]
 async fn main() -> Result<(), Error> {
     let access_svc = connect_to_protocol::<AccessMarker>()
@@ -763,8 +650,14 @@ async fn main() -> Result<(), Error> {
         .context("failed to connect to bluetooth pairing interface")?;
     let state = Arc::new(Mutex::new(State::new()));
     let peer_watcher = watch_peers(access_svc.clone(), state.clone());
-    let repl = run_repl(access_svc, host_watcher_svc.clone(), pairing_svc, state.clone())
-        .map_err(|e| e.context("REPL failed unexpectedly").into());
+    let handler = BtCliHandler {
+        access_svc,
+        host_svc: host_watcher_svc.clone(),
+        pairing_svc,
+        state: state.clone(),
+    };
+    let repl = bt_repl::run(PROMPT, command_source(state.clone()), handler)
+        .map_err(|e| e.context("REPL failed unexpectedly"));
     let host_watcher = watch_hosts(host_watcher_svc, state);
     let repl = pin!(repl);
     let peer_watcher = pin!(peer_watcher);
@@ -926,6 +819,9 @@ mod tests {
 
         assert!(!match_peer("Sapphire", &nameless_peer));
         assert!(match_peer("Sapphire", &named_peer));
+        assert!(match_peer("sapphire", &named_peer));
+        assert!(match_peer("SAPPHIRE", &named_peer));
+        assert!(match_peer("sApPh", &named_peer));
 
         assert!(match_peer("", &nameless_peer));
         assert!(match_peer("", &named_peer));
@@ -957,23 +853,44 @@ mod tests {
         // Fields for detailed view of peers
         let fields = Regex::new(r"Id(?s).*Address(?s).*Technology(?s).*Name(?s).*Appearance(?s).*Connected(?s).*Bonded(?s).*LE Services(?s).*BR/EDR Serv\.").unwrap();
 
-        // Empty arguments matches everything
-        assert!(fields.is_match(&get_peers(&[], &state)));
-        assert!(get_peers(&[], &state).contains("2/2 peers"));
-        assert!(get_peers(&[], &state).contains("01:23:45"));
-        assert!(get_peers(&[], &state).contains("AD:DE:7E"));
+        // Default (empty arguments) shows all peers, with named peers listed last.
+        let default_output = get_peers(&[], &state);
+        assert!(fields.is_match(&default_output));
+        assert!(default_output.contains("Showing 2/2 peers\n"));
+        let unnamed_pos = default_output.find("01:23:45").unwrap();
+        let named_pos = default_output.find("AD:DE:7E").unwrap();
+        assert!(unnamed_pos < named_pos);
+
+        // --named-only / -n hides unnamed peers.
+        for flag in ["--named-only", "-n"] {
+            let named_only_output = get_peers(&[flag], &state);
+            assert!(fields.is_match(&named_only_output));
+            assert!(named_only_output.contains("Showing 1/2 peers\n"));
+            assert!(!named_only_output.contains("01:23:45"));
+            assert!(named_only_output.contains("AD:DE:7E"));
+        }
 
         // No matches prints nothing.
         assert!(!fields.is_match(&get_peers(&["nomatch"], &state)));
-        assert!(get_peers(&["nomatch"], &state).contains("0/2 peers"));
+        assert!(get_peers(&["nomatch"], &state).contains("Showing 0/2 peers\n"));
         assert!(!get_peers(&["nomatch"], &state).contains("01:23:45"));
         assert!(!get_peers(&["nomatch"], &state).contains("AD:DE:7E"));
 
-        // We can match either one
-        assert!(get_peers(&["01:23"], &state).contains("1/2 peers"));
+        // We can match either peer without --named-only, and combine --named-only with a filter.
+        assert!(get_peers(&["01:23"], &state).contains("Showing 1/2 peers\n"));
         assert!(get_peers(&["01:23"], &state).contains("01:23:45"));
-        assert!(get_peers(&["abcd"], &state).contains("1/2 peers"));
+        assert!(get_peers(&["abcd"], &state).contains("Showing 1/2 peers\n"));
         assert!(get_peers(&["beef"], &state).contains("AD:DE:7E"));
+        assert!(get_peers(&["--named-only", "Sapphire"], &state).contains("AD:DE:7E"));
+        assert!(get_peers(&["Sapphire", "-n"], &state).contains("AD:DE:7E"));
+        assert_eq!(get_peers(&["--named-only", "01:23"], &state), "Showing 0/2 peers\n");
+        assert_eq!(get_peers(&["01:23", "-n"], &state), "Showing 0/2 peers\n");
+
+        // Unrecognized flags or extra positional arguments return usage.
+        let expected_usage = format!("usage: {}", Cmd::ShowPeers.usage());
+        assert_eq!(get_peers(&["--unknown"], &state), expected_usage);
+        assert_eq!(get_peers(&["--all"], &state), expected_usage);
+        assert_eq!(get_peers(&["01:23", "beef"], &state), expected_usage);
     }
 
     #[test]
@@ -999,27 +916,183 @@ mod tests {
         // Fields for table view of peers
         let fields = Regex::new(r"PeerId[ \t]*\|[ \t]*Address[ \t]*\|[ \t]*Technology[ \t]*\|[ \t]*Name[ \t]*\|[ \t]*Appearance[ \t]*\|[ \t]*Connected[ \t]*\|[ \t]*Bonded").unwrap();
 
-        // Empty arguments matches everything
-        assert!(fields.is_match(&get_peers(&[], &state)));
-        assert!(get_peers(&[], &state).contains("2/2 peers"));
-        assert!(get_peers(&[], &state).contains("01:23:45"));
-        assert!(get_peers(&[], &state).contains("AD:DE:7E"));
+        // Default (empty arguments) shows all peers without extra lines between rows, with named
+        // peers listed last.
+        let default_output = get_peers(&[], &state);
+        assert!(fields.is_match(&default_output));
+        assert!(default_output.starts_with("Showing 2/2 peers\n"));
+        let lines: Vec<&str> = default_output.lines().collect();
+        // Summary line, title row, single header separator, and 2 peer rows (no blank line or
+        // inter-row separators).
+        assert_eq!(lines.len(), 5);
+        assert!(lines[3].contains("01:23:45"));
+        assert!(lines[4].contains("AD:DE:7E"));
+
+        // --named-only / -n hides unnamed peers.
+        for flag in ["--named-only", "-n"] {
+            let named_only_output = get_peers(&[flag], &state);
+            assert!(fields.is_match(&named_only_output));
+            assert!(named_only_output.starts_with("Showing 1/2 peers\n"));
+            assert!(!named_only_output.contains("01:23:45"));
+            assert!(named_only_output.contains("AD:DE:7E"));
+            assert_eq!(named_only_output.lines().count(), 4);
+        }
 
         // No matches prints nothing.
         assert!(!fields.is_match(&get_peers(&["nomatch"], &state)));
-        assert!(get_peers(&["nomatch"], &state).contains("0/2 peers"));
+        assert!(get_peers(&["nomatch"], &state).contains("Showing 0/2 peers\n"));
         assert!(!get_peers(&["nomatch"], &state).contains("01:23:45"));
         assert!(!get_peers(&["nomatch"], &state).contains("AD:DE:7E"));
 
-        // We can match either one
-        assert!(get_peers(&["01:23"], &state).contains("1/2 peers"));
+        // We can match either peer without --named-only, and combine --named-only with a filter.
+        assert!(get_peers(&["01:23"], &state).contains("Showing 1/2 peers\n"));
         assert!(get_peers(&["01:23"], &state).contains("01:23:45"));
-        assert!(get_peers(&["abcd"], &state).contains("1/2 peers"));
+        assert!(get_peers(&["abcd"], &state).contains("Showing 1/2 peers\n"));
         assert!(get_peers(&["beef"], &state).contains("AD:DE:7E"));
+        assert!(get_peers(&["--named-only", "Sapphire"], &state).contains("AD:DE:7E"));
+        assert!(get_peers(&["Sapphire", "-n"], &state).contains("AD:DE:7E"));
+        assert_eq!(get_peers(&["--named-only", "01:23"], &state), "Showing 0/2 peers\n");
+        assert_eq!(get_peers(&["01:23", "-n"], &state), "Showing 0/2 peers\n");
+
+        // Unrecognized flags or extra positional arguments return usage.
+        let expected_usage = format!("usage: {}", Cmd::ListPeers.usage());
+        assert_eq!(get_peers(&["-z"], &state), expected_usage);
+        assert_eq!(get_peers(&["--all"], &state), expected_usage);
+        assert_eq!(get_peers(&["01:23", "beef"], &state), expected_usage);
+    }
+
+    #[fuchsia::test]
+    fn test_get_peers_named_only_and_sorting() {
+        // Empty peer map still reports no known peers.
+        let empty_state = Mutex::new(State::new());
+        assert_eq!(get_peers(&[], &empty_state, false), "No known peers");
+        assert_eq!(get_peers(&["--named-only"], &empty_state, false), "No known peers");
+
+        // All peers unnamed: default shows all of them; --named-only hides all of them.
+        let mut only_unnamed = State::new();
+        let _ = only_unnamed.peers.insert(
+            PeerId(0x1001),
+            named_peer(PeerId(0x1001), Address::Public([1, 0, 0, 0, 0, 0]), None),
+        );
+        let _ = only_unnamed.peers.insert(
+            PeerId(0x1002),
+            named_peer(PeerId(0x1002), Address::Public([2, 0, 0, 0, 0, 0]), None),
+        );
+        let _ = only_unnamed.peers.insert(
+            PeerId(0x1003),
+            named_peer(PeerId(0x1003), Address::Public([3, 0, 0, 0, 0, 0]), None),
+        );
+        let only_unnamed = Mutex::new(only_unnamed);
+        assert!(get_peers(&[], &only_unnamed, false).starts_with("Showing 3/3 peers\n"));
+        assert_eq!(get_peers(&["--named-only"], &only_unnamed, false), "Showing 0/3 peers\n");
+        assert_eq!(get_peers(&["-n"], &only_unnamed, false), "Showing 0/3 peers\n");
+
+        // Mixed unnamed and named peers: named peers always sort last (after unnamed peers, even
+        // connected + bonded ones), and connected + bonded peers sort last within each group.
+        let mut mixed = State::new();
+        let _ = mixed.peers.insert(
+            PeerId(0x2000),
+            custom_peer(PeerId(0x2000), Address::Public([0xDD, 0, 0, 0, 0, 0]), false, false, None),
+        );
+        let _ = mixed.peers.insert(
+            PeerId(0x2003),
+            custom_peer(PeerId(0x2003), Address::Public([0xCC, 0, 0, 0, 0, 0]), true, true, None),
+        );
+        let _ = mixed.peers.insert(
+            PeerId(0x2001),
+            named_peer(
+                PeerId(0x2001),
+                Address::Public([0xAA, 0, 0, 0, 0, 0]),
+                Some("Headphones".to_string()),
+            ),
+        );
+        let mut connected_named = named_peer(
+            PeerId(0x2002),
+            Address::Public([0xBB, 0, 0, 0, 0, 0]),
+            Some("Speaker".to_string()),
+        );
+        connected_named.connected = true;
+        connected_named.bonded = true;
+        let _ = mixed.peers.insert(PeerId(0x2002), connected_named);
+        let mixed = Mutex::new(mixed);
+
+        for full_details in [false, true] {
+            let all_output = get_peers(&[], &mixed, full_details);
+            assert!(all_output.starts_with("Showing 4/4 peers\n"));
+            let unnamed_disconnected_pos = all_output.find("00:00:00:00:00:DD").unwrap();
+            let unnamed_connected_pos = all_output.find("00:00:00:00:00:CC").unwrap();
+            let headphones_pos = all_output.find("Headphones").unwrap();
+            let speaker_pos = all_output.find("Speaker").unwrap();
+            assert!(unnamed_disconnected_pos < unnamed_connected_pos);
+            assert!(unnamed_connected_pos < headphones_pos);
+            assert!(headphones_pos < speaker_pos);
+
+            let named_output = get_peers(&["--named-only"], &mixed, full_details);
+            assert!(named_output.starts_with("Showing 2/4 peers\n"));
+            assert!(!named_output.contains("00:00:00:00:00:DD"));
+            assert!(!named_output.contains("00:00:00:00:00:CC"));
+            assert!(
+                named_output.find("Headphones").unwrap() < named_output.find("Speaker").unwrap()
+            );
+        }
+    }
+
+    #[fuchsia::test]
+    fn test_get_peers_case_insensitive_name() {
+        let mut state = State::new();
+        let _ = state.peers.insert(
+            PeerId(0xabcd),
+            named_peer(
+                PeerId(0xabcd),
+                Address::Public([0xAB, 0x89, 0x67, 0x45, 0x23, 0x01]),
+                Some("MOMENTUM 5b".to_string()),
+            ),
+        );
+        let _ = state.peers.insert(
+            PeerId(0xbeef),
+            named_peer(
+                PeerId(0xbeef),
+                Address::Public([0x11, 0x00, 0x55, 0x7E, 0xDE, 0xAD]),
+                Some("Sapphire".to_string()),
+            ),
+        );
+        let state = Mutex::new(state);
+
+        for full_details in [false, true] {
+            for filter in ["Moment", "moment", "MOMENT", "5B", "5b"] {
+                let output = get_peers(&[filter], &state, full_details);
+                assert!(output.contains("1/2 peers"));
+                assert!(output.contains("MOMENTUM 5b"));
+                assert!(!output.contains("Sapphire"));
+            }
+
+            for filter in ["sapphire", "SAPPHIRE", "sApPhIrE"] {
+                let output = get_peers(&[filter], &state, full_details);
+                assert!(output.contains("1/2 peers"));
+                assert!(output.contains("Sapphire"));
+                assert!(!output.contains("MOMENTUM 5b"));
+            }
+        }
     }
 
     #[test]
     fn cmp_peers_correctly_orders_peers() {
+        // Sorts named peers after unnamed peers (at the bottom of the list), both with matching
+        // connection state and when the unnamed peer is connected and bonded.
+        let named = named_peer(
+            PeerId(0x1111),
+            Address::Public([3, 0, 0, 0, 0, 0]),
+            Some("Sapphire".to_string()),
+        );
+        let unnamed_disconnected =
+            custom_peer(PeerId(0x2221), Address::Public([5, 0, 0, 0, 0, 0]), false, false, None);
+        let unnamed_connected =
+            custom_peer(PeerId(0x2222), Address::Public([4, 0, 0, 0, 0, 0]), true, true, None);
+        assert_eq!(cmp_peers(&unnamed_disconnected, &named), Ordering::Less);
+        assert_eq!(cmp_peers(&named, &unnamed_disconnected), Ordering::Greater);
+        assert_eq!(cmp_peers(&unnamed_connected, &named), Ordering::Less);
+        assert_eq!(cmp_peers(&named, &unnamed_connected), Ordering::Greater);
+
         // Sorts connected correctly
         let peer_a =
             custom_peer(PeerId(0xbeef), Address::Public([1, 0, 0, 0, 0, 0]), false, false, None);
@@ -1096,22 +1169,27 @@ mod tests {
             // known address
             ("disconnect 00:00:00:00:00:01", Ok(PeerId(0xdeadbeef))),
             // no id param
-            ("disconnect", Err(format!("usage: {}", Cmd::Disconnect.cmd_help()))),
+            ("disconnect", Err(format!("usage: {}", Cmd::Disconnect.usage()))),
         ];
         for (line, expected) in cases {
             assert_eq!(parse_disconnect_id(line, &state), expected);
         }
     }
 
+    /// Splits `line` into a command and its arguments, as the REPL does.
+    fn parse_cmd(line: &str) -> Option<(Cmd, Vec<&str>)> {
+        let mut words = line.split_whitespace();
+        let cmd = words.next()?.parse::<Cmd>().ok()?;
+        Some((cmd, words.collect()))
+    }
+
     fn parse_disconnect_id(line: &str, state: &Mutex<State>) -> Result<PeerId, String> {
-        let args = match parse_cmd(line.to_string()) {
-            ParseResult::Valid((Cmd::Disconnect, args)) => Ok(args),
-            ParseResult::Valid((_, _)) => Err("Command is not disconnect"),
-            _ => Err("failed"),
+        let args = match parse_cmd(line) {
+            Some((Cmd::Disconnect, args)) => Ok(args),
+            Some((_, _)) => Err("Command is not disconnect"),
+            None => Err("failed"),
         }?;
-        let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let args: &[&str] = &*args;
-        parse_disconnect(args, state)
+        parse_disconnect(&args, state)
     }
 
     // Tests that command lines entered parse correctly to the expected pairing calls
@@ -1194,7 +1272,7 @@ mod tests {
                 )),
             ),
             // no id param
-            ("pair", Err(format!("usage: {}", Cmd::Pair.cmd_help()))),
+            ("pair", Err(format!("usage: {}", Cmd::Pair.usage()))),
         ];
         for (line, expected) in cases {
             assert_eq!(parse_pair_args(line, &state), expected);
@@ -1205,14 +1283,12 @@ mod tests {
         line: &str,
         state: &Mutex<State>,
     ) -> Result<(FidlPeerId, PairingOptions), String> {
-        let args = match parse_cmd(line.to_string()) {
-            ParseResult::Valid((Cmd::Pair, args)) => Ok(args),
-            ParseResult::Valid((_, _)) => Err("Command is not pair"),
-            _ => Err("failed"),
+        let args = match parse_cmd(line) {
+            Some((Cmd::Pair, args)) => Ok(args),
+            Some((_, _)) => Err("Command is not pair"),
+            None => Err("failed"),
         }?;
-        let args: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let args: &[&str] = &*args;
-        parse_pair(args, state)
+        parse_pair(&args, state)
     }
 
     fn timeout() -> MonotonicDuration {
@@ -1406,5 +1482,18 @@ mod tests {
 
         assert!(mock_result.is_ok());
         assert!(result.expect("expected a result").contains("Pair error"));
+    }
+
+    #[fuchsia::test]
+    async fn handle_dispatches_commands() {
+        let (access_svc, _access_server) = fidl::endpoints::create_proxy::<AccessMarker>();
+        let (host_svc, _host_server) = fidl::endpoints::create_proxy::<HostWatcherMarker>();
+        let (pairing_svc, _pairing_server) = fidl::endpoints::create_proxy::<PairingMarker>();
+        let state = Arc::new(Mutex::new(State::new()));
+        let mut handler = BtCliHandler { access_svc, host_svc, pairing_svc, state };
+
+        assert_eq!(handler.handle(Cmd::ListPeers, &[]).await.unwrap(), ReplControl::Continue);
+        assert_eq!(handler.handle(Cmd::Controller, &[]).await.unwrap(), ReplControl::Continue);
+        assert!(handler.handle(Cmd::SetController, &[]).await.is_err());
     }
 }

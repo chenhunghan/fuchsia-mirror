@@ -9,11 +9,11 @@
 #include <fidl/fuchsia.hardware.sysmem/cpp/wire.h>
 #include <fidl/fuchsia.system.state/cpp/fidl.h>
 #include <fuchsia/hardware/intelgpucore/cpp/banjo.h>
-#include <lib/device-protocol/pci.h>
 #include <lib/driver/compat/cpp/device_server.h>
 #include <lib/driver/component/cpp/start_completer.h>
 #include <lib/driver/component/cpp/stop_completer.h>
 #include <lib/driver/mmio/cpp/mmio.h>
+#include <lib/driver/pci/cpp/pci.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/inspect/cpp/inspector.h>
 #include <lib/pci/constants.h>

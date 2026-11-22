@@ -31,7 +31,7 @@ In additional to the required fields, the driver runner accepts a set of
 optional fields, which are used to specify metadata or configure the runtime
 environment of the driver component.
 
-### Colocation
+### Colocation {:#colocation}
 
 If the `colocate` field is set to the string `true`, the driver will be put in
 the same [driver host][driver-host] as its parent driver if possible. However
@@ -278,8 +278,8 @@ For more detailed explanation of how drivers are bound, see
 <!-- Reference links -->
 
 [glossary.component]: /docs/glossary/README.md#component
-[driver-host]: /docs/concepts/drivers/driver_framework.md#driver_host
-[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
+[driver-host]: /docs/concepts/drivers/driver_framework.md#driver-host
+[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver-manager
 [driver-dispatcher]: /docs/concepts/drivers/driver-dispatcher-and-threads.md
 [dispatcher-flags]: /sdk/lib/driver/runtime/include/lib/fdf/types.h
 [fhcp-schema]: /build/drivers/FHCP.json

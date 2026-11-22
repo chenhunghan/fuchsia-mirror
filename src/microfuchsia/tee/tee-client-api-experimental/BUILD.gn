@@ -2,21 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-shared_library("tee-client-api-experimental") {
-  sources = [ "tee-client-api-experimental.cc" ]
-  public_deps = [ ":tee-client-api-headers" ]
-  deps = [
-    "//sdk/fidl/fuchsia.hardware.tee:fuchsia.hardware.tee_cpp",
-    "//sdk/fidl/fuchsia.tee:fuchsia.tee_cpp",
-    "//sdk/lib/component/incoming/cpp",
-    "//sdk/lib/fdio",
-    "//sdk/lib/fidl",
-    "//sdk/lib/fit",
-    "//src/lib/fxl",
-    "//zircon/system/ulib/zx",
-  ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -51,7 +36,7 @@ library_headers("tee-client-api-headers") {
   visibility = [ ":*" ]
 }
 
-static_library("tee-client-api-experimental-static") {
+source_set("tee-client-api-experimental-static") {
   sources = [ "tee-client-api-experimental.cc" ]
   deps = [
     "//sdk/fidl/fuchsia.hardware.tee:fuchsia.hardware.tee_cpp",
@@ -65,4 +50,14 @@ static_library("tee-client-api-experimental-static") {
   ]
   visibility = [ ":*" ]
   public_deps = [ ":tee-client-api-headers" ]
+}
+
+shared_library("tee-client-api-experimental") {
+  public_deps = [ ":tee-client-api-headers" ]
+  visibility = [
+    ":*",
+    "//src/tee/tee-client-api-experimental:*",
+    "//vendor/*",
+  ]
+  deps = [ ":tee-client-api-experimental-static" ]
 }

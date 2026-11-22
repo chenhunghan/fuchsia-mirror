@@ -58,7 +58,6 @@ fuchsia_driver_component("usb-mass-storage") {
   component_name = "usb-mass-storage"
   dml_label = ":usb-mass-storage-dml"
   deps = [ ":usb-mass-storage-driver" ]
-  info = "meta/usb-mass-storage-info.json"
 }
 
 fuchsia_driver_package("package") {

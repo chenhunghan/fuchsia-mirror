@@ -564,8 +564,10 @@ fn glob_pattern(pattern: &str) -> glob::Pattern {
             collapsed.push(c);
         }
     }
-    glob::Pattern::new(&collapsed)
-        .unwrap_or_else(|_| glob::Pattern::new(&glob::Pattern::escape(pattern)).unwrap())
+    glob::Pattern::new(&collapsed).unwrap_or_else(|_| {
+        glob::Pattern::new(&glob::Pattern::escape(pattern))
+            .expect("an escaped pattern has no special characters, so it always compiles")
+    })
 }
 
 fn ipc_from_row(r: crate::tp::Row<'_>) -> IpcEvent {

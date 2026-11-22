@@ -121,7 +121,7 @@ void put_apacket(apacket* p) { delete p; }
 
 void handle_online(atransport* t) {
   FX_LOGS(DEBUG) << "adb: online";
-  t->online = 1;
+  t->online = true;
   IncrementActiveConnections();
 }
 
@@ -138,11 +138,11 @@ void handle_offline(atransport* t) {
   t->SetConnectionState(kCsOffline);
 
   // Close the associated usb
-  t->online = 0;
+  t->online = false;
 
   // This is necessary to avoid a race condition that occurred when a transport closes
   // while a client socket is still active.
-  //    close_all_sockets(t);
+  close_all_sockets(t);
 
   t->RunDisconnects();
 }
@@ -464,6 +464,11 @@ void handle_packet(apacket* p, atransport* t) {
         break;
       }
 
+      if (s->closing || !t->online) {
+        s->close(s);
+        send_close(0, p->msg.arg0, t);
+        break;
+      }
       s->peer = create_remote_socket(p->msg.arg0, t);
       s->peer->peer = s;
 
@@ -484,22 +489,22 @@ void handle_packet(apacket* p, atransport* t) {
 
     case A_OKAY: /* READY(local-id, remote-id, "") */
       if (t->online && p->msg.arg0 != 0 && p->msg.arg1 != 0) {
+        std::optional<int32_t> acked_bytes;
+        if (p->payload.size() == sizeof(int32_t)) {
+          int32_t value;
+          memcpy(&value, p->payload.data(), sizeof(value));
+          // acked_bytes can be negative!
+          //
+          // In the future, we can use this to preemptively supply backpressure, instead
+          // of waiting for the writer to hit its limit.
+          acked_bytes = value;
+        } else if (p->payload.size() != 0) {
+          FX_LOGS(ERROR) << "invalid A_OKAY payload size: " << p->payload.size();
+          break;
+        }
+
         asocket* s = find_local_socket(p->msg.arg1, 0);
         if (s) {
-          std::optional<int32_t> acked_bytes;
-          if (p->payload.size() == sizeof(int32_t)) {
-            int32_t value;
-            memcpy(&value, p->payload.data(), sizeof(value));
-            // acked_bytes can be negative!
-            //
-            // In the future, we can use this to preemptively supply backpressure, instead
-            // of waiting for the writer to hit its limit.
-            acked_bytes = value;
-          } else if (p->payload.size() != 0) {
-            FX_LOGS(ERROR) << "invalid A_OKAY payload size: " << p->payload.size();
-            return;
-          }
-
           if (s->peer == nullptr) {
             /* On first READY message, create the connection. */
             s->peer = create_remote_socket(p->msg.arg0, t);

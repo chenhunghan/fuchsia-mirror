@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    [
+        "goldens/integration_test/testing/fidl/BUILD.gn",
+        "goldens/integration_test/testing/fidl/realm_factory.test.fidl",
+        "goldens/integration_test/testing/realm-factory/BUILD.gn",
+        "goldens/integration_test/testing/realm-factory/meta/default.cml",
+        "goldens/integration_test/testing/realm-factory/src/main.rs",
+        "goldens/integration_test/tests/BUILD.gn",
+        "goldens/integration_test/tests/meta/test-root.cml",
+        "goldens/integration_test/tests/meta/test-suite.cml",
+        "goldens/integration_test/tests/src/main.rs",
+        "meta/example-component.cml",
+    ],
+    visibility = ["//tools/testgen:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "example-component_manifest",
+    component_name = "example-component",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/example-component.cml",
+)
+
+fx_component(
+    name = "example-component",
+    compiled_manifest = ":example-component_manifest",
+    visibility = ["//tools/testgen/testdata/goldens/integration_test/testing/realm-factory:__pkg__"],
+)

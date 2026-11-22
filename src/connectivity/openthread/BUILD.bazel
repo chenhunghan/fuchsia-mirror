@@ -1,0 +1,17 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+# OpenThread device tests defined in Bazel. These are exported to `fx test` and
+# infra builders through `:bazel_tests` in BUILD.gn.
+test_suite(
+    name = "openthread_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//src/connectivity/openthread/tests/ot-rcp-fuchsia:tests",
+        "//src/connectivity/openthread/tests/ot-rcp-fuchsia/tests/mock-spinel-host:tests",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher:tests",
+    ],
+)

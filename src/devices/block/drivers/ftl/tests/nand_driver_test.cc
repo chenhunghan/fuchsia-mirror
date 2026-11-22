@@ -4,8 +4,10 @@
 
 #include "nand_driver.h"
 
-#include <fuchsia/hardware/badblock/cpp/banjo.h>
+#include <fidl/fuchsia.hardware.badblock/cpp/wire.h>
 #include <fuchsia/hardware/nand/cpp/banjo.h>
+#include <lib/async-loop/cpp/loop.h>
+#include <lib/async-loop/default.h>
 #include <lib/ddk/driver.h>
 #include <lib/driver/testing/cpp/scoped_global_logger.h>
 
@@ -91,46 +93,64 @@ class FakeNand : public ddk::NandProtocol<FakeNand> {
 };
 
 // Fake for the bad block protocol.
-class FakeBadBlock : public ddk::BadBlockProtocol<FakeBadBlock> {
+class FakeBadBlock : public fidl::WireServer<fuchsia_hardware_badblock::BadBlock> {
  public:
-  FakeBadBlock() : proto_({&bad_block_protocol_ops_, this}) {}
+  FakeBadBlock() = default;
 
-  bad_block_protocol_t* proto() { return &proto_; }
   void set_result(zx_status_t result) { result_ = result; }
+  void set_bad_blocks(std::vector<uint32_t> bad_blocks) { bad_blocks_ = std::move(bad_blocks); }
 
-  // Bad block protocol:
-  zx_status_t BadBlockGetBadBlockList(uint32_t* out_bad_blocks_list, size_t bad_blocks_count,
-                                      size_t* out_bad_blocks_actual) {
-    *out_bad_blocks_actual = 0;
-    if (!bad_blocks_count) {
-      *out_bad_blocks_actual = 1;
-    } else if (bad_blocks_count == 1) {
-      ZX_ASSERT(out_bad_blocks_list);
-      *out_bad_blocks_list = 1;  // Second block is bad.
-      *out_bad_blocks_actual = 1;
+  void GetBadBlockList(GetBadBlockListCompleter::Sync& completer) override {
+    if (result_ != ZX_OK) {
+      completer.ReplyError(result_);
+      return;
     }
-    return result_;
+    completer.ReplySuccess(fidl::VectorView<uint32_t>::FromExternal(bad_blocks_));
   }
 
-  zx_status_t BadBlockMarkBlockBad(uint32_t block) { return ZX_ERR_BAD_STATE; }
+  void MarkBlockBad(MarkBlockBadRequestView request,
+                    MarkBlockBadCompleter::Sync& completer) override {
+    completer.ReplyError(ZX_ERR_BAD_STATE);
+  }
+
+  void handle_unknown_method(
+      fidl::UnknownMethodMetadata<fuchsia_hardware_badblock::BadBlock> metadata,
+      fidl::UnknownMethodCompleter::Sync& completer) override {}
+
+  fidl::ClientEnd<fuchsia_hardware_badblock::BadBlock> Connect(async_dispatcher_t* dispatcher) {
+    auto endpoints = fidl::Endpoints<fuchsia_hardware_badblock::BadBlock>::Create();
+    fidl::BindServer(dispatcher, std::move(endpoints.server), this);
+    return std::move(endpoints.client);
+  }
 
  private:
-  bad_block_protocol_t proto_;
   zx_status_t result_ = ZX_OK;
+  std::vector<uint32_t> bad_blocks_ = {1};
 };
 
 class NandDriverTest : public zxtest::Test {
  public:
+  void SetUp() override {
+    ASSERT_OK(loop_.StartThread("bad-block-server"));
+    bad_block_client_ = bad_block_proto_.Connect(loop_.dispatcher());
+  }
+
+  void TearDown() override { loop_.Shutdown(); }
+
   nand_protocol_t* nand_proto() { return nand_proto_.proto(); }
-  bad_block_protocol_t* bad_block_proto() { return bad_block_proto_.proto(); }
+  fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block_proto() {
+    return bad_block_client_.borrow();
+  }
   auto& nand_operations() { return nand_proto_.operations(); }
   FakeNand* nand() { return &nand_proto_; }
   FakeBadBlock* bad_block() { return &bad_block_proto_; }
 
  private:
   fdf_testing::ScopedGlobalLogger logger_;
+  async::Loop loop_{&kAsyncLoopConfigNoAttachToCurrentThread};
   FakeNand nand_proto_;
   FakeBadBlock bad_block_proto_;
+  fidl::ClientEnd<fuchsia_hardware_badblock::BadBlock> bad_block_client_;
 };
 
 TEST_F(NandDriverTest, TrivialLifetime) {
@@ -140,21 +160,47 @@ TEST_F(NandDriverTest, TrivialLifetime) {
 TEST_F(NandDriverTest, Init) {
   auto driver = ftl::NandDriver::Create(nand_proto(), bad_block_proto());
   ASSERT_EQ(nullptr, driver->Init());
+
+  // The OOB is small enough for pages to be doubled, so each page read is really two reads.
+  EXPECT_EQ(ftl::kDefaultReadWearLimit / 2, driver->read_wear_limit());
 }
 
-TEST(NandDriverTest, InitWithBigNand) {
-  fdf_testing::ScopedGlobalLogger logger_;
+TEST_F(NandDriverTest, InitWithBigNand) {
   const uint32_t kLargeOobSize = 45;
   FakeNand nand_proto(kLargeOobSize);
-  FakeBadBlock bad_block_proto;
-  auto driver = ftl::NandDriver::Create(nand_proto.proto(), bad_block_proto.proto());
+  auto driver = ftl::NandDriver::Create(nand_proto.proto(), bad_block_proto());
   ASSERT_EQ(nullptr, driver->Init());
+
+  // Pages are not doubled, so the default read wear limit should be used.
+  EXPECT_EQ(0u, driver->read_wear_limit());
 }
 
 TEST_F(NandDriverTest, InitFailure) {
   bad_block()->set_result(ZX_ERR_BAD_STATE);
   auto driver = ftl::NandDriver::Create(nand_proto(), bad_block_proto());
   ASSERT_NE(nullptr, driver->Init());
+}
+
+TEST_F(NandDriverTest, InitWithEmptyBadBlockList) {
+  bad_block()->set_bad_blocks({});
+  auto driver = ftl::NandDriver::Create(nand_proto(), bad_block_proto());
+  ASSERT_EQ(nullptr, driver->Init());
+  ASSERT_FALSE(driver->IsBadBlock(1 * kBlockSize));
+}
+
+TEST_F(NandDriverTest, InitWithPeerClosedBadBlock) {
+  auto endpoints = fidl::Endpoints<fuchsia_hardware_badblock::BadBlock>::Create();
+  endpoints.server.reset();
+  auto driver = ftl::NandDriver::Create(nand_proto(), endpoints.client.borrow());
+  ASSERT_EQ(nullptr, driver->Init());
+  ASSERT_FALSE(driver->IsBadBlock(1 * kBlockSize));
+}
+
+TEST_F(NandDriverTest, InitWithNoBadBlock) {
+  auto driver = ftl::NandDriver::Create(
+      nand_proto(), fidl::UnownedClientEnd<fuchsia_hardware_badblock::BadBlock>(ZX_HANDLE_INVALID));
+  ASSERT_EQ(nullptr, driver->Init());
+  ASSERT_FALSE(driver->IsBadBlock(1 * kBlockSize));
 }
 
 TEST_F(NandDriverTest, Read) {

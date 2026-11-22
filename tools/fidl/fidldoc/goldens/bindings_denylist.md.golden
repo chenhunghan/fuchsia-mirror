@@ -710,12 +710,12 @@ Type: <code>uint32</code>
         </tr>
 </table>
 
-### OnlyLlcpp [strict](/fuchsia-src/reference/fidl/language/language.md#strict-vs-flexible){:.fidl-attribute}  {#OnlyLlcpp data-text="OnlyLlcpp"}
+### OnlyCpp [strict](/fuchsia-src/reference/fidl/language/language.md#strict-vs-flexible){:.fidl-attribute}  {#OnlyCpp data-text="OnlyCpp"}
 *Defined in [test.bindingsdenylist/example.test.fidl](https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/fidl/fidlc/testdata/bindings_denylist/example.test.fidl;l=29)*
 <table>
     <tr><th>Ordinal</th><th>Variant</th><th>Type</th><th>Description</th></tr>
-        <tr id="OnlyLlcpp.x">
-<td><h3 id="OnlyLlcpp.x" class="add-link hide-from-toc">1</h3></td>
+        <tr id="OnlyCpp.x">
+<td><h3 id="OnlyCpp.x" class="add-link hide-from-toc">1</h3></td>
             <td><code>x</code></td>
             <td>
                 <code>uint32</code>

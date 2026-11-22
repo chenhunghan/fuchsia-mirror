@@ -1,0 +1,51 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_build_info//:args.bzl", "rustc_prefix")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":cargo_osrb_bin_test"],
+    visibility = ["//tools:__pkg__"],
+)
+
+rustc_binary_host_tool(
+    name = "cargo_osrb_bin",
+    srcs = ["src/main.rs"],
+    binary_name = "cargo-osrb",
+    crate_name = "cargo_osrb",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    rustc_env = {
+        "FUCHSIA_CARGO_PATH": rustc_prefix + "/bin/cargo",
+    },
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:cargo_metadata",
+        "//third_party/rust_crates/vendor:petgraph",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:toml",
+    ],
+)
+
+host_rustc_test(
+    name = "cargo_osrb_bin_test",
+    crate = ":cargo_osrb_bin",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

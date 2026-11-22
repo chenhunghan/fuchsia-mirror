@@ -5,7 +5,7 @@
 // DO NOT EDIT.
 // Generated from FIDL library `zither.enums` by zither, a Fuchsia platform tool.
 
-use zerocopy::{Immutable, IntoBytes, TryFromBytes};
+use zerocopy::{FromBytes, Immutable, IntoBytes, TryFromBytes};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Immutable, IntoBytes, PartialEq, TryFromBytes)]
@@ -249,28 +249,46 @@ impl From<Int64Limits> for i64 {
 
 pub const FOUR: u16 = 0b100;
 
-#[repr(u16)]
-#[derive(Clone, Copy, Debug, Eq, Hash, Immutable, IntoBytes, PartialEq, TryFromBytes)]
-pub enum EnumWithExpressions {
-    OrWithLiteral = 3,  // 0b01 | 0b10
-    OrWithConstant = 5, // 0b001 | FOUR
-}
+#[repr(transparent)]
+#[derive(Clone, Copy, Eq, FromBytes, Hash, Immutable, IntoBytes, PartialEq)]
+pub struct EnumWithExpressions(u16);
 
 impl EnumWithExpressions {
-    pub fn from_raw(raw: u16) -> Option<Self> {
-        match raw {
-            3 => Some(Self::OrWithLiteral),
+    pub const OR_WITH_LITERAL: Self = Self(3); // 0b01 | 0b10
+    pub const OR_WITH_CONSTANT: Self = Self(5); // 0b001 | FOUR
 
-            5 => Some(Self::OrWithConstant),
+    /// Constructs a value from its underlying integer.
+    pub const fn from_raw(raw: u16) -> Self {
+        Self(raw)
+    }
 
-            _ => None,
-        }
+    /// Returns the underlying integer.
+    pub const fn as_raw(self) -> u16 {
+        self.0
+    }
+}
+
+impl From<u16> for EnumWithExpressions {
+    fn from(raw: u16) -> Self {
+        Self(raw)
     }
 }
 
 impl From<EnumWithExpressions> for u16 {
     fn from(val: EnumWithExpressions) -> Self {
-        val as Self
+        val.0
+    }
+}
+
+impl core::fmt::Debug for EnumWithExpressions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::OR_WITH_LITERAL => f.write_str("EnumWithExpressions::OR_WITH_LITERAL"),
+
+            Self::OR_WITH_CONSTANT => f.write_str("EnumWithExpressions::OR_WITH_CONSTANT"),
+
+            Self(raw) => f.debug_tuple("EnumWithExpressions").field(&raw).finish(),
+        }
     }
 }
 

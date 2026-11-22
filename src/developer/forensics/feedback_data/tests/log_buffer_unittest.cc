@@ -14,10 +14,10 @@ namespace {
 constexpr fuchsia_logging::LogSeverity kLogInfo = fuchsia_logging::LogSeverity::Info;
 constexpr fuchsia_logging::LogSeverity kLogWarning = fuchsia_logging::LogSeverity::Warn;
 
-::fpromise::result<fuchsia::logger::LogMessage, std::string> ToMessage(
+::fpromise::result<fuchsia_logger::LogMessage, std::string> ToMessage(
     const std::string& msg, fuchsia_logging::LogSeverity severity = kLogInfo,
     std::vector<std::string> tags = {"tag1", "tag2"}) {
-  return ::fpromise::ok(fuchsia::logger::LogMessage{
+  return ::fpromise::ok(fuchsia_logger::LogMessage{{
       .pid = 100,
       .tid = 101,
       .time = zx::time_boot((zx::sec(1) + zx::msec(10)).get()),
@@ -25,12 +25,12 @@ constexpr fuchsia_logging::LogSeverity kLogWarning = fuchsia_logging::LogSeverit
       .dropped_logs = 0,
       .tags = std::move(tags),
       .msg = msg,
-  });
+  }});
 }
 
-::fpromise::result<fuchsia::logger::LogMessage, std::string> ToMessage(const std::string& msg,
-                                                                       const zx::duration time) {
-  return ::fpromise::ok(fuchsia::logger::LogMessage{
+::fpromise::result<fuchsia_logger::LogMessage, std::string> ToMessage(const std::string& msg,
+                                                                      const zx::duration time) {
+  return ::fpromise::ok(fuchsia_logger::LogMessage{{
       .pid = 100,
       .tid = 101,
       .time = zx::time_boot(time.to_nsecs()),
@@ -38,10 +38,10 @@ constexpr fuchsia_logging::LogSeverity kLogWarning = fuchsia_logging::LogSeverit
       .dropped_logs = 0,
       .tags = {"tag1", "tag2"},
       .msg = msg,
-  });
+  }});
 }
 
-::fpromise::result<fuchsia::logger::LogMessage, std::string> ToError(const std::string& error) {
+::fpromise::result<fuchsia_logger::LogMessage, std::string> ToError(const std::string& error) {
   return ::fpromise::error(error);
 }
 

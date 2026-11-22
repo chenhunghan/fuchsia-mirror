@@ -55,8 +55,11 @@ _Static_assert(sizeof(long) >= sizeof(fc_status_t));  // NOLINT
 
 extern void create_ffx_lib_context(ffx_lib_context_t** ctx);
 
+// Creates an environment context from `config_json`. If `strict` is true, the context runs in
+// ffx strict mode, as `ffx --strict` does, and `isolate_dir` must be null.
 extern fc_status_t create_ffx_env_context(ffx_env_context_t** env_ctx, ffx_lib_context_t* lib_ctx,
-                                          const char* config_json, const char* isolate_dir);
+                                          const char* config_json, const char* isolate_dir,
+                                          bool strict);
 
 extern void destroy_ffx_env_context(ffx_env_context_t* ctx);
 

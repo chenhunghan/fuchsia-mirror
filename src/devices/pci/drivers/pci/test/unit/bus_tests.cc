@@ -4,6 +4,8 @@
 
 #include <fidl/fuchsia.hardware.pci.root/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.pci/cpp/fidl.h>
+#include <lib/async-loop/cpp/loop.h>
+#include <lib/async-loop/default.h>
 #include <lib/driver/legacy-bind-constants/legacy-bind-constants.h>
 #include <lib/driver/metadata/cpp/metadata_server.h>
 #include <lib/driver/mmio/cpp/mmio.h>
@@ -35,7 +37,11 @@
 
 #include "src/devices/pci/drivers/pci/bridge.h"
 #include "src/devices/pci/drivers/pci/bus.h"
+#include "src/devices/pci/drivers/pci/capabilities/msix.h"
+#include "src/devices/pci/drivers/pci/composite.h"
+#include "src/devices/pci/drivers/pci/test/fakes/fake_allocator.h"
 #include "src/devices/pci/drivers/pci/test/fakes/fake_root_service.h"
+#include "src/devices/pci/drivers/pci/test/fakes/test_device.h"
 #include "src/lib/testing/predicates/status.h"
 
 namespace pci {
@@ -499,11 +505,11 @@ TEST_F(PciBusTests, OutgoingServices) {
     EXPECT_EQ(device_info->info().device_id(), static_cast<uint16_t>(1));
 
     fidl::SyncClient debug_client(std::move(*debug_client_end));
-    auto bridge_info = debug_client->GetHostBridgeInfo();
-    ASSERT_TRUE(bridge_info.is_ok());
-    EXPECT_EQ(bridge_info->info().name(), "fakeroot");
-    EXPECT_EQ(bridge_info->info().start_bus_number(), static_cast<uint8_t>(0));
-    EXPECT_EQ(bridge_info->info().end_bus_number(), static_cast<uint8_t>(2));
+    auto root_info = debug_client->GetRootInfo();
+    ASSERT_TRUE(root_info.is_ok());
+    EXPECT_EQ(root_info->info().name(), "fakeroot");
+    EXPECT_EQ(root_info->info().start_bus_number(), static_cast<uint8_t>(0));
+    EXPECT_EQ(root_info->info().end_bus_number(), static_cast<uint8_t>(2));
   });
   ASSERT_OK(run_result);
 }
@@ -1191,6 +1197,40 @@ TEST_F(PciBusTests, AcpiDeviceCompositeSpecIncludesAcpiParent) {
   EXPECT_EQ(parents->size(), 2u);
 }
 
+// Functions with the same BDF in different segments get distinct composite specs that each
+// match only their own segment's PCI node.
+TEST(PciCompositeSpecTests, SpecIsSegmentScoped) {
+  auto make_spec = [](uint32_t segment_group) {
+    return pci::CreateCompositeNodeSpec(pci::CompositeInfo{
+        .vendor_id = 0x8086,
+        .device_id = 1,
+        .segment_group = segment_group,
+        .bus_id = 0x12,
+        .dev_id = 0x3,
+        .func_id = 0x4,
+    });
+  };
+  fuchsia_driver_framework::CompositeNodeSpec spec0 = make_spec(0);
+  fuchsia_driver_framework::CompositeNodeSpec spec1 = make_spec(1);
+
+  EXPECT_EQ(spec0.name(), "0000_12_03_4");
+  EXPECT_EQ(spec1.name(), "0001_12_03_4");
+
+  ASSERT_TRUE(spec1.parents2().has_value());
+  const auto& rules = spec1.parents2()->at(0).bind_rules();
+  auto segment_rule = std::ranges::find_if(
+      rules, [](const auto& rule) { return rule.key() == bind_fuchsia_pci::SEGMENT; });
+  ASSERT_NE(segment_rule, rules.end());
+  ASSERT_EQ(segment_rule->values().size(), 1u);
+  EXPECT_EQ(segment_rule->values()[0].int_value().value(), 1u);
+
+  const auto& properties = spec1.parents2()->at(0).properties();
+  auto segment_property = std::ranges::find_if(
+      properties, [](const auto& prop) { return prop.key() == bind_fuchsia_pci::SEGMENT; });
+  ASSERT_NE(segment_property, properties.end());
+  EXPECT_EQ(segment_property->value().int_value().value(), 1u);
+}
+
 // A composite spec rejected with a domain error leaves the device and its fragment node in place.
 TEST_F(PciBusTests, CompositeNodeSpecDomainErrorKeepsDevice) {
   ecam()
@@ -1210,8 +1250,8 @@ TEST_F(PciBusTests, CompositeNodeSpecDomainErrorKeepsDevice) {
   EXPECT_EQ(child_count, 1u);
 }
 
-// A composite spec rejected with a framework error removes the node and drops the device.
-TEST_F(PciBusTests, CompositeNodeSpecFrameworkErrorRemovesDevice) {
+// A composite spec rejected with a framework error disables the device and removes its node.
+TEST_F(PciBusTests, CompositeNodeSpecFrameworkErrorDisablesDevice) {
   ecam()
       .get_device({.bus_id = 0, .device_id = 0, .function_id = 0})
       ->set_vendor_id(0x8086)
@@ -1220,13 +1260,42 @@ TEST_F(PciBusTests, CompositeNodeSpecFrameworkErrorRemovesDevice) {
       [](PciBusTestEnvironment& env) { env.composite_manager().set_epitaph(ZX_ERR_INTERNAL); });
 
   ASSERT_OK(StartDriver());
-  EXPECT_EQ(bus()->GetDeviceCount(), 0u);
+  EXPECT_EQ(bus()->GetDeviceCount(), 1u);
 
   driver_test().runtime().RunUntil([&]() {
     return driver_test().RunInNodeContext<size_t>([](fdf_testing::TestNode& node) {
       return node.children().at("bus").children().count("00_00_0");
     }) == 0u;
   });
+
+  zx::result device_client_end =
+      driver_test().Connect<fuchsia_hardware_pci::Service::Device>("00_00_0");
+  ASSERT_OK(device_client_end);
+  zx::result run_result = driver_test().RunOnBackgroundDispatcherSync([&]() {
+    fidl::SyncClient client(std::move(*device_client_end));
+    auto info_result = client->GetDeviceInfo();
+    EXPECT_TRUE(info_result.is_error());
+    EXPECT_TRUE(info_result.error_value().is_peer_closed());
+  });
+  ASSERT_OK(run_result);
+}
+
+// A device disabled during downstream configuration is not published.
+TEST_F(PciBusTests, DisabledDeviceIsUnpublished) {
+  auto cfg_buf = kFakeVirtioInputDeviceConfig;
+  cfg_buf[kFakeVirtioInputMsixCapabilityOffset + MsixCapability::kMsixTableRegisterOffset] =
+      kMaxBarCount;
+  ecam()
+      .get_config_view({.bus_id = 0, .device_id = 0, .function_id = 0})
+      .WriteBuffer(0, cfg_buf.data(), cfg_buf.size());
+
+  ASSERT_OK(StartDriver());
+  EXPECT_EQ(bus()->GetDeviceCount(), 1u);
+
+  size_t child_count = driver_test().RunInNodeContext<size_t>([](fdf_testing::TestNode& node) {
+    return node.children().at("bus").children().count("00_00_0");
+  });
+  EXPECT_EQ(child_count, 0u);
 
   zx::result device_client_end =
       driver_test().Connect<fuchsia_hardware_pci::Service::Device>("00_00_0");
@@ -1343,6 +1412,205 @@ TEST_F(PciBusTests, BridgeWindowsSurviveBusRestart) {
   EXPECT_EQ(bridge->io_limit(), 0xFFFFu);
   EXPECT_EQ(bridge->mem_base(), 0x10000000u);
   EXPECT_EQ(bridge->mem_limit(), 0xBFFFFFFFu);
+}
+
+TEST_F(PciBusTests, ReadBar) {
+  ecam().get_device({})->set_vendor_id(0x8086).set_device_id(0x8086);
+  ASSERT_OK(StartDriver());
+  auto* bus = this->bus();
+
+  constexpr size_t kBarSize = 0x2000;
+  pci::Device* dev = bus->GetDevice({});
+  ASSERT_NE(dev, nullptr);
+  {
+    fbl::AutoLock _(dev->dev_lock());
+    dev->bars() = {};
+    dev->bars()[0] = Bar{
+        .size = kBarSize,
+        .bar_id = 0,
+        .is_mmio = true,
+        .allocation = std::make_unique<FakeAllocation>(
+            fuchsia_hardware_pci_root::AddressSpace::kMemory, 0, kBarSize),
+    };
+    dev->bars()[1] = Bar{.size = kBarSize, .bar_id = 1, .is_mmio = true};
+    dev->bars()[2] = Bar{.size = 0x100, .bar_id = 2, .is_mmio = false};
+  }
+  config::Command.FromValue(0).set_memory_space(true).WriteTo(dev->config().get());
+
+  async::Loop loop(&kAsyncLoopConfigNoAttachToCurrentThread);
+  ASSERT_OK(loop.StartThread());
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_hardware_pci::Debug>::Create();
+  fidl::BindServer(loop.dispatcher(), std::move(server_end), bus);
+  fidl::WireSyncClient client(std::move(client_end));
+
+  {
+    auto res = client->ReadBar({}, /*bar_id=*/0, /*offset=*/kBarSize - 16, /*size=*/16);
+    ASSERT_OK(res.status());
+    ASSERT_OK(*res);
+    EXPECT_EQ(res->value()->buffer.size(), 16u);
+  }
+  {
+    auto res = client->ReadBar({}, /*bar_id=*/0, /*offset=*/0, /*size=*/kBarSize);
+    ASSERT_OK(res.status());
+    ASSERT_OK(*res);
+    EXPECT_EQ(res->value()->buffer.size(), fuchsia_hardware_pci::wire::kReadbarMaxSize);
+  }
+
+  EXPECT_STATUS(*client->ReadBar({.bus_id = 1}, /*bar_id=*/0, /*offset=*/0, /*size=*/16),
+                ZX_ERR_NOT_FOUND);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/pci::kMaxBarCount, /*offset=*/0, /*size=*/16),
+                ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/3, /*offset=*/0, /*size=*/16), ZX_ERR_NOT_FOUND);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/0, /*offset=*/0, /*size=*/0), ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/0, /*offset=*/kBarSize, /*size=*/0),
+                ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(
+      *client->ReadBar({}, /*bar_id=*/0, /*offset=*/kBarSize, /*size=*/UINT64_MAX - kBarSize + 1),
+      ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/0, /*offset=*/kBarSize - 16, /*size=*/17),
+                ZX_ERR_INVALID_ARGS);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/2, /*offset=*/0, /*size=*/16),
+                ZX_ERR_NOT_SUPPORTED);
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/1, /*offset=*/0, /*size=*/16), ZX_ERR_BAD_STATE);
+
+  config::Command.FromValue(0).WriteTo(dev->config().get());
+  EXPECT_STATUS(*client->ReadBar({}, /*bar_id=*/0, /*offset=*/0, /*size=*/16), ZX_ERR_BAD_STATE);
+}
+
+uint16_t ReadLe16(const std::vector<uint8_t>& bytes, size_t offset) {
+  return static_cast<uint16_t>(bytes[offset]) |
+         static_cast<uint16_t>(static_cast<uint16_t>(bytes[offset + 1]) << 8u);
+}
+
+TEST_F(PciBusTests, DebugGetDevicesPaginationAndConfig) {
+  // Fifteen 4096-byte PCIe snapshots fit in a 64 KiB channel message (32-byte header +
+  // 15 * 4168 = 62552 bytes), so 17 PCIe devices plus one 256-byte conventional PCI device
+  // split across two non-empty batches (15 + 3) followed by an empty batch.
+  constexpr uint8_t kPcieDeviceCount = 17;
+  constexpr fuchsia_hardware_pci::wire::Bdf kConventionalBdf = {
+      .bus_id = 0,
+      .device_id = kPcieDeviceCount,
+      .function_id = 0,
+  };
+  auto& ecam = this->ecam();
+  for (uint8_t i = 0; i < kPcieDeviceCount; i++) {
+    const fuchsia_hardware_pci::wire::Bdf bdf = {.bus_id = 0, .device_id = i, .function_id = 0};
+    ecam.get_device(bdf)->set_vendor_id(0x1af4).set_device_id(i);
+    // A minimal PCIe capability list: the status register advertises a capability list at
+    // 0x40, which holds a version 2 PCI Express capability for an endpoint.
+    auto view = ecam.get_config_view(bdf);
+    view.Write16(view.Read16(kConfigStatus) | kStatusNewCaps, kConfigStatus);
+    view.Write8(0x40, kConfigCapabilities);
+    view.Write16(0x0010, 0x40);
+    view.Write16(0x0002, 0x42);
+    // Mark the end of extended config space so each PCIe snapshot is verifiable to byte 4095.
+    view.Write32(0xdeadbe00u | i, 0xffc);
+  }
+  ecam.get_device(kConventionalBdf)->set_vendor_id(0x8086).set_device_id(0x1234);
+  ecam.get_config_view(kConventionalBdf).Write32(0xcafebabe, 0x100);
+
+  ASSERT_OK(StartDriver());
+  auto* bus = this->bus();
+  ASSERT_EQ(bus->GetDeviceCount(), kPcieDeviceCount + 1u);
+
+  // The Debug server and its iterators run on the driver's foreground dispatcher, so the
+  // synchronous client calls run on a separate thread while the dispatcher is pumped.
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_hardware_pci::Debug>::Create();
+  fidl::BindServer(fdf::Dispatcher::GetCurrent()->async_dispatcher(), std::move(server_end),
+                   static_cast<fidl::WireServer<fuchsia_hardware_pci::Debug>*>(bus));
+
+  std::vector<fuchsia_hardware_pci::DeviceSnapshot> devices;
+  driver_test().runtime().PerformBlockingWork([&, client_end = std::move(client_end)]() mutable {
+    fidl::WireSyncClient client(std::move(client_end));
+    {
+      auto info = client->GetRootInfo();
+      ASSERT_OK(info.status());
+      EXPECT_EQ(info->info.start_bus_number, 0u);
+      EXPECT_EQ(info->info.end_bus_number, 2u);
+      EXPECT_EQ(info->info.segment_group, 0u);
+    }
+
+    auto open_iterator = [&] {
+      auto [iter_client, iter_server] =
+          fidl::Endpoints<fuchsia_hardware_pci::DeviceIterator>::Create();
+      EXPECT_OK(client->GetDevices(std::move(iter_server)).status());
+      return fidl::WireSyncClient(std::move(iter_client));
+    };
+
+    // Start a second iterator partway through the first to show they don't share state.
+    auto first = open_iterator();
+    auto first_batch = first->GetNext();
+    ASSERT_OK(first_batch.status());
+    EXPECT_EQ(first_batch->devices.size(), 15u);
+    auto first_devices = fidl::ToNatural(first_batch->devices);
+    ASSERT_TRUE(first_devices.has_value());
+    devices = std::move(*first_devices);
+
+    auto second = open_iterator();
+    size_t second_count = 0;
+    while (true) {
+      auto next = second->GetNext();
+      ASSERT_OK(next.status());
+      if (next->devices.empty()) {
+        break;
+      }
+      second_count += next->devices.size();
+    }
+    EXPECT_EQ(second_count, kPcieDeviceCount + 1u);
+
+    auto second_batch = first->GetNext();
+    ASSERT_OK(second_batch.status());
+    EXPECT_EQ(second_batch->devices.size(), 3u);
+    auto tail = fidl::ToNatural(second_batch->devices);
+    ASSERT_TRUE(tail.has_value());
+    devices.insert(devices.end(), tail->begin(), tail->end());
+
+    auto empty_batch = first->GetNext();
+    ASSERT_OK(empty_batch.status());
+    EXPECT_TRUE(empty_batch->devices.empty());
+
+    // The server closes the iterator channel cleanly after the terminal empty batch.
+    EXPECT_TRUE(first->GetNext().is_peer_closed());
+  });
+
+  ASSERT_EQ(devices.size(), kPcieDeviceCount + 1u);
+  for (uint8_t i = 0; i < kPcieDeviceCount; i++) {
+    const auto& device = devices[i];
+    EXPECT_EQ(device.bdf().bus_id(), 0u);
+    EXPECT_EQ(device.bdf().device_id(), i);
+    EXPECT_EQ(device.bdf().function_id(), 0u);
+    ASSERT_EQ(device.config().size(), kExtendedConfigSize);
+    EXPECT_EQ(ReadLe16(device.config(), 0), 0x1af4);
+    EXPECT_EQ(ReadLe16(device.config(), 2), i);
+    EXPECT_EQ(device.config()[0x40], 0x10);
+    EXPECT_EQ(device.config()[0xffc], i);
+    EXPECT_EQ(device.config()[0xffd], 0xbe);
+    EXPECT_EQ(device.config()[0xffe], 0xad);
+    EXPECT_EQ(device.config()[0xfff], 0xde);
+    // BAR sizes match what the bus driver probed.
+    pci::Device* bus_device = bus->GetDevice({.bus_id = 0, .device_id = i, .function_id = 0});
+    ASSERT_NE(bus_device, nullptr);
+    fbl::AutoLock _(bus_device->dev_lock());
+    EXPECT_GT(device.bar_sizes()[0], 0u);
+    for (size_t bar = 0; bar < device.bar_sizes().size(); bar++) {
+      const auto& probed = bus_device->bars()[bar];
+      EXPECT_EQ(device.bar_sizes()[bar], probed.has_value() ? probed->size : 0u);
+    }
+  }
+  const auto& conventional = devices.back();
+  EXPECT_EQ(conventional.bdf().bus_id(), kConventionalBdf.bus_id);
+  EXPECT_EQ(conventional.bdf().device_id(), kConventionalBdf.device_id);
+  EXPECT_EQ(conventional.bdf().function_id(), kConventionalBdf.function_id);
+  ASSERT_EQ(conventional.config().size(), kBaseConfigSize);
+  EXPECT_EQ(ReadLe16(conventional.config(), 0), 0x8086);
+  EXPECT_EQ(ReadLe16(conventional.config(), 2), 0x1234);
+  pci::Device* bus_device = bus->GetDevice(kConventionalBdf);
+  ASSERT_NE(bus_device, nullptr);
+  fbl::AutoLock _(bus_device->dev_lock());
+  for (size_t bar = 0; bar < conventional.bar_sizes().size(); bar++) {
+    const auto& probed = bus_device->bars()[bar];
+    EXPECT_EQ(conventional.bar_sizes()[bar], probed.has_value() ? probed->size : 0u);
+  }
 }
 
 }  // namespace

@@ -4,6 +4,7 @@
 """Unit tests for honeydew.fuchsia_device.fuchsia_device.py."""
 
 import base64
+import dataclasses
 import ipaddress
 import json
 import os
@@ -19,27 +20,33 @@ import fidl_fuchsia_hardware_power_statecontrol as fhp_statecontrol
 import fidl_fuchsia_hwinfo as f_hwinfo
 import fidl_fuchsia_io as f_io
 import fuchsia_inspect
-import honeydew.affordances.connectivity.wlan.core as wlan_core
 from fuchsia_controller_py import FcTransportStatus, ZxStatus
 from honeydew import affordances_capable, errors
-from honeydew.affordances import location
-from honeydew.affordances.connectivity.bluetooth.gap import gap_using_fc
-from honeydew.affordances.connectivity.wlan import wlan_policy
-from honeydew.affordances.drivers.fake_battery import fake_battery_using_ffx
+from honeydew.affordances.connectivity.bluetooth.gap import gap
+from honeydew.affordances.connectivity.thread import thread
+from honeydew.affordances.connectivity.wlan.core import wlan_core
+from honeydew.affordances.connectivity.wlan.wlan_policy import wlan_policy
+from honeydew.affordances.drivers.fake_battery import fake_battery
+from honeydew.affordances.hello_fuchsia import (
+    hello_fuchsia_using_fc,
+    hello_fuchsia_using_ffx,
+)
+from honeydew.affordances.hello_fuchsia import types as hello_fuchsia_types
+from honeydew.affordances.hello_world import hello_world
+from honeydew.affordances.location import location
 from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller_using_starnix,
 )
-from honeydew.affordances.rtc import rtc_using_fc
-from honeydew.affordances.session import session_using_ffx
-from honeydew.affordances.starnix import starnix_using_ffx
-from honeydew.affordances.tracing import (
-    tracing_using_fc,
-    tracing_using_ffx,
-)
+from honeydew.affordances.rtc import rtc
+from honeydew.affordances.session import session
+from honeydew.affordances.starnix import starnix
+from honeydew.affordances.tracing import tracing as tracing_affordance
 from honeydew.affordances.tracing import types as tracing_types
-from honeydew.affordances.ui.screenshot import screenshot_using_ffx
-from honeydew.affordances.ui.user_input import user_input_using_fc
-from honeydew.affordances.virtual_audio import audio_using_fuchsia_controller
+from honeydew.affordances.ui.screenshot import screenshot
+from honeydew.affordances.ui.user_input import user_input
+from honeydew.affordances.usb import errors as usb_errors
+from honeydew.affordances.usb import usb as usb_affordance
+from honeydew.affordances.virtual_audio import audio
 from honeydew.auxiliary_devices.power_switch import (
     power_switch as power_switch_interface,
 )
@@ -50,13 +57,12 @@ from honeydew.fuchsia_device import fuchsia_device
 from honeydew.transports.fastboot import fastboot
 from honeydew.transports.ffx import config as ffx_config
 from honeydew.transports.ffx import errors as ffx_errors
-from honeydew.transports.ffx import ffx, ffx_with_monitor
+from honeydew.transports.ffx import ffx_impl, ffx_with_monitor
 from honeydew.transports.fuchsia_controller import errors as fc_errors
 from honeydew.transports.fuchsia_controller import (
     fuchsia_controller as fc_transport,
 )
-from honeydew.transports.serial import serial as serial_interface
-from honeydew.transports.serial import serial_using_unix_socket
+from honeydew.transports.serial import serial as serial_transport
 from honeydew.typing import custom_types
 from honeydew.utils import common
 from mobly import signals
@@ -152,7 +158,6 @@ _INPUT_ARGS: dict[str, Any] = {
         subtools_search_path=None,
         proxy_timeout_secs=None,
         ssh_keepalive_timeout=None,
-        emu_instance_dir=None,
         ssh_private_keys=None,
         ssh_public_keys=None,
         shared_data="/tmp/shared_data",
@@ -263,7 +268,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
                 autospec=True,
             ) as mock_fc_create_context,
             mock.patch.object(
-                ffx.FFX,
+                ffx_impl.FfxImpl,
                 "check_connection",
                 autospec=True,
             ) as mock_ffx_check_connection,
@@ -316,10 +321,9 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         self.fd_fc_obj._device_info = custom_types.DeviceInfo(
             name=_INPUT_ARGS["device_name"],
-            serial_number=None,
+            serial_number="12345678",
             address=None,
             serial_socket=None,
-            fastboot_node_id="12345678",
         )
 
         self.assertIsInstance(
@@ -344,7 +348,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         return_value=None,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         return_value="ffx-serial-1234",
@@ -355,7 +359,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_fastboot_init: mock.Mock,
     ) -> None:
         """Test case to make sure fuchsia_device falls back to FFX serial_number
-        for fastboot when fastboot_node_id and serial_number are not in device_info.
+        for fastboot when serial_number is not in device_info.
         """
         device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
 
@@ -364,7 +368,6 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             serial_number=None,
             address=None,
             serial_socket=None,
-            fastboot_node_id=None,
         )
 
         self.assertIsInstance(
@@ -384,7 +387,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.fd_fc_obj._device_info = device_info
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         side_effect=ffx_errors.FfxCommandError("FFX error"),
@@ -394,7 +397,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_ffx_serial_number: mock.Mock,
     ) -> None:
         """Test case to make sure fuchsia_device raises FuchsiaDeviceError when
-        accessing fastboot without fastboot_node_id/serial_number and FFX fails.
+        accessing fastboot without serial_number and FFX fails.
         """
         device_info: custom_types.DeviceInfo = self.fd_fc_obj._device_info
 
@@ -403,7 +406,6 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             serial_number=None,
             address=None,
             serial_socket=None,
-            fastboot_node_id=None,
         )
 
         with self.assertRaises(errors.FuchsiaDeviceError):
@@ -415,7 +417,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.fd_fc_obj._device_info = device_info
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "serial_number",
         new_callable=mock.PropertyMock,
         side_effect=signals.TestAbortAll("abort"),
@@ -433,7 +435,6 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             serial_number=None,
             address=None,
             serial_socket=None,
-            fastboot_node_id=None,
         )
 
         with self.assertRaises(signals.TestAbortAll):
@@ -448,7 +449,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         """Test case to make sure fuchsia_device supports ffx transport."""
         self.assertIsInstance(
             self.fd_fc_obj.ffx,
-            ffx.FFX,
+            ffx_impl.FfxImpl,
         )
         self.assertNotIsInstance(
             self.fd_fc_obj.ffx,
@@ -457,6 +458,47 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.fd_fc_obj.ffx.config.shared_data, "/tmp/shared_data"
         )
+
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "check_connection",
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "run",
+        return_value=json.dumps(
+            [
+                {
+                    "nodename": "fuchsia-emulator",
+                    "addresses": [{"type": "Usb", "cid": 42}],
+                }
+            ]
+        ),
+        autospec=True,
+    )
+    def test_ffx_transport_refreshes_usb_device_info_address(
+        self,
+        mock_ffx_run: mock.Mock,
+        mock_ffx_check_connection: mock.Mock,
+    ) -> None:
+        """Verify FuchsiaDevice.ffx updates _device_info.address with the refreshed UsbAddress."""
+        orig_device_info = self.fd_fc_obj._device_info
+        self.fd_fc_obj.__dict__.pop("ffx", None)
+        try:
+            self.fd_fc_obj._device_info = dataclasses.replace(
+                orig_device_info,
+                address=custom_types.UsbAddress(target_id=7),
+            )
+            ffx_obj = self.fd_fc_obj.ffx
+            expected_usb = custom_types.UsbAddress(target_id=42)
+            self.assertEqual(ffx_obj.get_target_address(), expected_usb)
+            self.assertEqual(self.fd_fc_obj._device_info.address, expected_usb)
+            mock_ffx_run.assert_called_once()
+            mock_ffx_check_connection.assert_called_once()
+        finally:
+            self.fd_fc_obj.__dict__.pop("ffx", None)
+            self.fd_fc_obj._device_info = orig_device_info
 
     @mock.patch.object(
         ffx_with_monitor.FFXWithMonitor,
@@ -507,7 +549,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         """Test case to make sure fuchsia_device supports serial transport."""
         self.assertIsInstance(
             self.fd_fc_obj.serial,
-            serial_using_unix_socket.SerialUsingUnixSocket,
+            serial_transport.Serial,
         )
 
     def test_serial_transport_error(self) -> None:
@@ -527,7 +569,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             errors.FuchsiaDeviceError,
             "'serial_socket' arg need to be provided during the init to use Serial affordance",
         ):
-            _: serial_interface.Serial = self.fd_fc_obj.serial
+            _: serial_transport.Serial = self.fd_fc_obj.serial
 
         self.fd_fc_obj._device_info = device_info
 
@@ -535,20 +577,18 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
     def test_session(self) -> None:
         """Test case to make sure fuchsia_device supports session
         affordance implemented using FFX"""
-        self.assertIsInstance(
-            self.fd_fc_obj.session, session_using_ffx.SessionUsingFfx
-        )
+        self.assertIsInstance(self.fd_fc_obj.session, session.Session)
 
     def test_screenshot(self) -> None:
         """Test case to make sure fuchsia_device supports screenshot
         affordance implemented using FFX"""
         self.assertIsInstance(
             self.fd_fc_obj.screenshot,
-            screenshot_using_ffx.ScreenshotUsingFfx,
+            screenshot.Screenshot,
         )
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value="test.hardwarepowercontrol.Service",
         autospec=True,
@@ -558,11 +598,11 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         affordance implemented using FFX"""
         self.assertIsInstance(
             self.fd_fc_obj.fake_battery,
-            fake_battery_using_ffx.FakeBatteryUsingFfx,
+            fake_battery.FakeBattery,
         )
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -577,11 +617,11 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsInstance(
             self.fd_fc_obj.virtual_audio,
-            audio_using_fuchsia_controller.VirtualAudioUsingFuchsiaController,
+            audio.VirtualAudio,
         )
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -602,7 +642,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.fd_fc_obj.virtual_audio  # pylint: disable=pointless-statement
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value='{"instances": [{"moniker": "core/starnix_runner/kernels:kernel"}]}',
         autospec=True,
@@ -620,7 +660,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_ffx_run.assert_called_once()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value='{"instances": [{"moniker": "core/starnix_runner/kernels:kernel"}]}',
         autospec=True,
@@ -631,13 +671,11 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Test case to make sure fuchsia_device supports
         starnix affordance implemented using starnix"""
-        self.assertIsInstance(
-            self.fd_fc_obj.starnix, starnix_using_ffx.StarnixUsingFfx
-        )
+        self.assertIsInstance(self.fd_fc_obj.starnix, starnix.Starnix)
         mock_ffx_run.assert_called_once()
 
     @mock.patch.object(
-        rtc_using_fc.RtcUsingFc,
+        rtc.Rtc,
         "__init__",
         autospec=True,
         return_value=None,
@@ -647,7 +685,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         implemented using fuchsia-controller"""
         self.assertIsInstance(
             self.fd_fc_obj.rtc,
-            rtc_using_fc.RtcUsingFc,
+            rtc.Rtc,
         )
         mock_rtc_fc_init.assert_called_once_with(
             self.fd_fc_obj.rtc,
@@ -660,7 +698,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         implemented using ffx by default."""
         self.assertIsInstance(
             self.fd_fc_obj.tracing,
-            tracing_using_ffx.TracingUsingFfx,
+            tracing_affordance.Tracing,
         )
 
     @parameterized.expand(
@@ -668,26 +706,10 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             param(
                 label="when_config_is_none",
                 config=None,
-                expected_impl=tracing_types.Implementation.FFX,
-                expected_cls=tracing_using_ffx.TracingUsingFfx,
             ),
             param(
                 label="when_tracing_config_is_missing",
                 config={"affordances": {}},
-                expected_impl=tracing_types.Implementation.FFX,
-                expected_cls=tracing_using_ffx.TracingUsingFfx,
-            ),
-            param(
-                label="when_tracing_config_is_fuchsia_controller",
-                config={
-                    "affordances": {
-                        "tracing": {
-                            "implementation": "fuchsia-controller",
-                        },
-                    },
-                },
-                expected_impl=tracing_types.Implementation.FUCHSIA_CONTROLLER,
-                expected_cls=tracing_using_fc.TracingUsingFc,
             ),
             param(
                 label="when_tracing_config_is_ffx",
@@ -698,8 +720,6 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
                         },
                     },
                 },
-                expected_impl=tracing_types.Implementation.FFX,
-                expected_cls=tracing_using_ffx.TracingUsingFfx,
             ),
         ],
         name_func=_custom_test_name_func,
@@ -708,8 +728,6 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self,
         label: str,  # pylint: disable=unused-argument
         config: dict[str, Any] | None,
-        expected_impl: tracing_types.Implementation,
-        expected_cls: type[Any],
     ) -> None:
         """Test FuchsiaDevice._get_tracing_affordance_implementation and .tracing."""
         original_config = self.fd_fc_obj._config
@@ -718,14 +736,33 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.fd_fc_obj._config = config
             self.assertEqual(
                 self.fd_fc_obj._get_tracing_affordance_implementation(),
-                expected_impl,
+                tracing_types.Implementation.FFX,
             )
-            self.assertIsInstance(self.fd_fc_obj.tracing, expected_cls)
+            self.assertIsInstance(
+                self.fd_fc_obj.tracing, tracing_affordance.Tracing
+            )
         finally:
             self.fd_fc_obj.__dict__.pop("tracing", None)
             self.fd_fc_obj._config = original_config
 
-    def test_tracing_invalid_config(self) -> None:
+    @parameterized.expand(
+        [
+            param(
+                label="when_tracing_config_is_fuchsia_controller",
+                implementation="fuchsia-controller",
+            ),
+            param(
+                label="when_tracing_config_is_invalid",
+                implementation="invalid-impl",
+            ),
+        ],
+        name_func=_custom_test_name_func,
+    )
+    def test_tracing_invalid_config(
+        self,
+        label: str,  # pylint: disable=unused-argument
+        implementation: str,
+    ) -> None:
         """Test FuchsiaDevice._get_tracing_affordance_implementation raises ConfigError."""
         original_config = self.fd_fc_obj._config
         self.fd_fc_obj.__dict__.pop("tracing", None)
@@ -733,7 +770,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.fd_fc_obj._config = {
                 "affordances": {
                     "tracing": {
-                        "implementation": "invalid-impl",
+                        "implementation": implementation,
                     },
                 },
             }
@@ -746,7 +783,136 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.fd_fc_obj._config = original_config
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
+        "check_connection",
+        autospec=True,
+    )
+    def test_hello_world(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device supports hello_world affordance."""
+        self.assertIsInstance(
+            self.fd_fc_obj.hello_world,
+            hello_world.HelloWorld,
+        )
+        mock_ffx_check_connection.assert_called_once()
+
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "check_connection",
+        autospec=True,
+    )
+    def test_hello_fuchsia(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device supports hello_fuchsia affordance
+        implemented using ffx by default."""
+        self.assertIsInstance(
+            self.fd_fc_obj.hello_fuchsia,
+            hello_fuchsia_using_ffx.HelloFuchsiaUsingFfx,
+        )
+        mock_ffx_check_connection.assert_called_once()
+
+    @parameterized.expand(
+        [
+            param(
+                label="when_config_is_none",
+                config=None,
+                expected_impl=hello_fuchsia_types.Implementation.FFX,
+                expected_cls=hello_fuchsia_using_ffx.HelloFuchsiaUsingFfx,
+            ),
+            param(
+                label="when_hello_fuchsia_config_is_missing",
+                config={"affordances": {}},
+                expected_impl=hello_fuchsia_types.Implementation.FFX,
+                expected_cls=hello_fuchsia_using_ffx.HelloFuchsiaUsingFfx,
+            ),
+            param(
+                label="when_hello_fuchsia_config_is_fuchsia_controller",
+                config={
+                    "affordances": {
+                        "hello_fuchsia": {
+                            "implementation": "fuchsia-controller",
+                        },
+                    },
+                },
+                expected_impl=hello_fuchsia_types.Implementation.FUCHSIA_CONTROLLER,
+                expected_cls=hello_fuchsia_using_fc.HelloFuchsiaUsingFc,
+            ),
+            param(
+                label="when_hello_fuchsia_config_is_ffx",
+                config={
+                    "affordances": {
+                        "hello_fuchsia": {
+                            "implementation": "ffx",
+                        },
+                    },
+                },
+                expected_impl=hello_fuchsia_types.Implementation.FFX,
+                expected_cls=hello_fuchsia_using_ffx.HelloFuchsiaUsingFfx,
+            ),
+        ],
+        name_func=_custom_test_name_func,
+    )
+    def test_hello_fuchsia_implementation_selection(
+        self,
+        label: str,  # pylint: disable=unused-argument
+        config: dict[str, Any] | None,
+        expected_impl: hello_fuchsia_types.Implementation,
+        expected_cls: type[Any],
+    ) -> None:
+        """Test FuchsiaDevice._get_hello_fuchsia_affordance_implementation and .hello_fuchsia."""
+        original_config = self.fd_fc_obj._config
+        self.fd_fc_obj.__dict__.pop("hello_fuchsia", None)
+        try:
+            self.fd_fc_obj._config = config
+            self.assertEqual(
+                self.fd_fc_obj._get_hello_fuchsia_affordance_implementation(),
+                expected_impl,
+            )
+            with (
+                mock.patch.object(
+                    ffx_impl.FfxImpl,
+                    "check_connection",
+                    autospec=True,
+                ),
+                mock.patch.object(
+                    fc_transport.FuchsiaController,
+                    "check_connection",
+                    autospec=True,
+                ),
+            ):
+                self.assertIsInstance(
+                    self.fd_fc_obj.hello_fuchsia, expected_cls
+                )
+        finally:
+            self.fd_fc_obj.__dict__.pop("hello_fuchsia", None)
+            self.fd_fc_obj._config = original_config
+
+    def test_hello_fuchsia_invalid_config(self) -> None:
+        """Test FuchsiaDevice._get_hello_fuchsia_affordance_implementation raises ConfigError."""
+        original_config = self.fd_fc_obj._config
+        self.fd_fc_obj.__dict__.pop("hello_fuchsia", None)
+        try:
+            self.fd_fc_obj._config = {
+                "affordances": {
+                    "hello_fuchsia": {
+                        "implementation": "invalid-impl",
+                    },
+                },
+            }
+            with self.assertRaises(errors.ConfigError):
+                self.fd_fc_obj._get_hello_fuchsia_affordance_implementation()
+            with self.assertRaises(errors.ConfigError):
+                _ = self.fd_fc_obj.hello_fuchsia
+        finally:
+            self.fd_fc_obj.__dict__.pop("hello_fuchsia", None)
+            self.fd_fc_obj._config = original_config
+
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -758,18 +924,18 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         user_input affordance."""
 
         moniker = (
-            user_input_using_fc._INPUT_HELPER_COMPONENT
+            user_input._INPUT_HELPER_COMPONENT
         )  # pylint: disable=protected-access
         mock_output = {"instances": [{"moniker": moniker}]}
         mock_ffx_run.return_value = json.dumps(mock_output)
 
         self.assertIsInstance(
             self.fd_fc_obj.user_input,
-            user_input_using_fc.UserInputUsingFc,
+            user_input.UserInput,
         )
 
     @mock.patch.object(
-        gap_using_fc.GapUsingFc,
+        gap.Gap,
         "__init__",
         autospec=True,
         return_value=None,
@@ -779,7 +945,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         Fuchsia-Controller based bluetooth_gap affordance."""
         self.assertIsInstance(
             self.fd_fc_obj.bluetooth_gap,
-            gap_using_fc.GapUsingFc,
+            gap.Gap,
         )
         bt_gap_fc_init.assert_called_once_with(
             self.fd_fc_obj.bluetooth_gap,
@@ -795,7 +961,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         return_value=None,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value="".join(wlan_policy._REQUIRED_CAPABILITIES),
         autospec=True,
@@ -832,7 +998,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -864,9 +1030,77 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             suspend_resume_affordance=self.fd_fc_obj,
         )
 
+    def test_usb(self) -> None:
+        """Test case to make sure fuchsia_device supports usb affordance."""
+        mock_power_hub = mock.MagicMock(
+            spec=usb_power_hub_interface.UsbPowerHub
+        )
+        with mock.patch.object(
+            usb_power_hub_interface.UsbPowerHub,
+            "from_config",
+            return_value=mock_power_hub,
+        ) as mock_from_config:
+            self.assertIsInstance(self.fd_fc_obj.usb, usb_affordance.USB)
+            mock_from_config.assert_called_once_with(
+                device_config=self.fd_fc_obj._config,
+            )
+            self.assertIs(self.fd_fc_obj.usb._ffx, self.fd_fc_obj.ffx)
+            self.assertIs(
+                self.fd_fc_obj.usb._fuchsia_controller,
+                self.fd_fc_obj.fuchsia_controller,
+            )
+            self.assertIs(self.fd_fc_obj.usb._reboot_affordance, self.fd_fc_obj)
+            self.assertIs(
+                self.fd_fc_obj.usb._device_address_change, self.fd_fc_obj
+            )
+            self.assertIs(self.fd_fc_obj.usb._health_check, self.fd_fc_obj)
+            self.assertIs(self.fd_fc_obj.usb._serial, self.fd_fc_obj.serial)
+            self.assertIs(self.fd_fc_obj.usb.power_hub, mock_power_hub)
+
+    def test_usb_without_serial_socket(self) -> None:
+        """Test case for FuchsiaDevice.usb without serial_socket."""
+        orig_device_info = self.fd_fc_obj._device_info
+        self.fd_fc_obj._device_info = custom_types.DeviceInfo(
+            name=_INPUT_ARGS["device_name"],
+            serial_number=None,
+            address=_INPUT_ARGS["device_ip"],
+            serial_socket=None,
+        )
+        try:
+            self.assertIsInstance(self.fd_fc_obj.usb, usb_affordance.USB)
+            self.assertIsNone(self.fd_fc_obj.usb._serial)
+        finally:
+            self.fd_fc_obj.__dict__.pop("usb", None)
+            self.fd_fc_obj._device_info = orig_device_info
+
+    @mock.patch.object(
+        thread.Thread,
+        "__init__",
+        autospec=True,
+        return_value=None,
+    )
+    def test_thread(
+        self,
+        thread_fc_init: mock.Mock,
+    ) -> None:
+        """Test case to make sure fuchsia_device supports Fuchsia-Controller based thread
+        affordance."""
+        self.assertIsInstance(
+            self.fd_fc_obj.thread,
+            thread.Thread,
+        )
+        thread_fc_init.assert_called_once_with(
+            self.fd_fc_obj.thread,
+            device_name=self.fd_fc_obj._device_info.name,
+            ffx=self.fd_fc_obj.ffx,
+            fuchsia_controller=self.fd_fc_obj.fuchsia_controller,
+            reboot_affordance=self.fd_fc_obj,
+            fuchsia_device_close=self.fd_fc_obj,
+        )
+
     # List all the tests related to static properties
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "get_target_board",
         return_value=_MOCK_ARGS["board"],
         autospec=True,
@@ -907,7 +1141,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.fd_fc_obj.model(), "default-model")
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "get_target_product",
         return_value=_MOCK_ARGS["product"],
         autospec=True,
@@ -987,6 +1221,12 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             self.fd_fc_obj, affordances_capable.SuspendResumeCapableDevice
         )
 
+    def test_fuchsia_device_is_health_check_capable(self) -> None:
+        """Test case to make sure fuchsia device is health check capable"""
+        self.assertIsInstance(
+            self.fd_fc_obj, affordances_capable.HealthCheckCapable
+        )
+
     # List all the tests related to public methods
     @parameterized.expand(
         [
@@ -1036,31 +1276,51 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self.fd_fc_obj._on_device_close_fns = []
 
     @mock.patch.object(
+        common,
+        "time_limit",
+        autospec=True,
+    )
+    @mock.patch.object(
         fc_transport.FuchsiaController,
         "check_connection",
         autospec=True,
     )
-    @mock.patch.object(ffx.FFX, "check_connection", autospec=True)
+    @mock.patch.object(ffx_impl.FfxImpl, "check_connection", autospec=True)
     def test_health_check_fc(
         self,
         mock_ffx_check_connection: mock.Mock,
         mock_fc_check_connection: mock.Mock,
+        mock_time_limit: mock.Mock,
     ) -> None:
         """Testcase for FuchsiaDevice.health_check() when transport is set to
         Fuchsia-Controller"""
         self.fd_fc_obj.health_check()
-        mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
+        mock_time_limit.assert_called_once_with(
+            timeout=fuchsia_device._HEALTH_CHECK_TIMEOUT_SECS,
+            exception_message=f"Timeout occurred during the health check of '{self.fd_fc_obj.device_name}'",
+        )
+        mock_ffx_check_connection.assert_called_once_with(
+            self.fd_fc_obj.ffx,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
         mock_fc_check_connection.assert_called_once_with(
-            self.fd_fc_obj.fuchsia_controller
+            self.fd_fc_obj.fuchsia_controller,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
         )
 
+    @mock.patch.object(
+        serial_transport.Serial,
+        "send_and_recv",
+        return_value="USB Policy: OK\n[usb-cli:DONE]",
+        autospec=True,
+    )
     @mock.patch.object(
         fc_transport.FuchsiaController,
         "check_connection",
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "check_connection",
         side_effect=ffx_errors.FfxConnectionError("ffx connection error"),
         autospec=True,
@@ -1069,6 +1329,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         self,
         mock_ffx_check_connection: mock.Mock,
         mock_fc_check_connection: mock.Mock,
+        mock_serial_send_and_recv: mock.Mock,
     ) -> None:
         """Testcase for FuchsiaDevice.health_check() raising HealthCheckError"""
         with self.assertRaises(errors.HealthCheckError) as context:
@@ -1084,8 +1345,94 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             err_msg,
             r"\[leg=ffx \| ffx=FAIL\(\d+\.\ds\)\] FfxConnectionError: ffx connection error$",
         )
-        mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
+        mock_ffx_check_connection.assert_called_once_with(
+            self.fd_fc_obj.ffx,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
         mock_fc_check_connection.assert_not_called()
+        mock_serial_send_and_recv.assert_called_once_with(
+            self.fd_fc_obj.serial,
+            cmd="usb-cli health",
+            stop_tokens=usb_affordance._USB_CLI_STOP_TOKENS,
+            timeout_sec=usb_affordance._USB_CLI_HEALTH_TIMEOUT_SECS,
+        )
+
+    @mock.patch.object(
+        serial_transport.Serial,
+        "send_and_recv",
+        return_value="USB Policy: OK\n[usb-cli:DONE]",
+        autospec=True,
+    )
+    @mock.patch.object(
+        common,
+        "time_limit",
+        side_effect=errors.HoneydewTimeoutError("health check timed out"),
+        autospec=True,
+    )
+    def test_health_check_timeout_exception(
+        self,
+        mock_time_limit: mock.Mock,
+        mock_serial_send_and_recv: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() collecting USB health on timeout"""
+        with self.assertRaises(errors.HealthCheckError):
+            self.fd_fc_obj.health_check()
+
+        mock_time_limit.assert_called_once()
+        mock_serial_send_and_recv.assert_called_once_with(
+            self.fd_fc_obj.serial,
+            cmd="usb-cli health",
+            stop_tokens=usb_affordance._USB_CLI_STOP_TOKENS,
+            timeout_sec=usb_affordance._USB_CLI_HEALTH_TIMEOUT_SECS,
+        )
+
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        side_effect=errors.NotSupportedError("serial not supported"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        common,
+        "time_limit",
+        side_effect=errors.HoneydewTimeoutError("health check timed out"),
+        autospec=True,
+    )
+    def test_health_check_diagnostic_info_not_supported(
+        self,
+        mock_time_limit: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() ignoring NotSupportedError from get_diagnostic_info()."""
+        with self.assertRaises(errors.HealthCheckError):
+            self.fd_fc_obj.health_check()
+
+        mock_time_limit.assert_called_once()
+        mock_get_diagnostic_info.assert_called_once_with(self.fd_fc_obj.usb)
+
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        side_effect=usb_errors.UsbError("serial failed"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        common,
+        "time_limit",
+        side_effect=errors.HoneydewTimeoutError("health check timed out"),
+        autospec=True,
+    )
+    def test_health_check_diagnostic_info_usb_error(
+        self,
+        mock_time_limit: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.health_check() logging UsbError from get_diagnostic_info()."""
+        with self.assertRaises(errors.HealthCheckError):
+            self.fd_fc_obj.health_check()
+
+        mock_time_limit.assert_called_once()
+        mock_get_diagnostic_info.assert_called_once_with(self.fd_fc_obj.usb)
 
     @mock.patch.object(
         fc_transport.FuchsiaController,
@@ -1096,7 +1443,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "check_connection",
         autospec=True,
     )
@@ -1119,10 +1466,60 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             err_msg,
             r"\[leg=fc \| ffx=ok\(\d+\.\ds\) fc=FAIL\(\d+\.\ds\)\] FuchsiaControllerConnectionError: fc connection error$",
         )
-        mock_ffx_check_connection.assert_called_once_with(self.fd_fc_obj.ffx)
-        mock_fc_check_connection.assert_called_once_with(
-            self.fd_fc_obj.fuchsia_controller
+        mock_ffx_check_connection.assert_called_once_with(
+            self.fd_fc_obj.ffx,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
         )
+        mock_fc_check_connection.assert_called_once_with(
+            self.fd_fc_obj.fuchsia_controller,
+            timeout=fuchsia_device._CHECK_CONNECTIONS_TIMEOUT_SECS,
+        )
+
+    @mock.patch.object(
+        usb_affordance.USB,
+        "get_diagnostic_info",
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "check_connection",
+        autospec=True,
+    )
+    def test_health_check_nested_preserves_outer_leg_state(
+        self,
+        mock_ffx_check_connection: mock.Mock,
+        mock_get_diagnostic_info: mock.Mock,
+    ) -> None:
+        """Testcase for nested FuchsiaDevice.health_check() preserving outer leg state."""
+        nested_called = False
+
+        def _fc_side_effect(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal nested_called
+            if not nested_called:
+                nested_called = True
+                # Simulate a nested health_check() (e.g. from recovery) and
+                # then fail the outer fc leg to verify outer leg attribution.
+                self.fd_fc_obj.health_check()
+                raise fc_errors.FuchsiaControllerConnectionError(
+                    "fc connection error after nested health_check"
+                )
+
+        with mock.patch.object(
+            fc_transport.FuchsiaController,
+            "check_connection",
+            side_effect=_fc_side_effect,
+            autospec=True,
+        ):
+            with self.assertRaises(errors.HealthCheckError) as context:
+                self.fd_fc_obj.health_check()
+
+        self.assertRegex(
+            str(context.exception),
+            r"\[leg=fc \| ffx=ok\(\d+\.\ds\) fc=FAIL\(\d+\.\ds\)\] "
+            r"FuchsiaControllerConnectionError: fc connection error after nested health_check$",
+        )
+        self.assertEqual(mock_ffx_check_connection.call_count, 2)
+        mock_get_diagnostic_info.assert_called_once_with(self.fd_fc_obj.usb)
 
     @parameterized.expand(
         [
@@ -1191,7 +1588,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         name_func=_custom_test_name_func,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -1246,7 +1643,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         name_func=_custom_test_name_func,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -1266,7 +1663,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_ffx_run.assert_called_once()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         autospec=True,
     )
@@ -1397,9 +1794,8 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
     def test_set_power_switch(self) -> None:
         """Testcase for FuchsiaDevice.set_power_switch()"""
         power_switch = mock.MagicMock(spec=power_switch_interface.PowerSwitch)
-        self.fd_fc_obj.set_power_switch(power_switch=power_switch, outlet=5)
-        self.assertEqual(self.fd_fc_obj._power_switch, power_switch)
-        self.assertEqual(self.fd_fc_obj._power_switch_outlet, 5)
+        self.fd_fc_obj.set_power_switch(power_switch=power_switch)
+        self.assertEqual(self.fd_fc_obj.power_switch, power_switch)
 
     async def test_power_cycle_not_supported_error(self) -> None:
         """Testcase for FuchsiaDevice.power_cycle() raising NotSupportedError."""
@@ -1408,7 +1804,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             await self.fd_fc_obj.power_cycle()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "notify_intentional_disconnect",
         autospec=True,
     )
@@ -1442,19 +1838,19 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Testcase for FuchsiaDevice.power_cycle()"""
         power_switch = mock.MagicMock(spec=power_switch_interface.PowerSwitch)
-        self.fd_fc_obj.set_power_switch(power_switch=power_switch, outlet=5)
+        self.fd_fc_obj.set_power_switch(power_switch=power_switch)
         await self.fd_fc_obj.power_cycle()
 
         self.assertEqual(mock_log_message_to_device.call_count, 2)
-        power_switch.power_off.assert_called_with(5)
-        power_switch.power_on.assert_called_with(5)
+        power_switch.power_off.assert_called_with()
+        power_switch.power_on.assert_called_with()
         mock_ffx_notify_intentional_disconnect.assert_called()
         mock_wait_for_offline.assert_called()
         mock_wait_for_online.assert_called()
         mock_on_device_boot.assert_called()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "notify_intentional_disconnect",
         autospec=True,
     )
@@ -1493,11 +1889,11 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             None,
         ]
         power_switch = mock.MagicMock(spec=power_switch_interface.PowerSwitch)
-        self.fd_fc_obj.set_power_switch(power_switch=power_switch, outlet=5)
+        self.fd_fc_obj.set_power_switch(power_switch=power_switch)
         await self.fd_fc_obj.power_cycle()
 
-        power_switch.power_off.assert_called_with(5)
-        power_switch.power_on.assert_called_with(5)
+        power_switch.power_off.assert_called_with()
+        power_switch.power_on.assert_called_with()
         mock_ffx_notify_intentional_disconnect.assert_called()
         mock_wait_for_offline.assert_called()
         mock_wait_for_online.assert_called()
@@ -1516,7 +1912,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         """Test power_cycle() propagates unexpected exceptions (e.g. Mobly
         signals) raised while logging the message to the device."""
         power_switch = mock.MagicMock(spec=power_switch_interface.PowerSwitch)
-        self.fd_fc_obj.set_power_switch(power_switch=power_switch, outlet=5)
+        self.fd_fc_obj.set_power_switch(power_switch=power_switch)
 
         with self.assertRaises(signals.TestAbortAll):
             await self.fd_fc_obj.power_cycle()
@@ -1525,7 +1921,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         power_switch.power_off.assert_not_called()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "notify_intentional_disconnect",
         autospec=True,
     )
@@ -1573,14 +1969,24 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_wait_for_online.assert_called()
         mock_on_device_boot.assert_called()
 
-    async def test_suspend_error(self) -> None:
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "boot_id",
+        autospec=True,
+        return_value="1",
+    )
+    async def test_suspend_error(
+        self,
+        unused_mock_boot_id: mock.Mock,
+    ) -> None:
         """Testcase for FuchsiaDevice.suspend() raising NotSupportedError."""
+        self.fd_fc_obj.usb._power_hub = None
         with self.assertRaises(errors.NotSupportedError):
             await self.fd_fc_obj.suspend()
 
     @mock.patch.object(
-        ffx.FFX,
-        "notify_intentional_disconnect",
+        usb_affordance.USB,
+        "disconnect",
         autospec=True,
     )
     @mock.patch.object(
@@ -1589,37 +1995,20 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
         return_value="1",
     )
-    @mock.patch.object(
-        fc_transport.FuchsiaController,
-        "before_usb_disconnect",
-        autospec=True,
-    )
-    @mock.patch.object(
-        fuchsia_device.FuchsiaDevice,
-        "wait_for_offline",
-        autospec=True,
-    )
     async def test_suspend(
         self,
-        mock_wait_for_offline: mock.Mock,
-        mock_before_usb_disconnect: mock.Mock,
         mock_boot_id: mock.Mock,
-        mock_ffx_notify_intentional_disconnect: mock.Mock,
+        mock_usb_disconnect: mock.Mock,
     ) -> None:
         """Testcase for FuchsiaDevice.suspend()"""
         mock_usb_power_hub = mock.MagicMock(
             spec=usb_power_hub_interface.UsbPowerHub
         )
-        self.fd_fc_obj.set_usb_power_hub(
-            usb_power_hub=mock_usb_power_hub, port=1
-        )
+        self.fd_fc_obj.usb.set_power_hub(power_hub=mock_usb_power_hub)
         await self.fd_fc_obj.suspend()
 
         mock_boot_id.assert_called()
-        mock_before_usb_disconnect.assert_called()
-        mock_ffx_notify_intentional_disconnect.assert_called()
-        mock_usb_power_hub.power_off.assert_called_with(1)
-        mock_wait_for_offline.assert_called()
+        mock_usb_disconnect.assert_called_once_with(self.fd_fc_obj.usb)
 
     @mock.patch.object(
         fuchsia_device.FuchsiaDevice,
@@ -1628,35 +2017,25 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         side_effect=["1", "1"],
     )
     @mock.patch.object(
-        fc_transport.FuchsiaController,
-        "after_usb_reconnect",
-        autospec=True,
-    )
-    @mock.patch.object(
-        fuchsia_device.FuchsiaDevice,
-        "wait_for_online",
+        usb_affordance.USB,
+        "connect",
         autospec=True,
     )
     async def test_resume(
         self,
-        mock_wait_for_online: mock.Mock,
-        mock_after_usb_reconnect: mock.Mock,
+        mock_usb_connect: mock.Mock,
         mock_boot_id: mock.Mock,
     ) -> None:
         """Testcase for FuchsiaDevice.resume()"""
         mock_usb_power_hub = mock.MagicMock(
             spec=usb_power_hub_interface.UsbPowerHub
         )
-        self.fd_fc_obj.set_usb_power_hub(
-            usb_power_hub=mock_usb_power_hub, port=1
-        )
+        self.fd_fc_obj.usb.set_power_hub(power_hub=mock_usb_power_hub)
         self.fd_fc_obj._pre_suspend_boot_id = "1"
         await self.fd_fc_obj.resume()
 
+        mock_usb_connect.assert_called_once_with(self.fd_fc_obj.usb)
         mock_boot_id.assert_called()
-        mock_after_usb_reconnect.assert_called()
-        mock_usb_power_hub.power_on.assert_called_with(1)
-        mock_wait_for_online.assert_called()
 
     @mock.patch.object(
         fuchsia_device.FuchsiaDevice,
@@ -1665,28 +2044,20 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         return_value="2",
     )
     @mock.patch.object(
-        fc_transport.FuchsiaController,
-        "after_usb_reconnect",
-        autospec=True,
-    )
-    @mock.patch.object(
-        fuchsia_device.FuchsiaDevice,
-        "wait_for_online",
+        usb_affordance.USB,
+        "connect",
         autospec=True,
     )
     async def test_resume_error(
         self,
-        unused_mock_wait_for_online: mock.Mock,
-        unused_mock_after_usb_reconnect: mock.Mock,
+        unused_mock_usb_connect: mock.Mock,
         unused_mock_boot_id: mock.Mock,
     ) -> None:
         """Testcase for FuchsiaDevice.resume() raising FuchsiaDeviceError."""
         mock_usb_power_hub = mock.MagicMock(
             spec=usb_power_hub_interface.UsbPowerHub
         )
-        self.fd_fc_obj.set_usb_power_hub(
-            usb_power_hub=mock_usb_power_hub, port=1
-        )
+        self.fd_fc_obj.usb.set_power_hub(power_hub=mock_usb_power_hub)
         self.fd_fc_obj._pre_suspend_boot_id = "1"
         with self.assertRaises(errors.FuchsiaDeviceError):
             await self.fd_fc_obj.resume()
@@ -1760,7 +2131,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_send_snapshot_command.assert_called()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "wait_for_rcs_disconnection",
         autospec=True,
     )
@@ -1773,7 +2144,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_ffx_wait_for_rcs_disconnection.assert_called()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "wait_for_rcs_disconnection",
         side_effect=ffx_errors.FfxCommandError("error"),
         autospec=True,
@@ -1861,7 +2232,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "wait_for_rcs_connection",
         autospec=True,
     )
@@ -1893,7 +2264,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "wait_for_rcs_connection",
         autospec=True,
     )
@@ -1923,10 +2294,174 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         fuchsia_device.FuchsiaDevice,
         "is_static_address",
         new_callable=mock.PropertyMock,
+        return_value=False,
+    )
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "resolve_device_address",
+        side_effect=(
+            errors.FuchsiaDeviceError("Failed to resolve address"),
+            None,
+        ),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_connection",
+        autospec=True,
+    )
+    async def test_wait_for_online_retries_transient_resolve_address_failure(
+        self,
+        mock_ffx_wait_for_rcs_connection: mock.Mock,
+        mock_resolve_device_address: mock.Mock,
+        mock_is_static_address: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.wait_for_online() retrying when resolve_device_address fails transiently on USB."""
+        orig_device_info = self.fd_fc_obj._device_info
+        try:
+            self.fd_fc_obj._device_info = dataclasses.replace(
+                orig_device_info,
+                address=custom_types.UsbAddress(target_id=42),
+            )
+            await self.fd_fc_obj.wait_for_online()
+        finally:
+            self.fd_fc_obj._device_info = orig_device_info
+
+        mock_is_static_address.assert_called_once()
+        self.assertEqual(mock_ffx_wait_for_rcs_connection.call_count, 2)
+        self.assertEqual(mock_resolve_device_address.call_count, 2)
+
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "is_static_address",
+        new_callable=mock.PropertyMock,
+        return_value=False,
+    )
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "resolve_device_address",
+        side_effect=errors.FuchsiaDeviceError("Failed to resolve address"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_connection",
+        autospec=True,
+    )
+    async def test_wait_for_online_raises_after_max_resolve_address_attempts(
+        self,
+        mock_ffx_wait_for_rcs_connection: mock.Mock,
+        mock_resolve_device_address: mock.Mock,
+        mock_is_static_address: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.wait_for_online() raising after exhausting resolve_device_address retries on USB."""
+        orig_device_info = self.fd_fc_obj._device_info
+        try:
+            self.fd_fc_obj._device_info = dataclasses.replace(
+                orig_device_info,
+                address=custom_types.UsbAddress(target_id=42),
+            )
+            with self.assertRaisesRegex(
+                errors.FuchsiaDeviceError, "failed to go online"
+            ):
+                await self.fd_fc_obj.wait_for_online()
+        finally:
+            self.fd_fc_obj._device_info = orig_device_info
+
+        mock_is_static_address.assert_called_once()
+        self.assertEqual(
+            mock_ffx_wait_for_rcs_connection.call_count,
+            fuchsia_device._RESOLVE_DEVICE_ADDRESS_MAX_ATTEMPTS,
+        )
+        self.assertEqual(
+            mock_resolve_device_address.call_count,
+            fuchsia_device._RESOLVE_DEVICE_ADDRESS_MAX_ATTEMPTS,
+        )
+
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "is_static_address",
+        new_callable=mock.PropertyMock,
+        return_value=False,
+    )
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "resolve_device_address",
+        side_effect=errors.FuchsiaDeviceError("Failed to resolve address"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_connection",
+        autospec=True,
+    )
+    async def test_wait_for_online_does_not_retry_non_usb_resolve_address_failure(
+        self,
+        mock_ffx_wait_for_rcs_connection: mock.Mock,
+        mock_resolve_device_address: mock.Mock,
+        mock_is_static_address: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.wait_for_online() not retrying resolve_device_address failures on non-USB targets."""
+        with self.assertRaisesRegex(
+            errors.FuchsiaDeviceError, "failed to go online"
+        ):
+            await self.fd_fc_obj.wait_for_online()
+
+        mock_is_static_address.assert_called_once()
+        mock_ffx_wait_for_rcs_connection.assert_called_once_with(
+            mock.ANY, include_target_name=True
+        )
+        mock_resolve_device_address.assert_called_once()
+
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "is_static_address",
+        new_callable=mock.PropertyMock,
+        return_value=False,
+    )
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "resolve_device_address",
+        side_effect=errors.HealthCheckError("Health check failed"),
+        autospec=True,
+    )
+    @mock.patch.object(
+        ffx_impl.FfxImpl,
+        "wait_for_rcs_connection",
+        autospec=True,
+    )
+    async def test_wait_for_online_does_not_retry_health_check_error(
+        self,
+        mock_ffx_wait_for_rcs_connection: mock.Mock,
+        mock_resolve_device_address: mock.Mock,
+        mock_is_static_address: mock.Mock,
+    ) -> None:
+        """Testcase for FuchsiaDevice.wait_for_online() not retrying HealthCheckError on USB targets."""
+        orig_device_info = self.fd_fc_obj._device_info
+        try:
+            self.fd_fc_obj._device_info = dataclasses.replace(
+                orig_device_info,
+                address=custom_types.UsbAddress(target_id=42),
+            )
+            with self.assertRaises(errors.HealthCheckError):
+                await self.fd_fc_obj.wait_for_online()
+        finally:
+            self.fd_fc_obj._device_info = orig_device_info
+
+        mock_is_static_address.assert_called_once()
+        mock_ffx_wait_for_rcs_connection.assert_called_once_with(
+            mock.ANY, include_target_name=True
+        )
+        mock_resolve_device_address.assert_called_once()
+
+    @mock.patch.object(
+        fuchsia_device.FuchsiaDevice,
+        "is_static_address",
+        new_callable=mock.PropertyMock,
         return_value=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "wait_for_rcs_connection",
         side_effect=ffx_errors.FfxCommandError("error"),
         autospec=True,
@@ -2535,7 +3070,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_fc_connect_device_proxy.assert_called()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value='{"instances": [{"moniker": "core/starnix_runner/kernels:kernel"}]}',
         autospec=True,
@@ -2547,7 +3082,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_ffx.assert_called_once()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value='{"instances": []}',
         autospec=True,
@@ -2561,7 +3096,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         mock_ffx.assert_called_once()
 
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         side_effect=ffx_errors.FfxCommandError("error"),
         autospec=True,
@@ -2583,22 +3118,23 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value=_MOCK_ARGS["ffx_target_ssh_address_output"],
         autospec=True,
     )
-    async def test_resolve_device_address(
+    def test_resolve_device_address(
         self,
         mock_ffx_run: mock.Mock,
         mock_fuchsia_device_health_check: mock.Mock,
     ) -> None:
         """Testcase for FuchsiaDevice.resolve_device_address()"""
         with mock.patch.object(self.fd_fc_obj, "_on_device_address_change_fns"):
-            await self.fd_fc_obj.resolve_device_address()
+            self.fd_fc_obj.resolve_device_address()
         mock_ffx_run.assert_called_once_with(
             self.fd_fc_obj.ffx,
-            cmd=ffx._FFX_CMDS["TARGET_ADDRESS"] + [self.fd_fc_obj.device_name],
+            cmd=ffx_impl._FFX_CMDS["TARGET_ADDRESS"]
+            + [self.fd_fc_obj.device_name],
             include_target=False,
             log_status_on_failure=False,
         )
@@ -2611,7 +3147,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "check_connection",
         autospec=True,
     )
@@ -2626,7 +3162,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value=json.dumps(
             [
@@ -2644,7 +3180,7 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         ),
         autospec=True,
     )
-    async def test_resolve_device_address_usb(
+    def test_resolve_device_address_usb(
         self,
         mock_ffx_run: mock.Mock,
         mock_fc_create_context: mock.Mock,
@@ -2659,11 +3195,13 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
             address=custom_types.UsbAddress(target_id=3),
             serial_socket=_INPUT_ARGS["device_serial_socket"],
         )
+        assert isinstance(self.fd_fc_obj.ffx, ffx_impl.FfxImpl)
         self.fd_fc_obj.ffx._target_addr = custom_types.UsbAddress(target_id=3)
-        await self.fd_fc_obj.resolve_device_address()
+        self.fd_fc_obj.resolve_device_address()
         mock_ffx_run.assert_called_once_with(
             self.fd_fc_obj.ffx,
-            cmd=ffx._FFX_CMDS["TARGET_ADDRESS"] + [self.fd_fc_obj.device_name],
+            cmd=ffx_impl._FFX_CMDS["TARGET_ADDRESS"]
+            + [self.fd_fc_obj.device_name],
             include_target=False,
             log_status_on_failure=False,
         )
@@ -2686,19 +3224,19 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         return_value="not a json",
         autospec=True,
     )
-    async def test_resolve_device_address_raises_on_malformed_output(
+    def test_resolve_device_address_raises_on_malformed_output(
         self,
         mock_ffx_run: mock.Mock,
         mock_fuchsia_device_health_check: mock.Mock,
     ) -> None:
         """Test resolve_device_address() wraps errors parsing malformed ffx output"""
         with self.assertRaises(errors.FuchsiaDeviceError):
-            await self.fd_fc_obj.resolve_device_address()
+            self.fd_fc_obj.resolve_device_address()
 
         mock_ffx_run.assert_called_once()
         mock_fuchsia_device_health_check.assert_not_called()
@@ -2709,19 +3247,19 @@ class FuchsiaDeviceTests(unittest.IsolatedAsyncioTestCase):
         autospec=True,
     )
     @mock.patch.object(
-        ffx.FFX,
+        ffx_impl.FfxImpl,
         "run",
         side_effect=signals.TestAbortAll("abort"),
         autospec=True,
     )
-    async def test_resolve_device_address_propagates_unexpected_exceptions(
+    def test_resolve_device_address_propagates_unexpected_exceptions(
         self,
         mock_ffx_run: mock.Mock,
         mock_fuchsia_device_health_check: mock.Mock,
     ) -> None:
         """Test resolve_device_address() propagates unexpected exceptions as-is."""
         with self.assertRaises(signals.TestAbortAll):
-            await self.fd_fc_obj.resolve_device_address()
+            self.fd_fc_obj.resolve_device_address()
 
         mock_ffx_run.assert_called_once()
         mock_fuchsia_device_health_check.assert_not_called()

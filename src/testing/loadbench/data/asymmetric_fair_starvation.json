@@ -1,0 +1,376 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+// Synthetic 8-CPU asymmetric scheduler reproduction for Fair-thread starvation
+// when CPUs 2-6 (Medium cluster, max normalized rate ~0.805 each, 4.028 total)
+// are ~96% occupied by periodic Deadline threads while unpinned Fair spinners
+// saturate the remaining cores (CPUs 0-1 Little, CPU 7 Big).
+//
+// Under FairPlacementAffinity::QueueTime, queue_time_from_load() only counts
+// Fair utilization and ignores Deadline utilization. Heavy Fair spinners are
+// pushed onto CPUs 0, 1, and 7 by projected deficit, leaving CPUs 2-6 with
+// ~0 Fair queue time despite ~96-100% Deadline occupancy. Tiny waking Fair
+// victim threads (25us work -> deficit within PLACEMENT_DEFICIT_MARGIN) see
+// 0ns Fair queue time on CPUs 2-6 versus tens of milliseconds on CPUs 0, 1, 7,
+// get placed onto Deadline-saturated Medium cores, cannot be stolen across
+// clusters while source Fair queue time <= 250us, and suffer multi-hundred-ms
+// to multi-second wake-to-run stalls.
+{
+  "name": "8-CPU asymmetric Fair-thread starvation under Medium-cluster Deadline load",
+  "config": {
+    "priority": 31,
+    "interval": "120s"
+  },
+  "objects": {
+    "dl_timer_ufs": { "type": "timer" },
+    "dl_timer_fxfs": { "type": "timer" },
+    "dl_timer_binder": { "type": "timer" },
+    "dl_timer_scenic": { "type": "timer" },
+    "dl_timer_disp_coord": { "type": "timer" },
+    "dl_timer_disp_eng": { "type": "timer" },
+    "dl_timer_disp_irq": { "type": "timer" },
+    "dl_timer_sf_hwc": { "type": "timer" },
+    "dl_timer_gpu_dvfs": { "type": "timer" },
+    "dl_timer_sf_app": { "type": "timer" },
+    "dl_timer_sf_timer": { "type": "timer" },
+    "dl_timer_scene_mgr": { "type": "timer" },
+
+    "victim_timer_0": { "type": "timer" },
+    "victim_timer_1": { "type": "timer" },
+    "victim_timer_2": { "type": "timer" },
+
+    "victim_port_0": { "type": "port" },
+    "victim_event_0": { "type": "event" },
+    "victim_port_1": { "type": "port" },
+    "victim_event_1": { "type": "event" },
+    "victim_port_2": { "type": "port" },
+    "victim_event_2": { "type": "event" },
+
+    "control_port_0": { "type": "port" },
+    "control_event_0": { "type": "event" }
+  },
+  "workers": [
+    // Medium-cluster Deadline roles (affined to CPUs 2-6).
+    // Spin durations reflect wall-clock execution on Medium cores (rate ~0.805)
+    // just below each role's scaled capacity, totaling ~4.81 Medium cores
+    // (~0.96 wall-clock utilization per CPU across CPUs 2-6).
+    {
+      "name": "dl-ufs-worker",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "2500us",
+        "deadline": "3333us",
+        "period": "3333us",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_ufs", "deadline": "3333us" },
+        { "action": "spin", "duration": "3050us" },
+        { "action": "signal", "object": "victim_event_0", "clear": 0, "set": 8 },
+        { "action": "signal", "object": "control_event_0", "clear": 0, "set": 8 },
+        { "action": "wait_one", "object": "dl_timer_ufs", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-fxfs",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "2500us",
+        "deadline": "3333us",
+        "period": "3333us",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_fxfs", "deadline": "3333us" },
+        { "action": "spin", "duration": "3050us" },
+        { "action": "wait_one", "object": "dl_timer_fxfs", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-remote-binder",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "1500us",
+        "deadline": "3ms",
+        "period": "3ms",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_binder", "deadline": "3ms" },
+        { "action": "spin", "duration": "1830us" },
+        { "action": "wait_one", "object": "dl_timer_binder", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-scenic-main",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "870us",
+        "deadline": "2ms",
+        "period": "2ms",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_scenic", "deadline": "2ms" },
+        { "action": "spin", "duration": "1060us" },
+        { "action": "wait_one", "object": "dl_timer_scenic", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-display-coord",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "1800us",
+        "deadline": "4200us",
+        "period": "4200us",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_disp_coord", "deadline": "4200us" },
+        { "action": "spin", "duration": "2200us" },
+        { "action": "wait_one", "object": "dl_timer_disp_coord", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-display-engine",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "1000us",
+        "deadline": "3400us",
+        "period": "3400us",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_disp_eng", "deadline": "3400us" },
+        { "action": "spin", "duration": "1220us" },
+        { "action": "signal", "object": "victim_event_1", "clear": 0, "set": 8 },
+        { "action": "wait_one", "object": "dl_timer_disp_eng", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-display-irq",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "500us",
+        "deadline": "3400us",
+        "period": "3400us",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_disp_irq", "deadline": "3400us" },
+        { "action": "spin", "duration": "610us" },
+        { "action": "wait_one", "object": "dl_timer_disp_irq", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-sf-hwcasync",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "1200us",
+        "deadline": "5ms",
+        "period": "5ms",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_sf_hwc", "deadline": "5ms" },
+        { "action": "spin", "duration": "1460us" },
+        { "action": "wait_one", "object": "dl_timer_sf_hwc", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-gpu-dvfs",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "350us",
+        "deadline": "3ms",
+        "period": "3ms",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_gpu_dvfs", "deadline": "3ms" },
+        { "action": "spin", "duration": "425us" },
+        { "action": "signal", "object": "victim_event_2", "clear": 0, "set": 8 },
+        { "action": "wait_one", "object": "dl_timer_gpu_dvfs", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-sf-app",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "1200us",
+        "deadline": "9800us",
+        "period": "9800us",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_sf_app", "deadline": "9800us" },
+        { "action": "spin", "duration": "1460us" },
+        { "action": "wait_one", "object": "dl_timer_sf_app", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-sf-timerdispatch",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "600us",
+        "deadline": "6750us",
+        "period": "6750us",
+        "critical": true,
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_sf_timer", "deadline": "6750us" },
+        { "action": "spin", "duration": "730us" },
+        { "action": "wait_one", "object": "dl_timer_sf_timer", "signals": 8 }
+      ]
+    },
+    {
+      "name": "dl-scene-manager",
+      "group": "deadline_medium",
+      "priority": {
+        "capacity": "270us",
+        "deadline": "4ms",
+        "period": "4ms",
+        "critical": true,
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        { "action": "timer_set", "timer": "dl_timer_scene_mgr", "deadline": "4ms" },
+        { "action": "spin", "duration": "330us" },
+        { "action": "wait_one", "object": "dl_timer_scene_mgr", "signals": 8 }
+      ]
+    },
+
+    // 14 unpinned Fair busy/spinner threads (10 continuous spinners modeling
+    // dex2oat workers + 4 high-duty bursty threads modeling background load).
+    {
+      "name": "fair-dex2oat-spinner",
+      "group": "fair_spinner",
+      "instances": 10,
+      "priority": 16,
+      "actions": [
+        { "action": "spin", "duration": "25ms" }
+      ]
+    },
+    {
+      "name": "fair-bg-burst",
+      "group": "fair_spinner",
+      "instances": 4,
+      "priority": 16,
+      "actions": [
+        { "action": "spin", "uniform": { "min": "8ms", "max": "20ms" } },
+        { "action": "sleep", "uniform": { "min": "500us", "max": "1500us" } }
+      ]
+    },
+
+    // Unpinned Fair "victim" threads waking on timers and doing tiny (25us)
+    // work, modeling periodic driver/system housekeeping dispatchers.
+    {
+      "name": "victim-timer-5ms",
+      "group": "fair_victim_timer",
+      "priority": 16,
+      "actions": [
+        { "action": "timer_set", "timer": "victim_timer_0", "deadline": "5ms" },
+        { "action": "wait_one", "object": "victim_timer_0", "signals": 8 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+    {
+      "name": "victim-timer-7ms",
+      "group": "fair_victim_timer",
+      "priority": 16,
+      "actions": [
+        { "action": "timer_set", "timer": "victim_timer_1", "deadline": "7ms" },
+        { "action": "wait_one", "object": "victim_timer_1", "signals": 8 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+    {
+      "name": "victim-timer-10ms",
+      "group": "fair_victim_timer",
+      "priority": 16,
+      "actions": [
+        { "action": "timer_set", "timer": "victim_timer_2", "deadline": "10ms" },
+        { "action": "wait_one", "object": "victim_timer_2", "signals": 8 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+
+    // Unpinned Fair "victim" threads blocked in zx_port_wait and woken by
+    // Deadline callers every 3.0-3.4ms to do 25us of work, modeling unprofiled
+    // driver-host dispatcher threads (power/clock/mailbox/WLAN).
+    {
+      "name": "victim-port-power-0",
+      "group": "fair_victim_port",
+      "priority": 16,
+      "actions": [
+        {
+          "action": "wait_async",
+          "port": "victim_port_0",
+          "object": "victim_event_0",
+          "signals": 8
+        },
+        { "action": "port_wait", "port": "victim_port_0" },
+        { "action": "signal", "object": "victim_event_0", "clear": 8, "set": 0 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+    {
+      "name": "victim-port-clock-1",
+      "group": "fair_victim_port",
+      "priority": 16,
+      "actions": [
+        {
+          "action": "wait_async",
+          "port": "victim_port_1",
+          "object": "victim_event_1",
+          "signals": 8
+        },
+        { "action": "port_wait", "port": "victim_port_1" },
+        { "action": "signal", "object": "victim_event_1", "clear": 8, "set": 0 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+    {
+      "name": "victim-port-bus-2",
+      "group": "fair_victim_port",
+      "priority": 16,
+      "actions": [
+        {
+          "action": "wait_async",
+          "port": "victim_port_2",
+          "object": "victim_event_2",
+          "signals": 8
+        },
+        { "action": "port_wait", "port": "victim_port_2" },
+        { "action": "signal", "object": "victim_event_2", "clear": 8, "set": 0 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    },
+
+    // Side-by-side Deadline control dispatcher (250us/2ms on CPUs 2-6) woken by
+    // the exact same dl-ufs-worker cadence as victim-port-power-0.
+    {
+      "name": "control-port-deadline-role",
+      "group": "deadline_control_port",
+      "priority": {
+        "capacity": "250us",
+        "deadline": "2ms",
+        "period": "2ms",
+        "affinity": [2, 3, 4, 5, 6]
+      },
+      "actions": [
+        {
+          "action": "wait_async",
+          "port": "control_port_0",
+          "object": "control_event_0",
+          "signals": 8
+        },
+        { "action": "port_wait", "port": "control_port_0" },
+        { "action": "signal", "object": "control_event_0", "clear": 8, "set": 0 },
+        { "action": "spin", "duration": "25us" }
+      ]
+    }
+  ]
+}

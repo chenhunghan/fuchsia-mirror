@@ -2,7 +2,14 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/components.gni")
 import("//build/cpp/sdk_source_set.gni")
+import("//build/test.gni")
+
+group("tests") {
+  testonly = true
+  deps = [ ":fake-vreg-cpp-test-pkg" ]
+}
 
 sdk_source_set("cpp") {
   category = "partner"
@@ -17,6 +24,23 @@ sdk_source_set("cpp") {
 
   public_deps = [
     "//sdk/fidl/fuchsia.hardware.vreg:fuchsia.hardware.vreg_cpp",
+    "//sdk/lib/driver/resource-vote/cpp",
     "//sdk/lib/driver/runtime:driver_runtime_cpp",
   ]
+}
+
+test("fake-vreg-cpp-test") {
+  sources = [ "fake-vreg-test.cc" ]
+  deps = [
+    ":cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/async-loop:async-loop-default",
+    "//src/lib/fxl/test:gtest_main",
+    "//third_party/googletest:gtest",
+  ]
+}
+
+fuchsia_unittest_package("fake-vreg-cpp-test-pkg") {
+  package_name = "fake-vreg-cpp-test"
+  deps = [ ":fake-vreg-cpp-test" ]
 }

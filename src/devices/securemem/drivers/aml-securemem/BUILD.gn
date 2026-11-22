@@ -80,7 +80,6 @@ fuchsia_cc_driver("aml-securemem-driver") {
 }
 
 fuchsia_driver_component("aml-securemem") {
-  info = "meta/aml-securemem-info.json"
   component_name = "aml-securemem"
   deps = [ ":aml-securemem-driver" ]
   dml_label = ":aml-securemem-dml"

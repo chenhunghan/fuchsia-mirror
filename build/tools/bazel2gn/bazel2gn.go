@@ -45,21 +45,44 @@ func unwrapParenExpr(expr syntax.Expr) syntax.Expr {
 
 // FileToGN converts all statements in a Bazel file to GN.
 func FileToGN(f *syntax.File) ([]string, error) {
+	return fileToGN(f, "", false, nil)
+}
+
+// FileToGNForPackage converts all statements in a Bazel file belonging to
+// `pkgPath` (relative to Fuchsia root) to GN.
+func FileToGNForPackage(f *syntax.File, pkgPath string) ([]string, error) {
+	return fileToGN(f, strings.Trim(pkgPath, "/"), true, nil)
+}
+
+// FileToGNWithConfig converts all statements in a Bazel file belonging to
+// `pkgPath` (relative to Fuchsia root) to GN using the optional repository
+// extension configuration `cfg`.
+func FileToGNWithConfig(f *syntax.File, pkgPath string, cfg *Config) ([]string, error) {
+	return fileToGN(f, strings.Trim(pkgPath, "/"), true, cfg)
+}
+
+func fileToGN(f *syntax.File, pkgPath string, hasPkgPath bool, cfg *Config) ([]string, error) {
+	if pkgPath == "." {
+		pkgPath = ""
+	}
 	if err := inlineRustTestCrates(f); err != nil {
 		return nil, err
 	}
 	if err := resolveTestPackages(f); err != nil {
 		return nil, err
 	}
-	if err := resolveComponentTargets(f); err != nil {
+	if err := resolveComponentTargetsWithConfig(f, cfg); err != nil {
 		return nil, err
 	}
-	if err := resolveLinuxResourceTargets(f); err != nil {
+	if err := resolveLinuxResourceTargetsWithConfig(f, cfg); err != nil {
+		return nil, err
+	}
+	if err := resolveResourceTargets(f); err != nil {
 		return nil, err
 	}
 	var lines []string
 	for _, stmt := range f.Stmts {
-		stmtLines, err := StmtToGN(stmt)
+		stmtLines, err := stmtToGN(stmt, pkgPath, hasPkgPath, cfg)
 		if err != nil {
 			return nil, stmtError(stmt, err)
 		}
@@ -100,6 +123,10 @@ func (e *FileError) Unwrap() error {
 //
 // [0] https://github.com/bazelbuild/starlark/blob/master/spec.md#statements
 func StmtToGN(stmt syntax.Stmt) ([]string, error) {
+	return stmtToGN(stmt, "", false, nil)
+}
+
+func stmtToGN(stmt syntax.Stmt, pkgPath string, hasPkgPath bool, cfg *Config) ([]string, error) {
 	// Skip the statement if it is mark for skipping by users.
 	shouldSkip, err := hasSkipAnnotation(stmt)
 	if err != nil {
@@ -118,7 +145,7 @@ func StmtToGN(stmt syntax.Stmt) ([]string, error) {
 		return nil, nil
 	case *syntax.ExprStmt:
 		if call, ok := v.X.(*syntax.CallExpr); ok {
-			return callExprToGN(call, v.Comments())
+			return callExprToGNWithConfig(call, v.Comments(), pkgPath, hasPkgPath, cfg)
 		}
 		if hasRawAttributeAnnotation(v) {
 			return nil, fmt.Errorf("found raw_attribute annotation in unexpected location, it should be right above a target definition to take effect")
@@ -154,7 +181,7 @@ func exprToGN(expr syntax.Expr, transformers []transformer) ([]string, error) {
 		// NOTE: I'm not sure whether we need to plumb transformers here, so far it
 		// is not necessary. callExprToGN should be a top-level entry point for
 		// macro and rules.
-		return callExprToGN(v, v.Comments())
+		return callExprToGN(v, v.Comments(), "", false)
 	case *syntax.BinaryExpr:
 		return binaryExprToGN(v, transformers)
 	case *syntax.Ident:
@@ -281,12 +308,17 @@ func targetCompatibleWithToGNConditions(expr syntax.Expr) ([]string, error) {
 // be macro or Bazel rules known to the converter.
 //
 // [0] https://github.com/bazelbuild/starlark/blob/master/spec.md#function-and-method-calls
-func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]string, error) {
+func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments, pkgPath string, hasPkgPath bool) ([]string, error) {
+	return callExprToGNWithConfig(expr, stmtComments, pkgPath, hasPkgPath, nil)
+}
+
+func callExprToGNWithConfig(expr *syntax.CallExpr, stmtComments *syntax.Comments, pkgPath string, hasPkgPath bool, cfg *Config) ([]string, error) {
 	fn, ok := expr.Fn.(*syntax.Ident)
 	if !ok {
 		return nil, fmt.Errorf("expected identifier for call expression, got %T", expr.Fn)
 	}
 	bazelRule := fn.Name
+	ruleCfg, hasRuleCfg := cfg.lookupRule(bazelRule)
 	start, _ := expr.Span()
 	rawAttrs, err := rawAttributesFromComments(start.Line, stmtComments, expr.Comments())
 	if err != nil {
@@ -318,12 +350,24 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 	default:
 		var ok bool
 		gnTemplateName, ok = bazelRuleToGNTemplate[bazelRule]
+		if !ok && hasRuleCfg {
+			gnTemplateName, ok = ruleCfg.GNTemplate, true
+		}
 		if !ok {
 			return nil, fmt.Errorf("%s is not a known Bazel rule to convert to GN", bazelRule)
 		}
 	}
 
+	var ifsOutputName string
 	switch bazelRule {
+	case ccLinkStubFromIfsFileRule:
+		if hasRawOutputNameAttr(rawAttrs) {
+			return nil, errRawOutputNameOnCcLinkStub
+		}
+		var err error
+		if ifsOutputName, err = ccLinkStubFromIfsFileOutputName(expr); err != nil {
+			return nil, err
+		}
 	case "cmc_merge":
 		if err := prepareCmcMerge(expr, rawAttrs); err != nil {
 			return nil, err
@@ -352,6 +396,10 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		if err := validateCompiledAction(expr); err != nil {
 			return nil, err
 		}
+	case "resource", "fuchsia_package_resource", "resource_group", "fuchsia_package_resource_group", "resource_tree", "fuchsia_package_resource_collection":
+		if err := prepareResourceCall(expr, &gnTemplateName, pkgPath, hasPkgPath); err != nil {
+			return nil, err
+		}
 	}
 	// TODO(jayzhuang): Handle package level settings, e.g. visibility.
 	if gnTemplateName == noGNEquivalent || bazelRule == "package" {
@@ -366,11 +414,23 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		}
 		return fxUnittestPackageToGN(expr)
 	}
+	if bazelRule == ctfFxPackageRule {
+		if len(rawAttrs) > 0 {
+			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
+		}
+		return ctfFxPackageToGN(expr)
+	}
 	if bazelRule == "linux_resource" {
 		if len(rawAttrs) > 0 {
 			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
 		}
 		return linuxResourceToGN(expr)
+	}
+	if bazelRule == "icu_fuchsia_package" {
+		if len(rawAttrs) > 0 {
+			return nil, fmt.Errorf("raw_attribute annotation is not supported on %s", bazelRule)
+		}
+		return icuFuchsiaPackageToGN(expr)
 	}
 
 	attrsToOmit := attrsToOmitByRules[bazelRule]
@@ -378,6 +438,8 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 
 	// Loops through all arguments to handle special ones first.
 	var name string
+	var nameExpr syntax.Expr
+	var sharedLibName syntax.Expr
 	var remainingArgs []*syntax.BinaryExpr
 	var wrappingConditions []string
 	var hasWithUnitTests bool
@@ -414,9 +476,9 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		// it so `testonly = False` (or any non-`True` expression) fails
 		// conversion rather than silently generating a `testonly = true` GN
 		// `cc_test_executable()`.
-		if bazelRule == "fx_cc_test_binary" && ident.Name == "testonly" {
+		if (bazelRule == "fx_cc_test_binary" || bazelRule == "vulkan_test") && ident.Name == "testonly" {
 			if rhsIdent, ok := unwrapParenExpr(binaryExpr.Y).(*syntax.Ident); !ok || rhsIdent.Name != "True" {
-				return nil, errors.New("fx_cc_test_binary targets are always testonly; testonly must be True if specified")
+				return nil, fmt.Errorf("%s targets are always testonly; testonly must be True if specified", bazelRule)
 			}
 		}
 		// `gn_output_name` on `fx_cc_binary` and `fx_cc_test_binary` is renamed to GN
@@ -424,7 +486,7 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 		// require a string literal so that `fx_packaged_binary` and
 		// `linux_resource` lookups (see `indexGNBinaries`) see the same name as
 		// GN, and reject a conflicting raw `output_name` annotation.
-		if (bazelRule == "fx_cc_binary" || bazelRule == "fx_cc_test_binary") && ident.Name == "gn_output_name" {
+		if (bazelRule == "fx_cc_binary" || bazelRule == "fx_cc_test_binary" || bazelRule == "icu_executable" || bazelRule == "vulkan_executable" || bazelRule == "vulkan_test") && ident.Name == "gn_output_name" {
 			if _, err := stringLiteralValue(binaryExpr.Y); err != nil {
 				return nil, fmt.Errorf("gn_output_name of %s must be a string literal: %v", bazelRule, err)
 			}
@@ -433,7 +495,12 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 			}
 			hasOutputNameAttr = true
 		}
-		if attrsToOmit[ident.Name] {
+		if attrsToOmit[ident.Name] || (hasRuleCfg && ruleCfg.omitsAttr(ident.Name)) {
+			continue
+		}
+		if bazelRule == "fx_cc_shared_library" && ident.Name == "shared_lib_name" {
+			// Converted to `output_name` by `fxCcSharedLibraryOutputNameToGN()`.
+			sharedLibName = binaryExpr.Y
 			continue
 		}
 		if unsupportedAttrs[ident.Name] {
@@ -445,6 +512,7 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 				return nil, fmt.Errorf("converting target name: %v", err)
 			}
 			name = strings.Join(lines, "\n")
+			nameExpr = binaryExpr.Y
 
 			continue
 		}
@@ -498,6 +566,9 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 	}
 
 	ret := []string{fmt.Sprintf("%s(%s) {", gnTemplateName, name)}
+	if ifsOutputName != "" {
+		ret = append(ret, indent([]string{fmt.Sprintf("output_name = %s", gnQuote(ifsOutputName))}, 1)...)
+	}
 	if isLinkShared {
 		// GN `loadable_module()` automatically appends `.so`, so strip a trailing
 		// `.so` from `name` into `output_name` to avoid `<name>.so.so`.
@@ -505,37 +576,94 @@ func callExprToGN(expr *syntax.CallExpr, stmtComments *syntax.Comments) ([]strin
 			ret = append(ret, indent([]string{fmt.Sprintf("output_name = %s", gnQuote(baseName))}, 1)...)
 		}
 	}
+	if bazelRule == "fx_cc_shared_library" {
+		lines, err := fxCcSharedLibraryOutputNameToGN(nameExpr, sharedLibName, rawAttrs)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, indent(lines, 1)...)
+	}
 
 	// `aspect_hints` maps to `deps` in GN, but Buildifier places `aspect_hints`
 	// near the top of the target before `deps` or `implementation_deps`. If
 	// another attribute on the target also maps to `deps`, move `aspect_hints`
+	// (and other attributes appended to `deps`, see `isAppendedDepsAttr()`)
 	// after the last such attribute and append (`+=`) to `deps`.
-	remainingArgs, appendAspectHints, initDeps := reorderAspectHints(remainingArgs, bazelRule)
-	if initDeps {
+	remainingArgs, appendDeps, initDeps := reorderAppendedDepsWithConfig(remainingArgs, bazelRule, cfg)
+
+	var extraExprs []string
+	if extra, ok := extraGnExpressionByRules[bazelRule]; ok {
+		extraExprs = append(extraExprs, extra...)
+	}
+	if hasRuleCfg && len(ruleCfg.ExtraGNExpressions) > 0 {
+		extraExprs = append(extraExprs, ruleCfg.ExtraGNExpressions...)
+	}
+	if len(extraExprs) > 0 {
+		// GN fails on a second assignment to the same variable, so reject raw
+		// attributes or target attributes that set a variable bazel2gn already
+		// sets for this rule.
+		for _, e := range extraExprs {
+			extraName := gnAssignedName(e)
+			if rawAttrsAssign(rawAttrs, extraName) {
+				return nil, fmt.Errorf("bazel2gn always sets `%s` on %s; remove the `# @bazel2gn:raw_attribute:%s` annotation", e, bazelRule, extraName)
+			}
+			if len(matchingArgsForGNVar(remainingArgs, bazelRule, extraName, cfg)) > 0 {
+				return nil, fmt.Errorf("bazel2gn always sets `%s` on %s; remove the conflicting attribute for %q", e, bazelRule, extraName)
+			}
+		}
+	}
+
+	// Unlike `extraGnExpressionByRules`, a raw attribute or target attribute
+	// that sets the same variable replaces or precedes the default instead of
+	// failing.
+	var defaultExprs []string
+	if defaults, ok := defaultGnExpressionByRules[bazelRule]; ok {
+		defaultExprs = append(defaultExprs, defaults...)
+	}
+	if hasRuleCfg && len(ruleCfg.DefaultGNExpressions) > 0 {
+		defaultExprs = append(defaultExprs, ruleCfg.DefaultGNExpressions...)
+	}
+	var defaultExprsBefore []string
+	var defaultExprsAfter []string
+	for _, d := range defaultExprs {
+		defaultName := gnAssignedName(d)
+		if rawAttrsAssign(rawAttrs, defaultName) {
+			continue
+		}
+		matching := matchingArgsForGNVar(remainingArgs, bazelRule, defaultName, cfg)
+		if len(matching) == 0 {
+			defaultExprsAfter = append(defaultExprsAfter, d)
+			continue
+		}
+		unconditionallyInitialized := slices.ContainsFunc(matching, func(arg *syntax.BinaryExpr) bool {
+			return attrUnconditionallyInitializesGNVarWithConfig(arg, bazelRule, cfg)
+		})
+		if !unconditionallyInitialized {
+			defaultExprsBefore = append(defaultExprsBefore, d)
+		}
+	}
+
+	if initDeps && !rawAttrsAssign(defaultExprsBefore, "deps") {
 		ret = append(ret, indent([]string{"deps = []"}, 1)...)
+	}
+	if len(defaultExprsBefore) > 0 {
+		ret = append(ret, indent(defaultExprsBefore, 1)...)
 	}
 
 	// Loop through all args again to actually build the content of this target.
 	for _, arg := range remainingArgs {
-		lines, err := attrAssignmentToGN(arg, bazelRule, compiledActionOutputs, appendAspectHints, hasWithUnitTests)
+		lines, err := attrAssignmentToGNWithConfig(arg, bazelRule, compiledActionOutputs, appendDeps, hasWithUnitTests, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("converting Bazel attribute to GN: %v", err)
 		}
 		ret = append(ret, indent(lines, 1)...)
 	}
 
-	if extra, ok := extraGnExpressionByRules[bazelRule]; ok {
-		// GN fails on a second assignment to the same variable, so reject raw
-		// attributes that set a variable bazel2gn already sets for this rule.
-		for _, e := range extra {
-			extraName := strings.TrimSpace(strings.SplitN(e, "=", 2)[0])
-			for _, raw := range rawAttrs {
-				if strings.TrimSpace(strings.SplitN(raw, "=", 2)[0]) == extraName {
-					return nil, fmt.Errorf("bazel2gn always sets `%s` on %s; remove the `# @bazel2gn:raw_attribute:%s` annotation", e, bazelRule, extraName)
-				}
-			}
-		}
-		ret = append(ret, indent(extra, 1)...)
+	if len(extraExprs) > 0 {
+		ret = append(ret, indent(extraExprs, 1)...)
+	}
+	if len(defaultExprsAfter) > 0 {
+		ret = append(ret, indent(defaultExprsAfter, 1)...)
 	}
 	ret = append(ret, indent(rawAttrs, 1)...)
 
@@ -600,17 +728,23 @@ func validateCmlShard(expr *syntax.CallExpr) error {
 //
 // This function takes the current Bazel rule being converted into consideration.
 func convertAttrName(attrName, bazelRule string) string {
+	return convertAttrNameWithConfig(attrName, bazelRule, nil)
+}
+
+func convertAttrNameWithConfig(attrName, bazelRule string, cfg *Config) string {
+	if ruleCfg, ok := cfg.lookupRule(bazelRule); ok {
+		if ret, ok := ruleCfg.AttrMap[attrName]; ok {
+			return ret
+		}
+	}
 	ret, ok := commonAttrMap[attrName]
 	if ok {
 		return ret
 	}
-	ruleAttrMap, ok := attrMapsByRules[bazelRule]
-	if !ok {
-		return attrName
-	}
-	ret, ok = ruleAttrMap[attrName]
-	if ok {
-		return ret
+	if ruleAttrMap, ok := attrMapsByRules[bazelRule]; ok {
+		if ret, ok := ruleAttrMap[attrName]; ok {
+			return ret
+		}
 	}
 	return attrName
 }
@@ -683,42 +817,93 @@ func execPropertiesToGN(expr *syntax.BinaryExpr, bazelRule string) ([]string, er
 	return slices.Clone(rustHighmemGN), nil
 }
 
-// reorderAspectHints moves `aspect_hints` to immediately follow the last other
-// attribute that converts to `deps` in GN, if any such attribute exists.
-// Returns the reordered slice, whether `aspect_hints` should use `+=`, and
-// whether `deps = []` must be emitted at the start of the target because the
-// preceding `deps`-mapped attributes only assign to `deps` conditionally.
-func reorderAspectHints(args []*syntax.BinaryExpr, bazelRule string) ([]*syntax.BinaryExpr, bool, bool) {
-	aspectHintsIdx := -1
+// isAppendedDepsAttr returns whether `attr` of `bazelRule` maps to GN `deps`
+// and is appended (`+=`) to the `deps` set by other attributes, instead of
+// being one of the attributes that set `deps`.
+func isAppendedDepsAttr(attr, bazelRule string) bool {
+	switch attr {
+	case "aspect_hints":
+		return true
+	case "dynamic_deps":
+		// `deps` and `dynamic_deps` of `fx_cc_shared_library()` both map to
+		// GN `deps`.
+		return bazelRule == "fx_cc_shared_library"
+	}
+	return false
+}
+
+func isAppendedDepsAttrWithConfig(attr, bazelRule string, cfg *Config) bool {
+	if isAppendedDepsAttr(attr, bazelRule) {
+		return true
+	}
+	if convertAttrNameWithConfig(attr, bazelRule, cfg) != "deps" {
+		return false
+	}
+	if ruleCfg, ok := cfg.lookupRule(bazelRule); ok {
+		op := ruleCfg.AttrAssignmentOps[attr]
+		return op == "+=" || op == "-="
+	}
+	return false
+}
+
+// reorderAppendedDeps moves attributes appended to GN `deps` (see
+// `isAppendedDepsAttr()`) to immediately follow the last other attribute that
+// converts to `deps` in GN, if any such attribute exists. Returns the
+// reordered slice, whether the appended attributes should use `+=`, and
+// whether `deps = []` must be emitted at the start of the target because no
+// preceding `deps`-mapped attribute unconditionally assigns to `deps`.
+func reorderAppendedDeps(args []*syntax.BinaryExpr, bazelRule string) ([]*syntax.BinaryExpr, bool, bool) {
+	return reorderAppendedDepsWithConfig(args, bazelRule, nil)
+}
+
+func reorderAppendedDepsWithConfig(args []*syntax.BinaryExpr, bazelRule string, cfg *Config) ([]*syntax.BinaryExpr, bool, bool) {
+	var appended []*syntax.BinaryExpr
+	firstAppendedIdx := -1
 	lastOtherDepsIdx := -1
 	unconditionallyInitializesDeps := false
 	for i, arg := range args {
 		ident := arg.X.(*syntax.Ident)
-		if ident.Name == "aspect_hints" {
-			aspectHintsIdx = i
-		} else if convertAttrName(ident.Name, bazelRule) == "deps" {
+		if isAppendedDepsAttrWithConfig(ident.Name, bazelRule, cfg) {
+			if firstAppendedIdx == -1 {
+				firstAppendedIdx = i
+			}
+			appended = append(appended, arg)
+		} else if convertAttrNameWithConfig(ident.Name, bazelRule, cfg) == "deps" {
 			lastOtherDepsIdx = i
-			if attrUnconditionallyInitializesGNVar(arg) {
+			if attrUnconditionallyInitializesGNVarWithConfig(arg, bazelRule, cfg) {
 				unconditionallyInitializesDeps = true
 			}
 		}
 	}
-	if aspectHintsIdx == -1 || lastOtherDepsIdx == -1 {
+	hasExplicitAppendedOp := false
+	if ruleCfg, ok := cfg.lookupRule(bazelRule); ok {
+		for _, arg := range appended {
+			if op := ruleCfg.AttrAssignmentOps[arg.X.(*syntax.Ident).Name]; op == "+=" || op == "-=" {
+				hasExplicitAppendedOp = true
+				break
+			}
+		}
+	}
+	// A single attribute mapping to `deps` can simply assign it unless a
+	// configured rule explicitly gave that attribute `+=` or `-=`.
+	if len(appended) == 0 || (lastOtherDepsIdx == -1 && len(appended) == 1 && !hasExplicitAppendedOp) {
 		return args, false, false
 	}
 	initDeps := !unconditionallyInitializesDeps
-	if aspectHintsIdx > lastOtherDepsIdx {
+	if lastOtherDepsIdx == -1 || firstAppendedIdx > lastOtherDepsIdx {
+		// Either only appended attributes map to `deps`, so they all append
+		// to the `deps = []` emitted first, or they already follow the other
+		// attributes mapping to `deps`.
 		return args, true, initDeps
 	}
-	aspectHintsArg := args[aspectHintsIdx]
 	reordered := make([]*syntax.BinaryExpr, 0, len(args))
 	for i, arg := range args {
-		if i == aspectHintsIdx {
+		if isAppendedDepsAttrWithConfig(arg.X.(*syntax.Ident).Name, bazelRule, cfg) {
 			continue
 		}
 		reordered = append(reordered, arg)
 		if i == lastOtherDepsIdx {
-			reordered = append(reordered, aspectHintsArg)
+			reordered = append(reordered, appended...)
 		}
 	}
 	return reordered, true, initDeps
@@ -728,11 +913,24 @@ func reorderAspectHints(args []*syntax.BinaryExpr, bazelRule string) ([]*syntax.
 // unconditionally defines its target GN variable at the outer scope of the
 // target (so a subsequent `+=` will not fail with `Undefined identifier`).
 func attrUnconditionallyInitializesGNVar(arg *syntax.BinaryExpr) bool {
+	return attrUnconditionallyInitializesGNVarWithConfig(arg, "", nil)
+}
+
+func attrUnconditionallyInitializesGNVarWithConfig(arg *syntax.BinaryExpr, bazelRule string, cfg *Config) bool {
 	lhs := arg.X.(*syntax.Ident)
 	if idkFuchsiaSpecificAttrs[lhs.Name] || idkNonFuchsiaSpecificAttrs[lhs.Name] {
 		return false
 	}
-	if op, ok := bazelAttrToGNAssignmentOps[lhs.Name]; ok && op != "=" {
+	if ruleCfg, ok := cfg.lookupRule(bazelRule); ok {
+		if op, ok := ruleCfg.AttrAssignmentOps[lhs.Name]; ok {
+			if op != "=" {
+				return false
+			}
+			// Explicit "=" in rule config overrides default bazelAttrToGNAssignmentOps.
+		} else if op, ok := bazelAttrToGNAssignmentOps[lhs.Name]; ok && op != "=" {
+			return false
+		}
+	} else if op, ok := bazelAttrToGNAssignmentOps[lhs.Name]; ok && op != "=" {
 		return false
 	}
 	if _, ok := overwrittenRaw(arg); ok {
@@ -786,12 +984,17 @@ func selectHasDefault(expr *syntax.CallExpr) bool {
 // NOTE: Assignment is a special binary expression with operator =.
 //
 // [0] https://github.com/bazelbuild/starlark/blob/master/spec.md#assignments
-func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActionOutputs map[string]string, appendAspectHints bool, hasWithUnitTests bool) ([]string, error) {
+func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActionOutputs map[string]string, appendDeps bool, hasWithUnitTests bool) ([]string, error) {
+	return attrAssignmentToGNWithConfig(expr, bazelRule, compiledActionOutputs, appendDeps, hasWithUnitTests, nil)
+}
+
+func attrAssignmentToGNWithConfig(expr *syntax.BinaryExpr, bazelRule string, compiledActionOutputs map[string]string, appendDeps bool, hasWithUnitTests bool, cfg *Config) ([]string, error) {
 	lhs, ok := expr.X.(*syntax.Ident)
 	if !ok {
 		return nil, fmt.Errorf("expecting an identifier on the left hand side of attribute assignment, got %T", expr.X)
 	}
-	attrName := convertAttrName(lhs.Name, bazelRule)
+	attrName := convertAttrNameWithConfig(lhs.Name, bazelRule, cfg)
+	ruleCfg, hasRuleCfg := cfg.lookupRule(bazelRule)
 
 	// `exec_properties` has no GN equivalent attribute and must never be
 	// emitted verbatim, even with an overwrite annotation.
@@ -803,15 +1006,22 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 	//
 	// This requires determining which assignment operator to use now even though
 	// we may not end up using it.
-	op, ok := bazelAttrToGNAssignmentOps[lhs.Name]
-	if !ok {
+	var op string
+	opFound := false
+	if hasRuleCfg {
+		op, opFound = ruleCfg.AttrAssignmentOps[lhs.Name]
+	}
+	if !opFound {
+		op, opFound = bazelAttrToGNAssignmentOps[lhs.Name]
+	}
+	if !opFound {
 		op = "="
 	}
 
 	if idkFuchsiaSpecificAttrs[lhs.Name] || idkNonFuchsiaSpecificAttrs[lhs.Name] {
 		op = "+="
 	}
-	if lhs.Name == "aspect_hints" && appendAspectHints {
+	if !opFound && appendDeps && isAppendedDepsAttrWithConfig(lhs.Name, bazelRule, cfg) {
 		op = "+="
 	}
 
@@ -860,78 +1070,116 @@ func attrAssignmentToGN(expr *syntax.BinaryExpr, bazelRule string, compiledActio
 		return nil, err
 	}
 
-	switch attrName {
-	case "visibility":
-		transformers = append(transformers, bazelVisibilityToGN)
-	case "deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "non_rust_deps", "sdk_deps", "non_sdk_deps", "validations", "cm_label", "source_deps":
-		transformers = append(transformers, bazelDepToGN)
-	case "public_deps":
-		transformers = append(transformers, bazelDepToGN)
-		if bazelRule == "alias" {
-			// `alias` rules map from a single path in bazel to a list in GN
-			transformers = append(transformers, bazelExprToGNList)
+	matchedRuleCfgTransformer := false
+	if hasRuleCfg {
+		if tName, ok := ruleCfg.AttrTransformers[lhs.Name]; ok {
+			transformers = append(transformers, transformerAnnotationNames[tName])
+			matchedRuleCfgTransformer = true
+		} else if tName, ok := ruleCfg.AttrTransformers[attrName]; ok {
+			transformers = append(transformers, transformerAnnotationNames[tName])
+			matchedRuleCfgTransformer = true
 		}
-	case "configs":
-		if _, ok := buildFlagsAttrMap[lhs.Name]; ok {
-			// `build_flags()` labels are the same as their GN `config()` labels.
+	}
+
+	if !matchedRuleCfgTransformer {
+		switch attrName {
+		case "visibility":
+			transformers = append(transformers, bazelVisibilityToGN)
+		case "deps", "data_deps", "test_deps", "proc_macro_deps", "link_deps", "args_deps", "plugin_deps", "fidls", "fidl_target", "non_rust_deps", "sdk_deps", "non_sdk_deps", "validations", "cm_label", "source_deps", "icu_deps", "icu_public_deps", "subpackages", "public_configs":
 			transformers = append(transformers, bazelDepToGN)
-		} else {
-			transformers = append(transformers, bazelCOptToGNConfig)
+		case "files":
+			if bazelRule == "resource_group" || bazelRule == "fuchsia_package_resource_group" {
+				transformers = append(transformers, bazelResourceGroupFilesToGN)
+			}
+		case "public_deps":
+			transformers = append(transformers, bazelDepToGN)
+			if bazelRule == "alias" {
+				// `alias` rules map from a single path in bazel to a list in GN
+				transformers = append(transformers, bazelExprToGNList)
+			}
+		case "configs":
+			if _, ok := buildFlagsAttrMap[lhs.Name]; ok {
+				// `build_flags()` labels are the same as their GN `config()` labels.
+				transformers = append(transformers, bazelDepToGN)
+			} else {
+				transformers = append(transformers, bazelCOptToGNConfig)
+			}
+		case "api", "outputs", "sources", "inputs", "args_sources", "args_source_root":
+			if bazelRule == compiledActionRule && attrName == "outputs" {
+				transformers = append(transformers, compiledActionOutsTransformer)
+			} else if bazelRule == "cmc_merge" && attrName == "sources" {
+				transformers = append(transformers, bazelCmcMergeSrcsToGN)
+			} else {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "includes":
+			switch bazelRule {
+			case "expect_includes":
+				transformers = append(transformers, bazelCmlIncludesToGN)
+			case "fx_generated_expectations":
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "manifest":
+			if isFxManifestRule(bazelRule) || bazelRule == "icu_fuchsia_component" {
+				transformers = append(transformers, bazelManifestToGN(bazelRule))
+			}
+		case "depfile":
+			if bazelRule == compiledActionRule {
+				transformers = append(transformers, compiledActionScalarOutTransformer(expr))
+			}
+		case "expectations":
+			switch bazelRule {
+			case "fx_expectations":
+				transformers = append(transformers, bazelFilePathsToGN)
+			case internalFxTestComponentWithExpectationsRule:
+				transformers = append(transformers, bazelExpectationsToGN)
+			}
+		case "args":
+			if bazelRule == compiledActionRule {
+				transformers = append(transformers, compiledActionArgsTransformer(compiledActionOutputs))
+			}
+		case "tool":
+			if bazelRule == compiledActionRule {
+				transformers = append(transformers, compiledActionToolTransformer(expr))
+			}
+		case "tool_output_name", "mnemonic":
+			if bazelRule == compiledActionRule {
+				transformers = append(transformers, compiledActionStringAttrTransformer(attrName))
+			}
+		case "config_data":
+			if bazelRule == "ffx_plugin" {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "abi":
+			// `cc_link_stub_from_ifs_file()` takes an `.ifs` file label in Bazel,
+			// and `ifs_shared_library()` a file path in GN.
+			if bazelRule == ccLinkStubFromIfsFileRule {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "checked_in_source":
+			// `rustc_bindgen_golden()` takes a file label in Bazel and a file path
+			// in GN. Its `headers` are source paths in both.
+			if bazelRule == "rustc_bindgen_golden" {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "source":
+			// `bind_library()` `src` (mapped to GN `source`) and `intl_strings()` take a file label in Bazel and a file path in GN.
+			if bazelRule == "bind_library" || bazelRule == "intl_strings" {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "amendments_path", "template_path":
+			// `fostr_fidl()` takes file labels in Bazel and file paths in GN.
+			if bazelRule == "fostr_fidl" {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "parcelables", "interfaces":
+			// AIDL rules take `.aidl` file labels in Bazel and file paths in GN.
+			if bazelRule == "aidl" || bazelRule == "aidl_cpp" || bazelRule == "aidl_ndk" || bazelRule == "aidl_rust" {
+				transformers = append(transformers, bazelFilePathsToGN)
+			}
+		case "ldflags":
+			transformers = append(transformers, bazelLdflagsToGN)
 		}
-	case "api", "outputs", "sources", "inputs", "args_sources", "args_source_root":
-		if bazelRule == compiledActionRule && attrName == "outputs" {
-			transformers = append(transformers, compiledActionOutsTransformer)
-		} else if bazelRule == "cmc_merge" && attrName == "sources" {
-			transformers = append(transformers, bazelCmcMergeSrcsToGN)
-		} else {
-			transformers = append(transformers, bazelFilePathsToGN)
-		}
-	case "includes":
-		switch bazelRule {
-		case "expect_includes":
-			transformers = append(transformers, bazelCmlIncludesToGN)
-		case "fx_generated_expectations":
-			transformers = append(transformers, bazelFilePathsToGN)
-		}
-	case "manifest":
-		if isFxManifestRule(bazelRule) {
-			transformers = append(transformers, bazelManifestToGN(bazelRule))
-		}
-	case "depfile":
-		if bazelRule == compiledActionRule {
-			transformers = append(transformers, compiledActionScalarOutTransformer(expr))
-		}
-	case "expectations":
-		switch bazelRule {
-		case "fx_expectations":
-			transformers = append(transformers, bazelFilePathsToGN)
-		case internalFxTestComponentWithExpectationsRule:
-			transformers = append(transformers, bazelExpectationsToGN)
-		}
-	case "args":
-		if bazelRule == compiledActionRule {
-			transformers = append(transformers, compiledActionArgsTransformer(compiledActionOutputs))
-		}
-	case "tool":
-		if bazelRule == compiledActionRule {
-			transformers = append(transformers, compiledActionToolTransformer(expr))
-		}
-	case "tool_output_name", "mnemonic":
-		if bazelRule == compiledActionRule {
-			transformers = append(transformers, compiledActionStringAttrTransformer(attrName))
-		}
-	case "config_data":
-		if bazelRule == "ffx_plugin" {
-			transformers = append(transformers, bazelFilePathsToGN)
-		}
-	case "checked_in_source":
-		// `rustc_bindgen_golden()` takes a file label in Bazel and a file path
-		// in GN. Its `headers` are source paths in both.
-		if bazelRule == "rustc_bindgen_golden" {
-			transformers = append(transformers, bazelFilePathsToGN)
-		}
-	case "ldflags":
-		transformers = append(transformers, bazelLdflagsToGN)
 	}
 
 	rhsY := unwrapParenExpr(expr.Y)
@@ -1231,6 +1479,50 @@ func transformersFromComments(comments *syntax.Comments) ([]transformer, error) 
 		return nil, err
 	}
 	return append(before, suffix...), nil
+}
+
+// gnAssignedName returns the variable that a GN assignment such as
+// `enable_mypy = false` replaces. It returns "" when `=` is absent or part of
+// `==`, or for `+=` and `-=`, which modify a variable's existing value instead
+// of replacing it: a raw `x += ...` neither conflicts with nor replaces a
+// generated `x = ...`, and needs it to come first.
+func gnAssignedName(assignment string) string {
+	name, after, found := strings.Cut(assignment, "=")
+	if !found || strings.HasPrefix(after, "=") {
+		return ""
+	}
+	name = strings.TrimSpace(name)
+	if strings.HasSuffix(name, "+") || strings.HasSuffix(name, "-") {
+		return ""
+	}
+	return name
+}
+
+// matchingArgsForGNVar returns the subset of `args` whose converted GN
+// variable name equals `gnVar`.
+func matchingArgsForGNVar(args []*syntax.BinaryExpr, bazelRule, gnVar string, cfg *Config) []*syntax.BinaryExpr {
+	if gnVar == "" {
+		return nil
+	}
+	var matching []*syntax.BinaryExpr
+	for _, arg := range args {
+		ident := arg.X.(*syntax.Ident)
+		if ident.Name == "tags" || ident.Name == execPropertiesAttr || ident.Name == disableInstrumentationAttr {
+			continue
+		}
+		if convertAttrNameWithConfig(ident.Name, bazelRule, cfg) == gnVar {
+			matching = append(matching, arg)
+		}
+	}
+	return matching
+}
+
+// rawAttrsAssign reports whether any of `rawAttrs` assigns the GN variable
+// `name`. It's always false for an empty `name` (from a `+=` or `-=`).
+func rawAttrsAssign(rawAttrs []string, name string) bool {
+	return name != "" && slices.ContainsFunc(rawAttrs, func(raw string) bool {
+		return gnAssignedName(raw) == name
+	})
 }
 
 // rawAttributesFromComments extracts raw GN lines from `@bazel2gn:raw_attribute:`

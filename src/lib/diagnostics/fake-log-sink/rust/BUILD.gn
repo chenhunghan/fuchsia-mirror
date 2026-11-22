@@ -3,32 +3,6 @@
 # found in the LICENSE file.
 
 import("//build/bazel/bazel_test_suite.gni")
-import("//build/rust/rustc_staticlib.gni")
-
-rustc_staticlib("rust_ffi") {
-  testonly = true
-  edition = "2024"
-  features = [ "ffi" ]
-  visibility = [
-    ":*",
-    "//src/lib/diagnostics/fake-log-sink/cpp:*",
-    "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:*",
-  ]
-  public = [ "fake_log_sink.h" ]
-  sources = [ "src/lib.rs" ]
-  deps = [
-    "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
-    "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
-    "//sdk/rust/zx",
-    "//src/diagnostics/lib/ring-buffer",
-    "//src/lib/diagnostics/log/message/rust",
-    "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:lib",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-sync",
-    "//third_party/rust_crates:futures",
-  ]
-}
 
 bazel_test_suite("bazel_tests") {
   target_tests =
@@ -88,6 +62,39 @@ rustc_library("rust") {
     "//src/lib/fuchsia-sync",
     "//third_party/rust_crates:futures",
   ]
+}
+
+rustc_staticlib("rust_ffi") {
+  testonly = true
+  sources = [ "src/lib.rs" ]
+  features = [ "ffi" ]
+  edition = "2024"
+  visibility = [
+    ":*",
+    "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:*",
+  ]
+  deps = [
+    "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+    "//sdk/fidl/fuchsia.logger:fuchsia.logger_rust",
+    "//sdk/rust/zx",
+    "//src/diagnostics/lib/ring-buffer",
+    "//src/lib/diagnostics/log/message/rust",
+    "//src/lib/diagnostics/log/message/rust/cpp-log-decoder:lib",
+    "//src/lib/fidl/rust/fidl",
+    "//src/lib/fuchsia-async",
+    "//src/lib/fuchsia-sync",
+    "//third_party/rust_crates:futures",
+  ]
+}
+
+source_set("rust_ffi_headers") {
+  testonly = true
+  public = [ "fake_log_sink.h" ]
+  visibility = [
+    ":*",
+    "//src/lib/diagnostics/fake-log-sink/cpp:*",
+  ]
+  public_deps = [ ":rust_ffi" ]
 }
 
 rustc_test("fake_log_sink_lib_test") {

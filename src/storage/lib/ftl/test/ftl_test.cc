@@ -640,6 +640,42 @@ TEST(FtlTest, FindWornBlockTest) {
   ASSERT_EQ(1u, FtlnCheckBlockBitmap(ftl, ftl->written, page_two_physical / kPagesPerBlock));
 }
 
+TEST(FtlTest, DefaultReadWearLimit) {
+  FtlShell ftl_shell;
+  ASSERT_TRUE(ftl_shell.Init(kDefaultOptions));
+  FTLN ftl = reinterpret_cast<FTLN>(
+      reinterpret_cast<ftl::VolumeImpl*>(ftl_shell.volume())->GetInternalVolumeForTest());
+  ASSERT_EQ(ftl::kDefaultReadWearLimit, ftl->max_rc);
+}
+
+TEST(FtlTest, DriverProvidedReadWearLimit) {
+  constexpr uint32_t kReadWearLimit = ftl::kDefaultReadWearLimit / 2;
+  FtlShell ftl_shell;
+  auto driver_owned = std::make_unique<NdmRamDriver>(kDefaultOptions, kBoringTestOptions);
+  ASSERT_EQ(nullptr, driver_owned->Init());
+  driver_owned->set_read_wear_limit(kReadWearLimit);
+  NdmRamDriver* driver_unowned = driver_owned.get();
+  ASSERT_TRUE(ftl_shell.InitWithDriver(std::move(driver_owned)));
+  ftl::Volume* volume = ftl_shell.volume();
+
+  FTLN ftl = reinterpret_cast<FTLN>(
+      reinterpret_cast<ftl::VolumeImpl*>(volume)->GetInternalVolumeForTest());
+  ASSERT_EQ(kReadWearLimit, ftl->max_rc);
+
+  // Reattaching with the same driver setting keeps the custom limit.
+  ASSERT_EQ(nullptr, volume->ReAttach());
+  ftl = reinterpret_cast<FTLN>(
+      reinterpret_cast<ftl::VolumeImpl*>(volume)->GetInternalVolumeForTest());
+  ASSERT_EQ(kReadWearLimit, ftl->max_rc);
+
+  // The limit is not saved on the volume, so clearing it on the driver reverts to the default.
+  driver_unowned->set_read_wear_limit(0);
+  ASSERT_EQ(nullptr, volume->ReAttach());
+  ftl = reinterpret_cast<FTLN>(
+      reinterpret_cast<ftl::VolumeImpl*>(volume)->GetInternalVolumeForTest());
+  ASSERT_EQ(ftl::kDefaultReadWearLimit, ftl->max_rc);
+}
+
 TEST(FtlTest, ReadBoundsCheck) {
   FtlShell ftl;
   ASSERT_TRUE(ftl.Init(kDefaultOptions));

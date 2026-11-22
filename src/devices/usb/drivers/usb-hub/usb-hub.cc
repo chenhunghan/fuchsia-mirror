@@ -70,7 +70,7 @@ zx_status_t UsbHubDevice::GetPortStatus() {
       return result.error_value();
     }
     fbl::AutoLock l(&async_execution_context_);
-    ZX_ASSERT(index <= port_status_.size());
+    ZX_ASSERT(index < port_status_.size());
     port_status_[index].status = result.value();
     index++;
   }
@@ -93,23 +93,35 @@ void UsbHubDevice::DdkInit(ddk::InitTxn txn) {
     txn_->Reply(status);
     return;
   }
-  status = ZX_ERR_IO;
+  bool found_ep = false;
   // According to USB 2.0 Specification section 11.12.1 a hub should have exactly one
   // interrupt endpoint and no other endpoints.
   for (auto& interface : *interfaces) {
     if (interface.descriptor()->b_num_endpoints == 1) {
       auto eplist = interface.GetEndpointList();
       auto ep = eplist.begin();
+      if (ep == eplist.end() || !usb_ep_is_int(ep->descriptor()) ||
+          !usb_ep_is_in(ep->descriptor())) {
+        continue;
+      }
       interrupt_endpoint_ = *ep->descriptor();
       status =
           usb_.EnableEndpoint(&interrupt_endpoint_, ep->ss_companion().value_or(nullptr), true);
+      found_ep = true;
       break;
     }
+  }
+  if (!found_ep) {
+    zxlogf(ERROR, "Initialization failed: no interrupt endpoint found");
+    txn_->Reply(ZX_ERR_IO);
+    return;
   }
   if (status != ZX_OK) {
     zxlogf(ERROR, "Initialization failed due to %s", zx_status_get_string(status));
     txn_->Reply(status);
+    return;
   }
+  interrupt_endpoint_enabled_ = true;
   speed_ = usb_.GetSpeed();
   uint16_t desc_type = (speed_ == fdescriptor::UsbSpeed::kSuper
                             ? fidl::ToUnderlying(fdescriptor::DescriptorType::kHubSuperSpeed)
@@ -380,6 +392,40 @@ void UsbHubDevice::HandleResetComplete(PortNumber port) {
   port_status_[PortNumberToIndex(port).value()].reset_pending = false;
   auto speed = port_status_[PortNumberToIndex(port).value()].GetSpeed(speed_);
   zx_status_t status = bus_.DeviceAdded(port.value(), speed);
+  if (status != ZX_OK && !shutting_down_) {
+    zxlogf(ERROR, "Failed to add device on port %u: %s", port.value(),
+           zx_status_get_string(status));
+    // On USB 2.0 hubs, disable the downstream port so the unenumerated device does not remain
+    // active at Default Address 0 (USB 2.0 section 11.24.2.2; per USB 3.2 section 10.16.2.4,
+    // ClearPortFeature(PORT_ENABLE) is not supported on Enhanced SuperSpeed hubs), and clear the
+    // hub's TT buffer for Low/Full-Speed devices behind a High-Speed hub (USB 2.0 section
+    // 11.24.2.3).
+    if (speed_ != fdescriptor::UsbSpeed::kSuper &&
+        speed_ != fdescriptor::UsbSpeed::kEnhancedSuper) {
+      zx_status_t disable_status =
+          ClearFeature(kClassPortOut, USB_FEATURE_PORT_ENABLE, port.value());
+      if (disable_status != ZX_OK && disable_status != ZX_ERR_IO_NOT_PRESENT) {
+        zxlogf(ERROR, "Failed to disable port %u after DeviceAdded error: %s", port.value(),
+               zx_status_get_string(disable_status));
+      }
+    }
+    if (speed_ == fdescriptor::UsbSpeed::kHigh &&
+        (speed == fdescriptor::UsbSpeed::kLow || speed == fdescriptor::UsbSpeed::kFull)) {
+      constexpr uint8_t kClearTtBuffer = 8;
+      // USB 2.0 section 11.24.2.3 Table 11-18: Clear TT Buffer for Control EP0 at Default
+      // Address 0 in both OUT (bit 15 = 0) and IN (bit 15 = 1) directions on Single-TT
+      // (wIndex = 1).
+      constexpr uint16_t kClearTtEp0Addr0Out = 0x0000;
+      constexpr uint16_t kClearTtEp0Addr0In = 0x8000;
+      for (uint16_t tt_value : {kClearTtEp0Addr0Out, kClearTtEp0Addr0In}) {
+        zx_status_t tt_status = ControlOut(kClassPortOut, kClearTtBuffer, tt_value, 1, nullptr, 0);
+        if (tt_status != ZX_OK && tt_status != ZX_ERR_IO_NOT_PRESENT) {
+          zxlogf(ERROR, "Failed to clear TT buffer (0x%04x) for port %u: %s", tt_value,
+                 port.value(), zx_status_get_string(tt_status));
+        }
+      }
+    }
+  }
 
   port_status_[PortNumberToIndex(port).value()].enumeration_pending = false;
   port_status_[PortNumberToIndex(port).value()].link_active = (status == ZX_OK);
@@ -469,31 +515,34 @@ zx::result<usb_port_status_t> UsbHubDevice::GetPortStatus(PortNumber port) {
 void UsbHubDevice::DdkUnbind(ddk::UnbindTxn txn) {
   zx_status_t status = Shutdown();
   if (status != ZX_OK) {
-    return;
+    zxlogf(ERROR, "Shutdown() failed during unbind: %s", zx_status_get_string(status));
   }
   if (callback_thread_) {
-    thrd_join(*callback_thread_, &status);
-    if (status != ZX_OK) {
+    int thread_status = 0;
+    if (thrd_join(*callback_thread_, &thread_status) != thrd_success || thread_status != ZX_OK) {
       zxlogf(ERROR, "Could not join interrupt thread");
-      return;
     }
   }
   txn.Reply();
 }
 
 zx_status_t UsbHubDevice::Shutdown() {
-  shutting_down_ = true;
-  zx_status_t status = usb_.CancelAll(interrupt_endpoint_.b_endpoint_address);
-  if (status == ZX_ERR_IO_NOT_PRESENT) {
-    zxlogf(DEBUG, "CancelAll() for endpoint of disconnected device");
-  } else if (status != ZX_OK) {
-    // Fatal -- unable to shut down properly
-    zxlogf(ERROR, "CancelAll() error: %s", zx_status_get_string(status));
-    return status;
+  if (shutting_down_.exchange(true)) {
+    return ZX_OK;
+  }
+  zx_status_t cancel_status = ZX_OK;
+  if (interrupt_endpoint_enabled_) {
+    zx_status_t status = usb_.CancelAll(interrupt_endpoint_.b_endpoint_address);
+    if (status == ZX_ERR_IO_NOT_PRESENT) {
+      zxlogf(DEBUG, "CancelAll() for endpoint of disconnected device");
+    } else if (status != ZX_OK) {
+      zxlogf(ERROR, "CancelAll() error: %s", zx_status_get_string(status));
+      cancel_status = status;
+    }
   }
   // TODO(https://fxbug.dev/42163107): Cancel Control endpoint when supported
   sync_completion_signal(&xfer_done_);
-  return ZX_OK;
+  return cancel_status;
 }
 
 zx_status_t UsbHubDevice::Bind(std::unique_ptr<fpromise::executor> executor, zx_device_t* parent) {

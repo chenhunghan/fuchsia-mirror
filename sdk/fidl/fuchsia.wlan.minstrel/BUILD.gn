@@ -29,7 +29,6 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.wlan.minstrel") {
   sources = [ "wlan_minstrel.fidl" ]
-  enable_hlcpp = true
   excluded_checks = [
     "string-bounds-not-specified",
     "vector-bounds-not-specified",

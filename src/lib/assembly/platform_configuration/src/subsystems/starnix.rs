@@ -75,6 +75,9 @@ impl DefineSubsystemConfiguration<(&PlatformStarnixConfig, &PlatformConnectivity
                 builder.platform_bundle("nanohub_support")?;
                 builder.platform_bundle("fastrpc_support")?;
                 builder.platform_bundle("erofs_support")?;
+                if connectivity_config.mdns.config.is_none() {
+                    builder.platform_bundle("mdns_wired_only")?;
+                }
             } else {
                 builder.set_config_capability(
                     "fuchsia.starnix.runner.EnableDataCollection",
@@ -148,6 +151,7 @@ mod tests {
     use super::*;
     use crate::subsystems::ConfigurationBuilderImpl;
     use assembly_config_schema::BoardConfig;
+    use assembly_config_schema::platform_settings::connectivity_config::MdnsConfig;
 
     #[test]
     fn test_define_configuration_with_wifi_support_requires_wlanix() {
@@ -222,5 +226,75 @@ mod tests {
                 .value(),
             serde_json::json!(["network_manager", "remotevol_in_process"])
         );
+    }
+
+    #[test]
+    fn test_define_configuration_mdns_wired_only_for_android() {
+        let board_config: BoardConfig = Default::default();
+        let context = ConfigurationContext {
+            feature_set_level: &FeatureSetLevel::Standard,
+            build_type: &BuildType::Eng,
+            board_config: &board_config,
+            gendir: Default::default(),
+            resource_dir: Default::default(),
+            developer_only_options: Default::default(),
+        };
+
+        // Android Starnix without an explicit product mdns.config includes mdns_wired_only.
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+        StarnixSubsystem::define_configuration(
+            &context,
+            &(
+                &PlatformStarnixConfig {
+                    enabled: true,
+                    enable_android_support: true,
+                    ..Default::default()
+                },
+                &PlatformConnectivityConfig::default(),
+            ),
+            &mut builder,
+        )
+        .unwrap();
+        assert!(builder.build().bundles.contains("mdns_wired_only"));
+
+        // An explicit product mdns.config suppresses the default mdns_wired_only bundle.
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+        StarnixSubsystem::define_configuration(
+            &context,
+            &(
+                &PlatformStarnixConfig {
+                    enabled: true,
+                    enable_android_support: true,
+                    ..Default::default()
+                },
+                &PlatformConnectivityConfig {
+                    mdns: MdnsConfig {
+                        config: Some("custom_mdns.config".into()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            ),
+            &mut builder,
+        )
+        .unwrap();
+        assert!(!builder.build().bundles.contains("mdns_wired_only"));
+
+        // Non-Android Starnix (e.g. workbench) does not restrict mDNS media.
+        let mut builder: ConfigurationBuilderImpl = Default::default();
+        StarnixSubsystem::define_configuration(
+            &context,
+            &(
+                &PlatformStarnixConfig {
+                    enabled: true,
+                    enable_android_support: false,
+                    ..Default::default()
+                },
+                &PlatformConnectivityConfig::default(),
+            ),
+            &mut builder,
+        )
+        .unwrap();
+        assert!(!builder.build().bundles.contains("mdns_wired_only"));
     }
 }

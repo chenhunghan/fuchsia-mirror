@@ -363,8 +363,6 @@ mod tests {
                 pool_range_start: ip_v4!("192.168.0.10"),
                 pool_range_stop: ip_v4!("192.168.0.254"),
             },
-            permitted_macs: crate::configuration::PermittedMacs(Vec::new()),
-            static_assignments: crate::configuration::StaticAssignments(HashMap::new()),
             arp_probe: false,
             bound_device_names: vec![],
         };
@@ -462,8 +460,6 @@ mod tests {
                 pool_range_start: ip_v4!("192.168.0.10"),
                 pool_range_stop: ip_v4!("192.168.0.254"),
             },
-            permitted_macs: crate::configuration::PermittedMacs(Vec::new()),
-            static_assignments: crate::configuration::StaticAssignments(HashMap::new()),
             arp_probe: false,
             bound_device_names: vec![],
         };

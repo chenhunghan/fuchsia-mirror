@@ -244,7 +244,7 @@ At this time I don't see a reasonable path forward with this approach unless
 we are willing to concede that PCI is a special driver that needs some custom
 kernel code as well as ~2 additional syscalls to do its job.
 
-## Prior art and references
+## Prior art and references {:#prior-art-and-references}
 
 Handling this entirely in userspace is a uniquely Zircon problem in my research.
 

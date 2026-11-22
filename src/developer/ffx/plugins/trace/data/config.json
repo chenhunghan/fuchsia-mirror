@@ -105,9 +105,10 @@
                 "kernel:vm",
                 "magma",
                 "memory:kernel",
-                "starnix:atrace",
+                "starnix:atrace:*",
                 "starnix:binder",
-                "starnix:pager"
+                "starnix:pager",
+                "starnix:perfetto:*"
             ]
         }
     }

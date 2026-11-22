@@ -109,10 +109,12 @@ impl Mapping {
             | MappingNameRef::Heap
             | MappingNameRef::Vma(_)
             | MappingNameRef::Ashmem(_)
-            | MappingNameRef::AioContext(_) => Access::rwx(),
-            // The vDSO and vvar mappings are backed by read-only kernel VMOs (with execute rights
-            // for the vDSO) and cannot be made writable by userspace via `mprotect`.
-            MappingNameRef::Vdso => Access::READ | Access::EXEC,
+            | MappingNameRef::AioContext(_)
+            // Each process maps a private copy-on-write clone of the vDSO, so it can be made
+            // writable via `mprotect` (for example, by debuggers setting breakpoints).
+            | MappingNameRef::Vdso => Access::rwx(),
+            // The vvar mapping exposes read-only kernel data (e.g. clock state), so userspace
+            // cannot make it writable or executable.
             MappingNameRef::Vvar => Access::READ,
             MappingNameRef::File(file) => {
                 let mut access = file.file().max_access_for_memory_mapping();
@@ -197,9 +199,9 @@ impl Mapping {
     }
 
     /// Returns whether this mapping is allowed to be executable, as reported by `me` in
-    /// `/proc/[pid]/smaps`. For file mappings, this is false if the file is on a `noexec` mount
-    /// or is sealed against execution. Security checks (see `security::file_mprotect()`) may still
-    /// deny making the mapping executable.
+    /// `/proc/[pid]/smaps`. For file mappings, this is false if the file is on a `noexec` mount,
+    /// is sealed against execution, or cannot be mapped executable. Security checks (see
+    /// `security::file_mprotect()`) may still deny making the mapping executable.
     pub fn may_exec(&self) -> bool {
         self.max_access().contains(Access::EXEC)
     }
@@ -526,10 +528,11 @@ bitflags! {
         const WIPEONFORK        = 1 <<  9;
         const DONT_SPLIT        = 1 << 10;
         const DONT_EXPAND       = 1 << 11;
-        /// A read-only `MAP_PRIVATE` file mapping that is still backed directly by the file's
-        /// VMO, through a handle without `WRITE` rights. It must be promoted to a copy-on-write
-        /// child VMO before it can become writable (see
-        /// `MemoryManagerState::promote_to_private_child`).
+        /// A `MAP_PRIVATE` file mapping that is still backed directly by the file's VMO, through
+        /// a handle without `WRITE` rights. It must be promoted to a copy-on-write child VMO
+        /// before it is written or becomes writable (see
+        /// `MemoryManagerState::promote_to_private_child`). Writable ones are mapped without
+        /// `WRITE` in the user VMAR, so that the first write faults.
         const LAZY_PRIVATE_FILE = 1 << 12;
         const LOCKED            = 1 << 13;
         const UFFD              = 1 << 14;

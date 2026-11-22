@@ -217,6 +217,32 @@ Trace data reaches the output socket in these cases:
   stopping, or terminating. If writing fails, the session terminates that
   tracee.
 
+These writes must uphold two invariants while a `StartTracing` request is
+pending:
+
+* **No provider data while `StartTracing` is pending.** Nothing is written to
+  the output socket between a `StartTracing` request and its reply. Before the
+  first reply, the socket carries nothing but the session header. A consumer
+  may therefore wait for the `StartTracing` reply before it begins to read the
+  socket, and `trace_manager` must never need the consumer to read the socket
+  in order to send that reply. This only constrains writes that can wait for
+  the consumer: with `defer_transfer`, data goes to a file until the session
+  stops, and buffer saves run as soon as they arrive.
+* **`trace_manager` drops nothing that is handed over early.** A provider
+  begins recording as soon as it receives `Start`, which is before the session
+  is `kStarted`. Everything a provider hands over while `StartTracing` is
+  pending, whether through a buffer-save request or by terminating, is
+  written after the reply, in the order it arrived. This holds however the
+  pending `StartTracing` is completed (every provider acknowledged, the start
+  timeout fired, or a `StopTracing` or controller disconnect arrived first),
+  and also when the provider leaves the session before then. The ack for a
+  held save is sent only once the save has been written, so it too waits for
+  the reply. Until then the provider cannot reuse that rolling buffer, and a
+  provider that fills its other rolling buffer in the meantime drops records
+  (see `zircon/system/ulib/trace-engine/context.cc`). That loss happens in the
+  provider, is bounded by the start timeout, and is reported in its
+  `ProviderStats`.
+
 With a `DeferredBufferForwarder`, these writes go to a temporary file, which
 is copied to the socket when all tracees have stopped (or the stop timeout
 fires) and when the forwarder is destroyed.

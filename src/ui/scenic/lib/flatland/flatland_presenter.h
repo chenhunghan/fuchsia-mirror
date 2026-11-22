@@ -37,6 +37,13 @@ class FlatlandPresenter {
                                         std::vector<zx::counter> present_fences,
                                         bool schedule_asap) = 0;
 
+  // From scheduling::FrameScheduler::NotifyExpectedPresent():
+  // Forwards an advisory presentation timing and frame interval hint for |session_id| onto the
+  // main dispatcher in FIFO order with ScheduleUpdateForSession().
+  virtual void NotifyExpectedPresent(scheduling::SessionId session_id,
+                                     zx::time expected_present_time, zx::duration frame_interval,
+                                     bool schedule_asap) = 0;
+
   // From scheduling::FrameScheduler::GetFuturePresentationInfos():
   // Gets the predicted latch points and presentation times for the frames at or before the next
   // |requested_prediction_span| time span. Uses the FramePredictor to do so.

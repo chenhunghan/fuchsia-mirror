@@ -41,7 +41,7 @@ class AmlogicSecureMemDevice : public AmlogicSecureMemDeviceBase,
   void DdkUnbind(ddk::UnbindTxn txn);
   void DdkRelease() { delete this; }
 
-  // LLCPP interface implementations
+  // FIDL wire interface implementations
   void GetSecureMemoryPhysicalAddress(
       GetSecureMemoryPhysicalAddressRequestView request,
       GetSecureMemoryPhysicalAddressCompleter::Sync& completer) override;

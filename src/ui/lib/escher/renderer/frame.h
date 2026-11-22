@@ -113,13 +113,12 @@ class Frame : public Resource {
   // that it can be reused in newly constructed frames.
   BlockAllocator TakeBlockAllocator() { return std::move(block_allocator_); }
 
-  // Called by BatchGpuUploader and BatchGpuDownloader to write to the
+  // Called by BatchGpuUploader to write to the
   // new_command_buffer_ and gather work to post to the GPU.
   // TODO(https://fxbug.dev/42098218) Remove these functions once BatchGpuUploader::Writers are
   // backed by secondary buffers, and the frame's primary command buffer is not
   // moved into the Writer.
   friend class BatchGpuUploader;
-  friend class BatchGpuDownloader;
   CommandBufferPtr TakeCommandBuffer();
   void PutCommandBuffer(CommandBufferPtr command_buffer);
 

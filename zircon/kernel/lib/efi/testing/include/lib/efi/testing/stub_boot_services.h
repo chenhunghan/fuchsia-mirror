@@ -106,7 +106,6 @@ class StubBootServices {
   //   efi_status (*UnloadImage)(efi_handle image_handle);
   //   efi_status (*ExitBootServices)(efi_handle image_handle, size_t map_key);
   //   efi_status (*GetNextMonotonicCount)(uint64_t* count);
-  //   efi_status (*Stall)(size_t microseconds);
   //   efi_status (*SetWatchdogTimer)(size_t timeout, uint64_t watchdog_code, size_t data_size,
   //                                  char16_t* watchdog_data);
   //   efi_status (*ConnectController)(efi_handle controller_handle,
@@ -115,6 +114,8 @@ class StubBootServices {
   //   efi_status (*DisconnectController)(efi_handle controller_handle,
   //                                      efi_handle driver_image_handle,
   //                                      efi_handle child_handle);
+
+  virtual efi_status Stall(size_t microseconds) { return EFI_UNSUPPORTED; }
 
   virtual efi_status OpenProtocol(efi_handle handle, const efi_guid* protocol, void** intf,
                                   efi_handle agent_handle, efi_handle controller_handle,
@@ -180,7 +181,7 @@ constexpr auto MatchGuid = MatchGuidT<efi_guid>;
 class MockBootServices : public StubBootServices {
  public:
   MOCK_METHOD(efi_status, GetMemoryMap,
-              (size_t * memory_map_size, efi_memory_descriptor* memory_map, size_t* map_key,
+              (size_t* memory_map_size, efi_memory_descriptor* memory_map, size_t* map_key,
                size_t* desc_size, uint32_t* desc_version),
               (override));
   MOCK_METHOD(efi_status, CreateEvent,

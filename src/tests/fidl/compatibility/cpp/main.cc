@@ -194,17 +194,21 @@ class EchoClientApp {
         .ThenExactlyOnce(std::move(callback));
   }
 
-  void EchoXunions(::std::vector<AllTypesXunion> value, ::std::string forward_to_server,
-                   fidl::ClientCallback<Echo::EchoXunions> callback) {
-    client_->EchoXunions(EchoEchoXunionsRequest(std::move(value), std::move(forward_to_server)))
+  void EchoFlexibleUnions(::std::vector<AllTypesFlexibleUnion> value,
+                          ::std::string forward_to_server,
+                          fidl::ClientCallback<Echo::EchoFlexibleUnions> callback) {
+    client_
+        ->EchoFlexibleUnions(
+            EchoEchoFlexibleUnionsRequest(std::move(value), std::move(forward_to_server)))
         .ThenExactlyOnce(std::move(callback));
   }
 
-  void EchoXunionsWithError(::std::vector<AllTypesXunion> value, DefaultEnum err,
-                            ::std::string forward_to_server, RespondWith result_variant,
-                            fidl::ClientCallback<Echo::EchoXunionsWithError> callback) {
+  void EchoFlexibleUnionsWithError(
+      ::std::vector<AllTypesFlexibleUnion> value, DefaultEnum err, ::std::string forward_to_server,
+      RespondWith result_variant,
+      fidl::ClientCallback<Echo::EchoFlexibleUnionsWithError> callback) {
     client_
-        ->EchoXunionsWithError(EchoEchoXunionsWithErrorRequest(
+        ->EchoFlexibleUnionsWithError(EchoEchoFlexibleUnionsWithErrorRequest(
             std::move(value), err, std::move(forward_to_server), result_variant))
         .ThenExactlyOnce(std::move(callback));
   }
@@ -594,23 +598,24 @@ class EchoConnection final : public fidl::Server<Echo> {
     }
   }
 
-  void EchoXunions(EchoXunionsRequest& request, EchoXunionsCompleter::Sync& completer) override {
+  void EchoFlexibleUnions(EchoFlexibleUnionsRequest& request,
+                          EchoFlexibleUnionsCompleter::Sync& completer) override {
     if (request.forward_to_server().empty()) {
       completer.Reply(std::move(request.value()));
     } else {
       std::shared_ptr<EchoClientApp> app = std::make_shared<EchoClientApp>();
-      app->EchoXunions(std::move(request.value()), "",
-                       [completer = completer.ToAsync(),
-                        extend_lifetime = app](fidl::Result<Echo::EchoXunions>& result) mutable {
-                         ZX_ASSERT_MSG(result.is_ok(), "Forwarding failed: %s",
-                                       result.error_value().FormatDescription().c_str());
-                         completer.Reply(std::move(result->value()));
-                       });
+      app->EchoFlexibleUnions(std::move(request.value()), "",
+                              [completer = completer.ToAsync(), extend_lifetime = app](
+                                  fidl::Result<Echo::EchoFlexibleUnions>& result) mutable {
+                                ZX_ASSERT_MSG(result.is_ok(), "Forwarding failed: %s",
+                                              result.error_value().FormatDescription().c_str());
+                                completer.Reply(std::move(result->value()));
+                              });
     }
   }
 
-  void EchoXunionsWithError(EchoXunionsWithErrorRequest& request,
-                            EchoXunionsWithErrorCompleter::Sync& completer) override {
+  void EchoFlexibleUnionsWithError(EchoFlexibleUnionsWithErrorRequest& request,
+                                   EchoFlexibleUnionsWithErrorCompleter::Sync& completer) override {
     if (request.forward_to_server().empty()) {
       if (request.result_variant() == wire::RespondWith::kErr) {
         completer.Reply(fit::error(request.result_err()));
@@ -619,10 +624,10 @@ class EchoConnection final : public fidl::Server<Echo> {
       }
     } else {
       std::shared_ptr<EchoClientApp> app = std::make_shared<EchoClientApp>();
-      app->EchoXunionsWithError(
+      app->EchoFlexibleUnionsWithError(
           std::move(request.value()), request.result_err(), "", request.result_variant(),
           [completer = completer.ToAsync(),
-           extend_lifetime = app](fidl::Result<Echo::EchoXunionsWithError>& result) mutable {
+           extend_lifetime = app](fidl::Result<Echo::EchoFlexibleUnionsWithError>& result) mutable {
             ZX_ASSERT_MSG(result.is_ok() || result.error_value().is_domain_error(),
                           "Forwarding failed: %s",
                           result.error_value().FormatDescription().c_str());

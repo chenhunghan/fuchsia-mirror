@@ -1,0 +1,557 @@
+{
+    "name": "discovery_and_descriptors",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 255,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "bulk",
+                                "max_packet_size": 512,
+                                "interval": 0
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "stat_dev"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "is_char_dev": true,
+                    "major": 189,
+                    "minor_offset_from_devnum": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "idVendor"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "idVendor",
+                    "value": "1234\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "idProduct"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "idProduct",
+                    "value": "5678\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "bcdDevice"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "bcdDevice",
+                    "value": "0543\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "bDeviceClass"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "bDeviceClass",
+                    "value": "00\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "bDeviceSubClass"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "bDeviceSubClass",
+                    "value": "00\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "bDeviceProtocol"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "bDeviceProtocol",
+                    "value": "00\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "bNumConfigurations"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "bNumConfigurations",
+                    "value": "1\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "bConfigurationValue"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "bConfigurationValue",
+                    "value": "1\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "busnum"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "busnum",
+                    "value": "1\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "devnum"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "devnum",
+                    "value": "$DEVNUM\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "speed"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "speed",
+                    "value": "480\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "uevent"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "uevent",
+                    "value": "MAJOR=189\nMINOR=$MINOR\nDEVNAME=bus/usb/001/$DEVNUM\nDEVTYPE=usb_device\nPRODUCT=1234/5678/543\nTYPE=0/0/0\nBUSNUM=001\nDEVNUM=$DEVNUM\n"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read_sysfs",
+                "attr": "descriptors"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "attr": "descriptors",
+                    "bytes": [
+                        18,
+                        1,
+                        0,
+                        2,
+                        0,
+                        0,
+                        0,
+                        64,
+                        52,
+                        18,
+                        120,
+                        86,
+                        67,
+                        5,
+                        1,
+                        2,
+                        3,
+                        1,
+                        9,
+                        2,
+                        32,
+                        0,
+                        1,
+                        1,
+                        0,
+                        128,
+                        50,
+                        9,
+                        4,
+                        0,
+                        0,
+                        2,
+                        255,
+                        0,
+                        0,
+                        0,
+                        7,
+                        5,
+                        129,
+                        2,
+                        0,
+                        2,
+                        0,
+                        7,
+                        5,
+                        2,
+                        2,
+                        0,
+                        2,
+                        0
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd_ro",
+                "mode": "rdonly"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd_ro"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read",
+                "fd": "fd_ro",
+                "size": 64
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_read": 50,
+                    "data": [
+                        18,
+                        1,
+                        0,
+                        2,
+                        0,
+                        0,
+                        0,
+                        64,
+                        52,
+                        18,
+                        120,
+                        86,
+                        67,
+                        5,
+                        1,
+                        2,
+                        3,
+                        1,
+                        9,
+                        2,
+                        32,
+                        0,
+                        1,
+                        1,
+                        0,
+                        128,
+                        50,
+                        9,
+                        4,
+                        0,
+                        0,
+                        2,
+                        255,
+                        0,
+                        0,
+                        0,
+                        7,
+                        5,
+                        129,
+                        2,
+                        0,
+                        2,
+                        0,
+                        7,
+                        5,
+                        2,
+                        2,
+                        0,
+                        2,
+                        0
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read",
+                "fd": "fd_ro",
+                "size": 64
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_read": 0,
+                    "data": []
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "lseek",
+                "fd": "fd_ro",
+                "offset": 18,
+                "whence": "SEEK_SET"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "offset": 18
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "read",
+                "fd": "fd_ro",
+                "size": 9
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_read": 9,
+                    "data": [
+                        9,
+                        2,
+                        32,
+                        0,
+                        1,
+                        1,
+                        0,
+                        128,
+                        50
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "pread",
+                "fd": "fd_ro",
+                "offset": 0,
+                "size": 18
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "bytes_read": 18,
+                    "data": [
+                        18,
+                        1,
+                        0,
+                        2,
+                        0,
+                        0,
+                        0,
+                        64,
+                        52,
+                        18,
+                        120,
+                        86,
+                        67,
+                        5,
+                        1,
+                        2,
+                        3,
+                        1
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "lseek",
+                "fd": "fd_ro",
+                "offset": -1,
+                "whence": "SEEK_SET"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "get_speed",
+                "fd": "fd_ro"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EPERM"
+            }
+        },
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd_rw",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd_rw"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "write",
+                "fd": "fd_rw",
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4
+                ]
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EINVAL"
+            }
+        },
+        {
+            "step": {
+                "type": "get_speed",
+                "fd": "fd_rw"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "speed": 3
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "get_capabilities",
+                "fd": "fd_rw",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "capabilities": 511
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "connectinfo",
+                "fd": "fd_rw",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "devnum_matches": true,
+                    "slow": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd_ro"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd_rw"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

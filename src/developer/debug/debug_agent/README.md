@@ -120,6 +120,22 @@ Callers and implementations must preserve these invariants:
   Exception handlers in `DebuggedJob` and `DebuggedProcess` must lazily create
   `DebuggedProcess` and call `PopulateCurrentThreads` upon receiving an
   exception.
+- `DebuggedProcess::OnThreadStarting` must insert the new thread into `threads_`
+  before it suspends the thread, closes the exception, or sends a notification.
+  When `suspend_new_threads_` is false, hold `ZX_EXCP_THREAD_STARTING` until
+  `SendRunningThreadNotification` sends a `State::kRunning` record with
+  `StackAmount::kNone`. When `suspend_new_threads_` is true, call
+  `ClientSuspend(false)` before `exception.reset()`, then call
+  `WaitForSuspensionSignal` to wait for the suspended signal without accepting a
+  blocked exception state.
+- On deferred-module attaches where `ShouldDeferModules` is true,
+  `DebugAgent::OnProcessChanged` must not send transient `State::kBlocked`
+  notifications for the thread held in a job exception. On `kWeak` process
+  start, skip `PopulateCurrentThreads` so `DebuggedProcess::OnThreadStarting`
+  reports the initial thread. On `job_only`, `kMinimal`, and `kNameChanged`
+  events, pass `exception_thread_koid` to `PopulateCurrentThreads` so that
+  thread reports `State::kRunning` with `StackAmount::kNone` while other threads
+  keep their live state.
 
 ## Side Effects
 

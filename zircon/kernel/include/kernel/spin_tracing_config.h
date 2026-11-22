@@ -15,16 +15,6 @@ constexpr bool kSchedulerLockSpinTracingEnabled = true;
 constexpr bool kSchedulerLockSpinTracingEnabled = false;
 #endif
 
-#if SCHEDULER_LOCK_SPIN_TRACING_COMPRESSED
-constexpr bool kSchedulerLockSpinTracingCompressed = true;
-#else
-constexpr bool kSchedulerLockSpinTracingCompressed = false;
-#endif
-
-static_assert(!kSchedulerLockSpinTracingCompressed || kSchedulerLockSpinTracingEnabled,
-              "Error: Compress lock-spin trace records requested, but lock-spin tracing is not "
-              "enabled.");
-
 namespace spin_tracing {
 
 namespace internal {
@@ -46,42 +36,27 @@ struct Bitfield {
 
 }  // namespace internal
 
-enum class LockType { kSpinlock = 0, kMutex = 1, kChainLock = 2, kRwLock = 3 };
-enum class FinishType {
-  kLockAcquired = 0,
-  kBlocked = 1,
-};
+enum class LockType : uint8_t { kSpinlock = 0 };
 
 class EncodedLockId {
  public:
-  using IdBits = internal::Bitfield<uint64_t, 49, 0>;            // bits [ 0 .. 48]
-  using ClassNameBits = internal::Bitfield<uint16_t, 12, 49>;    // bits [49 .. 60]
-  using LockTypeBits = internal::Bitfield<LockType, 2, 61>;      // bits [61 .. 62]
-  using FinishTypeBits = internal::Bitfield<FinishType, 1, 63>;  // bits [63 .. 63]
+  using IdBits = internal::Bitfield<uint64_t, 49, 0>;          // bits [ 0 .. 48]
+  using ClassNameBits = internal::Bitfield<uint16_t, 12, 49>;  // bits [49 .. 60]
+  using LockTypeBits = internal::Bitfield<LockType, 2, 61>;    // bits [61 .. 62]
 
   constexpr EncodedLockId(LockType type, uint64_t lock_id, uint16_t class_name_id)
-      : value_{LockTypeBits::Encode(type) | IdBits::Encode(lock_id) |
-               ClassNameBits::Encode(class_name_id)} {}
-
-  static constexpr EncodedLockId Invalid() { return EncodedLockId{}; }
+      : value_{
+            LockTypeBits::Encode(type) | IdBits::Encode(lock_id) |
+                ClassNameBits::Encode(class_name_id),
+        } {}
 
   void SetLockClassId(uint16_t class_name_id) {
     value_ = ClassNameBits::Reset(value_, class_name_id);
   }
 
-  uint64_t FinishedValue(FinishType finish_type) {
-    return value_ | FinishTypeBits::Encode(finish_type);
-  }
-
-  constexpr uint64_t value() const { return value_; }
-  constexpr uint64_t id() const { return IdBits::Decode(value_); }
   constexpr uint16_t class_name() const { return ClassNameBits::Decode(value_); }
-  constexpr LockType lock_type() const { return LockTypeBits::Decode(value_); }
-  constexpr FinishType finish_type() const { return FinishTypeBits::Decode(value_); }
 
  private:
-  constexpr EncodedLockId() = default;
-
   uint64_t value_{0};
 };
 

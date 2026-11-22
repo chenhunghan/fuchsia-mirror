@@ -11,16 +11,23 @@
     program: {
         binary: "bin/font_provider_integration_tests",
     },
-    children: [
-        {
-            name: "config",
-            url: "#meta/test_config_values.cm",
-        },
-    ],
     collections: [
         {
             name: "coll",
             durability: "transient",
+        },
+    ],
+    capabilities: [
+        {
+            config: "fuchsia.fonts.FontManifest",
+            type: "string",
+            max_size: 1024,
+            value: "",
+        },
+        {
+            config: "fuchsia.fonts.VerboseLogging",
+            type: "bool",
+            value: true,
         },
     ],
     offer: [
@@ -42,7 +49,7 @@
                 "fuchsia.fonts.FontManifest",
                 "fuchsia.fonts.VerboseLogging",
             ],
-            from: "#config",
+            from: "self",
             to: "#coll",
         },
     ],

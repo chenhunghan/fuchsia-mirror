@@ -8,7 +8,15 @@ import("//build/zircon/zx_library.gni")
 # LINT.IfChange
 zx_library("fbl") {
   sdk = "source"
-  sdk_publishable = "internal"
+
+  # fbl is in the IDK only so in-tree targets built with the Bazel SDK rules
+  # (e.g. drivers) can use it at HEAD. It must never be stabilized or used
+  # outside the Fuchsia tree, hence the name.
+  # TODO(https://fxbug.dev/444521390): Remove fbl from the IDK.
+  sdk_publishable = "partner"
+  sdk_name = "fbl_deprecated"
+  sdk_area = "Kernel"
+  stable = false
   sdk_headers = [
     "fbl/algorithm.h",
     "fbl/alloc_checker.h",
@@ -34,6 +42,7 @@ zx_library("fbl") {
     "fbl/mutex.h",
     "fbl/no_destructor.h",
     "fbl/null_lock.h",
+    "fbl/packed_pointer.h",
     "fbl/recycler.h",
     "fbl/ref_counted.h",
     "fbl/ref_counted_internal.h",
@@ -50,6 +59,7 @@ zx_library("fbl") {
     "fbl/unaligned.h",
     "fbl/unique_fd.h",
     "fbl/vector.h",
+    "fbl/wavl_tree_augmented_invariant_observer.h",
     "fbl/wavl_tree_best_node_observer.h",
   ]
 

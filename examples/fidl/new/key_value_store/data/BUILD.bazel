@@ -1,0 +1,64 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+    "resource",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+resource(
+    name = "error_invalid_key_",
+    srcs = ["error_invalid_key_.txt"],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+resource(
+    name = "error_invalid_value",
+    srcs = ["error_invalid_value.txt"],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+resource(
+    name = "verse_1",
+    srcs = ["verse_1.txt"],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+resource(
+    name = "verse_2",
+    srcs = ["verse_2.txt"],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+resource(
+    name = "verse_3",
+    srcs = ["verse_3.txt"],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+resource(
+    name = "verse_4",
+    srcs = ["verse_4.txt"],
+    outputs = ["data/{{source_file_part}}"],
+)
+
+# These are files that are meant to be included with our client component. Each
+# file represents a write "attempt" to the key-value store, where the name of
+# the file (sans extension) serving as the key, and the contents serving as the
+# value.
+fuchsia_package_resource_collection(
+    name = "resources",
+    resources = [
+        ":error_invalid_key_",
+        ":error_invalid_value",
+        ":verse_1",
+        ":verse_2",
+        ":verse_3",
+        ":verse_4",
+    ],
+    visibility = ["//examples/fidl/new/key_value_store:__subpackages__"],
+)

@@ -7,7 +7,6 @@
 
 use lock_order::lock::LockLevelFor;
 use lock_order::relation::LockBefore;
-use lock_order::wrap::{LockedWrapperApi, LockedWrapperUnlockedApi};
 use netstack3_base::{CoreTimerContext, CounterContext};
 use netstack3_device::{DeviceId, WeakDeviceId};
 use netstack3_ip::IpLayerTimerId;
@@ -18,13 +17,15 @@ use netstack3_ip::multicast_forwarding::{
     MulticastRouteTable, MulticastRouteTableContext,
 };
 
+use crate::context::WrapLockLevel;
+use crate::context::prelude::*;
 use crate::{BindingsContext, BindingsTypes, CoreCtx, IpExt, lock_ordering};
 
 #[netstack3_macros::instantiate_ip_impl_block(I)]
 impl<I: IpExt, BC: BindingsContext, L: LockBefore<lock_ordering::IpMulticastForwardingState<I>>>
     MulticastForwardingStateContext<I, BC> for CoreCtx<'_, BC, L>
 {
-    type Ctx<'a> = CoreCtx<'a, BC, lock_ordering::IpMulticastForwardingState<I>>;
+    type Ctx<'a> = CoreCtx<'a, BC, WrapLockLevel<lock_ordering::IpMulticastForwardingState<I>>>;
 
     fn with_state<
         O,
@@ -55,7 +56,7 @@ impl<I: IpExt, BC: BindingsContext, L: LockBefore<lock_ordering::IpMulticastForw
 impl<I: IpExt, BC: BindingsContext, L: LockBefore<lock_ordering::IpMulticastRouteTable<I>>>
     MulticastRouteTableContext<I, BC> for CoreCtx<'_, BC, L>
 {
-    type Ctx<'a> = CoreCtx<'a, BC, lock_ordering::IpMulticastRouteTable<I>>;
+    type Ctx<'a> = CoreCtx<'a, BC, WrapLockLevel<lock_ordering::IpMulticastRouteTable<I>>>;
 
     fn with_route_table<
         O,

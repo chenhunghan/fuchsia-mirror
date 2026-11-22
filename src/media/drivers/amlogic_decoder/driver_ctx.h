@@ -5,6 +5,7 @@
 #ifndef SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_DRIVER_CTX_H_
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_DRIVER_CTX_H_
 
+#include <fidl/fuchsia.io/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/async/cpp/sequence_checker.h>
@@ -73,7 +74,7 @@ class DriverCtx {
   // Run to_run_on_shared_fidl_sequence on the shared fidl sequence.
   void PostToSharedFidl(fit::closure to_run_on_shared_fidl_sequence);
 
-  void SetAuxServiceDirectory(fidl::InterfaceHandle<fuchsia::io::Directory> aux_service_directory);
+  void SetAuxServiceDirectory(fidl::ClientEnd<fuchsia_io::Directory> new_aux_service_directory);
 
   CodecMetrics& metrics();
 
@@ -98,7 +99,7 @@ class DriverCtx {
   thrd_t shared_fidl_thread_;
 
   // Services provided by codec_factory:
-  std::shared_ptr<sys::ServiceDirectory> aux_service_directory_;
+  fidl::ClientEnd<fuchsia_io::Directory> aux_service_directory_;
 
   // Cobalt:
   std::optional<CodecMetrics> metrics_;

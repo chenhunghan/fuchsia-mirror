@@ -35,5 +35,4 @@ fuchsia_driver_component("component") {
   component_name = "node_group"
   manifest = "meta/node-group.cml"
   deps = [ ":driver" ]
-  info = "meta/node-group-info.json"
 }

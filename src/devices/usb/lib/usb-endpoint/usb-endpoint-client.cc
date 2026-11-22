@@ -21,7 +21,7 @@ zx::result<std::optional<uint64_t>> GetMappedKey(
       // Is not unmapped at this point.
       return zx::ok(std::nullopt);
     default:
-      zxlogf(ERROR, "Unrecognized buffer type %lu", static_cast<unsigned long>(buffer.Which()));
+      FDF_LOG(ERROR, "Unrecognized buffer type %lu", static_cast<unsigned long>(buffer.Which()));
       return zx::error(ZX_ERR_INTERNAL);
   }
 }
@@ -33,7 +33,7 @@ EndpointClientBase::~EndpointClientBase() {
   while (auto req = free_reqs_.Remove()) {
     auto status = DeleteRequest(std::move(*req));
     if (status != ZX_OK) {
-      zxlogf(ERROR, "Could not delete request %d", status);
+      FDF_LOG(ERROR, "Could not delete request %d", status);
     }
   }
 
@@ -62,7 +62,7 @@ zx_status_t EndpointClientBase::Unmap(const fuchsia_hardware_usb_request::Buffer
   auto mapped = node.mapped();
   auto status = zx::vmar::root_self()->unmap(mapped.addr, mapped.size);
   if (status != ZX_OK) {
-    zxlogf(ERROR, "Failed to unmap VMO %d", status);
+    FDF_LOG(ERROR, "Failed to unmap VMO %d", status);
     return status;
   }
 
@@ -90,7 +90,7 @@ zx_status_t EndpointClientBase::DeleteRequest(usb::FidlRequest&& request) {
   for (auto& d : *request->data()) {
     auto status = Unmap(d);
     if (status != ZX_OK) {
-      zxlogf(ERROR, "Could not unmap buffer region %d", status);
+      FDF_LOG(ERROR, "Could not unmap buffer region %d", status);
       // Return the latest failed status value, but keep trying to unmap the rest of the buffer
       // regions
       ret_status = status;
@@ -105,17 +105,17 @@ zx_status_t EndpointClientBase::DeleteRequest(usb::FidlRequest&& request) {
     fidl::WireResult result = client_.wire_sync()->UnregisterVmos(
         fidl::VectorView<uint64_t>::FromExternal(vmo_ids.data(), vmo_ids.size()));
     if (!result.ok()) {
-      zxlogf(ERROR, "Failed to unregister vmo %s", result.FormatDescription().c_str());
+      FDF_LOG(ERROR, "Failed to unregister vmo %s", result.FormatDescription().c_str());
       return result.status();
     }
     if (result->failed_vmo_ids.size() != result->errors.size()) {
-      zxlogf(ERROR, "Inconsistent failed vmo ids and errors");
+      FDF_LOG(ERROR, "Inconsistent failed vmo ids and errors");
       return ZX_ERR_INTERNAL;
     }
     for (size_t i = 0; i < result->failed_vmo_ids.size(); i++) {
       zx_status_t status = result->errors.at(i);
-      zxlogf(ERROR, "Failed to unregister vmo %lu: %s", result->failed_vmo_ids.at(i),
-             zx_status_get_string(status));
+      FDF_LOG(ERROR, "Failed to unregister vmo %lu: %s", result->failed_vmo_ids.at(i),
+              zx_status_get_string(status));
       ret_status = status;
     }
   }
@@ -131,7 +131,7 @@ zx_status_t EndpointClientBase::Close() {
       for (fuchsia_hardware_usb_request::BufferRegion& d : *req.value()->data()) {
         zx_status_t status = Unmap(d);
         if (status != ZX_OK) {
-          zxlogf(ERROR, "Could not unmap buffer region %d", status);
+          FDF_LOG(ERROR, "Could not unmap buffer region %d", status);
           // Return the latest failed status value, but keep trying to unmap the rest of the buffer
           // regions
           ret_status = status;
@@ -156,7 +156,7 @@ size_t EndpointClientBase::RegisterVmos(size_t vmo_count, size_t vmo_size) {
   size_t actual = 0;
   fidl::WireResult result = client_.wire_sync()->RegisterVmos(vmo_info);
   if (!result.ok()) {
-    zxlogf(ERROR, "Failed to register VMOs %s", result.FormatDescription().c_str());
+    FDF_LOG(ERROR, "Failed to register VMOs %s", result.FormatDescription().c_str());
     return 0;
   }
 
@@ -169,7 +169,7 @@ size_t EndpointClientBase::RegisterVmos(size_t vmo_count, size_t vmo_size) {
     auto status = zx::vmar::root_self()->map(ZX_VM_PERM_READ | ZX_VM_PERM_WRITE, 0, vmo.vmo(), 0,
                                              vmo_size, &mapped_addr);
     if (status != ZX_OK) {
-      zxlogf(ERROR, "Failed to map the vmo: %d", status);
+      FDF_LOG(ERROR, "Failed to map the vmo: %d", status);
       // Try for the next one.
       continue;
     }

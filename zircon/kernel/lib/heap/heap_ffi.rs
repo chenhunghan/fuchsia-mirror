@@ -8,19 +8,6 @@
 
 use core::ffi::c_void;
 
-// TODO(https://fxbug.dev/565806419): Remove once all C/C++ callers are ported to Rust.
-/// C FFI entry point for [`super::heap_wrapper::rust_heap_init`].
-///
-/// # Safety
-///
-/// The caller must ensure that this is called exactly once during kernel initialization.
-// SAFETY: The symbol name is unique and matches the C FFI declaration.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_heap_init() {
-    // SAFETY: The caller upholds the preconditions of `rust_heap_init`.
-    unsafe { super::heap_wrapper::rust_heap_init() }
-}
-
 /// C FFI entry point for [`super::heap_wrapper::malloc`].
 ///
 /// # Safety
@@ -103,12 +90,4 @@ pub extern "C" fn rust_profile_track_alloc(size: usize) -> u32 {
 #[unsafe(export_name = "rust_profile_track_free")]
 pub extern "C" fn rust_profile_track_free(handle: u32, size: usize) {
     super::heap_wrapper::profile_track_free(handle, size)
-}
-
-// TODO(https://fxbug.dev/565806419): Remove once all C/C++ callers are ported to Rust.
-/// C FFI entry point for [`super::heap_wrapper::rust_cmpct_set_fill_on_alloc_threshold`].
-// SAFETY: The symbol name is unique and matches the C FFI declaration.
-#[unsafe(export_name = "rust_cmpct_set_fill_on_alloc_threshold")]
-pub extern "C" fn rust_cmpct_set_fill_on_alloc_threshold(size: usize) {
-    super::heap_wrapper::rust_cmpct_set_fill_on_alloc_threshold(size)
 }

@@ -4,8 +4,13 @@
 # found in the LICENSE file.
 """Unit tests for pluggable system samplers and coordinators."""
 
+import json
+import os
 import shutil
+import signal
 import tempfile
+import threading
+import time
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -245,6 +250,46 @@ class SystemProfilerCoordinatorTest(unittest.TestCase):
         self.assertEqual(len(second_events), 1)
         self.assertEqual(second_events[0]["name"], "fake.metric")
         self.assertEqual(second_events[0]["args"]["count"], 42)
+
+
+class RunProfilerSignalWakeupTest(ProcMockTestCase):
+    def test_sigterm_wakes_sleep_immediately_and_closes_json(self) -> None:
+        output_path = self.test_dir / "system_profile.json"
+        timer = threading.Timer(
+            0.05, os.kill, args=(os.getpid(), signal.SIGTERM)
+        )
+        timer_started = False
+
+        def time_fn() -> float:
+            # run_profiler() first calls time_fn() after blocking SIGTERM.
+            # Start the timer thread then, so that it inherits the blocked
+            # mask and the default SIGTERM action can't kill the test process.
+            nonlocal timer_started
+            if not timer_started:
+                timer_started = True
+                timer.start()
+            return time.time()
+
+        t0 = time.monotonic()
+        try:
+            system_profiler.run_profiler(
+                interval_sec=10.0,
+                output_path=output_path,
+                target_pid=None,
+                metadata={"FX_BUILD_UUID": "test-uuid"},
+                proc_dir=str(self.proc_dir),
+                time_fn=time_fn,
+            )
+        finally:
+            timer.cancel()
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})
+        elapsed = time.monotonic() - t0
+
+        self.assertLess(elapsed, 2.0)
+        parsed = json.loads(output_path.read_text())
+        self.assertIsInstance(parsed, list)
+        self.assertGreaterEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["name"], "system_profiler_metadata")
 
 
 if __name__ == "__main__":

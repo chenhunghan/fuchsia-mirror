@@ -4,7 +4,6 @@
 
 #include "src/devices/nand/drivers/skip-block/skip-block.h"
 
-#include <fuchsia/hardware/badblock/c/banjo.h>
 #include <fuchsia/hardware/nand/c/banjo.h>
 #include <lib/ddk/metadata.h>
 #include <lib/driver/compat/cpp/banjo_client.h>
@@ -21,6 +20,7 @@
 #include <utility>
 
 #include <fbl/algorithm.h>
+#include <fbl/alloc_checker.h>
 #include <fbl/auto_lock.h>
 #include <safemath/safe_math.h>
 
@@ -202,12 +202,12 @@ zx::result<> SkipBlock::Start(fdf::DriverContext context) {
   }
   nand_ = nand.value();
 
-  zx::result bad_block = compat::ConnectBanjo<ddk::BadBlockProtocolClient>(incoming);
+  zx::result bad_block = incoming->Connect<fuchsia_hardware_badblock::Service::BadBlock>();
   if (bad_block.is_error()) {
-    fdf::error("Failed to get bad-block banjo protocol: {}", bad_block);
+    fdf::error("Failed to get bad-block service: {}", bad_block);
     return bad_block.take_error();
   }
-  bad_block_ = bad_block.value();
+  bad_block_.Bind(std::move(bad_block.value()));
 
   zx::result copy_count = compat::GetMetadata<uint32_t>(incoming, DEVICE_METADATA_PRIVATE);
   if (copy_count.is_error()) {
@@ -285,26 +285,24 @@ void SkipBlock::ServeDevfs(fidl::ServerEnd<fuchsia_hardware_skipblock::SkipBlock
 }
 
 zx_status_t SkipBlock::GetBadBlockList(fbl::Array<uint32_t>* bad_blocks) {
-  size_t bad_block_count;
-  zx_status_t status = bad_block_.GetBadBlockList(nullptr, 0, &bad_block_count);
-  if (status != ZX_OK) {
-    return status;
+  fidl::WireResult result = bad_block_->GetBadBlockList();
+  if (!result.ok()) {
+    return result.status();
   }
-  if (bad_block_count == 0) {
+  if (result->is_error()) {
+    return result->error_value();
+  }
+  const auto& list = result->value()->bad_block_list;
+  if (list.empty()) {
     bad_blocks->reset();
     return ZX_OK;
   }
-  const size_t bad_block_list_len = bad_block_count;
-  std::unique_ptr<uint32_t[]> bad_block_list(new uint32_t[bad_block_count]);
-  memset(bad_block_list.get(), 0, sizeof(uint32_t) * bad_block_count);
-  status = bad_block_.GetBadBlockList(bad_block_list.get(), bad_block_list_len, &bad_block_count);
-  if (status != ZX_OK) {
-    return status;
+  fbl::AllocChecker ac;
+  *bad_blocks = fbl::MakeArray<uint32_t>(&ac, list.size());
+  if (!ac.check()) {
+    return ZX_ERR_NO_MEMORY;
   }
-  if (bad_block_list_len != bad_block_count) {
-    return ZX_ERR_INTERNAL;
-  }
-  *bad_blocks = fbl::Array<uint32_t>(bad_block_list.release(), bad_block_count);
+  memcpy(bad_blocks->data(), list.data(), sizeof(uint32_t) * list.size());
   return ZX_OK;
 }
 
@@ -477,10 +475,15 @@ zx_status_t SkipBlock::WriteLocked(ReadWriteOperation op, bool* bad_block_grown,
       op = std::move(op_context.op);
       if (op_context.mark_bad) {
         fdf::error("Failed to erase/write block {}, marking bad", op_context.physical_block);
-        status = bad_block_.MarkBlockBad(op_context.physical_block);
-        if (status != ZX_OK) {
-          fdf::error("Failed to mark block bad");
-          return status;
+        fidl::WireResult mark_result = bad_block_->MarkBlockBad(op_context.physical_block);
+        if (!mark_result.ok()) {
+          fdf::error("Failed to mark block bad: {}", mark_result.status_string());
+          return mark_result.status();
+        }
+        if (mark_result->is_error()) {
+          fdf::error("MarkBlockBad returned error: {}",
+                     zx_status_get_string(mark_result->error_value()));
+          return mark_result->error_value();
         }
         // Logical to physical mapping has changed, so we need to re-initialize block_map_.
         fbl::Array<uint32_t> bad_blocks;

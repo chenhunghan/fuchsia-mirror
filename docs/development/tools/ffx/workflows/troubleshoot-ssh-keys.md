@@ -85,6 +85,38 @@ follow these steps:
     on the device. For more details, see
     [Create SSH keys for Fuchsia devices][create-ssh-keys].
 
+## Manual verification using Linux commands {:#manual-linux-verification}
+
+You can also inspect and compare SSH keys manually without `ffx`:
+
+1.  **Check file permissions and local public keys**:
+
+    Verify that your private key has `0600` permissions (OpenSSH rejects
+    world- or group-readable private keys) and inspect the public keys in
+    `~/.ssh/` and your `ssh-agent`:
+
+    ```posix-terminal
+    ls -la ~/.ssh/fuchsia_ed25519*
+    cat ~/.ssh/fuchsia_authorized_keys
+    ssh-add -L
+    ```
+
+2.  **Query the device's `authorized_keys` over HTTP (`eng` / `userdebug`
+    builds)**:
+
+    On `eng` and `userdebug` builds, the target serves its `authorized_keys`
+    over HTTP on port `9797` (from the host, `ffx` queries the port configured
+    via `ssh.authorized_keys_server_port`, which defaults to `9797`). You can
+    fetch the device's expected public keys directly with `curl`:
+
+    ```posix-terminal
+    curl "http://[fe80::ca63:14ff:fe70:51db%zx-c863147051da]:9797"
+    ```
+
+    Compare the returned `ssh-ed25519` key strings against your local
+    `~/.ssh/fuchsia_authorized_keys` (or
+    `ssh-keygen -y -f ~/.ssh/fuchsia_ed25519`) and `ssh-add -L` output.
+
 <!-- Reference links -->
 
 [create-ssh-keys]: /docs/development/tools/ffx/workflows/create-ssh-keys-for-devices.md

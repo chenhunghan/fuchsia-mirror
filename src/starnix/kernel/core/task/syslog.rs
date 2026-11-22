@@ -9,13 +9,17 @@ use crate::task::{
     Waiter,
 };
 use crate::vfs::OutputBuffer;
-use diagnostics_data::{Data, Logs, LogsData, Severity};
+use diagnostics_data::Severity;
+use diagnostics_log_encoding::{
+    Argument, FXT_HEADER_SIZE, Header, LOG_CONTROL_BIT, MONIKER, TRACING_FORMAT_LOG_RECORD_TYPE,
+    Value,
+};
 use estimate_timeline::{DefaultFetcher, TimeFetcher, TimelineEstimator};
 use fidl_fuchsia_diagnostics as fdiagnostics;
 use fuchsia_component::client::connect_to_protocol_sync;
 use fuchsia_inspect::Inspector;
 use futures::FutureExt;
-use serde::Deserialize;
+use smallvec::SmallVec;
 use starnix_sync::{LockDepMutex, SyslogStateLock, SyslogSubscriptionLock};
 use starnix_uapi::auth::CAP_SYSLOG;
 use starnix_uapi::errors::{EAGAIN, Errno, errno, error};
@@ -23,7 +27,7 @@ use starnix_uapi::syslog::SyslogAction;
 use starnix_uapi::vfs::FdEvents;
 use std::cmp;
 use std::collections::VecDeque;
-use std::io::{self, Write};
+use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock, mpsc};
 use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, TryFromBytes};
@@ -200,13 +204,6 @@ pub struct LogSubscription {
     waiters: Arc<WaitQueue>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum OneOrMany<T> {
-    Many(Vec<T>),
-    One(T),
-}
-
 impl LogSubscription {
     pub fn wait(&self, waiter: &Waiter, events: FdEvents, handler: EventHandler) -> WaitCanceler {
         self.waiters.wait_async_fd_events(waiter, events, handler)
@@ -289,9 +286,12 @@ impl LogSubscription {
 struct LogIterator {
     iterator: fdiagnostics::BatchIteratorSynchronousProxy,
     pending_formatted_contents: VecDeque<fdiagnostics::FormattedContent>,
-    pending_datas: VecDeque<Data<Logs>>,
+    vmo_buf: Vec<u8>,
+    vmo_offset: usize,
+    vmo_len: usize,
+    formatted_buf: Vec<u8>,
     state: Arc<LockDepMutex<TimelineEstimator<DefaultFetcher>, SyslogStateLock>>,
-    tags: std::collections::HashMap<u64, diagnostics_message::MonikerWithUrl>,
+    tags: std::collections::HashMap<u64, String>,
 }
 
 impl LogIterator {
@@ -322,128 +322,116 @@ impl LogIterator {
         Ok(Self {
             iterator,
             pending_formatted_contents: VecDeque::new(),
-            pending_datas: VecDeque::new(),
+            vmo_buf: Vec::new(),
+            vmo_offset: 0,
+            vmo_len: 0,
+            formatted_buf: Vec::new(),
             state: syslog.state.clone(),
             tags: std::collections::HashMap::new(),
         })
     }
 
-    // TODO(b/315520045): Investigate if we should make this
-    // not allocate anything.
     fn get_next(&mut self) -> Result<Option<Vec<u8>>, Errno> {
-        'main_loop: loop {
-            while let Some(data) = self.pending_datas.pop_front() {
-                if let Some(log) = format_log(data, &self.state).map_err(|_| errno!(EIO))? {
+        loop {
+            // Process remaining FXT records in the current VMO buffer.
+            while self.vmo_offset < self.vmo_len {
+                let current_slice = &self.vmo_buf[self.vmo_offset..self.vmo_len];
+                if current_slice.len() < FXT_HEADER_SIZE {
+                    self.vmo_offset = self.vmo_len;
+                    break;
+                }
+
+                let (header, after_header) =
+                    Header::read_from_prefix(current_slice).map_err(|_| {
+                        self.vmo_offset = self.vmo_len;
+                        errno!(EIO, "Invalid FXT header")
+                    })?;
+
+                let record_size_words = header.size_words() as usize;
+                let record_len = record_size_words * 8;
+                if record_len < 16 || current_slice.len() < record_len {
+                    self.vmo_offset = self.vmo_len;
+                    break;
+                }
+
+                let (record_bytes, _) = current_slice.split_at(record_len);
+                self.vmo_offset += record_len;
+
+                if header.raw_type() != TRACING_FORMAT_LOG_RECORD_TYPE {
+                    continue;
+                }
+
+                let tag = header.tag();
+                let is_manifest = (tag & LOG_CONTROL_BIT) != 0;
+                let actual_tag = (tag & !LOG_CONTROL_BIT) as u64;
+
+                let (timestamp_raw, _) = i64::read_from_prefix(after_header)
+                    .map_err(|_| errno!(EIO, "Invalid FXT timestamp"))?;
+                let timestamp = zx::BootInstant::from_nanos(timestamp_raw);
+
+                let arguments_buffer = &record_bytes[16..];
+
+                if is_manifest {
+                    let mut moniker_str = None;
+                    let mut args_slice = arguments_buffer;
+                    while !args_slice.is_empty() {
+                        let (arg, rem) =
+                            diagnostics_log_encoding::parse::parse_argument(args_slice)
+                                .map_err(|_| errno!(EIO, "Error parsing FXT argument"))?;
+                        args_slice = rem;
+                        if arg.name() == MONIKER {
+                            if let Value::Text(t) = arg.value() {
+                                moniker_str = Some(t.into_owned());
+                            }
+                        }
+                    }
+                    if let Some(m) = moniker_str {
+                        let comp_name = moniker_to_component_name(&m);
+                        self.tags.insert(actual_tag, comp_name);
+                    }
+                    continue;
+                }
+
+                let component_name =
+                    self.tags.get(&actual_tag).map(|s| s.as_str()).unwrap_or("unknown");
+
+                if let Some(log) = format_fxt_record(
+                    header,
+                    timestamp,
+                    component_name,
+                    arguments_buffer,
+                    &self.state,
+                    &mut self.formatted_buf,
+                )? {
                     return Ok(Some(log));
                 }
             }
-            while let Some(formatted_content) = self.pending_formatted_contents.pop_front() {
-                let output: OneOrMany<Data<Logs>> = match formatted_content {
+
+            // Need more data from pending VMO batch contents.
+            if let Some(formatted_content) = self.pending_formatted_contents.pop_front() {
+                match formatted_content {
                     fdiagnostics::FormattedContent::Fxt(data) => {
-                        let buf = data
-                            .read_to_vec(
-                                0,
-                                data.get_content_size().map_err(|a| {
-                                    errno!(EIO, format!("Error {a} getting VMO size"))
-                                })?,
-                            )
-                            .map_err(|err| {
-                                errno!(EIO, format!("failed to read logs vmo: {err}"))
-                            })?;
-                        let mut current_slice = buf.as_ref();
-                        let mut ret: Option<OneOrMany<LogsData>> = None;
-                        loop {
-                            let (record, remaining) =
-                                diagnostics_log_encoding::parse::parse_record(current_slice)
-                                    .map_err(|a| errno!(EIO, format!("Error {a} parsing FXT")))?;
-
-                            let record_len = current_slice.len() - remaining.len();
-                            let record_bytes = &current_slice[..record_len];
-
-                            let header = diagnostics_log_encoding::Header::read_from_bytes(
-                                &current_slice[..8],
-                            )
-                            .map_err(|_| errno!(EIO, "Invalid FXT header"))?;
-                            let tag = header.tag();
-                            let is_manifest =
-                                (tag & diagnostics_log_encoding::LOG_CONTROL_BIT) != 0;
-                            let actual_tag = tag & !diagnostics_log_encoding::LOG_CONTROL_BIT;
-
-                            if is_manifest {
-                                let mut moniker = None;
-                                let mut url = None;
-                                for arg in &record.arguments {
-                                    use diagnostics_log_encoding::Value;
-                                    if arg.name() == "moniker" {
-                                        if let Value::Text(t) = arg.value() {
-                                            moniker = Some(diagnostics_data::ExtendedMoniker::parse_str(&t).unwrap_or_else(|_| diagnostics_data::ExtendedMoniker::ComponentInstance(moniker::Moniker::parse_str("unknown").unwrap())));
-                                        }
-                                    } else if arg.name() == "url" {
-                                        if let Value::Text(t) = arg.value() {
-                                            url = Some(flyweights::FlyStr::new(t));
-                                        }
-                                    }
-                                }
-                                if let (Some(moniker), Some(url)) = (moniker, url) {
-                                    self.tags.insert(
-                                        actual_tag as u64,
-                                        diagnostics_message::MonikerWithUrl { moniker, url },
-                                    );
-                                }
-                            } else {
-                                let source = self
-                                    .tags
-                                    .get(&(actual_tag as u64))
-                                    .cloned()
-                                    .unwrap_or_else(|| diagnostics_message::MonikerWithUrl {
-                                        moniker:
-                                            diagnostics_data::ExtendedMoniker::ComponentInstance(
-                                                moniker::Moniker::parse_str("unknown").unwrap(),
-                                            ),
-                                        url: flyweights::FlyStr::new("unknown"),
-                                    });
-
-                                let data =
-                                    diagnostics_message::from_structured(source, record_bytes)
-                                        .map_err(|a| {
-                                            errno!(EIO, format!("Error {a} parsing FXT"))
-                                        })?;
-
-                                ret = Some(match ret.take() {
-                                    Some(OneOrMany::One(one)) => OneOrMany::Many(vec![one, data]),
-                                    Some(OneOrMany::Many(mut many)) => {
-                                        many.push(data);
-                                        OneOrMany::Many(many)
-                                    }
-                                    None => OneOrMany::One(data),
-                                });
-                            }
-
-                            if remaining.is_empty() {
-                                break;
-                            }
-                            current_slice = remaining;
+                        let content_size = data
+                            .get_content_size()
+                            .map_err(|a| errno!(EIO, format!("Error {a} getting VMO size")))?
+                            as usize;
+                        if self.vmo_buf.len() < content_size {
+                            self.vmo_buf.resize(content_size, 0);
                         }
-                        ret.unwrap_or_else(|| OneOrMany::Many(vec![]))
+                        data.read(&mut self.vmo_buf[..content_size], 0).map_err(|err| {
+                            errno!(EIO, format!("failed to read logs vmo: {err}"))
+                        })?;
+                        self.vmo_offset = 0;
+                        self.vmo_len = content_size;
+                        continue;
                     }
                     format => {
-                        unreachable!("we only request and expect one format. Got: {format:?}")
-                    }
-                };
-                match output {
-                    OneOrMany::One(data) => {
-                        if let Some(log) = format_log(data, &self.state).map_err(|_| errno!(EIO))? {
-                            return Ok(Some(log));
-                        }
-                    }
-                    OneOrMany::Many(datas) => {
-                        if datas.len() > 0 {
-                            self.pending_datas.extend(datas);
-                            continue 'main_loop;
-                        }
+                        unreachable!("we only request and expect FXT format. Got: {format:?}")
                     }
                 }
             }
+
+            // Fetch next batch from BatchIterator.
             let next_batch = {
                 let _waiting_guard = ThreadLockupDetector::pause_tracking();
                 self.iterator
@@ -553,71 +541,134 @@ pub(crate) fn extract_level(msg: &[u8]) -> Option<(KmsgLevel, &[u8])> {
         .map(|level| (level, &msg[end + 1..]))
 }
 
-fn format_log<T: TimeFetcher>(
-    data: Data<Logs>,
+fn moniker_to_component_name(moniker_str: &str) -> String {
+    match diagnostics_data::ExtendedMoniker::parse_str(moniker_str) {
+        Ok(diagnostics_data::ExtendedMoniker::ComponentInstance(moniker)) => {
+            if moniker.is_root() {
+                "<root>".to_string()
+            } else if let Some(leaf) = moniker.leaf() {
+                leaf.as_ref().to_string()
+            } else {
+                "unknown".to_string()
+            }
+        }
+        Ok(diagnostics_data::ExtendedMoniker::ComponentManager) => "klog".to_string(),
+        Err(_) => "unknown".to_string(),
+    }
+}
+
+fn format_fxt_record<'a, T: TimeFetcher>(
+    header: Header,
+    timestamp: zx::BootInstant,
+    component_name: &str,
+    arguments_buffer: &'a [u8],
     state: &Arc<LockDepMutex<TimelineEstimator<T>, SyslogStateLock>>,
-) -> Result<Option<Vec<u8>>, io::Error> {
-    let mut formatted_tags = match data.tags() {
-        None => vec![],
-        Some(tags) => {
-            let mut formatted = vec![];
-            for (i, tag) in tags.iter().enumerate() {
+    formatted_buf: &mut Vec<u8>,
+) -> Result<Option<Vec<u8>>, Errno> {
+    let mut tags = SmallVec::<[std::borrow::Cow<'a, str>; 4]>::new();
+    let mut message: Option<std::borrow::Cow<'a, str>> = None;
+    let mut pid: Option<u64> = None;
+
+    let mut args_slice = arguments_buffer;
+    while !args_slice.is_empty() {
+        let (arg, rem) = diagnostics_log_encoding::parse::parse_argument(args_slice)
+            .map_err(|_| errno!(EIO, "Error parsing FXT argument"))?;
+        args_slice = rem;
+        match arg {
+            Argument::Tag(t) => {
                 // TODO(b/299533466): remove this.
-                if tag.contains("fxlogcat") {
+                if t.contains("fxlogcat") {
                     return Ok(None);
                 }
-                if i != 0 {
-                    write!(&mut formatted, ",")?;
-                }
-                write!(&mut formatted, "{tag}")?;
+                tags.push(t);
             }
-            write!(&mut formatted, ": ")?;
-            formatted
+            Argument::Message(m) => {
+                message = Some(m);
+            }
+            Argument::Pid(p) => {
+                pid = Some(p.raw_koid());
+            }
+            _ => {}
         }
-    };
+    }
 
-    let mut result = Vec::<u8>::new();
-    let (level, msg_after_level) = match data.msg().and_then(|msg| extract_level(msg.as_bytes())) {
-        Some((level, remaining_msg)) => (level as u8, Some(remaining_msg)),
-        None => match data.severity() {
-            Severity::Trace | Severity::Debug => (KmsgLevel::Debug as u8, None),
-            Severity::Info => (KmsgLevel::Info as u8, None),
-            Severity::Warn => (KmsgLevel::Warning as u8, None),
-            Severity::Error => (KmsgLevel::Error as u8, None),
-            Severity::Fatal => (KmsgLevel::Critical as u8, None),
-        },
+    let (level, msg_slice) = match message.as_deref().and_then(|msg| extract_level(msg.as_bytes()))
+    {
+        Some((lvl, rem)) => (lvl as u8, rem),
+        None => {
+            let raw_sev = header.severity();
+            let sev = Severity::from(raw_sev);
+            let lvl = match sev {
+                Severity::Trace | Severity::Debug => KmsgLevel::Debug as u8,
+                Severity::Info => KmsgLevel::Info as u8,
+                Severity::Warn => KmsgLevel::Warning as u8,
+                Severity::Error => KmsgLevel::Error as u8,
+                Severity::Fatal => KmsgLevel::Critical as u8,
+            };
+            (lvl, message.as_deref().map(|m| m.as_bytes()).unwrap_or(b""))
+        }
     };
 
     // TODO(https://fxbug.dev/433724019): this isn't correct strictly speaking, but will be in most
     // cases. We unapply the *current* offset and in the case where suspension happened between
     // when the log message was generated and when Starnix is forwarding the log message, this will
     // be different from the *actual* offset prior to suspension.
-    let time = state.lock().boot_time_to_monotonic_time(data.metadata.timestamp);
+    let time = state.lock().boot_time_to_monotonic_time(timestamp);
     let time_nanos = time.into_nanos();
     let time_secs = time_nanos / NANOS_PER_SECOND;
     // Microsecond-level precision fractional time.
     let time_fract = (time_nanos % NANOS_PER_SECOND) / MICROS_PER_NANOSECOND;
-    let component_name = data.component_name();
-    write!(&mut result, "<{level}>[{time_secs:05}.{time_fract:06}] {component_name}",)?;
 
-    match data.metadata.pid {
-        Some(pid) => write!(&mut result, "[{pid}]: ")?,
-        None => write!(&mut result, ": ")?,
+    formatted_buf.clear();
+    write!(formatted_buf, "<{level}>[{time_secs:05}.{time_fract:06}] {component_name}")
+        .map_err(|_| errno!(EIO))?;
+
+    match pid {
+        Some(p) => write!(formatted_buf, "[{p}]: ").map_err(|_| errno!(EIO))?,
+        None => write!(formatted_buf, ": ").map_err(|_| errno!(EIO))?,
     }
 
-    result.append(&mut formatted_tags);
-
-    if let Some(msg) = msg_after_level {
-        write!(&mut result, "{}", String::from_utf8_lossy(msg))?;
-    } else if let Some(msg) = data.msg() {
-        write!(&mut result, "{msg}")?;
+    for (i, tag) in tags.iter().enumerate() {
+        if i != 0 {
+            write!(formatted_buf, ",").map_err(|_| errno!(EIO))?;
+        }
+        write!(formatted_buf, "{tag}").map_err(|_| errno!(EIO))?;
+    }
+    if !tags.is_empty() {
+        write!(formatted_buf, ": ").map_err(|_| errno!(EIO))?;
     }
 
-    for kvp in data.payload_keys_strings() {
-        write!(&mut result, " {kvp}")?;
+    formatted_buf.extend_from_slice(msg_slice);
+
+    // Second pass for structured payload keys
+    let mut args_slice = arguments_buffer;
+    while !args_slice.is_empty() {
+        let (arg, rem) = diagnostics_log_encoding::parse::parse_argument(args_slice)
+            .map_err(|_| errno!(EIO, "Error parsing FXT argument"))?;
+        args_slice = rem;
+        if let Argument::Other { name, value } = arg {
+            match value {
+                Value::SignedInt(v) => {
+                    write!(formatted_buf, " {name}={v}").map_err(|_| errno!(EIO))?;
+                }
+                Value::UnsignedInt(v) => {
+                    write!(formatted_buf, " {name}={v}").map_err(|_| errno!(EIO))?;
+                }
+                Value::Floating(v) => {
+                    write!(formatted_buf, " {name}={v}").map_err(|_| errno!(EIO))?;
+                }
+                Value::Text(v) => {
+                    write!(formatted_buf, " {name}={v}").map_err(|_| errno!(EIO))?;
+                }
+                Value::Boolean(v) => {
+                    write!(formatted_buf, " {name}={v}").map_err(|_| errno!(EIO))?;
+                }
+            }
+        }
     }
-    write!(&mut result, "\n")?;
-    Ok(Some(result))
+
+    formatted_buf.push(b'\n');
+    Ok(Some(formatted_buf.clone()))
 }
 
 #[cfg(test)]
@@ -690,5 +741,14 @@ mod tests {
     #[test]
     fn parse_message_defaults_when_no_level() {
         assert_eq!(None, extract_level("some message".as_bytes()));
+    }
+
+    #[test]
+    fn test_moniker_to_component_name() {
+        assert_eq!(moniker_to_component_name("core/network/netstack"), "netstack");
+        assert_eq!(moniker_to_component_name("bootstrap/archivist"), "archivist");
+        assert_eq!(moniker_to_component_name("/"), "<root>");
+        assert_eq!(moniker_to_component_name("."), "<root>");
+        assert_eq!(moniker_to_component_name("<component_manager>"), "klog");
     }
 }

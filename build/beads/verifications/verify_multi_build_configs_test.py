@@ -63,7 +63,6 @@ build_info_board = "x64"
 build_info_product = "core"
 build_only_labels = ["//build/beads/verifications:example_targets"]
 compilation_mode = "release"
-export_bazel_tests = false
 target_cpu = "x64"
 truncate_build_info_commit_date = true
 """,
@@ -640,6 +639,84 @@ variants: "{variant=\\"asan-fuzzer\\" target_type=[\\"fuzzed_executable\\"]}"
                 stdout_text,
             )
             self.assertIn("1 unexpected diffs", stdout_text)
+
+    def test_multiproduct_ignored_gn_args_and_host_signature(self) -> None:
+        fuchsia_textproto = """
+compilation_mode: COMPILATION_MODE_RELEASE
+board: "boards/x64.gni"
+product: "products/fuchsia.gni"
+gn_args: "additional_bazel_sdk_labels = [ \\"//sdk:extra\\" ]"
+gn_args: "additional_tefmocheck_labels = [ \\"//vendor/google/tools/testing/tefmocheck:private_checks\\" ]"
+gn_args: "clippy_cause_failure = true"
+gn_args: "enable_jobserver = true"
+gn_args: "exported_package_labels = [ \\"//src:pkg\\" ]"
+gn_args: "include_clippy = true"
+gn_args: "include_rustdoc = true"
+gn_args: "is_postsubmit = true"
+gn_args: "sdk_archive_labels = [ \\"//sdk:archive\\" ]"
+gn_args: "sdk_cross_compile_host_tools = true"
+gn_args: "truncate_build_info_commit_date = true"
+target_arch: X64
+"""
+        riscv_textproto = """
+compilation_mode: COMPILATION_MODE_RELEASE
+board: "boards/riscv64.gni"
+product: "products/minimal.gni"
+gn_args: "truncate_build_info_commit_date = true"
+target_arch: RISCV64
+"""
+        fuchsia_cfg = verify_multi_build_configs.parse_fint_params_textproto(
+            fuchsia_textproto,
+            name="fuchsia.x64-release",
+        )
+        riscv_cfg = verify_multi_build_configs.parse_fint_params_textproto(
+            riscv_textproto,
+            name="minimal.riscv64-release",
+        )
+        args_gn = fuchsia_cfg.generate_args_gn()
+        for ignored_var in (
+            "additional_bazel_sdk_labels",
+            "additional_tefmocheck_labels",
+            "clippy_cause_failure",
+            "enable_jobserver",
+            "exported_package_labels",
+            "include_clippy",
+            "include_rustdoc",
+            "is_postsubmit",
+            "sdk_archive_labels",
+            "sdk_cross_compile_host_tools",
+        ):
+            self.assertNotIn(ignored_var, args_gn)
+        self.assertIn("truncate_build_info_commit_date = true", args_gn)
+        self.assertEqual(
+            fuchsia_cfg.host_config_signature(),
+            riscv_cfg.host_config_signature(),
+        )
+
+    def test_resolve_fint_params_specs_global_ci_and_try(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = pathlib.Path(tmpdir)
+            fint_root = (
+                root / "integration/infra/config/generated/fuchsia/fint_params"
+            )
+            global_ci_dir = fint_root / "global.ci"
+            try_dir = fint_root / "try"
+            global_ci_dir.mkdir(parents=True)
+            try_dir.mkdir(parents=True)
+
+            fuchsia_try = try_dir / "fuchsia.x64-debug.textproto"
+            fuchsia_try.write_text("target_arch: X64\n")
+
+            riscv_global_ci = global_ci_dir / "minimal.riscv64-debug.textproto"
+            riscv_global_ci.write_text("target_arch: RISCV64\n")
+            (try_dir / "minimal.riscv64-debug.textproto").write_text(
+                "target_arch: RISCV64\n"
+            )
+
+            resolved = verify_multi_build_configs.resolve_fint_params_specs(
+                root, ["fuchsia.x64-debug", "minimal.riscv64-debug"]
+            )
+            self.assertEqual(resolved, [fuchsia_try, riscv_global_ci])
 
 
 if __name__ == "__main__":

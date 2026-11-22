@@ -15,15 +15,6 @@ from unittest import mock
 
 import registry
 
-_PRESERVED_ENV_VARS = (
-    "PYTHONHOME",
-    "PYTHONPATH",
-    "RUNFILES_DIR",
-    "RUNFILES_MANIFEST_FILE",
-    "TEST_SRCDIR",
-    "LD_LIBRARY_PATH",
-)
-
 
 def _find_tool_launcher() -> list[str] | None:
     rel = "tools/devshell/fx_cli/registry"
@@ -68,10 +59,6 @@ class FxRegistryToolTests(unittest.TestCase):
         env = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         }
-        for key in _PRESERVED_ENV_VARS:
-            val = os.environ.get(key)
-            if val is not None:
-                env[key] = val
         if fuchsia_dir is not None:
             env["FUCHSIA_DIR"] = str(fuchsia_dir)
         if launcher_cmd is not None:
@@ -593,59 +580,127 @@ class FxRegistryToolTests(unittest.TestCase):
                         )
                     self.assertEqual(_find_tool_launcher(), expected_fallback)
 
-    def test_run_registry_preserves_python_and_runfiles_env(self) -> None:
-        ambient_env = {
-            "PATH": "/custom/bin:/usr/bin",
-            "PYTHONHOME": "/hermetic/python",
-            "PYTHONPATH": "/hermetic/python/lib_python314.zip",
-            "RUNFILES_DIR": "/bazel/runfiles",
-            "RUNFILES_MANIFEST_FILE": "/bazel/MANIFEST",
-            "TEST_SRCDIR": "/bazel/srcdir",
-            "LD_LIBRARY_PATH": "/hermetic/lib",
-            "FUCHSIA_DIR": "/ambient/fuchsia/must/not/leak",
-            "UNRELATED_ENV": "must_not_leak",
-        }
-        fake_completed = subprocess.CompletedProcess(
-            args=["/fake/registry", "list"],
-            returncode=0,
-            stdout="",
-            stderr="",
+    def test_bazel_launcher_self_contained_python_runtime(self) -> None:
+        launcher_cmd = _find_tool_launcher()
+        if launcher_cmd is None or len(launcher_cmd) != 1:
+            self.skipTest(
+                "Bazel fx_script_host_tool launcher not present in this test environment"
+            )
+        launcher = Path(launcher_cmd[0])
+        runfiles_dir = (
+            launcher.parent
+            / f"{launcher.name}.runtime_dir"
+            / f"{launcher.name}_fx_py_bin.runfiles"
         )
-        with (
-            mock.patch.dict(os.environ, ambient_env, clear=True),
-            mock.patch.object(
-                sys.modules[__name__],
-                "_find_tool_launcher",
-                return_value=["/fake/registry"],
-            ),
-            mock.patch.object(
-                subprocess, "run", return_value=fake_completed
-            ) as mock_run,
-        ):
-            self._run_registry(["list"], fuchsia_dir=None)
-            passed_env = mock_run.call_args.kwargs["env"]
-            self.assertEqual(
-                passed_env,
-                {
-                    "PATH": "/custom/bin:/usr/bin",
-                    "PYTHONHOME": "/hermetic/python",
-                    "PYTHONPATH": "/hermetic/python/lib_python314.zip",
-                    "RUNFILES_DIR": "/bazel/runfiles",
-                    "RUNFILES_MANIFEST_FILE": "/bazel/MANIFEST",
-                    "TEST_SRCDIR": "/bazel/srcdir",
-                    "LD_LIBRARY_PATH": "/hermetic/lib",
-                },
-            )
-            self.assertNotIn("FUCHSIA_DIR", passed_env)
+        python_repos = tuple(
+            p
+            for p in runfiles_dir.iterdir()
+            if p.is_dir() and (p / "python3").is_file()
+        )
+        self.assertEqual(
+            len(python_repos),
+            1,
+            msg=f"Expected one staged compact Python runtime under {runfiles_dir}",
+        )
+        py_repo = python_repos[0]
+        bin_pythons = (
+            tuple(sorted((py_repo / "bin").glob("python3.*")))
+            if (py_repo / "bin").is_dir()
+            else ()
+        )
+        self.assertEqual(
+            len(bin_pythons),
+            1,
+            msg=f"Expected normalized bin/python3.* under {py_repo}",
+        )
+        self.assertFalse(bin_pythons[0].is_symlink())
+        self.assertTrue(any((py_repo / "lib").glob("python3*.zip")))
+        self.assertSequenceEqual(tuple(py_repo.glob("python3.*-real")), ())
+        self.assertSequenceEqual(tuple(py_repo.glob("lib_python3.*.zip")), ())
 
-            self._run_registry(["list"], fuchsia_dir=Path("/explicit/fuchsia"))
-            passed_env_with_dir = mock_run.call_args.kwargs["env"]
-            self.assertEqual(
-                passed_env_with_dir["FUCHSIA_DIR"], "/explicit/fuchsia"
+        resolved_repo = py_repo.resolve()
+        probe_script = (
+            "import encodings, json, os, pathlib, sys; "
+            "print(json.dumps({"
+            "'prefix': str(pathlib.Path(sys.prefix).resolve()), "
+            "'encodings': str(pathlib.Path(encodings.__file__).resolve()), "
+            "'safe_path': bool(sys.flags.safe_path), "
+            "'pythonhome': os.environ.get('PYTHONHOME'), "
+            "'pythonpath': os.environ.get('PYTHONPATH'), "
+            "'pythonsafepath': os.environ.get('PYTHONSAFEPATH'), "
+            "'handshake': os.environ.get('_FX_UNSET_PYTHONSAFEPATH'), "
+            "}))"
+        )
+
+        def probe_python(
+            executable: Path, **extra_env: str
+        ) -> dict[str, object]:
+            proc = subprocess.run(
+                (str(executable), "-c", probe_script),
+                env={"PATH": "/usr/bin:/bin", **extra_env},
+                capture_output=True,
+                text=True,
+                check=False,
             )
-            self.assertEqual(
-                passed_env_with_dir["PYTHONHOME"], "/hermetic/python"
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            return json.loads(proc.stdout)
+
+        # Running the staged interpreter directly with a scrubbed environment
+        # (no PYTHONHOME or PYTHONPATH) must derive sys.prefix and stdlib from
+        # the staged runtime directory itself.
+        direct_data = probe_python(bin_pythons[0])
+        self.assertEqual(direct_data["prefix"], str(resolved_repo))
+        self.assertTrue(
+            Path(str(direct_data["encodings"])).is_relative_to(resolved_repo),
+            msg=f"Expected encodings under {resolved_repo}, got {direct_data['encodings']}",
+        )
+
+        # Running the rewritten python3 wrapper with a polluted PYTHONHOME must
+        # clear PYTHONHOME without injecting PYTHONPATH.
+        wrapper_data = probe_python(
+            py_repo / "python3",
+            PYTHONHOME="/nonexistent/polluted/pythonhome",
+        )
+        self.assertEqual(wrapper_data["prefix"], str(resolved_repo))
+        self.assertIsNone(wrapper_data["pythonhome"])
+        self.assertIsNone(wrapper_data["pythonpath"])
+
+        # When the launcher handshake is active, the wrapper must convert
+        # PYTHONSAFEPATH into -P and unset both variables for the real Python.
+        safepath_data = probe_python(
+            py_repo / "python3",
+            PYTHONSAFEPATH="1",
+            _FX_UNSET_PYTHONSAFEPATH="1",
+        )
+        self.assertTrue(safepath_data["safe_path"])
+        self.assertIsNone(safepath_data["pythonsafepath"])
+        self.assertIsNone(safepath_data["handshake"])
+
+        # Verify the real Bazel-generated launcher emits the PYTHONSAFEPATH
+        # handshake so rules_python entrypoint changes cannot silently bypass it.
+        self.assertIn(
+            "_FX_UNSET_PYTHONSAFEPATH",
+            launcher.read_text(encoding="utf-8"),
+        )
+
+        # Running the real fx_script_host_tool launcher with a polluted ambient
+        # PYTHONHOME must still succeed cleanly.
+        with tempfile.TemporaryDirectory() as td:
+            fuchsia_dir = Path(td)
+            self._write_sample_registry(fuchsia_dir)
+            proc = subprocess.run(
+                (str(launcher), "list", "--json"),
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "FUCHSIA_DIR": str(fuchsia_dir),
+                    "PYTHONHOME": "/nonexistent/polluted/pythonhome",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
             )
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            self.assertEqual(len(json.loads(proc.stdout)), 4)
 
     def test_global_fuchsia_dir_flag_before_subcommand(self) -> None:
         with tempfile.TemporaryDirectory() as td:

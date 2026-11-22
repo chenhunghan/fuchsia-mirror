@@ -1,0 +1,70 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/lib/hid/acer12.h",
+        "include/lib/hid/ambient-light.h",
+        "include/lib/hid/atlas-touchpad.h",
+        "include/lib/hid/bma253.h",
+        "include/lib/hid/boot.h",
+        "include/lib/hid/buttons.h",
+        "include/lib/hid/descriptor.h",
+        "include/lib/hid/egalax.h",
+        "include/lib/hid/eyoyo.h",
+        "include/lib/hid/gt92xx.h",
+        "include/lib/hid/hid.h",
+        "include/lib/hid/ltr-578als.h",
+        "include/lib/hid/mouse.h",
+        "include/lib/hid/multi-sensor.h",
+        "include/lib/hid/paradise.h",
+        "include/lib/hid/samsung.h",
+        "include/lib/hid/usages.h",
+    ],
+    deps = ["//sdk/fidl/fuchsia.buttons:fuchsia.buttons_cpp"],
+)
+
+fx_cc_library(
+    name = "hid",
+    srcs = [
+        "acer12.c",
+        "ambient-light.c",
+        "atlas-touchpad.c",
+        "bma253.c",
+        "boot.c",
+        "buttons.cc",
+        "egalax.c",
+        "eyoyo.c",
+        "gt92xx.c",
+        "hid.c",
+        "keymaps.c",
+        "ltr-578als.c",
+        "mouse.c",
+        "multi-sensor.c",
+        "paradise.c",
+        "samsung.c",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    implementation_deps = [
+        "//src/lib/ddk:ddk-metadata-headers",
+        "//src/lib/ddktl",
+    ],
+    visibility = [
+        "//src/connectivity/ethernet/drivers/asix-88179:__pkg__",
+        "//src/connectivity/ethernet/drivers/usb-cdc-ecm:__pkg__",
+        "//src/devices/board/drivers/x86:__pkg__",
+        "//src/devices/serial/drivers/ftdi/test:__pkg__",
+        "//src/ui/examples/escher/common:__pkg__",
+        "//src/ui/input:__subpackages__",
+    ],
+    deps = [":headers"],
+    alwayslink = True,
+)

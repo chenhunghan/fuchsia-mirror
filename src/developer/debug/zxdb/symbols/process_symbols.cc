@@ -65,7 +65,7 @@ void ProcessSymbols::SetModules(const std::vector<debug_ipc::Module>& modules,
   // Notify that we're about to load all the symbols before actually loading anything. Wait until
   // the number of new modules has been calculated so the UI is only blocked when there are many
   // new modules. See |WillLoadModuleSymbols| in console_context.cc for details.
-  notifications_->WillLoadModuleSymbols(new_module_indices.size());
+  notifications_->WillLoadModuleSymbols(static_cast<int>(new_module_indices.size()));
 
   // Find deleted modules plus any that need their symbols refreshed.
   std::vector<ModuleMap::iterator> deleted_modules;

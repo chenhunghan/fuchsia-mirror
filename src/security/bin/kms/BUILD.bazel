@@ -1,0 +1,116 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":kms_tests"],
+    visibility = ["//src/security:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/common.rs",
+        "src/crypto_provider/mock_provider.rs",
+        "src/crypto_provider/mod.rs",
+        "src/crypto_provider/mundane_provider.rs",
+        "src/crypto_provider/optee_provider/boringssl_wrapper.rs",
+        "src/crypto_provider/optee_provider/keysafe.rs",
+        "src/crypto_provider/optee_provider/mod.rs",
+        "src/crypto_provider/software_provider.rs",
+        "src/key_manager.rs",
+        "src/kms_asymmetric_key.rs",
+        "src/kms_sealing_key.rs",
+        "src/main.rs",
+    ],
+    binary_name = "kms",
+    edition = "2024",
+    link_deps = [
+        "//src/security/lib/tee/tee-client-api:tee-client-api-import",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.kms:fuchsia.kms_rust",
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-sync",
+        "//src/lib/mundane",
+        "//src/security/lib/tee/rust",
+        "//third_party/boringssl/rust:bssl-sys",
+        "//third_party/rust_crates/vendor:aes-gcm",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:base64",
+        "//third_party/rust_crates/vendor:byteorder",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:rkyv",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+rustc_test(
+    name = "kms_bin_test",
+    crate = ":bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:tempfile",
+    ],
+)
+
+fx_packaged_binary(
+    name = "kms_bin_test_packaged",
+    testonly = True,
+    binary = ":kms_bin_test",
+    binary_name = "kms_bin_test",
+)
+
+fx_component_manifest(
+    name = "kms_bin_test_manifest",
+    testonly = True,
+    component_name = "kms_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/kms_bin_test.cml",
+)
+
+fx_test_component(
+    name = "kms_bin_test_component",
+    compiled_manifest = ":kms_bin_test_manifest",
+    deps = [":kms_bin_test_packaged"],
+)
+
+fx_package(
+    name = "kms_tests_package",
+    package_name = "kms_tests",
+    testonly = True,
+    test_components = [":kms_bin_test_component"],
+)
+
+fx_test(
+    name = "kms_tests",
+    package = ":kms_tests_package",
+)

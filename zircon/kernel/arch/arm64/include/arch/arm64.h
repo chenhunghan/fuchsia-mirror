@@ -10,14 +10,8 @@
 
 #ifndef __ASSEMBLER__
 
-#include <lib/arch/asm.h>
 #include <lib/arch/intrin.h>
-#include <stdbool.h>
-#include <sys/types.h>
-#include <zircon/compiler.h>
 #include <zircon/types.h>
-
-#include <kernel/cpu.h>
 
 struct iframe_t;
 
@@ -40,34 +34,12 @@ struct arch_exception_context {
   uint32_t user_synth_data;
 };
 
-// Implemented in or called from assembly.
-extern "C" {
-void arm64_sync_exception(iframe_t* iframe, uint exception_flags, uint32_t esr);
-
-void platform_irq(iframe_t* frame);
-}  // extern C
-
 inline uint64_t arm64_get_boot_el() { return __arm_rsr64("CurrentEL") >> 2; }
-
-// Called during clock selection (if it is called at all) before secondary CPUs
-// have started.
-extern "C" void arm64_allow_pct_in_el0();
-
-// Puts the calling cpu in a working state and reads its feature flags.
-extern "C" void arm64_cpu_early_init();
-
-// Allocates a stack for the secondary cpu with bootstrap data placed on it.
-// Ready to be passed to the cpu when starting it for the first time.
-// On success, |*out| is a virtual address near the top of the stack just below
-// the bootstrap payload.
-extern "C" zx_status_t arm64_create_secondary_stack(cpu_num_t cpu_num, uintptr_t* out);
-
-// Frees a stack created by |arm64_create_secondary_stack|.
-extern "C" zx_status_t arm64_free_secondary_stack(cpu_num_t cpu_num);
 
 #endif  // __ASSEMBLER__
 
-// Used in above exception_flags arguments.
+// Used in the exception_flags arguments of arm64_sync_exception, arm64_irq and
+// arm64_serror_exception.
 #define ARM64_EXCEPTION_FLAG_LOWER_EL (1 << 0)
 
 // Used in the which argument of arm64_unrestricted_arm32_exception.

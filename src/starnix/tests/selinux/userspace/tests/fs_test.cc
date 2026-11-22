@@ -2,23 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <endian.h>
 #include <fcntl.h>
 #include <lib/fit/defer.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "fs_test_policy"; }
+extern std::string GetTestPolicyName() { return "fs_test_policy"; }
 
 namespace {
 constexpr char kDirLabel[] = "test_u:object_r:test_fs_readdir_dir_t:s0";
@@ -157,6 +160,43 @@ TEST(FsTest, WriteDeniedPreservesSuid) {
   EXPECT_NE(file_stat.st_mode & S_ISGID, 0u);
 }
 
+// Verify that modifying a file from a domain with `write` permission (but without `setattr`,
+// `fsetid`, or `setfcap` permissions) clears the S_ISUID and S_ISGID bits as well as
+// `security.capability`.
+// Regression test for https://fxbug.dev/584229686.
+TEST(FsTest, WriteAllowedWithoutSetattrClearsPrivileges) {
+  auto test_file = ScopedTempFDWithLabel(kFallocateFileLabel);
+  ASSERT_TRUE(test_file.is_valid());
+
+  ASSERT_THAT(fchmod(test_file.fd(), S_ISUID | S_ISGID | S_IRWXU | S_IXGRP), SyscallSucceeds());
+
+  vfs_cap_data cap_data{};
+  cap_data.magic_etc = htole32(VFS_CAP_REVISION_2 | VFS_CAP_FLAGS_EFFECTIVE);
+  cap_data.data[0].permitted = htole32(static_cast<uint32_t>(1ULL << CAP_NET_RAW));
+  ASSERT_THAT(fsetxattr(test_file.fd(), "security.capability", &cap_data, XATTR_CAPS_SZ_2, 0),
+              SyscallSucceeds());
+
+  test_helper::UnsetCapability(CAP_FSETID);
+  test_helper::UnsetCapability(CAP_SETFCAP);
+  auto restore_caps = fit::defer([] {
+    test_helper::SetCapabilityEffective(CAP_FSETID);
+    test_helper::SetCapabilityEffective(CAP_SETFCAP);
+  });
+
+  auto enforcing = ScopedEnforcement::SetEnforcing();
+
+  EXPECT_TRUE(RunSubprocessAs("test_u:test_r:test_fs_t:s0", [&] {
+    char buf[] = "x";
+    EXPECT_THAT(write(test_file.fd(), buf, sizeof(buf)), SyscallSucceedsWithValue(sizeof(buf)));
+  }));
+
+  struct stat file_stat{};
+  ASSERT_THAT(fstat(test_file.fd(), &file_stat), SyscallSucceeds());
+  EXPECT_EQ(file_stat.st_mode & static_cast<mode_t>(S_ISUID | S_ISGID), 0u);
+  EXPECT_THAT(fgetxattr(test_file.fd(), "security.capability", nullptr, 0),
+              SyscallFailsWithErrno(ENODATA));
+}
+
 // Verify that renaming a directory across parent directories checks `reparent` on the moving
 // directory before checking `add_name` on the target parent directory.
 TEST(FsTest, RenameChecksReparentBeforeAddName) {
@@ -279,12 +319,9 @@ TEST_P(FsSecurityTest, Sendfile) {
   std::string context = MakeTestSecurityContext(params.test_domain);
 
   EXPECT_TRUE(RunSubprocessAs(context, [&]() {
-    if (params.src_readable && params.dst_writable) {
-      EXPECT_THAT(sendfile(dst_file.fd(), src_file.fd(), nullptr, kPayloadSize), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(sendfile(dst_file.fd(), src_file.fd(), nullptr, kPayloadSize),
-                  SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(
+        sendfile(dst_file.fd(), src_file.fd(), nullptr, kPayloadSize),
+        SyscallSucceedsOrFailsWithErrno(params.src_readable && params.dst_writable, EACCES));
   }));
 }
 
@@ -305,13 +342,8 @@ TEST_P(FsSecurityTest, SpliceFromSrc) {
   std::string context = MakeTestSecurityContext(params.test_domain);
 
   EXPECT_TRUE(RunSubprocessAs(context, [&]() {
-    if (params.src_readable) {
-      EXPECT_THAT(splice(src_file.fd(), nullptr, pipe_out.get(), nullptr, kPayloadSize, 0),
-                  SyscallSucceeds());
-    } else {
-      EXPECT_THAT(splice(src_file.fd(), nullptr, pipe_out.get(), nullptr, kPayloadSize, 0),
-                  SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(splice(src_file.fd(), nullptr, pipe_out.get(), nullptr, kPayloadSize, 0),
+                SyscallSucceedsOrFailsWithErrno(params.src_readable, EACCES));
   }));
 }
 
@@ -332,13 +364,8 @@ TEST_P(FsSecurityTest, SpliceToDst) {
   std::string context = MakeTestSecurityContext(params.test_domain);
 
   EXPECT_TRUE(RunSubprocessAs(context, [&]() {
-    if (params.dst_writable) {
-      EXPECT_THAT(splice(pipe_in.get(), nullptr, dst_file.fd(), nullptr, kPayloadSize, 0),
-                  SyscallSucceeds());
-    } else {
-      EXPECT_THAT(splice(pipe_in.get(), nullptr, dst_file.fd(), nullptr, kPayloadSize, 0),
-                  SyscallFailsWithErrno(EACCES));
-    }
+    EXPECT_THAT(splice(pipe_in.get(), nullptr, dst_file.fd(), nullptr, kPayloadSize, 0),
+                SyscallSucceedsOrFailsWithErrno(params.dst_writable, EACCES));
   }));
 }
 

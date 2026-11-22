@@ -7,8 +7,15 @@ load(
     "starnix_enable_trace_and_debug_logs_in_release",
 )
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":starnix_logging-tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
+)
 
 rustc_library(
     name = "starnix_logging",
@@ -79,4 +86,9 @@ rustc_test(
         "//third_party/rust_crates/vendor:pretty_assertions",
         "//third_party/rust_crates/vendor:regex-lite",
     ],
+)
+
+fx_unittest_package(
+    name = "starnix_logging-tests",
+    unit_tests = [":starnix_logging_lib_test"],
 )

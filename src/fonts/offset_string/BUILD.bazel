@@ -1,0 +1,42 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":offset_string_tests"],
+    visibility = ["//src/fonts:__pkg__"],
+)
+
+rustc_library(
+    name = "offset_string",
+    srcs = [
+        "src/conversions.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    visibility = ["//src/fonts/manifest:__pkg__"],
+    deps = [
+        "//src/fonts/char_set",
+        "//src/lib/intl/unicode_utils/char_collection",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:unic-char-range",
+    ],
+)
+
+rustc_test(
+    name = "offset_string_test",
+    crate = ":offset_string",
+)
+
+fx_unittest_package(
+    name = "offset_string_tests",
+    unit_tests = [":offset_string_test"],
+)

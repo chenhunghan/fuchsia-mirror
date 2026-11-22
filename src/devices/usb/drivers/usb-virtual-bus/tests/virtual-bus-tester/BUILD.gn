@@ -51,7 +51,6 @@ fuchsia_cc_driver("virtual-bus-tester-driver") {
 
 fuchsia_driver_component("virtual-bus-tester") {
   testonly = true
-  info = "meta/virtual-bus-tester-info.json"
   cm_label = ":virtual-bus-tester-manifest"
   deps = [ ":virtual-bus-tester-driver" ]
 }

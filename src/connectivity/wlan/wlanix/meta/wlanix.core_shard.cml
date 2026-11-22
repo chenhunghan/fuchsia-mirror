@@ -6,8 +6,6 @@
         {
             name: "wlanix",
             url: "fuchsia-pkg://fuchsia.com/wlanix#meta/wlanix.cm",
-            startup: "eager",
-            environment: "#core-env",
         },
     ],
     offer: [

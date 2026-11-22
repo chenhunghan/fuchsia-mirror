@@ -92,6 +92,19 @@ Callers and implementations must preserve these invariants:
 - When resolving a DWARF type signature whose target `DwarfDieRef` is invalid
   (`!sig_ref.is_valid()`), return an empty `fxl::RefPtr<Symbol>()` instead of
   crashing with `FX_CHECK`.
+- When DWARF v5 `.debug_names` accelerator tables are present,
+  `ModuleSymbolsImpl::CreateIndex()` avoids scanning DIEs across compilation
+  units. It indexes only compilation unit source files from line tables
+  (`Index::IndexSourceFiles()`).
+- In `FindDebugNamesEntries()`, compile unit and DIE unit offsets are validated
+  with `has_value()` because section and unit offset 0 is a valid DWARF offset.
+  Never use 0 as an invalid sentinel.
+- Local type units in `.debug_names` use `.debug_info` offsets. Foreign type
+  unit entries return `std::nullopt` until `zxdb` supports split DWARF
+  (https://fxbug.dev/583730372).
+- Index fallback: when `.debug_names` is absent or empty, or when
+  `force_slow_index` is set, `ModuleSymbolsImpl` falls back to the full-DIE
+  `Index`.
 
 ## Side Effects
 

@@ -1,0 +1,121 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# [START imports]
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+# [END imports]
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":echo_integration_test_rust_test",
+        ":subpackaged_echo_integration_test_rust_test",
+    ],
+    visibility = ["//examples:__pkg__"],
+)
+
+# [START example_snippet]
+# [START executable]
+rustc_test(
+    name = "echo_integration_test_rust_bin",
+    srcs = ["src/lib.rs"],
+    crate_name = "echo_integration_test_rust",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/components/routing/fidl:echo_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+# [END executable]
+
+# [START component]
+fx_packaged_binary(
+    name = "echo_integration_test_rust_bin_packaged",
+    testonly = True,
+    binary = ":echo_integration_test_rust_bin",
+    binary_name = "echo_integration_test_rust",
+)
+
+fx_component_manifest(
+    name = "echo_integration_test_manifest",
+    testonly = True,
+    component_name = "echo_integration_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/echo_integration_test.cml",
+)
+
+fx_test_component(
+    name = "echo_integration_test_component",
+    compiled_manifest = ":echo_integration_test_manifest",
+    deps = [":echo_integration_test_rust_bin_packaged"],
+)
+
+# [END component]
+
+# [START test_package]
+fx_package(
+    name = "echo_integration_test_rust",
+    testonly = True,
+    components = ["//examples/components/routing/rust/echo_server:echo_server_cmp"],
+    test_components = [":echo_integration_test_component"],
+)
+
+fx_test(
+    name = "echo_integration_test_rust_test",
+    package = ":echo_integration_test_rust",
+)
+
+# [END test_package]
+# [END example_snippet]
+
+fx_component_manifest(
+    name = "subpackaged_echo_integration_test_rust_manifest",
+    testonly = True,
+    component_name = "default",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/subpackaged_echo_integration_test.cml",
+)
+
+fx_test_component(
+    name = "subpackaged_echo_integration_test_rust_component",
+    compiled_manifest = ":subpackaged_echo_integration_test_rust_manifest",
+    deps = [":echo_integration_test_rust_bin_packaged"],
+)
+
+fx_package(
+    name = "subpackaged_echo_integration_test_rust",
+    testonly = True,
+    subpackages = ["//examples/components/routing/rust/echo_server"],
+    test_components = [":subpackaged_echo_integration_test_rust_component"],
+)
+
+fx_test(
+    name = "subpackaged_echo_integration_test_rust_test",
+    package = ":subpackaged_echo_integration_test_rust",
+)

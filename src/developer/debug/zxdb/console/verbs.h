@@ -94,6 +94,7 @@ enum class Verb {
   kSymSearch,
   kSymStat,
   kSysInfo,
+  kTrace,
   kUntil,
   kUp,
   kWatch,

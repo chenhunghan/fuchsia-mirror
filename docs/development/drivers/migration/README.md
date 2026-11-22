@@ -76,7 +76,7 @@ missing in the playbook:
 [driver-framework]: /docs/concepts/drivers/driver_framework.md
 [components]: /docs/concepts/components/v2/README.md
 [fidl]: /docs/concepts/fidl/overview.md
-[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver_manager
+[driver-manager]: /docs/concepts/drivers/driver_framework.md#driver-manager
 [driver-node]: /docs/concepts/drivers/drivers_and_nodes.md
 [migrate-from-banjo-to-fidl]: /docs/development/drivers/migration/migrate-from-banjo-to-fidl/overview.md
 [migrate-from-dfv1-to-dfv2]: /docs/development/drivers/migration/migrate-from-dfv1-to-dfv2/overview.md

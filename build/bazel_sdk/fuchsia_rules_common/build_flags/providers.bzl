@@ -107,6 +107,8 @@ BuildFlagsListInfo = provider(
     doc = "A provider for a list of BuildFlagsInfo values.",
     fields = {
         "infos": "A list of BuildFlagsInfo values.",
+        "extra_cpp_link_flags": "Optional list of extra linker flag strings from link_deps for static cquery command reconstruction when cc_shared_library serializes link_deps into its link response file (see 'Supporting cc_shared_library() targets' in build_flags/README.md).",
+        "extra_cpp_link_items": "Optional list of extra linker flag strings and File artifacts from link_deps written to cc_shared_library link response files via Args so File paths remain RBE path-mapped (see 'Supporting cc_shared_library() targets' in build_flags/README.md).",
     },
 )
 

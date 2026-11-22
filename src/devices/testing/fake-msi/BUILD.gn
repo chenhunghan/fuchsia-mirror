@@ -48,6 +48,7 @@ if (is_fuchsia) {
     includes = [ "include" ]
     visibility = [
       ":*",
+      "//src/devices/board/lib/acpi:*",
       "//src/devices/pci/drivers/pci/test:*",
       "//src/devices/pci/drivers/pciroot-banjo-adapter:*",
       "//src/devices/pci/lib/pci:*",

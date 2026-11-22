@@ -12,8 +12,7 @@ import os
 import tempfile
 from pathlib import Path
 
-import cl_utils
-import fuchsia
+from build.rbe import cl_utils, fuchsia
 
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent

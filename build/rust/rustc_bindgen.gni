@@ -215,7 +215,7 @@ template("rustc_bindgen") {
                  "visibility",
                ])
   } else {
-    _bindgen_bin = "//prebuilt/third_party/rust_bindgen/$host_platform/bindgen"
+    _bindgen_bin = "${rust_bindgen_prefix}/bindgen"
     _rustfmt_bin = "$rustc_prefix/bin/rustfmt"
     _rustfmt_config = "//rustfmt.toml"
 

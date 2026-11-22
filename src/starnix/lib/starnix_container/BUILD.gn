@@ -57,7 +57,7 @@ if (is_host) {
       "//vendor/google/*",
     ]
     deps = [
-      "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+      "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust_common",
       "//src/lib/assembly/config_schema",
       "//src/lib/depfile",
       "//src/lib/fidl/rust/fidl",

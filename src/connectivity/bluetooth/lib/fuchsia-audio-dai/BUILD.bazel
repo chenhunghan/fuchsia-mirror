@@ -2,12 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
-# TODO(https://fxbug.dev/571945302): Migrate the unit tests, which remain in
-# BUILD.gn.
+test_suite(
+    name = "tests",
+    tests = [":fuchsia-audio-dai-tests"],
+    visibility = ["//src/connectivity/bluetooth:__pkg__"],
+)
+
 rustc_library(
     name = "fuchsia-audio-dai",
     srcs = [
@@ -42,4 +53,42 @@ rustc_library(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+rustc_test(
+    name = "fuchsia-audio-dai_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":fuchsia-audio-dai",
+    # Only used by bazel2gn, to keep the GN `output_name` of the test binary.
+    crate_name = "fuchsia_audio_dai_lib_test",
+    proc_macro_deps = ["//src/lib/testing/fixture"],
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/connectivity/bluetooth/testing/realmbuilder-mock-helpers",
+        "//src/lib/async-utils",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+    ],
+)
+
+fx_unittest_component(
+    name = "fuchsia-audio-dai-tests-component",
+    binary = ":fuchsia-audio-dai_test",
+    component_name = "fuchsia-audio-dai-tests",
+)
+
+fx_package(
+    name = "fuchsia-audio-dai-tests-package",
+    package_name = "fuchsia-audio-dai-tests",
+    testonly = True,
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    test_components = [":fuchsia-audio-dai-tests-component"],
+)
+
+fx_test(
+    name = "fuchsia-audio-dai-tests",
+    package = ":fuchsia-audio-dai-tests-package",
 )

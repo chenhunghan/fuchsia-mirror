@@ -248,6 +248,50 @@ build_flags_toolchain_instance(
         self.assertIn("# - //build/flags:missing1", generated_content)
         self.assertIn("# - //build/flags:missing2", generated_content)
 
+    def test_generate_bazel_toolchain_definitions_variant_removed_configs(
+        self,
+    ) -> None:
+        custom_map = DefaultBuildFlagsMap(
+            {
+                "target_a": DefaultBuildFlagsSet(
+                    cxx_common_build_flags=[
+                        "//build/config:compiler",
+                        "//build/config:no_rtti",
+                        "//build/config:icf",
+                        "//build/config:werror",
+                    ],
+                    rust_common_build_flags=["//build/config:no_rtti"],
+                    target_compatible_with='["@platforms//os:target_a_os"]',
+                ),
+            }
+        )
+
+        generated_content = custom_map.generate_bazel_toolchain_definitions()
+
+        self.assertIn(
+            """\
+    cxx_common_build_flags = [
+        "@@//build/config:compiler",
+    ] + select({
+        "@@//build/bazel/config/variant_features/ubsan:true": [],
+        "//conditions:default": ["@@//build/config:no_rtti"],
+    }) + select({
+        "@@//build/bazel/config/variant_features/fuzzer:true": [],
+        "//conditions:default": ["@@//build/config:icf"],
+    }) + [
+        "@@//build/config:werror",
+    ],""",
+            generated_content,
+        )
+        self.assertIn(
+            """\
+    rust_common_build_flags = select({
+        "@@//build/bazel/config/variant_features/ubsan:true": [],
+        "//conditions:default": ["@@//build/config:no_rtti"],
+    }),""",
+            generated_content,
+        )
+
     def test_get_build_flags_targets_from_ast_custom_macros_and_comprehensions(
         self,
     ) -> None:

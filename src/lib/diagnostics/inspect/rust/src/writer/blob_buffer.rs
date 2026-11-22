@@ -149,12 +149,12 @@ impl BlobBuffer {
     /// (`zx::Rights::BASIC | zx::Rights::READ | zx::Rights::MAP | zx::Rights::GET_PROPERTY`,
     /// omitting `zx::Rights::WRITE` so readers cannot mutate the producer's VMO).
     #[cfg(target_os = "fuchsia")]
-    pub(crate) fn duplicate_vmo(&self) -> Option<zx::Vmo> {
+    pub(crate) fn duplicate_vmo(&self) -> Result<zx::Vmo, Error> {
         self.storage
             .duplicate_handle(
                 zx::Rights::BASIC | zx::Rights::READ | zx::Rights::MAP | zx::Rights::GET_PROPERTY,
             )
-            .ok()
+            .map_err(Error::DuplicateVmoFailed)
     }
 }
 

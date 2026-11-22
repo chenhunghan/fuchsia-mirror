@@ -5,7 +5,7 @@
 use crate::task::Kernel;
 use crate::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
 use crate::vfs::pseudo::simple_file::create_bytes_file_with_handler;
-use crate::vfs::pseudo::stub_empty_file::StubEmptyFile;
+use crate::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use starnix_logging::bug_ref;
 use starnix_uapi::file_mode::mode;
 
@@ -40,52 +40,37 @@ pub fn build_kernel_directory(kernel: &Kernel, dir: &SimpleDirectoryMutator) {
         );
     });
 
-    dir.subdir("fs", dir_mode, |dir| {
-        dir.subdir("cgroup", dir_mode, |dir| {
-            dir.entry(
-                "cgroup.subtree_control",
-                StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                mode!(IFREG, 0o644),
-            );
-            for name in ["apps", "system"] {
-                dir.subdir(name, dir_mode, |dir| {
-                    dir.entry(
-                        "cgroup.subtree_control",
-                        StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                        mode!(IFREG, 0o644),
-                    );
-                });
-            }
-        });
-    });
     dir.subdir("dmabuf", dir_mode, |dir| {
-        // TODO(https://fxbug.dev/452096300"): Do not report any buffer for now.
+        // TODO(https://fxbug.dev/452096300): Do not report any buffer for now.
         dir.subdir("buffers", dir_mode, |_| {});
     });
     dir.subdir("mm", dir_mode, |dir| {
-        dir.entry(
-            "cma",
-            StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-            mode!(IFREG, 0o444),
-        );
+        // TODO(https://fxbug.dev/452096300): Do not report any CMA areas for now.
+        dir.subdir("cma", dir_mode, |_| {});
         dir.subdir("lru_gen", dir_mode, |dir| {
             dir.entry(
                 "enabled",
-                StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
+                StubBytesFile::new_node_read_only(
+                    bug_ref!("https://fxbug.dev/452096300"),
+                    b"0x0000\n",
+                ),
                 mode!(IFREG, 0o644),
             );
         });
         dir.subdir("pgsize_migration", dir_mode, |dir| {
             dir.entry(
                 "enabled",
-                StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
+                StubBytesFile::new_node_read_only(bug_ref!("https://fxbug.dev/452096300"), b"0\n"),
                 mode!(IFREG, 0o644),
             );
         });
         dir.subdir("transparent_hugepage", dir_mode, |dir| {
             dir.entry(
                 "enabled",
-                StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/322894184")),
+                StubBytesFile::new_node_read_only(
+                    bug_ref!("https://fxbug.dev/322894184"),
+                    b"always madvise [never]\n",
+                ),
                 mode!(IFREG, 0o644),
             );
         });

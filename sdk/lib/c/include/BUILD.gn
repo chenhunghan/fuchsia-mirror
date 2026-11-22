@@ -484,7 +484,7 @@ python_library("hdrgen.library") {
 # Generate standlaone "#include <foo.h>" compile-time tests for each public
 # header file, and compile them in every known language mode.
 header_test_stdc = [
-  # TODO(https://fxbug.dev/376333113): musl vs llvm-libc repeated typedefs are
+  # TODO(https://fxbug.dev/42141211): musl vs llvm-libc repeated typedefs are
   # invalid in C<11.
   #
   #89, 99,
@@ -496,7 +496,7 @@ header_test_stdcxx = [
   # These can be either integers or strings, doesn't matter.  But GN doesn't
   # allow (nor would anything else preserve) a leading 0 on an integer and the
   # result must be exactly "03", not "3".
-  # TODO(https://fxbug.dev/376333113): libc++ headers are not C++03 clean!
+  # libc++ headers are not C++03 clean.
   #"03",
   11,
   14,

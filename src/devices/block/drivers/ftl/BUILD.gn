@@ -45,7 +45,6 @@ fuchsia_driver_component("ftl") {
   component_name = "ftl"
   dml_label = ":ftl-dml"
   deps = [ ":ftl-driver" ]
-  info = "meta/ftl-info.json"
 }
 
 fuchsia_driver_package("package") {
@@ -66,9 +65,9 @@ source_set("common") {
     "oob_doubler.cc",
   ]
   public_deps = [
-    "//sdk/banjo/fuchsia.hardware.badblock:fuchsia.hardware.badblock_banjo_cpp",
     "//sdk/banjo/fuchsia.hardware.nand:fuchsia.hardware.nand_banjo_cpp",
     "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_cpp",
+    "//sdk/fidl/fuchsia.hardware.badblock:fuchsia.hardware.badblock_cpp",
     "//sdk/fidl/fuchsia.hardware.block.volume:fuchsia.hardware.block.volume_cpp",
     "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
     "//sdk/lib/driver/compat/cpp",

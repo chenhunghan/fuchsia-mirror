@@ -4,7 +4,7 @@
         {
             "seat_id": "target_parity",
             "name": "Semantic Migration & Parity Reviewer",
-            "responsibility": "Verifies semantic equivalence between BUILD.gn and BUILD.bazel (targets, sources, flags, conditions, dependency edges, test behavior, and dual-build sentinel sync where non-trivial) without re-litigating deterministic check rules.",
+            "responsibility": "Verifies semantic equivalence between BUILD.gn and BUILD.bazel (targets, sources, flags, conditions, dependency edges, test behavior including release/NDEBUG and shared-library runtime_deps parity \u2014 including propagating fx_cc_shared_library transitive dynamic library runfiles via data = [\":<shlib>\"] (# @bazel2gn:skip) when wrapped in cc_import for rustc_library/rustc_test link_deps since native.cc_import drops DefaultInfo runfiles \u2014 ffx_plugin vs standalone FHO subtool rustc_library decomposition, and dual-build sentinel sync where non-trivial) without re-litigating deterministic check rules.",
             "prompt_file": "target_parity.md",
             "allowed_tools": [
                 "find_rdeps"

@@ -61,7 +61,6 @@ fuchsia_driver_component("component") {
     ":driver",
     ":virtio_pmem_bind",
   ]
-  info = "meta/virtio_pmem-info.json"
   manifest = "meta/virtio-pmem.cml"
 }
 

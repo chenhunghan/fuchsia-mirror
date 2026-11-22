@@ -17,16 +17,6 @@ config("tracing") {
   }
 }
 
-source_set("barriers") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_barriers.h" ]
-
-  if (is_fuchsia) {
-    public_deps = [ "//src/lib/ddk:ddk-hw-headers" ]
-  }
-}
-
 source_set("buffer_header") {
   public_configs = [ ":platform_include_config" ]
   public_deps = [
@@ -83,34 +73,6 @@ source_set("bus_mapper") {
   } else {
     deps = [ "linux:bus_mapper" ]
   }
-}
-
-source_set("handle_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_handle.h" ]
-
-  public_deps = [ ":port_header" ]
-  if (is_fuchsia) {
-    public_deps += [ "//zircon/system/ulib/zx" ]
-  }
-}
-
-source_set("handle") {
-  public_deps = [
-    ":handle_header",
-    ":port",
-  ]
-
-  if (is_fuchsia) {
-    deps = [ "zircon:handle" ]
-  }
-}
-
-source_set("interrupt_header") {
-  public_configs = [ ":platform_include_config" ]
-  public_deps = [ "//src/graphics/magma/lib/magma/util:macros" ]
-  sources = [ "platform_interrupt.h" ]
 }
 
 source_set("iommu_header") {
@@ -221,67 +183,10 @@ source_set("device_client") {
   }
 }
 
-source_set("thread_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_thread.h" ]
-}
-
-source_set("thread") {
-  public_deps = [ ":thread_header" ]
-
-  if (is_fuchsia) {
-    deps = [ "zircon:thread" ]
-  }
-}
-
-source_set("event_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_event.h" ]
-
-  public_deps = [ "//src/graphics/magma/lib/magma/util:status" ]
-}
-
-source_set("event") {
-  public_deps = [ ":event_header" ]
-
-  if (is_fuchsia) {
-    deps = [ "zircon:event" ]
-  }
-}
-
-source_set("logger_provider_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  public_deps = [ ":handle_header" ]
-
-  sources = [ "platform_logger_provider.h" ]
-}
-
-source_set("logger_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_logger.h" ]
-}
-
 # Just redirect users to the header; implementation varies for
 # client drivers vs system drivers.
 group("logger") {
   public_deps = [ ":logger_header" ]
-}
-
-group("logger_impl") {
-  public_deps = [
-    ":logger_header",
-    ":logger_provider_header",
-  ]
-  if (is_fuchsia) {
-    deps = [ "zircon:logger" ]
-  }
-  if (is_linux) {
-    deps = [ "linux:logger" ]
-  }
 }
 
 source_set("logger_for_system_drivers") {
@@ -293,63 +198,13 @@ source_set("logger_for_system_drivers") {
   }
 }
 
-source_set("object_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_object.h" ]
-  if (is_fuchsia) {
-    public_deps = [ "//zircon/system/ulib/zx" ]
-  }
-}
-
-source_set("object") {
-  public_deps = [ ":object_header" ]
-
-  if (is_fuchsia) {
-    deps = [ "zircon:object" ]
-  }
-}
-
-source_set("semaphore_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_semaphore.h" ]
-
-  public_deps = [
-    ":object",
-    "//src/graphics/magma/lib/magma/util:macros",
-    "//src/graphics/magma/lib/magma/util:status",
-  ]
-  if (is_fuchsia) {
-    public_deps += [ "//zircon/system/ulib/zx" ]
-  }
-}
-
 source_set("semaphore") {
   public_configs = [ ":platform_include_config" ]
 
   public_deps = [ ":semaphore_header" ]
 
   if (is_fuchsia) {
-    deps = [ "zircon:semaphore" ]
-  }
-}
-
-source_set("port_header") {
-  public_configs = [ ":platform_include_config" ]
-
-  sources = [ "platform_port.h" ]
-
-  public_deps = [ "//src/graphics/magma/lib/magma/util:status" ]
-}
-
-source_set("port") {
-  public_deps = [ ":port_header" ]
-
-  deps = [ ":object" ]
-
-  if (is_fuchsia) {
-    deps += [ "zircon:port" ]
+    deps = [ "//src/graphics/magma/lib/magma/platform/zircon:semaphore" ]
   }
 }
 
@@ -408,6 +263,20 @@ source_set("trace_provider") {
   }
 }
 
+# Like ":trace_provider", but uses the shared libtrace-engine.so instead of
+# the static trace engine.
+source_set("trace_provider_shared_engine") {
+  visibility = [ "//src/graphics/lib/magma/src/libmagma:*" ]
+
+  public_deps = [ ":trace_provider_header" ]
+
+  if (magma_enable_tracing) {
+    deps = [ "zircon:trace_provider_shared_engine" ]
+  } else {
+    sources = [ "platform_trace_provider_stubs.cc" ]
+  }
+}
+
 source_set("trace_provider_with_fdio_header") {
   public_configs = [
     ":platform_include_config",
@@ -451,4 +320,245 @@ source_set("sysmem_connection") {
   public_deps = [ ":sysmem_connection_header" ]
 
   deps = [ "zircon:sysmem_connection" ]
+}
+
+## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
+#
+#  ________  _________  ________  ________
+# |\   ____\|\___   ___\\   __  \|\   __  \
+# \ \  \___|\|___ \  \_\ \  \|\  \ \  \|\  \
+#  \ \_____  \   \ \  \ \ \  \\\  \ \   ____\
+#   \|____|\  \   \ \  \ \ \  \\\  \ \  \___|
+#     ____\_\  \   \ \__\ \ \_______\ \__\
+#    |\_________\   \|__|  \|_______|\|__|
+#    \|_________|
+#
+#
+# AUTO-GENERATED - DO NOT EDIT
+#
+# The targets below are auto-generated based on the targets defined in the
+# BUILD.bazel file from the same directory. If you made changes to targets in
+# Bazel, instead of editing this file manually, run:
+#
+#   > fx bazel2gn
+#
+# Please do NOT edit this file directly. Instead, edit the BUILD.bazel file and
+# rerun bazel2gn.
+
+import("//build/tools/bazel2gn/bazel_migration.gni")
+
+_COMMON_DEPS = []
+if (is_fuchsia) {
+  _COMMON_DEPS += [ "//zircon/system/ulib/zx" ]
+}
+
+# To avoid "Assignment had no effect" from GN.
+# It's possible this variable is only used in if conditions (e.g. is_host).
+not_needed([ "_COMMON_DEPS" ])
+
+static_library("handle_header") {
+  public = [ "platform_handle.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+  ]
+  public_deps = [ ":port_header" ] + _COMMON_DEPS
+}
+
+source_set("handle") {
+  if (is_fuchsia) {
+    deps = [ "//src/graphics/magma/lib/magma/platform/zircon:handle" ]
+  } else {
+    deps = []
+  }
+  visibility = [
+    ":*",
+    "//src/graphics/lib/magma/src/libmagma:*",
+    "//src/graphics/magma/lib/magma/test_util:*",
+    "//src/graphics/magma/tests/unit_tests:*",
+  ]
+  public_deps = [
+    ":handle_header",
+    ":port",
+  ]
+}
+
+static_library("interrupt_header") {
+  public = [ "platform_interrupt.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/drivers/msd-arm-mali/src:*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+  ]
+  public_deps = [ "//src/graphics/magma/lib/magma/util:macros" ]
+}
+
+static_library("thread_header") {
+  public = [ "platform_thread.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+    "//vendor/google/*",
+  ]
+}
+
+source_set("thread") {
+  if (is_fuchsia) {
+    deps = [ "//src/graphics/magma/lib/magma/platform/zircon:thread" ]
+  } else {
+    deps = []
+  }
+  visibility = [
+    ":*",
+    "//src/graphics/drivers/msd-arm-mali/src:*",
+    "//src/graphics/drivers/msd-intel-gen/src:*",
+    "//src/graphics/drivers/msd-vsi-vip/src:*",
+    "//src/graphics/lib/magma/src/libmagma:*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+    "//src/graphics/magma/lib/magma/util:*",
+    "//src/graphics/magma/tests/unit_tests:*",
+  ]
+  public_deps = [ ":thread_header" ]
+}
+
+static_library("event_header") {
+  public = [ "platform_event.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+  ]
+  public_deps = [ "//src/graphics/magma/lib/magma/util:status" ]
+}
+
+source_set("event") {
+  if (is_fuchsia) {
+    deps = [ "//src/graphics/magma/lib/magma/platform/zircon:event" ]
+  } else {
+    deps = []
+  }
+  visibility = [
+    ":*",
+    "//src/graphics/drivers/msd-arm-mali/src:*",
+    "//src/graphics/drivers/msd-intel-gen/src:*",
+    "//src/graphics/drivers/msd-vsi-vip/src:*",
+    "//src/graphics/magma/lib/magma_service/sys_driver/tests:*",
+    "//src/graphics/magma/tests/unit_tests:*",
+  ]
+  public_deps = [ ":event_header" ]
+}
+
+static_library("logger_provider_header") {
+  public = [ "platform_logger_provider.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/lib/magma/src/libmagma:*",
+    "//src/graphics/lib/magma/src/libmagma_virt:*",
+    "//src/graphics/magma/*",
+    "//src/graphics/tests/vkext:*",
+  ]
+  public_deps = [ ":handle_header" ]
+}
+
+static_library("logger_header") {
+  public = [ "platform_logger.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/drivers/*",
+    "//src/graphics/lib/magma/src/libmagma:*",
+    "//src/graphics/lib/magma/src/libmagma_virt:*",
+    "//src/graphics/magma/*",
+    "//src/graphics/tests/vkext:*",
+  ]
+}
+
+source_set("logger_impl") {
+  if (is_fuchsia) {
+    deps = [ "//src/graphics/magma/lib/magma/platform/zircon:logger" ]
+  } else if (is_linux) {
+    deps = [ "//src/graphics/magma/lib/magma/platform/linux:logger" ]
+  } else {
+    deps = []
+  }
+  visibility = [
+    ":*",
+    "//src/graphics/lib/magma/src/libmagma:*",
+    "//src/graphics/lib/magma/src/libmagma_virt:*",
+    "//src/graphics/magma/lib/magma/test_util:*",
+    "//src/graphics/magma/lib/magma_client/mock:*",
+    "//src/graphics/tests/vkext:*",
+  ]
+  public_deps = [
+    ":logger_header",
+    ":logger_provider_header",
+  ]
+}
+
+static_library("object_header") {
+  public = [ "platform_object.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+  ]
+  public_deps = _COMMON_DEPS
+}
+
+source_set("object") {
+  if (is_fuchsia) {
+    deps = [ "//src/graphics/magma/lib/magma/platform/zircon:object" ]
+  } else {
+    deps = []
+  }
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+    "//src/graphics/magma/lib/magma_service/sys_driver:*",
+  ]
+  public_deps = [ ":object_header" ]
+}
+
+static_library("semaphore_header") {
+  public = [ "platform_semaphore.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+  ]
+  public_deps = [
+                  ":object",
+                  "//src/graphics/magma/lib/magma/util:macros",
+                  "//src/graphics/magma/lib/magma/util:status",
+                ] + _COMMON_DEPS
+}
+
+static_library("port_header") {
+  public = [ "platform_port.h" ]
+  public_configs = [ ":platform_include_config" ]
+  visibility = [
+    ":*",
+    "//src/graphics/magma/lib/magma/platform/zircon:*",
+  ]
+  public_deps = [ "//src/graphics/magma/lib/magma/util:status" ]
+}
+
+source_set("port") {
+  deps = []
+  deps += [ ":object" ]
+  if (is_fuchsia) {
+    deps += [ "//src/graphics/magma/lib/magma/platform/zircon:port" ]
+  }
+  visibility = [
+    ":*",
+    "//src/graphics/drivers/msd-arm-mali/src:*",
+    "//src/graphics/drivers/msd-arm-mali/tests/hardware:*",
+    "//src/graphics/drivers/msd-arm-mali/tests/unit_tests:*",
+    "//src/graphics/magma/tests/unit_tests:*",
+  ]
+  public_deps = [ ":port_header" ]
 }

@@ -54,20 +54,30 @@ template("sanitizer_rustflags") {
     # Not all Clang targets support all variants. E.g.
     # x86_64-pc-windows-msvc only supports "none"
     if (defined(_toolchain_info_variants[_variant])) {
-      _toolchain_info_variant = _toolchain_info_variants[_variant]
+      # Standalone environments (such as the kernel) provide their own
+      # in-tree sanitizer runtime and must not link Clang's prebuilt
+      # userspace libclang_rt libraries.
+      if (_prebuilt_runtime) {
+        _toolchain_info_variant = _toolchain_info_variants[_variant]
 
-      if (_shared_runtime) {
-        _toolchain_info_variant_libs = _toolchain_info_variant.shared
-      } else {
-        _toolchain_info_variant_libs = _toolchain_info_variant.static
-      }
-
-      foreach(lib, needed_libs) {
-        libclang_rt_lib_name = _toolchain_info_variant_libs[lib]
-        if (libclang_rt_lib_name != "") {
-          rustflags +=
-              [ "-Clink-arg=${rebased_clang_dir}/${libclang_rt_lib_name}" ]
+        if (_shared_runtime) {
+          _toolchain_info_variant_libs = _toolchain_info_variant.shared
+        } else {
+          _toolchain_info_variant_libs = _toolchain_info_variant.static
         }
+
+        foreach(lib, needed_libs) {
+          libclang_rt_lib_name = _toolchain_info_variant_libs[lib]
+          if (libclang_rt_lib_name != "") {
+            rustflags +=
+                [ "-Clink-arg=${rebased_clang_dir}/${libclang_rt_lib_name}" ]
+          }
+        }
+      } else {
+        not_needed([
+                     "_toolchain_info_variants",
+                     "needed_libs",
+                   ])
       }
 
       # Expose the presence of sanitizers as a compile-time condition.
@@ -245,7 +255,6 @@ sanitizer_extra_options("suppress-asan-stack-use-after-return") {
 # https://github.com/google/sanitizers/wiki/AddressSanitizerContainerOverflow.
 sanitizer_extra_options("suppress-asan-container-overflow") {
   visibility = [
-    "//sdk/lib/sys/component/cpp/testing:*",
     "//src/lib/llvm/fuchsia:*",
     "//src/lib/llvm/host:*",
   ]

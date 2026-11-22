@@ -200,8 +200,8 @@ func (c *FFXStrictClient) SetDefaultTarget(target *string) {
 	}
 }
 
-func (c *FFXStrictClient) Flash(ctx context.Context, fastbootSerial, productDir, pubKeyPath string) error {
-	if err := c.ffxInst.Flash(ctx, fastbootSerial, pubKeyPath, productDir, false); err != nil {
+func (c *FFXStrictClient) Flash(ctx context.Context, target, productDir, pubKeyPath string) error {
+	if err := c.ffxInst.Flash(ctx, target, pubKeyPath, productDir, false); err != nil {
 		return fmt.Errorf("ffx flash failed: %w", err)
 	}
 	return nil

@@ -3,7 +3,8 @@
 // found in the LICENSE file.
 
 use crate::reader::{
-    BlockService, MAX_READ_BUFFER_SIZE, read_aligned_range, read_aligned_range_with_precommit,
+    BlockService, GuardedBlockService, MAX_READ_BUFFER_SIZE, read_aligned_range,
+    read_aligned_range_with_precommit,
 };
 use crate::{
     BLOCK_SIZE, ENCRYPTION_KEY_SIZE, Extents, MappingCommand, NullPageRequest, PageRequest,
@@ -12,17 +13,21 @@ use crate::{
 use anyhow::{Error, anyhow, bail};
 use blob_metadata::{BlobMetadata, BlobMetadataV53, MerkleLeaves};
 use byteorder::{LittleEndian, ReadBytesExt};
-use delivery_blob::compression::{CompressionInfo, DataBuffer, StreamingDecompressor};
+use delivery_blob::compression::{
+    CompressionAlgorithm, CompressionInfo, DataBuffer, StreamingDecompressor,
+};
 use fuchsia_sync::Mutex;
 use futures::channel::oneshot;
 use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
 use std::borrow::Borrow;
 use std::cmp::min;
 use std::collections::hash_map::{Entry, HashMap};
+use std::num::NonZero;
 use std::ops::{ControlFlow, Range};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use storage_profile::{FileMessage, Message as _};
-use vmo_fifo::Message;
+use storage_units::{BlockSize, page_size};
+use vmo_fifo::{Message, Receiver, SlotGuard};
 use zx::sys::zx_page_request_command_t::ZX_PAGER_VMO_READ;
 
 /// Target readahead size (128 KiB), matching Fxfs.
@@ -43,6 +48,28 @@ fn read_ahead_size_for_chunk_size(compression_chunk_size: u64, target_read_ahead
         compression_chunk_size
     } else {
         (target_read_ahead_size / compression_chunk_size) * compression_chunk_size
+    }
+}
+
+// Begins a `page_fault` trace flow and returns its non-zero ID when the `"storage"` trace
+// category is enabled, or `0` without calling `Id::new()` when tracing is disabled.
+fn begin_page_fault_flow() -> u64 {
+    let mut trace_flow_id = 0;
+    storage_trace::flow_begin!("storage", "page_fault", {
+        let id = storage_trace::Id::new();
+        trace_flow_id = id.into();
+        id
+    });
+    trace_flow_id
+}
+
+fn trace_read_callback_flow(trace_flow_id: u64, end_flow: bool) {
+    if trace_flow_id != 0 {
+        if end_flow {
+            storage_trace::flow_end!("storage", "page_fault", trace_flow_id.into());
+        } else {
+            storage_trace::flow_step!("storage", "page_fault", trace_flow_id.into());
+        }
     }
 }
 
@@ -103,11 +130,23 @@ pub struct File {
     extents: Extents,
     uncompressed_size: u64,
     transform: Transform,
+    // Holds the first FIFO `SlotGuard` that retired or began replacing this `File` so its slot
+    // stays unpopped until all in-flight block reads on this `File` complete. Because a `Files`
+    // session is driven by a single FIFO `Receiver` whose `read_head` advances only across
+    // contiguous completed slots, keeping the first retiring slot unpopped also prevents any later
+    // superseding `Mappings` or `CloseBlob` slot from retiring early.
+    retired_slot_guard: OnceLock<Arc<SlotGuard<RawMappingCommand>>>,
 }
 
 impl File {
     pub fn new(extents: Extents, uncompressed_size: u64, transform: Transform) -> Self {
-        Self { extents, uncompressed_size, transform }
+        Self { extents, uncompressed_size, transform, retired_slot_guard: OnceLock::new() }
+    }
+
+    fn attach_slot_guard(&self, slot_guard: Option<Arc<SlotGuard<RawMappingCommand>>>) {
+        if let Some(guard) = slot_guard {
+            let _ = self.retired_slot_guard.set(guard);
+        }
     }
 
     /// Returns the extents mapping logical offsets to device offsets.
@@ -171,30 +210,26 @@ impl File {
     }
 
     /// Expands `original_range` to `window_alignment` boundaries, clamped to the page-aligned end
-    /// of the file, or returns `None` if `original_range` is empty or starts past the end of the
-    /// file.
+    /// of the file, or returns `None` if `original_range` is empty, starts past the end of the
+    /// file, or aligning the file size overflows.
     fn aligned_read_range(
         &self,
         original_range: Range<u64>,
         window_alignment: u64,
     ) -> Option<Range<u64>> {
-        self.aligned_read_range_for_page_size(
-            original_range,
-            window_alignment,
-            zx::system_get_page_size() as u64,
-        )
+        self.aligned_read_range_for_page_size(original_range, window_alignment, page_size().into())
     }
 
     fn aligned_read_range_for_page_size(
         &self,
         original_range: Range<u64>,
         window_alignment: u64,
-        page_size: u64,
+        page_size: BlockSize,
     ) -> Option<Range<u64>> {
         if original_range.is_empty() {
             return None;
         }
-        let page_aligned_size = self.uncompressed_size.next_multiple_of(page_size);
+        let page_aligned_size = page_size.align_up(self.uncompressed_size)?;
         if original_range.start >= page_aligned_size {
             return None;
         }
@@ -214,7 +249,7 @@ impl File {
     }
 
     /// Streams and decodes the uncompressed range requested by `page_request`, aligning the read
-    /// window to `window_alignment` and delivering chunks at `self.verification_alignment()`.
+    /// window to `window_alignment` rounded up to a multiple of `self.verification_alignment()`.
     ///
     /// Unlike [`Self::read_range`] (which expands the read window to `self.read_ahead_size()`),
     /// this allows a caller (such as a child file mapping) to bound the read window to a smaller
@@ -261,7 +296,7 @@ impl File {
     ) {
         self.read_single_window_for_page_size(
             window_alignment,
-            zx::system_get_page_size() as u64,
+            page_size().into(),
             service,
             page_request,
             record_offset,
@@ -271,11 +306,12 @@ impl File {
     fn read_single_window_for_page_size(
         self: &Arc<Self>,
         window_alignment: u64,
-        page_size: u64,
+        page_size: BlockSize,
         service: &(impl BlockService + ?Sized),
         mut page_request: impl PageRequest,
         record_offset: &impl Fn(u64),
     ) {
+        let trace_flow_id = page_request.trace_flow_id();
         let Some(read_range) = self.aligned_read_range_for_page_size(
             page_request.range(),
             window_alignment,
@@ -283,34 +319,18 @@ impl File {
         ) else {
             return;
         };
+        storage_trace::duration!(
+            "storage",
+            "File::read_single_window",
+            "len" => read_range.end - read_range.start
+        );
 
-        let chunk_size = self.verification_alignment();
-        if page_request.prepare(read_range.clone(), chunk_size as usize).is_err() {
-            return;
-        }
-
-        for offset in (read_range.start..read_range.end).step_by(window_alignment as usize) {
-            record_offset(offset);
-        }
-
-        if read_range.start >= self.uncompressed_size {
-            let len = (read_range.end - read_range.start) as usize;
-            page_request.mut_ptr_slice().subslice_mut(0..len).fill(0);
-            let _ = page_request.commit(len);
-            return;
-        }
-
-        // Obtain the deferred VMAR pre-commit handle before moving `page_request` into the
-        // completion closure. `read_aligned_range_with_precommit` executes `precommit.run()` on
-        // this thread right after the first asynchronous block read is submitted to overlap
-        // `zx::VmarOp::COMMIT` with storage DMA.
-        let precommit = page_request.precommit();
         enum ReadMode<'a> {
             Raw(u64),
             Decompress,
             Decrypt(&'a Arc<dyn Cipher>),
         }
-        let mode = match &self.transform {
+        let mode = (read_range.start < self.uncompressed_size).then(|| match &self.transform {
             Transform::None => ReadMode::Raw(read_range.start),
             Transform::Compressed(info) => {
                 match info.raw_offset_for_uncompressed_range(&read_range, BLOCK_SIZE) {
@@ -319,7 +339,47 @@ impl File {
                 }
             }
             Transform::Encrypted(cipher) => ReadMode::Decrypt(cipher),
+        });
+        // Only flush intermediate 32 KiB chunks when decompressing LZ4, where decompressing a
+        // chunk is faster than SHA-256 verification so `pkg-cache` verifies chunks in one
+        // continuous wake cycle. For ZSTD (where decompression is much slower than SHA-256) and
+        // raw/encrypted reads, wait until the full window is ready to avoid repeated wake/sleep
+        // cycles and partial-window supplies that trigger duplicate readahead faults.
+        let flush_alignment = match (&self.transform, &mode) {
+            (Transform::Compressed(info), Some(ReadMode::Decompress))
+                if info.compression_algorithm() == CompressionAlgorithm::Lz4 =>
+            {
+                NonZero::new(info.chunk_size() as usize)
+            }
+            _ => None,
         };
+        if page_request.prepare(read_range.clone(), flush_alignment).is_err() {
+            return;
+        }
+
+        for offset in (read_range.start..read_range.end).step_by(window_alignment as usize) {
+            record_offset(offset);
+        }
+
+        let Some(mode) = mode else {
+            let len = (read_range.end - read_range.start) as usize;
+            page_request.mut_ptr_slice().subslice_mut(0..len).fill(0);
+            let _ = page_request.commit(len);
+            return;
+        };
+
+        // Obtain the deferred VMAR pre-commit handle before moving `page_request` into the
+        // completion closure. `read_aligned_range_with_precommit` executes `precommit.run()` on
+        // this thread right after the first asynchronous block read is submitted to overlap
+        // `zx::VmarOp::COMMIT` with storage DMA.
+        let precommit = page_request.precommit();
+        let forwards_trace_flow = page_request.forwards_trace_flow();
+        // Wrap `service` so every submitted `read_blocks` sub-request holds `Arc<File>` (and any
+        // attached `SlotGuard`) until its physical read callback finishes, even if
+        // `SplittableBuffer` or `ReadContext` aborts early on a sibling extent or chunk error.
+        let guarded_service = GuardedBlockService::new(service, self.clone());
+        let service = &guarded_service;
+
         match mode {
             ReadMode::Raw(raw_offset) => {
                 let uncompressed_size = self.uncompressed_size;
@@ -339,12 +399,25 @@ impl File {
                         let buffer = match res {
                             Ok(buffer) => buffer,
                             Err(error) => {
+                                storage_trace::duration!("storage", "blob-read-raw", "len" => 0u64);
+                                trace_read_callback_flow(trace_flow_id, true);
                                 if !is_cancelled(&error) {
                                     log::error!(error:?; "Failed to read blocks for mapped file");
                                 }
                                 return ControlFlow::Break(());
                             }
                         };
+                        storage_trace::duration!(
+                            "storage",
+                            "blob-read-raw",
+                            "len" => buffer.len() as u64
+                        );
+                        let is_final_chunk =
+                            current_offset + buffer.len() as u64 >= stored_end_offset;
+                        trace_read_callback_flow(
+                            trace_flow_id,
+                            !forwards_trace_flow && is_final_chunk,
+                        );
                         let valid_len = min(
                             buffer.len() as u64,
                             uncompressed_size.saturating_sub(current_offset),
@@ -363,6 +436,7 @@ impl File {
                         let dest = page_request.mut_ptr_slice().subslice_mut(0..commit_len);
                         let (mut head, mut tail) = dest.split_at_mut(valid_len);
                         head.copy_from_ptr_slice(buffer.as_ptr_slice().subslice(0..valid_len));
+                        drop(buffer);
                         tail.fill(0);
                         if page_request.commit(commit_len).is_err() {
                             return ControlFlow::Break(());
@@ -381,6 +455,7 @@ impl File {
                     // is dropped.
                     return;
                 };
+                let mut remaining_compressed = aligned_range.end - aligned_range.start;
 
                 read_aligned_range_with_precommit(
                     &self.extents,
@@ -391,6 +466,12 @@ impl File {
                         let buffer = match res {
                             Ok(buffer) => buffer,
                             Err(error) => {
+                                storage_trace::duration!(
+                                    "storage",
+                                    "blob-decompress",
+                                    "len" => 0u64
+                                );
+                                trace_read_callback_flow(trace_flow_id, true);
                                 if !is_cancelled(&error) {
                                     log::error!(
                                         error:?;
@@ -400,7 +481,19 @@ impl File {
                                 return ControlFlow::Break(());
                             }
                         };
-                        if decompressor.push(buffer.as_ptr_slice()).is_err() {
+                        storage_trace::duration!(
+                            "storage",
+                            "blob-decompress",
+                            "len" => buffer.len() as u64
+                        );
+                        remaining_compressed =
+                            remaining_compressed.saturating_sub(buffer.len() as u64);
+                        trace_read_callback_flow(
+                            trace_flow_id,
+                            !forwards_trace_flow && remaining_compressed == 0,
+                        );
+                        let res = decompressor.push(buffer.as_ptr_slice());
+                        if res.is_err() {
                             return ControlFlow::Break(());
                         }
                         ControlFlow::Continue(())
@@ -409,6 +502,7 @@ impl File {
             }
             ReadMode::Decrypt(cipher) => {
                 let mut current_offset = read_range.start;
+                let end_offset = read_range.end;
                 let uncompressed_size = self.uncompressed_size;
                 let cipher = cipher.clone();
 
@@ -421,6 +515,8 @@ impl File {
                         let buffer = match res {
                             Ok(buffer) => buffer,
                             Err(error) => {
+                                storage_trace::duration!("storage", "blob-decrypt", "len" => 0u64);
+                                trace_read_callback_flow(trace_flow_id, true);
                                 if !is_cancelled(&error) {
                                     log::error!(
                                         error:?;
@@ -430,28 +526,42 @@ impl File {
                                 return ControlFlow::Break(());
                             }
                         };
-                        let mut dest = page_request.mut_ptr_slice().subslice_mut(0..buffer.len());
+                        let buffer_len = buffer.len();
+                        storage_trace::duration!(
+                            "storage",
+                            "blob-decrypt",
+                            "len" => buffer_len as u64
+                        );
+                        let is_final_chunk = current_offset + buffer_len as u64 >= end_offset;
+                        trace_read_callback_flow(
+                            trace_flow_id,
+                            !forwards_trace_flow && is_final_chunk,
+                        );
+                        let mut dest = page_request.mut_ptr_slice().subslice_mut(0..buffer_len);
+
                         // Both `buffer` and `dest` are aligned to 64 bytes.
-                        if let Err(error) = cipher.decrypt_to(
+                        let decrypt_res = cipher.decrypt_to(
                             0,
                             0,
                             0,
                             current_offset,
                             buffer.as_ptr_slice(),
                             dest.reborrow(),
-                        ) {
+                        );
+                        drop(buffer);
+                        if let Err(error) = decrypt_res {
                             log::error!(error:?; "Failed to decrypt buffer");
                             return ControlFlow::Break(());
                         }
                         let valid_len = min(
-                            buffer.len() as u64,
+                            buffer_len as u64,
                             uncompressed_size.saturating_sub(current_offset),
                         ) as usize;
-                        dest.subslice_mut(valid_len..buffer.len()).fill(0);
-                        if page_request.commit(buffer.len()).is_err() {
+                        dest.subslice_mut(valid_len..buffer_len).fill(0);
+                        if page_request.commit(buffer_len).is_err() {
                             return ControlFlow::Break(());
                         }
-                        current_offset += buffer.len() as u64;
+                        current_offset += buffer_len as u64;
                         ControlFlow::Continue(())
                     },
                 );
@@ -478,6 +588,7 @@ impl File {
         self: &Arc<Self>,
         child_key: u64,
         original_range: Range<u64>,
+        mut trace_flow_id: u64,
         parent_file: &Arc<File>,
         service: &(impl BlockService + ?Sized),
         delivery_handler: &Arc<D>,
@@ -487,7 +598,15 @@ impl File {
         else {
             return false;
         };
+        storage_trace::duration!(
+            "storage",
+            "File::read_child_range",
+            "key" => child_key,
+            "offset" => child_read_range.start,
+            "len" => child_read_range.end - child_read_range.start
+        );
         let parent_align = parent_file.verification_alignment();
+        let has_trace_flow = trace_flow_id != 0;
 
         let mut started_async_io = false;
         for extent in self
@@ -501,18 +620,31 @@ impl File {
                 continue;
             }
             let slice_len = slice_end - slice_start;
+            let extent_flow_id = if trace_flow_id != 0 {
+                std::mem::take(&mut trace_flow_id)
+            } else if has_trace_flow {
+                begin_page_fault_flow()
+            } else {
+                0
+            };
             match extent.device_extent() {
                 crate::DeviceExtent::Sparse => {
-                    let _ =
-                        delivery_handler.deliver_child_sparse(child_key, slice_start, slice_len);
+                    let _ = delivery_handler.deliver_child_sparse(
+                        child_key,
+                        slice_start,
+                        slice_len,
+                        extent_flow_id,
+                    );
                 }
                 crate::DeviceExtent::Block(dev_offset) => {
                     let parent_start = dev_offset + (slice_start - extent.logical_range().start);
-                    let child_req = delivery_handler.get_child_page_request(
-                        child_key,
-                        slice_start,
-                        parent_start..(parent_start + slice_len),
-                    );
+                    let child_req = delivery_handler
+                        .get_child_page_request(
+                            child_key,
+                            slice_start,
+                            parent_start..(parent_start + slice_len),
+                        )
+                        .with_trace_flow_id(extent_flow_id);
                     parent_file.read_range_with_alignment(parent_align, service, child_req);
                     started_async_io = true;
                 }
@@ -524,6 +656,7 @@ impl File {
                         child_key,
                         slice_start,
                         tail_length,
+                        extent_flow_id,
                     );
                 }
             }
@@ -543,20 +676,32 @@ impl<R> Default for LoadingSlot<R> {
     }
 }
 
-enum FileEntry<R> {
+enum FileState<R> {
     Loading(LoadingSlot<R>),
     Loaded(Arc<File>),
 }
 
-impl<R> Default for FileEntry<R> {
-    fn default() -> Self {
-        Self::Loading(LoadingSlot::default())
+/// A pre-allocated reservation for registering a blob's Merkle tree leaf hashes with the
+/// downstream verifier.
+///
+/// Reserving space upfront on the submission thread before issuing metadata block reads ensures
+/// that all paths acquire resources in a consistent order (`delivery_vmo` -> `BufferAllocator`)
+/// and avoids blocking block-completion threads on `delivery_vmo` space.
+pub trait BlobRegistration: Send + 'static {
+    /// Commits the blob registration with `merkle_leaves` and `read_alignment`.
+    fn commit(self, merkle_leaves: &[[u8; 32]], read_alignment: usize) -> Result<(), Error>;
+}
+
+impl BlobRegistration for () {
+    fn commit(self, _merkle_leaves: &[[u8; 32]], _read_alignment: usize) -> Result<(), Error> {
+        Ok(())
     }
 }
 
 /// Trait for handling deliveries (page request buffers and blob registrations) from [`Files`].
 pub trait DeliveryHandler: Send + Sync + 'static {
     type Request: PageRequest;
+    type BlobRegistration: BlobRegistration;
 
     /// Produces a [`PageRequest`] to receive decompressed or uncompressed page data.
     fn get_page_request(self: &Arc<Self>, key: u64, range: Range<u64>) -> Self::Request;
@@ -585,6 +730,7 @@ pub trait DeliveryHandler: Send + Sync + 'static {
         _child_key: u64,
         _child_target_offset: u64,
         _tail_length: u32,
+        _trace_flow_id: u64,
     ) {
         unreachable!()
     }
@@ -596,20 +742,18 @@ pub trait DeliveryHandler: Send + Sync + 'static {
         _child_key: u64,
         _child_target_offset: u64,
         _child_length: u64,
+        _trace_flow_id: u64,
     ) -> Result<(), Error> {
         unreachable!()
     }
 
-    /// Registers a blob's Merkle tree leaf hashes and delivery read alignment with the
-    /// downstream verifier.
-    fn register_blob(
+    /// Reserves space to register a blob (`key`) with at most `max_leaf_bytes` of Merkle tree leaf
+    /// hashes with the downstream verifier.
+    fn prepare_register_blob(
         &self,
-        _key: u64,
-        _merkle_leaves: &[[u8; 32]],
-        _read_alignment: usize,
-    ) -> Result<(), Error> {
-        Ok(())
-    }
+        key: u64,
+        max_leaf_bytes: usize,
+    ) -> Result<Self::BlobRegistration, Error>;
 
     /// Unregisters a file when it is closed.
     fn unregister_file(&self, _key: u64) {}
@@ -621,9 +765,18 @@ pub struct NoopDeliveryHandler;
 
 impl DeliveryHandler for NoopDeliveryHandler {
     type Request = NullPageRequest;
+    type BlobRegistration = ();
 
     fn get_page_request(self: &Arc<Self>, _key: u64, _range: Range<u64>) -> NullPageRequest {
         NullPageRequest
+    }
+
+    fn prepare_register_blob(
+        &self,
+        _key: u64,
+        _max_leaf_bytes: usize,
+    ) -> Result<Self::BlobRegistration, Error> {
+        Ok(())
     }
 }
 
@@ -709,15 +862,28 @@ impl ProfileRecording {
     }
 }
 
+struct FileEntry<R> {
+    // Sequence number of the latest `Mappings` command for this key (`0` if created by a page
+    // request before the first `Mappings` command arrived).
+    generation: u64,
+    state: FileState<R>,
+}
+
+struct FilesState<R> {
+    map: HashMap<u64, FileEntry<R>>,
+    next_generation: u64,
+}
+
 /// A thread-safe registry of active [`File`] instances indexed by their Zircon pager port key.
 pub struct Files<S: ?Sized, D: DeliveryHandler> {
     service: Arc<S>,
     delivery_handler: Arc<D>,
     port: zx::Port,
-    // When `Some(parent_file)`, this registry belongs to a child mapper session whose files map
-    // logical offsets into `parent_file`.
-    parent: Option<Arc<File>>,
-    map: Mutex<HashMap<u64, FileEntry<D::Request>>>,
+    // When `Some((parent_files, parent_key))`, this registry belongs to a child mapper session
+    // whose files map logical offsets into the parent file registered under `parent_key` in
+    // `parent_files`.
+    parent: Option<(Arc<Files<S, D>>, u64)>,
+    state: Mutex<FilesState<D::Request>>,
     // Page requests queued while a file's metadata was still loading, paired with
     // `(key, file, req)` to be dispatched on `PagerThread` once metadata loading completes.
     deferred_page_requests: Mutex<Vec<(u64, Arc<File>, D::Request)>>,
@@ -732,19 +898,19 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
     }
 
     /// Creates a new file registry sharing an existing `Arc<D>` delivery handler, optionally
-    /// mapped as a child session over `parent_file`.
+    /// mapped as a child session over `(parent_files, parent_key)`.
     pub fn new_with_shared_handler(
         service: Arc<S>,
         delivery_handler: Arc<D>,
         port: zx::Port,
-        parent: Option<Arc<File>>,
+        parent: Option<(Arc<Files<S, D>>, u64)>,
     ) -> Self {
         Self {
             service,
             delivery_handler,
             port,
             parent,
-            map: Mutex::new(HashMap::new()),
+            state: Mutex::new(FilesState { map: HashMap::new(), next_generation: 1 }),
             deferred_page_requests: Mutex::new(Vec::new()),
             recording: Mutex::new(None),
         }
@@ -795,26 +961,38 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
         self.parent.is_some()
     }
 
-    /// Spawns a background thread to service pager requests for `self`.
-    pub fn spawn_pager_thread(self: &Arc<Self>) -> PagerThread<S, D> {
+    /// Spawns a background thread with `name` to service pager requests for `self`.
+    pub fn spawn_pager_thread(self: &Arc<Self>, name: &str) -> PagerThread<S, D> {
         let files = self.clone();
-        let thread = std::thread::spawn(move || {
-            if let Err(error) = fuchsia_scheduler::set_role_for_this_thread(PAGER_THREAD_ROLE) {
-                log::warn!(error:?; "Failed to set pager thread role");
-            }
-            files.run_pager_loop();
-        });
+        let thread = std::thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                if let Err(error) = fuchsia_scheduler::set_role_for_this_thread(PAGER_THREAD_ROLE) {
+                    log::warn!(error:?; "Failed to set pager thread role");
+                }
+                files.run_pager_loop();
+            })
+            .expect("failed to spawn pager thread");
         PagerThread { files: self.clone(), thread: Some(thread) }
     }
 
     // Dispatches a `D::Request` to either `file.read_child_range` (for child sessions) or
     // `file.read_range_with_recording` (for root sessions).
     fn dispatch_page_request(&self, key: u64, file: &Arc<File>, req: D::Request) {
-        if let Some(parent_file) = &self.parent {
+        if let Some((parent_files, parent_key)) = &self.parent {
+            let Some(parent_file) = parent_files.get_file(*parent_key) else {
+                log::warn!(
+                    key,
+                    parent_key = *parent_key;
+                    "Parent file is no longer mapped for child page request"
+                );
+                return;
+            };
             let _ = file.read_child_range(
                 key,
                 req.range(),
-                parent_file,
+                req.trace_flow_id(),
+                &parent_file,
                 self.service.as_ref(),
                 &self.delivery_handler,
             );
@@ -842,6 +1020,22 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
                     PAGER_WAKE_KEY => {
                         let requests = std::mem::take(&mut *self.deferred_page_requests.lock());
                         for (key, file, req) in requests {
+                            let range = req.range();
+                            storage_trace::duration!(
+                                "storage",
+                                "Files::dispatch_deferred_page_request",
+                                "key" => key,
+                                "offset" => range.start,
+                                "len" => range.end - range.start
+                            );
+                            let trace_flow_id = req.trace_flow_id();
+                            if trace_flow_id != 0 {
+                                storage_trace::flow_step!(
+                                    "storage",
+                                    "page_fault",
+                                    trace_flow_id.into()
+                                );
+                            }
                             self.dispatch_page_request(key, &file, req);
                         }
                     }
@@ -862,15 +1056,14 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
         &self.service
     }
 
-    /// Registers a blob's Merkle tree leaf hashes and delivery read alignment with the
-    /// downstream delivery handler.
-    pub fn register_blob(
+    /// Reserves space with the downstream delivery handler to register `key` with at most
+    /// `max_leaf_bytes` of Merkle tree leaf hashes.
+    pub fn prepare_register_blob(
         &self,
         key: u64,
-        merkle_leaves: &[[u8; 32]],
-        read_alignment: usize,
-    ) -> Result<(), Error> {
-        self.delivery_handler.register_blob(key, merkle_leaves, read_alignment)
+        max_leaf_bytes: usize,
+    ) -> Result<D::BlobRegistration, Error> {
+        self.delivery_handler.prepare_register_blob(key, max_leaf_bytes)
     }
 
     // Handles a page request from `PagerThread`.
@@ -879,16 +1072,25 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
     // If the file is currently loading or unmapped, queues the request to be fulfilled
     // when loaded.
     fn handle_page_request(&self, key: u64, range: Range<u64>) {
-        let req = self.delivery_handler.get_page_request(key, range);
-        let mut map = self.map.lock();
-        match map.entry(key) {
-            Entry::Occupied(mut entry) => match entry.get_mut() {
-                FileEntry::Loaded(file) => {
+        storage_trace::duration!(
+            "storage",
+            "Files::handle_page_request",
+            "key" => key,
+            "offset" => range.start,
+            "len" => range.end - range.start
+        );
+        let trace_flow_id = begin_page_fault_flow();
+        let req =
+            self.delivery_handler.get_page_request(key, range).with_trace_flow_id(trace_flow_id);
+        let mut state = self.state.lock();
+        match state.map.entry(key) {
+            Entry::Occupied(mut entry) => match &mut entry.get_mut().state {
+                FileState::Loaded(file) => {
                     let file = Arc::clone(file);
-                    drop(map);
+                    drop(state);
                     self.dispatch_page_request(key, &file, req);
                 }
-                FileEntry::Loading(slot) => {
+                FileState::Loading(slot) => {
                     slot.requests.push(req);
                 }
             },
@@ -900,43 +1102,175 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
                 // Potential weakness: Unknown keys are unbounded. If an invalid or bogus page
                 // request arrives for a key that is never mapped, this entry will remain in
                 // memory until the session is dropped.
-                entry.insert(FileEntry::Loading(LoadingSlot {
-                    requests: vec![req],
-                    waiters: Vec::new(),
-                }));
+                entry.insert(FileEntry {
+                    generation: 0,
+                    state: FileState::Loading(LoadingSlot {
+                        requests: vec![req],
+                        waiters: Vec::new(),
+                    }),
+                });
             }
         }
     }
 
-    /// Marks `key` as currently loading metadata, preserving any page requests that arrived
-    /// prior to the mapping command.
+    #[cfg(test)]
     pub fn begin_loading(&self, key: u64) {
-        self.map.lock().entry(key).or_default();
+        let _ = self.begin_loading_with_slot_guard(key, None);
+    }
+
+    // Marks `key` as currently loading metadata (or advances its generation if already present so
+    // an existing `Loaded` entry remains readable while replacement metadata loads), preserving
+    // any page requests that arrived prior to the mapping command.
+    fn begin_loading_with_slot_guard(
+        &self,
+        key: u64,
+        slot_guard: Option<&Arc<SlotGuard<RawMappingCommand>>>,
+    ) -> u64 {
+        let mut state = self.state.lock();
+        let generation = state.next_generation;
+        state.next_generation += 1;
+        match state.map.entry(key) {
+            Entry::Occupied(mut entry) => {
+                let entry = entry.get_mut();
+                entry.generation = generation;
+                if let FileState::Loaded(old_file) = &entry.state {
+                    // Attach a clone of `slot_guard` immediately so that even if this overwrite's
+                    // metadata read is later superseded (by `CloseBlob` or another overwrite) and
+                    // completes before `old_file`'s in-flight block reads finish, this FIFO slot
+                    // will not retire until `old_file` is also dropped.
+                    old_file.attach_slot_guard(slot_guard.cloned());
+                }
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(FileEntry {
+                    generation,
+                    state: FileState::Loading(LoadingSlot::default()),
+                });
+            }
+        }
+        generation
     }
 
     /// Inserts a file into the registry under `key` and dispatches any page requests that
     /// arrived while metadata was loading.
-    fn insert(&self, key: u64, file: Arc<File>) {
-        let (reqs, waiters) = {
-            let mut map = self.map.lock();
-            let prev = map.insert(key, FileEntry::Loaded(file.clone()));
-            match prev {
-                Some(FileEntry::Loading(slot)) => (slot.requests, slot.waiters),
-                _ => (Vec::new(), Vec::new()),
+    #[cfg(test)]
+    pub(crate) fn insert(&self, key: u64, file: Arc<File>) {
+        self.insert_with_slot_guard(key, file, None);
+    }
+
+    fn insert_with_slot_guard(
+        &self,
+        key: u64,
+        file: Arc<File>,
+        slot_guard: Option<Arc<SlotGuard<RawMappingCommand>>>,
+    ) {
+        let (reqs, waiters, old_file) = {
+            let mut state = self.state.lock();
+            let generation = state.next_generation;
+            state.next_generation += 1;
+            let prev = state
+                .map
+                .insert(key, FileEntry { generation, state: FileState::Loaded(file.clone()) });
+            match prev.map(|entry| entry.state) {
+                Some(FileState::Loading(slot)) => (slot.requests, slot.waiters, None),
+                Some(FileState::Loaded(old_file)) => (Vec::new(), Vec::new(), Some(old_file)),
+                None => (Vec::new(), Vec::new(), None),
             }
         };
+        if let Some(old_file) = old_file {
+            old_file.attach_slot_guard(slot_guard);
+        } else {
+            drop(slot_guard);
+        }
+        self.finish_insert(key, file, reqs, waiters);
+    }
 
+    fn commit_loading(
+        &self,
+        key: u64,
+        generation: u64,
+        file: Arc<File>,
+        registration: Option<D::BlobRegistration>,
+        merkle_leaves: &[[u8; 32]],
+    ) {
+        // Child files do not have their own Merkle trees, and overwritten root blobs (`Loaded`)
+        // keep their existing verifier initialised on initial open. Check `generation` and whether
+        // initial registration is needed before committing `registration` outside the lock.
+        let Some(needs_registration) = ({
+            let state = self.state.lock();
+            match state.map.get(&key) {
+                Some(entry) if entry.generation == generation => {
+                    Some(matches!(entry.state, FileState::Loading(_)) && !self.has_parent())
+                }
+                _ => None,
+            }
+        }) else {
+            return;
+        };
+        if needs_registration
+            && let Some(registration) = registration
+            && let Err(error) =
+                registration.commit(merkle_leaves, file.verification_alignment() as usize)
+        {
+            log::error!(error:?, key; "Failed to register blob");
+            self.abort_loading(key, generation);
+            return;
+        }
+        let (reqs, waiters, old_file) = {
+            let mut state = self.state.lock();
+            let Some(entry) = state.map.get_mut(&key) else {
+                return;
+            };
+            if entry.generation != generation {
+                return;
+            }
+            match std::mem::replace(&mut entry.state, FileState::Loaded(file.clone())) {
+                FileState::Loading(slot) => (slot.requests, slot.waiters, None),
+                // `begin_loading_with_slot_guard` already attached `slot_guard` to `old_file`.
+                FileState::Loaded(old_file) => (Vec::new(), Vec::new(), Some(old_file)),
+            }
+        };
+        drop(old_file);
+        self.finish_insert(key, file, reqs, waiters);
+    }
+
+    fn abort_loading(&self, key: u64, generation: u64) {
+        let removed = {
+            let mut state = self.state.lock();
+            match state.map.entry(key) {
+                Entry::Occupied(entry) if entry.get().generation == generation => {
+                    Some(entry.remove())
+                }
+                _ => None,
+            }
+        };
+        if let Some(removed) = removed {
+            drop(removed);
+            if self.parent.is_none() {
+                self.delivery_handler.unregister_file(key);
+            }
+        }
+    }
+
+    fn finish_insert(
+        &self,
+        key: u64,
+        file: Arc<File>,
+        reqs: Vec<D::Request>,
+        waiters: Vec<oneshot::Sender<Arc<File>>>,
+    ) {
         for waiter in waiters {
             let _ = waiter.send(file.clone());
         }
 
         if !reqs.is_empty() {
-            // `insert` is called inside a block I/O completion callback. Calling
-            // `file.read_range` here would deadlock a single-threaded block completion worker
-            // when a read requires multiple buffer allocations from a full pool: allocating the
-            // next chunk blocks the completion thread waiting for earlier chunks to complete
-            // and free their buffers, which that same thread is responsible for completing.
-            // Instead, hand `reqs` to `PagerThread` so the callback can return immediately.
+            // `insert` / `commit_loading` can be called inside a block I/O completion
+            // callback. Calling `file.read_range` here would deadlock a single-threaded block
+            // completion worker when a read requires multiple buffer allocations from a full pool:
+            // allocating the next chunk blocks the completion thread waiting for earlier chunks to
+            // complete and free their buffers, which that same thread is responsible for
+            // completing. Instead, hand `reqs` to `PagerThread` so the callback can return
+            // immediately.
             self.deferred_page_requests
                 .lock()
                 .extend(reqs.into_iter().map(|req| (key, file.clone(), req)));
@@ -951,9 +1285,9 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
 
     /// Returns the loaded [`File`] registered under `key`, if present.
     pub fn get_file(&self, key: u64) -> Option<Arc<File>> {
-        let map = self.map.lock();
-        match map.get(&key) {
-            Some(FileEntry::Loaded(file)) => Some(file.clone()),
+        let state = self.state.lock();
+        match state.map.get(&key).map(|entry| &entry.state) {
+            Some(FileState::Loaded(file)) => Some(file.clone()),
             _ => None,
         }
     }
@@ -962,11 +1296,11 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
     /// waiting asynchronously if the file is currently loading or hasn't arrived yet.
     pub async fn wait_for_file(&self, key: u64) -> Result<Arc<File>, Error> {
         let receiver = {
-            let mut map = self.map.lock();
-            match map.entry(key) {
-                Entry::Occupied(mut entry) => match entry.get_mut() {
-                    FileEntry::Loaded(file) => return Ok(file.clone()),
-                    FileEntry::Loading(slot) => {
+            let mut state = self.state.lock();
+            match state.map.entry(key) {
+                Entry::Occupied(mut entry) => match &mut entry.get_mut().state {
+                    FileState::Loaded(file) => return Ok(file.clone()),
+                    FileState::Loading(slot) => {
                         let (sender, receiver) = oneshot::channel();
                         slot.waiters.push(sender);
                         receiver
@@ -974,10 +1308,13 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
                 },
                 Entry::Vacant(entry) => {
                     let (sender, receiver) = oneshot::channel();
-                    entry.insert(FileEntry::Loading(LoadingSlot {
-                        requests: Vec::new(),
-                        waiters: vec![sender],
-                    }));
+                    entry.insert(FileEntry {
+                        generation: 0,
+                        state: FileState::Loading(LoadingSlot {
+                            requests: Vec::new(),
+                            waiters: vec![sender],
+                        }),
+                    });
                     receiver
                 }
             }
@@ -988,16 +1325,30 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
 
     /// Removes the file registered under `key`.
     pub fn remove(&self, key: u64) {
+        self.remove_with_slot_guard(key, None);
+    }
+
+    fn remove_with_slot_guard(
+        &self,
+        key: u64,
+        slot_guard: Option<Arc<SlotGuard<RawMappingCommand>>>,
+    ) {
+        let removed = self.state.lock().map.remove(&key);
+        if let Some(FileEntry { state: FileState::Loaded(old_file), .. }) = removed {
+            old_file.attach_slot_guard(slot_guard);
+        } else {
+            drop(removed);
+            drop(slot_guard);
+        }
         if self.parent.is_none() {
             self.delivery_handler.unregister_file(key);
         }
-        self.map.lock().remove(&key);
     }
 
     /// Returns `true` if `key` is currently in the loading state.
     #[cfg(test)]
     pub fn is_loading(&self, key: u64) -> bool {
-        matches!(self.map.lock().get(&key), Some(FileEntry::Loading(_)))
+        matches!(self.state.lock().map.get(&key).map(|e| &e.state), Some(FileState::Loading(_)))
     }
 
     /// Returns `true` if `key` is currently in the loading state with at least one queued page
@@ -1005,15 +1356,14 @@ impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Files<S, D> {
     #[cfg(test)]
     pub fn has_queued_page_requests(&self, key: u64) -> bool {
         matches!(
-            self.map.lock().get(&key),
-            Some(FileEntry::Loading(slot)) if !slot.requests.is_empty()
+            self.state.lock().map.get(&key).map(|e| &e.state),
+            Some(FileState::Loading(slot)) if !slot.requests.is_empty()
         )
     }
 
     /// Returns `true` if `key` is currently in the loaded state.
-    #[cfg(test)]
-    pub fn is_loaded(&self, key: u64) -> bool {
-        matches!(self.map.lock().get(&key), Some(FileEntry::Loaded(_)))
+    pub(crate) fn is_loaded(&self, key: u64) -> bool {
+        matches!(self.state.lock().map.get(&key).map(|e| &e.state), Some(FileState::Loaded(_)))
     }
 }
 
@@ -1078,10 +1428,7 @@ pub fn read_blob_metadata(
     stored_data_size: u64,
     callback: impl FnOnce(DecodedBlobMetadata) + Send + 'static,
 ) {
-    let mut total_metadata_len = 0u64;
-    for extent in metadata_extents.iter_extents(0) {
-        total_metadata_len += extent.len();
-    }
+    let total_metadata_len = metadata_extents.logical_len();
     if total_metadata_len == 0 {
         callback(DecodedBlobMetadata {
             uncompressed_size: stored_data_size,
@@ -1106,6 +1453,7 @@ pub fn read_blob_metadata(
         let bytes = metadata_bytes.as_mut().unwrap();
         let copy_len = min(buffer.len(), total_metadata_len as usize - bytes.len());
         buffer.as_ptr_slice().subslice(0..copy_len).append_to(bytes);
+        drop(buffer);
         if bytes.len() < total_metadata_len as usize {
             return ControlFlow::Continue(());
         }
@@ -1136,46 +1484,73 @@ pub fn read_blob_metadata(
     });
 }
 
-/// RAII guard that manages the lifecycle of a file transitioning from loading metadata to loaded.
+/// RAII guard that manages the lifecycle of a file while its metadata is being fetched
+/// asynchronously from storage.
 ///
-/// When metadata is being fetched asynchronously from storage, the file entry in [`Files`]
-/// remains in the [`FileEntry::Loading`] state, accumulating incoming page requests in its queue.
+/// For an initial open, the file entry in [`Files`] starts in [`FileState::Loading`], accumulating
+/// incoming page requests in its queue. For an overwrite of an already-loaded file, the existing
+/// [`FileState::Loaded`] entry stays in place until the new metadata finishes loading.
 ///
-/// - On success: [`LoadingFileGuard::commit`] consumes the guard, stores the fully initialized
-///   [`File`], and dispatches all queued page requests to [`PagerThread`] to be fulfilled.
-/// - On failure or cancellation: If dropped before `commit` is called (e.g. due to storage I/O
-///   error, corrupted metadata, or session teardown), the `Drop` implementation cleans up the
-///   entry by removing `key` from [`Files`]. Dropping the loading slot drops all queued
-///   [`PageRequest`] objects, which fails the pending page requests in the kernel pager.
+/// - On success: [`LoadingFileGuard::commit`] consumes the guard, registers the blob's Merkle
+///   leaves on initial load, replaces any prior entry with the newly initialised [`File`]
+///   (dropping its own [`SlotGuard`] reference while any replaced [`File`] retains the clone
+///   attached in `begin_loading_with_slot_guard` until its in-flight reads finish), and dispatches
+///   any queued page requests to [`PagerThread`].
+/// - On failure or cancellation: If dropped without committing while `key` is still at
+///   `generation`, `Drop` removes `key` from [`Files`], both when `key` is in
+///   [`FileState::Loading`] (dropping any queued [`PageRequest`] objects) and when `key` holds
+///   [`FileState::Loaded`] during a failed overwrite (since retiring the overwrite's [`SlotGuard`]
+///   allows Fxfs to free the old file's extents).
 struct LoadingFileGuard<S: BlockService + ?Sized + 'static, D: DeliveryHandler> {
-    files: Option<Arc<Files<S, D>>>,
+    files: Arc<Files<S, D>>,
     key: u64,
+    generation: u64,
+    committed: bool,
+    slot_guard: Arc<SlotGuard<RawMappingCommand>>,
 }
 
 impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> LoadingFileGuard<S, D> {
-    /// Commits the loaded file to the registry, transferring ownership and dispatching any queued
-    /// page requests to [`PagerThread`] to be fulfilled.
-    fn commit(mut self, file: Arc<File>) {
-        self.files.take().unwrap().insert(self.key, file);
+    fn new(
+        files: Arc<Files<S, D>>,
+        key: u64,
+        slot_guard: Arc<SlotGuard<RawMappingCommand>>,
+    ) -> Self {
+        let generation = files.begin_loading_with_slot_guard(key, Some(&slot_guard));
+        Self { files, key, generation, committed: false, slot_guard }
+    }
+
+    /// Commits `registration` (on initial load of a root blob) and stores the loaded file in the
+    /// registry if `self.generation` is still current.
+    fn commit(
+        mut self,
+        file: Arc<File>,
+        registration: Option<D::BlobRegistration>,
+        merkle_leaves: &[[u8; 32]],
+    ) {
+        self.committed = true;
+        self.files.commit_loading(self.key, self.generation, file, registration, merkle_leaves);
     }
 }
 
 impl<S: BlockService + ?Sized + 'static, D: DeliveryHandler> Drop for LoadingFileGuard<S, D> {
     fn drop(&mut self) {
-        if let Some(files) = self.files.take() {
-            files.remove(self.key);
+        if !self.committed {
+            self.files.abort_loading(self.key, self.generation);
         }
     }
 }
 
-/// Processes a raw mapping command (`RawMappingCommand`), decoding extent descriptors,
-/// reading blob metadata from storage, registering Merkle leaves via `files`, and
-/// inserting/removing the file from `files`.
+/// Processes a claimed raw mapping command (`RawMappingCommand`), decoding extent descriptors,
+/// reading blob metadata from storage, registering Merkle leaves via `files`, inserting/removing
+/// the file from `files`, and holding the command's [`SlotGuard`] until any asynchronous metadata
+/// read completes and any replaced or removed [`File`] (including all in-flight block reads on it)
+/// has been dropped.
 pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHandler>(
-    msg: &Message<'_, RawMappingCommand>,
+    msg: Message<'_, RawMappingCommand>,
+    receiver: &Arc<Receiver<RawMappingCommand>>,
     files: &Arc<Files<S, D>>,
 ) -> Result<(), Error> {
-    let cmd = **msg;
+    let cmd = *msg;
     match MappingCommand::try_from(cmd)? {
         MappingCommand::Mappings {
             key,
@@ -1204,7 +1579,14 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
                 .try_into()
                 .map_err(|_| anyhow!("Extent byte length exceeds u32"))?;
 
-            let payload_bytes = msg.payload_slice(offset, payload_len);
+            // `offset` comes from the client, so validate it before decoding. Extents are read as
+            // `u64`s and the payload region is page aligned, so `offset` must be 8-byte aligned.
+            if !offset.is_multiple_of(std::mem::align_of::<u64>() as u32) {
+                bail!("Payload offset {offset} is not 8-byte aligned");
+            }
+            let payload_bytes = msg
+                .try_payload_slice(offset, payload_len)
+                .ok_or_else(|| anyhow!("Payload slice is out of bounds"))?;
             let data_bytes = payload_bytes.subslice(0..extent_bytes_len);
             let data_extents = Extents::from_encoded(data_bytes.iter_as::<u64>(), device_offset)
                 .ok_or_else(|| anyhow!("Failed to decode data extents"))?;
@@ -1213,15 +1595,10 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
                 let key_bytes = payload_bytes.subslice(extent_bytes_len..total_bytes_len);
                 let cipher_key = UnwrappedKey::new(key_bytes.to_vec());
                 let cipher = Arc::new(FxfsCipher::new(&cipher_key)) as Arc<dyn Cipher>;
+                let slot_guard = Arc::new(msg.into_slot_guard(Arc::clone(receiver)));
                 let file =
                     Arc::new(File::new(data_extents, stored_size, Transform::Encrypted(cipher)));
-                files.insert(key, file);
-                return Ok(());
-            }
-
-            if files.has_parent() && metadata_count == 0 {
-                let file = Arc::new(File::new(data_extents, stored_size, Transform::None));
-                files.insert(key, file);
+                files.insert_with_slot_guard(key, file, Some(slot_guard));
                 return Ok(());
             }
 
@@ -1229,35 +1606,58 @@ pub fn process_mapping_command<S: BlockService + ?Sized + 'static, D: DeliveryHa
             let metadata_extents =
                 Extents::from_encoded(metadata_bytes.iter_as::<u64>(), device_offset)
                     .ok_or_else(|| anyhow!("Failed to decode metadata extents"))?;
+            let max_leaf_bytes: usize = metadata_extents
+                .logical_len()
+                .try_into()
+                .map_err(|_| anyhow!("Metadata byte length exceeds usize"))?;
 
-            files.begin_loading(key);
+            if max_leaf_bytes == 0 {
+                let file = Arc::new(File::new(data_extents, stored_size, Transform::None));
+                if !files.has_parent() && !files.is_loaded(key) {
+                    files
+                        .prepare_register_blob(key, 0)?
+                        .commit(&[], file.verification_alignment() as usize)?;
+                }
+                let slot_guard = Arc::new(msg.into_slot_guard(Arc::clone(receiver)));
+                files.insert_with_slot_guard(key, file, Some(slot_guard));
+                return Ok(());
+            }
+
+            // Child files do not have their own Merkle trees, and overwritten root blobs (`Loaded`)
+            // keep their existing verifier initialised on initial open. For initial root-blob
+            // opens, preallocate the delivery VMO space required to register the blob's Merkle
+            // leaves before mutating `files` or issuing the metadata block read so blocking
+            // reservations stay off the block-completion thread, resources are acquired in
+            // `delivery_vmo` -> `BufferAllocator` order, and `files` is left unchanged if
+            // preallocation fails.
+            //
+            // We use `metadata_extents.logical_len()` as a conservative upper bound for
+            // `max_leaf_bytes`: the on-disk metadata stores the uncompressed Merkle leaves plus
+            // headers and (when compressed) seek offsets.
+            let registration = if !files.has_parent() && !files.is_loaded(key) {
+                Some(files.prepare_register_blob(key, max_leaf_bytes)?)
+            } else {
+                None
+            };
+            let slot_guard = Arc::new(msg.into_slot_guard(Arc::clone(receiver)));
+            let guard = LoadingFileGuard::new(files.clone(), key, slot_guard);
+
             let service = files.service().clone();
-            let guard = LoadingFileGuard { files: Some(files.clone()), key };
-            let files_clone = files.clone();
-            read_blob_metadata(service.as_ref(), &metadata_extents, stored_size, move |metadata| {
+            let guarded_service =
+                GuardedBlockService::new(service.as_ref(), Arc::clone(&guard.slot_guard));
+            read_blob_metadata(&guarded_service, &metadata_extents, stored_size, move |metadata| {
                 let file = Arc::new(File::new(
                     data_extents,
                     metadata.uncompressed_size,
                     metadata.compression_info.into(),
                 ));
-                // Child files do not have their own Merkle trees; their backing parent blob is
-                // verified instead.
-                if !files_clone.has_parent() {
-                    if let Err(error) = files_clone.register_blob(
-                        key,
-                        &metadata.merkle_leaves,
-                        file.verification_alignment() as usize,
-                    ) {
-                        log::error!(error:?; "Failed to register blob {key}");
-                        return;
-                    }
-                }
-                guard.commit(file);
+                guard.commit(file, registration, &metadata.merkle_leaves);
             });
             Ok(())
         }
         MappingCommand::CloseBlob { key } => {
-            files.remove(key);
+            let slot_guard = Arc::new(msg.into_slot_guard(Arc::clone(receiver)));
+            files.remove_with_slot_guard(key, Some(slot_guard));
             Ok(())
         }
     }
@@ -1274,10 +1674,13 @@ mod tests {
     use bincode::Options;
     use blob_metadata::BlobFormat;
     use byteorder::WriteBytesExt;
-    use delivery_blob::compression::{ChunkedArchive, ChunkedArchiveOptions, CompressionAlgorithm};
+    use delivery_blob::compression::{ChunkedArchive, ChunkedArchiveError, ChunkedArchiveOptions};
     use fuchsia_async as fasync;
     use fxfs_crypto::{Cipher, FxfsCipher, UnwrappedKey};
+    use std::collections::VecDeque;
+    use std::pin::pin;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
     use storage_ptr_slice::MutPtrByteSlice;
 
@@ -1754,23 +2157,40 @@ mod tests {
     struct DelayedBlockService {
         device_data: Vec<u8>,
         pending: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+        fail_offsets: Mutex<Vec<u64>>,
         allocator: Option<Arc<BufferAllocator>>,
     }
 
     impl DelayedBlockService {
         fn new(device_data: Vec<u8>) -> Arc<Self> {
-            Arc::new(Self { device_data, pending: Mutex::new(Vec::new()), allocator: None })
+            Arc::new(Self {
+                device_data,
+                pending: Mutex::new(Vec::new()),
+                fail_offsets: Mutex::new(Vec::new()),
+                allocator: None,
+            })
         }
 
         fn new_with_pool_capacity(device_data: Vec<u8>, pool_capacity: usize) -> Arc<Self> {
             Arc::new(Self {
                 device_data,
                 pending: Mutex::new(Vec::new()),
+                fail_offsets: Mutex::new(Vec::new()),
                 allocator: Some(Arc::new(BufferAllocator::new(
                     BLOCK_SIZE as usize,
                     BufferSource::new(pool_capacity),
                 ))),
             })
+        }
+
+        fn fail_at_offset(&self, offset: u64) {
+            self.fail_offsets.lock().push(offset);
+        }
+
+        fn wait_for_pending(&self, min_count: usize) {
+            while self.pending.lock().len() < min_count {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         }
 
         fn wait_and_trigger_sync(&self) {
@@ -1806,6 +2226,21 @@ mod tests {
             mut dest_buffer: OwnedBuffer,
             on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
         ) -> Result<(), Error> {
+            let should_fail = {
+                let mut fail_offsets = self.fail_offsets.lock();
+                if let Some(pos) = fail_offsets.iter().position(|&off| off == device_offset) {
+                    fail_offsets.swap_remove(pos);
+                    true
+                } else {
+                    false
+                }
+            };
+            if should_fail {
+                self.pending.lock().push(Box::new(move || {
+                    on_complete(Err(anyhow!("injected block read failure")));
+                }));
+                return Ok(());
+            }
             let start = device_offset as usize;
             let end = (start + dest_buffer.len()).min(self.device_data.len());
             dest_buffer
@@ -1935,7 +2370,7 @@ mod tests {
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -1951,10 +2386,11 @@ mod tests {
             extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
         // File is initially in Loading state.
         assert!(files.is_loading(99));
@@ -1983,20 +2419,33 @@ mod tests {
         let service = DelayedBlockService::new(device_data);
         let registered = Arc::new(std::sync::Mutex::new(None));
         let registered_clone = registered.clone();
-        struct TestRegisterHandler(Arc<std::sync::Mutex<Option<(u64, Vec<[u8; 32]>, usize)>>>);
+        struct TestRegistration {
+            key: u64,
+            max_leaf_bytes: usize,
+            registered: Arc<std::sync::Mutex<Option<(u64, usize, Vec<[u8; 32]>, usize)>>>,
+        }
+        impl BlobRegistration for TestRegistration {
+            fn commit(self, leaves: &[[u8; 32]], read_alignment: usize) -> Result<(), Error> {
+                *self.registered.lock().unwrap() =
+                    Some((self.key, self.max_leaf_bytes, leaves.to_vec(), read_alignment));
+                Ok(())
+            }
+        }
+        struct TestRegisterHandler(
+            Arc<std::sync::Mutex<Option<(u64, usize, Vec<[u8; 32]>, usize)>>>,
+        );
         impl DeliveryHandler for TestRegisterHandler {
             type Request = TestVecBuffer;
+            type BlobRegistration = TestRegistration;
             fn get_page_request(self: &Arc<Self>, _key: u64, _range: Range<u64>) -> Self::Request {
                 TestVecBuffer::new(4096).0
             }
-            fn register_blob(
+            fn prepare_register_blob(
                 &self,
                 key: u64,
-                leaves: &[[u8; 32]],
-                read_alignment: usize,
-            ) -> Result<(), Error> {
-                *self.0.lock().unwrap() = Some((key, leaves.to_vec(), read_alignment));
-                Ok(())
+                max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                Ok(TestRegistration { key, max_leaf_bytes, registered: self.0.clone() })
             }
         }
         let files = Arc::new(Files::new(
@@ -2020,7 +2469,7 @@ mod tests {
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2036,11 +2485,12 @@ mod tests {
             extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
         // Process the mapping command.
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
         // While the block read for metadata is pending completion, the file is in the "loading"
         // state and leaves are not yet registered.
@@ -2052,20 +2502,20 @@ mod tests {
 
         // Once the block read completes and metadata is decoded, verify that:
         // - The file transitioned out of "loading" and is committed into `Files`.
-        // - The `register_blob` callback was invoked with the expected key, Merkle leaves, and
-        //   read_alignment.
+        // - The `BlobRegistration::commit` callback was invoked with the expected key, reserved
+        //   max_leaf_bytes, Merkle leaves, and read_alignment.
         assert!(!files.is_loading(42));
         assert!(files.get_file(42).is_some());
-        let (reg_key, reg_leaves, reg_read_alignment) =
+        let (reg_key, reg_max_leaf_bytes, reg_leaves, reg_read_alignment) =
             registered.lock().unwrap().take().expect("registered callback called");
         assert_eq!(reg_key, 42);
+        assert_eq!(reg_max_leaf_bytes, BLOCK_SIZE as usize);
         assert_eq!(reg_leaves, vec![leaf1, leaf2]);
         assert_eq!(reg_read_alignment, DEFAULT_VERIFICATION_ALIGNMENT as usize);
     }
 
     #[fuchsia::test]
     fn test_loading_page_request_buffer_dropped_on_failure() {
-        use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
         use std::sync::atomic::{AtomicBool, Ordering};
         use storage_ptr_slice::MutPtrByteSlice;
 
@@ -2094,7 +2544,7 @@ mod tests {
             fn prepare(
                 &mut self,
                 _range: Range<u64>,
-                _read_alignment: usize,
+                _flush_alignment: Option<NonZero<usize>>,
             ) -> Result<(), ChunkedArchiveError> {
                 Ok(())
             }
@@ -2142,7 +2592,7 @@ mod tests {
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2158,10 +2608,11 @@ mod tests {
             extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
         assert!(files.is_loading(99));
 
@@ -2179,7 +2630,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_pager_concurrent_request_during_metadata_read() {
-        use vmo_fifo::SyncSender;
+        use vmo_fifo::{Alignment, SyncSender};
         use zx::{Pager, PagerOptions, Port, Rights, Vmo, VmoOptions};
 
         let metadata =
@@ -2205,7 +2656,7 @@ mod tests {
             port.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
         ));
 
-        let _pager_thread = files.spawn_pager_thread();
+        let _pager_thread = files.spawn_pager_thread("pager");
 
         let pager = Pager::create(PagerOptions::empty()).unwrap();
         let vmo_blob = pager.create_vmo(VmoOptions::empty(), &port, 42, BLOCK_SIZE).unwrap();
@@ -2225,7 +2676,7 @@ mod tests {
         let vmo = Vmo::create(65536).unwrap();
         let mut sender = SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2241,13 +2692,15 @@ mod tests {
             extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
         std::thread::scope(|s| {
-            let msg = receiver.peek().unwrap();
+            let msg = receiver.claim().unwrap();
+            let receiver_for_process = receiver.clone();
             let files_for_process = files.clone();
             s.spawn(move || {
-                process_mapping_command(&msg, &files_for_process).unwrap();
+                process_mapping_command(msg, &receiver_for_process, &files_for_process).unwrap();
             });
 
             // Wait until metadata block read has been submitted to service
@@ -2285,7 +2738,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_pager_request_arrives_before_mapping_command() {
-        use vmo_fifo::SyncSender;
+        use vmo_fifo::{Alignment, SyncSender};
         use zx::{Pager, PagerOptions, Port, Rights, Vmo, VmoOptions};
 
         let metadata =
@@ -2311,7 +2764,7 @@ mod tests {
             port.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
         ));
 
-        let _pager_thread = files.spawn_pager_thread();
+        let _pager_thread = files.spawn_pager_thread("pager");
 
         let pager = Pager::create(PagerOptions::empty()).unwrap();
         let vmo_blob = pager.create_vmo(VmoOptions::empty(), &port, 42, BLOCK_SIZE).unwrap();
@@ -2331,7 +2784,7 @@ mod tests {
         let vmo = Vmo::create(65536).unwrap();
         let mut sender = SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2347,7 +2800,8 @@ mod tests {
             extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
         // Trigger page fault from a background thread BEFORE the mapping command is processed.
         std::thread::spawn(move || {
@@ -2361,10 +2815,11 @@ mod tests {
         }
 
         std::thread::scope(|s| {
-            let msg = receiver.peek().unwrap();
+            let msg = receiver.claim().unwrap();
+            let receiver_for_process = receiver.clone();
             let files_for_process = files.clone();
             s.spawn(move || {
-                process_mapping_command(&msg, &files_for_process).unwrap();
+                process_mapping_command(msg, &receiver_for_process, &files_for_process).unwrap();
             });
 
             // Trigger metadata read completion.
@@ -2393,7 +2848,7 @@ mod tests {
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2417,10 +2872,10 @@ mod tests {
         };
         payload_buf.commit(cmd).unwrap();
 
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
-        msg.pop().unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
         assert!(files.is_loaded(123));
 
@@ -2437,9 +2892,8 @@ mod tests {
             })
             .unwrap();
 
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
-        msg.pop().unwrap();
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
         assert!(!files.is_loaded(123));
     }
@@ -2697,7 +3151,7 @@ mod tests {
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2713,10 +3167,11 @@ mod tests {
             extent_count: 1,
         };
         payload_buf.commit(cmd).unwrap();
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
         let file = files.get_file(100).expect("File should be loaded immediately");
         let (page_request, rx) =
@@ -2730,16 +3185,16 @@ mod tests {
         struct NoRegisterBlobHandler;
         impl DeliveryHandler for NoRegisterBlobHandler {
             type Request = TestVecBuffer;
+            type BlobRegistration = ();
             fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
                 TestVecBuffer::new_with_range(range).0
             }
-            fn register_blob(
+            fn prepare_register_blob(
                 &self,
                 _key: u64,
-                _merkle_leaves: &[[u8; 32]],
-                _read_alignment: usize,
-            ) -> Result<(), Error> {
-                panic!("register_blob should not be called for encrypted files");
+                _max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                panic!("prepare_register_blob should not be called for encrypted files");
             }
         }
 
@@ -2772,7 +3227,7 @@ mod tests {
         let vmo = zx::Vmo::create(65536).unwrap();
         let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
             vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             16,
         )
         .unwrap();
@@ -2800,14 +3255,14 @@ mod tests {
         };
         sender.reserve_payload(0).unwrap().commit(invalid_cmd).unwrap();
 
-        let mut receiver = vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
 
-        let msg = receiver.peek().unwrap();
-        process_mapping_command(&msg, &files).unwrap();
-        msg.pop().unwrap();
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
 
-        let invalid_msg = receiver.peek().unwrap();
-        assert!(process_mapping_command(&invalid_msg, &files).is_err());
+        let invalid_msg = receiver.claim().unwrap();
+        assert!(process_mapping_command(invalid_msg, &receiver, &files).is_err());
 
         let file = files.get_file(101).expect("File should be loaded immediately");
         assert!(matches!(file.transform(), Transform::Encrypted(_)));
@@ -2840,7 +3295,7 @@ mod tests {
             TestDeliveryHandler(move |_key, _range| page_request.lock().take().unwrap()),
             zx::Port::create(),
         ));
-        let _pager_thread = files.spawn_pager_thread();
+        let _pager_thread = files.spawn_pager_thread("pager");
 
         let data_extents =
             Extents::try_new([Extent::new(0..TARGET_READ_AHEAD_SIZE, Some(0))], 0).unwrap();
@@ -2904,7 +3359,7 @@ mod tests {
             TestDeliveryHandler(|_key, _range| TestVecBuffer::new(4096).0),
             port,
         ));
-        let thread = files.spawn_pager_thread();
+        let thread = files.spawn_pager_thread("pager");
         drop(thread);
     }
 
@@ -3058,7 +3513,7 @@ mod tests {
             }),
             zx::Port::create(),
         ));
-        let _pager_thread = files.spawn_pager_thread();
+        let _pager_thread = files.spawn_pager_thread("pager");
 
         files.start_recording().expect("start_recording failed");
 
@@ -3102,8 +3557,16 @@ mod tests {
         }
         impl DeliveryHandler for RecordingChildHandler {
             type Request = TestVecBuffer;
+            type BlobRegistration = ();
             fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
                 TestVecBuffer::new_with_range(range).0
+            }
+            fn prepare_register_blob(
+                &self,
+                _key: u64,
+                _max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                Ok(())
             }
             fn get_child_page_request(
                 self: &Arc<Self>,
@@ -3124,6 +3587,7 @@ mod tests {
                 child_key: u64,
                 child_target_offset: u64,
                 tail_length: u32,
+                _trace_flow_id: u64,
             ) {
                 self.events.lock().push(RecordedEvent::InlineTail {
                     parent_byte_offset,
@@ -3158,7 +3622,7 @@ mod tests {
 
         let handler = Arc::new(RecordingChildHandler { events: Mutex::new(Vec::new()) });
         let started_async =
-            child_file.read_child_range(10, 0..4096, &parent_file, &service, &handler);
+            child_file.read_child_range(10, 0..4096, 0, &parent_file, &service, &handler);
         assert!(started_async, "Expected Block extent to perform one aligned parent read");
         assert_eq!(service.read_count(), 1, "InlineTail must not perform any block I/O");
 
@@ -3184,7 +3648,6 @@ mod tests {
     #[fuchsia::test]
     fn test_read_range_runs_precommit_only_when_io_is_in_flight() {
         use crate::PagePrecommit;
-        use delivery_blob::compression::{ChunkedArchiveError, DataBuffer};
 
         struct VmarBackedRequest {
             range: Range<u64>,
@@ -3216,7 +3679,7 @@ mod tests {
             fn prepare(
                 &mut self,
                 read_range: Range<u64>,
-                _read_alignment: usize,
+                _flush_alignment: Option<NonZero<usize>>,
             ) -> Result<(), ChunkedArchiveError> {
                 self.range = read_range;
                 Ok(())
@@ -3264,8 +3727,6 @@ mod tests {
 
     #[fuchsia::test]
     fn test_files_splits_large_page_request_into_1mib_windows() {
-        use delivery_blob::compression::ChunkedArchiveError;
-
         struct RecordingRequest {
             range: Range<u64>,
             buf: Vec<u8>,
@@ -3288,7 +3749,7 @@ mod tests {
             fn prepare(
                 &mut self,
                 read_range: Range<u64>,
-                _read_alignment: usize,
+                _flush_alignment: Option<NonZero<usize>>,
             ) -> Result<(), ChunkedArchiveError> {
                 let len = (read_range.end - read_range.start) as usize;
                 assert!(len <= MAX_READ_BUFFER_SIZE, "prepared range {len} > 1 MiB");
@@ -3334,8 +3795,6 @@ mod tests {
 
     #[fuchsia::test]
     fn test_child_files_splits_large_page_requests_and_handles_deferred_loading() {
-        use delivery_blob::compression::ChunkedArchiveError;
-
         #[derive(Clone, Debug, PartialEq)]
         struct RecordedChildSlice {
             child_key: u64,
@@ -3368,7 +3827,7 @@ mod tests {
             fn prepare(
                 &mut self,
                 read_range: Range<u64>,
-                _read_alignment: usize,
+                _flush_alignment: Option<NonZero<usize>>,
             ) -> Result<(), ChunkedArchiveError> {
                 let len = (read_range.end - read_range.start) as usize;
                 assert!(len <= MAX_READ_BUFFER_SIZE, "prepared child parent range {len} > 1 MiB");
@@ -3414,6 +3873,7 @@ mod tests {
 
         impl DeliveryHandler for ChildRecordingHandler {
             type Request = ChildRecordingRequest;
+            type BlobRegistration = ();
 
             fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
                 ChildRecordingRequest {
@@ -3423,6 +3883,14 @@ mod tests {
                     recorded: self.recorded.clone(),
                     on_record: self.on_record.clone(),
                 }
+            }
+
+            fn prepare_register_blob(
+                &self,
+                _key: u64,
+                _max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                Ok(())
             }
 
             fn get_child_page_request(
@@ -3464,13 +3932,20 @@ mod tests {
             recorded: recorded.clone(),
             on_record: on_record.clone(),
         });
+        let parent_files = Arc::new(Files::new_with_shared_handler(
+            service.clone(),
+            handler.clone(),
+            zx::Port::create(),
+            None,
+        ));
+        parent_files.insert(1, parent_file);
         let child_files = Arc::new(Files::new_with_shared_handler(
             service,
             handler,
             zx::Port::create(),
-            Some(parent_file),
+            Some((parent_files, 1)),
         ));
-        let _pager_thread = child_files.spawn_pager_thread();
+        let _pager_thread = child_files.spawn_pager_thread("child-pager");
 
         // 1. Queue a 4 KiB child page request while the child file is not yet loaded, then insert
         // the child file so `PagerThread` dispatches it through `dispatch_page_request` ->
@@ -3598,7 +4073,13 @@ mod tests {
         // block-padded extents and zero-fills the remaining tail pages in a single commit.
         let (req, rx) =
             TestVecBuffer::new_with_range((WINDOW * 2) as u64..(WINDOW * 2 + 4096) as u64);
-        file.read_single_window_for_page_size(WINDOW as u64, 16384, &service, req, &|_| {});
+        file.read_single_window_for_page_size(
+            WINDOW as u64,
+            BlockSize::SIZE_16KIB,
+            &service,
+            req,
+            &|_| {},
+        );
         let mut expected = data[WINDOW * 2..].to_vec();
         expected.resize(16384, 0);
         assert_eq!(rx.output(), expected);
@@ -3615,7 +4096,13 @@ mod tests {
         let raw_file = Arc::new(File::new(raw_extents, uncompressed_len as u64, Transform::None));
         let raw_service = FakeBlockService::new(raw_device_data);
         let (req, rx) = TestVecBuffer::new_with_range(0..4096);
-        raw_file.read_single_window_for_page_size(16384, 16384, &raw_service, req, &|_| {});
+        raw_file.read_single_window_for_page_size(
+            16384,
+            BlockSize::SIZE_16KIB,
+            &raw_service,
+            req,
+            &|_| {},
+        );
         let mut expected_raw = uncompressed_bytes;
         expected_raw.resize(16384, 0);
         assert_eq!(rx.output(), expected_raw);
@@ -3624,7 +4111,7 @@ mod tests {
 
     #[fuchsia::test]
     fn test_read_single_window_decompress_16k_page_size_with_8k_chunks() {
-        const PAGE_SIZE: u64 = 16384;
+        const PAGE_SIZE: BlockSize = BlockSize::SIZE_16KIB;
         const CHUNK_SIZE: usize = 8192;
         const UNCOMPRESSED_LEN: usize = 12000;
         let data: Vec<u8> = (0..UNCOMPRESSED_LEN).map(|i| (i % 251) as u8).collect();
@@ -3659,9 +4146,9 @@ mod tests {
         let service = FakeBlockService::new(compressed_data.clone());
 
         let (req, rx) = TestVecBuffer::new_with_range(0..4096);
-        file.read_single_window_for_page_size(PAGE_SIZE, PAGE_SIZE, &service, req, &|_| {});
+        file.read_single_window_for_page_size(PAGE_SIZE.get(), PAGE_SIZE, &service, req, &|_| {});
         let mut expected = data;
-        expected.resize(PAGE_SIZE as usize, 0);
+        expected.resize(PAGE_SIZE.get() as usize, 0);
         assert_eq!(rx.output(), expected);
         assert_eq!(rx.commits(), vec![(0, CHUNK_SIZE), (CHUNK_SIZE as u64, CHUNK_SIZE)]);
 
@@ -3688,7 +4175,7 @@ mod tests {
         let single_file =
             Arc::new(File::new(single_extents, CHUNK_SIZE as u64, single_info.into()));
         let single_service = FakeBlockService::new(single_device_data);
-        let (req, rx) = TestVecBuffer::new_with_range(CHUNK_SIZE as u64..PAGE_SIZE);
+        let (req, rx) = TestVecBuffer::new_with_range(CHUNK_SIZE as u64..PAGE_SIZE.get());
         single_file.read_single_window_for_page_size(
             CHUNK_SIZE as u64,
             PAGE_SIZE,
@@ -3698,5 +4185,1631 @@ mod tests {
         );
         assert_eq!(rx.output(), vec![0u8; CHUNK_SIZE]);
         assert_eq!(rx.commits(), vec![(CHUNK_SIZE as u64, CHUNK_SIZE)]);
+    }
+
+    #[fuchsia::test]
+    fn test_process_mapping_command_orders_registration_before_metadata_buffer_and_drops_buffer_before_commit()
+     {
+        #[derive(Debug, PartialEq)]
+        enum Step {
+            PrepareRegisterBlob { key: u64, max_leaf_bytes: usize },
+            AllocateMetadataBuffer { max_len: usize },
+            CommitRegisterBlob { key: u64, leaf_count: usize, buffer_freed_before_commit: bool },
+        }
+
+        const ALLOCATOR_CAPACITY: usize = 4096;
+
+        struct OrderingBlockService {
+            allocator: Arc<BufferAllocator>,
+            data: Vec<u8>,
+            steps: Arc<Mutex<Vec<Step>>>,
+        }
+
+        impl BlockService for OrderingBlockService {
+            fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
+                self.steps.lock().push(Step::AllocateMetadataBuffer { max_len });
+                self.allocator.allocate_buffer_sync_owned(max_len)
+            }
+
+            fn read_blocks(
+                &self,
+                device_offset: u64,
+                mut dest_buffer: OwnedBuffer,
+                on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
+            ) -> Result<(), Error> {
+                let start = device_offset as usize;
+                let end = start + dest_buffer.len();
+                dest_buffer.as_mut_ptr_slice().copy_from_slice(&self.data[start..end]);
+                on_complete(Ok(dest_buffer));
+                Ok(())
+            }
+        }
+
+        struct OrderingRegistration {
+            key: u64,
+            allocator: Arc<BufferAllocator>,
+            steps: Arc<Mutex<Vec<Step>>>,
+        }
+
+        impl BlobRegistration for OrderingRegistration {
+            fn commit(
+                self,
+                merkle_leaves: &[[u8; 32]],
+                _read_alignment: usize,
+            ) -> Result<(), Error> {
+                // The 4096-byte pool only has room for 1 block, so `try_allocate_buffer(4096)`
+                // succeeds if and only if `read_blob_metadata` already dropped its `OwnedBuffer`
+                // before invoking the registration commit callback.
+                let buffer_freed_before_commit =
+                    self.allocator.try_allocate_buffer(ALLOCATOR_CAPACITY).is_ok();
+                self.steps.lock().push(Step::CommitRegisterBlob {
+                    key: self.key,
+                    leaf_count: merkle_leaves.len(),
+                    buffer_freed_before_commit,
+                });
+                Ok(())
+            }
+        }
+
+        struct OrderingDeliveryHandler {
+            allocator: Arc<BufferAllocator>,
+            steps: Arc<Mutex<Vec<Step>>>,
+        }
+
+        impl DeliveryHandler for OrderingDeliveryHandler {
+            type Request = TestVecBuffer;
+            type BlobRegistration = OrderingRegistration;
+
+            fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+                TestVecBuffer::new_with_range(range).0
+            }
+
+            fn prepare_register_blob(
+                &self,
+                key: u64,
+                max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                self.steps.lock().push(Step::PrepareRegisterBlob { key, max_leaf_bytes });
+                Ok(OrderingRegistration {
+                    key,
+                    allocator: self.allocator.clone(),
+                    steps: self.steps.clone(),
+                })
+            }
+        }
+
+        let metadata = BlobMetadata {
+            merkle_leaves: vec![[0xAAu8; 32], [0xBBu8; 32]],
+            format: BlobFormat::Uncompressed,
+        };
+        let encoded_metadata = serialize_metadata(&metadata);
+        let mut device_data = vec![0u8; (2 * BLOCK_SIZE) as usize];
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let steps = Arc::new(Mutex::new(Vec::new()));
+        let allocator = Arc::new(BufferAllocator::new(
+            BLOCK_SIZE as usize,
+            BufferSource::new(ALLOCATOR_CAPACITY),
+        ));
+        let service = Arc::new(OrderingBlockService {
+            allocator: allocator.clone(),
+            data: device_data,
+            steps: steps.clone(),
+        });
+        let handler = OrderingDeliveryHandler { allocator, steps: steps.clone() };
+        let files = Arc::new(Files::new(service, handler, zx::Port::create()));
+
+        let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
+        let meta_extents =
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(BLOCK_SIZE))], 0).unwrap();
+        let mut payload_bytes = Vec::new();
+        for w in
+            Extents::encode_extents(&data_extents).chain(Extents::encode_extents(&meta_extents))
+        {
+            payload_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+
+        let vmo = zx::Vmo::create(65536).unwrap();
+        let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            vmo_fifo::Alignment::SIZE_1KIB,
+            16,
+        )
+        .unwrap();
+        let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
+        let offset = payload_buf.offset();
+        payload_buf.data().copy_from_slice(&payload_bytes);
+        payload_buf
+            .commit(crate::RawMappingCommand {
+                opcode: crate::MAPPINGS_COMMAND,
+                offset,
+                key: 77,
+                stored_size: 4096,
+                device_offset: 0,
+                metadata_count: 1,
+                extent_count: 1,
+            })
+            .unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
+        let msg = receiver.claim().unwrap();
+        process_mapping_command(msg, &receiver, &files).unwrap();
+
+        assert_eq!(
+            &*steps.lock(),
+            &[
+                Step::PrepareRegisterBlob { key: 77, max_leaf_bytes: BLOCK_SIZE as usize },
+                Step::AllocateMetadataBuffer { max_len: BLOCK_SIZE as usize },
+                Step::CommitRegisterBlob {
+                    key: 77,
+                    leaf_count: 2,
+                    buffer_freed_before_commit: true,
+                },
+            ]
+        );
+
+        // 2. Verify `metadata_count == 0` on a root session (`!files.has_parent()`):
+        // `prepare_register_blob(key, 0)` and synchronous `commit` with zero metadata buffer
+        // allocations.
+        steps.lock().clear();
+        let data_only_words: Vec<u64> = Extents::encode_extents(&data_extents).collect();
+        let mut data_only_bytes = Vec::new();
+        for w in data_only_words {
+            data_only_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        let mut payload_buf = sender.reserve_payload(data_only_bytes.len()).unwrap();
+        let offset = payload_buf.offset();
+        payload_buf.data().copy_from_slice(&data_only_bytes);
+        payload_buf
+            .commit(crate::RawMappingCommand {
+                opcode: crate::MAPPINGS_COMMAND,
+                offset,
+                key: 78,
+                stored_size: 4096,
+                device_offset: 0,
+                metadata_count: 0,
+                extent_count: 1,
+            })
+            .unwrap();
+        let msg_78 = receiver.claim().unwrap();
+        process_mapping_command(msg_78, &receiver, &files).unwrap();
+        assert!(files.is_loaded(78));
+        assert_eq!(
+            &*steps.lock(),
+            &[
+                Step::PrepareRegisterBlob { key: 78, max_leaf_bytes: 0 },
+                Step::CommitRegisterBlob {
+                    key: 78,
+                    leaf_count: 0,
+                    buffer_freed_before_commit: true,
+                },
+            ]
+        );
+    }
+
+    #[fuchsia::test]
+    fn test_process_mapping_command_failed_or_corrupt_metadata_drops_registration() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct SingleSlotRegistration {
+            key: u64,
+            slot_in_use: Arc<AtomicBool>,
+            committed_keys: Arc<Mutex<Vec<u64>>>,
+        }
+
+        impl BlobRegistration for SingleSlotRegistration {
+            fn commit(
+                self,
+                _merkle_leaves: &[[u8; 32]],
+                _read_alignment: usize,
+            ) -> Result<(), Error> {
+                self.committed_keys.lock().push(self.key);
+                Ok(())
+            }
+        }
+
+        impl Drop for SingleSlotRegistration {
+            fn drop(&mut self) {
+                assert!(
+                    self.slot_in_use.swap(false, Ordering::SeqCst),
+                    "SingleSlotRegistration dropped when slot was not marked in use"
+                );
+            }
+        }
+
+        struct SingleSlotDeliveryHandler {
+            slot_in_use: Arc<AtomicBool>,
+            committed_keys: Arc<Mutex<Vec<u64>>>,
+        }
+
+        impl DeliveryHandler for SingleSlotDeliveryHandler {
+            type Request = TestVecBuffer;
+            type BlobRegistration = SingleSlotRegistration;
+
+            fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+                TestVecBuffer::new_with_range(range).0
+            }
+
+            fn prepare_register_blob(
+                &self,
+                key: u64,
+                _max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                if self.slot_in_use.swap(true, Ordering::SeqCst) {
+                    bail!("delivery_vmo registration slot was not freed by previous failed read");
+                }
+                Ok(SingleSlotRegistration {
+                    key,
+                    slot_in_use: self.slot_in_use.clone(),
+                    committed_keys: self.committed_keys.clone(),
+                })
+            }
+        }
+
+        struct ConfigurableMetadataBlockService {
+            allocator: Arc<BufferAllocator>,
+            corrupt_data: Vec<u8>,
+            valid_data: Vec<u8>,
+            mode: Mutex<u8>, // 0 = I/O error, 1 = corrupt bincode, 2 = valid metadata
+            pending: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+        }
+
+        impl BlockService for ConfigurableMetadataBlockService {
+            fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
+                self.allocator.allocate_buffer_sync_owned(max_len)
+            }
+
+            fn read_blocks(
+                &self,
+                _device_offset: u64,
+                mut dest_buffer: OwnedBuffer,
+                on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
+            ) -> Result<(), Error> {
+                let mode = *self.mode.lock();
+                let len = dest_buffer.len();
+                match mode {
+                    0 => {
+                        self.pending.lock().push(Box::new(move || {
+                            drop(dest_buffer);
+                            on_complete(Err(anyhow!("simulated metadata block read I/O error")));
+                        }));
+                    }
+                    1 => {
+                        dest_buffer.as_mut_ptr_slice().copy_from_slice(&self.corrupt_data[..len]);
+                        self.pending.lock().push(Box::new(move || {
+                            on_complete(Ok(dest_buffer));
+                        }));
+                    }
+                    _ => {
+                        dest_buffer.as_mut_ptr_slice().copy_from_slice(&self.valid_data[..len]);
+                        self.pending.lock().push(Box::new(move || {
+                            on_complete(Ok(dest_buffer));
+                        }));
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let valid_metadata =
+            BlobMetadata { merkle_leaves: vec![[0xCCu8; 32]], format: BlobFormat::Uncompressed };
+        let encoded_valid = serialize_metadata(&valid_metadata);
+        let mut valid_data = vec![0u8; BLOCK_SIZE as usize];
+        valid_data[..encoded_valid.len()].copy_from_slice(&encoded_valid);
+        let corrupt_data = vec![0xFFu8; BLOCK_SIZE as usize];
+
+        let allocator = Arc::new(BufferAllocator::new(
+            BLOCK_SIZE as usize,
+            BufferSource::new(BLOCK_SIZE as usize),
+        ));
+        let service = Arc::new(ConfigurableMetadataBlockService {
+            allocator,
+            corrupt_data,
+            valid_data,
+            mode: Mutex::new(0),
+            pending: Mutex::new(Vec::new()),
+        });
+        let slot_in_use = Arc::new(AtomicBool::new(false));
+        let committed_keys = Arc::new(Mutex::new(Vec::new()));
+        let files = Arc::new(Files::new(
+            service.clone(),
+            SingleSlotDeliveryHandler {
+                slot_in_use: slot_in_use.clone(),
+                committed_keys: committed_keys.clone(),
+            },
+            zx::Port::create(),
+        ));
+
+        let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
+        let meta_extents =
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(BLOCK_SIZE))], 0).unwrap();
+        let mut payload_bytes = Vec::new();
+        for w in
+            Extents::encode_extents(&data_extents).chain(Extents::encode_extents(&meta_extents))
+        {
+            payload_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+
+        let vmo = zx::Vmo::create(65536).unwrap();
+        let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            vmo_fifo::Alignment::SIZE_1KIB,
+            16,
+        )
+        .unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
+
+        let send_and_process =
+            |key: u64,
+             sender: &mut vmo_fifo::SyncSender<crate::RawMappingCommand>,
+             receiver: &Arc<vmo_fifo::Receiver<crate::RawMappingCommand>>| {
+                let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
+                let offset = payload_buf.offset();
+                payload_buf.data().copy_from_slice(&payload_bytes);
+                payload_buf
+                    .commit(crate::RawMappingCommand {
+                        opcode: crate::MAPPINGS_COMMAND,
+                        offset,
+                        key,
+                        stored_size: BLOCK_SIZE,
+                        device_offset: 0,
+                        metadata_count: 1,
+                        extent_count: 1,
+                    })
+                    .unwrap();
+                let msg = receiver.claim().unwrap();
+                process_mapping_command(msg, receiver, &files).unwrap();
+            };
+
+        // 1. Metadata I/O error: `prepare_register_blob` reserves the single slot, and when the
+        // block read fails, the captured `BlobRegistration` is dropped and frees the slot.
+        *service.mode.lock() = 0;
+        send_and_process(80, &mut sender, &receiver);
+        assert!(slot_in_use.load(Ordering::SeqCst));
+        for cb in std::mem::take(&mut *service.pending.lock()) {
+            cb();
+        }
+        assert!(!slot_in_use.load(Ordering::SeqCst));
+        assert!(!files.is_loading(80));
+        assert!(!files.is_loaded(80));
+        assert!(committed_keys.lock().is_empty());
+
+        // 2. Corrupt bincode deserialization error: `prepare_register_blob` reuses the freed slot,
+        // and when deserialization fails, `BlobRegistration` is dropped and frees the slot again.
+        *service.mode.lock() = 1;
+        send_and_process(81, &mut sender, &receiver);
+        assert!(slot_in_use.load(Ordering::SeqCst));
+        for cb in std::mem::take(&mut *service.pending.lock()) {
+            cb();
+        }
+        assert!(!slot_in_use.load(Ordering::SeqCst));
+        assert!(!files.is_loading(81));
+        assert!(!files.is_loaded(81));
+        assert!(committed_keys.lock().is_empty());
+
+        // 3. Valid metadata read succeeds using the freed slot and commits registration.
+        *service.mode.lock() = 2;
+        send_and_process(82, &mut sender, &receiver);
+        for cb in std::mem::take(&mut *service.pending.lock()) {
+            cb();
+        }
+        assert!(!slot_in_use.load(Ordering::SeqCst));
+        assert!(files.is_loaded(82));
+        assert_eq!(&*committed_keys.lock(), &[82]);
+    }
+
+    #[fuchsia::test]
+    fn test_aligned_read_range_for_page_size_overflow() {
+        let extents = Extents::try_new(std::iter::empty::<Extent>(), 0).unwrap();
+        let file = File::new(extents, u64::MAX, Transform::None);
+        const PAGE_SIZE: BlockSize = BlockSize::SIZE_4KIB;
+        assert_eq!(file.aligned_read_range_for_page_size(0..4096, 4096, PAGE_SIZE), None);
+    }
+
+    #[fuchsia::test]
+    fn test_close_blob_while_metadata_loading_prevents_commit_and_reinsert() {
+        struct TrackingRegistration {
+            key: u64,
+            committed_keys: Arc<Mutex<Vec<u64>>>,
+        }
+        impl BlobRegistration for TrackingRegistration {
+            fn commit(
+                self,
+                _merkle_leaves: &[[u8; 32]],
+                _read_alignment: usize,
+            ) -> Result<(), Error> {
+                self.committed_keys.lock().push(self.key);
+                Ok(())
+            }
+        }
+        struct TrackingDeliveryHandler {
+            committed_keys: Arc<Mutex<Vec<u64>>>,
+        }
+        impl DeliveryHandler for TrackingDeliveryHandler {
+            type Request = TestVecBuffer;
+            type BlobRegistration = TrackingRegistration;
+            fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+                TestVecBuffer::new_with_range(range).0
+            }
+            fn prepare_register_blob(
+                &self,
+                key: u64,
+                _max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                Ok(TrackingRegistration { key, committed_keys: self.committed_keys.clone() })
+            }
+        }
+
+        let metadata =
+            BlobMetadata { merkle_leaves: vec![[0x11u8; 32]], format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+        let mut device_data = vec![0u8; (2 * BLOCK_SIZE) as usize];
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let committed_keys = Arc::new(Mutex::new(Vec::new()));
+        let files = Arc::new(Files::new(
+            service.clone(),
+            TrackingDeliveryHandler { committed_keys: committed_keys.clone() },
+            zx::Port::create(),
+        ));
+
+        // Pre-populate key 20 as already loaded so we also test re-mapping an already-loaded key
+        // followed by CloseBlob while the new metadata read is in flight.
+        let initial_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
+        files.insert(20, Arc::new(File::new(initial_extents, BLOCK_SIZE, Transform::None)));
+        assert!(files.is_loaded(20));
+
+        let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
+        let meta_extents =
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(BLOCK_SIZE))], 0).unwrap();
+        let mut payload_bytes = Vec::new();
+        for w in
+            Extents::encode_extents(&data_extents).chain(Extents::encode_extents(&meta_extents))
+        {
+            payload_bytes.extend_from_slice(&w.to_le_bytes());
+        }
+
+        let vmo = zx::Vmo::create(65536).unwrap();
+        let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            vmo_fifo::Alignment::SIZE_1KIB,
+            16,
+        )
+        .unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
+
+        for key in [10u64, 20u64] {
+            let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
+            let offset = payload_buf.offset();
+            payload_buf.data().copy_from_slice(&payload_bytes);
+            payload_buf
+                .commit(crate::RawMappingCommand {
+                    opcode: crate::MAPPINGS_COMMAND,
+                    offset,
+                    key,
+                    stored_size: BLOCK_SIZE,
+                    device_offset: 0,
+                    metadata_count: 1,
+                    extent_count: 1,
+                })
+                .unwrap();
+            let msg = receiver.claim().unwrap();
+            process_mapping_command(msg, &receiver, &files).unwrap();
+            if key == 10 {
+                assert!(files.is_loading(key));
+            } else {
+                assert!(files.is_loaded(key));
+            }
+
+            // Close the blob before its metadata read completes.
+            sender
+                .push(crate::RawMappingCommand {
+                    opcode: crate::CLOSE_BLOB_COMMAND,
+                    offset: 0,
+                    key,
+                    stored_size: 0,
+                    device_offset: 0,
+                    metadata_count: 0,
+                    extent_count: 0,
+                })
+                .unwrap();
+            let close_msg = receiver.claim().unwrap();
+            process_mapping_command(close_msg, &receiver, &files).unwrap();
+            assert!(!files.is_loading(key));
+            assert!(!files.is_loaded(key));
+        }
+
+        // Complete both pending metadata reads; neither closed key may be registered or
+        // re-inserted into `files`.
+        service.wait_and_trigger_sync();
+        assert!(committed_keys.lock().is_empty());
+        assert!(!files.is_loaded(10));
+        assert!(!files.is_loaded(20));
+    }
+
+    #[fuchsia::test]
+    async fn test_remap_same_key_without_close_blob_and_commit_failure() {
+        struct ControlledRegistration {
+            key: u64,
+            fail_commit: bool,
+            committed: Arc<Mutex<Vec<(u64, Vec<[u8; 32]>)>>>,
+        }
+        impl BlobRegistration for ControlledRegistration {
+            fn commit(
+                self,
+                merkle_leaves: &[[u8; 32]],
+                _read_alignment: usize,
+            ) -> Result<(), Error> {
+                if self.fail_commit {
+                    bail!("simulated registration commit failure for key {}", self.key);
+                }
+                self.committed.lock().push((self.key, merkle_leaves.to_vec()));
+                Ok(())
+            }
+        }
+        struct ControlledDeliveryHandler {
+            fail_prepare: Mutex<bool>,
+            fail_commit: Mutex<bool>,
+            committed: Arc<Mutex<Vec<(u64, Vec<[u8; 32]>)>>>,
+            unregistered: Arc<Mutex<Vec<u64>>>,
+        }
+        impl DeliveryHandler for ControlledDeliveryHandler {
+            type Request = TestVecBuffer;
+            type BlobRegistration = ControlledRegistration;
+            fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+                TestVecBuffer::new_with_range(range).0
+            }
+            fn prepare_register_blob(
+                &self,
+                key: u64,
+                _max_leaf_bytes: usize,
+            ) -> Result<Self::BlobRegistration, Error> {
+                if *self.fail_prepare.lock() {
+                    bail!("simulated prepare_register_blob failure for key {key}");
+                }
+                Ok(ControlledRegistration {
+                    key,
+                    fail_commit: *self.fail_commit.lock(),
+                    committed: self.committed.clone(),
+                })
+            }
+            fn unregister_file(&self, key: u64) {
+                self.unregistered.lock().push(key);
+            }
+        }
+
+        struct PerReadBlockService {
+            allocator: Arc<BufferAllocator>,
+            data: Vec<u8>,
+            pending:
+                Mutex<Vec<(u64, OwnedBuffer, Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>)>>,
+        }
+        impl BlockService for PerReadBlockService {
+            fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
+                self.allocator.allocate_buffer_sync_owned(max_len)
+            }
+            fn read_blocks(
+                &self,
+                device_offset: u64,
+                dest_buffer: OwnedBuffer,
+                on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
+            ) -> Result<(), Error> {
+                self.pending.lock().push((device_offset, dest_buffer, on_complete));
+                Ok(())
+            }
+        }
+        impl PerReadBlockService {
+            fn complete_at(&self, index: usize, ok: bool) {
+                let (device_offset, mut buf, cb) = self.pending.lock().remove(index);
+                if ok {
+                    let start = device_offset as usize;
+                    let len = buf.len();
+                    buf.as_mut_ptr_slice().copy_from_slice(&self.data[start..start + len]);
+                    cb(Ok(buf));
+                } else {
+                    drop(buf);
+                    cb(Err(anyhow!("simulated metadata read failure")));
+                }
+            }
+        }
+
+        let meta_1 =
+            BlobMetadata { merkle_leaves: vec![[0xAAu8; 32]], format: BlobFormat::Uncompressed };
+        let meta_2 =
+            BlobMetadata { merkle_leaves: vec![[0xBBu8; 32]], format: BlobFormat::Uncompressed };
+        let encoded_1 = serialize_metadata(&meta_1);
+        let encoded_2 = serialize_metadata(&meta_2);
+        let mut device_data = vec![0u8; (4 * BLOCK_SIZE) as usize];
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_1.len()]
+            .copy_from_slice(&encoded_1);
+        device_data[(2 * BLOCK_SIZE) as usize..(2 * BLOCK_SIZE) as usize + encoded_2.len()]
+            .copy_from_slice(&encoded_2);
+
+        let allocator = Arc::new(BufferAllocator::new(
+            BLOCK_SIZE as usize,
+            BufferSource::new((8 * BLOCK_SIZE) as usize),
+        ));
+        let service = Arc::new(PerReadBlockService {
+            allocator,
+            data: device_data,
+            pending: Mutex::new(Vec::new()),
+        });
+        let committed = Arc::new(Mutex::new(Vec::new()));
+        let unregistered = Arc::new(Mutex::new(Vec::new()));
+        let files = Arc::new(Files::new(
+            service.clone(),
+            ControlledDeliveryHandler {
+                fail_prepare: Mutex::new(false),
+                fail_commit: Mutex::new(false),
+                committed: committed.clone(),
+                unregistered: unregistered.clone(),
+            },
+            zx::Port::create(),
+        ));
+
+        let vmo = zx::Vmo::create(65536).unwrap();
+        let mut sender = vmo_fifo::SyncSender::<crate::RawMappingCommand>::new(
+            vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
+            vmo_fifo::Alignment::SIZE_1KIB,
+            16,
+        )
+        .unwrap();
+        let receiver =
+            Arc::new(vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16).unwrap());
+
+        let send_mapping = |key: u64,
+                            meta_block: u64,
+                            stored_size: u64,
+                            sender: &mut vmo_fifo::SyncSender<crate::RawMappingCommand>,
+                            receiver: &Arc<vmo_fifo::Receiver<crate::RawMappingCommand>>|
+         -> Result<(), Error> {
+            let data_extents = Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).unwrap();
+            let meta_extents =
+                Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(meta_block * BLOCK_SIZE))], 0)
+                    .unwrap();
+            let mut payload_bytes = Vec::new();
+            for w in
+                Extents::encode_extents(&data_extents).chain(Extents::encode_extents(&meta_extents))
+            {
+                payload_bytes.extend_from_slice(&w.to_le_bytes());
+            }
+            let mut payload_buf = sender.reserve_payload(payload_bytes.len()).unwrap();
+            let offset = payload_buf.offset();
+            payload_buf.data().copy_from_slice(&payload_bytes);
+            payload_buf
+                .commit(crate::RawMappingCommand {
+                    opcode: crate::MAPPINGS_COMMAND,
+                    offset,
+                    key,
+                    stored_size,
+                    device_offset: 0,
+                    metadata_count: 1,
+                    extent_count: 1,
+                })
+                .unwrap();
+            let msg = receiver.claim().unwrap();
+            process_mapping_command(msg, receiver, &files)
+        };
+
+        // 1. Re-mapping `Mappings #1 -> Mappings #2` on key 100 without `CloseBlob`, where `#1`
+        // completes before `#2`: `#1` must be ignored and queued page requests + `wait_for_file`
+        // waiters must remain attached until `#2` completes.
+        send_mapping(100, 1, BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        files.handle_page_request(100, 0..BLOCK_SIZE);
+        let mut waiter_100 = std::pin::pin!(files.wait_for_file(100));
+        assert!(futures::poll!(&mut waiter_100).is_pending());
+        send_mapping(100, 2, 2 * BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        assert_eq!(service.pending.lock().len(), 2);
+
+        // Complete `#1` first; it must not commit or resolve the waiter.
+        service.complete_at(0, true);
+        assert!(committed.lock().is_empty());
+        assert!(files.is_loading(100));
+        assert!(files.has_queued_page_requests(100));
+        assert!(futures::poll!(&mut waiter_100).is_pending());
+
+        // Complete `#2`; it must commit `meta_2`, move the queued page request to
+        // `deferred_page_requests`, and resolve the waiter with `2 * BLOCK_SIZE`.
+        service.complete_at(0, true);
+        assert!(files.is_loaded(100));
+        assert_eq!(&*committed.lock(), &[(100, vec![[0xBBu8; 32]])]);
+        assert_eq!(files.deferred_page_requests.lock().len(), 1);
+        files.deferred_page_requests.lock().clear();
+        let loaded_100 = waiter_100.await.unwrap();
+        assert_eq!(loaded_100.uncompressed_size(), 2 * BLOCK_SIZE);
+
+        // 2. Re-mapping `Mappings #1 -> Mappings #2` on key 101 without `CloseBlob`, where `#1`
+        // fails while `#2` is in flight, and also where `#2` completes before `#1`:
+        committed.lock().clear();
+        send_mapping(101, 1, BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        send_mapping(101, 2, 2 * BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        // Fail `#1` while `#2` is still loading; `#2` must remain loading and not be unregistered.
+        service.complete_at(0, false);
+        assert!(files.is_loading(101));
+        assert!(unregistered.lock().is_empty());
+        // Complete `#2`.
+        service.complete_at(0, true);
+        assert!(files.is_loaded(101));
+        assert_eq!(files.get_file(101).unwrap().uncompressed_size(), 2 * BLOCK_SIZE);
+
+        // Now test `#2` completing BEFORE `#1` on key 102:
+        committed.lock().clear();
+        send_mapping(102, 1, BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        send_mapping(102, 2, 2 * BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        // Complete `#2` (index 1) first, then complete `#1` (index 0): `#1` must not overwrite `#2`.
+        service.complete_at(1, true);
+        assert_eq!(files.get_file(102).unwrap().uncompressed_size(), 2 * BLOCK_SIZE);
+        service.complete_at(0, true);
+        assert_eq!(files.get_file(102).unwrap().uncompressed_size(), 2 * BLOCK_SIZE);
+        assert_eq!(&*committed.lock(), &[(102, vec![[0xBBu8; 32]])]);
+
+        // 3. `prepare_register_blob` failing on an unmapped/loading key must leave `files`
+        // unchanged, while overwriting already-loaded key 102 skips `prepare_register_blob`.
+        *files.delivery_handler().fail_prepare.lock() = true;
+        assert!(send_mapping(104, 1, BLOCK_SIZE, &mut sender, &receiver).is_err());
+        assert!(!files.is_loading(104));
+        assert!(!files.is_loaded(104));
+        send_mapping(102, 1, BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        service.complete_at(0, true);
+        *files.delivery_handler().fail_prepare.lock() = false;
+        assert!(files.is_loaded(102));
+        assert_eq!(files.get_file(102).unwrap().uncompressed_size(), BLOCK_SIZE);
+
+        // 4. `registration.commit` failing in `commit_loading` on key 103 must remove `key` from
+        // `files`, cancel `wait_for_file`, and call `unregister_file(103)`.
+        *files.delivery_handler().fail_commit.lock() = true;
+        send_mapping(103, 1, BLOCK_SIZE, &mut sender, &receiver).unwrap();
+        let mut waiter_103 = std::pin::pin!(files.wait_for_file(103));
+        assert!(futures::poll!(&mut waiter_103).is_pending());
+        service.complete_at(0, true);
+        *files.delivery_handler().fail_commit.lock() = false;
+        assert!(!files.is_loading(103));
+        assert!(!files.is_loaded(103));
+        assert_eq!(&*unregistered.lock(), &[103]);
+        assert!(waiter_103.await.is_err());
+    }
+
+    struct TrackingRegistration {
+        registered_alignments: Arc<Mutex<Vec<usize>>>,
+        fail_commit: bool,
+    }
+
+    impl BlobRegistration for TrackingRegistration {
+        fn commit(self, _merkle_leaves: &[[u8; 32]], read_alignment: usize) -> Result<(), Error> {
+            if self.fail_commit {
+                bail!("Simulated registration commit failure");
+            }
+            self.registered_alignments.lock().push(read_alignment);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TrackingDeliveryHandler {
+        registered_alignments: Arc<Mutex<Vec<usize>>>,
+        prepared_registrations: AtomicUsize,
+        fail_next_registration_commit: AtomicBool,
+        unregister_count: AtomicUsize,
+        page_requests: Mutex<VecDeque<TestVecBuffer>>,
+        child_page_requests: Mutex<VecDeque<TestVecBuffer>>,
+    }
+
+    impl DeliveryHandler for TrackingDeliveryHandler {
+        type Request = TestVecBuffer;
+        type BlobRegistration = TrackingRegistration;
+
+        fn get_page_request(self: &Arc<Self>, _key: u64, range: Range<u64>) -> Self::Request {
+            self.page_requests
+                .lock()
+                .pop_front()
+                .unwrap_or_else(|| TestVecBuffer::new_with_range(range).0)
+        }
+
+        fn get_child_page_request(
+            self: &Arc<Self>,
+            _child_key: u64,
+            _child_target_offset: u64,
+            parent_byte_range: Range<u64>,
+        ) -> Self::Request {
+            self.child_page_requests
+                .lock()
+                .pop_front()
+                .unwrap_or_else(|| TestVecBuffer::new_with_range(parent_byte_range).0)
+        }
+
+        fn prepare_register_blob(
+            &self,
+            _key: u64,
+            _max_leaf_bytes: usize,
+        ) -> Result<Self::BlobRegistration, Error> {
+            self.prepared_registrations.fetch_add(1, Ordering::SeqCst);
+            Ok(TrackingRegistration {
+                registered_alignments: Arc::clone(&self.registered_alignments),
+                fail_commit: self.fail_next_registration_commit.swap(false, Ordering::SeqCst),
+            })
+        }
+
+        fn unregister_file(&self, _key: u64) {
+            self.unregister_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct TestMappingFifo {
+        sender: vmo_fifo::AsyncSender<crate::RawMappingCommand>,
+        receiver: Arc<vmo_fifo::Receiver<crate::RawMappingCommand>>,
+    }
+
+    impl TestMappingFifo {
+        fn new() -> Self {
+            let vmo = zx::Vmo::create(65536).expect("create VMO failed");
+            let sender = vmo_fifo::AsyncSender::<crate::RawMappingCommand>::new(
+                vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).expect("duplicate VMO failed"),
+                vmo_fifo::Alignment::SIZE_1KIB,
+                16,
+            )
+            .expect("create AsyncSender failed");
+            let receiver = Arc::new(
+                vmo_fifo::Receiver::<crate::RawMappingCommand>::new(vmo, 16)
+                    .expect("create Receiver failed"),
+            );
+            Self { sender, receiver }
+        }
+
+        async fn push_extents_mapping(
+            &mut self,
+            key: u64,
+            data_extents: &Extents,
+            meta_extents: &Extents,
+            stored_size: u64,
+        ) -> u64 {
+            let mut payload_bytes = Vec::new();
+            let mut extent_count = 0u32;
+            for w in Extents::encode_extents(data_extents) {
+                payload_bytes.extend_from_slice(&w.to_le_bytes());
+                extent_count += 1;
+            }
+            let mut metadata_count = 0u32;
+            for w in Extents::encode_extents(meta_extents) {
+                payload_bytes.extend_from_slice(&w.to_le_bytes());
+                metadata_count += 1;
+            }
+            let mut payload_buf = self
+                .sender
+                .reserve_payload(payload_bytes.len())
+                .await
+                .expect("reserve_payload failed");
+            payload_buf.data().copy_from_slice(&payload_bytes);
+            let cmd = crate::RawMappingCommand {
+                opcode: crate::MAPPINGS_COMMAND,
+                offset: payload_buf.offset(),
+                key,
+                stored_size,
+                device_offset: 0,
+                metadata_count,
+                extent_count,
+            };
+            payload_buf.commit(cmd).await.expect("commit failed")
+        }
+
+        async fn push_mapping(
+            &mut self,
+            key: u64,
+            data_block: u64,
+            meta_block: u64,
+            stored_size: u64,
+        ) -> u64 {
+            let data_extents =
+                Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(data_block * BLOCK_SIZE))], 0)
+                    .expect("data extents");
+            let meta_extents =
+                Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(meta_block * BLOCK_SIZE))], 0)
+                    .expect("meta extents");
+            self.push_extents_mapping(key, &data_extents, &meta_extents, stored_size).await
+        }
+
+        async fn push_close(&mut self, key: u64) -> u64 {
+            self.sender
+                .push(crate::MappingCommand::CloseBlob { key }.into())
+                .await
+                .expect("push CloseBlob failed")
+        }
+
+        fn process_next<S, D>(&self, files: &Arc<Files<S, D>>)
+        where
+            S: BlockService + ?Sized + 'static,
+            D: DeliveryHandler,
+        {
+            let msg = self.receiver.claim().expect("claim failed");
+            process_mapping_command(msg, &self.receiver, files)
+                .expect("process_mapping_command failed");
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_overwrite_keeps_old_file_and_retires_slot_after_in_flight_read() {
+        let blob_key = 55;
+        let old_data = vec![0xAAu8; BLOCK_SIZE as usize];
+        let new_data = vec![0xBBu8; BLOCK_SIZE as usize];
+
+        let metadata =
+            BlobMetadata { merkle_leaves: vec![[7u8; 32]], format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+
+        // Layout on mock device:
+        // Block 0: old data (0xAA), Block 1: old metadata
+        // Block 2: new data (0xBB), Block 3: new metadata
+        let mut device_data = vec![0u8; (4 * BLOCK_SIZE) as usize];
+        device_data[..BLOCK_SIZE as usize].copy_from_slice(&old_data);
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+        device_data[(2 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize]
+            .copy_from_slice(&new_data);
+        device_data[(3 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let (req1, rx1) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let (req2, rx2) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let (req3, rx3) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+
+        let handler = TrackingDeliveryHandler {
+            page_requests: Mutex::new(VecDeque::from([req1, req2, req3])),
+            ..Default::default()
+        };
+        let files = Arc::new(Files::new(service.clone(), handler, zx::Port::create()));
+        let _pager_thread = files.spawn_pager_thread("pager");
+        let mut fifo = TestMappingFifo::new();
+
+        // Load the initial mapping (blocks 0 and 1).
+        let slot0 = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        let mut wait_slot0 = pin!(fifo.sender.wait_until_popped(slot0));
+        fifo.process_next(&files);
+        assert!(futures::poll!(&mut wait_slot0).is_pending());
+        service.wait_and_trigger_sync();
+        wait_slot0.await.expect("initial mapping slot should pop once loaded");
+        assert_eq!(
+            *files.delivery_handler.registered_alignments.lock(),
+            vec![DEFAULT_VERIFICATION_ALIGNMENT as usize]
+        );
+
+        // Start an in-flight block read on `old_file` without completing it yet.
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 1);
+
+        // Push and process the overwrite mapping (blocks 2 and 3) synchronously: `old_file` must
+        // remain `Loaded` while the overwrite's metadata read is in flight, and `slot1` must stay
+        // unpopped.
+        let slot1 = fifo.push_mapping(blob_key, 2, 3, BLOCK_SIZE).await;
+        let mut wait_slot1 = pin!(fifo.sender.wait_until_popped(slot1));
+        fifo.process_next(&files);
+        assert!(files.is_loaded(blob_key));
+        assert!(futures::poll!(&mut wait_slot1).is_pending());
+        assert_eq!(service.pending.lock().len(), 2);
+
+        // A page request arriving while the overwrite's metadata read is in flight is served
+        // immediately by `old_file` without blocking in a loading queue.
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 3);
+
+        // Complete the overwrite's metadata read (index 1 in `service.pending`) while leaving both
+        // data reads on `old_file` (indices 0 and 2) in flight.
+        {
+            let cb = service.pending.lock().remove(1);
+            cb();
+        }
+        // `new_file` is now installed, `prepare_register_blob` / `commit` were not called a second
+        // time, and `slot1` is still unpopped because `old_file` has two in-flight data reads.
+        assert_eq!(files.delivery_handler.prepared_registrations.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *files.delivery_handler.registered_alignments.lock(),
+            vec![DEFAULT_VERIFICATION_ALIGNMENT as usize]
+        );
+        assert_eq!(files.delivery_handler.unregister_count.load(Ordering::SeqCst), 0);
+        assert!(futures::poll!(&mut wait_slot1).is_pending());
+
+        // Complete the two in-flight data reads on `old_file`; once both finish, `old_file` drops
+        // and retires `slot1`.
+        service.wait_and_trigger_sync();
+        assert_eq!(rx1.output(), old_data);
+        assert_eq!(rx2.output(), old_data);
+        wait_slot1.await.expect("overwrite slot should pop once in-flight reads on old_file end");
+
+        // Subsequent page requests read from `new_file`.
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        service.wait_and_trigger_sync();
+        assert_eq!(rx3.wait_for_commits(1), vec![(0, BLOCK_SIZE as usize)]);
+        assert_eq!(rx3.output(), new_data);
+    }
+
+    #[fuchsia::test]
+    async fn test_overwrite_during_in_flight_metadata_read_carries_over_requests() {
+        let blob_key = 77;
+        let old_data = vec![0x11u8; BLOCK_SIZE as usize];
+        let new_data = vec![0x22u8; BLOCK_SIZE as usize];
+
+        let metadata =
+            BlobMetadata { merkle_leaves: vec![[0x33u8; 32]], format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+
+        // Block 0: old data (0x11), Block 1: old metadata
+        // Block 2: new data (0x22), Block 3: new metadata
+        let mut device_data = vec![0u8; (4 * BLOCK_SIZE) as usize];
+        device_data[..BLOCK_SIZE as usize].copy_from_slice(&old_data);
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+        device_data[(2 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize]
+            .copy_from_slice(&new_data);
+        device_data[(3 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let (req1, rx1) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let (req2, rx2) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+
+        let handler = TrackingDeliveryHandler {
+            page_requests: Mutex::new(VecDeque::from([req1, req2])),
+            ..Default::default()
+        };
+        let files = Arc::new(Files::new(service.clone(), handler, zx::Port::create()));
+        let _pager_thread = files.spawn_pager_thread("pager");
+        let mut fifo = TestMappingFifo::new();
+
+        // Start the initial mapping (blocks 0 and 1) and queue a page request while its metadata
+        // read is still in flight.
+        let slot0 = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+
+        // Push and process the overwrite mapping (blocks 2 and 3) while the first metadata read is
+        // still in flight, then queue a second page request.
+        let slot1 = fifo.push_mapping(blob_key, 2, 3, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 2);
+
+        // Complete the first metadata read; because its generation was superseded, it must skip
+        // `register_blob` and `commit` and retire `slot0`.
+        {
+            let cb = service.pending.lock().remove(0);
+            cb();
+        }
+        fifo.sender.wait_until_popped(slot0).await.expect("slot0 should pop");
+        assert!(files.delivery_handler.registered_alignments.lock().is_empty());
+
+        // Complete the second metadata read (`register_blob` is now committed once for the
+        // replacement file while `prepare_register_blob` ran twice across both `Loading` opens),
+        // then wait for `PagerThread` to submit both data reads and complete them.
+        service.wait_and_trigger_sync();
+        fifo.sender.wait_until_popped(slot1).await.expect("slot1 should pop");
+        assert_eq!(files.delivery_handler.prepared_registrations.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *files.delivery_handler.registered_alignments.lock(),
+            vec![DEFAULT_VERIFICATION_ALIGNMENT as usize]
+        );
+        service.wait_for_pending(2);
+        service.wait_and_trigger_sync();
+
+        assert_eq!(rx1.wait_for_commits(1), vec![(0, BLOCK_SIZE as usize)]);
+        assert_eq!(rx1.output(), new_data);
+        assert_eq!(rx2.wait_for_commits(1), vec![(0, BLOCK_SIZE as usize)]);
+        assert_eq!(rx2.output(), new_data);
+    }
+
+    #[fuchsia::test]
+    async fn test_close_blob_cancels_in_flight_metadata_read_and_waits_for_in_flight_reads() {
+        let blob_key = 78;
+        let data = vec![0xCCu8; BLOCK_SIZE as usize];
+        let metadata =
+            BlobMetadata { merkle_leaves: MerkleLeaves::new(), format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+        let mut device_data = vec![0u8; (2 * BLOCK_SIZE) as usize];
+        device_data[..BLOCK_SIZE as usize].copy_from_slice(&data);
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let (req1, rx1) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let handler = TrackingDeliveryHandler {
+            page_requests: Mutex::new(VecDeque::from([req1])),
+            ..Default::default()
+        };
+        let files = Arc::new(Files::new(service.clone(), handler, zx::Port::create()));
+        let mut fifo = TestMappingFifo::new();
+
+        // 1. Start an initial mapping; its metadata read is now pending on disk.
+        let _ = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        assert!(files.is_loading(blob_key));
+
+        // Process `CloseBlob` while the metadata read is in flight. Because the initial `Mappings`
+        // command's `SlotGuard` is held by `LoadingFileGuard` until the in-flight metadata read
+        // finishes, `close_slot1` remains unpopped until the metadata read completes.
+        let close_slot1 = fifo.push_close(blob_key).await;
+        let mut wait_close1 = pin!(fifo.sender.wait_until_popped(close_slot1));
+        fifo.process_next(&files);
+        assert!(!files.is_loading(blob_key));
+        assert!(futures::poll!(&mut wait_close1).is_pending());
+
+        // Complete the metadata read; `commit` must not re-insert the closed file, and both slots
+        // now retire.
+        service.wait_and_trigger_sync();
+        assert!(!files.is_loading(blob_key));
+        assert!(!files.is_loaded(blob_key));
+        wait_close1
+            .await
+            .expect("close_slot1 should pop once the in-flight metadata read completes");
+
+        // 2. Load the blob, start an in-flight data read, and verify `CloseBlob`'s slot stays
+        // unpopped until the in-flight data read finishes.
+        let _ = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        service.wait_and_trigger_sync();
+        assert!(files.is_loaded(blob_key));
+
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 1);
+
+        let close_slot2 = fifo.push_close(blob_key).await;
+        let mut wait_close2 = pin!(fifo.sender.wait_until_popped(close_slot2));
+        fifo.process_next(&files);
+        assert!(!files.is_loaded(blob_key));
+        assert!(futures::poll!(&mut wait_close2).is_pending());
+
+        service.wait_and_trigger_sync();
+        assert_eq!(rx1.output(), data);
+        wait_close2.await.expect("close_slot2 should pop once in-flight read completes");
+    }
+
+    #[fuchsia::test]
+    async fn test_superseded_or_failed_overwrite_holds_slot_until_old_file_read_completes() {
+        let blob_key = 79;
+        let old_data = vec![0xAAu8; BLOCK_SIZE as usize];
+        let new_data = vec![0xBBu8; BLOCK_SIZE as usize];
+        let metadata =
+            BlobMetadata { merkle_leaves: MerkleLeaves::new(), format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+
+        // Block 0: old data, Block 1: valid metadata, Block 2: new data, Block 3: valid metadata,
+        // Block 4: corrupt metadata (0xFF bytes).
+        let mut device_data = vec![0u8; (5 * BLOCK_SIZE) as usize];
+        device_data[..BLOCK_SIZE as usize].copy_from_slice(&old_data);
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+        device_data[(2 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize]
+            .copy_from_slice(&new_data);
+        device_data[(3 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+        device_data[(4 * BLOCK_SIZE) as usize..].fill(0xFF);
+
+        let service = DelayedBlockService::new(device_data);
+        let (req1, rx1) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let (req2, rx2) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let handler = TrackingDeliveryHandler {
+            page_requests: Mutex::new(VecDeque::from([req1, req2])),
+            ..Default::default()
+        };
+        let files = Arc::new(Files::new(service.clone(), handler, zx::Port::create()));
+        let mut fifo = TestMappingFifo::new();
+
+        // Case 1: Overwrite superseded by `CloseBlob` while `old_file` still has an in-flight read.
+        let _ = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        service.wait_and_trigger_sync();
+        assert!(files.is_loaded(blob_key));
+
+        // Start an in-flight data read on `old_file` (pending index 0).
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 1);
+
+        // Push Overwrite 1 (pending index 1 = metadata read for Overwrite 1), then supersede it
+        // with `CloseBlob`.
+        let overwrite_slot1 = fifo.push_mapping(blob_key, 2, 3, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        assert_eq!(service.pending.lock().len(), 2);
+
+        let close_slot = fifo.push_close(blob_key).await;
+        fifo.process_next(&files);
+        assert!(!files.is_loaded(blob_key));
+
+        // Complete Overwrite 1's superseded metadata read BEFORE `old_file`'s data read finishes.
+        // `overwrite_slot1` must remain unpopped until `old_file`'s data read completes!
+        {
+            let metadata_cb = service.pending.lock().remove(1);
+            metadata_cb();
+        }
+        let mut wait_overwrite1 = pin!(fifo.sender.wait_until_popped(overwrite_slot1));
+        let mut wait_close = pin!(fifo.sender.wait_until_popped(close_slot));
+        assert!(futures::poll!(&mut wait_overwrite1).is_pending());
+        assert!(futures::poll!(&mut wait_close).is_pending());
+
+        // Now complete `old_file`'s in-flight data read; both slots retire.
+        service.wait_and_trigger_sync();
+        assert_eq!(rx1.output(), old_data);
+        wait_overwrite1.await.expect("overwrite_slot1 should pop after old_file read finishes");
+        wait_close.await.expect("close_slot should pop after old_file read finishes");
+
+        // Case 2: Overwrite metadata read fails (corrupt Block 4) while `old_file` has an in-flight
+        // data read. `old_file` must be removed from `files` and `overwrite_slot2` must stay
+        // unpopped until `old_file`'s in-flight data read completes.
+        let _ = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        service.wait_and_trigger_sync();
+        assert!(files.is_loaded(blob_key));
+
+        files.handle_page_request(blob_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 1);
+
+        let overwrite_slot2 = fifo.push_mapping(blob_key, 2, 4, BLOCK_SIZE).await;
+        fifo.process_next(&files);
+        assert_eq!(service.pending.lock().len(), 2);
+
+        // Complete the corrupt metadata read first.
+        {
+            let bad_metadata_cb = service.pending.lock().remove(1);
+            bad_metadata_cb();
+        }
+        assert!(!files.is_loaded(blob_key));
+        let mut wait_overwrite2 = pin!(fifo.sender.wait_until_popped(overwrite_slot2));
+        assert!(futures::poll!(&mut wait_overwrite2).is_pending());
+
+        // Complete `old_file`'s data read; `overwrite_slot2` now pops cleanly.
+        service.wait_and_trigger_sync();
+        assert_eq!(rx2.output(), old_data);
+        wait_overwrite2.await.expect("overwrite_slot2 should pop after old_file read finishes");
+    }
+
+    #[fuchsia::test]
+    async fn test_child_files_resolves_overwritten_parent_and_holds_parent_slot() {
+        let parent_key = 90;
+        let child_key = 1;
+        let old_data = vec![0xAAu8; BLOCK_SIZE as usize];
+        let new_data = vec![0xBBu8; BLOCK_SIZE as usize];
+        let metadata =
+            BlobMetadata { merkle_leaves: MerkleLeaves::new(), format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+
+        // Block 0: old parent data, Block 1: metadata, Block 2: new parent data, Block 3: metadata.
+        let mut device_data = vec![0u8; (4 * BLOCK_SIZE) as usize];
+        device_data[..BLOCK_SIZE as usize].copy_from_slice(&old_data);
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+        device_data[(2 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize]
+            .copy_from_slice(&new_data);
+        device_data[(3 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let (req1, rx1) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let (req2, rx2) = TestVecBuffer::new_with_range(0..BLOCK_SIZE);
+        let shared_handler = Arc::new(TrackingDeliveryHandler {
+            child_page_requests: Mutex::new(VecDeque::from([req1, req2])),
+            ..Default::default()
+        });
+        let parent_files = Arc::new(Files::new_with_shared_handler(
+            service.clone(),
+            shared_handler.clone(),
+            zx::Port::create(),
+            None,
+        ));
+        let child_files = Arc::new(Files::new_with_shared_handler(
+            service.clone(),
+            shared_handler,
+            zx::Port::create(),
+            Some((parent_files.clone(), parent_key)),
+        ));
+        let mut parent_fifo = TestMappingFifo::new();
+
+        // Map `parent_key` in `parent_files` and `child_key` (mapping logical 0..BLOCK_SIZE ->
+        // parent offset 0) in `child_files`.
+        let _ = parent_fifo.push_mapping(parent_key, 0, 1, BLOCK_SIZE).await;
+        parent_fifo.process_next(&parent_files);
+        service.wait_and_trigger_sync();
+        assert!(parent_files.is_loaded(parent_key));
+
+        let child_extents =
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(0))], 0).expect("child extents");
+        child_files
+            .insert(child_key, Arc::new(File::new(child_extents, BLOCK_SIZE, Transform::None)));
+
+        // Start a child page request so an asynchronous block read is in flight on `old_parent`.
+        child_files.handle_page_request(child_key, 0..BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 1);
+
+        // Overwrite `parent_key` in `parent_files` and complete the overwrite's metadata read while
+        // the child read on `old_parent` is still in flight.
+        let overwrite_slot = parent_fifo.push_mapping(parent_key, 2, 3, BLOCK_SIZE).await;
+        let mut wait_overwrite = pin!(parent_fifo.sender.wait_until_popped(overwrite_slot));
+        parent_fifo.process_next(&parent_files);
+        assert_eq!(service.pending.lock().len(), 2);
+        {
+            let metadata_cb = service.pending.lock().remove(1);
+            metadata_cb();
+        }
+        assert!(
+            futures::poll!(&mut wait_overwrite).is_pending(),
+            "parent overwrite slot must wait for in-flight child read on old parent File"
+        );
+
+        // Complete the child read on `old_parent`; `overwrite_slot` now pops.
+        service.wait_and_trigger_sync();
+        assert_eq!(rx1.output(), old_data);
+        wait_overwrite.await.expect("overwrite_slot should pop once child read completes");
+
+        // Subsequent child page requests dynamically resolve the overwritten parent `File`.
+        child_files.handle_page_request(child_key, 0..BLOCK_SIZE);
+        service.wait_and_trigger_sync();
+        assert_eq!(rx2.output(), new_data);
+    }
+
+    #[fuchsia::test]
+    async fn test_multi_extent_partial_error_holds_slot_until_all_in_flight_reads_finish() {
+        let blob_key = 95;
+        let metadata =
+            BlobMetadata { merkle_leaves: MerkleLeaves::new(), format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+
+        // Layout on mock device (6 blocks):
+        // Block 0: data extent 0, Block 2: data extent 1 (non-contiguous so `SplittableBuffer`
+        // splits a 2-block read into two `read_blocks` calls), Block 1: valid 1-block metadata,
+        // Block 3 + Block 5: 2-extent metadata for Case 3.
+        let mut device_data = vec![0xDDu8; (6 * BLOCK_SIZE) as usize];
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+        device_data[(3 * BLOCK_SIZE) as usize..(3 * BLOCK_SIZE) as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let (req1, _rx1) = TestVecBuffer::new_with_range(0..2 * BLOCK_SIZE);
+        let handler = TrackingDeliveryHandler {
+            page_requests: Mutex::new(VecDeque::from([req1])),
+            ..Default::default()
+        };
+        let files = Arc::new(Files::new(service.clone(), handler, zx::Port::create()));
+        let mut fifo = TestMappingFifo::new();
+
+        let two_block_data_extents = Extents::try_new(
+            [
+                Extent::new(0..BLOCK_SIZE, Some(0)),
+                Extent::new(BLOCK_SIZE..2 * BLOCK_SIZE, Some(2 * BLOCK_SIZE)),
+            ],
+            0,
+        )
+        .expect("data extents failed");
+        let one_block_meta_extents =
+            Extents::try_new([Extent::new(0..BLOCK_SIZE, Some(BLOCK_SIZE))], 0)
+                .expect("meta extents failed");
+
+        // 1. Multi-extent data read where extent 0 fails while extent 1 is still in flight:
+        // `SplittableBuffer` / `ReadContext` drop the outer completion callback immediately on
+        // extent 0's error, yet `CloseBlob`'s slot must stay unpopped until extent 1 finishes.
+        let _ = fifo
+            .push_extents_mapping(
+                blob_key,
+                &two_block_data_extents,
+                &one_block_meta_extents,
+                2 * BLOCK_SIZE,
+            )
+            .await;
+        fifo.process_next(&files);
+        service.wait_and_trigger_sync();
+        assert!(files.is_loaded(blob_key));
+
+        service.fail_at_offset(0);
+        files.handle_page_request(blob_key, 0..2 * BLOCK_SIZE);
+        assert_eq!(service.pending.lock().len(), 2);
+
+        let close_slot1 = fifo.push_close(blob_key).await;
+        let mut wait_close1 = pin!(fifo.sender.wait_until_popped(close_slot1));
+        fifo.process_next(&files);
+
+        // Complete extent 0 (which fails and drops the outer read callback), leaving extent 1 in
+        // flight.
+        {
+            let fail_cb = service.pending.lock().remove(0);
+            fail_cb();
+        }
+        assert!(
+            futures::poll!(&mut wait_close1).is_pending(),
+            "CloseBlob slot must wait for remaining in-flight extent after sibling extent error"
+        );
+
+        service.wait_and_trigger_sync();
+        wait_close1.await.expect("close_slot1 failed to pop after remaining extent finished");
+
+        // 2. Multi-extent `ChildBlockService::read_blocks` where extent 0 fails while extent 1 is
+        // still in flight on the parent file.
+        let _ = fifo
+            .push_extents_mapping(
+                blob_key,
+                &two_block_data_extents,
+                &one_block_meta_extents,
+                2 * BLOCK_SIZE,
+            )
+            .await;
+        fifo.process_next(&files);
+        service.wait_and_trigger_sync();
+
+        let child_service = crate::ChildBlockService::new(service.clone(), files.clone(), blob_key);
+        service.fail_at_offset(0);
+        let child_buf = child_service.allocate_buffer((2 * BLOCK_SIZE) as usize);
+        child_service
+            .read_blocks(0, child_buf, Box::new(|res| assert!(res.is_err())))
+            .expect("child read_blocks failed");
+        assert_eq!(service.pending.lock().len(), 2);
+
+        let close_slot2 = fifo.push_close(blob_key).await;
+        let mut wait_close2 = pin!(fifo.sender.wait_until_popped(close_slot2));
+        fifo.process_next(&files);
+
+        {
+            let fail_cb = service.pending.lock().remove(0);
+            fail_cb();
+        }
+        assert!(
+            futures::poll!(&mut wait_close2).is_pending(),
+            "parent CloseBlob slot must wait for remaining ChildBlockService extent"
+        );
+
+        service.wait_and_trigger_sync();
+        wait_close2.await.expect("close_slot2 failed to pop after remaining child extent finished");
+
+        // 3. Multi-extent metadata read where extent 0 fails while extent 1 is still in flight.
+        let two_block_meta_extents = Extents::try_new(
+            [
+                Extent::new(0..BLOCK_SIZE, Some(3 * BLOCK_SIZE)),
+                Extent::new(BLOCK_SIZE..2 * BLOCK_SIZE, Some(5 * BLOCK_SIZE)),
+            ],
+            0,
+        )
+        .expect("two-block meta extents failed");
+        service.fail_at_offset(3 * BLOCK_SIZE);
+        let meta_slot = fifo
+            .push_extents_mapping(
+                blob_key,
+                &two_block_data_extents,
+                &two_block_meta_extents,
+                2 * BLOCK_SIZE,
+            )
+            .await;
+        let mut wait_meta = pin!(fifo.sender.wait_until_popped(meta_slot));
+        fifo.process_next(&files);
+        assert_eq!(service.pending.lock().len(), 2);
+
+        {
+            let fail_cb = service.pending.lock().remove(0);
+            fail_cb();
+        }
+        assert!(!files.is_loading(blob_key));
+        assert!(
+            futures::poll!(&mut wait_meta).is_pending(),
+            "Mappings slot must wait for remaining metadata extent after sibling extent error"
+        );
+
+        service.wait_and_trigger_sync();
+        wait_meta.await.expect("meta_slot failed to pop after remaining metadata extent finished");
+    }
+
+    #[fuchsia::test]
+    async fn test_failed_registration_commit_removes_loading_entry_and_retires_slot() {
+        let blob_key = 96;
+        let metadata =
+            BlobMetadata { merkle_leaves: vec![[5u8; 32]], format: BlobFormat::Uncompressed };
+        let encoded_metadata = serialize_metadata(&metadata);
+        let mut device_data = vec![0u8; (2 * BLOCK_SIZE) as usize];
+        device_data[BLOCK_SIZE as usize..BLOCK_SIZE as usize + encoded_metadata.len()]
+            .copy_from_slice(&encoded_metadata);
+
+        let service = DelayedBlockService::new(device_data);
+        let handler = TrackingDeliveryHandler {
+            fail_next_registration_commit: AtomicBool::new(true),
+            ..Default::default()
+        };
+        let files = Arc::new(Files::new(service.clone(), handler, zx::Port::create()));
+        let mut fifo = TestMappingFifo::new();
+
+        let slot = fifo.push_mapping(blob_key, 0, 1, BLOCK_SIZE).await;
+        let mut wait_slot = pin!(fifo.sender.wait_until_popped(slot));
+        fifo.process_next(&files);
+        assert!(files.is_loading(blob_key));
+        assert!(futures::poll!(&mut wait_slot).is_pending());
+
+        service.wait_and_trigger_sync();
+        wait_slot.await.expect("slot failed to pop after registration commit failure");
+        assert!(!files.is_loading(blob_key));
+        assert!(!files.is_loaded(blob_key));
+        assert_eq!(files.delivery_handler.prepared_registrations.load(Ordering::SeqCst), 1);
+        assert!(files.delivery_handler.registered_alignments.lock().is_empty());
+        assert_eq!(files.delivery_handler.unregister_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[fuchsia::test]
+    fn test_read_range_flush_alignment_only_for_lz4() {
+        struct FlushAlignmentRecorder {
+            range: Range<u64>,
+            buf: Vec<u8>,
+            flush_alignment: Arc<Mutex<Option<Option<NonZero<usize>>>>>,
+        }
+
+        impl DataBuffer for FlushAlignmentRecorder {
+            fn range(&self) -> Range<u64> {
+                self.range.clone()
+            }
+            fn mut_ptr_slice(&mut self) -> MutPtrByteSlice<'_> {
+                MutPtrByteSlice::from(&mut self.buf[..])
+            }
+            fn commit(&mut self, _size: usize) -> Result<(), ChunkedArchiveError> {
+                Ok(())
+            }
+        }
+
+        impl PageRequest for FlushAlignmentRecorder {
+            fn prepare(
+                &mut self,
+                read_range: Range<u64>,
+                flush_alignment: Option<NonZero<usize>>,
+            ) -> Result<(), ChunkedArchiveError> {
+                self.buf = vec![0u8; (read_range.end - read_range.start) as usize];
+                self.range = read_range;
+                *self.flush_alignment.lock() = Some(flush_alignment);
+                Ok(())
+            }
+            fn split_at(&mut self, _mid: u64) -> Self {
+                unreachable!()
+            }
+        }
+
+        let uncompressed = vec![0x42u8; 65536];
+        let check_transform = |transform: Transform, data: &[u8]| {
+            let aligned_len = data.len().next_multiple_of(BLOCK_SIZE as usize);
+            let mut disk = vec![0u8; aligned_len];
+            disk[..data.len()].copy_from_slice(data);
+            let service = FakeBlockService::new(disk);
+            let extents = Extents::try_new([Extent::new(0..(aligned_len as u64), Some(0))], 0)
+                .expect("extents");
+            let file = Arc::new(File::new(extents, uncompressed.len() as u64, transform));
+            let recorded = Arc::new(Mutex::new(None));
+            file.read_range(
+                &service,
+                FlushAlignmentRecorder {
+                    range: 0..4096,
+                    buf: Vec::new(),
+                    flush_alignment: recorded.clone(),
+                },
+            );
+            recorded.lock().expect("prepare was not called")
+        };
+
+        assert_eq!(check_transform(Transform::None, &uncompressed), None);
+
+        // Raw LZ4 chunks (`ReadMode::Raw`) perform no decompression and should also wait for the
+        // full window.
+        let raw_lz4 =
+            CompressionInfo::new_lz4_with_raw_chunks(32768, 65536, 65536, &[0, 32768]).unwrap();
+        assert_eq!(check_transform(Transform::Compressed(raw_lz4), &uncompressed), None);
+
+        for (alg, expected) in
+            [(CompressionAlgorithm::Zstd, None), (CompressionAlgorithm::Lz4, NonZero::new(32768))]
+        {
+            let archive = ChunkedArchive::new(
+                &uncompressed,
+                ChunkedArchiveOptions::V3 { compression_algorithm: alg },
+            )
+            .expect("archive");
+            let chunk_size = archive.chunk_size() as u64;
+            let mut compressed = Vec::new();
+            let mut offsets = Vec::new();
+            for chunk in archive.chunks() {
+                offsets.push(compressed.len() as u64);
+                compressed.extend_from_slice(&chunk.compressed_data);
+            }
+            let info =
+                CompressionInfo::new(chunk_size, compressed.len() as u64, &offsets, alg).unwrap();
+            assert_eq!(check_transform(Transform::Compressed(info), &compressed), expected);
+        }
     }
 }

@@ -56,7 +56,7 @@ fx set bringup.x64 --variant gcc
 
 You can also enable asan by using the variant flag.
 
-## Building Zircon for all targets
+## Building Zircon for all targets {#building-zircon-for-all-targets}
 
 You can build for all targets with `fx multi` and using a file that contains all
 the specifications to build. The output for each target is found in

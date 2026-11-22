@@ -82,38 +82,26 @@ unsafe extern "C" fn cmd_watchdog(argc: c_int, argv: *const CmdArgs, _flags: u32
         return -1;
     };
 
-    // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-    if !unsafe { hw_watchdog_present() } {
+    if !hw_watchdog_present() {
         kprint!("There is no hardware watchdog present in this system.\n");
         return 0;
     }
 
     match command {
         Cmd::Status => {
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            let last_pet = unsafe { hw_watchdog_get_last_pet_time() };
+            let last_pet = hw_watchdog_get_last_pet_time().0;
             let now = current_boot_time().0;
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            kprint!(
-                "Enabled  : {:s}\n",
-                if unsafe { hw_watchdog_is_enabled() } { "yes" } else { "no" }
-            );
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            kprint!("Timeout  : {} mSec\n", unsafe { hw_watchdog_get_timeout_nsec() } / zx_msec(1));
+            kprint!("Enabled  : {:s}\n", if hw_watchdog_is_enabled() { "yes" } else { "no" });
+            kprint!("Timeout  : {} mSec\n", hw_watchdog_get_timeout_nsec().0 / zx_msec(1));
             kprint!(
                 "Last Pet : {}.{:03} ({} mSec ago)\n",
                 last_pet / zx_sec(1),
                 (last_pet / zx_msec(1)) % 1000,
                 (now - last_pet) / zx_msec(1)
             );
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
             kprint!(
                 "Petting  : {:s}\n",
-                if unsafe { hw_watchdog_is_petting_suppressed() } {
-                    "Suppressed"
-                } else {
-                    "Enabled"
-                }
+                if hw_watchdog_is_petting_suppressed() { "Suppressed" } else { "Enabled" }
             );
         }
 
@@ -122,8 +110,7 @@ unsafe extern "C" fn cmd_watchdog(argc: c_int, argv: *const CmdArgs, _flags: u32
         }
 
         Cmd::Enable => {
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            let res = unsafe { hw_watchdog_set_enabled(true) };
+            let res = hw_watchdog_set_enabled(true);
             if res == Err(Status::NOT_SUPPORTED) {
                 kprint!("Watchdog does not support enabling.\n");
                 return Status::result_into_raw(res);
@@ -136,8 +123,7 @@ unsafe extern "C" fn cmd_watchdog(argc: c_int, argv: *const CmdArgs, _flags: u32
         }
 
         Cmd::Disable => {
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            let res = unsafe { hw_watchdog_set_enabled(false) };
+            let res = hw_watchdog_set_enabled(false);
             if res == Err(Status::NOT_SUPPORTED) {
                 kprint!("Watchdog does not support disabling.\n");
                 return Status::result_into_raw(res);
@@ -150,8 +136,7 @@ unsafe extern "C" fn cmd_watchdog(argc: c_int, argv: *const CmdArgs, _flags: u32
         }
 
         Cmd::Force => {
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            if !unsafe { hw_watchdog_is_enabled() } {
+            if !hw_watchdog_is_enabled() {
                 kprint!("Watchdog is not enabled.  Enable the watchdog first.\n");
                 return Status::BAD_STATE.into_raw();
             }
@@ -175,9 +160,8 @@ unsafe extern "C" fn cmd_watchdog(argc: c_int, argv: *const CmdArgs, _flags: u32
             // the system.
             dlog_panic_start();
 
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            let deadline = unsafe { hw_watchdog_get_last_pet_time() }
-                .saturating_add(unsafe { hw_watchdog_get_timeout_nsec() });
+            let deadline =
+                hw_watchdog_get_last_pet_time().0.saturating_add(hw_watchdog_get_timeout_nsec().0);
             kprint!(
                 "System wedged!  Watchdog will fire in {} mSec\n",
                 (deadline - current_mono_time().0) / zx_msec(1)
@@ -190,19 +174,15 @@ unsafe extern "C" fn cmd_watchdog(argc: c_int, argv: *const CmdArgs, _flags: u32
         }
 
         Cmd::Suppress => {
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            unsafe {
-                hw_watchdog_pet();
-                hw_watchdog_suppress_petting(true);
-            }
+            hw_watchdog_pet();
+            hw_watchdog_suppress_petting(true);
 
-            // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-            if !unsafe { hw_watchdog_is_enabled() } {
+            if !hw_watchdog_is_enabled() {
                 kprint!("WDT petting is now suppressed, but the WDT is not currently enabled.\n");
             } else {
-                // SAFETY: The layer always resolves a `'static` driver, set once in early boot.
-                let deadline = unsafe { hw_watchdog_get_last_pet_time() }
-                    .saturating_add(unsafe { hw_watchdog_get_timeout_nsec() });
+                let deadline = hw_watchdog_get_last_pet_time()
+                    .0
+                    .saturating_add(hw_watchdog_get_timeout_nsec().0);
                 kprint!(
                     "WDT petting is now suppressed, WDT will fire in {} mSec\n",
                     (deadline - current_mono_time().0) / zx_msec(1)

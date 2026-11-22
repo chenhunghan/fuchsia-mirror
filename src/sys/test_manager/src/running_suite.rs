@@ -78,6 +78,9 @@ pub(crate) struct RunningSuite {
 
     /// Wrapper for `DebugAgent` service.
     debug_agent: Option<DebugAgent>,
+
+    /// The runner declared by the test root, if any.
+    runner: Option<String>,
 }
 
 impl RunningSuite {
@@ -158,6 +161,7 @@ impl RunningSuite {
             })?;
 
         Ok(RunningSuite {
+            runner: facets.runner,
             custom_artifact_tokens: vec![],
             mock_ready_task: Some(fasync::Task::spawn(
                 mock_ready_event.wait_or_dropped().map(|_| ()),
@@ -321,7 +325,7 @@ impl RunningSuite {
 
             let run_options = get_invocation_options(options);
 
-            sender.send(Ok(SuiteEvents::suite_started().into())).await.unwrap();
+            sender.send(Ok(SuiteEvents::suite_started(self.runner.clone()).into())).await.unwrap();
 
             loop {
                 const INVOCATIONS_CHUNK: usize = 50;
@@ -886,7 +890,6 @@ async fn get_realm(
     wrapper_realm
         .add_route(
             Route::new()
-                .capability(Capability::protocol_by_name("fuchsia.diagnostics.LogStream"))
                 .capability(Capability::protocol_by_name("fuchsia.logger.LogSink"))
                 .capability(Capability::protocol_by_name("fuchsia.inspect.InspectSink"))
                 .from(&archivist)
@@ -1407,6 +1410,7 @@ mod tests {
         let mut suite_facet = facet::SuiteFacets {
             collection: HERMETIC_TESTS_COLLECTION,
             deprecated_allowed_packages: None,
+            runner: None,
         };
 
         // default for hermetic realm is no other allowed package.

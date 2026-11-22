@@ -27,14 +27,15 @@ class PowerSwitchUsingPduTests(unittest.TestCase):
     def setUp(self, _: mock.Mock) -> None:
         """Set up for PDU tests by creating a PDU object."""
         super().setUp()
+        self.outlet_num: int = 7
         self.pdu_obj: power_switch_using_pdu.PowerSwitchUsingPdu = (
             power_switch_using_pdu.PowerSwitchUsingPdu(
                 pdu_host=_MOCK_PDU_HOST,
                 pdu_username=_MOCK_PDU_USERNAME,
                 priv_key_path=_MOCK_PRIV_KEY_PATH,
+                outlet=self.outlet_num,
             )
         )
-        self.outlet_num: int = 7
 
     @mock.patch("os.path.exists", return_value=False, autospec=True)
     def test_instantiate_power_switch_using_pdu_when_key_not_found(
@@ -49,6 +50,7 @@ class PowerSwitchUsingPduTests(unittest.TestCase):
                 pdu_host=_MOCK_PDU_HOST,
                 pdu_username=_MOCK_PDU_USERNAME,
                 priv_key_path=_MOCK_PRIV_KEY_PATH,
+                outlet=self.outlet_num,
             )
         mock_exists.assert_called_once_with(_MOCK_PRIV_KEY_PATH)
 
@@ -75,7 +77,7 @@ class PowerSwitchUsingPduTests(unittest.TestCase):
         ]
     )
     @mock.patch.object(
-        power_switch_using_pdu.PowerSwitchUsingPdu, "run", autospec=True
+        power_switch_using_pdu.PowerSwitchUsingPdu, "_run", autospec=True
     )
     def test_power_on_off_success(
         self,
@@ -86,7 +88,7 @@ class PowerSwitchUsingPduTests(unittest.TestCase):
         method = getattr(self.pdu_obj, test_data["method"])
         outlet = self.outlet_num
         expected_state = test_data["expected_state"]
-        method(outlet=self.outlet_num)
+        method()
         mock_run.assert_called_once()
         actual_cmd_list = mock_run.call_args[1]["command"]
         expected_cmd_start = f"ssh -i {_MOCK_PRIV_KEY_PATH} {_MOCK_PDU_USERNAME}@{_MOCK_PDU_HOST}"
@@ -99,22 +101,64 @@ class PowerSwitchUsingPduTests(unittest.TestCase):
         self.assertIn(expected_cmd_start, command_string)
         self.assertIn(expected_remote_cmd, command_string)
 
-    @parameterized.expand(
-        [
-            param({"label": "off_no_outlet", "method": "power_off"}),
-            param({"label": "on_no_outlet", "method": "power_on"}),
-        ]
-    )
-    def test_power_on_off_no_outlet_failure(
-        self, test_data: dict[str, Any]
+    @mock.patch("os.path.exists", return_value=True, autospec=True)
+    def test_from_config_missing_outlet_raises_power_switch_error(
+        self, _: mock.Mock
     ) -> None:
-        """Test case to ensure failure when outlet is None."""
-        method = getattr(self.pdu_obj, test_data["method"])
-        with self.assertRaisesRegex(
-            power_switch_using_pdu.PowerSwitchPduError,
-            "Outlet number must be specified",
-        ):
-            method(outlet=None)
+        """Test PowerSwitch.from_config() raises PowerSwitchError when outlet is missing."""
+        with self.assertRaises(power_switch.PowerSwitchError):
+            power_switch.PowerSwitch.from_config(
+                device_config={
+                    "auxiliary_devices": {
+                        "power_switch": {
+                            "hardware": {
+                                "pdu_host": _MOCK_PDU_HOST,
+                                "pdu_username": _MOCK_PDU_USERNAME,
+                                "priv_key_path": _MOCK_PRIV_KEY_PATH,
+                            },
+                            "implementation": {
+                                "module": (
+                                    "honeydew.auxiliary_devices.power_switch."
+                                    "power_switch_using_pdu"
+                                ),
+                                "class": "PowerSwitchUsingPdu",
+                            },
+                        },
+                    },
+                }
+            )
+
+    @mock.patch("os.path.exists", return_value=True, autospec=True)
+    def test_from_config_with_auxiliary_devices_config(
+        self, _: mock.Mock
+    ) -> None:
+        """Test PowerSwitch.from_config() with nested auxiliary_devices config."""
+        switch = power_switch.PowerSwitch.from_config(
+            device_config={
+                "auxiliary_devices": {
+                    "power_switch": {
+                        "hardware": {
+                            "pdu_host": _MOCK_PDU_HOST,
+                            "pdu_username": _MOCK_PDU_USERNAME,
+                            "priv_key_path": _MOCK_PRIV_KEY_PATH,
+                            "outlet": 4,
+                        },
+                        "implementation": {
+                            "module": (
+                                "honeydew.auxiliary_devices.power_switch."
+                                "power_switch_using_pdu"
+                            ),
+                            "class": "PowerSwitchUsingPdu",
+                        },
+                    },
+                },
+            }
+        )
+        self.assertIsInstance(
+            switch, power_switch_using_pdu.PowerSwitchUsingPdu
+        )
+        assert isinstance(switch, power_switch_using_pdu.PowerSwitchUsingPdu)
+        self.assertEqual(switch._outlet, 4)  # pylint: disable=protected-access
 
     @mock.patch.object(
         host_shell,
@@ -125,7 +169,7 @@ class PowerSwitchUsingPduTests(unittest.TestCase):
     def test_run_error(self, mock_host_shell_run: mock.Mock) -> None:
         """Test case for PowerSwitchUsingPdu._run() failure case, wrapping HostCmdError."""
         with self.assertRaises(power_switch_using_pdu.PowerSwitchPduError):
-            self.pdu_obj.run(
+            self.pdu_obj._run(
                 command=["ssh", "fail-command"]
             )  # pylint: disable=protected-access
         mock_host_shell_run.assert_called_once()

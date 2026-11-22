@@ -78,7 +78,7 @@
 //!    `allocator` records of the child stores' layer files themselves; if extreme layer file
 //!    fragmentation ever exceeded this share, `R_total` is unaffected and `root_store` would simply
 //!    major-compact slightly earlier), unflushed system journal usage (`4 * J_sys`), and
-//!    `journal::RESERVED_SPACE`.
+//!    `journal::reserved_space`.
 //! 2. **Per-Child-Store Requirement (`req_S`)**: For each child volume `S`, covers that volume's
 //!    borrowing headroom (`3/8 * L_S`) and its unflushed journal mutations (`4 * J_S`).
 //! 3. **Total Required Reservation (`R_total`)**: `req_sys + sum(req_S)`.
@@ -111,14 +111,14 @@
 //!   and the store can be compacted (`needs_flush(S)` or `layers.len() > 1`). `root_store` forces
 //!   a major compaction when system borrowed space (`(R_total - M_total).saturating_sub(sum(B_S))`)
 //!   exceeds half of the system's non-scratch layer and journal headroom
-//!   (`0.5 * (L_alloc + L_root) + 1/8 * sum(L_child) + RESERVED_SPACE`). Because a full compaction
-//!   of `S` unconditionally resets `store_borrowed[S] = 0` and drops `Checkpoints::Old` even when
-//!   `M_total < R_total`, a single subsequent transaction on `S` will not trigger another major
-//!   compaction.
+//!   (`0.5 * (L_alloc + L_root) + 1/8 * sum(L_child) + journal::reserved_space(reclaim_size)`).
+//!   Because a full compaction of `S` unconditionally resets `store_borrowed[S] = 0` and drops
+//!   `Checkpoints::Old` even when `M_total < R_total`, a single subsequent transaction on `S` will
+//!   not trigger another major compaction.
 //!
 //! ## Journal Replay and Software Upgrades
 //!
-//! The target reservation formulas (such as `journal::RESERVED_SPACE` or the layer/journal
+//! The target reservation formulas (such as `journal::reserved_space` or the layer/journal
 //! multipliers) can change between software versions, and during journal replay the full set of
 //! child volumes and their layer sizes are not yet known. If the super-block only recorded global
 //! borrowed space `B` and computed the mount-time reservation as `R_total - B`, any software update
@@ -143,9 +143,13 @@
 //!      - `Commit` (non-borrowing): Adds `4 * txn_size` to `M_total`.
 //!      - `CommitBorrowed(reserved)` (borrowing): Updates `M_total` to `reserved` (the
 //!        post-`apply_transaction` `metadata_reservation.amount()` recorded in live mode).
-//! 3. **Reconciling with Current Software Requirements (`init_metadata_reservation`)**: Once replay
-//!    completes and all child volumes are opened, `min(M_total, R_total)` is reserved from the
-//!    allocator (while `total_store_borrowed` clamps each `store_borrowed[S]` to `h_S` on read):
+//! 3. **Reconciling with Current Software Requirements (`on_replay_complete` /
+//!    `init_metadata_reservation`)**: Once replay completes and all child volumes are opened,
+//!    `on_replay_complete` reconciles the replayed reservation state in memory (migrating `< V61`
+//!    super-blocks and pruning removed stores from `store_borrowed`), while
+//!    `total_store_borrowed` clamps each `store_borrowed[S]` to `h_S` on read. When formatting or
+//!    mounting writable, `init_metadata_reservation` then reserves `min(M_total, R_total)` from
+//!    the allocator:
 //!    - **If required reservations increased** (`M_total < R_total`): Only `M_total` is reserved
 //!      from the allocator at mount time, never asking for extra space.
 //!    - **If required reservations decreased** (`M_total > R_total`): The reservation is capped
@@ -193,7 +197,7 @@ use std::sync::{Arc, OnceLock};
 // multiplier should be here.  2x was too low, as it didn't cover any space for metadata.  4x might
 // be too much.
 pub const fn reserved_space_from_journal_usage(journal_usage: u64) -> u64 {
-    journal_usage * 4
+    journal_usage.saturating_mul(4)
 }
 
 /// Tracks the metadata reservation state during journal replay before `init_metadata_reservation`
@@ -339,8 +343,8 @@ struct Inner {
     // The maximum transaction size that has been encountered so far.
     max_transaction_size: (u64, UintProperty),
 
-    // Extra temporary space that might be tied up in the journal that hasn't yet been deallocated.
-    reserved_space: u64,
+    // See the comment for reclaim_size in JournalOptions.
+    journal_reclaim_size: u64,
 }
 
 impl Inner {
@@ -366,14 +370,14 @@ impl Inner {
     // Returns the headroom attributed to a child store's own borrowing budget to cover growth of
     // its own layer files between major compactions.
     fn child_headroom_store_share(layer_size: u64) -> u64 {
-        layer_size * 3 / 8
+        (layer_size / 8) * 3
     }
 
     // Returns the total headroom for `object_id` given its `layer_size`.
     fn tree_headroom(&self, object_id: u64, layer_size: u64) -> u64 {
         if self.is_child_store(object_id) {
             Self::child_headroom_system_share(layer_size)
-                + Self::child_headroom_store_share(layer_size)
+                .saturating_add(Self::child_headroom_store_share(layer_size))
         } else {
             Self::system_tree_headroom(layer_size)
         }
@@ -381,7 +385,7 @@ impl Inner {
 
     // Returns the total reservation for `object_id` given its `layer_size`.
     fn tree_reservation(&self, object_id: u64, layer_size: u64) -> u64 {
-        Self::tree_scratch(layer_size) + self.tree_headroom(object_id, layer_size)
+        Self::tree_scratch(layer_size).saturating_add(self.tree_headroom(object_id, layer_size))
     }
 
     fn is_system_store(&self, store_id: u64) -> bool {
@@ -404,12 +408,12 @@ impl Inner {
 
     // Returns the system bucket's non-scratch borrowing headroom.
     fn system_headroom(&self) -> u64 {
-        let mut headroom = self.reserved_space;
+        let mut headroom = journal::reserved_space(self.journal_reclaim_size);
         for (&object_id, &layer_size) in &self.layer_sizes {
             if self.is_child_store(object_id) {
-                headroom += Self::child_headroom_system_share(layer_size);
+                headroom = headroom.saturating_add(Self::child_headroom_system_share(layer_size));
             } else {
-                headroom += Self::system_tree_headroom(layer_size);
+                headroom = headroom.saturating_add(Self::system_tree_headroom(layer_size));
             }
         }
         headroom
@@ -426,7 +430,7 @@ impl Inner {
         let layer_size = self.layer_sizes.get(&store_id).copied().unwrap_or(0);
         let journal_usage = self.journal_checkpoints.get(&store_id).map_or(0, |c| c.usage());
         Self::child_headroom_store_share(layer_size)
-            + reserved_space_from_journal_usage(journal_usage)
+            .saturating_add(reserved_space_from_journal_usage(journal_usage))
     }
 
     // Returns the total metadata space (`B_S`) currently borrowed by child store `store_id` across
@@ -458,16 +462,17 @@ impl Inner {
     // Returns the total required size of the metadata reservation assuming that no space has been
     // borrowed.
     fn required_reservation(&self) -> u64 {
-        let mut child_headroom = 0;
+        let mut child_headroom: u64 = 0;
         for (&object_id, &layer_size) in &self.layer_sizes {
             if self.is_child_store(object_id) {
-                child_headroom += Self::child_headroom_store_share(layer_size);
+                child_headroom =
+                    child_headroom.saturating_add(Self::child_headroom_store_share(layer_size));
             }
         }
         self.max_tree_scratch()
-            + self.system_headroom()
-            + child_headroom
-            + reserved_space_from_journal_usage(self.total_journal_usage())
+            .saturating_add(self.system_headroom())
+            .saturating_add(child_headroom)
+            .saturating_add(reserved_space_from_journal_usage(self.total_journal_usage()))
     }
 
     // Returns the total borrowed metadata space, using the live reservation if initialized or
@@ -634,7 +639,10 @@ impl Inner {
 }
 
 impl ObjectManager {
-    pub fn new(on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>) -> ObjectManager {
+    pub fn new(
+        on_new_store: Option<Box<dyn Fn(&ObjectStore) + Send + Sync>>,
+        journal_reclaim_size: u64,
+    ) -> ObjectManager {
         ObjectManager {
             inner: RwLock::new(Inner {
                 stores: HashMap::default(),
@@ -648,7 +656,7 @@ impl ObjectManager {
                 last_end_offset: 0,
                 replay_metadata_reservation: ReplayMetadataReservation::Reserved(u64::MAX),
                 max_transaction_size: (0, metrics::detail().create_uint("max_transaction_size", 0)),
-                reserved_space: journal::RESERVED_SPACE,
+                journal_reclaim_size,
             }),
             metadata_reservation: OnceLock::new(),
             volume_directory: OnceLock::new(),
@@ -760,11 +768,66 @@ impl ObjectManager {
             self.open_store(&root_store, store_id).await?;
         }
 
-        // This can fail if a filesystem is created and truncated to a size
-        // that doesn't leave enough free space for metadata reservations.
-        self.init_metadata_reservation()
-            .await
-            .context("Insufficient free space for metadata reservation.")?;
+        let legacy_required = if matches!(
+            self.inner.read().replay_metadata_reservation,
+            ReplayMetadataReservation::Borrowed(_)
+        ) {
+            Some(self.legacy_required_reservation().await?)
+        } else {
+            None
+        };
+        let mut inner = self.inner.write();
+        match inner.replay_metadata_reservation {
+            // When migrating from a `< V61` super-block, only a single global `borrowed` scalar is
+            // known, which was computed against `legacy_required_reservation()`. Recover
+            // `M_total = min(legacy_required - legacy_borrowed, required)`, subtract any unflushed
+            // journal borrowing already tracked in `journal_checkpoints`, and distribute the
+            // remaining non-journal deficit proportionally across child stores' layer headroom
+            // using u128 arithmetic to avoid overflow.
+            ReplayMetadataReservation::Borrowed(legacy_borrowed) => {
+                let legacy_required = legacy_required.unwrap();
+                ensure!(legacy_required >= legacy_borrowed, FxfsError::Inconsistent);
+                let required = inner.required_reservation();
+                let amount = std::cmp::min(legacy_required - legacy_borrowed, required);
+                let borrowed = required - amount;
+                let max_scratch = inner.max_tree_scratch();
+                let total_journal_space =
+                    reserved_space_from_journal_usage(inner.total_journal_usage());
+                let flushed_headroom =
+                    required.saturating_sub(max_scratch.saturating_add(total_journal_space));
+                let total_unflushed_borrowed: u64 = inner
+                    .journal_checkpoints
+                    .values()
+                    .map(|c| reserved_space_from_journal_usage(c.borrowed_usage()))
+                    .fold(0u64, u64::saturating_add);
+                let flushed_borrowed = borrowed.saturating_sub(total_unflushed_borrowed);
+                inner.store_borrowed.clear();
+                let store_ids: Vec<u64> = inner.stores.keys().copied().collect();
+                for id in store_ids {
+                    if inner.is_child_store(id) {
+                        let layer_size = inner.layer_sizes.get(&id).copied().unwrap_or(0);
+                        let h_s = Inner::child_headroom_store_share(layer_size);
+                        let layer_borrowed = if flushed_headroom > 0 {
+                            std::cmp::min(
+                                h_s,
+                                ((h_s as u128 * flushed_borrowed as u128)
+                                    / flushed_headroom as u128)
+                                    as u64,
+                            )
+                        } else {
+                            0
+                        };
+                        inner.store_borrowed.insert(id, layer_borrowed);
+                    }
+                }
+                inner.prune_stores_borrowed();
+                inner.replay_metadata_reservation = ReplayMetadataReservation::Reserved(amount);
+            }
+
+            ReplayMetadataReservation::Reserved(_) => {
+                inner.prune_stores_borrowed();
+            }
+        }
 
         Ok(())
     }
@@ -1188,86 +1251,28 @@ impl ObjectManager {
             max_tree_reservation = std::cmp::max(max_tree_reservation, total_layer_size * 3 / 2);
         }
 
-        Ok(max_tree_reservation + total_journal_usage * 4 + LEGACY_RESERVED_SPACE)
+        Ok(max_tree_reservation
+            .saturating_add(reserved_space_from_journal_usage(total_journal_usage))
+            .saturating_add(LEGACY_RESERVED_SPACE))
     }
 
-    /// Initializes the live `metadata_reservation` from the allocator after journal replay and
-    /// opening all volumes.
-    pub async fn init_metadata_reservation(&self) -> Result<(), Error> {
-        let legacy_required = if matches!(
-            self.inner.read().replay_metadata_reservation,
-            ReplayMetadataReservation::Borrowed(_)
-        ) {
-            Some(self.legacy_required_reservation().await?)
-        } else {
-            None
-        };
+    /// Reserves the live `metadata_reservation` from the allocator when formatting, or when
+    /// mounting writable after `on_replay_complete`.
+    pub fn init_metadata_reservation(&self) -> Result<(), Error> {
         let (amount, required, replay_state, allocator) = {
-            let mut inner = self.inner.write();
+            let inner = self.inner.read();
             let required = inner.required_reservation();
             let replay_state = inner.replay_metadata_reservation;
-            let amount = match replay_state {
-                // When migrating from a `< V61` super-block, only a single global `borrowed`
-                // scalar is known, which was computed against `legacy_required_reservation()`.
-                // Recover `M_total = min(legacy_required - legacy_borrowed, required)`, subtract
-                // any unflushed journal borrowing already tracked in `journal_checkpoints`, and
-                // distribute the remaining non-journal deficit proportionally across child stores'
-                // layer headroom using u128 arithmetic to avoid overflow.
-                ReplayMetadataReservation::Borrowed(legacy_borrowed) => {
-                    let legacy_required = legacy_required.unwrap();
-                    ensure!(legacy_required >= legacy_borrowed, FxfsError::Inconsistent);
-                    let amount = std::cmp::min(legacy_required - legacy_borrowed, required);
-                    let borrowed = required - amount;
-                    let max_scratch = inner.max_tree_scratch();
-                    let total_journal_space =
-                        reserved_space_from_journal_usage(inner.total_journal_usage());
-                    let flushed_headroom =
-                        required.saturating_sub(max_scratch + total_journal_space);
-                    let total_unflushed_borrowed: u64 = inner
-                        .journal_checkpoints
-                        .values()
-                        .map(|c| reserved_space_from_journal_usage(c.borrowed_usage()))
-                        .sum();
-                    let flushed_borrowed = borrowed.saturating_sub(total_unflushed_borrowed);
-                    inner.store_borrowed.clear();
-                    let store_ids: Vec<u64> = inner.stores.keys().copied().collect();
-                    for id in store_ids {
-                        if inner.is_child_store(id) {
-                            let layer_size = inner.layer_sizes.get(&id).copied().unwrap_or(0);
-                            let h_s = Inner::child_headroom_store_share(layer_size);
-                            let layer_borrowed = if flushed_headroom > 0 {
-                                std::cmp::min(
-                                    h_s,
-                                    ((h_s as u128 * flushed_borrowed as u128)
-                                        / flushed_headroom as u128)
-                                        as u64,
-                                )
-                            } else {
-                                0
-                            };
-                            inner.store_borrowed.insert(id, layer_borrowed);
-                        }
-                    }
-                    inner.prune_stores_borrowed();
-                    inner.replay_metadata_reservation = ReplayMetadataReservation::Reserved(amount);
-                    amount
-                }
-
-                // For V61+ super-blocks, prune any removed stores from `store_borrowed` and
-                // reserve `min(reserved_total, required)` so that if a software update increased
-                // `required_reservation()`, we never attempt to reserve more from the allocator at
-                // mount time than was previously held on disk.
-                ReplayMetadataReservation::Reserved(reserved_total) => {
-                    inner.prune_stores_borrowed();
-                    std::cmp::min(reserved_total, required)
-                }
+            let ReplayMetadataReservation::Reserved(reserved_total) = replay_state else {
+                unreachable!("on_replay_complete reconciles Borrowed into Reserved");
             };
+            // Reserve `min(reserved_total, required)` so that if a software update increased
+            // `required_reservation()`, we never attempt to reserve more from the allocator at
+            // mount time than was previously held on disk (and on format `reserved_total` starts
+            // at `u64::MAX`).
+            let amount = std::cmp::min(reserved_total, required);
             (amount, required, replay_state, inner.allocator.as_ref().cloned().unwrap())
         };
-        if self.root_parent_store().filesystem().options().read_only {
-            // We don't need metadata reservations in read-only mode.
-            return Ok(());
-        }
         self.metadata_reservation
             .set(allocator.clone().reserve(None, amount).with_context(|| {
                 format!(
@@ -1372,8 +1377,8 @@ impl ObjectManager {
             .unwrap_or(0)
     }
 
-    pub fn set_reserved_space(&self, amount: u64) {
-        self.inner.write().reserved_space = amount;
+    pub fn journal_reclaim_size(&self) -> u64 {
+        self.inner.read().journal_reclaim_size
     }
 
     pub fn last_end_offset(&self) -> u64 {
@@ -1480,14 +1485,15 @@ impl ObjectManager {
     /// we run the risk of there not being enough reserved.  To handle this, if the amount is
     /// significant, we force the journal to borrow the space (using a journal created transaction).
     ///
-    /// We allow up to `BLOCK_SIZE + 64` bytes before borrowing to cover up to a full block of
-    /// padding (from `pad_to_block` or `skip_to_end_of_block`) plus any `RESET` version, `Discard`,
-    /// or `DidFlushDevice` records written in `pre_commit`.
+    /// Up to `BLOCK_SIZE` bytes are allowed before borrowing, enough for a full block of padding
+    /// (from `pad_to_block` or `skip_to_end_of_block`). Pending `RESET` version, `Discard` and
+    /// `DidFlushDevice` records are excluded: `write_and_apply_mutations` writes them after this
+    /// check, immediately before the next transaction it writes, so they are charged to
+    /// `pre_commit`'s borrowed transaction when one runs, or else to the committing transaction.
     pub fn needs_borrow_for_journal(&self, checkpoint: u64) -> bool {
         let inner = self.inner.read();
         !inner.journal_checkpoints.is_empty()
-            && checkpoint.checked_sub(inner.last_end_offset).unwrap()
-                > journal::BLOCK_SIZE.get() + 64
+            && checkpoint.checked_sub(inner.last_end_offset).unwrap() > journal::BLOCK_SIZE.get()
     }
 
     #[cfg(test)]
@@ -1553,14 +1559,16 @@ mod tests {
         Directory, FlushReason, HandleOptions, INVALID_OBJECT_ID, NewChildStoreOptions, ObjectKey,
         ObjectStore, ObjectValue, StoreOptions,
     };
+    use event_listener::Event;
     use fxfs_crypto::Crypt;
     use fxfs_insecure_crypto::new_insecure_crypt;
     use rand::rngs::SmallRng;
     use rand::{RngExt, SeedableRng};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
     use storage_device::DeviceHolder;
-    use storage_device::fake_device::FakeDevice;
+    use storage_device::fake_device::{FakeDevice, Observer};
 
     // Runs a randomized stress test exercising per-store metadata reservations, borrowing,
     // minor/major compactions, locked flushes, dynamic volume creation/deletion, and remounts
@@ -1694,7 +1702,7 @@ mod tests {
                 );
             }
 
-            let reclaim_size = if rng.random_bool(0.5) { 32768 } else { 65536 };
+            let reclaim_size = if rng.random_bool(0.5) { 16384 } else { 32768 };
             let device = DeviceHolder::new(FakeDevice::new(4096, 4096));
             let mut fs = FxFilesystemBuilder::new()
                 .journal_options(JournalOptions { reclaim_size, ..Default::default() })
@@ -1727,8 +1735,9 @@ mod tests {
                     let root_dir_id = store.root_directory_object_id();
 
                     // Pre-populate `vol_0` (encrypted) and `vol_2` (unencrypted) with > 512 KiB
-                    // (`DEFAULT_RECLAIM_SIZE`) of base-layer metadata so minor compactions keep
-                    // their base layer instead of collapsing into full compactions.
+                    // (`tree::MINOR_COMPACTION_MERGE_THRESHOLD`) of base-layer metadata so minor
+                    // compactions keep their base layer instead of collapsing into full
+                    // compactions.
                     let base_count = if i == 0 || i == 2 { 1400 } else { 0 };
                     for batch in 0..(base_count / 50) {
                         let mut txn = store
@@ -2429,6 +2438,191 @@ mod tests {
             "Funded transaction after sync() should pay for block padding rather than borrowing from metadata_reservation"
         );
 
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_discard_over_block_size_borrows_from_metadata_reservation() {
+        struct WriteObserver {
+            bytes_written: Arc<AtomicUsize>,
+            event: Arc<Event>,
+        }
+        impl Observer for WriteObserver {
+            fn write(&self, _offset: u64, len: usize) {
+                self.bytes_written.fetch_add(len, Ordering::SeqCst);
+                self.event.notify(usize::MAX);
+            }
+        }
+
+        let bytes_written = Arc::new(AtomicUsize::new(0));
+        let event = Arc::new(Event::new());
+        let mut fake_device = FakeDevice::new(8192, 4096);
+        fake_device.set_observer(Box::new(WriteObserver {
+            bytes_written: bytes_written.clone(),
+            event: event.clone(),
+        }));
+
+        let (snapshot, handle_id, end_t1, block_start) = {
+            let fs =
+                FxFilesystem::new_empty(DeviceHolder::new(fake_device)).await.expect("new_empty");
+            let mut transaction = fs
+                .root_store()
+                .new_transaction(lock_keys![], Options::default())
+                .await
+                .expect("txn");
+            let handle = ObjectStore::create_object(
+                &fs.root_store(),
+                &mut transaction,
+                HandleOptions::default(),
+                None,
+            )
+            .await
+            .expect("create_object");
+            transaction.commit().await.expect("commit");
+
+            // Pad and flush the journal to a 4 KiB block boundary without compacting, so
+            // `super_block_header.journal_checkpoint.file_offset` stays 0 and `zero_offset` stays
+            // `None` on remount.
+            let sync_cp = fs
+                .journal()
+                .sync(SyncOptions { flush_device: true, ..Default::default() })
+                .await
+                .expect("sync")
+                .unwrap();
+            let block_start = sync_cp.file_offset.next_multiple_of(4096);
+            bytes_written.store(0, Ordering::SeqCst);
+
+            // Commit `T1` so that it ends in the last 64 bytes of the block
+            // `[block_start, block_start + 4096)`.
+            let mut t1 = fs
+                .root_store()
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        fs.root_store().store_object_id(),
+                        handle.object_id()
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("t1");
+            t1.add(
+                fs.root_store().store_object_id(),
+                Mutation::replace_or_insert_object(
+                    ObjectKey::extended_attribute(handle.object_id(), b"a".to_vec()),
+                    ObjectValue::inline_extended_attribute(vec![0x11; 4040]),
+                ),
+            );
+            t1.commit().await.expect("t1 commit");
+            let end_t1 = fs.object_manager().last_end_offset();
+            let tail_rem = (block_start + 4096) - end_t1;
+            assert!((1..=64).contains(&tail_rem), "expected 1..=64 tail bytes, got {tail_rem}");
+
+            // Commit `T2` across `[block_start, block_start + 8192)` into a third block. Its first
+            // mutation moves replay into the second block, while the tail of its second mutation
+            // and its `Commit` record stay unflushed in memory in the third block.
+            let mut t2 = fs
+                .root_store()
+                .new_transaction(
+                    lock_keys![LockKey::object(
+                        fs.root_store().store_object_id(),
+                        handle.object_id()
+                    )],
+                    Options::default(),
+                )
+                .await
+                .expect("t2");
+            t2.add(
+                fs.root_store().store_object_id(),
+                Mutation::replace_or_insert_object(
+                    ObjectKey::extended_attribute(handle.object_id(), b"b1".to_vec()),
+                    ObjectValue::inline_extended_attribute(vec![0x22; 2100]),
+                ),
+            );
+            t2.add(
+                fs.root_store().store_object_id(),
+                Mutation::replace_or_insert_object(
+                    ObjectKey::extended_attribute(handle.object_id(), b"b2".to_vec()),
+                    ObjectValue::inline_extended_attribute(vec![0x33; 2100]),
+                ),
+            );
+            t2.commit().await.expect("t2 commit");
+
+            while bytes_written.load(Ordering::SeqCst) < 8192 {
+                let listener = event.listen();
+                if bytes_written.load(Ordering::SeqCst) >= 8192 {
+                    break;
+                }
+                listener.await;
+            }
+            assert_eq!(bytes_written.load(Ordering::SeqCst), 8192);
+
+            (fs.device().snapshot().expect("snapshot"), handle.object_id(), end_t1, block_start)
+        };
+
+        let fs = FxFilesystem::open(snapshot).await.expect("open failed");
+        assert_eq!(fs.object_manager().last_end_offset(), end_t1);
+        let discard_gap = (block_start + 8192) - end_t1;
+        assert!(
+            (4097..=4160).contains(&discard_gap),
+            "expected discard gap in 4097..=4160, got {discard_gap}"
+        );
+
+        let borrowed_before = fs.object_manager().borrowed_metadata_space();
+        let mut t3 = fs
+            .root_store()
+            .new_transaction(
+                lock_keys![LockKey::object(fs.root_store().store_object_id(), handle_id)],
+                Options::default(),
+            )
+            .await
+            .expect("t3");
+        t3.add(
+            fs.root_store().store_object_id(),
+            Mutation::merge_object(ObjectKey::object(handle_id), ObjectValue::None),
+        );
+        t3.commit().await.expect("t3 commit");
+
+        let borrowed_after = fs.object_manager().borrowed_metadata_space();
+        assert!(
+            borrowed_after - borrowed_before
+                > super::reserved_space_from_journal_usage(discard_gap),
+            "pre_commit should borrow to absorb > BLOCK_SIZE discard gap ({borrowed_after} vs {borrowed_before})"
+        );
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_reservation_saturation() {
+        assert_eq!(super::reserved_space_from_journal_usage(u64::MAX), u64::MAX);
+        assert_eq!(super::Inner::child_headroom_store_share(u64::MAX), (u64::MAX / 8) * 3,);
+
+        let device = DeviceHolder::new(FakeDevice::new(4096, 4096));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let child_id = {
+            let root_vol = root_volume(fs.clone()).await.expect("root_volume failed");
+            let child = root_vol
+                .new_volume("child", NewChildStoreOptions::default())
+                .await
+                .expect("new_volume failed");
+            child.store_object_id()
+        };
+        fs.journal().force_compact().await.expect("force_compact failed");
+        fs.close().await.expect("close failed");
+
+        let device = fs.take_device().await;
+        device.reopen(false);
+        let fs = FxFilesystemBuilder::new()
+            .journal_options(JournalOptions { reclaim_size: u64::MAX, ..Default::default() })
+            .open(device)
+            .await
+            .expect("open with saturated reclaim_size failed");
+        let om = fs.object_manager();
+        let root_id = om.root_store_object_id();
+        assert_eq!(om.required_reservation(), u64::MAX);
+        assert_eq!(om.tree_reservation(root_id, u64::MAX), u64::MAX);
+        assert_eq!(om.tree_reservation(child_id, u64::MAX), u64::MAX);
+        fs.journal().force_compact().await.expect("force_compact failed");
         fs.close().await.expect("close failed");
     }
 }

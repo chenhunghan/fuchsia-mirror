@@ -1,0 +1,97 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/config/derived:compilation_modes.bzl", "is_debug")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":audio_core_hardware_tests"],
+)
+
+fx_cc_test_binary(
+    name = "audio_core_hardware_tests_bin",
+    srcs = [
+        "audio_core_hardware_test.cc",
+        "audio_core_hardware_test.h",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/fxl/test:test_settings",
+        "//src/media/audio/lib/test:test_fixture",
+        "//zircon/system/ulib/fzl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "audio_core_hardware_tests_packaged_bin",
+    testonly = True,
+    binary = ":audio_core_hardware_tests_bin",
+    binary_name = "audio_core_hardware_tests",
+)
+
+fx_component_manifest(
+    name = "audio_core_hardware_tests_manifest",
+    testonly = True,
+    component_name = "audio_core_hardware_tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/audio_core_hardware_tests.cml",
+)
+
+fx_test_component(
+    name = "audio_core_hardware_tests_component",
+    compiled_manifest = ":audio_core_hardware_tests_manifest",
+    test_type = "system",
+    deps = [":audio_core_hardware_tests_packaged_bin"],
+)
+
+fx_package(
+    name = "audio_core_hardware_tests_package",
+    package_name = "audio_core_hardware_tests",
+    testonly = True,
+    test_components = [":audio_core_hardware_tests_component"],
+)
+
+# This suite has real-time requirements and must run in release builds (debug
+# builds are too slow).
+fx_test(
+    name = "audio_core_hardware_tests",
+    build_only = True if is_debug else select({
+        "//build/bazel/config/variant_features/asan:true": True,
+        "//build/bazel/config/variant_features/hwasan:true": True,
+        "//conditions:default": False,
+    }),
+    # By definition this validates software that requires real audio input
+    # hardware.
+    environments = ["//build/bazel/rules/testing:default_environments"] if is_debug else select({
+        "//build/bazel/config/variant_features/asan:true": ["//build/bazel/rules/testing:default_environments"],
+        "//build/bazel/config/variant_features/hwasan:true": ["//build/bazel/rules/testing:default_environments"],
+        "//conditions:default": [
+            "//build/testing/environments:astro_env",
+            "//build/testing/environments:nelson_env",
+            "//build/testing/environments:sherlock_env",
+        ],
+    }),
+    package = ":audio_core_hardware_tests_package",
+)

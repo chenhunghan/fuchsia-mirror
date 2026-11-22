@@ -15,12 +15,14 @@
 #include <cstddef>
 #include <map>
 #include <ranges>
+#include <sstream>
+#include <string>
 #include <thread>
 
-#include <zxtest/zxtest.h>
-
 #include "../test/safe-zero-construction.h"
+#include "../test/unittest.h"
 #include "stack-abi.h"
+#include "test/UnitTest/MemoryMatcher.h"
 #include "thread-storage-test-utils.h"
 #include "thread-storage.h"
 #include "threads_impl.h"
@@ -67,7 +69,7 @@ class TemporaryVmarForTest {
   PageRoundedSize size_;
 };
 
-class LibcThreadTests : public ::zxtest::Test {
+class LibcThreadTests : public LIBC_NAMESPACE::testing::Test {
  public:
   // Place everything inside a constrained VMAR that's always destroyed at the
   // end of the test, just in case.
@@ -160,7 +162,8 @@ void CheckZeroThread(const Thread* thread) {
     tcb.head.tp = 0;
   }
 
-  EXPECT_BYTES_EQ(&tcb, kZero.data(), kZero.size());
+  EXPECT_MEM_EQ(testing::MemoryView(reinterpret_cast<const char*>(kZero.data()), kZero.size()),
+                testing::MemoryView(reinterpret_cast<const char*>(&tcb), sizeof(tcb)));
 }
 
 void CheckThread(Thread* thread) {
@@ -216,16 +219,17 @@ void CheckStack(std::string_view stack_name, PageRoundedSize stack_size, PageRou
   // Likewise, if guards fault at both ends, proboably in the middle too.
 
   uint64_t* in_guard = Launder(GrowsUp ? sp + stack_words : sp - stack_words - 1);
-  ASSERT_DEATH(DeathByRead(in_guard), "%s sp=%p in_guard=%p", std::string(stack_name).c_str(), sp,
-               in_guard);
-  ASSERT_DEATH(DeathByWrite(in_guard), "%s sp=%p in_guard=%p", std::string(stack_name).c_str(), sp,
-               in_guard);
+  {
+    SCOPED_TRACE(std::string(stack_name));
+    ASSERT_DEATH(DeathByRead(in_guard));
+    ASSERT_DEATH(DeathByWrite(in_guard));
 
-  const size_t guard_words = guard_size.get() / sizeof(uint64_t);
-  uint64_t* far_in_guard =
-      Launder(GrowsUp ? sp + stack_words + guard_words - 1 : stack.data() - guard_words);
-  ASSERT_DEATH(DeathByRead(far_in_guard), "%s", std::string(stack_name).c_str());
-  ASSERT_DEATH(DeathByWrite(far_in_guard), "%s", std::string(stack_name).c_str());
+    const size_t guard_words = guard_size.get() / sizeof(uint64_t);
+    uint64_t* far_in_guard =
+        Launder(GrowsUp ? sp + stack_words + guard_words - 1 : stack.data() - guard_words);
+    ASSERT_DEATH(DeathByRead(far_in_guard));
+    ASSERT_DEATH(DeathByWrite(far_in_guard));
+  }
 }
 
 void CheckStorage(PageRoundedSize stack_size, PageRoundedSize guard_size,
@@ -303,7 +307,7 @@ void CheckVmoName(zx::unowned_vmar vmar, std::string_view expected_name, zx_vadd
   const zx_info_vmo_t& vmo_info = vmo->second;
   std::string_view vmo_name{vmo_info.name, std::size(vmo_info.name)};
   vmo_name = vmo_name.substr(0, vmo_name.find_first_of('\0'));
-  EXPECT_STREQ(std::string{expected_name}, std::string{vmo_name});
+  EXPECT_EQ(expected_name, vmo_name);
 }
 
 TEST_F(LibcThreadTests, ThreadStorage) {
@@ -322,7 +326,7 @@ TEST_F(LibcThreadTests, ThreadStorage) {
 
   // Allocate the most basic layout: one-page stacks, one-page guards.
   auto result = storage.Allocate(CreateHandles(), kVmoName, kOnePage, kOnePage);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
 
   CheckVmoName(TestVmar(), kVmoName, reinterpret_cast<uintptr_t>(*result));
 
@@ -343,7 +347,7 @@ TEST_F(LibcThreadTests, ThreadStorageBigStack) {
   ThreadStorage storage;
 
   auto result = storage.Allocate(CreateHandles(), kVmoName, kManyPages, kOnePage);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
   CheckStorage(kManyPages, kOnePage, storage, *result);
 }
 
@@ -351,7 +355,7 @@ TEST_F(LibcThreadTests, ThreadStorageBigGuard) {
   ThreadStorage storage;
 
   auto result = storage.Allocate(CreateHandles(), kVmoName, kOnePage, kManyPages);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
   CheckStorage(kOnePage, kManyPages, storage, *result);
 }
 
@@ -366,7 +370,7 @@ TEST_F(LibcThreadTests, ThreadStorageNoGuard) {
   // the minimal one is three pages.
   const PageRoundedSize vmar_size = *PageRoundedSize::Pages(kStackCount + 3);
   auto result = storage.Allocate(CreateHandles(vmar_size), kVmoName, kOnePage, kNoGuard);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
 }
 
 TEST_F(LibcThreadTests, ThreadStorageTls) {
@@ -376,7 +380,7 @@ TEST_F(LibcThreadTests, ThreadStorageTls) {
       kTlsStart + sizeof(uint32_t),
       sizeof(uint32_t),
   };
-  constexpr ptrdiff_t kTlsBias =
+  static constexpr ptrdiff_t kTlsBias =
       static_cast<ptrdiff_t>(kTlsStart) -
       (TlsTraits::kTlsNegative ? static_cast<ptrdiff_t>(kTrivialLayout.size_bytes()) : 0);
 
@@ -401,7 +405,7 @@ TEST_F(LibcThreadTests, ThreadStorageTls) {
 
   ThreadStorage storage;
   auto result = storage.Allocate(CreateHandles(), kVmoName, kOnePage, kOnePage);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
   CheckStorage(kOnePage, kOnePage, storage, *result);
 
   void* tp = pthread_to_tp(*result);
@@ -438,7 +442,7 @@ TEST_F(LibcThreadTests, ThreadStorageTlsAlignment) {
 
   ThreadStorage storage;
   auto result = storage.Allocate(CreateHandles(), kVmoName, kOnePage, kOnePage);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
   CheckStorage(kOnePage, kOnePage, storage, *result);
 }
 
@@ -470,7 +474,7 @@ TEST_F(LibcThreadTests, ThreadStorageTlsReal) {
 
     ThreadStorage storage;
     auto result = storage.Allocate(CreateHandles(), kVmoName, kOnePage, kOnePage);
-    ASSERT_TRUE(result.is_ok()) << result.status_string();
+    ASSERT_OK(result);
     CheckStorage(kOnePage, kOnePage, storage, *result);
 
     void* tp = pthread_to_tp(*result);
@@ -530,7 +534,7 @@ TEST_F(LibcThreadTests, ThreadStorageCreateHandles) {
 
   ThreadStorage storage;
   auto result = storage.Allocate(handles, kVmoName, kOnePage, kOnePage);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
   CheckStorage(kOnePage, kOnePage, storage, *result);
 
   CheckVmar("thread block", thread_block.vmar().borrow(), storage.thread_block());
@@ -559,7 +563,7 @@ void CheckThreadBlockForLayout(const TlsLayout& layout, thrd_zx_create_handles_t
 
   ThreadStorage storage;
   auto result = storage.Allocate(handles, kVmoName, kOnePage, kOnePage);
-  ASSERT_TRUE(result.is_ok()) << result.status_string();
+  ASSERT_OK(result);
   CheckStorage(kOnePage, kOnePage, storage, *result);
 
   // The entire block should be valid. CheckStorage eventually checks the TCB portion.
@@ -575,7 +579,7 @@ void CheckThreadBlockForLayout(const TlsLayout& layout, thrd_zx_create_handles_t
   EXPECT_EQ(ld::TpRelative(-found_tp_offset, pthread_to_tp(*result)), found_thread_block.data())
       << "Expected the tp offset to point to the start of the thread block";
 
-  ASSERT_EQ(found_thread_block.size() % kOnePage.get(), 0);
+  ASSERT_EQ(found_thread_block.size() % kOnePage.get(), 0u);
   EXPECT_GE(found_thread_block.size(), layout.size_bytes())
       << "Insufficient block size to hold the full TLS layout";
 }

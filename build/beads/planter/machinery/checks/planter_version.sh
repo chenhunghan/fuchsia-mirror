@@ -8,7 +8,7 @@ set -euo pipefail
 # Blocks the gate when the planter running these checks is too old for them.
 #
 # These checks rely on planter fixing diffengine false positives itself
-# (google3 cl/1010931533) and honoring finding waivers (cl/1010931925). An older
+# (cl/1010931533) and honoring finding waivers (cl/1010931925). An older
 # planter runs them without complaint but raises blocking findings it should
 # not. Planter exports PLANTER_RESOLVED_CHANGE_BASE to every check from
 # cl/1010931925 on and older planters never do, so its absence in a check that
@@ -19,10 +19,17 @@ set -euo pipefail
 # manifest.json. This check covers the planters that predate that field; delete
 # it once none of them are in use.
 
+# Verify that the running planter binary exports PLANTER_RESOLVED_CHANGE_BASE.
+emit_planter_too_old() {
+  local msg="$1"
+  printf '[{"category":"planter_too_old","severity":"ERROR","message":"%s"}]\n' "$msg"
+}
+
 if [[ -n "${PLANTER_CHECK_NAME:-}" && -z "${PLANTER_RESOLVED_CHANGE_BASE+set}" ]]; then
-  cat <<'JSON'
-[{"category":"planter_too_old","severity":"ERROR","message":"This planter is too old for the checks in build/beads/planter/machinery: it will raise false-positive blocking findings and ignore waivers. Sync google3 to cl/1010931925 or later, rebuild planter, and rerun."}]
-JSON
+  MSG="This planter is too old for the checks in build/beads/planter/machinery: "
+  MSG+="it will raise false-positive blocking findings and ignore waivers. "
+  MSG+="Sync to cl/1010931925 or later, rebuild planter, and rerun."
+  emit_planter_too_old "$MSG"
 else
   echo '[]'
 fi

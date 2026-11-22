@@ -37,6 +37,28 @@ pub fn trace_fs(
     Ok(handle.0.clone())
 }
 
+// Stub tracepoint IDs exposed under `/sys/kernel/tracing/events/<group>/<event>/id` for
+// `perf_event_open(PERF_TYPE_TRACEPOINT)` and eBPF tracepoint attachment (`bpf_attach_tracepoint()`).
+//
+// Note: These tracepoint IDs are only stubs for `perf_event_open` and eBPF attachment; Starnix
+// does not emit kernel trace events for them.
+const STUB_TRACEPOINT_EVENTS: &[(&str, &str, &[u8])] = &[
+    // Probed by the SELinux `perf_event` testsuite.
+    ("ftrace", "function", b"1\n"),
+    // Standard Linux mm/oom tracepoints used by Android `libmemevents` and `lmkd`.
+    ("vmscan", "mm_vmscan_direct_reclaim_begin", b"10\n"),
+    ("vmscan", "mm_vmscan_direct_reclaim_end", b"11\n"),
+    ("vmscan", "mm_vmscan_kswapd_wake", b"12\n"),
+    ("vmscan", "mm_vmscan_kswapd_sleep", b"13\n"),
+    ("oom", "mark_victim", b"16\n"),
+    // Android GKI vendor hook and Android Common Kernel tracepoints used by `libmemevents`
+    // and `lmkd`.
+    ("android_vendor_lmk", "android_trigger_vendor_lmk_kill", b"14\n"),
+    ("kmem", "mm_calculate_totalreserve_pages", b"15\n"),
+    // Probed by SELinux `perf_event` userspace tests.
+    ("sched", "sched_switch", b"17\n"),
+];
+
 pub struct TraceFs;
 
 impl FileSystemOps for TraceFs {
@@ -85,18 +107,20 @@ impl TraceFs {
                     dir.subdir("print", 0o755, |dir| {
                         dir.entry("format", FtracePrintFormatFile::new_node(), mode!(IFREG, 0o444));
                     });
-                    if kernel.features.selinux_test_suite {
-                        // Necessary for the perf_event SELinux testsuite case.
-                        // See https://fxbug.dev/398663320.
-                        dir.subdir("function", 0o755, |dir| {
+                });
+                // Populate stub `<group>/<event>/id` files for `perf_event_open` and eBPF
+                // attachment. Starnix does not emit kernel trace events for these tracepoints.
+                for &(group, event, id_bytes) in STUB_TRACEPOINT_EVENTS {
+                    dir.subdir(group, 0o755, |dir| {
+                        dir.subdir(event, 0o755, |dir| {
                             dir.entry(
                                 "id",
-                                BytesFile::new_node(b"1\n".to_vec()),
+                                BytesFile::new_node(id_bytes.to_vec()),
                                 mode!(IFREG, 0o444),
                             );
                         });
-                    }
-                });
+                    });
+                }
                 dir.entry("enable", TraceBytesFile::new_node(), mode!(IFREG, 0o755));
             });
             dir.subdir("options", 0o755, |dir| {
@@ -321,6 +345,59 @@ mod tests {
     use starnix_uapi::auth::FsCred;
     use starnix_uapi::file_mode::mode;
     use starnix_uapi::open_flags::OpenFlags;
+    use std::collections::HashSet;
+
+    #[::fuchsia::test]
+    async fn test_stub_tracepoint_event_ids() {
+        spawn_kernel_and_run(async move |current_task| {
+            let fs = TraceFs::new_fs(current_task, FileSystemOptions::default())
+                .expect("create tracefs");
+            let root_dir = fs
+                .root()
+                .node
+                .downcast_ops::<Arc<SimpleDirectory>>()
+                .expect("tracefs root is a SimpleDirectory");
+
+            assert!(
+                root_dir.lookup("events/ftrace/print/format".into()).is_some(),
+                "events/ftrace/print/format must remain present alongside ftrace stub events"
+            );
+
+            // Seed with ID 5, which is used by `events/ftrace/print/format` (`FtracePrintFormatFile`).
+            let mut seen_ids = HashSet::from([5]);
+            for &(group, event, expected_id_bytes) in STUB_TRACEPOINT_EVENTS {
+                let relative_path = format!("events/{group}/{event}/id");
+                let node = root_dir
+                    .lookup(relative_path.as_str().into())
+                    .unwrap_or_else(|| panic!("missing tracefs stub node {relative_path}"));
+                assert_eq!(node.info().mode, mode!(IFREG, 0o444));
+
+                let namespace_node = NamespaceNode::new_anonymous_unrooted(current_task, node);
+                let file = namespace_node
+                    .open(current_task, OpenAccessCheck::skip(OpenFlags::RDONLY))
+                    .expect("open tracepoint id node");
+                let mut buffer = VecOutputBuffer::new(32);
+                let bytes_read =
+                    file.read(current_task, &mut buffer).expect("read tracepoint id node");
+                let actual_bytes = &buffer.data()[..bytes_read];
+                assert_eq!(actual_bytes, expected_id_bytes, "mismatch for {relative_path}");
+
+                let id_str =
+                    std::str::from_utf8(actual_bytes).expect("tracepoint id is valid utf8");
+                let parsed_id: u64 = id_str
+                    .strip_suffix('\n')
+                    .expect("tracepoint id ends with newline")
+                    .parse()
+                    .expect("tracepoint id is a positive integer");
+                assert!(parsed_id > 0, "tracepoint id must be positive for {relative_path}");
+                assert!(
+                    seen_ids.insert(parsed_id),
+                    "duplicate tracepoint id {parsed_id} for {relative_path}"
+                );
+            }
+        })
+        .await;
+    }
 
     #[::fuchsia::test]
     async fn test_events_header_page_size() {
@@ -389,8 +466,8 @@ mod tests {
             assert!(!has_active_syscall_trace_for_testing());
 
             // 2. When enabled, small writes (<= 128 bytes) use the inline SmallVec buffer,
-            // and large writes (> 128 bytes) spill to the heap. Write enough events across
-            // the per-CPU queues to overflow a full page on queue 0 so we can read it back.
+            // and large writes (> 128 bytes) spill to the heap. A single small write per CPU
+            // is readable immediately from the partial tail page without waiting for overflow.
             // Each write while enabled must end the syscall's trace duration before pushing the
             // event to the ring buffer.
             event_queue_collection.enable().expect("enable queue");
@@ -406,6 +483,22 @@ mod tests {
                     "enabled trace_marker write must end the syscall trace duration before push_event"
                 );
             }
+            let mut partial_buf = VecOutputBuffer::new(*PAGE_SIZE as usize);
+            let partial_read = event_queue_collection.queues[0]
+                .read(&mut partial_buf)
+                .expect("read partial tail page from queue 0");
+            assert_eq!(partial_read, *PAGE_SIZE as usize);
+            let partial_page = partial_buf.data();
+            let data_size = u64::from_le_bytes(partial_page[8..16].try_into().unwrap()) as usize;
+            assert!(data_size > 0 && 16 + data_size <= partial_page.len());
+            assert!(
+                partial_page[16..16 + data_size]
+                    .windows(b"B|1234|activityStart\n".len())
+                    .any(|w| w == b"B|1234|activityStart\n")
+            );
+            let mut empty_buf = VecOutputBuffer::new(*PAGE_SIZE as usize);
+            assert_eq!(event_queue_collection.queues[0].read(&mut empty_buf), error!(EAGAIN));
+
             let large_payload = vec![b'x'; 768];
             for _ in 0..(6 * num_cpus) {
                 let mut large_buf = VecInputBuffer::new(&large_payload);
@@ -421,11 +514,6 @@ mod tests {
                 .expect("read full page from queue 0");
             assert_eq!(bytes_read, *PAGE_SIZE as usize);
             let page_data = read_buf.data();
-            assert!(
-                page_data
-                    .windows(b"B|1234|activityStart\n".len())
-                    .any(|w| w == b"B|1234|activityStart\n")
-            );
             assert!(page_data.windows(large_payload.len()).any(|w| w == large_payload.as_slice()));
             event_queue_collection.disable().expect("disable queue after test");
         })

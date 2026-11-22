@@ -1,4 +1,4 @@
-[#](#) Tutorial: Debug tests using zxdb
+# Tutorial: Debug tests using zxdb
 
 This tutorial walks through a debugging workflow using the `fx test` command
 and the Fuchsia debugger (`zxdb`).

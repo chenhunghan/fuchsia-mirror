@@ -18,6 +18,8 @@ use speedtest_fdomain::client;
 use target_holders::RemoteControlProxyHolder;
 
 #[derive(FfxTool)]
+// Always requires a target (deferred only to reject the removed --overnet flag first).
+#[target(Required)]
 pub struct SpeedtestTool {
     remote_control: Deferred<RemoteControlProxyHolder>,
     #[command]

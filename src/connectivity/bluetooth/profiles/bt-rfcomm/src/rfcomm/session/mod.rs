@@ -2788,4 +2788,208 @@ mod tests {
             expected_fcon_response,
         );
     }
+
+    #[track_caller]
+    fn send_raw_bytes(exec: &mut fasync::TestExecutor, remote: &mut Channel, bytes: Vec<u8>) {
+        let mut write_fut = pin!(remote.send(bytes));
+        exec.run_until_stalled(&mut write_fut)
+            .expect("write should complete")
+            .expect("write should succeed");
+    }
+
+    #[track_caller]
+    fn expect_peer_frame_with_role(
+        exec: &mut fasync::TestExecutor,
+        remote: &mut Channel,
+        sender_role: Role,
+    ) -> Frame {
+        let bytes = exec
+            .run_until_stalled(&mut remote.next())
+            .expect("frame ready")
+            .expect("some bytes")
+            .expect("ok bytes");
+        Frame::parse(sender_role, /* credit_based_flow= */ false, &bytes).expect("valid frame")
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn inbound_malformed_four_byte_uih_frame_does_not_crash_session(transport: Transport) {
+        let mut exec = fasync::TestExecutor::new();
+
+        let (local, mut remote) = create_test_channels(transport);
+        let (channel_open_fn, _inbound_channels) = create_inbound_relay();
+        let session = Session::create(PeerId(1), local, channel_open_fn);
+
+        let mut terminated_fut = session.finished();
+        exec.run_until_stalled(&mut terminated_fut)
+            .expect_pending("session should remain active while remote is live");
+
+        // Peer initiates multiplexer startup with raw SABM(0), transitioning Session to
+        // Role::Responder where credit_based_flow() defaults to true.
+        send_raw_bytes(&mut exec, &mut remote, vec![0x03, 0x3F, 0x01, 0x1C]);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        let ua = expect_peer_frame_with_role(&mut exec, &mut remote, Role::Responder);
+        assert_eq!(ua.dlci, DLCI::MUX_CONTROL_DLCI);
+        assert_eq!(ua.data, FrameData::UnnumberedAcknowledgement);
+        {
+            let mut lock_fut = pin!(session.inner.lock());
+            let inner = exec.run_until_stalled(&mut lock_fut).expect("session lock ready");
+            assert_eq!(inner.role(), Role::Responder);
+            assert!(inner.credit_based_flow());
+        }
+
+        // Peer sends crafted 4-byte 2-octet-length UIH frames with P/F=1 on user DLCIs.
+        // Previously this triggered an OOB panic in Frame::parse when reading the credit octet.
+        for malformed in [
+            vec![0x08, 0xFF, 0x00, 0x00],
+            vec![0x0B, 0xFF, 0x00, 0x00],
+            vec![0xF7, 0xFF, 0xFE, 0xFF],
+        ] {
+            send_raw_bytes(&mut exec, &mut remote, malformed);
+            let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+            exec.run_until_stalled(&mut terminated_fut)
+                .expect_pending("session must stay alive after malformed 4-byte UIH frame");
+            exec.run_until_stalled(&mut remote.next())
+                .expect_pending("no response should be sent for BufferTooSmall parse error");
+        }
+
+        // Verify the session remains healthy and responsive to subsequent valid frames.
+        let test_params = TestCommandParams { test_pattern: vec![0xDE, 0xAD, 0xBE, 0xEF] };
+        let test_cmd = Frame::make_mux_command(
+            Role::Initiator,
+            MuxCommand {
+                params: MuxCommandParams::Test(test_params.clone()),
+                command_response: CommandResponse::Command,
+            },
+        );
+        send_peer_frame(&mut exec, &mut remote, test_cmd);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        let response = expect_peer_frame_with_role(&mut exec, &mut remote, Role::Responder);
+        assert_eq!(
+            response.data,
+            FrameData::UnnumberedInfoHeaderCheck(UIHData::Mux(MuxCommand {
+                params: MuxCommandParams::Test(test_params),
+                command_response: CommandResponse::Response,
+            }))
+        );
+        exec.run_until_stalled(&mut terminated_fut)
+            .expect_pending("session should still be active after Test command");
+
+        // Peer cleanly terminates the session with DISC(0).
+        send_peer_frame(
+            &mut exec,
+            &mut remote,
+            Frame::make_disc_command(Role::Initiator, DLCI::MUX_CONTROL_DLCI),
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        if matches!(transport, Transport::Socket) {
+            // `peer_processing_task` uses synchronous `Channel::write` on sockets, whereas
+            // `FidlClientConnection::write` flushes asynchronously and may be cancelled when
+            // `peer_processing_task` drops `l2cap_channel` upon exiting.
+            let disc_ua = expect_peer_frame_with_role(&mut exec, &mut remote, Role::Responder);
+            assert_eq!(disc_ua.dlci, DLCI::MUX_CONTROL_DLCI);
+            assert_eq!(disc_ua.data, FrameData::UnnumberedAcknowledgement);
+        }
+        exec.run_until_stalled(&mut terminated_fut)
+            .expect("session should terminate cleanly after DISC(0)");
+        let mut remote_closed_fut = pin!(remote.closed());
+        let _ = exec
+            .run_until_stalled(&mut remote_closed_fut)
+            .expect("L2CAP channel should be closed after DISC(0)");
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn outbound_malformed_four_byte_uih_frame_does_not_crash_session(transport: Transport) {
+        let mut exec = fasync::TestExecutor::new();
+
+        let (local, mut remote) = create_test_channels(transport);
+        let (channel_open_fn, _inbound_channels) = create_inbound_relay();
+        let session = Session::create(PeerId(2), local, channel_open_fn);
+
+        let mut terminated_fut = session.finished();
+        exec.run_until_stalled(&mut terminated_fut)
+            .expect_pending("session should remain active while remote is live");
+
+        // Local initiates multiplexer startup with SABM(0).
+        {
+            let mut start_fut = pin!(session.initiate_multiplexer_startup());
+            exec.run_until_stalled(&mut start_fut).expect("startup initiation should complete");
+        }
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        let sabm = expect_peer_frame_with_role(&mut exec, &mut remote, Role::Unassigned);
+        assert_eq!(sabm.dlci, DLCI::MUX_CONTROL_DLCI);
+        assert_eq!(sabm.data, FrameData::SetAsynchronousBalancedMode);
+
+        // Peer responds with raw UA(0), transitioning Session to Role::Initiator where
+        // credit_based_flow() defaults to true.
+        send_raw_bytes(&mut exec, &mut remote, vec![0x03, 0x73, 0x01, 0xD7]);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        {
+            let mut lock_fut = pin!(session.inner.lock());
+            let inner = exec.run_until_stalled(&mut lock_fut).expect("session lock ready");
+            assert_eq!(inner.role(), Role::Initiator);
+            assert!(inner.credit_based_flow());
+        }
+
+        // Peer sends crafted 4-byte 2-octet-length UIH frames with P/F=1 on user DLCIs.
+        for malformed in [
+            vec![0x08, 0xFF, 0x00, 0x00],
+            vec![0x0B, 0xFF, 0x00, 0x00],
+            vec![0xF7, 0xFF, 0xFE, 0xFF],
+        ] {
+            send_raw_bytes(&mut exec, &mut remote, malformed);
+            let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+            exec.run_until_stalled(&mut terminated_fut)
+                .expect_pending("session must stay alive after malformed 4-byte UIH frame");
+            exec.run_until_stalled(&mut remote.next())
+                .expect_pending("no response should be sent for BufferTooSmall parse error");
+        }
+
+        // Verify the session remains healthy and responsive to subsequent valid frames.
+        let test_params = TestCommandParams { test_pattern: vec![0xCA, 0xFE, 0xBA, 0xBE] };
+        let test_cmd = Frame::make_mux_command(
+            Role::Responder,
+            MuxCommand {
+                params: MuxCommandParams::Test(test_params.clone()),
+                command_response: CommandResponse::Command,
+            },
+        );
+        send_peer_frame(&mut exec, &mut remote, test_cmd);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        let response = expect_peer_frame_with_role(&mut exec, &mut remote, Role::Initiator);
+        assert_eq!(
+            response.data,
+            FrameData::UnnumberedInfoHeaderCheck(UIHData::Mux(MuxCommand {
+                params: MuxCommandParams::Test(test_params),
+                command_response: CommandResponse::Response,
+            }))
+        );
+        exec.run_until_stalled(&mut terminated_fut)
+            .expect_pending("session should still be active after Test command");
+
+        // Peer cleanly terminates the session with DISC(0).
+        send_peer_frame(
+            &mut exec,
+            &mut remote,
+            Frame::make_disc_command(Role::Responder, DLCI::MUX_CONTROL_DLCI),
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        if matches!(transport, Transport::Socket) {
+            // `peer_processing_task` uses synchronous `Channel::write` on sockets, whereas
+            // `FidlClientConnection::write` flushes asynchronously and may be cancelled when
+            // `peer_processing_task` drops `l2cap_channel` upon exiting.
+            let disc_ua = expect_peer_frame_with_role(&mut exec, &mut remote, Role::Initiator);
+            assert_eq!(disc_ua.dlci, DLCI::MUX_CONTROL_DLCI);
+            assert_eq!(disc_ua.data, FrameData::UnnumberedAcknowledgement);
+        }
+        exec.run_until_stalled(&mut terminated_fut)
+            .expect("session should terminate cleanly after DISC(0)");
+        let mut remote_closed_fut = pin!(remote.closed());
+        let _ = exec
+            .run_until_stalled(&mut remote_closed_fut)
+            .expect("L2CAP channel should be closed after DISC(0)");
+    }
 }

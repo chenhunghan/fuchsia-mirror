@@ -7,6 +7,8 @@
 #include <lib/zx/debuglog.h>
 #include <lib/zx/event.h>
 #include <lib/zx/interrupt.h>
+#include <lib/zx/job.h>
+#include <lib/zx/process.h>
 #include <lib/zx/resource.h>
 #include <lib/zx/vmar.h>
 #include <lib/zx/vmo.h>
@@ -36,35 +38,34 @@ const zx::unowned_resource get_mmio() { return standalone::GetMmioResource(); }
 const zx::unowned_resource get_system() { return standalone::GetSystemResource(); }
 
 // Physical memory is reserved during boot and its location varies based on
-// system and architecture. What this 'test' does is scan MMIO space looking
-// for a valid region to test against, ensuring that the only errors it sees
-// are 'ZX_ERR_NOT_FOUND', which indicates that it is missing from the
-// region allocator.
+// system and architecture. Scan MMIO space in 4 GiB steps for the first region
+// the root MMIO resource allows, ensuring the only errors seen are
+// ZX_ERR_NOT_FOUND (missing from the region allocator) or
+// ZX_ERR_ACCESS_DENIED (RAM or another kernel-reserved range).
 //
 // TODO(https://fxbug.dev/42107339): Figure out a way to test IRQs in the same manner, without
 // hardcoding target-specific IRQ vectors in these tests. That information is
 // stored in the kernel and is not exposed to userspace, so we can't simply
 // guess/probe valid vectors like we can MMIO and still assume the tests are
 // valid.
-
-TEST(Resource, ProbeAddressSpace) {
-  zx_status_t status;
-  // Scan mmio in chunks until we find a gap that isn't exclusively reserved physical memory.
-  uint64_t step = 0x100000000;
-  for (uint64_t base = 0; base < UINT64_MAX - step; base += step) {
+static zx_status_t FindMmioTestBase(uint64_t* out_base) {
+  constexpr uint64_t kStep = 0x100000000;
+  for (uint64_t base = 0; base < UINT64_MAX - kStep; base += kStep) {
     zx::resource handle;
-    status = zx::resource::create(*get_mmio(), ZX_RSRC_KIND_MMIO, base, mmio_test_size, NULL, 0,
-                                  &handle);
+    zx_status_t status = zx::resource::create(*get_mmio(), ZX_RSRC_KIND_MMIO, base, mmio_test_size,
+                                              nullptr, 0, &handle);
     if (status == ZX_OK) {
-      mmio_test_base = base;
-      break;
+      *out_base = base;
+      return ZX_OK;
     }
-
-    // If ZX_OK wasn't returned, then we should see either ZX_ERR_NOT_FOUND or
-    // ZX_ERR_ACCESS_DENIED.
-    ASSERT_TRUE(status == ZX_ERR_NOT_FOUND || status == ZX_ERR_ACCESS_DENIED);
+    if (status != ZX_ERR_NOT_FOUND && status != ZX_ERR_ACCESS_DENIED) {
+      return status;
+    }
   }
+  return ZX_ERR_NOT_FOUND;
 }
+
+TEST(Resource, ProbeAddressSpace) { ASSERT_OK(FindMmioTestBase(&mmio_test_base)); }
 
 // This is a basic smoketest for creating resources and verifying the internals
 // returned by zx_object_get_info match what the caller passed for creation.
@@ -232,6 +233,92 @@ TEST(Resource, VmoReplaceAsExecutable) {
   ASSERT_EQ(ZX_OK, zx_handle_duplicate(vmo.get(), ZX_RIGHT_READ, vmo2.reset_and_get_address()));
   EXPECT_EQ(ZX_ERR_WRONG_TYPE,
             zx_vmo_replace_as_executable(vmo2.release(), vmo.get(), vmo3.reset_and_get_address()));
+}
+
+// Maps one page at |paddr| executable into |vmar| through both kernel paths that used
+// to dereference the physmap alias of the backing page (https://fxbug.dev/505914854):
+//   (1) zx_vmar_map(ZX_VM_PERM_READ | ZX_VM_PERM_EXECUTE | ZX_VM_MAP_RANGE), which
+//       populates the page tables inside the syscall -> ArchVmAspace::Map, and
+//   (2) zx_vmar_map(ZX_VM_PERM_READ | ZX_VM_MAP_RANGE) + zx_vmar_protect(READ | EXECUTE)
+//       on the populated mapping -> ArchVmAspace::Protect.
+// |vmar| must belong to a process that is never started: |paddr| is not RAM, so any
+// access to it, even a speculative one from a CPU running that address space, could
+// fault or raise an asynchronous bus error on real hardware.
+// Sets |*out_status| to the status of the VMO creation or the first executable map;
+// nothing further is attempted on failure so callers can decide which failures are
+// acceptable for |paddr|. Every other step must succeed and is asserted in place, so
+// callers must wrap this call in ASSERT_NO_FATAL_FAILURE.
+static void MapNonRamPageExecutable(const zx::vmar& vmar, uint64_t paddr, zx_status_t* out_status) {
+  *out_status = ZX_ERR_INTERNAL;
+  const size_t page_size = zx_system_get_page_size();
+
+  zx::vmo vmo;
+  zx_status_t status = zx::vmo::create_physical(*get_mmio(), paddr, page_size, &vmo);
+  if (status != ZX_OK) {
+    *out_status = status;
+    return;
+  }
+  // Physical VMOs default to uncached, and arm64 refuses executable mappings that are
+  // not cached. The policy can only change while the VMO has no mappings.
+  ASSERT_OK(vmo.set_cache_policy(ZX_CACHE_POLICY_CACHED));
+
+  zx::resource vmex;
+  ASSERT_OK(zx::resource::create(*get_system(), ZX_RSRC_KIND_SYSTEM, ZX_RSRC_SYSTEM_VMEX_BASE, 1,
+                                 nullptr, 0, &vmex));
+  zx::vmo exec_vmo;
+  ASSERT_OK(vmo.replace_as_executable(vmex, &exec_vmo));
+
+  zx_vaddr_t addr = 0;
+  status = vmar.map(ZX_VM_PERM_READ | ZX_VM_PERM_EXECUTE | ZX_VM_MAP_RANGE, 0, exec_vmo, 0,
+                    page_size, &addr);
+  if (status != ZX_OK) {
+    *out_status = status;
+    return;
+  }
+  ASSERT_OK(vmar.unmap(addr, page_size));
+
+  ASSERT_OK(vmar.map(ZX_VM_PERM_READ | ZX_VM_MAP_RANGE, 0, exec_vmo, 0, page_size, &addr));
+  ASSERT_OK(vmar.protect(ZX_VM_PERM_READ | ZX_VM_PERM_EXECUTE, addr, page_size));
+  ASSERT_OK(vmar.unmap(addr, page_size));
+  *out_status = ZX_OK;
+}
+
+// Regression test for https://fxbug.dev/505914854: making a non-RAM physical VMO
+// executable panicked the kernel because the instruction cache sync assumed every
+// mapped page has a physmap alias.
+TEST(Resource, NonRamPhysicalVmoExecutableMapping) {
+  if (!get_mmio()->is_valid() || !get_system()->is_valid()) {
+    ZXTEST_SKIP("MMIO or system resource not available");
+  }
+
+  // The root MMIO resource denies all RAM, so whatever the probe finds has no physmap
+  // alias. Probe here instead of relying on Resource.ProbeAddressSpace having run first,
+  // which is not the case under --gtest_filter.
+  uint64_t base = 0;
+  ASSERT_OK(FindMmioTestBase(&base));
+
+  // Map into a process that is never started, so its address space is never active on
+  // any CPU and nothing can touch the non-RAM pages, not even speculatively.
+  constexpr char kProcessName[] = "nonram-exec";
+  zx::process process;
+  zx::vmar vmar;
+  ASSERT_OK(zx::process::create(*zx::job::default_job(), kProcessName, sizeof(kProcessName) - 1, 0,
+                                &process, &vmar));
+
+  zx_status_t status = ZX_ERR_INTERNAL;
+  ASSERT_NO_FATAL_FAILURE(MapNonRamPageExecutable(vmar, base, &status));
+  ASSERT_OK(status);
+
+  // The address from the bug report, far above the end of RAM, takes the kernel's
+  // "beyond the physmap" branch rather than the "inside the physmap range but not
+  // mapped" one. Not every platform can reach it: the root MMIO resource may deny it
+  // with ZX_ERR_ACCESS_DENIED, and x64 rejects physical addresses wider than the CPU
+  // supports with ZX_ERR_INVALID_ARGS. Success or either of those is acceptable; what
+  // must not happen is a kernel panic.
+  constexpr uint64_t kBeyondRamPaddr = 0xFFFFFF0000;
+  ASSERT_NO_FATAL_FAILURE(MapNonRamPageExecutable(vmar, kBeyondRamPaddr, &status));
+  EXPECT_TRUE(status == ZX_OK || status == ZX_ERR_ACCESS_DENIED || status == ZX_ERR_INVALID_ARGS,
+              "status %d", status);
 }
 
 TEST(Resource, CreateResourceSlice) {

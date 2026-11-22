@@ -367,8 +367,7 @@ impl<I: IoApic> InterruptManager<I> {
         // to obtain the bootstrap processor's APIC ID.
         let bsp_id = unsafe { apic_bsp_id() }; // Dest ID == the BSP APIC ID
         tgt_addr |= (bsp_id as u64) << 12;
-        tgt_addr |= 0x08; // Redir hint == 1
-        tgt_addr &= !0x04; // Dest Mode == Physical
+        // Dest Mode == Physical (bit 2 = 0), Redirection Hint == 0 (bit 3 = 0).
 
         // Compute the target data.
         // See section 10.11.2 of the Intel 64 and IA-32 Architectures Software
@@ -751,5 +750,20 @@ mod pc_interrupt_tests {
             fields.handler_allocated.clear(platform_base, platform_base + 1).unwrap();
             fields.handler_allocated.clear(platform_base + 34, platform_base + 35).unwrap();
         }
+    }
+
+    /// Test that MSI allocation uses physical destination mode with redirection hint cleared.
+    #[test]
+    fn test_msi_alloc_target_addr() {
+        let im = get_test_im();
+        im.reset();
+        let _ = im.init();
+
+        let mut block = unwrap_ok!(im.msi_alloc_block(1, false, true));
+        // SAFETY: `apic_bsp_id` is safe to call after APIC initialization.
+        let bsp_id = unsafe { super::apic_bsp_id() };
+        expect_eq!(block.tgt_addr, 0xFEE00000u64 | ((bsp_id as u64) << 12));
+        expect_eq!(block.tgt_addr & 0x0c, 0u64);
+        im.msi_free_block(&mut block);
     }
 }

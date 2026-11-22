@@ -4,7 +4,9 @@
 
 #include "src/devices/usb/drivers/aml-usb-phy/aml-usb-phy.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <lib/async_patterns/testing/cpp/dispatcher_bound.h>
+#include <lib/driver/fake-mmio-reg/cpp/fake-mmio-reg.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 #include <lib/zx/clock.h>
@@ -12,7 +14,7 @@
 
 #include <string>
 
-#include <fake-mmio-reg/fake-mmio-reg.h>
+#include <bind/fuchsia/cpp/bind.h>
 #include <gtest/gtest.h>
 #include <soc/aml-common/aml-registers.h>
 
@@ -57,7 +59,7 @@ class FakeMmio {
   uint64_t reg_values_[kRegisterCount] = {0};
 
  private:
-  ddk_fake::FakeMmioRegRegion region_;
+  fake_mmio::FakeMmioRegRegion region_;
 };
 
 class TestAmlUsbPhyDevice : public AmlUsbPhyDevice {
@@ -86,7 +88,9 @@ class TestAmlUsbPhyDevice : public AmlUsbPhyDevice {
 
 class AmlUsbPhyTestEnvironment : public fdf_testing::Environment {
  public:
-  void Init(const zx::interrupt& interrupt) {
+  // If `dml_metadata` is true, provides the metadata that DML boards generate instead of the
+  // legacy FIDL table.
+  void Init(const zx::interrupt& interrupt, bool dml_metadata = false) {
     zx::interrupt duplicate;
     ASSERT_OK(interrupt.duplicate(ZX_RIGHT_SAME_RIGHTS, &duplicate));
     std::map<uint32_t, zx::interrupt> irqs;
@@ -111,8 +115,12 @@ class AmlUsbPhyTestEnvironment : public fdf_testing::Environment {
         .phy_type = kPhyType,
     }};
 
-    ASSERT_OK(
-        pdev_.AddFidlMetadata(fuchsia_hardware_usb_phy::Metadata::kSerializableName, kMetadata));
+    if (dml_metadata) {
+      AddDmlMetadata();
+    } else {
+      ASSERT_OK(
+          pdev_.AddFidlMetadata(fuchsia_hardware_usb_phy::Metadata::kSerializableName, kMetadata));
+    }
 
     registers_.ExpectWrite<uint32_t>(RESET1_LEVEL_OFFSET, aml_registers::USB_RESET1_LEVEL_MASK,
                                      aml_registers::USB_RESET1_LEVEL_MASK);
@@ -147,7 +155,39 @@ class AmlUsbPhyTestEnvironment : public fdf_testing::Environment {
 
   mock_registers::MockRegisters& registers() { return registers_; }
 
+  static constexpr uint32_t kXhciGlobalId = 0x12345678;
+  static constexpr uint32_t kDwc2GlobalId = 0x9abcdef0;
+
  private:
+  void AddDmlMetadata() {
+    using fuchsia_driver_metadata::DictionaryValue;
+    std::vector<fuchsia_driver_metadata::DictionaryEntry> config;
+    config.emplace_back("phy_type", DictionaryValue::WithStr("G12_A"));
+    config.emplace_back("usb_phy_modes._count", DictionaryValue::WithInt64(3));
+    config.emplace_back("usb_phy_modes.0.protocol", DictionaryValue::WithStr("USB_2_0"));
+    config.emplace_back("usb_phy_modes.0.dr_mode", DictionaryValue::WithStr("HOST"));
+    config.emplace_back("usb_phy_modes.0.is_otg_capable", DictionaryValue::WithBoolean(false));
+    config.emplace_back("usb_phy_modes.1.protocol", DictionaryValue::WithStr("USB_2_0"));
+    config.emplace_back("usb_phy_modes.1.dr_mode", DictionaryValue::WithStr("OTG"));
+    config.emplace_back("usb_phy_modes.1.is_otg_capable", DictionaryValue::WithBoolean(true));
+    config.emplace_back("usb_phy_modes.2.protocol", DictionaryValue::WithStr("USB_3_0"));
+    config.emplace_back("usb_phy_modes.2.dr_mode", DictionaryValue::WithStr("HOST"));
+    config.emplace_back("usb_phy_modes.2.is_otg_capable", DictionaryValue::WithBoolean(false));
+    ASSERT_OK(
+        pdev_.AddFidlMetadata("fuchsia.hardware.usb.phy.AmlUsbPhyConfig",
+                              fuchsia_driver_metadata::Dictionary{{.entries = std::move(config)}}));
+
+    std::vector<fuchsia_driver_metadata::DictionaryEntry> ids;
+    ids.emplace_back("phys._count", DictionaryValue::WithInt64(2));
+    ids.emplace_back("phys.0.id", DictionaryValue::WithInt64(kDwc2GlobalId));
+    ids.emplace_back("phys.0.name", DictionaryValue::WithStr("dwc2-phy"));
+    ids.emplace_back("phys.1.id", DictionaryValue::WithInt64(kXhciGlobalId));
+    ids.emplace_back("phys.1.name", DictionaryValue::WithStr("xhci"));
+    ASSERT_OK(
+        pdev_.AddFidlMetadata("fuchsia.hardware.usb.phy.Metadata",
+                              fuchsia_driver_metadata::Dictionary{{.entries = std::move(ids)}}));
+  }
+
   fdf_fake::FakePDev pdev_;
   mock_registers::MockRegisters registers_{fdf::Dispatcher::GetCurrent()->async_dispatcher()};
 };
@@ -162,7 +202,8 @@ class AmlUsbPhyTest : public testing::Test {
  public:
   void SetUp() override {
     ASSERT_OK(zx::interrupt::create(zx::resource(), 0, ZX_INTERRUPT_VIRTUAL, &interrupt_));
-    driver_test_.RunInEnvironmentTypeContext([&](auto& env) { env.Init(interrupt_); });
+    driver_test_.RunInEnvironmentTypeContext(
+        [&](auto& env) { env.Init(interrupt_, UseDmlMetadata()); });
     ASSERT_OK(driver_test_.StartDriver());
 
     // Wait for Init() to publish initial children.
@@ -173,6 +214,9 @@ class AmlUsbPhyTest : public testing::Test {
           [](auto& node) { return node.children().size() == 1; });
     });
   }
+
+  // Whether the test provides DML board metadata instead of the legacy FIDL table.
+  virtual bool UseDmlMetadata() const { return false; }
 
   void TearDown() override {
     ASSERT_OK(driver_test_.StopDriver());
@@ -262,6 +306,52 @@ TEST_F(AmlUsbPhyTest, ConnectStatusChanged) {
   });
 
   driver_test().RunInDriverContext([](auto& driver) { EXPECT_TRUE(driver.dwc2_connected()); });
+}
+
+// Returns the value of the `fuchsia.ID` property of `node`, if any.
+std::optional<uint32_t> GetIdProperty(const fdf_testing::TestNode& node) {
+  std::optional<uint32_t> id;
+  for (const fuchsia_driver_framework::NodeProperty2& property : node.GetProperties()) {
+    if (property.key() == bind_fuchsia::ID) {
+      EXPECT_FALSE(id.has_value()) << "Duplicate fuchsia.ID property";
+      if (!property.value().int_value().has_value()) {
+        ADD_FAILURE() << "fuchsia.ID property isn't an integer";
+        continue;
+      }
+      id = property.value().int_value().value();
+    }
+  }
+  return id;
+}
+
+TEST_F(AmlUsbPhyTest, NoGlobalId) {
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    auto& children = node.children().at(std::string(AmlUsbPhyDevice::kDeviceName)).children();
+    EXPECT_FALSE(GetIdProperty(children.at("xhci")).has_value());
+  });
+}
+
+class AmlUsbPhyDmlTest : public AmlUsbPhyTest {
+ public:
+  bool UseDmlMetadata() const override { return true; }
+};
+
+// The global IDs from the DML board's PHY metadata are published as `fuchsia.ID`, including when
+// a child is re-published after a mode switch.
+TEST_F(AmlUsbPhyDmlTest, GlobalId) {
+  CheckDevices(std::vector<std::string>{"xhci"});
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    auto& children = node.children().at(std::string(AmlUsbPhyDevice::kDeviceName)).children();
+    EXPECT_EQ(GetIdProperty(children.at("xhci")), AmlUsbPhyTestEnvironment::kXhciGlobalId);
+  });
+
+  TriggerInterruptAndCheckMode(fuchsia_hardware_usb_phy::Mode::kPeripheral);
+  CheckDevices(std::vector<std::string>{"xhci", "dwc2-phy"});
+  driver_test().RunInNodeContext([](fdf_testing::TestNode& node) {
+    auto& children = node.children().at(std::string(AmlUsbPhyDevice::kDeviceName)).children();
+    EXPECT_EQ(GetIdProperty(children.at("xhci")), AmlUsbPhyTestEnvironment::kXhciGlobalId);
+    EXPECT_EQ(GetIdProperty(children.at("dwc2-phy")), AmlUsbPhyTestEnvironment::kDwc2GlobalId);
+  });
 }
 
 }  // namespace aml_usb_phy

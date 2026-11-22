@@ -12,5 +12,4 @@
     use: [
         { protocol: "examples.${series_flat_case}.${variant_flat_case}.${protocol_pascal_case}" },
     ],
-    config: {},
 }

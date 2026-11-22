@@ -28,7 +28,7 @@ cc_test_executable("i18n_tests") {
   deps = [
     ":icu_headers",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/intl/lookup/cpp:lib",
     "//src/lib/testing/loop_fixture",

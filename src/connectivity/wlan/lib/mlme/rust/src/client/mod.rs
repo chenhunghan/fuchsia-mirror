@@ -1472,7 +1472,10 @@ mod tests {
         let mut m = MockObjects::new().await;
         let mut me = m.make_mlme().await;
 
-        let reconnect_req = fidl_mlme::ReconnectRequest { peer_sta_address: [1, 2, 3, 4, 5, 6] };
+        let reconnect_req = fidl_mlme::ReconnectRequest {
+            peer_sta_address: [1, 2, 3, 4, 5, 6],
+            owe_public_key: None,
+        };
         let result = me.handle_mlme_request(wlan_sme::MlmeRequest::Reconnect(reconnect_req)).await;
         let err = result.unwrap_err();
         let mlme_err = err.downcast_ref::<Error>().expect("expected Mlme Error");

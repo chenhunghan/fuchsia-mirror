@@ -16,6 +16,8 @@ pub use chainlock_proof::*;
 pub use chainlock_transaction::*;
 pub use concurrent::{
     Action, AllowFinalized, AtomicToken, ChainLockResult, DONE, DoneType, IntoTransactionResult,
-    RecordBackoff, SelectAccounting, SelectTracing, StateOption, StateSaver, Token, Transaction,
+    ReadTransactionToken, RecordBackoff, SYNC_OPT_ACQ_REL_OPS, SYNC_OPT_FENCE, SelectAccounting,
+    SelectTracing, SeqLock, SeqLockPayload, StateOption, StateSaver, Token, Transaction,
     TransactionHooks, TransactionOption as Option, TransactionResult, TransactionState as State,
+    WriteGuard,
 };

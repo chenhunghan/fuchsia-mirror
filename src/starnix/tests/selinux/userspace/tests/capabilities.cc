@@ -4,17 +4,20 @@
 
 #include <fcntl.h>
 #include <grp.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 
 #include <gtest/gtest.h>
 #include <linux/capability.h>
+#include <linux/securebits.h>
 
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "capabilities_policy"; }
+extern std::string GetTestPolicyName() { return "capabilities_policy"; }
 
 namespace {
 
@@ -342,5 +345,59 @@ TEST(CapabilitiesTest, CreateFileInSgidDirRequiresFsetid) {
     close(fd);
   }));
 }
+
+/// `PR_SET_SECUREBITS` checks `CAP_SETPCAP` directly without invoking SELinux `capability { setpcap
+/// }`.
+TEST(CapabilitiesTest, PrctlSetSecurebitsDoesNotCheckSetpcap) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:test_deny_setpcap_t:s0", [&] {
+    EXPECT_THAT(prctl(PR_SET_SECUREBITS, SECBIT_KEEP_CAPS, 0, 0, 0), SyscallSucceeds());
+  }));
+}
+
+class PrctlCapbsetDropTest : public ::testing::TestWithParam<bool> {};
+
+/// When `capability { setpcap }` is granted, `PR_CAPBSET_DROP` succeeds; when denied, it fails
+/// with `EPERM`.
+TEST_P(PrctlCapbsetDropTest, Drop) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  const bool allowed = GetParam();
+  const char* domain =
+      allowed ? "test_u:test_r:test_allow_setpcap_t:s0" : "test_u:test_r:test_deny_setpcap_t:s0";
+
+  ASSERT_TRUE(RunSubprocessAs(domain, [allowed] {
+    EXPECT_THAT(prctl(PR_CAPBSET_DROP, CAP_CHOWN, 0, 0, 0),
+                SyscallSucceedsOrFailsWithErrno(allowed, EPERM));
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(CapabilitiesTest, PrctlCapbsetDropTest, ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                           return info.param ? "Allowed" : "Denied";
+                         });
+
+class SetTimeOfDayTest : public ::testing::TestWithParam<bool> {};
+
+/// When `capability { sys_time }` is granted, `settimeofday` passes capability checks and fails
+/// with `EINVAL` on out-of-range timezone bounds; when denied, it fails with `EPERM` before
+/// timezone bounds validation.
+TEST_P(SetTimeOfDayTest, InvalidTimezone) {
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  const bool allowed = GetParam();
+  const char* domain =
+      allowed ? "test_u:test_r:test_allow_sys_time_t:s0" : "test_u:test_r:test_deny_sys_time_t:s0";
+
+  ASSERT_TRUE(RunSubprocessAs(domain, [allowed] {
+    struct timezone bad_tz = {15 * 60 + 1, 0};
+    EXPECT_THAT(syscall(SYS_settimeofday, nullptr, &bad_tz),
+                SyscallFailsWithErrno(allowed ? EINVAL : EPERM));
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(CapabilitiesTest, SetTimeOfDayTest, ::testing::Bool(),
+                         [](const ::testing::TestParamInfo<bool>& info) {
+                           return info.param ? "Allowed" : "Denied";
+                         });
 
 }  // namespace

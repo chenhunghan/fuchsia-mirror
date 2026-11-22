@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":safemath-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "safemath",
+    srcs = ["byte_conversions_unittest.cc"],
+    gn_output_name = "safemath-test",
+    deps = [
+        "//sdk/lib/stdcompat",
+        "//zircon/system/ulib/zxtest",
+        "//zircon/third_party/ulib/safemath",
+    ],
+)
+
+fx_unittest_package(
+    name = "safemath-test-pkg",
+    unit_tests = [":safemath"],
+)

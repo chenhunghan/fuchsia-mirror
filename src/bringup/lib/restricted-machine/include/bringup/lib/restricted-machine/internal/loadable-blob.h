@@ -17,10 +17,8 @@
 #include <lib/elfldltl/vmar-loader.h>
 
 // For VMO loading
-#include <fidl/fuchsia.ldsvc/cpp/wire.h>
 #include <lib/zx/channel.h>
 #include <lib/zx/vmo.h>
-#include <zircon/dlfcn.h>
 #include <zircon/status.h>
 #include <zircon/types.h>
 
@@ -44,13 +42,6 @@ class LoadableBlobSymbols {
  private:
   // The string_view are only valid as long as the mapped libraries persist.
   std::unordered_map<std::string_view, uint64_t> symbol_addrs_;
-};
-
-class LibVmoLoader {
- public:
-  LibVmoLoader() = default;
-  ~LibVmoLoader() = default;
-  virtual zx::vmo Get(std::string_view libname);
 };
 
 // This class encapsulates loading a single loadable blob.

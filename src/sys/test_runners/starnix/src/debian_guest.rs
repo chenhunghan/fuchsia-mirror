@@ -13,8 +13,10 @@ use fidl_fuchsia_virtualization_guest_interaction::{
 use fuchsia_async::{DurationExt, TimeoutExt};
 use fuchsia_component::client::connect_to_protocol;
 use futures::TryStreamExt;
+use futures::lock::Mutex as AsyncMutex;
 use std::cell::OnceCell;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 const EXECUTE_TIMEOUT_SECONDS: i64 = 180;
@@ -39,6 +41,7 @@ pub struct DebianGuest {
     /// helper function, to aid with locking and ensuring that the guest is ready for interaction.
     guest_proxy: OnceCell<Mutex<InteractiveGuestProxy>>,
     data_mount: Mutex<Option<DataMount>>,
+    pushed_files: AsyncMutex<HashMap<PathBuf, String>>,
 }
 
 impl DebianGuest {
@@ -50,7 +53,26 @@ impl DebianGuest {
     /// # Arguments
     /// * `instance_name` - An instance name, which serves as the tag for log output.
     pub fn new(instance_name: String) -> DebianGuest {
-        DebianGuest { instance_name, guest_proxy: OnceCell::new(), data_mount: Mutex::new(None) }
+        DebianGuest {
+            instance_name,
+            guest_proxy: OnceCell::new(),
+            data_mount: Mutex::new(None),
+            pushed_files: AsyncMutex::new(HashMap::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_proxy(guest_proxy: InteractiveGuestProxy) -> Self {
+        Self {
+            instance_name: "test_guest".to_string(),
+            guest_proxy: OnceCell::from(Mutex::new(guest_proxy)),
+            data_mount: Mutex::new(None),
+            pushed_files: AsyncMutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn is_bootstrapped(&self) -> bool {
+        self.guest_proxy.get().is_some()
     }
 
     /// Configures an optional data mount to attach to the guest upon initialization. Note that if the
@@ -81,7 +103,7 @@ impl DebianGuest {
                 cfg.virtio_gpu = Some(false);
                 cfg.virtio_sound = Some(false);
                 cfg.virtio_sound_input = Some(false);
-                cfg.virtio_rng = Some(false);
+                cfg.virtio_rng = Some(true);
                 cfg.virtio_balloon = Some(false);
                 cfg.virtio_mem = Some(false);
                 cfg.default_net = Some(false);
@@ -103,7 +125,7 @@ impl DebianGuest {
 
                 // The initialization of the mount requires interacting with the guest_proxy, and
                 // will recursively call interactive_guest() to obtain said proxy. Therefore, the
-                // mounting needs to be done only after the previous initialization logic finishes.
+                // mounting needs to be done only after self.guest_proxy has been set.
                 if let Some(mount_script) = mount_script {
                     Box::pin(self.initialize_mount(mount_script))
                         .await
@@ -115,13 +137,17 @@ impl DebianGuest {
         }
     }
 
+    /// Uploads and executes the guest data-mount script during lazy guest bootstrap.
     async fn initialize_mount(
         &self,
         mount_script: ClientEnd<fio::FileMarker>,
     ) -> Result<(), Error> {
         const GUEST_MOUNT_SCRIPT_PATH: &str = "/tmp/mount_syscall_deps.sh";
 
-        self.push_data_to_guest(mount_script, Path::new(GUEST_MOUNT_SCRIPT_PATH)).await?;
+        self.push_data_to_guest_once(Path::new(GUEST_MOUNT_SCRIPT_PATH), None, async || {
+            Ok(mount_script)
+        })
+        .await?;
         self.execute(&format!("/bin/sh {}", GUEST_MOUNT_SCRIPT_PATH), &[], None, None, None)
             .await?;
 
@@ -129,16 +155,41 @@ impl DebianGuest {
         Ok(())
     }
 
-    /// Pushes data from `source` to the guest at `destination`.
+    /// Pushes the open_source content to the given destination on the guest. If a content_hash is
+    /// provided, it will be used to validate whether the given content and destination have been
+    /// pushed to the guest already. Upon pushing, the internal tracking cache will be updated.
     ///
-    /// # Arguments
-    /// * `source` - The source file to copy from.
-    /// * `destination` - The destination path in the guest's filesystem.
-    pub async fn push_data_to_guest(
+    /// If a content_hash is not provided, the data will be pushed unconditionally, and no updates
+    /// will be made to the internal tracking cache.
+    pub async fn push_data_to_guest_once(
         &self,
-        source: ClientEnd<fio::FileMarker>,
         destination: &Path,
+        content_hash: Option<&str>,
+        open_source: impl AsyncFnOnce() -> Result<ClientEnd<fio::FileMarker>, Error>,
     ) -> Result<(), Error> {
+        // The interactive guest is lazily initialized, and can attempt to push files itself. To
+        // avoid holding the pushed_files lock across the first initialization sequence, which could
+        // self-deadlock during initialization data pushes, we'll pre-warm the guest if necessary.
+        if !self.is_bootstrapped() {
+            let _ = self.interactive_guest().await;
+        }
+
+        let mut pushed_files = self.pushed_files.lock().await;
+        if let Some(hash) = content_hash
+            && pushed_files.get(destination).map(String::as_str) == Some(hash)
+        {
+            log::info!(
+                tag = self.instance_name.as_str();
+                "Skipping push to guest; file already present (destination: {}, hash: {})",
+                destination.display(),
+                hash
+            );
+            return Ok(());
+        }
+
+        let source = open_source().await?;
+        pushed_files.remove(destination);
+
         log::info!(tag = self.instance_name.as_str(); "Pushing data to guest (destination: {})", destination.display());
 
         let dest_str = destination
@@ -159,6 +210,9 @@ impl DebianGuest {
             destination.display()
         );
 
+        if let Some(hash) = content_hash {
+            pushed_files.insert(destination.to_path_buf(), hash.to_string());
+        }
         Ok(())
     }
 
@@ -271,6 +325,251 @@ impl DebianGuest {
                 log::info!(tag = self.instance_name.as_str(); "Guest was never bootstrapped, shutdown is unnecessary.");
                 Ok(())
             }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::*;
+    use fidl::endpoints::{ServerEnd, create_proxy_and_stream};
+    use fidl_fuchsia_virtualization_guest_interaction::InteractiveGuestRequest;
+    use fuchsia_async as fasync;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Simulates a mock guest command starting cleanly and exiting with the given code.
+    pub(crate) fn send_command_exit(listener: ServerEnd<CommandListenerMarker>, return_code: i32) {
+        let (_stream, control_handle) = listener.into_stream_and_control_handle();
+        control_handle.send_on_started(zx::sys::ZX_OK).expect("send OnStarted");
+        control_handle.send_on_terminated(zx::sys::ZX_OK, return_code).expect("send OnTerminated");
+    }
+
+    /// Mock `InteractiveGuest` server paired with a pre-bootstrapped `DebianGuest` for unit tests.
+    pub(crate) struct MockDebianGuest {
+        pub(crate) guest: Arc<DebianGuest>,
+        put_file_count: Arc<AtomicUsize>,
+        scope: fasync::Scope,
+    }
+
+    impl MockDebianGuest {
+        pub(crate) fn new() -> Self {
+            Self::with_put_file_handler(|_remote_path, _attempt| zx::sys::ZX_OK)
+        }
+
+        pub(crate) fn with_put_file_handler(
+            mut handler: impl FnMut(String, usize) -> zx::sys::zx_status_t + 'static,
+        ) -> Self {
+            let mut attempt = 0;
+            Self::with_request_handler(move |request| match request {
+                InteractiveGuestRequest::PutFile { remote_path, responder, .. } => {
+                    let status = handler(remote_path, attempt);
+                    attempt += 1;
+                    responder.send(status).expect("send PutFile response");
+                }
+                other => panic!("Unexpected InteractiveGuest request: {:?}", other),
+            })
+        }
+
+        pub(crate) fn with_request_handler(
+            mut handler: impl FnMut(InteractiveGuestRequest) + 'static,
+        ) -> Self {
+            let scope = fasync::Scope::new();
+            let put_file_count = Arc::new(AtomicUsize::new(0));
+            let put_file_count_server = put_file_count.clone();
+            let (guest_proxy, mut guest_stream) =
+                create_proxy_and_stream::<InteractiveGuestMarker>();
+            let _server_task = scope.spawn_local(async move {
+                while let Some(request) = guest_stream.try_next().await.expect("guest stream") {
+                    if matches!(request, InteractiveGuestRequest::PutFile { .. }) {
+                        put_file_count_server.fetch_add(1, Ordering::SeqCst);
+                    }
+                    handler(request);
+                }
+            });
+
+            Self {
+                guest: Arc::new(DebianGuest::with_test_proxy(guest_proxy)),
+                put_file_count,
+                scope,
+            }
+        }
+
+        pub(crate) fn put_file_count(&self) -> usize {
+            self.put_file_count.load(Ordering::SeqCst)
+        }
+
+        pub(crate) async fn finish(self) {
+            drop(self.guest);
+            self.scope.join().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_helpers::MockDebianGuest;
+    use super::*;
+    use fidl::endpoints::{create_endpoints, create_proxy_and_stream};
+    use fidl_fuchsia_virtualization_guest_interaction::{
+        InteractiveGuestPutFileResponder, InteractiveGuestRequest, InteractiveGuestRequestStream,
+    };
+    use futures::future::join;
+    use futures::poll;
+    use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn open_dummy_file() -> Result<ClientEnd<fio::FileMarker>, Error> {
+        let (client, _server) = create_endpoints::<fio::FileMarker>();
+        Ok(client)
+    }
+
+    async fn next_put_file(
+        stream: &mut InteractiveGuestRequestStream,
+    ) -> InteractiveGuestPutFileResponder {
+        match stream.try_next().await.expect("guest stream") {
+            Some(InteractiveGuestRequest::PutFile { responder, .. }) => responder,
+            other => panic!("Expected PutFile request, got: {:?}", other),
+        }
+    }
+
+    #[fuchsia::test]
+    async fn push_data_to_guest_once_deduplicates_and_updates() {
+        let mock = MockDebianGuest::new();
+        let first_path = Path::new("/starnix_linux_foo_bin");
+        let second_path = Path::new("/starnix_linux_bar_bin");
+
+        mock.guest
+            .push_data_to_guest_once(first_path, Some("hash_v1"), open_dummy_file)
+            .await
+            .expect("first push succeeds");
+        assert_eq!(mock.put_file_count(), 1);
+
+        // Cache hit must skip both `open_source` and `PutFile`.
+        mock.guest
+            .push_data_to_guest_once(first_path, Some("hash_v1"), async || {
+                panic!("open_source must not be called on cache hit")
+            })
+            .await
+            .expect("duplicate push with same hash is skipped");
+        assert_eq!(mock.put_file_count(), 1);
+
+        mock.guest
+            .push_data_to_guest_once(first_path, Some("hash_v2"), open_dummy_file)
+            .await
+            .expect("updated hash re-pushes to same path");
+        assert_eq!(mock.put_file_count(), 2);
+
+        mock.guest
+            .push_data_to_guest_once(first_path, None, open_dummy_file)
+            .await
+            .expect("push without hash always pushes and clears cached hash");
+        assert_eq!(mock.put_file_count(), 3);
+
+        // Because the unhashed push cleared the cache, re-pushing `hash_v2` must push again.
+        mock.guest
+            .push_data_to_guest_once(first_path, Some("hash_v2"), open_dummy_file)
+            .await
+            .expect("push after unhashed eviction pushes again");
+        assert_eq!(mock.put_file_count(), 4);
+
+        mock.guest
+            .push_data_to_guest_once(second_path, Some("hash_v1"), open_dummy_file)
+            .await
+            .expect("distinct path is pushed");
+        assert_eq!(mock.put_file_count(), 5);
+
+        mock.finish().await;
+    }
+
+    #[fuchsia::test]
+    async fn push_data_to_guest_once_does_not_cache_failed_push() {
+        let mock = MockDebianGuest::with_put_file_handler(|_remote_path, attempt| {
+            if attempt == 0 || attempt == 2 { zx::Status::IO.into_raw() } else { zx::sys::ZX_OK }
+        });
+        let destination = Path::new("/starnix_linux_retry_bin");
+
+        assert!(
+            mock.guest
+                .push_data_to_guest_once(destination, Some("hash_v1"), open_dummy_file)
+                .await
+                .is_err()
+        );
+
+        mock.guest
+            .push_data_to_guest_once(destination, Some("hash_v1"), open_dummy_file)
+            .await
+            .expect("retry push succeeds");
+        assert_eq!(mock.put_file_count(), 2);
+
+        // A failed overwrite must evict any previously cached hash so callers never reuse a
+        // partially written file on the guest-even if they subsequently request `hash_v1`.
+        assert!(
+            mock.guest
+                .push_data_to_guest_once(destination, Some("hash_v2"), open_dummy_file)
+                .await
+                .is_err()
+        );
+        mock.guest
+            .push_data_to_guest_once(destination, Some("hash_v1"), open_dummy_file)
+            .await
+            .expect("retry after failed overwrite pushes again");
+        assert_eq!(mock.put_file_count(), 4);
+
+        mock.finish().await;
+    }
+
+    #[fuchsia::test]
+    async fn push_data_to_guest_once_serializes_concurrent_callers() {
+        let (guest_proxy, mut guest_stream) = create_proxy_and_stream::<InteractiveGuestMarker>();
+        let guest = DebianGuest::with_test_proxy(guest_proxy);
+        let destination = Path::new("/starnix_linux_concurrent_bin");
+        let open_count = AtomicUsize::new(0);
+        let make_open = || {
+            async || {
+                open_count.fetch_add(1, Ordering::SeqCst);
+                open_dummy_file().await
+            }
+        };
+
+        // Case 1: Concurrent push for the same (destination, hash) waits on `pushed_files` and
+        // skips both `open_source` and `PutFile` once the in-flight push succeeds.
+        {
+            let mut call1 =
+                pin!(guest.push_data_to_guest_once(destination, Some("hash_v1"), make_open()));
+            let mut call2 =
+                pin!(guest.push_data_to_guest_once(destination, Some("hash_v1"), make_open()));
+
+            assert!(poll!(call1.as_mut()).is_pending());
+            let responder = next_put_file(&mut guest_stream).await;
+            assert!(poll!(call2.as_mut()).is_pending());
+
+            responder.send(zx::sys::ZX_OK).expect("send PutFile OK");
+            let (res1, res2) = join(call1, call2).await;
+            res1.expect("first concurrent push succeeds");
+            res2.expect("second concurrent push deduplicates");
+            assert_eq!(open_count.load(Ordering::SeqCst), 1);
+        }
+
+        // Case 2: If the in-flight push fails, the queued waiter retries rather than skipping.
+        {
+            let mut call3 =
+                pin!(guest.push_data_to_guest_once(destination, Some("hash_v2"), make_open()));
+            let mut call4 =
+                pin!(guest.push_data_to_guest_once(destination, Some("hash_v2"), make_open()));
+
+            assert!(poll!(call3.as_mut()).is_pending());
+            let fail_responder = next_put_file(&mut guest_stream).await;
+            assert!(poll!(call4.as_mut()).is_pending());
+
+            fail_responder.send(zx::Status::IO.into_raw()).expect("send PutFile IO error");
+            assert!(call3.await.is_err());
+            assert!(poll!(call4.as_mut()).is_pending());
+
+            let retry_responder = next_put_file(&mut guest_stream).await;
+            retry_responder.send(zx::sys::ZX_OK).expect("send retry PutFile OK");
+            call4.await.expect("waiting caller retries after failed in-flight push");
+            assert_eq!(open_count.load(Ordering::SeqCst), 3);
         }
     }
 }

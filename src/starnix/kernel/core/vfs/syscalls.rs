@@ -5,7 +5,10 @@
 use crate::mm::{IOVecPtr, MemoryAccessor, MemoryAccessorExt, PAGE_SIZE};
 use crate::security;
 use crate::syscalls::time::{ITimerSpecPtr, TimeSpecPtr, TimeValPtr};
-use crate::task::{CurrentTask, EventHandler, ReadyItem, ReadyItemKey, Waiter};
+use crate::task::{
+    CurrentTask, EventHandler, ReadyItem, ReadyItemKey, Waiter, confirm_fs_syscall_trace,
+    confirm_fs_syscall_trace_if,
+};
 use crate::time::{Timeline, TimerWakeup};
 use crate::vfs::aio::AioContext;
 use crate::vfs::buffers::{UserBuffersInputBuffer, UserBuffersOutputBuffer};
@@ -32,7 +35,7 @@ use starnix_types::user_buffer::UserBuffer;
 use starnix_uapi::arc_key::PtrKey;
 use starnix_uapi::auth::{
     CAP_BLOCK_SUSPEND, CAP_DAC_READ_SEARCH, CAP_LEASE, CAP_SYS_ADMIN, CAP_WAKE_ALARM, Capabilities,
-    Credentials, PTRACE_MODE_ATTACH_REALCREDS,
+    Credentials, PTRACE_MODE_ATTACH_REALCREDS, SecureBits,
 };
 use starnix_uapi::device_id::DeviceId;
 use starnix_uapi::errors::{
@@ -60,13 +63,13 @@ use starnix_uapi::{
     F_GETOWN, F_GETOWN_EX, F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW, F_SETFD, F_SETFL, F_SETLEASE,
     F_SETLK, F_SETLK64, F_SETLKW, F_SETLKW64, F_SETOWN, F_SETOWN_EX, F_SETSIG, FIOCLEX, FIONCLEX,
     MFD_ALLOW_SEALING, MFD_CLOEXEC, MFD_EXEC, MFD_HUGE_MASK, MFD_HUGE_SHIFT, MFD_HUGETLB,
-    MFD_NOEXEC_SEAL, NAME_MAX, O_CLOEXEC, O_CREAT, O_NOFOLLOW, O_NOTIFICATION_PIPE, O_PATH,
-    O_TMPFILE, PIDFD_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI, POLLRDBAND, POLLRDNORM,
-    POLLWRBAND, POLLWRNORM, POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE, POSIX_FADV_NORMAL,
-    POSIX_FADV_RANDOM, POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED, RWF_SUPPORTED, TFD_CLOEXEC,
-    TFD_NONBLOCK, TFD_TIMER_ABSTIME, TFD_TIMER_CANCEL_ON_SET, XATTR_CREATE, XATTR_NAME_MAX,
-    XATTR_REPLACE, XATTR_SIZE_MAX, aio_context_t, errno, error, io_event, iocb, off_t, pid_t,
-    pollfd, pselect6_sigmask, sigset_t, statx, timespec, uapi, uid_t,
+    MFD_NOEXEC_SEAL, O_CLOEXEC, O_CREAT, O_NOFOLLOW, O_NOTIFICATION_PIPE, O_PATH, O_TMPFILE,
+    PIDFD_NONBLOCK, POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI, POLLRDBAND, POLLRDNORM, POLLWRBAND,
+    POLLWRNORM, POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE, POSIX_FADV_NORMAL, POSIX_FADV_RANDOM,
+    POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED, RWF_SUPPORTED, TFD_CLOEXEC, TFD_NONBLOCK,
+    TFD_TIMER_ABSTIME, TFD_TIMER_CANCEL_ON_SET, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE,
+    XATTR_SIZE_MAX, aio_context_t, errno, error, io_event, iocb, off_t, pid_t, pollfd,
+    pselect6_sigmask, sigset_t, statx, timespec, uapi, uid_t,
 };
 use std::collections::{HashSet, VecDeque};
 use std::marker::PhantomData;
@@ -203,6 +206,7 @@ pub fn sys_read(
     length: usize,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.read(
         current_task,
         &mut UserBuffersOutputBuffer::unified_new_at(current_task, address, length)?,
@@ -217,6 +221,7 @@ pub fn sys_write(
     length: usize,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.write(
         current_task,
         &mut UserBuffersInputBuffer::unified_new_at(current_task, address, length)?,
@@ -268,6 +273,7 @@ pub fn sys_lseek(
     whence: u32,
 ) -> Result<off_t, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.seek(current_task, SeekTarget::from_raw(whence, offset)?)
 }
 
@@ -415,6 +421,7 @@ pub fn sys_pread64(
     offset: off_t,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let offset = offset.try_into().map_err(|_| errno!(EINVAL))?;
     file.read_at(
         current_task,
@@ -431,6 +438,7 @@ pub fn sys_pwrite64(
     offset: off_t,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let offset = offset.try_into().map_err(|_| errno!(EINVAL))?;
     file.write_at(
         current_task,
@@ -454,6 +462,7 @@ fn do_readv(
         track_stub!(TODO("https://fxbug.dev/322875072"), "preadv2 flags", flags);
     }
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let iovec = current_task.read_iovec(iovec_addr, iovec_count)?;
     let mut data = UserBuffersOutputBuffer::unified_new(current_task, iovec)?;
     if let Some(offset) = offset {
@@ -511,6 +520,7 @@ fn do_writev(
     }
 
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let iovec = current_task.read_iovec(iovec_addr, iovec_count)?;
     let mut data = UserBuffersInputBuffer::unified_new(current_task, iovec)?;
     let res = if let Some(offset) = offset {
@@ -574,6 +584,7 @@ pub fn fstatfs<T32: IntoBytes + Immutable + TryFrom<uapi::statfs>>(
     //
     // See https://man7.org/linux/man-pages/man2/open.2.html
     let file = current_task.get_file_allowing_opath(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let mut stat = file.fs.statfs(current_task)?;
     stat.f_flags |= file.name.mount.flags().bits() as i64;
     current_task.write_multi_arch_object(user_buf, stat)?;
@@ -652,6 +663,7 @@ where
     }
     let mut context = LookupContext::default();
     let (parent, basename) = current_task.lookup_parent_at(&mut context, dir_fd, path.as_ref())?;
+    confirm_fs_syscall_trace_if(|| parent.entry.node.fs().is_storage_backed());
     callback(context, parent, basename)
 }
 
@@ -680,6 +692,25 @@ impl LookupFlags {
 
     pub fn directory() -> Self {
         Self { directory_mode: DirectoryMode::MustBeDirectory, ..Default::default() }
+    }
+
+    /// Returns the lookup flags for `fstatat(2)` (`newfstatat`, `fstatat64`, and the `stat` and
+    /// `lstat` wrappers).
+    ///
+    /// From <https://man7.org/linux/man-pages/man2/fstatat.2.html>:
+    ///
+    ///   AT_NO_AUTOMOUNT (since Linux 2.6.38)
+    ///          Don't automount the terminal ("basename") component of
+    ///          path.  Since Linux 3.1 this flag is ignored.  Since Linux
+    ///          4.11 this flag is implied.
+    ///
+    /// Implying it here also keeps the per-call `LookupFlags::automount` stub tracking off this
+    /// hot path.
+    fn for_fstatat(flags: u32) -> Result<Self, Errno> {
+        Self::from_bits(
+            flags | AT_NO_AUTOMOUNT,
+            AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+        )
     }
 
     fn from_bits(flags: u32, allowed_flags: u32) -> Result<Self, Errno> {
@@ -727,6 +758,7 @@ pub fn lookup_at(
         if options.allow_empty_path {
             let (node, _) =
                 current_task.resolve_dir_fd(dir_fd, path.as_ref(), ResolveFlags::empty())?;
+            confirm_fs_syscall_trace_if(|| node.entry.node.fs().is_storage_backed());
             return Ok(node);
         }
         return error!(ENOENT);
@@ -753,7 +785,12 @@ pub fn lookup_at(
     };
     let mut child_context = parent_context.with(symlink_mode, directory_mode);
 
-    parent.lookup_child(current_task, &mut child_context, basename)
+    let child = parent.lookup_child(current_task, &mut child_context, basename);
+    match &child {
+        Ok(node) => confirm_fs_syscall_trace_if(|| node.entry.node.fs().is_storage_backed()),
+        Err(_) => confirm_fs_syscall_trace_if(|| parent.entry.node.fs().is_storage_backed()),
+    }
+    child
 }
 
 fn do_openat(
@@ -823,6 +860,10 @@ pub fn sys_openat2(
         ResolveFlags::from_bits(how.resolve.try_into().map_err(|_| errno!(EINVAL))?)
             .ok_or_else(|| errno!(EINVAL))?;
 
+    if resolve_flags.contains(ResolveFlags::BENEATH | ResolveFlags::IN_ROOT) {
+        return error!(EINVAL);
+    }
+
     if resolve_flags.contains(ResolveFlags::CACHED) {
         track_stub!(TODO("https://fxbug.dev/326474574"), "openat2: RESOLVE_CACHED");
         return error!(EAGAIN);
@@ -840,6 +881,34 @@ pub fn sys_faccessat(
     sys_faccessat2(current_task, dir_fd, user_path, mode, 0)
 }
 
+/// Returns the credentials with which `access(2)`, and `faccessat(2)` without `AT_EACCESS`, look up
+/// the path and check access, or `None` if they are equal to `creds` and need not be installed.
+///
+/// From <https://man7.org/linux/man-pages/man2/access.2.html>:
+///
+///   The check is done using the calling process's real UID and GID, rather than the effective
+///   IDs as is done when actually attempting an operation (e.g., open(2)) on the file.
+///   Similarly, for the root user, the check uses the set of permitted capabilities rather than
+///   the set of effective capabilities; and for non-root users, the check uses an empty set of
+///   capabilities.
+///
+/// As on Linux, the capabilities are left unchanged if `SECBIT_NO_SETUID_FIXUP` is set. Credentials
+/// that already have these values are detected without cloning them.
+fn access_check_creds(creds: &Credentials) -> Option<Credentials> {
+    let (fsuid, fsgid) = (creds.uid, creds.gid);
+    let cap_effective = if creds.securebits.contains(SecureBits::NO_SETUID_FIXUP) {
+        creds.cap_effective
+    } else if creds.uid == 0 {
+        creds.cap_permitted
+    } else {
+        Capabilities::empty()
+    };
+    if (creds.fsuid, creds.fsgid, creds.cap_effective) == (fsuid, fsgid, cap_effective) {
+        return None;
+    }
+    Some(Credentials { fsuid, fsgid, cap_effective, ..creds.clone() })
+}
+
 pub fn sys_faccessat2(
     current_task: &CurrentTask,
     dir_fd: FdNumber,
@@ -853,23 +922,16 @@ pub fn sys_faccessat2(
         let name = lookup_at(current_task, dir_fd, user_path, lookup_flags)?;
         name.check_access(current_task, AccessCheck::for_access(mode))
     };
-    // Unless `AT_ACCESS` is set, perform lookup & access-checking using real UID & GID.
-    if flags & AT_EACCESS == 0 {
-        let mut temporary_creds = Credentials::clone(&current_task.current_creds());
-        temporary_creds.fsuid = temporary_creds.uid;
-        temporary_creds.fsgid = temporary_creds.gid;
-
-        // access() for root users should use permitted capabilities instead of effective capabilities.
-        // access() for non-root users should use an empty set of capabilities.
-        if temporary_creds.uid == 0 {
-            temporary_creds.cap_effective = temporary_creds.cap_permitted;
-        } else {
-            temporary_creds.cap_effective = Capabilities::empty();
-        }
-
-        current_task.override_creds(temporary_creds.into(), access_check)
+    // Unless `AT_EACCESS` is set, look up and check access with the real UID & GID; see
+    // `access_check_creds()`.
+    let override_creds = if flags & AT_EACCESS == 0 {
+        access_check_creds(&current_task.current_creds())
     } else {
-        access_check()
+        None
+    };
+    match override_creds {
+        Some(creds) => current_task.override_creds(creds.into(), access_check),
+        None => access_check(),
     }
 }
 
@@ -880,6 +942,7 @@ pub fn sys_getdents64(
     user_capacity: usize,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let mut offset = file.offset.copy();
     let mut sink = DirentSink64::new(current_task, &mut *offset, user_buffer, user_capacity);
     let result = file.readdir(current_task, &mut sink);
@@ -907,6 +970,7 @@ pub fn sys_fchdir(current_task: &CurrentTask, fd: FdNumber) -> Result<(), Errno>
     //
     // See https://man7.org/linux/man-pages/man2/open.2.html
     let file = current_task.get_file_allowing_opath(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     if !file.name.entry.node.is_dir() {
         return error!(ENOTDIR);
     }
@@ -924,6 +988,7 @@ pub fn sys_fstat(
     //
     // See https://man7.org/linux/man-pages/man2/open.2.html
     let file = current_task.get_file_allowing_opath(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let result = file.node().stat(current_task)?;
     current_task.write_object(buffer, &result)?;
     Ok(())
@@ -962,8 +1027,7 @@ pub fn sys_fstatat64(
     buffer: StatPtr,
     flags: u32,
 ) -> Result<(), Errno> {
-    let lookup_flags =
-        LookupFlags::from_bits(flags, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT)?;
+    let lookup_flags = LookupFlags::for_fstatat(flags)?;
     let result = match lookup_at(current_task, dir_fd, user_path, lookup_flags) {
         Ok(name) => name.entry.node.stat(current_task)?,
         // TODO(https://fxbug.dev/485370648) remove when unnecessary
@@ -1065,6 +1129,7 @@ pub fn sys_truncate(
 pub fn sys_ftruncate(current_task: &CurrentTask, fd: FdNumber, length: off_t) -> Result<(), Errno> {
     let length = length.try_into().map_err(|_| errno!(EINVAL))?;
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.ftruncate(current_task, length)?;
     Ok(())
 }
@@ -1075,14 +1140,9 @@ pub fn sys_mkdirat(
     user_path: UserCString,
     mode: FileMode,
 ) -> Result<(), Errno> {
-    let path = current_task.read_path(user_path)?;
-
-    if path.is_empty() {
-        return error!(ENOENT);
-    }
-    let (parent, basename) =
-        current_task.lookup_parent_at(&mut LookupContext::default(), dir_fd, path.as_ref())?;
-    parent.create_node(current_task, basename, mode.with_type(FileMode::IFDIR), DeviceId::NONE)?;
+    lookup_parent_at(current_task, dir_fd, user_path, |_, parent, basename| {
+        parent.create_node(current_task, basename, mode.with_type(FileMode::IFDIR), DeviceId::NONE)
+    })?;
     Ok(())
 }
 
@@ -1195,10 +1255,6 @@ pub fn sys_renameat2(
     let (old_parent, old_basename) = lookup(old_dir_fd, old_user_path)?;
     let (new_parent, new_basename) = lookup(new_dir_fd, new_user_path)?;
 
-    if new_basename.len() > NAME_MAX as usize {
-        return error!(ENAMETOOLONG);
-    }
-
     NamespaceNode::rename(
         current_task,
         &old_parent,
@@ -1213,6 +1269,7 @@ pub fn sys_fchmod(current_task: &CurrentTask, fd: FdNumber, mode: FileMode) -> R
     // Remove the filetype from the mode.
     let mode = mode & FileMode::PERMISSIONS;
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.name.entry.node.chmod(current_task, &file.name.mount, mode)?;
     file.name.entry.notify_ignoring_excl_unlink(InotifyMask::ATTRIB);
     Ok(())
@@ -1243,6 +1300,7 @@ pub fn sys_fchown(
     group: u32,
 ) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.name.entry.node.chown(
         current_task,
         &file.name.mount,
@@ -1274,14 +1332,6 @@ fn read_xattr_name(current_task: &CurrentTask, name_addr: UserCString) -> Result
         .map_err(|e| if e == ENAMETOOLONG { errno!(ERANGE) } else { e })?;
     if name.is_empty() {
         return error!(ERANGE);
-    }
-    let dot_index = memchr::memchr(b'.', &name).ok_or_else(|| errno!(ENOTSUP))?;
-    if name[dot_index + 1..].is_empty() {
-        return error!(EINVAL);
-    }
-    match &name[..dot_index] {
-        b"user" | b"security" | b"trusted" | b"system" => {}
-        _ => return error!(ENOTSUP),
     }
     Ok(name)
 }
@@ -1326,6 +1376,7 @@ pub fn sys_fgetxattr(
     size: usize,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     do_getxattr(current_task, &file.name, name_addr, value_addr, size)
 }
 
@@ -1372,6 +1423,7 @@ pub fn sys_fsetxattr(
     flags: u32,
 ) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     do_setxattr(current_task, &file.name, name_addr, value_addr, size, flags)
 }
 
@@ -1436,6 +1488,7 @@ pub fn sys_fremovexattr(
     name_addr: UserCString,
 ) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     do_removexattr(current_task, &file.name, name_addr)
 }
 
@@ -1505,6 +1558,7 @@ pub fn sys_flistxattr(
     size: usize,
 ) -> Result<usize, Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     do_listxattr(current_task, &file.name, list_addr, size)
 }
 
@@ -1515,6 +1569,7 @@ pub fn sys_getcwd(
 ) -> Result<usize, Errno> {
     let root = current_task.fs().root();
     let cwd = current_task.fs().cwd();
+    confirm_fs_syscall_trace_if(|| cwd.entry.node.fs().is_storage_backed());
     let mut user_cwd = match cwd.path_from_root(Some(&root)) {
         PathWithReachability::Reachable(path) => path,
         PathWithReachability::Unreachable(mut path) => {
@@ -1586,6 +1641,7 @@ pub fn sys_ioctl(
         }
         _ => {
             let file = current_task.get_file(fd)?;
+            confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
             file.ioctl(current_task, request, arg)
         }
     }
@@ -1872,6 +1928,7 @@ fn do_mount_create(
     };
 
     let fs = current_task.create_filesystem(fs_type.as_ref(), options)?;
+    confirm_fs_syscall_trace_if(|| fs.is_storage_backed());
 
     security::sb_kern_mount(current_task, &fs)?;
     target.mount(WhatToMount::Fs(fs), flags.mountpoint_flags())
@@ -2828,26 +2885,31 @@ pub fn sys_ppoll(
 
 pub fn sys_flock(current_task: &CurrentTask, fd: FdNumber, operation: u32) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     let operation = FlockOperation::from_flags(operation)?;
     file.flock(current_task, operation)
 }
 
 pub fn sys_sync(current_task: &CurrentTask) -> Result<(), Errno> {
+    confirm_fs_syscall_trace();
     current_task.kernel().mounts.sync_all(current_task)
 }
 
 pub fn sys_syncfs(current_task: &CurrentTask, fd: FdNumber) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.fs.sync(current_task)
 }
 
 pub fn sys_fsync(current_task: &CurrentTask, fd: FdNumber) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.sync(current_task)
 }
 
 pub fn sys_fdatasync(current_task: &CurrentTask, fd: FdNumber) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     file.data_sync(current_task)
 }
 
@@ -2866,6 +2928,7 @@ pub fn sys_sync_file_range(
     }
 
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
 
     if offset < 0 || length < 0 {
         return error!(EINVAL);
@@ -2923,6 +2986,7 @@ pub fn sys_fadvise64(
     }
 
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     // fadvise does not work on pipes.
     if file.downcast_file::<PipeFileObject>().is_some() {
         return error!(ESPIPE);
@@ -2944,6 +3008,7 @@ pub fn sys_fallocate(
     len: off_t,
 ) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
 
     // Offset must not be less than 0.
     // Length must not be less than or equal to 0.
@@ -3019,7 +3084,9 @@ pub fn sys_utimensat(
         if flags != 0 {
             return error!(EINVAL);
         }
-        current_task.get_file(dir_fd)?.name.to_passive()
+        let file = current_task.get_file(dir_fd)?;
+        confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
+        file.name.to_passive()
     } else {
         let lookup_flags = LookupFlags::from_bits(flags, AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)?;
         lookup_at(current_task, dir_fd, user_path, lookup_flags)?
@@ -3085,6 +3152,7 @@ pub fn sys_readahead(
     length: usize,
 ) -> Result<(), Errno> {
     let file = current_task.get_file(fd)?;
+    confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
     // Allow only non-negative values of `offset`. Some versions of Linux allow it to be negative,
     // but GVisor tests require `readahead()` to fail in this case.
     let offset: usize = offset.try_into().map_err(|_| errno!(EINVAL))?;
@@ -3201,7 +3269,7 @@ pub fn sys_io_destroy(current_task: &CurrentTask, ctx_id: aio_context_t) -> Resu
 #[cfg(target_arch = "aarch64")]
 mod arch32 {
     use crate::mm::MemoryAccessorExt;
-    use crate::task::CurrentTask;
+    use crate::task::{CurrentTask, confirm_fs_syscall_trace_if};
     use crate::vfs::syscalls::{
         LookupFlags, OpenFlags, lookup_at, sys_dup3, sys_faccessat, sys_fallocate, sys_lseek,
         sys_mkdirat, sys_openat, sys_readlinkat, sys_unlinkat,
@@ -3257,6 +3325,7 @@ mod arch32 {
         arch32_stat_buf: UserRef<uapi::arch32::stat64>,
     ) -> Result<(), Errno> {
         let file = current_task.get_file_allowing_opath(fd)?;
+        confirm_fs_syscall_trace_if(|| file.fs.is_storage_backed());
         stat64(current_task, file.node(), arch32_stat_buf)
     }
 
@@ -3607,6 +3676,7 @@ mod tests {
     use crate::task::KernelFeatures;
     use crate::testing::*;
     use starnix_types::vfs::default_statfs;
+    use starnix_uapi::auth::CAP_DAC_OVERRIDE;
     use starnix_uapi::{O_RDONLY, SEEK_CUR, SEEK_END, SEEK_SET};
     use zerocopy::IntoBytes;
 
@@ -3875,6 +3945,114 @@ mod tests {
     }
 
     #[::fuchsia::test]
+    fn test_access_check_creds_skips_noop_override() {
+        // A non-root task whose filesystem IDs are its real IDs needs no override if it has no
+        // effective capabilities, even if it has permitted ones. Neither does root whose effective
+        // capabilities are its permitted capabilities, even if those are reduced.
+        assert!(access_check_creds(&Credentials::with_ids(1000, 1001)).is_none());
+        let creds =
+            Credentials { cap_permitted: CAP_DAC_OVERRIDE, ..Credentials::with_ids(1000, 1001) };
+        assert!(access_check_creds(&creds).is_none());
+        assert!(access_check_creds(&Credentials::with_ids(0, 0)).is_none());
+        let creds = Credentials {
+            cap_permitted: CAP_DAC_OVERRIDE,
+            cap_effective: CAP_DAC_OVERRIDE,
+            ..Credentials::with_ids(0, 0)
+        };
+        assert!(access_check_creds(&creds).is_none());
+    }
+
+    #[::fuchsia::test]
+    fn test_access_check_creds_uses_real_ids() {
+        // Other filesystem IDs are replaced with the real IDs, also if only one of them differs.
+        let creds = Credentials { fsuid: 2000, fsgid: 2001, ..Credentials::with_ids(1000, 1001) };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!((access_creds.uid, access_creds.gid), (1000, 1001));
+        assert_eq!((access_creds.fsuid, access_creds.fsgid), (1000, 1001));
+        assert_eq!(access_creds.cap_effective, Capabilities::empty());
+        let creds = Credentials { fsuid: 2000, ..Credentials::with_ids(1000, 1001) };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!((access_creds.fsuid, access_creds.fsgid), (1000, 1001));
+        let creds = Credentials { fsgid: 2001, ..Credentials::with_ids(1000, 1001) };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!((access_creds.fsuid, access_creds.fsgid), (1000, 1001));
+    }
+
+    #[::fuchsia::test]
+    fn test_access_check_creds_adjusts_capabilities() {
+        // A non-root task checks access without its effective capabilities.
+        let creds = Credentials {
+            cap_permitted: CAP_DAC_OVERRIDE,
+            cap_effective: CAP_DAC_OVERRIDE,
+            ..Credentials::with_ids(1000, 1001)
+        };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!((access_creds.fsuid, access_creds.fsgid), (1000, 1001));
+        assert_eq!(access_creds.cap_effective, Capabilities::empty());
+        assert_eq!(access_creds.cap_permitted, CAP_DAC_OVERRIDE);
+
+        // Root checks access with its permitted capabilities.
+        let creds =
+            Credentials { cap_effective: Capabilities::empty(), ..Credentials::with_ids(0, 0) };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!(access_creds.cap_effective, creds.cap_permitted);
+    }
+
+    #[::fuchsia::test]
+    fn test_access_check_creds_keeps_capabilities_with_no_setuid_fixup() {
+        // With `SECBIT_NO_SETUID_FIXUP`, the effective capabilities are kept, so a non-root task
+        // with effective capabilities and root without them need no override...
+        let creds = Credentials {
+            cap_permitted: CAP_DAC_OVERRIDE,
+            cap_effective: CAP_DAC_OVERRIDE,
+            securebits: SecureBits::NO_SETUID_FIXUP,
+            ..Credentials::with_ids(1000, 1001)
+        };
+        assert!(access_check_creds(&creds).is_none());
+        let creds = Credentials {
+            cap_effective: Capabilities::empty(),
+            securebits: SecureBits::NO_SETUID_FIXUP,
+            ..Credentials::with_ids(0, 0)
+        };
+        assert!(access_check_creds(&creds).is_none());
+
+        // ... and only the filesystem IDs are replaced.
+        let creds = Credentials {
+            fsuid: 2000,
+            cap_permitted: CAP_DAC_OVERRIDE,
+            cap_effective: CAP_DAC_OVERRIDE,
+            securebits: SecureBits::NO_SETUID_FIXUP,
+            ..Credentials::with_ids(1000, 1001)
+        };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!((access_creds.fsuid, access_creds.fsgid), (1000, 1001));
+        assert_eq!(access_creds.cap_effective, CAP_DAC_OVERRIDE);
+    }
+
+    #[::fuchsia::test]
+    fn test_access_check_creds_setuid_root_program() {
+        // A set-user-ID-root program checks access as its real user, without capabilities. Its
+        // other IDs, capability sets and supplementary groups are kept.
+        let creds = Credentials {
+            euid: 0,
+            saved_uid: 0,
+            fsuid: 0,
+            cap_permitted: Capabilities::all(),
+            cap_effective: Capabilities::all(),
+            groups: vec![3003],
+            ..Credentials::with_ids(1000, 1001)
+        };
+        let access_creds = access_check_creds(&creds).expect("override needed");
+        assert_eq!((access_creds.fsuid, access_creds.fsgid), (1000, 1001));
+        assert_eq!(access_creds.cap_effective, Capabilities::empty());
+        assert_eq!((access_creds.uid, access_creds.gid), (1000, 1001));
+        assert_eq!((access_creds.euid, access_creds.egid), (0, 1001));
+        assert_eq!((access_creds.saved_uid, access_creds.saved_gid), (0, 1001));
+        assert_eq!(access_creds.cap_permitted, Capabilities::all());
+        assert_eq!(access_creds.groups, vec![3003]);
+    }
+
+    #[::fuchsia::test]
     async fn test_sys_sync() -> Result<(), Errno> {
         spawn_kernel_and_run(async |current_task| {
             sys_sync(current_task)?;
@@ -3956,6 +4134,36 @@ mod tests {
             features,
         )
         .await;
+    }
+
+    #[::fuchsia::test]
+    fn test_fstatat_lookup_flags_imply_no_automount() {
+        for flags in [
+            0,
+            AT_SYMLINK_NOFOLLOW,
+            AT_EMPTY_PATH,
+            AT_NO_AUTOMOUNT,
+            AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT,
+        ] {
+            let lookup_flags = LookupFlags::for_fstatat(flags).expect("valid fstatat flags");
+            assert!(!lookup_flags.automount, "flags {flags:#x}");
+            assert_eq!(
+                lookup_flags.allow_empty_path,
+                flags & AT_EMPTY_PATH != 0,
+                "flags {flags:#x}"
+            );
+            let symlink_mode = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+                SymlinkMode::NoFollow
+            } else {
+                SymlinkMode::Follow
+            };
+            assert_eq!(lookup_flags.symlink_mode, symlink_mode, "flags {flags:#x}");
+        }
+        assert_eq!(LookupFlags::for_fstatat(AT_SYMLINK_FOLLOW).unwrap_err(), errno!(EINVAL));
+
+        // statx(2) still asks for an automount unless the caller passes AT_NO_AUTOMOUNT.
+        assert!(LookupFlags::from(StatxFlags::empty()).automount);
+        assert!(!LookupFlags::from(StatxFlags::AT_NO_AUTOMOUNT).automount);
     }
 
     #[::fuchsia::test]

@@ -51,7 +51,6 @@ fuchsia_driver_component("component") {
     ":bind",
     ":driver",
   ]
-  info = "meta/lab_root_info.json"
 }
 
 driver_bind_rules("sample_bind") {
@@ -89,7 +88,6 @@ fuchsia_driver_component("sample_component") {
     ":sample_bind",
     ":sample_driver",
   ]
-  info = "meta/lab_sample_driver_info.json"
 }
 
 # Standalone package so the conformance workflow can register lab_root

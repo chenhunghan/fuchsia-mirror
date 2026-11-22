@@ -20,6 +20,5 @@ group("tests") {
     "usb-cdc-ecm:tests",
     "usb-cdc-function:tests",
     "virtio:tests",
-    "//zircon/third_party/dev/ethernet/e1000:tests",
   ]
 }

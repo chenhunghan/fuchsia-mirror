@@ -18,6 +18,9 @@ idk_cc_source_library_zx(
     api_file_path = "//sdk/lib/mmio-ptr:mmio-ptr.api",
     category = "partner",
     idk_name = "mmio-ptr",
+    # Needed on host in Bazel for <zircon/compiler.h> (https://fxbug.dev/429377203).
+    # @bazel2gn:skip
+    non_fuchsia_deps = ["//zircon/system/public"],
     stable = True,
     visibility = ["//:__subpackages__"],
 )

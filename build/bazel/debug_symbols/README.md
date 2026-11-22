@@ -7,9 +7,9 @@ of Bazel and third-party rulesets, and is subject to change over
 time:
 
 - Bazel 7.5
-- `@rules_cc` version 0.1.1
-- `@rules_rust` version 0.59.1
-- `@rules_go` version 0.54.0
+- `@rules_cc` version 0.2.25
+- `@rules_rust` version 0.74.0
+- `@rules_go` version 0.61.1
 
 Given that most of these details are completely undocumented, they
 may change when upgrading any versions of these dependencies.
@@ -281,6 +281,34 @@ For all other binary targets that need to be packaged or distributed, such
 as host tools or Fuchsia binaries not built with the SDK, a dedicated Bazel
 rule will be needed to perform similar stripping. Tracked by
 https://fxbug.dev/443982549.
+
+## Source path remapping (in-tree vs. OOT)
+
+In-tree Bazel builds emit `DW_AT_comp_dir = "."` and `../../<path>` for
+checked-in `@//` C, C++, and assembly sources via
+`//build/config:relative_paths` (`//build/config/BUILD.bazel`) so DWARF and
+Breakpad `.sym` paths match GN binaries under two-level `out/<name>` build
+directories without modifying `zxdb` or `ffx debug symbolize` (matching Rust
+remapping is tracked under https://fxbug.dev/582745291).
+
+- **Guarded namespaces**: Clang (`-fdebug-prefix-map` and in-tree coverage
+  `-fcoverage-prefix-map`) guards `bazel-out/`, `external/`, and
+  `fuchsia_build_generated/` (including `-iquote .` `./`-prefixed lookups)
+  against `../../` prefixing while passing only `-fmacro-prefix-map=./=`
+  (stripping `-iquote .`'s leading `./`) so both main-file and header C/C++
+  `__FILE__` expansions resolve to `<path>` (vs. GN's `../../<path>`;
+  `FX_LOGS` handles both, while migrated GN tests checking literal `"../../"` in
+  `__FILE__` should expect `<path>`).
+- **OOT isolation**: Standalone out-of-tree `@rules_fuchsia` workspaces keep
+  `use_default_build_flags = False` and continue using `relpath_debug_info` in
+  `cc_features.bzl`, omitting `../../` so `bazel run :pkg.debug_symbols`
+  resolves workspace-relative source files directly.
+- **Custom `fx --dir` depths**: If a local build directory uses a depth other
+  than two levels (e.g., `fx --dir build`), add a manual `zxdb` mapping
+  (`set source-map += <abs_build_dir>/../..=<abs_fuchsia_dir>` when
+  `.symbol-index.json` registers `build_dir`, or
+  `set source-map += ./../..=<abs_fuchsia_dir>` when `build_dir` is unset) to
+  resolve checked-in sources.
 
 [strip_flag]: https://bazel.build/docs/user-manual#strip
 [fuchsia_cc_toolchain_debuginfo]: https://cs.opensource.google/fuchsia/fuchsia/+/main:build/bazel_sdk/bazel_rules_fuchsia/common/toolchains/clang/cc_features.bzl;drc=45259f8d1473df80ecd8c180e97382886f19baa4;l=203

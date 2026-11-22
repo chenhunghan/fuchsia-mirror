@@ -5,6 +5,7 @@
 #ifndef SRC_LIB_FSL_VMO_VECTOR_H_
 #define SRC_LIB_FSL_VMO_VECTOR_H_
 
+#include <fidl/fuchsia.mem/cpp/natural_types.h>
 #include <lib/zx/vmo.h>
 
 #include <vector>
@@ -20,11 +21,18 @@ FXL_EXPORT bool VmoFromVector(const std::vector<char>& vector, SizedVmo* sized_v
 // Make a new shared buffer with the contents of a char vector.
 FXL_EXPORT bool VmoFromVector(const std::vector<char>& vector, fuchsia::mem::Buffer* sized_vmo_ptr);
 
+// Make a new shared buffer with the contents of a char vector.
+FXL_EXPORT bool VmoFromVector(const std::vector<char>& vector, fuchsia_mem::Buffer* buffer_ptr);
+
 // Copy the contents of a shared buffer into a char vector.
 FXL_EXPORT bool VectorFromVmo(const SizedVmo& shared_buffer, std::vector<char>* vector_ptr);
 
 // Copy the contents of a shared buffer into a char vector.
 FXL_EXPORT bool VectorFromVmo(const fuchsia::mem::Buffer& shared_buffer,
+                              std::vector<char>* vector_ptr);
+
+// Copy the contents of a shared buffer into a char vector.
+FXL_EXPORT bool VectorFromVmo(const fuchsia_mem::Buffer& shared_buffer,
                               std::vector<char>* vector_ptr);
 
 // Make a new shared buffer with the contents of a uint8_t vector.
@@ -34,11 +42,18 @@ FXL_EXPORT bool VmoFromVector(const std::vector<uint8_t>& vector, SizedVmo* size
 FXL_EXPORT bool VmoFromVector(const std::vector<uint8_t>& vector,
                               fuchsia::mem::Buffer* sized_vmo_ptr);
 
+// Make a new shared buffer with the contents of a uint8_t vector.
+FXL_EXPORT bool VmoFromVector(const std::vector<uint8_t>& vector, fuchsia_mem::Buffer* buffer_ptr);
+
 // Copy the contents of a shared buffer into a uint8_t vector.
 FXL_EXPORT bool VectorFromVmo(const SizedVmo& shared_buffer, std::vector<uint8_t>* vector_ptr);
 
 // Copy the contents of a shared buffer into a uint8_t vector.
 FXL_EXPORT bool VectorFromVmo(const fuchsia::mem::Buffer& shared_buffer,
+                              std::vector<uint8_t>* vector_ptr);
+
+// Copy the contents of a shared buffer into a uint8_t vector.
+FXL_EXPORT bool VectorFromVmo(const fuchsia_mem::Buffer& shared_buffer,
                               std::vector<uint8_t>* vector_ptr);
 
 }  // namespace fsl

@@ -61,6 +61,7 @@ pub struct EntityReport {
     pub is_finished: bool,
     pub artifacts: Vec<(ArtifactType, InMemoryArtifact)>,
     pub directories: Vec<(DirectoryArtifactType, InMemoryDirectoryWriter)>,
+    pub runner: Option<String>,
 }
 
 #[derive(Clone)]
@@ -94,7 +95,11 @@ impl Reporter for InMemoryReporter {
         Ok(())
     }
 
-    fn set_entity_info(&self, _entity: &EntityId, _info: &EntityInfo) {}
+    fn set_entity_info(&self, entity: &EntityId, info: &EntityInfo) {
+        if let Some(runner) = &info.runner {
+            self.entities.lock().entry(*entity).or_default().runner = Some(runner.clone());
+        }
+    }
 
     fn entity_started(&self, id: &EntityId, timestamp: Timestamp) -> Result<(), Error> {
         self.entities.lock().entry(*id).or_default().started_time = Some(timestamp);

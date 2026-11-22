@@ -30,7 +30,7 @@ use indexmap::IndexSet;
 use selinux::permission_check::PermissionCheck;
 use selinux::policy::{FsUseType, XpermsKind};
 use selinux::{
-    ClassPermission, CommonFilePermission, CommonFilePermissionSet, CommonFsNodePermission,
+    CommonFilePermission, CommonFilePermissionSet, CommonFsNodePermission,
     CommonFsNodePermissionSet, DirPermission, DirPermissionSet, FdPermission, FileClass,
     FileSystemLabel, FileSystemLabelingScheme, FileSystemMountOptions, ForClass, FsNodeClass,
     InitialSid, KernelPermission, KernelPermissionSet, PolicyCap, ProcessPermission, SecurityId,
@@ -46,7 +46,7 @@ use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::{errno, error};
 use std::cell::Ref;
 use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// Empty permission set to pass to `has_file_permissions()`.
@@ -73,21 +73,25 @@ fn common_fs_node_permissions_from_flags(flags: PermissionFlags) -> CommonFsNode
     result
 }
 
-/// Returns the set of `Permissions` on `class`, corresponding to the specified `flags`.
-fn permissions_from_flags(flags: PermissionFlags, class: FsNodeClass) -> KernelPermissionSet {
-    let result = common_fs_node_permissions_from_flags(flags - PermissionFlags::EXEC);
+impl ForClass<FsNodeClass> for PermissionFlags {
+    type Output = KernelPermissionSet;
 
-    if let FsNodeClass::File(class) = class {
-        if flags.contains(PermissionFlags::EXEC) {
-            if class == FileClass::Dir {
-                return (DirPermissionSet::from(result) | DirPermission::Search).into();
-            } else {
-                return (CommonFilePermissionSet::from(result) | CommonFilePermission::Execute)
-                    .for_class(class);
+    /// Returns the set of permissions on `class` corresponding to these flags.
+    fn for_class(&self, class: FsNodeClass) -> KernelPermissionSet {
+        let result = common_fs_node_permissions_from_flags(*self - PermissionFlags::EXEC);
+
+        if let FsNodeClass::File(class) = class {
+            if self.contains(PermissionFlags::EXEC) {
+                if class == FileClass::Dir {
+                    return (DirPermissionSet::from(result) | DirPermission::Search).into();
+                } else {
+                    return (CommonFilePermissionSet::from(result) | CommonFilePermission::Execute)
+                        .for_class(class);
+                }
             }
         }
+        result.for_class(class)
     }
-    result.for_class(class)
 }
 
 fn is_internal_operation(current_task: &CurrentTask) -> bool {
@@ -206,17 +210,6 @@ fn check_permission_and_xperms(
     );
 
     if let Some(audit_permissions) = result.audit_permissions(permission.class()) {
-        if !result.permit() {
-            current_task
-                .kernel()
-                .security_state
-                .state
-                .as_ref()
-                .unwrap()
-                .access_denial_count
-                .fetch_add(1, Ordering::Release);
-        }
-
         audit_decision(
             current_task,
             permission_check,
@@ -237,7 +230,7 @@ fn has_fs_node_permissions_dontaudit(
     _current_task: &CurrentTask,
     subject_sid: SecurityId,
     fs_node: NonPrivateFsNode<'_>,
-    permissions: impl ForClass<FsNodeClass, Output = KernelPermissionSet>,
+    permissions: impl ForClass<FsNodeClass, Output: Into<KernelPermissionSet>>,
 ) -> Result<(), Errno> {
     fuchsia_trace::duration!(
         CATEGORY_STARNIX_SECURITY,
@@ -245,7 +238,7 @@ fn has_fs_node_permissions_dontaudit(
     );
 
     let target = fs_node_effective_sid_and_class(fs_node);
-    let permissions = permissions.for_class(target.class);
+    let permissions = permissions.for_class(target.class).into();
     if permissions.is_empty() {
         return Ok(());
     }
@@ -263,13 +256,13 @@ fn has_fs_node_permissions(
     current_task: &CurrentTask,
     subject_sid: SecurityId,
     fs_node: NonPrivateFsNode<'_>,
-    permissions: impl ForClass<FsNodeClass, Output = KernelPermissionSet>,
+    permissions: impl ForClass<FsNodeClass, Output: Into<KernelPermissionSet>>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     fuchsia_trace::duration!(CATEGORY_STARNIX_SECURITY, "security.selinux.has_fs_node_permissions");
 
     let target = fs_node_effective_sid_and_class(fs_node);
-    let permissions = permissions.for_class(target.class);
+    let permissions = permissions.for_class(target.class).into();
     if permissions.is_empty() {
         return Ok(());
     }
@@ -340,7 +333,7 @@ fn check_permission(
     current_task: &CurrentTask,
     source_sid: SecurityId,
     target_sid: SecurityId,
-    permission: impl ClassPermission,
+    permission: impl Into<KernelPermission>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     check_permissions(
@@ -348,7 +341,7 @@ fn check_permission(
         current_task,
         source_sid,
         target_sid,
-        permission,
+        permission.into(),
         audit_context,
     )
 }
@@ -374,17 +367,6 @@ fn check_permissions(
     let result = permission_check.has_permissions(source_sid, target_sid, permissions);
 
     if let Some(audit_permissions) = result.audit_permissions(permissions.class()) {
-        if !result.permit() {
-            current_task
-                .kernel()
-                .security_state
-                .state
-                .as_ref()
-                .unwrap()
-                .access_denial_count
-                .fetch_add(1, Ordering::Release);
-        }
-
         audit_decision(
             current_task,
             permission_check,
@@ -404,7 +386,7 @@ fn check_self_permission(
     permission_check: &PermissionCheck<'_>,
     current_task: &CurrentTask,
     subject_sid: SecurityId,
-    permission: impl ClassPermission,
+    permission: impl Into<KernelPermission>,
     audit_context: Auditable<'_>,
 ) -> Result<(), Errno> {
     check_permission(
@@ -446,7 +428,6 @@ pub(super) fn kernel_init_security(
         server,
         pending_file_systems: LockDepMutex::default(),
         selinuxfs_null: OnceLock::default(),
-        access_denial_count: AtomicU64::new(0u64),
         has_policy: false.into(),
         _inspect_node: inspect_node,
     }
@@ -471,18 +452,11 @@ pub(super) struct KernelState {
     /// with a null file.
     pub(super) selinuxfs_null: OnceLock<FileHandle>,
 
-    /// Counts the number of times that an AVC denial is audit-logged.
-    pub(super) access_denial_count: AtomicU64,
-
     /// Inspect node through which SELinux status is exposed.
     pub(super) _inspect_node: fuchsia_inspect::Node,
 }
 
 impl KernelState {
-    pub(super) fn access_denial_count(&self) -> u64 {
-        self.access_denial_count.load(Ordering::Acquire)
-    }
-
     pub(super) fn has_policy(&self) -> bool {
         self.has_policy.load(Ordering::Acquire)
     }
@@ -869,7 +843,7 @@ fn policycap_support(policy_cap: PolicyCap) -> PolicyCapSupport {
 }
 
 /// Security state for a current task. This holds the task-local cache for permission check results.
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct CurrentTaskState {
     pub local_cache: selinux::PerThreadCache,
 }

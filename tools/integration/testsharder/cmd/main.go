@@ -202,6 +202,10 @@ func execute(ctx context.Context, flags testsharderFlags, params *proto.Params, 
 	opts := &testsharder.ShardOptions{
 		Tags:   params.EnvironmentTags,
 		UseTCG: params.UseTcg,
+		// Perf tests aren't put into separate shards with --preserve-order,
+		// which assumes one shard per environment (maxShardsPerEnv=1) and
+		// runs tests in a fixed order.
+		SeparatePerfShards: !params.DisableSeparatePerfShards && !flags.preserveTestOrder,
 	}
 	// Pass in the test-list to carry over tags to the shards.
 	testListPath := filepath.Join(flags.buildDir, m.TestListLocation()[0])

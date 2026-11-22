@@ -26,7 +26,17 @@ std::string PathForExec(std::string_view binary_name) {
   return "data/bin/" + std::string(binary_name);
 }
 
-TEST(GenfsconCreateTest, Create) {
+class GenfsconCreateTest : public ::testing::Test {
+ protected:
+  static void SetUpTestSuite() {
+    ASSERT_THAT(EnsureDeviceNode("/dev/fuse", S_IFCHR | 0666, makedev(10, 229)),
+                SyscallResultIsOk());
+    ASSERT_THAT(mkdir("/fuse", 0755),
+                testing::AnyOf(SyscallSucceeds(), SyscallFailsWithErrno(EEXIST)));
+  }
+};
+
+TEST_F(GenfsconCreateTest, Create) {
   // Pipe used to confirm that the filesystem is ready.
   int pipe_ends[2];
   SAFE_SYSCALL(pipe(pipe_ends));
@@ -37,7 +47,7 @@ TEST(GenfsconCreateTest, Create) {
   fork_helper.RunInForkedProcess([&] {
     std::string binary_name = "fuse_memfs_bin";
     std::string path_for_exec = PathForExec(binary_name);
-    std::string fuse_dev = "/dev_fuse";
+    std::string fuse_dev = "/dev/fuse";
     std::string path = "/fuse";
 
     // The fuse_memfs program writes to fd 3 to signal that the fs is ready.
@@ -62,7 +72,7 @@ TEST(GenfsconCreateTest, Create) {
   SAFE_SYSCALL(umount("/fuse"));
 }
 
-TEST(GenfsconCreateTest, FsCreateCon) {
+TEST_F(GenfsconCreateTest, FsCreateCon) {
   // Pipe used to confirm that the filesystem is ready.
   int pipe_ends[2];
   SAFE_SYSCALL(pipe(pipe_ends));
@@ -73,7 +83,7 @@ TEST(GenfsconCreateTest, FsCreateCon) {
   fork_helper.RunInForkedProcess([&] {
     std::string binary_name = "fuse_memfs_bin";
     std::string path_for_exec = PathForExec(binary_name);
-    std::string fuse_dev = "/dev_fuse";
+    std::string fuse_dev = "/dev/fuse";
     std::string path = "/fuse";
 
     // The fuse_memfs program writes to fd 3 to signal that the fs is ready.
@@ -102,8 +112,4 @@ TEST(GenfsconCreateTest, FsCreateCon) {
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
-  EXPECT_THAT(mknod("/dev_fuse", S_IFCHR | 0666, makedev(10, 229)), SyscallSucceeds());
-  EXPECT_THAT(mkdir("/fuse", 0755), SyscallSucceeds());
-  return "genfscon_create_policy";
-}
+extern std::string GetTestPolicyName() { return "genfscon_create_policy"; }

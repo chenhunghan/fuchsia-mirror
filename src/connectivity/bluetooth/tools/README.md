@@ -10,8 +10,9 @@ channels for all bluetooth controllers on the system.
 default) supporting the pcap format. The captured packets can be visualized using any protocol
 analyzer that supports pcap (e.g. Wireshark).
 
-This will fetch the current buffer of packets for all devices under `/dev/class/bt-hci/`,
-output the traffic to stdout, then exit:
+This will fetch the current buffer of packets for all
+`fuchsia.hardware.bluetooth.Service` instances, output the traffic to stdout,
+then exit:
 
 ```
 $ bt-snoop-cli --dump --format pretty

@@ -3,6 +3,14 @@
 # found in the LICENSE file.
 
 load(
+    "//build/bazel/rules/components:cml_shard.bzl",
+    "cml_shard",
+)
+load(
+    "//build/bazel/rules/components:expect_includes.bzl",
+    "expect_includes",
+)
+load(
     "//build/bazel/rules/components:fx_component.bzl",
     "fx_component",
     "fx_component_manifest",
@@ -19,6 +27,57 @@ load(
 )
 
 package(default_applicable_licenses = ["//:license"])
+
+cml_shard(
+    name = "meta/client.shard",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    shard = "meta/client.shard.cml",
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+# Appended to `deps` by `fx_sharded_test_package()` when `expectations` is
+# unset so `cmc check-includes` verifies that the test manifest includes
+# `meta/client.shard.cml`.
+expect_includes(
+    name = "expected_includes_client",
+    includes = [":meta/client.shard"],
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+cml_shard(
+    name = "meta/client_with_expectations.shard",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/lib/testing/expectation:meta/common.shard",
+    ],
+    shard = "meta/client_with_expectations.shard.cml",
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
+
+# Appended to `deps` by `fx_sharded_test_package()` when `expectations` is
+# set so `cmc check-includes` verifies that the test manifest includes
+# `meta/client_with_expectations.shard.cml`.
+expect_includes(
+    name = "expected_includes_client_with_expectations",
+    includes = [":meta/client_with_expectations.shard"],
+    visibility = [
+        "//src:__subpackages__",
+        "//third_party/gvisor_syscall_tests:__subpackages__",
+        "//vendor:__subpackages__",
+    ],
+)
 
 rustc_binary(
     name = "bin",

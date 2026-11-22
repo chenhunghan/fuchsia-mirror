@@ -17,11 +17,6 @@
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-/// Returns the path to the policy that should be loaded for use by the test-suite.
-/// This hook may also perform pre-policy-load work, e.g. creating kernel objects for later
-/// validation by tests.
-extern std::string DoPrePolicyLoadWork();
-
 namespace {
 
 struct CommandLineOptions {
@@ -29,29 +24,20 @@ struct CommandLineOptions {
   bool skip_audit = false;
 };
 
-void LoadPolicy(const std::string& name) {
-  // Ensure that no previous policy has been loaded.
-  auto previous_policy = ReadFile("/sys/fs/selinux/policy");
-  ASSERT_THAT(previous_policy, SyscallResultIsErrno(EINVAL));
-
-  // Load the specified policy from the policy data directory.
-  auto policy_path = "data/policies/" + name;
-  auto binary_policy = ReadFile(policy_path);
-  ASSERT_THAT(binary_policy, SyscallResultIsOk()) << "Read of policy at " << policy_path;
-  auto result = WriteExistingFile("/sys/fs/selinux/load", binary_policy.value());
-  ASSERT_THAT(result, SyscallResultIsOk()) << "Load of policy from " << policy_path;
-
-  // Ensure that the binary policy is reported by the kernel as having been loaded.
-  auto loaded_policy = ReadFile("/sys/fs/selinux/policy");
-  ASSERT_THAT(loaded_policy, SyscallResultIsOk());
-}
+std::string g_initial_task_security_context;
 
 // Perform one-time initialization of the test system.
 void PrepareTestEnvironment() {
   // Check if selinuxfs is already mounted as a proxy for environment setup.
   auto mounts = ReadFile("/proc/mounts");
   if (mounts.is_ok() && cpp23::contains(mounts.value(), "/sys/fs/selinux selinuxfs")) {
-    // Environment appears to be already initialized.
+    // Environment appears to be already initialized (e.g. a subsequent test chunk in the same
+    // container). Suites that define `DoPrePolicyLoadWork()` require a fresh pre-policy
+    // environment and must not be split across multiple invocations.
+    if (DoPrePolicyLoadWork) {
+      FAIL() << "DoPrePolicyLoadWork() cannot run because the test environment was already "
+                "initialized by a prior invocation.";
+    }
     return;
   }
   ASSERT_THAT(mkdir("/proc", 0755), SyscallSucceeds());
@@ -70,20 +56,62 @@ void PrepareTestEnvironment() {
   ASSERT_THAT(mount("bpf", "/sys/fs/bpf", "bpf", MS_NOEXEC | MS_NOSUID, nullptr),
               SyscallSucceeds());
   ASSERT_THAT(mount("tmpfs", "/tmp", "tmpfs", MS_RELATIME, nullptr), SyscallSucceeds());
+  ASSERT_THAT(mount("tmpfs", "/dev", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_STRICTATIME, nullptr),
+              SyscallSucceeds());
 
-  auto policy_path = DoPrePolicyLoadWork();
-  LoadPolicy(policy_path);
+  if (DoPrePolicyLoadWork) {
+    DoPrePolicyLoadWork();
+  }
+
+  // Ensure that no previous policy has been loaded.
+  auto previous_policy = ReadFile("/sys/fs/selinux/policy");
+  ASSERT_THAT(previous_policy, SyscallResultIsErrno(EINVAL));
+
+  LoadPolicy(GetTestPolicyName());
 }
-
-std::string g_initial_task_security_context;
 
 class TaskSecurityContextChecker : public ::testing::EmptyTestEventListener {
  public:
+  void OnTestStart(const testing::TestInfo& test_info) override {
+    auto current_policy = ReadFile("/sys/fs/selinux/policy");
+    if (current_policy.is_error()) {
+      ADD_FAILURE() << "Failed to read loaded policy at start of test "
+                    << test_info.test_suite_name() << "." << test_info.name() << ": "
+                    << strerror(current_policy.error_value());
+      test_start_policy_.clear();
+      return;
+    }
+    test_start_policy_ = std::move(current_policy.value());
+  }
+
   void OnTestEnd(const testing::TestInfo& test_info) override {
+    CheckPolicy(test_info, "end");
     CheckSecurityContext(test_info, "end");
   }
 
  private:
+  void CheckPolicy(const testing::TestInfo& test_info, const char* phase) {
+    if (test_start_policy_.empty()) {
+      return;
+    }
+    auto current_policy = ReadFile("/sys/fs/selinux/policy");
+    if (current_policy.is_error()) {
+      ADD_FAILURE() << "Failed to read loaded policy at " << phase << " of test "
+                    << test_info.test_suite_name() << "." << test_info.name() << ": "
+                    << strerror(current_policy.error_value());
+      return;
+    }
+    if (current_policy.value() != test_start_policy_) {
+      ADD_FAILURE() << "Loaded policy was modified at " << phase << " of test "
+                    << test_info.test_suite_name() << "." << test_info.name()
+                    << " and not restored.";
+      auto reset_result = WriteExistingFile("/sys/fs/selinux/load", test_start_policy_);
+      if (reset_result.is_error()) {
+        ADD_FAILURE() << "Failed to restore policy after test " << test_info.test_suite_name()
+                      << "." << test_info.name() << ": " << strerror(reset_result.error_value());
+      }
+    }
+  }
   void CheckSecurityContext(const testing::TestInfo& test_info, const char* phase) {
     auto current_context = ReadTaskAttr("current");
     if (current_context.is_error()) {
@@ -106,6 +134,8 @@ class TaskSecurityContextChecker : public ::testing::EmptyTestEventListener {
       }
     }
   }
+
+  std::string test_start_policy_;
 };
 
 class UserspaceTestEnvironment : public ::testing::Environment {
@@ -159,6 +189,7 @@ int main(int argc, char** argv) {
   auto parse_res = parse_args(argc, argv);
   if (parse_res.is_error()) {
     fprintf(stderr, "%s\n", parse_res.error_value().c_str());
+    return 1;
   }
 
   // Set up gTest to perform test environment setup at-most-once.

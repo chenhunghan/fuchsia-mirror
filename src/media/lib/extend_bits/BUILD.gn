@@ -6,6 +6,11 @@ config("extend_bits_include_config") {
   include_dirs = [ "include" ]
 }
 
+group("tests") {
+  testonly = true
+  deps = [ "unit_tests:tests" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________

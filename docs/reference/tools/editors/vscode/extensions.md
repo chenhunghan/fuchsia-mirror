@@ -163,4 +163,4 @@ directly from VS Code.
 [bazel-vscode-ext]: https://marketplace.visualstudio.com/items?itemName=BazelBuild.vscode-bazel
 [sdk-get-started]: https://fuchsia.googlesource.com/sdk-samples/getting-started
 
-[code-workspace]: /docs/reference/tools/editors#fuchsia.code-workspace
+[code-workspace]: /docs/reference/tools/editors#fuchsia-code-workspace

@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
       "data": "test.foreigntypeinresponseusedthroughcompose",
       "start_offset": 8,
       "end_offset": 52
@@ -14,7 +14,7 @@
       "library_name": "test.middle",
       "referenced_at": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
         "data": "test.middle",
         "start_offset": 61,
         "end_offset": 72
@@ -26,7 +26,7 @@
       "library_name": "test.bottom",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/bottom.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/bottom.test.fidl",
         "data": "test.bottom",
         "start_offset": 8,
         "end_offset": 19
@@ -36,7 +36,7 @@
       "library_name": "test.middle",
       "library_location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
         "data": "test.middle",
         "start_offset": 8,
         "end_offset": 19
@@ -48,7 +48,7 @@
       "identifier": "test.bottom/Foo",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/bottom.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/bottom.test.fidl",
         "data": "Foo",
         "start_offset": 27,
         "end_offset": 30
@@ -58,7 +58,7 @@
       "identifier": "test.middle/MiddleGetFooResponse",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
         "data": "struct {\n        foo test.bottom.Foo;\n    }",
         "start_offset": 91,
         "end_offset": 134
@@ -68,7 +68,7 @@
       "identifier": "test.middle/Middle",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
         "data": "Middle",
         "start_offset": 58,
         "end_offset": 64
@@ -85,17 +85,17 @@
       "identifier": "test.foreigntypeinresponseusedthroughcompose/Top",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
         "data": "Top",
-        "start_offset": 239,
-        "end_offset": 242
+        "start_offset": 91,
+        "end_offset": 94
       },
       "methods": [
         {
           "identifier": "GetFoo",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/middle.test.fidl",
             "data": "GetFoo",
             "start_offset": 78,
             "end_offset": 84
@@ -111,10 +111,10 @@
           "identifier": "test.middle/Middle",
           "referenced_at": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/foreign_type_in_response_used_through_compose/top.test.fidl",
             "data": "test.middle.Middle",
-            "start_offset": 257,
-            "end_offset": 275
+            "start_offset": 109,
+            "end_offset": 127
           }
         }
       ]

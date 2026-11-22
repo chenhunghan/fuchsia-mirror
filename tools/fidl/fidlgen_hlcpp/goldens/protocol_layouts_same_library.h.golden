@@ -152,10 +152,10 @@ class UnionPayload final {
 
   static UnionPayload WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<UnionPayload> New();
@@ -190,7 +190,7 @@ class UnionPayload final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -198,9 +198,9 @@ class UnionPayload final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::UnionPayload::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::UnionPayload::Tag::Invalid);
   union {
     bool b_;
   };
@@ -302,10 +302,10 @@ class ComposedProtocolTwoWayAnonComposedRequest final {
 
   static ComposedProtocolTwoWayAnonComposedRequest WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ComposedProtocolTwoWayAnonComposedRequest> New();
@@ -340,7 +340,7 @@ class ComposedProtocolTwoWayAnonComposedRequest final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -348,9 +348,9 @@ class ComposedProtocolTwoWayAnonComposedRequest final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest::Tag::Invalid);
   union {
     bool b_;
   };
@@ -529,10 +529,10 @@ class ComposedProtocol_TwoWayAnonComposedWithError_Response final {
 
   static ComposedProtocol_TwoWayAnonComposedWithError_Response WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ComposedProtocol_TwoWayAnonComposedWithError_Response> New();
@@ -567,7 +567,7 @@ class ComposedProtocol_TwoWayAnonComposedWithError_Response final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -575,9 +575,9 @@ class ComposedProtocol_TwoWayAnonComposedWithError_Response final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response::Tag::Invalid);
   union {
     bool b_;
   };
@@ -603,11 +603,11 @@ class ComposedProtocol_TwoWayAnonComposedWithError_Result final {
   static ComposedProtocol_TwoWayAnonComposedWithError_Result WithResponse(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response&&);
   static ComposedProtocol_TwoWayAnonComposedWithError_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ComposedProtocol_TwoWayAnonComposedWithError_Result> New();
@@ -655,7 +655,7 @@ class ComposedProtocol_TwoWayAnonComposedWithError_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -684,9 +684,9 @@ class ComposedProtocol_TwoWayAnonComposedWithError_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result::Tag::Invalid);
   union {
     ::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response response_;
     uint32_t err_;
@@ -712,10 +712,10 @@ class ComposedProtocolOnAnonComposedRequest final {
 
   static ComposedProtocolOnAnonComposedRequest WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ComposedProtocolOnAnonComposedRequest> New();
@@ -750,7 +750,7 @@ class ComposedProtocolOnAnonComposedRequest final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -758,9 +758,9 @@ class ComposedProtocolOnAnonComposedRequest final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest::Tag::Invalid);
   union {
     bool b_;
   };
@@ -786,11 +786,11 @@ class ComposedProtocol_TwoWayNamedComposedWithError_Result final {
   static ComposedProtocol_TwoWayNamedComposedWithError_Result WithResponse(::test::protocollayoutssamelibrary::UnionPayload&&);
   static ComposedProtocol_TwoWayNamedComposedWithError_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<ComposedProtocol_TwoWayNamedComposedWithError_Result> New();
@@ -838,7 +838,7 @@ class ComposedProtocol_TwoWayNamedComposedWithError_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -867,9 +867,9 @@ class ComposedProtocol_TwoWayNamedComposedWithError_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result::Tag::Invalid);
   union {
     ::test::protocollayoutssamelibrary::UnionPayload response_;
     uint32_t err_;
@@ -1004,11 +1004,11 @@ class MainProtocol_TwoWayLocalWithError_Result final {
   static MainProtocol_TwoWayLocalWithError_Result WithResponse(::test::protocollayoutssamelibrary::UnionPayload&&);
   static MainProtocol_TwoWayLocalWithError_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<MainProtocol_TwoWayLocalWithError_Result> New();
@@ -1056,7 +1056,7 @@ class MainProtocol_TwoWayLocalWithError_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1085,9 +1085,9 @@ class MainProtocol_TwoWayLocalWithError_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid);
   union {
     ::test::protocollayoutssamelibrary::UnionPayload response_;
     uint32_t err_;
@@ -1190,11 +1190,11 @@ class MainProtocolTwoWayAnonRequest final {
 
   static MainProtocolTwoWayAnonRequest WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
   kUnknown = 0,
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<MainProtocolTwoWayAnonRequest> New();
@@ -1220,7 +1220,7 @@ class MainProtocolTwoWayAnonRequest final {
     return b_;
   }
   MainProtocolTwoWayAnonRequest& set_b(bool value);
-  MainProtocolTwoWayAnonRequest& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  MainProtocolTwoWayAnonRequest& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest::Tag Which() const {
 
@@ -1236,7 +1236,7 @@ class MainProtocolTwoWayAnonRequest final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -1250,9 +1250,9 @@ class MainProtocolTwoWayAnonRequest final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest::Tag::Invalid);
   union {
     bool b_;
     std::vector<uint8_t> unknown_data_;
@@ -1432,11 +1432,11 @@ class MainProtocol_TwoWayAnonWithError_Response final {
 
   static MainProtocol_TwoWayAnonWithError_Response WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
   kUnknown = 0,
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<MainProtocol_TwoWayAnonWithError_Response> New();
@@ -1462,7 +1462,7 @@ class MainProtocol_TwoWayAnonWithError_Response final {
     return b_;
   }
   MainProtocol_TwoWayAnonWithError_Response& set_b(bool value);
-  MainProtocol_TwoWayAnonWithError_Response& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  MainProtocol_TwoWayAnonWithError_Response& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response::Tag Which() const {
 
@@ -1478,7 +1478,7 @@ class MainProtocol_TwoWayAnonWithError_Response final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -1492,9 +1492,9 @@ class MainProtocol_TwoWayAnonWithError_Response final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid);
   union {
     bool b_;
     std::vector<uint8_t> unknown_data_;
@@ -1521,11 +1521,11 @@ class MainProtocol_TwoWayAnonWithError_Result final {
   static MainProtocol_TwoWayAnonWithError_Result WithResponse(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response&&);
   static MainProtocol_TwoWayAnonWithError_Result WithErr(uint32_t&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
 
     kResponse = 1,  // 0x1
     kErr = 2,  // 0x2
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<MainProtocol_TwoWayAnonWithError_Result> New();
@@ -1573,7 +1573,7 @@ class MainProtocol_TwoWayAnonWithError_Result final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
 
@@ -1602,9 +1602,9 @@ class MainProtocol_TwoWayAnonWithError_Result final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid);
   union {
     ::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response response_;
     uint32_t err_;
@@ -1630,11 +1630,11 @@ class MainProtocolOnAnonRequest final {
 
   static MainProtocolOnAnonRequest WithB(bool&&);
 
-  enum __attribute__((enum_extensibility(closed))) Tag : fidl_xunion_tag_t {
+  enum __attribute__((enum_extensibility(closed))) Tag : fidl_union_tag_t {
   kUnknown = 0,
 
     kB = 1,  // 0x1
-    Invalid = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    Invalid = ::std::numeric_limits<uint32_t>::max(),
   };
 
   static ::std::unique_ptr<MainProtocolOnAnonRequest> New();
@@ -1660,7 +1660,7 @@ class MainProtocolOnAnonRequest final {
     return b_;
   }
   MainProtocolOnAnonRequest& set_b(bool value);
-  MainProtocolOnAnonRequest& SetUnknownData(fidl_xunion_tag_t ordinal, std::vector<uint8_t> bytes);
+  MainProtocolOnAnonRequest& SetUnknownData(fidl_union_tag_t ordinal, std::vector<uint8_t> bytes);
 
   ::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest::Tag Which() const {
 
@@ -1676,7 +1676,7 @@ class MainProtocolOnAnonRequest final {
 
   // You probably want to use Which() method instead of Ordinal(). Use Ordinal() only when you need
   // access to the raw integral ordinal value.
-  fidl_xunion_tag_t Ordinal() const {
+  fidl_union_tag_t Ordinal() const {
     return tag_;
   }
   const std::vector<uint8_t>* UnknownBytes() const {
@@ -1690,9 +1690,9 @@ class MainProtocolOnAnonRequest final {
 
  private:
   void Destroy();
-  void EnsureStorageInitialized(::fidl_xunion_tag_t tag);
+  void EnsureStorageInitialized(::fidl_union_tag_t tag);
 
-  ::fidl_xunion_tag_t tag_ = static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest::Tag::Invalid);
+  ::fidl_union_tag_t tag_ = static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest::Tag::Invalid);
   union {
     bool b_;
     std::vector<uint8_t> unknown_data_;
@@ -1911,7 +1911,7 @@ struct Equality<::test::protocollayoutssamelibrary::TablePayload> {
   }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::UnionPayload> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::UnionPayload> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::UnionPayload>
@@ -1923,9 +1923,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::UnionPay
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::UnionPayload>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -1955,7 +1955,7 @@ struct Equality<::test::protocollayoutssamelibrary::UnionPayload> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::UnionPayload::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::UnionPayload::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::UnionPayload::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -1990,7 +1990,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocolOneWayAnonCo
   }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest>
@@ -2002,9 +2002,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::Composed
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2034,7 +2034,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonCo
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonComposedRequest::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -2093,7 +2093,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocolTwoWayAnonCo
   }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response>
@@ -2105,9 +2105,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::Composed
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2137,7 +2137,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonC
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Response::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -2148,7 +2148,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonC
     }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result>
@@ -2160,9 +2160,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::Composed
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2192,7 +2192,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonC
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonComposedWithError_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -2205,7 +2205,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayAnonC
     }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest>
@@ -2217,9 +2217,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::Composed
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2249,7 +2249,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocolOnAnonCompos
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::ComposedProtocolOnAnonComposedRequest::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -2260,7 +2260,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocolOnAnonCompos
     }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result>
@@ -2272,9 +2272,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::Composed
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2304,7 +2304,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamed
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamedComposedWithError_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -2317,7 +2317,7 @@ struct Equality<::test::protocollayoutssamelibrary::ComposedProtocol_TwoWayNamed
     }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result>
@@ -2329,9 +2329,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::MainProt
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2361,7 +2361,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWith
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::MainProtocol_TwoWayLocalWithError_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -2398,7 +2398,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocolOneWayAnonReques
   }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest>
@@ -2410,9 +2410,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::MainProt
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2442,7 +2442,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonReques
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonRequest::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -2500,7 +2500,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocolTwoWayAnonWithEr
   }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response>
@@ -2512,9 +2512,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::MainProt
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2544,7 +2544,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithE
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Response::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);
@@ -2554,7 +2554,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithE
     }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result>
@@ -2566,9 +2566,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::MainProt
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2598,7 +2598,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithE
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithError_Result::Tag::kResponse:
         return ::fidl::Equals(_lhs.response_, _rhs.response_);
@@ -2611,7 +2611,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocol_TwoWayAnonWithE
     }
 };
 template <>
-struct IsFidlXUnion<::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest> : public std::true_type {};
+struct IsFidlUnion<::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest> : public std::true_type {};
 
 template <>
 struct CodingTraits<::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest>
@@ -2623,9 +2623,9 @@ struct CodingTraits<std::unique_ptr<::test::protocollayoutssamelibrary::MainProt
 
   static void Encode(Encoder* encoder, std::unique_ptr<::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest>* value, size_t offset,
                      std::optional<::fidl::HandleInformation> maybe_handle_info = std::nullopt) {
-    auto&& p_xunion = *value;
-    if (p_xunion) {
-      p_xunion->Encode(encoder, offset);
+    auto&& p_union = *value;
+    if (p_union) {
+      p_union->Encode(encoder, offset);
     }
   }
 
@@ -2655,7 +2655,7 @@ struct Equality<::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest> {
     }
 
     switch (_lhs.Ordinal()) {
-      case static_cast<fidl_xunion_tag_t>(::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest::Tag::Invalid):
+      case static_cast<fidl_union_tag_t>(::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest::Tag::Invalid):
         return true;
       case ::test::protocollayoutssamelibrary::MainProtocolOnAnonRequest::Tag::kB:
         return ::fidl::Equals(_lhs.b_, _rhs.b_);

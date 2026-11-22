@@ -7,7 +7,6 @@ group("power") {
   deps = [
     "optimistic_lease_management",
     "state_recorder",
-    "suspend_config",
     "wake_lease",
   ]
 }
@@ -16,7 +15,6 @@ group("hermetic_tests") {
   testonly = true
   deps = [
     "optimistic_lease_management:tests",
-    "suspend_config:tests",
     "wake_lease:tests",
   ]
 }

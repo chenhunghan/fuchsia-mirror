@@ -363,7 +363,7 @@ In DFv1, DDK provides the following functions for connecting to FIDL protocols:
 In DFv2, you use the [driver namespace][driver-namespace] library to connect
 to the FIDL protocols.
 
-#### DdkConnectFidlProtocol()
+#### DdkConnectFidlProtocol() {:#ddkconnectfidlprotocol}
 
 * {DFv1}
 
@@ -391,7 +391,7 @@ to the FIDL protocols.
 
   (Source: [DFv2 driver transport example][dfv2-driver-transport-zircon])
 
-#### DdkConnectFragmentFidlProtocol()
+#### DdkConnectFragmentFidlProtocol() {:#ddkconnectfragmentfidlprotocol}
 
 * {DFv1}
 
@@ -416,7 +416,7 @@ to the FIDL protocols.
   }
   ```
 
-#### DdkConnectRuntimeProtocol()
+#### DdkConnectRuntimeProtocol() {:#ddkconnectruntimeprotocol}
 
 * {DFv1}
 
@@ -444,7 +444,7 @@ to the FIDL protocols.
 
   (Source: [DFv2 driver transport example][dfv2-driver-transport-driver])
 
-#### DdkConnectFragmentRuntimeProtocol()
+#### DdkConnectFragmentRuntimeProtocol() {:#ddkconnectfragmentruntimeprotocol}
 
 * {DFv1}
 

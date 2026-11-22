@@ -1,0 +1,148 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":audio_services_mixer_mix_unittests"],
+    visibility = ["//src/media:__pkg__"],
+)
+
+fx_cc_library(
+    name = "mix",
+    srcs = [
+        "base_consumer_stage.cc",
+        "consumer_stage.cc",
+        "custom_stage.cc",
+        "gain_control.cc",
+        "mix_job_context.cc",
+        "mix_job_subtask.cc",
+        "mixer_gain_controls.cc",
+        "mixer_source.cc",
+        "mixer_stage.cc",
+        "packet_view.cc",
+        "pipeline_mix_thread.cc",
+        "pipeline_stage.cc",
+        "producer_stage.cc",
+        "reusable_buffer.cc",
+        "ring_buffer.cc",
+        "ring_buffer_consumer_writer.cc",
+        "silence_padding_stage.cc",
+        "simple_packet_queue_producer_stage.cc",
+        "simple_ring_buffer_producer_stage.cc",
+        "splitter_consumer_stage.cc",
+        "splitter_producer_stage.cc",
+        "start_stop_control.cc",
+        "stream_sink_consumer_writer.cc",
+        "timeline_function_math.cc",
+    ],
+    hdrs = [
+        "base_consumer_stage.h",
+        "consumer_stage.h",
+        "custom_stage.h",
+        "gain_control.h",
+        "mix_job_context.h",
+        "mix_job_subtask.h",
+        "mixer_gain_controls.h",
+        "mixer_source.h",
+        "mixer_stage.h",
+        "packet_view.h",
+        "pipeline_detached_thread.h",
+        "pipeline_mix_thread.h",
+        "pipeline_stage.h",
+        "pipeline_thread.h",
+        "producer_stage.h",
+        "ptr_decls.h",
+        "reusable_buffer.h",
+        "ring_buffer.h",
+        "ring_buffer_consumer_writer.h",
+        "silence_padding_stage.h",
+        "simple_packet_queue_producer_stage.h",
+        "simple_ring_buffer_producer_stage.h",
+        "splitter_consumer_stage.h",
+        "splitter_producer_stage.h",
+        "start_stop_control.h",
+        "stream_sink_consumer_writer.h",
+        "timeline_function_math.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/fit",
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/syslog/cpp",
+        "//src/media/audio/lib/format2",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = [
+        ":__subpackages__",
+        "//src/media/audio/services/mixer/fidl:__subpackages__",
+    ],
+    deps = [
+        "//src/media/audio/lib/clock",
+        "//src/media/audio/lib/processing",
+        "//src/media/audio/services/common",
+        "//src/media/audio/services/mixer/common",
+        "//zircon/system/ulib/fzl",
+        "//zircon/system/ulib/sync:sync-cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "mix_unittests",
+    srcs = [
+        "base_consumer_stage_unittest.cc",
+        "consumer_stage_unittest.cc",
+        "custom_stage_unittest.cc",
+        "gain_control_unittest.cc",
+        "mixer_gain_controls_unittest.cc",
+        "mixer_source_clock_unittest.cc",
+        "mixer_source_unittest.cc",
+        "mixer_stage_unittest.cc",
+        "packet_view_unittest.cc",
+        "pipeline_mix_thread_unittest.cc",
+        "pipeline_stage_unittest.cc",
+        "producer_stage_unittest.cc",
+        "reusable_buffer_unittest.cc",
+        "ring_buffer_consumer_writer_unittest.cc",
+        "ring_buffer_unittest.cc",
+        "silence_padding_stage_unittest.cc",
+        "simple_packet_queue_producer_stage_unittest.cc",
+        "simple_ring_buffer_producer_stage_unittest.cc",
+        "splitter_consumer_stage_unittest.cc",
+        "splitter_producer_stage_unittest.cc",
+        "start_stop_control_unittest.cc",
+        "stream_sink_consumer_writer_unittest.cc",
+        "timeline_function_math_unittest.cc",
+    ],
+    gn_output_name = "audio_services_mixer_mix_unittests",
+    deps = [
+        ":mix",
+        "//sdk/fidl/fuchsia.audio.effects:fuchsia.audio.effects_hlcpp",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/media/audio/lib/clock/testing",
+        "//src/media/audio/lib/format2",
+        "//src/media/audio/lib/processing",
+        "//src/media/audio/lib/processing:prebuilt_coefficient_tables",
+        "//src/media/audio/services/common/testing",
+        "//src/media/audio/services/mixer/mix/testing",
+        # Bazel's gtest target bundles gmock, whereas GN defines gmock separately.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_package(
+    name = "audio_services_mixer_mix_unittests",
+    # TODO(https://fxbug.dev/570694755): Support parallel on fx_unittest_package in bazel2gn.
+    # @bazel2gn:skip
+    parallel = 4,
+    unit_tests = [":mix_unittests"],
+)

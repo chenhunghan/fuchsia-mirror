@@ -26,7 +26,7 @@ if (is_host) {
       "//src/developer/ffx/lib/target/holders:lib",
       "//src/developer/ffx/lib/writer:lib",
       "//src/lib/fdomain/client",
-      "//src/performance/memory/stacktrack/lib/stacktrack_snapshot:stacktrack_snapshot_fdomain",
+      "//src/memory/stacktrack/lib/stacktrack_snapshot:stacktrack_snapshot_fdomain",
       "//third_party/rust_crates:anyhow",
     ]
   }
@@ -67,7 +67,7 @@ ffx_e2e_product_bundle("product_bundle") {
     }
     base_packages = [
       {
-        package_target = "//src/performance/memory/stacktrack/example"
+        package_target = "//src/memory/stacktrack/example"
       },
     ]
   }

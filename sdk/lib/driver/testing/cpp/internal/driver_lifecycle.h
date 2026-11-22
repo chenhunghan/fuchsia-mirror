@@ -10,6 +10,9 @@
 #include <lib/driver/component/cpp/internal/driver_server2.h>
 #include <lib/driver/symbols/symbols.h>
 #include <lib/driver/testing/cpp/driver_runtime.h>
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+#include <lib/fdf/env.h>
+#endif
 
 #include <mutex>
 #include <vector>
@@ -78,6 +81,11 @@ class DriverUnderTestBase : public fdf::WireAsyncEventHandler<fuchsia_driver_fra
   // The resulting zx::result is the result of the suspend operation.
   DriverRuntime::AsyncTask<zx::result<>> Suspend();
 
+  // Waits until the driver runtime requests that the driver be resumed (for example, when a
+  // registered wake vector triggers while suspended). This is an asynchronous operation.
+  // Use |DriverRuntime::RunToCompletion| to await the completion of the async task.
+  DriverRuntime::AsyncTask<zx::result<>> WaitForResumeRequest();
+
   // Resume the driver. This is an asynchronous operation.
   // Use |DriverRuntime::RunToCompletion| to await the completion of the async task.
   // The resulting zx::result is the result of the resume operation.
@@ -111,6 +119,22 @@ class DriverUnderTestBase : public fdf::WireAsyncEventHandler<fuchsia_driver_fra
   mutable std::mutex health_alerts_mutex_;
   std::vector<fuchsia_driver_framework::HealthAlert> health_alerts_
       __TA_GUARDED(health_alerts_mutex_);
+#if FUCHSIA_API_LEVEL_AT_LEAST(HEAD)
+  struct ResumeRequester : public fdf_env_resume_requester_t {
+    explicit ResumeRequester(DriverUnderTestBase* owner)
+        : fdf_env_resume_requester_t{.handler = &DriverUnderTestBase::OnResumeRequested},
+          owner(owner) {}
+    DriverUnderTestBase* owner;
+  };
+
+  static zx_status_t OnResumeRequested(fdf_env_resume_requester_t* requester);
+
+  ResumeRequester resume_requester_{this};
+  std::mutex resume_request_mutex_;
+  bool resume_requested_ __TA_GUARDED(resume_request_mutex_) = false;
+  std::optional<fpromise::completer<zx::result<>>> resume_request_completer_
+      __TA_GUARDED(resume_request_mutex_);
+#endif
 };
 
 // This is a RAII wrapper over a driver under test. On construction it initializes the driver server

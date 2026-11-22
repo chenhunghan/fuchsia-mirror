@@ -8,6 +8,10 @@
 BT_FILE_DEPS=(
   "scripts/fx"
   "scripts/fx-help.awk"
+  "tools/devshell/fx_cli/__init__.py"
+  "tools/devshell/fx_cli/locator.py"
+  "tools/devshell/fx_cli/registry.py"
+  "tools/devshell/fx_host_tools.json"
   "tools/devshell/helpdoc"
   "tools/devshell/lib/fx-cmd-locator.sh"
   "tools/devshell/lib/fx-optional-features.sh"

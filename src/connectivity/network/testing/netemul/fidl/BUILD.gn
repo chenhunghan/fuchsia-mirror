@@ -28,7 +28,6 @@
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 fidl("fuchsia.netemul") {
-  testonly = true
   sources = [
     "configurable_netstack.fidl",
     "netemul.fidl",
@@ -36,6 +35,7 @@ fidl("fuchsia.netemul") {
   visibility = [
     ":*",
     "//src/bringup/bin/netsvc/test/integration:*",
+    "//src/connectivity/lowpan/tests/thread-integration-tests/common:*",
     "//src/connectivity/network/*",
   ]
   public_deps = [

@@ -4,35 +4,29 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Fine-grained native Rust (`Rust -> Rust`) unit tests for the ARM SMMUv2 driver components.
+//! Fine-grained native Rust (`Rust -> Rust`) unit tests for the ARM SMMU driver components which
+//! do not depend on the architecture version. Those of the SMMUv2 driver proper are in
+//! `v2/unit_tests.rs`.
 //!
 //! This module is shared between the standalone host test binary (`fx test --host`) and the
 //! in-kernel `#[cfg(ktest)]` test suite, so assertions return `bool` via [`check!`] and
 //! [`check_eq!`] rather than panicking or depending on `std`.
 //!
-//! Covers all 10 component areas:
+//! Covers:
 //! 1. `smmu_mode` boot option string validation and parsing.
 //! 2. `vmsav8_64` stage-1 page/table descriptor encoding, permissions, and atomic PTE stores.
-//! 3. `SmrValue` stream-matching construction, intersection, containment, and iteration.
-//! 4. `Bitmask128` 128-bit resource mask operations and set-bit iteration.
-//! 5. `PageCache` LIFO allocation, zero-filling, FIFO tail trimming, and OOM handling.
-//! 6. `TranslationTableHelper` 4-level cursor walks, PoC cache cleaning, and table reclamation.
-//! 7. `DeviceAspace` map/unmap, specific-location placement, straddling levels, OOM rollback,
+//! 3. `Bitmask128` 128-bit resource mask operations and set-bit iteration.
+//! 4. `PageCache` LIFO allocation, zero-filling, FIFO tail trimming, and OOM handling.
+//! 5. `TranslationTableHelper` 4-level cursor walks, PoC cache cleaning, and table reclamation.
+//! 6. `DeviceAspace` map/unmap, specific-location placement, straddling levels, OOM rollback,
 //!    shared table levels, and recursive 4-level page-table verification.
-//! 8. `StreamMatchRegGroup` lockdown, adoption, context-bank binding, invalidation, and teardown.
-//! 9. `ContextBank` lockdown, mode transitions, adoption (32-bit, Ext32Bit, 64-bit), fault IRQ
-//!    toggling, and ASID/VA TLB invalidation.
-//! 10. `define_smmu_reg!` 32-bit/64-bit/indexed register bitfields, `RSVDZ_MASK`, and metadata.
-//!
-//! Plus the `EscapedName` formatter used when printing object names in diagnostics.
+//! 7. The `EscapedName` formatter used when printing object names in diagnostics.
 
 use core::ffi::c_char;
 use core::fmt::Write as _;
-use core::pin::Pin;
 use core::sync::atomic::Ordering;
 
 use debug::dprintf;
-use pin_init::PinInit;
 use region_alloc::{AllowOverlap, RegionSpan, TestRegionSet};
 use zx_status::Status;
 
@@ -44,28 +38,17 @@ use super::common::vmsav8_64::{
     write_pte,
 };
 use super::common::{
-    ALL_PERM_FLAGS, ArmSmmuMode, DEFAULT_TCR_T0SZ, DeviceAspace, EscapedName,
-    IOMMU_FLAG_PERM_EXECUTE, IOMMU_FLAG_PERM_READ, IOMMU_FLAG_PERM_WRITE, PAGE_MASK, PAGE_SHIFT,
-    PAGE_SIZE, PAGE_SIZE_USIZE, PageCache, PinnedVmoSource, SmmuEnv, SmmuPage, TlbInvalidator,
-    get_smmu_mode, get_smmu_mode_bytes, get_smmu_mode_cstr, validate_smmu_mode_cstr,
-    validate_smmu_mode_string,
+    ALL_PERM_FLAGS, ArmSmmuMode, DeviceAspace, EscapedName, IOMMU_FLAG_PERM_EXECUTE,
+    IOMMU_FLAG_PERM_READ, IOMMU_FLAG_PERM_WRITE, PAGE_MASK, PAGE_SHIFT, PAGE_SIZE, PAGE_SIZE_USIZE,
+    PageCache, PinnedVmoSource, SmmuEnv, SmmuPage, TlbInvalidator, get_smmu_mode,
+    get_smmu_mode_bytes, get_smmu_mode_cstr, validate_smmu_mode_cstr, validate_smmu_mode_string,
 };
-use super::v2::context_bank::{INVALIDATE_ALL_PAGE_COUNT_THRESHOLD, UNUSED_ASID};
-use super::v2::registers::{
-    Cba2rVa64, CbarType, ClientPd, ExidEnable, FieldDesc, S2crPrivCfg, S2crType, SmmuMmio, Stalld,
-    TcrIrg0, TcrOrg0, TcrSh0, TcrTg0, TcrTg1, gr0, gr1, s1cbr, s2cbr,
-};
+use super::v2::Bitmask128;
 use super::v2::smmu::TagBuf;
-use super::v2::{
-    AddrMode, Bitmask128, BtiMode, ContextBank, SmmuController, SmmuParams, SmrValue,
-    StreamMatchRegGroup, addr_mode_to_string, arm_cbar_type_to_string, arm_s2cr_type_to_string,
-    arm_smmu_mode_to_string, bti_mode_to_string, smr_intersects,
-};
 
 type RegionAllocator = region_alloc::RegionAllocator<super::common::SmmuRawMutex>;
 
-// Lightweight boolean assertion macros shared by both the host FFI test runner (`cross_test_ffi`)
-// and the in-kernel `#[ktest]` harness, where panicking on failure is undesirable.
+// Lightweight boolean assertion macros for the in-kernel `#[ktest]` harness, where panicking on failure is undesirable.
 macro_rules! check {
     ($cond:expr) => {
         if !($cond) {
@@ -274,6 +257,11 @@ pub fn test_smmu_mode_whitespace() -> bool {
     check_eq!(get_smmu_mode(mode_str, Some(0x5678)), Some(ArmSmmuMode::Enforced));
     check_eq!(get_smmu_mode(mode_str, Some(0x0001)), Some(ArmSmmuMode::Passthru));
 
+    check_eq!(
+        get_smmu_mode(" \t disabled \t , \t 0x1234 \t = \t passthru \t ", Some(0x1234)),
+        Some(ArmSmmuMode::Passthru)
+    );
+
     // Whitespace-only string is invalid (equivalent to empty).
     check!(!validate_smmu_mode_string("   \t\n\r  "));
     check_eq!(get_smmu_mode("   \t\n\r  ", None), None);
@@ -404,6 +392,8 @@ pub fn test_vmsav8_64_descriptors() -> bool {
         // Access Flag (bit 10) must always be 1, and Dirty Bit Modifier (bit 51) must be 0.
         check!((entry & PAGE_ENTRY_ACCESS_FLAG_BIT) != 0);
         check_eq!(entry & DBM_BIT, 0);
+        // Not global (bit 11) must always be 1: the mapping belongs to one address space.
+        check_eq!(entry & (1 << 11), 1 << 11);
         check_eq!(entry & PERM_BITS_MASK, get_page_entry_perms(perms));
         check_eq!(get_page_entry_perms(perms), PERM_LUT[perms as usize]);
 
@@ -438,10 +428,10 @@ pub fn test_vmsav8_64_descriptors() -> bool {
     // SAFETY: `vaddr` is the physmap virtual address of `page`, which is exclusively owned here.
     let table = unsafe { table_slice(vaddr) };
     write_pte(&table[0], table_desc, 0);
-    check_eq!(table[0].load(Ordering::Acquire), table_desc);
+    check_eq!(table[0].load(Ordering::Relaxed), table_desc);
     let leaf_desc = make_page_entry(page_pa, IOMMU_FLAG_PERM_READ | IOMMU_FLAG_PERM_WRITE);
     write_pte(&table[511], leaf_desc, 3);
-    check_eq!(table[511].load(Ordering::Acquire), leaf_desc);
+    check_eq!(table[511].load(Ordering::Relaxed), leaf_desc);
     write_pte(&table[0], 0, 0);
     write_pte(&table[511], 0, 3);
     // SAFETY: `vaddr` is the physmap address of `page`, which is owned by this test.
@@ -458,139 +448,7 @@ pub fn test_vmsav8_64_descriptors() -> bool {
 }
 
 // ============================================================================
-// 3. `SmrValue` and `SmrValueIter` Unit Tests
-// ============================================================================
-
-/// Tests `SmrValue` construction, raw value preservation, boundary Stream IDs (`0x7fff` vs
-/// `0x8000`), intersection, containment, stream counting, and `SmrValueIter` iteration.
-pub fn test_smr_value_and_iter() -> bool {
-    dprintf!(INFO, "[Backend: Rust->Rust] SmrValueAndIter\n");
-
-    // Default invalid sentinel (`0x7fff_ffff`): extracting mask/id.
-    let def = SmrValue::default_invalid();
-    check_eq!(def, SmrValue::default());
-    check_eq!(def.value(), 0x7fff_ffff);
-    check_eq!(def.id(), 0x7fff);
-    check_eq!(def.mask(), 0x7fff);
-
-    // The raw value is preserved: bits in `id` that are masked by `mask` are kept as given (so
-    // `value()` round-trips a `bti_id` or `SMR` register), and are only cleared when computing the
-    // first matched Stream ID / iterating.
-    let raw = SmrValue::new(0x00ff, 0x000f);
-    check_eq!(raw.id(), 0x00ff);
-    check_eq!(raw.mask(), 0x000f);
-    check_eq!(raw.num_streams(), 16);
-    check_eq!(raw.value(), (0x000fu32 << 16) | 0x00ffu32);
-    check_eq!(raw.first_stream_id(), 0x00f0);
-    check_eq!(
-        SmrValue::from_bti_id(0x000f_00ff, SmrValue::FULL_VALID_MASK).map(|v| v.value()),
-        Ok(0x000f_00ff)
-    );
-    // Values which differ only in masked `id` bits match the same streams.
-    check!(raw.intersects(SmrValue::new(0x00f0, 0x000f)));
-    check!(raw.contains(0x00f0) && raw.contains(0x00ff) && !raw.contains(0x0100));
-    let mut raw_count = 0u16;
-    for sid in raw {
-        check_eq!(sid, 0x00f0 + raw_count);
-        raw_count += 1;
-    }
-    check_eq!(raw_count, 16);
-    // The default sentinel wildcards every bit, and so matches every 15-bit Stream ID.
-    check_eq!(def.first_stream_id(), 0);
-    check_eq!(def.iter().count(), 0x8000);
-    check_eq!(def.iter().last(), Some(0x7fff));
-
-    // `from_bti_id` boundary checks against `FULL_VALID_MASK` (`0x7fff_7fff`) and narrower masks.
-    check!(SmrValue::from_bti_id(0x7fff, SmrValue::FULL_VALID_MASK).is_ok());
-    check_eq!(SmrValue::from_bti_id(0x8000, SmrValue::FULL_VALID_MASK), Err(Status::INVALID_ARGS));
-    check_eq!(
-        SmrValue::from_bti_id(0x8000_0000, SmrValue::FULL_VALID_MASK),
-        Err(Status::INVALID_ARGS)
-    );
-    check_eq!(
-        SmrValue::from_bti_id(1u64 << 32, SmrValue::FULL_VALID_MASK),
-        Err(Status::INVALID_ARGS)
-    );
-    // Narrower hardware mask (e.g. 10-bit stream IDs `0x03ff_03ff`):
-    let mask_10bit: u32 = 0x03ff_03ff;
-    check!(SmrValue::from_bti_id(0x03ff, mask_10bit).is_ok());
-    check_eq!(SmrValue::from_bti_id(0x0400, mask_10bit), Err(Status::INVALID_ARGS));
-
-    // `from_smr_reg` construction (the `VALID` bit is dropped, masked `id` bits are preserved).
-    let mut smr_reg = gr0::Smr::from_value(0);
-    smr_reg.set_valid(1).set_id(0x0123).set_mask(0x0003);
-    let from_reg = SmrValue::from_smr_reg(smr_reg, SmrValue::FULL_VALID_MASK);
-    check_eq!(from_reg.id(), 0x0123);
-    check_eq!(from_reg.first_stream_id(), 0x0120);
-    check_eq!(from_reg.mask(), 0x0003);
-    check_eq!(from_reg.num_streams(), 4);
-
-    // Intersection and containment.
-    let exact_10 = SmrValue::new(0x0010, 0x0000);
-    let exact_11 = SmrValue::new(0x0011, 0x0000);
-    let masked_10_13 = SmrValue::new(0x0010, 0x0003); // {0x10, 0x11, 0x12, 0x13}
-    let masked_10_12 = SmrValue::new(0x0010, 0x0002); // {0x10, 0x12}
-    let masked_10_11 = SmrValue::new(0x0010, 0x0001); // {0x10, 0x11}
-    let masked_20_23 = SmrValue::new(0x0020, 0x0003); // {0x20, 0x21, 0x22, 0x23}
-
-    check!(!exact_10.intersects(exact_11));
-    check!(!smr_intersects(exact_10.value(), exact_11.value()));
-    check!(exact_10.contains(0x0010));
-    check!(!exact_10.contains(0x0011));
-
-    check!(masked_10_13.intersects(exact_11));
-    check!(exact_11.intersects(masked_10_13));
-    check!(smr_intersects(masked_10_13.value(), exact_11.value()));
-    check!(masked_10_13.contains(0x0010));
-    check!(masked_10_13.contains(0x0011));
-    check!(masked_10_13.contains(0x0012));
-    check!(masked_10_13.contains(0x0013));
-    check!(!masked_10_13.contains(0x0014));
-
-    // Overlapping masks with non-subset relationship (`{0x10, 0x11}` vs `{0x10, 0x12}` intersect
-    // at `0x10`).
-    check!(masked_10_11.intersects(masked_10_12));
-    check!(!masked_10_13.intersects(masked_20_23));
-
-    // `SmrValueIter` over an exact Stream ID (`mask == 0`).
-    let mut iter_exact = exact_10.iter();
-    check_eq!(iter_exact.next(), Some(0x0010));
-    check_eq!(iter_exact.next(), None);
-
-    // `SmrValueIter` over a non-contiguous mask (`id = 0x0200, mask = 0x0105`, wildcard bits 0, 2,
-    // and 8 -> 8 stream IDs in strictly ascending order).
-    let non_contig = SmrValue::new(0x0205, 0x0105);
-    check_eq!(non_contig.id(), 0x0205);
-    check_eq!(non_contig.first_stream_id(), 0x0200);
-    check_eq!(non_contig.num_streams(), 8);
-    let expected_sids: [u16; 8] = [0x0200, 0x0201, 0x0204, 0x0205, 0x0300, 0x0301, 0x0304, 0x0305];
-    let mut count = 0usize;
-    for sid in non_contig {
-        check!(count < expected_sids.len());
-        check_eq!(sid, expected_sids[count]);
-        check!(non_contig.contains(sid));
-        count += 1;
-    }
-    check_eq!(count, expected_sids.len());
-
-    // `SmrValueIter` at the upper 15-bit boundary (`0x7ffe..=0x7fff`) must terminate cleanly
-    // without wrapping around.
-    let top_pair = SmrValue::new(0x7ffe, 0x0001);
-    let mut top_iter = top_pair.iter();
-    check_eq!(top_iter.next(), Some(0x7ffe));
-    check_eq!(top_iter.next(), Some(0x7fff));
-    check_eq!(top_iter.next(), None);
-
-    let max_single = SmrValue::new(0x7fff, 0x0000);
-    let mut max_iter = max_single.iter();
-    check_eq!(max_iter.next(), Some(0x7fff));
-    check_eq!(max_iter.next(), None);
-
-    true
-}
-
-// ============================================================================
-// 4. `Bitmask128` Unit Tests
+// 3. `Bitmask128` Unit Tests
 // ============================================================================
 
 /// Tests `Bitmask128` bit manipulation, boundary indices (`0`, `63`, `64`, `127`),
@@ -670,19 +528,21 @@ pub fn test_bitmask128() -> bool {
 }
 
 // ============================================================================
-// 5. `PageCache` Unit Tests
+// 4. `PageCache` Unit Tests
 // ============================================================================
 
-/// Helper returning a mutable byte slice over a 4 KiB page in the kernel/mock physmap.
+/// Returns `true` if the 4 KiB page at `paddr` in the kernel/mock physmap is completely
+/// zero-filled.
 ///
 /// # Safety
 ///
-/// `paddr` must be the physical address of an allocated 4 KiB page exclusively accessed by the
-/// caller for lifetime `'a`.
-unsafe fn page_bytes_mut<'a>(paddr: u64) -> &'a mut [u8; PAGE_SIZE_USIZE] {
+/// `paddr` must be the physical address of an allocated 4 KiB page with no concurrent mutable
+/// access during the call.
+unsafe fn is_page_zeroed(paddr: u64) -> bool {
     let vaddr = SmmuEnv::paddr_to_physmap(paddr);
-    // SAFETY: Caller guarantees `paddr` is an allocated page with exclusive mutable access.
-    unsafe { &mut *core::ptr::with_exposed_provenance_mut::<[u8; PAGE_SIZE_USIZE]>(vaddr) }
+    // SAFETY: Caller guarantees `paddr` is an allocated page valid for shared read access.
+    let bytes = unsafe { &*core::ptr::with_exposed_provenance::<[u8; PAGE_SIZE_USIZE]>(vaddr) };
+    bytes.iter().all(|&b| b == 0)
 }
 
 /// Recursively frees all valid translation table pages reachable from `table_page` back into
@@ -784,23 +644,10 @@ impl Drop for TestPageCache {
     }
 }
 
-#[cfg(not(is_kernel))]
-struct TestPmmLimitGuard;
-
-#[cfg(not(is_kernel))]
-impl Drop for TestPmmLimitGuard {
-    fn drop(&mut self) {
-        SmmuEnv::host_pmm_clear_allocation_limit();
-    }
-}
-
 /// Tests `PageCache` allocation (`get_page`), zero-filling, `return_page`, and LIFO reuse
 /// ordering.
 pub fn test_page_cache_add_and_get() -> bool {
     dprintf!(INFO, "[Backend: Rust->Rust] PageCacheAddAndGet\n");
-
-    #[cfg(not(is_kernel))]
-    let baseline_pmm = SmmuEnv::host_pmm_allocated_page_count();
 
     let mut cache = TestPageCache::new();
     check_eq!(cache.in_flight_pages(), 0);
@@ -813,16 +660,11 @@ pub fn test_page_cache_add_and_get() -> bool {
         };
         check_eq!(cache.in_flight_pages(), (i + 1) as u32);
         check_eq!(cache.cache_entries(), 0);
-        #[cfg(not(is_kernel))]
-        check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm + i + 1);
 
         // Newly allocated pages from `PageCache::get_page` must be completely zero-filled and
         // cleaned to PoC DRAM.
         // SAFETY: `page` was just checked out from `cache` and is exclusively owned here.
-        let bytes = unsafe { page_bytes_mut(page.paddr()) };
-        check!(bytes.iter().all(|&b| b == 0));
-        #[cfg(not(is_kernel))]
-        check_eq!(SmmuEnv::host_pmm_read_poc_dram64(page.paddr()), Some(0));
+        check!(unsafe { is_page_zeroed(page.paddr()) });
 
         *slot = Some(page);
     }
@@ -832,8 +674,6 @@ pub fn test_page_cache_add_and_get() -> bool {
         cache.return_page(slot.unwrap());
         check_eq!(cache.in_flight_pages(), (3 - i) as u32);
         check_eq!(cache.cache_entries(), (i + 1) as u32);
-        #[cfg(not(is_kernel))]
-        check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm + 4);
     }
 
     // Pop all 4 pages again: must come from the cache in LIFO order (`pages[3..=0]`, stack
@@ -845,12 +685,9 @@ pub fn test_page_cache_add_and_get() -> bool {
         check_eq!(page, pages[3 - i].unwrap());
         check_eq!(cache.in_flight_pages(), (i + 1) as u32);
         check_eq!(cache.cache_entries(), (3 - i) as u32);
-        #[cfg(not(is_kernel))]
-        check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm + 4);
 
         // SAFETY: `page` was just checked out from `cache` and is exclusively owned here.
-        let bytes = unsafe { page_bytes_mut(page.paddr()) };
-        check!(bytes.iter().all(|&b| b == 0));
+        check!(unsafe { is_page_zeroed(page.paddr()) });
     }
 
     // Return and trim to 0 before dropping `cache`.
@@ -860,8 +697,6 @@ pub fn test_page_cache_add_and_get() -> bool {
     cache.trim(0);
     check_eq!(cache.in_flight_pages(), 0);
     check_eq!(cache.cache_entries(), 0);
-    #[cfg(not(is_kernel))]
-    check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm);
 
     true
 }
@@ -869,9 +704,6 @@ pub fn test_page_cache_add_and_get() -> bool {
 /// Tests `PageCache::trim` FIFO tail eviction and LIFO head retention.
 pub fn test_page_cache_trim() -> bool {
     dprintf!(INFO, "[Backend: Rust->Rust] PageCacheTrim\n");
-
-    #[cfg(not(is_kernel))]
-    let baseline_pmm = SmmuEnv::host_pmm_allocated_page_count();
 
     let mut cache = TestPageCache::new();
     let mut pages = [None; 4];
@@ -899,8 +731,6 @@ pub fn test_page_cache_trim() -> bool {
     // pages[1]` from head to tail.
     cache.trim(3);
     check_eq!(cache.cache_entries(), 3);
-    #[cfg(not(is_kernel))]
-    check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm + 3);
 
     let Ok(pop3) = cache.get_page() else {
         return false;
@@ -925,13 +755,9 @@ pub fn test_page_cache_trim() -> bool {
 
     cache.trim(2);
     check_eq!(cache.cache_entries(), 2);
-    #[cfg(not(is_kernel))]
-    check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm + 2);
 
     cache.trim(1);
     check_eq!(cache.cache_entries(), 1);
-    #[cfg(not(is_kernel))]
-    check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm + 1);
 
     // The single remaining cached page must be the MRU head (`pop3`).
     let Ok(last_pop) = cache.get_page() else {
@@ -943,8 +769,6 @@ pub fn test_page_cache_trim() -> bool {
     cache.trim(0);
     check_eq!(cache.cache_entries(), 0);
     check_eq!(cache.in_flight_pages(), 0);
-    #[cfg(not(is_kernel))]
-    check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm);
 
     true
 }
@@ -953,44 +777,36 @@ pub fn test_page_cache_trim() -> bool {
 pub fn test_page_cache_oom() -> bool {
     dprintf!(INFO, "[Backend: Rust->Rust] PageCacheOom\n");
 
-    #[cfg(not(is_kernel))]
-    {
-        #[cfg(not(is_kernel))]
-        let baseline_pmm = SmmuEnv::host_pmm_allocated_page_count();
-        SmmuEnv::host_pmm_set_allocation_limit(1);
-        let _limit_guard = TestPmmLimitGuard;
+    // The budget belongs to this cache alone, so it cannot affect (or be consumed by) any
+    // other address space, and it goes away with the cache.
+    let mut cache = TestPageCache::new();
+    cache.set_test_alloc_budget(Some(1));
+    let Ok(p1) = cache.get_page() else {
+        return false;
+    };
+    check_eq!(cache.in_flight_pages(), 1);
 
-        let mut cache = TestPageCache::new();
-        let Ok(p1) = cache.get_page() else {
-            return false;
-        };
-        check_eq!(cache.in_flight_pages(), 1);
+    // Second allocation from PMM must fail with `Status::NO_MEMORY`.
+    check_eq!(cache.get_page(), Err(Status::NO_MEMORY));
+    check_eq!(cache.in_flight_pages(), 1);
 
-        // Second allocation from PMM must fail with `Status::NO_MEMORY`.
-        check_eq!(cache.get_page(), Err(Status::NO_MEMORY));
-        check_eq!(cache.in_flight_pages(), 1);
+    // Returning `p1` to the cache allows `get_page()` to succeed from the cache without
+    // allocating a new page from the PMM.
+    cache.return_page(p1);
+    check_eq!(cache.cache_entries(), 1);
+    let Ok(reused) = cache.get_page() else {
+        return false;
+    };
+    check_eq!(reused, p1);
 
-        // Returning `p1` to the cache allows `get_page()` to succeed from the cache without
-        // allocating a new page from the PMM.
-        cache.return_page(p1);
-        check_eq!(cache.cache_entries(), 1);
-        let Ok(reused) = cache.get_page() else {
-            return false;
-        };
-        check_eq!(reused, p1);
-
-        cache.return_page(reused);
-        cache.trim(0);
-        drop(_limit_guard);
-        #[cfg(not(is_kernel))]
-        check_eq!(SmmuEnv::host_pmm_allocated_page_count(), baseline_pmm);
-    }
+    cache.return_page(reused);
+    cache.trim(0);
 
     true
 }
 
 // ============================================================================
-// 6. `TranslationTableHelper` Unit Tests
+// 5. `TranslationTableHelper` Unit Tests
 // ============================================================================
 
 /// Tests `TranslationTableHelper` 4-level cursor walks across L1/L2/L3 boundaries, PoC dcache
@@ -1000,20 +816,8 @@ pub fn test_translation_table_helper_walk_and_reclaim() -> bool {
 
     let aspace_start: u64 = 0x1000;
     let aspace_len: u64 = (1u64 << 39) - aspace_start;
-    // `RegionAllocator` requires pinned in-place initialization (`PinInit`), and `kalloc::Box` does
-    // not provide a standalone `Box::pin_init` constructor, so we allocate uninitialized heap
-    // storage via `try_new_uninit` and run `__pinned_init` directly in place.
-    let mut avail_regions_uninit = match kalloc::Box::<RegionAllocator>::try_new_uninit() {
-        Ok(b) => b,
-        Err(_) => return false,
-    };
-    let init = RegionAllocator::init();
-    // SAFETY: `avail_regions_uninit` is a freshly allocated heap box whose address remains stable
-    // inside `Pin<kalloc::Box<RegionAllocator>>` for the lifetime of this test.
-    let avail_regions = unsafe {
-        let Ok(()) = init.__pinned_init(avail_regions_uninit.as_mut_ptr());
-        Pin::new_unchecked(avail_regions_uninit.assume_init())
-    };
+    pin_init::stack_pin_init!(let avail_regions = RegionAllocator::init());
+    let avail_regions = avail_regions.as_ref();
     check!(
         avail_regions
             .add_region(RegionSpan { base: aspace_start, size: aspace_len }, AllowOverlap::No)
@@ -1041,7 +845,8 @@ pub fn test_translation_table_helper_walk_and_reclaim() -> bool {
     // from `page_cache`.
     unsafe {
         check!(helper.initialize_for_map(straddle_va, root_page, &mut page_cache).is_ok());
-        // `initialize_for_map` allocates L1[0], L2[511], and L3 (3 intermediate pages + 1 root = 4).
+        // `initialize_for_map` allocates L1[0], L2[511], and L3 (3 intermediate pages + 1 root =
+        // 4).
         check_eq!(page_cache.in_flight_pages(), 4);
         check!(!helper.current_page_entry_valid());
 
@@ -1062,14 +867,6 @@ pub fn test_translation_table_helper_walk_and_reclaim() -> bool {
         helper.assign_page_entry(pte1);
         check!(helper.current_page_entry_valid());
         helper.finish_operation(aspace_start, aspace_len, &avail_regions, &mut page_cache);
-    }
-
-    // Verify L0[0] was cleaned to PoC DRAM on host.
-    #[cfg(not(is_kernel))]
-    {
-        let l0_entry = SmmuEnv::host_pmm_read_poc_dram64(root_page.paddr());
-        check!(l0_entry.is_some());
-        check!(is_table_entry(l0_entry.unwrap()));
     }
 
     // Unmap the 2 straddling pages after dropping `straddle_reg` (returning the VA range to
@@ -1159,7 +956,7 @@ pub fn test_translation_table_helper_walk_and_reclaim() -> bool {
 }
 
 // ============================================================================
-// 7. `DeviceAspace` Unit Tests
+// 6. `DeviceAspace` Unit Tests
 // ============================================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1224,8 +1021,6 @@ struct RecordingInvalidator {
     count: usize,
     last_base: u64,
     last_size: u64,
-    #[cfg(not(is_kernel))]
-    pmm_pages_during_inval: usize,
 }
 
 impl TlbInvalidator for RecordingInvalidator {
@@ -1233,10 +1028,6 @@ impl TlbInvalidator for RecordingInvalidator {
         self.count += 1;
         self.last_base = base;
         self.last_size = size;
-        #[cfg(not(is_kernel))]
-        {
-            self.pmm_pages_during_inval = SmmuEnv::host_pmm_allocated_page_count();
-        }
     }
 }
 
@@ -1259,8 +1050,6 @@ impl core::ops::DerefMut for TestAspace {
 
 impl Drop for TestAspace {
     fn drop(&mut self) {
-        #[cfg(not(is_kernel))]
-        SmmuEnv::host_pmm_clear_allocation_limit();
         if self.0.page_cache().in_flight_pages() != 0 || self.0.page_cache().cache_entries() != 0 {
             let mut inval = RecordingInvalidator::default();
             self.0.free_translation_tables(&mut inval);
@@ -1316,15 +1105,6 @@ fn verify_table_level(
         let entry = slot.load(Ordering::Relaxed);
         let entry_vaddr = base_vaddr + (i as u64) * entry_span;
         let entry_end = entry_vaddr + entry_span;
-
-        #[cfg(not(is_kernel))]
-        {
-            let entry_pa = table_pa + (i as u64) * 8;
-            let poc_val = SmmuEnv::host_pmm_read_poc_dram64(entry_pa);
-            let cpu_val = SmmuEnv::host_pmm_read_cpu_cache64(entry_pa);
-            check_eq!(poc_val, Some(entry));
-            check_eq!(cpu_val, Some(entry));
-        }
 
         if !is_valid_entry(entry) {
             check_eq!(entry, 0);
@@ -1471,37 +1251,20 @@ pub fn test_device_aspace_map_and_unmap() -> bool {
         ];
         check!(verify_allocated_regions(&aspace, &expected));
 
-        // Unmap and revalidate the page tables once again.
-        #[cfg(not(is_kernel))]
-        let pages_before_unmap = SmmuEnv::host_pmm_allocated_page_count();
         aspace.unmap(alloc, &mut inval);
         check_eq!(inval.count, 2);
         check_eq!(inval.last_base, aspace_start);
         check_eq!(inval.last_size, 6 * PAGE_SIZE);
-        #[cfg(not(is_kernel))]
-        {
-            // Reclaimed intermediate table pages must remain in `PageCache` during
-            // `TlbInvalidator::invalidate` and be freed to the PMM only after invalidation returns.
-            check_eq!(inval.pmm_pages_during_inval, pages_before_unmap);
-            check_eq!(SmmuEnv::host_pmm_allocated_page_count(), pages_before_unmap - 3);
-        }
         check!(verify_allocated_regions(&aspace, &[]));
         check_eq!(aspace.page_cache().in_flight_pages(), 1);
         check_eq!(aspace.page_cache().cache_entries(), 0);
     }
 
-    #[cfg(not(is_kernel))]
-    let pages_before_free = SmmuEnv::host_pmm_allocated_page_count();
     let mut inval = RecordingInvalidator::default();
     aspace.free_translation_tables(&mut inval);
     check_eq!(inval.count, 1);
     check_eq!(inval.last_base, 0);
     check_eq!(inval.last_size, 0);
-    #[cfg(not(is_kernel))]
-    {
-        check_eq!(inval.pmm_pages_during_inval, pages_before_free);
-        check_eq!(SmmuEnv::host_pmm_allocated_page_count(), pages_before_free - 1);
-    }
     // The root table page has been returned and freed along with everything else. (Asking for
     // `root_tt_paddr()` at this point is a debug-asserted error.)
     check_eq!(aspace.page_cache().in_flight_pages(), 0);
@@ -1601,115 +1364,97 @@ pub fn test_device_aspace_map_straddling_table_levels() -> bool {
 
 /// Tests `DeviceAspace::map` failure injection and rollback.
 ///
-/// Part 1 maps 2 pages straddling the 512 GiB `L0[0] -> L0[1]` boundary (`(1 << 39) - PAGE_SIZE`),
-/// where the first page resides in the last slot of `L0[0]`'s L1/L2/L3 table chain and the second
-/// page resides in the first slot of `L0[1]`'s L1/L2/L3 table chain. The full mapping requires 6
-/// new intermediate table allocations:
+/// Part 1 maps 6 pages straddling the 512 GiB `L0[0] -> L0[1]` boundary (`(1 << 39) - 5 *
+/// PAGE_SIZE`), where the first 5 pages reside in the last 5 slots of `L0[0]`'s L1/L2/L3 table
+/// chain and the 6th page resides in the first slot of `L0[1]`'s L1/L2/L3 table chain. The full
+/// mapping requires 6 new intermediate table allocations:
 /// 1. `L0[0]`'s L1 table (during `initialize_for_map` for page 0)
 /// 2. `L0[0]`'s L2 table (during `initialize_for_map` for page 0)
 /// 3. `L0[0]`'s L3 table (during `initialize_for_map` for page 0)
-/// 4. `L0[1]`'s L1 table (during `advance` from page 0 to page 1)
-/// 5. `L0[1]`'s L2 table (during `advance` from page 0 to page 1)
-/// 6. `L0[1]`'s L3 table (during `advance` from page 0 to page 1)
+/// 4. `L0[1]`'s L1 table (during `advance` from page 4 to page 5)
+/// 5. `L0[1]`'s L2 table (during `advance` from page 4 to page 5)
+/// 6. `L0[1]`'s L3 table (during `advance` from page 4 to page 5)
 ///
-/// By setting the allocation limit to `limit` in `0..=5`, we inject an allocation failure at each
+/// By setting the allocation budget to `limit` in `0..=5`, we inject an allocation failure at each
 /// of those 6 table allocations in turn and verify that `map` fails with `ZX_ERR_NO_MEMORY`,
 /// invalidates the TLB, and rolls back all partially-allocated tables and regions.
 ///
 /// Part 2 maps `vmo1` at `0x1000` and then injects failure across `limit` in `0..=2` while mapping
-/// `vmo` across the 1 GiB `L1[0] -> L1[1]` boundary, verifying that rollback preserves `vmo1`'s
+/// `vmo2` across the 1 GiB `L1[0] -> L1[1]` boundary, verifying that rollback preserves `vmo1`'s
 /// shared L0/L1/L2 tables.
 pub fn test_device_aspace_map_failure_injection() -> bool {
     dprintf!(INFO, "[Backend: Rust->Rust] DeviceAspaceMapFailureInjection\n");
 
-    #[cfg(not(is_kernel))]
-    {
-        let aspace_start: u64 = 0x1000;
-        let aspace_end: u64 = 1u64 << 48;
-        let Ok(aspace) = DeviceAspace::create(aspace_start, aspace_end - aspace_start, 0) else {
-            return false;
-        };
-        let mut aspace = TestAspace(aspace);
+    let aspace_start: u64 = 0x1000;
+    let aspace_end: u64 = 1u64 << 48;
+    let Ok(aspace) = DeviceAspace::create(aspace_start, aspace_end - aspace_start, 0) else {
+        return false;
+    };
+    let mut aspace = TestAspace(aspace);
+    check!(verify_allocated_regions(&aspace, &[]));
+
+    let segments = [(0x0070_0000, 5 * PAGE_SIZE), (0x0080_0000, PAGE_SIZE)];
+    let vmo = MockPinnedVmo::new(&segments);
+    let straddle_vaddr: u64 = (1u64 << 39) - 5 * PAGE_SIZE;
+    let perms = IOMMU_FLAG_PERM_READ | IOMMU_FLAG_PERM_WRITE;
+    let mut inval = RecordingInvalidator::default();
+
+    for limit in 0..=5u32 {
+        inval = RecordingInvalidator::default();
+        aspace.set_test_alloc_budget(Some(limit));
+        let res = aspace.map(&vmo, perms, &mut inval, Some(straddle_vaddr));
+        aspace.set_test_alloc_budget(None);
+        check_eq!(res.err(), Some(Status::NO_MEMORY));
+        // Since it failed, it should have unmapped and invalidated.
+        check_eq!(inval.count, 1);
+        check_eq!(inval.last_base, straddle_vaddr);
+        check_eq!(inval.last_size, 6 * PAGE_SIZE);
+
+        // Confirm that nothing remained allocated in the RegionAllocator and the page tables
+        // were properly cleaned up.
         check!(verify_allocated_regions(&aspace, &[]));
-
-        let segments = [(0x0070_0000, PAGE_SIZE), (0x0080_0000, PAGE_SIZE)];
-        let vmo = MockPinnedVmo::new(&segments);
-        let straddle_vaddr: u64 = (1u64 << 39) - PAGE_SIZE;
-        let perms = IOMMU_FLAG_PERM_READ | IOMMU_FLAG_PERM_WRITE;
-        let mut inval = RecordingInvalidator::default();
-
-        // `straddle_vaddr` requires 6 new intermediate table pages (`L0[0]`'s L1/L2/L3 + `L0[1]`'s
-        // L1/L2/L3). Test every allocation countdown limit `0..=5` to verify failure, TLB
-        // invalidation on rollback, and reclamation at each table level.
-        #[cfg(not(is_kernel))]
-        let pages_before = SmmuEnv::host_pmm_allocated_page_count();
-        for limit in 0..=5u64 {
-            inval = RecordingInvalidator::default();
-            SmmuEnv::host_pmm_set_allocation_limit(limit);
-            let res = aspace.map(&vmo, perms, &mut inval, Some(straddle_vaddr));
-            SmmuEnv::host_pmm_clear_allocation_limit();
-            check_eq!(res.err(), Some(Status::NO_MEMORY));
-            // Since it failed, it should have unmapped and invalidated.
-            check_eq!(inval.count, 1);
-            check_eq!(inval.last_base, straddle_vaddr);
-            check_eq!(inval.last_size, 2 * PAGE_SIZE);
-            #[cfg(not(is_kernel))]
-            {
-                check_eq!(inval.pmm_pages_during_inval, pages_before + limit as usize);
-                check_eq!(SmmuEnv::host_pmm_allocated_page_count(), pages_before);
-            }
-
-            // Confirm that nothing remained allocated in the RegionAllocator and the page tables
-            // were properly cleaned up.
-            check!(verify_allocated_regions(&aspace, &[]));
-            check_eq!(aspace.page_cache().in_flight_pages(), 1);
-            check_eq!(aspace.page_cache().cache_entries(), 0);
-        }
-
-        // Now map `vmo1` at `0x1000`, then inject failure while mapping `vmo2` at `(1 << 30) -
-        // PAGE_SIZE` (which shares L0[0] and L1[0] with `vmo1` for its first page, then fails when
-        // allocating L1[1]/L2[0]/L3[0] for its second page). Verify `vmo1` remains intact!
-        let vmo1_segs = [(0x0090_0000, PAGE_SIZE)];
-        let vmo1 = MockPinnedVmo::new(&vmo1_segs);
-        let Ok(alloc1) = aspace.map(&vmo1, perms, &mut inval, Some(0x1000)) else {
-            return false;
-        };
-        let expected_vmo1 =
-            [ExpectedRegion { vaddr: 0x1000, paddr: 0x0090_0000, len: PAGE_SIZE, perms }];
-        check!(verify_allocated_regions(&aspace, &expected_vmo1));
-
-        let straddle_l1 = (1u64 << 30) - PAGE_SIZE;
-        #[cfg(not(is_kernel))]
-        let base_after_vmo1 = SmmuEnv::host_pmm_allocated_page_count();
-        // Because `vmo1` at `0x1000` already allocated the L1 table under `L0[0]` and the L2 table
-        // under `L1[0]`, `straddle_l1` needs 1 new page (`L3` under `L2[511]`) for page 0 and 2 new
-        // pages (`L2` and `L3` under `L1[1]`) for page 1 (3 new pages total). Limit the countdown
-        // to `0..=2` pages so it fails at each step and preserves `vmo1`'s shared L0/L1/L2 tables!
-        for limit in 0..=2u64 {
-            inval = RecordingInvalidator::default();
-            SmmuEnv::host_pmm_set_allocation_limit(limit);
-            let res2 = aspace.map(&vmo, perms, &mut inval, Some(straddle_l1));
-            SmmuEnv::host_pmm_clear_allocation_limit();
-            check_eq!(res2.err(), Some(Status::NO_MEMORY));
-            check_eq!(inval.count, 1);
-            check_eq!(inval.last_base, straddle_l1);
-            check_eq!(inval.last_size, 2 * PAGE_SIZE);
-            #[cfg(not(is_kernel))]
-            {
-                check_eq!(inval.pmm_pages_during_inval, base_after_vmo1 + limit as usize);
-                check_eq!(SmmuEnv::host_pmm_allocated_page_count(), base_after_vmo1);
-            }
-
-            // `vmo1` must still be mapped and intact, and all tables allocated for `res2` must be
-            // reclaimed.
-            check!(verify_allocated_regions(&aspace, &expected_vmo1));
-            check_eq!(aspace.page_cache().in_flight_pages(), 4);
-        }
-
-        aspace.unmap(alloc1, &mut inval);
-        check!(verify_allocated_regions(&aspace, &[]));
-        aspace.free_translation_tables(&mut inval);
+        check_eq!(aspace.page_cache().in_flight_pages(), 1);
+        check_eq!(aspace.page_cache().cache_entries(), 0);
     }
+
+    // Now map `vmo1` at `0x1000`, then inject failure while mapping `vmo2` at `(1 << 30) -
+    // PAGE_SIZE` (which shares L0[0] and L1[0] with `vmo1` for its first page, then fails when
+    // allocating L1[1]/L2[0]/L3[0] for its second page). Verify `vmo1` remains intact!
+    let vmo1_segs = [(0x0090_0000, PAGE_SIZE)];
+    let vmo1 = MockPinnedVmo::new(&vmo1_segs);
+    let Ok(alloc1) = aspace.map(&vmo1, perms, &mut inval, Some(0x1000)) else {
+        return false;
+    };
+    let expected_vmo1 =
+        [ExpectedRegion { vaddr: 0x1000, paddr: 0x0090_0000, len: PAGE_SIZE, perms }];
+    check!(verify_allocated_regions(&aspace, &expected_vmo1));
+
+    let vmo2_segs = [(0x0070_0000, PAGE_SIZE), (0x0080_0000, PAGE_SIZE)];
+    let vmo2 = MockPinnedVmo::new(&vmo2_segs);
+    let straddle_l1 = (1u64 << 30) - PAGE_SIZE;
+    // Because `vmo1` at `0x1000` already allocated the L1 table under `L0[0]` and the L2 table
+    // under `L1[0]`, `straddle_l1` needs 1 new page (`L3` under `L2[511]`) for page 0 and 2 new
+    // pages (`L2` and `L3` under `L1[1]`) for page 1 (3 new pages total). Limit the countdown
+    // to `0..=2` pages so it fails at each step and preserves `vmo1`'s shared L0/L1/L2 tables!
+    for limit in 0..=2u32 {
+        inval = RecordingInvalidator::default();
+        aspace.set_test_alloc_budget(Some(limit));
+        let res2 = aspace.map(&vmo2, perms, &mut inval, Some(straddle_l1));
+        aspace.set_test_alloc_budget(None);
+        check_eq!(res2.err(), Some(Status::NO_MEMORY));
+        check_eq!(inval.count, 1);
+        check_eq!(inval.last_base, straddle_l1);
+        check_eq!(inval.last_size, 2 * PAGE_SIZE);
+
+        // `vmo1` must still be mapped and intact, and all tables allocated for `res2` must be
+        // reclaimed.
+        check!(verify_allocated_regions(&aspace, &expected_vmo1));
+        check_eq!(aspace.page_cache().in_flight_pages(), 4);
+    }
+
+    aspace.unmap(alloc1, &mut inval);
+    check!(verify_allocated_regions(&aspace, &[]));
+    aspace.free_translation_tables(&mut inval);
 
     true
 }
@@ -1923,580 +1668,109 @@ pub fn test_device_aspace_map_at_location_edge_cases() -> bool {
 }
 
 // ============================================================================
-// 8. `StreamMatchRegGroup` Unit Tests
+// Non-MMIO Bitfield Macro & `dump_bitfields` Unit Tests
 // ============================================================================
 
-/// Test guard that ensures `StreamMatchRegGroup::disable` runs even if a `check!` returns early.
-struct TestSmrg(fbl::UniquePtr<StreamMatchRegGroup>);
+/// Tests the non-MMIO arm of `define_smmu_reg!` (`struct Name(u64) => { ... }`) across integer,
+/// boolean, enum, `[rsvdz]`, and `__res` fields without `FieldDesc` in scope, and exercises
+/// `dump_bitfields` directly.
+pub fn test_non_mmio_bitfields() -> bool {
+    use super::common::mmio::{define_smmu_reg, dump_bitfields};
 
-impl core::ops::Deref for TestSmrg {
-    type Target = StreamMatchRegGroup;
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    dprintf!(INFO, "[Backend: Rust->Rust] NonMmioBitfields\n");
+
+    #[repr(u32)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum TestCfg {
+        Abort = 0,
+        Bypass = 4,
+        Stage1 = 5,
+        Reserved = 7,
     }
-}
 
-impl core::ops::DerefMut for TestSmrg {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Drop for TestSmrg {
-    fn drop(&mut self) {
-        if !self.0.gr0_base().is_null() {
-            self.0.disable();
-        }
-    }
-}
-
-/// Tests `StreamMatchRegGroup` creation, lockdown, adoption (valid `Translation`/`Bypass`/`Fault`
-/// vs. invalid `S2crType::Invalid` and out-of-range `cbndx`), `enable_for_context_bank`,
-/// `invalidate`, `revalidate`, `disable`, and `disable_at`.
-pub fn test_stream_match_reg_group() -> bool {
-    dprintf!(INFO, "[Backend: Rust->Rust] StreamMatchRegGroup\n");
-
-    let Ok(mut fake_gr0) = fbl::Array::<u64>::try_new(512) else {
-        return false;
-    };
-    // SAFETY: `fake_gr0` is a 4096-byte heap buffer that outlives `gr0_base`.
-    let gr0_base = unsafe { SmmuMmio::with_size(fake_gr0.as_mut_ptr().addr(), 4096) };
-    let mut avail_smrgs = Bitmask128::new();
-    avail_smrgs.set_lowest_n_bits(4);
-    avail_smrgs.clear_bit(2); // Mark SMRG #2 unavailable (`ALREADY_BOUND`).
-    let mut avail_cbs = Bitmask128::new();
-    avail_cbs.set_lowest_n_bits(4);
-
-    let smmu = SmmuParams {
-        name: "SMMU@smrg_test",
-        op_mode: ArmSmmuMode::Enforced,
-        num_smrgs: 4,
-        num_cbs: 4,
-        available_smrgs: &avail_smrgs,
-        available_cbs: &avail_cbs,
-        gr0_base,
-        gr1_base: SmmuMmio::null(),
-        cb0_base: SmmuMmio::null(),
-        reg_page_size: 4096,
-    };
-
-    let sid = SmrValue::new(0x0123, 0x0003);
-    // Index validation: `>= num_smrgs` -> `INVALID_ARGS`, unavailable bit -> `ALREADY_BOUND`.
-    check_eq!(
-        StreamMatchRegGroup::create_and_lockdown(&smmu, 4, sid).err(),
-        Some(Status::INVALID_ARGS)
-    );
-    check_eq!(
-        StreamMatchRegGroup::create_and_lockdown(&smmu, 2, sid).err(),
-        Some(Status::ALREADY_BOUND)
-    );
-
-    // `create_and_lockdown` disables SMR[0] (`valid = 0, id = 0, mask = 0`) and sets S2CR[0] to
-    // `S2crType::Fault`.
-    gr0::Smr::from_value(0xffff_ffff).write_at(&gr0_base, 0);
-    let Ok(smrg) = StreamMatchRegGroup::create_and_lockdown(&smmu, 0, sid) else {
-        return false;
-    };
-    let mut smrg = TestSmrg(smrg);
-    check_eq!(smrg.smrg_ndx(), 0);
-    check_eq!(smrg.stream_ids(), sid);
-    check_eq!(smrg.mode(), S2crType::Invalid);
-    check_eq!(smrg.cb_ndx(), StreamMatchRegGroup::INVALID_CB_NDX);
-    check_eq!(gr0::Smr::read_at(&gr0_base, 0).valid(), 0);
-    check_eq!(gr0::S2cr::read_at(&gr0_base, 0).s2cr_type(), S2crType::Fault);
-
-    // `enable_for_context_bank(1)` programs S2CR[0] (`Translation`, `cbndx = 1`, `privcfg = 2`)
-    // and SMR[0] (`valid = 1`, `id = 0x0123`, written exactly as given, `mask = 0x0003`).
-    smrg.enable_for_context_bank(1);
-    check_eq!(smrg.mode(), S2crType::Translation);
-    check_eq!(smrg.cb_ndx(), 1);
-    let s2cr0 = gr0::S2crType0::from_value(gr0::S2cr::read_at(&gr0_base, 0).reg_value());
-    check_eq!(s2cr0.s2cr_type(), S2crType::Translation);
-    check_eq!(s2cr0.cbndx(), 1);
-    check_eq!(s2cr0.privcfg(), S2crPrivCfg::Unprivileged);
-    let smr0 = gr0::Smr::read_at(&gr0_base, 0);
-    check_eq!(smr0.valid(), 1);
-    check_eq!(smr0.id(), 0x0123);
-    check_eq!(smr0.mask(), 0x0003);
-
-    // `invalidate` and `revalidate` toggle `SMR.VALID` while preserving `ID` and `MASK`.
-    smrg.invalidate();
-    check_eq!(gr0::Smr::read_at(&gr0_base, 0).valid(), 0);
-    check_eq!(gr0::Smr::read_at(&gr0_base, 0).id(), 0x0123);
-    smrg.revalidate();
-    check_eq!(gr0::Smr::read_at(&gr0_base, 0).valid(), 1);
-
-    // `disable` resets registers and internal fields so `Drop` succeeds cleanly.
-    smrg.disable();
-    check_eq!(smrg.mode(), S2crType::Invalid);
-    check_eq!(smrg.cb_ndx(), StreamMatchRegGroup::INVALID_CB_NDX);
-    check!(smrg.gr0_base().is_null());
-    drop(smrg);
-
-    // `create_and_adopt` tests:
-    // 1. Adopting `S2crType::Invalid` -> `Err(Status::BAD_STATE)` with clean Drop.
-    gr0::S2cr::from_value(0).set_s2cr_type(S2crType::Invalid).write_at(&gr0_base, 1);
-    check_eq!(StreamMatchRegGroup::create_and_adopt(&smmu, 1, sid).err(), Some(Status::BAD_STATE));
-
-    // 2. Adopting `S2crType::Translation` with out-of-range `cbndx = 7 >= num_cbs` ->
-    //    `Err(Status::OUT_OF_RANGE)` with clean Drop.
-    gr0::S2crType0::from_value(0)
-        .set_s2cr_type(S2crType::Translation)
-        .set_cbndx(7)
-        .write_at(&gr0_base, 1);
-    check_eq!(
-        StreamMatchRegGroup::create_and_adopt(&smmu, 1, sid).err(),
-        Some(Status::OUT_OF_RANGE)
-    );
-
-    // 3. Adopting valid `S2crType::Translation` (`cbndx = 2`) and `S2crType::Bypass`.
-    gr0::S2crType0::from_value(0)
-        .set_s2cr_type(S2crType::Translation)
-        .set_cbndx(2)
-        .write_at(&gr0_base, 1);
-    let Ok(adopted_trans) = StreamMatchRegGroup::create_and_adopt(&smmu, 1, sid) else {
-        return false;
-    };
-    let mut adopted_trans = TestSmrg(adopted_trans);
-    check_eq!(adopted_trans.mode(), S2crType::Translation);
-    check_eq!(adopted_trans.cb_ndx(), 2);
-    adopted_trans.disable();
-    drop(adopted_trans);
-
-    gr0::S2cr::from_value(0).set_s2cr_type(S2crType::Bypass).write_at(&gr0_base, 3);
-    let Ok(adopted_bypass) = StreamMatchRegGroup::create_and_adopt(&smmu, 3, sid) else {
-        return false;
-    };
-    let mut adopted_bypass = TestSmrg(adopted_bypass);
-    check_eq!(adopted_bypass.mode(), S2crType::Bypass);
-    check_eq!(adopted_bypass.cb_ndx(), StreamMatchRegGroup::INVALID_CB_NDX);
-    adopted_bypass.disable();
-    drop(adopted_bypass);
-
-    // `disable_at` static helper.
-    gr0::Smr::from_value(0).set_valid(1).set_id(0x55).write_at(&gr0_base, 3);
-    StreamMatchRegGroup::disable_at(&smmu, 3);
-    check_eq!(gr0::Smr::read_at(&gr0_base, 3).valid(), 0);
-    check_eq!(gr0::S2cr::read_at(&gr0_base, 3).s2cr_type(), S2crType::Fault);
-
-    true
-}
-
-// ============================================================================
-// 9. `ContextBank` Unit Tests
-// ============================================================================
-
-/// Test guard that ensures `ContextBank` transitions to `BtiMode::Shutdown` even if a `check!`
-/// returns early.
-struct TestCb<'a>(fbl::UniquePtr<ContextBank>, &'a str);
-
-impl core::ops::Deref for TestCb<'_> {
-    type Target = ContextBank;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl core::ops::DerefMut for TestCb<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl Drop for TestCb<'_> {
-    fn drop(&mut self) {
-        if self.0.mode() != BtiMode::Shutdown {
-            if self.0.mode() == BtiMode::Adopted {
-                self.0.force_mode_for_test(BtiMode::Fault);
+    impl TestCfg {
+        const fn from_raw(raw: u32) -> Self {
+            match raw {
+                0 => Self::Abort,
+                4 => Self::Bypass,
+                5 => Self::Stage1,
+                _ => Self::Reserved,
             }
-            self.0.set_mode(self.1, BtiMode::Shutdown);
         }
     }
-}
 
-/// Tests `ContextBank` lockdown, mode transitions (`Fault`, `Bypass`, `Translation`, `Shutdown`),
-/// fault interrupt toggling, ASID and region TLB invalidations
-/// (`INVALIDATE_ALL_PAGE_COUNT_THRESHOLD`), and hardware state adoption across 64-bit, Ext32Bit,
-/// and 32-bit addressing modes.
-pub fn test_context_bank() -> bool {
-    dprintf!(INFO, "[Backend: Rust->Rust] ContextBank\n");
-
-    let Ok(mut fake_regs) = fbl::Array::<u64>::try_new(512 * 6) else {
-        return false;
-    };
-    let base_vaddr = fake_regs.as_mut_ptr().addr();
-    // SAFETY: `fake_regs` is a 6 * 4096-byte heap buffer that outlives `gr0_base`, `gr1_base`,
-    // and `cb0_base`.
-    let (gr0_base, gr1_base, cb0_base) = unsafe {
-        (
-            SmmuMmio::with_size(base_vaddr, 4096),
-            SmmuMmio::with_size(base_vaddr + 4096, 4096),
-            SmmuMmio::with_size(base_vaddr + 8192, 4 * 4096),
-        )
-    };
-
-    let mut avail_smrgs = Bitmask128::new();
-    avail_smrgs.set_lowest_n_bits(4);
-    let mut avail_cbs = Bitmask128::new();
-    avail_cbs.set_lowest_n_bits(4);
-    avail_cbs.clear_bit(3); // Mark CB #3 unavailable.
-
-    let smmu = SmmuParams {
-        name: "SMMU@cb_test",
-        op_mode: ArmSmmuMode::Disabled,
-        num_smrgs: 4,
-        num_cbs: 4,
-        available_smrgs: &avail_smrgs,
-        available_cbs: &avail_cbs,
-        gr0_base,
-        gr1_base,
-        cb0_base,
-        reg_page_size: 4096,
-    };
-
-    // Index validation: `>= num_cbs` -> `INVALID_ARGS`, unavailable bit -> `ALREADY_BOUND`.
-    check_eq!(ContextBank::create_and_lockdown(&smmu, 4).err(), Some(Status::INVALID_ARGS));
-    check_eq!(ContextBank::create_and_lockdown(&smmu, 3).err(), Some(Status::ALREADY_BOUND));
-
-    let Ok(cb) = ContextBank::create_and_lockdown(&smmu, 1) else {
-        return false;
-    };
-    let mut cb = TestCb(cb, smmu.name);
-    let cb1_base = smmu.get_cb_base(1);
-    check_eq!(cb.cb_ndx(), 1);
-    check_eq!(cb.asid(), ContextBank::UPPER_ASID_BITS | 1);
-    check_eq!(s1cbr::Ttbr0_64Bit::read_from(&cb1_base).asid(), UNUSED_ASID as u64);
-    check_eq!(s1cbr::Ttbr1_64Bit::read_from(&cb1_base).asid(), UNUSED_ASID as u64);
-
-    // Transition to `BtiMode::Fault`, then `BtiMode::Bypass`, then back to `BtiMode::Fault`.
-    cb.set_mode(smmu.name, BtiMode::Fault);
-    check_eq!(cb.mode(), BtiMode::Fault);
-    check_eq!(cb.addr_mode(), AddrMode::Mode64Bit);
-    check_eq!(cb.aspace_size(), 0);
-    check_eq!(s1cbr::Sctlr::read_from(&cb1_base).m(), 1);
-    check_eq!(s1cbr::Tcr64Bit::read_from(&cb1_base).epd0(), 1);
-    check_eq!(s1cbr::Tcr64Bit::read_from(&cb1_base).epd1(), 1);
-
-    cb.set_mode(smmu.name, BtiMode::Bypass);
-    check_eq!(cb.mode(), BtiMode::Bypass);
-    check_eq!(cb.aspace_size(), 1u64 << 48);
-    check_eq!(gr1::Cbar::read_at(&gr1_base, 1).cbar_type(), CbarType::S1TS2Bypass);
-    check_eq!(s1cbr::Sctlr::read_from(&cb1_base).m(), 0);
-
-    cb.set_mode(smmu.name, BtiMode::Fault);
-    check_eq!(cb.mode(), BtiMode::Fault);
-
-    // Attach a `DeviceAspace` and transition to `BtiMode::Translation`.
-    let Ok(aspace) = DeviceAspace::create(0x1000, (1u64 << 48) - 0x1000, 0) else {
-        return false;
-    };
-    let mut aspace = TestAspace(aspace);
-    cb.attach_aspace(&aspace);
-    cb.set_mode(smmu.name, BtiMode::Translation);
-    check_eq!(cb.mode(), BtiMode::Translation);
-    check_eq!(cb.aspace_size(), 1u64 << (64 - DEFAULT_TCR_T0SZ));
-    check!(cb.ttbrs()[0].enabled);
-    check_eq!(cb.ttbrs()[0].ttbr_paddr, aspace.root_tt_paddr());
-    check_eq!(s1cbr::Ttbr0_64Bit::read_from(&cb1_base).base_addr_value(), aspace.root_tt_paddr());
-    check_eq!(s1cbr::Ttbr0_64Bit::read_from(&cb1_base).asid(), cb.asid() as u64);
-    check_eq!(s1cbr::Tcr64Bit::read_from(&cb1_base).epd0(), 0);
-    check_eq!(s1cbr::Tcr64Bit::read_from(&cb1_base).epd1(), 1);
-    check_eq!(s1cbr::Sctlr::read_from(&cb1_base).m(), 1);
-
-    // Fault interrupt toggling (`SCTLR.CFIE`).
-    cb.enable_fault_interrupt();
-    check_eq!(s1cbr::Sctlr::read_from(&cb1_base).cfie(), 1);
-    cb.disable_fault_interrupt();
-    check_eq!(s1cbr::Sctlr::read_from(&cb1_base).cfie(), 0);
-
-    // TLB invalidation by region (below threshold `<= 256` pages uses `TLBIVA`; above threshold
-    // `> 256` pages falls back to `TLBIASID`).
-    s1cbr::Tlbiasid::from_value(0).write_to(&cb1_base);
-    s1cbr::TlbivaAArch64::from_value(0).write_to(&cb1_base);
-    let mut inval_op = cb.make_inval_op();
-    inval_op.invalidate(0x1234_5000, 2 * PAGE_SIZE);
-    let tlbiva = s1cbr::TlbivaAArch64::read_from(&cb1_base);
-    check_eq!(tlbiva.asid(), cb.asid() as u64);
-    check_eq!(tlbiva.address(), 0x1234_6000);
-    check_eq!(s1cbr::Tlbiasid::read_from(&cb1_base).asid(), 0);
-
-    // Region larger than `INVALIDATE_ALL_PAGE_COUNT_THRESHOLD` (257 pages) must issue `TLBIASID`.
-    inval_op.invalidate(0x1000_0000, (INVALIDATE_ALL_PAGE_COUNT_THRESHOLD + 1) * PAGE_SIZE);
-    check_eq!(s1cbr::Tlbiasid::read_from(&cb1_base).asid(), cb.asid() as u32);
-
-    // Zero-size invalidation via `ContextBankInvalidator` also issues `TLBIASID`.
-    s1cbr::Tlbiasid::from_value(0).write_to(&cb1_base);
-    aspace.free_translation_tables(&mut inval_op);
-    check_eq!(s1cbr::Tlbiasid::read_from(&cb1_base).asid(), cb.asid() as u32);
-
-    // Shut down `cb` cleanly.
-    cb.set_mode(smmu.name, BtiMode::Shutdown);
-    check_eq!(cb.mode(), BtiMode::Shutdown);
-    check!(cb.gr1_base().is_null());
-    check!(cb.cb_base().is_null());
-    drop(cb);
-
-    // Test `ContextBank::create_and_adopt` across:
-    // (a) Stage-1 64-bit translation (`VA64 = 1`, `SCTLR.M = 1`, `TCR.T0SZ = 16`, `EPD0 = 0`,
-    //     `EPD1 = 1`).
-    let cb2_base = smmu.get_cb_base(2);
-    gr1::Cbar::from_value(0).set_cbar_type(CbarType::S1TS2Bypass).write_at(&gr1_base, 2);
-    gr1::Cba2r::from_value(0).set_va64(Cba2rVa64::Va64).write_at(&gr1_base, 2);
-    s1cbr::Tcr64Bit::from_value(0)
-        .set_t0sz(16)
-        .set_t1sz(24)
-        .set_tg0(TcrTg0::Granule4KB)
-        .set_epd0(0)
-        .set_epd1(1)
-        .write_to(&cb2_base);
-    s1cbr::Ttbr0_64Bit::from_value(0).set_base_addr_from_value(0xabcd_0000).write_to(&cb2_base);
-    s1cbr::Sctlr::from_value(0).set_m(1).write_to(&cb2_base);
-
-    let Ok(adopted_64) = ContextBank::create_and_adopt(&smmu, 2) else {
-        return false;
-    };
-    let mut adopted_64 = TestCb(adopted_64, smmu.name);
-    check_eq!(adopted_64.mode(), BtiMode::Adopted);
-    check_eq!(adopted_64.addr_mode(), AddrMode::Mode64Bit);
-    check!(adopted_64.ttbrs()[0].enabled);
-    check!(!adopted_64.ttbrs()[1].enabled);
-    check_eq!(adopted_64.ttbrs()[0].granule_size_bits, 12);
-    check_eq!(adopted_64.ttbrs()[0].first_valid_addr, 0);
-    check_eq!(adopted_64.ttbrs()[0].last_valid_addr, (1u64 << 48) - 1);
-    check_eq!(adopted_64.ttbrs()[0].ttbr_paddr, 0xabcd_0000);
-    adopted_64.force_mode_for_test(BtiMode::Fault);
-    adopted_64.set_mode(smmu.name, BtiMode::Shutdown);
-    drop(adopted_64);
-
-    // (b) Stage-1 Ext32Bit translation (`VA64 = 0`, `TCR.EAE = 1`, `T0SZ = 2`, `T1SZ = 0`).
-    gr1::Cba2r::from_value(0).set_va64(Cba2rVa64::Va32).write_at(&gr1_base, 2);
-    s1cbr::TcrExt32Bit::from_value(0)
-        .set_eae(1)
-        .set_t0sz(2)
-        .set_t1sz(0)
-        .set_epd0(0)
-        .set_epd1(1)
-        .write_to(&cb2_base);
-    s1cbr::Ttbr0Ext32Bit::from_value(0).set_base_addr_from_value(0x1234_0000).write_to(&cb2_base);
-    s1cbr::Sctlr::from_value(0).set_m(1).write_to(&cb2_base);
-
-    let Ok(adopted_ext32) = ContextBank::create_and_adopt(&smmu, 2) else {
-        return false;
-    };
-    let mut adopted_ext32 = TestCb(adopted_ext32, smmu.name);
-    check_eq!(adopted_ext32.mode(), BtiMode::Adopted);
-    check_eq!(adopted_ext32.addr_mode(), AddrMode::Ext32Bit);
-    check_eq!(adopted_ext32.ttbrs()[0].last_valid_addr, (1u64 << 30) - 1);
-    check_eq!(adopted_ext32.ttbrs()[0].ttbr_paddr, 0x1234_0000);
-    adopted_ext32.force_mode_for_test(BtiMode::Fault);
-    adopted_ext32.set_mode(smmu.name, BtiMode::Shutdown);
-    drop(adopted_ext32);
-
-    // (c) Stage-1 32-bit short-descriptor translation (`VA64 = 0`, `TCR.EAE = 0`, `T0SZ = 1`).
-    gr1::Cba2r::from_value(0).set_va64(Cba2rVa64::Va32).write_at(&gr1_base, 2);
-    s1cbr::Tcr32Bit::from_value(0).set_eae(0).set_t0sz(1).set_pd0(0).set_pd1(1).write_to(&cb2_base);
-    s1cbr::Ttbr0_32Bit::from_value(0).set_base_addr_from_value(0x5678_0000).write_to(&cb2_base);
-    s1cbr::Sctlr::from_value(0).set_m(1).write_to(&cb2_base);
-
-    let Ok(adopted_32) = ContextBank::create_and_adopt(&smmu, 2) else {
-        return false;
-    };
-    let mut adopted_32 = TestCb(adopted_32, smmu.name);
-    check_eq!(adopted_32.mode(), BtiMode::Adopted);
-    check_eq!(adopted_32.addr_mode(), AddrMode::Mode32Bit);
-    check_eq!(adopted_32.ttbrs()[0].last_valid_addr, (1u64 << 31) - 1);
-    check_eq!(adopted_32.ttbrs()[1].first_valid_addr, 1u64 << 31);
-    check_eq!(adopted_32.ttbrs()[1].last_valid_addr, 0xFFFF_FFFF);
-    check_eq!(adopted_32.ttbrs()[0].ttbr_paddr, 0x5678_0000);
-    adopted_32.force_mode_for_test(BtiMode::Fault);
-    adopted_32.set_mode(smmu.name, BtiMode::Shutdown);
-    drop(adopted_32);
-
-    // `ContextBank::disable_at` static helper.
-    ContextBank::disable_at(&smmu, 0);
-    check_eq!(s1cbr::Ttbr0_64Bit::read_from(&cb0_base).asid(), UNUSED_ASID as u64);
-
-    true
-}
-
-// ============================================================================
-// 10. `define_smmu_reg!` Formatting & Bitfields Unit Tests
-// ============================================================================
-
-/// Tests `define_smmu_reg!` 32-bit, 64-bit, and indexed register bitfields, `RSVDZ_MASK` write
-/// masking, enum conversions, `FieldDesc::extract`, and string formatting helpers.
-pub fn test_registers_and_bitfields() -> bool {
-    dprintf!(INFO, "[Backend: Rust->Rust] RegistersAndBitfields\n");
-
-    let Ok(mut fake_mmio) = fbl::Array::<u64>::try_new(512) else {
-        return false;
-    };
-    // SAFETY: `fake_mmio` is a 4096-byte heap buffer that outlives `mmio`.
-    let mmio = unsafe { SmmuMmio::with_size(fake_mmio.as_mut_ptr().addr(), 4096) };
-
-    // 1. 32-bit fixed-offset register (`gr0::Cr0`) round-trip and `RSVDZ_MASK` stripping on write.
-    let mut cr0 = gr0::Cr0::from_value(u32::MAX);
-    check_eq!(cr0.clientpd(), ClientPd::Disabled);
-    check_eq!(cr0.stalld(), Stalld::Disabled);
-    check_eq!(cr0.exidenable(), ExidEnable::Enabled);
-    cr0.write_to(&mmio);
-    let cr0_readback = gr0::Cr0::read_from(&mmio);
-    check_eq!(cr0_readback.reg_value() & gr0::Cr0::RSVDZ_MASK, 0);
-    check_eq!(cr0_readback.reg_value(), !gr0::Cr0::RSVDZ_MASK);
-
-    cr0.set_clientpd(ClientPd::Enabled)
-        .set_stalld(Stalld::Enabled)
-        .set_exidenable(ExidEnable::Disabled)
-        .set_usfcfg(1)
-        .set_gfre(1)
-        .set_gfie(1)
-        .write_to(&mmio);
-    let cr0_mod = gr0::Cr0::read_from(&mmio);
-    check_eq!(cr0_mod.clientpd(), ClientPd::Enabled);
-    check_eq!(cr0_mod.stalld(), Stalld::Enabled);
-    check_eq!(cr0_mod.exidenable(), ExidEnable::Disabled);
-    check_eq!(cr0_mod.usfcfg(), 1);
-    check_eq!(cr0_mod.gfre(), 1);
-    check_eq!(cr0_mod.gfie(), 1);
-
-    // 2. Bitfields in `gr0::Idr0`.
-    let mut idr0 = gr0::Idr0::from_value(0);
-    idr0.set_s1ts(1)
-        .set_s2ts(0)
-        .set_nts(1)
-        .set_sms(1)
-        .set_cttw(1)
-        .set_numirpt(16)
-        .set_numsmrg(64)
-        .write_to(&mmio);
-    let idr0_rb = gr0::Idr0::read_from(&mmio);
-    check_eq!(idr0_rb.s1ts(), 1);
-    check_eq!(idr0_rb.s2ts(), 0);
-    check_eq!(idr0_rb.nts(), 1);
-    check_eq!(idr0_rb.sms(), 1);
-    check_eq!(idr0_rb.cttw(), 1);
-    check_eq!(idr0_rb.numirpt(), 16);
-    check_eq!(idr0_rb.numsmrg(), 64);
-    check_eq!(idr0_rb.reg_value() & gr0::Idr0::RSVDZ_MASK, 0);
-
-    // 3. 64-bit register (`s1cbr::Ttbr0_64Bit`, `s2cbr::Ttbr0`, `s1cbr::Far`) round-trip and
-    //    `RSVDZ_MASK` enforcement.
-    let mut ttbr0 = s1cbr::Ttbr0_64Bit::from_value(u64::MAX);
-    ttbr0.write_to(&mmio);
-    let ttbr0_rb = s1cbr::Ttbr0_64Bit::read_from(&mmio);
-    check_eq!(ttbr0_rb.reg_value() & s1cbr::Ttbr0_64Bit::RSVDZ_MASK, 0);
-
-    let test_pa: u64 = 0x0000_DEAD_BEEF_F000;
-    s1cbr::Ttbr0_64Bit::from_value(0)
-        .set_asid(0x5A03)
-        .set_base_addr_from_value(test_pa)
-        .write_to(&mmio);
-    let ttbr0_pa = s1cbr::Ttbr0_64Bit::read_from(&mmio);
-    check_eq!(ttbr0_pa.asid(), 0x5A03);
-    check_eq!(ttbr0_pa.base_addr_value(), test_pa);
-
-    s2cbr::Ttbr0::from_value(u64::MAX).write_to(&mmio);
-    check_eq!(s2cbr::Ttbr0::read_from(&mmio).reg_value() & s2cbr::Ttbr0::RSVDZ_MASK, 0);
-    s2cbr::Ttbr0::from_value(0).set_base_addr_from_value(test_pa).write_to(&mmio);
-    check_eq!(s2cbr::Ttbr0::read_from(&mmio).base_addr_value(), test_pa);
-
-    s1cbr::Far::from_value(0).set_faddr(0xCAFE_BABE_1234_5678).write_to(&mmio);
-    check_eq!(s1cbr::Far::read_from(&mmio).faddr(), 0xCAFE_BABE_1234_5678);
-
-    // 4. Indexed register arrays (`gr0::Smr`, `gr0::S2cr`, `gr1::Cbar`, `gr1::Cba2r`,
-    //    `gr1::Cbfrsynra`) across indices `0..4`.
-    for ndx in 0..4u32 {
-        check_eq!(gr0::Smr::offset(ndx), 0x800 + (ndx << 2));
-        check_eq!(gr0::S2cr::offset(ndx), 0xc00 + (ndx << 2));
-        check_eq!(gr1::Cbar::offset(ndx), ndx << 2);
-        check_eq!(gr1::Cbfrsynra::offset(ndx), 0x400 + (ndx << 2));
-        check_eq!(gr1::Cba2r::offset(ndx), 0x800 + (ndx << 2));
-
-        gr0::Smr::from_value(u32::MAX).write_at(&mmio, ndx);
-        check_eq!(gr0::Smr::read_at(&mmio, ndx).reg_value() & gr0::Smr::RSVDZ_MASK, 0);
-
-        gr1::Cba2r::from_value(u32::MAX).write_at(&mmio, ndx);
-        check_eq!(gr1::Cba2r::read_at(&mmio, ndx).reg_value() & gr1::Cba2r::RSVDZ_MASK, 0);
+    define_smmu_reg! {
+        /// Synthetic 64-bit in-memory structure doubleword covering all supported field kinds.
+        pub struct TestStructDw(u64) => {
+            63:63 => valid, set_valid ["VALID"]: bool;
+            62:60 => [rsvdz];
+            59:56 => res0, set_res0 ["__res0"]: u64;
+            55:12 => addr, set_addr ["ADDR"]: u64;
+            11:4  => [rsvdz];
+            3:1   => cfg, set_cfg ["CFG"]: enum TestCfg;
+            0:0   => leaf, set_leaf ["LEAF"]: bool;
+        }
     }
 
-    // 5. Enum `from_raw` and string helper coverage.
-    check_eq!(S2crType::from_raw(0), S2crType::Translation);
-    check_eq!(S2crType::from_raw(1), S2crType::Bypass);
-    check_eq!(S2crType::from_raw(2), S2crType::Fault);
-    check_eq!(S2crType::from_raw(3), S2crType::Invalid);
+    let expected_rsvdz: u64 = (0b111u64 << 60) | (0xffu64 << 4);
+    check_eq!(TestStructDw::RSVDZ_MASK, expected_rsvdz);
+    check_eq!(TestStructDw::default().reg_value(), 0);
 
-    check_eq!(S2crPrivCfg::from_raw(0), S2crPrivCfg::Default);
-    check_eq!(S2crPrivCfg::from_raw(1), S2crPrivCfg::Reserved1);
-    check_eq!(S2crPrivCfg::from_raw(2), S2crPrivCfg::Unprivileged);
-    check_eq!(S2crPrivCfg::from_raw(3), S2crPrivCfg::Privileged);
+    let mut dw = TestStructDw::from(0u64);
+    dw.set_valid(true)
+        .set_res0(0xa)
+        .set_addr(0x1_2345_6789)
+        .set_cfg(TestCfg::Stage1)
+        .set_leaf(true);
+    check!(dw.valid());
+    check_eq!(dw.res0(), 0xa);
+    check_eq!(dw.addr(), 0x1_2345_6789);
+    check_eq!(dw.cfg(), TestCfg::Stage1);
+    check!(dw.leaf());
 
-    check_eq!(CbarType::from_raw(0), CbarType::S2Translation);
-    check_eq!(CbarType::from_raw(1), CbarType::S1TS2Bypass);
-    check_eq!(CbarType::from_raw(2), CbarType::S1TS2Fault);
-    check_eq!(CbarType::from_raw(3), CbarType::S1TS2Translate);
+    let expected_raw: u64 =
+        (1u64 << 63) | (0xau64 << 56) | (0x1_2345_6789u64 << 12) | (5u64 << 1) | 1u64;
+    check_eq!(dw.reg_value(), expected_raw);
+    check_eq!(u64::from(dw), expected_raw);
 
-    check_eq!(Cba2rVa64::from_raw(0), Cba2rVa64::Va32);
-    check_eq!(Cba2rVa64::from_raw(1), Cba2rVa64::Va64);
-    check_eq!(TcrTg0::from_raw(0), TcrTg0::Granule4KB);
-    check_eq!(TcrTg0::from_raw(1), TcrTg0::Granule64KB);
-    check_eq!(TcrTg0::from_raw(2), TcrTg0::Granule16KB);
-    check_eq!(TcrTg0::from_raw(3), TcrTg0::Reserved);
-    check_eq!(TcrTg1::from_raw(0), TcrTg1::Reserved0);
-    check_eq!(TcrTg1::from_raw(1), TcrTg1::Granule16KB);
-    check_eq!(TcrTg1::from_raw(2), TcrTg1::Granule4KB);
-    check_eq!(TcrTg1::from_raw(3), TcrTg1::Granule64KB);
-    check_eq!(TcrSh0::from_raw(3), TcrSh0::InnerShareable);
-    check_eq!(TcrOrg0::from_raw(1), TcrOrg0::WriteBackWriteAllocate);
-    check_eq!(TcrIrg0::from_raw(1), TcrIrg0::WriteBackWriteAllocate);
+    // Clearing boolean fields and changing enum/integer fields leaves adjacent bits intact.
+    dw.set_valid(false).set_cfg(TestCfg::Bypass).set_leaf(false);
+    check!(!dw.valid());
+    check_eq!(dw.cfg(), TestCfg::Bypass);
+    check!(!dw.leaf());
+    check_eq!(dw.addr(), 0x1_2345_6789);
+    check_eq!(dw.res0(), 0xa);
 
-    check_eq!(arm_smmu_mode_to_string(ArmSmmuMode::Disabled), "Disabled");
-    check_eq!(arm_smmu_mode_to_string(ArmSmmuMode::Passthru), "Passthru");
-    check_eq!(arm_smmu_mode_to_string(ArmSmmuMode::Enforced), "Enforced");
-    check_eq!(arm_s2cr_type_to_string(S2crType::Translation), "Translation");
-    check_eq!(
-        arm_cbar_type_to_string(CbarType::S1TS2Bypass),
-        "Translate: Stage 1 Context with Stage 2 Bypass"
-    );
-    check_eq!(addr_mode_to_string(AddrMode::Mode64Bit), "64Bit");
-    check_eq!(bti_mode_to_string(BtiMode::Translation), "Translation");
+    // Raw value injection with RSVDZ bits set: verify `RSVDZ_MASK` strips only `[rsvdz]` ranges.
+    let with_rsvdz = TestStructDw::from_value(expected_raw | expected_rsvdz);
+    check_eq!(with_rsvdz.reg_value() & !TestStructDw::RSVDZ_MASK, expected_raw);
 
-    // 6. `FieldDesc::extract` and generated `FIELDS` metadata tables.
-    let fd_single = FieldDesc { name: "BIT5", msb: 5, lsb: 5 };
-    check_eq!(fd_single.extract(1u64 << 5), 1);
-    check_eq!(fd_single.extract(!(1u64 << 5)), 0);
+    let mut reset_dw = with_rsvdz;
+    reset_dw.set_reg_value(expected_raw);
+    check_eq!(reset_dw, TestStructDw::from_value(expected_raw));
 
-    let fd_full = FieldDesc { name: "ALL64", msb: 63, lsb: 0 };
-    check_eq!(fd_full.extract(0xDEAD_BEEF_CAFE_BABE), 0xDEAD_BEEF_CAFE_BABE);
+    // Verify `FIELDS` metadata and `FieldDesc::extract` values.
+    check_eq!(TestStructDw::FIELDS.len(), 7);
+    check_eq!(TestStructDw::FIELDS[0].name, "VALID");
+    check_eq!(TestStructDw::FIELDS[0].extract(expected_raw), 1);
+    check_eq!(TestStructDw::FIELDS[1].name, "");
+    check_eq!(TestStructDw::FIELDS[2].name, "__res0");
+    check_eq!(TestStructDw::FIELDS[2].extract(expected_raw), 0xa);
+    check_eq!(TestStructDw::FIELDS[3].name, "ADDR");
+    check_eq!(TestStructDw::FIELDS[3].extract(expected_raw), 0x1_2345_6789);
+    check_eq!(TestStructDw::FIELDS[4].name, "");
+    check_eq!(TestStructDw::FIELDS[5].name, "CFG");
+    check_eq!(TestStructDw::FIELDS[5].extract(expected_raw), 5);
+    check_eq!(TestStructDw::FIELDS[6].name, "LEAF");
+    check_eq!(TestStructDw::FIELDS[6].extract(expected_raw), 1);
 
-    check!(!gr0::Cr0::FIELDS.is_empty());
-    check!(!gr0::Cr2::FIELDS.is_empty());
-    check!(!gr0::Smr::FIELDS.is_empty());
-    check!(!s1cbr::Ttbr0_64Bit::FIELDS.is_empty());
-    // Verify that `[rsvdz]` fields in `gr0::Cr2::FIELDS` have `name == ""` while named fields in
-    // `gr0::Smr::FIELDS` have non-empty names.
-    let has_rsvdz_field = gr0::Cr2::FIELDS.iter().any(|f| f.name.is_empty());
-    let has_valid_field =
-        gr0::Smr::FIELDS.iter().any(|f| f.name == "VALID" && f.msb == 31 && f.lsb == 31);
-    check!(has_rsvdz_field);
-    check!(has_valid_field);
-
-    // Exercise `dump_reg` formatting for both 32-bit (`Cr0`) and 64-bit (`Ttbr0_64Bit`) registers.
-    super::v2::smmu::dump_reg(
-        "GR0.CR0",
-        cr0_mod.reg_value() as u64,
-        4,
-        gr0::Cr0::OFFSET,
-        gr0::Cr0::FIELDS,
-        &mmio,
-        1,
-    );
-    super::v2::smmu::dump_reg(
-        "CB0.TTBR0",
-        ttbr0_pa.reg_value(),
-        8,
-        s1cbr::Ttbr0_64Bit::OFFSET,
-        s1cbr::Ttbr0_64Bit::FIELDS,
-        &mmio,
+    // Exercise `dump_bitfields` directly on the 64-bit structure doubleword.
+    dump_bitfields(
+        "TEST_DW0",
+        0x4000_1000,
+        expected_raw,
+        core::mem::size_of::<u64>(),
+        TestStructDw::FIELDS,
         1,
     );
 
@@ -2504,7 +1778,7 @@ pub fn test_registers_and_bitfields() -> bool {
 }
 
 // ============================================================================
-// 11. `EscapedName` Unit Tests
+// 7. `EscapedName` Unit Tests
 // ============================================================================
 
 /// Tests that `EscapedName` stops at the first NUL, prints valid UTF-8 unchanged, escapes bytes
@@ -2542,28 +1816,121 @@ pub fn test_escaped_name() -> bool {
     true
 }
 
-/// Runs all 22 native Rust (`Rust -> Rust`) component unit tests in sequence.
-pub fn run_all_unit_tests() -> bool {
-    test_smmu_mode_defaults()
-        && test_smmu_mode_advanced()
-        && test_smmu_mode_case_insensitive()
-        && test_smmu_mode_whitespace()
-        && test_smmu_mode_validation()
-        && test_vmsav8_64_descriptors()
-        && test_smr_value_and_iter()
-        && test_bitmask128()
-        && test_page_cache_add_and_get()
-        && test_page_cache_trim()
-        && test_page_cache_oom()
-        && test_translation_table_helper_walk_and_reclaim()
-        && test_device_aspace_map_and_unmap()
-        && test_device_aspace_map_at_specific_location()
-        && test_device_aspace_map_straddling_table_levels()
-        && test_device_aspace_map_failure_injection()
-        && test_device_aspace_shared_table_levels()
-        && test_device_aspace_map_at_location_edge_cases()
-        && test_stream_match_reg_group()
-        && test_context_bank()
-        && test_registers_and_bitfields()
-        && test_escaped_name()
+/// In-kernel `k ut arm_smmu` test suite wrapping the 18 version-neutral unit tests.
+#[cfg(ktest)]
+#[unittest::suite(name = "arm_smmu")]
+mod ktest_suite {
+    /// Tests default SMMU mode strings (`"disabled"`, `"passthru"`, `"enforced"`).
+    #[test]
+    fn smmu_mode_defaults() {
+        unittest::assert_true!(super::test_smmu_mode_defaults());
+    }
+
+    /// Tests per-base-address overrides, radix parsing, and malformed segment skipping.
+    #[test]
+    fn smmu_mode_advanced() {
+        unittest::assert_true!(super::test_smmu_mode_advanced());
+    }
+
+    /// Tests ASCII case-insensitivity of SMMU mode tokens and hexadecimal base addresses.
+    #[test]
+    fn smmu_mode_case_insensitive() {
+        unittest::assert_true!(super::test_smmu_mode_case_insensitive());
+    }
+
+    /// Tests whitespace trimming around commas, `=`, and mode tokens.
+    #[test]
+    fn smmu_mode_whitespace() {
+        unittest::assert_true!(super::test_smmu_mode_whitespace());
+    }
+
+    /// Tests validation of valid and malformed SMMU mode strings.
+    #[test]
+    fn smmu_mode_validation() {
+        unittest::assert_true!(super::test_smmu_mode_validation());
+    }
+
+    /// Tests VMSAv8-64 stage-1 address validation, descriptor encoding, and atomic PTE writes.
+    #[test]
+    fn vmsav8_64_descriptors() {
+        unittest::assert_true!(super::test_vmsav8_64_descriptors());
+    }
+
+    /// Tests `Bitmask128` bit manipulation, boundary indices, and `Bitmask128Iter`.
+    #[test]
+    fn bitmask128() {
+        unittest::assert_true!(super::test_bitmask128());
+    }
+
+    /// Tests `PageCache` allocation (`get_page`), zero-filling, `return_page`, and LIFO reuse.
+    #[test]
+    fn page_cache_add_and_get() {
+        unittest::assert_true!(super::test_page_cache_add_and_get());
+    }
+
+    /// Tests `PageCache::trim` FIFO tail eviction and LIFO head retention.
+    #[test]
+    fn page_cache_trim() {
+        unittest::assert_true!(super::test_page_cache_trim());
+    }
+
+    /// Tests `PageCache` OOM handling when the underlying PMM reaches its allocation limit.
+    #[test]
+    fn page_cache_oom() {
+        unittest::assert_true!(super::test_page_cache_oom());
+    }
+
+    /// Tests `TranslationTableHelper` 4-level cursor walks and intermediate table reclamation.
+    #[test]
+    fn translation_table_helper_walk_and_reclaim() {
+        unittest::assert_true!(super::test_translation_table_helper_walk_and_reclaim());
+    }
+
+    /// Tests `DeviceAspace` map and unmap across all permission flag combinations.
+    #[test]
+    fn device_aspace_map_and_unmap() {
+        unittest::assert_true!(super::test_device_aspace_map_and_unmap());
+    }
+
+    /// Tests `DeviceAspace::map` at a caller-specified virtual address.
+    #[test]
+    fn device_aspace_map_at_specific_location() {
+        unittest::assert_true!(super::test_device_aspace_map_at_specific_location());
+    }
+
+    /// Tests `DeviceAspace::map` straddling the 512 GiB L0[0] -> L0[1] boundary.
+    #[test]
+    fn device_aspace_map_straddling_table_levels() {
+        unittest::assert_true!(super::test_device_aspace_map_straddling_table_levels());
+    }
+
+    /// Tests `DeviceAspace::map` OOM rollback and preservation of pre-existing sibling mappings.
+    #[test]
+    fn device_aspace_map_failure_injection() {
+        unittest::assert_true!(super::test_device_aspace_map_failure_injection());
+    }
+
+    /// Tests reference-free reclamation of shared L0/L1/L2/L3 translation tables on reverse unmap.
+    #[test]
+    fn device_aspace_shared_table_levels() {
+        unittest::assert_true!(super::test_device_aspace_shared_table_levels());
+    }
+
+    /// Tests alignment, overflow, bounds checks, overlap rejection, and adjacent region placement.
+    #[test]
+    fn device_aspace_map_at_location_edge_cases() {
+        unittest::assert_true!(super::test_device_aspace_map_at_location_edge_cases());
+    }
+
+    /// Tests the non-MMIO `define_smmu_reg!` arm and `dump_bitfields` helper on a `u64` value.
+    #[test]
+    fn non_mmio_bitfields() {
+        unittest::assert_true!(super::test_non_mmio_bitfields());
+    }
+
+    /// Tests `EscapedName` NUL termination, UTF-8 passthrough, and invalid-byte escaping.
+    #[test]
+    fn escaped_name() {
+        unittest::assert_true!(super::test_escaped_name());
+    }
 }

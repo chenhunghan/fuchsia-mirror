@@ -6,7 +6,7 @@ In the guide on [building components][build-components] we saw several examples
 of defining components for executables and then packaging them. In this document
 we review ways of making data files available to components in the same package.
 
-## Hermetic data files with `resource()`
+## Hermetic data files with resource() {:#hermetic-data-files-with-resource}
 
 At runtime, components are able to read the contents of their own package by
 accessing the path `/pkg/` in their namespace. The `resource()` template may be
@@ -136,5 +136,5 @@ version, depending on the package association.
 [additional-packaged-resources]: /docs/development/components/build.md#additional-packaged-resources
 [build-components]: /docs/development/components/build.md
 [gn-placeholders]: https://gn.googlesource.com/gn/+/HEAD/docs/reference.md#placeholders
-[metafar]: /docs/concepts/packages/package.md#metafar
+[metafar]: /docs/concepts/packages/package.md#meta-far
 [resource-gni]: /build/dist/resource.gni

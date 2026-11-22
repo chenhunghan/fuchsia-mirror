@@ -20,6 +20,7 @@ cml_shard(
     shard = "meta/use_elf_runner.shard.cml",
     visibility = [
         "//examples/components/routing/rust/echo_server:__pkg__",
+        "//src/lib/fuchsia-component-test/tests:__pkg__",
         "//src/sys/component_manager/tests:__subpackages__",
     ],
 )

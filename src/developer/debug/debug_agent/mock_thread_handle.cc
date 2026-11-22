@@ -6,6 +6,8 @@
 
 #include <lib/syslog/cpp/macros.h>
 
+#include <utility>
+
 #include "src/developer/debug/debug_agent/mock_suspend_handle.h"
 
 namespace debug_agent {
@@ -21,8 +23,8 @@ MockThreadHandle::MockThreadHandle(zx_koid_t thread_koid, std::string name)
 
 void MockThreadHandle::SetRegisterCategory(debug::RegisterCategory cat,
                                            std::vector<debug::RegisterValue> values) {
-  FX_CHECK(static_cast<size_t>(cat) < std::size(registers_));
-  registers_[static_cast<size_t>(cat)] = std::move(values);
+  FX_CHECK(std::to_underlying(cat) < std::size(registers_));
+  registers_[std::to_underlying(cat)] = std::move(values);
 }
 
 size_t MockThreadHandle::BreakpointInstallCount(uint64_t address) const {
@@ -33,7 +35,7 @@ size_t MockThreadHandle::BreakpointInstallCount(uint64_t address) const {
 }
 
 size_t MockThreadHandle::TotalBreakpointInstallCalls() const {
-  int total = 0;
+  size_t total = 0;
   for (auto it : bp_installs_)
     total += it.second;
   return total;
@@ -47,7 +49,7 @@ size_t MockThreadHandle::BreakpointUninstallCount(uint64_t address) const {
 }
 
 size_t MockThreadHandle::TotalBreakpointUninstallCalls() const {
-  int total = 0;
+  size_t total = 0;
   for (auto it : bp_uninstalls_)
     total += it.second;
   return total;
@@ -61,7 +63,7 @@ size_t MockThreadHandle::WatchpointInstallCount(const debug::AddressRange& range
 }
 
 size_t MockThreadHandle::TotalWatchpointInstallCalls() const {
-  int total = 0;
+  size_t total = 0;
   for (auto it : wp_installs_)
     total += it.second;
   return total;
@@ -75,7 +77,7 @@ size_t MockThreadHandle::WatchpointUninstallCount(const debug::AddressRange& ran
 }
 
 size_t MockThreadHandle::TotalWatchpointUninstallCalls() const {
-  int total = 0;
+  size_t total = 0;
   for (auto it : wp_uninstalls_)
     total += it.second;
   return total;
@@ -84,7 +86,7 @@ size_t MockThreadHandle::TotalWatchpointUninstallCalls() const {
 debug_ipc::ThreadRecord MockThreadHandle::GetThreadRecord(zx_koid_t process_koid) const {
   debug_ipc::ThreadRecord record;
   record.id = {.process = process_koid, .thread = thread_koid_};
-  record.name = "test thread";
+  record.name = name_.empty() ? "test thread" : name_;
   record.state = state_.state;
   record.blocked_reason = state_.blocked_reason;
   return record;
@@ -95,6 +97,8 @@ std::unique_ptr<SuspendHandle> MockThreadHandle::Suspend() {
 }
 
 bool MockThreadHandle::WaitForSuspension(TickTimePoint deadline) const { return true; }
+
+bool MockThreadHandle::WaitForSuspensionSignal(TickTimePoint) const { return is_suspended(); }
 
 std::optional<GeneralRegisters> MockThreadHandle::GetGeneralRegisters() const {
   return general_registers_;
@@ -119,9 +123,9 @@ std::vector<debug::RegisterValue> MockThreadHandle::ReadRegisters(
     const std::vector<debug::RegisterCategory>& cats_to_get) const {
   std::vector<debug::RegisterValue> result;
   for (const auto cat : cats_to_get) {
-    FX_CHECK(static_cast<size_t>(cat) < std::size(registers_));
+    FX_CHECK(std::to_underlying(cat) < std::size(registers_));
 
-    const auto& source = registers_[static_cast<size_t>(cat)];
+    const auto& source = registers_[std::to_underlying(cat)];
     result.insert(result.end(), source.begin(), source.end());
   }
 

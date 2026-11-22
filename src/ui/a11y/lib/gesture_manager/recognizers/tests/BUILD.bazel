@@ -1,0 +1,30 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_test_binary(
+    name = "gesture_recognizers_tests",
+    srcs = [
+        "m_finger_n_tap_drag_recognizer_test.cc",
+        "m_finger_n_tap_recognizer_test.cc",
+        "one_finger_drag_recognizer_test.cc",
+        "one_finger_n_tap_recognizer_test.cc",
+        "swipe_recognizer_test.cc",
+        "two_finger_drag_recognizer_test.cc",
+    ],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    copts = ["-Wno-conversion"],
+    deps = [
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/ui/a11y/lib/gesture_manager/arena",
+        "//src/ui/a11y/lib/gesture_manager/arena/tests/mocks",
+        "//src/ui/a11y/lib/gesture_manager/recognizers",
+        "//src/ui/a11y/lib/testing:input",
+        "@com_google_googletest//:gtest",
+    ],
+)

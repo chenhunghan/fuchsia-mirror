@@ -14,6 +14,15 @@
             {
                 source_moniker: "<component_manager>",
                 source: "component",
+                source_name: "fuchsia.boot.Arguments",
+                capability: "protocol",
+                target_monikers: [
+                    "/bootstrap/kernel-args-forwarder",
+                ],
+            },
+            {
+                source_moniker: "<component_manager>",
+                source: "component",
                 source_name: "fuchsia.kernel.CpuResource",
                 capability: "protocol",
                 target_monikers: [
@@ -611,9 +620,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/core/lowpanservice",
-
-                    // TODO(https://fxbug.dev/577222218): Remove once added to product policy.
-                    "/core/session-manager/session:session/nest_thread_controller",
                 ],
             },
             {
@@ -641,9 +647,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/core/lowpanservice",
-
-                    // TODO(https://fxbug.dev/577222218): Remove once added to product policy.
-                    "/core/session-manager/session:session/nest_thread_controller",
                 ],
             },
             {
@@ -709,9 +712,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/core/lowpanservice",
-
-                    // TODO(https://fxbug.dev/577222218): Remove once added to product policy.
-                    "/core/session-manager/session:session/nest_thread_controller",
                 ],
             },
             {
@@ -730,9 +730,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/core/lowpanservice",
-
-                    // TODO(https://fxbug.dev/577222218): Remove once added to product policy.
-                    "/core/session-manager/session:session/nest_thread_controller",
                 ],
             },
             {
@@ -742,9 +739,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/core/lowpanservice",
-
-                    // TODO(https://fxbug.dev/577222218): Remove once added to product policy.
-                    "/core/session-manager/session:session/nest_thread_controller",
                 ],
             },
             {
@@ -754,9 +748,6 @@
                 capability: "protocol",
                 target_monikers: [
                     "/core/lowpanservice",
-
-                    // TODO(https://fxbug.dev/577222218): Remove once added to product policy.
-                    "/core/session-manager/session:session/nest_thread_controller",
                 ],
             },
 
@@ -880,6 +871,55 @@
                 "/core/system-update/omaha-client-service",
                 "/core/system-update/system-update-checker",
                 "/core/system-update/system-update-committer",
+                "/core/wlancfg",
+                "/core/wlandevicemonitor",
+            ],
+            eager_startup: [
+                "/bootstrap",
+                "/bootstrap/bootfs_recovery",
+                "/bootstrap/bootfs_recovery/**",
+                "/bootstrap/console",
+                "/bootstrap/console-launcher",
+                "/bootstrap/cpu_manager",
+                "/bootstrap/critical-services",
+                "/bootstrap/power_manager",
+                "/bootstrap/sysmem",
+                "/bootstrap/sysmem/sysmem-config",
+                "/core",
+                "/core/auto-brightness",
+                "/core/bt-a2dp",
+                "/core/bt-device-id",
+                "/core/bt-hfp-audio-gateway",
+                "/core/bt-map-mce",
+                "/core/bt-snoop",
+                "/core/cobalt_system_metrics",
+                "/core/configurator",
+                "/core/factory-reset-trigger",
+                "/core/fan-controller",
+                "/core/feedback",
+                "/core/lowpan-monitor",
+
+                // TODO(https://fxbug.dev/42175335): Move to eng-only once mdns is split out of
+                // core.cml on non-eng builds.
+                "/core/mdns",
+
+                // TODO(https://fxbug.dev/42158833): Remove once remaining products migrate to
+                // memory_monitor2.
+                "/core/memory_monitor",
+                "/core/metrics-logger-standalone",
+                "/core/network",
+                "/core/network/netcfg",
+                "/core/network/reachability",
+                "/core/session-manager",
+                "/core/storage_cache_manager",
+                "/core/system-update",
+                "/core/system-update/omaha-client-service",
+                "/core/system-update/system-update-committer",
+                "/core/system-update/system-updater",
+                "/core/system_recovery",
+                "/core/tee_manager",
+                "/core/tee_manager/**",
+                "/core/timekeeper",
                 "/core/wlancfg",
                 "/core/wlandevicemonitor",
             ],

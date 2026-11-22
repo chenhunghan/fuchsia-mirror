@@ -1,0 +1,77 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = [
+        "src/launcher.rs",
+        "src/main.rs",
+    ],
+    binary_name = "fuzz_test_runner",
+    edition = "2024",
+    proc_macro_deps = ["//third_party/rust_crates/vendor:async-trait"],
+    deps = [
+        "//sdk/fidl/fuchsia.process:fuchsia.process_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/sys/fuzzing/fidl:fuchsia.fuzzer_rust",
+        "//src/sys/test_runners:lib",
+        "//src/sys/test_runners/elf:lib",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "fuzz_test_runner",
+)
+
+fx_component_manifest(
+    name = "fuzz-test-runner-component-manifest",
+    component_name = "fuzz-test-runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:lib.shard",
+    ],
+    manifest = "meta/fuzz_test_runner.cml",
+)
+
+fx_component(
+    name = "fuzz-test-runner-component",
+    compiled_manifest = ":fuzz-test-runner-component-manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+fx_component_manifest(
+    name = "fuzz-starnix-test-runner-component-manifest",
+    component_name = "fuzz-starnix-test-runner",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:lib.shard",
+    ],
+    manifest = "meta/fuzz_starnix_test_runner.cml",
+)
+
+fx_component(
+    name = "fuzz-starnix-test-runner-component",
+    compiled_manifest = ":fuzz-starnix-test-runner-component-manifest",
+    deps = [":bin_packaged_bin"],
+)

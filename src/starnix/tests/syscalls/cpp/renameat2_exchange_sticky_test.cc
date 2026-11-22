@@ -5,7 +5,6 @@
 // Tests for sticky bit enforcement during rename operations.
 
 #include <fcntl.h>
-#include <grp.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -93,9 +92,7 @@ TEST_F(RenameExchangeStickyTest, SingleRenameChecksSticky) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    SAFE_SYSCALL(setgroups(0, nullptr));
-    SAFE_SYSCALL(setresgid(kAliceGid, kAliceGid, kAliceGid));
-    SAFE_SYSCALL(setresuid(kAliceUid, kAliceUid, kAliceUid));
+    ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(kAliceUid, kAliceGid));
 
     ASSERT_THAT(rename(alice_path.c_str(), bob_path.c_str()), SyscallFailsWithErrno(EPERM));
   });
@@ -127,9 +124,7 @@ TEST_F(RenameExchangeStickyTest, ExchangeChecksSticky) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    SAFE_SYSCALL(setgroups(0, nullptr));
-    SAFE_SYSCALL(setresgid(kAliceGid, kAliceGid, kAliceGid));
-    SAFE_SYSCALL(setresuid(kAliceUid, kAliceUid, kAliceUid));
+    ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(kAliceUid, kAliceGid));
 
     ASSERT_THAT(
         renameat2(AT_FDCWD, alice_path.c_str(), AT_FDCWD, bob_path.c_str(), RENAME_EXCHANGE),
@@ -158,9 +153,7 @@ TEST_F(RenameExchangeStickyTest, ExchangeSameOwnerAllowed) {
   test_helper::ForkHelper helper;
 
   helper.RunInForkedProcess([&] {
-    SAFE_SYSCALL(setgroups(0, nullptr));
-    SAFE_SYSCALL(setresgid(kAliceGid, kAliceGid, kAliceGid));
-    SAFE_SYSCALL(setresuid(kAliceUid, kAliceUid, kAliceUid));
+    ASSERT_TRUE(test_helper::SwitchToUnprivilegedUser(kAliceUid, kAliceGid));
 
     SAFE_SYSCALL(renameat2(AT_FDCWD, a_path.c_str(), AT_FDCWD, b_path.c_str(), RENAME_EXCHANGE));
   });

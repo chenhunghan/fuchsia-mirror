@@ -1,0 +1,170 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":virtio_net_cpp_unittests",
+        ":virtio_net_unittests",
+    ],
+    visibility = ["//src/virtualization:__pkg__"],
+)
+
+fx_cc_library(
+    name = "guest-ethernet",
+    srcs = [
+        "src/cpp/completion_queue.cc",
+        "src/cpp/guest_ethernet.cc",
+        "src/cpp/guest_ethernet_context.cc",
+        "src/cpp/guest_ethernet_interface.cc",
+    ],
+    hdrs = [
+        "src/cpp/completion_queue.h",
+        "src/cpp/guest_ethernet.h",
+        "src/cpp/guest_ethernet_context.h",
+        "src/cpp/guest_ethernet_interface.h",
+    ],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_hlcpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+        "//src/connectivity/network/lib/net_interfaces/cpp",
+        "//src/devices/bin/driver_runtime",
+    ],
+    public_configs = ["//build/config/fuchsia:dynamic_cpp_standard_library"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.network.driver:fuchsia.hardware.network.driver_cpp",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_hlcpp",
+        "//sdk/fidl/fuchsia.net.virtualization:fuchsia.net.virtualization_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fit",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/network/drivers/network-device/device",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/trace-provider",
+        "//zircon/system/ulib/virtio",
+    ],
+)
+
+rustc_binary(
+    name = "virtio_net_bin",
+    srcs = [
+        "src/device.rs",
+        "src/guest_ethernet.rs",
+        "src/interface.rs",
+        "src/main.rs",
+        "src/wire.rs",
+    ],
+    edition = "2024",
+    link_deps = [":guest-ethernet"],
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:num-derive",
+    ],
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.virtualization.hardware:fuchsia.virtualization.hardware_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/virtualization/lib/machina-virtio-device",
+        "//src/virtualization/lib/virtio-device",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "virtio_net_bin_test",
+    crate = ":virtio_net_bin",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/async-utils",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:rand",
+    ],
+)
+
+fx_unittest_package(
+    name = "virtio_net_unittests",
+    max_log_severity = "ERROR",
+    unit_tests = [":virtio_net_bin_test"],
+)
+
+fx_packaged_binary(
+    name = "virtio_net_packaged_bin",
+    binary = ":virtio_net_bin",
+    binary_name = "virtio_net_bin",
+)
+
+fx_component_manifest(
+    name = "virtio_net_manifest",
+    component_name = "virtio_net",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:use.shard",
+        "//src/connectivity/network/lib/net_interfaces:client.shard",
+    ],
+    manifest = "meta/virtio_net.cml",
+)
+
+fx_component(
+    name = "virtio_net_component",
+    compiled_manifest = ":virtio_net_manifest",
+    visibility = ["//src/virtualization/bin/vmm/device:__subpackages__"],
+    deps = [":virtio_net_packaged_bin"],
+)
+
+fx_cc_test_binary(
+    name = "virtio_net_cpp_unittests_bin",
+    srcs = ["src/cpp/completion_queue_test.cc"],
+    # TODO(https://fxbug.dev/570694755): completion_queue_test.cc uses angled
+    # workspace-root `#include <src/...>`, which GN resolves via root `-I.`
+    # while Bazel only adds `-iquote .`.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    deps = [
+        ":guest-ethernet",
+        "//sdk/fidl/fuchsia.net.virtualization:fuchsia.net.virtualization_hlcpp",
+        "//sdk/lib/driver/testing/cpp",
+        "//sdk/lib/sys/cpp/testing:cpp",
+        "//src/connectivity/network/drivers/network-device/device",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        # Bazel's googletest has no separate gmock target (:gtest bundles
+        # GoogleMock), while GN keeps //third_party/googletest:gmock.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_package(
+    name = "virtio_net_cpp_unittests",
+    unit_tests = [":virtio_net_cpp_unittests_bin"],
+)

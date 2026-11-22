@@ -3,7 +3,7 @@
 There are three basic layers to the build configuration for fonts:
 
 1.  [Common infrastructure and metadata](#common-infra)
-1.  [Reusable font bundles](#reusable)
+1.  [Reusable font bundles](#font-packages)
 1.  [Product-specific configurations](#product-specific)
 
 ## Background
@@ -345,7 +345,7 @@ The template passes this information to the font manifest generator
 The manifest generator selects from the font catalogs the predefined metadata
 for the font files that are included in the `font_collection`. It also reads
 every included font file and extracts the list of
-[code points](.#gloss-code-points) (character set) that each font file supports.
+[code points](.#gloss-code-point) (character set) that each font file supports.
 
 All of this data is assembled into a single `.font_manifest.json` file that
 supplied to the font provider service using a `config_data` rule.

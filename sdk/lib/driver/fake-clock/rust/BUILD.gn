@@ -2,6 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+group("tests") {
+  testonly = true
+  deps = [ ":driver_fake_clock_tests" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -36,10 +41,37 @@ rustc_library("rust") {
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_rust_next",
     "//sdk/lib/driver/component/rust",
+    "//sdk/lib/driver/resource-vote/rust",
     "//sdk/rust/zx",
     "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-sync",
+  ]
+}
+
+rustc_test("driver_fake_clock_lib_test") {
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+  deps = [
+           "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+           "//sdk/fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_rust_next",
+           "//sdk/lib/driver/component/rust",
+           "//sdk/lib/driver/resource-vote/rust",
+           "//sdk/rust/zx",
+           "//src/lib/fidl/rust_next/fidl_next",
+           "//src/lib/fuchsia-async",
+           "//src/lib/fuchsia-component",
+           "//src/lib/fuchsia-sync",
+         ] + [ "//src/lib/fuchsia" ]
+}
+
+fuchsia_unittest_package("driver_fake_clock_tests") {
+  package_name = "driver_fake_clock_tests-gn"
+  component_name = "driver_fake_clock_tests"
+  deps = [ ":driver_fake_clock_lib_test" ]
+  visibility = [
+    ":*",
+    "//sdk/lib:*",
   ]
 }

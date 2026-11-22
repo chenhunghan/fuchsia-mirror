@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "src/media/audio/audio_core/device_id.h"
+#include "src/media/audio/audio_core/test/api/ultrasound_test_shared.h"
 #include "src/media/audio/audio_core/testing/integration/hermetic_audio_test.h"
 #include "src/media/audio/lib/analysis/generators.h"
 #include "src/media/audio/lib/test/comparators.h"
@@ -507,6 +508,39 @@ class AudioRendererPipelineTuningTest
 
  private:
   fuchsia::media::tuning::AudioTunerPtr audio_tuner_;
+};
+
+class UltrasoundRendererPipelineTest : public UltrasoundTest {
+ protected:
+  // Use a 500ms ring buffer (48,000 frames at 96 kHz): halves PlaySynchronized's pre-play wait
+  // compared to a 1s buffer, while leaving >300ms of post-signal slack before wrap-around.
+  static constexpr uint32_t kOutputRingBufferFrames = kUltrasoundSampleRate / 2;
+
+  void SetUp() override {
+    UltrasoundTest::SetUp();
+    output_ = HermeticAudioTest::CreateOutput(kUltrasoundOutputDeviceId, kUltrasoundFormat,
+                                              kOutputRingBufferFrames);
+    renderer_ =
+        HermeticAudioTest::CreateUltrasoundRenderer(kUltrasoundFormat, kOutputRingBufferFrames);
+  }
+
+  void TearDown() override {
+    if constexpr (kEnableAllOverflowAndUnderflowChecksInRealtimeTests) {
+      ExpectNoOverflowsOrUnderflows();
+    } else {
+      // We expect no renderer underflows: we pre-submit the whole signal. Keep that check enabled.
+      ExpectNoRendererUnderflows();
+    }
+
+    UltrasoundTest::TearDown();
+  }
+
+  VirtualOutput<kSampleFormat>* output() const { return output_; }
+  UltrasoundRendererShim<kSampleFormat>* renderer() const { return renderer_; }
+
+ private:
+  VirtualOutput<kSampleFormat>* output_ = nullptr;
+  UltrasoundRendererShim<kSampleFormat>* renderer_ = nullptr;
 };
 
 }  // namespace media::audio::test

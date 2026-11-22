@@ -5,8 +5,8 @@
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
-    ["foo.bzl"],
-    ["//visibility:__subpackages__"],
+    ["test_lib.textproto"],
+    visibility = ["//tools/bazel-docgen:__pkg__"],
 )
 
 # For testing:

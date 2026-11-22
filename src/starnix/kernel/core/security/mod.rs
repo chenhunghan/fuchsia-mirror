@@ -34,12 +34,6 @@ pub struct KernelState {
     state: Option<selinux_hooks::KernelState>,
 }
 
-impl KernelState {
-    pub fn access_denial_count(&self) -> u64 {
-        self.state.as_ref().map_or(0u64, |state| state.access_denial_count())
-    }
-}
-
 /// Wrapper types enforcing at compile time that kernel-private `FsNode`s do not access security
 /// state.
 mod non_private;

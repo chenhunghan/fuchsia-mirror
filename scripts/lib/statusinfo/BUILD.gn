@@ -57,6 +57,7 @@ if (is_host) {
       "__init__.py",
       "statusinfo.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/fxtest/python:*",
@@ -64,5 +65,6 @@ if (is_host) {
       "//tools/devshell/python/test-category:*",
     ]
     deps = [ "//third_party/colorama" ]
+    enable_mypy = false
   }
 }

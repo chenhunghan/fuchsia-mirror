@@ -4,12 +4,16 @@
 
 import("//tools/fidl/fidlc/testdata/fidl_golden_library.gni")
 
+# LINT.IfChange
 fidl_golden_library("test.protocolpayloads.imported") {
   sources = [ "imported.test.fidl" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
 
 fidl_golden_library("test.protocolpayloads") {
   sources = [ "example.test.fidl" ]
   experimental_flags = [ "output_index_json" ]
   public_deps = [ ":test.protocolpayloads.imported" ]
+  excluded_checks = [ "invalid-copyright-for-platform-source-library" ]
 }
+# LINT.ThenChange(BUILD.bazel)

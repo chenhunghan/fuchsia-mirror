@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "srcs",
+    srcs = [
+        "command_buffers.cc",
+        "command_pool.cc",
+        "debug_utils_messenger.cc",
+        "device.cc",
+        "fixed_functions.cc",
+        "framebuffers.cc",
+        "graphics_pipeline.cc",
+        "image_view.cc",
+        "instance.cc",
+        "physical_device.cc",
+        "readback.cc",
+        "render_pass.cc",
+        "shader.cc",
+        "swapchain.cc",
+        "utils.cc",
+    ],
+    hdrs = [
+        "command_buffers.h",
+        "command_pool.h",
+        "debug_utils_messenger.h",
+        "device.h",
+        "fixed_functions.h",
+        "framebuffers.h",
+        "graphics_pipeline.h",
+        "image_view.h",
+        "instance.h",
+        "physical_device.h",
+        "readback.h",
+        "render_pass.h",
+        "shader.h",
+        "surface.h",
+        "swapchain.h",
+        "utils.h",
+    ],
+    visibility = ["//src/graphics/examples/vkproto:__subpackages__"],
+    deps = ["//src/lib/vulkan"],
+    alwayslink = True,
+)
+
+fx_component_manifest(
+    name = "config-manifest",
+    manifest = "//src/graphics/examples/vkproto/meta:config.shard",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "config",
+    cm_label = ":config-manifest",
+)
+
+# This target can set the gpu vendor ID from a config exactly matching the one
+# in meta/config.shard.cml.
+fx_cc_library(
+    name = "config_query",
+    srcs = ["config_query.cc"],
+    implementation_deps = [
+        ":config",
+        ":srcs",
+    ],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = ["//src/graphics/examples/vkproto:__subpackages__"],
+    alwayslink = True,
+)

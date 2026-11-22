@@ -35,7 +35,7 @@
 
 namespace ld::abi {
 
-template <class Elf = elfldltl::Elf<>, class AbiTraits = elfldltl::LocalAbiTraits>
+template <elfldltl::ElfApi Elf = elfldltl::Elf<>, class AbiTraits = elfldltl::LocalAbiTraits>
 struct Abi {
   // Aliases to avoid using `typename` all over the place.
   using Word = Elf::Word;

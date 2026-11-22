@@ -42,7 +42,13 @@ const MAX_EP_SIZE: usize = 31;
 /// Maps a physical memory range into the kernel address space.
 ///
 /// Returns a tuple of `(virt_ptr, mapping_base_addr)`.
-fn map_range(paddr: u64, len: usize) -> Result<(NonNull<u8>, usize), Status> {
+///
+/// # Safety
+///
+/// `[paddr, paddr + len)` expanded to page boundaries is a physical range for which
+/// `ARCH_MMU_FLAG_CACHED` is appropriate for all mappings, and creating a read-only kernel mapping
+/// of it is sound.
+unsafe fn map_range(paddr: u64, len: usize) -> Result<(NonNull<u8>, usize), Status> {
     if paddr == 0 || len == 0 {
         return Err(Status::INVALID_ARGS);
     }
@@ -52,32 +58,39 @@ fn map_range(paddr: u64, len: usize) -> Result<(NonNull<u8>, usize), Status> {
     let paddr_top = page::round_up(paddr_end);
     let map_size = paddr_top.checked_sub(paddr_base).ok_or(Status::INVALID_ARGS)?;
 
-    let mut base_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-    // SAFETY: `alloc_physical` maps the specified physical address range into the kernel aspace.
-    let status = unsafe {
+    // SAFETY: The caller guarantees that cached is appropriate for all mappings of the physical
+    // range, and that creating this mapping is sound.
+    let base = unsafe {
         VmAspace::kernel_aspace().alloc_physical(
             b"smbios",
             map_size,
-            &mut base_ptr,
+            None,
             page::SHIFT as u8,
             crate::kernel::types::PAddr(paddr_base),
             0,
             ARCH_MMU_FLAG_CACHED | ARCH_MMU_FLAG_PERM_READ,
         )
-    };
-    status?;
+    }?;
 
     let offset = paddr_usize - paddr_base;
-    let virt_addr = (base_ptr as usize) + offset;
+    let virt_addr = base + offset;
     let virt_ptr = core::ptr::with_exposed_provenance_mut::<u8>(virt_addr);
     let non_null = NonNull::new(virt_ptr).ok_or(Status::NO_MEMORY)?;
-    Ok((non_null, base_ptr as usize))
+    Ok((non_null, base))
 }
 
 /// Searches for and maps the SMBIOS entry point table, returning the mapped pointer and version.
-fn find_entry_point() -> Result<(NonNull<u8>, EntryPointVersion), Status> {
-    let smbios_phys = Option::from(PhysHandoff::get().smbios_phys).ok_or(Status::NOT_FOUND)?;
-    let (ep_virt_ptr, ep_mapping_base) = map_range(smbios_phys, MAX_EP_SIZE)?;
+///
+/// # Safety
+///
+/// Caller must ensure `gPhysHandoff` is valid (`EndHandoff()` has not been called).
+unsafe fn find_entry_point() -> Result<(NonNull<u8>, EntryPointVersion), Status> {
+    // SAFETY: Caller guarantees `gPhysHandoff` is valid.
+    let smbios_phys =
+        Option::from(unsafe { PhysHandoff::get() }.smbios_phys).ok_or(Status::NOT_FOUND)?;
+    // SAFETY: Cached is appropriate for all mappings of the SMBIOS entry point, and creating a
+    // read-only kernel mapping of it is sound.
+    let (ep_virt_ptr, ep_mapping_base) = unsafe { map_range(smbios_phys, MAX_EP_SIZE) }?;
 
     // SAFETY: `ep_virt_ptr` points to at least `MAX_EP_SIZE` (31) valid mapped bytes.
     let ep_bytes = unsafe { core::slice::from_raw_parts(ep_virt_ptr.as_ptr(), MAX_EP_SIZE) };
@@ -87,7 +100,8 @@ fn find_entry_point() -> Result<(NonNull<u8>, EntryPointVersion), Status> {
     } else if ep_bytes.starts_with(SMBIOS3_ANCHOR) {
         Ok((ep_virt_ptr, EntryPointVersion::V3_0))
     } else {
-        // SAFETY: Anchor mismatch; free the allocated entry point mapping before returning error.
+        // SAFETY: `ep_mapping_base` is in a mapping of the root VMAR whose whole VMO range is
+        // pinned by a pin this code owns, and nothing uses that mapping any more.
         unsafe {
             let _ = VmAspace::kernel_aspace().free_region(ep_mapping_base);
         }
@@ -96,16 +110,25 @@ fn find_entry_point() -> Result<(NonNull<u8>, EntryPointVersion), Status> {
 }
 
 /// Initializes the SMBIOS subsystem.
-pub(super) fn pc_init_smbios() {
-    // SAFETY: Initialization is serialized with respect to any other access.
+///
+/// # Safety
+///
+/// Caller must ensure this is called at most once during single-CPU platform initialization before
+/// `EndHandoff()`.
+pub(super) unsafe fn pc_init_smbios() {
+    // SAFETY: Caller guarantees serialized initialization prior to `EndHandoff()`.
     unsafe {
         SMBIOS_STATE.init(probe_smbios());
     }
 }
 
-fn probe_smbios() -> SmbiosState {
+/// # Safety
+///
+/// Caller must ensure `gPhysHandoff` is valid (`EndHandoff()` has not been called).
+unsafe fn probe_smbios() -> SmbiosState {
     let mut state = SmbiosState::default();
-    let (ep_ptr, version) = match find_entry_point() {
+    // SAFETY: Caller guarantees `gPhysHandoff` is valid.
+    let (ep_ptr, version) = match unsafe { find_entry_point() } {
         Ok(res) => res,
         Err(_) => {
             // SAFETY: `printf` format string is a valid null-terminated C string.
@@ -121,19 +144,23 @@ fn probe_smbios() -> SmbiosState {
             // SAFETY: `ep_ptr` points to at least `MAX_EP_SIZE` (31) valid mapped bytes.
             let ep_bytes = unsafe { core::slice::from_raw_parts(ep_ptr.as_ptr(), MAX_EP_SIZE) };
             let Ok((ep, _)) = EntryPoint2_1::ref_from_prefix(ep_bytes) else {
-                // SAFETY: Free the entry point mapping on parse error.
+                // SAFETY: `ep_ptr` rounded down to a page is in a mapping of the root VMAR whose
+                // whole VMO range is pinned by a pin this code owns, and nothing uses that mapping
+                // any more.
                 unsafe {
                     let _ = VmAspace::kernel_aspace()
-                        .free_region(page::round_down(ep_ptr.as_ptr() as usize));
+                        .free_region(page::round_down(ep_ptr.addr().get()));
                 }
                 return state;
             };
 
             if !ep.is_valid() {
-                // SAFETY: Free the entry point mapping on invalid entry point.
+                // SAFETY: `ep_ptr` rounded down to a page is in a mapping of the root VMAR whose
+                // whole VMO range is pinned by a pin this code owns, and nothing uses that mapping
+                // any more.
                 unsafe {
                     let _ = VmAspace::kernel_aspace()
-                        .free_region(page::round_down(ep_ptr.as_ptr() as usize));
+                        .free_region(page::round_down(ep_ptr.addr().get()));
                 }
                 return state;
             }
@@ -142,13 +169,16 @@ fn probe_smbios() -> SmbiosState {
             let struct_table_phys = ep.struct_table_phys.get() as u64;
             let struct_table_length = ep.struct_table_length.get() as usize;
 
-            // SAFETY: Free the entry point mapping now that ep has been copied.
+            // SAFETY: `ep_ptr` rounded down to a page is in a mapping of the root VMAR whose whole
+            // VMO range is pinned by a pin this code owns, and nothing uses that mapping any more.
             unsafe {
-                let _ = VmAspace::kernel_aspace()
-                    .free_region(page::round_down(ep_ptr.as_ptr() as usize));
+                let _ =
+                    VmAspace::kernel_aspace().free_region(page::round_down(ep_ptr.addr().get()));
             }
 
-            match map_range(struct_table_phys, struct_table_length) {
+            // SAFETY: Cached is appropriate for all mappings of the SMBIOS structure table, and
+            // creating a read-only kernel mapping of it is sound.
+            match unsafe { map_range(struct_table_phys, struct_table_length) } {
                 Ok((struct_virt_ptr, _struct_mapping_base)) => {
                     state.version = Some(EntryPointVersion::V2_1);
                     state.ep2_1 = Some(ep_copy);
@@ -164,18 +194,23 @@ fn probe_smbios() -> SmbiosState {
             }
         }
         EntryPointVersion::V3_0 => {
-            // SAFETY: Free the entry point mapping and print version 3 not yet implemented message.
+            // SAFETY: `ep_ptr` rounded down to a page is in a mapping of the root VMAR whose whole
+            // VMO range is pinned by a pin this code owns, and nothing uses that mapping any more.
             unsafe {
-                let _ = VmAspace::kernel_aspace()
-                    .free_region(page::round_down(ep_ptr.as_ptr() as usize));
+                let _ =
+                    VmAspace::kernel_aspace().free_region(page::round_down(ep_ptr.addr().get()));
+            }
+            // SAFETY: `printf` format string is a valid null-terminated C string.
+            unsafe {
                 printf(c"smbios: version 3 not yet implemented\n".as_ptr());
             }
         }
         _ => {
-            // SAFETY: Free the entry point mapping on unknown version.
+            // SAFETY: `ep_ptr` rounded down to a page is in a mapping of the root VMAR whose whole
+            // VMO range is pinned by a pin this code owns, and nothing uses that mapping any more.
             unsafe {
-                let _ = VmAspace::kernel_aspace()
-                    .free_region(page::round_down(ep_ptr.as_ptr() as usize));
+                let _ =
+                    VmAspace::kernel_aspace().free_region(page::round_down(ep_ptr.addr().get()));
             }
         }
     }

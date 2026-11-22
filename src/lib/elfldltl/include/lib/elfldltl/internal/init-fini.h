@@ -109,6 +109,24 @@ struct InvocableOn {
   using type = std::is_invocable<T, Args...>;
 };
 
+// Used to implement InvocableAsR<T, F> via SignatureOf<F>::Invoke.
+template <typename T>
+struct InvocableROn {
+  template <typename R, typename... Args>
+  static consteval bool Check() {
+    if constexpr (!std::is_invocable_v<T, Args...>) {
+      return false;
+    } else if constexpr (std::is_void_v<R>) {
+      return std::is_void_v<std::invoke_result_t<T, Args...>>;
+    } else {
+      return std::is_invocable_r_v<R, T, Args...>;
+    }
+  }
+
+  template <typename R, typename... Args>
+  using type = std::bool_constant<Check<R, Args...>()>;
+};
+
 }  // namespace elfldltl::internal
 
 #endif  // SRC_LIB_ELFLDLTL_INCLUDE_LIB_ELFLDLTL_INTERNAL_INIT_FINI_H_

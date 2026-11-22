@@ -9,8 +9,7 @@
     },
     use: [
         { protocol: "examples.canvas.baseline.Instance" },
-    ],
-    config: {
+
         // [START diff_1]
         // A script for the client to follow. Entries in the script may take one of two forms: a
         // pair of signed-integer coordinates like "-2,15:4,5", the string "PUSH", or the string
@@ -20,15 +19,19 @@
         // TODO(https://fxbug.dev/42178362): It would absolve individual language implementations of a great
         //   deal of string parsing if we were able to use a vector of `union { Point; Push, Wait}`
         //   here.
-        script: {
+        {
+            config: "fuchsia.examples.canvas.baseline.Script",
+            key: "script",
             type: "vector",
             max_count: 100,
             element: {
                 type: "string",
                 max_size: 64,
             },
+            availability: "transitional",
+            default: [],
         },
 
         // [END diff_1]
-    },
+    ],
 }

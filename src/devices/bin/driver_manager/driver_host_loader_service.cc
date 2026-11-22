@@ -80,4 +80,13 @@ zx::result<zx::vmo> DriverHostLoaderService::LoadObjectImpl(std::string path) {
   return LoaderService::LoadObjectImpl(path);
 }
 
+void DriverHostLoaderService::LoadObjectAsync(std::string path,
+                                              fit::callback<void(zx::result<zx::vmo>)> callback) {
+  if (!InAllowlist(path)) {
+    callback(zx::error(ZX_ERR_ACCESS_DENIED));
+    return;
+  }
+  LoaderService::LoadObjectAsync(std::move(path), std::move(callback));
+}
+
 }  // namespace driver_manager

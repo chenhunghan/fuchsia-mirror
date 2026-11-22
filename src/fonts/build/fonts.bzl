@@ -30,7 +30,7 @@ _ASSETS_RELATIVE_PATH = "data/assets"
 # Default prefix for the manifest file name in /config/data.
 _DEFAULT_MANIFEST_PREFIX = "all"
 
-_FONT_MANIFEST_GENERATOR = "@gn_targets//toolchain_host_x64/src/fonts/tools/manifest_generator:font_manifest_generator"
+_FONT_MANIFEST_GENERATOR = "//src/fonts/tools/manifest_generator:font_manifest_generator"
 
 # Mapping from font file_name to path_prefix from
 # //prebuilt/third_party/fonts/fuchsia.font_pkgs.json.
@@ -537,7 +537,6 @@ def font_packages(name = "packages", visibility = None):
         all_packages.append(":" + package_name)
         fx_package(
             name = package_name,
-            package_name = package_name,
             resources = [":" + resource_target],
             visibility = visibility,
         )

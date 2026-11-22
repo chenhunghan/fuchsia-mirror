@@ -56,6 +56,15 @@ const MAX_CONNECTION_EST_TIME: zx::MonotonicDuration = zx::MonotonicDuration::fr
 /// to account for radio delay and other factors that impede connection establishment.
 const CONNECTION_THRESHOLD: zx::MonotonicDuration = zx::MonotonicDuration::from_millis(750);
 
+/// Minimum outbound SDU size for the AVCTP Browsing Channel, per AVRCP 1.6.2
+/// Section 9.3.4.1, which requires a 335-byte minimum browsing MTU.
+///
+/// `bt-avrcp` enforces this floor on TX via [`Channel::max_tx_size`] because
+/// `fuchsia.bluetooth.bredr/Channel` only exposes the negotiated max TX SDU
+/// size. The local RX MTU is configured by L2CAP to the stack maximum when
+/// `ChannelParameters::max_rx_packet_size` is left unset.
+pub(crate) const MIN_BROWSE_TX_SDU_SIZE: usize = 335;
+
 #[derive(PartialEq)]
 pub enum PeerChannelState<T> {
     Connected(Arc<T>),
@@ -165,7 +174,6 @@ impl AVCTPConnectionType {
     /// Get the the correct L2cap ChannelParameters for this connection type.
     /// (basic for control, enhanced retransmission for browsing)
     pub fn parameters(&self) -> fidl_bt::ChannelParameters {
-        // TODO(https://fxbug.dev/42052066): set minimum MTU to 335.
         match self {
             AVCTPConnectionType::Control => fidl_bt::ChannelParameters::default(),
             AVCTPConnectionType::Browse => fidl_bt::ChannelParameters {
@@ -485,9 +493,16 @@ impl RemotePeer {
                 self.reset_connections(true)
             }
             AVCTPConnectionType::Browse => {
+                if channel.max_tx_size() < MIN_BROWSE_TX_SDU_SIZE {
+                    warn!(
+                        peer_id:% = self.peer_id,
+                        max_tx_size = channel.max_tx_size();
+                        "Outgoing browse channel max TX SDU size is below minimum {MIN_BROWSE_TX_SDU_SIZE}, disconnecting"
+                    );
+                    return self.connect_failed(AVCTPConnectionType::Browse, false);
+                }
                 if self.browse_channel.is_connecting() {
-                    let peer = AvctpPeer::new(channel);
-                    return self.set_browse_connection(peer);
+                    return self.set_browse_connection(channel);
                 }
                 self.reset_browse_connection(true)
             }
@@ -585,9 +600,19 @@ impl RemotePeer {
         }
     }
 
-    fn set_browse_connection(&mut self, peer: AvctpPeer) {
+    fn set_browse_connection(&mut self, channel: Channel) {
         let current_time = fasync::MonotonicInstant::now();
         debug!("Set browse connection for {} at: {}", self.peer_id, current_time.into_nanos());
+
+        if channel.max_tx_size() < MIN_BROWSE_TX_SDU_SIZE {
+            warn!(
+                peer_id:% = self.peer_id,
+                max_tx_size = channel.max_tx_size();
+                "Browse channel max TX SDU size is below minimum {MIN_BROWSE_TX_SDU_SIZE}, disconnecting"
+            );
+            self.inspect.metrics().connection_error();
+            return;
+        }
 
         // If the current connection establishment is within a threshold amount of time from the
         // most recent connection establishment, both connections should be dropped, and should
@@ -618,6 +643,7 @@ impl RemotePeer {
         }
 
         info!("{} connected new browse channel", self.peer_id);
+        let peer = AvctpPeer::new(channel);
         self.last_browse_connected_time = Some(current_time);
         self.browse_channel.connected(Arc::new(peer));
         self.handle_new_connection_event(AVCTPConnectionType::Browse, true);
@@ -836,8 +862,8 @@ impl RemotePeerHandle {
         self.peer.write().set_control_connection(peer);
     }
 
-    pub fn set_browse_connection(&self, peer: AvctpPeer) {
-        self.peer.write().set_browse_connection(peer);
+    pub fn set_browse_connection(&self, channel: Channel) {
+        self.peer.write().set_browse_connection(channel);
     }
 
     pub fn set_target_descriptor(&self, service: AvrcpService) {
@@ -987,7 +1013,9 @@ pub(crate) mod tests {
     use assert_matches::assert_matches;
     use async_utils::PollExt;
     use bt_avctp::{AvcCommand, AvcCommandStream, AvctpCommand, AvctpCommandStream};
-    use bt_channel_test_support::{Transport, create_test_channels};
+    use bt_channel_test_support::{
+        Transport, create_test_channels, create_test_channels_with_max_tx,
+    };
     use fuchsia_bluetooth::profile::avrcp::{
         AvrcpControllerFeatures, AvrcpProtocolVersion, AvrcpTargetFeatures,
     };
@@ -997,22 +1025,48 @@ pub(crate) mod tests {
     use test_case::test_case;
 
     use diagnostics_assertions::assert_data_tree;
-    use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_bluetooth::ErrorCode;
-    use fidl_fuchsia_bluetooth_bredr::{
-        ConnectParameters, L2capParameters, ProfileMarker, ProfileRequest, ProfileRequestStream,
-    };
+    use fidl_fuchsia_bluetooth_bredr::{ConnectParameters, L2capParameters};
     use fuchsia_async::{self as fasync, DurationExt};
     use fuchsia_inspect_derive::WithInspect;
+    use test_profile_server::{ConnectChannel, ConnectRequest, TestProfileServer};
 
-    fn setup_remote_peer(
-        id: PeerId,
-    ) -> (RemotePeerHandle, Arc<TargetDelegate>, ProfileRequestStream) {
-        let (profile_proxy, profile_requests) = create_proxy_and_stream::<ProfileMarker>();
+    fn setup_remote_peer(id: PeerId) -> (RemotePeerHandle, Arc<TargetDelegate>, TestProfileServer) {
+        let (profile_proxy, profile_server) = TestProfileServer::create_endpoints();
         let target_delegate = Arc::new(TargetDelegate::new());
         let peer_handle = RemotePeerHandle::spawn_peer(id, target_delegate.clone(), profile_proxy);
 
-        (peer_handle, target_delegate, profile_requests)
+        (peer_handle, target_delegate, profile_server)
+    }
+
+    #[track_caller]
+    fn expect_connect_request(
+        exec: &mut fasync::TestExecutor,
+        profile_server: &mut TestProfileServer,
+    ) -> ConnectRequest {
+        let mut connect_fut = pin!(profile_server.expect_connect_request());
+        match exec.run_until_stalled(&mut connect_fut) {
+            Poll::Ready(request) => request,
+            Poll::Pending => panic!("Expected connect request to be ready, but was pending"),
+        }
+    }
+
+    #[track_caller]
+    fn accept_connect_with_max_tx(
+        request: ConnectRequest,
+        transport: Transport,
+        max_tx_size: usize,
+    ) -> Channel {
+        let (local, remote) = create_test_channels_with_max_tx(transport, max_tx_size);
+        let channel = local.try_into().expect("channel into FIDL BREDR channel");
+        request.responder.send(Ok(channel)).expect("FIDL response should work");
+        remote
+    }
+
+    #[track_caller]
+    fn expect_no_connect(exec: &mut fasync::TestExecutor, profile_server: &mut TestProfileServer) {
+        let mut next_request_fut = pin!(profile_server.next());
+        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
     }
 
     #[track_caller]
@@ -1049,16 +1103,24 @@ pub(crate) mod tests {
         remote
     }
 
+    // Helper function to set incoming browse connection with a specific max TX size.
+    fn set_incoming_browse_connection_with_max_tx(
+        peer_handle: &RemotePeerHandle,
+        transport: Transport,
+        max_tx_size: usize,
+    ) -> Channel {
+        let (local, remote) = create_test_channels_with_max_tx(transport, max_tx_size);
+        peer_handle.set_browse_connection(local);
+
+        remote
+    }
+
     // Helper function to set incoming browse connection.
     fn set_incoming_browse_connection(
         peer_handle: &RemotePeerHandle,
         transport: Transport,
     ) -> Channel {
-        let (local, remote) = create_test_channels(transport);
-        let browse_channel = AvctpPeer::new(local);
-        peer_handle.set_browse_connection(browse_channel);
-
-        remote
+        set_incoming_browse_connection_with_max_tx(peer_handle, transport, Channel::DEFAULT_MAX_TX)
     }
 
     // Check that the remote will attempt to connect to a peer if we have a profile.
@@ -1070,7 +1132,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(1);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer - while unusual, this peer
         // advertises a non-standard PSM.
@@ -1084,9 +1146,7 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish
         // a connection.
@@ -1094,21 +1154,9 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for control.
-        let (channel, _remote) = create_test_channels(transport);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, connection, .. }))) => {
-                let channel = channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-                // The connect request should be for the PSM advertised by the remote peer.
-                match connection {
-                    ConnectParameters::L2cap(L2capParameters { psm: Some(v), .. }) => {
-                        assert_eq!(v, u16::from(peer_psm));
-                    }
-                    x => panic!("Expected L2CAP parameters but got: {:?}", x),
-                }
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let _remote = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(peer_psm.into()))
+            .accept_with_transport(transport);
 
         // run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1121,9 +1169,7 @@ pub(crate) mod tests {
 
         // Since peer does not support browsing, verify that outgoing
         // browsing connection was not initiated.
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
         assert!(!peer_handle.is_browse_connected());
     }
 
@@ -1137,7 +1183,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(1);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer - while unusual, this peer
         // advertises a non-standard PSM.
@@ -1151,9 +1197,7 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish
         // a connection.
@@ -1161,14 +1205,8 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for control.
-        let (channel, _remote) = create_test_channels(transport);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let _remote =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1180,31 +1218,19 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for browse.
-        let (channel2, _remote2) = create_test_channels(transport);
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, connection, .. }))) => {
-                let channel = channel2.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-                // The connect request should be for the PSM advertised by the remote peer.
-                match connection {
-                    ConnectParameters::L2cap(L2capParameters {
-                        psm: Some(v),
-                        parameters: Some(params),
-                        ..
-                    }) => {
-                        assert_eq!(v, u16::from(Psm::new(27))); // AVCTP_BROWSE
-                        assert_eq!(
-                            params.channel_mode.expect("channel mode should not be None"),
-                            fidl_bt::ChannelMode::EnhancedRetransmission
-                        );
-                    }
-                    x => panic!("Expected L2CAP parameters but got: {:?}", x),
-                }
+        let req = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(u16::from(Psm::new(27)))); // AVCTP_BROWSE
+        // The connect request should use ERTM for the browse channel.
+        match &req.connection {
+            ConnectParameters::L2cap(L2capParameters { parameters: Some(params), .. }) => {
+                assert_eq!(
+                    params.channel_mode.expect("channel mode should not be None"),
+                    fidl_bt::ChannelMode::EnhancedRetransmission
+                );
             }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
+            x => panic!("Expected L2CAP parameters but got: {:?}", x),
         };
+        let _remote2 = req.accept_with_transport(transport);
 
         // run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1222,7 +1248,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(123);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer.
         let peer_psm = Psm::new(bredr::PSM_AVCTP);
@@ -1235,9 +1261,7 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish
         // a connection.
@@ -1245,20 +1269,9 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // Peer should have requested a connection.
-        let (channel, mut remote) = create_test_channels(transport);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, connection, .. }))) => {
-                let channel = channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-                match connection {
-                    ConnectParameters::L2cap(L2capParameters { psm: Some(v), .. }) => {
-                        assert_eq!(v, u16::from(peer_psm));
-                    }
-                    x => panic!("Expected L2CAP parameters but got: {:?}", x),
-                }
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut remote = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(peer_psm.into()))
+            .accept_with_transport(transport);
 
         // Peer should be connected.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1295,7 +1308,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(123);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer.
         peer_handle.set_target_descriptor(AvrcpService::Target {
@@ -1307,23 +1320,15 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish a connection.
         exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
         let _ = exec.wake_expired_timers();
 
         // We expect to initiate an outbound connection through the profile server.
-        let (channel, mut remote) = create_test_channels(transport);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut remote =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // The inbound connection is accepted (since there were no previous connections).
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1353,16 +1358,8 @@ pub(crate) mod tests {
         exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
         let _ = exec.wake_expired_timers();
 
-        let (channel3, mut _remote3) = create_test_channels(transport);
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel3.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut _remote3 =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // Run to update watcher state.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1381,7 +1378,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(123);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer.
         peer_handle.set_target_descriptor(AvrcpService::Target {
@@ -1393,9 +1390,7 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish
         // a connection.
@@ -1403,15 +1398,8 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for control.
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                // Trigger connection failure.
-                responder
-                    .send(Err(fidl_fuchsia_bluetooth::ErrorCode::Failed))
-                    .expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        expect_connect_request(&mut exec, &mut profile_server)
+            .reject(fidl_fuchsia_bluetooth::ErrorCode::Failed);
 
         // run until stalled, the connection should have failed.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1423,9 +1411,7 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We shouldn't have requested retry.
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Set control channel manually to test browse channel connection retry
         let _remote = set_incoming_control_connection(&peer_handle, transport);
@@ -1441,31 +1427,19 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for browse.
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { connection, responder, .. }))) => {
-                // Trigger failure.
-                responder
-                    .send(Err(fidl_fuchsia_bluetooth::ErrorCode::Failed))
-                    .expect("FIDL response should work");
-
-                // Verify that request is for browse.
-                match connection {
-                    ConnectParameters::L2cap(L2capParameters {
-                        psm: Some(v),
-                        parameters: Some(params),
-                        ..
-                    }) => {
-                        assert_eq!(v, u16::from(Psm::new(27))); // AVCTP_BROWSE
-                        assert_eq!(
-                            params.channel_mode.expect("channel mode should not be None"),
-                            fidl_bt::ChannelMode::EnhancedRetransmission
-                        );
-                    }
-                    x => panic!("Expected L2CAP parameters but got: {:?}", x),
-                }
+        let req = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(u16::from(Psm::new(27)))); // AVCTP_BROWSE
+        // Verify that request uses ERTM for browse.
+        match &req.connection {
+            ConnectParameters::L2cap(L2capParameters { parameters: Some(params), .. }) => {
+                assert_eq!(
+                    params.channel_mode.expect("channel mode should not be None"),
+                    fidl_bt::ChannelMode::EnhancedRetransmission
+                );
             }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+            x => panic!("Expected L2CAP parameters but got: {:?}", x),
+        }
+        req.reject(fidl_fuchsia_bluetooth::ErrorCode::Failed);
 
         // run until stalled, the connection should have failed.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1476,9 +1450,7 @@ pub(crate) mod tests {
         exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
         let _ = exec.wake_expired_timers();
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
     }
 
     /// Tests that when inbound and outbound browse connections are
@@ -1492,7 +1464,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(123);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer.
         peer_handle.set_target_descriptor(AvrcpService::Target {
@@ -1504,9 +1476,7 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish
         // a connection.
@@ -1514,14 +1484,8 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for control.
-        let (channel, _remote) = create_test_channels(transport);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let _remote =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // Run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1533,15 +1497,8 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for browse.
-        let (channel2, mut remote2) = create_test_channels(transport);
-        let mut next_request_fut = profile_requests.next();
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel2.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut remote2 =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // Run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1574,15 +1531,8 @@ pub(crate) mod tests {
         exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
         let _ = exec.wake_expired_timers();
 
-        let (channel4, mut remote4) = create_test_channels(transport);
-        let mut next_request_fut = profile_requests.next();
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel4.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut remote4 =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // Run to update watcher state.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1602,7 +1552,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(1);
-        let (peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer - while unusual, this peer
         // advertises a non-standard PSM.
@@ -1615,9 +1565,7 @@ pub(crate) mod tests {
 
         assert!(!peer_handle.is_control_connected());
 
-        let next_request_fut = profile_requests.next();
-        let mut next_request_fut = pin!(next_request_fut);
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish
         // a connection.
@@ -1625,14 +1573,8 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for control.
-        let (channel, mut remote) = create_test_channels(transport);
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut remote =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1644,15 +1586,8 @@ pub(crate) mod tests {
         let _ = exec.wake_expired_timers();
 
         // We should have requested a connection for browse.
-        let (channel2, mut remote2) = create_test_channels(transport);
-        let mut next_request_fut = profile_requests.next();
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                let channel = channel2.try_into().unwrap();
-                responder.send(Ok(channel)).expect("FIDL response should work");
-            }
-            x => panic!("Expected Profile connection request to be ready, got {:?} instead.", x),
-        };
+        let mut remote2 =
+            expect_connect_request(&mut exec, &mut profile_server).accept_with_transport(transport);
 
         // run until stalled, the connection should be put in place.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -1692,7 +1627,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(1);
-        let (peer_handle, _target_delegate, mut _profile_requests) = setup_remote_peer(id);
+        let (peer_handle, _target_delegate, mut _profile_server) = setup_remote_peer(id);
 
         // Set the descriptor to simulate service found for peer - while unusual, this peer
         // advertises a non-standard PSM.
@@ -1807,7 +1742,7 @@ pub(crate) mod tests {
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
 
         let id = PeerId(30789);
-        let (mut peer_handle, _target_delegate, mut profile_requests) = setup_remote_peer(id);
+        let (mut peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
         let (inspect, _metrics_node) = attach_inspect_with_metrics(&mut peer_handle);
 
         // Set the descriptor to simulate service found for peer.
@@ -1818,20 +1753,14 @@ pub(crate) mod tests {
         });
         peer_handle.request_control_connection();
 
-        let mut next_request_fut = Box::pin(profile_requests.next());
-        assert!(exec.run_until_stalled(&mut next_request_fut).is_pending());
+        expect_no_connect(&mut exec, &mut profile_server);
 
         // Advance time by the maximum amount of time it would take to establish a connection.
         exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
         let _ = exec.wake_expired_timers();
 
         // We expect to initiate an outbound connection through the profile server. Simulate error.
-        match exec.run_until_stalled(&mut next_request_fut) {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { responder, .. }))) => {
-                responder.send(Err(ErrorCode::Failed)).expect("Fidl response should be ok");
-            }
-            x => panic!("Expected ready profile connection, but got: {:?}", x),
-        };
+        expect_connect_request(&mut exec, &mut profile_server).reject(ErrorCode::Failed);
 
         // Run to update watcher state.
         let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
@@ -2221,8 +2150,7 @@ pub(crate) mod tests {
             Transport::Fidl => create_test_channels(transport),
         };
 
-        let browse_channel = AvctpPeer::new(local_browse);
-        peer_handle.set_browse_connection(browse_channel);
+        peer_handle.set_browse_connection(local_browse);
         exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
         let _ = exec.wake_expired_timers();
 
@@ -2260,5 +2188,343 @@ pub(crate) mod tests {
         // Should have gracefully disconnected only the browse connection.
         assert!(peer_handle.is_control_connected());
         assert!(!peer_handle.is_browse_connected());
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn outgoing_browse_channel_below_min_mtu_rejected(transport: Transport) {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
+
+        let id = PeerId(1);
+        let (mut peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
+        let (inspect, _metrics_node) = attach_inspect_with_metrics(&mut peer_handle);
+
+        peer_handle.set_target_descriptor(AvrcpService::Target {
+            features: AvrcpTargetFeatures::CATEGORY1 | AvrcpTargetFeatures::SUPPORTSBROWSING,
+            psm: Psm::AVCTP,
+            protocol_version: AvrcpProtocolVersion(1, 6),
+        });
+        peer_handle.request_control_connection();
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+
+        // Establish control connection.
+        let mut control_remote = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP.into()))
+            .accept_with_transport(transport);
+
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+
+        // Advance time so the outgoing browse connection is requested.
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+
+        // Return a browse channel with a max TX SDU size one byte below the minimum.
+        let request = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP_BROWSE.into()));
+        let mut browse_small_remote =
+            accept_connect_with_max_tx(request, transport, MIN_BROWSE_TX_SDU_SIZE - 1);
+
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+        assert!(!peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut control_remote);
+        expect_channel_closed(&mut exec, &mut browse_small_remote);
+
+        assert_data_tree!(@executor exec, inspect, root: {
+            peer: contains {
+                control: "Connected",
+                browse: "Disconnected",
+            },
+            metrics: contains {
+                connection_errors: 1u64,
+                control_connections: 1u64,
+                browse_connections: 0u64,
+            }
+        });
+
+        // Verify that the failed browse connection does not automatically retry.
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+        expect_no_connect(&mut exec, &mut profile_server);
+
+        // Request browse connection again and verify that exact MIN_BROWSE_TX_SDU_SIZE succeeds.
+        peer_handle.request_browse_connection();
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+
+        let request = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP_BROWSE.into()));
+        let mut browse_ok_remote =
+            accept_connect_with_max_tx(request, transport, MIN_BROWSE_TX_SDU_SIZE);
+
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn incoming_browse_channel_below_min_mtu_rejected(transport: Transport) {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
+
+        let id = PeerId(1);
+        let (mut peer_handle, _target_delegate, _profile_server) = setup_remote_peer(id);
+        let (inspect, _metrics_node) = attach_inspect_with_metrics(&mut peer_handle);
+
+        let mut control_remote = set_incoming_control_connection(&peer_handle, transport);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+
+        // Incoming browse connection below MIN_BROWSE_TX_SDU_SIZE should be rejected and dropped.
+        let mut browse_small_remote = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE - 1,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+
+        assert!(peer_handle.is_control_connected());
+        assert!(!peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut control_remote);
+        expect_channel_closed(&mut exec, &mut browse_small_remote);
+
+        assert_data_tree!(@executor exec, inspect, root: {
+            peer: contains {
+                control: "Connected",
+                browse: "Disconnected",
+            },
+            metrics: contains {
+                connection_errors: 1u64,
+                control_connections: 1u64,
+                browse_connections: 0u64,
+            }
+        });
+
+        // Incoming browse connection with exact MIN_BROWSE_TX_SDU_SIZE should be accepted.
+        let mut browse_ok_remote = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+
+        assert!(peer_handle.is_control_connected());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn incoming_browse_channel_below_min_mtu_keeps_existing_connection(transport: Transport) {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
+
+        let id = PeerId(1);
+        let (mut peer_handle, _target_delegate, _profile_server) = setup_remote_peer(id);
+        let (inspect, _metrics_node) = attach_inspect_with_metrics(&mut peer_handle);
+
+        let mut control_remote = set_incoming_control_connection(&peer_handle, transport);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+
+        let mut browse_ok_remote = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+
+        // An undersized incoming browse channel arriving within CONNECTION_THRESHOLD must be
+        // dropped without triggering collision teardown of the active browse channel.
+        let mut browse_small_early = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE - 1,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_closed(&mut exec, &mut browse_small_early);
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+
+        // An undersized incoming browse channel arriving after CONNECTION_THRESHOLD must also
+        // drop only the new channel while keeping the active browse channel connected.
+        exec.set_fake_time((CONNECTION_THRESHOLD * 2).after_now());
+        let _ = exec.wake_expired_timers();
+
+        let mut browse_small_late = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE - 1,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_closed(&mut exec, &mut browse_small_late);
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+        expect_channel_writable(&mut exec, &mut control_remote);
+
+        assert_data_tree!(@executor exec, inspect, root: {
+            peer: contains {
+                control: "Connected",
+                browse: "Connected",
+            },
+            metrics: contains {
+                connection_errors: 2u64,
+                browse_channel_collisions: 0u64,
+                control_connections: 1u64,
+                browse_connections: 1u64,
+            }
+        });
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn incoming_browse_channel_below_min_mtu_preserves_in_flight_outgoing_connect(
+        transport: Transport,
+    ) {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
+
+        let id = PeerId(1);
+        let (mut peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
+        let (inspect, _metrics_node) = attach_inspect_with_metrics(&mut peer_handle);
+
+        peer_handle.set_target_descriptor(AvrcpService::Target {
+            features: AvrcpTargetFeatures::CATEGORY1 | AvrcpTargetFeatures::SUPPORTSBROWSING,
+            psm: Psm::AVCTP,
+            protocol_version: AvrcpProtocolVersion(1, 6),
+        });
+        peer_handle.request_control_connection();
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+
+        let _control_remote = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP.into()))
+            .accept_with_transport(transport);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+
+        // Start outgoing browse connection and hold its request in flight.
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+        let browse_request = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP_BROWSE.into()));
+
+        // While the outgoing browse connect is in flight, an undersized incoming browse channel
+        // arrives and is dropped without resetting the Connecting state.
+        let mut browse_small_remote = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE - 1,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(!peer_handle.is_browse_connected());
+        expect_channel_closed(&mut exec, &mut browse_small_remote);
+
+        // Completing the in-flight outgoing browse connect with a valid channel succeeds.
+        let mut browse_ok_remote =
+            accept_connect_with_max_tx(browse_request, transport, MIN_BROWSE_TX_SDU_SIZE);
+
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+
+        assert_data_tree!(@executor exec, inspect, root: {
+            peer: contains {
+                control: "Connected",
+                browse: "Connected",
+            },
+            metrics: contains {
+                connection_errors: 1u64,
+                control_connections: 1u64,
+                browse_connections: 1u64,
+            }
+        });
+    }
+
+    #[test_case(Transport::Socket ; "socket")]
+    #[test_case(Transport::Fidl ; "fidl")]
+    #[fuchsia::test]
+    fn outgoing_browse_channel_below_min_mtu_keeps_existing_incoming_connection(
+        transport: Transport,
+    ) {
+        let mut exec = fasync::TestExecutor::new_with_fake_time();
+        exec.set_fake_time(fasync::MonotonicInstant::from_nanos(5_000000000));
+
+        let id = PeerId(1);
+        let (mut peer_handle, _target_delegate, mut profile_server) = setup_remote_peer(id);
+        let (inspect, _metrics_node) = attach_inspect_with_metrics(&mut peer_handle);
+
+        peer_handle.set_target_descriptor(AvrcpService::Target {
+            features: AvrcpTargetFeatures::CATEGORY1 | AvrcpTargetFeatures::SUPPORTSBROWSING,
+            psm: Psm::AVCTP,
+            protocol_version: AvrcpProtocolVersion(1, 6),
+        });
+        peer_handle.request_control_connection();
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+
+        let mut control_remote = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP.into()))
+            .accept_with_transport(transport);
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+
+        // Start outgoing browse connection and hold its request in flight.
+        exec.set_fake_time(MAX_CONNECTION_EST_TIME.after_now());
+        let _ = exec.wake_expired_timers();
+        let browse_request = expect_connect_request(&mut exec, &mut profile_server)
+            .assert_channel(ConnectChannel::L2CapPsm(Psm::AVCTP_BROWSE.into()));
+
+        // Peer completes a valid incoming browse connection while our outgoing attempt is pending.
+        let mut browse_ok_remote = set_incoming_browse_connection_with_max_tx(
+            &peer_handle,
+            transport,
+            MIN_BROWSE_TX_SDU_SIZE,
+        );
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+
+        // Outgoing attempt resolves late with an undersized channel; only the undersized outgoing
+        // channel should be dropped while the valid incoming browse connection stays connected.
+        let mut browse_small_remote =
+            accept_connect_with_max_tx(browse_request, transport, MIN_BROWSE_TX_SDU_SIZE - 1);
+
+        let _ = exec.run_until_stalled(&mut futures::future::pending::<()>());
+        assert!(peer_handle.is_control_connected());
+        assert!(peer_handle.is_browse_connected());
+        expect_channel_closed(&mut exec, &mut browse_small_remote);
+        expect_channel_writable(&mut exec, &mut browse_ok_remote);
+        expect_channel_writable(&mut exec, &mut control_remote);
+
+        assert_data_tree!(@executor exec, inspect, root: {
+            peer: contains {
+                control: "Connected",
+                browse: "Connected",
+            },
+            metrics: contains {
+                connection_errors: 1u64,
+                control_connections: 1u64,
+                browse_connections: 1u64,
+            }
+        });
     }
 }

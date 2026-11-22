@@ -32,7 +32,6 @@ fidl("fuchsia.wlan.mlme") {
     "wlan_mlme.fidl",
     "wlan_mlme_ext.fidl",
   ]
-  enable_hlcpp = true
   excluded_checks = [
     "event-names-must-start-with-on",
     "invalid-case-for-constant",
@@ -41,6 +40,7 @@ fidl("fuchsia.wlan.mlme") {
   ]
   visibility = [ "*" ]
   public_deps = [
+    "//sdk/fidl/fuchsia.power.system",
     "//sdk/fidl/fuchsia.wlan.common",
     "//sdk/fidl/fuchsia.wlan.driver",
     "//sdk/fidl/fuchsia.wlan.ieee80211",

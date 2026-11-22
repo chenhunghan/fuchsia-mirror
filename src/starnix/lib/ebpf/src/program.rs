@@ -7,8 +7,7 @@ pub use ebpf_core::program::*;
 use crate::executor::execute;
 use crate::verifier::VerifiedEbpfProgram;
 use crate::{
-    BPF_CALL, BPF_JMP, BPF_MAP_TYPE_ARRAY, CbpfConfig, DataWidth, EbpfError, EbpfInstruction,
-    EbpfPtr, MapSchema, Type,
+    BPF_MAP_TYPE_ARRAY, CbpfConfig, DataWidth, EbpfError, EbpfInstruction, EbpfPtr, MapSchema, Type,
 };
 use derivative::Derivative;
 use std::collections::HashMap;
@@ -438,15 +437,11 @@ impl<C: EbpfProgramContext> EbpfHelperImpl<C> {
     }
 }
 
-/// Stores set of helpers for an eBPF program. The helpers are stored packed
-/// in a vector for fast access in the interpreter.
+/// Stores set of helpers for an eBPF program.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Debug(bound = ""), Default(bound = ""))]
 pub struct HelperSet<C: EbpfProgramContext> {
-    helpers: Vec<EbpfHelperImpl<C>>,
-
-    // Maps helper IDs used in eBPF to location of the helper in `helpers`.
-    indices: HashMap<u32, u32>,
+    helpers: HashMap<u32, EbpfHelperImpl<C>>,
 }
 
 impl<C: EbpfProgramContext> FromIterator<(u32, EbpfHelperImpl<C>)> for HelperSet<C> {
@@ -454,14 +449,7 @@ impl<C: EbpfProgramContext> FromIterator<(u32, EbpfHelperImpl<C>)> for HelperSet
     where
         T: IntoIterator<Item = (u32, EbpfHelperImpl<C>)>,
     {
-        let mut helpers = Vec::new();
-        let mut indices = HashMap::new();
-        for (helper_id, helper) in iter {
-            let helper_index = helpers.len();
-            helpers.push(helper);
-            indices.insert(helper_id, helper_index as u32);
-        }
-        Self { helpers, indices }
+        Self { helpers: HashMap::from_iter(iter) }
     }
 }
 
@@ -470,19 +458,14 @@ impl<C: EbpfProgramContext> HelperSet<C> {
         Self::from_iter(iter)
     }
 
-    /// Looks up a helper by ID, returns helper `index`.
-    pub fn get_index_by_id(&self, id: u32) -> Option<u32> {
-        self.indices.get(&id).cloned()
-    }
-
-    /// Returns the helper with the specified index.
-    pub fn get_by_index(&self, index: u32) -> Option<&EbpfHelperImpl<C>> {
-        self.helpers.get(index as usize)
+    /// Returns the helper with the specified `id`.
+    pub fn get(&self, id: u32) -> Option<&EbpfHelperImpl<C>> {
+        self.helpers.get(&id)
     }
 
     /// Returns an iterator over all registered helpers and their IDs.
     pub fn iter(&self) -> impl Iterator<Item = (u32, &EbpfHelperImpl<C>)> {
-        self.indices.iter().map(|(&id, &idx)| (id, &self.helpers[idx as usize]))
+        self.helpers.iter().map(|(&id, helper)| (id, helper))
     }
 }
 
@@ -811,47 +794,17 @@ impl<C: EbpfProgramContext, T: ArgumentTypeChecker<C>> EbpfProgram<C, T> {
 }
 
 impl<C: EbpfProgramContext> EbpfProgram<C> {
-    /// Prepares linked eBPF instructions for execution in the interpreter by updating function
-    /// call instructions (`BPF_JMP | BPF_CALL`) to reference helpers by their indices in the
-    /// context's helper table instead of their IDs.
+    /// Creates an interpreted `EbpfProgram<C>` from instructions that have already been verified
+    /// and linked.
     ///
     /// # Safety
     /// `code` must have been verified and linked for context `C` and `maps`.
-    pub unsafe fn from_linked_instructions(
-        mut code: Vec<EbpfInstruction>,
-        maps: Vec<C::Map>,
-    ) -> Result<Self, EbpfError>
-    where
-        C: StaticHelperSet,
-    {
-        let helpers = C::helpers();
-
-        for (pc, instruction) in code.iter_mut().enumerate() {
-            // Replace helper IDs with helper indices in call instructions.
-            if instruction.code() == (BPF_JMP | BPF_CALL) {
-                if instruction.src_reg() != 0 {
-                    return Err(EbpfError::ProgramLinkError(format!(
-                        "Unsupported src_reg={} in call instruction at pc {}",
-                        instruction.src_reg(),
-                        pc,
-                    )));
-                }
-                let helper_id = instruction.imm() as u32;
-                let Some(index) = helpers.get_index_by_id(helper_id) else {
-                    return Err(EbpfError::ProgramLinkError(format!(
-                        "Missing implementation for helper with id={}",
-                        helper_id,
-                    )));
-                };
-                instruction.set_imm(index as i32);
-            }
-        }
-
-        Ok(Self {
+    pub unsafe fn from_linked_instructions(code: Vec<EbpfInstruction>, maps: Vec<C::Map>) -> Self {
+        Self {
             backend: ProgramBackend::Interpreted(code),
             _maps: maps,
             type_checker: StaticTypeChecker(),
-        })
+        }
     }
 }
 
@@ -886,10 +839,7 @@ where
     let linkage = collect_program_linkage::<C>(&maps);
     let code = link_instructions(program, &linkage)?;
 
-    // SAFETY: `code` was verified and linked for context `C` and `maps`.
-    let EbpfProgram { backend, _maps, type_checker: _ } =
-        unsafe { EbpfProgram::<C>::from_linked_instructions(code, maps)? };
-    Ok(EbpfProgram { backend, _maps, type_checker })
+    Ok(EbpfProgram { backend: ProgramBackend::Interpreted(code), _maps: maps, type_checker })
 }
 
 /// Rewrites the code to ensure mapped fields are correctly handled. Returns
@@ -936,17 +886,19 @@ macro_rules! empty_static_helper_set {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::api::*;
     use crate::conformance::test::parse_asm;
     use crate::{
-        CallingContext, FieldDescriptor, FieldType, LinkError, MapLinkageError, MemoryId,
-        NullVerifierLogger, PointerOrigin, ProgramArgument, StructAccess, StructDescriptor,
-        StructMappingError, Type, VerifierError, VerifierErrorKind, new_memory_id, verify_program,
+        CallingContext, FieldDescriptor, FieldType, FunctionSignatureBuilder, HelperDefinition,
+        LinkError, MapFlags, MapLinkageError, MemoryId, NullVerifierLogger, PointerOrigin,
+        ProgramArgument, StructAccess, StructDescriptor, StructMappingError, Type, VerifierError,
+        VerifierErrorKind, new_memory_id, verify_program,
     };
+    use linux_uapi::{bpf_map_type_BPF_MAP_TYPE_ARRAY, bpf_map_type_BPF_MAP_TYPE_HASH};
     use std::mem::offset_of;
-    use std::sync::LazyLock;
+    use std::sync::{Arc, LazyLock};
     use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
     #[repr(C)]
@@ -1129,6 +1081,66 @@ mod test {
 
     empty_static_helper_set!(TestEbpfProgramContext);
 
+    fn test_vmex_resource() -> &'static zx::Resource {
+        static TEST_VMEX_RESOURCE: std::sync::LazyLock<zx::Resource> =
+            std::sync::LazyLock::new(|| {
+                let (client, server) = zx::Channel::create();
+                fdio::service_connect("/svc/fuchsia.kernel.VmexResource", server)
+                    .expect("failed to connect to /svc/fuchsia.kernel.VmexResource");
+                let vmex = fidl_fuchsia_kernel::VmexResourceSynchronousProxy::new(client);
+                vmex.get(zx::MonotonicInstant::INFINITE)
+                    .expect("failed to get VmexResource from fuchsia.kernel.VmexResource")
+            });
+        &TEST_VMEX_RESOURCE
+    }
+
+    pub(crate) fn link_program_jit_for_test<C, T>(
+        program: &VerifiedEbpfProgram,
+        maps: Vec<C::Map>,
+    ) -> Result<EbpfProgram<C, T>, EbpfError>
+    where
+        C: EbpfProgramContext + StaticHelperSet,
+        T: ArgumentTypeChecker<C>,
+    {
+        let type_checker = T::link(program)?;
+        let linkage = collect_program_linkage::<C>(&maps);
+        let code = link_instructions(program, &linkage)?;
+        let vmo = crate::jit::compile_jit_vmo(&code, &linkage, test_vmex_resource())?;
+        // SAFETY: `vmo` was just compiled from verified `program` linked against `C` and `maps`,
+        // and `type_checker` was validated via `T::link(program)` above.
+        unsafe { EbpfProgram::from_compiled_vmo_with_type_checker(vmo, maps, type_checker) }
+    }
+
+    // Prepares both an interpreter program and (when supported on the target) a JIT-compiled
+    // program so tests exercise both execution backends.
+    fn link_test_programs_with_context<C>(
+        program: &VerifiedEbpfProgram,
+    ) -> Result<Vec<EbpfProgram<C>>, EbpfError>
+    where
+        C: EbpfProgramContext + StaticHelperSet,
+    {
+        let mut programs = vec![link_program::<C>(program, vec![])?];
+        if crate::jit::IS_SUPPORTED {
+            programs.push(link_program_jit_for_test::<C, StaticTypeChecker>(program, vec![])?);
+        }
+        Ok(programs)
+    }
+
+    fn link_test_programs_with_maps<C>(
+        program: &VerifiedEbpfProgram,
+        maps: Vec<C::Map>,
+    ) -> Result<Vec<EbpfProgram<C>>, EbpfError>
+    where
+        C: EbpfProgramContext + StaticHelperSet,
+        C::Map: Clone,
+    {
+        let mut programs = vec![link_program::<C>(program, maps.clone())?];
+        if crate::jit::IS_SUPPORTED {
+            programs.push(link_program_jit_for_test::<C, StaticTypeChecker>(program, maps)?);
+        }
+        Ok(programs)
+    }
+
     fn initialize_test_program(
         code: Vec<EbpfInstruction>,
     ) -> Result<EbpfProgram<TestEbpfProgramContext>, EbpfError> {
@@ -1138,6 +1150,17 @@ mod test {
             &mut NullVerifierLogger,
         )?;
         link_program(&verified_program, vec![])
+    }
+
+    fn initialize_test_programs(
+        code: Vec<EbpfInstruction>,
+    ) -> Result<Vec<EbpfProgram<TestEbpfProgramContext>>, EbpfError> {
+        let verified_program = verify_program(
+            code,
+            CallingContext { args: vec![TEST_ARG_TYPE.clone()], ..Default::default() },
+            &mut NullVerifierLogger,
+        )?;
+        link_test_programs_with_context(&verified_program)
     }
 
     struct TestEbpfProgramContext32BitMapped {}
@@ -1157,15 +1180,15 @@ mod test {
 
     empty_static_helper_set!(TestEbpfProgramContext32BitMapped);
 
-    fn initialize_test_program_for_32bit_arg(
+    fn initialize_test_programs_for_32bit_arg(
         code: Vec<EbpfInstruction>,
-    ) -> Result<EbpfProgram<TestEbpfProgramContext32BitMapped>, EbpfError> {
+    ) -> Result<Vec<EbpfProgram<TestEbpfProgramContext32BitMapped>>, EbpfError> {
         let verified_program = verify_program(
             code,
             CallingContext { args: vec![TEST_ARG_32_BIT_TYPE.clone()], ..Default::default() },
             &mut NullVerifierLogger,
         )?;
-        link_program(&verified_program, vec![])
+        link_test_programs_with_context(&verified_program)
     }
 
     #[test]
@@ -1182,11 +1205,11 @@ mod test {
         ldxdw %r0, [%r1]
         exit
         "#;
-        let program = initialize_test_program(parse_asm(program)).expect("load");
-
-        let v = [42];
-        let mut data = TestArgument::from_data(&v[..]);
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), v[0]);
+        for program in initialize_test_programs(parse_asm(program)).expect("load") {
+            let v = [42];
+            let mut data = TestArgument::from_data(&v[..]);
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), v[0]);
+        }
     }
 
     #[test]
@@ -1220,10 +1243,13 @@ mod test {
           ldxw %r0, [%r1+12]
           exit
         "#;
-        let program = initialize_test_program_for_32bit_arg(parse_asm(program)).expect("load");
-
-        let mut data = TestArgument32BitMapped(TestArgument::default());
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), data.0.mutable_field as u64);
+        for program in initialize_test_programs_for_32bit_arg(parse_asm(program)).expect("load") {
+            let mut data = TestArgument32BitMapped(TestArgument::default());
+            assert_eq!(
+                program.run_with_1_argument(&mut (), &mut data),
+                data.0.mutable_field as u64
+            );
+        }
     }
 
     #[test]
@@ -1234,11 +1260,11 @@ mod test {
           ldxh %r0, [%r1+14]
           exit
         "#;
-        let program = initialize_test_program_for_32bit_arg(parse_asm(program)).expect("load");
-
-        let mut data = TestArgument32BitMapped(TestArgument::default());
-        data.0.mutable_field = 0x12345678;
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), 0x1234 as u64);
+        for program in initialize_test_programs_for_32bit_arg(parse_asm(program)).expect("load") {
+            let mut data = TestArgument32BitMapped(TestArgument::default());
+            data.0.mutable_field = 0x12345678;
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), 0x1234 as u64);
+        }
     }
 
     #[test]
@@ -1256,11 +1282,11 @@ mod test {
         ldxdw %r0, [%r1]
         exit
         "#;
-        let program = initialize_test_program_for_32bit_arg(parse_asm(program)).expect("load");
-
-        let v = [42];
-        let mut data = TestArgument32BitMapped(TestArgument::from_data(&v[..]));
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), v[0]);
+        for program in initialize_test_programs_for_32bit_arg(parse_asm(program)).expect("load") {
+            let v = [42];
+            let mut data = TestArgument32BitMapped(TestArgument::from_data(&v[..]));
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), v[0]);
+        }
     }
 
     #[test]
@@ -1279,11 +1305,11 @@ mod test {
         ldxdw %r0, [%r1]
         exit
         "#;
-        let program = initialize_test_program_for_32bit_arg(parse_asm(program)).expect("load");
-
-        let v = [42];
-        let mut data = TestArgument32BitMapped(TestArgument::from_data(&v[..]));
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), v[0]);
+        for program in initialize_test_programs_for_32bit_arg(parse_asm(program)).expect("load") {
+            let v = [42];
+            let mut data = TestArgument32BitMapped(TestArgument::from_data(&v[..]));
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), v[0]);
+        }
     }
 
     #[test]
@@ -1316,11 +1342,11 @@ mod test {
         "#;
         let code = parse_asm(program);
 
-        let program = initialize_test_program(code).expect("load");
-
-        let v = [42];
-        let mut data = TestArgument::from_data(&v[..]);
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), 17);
+        for program in initialize_test_programs(code).expect("load") {
+            let v = [42];
+            let mut data = TestArgument::from_data(&v[..]);
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), 17);
+        }
     }
 
     #[test]
@@ -1433,11 +1459,11 @@ mod test {
           mov %r0, 1
           exit
         "#;
-        let program = initialize_test_program(parse_asm(program)).expect("load");
-
-        let mut data = TestArgument::default();
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), 1);
-        assert_eq!(data.mutable_field, 0x42);
+        for program in initialize_test_programs(parse_asm(program)).expect("load") {
+            let mut data = TestArgument::default();
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), 1);
+            assert_eq!(data.mutable_field, 0x42);
+        }
     }
 
     #[test]
@@ -1448,11 +1474,11 @@ mod test {
           mov %r0, 1
           exit
         "#;
-        let program = initialize_test_program_for_32bit_arg(parse_asm(program)).expect("load");
-
-        let mut data = TestArgument32BitMapped(TestArgument::default());
-        assert_eq!(program.run_with_1_argument(&mut (), &mut data), 1);
-        assert_eq!(data.0.mutable_field, 0x42);
+        for program in initialize_test_programs_for_32bit_arg(parse_asm(program)).expect("load") {
+            let mut data = TestArgument32BitMapped(TestArgument::default());
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), 1);
+            assert_eq!(data.0.mutable_field, 0x42);
+        }
     }
 
     #[test]
@@ -1480,6 +1506,7 @@ mod test {
             })
         );
     }
+
     #[test]
     fn test_five_argument_program_execution() {
         struct FiveArgContext {}
@@ -1513,9 +1540,101 @@ mod test {
             &mut NullVerifierLogger,
         )
         .expect("5-argument program should verify");
-        let linked = link_program::<FiveArgContext>(&verified, vec![])
-            .expect("5-argument program should link");
-        assert_eq!(linked.run_with_5_arguments(&mut (), 10, 20, 30, 40, 50), 150);
+        for linked in link_test_programs_with_context::<FiveArgContext>(&verified)
+            .expect("5-argument program should link")
+        {
+            assert_eq!(linked.run_with_5_arguments(&mut (), 10, 20, 30, 40, 50), 150);
+        }
+    }
+
+    #[test]
+    fn test_atomic_operations_32_and_64() {
+        // Exercise 32-bit and 64-bit atomic operations on stack memory `[%r10-8]` and `[%r10-16]`,
+        // including `src == %r0` and checking upper 32-bit zero-extension.
+        let code = parse_asm(
+            r#"
+            # Initialize [%r10-8] = 0x11223344_00000010 (little-endian: low32=0x10, high32=0x11223344)
+            stw [%r10-8], 0x10
+            stw [%r10-4], 0x11223344
+
+            # 1) 32-bit atomic add (no fetch): [%r10-8] += 5 -> 0x15
+            mov %r2, -1
+            mov32 %r2, 5
+            lock add32 [%r10-8], %r2
+
+            # 2) 32-bit atomic fetch add with src == %r0:
+            # Set %r0 = 10 with dirty upper bits first; [%r10-8] was 0x15 -> 0x1f, %r0 -> 0x15
+            mov %r0, -1
+            add32 %r0, 11
+            lock fetch add32 [%r10-8], %r0
+            jeq %r0, 0x15, +1
+            exit
+
+            # 3) 32-bit atomic fetch AND, OR, XOR, XCHG:
+            # [%r10-8] is 0x1f; fetch-AND with 0x0f -> old=0x1f, new=0x0f
+            mov %r3, -1
+            add32 %r3, 0x10
+            lock fetch and32 [%r10-8], %r3
+            jeq %r3, 0x1f, +1
+            exit
+
+            # Fetch-OR with 0xf0 on %r0 (src == %r0): [%r10-8] was 0x0f -> 0xff, %r0 -> 0x0f
+            mov32 %r0, 0xf0
+            lock fetch or32 [%r10-8], %r0
+            jeq %r0, 0x0f, +1
+            exit
+
+            # Fetch-XOR with 0x55: [%r10-8] was 0xff -> 0xaa, %r3 -> 0xff
+            mov32 %r3, 0x55
+            lock fetch xor32 [%r10-8], %r3
+            jeq %r3, 0xff, +1
+            exit
+
+            # 32-bit XCHG with 0x80000001: [%r10-8] was 0xaa -> 0x80000001, %r3 -> 0xaa
+            mov32 %r3, 0x80000001
+            lock xchg32 [%r10-8], %r3
+            jeq %r3, 0xaa, +1
+            exit
+
+            # 32-bit CMPXCHG hit when %r0 has dirty upper bits (0xffffffff_80000001):
+            # Matches 0x80000001, stores 0x42, and zero-extends %r0 to 0x80000001
+            mov %r0, -0x7fffffff
+            mov32 %r4, 0x42
+            lock cmpxchg32 [%r10-8], %r4
+            rsh %r0, 32
+            jeq %r0, 0, +1
+            exit
+
+            # Verify adjacent 32-bit word [%r10-4] is still 0x11223344
+            ldxw %r5, [%r10-4]
+            jeq %r5, 0x11223344, +1
+            exit
+
+            # 4) 64-bit atomic operations on [%r10-16]:
+            stdw [%r10-16], 100
+            mov %r2, 23
+            lock fetch add [%r10-16], %r2
+            jeq %r2, 100, +1
+            exit
+
+            # 64-bit CMPXCHG miss (%r0 = 999 != 123): %r0 becomes 123, memory stays 123
+            mov %r0, 999
+            mov %r3, 777
+            lock cmpxchg [%r10-16], %r3
+            jeq %r0, 123, +1
+            exit
+
+            # Now %r0 is 123, so a second CMPXCHG with %r3 = 777 hits
+            lock cmpxchg [%r10-16], %r3
+            ldxdw %r0, [%r10-16]
+            exit
+            "#,
+        );
+
+        for program in initialize_test_programs(code).expect("load") {
+            let mut data = TestArgument::default();
+            assert_eq!(program.run_with_1_argument(&mut (), &mut data), 777);
+        }
     }
 
     #[test]
@@ -1649,10 +1768,12 @@ mod test {
             exit
             "#,
         );
-        let mut arg = TestArgument::default();
-        let linked = initialize_test_program(dead_helper_code)
-            .expect("dead-branch unknown helper should verify and link");
-        assert_eq!(linked.run_with_1_argument(&mut (), &mut arg), 7);
+        for linked in initialize_test_programs(dead_helper_code)
+            .expect("dead-branch unknown helper should verify and link")
+        {
+            let mut arg = TestArgument::default();
+            assert_eq!(linked.run_with_1_argument(&mut (), &mut arg), 7);
+        }
     }
 
     #[repr(C)]
@@ -1946,5 +2067,353 @@ mod test {
             link_instructions(&pkt_prog, &ProgramLinkageInfo::default()),
             Err(LinkError::MissingPacketLoadFn)
         );
+    }
+
+    #[test]
+    fn test_packet_load_abs_and_ind() {
+        // %r1 = packet (`&TestPacket`), %r2 = dynamic index (`usize`).
+        // Initialize %r0 = 0 (verifier requires %r0 to be initialized before BPF_ABS/BPF_IND in
+        // case of early exit), copy %r1 -> %r6 (packet base register required by BPF_ABS/BPF_IND),
+        // and save %r2 -> %r8 because BPF_ABS/BPF_IND clobber %r1..%r5 in the verifier.
+        let code = parse_asm(
+            r#"
+            mov %r0, 0
+            mov %r6, %r1
+            mov %r8, %r2
+            # Load byte at offset 0 (BPF_LD | BPF_ABS | BPF_B) -> 0x11
+            ldpb
+            mov %r7, %r0
+            # Load halfword at offset 0 (BPF_LD | BPF_ABS | BPF_H) -> 0x1122
+            ldph
+            add %r7, %r0
+            # Load word at offset 0 (BPF_LD | BPF_ABS | BPF_W) -> 0x11223344
+            ldpw
+            add %r7, %r0
+            # Load dword at indirect offset %r8 + 2 (BPF_LD | BPF_IND | BPF_DW)
+            ldpdw %r8 +2
+            add %r0, %r7
+            exit
+            "#,
+        );
+
+        let verified = verify_program(
+            code,
+            CallingContext {
+                args: vec![TEST_PACKET_TYPE.clone(), Type::UNKNOWN_SCALAR],
+                packet_type: Some(TEST_PACKET_TYPE.clone()),
+                ..Default::default()
+            },
+            &mut NullVerifierLogger,
+        )
+        .expect("verify");
+
+        let programs =
+            link_test_programs_with_context::<PacketTestContext>(&verified).expect("link");
+
+        let packet = TestPacket([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA]);
+        let expected_in_bounds = 0x11u64 + 0x1122u64 + 0x11223344u64 + 0x33445566778899AAu64;
+        for program in &programs {
+            // In-bounds: %r2 = 0 -> loads DW at offset 0 + 2 = 2..10
+            assert_eq!(program.run_with_2_arguments(&mut (), &packet, 0), expected_in_bounds);
+            // Out-of-bounds: %r2 = 1 -> tries to load DW at offset 1 + 2 = 3..11 -> returns 0
+            assert_eq!(program.run_with_2_arguments(&mut (), &packet, 1), 0);
+        }
+    }
+
+    #[derive(Clone)]
+    struct RelocationTestMap {
+        schema: MapSchema,
+        map_ptr: u64,
+        data: Option<Arc<[u8; 64]>>,
+    }
+
+    impl MapReference for RelocationTestMap {
+        fn schema(&self) -> &MapSchema {
+            &self.schema
+        }
+
+        fn as_bpf_value(&self) -> BpfValue {
+            BpfValue::from(self.map_ptr)
+        }
+
+        fn get_data_ptr(&self) -> Option<BpfValue> {
+            assert_eq!(self.schema.map_type, bpf_map_type_BPF_MAP_TYPE_ARRAY);
+            self.data.as_ref().map(|buf| BpfValue::from(buf.as_ptr() as u64))
+        }
+    }
+
+    struct MapAndHelperTestContext {}
+
+    #[repr(C)]
+    struct HelperRunContext {
+        accumulated: u64,
+    }
+
+    const TEST_HELPER_ID: u32 = 1;
+
+    extern "C" fn test_5arg_helper(
+        context: &mut HelperRunContext,
+        a1: BpfValue,
+        a2: BpfValue,
+        a3: BpfValue,
+        a4: BpfValue,
+        a5: BpfValue,
+    ) -> BpfValue {
+        let sum = a1
+            .as_u64()
+            .wrapping_add(a2.as_u64())
+            .wrapping_add(a3.as_u64())
+            .wrapping_add(a4.as_u64())
+            .wrapping_add(a5.as_u64());
+        context.accumulated = context.accumulated.wrapping_add(sum);
+        BpfValue::from(context.accumulated)
+    }
+
+    impl EbpfProgramContext for MapAndHelperTestContext {
+        type RunContext<'a> = HelperRunContext;
+        type Packet<'a> = ();
+        type Arg1<'a> = usize;
+        type Arg2<'a> = usize;
+        type Arg3<'a> = ();
+        type Arg4<'a> = ();
+        type Arg5<'a> = ();
+        type Map = RelocationTestMap;
+    }
+
+    impl StaticHelperSet for MapAndHelperTestContext {
+        fn helpers() -> &'static HelperSet<Self> {
+            static HELPERS: LazyLock<HelperSet<MapAndHelperTestContext>> = LazyLock::new(|| {
+                HelperSet::new(std::iter::once((
+                    TEST_HELPER_ID,
+                    EbpfHelperImpl::<MapAndHelperTestContext>(test_5arg_helper),
+                )))
+            });
+            &HELPERS
+        }
+    }
+
+    #[test]
+    fn test_map_relocations_and_non_array_map() {
+        let mut array_buf = [0u8; 64];
+        // Write 0xCAFEBABE_12345678 at offset 16 inside the array map buffer.
+        array_buf[16..24].copy_from_slice(&0xCAFEBABE_12345678u64.to_ne_bytes());
+
+        let array_map = RelocationTestMap {
+            schema: MapSchema {
+                map_type: bpf_map_type_BPF_MAP_TYPE_ARRAY,
+                key_size: 4,
+                value_size: 32,
+                max_entries: 2,
+                flags: MapFlags::empty(),
+            },
+            map_ptr: 0xDEAD_0001,
+            data: Some(Arc::new(array_buf)),
+        };
+        // Include a non-ARRAY map (`BPF_MAP_TYPE_HASH`) whose `get_data_ptr()` would panic if
+        // `collect_program_linkage` called it on non-array maps.
+        let hash_map = RelocationTestMap {
+            schema: MapSchema {
+                map_type: bpf_map_type_BPF_MAP_TYPE_HASH,
+                key_size: 4,
+                value_size: 8,
+                max_entries: 16,
+                flags: MapFlags::empty(),
+            },
+            map_ptr: 0xDEAD_0002,
+            data: None,
+        };
+
+        // 1) `BPF_PSEUDO_MAP_IDX_VALUE` for map 0 (`array_map`) with offset 16 -> reads u64 at
+        //    `[%r1]`
+        // 2) `BPF_PSEUDO_MAP_IDX` for map 1 (`hash_map`) -> exercises map pointer relocation
+        let code = parse_asm(
+            r#"
+            lddw %r1, map_val[0]+16
+            lddw %r2, map[1]
+            ldxdw %r0, [%r1]
+            exit
+            "#,
+        );
+
+        let mut calling_context = CallingContext {
+            args: vec![Type::UNKNOWN_SCALAR, Type::UNKNOWN_SCALAR],
+            ..Default::default()
+        };
+        assert_eq!(calling_context.register_map(array_map.schema), 0);
+        assert_eq!(calling_context.register_map(hash_map.schema), 1);
+
+        let verified =
+            verify_program(code, calling_context, &mut NullVerifierLogger).expect("verify");
+
+        let programs = link_test_programs_with_maps::<MapAndHelperTestContext>(
+            &verified,
+            vec![array_map, hash_map],
+        )
+        .expect("link");
+
+        for program in &programs {
+            let mut ctx = HelperRunContext { accumulated: 0 };
+            assert_eq!(program.run_with_2_arguments(&mut ctx, 0, 0), 0xCAFEBABE_12345678u64);
+        }
+    }
+
+    #[test]
+    fn test_helper_with_run_context_and_callee_saved_regs() {
+        // Verify that %r6..%r9 and %r10 are preserved across helper calls, and that RunContext + 5
+        // arguments are passed to the helper accurately in both interpreter and JIT mode.
+        let program = r#"
+          mov %r6, %r1
+          mov %r7, %r2
+          mov %r8, 100
+          mov %r9, 200
+          stdw [%r10 - 8], 300
+          mov %r3, %r8
+          mov %r4, %r9
+          ldxdw %r5, [%r10 - 8]
+          call 1
+          # Call a second time using preserved %r6..%r10
+          mov %r1, %r6
+          mov %r2, %r7
+          mov %r3, %r8
+          mov %r4, %r9
+          ldxdw %r5, [%r10 - 8]
+          call 1
+          add %r0, %r6
+          add %r0, %r7
+          add %r0, %r8
+          add %r0, %r9
+          ldxdw %r1, [%r10 - 8]
+          add %r0, %r1
+          exit
+        "#;
+
+        static TEST_HELPER_DEF: LazyLock<HelperDefinition> = LazyLock::new(|| HelperDefinition {
+            index: TEST_HELPER_ID,
+            name: "test_5arg_helper",
+            signature: FunctionSignatureBuilder {
+                args: vec![
+                    Type::ScalarValueParameter,
+                    Type::ScalarValueParameter,
+                    Type::ScalarValueParameter,
+                    Type::ScalarValueParameter,
+                    Type::ScalarValueParameter,
+                ],
+                return_value: Type::UNKNOWN_SCALAR,
+                invalidate_array_bounds: false,
+            }
+            .build(),
+        });
+
+        let mut calling_context = CallingContext {
+            args: vec![Type::UNKNOWN_SCALAR, Type::UNKNOWN_SCALAR],
+            ..Default::default()
+        };
+        calling_context.helpers.insert(TEST_HELPER_ID, &*TEST_HELPER_DEF);
+
+        let verified = verify_program(parse_asm(program), calling_context, &mut NullVerifierLogger)
+            .expect("verify");
+
+        let programs =
+            link_test_programs_with_context::<MapAndHelperTestContext>(&verified).expect("link");
+
+        for program in &programs {
+            let mut ctx = HelperRunContext { accumulated: 10 };
+            // Each call adds (11 + 22 + 100 + 200 + 300) = 633 to ctx.accumulated:
+            // After call 1: accumulated = 643
+            // After call 2: accumulated = 1276 (returned in %r0)
+            // Then adds %r6..%r9 + [%r10 - 8] = 633 -> total 1909.
+            let res = program.run_with_2_arguments(&mut ctx, 11, 22);
+            assert_eq!(res, 1909);
+            assert_eq!(ctx.accumulated, 1276);
+        }
+    }
+
+    #[test]
+    fn test_jit_unused_register_fields_and_untaken_oob_jumps() {
+        // 1. Unused register nibbles (`11..=15`) in immediate, unary, store-immediate, and legacy
+        // packet-load instructions are not checked by `BpfVisitor::visit` and must not cause JIT
+        // compilation to panic or fail. Constructed with `EbpfInstruction::new` because
+        // `parse_asm` cannot encode invalid `11..=15` unused register nibbles.
+        let code = vec![
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 0, 15, 0, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_X, 6, 1, 0, 0),
+            // `BPF_LD | BPF_ABS` ignores both `dst_reg` and `src_reg`; `BPF_LD | BPF_IND` ignores
+            // `dst_reg`.
+            EbpfInstruction::new(BPF_LD | BPF_ABS | BPF_B, 15, 15, 0, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_MOV | BPF_K, 2, 14, 0, 1),
+            EbpfInstruction::new(BPF_LD | BPF_IND | BPF_B, 13, 2, 0, 0),
+            // Immediate ALU, unary NEG/END, and ST_MEM ignore `src_reg`.
+            EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_K, 0, 12, 0, 5),
+            EbpfInstruction::new(BPF_ALU64 | BPF_NEG, 0, 11, 0, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_NEG, 0, 15, 0, 0),
+            EbpfInstruction::new(BPF_ALU | BPF_END | BPF_TO_LE, 0, 14, 0, 16),
+            EbpfInstruction::new(BPF_ST | BPF_MEM | BPF_DW, 10, 13, -8, 10),
+            EbpfInstruction::new(BPF_LDX | BPF_MEM | BPF_DW, 3, 10, -8, 0),
+            EbpfInstruction::new(BPF_ALU64 | BPF_ADD | BPF_X, 0, 3, 0, 0),
+            EbpfInstruction::new(BPF_JMP | BPF_EXIT, 15, 15, 0, 0),
+        ];
+
+        let verified = verify_program(
+            code,
+            CallingContext {
+                args: vec![TEST_PACKET_TYPE.clone(), Type::UNKNOWN_SCALAR],
+                packet_type: Some(TEST_PACKET_TYPE.clone()),
+                ..Default::default()
+            },
+            &mut NullVerifierLogger,
+        )
+        .expect("verify program with unused register nibbles");
+
+        let packet = TestPacket([0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA]);
+        for program in link_test_programs_with_context::<PacketTestContext>(&verified)
+            .expect("link program with unused register nibbles")
+        {
+            // packet[1] = 0x22 (34) + 5 + 10 = 49.
+            assert_eq!(program.run_with_2_arguments(&mut (), &packet, 0), 49);
+        }
+
+        // 2. A conditional jump whose condition is statically known to be `false` is visited by
+        // `verify_program()`, but its target offset is not validated by the verifier when the
+        // branch is untaken. JIT compilation must reject both out-of-bounds jump offsets and jumps
+        // into the second instruction slot of a 2-slot `BPF_LDDW` with `EbpfError::ProgramLinkError`.
+        if crate::jit::IS_SUPPORTED {
+            for bad_asm in [
+                r#"
+                mov %r0, 0
+                jeq %r0, 1, +100
+                exit
+                "#,
+                r#"
+                mov %r0, 0
+                jeq %r0, 1, -3
+                exit
+                "#,
+                r#"
+                mov %r0, 0
+                jeq %r0, 1, -10
+                exit
+                "#,
+                r#"
+                mov %r0, 0
+                jeq %r0, 1, +1
+                lddw %r1, 0x123456789abcdef0
+                exit
+                "#,
+            ] {
+                let verified_bad = verify_program(
+                    parse_asm(bad_asm),
+                    CallingContext { args: vec![TEST_ARG_TYPE.clone()], ..Default::default() },
+                    &mut NullVerifierLogger,
+                )
+                .expect("verifier allows untaken conditional jump with invalid target");
+                assert!(matches!(
+                    link_program_jit_for_test::<TestEbpfProgramContext, StaticTypeChecker>(
+                        &verified_bad,
+                        vec![],
+                    ),
+                    Err(EbpfError::ProgramLinkError(_))
+                ));
+            }
+        }
     }
 }

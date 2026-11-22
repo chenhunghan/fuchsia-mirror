@@ -42,7 +42,7 @@ impl DynamicFileSource for LoadavgFile {
                 }
             }
 
-            let existing_tasks = pid_table.process_ids().len() + running_tasks_count;
+            let existing_tasks = pid_table.num_tasks().max(running_tasks_count);
             (runnable_tasks, existing_tasks, pid_table.last_pid())
         };
 

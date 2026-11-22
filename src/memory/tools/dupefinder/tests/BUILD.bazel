@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":dupefinder_html_goldens_test"],
+    visibility = ["//src/memory/tools:__pkg__"],
+)
+
+# LINT.IfChange(golden_tests)
+# bazel2gn does not translate golden_test(). GN keeps golden_files("dupefinder_html_goldens") above the sentinel.
+# @bazel2gn:skip
+golden_test(
+    name = "dupefinder_html_goldens_test",
+    goldens = {
+        "goldens/from_e2e_test.golden.html": ":from_e2e_test.render",
+    },
+)
+
+compiled_action(
+    name = "from_e2e_test.render",
+    testonly = True,
+    srcs = ["goldens/from_e2e_test.json"],
+    outs = ["from_e2e_test.html"],
+    args = [
+        "--json-dump",
+        "$(location :goldens/from_e2e_test.json)",
+        "--html-output",
+        "$(location :from_e2e_test.html)",
+    ],
+    tool = ":render_html_for_goldens",
+)
+# LINT.ThenChange(BUILD.gn:golden_tests)
+
+rustc_binary(
+    name = "render_html_for_goldens",
+    testonly = True,
+    srcs = ["render_html_for_goldens.rs"],
+    crate_root = "render_html_for_goldens.rs",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//src/lib/fuchsia",
+        "//src/memory/tools/dupefinder:lib",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:camino",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)

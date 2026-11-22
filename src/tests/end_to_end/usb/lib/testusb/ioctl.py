@@ -19,6 +19,7 @@ import errno
 import functools
 import logging
 import os
+import select
 import time
 
 from .backend import USBTestBackend
@@ -47,6 +48,11 @@ def _get_libc() -> ctypes.CDLL:
 def _ioc(direction: int, io_type: int, seq_number: int, size: int) -> int:
     """Calculate a Linux ioctl command number from directional/type fields."""
     return (direction << 30) | (io_type << 8) | (seq_number << 0) | (size << 16)
+
+
+def _iow(type_char: str, seq_number: int, size: int) -> int:
+    """Calculate a Linux _IOW ioctl command number."""
+    return _ioc(1, ord(type_char), seq_number, size)
 
 
 def _ior(type_char: str, seq_number: int, size: int) -> int:
@@ -140,10 +146,42 @@ class UsbtestParam(ctypes.Structure):
     ]
 
 
+class UsbdevfsUrb(ctypes.Structure):
+    """Ctypes representation of struct usbdevfs_urb (<linux/usbdevice_fs.h>).
+
+    This is the request passed to USBDEVFS_SUBMITURB for asynchronous
+    transfers. The trailing iso_frame_desc[] array is left out because only
+    bulk URBs are used.
+    """
+
+    _fields_ = [
+        ("type", ctypes.c_ubyte),
+        ("endpoint", ctypes.c_ubyte),
+        ("status", ctypes.c_int),
+        ("flags", ctypes.c_uint),
+        ("buffer", ctypes.c_void_p),
+        ("buffer_length", ctypes.c_int),
+        ("actual_length", ctypes.c_int),
+        ("start_frame", ctypes.c_int),
+        ("number_of_packets", ctypes.c_int),
+        ("error_count", ctypes.c_int),
+        ("signr", ctypes.c_uint),
+        ("usercontext", ctypes.c_void_p),
+    ]
+
+
+USBDEVFS_URB_TYPE_BULK = 3
+
 USBDEVFS_CONTROL = _iowr("U", 0, ctypes.sizeof(UsbdevfsCtrltransfer))
 USBDEVFS_BULK = _iowr("U", 2, ctypes.sizeof(UsbdevfsBulktransfer))
 USBDEVFS_SETINTERFACE = _ior("U", 4, ctypes.sizeof(UsbdevfsSetinterface))
 USBDEVFS_SETCONFIGURATION = _ior("U", 5, ctypes.sizeof(ctypes.c_uint))
+# Asynchronous transfers: SUBMITURB queues a URB and returns immediately,
+# REAPURBNDELAY returns a completed URB (or EAGAIN if none has completed yet),
+# and DISCARDURB cancels a queued URB.
+USBDEVFS_SUBMITURB = _ior("U", 10, ctypes.sizeof(UsbdevfsUrb))
+USBDEVFS_DISCARDURB = _io("U", 11)
+USBDEVFS_REAPURBNDELAY = _iow("U", 13, ctypes.sizeof(ctypes.c_void_p))
 USBDEVFS_CLAIMINTERFACE = _ior("U", 15, ctypes.sizeof(ctypes.c_uint))
 USBDEVFS_RELEASEINTERFACE = _ior("U", 16, ctypes.sizeof(ctypes.c_uint))
 USBDEVFS_IOCTL = _iowr("U", 18, ctypes.sizeof(UsbdevfsIoctl))
@@ -325,6 +363,17 @@ class UsbTestModeSelector(enum.IntEnum):
     TEST_FORCE_ENABLE = 0x05
 
 
+# Number of URBs that run_pipelined_bulk keeps queued in each active
+# direction. With 64 KiB transfers this keeps about 1 MiB in flight per
+# direction, which is enough to keep a USB 2.0 link busy.
+_BULK_PIPELINE_DEPTH: int = 16
+# How long to wait for cancelled URBs to come back before giving up.
+_URB_CANCEL_TIMEOUT_SECS: float = 1.0
+# Period of the payload that run_pipelined_bulk sends in loopback. A prime
+# doesn't divide any max packet size, so every packet of a transfer carries
+# different bytes and a repeated or reordered packet fails verification.
+_LOOPBACK_PATTERN_PERIOD: int = 251
+
 _USB_DT_DEVICE_SIZE: int = 18
 _USB_DT_CONFIG_SIZE: int = 9
 _DEFAULT_CTRL_TIMEOUT_MS: int = 1000
@@ -484,6 +533,11 @@ class USBTestIoctlBackend(USBTestBackend):
         self.ifnum = ifnum
         self._fd: int | None = None
         self._maxpacket: int | None = None
+        # Cancelled URBs that the kernel had not returned yet, by address,
+        # each mapped to the URBs and buffers of its transfer. The kernel
+        # writes into them when such a URB is reaped, so they must stay alive
+        # until then, or until the fd is closed.
+        self._orphaned_urbs: dict[int, object] = {}
 
     def open(self) -> None:
         """Opens the USB character device node and reads device parameters.
@@ -541,6 +595,8 @@ class USBTestIoctlBackend(USBTestBackend):
                         "Error closing file descriptor %d: %s", self._fd, err
                     )
                 self._fd = None
+                # Closing the fd frees any URBs still owned by the kernel.
+                self._orphaned_urbs.clear()
         self.is_open = False
 
     def _reconnect_kernel_drivers(self) -> None:
@@ -1174,6 +1230,317 @@ class USBTestIoctlBackend(USBTestBackend):
                 )
 
         return ep_out, ep_in, target_ifnum
+
+    def _reap_urb(
+        self,
+        reap_ptr: ctypes.c_void_p,
+        poller: select.poll,
+        timeout_ms: int,
+    ) -> int | None:
+        """Waits for the next completed URB and returns its address, or None on timeout."""
+        assert self._fd is not None
+        cdll = _get_libc()
+        while True:
+            reap_ptr.value = 0
+            res = cdll.ioctl(
+                self._fd, USBDEVFS_REAPURBNDELAY, ctypes.byref(reap_ptr)
+            )
+            if res >= 0:
+                return reap_ptr.value or 0
+            errno_val = ctypes.get_errno()
+            if errno_val == errno.EINTR:
+                continue
+            if errno_val != errno.EAGAIN:
+                raise OSError(
+                    errno_val,
+                    "REAPURBNDELAY failed: "
+                    f"errno {errno_val} ({os.strerror(errno_val)})",
+                )
+            if not poller.poll(timeout_ms):
+                return None
+
+    def _transfer_pipelined_urbs(
+        self,
+        params: TestParams,
+        ep_out: int | None,
+        ep_in: int | None,
+        verify: bool,
+    ) -> tuple[int, int, str | None]:
+        """Runs fixed-length bulk transfers with several URBs in flight.
+
+        Keeps up to _BULK_PIPELINE_DEPTH URBs queued per active direction
+        via USBDEVFS_SUBMITURB and USBDEVFS_REAPURBNDELAY. If `verify` is set
+        (loopback), every received IN buffer is compared against the
+        transmitted pattern.
+        """
+        assert self._fd is not None
+        length = params.length
+        depth = min(params.iterations, _BULK_PIPELINE_DEPTH)
+
+        period = _LOOPBACK_PATTERN_PERIOD
+        pattern = (bytes(range(period)) * (length // period + 1))[:length]
+        out_buf = ctypes.create_string_buffer(pattern, length)
+        expected = memoryview(out_buf).cast("B")[:length]
+        in_bufs = (
+            [ctypes.create_string_buffer(length) for _ in range(depth)]
+            if ep_in is not None
+            else []
+        )
+        received = [memoryview(buf).cast("B")[:length] for buf in in_bufs]
+
+        # Queue IN URBs before OUT URBs so the host is ready to receive
+        # looped-back data as soon as the device sends it.
+        urbs: dict[int, tuple[bool, int, UsbdevfsUrb]] = {}
+        initial_addrs: list[int] = []
+        for is_in, ep in ((True, ep_in), (False, ep_out)):
+            if ep is None:
+                continue
+            for slot in range(depth):
+                buf = in_bufs[slot] if is_in else out_buf
+                urb = UsbdevfsUrb(
+                    type=USBDEVFS_URB_TYPE_BULK,
+                    endpoint=ep,
+                    buffer=ctypes.addressof(buf),
+                    buffer_length=length,
+                )
+                addr = ctypes.addressof(urb)
+                urbs[addr] = (is_in, slot, urb)
+                initial_addrs.append(addr)
+
+        active_dirs = [
+            is_in
+            for is_in, ep in ((False, ep_out), (True, ep_in))
+            if ep is not None
+        ]
+        submitted = {is_in: 0 for is_in in active_dirs}
+        completed = {is_in: 0 for is_in in active_dirs}
+        in_flight: set[int] = set()
+        cdll = _get_libc()
+
+        def submit(addr: int) -> None:
+            is_in, slot, urb = urbs[addr]
+            if verify and is_in:
+                received[slot][0] = expected[0] ^ 0xFF
+            urb.status = 0
+            urb.actual_length = 0
+            urb.error_count = 0
+            res = cdll.ioctl(self._fd, USBDEVFS_SUBMITURB, ctypes.byref(urb))
+            if res < 0:
+                err = ctypes.get_errno()
+                raise OSError(
+                    err, f"SUBMITURB failed: errno {err} ({os.strerror(err)})"
+                )
+            in_flight.add(addr)
+            submitted[is_in] += 1
+
+        poller = select.poll()
+        poller.register(self._fd, select.POLLOUT)
+        reap_ptr = ctypes.c_void_p()
+        error_msg: str | None = None
+        try:
+            for addr in initial_addrs:
+                submit(addr)
+
+            while min(completed.values()) < params.iterations:
+                reaped = self._reap_urb(reap_ptr, poller, params.timeout_ms)
+                if reaped is None:
+                    raise TimeoutError(
+                        f"Timed out after {params.timeout_ms}ms waiting for URB completion"
+                    )
+                if self._orphaned_urbs.pop(reaped, None) is not None:
+                    # A URB cancelled by an earlier transfer came back late.
+                    continue
+                if reaped not in urbs:
+                    raise RuntimeError(
+                        f"Reaped unknown URB address {reaped:#x}"
+                    )
+                in_flight.discard(reaped)
+
+                is_in, slot, urb = urbs[reaped]
+                direction = "IN" if is_in else "OUT"
+                index = completed[is_in]
+                if urb.status != 0:
+                    raise RuntimeError(
+                        f"Bulk {direction} transfer {index} failed: status "
+                        f"{urb.status} ({os.strerror(-urb.status)})"
+                    )
+                if urb.actual_length != length:
+                    raise RuntimeError(
+                        f"Bulk {direction} transfer {index} was short: "
+                        f"requested {length} bytes, transferred {urb.actual_length} bytes"
+                    )
+                if verify and is_in and received[slot] != expected:
+                    data = bytes(received[slot])
+                    offset = next(
+                        i
+                        for i, (a, b) in enumerate(zip(data, pattern))
+                        if a != b
+                    )
+                    raise RuntimeError(
+                        f"Loopback data corruption in transfer {index} at byte "
+                        f"{offset}: received {data[offset:offset + 16].hex()} "
+                        f"!= sent {pattern[offset:offset + 16].hex()}"
+                    )
+                completed[is_in] += 1
+
+                if submitted[is_in] < params.iterations:
+                    submit(reaped)
+        except (OSError, RuntimeError, TimeoutError) as err:
+            error_msg = str(err)
+        finally:
+            try:
+                for addr in in_flight:
+                    # EINVAL only means that the URB has already completed.
+                    cdll.ioctl(
+                        self._fd,
+                        USBDEVFS_DISCARDURB,
+                        ctypes.byref(urbs[addr][2]),
+                    )
+                deadline = time.monotonic() + _URB_CANCEL_TIMEOUT_SECS
+                while in_flight:
+                    # poll() wakes up as soon as a URB completes, so wait
+                    # for whatever is left of the deadline.
+                    remaining_ms = int((deadline - time.monotonic()) * 1000)
+                    try:
+                        reaped = self._reap_urb(
+                            reap_ptr, poller, max(remaining_ms, 0)
+                        )
+                    except OSError:
+                        break
+                    if reaped is None:
+                        break
+                    in_flight.discard(reaped)
+                    self._orphaned_urbs.pop(reaped, None)
+            finally:
+                # The kernel writes the status and IN data of URBs that are
+                # still in flight into their buffers when they are reaped, so
+                # keep those buffers alive until then, or until the fd is
+                # closed, even if waiting for them was interrupted.
+                if in_flight:
+                    _LOGGER.warning(
+                        "%d cancelled URBs were not returned within %.1fs",
+                        len(in_flight),
+                        _URB_CANCEL_TIMEOUT_SECS,
+                    )
+                    transfer = (urbs, in_bufs, out_buf)
+                    for addr in in_flight:
+                        self._orphaned_urbs[addr] = transfer
+
+        return (
+            sum(completed.values()) * length,
+            min(completed.values()),
+            error_msg,
+        )
+
+    def run_pipelined_bulk(
+        self,
+        params: TestParams,
+        *,
+        config_val: int,
+        use_out: bool,
+        use_in: bool,
+        verify_loopback: bool = False,
+        test_id: int = 0,
+        test_name: str = "BULK_PIPELINED",
+        ep_out: int | None = None,
+        ep_in: int | None = None,
+    ) -> TestResult:
+        """Runs pipelined bulk transfers on OUT, IN, or both endpoints.
+
+        Args:
+            params: Transfer length, number of transfers per direction, and
+                completion timeout.
+            config_val: USB configuration to run the transfers in.
+            use_out: Whether to run bulk OUT transfers.
+            use_in: Whether to run bulk IN transfers.
+            verify_loopback: Whether to compare every IN transfer with the
+                pattern sent on OUT. Only meaningful in a loopback
+                configuration, and requires both `use_out` and `use_in`.
+            test_id: Integer test identifier.
+            test_name: Human-readable test name.
+            ep_out: Optional explicit Bulk OUT endpoint address.
+            ep_in: Optional explicit Bulk IN endpoint address.
+
+        Returns:
+            TestResult recording status, duration, throughput, and errors.
+
+        Raises:
+            RuntimeError: If the backend is not open.
+            ValueError: If neither direction is enabled, or if
+                `verify_loopback` is set without both directions.
+        """
+        if not self.is_open or self._fd is None:
+            raise RuntimeError("Backend is not open")
+        if not (use_out or use_in):
+            raise ValueError("run_pipelined_bulk requires use_out or use_in")
+        if verify_loopback and not (use_out and use_in):
+            raise ValueError("verify_loopback requires use_out and use_in")
+
+        if self.get_configuration() != config_val:
+            if not self.set_configuration(config_val):
+                return TestResult(
+                    test_id=test_id,
+                    test_name=test_name,
+                    status=TestStatus.FAIL,
+                    duration_secs=0.0,
+                    error_message=f"Failed to set Configuration {config_val}",
+                )
+
+        disc_out, disc_in, disc_if = self._find_endpoints(config_val=config_val)
+        target_out = (ep_out or disc_out) if use_out else None
+        target_in = (ep_in or disc_in) if use_in else None
+        claim_ifnum = disc_if if disc_if is not None else self.ifnum
+
+        if (use_out and target_out is None) or (use_in and target_in is None):
+            return TestResult(
+                test_id=test_id,
+                test_name=test_name,
+                status=TestStatus.ERROR,
+                duration_secs=0.0,
+                error_message=(
+                    "Could not discover required bulk endpoint(s) from "
+                    "USB configuration descriptor"
+                ),
+            )
+
+        with self.claimed_interface(claim_ifnum):
+            start_time = time.perf_counter()
+            (
+                total_bytes,
+                iterations_done,
+                error_msg,
+            ) = self._transfer_pipelined_urbs(
+                params,
+                ep_out=target_out,
+                ep_in=target_in,
+                verify=verify_loopback,
+            )
+            elapsed = time.perf_counter() - start_time
+            if error_msg:
+                # USBDEVFS_CLEAR_HALT needs the interface to be claimed.
+                if target_out is not None:
+                    self._clear_halt(target_out)
+                if target_in is not None:
+                    self._clear_halt(target_in)
+
+        throughput_mbps = (
+            (total_bytes * 8 / 1e6) / elapsed if elapsed > 0 else 0.0
+        )
+        throughput_mbs = (
+            (total_bytes / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
+        )
+
+        return TestResult(
+            test_id=test_id,
+            test_name=test_name,
+            status=TestStatus.FAIL if error_msg else TestStatus.PASS,
+            duration_secs=elapsed,
+            error_message=error_msg,
+            iterations_completed=iterations_done,
+            bytes_transferred=total_bytes,
+            throughput_mbps=throughput_mbps,
+            throughput_mbs=throughput_mbs,
+        )
 
     def run_bulk_loopback(
         self,

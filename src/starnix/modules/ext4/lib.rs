@@ -28,7 +28,7 @@ use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::mount_flags::FileSystemFlags;
 use starnix_uapi::open_flags::OpenFlags;
-use starnix_uapi::{EXT4_SUPER_MAGIC, errno, error, ino_t, off_t, statfs};
+use starnix_uapi::{EXT4_SUPER_MAGIC, XATTR_NAME_CAPS, errno, error, ino_t, off_t, statfs};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -44,6 +44,10 @@ pub struct ExtFilesystem {
 impl FileSystemOps for ExtFilesystem {
     fn name(&self) -> &'static FsStr {
         "ext4".into()
+    }
+
+    fn is_storage_backed(&self) -> bool {
+        true
     }
 
     fn statfs(&self, _fs: &FileSystem, _current_task: &CurrentTask) -> Result<statfs, Errno> {
@@ -164,6 +168,7 @@ impl FsNodeOps for ExtDirectory {
         let inode_num = raw_inode_num as ino_t;
         fs.get_or_create_node(inode_num, || {
             let ext_node = ExtNode::new(fs_ops, raw_inode_num)?;
+            let has_file_capabilities = ext_node.xattrs.contains_key(XATTR_NAME_CAPS.to_bytes());
             let entry_type = EntryType::from_u8(entry.e2d_type).map_err(|e| errno!(EIO, e))?;
             let info = fs_node_info_from_ext_node(&ext_node);
 
@@ -193,7 +198,12 @@ impl FsNodeOps for ExtDirectory {
                 }
             };
 
-            let child = FsNode::new_uncached(inode_num, ops, &fs, info, FsNodeFlags::empty());
+            let flags = if has_file_capabilities {
+                FsNodeFlags::empty()
+            } else {
+                FsNodeFlags::HAS_NO_PRIVILEGES
+            };
+            let child = FsNode::new_uncached(inode_num, ops, &fs, info, flags);
             Ok(child)
         })
     }

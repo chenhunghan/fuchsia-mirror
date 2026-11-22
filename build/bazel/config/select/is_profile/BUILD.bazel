@@ -2,23 +2,30 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@bazel_skylib//lib:selects.bzl", "selects")
+
 package(default_applicable_licenses = ["//:license"])
 
-config_setting(
+selects.config_setting_group(
     name = "true",
-    flag_values = {
-        "//build/bazel/config/variables:is_profile": "True",
-    },
+    match_any = [
+        "//build/bazel/config/variant_features/profile:true",
+        "//build/bazel/config/variant_features/profile-rust:true",
+    ],
+    visibility = ["//:__subpackages__"],
 )
 
-config_setting(
+selects.config_setting_group(
     name = "false",
-    flag_values = {
-        "//build/bazel/config/variables:is_profile": "False",
-    },
+    match_all = [
+        "//build/bazel/config/variant_features/profile:false",
+        "//build/bazel/config/variant_features/profile-rust:false",
+    ],
+    visibility = ["//:__subpackages__"],
 )
 
 alias(
     name = "is_profile",
     actual = ":true",
+    visibility = ["//:__subpackages__"],
 )

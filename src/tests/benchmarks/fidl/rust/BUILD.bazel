@@ -21,7 +21,6 @@ load("//tools/fidl/gidl:gidl.bzl", "gidl")
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
 _GIDL_LIB_DEPS = [
     ":benchmark_suite__%s" % suite["name"]
     for suite in BENCHMARK_SUITES
@@ -143,9 +142,7 @@ fx_component(
 
 fx_package(
     name = "fidl_microbenchmarks_rust",
-    package_name = "fidl_microbenchmarks_rust",
     testonly = True,
     components = [":benchmark"],
     visibility = ["//src/tests/benchmarks:__subpackages__"],
 )
-# LINT.ThenChange(//src/tests/benchmarks/fidl/rust/BUILD.gn)

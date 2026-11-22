@@ -15,7 +15,6 @@ load(
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
 _BENCHMARK_SUITE_VISIBILITY = [
     "//src/tests/benchmarks/fidl:__subpackages__",
 ]
@@ -54,4 +53,3 @@ fidl_library(
     )
     for suite in UNIQUE_BENCHMARK_FIDL_SUITES
 ]
-# LINT.ThenChange(//src/tests/benchmarks/fidl/benchmark_suite/BUILD.gn)

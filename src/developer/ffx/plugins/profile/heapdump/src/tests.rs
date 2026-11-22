@@ -210,7 +210,7 @@ async fn test_ffx_profile_heapdump() {
                     let filename = profile.string_table.get(function.filename as usize).unwrap();
 
                     if name.contains("fibonacci(")
-                        && filename.ends_with("src/performance/memory/heapdump/example/main.c")
+                        && filename.ends_with("src/memory/heapdump/example/main.c")
                     {
                         counter += 1;
                     }

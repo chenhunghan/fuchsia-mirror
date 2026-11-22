@@ -51,7 +51,7 @@ struct ::fidl::internal::WireCodingTraits<{{ .WireTransactionalRequest }}, ::fid
   {{ if .RequestArgs }}
     {{ .WireTransactionalRequest }}::{{ .WireTransactionalRequest.Self }}({{ RenderParams .RequestArgs }})
     : body({{ .RequestPayload }} { {{ RenderForwardParams .RequestArgs }} } ) {
-      ::fidl::InitTxnHeader(&header, 0, {{ .OrdinalName }}, {{ .DynamicFlagsName }});
+      ::fidl::InitTxnHeader(&this->header, 0, {{ .OrdinalName }}, {{ .DynamicFlagsName }});
     }
   {{- end }}
 

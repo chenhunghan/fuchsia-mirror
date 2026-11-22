@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
       "data": "test.arrays",
       "start_offset": 8,
       "end_offset": 19
@@ -20,7 +20,7 @@
       "identifier": "test.arrays/UnionLargeArray",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
         "data": "UnionLargeArray",
         "start_offset": 346,
         "end_offset": 361
@@ -31,7 +31,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
             "data": "a",
             "start_offset": 386,
             "end_offset": 387
@@ -47,7 +47,7 @@
       "identifier": "test.arrays/UnionSmallArray",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
         "data": "UnionSmallArray",
         "start_offset": 277,
         "end_offset": 292
@@ -58,7 +58,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
             "data": "a",
             "start_offset": 317,
             "end_offset": 318
@@ -76,7 +76,7 @@
       "identifier": "test.arrays/TableLargeArray",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
         "data": "TableLargeArray",
         "start_offset": 213,
         "end_offset": 228
@@ -87,7 +87,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
             "data": "a",
             "start_offset": 246,
             "end_offset": 247
@@ -103,7 +103,7 @@
       "identifier": "test.arrays/TableSmallArray",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
         "data": "TableSmallArray",
         "start_offset": 151,
         "end_offset": 166
@@ -114,7 +114,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
             "data": "a",
             "start_offset": 184,
             "end_offset": 185
@@ -132,7 +132,7 @@
       "identifier": "test.arrays/StructLargeArray",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
         "data": "StructLargeArray",
         "start_offset": 88,
         "end_offset": 104
@@ -142,7 +142,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
             "data": "a",
             "start_offset": 120,
             "end_offset": 121
@@ -158,7 +158,7 @@
       "identifier": "test.arrays/StructSmallArray",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
         "data": "StructSmallArray",
         "start_offset": 27,
         "end_offset": 43
@@ -168,7 +168,7 @@
           "name": "a",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/arrays.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/arrays.test.fidl",
             "data": "a",
             "start_offset": 59,
             "end_offset": 60

@@ -177,6 +177,13 @@ func (c *NearbyStringCheck) IsInfraFailure() bool {
 	return c.InfraFailure
 }
 
+func (c *NearbyStringCheck) Category() runtests.FailureCategory {
+	if c.InfraFailure {
+		return runtests.CategoryInfra
+	}
+	return runtests.CategorySystemOrTest
+}
+
 func (c *NearbyStringCheck) IsFlake() bool {
 	return c.isFlake
 }

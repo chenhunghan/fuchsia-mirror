@@ -49,6 +49,5 @@ rustc_test(
 
 fx_unittest_package(
     name = "vigil-tests",
-    package_name = "vigil-tests",
     unit_tests = [":vigil_test"],
 )

@@ -79,6 +79,19 @@ pub fn normalize_path(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(normalized)
 }
 
+/// Returns true if `path` (ignoring anchor and query parameters) refers to a path under
+/// `reference_folder`.
+///
+/// Normalizes the path component-wise so that escaping parent references (`..`) and non-matching
+/// prefixes (like `/reference_guide.md`) are not treated as reference paths.
+pub fn is_reference_path(path: impl AsRef<Path>, reference_folder: &Path) -> bool {
+    let p = path.as_ref();
+    let s = p.to_string_lossy();
+    let (mut path_str, _) = s.split_once('#').unwrap_or((&s, ""));
+    (path_str, _) = path_str.split_once('?').unwrap_or((path_str, ""));
+    normalize_path(Path::new(path_str)).is_ok_and(|n| n.starts_with(reference_folder))
+}
+
 /// Normalizes the path and verifies it remains within the specified `root_dir`.
 /// If the normalized path is outside `root_dir`, returns an error.
 pub fn normalize_and_validate_path(path: &Path, root_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -215,5 +228,27 @@ mod tests {
 
         // Escaping root path
         assert!(normalize_and_validate_path(Path::new("../external/file.md"), &root_dir).is_err());
+    }
+
+    #[test]
+    fn test_is_reference_path() {
+        let default_ref = Path::new("/reference");
+        assert!(is_reference_path("/reference", default_ref));
+        assert!(is_reference_path("/reference/", default_ref));
+        assert!(is_reference_path("/reference/to/generated.md", default_ref));
+        assert!(is_reference_path("/reference#section", default_ref));
+        assert!(is_reference_path("/reference/doc.md?foo=1#bar", default_ref));
+        assert!(is_reference_path("/docs/../reference/doc.md#sec", default_ref));
+
+        assert!(!is_reference_path("/reference_guide.md", default_ref));
+        assert!(!is_reference_path("/reference/../src/main.cc", default_ref));
+        assert!(!is_reference_path("/reference/../../escape", default_ref));
+        assert!(!is_reference_path("reference/doc.md", default_ref));
+        assert!(!is_reference_path("https://fuchsia.dev/reference/doc.md", default_ref));
+        assert!(!is_reference_path("/docs/doc.md", default_ref));
+
+        let custom_ref = Path::new("/api_docs");
+        assert!(is_reference_path("/api_docs/fidl/fuchsia.io.md", custom_ref));
+        assert!(!is_reference_path("/reference/to/generated.md", custom_ref));
     }
 }

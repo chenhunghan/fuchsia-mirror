@@ -4,12 +4,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::task::copy_user_name;
 use crate::object::{HandleValue, JobDispatcher, ProcessDispatcher, ThreadDispatcher};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use crate::userabi::VDso;
 use crate::vm::vm_mapping::VmMapping;
 use crate::vm::vm_object::VmObjectReadWriteOptions;
 use boot_options::BootOptions;
+use core::mem::MaybeUninit;
 use debug::ltracef;
 use syscalls_macro::syscall;
 use zx_status::Status;
@@ -44,8 +46,8 @@ pub fn sys_process_create(
     ProcessDispatcher::with_current(|up| up.enforce_basic_policy(ZX_POL_NEW_PROCESS))?;
 
     // copy out the name
-    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); ZX_MAX_NAME_LEN];
-    let sp = name_ptr.copy_user_string(name_len, &mut buf)?;
+    let mut buf = [MaybeUninit::<u8>::uninit(); ZX_MAX_NAME_LEN];
+    let sp = copy_user_name(name_ptr, name_len, &mut buf)?;
     ltracef!("name {}\n", zr::from_utf8_lossy(sp));
 
     let job = ProcessDispatcher::with_current(|up| {
@@ -102,8 +104,8 @@ pub fn sys_process_create_shared(
     ProcessDispatcher::with_current(|up| up.enforce_basic_policy(ZX_POL_NEW_PROCESS))?;
 
     // copy out the name
-    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); ZX_MAX_NAME_LEN];
-    let sp = name_ptr.copy_user_string(name_len, &mut buf)?;
+    let mut buf = [MaybeUninit::<u8>::uninit(); ZX_MAX_NAME_LEN];
+    let sp = copy_user_name(name_ptr, name_len, &mut buf)?;
     ltracef!("name {}\n", zr::from_utf8_lossy(sp));
 
     // create a new process dispatcher
@@ -202,7 +204,10 @@ pub fn sys_process_start(
     };
 
     let arg_handle = if arg1_handle.raw_value() != ZX_HANDLE_INVALID {
-        ProcessDispatcher::with_current(|up| up.handle_table().remove_handle(up, arg1_handle))
+        Some(
+            ProcessDispatcher::with_current(|up| up.handle_table().remove_handle(up, arg1_handle))
+                .ok_or(Status::BAD_HANDLE)?,
+        )
     } else {
         None
     };
@@ -214,7 +219,10 @@ pub fn sys_process_start(
 #[syscall]
 pub fn sys_process_exit(retcode: i64) {
     ltracef!("retcode {}\n", retcode);
-    ProcessDispatcher::exit_current(retcode)
+    // SAFETY: Syscalls execute on a running user thread after `ConstructFirstThread` with
+    // interrupts enabled, blocking permitted, and no spinlocks, thread locks, or
+    // `ChainLockTransaction` held.
+    unsafe { ProcessDispatcher::exit_current(retcode) }
 }
 
 #[syscall]
@@ -239,7 +247,7 @@ pub fn sys_process_read_memory(
         )
     })?;
 
-    let aspace = process.aspace_at(vaddr).ok_or(Status::BAD_STATE)?;
+    let aspace = process.aspace_at(vaddr);
 
     let vm_mapping = aspace.find_mapping(vaddr).ok_or(Status::NOT_FOUND)?;
 
@@ -291,7 +299,7 @@ pub fn sys_process_write_memory(
         )
     })?;
 
-    let aspace = process.aspace_at(vaddr).ok_or(Status::BAD_STATE)?;
+    let aspace = process.aspace_at(vaddr);
 
     let vm_mapping = aspace.find_mapping(vaddr).ok_or(Status::NOT_FOUND)?;
 

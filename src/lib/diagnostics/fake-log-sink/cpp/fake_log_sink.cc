@@ -5,9 +5,8 @@
 #include "src/lib/diagnostics/fake-log-sink/cpp/fake_log_sink.h"
 
 #include <lib/async-loop/cpp/loop.h>
+#include <lib/syslog/cpp/log_settings.h>
 #include <zircon/assert.h>
-
-#include <sdk/lib/syslog/cpp/log_settings.h>
 
 #include "src/lib/diagnostics/fake-log-sink/rust/fake_log_sink.h"
 #include "src/lib/diagnostics/log/message/rust/cpp-log-decoder/log_decoder.h"

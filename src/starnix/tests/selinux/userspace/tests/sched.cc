@@ -2,16 +2,22 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <sched.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <string>
+#include <tuple>
+
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
 #include "src/starnix/tests/selinux/userspace/util.h"
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "sched_policy"; }
+extern std::string GetTestPolicyName() { return "sched_policy"; }
 
 namespace {
 
@@ -152,5 +158,50 @@ TEST(SchedTest, SchedSetaffinityDeniedWithoutSetsched) {
                 SyscallFailsWithErrno(EACCES));
   }));
 }
+
+struct SchedSysNiceOp {
+  const char* name;
+  long (*fn)(pid_t);
+};
+
+long SetPriorityNice1(pid_t pid) { return setpriority(PRIO_PROCESS, pid, 1); }
+
+long SetAffinityCpu0(pid_t pid) {
+  cpu_set_t mask;
+  CPU_ZERO(&mask);
+  CPU_SET(0, &mask);
+  return syscall(SYS_sched_setaffinity, pid, sizeof(mask), &mask);
+}
+
+class SchedSysNiceTest : public ::testing::TestWithParam<std::tuple<SchedSysNiceOp, bool>> {};
+
+/// When `capability { sys_nice }` is granted, scheduling modifications on a task with an extra
+/// permitted capability succeed; when denied, they fail with `EPERM`.
+TEST_P(SchedSysNiceTest, MissingTargetCapRequiresSysNice) {
+  const auto& [op, allowed] = GetParam();
+  const char* domain = allowed ? "test_u:test_r:test_sched_child_sys_nice_t:s0"
+                               : "test_u:test_r:test_sched_child_no_sys_nice_t:s0";
+
+  auto enforce = ScopedEnforcement::SetEnforcing();
+  ScopedTargetProcess target("test_u:test_r:test_sched_target_t:s0");
+
+  EXPECT_TRUE(RunSubprocessAs(domain, [&] {
+    // Drop a permitted capability that `target` retains so `CAP_SYS_NICE` is required even when
+    // both tasks share the same UID.
+    test_helper::UnsetCapabilityEffective(CAP_NET_RAW);
+    test_helper::UnsetCapabilityPermitted(CAP_NET_RAW);
+    EXPECT_THAT(op.fn(target.pid()), SyscallSucceedsOrFailsWithErrno(allowed, EPERM));
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SchedTest, SchedSysNiceTest,
+    ::testing::Combine(::testing::Values(SchedSysNiceOp{"Setpriority", SetPriorityNice1},
+                                         SchedSysNiceOp{"SchedSetaffinity", SetAffinityCpu0}),
+                       ::testing::Bool()),
+    [](const ::testing::TestParamInfo<std::tuple<SchedSysNiceOp, bool>>& info) {
+      return std::string(std::get<0>(info.param).name) +
+             (std::get<1>(info.param) ? "Allowed" : "Denied");
+    });
 
 }  // namespace

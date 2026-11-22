@@ -10,7 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -48,7 +48,7 @@ def _materialize_directory(src_dir: Path, dst_dir: Path) -> None:
     )
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--path",
@@ -76,8 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.fuchsia_dir is not None:
         fuchsia_dir = args.fuchsia_dir.resolve()
-    elif "FUCHSIA_DIR" in os.environ:
-        fuchsia_dir = Path(os.environ["FUCHSIA_DIR"]).resolve()
+    elif "FUCHSIA_DIR" in env:
+        fuchsia_dir = Path(env["FUCHSIA_DIR"]).resolve()
     else:
         fuchsia_dir = _DEFAULT_FUCHSIA_DIR
 
@@ -151,4 +151,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:], os.environ))

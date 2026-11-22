@@ -56,10 +56,3 @@ pub unsafe extern "C" fn rust_io_buffer_dispatcher_set_name(
     let name_bytes = unsafe { zr::slice_from_raw_parts(name.cast(), len) };
     Status::result_into_raw(disp.set_name(name_bytes))
 }
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_io_buffer_dispatcher_region_count(
-    disp: &IoBufferDispatcher,
-) -> usize {
-    disp.region_count()
-}

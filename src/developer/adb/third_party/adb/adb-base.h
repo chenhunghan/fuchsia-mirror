@@ -5,8 +5,9 @@
 #ifndef SRC_DEVELOPER_ADB_THIRD_PARTY_ADB_ADB_BASE_H_
 #define SRC_DEVELOPER_ADB_THIRD_PARTY_ADB_ADB_BASE_H_
 
-#include <lib/zx/socket.h>
+#include <lib/async/dispatcher.h>
 #include <lib/zx/result.h>
+#include <lib/zx/socket.h>
 
 #include <string_view>
 
@@ -17,6 +18,7 @@ class AdbBase {
   AdbBase() = default;
   virtual ~AdbBase() = default;
 
+  virtual async_dispatcher_t* dispatcher() const = 0;
   virtual bool SendUsbPacket(uint8_t* buf, size_t len) = 0;
   virtual zx::result<zx::socket> GetServiceSocket(std::string_view service,
                                                   std::string_view args) = 0;

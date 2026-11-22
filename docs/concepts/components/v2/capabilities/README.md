@@ -144,7 +144,7 @@ For more information on how components connect to capabilities at runtime, see
 [capability-resolver]: /docs/concepts/components/v2/capabilities/resolver.md
 [capability-runner]: /docs/concepts/components/v2/capabilities/runner.md
 [capability-availability]: /docs/concepts/components/v2/capabilities/availability.md
-[doc-children]: /docs/concepts/components/v2/realms.md##child-component-instances
+[doc-children]: /docs/concepts/components/v2/realms.md#child-component-instances
 [doc-collections]: /docs/concepts/components/v2/realms.md#collections
 [doc-component-manifest]: /docs/concepts/components/v2/component_manifests.md
 [doc-environments]: /docs/concepts/components/v2/environments.md

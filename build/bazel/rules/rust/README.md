@@ -89,4 +89,4 @@ When adding a new Fuchsia wrapper macro or rule equivalent for an upstream
 6. **Verify tests and checks**:
    * Run `fx test --host @//scripts/shac/tests:bazel_test`.
    * Run `fx host-tool shac check --only bazel_fuchsia_wrappers --all`.
-   * Run `fx doc-checker --local-links-only`.
+   * Run `fx doc-checker`.

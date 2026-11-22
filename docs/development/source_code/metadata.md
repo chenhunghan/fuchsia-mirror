@@ -102,7 +102,7 @@ To support large repositories that contain multiple distinct projects, multiple
 `METADATA.textproto` files may be used throughout the file tree. Metadata files
 apply to their own directory and all the directories below.
 
-## Presubmits
+## Presubmits {:#presubmits}
 
 The `presubmit` field allows the specification of reviewers who should be
 automatically added to each changelist as a reviewer (`auto_reviewers`) and

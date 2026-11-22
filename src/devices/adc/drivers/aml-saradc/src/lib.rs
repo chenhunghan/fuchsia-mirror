@@ -444,7 +444,7 @@ impl Driver for AmlSaradc {
         Ok(AmlSaradc { _node: node, tx, _scope: scope })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         let _ = self.tx.unbounded_send(AdcRequest::Stop);
     }
 }

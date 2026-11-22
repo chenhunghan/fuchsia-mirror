@@ -88,7 +88,7 @@ func TestDoProcessMock(t *testing.T) {
 	// The following utilities already had their args checked for invalid paths
 	// above, so at this point we just need to touch an expected output file.
 	// The contents are randomized to allow for simple change detection.
-	case "cp":
+	case "cp", "simg2img", "truncate":
 		touchRandomFile(t, args[len(args)-1])
 		exitCode = 0
 	case "fvm":

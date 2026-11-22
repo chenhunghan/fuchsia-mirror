@@ -744,20 +744,17 @@ def run_profiler(
         time_fn=time_fn,
     )
 
-    running = True
-
-    def handler(signum: int, frame: Any) -> None:
-        nonlocal running
-        running = False
-
-    signal.signal(signal.SIGINT, handler)
-    signal.signal(signal.SIGTERM, handler)
-    signal.signal(signal.SIGHUP, handler)
+    # Block the stop signals and wait for them with sigtimedwait() instead of
+    # time.sleep(), so that a signal ends the wait immediately instead of
+    # after the rest of the interval. Signals that arrive while sampling stay
+    # pending until the next wait.
+    stop_signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+    signal.pthread_sigmask(signal.SIG_BLOCK, stop_signals)
 
     start_time_epoch = time_fn()
 
     with streaming_trace_writer(output_path) as write_event:
-        while running:
+        while True:
             start_loop = time_fn()
 
             now = time_fn()
@@ -768,7 +765,8 @@ def run_profiler(
 
             elapsed_loop = time_fn() - start_loop
             sleep_time = max(0.01, interval_sec - elapsed_loop)
-            time.sleep(sleep_time)
+            if signal.sigtimedwait(stop_signals, sleep_time):
+                break
 
 
 def main() -> None:

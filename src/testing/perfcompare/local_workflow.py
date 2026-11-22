@@ -4,16 +4,42 @@
 
 import argparse
 import collections
+import concurrent.futures
 import json
 import os
 import pathlib
+import re
 import statistics
 import subprocess
-from typing import TextIO, Tuple
+import tempfile
+import urllib.parse
+from collections.abc import Collection, Set
+from typing import Any, Callable, TextIO, TypeVar
 
 _DEFAULT_STATE_FILE = (
     "/google/data/ro/teams/tq-performance/sample_builds_state.json"
 )
+
+# Matches the links to each test task's CAS outputs in build step summaries,
+# capturing the CAS instance and the root digest of the task's output tree.
+# Step summaries also link to other CAS uploads (such as the aggregated perf
+# dataset), which this deliberately does not match.
+_TASK_OUTPUTS_LINK_REGEX = re.compile(
+    r"\[task outputs\]\(https://cas-viewer\.(?:appspot\.com|api\.luci\.app)/"
+    r"(projects/[^/]+/instances/[^/]+)/blobs/([0-9a-fA-F]+/[0-9]+)/tree\)"
+)
+
+_PERF_RESULTS_SUFFIX = ".fuchsiaperf.json"
+
+# Test tasks write their results under this directory. The aggregated perf
+# dataset stores each task's results without this prefix.
+_TASK_RESULTS_PREFIX = "out/"
+
+# Maximum number of concurrent `cas` invocations.
+_MAX_CAS_JOBS = 8
+
+T = TypeVar("T")
+R = TypeVar("R")
 
 
 def _normalize_build_id(build_id: str) -> str:
@@ -51,7 +77,8 @@ def extract_metrics(args, out_fh: TextIO) -> None:
 # violation by changing the type specification of "subparsers" to whatever
 # publicly-available type is determined for it to have.
 def register_subparsers(
-    subparsers: argparse._SubParsersAction, out_fh: TextIO
+    subparsers: "argparse._SubParsersAction[argparse.ArgumentParser]",
+    out_fh: TextIO,
 ) -> None:
     """Registers subparsers for workflow commands."""
     subparser = subparsers.add_parser(
@@ -116,7 +143,10 @@ def register_subparsers(
 
 
 def _download_metrics(
-    bb_tool: str, build_id: str, out_dir: str, out_fh: TextIO
+    bb_tool: pathlib.Path,
+    build_id: str,
+    out_dir: str,
+    out_fh: TextIO,
 ) -> None:
     build_id = _normalize_build_id(build_id)
     os.makedirs(out_dir, exist_ok=True)
@@ -124,14 +154,41 @@ def _download_metrics(
     cas_tool = _find_cas_tool()
 
     try:
-        digest, instance = _get_cas_info_from_build(bb_tool, build_id, out_fh)
-        _download_from_cas(cas_tool, digest, instance, out_dir, out_fh)
-    except (subprocess.CalledProcessError, RuntimeError) as e:
+        build_info = _get_build_info(bb_tool, build_id, out_fh)
+        # Every build that ran tests has output properties, so a KeyError
+        # here means we cannot proceed. It is reported by the handler below.
+        properties = build_info["output"]["properties"]
+        perf_dataset = _get_perf_dataset(properties)
+        if perf_dataset is not None:
+            instance, digest = perf_dataset
+            _download_from_cas(cas_tool, instance, digest, out_dir, out_fh)
+        else:
+            # Builds do not publish the aggregated dataset if any test
+            # failed, but the results from each test task are still in CAS.
+            out_fh.write(
+                f"Build {build_id} has no aggregated perf dataset. "
+                "Collecting results from individual test tasks...\n"
+            )
+            failed_tests = properties.get("failed_test_names", [])
+            if failed_tests:
+                out_fh.write("Excluding results from failed tests:\n")
+                for test in failed_tests:
+                    out_fh.write(f"  {test}\n")
+            _download_task_results(
+                cas_tool,
+                build_id,
+                # Buildbucket omits "steps" when it is empty.
+                build_info.get("steps", []),
+                set(failed_tests),
+                out_dir,
+                out_fh,
+            )
+    except (subprocess.CalledProcessError, RuntimeError, KeyError) as e:
         raise RuntimeError(f"Download failed for build {build_id}") from e
 
 
 def _download_baseline(
-    bb_tool: str,
+    bb_tool: pathlib.Path,
     builder_name: str,
     count: int,
     out_dir: str,
@@ -241,39 +298,44 @@ def _process_files(
             out_file.write(f"{suite},{metric},{values_str}\n")
 
 
-def _get_cas_info_from_build(
+def _get_build_info(
     bb_tool: pathlib.Path, build_id: str, out_fh: TextIO
-) -> Tuple[str, str]:
-    """Uses the `bb` tool to get the CAS digest and instance for a build."""
-    cmd = [bb_tool, "get", "-p", "-json", build_id]
+) -> dict[str, Any]:
+    """Uses the `bb` tool to get a build's output properties and steps."""
+    cmd = [
+        bb_tool,
+        "get",
+        "-fields",
+        "output.properties,steps",
+        "-json",
+        build_id,
+    ]
     out_fh.write(f"Fetching build info for {build_id} using bb...\n")
     result = subprocess.run(cmd, capture_output=True, text=True, check=True)
 
     try:
-        build_info = json.loads(result.stdout)
+        return json.loads(result.stdout)
     except json.JSONDecodeError as e:
         raise RuntimeError(f"Failed to parse bb output as JSON: {e}") from e
 
-    properties = build_info["output"]["properties"]
-    try:
-        instance = properties["cas_instance"]
-        digest = properties.get("perf_dataset_digest") or properties.get(
-            "perfcompare_dataset_digest"
-        )
-        if not digest:
-            raise KeyError("perf_dataset_digest or perfcompare_dataset_digest")
-    except KeyError as e:
-        raise KeyError(
-            f"Missing required entry {e} in build output properties: {properties}"
-        ) from e
 
-    return digest, instance
+def _get_perf_dataset(properties: dict[str, Any]) -> tuple[str, str] | None:
+    """Returns the (CAS instance, digest) of a build's aggregated perf dataset.
+
+    Returns None if the build did not publish an aggregated dataset.
+    """
+    digest = properties.get("perf_dataset_digest") or properties.get(
+        "perfcompare_dataset_digest"
+    )
+    if not digest:
+        return None
+    return properties["cas_instance"], digest
 
 
 def _download_from_cas(
     cas_tool: pathlib.Path,
-    digest: str,
     instance: str,
+    digest: str,
     out_dir: str,
     out_fh: TextIO,
 ) -> None:
@@ -290,6 +352,168 @@ def _download_from_cas(
     ]
     out_fh.write(f"Downloading from cas to {out_dir}...\n")
     subprocess.run(cmd, check=True)
+
+
+def _extract_task_outputs_from_steps(
+    steps: Collection[dict[str, Any]],
+) -> list[tuple[str, str]]:
+    """Extracts CAS (instance, digest) pairs of test task outputs.
+
+    Returns them sorted so that boot directories are numbered
+    deterministically. A task linked from more than one step is returned
+    once, so that its results are not counted twice.
+    """
+    return sorted(
+        {
+            (match.group(1), match.group(2))
+            for step in steps
+            for match in _TASK_OUTPUTS_LINK_REGEX.finditer(
+                step.get("summaryMarkdown", "")
+            )
+        }
+    )
+
+
+def _download_task_results(
+    cas_tool: pathlib.Path,
+    build_id: str,
+    steps: Collection[dict[str, Any]],
+    failed_tests: Set[str],
+    out_dir: str,
+    out_fh: TextIO,
+) -> None:
+    """Downloads perf results from a build's test tasks into out_dir/by_boot.
+
+    This reproduces the layout of the aggregated perf dataset: each task that
+    produced perf results gets its own boot directory, holding only its
+    *.fuchsiaperf.json files from passing tests. Other task outputs (traces,
+    logs, snapshots) can be gigabytes per task and are not downloaded.
+    """
+    task_outputs = _extract_task_outputs_from_steps(steps)
+    if not task_outputs:
+        raise RuntimeError(
+            f"No task outputs found in build steps for {build_id}"
+        )
+
+    by_boot_dir = os.path.join(out_dir, "by_boot")
+    # Check this before downloading anything, rather than letting the
+    # os.rename() below fail after all the downloads.
+    if os.path.lexists(by_boot_dir):
+        raise RuntimeError(
+            f"{by_boot_dir} already exists. "
+            "Use an empty output directory to avoid mixing results."
+        )
+
+    out_fh.write(
+        f"Listing perf results in {len(task_outputs)} task outputs...\n"
+    )
+    results_per_task = _parallel_map(
+        lambda task: _list_perf_results(
+            cas_tool, task[0], task[1], failed_tests
+        ),
+        task_outputs,
+    )
+    boots = [
+        (instance, results)
+        for (instance, _), results in zip(task_outputs, results_per_task)
+        if results
+    ]
+    if not boots:
+        raise RuntimeError(
+            f"No {_PERF_RESULTS_SUFFIX} files found in task outputs for "
+            f"build {build_id}"
+        )
+
+    # Download into a staging directory so that a failed download does not
+    # leave an incomplete by_boot directory that looks like a valid dataset.
+    with tempfile.TemporaryDirectory(
+        prefix=".by_boot.", dir=out_dir
+    ) as staging_dir:
+        staged_by_boot_dir = os.path.join(staging_dir, "by_boot")
+        os.mkdir(staged_by_boot_dir)
+        downloads = []
+        for boot_idx, (instance, results) in enumerate(boots):
+            boot_dir = os.path.join(staged_by_boot_dir, f"boot{boot_idx:06d}")
+            for rel_path, digest in results:
+                downloads.append(
+                    (instance, digest, os.path.join(boot_dir, rel_path))
+                )
+        out_fh.write(
+            f"Downloading {len(downloads)} perf results files from "
+            f"{len(boots)} tasks to {by_boot_dir}...\n"
+        )
+        _parallel_map(
+            lambda download: _download_file_from_cas(
+                cas_tool, download[0], download[1], download[2]
+            ),
+            downloads,
+        )
+        os.rename(staged_by_boot_dir, by_boot_dir)
+
+
+def _list_perf_results(
+    cas_tool: pathlib.Path,
+    instance: str,
+    digest: str,
+    failed_tests: Set[str],
+) -> list[tuple[str, str]]:
+    """Lists the perf results files in a task's CAS output tree.
+
+    Returns sorted (path, file digest) pairs, with paths relative to the
+    task's results directory, excluding results from failed_tests.
+    """
+    cmd = [cas_tool, "tree", "-cas-instance", instance, "-digest", digest]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    tree = json.loads(result.stdout)
+    # testrunner names each test's output directory after the test with
+    # colons removed and then URL-escaped (see Record() in
+    # //tools/testing/testrunner/outputs.go). Unescaping cannot restore the
+    # colons, so remove them from the failed test names before comparing.
+    failed_tests_munged = {name.replace(":", "") for name in failed_tests}
+    results = []
+    for path, entry in tree["files"].items():
+        if not path.endswith(_PERF_RESULTS_SUFFIX):
+            continue
+        rel_path = path.removeprefix(_TASK_RESULTS_PREFIX)
+        test_name = urllib.parse.unquote(rel_path.split("/", 1)[0])
+        if test_name not in failed_tests_munged:
+            results.append((rel_path, entry["digest"]))
+    return sorted(results)
+
+
+def _download_file_from_cas(
+    cas_tool: pathlib.Path, instance: str, digest: str, dest: str
+) -> None:
+    """Uses the hermetic `cas` binary to download a single file."""
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    cmd = [
+        cas_tool,
+        "download",
+        "-cas-instance",
+        instance,
+        "-digest",
+        digest,
+        "-file",
+        dest,
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def _parallel_map(fn: Callable[[T], R], items: Collection[T]) -> list[R]:
+    """Returns [fn(item) for item in items], running calls concurrently.
+
+    If any call raises, calls that have not started are cancelled, and the
+    exception is re-raised once the running calls finish.
+    """
+    with concurrent.futures.ThreadPoolExecutor(_MAX_CAS_JOBS) as executor:
+        futures = [executor.submit(fn, item) for item in items]
+        try:
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+            return [future.result() for future in futures]
+        finally:
+            for future in futures:
+                future.cancel()
 
 
 def _get_build_status(bb_tool: pathlib.Path, build_id: str) -> str:

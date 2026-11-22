@@ -9,7 +9,7 @@ Note: Formerly known as [FTP](../deprecated-ftp-process.md)-033.
 
 This FTP amends and clarifies the behavior of FIDL decoders when
 encountering tables, extensible unions, enums, and bits &mdash;
-_extensible messages_[[^1]](#Footnote1) &mdash; contain fields where the
+_extensible messages_[[^1]](#footnote1) &mdash; contain fields where the
 type is unknown.
 
 Specifically, we propose:
@@ -104,7 +104,7 @@ ordinal/tag/value/specific bit, for brevity.
         }
         ```
 
-### Strict Handling of Messages
+### Strict handling of messages {:#strict-handling-of-messages}
 
 *   We introduce a `strict` keyword that can prefix extensible message
     declarations, e.g., `strict table T { ... }` or `strict enum T { ... }`.
@@ -137,7 +137,7 @@ ordinal/tag/value/specific bit, for brevity.
     };
     ```
 
-## Implementation strategy
+## Implementation strategy {:#implementation-strategy}
 
 1. Update the FIDL compatibility test to validate that existing language
     bindings conform to this specification.
@@ -356,7 +356,7 @@ later reversed the decision.
 
 -------------------------------
 
-##### Footnote1
+##### Footnote1 {:#footnote1}
 Enums & bits are included in extensible messages, since new members can be
 added or removed after the message is defined.
 

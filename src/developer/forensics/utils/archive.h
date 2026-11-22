@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_UTILS_ARCHIVE_H_
 #define SRC_DEVELOPER_FORENSICS_UTILS_ARCHIVE_H_
 
-#include <fuchsia/mem/cpp/fidl.h>
+#include <fidl/fuchsia.mem/cpp/fidl.h>
 
 #include <map>
 #include <string>
@@ -25,7 +25,7 @@ bool Archive(const std::map<std::string, std::string>& files, fsl::SizedVmo* arc
              std::map<std::string, ArchiveFileStats>* file_to_size_stats = nullptr);
 
 // Unpack a ZIP archive into a map of filenames to string content.
-bool Unpack(const fuchsia::mem::Buffer& archive, std::map<std::string, std::string>* files);
+bool Unpack(const fuchsia_mem::Buffer& archive, std::map<std::string, std::string>* files);
 
 }  // namespace forensics
 

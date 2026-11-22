@@ -5,6 +5,8 @@
 #ifndef SRC_DEVELOPER_DEBUG_DEBUG_AGENT_DEBUGGED_THREAD_H_
 #define SRC_DEVELOPER_DEBUG_DEBUG_AGENT_DEBUGGED_THREAD_H_
 
+#include <cstdint>
+
 #include "src/developer/debug/debug_agent/arch.h"
 #include "src/developer/debug/debug_agent/automation_handler.h"
 #include "src/developer/debug/debug_agent/exception_handle.h"
@@ -115,6 +117,10 @@ class DebuggedThread {
   // Sends a notification to the client about the state of this thread.
   void SendThreadNotification() const;
 
+  // Sends a thread-starting notification reporting this thread as running with no stack frames
+  // without querying OS state or unwinding.
+  void SendRunningThreadNotification() const;
+
   // Notification that a ProcessBreakpoint is about to be deleted.
   void WillDeleteProcessBreakpoint(ProcessBreakpoint* bp);
 
@@ -124,7 +130,7 @@ class DebuggedThread {
   void set_stepping_over_breakpoint(bool so) { stepping_over_breakpoint_ = so; }
 
  private:
-  enum class OnStop {
+  enum class OnStop : uint8_t {
     kNotify,  // Send client notification like normal.
     kResume,  // The thread should be resumed from this exception.
   };
@@ -157,7 +163,7 @@ class DebuggedThread {
   void UpdateForHitProcessBreakpoint(debug_ipc::BreakpointType exception_type,
                                      ProcessBreakpoint* process_breakpoint,
                                      std::vector<debug_ipc::BreakpointStats>& hit_breakpoints,
-                                     std::vector<debug_ipc::ThreadRecord>& stopped_threads);
+                                     std::vector<debug_ipc::ThreadRecord>& other_affected_threads);
 
   // Returns true if there is a software breakpoint instruction at the given address.
   bool IsBreakpointInstructionAtAddress(uint64_t address) const;

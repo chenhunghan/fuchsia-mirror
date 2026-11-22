@@ -9,7 +9,6 @@ if (is_host) {
       "component:host_tests",
       "debug:tests",
       "emulator:host_tests",
-      "product:tests",
       "product_bundle:tests",
       "profile:host_tests",
       "target:host_tests",

@@ -16,12 +16,10 @@ from honeydew.affordances.power.system_power_state_controller import (
 from honeydew.affordances.power.system_power_state_controller import (
     system_power_state_controller_common,
 )
+from honeydew.affordances.usb import usb as usb_affordance
 from honeydew.transports.ffx import errors as ffx_errors
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.ffx import types as ffx_types
-from honeydew.transports.fuchsia_controller import (
-    fuchsia_controller as fc_transport,
-)
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -70,7 +68,7 @@ class SystemPowerStateControllerUsingUsbCli(
     Args:
         device_name: Device name returned by `ffx target list`.
         ffx: FFX transport implementation.
-        fuchsia_controller: FuchsiaController transport implementation.
+        usb: USB affordance implementation.
         device_logger: FuchsiaDeviceLogger implementation.
         inspect: InspectCapableDevice implementation.
         reboot_affordance: RebootCapableDevice implementation.
@@ -87,7 +85,7 @@ class SystemPowerStateControllerUsingUsbCli(
         self,
         device_name: str,
         ffx: ffx_transport.FFX,
-        fuchsia_controller: fc_transport.FuchsiaController,
+        usb: usb_affordance.USB,
         device_logger: affordances_capable.FuchsiaDeviceLogger,
         inspect: affordances_capable.InspectCapableDevice,
         reboot_affordance: affordances_capable.RebootCapableDevice,
@@ -98,9 +96,7 @@ class SystemPowerStateControllerUsingUsbCli(
             device_logger=device_logger,
             inspect=inspect,
         )
-        self._fuchsia_controller: fc_transport.FuchsiaController = (
-            fuchsia_controller
-        )
+        self._usb: usb_affordance.USB = usb
         self._reboot_affordance: affordances_capable.RebootCapableDevice = (
             reboot_affordance
         )
@@ -213,8 +209,7 @@ class SystemPowerStateControllerUsingUsbCli(
             resume_mode,
         )
 
-        self._fuchsia_controller.before_usb_disconnect()
-        self._ffx.notify_intentional_disconnect()
+        self._usb.before_disconnect()
 
         proc: subprocess.Popen[str] | None = self._start_usb_cli_cable_breaker(
             duration=resume_mode.duration
@@ -233,7 +228,7 @@ class SystemPowerStateControllerUsingUsbCli(
         finally:
             try:
                 await self._reboot_affordance.wait_for_online()
-                self._fuchsia_controller.after_usb_reconnect()
+                self._usb.after_connect()
             except errors.HoneydewError as err:
                 raise system_power_state_controller_interface.SystemPowerStateControllerError(
                     f"'{self._device_name}' failed to come back online after usb-cli cable-breaker"

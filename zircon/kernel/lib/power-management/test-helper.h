@@ -12,20 +12,24 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <memory>
+#include <optional>
+#include <utility>
 
+#include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
 
-constexpr uint8_t kDomainIndependantPowerLevel = 0;
-constexpr uint8_t kDefaultMaxPowerLevels = 10;
-constexpr uint8_t kMaxIdlePowerLevel = 2;
-constexpr uint8_t kMinActivePowerLevel = kMaxIdlePowerLevel + 1;
+constexpr uint8_t kDefaultActivePowerLevels = 7;
+constexpr uint8_t kDefaultIdleStates = 3;
 
-// Makes a power model of `power_levels` using the helpers below to determine
-// the level properties. In many cases costs are defined in an arbitrary way based on
-// the level indexes.
-power_management::EnergyModel MakeFakeEnergyModel(size_t power_levels);
+constexpr uint64_t ActivePowerNwForLevel(size_t i) { return (i + 1) * 100; }
+constexpr uint64_t StaticPowerNwForLevel(size_t i) { return (i + 1) * 10; }
+
+// Makes a synthetic energy model with `active_levels` active OPPs and `idle_states` idle states
+// (`0` = clock-gated WFI, `1..idle_states` = power-gated PSCI states).
+inline power_management::EnergyModel MakeFakeEnergyModel(size_t active_levels,
+                                                         size_t idle_states = kDefaultIdleStates) {
+  return power_management::EnergyModel::CreateForTest(idle_states, active_levels);
+}
 
 template <typename... Cpus>
 cpu_mask_t MakeCpuMask(Cpus... cpus) {
@@ -46,7 +50,7 @@ struct FakePowerLevelController : public power_management::PowerLevelController 
     return zx::ok(0);
   }
 
-  zx::result<uint64_t> GetCurrentPowerLevel(uint32_t domain_id) const {
+  zx::result<uint64_t> GetCurrentPowerLevel(uint32_t domain_id) const final {
     if (current_power_level.has_value()) {
       return zx::ok(current_power_level.value());
     }
@@ -58,8 +62,6 @@ struct FakePowerLevelController : public power_management::PowerLevelController 
   std::optional<uint64_t> current_power_level;
 };
 
-#include <fbl/ref_counted.h>
-
 inline fbl::RefPtr<power_management::PowerDomain> MakePowerDomain(
     uint32_t id, power_management::EnergyModel& model, cpu_mask_t cpus) {
   return fbl::MakeRefCounted<power_management::PowerDomain>(
@@ -68,7 +70,7 @@ inline fbl::RefPtr<power_management::PowerDomain> MakePowerDomain(
 
 template <typename... Cpus>
 inline auto MakePowerDomainHelper(uint32_t id, Cpus... cpus) {
-  auto model = MakeFakeEnergyModel(kDefaultMaxPowerLevels);
+  auto model = MakeFakeEnergyModel(kDefaultActivePowerLevels);
   return MakePowerDomain(id, model, MakeCpuMask(cpus...));
 }
 
@@ -76,34 +78,5 @@ template <typename... Cpus>
 inline auto MakePowerDomainHelper(uint32_t id, power_management::EnergyModel& model, Cpus... cpus) {
   return MakePowerDomain(id, model, MakeCpuMask(cpus...));
 }
-
-template <typename CpuVisitor>
-void ForEachCpuIn(cpu_mask_t cpus, CpuVisitor&& visitor) {
-  uint32_t cpu_num = 0;
-  while (cpus > 0) {
-    if (cpus & 1) {
-      visitor(cpu_num);
-    }
-    cpus >>= 1;
-    cpu_num++;
-  }
-}
-
-constexpr power_management::ControlInterface ControlInterfaceIdForLevel(size_t i) {
-  // PSCI retention and powerdown levels.
-  if (i < kMaxIdlePowerLevel) {
-    return power_management::ControlInterface::kArmPsci;
-  }
-
-  // WFI power level. This idle state can also be entered via PSCI standby, which is redundant.
-  if (i == kMaxIdlePowerLevel) {
-    return power_management::ControlInterface::kArmWfi;
-  }
-
-  // Active power levels.
-  return power_management::ControlInterface::kCpuDriver;
-}
-
-constexpr uint64_t ControlInterfaceArgForLevel(size_t i) { return i; }
 
 #endif  // ZIRCON_KERNEL_LIB_POWER_MANAGEMENT_TEST_HELPER_H_

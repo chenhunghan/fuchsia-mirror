@@ -79,7 +79,7 @@ declare `use` of `fuchsia.hardware.sysmem.Sysmem` in their component manifests.
 1. Sysmem chooses a format that can satisfy all the constraints. This can
     only happen after every participant has bound its token and set constraints
     on the collection.
-1. Sysmem allocates a number of [buffers](#Buffers) using that format.
+1. Sysmem allocates a number of [buffers](#buffers) using that format.
 1. Participants retrieve the buffers from sysmem, as well as information
    about the allocated format.
 
@@ -210,14 +210,14 @@ docs of [`SetDispensable`][SetDispensable] and [`AttachToken`][AttachToken].
 
 ## Glossary
 
-### Buffers
+### Buffers {#buffers}
 
 A buffer represents a single image or other piece of memory an application
 will work with. Sysmem currently uses one [VMO][vmo] per buffer. Clients can
 [map][map] the memory onto the CPU or [pin][pmt] it to use it with a hardware
 block.
 
-### Participants
+### Participants {#participants}
 
 A participant is any application or driver that wants to access a buffer. All
 participants must connect to sysmem to negotiate memory formats.

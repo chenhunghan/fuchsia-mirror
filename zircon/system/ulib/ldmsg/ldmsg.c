@@ -7,9 +7,9 @@
 
 #include <ldmsg/ldmsg.h>
 
-// TODO(https://fxbug.dev/42072830): These handwritten encoding/decoding functions should
-// be replaced with generated FIDL bindings after the linked bug about libc
-// improvements.
+// TODO(https://fxbug.dev/42106600): Replace these handwritten encoding/decoding
+// functions with generated FIDL bindings as part of the fuchsia.ldsvc.Loader
+// protocol redesign.
 
 static_assert(sizeof(ldmsg_req_t) == 1024, "Loader service requests can be at most 1024 bytes.");
 

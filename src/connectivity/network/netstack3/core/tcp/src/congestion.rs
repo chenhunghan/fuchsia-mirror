@@ -38,13 +38,21 @@ struct CongestionControlParams {
 }
 
 impl CongestionControlParams {
+    /// Initial slow-start threshold before any congestion event has occurred.
+    ///
+    /// Per RFC 5681 Section 3.1 (https://www.rfc-editor.org/rfc/rfc5681#section-3.1):
+    ///   The initial value of ssthresh SHOULD be set arbitrarily high (e.g.,
+    ///   to the size of the largest possible advertised window), but ssthresh
+    ///   MUST be reduced in response to congestion.
+    const SSTHRESH_INIT: u32 = u32::MAX;
+
     fn with_mss(mss: EffectiveMss) -> Self {
         // Per RFC 6928 Section 2 (https://www.rfc-editor.org/rfc/rfc6928#section-2):
         //   Specifically, the initial window (IW) will have an upper bound of
         //   10 segments and the maximum amount of data that can be sent is 10 *
         //   SMSS.
         let cwnd = 10 * u32::from(mss);
-        Self { cwnd, ssthresh: u32::MAX, mss }
+        Self { cwnd, ssthresh: Self::SSTHRESH_INIT, mss }
     }
 
     fn rounded_cwnd(&self) -> CongestionWindow {
@@ -340,7 +348,7 @@ impl<I: Instant> CongestionControl<I> {
         //    size to the new segment size.
         //
         // [RFC 5681 section 3.1]: https://datatracker.ietf.org/doc/html/rfc5681#section-3.1
-        if params.ssthresh == u32::MAX {
+        if params.ssthresh == CongestionControlParams::SSTHRESH_INIT {
             params.cwnd = params.cwnd.saturating_div(orig).saturating_mul(u32::from(params.mss));
         }
 
@@ -447,9 +455,6 @@ pub(super) enum NewDataLimit {
     /// Clamp segments to one MSS.
     SingleMss,
     /// Allow segments up to the available congestion window.
-    // TODO(https://fxbug.dev/565891068): Use in SendInner::poll_send when GSO
-    // is enabled.
-    #[cfg_attr(not(test), expect(dead_code))]
     AvailableWindow,
 }
 

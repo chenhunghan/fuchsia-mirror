@@ -2,7 +2,6 @@
     "ignored_prefixes": [
         "src/connectivity/ethernet/drivers/third_party/igc/",
         "src/connectivity/openthread/third_party/openthread/",
-        "src/connectivity/wlan/drivers/third_party/intel/iwlwifi/",
         "src/connectivity/wlan/lib/common/cpp/",
         "src/connectivity/wlan/lib/common/cpp/include/wlan/common/",
         "src/storage/f2fs/third_party/ext2_hash/",
@@ -14,7 +13,6 @@
         "tools/debug/covargs/api/third_party/codecoverage/",
         "zircon/kernel/lib/libc/",
         "zircon/system/ulib/virtio/include/virtio/",
-        "zircon/third_party/dev/",
         "zircon/third_party/uapp/",
         "zircon/third_party/ulib/"
     ],

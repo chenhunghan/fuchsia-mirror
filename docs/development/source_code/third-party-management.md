@@ -233,7 +233,7 @@ You can validate the changes locally by running `jiri update
 [osrb-process]: /docs/contribute/governance/policy/osrb-process.md
 [oss-licensing]: /docs/contribute/governance/policy/open-source-licensing-policies.md
 [owners]: /docs/development/source_code/owners.md
-[owners-best-practices]: /docs/development/source_code/owners.md#best_practices
+[owners-best-practices]: /docs/development/source_code/owners.md#best-practices
 [pylibs]: /third_party/pylibs/README.md
 [readme-fuchsia]: /docs/development/source_code/third-party-metadata.md
 [rust-third-party]: /docs/development/languages/rust/external_crates.md

@@ -2,6 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/icu:icu_executable.bzl", "icu_executable")
+load("//build/bazel/rules/icu:icu_fuchsia_component.bzl", "icu_fuchsia_component")
+load("//build/bazel/rules/icu:icu_fuchsia_package.bzl", "icu_fuchsia_package")
+load("//build/bazel/rules/icu:icu_source_set.bzl", "icu_source_set")
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
@@ -13,4 +18,57 @@ exports_files(
         "meta/intl.core_shard.base.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+icu_source_set(
+    name = "lib",
+    srcs = [
+        "run.cc",
+        "run.h",
+    ],
+    icu_deps = [
+        "//src/lib/intl/intl_property_provider_impl",
+        "//src/lib/intl/time_zone_info:time-zone-info-service-lib",
+    ],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.settings:fuchsia.settings_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/inspect/component/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl:fxl_cli",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = ["//sdk/fidl/fuchsia.inspect:fuchsia.inspect_cpp"],
+)
+
+icu_executable(
+    name = "intl_services_bin",
+    srcs = ["main.cc"],
+    icu_deps = [":lib"],
+    output_name = "intl_services",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.inspect:fuchsia.inspect_cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+)
+
+icu_fuchsia_component(
+    name = "component",
+    component_name = "intl",
+    icu_deps = [
+        ":intl_services_bin",
+        "//src/lib/icu:icudtl",
+    ],
+    manifest = "meta/intl.cml",
+    visibility = ["//:__subpackages__"],
+)
+
+icu_fuchsia_package(
+    name = "pkg",
+    package_name = "intl_services",
+    icu_components = [":component"],
+    visibility = ["//:__subpackages__"],
 )

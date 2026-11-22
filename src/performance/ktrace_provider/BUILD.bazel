@@ -1,0 +1,69 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = [
+        "app.cc",
+        "app.h",
+        "log_importer.cc",
+        "log_importer.h",
+        "main.cc",
+    ],
+    gn_output_name = "ktrace_provider",
+    deps = [
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/scheduler/cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl:fxl_cli",
+        "//src/performance/lib/fxt",
+        "//zircon/system/ulib/trace",
+        "//zircon/system/ulib/trace-provider",
+        "//zircon/system/ulib/zircon-internal",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "ktrace_provider",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "ktrace_provider",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/ktrace_provider.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "ktrace_provider",
+    components = [":component"],
+)

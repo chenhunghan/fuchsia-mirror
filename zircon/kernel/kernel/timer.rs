@@ -21,15 +21,14 @@
 //! - Timers aren't permanently bound to a particular CPU and may fire on a CPU other than the one
 //!   on which they were set.
 //!
-//! The C++ `Timer` and `TimerQueue` classes in `kernel/timer.h` reserve opaque storage of the same
-//! size and alignment for these types (so that timers can be embedded in C++ objects and
-//! constructed in static storage) and forward to the `rust_*` functions at the bottom of this
-//! file.
+//! The C++ `Timer` class in `kernel/timer.h` reserves opaque storage of the same size and
+//! alignment (so that timers can be embedded in C++ objects and constructed in static storage) and
+//! forwards to the `rust_*` functions at the bottom of this file.
 
 use core::cell::{Cell, UnsafeCell};
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 use core::fmt::Write;
-use core::mem::{MaybeUninit, align_of, offset_of, size_of};
+use core::mem::{align_of, offset_of, size_of};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
@@ -40,10 +39,10 @@ use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode};
 use ksync::{KCell, LockToken, kcell_init, source_tag};
 use libarch::device_memory_barrier;
 use libc::stdio::StringFile;
-use pin_init::{InPlaceWrite, PinInit, pin_data, pin_init, pinned_drop};
+use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zr::static_assert;
 use zx_status::Status;
-use zx_types::{ZX_TIME_INFINITE, zx_status_t};
+use zx_types::ZX_TIME_INFINITE;
 
 use super::deadline::{Deadline, DurationUnknown, InstantUnknown, SlackMode};
 use crate::arch_rs::{curr_cpu_num, ints_disabled};
@@ -51,7 +50,7 @@ use crate::counters::define_kcounter;
 use crate::kconcurrent::{ChainLock, ChainLockTransaction};
 use crate::kernel::mp::{INVALID_CPU, is_cpu_online};
 use crate::kernel::percpu::PerCpu;
-use crate::kernel::scheduler::{SchedTime, rust_kernel_scheduler_timer_tick};
+use crate::kernel::scheduler;
 use crate::kernel::stats::{inc_timer_ints, inc_timers};
 use crate::kernel::types::cpu_num_t;
 use crate::ksync_kernel::{NoIrqSavePolicy, declare_singleton_monitored_spinlock};
@@ -374,6 +373,12 @@ impl Timer {
     /// The timer function is declared as:
     ///   `void callback(Timer *, zx_time_t now, void *arg) { ... }`
     ///
+    /// When the timer fires, `callback` is invoked once for `self` in interrupt context with
+    /// interrupts and preemption disabled, [`TimerLock`] not held on the current CPU, and no
+    /// [`ChainLockTransaction`] active on the current CPU. It receives `self` as its first
+    /// argument (non-null, properly aligned for [`Timer`], initialized, and live for the duration
+    /// of the callback with no active mutable references) and `arg` as its third argument.
+    ///
     /// # Safety
     ///
     /// The caller must ensure that:
@@ -652,10 +657,9 @@ impl Timer {
         // for the duration of this call.
         let clt_token = unsafe { ChainLockTransaction::mark_active() };
 
-        // Just like the `TrylockOrCancel(MonitoredSpinLock*)` overload, but this version
-        // operates on a ChainLock instead of a MonitoredSpinLock, and is used by the wait queue
-        // timeout mechanism.  Keep attempting to acquire the lock, yielding in between attempts,
-        // and bailing out in the case that we notice that the cancel flag has been set.
+        // Used by the wait queue timeout mechanism. Keep attempting to acquire the lock, yielding
+        // in between attempts, and bailing out in the case that we notice that the cancel flag has
+        // been set.
         while !lock.try_acquire(&clt_token) {
             if self.cancel_pending() {
                 return Err(Status::TIMED_OUT);
@@ -674,32 +678,19 @@ impl Timer {
         self.cancel.load_unlocked()
     }
 
-    /// Returns the applied slack adjustment, for timer tests.
-    ///
-    /// # Safety
-    ///
-    /// No operation that may modify the timer's slack ([`Self::set_deadline`] or
-    /// [`TimerQueue::transition_off_cpu`]) may run concurrently.
-    unsafe fn slack_for_test(&self) -> DurationUnknown {
-        // SAFETY: `KCell` and `UnsafeCell` are `repr(transparent)`, so `self.slack` has the layout
-        // of a `Cell<DurationUnknown>`, and the caller guarantees that nothing writes it
-        // concurrently.
-        unsafe { &*ptr::from_ref(&self.slack).cast::<Cell<DurationUnknown>>() }.get()
-    }
-
-    /// Returns a monotonic instant if `expected_clock_id` is [`ZX_CLOCK_MONOTONIC`] and a boot
-    /// instant if `expected_clock_id` is [`ZX_CLOCK_BOOT`], for timer tests.
-    ///
-    /// # Safety
-    ///
-    /// No operation that may modify the timer's scheduled time ([`Self::set_deadline`] or
-    /// [`TimerQueue::transition_off_cpu`]) may run concurrently.
-    unsafe fn scheduled_time_for_test(&self, expected_clock_id: u32) -> InstantUnknown {
+    /// Returns `(scheduled_time, slack)` under [`TimerLock`] for timer tests, asserting that the
+    /// timer uses `expected_clock_id` (`ZX_CLOCK_MONOTONIC` or `ZX_CLOCK_BOOT`). `scheduled_time`
+    /// is a monotonic instant if `expected_clock_id` is `ZX_CLOCK_MONOTONIC` and a boot instant if
+    /// `expected_clock_id` is `ZX_CLOCK_BOOT`.
+    #[cfg(ktest)]
+    pub fn scheduled_time_and_slack_for_test(
+        &self,
+        expected_clock_id: u32,
+    ) -> (InstantUnknown, DurationUnknown) {
         debug_assert!(self.clock_id == expected_clock_id);
-        // SAFETY: `KCell` and `UnsafeCell` are `repr(transparent)`, so `self.scheduled_time` has
-        // the layout of a `Cell<InstantUnknown>`, and the caller guarantees that nothing writes it
-        // concurrently.
-        unsafe { &*ptr::from_ref(&self.scheduled_time).cast::<Cell<InstantUnknown>>() }.get()
+        ksync::lock!(let guard = TimerLock::lock(source_tag!()));
+        let token = guard.token();
+        (self.scheduled_time(token).get(), self.slack(token).get())
     }
 
     /// We ensure that timers are not on a list or an active cpu when destroyed.
@@ -732,9 +723,8 @@ type TimerList = DoublyLinkedList<NonNull<Timer>, TimerQueueTag>;
 ///
 /// Note: A preemption timer may fire even after it has been canceled.
 ///
-/// `TimerQueue`s are constructed in place by the C++ `percpu` constructor (through
-/// [`rust_timer_queue_init`]) and live in [`PerCpu`] for the lifetime of the system, so they are
-/// never moved.
+/// `TimerQueue`s are constructed in place in [`PerCpu`] and live there for the lifetime of the
+/// system, so they are never moved.
 #[pin_data]
 #[repr(C)]
 pub struct TimerQueue {
@@ -761,8 +751,8 @@ pub struct TimerQueue {
     next_timer_deadline: UnsafeCell<i64>,
 }
 
-// The C++ `TimerQueue` is `OpaqueStorage<32, 8>`. `percpu.rs` also checks the size and alignment
-// against the bindgen view of the C++ class.
+// `struct percpu` reserves `OpaqueStorage<32, 8>` for `timer_queue`; `percpu.rs` also checks this
+// size and alignment against the bindgen view of `struct percpu`.
 static_assert!(size_of::<TimerQueue>() == 32);
 static_assert!(align_of::<TimerQueue>() == 8);
 
@@ -1196,9 +1186,9 @@ impl TimerQueue {
 
     /// Set/reset/cancel the preemption timer.
     ///
-    /// When the preemption timer fires, the scheduler's [`rust_kernel_scheduler_timer_tick`] is
-    /// called. Set the deadline to `ZX_TIME_INFINITE` to cancel the preemption timer. The
-    /// scheduler's timer tick may be called spuriously after cancellation.
+    /// When the preemption timer fires, [`scheduler::timer_tick`] is called. Set the deadline to
+    /// `ZX_TIME_INFINITE` to cancel the preemption timer. The scheduler's timer tick may be called
+    /// spuriously after cancellation.
     ///
     /// # Safety
     ///
@@ -1249,9 +1239,9 @@ impl TimerQueue {
             // SAFETY: As above.
             unsafe { self.set_preempt_timer_deadline(InstantMono::INFINITE) };
             // SAFETY: `tick` only runs from `timer_tick`, in the current CPU's timer interrupt with
-            // interrupts disabled, which is where `rust_kernel_scheduler_timer_tick` must be called
-            // once the preemption deadline has passed.
-            unsafe { rust_kernel_scheduler_timer_tick(SchedTime::from_raw(now.0)) };
+            // interrupts disabled, which is where `scheduler::timer_tick` must be called once the
+            // preemption deadline has passed.
+            unsafe { scheduler::timer_tick() };
         }
 
         // Tick both of the timer lists.
@@ -1510,15 +1500,13 @@ impl core::fmt::Display for PrintfPtr {
     }
 }
 
-/// called at interrupt time to process any pending timers
+/// Called at interrupt time to process any pending timers.
 ///
 /// # Safety
 ///
-/// Must be called from the timer interrupt, with interrupts disabled.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/platform/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn timer_tick() {
+/// The caller must ensure that this function is called from the timer interrupt with interrupts
+/// disabled, and that [`TimerLock`] is not held on the current CPU.
+pub unsafe fn timer_tick() {
     debug_assert!(ints_disabled());
 
     inc_timer_ints();
@@ -1564,169 +1552,6 @@ pub extern "C" fn rust_timer_cancel(timer: &Timer) -> bool {
     timer.cancel()
 }
 
-/// C++ FFI entry point for `Timer::TrylockOrCancel(ChainLock&)`.
-///
-/// # Safety
-///
-/// Same as [`Timer::trylock_or_cancel`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_trylock_or_cancel(
-    timer: &Timer,
-    lock: &ChainLock,
-) -> zx_status_t {
-    // SAFETY: The caller upholds the requirements of `Timer::trylock_or_cancel`.
-    Status::result_into_raw(unsafe { timer.trylock_or_cancel(lock) })
-}
-
-/// C++ FFI entry point used by `Timer::TrylockOrCancel(MonitoredSpinLock*)` to check for a pending
-/// cancel.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_timer_cancel_pending(timer: &Timer) -> bool {
-    timer.cancel_pending()
-}
-
-/// C++ FFI entry point for `Timer::slack_for_test()`.
-///
-/// # Safety
-///
-/// Same as [`Timer::slack_for_test`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_slack_for_test(timer: &Timer) -> DurationUnknown {
-    // SAFETY: The caller upholds the requirements of `Timer::slack_for_test`.
-    unsafe { timer.slack_for_test() }
-}
-
-/// C++ FFI entry point for `Timer::scheduled_time_for_test()`.
-///
-/// # Safety
-///
-/// Same as [`Timer::scheduled_time_for_test`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_scheduled_time_for_test(
-    timer: &Timer,
-    expected_clock_id: u32,
-) -> InstantUnknown {
-    // SAFETY: The caller upholds the requirements of `Timer::scheduled_time_for_test`.
-    unsafe { timer.scheduled_time_for_test(expected_clock_id) }
-}
-
-/// C++ FFI entry point for `TimerQueue::TimerQueue()`.
-///
-/// # Safety
-///
-/// `timer_queue` must point to valid, aligned, writable storage for a [`TimerQueue`] that does not
-/// hold a live `TimerQueue`. The initialized `TimerQueue` must not be moved until it is destroyed
-/// by [`rust_timer_queue_destroy`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_init(timer_queue: *mut MaybeUninit<TimerQueue>) {
-    // SAFETY: The caller guarantees that `timer_queue` points to valid, aligned, writable storage
-    // that stays pinned once initialized.
-    let slot = unsafe { &mut *timer_queue };
-    let _ = slot.write_pin_init(TimerQueue::init());
-}
-
-/// C++ FFI entry point for `TimerQueue::~TimerQueue()`.
-///
-/// # Safety
-///
-/// `timer_queue` must point to an initialized [`TimerQueue`] with empty timer lists that is not
-/// used again.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_destroy(timer_queue: *mut TimerQueue) {
-    // SAFETY: The caller guarantees that `timer_queue` points to an initialized `TimerQueue` that
-    // is not used again.
-    unsafe { ptr::drop_in_place(timer_queue) };
-}
-
-/// C++ FFI entry point for `TimerQueue::PreemptReset()`.
-///
-/// # Safety
-///
-/// Same as [`TimerQueue::preempt_reset`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_preempt_reset(
-    timer_queue: &TimerQueue,
-    deadline: InstantMono,
-) {
-    // SAFETY: The caller upholds the requirements of `TimerQueue::preempt_reset`.
-    unsafe { timer_queue.preempt_reset(deadline) }
-}
-
-/// C++ FFI entry point for `TimerQueue::PreemptArmed()`.
-///
-/// # Safety
-///
-/// Same as [`TimerQueue::preempt_armed`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_preempt_armed(timer_queue: &TimerQueue) -> bool {
-    // SAFETY: The caller upholds the requirements of `TimerQueue::preempt_armed`.
-    unsafe { timer_queue.preempt_armed() }
-}
-
-/// C++ FFI entry point for `TimerQueue::TransitionOffCpu()`.
-///
-/// # Safety
-///
-/// Same as [`TimerQueue::transition_off_cpu`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_transition_off_cpu(
-    timer_queue: &TimerQueue,
-    source: &TimerQueue,
-) {
-    // SAFETY: The caller upholds the requirements of `TimerQueue::transition_off_cpu`.
-    unsafe { timer_queue.transition_off_cpu(source) }
-}
-
-/// C++ FFI entry point for `TimerQueue::PrintTimerQueues()`.
-///
-/// # Safety
-///
-/// If `len > 0`, `buf` must be non-null and valid for writes of `len` bytes.
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_print_timer_queues(buf: *mut c_char, len: usize) {
-    let buf: &mut [u8] = if len == 0 {
-        &mut []
-    } else {
-        // SAFETY: `len > 0`, so the caller guarantees that `buf` is non-null and valid for writes
-        // of `len` bytes.
-        unsafe { core::slice::from_raw_parts_mut(buf.cast::<u8>(), len) }
-    };
-    TimerQueue::print_timer_queues(buf);
-}
-
-/// C++ FFI entry point for `TimerQueue::UpdatePlatformTimer()`.
-///
-/// # Safety
-///
-/// Same as [`TimerQueue::update_platform_timer`].
-// SAFETY: Symbol name is unique across the kernel link unit and matches the C++ declaration in
-// `zircon/kernel/include/kernel/timer.h`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_timer_queue_update_platform_timer(timer_queue: &TimerQueue) {
-    // SAFETY: The caller upholds the requirements of `TimerQueue::update_platform_timer`.
-    unsafe { timer_queue.update_platform_timer() }
-}
-
 /// # Safety
 ///
 /// Nothing: `argv` is never dereferenced. The function is `unsafe` only to match the console
@@ -1770,7 +1595,7 @@ crate::console::static_command!(
 
 /// Kernel timer tests.
 #[cfg(ktest)]
-#[unittest::suite(name = "timer_rust")]
+#[unittest::suite(name = "timer")]
 mod tests {
     use crate::kernel::deadline::{SlackMode, TimerSlack};
     use crate::platform_rs::timer::{
@@ -1778,10 +1603,24 @@ mod tests {
         current_mono_time, timer_current_boot_ticks, timer_current_mono_and_boot_ticks,
         timer_current_mono_ticks, zx_hour, zx_msec, zx_usec,
     };
+    use core::mem::MaybeUninit;
     use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-    use pin_init::stack_pin_init;
+    use kprint::kprintln;
+    use pin_init::{InPlaceWrite, stack_pin_init};
     use unittest::{assert_eq, assert_false, assert_ge, assert_le, assert_lt, assert_true};
     use zx_types::{ZX_TIME_INFINITE, ZX_TIME_INFINITE_PAST};
+
+    #[cfg(not(target_arch = "x86_64"))]
+    use {
+        crate::arch_rs::InterruptDisableGuard,
+        crate::kconcurrent::{
+            ChainLock, ChainLockTransaction, IRQ_SAVE_OPTION, NO_IRQ_SAVE_OPTION,
+            TransactionResult, clt_tag, single_chain_lock_guard,
+        },
+        crate::kernel::mp::{cpu_num_to_mask, get_online_mask},
+        crate::kernel::thread::ThreadPtr,
+        unittest::{expect_eq, expect_false, subtest},
+    };
 
     #[derive(Default)]
     struct TimerArgs {
@@ -2165,11 +2004,8 @@ mod tests {
             assert_eq!(clock_id, timer.clock_id);
             assert_eq!(INVALID_CPU, timer.active_cpu.load_unlocked());
             assert_false!(timer.cancel.load_unlocked());
-            // SAFETY: The timer is never set, so nothing modifies its scheduled time.
-            let scheduled_time = unsafe { timer.scheduled_time_for_test(clock_id) };
+            let (scheduled_time, slack) = timer.scheduled_time_and_slack_for_test(clock_id);
             assert_eq!(0, scheduled_time.0);
-            // SAFETY: The timer is never set, so nothing modifies its slack.
-            let slack = unsafe { timer.slack_for_test() };
             assert_eq!(0, slack.0);
             assert_true!(timer.callback.load(Ordering::Relaxed).is_none());
             assert_true!(timer.arg.load(Ordering::Relaxed).is_null());
@@ -2177,17 +2013,11 @@ mod tests {
         }
     }
 
-    // Check that `rust_timer_queue_init`, which backs the C++ TimerQueue constructor, creates an
-    // empty TimerQueue with no deadlines set.
+    // Check that `TimerQueue::init` creates an empty TimerQueue with no deadlines set.
     /// timer_queue_init
     #[test]
     fn timer_queue_init() {
-        let mut storage = MaybeUninit::<TimerQueue>::uninit();
-        // SAFETY: `storage` is valid storage for a `TimerQueue`, and is not moved before
-        // `rust_timer_queue_destroy` below.
-        unsafe { rust_timer_queue_init(&mut storage) };
-        // SAFETY: `rust_timer_queue_init` initialized `storage`.
-        let timer_queue = unsafe { storage.assume_init_ref() };
+        stack_pin_init!(let timer_queue = TimerQueue::init());
 
         {
             ksync::lock!(let mut guard = TimerLock::lock(source_tag!()));
@@ -2202,9 +2032,205 @@ mod tests {
         // SAFETY: Only this test can see `timer_queue`, so nothing else accesses its deadlines.
         let next_timer_deadline = unsafe { timer_queue.next_timer_deadline() };
         assert_eq!(ZX_TIME_INFINITE, next_timer_deadline);
+    }
 
-        // SAFETY: `storage` holds an initialized `TimerQueue` with empty timer lists, which is not
-        // used again.
-        unsafe { rust_timer_queue_destroy(storage.as_mut_ptr()) };
+    #[cfg(not(target_arch = "x86_64"))]
+    struct TrylockTimerArgs {
+        result: AtomicI32,
+        timer_fired: AtomicBool,
+        wait: AtomicBool,
+        lock: ChainLock,
+    }
+
+    /// Timer callback that tests [`Timer::trylock_or_cancel`] against the [`ChainLock`] in
+    /// [`TrylockTimerArgs`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that:
+    /// - `t` is non-null, properly aligned for [`Timer`], and points to the initialized,
+    ///   currently firing [`Timer`] that remains live for the duration of the callback in
+    ///   interrupt context with interrupts disabled, `TimerLock` not held, no
+    ///   `ChainLockTransaction` active, and no active mutable references.
+    /// - `void_arg` is non-null, properly aligned for [`TrylockTimerArgs`], and points to an
+    ///   initialized [`TrylockTimerArgs`] that remains live for the duration of the callback with
+    ///   no active mutable references.
+    #[cfg(not(target_arch = "x86_64"))]
+    unsafe extern "C" fn timer_trylock_cb(t: *mut Timer, _now: i64, void_arg: *mut c_void) {
+        // SAFETY: The caller's `# Safety` contract guarantees `void_arg` is non-null, properly
+        // aligned, and points to a live, initialized `TrylockTimerArgs` with no active mutable
+        // references for the duration of this callback.
+        let arg = unsafe { &*void_arg.cast::<TrylockTimerArgs>() };
+        arg.timer_fired.store(true, Ordering::SeqCst);
+        while arg.wait.load(Ordering::SeqCst) {
+            libarch::r#yield();
+        }
+
+        // SAFETY: The caller's `# Safety` contract guarantees `t` is non-null, properly aligned,
+        // and points to a live, initialized `Timer` with no active mutable references for the
+        // duration of this callback.
+        let timer = unsafe { &*t };
+        let result = ChainLockTransaction::until_done(
+            NO_IRQ_SAVE_OPTION,
+            clt_tag!("timer_trylock_cb"),
+            |token| -> TransactionResult<Result<(), Status>> {
+                // SAFETY: The caller's `# Safety` contract guarantees this runs from `timer`'s
+                // own executing callback with `TimerLock` not held, `until_done` has registered an
+                // active, unfinalized `ChainLockTransaction` that does not hold `arg.lock`, and on
+                // `Ok(())` we finalize the transaction and release `arg.lock` immediately below.
+                let result = unsafe { timer.trylock_or_cancel(&arg.lock) };
+                if result.is_ok() {
+                    ChainLockTransaction::finalize(token);
+                    arg.lock.release(token);
+                }
+                TransactionResult::Value(result)
+            },
+        );
+
+        arg.result.store(Status::result_into_raw(result), Ordering::SeqCst);
+    }
+
+    /// Exercises [`Timer::trylock_or_cancel`] from a timer callback against a contested
+    /// [`ChainLock`] on another CPU.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure this is called from a live kernel thread after
+    /// `LK_INIT_LEVEL_THREADING`, with interrupts enabled and no thread lock, scheduler queue lock,
+    /// or `ChainLockTransaction` active.
+    unsafe fn run_trylock_or_cancel_test(test_name: &str, cancel_while_locked: bool) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        {
+            let _ = (test_name, cancel_while_locked);
+            // TODO(https://fxbug.dev/42166211): Test is disabled because it can deadlock with TLB
+            // invalidation, which uses synchronous IPIs.
+            kprintln!("test is disabled on x86, see https://fxbug.dev/42166211");
+            true
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            // We need 2 or more CPUs for this test.
+            if get_online_mask().count_ones() < 2 {
+                kprintln!("skipping test {:s}, not enough online cpus", test_name);
+                return true;
+            }
+
+            (subtest!(|| {
+                // Capture and restore the unittest thread's affinity on exit so subsequent tests in
+                // the suite do not stay constrained off `timer_cpu`.
+                // SAFETY: The caller's `# Safety` contract guarantees a live kernel thread after
+                // `LK_INIT_LEVEL_THREADING`.
+                let current = unsafe { ThreadPtr::current() };
+                // SAFETY: `current` is the live current thread, and the caller's `# Safety`
+                // contract guarantees no thread lock or `ChainLockTransaction` is active.
+                let prev_affinity = unsafe { current.get_cpu_affinity() };
+                let _restore_affinity = zr::defer(move || {
+                    // SAFETY: `current` is the live current thread, and interrupts and locks are
+                    // restored/released before this guard drops, so no thread lock, scheduler queue
+                    // lock, or `ChainLockTransaction` is active.
+                    let _ = unsafe { current.set_cpu_affinity(prev_affinity) };
+                });
+
+                let arg = TrylockTimerArgs {
+                    result: AtomicI32::new(0),
+                    timer_fired: AtomicBool::new(false),
+                    wait: AtomicBool::new(true),
+                    lock: ChainLock::new(),
+                };
+                stack_pin_init!(let t = Timer::init(ZX_CLOCK_MONOTONIC));
+                let t = t.into_ref();
+
+                {
+                    let _block_interrupts = InterruptDisableGuard::new();
+
+                    let timer_cpu: cpu_num_t = curr_cpu_num();
+                    let deadline =
+                        Deadline::after_mono(DurationMono::from_micros(100), TimerSlack::none());
+                    // SAFETY:
+                    // - `t` is pinned on the stack (`Pin<&Timer>`) and canceled below before `t`
+                    //   and `arg` go out of scope.
+                    // - No `&mut Timer` or `Pin<&mut Timer>` references to `t` exist or are used
+                    //   while `t` is scheduled or executing its callback (`t` was converted via
+                    //   `Pin::into_ref`).
+                    // - Neither `set_deadline`, `set_oneshot`, nor `cancel` is called concurrently
+                    //   on `t`.
+                    // - `arg` (`&TrylockTimerArgs`) remains live and initialized with no active
+                    //   mutable references until after `t.cancel()` returns, and
+                    //   `Timer::set_deadline` guarantees `timer_trylock_cb` receives `t`
+                    //   valid/unaliased and runs in interrupt context with interrupts disabled,
+                    //   `TimerLock` not held, and no `ChainLockTransaction` active, satisfying
+                    //   `timer_trylock_cb`'s `# Safety` contract.
+                    unsafe {
+                        t.set_deadline(
+                            &deadline,
+                            timer_trylock_cb,
+                            ptr::from_ref(&arg).cast_mut().cast(),
+                        );
+                    }
+
+                    // The timer is set to run on timer_cpu, switch to a different CPU, acquire the
+                    // lock then signal the callback to proceed.
+                    // SAFETY: `current` is the live current thread, and the caller's `# Safety`
+                    // contract guarantees no thread lock, scheduler queue lock, or
+                    // `ChainLockTransaction` is active.
+                    unsafe {
+                        current.set_cpu_affinity(!cpu_num_to_mask(timer_cpu));
+                    }
+                    debug_assert!(curr_cpu_num() != timer_cpu);
+                }
+
+                {
+                    single_chain_lock_guard!(
+                        _guard,
+                        IRQ_SAVE_OPTION,
+                        &arg.lock,
+                        clt_tag!("run_trylock_or_cancel_test")
+                    );
+
+                    while !arg.timer_fired.load(Ordering::SeqCst) {
+                        libarch::r#yield();
+                    }
+
+                    // Callback should now be running. Tell it to stop waiting and start trylocking.
+                    arg.wait.store(false, Ordering::SeqCst);
+
+                    if cancel_while_locked {
+                        // See that `Timer::cancel` returns false indicating that the timer ran.
+                        expect_false!(t.cancel());
+                    }
+                }
+
+                if cancel_while_locked {
+                    // See that the timer failed to acquire the lock.
+                    expect_eq!(Status::TIMED_OUT.into_raw(), arg.result.load(Ordering::SeqCst));
+                } else {
+                    // See that `Timer::cancel` returns false indicating that the timer ran.
+                    expect_false!(t.cancel());
+
+                    // Note, we cannot assert the value of arg.result. We have both released the
+                    // lock and canceled the timer, but we don't know which of these events the
+                    // timer observed first.
+                }
+            }))()
+        }
+    }
+
+    /// See that `Timer::trylock_or_cancel` spins until the timer is canceled.
+    #[test]
+    fn trylock_or_cancel_canceled() {
+        // SAFETY: Kernel unit tests run on a live thread after `LK_INIT_LEVEL_THREADING` with
+        // interrupts enabled and no thread lock, scheduler queue lock, or `ChainLockTransaction`
+        // active.
+        assert_true!(unsafe { run_trylock_or_cancel_test("trylock_or_cancel_canceled", true) });
+    }
+
+    /// See that `Timer::trylock_or_cancel` acquires the lock when the holder releases it.
+    #[test]
+    fn trylock_or_cancel_get_lock() {
+        // SAFETY: Kernel unit tests run on a live thread after `LK_INIT_LEVEL_THREADING` with
+        // interrupts enabled and no thread lock, scheduler queue lock, or `ChainLockTransaction`
+        // active.
+        assert_true!(unsafe { run_trylock_or_cancel_test("trylock_or_cancel_get_lock", false) });
     }
 }

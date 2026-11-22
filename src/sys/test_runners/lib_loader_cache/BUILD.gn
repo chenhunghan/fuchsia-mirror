@@ -5,7 +5,6 @@
 import("//build/components.gni")
 
 fuchsia_package("lib_loader_runner_cache") {
-  testonly = true
   visibility = [
     ":*",
     "//bundles/assembly/*",
@@ -58,7 +57,6 @@ group("tests") {
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
 rustc_binary("bin") {
-  testonly = true
   sources = [
     "src/loader_cache.rs",
     "src/main.rs",
@@ -115,13 +113,11 @@ if (is_fuchsia) {
 }
 
 fuchsia_component_manifest("lib_loader_runner_cache_cmp-manifest") {
-  testonly = true
   component_name = "lib_loader_runner_cache"
   manifest = "meta/lib_loader_runner_cache.cml"
 }
 
 fuchsia_component("lib_loader_runner_cache_cmp") {
-  testonly = true
   cm_label = ":lib_loader_runner_cache_cmp-manifest"
   visibility = [
     ":*",

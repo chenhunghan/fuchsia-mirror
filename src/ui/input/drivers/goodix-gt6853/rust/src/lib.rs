@@ -27,7 +27,7 @@ use fidl_next_fuchsia_hardware_i2c as fidl_i2c;
 use fidl_next_fuchsia_input_report as fidl_input_report;
 use fuchsia_component::server::ServiceFs;
 use futures::StreamExt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 struct GoodixGt6853Driver {
     #[expect(unused)]
@@ -36,8 +36,8 @@ struct GoodixGt6853Driver {
     child_node: fidl::endpoints::ClientEnd<NodeControllerMarker>,
     #[expect(unused)]
     fidl_input_device: FidlInputDevice,
-    controller_task: Mutex<Option<fuchsia_async::Task<()>>>,
-    fidl_service_task: Mutex<Option<fuchsia_async::Task<()>>>,
+    controller_task: fuchsia_async::Task<()>,
+    fidl_service_task: fuchsia_async::Task<()>,
 }
 
 driver_register!(GoodixGt6853Driver);
@@ -168,24 +168,13 @@ impl Driver for GoodixGt6853Driver {
         let controller_task = fuchsia_async::Task::spawn(controller.run());
 
         log::info!("goodix_gt6853 driver initialized successfully");
-        Ok(Self {
-            parent_node,
-            child_node,
-            fidl_input_device,
-            controller_task: Mutex::new(Some(controller_task)),
-            fidl_service_task: Mutex::new(Some(fidl_service_task)),
-        })
+        Ok(Self { parent_node, child_node, fidl_input_device, controller_task, fidl_service_task })
     }
 
-    async fn stop(&self) {
+    async fn stop(self) {
         log::info!("Stopping goodix_gt6853 driver");
-        let controller_task = self.controller_task.lock().unwrap().take();
-        if let Some(task) = controller_task {
-            task.abort().await;
-        }
-        let fidl_service_task = self.fidl_service_task.lock().unwrap().take();
-        if let Some(task) = fidl_service_task {
-            task.abort().await;
-        }
+        let Self { controller_task, fidl_service_task, .. } = self;
+        controller_task.abort().await;
+        fidl_service_task.abort().await;
     }
 }

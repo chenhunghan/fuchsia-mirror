@@ -387,7 +387,7 @@ particular, the [reference documentation][fidl-attributes] for official FIDL
 attributes will be updated to reflect the rules stipulated by this design, and
 to note valid argument types and implied defaults for each attribute.
 
-## Drawbacks, Alternatives, and Unknowns
+## Drawbacks, alternatives, and unknowns {:#drawbacks-alternatives-and-unknowns}
 
 ### In-FIDL Attribute Schemas
 
@@ -509,7 +509,7 @@ the syntax proposed in this document.
 [fidl-attributes]: /docs/reference/fidl/language/attributes.md
 [fidl-attributes-discoverable]: /docs/reference/fidl/language/attributes.md#discoverable
 [fidl-attributes-doc]: /docs/reference/fidl/language/attributes.md#doc
-[fidl-attributes-for-deprecated-c-bindings]: /docs/reference/fidl/language/attributes.md#layout
+[fidl-attributes-for-deprecated-c-bindings]: /docs/reference/fidl/language/attributes.md
 [fidl-attributes-no-doc]: /docs/reference/fidl/language/attributes.md#nodoc
 [fidl-attributes-transitional]: /docs/reference/fidl/language/attributes.md#transitional
 [fidl-attributes-transport]: /docs/reference/fidl/language/attributes.md#transport

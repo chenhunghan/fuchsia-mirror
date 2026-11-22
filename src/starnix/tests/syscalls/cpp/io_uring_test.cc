@@ -2,15 +2,21 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <grp.h>
+#include <lib/fit/defer.h>
+#include <sys/fsuid.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+
+#include <string>
 
 #include <fbl/unique_fd.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include <linux/io_uring.h>
 
+#include "src/lib/files/file.h"
 #include "src/starnix/tests/syscalls/cpp/io_uring_helper.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
@@ -18,6 +24,7 @@
 namespace {
 
 using io_uring_helper::io_uring_enter;
+using io_uring_helper::io_uring_register;
 using io_uring_helper::io_uring_setup;
 
 // TODO(b/444216805): Re-enable once debian 12 fix is implemented.
@@ -118,6 +125,104 @@ TEST(IoUringTest, IoUringSetupDeferTaskrun) {
   params.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN;
   fd = fbl::unique_fd(io_uring_setup(1, &params));
   ASSERT_TRUE(fd.is_valid()) << strerror(errno);
+}
+
+TEST(IoUringTest, RegisterBuffersEmptyError) {
+  struct io_uring_params params = {};
+  fbl::unique_fd ring_fd(io_uring_setup(1, &params));
+  ASSERT_TRUE(ring_fd.is_valid()) << "io_uring_setup failed: " << strerror(errno);
+
+  int ret = io_uring_register(ring_fd.get(), IORING_REGISTER_BUFFERS, nullptr, 0);
+  EXPECT_EQ(ret, -1);
+  EXPECT_EQ(errno, EFAULT);
+
+  struct iovec iov = {};
+  ret = io_uring_register(ring_fd.get(), IORING_REGISTER_BUFFERS, &iov, 0);
+  EXPECT_EQ(ret, -1);
+  EXPECT_EQ(errno, EINVAL);
+}
+
+TEST(IoUringTest, RingMappingOmitsMayExec) {
+  if (!test_helper::IsStarnix() && !test_helper::IsKernelVersionAtLeast(6, 16)) {
+    // Prior to Linux 6.16, anonymous-inode mappings such as `io_uring` rings reported `me` in
+    // `proc_pid_smaps(5)`. Starnix never maps ring memory executable and matches Linux 6.16+.
+    GTEST_SKIP() << "io_uring ring mappings report `me` prior to Linux 6.16.";
+  }
+  struct io_uring_params params = {};
+  fbl::unique_fd ring_fd(io_uring_setup(1, &params));
+  if (!ring_fd.is_valid() && (errno == EPERM || errno == ENOSYS)) {
+    GTEST_SKIP() << "io_uring_setup unavailable: " << strerror(errno);
+  }
+  ASSERT_TRUE(ring_fd.is_valid()) << "io_uring_setup failed: " << strerror(errno);
+
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  auto ring_map = ASSERT_RESULT_SUCCESS_AND_RETURN(test_helper::ScopedMMap::MMap(
+      nullptr, page_size, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd.get(), IORING_OFF_SQ_RING));
+
+  std::string smaps;
+  ASSERT_TRUE(files::ReadFileToString("/proc/self/smaps", &smaps));
+  auto mapping =
+      test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(ring_map.mapping()), smaps);
+  ASSERT_NE(mapping, std::nullopt);
+  EXPECT_FALSE(mapping->ContainsFlag("me"));
+
+  EXPECT_THAT(mprotect(ring_map.mapping(), page_size, PROT_READ | PROT_EXEC),
+              SyscallFailsWithErrno(EACCES));
+}
+
+// With io_uring_disabled set to 1, only members of io_uring_group (or tasks with CAP_SYS_ADMIN)
+// can create io_uring instances. Membership is determined by the filesystem GID and the
+// supplementary groups, not by the effective GID.
+TEST(IoUringTest, IoUringGroupChecksFsGid) {
+  if (getuid() != 0 || !test_helper::HasSysAdmin()) {
+    GTEST_SKIP() << "Not running as root, skipping.";
+  }
+  constexpr char kDisabledPath[] = "/proc/sys/kernel/io_uring_disabled";
+  constexpr char kGroupPath[] = "/proc/sys/kernel/io_uring_group";
+  std::string old_disabled;
+  std::string old_group;
+  if (!files::ReadFileToString(kDisabledPath, &old_disabled) ||
+      !files::ReadFileToString(kGroupPath, &old_group)) {
+    GTEST_SKIP() << "io_uring_disabled and io_uring_group are not supported, skipping.";
+  }
+  auto restore = fit::defer([&] {
+    EXPECT_TRUE(files::WriteFile(kDisabledPath, old_disabled));
+    EXPECT_TRUE(files::WriteFile(kGroupPath, old_group));
+  });
+
+  constexpr uid_t kUid = 65532;
+  constexpr gid_t kIoUringGid = 65532;
+  constexpr gid_t kOtherGid = 65531;
+  if (!files::WriteFile(kGroupPath, std::to_string(kIoUringGid))) {
+    GTEST_SKIP() << "Cannot write io_uring_group, skipping.";
+  }
+  ASSERT_TRUE(files::WriteFile(kDisabledPath, "1"));
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kIoUringGid, kOtherGid, kOtherGid), SyscallSucceeds());
+    ASSERT_EQ(setfsgid(kIoUringGid), static_cast<int>(kOtherGid));
+    ASSERT_THAT(setresuid(kUid, kUid, kUid), SyscallSucceeds());
+    ASSERT_FALSE(test_helper::HasSysAdmin());
+
+    struct io_uring_params params = {};
+    fbl::unique_fd fd(io_uring_setup(1, &params));
+    EXPECT_TRUE(fd.is_valid()) << strerror(errno);
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+
+  helper.RunInForkedProcess([] {
+    ASSERT_THAT(setgroups(0, nullptr), SyscallSucceeds());
+    ASSERT_THAT(setresgid(kOtherGid, kIoUringGid, kIoUringGid), SyscallSucceeds());
+    ASSERT_EQ(setfsgid(kOtherGid), static_cast<int>(kIoUringGid));
+    ASSERT_THAT(setresuid(kUid, kUid, kUid), SyscallSucceeds());
+    ASSERT_FALSE(test_helper::HasSysAdmin());
+
+    struct io_uring_params params = {};
+    EXPECT_THAT(io_uring_setup(1, &params), SyscallFailsWithErrno(EPERM));
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
 }
 
 }  // namespace

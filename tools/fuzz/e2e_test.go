@@ -172,8 +172,8 @@ func testFuzzWithoutCorpus(t *testing.T, handle string) {
 		t.Fatalf("output missing signal: %s", out)
 	}
 
-	// This format is emitted by the Go symbolizer, but not the C++ symbolizer
-	if !strings.Contains(out, "(anonymous namespace)::crasher") {
+	// Verify C++ symbolizer resolved the function and source file
+	if !strings.Contains(out, "$anon::crasher") || !strings.Contains(out, "crash.cc:") {
 		t.Fatalf("stack trace missing expected symbol: %s", out)
 	}
 

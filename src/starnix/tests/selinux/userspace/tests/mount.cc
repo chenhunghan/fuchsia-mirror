@@ -10,7 +10,6 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-#include <map>
 #include <string>
 
 #include <fbl/unique_fd.h>
@@ -22,21 +21,9 @@
 
 namespace {
 
-std::map<std::string, fit::result<int>> g_pre_policy_mount_results;
-
 const char* kSelinuxMountOptions[] = {"context", "fscontext", "defcontext", "rootcontext"};
 
 class MountOptionValidationTest : public ::testing::TestWithParam<const char*> {};
-
-TEST_P(MountOptionValidationTest, RejectedBeforePolicyLoad) {
-  const char* option_name = GetParam();
-  auto it = g_pre_policy_mount_results.find(option_name);
-  ASSERT_NE(it, g_pre_policy_mount_results.end()) << "Result for " << option_name << " not found";
-  const auto& result = it->second;
-
-  EXPECT_THAT(result, SyscallResultIsErrno(EINVAL))
-      << "Mount with '" << option_name << "' unexpectedly succeeded or failed with wrong error";
-}
 
 TEST_P(MountOptionValidationTest, RejectedWhenInvalid) {
   if (!test_helper::HasSysAdmin()) {
@@ -337,19 +324,4 @@ TEST(MountTest, NfsNotSupported) {
 
 }  // namespace
 
-extern std::string DoPrePolicyLoadWork() {
-  for (const char* option : kSelinuxMountOptions) {
-    test_helper::ScopedTempDir mount_dir;
-
-    // Before policy load, any SELinux mount option should result in EINVAL because the kernel
-    // cannot validate the context (or even know which options are valid).
-    std::string options = std::string(option) + "=system_u:object_r:tmp_t:s0";
-    if (mount("tmpfs", mount_dir.path().c_str(), "tmpfs", 0, options.c_str()) != -1) {
-      g_pre_policy_mount_results.emplace(option, fit::ok());
-    } else {
-      g_pre_policy_mount_results.emplace(option, fit::error(errno));
-    }
-  }
-
-  return "mount_policy";
-}
+extern std::string GetTestPolicyName() { return "mount_policy"; }

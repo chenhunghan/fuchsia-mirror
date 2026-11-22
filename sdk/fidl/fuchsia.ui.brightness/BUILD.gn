@@ -35,7 +35,6 @@ fidl("fuchsia.ui.brightness") {
   ]
   sdk_area = "UI"
   sdk_category = "partner"
-  enable_hlcpp = true
   excluded_checks = [ "invalid-case-for-decl-name" ]
   stable = true
   visibility = [ "*" ]

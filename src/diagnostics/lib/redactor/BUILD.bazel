@@ -2,12 +2,26 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "wrap_host_rust_test")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
 load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
 load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":redactor-tests"],
+    visibility = ["//src/diagnostics:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":redactor_host_test"],
+    visibility = ["//src/diagnostics:__pkg__"],
+)
 
 rustc_library(
     name = "redactor",
@@ -43,5 +57,4 @@ wrap_host_rust_test(
 fx_unittest_package(
     name = "redactor-tests",
     unit_tests = [":redactor_test"],
-    visibility = ["//src/diagnostics:__subpackages__"],
 )

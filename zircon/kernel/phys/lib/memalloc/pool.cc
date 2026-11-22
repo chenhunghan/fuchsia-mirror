@@ -69,8 +69,8 @@ auto FindContainingRangeAmong(Ranges&& ranges, uint64_t addr, uint64_t size)
 
 }  // namespace
 
-fit::result<fit::failed> Pool::Init(std::span<internal::RangeIterationContext> state,
-                                    uint64_t min_addr, uint64_t max_addr) {
+fit::result<fit::failed> Pool::InitInternal(std::span<internal::RangeIterationContext> state,
+                                            uint64_t min_addr, uint64_t max_addr) {
   RangeStream ranges(state);
 
   const size_t scratch_size = FindNormalizedRangesScratchSize(ranges.size()) * sizeof(void*);

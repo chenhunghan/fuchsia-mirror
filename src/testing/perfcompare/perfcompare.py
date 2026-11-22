@@ -211,7 +211,10 @@ class SingleBootDataset(object):
                     tar.getmembers(), key=lambda member: member.name
                 ):
                     if IsResultsFilename(member.name):
-                        yield json.load(tar.extractfile(member))
+                        member_file = tar.extractfile(member)
+                        # extractfile() returns None for non-regular files.
+                        assert member_file is not None, member.name
+                        yield json.load(member_file)
         else:
             # Read from directory.
             for dir_path, _, file_names in sorted(os.walk(self._filename)):
@@ -506,8 +509,19 @@ def PrintMultibootDatasetTable(multiboot_dataset, out_fh):
     FormatTable(heading_row, rows, out_fh)
 
 
+def _FindIterFiles(pattern):
+    # Lacewing's "latest" directory symlink makes a recursive glob match each
+    # results file twice, so deduplicate by real path.
+    return sorted(
+        set(
+            os.path.realpath(path)
+            for path in glob.glob(pattern, recursive=True)
+        )
+    )
+
+
 def RunLocal(args, out_fh, run_cmd):
-    if glob.glob(args.iter_file) != []:
+    if _FindIterFiles(args.iter_file):
         # We check for this case so that we don't accidentally treat
         # pre-existing files the same as files newly outputted by
         # args.iter_cmd.
@@ -533,9 +547,15 @@ def RunLocal(args, out_fh, run_cmd):
         run_cmd(errexit_prefix + args.reboot_cmd, shell=True)
         run_cmd(errexit_prefix + args.iter_cmd, shell=True)
 
+        dataset_files = _FindIterFiles(args.iter_file)
+        if not dataset_files:
+            raise AssertionError(
+                "No output files matched %r after running --iter_cmd"
+                % args.iter_file
+            )
+
         boot_dir = os.path.join(by_boot_dir, "boot%06d" % boot_idx)
         os.mkdir(boot_dir)
-        dataset_files = sorted(glob.glob(args.iter_file))
         for idx, dataset_file in enumerate(dataset_files):
             new_filename = os.path.join(
                 boot_dir, "results%06d.fuchsiaperf.json" % idx
@@ -674,10 +694,11 @@ def Main(argv, out_fh, run_cmd=subprocess.check_call):
         "--iter_file",
         required=True,
         help="File(s) that the performance test will write its results to. "
-        " This is a glob expression, so it may specify multiple files. "
-        " Each file is expected to be a process dataset in the"
-        " *.fuchsiaperf.json format.  These files will be removed (renamed)"
-        " by this tool",
+        " This is a glob expression (supporting recursive '**' matching),"
+        " so it may specify multiple files, and must match at least one"
+        " file per iteration.  Each file is expected to be a process"
+        " dataset in the *.fuchsiaperf.json format.  These files will be"
+        " removed (renamed) by this tool",
     )
     subparser.add_argument(
         "--reboot_cmd",

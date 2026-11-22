@@ -46,6 +46,17 @@ pub enum UseDecl {
     Dictionary(UseDictionaryDecl),
 }
 
+// `UseDecl` instances for storage and service capabilities remain resident in
+// `ResolvedInstanceState`. Large variants (`EventStream`, `Config`) are boxed.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<UseDecl>() <= 64);
+};
+#[cfg(all(target_pointer_width = "64", fuchsia_api_level_at_least = "HEAD"))]
+const _: () = {
+    assert!(std::mem::size_of::<UseDecl>() == 64);
+};
+
 #[cfg_attr(feature = "serde", derive(Deserialize, Serialize))]
 #[derive(FidlDecl, UseDeclCommon, Debug, Clone, PartialEq, Eq)]
 #[fidl_decl(fidl_table = "fdecl::UseService", source_path = "dictionary")]

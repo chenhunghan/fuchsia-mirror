@@ -13,8 +13,6 @@ load("//tools/fidl/gidl:gidl.bzl", "gidl")
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
-
 _CONFORMANCE_TEST_SOURCE = "src/conformance_test.rs"
 
 gidl(
@@ -56,5 +54,3 @@ fx_unittest_package(
     unit_tests = [":fidl_rust_next_conformance_tests_bin"],
     visibility = ["//src/lib/fidl/rust_next:__subpackages__"],
 )
-
-# LINT.ThenChange(//src/lib/fidl/rust_next/conformance/BUILD.gn)

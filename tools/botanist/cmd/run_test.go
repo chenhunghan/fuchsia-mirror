@@ -6,14 +6,20 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,8 +40,14 @@ import (
 )
 
 type MockTarget struct {
-	mu               sync.Mutex
-	ffx              *targets.FFXInstance
+	mu         sync.Mutex
+	ffx        *targets.FFXInstance
+	serialNum  string
+	sharedData string
+	// emptyNodename makes Nodename() return only a nodename recorded via
+	// SetNodename, emulating targets without a statically configured nodename.
+	emptyNodename    bool
+	nodename         string
 	serialSocketPath string
 	sshClientFunc    func(attempt int) (*sshutil.Client, error)
 	sshClientCalls   int
@@ -73,7 +85,29 @@ func (m *MockTarget) IPv6() (*net.IPAddr, error) {
 func (m *MockTarget) IPv4() (net.IP, error) {
 	return net.ParseIP("127.0.0.1"), nil
 }
-func (m *MockTarget) Nodename() string           { return "mock-target" }
+func (m *MockTarget) Nodename() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.emptyNodename {
+		return m.nodename
+	}
+	return cmp.Or(m.nodename, "mock-target")
+}
+func (m *MockTarget) SetNodename(nodename string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.nodename = nodename
+}
+func (m *MockTarget) SerialNumber() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.serialNum
+}
+func (m *MockTarget) SetSerialNumber(serial string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.serialNum = serial
+}
 func (m *MockTarget) Serial() io.ReadWriteCloser { return nil }
 func (m *MockTarget) SerialSocketPath() string {
 	m.mu.Lock()
@@ -114,7 +148,7 @@ func (m *MockTarget) UseFFXExperiment(exp botanist.Experiment) bool {
 }
 func (m *MockTarget) UseProductBundles() bool { return false }
 func (m *MockTarget) FFXEnv() []string        { return nil }
-func (m *MockTarget) GetSharedData() string   { return "" }
+func (m *MockTarget) GetSharedData() string   { return m.sharedData }
 
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -247,7 +281,7 @@ func TestStartFFXMonitor(t *testing.T) {
 	}
 }
 
-func newFFXTarget(t *testing.T, tmpDir, script string) *MockTarget {
+func newFFXTarget(t *testing.T, tmpDir, script string, mode ffxutil.FFXInvokeMode) *MockTarget {
 	t.Helper()
 	ffxPath := filepath.Join(tmpDir, "ffx")
 	if err := os.WriteFile(ffxPath, []byte(script), 0o755); err != nil {
@@ -261,12 +295,12 @@ func newFFXTarget(t *testing.T, tmpDir, script string) *MockTarget {
 	if err := os.WriteFile(sshPub, []byte("PUBLIC KEY"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	ffxInstance, err := ffxutil.NewFFXInstance(context.Background(), ffxPath, tmpDir, nil, "target", &ffxutil.SSHInfo{SshPriv: sshPriv, SshPub: sshPub}, tmpDir, ffxutil.UseFFXLegacy)
+	ffxInstance, err := ffxutil.NewFFXInstance(context.Background(), ffxPath, tmpDir, nil, "target", &ffxutil.SSHInfo{SshPriv: sshPriv, SshPub: sshPub}, tmpDir, mode)
 	if err != nil {
 		t.Fatalf("failed to create ffx instance: %s", err)
 	}
 	ffxInstance.SetStdoutStderr(io.Discard, io.Discard)
-	return &MockTarget{ffx: &targets.FFXInstance{FFXInstance: ffxInstance}}
+	return &MockTarget{ffx: &targets.FFXInstance{FFXInstance: ffxInstance}, sharedData: ffxInstance.SharedData()}
 }
 
 func TestStartFFXMonitorShutdownWait(t *testing.T) {
@@ -321,7 +355,7 @@ fi
 			tmpDir := t.TempDir()
 			t.Setenv(testrunnerconstants.TestOutDirEnvKey, tmpDir)
 
-			target := newFFXTarget(t, tmpDir, tc.script)
+			target := newFFXTarget(t, tmpDir, tc.script, ffxutil.UseFFXLegacy)
 
 			if tc.cleanup != nil {
 				t.Cleanup(func() {
@@ -689,7 +723,7 @@ func TestExecuteSkipSetupPropagatesTestrunnerError(t *testing.T) {
 func TestDispatchTestsWrapsPackageRepoSetupError(t *testing.T) {
 	t.Run("legacy AddPackageRepository failure", func(t *testing.T) {
 		repoErr := errors.New("connection reset by peer")
-		target := newFFXTarget(t, t.TempDir(), "#!/bin/sh\nexit 0\n")
+		target := newFFXTarget(t, t.TempDir(), "#!/bin/sh\nexit 0\n", ffxutil.UseFFXLegacy)
 		target.addPkgRepoErr = repoErr
 		cmd := &RunCommand{
 			expectsSSH:        true,
@@ -721,7 +755,7 @@ func TestDispatchTestsWrapsPackageRepoSetupError(t *testing.T) {
 
 	t.Run("ffx setupFFXPackageServer failure", func(t *testing.T) {
 		t.Setenv(constants.PkgSrvPortKey, "invalid-port")
-		target := newFFXTarget(t, t.TempDir(), "#!/bin/sh\nexit 0\n")
+		target := newFFXTarget(t, t.TempDir(), "#!/bin/sh\nexit 0\n", ffxutil.UseFFXLegacy)
 		cmd := &RunCommand{
 			expectsSSH:        true,
 			localRepo:         t.TempDir(),
@@ -754,7 +788,7 @@ case "$*" in
 esac
 `
 		repoErr := errors.New("failed to register ffx repository")
-		target := newFFXTarget(t, t.TempDir(), ffxScript)
+		target := newFFXTarget(t, t.TempDir(), ffxScript, ffxutil.UseFFXLegacy)
 		target.addFFXPkgRepoErr = repoErr
 		cmd := &RunCommand{
 			expectsSSH:        true,
@@ -841,7 +875,7 @@ func TestLogBotanistFailure(t *testing.T) {
 func TestDispatchTestsCreatesTestbedConfigAfterTargetSetup(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv(testrunnerconstants.TestOutDirEnvKey, tmpDir)
-	target := newFFXTarget(t, tmpDir, "#!/bin/sh\nexit 0\n")
+	target := newFFXTarget(t, tmpDir, "#!/bin/sh\nexit 0\n", ffxutil.UseFFXLegacy)
 	target.GetFFX().SetTarget("")
 
 	var ffxTargetDuringTestConfig string
@@ -884,4 +918,447 @@ func TestDispatchTestsCreatesTestbedConfigAfterTargetSetup(t *testing.T) {
 	if ffxTargetDuringTestConfig != "127.0.0.1" {
 		t.Errorf("FFX target during TestConfig = %q, want %q", ffxTargetDuringTestConfig, "127.0.0.1")
 	}
+}
+
+func writeTestEd25519Key(t *testing.T, dir string) (string, string) {
+	t.Helper()
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkcs8, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8})
+	privPath := filepath.Join(dir, "id_ed25519")
+	pubPath := privPath + ".pub"
+	if err := os.WriteFile(privPath, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pubPath, []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return privPath, pubPath
+}
+
+func newStrictTestDevice(t *testing.T, ffxScript string, config targets.DeviceConfig, experiments botanist.Experiments) *targets.Device {
+	t.Helper()
+	tmpDir := t.TempDir()
+	ffxPath := filepath.Join(tmpDir, "ffx")
+	if err := os.WriteFile(ffxPath, []byte(ffxScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sshPriv, sshPub := writeTestEd25519Key(t, tmpDir)
+	baseFFX, err := ffxutil.NewFFXInstance(t.Context(), ffxPath, tmpDir, nil, "", &ffxutil.SSHInfo{SshPriv: sshPriv, SshPub: sshPub}, filepath.Join(tmpDir, "out"), ffxutil.UseFFXStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseFFX.SetStdoutStderr(io.Discard, io.Discard)
+
+	config.SSHKeys = []string{sshPriv}
+	dev, err := targets.NewDevice(t.Context(), config, targets.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev.SetFFX(&targets.FFXInstance{FFXInstance: ffxutil.FFXWithTarget(baseFFX, ""), Experiments: experiments}, baseFFX.Env())
+	return dev
+}
+
+func TestSetupFFXUSBDriver(t *testing.T) {
+	t.Run("discovers_usb_address_and_populates_test_config", func(t *testing.T) {
+		baseDir := t.TempDir()
+		t.Chdir(baseDir)
+		// Use a relative output directory to verify USBSocketPath is normalized
+		// to an absolute path for subprocesses running from other directories.
+		t.Setenv(testrunnerconstants.TestOutDirEnvKey, "rel_test_out")
+		wantSocketDir := filepath.Join(baseDir, "rel_test_out")
+		attemptsFile := filepath.Join(baseDir, "attempts")
+		script := fmt.Sprintf(`#!/bin/bash
+attempts=%q
+if [[ "$*" == *"check-ssh-keys"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"usb-driver"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do sleep 1 & wait $!; done
+fi
+if [[ "$*" == *"target list"* ]]; then
+  if [[ "$*" != *"id:USB9876"* ]]; then
+    echo '{"type":"user","code":1,"message":"missing target query: '"$*"'"}'
+    exit 1
+  fi
+  count=0
+  if [[ -f "$attempts" ]]; then
+    count=$(cat "$attempts")
+  fi
+  count=$((count + 1))
+  echo "$count" > "$attempts"
+  if [[ "$count" -lt 2 ]]; then
+    echo '[]'
+    exit 0
+  fi
+  echo '[{"nodename":"<unknown>","rcs_state":"U","serial":"USB9876","addresses":[]},{"nodename":"fuchsia-usb-dut","rcs_state":"N","serial":"USB9876","addresses":[{"type":"Usb","cid":7}]}]'
+  exit 0
+fi
+exit 0
+`, attemptsFile)
+
+		experiments := botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)})
+		dev := newStrictTestDevice(t, script, targets.DeviceConfig{
+			SerialNumber: "USB9876",
+			Network: targets.NetworkProperties{
+				Nodename: "fuchsia-usb-dut",
+				IPv4Addr: "192.168.42.99",
+			},
+		}, experiments)
+
+		cmd := &RunCommand{
+			usbTargetDiscoverBackoff: 10 * time.Millisecond,
+			usbTargetDiscoverTimeout: 5 * time.Second,
+		}
+		cleanup, err := cmd.setupFFXUSBDriver(t.Context(), dev)
+		if err != nil {
+			t.Fatalf("setupFFXUSBDriver() failed: %v", err)
+		}
+		t.Cleanup(cleanup)
+
+		gotSocket := dev.USBSocketPath()
+		if !filepath.IsAbs(gotSocket) {
+			t.Errorf("dev.USBSocketPath() = %q, want absolute path", gotSocket)
+		}
+		if filepath.Dir(gotSocket) != wantSocketDir {
+			t.Errorf("filepath.Dir(dev.USBSocketPath()) = %q, want %q", filepath.Dir(gotSocket), wantSocketDir)
+		}
+		if got := dev.USBAddress(); got != "usb:cid:7" {
+			t.Errorf("dev.USBAddress() = %q, want %q", got, "usb:cid:7")
+		}
+		cfgAny, err := dev.TestConfig(true)
+		if err != nil {
+			t.Fatalf("dev.TestConfig(true) failed: %v", err)
+		}
+		cfg := cfgAny.(targets.FuchsiaTestbedConfig)
+		if cfg.IPv4 != "" || cfg.IPv6 != "" {
+			t.Errorf("TestConfig IPv4=%q IPv6=%q, want both empty", cfg.IPv4, cfg.IPv6)
+		}
+		if cfg.DeviceUSB != "usb:cid:7" {
+			t.Errorf("TestConfig DeviceUSB = %q, want %q", cfg.DeviceUSB, "usb:cid:7")
+		}
+		if cfg.USBSocketPath != gotSocket {
+			t.Errorf("TestConfig USBSocketPath = %q, want %q", cfg.USBSocketPath, gotSocket)
+		}
+	})
+
+	t.Run("multiple_usb_targets_fails", func(t *testing.T) {
+		t.Setenv(testrunnerconstants.TestOutDirEnvKey, t.TempDir())
+		script := `#!/bin/bash
+if [[ "$*" == *"check-ssh-keys"* ]]; then
+  exit 0
+fi
+if [[ "$*" == *"usb-driver"* ]]; then
+  trap 'exit 0' TERM INT
+  while true; do sleep 1 & wait $!; done
+fi
+if [[ "$*" == *"target list"* ]]; then
+  echo '[{"nodename":"dut-a","rcs_state":"N","serial":"USB9876","addresses":[{"type":"Usb","cid":7}]},{"nodename":"dut-b","rcs_state":"N","serial":"USB9876","addresses":[{"type":"Usb","cid":8}]}]'
+  exit 0
+fi
+exit 0
+`
+		experiments := botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)})
+		dev := newStrictTestDevice(t, script, targets.DeviceConfig{
+			SerialNumber: "USB9876",
+			Network:      targets.NetworkProperties{Nodename: "fuchsia-usb-dut"},
+		}, experiments)
+		cmd := &RunCommand{
+			usbTargetDiscoverBackoff: 10 * time.Millisecond,
+			usbTargetDiscoverTimeout: 5 * time.Second,
+		}
+		cleanup, err := cmd.setupFFXUSBDriver(t.Context(), dev)
+		cleanup()
+		if err == nil {
+			t.Fatal("setupFFXUSBDriver() with multiple USB targets = nil, want error")
+		}
+	})
+
+	t.Run("missing_serial_fails", func(t *testing.T) {
+		t.Setenv(testrunnerconstants.TestOutDirEnvKey, t.TempDir())
+		experiments := botanist.GetExperiments([]string{string(botanist.ForceFFXUSB)})
+		dev := newStrictTestDevice(t, "#!/bin/bash\nexit 0\n", targets.DeviceConfig{
+			Network: targets.NetworkProperties{Nodename: "fuchsia-usb-dut"},
+		}, experiments)
+		cmd := &RunCommand{}
+		cleanup, err := cmd.setupFFXUSBDriver(t.Context(), dev)
+		cleanup()
+		if err == nil {
+			t.Fatal("setupFFXUSBDriver() with missing serial = nil, want error")
+		}
+	})
+}
+
+// mockFFXPrelude begins a mock ffx script that accepts `check-ssh-keys`, which
+// runs when an FFXInstance is created, so the rest of the script is free to
+// fail by default.
+const mockFFXPrelude = "#!/bin/bash\nif [[ \"$*\" == *\"check-ssh-keys\"* ]]; then\n  exit 0\nfi\n"
+
+// checkRegisteredTargets checks the contents of ffx's
+// $SHARED_DATA/targets.json, which must not exist if want is nil.
+func checkRegisteredTargets(t *testing.T, ffx *ffxutil.FFXInstance, want []ffxutil.RegisteredTarget) {
+	t.Helper()
+	got, err := ffx.LoadRegisteredTargets()
+	if want == nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("LoadRegisteredTargets() = %+v, %v; want os.ErrNotExist", got, err)
+		}
+		return
+	}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("LoadRegisteredTargets() = %+v, %v; want %+v", got, err, want)
+	}
+}
+
+func TestIdentifyTarget(t *testing.T) {
+	const defaultAddr = "192.168.42.10"
+	for _, tc := range []struct {
+		name          string
+		initialSerial string
+		emptyNodename bool
+		scriptBody    string
+		wantSerial    string
+		wantNodename  string
+		wantLogSubstr string
+		// wantNoFFXCall means identifyTarget must not query ffx.
+		wantNoFFXCall bool
+	}{
+		{
+			name:         "populates_serial_when_rcs_ready",
+			scriptBody:   `echo '[{"nodename":"fuchsia-5254-1234-1234","rcs_state":"Y","serial":"EM-B89E30F7F"}]'`,
+			wantSerial:   "EM-B89E30F7F",
+			wantNodename: "mock-target",
+		},
+		{
+			name:          "discovers_nodename_and_serial_when_target_nodename_empty",
+			emptyNodename: true,
+			scriptBody:    `echo '[{"nodename":"fuchsia-gce-1","rcs_state":"Y","serial":"GC-998877"}]'`,
+			wantSerial:    "GC-998877",
+			wantNodename:  "fuchsia-gce-1",
+		},
+		{
+			name:          "skips_ffx_call_when_serial_and_nodename_already_known",
+			initialSerial: "STATIC-SER001",
+			scriptBody:    "exit 1",
+			wantSerial:    "STATIC-SER001",
+			wantNodename:  "mock-target",
+			wantNoFFXCall: true,
+		},
+		{
+			name:          "logs_and_ignores_failing_ffx",
+			emptyNodename: true,
+			scriptBody:    "exit 1",
+			wantLogSubstr: "unable to identify target <unknown>",
+		},
+		{
+			name:          "logs_and_ignores_when_rcs_not_ready",
+			scriptBody:    `echo '[{"nodename":"192.168.42.10","rcs_state":"N","serial":"<unknown>"}]'`,
+			wantNodename:  "mock-target",
+			wantLogSubstr: "RCS not ready",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := fmt.Sprintf(`if [[ "$*" != *"-c discovery.timeout=15000"* || "$*" != *"target list %s"* ]]; then
+  echo "unexpected ffx args: $*" >&2
+  exit 1
+fi
+%s
+`, defaultAddr, tc.scriptBody)
+			target := newFFXTarget(t, t.TempDir(), mockFFXPrelude+script, ffxutil.UseFFXStrict)
+			target.emptyNodename = tc.emptyNodename
+			if tc.initialSerial != "" {
+				target.SetSerialNumber(tc.initialSerial)
+			}
+			var logBuf syncBuffer
+			logCtx := logger.WithLogger(t.Context(), logger.NewLogger(logger.DebugLevel, color.NewColor(color.ColorNever), &logBuf, &logBuf, ""))
+			identifyTarget(logCtx, target, defaultAddr)
+
+			if got := target.Nodename(); got != tc.wantNodename {
+				t.Errorf("identifyTarget() target.Nodename() = %q, want %q", got, tc.wantNodename)
+			}
+			if got := target.SerialNumber(); got != tc.wantSerial {
+				t.Errorf("identifyTarget() target.SerialNumber() = %q, want %q", got, tc.wantSerial)
+			}
+			// The mock ffx fails every query in the skip case, which
+			// identifyTarget would log.
+			if tc.wantNoFFXCall && strings.Contains(logBuf.String(), "unable to identify target") {
+				t.Errorf("identifyTarget() queried ffx; log = %q", logBuf.String())
+			}
+			if tc.wantLogSubstr != "" && !strings.Contains(logBuf.String(), tc.wantLogSubstr) {
+				t.Errorf("identifyTarget() log = %q, want substring %q", logBuf.String(), tc.wantLogSubstr)
+			}
+		})
+	}
+}
+
+func TestDispatchTests_UseSerialTargetID(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		experiments    []string
+		emptyNodename  bool
+		wantSerial     string
+		wantTarget     string
+		wantRegistered []ffxutil.RegisteredTarget
+		// wantNodenameEnv is the FUCHSIA_NODENAME that testrunner runs with.
+		wantNodenameEnv string
+	}{
+		{
+			name:        "with_use_serial_target_id",
+			experiments: []string{string(botanist.UseSerialTargetID)},
+			wantSerial:  "EM-DISPATCH1",
+			wantTarget:  "id:EM-DISPATCH1",
+			wantRegistered: []ffxutil.RegisteredTarget{
+				{Nodename: "mock-target", ID: "EM-DISPATCH1", Address: "127.0.0.1"},
+			},
+			wantNodenameEnv: "mock-target",
+		},
+		{
+			// A discovered nodename is registered, but FUCHSIA_NODENAME stays
+			// empty so testrunner does not take the target for a physical
+			// device with a static nodename.
+			name:          "discovered_nodename_not_exported",
+			experiments:   []string{string(botanist.UseSerialTargetID)},
+			emptyNodename: true,
+			wantSerial:    "EM-DISPATCH1",
+			wantTarget:    "id:EM-DISPATCH1",
+			wantRegistered: []ffxutil.RegisteredTarget{
+				{Nodename: "mock-target", ID: "EM-DISPATCH1", Address: "127.0.0.1"},
+			},
+		},
+		{
+			// Without the experiment, botanist neither queries the target nor
+			// records it in testbed.json or $SHARED_DATA/targets.json.
+			name:            "without_experiment",
+			wantTarget:      "127.0.0.1",
+			wantNodenameEnv: "mock-target",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := `if [[ "$*" == *"target list 127.0.0.1"* ]]; then
+  echo '[{"nodename":"mock-target","rcs_state":"Y","serial":"EM-DISPATCH1"}]'
+fi
+`
+			tmpDir := t.TempDir()
+			target := newFFXTarget(t, tmpDir, mockFFXPrelude+script, ffxutil.UseFFXStrict)
+			target.emptyNodename = tc.emptyNodename
+			target.testConfigFunc = func(expectsSSH bool) (any, error) {
+				return targets.TestbedConfig(target, expectsSSH, nil)
+			}
+			experiments := botanist.GetExperiments(tc.experiments)
+			target.ffx.Experiments = experiments
+
+			t.Setenv(testrunnerconstants.TestOutDirEnvKey, tmpDir)
+			t.Setenv(constants.NodenameEnvKey, "nodename-not-set-by-botanist")
+
+			cmd := &RunCommand{
+				ffxPath:           filepath.Join(tmpDir, "ffx"),
+				expectsSSH:        true,
+				productBundles:    "test-bundles",
+				productBundleName: "test-bundle-name",
+			}
+			eg, ctx := errgroup.WithContext(t.Context())
+			cmd.dispatchTests(
+				ctx,
+				func() {},
+				eg,
+				[]targets.Base{target},
+				[]targets.FuchsiaTarget{target},
+				target,
+				nil,
+				filepath.Join(tmpDir, "nonexistent-tests.json"),
+				experiments,
+			)
+			_ = eg.Wait()
+
+			if len(cmd.testrunnerOptions.TestbedConfig) != 1 {
+				t.Fatalf("len(TestbedConfig) = %d, want 1", len(cmd.testrunnerOptions.TestbedConfig))
+			}
+			gotCfg, ok := cmd.testrunnerOptions.TestbedConfig[0].(targets.FuchsiaTestbedConfig)
+			if !ok {
+				t.Fatalf("TestbedConfig[0] has type %T, want targets.FuchsiaTestbedConfig", cmd.testrunnerOptions.TestbedConfig[0])
+			}
+			if gotCfg.DeviceSerial != tc.wantSerial {
+				t.Errorf("TestbedConfig[0].DeviceSerial = %q, want %q", gotCfg.DeviceSerial, tc.wantSerial)
+			}
+			if got := target.SerialNumber(); got != tc.wantSerial {
+				t.Errorf("target.SerialNumber() = %q, want %q", got, tc.wantSerial)
+			}
+			if got := target.GetFFX().GetTarget(); got != tc.wantTarget {
+				t.Errorf("target.GetFFX().GetTarget() = %q, want %q", got, tc.wantTarget)
+			}
+			if got := os.Getenv(constants.NodenameEnvKey); got != tc.wantNodenameEnv {
+				t.Errorf("%s = %q, want %q", constants.NodenameEnvKey, got, tc.wantNodenameEnv)
+			}
+
+			checkRegisteredTargets(t, target.ffx.FFXInstance, tc.wantRegistered)
+		})
+	}
+}
+
+func TestConfigureAndRegisterTarget_MultiTarget(t *testing.T) {
+	script := `if [[ "$*" == *"target list 192.168.42.12"* ]]; then
+  echo '[{"nodename":"fuchsia-gce-1","rcs_state":"Y","serial":"GC-998877"}]'
+  exit 0
+fi
+exit 1
+`
+	base := newFFXTarget(t, t.TempDir(), mockFFXPrelude+script, ffxutil.UseFFXStrict)
+	experiments := botanist.GetExperiments([]string{string(botanist.UseSerialTargetID)})
+
+	cmd := &RunCommand{}
+	for _, tc := range []struct {
+		ip           string
+		nodename     string
+		serial       string
+		wantNodename string
+		wantSerial   string
+		// wantTarget is the expected ffx target, or empty for the IP address.
+		wantTarget string
+	}{
+		// A target with a statically known serial number and nodename.
+		{ip: "192.168.42.10", nodename: "fuchsia-dev-1", serial: "SER001", wantNodename: "fuchsia-dev-1", wantSerial: "SER001", wantTarget: "id:SER001"},
+		// A target identified at runtime.
+		{ip: "192.168.42.12", wantNodename: "fuchsia-gce-1", wantSerial: "GC-998877", wantTarget: "id:GC-998877"},
+		// A target that can't be identified keeps using its IP address.
+		{ip: "192.168.42.13"},
+	} {
+		target := &MockTarget{
+			ffx:           &targets.FFXInstance{FFXInstance: ffxutil.FFXWithTarget(base.ffx.FFXInstance, "")},
+			nodename:      tc.nodename,
+			emptyNodename: tc.nodename == "",
+			serialNum:     tc.serial,
+			sharedData:    base.sharedData,
+		}
+		addr := net.IPAddr{IP: net.ParseIP(tc.ip)}
+		forceUSB, cleanup, err := cmd.configureAndRegisterTarget(t.Context(), target, addr, experiments)
+		if err != nil {
+			t.Fatalf("configureAndRegisterTarget(%s) failed: %s", tc.ip, err)
+		}
+		t.Cleanup(cleanup)
+		if forceUSB {
+			t.Errorf("configureAndRegisterTarget(%s) forceUSB = %v, want false", tc.ip, forceUSB)
+		}
+		wantTarget := cmp.Or(tc.wantTarget, tc.ip)
+		if got := target.GetFFX().GetTarget(); got != wantTarget {
+			t.Errorf("configureAndRegisterTarget(%s) GetTarget() = %q, want %q", tc.ip, got, wantTarget)
+		}
+		if got := target.Nodename(); got != tc.wantNodename {
+			t.Errorf("configureAndRegisterTarget(%s) Nodename() = %q, want %q", tc.ip, got, tc.wantNodename)
+		}
+		if got := target.SerialNumber(); got != tc.wantSerial {
+			t.Errorf("configureAndRegisterTarget(%s) SerialNumber() = %q, want %q", tc.ip, got, tc.wantSerial)
+		}
+	}
+
+	checkRegisteredTargets(t, base.ffx.FFXInstance, []ffxutil.RegisteredTarget{
+		{Nodename: "fuchsia-dev-1", ID: "SER001", Address: "192.168.42.10"},
+		{Nodename: "fuchsia-gce-1", ID: "GC-998877", Address: "192.168.42.12"},
+	})
 }

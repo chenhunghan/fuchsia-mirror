@@ -3,7 +3,7 @@
 # found in the LICENSE file.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
 load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
 
@@ -26,12 +26,13 @@ go_library(
         "utils.go",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/fuzz",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//third_party/golibs:github.com/golang/glog",
         "//third_party/golibs:github.com/kr/fs",
         "//third_party/golibs:github.com/pkg/sftp",
         "//third_party/golibs:golang.org/x/crypto/ssh",
+        "//tools/lib/productbundle",
         "//tools/qemu",
     ],
 )
@@ -41,7 +42,7 @@ go_binary_host_tool(
     srcs = [
         "cmd/fuzz.go",
     ],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//visibility:public"],
     deps = [
         ":lib",
@@ -71,7 +72,7 @@ host_go_test(
         "utils_test.go",
     ],
     embed = [":lib"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__pkg__"],
     deps = [
         "//third_party/golibs:github.com/golang/glog",

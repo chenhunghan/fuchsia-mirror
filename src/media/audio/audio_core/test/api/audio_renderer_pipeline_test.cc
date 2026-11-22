@@ -5,6 +5,7 @@
 #include <lib/syslog/cpp/macros.h>
 #include <zircon/types.h>
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -1073,6 +1074,61 @@ TEST_F(AudioRendererPipelineTuningTest, AudioTunerUpdateEffect) {
   opts.test_label = "check silence";
   CompareAudioBuffers(AudioBufferSlice(&ring_buffer, num_frames, output()->frame_count()),
                       AudioBufferSlice<ASF::SIGNED_16>(), opts);
+}
+
+// Verifies UltrasoundRenderer attenuates a 1 kHz tone by >50 dB while preserving a 28 kHz tone.
+TEST_F(UltrasoundRendererPipelineTest, FiltersAudibleFrequencies) {
+  constexpr int64_t kFftFrames = 4096;
+  constexpr int32_t kAudibleBin = 43;       // ~1007.8 Hz
+  constexpr int32_t kUltrasonicBin = 1195;  // ~28007.8 Hz
+
+  constexpr int64_t kTotalInputFrames = 16384;  // ~170.7ms at 96kHz
+  AudioBuffer<kSampleFormat> input_buffer(kUltrasoundFormat, kTotalInputFrames);
+  for (int64_t frame = 0; frame < kTotalInputFrames; ++frame) {
+    double angle1 = 2.0 * M_PI * static_cast<double>(kAudibleBin) *
+                    static_cast<double>(frame % kFftFrames) / static_cast<double>(kFftFrames);
+    double angle2 = 2.0 * M_PI * static_cast<double>(kUltrasonicBin) *
+                    static_cast<double>(frame % kFftFrames) / static_cast<double>(kFftFrames);
+    float val = static_cast<float>(0.5 * std::cos(angle1) + 0.5 * std::cos(angle2));
+    for (int32_t ch = 0; ch < static_cast<int32_t>(kUltrasoundChannels); ++ch) {
+      input_buffer.samples()[input_buffer.SampleIndex(frame, ch)] = val;
+    }
+  }
+
+  auto packets = renderer()->AppendSlice(input_buffer, kFftFrames);
+  renderer()->PlaySynchronized(this, output(), 0);
+  renderer()->WaitForPackets(this, packets);
+  auto ring_buffer = output()->SnapshotRingBuffer();
+
+  if constexpr (!kEnableAllOverflowAndUnderflowChecksInRealtimeTests) {
+    // In case of underflows, exit NOW (don't assess this buffer).
+    // TODO(https://fxbug.dev/42160300): Remove workarounds when underflow conditions are fixed.
+    if (DeviceHasUnderflows(DeviceUniqueIdToString(kUltrasoundOutputDeviceId))) {
+      GTEST_SKIP() << "Skipping data checks due to underflows";
+    }
+  }
+
+  // Pick an FFT window starting at frame kFftFrames to ensure we are well into steady state.
+  constexpr int64_t kSliceStart = kFftFrames;
+  ASSERT_LE(kSliceStart + kFftFrames, ring_buffer.NumFrames());
+
+  auto mono_format = Format::Create<kSampleFormat>(1, kUltrasoundSampleRate).take_value();
+  for (uint32_t ch = 0; ch < kUltrasoundChannels; ++ch) {
+    AudioBuffer<kSampleFormat> mono_buffer(mono_format, kFftFrames);
+    for (int64_t i = 0; i < kFftFrames; ++i) {
+      mono_buffer.samples()[i] = ring_buffer.SampleAt(kSliceStart + i, ch);
+    }
+
+    auto results = MeasureAudioFreqs(AudioBufferSlice(&mono_buffer), {kAudibleBin, kUltrasonicBin});
+
+    // Audible tone (1 kHz) must be attenuated by > 50 dB relative to input amplitude of 0.5.
+    // 50 dB attenuation corresponds to factor 10^(-50/20) = 0.003162, so magnitude < 0.5 * 0.003162
+    // = 0.00158.
+    EXPECT_LT(results.magnitudes[kAudibleBin], 0.00158f) << "channel " << ch;
+
+    // Ultrasonic tone (28 kHz) must be preserved at unity gain (input amplitude was 0.5).
+    EXPECT_NEAR(results.magnitudes[kUltrasonicBin], 0.5f, 0.05f) << "channel " << ch;
+  }
 }
 
 // TODO(b/318435490): more deeply test renderer data pipeline methods:

@@ -4,418 +4,301 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::exceptionate::Exceptionate;
 use super::handle::KernelHandle;
 use super::handle_table::HandleTable;
 use super::job_dispatcher::JobDispatcher;
-use super::process_dispatcher::{ProcessDispatcher, ProcessState, ShareableProcessState};
+use super::process_dispatcher::{ProcessDispatcher, ProcessDispatcherState, ShareableProcessState};
 use super::thread_dispatcher::ThreadDispatcher;
-use crate::arch_rs::UserEntryState;
+use super::vm_address_region_dispatcher::VmAddressRegionDispatcher;
+use crate::arch_rs::ArchExceptionContext;
+use crate::vm::vm_aspace::{ShareOpt, VmAspace};
 use core::mem::MaybeUninit;
-use zx_types::{
-    zx_info_process_t, zx_info_task_runtime_t, zx_info_task_stats_t, zx_koid_t, zx_rights_t,
-    zx_status_t,
-};
+use fbl::RefPtr;
+use zx_status::Status;
+use zx_types::{zx_koid_t, zx_rights_t, zx_status_t, zx_vaddr_t};
 
 unsafe extern "C" {
-    /// Returns a raw pointer to the current process dispatcher.
+    /// Allocates and constructs a `ProcessDispatcher`, initializing `out_handle` with a
+    /// `KernelHandle` owning it.
     ///
     /// # Safety
     ///
-    /// The caller must only call this when executing within a valid thread context.
-    pub(crate) fn cpp_process_dispatcher_current() -> *mut ProcessDispatcher;
+    /// `shareable_state` and `job` must carry acquired reference counts that are transferred to
+    /// the constructor. `name_ptr` must point to `name_len` readable bytes, and `out_handle`
+    /// must point to valid uninitialized storage.
+    pub(super) fn cpp_process_dispatcher_alloc(
+        shareable_state: *mut ShareableProcessState,
+        job: *mut JobDispatcher,
+        name_ptr: *const core::ffi::c_char,
+        name_len: usize,
+        flags: u32,
+        out_handle: *mut MaybeUninit<KernelHandle<ProcessDispatcher>>,
+    ) -> zx_status_t;
 
-    /// Looks up a process given its koid, returning an exported `RefPtr<ProcessDispatcher>` raw
-    /// pointer (or null if not found).
-    ///
-    /// # Panics
-    ///
-    /// Panics if called before root job initialization or from a context where acquiring
-    /// `CriticalMutex` is not permitted (such as IRQ context).
-    pub(crate) fn cpp_process_dispatcher_lookup_process_by_id(
-        koid: zx_koid_t,
-    ) -> *mut ProcessDispatcher;
+    /// Allocates a new `ShareableProcessState`, returning an acquired reference or null on OOM.
+    pub(super) fn cpp_shareable_process_state_create() -> *mut ShareableProcessState;
 
-    /// Checks if the given ProcessDispatcher is the current process.
+    /// Returns the `fbl::RefCounted` subobject of `state`.
     ///
     /// # Safety
     ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_is_current(process: *const ProcessDispatcher) -> bool;
+    /// `state` must point to a valid `ShareableProcessState`.
+    pub(super) fn cpp_shareable_process_state_get_ref_counted(
+        state: *mut ShareableProcessState,
+    ) -> *mut ();
 
-    /// Calls into C++ implementation to kill a process.
+    /// Deletes `state` once its last reference is gone.
     ///
     /// # Safety
     ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_kill(process: *mut ProcessDispatcher, retcode: i64);
+    /// `state` must point to a `ShareableProcessState` to which no reference remains.
+    pub(super) fn cpp_shareable_process_state_free(state: *mut ShareableProcessState);
 
-    /// Calls into C++ implementation to suspend a process.
+    /// Increments the share count of `state`; returns false if it was already destroyed.
     ///
     /// # Safety
     ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_suspend(process: *mut ProcessDispatcher) -> zx_status_t;
+    /// `state` must point to a valid `ShareableProcessState`.
+    pub(super) fn cpp_shareable_process_state_increment_share_count(
+        state: *mut ShareableProcessState,
+    ) -> bool;
 
-    /// Calls into C++ implementation to resume a process.
+    /// Decrements the share count of `state`, cleaning up the shared resources at zero.
     ///
     /// # Safety
     ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_resume(process: *mut ProcessDispatcher);
+    /// `state` must point to a valid `ShareableProcessState`.
+    pub(super) fn cpp_shareable_process_state_decrement_share_count(
+        state: *mut ShareableProcessState,
+    );
 
-    /// Returns a pointer to the handle table of `process`.
+    /// Initializes the shared address space and futex context of `state`.
     ///
     /// # Safety
     ///
-    /// `process` must point to a valid `ProcessDispatcher`.
+    /// `state` must point to a valid, uninitialized `ShareableProcessState` (`share_count > 0`)
+    /// to which the caller has exclusive access (no prior or concurrent calls to initialize or
+    /// read `futex_context` / `aspace`), and `aspace_name` must point to a NUL-terminated C
+    /// string.
+    pub(super) fn cpp_shareable_process_state_initialize(
+        state: *mut ShareableProcessState,
+        aspace_base: zx_vaddr_t,
+        aspace_size: usize,
+        aspace_name: *const core::ffi::c_char,
+        share_opt: ShareOpt,
+    ) -> bool;
+
+    /// Returns the number of processes sharing `state`.
+    ///
+    /// # Safety
+    ///
+    /// `state` must point to a valid `ShareableProcessState`.
+    pub(super) fn cpp_shareable_process_state_share_count(
+        state: *const ShareableProcessState,
+    ) -> u64;
+
+    /// Returns a pointer to the handle table of `state`.
+    ///
+    /// # Safety
+    ///
+    /// `state` must point to a valid `ShareableProcessState`.
     #[allow(improper_ctypes)]
-    pub(crate) fn cpp_process_dispatcher_handle_table(
-        process: *const ProcessDispatcher,
+    pub(super) fn cpp_shareable_process_state_handle_table(
+        state: *const ShareableProcessState,
     ) -> *const HandleTable;
 
-    /// Returns a pointer to the shareable process state of `process`.
+    /// Returns a pointer to the `FutexContext` storage of `state`.
     ///
     /// # Safety
     ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(super) fn cpp_process_dispatcher_shareable_state(
-        process: *const ProcessDispatcher,
-    ) -> *const ShareableProcessState;
+    /// `state` must point to a valid `ShareableProcessState` on which
+    /// `cpp_shareable_process_state_initialize` has returned `true`.
+    pub(super) fn cpp_shareable_process_state_futex_context(
+        state: *const ShareableProcessState,
+    ) -> *mut core::ffi::c_void;
 
     /// Returns a pointer to the address space of `state`.
     ///
     /// # Safety
     ///
-    /// `state` must point to a valid `ShareableProcessState`.
+    /// `state` must point to a valid `ShareableProcessState` on which
+    /// `cpp_shareable_process_state_initialize` has returned `true`.
     pub(super) fn cpp_shareable_process_state_aspace(
         state: *const ShareableProcessState,
-    ) -> *const crate::vm::vm_aspace::VmAspace;
+    ) -> *mut VmAspace;
+}
 
-    /// Enforces basic policy for the given process.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_enforce_basic_policy(
-        process: *mut ProcessDispatcher,
-        policy: u32,
-    ) -> zx_status_t;
+// Exported FFI functions for C++ callers:
 
-    /// Returns the timer slack policy for the given process.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher` and `out_slack` must point to valid
-    /// memory.
-    pub(crate) fn cpp_process_dispatcher_get_timer_slack_policy(
-        process: *const ProcessDispatcher,
-        out_slack: *mut crate::kernel::deadline::TimerSlack,
-    );
+/// Initializes `ProcessDispatcherState` in-place.
+///
+/// # Safety
+///
+/// `state` must point to valid uninitialized memory for `ProcessDispatcherState`.
+/// `shareable_state` and `job` must carry acquired reference counts, and `name_ptr` must point to
+/// `name_len` readable bytes whenever `name_len > 0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_process_dispatcher_state_init(
+    state: *mut ProcessDispatcherState,
+    disp: &ProcessDispatcher,
+    shareable_state: *mut ShareableProcessState,
+    job: *mut JobDispatcher,
+    name_ptr: *const core::ffi::c_char,
+    name_len: usize,
+    flags: u32,
+) {
+    // SAFETY: The caller transferred reference counts on `shareable_state` and `job`, guarantees
+    // `name_ptr` is readable for `name_len` bytes, and that `state` points to uninitialized
+    // storage of the right size and alignment.
+    unsafe {
+        let shareable_state = RefPtr::from_raw(shareable_state);
+        let job = RefPtr::from_raw(job);
+        let name = zr::slice_from_raw_parts(name_ptr.cast(), name_len);
+        let _ = pin_init::PinInit::__pinned_init(
+            ProcessDispatcherState::init(disp, shareable_state, job, name, flags),
+            state,
+        );
+    }
+}
 
-    /// Retrieves process info from C++.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_get_info(
-        process: *const ProcessDispatcher,
-    ) -> zx_info_process_t;
+/// Creates a new `ProcessDispatcher` and its root VMAR dispatcher.
+///
+/// # Safety
+///
+/// `job` must carry an acquired reference count. `name_ptr` must point to `name_len` readable
+/// bytes. All out pointers must point to valid uninitialized memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_process_dispatcher_create(
+    job: *mut JobDispatcher,
+    name_ptr: *const core::ffi::c_char,
+    name_len: usize,
+    flags: u32,
+    out_handle: *mut MaybeUninit<KernelHandle<ProcessDispatcher>>,
+    out_rights: *mut MaybeUninit<zx_rights_t>,
+    out_vmar_handle: *mut MaybeUninit<KernelHandle<VmAddressRegionDispatcher>>,
+    out_vmar_rights: *mut MaybeUninit<zx_rights_t>,
+) -> zx_status_t {
+    // SAFETY: The caller transferred a reference count on `job` and guarantees `name_ptr` is
+    // readable for `name_len` bytes whenever `name_len > 0`.
+    let (job, name) =
+        unsafe { (RefPtr::from_raw(job), zr::slice_from_raw_parts(name_ptr.cast(), name_len)) };
+    match ProcessDispatcher::create(job, name, flags) {
+        Ok((handle, rights, vmar_handle, vmar_rights)) => {
+            // SAFETY: The caller guarantees all out pointers are valid for writes.
+            unsafe {
+                (*out_handle).write(handle);
+                (*out_rights).write(rights);
+                (*out_vmar_handle).write(vmar_handle);
+                (*out_vmar_rights).write(vmar_rights);
+            }
+            zx_types::ZX_OK
+        }
+        Err(status) => status.into_raw(),
+    }
+}
 
-    /// Returns the current `ProcessDispatcher::State` of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(super) fn cpp_process_dispatcher_state(process: *const ProcessDispatcher) -> ProcessState;
+/// Runs the shutdown sequence for a process whose last handle closed before it started.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_on_zero_handles(process: &ProcessDispatcher) {
+    process.on_zero_handles();
+}
 
-    /// Retrieves task memory statistics for `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher` and `out_stats` must point to valid
-    /// writable memory.
-    pub(crate) fn cpp_process_dispatcher_get_stats(
-        process: *const ProcessDispatcher,
-        out_stats: *mut zx_info_task_stats_t,
-    ) -> zx_status_t;
+/// Returns the koid of the process's job.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_get_related_koid(
+    process: &ProcessDispatcher,
+) -> zx_koid_t {
+    process.get_related_koid()
+}
 
-    /// Retrieves task runtime statistics for `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_get_runtime_stats(
-        process: *const ProcessDispatcher,
-    ) -> zx_info_task_runtime_t;
+/// Copies the process name into `out_name`.
+///
+/// # Safety
+///
+/// `out_name` must point to at least `ZX_MAX_NAME_LEN` writable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_process_dispatcher_get_name(
+    process: &ProcessDispatcher,
+    out_name: *mut core::ffi::c_char,
+) -> zx_status_t {
+    // SAFETY: The caller guarantees `out_name` points to `ZX_MAX_NAME_LEN` writable bytes.
+    let name_buf = unsafe { &mut *out_name.cast::<[u8; zx_types::ZX_MAX_NAME_LEN]>() };
+    Status::result_into_raw(process.get_name(name_buf))
+}
 
-    /// Retrieves the KOIDs of all threads in `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher` and `out_threads` and `out_count` must
-    /// point to valid writable memory.
-    pub(crate) fn cpp_process_dispatcher_get_threads(
-        process: *const ProcessDispatcher,
-        out_threads: *mut *mut zx_koid_t,
-        out_count: *mut usize,
-    ) -> zx_status_t;
+/// Sets the process name.
+///
+/// # Safety
+///
+/// If `len > 0`, `name` must point to at least `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_process_dispatcher_set_name(
+    process: &ProcessDispatcher,
+    name: *const core::ffi::c_char,
+    len: usize,
+) -> zx_status_t {
+    // SAFETY: The caller guarantees `name` is readable for `len` bytes whenever `len > 0`.
+    let name = unsafe { zr::slice_from_raw_parts(name.cast(), len) };
+    Status::result_into_raw(process.set_name(name))
+}
 
-    /// Sets a process as critical to a job.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    /// `job` must point to a valid `JobDispatcher` whose reference was transferred.
-    pub(crate) fn cpp_process_dispatcher_set_critical_to_job(
-        process: *mut ProcessDispatcher,
-        job: *mut JobDispatcher,
-        retcode_nonzero: bool,
-    ) -> zx_status_t;
+/// Returns the process's job with an acquired reference count.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_job(process: &ProcessDispatcher) -> *mut JobDispatcher {
+    RefPtr::into_raw(process.job().clone()).cast_mut()
+}
 
-    /// Creates a new process and its root VMAR under the specified job.
-    ///
-    /// # Safety
-    ///
-    /// `job` must point to a valid `JobDispatcher` whose reference count was transferred.
-    /// `name_ptr` must point to `name_len` readable bytes.
-    /// Output handle and rights pointers must point to writable memory.
-    pub(crate) fn cpp_process_dispatcher_create(
-        job: *mut JobDispatcher,
-        name_ptr: *const core::ffi::c_char,
-        name_len: usize,
-        flags: u32,
-        out_proc_handle: *mut MaybeUninit<KernelHandle<ProcessDispatcher>>,
-        out_proc_rights: *mut MaybeUninit<zx_rights_t>,
-        out_vmar_handle: *mut MaybeUninit<
-            KernelHandle<super::vm_address_region_dispatcher::VmAddressRegionDispatcher>,
-        >,
-        out_vmar_rights: *mut MaybeUninit<zx_rights_t>,
-    ) -> zx_status_t;
+/// Kills the process with `retcode`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_kill(process: &ProcessDispatcher, retcode: i64) {
+    process.kill(retcode);
+}
 
-    /// Creates a new shared process that shares state with `shared_proc`.
-    ///
-    /// # Safety
-    ///
-    /// `shared_proc` must point to a valid `ProcessDispatcher` whose reference count was
-    /// transferred.
-    /// `name_ptr` must point to `name_len` readable bytes.
-    /// Output handle and rights pointers must point to writable memory.
-    pub(crate) fn cpp_process_dispatcher_create_shared(
-        shared_proc: *mut ProcessDispatcher,
-        name_ptr: *const core::ffi::c_char,
-        name_len: usize,
-        flags: u32,
-        out_proc_handle: *mut MaybeUninit<KernelHandle<ProcessDispatcher>>,
-        out_proc_rights: *mut MaybeUninit<zx_rights_t>,
-        out_restricted_vmar_handle: *mut MaybeUninit<
-            KernelHandle<super::vm_address_region_dispatcher::VmAddressRegionDispatcher>,
-        >,
-        out_restricted_vmar_rights: *mut MaybeUninit<zx_rights_t>,
-    ) -> zx_status_t;
+/// Returns the process's debug `Exceptionate`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_debug_exceptionate(
+    process: &ProcessDispatcher,
+) -> &Exceptionate {
+    process.debug_exceptionate()
+}
 
-    /// Exits the current process with the given return code.
-    ///
-    /// # Safety
-    ///
-    /// Must only be called within a valid running thread context. Terminates current process
-    /// execution.
-    pub(crate) fn cpp_process_dispatcher_exit_current(retcode: i64) -> !;
+/// Returns a borrowed pointer to the process's `ShareableProcessState`.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_shareable_state(
+    process: &ProcessDispatcher,
+) -> *mut ShareableProcessState {
+    RefPtr::as_ptr(&process.state().shareable_state).cast_mut()
+}
 
-    /// Returns the address space of `process` at the given virtual address.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_aspace_at(
-        process: *mut ProcessDispatcher,
-        va: usize,
-    ) -> *mut crate::vm::vm_aspace::VmAspace;
+/// Looks up a process anywhere in the job tree by koid, returning an acquired reference or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_process_dispatcher_lookup_process_by_id(
+    koid: zx_koid_t,
+) -> *mut ProcessDispatcher {
+    ProcessDispatcher::lookup_process_by_id(koid)
+        .map_or(core::ptr::null_mut(), |proc| RefPtr::into_raw(proc).cast_mut())
+}
 
-    /// Returns the normal address space of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(super) fn cpp_process_dispatcher_normal_aspace(
-        process: *mut ProcessDispatcher,
-    ) -> *mut crate::vm::vm_aspace::VmAspace;
-
-    /// Returns the restricted address space of `process`, or null if none.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(super) fn cpp_process_dispatcher_restricted_aspace(
-        process: *const ProcessDispatcher,
-    ) -> *mut crate::vm::vm_aspace::VmAspace;
-
-    /// Returns the job of `process` as a non-null pointer with an acquired refcount.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_job(process: *mut ProcessDispatcher)
-    -> *mut JobDispatcher;
-
-    /// Returns the debug address of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_get_debug_addr(process: *const ProcessDispatcher)
-    -> usize;
-
-    /// Sets the debug address of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_set_debug_addr(
-        process: *mut ProcessDispatcher,
-        addr: usize,
-    ) -> zx_status_t;
-
-    /// Returns the dynamic break-on-load address of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_get_dyn_break_on_load(
-        process: *const ProcessDispatcher,
-    ) -> usize;
-
-    /// Sets the dynamic break-on-load address of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_set_dyn_break_on_load(
-        process: *mut ProcessDispatcher,
-        break_on_load: usize,
-    ) -> zx_status_t;
-
-    /// Returns the hardware trace context ID of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    #[cfg(target_arch = "x86_64")]
-    pub(crate) fn cpp_process_dispatcher_hw_trace_context_id(
-        process: *const ProcessDispatcher,
-    ) -> usize;
-
-    /// Returns a pointer to the `FutexContext` of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_futex_context(
-        process: *const ProcessDispatcher,
-    ) -> *mut core::ffi::c_void;
-
-    /// Makes `thread` runnable and adds it to the C++ thread list of `process`.
-    ///
-    /// Ownership of `thread` within the process thread list stays on the C++ side; this only
-    /// hands the thread over to `ProcessDispatcher::AddInitializedThread`, which takes the
-    /// process lock itself.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`, `thread` to a valid initialized
-    /// `ThreadDispatcher` that is not already in a thread list, and `entry` to a valid
-    /// `UserEntryState`.
-    pub(crate) fn cpp_process_add_initialized_thread(
-        process: *const ProcessDispatcher,
-        thread: *const ThreadDispatcher,
-        ensure_initial_thread: bool,
-        entry: *const UserEntryState,
-    ) -> zx_status_t;
-
-    /// Removes `thread` from the C++ thread list of `process`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher` and `thread` must point to a valid
-    /// `ThreadDispatcher` that is in the thread list of `process`.
-    pub(crate) fn cpp_process_remove_thread(
-        process: *mut ProcessDispatcher,
-        thread: *mut ThreadDispatcher,
-    );
-
-    /// Returns a pointer to the process's normal `Exceptionate`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_exceptionate(
-        process: *mut ProcessDispatcher,
-    ) -> *mut super::exceptionate::Exceptionate;
-
-    /// Returns a pointer to the process's debug `Exceptionate`.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_debug_exceptionate(
-        process: *mut ProcessDispatcher,
-    ) -> *mut super::exceptionate::Exceptionate;
-
-    /// Looks up a thread in `process` by `koid`, returning an exported `RefPtr<ThreadDispatcher>`
-    /// raw pointer (or null if not found).
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_lookup_thread_by_id(
-        process: *mut ProcessDispatcher,
-        koid: zx_koid_t,
-    ) -> *mut ThreadDispatcher;
-
-    /// Returns whether `process` is marked critical to the root job.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_critical_to_root_job(
-        process: *const ProcessDispatcher,
-    ) -> bool;
-
-    #[cfg(ktest)]
-    pub(super) fn cpp_process_dispatcher_get_attributed_memory(
-        process: *const ProcessDispatcher,
-        out_counts: *mut crate::vm::attribution::AttributionCounts,
-    );
-
-    #[cfg(ktest)]
-    pub(super) fn cpp_shareable_process_state_create()
-    -> *mut super::process_dispatcher::ShareableProcessState;
-
-    #[cfg(ktest)]
-    pub(super) fn cpp_shareable_process_state_destroy(
-        state: *mut super::process_dispatcher::ShareableProcessState,
-    );
-
-    #[cfg(ktest)]
-    pub(super) fn cpp_shareable_process_state_increment_share_count(
-        state: *mut super::process_dispatcher::ShareableProcessState,
-    ) -> bool;
-
-    #[cfg(ktest)]
-    pub(super) fn cpp_shareable_process_state_decrement_share_count(
-        state: *mut super::process_dispatcher::ShareableProcessState,
-    );
-
-    #[cfg(ktest)]
-    pub(super) fn cpp_shareable_process_state_handle_table(
-        state: *mut super::process_dispatcher::ShareableProcessState,
-    ) -> *const super::handle_table::HandleTable;
-
-    /// Returns a cached copy of the vDSO code address of `process` or computes a new one.
-    ///
-    /// # Safety
-    ///
-    /// `process` must point to a valid `ProcessDispatcher`.
-    pub(crate) fn cpp_process_dispatcher_vdso_code_address(
-        process: *mut ProcessDispatcher,
-    ) -> usize;
+/// Notifies attached job debuggers that `thread` is starting `process`.
+///
+/// # Safety
+///
+/// * `thread` must be the currently executing user thread (`thread.is_current()`) and belong to
+///   `process`, in a blocking-permitted context with interrupts enabled (required by
+///   [`ProcessDispatcher::on_process_start_for_job_debugger`]).
+/// * `thread`'s dispatcher lock (`thread.state().lock`) must not be held, nor any thread lock,
+///   spinlock, or active `ChainLockTransaction` (required by
+///   [`ProcessDispatcher::on_process_start_for_job_debugger`]).
+/// * `context` must describe `thread`, and if `context.frame` is non-null, it must point to a
+///   valid, initialized, writable `Iframe` for the duration of the call without conflicting Rust
+///   references (required by [`ProcessDispatcher::on_process_start_for_job_debugger`]).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_process_dispatcher_on_process_start_for_job_debugger(
+    process: &ProcessDispatcher,
+    thread: &ThreadDispatcher,
+    context: &ArchExceptionContext,
+) {
+    // SAFETY: Guaranteed by the caller per this function's `# Safety` contract.
+    unsafe { process.on_process_start_for_job_debugger(thread, context) };
 }

@@ -37,9 +37,6 @@ rustc_library(
     ],
 )
 
-# bazel2gn cannot translate `test_data`, so this test is wired into
-# //src/developer/ffx:tests in Bazel.
-# @bazel2gn:skip
 host_rustc_test(
     name = "ffx_product_create_old_lib_test",
     compile_data = [

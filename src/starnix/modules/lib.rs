@@ -5,6 +5,8 @@
 // Increase recursion limit because LTO causes overflow.
 #![recursion_limit = "256"]
 
+mod soc;
+
 use anyhow::{Context, Error, anyhow, bail};
 use bstr::BString;
 use fidl_fuchsia_ui_composition as fuicomposition;
@@ -78,7 +80,17 @@ use std::sync::Arc;
 
 /// Modules that are enabled by default for all containers unless explicitly disabled via
 /// `"-<module>"` in `program.modules`.
-const DEFAULT_MODULES: &[&str] = &["device_mapper", "hw_random", "loop", "rtc", "tun", "zram"];
+const DEFAULT_MODULES: &[&str] = &[
+    "device_mapper",
+    "hw_random",
+    "loop",
+    "rtc",
+    // TODO(https://fxbug.dev/572704645): Remove "soc" once Android container manifests roll with
+    // explicit `"soc"` enabled.
+    "soc",
+    "tun",
+    "zram",
+];
 
 /// Validates that `name` is a known container module and that `args` (if `Some`) are valid for
 /// that module.
@@ -88,6 +100,7 @@ pub fn validate_module(name: &str, args: Option<&[&str]>) -> Result<(), Error> {
         "framebuffer" => Some(starnix_modules_framebuffer::validate_args),
         "magma" => Some(starnix_modules_magma::validate_args),
         "perfetto" => Some(starnix_modules_perfetto_consumer::validate_args),
+        "soc" => Some(soc::validate_args),
         "thermal" => Some(starnix_modules_thermal::validate_args),
         "android_usb"
         | "ashmem"
@@ -136,7 +149,7 @@ impl Modules {
                 usb_device_init(kernel).context("Failed to add android usb device nodes")?;
             }
             "ashmem" => ashmem_device_init(kernel),
-            "battery_manager" => battery_manager_device_init(kernel),
+            "battery_manager" => battery_manager_device_init(kernel)?,
             "boot_notifier" => starnix_modules_boot::module_init(kernel, args)?,
             "data_collection_consent_sync" => consent_sync_init(kernel),
             "device_mapper" => {
@@ -150,7 +163,7 @@ impl Modules {
                     ),
                     registry.objects.misc_class(),
                     create_device_mapper,
-                );
+                )?;
                 device_mapper_init(kernel)?;
             }
             "fastrpc" => fastrpc_device_init(kernel),
@@ -161,10 +174,10 @@ impl Modules {
                 &self.initial_view_id_annotation,
             )?,
             "gfxstream" => gpu_device_init(kernel),
-            "goog_chip_info" => goog_chip_info_device_init(kernel),
+            "goog_chip_info" => goog_chip_info_device_init(kernel)?,
             // Note: `google_odpm` and `hvdcp_opti` both statically register `iio:device0`;
             // `Modules::validate` rejects enabling both simultaneously.
-            "google_odpm" => odpm_device_init(kernel),
+            "google_odpm" => odpm_device_init(kernel)?,
             // The virtgralloc0 device allows vulkan_selector to indicate to gralloc whether
             // swiftshader or magma will be used. This is separate from the magma module because
             // the policy choice whether to use magma or swiftshader is in vulkan_selector, and it
@@ -180,7 +193,7 @@ impl Modules {
                     DeviceMetadata::new("hwrng".into(), DeviceId::HW_RANDOM, DeviceMode::Char),
                     registry.objects.misc_class(),
                     simple_device_ops::<DevRandom>,
-                );
+                )?;
             }
             "kgsl" => kgsl_device_init(kernel),
             "loop" => {
@@ -194,7 +207,7 @@ impl Modules {
                     ),
                     registry.objects.misc_class(),
                     create_loop_control_device,
-                );
+                )?;
                 loop_device_init(kernel)?;
             }
             "magma" => starnix_modules_magma::module_init(kernel, args)?,
@@ -210,6 +223,7 @@ impl Modules {
             "perfetto" => starnix_modules_perfetto_consumer::module_init(kernel, args)?,
             "power_residency" => init_power_residency_device(kernel),
             "rtc" => rtc_device_init(kernel)?,
+            "soc" => soc::module_init(kernel, args)?,
             "system_mode" => init_system_mode(kernel),
             "thermal" => starnix_modules_thermal::module_init(kernel, args)?,
             "tun" => {
@@ -219,7 +233,7 @@ impl Modules {
                     DeviceMetadata::new("tun".into(), DeviceId::TUN, DeviceMode::Char),
                     registry.objects.misc_class(),
                     simple_device_ops::<DevTun>,
-                );
+                )?;
             }
             "usbfs" => {
                 usbfs_init(kernel).context("Failed to initialize usbfs")?;
@@ -397,6 +411,7 @@ fn init_framebuffer_module(
     );
     let view_ref = fuchsia_scenic::duplicate_view_ref(&view_identity.view_ref)
         .expect("Failed to dup view ref.");
+    let direct_input_view_ref = fuchsia_scenic::duplicate_view_ref(&view_identity.view_ref).ok();
     let keyboard =
         fuchsia_component::client::connect_to_protocol_sync::<fuiinput3::KeyboardMarker>()
             .expect("Failed to connect to keyboard");
@@ -420,7 +435,7 @@ fn init_framebuffer_module(
     };
 
     let (input_events_relay, input_events_relay_handle) = new_input_relay();
-    let direct_input_manager = get_or_init_direct_input(kernel);
+    let direct_input_manager = get_or_init_direct_input(kernel, direct_input_view_ref);
     let input_events_relay = input_events_relay.with_direct_input_manager(direct_input_manager);
     input_events_relay.start_relays(
         kernel,
@@ -462,7 +477,7 @@ pub fn init_common_devices(kernel: &Kernel) -> Result<(), Errno> {
         DeviceMetadata::new("fuse".into(), DeviceId::FUSE, DeviceMode::Char),
         registry.objects.misc_class(),
         open_fuse_device,
-    );
+    )?;
     mem_device_init(kernel)?;
     tty_device_init(kernel)?;
     Ok(())

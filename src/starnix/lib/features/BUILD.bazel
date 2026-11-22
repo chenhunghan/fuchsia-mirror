@@ -2,25 +2,47 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(
     default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+)
+
+test_suite(
+    name = "tests",
+    tests = [":starnix_features-tests"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )
 
 rustc_library(
     name = "starnix_features",
     srcs = ["src/lib.rs"],
-    crate_name = "starnix_features",
     edition = "2024",
     lint_config = "//src/starnix/build:kernel_library_config",
     proc_macro_deps = [
         "//third_party/rust_crates/vendor:strum_macros",
     ],
-    with_unit_tests = True,
+    visibility = [
+        "//src/lib/assembly/platform_configuration:__pkg__",
+        "//src/starnix/kernel/runner:__pkg__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:strum",
         "//third_party/rust_crates/vendor:thiserror",
     ],
+)
+
+rustc_test(
+    name = "starnix_features_test",
+    crate = ":starnix_features",
+    tags = ["manual"],
+)
+
+# Tests exercise failure cases, so ERROR logs are expected.
+fx_unittest_package(
+    name = "starnix_features-tests",
+    max_log_severity = "ERROR",
+    unit_tests = [":starnix_features_test"],
 )

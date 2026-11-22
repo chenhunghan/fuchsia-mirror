@@ -2,16 +2,13 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# [START imports]
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
-# [END imports]
-
-# Subpackaged component "echo_client#meta/default.cm"
-fuchsia_package_with_single_component("echo_client") {
-  component_name = "default"
-  manifest = "meta/echo_client.cml"
-  deps = [ ":bin" ]
+# Subpackaged component "echo_client#meta/default.cm" Kept for
+# //examples/components/routing/with_subpackages:subpackaged_echo_realm_cpp in
+# GN.
+bazel_fuchsia_package("echo_client") {
+  bazel_config = "fuchsia_platform"
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
@@ -64,5 +61,15 @@ fuchsia_component("echo_client_cmp") {
     "//examples/components/routing:*",
     "//examples/diagnostics/inspect/cpp:*",
   ]
+  deps = [ ":bin" ]
+}
+
+fuchsia_component_manifest("echo_client_manifest") {
+  component_name = "default"
+  manifest = "meta/echo_client.cml"
+}
+
+fuchsia_component("echo_client_component") {
+  cm_label = ":echo_client_manifest"
   deps = [ ":bin" ]
 }

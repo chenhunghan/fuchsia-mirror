@@ -5,30 +5,25 @@
 use crate::filesystems::{BlobFilesystem, FsManagementFilesystemInstance};
 use async_trait::async_trait;
 use blob_pager_and_verifier::BlobPagerAndVerifier;
-use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobCreatorProxy, BlobReaderMarker, BlobReaderProxy};
+use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobCreatorProxy};
 use fidl_fuchsia_io as fio;
 use fidl_fuchsia_storage_block as fblock;
 use fidl_fuchsia_storage_mapping as fmapping;
 use fuchsia_component::client::{connect_to_protocol_at_dir_root, connect_to_protocol_at_dir_svc};
 use fuchsia_merkle::Hash;
 use std::path::Path;
+use std::sync::Arc;
 use storage_benchmarks::{
     BlockDeviceConfig, BlockDeviceFactory, CacheClearableFilesystem, Filesystem, FilesystemConfig,
 };
 
 /// Config object for starting Fxblob instances.
 #[derive(Clone, Default)]
-pub struct Fxblob {
-    use_driver_blob_paging: bool,
-}
+pub struct Fxblob;
 
 impl Fxblob {
     pub fn new() -> Self {
-        Self { use_driver_blob_paging: false }
-    }
-
-    pub fn with_driver_paging() -> Self {
-        Self { use_driver_blob_paging: true }
+        Self
     }
 }
 
@@ -57,25 +52,19 @@ impl FilesystemConfig for Fxblob {
         let blob_creator =
             connect_to_protocol_at_dir_svc::<BlobCreatorMarker>(fxblob.exposed_dir())
                 .expect("failed to connect to the BlobCreator protocol");
-        let blob_reader = connect_to_protocol_at_dir_svc::<BlobReaderMarker>(fxblob.exposed_dir())
-            .expect("failed to connect to the BlobReader protocol");
-        let pager_and_verifier = if self.use_driver_blob_paging {
-            Some(FxblobInstance::create_pager_and_verifier(&fxblob).await)
-        } else {
-            None
-        };
-        FxblobInstance { blob_creator, blob_reader, pager_and_verifier, fxblob }
+        let pager_and_verifier =
+            Some(Arc::new(FxblobInstance::create_pager_and_verifier(&fxblob).await));
+        FxblobInstance { blob_creator, pager_and_verifier, fxblob }
     }
 
     fn name(&self) -> String {
-        if self.use_driver_blob_paging { "fxblob_driver".to_owned() } else { "fxblob".to_owned() }
+        "fxblob".to_owned()
     }
 }
 
 pub struct FxblobInstance {
     blob_creator: BlobCreatorProxy,
-    blob_reader: BlobReaderProxy,
-    pager_and_verifier: Option<BlobPagerAndVerifier>,
+    pager_and_verifier: Option<Arc<BlobPagerAndVerifier>>,
     fxblob: FsManagementFilesystemInstance,
 }
 
@@ -86,18 +75,8 @@ impl FxblobInstance {
         let mapping_provider =
             connect_to_protocol_at_dir_svc::<fmapping::MappingProviderMarker>(fxblob.exposed_dir())
                 .expect("failed to connect to the MappingProvider protocol");
-        let block_proxy = fxblob
-            .block_device
-            .connector()
-            .connect_block()
-            .expect("failed to connect to block device")
-            .into_proxy();
-        let (mapper, mapper_server) = fidl::endpoints::create_proxy::<fblock::MapperMarker>();
-        block_proxy
-            .connect_mapper(mapper_server)
-            .await
-            .expect("FIDL error on ConnectMapper")
-            .expect("ConnectMapper failed");
+        let mapper = connect_to_protocol_at_dir_svc::<fblock::MapperMarker>(fxblob.exposed_dir())
+            .expect("failed to connect to the Mapper protocol");
         BlobPagerAndVerifier::new(&mapping_provider, &mapper)
             .await
             .expect("failed to initialize BlobPagerAndVerifier")
@@ -114,6 +93,16 @@ impl FxblobInstance {
         if let Some(pager) = &self.pager_and_verifier {
             pager.clear_cache();
         }
+    }
+
+    pub fn get_file_mapper_handler(
+        &self,
+        scope: vfs::execution_scope::ExecutionScope,
+    ) -> Arc<vfs::service::Service> {
+        self.pager_and_verifier
+            .as_ref()
+            .expect("driver blob paging is not enabled")
+            .get_file_mapper_handler(scope)
     }
 }
 
@@ -132,40 +121,29 @@ impl Filesystem for FxblobInstance {
 #[async_trait]
 impl CacheClearableFilesystem for FxblobInstance {
     async fn clear_cache(&mut self) {
-        let use_driver_blob_paging = self.pager_and_verifier.take().is_some();
+        self.pager_and_verifier.take();
         let () = self.fxblob.clear_cache().await;
         self.blob_creator =
             connect_to_protocol_at_dir_svc::<BlobCreatorMarker>(self.fxblob.exposed_dir())
                 .expect("failed to connect to the BlobCreator protocol");
-        self.blob_reader =
-            connect_to_protocol_at_dir_svc::<BlobReaderMarker>(self.fxblob.exposed_dir())
-                .expect("failed to connect to the BlobReader protocol");
-        if use_driver_blob_paging {
-            self.pager_and_verifier = Some(Self::create_pager_and_verifier(&self.fxblob).await);
-        }
+        self.pager_and_verifier =
+            Some(Arc::new(Self::create_pager_and_verifier(&self.fxblob).await));
     }
 }
 
 #[async_trait]
 impl BlobFilesystem for FxblobInstance {
     async fn get_vmo(&self, name: &Hash) -> zx::Vmo {
-        if let Some(pager) = &self.pager_and_verifier {
-            pager.create_vmo(&**name).await.expect("failed to get vmo from BlobPagerAndVerifier")
-        } else {
-            self.blob_reader()
-                .get_vmo(&*name)
-                .await
-                .expect("transport error on BlobReader.GetVmo")
-                .expect("failed to get vmo")
-        }
+        self.pager_and_verifier
+            .as_ref()
+            .unwrap()
+            .create_vmo(&**name)
+            .await
+            .expect("failed to get vmo from BlobPagerAndVerifier")
     }
 
     fn blob_creator(&self) -> &BlobCreatorProxy {
         &self.blob_creator
-    }
-
-    fn blob_reader(&self) -> &BlobReaderProxy {
-        &self.blob_reader
     }
 
     fn exposed_dir(&self) -> &fio::DirectoryProxy {

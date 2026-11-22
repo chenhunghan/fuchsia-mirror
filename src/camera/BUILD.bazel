@@ -15,9 +15,15 @@ test_suite(
     tests = [
         "//src/camera/bin/camera-gym/controller_error:camera_gym_controller_error_unittest",
         "//src/camera/bin/camera-gym/controller_parser:camera_gym_controller_parser_unittest",
+        "//src/camera/bin/device_watcher:tests",
+        "//src/camera/bin/virtual_camera:tests",
         "//src/camera/lib/actor:actor_base_unittest",
         "//src/camera/lib/fake_camera:fake_camera_unittest_test",
+        "//src/camera/lib/image_utils:tests",
         "//src/camera/lib/raw_formats:tests",
+        "//src/camera/lib/stream_utils:tests",
         "//src/camera/lib/tokens:tokens-unittest",
+        "//src/camera/lib/virtual_camera:tests",
+        "//src/camera/lib/vmo_pool_wrapper:tests",
     ],
 )

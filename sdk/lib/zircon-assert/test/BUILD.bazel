@@ -1,0 +1,48 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/host_tests:host_test.bzl", "host_test")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":zircon-assert-tests"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":zircon-assert-unittests_host_test"],
+    visibility = ["//sdk/lib:__pkg__"],
+)
+
+# GN's bootfs_test() expects the binary at test/zircon-assert-unittests via distribution_entries metadata, and fuchsia_unittest_package() also needs test_component_manifest_program when distribution_entries is set.
+# @bazel2gn:raw_attribute:metadata = { distribution_entries = [ { source = rebase_path("$root_out_dir/zircon-assert-unittests", root_build_dir) destination = "test/zircon-assert-unittests" label = get_label_info(":zircon-assert-unittests", "label_with_toolchain") } ] test_component_manifest_program = [ { program = { binary = "test/zircon-assert-unittests" } } ] test_component_manifest_program_barrier = [] }
+fx_cc_test_binary(
+    name = "zircon-assert-unittests",
+    srcs = ["zircon-assert-tests.cc"],
+    aspect_hints = ["//src/sys/test_runners/gtest:death_test"],
+    deps = [
+        "//sdk/lib/zircon-assert",
+        "//src/lib/fxl/test:gtest_main",
+        # @com_google_googletest//:gtest bundles gmock; preserve the GN :gmock label.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_package(
+    name = "zircon-assert-tests",
+    unit_tests = [":zircon-assert-unittests"],
+)
+
+host_test(
+    name = "zircon-assert-unittests_host_test",
+    binary = ":zircon-assert-unittests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)

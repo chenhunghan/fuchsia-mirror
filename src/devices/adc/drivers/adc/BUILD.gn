@@ -57,7 +57,6 @@ fuchsia_cc_driver("adc-driver") {
 }
 
 fuchsia_driver_component("adc") {
-  info = "meta/adc-info.json"
   component_name = "adc"
   dml_label = ":adc-dml"
   deps = [ ":adc-driver" ]

@@ -2,6 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/python/python_c_extension_shared_lib.gni")
 import("//build/python/python_host_test.gni")
 import("//build/python/python_library.gni")
 import("//third_party/protobuf/proto_library.gni")
@@ -16,6 +17,10 @@ import("//third_party/protobuf/proto_library.gni")
 # python_edition_defaults.py). The empty aggregator target ":protobuf_py"
 # combines all three to expose the complete "google.protobuf" package at
 # runtime.
+#
+# Targets that process traces should depend on ":tp_shell". Targets that only
+# need the "google.protobuf" runtime, e.g. to write protos, may depend on
+# ":protobuf_py" directly.
 python_library("protobuf_static_py") {
   visibility = [ ":*" ]
   library_name = "google"
@@ -67,7 +72,8 @@ python_library("protobuf_static_py") {
 
 # Compiles standard protobuf library .proto files to Python.
 # This target is restricted to this file to prevent external misuse;
-# external targets should depend on the public ":tp_shell" target instead.
+# external targets should depend on the public ":tp_shell" target (to process
+# traces) or ":protobuf_py" (for the protobuf runtime) instead.
 proto_library("common_python_protos") {
   visibility = [ ":*" ]
   proto_in_dir = "//third_party/protobuf/src/src"
@@ -165,8 +171,87 @@ python_library("protobuf_edition_defaults_py_lib") {
   enable_mypy = false
 }
 
+if (is_host && is_linux) {
+  # Generates google/protobuf/descriptor.upbdefs.{h,c}, which the upb Python
+  # extension uses to load descriptor.proto into its upb_DefPool.
+  proto_library("descriptor_upbdefs") {
+    visibility = [ ":*" ]
+    sources =
+        [ "//third_party/protobuf/src/src/google/protobuf/descriptor.proto" ]
+    proto_in_dir = "//third_party/protobuf/src/src"
+    proto_out_dir = "src/performance/lib/tp_shell/upbdefs"
+    generate_cc = false
+    generate_python = false
+    generator_plugin_label = "//third_party/protobuf:protoc-gen-upbdefs"
+    generator_plugin_suffixes = [
+      ".upbdefs.h",
+      ".upbdefs.c",
+    ]
+  }
+
+  config("_upb_message_config") {
+    visibility = [ ":*" ]
+    include_dirs = [ "$root_gen_dir/src/performance/lib/tp_shell/upbdefs" ]
+    cflags = [
+      "-Wno-pedantic",
+      "-Wno-cast-function-type",
+      "-Wno-implicit-fallthrough",
+      "-Wno-incompatible-pointer-types-discards-qualifiers",
+      "-Wno-shorten-64-to-32",
+      "-Wno-unused-parameter",
+      "-Wno-write-strings",
+    ]
+  }
+
+  source_set("_upb_message_srcs") {
+    visibility = [ ":_upb_message" ]
+    sources = [
+      "$root_gen_dir/src/performance/lib/tp_shell/upbdefs/google/protobuf/descriptor.upbdefs.c",
+      "//third_party/protobuf/src/python/convert.c",
+      "//third_party/protobuf/src/python/descriptor.c",
+      "//third_party/protobuf/src/python/descriptor_containers.c",
+      "//third_party/protobuf/src/python/descriptor_pool.c",
+      "//third_party/protobuf/src/python/extension_dict.c",
+      "//third_party/protobuf/src/python/map.c",
+      "//third_party/protobuf/src/python/message.c",
+      "//third_party/protobuf/src/python/protobuf.c",
+      "//third_party/protobuf/src/python/repeated.c",
+      "//third_party/protobuf/src/python/unknown_fields.c",
+    ]
+    configs += [
+      "//build/config/python:python_c_extension_shared_lib_config",
+      "//third_party/protobuf:protobuf_warnings",
+      ":_upb_message_config",
+    ]
+    deps = [
+      ":descriptor_upbdefs",
+      "//build/config/python:generate_python_api_symbols",
+      "//third_party/protobuf:upb_full",
+    ]
+  }
+
+  python_c_extension_shared_lib("_upb_message") {
+    visibility = [ ":*" ]
+    sources = []
+    deps = [ ":_upb_message_srcs" ]
+  }
+
+  python_library("protobuf_upb_py") {
+    visibility = [ ":*" ]
+    library_name = "google"
+    source_root = "_upb_pkg"
+    sources = [
+      "_upb/__init__.py",
+      "_upb/_message.py",
+    ]
+    data_package_name = "_upb_bin"
+    data_sources = [ "$root_out_dir/_upb_message.so" ]
+    deps = [ ":_upb_message" ]
+    enable_mypy = false
+  }
+}
+
 python_library("protobuf_py") {
-  visibility = [ ":*" ]
   library_name = "google"
   sources = []
   library_deps = [
@@ -174,6 +259,9 @@ python_library("protobuf_py") {
     ":protobuf_edition_defaults_py_lib",
     ":protobuf_static_py",
   ]
+  if (is_host && is_linux) {
+    library_deps += [ ":protobuf_upb_py" ]
+  }
   enable_mypy = false
 }
 

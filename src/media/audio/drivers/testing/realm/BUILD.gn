@@ -63,7 +63,6 @@ fuchsia_cc_driver("audio-test-root-driver") {
 
 fuchsia_driver_component("audio-test-root") {
   deps = [ ":audio-test-root-driver" ]
-  info = "meta/audio-test-root-info.json"
   manifest = "meta/audio-test-root.cml"
 }
 
@@ -120,20 +119,17 @@ fuchsia_cc_driver("dai-test-driver") {
 fuchsia_driver_component("test-codec") {
   component_name = "test-codec"
   deps = [ ":codec-test-driver" ]
-  info = "meta/test-codec-info.json"
   cm_label = ":test-codec_dml_manifest"
 }
 
 fuchsia_driver_component("test-codec2") {
   component_name = "test-codec2"
   deps = [ ":codec-test-driver2" ]
-  info = "meta/test-codec2-info.json"
   cm_label = ":test-codec2_dml_manifest"
 }
 
 fuchsia_driver_component("test-dai") {
   component_name = "test-dai"
   deps = [ ":dai-test-driver" ]
-  info = "meta/test-dai-info.json"
   cm_label = ":test-dai_dml_manifest"
 }

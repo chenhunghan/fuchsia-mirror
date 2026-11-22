@@ -5,7 +5,7 @@
 pub mod error;
 pub use error::{Result, TraceError};
 use ffx_config::EnvironmentContext;
-use fidl_fuchsia_tracing_controller::{ProviderSpec, TraceConfig};
+use fidl_fuchsia_tracing_controller_common::{ProviderSpec, TraceConfig};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};

@@ -113,10 +113,7 @@ class InvalidatedSidTestSuite : public ::testing::Test {
     EXPECT_THAT(ReadProcAttr(child_pid_, "current"), SyscallResultIsOk(kInitialDomainContext));
 
     // 4. Reload policy (which omits test_invalidated_domain_t).
-    auto policy_bytes = ReadFile("data/policies/invalidated_sid_reloaded_policy");
-    ASSERT_THAT(policy_bytes, SyscallResultIsOk());
-    EXPECT_THAT(WriteExistingFile("/sys/fs/selinux/load", policy_bytes.value()),
-                SyscallResultIsOk());
+    ASSERT_NO_FATAL_FAILURE(LoadPolicy("invalidated_sid_reloaded_policy"));
 
     // 5. Signal child that policy has been reloaded and wait for child verification.
     msg = HandshakeMessage::kReloaded;
@@ -131,6 +128,8 @@ class InvalidatedSidTestSuite : public ::testing::Test {
   static void TearDownTestSuite() {
     accepted_socket_.reset();
     EXPECT_TRUE(fork_helper_.WaitForChildren());
+
+    LoadPolicy("invalidated_sid_initial_policy");
   }
 
  protected:
@@ -147,7 +146,7 @@ test_helper::ForkHelper InvalidatedSidTestSuite::fork_helper_;
 pid_t InvalidatedSidTestSuite::child_pid_ = 0;
 fbl::unique_fd InvalidatedSidTestSuite::accepted_socket_;
 
-extern std::string DoPrePolicyLoadWork() { return "invalidated_sid_initial_policy"; }
+extern std::string GetTestPolicyName() { return "invalidated_sid_initial_policy"; }
 
 TEST_F(InvalidatedSidTestSuite, TaskContextFallsBackToUnlabeled) {
   EXPECT_THAT(ReadProcAttr(child_pid(), "current"), SyscallResultIsOk(kUnlabeledContext));

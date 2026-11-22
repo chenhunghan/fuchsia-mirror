@@ -2,16 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_test_suite.gni")
-
-bazel_test_suite("netstack3-sync-tests") {
-  target_tests = [
-    "//src/connectivity/network/netstack3/core/sync:netstack3-sync-instrumented-package",
-    "//src/connectivity/network/netstack3/core/sync:netstack3-sync-package",
-  ]
-  host_tests = [ "//src/connectivity/network/netstack3/core/sync:netstack3-sync-instrumented_host_test" ]
-}
-
 group("tests") {
   testonly = true
   public_deps = [
@@ -19,7 +9,6 @@ group("tests") {
     ":netstack3-sync-instrumented-package",
     ":netstack3-sync-instrumented_test($host_toolchain)",
     ":netstack3-sync-package",
-    ":netstack3-sync-tests",
   ]
 }
 
@@ -178,12 +167,10 @@ fuchsia_unittest_package("netstack3-sync-instrumented-package") {
   package_name = "netstack3-sync-instrumented-gn"
   component_name = "netstack3-sync-instrumented"
   deps = [ ":netstack3-sync-instrumented_test" ]
-  visibility = [ "*" ]
 }
 
 fuchsia_unittest_package("netstack3-sync-package") {
   package_name = "netstack3-sync-gn"
   component_name = "netstack3-sync"
   deps = [ ":netstack3-sync_test" ]
-  visibility = [ "*" ]
 }

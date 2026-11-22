@@ -49,7 +49,7 @@ but these depend on many external factors that are out of scope for this RFC.
 It is expected though that by that time the custom branch will no longer be
 needed.
 
-## Motivation
+## Motivation {#motivation}
 
 The [Ninja][ninja-build] build tool was developed by Evan Martin at Google as
 an experiment while he was working for Chrome

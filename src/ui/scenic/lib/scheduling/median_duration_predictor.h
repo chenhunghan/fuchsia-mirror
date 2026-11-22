@@ -27,6 +27,8 @@ class MedianDurationPredictor : public DurationPredictor {
 
   void InsertNewMeasurement(zx::duration duration) override;
 
+  void Reset(zx::duration initial_prediction);
+
  private:
   // `window_`, `window_size_` and `index_` are used to maintain a ring-buffer of the last
   // `window_size_` measurements.

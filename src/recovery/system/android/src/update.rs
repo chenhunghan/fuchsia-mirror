@@ -7,6 +7,8 @@ use anyhow::{Context as _, Error};
 use fidl::endpoints::{DiscoverableProtocolMarker as _, create_proxy};
 use fidl_fuchsia_fxfs as ffxfs;
 use fidl_fuchsia_io as fio;
+use fidl_fuchsia_storage_block as fstorage_block;
+use fidl_fuchsia_storage_mapping as fstorage_mapping;
 use fuchsia_component::client::connect_to_protocol;
 use futures::TryStreamExt as _;
 use isolated_swd::updater::Updater;
@@ -46,9 +48,11 @@ pub async fn apply_update(
         fuchsia_fs::directory::open_directory(&blob_exposed_dir, "svc", fio::PERM_READABLE)
             .await
             .context("opening blob svc")?;
-    for protocol_name in
-        [ffxfs::BlobCreatorMarker::PROTOCOL_NAME, ffxfs::BlobReaderMarker::PROTOCOL_NAME]
-    {
+    for protocol_name in [
+        ffxfs::BlobCreatorMarker::PROTOCOL_NAME,
+        fstorage_block::MapperMarker::PROTOCOL_NAME,
+        fstorage_mapping::MappingProviderMarker::PROTOCOL_NAME,
+    ] {
         let blob_svc = Clone::clone(&blob_svc);
         svc_dir
             .add_entry_may_overwrite(

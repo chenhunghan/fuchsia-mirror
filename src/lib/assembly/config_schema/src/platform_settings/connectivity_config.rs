@@ -41,9 +41,10 @@ pub struct PlatformConnectivityConfig {
     /// SSIDs in logs and Inspect by replacing them with per-boot salted
     /// hashes (the 3-octet vendor OUI prefix of MAC addresses is preserved).
     ///
-    /// Defaults to `true` on `user` and `userdebug` builds and `false` on
-    /// `eng` builds, where engineers need raw identifiers to cross-reference
-    /// against packet captures. Cannot be disabled on `user` builds.
+    /// Defaults to `true` on `userdebug` builds and `false` on `user` builds
+    /// (while redaction is being rolled out) and on `eng` builds (where
+    /// engineers need raw identifiers to cross-reference against packet
+    /// captures). Products may override the default on any build type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redact_network_identifiers: Option<bool>,
 }

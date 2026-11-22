@@ -21,10 +21,7 @@
             dependency: "weak",
         },
         {
-            protocol: [
-                "fuchsia.boot.Arguments",
-                "fuchsia.boot.WriteOnlyLog",
-            ],
+            protocol: [ "fuchsia.boot.WriteOnlyLog" ],
             from: "parent",
             to: "#bootfs_recovery",
         },

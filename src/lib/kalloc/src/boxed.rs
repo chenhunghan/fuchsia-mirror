@@ -5,7 +5,7 @@
 // https://opensource.org/licenses/MIT
 
 use crate::allocator::{AllocError, Allocator, DefaultAllocator};
-use core::mem::MaybeUninit;
+use core::mem::{DropGuard, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::pin::Pin;
 use core::ptr::NonNull;
@@ -276,6 +276,36 @@ impl<T> Box<[T], DefaultAllocator> {
         len: usize,
     ) -> Result<Box<[MaybeUninit<T>], DefaultAllocator>, AllocError> {
         Self::try_new_zeroed_uninit_slice_in(len, DefaultAllocator)
+    }
+}
+
+impl<T: Clone, A: Allocator> Box<[T], A> {
+    /// Tries to allocate a new slice and clone all elements from `src` into it.
+    pub fn try_clone_from_slice_in(src: &[T], allocator: A) -> Result<Self, AllocError> {
+        let slice = Self::try_new_uninit_slice_in(src.len(), allocator)?;
+        let mut guard = DropGuard::new((slice, 0usize), |(mut slice, init)| {
+            for elem in &mut slice[..init] {
+                // SAFETY: Elements `0..init` were initialized in the loop below and are dropped
+                // once before the uninitialized `Box` deallocates its storage.
+                unsafe { elem.assume_init_drop() };
+            }
+        });
+        let (slice, init) = &mut *guard;
+        for (dst, item) in slice.iter_mut().zip(src) {
+            dst.write(item.clone());
+            *init += 1;
+        }
+        let (slice, _) = DropGuard::dismiss(guard);
+        // SAFETY: Every element of `slice` was initialized in the loop above.
+        Ok(unsafe { slice.assume_init() })
+    }
+}
+
+impl<T: Clone> TryFrom<&[T]> for Box<[T]> {
+    type Error = AllocError;
+
+    fn try_from(slice: &[T]) -> Result<Self, Self::Error> {
+        Self::try_clone_from_slice_in(slice, DefaultAllocator)
     }
 }
 
@@ -966,5 +996,57 @@ mod tests {
         );
         assert_eq!(b_alloc_err.err(), Some(zx_status::Status::NO_MEMORY));
         assert!(!dropped.get());
+    }
+
+    #[test]
+    fn test_box_try_from_slice() {
+        let b = Box::<[u32]>::try_from([10, 20, 30].as_slice()).unwrap();
+        assert_eq!(*b, [10, 20, 30]);
+
+        let empty = Box::<[u32]>::try_from([].as_slice()).unwrap();
+        assert_eq!(empty.len(), 0);
+
+        let clone_count = core::cell::Cell::new(0usize);
+        let drop_count = core::cell::Cell::new(0usize);
+        struct Counted<'a> {
+            clones: &'a core::cell::Cell<usize>,
+            drops: &'a core::cell::Cell<usize>,
+        }
+        impl Clone for Counted<'_> {
+            fn clone(&self) -> Self {
+                self.clones.set(self.clones.get() + 1);
+                Self { clones: self.clones, drops: self.drops }
+            }
+        }
+        impl Drop for Counted<'_> {
+            fn drop(&mut self) {
+                self.drops.set(self.drops.get() + 1);
+            }
+        }
+        {
+            let src = [
+                Counted { clones: &clone_count, drops: &drop_count },
+                Counted { clones: &clone_count, drops: &drop_count },
+                Counted { clones: &clone_count, drops: &drop_count },
+            ];
+            let alloc = TrackingAllocator::new();
+            let b = Box::try_clone_from_slice_in(src.as_slice(), alloc.clone()).unwrap();
+            assert_eq!(b.len(), 3);
+            assert_eq!(clone_count.get(), 3);
+            assert_eq!(drop_count.get(), 0);
+            drop(b);
+            assert_eq!(drop_count.get(), 3);
+            assert!(alloc.allocated.borrow().is_empty());
+        }
+        assert_eq!(drop_count.get(), 6);
+
+        struct PanicOnClone(#[allow(dead_code)] u8);
+        impl Clone for PanicOnClone {
+            fn clone(&self) -> Self {
+                panic!("clone must not run on allocation failure");
+            }
+        }
+        let failing = Box::try_clone_from_slice_in(&[PanicOnClone(0)], AlwaysFailingAllocator);
+        assert!(failing.is_err());
     }
 }

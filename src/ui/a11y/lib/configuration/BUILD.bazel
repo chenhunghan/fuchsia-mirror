@@ -1,0 +1,33 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "configuration",
+    srcs = ["color_transform_manager.cc"],
+    hdrs = ["color_transform_manager.h"],
+    # TODO(https://fxbug.dev/42136089): delete the below and fix compiler warnings
+    # -I. is required for color_transform_manager.cc's angled includes; @bazel2gn:raw_overwrite strips it for GN.
+    copts = [
+        "-Wno-conversion",
+        "-I.",
+    ],  # @bazel2gn:raw_overwrite:[ "//build/config:Wno-conversion" ]
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.ui.input:fuchsia.ui.input_hlcpp",
+        "//sdk/fidl/fuchsia.ui.views:fuchsia.ui.views_hlcpp",
+    ],
+    visibility = ["//src/ui/a11y/lib:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_cpp",
+        "//sdk/fidl/fuchsia.math:fuchsia.math_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/ui/a11y/lib/util",
+    ],
+    alwayslink = True,
+)

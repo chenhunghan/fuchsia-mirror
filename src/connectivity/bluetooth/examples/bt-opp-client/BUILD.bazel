@@ -68,7 +68,6 @@ fx_component(
 
 fx_package(
     name = "bt-opp-client",
-    package_name = "bt-opp-client",
     components = [":component"],
 )
 

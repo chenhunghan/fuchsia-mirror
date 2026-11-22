@@ -1,0 +1,38 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["dsputil.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.dsp:fuchsia.hardware.dsp_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_packaged_binary(
+    name = "dsputil_packaged_bin",
+    binary = ":bin",
+    binary_name = "dsputil",
+)
+
+fx_package(
+    name = "dsputil",
+    package_repository_name = "fuchsia.com",
+    resources = [":dsputil_packaged_bin"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)

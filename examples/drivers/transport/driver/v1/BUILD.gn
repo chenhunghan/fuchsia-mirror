@@ -44,7 +44,6 @@ fuchsia_cc_driver("parent_driver") {
 
 fuchsia_driver_component("parent_component") {
   deps = [ ":parent_driver" ]
-  info = "meta/component-info.json"
   dml_label = ":parent_component-dml"
 }
 
@@ -70,6 +69,5 @@ fuchsia_cc_driver("child_driver") {
 
 fuchsia_driver_component("child_component") {
   deps = [ ":child_driver" ]
-  info = "meta/component-info.json"
   dml_label = ":child_component-dml"
 }

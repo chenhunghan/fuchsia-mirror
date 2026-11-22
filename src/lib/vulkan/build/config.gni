@@ -17,23 +17,12 @@ declare_args() {
     vulkan_host_runtime_dir = "//prebuilt/third_party/vulkan_runtime/linux-x64"
   }
 
-  # TODO(liyl): Currently non-x64 platforms don't have Vulkan support,
-  # so we always use the null Vulkan implementation instead.
-  #
-  # Global arguments for whether we use a "null" Vulkan implementation on
-  # host vulkan_executables and vulkan_tests, so that any attempt to create a
-  # VkInstances or VkDevice will fail.
-  #
-  # This argument will affect all vulkan_{executable/test} build targets.
-  #
-  use_null_vulkan_on_host = !has_prebuilt_vulkan_runtime
-
   #
   # Global arguments for whether we use the SwiftShader Vulkan ICD on host
   # vulkan_executables and vulkan_tests.
   #
   # This argument will affect all vulkan_{executable/test} build targets and
-  # it only works when use_null_vulkan_on_host is set to false.
+  # it only works when has_prebuilt_vulkan_runtime is set to true.
   #
   use_swiftshader_vulkan_icd_on_host = true
 }

@@ -33,7 +33,7 @@ The PCI bus driver binds to [`fuchsia.hardware.pci.root/RootService`](https://cs
 
 ## Libraries
 
-* [`//src/devices/pci/lib/device-protocol-pci:device-protocol-pci`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/lib/device-protocol-pci/BUILD.gn;l=7)
+* [`//sdk/lib/driver/pci/cpp:cpp`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/pci/cpp/BUILD.gn;l=7)
   * Provides helper methods `MapMmio` and `ConfigureInterruptMode` for use with drivers, as well as convenience methods for constructing a client end for `fuchsia.hardware.pci/Device` calls.
 * [`//src/devices/pci/lib/pci:pci`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/lib/pci/BUILD.gn;l=9)
   * Provides base implementations for the `PciRootHost` interface which provides a way for a platform to implement a backing driver that can service multiple `fuchsia.hardware.pciroot/Pciroot` instances to support multiple PCI buses in the system.
@@ -46,11 +46,12 @@ See [`//src/devices/pci/drivers/pci/test/README.md`](drivers/pci/test/README.md)
 
 ## Tests
 
+* [`//sdk/lib/driver/pci/cpp:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:sdk/lib/driver/pci/cpp/BUILD.gn;l=29)
+  * `driver-pci-cpp-test`
 * [`//src/devices/pci/drivers/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/drivers/pci/BUILD.gn;l=122)
   * `pci-driver-test`: Rust integration test suite in `drivers/pci/test/driver/driver_tests.rs` running against `fake-bus-pci` (build target `pci_fake`) inside `DriverTestRealm`.
   * `pci-unit-test`: C++ unit test suite in `drivers/pci/test/unit/` testing allocation, bus, config, device, and MSI-X against fakes.
 * [`//src/devices/pci:tests`](https://cs.opensource.google/fuchsia/fuchsia/+/main:src/devices/pci/BUILD.gn;l=14)
-  * `device-protocol-pci-test`
   * `pci-protocol-fake-test`
   * `pci-roothost-test`
   * `pciroot-banjo-adapter-test`

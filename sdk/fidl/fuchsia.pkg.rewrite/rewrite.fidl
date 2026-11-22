@@ -64,7 +64,7 @@ type LiteralRule = struct {
     path_prefix_replacement string;
 };
 
-/// A rewrite rule, represented as an xunion for future compatibility.
+/// A rewrite rule, represented as a union for future compatibility.
 type Rule = flexible union {
     1: literal LiteralRule;
 };

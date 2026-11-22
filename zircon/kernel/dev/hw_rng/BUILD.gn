@@ -4,7 +4,6 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 kernel_rust_mod("hw_rng-rs") {
@@ -16,20 +15,12 @@ kernel_rust_mod("hw_rng-rs") {
   deps = [
     "//sdk/rust/zx-status",
     "//src/lib/kprint",
-    "//src/lib/zr",
     "//third_party/rust_crates:zerocopy",
     "//zircon/kernel/lib/debug",
     "//zircon/system/ulib/pretty/rust:pretty",
   ]
 }
 
-source_set("hw_rng") {
-  public_deps = [ ":headers" ]
-
-  sources = [ "hw_rng_ffi.cc" ]
+group("hw_rng") {
   deps = [ ":hw_rng-rs" ]
-}
-
-library_headers("headers") {
-  headers = [ "dev/hw_rng.h" ]
 }

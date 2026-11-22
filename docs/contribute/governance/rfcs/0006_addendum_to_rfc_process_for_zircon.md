@@ -78,7 +78,8 @@ serves as documentation for the RFC process as it applies to Zircon.
 ## Drawbacks, Alternatives, and Unknowns
 
 The Fuchsia RFC process introduces friction that might slow down the pace of making and
-executing decisions. The criteria in the ["when to use the process" section](/docs/contribute/governance/rfcs/0001_rfc_process.md#when-to-use-the-process)
+executing decisions. The criteria in the ["when to use the process"
+section](/docs/contribute/governance/rfcs/0001_rfc_process.md#criteria)
 attempts to mitigate this by scoping the process to consequential situations but such
 scoping is bound to have false positives and false negatives.
 

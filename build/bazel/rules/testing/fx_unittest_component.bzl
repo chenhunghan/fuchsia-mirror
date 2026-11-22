@@ -57,6 +57,9 @@ def _fx_unittest_runner_shard_impl(ctx):
             enforced_shards = expected_includes.enforced_shards if expected_includes else depset(),
             auto_include_shards = auto_include_shards,
             transitive_shards = transitive_shards,
+            required_package_components = (
+                expected_includes.required_package_components if expected_includes else depset()
+            ),
         ),
     ]
 

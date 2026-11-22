@@ -1,0 +1,182 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# The simulated IEEE 802.15.4 medium that hermetic OpenThread tests attach
+# their nodes to.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":rf-medium-dispatcher-component-test",
+        ":rf-medium-dispatcher-unittests",
+    ],
+    visibility = ["//src/connectivity/openthread:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    testonly = True,
+    srcs = [
+        "src/lib.rs",
+        "src/tests.rs",
+    ],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "rf_medium_dispatcher",
+    edition = "2024",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher/fidl/test.lowpan.rfsim:test.lowpan.rfsim_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "rf_medium_dispatcher_lib_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":lib",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_unittest_package(
+    name = "rf-medium-dispatcher-unittests",
+    unit_tests = [":rf_medium_dispatcher_lib_test"],
+)
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_name = "rf_medium_dispatcher",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":lib",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher/fidl/test.lowpan.rfsim:test.lowpan.rfsim_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "rf_medium_dispatcher",
+)
+
+fx_component_manifest(
+    name = "rf-medium-dispatcher-manifest",
+    testonly = True,
+    component_name = "rf-medium-dispatcher",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/rf-medium-dispatcher.cml",
+)
+
+fx_component(
+    name = "rf-medium-dispatcher-component",
+    testonly = True,
+    compiled_manifest = ":rf-medium-dispatcher-manifest",
+    deps = [":bin_packaged"],
+)
+
+# Subpackaged by tests whose realms contain a medium
+# ("rf-medium-dispatcher#meta/rf-medium-dispatcher.cm"), through the GN wrapper
+# in BUILD.gn.
+fx_package(
+    name = "rf-medium-dispatcher",
+    testonly = True,
+    components = [":rf-medium-dispatcher-component"],
+)
+
+rustc_test(
+    name = "component_test_bin",
+    srcs = ["tests/component.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate_root = "tests/component.rs",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/rust/zx",
+        "//src/connectivity/openthread/tests/rf_medium_dispatcher/fidl/test.lowpan.rfsim:test.lowpan.rfsim_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_packaged_binary(
+    name = "component_test_bin_packaged",
+    testonly = True,
+    binary = ":component_test_bin",
+    binary_name = "rf_medium_dispatcher_component_test",
+)
+
+fx_component_manifest(
+    name = "component-test-manifest",
+    testonly = True,
+    component_name = "component-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/rf-medium-dispatcher-component-test.cml",
+)
+
+fx_test_component(
+    name = "component-test",
+    compiled_manifest = ":component-test-manifest",
+    deps = [":component_test_bin_packaged"],
+)
+
+fx_package(
+    name = "rf-medium-dispatcher-component-test_package",
+    package_name = "rf-medium-dispatcher-component-test",
+    components = [":rf-medium-dispatcher-component"],
+    test_components = [":component-test"],
+)
+
+# Runs the component in a static test realm to check its manifest and serving.
+fx_test(
+    name = "rf-medium-dispatcher-component-test",
+    package = ":rf-medium-dispatcher-component-test_package",
+)

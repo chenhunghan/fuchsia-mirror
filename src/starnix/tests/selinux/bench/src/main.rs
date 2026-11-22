@@ -2,6 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+//! Latency microbenchmarks for SEStarnix (`selinux` primitives and `starnix_core::security` hooks).
+//!
+//! Most benchmarks in this binary bypass production fast-paths and caches to isolate individual
+//! operations as regression signals rather than standalone optimization targets. See
+//! `//src/starnix/tests/selinux/bench/README.md` for details.
+
 #![recursion_limit = "1024"]
 
 mod contention;
@@ -18,9 +24,10 @@ use selinux::{
 use starnix_core::security;
 use starnix_core::task::CurrentTask;
 use starnix_core::testing::{PanickingFile, spawn_kernel_with_selinux_and_run};
-use starnix_core::vfs::{NamespaceNode, OpenAccessCheck};
+use starnix_core::vfs::{FileHandle, NamespaceNode, OpenAccessCheck};
 use starnix_uapi::auth::Credentials;
 use starnix_uapi::device_id::DeviceId;
+use starnix_uapi::errno;
 use starnix_uapi::file_mode::FileMode;
 use starnix_uapi::open_flags::OpenFlags;
 use std::hint::black_box;
@@ -84,9 +91,10 @@ fn pin_thread_to_big_cores() {
     }
 }
 
+/// Runs `callback` in an in-process Starnix kernel with SELinux enforcing `aosp_sepolicy`.
 async fn spawn_test_kernel<F>(callback: F)
 where
-    F: AsyncFnOnce(&mut CurrentTask, &Arc<SecurityServer>) + Send + Sync + 'static,
+    F: AsyncFnOnce(&mut CurrentTask, &SecurityServer) + Send + Sync + 'static,
 {
     spawn_kernel_with_selinux_and_run(async |current_task, security_server| {
         pin_thread_to_big_cores();
@@ -102,6 +110,8 @@ where
     .await;
 }
 
+/// Registers a hook benchmark operating on a kernel-private anonymous [`PanickingFile`], skipping
+/// `FsNode` and cache lookups.
 fn create_file_bench(
     group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     name: &'static str,
@@ -133,6 +143,7 @@ fn security_context_to_sid_bench(
     context_bytes: &'static [u8],
 ) {
     let server = new_populated_security_server();
+    // Pre-resolve the context so measurement covers `SidTable` lookup rather than SID allocation.
     let _ = server.security_context_to_sid(context_bytes.into()).unwrap();
 
     let _ = group.bench_function(format!("security_context_to_sid_{name_suffix}"), move |bench| {
@@ -208,45 +219,37 @@ fn compute_create_sid_bench(
     });
 }
 
-fn cached_create_sid_filename_bench(
+fn cached_create_sid_filename_nameless_bench(
     group: &mut criterion::BenchmarkGroup<'_, WallTime>,
-    bench_name: &'static str,
     source_context: &'static [u8],
     target_context: &'static [u8],
     target_class: KernelClass,
-    filename: &'static [u8],
 ) {
     let server = new_populated_security_server();
     let source_sid = server.security_context_to_sid(source_context.into()).unwrap();
     let target_sid = server.security_context_to_sid(target_context.into()).unwrap();
     let local_cache = PerThreadCache::default();
     let permission_check = server.as_permission_check(&local_cache);
-    let nameless_sid = permission_check
+    assert_eq!(server.avc_cache_stats().lookups, 0);
+    let _ = permission_check
         .compute_create_sid(source_sid, target_sid, target_class, /* name = */ &[])
         .unwrap();
-    let created_sid = permission_check
-        .compute_create_sid(source_sid, target_sid, target_class, filename)
+    assert_eq!(server.avc_cache_stats().misses, 1);
+    let _ = permission_check
+        .compute_create_sid(source_sid, target_sid, target_class, /* name = */ &[])
         .unwrap();
-    if bench_name == "match" {
-        assert_ne!(created_sid, nameless_sid, "`match` must hit a filename transition rule");
-    } else {
-        assert_eq!(
-            created_sid, nameless_sid,
-            "`{bench_name}` must not hit a filename transition rule"
-        );
-    }
+    assert_eq!(server.avc_cache_stats().hits, 1);
 
-    let _ =
-        group.bench_function(format!("cached_create_sid_filename_{bench_name}"), move |bench| {
-            let permission_check = server.as_permission_check(&local_cache);
-            bench.iter(|| {
-                let _ = black_box(
-                    permission_check
-                        .compute_create_sid(source_sid, target_sid, target_class, filename)
-                        .unwrap(),
-                );
-            })
-        });
+    let _ = group.bench_function("cached_create_sid_filename_nameless", move |bench| {
+        let permission_check = server.as_permission_check(&local_cache);
+        bench.iter(|| {
+            let _ = black_box(
+                permission_check
+                    .compute_create_sid(source_sid, target_sid, target_class, /* name = */ &[])
+                    .unwrap(),
+            );
+        })
+    });
 }
 
 fn compute_create_sid_filename_bench(
@@ -296,10 +299,12 @@ fn concurrent_access_cache_get_bench(group: &mut criterion::BenchmarkGroup<'_, W
     };
 
     let keys: Vec<_> = (1..=1000)
-        .map(|index| AccessQueryArgs {
-            source_sid: SecurityId(NonZeroU32::new(index).unwrap()),
-            target_sid: SecurityId(NonZeroU32::new(index + 1).unwrap()),
-            target_class: KernelClass::Process,
+        .map(|index| {
+            AccessQueryArgs::new(
+                SecurityId(NonZeroU32::new(index).unwrap()),
+                SecurityId(NonZeroU32::new(index + 1).unwrap()),
+                KernelClass::Process,
+            )
         })
         .collect();
 
@@ -354,6 +359,29 @@ fn create_tmpfs_file(current_task: &CurrentTask, name: &str) -> NamespaceNode {
         .expect("create_node(file)")
 }
 
+/// Creates and opens a regular file named `name` in the root `tmpfs` directory, running
+/// [`security::file_open`] so `FileObjectOpenState` is initialized as in `open(2)`.
+fn open_tmpfs_file(current_task: &CurrentTask, name: &str) -> FileHandle {
+    let node = create_tmpfs_file(current_task, name);
+    let file = node.open(current_task, OpenAccessCheck::skip(OpenFlags::RDWR)).unwrap();
+    security::file_open(current_task, &file).unwrap();
+    file
+}
+
+fn file_permission_tmpfs_bench(
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
+    current_task: &'static CurrentTask,
+) {
+    let file = open_tmpfs_file(current_task, "file_permission_tmpfs");
+    let _ = group.bench_function("file_permission_tmpfs", move |bench| {
+        bench.iter(|| {
+            let _ = black_box(
+                security::file_permission(current_task, &file, PermissionFlags::READ).unwrap(),
+            );
+        })
+    });
+}
+
 fn fs_node_permission_tmpfs_bench(
     group: &mut criterion::BenchmarkGroup<'_, WallTime>,
     current_task: &'static CurrentTask,
@@ -402,6 +430,39 @@ fn check_file_ioctl_access_bench(
     create_file_bench(group, "check_file_ioctl_access", current_task, |task, file| {
         let _ =
             black_box(security::check_file_ioctl_access(task, file, starnix_uapi::TCGETS).unwrap());
+    });
+}
+
+fn check_file_ioctl_access_tmpfs_bench(
+    group: &mut criterion::BenchmarkGroup<'_, WallTime>,
+    current_task: &'static CurrentTask,
+    security_server: &SecurityServer,
+) {
+    // `aosp_sepolicy` grants `kernel` `file { ioctl }` on `tmpfs` and filters `fs_type:file` ioctls
+    // via `allowxperm` rules that permit `TCGETS` (`0x5401`) and deny `TCSETS` (`0x5402`).
+    let file = open_tmpfs_file(current_task, "check_file_ioctl_access_tmpfs");
+    assert_eq!(
+        security::check_file_ioctl_access(current_task, &file, starnix_uapi::TCSETS),
+        Err(errno!(EACCES)),
+        "`check_file_ioctl_access_tmpfs` must exercise active `allowxperm` filtering"
+    );
+    // Warm `PerThreadCache` for `TCGETS` and verify subsequent checks hit it without consulting
+    // the shared `AccessVectorCache`.
+    security::check_file_ioctl_access(current_task, &file, starnix_uapi::TCGETS).unwrap();
+    let avc_lookups = security_server.avc_cache_stats().lookups;
+    security::check_file_ioctl_access(current_task, &file, starnix_uapi::TCGETS).unwrap();
+    assert_eq!(
+        security_server.avc_cache_stats().lookups,
+        avc_lookups,
+        "`check_file_ioctl_access_tmpfs` must hit `PerThreadCache` for `TCGETS`"
+    );
+    let _ = group.bench_function("check_file_ioctl_access_tmpfs", move |bench| {
+        bench.iter(|| {
+            let _ = black_box(
+                security::check_file_ioctl_access(current_task, &file, starnix_uapi::TCGETS)
+                    .unwrap(),
+            );
+        })
     });
 }
 
@@ -500,6 +561,8 @@ fn main() {
         );
         // `system_data_file` has filename transition rules (`ndebugsocket` on `sock_file`), while
         // `tmpfs` has no filename transition rules (`no_target_rules`).
+        const NAMELESS_CASE: (&str, &[u8], &[u8], KernelClass, &[u8]) =
+            ("nameless", b"u:r:init:s0", b"u:object_r:tmpfs:s0", KernelClass::File, b"");
         let filename_transition_cases: &[(&str, &[u8], &[u8], KernelClass, &[u8])] = &[
             (
                 "match",
@@ -522,7 +585,7 @@ fn main() {
                 KernelClass::File,
                 b"unlikely_filename_1234",
             ),
-            ("nameless", b"u:r:init:s0", b"u:object_r:tmpfs:s0", KernelClass::File, b""),
+            NAMELESS_CASE,
         ];
         for &(bench_name, source, target, target_class, filename) in filename_transition_cases {
             compute_create_sid_filename_bench(
@@ -533,22 +596,18 @@ fn main() {
                 target_class,
                 filename,
             );
-            cached_create_sid_filename_bench(
-                &mut group,
-                bench_name,
-                source,
-                target,
-                target_class,
-                filename,
-            );
         }
+        let (_, source, target, target_class, _) = NAMELESS_CASE;
+        cached_create_sid_filename_nameless_bench(&mut group, source, target, target_class);
         concurrent_access_cache_get_bench(&mut group);
         contention::register_benchmarks(&mut group);
         file_permission_bench(&mut group, current_task);
+        file_permission_tmpfs_bench(&mut group, current_task);
         fs_node_permission_bench(&mut group, current_task);
         fs_node_permission_tmpfs_bench(&mut group, current_task);
         file_open_tmpfs_bench(&mut group, current_task);
         check_file_ioctl_access_bench(&mut group, current_task);
+        check_file_ioctl_access_tmpfs_bench(&mut group, current_task, security_server);
         binder_transaction_bench(&mut group, current_task, security_server);
         group.finish();
     }));

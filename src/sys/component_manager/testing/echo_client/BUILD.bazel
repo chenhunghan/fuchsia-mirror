@@ -33,6 +33,7 @@ fx_packaged_binary(
     name = "echo_client_testing_packaged_bin",
     binary = ":echo_client_testing",
     binary_name = "echo_client_testing",
+    visibility = ["//src/lib/fuchsia-component-test/tests:__pkg__"],
 )
 
 fx_component_manifest(

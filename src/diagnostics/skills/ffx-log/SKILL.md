@@ -15,7 +15,7 @@ on active components and code bugs.
 
 ## Workflow
 
-### 1. Retrieve logsa
+### 1. Retrieve logs
 
 To view device logs, use the `ffx log` command with the `--exclude-regex-file`
 flag:
@@ -26,7 +26,8 @@ ffx log --exclude-regex-file src/diagnostics/skills/ffx-log/references/noise_pat
 
 By default, this command returns up to the **last 100 log lines** (`--tail 100`
 after `dump`) and **excludes repetitive background system-level noise**
-(`--exclude-regex-file src/diagnostics/skills/ffx-log/references/noise_patterns.txt`).
+(`--exclude-regex-file
+src/diagnostics/skills/ffx-log/references/noise_patterns.txt`).
 
 ### 2. Available flags for advanced filtering
 
@@ -35,17 +36,28 @@ Customize the log query using these arguments:
 - `--severity <level>`: Minimum log severity level to display. Case-insensitive.
   Accepted values: `trace`, `debug`, `info`, `warn` (or `warning`), `error`,
   `fatal`.
-- `--component <moniker_or_url>`: Filter logs for specific component monikers
-  or URLs. Specify multiple times for multiple components (fuzzy matching).
-- `--filter <text>`: Keep only log lines where the moniker, the
-  tag, or the log message contains the specified text (case-insensitive).
-  Can be repeated.
-- `--exclude <text>`: Exclude log lines matching the specified text string. Can
-  be repeated.
+- `--component <moniker_or_url>`: Filter logs for specific component monikers or
+  URLs via fuzzy matching against target components. Specify multiple times for
+  multiple components. Note that this may fail if multiple component instances
+  match without disambiguation.
+- `--filter <text>`: Keep only log lines where the component moniker, component
+  URL, source file path, or log message contains the specified text
+  (case-insensitive). Can be repeated.
+- `--exclude <text>`: Exclude log lines where the component moniker, component
+  URL, source file path, or log message matches the specified text string
+  (case-insensitive). Can be repeated.
+- `--tag <tag>`: Filter logs to keep only entries matching the specified log
+  tag. Can be repeated.
 - `--exclude-regex <pattern>`: Exclude log lines matching the specified regular
   expression.
 - `--since <duration_or_time>`: Filter logs to only include events since a
   duration (for example, `"5m ago"`, `"1h ago"`, or `"now"`).
+
+> **Tip:** When a component's or driver's exact moniker is unknown (such as
+> dynamically bound drivers in driver hosts), filter by its component URL or
+> `.cm` manifest name using `--filter` (for example,
+> `--filter fuchsia-pkg://fuchsia.com/my-driver#meta/my-driver.cm` or
+> `--filter my-driver.cm`) rather than guessing the moniker.
 
 Under the `dump` subcommand, you can specify:
 
@@ -84,4 +96,11 @@ noise.
 
     ```posix-terminal
     ffx log --severity info dump --tail 200
+    ```
+
+* **Scenario E: Filter logs for a driver or component by component URL or
+  manifest when its moniker is unknown:**
+
+    ```posix-terminal
+    ffx log --exclude-regex-file src/diagnostics/skills/ffx-log/references/noise_patterns.txt --filter my-driver.cm dump --tail 100
     ```

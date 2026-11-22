@@ -43,6 +43,22 @@ class CommandBufferPool {
   // not retry from inside a callback.
   bool Cleanup();
 
+  // Return the sequence number of the oldest pending command buffer, or 0 if
+  // no command buffers are pending.
+  uint64_t OldestPendingSequenceNumber() const;
+
+  // Wait up to `timeout_nanoseconds` for the oldest pending command buffer.
+  // Returns true only when its fence has signaled (or its submission already
+  // failed), and false if no command buffer is pending, the oldest pending
+  // buffer has not been submitted, this pool is inside `Cleanup()` (a
+  // re-entrant call from a `CommandBufferFinishedCallback`, where a nested
+  // `Cleanup()` could not retire the buffer anyway), `timeout_nanoseconds`
+  // elapses, or `vkWaitForFences()` returns an error such as
+  // `VK_ERROR_DEVICE_LOST`. Does not retire the buffer; call `Cleanup()`
+  // afterward to retire it and advance `last_finished_sequence_number()` before
+  // waiting again.
+  bool WaitOnOldestPendingCommandBuffer(uint64_t timeout_nanoseconds);
+
   vk::Device device() const { return device_; }
   vk::Queue queue() const { return queue_; }
 

@@ -119,6 +119,7 @@ validity of memory via the following functions:
 * `asan_unpoison_shadow`
 * `asan_region_is_poisoned`
 * `asan_address_is_poisoned`
+* `asan_entire_region_is_poisoned`
 
 Memory allocators should use `asan_poison_shadow` to mark regions of memory as
 invalid, specifying different poison values for different types of memory.
@@ -138,12 +139,12 @@ After an allocation is freed, it is kept in a 'quarantine' to delay its reuse.
 This improves detection of use-after-free errors.
 
 The quarantine is implemented as a free-running circular queue, which stores
-up to kQuarantineElements pointers and frees them in FIFO order.
+up to `QUARANTINE_ELEMENTS` pointers and frees them in FIFO order.
 
 In `free`, the memory to be deallocated is added to the quarantine, and
 once the queue is full, the oldest element is actually freed.
 
-TODO(https://fxbug.dev/42104852): kQuarantineElements is 65,536; this means that in the worst
+TODO(https://fxbug.dev/42104852): `QUARANTINE_ELEMENTS` is 65,536; this means that in the worst
 case it increases kernel heap memory usage by 256 MB (4K * 65536), which is the
 same as compiler-rt's default quarantine size. We could consider dynamically
 tuning this or having the quarantine not release memory until there is memory

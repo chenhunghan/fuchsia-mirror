@@ -8910,6 +8910,463 @@ TEST(Sysmem, SizeAlignmentFlowsToMinSizeAndMinBytesPerRow) {
   ASSERT_EQ(16 * 4, *allocated_image_constraints->min_bytes_per_row());
 }
 
+TEST(Sysmem, TiledAndTeImageSizeOverflowFailsCleanly) {
+  constexpr uint32_t kXTileRowBytes = 512;
+  constexpr uint32_t kPvric16x4RowBytes = 64;
+  constexpr uint32_t kNearMaxHeight = 0xFFFFFFFEu;
+
+  struct Case {
+    fuchsia_images2::PixelFormatModifier modifier;
+    fuchsia_math::SizeU min_size;
+    uint32_t min_bytes_per_row;
+  };
+  const Case kCases[] = {
+      // 64-row ARM transaction-elimination tile height alignment overflows uint32_t.
+      {fuchsia_images2::PixelFormatModifier::kArmLinearTe, {1, kNearMaxHeight}, 4},
+      // 8-row Intel X-tile height alignment overflows uint32_t.
+      {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled, {1, kNearMaxHeight}, kXTileRowBytes},
+      // Intel 32-bit width_in_tiles * height_in_tiles * 4096 overflows uint32_t while
+      // width * height == 2^30 <= UINT32_MAX.
+      {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled, {32768, 32768}, 32768 * 4},
+      // 4-row PVRIC 16x4 tile height alignment overflows uint32_t.
+      {fuchsia_images2::PixelFormatModifier::kPvrFbcdc16X4V14,
+       {1, kNearMaxHeight},
+       kPvric16x4RowBytes},
+  };
+
+  for (size_t i = 0; i < std::size(kCases); ++i) {
+    const auto& test_case = kCases[i];
+    auto collection = make_single_participant_collection_v2();
+    ASSERT_OK(collection);
+    fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+    auto& constraints = set_constraints.constraints().emplace();
+    constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageRead;
+    constraints.min_buffer_count() = 1;
+    auto& image_constraints = constraints.image_format_constraints().emplace().emplace_back();
+    image_constraints.pixel_format() = fuchsia_images2::PixelFormat::kR8G8B8A8;
+    image_constraints.pixel_format_modifier() = test_case.modifier;
+    image_constraints.min_size() = test_case.min_size;
+    image_constraints.min_bytes_per_row() = test_case.min_bytes_per_row;
+    image_constraints.color_spaces().emplace().emplace_back(fuchsia_images2::ColorSpace::kSrgb);
+
+    auto set_constraints_result = collection->SetConstraints(std::move(set_constraints));
+    ASSERT_TRUE(set_constraints_result.is_ok());
+    auto wait_result = collection->WaitForAllBuffersAllocated();
+    ASSERT_FALSE(wait_result.is_ok(),
+                 "case %zu: modifier=0x%" PRIx64 " min_size={%u, %u} min_bytes_per_row=%u", i,
+                 fidl::ToUnderlying(test_case.modifier), test_case.min_size.width(),
+                 test_case.min_size.height(), test_case.min_bytes_per_row);
+  }
+
+  // Verify the sysmem server remained alive rather than panicking inside ImageFormatImageSize.
+  auto alive_token = create_initial_token_v2();
+  ASSERT_TRUE(alive_token->Sync().is_ok());
+}
+
+TEST(Sysmem, AggregatedIncompatibleImageFormatPrunedFallsBack) {
+  struct Case {
+    std::vector<fuchsia_images2::PixelFormat> formats;
+    uint32_t consumer_max_bytes_per_row;
+    bool expect_ok;
+  };
+  const Case kCases[] = {
+      // At width 100, kR8G8B8A8 needs 400 bytes/row (> 300) and is pruned in kAggregated, while
+      // kB8G8R8 needs 300 bytes/row (<= 300) and succeeds.
+      {{fuchsia_images2::PixelFormat::kR8G8B8A8, fuchsia_images2::PixelFormat::kB8G8R8}, 300, true},
+      // Reversed order exercises pruning at final index 1 after index 0 already succeeded.
+      {{fuchsia_images2::PixelFormat::kB8G8R8, fuchsia_images2::PixelFormat::kR8G8B8A8}, 300, true},
+      // Both formats eliminated (2 -> 0) fails allocation cleanly.
+      {{fuchsia_images2::PixelFormat::kR8G8B8A8, fuchsia_images2::PixelFormat::kB8G8R8},
+       299,
+       false},
+  };
+
+  for (size_t i = 0; i < std::size(kCases); ++i) {
+    const auto& test_case = kCases[i];
+    auto parent_token = create_initial_token_v2();
+    auto child_token = create_token_under_token_v2(parent_token);
+    auto producer = convert_token_to_collection_v2(std::move(parent_token));
+    auto consumer = convert_token_to_collection_v2(std::move(child_token));
+
+    {
+      fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+      auto& constraints = set_constraints.constraints().emplace();
+      constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageWriteOften;
+      constraints.min_buffer_count() = 1;
+      auto& ifc_list = constraints.image_format_constraints().emplace();
+      for (const auto pixel_format : test_case.formats) {
+        auto& ifc = ifc_list.emplace_back();
+        ifc.pixel_format() = pixel_format;
+        ifc.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+        ifc.min_size() = {100, 64};
+        ifc.color_spaces() = {fuchsia_images2::ColorSpace::kSrgb};
+      }
+      ASSERT_TRUE(producer->SetConstraints(std::move(set_constraints)).is_ok());
+    }
+
+    {
+      fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+      auto& constraints = set_constraints.constraints().emplace();
+      constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageReadOften;
+      constraints.min_buffer_count() = 1;
+      auto& ifc_list = constraints.image_format_constraints().emplace();
+      for (const auto pixel_format : test_case.formats) {
+        auto& ifc = ifc_list.emplace_back();
+        ifc.pixel_format() = pixel_format;
+        ifc.pixel_format_modifier() = fuchsia_images2::PixelFormatModifier::kLinear;
+        ifc.max_bytes_per_row() = test_case.consumer_max_bytes_per_row;
+        ifc.color_spaces() = {fuchsia_images2::ColorSpace::kSrgb};
+      }
+      ASSERT_TRUE(consumer->SetConstraints(std::move(set_constraints)).is_ok());
+    }
+
+    auto producer_wait = producer->WaitForAllBuffersAllocated();
+    auto consumer_wait = consumer->WaitForAllBuffersAllocated();
+    ASSERT_EQ(test_case.expect_ok, producer_wait.is_ok(), "case %zu", i);
+    ASSERT_EQ(test_case.expect_ok, consumer_wait.is_ok(), "case %zu", i);
+    if (test_case.expect_ok) {
+      ASSERT_TRUE(producer_wait->buffer_collection_info().has_value());
+      ASSERT_TRUE(producer_wait->buffer_collection_info()->settings().has_value());
+      const auto& settings = *producer_wait->buffer_collection_info()->settings();
+      ASSERT_TRUE(settings.image_format_constraints().has_value());
+      const auto& allocated_ifc = *settings.image_format_constraints();
+      ASSERT_TRUE(allocated_ifc.pixel_format().has_value());
+      ASSERT_EQ(fuchsia_images2::PixelFormat::kB8G8R8, *allocated_ifc.pixel_format(), "case %zu",
+                i);
+    }
+  }
+}
+
+TEST(Sysmem, TiledMaxBytesPerRowBelowFormatRequirementFails) {
+  constexpr uint32_t kXTileRowBytes = 512;
+  constexpr uint32_t kYTileRowBytes = 128;
+  constexpr uint32_t kPvric16x4RowBytes = 64;
+  constexpr uint32_t kAfbc16x16RowBytes = 64;
+  constexpr uint32_t kAfbcTiledHeader16x16RowBytes = 512;
+
+  struct Case {
+    fuchsia_images2::PixelFormatModifier modifier;
+    fuchsia_math::SizeU min_size;
+    uint32_t max_bytes_per_row;
+    bool expect_ok;
+    fuchsia_images2::PixelFormat pixel_format = fuchsia_images2::PixelFormat::kR8G8B8A8;
+    fuchsia_images2::ColorSpace color_space = fuchsia_images2::ColorSpace::kSrgb;
+    std::optional<fuchsia_math::SizeU> required_max_size = std::nullopt;
+    std::vector<fuchsia_math::SizeU> required_max_size_list = {};
+    std::optional<uint32_t> expected_max_bytes_per_row = std::nullopt;
+    std::optional<uint32_t> expected_min_bytes_per_row = std::nullopt;
+    std::optional<uint64_t> expected_size_bytes = std::nullopt;
+  };
+  const Case kCases[] = {
+      {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled, {1, 1}, kXTileRowBytes - 1, false},
+      {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled, {1, 1}, kXTileRowBytes, true},
+      // 200 * 4 = 800 rounds up to 1024 > max_bytes_per_row (512).
+      {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled, {200, 1}, kXTileRowBytes, false},
+      {fuchsia_images2::PixelFormatModifier::kPvrFbcdc16X4V14,
+       {1, 1},
+       kPvric16x4RowBytes - 1,
+       false},
+      {fuchsia_images2::PixelFormatModifier::kPvrFbcdc16X4V14, {1, 1}, kPvric16x4RowBytes, true},
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc16X16, {1, 1}, kAfbc16x16RowBytes - 1, false},
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc16X16, {1, 1}, kAfbc16x16RowBytes, true},
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc16X16SplitBlockSparseYuvTiledHeader,
+       {1, 1},
+       kAfbcTiledHeader16x16RowBytes - 1,
+       false},
+      {fuchsia_images2::PixelFormatModifier::kArmAfbc16X16SplitBlockSparseYuvTiledHeader,
+       {1, 1},
+       kAfbcTiledHeader16x16RowBytes,
+       true},
+      // required_max_size_list width 200 needs 2 X-tiles (1024 bytes) > max_bytes_per_row (512).
+      {.modifier = fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+       .min_size = {1, 1},
+       .max_bytes_per_row = kXTileRowBytes,
+       .expect_ok = false,
+       .required_max_size_list = {{200, 64}}},
+      // Deprecated required_max_size width 200 also fails sanitization when > max_bytes_per_row.
+      {.modifier = fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+       .min_size = {1, 1},
+       .max_bytes_per_row = kXTileRowBytes,
+       .expect_ok = false,
+       .required_max_size = fuchsia_math::SizeU{200, 64}},
+      // required_max_size_list width < min_size.width is valid in sysmem and clamps to min_size.
+      {.modifier = fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+       .min_size = {128, 64},
+       .max_bytes_per_row = kXTileRowBytes,
+       .expect_ok = true,
+       .required_max_size_list = {{64, 64}}},
+      // Finite max_bytes_per_row (700) rounds down to a multiple of bytes_per_row_divisor (512).
+      {.modifier = fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+       .min_size = {1, 1},
+       .max_bytes_per_row = 700,
+       .expect_ok = true,
+       .expected_max_bytes_per_row = kXTileRowBytes},
+      // Multi-plane NV12 + Intel Y-tiling requires 128-byte tile row alignment.
+      {.modifier = fuchsia_images2::PixelFormatModifier::kIntelI915YTiled,
+       .min_size = {2, 2},
+       .max_bytes_per_row = kYTileRowBytes - 1,
+       .expect_ok = false,
+       .pixel_format = fuchsia_images2::PixelFormat::kNv12,
+       .color_space = fuchsia_images2::ColorSpace::kRec709},
+      {.modifier = fuchsia_images2::PixelFormatModifier::kIntelI915YTiled,
+       .min_size = {2, 2},
+       .max_bytes_per_row = kYTileRowBytes,
+       .expect_ok = true,
+       .pixel_format = fuchsia_images2::PixelFormat::kNv12,
+       .color_space = fuchsia_images2::ColorSpace::kRec709},
+      // GOOGLE_GOLDFISH_OPTIMAL uses linear minimum row bytes and image size for RGBA and NV12.
+      {.modifier = fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal,
+       .min_size = {100, 64},
+       .max_bytes_per_row = 399,
+       .expect_ok = false},
+      {.modifier = fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal,
+       .min_size = {100, 64},
+       .max_bytes_per_row = 400,
+       .expect_ok = false,
+       .required_max_size_list = {{200, 64}}},
+      {.modifier = fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal,
+       .min_size = {100, 64},
+       .max_bytes_per_row = 400,
+       .expect_ok = true,
+       .expected_min_bytes_per_row = 400,
+       .expected_size_bytes = 400u * 64u},
+      {.modifier = fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal,
+       .min_size = {64, 64},
+       .max_bytes_per_row = 63,
+       .expect_ok = false,
+       .pixel_format = fuchsia_images2::PixelFormat::kNv12,
+       .color_space = fuchsia_images2::ColorSpace::kRec709},
+      {.modifier = fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal,
+       .min_size = {64, 64},
+       .max_bytes_per_row = 64,
+       .expect_ok = false,
+       .pixel_format = fuchsia_images2::PixelFormat::kNv12,
+       .color_space = fuchsia_images2::ColorSpace::kRec709,
+       .required_max_size_list = {{128, 64}}},
+      {.modifier = fuchsia_images2::PixelFormatModifier::kGoogleGoldfishOptimal,
+       .min_size = {64, 64},
+       .max_bytes_per_row = 64,
+       .expect_ok = true,
+       .pixel_format = fuchsia_images2::PixelFormat::kNv12,
+       .color_space = fuchsia_images2::ColorSpace::kRec709,
+       .expected_min_bytes_per_row = 64,
+       .expected_size_bytes = 64u * 64u * 3u / 2u},
+  };
+
+  for (size_t i = 0; i < std::size(kCases); ++i) {
+    const auto& test_case = kCases[i];
+    auto collection = make_single_participant_collection_v2();
+    ASSERT_OK(collection);
+    fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+    auto& constraints = set_constraints.constraints().emplace();
+    constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageRead;
+    constraints.min_buffer_count() = 1;
+    auto& image_constraints = constraints.image_format_constraints().emplace().emplace_back();
+    image_constraints.pixel_format() = test_case.pixel_format;
+    image_constraints.pixel_format_modifier() = test_case.modifier;
+    image_constraints.min_size() = test_case.min_size;
+    image_constraints.max_bytes_per_row() = test_case.max_bytes_per_row;
+    image_constraints.color_spaces().emplace().emplace_back(test_case.color_space);
+    if (test_case.required_max_size.has_value()) {
+      image_constraints.required_max_size() = *test_case.required_max_size;
+    }
+    if (!test_case.required_max_size_list.empty()) {
+      image_constraints.required_max_size_list() = test_case.required_max_size_list;
+    }
+
+    auto set_constraints_result = collection->SetConstraints(std::move(set_constraints));
+    ASSERT_TRUE(set_constraints_result.is_ok(), "case %zu", i);
+    auto wait_result = collection->WaitForAllBuffersAllocated();
+    ASSERT_EQ(test_case.expect_ok, wait_result.is_ok(),
+              "case %zu: format=%u modifier=0x%" PRIx64 " min_size={%u, %u} max_bytes_per_row=%u",
+              i, fidl::ToUnderlying(test_case.pixel_format), fidl::ToUnderlying(test_case.modifier),
+              test_case.min_size.width(), test_case.min_size.height(), test_case.max_bytes_per_row);
+    if (test_case.expect_ok && (test_case.expected_max_bytes_per_row.has_value() ||
+                                test_case.expected_min_bytes_per_row.has_value() ||
+                                test_case.expected_size_bytes.has_value())) {
+      ASSERT_TRUE(wait_result->buffer_collection_info().has_value(), "case %zu", i);
+      ASSERT_TRUE(wait_result->buffer_collection_info()->settings().has_value(), "case %zu", i);
+      const auto& settings = *wait_result->buffer_collection_info()->settings();
+      if (test_case.expected_max_bytes_per_row.has_value() ||
+          test_case.expected_min_bytes_per_row.has_value()) {
+        ASSERT_TRUE(settings.image_format_constraints().has_value(), "case %zu", i);
+        const auto& allocated_ifc = *settings.image_format_constraints();
+        if (test_case.expected_max_bytes_per_row.has_value()) {
+          ASSERT_TRUE(allocated_ifc.max_bytes_per_row().has_value(), "case %zu", i);
+          ASSERT_EQ(*test_case.expected_max_bytes_per_row, *allocated_ifc.max_bytes_per_row(),
+                    "case %zu", i);
+        }
+        if (test_case.expected_min_bytes_per_row.has_value()) {
+          ASSERT_TRUE(allocated_ifc.min_bytes_per_row().has_value(), "case %zu", i);
+          ASSERT_EQ(*test_case.expected_min_bytes_per_row, *allocated_ifc.min_bytes_per_row(),
+                    "case %zu", i);
+        }
+      }
+      if (test_case.expected_size_bytes.has_value()) {
+        ASSERT_TRUE(settings.buffer_settings().has_value(), "case %zu", i);
+        ASSERT_TRUE(settings.buffer_settings()->size_bytes().has_value(), "case %zu", i);
+        ASSERT_EQ(*test_case.expected_size_bytes, *settings.buffer_settings()->size_bytes(),
+                  "case %zu", i);
+      }
+    }
+  }
+}
+
+TEST(Sysmem, TiledRequiredMaxSizeAndBytesPerRowDivisorLcm) {
+  constexpr uint32_t kClientDivisor = 96;
+  // lcm(96, 512) == 1536 (3 X-tiles wide).
+  constexpr uint32_t kExpectedLcmDivisor = 1536;
+  constexpr uint32_t kRequiredWidth = 400;
+  constexpr uint32_t kRequiredHeight = 64;
+  // 400 * 4 = 1600 bytes rounds up to 2 * 1536 = 3072 bytes.
+  constexpr uint32_t kExpectedRequiredRowBytes = 2 * kExpectedLcmDivisor;
+
+  auto collection = make_single_participant_collection_v2();
+  ASSERT_OK(collection);
+  fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+  auto& constraints = set_constraints.constraints().emplace();
+  constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageRead;
+  constraints.min_buffer_count() = 1;
+  auto& image_constraints = constraints.image_format_constraints().emplace().emplace_back();
+  image_constraints.pixel_format() = fuchsia_images2::PixelFormat::kR8G8B8A8;
+  image_constraints.pixel_format_modifier() =
+      fuchsia_images2::PixelFormatModifier::kIntelI915XTiled;
+  image_constraints.color_spaces().emplace().emplace_back(fuchsia_images2::ColorSpace::kSrgb);
+  image_constraints.bytes_per_row_divisor() = kClientDivisor;
+  image_constraints.required_max_size_list().emplace().emplace_back(
+      fuchsia_math::SizeU{kRequiredWidth, kRequiredHeight});
+
+  auto set_constraints_result = collection->SetConstraints(std::move(set_constraints));
+  ASSERT_TRUE(set_constraints_result.is_ok());
+  auto wait_result = collection->WaitForAllBuffersAllocated();
+  ASSERT_TRUE(wait_result.is_ok());
+
+  ASSERT_TRUE(wait_result->buffer_collection_info().has_value());
+  ASSERT_TRUE(wait_result->buffer_collection_info()->settings().has_value());
+  const auto& settings = *wait_result->buffer_collection_info()->settings();
+  ASSERT_TRUE(settings.image_format_constraints().has_value());
+  const auto& allocated_image_constraints = *settings.image_format_constraints();
+  ASSERT_TRUE(allocated_image_constraints.bytes_per_row_divisor().has_value());
+  ASSERT_EQ(kExpectedLcmDivisor, *allocated_image_constraints.bytes_per_row_divisor());
+  ASSERT_TRUE(allocated_image_constraints.min_bytes_per_row().has_value());
+  ASSERT_EQ(kExpectedLcmDivisor, *allocated_image_constraints.min_bytes_per_row());
+  ASSERT_TRUE(allocated_image_constraints.max_bytes_per_row().has_value());
+  ASSERT_EQ(std::numeric_limits<uint32_t>::max(), *allocated_image_constraints.max_bytes_per_row());
+
+  auto format_result =
+      ImageConstraintsToFormat(allocated_image_constraints, kRequiredWidth, kRequiredHeight);
+  ASSERT_TRUE(format_result.is_ok());
+  ASSERT_TRUE(format_result.value().bytes_per_row().has_value());
+  ASSERT_EQ(kExpectedRequiredRowBytes, *format_result.value().bytes_per_row());
+  ASSERT_TRUE(settings.buffer_settings().has_value());
+  ASSERT_TRUE(settings.buffer_settings()->size_bytes().has_value());
+  ASSERT_EQ(ImageFormatImageSize(format_result.value()), *settings.buffer_settings()->size_bytes());
+}
+
+TEST(Sysmem, TiledIncompatibleMaxBytesPerRowFallsBackToLinear) {
+  struct Scenario {
+    std::vector<fuchsia_images2::PixelFormatModifier> producer_modifiers;
+    fuchsia_math::SizeU producer_min_size;
+    std::vector<fuchsia_math::SizeU> producer_required_max_size_list;
+    std::vector<fuchsia_images2::PixelFormatModifier> consumer_modifiers;
+    uint32_t consumer_max_bytes_per_row;
+  };
+  const Scenario kScenarios[] = {
+      // 1. Producer offers [X-tiled, Linear] with min_size {200, 64} (X-tiled needs 1024 > 800;
+      // Linear needs 800 <= 800).
+      {.producer_modifiers = {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+                              fuchsia_images2::PixelFormatModifier::kLinear},
+       .producer_min_size = {200, 64},
+       .producer_required_max_size_list = {},
+       .consumer_modifiers = {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+                              fuchsia_images2::PixelFormatModifier::kLinear},
+       .consumer_max_bytes_per_row = 800},
+      // 2. Reversed order [Linear, X-tiled]: X-tiled fails at final index 1 after Linear at index 0
+      // already succeeded.
+      {.producer_modifiers = {fuchsia_images2::PixelFormatModifier::kLinear,
+                              fuchsia_images2::PixelFormatModifier::kIntelI915XTiled},
+       .producer_min_size = {200, 64},
+       .producer_required_max_size_list = {},
+       .consumer_modifiers = {fuchsia_images2::PixelFormatModifier::kLinear,
+                              fuchsia_images2::PixelFormatModifier::kIntelI915XTiled},
+       .consumer_max_bytes_per_row = 800},
+      // 3. Producer offers [X-tiled, Linear] with min_size {64, 64}; consumer uses kDoNotCare
+      // modifier with max_bytes_per_row = 511 (< 512 X-tile divisor, >= 256 Linear row bytes).
+      {.producer_modifiers = {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+                              fuchsia_images2::PixelFormatModifier::kLinear},
+       .producer_min_size = {64, 64},
+       .producer_required_max_size_list = {},
+       .consumer_modifiers = {fuchsia_images2::PixelFormatModifier::kDoNotCare},
+       .consumer_max_bytes_per_row = 511},
+      // 4. Producer offers [X-tiled, Linear] with min_size {1, 1} and required_max_size_list
+      // {{200, 64}}; consumer sets max_bytes_per_row = 800 -> X-tiled pruned via required_max_size
+      // check during kAggregated sanitization, falling back to Linear.
+      {.producer_modifiers = {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+                              fuchsia_images2::PixelFormatModifier::kLinear},
+       .producer_min_size = {1, 1},
+       .producer_required_max_size_list = {{200, 64}},
+       .consumer_modifiers = {fuchsia_images2::PixelFormatModifier::kIntelI915XTiled,
+                              fuchsia_images2::PixelFormatModifier::kLinear},
+       .consumer_max_bytes_per_row = 800},
+  };
+
+  for (size_t i = 0; i < std::size(kScenarios); ++i) {
+    const auto& scenario = kScenarios[i];
+    auto parent_token = create_initial_token_v2();
+    auto child_token = create_token_under_token_v2(parent_token);
+    auto producer = convert_token_to_collection_v2(std::move(parent_token));
+    auto consumer = convert_token_to_collection_v2(std::move(child_token));
+
+    {
+      fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+      auto& constraints = set_constraints.constraints().emplace();
+      constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageWriteOften;
+      constraints.min_buffer_count() = 1;
+      auto& ifc_list = constraints.image_format_constraints().emplace();
+      for (const auto modifier : scenario.producer_modifiers) {
+        auto& ifc = ifc_list.emplace_back();
+        ifc.pixel_format() = fuchsia_images2::PixelFormat::kR8G8B8A8;
+        ifc.pixel_format_modifier() = modifier;
+        ifc.min_size() = scenario.producer_min_size;
+        if (!scenario.producer_required_max_size_list.empty()) {
+          ifc.required_max_size_list() = scenario.producer_required_max_size_list;
+        }
+        ifc.color_spaces() = {fuchsia_images2::ColorSpace::kSrgb};
+      }
+      ASSERT_TRUE(producer->SetConstraints(std::move(set_constraints)).is_ok(), "scenario %zu", i);
+    }
+
+    {
+      fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constraints;
+      auto& constraints = set_constraints.constraints().emplace();
+      constraints.usage().emplace().cpu() = fuchsia_sysmem2::kCpuUsageReadOften;
+      constraints.min_buffer_count() = 1;
+      auto& ifc_list = constraints.image_format_constraints().emplace();
+      for (const auto modifier : scenario.consumer_modifiers) {
+        auto& ifc = ifc_list.emplace_back();
+        ifc.pixel_format() = fuchsia_images2::PixelFormat::kR8G8B8A8;
+        ifc.pixel_format_modifier() = modifier;
+        ifc.max_bytes_per_row() = scenario.consumer_max_bytes_per_row;
+        ifc.color_spaces() = {fuchsia_images2::ColorSpace::kSrgb};
+      }
+      ASSERT_TRUE(consumer->SetConstraints(std::move(set_constraints)).is_ok(), "scenario %zu", i);
+    }
+
+    auto producer_wait = producer->WaitForAllBuffersAllocated();
+    auto consumer_wait = consumer->WaitForAllBuffersAllocated();
+    ASSERT_TRUE(producer_wait.is_ok(), "scenario %zu", i);
+    ASSERT_TRUE(consumer_wait.is_ok(), "scenario %zu", i);
+    ASSERT_TRUE(producer_wait->buffer_collection_info().has_value(), "scenario %zu", i);
+    ASSERT_TRUE(producer_wait->buffer_collection_info()->settings().has_value(), "scenario %zu", i);
+    const auto& settings = *producer_wait->buffer_collection_info()->settings();
+    ASSERT_TRUE(settings.image_format_constraints().has_value(), "scenario %zu", i);
+    const auto& allocated_ifc = *settings.image_format_constraints();
+    ASSERT_TRUE(allocated_ifc.pixel_format_modifier().has_value(), "scenario %zu", i);
+    ASSERT_EQ(fuchsia_images2::PixelFormatModifier::kLinear, *allocated_ifc.pixel_format_modifier(),
+              "scenario %zu", i);
+  }
+}
+
 // This test is too likely to cause an OOM which would be treated as a flake. For now we can enable
 // and run this manually.
 #if 0

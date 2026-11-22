@@ -42,7 +42,7 @@ idk_ffx_tool(
         "//src/graphics/examples/vkproto/driver-tests:__pkg__",
         "//src/graphics/tests:__subpackages__",
         "//src/lib/fuchsia-component-test/realm_builder_server:__pkg__",
-        "//src/performance/memory/heapdump/collector:__pkg__",
+        "//src/memory/heapdump/collector:__pkg__",
         "//src/sys/pkg/tests/system-tests:__pkg__",
         "//src/testing/fidl/intl_property_manager:__pkg__",
         "//src/tests/end_to_end/package_manager:__pkg__",

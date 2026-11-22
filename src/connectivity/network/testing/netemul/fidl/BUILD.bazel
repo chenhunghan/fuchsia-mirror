@@ -8,13 +8,13 @@ package(default_applicable_licenses = ["//:license"])
 
 fidl_library(
     name = "fuchsia.netemul",
-    testonly = True,
     srcs = [
         "configurable_netstack.fidl",
         "netemul.fidl",
     ],
     visibility = [
         "//src/bringup/bin/netsvc/test/integration:__pkg__",
+        "//src/connectivity/lowpan/tests/thread-integration-tests/common:__pkg__",
         "//src/connectivity/network:__subpackages__",
     ],
     deps = [

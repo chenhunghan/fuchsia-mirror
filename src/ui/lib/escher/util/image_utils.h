@@ -25,6 +25,10 @@ using ImageConversionFunction = fit::function<void(void*, const void*, uint32_t,
 // Returns the number of bytes per pixel for the given format.
 size_t BytesPerPixel(vk::Format format);
 
+// Returns the number of bytes of tightly packed pixel data for a `width` x `height` image of
+// `format`. Crashes for unsupported formats.
+size_t GetImageByteSize(vk::Format format, size_t width, size_t height);
+
 // Return true if |format| can be used as a depth buffer.
 bool IsDepthFormat(vk::Format format);
 
@@ -35,8 +39,8 @@ bool IsStencilFormat(vk::Format format);
 // Currently these include:
 //   - eG8B8G8R8422Unorm
 //   - eG8B8R82Plane420Unorm
-// TODO(https://fxbug.dev/42098808): use of these formats is not enough to assume NV12, but they're currently
-// the only formats we support at the sampler level.
+// TODO(https://fxbug.dev/42098808): use of these formats is not enough to assume NV12, but they're
+// currently the only formats we support at the sampler level.
 bool IsYuvFormat(vk::Format format);
 
 // Return a pair of booleans, each of which is true if |format| can be used as
@@ -87,14 +91,17 @@ ImagePtr NewImage(ImageFactory* image_factory, vk::Format format, ColorSpace col
                   vk::ImageUsageFlags additional_flags = vk::ImageUsageFlags(),
                   vk::MemoryPropertyFlags memory_flags = vk::MemoryPropertyFlags());
 
-// Write the contents of |pixels| into an existing |gpu_image|.
-// The width, and height of |pixels| is assumed to match that of
-// |gpu_image|.
-// If the format of |pixels| is different from |gpu_image|, a conversion
-// function that can convert from |pixels| to |gpu_image| should be
-// provided as |convertion_func|.
-// Note that all escher images are stored in GPU memory.  The use of gpu_image
-// here is to specifically differentiate it from pixels, which may be stored in
+// Write the contents of `pixels` into an existing `gpu_image`.
+// The width, and height of `pixels` is assumed to match that of
+// `gpu_image`.
+// The format of `gpu_image` must be one that
+// `BatchGpuUploader::ScheduleWriteImage()` accepts; any other format crashes
+// the process.
+// If the format of `pixels` is different from `gpu_image`, a conversion
+// function that can convert from `pixels` to `gpu_image` should be
+// provided as `convertion_func`.
+// Note that all escher images are stored in GPU memory.  The use of `gpu_image`
+// here is to specifically differentiate it from `pixels`, which may be stored in
 // host_memory.
 void WritePixelsToImage(
     escher::BatchGpuUploader* batch_gpu_uploader, const uint8_t* pixels, const ImagePtr& gpu_image,

@@ -5,9 +5,9 @@
 // https://opensource.org/licenses/MIT
 
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
+use super::descriptor::CODE_64_SELECTOR;
 use super::feature;
 use super::interrupts::{X86_INT_BREAKPOINT, X86InterruptVector};
 use super::x86::x86_lidt;
@@ -19,9 +19,6 @@ use crate::vm::vm_aspace::VmAspace;
 
 /// The size of the `clac` instruction.
 const CLAC_SIZE: usize = 3;
-
-/// Kernel 64-bit code segment selector (`CODE_64_SELECTOR` in `arch/x86/descriptor.h`).
-const CODE_64_SELECTOR: u16 = 0x10;
 
 /// Single 16-byte Interrupt Descriptor Table (IDT) gate descriptor on x86_64.
 #[repr(C)]
@@ -83,7 +80,6 @@ pub(super) enum IdtDpl {
     Dpl2 = 2,
     Dpl3 = 3,
 }
-
 /// Page-aligned wrapper around an [`Idt`] stored in a global `static` and mutated only during
 /// single-threaded early boot on CPU 0 before secondary CPUs are brought online.
 #[repr(C, align(4096))]
@@ -115,10 +111,7 @@ impl SharedIdt {
 pub static _idt_startup: SharedIdt = SharedIdt::new();
 
 /// IDT after early boot.
-// SAFETY: `_idt` is the unique global definition for `extern struct idt _idt` in
-// `arch/x86/mp.cc`, and `SharedIdt` (`#[repr(C, align(4096))]` wrapping `UnsafeCell<Idt>`) is
-// layout-compatible with `struct idt`.
-#[unsafe(no_mangle)]
+#[allow(non_upper_case_globals)]
 pub static _idt: SharedIdt = SharedIdt::new();
 
 /// Read-only remapping of the IDT.
@@ -248,23 +241,23 @@ pub(super) unsafe fn idt_load(idt: *const Idt) {
 pub(super) unsafe fn idt_setup_readonly() {
     debug_assert!(curr_cpu_num() == 0);
     debug_assert!(mp::get_online_mask() == 1);
-    let mut idt_ro_ptr: *mut c_void = core::ptr::null_mut();
     let paddr = vaddr_to_paddr(_idt.get().cast());
-    // SAFETY: Allocates a read-only virtual mapping in the kernel address space backed by the
-    // physical page of `_idt`.
-    let status = unsafe {
-        VmAspace::kernel_aspace().alloc_physical(
-            b"idt_readonly",
-            core::mem::size_of::<Idt>(),
-            &mut idt_ro_ptr,
-            page::SHIFT as u8,
-            paddr,
-            0,
-            ARCH_MMU_FLAG_PERM_READ,
-        )
+    // SAFETY: The cache policy in the flags is appropriate for all mappings of the physical range,
+    // and creating this mapping is sound.
+    let base = unsafe {
+        VmAspace::kernel_aspace()
+            .alloc_physical(
+                b"idt_readonly",
+                core::mem::size_of::<Idt>(),
+                None,
+                page::SHIFT as u8,
+                paddr,
+                0,
+                ARCH_MMU_FLAG_PERM_READ,
+            )
+            .expect("Failed to allocate read-only IDT")
     };
-    assert!(status.is_ok());
-    let idt_ro = idt_ro_ptr.cast::<Idt>();
+    let idt_ro: *mut Idt = core::ptr::with_exposed_provenance_mut(base);
     // Written once on CPU 0 while `mp::get_online_mask() == 1` before secondary CPUs are brought
     // online; AP bringup synchronizes memory visibility.
     IDT_RO.store(idt_ro, Ordering::Relaxed);

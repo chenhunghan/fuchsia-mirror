@@ -7,9 +7,7 @@ use crate::kernel::{
 };
 use crate::policy::{AccessVector, SELINUX_AVD_FLAGS_PERMISSIVE, XpermsKind};
 use crate::security_server::{PolicySeqNo, SecurityServer};
-use crate::{
-    ClassPermission, FdPermission, KernelClass, KernelPermission, KernelPermissionSet, SecurityId,
-};
+use crate::{FdPermission, KernelClass, KernelPermission, KernelPermissionSet, SecurityId};
 
 use std::num::NonZeroU32;
 
@@ -74,13 +72,13 @@ impl<'a> PermissionCheck<'a> {
     /// The result indicates both whether `permission` is `permit`ted, and whether the caller
     /// should `audit` log the query.
     #[inline]
-    pub fn has_permission<P: ClassPermission + Into<KernelPermission> + 'static>(
+    pub fn has_permission(
         &self,
         source_sid: SecurityId,
         target_sid: SecurityId,
-        permission: P,
+        permission: impl Into<KernelPermission>,
     ) -> PermissionCheckResult {
-        self.has_permissions(source_sid, target_sid, permission)
+        self.has_permissions(source_sid, target_sid, permission.into())
     }
 
     /// Returns whether the `source_sid` has all of the specified `permissions` on `target_sid`.
@@ -122,12 +120,12 @@ impl<'a> PermissionCheck<'a> {
     ///
     /// A denied request is audited if the base permission is `dontaudit` or the extended
     /// permission is `dontauditxperm`.
-    pub fn has_extended_permission<P: ClassPermission + Into<KernelPermission> + 'static>(
+    pub fn has_extended_permission(
         &self,
         xperms_kind: XpermsKind,
         source_sid: SecurityId,
         target_sid: SecurityId,
-        permission: P,
+        permission: impl Into<KernelPermission>,
         xperm: u16,
     ) -> PermissionCheckResult {
         let permission: KernelPermission = permission.into();

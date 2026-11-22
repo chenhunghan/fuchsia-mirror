@@ -9,9 +9,16 @@ import("//build/rust/rustc_macro.gni")
 rustc_macro("syscalls-macro") {
   name = "syscalls_macro"
   edition = "2024"
+  with_unit_tests = true
   sources = [ "src/lib.rs" ]
   deps = [
+    "//third_party/rust_crates:proc-macro2",
     "//third_party/rust_crates:quote",
     "//third_party/rust_crates:syn",
   ]
+}
+
+group("tests") {
+  testonly = true
+  deps = [ ":syscalls-macro_test($host_toolchain)" ]
 }

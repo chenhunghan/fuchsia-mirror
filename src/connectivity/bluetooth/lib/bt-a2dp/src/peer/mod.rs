@@ -1339,16 +1339,13 @@ mod tests {
     use async_utils::PollExt;
     use bt_channel_test_support::{Transport, create_test_channels};
     use bt_metrics::respond_to_metrics_req_for_test;
-    use fidl::endpoints::create_proxy_and_stream;
     use fidl_fuchsia_bluetooth::ErrorCode;
-
-    use fidl_fuchsia_bluetooth_bredr::{
-        ProfileMarker, ProfileRequest, ProfileRequestStream, ServiceClassProfileIdentifier,
-    };
+    use fidl_fuchsia_bluetooth_bredr::ServiceClassProfileIdentifier;
     use fidl_fuchsia_metrics::{MetricEvent, MetricEventPayload};
     use futures::{SinkExt, StreamExt};
     use std::pin::pin;
     use test_case::test_case;
+    use test_profile_server::{ConnectChannel, TestProfileServer};
 
     use crate::media_task::tests::{TestMediaTask, TestMediaTaskBuilder};
     use crate::media_types::*;
@@ -1425,7 +1422,7 @@ mod tests {
     }
 
     /// Creates a Peer object, returning a channel connected ot the remote end, a
-    /// ProfileRequestStream connected to the profile_proxy, and the Peer object.
+    /// TestProfileServer connected to the profile_proxy, and the Peer object.
     fn setup_test_peer(
         transport: Transport,
         use_cobalt: bool,
@@ -1433,7 +1430,7 @@ mod tests {
         permits: Option<Permits>,
     ) -> (
         Channel,
-        ProfileRequestStream,
+        TestProfileServer,
         Option<fidl_fuchsia_metrics::MetricEventLoggerRequestStream>,
         Peer,
     ) {
@@ -1444,7 +1441,7 @@ mod tests {
         } else {
             (bt_metrics::MetricsLogger::default(), None)
         };
-        let (profile_proxy, requests) = create_proxy_and_stream::<ProfileMarker>();
+        let (profile_proxy, requests) = TestProfileServer::create_endpoints();
         let peer =
             Peer::create(PeerId(1), avdtp, streams, permits, profile_proxy, None, metrics_logger);
 
@@ -1514,7 +1511,7 @@ mod tests {
     #[test_case(Transport::Fidl ; "fidl")]
     fn disconnected(transport: Transport) {
         let mut exec = fasync::TestExecutor::new();
-        let (proxy, _stream) = create_proxy_and_stream::<ProfileMarker>();
+        let (proxy, _stream) = TestProfileServer::create_endpoints();
         let (signaling, remote) = create_test_channels(transport);
 
         let id = PeerId(1);
@@ -1997,18 +1994,13 @@ mod tests {
         };
 
         // Should connect the media channel after open.
-        let (transport_chan, _remote_chan) = create_test_channels(transport);
-
-        let request = exec.run_until_stalled(&mut profile_request_stream.next());
-        match request {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { peer_id, connection, responder }))) => {
-                assert_eq!(PeerId(1), peer_id.into());
-                assert_eq!(connection, ConnectParameters::L2cap(Peer::transport_channel_params()));
-                let channel = transport_chan.try_into().unwrap();
-                responder.send(Ok(channel)).expect("responder sends");
-            }
-            x => panic!("Should have sent a open l2cap request, but got {:?}", x),
-        };
+        let mut connect_fut = pin!(profile_request_stream.expect_connect_request());
+        let _remote_chan = exec
+            .run_until_stalled(&mut connect_fut)
+            .expect("Should have sent a open l2cap request")
+            .assert_peer(PeerId(1))
+            .assert_channel(ConnectChannel::L2CapPsm(PSM_AVDTP))
+            .accept_with_transport(transport);
 
         // Setup is complete once the media transport is connected. The start is sent by the task
         // that starts the stream when the audio is active.
@@ -2355,18 +2347,13 @@ mod tests {
         assert!(!peer.is_streaming_now());
 
         // Should connect the media channel after open.
-        let (transport_chan, _remote_chan) = create_test_channels(transport);
-
-        let request = exec.run_until_stalled(&mut profile_request_stream.next());
-        match request {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { peer_id, connection, responder }))) => {
-                assert_eq!(PeerId(1), peer_id.into());
-                assert_eq!(connection, ConnectParameters::L2cap(Peer::transport_channel_params()));
-                let channel = transport_chan.try_into().unwrap();
-                responder.send(Ok(channel)).expect("responder sends");
-            }
-            x => panic!("Should have sent a open l2cap request, but got {:?}", x),
-        };
+        let mut connect_fut = pin!(profile_request_stream.expect_connect_request());
+        let _remote_chan = exec
+            .run_until_stalled(&mut connect_fut)
+            .expect("Should have sent a open l2cap request")
+            .assert_peer(PeerId(1))
+            .assert_channel(ConnectChannel::L2CapPsm(PSM_AVDTP))
+            .accept_with_transport(transport);
 
         // Setup finishes when the media transport is connected, and the start is sent by the
         // task which takes the permit and starts the stream.
@@ -2511,14 +2498,12 @@ mod tests {
         };
 
         // Should connect the media channel after open.
-        let request = exec.run_until_stalled(&mut profile_request_stream.next());
-        match request {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect { peer_id, responder, .. }))) => {
-                assert_eq!(PeerId(1), peer_id.into());
-                responder.send(Err(ErrorCode::Failed)).expect("responder sends");
-            }
-            x => panic!("Should have sent a open l2cap request, but got {:?}", x),
-        };
+        let mut connect_fut = pin!(profile_request_stream.expect_connect_request());
+        exec.run_until_stalled(&mut connect_fut)
+            .expect("Should have sent a open l2cap request")
+            .assert_peer(PeerId(1))
+            .assert_channel(ConnectChannel::L2CapPsm(PSM_AVDTP))
+            .reject(ErrorCode::Failed);
 
         // Should return an error.
         // Should be done without an error, but with no streams.
@@ -3779,10 +3764,10 @@ mod tests {
         transport: Transport,
         streams: Streams,
         avrcp: Option<avrcp::PeerManagerProxy>,
-    ) -> (Channel, ProfileRequestStream, Peer) {
+    ) -> (Channel, TestProfileServer, Peer) {
         let (avdtp, remote) = setup_avdtp_peer(transport);
         let metrics_logger = bt_metrics::MetricsLogger::default();
-        let (profile_proxy, requests) = create_proxy_and_stream::<ProfileMarker>();
+        let (profile_proxy, requests) = TestProfileServer::create_endpoints();
         let peer =
             Peer::create(PeerId(1), avdtp, streams, None, profile_proxy, avrcp, metrics_logger);
 
@@ -3893,20 +3878,13 @@ mod tests {
         assert!(exec.run_until_stalled(&mut start_future).is_pending());
 
         // Respond to connect request for transport channel.
-        let (transport_chan, _remote_transport) = create_test_channels(transport);
-        let request = exec.run_until_stalled(&mut profile_request_stream.next());
-        match request {
-            Poll::Ready(Some(Ok(ProfileRequest::Connect {
-                peer_id,
-                connection: _,
-                responder,
-            }))) => {
-                assert_eq!(PeerId(1), peer_id.into());
-                let channel = transport_chan.try_into().unwrap();
-                responder.send(Ok(channel)).expect("responder sends");
-            }
-            x => panic!("Expected Connect request, got {:?}", x),
-        };
+        let mut connect_fut = pin!(profile_request_stream.expect_connect_request());
+        let _remote_transport = exec
+            .run_until_stalled(&mut connect_fut)
+            .expect("Expected Connect request")
+            .assert_peer(PeerId(1))
+            .assert_channel(ConnectChannel::L2CapPsm(PSM_AVDTP))
+            .accept_with_transport(transport);
 
         // Setup finishes when the media transport is connected, then the stream is started by
         // the task that starts the stream when the audio is active.

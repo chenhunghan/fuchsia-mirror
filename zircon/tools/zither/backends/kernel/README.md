@@ -10,8 +10,6 @@ Most generated files are .inc files with legacy 'macro template' APIs, allowing
 for further, flexible, generation logic:
 * `<lib/syscalls/category.inc>`: a categorization of syscalls with macro
   helpers;
-* `<lib/syscalls/kernel.inc>`: macro-templated enumeration of syscalls
-  from the kernel's point of view;
 * `<lib/syscalls/syscalls.inc>`: macro-templated enumeration of syscalls
   from userspace's point of view;
 * `<lib/syscalls/zx-syscall-numbers.h>`: `#define`s of syscall numbers.

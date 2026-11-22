@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use super::permissions::{ClassPermission, FileClass, KernelClass, ProcessPermission};
+use super::permissions::{FileClass, KernelClass, KernelPermission, ProcessPermission};
 use super::{KernelAccessDecision, ObjectClass};
 use crate::NullessByteStr;
 use crate::policy::{
@@ -13,7 +13,6 @@ use crate::policy::{
 
 use fuchsia_rcu::RcuDroppable;
 use std::ops::Deref;
-use strum::VariantArray as _;
 
 // SAFETY: `Policy` contains only plain data and heap-allocated slices/tables with no custom `Drop`
 // logic, so it is safe to drop asynchronously on the RCU reclamation thread.
@@ -126,10 +125,11 @@ impl PolicyIndex {
     }
 
     /// Returns the policy [`AccessVector`] for a well-known kernel object class permission.
-    pub(crate) fn kernel_permission_to_access_vector<P: ClassPermission>(
+    pub(crate) fn kernel_permission_to_access_vector(
         &self,
-        permission: P,
+        permission: impl Into<KernelPermission>,
     ) -> Option<AccessVector> {
+        let permission = permission.into();
         let class_index = permission.class() as usize;
         let permission_index = permission.id() as usize;
         let permission_id = self.permissions[class_index][permission_index]?;
@@ -225,6 +225,11 @@ impl PolicyIndex {
             }
             decision
         }
+    }
+
+    /// Returns whether the policy defines any `genfscon` statements for `fs_type`.
+    pub fn has_genfscon_for_fs(&self, fs_type: NullessByteStr<'_>) -> bool {
+        self.policy.has_genfscon_for_fs(fs_type)
     }
 
     /// If there is a `genfscon` statement for the given filesystem type, returns the associated

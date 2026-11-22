@@ -18,6 +18,7 @@
 #include <lib/magma_service/util/register_io.h>
 #include <zircon/compiler.h>
 
+#include <atomic>
 #include <deque>
 #include <list>
 #include <mutex>
@@ -315,6 +316,7 @@ class MsdArmDevice : public msd::Device,
   std::thread gpu_interrupt_thread_;
   std::thread mmu_interrupt_thread_;
 
+  // Written on the device or interrupt threads; read from any thread in Dump().
   std::atomic_bool handling_gpu_interrupt_;
   std::atomic_bool handling_mmu_interrupt_;
   std::atomic<uint64_t> job_interrupt_delay_{};
@@ -322,7 +324,7 @@ class MsdArmDevice : public msd::Device,
   std::atomic<uint64_t> mmu_interrupt_delay_{};
   std::atomic<uint64_t> gpu_interrupt_time_{};
   std::atomic<uint64_t> mmu_interrupt_time_{};
-  uint64_t job_interrupt_time_ = {};
+  std::atomic<uint64_t> job_interrupt_time_{};
 
   async::Loop loop_{&kAsyncLoopConfigNeverAttachToThread};
   // The watchdog loop runs WatchdogTask to help root-cause https://fxbug.dev/42069578.

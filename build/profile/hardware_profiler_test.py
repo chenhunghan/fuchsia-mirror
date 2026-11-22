@@ -4,10 +4,12 @@
 # found in the LICENSE file.
 """Unit tests for the hardware profiler."""
 
+import getpass
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import hardware_profiler
 
@@ -166,6 +168,28 @@ class HardwareProfileTest(ProcMockTestCase):
         # 5. Verify Mounts
         self.assertEqual(len(profile["mounts"]), 1)
         self.assertEqual(profile["mounts"][0]["mount_point"], "/")
+
+
+class GetCurrentUserTest(unittest.TestCase):
+    """Tests for get_current_user fallback handling under synthetic UIDs."""
+
+    def test_get_current_user_success(self) -> None:
+        with mock.patch.object(getpass, "getuser", return_value="alice"):
+            self.assertEqual(hardware_profiler.get_current_user(), "alice")
+
+    def test_get_current_user_key_error_fallback(self) -> None:
+        with mock.patch.object(
+            getpass, "getuser", side_effect=KeyError("uid not found")
+        ):
+            self.assertEqual(hardware_profiler.get_current_user(), "")
+
+    def test_get_current_user_os_error_fallback(self) -> None:
+        with mock.patch.object(
+            getpass,
+            "getuser",
+            side_effect=OSError("No username set in the environment"),
+        ):
+            self.assertEqual(hardware_profiler.get_current_user(), "")
 
 
 if __name__ == "__main__":

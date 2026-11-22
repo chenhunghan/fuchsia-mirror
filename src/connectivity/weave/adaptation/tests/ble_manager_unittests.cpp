@@ -12,6 +12,11 @@
 
 #include <lib/sys/cpp/testing/component_context_provider.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/clock.h>
+#include <lib/zx/time.h>
+
+#include <atomic>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -61,9 +66,15 @@ class BLEManagerTest : public WeaveTestFixture<> {
   }
 
   void TearDown() override {
+    if (ble_mgr_) {
+      ble_mgr_->ReleaseAllConnections();
+      ble_mgr_->_GetBleLayer()->Shutdown();
+    }
+    PlatformMgrImpl().GetSystemLayer().Shutdown();
     event_loop_.Quit();
     WeaveTestFixture<>::StopFixtureLoop();
     WeaveTestFixture<>::TearDown();
+    ble_mgr_.reset();
 
     ThreadStackMgrImpl().SetDelegate(nullptr);
     ConfigurationMgrImpl().SetDelegate(nullptr);
@@ -71,7 +82,14 @@ class BLEManagerTest : public WeaveTestFixture<> {
   }
 
  protected:
+  static constexpr size_t kMaxConnections = BLEManagerImpl::kMaxConnections;
+
   void InitBleMgr() {
+    ble_mgr_->_GetBleLayer()->OnWeaveBleConnectReceived = [](::nl::Ble::BLEEndPoint* end_point) {
+      end_point->OnMessageReceived = [](::nl::Ble::BLEEndPoint*, PacketBuffer* msg) {
+        PacketBuffer::Free(msg);
+      };
+    };
     EXPECT_EQ(ble_mgr_->_Init(), WEAVE_NO_ERROR);
     event_loop_.RunUntilIdle();
     EXPECT_EQ(GetBLEMgrServiceMode(), ConnectivityManager::kWoBLEServiceMode_Enabled);
@@ -111,6 +129,61 @@ class BLEManagerTest : public WeaveTestFixture<> {
   void OnPlatformEvent(const WeaveDeviceEvent* event) {
     ble_mgr_->_OnPlatformEvent(event);
     event_loop_.RunUntilIdle();
+  }
+
+  uint16_t GetNumConnections() { return ble_mgr_->_NumConnections(); }
+
+  static std::vector<uint8_t> BtpConnectReq() {
+    return std::vector<uint8_t>(std::begin(FakeGATTService::kBtpConnectReqValue),
+                                std::end(FakeGATTService::kBtpConnectReqValue));
+  }
+
+  fuchsia::bluetooth::gatt2::LocalService_WriteValue_Result WriteValueForPeer(
+      fuchsia::bluetooth::PeerId peer_id, std::vector<uint8_t> value) {
+    fuchsia::bluetooth::gatt2::LocalService_WriteValue_Result result;
+    std::atomic_bool done{false};
+    fake_gatt_server_.WriteRequestForPeer(
+        peer_id, std::move(value),
+        [&](fuchsia::bluetooth::gatt2::LocalService_WriteValue_Result res) {
+          result = std::move(res);
+          done.store(true, std::memory_order_release);
+        });
+    const zx::time deadline = zx::deadline_after(zx::sec(5));
+    while (!done.load(std::memory_order_acquire) && zx::clock::get_monotonic() < deadline) {
+      event_loop_.Run(zx::deadline_after(zx::msec(10)), /*once=*/true);
+    }
+    EXPECT_TRUE(done.load(std::memory_order_acquire));
+    event_loop_.RunUntilIdle();
+    return result;
+  }
+
+  void ConfigureCharacteristicForPeer(
+      fuchsia::bluetooth::PeerId peer_id, bool indicate,
+      fuchsia::bluetooth::gatt2::Handle handle = FakeGATTService::kCharacteristicHandle) {
+    std::atomic_bool done{false};
+    fake_gatt_server_.OnCharacteristicConfigurationForPeer(
+        peer_id, /*notify=*/false, indicate, [&] { done.store(true, std::memory_order_release); },
+        handle);
+    const zx::time deadline = zx::deadline_after(zx::sec(5));
+    while (!done.load(std::memory_order_acquire) && zx::clock::get_monotonic() < deadline) {
+      event_loop_.Run(zx::deadline_after(zx::msec(10)), /*once=*/true);
+    }
+    EXPECT_TRUE(done.load(std::memory_order_acquire));
+    event_loop_.RunUntilIdle();
+  }
+
+  std::vector<FakeGATTService::ReceivedIndication> GetIndications() const {
+    return fake_gatt_server_.GetIndications();
+  }
+
+  bool WaitForIndicationCount(size_t expected_count) {
+    const zx::time deadline = zx::deadline_after(zx::sec(5));
+    while (fake_gatt_server_.GetIndications().size() < expected_count &&
+           zx::clock::get_monotonic() < deadline) {
+      event_loop_.RunUntilIdle();
+      zx::nanosleep(zx::deadline_after(zx::msec(1)));
+    }
+    return fake_gatt_server_.GetIndications().size() >= expected_count;
   }
 
   TestConfigurationManager& config_delegate() {
@@ -238,5 +311,99 @@ TEST_F(BLEManagerTest, DisableAdvertisingWhenProvisioned) {
 // TODO(https://fxbug.dev/42085753): Re-enable this test once the GATT Write / Indicate flakes are
 // fixed.
 TEST_F(BLEManagerTest, DISABLED_TestWeaveConnect) { WeaveConnect(); }
+
+TEST_F(BLEManagerTest, IsolatesConcurrentPeerConnections) {
+  constexpr fuchsia::bluetooth::PeerId kPeer1{1001};
+  constexpr fuchsia::bluetooth::PeerId kPeer2{2002};
+  constexpr fuchsia::bluetooth::PeerId kUnconnectedPeer{3003};
+
+  EXPECT_EQ(GetNumConnections(), 0u);
+
+  // Peer 1 initiates a BTP connection handshake via C1 write.
+  auto write_res_1 = WriteValueForPeer(kPeer1, BtpConnectReq());
+  EXPECT_FALSE(write_res_1.is_err());
+  EXPECT_EQ(GetNumConnections(), 1u);
+
+  // An unconnected peer attempting to subscribe or unsubscribe must be ignored without
+  // allocating a connection slot or tearing down Peer 1's handshake.
+  ConfigureCharacteristicForPeer(kUnconnectedPeer, /*indicate=*/true);
+  EXPECT_EQ(GetNumConnections(), 1u);
+  ConfigureCharacteristicForPeer(kUnconnectedPeer, /*indicate=*/false);
+  EXPECT_EQ(GetNumConnections(), 1u);
+  EXPECT_TRUE(GetIndications().empty());
+
+  // Peer 2 concurrently initiates its own BTP connection handshake via C1 write.
+  auto write_res_2 = WriteValueForPeer(kPeer2, BtpConnectReq());
+  EXPECT_FALSE(write_res_2.is_err());
+  EXPECT_EQ(GetNumConnections(), 2u);
+
+  // Peer 1 subscribes to C2 indications and receives its BTP CapabilitiesResponse routed
+  // specifically to kPeer1.
+  ConfigureCharacteristicForPeer(kPeer1, /*indicate=*/true);
+  ASSERT_TRUE(WaitForIndicationCount(1));
+  {
+    auto indications = GetIndications();
+    ASSERT_EQ(indications.size(), 1u);
+    ASSERT_EQ(indications[0].peer_ids.size(), 1u);
+    EXPECT_EQ(indications[0].peer_ids[0].value, kPeer1.value);
+  }
+  EXPECT_EQ(GetNumConnections(), 2u);
+
+  // Peer 2 subscribes to C2 indications and receives its own BTP CapabilitiesResponse routed
+  // specifically to kPeer2.
+  ConfigureCharacteristicForPeer(kPeer2, /*indicate=*/true);
+  ASSERT_TRUE(WaitForIndicationCount(2));
+  {
+    auto indications = GetIndications();
+    ASSERT_EQ(indications.size(), 2u);
+    ASSERT_EQ(indications[1].peer_ids.size(), 1u);
+    EXPECT_EQ(indications[1].peer_ids[0].value, kPeer2.value);
+  }
+  EXPECT_EQ(GetNumConnections(), 2u);
+
+  // Peer 2 sends a malformed BTP frame, causing BleLayer to abort Peer 2's endpoint without
+  // affecting Peer 1's active connection.
+  auto bad_write_res = WriteValueForPeer(kPeer2, {0xff, 0xff});
+  EXPECT_FALSE(bad_write_res.is_err());
+  EXPECT_EQ(GetNumConnections(), 1u);
+
+  // Peer 1 unsubscribes cleanly, releasing the remaining connection slot.
+  ConfigureCharacteristicForPeer(kPeer1, /*indicate=*/false);
+  EXPECT_EQ(GetNumConnections(), 0u);
+}
+
+TEST_F(BLEManagerTest, EnforcesMaxConcurrentConnectionsAndReusesSlot) {
+  for (size_t i = 0; i < kMaxConnections; ++i) {
+    const fuchsia::bluetooth::PeerId peer_id{100 + i};
+    auto res = WriteValueForPeer(peer_id, BtpConnectReq());
+    EXPECT_FALSE(res.is_err());
+    ConfigureCharacteristicForPeer(peer_id, /*indicate=*/true);
+    ASSERT_TRUE(WaitForIndicationCount(i + 1));
+    auto indications = GetIndications();
+    ASSERT_EQ(indications[i].peer_ids.size(), 1u);
+    EXPECT_EQ(indications[i].peer_ids[0].value, peer_id.value);
+  }
+  EXPECT_EQ(GetNumConnections(), kMaxConnections);
+
+  // An additional concurrent peer beyond kMaxConnections is rejected with INSUFFICIENT_RESOURCES.
+  constexpr fuchsia::bluetooth::PeerId kOverflowPeer{999};
+  auto overflow_res = WriteValueForPeer(kOverflowPeer, BtpConnectReq());
+  ASSERT_TRUE(overflow_res.is_err());
+  EXPECT_EQ(overflow_res.err(), fuchsia::bluetooth::gatt2::Error::INSUFFICIENT_RESOURCES);
+  EXPECT_EQ(GetNumConnections(), kMaxConnections);
+
+  // Unsubscribing one active peer frees its slot for reuse by kOverflowPeer.
+  ConfigureCharacteristicForPeer(fuchsia::bluetooth::PeerId{100}, /*indicate=*/false);
+  EXPECT_EQ(GetNumConnections(), kMaxConnections - 1);
+
+  auto retry_res = WriteValueForPeer(kOverflowPeer, BtpConnectReq());
+  EXPECT_FALSE(retry_res.is_err());
+  ConfigureCharacteristicForPeer(kOverflowPeer, /*indicate=*/true);
+  ASSERT_TRUE(WaitForIndicationCount(kMaxConnections + 1));
+  auto indications = GetIndications();
+  ASSERT_EQ(indications.back().peer_ids.size(), 1u);
+  EXPECT_EQ(indications.back().peer_ids[0].value, kOverflowPeer.value);
+  EXPECT_EQ(GetNumConnections(), kMaxConnections);
+}
 
 }  // namespace nl::Weave::DeviceLayer::Internal::testing

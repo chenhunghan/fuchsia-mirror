@@ -4,12 +4,13 @@
 
 #include "src/ui/lib/escher/renderer/batch_gpu_uploader.h"
 
+#include <cstring>
 #include <thread>
 
 #include <gtest/gtest.h>
 
 #include "src/ui/lib/escher/geometry/types.h"
-#include "src/ui/lib/escher/renderer/batch_gpu_downloader.h"
+#include "src/ui/lib/escher/impl/vulkan_utils.h"
 #include "src/ui/lib/escher/test/common/gtest_escher.h"
 #include "src/ui/lib/escher/util/image_utils.h"
 #include "src/ui/lib/escher/vk/buffer_factory.h"
@@ -35,6 +36,61 @@ std::pair<ImagePtr, vk::BufferImageCopy> Create1x1ImageAndRegion(EscherWeakPtr e
   region.imageExtent.depth = 1;
   region.bufferOffset = 0;
   return {std::move(image), std::move(region)};
+}
+
+// Copies the color contents of `image`, which holds `byte_size` tightly packed bytes, to host
+// memory and returns them. Waits for the GPU to become idle.
+std::vector<uint8_t> ReadbackColorImage(const EscherWeakPtr& escher, const ImagePtr& image,
+                                        vk::DeviceSize byte_size) {
+  BufferPtr readback_buffer = escher->buffer_cache()->NewHostBuffer(byte_size);
+  auto cmds = CommandBuffer::NewForTransfer(escher.get());
+  constexpr auto kStage = vk::PipelineStageFlagBits::eTransfer;
+  cmds->ImageBarrier(image, image->layout(), vk::ImageLayout::eTransferSrcOptimal, kStage,
+                     vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eTransferWrite, kStage,
+                     vk::AccessFlagBits::eTransferRead);
+  const vk::BufferImageCopy region =
+      impl::GetDefaultBufferImageCopy(image->width(), image->height());
+  cmds->vk().copyImageToBuffer(image->vk(), vk::ImageLayout::eTransferSrcOptimal,
+                               readback_buffer->vk(), 1, &region);
+  cmds->KeepAlive(readback_buffer);
+  cmds->KeepAlive(image);
+  EXPECT_TRUE(cmds->Submit(nullptr));
+  (void)escher->vk_device().waitIdle();
+  EXPECT_TRUE(escher->Cleanup());
+
+  const uint8_t* data = readback_buffer->host_ptr();
+  return std::vector<uint8_t>(data, data + byte_size);
+}
+
+// Wraps the `vk::Image` of `owner` without taking ownership. Like other images created by
+// `Image::WrapVkImage()`, the returned image reports a `size()` of 0. `owner` must outlive it.
+ImagePtr WrapImage(const EscherWeakPtr& escher, const ImagePtr& owner) {
+  return Image::WrapVkImage(escher->resource_recycler(), owner->info(), owner->vk(),
+                            owner->layout());
+}
+
+// Submits all work scheduled on `uploader`, waits for it to finish, and returns the result of
+// `Escher::Cleanup()`. Death tests call this after scheduling so that, if the check under test did
+// not fire, the death block would exit cleanly instead of aborting in `~BatchGpuUploader()` due to
+// unsubmitted work.
+bool SubmitAndWait(const EscherWeakPtr& escher, BatchGpuUploader& uploader) {
+  uploader.Submit();
+  (void)escher->vk_device().waitIdle();
+  return escher->Cleanup();
+}
+
+// Expects that scheduling a 4-byte upload of `region` to `image` kills the process with a message
+// matching `message`.
+void ExpectScheduleWriteImageDies(const EscherWeakPtr& escher, const ImagePtr& image,
+                                  const vk::BufferImageCopy& region, const char* message) {
+  EXPECT_DEATH(
+      {
+        auto uploader = BatchGpuUploader::New(escher);
+        uploader->ScheduleWriteImage(image, std::vector<uint8_t>{1, 2, 3, 4},
+                                     vk::ImageLayout::eShaderReadOnlyOptimal, region);
+        SubmitAndWait(escher, *uploader);
+      },
+      message);
 }
 
 }  // namespace
@@ -345,22 +401,7 @@ VK_TEST_F(BatchGpuUploaderTest, SubmitImageToCommandBuffer) {
   EXPECT_TRUE(uploaded);
 
   // Check if the uploaded content is correct.
-  auto downloader = BatchGpuDownloader::New(escher);
-  bool pixel_correct = false;
-  downloader->ScheduleReadImage(
-      image,
-      [&pixel_correct](const void* host_ptr, size_t size) {
-        const auto* pixel_downloaded = reinterpret_cast<const uint8_t*>(host_ptr);
-        pixel_correct = pixel_downloaded[0] == 150u && pixel_downloaded[1] == 88u &&
-                        pixel_downloaded[2] == 121u && pixel_downloaded[3] == 255u;
-      },
-      region);
-  bool downloaded = false;
-  downloader->Submit([&downloaded]() { downloaded = true; });
-
-  (void)escher->vk_device().waitIdle();
-  EXPECT_TRUE(escher->Cleanup());
-  EXPECT_TRUE(downloaded && pixel_correct);
+  EXPECT_EQ(ReadbackColorImage(escher, image, 4), (std::vector<uint8_t>{150, 88, 121, 255}));
 }
 
 VK_TEST_F(BatchGpuUploaderTest, ReuseAfterSubmission) {
@@ -431,6 +472,282 @@ VK_TEST_F(BatchGpuUploaderTest, UnfinishedWorkDeathTest) {
         uploader = nullptr;
       },
       "");
+}
+
+// The callback receives the byte size of the copy region, even when `Image::size()` is 0, as it is
+// for images created by `Image::WrapVkImage()`.
+VK_TEST_F(BatchGpuUploaderTest, WriteImageCallbackReceivesRegionByteSize) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [owner, region] = Create1x1ImageAndRegion(escher);
+  ImagePtr wrapped = WrapImage(escher, owner);
+  auto uploader = BatchGpuUploader::New(escher);
+
+  size_t received_copy_size = 0;
+  uploader->ScheduleWriteImage(
+      wrapped,
+      [&received_copy_size](uint8_t* host_ptr, size_t copy_size) {
+        received_copy_size = copy_size;
+        std::memset(host_ptr, 0xFF, copy_size);
+      },
+      vk::ImageLayout::eShaderReadOnlyOptimal, region);
+  EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+  EXPECT_EQ(received_copy_size, 4U);
+}
+
+// Images created by `Image::WrapVkImage()` report a size of 0; uploading to
+// them must still stage and copy every pixel.
+VK_TEST_F(BatchGpuUploaderTest, WriteWrappedImage) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  ImageFactoryAdapter image_factory(escher->gpu_allocator(), escher->resource_recycler());
+  ImagePtr owner =
+      image_utils::NewImage(&image_factory, vk::Format::eR8G8B8A8Unorm, ColorSpace::kSrgb, 2, 2);
+  ImagePtr wrapped = WrapImage(escher, owner);
+  ASSERT_EQ(wrapped->size(), 0U);
+
+  const std::vector<uint8_t> pixels = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+  auto uploader = BatchGpuUploader::New(escher);
+  uploader->ScheduleWriteImage(wrapped, pixels, vk::ImageLayout::eTransferSrcOptimal);
+  EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+  EXPECT_EQ(ReadbackColorImage(escher, wrapped, pixels.size()), pixels);
+}
+
+// Several uploads to wrapped images in one batch must get disjoint staging
+// ranges so that no upload overwrites another's pixels.
+VK_TEST_F(BatchGpuUploaderTest, BatchedWrappedImagesUseDisjointStagingRanges) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [owner_1, region_1] = Create1x1ImageAndRegion(escher);
+  auto [owner_2, region_2] = Create1x1ImageAndRegion(escher);
+  ImagePtr wrapped_1 = WrapImage(escher, owner_1);
+  ImagePtr wrapped_2 = WrapImage(escher, owner_2);
+
+  const std::vector<uint8_t> first_pixel = {150, 88, 121, 255};
+  const std::vector<uint8_t> second_pixel = {130, 120, 110, 255};
+  auto uploader = BatchGpuUploader::New(escher);
+  uploader->ScheduleWriteImage(wrapped_1, first_pixel, vk::ImageLayout::eTransferSrcOptimal,
+                               region_1);
+  uploader->ScheduleWriteImage(wrapped_2, second_pixel, vk::ImageLayout::eTransferSrcOptimal,
+                               region_2);
+  EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+  EXPECT_EQ(ReadbackColorImage(escher, wrapped_1, first_pixel.size()), first_pixel);
+  EXPECT_EQ(ReadbackColorImage(escher, wrapped_2, second_pixel.size()), second_pixel);
+}
+
+// A wrapped image reports a `size()` of 0. If its staging range were sized from `size()`, it would
+// start at the same offset as the owned image's range after it, and receive the owned image's
+// pixel.
+VK_TEST_F(BatchGpuUploaderTest, WrappedAndOwnedImagesInOneBatchUseDisjointStagingRanges) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [owner, wrapped_region] = Create1x1ImageAndRegion(escher);
+  ImagePtr wrapped = WrapImage(escher, owner);
+  auto [owned, owned_region] = Create1x1ImageAndRegion(escher);
+
+  const std::vector<uint8_t> wrapped_pixel = {150, 88, 121, 255};
+  const std::vector<uint8_t> owned_pixel = {130, 120, 110, 255};
+  auto uploader = BatchGpuUploader::New(escher);
+  uploader->ScheduleWriteImage(wrapped, wrapped_pixel, vk::ImageLayout::eTransferSrcOptimal,
+                               wrapped_region);
+  uploader->ScheduleWriteImage(owned, owned_pixel, vk::ImageLayout::eTransferSrcOptimal,
+                               owned_region);
+  EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+  EXPECT_EQ(ReadbackColorImage(escher, wrapped, wrapped_pixel.size()), wrapped_pixel);
+  EXPECT_EQ(ReadbackColorImage(escher, owned, owned_pixel.size()), owned_pixel);
+}
+
+// A 3x1 `eR8Unorm` upload stages 3 bytes, so the record after it must start at the next 4-byte
+// aligned offset. An unaligned `bufferOffset` would be rejected by Vulkan for the 4-byte texels of
+// the second image, and an undersized staging buffer would cut off its pixels.
+VK_TEST_F(BatchGpuUploaderTest, BatchedUploadAfterUnalignedRecordStartsAligned) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  ImageFactoryAdapter image_factory(escher->gpu_allocator(), escher->resource_recycler());
+  ImagePtr r8_image =
+      image_utils::NewImage(&image_factory, vk::Format::eR8Unorm, ColorSpace::kSrgb, 3, 1);
+  auto [rgba_image, rgba_region] = Create1x1ImageAndRegion(escher);
+
+  const std::vector<uint8_t> r8_pixels = {10, 20, 30};
+  const std::vector<uint8_t> rgba_pixel = {150, 88, 121, 255};
+  auto uploader = BatchGpuUploader::New(escher);
+  uploader->ScheduleWriteImage(r8_image, r8_pixels, vk::ImageLayout::eTransferSrcOptimal);
+  uploader->ScheduleWriteImage(rgba_image, rgba_pixel, vk::ImageLayout::eTransferSrcOptimal,
+                               rgba_region);
+  EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+  EXPECT_EQ(ReadbackColorImage(escher, r8_image, r8_pixels.size()), r8_pixels);
+  EXPECT_EQ(ReadbackColorImage(escher, rgba_image, rgba_pixel.size()), rgba_pixel);
+}
+
+// `host_data` may hold more bytes than the copy region reads; only the leading bytes are
+// uploaded. The second upload checks that the next record's staging range does not overlap the
+// oversized record's region. Bytes the oversized record might copy past its region cannot be
+// observed through the public API, because the next record's own write replaces them.
+VK_TEST_F(BatchGpuUploaderTest, OversizedImageHostDataUploadsLeadingBytes) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [first_image, first_region] = Create1x1ImageAndRegion(escher);
+  auto [second_image, second_region] = Create1x1ImageAndRegion(escher);
+
+  const std::vector<uint8_t> oversized_host_data = {150, 88, 121, 255, 1, 2, 3, 4};
+  const std::vector<uint8_t> first_pixel(oversized_host_data.begin(),
+                                         oversized_host_data.begin() + 4);
+  const std::vector<uint8_t> second_pixel = {130, 120, 110, 254};
+  auto uploader = BatchGpuUploader::New(escher);
+  uploader->ScheduleWriteImage(first_image, oversized_host_data,
+                               vk::ImageLayout::eTransferSrcOptimal, first_region);
+  uploader->ScheduleWriteImage(second_image, second_pixel, vk::ImageLayout::eTransferSrcOptimal,
+                               second_region);
+  EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+  EXPECT_EQ(ReadbackColorImage(escher, first_image, first_pixel.size()), first_pixel);
+  EXPECT_EQ(ReadbackColorImage(escher, second_image, second_pixel.size()), second_pixel);
+}
+
+// Every format the uploader accepts stages `width * height * bytes-per-pixel` bytes and uploads
+// them unchanged.
+VK_TEST_F(BatchGpuUploaderTest, UploadsEverySupportedFormat) {
+  struct FormatCase {
+    vk::Format format;
+    size_t expected_copy_size;
+  };
+  constexpr FormatCase kFormatCases[] = {
+      {.format = vk::Format::eR8G8B8A8Unorm, .expected_copy_size = 16},
+      {.format = vk::Format::eR8G8B8A8Srgb, .expected_copy_size = 16},
+      {.format = vk::Format::eB8G8R8A8Unorm, .expected_copy_size = 16},
+      {.format = vk::Format::eB8G8R8A8Srgb, .expected_copy_size = 16},
+      {.format = vk::Format::eR8Unorm, .expected_copy_size = 4},
+  };
+
+  auto escher = test::GetEscher()->GetWeakPtr();
+  ImageFactoryAdapter image_factory(escher->gpu_allocator(), escher->resource_recycler());
+  for (const FormatCase& format_case : kFormatCases) {
+    SCOPED_TRACE(vk::to_string(format_case.format));
+    ImagePtr image =
+        image_utils::NewImage(&image_factory, format_case.format, ColorSpace::kSrgb, 2, 2);
+
+    size_t received_copy_size = 0;
+    std::vector<uint8_t> written;
+    auto uploader = BatchGpuUploader::New(escher);
+    uploader->ScheduleWriteImage(
+        image,
+        [&received_copy_size, &written](uint8_t* host_ptr, size_t copy_size) {
+          received_copy_size = copy_size;
+          written.resize(copy_size);
+          for (size_t i = 0; i < copy_size; ++i) {
+            written[i] = static_cast<uint8_t>(i + 1);
+          }
+          std::memcpy(host_ptr, written.data(), copy_size);
+        },
+        vk::ImageLayout::eTransferSrcOptimal);
+    EXPECT_TRUE(SubmitAndWait(escher, *uploader));
+
+    EXPECT_EQ(received_copy_size, format_case.expected_copy_size);
+    EXPECT_EQ(ReadbackColorImage(escher, image, format_case.expected_copy_size), written);
+  }
+}
+
+// Uploading fewer bytes than the copy region reads would upload stale staging
+// memory to the GPU, so it is rejected when the upload is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, UndersizedImageHostDataDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+
+  // Match the check's message: in AddressSanitizer builds the 4-byte copy from the 3-byte vector
+  // at `Submit()` would also kill the process if the check were missing.
+  EXPECT_DEATH(
+      {
+        auto uploader = BatchGpuUploader::New(escher);
+        uploader->ScheduleWriteImage(image, std::vector<uint8_t>{1, 2, 3},
+                                     vk::ImageLayout::eShaderReadOnlyOptimal, region);
+        SubmitAndWait(escher, *uploader);
+      },
+      "copy region reads");
+}
+
+// Staging ranges are sized for tightly packed regions only, so a region with a
+// row length is rejected when the upload is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, PitchedRowLengthCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.bufferRowLength = 2;
+
+  ExpectScheduleWriteImageDies(escher, image, region, "supported for upload: bufferRowLength is 2");
+}
+
+// Staging ranges are sized for color data only, so a depth region is rejected when the upload is
+// scheduled.
+VK_TEST_F(BatchGpuUploaderTest, UnsupportedAspectCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eDepth;
+
+  ExpectScheduleWriteImageDies(escher, image, region, "Only color copy regions");
+}
+
+// Staging ranges are sized for one layer only, so a multi-layer region is rejected when the
+// upload is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, MultiLayerCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.imageSubresource.layerCount = 2;
+
+  ExpectScheduleWriteImageDies(escher, image, region, "Only single-layer");
+}
+
+// Staging ranges are sized for tightly packed regions only, so a region with an image height is
+// rejected when the upload is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, PitchedImageHeightCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.bufferImageHeight = 2;
+
+  ExpectScheduleWriteImageDies(escher, image, region,
+                               "supported for upload: bufferImageHeight is 2");
+}
+
+// Formats `IsUploadFormatSupported()` rejects crash when the upload is scheduled. 4:2:2 YUV is used
+// because `image_utils::GetImageByteSize()` sizes it, so only the `IsUploadFormatSupported()` check
+// can fire. No device support for the format is needed: wrapping makes no Vulkan call, and the
+// check fires before anything reads the image memory.
+VK_TEST_F(BatchGpuUploaderTest, UnsupportedUploadFormatDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [owner, region] = Create1x1ImageAndRegion(escher);
+  ImageInfo yuv_info = owner->info();
+  yuv_info.format = vk::Format::eG8B8G8R8422Unorm;
+  ImagePtr yuv_image =
+      Image::WrapVkImage(escher->resource_recycler(), yuv_info, owner->vk(), owner->layout());
+
+  ExpectScheduleWriteImageDies(escher, yuv_image, region, "Unsupported image format for upload");
+}
+
+// An empty extent would size an empty staging range, so a zero-width region is rejected when the
+// upload is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, ZeroWidthCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.imageExtent.width = 0;
+
+  ExpectScheduleWriteImageDies(escher, image, region, "imageExtent.width is 0");
+}
+
+// An empty extent would size an empty staging range, so a zero-height region is rejected when the
+// upload is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, ZeroHeightCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.imageExtent.height = 0;
+
+  ExpectScheduleWriteImageDies(escher, image, region, "imageExtent.height is 0");
+}
+
+// Staging ranges are sized for 2D regions only, so a zero-depth region is rejected when the upload
+// is scheduled.
+VK_TEST_F(BatchGpuUploaderTest, ZeroDepthCopyRegionDeathTest) {
+  auto escher = test::GetEscher()->GetWeakPtr();
+  auto [image, region] = Create1x1ImageAndRegion(escher);
+  region.imageExtent.depth = 0;
+
+  ExpectScheduleWriteImageDies(escher, image, region, "imageExtent.depth is 0");
 }
 
 }  // namespace escher

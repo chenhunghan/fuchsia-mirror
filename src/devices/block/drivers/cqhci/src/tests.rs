@@ -1074,7 +1074,7 @@ async fn test_suspend_wrong_state() {
     let started_driver = harness.start_driver().await.expect("failed to start driver");
     let driver = started_driver.get_driver().expect("failed to get driver");
     {
-        let command_queue = driver.command_queue.lock().as_ref().cloned().unwrap();
+        let command_queue = driver.command_queue.clone();
 
         // Shut down the command queue so its state becomes State::Disabled.
         command_queue.shutdown().await;
@@ -1400,7 +1400,7 @@ async fn test_submit_read_direct() {
     block_client.write_at(BufferSlice::from(&write_buf[..]), 0).await.expect("write failed");
 
     let driver = started_driver.get_driver().expect("failed to get driver");
-    let cq = driver.command_queue.lock().as_ref().cloned().unwrap();
+    let cq = driver.command_queue.clone();
 
     assert_eq!(cq.minimum_contiguity(), zx::system_get_page_size() as u64);
 
@@ -1469,7 +1469,7 @@ async fn test_into_block_service_success() {
     block_client.write_at(BufferSlice::from(&write_buf[..]), 0).await.expect("write failed");
 
     let driver = started_driver.get_driver().expect("failed to get driver");
-    let cq = driver.command_queue.lock().as_ref().cloned().unwrap();
+    let cq = driver.command_queue.clone();
     let partition = Arc::new(crate::partition::EmmcPartition::new(
         EmmcPartitionId::UserDataPartition,
         Arc::downgrade(&cq),

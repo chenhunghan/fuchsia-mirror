@@ -1,3 +1,7 @@
+// Copyright 2026 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
 //! Where C++ is structurally expected to be for a given Rust file. The C++
 //! a Rust function replaces is normally in the same component (the
 //! directory the Rust crate lives in) or in a directory above it, and never

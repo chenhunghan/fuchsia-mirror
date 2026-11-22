@@ -330,13 +330,30 @@ def main() -> int:
         help="Only export packages that Bazel has built since they were last "
         "exported.",
     )
+    parser.add_argument(
+        "--extra-manifest",
+        action="append",
+        default=[],
+        help="Additional exported manifest path (relative to --ninja-build-dir) "
+        "to export alongside bazel_test_packages.list, for on-demand tests.",
+    )
     args = parser.parse_args()
 
     bazel_paths = build_utils.BazelPaths.new(build_dir=args.ninja_build_dir)
     try:
+        if (
+            args.extra_manifest
+            and not (bazel_paths.ninja_build_dir / PACKAGES_LIST).is_file()
+        ):
+            # On-demand tests can be exported even if no exported Bazel tests
+            # are in the GN graph.
+            listed_manifests = []
+        else:
+            listed_manifests = read_packages_list(bazel_paths.ninja_build_dir)
+        manifests = list(dict.fromkeys(listed_manifests + args.extra_manifest))
         export_packages(
             bazel_paths,
-            read_packages_list(bazel_paths.ninja_build_dir),
+            manifests,
             incremental=args.incremental,
         )
     except (OSError, KeyError, ValueError) as e:

@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,8 +17,6 @@ import (
 
 	"go.fuchsia.dev/fuchsia/tools/emulator"
 	"go.fuchsia.dev/fuchsia/tools/emulator/emulatortest"
-	"go.fuchsia.dev/fuchsia/tools/net/netutil"
-	"go.fuchsia.dev/fuchsia/tools/net/tftp"
 	fvdpb "go.fuchsia.dev/fuchsia/tools/virtual_device/proto"
 )
 
@@ -51,17 +48,6 @@ func cmdWithTimeout(t *testing.T, ctx context.Context, shouldWork bool, name str
 		}
 		t.Logf("%s %s as expected", name, expected)
 	}
-}
-
-func attemptNetcp(t *testing.T, ctx context.Context, shouldWork bool) {
-	cmdWithTimeout(
-		t,
-		ctx,
-		shouldWork,
-		toolPath(t, "netcp"),
-		defaultNodename+":/boot/kernel/vdso/stable",
-		"/tmp/vdso",
-	)
 }
 
 func randomTokenAsString(t *testing.T) string {
@@ -108,42 +94,6 @@ func attemptNetls(t *testing.T, ctx context.Context, shouldWork bool) {
 
 func attemptNetaddr(t *testing.T, ctx context.Context, shouldWork bool) {
 	cmdWithTimeout(t, ctx, shouldWork, toolPath(t, "netaddr"))
-}
-
-func attemptTftp(t *testing.T, ctx context.Context, shouldWork bool) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	addr, err := netutil.GetNodeAddress(ctx, defaultNodename)
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-
-	tftp, err := tftp.NewClient(&net.UDPAddr{
-		IP:   addr.IP,
-		Port: tftp.ClientPort,
-		Zone: addr.Zone,
-	}, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-		return
-	}
-
-	reader := strings.NewReader("123456789")
-	if err := tftp.Write(ctx, "/tmp/test", reader, reader.Size()); shouldWork {
-		if err == nil {
-			t.Log("tftp write succeeded as expected")
-		} else {
-			t.Fatalf("tftp write failed, but expected to succeed: %s", err)
-		}
-	} else {
-		if err == nil {
-			t.Fatal("tftp write expected to fail, but succeeded")
-		} else {
-			t.Logf("tftp write failed as expected: %s", err)
-		}
-	}
 }
 
 func attemptLoglistener(t *testing.T, ctx context.Context, shouldWork bool) {
@@ -215,10 +165,8 @@ func TestNetsvcAllFeatures(t *testing.T) {
 	// features should work.
 	attemptLoglistener(t, ctx, true)
 	attemptNetaddr(t, ctx, true)
-	attemptNetcp(t, ctx, true)
 	attemptNetls(t, ctx, true)
 	attemptNetruncmd(t, ctx, i, true)
-	attemptTftp(t, ctx, true)
 }
 
 func TestNetsvcAllFeaturesWithNodename(t *testing.T) {
@@ -231,10 +179,8 @@ func TestNetsvcAllFeaturesWithNodename(t *testing.T) {
 	// features should work.
 	attemptLoglistener(t, ctx, true)
 	attemptNetaddr(t, ctx, true)
-	attemptNetcp(t, ctx, true)
 	attemptNetls(t, ctx, true)
 	attemptNetruncmd(t, ctx, i, true)
-	attemptTftp(t, ctx, true)
 }
 
 func TestNetsvcLimited(t *testing.T) {
@@ -247,10 +193,8 @@ func TestNetsvcLimited(t *testing.T) {
 	// most operations should fail.
 	attemptLoglistener(t, ctx, false)
 	attemptNetaddr(t, ctx, true)
-	attemptNetcp(t, ctx, false)
 	attemptNetls(t, ctx, true)
 	attemptNetruncmd(t, ctx, i, false)
-	attemptTftp(t, ctx, false)
 }
 
 func execDir(t *testing.T) string {

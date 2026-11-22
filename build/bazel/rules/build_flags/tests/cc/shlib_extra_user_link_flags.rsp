@@ -1,0 +1,1 @@
+-Wl,--defsym=shlib_user_link_flag_marker=get_pic_obj_value

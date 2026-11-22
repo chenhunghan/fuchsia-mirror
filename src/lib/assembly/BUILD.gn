@@ -35,7 +35,6 @@ standardized_test_groups("tests") {
     "//src/lib/assembly/product_bundle:product_bundle_test",
     "//src/lib/assembly/product_input_bundle:product_input_bundle_test",
     "//src/lib/assembly/shell_commands:shell_commands_test",
-    "//src/lib/assembly/structured_config/tests/malformed_fail",
     "//src/lib/assembly/structured_config/tests/repackaging_pass",
     "//src/lib/assembly/subpackage_blobs_package:subpackage_blobs_package_test",
     "//src/lib/assembly/sdk:sdk_test",

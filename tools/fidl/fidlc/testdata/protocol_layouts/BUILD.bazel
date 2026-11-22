@@ -1,0 +1,26 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//tools/fidl/fidlc/testdata:fidl_golden_library.bzl", "fidl_golden_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+# LINT.IfChange
+fidl_golden_library(
+    name = "test.protocollayouts.imported",
+    srcs = ["imported.test.fidl"],
+    excluded_checks = [
+        "event-names-must-start-with-on",
+        "invalid-copyright-for-platform-source-library",
+    ],
+)
+
+fidl_golden_library(
+    name = "test.protocollayouts",
+    srcs = ["example.test.fidl"],
+    excluded_checks = ["invalid-copyright-for-platform-source-library"],
+    experimental_flags = ["output_index_json"],
+    deps = [":test.protocollayouts.imported"],
+)
+# LINT.ThenChange(BUILD.gn)

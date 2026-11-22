@@ -90,7 +90,7 @@ executable("captive-thread-unittests") {
     "//src/lib/captive-thread/testing:captive-thread-testing",
     "//src/lib/elfldltl",
     "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
 }
 

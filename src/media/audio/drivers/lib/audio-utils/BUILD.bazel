@@ -2,11 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("//build/bazel/rules:zx_library.bzl", "cc_source_library_zx")
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
 
 package(default_applicable_licenses = ["//:license"])
 
-cc_source_library_zx(
+fx_cc_source_library_zx(
     name = "audio-utils",
     srcs = [
         "audio-device-stream.cc",
@@ -22,9 +22,7 @@ cc_source_library_zx(
     ],
     # TODO(https://fxbug.dev/42176699): This target uses mutable tables which are deprecated,
     # rather than builders.
-    copts = [
-        "-DFIDL_WIRE_ALLOW_DEPRECATED_MUTABLE_TABLES",
-    ],  # @bazel2gn:raw_overwrite:[ "//build/cpp:fidl-wire-deprecated-mutable-tables" ]
+    build_flags = ["//build/cpp:fidl-wire-deprecated-mutable-tables"],
     implementation_deps = [
         "//sdk/lib/component/incoming/cpp",
         "//sdk/lib/fdio",

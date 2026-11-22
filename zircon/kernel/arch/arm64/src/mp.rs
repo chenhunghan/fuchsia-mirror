@@ -9,25 +9,21 @@
 //! through the fixed x20 register).
 
 use super::feature::{MPIDR_EL1_RAW, midr_to_microarch};
+use super::secondary::{arm64_create_secondary_stack, arm64_free_secondary_stack};
+use crate::generic_arm::{platform_get_cpu_state, platform_start_cpu};
 use crate::kernel::mp::{MpIpi, MpIpiTarget, MpUnplugEvent, SMP_MAX_CPUS};
 use crate::kernel::types::{INVALID_CPU, cpu_mask_t, cpu_num_t, mask_all_but_one};
+use crate::pdev_power::PowerCpuState;
 use arm64_feature_bindings::arm64_microarch;
 use arm64_mp_bindings::{ARM64_MPIDR_MASK, PERCPU_IN_RESTRICTED_MODE};
 use core::arch::asm;
 use core::mem::{align_of, offset_of, size_of};
 use core::sync::atomic::{AtomicU64, Ordering};
-use debug::ltracef;
-use libarch::arm64::MIDR_EL1;
+use debug::{dprintf, ltracef};
+use libarch::arm64::{MIDR_EL1, MultiprocessorAffinityRegister as Mpidr};
 use zx_status::Status;
 
 const LOCAL_TRACE: u32 = 0;
-
-unsafe extern "C" {
-    fn cpp_platform_halt_cpu();
-    fn platform_start_cpu(cpu_id: cpu_num_t, mpid: u64, context: u64) -> Result<(), Status>;
-    fn arm64_create_secondary_stack(cpu_num: cpu_num_t, out: *mut usize) -> Result<(), Status>;
-    fn arm64_free_secondary_stack(cpu_num: cpu_num_t) -> Result<(), Status>;
-}
 
 /// Per cpu structure, pointed to by a fixed register while in kernel mode.
 /// Aligned on the maximum architectural cache line to avoid cache
@@ -290,6 +286,15 @@ pub fn arch_curr_cpu_num() -> cpu_num_t {
     read_percpu_field!(cpu_num)
 }
 
+/// Returns the number of spinlocks held on the calling CPU.
+// TODO(https://fxbug.dev/581987928): Remove `#[coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#[coverage(off)]
+#[inline(always)]
+pub fn num_spinlocks_held() -> u32 {
+    read_percpu_field!(num_spinlocks)
+}
+
 /// Sets the calling CPU's flag that tracks whether it is in restricted mode.
 ///
 /// x20 points at the calling CPU's `arm64_percpu` from that CPU's first
@@ -304,14 +309,29 @@ pub(super) fn arch_set_restricted_flag(restricted: bool) {
 
 /// Returns the calling CPU's flag that tracks whether it is in restricted mode.
 ///
-/// x20 points at the calling CPU's `arm64_percpu`, as for [`arch_set_restricted_flag`].
+/// Call with interrupts or preemption disabled so the calling thread cannot migrate across CPUs
+/// and observe a stale flag.
+///
+/// # Safety
+///
+/// `x20` must already point to the calling CPU's initialized `arm64_percpu` (after
+/// `arm64_init_percpu_early`).
 #[inline(always)]
-pub(super) fn arch_get_restricted_flag() -> bool {
+pub unsafe fn arch_get_restricted_flag() -> bool {
     read_percpu_field!(in_restricted_mode) != 0
 }
 
 /// Mask the MPIDR register to only leave the AFFx ids.
 const MPID_AFF_MASK: u64 = ARM64_MPIDR_MASK;
+
+/// Constructs an ARM MPID from `cluster` (AFF1) and `cpu` number (AFF0).
+///
+/// Currently assumes CPU topologies described only in AFF0 and AFF1; AFF2 and AFF3 are left zero.
+#[inline]
+pub const fn arm64_mpid(cluster: u64, cpu: u64) -> u64 {
+    ((cluster << Mpidr::AFF1_SHIFT) & Mpidr::AFF1_MASK)
+        | ((cpu << Mpidr::AFF0_SHIFT) & Mpidr::AFF0_MASK)
+}
 
 /// A list of mpids, indexed by cpu_id.
 /// We can leave this zero-initialized as MPID 0 can be a valid value for CPU 0.
@@ -332,14 +352,27 @@ static mut ARM64_PERCPU_ARRAY: [Arm64Percpu; SMP_MAX_CPUS] = unsafe { core::mem:
 
 /// Total number of detected cpus.
 ///
-/// C++ sets it through `arch_set_num_cpus()` in `<arch/arm64/mp.h>`, once on the boot CPU before
-/// the secondary CPUs start, and reads it through `arch_max_num_cpus()`.
+/// [`arch_set_num_cpus`] sets it once on the boot CPU before the secondary CPUs start. C++ reads
+/// it through `arch_max_num_cpus()` in `<arch/arm64/mp.h>`.
 #[unsafe(no_mangle)]
 pub static mut arm_num_cpus: u32 = 1;
 
+// TODO(https://fxbug.dev/42108040): get num_cpus from topology.
+/// Sets the number of detected cpus. This needs to be set very early (before arch_init).
+///
+/// # Safety
+///
+/// Must be called on the boot CPU before it starts any secondary CPU, and nothing may read the
+/// count concurrently.
+#[inline(always)]
+pub unsafe fn arch_set_num_cpus(cpu_count: u32) {
+    // SAFETY: The caller guarantees that nothing reads or writes `arm_num_cpus` concurrently.
+    unsafe { arm_num_cpus = cpu_count };
+}
+
 /// Returns the number of detected cpus.
 #[inline(always)]
-pub(super) fn arch_max_num_cpus() -> u32 {
+pub fn arch_max_num_cpus() -> u32 {
     // SAFETY: The boot CPU writes `arm_num_cpus` once, through `arch_set_num_cpus()`, before it
     // starts any secondary CPU, and nothing writes it afterwards.
     unsafe { arm_num_cpus }
@@ -351,8 +384,7 @@ pub(super) fn arch_max_num_cpus() -> u32 {
 ///
 /// CPU `cpu_id` must not have started yet, or be the calling CPU: it reads its `cpu_num` through
 /// x20, and C++ indexes per-CPU arrays with it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_register_mpid(cpu_id: u32, mpid: u64) {
+pub unsafe fn arch_register_mpid(cpu_id: u32, mpid: u64) {
     // SAFETY: Only this function writes `cpu_num`, and the caller guarantees that CPU `cpu_id`
     // is not running elsewhere, so nothing reads the field concurrently. `cpu_id` is the value
     // that CPU's per-CPU array indices are taken from.
@@ -361,8 +393,7 @@ pub unsafe extern "C" fn arch_register_mpid(cpu_id: u32, mpid: u64) {
 }
 
 /// Translate mpidr to cpu number.
-#[unsafe(no_mangle)]
-pub extern "C" fn arm64_mpidr_to_cpu_num(mut mpidr: u64) -> cpu_num_t {
+pub fn arm64_mpidr_to_cpu_num(mut mpidr: u64) -> cpu_num_t {
     mpidr &= MPID_AFF_MASK;
     for (i, entry) in ARM64_CPU_LIST.iter().enumerate().take(arch_max_num_cpus() as usize) {
         if entry.load(Ordering::Relaxed) == mpidr {
@@ -374,8 +405,7 @@ pub extern "C" fn arm64_mpidr_to_cpu_num(mut mpidr: u64) -> cpu_num_t {
 }
 
 /// Translate a CPU number back to the MPIDR of the CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_cpu_num_to_mpidr(cpu_num: cpu_num_t) -> u64 {
+pub fn arch_cpu_num_to_mpidr(cpu_num: cpu_num_t) -> u64 {
     debug_assert!((cpu_num as usize) < ARM64_CPU_LIST.len());
     ARM64_CPU_LIST[cpu_num as usize].load(Ordering::Relaxed)
 }
@@ -403,7 +433,9 @@ pub extern "C" fn arch_mp_send_ipi(target: MpIpiTarget, mut mask: cpu_mask_t, ip
     }
 
     // SAFETY: `interrupt_send_ipi` requires the interrupt ops to be registered. The interrupt
-    // controller driver registers them during platform early init, before the kernel sends IPIs.
+    // controller driver registers them in `driver_handoff_post_vm`, before any secondary CPU starts.
+    // Until then, as for an early panic, the call reaches the default ops, whose `send_ipi` only
+    // returns an error.
     let _ = unsafe { crate::pdev_interrupt::interrupt_send_ipi(mask, ipi) };
 }
 
@@ -415,8 +447,7 @@ pub extern "C" fn arch_mp_send_ipi(target: MpIpiTarget, mut mask: cpu_mask_t, ip
 /// CPU must not read or write per-CPU state through x20 before the first call on that CPU
 /// returns. A later call rewrites the same x20 value and `microarch`. No call may overlap
 /// `arch_quirks_needs_arm_erratum_858921_mitigation`, which reads every CPU's `microarch`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arm64_init_percpu_early() {
+pub(super) unsafe fn arm64_init_percpu_early() {
     // slow lookup the current cpu id and setup the percpu structure
     let mpidr = MPIDR_EL1_RAW.read();
     let cpu = arm64_mpidr_to_cpu_num(mpidr);
@@ -440,8 +471,8 @@ pub unsafe extern "C" fn arm64_init_percpu_early() {
 #[unsafe(no_mangle)]
 pub extern "C" fn arch_mp_init_percpu() {
     // SAFETY: `interrupt_init_percpu` requires the interrupt ops to be registered. The interrupt
-    // controller driver registers them during platform early init, before `arch_init` and before
-    // any secondary CPU starts.
+    // controller driver registers them in `driver_handoff_post_vm`, before `arch_init` and before any
+    // secondary CPU starts.
     unsafe { crate::pdev_interrupt::interrupt_init_percpu() };
 }
 
@@ -463,15 +494,14 @@ pub unsafe extern "C" fn arch_flush_state_and_halt(flush_done: *mut MpUnplugEven
     // SAFETY: The caller guarantees that `flush_done` points at a live `MpUnplugEvent`, the
     // current `Thread` is initialized, and no spinlocks or active `ChainLockTransaction` are held.
     unsafe { crate::kernel::mp::unplug_event_signal(flush_done) };
-    // SAFETY: `cpp_platform_halt_cpu` takes no arguments and has no caller preconditions.
-    unsafe { cpp_platform_halt_cpu() };
-    panic!("control should never reach here");
+    // SAFETY: `lk_main` runs `platform_early_init` before it starts the scheduler, and the caller
+    // is the unplugging CPU's idle/power thread, which runs under the scheduler.
+    unsafe { crate::generic_arm::platform_halt_cpu() }
 }
 
 /// Should be invoked by platform_mp_prep_cpu_unplug to ask the
 /// arch to do whatever it needs to do to stop the CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_mp_prep_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
+pub fn arch_mp_prep_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
     if cpu_id == 0 || cpu_id >= arch_max_num_cpus() {
         return Err(Status::INVALID_ARGS);
     }
@@ -480,8 +510,7 @@ pub extern "C" fn arch_mp_prep_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Statu
 
 /// Should be invoked by platform_mp_cpu_unplug to ask the
 /// arch to do whatever it needs to do to stop the CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn arch_mp_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
+pub fn arch_mp_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
     // we do not allow unplugging the bootstrap processor
     if cpu_id == 0 || cpu_id >= arch_max_num_cpus() {
         return Err(Status::INVALID_ARGS);
@@ -494,32 +523,56 @@ pub extern "C" fn arch_mp_cpu_unplug(cpu_id: cpu_num_t) -> Result<(), Status> {
 ///
 /// # Safety
 ///
-/// The caller must serialize this with every other hotplug and unplug of `cpu_id`, and `cpu_id`
-/// must be fully stopped: not still booting and not partway through halting. Otherwise its
-/// secondary stack can be reinitialized or freed while that CPU is running on it.
+/// `platform_early_init` must have run. The caller must run in thread context on a thread whose
+/// `Thread` is initialized. It must serialize this with every other hotplug and unplug of `cpu_id`,
+/// and `cpu_id` must be fully stopped: not still booting and not partway through halting. Otherwise
+/// the stack its last start used can be freed while its last bootstrap thread is still on it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arch_mp_cpu_hotplug(cpu_id: cpu_num_t) -> Result<(), Status> {
-    // arm64_create_secondary_stack indexes its per-CPU threads by `cpu_id - 1`.
+    // arm64_create_secondary_stack indexes its per-CPU stacks by `cpu_id - 1`.
     if cpu_id == 0 || cpu_id >= arch_max_num_cpus() || cpu_id as usize >= SMP_MAX_CPUS {
         return Err(Status::INVALID_ARGS);
     }
     if crate::kernel::mp::is_cpu_online(cpu_id) {
         return Err(Status::BAD_STATE);
     }
+    // A CPU the platform does not report as powered off may still be starting or halting, with its
+    // bootstrap thread on the stack the create frees.
+    match platform_get_cpu_state(cpu_id) {
+        Ok(PowerCpuState::Off | PowerCpuState::Stopped) => {}
+        // The platform cannot report CPU state, so this relies on the caller alone.
+        Err(Status::NOT_SUPPORTED) => {}
+        Ok(_) => return Err(Status::BAD_STATE),
+        Err(status) => {
+            dprintf!(
+                INFO,
+                "arch_mp_cpu_hotplug: cannot get cpu-{} state (status {})\n",
+                cpu_id,
+                status.into_raw()
+            );
+            return Err(status);
+        }
+    }
 
     // Create a stack for the thread running on the CPU.
-    let mut stack: usize = 0;
-    // SAFETY: `stack` is a valid place for the stack pointer to be written to.
-    unsafe { arm64_create_secondary_stack(cpu_id, &raw mut stack) }?;
+    // SAFETY: The range check above puts `cpu_id` in `1..SMP_MAX_CPUS`, and the caller guarantees
+    // that it is fully stopped, serializes this with its other hotplugs and unplugs, and runs on a
+    // thread whose `Thread` is initialized. A fully stopped CPU's last bootstrap thread has exited
+    // and switched off the stack the create frees.
+    let stack = unsafe { arm64_create_secondary_stack(cpu_id) }?;
 
     // Start the CPU.
     let mpid = ARM64_CPU_LIST[cpu_id as usize].load(Ordering::Relaxed);
-    // SAFETY: `stack` is the stack `arm64_create_secondary_stack` just created for `cpu_id`, and
-    // `mpid` is the MPIDR registered for it.
+    // SAFETY: The caller guarantees that `platform_early_init` has run. `stack` is the stack
+    // `arm64_create_secondary_stack` just created for `cpu_id`, and `mpid` is the MPIDR registered
+    // for it. CPU `cpu_id` is not running: the caller guarantees it is fully stopped (see
+    // `# Safety`), the `is_cpu_online` check above rejected an online one, and the platform
+    // reported it powered off if it can report CPU state.
     let status = unsafe { platform_start_cpu(cpu_id, mpid, stack as u64) };
     if status.is_err() {
         // Start failed, so free the stack.
-        // SAFETY: The CPU did not start, so nothing runs on the stack being freed.
+        // SAFETY: `cpu_id` is in range, as above, and the CPU did not start, so nothing runs on the
+        // stack being freed.
         let free_stack_status = unsafe { arm64_free_secondary_stack(cpu_id) };
         debug_assert!(free_stack_status.is_ok());
     }
@@ -542,8 +595,7 @@ pub unsafe extern "C" fn arch_mp_cpu_hotplug(cpu_id: cpu_num_t) -> Result<(), St
 /// chance to identify themselves.  Use mp_wait_for_all_cpus_ready
 /// (kernel/mp.h) to establish this if needed. No CPU may be running
 /// `arm64_init_percpu_early` meanwhile, as one does when it comes back up.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_quirks_needs_arm_erratum_858921_mitigation() -> bool {
+pub unsafe fn arch_quirks_needs_arm_erratum_858921_mitigation() -> bool {
     // If there are any A73 cores in this system, then we need the clock read
     // mitigation.
     debug_assert!(SMP_MAX_CPUS >= arch_max_num_cpus() as usize);

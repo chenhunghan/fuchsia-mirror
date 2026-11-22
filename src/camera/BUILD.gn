@@ -41,10 +41,7 @@ group("drivers") {
 }
 
 group("service") {
-  public_deps = [
-    "//src/camera/bin/device",
-    "//src/camera/bin/device_watcher",
-  ]
+  public_deps = [ "//src/camera/bin/device" ]
 }
 
 # Add targets here that are useful for general development.

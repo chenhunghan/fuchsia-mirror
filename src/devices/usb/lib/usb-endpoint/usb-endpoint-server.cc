@@ -129,14 +129,17 @@ zx::result<std::vector<io_buffer::PhysIter>> EndpointServer::get_iter(RequestVar
           break;
         }
         case fuchsia_hardware_usb_request::Buffer::Tag::kData: {
-          auto iter = fidl_request.phys_iter(i, max_length);
+          zx::result iter = fidl_request.phys_iter(i, max_length);
+          if (iter.is_error()) {
+            return iter.take_error();
+          }
           if (sg_support_ == ScatterGatherSupport::kUnsupported && *d.size() > 0) {
-            auto it_p = iter.begin();
-            if (it_p == iter.end() || (*it_p).second < *d.size()) {
+            auto it_p = iter->begin();
+            if (it_p == iter->end() || (*it_p).second < *d.size()) {
               return zx::error(ZX_ERR_NOT_SUPPORTED);
             }
           }
-          iters.push_back(iter);
+          iters.push_back(*std::move(iter));
           break;
         }
         default:

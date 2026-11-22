@@ -16,6 +16,7 @@ package(
 
 fuchsia_board_configuration(
     name = "riscv64",
+    arch = "riscv64",
     board_input_bundles = [
         ":main_bundle",
         ":virtio",

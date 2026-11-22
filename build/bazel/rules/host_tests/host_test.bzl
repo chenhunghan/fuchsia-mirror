@@ -232,7 +232,9 @@ def _host_test_impl(ctx):
         ),
     ]
 
+# LINT.IfChange(host_test_rule_kind)
 host_test = rule(
+    # LINT.ThenChange(//build/bazel/scripts/bazel_tests_utils.py:test_rule_kinds)
     implementation = _host_test_impl,
     doc = """Create a Bazel host test for Fuchsia.
 

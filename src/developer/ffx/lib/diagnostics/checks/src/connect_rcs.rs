@@ -19,6 +19,16 @@ impl<N> ConnectRemoteControlProxy<N> {
     }
 }
 
+#[derive(thiserror::Error, Debug)]
+#[error(
+    "\nUnable to query device info over Remote Control Service (RCS). Consult {doc_link}\nUnderlying error: {underlying:#}"
+)]
+pub struct RcsConnectionError {
+    pub doc_link: String,
+    #[source]
+    pub underlying: anyhow::Error,
+}
+
 impl<N> Check for ConnectRemoteControlProxy<N>
 where
     N: Notifier + Sized,
@@ -49,32 +59,41 @@ where
         _notifier: &'a mut Self::Notifier,
     ) -> CheckFut<'a, Self::Output> {
         Box::pin(async move {
-            let proxy = input
-                .rcs_proxy_fdomain()
+            let rcs_fut = async {
+                let proxy = input
+                    .rcs_proxy_fdomain()
+                    .await
+                    .or_else_analytics(|e| {
+                        ffx_target::analytics::PointOfFailure::FailedToConnectRCS { error: e }
+                            .into()
+                    })
+                    .await?;
+                let moniker = "/core/hwinfo";
+                let product_proxy: ProductProxy = target_holders::open_moniker(
+                    &proxy,
+                    rcs::OpenDirType::ExposedDir,
+                    moniker,
+                    self.timeout,
+                )
                 .await
-                .or_else_analytics(|e| {
-                    ffx_target::analytics::PointOfFailure::FailedToConnectRCS { error: e }.into()
+                .or_analytics(PointOfFailure::FailedToOpenHWInfoComponent {
+                    moniker,
+                    protocol: ProductMarker::PROTOCOL_NAME,
                 })
                 .await?;
-            let moniker = "/core/hwinfo";
-            let product_proxy: ProductProxy = target_holders::open_moniker(
-                &proxy,
-                rcs::OpenDirType::ExposedDir,
-                moniker,
-                self.timeout,
-            )
-            .await
-            .or_analytics(PointOfFailure::FailedToOpenHWInfoComponent {
-                moniker,
-                protocol: ProductMarker::PROTOCOL_NAME,
+                let info = product_proxy
+                    .get_info()
+                    .await
+                    .or_else_analytics(|e| PointOfFailure::UnableToGetInfo { error: e }.into())
+                    .await?;
+                Ok::<_, anyhow::Error>(info)
+            };
+            rcs_fut.await.map_err(|e| {
+                let doc_link = ffx_diagnostics_formatting::doc_link(
+                    "development/tools/ffx/workflows/network-connectivity/ssh-daemon#remote-control-service",
+                );
+                RcsConnectionError { doc_link, underlying: e }.into()
             })
-            .await?;
-            let info = product_proxy
-                .get_info()
-                .await
-                .or_else_analytics(|e| PointOfFailure::UnableToGetInfo { error: e }.into())
-                .await?;
-            Ok(info)
         })
     }
 }
@@ -169,5 +188,22 @@ mod test {
         let output: String = notifier.into();
         assert!(output.contains("SUCCESS"), "Got '{output}'");
         assert_eq!(product_info.name, Some("wubwubwub".to_owned()));
+    }
+
+    #[fuchsia::test]
+    async fn test_connect_remote_control_proxy_failure_includes_doc_link() {
+        let mut notifier = ffx_diagnostics::StringNotifier::new();
+        let conn = Connection::from_fdomain_client(fdomain_remote_control_server(|req| {
+            let rcs::RemoteControlRequest::ConnectCapability { responder, .. } = req else {
+                panic!("unexpected request: {req:?}");
+            };
+            responder.send(Err(rcs::ConnectCapabilityError::NoMatchingCapabilities)).unwrap();
+        }));
+        let res = ConnectRemoteControlProxy::new(Duration::from_secs(1))
+            .check_with_notifier(conn, &mut notifier)
+            .await;
+        let err = res.expect_err("expected RCS connection failure").to_string();
+        assert!(err.contains("Unable to query device info over Remote Control Service (RCS)."));
+        assert!(err.contains("#remote-control-service"));
     }
 }

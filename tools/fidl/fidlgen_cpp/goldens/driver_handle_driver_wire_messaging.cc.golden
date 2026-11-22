@@ -165,7 +165,7 @@ fdf::WireServer<::test_driverhandle::HandlesInProtocol>::Handler fdf::WireServer
 
 ::fidl::internal::TransactionalRequest<::test_driverhandle::HandlesInProtocol::SendHandles>::TransactionalRequest(::test_driverhandle::wire::T t)
     : body(::test_driverhandle::wire::HandlesInProtocolSendHandlesRequest{t}) {
-  ::fidl::InitTxnHeader(&header, 0, ::test_driverhandle::kHandlesInProtocol_SendHandles_Ordinal, ::test_driverhandle::kHandlesInProtocol_SendHandles_DynamicFlags);
+  ::fidl::InitTxnHeader(&this->header, 0, ::test_driverhandle::kHandlesInProtocol_SendHandles_Ordinal, ::test_driverhandle::kHandlesInProtocol_SendHandles_DynamicFlags);
 }
 void ::fidl::internal::TransactionalRequest<::test_driverhandle::HandlesInProtocol::SendHandles>::_CloseHandles() {
   body._CloseHandles();

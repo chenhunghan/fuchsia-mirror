@@ -449,10 +449,28 @@ impl CategoryCounter {
         // we ignore them.
         category_counter.remove("kernel:meta");
         category_counter.remove("kernel:sched");
-        // "starnix:atrace" delivers events via Perfetto blobs, so the category check will fail.
-        let is_starnix_atrace = |k: &str| k.starts_with("starnix:atrace");
-        category_counter.retain(|k, _| !is_starnix_atrace(k));
-        wildcard_categories.retain(|k| !is_starnix_atrace(k));
+        // "starnix:atrace..." and "starnix:perfetto:..." categories deliver their data in Perfetto
+        // blobs rather than as FXT events with a category, so the category check would always
+        // fail for them. The same holds for a prefix wildcard ("<prefix>*") that can only select
+        // those categories: its prefix must itself be a prefix of the blob namespace
+        // ("starnix:perfetto:" or "starnix:atrace:"), and be at least as long as the lower bound
+        // below. Shorter prefixes can also select categories that produce FXT events (e.g.
+        // "starnix:p*" matches "starnix:pager"), so they stay verified. No such category starts
+        // with "starnix:a" today, but "starnix:a*" stays verified for the same reason. Bare
+        // "starnix:perfetto" is not a wildcard and selects nothing, so it stays verified too.
+        let is_wildcard_into = |k: &str, lower_bound: &str, namespace: &str| {
+            k.strip_suffix('*').is_some_and(|prefix| {
+                prefix.starts_with(lower_bound) && namespace.starts_with(prefix)
+            })
+        };
+        let is_delivered_via_perfetto_blob = |k: &str| {
+            k.starts_with("starnix:atrace")
+                || k.starts_with("starnix:perfetto:")
+                || is_wildcard_into(k, "starnix:pe", "starnix:perfetto:")
+                || is_wildcard_into(k, "starnix:at", "starnix:atrace:")
+        };
+        category_counter.retain(|k, _| !is_delivered_via_perfetto_blob(k));
+        wildcard_categories.retain(|k| !is_delivered_via_perfetto_blob(k));
         Self { category_counter, input_categories, wildcard_categories }
     }
 
@@ -557,18 +575,72 @@ mod test {
 
     #[fuchsia::test]
     async fn test_verify_starnix_atrace() {
-        // starnix:atrace delivers events via Perfetto blobs, so we ignore it and its subcategories.
+        // starnix:atrace* and starnix:perfetto:* (or starnix:perfetto*) deliver events via Perfetto
+        // blobs, so we ignore them and their subcategories, while bare starnix:perfetto is not a
+        // valid category.
         let mut counter = CategoryCounter::new(vec![
             "starnix:atrace".into(),
+            "starnix:atrace*".into(),
+            "starnix:atrace:*".into(),
             "starnix:atrace:am".into(),
             "starnix:atrace:apps".into(),
+            "starnix:perfetto".into(),
+            "starnix:perfetto*".into(),
+            "starnix:perfetto:*".into(),
+            "starnix:perfetto:track_event".into(),
+            "starnix:perfetto:surfaceflinger".into(),
             "unmatched:category".into(),
         ]);
         counter.increment_category("some");
         counter.increment_category("other");
         counter.increment_category("categories");
-        let missing = counter.get_invalid_category_list();
-        assert_eq!(missing, vec!["unmatched:category"]);
+        let mut missing = counter.get_invalid_category_list();
+        missing.sort();
+        assert_eq!(missing, vec!["starnix:perfetto", "unmatched:category"]);
+    }
+
+    #[fuchsia::test]
+    async fn test_verify_starnix_blob_wildcards() {
+        // A wildcard that can only select starnix:perfetto:... or starnix:atrace:... categories
+        // delivers its data in Perfetto blobs, so it is not verified. Shorter prefixes also
+        // select categories that produce FXT events, so they are still verified, and so are
+        // wildcards that match neither namespace ("starnix:atx*", "starnix:pex*").
+        let mut counter = CategoryCounter::new(vec![
+            "starnix*".into(),
+            "starnix:*".into(),
+            "starnix:a*".into(),
+            "starnix:at*".into(),
+            "starnix:atr*".into(),
+            "starnix:atx*".into(),
+            "starnix:p*".into(),
+            "starnix:pe*".into(),
+            "starnix:perf*".into(),
+            "starnix:pex*".into(),
+        ]);
+        counter.increment_category("some");
+        counter.increment_category("other");
+        counter.increment_category("categories");
+        let mut missing = counter.get_invalid_category_list();
+        missing.sort();
+        assert_eq!(
+            missing,
+            vec![
+                "starnix*",
+                "starnix:*",
+                "starnix:a*",
+                "starnix:atx*",
+                "starnix:p*",
+                "starnix:pex*"
+            ]
+        );
+
+        // The verified wildcards are satisfied by events they match. "starnix:a_test" is a
+        // made-up category.
+        counter.increment_category("starnix:pager");
+        counter.increment_category("starnix:a_test");
+        let mut missing = counter.get_invalid_category_list();
+        missing.sort();
+        assert_eq!(missing, vec!["starnix:atx*", "starnix:pex*"]);
     }
 
     #[fuchsia::test]

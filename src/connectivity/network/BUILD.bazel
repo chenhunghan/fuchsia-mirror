@@ -5,6 +5,7 @@
 load("@fuchsia_rules_common//build_flags:build_flags.bzl", "build_flags")
 load("//build/bazel/config/derived:compilation_modes.bzl", "is_release")
 load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/components:cml_shard.bzl", "cml_shard")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -25,6 +26,13 @@ exports_files(
         "meta/isolated-network-offers.shard.cml",
     ],
     visibility = ["//src/sys/pkg/testing/mock-omaha-server-fuchsia:__pkg__"],
+)
+
+cml_shard(
+    name = "meta/test-collection.shard",
+    includes = ["//sdk/lib/syslog:offer.shard"],
+    shard = "meta/test-collection.shard.cml",
+    visibility = ["//:__subpackages__"],
 )
 
 # This is a single definition for the optimization configuration of crates used
@@ -48,34 +56,55 @@ build_flags(
 # LINT.ThenChange(BUILD.gn:performance_critical_rust_crate)
 
 # Network target-side tests defined in Bazel. These are exported to `fx test`
-# and infra builders through `:bazel_tests` in BUILD.gn and
-# //src/connectivity:target_tests.
+# and infra builders through `:bazel_tests` in BUILD.gn.
 test_suite(
     name = "target_tests",
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
+        "//src/connectivity/network/dhcpv4/client/bindings:tests",
+        "//src/connectivity/network/dhcpv4/client/core:tests",
+        "//src/connectivity/network/dhcpv4/lib:tests",
+        "//src/connectivity/network/dhcpv4/server:tests",
         "//src/connectivity/network/dhcpv6/core:dhcpv6-test",
-        "//src/connectivity/network/lib/netfilter:netfilter-tests",
-        "//src/connectivity/network/lib/udp_serde:udp_serde-unittests",
-        "//src/connectivity/network/lib/udp_serde:udp_serde_c_compilation-unittest",
-        "//src/connectivity/network/netstack3/bench:netstack3-benchmarks-test",
-        "//src/connectivity/network/netstack3/core:netstack3-core-test-package",
+        "//src/connectivity/network/drivers/network-device/device:tests",
+        "//src/connectivity/network/drivers/network-device/mac:tests",
+        "//src/connectivity/network/lib/chunked_ringbuf:tests",
+        "//src/connectivity/network/lib/dns_server_watcher:tests",
+        "//src/connectivity/network/lib/net_interfaces/cpp:tests",
+        "//src/connectivity/network/lib/netfilter:tests",
+        "//src/connectivity/network/lib/pcap:tests",
+        "//src/connectivity/network/lib/sockaddr:tests",
+        "//src/connectivity/network/mdns/util:tests",
+        "//src/connectivity/network/net-cli:tests",
+        "//src/connectivity/network/netlink:tests",
+        "//src/connectivity/network/netlink/tests",
+        "//src/connectivity/network/netstack3:target_tests",
+        "//src/connectivity/network/testing/netemul/configurable-netstack:tests",
+        "//src/connectivity/network/testing/netemul/configurable-netstack/tests",
+        "//src/connectivity/network/testing/netemul/doc:tests",
+        "//src/connectivity/network/testing/netemul/network-context:tests",
+        "//src/connectivity/network/testing/netemul/service:tests",
         "//src/connectivity/network/testing/netemul/sync-manager:tests",
+        "//src/connectivity/network/tests",
+        "//src/connectivity/network/tests/benchmarks/resource-usage:tests",
+        "//src/connectivity/network/tests/benchmarks/socket-tun:tests",
+        "//src/connectivity/network/tests/connect:tests",
+        "//src/connectivity/network/tun/network-tun:tests",
     ],
-    visibility = ["//src/connectivity:__pkg__"],
 )
 
 # Network host-side tests defined in Bazel. These are exported to `fx test` and
-# infra builders through `:bazel_tests` in BUILD.gn and
-# //src/connectivity:host_tests.
+# infra builders through `:bazel_tests` in BUILD.gn.
 test_suite(
     name = "host_tests",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//src/connectivity/network/dhcpv6/core:core_host_test",
-        "//src/connectivity/network/netstack3/core:netstack3-core-host-test",
+        "//src/connectivity/network/lib/oneshot-sync:host_tests",
+        "//src/connectivity/network/lib/sockaddr:host_tests",
+        "//src/connectivity/network/net-cli:host_tests",
+        "//src/connectivity/network/netstack3:host_tests",
         "//src/connectivity/network/testing/conformance/expect:expect_test",
         "//src/connectivity/network/testing/conformance/expectation:expectation_test",
     ],
-    visibility = ["//src/connectivity:__pkg__"],
 )

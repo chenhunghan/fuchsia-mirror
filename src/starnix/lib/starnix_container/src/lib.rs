@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 use anyhow::{Context, Result, bail};
 use camino::{Utf8Path, Utf8PathBuf};
 use ext4_extract::ext4_extract;
-use fidl_fuchsia_component_decl as fcdecl;
+use fidl_fuchsia_component_decl_common as fcdecl;
 use flate2::read::GzDecoder;
 use fuchsia_pkg::{PackageBuilder, PackageManifest};
 use fuchsia_url::{FuchsiaPkgAbsoluteComponentUrl, RelativeComponentUrl, RelativePackageUrl};
@@ -281,7 +281,8 @@ impl StarnixContainerGenerator {
         if std::fs::exists(&path)? {
             bail!("collision on data subdirectory: {path}");
         }
-        std::fs::create_dir_all(&path).with_context(|| format!("Preparing data subdirectory {name:?}"))?;
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("Preparing data subdirectory {name:?}"))?;
         Ok(path)
     }
 
@@ -303,15 +304,13 @@ impl StarnixContainerGenerator {
         }?;
 
         if !self.ramdisk.is_empty() {
-            let ramdisk_files =
-                self.add_ramdisks("ramdisk", &self.ramdisk, &mut builder)?;
+            let ramdisk_files = self.add_ramdisks("ramdisk", &self.ramdisk, &mut builder)?;
             deps.add_inputs(&self.ramdisk);
             deps.add_outputs(ramdisk_files.into_values());
         }
 
         for (image_name, image_path) in &self.images {
-            let image_files =
-                self.add_ext4_image(image_name, image_path, &mut builder)?;
+            let image_files = self.add_ext4_image(image_name, image_path, &mut builder)?;
             deps.add_input(image_path);
             deps.add_outputs(image_files.into_values());
         }
@@ -864,6 +863,68 @@ mod tests {
 
         let c_node = new_m.get(c_inode).unwrap();
         assert_eq!(c_node.mode & 0o170000, 0o100000); // File
+    }
+
+    #[test]
+    fn test_apply_overrides_create_directory() {
+        let mut metadata = Metadata::new();
+        metadata.insert_directory(ROOT_INODE_NUM, 0o040000 | 0o755, 0, 0, Default::default());
+        metadata.insert_directory(3, 0o040000 | 0o700, 0, 0, Default::default());
+        metadata.add_child(&["existing"], 3);
+
+        let create_dir = |path: &str| FileOverride {
+            image_name: "system".into(),
+            file_path: path.into(),
+            operation: FileOperation::Mkdir,
+            mode: None,
+            uid: None,
+            gid: None,
+            seclabel: Some("u:object_r:rootfs:s0".into()),
+        };
+        let overrides = vec![create_dir("new"), create_dir("a/b"), create_dir("existing")];
+
+        let result = apply_overrides(metadata, overrides, "system").unwrap();
+        let new_m = result.metadata;
+        assert!(result.new_files.is_empty());
+
+        let new_inode = new_m.lookup(ROOT_INODE_NUM, "new").unwrap();
+        let new_node = new_m.get(new_inode).unwrap();
+        assert!(new_node.directory().unwrap().children.is_empty());
+        assert_eq!(new_node.mode, 0o040000 | 0o755);
+        assert_eq!(
+            new_node.extended_attributes,
+            ext4_metadata::ExtendedAttributes::from([(
+                (*b"security.selinux").into(),
+                b"u:object_r:rootfs:s0"[..].into()
+            )])
+        );
+
+        let a_inode = new_m.lookup(ROOT_INODE_NUM, "a").unwrap();
+        let b_inode = new_m.lookup(a_inode, "b").unwrap();
+        assert!(new_m.get(b_inode).unwrap().directory().is_some());
+
+        // An existing directory is left as it was.
+        assert_eq!(new_m.lookup(ROOT_INODE_NUM, "existing").unwrap(), 3);
+        assert_eq!(new_m.get(3).unwrap().mode, 0o040000 | 0o700);
+    }
+
+    #[test]
+    fn test_apply_overrides_create_directory_over_file_fails() {
+        let mut metadata = Metadata::new();
+        metadata.insert_directory(ROOT_INODE_NUM, 0o040000 | 0o755, 0, 0, Default::default());
+        metadata.insert_file(3, 0o100000 | 0o644, 0, 0, Default::default());
+        metadata.add_child(&["file"], 3);
+
+        let overrides = vec![FileOverride {
+            image_name: "system".into(),
+            file_path: "file".into(),
+            operation: FileOperation::Mkdir,
+            mode: None,
+            uid: None,
+            gid: None,
+            seclabel: None,
+        }];
+        assert!(apply_overrides(metadata, overrides, "system").is_err());
     }
 
     #[test]

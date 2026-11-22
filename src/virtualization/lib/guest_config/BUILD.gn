@@ -60,7 +60,7 @@ cc_test_executable("unittests") {
   deps = [
     ":guest_config",
     "//src/lib/fxl/test:gtest_main",
-    "//third_party/googletest:gmock",
+    "//third_party/googletest:gtest",
   ]
   testonly = true
   emit_tool_path = false

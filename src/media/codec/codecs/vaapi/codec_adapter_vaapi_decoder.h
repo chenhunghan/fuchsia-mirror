@@ -206,7 +206,8 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
 
   bool IsCoreCodecHwBased(CodecPort port) override { return true; }
 
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override;
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override;
 
   void CoreCodecAddBuffer(CodecPort port, const CodecBuffer* buffer) override {
     if (port != kOutputPort) {
@@ -235,15 +236,15 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
 
   void CoreCodecStartStream() override;
 
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override {
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override {
     // TODO(turnage): Accept midstream and interstream input format changes.
     // For now these should always be the initial value, so assert to notice if
     // anything changes.
-    ZX_ASSERT(per_stream_override_format_details.has_format_details_version_ordinal() &&
-              per_stream_override_format_details.format_details_version_ordinal() ==
+    ZX_ASSERT(per_stream_override_format_details->format_details_version_ordinal().has_value() &&
+              per_stream_override_format_details->format_details_version_ordinal().value() ==
                   input_format_details_version_ordinal_);
-    input_queue_.Push(CodecInputItem::FormatDetails(per_stream_override_format_details));
+    input_queue_.Push(CodecInputItem::FormatDetails(std::move(per_stream_override_format_details)));
   }
 
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override {
@@ -342,20 +343,7 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
 
   std::string CoreCodecGetName() override { return "VAAPI"; }
 
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override {
-    auto config = std::make_unique<fuchsia::media::StreamOutputConstraints>();
-    config->set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-    config->set_buffer_constraints_action_required(buffer_constraints_action_required);
-    auto* constraints = config->mutable_buffer_constraints();
-    constraints->set_buffer_constraints_version_ordinal(
-        new_output_buffer_constraints_version_ordinal);
-
-    return config;
-  }
-
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override {
     gfx::Size pic_size;
@@ -370,41 +358,32 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
       output_stride = GetOutputStride();
     }
 
-    fuchsia::images2::ImageFormat image_format;
-    image_format.set_pixel_format(fuchsia::images2::PixelFormat::NV12);
+    fuchsia_images2::ImageFormat image_format;
+    image_format.pixel_format(fuchsia_images2::PixelFormat::kNv12);
     if (is_output_tiled) {
-      image_format.set_pixel_format_modifier(
-          fuchsia::images2::PixelFormatModifier::INTEL_I915_Y_TILED);
+      image_format.pixel_format_modifier(fuchsia_images2::PixelFormatModifier::kIntelI915YTiled);
     }
 
-    image_format.set_size(fuchsia::math::SizeU{
-        .width = static_cast<uint32_t>(pic_size.width()),
-        .height = static_cast<uint32_t>(pic_size.height()),
-    });
-    image_format.set_bytes_per_row(output_stride);
-    image_format.set_display_rect(fuchsia::math::RectU{
-        .x = 0,
-        .y = 0,
-        .width = static_cast<uint32_t>(visible_rect.width()),
-        .height = static_cast<uint32_t>(visible_rect.height()),
-    });
-    image_format.set_color_space(fuchsia::images2::ColorSpace::REC709);
+    image_format.size(fuchsia_math::SizeU(static_cast<uint32_t>(pic_size.width()),
+                                          static_cast<uint32_t>(pic_size.height())));
+    image_format.bytes_per_row(output_stride);
+    image_format.display_rect(fuchsia_math::RectU(0, 0, static_cast<uint32_t>(visible_rect.width()),
+                                                  static_cast<uint32_t>(visible_rect.height())));
+    image_format.color_space(fuchsia_images2::ColorSpace::kRec709);
 
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_mime_type("video/raw");
-    format_details.set_image_format(std::move(image_format));
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(new_output_format_details_version_ordinal);
+    format_details.mime_type("video/raw");
+    format_details.image_format(std::move(image_format));
 
-    fuchsia::media::StreamOutputFormat result;
-    result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-    result.set_format_details(std::move(format_details));
-    result.mutable_format_details()->set_format_details_version_ordinal(
-        new_output_format_details_version_ordinal);
+    fuchsia_media::StreamOutputFormat result;
+    result.stream_lifetime_ordinal(stream_lifetime_ordinal);
+    result.format_details(std::move(format_details));
     return result;
   }
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override {
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override {
     fuchsia_sysmem2::BufferCollectionConstraints constraints;
     auto& bmc = constraints.buffer_memory_constraints().emplace();
 
@@ -512,7 +491,6 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
         auto& tiled_constraints = constraints.image_format_constraints()->emplace_back();
         tiled_constraints.pixel_format_modifier() =
             fuchsia_images2::PixelFormatModifier::kIntelI915YTiled;
-        tiled_constraints.bytes_per_row_divisor() = 0;
 
         set_common_constraints(tiled_constraints);
       }
@@ -520,7 +498,7 @@ class CodecAdapterVaApiDecoder : public CodecAdapter {
       ZX_ASSERT(!constraints.image_format_constraints()->empty());
     }
 
-    return constraints;
+    return CoreCodecGetBufferCollectionConstraints3Result{.constraints = std::move(constraints)};
   }
 
   void CoreCodecSetBufferCollectionInfo(

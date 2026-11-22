@@ -52,7 +52,6 @@ fuchsia_driver_component("usb-zero-function") {
     ":usb-zero-function-driver",
     ":usb_zero_function_bind",
   ]
-  info = "meta/usb-zero-function-info.json"
 }
 
 fuchsia_driver_package("package") {

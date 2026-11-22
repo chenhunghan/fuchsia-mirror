@@ -88,7 +88,7 @@ class MockProcessHandle : public ProcessHandle {
 
   bool is_attached_ = false;
 
-  ProcessHandleObserver* observer_;
+  ProcessHandleObserver* observer_ = nullptr;
   std::vector<MockThreadHandle> threads_;
 
   debug::MockMemory mock_memory_;

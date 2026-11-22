@@ -21,6 +21,7 @@ kernel_rust_mod("moonflower-rs") {
   deps = [
     "//sdk/rust/zx-status",
     "//src/lib/regio",
+    "//zircon/kernel/dev/psci:psci-rs",
     "//zircon/kernel/lib/debug",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
@@ -32,7 +33,6 @@ source_set("moonflower") {
   deps = [
     ":moonflower-rs",
     "//zircon/kernel/dev/pdev/power",
-    "//zircon/kernel/dev/psci",
     "//zircon/kernel/lib/arch",
     "//zircon/kernel/lib/counters",
     "//zircon/kernel/lib/debuglog",

@@ -17,7 +17,7 @@ pub enum MemoryMonitorVersion {
     V1,
     /// Memory Monitor 1, with memory profiling enabled.
     V1WithProfiling,
-    /// Memory Monitor 2, as implemented in //src/performance/memory/attribution/monitor,
+    /// Memory Monitor 2, as implemented in //src/memory/attribution/monitor,
     /// which uses component-based memory attribution.
     V2,
 }

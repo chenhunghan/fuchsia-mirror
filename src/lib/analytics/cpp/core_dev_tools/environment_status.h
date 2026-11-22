@@ -20,6 +20,11 @@ struct BotInfo {
 // nullptr, nullptr}
 BotInfo GetBotInfo();
 
+// Returns true if the current process appears to be invoked by an AI agent. An agent is detected
+// when any of the environment variables listed in //tools/devshell/lib/agents.txt or
+// //tools/devshell/lib/agent_session_ids.txt is set to a non-empty value.
+bool IsRunByAgent();
+
 bool IsDisabledByEnvironment();
 
 }  // namespace analytics::core_dev_tools

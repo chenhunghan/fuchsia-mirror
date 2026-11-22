@@ -2,26 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/bazel/bazel_test_suite.gni")
-import("//build/components.gni")
-
-bazel_test_suite("erofs-tests") {
-  target_tests = [ "//src/storage/erofs:erofs-tests" ]
-}
-
-fuchsia_unittest_package("erofs-tests-gn") {
-  deps = [
-    ":erofs_test",
-    "testing:simple_erofs_image",
-    "testing:simple_raw_files",
-  ]
-}
-
 group("tests") {
   testonly = true
   deps = [
     ":erofs-tests",
-    ":erofs-tests-gn",
     "component:tests",
     "serializer:tests",
   ]
@@ -112,4 +96,14 @@ rustc_test("erofs_test") {
            "//third_party/rust_crates:futures",
            "//third_party/rust_crates:test-case",
          ]
+}
+
+fuchsia_unittest_package("erofs-tests") {
+  package_name = "erofs-tests-gn"
+  component_name = "erofs-tests"
+  deps = [
+    ":erofs_test",
+    "//src/storage/erofs/testing:simple_erofs_image",
+    "//src/storage/erofs/testing:simple_raw_files",
+  ]
 }

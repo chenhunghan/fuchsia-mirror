@@ -6,6 +6,7 @@
 
 use super::dispatcher::Dispatcher;
 use super::port_dispatcher::PortDispatcher;
+use super::signal_observer::SignalObserver;
 
 unsafe extern "C" {
     pub(crate) fn cpp_dispatcher_on_zero_handles(dispatcher: *const Dispatcher);
@@ -47,15 +48,15 @@ unsafe extern "C" {
     pub(crate) fn cpp_dispatcher_get_related_koid(
         dispatcher: *const Dispatcher,
     ) -> zx_types::zx_koid_t;
-    pub(crate) fn cpp_dispatcher_add_observer(
+    pub(super) fn cpp_dispatcher_add_observer(
         dispatcher: *const Dispatcher,
-        observer: *mut core::ffi::c_void,
+        observer: *mut SignalObserver,
         handle: *const core::ffi::c_void,
         signals: zx_types::zx_signals_t,
     ) -> zx_types::zx_status_t;
-    pub(crate) fn cpp_dispatcher_remove_observer(
+    pub(super) fn cpp_dispatcher_remove_observer(
         dispatcher: *const Dispatcher,
-        observer: *mut core::ffi::c_void,
+        observer: *mut SignalObserver,
         out_signals: *mut zx_types::zx_signals_t,
     ) -> bool;
     pub(crate) fn cpp_dispatcher_get_name(
@@ -102,18 +103,4 @@ unsafe extern "C" {
     pub(super) fn cpp_dispatcher_poll_signals(
         dispatcher: *const Dispatcher,
     ) -> zx_types::zx_signals_t;
-    #[cfg(ktest)]
-    pub(super) fn cpp_callback_signal_observer_init(
-        storage: *mut core::ffi::c_void,
-        ctx: *const core::ffi::c_void,
-        on_match: unsafe extern "C" fn(*const core::ffi::c_void, zx_types::zx_signals_t),
-        on_cancel: unsafe extern "C" fn(*const core::ffi::c_void, zx_types::zx_signals_t),
-        matches_key: unsafe extern "C" fn(
-            *const core::ffi::c_void,
-            *const core::ffi::c_void,
-            u64,
-        ) -> bool,
-    ) -> *mut core::ffi::c_void;
-    #[cfg(ktest)]
-    pub(super) fn cpp_callback_signal_observer_destroy(observer: *mut core::ffi::c_void);
 }

@@ -20,6 +20,7 @@
                 "fuchsia.driver.development.Manager",
                 "fuchsia.driver.registrar.DriverRegistrar",
                 "fuchsia.driver.test.Realm",
+                "fuchsia.driver.token.NodeBusTopology",
                 "fuchsia.system.state.Administrator",
             ],
             from: "#driver_test_realm",

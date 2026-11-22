@@ -1,0 +1,119 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "app",
+    srcs = [
+        "app.cc",
+        "goldfish_device.cc",
+        "icd_component.cc",
+        "icd_list.cc",
+        "icd_runner.cc",
+        "lavapipe_device.cc",
+        "loader.cc",
+        "magma_dependency_injection.cc",
+        "magma_device.cc",
+    ],
+    hdrs = [
+        "app.h",
+        "goldfish_device.h",
+        "gpu_device.h",
+        "icd_component.h",
+        "icd_list.h",
+        "icd_runner.h",
+        "lavapipe_device.h",
+        "loader.h",
+        "magma_dependency_injection.h",
+        "magma_device.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/async-default",
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/fbl",
+    ],
+    visibility = ["//src/graphics/bin/vulkan_loader/test:__pkg__"],
+    deps = [
+        ":structured_config_lib",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_cpp",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_cpp",
+        "//sdk/fidl/fuchsia.component.runner:fuchsia.component.runner_cpp",
+        "//sdk/fidl/fuchsia.gpu.magma:fuchsia.gpu.magma_cpp",
+        "//sdk/fidl/fuchsia.hardware.goldfish:fuchsia.hardware.goldfish_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//sdk/fidl/fuchsia.vulkan.loader:fuchsia.vulkan.loader_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//sdk/lib/inspect/component/cpp",
+        "//src/lib/fsl",
+        "//src/lib/fxl",
+        "//src/lib/json_parser",
+        "//src/storage/lib/vfs/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "vulkan_loader",
+    deps = [
+        ":app",
+        "//sdk/fidl/fuchsia.memorypressure:fuchsia.memorypressure_cpp",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+        "//src/lib/fxl:fxl_cli",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "vulkan_loader",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "vulkan_loader",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/vulkan_loader.cml",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "structured_config_lib",
+    cm_label = ":manifest",
+)
+
+fx_component(
+    name = "vulkan_loader_cmp",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/graphics/bin/vulkan_loader/test:__pkg__"],
+    deps = [":bin_packaged"],
+)

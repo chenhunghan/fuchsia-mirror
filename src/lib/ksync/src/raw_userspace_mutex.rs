@@ -4,7 +4,7 @@
 
 use super::RawLock;
 use super::lockdep_tracked::LockdepTracked;
-use super::raw_lock::{ConstRawLock, ExclusiveLockPolicy};
+use super::raw_lock::{AdoptableLockPolicy, ConstRawLock, ExclusiveLockPolicy, TryLockPolicy};
 use lock_api::RawMutex as _;
 use pin_init::{PinInit, pin_init_from_closure};
 
@@ -106,6 +106,23 @@ unsafe impl super::LockPolicy<RawMutexStorage> for RawMutexPolicy {
 
 // SAFETY: `RawMutexPolicy` enforces exclusive mutual exclusion on `RawMutexStorage`.
 unsafe impl ExclusiveLockPolicy<RawMutexStorage> for RawMutexPolicy {}
+
+// SAFETY: `RawMutexPolicy`'s `GuardState` is `()` and userspace mutexes do not capture stack-LIFO
+// CPU interrupt state.
+unsafe impl AdoptableLockPolicy<RawMutexStorage> for RawMutexPolicy {}
+
+// SAFETY: `RawMutexStorage::try_lock` establishes exclusive mutual exclusion on `RawMutexStorage`
+// when it returns `true`.
+unsafe impl TryLockPolicy<RawMutexStorage> for RawMutexPolicy {
+    #[inline]
+    unsafe fn try_acquire(
+        lock: &RawMutexStorage,
+        _state: &mut Self::GuardState,
+        _args: (),
+    ) -> bool {
+        lock.try_lock()
+    }
+}
 
 // SAFETY: `RawMutexStorage` is a physical userspace mutex with a unique storage address.
 unsafe impl RawLock for RawMutexStorage {

@@ -7,6 +7,8 @@ package tefmocheck
 import (
 	"path"
 	"strings"
+
+	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
 )
 
 // testSuiteFailureReasonCheck checks if String is found in the failure reason of a specific targetTestName.
@@ -72,6 +74,10 @@ func (c *testSuiteFailureReasonCheck) TestName() string {
 
 func (c *testSuiteFailureReasonCheck) FailureReason() string {
 	return c.failureReason
+}
+
+func (c *testSuiteFailureReasonCheck) Category() runtests.FailureCategory {
+	return runtests.CategorySystemOrTest
 }
 
 // FailureReasonChecks returns checks to detect bad strings in failure reasons of test suites.

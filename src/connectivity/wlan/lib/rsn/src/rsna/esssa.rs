@@ -214,7 +214,6 @@ impl EssSa {
         Ok(rsna)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     /// This function will not succeed unless called on a new Esssa or one that was reset.
     pub fn initiate(&mut self, update_sink: &mut UpdateSink) -> Result<(), Error> {
         // TODO(https://fxbug.dev/42148516): Ptksa starts in Initialized when the EssSa
@@ -258,7 +257,6 @@ impl EssSa {
         }
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     fn on_key_confirmed(&mut self, update_sink: &mut UpdateSink, key: Key) -> Result<(), Error> {
         let was_esssa_established = self.is_established();
         match key {
@@ -370,7 +368,6 @@ impl EssSa {
         Ok(())
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_pmk_available(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -421,7 +418,6 @@ impl EssSa {
         }
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_conf(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -443,7 +439,6 @@ impl EssSa {
         }
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_rsna_retransmission_timeout(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -493,7 +488,6 @@ impl EssSa {
         Error::EapolHandshakeIncomplete("Unexpected timeout while establishing RSNA".to_string())
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_frame<B: SplitByteSlice>(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -557,7 +551,6 @@ impl EssSa {
         Ok(())
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     fn on_eapol_key_frame<B: SplitByteSlice>(
         &mut self,
         update_sink: &mut UpdateSink,

@@ -9,14 +9,14 @@ import "fmt"
 type Binding string
 
 const (
-	CPP         Binding = "cpp"
-	HLCPP       Binding = "hlcpp"
-	LLCPP       Binding = "llcpp"
-	DriverCPP   Binding = "driver_cpp"
-	DriverLLCPP Binding = "driver_llcpp"
-	Dart        Binding = "dart"
-	Rust        Binding = "rust"
-	Reference   Binding = "reference"
+	CPP           Binding = "cpp"
+	HLCPP         Binding = "hlcpp"
+	CPPWire       Binding = "cpp_wire"
+	DriverCPP     Binding = "driver_cpp"
+	DriverCPPWire Binding = "driver_cpp_wire"
+	Dart          Binding = "dart"
+	Rust          Binding = "rust"
+	Reference     Binding = "reference"
 )
 
 type ConfigKey string

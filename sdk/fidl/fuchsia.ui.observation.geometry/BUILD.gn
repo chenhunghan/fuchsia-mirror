@@ -2,21 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//tools/fidl/measure-tape/measure_tape.gni")
-
-measure_tape("measure_tape_for_geometry") {
-  target_binding = "hlcpp"
-  target_types = [
-    "fuchsia.ui.observation.geometry/ViewDescriptor",
-    "fuchsia.ui.observation.geometry/ViewTreeSnapshot",
-    "fuchsia.ui.observation.geometry/WatchResponse",
-  ]
-  fidls = [
-    ":fuchsia.ui.observation.geometry",
-    "//sdk/fidl/fuchsia.math",
-  ]
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________

@@ -12,6 +12,15 @@
         "request": "fuchsia.diagnostics/ArchiveAccessorStreamDiagnosticsRequest"
     },
     {
+        "kind": "protocol/member",
+        "name": "fuchsia.diagnostics/ArchiveAccessor.StreamDiagnosticsToSocket",
+        "strictness": "flexible",
+        "ordinal": "2637101110399702136",
+        "direction": "two_way",
+        "request": "fuchsia.diagnostics/ArchiveAccessorStreamDiagnosticsToSocketRequest",
+        "response": "fuchsia.diagnostics/ArchiveAccessor_StreamDiagnosticsToSocket_Response"
+    },
+    {
         "kind": "protocol",
         "name": "fuchsia.diagnostics/ArchiveAccessor",
         "openness": "open",
@@ -32,6 +41,23 @@
     {
         "kind": "struct",
         "name": "fuchsia.diagnostics/ArchiveAccessorStreamDiagnosticsRequest",
+        "resourceness": "resource"
+    },
+    {
+        "kind": "struct/member",
+        "name": "fuchsia.diagnostics/ArchiveAccessorStreamDiagnosticsToSocketRequest.stream",
+        "ordinal": "2",
+        "type": "zx/Handle:<SOCKET,zx.WRITE,zx.WAIT>"
+    },
+    {
+        "kind": "struct/member",
+        "name": "fuchsia.diagnostics/ArchiveAccessorStreamDiagnosticsToSocketRequest.stream_parameters",
+        "ordinal": "1",
+        "type": "fuchsia.diagnostics/StreamParameters"
+    },
+    {
+        "kind": "struct",
+        "name": "fuchsia.diagnostics/ArchiveAccessorStreamDiagnosticsToSocketRequest",
         "resourceness": "resource"
     },
     {

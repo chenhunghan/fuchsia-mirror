@@ -138,8 +138,31 @@ const std::array<double, HermeticFidelityTest::kNumReferenceFreqs>
 //
 // Single-MixStage frequency response and sinad limits, running at 96k
 //
-// (1) Ultrasound (96k point-sampled to 96k): expect kFullScaleLimitsDb and kFloat32SinadLimitsDb.
-//
+// (1) Ultrasound (96k high-pass filtered at 23k, output at 96k)
+const std::array<double, HermeticFidelityTest::kNumReferenceFreqs>
+    FidelityResults::kUltrasound96kLimitsDb = {
+        // clang-format off
+    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,
+    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,
+    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,    0.000,
+    0.000,    0.000,    0.000,    0.000,    0.000,   -6.024,   -3.832,   -1.177,   -0.499,    0.000,
+   -0.016,   -0.004,
+        // clang-format on
+};
+// Note: At index 39 (26 kHz, the passband edge), the 28-frame Hann-windowed sinc HPF has +0.025 dB
+// passband ripple (1.00289x). Because fidelity tests use a 0.0 dBFS full-scale input, this slight
+// overshoot clips at +-1.0f in OutputProducer::ProduceOutput, resulting in 64.043 dB SINAD.
+const std::array<double, HermeticFidelityTest::kNumReferenceFreqs>
+    FidelityResults::kUltrasound96kSinadLimitsDb = {
+        // clang-format off
+  159.295,  145.942,  146.071,  146.308,  146.571,  146.767,  146.620,  145.469,  142.382,  138.597,
+  134.786,  130.201,  126.065,  122.102,  118.055,  113.881,  110.034,  106.192,  102.045,   98.457,
+   95.100,   91.919,   90.148,   90.822,  101.344,   96.629,   92.589,   88.449,   91.600,   92.188,
+   72.902,   62.281,   50.689,   26.871,   12.815,  136.626,  137.818,  140.010,  140.614,   64.043,
+  141.257,  141.259,
+        // clang-format on
+};
+
 // (2) 48k stream, resampled to 96k
 const std::array<double, HermeticFidelityTest::kNumReferenceFreqs>
     FidelityResults::k48kTo96kLimitsDb = {

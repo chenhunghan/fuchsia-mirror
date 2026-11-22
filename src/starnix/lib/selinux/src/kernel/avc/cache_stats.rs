@@ -102,8 +102,9 @@ pub(super) struct ShardedCacheStats {
 
 impl ShardedCacheStats {
     pub fn new() -> ShardedCacheStats {
+        let num_shards = num_shards().next_power_of_two();
         ShardedCacheStats {
-            shards: (0..num_shards())
+            shards: (0..num_shards)
                 .map(|_| CachePadded::new(AtomicCacheStats::default()))
                 .collect(),
         }
@@ -111,7 +112,9 @@ impl ShardedCacheStats {
 
     #[inline]
     pub fn shard(&self) -> &AtomicCacheStats {
-        let index = current_cpu_index() % self.shards.len();
+        // `self.shards.len()` is a power of two, so masking with `len() - 1` avoids a runtime
+        // remainder division while keeping the index in bounds.
+        let index = current_cpu_index() & (self.shards.len() - 1);
         &self.shards[index]
     }
 

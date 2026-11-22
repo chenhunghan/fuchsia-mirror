@@ -47,7 +47,6 @@ group("images") {
       "${bazel_product_bundle_target}_elf_sizes",
       "${bazel_product_bundle_target}_size_targets",
     ]
-    deps += extra_bazel_assembly_targets
   }
 
   if (check_vtables_in_rodata) {

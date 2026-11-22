@@ -8,7 +8,7 @@ use ffx_diagnostics::{Check, CheckFut, Notifier};
 use ffx_diagnostics_analytics::{PointOfFailure, ResultExt};
 use ffx_target::connection::ConnectionError;
 use ffx_target::ssh_connector::SshConnector;
-use ffx_target::{Connection, TargetConnection, TargetConnectionError, TargetConnector};
+use ffx_target::{Connection, TargetConnection, TargetConnectionError, TransportConnector};
 use fuchsia_async::TimeoutExt;
 use std::time::Duration;
 use termio::Colors;
@@ -21,7 +21,7 @@ pub trait SshConnectorProvider {
         ctx: EnvironmentContext,
         handle: TargetHandle,
         notifier: &mut N,
-    ) -> anyhow::Result<impl TargetConnector + 'static>
+    ) -> anyhow::Result<impl TransportConnector + 'static>
     where
         N: Notifier + Sized;
 }
@@ -34,7 +34,7 @@ impl SshConnectorProvider for DefaultSshConnectorProvider {
         ctx: EnvironmentContext,
         handle: TargetHandle,
         notifier: &mut N,
-    ) -> anyhow::Result<impl TargetConnector + 'static>
+    ) -> anyhow::Result<impl TransportConnector + 'static>
     where
         N: Notifier + Sized,
     {
@@ -78,7 +78,7 @@ impl<'a, N, P> ConnectSsh<'a, N, P> {
 #[derive(Debug)]
 struct ConnectorHolder(SshConnector);
 
-impl TargetConnector for ConnectorHolder {
+impl TransportConnector for ConnectorHolder {
     const CONNECTION_TYPE: &'static str = "ssh";
 
     async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
@@ -235,14 +235,14 @@ mod test {
 
     impl<R> SshConnectorProvider for MockSshConnectorProvider<R>
     where
-        R: TargetConnector + 'static,
+        R: TransportConnector + 'static,
     {
         async fn connector_for_target<N>(
             &self,
             _ctx: EnvironmentContext,
             _handle: TargetHandle,
             _notifier: &mut N,
-        ) -> anyhow::Result<impl TargetConnector + 'static>
+        ) -> anyhow::Result<impl TransportConnector + 'static>
         where
             N: Notifier + Sized,
         {
@@ -269,7 +269,7 @@ mod test {
         }
     }
 
-    impl TargetConnector for MockConnector {
+    impl TransportConnector for MockConnector {
         const CONNECTION_TYPE: &'static str = "mock";
 
         async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
@@ -280,7 +280,7 @@ mod test {
     #[derive(Debug)]
     struct HangingConnector;
 
-    impl TargetConnector for HangingConnector {
+    impl TransportConnector for HangingConnector {
         const CONNECTION_TYPE: &'static str = "hanging";
 
         async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {

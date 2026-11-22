@@ -12,12 +12,12 @@
 #include <lib/zircon-internal/thread_annotations.h>
 #include <platform.h>
 #include <stdio.h>
+#include <string-file.h>
 
 #include <cassert>
 #include <type_traits>
 
 #include <arch/arch_interrupt.h>
-#include <dev/init.h>
 #include <kernel/event.h>
 #include <kernel/ffi.h>
 #include <kernel/lockdep.h>
@@ -34,9 +34,6 @@ bool rust_uart_is_tx_irq_enabled();
 void rust_uart_irq_provider_set_interrupts_enabled(uint32_t irq_num, bool enabled);
 bool rust_uart_rx_queue_full();
 void rust_uart_rx_queue_write_char(uint8_t c);
-void rust_uart_driver_handoff_early(const uart::all::Driver* serial);
-void rust_uart_driver_handoff_post_vm(const uart::all::Driver* serial);
-void rust_uart_driver_handoff_late(const uart::all::Driver* serial);
 
 enum class UartDriverKind : uint32_t {
   kNull = 0,
@@ -46,7 +43,6 @@ enum class UartDriverKind : uint32_t {
 
 struct UartDriverInfo {
   UartDriverKind kind;
-  bool has_irq;
   uint32_t irq;
   bool has_simple_cfg;
   uint32_t cfg_flags;
@@ -56,7 +52,7 @@ struct UartDriverInfo {
 
 static_assert(sizeof(UartDriverKind) == 4);
 static_assert(alignof(UartDriverKind) == 4);
-static_assert(sizeof(UartDriverInfo) == 40);
+static_assert(sizeof(UartDriverInfo) == 32);
 static_assert(alignof(UartDriverInfo) == 8);
 
 }  // extern "C"
@@ -167,17 +163,13 @@ void GetUartDriverInfo(UartDriverInfo* out) {
     }
     if constexpr (uart::MmioDriver<uart_type>) {
       out->kind = UartDriverKind::kMmio;
-      ktl::optional<uint32_t> irq = PlatformUartGetIrqNumber(driver.config().irq);
-      out->has_irq = irq.has_value();
-      out->irq = irq.value_or(0);
+      out->irq = driver.config().irq;
       uart::MmioRange aligned_mmio_range = driver.mmio_range().AlignedTo(kPageSize);
       out->io_base = aligned_mmio_range.address;
       out->io_size = aligned_mmio_range.size;
     } else if constexpr (uart::PioDriver<uart_type>) {
       out->kind = UartDriverKind::kPio;
-      ktl::optional<uint32_t> irq = PlatformUartGetIrqNumber(driver.config().irq);
-      out->has_irq = irq.has_value();
-      out->irq = irq.value_or(0);
+      out->irq = driver.config().irq;
       uart::IoPortRange ioports = driver.ioports();
       out->io_base = ioports.base;
       out->io_size = ioports.count;
@@ -185,7 +177,6 @@ void GetUartDriverInfo(UartDriverInfo* out) {
       constexpr auto kIsNullDriver = ktl::is_same_v<uart_type, uart::null::Driver>;
       ZX_ASSERT_MSG(kIsNullDriver, "Unexpected UART Configuration.");
       out->kind = UartDriverKind::kNull;
-      out->has_irq = false;
       out->irq = 0;
       out->io_base = 0;
       out->io_size = 0;
@@ -250,9 +241,15 @@ void EnableUartRxInterrupt() {
   gUart.Visit([](auto& driver) { driver.template EnableRxInterrupt<IrqSave>(); });
 }
 
-bool IsUartTxDrained() {
+bool IsUartTxDrained(bool lockless) {
   bool drained = true;
-  gUart.Visit([&drained](auto& driver) { drained = driver.template TxDrained<IrqSave>(); });
+  gUart.Visit([&drained, lockless](auto& driver) {
+    // Once a panic has started, the panicking CPU or a halted secondary CPU may
+    // already hold `gUart`'s spinlock. Bypass it via `DefaultLockPolicy`
+    // (`NullLockPolicy`), matching `WriteUartPanicChar`, since `TxDrained` only
+    // performs a read-only status register read.
+    drained = lockless ? driver.TxDrained() : driver.template TxDrained<IrqSave>();
+  });
   return drained;
 }
 
@@ -286,18 +283,6 @@ void WriteUartPanicChar(char c) {
 
 }  // namespace
 
-void UartDriverHandoffEarly(const uart::all::Driver& serial) {
-  rust_uart_driver_handoff_early(&serial);
-}
-
-void UartDriverHandoffPostVm(const uart::all::Driver& serial) {
-  rust_uart_driver_handoff_post_vm(&serial);
-}
-
-void UartDriverHandoffLate(const uart::all::Driver& serial) {
-  rust_uart_driver_handoff_late(&serial);
-}
-
 extern "C" {
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -317,7 +302,7 @@ FFI_ALWAYS_INLINE void cpp_uart_interrupt() { HandleUartInterrupt(); }
 
 FFI_ALWAYS_INLINE void cpp_uart_enable_rx_interrupt() { EnableUartRxInterrupt(); }
 
-FFI_ALWAYS_INLINE bool cpp_uart_tx_drained() { return IsUartTxDrained(); }
+FFI_ALWAYS_INLINE bool cpp_uart_tx_drained(bool lockless) { return IsUartTxDrained(lockless); }
 
 FFI_ALWAYS_INLINE void cpp_uart_prepare_for_suspend() { PrepareUartForSuspend(); }
 

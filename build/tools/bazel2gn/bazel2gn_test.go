@@ -47,6 +47,57 @@ func TestStmtToGN(t *testing.T) {
 		wantGN string
 	}{
 		{
+			name: "metrics_registry",
+			bazel: `load("//third_party/cobalt:metrics_registry.bzl", "metrics_registry")
+
+metrics_registry(
+	name = "scheduling_metrics_registry",
+	generate_binarypb = False,
+	generate_cc = True,
+	global_registry = True,
+	namespace = "cobalt_registry",
+	project_id = 13,
+)`,
+			wantGN: `metrics_registry("scheduling_metrics_registry") {
+	generate_binarypb = false
+	generate_cc = true
+	global = true
+	namespace = "cobalt_registry"
+	project_id = 13
+}`,
+		},
+		{
+			name: "Vulkan C++ wrapper templates",
+			bazel: `vulkan_executable(
+	name = "escher_rainfall",
+	srcs = ["rainfall_demo.cc"],
+	deps = ["//src/ui/examples/escher/common"],
+)
+
+vulkan_test(
+	name = "escher_unittests",
+	testonly = True,
+	srcs = ["run_all_unittests.cc"],
+	deps = ["//src/ui/lib/escher/test/common:gtest_escher"],
+)`,
+			wantGN: `vulkan_executable("escher_rainfall") {
+	sources = [
+		"rainfall_demo.cc",
+	]
+	deps = [
+		"//src/ui/examples/escher/common",
+	]
+}
+vulkan_test("escher_unittests") {
+	sources = [
+		"run_all_unittests.cc",
+	]
+	deps = [
+		"//src/ui/lib/escher/test/common:gtest_escher",
+	]
+}`,
+		},
+		{
 			name: "Simple Go targets",
 			bazel: `load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
@@ -150,6 +201,7 @@ go_test("bazel2gn_tests") {
 		{
 			name: "Simple Python targets",
 			bazel: `load("@rules_python//python:defs.bzl", "py_binary", "py_library")
+load("//build/bazel/rules/python:python_c_extension.bzl", "python_c_extension")
 
 py_library(
 	name = "generate_version_history",
@@ -162,11 +214,25 @@ py_binary(
 	srcs = ["cmd.py"],
 	main = "cmd.py",
 	deps = [":generate_version_history"],
+)
+
+python_c_extension(
+	name = "my_ext",
+	srcs = ["mod.cc", "mod.h"],
+	defines = ["Py_LIMITED_API=0x030b00f0"],
+	stubs_root = "my_ext",
+	stubs = ["__init__.pyi"],
+	visibility = ["//visibility:public"],
+	deps = [":abi"],
 )`,
 			wantGN: `python_library("generate_version_history") {
 	sources = [
 		"__init__.py",
 	]
+	imports = [
+		"..",
+	]
+	enable_mypy = false
 }
 python_binary("generate_version_history_bin") {
 	sources = [
@@ -176,6 +242,97 @@ python_binary("generate_version_history_bin") {
 	deps = [
 		":generate_version_history",
 	]
+	enable_mypy = false
+}
+if (is_host && is_linux) {
+	python_c_extension("my_ext") {
+		sources = [
+			"mod.cc",
+			"mod.h",
+		]
+		defines = [
+			"Py_LIMITED_API=0x030b00f0",
+		]
+		stubs_root = "my_ext"
+		stubs = [
+			"__init__.pyi",
+		]
+		visibility = [
+			"*",
+		]
+		deps = [
+			":abi",
+		]
+	}
+}`,
+		},
+		{
+			name: "Python zipapp binary and py_data_package are Bazel-only",
+			bazel: `load("@rules_python//python:defs.bzl", "py_library")
+load("//build/bazel/rules/python:py_data_package.bzl", "py_data_package")
+load("//build/bazel/rules/python:py_zipapp_binary.bzl", "py_zipapp_binary")
+
+py_data_package(
+	name = "data",
+	srcs = ["data.txt"],
+)
+
+# @bazel2gn:raw_attribute:data_package_name = "data"
+# @bazel2gn:raw_attribute:data_sources = [ "data.txt" ]
+py_library(
+	name = "lib",
+	srcs = ["lib.py"],
+	deps = [":data"],  # @bazel2gn:skip
+)
+
+py_zipapp_binary(
+	name = "tool",
+	main = "tool.py",
+	deps = [":lib"],
+)`,
+			wantGN: `python_library("lib") {
+	sources = [
+		"lib.py",
+	]
+	enable_mypy = false
+	data_package_name = "data"
+	data_sources = [ "data.txt" ]
+}`,
+		},
+		{
+			name: "py_library with imports",
+			bazel: `py_library(
+	name = "current_dir",
+	srcs = ["current_dir.py"],
+	imports = ["."],
+)
+
+py_library(
+	name = "vendored",
+	srcs = [
+		"src/foo/__init__.py",
+		"src/foo/bar.py",
+	],
+	imports = ["src"],
+)`,
+			wantGN: `python_library("current_dir") {
+	sources = [
+		"current_dir.py",
+	]
+	imports = [
+		".",
+	]
+	enable_mypy = false
+}
+python_library("vendored") {
+	sources = [
+		"src/foo/__init__.py",
+		"src/foo/bar.py",
+	]
+	imports = [
+		"src",
+	]
+	enable_mypy = false
 }`,
 		},
 		{
@@ -250,6 +407,36 @@ fuchsia_structured_config_rust_lib("my_test_config") {
 	testonly = true
 	cm_label = ":test_manifest"
 	name = "my_crate"
+	visibility = [
+		"*",
+	]
+}`,
+		},
+		{
+			name: "fuchsia_structured_config_cpp_elf_lib",
+			bazel: `load("//build/bazel/rules/components:structured_config.bzl", "fuchsia_structured_config_cpp_elf_lib")
+
+fuchsia_structured_config_cpp_elf_lib(
+	name = "my_component_config",
+	cm_label = ":manifest",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+	name = "my_test_config",
+	testonly = True,
+	cm_label = ":test_manifest",
+	fidl_library_name = "my.fidl.config",
+	namespace = "my_ns",
+	visibility = ["//visibility:public"],
+)`,
+			wantGN: `fuchsia_structured_config_cpp_elf_lib("my_component_config") {
+	cm_label = ":manifest"
+}
+fuchsia_structured_config_cpp_elf_lib("my_test_config") {
+	testonly = true
+	cm_label = ":test_manifest"
+	fidl_library_name = "my.fidl.config"
+	namespace = "my_ns"
 	visibility = [
 		"*",
 	]
@@ -389,6 +576,79 @@ fuchsia_component("component") {
 	deps = [
 		"//src/foo:foo_bin",
 	]
+}`,
+		},
+		{
+			name: "fx_unittest_package with parallel",
+			bazel: `fx_unittest_package(
+	name = "foo-test",
+	unit_tests = [":foo_bin"],
+	max_log_severity = "ERROR",
+	parallel = 4,
+)`,
+			wantGN: `fuchsia_unittest_package("foo-test") {
+	package_name = "foo-test-gn"
+	component_name = "foo-test"
+	deps = [
+		":foo_bin",
+	]
+	test_specs = {
+		log_settings = {
+			max_severity = "ERROR"
+		}
+		parallel = 4
+	}
+}`,
+		},
+		{
+			name: "fx_unittest_package with zero parallel",
+			bazel: `fx_unittest_package(
+	name = "foo-test",
+	unit_tests = [":foo_bin"],
+	parallel = 0,
+)`,
+			wantGN: `fuchsia_unittest_package("foo-test") {
+	package_name = "foo-test-gn"
+	component_name = "foo-test"
+	deps = [
+		":foo_bin",
+	]
+}`,
+		},
+		{
+			name: "fx_unittest_package with multiple unit tests and parallel",
+			bazel: `fx_unittest_package(
+	name = "foo-test",
+	package_name = "foo-tests",
+	unit_tests = [
+		":foo_test",
+		"//src/foo/bar:bar_test",
+	],
+	parallel = 2,
+)`,
+			wantGN: `fuchsia_unittest_component("foo-test.foo_test.component") {
+	component_name = "foo_test"
+	visibility = [ ":*" ]
+	deps = [
+		":foo_test",
+	]
+}
+fuchsia_unittest_component("foo-test.bar_test.component") {
+	component_name = "bar_test"
+	visibility = [ ":*" ]
+	deps = [
+		"//src/foo/bar:bar_test",
+	]
+}
+fuchsia_test_package("foo-test") {
+	package_name = "foo-tests-gn"
+	test_components = [
+		":foo-test.foo_test.component",
+		":foo-test.bar_test.component",
+	]
+	test_specs = {
+		parallel = 2
+	}
 }`,
 		},
 		{
@@ -643,6 +903,191 @@ measure_tape("rust_measure_tape_for_foo") {
 	testonly = true
 	visibility = [
 		"*",
+	]
+}`,
+		},
+		{
+			name: "ICU and intl_strings targets",
+			bazel: `load("//build/bazel/rules/icu:icu_executable.bzl", "icu_executable")
+load("//build/bazel/rules/icu:icu_fuchsia_component.bzl", "icu_fuchsia_component")
+load("//build/bazel/rules/icu:icu_fuchsia_package.bzl", "icu_fuchsia_package")
+load("//build/bazel/rules/icu:icu_group.bzl", "icu_group")
+load("//build/bazel/rules/icu:icu_source_set.bzl", "icu_source_set")
+load("//build/bazel/rules/icu:third_party_icu_headers.bzl", "third_party_icu_headers")
+load("//build/bazel/rules/intl:intl_strings.bzl", "intl_strings")
+
+third_party_icu_headers(
+	name = "icu_headers",
+	headers = [
+		"third_party/icu/source/common/unicode/ucnv.h",
+		"third_party/icu/source/i18n/unicode/msgfmt.h",
+	],
+	icu_assembly = True,
+)
+
+intl_strings(
+	name = "l10n",
+	library = "fuchsia.intl.l10n",
+	output_locales = [
+		"en",
+		"fr",
+	],
+	same_dir_locales = False,
+	source = ":strings.xml",
+	source_locale = "en",
+)
+
+icu_source_set(
+	name = "lib",
+	srcs = [
+		"run.cc",
+		"run.h",
+	],
+	hdrs = ["public.h"],
+	alwayslink = True,
+	includes = ["include"],
+	copts = ["-Wno-conversion"],
+	icu_deps = [":icu_headers"],
+	icu_public_deps = ["//src/lib/intl/lookup/cpp:lib"],
+	implementation_deps = ["//sdk/lib/syslog/cpp"],
+	deps = [
+		":fuchsia.intl.l10n_hlcpp",
+		"@com_google_googletest//:gtest_prod",
+	],
+)
+
+icu_executable(
+	name = "bin",
+	srcs = ["main.cc"],
+	output_name = "my_icu_bin",
+	icu_deps = [":lib"],
+	icu_public_deps = ["//src/intl/intl_services:lib"],
+	deps = ["//sdk/lib/syslog/cpp"],
+)
+
+icu_fuchsia_component(
+	name = "component",
+	component_name = "my-icu-component",
+	includes = ["//sdk/lib/syslog:client.shard"],
+	manifest = ":meta/my_icu_component.cml",
+	icu_deps = [
+		":bin",
+		"//src/lib/icu:icudtl",
+	],
+	deps = [":l10n_l10n_assets"],
+)
+
+icu_fuchsia_package(
+	name = "pkg",
+	package_name = "my-icu-pkg",
+	components = [":extra_component"],
+	icu_components = [":component"],
+	icu_resources = [":extra_icu_res"],
+	resources = [":config_values"],
+	subpackages = ["//src/lib/icu/tzdata:icu_tzdata_package"],
+	validate_elf_binaries = False,
+	validate_structured_config = True,
+)
+
+icu_group(
+	name = "all",
+	icu_deps = [":pkg"],
+	icu_public_deps = [":lib"],
+	public_deps = [":l10n"],
+)`,
+			wantGN: `third_party_icu_headers("icu_headers") {
+	headers = [
+		"third_party/icu/source/common/unicode/ucnv.h",
+		"third_party/icu/source/i18n/unicode/msgfmt.h",
+	]
+	icu_assembly = true
+}
+intl_strings("l10n") {
+	library = "fuchsia.intl.l10n"
+	output_locales = [
+		"en",
+		"fr",
+	]
+	same_dir_locales = false
+	source = "strings.xml"
+	source_locale = "en"
+}
+icu_source_set("lib") {
+	sources = [
+		"run.cc",
+		"run.h",
+	]
+	public = [
+		"public.h",
+	]
+	configs += [
+		"//build/config:Wno-conversion",
+	]
+	icu_deps = [
+		":icu_headers",
+	]
+	icu_public_deps = [
+		"//src/lib/intl/lookup/cpp:lib",
+	]
+	deps = [
+		"//sdk/lib/syslog/cpp",
+	]
+	public_deps = [
+		":fuchsia.intl.l10n_hlcpp",
+		"//third_party/googletest:gtest_prod",
+	]
+}
+icu_executable("bin") {
+	sources = [
+		"main.cc",
+	]
+	output_name = "my_icu_bin"
+	icu_deps = [
+		":lib",
+	]
+	icu_public_deps = [
+		"//src/intl/intl_services:lib",
+	]
+	deps = [
+		"//sdk/lib/syslog/cpp",
+	]
+}
+icu_fuchsia_component("component") {
+	component_name = "my-icu-component"
+	manifest = "meta/my_icu_component.cml"
+	icu_deps = [
+		":bin",
+		"//src/lib/icu:icudtl",
+	]
+	deps = [
+		":l10n_l10n_assets",
+	]
+}
+icu_fuchsia_package("pkg") {
+	package_name = "my-icu-pkg"
+	icu_deps = [
+		":component",
+		":extra_icu_res",
+	]
+	deps = [
+		":extra_component",
+		":config_values",
+	]
+	subpackages = [
+		"//src/lib/icu/tzdata:icu_tzdata_package",
+	]
+	disable_elf_binaries_checks = true
+	validate_structured_config = true
+}
+icu_group("all") {
+	icu_deps = [
+		":pkg",
+	]
+	icu_public_deps = [
+		":lib",
+	]
+	public_deps = [
+		":l10n",
 	]
 }`,
 		},
@@ -2027,6 +2472,28 @@ func TestCCConversion(t *testing.T) {
 }`,
 		},
 		{
+			name: "fx_cc_library friend",
+			bazel: `fx_cc_library(
+	name = "foo",
+	srcs = ["foo.cc"],
+	friend = [
+		":*",
+		"//bar/*",
+		"//baz:qux",
+	],
+)`,
+			wantGN: `static_library("foo") {
+	sources = [
+		"foo.cc",
+	]
+	friend = [
+		":*",
+		"//bar/*",
+		"//baz:qux",
+	]
+}`,
+		},
+		{
 			name: "cc_binary linkopts and linkshared",
 			bazel: `cc_binary(
 	name = "libfoo.so",
@@ -2171,6 +2638,91 @@ fuchsia_unittest_package("foo-test-pkg") {
 	]
 }`,
 		},
+		{
+			name: "C++ binary includes conversion and library includes omission",
+			bazel: `cc_binary(
+	name = "cc_bin",
+	srcs = ["main.cc"],
+	includes = select({
+		"@platforms//os:fuchsia": ["fuchsia_inc"],
+		"//conditions:default": ["default_inc"],
+	}),
+)
+
+fx_cc_binary(
+	name = "fx_bin",
+	srcs = ["main.cc"],
+	includes = ["..", "include"],
+)
+
+# @bazel2gn:raw_attribute:include_dirs = [ target_gen_dir ]
+fx_cc_binary(
+	name = "gen_hdr_bin",
+	srcs = ["main.cc"],
+	# @bazel2gn:skip
+	includes = ["."],
+)
+
+fx_cc_test_binary(
+	name = "test_bin",
+	srcs = ["test/foo_test.cc"],
+	includes = ["."],
+)
+
+fx_cc_library(
+	name = "lib",
+	srcs = ["lib.cc"],
+	hdrs = ["lib.h"],
+	includes = ["."],
+)`,
+			wantGN: `executable("cc_bin") {
+	sources = [
+		"main.cc",
+	]
+	if (is_fuchsia) {
+		include_dirs = [
+			"fuchsia_inc",
+		]
+	} else {
+		include_dirs = [
+			"default_inc",
+		]
+	}
+}
+executable("fx_bin") {
+	sources = [
+		"main.cc",
+	]
+	include_dirs = [
+		"..",
+		"include",
+	]
+}
+executable("gen_hdr_bin") {
+	sources = [
+		"main.cc",
+	]
+	include_dirs = [ target_gen_dir ]
+}
+cc_test_executable("test_bin") {
+	sources = [
+		"test/foo_test.cc",
+	]
+	include_dirs = [
+		".",
+	]
+	testonly = true
+	emit_tool_path = false
+}
+static_library("lib") {
+	sources = [
+		"lib.cc",
+	]
+	public = [
+		"lib.h",
+	]
+}`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := toSyntaxFile(t, tc.bazel)
@@ -2193,9 +2745,9 @@ func TestZxConversion(t *testing.T) {
 	}{
 		{
 			name: "extra gn expression",
-			bazel: `load("//build/bazel/rules:zx_library.bzl", "cc_source_library_zx")
+			bazel: `load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
 
-cc_source_library_zx(
+fx_cc_source_library_zx(
     name = "cmdline",
     srcs = ["args_parser.cc"],
     hdrs = [
@@ -2227,9 +2779,9 @@ cc_source_library_zx(
 		},
 		{
 			name: "zx library build_flags",
-			bazel: `load("//build/bazel/rules:zx_library.bzl", "cc_shared_library_zx")
+			bazel: `load("//build/bazel/rules/cc:fx_cc_shared_library_zx.bzl", "fx_cc_shared_library_zx")
 
-cc_shared_library_zx(
+fx_cc_shared_library_zx(
     name = "foo",
     srcs = ["foo.cc"],
     build_flags = ["//build/config/fuchsia:static_cpp_standard_library"],
@@ -2345,6 +2897,306 @@ rustc_library(
 	}
 }
 
+func TestBindLibraryConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bazel  string
+		wantGN string
+	}{
+		{
+			name: "bind_library in the IDK",
+			bazel: `load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+bind_library(
+    name = "fuchsia.example",
+    src = "fuchsia.example.bind",
+    api_area = "Driver SDK",
+    category = "partner",
+    visibility = ["//src/devices:__subpackages__"],
+)
+`,
+			wantGN: `bind_library("fuchsia.example") {
+	source = "fuchsia.example.bind"
+	sdk_area = "Driver SDK"
+	sdk_category = "partner"
+	visibility = [
+		":*",
+		"//src/devices/*",
+	]
+}`,
+		},
+		{
+			name: "bind_library with src label and deps",
+			bazel: `load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+bind_library(
+    name = "fuchsia.example.child",
+    testonly = True,
+    src = ":fuchsia.example.child.bind",
+    deps = [
+        ":fuchsia.example",
+        "//src/devices/bind/fuchsia.platform",
+    ],
+)
+`,
+			wantGN: `bind_library("fuchsia.example.child") {
+	testonly = true
+	source = "fuchsia.example.child.bind"
+	public_deps = [
+		":fuchsia.example",
+		"//src/devices/bind/fuchsia.platform",
+	]
+}`,
+		},
+		{
+			name: "bind_library with src in another package",
+			bazel: `load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+bind_library(
+    name = "fuchsia.example",
+    src = "//src/devices/bind/sources:fuchsia.example.bind",
+)
+`,
+			wantGN: `bind_library("fuchsia.example") {
+	source = "//src/devices/bind/sources/fuchsia.example.bind"
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := toSyntaxFile(t, tc.bazel)
+			gotGN, err := bazelToGN(f)
+			if err != nil {
+				t.Fatalf("Unexpected failure converting Bazel build targets: %v", err)
+			}
+			if diff := cmp.Diff(gotGN, tc.wantGN); diff != "" {
+				t.Errorf("Diff found after GN conversion (-got +want):\n%s\nBazel source:\n%s", diff, tc.bazel)
+			}
+		})
+	}
+}
+
+func TestFostrFidlConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bazel  string
+		wantGN string
+	}{
+		{
+			name: "fostr_fidl with deps",
+			bazel: `load("//src/lib/fostr/build:fostr_fidl.bzl", "fostr_fidl")
+
+fostr_fidl(
+    name = "fuchsia.ui.input",
+    fidl_target = "//sdk/fidl/fuchsia.ui.input",
+    visibility = ["//src/ui:__subpackages__"],
+    deps = [
+        "//src/lib/fostr/fidl/fuchsia.input",
+        "//src/lib/fostr/fidl/fuchsia.math",
+    ],
+)
+`,
+			wantGN: `fostr_fidl("fuchsia.ui.input") {
+	fidl_target = "//sdk/fidl/fuchsia.ui.input"
+	visibility = [
+		":*",
+		"//src/ui/*",
+	]
+	deps = [
+		"//src/lib/fostr/fidl/fuchsia.input",
+		"//src/lib/fostr/fidl/fuchsia.math",
+	]
+}`,
+		},
+		{
+			name: "fostr_fidl with amendments",
+			bazel: `load("//src/lib/fostr/build:fostr_fidl.bzl", "fostr_fidl")
+
+fostr_fidl(
+    name = "fuchsia.math",
+    testonly = True,
+    additional_include = "src/lib/fostr/fidl/fuchsia.math/amendments.h",
+    amendments_path = ":amendments.json",
+    fidl_target = "//sdk/fidl/fuchsia.math:fuchsia.math",
+    template_path = "//src/lib/fostr/build:fostr.fidlmerge",
+    public_deps = [":amendments"],
+)
+`,
+			wantGN: `fostr_fidl("fuchsia.math") {
+	testonly = true
+	additional_include = "src/lib/fostr/fidl/fuchsia.math/amendments.h"
+	amendments_path = "amendments.json"
+	fidl_target = "//sdk/fidl/fuchsia.math:fuchsia.math"
+	template_path = "//src/lib/fostr/build/fostr.fidlmerge"
+	public_deps = [
+		":amendments",
+	]
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := toSyntaxFile(t, tc.bazel)
+			gotGN, err := bazelToGN(f)
+			if err != nil {
+				t.Fatalf("Unexpected failure converting Bazel build targets: %v", err)
+			}
+			if diff := cmp.Diff(gotGN, tc.wantGN); diff != "" {
+				t.Errorf("Diff found after GN conversion (-got +want):\n%s\nBazel source:\n%s", diff, tc.bazel)
+			}
+		})
+	}
+}
+
+func TestAidlConversion(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bazel  string
+		wantGN string
+	}{
+		{
+			name: "aidl with backends, stability, version, hash_files, interfaces, parcelables, and deps",
+			bazel: `load("//build/bazel/rules/aidl:aidl.bzl", "aidl")
+
+aidl(
+    name = "my_service",
+    testonly = True,
+    backends = [
+        "cpp",
+        "ndk",
+        "rust",
+    ],
+    base = "aidl",
+    hash_files = ["aidl/.hash"],
+    interfaces = [":aidl/example/pkg/IMyService.aidl"],
+    parcelables = ["aidl/example/pkg/MyData.aidl"],
+    rust_crate_name = "my_service_rs",
+    stability = "vintf",
+    version = "2",
+    visibility = ["//src/example:__subpackages__"],
+    deps = ["//src/other:base_aidl"],
+)
+`,
+			wantGN: `aidl("my_service") {
+	testonly = true
+	backends = [
+		"cpp",
+		"ndk",
+		"rust",
+	]
+	base = "aidl"
+	interfaces = [
+		"aidl/example/pkg/IMyService.aidl",
+	]
+	parcelables = [
+		"aidl/example/pkg/MyData.aidl",
+	]
+	rust_crate_name = "my_service_rs"
+	stability = "vintf"
+	version = "2"
+	visibility = [
+		":*",
+		"//src/example/*",
+	]
+	deps = [
+		"//src/other:base_aidl",
+	]
+}`,
+		},
+		{
+			name: "aidl_cpp with bases, is_bootstrap, and structured = False",
+			bazel: `load("//build/bazel/rules/aidl:aidl.bzl", "aidl_cpp")
+
+aidl_cpp(
+    name = "my_cpp_lib",
+    bases = [
+        "//other/pkg/aidl",
+        "aidl",
+    ],
+    interfaces = ["//other/pkg:aidl/other/IFoo.aidl"],
+    is_bootstrap = True,
+    structured = False,
+)
+`,
+			wantGN: `aidl_cpp("my_cpp_lib") {
+	bases = [
+		"//other/pkg/aidl",
+		"aidl",
+	]
+	interfaces = [
+		"//other/pkg/aidl/other/IFoo.aidl",
+	]
+	is_bootstrap = true
+	structured = false
+}`,
+		},
+		{
+			name: "aidl_ndk with bases and deps",
+			bazel: `load("//build/bazel/rules/aidl:aidl.bzl", "aidl_ndk")
+
+aidl_ndk(
+    name = "my_ndk_lib",
+    bases = [
+        "aidl",
+        "//third_party/aidl/shared",
+    ],
+    hash_files = ["aidl/.hash"],
+    parcelables = ["aidl/example/Data.aidl"],
+    stability = "vintf",
+    version = "1",
+    deps = [":base_ndk"],
+)
+`,
+			wantGN: `aidl_ndk("my_ndk_lib") {
+	bases = [
+		"aidl",
+		"//third_party/aidl/shared",
+	]
+	parcelables = [
+		"aidl/example/Data.aidl",
+	]
+	stability = "vintf"
+	version = "1"
+	deps = [
+		":base_ndk",
+	]
+}`,
+		},
+		{
+			name: "aidl_rust with explicit rust_crate_name",
+			bazel: `load("//build/bazel/rules/aidl:aidl.bzl", "aidl_rust")
+
+aidl_rust(
+    name = "my_rust_lib",
+    base = "aidl",
+    interfaces = ["aidl/example/IMyService.aidl"],
+    rust_crate_name = "my_rust_crate",
+    deps = [":base_rust"],
+)
+`,
+			wantGN: `aidl_rust("my_rust_lib") {
+	base = "aidl"
+	interfaces = [
+		"aidl/example/IMyService.aidl",
+	]
+	rust_crate_name = "my_rust_crate"
+	deps = [
+		":base_rust",
+	]
+}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := toSyntaxFile(t, tc.bazel)
+			gotGN, err := bazelToGN(f)
+			if err != nil {
+				t.Fatalf("Unexpected failure converting Bazel build targets: %v", err)
+			}
+			if diff := cmp.Diff(gotGN, tc.wantGN); diff != "" {
+				t.Errorf("Diff found after GN conversion (-got +want):\n%s\nBazel source:\n%s", diff, tc.bazel)
+			}
+		})
+	}
+}
+
 func TestUnsupportedTestAttributes(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -2367,6 +3219,16 @@ func TestUnsupportedTestAttributes(t *testing.T) {
 )`,
 		},
 		{
+			// GN python_binary() doesn't support `imports`.
+			name: "py_binary with imports",
+			bazel: `py_binary(
+	name = "bin",
+	srcs = ["main.py"],
+	imports = ["."],
+	main = "main.py",
+)`,
+		},
+		{
 			name: "fx_unittest_package with non-literal unit tests",
 			bazel: `fx_unittest_package(
 	name = "foo-test",
@@ -2379,6 +3241,22 @@ func TestUnsupportedTestAttributes(t *testing.T) {
 	name = "foo-test",
 	unit_tests = [":foo_bin"],
 	environments = ["//build/testing/environments:emu_env"],
+)`,
+		},
+		{
+			name: "fx_unittest_package with negative parallel",
+			bazel: `fx_unittest_package(
+	name = "foo-test",
+	unit_tests = [":foo_bin"],
+	parallel = -1,
+)`,
+		},
+		{
+			name: "fx_unittest_package with non-integer parallel",
+			bazel: `fx_unittest_package(
+	name = "foo-test",
+	unit_tests = [":foo_bin"],
+	parallel = "4",
 )`,
 		},
 	} {
@@ -3325,6 +4203,19 @@ expect_includes(
 }`,
 		},
 		{
+			name: "expect_includes omits required_package_components",
+			bazel: `expect_includes(
+	name = "includes",
+	includes = [":client.shard"],
+	required_package_components = ["//foo:server_component"],
+)`,
+			wantGN: `expect_includes("includes") {
+	includes = [
+		"client.shard.cml",
+	]
+}`,
+		},
+		{
 			name: "aspect_hints as only attribute mapping to deps",
 			bazel: `fx_cc_library(
 	name = "foo",
@@ -3471,6 +4362,68 @@ cc_binary(
 		"main.cc",
 	]
 	output_name = "far"
+}`,
+		},
+		{
+			name: "raw_attribute replaces default enable_mypy on py_library",
+			bazel: `# @bazel2gn:raw_attribute:enable_mypy = true
+py_library(
+	name = "lib",
+	srcs = ["lib.py"],
+)`,
+			wantGN: `python_library("lib") {
+	sources = [
+		"lib.py",
+	]
+	enable_mypy = true
+}`,
+		},
+		{
+			name: "raw_attribute replaces default enable_mypy on py_binary",
+			bazel: `# @bazel2gn:raw_attribute:enable_mypy=true
+py_binary(
+	name = "bin",
+	srcs = ["main.py"],
+	main = "main.py",
+)`,
+			wantGN: `python_binary("bin") {
+	sources = [
+		"main.py",
+	]
+	main_source = "main.py"
+	enable_mypy=true
+}`,
+		},
+		{
+			name: "unrelated raw_attribute keeps default enable_mypy",
+			bazel: `# @bazel2gn:raw_attribute:testonly = true
+py_library(
+	name = "lib",
+	srcs = ["lib.py"],
+)`,
+			wantGN: `python_library("lib") {
+	sources = [
+		"lib.py",
+	]
+	enable_mypy = false
+	testonly = true
+}`,
+		},
+		{
+			// `+=` modifies the default instead of replacing it, so the default
+			// must still come first.
+			name: "augmented raw_attribute keeps default enable_mypy",
+			bazel: `# @bazel2gn:raw_attribute:enable_mypy += true
+py_library(
+	name = "lib",
+	srcs = ["lib.py"],
+)`,
+			wantGN: `python_library("lib") {
+	sources = [
+		"lib.py",
+	]
+	enable_mypy = false
+	enable_mypy += true
 }`,
 		},
 		{
@@ -3658,6 +4611,33 @@ fx_cc_binary(
 	name = "foo_test",
 	srcs = ["foo_test.cc"],
 	gn_output_name = "foo" + "_test",
+)`,
+		},
+		{
+			name: "aidl with unsupported aidl_gen override",
+			bazel: `aidl(
+	name = "foo_aidl",
+	base = "aidl",
+	parcelables = ["aidl/Foo.aidl"],
+	aidl_gen = ":mock_aidl_gen",
+)`,
+		},
+		{
+			name: "aidl_cpp with unsupported runtime_deps override",
+			bazel: `aidl_cpp(
+	name = "foo_cpp",
+	base = "aidl",
+	parcelables = ["aidl/Foo.aidl"],
+	runtime_deps = [":stub_binder_cc"],
+)`,
+		},
+		{
+			name: "aidl_rust with unsupported aidl_rust_glue override",
+			bazel: `aidl_rust(
+	name = "foo_rust",
+	base = "aidl",
+	parcelables = ["aidl/Foo.aidl"],
+	aidl_rust_glue = ":mock_rust_glue",
 )`,
 		},
 	} {

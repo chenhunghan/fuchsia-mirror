@@ -122,6 +122,9 @@ class _BridgeManagerServer(fdd.ManagerServer):
     async def run_health_check(self, request: Any) -> Any:
         return None
 
+    async def start_suspend_session(self, request: Any) -> Any:
+        return None
+
 
 class FakeDiscoveryTest(unittest.IsolatedAsyncioTestCase):
     async def test_fake_discovery_listing_and_filtering(self) -> None:

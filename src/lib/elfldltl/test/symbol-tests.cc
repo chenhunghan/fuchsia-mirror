@@ -24,6 +24,15 @@ constexpr uint32_t kEmptyGnuHash = 5381;
 constexpr uint32_t kFoobarCompatHash = 0x06d65882;
 constexpr uint32_t kFoobarGnuHash = 0xfde460be;
 
+struct NotConstructibleFromSpan {
+  NotConstructibleFromSpan() = delete;
+  static constexpr bool Valid(std::span<const uint32_t>) { return false; }
+  uint32_t symtab_size() const;
+  std::span<const uint32_t> Bucket(uint32_t) const;
+  std::span<const std::span<const uint32_t>> AllBuckets() const;
+};
+static_assert(!elfldltl::SymbolHashTableApi<NotConstructibleFromSpan, uint32_t>);
+
 FORMAT_TYPED_TEST_SUITE(ElfldltlSymbolTests);
 
 TEST(ElfldltlSymbolTests, CompatHash) {
@@ -292,6 +301,222 @@ TYPED_TEST(ElfldltlSymbolTests, ZeroInitialized) {
   foo.InitLinkerZeroInitialized();
 
   EXPECT_EQ(foo.strtab(), "\0"sv);
+}
+
+template <typename Addr>
+constexpr void AppendGnuHashWords(std::vector<Addr>& out, std::span<const uint32_t> words) {
+  if constexpr (sizeof(Addr) == sizeof(uint32_t)) {
+    for (uint32_t w : words) {
+      out.push_back(w);
+    }
+  } else {
+    for (size_t i = 0; i < words.size(); i += 2) {
+      uint32_t second = i + 1 < words.size() ? words[i + 1] : 0;
+      out.push_back(WordPair<Addr>(words[i], second));
+    }
+  }
+}
+
+TYPED_TEST(ElfldltlSymbolTests, GnuHashMultiBucketAndTrailingData) {
+  using Elf = TestFixture::Elf;
+  using Addr = Elf::Addr;
+  using Sym = Elf::Sym;
+  using size_type = Elf::size_type;
+
+  // Two buckets: "a" (even hash) in bucket 0 at symndx 2, "b" (odd hash) and
+  // "d" (odd hash) in bucket 1 at symndx 3..4, so max_symndx (3) > bias (2)
+  // and total 32-bit words in buckets + chain is odd (2 + 3 = 5).
+  constexpr elfldltl::SymbolName kSymA("a"sv);
+  constexpr elfldltl::SymbolName kSymB("b"sv);
+  constexpr elfldltl::SymbolName kSymD("d"sv);
+  static_assert(kSymA.gnu_hash() % 2 == 0);
+  static_assert(kSymB.gnu_hash() % 2 == 1);
+  static_assert(kSymD.gnu_hash() % 2 == 1);
+
+  TestSymtab<Elf> symtab;
+  symtab.AddSymbol("undef"sv, 0, 0, elfldltl::ElfSymBind::kGlobal, elfldltl::ElfSymType::kFunc, 0)
+      .AddSymbol(kSymA, 0x100, 0x10, elfldltl::ElfSymBind::kGlobal, elfldltl::ElfSymType::kFunc, 1)
+      .AddSymbol(kSymB, 0x200, 0x10, elfldltl::ElfSymBind::kGlobal, elfldltl::ElfSymType::kFunc, 1)
+      .AddSymbol(kSymD, 0x300, 0x10, elfldltl::ElfSymBind::kGlobal, elfldltl::ElfSymType::kFunc, 1);
+
+  // Add trailing garbage symbols to simulate an unbounded DT_SYMTAB read.
+  std::vector<Sym> raw_syms(symtab.symtab().begin(), symtab.symtab().end());
+  raw_syms.resize(raw_syms.size() + 4);
+
+  std::vector<Addr> raw_gnu_hash;
+  const uint32_t header[] = {2, 2, 1, 5};  // nbucket=2, bias=2, nfilter=1, shift=5
+  AppendGnuHashWords(raw_gnu_hash, header);
+  raw_gnu_hash.push_back(~size_type{});  // All Bloom filter bits set.
+  const uint32_t buckets_and_chains[] = {
+      2,                       // bucket 0 -> symndx 2 ("a")
+      3,                       // bucket 1 -> symndx 3 ("b", "d")
+      kSymA.gnu_hash() | 1u,   // symndx 2: end of bucket 0
+      kSymB.gnu_hash() & ~1u,  // symndx 3: continues bucket 1
+      kSymD.gnu_hash() | 1u,   // symndx 4: end of bucket 1
+      0xdeadbeef,              // Trailing RODATA after .gnu.hash
+      0xcafebabe,
+      0xfeedface,
+  };
+  AppendGnuHashWords(raw_gnu_hash, buckets_and_chains);
+
+  elfldltl::SymbolInfo<Elf> si;
+  si.set_symtab(raw_syms);
+  si.set_strtab(symtab.strtab());
+  si.set_gnu_hash(raw_gnu_hash);
+
+  const auto gnu_hash = si.gnu_hash();
+  ASSERT_TRUE(gnu_hash.has_value());
+  EXPECT_EQ(gnu_hash->symtab_size(), 5u);
+  EXPECT_EQ(si.safe_symtab().size(), 5u);
+
+  ASSERT_NE(kSymA.Lookup(si), nullptr);
+  EXPECT_EQ(kSymA.Lookup(si)->value(), 0x100u);
+  ASSERT_NE(kSymB.Lookup(si), nullptr);
+  EXPECT_EQ(kSymB.Lookup(si)->value(), 0x200u);
+  ASSERT_NE(kSymD.Lookup(si), nullptr);
+  EXPECT_EQ(kSymD.Lookup(si)->value(), 0x300u);
+  EXPECT_EQ(kNotFoundSymbol.Lookup(si), nullptr);
+
+  std::multiset<std::string_view> enumerated;
+  for (const auto& sym : si.HashedSymbols(*gnu_hash)) {
+    enumerated.insert(si.string(sym.name));
+  }
+  EXPECT_THAT(enumerated, ::testing::UnorderedElementsAre("a"sv, "b"sv, "d"sv));
+}
+
+TYPED_TEST(ElfldltlSymbolTests, GnuHashCollisionsAndEmptyBuckets) {
+  using Elf = TestFixture::Elf;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
+
+  // Test 3 consecutive identical hashes in one bucket followed by another
+  // bucket with the same hash value, ensuring 32-bit and 64-bit TableIterator
+  // neither duplicate non-terminal collision entries nor skip across a bucket
+  // end marker.
+  constexpr uint32_t kHash = 0x12345678;
+  std::vector<Addr> collision_table;
+  const uint32_t header[] = {2, 1, 1, 5};  // nbucket=2, bias=1, nfilter=1, shift=5
+  AppendGnuHashWords(collision_table, header);
+  collision_table.push_back(~size_type{});
+  const uint32_t body[] = {
+      1,            // bucket 0 -> symndx 1..3
+      4,            // bucket 1 -> symndx 4
+      kHash & ~1u,  // symndx 1
+      kHash & ~1u,  // symndx 2
+      kHash | 1u,   // symndx 3 (end of bucket 0)
+      kHash | 1u,   // symndx 4 (end of bucket 1)
+  };
+  AppendGnuHashWords(collision_table, body);
+
+  ASSERT_TRUE(elfldltl::GnuHash<Elf>::Valid(collision_table));
+  elfldltl::GnuHash<Elf> hash_table(collision_table);
+  EXPECT_EQ(hash_table.symtab_size(), 5u);
+
+  std::vector<uint32_t> indices;
+  for (auto bucket : hash_table.AllBuckets()) {
+    for (uint32_t symndx : bucket) {
+      indices.push_back(symndx);
+    }
+  }
+  EXPECT_THAT(indices, ::testing::ElementsAre(1u, 2u, 3u, 4u));
+
+  // All-zero buckets with zero chain words (no exported defined symbols).
+  std::vector<Addr> empty_table;
+  const uint32_t empty_header[] = {2, 3, 1, 5};  // nbucket=2, bias=3, nfilter=1
+  AppendGnuHashWords(empty_table, empty_header);
+  empty_table.push_back(Addr{0});
+  const uint32_t empty_buckets[] = {0, 0};
+  AppendGnuHashWords(empty_table, empty_buckets);
+
+  ASSERT_TRUE(elfldltl::GnuHash<Elf>::Valid(empty_table));
+  elfldltl::GnuHash<Elf> empty_gnu_hash(empty_table);
+  EXPECT_EQ(empty_gnu_hash.symtab_size(), 3u);
+  EXPECT_TRUE(std::ranges::empty(empty_gnu_hash.AllBuckets()));
+}
+
+TYPED_TEST(ElfldltlSymbolTests, GnuHashOddWordCounts) {
+  using Elf = TestFixture::Elf;
+  using Addr = Elf::Addr;
+  using size_type = Elf::size_type;
+
+  constexpr uint32_t kHash = 0x12345678;
+
+  // Odd nbucket (1) with empty chain (1 uint32_t zero-padded to Addr).
+  {
+    std::vector<Addr> table;
+    const uint32_t header[] = {1, 2, 1, 5};
+    AppendGnuHashWords(table, header);
+    table.push_back(Addr{0});
+    const uint32_t body[] = {0};
+    AppendGnuHashWords(table, body);
+
+    ASSERT_TRUE(elfldltl::GnuHash<Elf>::Valid(table));
+    elfldltl::GnuHash<Elf> gnu_hash(table);
+    EXPECT_EQ(gnu_hash.symtab_size(), 2u);
+    EXPECT_TRUE(std::ranges::empty(gnu_hash.AllBuckets()));
+    EXPECT_TRUE(std::ranges::empty(gnu_hash.Bucket(kHash)));
+  }
+
+  // Odd nbucket (1) with 2 chain entries (3 uint32_t words total).
+  {
+    std::vector<Addr> table;
+    const uint32_t header[] = {1, 1, 1, 5};
+    AppendGnuHashWords(table, header);
+    table.push_back(~size_type{});
+    const uint32_t body[] = {
+        1,            // bucket 0 -> symndx 1..2
+        kHash & ~1u,  // symndx 1
+        kHash | 1u,   // symndx 2 (end of bucket 0)
+    };
+    AppendGnuHashWords(table, body);
+
+    ASSERT_TRUE(elfldltl::GnuHash<Elf>::Valid(table));
+    elfldltl::GnuHash<Elf> gnu_hash(table);
+    EXPECT_EQ(gnu_hash.symtab_size(), 3u);
+
+    std::vector<uint32_t> indices;
+    for (auto bucket : gnu_hash.AllBuckets()) {
+      for (uint32_t symndx : bucket) {
+        indices.push_back(symndx);
+      }
+    }
+    EXPECT_THAT(indices, ::testing::ElementsAre(1u, 2u));
+
+    std::vector<uint32_t> bucket_indices;
+    for (uint32_t symndx : gnu_hash.Bucket(kHash)) {
+      bucket_indices.push_back(symndx);
+    }
+    EXPECT_THAT(bucket_indices, ::testing::ElementsAre(1u, 2u));
+  }
+
+  // Even nbucket (2) with 3 chain entries (5 uint32_t words total, no trailing
+  // RODATA).
+  {
+    std::vector<Addr> table;
+    const uint32_t header[] = {2, 1, 1, 5};
+    AppendGnuHashWords(table, header);
+    table.push_back(~size_type{});
+    const uint32_t body[] = {
+        1,            // bucket 0 -> symndx 1..2
+        3,            // bucket 1 -> symndx 3
+        kHash & ~1u,  // symndx 1
+        kHash | 1u,   // symndx 2 (end of bucket 0)
+        kHash | 1u,   // symndx 3 (end of bucket 1)
+    };
+    AppendGnuHashWords(table, body);
+
+    ASSERT_TRUE(elfldltl::GnuHash<Elf>::Valid(table));
+    elfldltl::GnuHash<Elf> gnu_hash(table);
+    EXPECT_EQ(gnu_hash.symtab_size(), 4u);
+
+    std::vector<uint32_t> indices;
+    for (auto bucket : gnu_hash.AllBuckets()) {
+      for (uint32_t symndx : bucket) {
+        indices.push_back(symndx);
+      }
+    }
+    EXPECT_THAT(indices, ::testing::ElementsAre(1u, 2u, 3u));
+  }
 }
 
 }  // namespace

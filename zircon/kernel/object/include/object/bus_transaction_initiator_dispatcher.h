@@ -12,7 +12,6 @@
 #include <zircon/rights.h>
 #include <zircon/types.h>
 
-#include <dev/iommu/bti.h>
 #include <kernel/ffi.h>
 #include <object/dispatcher.h>
 #include <object/handle.h>
@@ -21,22 +20,23 @@ class BusTransactionInitiatorDispatcher;
 
 extern "C" {
 zx_status_t cpp_bus_transaction_initiator_dispatcher_create(
-    const iommu::Iommu* iommu, uint64_t bti_id,
+    const void* bti,
     ffi::Uninitialized<KernelHandle<BusTransactionInitiatorDispatcher>>* handle_out);
 
-void rust_bus_transaction_initiator_dispatcher_state_init(void* state, void* disp, iommu::Bti* bti);
+void rust_bus_transaction_initiator_dispatcher_state_init(
+    void* state, const BusTransactionInitiatorDispatcher* disp, const void* bti);
 void rust_bus_transaction_initiator_dispatcher_state_destroy(void* state);
 Lock<CriticalMutex>* rust_bus_transaction_initiator_dispatcher_state_get_lock(const void* state);
-iommu::Bti* rust_bus_transaction_initiator_dispatcher_get_bti(
-    const BusTransactionInitiatorDispatcher* disp);
 void rust_bus_transaction_initiator_dispatcher_on_zero_handles(
     const BusTransactionInitiatorDispatcher* disp);
+zx_status_t rust_bus_transaction_initiator_dispatcher_set_name(
+    const BusTransactionInitiatorDispatcher* disp, const char* name, size_t len);
+zx_status_t rust_bus_transaction_initiator_dispatcher_get_name(
+    const BusTransactionInitiatorDispatcher* disp, char (*out_name)[ZX_MAX_NAME_LEN]);
 }
 
 class BusTransactionInitiatorDispatcher final : public Dispatcher {
  public:
-  using Bti = ::iommu::Bti;
-
   ~BusTransactionInitiatorDispatcher() final;
   zx_obj_type_t get_type() const final { return ZX_OBJ_TYPE_BTI; }
   zx_koid_t get_related_koid() const final { return ZX_KOID_INVALID; }
@@ -52,24 +52,23 @@ class BusTransactionInitiatorDispatcher final : public Dispatcher {
   void on_zero_handles() final;
 
   [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final __NONNULL((2)) {
-    return bti().set_name(name, len);
+    return rust_bus_transaction_initiator_dispatcher_set_name(this, name, len);
   }
 
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final {
-    return bti().get_name(out_name);
+    return rust_bus_transaction_initiator_dispatcher_get_name(this, &out_name);
   }
-
-  Bti& bti() const;
 
  protected:
   Lock<CriticalMutex>* get_lock() const final;
 
  private:
   friend zx_status_t cpp_bus_transaction_initiator_dispatcher_create(
-      const iommu::Iommu* iommu, uint64_t bti_id,
+      const void* bti,
       ffi::Uninitialized<KernelHandle<BusTransactionInitiatorDispatcher>>* handle_out);
 
-  explicit BusTransactionInitiatorDispatcher(fbl::RefPtr<Bti> bti);
+  explicit BusTransactionInitiatorDispatcher(const void* bti);
+  DISALLOW_COPY_ASSIGN_AND_MOVE(BusTransactionInitiatorDispatcher);
 
   OpaqueStorage<kBusTransactionInitiatorDispatcherStateSize,
                 kBusTransactionInitiatorDispatcherStateAlign>

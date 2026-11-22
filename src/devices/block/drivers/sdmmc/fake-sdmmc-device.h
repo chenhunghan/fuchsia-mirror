@@ -11,6 +11,7 @@
 #include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fit/function.h>
 #include <lib/stdcompat/span.h>
+#include <lib/vmo_store/vmo_store.h>
 
 #include <array>
 #include <map>
@@ -18,8 +19,6 @@
 #include <vector>
 
 #include <ddktl/device.h>
-
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace sdmmc {
 

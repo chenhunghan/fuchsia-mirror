@@ -12,7 +12,7 @@ pub use self::cobalt::CobaltDiagnostics;
 pub use self::composite::CompositeDiagnostics;
 #[cfg(test)]
 pub use self::fake::FakeDiagnostics;
-pub use self::inspect::{InspectDiagnostics, INSPECTOR};
+pub use self::inspect::{INSPECTOR, InspectDiagnostics};
 
 use crate::enums::{
     ClockCorrectionStrategy, ClockUpdateReason, FrequencyDiscardReason, InitialClockState,
@@ -39,6 +39,8 @@ pub enum Event {
     Initialized { clock_state: InitialClockState },
     /// An attempt was made to initialize and read from the real time clock.
     InitializeRtc { outcome: InitializeRtcOutcome, time: Option<UtcInstant> },
+    /// The initial state of the userspace UTC clock at startup (whether it was started).
+    StartupClockState { started: bool },
     /// A time source failed, relaunch will be attempted.
     TimeSourceFailed { role: Role, error: TimeSourceError },
     /// A time source changed its state.

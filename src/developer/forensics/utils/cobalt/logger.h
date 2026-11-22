@@ -5,7 +5,7 @@
 #ifndef SRC_DEVELOPER_FORENSICS_UTILS_COBALT_LOGGER_H_
 #define SRC_DEVELOPER_FORENSICS_UTILS_COBALT_LOGGER_H_
 
-#include <fuchsia/metrics/cpp/fidl.h>
+#include <fidl/fuchsia.metrics/cpp/fidl.h>
 #include <lib/fit/function.h>
 #include <lib/sys/cpp/service_directory.h>
 #include <lib/zx/time.h>
@@ -24,7 +24,7 @@ namespace forensics {
 namespace cobalt {
 
 // Log events to cobalt.
-class Logger {
+class Logger : public fidl::AsyncEventHandler<fuchsia_metrics::MetricEventLogger> {
  public:
   // We expect fuchsia.metrics.MetricEventLoggerFactory to be in |services|.
   Logger(async_dispatcher_t* dispatcher, std::shared_ptr<sys::ServiceDirectory> services,
@@ -72,9 +72,11 @@ class Logger {
 
   void LogEvent(Event event);
 
+  // |fidl::AsyncEventHandler<fuchsia_metrics::MetricEventLogger>|
+  void on_fidl_error(fidl::UnbindInfo error) override;
+
  private:
-  void ConnectToLogger(
-      ::fidl::InterfaceRequest<fuchsia::metrics::MetricEventLogger> logger_request);
+  void ConnectToLogger(fidl::ServerEnd<fuchsia_metrics::MetricEventLogger> logger_request);
   void RetryConnectingToLogger();
   void SendEvent(uint64_t event_id);
   void SendAllPendingEvents();
@@ -84,8 +86,8 @@ class Logger {
   std::shared_ptr<sys::ServiceDirectory> services_;
   timekeeper::Clock* clock_;
 
-  fuchsia::metrics::MetricEventLoggerFactoryPtr logger_factory_;
-  fuchsia::metrics::MetricEventLoggerPtr logger_;
+  fidl::Client<fuchsia_metrics::MetricEventLoggerFactory> logger_factory_;
+  fidl::Client<fuchsia_metrics::MetricEventLogger> logger_;
 
   // An event is pending if it has been written into a channel, but has not been acknowledged by
   // the recipient.

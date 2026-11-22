@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+package(default_applicable_licenses = ["//:license"])
+
+exports_files(
+    ["magma.json"],
+    visibility = ["//src/graphics/lib/magma/include/virtio:__pkg__"],
+)
+
+# GN's action() sets `script` and `args` directly instead of running a shell `cmd`.
+# @bazel2gn:raw_attribute:script = "magma_h_gen.py"
+# @bazel2gn:raw_attribute:args = [ rebase_path("magma.json", root_build_dir), rebase_path("$target_gen_dir/magma.h", root_build_dir) ]
+genrule(
+    name = "magma_header_gen",
+    srcs = ["magma.json"],
+    outs = [
+        # GN's action() requires outputs to reside under $target_gen_dir.
+        "magma.h",  # @bazel2gn:path_overwrite:$target_gen_dir/magma.h
+    ],
+    # Bazel runs the script with the hermetic prebuilt Python; GN uses
+    # `script` and `args` (set via raw_attribute above) instead of `cmd`.
+    cmd = "$(location @prebuilt_python//:python3) $(location :magma_h_gen.py) $< $@",  # @bazel2gn:skip
+    tools = [
+        ":magma_h_gen.py",
+        "@prebuilt_python//:python3",
+        "@prebuilt_python//:runtime_files",
+    ],
+    visibility = ["//src/graphics/magma/tests/codegen:__pkg__"],
+)

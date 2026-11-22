@@ -4,64 +4,11 @@
 
 import("//build/component/config.gni")
 import("//build/components.gni")
-import("//sdk/ctf/build/ctf.gni")
 
+# Retained in GN because bazel2gn does not translate component_config.
 component_config("placeholder_data") {
   sources = [ "configs/placeholder.json5" ]
   dest = "data/placeholder_config"
-}
-
-fuchsia_test_component("realm_integration_test") {
-  manifest = "meta/realm_integration_test.cml"
-  deps = [ ":realm_integration_test_bin" ]
-}
-
-fuchsia_test_component("realm_namespace_test") {
-  manifest = "meta/realm_namespace_test.cml"
-  deps = [ ":realm_namespace_test_bin" ]
-}
-
-template("ctf_or_integration_test") {
-  FUCHSIA_TEST_NAMES = [
-    "realm_integration_test",
-    "realm_namespace_test",
-  ]
-  DEPS = [
-    ":no_program",
-    "//src/sys/component_manager/testing/echo_server",
-    ":placeholder_data",
-  ]
-  if (defined(invoker.ctf) && invoker.ctf) {
-    ctf_fuchsia_package(target_name) {
-      testonly = true
-      package_name = target_name
-      deps = DEPS
-      test_component_names = []
-      foreach(fuchsia_test_name, FUCHSIA_TEST_NAMES) {
-        test_component_names += [ "${fuchsia_test_name}" ]
-        deps += [ ":${fuchsia_test_name}" ]
-      }
-    }
-  } else {
-    fuchsia_test_package(target_name) {
-      deps = DEPS + [
-               # https://fxbug.dev/42052321: Dep included for affected tests presubmit
-               "//src/sys/component_manager:component-manager-realm-builder-cmp",
-             ]
-      test_components = []
-      foreach(fuchsia_test_name, FUCHSIA_TEST_NAMES) {
-        test_components += [ ":${fuchsia_test_name}" ]
-      }
-    }
-  }
-}
-
-ctf_or_integration_test("realm_integration_tests") {
-  ctf = false
-}
-
-ctf_or_integration_test("realm_integration_tests-ctf") {
-  ctf = true
 }
 
 group("tests") {
@@ -105,34 +52,37 @@ group("ctf-tests") {
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
 
-rustc_test("realm_integration_test_bin") {
-  sources = [ "src/integration_test.rs" ]
-  source_root = "src/integration_test.rs"
-  edition = "2024"
-  deps = [
-    "//examples/components/routing/fidl:echo_rust",
-    "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
-    "//sdk/rust/zx",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-async",
-    "//src/lib/fuchsia-component",
-    "//src/lib/fuchsia-fs",
-  ]
+if (is_fuchsia) {
+  rustc_test("realm_integration_test_bin") {
+    sources = [ "src/integration_test.rs" ]
+    source_root = "src/integration_test.rs"
+    edition = "2024"
+    deps = [
+      "//examples/components/routing/fidl:echo_rust",
+      "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+      "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+      "//sdk/rust/zx",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-async",
+      "//src/lib/fuchsia-component",
+      "//src/lib/fuchsia-fs",
+    ]
+  }
 }
-
-rustc_test("realm_namespace_test_bin") {
-  sources = [ "src/namespace_test.rs" ]
-  source_root = "src/namespace_test.rs"
-  edition = "2024"
-  deps = [
-    "//examples/components/routing/fidl:echo_rust",
-    "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
-    "//src/lib/fidl/rust/fidl",
-    "//src/lib/fuchsia",
-    "//src/lib/fuchsia-component",
-  ]
+if (is_fuchsia) {
+  rustc_test("realm_namespace_test_bin") {
+    sources = [ "src/namespace_test.rs" ]
+    source_root = "src/namespace_test.rs"
+    edition = "2024"
+    deps = [
+      "//examples/components/routing/fidl:echo_rust",
+      "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust",
+      "//src/lib/fidl/rust/fidl",
+      "//src/lib/fuchsia",
+      "//src/lib/fuchsia-component",
+    ]
+  }
 }
 
 fuchsia_component_manifest("no_program-manifest") {
@@ -144,4 +94,57 @@ fuchsia_component_manifest("no_program-manifest") {
 fuchsia_component("no_program") {
   testonly = true
   cm_label = ":no_program-manifest"
+  deps = [ ":placeholder_data" ]
+}
+
+fuchsia_component_manifest("realm_integration_test-manifest") {
+  testonly = true
+  component_name = "realm_integration_test"
+  manifest = "meta/realm_integration_test.cml"
+}
+
+fuchsia_test_component("realm_integration_test") {
+  cm_label = ":realm_integration_test-manifest"
+  deps = [ ":realm_integration_test_bin" ]
+}
+
+fuchsia_component_manifest("realm_namespace_test-manifest") {
+  testonly = true
+  component_name = "realm_namespace_test"
+  manifest = "meta/realm_namespace_test.cml"
+}
+
+fuchsia_test_component("realm_namespace_test") {
+  cm_label = ":realm_namespace_test-manifest"
+  deps = [ ":realm_namespace_test_bin" ]
+}
+
+fuchsia_test_package("realm_integration_tests") {
+  package_name = "realm_integration_tests-gn"
+  test_components = [
+    ":realm_integration_test",
+    ":realm_namespace_test",
+  ]
+  deps = [
+    ":no_program",
+    "//src/sys/component_manager:component-manager-realm-builder-cmp",
+    "//src/sys/component_manager/testing/echo_server",
+  ]
+}
+
+ctf_fuchsia_package("realm_integration_tests-ctf") {
+  testonly = true
+  package_name = "realm_integration_tests-ctf"
+  deps = [
+    ":no_program",
+    "//src/sys/component_manager/testing/echo_server",
+  ]
+  deps += [
+    ":realm_integration_test",
+    ":realm_namespace_test",
+  ]
+  test_component_names = [
+    "realm_integration_test",
+    "realm_namespace_test",
+  ]
 }

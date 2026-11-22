@@ -39,7 +39,7 @@ compiler_build_flags(
     # TODO(https://fxbug.dev/520129672): Enabling this on non-CFI builds leads to
     # unexpected TLS effects, so let's enable this only on CFI builds for now.
     rust_linker_flags = select({
-        "//build/bazel/config/toolchain_tags/cfi:true": ["--fat-lto-objects"],
+        "//build/bazel/config/variant_features/cfi:true": ["--fat-lto-objects"],
         "//conditions:default": [],
     }) if fat_lto_objects else [],
     visibility = ["//visibility:public"],
@@ -215,8 +215,8 @@ compiler_build_flags(
 selects.config_setting_group(
     name = "toolchain_is_instrumented_or_lto",
     match_any = [
-        "//build/bazel/config/toolchain_tags/instrumented:true",
-        "//build/bazel/config/toolchain_tags/lto:true",
+        "//build/bazel/config/variant_features/instrumented:true",
+        "//build/bazel/config/variant_features/lto:true",
     ],
 )
 
@@ -349,7 +349,7 @@ selects.config_setting_group(
 selects.config_setting_group(
     name = "uninstrumented_optimize_has_rust_lto",
     match_all = [
-        "//build/bazel/config/toolchain_tags/instrumented:false",
+        "//build/bazel/config/variant_features/instrumented:false",
         ":optimize_has_rust_lto",
     ],
 )
@@ -361,7 +361,7 @@ selects.config_setting_group(
 selects.config_setting_group(
     name = "rust_lto_enabled",
     match_any = [
-        "//build/bazel/config/toolchain_tags/lto:true",
+        "//build/bazel/config/variant_features/lto:true",
         ":uninstrumented_optimize_has_rust_lto",
     ],
     visibility = ["//visibility:public"],

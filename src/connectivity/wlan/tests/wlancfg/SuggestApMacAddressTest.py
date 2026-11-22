@@ -8,7 +8,7 @@ import fidl_fuchsia_net as fidl_net
 import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fidl_fuchsia_wlan_product_deprecatedconfiguration as fidl_deprecatedconfiguration
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from honeydew.affordances.connectivity.wlan.utils.types import MacAddress
 from honeydew.typing.custom_types import FidlEndpoint
 from mobly import asserts, test_runner

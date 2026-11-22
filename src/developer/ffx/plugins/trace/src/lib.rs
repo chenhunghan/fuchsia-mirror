@@ -20,7 +20,7 @@ use futures::future::{Future, FutureExt as _};
 use prettytable::format::FormatBuilder;
 use prettytable::{Table, row};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Stdin, stdin};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
@@ -584,6 +584,13 @@ impl TraceTool {
 
         let expanded_categories = ffx_trace::expand_categories(&context, opts.categories.clone())
             .map_err(anyhow::Error::from)?;
+        let (expanded_categories, category_warnings) =
+            normalize_legacy_starnix_categories(expanded_categories);
+        // `writer.line` prints nothing in machine mode, so a foreground trace also passes these
+        // warnings to `finalize_trace`, which reports them in its machine output.
+        for warning in &category_warnings {
+            writer.line(warning)?;
+        }
         let defer_transfer = match opts.buffering_mode {
             BufferingMode::Oneshot | BufferingMode::Circular => false,
             BufferingMode::Streaming => true,
@@ -672,6 +679,7 @@ impl TraceTool {
                 compressed: opts.compressed,
                 ..Default::default()
             },
+            category_warnings,
             writer,
         )
         .await?;
@@ -740,7 +748,7 @@ impl TraceTool {
         };
 
         let stop_opts = Stop { output: Some(output.clone()), ..opts.clone() };
-        finalize_trace(&context, trace_data, &stop_opts, writer).await.map_err(Into::into)
+        finalize_trace(&context, trace_data, &stop_opts, vec![], writer).await.map_err(Into::into)
     }
 
     async fn trace_upload(self, opts: &Upload, writer: Writer) -> fho::Result<()> {
@@ -826,15 +834,25 @@ impl TraceTool {
 
 /// Does the final steps of capturing the trace such as, dumping the provider stats, post_processing
 /// and letting the user know the file name of the trace data.
+///
+/// `start_warnings` are warnings that the caller produced, and already printed, before the trace
+/// was recorded. They are reported at the front of the machine output's `warnings` and are not
+/// printed again.
 async fn finalize_trace(
     context: &EnvironmentContext,
     trace_data: TraceData,
     opts: &Stop,
+    start_warnings: Vec<String>,
     writer: Writer,
 ) -> Result<()> {
-    finalize_trace_impl(context, trace_data, opts, writer, |path, bucket, viewer| async move {
-        upload::upload_trace(&path, &bucket, &viewer).await
-    })
+    finalize_trace_impl(
+        context,
+        trace_data,
+        opts,
+        start_warnings,
+        writer,
+        |path, bucket, viewer| async move { upload::upload_trace(&path, &bucket, &viewer).await },
+    )
     .await
 }
 
@@ -844,10 +862,15 @@ async fn finalize_trace(
 /// This decouples trace finalization (stats formatting, post-processing, verification, configuration
 /// resolution, and error reporting) from network I/O and interactive GCS authentication, enabling
 /// hermetic unit tests to verify behavior without external cloud dependencies.
+///
+/// `start_warnings` are placed ahead of the warnings collected here in
+/// [`TraceRecordOutput::warnings`]. They are not written with `writer.line`, because the caller
+/// printed them when it produced them.
 async fn finalize_trace_impl<F, Fut>(
     context: &EnvironmentContext,
     trace_data: TraceData,
     opts: &Stop,
+    start_warnings: Vec<String>,
     mut writer: Writer,
     uploader: F,
 ) -> Result<()>
@@ -876,7 +899,8 @@ where
     } else {
         None
     };
-    let mut warnings = collect_stats_warnings(&raw_provider_stats, opts.verbose);
+    let mut warnings = start_warnings;
+    warnings.extend(collect_stats_warnings(&raw_provider_stats, opts.verbose));
 
     for line in stats_to_output(raw_provider_stats, opts.verbose) {
         writer.line(line)?;
@@ -1065,6 +1089,67 @@ fn resolve_output_paths(output_opt: Option<&str>, compressed: bool) -> Result<(S
         final_output.clone()
     };
     Ok((download_file, final_output))
+}
+
+/// Translates deprecated `starnix:atrace` category forms for backwards compatibility:
+/// - Bare `"starnix:atrace"` and `"starnix:atrace*"` are normalized to `"starnix:atrace:*"` with
+///   a deprecation warning.
+/// - Blanket `"starnix:atrace"`, `"starnix:atrace*"`, and `"starnix:atrace:*"` also enable
+///   `"starnix:perfetto:*"` with a deprecation warning, unless the request already includes a
+///   category that selects Perfetto data sources itself (`starnix:perfetto:<source>`, or a
+///   wildcard that matches those categories, such as `starnix:perfetto*`, `starnix:*` or `*`).
+///
+/// Granular atrace categories (e.g., `"starnix:atrace:am"`) are left unchanged, as are
+/// provider-qualified categories (`<provider>/<category>`).
+///
+/// `categories` comes from `ffx_trace::expand_categories`, which returns a sorted list without
+/// duplicates. The returned list keeps both properties, and each deprecated form is therefore
+/// warned about once, in sorted order, ahead of the implicit `starnix:perfetto:*` warning.
+/// TODO(https://fxbug.dev/587499598): Remove this compatibility translation once callers migrate.
+fn normalize_legacy_starnix_categories(categories: Vec<String>) -> (Vec<String>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut result = BTreeSet::new();
+    let mut saw_blanket_atrace = false;
+    let mut has_perfetto = false;
+
+    for cat in categories {
+        if cat == "starnix:atrace" || cat == "starnix:atrace*" {
+            warnings.push(format!(
+                "Warning: Category '{cat}' is deprecated; use 'starnix:atrace:*' instead."
+            ));
+            saw_blanket_atrace = true;
+            result.insert("starnix:atrace:*".to_string());
+        } else if cat == "starnix:atrace:*" {
+            saw_blanket_atrace = true;
+            result.insert(cat);
+        } else {
+            // A trailing `*` makes a category a prefix wildcard on the target, so any wildcard
+            // whose prefix is a prefix of `starnix:perfetto:` (e.g. `*`, `starnix:*`) already
+            // selects the Perfetto data sources.
+            if cat.starts_with("starnix:perfetto:")
+                || cat
+                    .strip_suffix('*')
+                    .is_some_and(|prefix| "starnix:perfetto:".starts_with(prefix))
+            {
+                has_perfetto = true;
+            }
+            result.insert(cat);
+        }
+    }
+
+    if saw_blanket_atrace && !has_perfetto {
+        result.insert("starnix:perfetto:*".to_string());
+        warnings.push(
+            "Warning: Blanket 'starnix:atrace:*' currently also enables 'starnix:perfetto:*'. \
+             This implicit behavior is deprecated and will be removed; request \
+             'starnix:perfetto:*' or a specific 'starnix:perfetto:<source>' category to choose \
+             the Android Perfetto userspace data sources (e.g. track_event, SurfaceFlinger) \
+             explicitly."
+                .to_string(),
+        );
+    }
+
+    (result.into_iter().collect(), warnings)
 }
 
 struct TempFileGuard(PathBuf);
@@ -1290,7 +1375,7 @@ mod tests {
     use serde_json::json;
     use std::io::Write;
     use std::matches;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use target_holders::fake_proxy;
     use tempfile::{Builder, NamedTempFile, TempDir};
 
@@ -1362,7 +1447,16 @@ mod tests {
     }
 
     fn setup_fake_session_manager(client: Arc<FDomainClient>) -> Deferred<SessionManagerProxy> {
-        Deferred::from_output(Ok(fake_proxy(client, |req| match req {
+        setup_capturing_fake_session_manager(client, Arc::new(Mutex::new(None)))
+    }
+
+    /// Like `setup_fake_session_manager`, but stores the `TraceConfig` of each
+    /// `StartTraceSession` request in `started_config`.
+    fn setup_capturing_fake_session_manager(
+        client: Arc<FDomainClient>,
+        started_config: Arc<Mutex<Option<TraceConfig>>>,
+    ) -> Deferred<SessionManagerProxy> {
+        Deferred::from_output(Ok(fake_proxy(client, move |req| match req {
             tracing_controller::SessionManagerRequest::GetKnownCategories { responder, .. } => {
                 responder.send(&fake_known_categories()).expect("should respond");
             }
@@ -1370,10 +1464,11 @@ mod tests {
                 responder.send(&fake_provider_infos()).expect("should respond");
             }
             tracing_controller::SessionManagerRequest::StartTraceSession {
-                config: _,
+                config,
                 options: _,
                 responder,
             } => {
+                *started_config.lock().unwrap() = Some(config);
                 responder.send(Ok(123)).expect("should respond");
             }
             tracing_controller::SessionManagerRequest::StartTraceSessionOnBoot {
@@ -1801,6 +1896,56 @@ Triggers:
     }
 
     #[fuchsia::test]
+    async fn test_start_translates_legacy_starnix_atrace() {
+        let client = fdomain_local::local_client_empty();
+        let env = ffx_config::test_init().unwrap();
+        let test_buffers = TestBuffers::default();
+        let writer = Writer::new_test(None, &test_buffers);
+        let start_opts = Start {
+            buffer_size: 2,
+            categories: vec!["starnix:atrace".to_string(), "kernel:meta".to_string()],
+            buffering_mode: tracing::BufferingMode::Oneshot,
+            background: true,
+            no_verify_trace: true,
+            ..Default::default()
+        };
+        let started_config = Arc::new(Mutex::new(None));
+
+        let tool = TraceTool {
+            provisioner: Deferred::from_output(Err(fho::user_error!("not found"))),
+            session_manager: setup_capturing_fake_session_manager(client, started_config.clone()),
+            context: env.context.clone(),
+            cmd: TraceCommand { sub_cmd: TraceSubCommand::Start(start_opts.clone()) },
+        };
+
+        tool.trace_start(&start_opts, writer).await.unwrap();
+
+        // The target gets the translated categories, not the deprecated one.
+        let config = started_config.lock().unwrap().take().expect("StartTraceSession config");
+        assert_eq!(
+            config.categories,
+            Some(vec![
+                "kernel:meta".to_string(),
+                "starnix:atrace:*".to_string(),
+                "starnix:perfetto:*".to_string(),
+            ])
+        );
+
+        // The user is told about both translations before tracing starts.
+        let output = test_buffers.into_stdout_str();
+        let want_prefix = "Warning: Category 'starnix:atrace' is deprecated; use \
+             'starnix:atrace:*' instead.\n\
+             Warning: Blanket 'starnix:atrace:*' currently also enables 'starnix:perfetto:*'.";
+        assert!(output.starts_with(want_prefix), "unexpected output: {output}");
+        assert!(
+            output.contains(
+                "Tracing categories: [kernel:meta,starnix:atrace:*,starnix:perfetto:*]..."
+            ),
+            "unexpected output: {output}"
+        );
+    }
+
+    #[fuchsia::test]
     async fn test_status() {
         let client = fdomain_local::local_client_empty();
         let env = ffx_config::test_init().unwrap();
@@ -1949,6 +2094,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec![],
             writer,
             |_path, _bucket, _viewer| async { Ok(expected_url.to_string()) },
         )
@@ -1991,6 +2137,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec![],
             writer,
             |_path, _bucket, _viewer| async { Ok("".to_string()) },
         )
@@ -2028,6 +2175,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec![],
             writer,
             |_path, _bucket, _viewer| async { Err(anyhow!("simulated upload failure")) },
         )
@@ -2066,6 +2214,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec![],
             writer,
             |_path, bucket, _viewer| async move {
                 assert_eq!(bucket, "cli-override-bucket");
@@ -2105,6 +2254,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec![],
             writer,
             |_path, _bucket, viewer| async move {
                 assert_eq!(viewer, "https://custom-viewer.corp.goog");
@@ -3095,6 +3245,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec![],
             writer,
             |_path, _bucket, _viewer| async { Ok(expected_url.to_string()) },
         )
@@ -3162,6 +3313,7 @@ Triggers:
             &env.context,
             trace_data,
             &stop_opts,
+            vec!["first start warning".to_string(), "second start warning".to_string()],
             writer,
             |_path, _bucket, _viewer| async { Err(anyhow!("simulated upload failure")) },
         )
@@ -3179,6 +3331,9 @@ Triggers:
         assert_eq!(
             got.warnings,
             vec![
+                // The start warnings come ahead of the warnings collected while finalizing.
+                "first start warning".to_string(),
+                "second start warning".to_string(),
                 "WARNING: 1 producers were missing stats. Perhaps a producer is misconfigured?"
                     .to_string(),
                 "WARNING: \"provider_foo\" dropped 42 records!".to_string(),
@@ -3187,6 +3342,87 @@ Triggers:
                 "Warning: Failed to upload trace to GCS: simulated upload failure".to_string(),
             ],
             "finalize_trace_impl({stop_opts:?}) warnings = {:?}, want clean warnings without ANSI codes",
+            got.warnings
+        );
+    }
+
+    #[fuchsia::test]
+    async fn test_finalize_trace_start_warnings_not_reprinted() {
+        let env = ffx_config::test_init().unwrap();
+        let test_buffers = TestBuffers::default();
+        let writer = Writer::new_test(None, &test_buffers);
+
+        let stop_opts = Stop { no_verify_trace: true, ..Default::default() };
+
+        let trace_data = TraceData {
+            output_file: "test_output.fxt".to_string(),
+            categories: vec![],
+            stop_result: StopResult::default(),
+        };
+
+        finalize_trace_impl(
+            &env.context,
+            trace_data,
+            &stop_opts,
+            vec!["start warning".to_string()],
+            writer,
+            |_path, _bucket, _viewer| async { Ok("".to_string()) },
+        )
+        .await
+        .unwrap();
+
+        // The caller printed the start warning when it produced it, so it must not show up here.
+        let output = test_buffers.into_stdout_str();
+        let expected_output =
+            "Results written to test_output.fxt\nUpload to https://ui.perfetto.dev/#!/ to view.\n";
+        assert_eq!(output, expected_output);
+    }
+
+    #[fuchsia::test]
+    async fn test_start_legacy_starnix_atrace_warnings_machine() {
+        let client = fdomain_local::local_client_empty();
+        let env = ffx_config::test_init().unwrap();
+        let test_buffers = TestBuffers::default();
+        let writer = Writer::new_test(Some(Format::Json), &test_buffers);
+
+        let start_opts = Start {
+            buffer_size: 2,
+            categories: vec!["starnix:atrace".to_string()],
+            duration: Some(1),
+            buffering_mode: tracing::BufferingMode::Oneshot,
+            output: Some("legacy-atrace.fxt".to_owned()),
+            background: false,
+            no_verify_trace: true,
+            ..Default::default()
+        };
+
+        let tool = TraceTool {
+            provisioner: Deferred::from_output(Err(fho::user_error!("not found"))),
+            session_manager: setup_fake_session_manager(client),
+            context: env.context.clone(),
+            cmd: TraceCommand { sub_cmd: TraceSubCommand::Start(start_opts.clone()) },
+        };
+
+        tool.trace_start(&start_opts, writer).await.unwrap();
+
+        // A foreground trace reports the category deprecation warnings in its machine output,
+        // ahead of any warnings produced while finalizing the trace.
+        let output = test_buffers.into_stdout_str();
+        let got: TraceRecordOutput = serde_json::from_str(&output)
+            .unwrap_or_else(|e| panic!("failed to deserialize {output:?}: {e}"));
+        assert_eq!(
+            got.warnings.first().map(String::as_str),
+            Some(
+                "Warning: Category 'starnix:atrace' is deprecated; use 'starnix:atrace:*' instead."
+            ),
+            "trace_start({start_opts:?}) warnings = {:?}",
+            got.warnings
+        );
+        assert!(
+            got.warnings.get(1).is_some_and(|w| w.starts_with(
+                "Warning: Blanket 'starnix:atrace:*' currently also enables 'starnix:perfetto:*'."
+            )),
+            "trace_start({start_opts:?}) warnings = {:?}",
             got.warnings
         );
     }
@@ -3269,5 +3505,113 @@ Triggers:
             .unwrap_or_else(|e| panic!("failed to deserialize {output:?}: {e}"));
         let want = TraceUploadOutput { url: expected_url.to_string() };
         assert_eq!(got, want, "trace_upload_impl({trace_path_str:?}) = {got:?}, want {want:?}");
+    }
+
+    #[test]
+    fn test_normalize_legacy_starnix_categories() {
+        for legacy in ["starnix:atrace", "starnix:atrace*"] {
+            let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+                "kernel:meta".to_string(),
+                legacy.to_string(),
+            ]);
+            assert_eq!(cats, vec!["kernel:meta", "starnix:atrace:*", "starnix:perfetto:*"]);
+            assert_eq!(warnings.len(), 2);
+            assert!(warnings[0].contains(&format!("'{legacy}' is deprecated")));
+            assert!(warnings[1].contains("starnix:perfetto:*"));
+        }
+
+        let (cats, warnings) =
+            normalize_legacy_starnix_categories(vec!["starnix:atrace:*".to_string()]);
+        assert_eq!(cats, vec!["starnix:atrace:*", "starnix:perfetto:*"]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("starnix:perfetto:*"));
+
+        // Migrated callers (including #starnix-ui and granular perfetto) produce no warnings.
+        for perfetto in ["starnix:perfetto:*", "starnix:perfetto:surfaceflinger"] {
+            let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+                "starnix:atrace:*".to_string(),
+                perfetto.to_string(),
+            ]);
+            assert_eq!(cats, vec!["starnix:atrace:*", perfetto]);
+            assert!(warnings.is_empty(), "{perfetto}: {warnings:?}");
+        }
+
+        // Broader wildcards already select the Perfetto data sources, so nothing is added.
+        for (broad, want) in [
+            ("starnix:perfetto*", ["starnix:atrace:*", "starnix:perfetto*"]),
+            ("starnix:p*", ["starnix:atrace:*", "starnix:p*"]),
+            ("starnix:*", ["starnix:*", "starnix:atrace:*"]),
+            ("starnix*", ["starnix*", "starnix:atrace:*"]),
+            ("*", ["*", "starnix:atrace:*"]),
+        ] {
+            let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+                "starnix:atrace:*".to_string(),
+                broad.to_string(),
+            ]);
+            assert_eq!(cats, want);
+            assert!(warnings.is_empty(), "{broad}: {warnings:?}");
+        }
+
+        // A wildcard that doesn't match the Perfetto categories doesn't select their data
+        // sources, so `starnix:perfetto:*` is still added.
+        for (other, want) in [
+            ("kernel:*", ["kernel:*", "starnix:atrace:*", "starnix:perfetto:*"]),
+            ("starnix:pa*", ["starnix:atrace:*", "starnix:pa*", "starnix:perfetto:*"]),
+        ] {
+            let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+                "starnix:atrace:*".to_string(),
+                other.to_string(),
+            ]);
+            assert_eq!(cats, want);
+            assert_eq!(warnings.len(), 1, "{other}: {warnings:?}");
+            assert!(warnings[0].contains("starnix:perfetto:*"));
+        }
+
+        // Provider-qualified categories are left unchanged.
+        let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+            "starnix_kernel.cm/starnix:atrace".to_string(),
+            "starnix_kernel.cm/starnix:atrace:*".to_string(),
+        ]);
+        assert_eq!(
+            cats,
+            vec!["starnix_kernel.cm/starnix:atrace", "starnix_kernel.cm/starnix:atrace:*"]
+        );
+        assert!(warnings.is_empty());
+
+        // A partially migrated caller only gets the warning for the deprecated atrace form.
+        let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+            "starnix:atrace".to_string(),
+            "starnix:perfetto:*".to_string(),
+        ]);
+        assert_eq!(cats, vec!["starnix:atrace:*", "starnix:perfetto:*"]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("'starnix:atrace' is deprecated"));
+
+        // Several deprecated forms collapse into one `starnix:atrace:*`, each with its own warning.
+        let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+            "starnix:atrace".to_string(),
+            "starnix:atrace*".to_string(),
+        ]);
+        assert_eq!(cats, vec!["starnix:atrace:*", "starnix:perfetto:*"]);
+        assert_eq!(warnings.len(), 3);
+        assert!(warnings[0].contains("'starnix:atrace' is deprecated"));
+        assert!(warnings[1].contains("'starnix:atrace*' is deprecated"));
+        assert!(warnings[2].contains("starnix:perfetto:*"));
+
+        // Granular atrace categories must not implicitly pull in starnix:perfetto:*.
+        let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+            "starnix:atrace:am".to_string(),
+            "starnix:atrace:gfx".to_string(),
+        ]);
+        assert_eq!(cats, vec!["starnix:atrace:am", "starnix:atrace:gfx"]);
+        assert!(warnings.is_empty());
+
+        // Unrelated categories are untouched.
+        let (cats, warnings) = normalize_legacy_starnix_categories(vec![
+            "kernel:meta".to_string(),
+            "starnix:meta".to_string(),
+        ]);
+        assert_eq!(cats, vec!["kernel:meta", "starnix:meta"]);
+        assert!(warnings.is_empty());
     }
 }

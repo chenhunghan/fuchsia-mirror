@@ -2,12 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
+import("//build/bazel/bazel_fuchsia_package.gni")
 
-fuchsia_package("sl4f-testing") {
+# //src/tests/end_to_end/sl4f:sl4f_test and :test still use this package
+# from GN.
+bazel_fuchsia_package("sl4f-testing") {
+  bazel_config = "fuchsia_platform"
   package_name = "sl4f-testing"
-  deps = [
-    "daemon-component",
-    "self-stop-component",
-  ]
 }

@@ -358,6 +358,10 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
 
   zx_status_t UsbBusConfigureHub(usb_speed_t speed, const usb_hub_descriptor_t* desc,
                                  bool multi_tt) {
+    configure_hub_seq_ = op_seq_.fetch_add(1) + 1;
+    if (configure_hub_status_ != ZX_OK) {
+      return configure_hub_status_;
+    }
     if (desc->b_nbr_ports != emulation_.port_count) {
       return ZX_ERR_INVALID_ARGS;
     }
@@ -392,6 +396,7 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
   }
 
   void UsbBusSetHubInterfaceDispatch(std::unique_ptr<IOEntry> entry) {
+    set_hub_interface_seq_ = op_seq_.fetch_add(1) + 1;
     hub_protocol_ = entry->hub_interface;
     entry->status = ZX_OK;
     Complete(std::move(entry));
@@ -436,14 +441,23 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     enum class Opcode : uint16_t {
       SetFeature = 0x323,
       ClearFeature = 0x123,
+      ClearTtBuffer = 0x823,
     };
     auto request_opcode = static_cast<Opcode>(request_type | (request << 8));
     switch (request_opcode) {
+      case Opcode::ClearTtBuffer: {
+        fbl::AutoLock l(&trace_mutex_);
+        clear_tt_buffer_calls_.push_back(ClearTtBufferCall{.value = value, .index = index});
+        return ZX_OK;
+      }
       case Opcode::SetFeature: {
         switch (value) {
           case USB_FEATURE_PORT_POWER: {
             if ((index != power_on_expected_) || (index > emulation_.port_count)) {
               return ZX_ERR_INVALID_ARGS;
+            }
+            if (power_on_seq_ == 0) {
+              power_on_seq_ = op_seq_.fetch_add(1) + 1;
             }
             port_status_[index - 1].SetBit(PortStatusBit::kPower);
             power_on_expected_++;
@@ -468,6 +482,15 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
       } break;
       case Opcode::ClearFeature: {
         switch (value) {
+          case USB_FEATURE_PORT_ENABLE:
+            clear_port_enable_count_++;
+            if (emulation_.speed == USB_SPEED_SUPER ||
+                emulation_.speed == USB_SPEED_ENHANCED_SUPER) {
+              return ZX_ERR_IO_REFUSED;
+            }
+            port_status_[index - 1].ClearBit(PortStatusBit::kEnabled);
+            port_status_[index - 1].ClearFeature(PortStatusBit::kEnabled);
+            return ZX_OK;
           case USB_FEATURE_C_PORT_CONNECTION:
             port_status_[index - 1].ClearFeature(PortStatusBit::kConnected);
             return ZX_OK;
@@ -628,10 +651,24 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
 
   zx_status_t UsbSetConfiguration(uint8_t configuration) { return ZX_ERR_NOT_SUPPORTED; }
 
+  struct ClearTtBufferCall {
+    uint16_t value;
+    uint16_t index;
+  };
+
   zx_status_t UsbEnableEndpointDispatch(const usb_endpoint_descriptor_t* ep_desc,
                                         const usb_ss_ep_comp_descriptor_t* ss_com_desc,
                                         bool enable) {
+    enable_endpoint_seq_ = op_seq_.fetch_add(1) + 1;
+    if (enable_endpoint_status_ != ZX_OK) {
+      return enable_endpoint_status_;
+    }
     interrupt_endpoint_ = ep_desc->b_endpoint_address;
+    if (ss_com_desc != nullptr) {
+      enabled_ss_companion_ = *ss_com_desc;
+    } else {
+      enabled_ss_companion_ = std::nullopt;
+    }
     return ZX_OK;
   }
 
@@ -662,11 +699,15 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
                                             size_t desc_size, size_t* out_desc_actual) {
     return ZX_ERR_NOT_SUPPORTED;
   }
-  size_t UsbGetDescriptorsLength() { return emulation_.descriptor.size(); }
+  size_t UsbGetDescriptorsLength() {
+    return descriptor_override_.has_value() ? descriptor_override_->size()
+                                            : emulation_.descriptor.size();
+  }
 
   void UsbGetDescriptors(uint8_t* out_descs_buffer, size_t descs_size, size_t* out_descs_actual) {
-    memcpy(out_descs_buffer, emulation_.descriptor.data(), emulation_.descriptor.size());
-    *out_descs_actual = emulation_.descriptor.size();
+    const auto desc = descriptor_override_.value_or(emulation_.descriptor);
+    memcpy(out_descs_buffer, desc.data(), desc.size());
+    *out_descs_actual = desc.size();
   }
 
   zx_status_t UsbGetStringDescriptor(uint8_t desc_id, uint16_t lang_id, uint16_t* out_lang_id,
@@ -675,15 +716,19 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     return ZX_ERR_NOT_SUPPORTED;
   }
   zx_status_t UsbCancelAllDispatch(uint8_t ep_address) {
+    if (interrupt_endpoint_ == 0 || ep_address != interrupt_endpoint_) {
+      return ZX_ERR_IO;
+    }
     if (request_) {
       auto req = std::move(request_);
       usb_request_complete(req->request, ZX_ERR_CANCELED, 0, &req->completion);
       pending_requests_--;
     }
-    return ZX_OK;
+    return cancel_all_status_.load();
   }
 
   zx_status_t UsbCancelAll(uint8_t ep_address) {
+    cancel_all_count_++;
     auto entry = MakeSyncEntry(OperationType::kUsbCancelAll);
     entry->ep_address = ep_address;
     return SendMessageSync(std::move(entry))->status;
@@ -827,7 +872,51 @@ class FakeDevice : public ddk::UsbBusProtocol<FakeDevice>, public ddk::UsbProtoc
     request_callback_ = std::move(callback);
   }
 
+  void SetConfigureHubStatus(zx_status_t status) { configure_hub_status_ = status; }
+
+  void SetEnableEndpointStatus(zx_status_t status) { enable_endpoint_status_ = status; }
+
+  void SetCancelAllStatus(zx_status_t status) { cancel_all_status_ = status; }
+
+  void SetDescriptorOverride(cpp20::span<const uint8_t> descriptor) {
+    descriptor_override_ = descriptor;
+  }
+
+  uint32_t set_hub_interface_seq() const { return set_hub_interface_seq_.load(); }
+  uint32_t configure_hub_seq() const { return configure_hub_seq_.load(); }
+  uint32_t enable_endpoint_seq() const { return enable_endpoint_seq_.load(); }
+  uint32_t power_on_seq() const { return power_on_seq_.load(); }
+  uint32_t cancel_all_count() const { return cancel_all_count_.load(); }
+  uint32_t clear_port_enable_count() const { return clear_port_enable_count_.load(); }
+  uint8_t interrupt_endpoint() const { return interrupt_endpoint_; }
+  std::optional<usb_ss_ep_comp_descriptor_t> enabled_ss_companion() const {
+    return enabled_ss_companion_;
+  }
+
+  bool PortEnabled(uint8_t port) { return port_status_[port].CheckBit(PortStatusBit::kEnabled); }
+
+  uint16_t PortChangeMask(uint8_t port) { return port_status_[port].GetStatus().w_port_change; }
+
+  std::vector<ClearTtBufferCall> GetClearTtBufferCalls() {
+    fbl::AutoLock l(&trace_mutex_);
+    return clear_tt_buffer_calls_;
+  }
+
  private:
+  std::atomic<uint32_t> op_seq_ = 0;
+  std::atomic<uint32_t> set_hub_interface_seq_ = 0;
+  std::atomic<uint32_t> configure_hub_seq_ = 0;
+  std::atomic<uint32_t> enable_endpoint_seq_ = 0;
+  std::atomic<uint32_t> power_on_seq_ = 0;
+  std::atomic<uint32_t> cancel_all_count_ = 0;
+  std::atomic<uint32_t> clear_port_enable_count_ = 0;
+  std::atomic<zx_status_t> configure_hub_status_ = ZX_OK;
+  std::atomic<zx_status_t> enable_endpoint_status_ = ZX_OK;
+  std::atomic<zx_status_t> cancel_all_status_ = ZX_OK;
+  std::optional<usb_ss_ep_comp_descriptor_t> enabled_ss_companion_;
+  std::optional<cpp20::span<const uint8_t>> descriptor_override_;
+  fbl::Mutex trace_mutex_;
+  std::vector<ClearTtBufferCall> clear_tt_buffer_calls_ __TA_GUARDED(trace_mutex_);
   std::atomic_size_t pending_requests_ = 0;
   // State change queue which is read from by a test
   IOQueue state_change_queue_;

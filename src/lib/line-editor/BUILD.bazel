@@ -22,7 +22,13 @@ rustc_library(
         "src/types.rs",
     ],
     edition = "2024",
-    visibility = ["//src/zircon/bin/zxsh:__pkg__"],
+    visibility = [
+        "//src/connectivity/bluetooth/lib/bt-repl:__pkg__",
+        "//src/connectivity/lowpan/tools/lowpanctl:__pkg__",
+        "//src/developer/zxsh:__pkg__",
+        "//src/power/battery-manager/battery-cli:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
     deps = [
         "//third_party/rust_crates/vendor:bstr",
         "//third_party/rust_crates/vendor:libc",

@@ -23,6 +23,7 @@ ffx_plugin(
     deps = [
         "//src/developer/ffx/lib/fho:lib",
         "//src/developer/ffx/lib/writer:lib",
+        "//src/lib/assembly/product_bundle",
         "//src/sys/pkg/lib/update-package",
         "//third_party/rust_crates/forks/prettytable-rs:prettytable",
         "//third_party/rust_crates/vendor:anyhow",
@@ -41,5 +42,6 @@ host_rustc_test(
         "//third_party/rust_crates/vendor:camino",
         "//third_party/rust_crates/vendor:serde_json",
         "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:zip",
     ],
 )

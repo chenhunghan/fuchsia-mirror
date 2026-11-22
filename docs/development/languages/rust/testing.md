@@ -58,7 +58,7 @@ Unit tests are built by the `rustc_binary` GN template only if the setting
 `with_unit_tests = true` is added:
 
 ```gn
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.gn" region_tag="rustc_tests" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.bazel" region_tag="rustc_tests" adjust_indentation="auto" %}
 ```
 
 Setting `with_unit_tests = true` causes this build rule to generate two
@@ -148,7 +148,7 @@ suffix `_test`), and `hello_world_rust_bin_test` (based on the value of `name`
 stanza).
 
 ```gn
-{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.gn" region_tag="fuchsia_test" adjust_indentation="auto" %}
+{% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/hello_world/rust/BUILD.bazel" region_tag="fuchsia_test" adjust_indentation="auto" %}
 ```
 
 To run the tests run:
@@ -184,8 +184,8 @@ rustc_binary("bin") {
 }
 ```
 
-[build-tests]:/docs/development/components/build.md#test-packages
-[component-tests]:/docs/development/testing/components/test_component.md
+[build-tests]: /docs/development/components/build.md#test-packages
+[component-tests]: /docs/development/testing/components/test_component.md
 [example-src]: /examples/hello_world/rust
 [glossary.component-manifest]: /docs/glossary/README.md#component-manifest
 [`assert_matches`]: https://fuchsia-docs.firebaseapp.com/rust/assert_matches/index.html

@@ -31,7 +31,6 @@ fuchsia_cc_driver("aml-pwm-driver") {
 }
 
 fuchsia_driver_component("aml-pwm") {
-  info = "meta/aml-pwm-info.json"
   component_name = "aml-pwm"
   deps = [
     ":aml-pwm-bind",

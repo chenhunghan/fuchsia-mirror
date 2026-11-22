@@ -35,7 +35,6 @@ fuchsia_driver_component("component_root") {
   manifest = "meta/root.cml"
   component_name = "root"
   deps = [ ":root_driver" ]
-  info = "meta/info.json"
 }
 
 driver_bind_rules("bind_composite_a") {
@@ -64,7 +63,6 @@ fuchsia_driver_component("component_composite_a") {
   manifest = "meta/composite-a.cml"
   component_name = "reload_test_nested_composite_a"
   deps = [ ":driver_composite_a" ]
-  info = "meta/info.json"
 }
 
 driver_bind_rules("bind_composite_b") {
@@ -89,7 +87,6 @@ fuchsia_driver_component("component_composite_b") {
   manifest = "meta/composite-b.cml"
   component_name = "reload_test_nested_composite_b"
   deps = [ ":driver_composite_b" ]
-  info = "meta/info.json"
 }
 
 driver_bind_rules("bind_top_b") {
@@ -118,5 +115,4 @@ fuchsia_driver_component("component_top_b") {
   manifest = "meta/top-b.cml"
   component_name = "reload_test_nested_top_b"
   deps = [ ":driver_top_b" ]
-  info = "meta/info.json"
 }

@@ -25,7 +25,7 @@ type FFXClient interface {
 	Close() error
 	ApplyEnv(env []string) ([]string, error)
 	SetDefaultTarget(target *string)
-	Flash(ctx context.Context, fastbootSerial, productDir, pubKeyPath string) error
+	Flash(ctx context.Context, target, productDir, pubKeyPath string) error
 	IsPackageServerRunning(ctx context.Context, repoName string) (bool, error)
 
 	// High-level provisioning operations
@@ -236,7 +236,13 @@ func (r *TestOrchestrator) downloadProductBundle(ctx context.Context, in *RunInp
 
 /* Step 3 - Flashing device OR Starting emulator. */
 func (r *TestOrchestrator) flashDevice(ctx context.Context, productDir string) error {
-	if err := r.ffx.Flash(ctx, r.deviceConfig.FastbootSerial, productDir, ""); err != nil {
+	// With no serial number, pass an empty target so that Flash omits
+	// --target and ffx flashes its default target.
+	target := ""
+	if r.deviceConfig.SerialNumber != "" {
+		target = "id:" + r.deviceConfig.SerialNumber
+	}
+	if err := r.ffx.Flash(ctx, target, productDir, ""); err != nil {
 		return fmt.Errorf("ffx flash: %w", err)
 	}
 	return nil

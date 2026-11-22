@@ -1,0 +1,157 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":lsusb-lib-tests",
+        ":lsusb-test",
+    ],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/descriptors.rs",
+        "src/lib.rs",
+    ],
+    crate_name = "lsusb",
+    edition = "2024",
+    proc_macro_deps = [
+        "//third_party/rust_crates/vendor:num-derive",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.usb.device:fuchsia.hardware.usb.device_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/lib/device-watcher/rust",
+        "//sdk/rust/zx-status",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:num-traits",
+        "//third_party/rust_crates/vendor:zerocopy",
+    ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Preserves the GN test binary name from `rustc_library(name = "lib", with_unit_tests = true)`.
+    crate_name = "lsusb_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//src/lib/fuchsia",
+    ],
+)
+
+fx_unittest_package(
+    name = "lsusb-lib-tests",
+    unit_tests = [":lib_test"],
+)
+
+rustc_binary(
+    name = "lsusb",
+    srcs = ["src/main.rs"],
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        ":lib",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-fs",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lsusb_packaged",
+    testonly = True,
+    binary = ":lsusb",
+    binary_name = "lsusb",
+)
+
+fx_cc_test_binary(
+    name = "lsusb-test-bin",
+    srcs = ["test.cc"],
+    gn_output_name = "lsusb-test",
+    deps = [
+        "//sdk/lib/fdio",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "lsusb-test-bin_packaged",
+    testonly = True,
+    binary = ":lsusb-test-bin",
+    binary_name = "lsusb-test",
+    install_root = "test/",
+)
+
+# A simple test utility that returns the integer value provided to it in its
+# first argument.
+
+fx_component_manifest(
+    name = "lsusb-test_manifest",
+    testonly = True,
+    component_name = "lsusb-test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/lsusb-test.cml",
+)
+
+fx_test_component(
+    name = "lsusb-test_component",
+    compiled_manifest = ":lsusb-test_manifest",
+    deps = [
+        ":lsusb-test-bin_packaged",
+        ":lsusb_packaged",
+    ],
+)
+
+fx_package(
+    name = "lsusb-test_package",
+    package_name = "lsusb-test",
+    testonly = True,
+    test_components = [":lsusb-test_component"],
+)
+
+fx_test(
+    name = "lsusb-test",
+    environments = [
+        "//build/testing/environments:nuc11_env",
+    ],
+    package = ":lsusb-test_package",
+)

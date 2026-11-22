@@ -84,8 +84,6 @@ ffx/net/dhcpd/get/parameter/arp-probe.golden
 ffx/net/dhcpd/get/parameter/bound-device-names.golden
 ffx/net/dhcpd/get/parameter/ip-addrs.golden
 ffx/net/dhcpd/get/parameter/lease-length.golden
-ffx/net/dhcpd/get/parameter/permitted-macs.golden
-ffx/net/dhcpd/get/parameter/statically-assigned-addrs.golden
 ffx/net/dhcpd/list.golden
 ffx/net/dhcpd/list/option.golden
 ffx/net/dhcpd/list/parameter.golden
@@ -169,8 +167,6 @@ ffx/net/dhcpd/set/parameter/arp-probe.golden
 ffx/net/dhcpd/set/parameter/bound-device-names.golden
 ffx/net/dhcpd/set/parameter/ip-addrs.golden
 ffx/net/dhcpd/set/parameter/lease-length.golden
-ffx/net/dhcpd/set/parameter/permitted-macs.golden
-ffx/net/dhcpd/set/parameter/statically-assigned-addrs.golden
 ffx/net/dhcpd/start.golden
 ffx/net/dhcpd/stop.golden
 ffx/net/dns.golden

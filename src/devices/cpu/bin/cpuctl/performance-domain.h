@@ -18,6 +18,7 @@ class CpuPerformanceDomain {
   static zx::result<CpuPerformanceDomain> CreateFromPath(const std::string& path);
   std::pair<zx_status_t, uint32_t> GetOperatingPointCount();
   std::pair<zx_status_t, uint64_t> GetNumLogicalCores();
+  std::tuple<zx_status_t, const std::vector<uint64_t>&> GetLogicalCoreIds();
   std::pair<zx_status_t, uint64_t> GetDomainId();
   std::pair<zx_status_t, uint64_t> GetRelativePerformance();
   std::pair<zx_status_t, uint64_t> GetRelativePerformance2();
@@ -39,6 +40,9 @@ class CpuPerformanceDomain {
 
   // Don't use this directly. Instead call GetOperatingPoints().
   std::vector<cpuctrl::wire::CpuOperatingPointInfo> cached_opps_;
+
+  // Don't use this directly. Instead call GetLogicalCoreIds().
+  std::vector<uint64_t> cached_core_ids_;
 };
 
 #endif  // SRC_DEVICES_CPU_BIN_CPUCTL_PERFORMANCE_DOMAIN_H_

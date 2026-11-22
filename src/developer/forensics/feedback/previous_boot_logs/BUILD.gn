@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+visibility = [ "//src/developer/forensics/*" ]
+
+###############################################################################
+# SOURCES
+###############################################################################
+source_set("boot_info") {
+  sources = [
+    "boot_info.cc",
+    "boot_info.h",
+  ]
+
+  public_deps = [ "//zircon/system/ulib/zx" ]
+
+  deps = [ "//third_party/rapidjson" ]
+}
+
+source_set("previous_boot_logs") {
+  sources = [
+    "single_previous_boot_logs.cc",
+    "single_previous_boot_logs.h",
+  ]
+
+  public_deps = [
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/fit-promise",
+    "//src/developer/forensics/feedback/attachments",
+    "//src/developer/forensics/feedback/attachments:file_backed_provider",
+    "//src/lib/fxl",
+    "//src/lib/timekeeper",
+    "//zircon/system/ulib/zx",
+  ]
+
+  deps = [
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/files",
+  ]
+}

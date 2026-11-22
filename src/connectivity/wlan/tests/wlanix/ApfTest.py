@@ -10,8 +10,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 import fuchsia_wlan_base_test
-import honeydew.affordances.connectivity.wlan.core as wlan_core
 import wlanix_testing
+from honeydew.affordances.connectivity.wlan.core import wlan_core
 from mobly import test_runner
 from mobly.asserts import (
     assert_equal,

@@ -79,8 +79,4 @@ fuchsia_unittest_package("spinel-pack-tests") {
   package_name = "spinel-pack-tests-gn"
   component_name = "spinel-pack-tests"
   deps = [ ":spinel_pack_test" ]
-  visibility = [
-    ":*",
-    "//src/connectivity:*",
-  ]
 }

@@ -13,6 +13,7 @@ use getopts::Options;
 use std::str::FromStr;
 
 use crate::central::{CentralState, CentralStatePtr};
+use crate::gatt::repl::WatchDisconnect;
 
 mod central;
 mod gatt;
@@ -23,7 +24,7 @@ async fn do_scan<T: bt_gatt::GattTypes>(
     state: CentralStatePtr<T>,
 ) -> Result<(), Error>
 where
-    <T as bt_gatt::GattTypes>::Client: Clone,
+    <T as bt_gatt::GattTypes>::Client: Clone + WatchDisconnect,
 {
     let mut opts = Options::new();
 
@@ -121,7 +122,7 @@ async fn do_connect<'a, T: bt_gatt::GattTypes>(
     args: &'a [String],
 ) -> Result<(), Error>
 where
-    <T as bt_gatt::GattTypes>::Client: Clone,
+    <T as bt_gatt::GattTypes>::Client: Clone + WatchDisconnect,
 {
     if args.len() < 1 {
         println!("connect: peer-id is required");

@@ -44,9 +44,9 @@ different ways:
     platforms or transitioned configurations.
   - **Analysis time**: After target loading completes, Bazel resolves the
     dependency graph by applying a specific **build configuration** (and target
-    platform) to each target definition. Only at analysis time—either through
+    platform) to each target definition. Only at analysis time--either through
     `select()` expressions resolved on rule attributes or inside a rule's
-    implementation function (`ctx`)—is the exact platform and flag configuration
+    implementation function (`ctx`)--is the exact platform and flag configuration
     known.
 
 ---
@@ -223,18 +223,18 @@ be computed at **load time** in Starlark.
 
 ```gn
 # //path/to/config.gni
-# LINT.IfChange(derived_feature_flag)
+# LINT.IfChange(derived_feature_flag_gn)
 enable_special_feature = my_global_variable && target_cpu == "arm64"
-# LINT.ThenChange(//path/to/config.bzl:derived_feature_flag)
+# LINT.ThenChange(//path/to/config.bzl:derived_feature_flag_bzl)
 ```
 
 ```starlark
 # //path/to/config.bzl
 load("@fuchsia_build_info//:args.bzl", "my_global_variable", "target_cpu")
 
-# LINT.IfChange(derived_feature_flag)
+# LINT.IfChange(derived_feature_flag_bzl)
 enable_special_feature = my_global_variable and target_cpu == "arm64"
-# LINT.ThenChange(//path/to/config.gni:derived_feature_flag)
+# LINT.ThenChange(//path/to/config.gni:derived_feature_flag_gn)
 ```
 
 For example, `//build/bazel/config/derived/compilation_modes.bzl` derives
@@ -268,45 +268,58 @@ time and must be modeled as Bazel **build settings** evaluated at analysis time.
    `//build/bazel/config/select/<varname>:<value>` so `BUILD.bazel` files can
    use them as `select()` keys for conditional attributes.
 
-#### Concrete Example: `is_profile`
+#### Concrete Example: `debuginfo`
 
 - **Variable definition** in `//build/bazel/config/variables/BUILD.bazel`:
   ```starlark
-  load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+  load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
 
-  bool_flag(
-      name = "is_profile",
-      build_setting_default = False,
+  string_flag(
+      name = "debuginfo",
+      build_setting_default = "debug",
+      values = [
+          "none",
+          "backtrace",
+          "debug",
+      ],
       visibility = ["//visibility:public"],
   )
   ```
 - **GN flag propagation** in `//build/bazel/config/bazel_args.gni`:
   ```gn
-  if (is_profile) {
-    _build_args += [ "--//build/bazel/config/variables:is_profile=True" ]
-  }
+  _build_args += [ "--//build/bazel/config/variables:debuginfo=" + debuginfo ]
   ```
-- **Select conditions** in `//build/bazel/config/select/is_profile/BUILD.bazel`:
+- **Select conditions** in `//build/bazel/config/select/debuginfo/BUILD.bazel`:
   ```starlark
   config_setting(
-      name = "true",
+      name = "none",
       flag_values = {
-          "//build/bazel/config/variables:is_profile": "True",
+          "//build/bazel/config/variables:debuginfo": "none",
       },
   )
 
   config_setting(
-      name = "false",
+      name = "backtrace",
       flag_values = {
-          "//build/bazel/config/variables:is_profile": "False",
+          "//build/bazel/config/variables:debuginfo": "backtrace",
       },
   )
 
-  alias(
-      name = "is_profile",
-      actual = ":true",
+  config_setting(
+      name = "debug",
+      flag_values = {
+          "//build/bazel/config/variables:debuginfo": "debug",
+      },
   )
   ```
+
+> [!NOTE]
+> **Composite settings in `select/`**:
+> Certain predicates in `//build/bazel/config/select/` (such as `is_profile` and `is_coverage`)
+> are not 1:1 scalar flags in `variables:`, but composite `selects.config_setting_group()`
+> targets in `//build/bazel/config/select/is_profile` and `//build/bazel/config/select/is_coverage`
+> that match combinations of toolchain tags (`profile`, `profile-rust`, `coverage`, `coverage-rust`,
+> `coverage-cts`).
 
 > [!NOTE]
 > **Why `variables:<varname>` and `select/<varname>:<value>` are separated**:
@@ -321,10 +334,10 @@ time and must be modeled as Bazel **build settings** evaluated at analysis time.
 >   and rule `attr.label()` dependencies), whereas
 >   `//build/bazel/config/select/<varname>:*` always identifies a
 >   `config_setting()` predicate (used in `select()` blocks).
-> - **Boolean shorthand in `select()`**: Having a dedicated package
->   `//build/bazel/config/select/<varname>` allows defining
+> - **Boolean shorthand in `select()`**: For boolean or presence flags, having a dedicated
+>   package `//build/bazel/config/select/<varname>` allows defining
 >   `alias(name = "<varname>", actual = ":true")`, enabling clean boolean
->   shorthand (`"//build/bazel/config/select/is_profile"`) in `select()`
+>   shorthand (`"//build/bazel/config/select/<varname>"`) in `select()`
 >   dictionaries.
 > - **Minimal file count**: All `build_setting()` flags passed on the command
 >   line are loaded from a single `//build/bazel/config/variables/BUILD.bazel`
@@ -343,41 +356,53 @@ attribute pointing to `//build/bazel/config/variables:<varname>` and indexing
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 
 def _my_rule_impl(ctx):
-    is_profile = ctx.attr._is_profile[BuildSettingInfo].value
+    debuginfo = ctx.attr._debuginfo[BuildSettingInfo].value
     ...
 ```
 
-#### Special Case: GN Toolchain Variant Tags (`//build/bazel/config/toolchain_tags/`)
+#### Special Case: GN Toolchain Variant Features (`//build/bazel/config/variant_features/`)
 
 Many GN `config()` definitions check whether a specific tag string is present in
-`toolchain_variant.tags` (defined in `//build/toolchain/variant_tags.gni`), or
-check `toolchain_variant.instrumented` (which is true whenever `"instrumented"`
-is present in `toolchain_variant.tags`).
+`toolchain_variant.tags` (defined in `//build/toolchain/variant_tags.gni`), check
+`toolchain_variant.instrumented` (true whenever `"instrumented"` is present in
+`toolchain_variant.tags`), or inspect variant configs in
+`toolchain_variant.configs`.
 
-Because there are many such tags and their Bazel definitions follow a uniform
-pattern, they are managed in a dedicated `//build/bazel/config/toolchain_tags/`
-hierarchy generated by `//build/bazel/config/toolchain_tags/update.py` (see
-`//build/bazel/config/toolchain_tags/README.md` for details):
+In Bazel, active build variants are represented by Bazel toolchain
+`feature()`s rather than independent Skylib `build_setting()` targets so
+per-target attributes (such as `features = ["-instrumented"]` or
+`disable_instrumentation`) and Starlark feature transitions share a single
+source of truth with the C++ toolchain, while extending variant selection to
+Rust and any rule or `build_flags()` target using `select()`. They are exposed
+via cycle-free `feature_flag()` targets defined in
+`//build/bazel/config/variant_features/BUILD.bazel` using
+`@fuchsia_rules_common//build_flags:feature_flag.bzl` (which reads Bazel's
+built-in `ctx.features` and `ctx.disabled_features` alongside Fuchsia's custom
+`@fuchsia_rules_common//build_flags:enabled_features` flag; see
+`//build/bazel/config/variant_features/README.md` for the full GN-to-Bazel
+feature mapping, including why ThinLTO is named `"thinlto"` rather than
+Bazel's reserved `"thin_lto"`):
 
-- **`bool_flag()` targets**: Defined in
-  `//build/bazel/config/toolchain_tags/BUILD.bazel` as
-  `//build/bazel/config/toolchain_tags:<tag>` (rather than under
-  `//build/bazel/config/variables`, which is reserved for direct GN variables).
-- **GN flag propagation**: `//build/bazel/config/toolchain_tags/toolchain_tags.gni`
-  is imported by `//build/bazel/config/bazel_args.gni` to pass
-  `--//build/bazel/config/toolchain_tags:<tag>={True,False}` based on
-  `toolchain_variant.tags`.
+- **`feature_flag()` targets**: Defined in
+  `//build/bazel/config/variant_features/BUILD.bazel` as
+  `//build/bazel/config/variant_features:<feature>`
+  (`visibility = ["//:__subpackages__"]`).
+  Unlike built-in `cc_toolchain` feature inspection, `feature_flag()` inspects
+  `ctx.features`, `ctx.disabled_features`, and
+  `@fuchsia_rules_common//build_flags:enabled_features` without depending on
+  `cc_toolchain`, preventing dependency cycles in default build flags.
+- **GN flag propagation**: `//build/bazel/config/bazel_args.gni` inspects
+  `toolchain_variant.tags` and `toolchain_variant.configs` and passes the
+  active feature names via `--@fuchsia_rules_common//build_flags:enabled_features`
+  (working around https://github.com/bazelbuild/bazel/issues/22453 instead of
+  repeating `--features=<name>`).
 - **`config_setting()` predicates for `select()`**: Defined in
-  `//build/bazel/config/toolchain_tags/<tag>/BUILD.bazel` as `:true`, `:false`,
-  and `:<tag>` (alias for `:true`).
-
-For example, a GN check for `toolchain_variant.instrumented` or
-`toolchain_variant.tags` containing `"lto"` maps to
-`//build/bazel/config/toolchain_tags/instrumented:true` and
-`//build/bazel/config/toolchain_tags/lto:true` in `select()` statements. To
-expose additional tags from `//build/toolchain/variant_tags.gni`, update
-`DEFAULT_TAGS_LIST` in `//build/bazel/config/toolchain_tags/update.py` and
-re-run the script.
+  `//build/bazel/config/variant_features/<feature>/BUILD.bazel` as `:true`,
+  `:false`, and `:<feature>` (alias for `:true`), matching against `flag_values`
+  on `//build/bazel/config/variant_features:<feature>`.
+- **Starlark transitions**: Rules that transition variants (such as
+  `transitive_features` via `@fuchsia_rules_common//:transition_utils.bzl`)
+  manipulate `--features` and propagate transitions across the build graph.
 
 ---
 
@@ -419,7 +444,7 @@ load("//build/bazel/config:providers.bzl", "DerivedConfigValueInfo")
 def _use_thinlto_impl(ctx):
     # 1. Read input build_setting values for the current target configuration
     optimize = ctx.attr._optimize[BuildSettingInfo].value
-    is_profile = ctx.attr._is_profile[BuildSettingInfo].value
+    is_instrumented = ctx.attr._is_instrumented[BuildSettingInfo].value
     current_cpu = ctx.attr._current_cpu[BuildSettingInfo].value
     is_host = ctx.attr._is_host[BuildSettingInfo].value
 
@@ -427,7 +452,7 @@ def _use_thinlto_impl(ctx):
     is_supported_cpu = current_cpu in ("x64", "arm64")
     is_lto_opt = optimize in ("size_thinlto", "speed_thinlto")
 
-    computed_value = is_lto_opt and is_supported_cpu and (not is_host) and (not is_profile)
+    computed_value = is_lto_opt and is_supported_cpu and (not is_host) and (not is_instrumented)
 
     # 3. Return the provider
     return [
@@ -441,7 +466,7 @@ use_thinlto_setting = rule(
     implementation = _use_thinlto_impl,
     attrs = {
         "_optimize": attr.label(default = "//build/bazel/config/variables:optimize"),
-        "_is_profile": attr.label(default = "//build/bazel/config/variables:is_profile"),
+        "_is_instrumented": attr.label(default = "//build/bazel/config/variant_features:instrumented"),
         "_current_cpu": attr.label(default = "//build/bazel/config/variables:current_cpu"),
         "_is_host": attr.label(default = "//build/bazel/config/variables:is_host"),
     },
@@ -472,7 +497,7 @@ during analysis.
 > `constraint_value()` (or `alias` targets pointing to them). In turn,
 > `config_setting()` can only match against `build_setting()` labels (via
 > `flag_values`), built-in Bazel flags (via `values`), or platform constraints
-> (via `constraint_values`)—it **cannot** inspect custom providers like
+> (via `constraint_values`)--it **cannot** inspect custom providers like
 > `DerivedConfigValueInfo` returned by ordinary Starlark rules.
 >
 > Consequently, `DerivedConfigValueInfo` targets are intended to be consumed by

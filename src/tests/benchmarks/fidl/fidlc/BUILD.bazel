@@ -13,7 +13,6 @@ load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary"
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
 fx_cc_binary(
     name = "bin",
     testonly = True,
@@ -59,9 +58,7 @@ fx_component(
 
 fx_package(
     name = "fidlc_microbenchmarks",
-    package_name = "fidlc_microbenchmarks",
     testonly = True,
     components = [":fidlc_microbenchmarks_component"],
     visibility = ["//src/tests/benchmarks:__subpackages__"],
 )
-# LINT.ThenChange(//src/tests/benchmarks/fidl/fidlc/BUILD.gn)

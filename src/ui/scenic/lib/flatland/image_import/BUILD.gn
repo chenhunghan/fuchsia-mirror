@@ -1,0 +1,65 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+source_set("image_import") {
+  sources = [
+    "engine_image_importer.h",
+    "image_importer.h",
+    "imported_collection.cc",
+    "imported_collection.h",
+    "imported_image.cc",
+    "imported_image.h",
+  ]
+
+  public_deps = [
+    "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+    "//sdk/fidl/fuchsia.math:fuchsia.math_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+    "//sdk/lib/fit",
+    "//src/ui/scenic/lib/allocation",
+    "//src/ui/scenic/lib/display:types",
+    "//src/ui/scenic/lib/utils",
+    "//zircon/system/ulib/zx",
+  ]
+
+  deps = [
+    "//sdk/lib/syslog/cpp",
+    "//zircon/system/ulib/trace",
+  ]
+}
+
+source_set("impl") {
+  sources = [
+    "image_importer_impl.cc",
+    "image_importer_impl.h",
+    "undisplayed_frame_deferral.cc",
+    "undisplayed_frame_deferral.h",
+  ]
+
+  public_deps = [
+    ":image_import",
+    "//sdk/lib/async:async-cpp",
+    "//sdk/lib/async-loop:async-loop-cpp",
+    "//sdk/lib/fit-promise",
+    "//src/lib/fxl",
+    "//src/ui/scenic/lib/display/coordinator_proxy",
+    "//src/ui/scenic/lib/flatland/renderer",
+    "//src/ui/scenic/lib/scheduling:duration_predictors",
+    "//zircon/system/ulib/inspect",
+  ]
+
+  deps = [
+    "//sdk/lib/scheduler/cpp",
+    "//sdk/lib/syslog/cpp",
+    "//src/ui/scenic/lib/display",
+    "//zircon/system/ulib/trace",
+  ]
+}
+
+source_set("testing") {
+  testonly = true
+  public = [ "testing/image_import_test_peer.h" ]
+
+  public_deps = [ ":image_import" ]
+}

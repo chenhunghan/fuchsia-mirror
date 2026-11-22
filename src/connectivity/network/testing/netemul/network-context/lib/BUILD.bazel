@@ -1,0 +1,93 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "network_service",
+    srcs = [
+        "endpoint.cc",
+        "endpoint_manager.cc",
+        "fake_endpoint.cc",
+        "netdump.cc",
+        "network.cc",
+        "network_context.cc",
+        "network_manager.cc",
+    ],
+    hdrs = [
+        "consumer.h",
+        "endpoint.h",
+        "endpoint_manager.h",
+        "fake_endpoint.h",
+        "interceptors/interceptor.h",
+        "interceptors/latency.h",
+        "interceptors/packet_loss.h",
+        "interceptors/reorder.h",
+        "netdump.h",
+        "netdump_types.h",
+        "network.h",
+        "network_context.h",
+        "network_manager.h",
+    ],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.driver.test:fuchsia.driver.test_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/device-watcher/cpp",
+        "//sdk/lib/fdio",
+        "//src/lib/fostr",
+        "//zircon/system/ulib/fbl",
+    ],
+    visibility = ["//src/connectivity/network/testing/netemul/network-context:__pkg__"],
+    deps = [
+        "//sdk/fidl/fuchsia.net.tun:fuchsia.net.tun_hlcpp",
+        # Included by public headers (interceptors/{latency,reorder}.h,
+        # endpoint.h, and consumer.h).
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-default",
+        "//sdk/lib/fit",
+        "//sdk/lib/stdcompat",
+        "//sdk/lib/syslog/cpp",
+        "//src/connectivity/network/testing/netemul/network-context/fidl:network_hlcpp",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "network_test_bin",
+    srcs = [
+        "interceptors/interceptors_unittest.cc",
+        "netdump_parser.cc",
+        "netdump_parser.h",
+        "netdump_unittest.cc",
+        "network_service_unittest.cc",
+    ],
+    deps = [
+        ":network_service",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_cpp_hlcpp_conversion",
+        "//sdk/lib/fdio-caller",
+        "//sdk/lib/sys/cpp",
+        "//src/connectivity/lib/network-device/cpp",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/lib/testing/predicates",
+        "//zircon/system/ulib/fzl",
+    ],
+)
+
+fx_packaged_binary(
+    name = "network_test_bin_packaged",
+    testonly = True,
+    binary = ":network_test_bin",
+    binary_name = "network_test",
+    visibility = ["//src/connectivity/network/testing/netemul/network-context:__pkg__"],
+)

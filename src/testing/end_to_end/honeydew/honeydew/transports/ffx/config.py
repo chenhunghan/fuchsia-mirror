@@ -44,7 +44,6 @@ class FfxConfigData:
             protocol driver.
         usb_driver_autostart: Whether to start the USB protocol driver if it
             isn't running.
-        emu_instance_dir: Directory where emulators are stored.
         ssh_private_keys: List of SSH private keys for connection.
         ssh_public_keys: List of SSH public keys for connection.
         ssh_auth_sock: Path to SSH authentication socket for connection.
@@ -61,7 +60,6 @@ class FfxConfigData:
     enable_usb: bool
     usb_socket_path: str | None
     usb_driver_autostart: bool
-    emu_instance_dir: str | None
     ssh_private_keys: list[str] | None
     ssh_public_keys: list[str] | None
     ssh_auth_sock: str | None = None
@@ -79,7 +77,6 @@ class FfxConfigData:
             f"enable_usb={self.enable_usb}, "
             f"usb_socket_path={self.usb_socket_path}, "
             f"usb_driver_autostart={self.usb_driver_autostart}, "
-            f"emu_instance_dir={self.emu_instance_dir}, "
             f"ssh_private_keys={self.ssh_private_keys}, "
             f"ssh_public_keys={self.ssh_public_keys}, "
             f"ssh_auth_sock={self.ssh_auth_sock}, "
@@ -87,11 +84,12 @@ class FfxConfigData:
             f"shared_data={self.shared_data}, "
         )
 
-    def get_config_args(self) -> list[str]:
-        """Returns the FFX command arguments to set the configuration.
+    def get_config_dict(self) -> dict[str, Any]:
+        """Returns the hierarchical FFX configuration dictionary.
 
         Returns:
-            List of FFX command arguments.
+            Nested configuration dictionary suitable for `ffx --strict -c`
+            and `fuchsia_controller.Context.strict`.
         """
 
         def set_nested(d: dict[str, Any], key_path: str, value: Any) -> None:
@@ -120,7 +118,6 @@ class FfxConfigData:
             "connectivity.enable_usb": self.enable_usb,
             "connectivity.usb_driver_autostart": self.usb_driver_autostart,
             "connectivity.usb_socket_path": self.usb_socket_path,
-            "emu.instance_dir": self.emu_instance_dir,
             "ssh.priv": self.ssh_private_keys,
             "ssh.pub": self.ssh_public_keys,
             "ssh.auth-sock": self.ssh_auth_sock,
@@ -131,7 +128,15 @@ class FfxConfigData:
             if value is not None:
                 set_nested(config_dict, key_path, value)
 
-        return ["-c", json.dumps(config_dict)]
+        return config_dict
+
+    def get_config_args(self) -> list[str]:
+        """Returns the FFX command arguments to set the configuration.
+
+        Returns:
+            List of FFX command arguments.
+        """
+        return ["-c", json.dumps(self.get_config_dict())]
 
 
 class FfxConfig:
@@ -152,7 +157,6 @@ class FfxConfig:
         ssh_keepalive_timeout: int | None = None,
         usb_socket_path: str | None = None,
         usb_driver_autostart: bool = True,
-        emu_instance_dir: str | None = None,
         ssh_private_keys: list[str] | None = None,
         ssh_public_keys: list[str] | None = None,
         ssh_auth_sock: str | None = None,
@@ -178,10 +182,6 @@ class FfxConfig:
             ssh_keepalive_timeout: SSH keep-alive timeout in secs.
                 Default value is None which means, it will not update
                 ssh_keepalive_timeout.
-            emu_instance_dir: Directory where emulators are stored.
-                If None, checks FUCHSIA_FFX_EMU_INSTANCE_DIR, candidate
-                directories relative to shared_data and ambient host data,
-                and falls back to <logs_dir>/emu.
             usb_socket_path: Path to socket used to communicate with the USB
                 protocol driver.
             usb_driver_autostart: Whether to start the USB protocol driver if it
@@ -219,9 +219,6 @@ class FfxConfig:
 
         self._shared_data: str = self._resolve_shared_data(
             shared_data, logs_dir
-        )
-        self._emu_instance_dir: str | None = self._resolve_emu_instance_dir(
-            emu_instance_dir, self._shared_data, logs_dir
         )
 
         self._ssh_auth_sock: str | None = (
@@ -320,35 +317,6 @@ class FfxConfig:
 
         return resolved_shared_data
 
-    def _resolve_emu_instance_dir(
-        self,
-        emu_instance_dir: str | None,
-        shared_data: str,
-        logs_dir: str,
-    ) -> str:
-        """Resolves the emu_instance_dir directory."""
-        resolved_emu_instance_dir: str | None = (
-            emu_instance_dir
-            if emu_instance_dir
-            else os.environ.get("FUCHSIA_FFX_EMU_INSTANCE_DIR") or None
-        )
-        if not resolved_emu_instance_dir:
-            data_home = os.environ.get("XDG_DATA_HOME") or os.path.expanduser(
-                "~/.local/share"
-            )
-            candidates: list[str] = [
-                os.path.join(shared_data, "emu", "instances"),
-                os.path.join(os.path.dirname(shared_data), "emu", "instances"),
-                os.path.join(data_home, "Fuchsia", "ffx", "emu", "instances"),
-            ]
-            for candidate in candidates:
-                if os.path.exists(candidate):
-                    resolved_emu_instance_dir = candidate
-                    break
-            if not resolved_emu_instance_dir:
-                resolved_emu_instance_dir = os.path.join(logs_dir, "emu")
-        return resolved_emu_instance_dir
-
     def close(self) -> None:
         """Clean up method.
 
@@ -382,7 +350,6 @@ class FfxConfig:
             enable_usb=self._enable_usb,
             usb_socket_path=self._usb_socket_path,
             usb_driver_autostart=self._usb_driver_autostart,
-            emu_instance_dir=self._emu_instance_dir,
             ssh_private_keys=self._ssh_private_keys,
             ssh_public_keys=self._ssh_public_keys,
             ssh_auth_sock=self._ssh_auth_sock,

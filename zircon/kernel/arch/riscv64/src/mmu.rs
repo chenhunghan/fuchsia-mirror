@@ -14,8 +14,10 @@ use super::vm::is_kernel_address;
 use super::{KERNEL_ASPACE_BASE, KERNEL_ASPACE_SIZE};
 use crate::counters;
 use crate::kernel::types::PAddr;
+use crate::top::handoff::{KernelPhysicalAddressOf, physmap_base, physmap_size};
 use crate::vm::arch_vm_aspace::*;
 use crate::vm::page::VmPageDoublyLinkedList;
+use crate::vm::physmap::is_physmap_phys_addr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use debug::dprintf;
 use ksync::lock;
@@ -58,14 +60,14 @@ counters::define_kcounter!(
 
 // Architectural Page Table and Virtual Memory dimensions.
 // This code is currently set up to handle Sv39 only.
-const PAGE_MASK: usize = page::SIZE - 1;
+const PAGE_MASK: usize = page::MASK;
 
-const NUM_PAGE_TABLE_LEVELS: usize = 3;
-const PAGE_TABLE_LEVEL_SHIFT: usize = 9;
-const NUM_PAGE_TABLE_ENTRIES: usize = 1 << PAGE_TABLE_LEVEL_SHIFT; // 512 entries per page table
+const NUM_PAGE_TABLE_LEVELS: usize = page::NUM_TABLE_LEVELS;
+zr::static_assert!(NUM_PAGE_TABLE_LEVELS == 3);
+const PAGE_TABLE_LEVEL_SHIFT: usize = page::TABLE_LEVEL_SHIFT;
+const NUM_PAGE_TABLE_ENTRIES: usize = page::NUM_TABLE_ENTRIES;
 
-const VIRTUAL_ADDRESS_SIZE: usize = 39;
-const VIRTUAL_ADDRESS_MASK: usize = (1usize << VIRTUAL_ADDRESS_SIZE) - 1;
+const VIRTUAL_ADDRESS_MASK: usize = page::VIRTUAL_ADDRESS_MASK;
 
 // Constants to assist indexing into the top portion of the kernel top level page table.
 const MMU_PT_KERNEL_BASE_INDEX: usize = NUM_PAGE_TABLE_ENTRIES / 2; // 256
@@ -469,14 +471,6 @@ fn riscv64_current_asid() -> u16 {
     Satp::read().asid()
 }
 
-// C FFI imports
-
-unsafe extern "C" {
-    fn cpp_kernel_physical_address_of(va: usize) -> u64;
-    static gPhysmapBase: usize;
-    static gPhysmapSize: usize;
-}
-
 /// Marks `paddr`'s page accessed, returning whether it has a `vm_page_t` at all.
 ///
 /// Mappings for physical VMOs do not, and so have no accessed state to update --
@@ -502,18 +496,38 @@ fn free_page_table_page(paddr: u64) {
     }
 }
 
+// `gPhysmapBase` and `gPhysmapSize` are set once during handoff, before any of this code runs.
 #[inline(always)]
 fn paddr_to_physmap(pa: u64) -> *mut u8 {
-    // SAFETY: `gPhysmapBase` is a C++ global fixed before any of this code runs, and
-    // the arithmetic only forms an address without accessing memory.
-    unsafe { (gPhysmapBase + (pa as usize)) as *mut u8 }
+    debug_assert!((pa as usize) < physmap_size());
+    core::ptr::with_exposed_provenance_mut(physmap_base().wrapping_add(pa as usize))
 }
 
 #[inline(always)]
 fn physmap_to_paddr(ptr: *const u8) -> u64 {
-    // SAFETY: `gPhysmapBase` is a C++ global fixed before any of this code runs, and
-    // the arithmetic only forms an address without accessing memory.
-    unsafe { (ptr as usize - gPhysmapBase) as u64 }
+    (ptr.addr() - physmap_base()) as u64
+}
+
+/// Returns true if the physical page at `pa` is mapped in the kernel physmap.
+///
+/// Only RAM is mapped into the physmap, so a non-RAM page -- device MMIO, a
+/// reserved firmware region, or anything above the end of RAM -- has no physmap
+/// alias even when `pa` is below `physmap_size()`.  The walk reads the kernel
+/// translation table without its lock: the physmap is built by physboot before
+/// the kernel runs and never changes afterwards.
+fn is_physmap_page_mapped(pa: u64) -> bool {
+    if !is_physmap_phys_addr(PAddr(pa as usize)) {
+        return false;
+    }
+    // SAFETY: taking the address of `KERNEL_TRANSLATION_TABLE` accesses nothing.
+    let kernel_table = unsafe { core::ptr::addr_of!(KERNEL_TRANSLATION_TABLE.0) as *const Pte };
+    query_page_table(
+        kernel_table,
+        KERNEL_ASPACE_BASE,
+        KERNEL_ASPACE_SIZE,
+        paddr_to_physmap(pa).addr(),
+    )
+    .is_ok()
 }
 
 /// Argument to SfenceVma.  Used to perform TLB invalidation on an optional range
@@ -1024,9 +1038,8 @@ pub(crate) fn riscv64_mmu_early_init() {
             MMU_PT_KERNEL_ENTRIES,
         );
 
-        KERNEL_TRANSLATION_TABLE_PHYS.init(cpp_kernel_physical_address_of(core::ptr::addr_of!(
-            KERNEL_TRANSLATION_TABLE.0
-        ) as usize));
+        KERNEL_TRANSLATION_TABLE_PHYS
+            .init(KernelPhysicalAddressOf((&raw const KERNEL_TRANSLATION_TABLE).addr()) as u64);
     }
 
     // Make sure it's visible to the cpu.
@@ -1091,11 +1104,8 @@ pub(crate) fn riscv64_mmu_init() {
 
 /// Returns the physical address of the bootstrap translation table for secondary CPU boot.
 fn riscv64_get_bootstrap_translation_table() -> u64 {
-    // SAFETY: taking the address of `BOOTSTRAP_TRANSLATION_TABLE` accesses nothing. The table is a
-    // kernel-lifetime static, mutated only during early MMU init before secondaries run.
-    unsafe {
-        cpp_kernel_physical_address_of(core::ptr::addr_of!(BOOTSTRAP_TRANSLATION_TABLE.0) as usize)
-    }
+    let va = (&raw const BOOTSTRAP_TRANSLATION_TABLE).addr();
+    KernelPhysicalAddressOf(va) as u64
 }
 
 /// Finds the index of the first valid entry in a page table.
@@ -2316,7 +2326,14 @@ unsafe fn aspace_map_contiguous(
 
     if (mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) != 0 {
         let mut cache_cm = VmICacheConsistencyManager::new();
-        cache_cm.sync_addr(paddr_to_physmap(paddr) as usize, count * page::SIZE);
+        for idx in 0..count {
+            let page_paddr = paddr.wrapping_add(idx.wrapping_mul(page::SIZE) as u64);
+            // Ignore non-physmap pages, such as device MMIO or reserved firmware
+            // regions: they have no kernel virtual address to clean through.
+            if is_physmap_page_mapped(page_paddr) {
+                cache_cm.sync_addr(paddr_to_physmap(page_paddr) as usize, page::SIZE);
+            }
+        }
     }
 
     // SAFETY: `top_table` was null-checked above and is the root translation table
@@ -2379,7 +2396,11 @@ unsafe fn aspace_map(
     if (mmu_flags & ARCH_MMU_FLAG_PERM_EXECUTE) != 0 {
         let mut cache_cm = VmICacheConsistencyManager::new();
         for &pa in phys {
-            cache_cm.sync_addr(paddr_to_physmap(pa) as usize, page::SIZE);
+            // Ignore non-physmap pages, such as device MMIO or reserved firmware
+            // regions: they have no kernel virtual address to clean through.
+            if is_physmap_page_mapped(pa) {
+                cache_cm.sync_addr(paddr_to_physmap(pa) as usize, page::SIZE);
+            }
         }
     }
 
@@ -2474,7 +2495,8 @@ unsafe fn aspace_protect(
         // page is queried for its physical address and synced through the physmap.
         // Only pages that are not yet executable need it.  This could be folded
         // into protect_pages(), but making an existing region executable is rare,
-        // so keep it simple.
+        // so keep it simple.  Pages outside the physmap (device MMIO, reserved
+        // firmware) have no alias to clean and are skipped.
         VM_MMU_PROTECT_MAKE_EXECUTE_CALLS.add(1);
         let mut cache_cm = VmICacheConsistencyManager::new();
         let mut pages_synced = 0i64;
@@ -2483,6 +2505,7 @@ unsafe fn aspace_protect(
             if let Ok((pa, flags)) =
                 query_page_table(top_table, aspace.base(), aspace.size(), page_va)
                 && (flags & ARCH_MMU_FLAG_PERM_EXECUTE) == 0
+                && is_physmap_page_mapped(pa)
             {
                 cache_cm.sync_addr(paddr_to_physmap(pa) as usize, page::SIZE);
                 pages_synced += 1;
@@ -2903,8 +2926,7 @@ impl Riscv64ArchVmAspace {
             }
         };
 
-        // SAFETY: `gPhysmapSize` is a C++ global initialized before MMU operations run.
-        debug_assert!((paddr as usize) < unsafe { gPhysmapSize });
+        debug_assert!((paddr as usize) < physmap_size());
 
         // Upstream `AllocPageTable()` does both of these.  The count is what lets
         // teardown tell whether the address space handed every page table back.
@@ -3407,7 +3429,7 @@ pub unsafe extern "C" fn rust_riscv64_aspace_pick_spot(
     aspace.canary.assert();
     // riscv64 places no architectural constraint on where a mapping may go, so
     // the bottom of the gap the caller found is always acceptable.  The caller
-    // (VmAddressRegion::AllocSpotLockedRegion) treats anything outside the gap as
+    // (VmAddressRegion::alloc_spot_locked_region) treats anything outside the gap as
     // an allocation failure and panics, so this must return a usable address.
     (base + page::SIZE - 1) & !PAGE_MASK
 }
@@ -3883,5 +3905,103 @@ mod tests {
                 crate::vm::pmm::free_page(page1);
             }
         }
+    }
+
+    /// Test executable mappings of pages without a physmap alias.
+    #[test]
+    fn test_non_physmap_exec() {
+        // Device MMIO, reserved firmware regions and anything past the end of RAM have no
+        // physmap alias, so mapping them executable must not clean the cache through one.
+        const VA: usize = 1usize << 30;
+        const RX_FLAGS: u8 = ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_EXECUTE;
+        const RO_FLAGS: u8 = ARCH_MMU_FLAG_PERM_READ;
+
+        // RAM is in the physmap; the first page past the end of RAM is not.
+        let (ram_page, ram_pa) = crate::vm::pmm::alloc_page(0).expect("pmm::alloc_page failed");
+        let ram_pa_mapped = is_physmap_page_mapped(ram_pa.0 as u64);
+        // SAFETY: `ram_page` was allocated above, never mapped, and is freed exactly once.
+        unsafe { crate::vm::pmm::free_page(ram_page) };
+        assert_true!(ram_pa_mapped);
+        let beyond_ram_pa = page::round_up(physmap_size()) as u64;
+        assert_false!(is_physmap_page_mapped(beyond_ram_pa));
+
+        // Below the end of RAM but not RAM (e.g. the MMIO below RAM on QEMU virt) exercises
+        // the page-table walk rather than the range check. Not every board has such a hole,
+        // so this candidate is optional.
+        let hole_pa = (0..physmap_size())
+            .step_by(page_size_per_level(1))
+            .map(|pa| pa as u64)
+            .find(|&pa| !is_physmap_page_mapped(pa));
+
+        let mut storage = core::mem::MaybeUninit::<Riscv64ArchVmAspace>::uninit();
+        let ptr = storage.as_mut_ptr();
+        // SAFETY: `ptr` points to aligned stack storage that stays pinned in `storage` until
+        // `rust_riscv64_aspace_destruct` drops it below.
+        unsafe {
+            rust_riscv64_aspace_construct(
+                ptr,
+                USER_ASPACE_BASE,
+                USER_ASPACE_SIZE,
+                AspaceType::User,
+                None,
+            );
+        }
+        // SAFETY: `ptr` was just constructed above and is never switched onto any hart.
+        assert_ok!(unsafe { rust_riscv64_aspace_init(ptr) });
+
+        for pa in core::iter::once(beyond_ram_pa).chain(hole_pa) {
+            let paddrs = [pa];
+            // SAFETY: `ptr` is initialized and never switched onto a hart, so nothing
+            // dereferences `pa`; `paddrs` holds one page-aligned address.
+            expect_ok!(unsafe {
+                rust_riscv64_aspace_map(
+                    ptr,
+                    VA,
+                    paddrs.as_ptr(),
+                    paddrs.len(),
+                    RX_FLAGS,
+                    ExistingEntryAction::Error,
+                )
+            });
+            let mut query_pa = 0u64;
+            let mut query_flags = 0u8;
+            // SAFETY: `ptr` is live; the out-pointers reference locals.
+            expect_ok!(unsafe {
+                rust_riscv64_aspace_query(ptr, VA, &mut query_pa, &mut query_flags)
+            });
+            expect_eq!(pa, query_pa);
+            expect_eq!(RX_FLAGS, query_flags & ARCH_MMU_FLAG_PERM_RWX_MASK);
+            // SAFETY: `ptr` is local and inactive.
+            expect_ok!(unsafe { rust_riscv64_aspace_unmap(ptr, VA, 1, ARCH_UNMAP_OPTION_NONE) });
+
+            // SAFETY: as above; `pa` is page aligned and nothing dereferences it.
+            expect_ok!(unsafe { rust_riscv64_aspace_map_contiguous(ptr, VA, pa, 1, RX_FLAGS) });
+            // SAFETY: `ptr` is local and inactive.
+            expect_ok!(unsafe { rust_riscv64_aspace_unmap(ptr, VA, 1, ARCH_UNMAP_OPTION_NONE) });
+
+            // Read-only first, then upgrade, so protect finds populated non-executable PTEs.
+            // SAFETY: as above.
+            expect_ok!(unsafe {
+                rust_riscv64_aspace_map(
+                    ptr,
+                    VA,
+                    paddrs.as_ptr(),
+                    paddrs.len(),
+                    RO_FLAGS,
+                    ExistingEntryAction::Error,
+                )
+            });
+            // SAFETY: `ptr` is local and inactive.
+            expect_ok!(unsafe {
+                rust_riscv64_aspace_protect(ptr, VA, 1, RX_FLAGS, ARCH_UNMAP_OPTION_NONE)
+            });
+            // SAFETY: `ptr` is local and inactive.
+            expect_ok!(unsafe { rust_riscv64_aspace_unmap(ptr, VA, 1, ARCH_UNMAP_OPTION_NONE) });
+        }
+
+        // SAFETY: `ptr` is local and inactive with everything unmapped.
+        expect_ok!(unsafe { rust_riscv64_aspace_destroy(ptr) });
+        // SAFETY: `ptr` was constructed above, is destroyed, and is dropped exactly once.
+        unsafe { rust_riscv64_aspace_destruct(ptr) };
     }
 }

@@ -27,13 +27,19 @@ set -euo pipefail
 #    `expanded_empty_test_suite` requiring a human-review dispute so a human
 #    verifies all relevant tests were included (agents must not resolve that
 #    comment).
+# 5. upward_bazel_test_suite_ref: a descendant BUILD.gn newly depends on an
+#    ancestor package's bazel_test_suite() instead of bubbling tests up.
+# 6. fuchsia_target_in_host_test_suite: a host-constrained or host-built
+#    test_suite() includes a target that is or transitively pulls in a
+#    Fuchsia-only target.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-$TARGET_DIR}"
-CHANGE_BASE="${PLANTER_CHANGE_BASE:-HEAD}"
+CHANGE_BASE="${PLANTER_RESOLVED_CHANGE_BASE:-${PLANTER_CHANGE_BASE:-HEAD}}"
 
-python3 - "$WORKDIR" "$TARGET_DIRS" "$CHANGE_BASE" <<'PYEOF'
+python3 - "$WORKDIR" "$TARGET_DIRS" "$CHANGE_BASE" "$SCRIPT_DIR" <<'PYEOF'
 import ast
 import json
 import os
@@ -41,14 +47,13 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, sys.argv[4])
+import planter_check_lib as pcl
+
 workdir = os.path.abspath(sys.argv[1])
 raw_dirs = sys.argv[2]
 change_base = sys.argv[3].strip() or "HEAD"
-target_dirs = [
-    d.strip().strip("/")
-    for d in re.split(r"[\s,]+", raw_dirs)
-    if d.strip().strip("/")
-]
+target_dirs = pcl.parse_target_dirs(raw_dirs, workdir)
 
 UMBRELLA_ANCESTORS = {"", "src", "sdk", "build", "third_party", "zircon"}
 SENTINEL_RE = re.compile(
@@ -93,54 +98,10 @@ def is_ancestor(anc, desc):
     )
 
 
+# Delegate change-base resolution to planter_check_lib so stacked prerequisite commits
+# on child subpackages are not conflated with the parent package's migration diff.
 def resolve_effective_diff_base():
-    head_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
-    parent_sha = git_out(["rev-parse", "--verify", "--quiet", "HEAD~1^{commit}"])
-    origin_main = git_out(
-        ["rev-parse", "--verify", "--quiet", "origin/main^{commit}"]
-    )
-    base_sha = git_out(
-        ["rev-parse", "--verify", "--quiet", f"{change_base}^{{commit}}"]
-    )
-    merge_base = (
-        git_out(["merge-base", origin_main, head_sha])
-        if (origin_main and head_sha)
-        else ""
-    )
-    head_on_origin = bool(
-        origin_main and head_sha and is_ancestor(head_sha, origin_main)
-    )
-    wt_files = git_lines(["diff", "--name-only", "HEAD"]) + git_lines(
-        ["ls-files", "--others", "--exclude-standard"]
-    )
-    head_files = (
-        git_lines(["diff", "--name-only", "HEAD~1", "HEAD"])
-        if parent_sha
-        else []
-    )
-    head_touches_target = bool(target_dirs) and any(
-        any(p.startswith(td + "/") for td in target_dirs) for p in head_files
-    )
-    if (
-        base_sha
-        and merge_base
-        and base_sha != merge_base
-        and is_ancestor(base_sha, merge_base)
-    ):
-        return merge_base
-    if parent_sha and (
-        not base_sha
-        or (
-            change_base == "HEAD"
-            and base_sha == head_sha
-            and not head_on_origin
-            and not wt_files
-            and head_touches_target
-        )
-        or not is_ancestor(base_sha, head_sha)
-    ):
-        return merge_base or "HEAD~1"
-    return change_base
+    return pcl.resolve_change_base(workdir, change_base, target_dirs=target_dirs)
 
 
 effective_base = resolve_effective_diff_base()
@@ -157,7 +118,7 @@ def read_worktree_file(rel_path):
 def read_base_file(rel_path):
     refs = [effective_base]
     if effective_base == "HEAD":
-        refs = ["HEAD~1", "HEAD"]
+        refs = ["HEAD", "HEAD~1"]
     for ref in refs:
         if not ref:
             continue
@@ -237,6 +198,7 @@ HOST_TEST_RULES = {
     "host_cc_test",
     "host_py_test",
     "host_shac_test",
+    "golden_test",
     "py_test",
     "sh_test",
 }
@@ -250,6 +212,22 @@ TARGET_TEST_RULES = {
     "rust_test",
     "cc_test",
     "go_test",
+}
+FUCHSIA_ONLY_RULES = {
+    "fx_test",
+    "fx_unittest_package",
+    "fuchsia_unittest_package",
+    "fuchsia_test_package",
+    "fx_test_package",
+    "fuchsia_package",
+    "fx_package",
+    "fx_test_component",
+    "fuchsia_test_component",
+    "fuchsia_component",
+    "fx_unittest_component",
+    "fx_packaged_binary",
+    "fx_test_component_with_expectations",
+    "fx_component_manifest_with_expectations",
 }
 PACKAGING_HELPER_RULES = {
     "fx_unittest_package",
@@ -295,6 +273,17 @@ def _has_host_constraints(kws):
     )
 
 
+def _has_fuchsia_constraints(kws):
+    tcw = kws.get("target_compatible_with")
+    if tcw is None:
+        return False
+    try:
+        src = ast.unparse(tcw)
+    except Exception:
+        src = ""
+    return "@platforms//os:fuchsia" in src
+
+
 def _extract_local_refs(node):
     if node is None:
         return []
@@ -320,6 +309,9 @@ def parse_bazel_file_info(src_text, rel_path=""):
         "target_tests": set(),
         "host_tests": set(),
         "all_targets": set(),
+        "fuchsia_only_targets": set(),
+        "host_group_refs": {},
+        "group_refs": {},
     }
     if not src_text.strip():
         return info
@@ -350,6 +342,15 @@ def parse_bazel_file_info(src_text, rel_path=""):
         t_name = name_node.value
         info["all_targets"].add(t_name)
         lineno = getattr(node, "lineno", 1)
+        if fn in FUCHSIA_ONLY_RULES or _has_fuchsia_constraints(kws):
+            info["fuchsia_only_targets"].add(t_name)
+        if fn in ("filegroup", "build_for_host", "test_suite"):
+            grp_lbls = []
+            for attr_nm in ("srcs", "deps", "tests"):
+                grp_lbls.extend(list_strings(kws.get(attr_nm)))
+            info["group_refs"][t_name] = (lineno, grp_lbls)
+            if fn == "build_for_host" or _has_host_constraints(kws):
+                info["host_group_refs"][t_name] = (lineno, grp_lbls)
         if fn in PACKAGING_HELPER_RULES:
             for attr_nm in PACKAGING_DEP_ATTRS:
                 for ref_nm in _extract_local_refs(kws.get(attr_nm)):
@@ -398,6 +399,25 @@ def parse_bazel_file_info(src_text, rel_path=""):
                 info["host_tests"].add(ut_target)
     info["target_tests"] -= wrapped_local_targets
     info["host_tests"] -= wrapped_local_targets
+    # Suites no longer carry HOST_OS_CONSTRAINTS, so also treat a suite as a
+    # host suite when it only lists host tests. Skip this in packages that also
+    # define device tests, where a suite listing only host tests is more
+    # likely a device suite that's missing its device tests.
+    for s_name, (_, tests_val) in info["suites"].items():
+        if (
+            not info["suite_host"].get(s_name)
+            and tests_val
+            and not info["target_tests"]
+        ):
+            if all(
+                (lbl.startswith(":") and lbl[1:] in info["host_tests"])
+                or (":" not in lbl and "/" not in lbl and lbl in info["host_tests"])
+                or lbl.endswith(":host_tests")
+                for lbl in tests_val
+            ):
+                info["suite_host"][s_name] = True
+        if info["suite_host"].get(s_name) and s_name in info["group_refs"]:
+            info["host_group_refs"][s_name] = info["group_refs"][s_name]
     return info
 
 
@@ -462,8 +482,19 @@ def parse_gn_bazel_test_suites(gn_text):
 # --- Aggregation test_suite() and group("tests") discovery ---
 
 
+def is_rules_build_only_suite(pkg, s_name):
+    """Return True when `//pkg:s_name` is a build-only rules suite not exported to GN."""
+    vis = bazel_info_of(pkg)["suite_vis"].get(s_name)
+    if not vis or not all(v.startswith("//build/bazel/") for v in vis):
+        return False
+    base_gn_txt = gn_code(read_base_file(os.path.join(pkg, "BUILD.gn")))
+    return not bool(SUITE_RE.search(base_gn_txt))
+
+
 def has_aggregation_bazel_suite(pkg):
-    for _, members in bazel_suites_of(pkg).values():
+    for s_name, (_, members) in bazel_suites_of(pkg).items():
+        if is_rules_build_only_suite(pkg, s_name):
+            continue
         for lbl in members or []:
             sp = split_label(lbl, pkg)
             if sp and sp[0] != pkg:
@@ -626,8 +657,8 @@ def check_per_package_bazel_test_suite(gn_rel):
                         f"reviewer which aggregation `test_suite()` (or where a new "
                         f"one, with a `bazel_test_suite()` in that directory's "
                         f"`BUILD.gn`, should be added if none exists) the package's "
-                        f"`test_suite()`(s) should be added to, suggesting asking the "
-                        f"Build team if they do not know."
+                        f"`test_suite()`(s) should be added to, suggesting asking a "
+                        f"member of //build/bazel/BAZEL_OWNERS if they do not know."
                     )
                 findings.append({
                     "source": "test_suite_layout",
@@ -747,7 +778,7 @@ def check_bazel_test_suite_only_build_gn(gn_rel):
             f"(or where a new one, with a `bazel_test_suite()` in that "
             f"directory's `BUILD.gn`, should be added if none exists) the "
             f"package's `test_suite()`(s) should be added to, suggesting "
-            f"asking the Build team if they do not know."
+            f"asking a member of //build/bazel/BAZEL_OWNERS if they do not know."
         )
     findings.append({
         "source": "test_suite_layout",
@@ -1173,12 +1204,191 @@ def check_implicit_test_suite(bz_rel):
                 })
 
 
+# --- Check 5: upward_bazel_test_suite_ref ---
+# Test aggregation flows upward only: an ancestor area's group("tests") reaches
+# its own bazel_test_suite(). A descendant BUILD.gn that newly depends on an
+# ancestor package's bazel_test_suite() inverts that flow.
+
+GN_LABEL_RE = re.compile(r'"(//[^":]*:[^"]+)"')
+
+
+def added_gn_labels(gn_rel):
+    base_labels = set(GN_LABEL_RE.findall(gn_code(read_base_file(gn_rel))))
+    code = gn_code(read_worktree_file(gn_rel))
+    for m in GN_LABEL_RE.finditer(code):
+        if m.group(1) not in base_labels:
+            yield m.group(1), code.count("\n", 0, m.start()) + 1
+
+
+def check_upward_bazel_test_suite_ref(gn_rel):
+    pkg_dir = os.path.dirname(gn_rel)
+    for lbl, lineno in added_gn_labels(gn_rel):
+        sp = split_label(lbl, pkg_dir)
+        if not sp:
+            continue
+        anc_pkg, s_name = sp
+        if not pkg_dir.startswith(anc_pkg + "/") and anc_pkg != "":
+            continue
+        anc_gn = read_worktree_file(os.path.join(anc_pkg, "BUILD.gn"))
+        if s_name not in parse_gn_bazel_test_suites(anc_gn):
+            continue
+        msg = (
+            f"'{gn_rel}' adds a dep on `{lbl}`, a `bazel_test_suite()` in ancestor "
+            f"package `{anc_pkg}`. Tests must bubble up to an area aggregation, "
+            f"not be pulled back down by a descendant `group(\"tests\")`."
+        )
+        rem = (
+            f"Remove `{lbl}` from '{gn_rel}'; the ancestor's own `group(\"tests\")` "
+            f"already reaches it. Add each migrated package's `test_suite()` to the "
+            f"nearest area aggregation `test_suite()` (the closest ancestor "
+            f"`BUILD.bazel` within the same library/subsystem, exposed by a "
+            f"`bazel_test_suite()` in that directory's `BUILD.gn`), not a distant "
+            f"umbrella suite. If no area aggregation exists yet, do not invent one: "
+            f"ask the reviewer via `CoderReport.disputed_findings` whether to add "
+            f"one in the subsystem root or use the existing umbrella suite."
+        )
+        findings.append({
+            "source": "test_suite_layout",
+            "category": "upward_bazel_test_suite_ref",
+            "severity": "error",
+            "file": gn_rel,
+            "line": lineno,
+            "message": msg,
+            "remediation": rem,
+        })
+
+
+# --- Check 6: fuchsia_target_in_host_test_suite ---
+
+_host_built_targets_cache = None
+
+
+def host_built_targets():
+    """Return {(pkg, target_name): host_entry_label} for targets built in host configuration."""
+    global _host_built_targets_cache
+    if _host_built_targets_cache is not None:
+        return _host_built_targets_cache
+    out = {}
+    seed_pkgs = ["build/bazel/rules/tests"]
+    queue = []
+    for s_pkg in seed_pkgs:
+        info = bazel_info_of(s_pkg)
+        for g_name, (_, lbls) in info["host_group_refs"].items():
+            entry_lbl = f"//{s_pkg}:{g_name}"
+            out[(s_pkg, g_name)] = entry_lbl
+            for lbl in lbls:
+                sp = split_label(lbl, s_pkg)
+                if sp and sp not in out:
+                    out[sp] = entry_lbl
+                    queue.append((sp[0], sp[1], entry_lbl))
+    while queue:
+        cur_pkg, cur_name, entry_lbl = queue.pop(0)
+        cur_info = bazel_info_of(cur_pkg)
+        _, grp_lbls = cur_info["group_refs"].get(cur_name, (0, []))
+        for lbl in grp_lbls:
+            sp = split_label(lbl, cur_pkg)
+            if sp and sp not in out:
+                out[sp] = entry_lbl
+                queue.append((sp[0], sp[1], entry_lbl))
+    _host_built_targets_cache = out
+    return out
+
+
+def find_fuchsia_only_target(pkg, t_name, seen):
+    """Return (f_pkg, f_name) if //pkg:t_name is or transitively includes a Fuchsia-only target."""
+    key = (pkg, t_name)
+    if key in seen:
+        return None
+    seen.add(key)
+    info = bazel_info_of(pkg)
+    if t_name in info["fuchsia_only_targets"]:
+        return key
+    suite_entry = info["suites"].get(t_name)
+    if not suite_entry:
+        return None
+    _, members = suite_entry
+    for lbl in members or []:
+        sp = split_label(lbl, pkg)
+        if not sp:
+            continue
+        found = find_fuchsia_only_target(sp[0], sp[1], seen)
+        if found is not None:
+            return found
+    return None
+
+
+def check_host_compatible_test_suite(bz_rel):
+    """Reject Fuchsia-only targets added to host-constrained or host-built test_suite()s."""
+    pkg_dir = os.path.dirname(bz_rel).strip("/")
+    pkg_info = bazel_info_of(pkg_dir)
+    cur_suites = pkg_info["suites"]
+    if not cur_suites:
+        return
+    base_suites = base_bazel_suites_of(pkg_dir)
+    hb_targets = host_built_targets()
+    for s_name, (lineno, members) in cur_suites.items():
+        if not members:
+            continue
+        # Also consult the base revision: adding a Fuchsia-only target makes
+        # the current suite no longer look like a host suite.
+        is_host_suite = pkg_info["suite_host"].get(
+            s_name, False
+        ) or base_bazel_info_of(pkg_dir)["suite_host"].get(s_name, False)
+        host_caller = hb_targets.get((pkg_dir, s_name))
+        if not is_host_suite and not host_caller:
+            continue
+        old_members = set((base_suites.get(s_name) or (0, None))[1] or [])
+        for lbl in members:
+            if lbl in old_members:
+                continue
+            sp = split_label(lbl, pkg_dir)
+            if not sp:
+                continue
+            f_target = find_fuchsia_only_target(sp[0], sp[1], set())
+            if f_target is None:
+                continue
+            f_pkg, f_name = f_target
+            host_reason = (
+                f"is built in the host configuration by `{host_caller}`"
+                if host_caller
+                else "is a host `test_suite()`"
+            )
+            anc_info = find_covering_ancestor_suite(pkg_dir, "target_tests")
+            if not anc_info and sp[0] != pkg_dir:
+                anc_info = find_covering_ancestor_suite(sp[0], "target_tests")
+            anc_hint = (
+                f" into `//{anc_info[0]}:{anc_info[1]}` in '{anc_info[0]}/BUILD.bazel'"
+                if anc_info
+                else " into the area's Fuchsia aggregation `test_suite()`"
+            )
+            msg = (
+                f"`test_suite(name = \"{s_name}\")` in '{bz_rel}' {host_reason}, "
+                f"but includes `{lbl}` which transitively pulls in Fuchsia-only "
+                f"target `//{f_pkg}:{f_name}` (`@platforms//os:fuchsia`), causing "
+                f"host builds to fail with target platform incompatibility."
+            )
+            rem = (
+                f"Remove `{lbl}` from `test_suite(name = \"{s_name}\")` in '{bz_rel}' "
+                f"and wire Fuchsia device test suite(s){anc_hint} instead (only "
+                f"host-compatible targets may be listed in `{s_name}`)."
+            )
+            findings.append({
+                "source": "test_suite_layout",
+                "category": "fuchsia_target_in_host_test_suite",
+                "severity": "error",
+                "file": bz_rel,
+                "line": lineno,
+                "message": msg,
+                "remediation": rem,
+            })
+
+
 # --- Main execution over changed BUILD.gn and BUILD.bazel files ---
 
 
-changed = set(git_lines(["diff", "--name-only", effective_base]))
-changed.update(git_lines(["diff", "--name-only", "HEAD"]))
-changed.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+changed = set(
+    pcl.changed_files(workdir, effective_base, target_dirs=target_dirs)
+)
 for td in target_dirs:
     for bname in ("BUILD.bazel", "BUILD.gn"):
         rel = os.path.join(td, bname)
@@ -1202,10 +1412,12 @@ for gn_rel in changed_gn:
     check_per_package_bazel_test_suite(gn_rel)
     check_bazel_test_suite_only_build_gn(gn_rel)
     check_nested_test_suite_in_gn(gn_rel)
+    check_upward_bazel_test_suite_ref(gn_rel)
 
 for bz_rel in changed_bz:
     check_nested_test_suite_in_bazel(bz_rel)
     check_implicit_test_suite(bz_rel)
+    check_host_compatible_test_suite(bz_rel)
 
 print(json.dumps(findings, indent=2))
 PYEOF

@@ -172,7 +172,7 @@ mem-read &self->main_waker
 0x1605a5d1ed0:  70 1a c8 36 47 04 00 00-68 fe 3d dd 25 01 00 00  |p  6G   h = %
 ```
 
-## `stack-data`
+## stack-data {#stack-data}
 
 The `stack-data` command provides a low-level analysis of the stack. This works
 similarly to `mem-analyze`. `stack-data` defaults to the top of the current

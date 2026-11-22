@@ -153,7 +153,7 @@ pub async fn populate_retained_index(
 }
 
 /// An index of blobs considered to be part of a new system's base package set.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct RetainedBlobs(HashSet<Hash>);
 
 impl RetainedBlobs {

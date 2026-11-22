@@ -207,14 +207,15 @@ class UsbHubDevice : public UsbHub, public ddk::UsbHubInterfaceProtocol<UsbHubDe
   fpromise::promise<Request, void> RequestQueue(Request request);
 
   std::atomic<bool> shutting_down_ = false;
+  std::atomic<bool> interrupt_endpoint_enabled_ = false;
   fbl::Array<PortStatus> port_status_ __TA_GUARDED(async_execution_context_);
   fbl::DoublyLinkedList<PortStatus*> pending_enumeration_list_
       __TA_GUARDED(async_execution_context_);
-  usb_hub_descriptor_t hub_descriptor_;
+  usb_hub_descriptor_t hub_descriptor_{};
   usb::RequestPool<void> request_pool_;
   inspect::Inspector inspector_;
-  usb_speed_t speed_;
-  usb_endpoint_descriptor_t interrupt_endpoint_;
+  usb_speed_t speed_ = 0;
+  usb_endpoint_descriptor_t interrupt_endpoint_{};
   ddk::UsbProtocolClient usb_;
   ddk::UsbBusProtocolClient bus_;
   async::Loop loop_;

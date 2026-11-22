@@ -6,34 +6,46 @@
 #define SRC_DEVICES_BLOCK_BIN_UFSUTIL_QUERY_H_
 
 #include <fidl/fuchsia.hardware.ufs/cpp/wire.h>
+#include <lib/zx/result.h>
 
-#include <string>
-#include <variant>
+#include <cstdint>
+#include <ostream>
+#include <unordered_map>
 
-using OptionValue = std::variant<uint32_t, std::string>;
+#include "common.h"
 
-int HandleReadDescriptor(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                         const std::unordered_map<uint32_t, OptionValue>& options);
+namespace ufsutil {
+zx::result<> HandleReadDescriptor(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                                  const std::unordered_map<uint32_t, OptionValue>& options,
+                                  std::ostream& out, std::ostream& err);
 
-int HandleWriteDescriptor(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                          const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleWriteDescriptor(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                                   const std::unordered_map<uint32_t, OptionValue>& options,
+                                   std::ostream& out, std::ostream& err);
 
-int HandleSetFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                  const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleSetFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                           const std::unordered_map<uint32_t, OptionValue>& options,
+                           std::ostream& out, std::ostream& err);
 
-int HandleReadFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                   const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleReadFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                            const std::unordered_map<uint32_t, OptionValue>& options,
+                            std::ostream& out, std::ostream& err);
 
-int HandleToggleFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                     const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleToggleFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                              const std::unordered_map<uint32_t, OptionValue>& options,
+                              std::ostream& out, std::ostream& err);
 
-int HandleClearFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                    const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleClearFlag(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                             const std::unordered_map<uint32_t, OptionValue>& options,
+                             std::ostream& out, std::ostream& err);
 
-int HandleReadAttribute(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                        const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleReadAttribute(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                                 const std::unordered_map<uint32_t, OptionValue>& options,
+                                 std::ostream& out, std::ostream& err);
 
-int HandleWriteAttribute(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
-                         const std::unordered_map<uint32_t, OptionValue>& options);
+zx::result<> HandleWriteAttribute(const fidl::WireSyncClient<fuchsia_hardware_ufs::Ufs>& client,
+                                  const std::unordered_map<uint32_t, OptionValue>& options,
+                                  std::ostream& out, std::ostream& err);
+}  // namespace ufsutil
 
 #endif  // SRC_DEVICES_BLOCK_BIN_UFSUTIL_QUERY_H_

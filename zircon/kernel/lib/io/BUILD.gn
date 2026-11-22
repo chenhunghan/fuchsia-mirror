@@ -4,22 +4,19 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
+import("//zircon/kernel/kernel_rust_mod.gni")
 
-static_library("io") {
-  public_deps = [ ":headers" ]
-
-  sources = [ "console.cc" ]
-  deps = [
-    "//zircon/kernel/lib/debuglog:headers",
-    "//zircon/kernel/lib/persistent-debuglog",
-    "//zircon/kernel/vm:headers",
-    "//zircon/system/ulib/zircon-internal",
-  ]
+group("io") {
+  public_deps = [ ":io-rs" ]
 }
 
-library_headers("headers") {
-  headers = [ "lib/io.h" ]
+kernel_rust_mod("io-rs") {
+  sources = [ "console.rs" ]
+  deps = [
+    "//src/lib/ksync",
+    "//src/lib/zr",
+    "//zircon/kernel/lib/libc:rust",
+  ]
 }
 
 group("tests") {

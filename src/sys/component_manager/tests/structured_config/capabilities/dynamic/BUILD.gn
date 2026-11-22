@@ -4,11 +4,10 @@
 
 import("//build/components.gni")
 
-# Retained in GN because `:config_lib` and `:values` use
-# `fuchsia_structured_config_cpp_elf_lib` / `fuchsia_structured_config_values`
-# (which have no in-tree Bazel rules and call `get_target_outputs` on
-# `:child_manifest`), and `:bin` depends on `:config_lib` and
-# `//sdk/lib/sys/component/cpp/testing:cpp` (RealmBuilder).
+# Retained in GN because `:config_lib` uses
+# `fuchsia_structured_config_cpp_elf_lib` (which has no in-tree Bazel rule and
+# calls `get_target_outputs` on `:child_manifest`), and `:bin` depends on
+# `:config_lib` and `//sdk/lib/sys/component/cpp/testing:cpp` (RealmBuilder).
 executable("bin") {
   testonly = true
   output_name = "sc_capabilities_dynamic"
@@ -45,17 +44,6 @@ fuchsia_structured_config_cpp_elf_lib("config_lib") {
   cm_label = ":child_manifest"
 }
 
-fuchsia_structured_config_values("values") {
-  testonly = true
-  cm_label = ":child_manifest"
-  component_name = "child"
-  values = {
-    my_flag = false
-    my_int = 0
-    transitional = 5
-  }
-}
-
 fuchsia_component("child") {
   testonly = true
   cm_label = ":child_manifest"
@@ -65,10 +53,7 @@ fuchsia_component("child") {
 fuchsia_test_package("tests") {
   package_name = "sc_capabilites_dynamic"
   test_components = [ ":sc_capabilities_dynamic" ]
-  deps = [
-    ":child",
-    ":values",
-  ]
+  deps = [ ":child" ]
 }
 
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##

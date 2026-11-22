@@ -20,20 +20,34 @@ using FidlRequestPool = internal::FidlRequestPool<FidlRequest>;
 
 // Template specialization for internal::FidlRequest<dma_buffer::PhysIter>.
 template <>
-inline dma_buffer::PhysIter FidlRequest::phys_iter(size_t idx, size_t max_length) const {
-  ZX_ASSERT(request_.data()->at(idx).size());
-  ZX_ASSERT(pinned_vmos_.find(idx) != pinned_vmos_.end());
-  auto length = request_.data()->at(idx).size().value();
+inline zx::result<dma_buffer::PhysIter> FidlRequest::phys_iter(size_t idx,
+                                                               size_t max_length) const {
+  if (!request_.data().has_value() || idx >= request_.data()->size()) {
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
+  }
+  const auto& region = request_.data()->at(idx);
+  if (!region.size().has_value() || *region.size() == 0) {
+    return zx::error(ZX_ERR_INVALID_ARGS);
+  }
+  const auto pinned_it = pinned_vmos_.find(idx);
+  if (pinned_it == pinned_vmos_.end()) {
+    return zx::error(ZX_ERR_NOT_FOUND);
+  }
+  const auto& pinned = pinned_it->second;
+  if (pinned.page_list == nullptr || pinned.phys_count == 0) {
+    return zx::error(ZX_ERR_BAD_STATE);
+  }
+  const uint64_t length = *region.size();
+  const uint64_t offset = region.offset().value_or(0);
   // phys_iter is only called for Buffer::Tag::kData via PhysMap pinned_vmos_.
-  // PhysMap pins the sub-range and already offsets phys_list[0] by any sub-page offset,
-  // so vmo_offset must be 0 to avoid double-offsetting.
-  constexpr uint64_t vmo_offset = 0;
-  return dma_buffer::PhysIter{pinned_vmos_.at(idx).phys_list,
-                              pinned_vmos_.at(idx).phys_count,
-                              vmo_offset,
-                              length,
-                              max_length,
-                              /*merge=*/true};
+  // PhysMap pins page-aligned physical pages for [0, pinned.mapped.size) within a single page
+  // (kMaxTransferSize < kPageSize); enforce bounds before applying the sub-page vmo_offset.
+  if (offset >= kPageSize || offset > pinned.mapped.size || length > pinned.mapped.size - offset) {
+    return zx::error(ZX_ERR_OUT_OF_RANGE);
+  }
+  return zx::ok(dma_buffer::PhysIter{pinned.page_list, pinned.phys_count, offset,
+                                     static_cast<size_t>(length), max_length,
+                                     /*merge=*/true});
 }
 
 }  // namespace usb

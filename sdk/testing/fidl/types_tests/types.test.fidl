@@ -36,13 +36,13 @@ type TestUnion = strict resource union {
     3: move_only MoveOnlyStruct;
 };
 
-type TestXUnion = flexible resource union {
+type TestFlexibleUnion = flexible resource union {
     1: primitive int32;
     2: copyable CopyableStruct;
     3: h zx.Handle;
 };
 
-type TestStrictXUnion = strict union {
+type TestStrictUnion = strict union {
     1: primitive int32;
     2: copyable CopyableStruct;
 };
@@ -51,28 +51,28 @@ type UnionWithUint64 = strict union {
     1: value int64;
 };
 
-type TestStrictXUnionInStruct = struct {
-    xu TestStrictXUnion;
+type TestStrictUnionInStruct = struct {
+    xu TestStrictUnion;
 };
 
-type TestStrictOptionalXUnionInStruct = struct {
-    xu TestStrictXUnion:optional;
+type TestStrictOptionalUnionInStruct = struct {
+    xu TestStrictUnion:optional;
 };
 
-type TestStrictXUnionInArrayInStruct = struct {
-    arr array<TestStrictXUnion, 10>;
+type TestStrictUnionInArrayInStruct = struct {
+    arr array<TestStrictUnion, 10>;
 };
 
-type TestNonResourceXUnion = flexible union {
+type TestNonResourceUnion = flexible union {
     1: primitive int32;
 };
 
 type TestFlexibleUnionInStruct = struct {
-    xu TestNonResourceXUnion;
+    xu TestNonResourceUnion;
 };
 
 type TestFlexibleUnionInArrayInStruct = struct {
-    arr array<TestNonResourceXUnion, 10>;
+    arr array<TestNonResourceUnion, 10>;
 };
 
 /// Verifies that user code can manipulate these bits.
@@ -204,11 +204,11 @@ type TableMaxOrdinal3WithReserved2 = table {
 ///   - add method `MyUnion() -> (MyUnion result);`
 ///   - write tests in C++ using MsgWrapper::MyUnionResponse
 closed protocol MsgWrapper {
-    strict TestXUnion() -> (resource struct {
-        result TestXUnion;
+    strict TestFlexibleUnion() -> (resource struct {
+        result TestFlexibleUnion;
     });
-    strict TestNonResourceXUnion() -> (struct {
-        result TestNonResourceXUnion;
+    strict TestNonResourceUnion() -> (struct {
+        result TestNonResourceUnion;
     });
     strict TestTable() -> (struct {
         result TestTable;

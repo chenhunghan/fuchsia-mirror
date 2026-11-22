@@ -71,8 +71,8 @@ func TestApplyStabilityExoneration(t *testing.T) {
 		name               string
 		dryRun             bool
 		maxExoneratedTests int
+		swarmingTaskName   string
 		inputTests         []runtests.TestDetails
-		checkTests         []runtests.TestDetails
 		respVariants       []*analysispb.TestVariantStabilityAnalysis
 		wantRPCCalled      bool
 		wantQueriedIDs     []string
@@ -604,13 +604,11 @@ func TestApplyStabilityExoneration(t *testing.T) {
 			},
 		},
 		{
-			name:   "blocking checkTests skips exoneration while flake checkTests allows it",
-			dryRun: false,
+			name:             "multiplied shard skips exoneration",
+			dryRun:           false,
+			swarmingTaskName: "multiplied:fuchsia-0001 | core.x64-debug",
 			inputTests: []runtests.TestDetails{
 				{Name: "host_x64/unstable", Status: runtests.TestFailure},
-			},
-			checkTests: []runtests.TestDetails{
-				{Name: "testing_failure_mode/more_than_5_tests_failed", IsTestingFailureMode: true, Status: runtests.TestFailure},
 			},
 			wantRPCCalled: false,
 			wantTests: []runtests.TestDetails{
@@ -618,30 +616,21 @@ func TestApplyStabilityExoneration(t *testing.T) {
 			},
 		},
 		{
-			name:   "flake checkTests (FAIL + companion PASS) allows exoneration",
+			name:   "target tagged is_multiplied_run is excluded",
 			dryRun: false,
 			inputTests: []runtests.TestDetails{
-				{Name: "host_x64/unstable", Status: runtests.TestFailure},
-			},
-			checkTests: []runtests.TestDetails{
-				{Name: "testing_failure_mode/flaky_log_check", IsTestingFailureMode: true, Status: runtests.TestFailure},
-				{Name: "testing_failure_mode/flaky_log_check", IsTestingFailureMode: true, Status: runtests.TestSuccess},
-			},
-			respVariants: []*analysispb.TestVariantStabilityAnalysis{
 				{
-					TestId:      "host_x64/unstable",
-					FailureRate: &analysispb.TestVariantStabilityAnalysis_FailureRate{IsMet: true},
+					Name:   "host_x64/multiplied_test",
+					Status: runtests.TestFailure,
+					Tags:   []build.TestTag{{Key: runtests.MultipliedRunTagKey, Value: "true"}},
 				},
 			},
-			wantRPCCalled: true,
+			wantRPCCalled: false,
 			wantTests: []runtests.TestDetails{
 				{
-					Name:   "host_x64/unstable",
-					Status: runtests.TestExonerated,
-					TestResult: runtests.TestResult{
-						ExonerationExplanation: "Exonerated by LUCI Analysis stability check (met failure_rate criteria).",
-					},
-					Tags: []build.TestTag{{Key: exonerationFailureRateTagKey, Value: "true"}},
+					Name:   "host_x64/multiplied_test",
+					Status: runtests.TestFailure,
+					Tags:   []build.TestTag{{Key: runtests.MultipliedRunTagKey, Value: "true"}},
 				},
 			},
 		},
@@ -666,11 +655,17 @@ func TestApplyStabilityExoneration(t *testing.T) {
 			}
 
 			summary := &runtests.TestSummary{Tests: tc.inputTests}
+			outputs := &TestingOutputs{TestSummary: summary}
+			if tc.swarmingTaskName != "" {
+				outputs.SwarmingSummary = &SwarmingTaskSummary{
+					Results: &SwarmingRpcsTaskResult{Name: tc.swarmingTaskName},
+				}
+			}
 			cfg := baseTestExonerationConfig(tc.dryRun, runRPC)
 			if tc.maxExoneratedTests > 0 {
 				cfg.MaxExoneratedTests = tc.maxExoneratedTests
 			}
-			if err := ApplyStabilityExoneration(context.Background(), cfg, summary, tc.checkTests); err != nil {
+			if err := ApplyStabilityExoneration(context.Background(), cfg, outputs); err != nil {
 				t.Fatalf("ApplyStabilityExoneration returned unexpected error: %v", err)
 			}
 			if rpcCalled != tc.wantRPCCalled {
@@ -758,7 +753,7 @@ func TestLoadExonerationConfigAndDefaultRdbRPC(t *testing.T) {
 		},
 	}
 	loaded.DryRun = false
-	if err := ApplyStabilityExoneration(context.Background(), loaded, summary, nil); err != nil {
+	if err := ApplyStabilityExoneration(context.Background(), loaded, &TestingOutputs{TestSummary: summary}); err != nil {
 		t.Fatalf("ApplyStabilityExoneration with fake rdb: %v", err)
 	}
 	if got := summary.Tests[0].Status; got != runtests.TestExonerated {
@@ -786,16 +781,61 @@ func TestLoadExonerationConfigAndDefaultRdbRPC(t *testing.T) {
 			{Name: "still_failing", Status: runtests.TestFailure},
 		},
 	}
-	if err := ApplyStabilityExoneration(context.Background(), loaded, failSummary, nil); err == nil {
+	if err := ApplyStabilityExoneration(context.Background(), loaded, &TestingOutputs{TestSummary: failSummary}); err == nil {
 		t.Errorf("expected error when rdb exits non-zero, got nil")
 	}
 	if got := failSummary.Tests[0].Status; got != runtests.TestFailure {
 		t.Errorf("still_failing Status = %v after RPC failure, want FAIL", got)
 	}
 
+	// Verify batching when more than maxStabilityBatchSize (100) test IDs are queried.
+	var batchCases []runtests.TestCaseResult
+	for i := range 60 {
+		batchCases = append(batchCases, runtests.TestCaseResult{
+			SuiteName:   "BatchSuite",
+			CaseName:    fmt.Sprintf("Case%02d", i),
+			DisplayName: fmt.Sprintf("BatchSuite.Case%02d", i),
+			Status:      runtests.TestFailure,
+		})
+	}
+	batchSummary := &runtests.TestSummary{
+		Tests: []runtests.TestDetails{
+			{
+				Name:       "fuchsia-pkg://fuchsia.com/batch#meta/batch.cm",
+				Status:     runtests.TestFailure,
+				TestResult: runtests.TestResult{Cases: batchCases},
+			},
+		},
+	}
+	var batchSizes []int
+	batchCfg := baseTestExonerationConfig(false, func(_ context.Context, _ string, reqBytes []byte) ([]byte, error) {
+		var req analysispb.QueryTestVariantStabilityRequest
+		if err := protojson.Unmarshal(reqBytes, &req); err != nil {
+			t.Fatalf("unmarshaling batch request: %v", err)
+		}
+		batchSizes = append(batchSizes, len(req.GetTestVariants()))
+		var resp analysispb.QueryTestVariantStabilityResponse
+		for _, tv := range req.GetTestVariants() {
+			resp.TestVariants = append(resp.TestVariants, &analysispb.TestVariantStabilityAnalysis{
+				TestId:    tv.GetTestId(),
+				FlakeRate: &analysispb.TestVariantStabilityAnalysis_FlakeRate{IsMet: true},
+			})
+		}
+		return protojson.Marshal(&resp)
+	})
+	if err := ApplyStabilityExoneration(context.Background(), batchCfg, &TestingOutputs{TestSummary: batchSummary}); err != nil {
+		t.Fatalf("ApplyStabilityExoneration batching failed: %v", err)
+	}
+	if diff := cmp.Diff([]int{100, 20}, batchSizes); diff != "" {
+		t.Errorf("batchSizes diff (-want +got):\n%s", diff)
+	}
+	if got := batchSummary.Tests[0].Status; got != runtests.TestExonerated {
+		t.Errorf("batched suite status = %q, want %q", got, runtests.TestExonerated)
+	}
+
 	// Verify fail-open error (no panic) if ApplyStabilityExoneration is called directly with an empty host.
 	emptyHostCfg := &ExonerationConfig{Project: "fuchsia"}
-	if err := ApplyStabilityExoneration(context.Background(), emptyHostCfg, failSummary, nil); err == nil {
+	if err := ApplyStabilityExoneration(context.Background(), emptyHostCfg, &TestingOutputs{TestSummary: failSummary}); err == nil {
 		t.Errorf("expected error when LUCIAnalysisHost is empty, got nil")
 	}
 	if got := failSummary.Tests[0].Status; got != runtests.TestFailure {

@@ -33,16 +33,27 @@ class SocketEnvVarsTest(unittest.TestCase):
             },
         )
 
-    def test_both_sockets(self) -> None:
+    def test_bes_socket_only(self) -> None:
+        env = bi.socket_env_vars(bes_socket="/tmp/fake-bes.sock")
+        self.assertEqual(
+            env,
+            {
+                bi.ENV_BAZEL_BES_SOCKET: "/tmp/fake-bes.sock",
+            },
+        )
+
+    def test_all_sockets(self) -> None:
         env = bi.socket_env_vars(
             rbe_socket="/tmp/fake-rbe.sock",
             resultstore_socket="/tmp/fake-rs.sock",
+            bes_socket="/tmp/fake-bes.sock",
         )
         self.assertEqual(
             env,
             {
                 bi.ENV_BAZEL_RBE_SOCKET: "/tmp/fake-rbe.sock",
                 bi.ENV_BAZEL_RESULTSTORE_SOCKET: "/tmp/fake-rs.sock",
+                bi.ENV_BAZEL_BES_SOCKET: "/tmp/fake-bes.sock",
             },
         )
 
@@ -98,22 +109,6 @@ class EnabledBazelResultStoreTest(unittest.TestCase):
         self.assertFalse(bi._enabled_bazel_resultstore(""))
 
 
-class NeedsGcertauthTest(unittest.TestCase):
-    def test_loas_rbe(self) -> None:
-        self.assertTrue(bi._needs_gcertauth("loas", "none"))
-
-    def test_loas_resultstore(self) -> None:
-        self.assertTrue(bi._needs_gcertauth("none", "loas"))
-
-    def test_loas_both(self) -> None:
-        self.assertTrue(bi._needs_gcertauth("loas", "loas"))
-
-    def test_neither_loas(self) -> None:
-        self.assertFalse(bi._needs_gcertauth("oauth", "oauth"))
-        self.assertFalse(bi._needs_gcertauth("machine", "machine"))
-        self.assertFalse(bi._needs_gcertauth("none", "none"))
-
-
 class GenerateBazelrcTest(unittest.TestCase):
     def test_service_proxies_empty(self) -> None:
         self.assertEqual(list(bi.generate_service_proxies_bazelrc({})), [])
@@ -144,16 +139,70 @@ class GenerateBazelrcTest(unittest.TestCase):
             ],
         )
 
-    def test_generate_auth_bazelrc_loas(self) -> None:
-        lines = list(bi.generate_auth_bazelrc("loas", "none"))
+    def test_service_proxies_bes(self) -> None:
+        lines = list(
+            bi.generate_service_proxies_bazelrc(
+                {bi.ENV_BAZEL_BES_SOCKET: "/tmp/fake-bes.sock"}
+            )
+        )
         self.assertEqual(
             lines,
-            [f"build:{bi.CONFIG_REMOTE_COMMON} --config={bi.CONFIG_GCERTAUTH}"],
+            [
+                f"build:{bi.CONFIG_RESULTSTORE_COMMON} --bes_proxy=unix:///tmp/fake-bes.sock"
+            ],
+        )
+
+    def test_service_proxies_bes_precedence_over_resultstore(self) -> None:
+        lines = list(
+            bi.generate_service_proxies_bazelrc(
+                {
+                    bi.ENV_BAZEL_BES_SOCKET: "/tmp/fake-bes.sock",
+                    bi.ENV_BAZEL_RESULTSTORE_SOCKET: "/tmp/fake-rs.sock",
+                }
+            )
+        )
+        self.assertEqual(
+            lines,
+            [
+                f"build:{bi.CONFIG_RESULTSTORE_COMMON} --bes_proxy=unix:///tmp/fake-bes.sock"
+            ],
+        )
+
+    def test_generate_auth_bazelrc_loas(self) -> None:
+        lines = list(bi.generate_auth_bazelrc("loas", "none"))
+        self.assertSequenceEqual(
+            lines,
+            (
+                f"build:{bi.CONFIG_REMOTE_COMMON} --config={bi.CONFIG_GCERTAUTH}",
+            ),
+        )
+
+    def test_generate_auth_bazelrc_resultstore_only_loas(self) -> None:
+        lines = list(bi.generate_auth_bazelrc("oauth", "loas"))
+        self.assertSequenceEqual(
+            lines,
+            (
+                f"build:{bi.CONFIG_RESULTSTORE_COMMON} --config={bi.CONFIG_GCERTAUTH}",
+            ),
+        )
+
+    def test_generate_auth_bazelrc_both_loas(self) -> None:
+        lines = list(bi.generate_auth_bazelrc("loas", "loas"))
+        self.assertSequenceEqual(
+            lines,
+            (
+                f"build:{bi.CONFIG_REMOTE_COMMON} --config={bi.CONFIG_GCERTAUTH}",
+                f"build:{bi.CONFIG_RESULTSTORE_COMMON} --config={bi.CONFIG_GCERTAUTH}",
+            ),
         )
 
     def test_generate_auth_bazelrc_non_loas(self) -> None:
-        self.assertEqual(list(bi.generate_auth_bazelrc("oauth", "none")), [])
-        self.assertEqual(list(bi.generate_auth_bazelrc("none", "none")), [])
+        self.assertSequenceEqual(
+            list(bi.generate_auth_bazelrc("oauth", "oauth")), ()
+        )
+        self.assertSequenceEqual(
+            list(bi.generate_auth_bazelrc("none", "none")), ()
+        )
 
 
 if __name__ == "__main__":

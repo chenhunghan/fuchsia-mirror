@@ -14,10 +14,10 @@ import fidl_fuchsia_wlan_policy as f_wlan_policy
 import fuchsia_controller_py as fc
 from fuchsia_controller_py import Channel, Context, FcTransportStatus
 from honeydew import affordances_capable
-from honeydew.affordances.connectivity.wlan import wlan_policy_ap
 from honeydew.affordances.connectivity.wlan.utils.errors import (
     HoneydewWlanError,
 )
+from honeydew.affordances.connectivity.wlan.wlan_policy_ap import wlan_policy_ap
 from honeydew.errors import NotSupportedError
 from honeydew.transports.ffx import ffx as ffx_transport
 from honeydew.transports.fuchsia_controller import (

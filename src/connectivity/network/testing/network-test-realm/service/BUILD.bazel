@@ -1,0 +1,126 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "realm_controller_server",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        ":network_test_realm",
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.net.debug:fuchsia.net.debug_rust",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+        "//sdk/fidl/fuchsia.net.dhcpv6:fuchsia.net.dhcpv6_rust",
+        "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
+        "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//sdk/fidl/fuchsia.net.root:fuchsia.net.root_rust",
+        "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust",
+        "//sdk/fidl/fuchsia.posix.socket:fuchsia.posix.socket_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lib/fidl_fuchsia_net_dhcpv6_ext",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/ping",
+        "//src/connectivity/network/testing/network-test-realm/fidl:fuchsia.net.test.realm_rust",
+        "//src/lib/async-utils",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/network/fidl_fuchsia_net_dhcp_ext",
+        "//src/lib/network/fidl_fuchsia_net_ext",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//src/lib/network/fidl_fuchsia_posix_socket_ext",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:assert_matches",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:futures-lite",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:socket2",
+        "//third_party/rust_crates/vendor:thiserror",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "realm_controller_server",
+)
+
+rustc_library(
+    name = "network_test_realm",
+    srcs = ["src/lib.rs"],
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    visibility = [
+        "//src/connectivity/network/net-cli/tests:__pkg__",
+        "//src/connectivity/network/testing/network-test-realm/tests:__pkg__",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.component.decl:fuchsia.component.decl_rust",
+        "//sdk/fidl/fuchsia.component:fuchsia.component_rust",
+        "//sdk/fidl/fuchsia.net.interfaces:fuchsia.net.interfaces_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/network/fidl_fuchsia_net_interfaces_ext",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)
+
+fx_component_manifest(
+    name = "hermetic_network_manifest",
+    testonly = True,
+    component_name = "hermetic_network",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/hermetic_network.cml",
+)
+
+fx_component(
+    name = "hermetic_network",
+    testonly = True,
+    compiled_manifest = ":hermetic_network_manifest",
+)
+
+fx_component_manifest(
+    name = "controller_manifest",
+    testonly = True,
+    component_name = "controller",
+    includes = [
+        "//sdk/lib/inspect:offer.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/controller.cml",
+)
+
+fx_component(
+    name = "controller",
+    testonly = True,
+    compiled_manifest = ":controller_manifest",
+    deps = [
+        ":bin_packaged_bin",
+        ":hermetic_network",
+    ],
+)

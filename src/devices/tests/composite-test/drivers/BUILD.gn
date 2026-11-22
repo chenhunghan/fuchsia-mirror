@@ -43,7 +43,6 @@ fuchsia_cc_driver("root-driver") {
 fuchsia_driver_component("root") {
   component_name = "root-driver"
   deps = [ ":root-driver" ]
-  info = "meta/root-driver-info.json"
   manifest = "meta/root.cml"
 }
 
@@ -69,7 +68,6 @@ fuchsia_cc_driver("leaf-driver") {
 fuchsia_driver_component("leaf") {
   component_name = "leaf-driver"
   deps = [ ":leaf-driver" ]
-  info = "meta/leaf-driver-info.json"
   manifest = "meta/leaf.cml"
 }
 
@@ -93,6 +91,5 @@ fuchsia_cc_driver("composite-driver") {
 fuchsia_driver_component("composite") {
   component_name = "composite-driver"
   deps = [ ":composite-driver" ]
-  info = "meta/composite-driver-info.json"
   manifest = "meta/test-composite.cml"
 }

@@ -1,10 +1,8 @@
-// Copyright 2026 The Fuchsia Authors
+// Copyright 2020 The Fuchsia Authors
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
-//
-// Ported from zircon/kernel/dev/pdev/hw_watchdog/hw_watchdog.cc
 
 // The console command is only built at LK_DEBUGLEVEL > 1, i.e. level 2.
 #[cfg(lk_debuglevel = "2")]
@@ -27,9 +25,9 @@ pub trait WatchdogOps: Sync + 'static {
     fn set_enabled(&self, enabled: bool) -> Result<(), Status>;
     /// Callback returning `true` if the watchdog is currently enabled.
     fn is_enabled(&self) -> bool;
-    /// Callback returning the nominal timeout period in nanoseconds (`zx_duration_boot_t`).
+    /// Callback returning the nominal timeout period.
     fn get_timeout_nsec(&self) -> DurationBoot;
-    /// Callback returning the last successful pet time (`zx_instant_boot_t`).
+    /// Callback returning the boot time of the last successful pet.
     fn get_last_pet_time(&self) -> InstantBoot;
     /// Callback to enable (`true`) or disable (`false`) suppression of future pets.
     fn suppress_petting(&self, suppress: bool);
@@ -79,8 +77,12 @@ fn get_driver() -> &'static dyn WatchdogOps {
 use debug::dprintf;
 
 /// Registers the hardware watchdog driver with the PDEV dispatch layer.
-pub fn register_watchdog(driver: &'static dyn WatchdogOps) {
-    // SAFETY: Called exactly once during single-threaded early boot before secondary CPUs run.
+///
+/// # Safety
+///
+/// Must be called at most once during single-threaded early boot before secondary CPUs start.
+pub unsafe fn register_watchdog(driver: &'static dyn WatchdogOps) {
+    // SAFETY: Caller guarantees single-threaded early-boot invocation with no concurrent access.
     unsafe {
         *ACTIVE_DRIVER.0.get() = Some(driver);
     }
@@ -93,96 +95,48 @@ pub fn register_watchdog(driver: &'static dyn WatchdogOps) {
 }
 
 /// Returns `true` if this platform has a hardware watchdog, `false` otherwise.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_present() -> bool {
-    // SAFETY: Checking whether ACTIVE_DRIVER is Some. Written once during single-threaded early boot.
+pub fn hw_watchdog_present() -> bool {
+    // SAFETY: `ACTIVE_DRIVER` is written only once during single-threaded early boot.
     unsafe { (*ACTIVE_DRIVER.0.get()).is_some() }
 }
 
 /// Pets the hardware watchdog if present and petting is not suppressed.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_pet() {
+pub fn hw_watchdog_pet() {
     get_driver().pet();
 }
 
 /// Attempts to enable or disable the hardware watchdog. Note that depending on
 /// hardware details, it may not be possible to change its enabled/disabled state.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_set_enabled(enabled: bool) -> Result<(), Status> {
+pub fn hw_watchdog_set_enabled(enabled: bool) -> Result<(), Status> {
     get_driver().set_enabled(enabled)
 }
 
 /// Returns `true` if the hardware watchdog is currently enabled.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_is_enabled() -> bool {
+pub fn hw_watchdog_is_enabled() -> bool {
     get_driver().is_enabled()
 }
 
-/// Returns the nominal hardware watchdog timeout period in nanoseconds (`zx_duration_boot_t`).
-/// Returns `ZX_TIME_INFINITE` (`i64::MAX`) if no hardware watchdog is present.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_get_timeout_nsec() -> i64 {
-    get_driver().get_timeout_nsec().0
+/// Returns the nominal hardware watchdog timeout period, or `DurationBoot(i64::MAX)` (infinite) if
+/// no hardware watchdog is present.
+pub fn hw_watchdog_get_timeout_nsec() -> DurationBoot {
+    get_driver().get_timeout_nsec()
 }
 
-/// Returns the time (`zx_instant_boot_t`) of the last successful pet of the hardware watchdog.
-/// Returns `0` if no hardware watchdog is present or has never been pet.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_get_last_pet_time() -> i64 {
-    get_driver().get_last_pet_time().0
+/// Returns the boot time of the last successful pet of the hardware watchdog, or `InstantBoot(0)`
+/// if no hardware watchdog is present or it has never been pet.
+pub fn hw_watchdog_get_last_pet_time() -> InstantBoot {
+    get_driver().get_last_pet_time()
 }
 
 /// Sets whether future pets to the hardware watchdog should be suppressed (`true`)
 /// or allowed (`false`). Used during kernel crash/panic paths so the watchdog will
 /// trigger a reboot if the system hangs during crash dump.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_suppress_petting(suppressed: bool) {
+pub fn hw_watchdog_suppress_petting(suppressed: bool) {
     get_driver().suppress_petting(suppressed);
 }
 
 /// Returns `true` if hardware watchdog petting is currently suppressed.
-///
-/// # Safety
-///
-/// The caller must ensure that `get_driver()` returns a valid reference to a
-/// `WatchdogOps` trait object.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hw_watchdog_is_petting_suppressed() -> bool {
+pub fn hw_watchdog_is_petting_suppressed() -> bool {
     get_driver().is_petting_suppressed()
 }
 

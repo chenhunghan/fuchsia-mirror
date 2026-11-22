@@ -98,8 +98,15 @@ group("gtest_all_bins") {
   ]
 }
 
+# Retained in BUILD.gn for `//src/sys/test_runners/gunit:gunit-runner-tests`
+# (`bazel2gn` does not translate `filegroup`).
+# LINT.IfChange(gunit_all_bins)
 group("gunit_all_bins") {
   testonly = true
+  visibility = [
+    ":*",
+    "//src/sys/test_runners/gunit:*",
+  ]
   deps = [
     ":gunit_huge_runner_example",
     ":gunit_runner_no_tests",
@@ -108,6 +115,8 @@ group("gunit_all_bins") {
     ":gunit_runner_test_with_environ",
   ]
 }
+
+# LINT.ThenChange(BUILD.bazel:gunit_all_bins)
 
 fuchsia_component("echo_test_realm") {
   testonly = true

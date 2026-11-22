@@ -2,32 +2,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
 import("//build/cpp/sdk_cpp_test.gni")
 import("//build/cpp/sdk_cpp_unittest_package.gni")
-import("//build/cpp/sdk_source_set.gni")
 
-sdk_source_set("cpp") {
-  category = "partner"
-
-  sdk_name = "media_cpp"
-  stable = true
-
-  sources = [
-    "type_converters.cc",
-    "type_converters.h",
-  ]
-
-  include_base = "//sdk"
-
-  public_deps = [
-    ":no_converters",
-    "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
-  ]
-
-  public_configs = [ "//sdk/config" ]
-}
-
+# TODO(https://fxbug.dev/582103173): Migrate test_bin and
+# media_lib_timeline_tests_package once bazel2gn supports sdk_cpp_test and
+# sdk_cpp_unittest_package.
 sdk_cpp_test("test_bin") {
   sources = [
     "test/timeline_function_test.cc",
@@ -73,6 +53,25 @@ group("tests") {
 # rerun bazel2gn.
 
 import("//build/tools/bazel2gn/bazel_migration.gni")
+
+sdk_source_set("cpp") {
+  sources = [ "type_converters.cc" ]
+  public = [ "type_converters.h" ]
+  sdk_area = "Media"
+  category = "partner"
+  sdk_name = "media_cpp"
+  include_base = "//sdk"
+  public_configs = [ "//sdk/config" ]
+  stable = true
+  visibility = [
+    ":*",
+    "//src/media/*",
+  ]
+  public_deps = [
+    ":no_converters",
+    "//sdk/fidl/fuchsia.media:fuchsia.media_hlcpp",
+  ]
+}
 
 sdk_source_set("no_converters") {
   sources = [

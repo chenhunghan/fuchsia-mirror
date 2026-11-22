@@ -139,7 +139,7 @@ void WriteBitfieldToMemory(const fxl::RefPtr<EvalContext>& context, const ExprVa
   // even if we do the masking in the debug_agent. This implementation is simpler than passing the
   // mask to the agent, so do that.
   context->GetDataProvider()->GetMemoryAsync(
-      dest.address(), byte_size,
+      dest.address(), static_cast<uint32_t>(byte_size),
       [context, dest, value, byte_size, cb = std::move(cb)](
           const Err& err, std::vector<uint8_t> original_data) mutable {
         if (err.has_error())

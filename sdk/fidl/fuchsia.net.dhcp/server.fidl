@@ -52,26 +52,6 @@ type Parameter = flexible union {
         /// max lease length is equivalent to the default lease length.
         2: max Duration;
     };
-    /// The client MAC addresses which the server will issue leases to. By
-    /// default, the server will not have a permitted MAC list, in which case it
-    /// will attempt to issue a lease to every client which requests one. If
-    /// permitted_macs has a non-zero length then the server will only respond
-    /// to lease requests from clients with  MAC in the list. The vector bound
-    /// has been arbitrarily selected as a generous upper limit.
-    4: permitted_macs vector<fuchsia.net.MacAddress>:256;
-    /// Addresses statically assigned to specific hosts or devices. Typically, a
-    /// network administrator will statically assign addresses to always-on
-    /// network devices which should always have the same IP address, such as
-    /// network printers. The vector bound has been arbitrarily selected as a
-    /// generous upper limit.
-    5: statically_assigned_addrs vector<@generated_name("StaticAssignment") table {
-        /// The MAC address of the host or device which will have the static IP
-        /// address assignment.
-        1: host fuchsia.net.MacAddress;
-        /// The IP address which the host or device will always be assigned the
-        /// server.
-        2: assigned_addr fuchsia.net.Ipv4Address;
-    }>:256;
     /// Enables server behavior where the server ARPs an IP address prior to
     /// issuing it in a lease. If the server receives a response, the server
     /// will mark the address as in-use and try again with a different address.
@@ -91,8 +71,6 @@ type ParameterName = strict enum {
     IP_ADDRS = 0;
     ADDRESS_POOL = 1;
     LEASE_LENGTH = 2;
-    PERMITTED_MACS = 3;
-    STATICALLY_ASSIGNED_ADDRS = 4;
     ARP_PROBE = 5;
     BOUND_DEVICE_NAMES = 6;
 };

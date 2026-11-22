@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":thermal-cli-test"],
+    visibility = ["//src/devices:__pkg__"],
+)
+
+fx_cc_binary(
+    name = "thermal-cli",
+    srcs = ["main.cc"],
+    visibility = ["//visibility:private"],
+    deps = [
+        ":common",
+        "//sdk/fidl/fuchsia.hardware.thermal:fuchsia.hardware.thermal_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/zx",
+    ],
+)
+
+fx_cc_library(
+    name = "common",
+    srcs = ["thermal-cli.cc"],
+    hdrs = ["thermal-cli.h"],
+    implementation_deps = [
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/fzl",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.thermal:fuchsia.hardware.thermal_cpp",
+        "//zircon/system/ulib/zx",
+    ],
+    alwayslink = True,
+)
+
+# test/thermal-cli-test.cc includes "thermal-cli.h" from the package root.
+# @bazel2gn:raw_attribute:include_dirs = [ "." ]
+fx_cc_test_binary(
+    name = "thermal-cli-test-bin",
+    srcs = ["test/thermal-cli-test.cc"],
+    gn_output_name = "thermal-cli-test",
+    # bazel2gn does not translate `includes` on `fx_cc_test_binary`; GN uses
+    # `include_dirs = [ "." ]` via the raw attribute directive above.
+    # TODO(https://fxbug.dev/570694755): Support `includes` on `fx_cc_test_binary` in bazel2gn.
+    # @bazel2gn:skip
+    includes = ["."],
+    deps = [
+        ":common",
+        "//sdk/fidl/fuchsia.hardware.thermal:fuchsia.hardware.thermal_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/driver/runtime/testing/cpp",
+        "//src/devices/bin/driver_runtime",
+        "//zircon/system/ulib/mock-function",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_unittest_package(
+    name = "thermal-cli-test",
+    unit_tests = [":thermal-cli-test-bin"],
+)

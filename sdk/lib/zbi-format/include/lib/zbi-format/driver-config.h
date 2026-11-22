@@ -97,7 +97,7 @@ typedef uint32_t zbi_kernel_driver_t;
 #define ZBI_KERNEL_DRIVER_QCOM_RNG ((zbi_kernel_driver_t)(0x474E5251u))
 
 // 'SMMU'
-#define ZBI_KERNEL_DRIVER_ARM_SMMU ((zbi_kernel_driver_t)(0x554D4D51u))
+#define ZBI_KERNEL_DRIVER_ARM_SMMU_V2 ((zbi_kernel_driver_t)(0x554D4D51u))
 
 // 'CPEM'
 #define ZBI_KERNEL_DRIVER_CPU_ENERGY_MODEL ((zbi_kernel_driver_t)(0x4d455043u))
@@ -446,7 +446,7 @@ typedef struct {
   // value packed into the lower 16 bits.
   uint32_t handoff_smr_cnt;
   uint32_t handoff_smrs[16];
-} zbi_dcfg_arm_smmu_driver_t;
+} zbi_dcfg_arm_smmu_v2_driver_t;
 
 #define ZBI_KERNEL_DRIVER_CPU_ENERGY_MODEL_MAX_OPPS ((uint32_t)(32u))
 
@@ -464,6 +464,10 @@ typedef struct {
 
   // Operating voltage in millivolts (mV).
   uint32_t voltage_mv;
+
+  // Static leakage power while clock-gated at this OPP, in microwatts (uW).
+  // Zero when uncharacterized.
+  uint32_t static_power_uw;
 } zbi_cpu_energy_model_opp_t;
 
 // Performance / Power Domain definition for CPU Energy Model.

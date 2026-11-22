@@ -9,6 +9,8 @@
 #include <lib/fit/result.h>
 #include <sched.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 
 #include <string>
 
@@ -25,6 +27,18 @@ class ForkHelper;
 #include <array>
 #include <utility>
 
+/// Returns the name of the policy file under `data/policies/` to load for the test suite.
+extern std::string GetTestPolicyName();
+
+/// Optional hook invoked once prior to loading the initial policy.
+///
+/// Only test suites that verify pre-policy-load kernel state and have few enough tests to run in a
+/// single runner invocation (<= 50 tests) may define this hook.
+[[gnu::weak]] extern void DoPrePolicyLoadWork();
+
+/// Loads the binary policy file `name` from `data/policies/` into `/sys/fs/selinux/load`.
+void LoadPolicy(const std::string& name);
+
 /// Returns true if the kernel supports the specified policy capability.
 bool IsPolicyCapSupported(const char* capability);
 
@@ -33,6 +47,11 @@ bool IsPolicyCapEnabled(const char* capability);
 
 /// Writes `data` to the file at `path`, returning the `errno` if any part of that process fails.
 fit::result<int> WriteExistingFile(const std::string& path, std::string_view data);
+
+/// Ensures that a device node exists at `path` with the given `mode` (including file type bits such
+/// as `S_IFCHR` or `S_IFBLK` and permissions) and device number `dev`, creating any missing parent
+/// directories.
+fit::result<int> EnsureDeviceNode(std::string_view path, mode_t mode, dev_t dev);
 
 /// Reads the contents of the file at `path`.
 fit::result<int, std::string> ReadFile(const std::string& path);
@@ -43,7 +62,7 @@ fit::result<int, std::string> ReadTaskAttr(std::string_view attr_name);
 /// Writes the specified security attribute (e.g. "current", "exec", etc) for the current task.
 fit::result<int> WriteTaskAttr(std::string_view attr_name, std::string_view context);
 
-/// Verifies that the `in`put string ends is empty, or ends with a trailing NUL, which is removed.
+/// Verifies that the `in`put string is empty, or ends with a trailing NUL, which is removed.
 /// If no trailing NUL is found then `EOVERFLOW` is returned, and a gTest failure added.
 fit::result<int, std::string> RemoveTrailingNul(std::string in);
 
@@ -52,7 +71,7 @@ fit::result<int, std::string> RemoveTrailingNul(std::string in);
 fit::result<int, std::string> GetLabel(int fd);
 
 /// Reads the security label of the symbolic link `fd` rather than that of the file it points to,
-//  returning the `errno` on failure.
+/// returning the `errno` on failure.
 /// The trailing NUL, if any, will be stripped before the label is returned.
 fit::result<int, std::string> GetLinkLabel(int fd);
 
@@ -78,40 +97,28 @@ fit::result<int, bool> IsSameInode(int fd_1, int fd_2);
 /// found.
 std::string MountOptionsFor(std::string_view mount_path);
 
-/// Runs the given action in a forked process after transitioning to |label|. This requires some
-/// rules to be set-up. For transitions from unconfined_t (the starting label for tests), giving
-/// them the `test_a` attribute from `test_policy.conf` is sufficient.
-template <typename T>
-::testing::AssertionResult RunSubprocessAs(std::string_view label, T action) {
-  pid_t pid = fork();
-  if (pid == 0) {
-    if (WriteTaskAttr("current", label).is_error()) {
-      _exit(1);
-    }
-    action();
-    _exit(testing::Test::HasFailure());
-  }
-  if (pid == -1) {
-    return ::testing::AssertionFailure() << "fork failed: " << strerror(errno);
-  } else {
-    int wstatus;
-    pid_t ret = waitpid(pid, &wstatus, 0);
-    if (ret == -1) {
-      return ::testing::AssertionFailure() << "waitpid failed: " << strerror(errno);
-    }
-    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
-      return ::testing::AssertionFailure()
-             << "forked process exited with status: " << WEXITSTATUS(wstatus) << " and signal "
-             << WTERMSIG(wstatus);
-    }
-    return ::testing::AssertionSuccess();
-  }
-}
-
 /// Runs in a child process the given `action` after transitioning to `label`.
 /// The process belongs to `fork_helper`.
 pid_t RunInForkedProcessWithLabel(test_helper::ForkHelper& fork_helper, std::string_view label,
                                   fit::function<void()> action);
+
+/// Runs the given action in a forked process after transitioning to `label`. This requires some
+/// rules to be set-up. For transitions from unconfined_t (the starting label for tests), giving
+/// them the `test_a` attribute from `test_policy.conf` is sufficient.
+template <typename T>
+::testing::AssertionResult RunSubprocessAs(std::string_view label, T action) {
+  test_helper::ForkHelper fork_helper;
+  fork_helper.OnlyWaitForForkedChildren();
+  pid_t pid = RunInForkedProcessWithLabel(fork_helper, label, std::move(action));
+  if (pid < 0) {
+    return ::testing::AssertionFailure() << "fork failed: " << strerror(errno);
+  }
+  if (auto wait_result = fork_helper.WaitForChildren(); !wait_result) {
+    return ::testing::AssertionFailure()
+           << "Subprocess with label \"" << label << "\" failed: " << wait_result.message();
+  }
+  return ::testing::AssertionSuccess();
+}
 
 /// Enables (or disables) enforcement while in scope, then restores enforcement to the previous
 /// state.
@@ -119,6 +126,8 @@ class ScopedEnforcement {
  public:
   static ScopedEnforcement SetEnforcing();
   static ScopedEnforcement SetPermissive();
+  ScopedEnforcement(const ScopedEnforcement&) = delete;
+  ScopedEnforcement& operator=(const ScopedEnforcement&) = delete;
   ~ScopedEnforcement();
 
  private:
@@ -126,12 +135,15 @@ class ScopedEnforcement {
   std::string previous_state_;
 };
 
+/// Restores a task security attribute (e.g. `current`, `fscreate`, `sockcreate`) to its
+/// previous value upon destruction.
 class ScopedTaskAttrResetter {
  public:
   /// Sets the specified security attribute for the current task while in scope, and restores its
-  /// previous value when deleted.  Callers should asssign the returned value and
-  /// `ASSERT_TRUE(is_ok())`.
+  /// previous value when deleted.
   static ScopedTaskAttrResetter SetTaskAttr(std::string_view attr_name, std::string_view new_value);
+  ScopedTaskAttrResetter(const ScopedTaskAttrResetter&) = delete;
+  ScopedTaskAttrResetter& operator=(const ScopedTaskAttrResetter&) = delete;
   ~ScopedTaskAttrResetter();
 
  private:

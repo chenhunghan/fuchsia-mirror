@@ -262,38 +262,36 @@ std::optional<fidl::SyncClient<fuchsia_net_interfaces_admin::Control>> GetInterf
 }
 
 // A client of the `fuchsia.net.interfaces.admin/Control` protocol that is
-// somewhat agnostic to FIDL bindings (e.g. HLCPP vs LLCPP).
+// somewhat agnostic to FIDL bindings (e.g. HLCPP vs new C++).
 //
 // When Constructed, it takes the `zx::channel` from the given `ControlSyncPtr`
-// (HLCPP) and uses it to create a `fidl::SyncClient` (LLCPP).
+// (HLCPP) and uses it to create a `fidl::SyncClient` (new C++).
 //
 // When Destructed, it takes the `zx::channel` from the `fidl::SyncClient`
-// (LLCPP), and rebinds it to the original `ControlSyncPtr` (HLCPP).
-class LlcppControlClientFromHlcpp {
+// (new C++), and rebinds it to the original `ControlSyncPtr` (HLCPP).
+class FidlSyncClientFromHlcpp {
  public:
   // Constructor takes the `zx::channel` from the hlcpp_client.
-  LlcppControlClientFromHlcpp(fuchsia::net::interfaces::admin::ControlSyncPtr *hlcpp_client) {
+  FidlSyncClientFromHlcpp(fuchsia::net::interfaces::admin::ControlSyncPtr *hlcpp_client) {
     hlcpp_client_ = hlcpp_client;
-    llcpp_client_ = fidl::SyncClient<fuchsia_net_interfaces_admin::Control>(
+    sync_client_ = fidl::SyncClient<fuchsia_net_interfaces_admin::Control>(
         fidl::ClientEnd<fuchsia_net_interfaces_admin::Control>(
             hlcpp_client_->Unbind().TakeChannel()));
   }
 
   // Destructor returns the `zx::channel` to the hlcpp_client.
-  ~LlcppControlClientFromHlcpp() {
-    hlcpp_client_->Bind(llcpp_client_.TakeClientEnd().TakeChannel());
-  }
+  ~FidlSyncClientFromHlcpp() { hlcpp_client_->Bind(sync_client_.TakeClientEnd().TakeChannel()); }
 
-  const fidl::SyncClient<fuchsia_net_interfaces_admin::Control> &Get() { return llcpp_client_; }
+  const fidl::SyncClient<fuchsia_net_interfaces_admin::Control> &Get() { return sync_client_; }
 
  private:
   // The HLCPP client whose `zx::channel` is taken when this object is
   // constructed. The `zx::channel` is rebound to the HLCPP client when this
   // object is destructed.
   fuchsia::net::interfaces::admin::ControlSyncPtr *hlcpp_client_;
-  // The LLCPP client that holds the `zx::channel` throughout the lifetime of
+  // The FIDL SyncClient that holds the `zx::channel` throughout the lifetime of
   // this object.
-  fidl::SyncClient<fuchsia_net_interfaces_admin::Control> llcpp_client_;
+  fidl::SyncClient<fuchsia_net_interfaces_admin::Control> sync_client_;
 };
 
 // A Handler for `fuchsia.net.interfaces.admin/AddressStateProvider` events.
@@ -471,9 +469,8 @@ PlatformResult AddTunnelAddress(uint64_t interface_id, const Inet::IPAddress &ad
     return kPlatformResultFailure;
   }
   // When dropped, returns the `zx_channel` to `hlcpp_control_client`.
-  LlcppControlClientFromHlcpp llcpp_control_client =
-      LlcppControlClientFromHlcpp(hlcpp_control_client);
-  return AddAddressInternal(interface_id, address, prefix_length, llcpp_control_client.Get());
+  FidlSyncClientFromHlcpp sync_control_client = FidlSyncClientFromHlcpp(hlcpp_control_client);
+  return AddAddressInternal(interface_id, address, prefix_length, sync_control_client.Get());
 }
 
 // Add or remove an address attached to the Thread or WLAN interfaces.

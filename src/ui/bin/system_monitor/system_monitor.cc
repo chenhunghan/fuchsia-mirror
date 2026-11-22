@@ -4,11 +4,11 @@
 
 #include "src/ui/bin/system_monitor/system_monitor.h"
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
 #include <lib/async/cpp/task.h>
 #include <lib/async/default.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/stdcompat/string_view.h>
-#include <lib/sys/cpp/service_directory.h>
 #include <lib/syslog/cpp/macros.h>
 
 #include <algorithm>
@@ -17,7 +17,6 @@
 #include <string>
 
 #include "rapidjson/schema.h"
-#include "src/lib/fsl/vmo/strings.h"
 #include "src/lib/json_parser/json_parser.h"
 
 namespace system_monitor {
@@ -27,38 +26,57 @@ constexpr zx::duration kPrintFrequency = zx::sec(10);
 constexpr char kCpuData[] = "CPU MEAN ";
 
 SystemMonitor::SystemMonitor() {
-  params_ = fuchsia::diagnostics::StreamParameters();
-  params_.set_stream_mode(fuchsia::diagnostics::StreamMode::SNAPSHOT);
-  params_.set_data_type(fuchsia::diagnostics::DataType::INSPECT);
-  params_.set_format(fuchsia::diagnostics::Format::JSON);
-  params_.set_client_selector_configuration(
-      fuchsia::diagnostics::ClientSelectorConfiguration::WithSelectAll(true));
+  params_ = fuchsia_diagnostics::StreamParameters{{
+      .data_type = fuchsia_diagnostics::DataType::kInspect,
+      .stream_mode = fuchsia_diagnostics::StreamMode::kSnapshot,
+      .format = fuchsia_diagnostics::Format::kJson,
+      .client_selector_configuration =
+          fuchsia_diagnostics::ClientSelectorConfiguration::WithSelectAll(true),
+  }};
 }
 
 void SystemMonitor::ConnectToArchiveAccessor() {
-  auto services = sys::ServiceDirectory::CreateFromNamespace();
-  services->Connect(accessor_.NewRequest());
+  zx::result client_end = component::Connect<fuchsia_diagnostics::ArchiveAccessor>();
+  if (client_end.is_error()) {
+    FX_PLOGS(ERROR, client_end.status_value()) << "Failed to connect to ArchiveAccessor";
+    return;
+  }
+  accessor_ = fidl::SyncClient(std::move(*client_end));
 }
 
 void SystemMonitor::InitializeRenderer() { renderer_.Initialize(); }
 
 void SystemMonitor::UpdateRecentDiagnostic() {
-  accessor_->StreamDiagnostics(std::move(params_), iterator_.NewRequest());
-  iterator_->GetNext(&iterator_result_);
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_diagnostics::BatchIterator>::Create();
+  fit::result<fidl::OneWayError> stream_result = accessor_->StreamDiagnostics(
+      {{.stream_parameters = params_, .result_stream = std::move(server_end)}});
+  if (stream_result.is_error()) {
+    FX_LOGS(WARNING) << "Failed to call StreamDiagnostics: " << stream_result.error_value();
+  }
+  iterator_ = fidl::SyncClient(std::move(client_end));
+  fidl::Result<fuchsia_diagnostics::BatchIterator::GetNext> result = iterator_->GetNext();
+  if (result.is_error()) {
+    // Keep the previous batch, if any.
+    FX_LOGS(WARNING) << "Failed to get the next batch of Inspect data: " << result.error_value();
+    return;
+  }
+  batch_ = std::move(result->batch());
 }
 
 std::vector<std::string> SystemMonitor::ParseBatch(
-    const std::vector<fuchsia::diagnostics::FormattedContent>& batch) {
+    const std::vector<fuchsia_diagnostics::FormattedContent>& batch) {
   std::vector<std::string> recent_diagnostics;
   for (auto& content : batch) {
-    if (!content.is_json()) {
+    if (content.Which() != fuchsia_diagnostics::FormattedContent::Tag::kJson) {
       FX_LOGS(WARNING) << "Invalid JSON Inspect content, skipping";
       continue;
     }
-    if (std::string json; fsl::StringFromVmo(content.json(), &json)) {
+    const fuchsia_mem::Buffer& buffer = content.json().value();
+    std::string json(buffer.size(), '\0');
+    if (zx_status_t status = buffer.vmo().read(json.data(), 0, buffer.size()); status == ZX_OK) {
       recent_diagnostics.push_back(std::move(json));
     } else {
-      FX_LOGS(WARNING) << "Failed to convert Inspect content to string, skipping";
+      FX_PLOGS(WARNING, status) << "Failed to convert Inspect content to string, skipping";
     }
   }
   return recent_diagnostics;
@@ -74,11 +92,10 @@ std::string SystemMonitor::GetTargetFromDiagnostics(std::vector<std::string> rec
 }
 
 std::string SystemMonitor::GetCPUData() {
-  auto& batch = iterator_result_.response().batch;
-  if (batch.empty()) {
+  if (batch_.empty()) {
     return "";
   }
-  return GetTargetFromDiagnostics(ParseBatch(std::move(batch)));
+  return GetTargetFromDiagnostics(ParseBatch(batch_));
 }
 
 void SystemMonitor::PrintRecentDiagnostic() {

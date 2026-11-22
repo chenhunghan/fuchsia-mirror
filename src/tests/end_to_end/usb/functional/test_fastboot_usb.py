@@ -43,7 +43,6 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
             await usb_lib.recover_to_fuchsia_mode(
                 self.dut,
                 usb_power_hub=self._usb_power_hub,
-                usb_port=self._usb_port,
                 timeout_sec=60,
             )
         except Exception as e:
@@ -57,7 +56,6 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
         await usb_lib.reboot_to_fastboot_mode(
             self.dut,
             usb_power_hub=self._usb_power_hub,
-            usb_port=self._usb_port,
             timeout_sec=30,
         )
 
@@ -124,7 +122,6 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
         await usb_lib.recover_to_fuchsia_mode(
             self.dut,
             usb_power_hub=self._usb_power_hub,
-            usb_port=self._usb_port,
             timeout_sec=60,
         )
 
@@ -136,7 +133,6 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
         await usb_lib.reboot_to_fastboot_mode(
             self.dut,
             usb_power_hub=self._usb_power_hub,
-            usb_port=self._usb_port,
             timeout_sec=30,
         )
 
@@ -151,7 +147,6 @@ class UsbFastbootTest(usb_lib.UsbPowerHubBaseTest):
         await usb_lib.recover_to_fuchsia_mode(
             self.dut,
             usb_power_hub=self._usb_power_hub,
-            usb_port=self._usb_port,
             timeout_sec=60,
         )
 

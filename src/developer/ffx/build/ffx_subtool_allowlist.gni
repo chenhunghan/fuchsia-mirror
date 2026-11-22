@@ -6,6 +6,8 @@
 # be depended on by a ffx plugin/subtool.
 # TODO(https://fxbug.dev/42081073): Stabilize these and remove this list.
 ffx_subtool_fidl_partner_unstable_allowlist = [
+  "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework",
+  "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token",
   "//sdk/fidl/fuchsia.power.broker:fuchsia.power.broker",
   "//sdk/fidl/fuchsia.hardware.power.battery:fuchsia.hardware.power.battery",
   "//sdk/fidl/fuchsia.hardware.power.source:fuchsia.hardware.power.source",
@@ -17,7 +19,11 @@ ffx_subtool_fidl_partner_unstable_allowlist = [
 
   "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block",
   "//sdk/fidl/fuchsia.hardware.block.volume:fuchsia.hardware.block.volume",
+
+  # used by ffx net
+  "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf",
   "//sdk/fidl/fuchsia.net.matchers:fuchsia.net.matchers",
+  "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources",
 ]
 
 # Unstable FIDL libraries that are not in "host_tool" or greater but are
@@ -61,7 +67,6 @@ ffx_subtool_fidl_allowlist = [
   "//sdk/fidl/fuchsia.net.dhcpv6:fuchsia.net.dhcpv6",
 
   # used by ffx net
-  "//sdk/fidl/fuchsia.ebpf:fuchsia.ebpf",
   "//sdk/fidl/fuchsia.net.filter:fuchsia.net.filter",
   "//sdk/fidl/fuchsia.net.interfaces.admin:fuchsia.net.interfaces.admin",
   "//sdk/fidl/fuchsia.net.neighbor:fuchsia.net.neighbor",
@@ -109,6 +114,10 @@ ffx_subtool_fidl_allowlist = [
   "//sdk/fidl/fuchsia.wlan.device.service:fuchsia.wlan.device.service",
   "//sdk/fidl/fuchsia.wlan.internal:fuchsia.wlan.internal",
   "//sdk/fidl/fuchsia.wlan.sme:fuchsia.wlan.sme",
+
+  # Used by Honeydew for Thread/LoWPAN testing
+  "//sdk/fidl/fuchsia.factory.lowpan:fuchsia.factory.lowpan",
+  "//sdk/fidl/fuchsia.lowpan.experimental:fuchsia.lowpan.experimental",
 
   # Used by Honeydew for input injection testing
   "//src/testing/sl4f/fidl:fuchsia.test.audio",

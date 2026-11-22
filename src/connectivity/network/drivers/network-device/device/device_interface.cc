@@ -1891,15 +1891,6 @@ void DeviceInterface::PruneDeadSession() __TA_REQUIRES_SHARED(control_lock_) {
   if (!session_->IsDying()) {
     return;
   }
-  // The session is marked as dying before its rx path is purged in
-  // NotifyDeadSession. Until then the rx queue may still hand buffers from this
-  // session to the device, raising the in-flight rx count after it was observed
-  // to be zero. NotifyDeadSession calls back into PruneDeadSession once the rx
-  // path has been purged.
-  if (!session_->IsRxPurged()) {
-    LOGF_TRACE("%s: %s rx path not yet purged", __FUNCTION__, session_->name());
-    return;
-  }
   if (!pending_prepare_vmos_.is_empty() || !pending_release_vmos_.is_empty()) {
     LOGF_TRACE("%s: VMO operations still pending", __FUNCTION__);
     return;

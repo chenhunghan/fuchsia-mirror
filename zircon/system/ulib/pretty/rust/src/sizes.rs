@@ -240,6 +240,14 @@ impl FormattedBytes {
         res
     }
 
+    /// Construct a string representing the given size, using the unit character `unit` (see
+    /// `format_size_fixed_rs`). Unknown units fall back to a natural unit with a `?` prefix.
+    pub fn with_raw_unit(bytes: usize, unit: u8) -> Self {
+        let mut res = Self::empty();
+        res.set_size_with_raw_unit(bytes, unit);
+        res
+    }
+
     /// Update the string to the given size, choosing an appropriate unit automatically.
     pub fn set_size(&mut self, bytes: usize) -> &mut Self {
         let s = format_size_rs(&mut self.buf, bytes);
@@ -249,7 +257,13 @@ impl FormattedBytes {
 
     /// Update the string to the given size, using the given unit.
     pub fn set_size_with_unit(&mut self, bytes: usize, unit: SizeUnit) -> &mut Self {
-        let s = format_size_fixed_rs(&mut self.buf, bytes, unit as u8);
+        self.set_size_with_raw_unit(bytes, unit as u8)
+    }
+
+    /// Update the string to the given size, using the unit character `unit` (see
+    /// `format_size_fixed_rs`). Unknown units fall back to a natural unit with a `?` prefix.
+    pub fn set_size_with_raw_unit(&mut self, bytes: usize, unit: u8) -> &mut Self {
+        let s = format_size_fixed_rs(&mut self.buf, bytes, unit);
         self.len = s.len();
         self
     }
@@ -700,5 +714,20 @@ mod tests {
         assert_eq!(fb_unit.as_str(), "1024K");
         assert_eq!(fb_unit.magnitude(), "1024");
         assert_eq!(fb_unit.unit(), SizeUnit::KiB);
+
+        // A known raw unit byte behaves exactly like the matching `SizeUnit`.
+        let fb_raw = FormattedBytes::with_raw_unit(1024 * 1024, b'K');
+        assert_eq!(fb_raw.as_str(), fb_unit.as_str());
+        assert_eq!(fb_raw.unit(), SizeUnit::KiB);
+
+        // An unknown raw unit byte falls back to a natural unit with a '?' prefix.
+        let fb_unknown = FormattedBytes::with_raw_unit(1, b'q');
+        assert_eq!(fb_unknown.as_str(), "?1B");
+
+        let mut fb_set = FormattedBytes::empty();
+        fb_set.set_size_with_raw_unit(1024 * 1024, b'K');
+        assert_eq!(fb_set.as_str(), "1024K");
+        fb_set.set_size_with_raw_unit(1, b'q');
+        assert_eq!(fb_set.as_str(), "?1B");
     }
 }

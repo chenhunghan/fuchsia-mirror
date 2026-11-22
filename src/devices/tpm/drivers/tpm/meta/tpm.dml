@@ -8,6 +8,13 @@
         colocate: "true",
         compat: "driver/tpm-driver.so",
         default_dispatcher_opts: [ "allow_sync_calls" ],
-        bind: { banjo: "fuchsia.tpm.BIND_PROTOCOL.IMPL" },
+        bind: { service: "fuchsia.hardware.tpmimpl.Service" },
     },
+    use: [
+        {
+            name: "default",
+            service: "fuchsia.hardware.tpmimpl.Service",
+            generate_bind_rule: false,
+        },
+    ],
 }

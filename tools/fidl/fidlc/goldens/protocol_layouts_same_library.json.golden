@@ -21,7 +21,7 @@
     {
       "name": "test.protocollayoutssamelibrary/ComposedProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 11,
         "column": 17,
         "length": 16
@@ -36,7 +36,7 @@
           "name": "OneWayAnonComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 12,
             "column": 12,
             "length": 18
@@ -67,7 +67,7 @@
           "name": "TwoWayAnonComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 15,
             "column": 12,
             "length": 18
@@ -112,7 +112,7 @@
           "name": "TwoWayAnonComposedWithError",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 20,
             "column": 12,
             "length": 27
@@ -184,7 +184,7 @@
           "name": "OnAnonComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 25,
             "column": 15,
             "length": 14
@@ -215,7 +215,7 @@
           "name": "OneWayNamedComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 29,
             "column": 12,
             "length": 19
@@ -246,7 +246,7 @@
           "name": "TwoWayNamedComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 30,
             "column": 12,
             "length": 19
@@ -291,7 +291,7 @@
           "name": "TwoWayNamedComposedWithError",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 31,
             "column": 12,
             "length": 28
@@ -363,7 +363,7 @@
           "name": "OnNamedComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 32,
             "column": 15,
             "length": 15
@@ -393,7 +393,7 @@
     {
       "name": "test.protocollayoutssamelibrary/MainProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 36,
         "column": 17,
         "length": 12
@@ -404,7 +404,7 @@
         {
           "name": "test.protocollayoutssamelibrary/ComposedProtocol",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 38,
             "column": 13,
             "length": 16
@@ -419,7 +419,7 @@
           "name": "OneWayAnonComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 12,
             "column": 12,
             "length": 18
@@ -450,7 +450,7 @@
           "name": "TwoWayAnonComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 15,
             "column": 12,
             "length": 18
@@ -495,7 +495,7 @@
           "name": "TwoWayAnonComposedWithError",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 20,
             "column": 12,
             "length": 27
@@ -567,7 +567,7 @@
           "name": "OnAnonComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 25,
             "column": 15,
             "length": 14
@@ -598,7 +598,7 @@
           "name": "OneWayNamedComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 29,
             "column": 12,
             "length": 19
@@ -629,7 +629,7 @@
           "name": "TwoWayNamedComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 30,
             "column": 12,
             "length": 19
@@ -674,7 +674,7 @@
           "name": "TwoWayNamedComposedWithError",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 31,
             "column": 12,
             "length": 28
@@ -746,7 +746,7 @@
           "name": "OnNamedComposed",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 32,
             "column": 15,
             "length": 15
@@ -777,7 +777,7 @@
           "name": "OneWayLocal",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 41,
             "column": 12,
             "length": 11
@@ -808,7 +808,7 @@
           "name": "TwoWayLocal",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 42,
             "column": 12,
             "length": 11
@@ -853,7 +853,7 @@
           "name": "TwoWayLocalWithError",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 43,
             "column": 12,
             "length": 20
@@ -925,7 +925,7 @@
           "name": "OnLocal",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 44,
             "column": 15,
             "length": 7
@@ -956,7 +956,7 @@
           "name": "OneWayAnon",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 47,
             "column": 12,
             "length": 10
@@ -987,7 +987,7 @@
           "name": "TwoWayAnon",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 50,
             "column": 12,
             "length": 10
@@ -1032,7 +1032,7 @@
           "name": "TwoWayAnonWithError",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 55,
             "column": 12,
             "length": 19
@@ -1104,7 +1104,7 @@
           "name": "OnAnon",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 60,
             "column": 15,
             "length": 6
@@ -1144,7 +1144,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 12,
         "column": 31,
         "length": 34
@@ -1168,7 +1168,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 13,
             "column": 12,
             "length": 1
@@ -1196,7 +1196,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 17,
         "column": 12,
         "length": 34
@@ -1220,7 +1220,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 18,
             "column": 12,
             "length": 1
@@ -1248,7 +1248,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 20,
         "column": 40,
         "length": 34
@@ -1272,7 +1272,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 21,
             "column": 12,
             "length": 1
@@ -1300,7 +1300,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 47,
         "column": 23,
         "length": 34
@@ -1324,7 +1324,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 48,
             "column": 12,
             "length": 1
@@ -1352,7 +1352,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 52,
         "column": 12,
         "length": 34
@@ -1376,7 +1376,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 53,
             "column": 12,
             "length": 1
@@ -1404,7 +1404,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 55,
         "column": 32,
         "length": 34
@@ -1428,7 +1428,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 56,
             "column": 12,
             "length": 1
@@ -1454,7 +1454,7 @@
         "TablePayload"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 3,
         "column": 6,
         "length": 12
@@ -1478,7 +1478,7 @@
           },
           "name": "a",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 4,
             "column": 8,
             "length": 1
@@ -1508,7 +1508,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 25,
         "column": 30,
         "length": 39
@@ -1532,7 +1532,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 26,
             "column": 12,
             "length": 1
@@ -1561,7 +1561,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 15,
         "column": 31,
         "length": 39
@@ -1585,7 +1585,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 16,
             "column": 12,
             "length": 1
@@ -1615,7 +1615,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 22,
         "column": 12,
         "length": 39
@@ -1639,7 +1639,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 23,
             "column": 12,
             "length": 1
@@ -1668,7 +1668,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 22,
         "column": 11,
         "length": 41
@@ -1746,7 +1746,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 31,
         "column": 58,
         "length": 14
@@ -1824,7 +1824,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 60,
         "column": 22,
         "length": 41
@@ -1848,7 +1848,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 61,
             "column": 12,
             "length": 1
@@ -1877,7 +1877,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 50,
         "column": 23,
         "length": 41
@@ -1901,7 +1901,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 51,
             "column": 12,
             "length": 1
@@ -1931,7 +1931,7 @@
         "response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 57,
         "column": 12,
         "length": 41
@@ -1955,7 +1955,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 58,
             "column": 12,
             "length": 1
@@ -1984,7 +1984,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 57,
         "column": 11,
         "length": 43
@@ -2062,7 +2062,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 43,
         "column": 50,
         "length": 14
@@ -2138,7 +2138,7 @@
         "UnionPayload"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
         "line": 7,
         "column": 6,
         "length": 12
@@ -2162,7 +2162,7 @@
             }
           },
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/protocol_layouts_same_library/example.test.fidl",
             "line": 8,
             "column": 8,
             "length": 1

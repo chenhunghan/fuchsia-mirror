@@ -46,7 +46,7 @@ static bool on_device(device_info_t* device, void* cookie) {
 
 static void usage(void) {
   fprintf(stderr, "usage: %s [options] [hostname]\n", appname);
-  netboot_usage(false);
+  netboot_usage();
   fprintf(stderr, "    --local           Print local address that routes to remote.\n");
 }
 

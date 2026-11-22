@@ -31,7 +31,7 @@ rustc_test(
         "//sdk/rust/zx",
         "//src/lib/fuchsia",
         "//src/lib/fuchsia-async",
-        "//src/lib/fuchsia-component-test:fuchsia-component-test-lib",  # @bazel2gn:path_overwrite://src/lib/fuchsia-component-test
+        "//src/lib/fuchsia-component-test",
         "//src/lib/fuchsia-runtime",
         "//src/sys/component_manager/tests/fidl:components_rust",
         "//src/sys/lib/component-events",

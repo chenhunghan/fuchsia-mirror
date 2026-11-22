@@ -300,7 +300,7 @@ int main(int argc, char** argv) {
   }
 
   FILE* output_file = fopen(arg_output_file, "w");
-  if (!data_input) {
+  if (!output_file) {
     fprintf(stderr, "Failed to open output file: %s\n", arg_output_file);
     return 2;
   }

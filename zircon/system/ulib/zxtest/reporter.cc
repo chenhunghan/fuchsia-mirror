@@ -7,7 +7,6 @@
 
 #include <utility>
 
-#include <fbl/string_printf.h>
 #include <zxtest/base/reporter.h>
 #include <zxtest/base/runner.h>
 
@@ -146,10 +145,8 @@ void Reporter::OnTestSkip(const TestCase& test_case, const TestInfo& test) {
 
 void Reporter::OnTestFailure(const TestCase& test_case, const TestInfo& test) {
   int64_t elapsed_time = timers_.test.GetElapsedTime();
-  char buffer[test_case.name().size() + test.name().size() + 2];
-  sprintf(buffer, "%s.%s", test_case.name().c_str(), test.name().c_str());
   iteration_summary_.failed++;
-  iteration_summary_.failed_tests.push_back(buffer);
+  iteration_summary_.failed_tests.push_back(test_case.name() + '.' + test.name());
   log_sink_->Write("[  FAILED  ] %s.%s (%" PRIi64 " ms)\n", test_case.name().c_str(),
                    test.name().c_str(), elapsed_time);
   log_sink_->Flush();

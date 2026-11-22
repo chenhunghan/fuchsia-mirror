@@ -91,15 +91,14 @@ if (is_fuchsia) {
     edition = "2024"
     visibility = [
       ":*",
-      "//src/connectivity/bluetooth/lib/bt-hfp:*",
-      "//src/connectivity/bluetooth/profiles/bt-hfp-hands-free:*",
-      "//src/connectivity/bluetooth/profiles/bt-hid:*",
+      "//src/connectivity/bluetooth/*",
     ]
     deps = [
       ":profile-client",
       "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
       "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
       "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+      "//src/connectivity/bluetooth/testing/bt-channel-test-support",
       "//src/lib/fidl/rust/fidl",
       "//third_party/rust_crates:futures",
     ]

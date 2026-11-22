@@ -2,19 +2,31 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-cc_library(
+fx_cc_library(
     name = "range",
     srcs = ["range.cc"],
     hdrs = [
         "interval-tree.h",
         "range.h",
     ],
-    target_compatible_with = ["@platforms//os:fuchsia"],
+    visibility = [
+        "//src/storage/bin/fvm:__pkg__",
+        "//src/storage/fvm:__pkg__",
+        "//src/storage/gpt:__pkg__",
+        "//src/storage/lib:__subpackages__",
+        "//src/storage/minfs:__pkg__",
+    ],
+    deps = [
+        # Needed on host for <zircon/assert.h> and __zx_panic(); in GN,
+        # //zircon/system/public provides a legacy symlink to zircon/assert.h.
+        "//sdk/lib/zircon-assert",
+        # On Fuchsia, //zircon/system/public would shadow the sysroot's
+        # <zircon/syscalls.h> without the generated syscalls/gen/*.inc files.
+        "//src/zircon/lib/zircon:headers",  # @bazel2gn:path_overwrite://zircon/system/public
+    ],
+    alwayslink = True,
 )

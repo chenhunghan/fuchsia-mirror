@@ -122,12 +122,12 @@ ErrOrValueVector ResolveStaticArray(const ExprValue& array, const ArrayInfo& inf
     // Describe the source of this data.
     ExprValueSource source = array.source();
     if (source.type() == ExprValueSource::Type::kMemory) {
-      source = source.GetOffsetInto(begin_offset);
+      source = source.GetOffsetInto(static_cast<uint32_t>(begin_offset));
     } else if (source.type() == ExprValueSource::Type::kRegister) {
       // Vector register, compute the bit shifts for this subset. This assumes little-endian
       // so we can compute the bit shifts to write to the register from the left.
       source = ExprValueSource(source.register_id(), type_size * 8,
-                               source.bit_shift() + (begin_offset * 8));
+                               source.bit_shift() + static_cast<uint32_t>(begin_offset * 8));
     }
     // else keep as original temporary/constant source.
 
@@ -162,7 +162,7 @@ void ResolvePointerArray(const fxl::RefPtr<EvalContext>& eval_context, const Exp
   TargetPointer end_address = base_address + type_size * end_index;
 
   eval_context->GetDataProvider()->GetMemoryAsync(
-      begin_address, end_address - begin_address,
+      begin_address, static_cast<uint32_t>(end_address - begin_address),
       [begin_address, type, count = end_index - begin_index, cb = std::move(cb)](
           const Err& err, std::vector<uint8_t> data) mutable {
         if (err.has_error())

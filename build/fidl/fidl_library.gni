@@ -5,6 +5,7 @@
 import("//build/config/fuchsia/platform_version.gni")
 import("//build/config/fuchsia/target_api_level.gni")
 import("//build/fidl/fidl_ir.gni")
+import("//build/fidl/fidl_summary.gni")
 import("//build/fidl/toolchain.gni")
 import("//build/json/validate_json.gni")
 import("//build/sdk/plasa/plasa_fragment_fidl.gni")
@@ -74,6 +75,7 @@ template("fidl_library") {
   library_name = invoker.library_name
 
   compilation_target_name = "${target_name}_compile"
+  summary_target_name = "${compilation_target_name}_summary_json"
   verification_target_name = "${target_name}_verify"
   plasa_fragment_target_name = "${target_name}_plasa"
   lint_target_name = "${target_name}_lint"
@@ -362,33 +364,47 @@ template("fidl_library") {
     # metadata generation, linting, etc. See https://fxbug.dev/381123422.
     visibility = [
       ":${main_target_name}",
-      ":${plasa_fragment_target_name}",
+      ":${summary_target_name}",
       ":${verification_target_name}",
     ]
     fidl_target_name = main_target_name
     fidl_library_name = library_name
     gen_dir = target_gen_dir
     json_representation = invoker.fidl_ir_json
-    out_json_summary = summary_file_json
     versioned = fidlc_versioned_arg
     if (!defined(available)) {
       available = [ "fuchsia:$fidl_target_api_levels" ]
     }
-    validations = [ ":${verification_target_name}" ]
+    validations = [
+      ":${summary_target_name}",
+      ":${verification_target_name}",
+    ]
   }
 
   # LINT.ThenChange(//build/bazel/rules/fidl/fidl_library.bzl:ir_compilation)
+
+  fidl_summary_json(summary_target_name) {
+    forward_variables_from(invoker, [ "applicable_licenses" ])
+    testonly = testonly
+    visibility = [ ":*" ]
+    inputs = [ invoker.fidl_ir_json ]
+    outputs = [ summary_file_json ]
+    deps = [ ":$compilation_target_name" ]
+  }
 
   plasa_fragment_fidl(plasa_fragment_target_name) {
     testonly = testonly
     visibility = [ ":*" ]
     fragment_file = summary_file_json
     dest = "fidl"
-    deps = [ ":$compilation_target_name" ]
+    deps = [ ":$summary_target_name" ]
   }
 
   # Additional dependencies to add when this target is published in an SDK.
-  sdk_atom_deps = [ ":$plasa_fragment_target_name" ]
+  sdk_atom_deps = [
+    ":$plasa_fragment_target_name",
+    ":$summary_target_name",
+  ]
 
   # LINT.IfChange(lint)
   action(lint_target_name) {
@@ -427,14 +443,9 @@ template("fidl_library") {
         filter_include(
             [ get_label_info(":${target_name}", "label_no_toolchain") ],
             [
-              "//sdk/lib/fidl/cpp/tests/*",
               "//sdk/testing/fidl:*",
               "//sdk/testing/fidl/protocols_tests:*",
-              "//sdk/testing/fidl/types_tests:*",
               "//src/devices/tools/fidlgen_banjo/tests/fidl:*",
-              "//src/lib/fidl/c/walker_tests:*",
-              "//src/lib/fidl/llcpp/tests/*",
-              "//src/lib/fidl/rust/external_tests:*",
               "//src/tests/benchmarks/fidl/benchmark_suite:*",
               "//src/tests/fidl/*",
               "//tools/fidl/fidlc/testdata:*",
@@ -616,7 +627,7 @@ template("fidl_library") {
       ":$lint_target_name",
     ]
 
-    deps = [ ":$plasa_fragment_target_name" ] + category_allowlist_deps
+    deps = category_allowlist_deps
   }
 
   # LINT.IfChange(idk_atom)

@@ -4,13 +4,14 @@
 
 use anyhow::{Result, format_err};
 use async_utils::hanging_get::client::HangingGetStream;
+use fidl_fuchsia_bluetooth_hfp as hfp;
+use fuchsia_async as fasync;
 use fuchsia_async::Task;
 use fuchsia_sync::Mutex;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use {fidl_fuchsia_bluetooth_hfp as hfp, fuchsia_async as fasync};
 
 pub type LocalCallId = u64;
 
@@ -83,6 +84,9 @@ impl CallProxyTask {
             };
 
             self.handle_new_call_state(new_call_state);
+            if new_call_state == hfp::CallState::Terminated {
+                return Ok(());
+            }
         }
     }
 

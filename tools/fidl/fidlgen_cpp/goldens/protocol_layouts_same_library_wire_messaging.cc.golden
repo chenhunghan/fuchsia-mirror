@@ -1113,7 +1113,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::ComposedProtocol::OneWayAnonComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::ComposedProtocolOneWayAnonComposedRequest ComposedProtocolOneWayAnonComposedRequest)
     : body(::test_protocollayoutssamelibrary::wire::ComposedProtocolOneWayAnonComposedRequest { ComposedProtocolOneWayAnonComposedRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayAnonComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1140,7 +1140,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedRequest ComposedProtocolTwoWayAnonComposedRequest)
     : body(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedRequest { ComposedProtocolTwoWayAnonComposedRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1165,7 +1165,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposed>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedResponse ComposedProtocolTwoWayAnonComposedResponse)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposed>(ComposedProtocolTwoWayAnonComposedResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposed>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposed_DynamicFlags);
@@ -1214,7 +1214,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposedWithError>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorRequest ComposedProtocolTwoWayAnonComposedWithErrorRequest)
     : body(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorRequest { ComposedProtocolTwoWayAnonComposedWithErrorRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1239,7 +1239,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposedWithError>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorResult ComposedProtocolTwoWayAnonComposedWithErrorResult)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposedWithError>(ComposedProtocolTwoWayAnonComposedWithErrorResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayAnonComposedWithError>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayAnonComposedWithError_DynamicFlags);
@@ -1284,7 +1284,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::ComposedProtocol::OnAnonComposed>::TransactionalEvent(::test_protocollayoutssamelibrary::wire::ComposedProtocolOnAnonComposedRequest ComposedProtocolOnAnonComposedRequest)
     : body{ ComposedProtocolOnAnonComposedRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OnAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OnAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OnAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OnAnonComposed_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::ComposedProtocol::OnAnonComposed>::TransactionalEvent() {
@@ -1315,7 +1315,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::ComposedProtocol::OneWayNamedComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::test_protocollayoutssamelibrary::wire::TablePayload { TablePayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OneWayNamedComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1342,7 +1342,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::UnionPayload UnionPayload)
     : body(::test_protocollayoutssamelibrary::wire::UnionPayload { UnionPayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1367,7 +1367,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposed>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposed>(TablePayload)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposed>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposed_DynamicFlags);
@@ -1416,7 +1416,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposedWithError>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::test_protocollayoutssamelibrary::wire::TablePayload { TablePayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -1441,7 +1441,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposedWithError>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayNamedComposedWithErrorResult ComposedProtocolTwoWayNamedComposedWithErrorResult)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposedWithError>(ComposedProtocolTwoWayNamedComposedWithErrorResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::ComposedProtocol::TwoWayNamedComposedWithError>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_TwoWayNamedComposedWithError_DynamicFlags);
@@ -1486,7 +1486,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWay
 
     ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::ComposedProtocol::OnNamedComposed>::TransactionalEvent(::test_protocollayoutssamelibrary::wire::UnionPayload UnionPayload)
     : body{ UnionPayload } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OnNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OnNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kComposedProtocol_OnNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kComposedProtocol_OnNamedComposed_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::ComposedProtocol::OnNamedComposed>::TransactionalEvent() {
@@ -3888,7 +3888,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::OneWayAnonComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::ComposedProtocolOneWayAnonComposedRequest ComposedProtocolOneWayAnonComposedRequest)
     : body(::test_protocollayoutssamelibrary::wire::ComposedProtocolOneWayAnonComposedRequest { ComposedProtocolOneWayAnonComposedRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnonComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -3915,7 +3915,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedRequest ComposedProtocolTwoWayAnonComposedRequest)
     : body(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedRequest { ComposedProtocolTwoWayAnonComposedRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -3940,7 +3940,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposed>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedResponse ComposedProtocolTwoWayAnonComposedResponse)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposed>(ComposedProtocolTwoWayAnonComposedResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposed>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposed_DynamicFlags);
@@ -3989,7 +3989,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposedWithError>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorRequest ComposedProtocolTwoWayAnonComposedWithErrorRequest)
     : body(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorRequest { ComposedProtocolTwoWayAnonComposedWithErrorRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4014,7 +4014,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposedWithError>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayAnonComposedWithErrorResult ComposedProtocolTwoWayAnonComposedWithErrorResult)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposedWithError>(ComposedProtocolTwoWayAnonComposedWithErrorResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonComposedWithError>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonComposedWithError_DynamicFlags);
@@ -4059,7 +4059,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnAnonComposed>::TransactionalEvent(::test_protocollayoutssamelibrary::wire::ComposedProtocolOnAnonComposedRequest ComposedProtocolOnAnonComposedRequest)
     : body{ ComposedProtocolOnAnonComposedRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnonComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnonComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnonComposed_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnAnonComposed>::TransactionalEvent() {
@@ -4090,7 +4090,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::OneWayNamedComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::test_protocollayoutssamelibrary::wire::TablePayload { TablePayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayNamedComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4117,7 +4117,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposed>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::UnionPayload UnionPayload)
     : body(::test_protocollayoutssamelibrary::wire::UnionPayload { UnionPayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4142,7 +4142,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposed>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposed>(TablePayload)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposed>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposed_DynamicFlags);
@@ -4191,7 +4191,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposedWithError>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::test_protocollayoutssamelibrary::wire::TablePayload { TablePayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4216,7 +4216,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposedWithError>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::ComposedProtocolTwoWayNamedComposedWithErrorResult ComposedProtocolTwoWayNamedComposedWithErrorResult)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposedWithError>(ComposedProtocolTwoWayNamedComposedWithErrorResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayNamedComposedWithError>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayNamedComposedWithError_DynamicFlags);
@@ -4261,7 +4261,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnNamedComposed>::TransactionalEvent(::test_protocollayoutssamelibrary::wire::UnionPayload UnionPayload)
     : body{ UnionPayload } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnNamedComposed_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnNamedComposed_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnNamedComposed_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnNamedComposed>::TransactionalEvent() {
@@ -4292,7 +4292,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::OneWayLocal>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::test_protocollayoutssamelibrary::wire::TablePayload { TablePayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayLocal_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayLocal_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4319,7 +4319,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocal>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::UnionPayload UnionPayload)
     : body(::test_protocollayoutssamelibrary::wire::UnionPayload { UnionPayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4344,7 +4344,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocal>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocal>(TablePayload)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocal>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocal_DynamicFlags);
@@ -4393,7 +4393,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocalWithError>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::TablePayload TablePayload)
     : body(::test_protocollayoutssamelibrary::wire::TablePayload { TablePayload } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4418,7 +4418,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocalWithError>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayLocalWithErrorResult MainProtocolTwoWayLocalWithErrorResult)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocalWithError>(MainProtocolTwoWayLocalWithErrorResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayLocalWithError>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayLocalWithError_DynamicFlags);
@@ -4463,7 +4463,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnLocal>::TransactionalEvent(::test_protocollayoutssamelibrary::wire::UnionPayload UnionPayload)
     : body{ UnionPayload } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnLocal_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnLocal_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnLocal_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnLocal>::TransactionalEvent() {
@@ -4494,7 +4494,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::OneWayAnon>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::MainProtocolOneWayAnonRequest MainProtocolOneWayAnonRequest)
     : body(::test_protocollayoutssamelibrary::wire::MainProtocolOneWayAnonRequest { MainProtocolOneWayAnonRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnon_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OneWayAnon_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4521,7 +4521,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnon>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonRequest MainProtocolTwoWayAnonRequest)
     : body(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonRequest { MainProtocolTwoWayAnonRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4546,7 +4546,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnon>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonResponse MainProtocolTwoWayAnonResponse)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnon>(MainProtocolTwoWayAnonResponse)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnon>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnon_DynamicFlags);
@@ -4595,7 +4595,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalRequest<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonWithError>::TransactionalRequest(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonWithErrorRequest MainProtocolTwoWayAnonWithErrorRequest)
     : body(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonWithErrorRequest { MainProtocolTwoWayAnonWithErrorRequest } ) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_DynamicFlags);
     }
 
   template <bool IsRecursive>
@@ -4620,7 +4620,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonWithError>::TransactionalResponse(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnonWithErrorResult MainProtocolTwoWayAnonWithErrorResult)
     : body(::fidl::WireResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonWithError>(MainProtocolTwoWayAnonWithErrorResult)) {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_DynamicFlags);
     }
   ::fidl::internal::TransactionalResponse<::test_protocollayoutssamelibrary::MainProtocol::TwoWayAnonWithError>::TransactionalResponse() {
     ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_TwoWayAnonWithError_DynamicFlags);
@@ -4665,7 +4665,7 @@ return MakeReply(::test_protocollayoutssamelibrary::wire::MainProtocolTwoWayAnon
 
     ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnAnon>::TransactionalEvent(::test_protocollayoutssamelibrary::wire::MainProtocolOnAnonRequest MainProtocolOnAnonRequest)
     : body{ MainProtocolOnAnonRequest } {
-      ::fidl::InitTxnHeader(&header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnon_DynamicFlags);
+      ::fidl::InitTxnHeader(&this->header, 0, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnon_Ordinal, ::test_protocollayoutssamelibrary::kMainProtocol_OnAnon_DynamicFlags);
     }
 
   ::fidl::internal::TransactionalEvent<::test_protocollayoutssamelibrary::MainProtocol::OnAnon>::TransactionalEvent() {

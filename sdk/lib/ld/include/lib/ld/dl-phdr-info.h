@@ -27,7 +27,7 @@ struct DlPhdrInfoCounts {
 };
 
 // This yields the current counts as of program startup, from ld::abi::_ld_abi.
-template <class Elf, class AbiTraits>
+template <elfldltl::ElfApi Elf, class AbiTraits>
 constexpr DlPhdrInfoCounts DlPhdrInfoInitialExecCounts(const abi::Abi<Elf, AbiTraits>& abi) {
   return {.adds = abi.loaded_modules_count};
 }

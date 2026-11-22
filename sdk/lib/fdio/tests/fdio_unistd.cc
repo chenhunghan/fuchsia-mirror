@@ -7,6 +7,7 @@
 #include <lib/fit/defer.h>
 #include <lib/fit/result.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -443,6 +444,78 @@ TEST(UnistdTest, DupAndRewinddir) {
     count_dirents(orig_fd.duplicate(), recount);
     EXPECT_EQ(recount, initial_count);
   }
+}
+
+TEST(UnistdTest, ChdirDotDotUpdatesCwd) {
+  std::string temp_dir = TestTempDirPath() + "/fdio-chdir.XXXXXX";
+  ASSERT_NE(mkdtemp(temp_dir.data()), nullptr, "%s", strerror(errno));
+  auto cleanup_temp =
+      fit::defer([&temp_dir] { EXPECT_EQ(0, rmdir(temp_dir.c_str()), "%s", strerror(errno)); });
+
+  char root_real[PATH_MAX];
+  ASSERT_NE(realpath(temp_dir.c_str(), root_real), nullptr, "%s", strerror(errno));
+  const std::string root_abs(root_real);
+
+  const std::string dir_a = fxl::Concatenate({root_abs, "/a"});
+  const std::string dir_b = fxl::Concatenate({root_abs, "/b"});
+  ASSERT_EQ(0, mkdir(dir_a.c_str(), 0777), "%s", strerror(errno));
+  auto cleanup_a =
+      fit::defer([&dir_a] { EXPECT_EQ(0, rmdir(dir_a.c_str()), "%s", strerror(errno)); });
+  ASSERT_EQ(0, mkdir(dir_b.c_str(), 0777), "%s", strerror(errno));
+  auto cleanup_b =
+      fit::defer([&dir_b] { EXPECT_EQ(0, rmdir(dir_b.c_str()), "%s", strerror(errno)); });
+
+  // Declared last so that the original cwd is restored before the directories are removed.
+  char prev_cwd[PATH_MAX];
+  ASSERT_NE(getcwd(prev_cwd, sizeof(prev_cwd)), nullptr, "%s", strerror(errno));
+  auto restore_cwd =
+      fit::defer([&prev_cwd] { EXPECT_EQ(0, chdir(prev_cwd), "%s", strerror(errno)); });
+
+  // Non-root '..' followed by another path segment in single absolute and relative chdir() calls.
+  char cwd[PATH_MAX];
+  ASSERT_EQ(0, chdir(fxl::Concatenate({root_abs, "/a/../b"}).c_str()), "%s", strerror(errno));
+  ASSERT_NE(getcwd(cwd, sizeof(cwd)), nullptr, "%s", strerror(errno));
+  EXPECT_STREQ(dir_b.c_str(), cwd);
+
+  ASSERT_EQ(0, chdir(root_abs.c_str()), "%s", strerror(errno));
+  ASSERT_EQ(0, chdir("a/../b"), "%s", strerror(errno));
+  ASSERT_NE(getcwd(cwd, sizeof(cwd)), nullptr, "%s", strerror(errno));
+  EXPECT_STREQ(dir_b.c_str(), cwd);
+
+  // Trailing non-root '..' in chdir("a/.."): tracked length must shrink to fit an exact buffer,
+  // and a subsequent relative chdir() must append at the new end rather than after an embedded NUL.
+  ASSERT_EQ(0, chdir(root_abs.c_str()), "%s", strerror(errno));
+  ASSERT_EQ(0, chdir("a/.."), "%s", strerror(errno));
+  std::string exact_buf(root_abs.size() + 1, '\0');
+  if (const char* p = getcwd(exact_buf.data(), exact_buf.size()); p == nullptr) {
+    ADD_FAILURE("getcwd(size=%zu) failed: %s", exact_buf.size(), strerror(errno));
+  } else {
+    EXPECT_STREQ(root_abs.c_str(), p);
+  }
+
+  ASSERT_EQ(0, chdir("a"), "%s", strerror(errno));
+  ASSERT_NE(getcwd(cwd, sizeof(cwd)), nullptr, "%s", strerror(errno));
+  EXPECT_STREQ(dir_a.c_str(), cwd);
+
+  // Root '..' edge: popping a top-level segment back to "/" and descending again.
+  const size_t second_slash = root_abs.find('/', 1);
+  const std::string first_component = root_abs.substr(0, second_slash);
+  ASSERT_EQ(0, chdir(fxl::Concatenate({first_component, "/.."}).c_str()), "%s", strerror(errno));
+  char root_buf[2] = {};
+  if (const char* p = getcwd(root_buf, sizeof(root_buf)); p == nullptr) {
+    ADD_FAILURE("getcwd(size=2) at / failed: %s", strerror(errno));
+  } else {
+    EXPECT_STREQ("/", p);
+  }
+
+  ASSERT_EQ(0, chdir(dir_b.substr(1).c_str()), "%s", strerror(errno));
+  ASSERT_NE(getcwd(cwd, sizeof(cwd)), nullptr, "%s", strerror(errno));
+  EXPECT_STREQ(dir_b.c_str(), cwd);
+
+  ASSERT_EQ(0, chdir(fxl::Concatenate({first_component, "/..", dir_a}).c_str()), "%s",
+            strerror(errno));
+  ASSERT_NE(getcwd(cwd, sizeof(cwd)), nullptr, "%s", strerror(errno));
+  EXPECT_STREQ(dir_a.c_str(), cwd);
 }
 
 }  // namespace

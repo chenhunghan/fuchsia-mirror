@@ -28,8 +28,7 @@ type Peer = table {
     ///
     /// This field is always present.
     ///
-    /// NOTE: Clients should use the `identifier` field to keep track of peers instead of their
-    /// address.
+    /// NOTE: Clients should use the `id` field to keep track of peers instead of their address.
     2: address bt.Address;
 
     /// The Bluetooth technologies that are supported by this peer.

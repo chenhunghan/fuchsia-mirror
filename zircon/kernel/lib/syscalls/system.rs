@@ -273,6 +273,38 @@ pub fn sys_system_suspend_enter(
 ) -> Result<(), Status> {
     validate_system_resource(resource, ZX_RSRC_SYSTEM_CPU_BASE)?;
 
+    // SAFETY: Syscalls execute in normal userspace-backed thread context after
+    // `LK_INIT_LEVEL_PLATFORM` has completed, with no spinlocks, `HotplugLock`, `TransitionLock`,
+    // or active `ChainLockTransaction` held.
+    unsafe {
+        suspend_enter(
+            resume_deadline,
+            options,
+            out_header,
+            out_entries,
+            num_entries,
+            actual_entries,
+        )
+    }
+}
+
+/// Validates `zx_system_suspend_enter` options and report buffers (after resource validation) and
+/// performs the requested wake-report discard, report generation, and/or suspend operation.
+///
+/// # Safety
+///
+/// Must be called from a normal thread context where blocking and CPU affinity changes are
+/// permitted after `LK_INIT_LEVEL_PLATFORM` has completed, with no spinlocks,
+/// [`crate::kernel::mp::HotplugLock`], `TransitionLock`, or active `ChainLockTransaction` held.
+#[inline]
+unsafe fn suspend_enter(
+    resume_deadline: zx_instant_boot_t,
+    options: u64,
+    out_header: UserOutPtr<zx_wake_source_report_header_t>,
+    out_entries: UserOutPtr<zx_wake_source_report_entry_t>,
+    num_entries: u32,
+    actual_entries: UserOutPtr<u32>,
+) -> Result<(), Status> {
     // Make sure that any flags passed by the user are defined.
     if options & !VALID_SUSPEND_FLAGS != 0 {
         return Err(Status::INVALID_ARGS);
@@ -303,6 +335,14 @@ pub fn sys_system_suspend_enter(
         return Err(Status::INVALID_ARGS);
     }
 
+    // If the user has asked us to only generate a report (but not actually try to
+    // suspend), make sure they (at least) passed us a buffer to hold a report
+    // header before discarding any acknowledged wake entries.
+    let report_only = options & ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY != 0;
+    if report_only && !wants_report {
+        return Err(Status::INVALID_ARGS);
+    }
+
     // If the user has asked us to discard wake entries for wake vectors which are
     // currently ack'ed, do so now.
     if options & ZX_SYSTEM_SUSPEND_OPTION_DISCARD != 0 {
@@ -310,12 +350,8 @@ pub fn sys_system_suspend_enter(
     }
 
     // If the user has asked us to only generate a report (but not actually try to
-    // suspend), make sure they (at least) passed us a buffer to hold a report
-    // header, then generate the report and get out.
-    if options & ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY != 0 {
-        if !wants_report {
-            return Err(Status::INVALID_ARGS);
-        }
+    // suspend), generate the report and get out.
+    if report_only {
         crate::wake_vector::WakeEvent::generate_wake_event_report(
             ZX_TIME_INFINITE,
             out_header,
@@ -328,10 +364,8 @@ pub fn sys_system_suspend_enter(
 
     // Finally, attempt to drop into suspend.  Then, if the user asked for a wake
     // event report, generate one for them.
-    // SAFETY: Syscalls execute in normal userspace-backed thread context after
-    // `LK_INIT_LEVEL_PLATFORM` has completed, with no spinlocks, `TransitionLock`, or active
-    // `ChainLockTransaction` held, and no concurrent CPU hotplug/unplug operations occur during
-    // system suspend.
+    // SAFETY: Caller guarantees normal thread context after `LK_INIT_LEVEL_PLATFORM` with no
+    // spinlocks, `HotplugLock`, `TransitionLock`, or active `ChainLockTransaction` held.
     let suspend_start_time = unsafe {
         if options & ZX_SYSTEM_SUSPEND_OPTION_DEEP != 0 {
             crate::kernel::idle_power_thread::IdlePowerThread::suspend_system(resume_deadline)
@@ -353,4 +387,101 @@ pub fn sys_system_suspend_enter(
     }
 
     Ok(())
+}
+
+/// Unit tests for system syscalls.
+#[cfg(ktest)]
+#[unittest::suite(name = "system_rust")]
+mod tests {
+    use super::suspend_enter;
+    use crate::kernel::idle_power_thread::IdlePowerThread;
+    use crate::user_copy::UserOutPtr;
+    use crate::wake_vector::WakeEvent;
+    use core::ptr::{NonNull, null_mut};
+    use unittest::{expect_eq, expect_err, expect_false, expect_ok, expect_true};
+    use zx_status::Status;
+    use zx_types::{
+        ZX_SYSTEM_SUSPEND_OPTION_DEEP, ZX_SYSTEM_SUSPEND_OPTION_DISCARD,
+        ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY, ZX_TIME_INFINITE_PAST, zx_wake_source_report_entry_t,
+        zx_wake_source_report_header_t,
+    };
+
+    /// Verifies invalid `suspend_enter` calls with `DISCARD` do not discard wake events.
+    #[test]
+    fn suspend_enter_invalid_args_do_not_discard_wake_events() {
+        expect_eq!(IdlePowerThread::pending_wake_events(), 0u64);
+        WakeEvent::discard_wake_event_report();
+        let _cleanup = zr::defer(WakeEvent::discard_wake_event_report);
+        expect_false!(WakeEvent::has_pending_wake_events());
+
+        let null_hdr = UserOutPtr::<zx_wake_source_report_header_t>::new(null_mut());
+        let null_entries = UserOutPtr::<zx_wake_source_report_entry_t>::new(null_mut());
+        let null_actual = UserOutPtr::<u32>::new(null_mut());
+        let dangling_entries =
+            UserOutPtr::<zx_wake_source_report_entry_t>::new(NonNull::dangling().as_ptr());
+        let dangling_actual = UserOutPtr::<u32>::new(NonNull::dangling().as_ptr());
+
+        // Strobe the resume-timer wake vector by entering suspend with an expired deadline so an
+        // acknowledged, unreported wake event sits in `PENDING_LIST`.
+        // SAFETY: Kernel unit tests run in normal thread context after `LK_INIT_LEVEL_PLATFORM`
+        // with no locks held.
+        expect_ok!(unsafe {
+            suspend_enter(ZX_TIME_INFINITE_PAST, 0, null_hdr, null_entries, 0, null_actual)
+        });
+        expect_true!(WakeEvent::has_pending_wake_events());
+
+        // `DISCARD | REPORT_ONLY` without an `out_header` buffer must fail before discarding.
+        // SAFETY: Same thread and lock context as above.
+        expect_err!(
+            unsafe {
+                suspend_enter(
+                    ZX_TIME_INFINITE_PAST,
+                    ZX_SYSTEM_SUSPEND_OPTION_DISCARD | ZX_SYSTEM_SUSPEND_OPTION_REPORT_ONLY,
+                    null_hdr,
+                    null_entries,
+                    0,
+                    null_actual,
+                )
+            },
+            Status::INVALID_ARGS
+        );
+        expect_true!(WakeEvent::has_pending_wake_events());
+
+        // Other invalid flag/buffer combinations paired with `DISCARD` must likewise not discard.
+        // SAFETY: Same thread and lock context as above.
+        expect_err!(
+            unsafe {
+                suspend_enter(
+                    ZX_TIME_INFINITE_PAST,
+                    ZX_SYSTEM_SUSPEND_OPTION_DISCARD | ZX_SYSTEM_SUSPEND_OPTION_DEEP,
+                    null_hdr,
+                    null_entries,
+                    0,
+                    null_actual,
+                )
+            },
+            Status::INVALID_ARGS
+        );
+        expect_true!(WakeEvent::has_pending_wake_events());
+
+        // SAFETY: Same thread and lock context as above.
+        expect_err!(
+            unsafe {
+                suspend_enter(
+                    ZX_TIME_INFINITE_PAST,
+                    ZX_SYSTEM_SUSPEND_OPTION_DISCARD,
+                    null_hdr,
+                    dangling_entries,
+                    1,
+                    dangling_actual,
+                )
+            },
+            Status::INVALID_ARGS
+        );
+        expect_true!(WakeEvent::has_pending_wake_events());
+
+        // Confirm that discarding actually clears the pending acknowledged wake event.
+        WakeEvent::discard_wake_event_report();
+        expect_false!(WakeEvent::has_pending_wake_events());
+    }
 }

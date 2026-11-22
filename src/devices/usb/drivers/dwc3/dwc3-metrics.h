@@ -81,6 +81,7 @@ class Dwc3Metrics {
 
   uint64_t phy_rpc_errors() const { return phy_rpc_errors_; }
   uint64_t hw_reset_timeouts() const { return hw_reset_timeouts_; }
+  uint64_t cmd_act_timeouts() const { return cmd_act_timeouts_; }
   uint64_t dci_disconnect_stall_count() const { return dci_disconnect_stall_count_; }
   uint64_t connect_failures() const { return connect_failures_; }
 

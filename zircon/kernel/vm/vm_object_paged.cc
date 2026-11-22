@@ -65,81 +65,70 @@ VmObjectPaged::~VmObjectPaged() {
   DestructorHelper();
 }
 
-void VmObjectPaged::DestructorHelper() {
-  RemoveFromGlobalList();
-
-  if (unlikely(options_ & kAlwaysPinned)) {
-    // It's possible that the final stage of construction of an always pinned vmo can fail, in which
-    // case it might not have any pinned pages. To avoid unpinning a range that has no pinned pages
-    // (which would panic), we first check if there are any pinned pages.
-    bool unpin = true;
-    {
-      Guard<CriticalMutex> guard{lock()};
-      if (unlikely(cow_pages_locked()->pinned_page_count_locked() == 0)) {
-        // There's no pinned pages at all. This can happen if the VMO is empty or if the final stage
-        // of construction failed, leaving committed-but-unpinned pages which will be cleaned up
-        // naturally when cow_pages_ is destroyed. We don't need to unpin anything.
-        unpin = false;
-      }
-    }
-    if (likely(unpin)) {
-      Unpin(0, size());
-    }
-  }
-
-  fbl::RefPtr<VmCowPages> deferred;
+void VmObjectPaged::UnpinAlwaysPinnedOnDestroy() {
+  // It's possible that the final stage of construction of an always pinned vmo can fail, in which
+  // case it might not have any pinned pages. To avoid unpinning a range that has no pinned pages
+  // (which would panic), we first check if there are any pinned pages.
+  bool unpin = true;
   {
     Guard<CriticalMutex> guard{lock()};
+    if (unlikely(cow_pages_locked()->pinned_page_count_locked() == 0)) {
+      // There's no pinned pages at all. This can happen if the VMO is empty or if the final stage
+      // of construction failed, leaving committed-but-unpinned pages which will be cleaned up
+      // naturally when cow_pages_ is destroyed. We don't need to unpin anything.
+      unpin = false;
+    }
+  }
+  if (likely(unpin)) {
+    Unpin(0, size());
+  }
+}
 
-    // Only clear the backlink if we are not a reference. A reference does not "own" the VmCowPages,
-    // so in the typical case, the VmCowPages will not have its backlink set to a reference. There
-    // does exist an edge case where the backlink can be a reference, which is handled by the else
-    // block below.
-    if (!is_reference()) {
-      cow_pages_locked()->set_paged_backlink_locked(nullptr);
+void VmObjectPaged::ClearOrMoveReferencesOnDestroyLocked() {
+  // Only clear the backlink if we are not a reference. A reference does not "own" the VmCowPages,
+  // so in the typical case, the VmCowPages will not have its backlink set to a reference. There
+  // does exist an edge case where the backlink can be a reference, which is handled by the else
+  // block below.
+  if (!is_reference()) {
+    cow_pages_locked()->set_paged_backlink_locked(nullptr);
+  } else {
+    // If this is a reference, we need to remove it from the original (parent) VMO's reference
+    // list.
+    VmObjectPaged* root_ref = cow_pages_locked()->get_paged_backlink_locked();
+    // The VmCowPages will have a valid backlink, either to the original VmObjectPaged or a
+    // reference VmObjectPaged, as long as there is a reference that is alive. We know that this
+    // is a reference.
+    DEBUG_ASSERT(root_ref);
+    if (likely(root_ref != this)) {
+      AssertHeld(root_ref->lock_ref());
+      VmObjectPaged* removed = root_ref->reference_list_.erase(*this);
+      DEBUG_ASSERT(removed == this);
     } else {
-      // If this is a reference, we need to remove it from the original (parent) VMO's reference
-      // list.
-      VmObjectPaged* root_ref = cow_pages_locked()->get_paged_backlink_locked();
-      // The VmCowPages will have a valid backlink, either to the original VmObjectPaged or a
-      // reference VmObjectPaged, as long as there is a reference that is alive. We know that this
-      // is a reference.
-      DEBUG_ASSERT(root_ref);
-      if (likely(root_ref != this)) {
-        AssertHeld(root_ref->lock_ref());
-        VmObjectPaged* removed = root_ref->reference_list_.erase(*this);
-        DEBUG_ASSERT(removed == this);
-      } else {
-        // It is possible for the backlink to point to |this| if the original parent went away at
-        // some point and the rest of the reference list had to be re-homed to |this|, and the
-        // backlink set to |this|. The VmCowPages was pointing to us, so clear the backlink. The
-        // backlink will get reset below if other references remain.
-        cow_pages_locked()->set_paged_backlink_locked(nullptr);
-      }
+      // It is possible for the backlink to point to |this| if the original parent went away at
+      // some point and the rest of the reference list had to be re-homed to |this|, and the
+      // backlink set to |this|. The VmCowPages was pointing to us, so clear the backlink. The
+      // backlink will get reset below if other references remain.
+      cow_pages_locked()->set_paged_backlink_locked(nullptr);
     }
-
-    // If this VMO had references, pick one of the references as the paged backlink from the shared
-    // VmCowPages. Also, move the remainder of the reference list to the chosen reference. Note that
-    // we're only moving the reference list over without adding the references to the children list;
-    // we do not want these references to be counted as children of the chosen VMO. We simply want a
-    // safe way to propagate mapping updates and VmCowPages changes on hidden node addition.
-    if (!reference_list_.is_empty()) {
-      // We should only be attempting to reset the backlink if the owner is going away and has reset
-      // the backlink above.
-      DEBUG_ASSERT(cow_pages_locked()->get_paged_backlink_locked() == nullptr);
-      VmObjectPaged* paged_backlink = reference_list_.pop_front();
-      cow_pages_locked()->set_paged_backlink_locked(paged_backlink);
-      AssertHeld(paged_backlink->lock_ref());
-      paged_backlink->reference_list_.splice(paged_backlink->reference_list_.end(),
-                                             reference_list_);
-    }
-    DEBUG_ASSERT(reference_list_.is_empty());
-    deferred = cow_pages_;
-  }
-  while (deferred) {
-    deferred = deferred->MaybeDeadTransition();
   }
 
+  // If this VMO had references, pick one of the references as the paged backlink from the shared
+  // VmCowPages. Also, move the remainder of the reference list to the chosen reference. Note that
+  // we're only moving the reference list over without adding the references to the children list;
+  // we do not want these references to be counted as children of the chosen VMO. We simply want a
+  // safe way to propagate mapping updates and VmCowPages changes on hidden node addition.
+  if (!reference_list_.is_empty()) {
+    // We should only be attempting to reset the backlink if the owner is going away and has reset
+    // the backlink above.
+    DEBUG_ASSERT(cow_pages_locked()->get_paged_backlink_locked() == nullptr);
+    VmObjectPaged* paged_backlink = reference_list_.pop_front();
+    cow_pages_locked()->set_paged_backlink_locked(paged_backlink);
+    AssertHeld(paged_backlink->lock_ref());
+    paged_backlink->reference_list_.splice(paged_backlink->reference_list_.end(), reference_list_);
+  }
+}
+
+void VmObjectPaged::RehomeChildrenOnDestroy() {
   fbl::RefPtr<VmObjectPaged> maybe_parent;
 
   // Re-home all our children with any parent that we have.
@@ -178,8 +167,29 @@ void VmObjectPaged::DestructorHelper() {
     // As we constructed a RefPtr to our parent, and we are in our own destructor, there is now
     // the potential for recursive destruction if we need to delete the parent due to holding the
     // last ref, hit this same path, etc.
-    VmDeferredDeleter<VmObjectPaged>::DoDeferredDelete(ktl::move(maybe_parent));
+    VmDeferredDeleter::DoDeferredDelete(ktl::move(maybe_parent));
   }
+}
+
+void VmObjectPaged::DestructorHelper() {
+  RemoveFromGlobalList();
+
+  if (unlikely(options_ & kAlwaysPinned)) {
+    UnpinAlwaysPinnedOnDestroy();
+  }
+
+  {
+    Guard<CriticalMutex> guard{lock()};
+    if (!is_reference() && reference_list_.is_empty()) {
+      cow_pages_locked()->set_paged_backlink_locked(nullptr);
+    } else {
+      ClearOrMoveReferencesOnDestroyLocked();
+    }
+    DEBUG_ASSERT(reference_list_.is_empty());
+  }
+  cow_pages_->MaybeDeadTransition();
+
+  RehomeChildrenOnDestroy();
 }
 
 zx_status_t VmObjectPaged::HintRange(uint64_t offset, uint64_t len, EvictionHint hint) {
@@ -377,11 +387,12 @@ zx_status_t VmObjectPaged::CreateContiguous(uint32_t pmm_alloc_flags, uint64_t s
     return ZX_ERR_NO_MEMORY;
   }
   PhysicalPageProvider* physical_page_provider_ptr = page_provider.get();
-  fbl::RefPtr<PageSource> page_source =
-      fbl::AdoptRef(new (&ac) PageSource(ktl::move(page_provider)));
-  if (!ac.check()) {
+  zx::result<fbl::RefPtr<PageSource>> page_source_result =
+      PageSource::Create(ktl::move(page_provider));
+  if (page_source_result.is_error()) {
     return ZX_ERR_NO_MEMORY;
   }
+  fbl::RefPtr<PageSource> page_source = ktl::move(page_source_result.value());
   auto* page_source_ptr = page_source.get();
 
   fbl::RefPtr<VmObjectPaged> vmo;
@@ -1003,7 +1014,7 @@ zx_status_t VmObjectPaged::CommitRangeInternal(uint64_t offset, uint64_t len, bo
       }
 
       status = cow_pages_locked()->CommitRangeLocked(*GetCowRange(offset, len), deferred,
-                                                     &committed_len, &page_request);
+                                                     &committed_len, page_request);
       DEBUG_ASSERT(committed_len <= len);
 
       // If we're required to pin, try to pin the committed range before waiting on the
@@ -1221,7 +1232,7 @@ zx_status_t VmObjectPaged::ZeroRangeInternal(uint64_t offset, uint64_t len, bool
 #endif
       // Now that we have a page aligned range we can try hand over to the cow pages zero method.
       ktl::tie(status, zeroed_len) =
-          cow_pages_locked()->ZeroPagesLocked(*cow_range, dirty_track, deferred, &page_request);
+          cow_pages_locked()->ZeroPagesLocked(*cow_range, dirty_track, deferred, page_request);
       if (zeroed_len != 0) {
         // Mark modified since we wrote zeros.
         mark_modified_locked();
@@ -1924,7 +1935,8 @@ zx_status_t VmObjectPaged::GetPage(uint64_t offset, uint pf_flags, MultiPageRequ
   __UNINITIALIZED VmCowPages::DeferredOps deferred(cow_pages_.get());
   Guard<CriticalMutex> guard{lock()};
   const bool write = pf_flags & VMM_PF_FLAG_WRITE;
-  zx::result<VmCowPages::LookupCursor> cursor = GetLookupCursorLocked(offset, kPageSize);
+  __UNINITIALIZED zx::result<VmCowPages::LookupCursor> cursor =
+      GetLookupCursorLocked(offset, kPageSize);
   if (cursor.is_error()) {
     return cursor.error_value();
   }

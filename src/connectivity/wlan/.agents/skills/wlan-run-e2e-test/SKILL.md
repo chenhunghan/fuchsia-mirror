@@ -4,7 +4,11 @@ description: >
   Workflow for running Fuchsia WLAN E2E tests on local devices or remote
   infrastructure, verifying testbed hardware requirements, monitoring
   execution, analyzing failure output, configuring testing product bundles,
-  and troubleshooting physical topology routing.
+  and troubleshooting physical topology routing. Use when running or iterating
+  on WLAN E2E tests against a local or forwarded testbed, running tests via fx
+  test-remote, or deploying WLAN stack changes with OTA or flashing. Don't use
+  for CI/CQ flake history or ResultDB logs (use wlan-e2e-test-luci-triage) or
+  sweeping wlan_e2e console builders (use wlan-e2e-console-triage).
 ---
 
 # Fuchsia WLAN E2E Test Workflow
@@ -12,6 +16,17 @@ description: >
 This skill encapsulates the end-to-end workflow for running and analyzing
 Fuchsia WLAN E2E tests against both local devices (including physically complex
 testbeds) and remote infrastructure builders.
+
+## Quick Start
+
+| Goal | Command / Action |
+| :--- | :--- |
+| **Verify DUT reachability** | `ffx target list` then `ffx target echo` (if unreachable, ask user if `mrt` or `pontis` forwarding is active). |
+| **Run local WLAN E2E suite** | `fx test --output --timeout 300 --e2e <test_name> -- --device <device_name> <equipment_params...>` |
+| **Run one Python E2E test case** | Append case name after `--`: `fx test --output --timeout 300 --e2e <test_name> -- <args> <test_case_name>` (never `--test-filter`). |
+| **Run on remote infra** | Read [fx-test-remote](../../../../../../.agents/skills/fx-test-remote/SKILL.md). |
+| **Set testing product bundle** | Run `fx set-main-pb for-testing-wlan-<core\|platform\|wlanix>.<board>`. If the product bundle is not available, run `fx set` with `--args='product_bundle_labels+=["//vendor/google/tests/end_to_end/wlan/product_bundles"]'` then retry.|
+| **Deploy WLAN stack changes** | Incremental OTA: `fx ota`; Full flash: `ffx target flash`. |
 
 ## 1. Running E2E Tests Locally
 
@@ -107,8 +122,9 @@ hardware (e.g. attenuator), use remote infrastructure.
 
 ### 2.1 Use the `fx-test-remote` Skill
 Apply the procedures defined in the
-[fx-test-remote](//.agents/skills/fx-test-remote/SKILL.md) skill to execute
-tasks on infrastructure. Look for WLAN specific builders.
+[fx-test-remote](../../../../../../.agents/skills/fx-test-remote/SKILL.md)
+(`//.agents/skills/fx-test-remote/SKILL.md`) skill to execute tasks on
+infrastructure. Look for WLAN specific builders.
 
 ### 2.2 Configure `fx set` (User Confirmation Required!)
 Testing remotely often demands reconfiguring the local Fuchsia checkout to match
@@ -118,7 +134,7 @@ the remote builder's parameters.
   you suspect the build needs this change, propose the specific `fx set` command
   immediately in your response to the user so they can approve or deny it
   without blocking.
-* ** CRITICAL:** NEVER run an `fx set` command without the user's explicit
+* **CRITICAL:** NEVER run an `fx set` command without the user's explicit
   confirmation, as doing so will wipe their existing build outputs.
 
 ### 2.3 Analyze Results
@@ -158,7 +174,7 @@ production components (like `cast_agent`) that could interfere with the tests.
 * **Build Setup:** Remind users configuring their local development setup for
   specific tests that they may need to include:
   `--args='product_bundle_labels+=["//vendor/google/tests/end_to_end/wlan/product_bundles"]'`
-  to access the relevant product bundles.
+  within `fx set` to access the relevant product bundles.
 * **Matching Tests to Bundles:** Determine the correct product bundle for your
   test based on the directory that contains the test, where `<board name>` is
   `astro`, `nelson`, `sherlock`, or `sorrel`. This list is not exhaustive, so

@@ -885,6 +885,27 @@ class TestConnection {
       EXPECT_FALSE(
           connection->ExecuteAtom(&size, &bad_atom.atom, semaphores, &deprecated_semaphores));
     }
+
+    const uint64_t kMaxJitPages = MsdArmConnection::max_jit_pages();
+    auto run_jit_alloc = [&](uint64_t va_pages, uint64_t committed_pages, uint64_t extend_pages) {
+      FakeConnectionOwner owner;
+      auto connection = MsdArmConnection::Create(0, &owner);
+      TestingAtom atom = good_atom;
+      atom.info[1].va_page_count = va_pages;
+      atom.info[1].committed_page_count = committed_pages;
+      atom.info[1].extend_page_count = extend_pages;
+      size_t size = sizeof(atom);
+      bool ok = connection->ExecuteAtom(&size, &atom.atom, semaphores, &deprecated_semaphores);
+      EXPECT_EQ(ok, !owner.atoms_list().empty());
+      return ok;
+    };
+
+    EXPECT_TRUE(run_jit_alloc(kMaxJitPages, kMaxJitPages, kMaxJitPages));
+    for (uint64_t invalid_pages : {kMaxJitPages + 1, 1ul << 52}) {
+      EXPECT_FALSE(run_jit_alloc(invalid_pages, 1, 1));
+      EXPECT_FALSE(run_jit_alloc(1, invalid_pages, 1));
+      EXPECT_FALSE(run_jit_alloc(1, 1, invalid_pages));
+    }
   }
 
   void JitParseFree() {

@@ -140,7 +140,6 @@ rustc_library("fidl-fuchsia-pkg-ext") {
   deps = []
   deps += [
     ":measure_fuchsia_pkg",
-    "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
     "//sdk/rust/zx-types",
     "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia-url",
@@ -158,10 +157,13 @@ rustc_library("fidl-fuchsia-pkg-ext") {
   ]
   if (is_fuchsia) {
     deps += [
+      "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust",
       "//sdk/rust/zx-status",
       "//src/storage/fxfs/fidl/fuchsia.fxfs:fuchsia.fxfs_rust",
       "//src/storage/lib/blob_writer:blob-writer",
       "//src/sys/pkg/lib/fuchsia-pkg",
     ]
+  } else {
+    deps += [ "//sdk/fidl/fuchsia.pkg:fuchsia.pkg_rust_common" ]
   }
 }

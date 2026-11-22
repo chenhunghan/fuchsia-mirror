@@ -15,6 +15,7 @@
 #include <lib/zx/vmo.h>
 
 #include <iosfwd>
+#include <memory>
 #include <vector>
 
 #include <trace-reader/reader_internal.h>
@@ -54,6 +55,9 @@ class Tracee {
   using StopCallback = fit::function<void(bool write_results)>;
   using TerminateCallback = fit::closure;
   using AlertCallback = fit::function<void(const std::string& alert_name)>;
+  // Called for each buffer save request. The callee performs the save by calling
+  // |TransferBuffer()|, possibly later.
+  using SaveBufferCallback = fit::function<void(uint32_t wrapped_count, uint64_t durable_data_end)>;
 
   explicit Tracee(async::Executor& executor, std::shared_ptr<const BufferForwarder> output,
                   const TraceProviderBundle* bundle);
@@ -64,7 +68,7 @@ class Tracee {
   bool Initialize(std::vector<std::string> categories, size_t buffer_size,
                   fuchsia_tracing::BufferingMode buffering_mode, StartCallback start_callback,
                   StopCallback stop_callback, TerminateCallback terminate_callback,
-                  AlertCallback alert_callback);
+                  AlertCallback alert_callback, SaveBufferCallback save_buffer_callback);
 
   void Terminate();
 
@@ -90,6 +94,9 @@ class Tracee {
   State state() const { return state_; }
   bool was_started() const { return was_started_; }
   bool results_written() const { return results_written_; }
+  // Shared so that TraceSession can still write out the buffer once this tracee is gone.
+  const std::shared_ptr<SharedBuffer>& buffer() const { return buffer_; }
+  fxl::WeakPtr<Tracee> GetWeakPtr() { return weak_ptr_factory_.GetWeakPtr(); }
 
  private:
   // The size of the fifo in packets.
@@ -116,7 +123,7 @@ class Tracee {
   const TraceProviderBundle* bundle_;
   State state_ = State::kReady;
 
-  std::optional<SharedBuffer> buffer_;
+  std::shared_ptr<SharedBuffer> buffer_;
   size_t buffer_vmo_size_ = 0u;
   zx::fifo fifo_;
 
@@ -124,6 +131,7 @@ class Tracee {
   StopCallback stop_callback_;
   TerminateCallback terminate_callback_;
   AlertCallback alert_callback_;
+  SaveBufferCallback save_buffer_callback_;
 
   async::Executor& executor_;
   async::WaitMethod<Tracee, &Tracee::OnHandleReady> wait_;

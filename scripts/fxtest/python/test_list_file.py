@@ -180,9 +180,21 @@ class Test:
         return self.needs_device()
 
     def is_host_test(self) -> bool:
-        # These are "pure" host tests, which excludes E2E tests
-        # that require a device.
-        return self.build.test.path is not None and not self.is_e2e_test()
+        """Determine if this test is a pure host test.
+
+        Pure host tests run on the host without requiring a Fuchsia device,
+        which excludes pure device tests (even when they have a host path),
+        E2E tests, boot tests, and bootfs tests.
+
+        Returns:
+            bool: True only if the test is a pure host test.
+        """
+        return (
+            self.build.test.path is not None
+            and self.build.test.os.lower() != "fuchsia"
+            and not self.needs_device()
+            and not self.is_boot_test()
+        )
 
     def join_info(self, entries: dict[str, TestListEntry]) -> None:
         """Add info from test-list.json to this test.

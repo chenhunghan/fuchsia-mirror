@@ -11,7 +11,6 @@ fidl_library(
     srcs = [
         "stash.fidl",
     ],
-    enable_hlcpp = True,
     # Stash cannnot not guarantee isolation between clients so its usage must
     # be carefully managed, see https://fxbug.dev/42124367. We intend to deprecate
     # stash and are not accepting new clients.

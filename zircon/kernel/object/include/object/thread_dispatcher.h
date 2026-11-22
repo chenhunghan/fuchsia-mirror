@@ -23,17 +23,16 @@
 #include <fbl/ref_ptr.h>
 #include <kernel/event.h>
 #include <kernel/ffi.h>
-#include <kernel/owned_wait_queue.h>
 #include <kernel/thread.h>
 #include <ktl/atomic.h>
 #include <ktl/string_view.h>
 #include <object/dispatcher.h>
-#include <object/exceptionate.h>
 #include <object/futex_context.h>
 #include <object/handle.h>
 #include <vm/vm_address_region.h>
 
 class ExceptionDispatcher;
+class Exceptionate;
 class ProcessDispatcher;
 class ThreadDispatcher;
 
@@ -41,7 +40,6 @@ class ThreadDispatcher;
 // cpp_thread_dispatcher_alloc, and a friend declaration requires the declaration it names to
 // already be visible.
 extern "C" {
-void* rust_thread_dispatcher_get_exceptionate(const ThreadDispatcher* thread);
 void* rust_thread_dispatcher_get_core_thread_lock(const ThreadDispatcher* thread);
 
 // Allocates and constructs a ThreadDispatcher. The Rust ThreadDispatcher::create() calls this
@@ -51,7 +49,7 @@ zx_status_t cpp_thread_dispatcher_alloc(
 void cpp_thread_dispatcher_set_core_thread(ThreadDispatcher* thread, Thread* core_thread);
 Thread* cpp_thread_dispatcher_get_core_thread(const ThreadDispatcher* thread);
 void cpp_thread_dispatcher_set_user_entry(ThreadDispatcher* thread, const UserEntryState* entry);
-void cpp_thread_dispatcher_attach_to_core_thread(ThreadDispatcher* thread, Thread* core_thread);
+void cpp_thread_dispatcher_set_is_initial_thread(ThreadDispatcher* thread, bool is_initial_thread);
 int cpp_thread_start_routine_entry(void* thread);
 
 // Rust FFI prototypes:
@@ -62,44 +60,21 @@ Lock<CriticalMutex>* rust_thread_dispatcher_state_get_lock(const void* state);
 zx_koid_t rust_thread_dispatcher_get_related_koid(const ThreadDispatcher* thread);
 ProcessDispatcher* rust_thread_dispatcher_get_process(const ThreadDispatcher* thread);
 void rust_thread_dispatcher_assert_canary(const ThreadDispatcher* thread);
-bool rust_thread_dispatcher_is_dying_or_dead(const ThreadDispatcher* thread);
 zx_status_t rust_thread_dispatcher_set_name(const ThreadDispatcher* thread, const char* name,
                                             size_t len);
 zx_status_t rust_thread_dispatcher_get_name(const ThreadDispatcher* thread,
                                             char (*out_name)[ZX_MAX_NAME_LEN]);
-zx_status_t rust_thread_dispatcher_make_runnable(const ThreadDispatcher* thread,
-                                                 const UserEntryState* entry, bool suspended);
 void rust_thread_dispatcher_kill(const ThreadDispatcher* thread);
 zx_status_t rust_thread_dispatcher_suspend(const ThreadDispatcher* thread);
 void rust_thread_dispatcher_resume(const ThreadDispatcher* thread);
-void rust_thread_dispatcher_suspending(const ThreadDispatcher* thread);
-void rust_thread_dispatcher_resuming(const ThreadDispatcher* thread);
 bool rust_thread_dispatcher_handle_single_shot_exception(
     ThreadDispatcher* thread, Exceptionate* exceptionate, zx_excp_type_t exception_type,
     const arch_exception_context_t* arch_context);
 
-void cpp_thread_handle_single_shot_exiting(ProcessDispatcher* process, ThreadDispatcher* thread);
 void cpp_thread_dispatcher_reset_core_thread(ThreadDispatcher* thread);
 
-void* rust_thread_dispatcher_get_runtime_stats(const ThreadDispatcher* thread);
-void rust_thread_dispatcher_exiting_current(const ThreadDispatcher* thread);
-
 uint32_t rust_thread_dispatcher_set_blocked_reason(uint32_t reason);
-void* rust_thread_dispatcher_get_dll_node(ThreadDispatcher* thread);
 }
-
-struct ThreadDispatcherListTraits {
-  using NodeState = fbl::DoublyLinkedListNodeState<ThreadDispatcher*, fbl::NodeOptions::None>;
-  static_assert(sizeof(NodeState) == 2 * sizeof(uintptr_t));
-  static_assert(alignof(NodeState) == alignof(uintptr_t));
-
-  using PtrType = ThreadDispatcher*;
-  using TagType = fbl::DefaultObjectTag;
-  using PtrTraits = fbl::internal::ContainerPtrTraits<PtrType>;
-  static NodeState& node_state(ThreadDispatcher& obj) {
-    return *reinterpret_cast<NodeState*>(rust_thread_dispatcher_get_dll_node(&obj));
-  }
-};
 
 class ThreadDispatcher final : public Dispatcher {
  public:
@@ -133,13 +108,7 @@ class ThreadDispatcher final : public Dispatcher {
 
   ~ThreadDispatcher();
 
-  static ThreadDispatcher* GetCurrent() { return Thread::Current::Get()->user_thread(); }
-
-  // Terminates the current thread. Does not return.
-  static void ExitCurrent() __NO_RETURN { Thread::Current::Exit(0); }
-  // Marks the current thread for termination. The thread will actually termiante when
-  // the kernel stack unwinds.
-  static void KillCurrent() { Thread::Current::Kill(); }
+  static ThreadDispatcher* GetCurrent() { return rust_thread_current_user_thread(); }
 
   // Asserts that the Rust ThreadDispatcherState's canary is valid.
   void AssertCanary() const { rust_thread_dispatcher_assert_canary(this); }
@@ -151,7 +120,6 @@ class ThreadDispatcher final : public Dispatcher {
     return rust_thread_dispatcher_get_related_koid(this);
   }
 
-  static constexpr zx_rights_t default_rights() { return ZX_DEFAULT_THREAD_RIGHTS; }
   bool is_waitable() const final { return ZX_DEFAULT_THREAD_RIGHTS & ZX_RIGHT_WAIT; }
 
   zx_status_t user_signal_self(uint32_t clear_mask, uint32_t set_mask) final {
@@ -166,12 +134,6 @@ class ThreadDispatcher final : public Dispatcher {
   // Should only be called by ProcessDispatcher upon adding the initialized thread.
   void set_is_initial_thread(bool is_initial_thread) { is_initial_thread_ = is_initial_thread; }
 
-  // Transitions a thread from the INITIALIZED state to either the RUNNING or SUSPENDED state.
-  // Is the caller's responsibility to ensure this thread is registered with the parent process,
-  // as such this is only expected to be called from the ProcessDispatcher.
-  zx_status_t MakeRunnable(const EntryState& entry, bool suspended) {
-    return rust_thread_dispatcher_make_runnable(this, &entry, suspended);
-  }
   void Kill() { rust_thread_dispatcher_kill(this); }
 
   // Suspends the thread.
@@ -183,17 +145,12 @@ class ThreadDispatcher final : public Dispatcher {
   ProcessDispatcher* process() const { return rust_thread_dispatcher_get_process(this); }
 
   // Returns the lower level kernel thread backing this dispatcher, or nullptr once
-  // ExitingCurrent() has cleared it.
+  // ThreadDispatcher::exiting_current() has cleared it.
   Thread* core_thread() const TA_REQ(get_lock()) { return core_thread_; }
 
   // Stores the register values userspace will start executing with. Only meaningful before the
   // thread has started, so this is not guarded.
   void set_user_entry(const EntryState& entry) { user_entry_ = entry; }
-  // Returns true if the thread is dying or dead. Threads never return to a previous state
-  // from dying/dead so once this is true it will never flip back to false.
-  bool IsDyingOrDead() const TA_EXCL(get_lock()) {
-    return rust_thread_dispatcher_is_dying_or_dead(this);
-  }
 
   [[nodiscard]] zx_status_t set_name(const char* name, size_t len) final __NONNULL((2))
       TA_EXCL(get_lock()) {
@@ -203,11 +160,6 @@ class ThreadDispatcher final : public Dispatcher {
   [[nodiscard]] zx_status_t get_name(char (&out_name)[ZX_MAX_NAME_LEN]) const final
       TA_EXCL(get_lock()) {
     return rust_thread_dispatcher_get_name(this, &out_name);
-  }
-
-  Exceptionate* exceptionate() {
-    AssertCanary();
-    return static_cast<Exceptionate*>(rust_thread_dispatcher_get_exceptionate(this));
   }
 
   // Sends a single-shot exception (which is sent to at most one handler, e.g.
@@ -221,12 +173,6 @@ class ThreadDispatcher final : public Dispatcher {
                                  const arch_exception_context_t& context) TA_EXCL(get_lock()) {
     return rust_thread_dispatcher_handle_single_shot_exception(this, exceptionate, exception_type,
                                                                &context);
-  }
-
-  // Fetch a consistent snapshot of the runtime stats, compensated for unaccumulated runtime in the
-  // ready or running state.
-  TaskRuntimeStats GetCompensatedTaskRuntimeStats() const {
-    return runtime_stats().GetCompensatedTaskRuntimeStats();
   }
 
   // Blocking syscalls, once they commit to a path that will likely block the
@@ -246,35 +192,6 @@ class ThreadDispatcher final : public Dispatcher {
   static Blocked SetBlockedReason(Blocked reason) {
     return static_cast<Blocked>(
         rust_thread_dispatcher_set_blocked_reason(static_cast<uint32_t>(reason)));
-  }
-
-  // This is called from Thread as it is exiting, just before it stops for good.
-  // It is an error to call this on anything other than the current thread.
-  void ExitingCurrent() { rust_thread_dispatcher_exiting_current(this); }
-
-  // callback from kernel when thread is suspending
-  void Suspending() { rust_thread_dispatcher_suspending(this); }
-  // callback from kernel when thread is resuming
-  void Resuming() { rust_thread_dispatcher_resuming(this); }
-
-  // Update the runtime stats for this thread/process. This is called by
-  // Scheduler to update the runtime stats of the thread as it changes thread
-  // state.
-  //
-  // Must be called with interrupts disabled.
-  void UpdateRuntimeStats(thread_state new_state) {
-    DEBUG_ASSERT(arch_ints_disabled());
-    runtime_stats().Update(new_state, ThreadRuntimeStats::NoIrqSave);
-  }
-
-  // Update time spent handling page faults. This is called by the VM during page fault handling.
-  void AddPageFaultTicks(zx_duration_mono_ticks_t ticks) {
-    runtime_stats().AddPageFaultTicks(ticks);
-  }
-
-  // Update time spent contended on locks. This is called by lock implementations.
-  void AddLockContentionTicks(zx_duration_mono_ticks_t ticks) {
-    runtime_stats().AddLockContentionTicks(ticks);
   }
 
   class CoreThreadObservation {
@@ -391,13 +308,6 @@ class ThreadDispatcher final : public Dispatcher {
     core_thread_ = core_thread;
   }
 
-  // TRANSITIONAL: the runtime stats are held as opaque storage in the Rust ThreadDispatcherState
-  // while ThreadRuntimeStats remains a C++ type. This resolves that storage back to the object;
-  // the Rust side checks the canary.
-  ThreadRuntimeStats& runtime_stats() const {
-    return *static_cast<ThreadRuntimeStats*>(rust_thread_dispatcher_get_runtime_stats(this));
-  }
-
   // The thread as understood by the lower kernel. This is set to nullptr when
   // the thread's lifecycle transitions to DEAD.
   Thread* core_thread_ TA_GUARDED(get_lock()) = nullptr;
@@ -428,8 +338,6 @@ class ThreadDispatcher final : public Dispatcher {
 };
 
 extern "C" {
-ThreadDispatcher* cpp_thread_dispatcher_current();
-bool cpp_thread_dispatcher_is_current(const ThreadDispatcher* thread);
 uintptr_t cpp_thread_dispatcher_blocking_futex_id(const ThreadDispatcher* thread);
 void cpp_thread_dispatcher_set_blocking_futex_id(ThreadDispatcher* thread, uintptr_t id);
 bool cpp_thread_dispatcher_lock_acquire(ThreadDispatcher* thread);
@@ -438,8 +346,6 @@ void cpp_thread_dispatcher_observe_core_thread(
     ThreadDispatcher* thread, ffi::Uninitialized<ThreadDispatcher::CoreThreadObservation>* out_obs);
 void cpp_thread_dispatcher_release_core_thread_observation(
     ThreadDispatcher::CoreThreadObservation* obs);
-zx_status_t cpp_sys_thread_raise_exception(uint32_t options, zx_excp_type_t type,
-                                           const zx_exception_context_t* user_context);
 }
 
 #endif  // ZIRCON_KERNEL_OBJECT_INCLUDE_OBJECT_THREAD_DISPATCHER_H_

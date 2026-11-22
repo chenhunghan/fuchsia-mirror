@@ -93,6 +93,13 @@ const __u32 REMOTE_BINDER_WAIT = _IOW('R', 2, struct remote_binder_wait_command)
 
 C(BINDER_CTL_ADD);
 
+// Flag of a BC_REPLY requesting that the replying thread receives its BR_TRANSACTION_COMPLETE along
+// with the next command it reads. It is not in `enum transaction_flags` of the UAPI headers yet,
+// and is named like the constant that bindgen generates for the values of this enum.
+// TODO(https://fxbug.dev/570123690): Remove once the UAPI headers define TF_DEFER_COMPLETE, as the
+// bindings would then define `transaction_flags_TF_DEFER_COMPLETE` twice.
+const __u32 transaction_flags_TF_DEFER_COMPLETE = 0x80;
+
 C(FIBMAP);
 C(FIGETBSZ);
 C(FICLONE);
@@ -336,13 +343,11 @@ struct sched_param {
   int sched_priority;
 };
 
-#ifndef __arm__
-
+C(FUSE_DEV_IOC_BACKING_OPEN);
+C(FUSE_DEV_IOC_BACKING_CLOSE);
 C(FUSE_DEV_IOC_PASSTHROUGH_OPEN_V0);
 C(FUSE_DEV_IOC_PASSTHROUGH_OPEN_V1);
 C(FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2);
-
-#endif  // #ifndef __arm__
 
 // USBDEVFS ioctl request constants (defined via _IO/_IOR/_IOW/_IOWR macros in
 // <linux/usbdevice_fs.h>).

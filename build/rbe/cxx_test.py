@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import cxx
+from build.rbe import cxx
 
 
 def _strs(items: Sequence[Any]) -> list[str]:

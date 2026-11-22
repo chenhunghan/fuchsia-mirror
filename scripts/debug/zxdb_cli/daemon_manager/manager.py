@@ -175,55 +175,7 @@ class DaemonManager:
             raise DaemonConnectionError(
                 f"Daemon socket not found at {self.socket_path}. Is it running?"
             )
-
-        try:
-            reader, writer = await asyncio.open_unix_connection(
-                self.socket_path
-            )
-        except Exception as e:
-            raise DaemonConnectionError(f"Error connecting to daemon: {e}")
-
-        try:
-            start_req = StartRequest(port=self.port, connect=True)
-            writer.write(serialize(start_req).encode("utf-8"))
-            await writer.drain()
-
-            try:
-                response_line = await asyncio.wait_for(
-                    reader.readline(), timeout=self.startup_timeout
-                )
-            except asyncio.TimeoutError:
-                raise DaemonConnectionError(
-                    "Timed out waiting for response from daemon."
-                )
-
-            if not response_line:
-                raise DaemonConnectionError("No response received from daemon.")
-
-            try:
-                resp = Response.model_validate_json(
-                    response_line.decode("utf-8")
-                )
-            except ValidationError as e:
-                raise DaemonConnectionError(
-                    f"Malformed response from daemon: {e}"
-                )
-
-            if not resp.success:
-                raise DaemonConnectionError(
-                    resp.message or "Failed to connect to DAP"
-                )
-
-        except DaemonConnectionError:
-            raise
-        except Exception as e:
-            raise DaemonConnectionError(f"Error communicating with daemon: {e}")
-        finally:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
+        await self._send_start_request(connect=True)
 
     def _spawn_daemon_process(self, write_fd: int) -> subprocess.Popen[bytes]:
         """Spawns the zxdb-daemon process in the background using FxCmd."""
@@ -280,6 +232,64 @@ class DaemonManager:
         finally:
             loop.remove_reader(read_fd)
 
+    async def _send_start_request(
+        self,
+        *,
+        connect: bool | None = None,
+        socket_path: Path | None = None,
+    ) -> Response[object]:
+        """Sends a StartRequest to the daemon and returns the validated Response."""
+        connect_flag = self.connect_to_existing if connect is None else connect
+        target_socket = (
+            socket_path if socket_path is not None else self.socket_path
+        )
+        try:
+            reader, writer = await asyncio.open_unix_connection(target_socket)
+        except Exception as e:
+            raise DaemonConnectionError(f"Error connecting to daemon: {e}")
+
+        try:
+            start_req = StartRequest(port=self.port, connect=connect_flag)
+            writer.write(serialize(start_req).encode("utf-8"))
+            await writer.drain()
+            try:
+                response_line = await asyncio.wait_for(
+                    reader.readline(), timeout=self.startup_timeout
+                )
+            except asyncio.TimeoutError:
+                raise DaemonConnectionError(
+                    "Timed out waiting for response from daemon."
+                )
+            if not response_line:
+                raise DaemonConnectionError(
+                    "No response received from daemon on start request."
+                )
+            try:
+                resp = Response.model_validate_json(
+                    response_line.decode("utf-8")
+                )
+            except ValidationError as e:
+                raise DaemonConnectionError(
+                    f"Malformed response on start request: {e}"
+                )
+
+            if not resp.success:
+                raise DaemonConnectionError(
+                    resp.message or "Failed to initialize session"
+                )
+
+            return resp
+        except DaemonConnectionError:
+            raise
+        except Exception as e:
+            raise DaemonConnectionError(f"Error communicating with daemon: {e}")
+        finally:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
     async def start(self) -> subprocess.Popen[bytes] | None:
         """Starts the daemon process or connects to an existing one.
 
@@ -330,56 +340,7 @@ class DaemonManager:
                 )
 
             # Send StartRequest to establish the session
-            try:
-                reader, writer = await asyncio.open_unix_connection(
-                    self.socket_path
-                )
-            except Exception as e:
-                raise DaemonConnectionError(f"Error connecting to daemon: {e}")
-
-            try:
-                start_req = StartRequest(
-                    port=self.port, connect=self.connect_to_existing
-                )
-                writer.write(serialize(start_req).encode("utf-8"))
-                await writer.drain()
-                try:
-                    response_line = await asyncio.wait_for(
-                        reader.readline(), timeout=self.startup_timeout
-                    )
-                except asyncio.TimeoutError:
-                    raise DaemonConnectionError(
-                        "Timed out waiting for response from daemon."
-                    )
-                if not response_line:
-                    raise DaemonConnectionError(
-                        "No response received from daemon on start request."
-                    )
-                try:
-                    resp = Response.model_validate_json(
-                        response_line.decode("utf-8")
-                    )
-                except ValidationError as e:
-                    raise DaemonConnectionError(
-                        f"Malformed response on start request: {e}"
-                    )
-
-                if not resp.success:
-                    raise DaemonConnectionError(
-                        resp.message or "Failed to initialize session"
-                    )
-            except DaemonConnectionError:
-                raise
-            except Exception as e:
-                raise DaemonConnectionError(
-                    f"Error communicating with daemon: {e}"
-                )
-            finally:
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except Exception:
-                    pass
+            await self._send_start_request()
 
             startup_success = True
             self._proc = proc

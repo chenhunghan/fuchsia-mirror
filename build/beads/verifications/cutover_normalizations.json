@@ -1,0 +1,265 @@
+[
+    {
+        "id": "cmd_clang_code_rules",
+        "comparison": "build_commands",
+        "match": {
+            "code": "build/beads/scripts/normalize_clang_args.py:_ARGS_TO_IGNORE,_ARG_PREFIXES_TO_IGNORE"
+        },
+        "reason": "Output, depfile, map-file, driver-mode, environment, RBE, crash-diagnostic and ThinLTO-cache flags differ by build system, not by what is built. Applied in code before comparing; never counted here.",
+        "source": "normalize_clang_args.py",
+        "fixture": null
+    },
+    {
+        "id": "cmd_clang_paths",
+        "comparison": "build_commands",
+        "match": {
+            "code": "build/beads/scripts/path_normalizer.py"
+        },
+        "reason": "GN build-dir and Bazel execroot/output paths are rewritten to common placeholders before comparing. Applied in code.",
+        "source": "path_normalizer.py",
+        "fixture": null
+    },
+    {
+        "id": "cmd_rustc_code_rules",
+        "comparison": "build_commands",
+        "match": {
+            "code": "build/beads/scripts/normalize_rustc_args.py:_ARGS_TO_IGNORE"
+        },
+        "reason": "Extern/-L, --emit, output, sysroot, RBE, API-level cfg, debuginfo, embed-bitcode, strip, metadata, link-arg, linker and extra-filename flags are ignored in code (see the TODOs there). The cutover check adds -Copt-level back, see cmd_rustc_opt_level_readded.",
+        "source": "normalize_rustc_args.py",
+        "fixture": null
+    },
+    {
+        "id": "cmd_rustc_opt_level_readded",
+        "comparison": "build_commands",
+        "match": {
+            "code": "build/beads/verifications/verify_package_cutover.py:_OPT_LEVEL_RE"
+        },
+        "reason": "normalize_rustc_args.py drops -Copt-level; the cutover check re-adds the effective value so that an opt-level change in a cutover is reported.",
+        "source": "verify_package_cutover.py",
+        "fixture": null
+    },
+    {
+        "id": "cmd_include_paths",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-(I|isystem|iquote).*"
+        },
+        "reason": "Header search paths differ in layout (GN gen/ and fidling/ dirs vs Bazel _virtual_includes, -isystem for deps). A wrong or missing header fails the build instead of changing the binary.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "-I{SOURCE_ROOT}/sdk/lib/fit/include",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_sysroot_path",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "--sysroot=.*"
+        },
+        "reason": "GN uses gen/zircon/public/sysroot and Bazel the fuchsia_platform_sysroot repository; both are the same Fuchsia sysroot.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "--sysroot=gen/zircon/public/sysroot",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_driver_name",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "clang(\\+\\+)?"
+        },
+        "reason": "GN invokes clang++ and Bazel clang with --driver-mode=g++; the driver mode, not the binary name, decides C++ behavior.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "clang++",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_compilation_dir",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-ffile-compilation-dir=.*"
+        },
+        "reason": "Debug-info compilation directory placeholder; GN uses the build dir and Bazel the execroot. No runtime effect.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "-ffile-compilation-dir={BUILD_DIR}",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_random_seed",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-frandom-seed=.*"
+        },
+        "reason": "Bazel sets a per-output random seed for reproducible builds. No runtime effect.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "-frandom-seed=bazel-out/x/main.o",
+            "gn": "absent",
+            "bazel": "present"
+        }
+    },
+    {
+        "id": "cmd_toolchain_version_define",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-DTOOLCHAIN_VERSION=.*"
+        },
+        "reason": "GN defines the toolchain version only to invalidate caches when the toolchain changes.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "-DTOOLCHAIN_VERSION=\"abc\"",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_crash_diagnostics",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-fcrash-diagnostics=.*"
+        },
+        "reason": "Only controls compiler crash reproducers.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "-fcrash-diagnostics=all",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_warnings",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-W(?!l,|a,|p,).*"
+        },
+        "reason": "Warning flags do not change generated code. Differences in warning sets are a lint concern, not a device one.",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_compile",
+            "item": "-Wconversion",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_link_library_spelling",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-L.*|-l.*|.*\\.so|@.*\\.rsp|-Wl,--(start|end)-group|-Wl,-(no-)?whole-archive",
+            "key": ".* cpp_link( \\w+)?"
+        },
+        "reason": "On C++ link lines GN passes link stubs and response files by path; Bazel passes -L/-l and whole-archive groups. The set of linked shared libraries is compared by the package content comparison (DT_NEEDED).",
+        "source": "replay of 0c6fb156878 (snapshot)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/snapshot cpp_link",
+            "item": "x64-shared/link_stub/libfdio.so",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_rust_sysroot_search_path",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "(-L(native=)? ?)?\\S*zircon/public/sysroot/lib"
+        },
+        "reason": "GN passes the Zircon sysroot library directory as a rustc -L search path; Bazel's toolchain provides the same sysroot. Search paths do not change the linked libraries, which the package content comparison compares (DT_NEEDED).",
+        "source": "live pilot of src/connectivity/policy/reachability",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/reachability rustc",
+            "item": "-L gen/zircon/public/sysroot/lib",
+            "gn": "present",
+            "bazel": "absent"
+        }
+    },
+    {
+        "id": "cmd_bazel_zx_all_source_define",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-D_ALL_SOURCE"
+        },
+        "reason": "Bazel zx_library macros (build/bazel/rules/cc/zx_library_utils.bzl) put _ALL_SOURCE in defines so it propagates to dependents, while GN zx_library applies it only to the library itself (build/config/zircon/BUILD.gn). Only exposes extra libc header declarations.",
+        "source": "fxr/1980795 (src/recovery/factory_reset)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/factory_reset cpp_compile",
+            "item": "-D_ALL_SOURCE",
+            "gn": "absent",
+            "bazel": "present"
+        }
+    },
+    {
+        "id": "cmd_fuchsia_link_pthread",
+        "comparison": "build_commands",
+        "match": {
+            "category": "cutover_diff_cmd_flags",
+            "item": "-pthread",
+            "key": ".* cpp_link( \\w+)?"
+        },
+        "reason": "Upstream Bazel targets such as @com_google_googletest//:gtest propagate linkopts = [\"-pthread\"]. On Fuchsia link lines Clang translates -pthread to -lpthread, which resolves to the sysroot's empty libpthread.so placeholder (pthreads is built into libc.so) and does not change DT_NEEDED or the output binary.",
+        "source": "fxr/1989115 (src/devices/bin/driver_playground)",
+        "fixture": {
+            "category": "cutover_diff_cmd_flags",
+            "key": "bin/unit_tests cpp_link",
+            "item": "-pthread",
+            "gn": "absent",
+            "bazel": "present"
+        }
+    },
+    {
+        "id": "pkg_cm_generated_manifest_path",
+        "comparison": "package_contents",
+        "match": {
+            "category": "cutover_diff_cm",
+            "item": "\\\"(obj|bazel-out)/.*generated_manifest\\.cml\\\",?"
+        },
+        "reason": "GN fuchsia_unittest_component and Bazel fx_unittest_component write generated .cml manifests under obj/ vs bazel-out/; cmc records the input path without affecting runtime component declarations.",
+        "source": "live pilot of src/connectivity/policy/reachability (coder proposal)",
+        "fixture": {
+            "category": "cutover_diff_cm",
+            "key": "meta/reachability-bin-test.cm",
+            "item": "\"obj/src/connectivity/policy/reachability/reachability-bin-test_component_generated_manifest.cml\",",
+            "gn": "\"obj/src/connectivity/policy/reachability/reachability-bin-test_component_generated_manifest.cml\",",
+            "bazel": ""
+        }
+    }
+]

@@ -338,7 +338,7 @@ pub(crate) enum Error {
     InvalidBlobDirUri(#[source] http::uri::InvalidUri),
 
     #[error("forwarding to package fetcher")]
-    PackageFetcher(#[source] Arc<crate::package_fetcher::Error>),
+    PackageFetcher(#[source] crate::package_fetcher::Error),
 
     #[error("authenticating context")]
     ContextAuthenticator(#[source] context_authenticator::ContextAuthenticatorError),
@@ -378,7 +378,7 @@ impl From<&Error> for fpkg::ResolveError {
             AuthorityFidl(_) => Err::Io,
             Authority(e) => fpkg_ext::errors::authority_to_resolve_err(e),
             InvalidBlobDirUri(_) => Err::Internal,
-            PackageFetcher(source) => source.as_ref().into(),
+            PackageFetcher(source) => source.into(),
             ContextAuthenticator(_) => Err::InvalidContext,
             CreatingSuperpackageRootDir { .. } => Err::Io,
             ReadingSubpackages(_) => Err::Io,

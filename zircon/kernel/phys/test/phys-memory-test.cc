@@ -12,9 +12,10 @@
 #include <fbl/algorithm.h>
 #include <ktl/byte.h>
 #include <ktl/span.h>
-#include <phys/address-space.h>
-#include <phys/allocation.h>
-#include <phys/new.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
+#include <phys/allocation/new.h>
+#include <phys/memory/init.h>
 
 #include "test-main.h"
 

@@ -34,6 +34,29 @@ std::unique_ptr<CoefficientTable> LinearFilterCoefficientTable::Create(Inputs in
 }
 
 std::unique_ptr<CoefficientTable> SincFilterCoefficientTable::Create(Inputs inputs) {
+  if (inputs.high_pass) {
+    // Construct the high-pass FIR filter via spectral inversion across all fractional offsets:
+    // subtracting the DC-normalized low-pass kernel from the unity all-pass kernel yields DC = 0.
+    auto low_pass = Create(Inputs{
+        .side_length = inputs.side_length,
+        .num_frac_bits = inputs.num_frac_bits,
+        .rate_conversion_ratio = inputs.rate_conversion_ratio,
+        .high_pass = false,
+    });
+    auto all_pass = Create(Inputs{
+        .side_length = inputs.side_length,
+        .num_frac_bits = inputs.num_frac_bits,
+        .rate_conversion_ratio = 1.0,
+        .high_pass = false,
+    });
+
+    CoefficientTableBuilder table(inputs.side_length, inputs.num_frac_bits);
+    std::transform(all_pass->raw_table().begin(), all_pass->raw_table().end(),
+                   low_pass->raw_table().begin(), table.physical_index_begin(),
+                   [](float ap, float lp) { return ap - lp; });
+    return table.Build();
+  }
+
   CoefficientTableBuilder table(inputs.side_length, inputs.num_frac_bits);
 
   const auto length = inputs.side_length;

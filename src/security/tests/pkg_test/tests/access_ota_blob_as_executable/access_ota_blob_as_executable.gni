@@ -162,13 +162,10 @@ template("access_ota_blob_as_executable") {
              "//src/security/tests/pkg_test/reboot:security_pkg_reboot-component",
 
              # Production SWD components.
-             "//src/sys/pkg/bin/pkg-cache:production-component-and-config",
+             "//src/sys/pkg/bin/pkg-cache:component",
              "//src/sys/pkg/bin/pkg-resolver:component",
              "//src/sys/pkg/bin/system-update-committer:component",
              "//src/sys/pkg/bin/system-updater:component",
-
-             # Production network components for OTA update.
-             "//src/connectivity/policy/http-client:component",
 
              # Mock SWD component dependencies.
              "//src/cobalt/bin/testing/fake_cobalt:component_v2",
@@ -189,7 +186,10 @@ template("access_ota_blob_as_executable") {
              ":${test_name}_v1_tuf_repo_resources",
              ":${test_name}_v1_update_package_resource",
            ]
-    subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+    subpackages = [
+      "//src/connectivity/network/netstack3:package-for-tests",
+      "//src/connectivity/policy/http-client:package",
+    ]
 
     # TODO(https://fxbug.dev/42169686): Complete test dependency composition to eliminate
     # error logs:

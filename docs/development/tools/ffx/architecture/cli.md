@@ -34,7 +34,7 @@ the process is running on the host. If the daemon is not running, the CLI
 spawns the daemon process and waits for a connection. So it is possible to see
 longer than average run times on the initial run of FFX.
 
-## Routing
+## Routing {:#routing}
 
 The CLI is designed as an extensible architecture. In this architecture,
 subtools provide the code execution. Subtools are defined by a mixture of GN

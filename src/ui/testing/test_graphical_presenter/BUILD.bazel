@@ -2,6 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 
 package(default_applicable_licenses = ["//:license"])
@@ -26,4 +35,29 @@ rustc_binary(
         "//third_party/rust_crates/vendor:futures",
         "//third_party/rust_crates/vendor:log",
     ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "test_graphical_presenter",
+)
+
+fx_component_manifest(
+    name = "test_graphical_presenter_manifest",
+    component_name = "test_graphical_presenter",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/test_graphical_presenter.cml",
+)
+
+fx_component(
+    name = "test_graphical_presenter",
+    compiled_manifest = ":test_graphical_presenter_manifest",
+    visibility = [
+        "//src/virtualization/bin/vmm/device/tests:__pkg__",
+        "//src/virtualization/tests/lib:__pkg__",
+    ],
+    deps = [":bin_packaged"],
 )

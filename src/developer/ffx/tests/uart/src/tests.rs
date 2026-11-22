@@ -20,7 +20,6 @@ use harness::{
     MockDriverProcess, MockUartTarget, STALE_METADATA_JSON, TestEmulator, assert_success,
     connection_count, process_exists, wait_for_process_exit,
 };
-use std::os::unix::net::UnixListener;
 use std::time::Duration;
 use uart_driver_api::{ConnectionError, ConnectionStatus};
 
@@ -236,6 +235,10 @@ async fn test_t2_disconnect_cleans_up_stale_or_corrupt_files() {
 
 #[fuchsia::test]
 async fn test_t2_connect_permission_denied_readonly_dir() {
+    if nix::unistd::geteuid().is_root() {
+        eprintln!("skipping: running as root bypasses read-only directory checks");
+        return;
+    }
     let emu = TestEmulator::shared().await;
     let _guard = emu.make_uart_dir_readonly();
     emu.connect_err(&[&emu.emu_name]).await;
@@ -318,11 +321,11 @@ async fn test_t3_multiple_connect_list_disconnect() {
     let emu = TestEmulator::shared().await;
     let target1 = &emu.emu_name;
     let socket_path = emu.shared_data_dir.join("other_device.sock");
-    let _listener = UnixListener::bind(&socket_path).unwrap();
+    let _mock_target = MockUartTarget::spawn(&socket_path);
     let target2 = socket_path.to_string_lossy();
 
     emu.connect_ok(&[target1]).await;
-    let _ = emu.connect(&[&target2]).await;
+    emu.connect_ok(&[&target2]).await;
     let list = emu.list_connections().await;
     assert!(connection_count(&list) >= 2, "list: {list:?}");
     emu.assert_connected(target1).await;
@@ -392,11 +395,16 @@ async fn test_t4_multiple_emulators_in_parallel() {
 async fn test_t4_reboot_target_during_connection() {
     let emu = TestEmulator::shared().await;
     emu.connect_target().await;
-
-    emu.restart().await;
     assert!(
-        emu.wait_for_target_echo(Duration::from_secs(60)).await,
-        "Target did not respond to echo after reboot within 60 seconds"
+        emu.wait_for_uart_ready(Duration::from_secs(30)).await,
+        "UART connection did not respond to echo before reboot within 30 seconds"
+    );
+
+    emu.reboot_target().await;
+    emu.wait_for_uart_down(Duration::from_secs(30)).await;
+    assert!(
+        emu.wait_for_uart_ready(Duration::from_secs(90)).await,
+        "UART connection did not reconnect and respond to echo after reboot within 90 seconds"
     );
     emu.disconnect_target().await;
 }
@@ -424,7 +432,7 @@ async fn test_t4_driver_exits_on_emulator_stop() {
     emu.stop().await;
 
     assert!(
-        wait_for_process_exit(driver_pid, Duration::from_secs(10)),
+        wait_for_process_exit(driver_pid, Duration::from_secs(10)).await,
         "Driver (PID {driver_pid}) failed to exit after emulator stopped"
     );
     emu.assert_disconnected(&emu.emu_name).await;
@@ -503,7 +511,7 @@ async fn test_t6_driver_cleanup_on_target_id_drift() {
     emu.reconnect_ok(&[&target]).await;
 
     assert!(
-        wait_for_process_exit(old_driver_pid, Duration::from_secs(5)),
+        wait_for_process_exit(old_driver_pid, Duration::from_secs(5)).await,
         "Old driver (PID {old_driver_pid}) failed to terminate on reconnect after target drift"
     );
     emu.assert_connected(&target).await;

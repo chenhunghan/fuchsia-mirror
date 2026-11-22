@@ -17,11 +17,93 @@ use mapping::{
     process_mapping_command,
 };
 use std::collections::HashMap;
+use std::num::NonZero;
 use std::ops::Range;
 use std::sync::Arc;
 use std::thread::JoinHandle;
+use storage_device::Device;
+use storage_device::buffer::OwnedBuffer;
+use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
 use storage_ptr_slice::MutPtrByteSlice;
 use vmo_fifo::{Receiver, SIG_SHUTDOWN};
+
+/// Adapter that implements [`BlockService`] over a [`Device`].
+pub struct DeviceBlockService {
+    device: Arc<dyn Device>,
+    scope: fasync::Scope,
+}
+
+impl DeviceBlockService {
+    pub fn new(device: Arc<dyn Device>) -> Self {
+        Self { device, scope: fasync::Scope::new_with_name("device_block_service") }
+    }
+}
+
+impl BlockService for DeviceBlockService {
+    fn allocate_buffer(&self, max_len: usize) -> OwnedBuffer {
+        let block_size = self.device.block_size() as usize;
+        let nblocks = (std::cmp::max(max_len, block_size) + block_size - 1) / block_size;
+        let aligned_len = nblocks * block_size;
+        let pool_size = nblocks.next_power_of_two() * block_size;
+        let buffer_source = BufferSource::new(pool_size);
+        let allocator = BufferAllocator::new(block_size, buffer_source);
+        Arc::new(allocator).allocate_buffer_sync_owned(aligned_len)
+    }
+
+    fn read_blocks(
+        &self,
+        device_offset: u64,
+        mut dest_buffer: OwnedBuffer,
+        on_complete: Box<dyn FnOnce(Result<OwnedBuffer, Error>) + Send>,
+    ) -> Result<(), Error> {
+        let device = self.device.clone();
+        self.scope.spawn(async move {
+            let res = device.read(device_offset, dest_buffer.as_mut()).await;
+            on_complete(res.map(|_| dest_buffer));
+        });
+        Ok(())
+    }
+}
+
+/// Serves a [`fblock::MapperRequestStream`] backed by `device`.
+pub async fn serve_device_mapper(device: Arc<dyn Device>, mut stream: fblock::MapperRequestStream) {
+    let service: Arc<dyn BlockService> = Arc::new(DeviceBlockService::new(device));
+    let handler =
+        Arc::new(|_mapping_vmo: &zx::Vmo, delivery_queue: zx::Vmo| Verifier::new(delivery_queue));
+    let scope = fasync::Scope::new();
+    while let Ok(Some(request)) = stream.try_next().await {
+        match request {
+            fblock::MapperRequest::OpenSession {
+                session,
+                mapping_vmo,
+                port,
+                delivery_queue,
+                responder,
+            } => {
+                match serve_mapper_session(
+                    handler.clone(),
+                    service.clone(),
+                    session,
+                    mapping_vmo,
+                    port,
+                    delivery_queue,
+                ) {
+                    Ok(fut) => {
+                        scope.spawn(async move {
+                            let _ = fut.await;
+                        });
+                        let _ = responder.send(Ok(()));
+                    }
+                    Err(status) => {
+                        let _ = responder.send(Err(status.into_raw()));
+                    }
+                }
+            }
+            fblock::MapperRequest::_UnknownMethod { .. } => {}
+        }
+    }
+    scope.join().await;
+}
 
 pub trait MapperHandler: Send + Sync + 'static {
     fn on_open_mapper_session(
@@ -88,6 +170,7 @@ impl DirectPager {
 
 impl DeliveryHandler for DirectPager {
     type Request = DirectPageRequest;
+    type BlobRegistration = ();
 
     fn get_page_request(
         self: &Arc<Self>,
@@ -102,7 +185,16 @@ impl DeliveryHandler for DirectPager {
             committed_len: 0,
             transfer_vmo: None,
             vaddr: 0,
+            trace_flow_id: 0,
         }
+    }
+
+    fn prepare_register_blob(
+        &self,
+        _key: u64,
+        _max_leaf_bytes: usize,
+    ) -> Result<Self::BlobRegistration, Error> {
+        Ok(())
     }
 
     fn unregister_file(&self, key: u64) {
@@ -119,6 +211,7 @@ pub struct DirectPageRequest {
     committed_len: usize,
     transfer_vmo: Option<zx::Vmo>,
     vaddr: usize,
+    trace_flow_id: u64,
 }
 
 impl DataBuffer for DirectPageRequest {
@@ -168,7 +261,7 @@ impl PageRequest for DirectPageRequest {
     fn prepare(
         &mut self,
         read_range: Range<u64>,
-        _read_alignment: usize,
+        _flush_alignment: Option<NonZero<usize>>,
     ) -> Result<(), ChunkedArchiveError> {
         assert_eq!(self.vaddr, 0, "prepare must only be called once");
         self.read_range = read_range;
@@ -182,6 +275,15 @@ impl PageRequest for DirectPageRequest {
         self.transfer_vmo = Some(transfer_vmo);
         self.vaddr = vaddr;
         Ok(())
+    }
+
+    fn with_trace_flow_id(mut self, trace_flow_id: u64) -> Self {
+        self.trace_flow_id = trace_flow_id;
+        self
+    }
+
+    fn trace_flow_id(&self) -> u64 {
+        self.trace_flow_id
     }
 
     fn split_at(&mut self, mid: u64) -> Self {
@@ -198,6 +300,7 @@ impl PageRequest for DirectPageRequest {
             committed_len: 0,
             transfer_vmo: None,
             vaddr: 0,
+            trace_flow_id: 0,
         }
     }
 }
@@ -256,13 +359,12 @@ impl MapperVmoThread {
         let files_for_vmo = files.clone();
         let thread = std::thread::spawn(move || {
             match Receiver::<RawMappingCommand>::new(mapping_vmo_dup, PENDING_COMMANDS_CAPACITY) {
-                Ok(mut receiver) => {
-                    while let Ok(msg) = receiver.peek() {
-                        if let Err(error) = process_mapping_command(&msg, &files_for_vmo) {
+                Ok(receiver) => {
+                    let receiver = Arc::new(receiver);
+                    while let Ok(msg) = receiver.claim() {
+                        if let Err(error) = process_mapping_command(msg, &receiver, &files_for_vmo)
+                        {
                             log::error!(error:?; "Failed to process mapping command");
-                        }
-                        if let Err(error) = msg.pop() {
-                            log::error!(error:?; "Failed to pop mapping command from FIFO");
                         }
                     }
                 }
@@ -379,14 +481,11 @@ async fn run_mapper_session_loop<M: MapperHandler + ?Sized, D: DeliveryHandler>(
                 delivery_queue,
                 responder,
             } => {
-                let parent_file = match files.wait_for_file(parent_key).await {
-                    Ok(file) => file,
-                    Err(error) => {
-                        log::warn!(error:?; "Failed to load parent file for key {parent_key}");
-                        responder.send(Err(zx::Status::NOT_FOUND.into_raw()))?;
-                        continue;
-                    }
-                };
+                if let Err(error) = files.wait_for_file(parent_key).await {
+                    log::warn!(error:?; "Failed to load parent file for key {parent_key}");
+                    responder.send(Err(zx::Status::NOT_FOUND.into_raw()))?;
+                    continue;
+                }
                 if port.is_some() && delivery_queue.is_none() && direct_pager.is_none() {
                     // When `port` is provided without a new `delivery_queue` on a verifier-backed
                     // parent session, the child session shares the parent's `Verifier` and
@@ -397,9 +496,9 @@ async fn run_mapper_session_loop<M: MapperHandler + ?Sized, D: DeliveryHandler>(
                         service.clone(),
                         files.delivery_handler().clone(),
                         child_port,
-                        Some(parent_file),
+                        Some((files.clone(), parent_key)),
                     ));
-                    let pager_thread = child_files.spawn_pager_thread();
+                    let pager_thread = child_files.spawn_pager_thread("child-pager");
                     scope.spawn(async move {
                         let _pager_thread = pager_thread;
                         if let Err(e) =
@@ -411,7 +510,8 @@ async fn run_mapper_session_loop<M: MapperHandler + ?Sized, D: DeliveryHandler>(
                     responder.send(Ok(()))?;
                     continue;
                 }
-                let child_service = Arc::new(ChildBlockService::new(service.clone(), parent_file));
+                let child_service =
+                    Arc::new(ChildBlockService::new(service.clone(), files.clone(), parent_key));
                 match serve_mapper_session(
                     handler.clone(),
                     child_service,
@@ -486,7 +586,7 @@ pub fn serve_mapper_session<M: MapperHandler + ?Sized>(
         (Some(port), Some(delivery_queue)) => {
             let verifier = handler.on_open_mapper_session(&mapping_vmo, delivery_queue)?;
             let files = Arc::new(Files::new(service.clone(), verifier, port));
-            let pager_thread = files.spawn_pager_thread();
+            let pager_thread = files.spawn_pager_thread("blob-pager");
             Ok(async move {
                 let _pager_thread = pager_thread;
                 run_mapper_session_loop(handler, service, session, mapping_vmo, files, None).await
@@ -499,7 +599,7 @@ pub fn serve_mapper_session<M: MapperHandler + ?Sized>(
             let direct_pager =
                 DirectPager::new(pager, port.duplicate_handle(zx::Rights::SAME_RIGHTS)?);
             let files = Arc::new(Files::new(service.clone(), direct_pager.clone(), port));
-            let pager_thread = files.spawn_pager_thread();
+            let pager_thread = files.spawn_pager_thread("pager");
             Ok(async move {
                 let _pager_thread = pager_thread;
                 run_mapper_session_loop(
@@ -526,8 +626,9 @@ mod tests {
     use mapping::{Extent, Extents, MappingCommand};
     use storage_device::buffer::OwnedBuffer;
     use storage_device::buffer_allocator::{BufferAllocator, BufferSource};
+    use storage_device::fake_device::FakeDevice;
     use storage_profile::{FileMessage, Message as _};
-    use vmo_fifo::SyncSender;
+    use vmo_fifo::{Alignment, SyncSender};
 
     struct FakeHandler;
     impl MapperHandler for FakeHandler {
@@ -584,7 +685,7 @@ mod tests {
         let (key, vmo) = direct_pager.create_vmo(8192, fblock::CreateVmoOptions::empty()).unwrap();
 
         let mut request = direct_pager.get_page_request(key, 0..8192);
-        request.prepare(0..8192, 128 * 1024).expect("prepare");
+        request.prepare(0..8192, None).expect("prepare");
 
         let page1 = vec![0xAAu8; 4096];
         request.mut_ptr_slice().subslice_mut(0..4096).copy_from_slice(&page1);
@@ -621,7 +722,7 @@ mod tests {
         assert_eq!(packet.key(), key);
 
         let mut request = direct_pager.get_page_request(key, 0..8192);
-        request.prepare(0..8192, 128 * 1024).expect("prepare");
+        request.prepare(0..8192, None).expect("prepare");
         drop(request);
 
         assert_eq!(reader_thread.join().unwrap(), Err(zx::Status::IO));
@@ -655,7 +756,7 @@ mod tests {
         assert_eq!(packet.key(), key);
 
         let mut request = direct_pager.get_page_request(key, 0..8192);
-        request.prepare(0..8192, 128 * 1024).expect("prepare");
+        request.prepare(0..8192, None).expect("prepare");
         drop(request);
 
         let buf = reader_thread.join().unwrap();
@@ -697,7 +798,8 @@ mod tests {
 
         let extents = vec![Extent::try_new(0..8192, Some(0)).unwrap()];
         let encoded_extents = Extents::try_new(&extents, 0).unwrap();
-        let mut sender = SyncSender::<RawMappingCommand>::new(mapping_vmo, 8, 256).unwrap();
+        let mut sender =
+            SyncSender::<RawMappingCommand>::new(mapping_vmo, Alignment::SIZE_8B, 256).unwrap();
         let mut payload = sender.reserve_payload(8).unwrap();
         for (mut chunk, val) in
             payload.data().chunks_mut(8).zip(Extents::encode_extents(&encoded_extents))
@@ -751,7 +853,7 @@ mod tests {
             let _ = fut.await;
         });
 
-        let mut sender = SyncSender::<RawMappingCommand>::new(mapping_vmo, 8, 256)
+        let mut sender = SyncSender::<RawMappingCommand>::new(mapping_vmo, Alignment::SIZE_8B, 256)
             .expect("SyncSender::new failed");
         let mut map_key = |key: u64| {
             let extents =
@@ -868,5 +970,148 @@ mod tests {
 
         proxy.close().await.expect("close fidl failed").expect("close session failed");
         task.await;
+    }
+
+    #[fuchsia::test]
+    async fn test_serve_device_mapper() {
+        let device: Arc<dyn Device> = Arc::new(FakeDevice::new(64, 512));
+        let block_data = vec![0x5Au8; 8192];
+        let mut write_buf = device.allocate_buffer(block_data.len()).await;
+        write_buf.as_mut_ptr_slice().copy_from_slice(&block_data);
+        device.write(4096, write_buf.as_ref()).await.expect("device write failed");
+        drop(write_buf);
+
+        let (mapper_proxy, mapper_server) = create_proxy::<fblock::MapperMarker>();
+        let mapper_task =
+            fasync::Task::spawn(serve_device_mapper(device, mapper_server.into_stream()));
+
+        let (session_proxy, session_server) = create_proxy::<fblock::MapperSessionMarker>();
+        let mapping_vmo = zx::Vmo::create(65536).expect("create mapping_vmo failed");
+        mapper_proxy
+            .open_session(
+                session_server,
+                mapping_vmo
+                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                    .expect("duplicate_handle failed"),
+                None,
+                None,
+            )
+            .await
+            .expect("open_session fidl failed")
+            .expect("open_session failed");
+
+        let (key, paged_vmo) = session_proxy
+            .create_vmo(8192, fblock::CreateVmoOptions::empty())
+            .await
+            .expect("create_vmo fidl failed")
+            .expect("create_vmo failed");
+
+        let extents = vec![Extent::try_new(0..8192, Some(4096)).expect("Extent::try_new failed")];
+        let encoded_extents = Extents::try_new(&extents, 0).expect("Extents::try_new failed");
+        let mut sender = SyncSender::<RawMappingCommand>::new(mapping_vmo, Alignment::SIZE_8B, 256)
+            .expect("SyncSender::new failed");
+        let mut payload = sender.reserve_payload(8).expect("reserve_payload failed");
+        for (mut chunk, val) in
+            payload.data().chunks_mut(8).zip(Extents::encode_extents(&encoded_extents))
+        {
+            chunk.copy_from_slice(&val.to_le_bytes());
+        }
+        let cmd = MappingCommand::Mappings {
+            key,
+            offset: payload.offset() as u32,
+            stored_size: 8192,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 1,
+            encrypted: false,
+        };
+        payload.commit(cmd.into()).expect("payload commit failed");
+
+        let mut read_buf = vec![0u8; 8192];
+        let read_buf = fasync::unblock(move || {
+            paged_vmo.read(&mut read_buf, 0).expect("read paged_vmo failed");
+            read_buf
+        })
+        .await;
+        assert_eq!(read_buf, block_data);
+
+        session_proxy.close().await.expect("close fidl failed").expect("close session failed");
+        drop(mapper_proxy);
+        mapper_task.await;
+    }
+
+    #[fuchsia::test]
+    async fn test_serve_device_mapper_rejects_bad_payload_offsets() {
+        let device: Arc<dyn Device> = Arc::new(FakeDevice::new(64, 512));
+        let block_data = vec![0x5Au8; 8192];
+        let mut write_buf = device.allocate_buffer(block_data.len()).await;
+        write_buf.as_mut_ptr_slice().copy_from_slice(&block_data);
+        device.write(4096, write_buf.as_ref()).await.expect("device write failed");
+        drop(write_buf);
+
+        let (mapper_proxy, mapper_server) = create_proxy::<fblock::MapperMarker>();
+        let mapper_task =
+            fasync::Task::spawn(serve_device_mapper(device, mapper_server.into_stream()));
+
+        let (session_proxy, session_server) = create_proxy::<fblock::MapperSessionMarker>();
+        let mapping_vmo = zx::Vmo::create(65536).expect("create mapping_vmo failed");
+        mapper_proxy
+            .open_session(
+                session_server,
+                mapping_vmo
+                    .duplicate_handle(zx::Rights::SAME_RIGHTS)
+                    .expect("duplicate_handle failed"),
+                None,
+                None,
+            )
+            .await
+            .expect("open_session fidl failed")
+            .expect("open_session failed");
+
+        let (key, paged_vmo) = session_proxy
+            .create_vmo(8192, fblock::CreateVmoOptions::empty())
+            .await
+            .expect("create_vmo fidl failed")
+            .expect("create_vmo failed");
+
+        let extents = vec![Extent::try_new(0..8192, Some(4096)).expect("Extent::try_new failed")];
+        let encoded_extents = Extents::try_new(&extents, 0).expect("Extents::try_new failed");
+        let mut sender = SyncSender::<RawMappingCommand>::new(mapping_vmo, Alignment::SIZE_8B, 256)
+            .expect("SyncSender::new failed");
+        let mappings = |offset| MappingCommand::Mappings {
+            key,
+            offset,
+            stored_size: 8192,
+            device_offset: 0,
+            metadata_count: 0,
+            extent_count: 1,
+            encrypted: false,
+        };
+
+        // The server must reject commands whose payload offset is out of bounds or misaligned
+        // without crashing, and keep processing subsequent commands.
+        sender.push(mappings(u32::MAX - 7).into()).expect("push out-of-bounds command failed");
+        sender.push(mappings(4).into()).expect("push misaligned command failed");
+
+        let mut payload = sender.reserve_payload(8).expect("reserve_payload failed");
+        for (mut chunk, val) in
+            payload.data().chunks_mut(8).zip(Extents::encode_extents(&encoded_extents))
+        {
+            chunk.copy_from_slice(&val.to_le_bytes());
+        }
+        let offset = payload.offset() as u32;
+        payload.commit(mappings(offset).into()).expect("payload commit failed");
+
+        let mut read_buf = vec![0u8; 8192];
+        let read_buf = fasync::unblock(move || {
+            paged_vmo.read(&mut read_buf, 0).expect("read paged_vmo failed");
+            read_buf
+        })
+        .await;
+        assert_eq!(read_buf, block_data);
+
+        session_proxy.close().await.expect("close fidl failed").expect("close session failed");
+        drop(mapper_proxy);
+        mapper_task.await;
     }
 }

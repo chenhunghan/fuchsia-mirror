@@ -131,13 +131,6 @@ zx_status_t zxio_synchronous_datagram_socket_init(
     zxio_storage_t* storage, zx::eventpair event,
     fidl::ClientEnd<fuchsia_posix_socket::SynchronousDatagramSocket> client);
 
-// datagram socket (channel backed)
-
-zx_status_t zxio_datagram_socket_init(zxio_storage_t* storage, zx::socket socket,
-                                      const zx_info_socket_t& info,
-                                      const zxio_datagram_prelude_size_t& prelude_size,
-                                      fidl::ClientEnd<fuchsia_posix_socket::DatagramSocket> client);
-
 // stream socket (channel backed) --------------------------------------------
 
 zx_status_t zxio_stream_socket_init(zxio_storage_t* storage, zx::socket socket,

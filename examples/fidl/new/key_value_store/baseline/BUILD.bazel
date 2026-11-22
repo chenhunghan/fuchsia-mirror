@@ -2,9 +2,47 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
-    ["meta/client.cml"],
+    [
+        "meta/client.cml",
+        "meta/server.cml",
+    ],
     visibility = ["//examples/fidl/new/key_value_store/baseline:__subpackages__"],
+)
+
+fx_component_manifest(
+    name = "client_manifest",
+    component_name = "keyvaluestore_baseline_client",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/client.cml",
+)
+
+filegroup(
+    name = "all",
+    testonly = True,
+    srcs = [
+        ":client_manifest",
+        "//examples/fidl/new/key_value_store/baseline/cpp_natural:examples_fidl_keyvaluestore_baseline_cpp_natural",
+        "//examples/fidl/new/key_value_store/baseline/cpp_wire:examples_fidl_keyvaluestore_baseline_cpp",
+        "//examples/fidl/new/key_value_store/baseline/rust:examples_fidl_keyvaluestore_baseline_rust",
+    ],
+    visibility = ["//examples/fidl/new/key_value_store:__pkg__"],
+)
+
+test_suite(
+    name = "hermetic_tests",
+    tests = [
+        "//examples/fidl/new/key_value_store/baseline/cpp_natural:tests",
+        "//examples/fidl/new/key_value_store/baseline/cpp_wire:tests",
+        "//examples/fidl/new/key_value_store/baseline/rust:tests",
+        "//examples/fidl/new/key_value_store/baseline/rust_next:tests",
+    ],
+    visibility = ["//examples/fidl/new/key_value_store:__pkg__"],
 )

@@ -105,8 +105,8 @@ class ReleaseFenceManager final {
   //     display is dark and `SetDisplayPowerMode()` applied the black config before calling
   //     `MarkAllFramesPresented()`), they are signaled immediately so clients are not starved of
   //     buffers while dark.
-  // Invokes `frame_presented_callback` (and signals `present_fences`) once all previous callbacks
-  // have been invoked.
+  // Posts `frame_presented_callback` asynchronously to `dispatcher_` (and signals `present_fences`)
+  // once all previous callbacks have been invoked.
   void OnSkippedFrame(uint64_t frame_number, std::vector<zx::event> release_fences,
                       std::vector<zx::counter> release_counters,
                       std::vector<zx::counter> present_fences,

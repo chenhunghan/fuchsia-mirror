@@ -1,0 +1,41 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_library_headers.bzl", "fx_cc_library_headers")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library_headers(
+    name = "headers",
+    hdrs = [
+        "include/lib/driver-unit-test/logger.h",
+        "include/lib/driver-unit-test/utils.h",
+    ],
+    deps = [
+        # <lib/driver-unit-test/logger.h> has #include
+        # <fidl/fuchsia.driver.test.logger/cpp/fidl.h>
+        "//sdk/fidl/fuchsia.driver.test.logger:fuchsia.driver.test.logger_cpp",
+
+        # lib/driver-unit-test/logger.h has #include <fbl/string.h>.
+        "//zircon/system/ulib/fbl",
+    ],
+)
+
+fx_cc_library(
+    name = "driver-unit-test",
+    srcs = [
+        "logger.cc",
+        "utils.cc",
+    ],
+    implementation_deps = [
+        "//sdk/lib/fidl",
+        "//src/lib/ddk",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+    visibility = ["//:__subpackages__"],
+    deps = [":headers"],
+    alwayslink = True,
+)

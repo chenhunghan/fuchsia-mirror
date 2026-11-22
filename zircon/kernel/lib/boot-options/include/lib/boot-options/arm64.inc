@@ -97,6 +97,19 @@ CPU-specific issues on entry to EL1 from EL0.  Values can be:
 As on SoCs with heterogeneous cores, a different selection should be made for
 each individual CPU, values other than `auto` should only be used in testing.
 )""")
+
+DEFINE_OPTION("kernel.arm64.atomics", Arm64Atomics, arm64_atomics,
+              {Arm64Atomics::kAuto}, R"""(
+This selects whether the helper functions that the kernel's compiled code calls
+for atomic operations use FEAT_LSE instructions or load-exclusive /
+store-exclusive loops.  Values can be:
+ * `auto` (default) - Use FEAT_LSE instructions if the boot CPU supports them,
+   using `lse-a55` on Cortex-A55.
+ * `lse` - Use FEAT_LSE instructions.  Panic if the boot CPU doesn't support them.
+ * `lse-a55` - Use FEAT_LSE instructions preceded by `prfm pstl1keep` (for
+   Cortex-A55).  Panic if the boot CPU doesn't support FEAT_LSE.
+ * `llsc` - Use load-exclusive / store-exclusive loops.
+)""")
 DEFINE_OPTION("kernel.arm64.force-pct", bool, arm64_force_pct, {false}, R"""(
 By default, the kernel will select the ARM virtual counter (VCT) to use as the
 time reference for the system.  It will only choose the physical counter (PCT)

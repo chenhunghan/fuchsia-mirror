@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use capability_source::CapabilitySource;
 use cm_rust::{Availability, CapabilityTypeName};
 use cm_types::Name;
-use fidl_fuchsia_component_runtime::RouteRequest;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
 use router_error::RouterError;
 use std::fmt;
 use std::sync::Arc;
@@ -77,7 +77,7 @@ impl CapabilityBound for Router<crate::Connector> {
         scope: vfs::execution_scope::ExecutionScope,
         token: Arc<crate::WeakInstanceToken>,
     ) -> Result<Arc<dyn vfs::directory::entry::DirectoryEntry>, crate::ConversionError> {
-        Ok(self.into_directory_entry(fidl_fuchsia_io::DirentType::Service, scope, token))
+        Ok(self.into_directory_entry(fidl_fuchsia_io_common::DirentType::Service, scope, token))
     }
 }
 impl CapabilityBound for Router<crate::Data> {
@@ -91,7 +91,7 @@ impl CapabilityBound for Router<crate::Data> {
         scope: vfs::execution_scope::ExecutionScope,
         token: Arc<crate::WeakInstanceToken>,
     ) -> Result<Arc<dyn vfs::directory::entry::DirectoryEntry>, crate::ConversionError> {
-        Ok(self.into_directory_entry(fidl_fuchsia_io::DirentType::Service, scope, token))
+        Ok(self.into_directory_entry(fidl_fuchsia_io_common::DirentType::Service, scope, token))
     }
 }
 impl CapabilityBound for Router<crate::Dictionary> {
@@ -105,7 +105,7 @@ impl CapabilityBound for Router<crate::Dictionary> {
         scope: vfs::execution_scope::ExecutionScope,
         token: Arc<crate::WeakInstanceToken>,
     ) -> Result<Arc<dyn vfs::directory::entry::DirectoryEntry>, crate::ConversionError> {
-        Ok(self.into_directory_entry(fidl_fuchsia_io::DirentType::Service, scope, token))
+        Ok(self.into_directory_entry(fidl_fuchsia_io_common::DirentType::Service, scope, token))
     }
 }
 
@@ -120,7 +120,7 @@ impl CapabilityBound for Router<crate::DirConnector> {
         scope: vfs::execution_scope::ExecutionScope,
         token: Arc<crate::WeakInstanceToken>,
     ) -> Result<Arc<dyn vfs::directory::entry::DirectoryEntry>, crate::ConversionError> {
-        Ok(self.into_directory_entry(fidl_fuchsia_io::DirentType::Service, scope, token))
+        Ok(self.into_directory_entry(fidl_fuchsia_io_common::DirentType::Service, scope, token))
     }
 }
 

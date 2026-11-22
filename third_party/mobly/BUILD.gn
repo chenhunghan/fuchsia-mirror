@@ -4,6 +4,7 @@
 
 import("//build/python/python_library.gni")
 
+# LINT.IfChange(mobly)
 group("mobly") {
   testonly = true
 
@@ -44,11 +45,9 @@ python_library("mobly_no_testonly") {
     "controllers/android_device_lib/__init__.py",
     "controllers/android_device_lib/adb.py",
     "controllers/android_device_lib/apk_utils.py",
-    "controllers/android_device_lib/callback_handler.py",
     "controllers/android_device_lib/callback_handler_v2.py",
     "controllers/android_device_lib/errors.py",
     "controllers/android_device_lib/fastboot.py",
-    "controllers/android_device_lib/jsonrpc_client_base.py",
     "controllers/android_device_lib/jsonrpc_shell_base.py",
     "controllers/android_device_lib/logcat_processor.py",
     "controllers/android_device_lib/service_manager.py",
@@ -57,7 +56,6 @@ python_library("mobly_no_testonly") {
     "controllers/android_device_lib/services/logcat.py",
     "controllers/android_device_lib/services/snippet_management_service.py",
     "controllers/android_device_lib/snippet_client_v2.py",
-    "controllers/android_device_lib/snippet_event.py",
     "controllers/attenuator.py",
     "controllers/attenuator_lib/__init__.py",
     "controllers/attenuator_lib/minicircuits.py",
@@ -105,3 +103,7 @@ python_library("mobly_no_testonly") {
     "//third_party/pyyaml:yaml",
   ]
 }
+# LINT.ThenChange(
+#     BUILD.bazel:mobly,
+#     //src/testing/end_to_end/stubs/BUILD.bazel:mobly,
+# )

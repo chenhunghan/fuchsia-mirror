@@ -39,6 +39,5 @@ fuchsia_cc_driver("fake-clock-driver") {
 fuchsia_driver_component("fake-clock-component") {
   component_name = "fake-clock"
   dml_label = ":fake-clock-dml"
-  info = "fake-clock-info.json"
   deps = [ ":fake-clock-driver" ]
 }

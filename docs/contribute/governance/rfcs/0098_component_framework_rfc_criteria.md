@@ -26,7 +26,7 @@ not.
 
 ## Design
 
-### Changes that require an RFC
+### Changes that require an RFC {:#changes-that-require-an-rfc}
 
 * **Changes resulting in additions or modifications to the public CF APIs,
   libraries, and tools,** as exposed in the Fuchsia SDK. For example, changes to

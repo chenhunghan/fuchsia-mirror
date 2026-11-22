@@ -148,6 +148,7 @@ class PortableUITest : public LoggingEventLoop, public ::testing::Test {
   virtual uint32_t display_refresh_rate_millihertz() { return 0; }
   virtual uint32_t display_rotation() { return 0; }
   virtual bool suspend_enabled() { return false; }
+  virtual std::string renderer() { return "vulkan"; }
 
  private:
   void SetUpRealmBase();

@@ -15,13 +15,9 @@ import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
-import cl_utils
-import fuchsia
-import remotetool
-import reproxy_logs
-
 # This requires python pb2 in build/rbe/proto (generated).
 from api.log import log_pb2
+from build.rbe import cl_utils, fuchsia, remotetool, reproxy_logs
 
 _SCRIPT_BASENAME = Path(__file__).name
 _SCRIPT_DIR = Path(__file__).parent
@@ -121,7 +117,7 @@ def expand_to_rpl_command(args: argparse.Namespace) -> int:
         reclient_bindir=fuchsia.RECLIENT_BINDIR,
         verbose=False,
     )
-    rtool = remotetool.configure_remotetool(args.cfg)
+    rtool = remotetool.configure(args.cfg, env=os.environ)
 
     # Stream records out to avoid losing data in the event of an error.
     outf: contextlib.AbstractContextManager[object]

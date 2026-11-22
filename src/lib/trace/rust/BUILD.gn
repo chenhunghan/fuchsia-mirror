@@ -14,16 +14,24 @@ rustc_staticlib("rust-cpp-test-lib") {
   edition = "2024"
   testonly = true
 
+  # C++ consumers use the header through ":rust-cpp-test-lib_headers".
+  visibility = [ ":*" ]
+
   deps = [
     ":trace",
     ":trace-observer",
     "//src/lib/fuchsia-async",
   ]
 
-  public = [ "test/lib.h" ]
-
   source_root = "test/lib.rs"
   sources = [ "test/lib.rs" ]
+}
+
+source_set("rust-cpp-test-lib_headers") {
+  testonly = true
+  visibility = [ ":*" ]
+  public = [ "test/lib.h" ]
+  public_deps = [ ":rust-cpp-test-lib" ]
 }
 
 source_set("cpp-test-runner") {
@@ -31,7 +39,7 @@ source_set("cpp-test-runner") {
   visibility = [ ":*" ]
   sources = [ "test/test_runner.cc" ]
   deps = [
-    ":rust-cpp-test-lib",
+    ":rust-cpp-test-lib_headers",
     "//sdk/lib/async",
     "//sdk/lib/async:async-cpp",
     "//sdk/lib/async-default",
@@ -94,10 +102,9 @@ group("tests") {
   deps = [ ":rust-trace-test" ]
 }
 
-# Defined in BUILD.bazel too, where it is a static library, so Bazel builds can
-# link `:trace-provider`. Kept in GN because librust-trace-provider.so is
-# included in bootfs and in the packages of Rust components that use
-# `:trace-provider`.
+# Defined in BUILD.bazel too (with `@bazel2gn:skip`). Kept in GN because
+# librust-trace-provider.so is included in bootfs and in the packages of Rust
+# components that use `:trace-provider`.
 shared_library("rust-trace-provider") {
   visibility = [ ":*" ]
   deps = [ ":rust-trace-provider-cpp" ]
@@ -197,9 +204,10 @@ rustc_library("trace-observer") {
   link_deps = [ "//zircon/system/ulib/trace" ]
   visibility = [
     ":*",
-    "//src/performance/memory/attribution/monitor:*",
+    "//src/memory/attribution/monitor:*",
     "//src/starnix/kernel/core:*",
     "//src/starnix/modules/perfetto_consumer:*",
+    "//src/sysmem/server/*",
     "//vendor/google/*",
   ]
   deps = [

@@ -77,6 +77,26 @@ INSTANTIATE_TEST_SUITE_P(
       return std::string(info.param.name.begin(), info.param.name.end());
     });
 
+TEST_F(NetworkTest, CreateAgentWaitsForMedia) {
+  auto cleanup = SetupEfiGlobalState(stub_service(), image_device());
+
+  efi_simple_network_mode mode = {
+      .CurrentAddress = {0x52, 0x54, 0x00, 0x63, 0x5e, 0x7a},
+      .MediaPresent = false,
+  };
+  net_device().SetModeData(mode);
+
+  constexpr size_t kLinkUpDelayUs = 2'000'000;
+  size_t elapsed_us = 0;
+  stub_service().SetOnStall([&](size_t us) {
+    elapsed_us += us;
+    mode.MediaPresent = elapsed_us >= kLinkUpDelayUs;
+    net_device().SetModeData(mode);
+  });
+
+  ASSERT_TRUE(EthernetAgent::Create().is_ok());
+}
+
 TEST_F(NetworkTest, CreateAgentAndTx) {
   auto cleanup = SetupEfiGlobalState(stub_service(), image_device());
   auto res = EthernetAgent::Create();

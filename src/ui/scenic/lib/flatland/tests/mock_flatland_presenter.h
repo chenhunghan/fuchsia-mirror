@@ -21,6 +21,9 @@ class MockFlatlandPresenter : public FlatlandPresenter {
                bool squashable, std::vector<zx::event> release_fences,
                std::vector<zx::counter> release_counters, std::vector<zx::counter> present_fences,
                bool schedule_asap));
+  MOCK_METHOD(void, NotifyExpectedPresent,
+              (scheduling::SessionId session_id, zx::time expected_present_time,
+               zx::duration frame_interval, bool schedule_asap));
   MOCK_METHOD(std::vector<scheduling::FuturePresentationInfo>, GetFuturePresentationInfos, ());
   MOCK_METHOD(void, RemoveSession,
               (scheduling::SessionId session_id, std::vector<zx::event> release_fences,

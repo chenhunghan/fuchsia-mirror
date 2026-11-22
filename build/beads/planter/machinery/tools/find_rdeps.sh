@@ -42,6 +42,7 @@ package_targets = set()
 non_gn_synced_targets = set()
 test_rule_targets = set()
 testonly_targets = set()
+shard_targets = rl.get_gn_shard_targets(workdir, target_pkg)
 idk_targets = set()
 alias_map = {}
 
@@ -56,6 +57,7 @@ if os.path.isfile(bazel_file):
         non_gn_synced_targets = parsed["non_gn_synced_targets"]
         test_rule_targets = parsed["test_rule_targets"]
         testonly_targets = parsed["testonly_targets"]
+        shard_targets |= parsed["shard_targets"]
         idk_targets = parsed["idk_targets"]
         alias_map = parsed["alias_map"]
     except Exception:
@@ -88,6 +90,7 @@ env_target_dir = pcl.normalize_target_dir(os.environ.get("PLANTER_TARGET_DIR", "
     idk_targets=idk_targets,
     target_dir=env_target_dir,
     excluded_gn_only_out=excluded_gn_only_references,
+    shard_targets=shard_targets,
 )
 
 is_test_pkg = rl.is_test_support_package(target_pkg)
@@ -128,7 +131,13 @@ print(json.dumps({
         for t, rset in per_target_rdeps.items()
     },
     "per_target_recommended_visibility": {
-        t: rec_vis(rset, is_test_support=is_test_pkg or t in testonly_targets, target_name=t)
+        t: rec_vis(
+            rset,
+            is_test_support=(
+                is_test_pkg or t in testonly_targets or t in shard_targets
+            ),
+            target_name=t,
+        )
         for t, rset in per_target_rdeps.items()
     },
     "per_target_area_rollup_visibility": {

@@ -123,7 +123,7 @@ void ControllerImpl::ReadCorpus(CorpusType corpus_type, fidl::InterfaceHandle<Co
                   return fpromise::pending();
                 }
                 return send.take_result();
-              }).and_then([callback = std::move(callback)]() { callback(); });
+              }).then([callback = std::move(callback)](const ZxResult<>& result) { callback(); });
   executor_->schedule_task(std::move(task));
 }
 

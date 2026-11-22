@@ -275,6 +275,9 @@ func TestDepsConversion(t *testing.T) {
 			bazel: `cc_library(
 	name = "test",
 	deps = [
+		"//:glm",
+		"@cobalt//:buckets_config",
+		"@cobalt//:cobalt_registry_proto",
 		"@com_google_googletest//:gtest",
 		"@com_googletest_gtest//:gtest",
 		"@com_google_googletest//:gtest_prod",
@@ -282,7 +285,6 @@ func TestDepsConversion(t *testing.T) {
 		"@com_google_googletest//:gmock",
 		"@googletest//:gtest",
 		"@double-conversion//:double-conversion",
-		"@re2//:re2",
 		"@zlib//:zlib",
 		"@rapidjson//:rapidjson",
 		"@com_google_protobuf//:protobuf",
@@ -290,6 +292,9 @@ func TestDepsConversion(t *testing.T) {
 )`,
 			wantGN: `static_library("test") {
 	public_deps = [
+		"//third_party/glm",
+		"//third_party/cobalt/src/lib/client/cpp:buckets_config",
+		"//third_party/cobalt/src/registry:cobalt_registry_proto",
 		"//third_party/googletest:gtest",
 		"//third_party/googletest:gtest",
 		"//third_party/googletest:gtest_prod",
@@ -297,7 +302,6 @@ func TestDepsConversion(t *testing.T) {
 		"//third_party/googletest:gmock",
 		"//third_party/googletest:gtest",
 		"//third_party/double-conversion",
-		"//third_party/re2",
 		"//third_party/zlib",
 		"//third_party/rapidjson",
 		"//third_party/protobuf:protobuf",

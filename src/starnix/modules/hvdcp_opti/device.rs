@@ -11,7 +11,7 @@ use super::qbg_file::create_qbg_device;
 use super::utils::ReadWriteBytesFile;
 use fidl_fuchsia_hardware_qcom_hvdcpopti as fhvdcpopti;
 use starnix_core::device::DeviceMode;
-use starnix_core::device::kobject::{Class, DeviceMetadata};
+use starnix_core::device::kobject::{Class, Device, DeviceMetadata};
 use starnix_core::device::service_watcher::{ServiceBindingScope, ServiceWatcher};
 use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::task::{CurrentTask, Kernel};
@@ -36,6 +36,7 @@ pub fn hvdcp_opti_init(kernel: &Kernel) {
                 register_hvdcp_opti_devices(current_task, &qbg_class, service_proxy, scope)
             {
                 log_warn!("Failed to initialize hvdcp_opti devices: {e:?}");
+                scope.teardown(current_task);
             }
         },
     );
@@ -62,82 +63,85 @@ fn register_hvdcp_opti_devices(
     let iio = objects.get_or_create_bus("iio".into());
     let power_supply = objects.power_supply_class();
 
-    let spmi = registry.add_bus_device(
+    let mut register =
+        |res: Result<Device, Errno>| res.map(|device| scope.add_scoped_device(device));
+
+    let spmi = register(registry.add_bus_device(
         "1c40000.qcom,spmi".into(),
         Some(soc),
         platform_bus.clone(),
         build_device_directory,
-    );
-    let spmi_0 = registry.add_bus_device(
+    ))?;
+    let spmi_0 = register(registry.add_bus_device(
         "spmi-0".into(),
-        Some(spmi.clone()),
+        Some(spmi),
         spmi_bus.clone(),
         build_device_directory,
-    );
-    let spmi_0_00 = registry.add_bus_device(
+    ))?;
+    let spmi_0_00 = register(registry.add_bus_device(
         "0-00".into(),
-        Some(spmi_0.clone()),
+        Some(spmi_0),
         spmi_bus,
         build_device_directory,
-    );
-    let smblite = registry.add_bus_device(
+    ))?;
+    let smblite = register(registry.add_bus_device(
         "1c40000.qcom,spmi:qcom,pm5100@0:qcom,qpnp-smblite".into(),
         Some(spmi_0_00.clone()),
         platform_bus.clone(),
         build_device_directory,
-    );
-    let qbg = registry.add_bus_device(
+    ))?;
+    let qbg = register(registry.add_bus_device(
         "1c40000.qcom,spmi:qcom,pm5100@0:qpnp,qbg@4f00".into(),
-        Some(spmi_0_00.clone()),
+        Some(spmi_0_00),
         platform_bus,
         build_device_directory,
-    );
+    ))?;
 
     // /sys/bus/iio/devices/iio:device{0,3}
-    let iio0 = registry.add_bus_device(
+    register(registry.add_bus_device(
         "iio:device0".into(),
         Some(smblite.clone()),
         iio.clone(),
         |device, dir| build_iio0_directory(device, &proxy, dir),
-    );
+    ))?;
 
-    let iio3 =
-        registry.add_bus_device("iio:device3".into(), Some(qbg.clone()), iio, |device, dir| {
-            build_iio3_directory(device, &proxy, dir)
-        });
+    register(registry.add_bus_device(
+        "iio:device3".into(),
+        Some(qbg.clone()),
+        iio,
+        |device, dir| build_iio3_directory(device, &proxy, dir),
+    ))?;
 
     // /sys/class/power_supply/usb
-    let usb = registry.add_numberless_device(
+    register(registry.add_numberless_device(
         "usb".into(),
         Some(smblite.clone()),
         power_supply.clone(),
         |device, dir| build_usb_power_supply_directory(device, &proxy, dir),
-    );
+    ))?;
 
     // /sys/class/power_supply/battery
-    let battery = registry.add_numberless_device(
+    register(registry.add_numberless_device(
         "battery".into(),
-        Some(smblite.clone()),
+        Some(smblite),
         power_supply.clone(),
         |device, dir| build_battery_power_supply_directory(device, &proxy, dir),
-    );
+    ))?;
 
     // /sys/class/power_supply/bms
-    let bms = registry.add_numberless_device(
+    register(registry.add_numberless_device(
         "bms".into(),
-        Some(qbg.clone()),
+        Some(qbg),
         power_supply,
         build_bms_power_supply_directory,
-    );
+    ))?;
 
-    let sysfs_devices = [spmi, spmi_0, spmi_0_00, smblite, qbg, iio0, iio3, usb, battery, bms];
-
-    // Register /dev/qbg and /dev/qbg_battery after the bus, IIO, and power_supply sysfs nodes
-    // exist, because the userspace hvdcp_opti daemon waits on /dev/qbg and immediately accesses
-    // those sysfs paths.
+    // Register /dev/qbg and /dev/qbg_battery after the bus, IIO, and power_supply sysfs nodes exist,
+    // because the userspace hvdcp_opti daemon waits on /dev/qbg and immediately accesses those
+    // sysfs paths.
     // /dev/qbg
     let qbg_service = service_proxy.clone();
-    let qbg_dev = registry.add_device(
+    register(registry.add_device(
         kernel,
         "qbg".into(),
         DeviceMetadata::new("qbg".into(), DeviceId::new(484, 0), DeviceMode::Char),
@@ -146,11 +150,11 @@ fn register_hvdcp_opti_devices(
               _id: DeviceId,
               _node: &NamespaceNode,
               _flags: OpenFlags| create_qbg_device(&qbg_service),
-    );
+    ))?;
 
     // /dev/qbg_battery
     let battery_service = service_proxy;
-    let qbg_battery_dev = registry.add_device(
+    register(registry.add_device(
         kernel,
         "qbg_battery".into(),
         DeviceMetadata::new("qbg_battery".into(), DeviceId::new(485, 0), DeviceMode::Char),
@@ -159,13 +163,8 @@ fn register_hvdcp_opti_devices(
               _id: DeviceId,
               _node: &NamespaceNode,
               _flags: OpenFlags| create_battery_profile_device(&battery_service),
-    );
+    ))?;
 
-    for dev in sysfs_devices {
-        scope.add_scoped_device(dev);
-    }
-    scope.add_scoped_device(qbg_dev);
-    scope.add_scoped_device(qbg_battery_dev);
     scope.monitor_channel(proxy);
     Ok(())
 }

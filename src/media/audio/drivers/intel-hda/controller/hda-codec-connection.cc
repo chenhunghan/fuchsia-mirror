@@ -4,6 +4,8 @@
 
 #include "hda-codec-connection.h"
 
+#include <lib/async/cpp/task.h>
+#include <lib/sync/completion.h>
 #include <stdio.h>
 #include <zircon/assert.h>
 
@@ -46,13 +48,6 @@ zx_protocol_device_t HdaCodecConnection::CODEC_DEVICE_THUNKS = []() {
   };
   return ops;
 }();
-
-ihda_codec_protocol_ops_t HdaCodecConnection::CODEC_PROTO_THUNKS = {
-    .get_driver_channel = [](void* ctx, zx_handle_t* channel_out) -> zx_status_t {
-      ZX_DEBUG_ASSERT(ctx);
-      return static_cast<HdaCodecConnection*>(ctx)->CodecGetDispatcherChannel(channel_out);
-    },
-};
 
 HdaCodecConnection::HdaCodecConnection(IntelHDAController& controller, uint8_t codec_id)
     : controller_(controller), codec_id_(codec_id), loop_(&kAsyncLoopConfigNeverAttachToThread) {
@@ -182,7 +177,15 @@ void HdaCodecConnection::Shutdown() {
   // Close all existing connections and synchronize with any client threads
   // who are currently processing requests.
   state_ = State::SHUTTING_DOWN;
-  ProcessCodecDeactivate();
+  sync_completion_t outgoing_reset;
+  if (async::PostTask(loop_.dispatcher(), [this, &outgoing_reset]() {
+        codec_driver_bindings_.RemoveAll();
+        outgoing_.reset();
+        ProcessCodecDeactivate();
+        sync_completion_signal(&outgoing_reset);
+      }) == ZX_OK) {
+    sync_completion_wait(&outgoing_reset, ZX_TIME_INFINITE);
+  }
   loop_.Shutdown();
 
   // Give any active streams we had back to our controller.
@@ -203,6 +206,14 @@ zx_status_t HdaCodecConnection::PublishDevice() {
   char name[ZX_DEVICE_NAME_MAX];
   snprintf(name, sizeof(name), "intel-hda-codec-%03u", codec_id_);
 
+  zx::result outgoing = ServeOutgoing();
+  if (outgoing.is_error()) {
+    LOG(ERROR, "Failed to serve outgoing directory for \"%s\" (%s)", name,
+        outgoing.status_string());
+    return outgoing.status_value();
+  }
+  const char* fidl_service_offers[] = {fuchsia_hardware_intel_hda::CodecService::Name};
+
   // Initialize our device and fill out the protocol hooks
   device_add_args_t args = {};
   args.version = DEVICE_ADD_ARGS_VERSION;
@@ -210,7 +221,9 @@ zx_status_t HdaCodecConnection::PublishDevice() {
   args.ctx = this;
   args.ops = &CODEC_DEVICE_THUNKS;
   args.proto_id = bind_fuchsia_audio_intelhda::BIND_PROTOCOL_IHDA_CODEC;
-  args.proto_ops = &CODEC_PROTO_THUNKS;
+  args.fidl_service_offers = fidl_service_offers;
+  args.fidl_service_offer_count = std::size(fidl_service_offers);
+  args.outgoing_dir_channel = outgoing->TakeChannel().release();
   args.str_props = dev_props_;
   args.str_prop_count = std::size(dev_props_);
 
@@ -222,6 +235,38 @@ zx_status_t HdaCodecConnection::PublishDevice() {
   }
 
   return ZX_OK;
+}
+
+zx::result<fidl::ClientEnd<fuchsia_io::Directory>> HdaCodecConnection::ServeOutgoing() {
+  auto [client, server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+  zx_status_t status = ZX_ERR_INTERNAL;
+  sync_completion_t served;
+  zx_status_t post_status = async::PostTask(
+      loop_.dispatcher(), [this, &status, &served, server = std::move(server)]() mutable {
+        outgoing_.emplace(loop_.dispatcher());
+        fuchsia_hardware_intel_hda::CodecService::InstanceHandler handler({
+            .device = codec_driver_bindings_.CreateHandler(
+                &codec_driver_server_, loop_.dispatcher(), fidl::kIgnoreBindingClosure),
+        });
+        zx::result result =
+            outgoing_->AddService<fuchsia_hardware_intel_hda::CodecService>(std::move(handler));
+        if (result.is_ok()) {
+          result = outgoing_->Serve(std::move(server));
+        }
+        if (result.is_error()) {
+          outgoing_.reset();
+        }
+        status = result.status_value();
+        sync_completion_signal(&served);
+      });
+  if (post_status != ZX_OK) {
+    return zx::error(post_status);
+  }
+  sync_completion_wait(&served, ZX_TIME_INFINITE);
+  if (status != ZX_OK) {
+    return zx::error(status);
+  }
+  return zx::ok(std::move(client));
 }
 
 zx_status_t HdaCodecConnection::ParseVidDid(const CodecResponse& resp) {
@@ -604,20 +649,26 @@ zx_status_t HdaCodecConnection::ProcessSetStreamFmt(Channel* channel,
   return res;
 }
 
-zx_status_t HdaCodecConnection::CodecGetDispatcherChannel(zx_handle_t* remote_endpoint_out) {
-  if (!remote_endpoint_out)
-    return ZX_ERR_INVALID_ARGS;
+void HdaCodecConnection::CodecDriverServer::GetChannel(GetChannelCompleter::Sync& completer) {
+  zx::result channel = codec_->CodecGetDispatcherChannel();
+  if (channel.is_error()) {
+    completer.Close(channel.status_value());
+    return;
+  }
+  completer.Reply(std::move(channel.value()));
+}
 
+zx::result<zx::channel> HdaCodecConnection::CodecGetDispatcherChannel() {
   zx::channel channel_local;
   zx::channel channel_remote;
   zx_status_t status = zx::channel::create(0, &channel_local, &channel_remote);
   if (status != ZX_OK) {
-    return status;
+    return zx::error(status);
   }
 
   fbl::RefPtr<Channel> channel = Channel::Create(std::move(channel_local));
   if (channel == nullptr) {
-    return ZX_ERR_NO_MEMORY;
+    return zx::error(ZX_ERR_NO_MEMORY);
   }
   fbl::AutoLock lock(&codec_driver_channel_lock_);
   codec_driver_channel_ = channel;
@@ -630,17 +681,10 @@ zx_status_t HdaCodecConnection::CodecGetDispatcherChannel(zx_handle_t* remote_en
   if (status != ZX_OK) {
     codec_driver_channel_.reset();
     // We let channel_remote go out of scope to trigger channel deactivation via peer close.
-    return status;
+    return zx::error(status);
   }
 
-  if (status == ZX_OK) {
-    // If things went well, release the reference to the remote endpoint
-    // from the zx::channel instance into the unmanaged world of DDK
-    // protocols.
-    *remote_endpoint_out = channel_remote.release();
-  }
-
-  return status;
+  return zx::ok(std::move(channel_remote));
 }
 
 void HdaCodecConnection::GetDispatcherChannelSignalled(async_dispatcher_t* dispatcher,

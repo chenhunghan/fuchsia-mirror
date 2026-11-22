@@ -6,11 +6,11 @@ the bottom of the dependency chain.
 
 # Zircon libraries
 
-## libzircon
+## libzircon {:#libzircon}
 
 This library defines the Zircon system ABI.
 
-## libzx
+## libzx {:#libzx}
 
 libzircon defines C types and function calls acting on those
 objects. libzx is a light C++ wrapper around those. It adds type

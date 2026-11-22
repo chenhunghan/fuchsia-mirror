@@ -829,6 +829,7 @@ static zx_status_t brcmf_sdiod_set_block_size(sdio_protocol_t* proto, sdio_func*
 
 zx_status_t brcmf_sdiod_probe(struct brcmf_sdio_dev* sdiodev, bool reloading) {
   zx_status_t ret = ZX_OK;
+  struct brcmf_sdio* bus = nullptr;
 
   ret = brcmf_sdiod_set_block_size(&sdiodev->sdio_proto_fn1, sdiodev->func1, SDIO_FUNC1_BLOCKSIZE);
   if (ret != ZX_OK) {
@@ -853,14 +854,15 @@ zx_status_t brcmf_sdiod_probe(struct brcmf_sdio_dev* sdiodev, bool reloading) {
   }
 
   /* try to attach to the target device */
-  sdiodev->bus = brcmf_sdio_probe(sdiodev, reloading);
-  if (!sdiodev->bus) {
+  bus = brcmf_sdio_probe(sdiodev, reloading);
+  if (!bus) {
     ret = ZX_ERR_IO_NOT_PRESENT;
     goto out;
   }
+  sdiodev->bus = bus;
   // brcmf_sdiod_host_fixup(sdiodev->func2->card->host);
 out:
-  if (ret != ZX_OK) {
+  if (ret != ZX_OK && !reloading) {
     brcmf_sdiod_remove(sdiodev);
   }
 

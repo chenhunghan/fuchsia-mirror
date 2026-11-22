@@ -4,32 +4,19 @@
 
 """A cc_library generated from a bind library."""
 
-load("@bazel_skylib//lib:paths.bzl", "paths")
+load("@fuchsia_rules_common//bind:bindc.bzl", "bindc_generate")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//fuchsia/constraints:target_compatibility.bzl", "COMPATIBILITY")
 load(":fuchsia_toolchains.bzl", "FUCHSIA_TOOLCHAIN_DEFINITION", "get_fuchsia_sdk_toolchain")
 load(":providers.bzl", "FuchsiaBindLibraryInfo")
 
 def _codegen_impl(ctx):
-    bindc = get_fuchsia_sdk_toolchain(ctx).bindc
-    base_path = ctx.attr.name
-    name = ctx.attr.library[FuchsiaBindLibraryInfo].name.replace(".", "/").replace("_bindlib", "")
-    bind_source = ctx.attr.library[DefaultInfo].files.to_list()[0]
-
-    # The generated header fie.
-    header = ctx.actions.declare_file(paths.join(base_path, "bind", name, "cpp", "bind.h"))
-
-    ctx.actions.run(
-        executable = bindc,
-        arguments = [
-            "generate-cpp",
-            "--lint",
-            "--output",
-            header.path,
-            bind_source.path,
-        ],
-        inputs = [bind_source],
-        outputs = [header],
+    header = bindc_generate(
+        ctx,
+        bindc = get_fuchsia_sdk_toolchain(ctx).bindc,
+        language = "cpp",
+        library_name = ctx.attr.library[FuchsiaBindLibraryInfo].name.replace("_bindlib", ""),
+        src = ctx.attr.library[DefaultInfo].files.to_list()[0],
         mnemonic = "BindcGenCc",
         toolchain = FUCHSIA_TOOLCHAIN_DEFINITION,
     )

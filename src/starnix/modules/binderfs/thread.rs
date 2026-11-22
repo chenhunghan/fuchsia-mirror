@@ -101,17 +101,70 @@ impl CommandQueueWithWaitQueue {
         self.commands.front()
     }
 
+    /// Whether the queue has a command that is read without waiting for the next command, i.e.
+    /// any command but a `DeferredTransactionComplete`.
+    pub fn has_non_deferred_commands(&self) -> bool {
+        self.commands
+            .iter()
+            .any(|queued| !matches!(queued.command, Command::DeferredTransactionComplete))
+    }
+
+    /// Turns any queued `DeferredTransactionComplete` into a `TransactionComplete`, so that it is
+    /// read without waiting for the next command.
+    ///
+    /// The `TransactionComplete` makes the binder readable, so this notifies the waiters that
+    /// `push_back` did not notify for the `DeferredTransactionComplete`.
+    pub fn undefer_transaction_complete(&mut self) {
+        let mut undeferred = false;
+        for queued in self.commands.iter_mut() {
+            if matches!(queued.command, Command::DeferredTransactionComplete) {
+                crate::trace::on_command_dequeued(&queued.command, queued.trace_id);
+                queued.command = Command::TransactionComplete;
+                crate::trace::on_command_enqueued(&queued.command, queued.trace_id);
+                undeferred = true;
+            }
+        }
+        if undeferred {
+            self.notify_waiters();
+        }
+    }
+
     pub fn pop_front(&mut self) -> Option<QueuedCommand> {
         let queued = self.commands.pop_front()?;
         crate::trace::on_command_dequeued(&queued.command, queued.trace_id);
         Some(queued)
     }
 
+    /// Enqueues `command` and notifies the waiters, unless `command` is a
+    /// `DeferredTransactionComplete`: it is only read along with the next command, so it does not
+    /// make the binder readable on its own.
     pub fn push_back(&mut self, command: QueuedCommand) {
         crate::trace::on_command_enqueued(&command.command, command.trace_id);
+        let notify = !matches!(command.command, Command::DeferredTransactionComplete);
         self.commands.push_back(command);
+        if notify {
+            self.notify_waiters();
+        }
+    }
+
+    /// Notifies the owning thread, if it is blocked waiting for work, and the FD event waiters that
+    /// a command is readable.
+    fn notify_waiters(&self) {
         self.command_event.notify();
         self.poll_waiters.notify_fd_events(FdEvents::POLLIN);
+    }
+
+    pub fn push_back_batch(&mut self, commands: impl IntoIterator<Item = QueuedCommand>) {
+        let mut pushed_any = false;
+        for command in commands {
+            crate::trace::on_command_enqueued(&command.command, command.trace_id);
+            self.commands.push_back(command);
+            pushed_any = true;
+        }
+        if pushed_any {
+            self.command_event.notify();
+            self.poll_waiters.notify_fd_events(FdEvents::POLLIN);
+        }
     }
 
     /// Puts a dequeued command back at the front of the queue, so that it is dequeued next.
@@ -486,13 +539,20 @@ impl<'a> BinderThreadGuard<'a> {
     }
 
     /// Completes an in-flight reply by clearing `reply_in_flight` and enqueuing
-    /// `Command::TransactionComplete`, consuming the [`InFlightReplyGuard`] token.
-    pub fn complete_reply(&mut self, in_flight: InFlightReplyGuard<'_>) {
+    /// `Command::TransactionComplete`, or `Command::DeferredTransactionComplete` if
+    /// `defer_complete` (the reply was sent with `TF_DEFER_COMPLETE`), consuming the
+    /// [`InFlightReplyGuard`] token.
+    pub fn complete_reply(&mut self, in_flight: InFlightReplyGuard<'_>, defer_complete: bool) {
         debug_assert!(std::ptr::eq(self.thread, in_flight.thread));
         debug_assert!(self.guard.reply_in_flight);
         in_flight.deactivate();
         self.guard.reply_in_flight = false;
-        self.guard.enqueue_command(Command::TransactionComplete.into());
+        let command = if defer_complete {
+            Command::DeferredTransactionComplete
+        } else {
+            Command::TransactionComplete
+        };
+        self.guard.enqueue_command(command.into());
     }
 
     /// Initiates a non-requeueable wait on this thread's `command_event` while holding
@@ -797,6 +857,10 @@ pub enum Command {
     /// Notifies a binder thread that its reply has been sent.
     /// Sent from binder to the server.
     TransactionComplete,
+    /// Notifies a binder thread that its reply, sent with `TF_DEFER_COMPLETE`, has been sent. It
+    /// is followed by the next command for the thread, e.g. the next incoming transaction.
+    /// Sent from binder to the server.
+    DeferredTransactionComplete,
     /// Notifies a binder thread that its two-way transaction has been sent. It is followed by the
     /// outcome of the transaction, e.g. a [`Command::Reply`].
     /// Sent from binder to the client.
@@ -853,6 +917,7 @@ impl Command {
             }
             Self::Reply(..) => binder_driver_return_protocol_BR_REPLY,
             Self::TransactionComplete
+            | Self::DeferredTransactionComplete
             | Self::TwoWayTransactionComplete
             | Self::OnewayTransactionComplete => {
                 binder_driver_return_protocol_BR_TRANSACTION_COMPLETE
@@ -884,12 +949,15 @@ impl Command {
     /// command is only read as the first command of a batch, and ends it.
     ///
     /// After a `TwoWayTransactionComplete`, `handle_thread_read` may still wait for the outcome of
-    /// the transaction and return it in the same read, as the first command of a new batch.
+    /// the transaction and return it in the same read, as the first command of a new batch. After
+    /// a `DeferredTransactionComplete`, it waits for the next command for the thread in the same
+    /// way.
     pub fn is_terminal(&self) -> bool {
         match self {
             Self::Transaction { .. }
             | Self::Reply(..)
             | Self::TransactionComplete
+            | Self::DeferredTransactionComplete
             | Self::TwoWayTransactionComplete
             | Self::OnewayTransaction(..)
             | Self::OnewayTransactionComplete
@@ -951,6 +1019,7 @@ impl Command {
                 }
             }
             Self::TransactionComplete
+            | Self::DeferredTransactionComplete
             | Self::TwoWayTransactionComplete
             | Self::OnewayTransactionComplete
             | Self::FailedReply

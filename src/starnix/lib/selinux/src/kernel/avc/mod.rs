@@ -69,6 +69,18 @@ pub struct AccessQueryArgs {
     pub source_sid: SecurityId,
     pub target_sid: SecurityId,
     pub target_class: KernelClass,
+    _padding: [u8; 3],
+}
+
+impl AccessQueryArgs {
+    #[inline(always)]
+    pub const fn new(
+        source_sid: SecurityId,
+        target_sid: SecurityId,
+        target_class: KernelClass,
+    ) -> Self {
+        Self { source_sid, target_sid, target_class, _padding: [0; 3] }
+    }
 }
 
 #[derive(Clone, ByteEq, IntoBytes, Immutable)]
@@ -125,7 +137,7 @@ impl AccessVectorCache {
         target_sid: SecurityId,
         target_class: KernelClass,
     ) -> KernelAccessDecision {
-        let query_args = AccessQueryArgs { source_sid, target_sid, target_class };
+        let query_args = AccessQueryArgs::new(source_sid, target_sid, target_class);
         self.access_cache.get_or_insert(&query_args, move || {
             delegate.compute_access_decision(source_sid, target_sid, target_class)
         })
@@ -142,7 +154,7 @@ impl AccessVectorCache {
         if !name.is_empty() {
             delegate.compute_create_sid(source_sid, target_sid, target_class, name)
         } else {
-            let query_args = AccessQueryArgs { source_sid, target_sid, target_class };
+            let query_args = AccessQueryArgs::new(source_sid, target_sid, target_class);
             self.create_sid_cache.get_or_try_insert(&query_args, move || {
                 delegate.compute_create_sid(source_sid, target_sid, target_class, name)
             })

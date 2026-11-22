@@ -2,7 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <fidl/fuchsia.io/cpp/fidl.h>
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
+#include <lib/component/incoming/cpp/protocol.h>
 #include <lib/fdio/directory.h>
 #include <stdio.h>
 
@@ -41,7 +45,7 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
     cond_.notify_all();
   }
 
-  void onCoreCodecFailStream(fuchsia::media::StreamError error) override {
+  void onCoreCodecFailStream(fuchsia_media::StreamError error) override {
     printf("Got onCoreCodecFailStream %d\n", static_cast<int>(error));
     fflush(stdout);
     fail_stream_count_++;
@@ -51,9 +55,10 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecMidStreamOutputConstraintsChange(bool output_re_config_required) override {
     // Test a representative value.
-    auto output_constraints = codec_adapter_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kOutputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto output_constraints_result =
+        codec_adapter_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kOutputPort);
+    ZX_ASSERT(output_constraints_result.has_value());
+    auto &output_constraints = output_constraints_result->constraints;
     EXPECT_TRUE(*output_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     std::unique_lock<std::mutex> lock(lock_);
@@ -83,9 +88,12 @@ class FakeCodecAdapterEvents : public CodecAdapterEvents {
 
   void onCoreCodecOutputPacket(CodecPacket *packet, bool error_detected_before,
                                bool error_detected_during) override {
-    auto output_format = codec_adapter_->CoreCodecGetOutputFormat(1u, 1u);
-    // Test a representative value.
-    EXPECT_EQ(output_format.format_details().mime_type(), "video/h264");
+    auto output_format = codec_adapter_->CoreCodecGetOutputFormat2(1u, 1u);
+    [&output_format]() {
+      // Test a representative value.
+      ASSERT_TRUE(output_format.format_details().has_value());
+      EXPECT_EQ(output_format.format_details()->mime_type(), "video/h264");
+    }();
 
     std::lock_guard lock(lock_);
     output_packets_done_.push_back(packet);
@@ -173,23 +181,24 @@ class H264EncoderTestFixture : public ::testing::Test {
   void TearDown() override { vaDefaultStubSetReturn(); }
 
   void CodecAndStreamInit() {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(1);
-    format_details.set_mime_type("video/h264");
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(1);
+    format_details.mime_type("video/h264");
 
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 10, .height = 10});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 10, .height = 10});
-    encoder_->CoreCodecInit(format_details);
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 10, 10));
+    image_format.size(fuchsia_math::SizeU(10, 10));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
 
-    auto input_constraints = encoder_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto input_constraints_result =
+        encoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+    ASSERT_TRUE(input_constraints_result.has_value());
+    auto &input_constraints = input_constraints_result->constraints;
     EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     encoder_->CoreCodecStartStream();
-    encoder_->CoreCodecQueueInputFormatDetails(format_details);
+    encoder_->CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   }
 
   void CodecStreamStop() {
@@ -228,10 +237,10 @@ class H264EncoderTestFixture : public ::testing::Test {
 TEST_F(H264EncoderTestFixture, InvalidFormat) {
   constexpr uint64_t kExpectedNumOfCodecFailures = 1u;
 
-  fuchsia::media::FormatDetails format_details;
-  format_details.set_format_details_version_ordinal(1);
-  format_details.set_mime_type("video/h264");
-  encoder_->CoreCodecInit(format_details);
+  fuchsia_media::FormatDetails format_details;
+  format_details.format_details_version_ordinal(1);
+  format_details.mime_type("video/h264");
+  encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   events_.WaitForCodecFailure(kExpectedNumOfCodecFailures);
 
   EXPECT_EQ(kExpectedNumOfCodecFailures, events_.fail_codec_count());
@@ -241,40 +250,37 @@ TEST_F(H264EncoderTestFixture, InvalidFormat) {
 TEST_F(H264EncoderTestFixture, RejectNonZeroDisplayOriginAndMissingCodedSize) {
   // 1. Non-zero display_rect.x (2, 0) fails the codec.
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(1);
-    format_details.set_mime_type("video/h264");
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 2, .y = 0, .width = 10, .height = 10});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 16, .height = 16});
-    encoder_->CoreCodecInit(format_details);
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(1);
+    format_details.mime_type("video/h264");
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(2, 0, 10, 10));
+    image_format.size(fuchsia_math::SizeU(16, 16));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events_.WaitForCodecFailure(1u);
     EXPECT_EQ(1u, events_.fail_codec_count());
   }
 
   // 2. Non-zero display_rect.y (0, 2) fails the codec.
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(2);
-    format_details.set_mime_type("video/h264");
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 2, .width = 10, .height = 10});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 16, .height = 16});
-    encoder_->CoreCodecInit(format_details);
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(2);
+    format_details.mime_type("video/h264");
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 2, 10, 10));
+    image_format.size(fuchsia_math::SizeU(16, 16));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events_.WaitForCodecFailure(2u);
     EXPECT_EQ(2u, events_.fail_codec_count());
   }
 
   // 3. Only display_rect set with no size fails on coded width.
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(3);
-    format_details.set_mime_type("video/h264");
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 10, .height = 10});
-    encoder_->CoreCodecInit(format_details);
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(3);
+    format_details.mime_type("video/h264");
+    format_details.image_format().emplace().display_rect(fuchsia_math::RectU(0, 0, 10, 10));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events_.WaitForCodecFailure(3u);
     EXPECT_EQ(3u, events_.fail_codec_count());
   }
@@ -286,18 +292,19 @@ TEST_F(H264EncoderTestFixture, SizeAndValidSizeFallbacks) {
   constexpr uint32_t kExpectedOutputPackets = 3;
 
   // Initialize with `size` (16x20) plus a smaller `valid_size` (10x10) and no `display_rect`.
-  fuchsia::media::FormatDetails initial_format;
-  initial_format.set_format_details_version_ordinal(1);
-  initial_format.set_mime_type("video/h264");
-  initial_format.mutable_image_format()->set_size(fuchsia::math::SizeU{.width = 16, .height = 20});
-  initial_format.mutable_image_format()->set_valid_size(
-      fuchsia::math::SizeU{.width = 10, .height = 10});
-  encoder_->CoreCodecInit(initial_format);
+  fuchsia_media::FormatDetails initial_format;
+  initial_format.format_details_version_ordinal(1);
+  initial_format.mime_type("video/h264");
+  auto &initial_image_format = initial_format.image_format().emplace();
+  initial_image_format.size(fuchsia_math::SizeU(16, 20));
+  initial_image_format.valid_size(fuchsia_math::SizeU(10, 10));
+  encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(initial_format));
 
   {
-    auto input_constraints = encoder_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto input_constraints_result =
+        encoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+    ASSERT_TRUE(input_constraints_result.has_value());
+    auto &input_constraints = input_constraints_result->constraints;
     EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     fuchsia_sysmem2::BufferCollectionInfo buffer_collection;
@@ -307,7 +314,8 @@ TEST_F(H264EncoderTestFixture, SizeAndValidSizeFallbacks) {
   }
 
   encoder_->CoreCodecStartStream();
-  encoder_->CoreCodecQueueInputFormatDetails(initial_format);
+  encoder_->CoreCodecQueueInputFormatDetails(
+      std::make_shared<const fuchsia_media::FormatDetails>(initial_format));
 
   constexpr uint32_t kOutputPacketCount = 35;
   constexpr size_t kOutputPacketSize = 4096;
@@ -333,14 +341,14 @@ TEST_F(H264EncoderTestFixture, SizeAndValidSizeFallbacks) {
   // `valid_size` fallback above already configured `display_size_` as 10x10 (rather than 16x20),
   // `HandleInputFormatChange()` must NOT trigger an encoder reset / output constraints change.
   {
-    fuchsia::media::FormatDetails same_display_rect_format;
-    same_display_rect_format.set_format_details_version_ordinal(2);
-    same_display_rect_format.set_mime_type("video/h264");
-    same_display_rect_format.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 16, .height = 20});
-    same_display_rect_format.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 10, .height = 10});
-    encoder_->CoreCodecQueueInputFormatDetails(same_display_rect_format);
+    fuchsia_media::FormatDetails same_display_rect_format;
+    same_display_rect_format.format_details_version_ordinal(2);
+    same_display_rect_format.mime_type("video/h264");
+    auto &image_format = same_display_rect_format.image_format().emplace();
+    image_format.size(fuchsia_math::SizeU(16, 20));
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 10, 10));
+    encoder_->CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(same_display_rect_format));
   }
   queue_frame();
 
@@ -348,12 +356,12 @@ TEST_F(H264EncoderTestFixture, SizeAndValidSizeFallbacks) {
   // This exercises the `size`-only fallback and changes `display_size_` from 10x10 to 16x20,
   // triggering one mid-stream output constraints change (for a total of 2 including stream start).
   {
-    fuchsia::media::FormatDetails size_only_format;
-    size_only_format.set_format_details_version_ordinal(3);
-    size_only_format.set_mime_type("video/h264");
-    size_only_format.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 16, .height = 20});
-    encoder_->CoreCodecQueueInputFormatDetails(size_only_format);
+    fuchsia_media::FormatDetails size_only_format;
+    size_only_format.format_details_version_ordinal(3);
+    size_only_format.mime_type("video/h264");
+    size_only_format.image_format().emplace().size(fuchsia_math::SizeU(16, 20));
+    encoder_->CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(size_only_format));
   }
   queue_frame();
 
@@ -382,9 +390,10 @@ TEST_F(H264EncoderTestFixture, Resize) {
   // Nothing writes to the output packet so its size doesn't matter.
   constexpr size_t kOutputPacketSize = 4096;
   {
-    auto input_constraints = encoder_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto input_constraints_result =
+        encoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+    ASSERT_TRUE(input_constraints_result.has_value());
+    auto &input_constraints = input_constraints_result->constraints;
     EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     // Fake out the client setting buffer constraints on sysmem
@@ -409,15 +418,15 @@ TEST_F(H264EncoderTestFixture, Resize) {
     input_packets.push_back(std::move(input_packet));
   }
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(2);
-    format_details.set_mime_type("video/h264");
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(2);
+    format_details.mime_type("video/h264");
 
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 12, .height = 10});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 12, .height = 10});
-    encoder_->CoreCodecQueueInputFormatDetails(format_details);
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 12, 10));
+    image_format.size(fuchsia_math::SizeU(12, 10));
+    encoder_->CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   }
   {
     auto input_packet = std::make_unique<CodecPacketForTest>(0);
@@ -453,9 +462,10 @@ TEST_F(H264EncoderTestFixture, EncodeBasic) {
   // Nothing writes to the output packet so its size doesn't matter.
   constexpr size_t kOutputPacketSize = 4096;
   {
-    auto input_constraints = encoder_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto input_constraints_result =
+        encoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+    ASSERT_TRUE(input_constraints_result.has_value());
+    auto &input_constraints = input_constraints_result->constraints;
     EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     // Fake out the client setting buffer constraints on sysmem
@@ -498,51 +508,70 @@ TEST_F(H264EncoderTestFixture, EncodeBasic) {
 // Test that we can connect using the CodecFactory.
 TEST(H264Encoder, Init) {
   EXPECT_TRUE(VADisplayWrapper::InitializeSingletonForTesting());
-  fidl::InterfaceRequest<fuchsia::io::Directory> directory_request;
+  auto [svc_client, svc_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
   async::Loop loop(&kAsyncLoopConfigAttachToCurrentThread);
 
-  auto codec_services = sys::ServiceDirectory::CreateWithRequest(&directory_request);
+  auto codec_factory_client_end =
+      component::ConnectAt<fuchsia_mediacodec::CodecFactory>(svc_client);
+  ASSERT_TRUE(codec_factory_client_end.is_ok());
+  fidl::SyncClient<fuchsia_mediacodec::CodecFactory> codec_factory(
+      std::move(*codec_factory_client_end));
 
-  std::thread codec_thread([directory_request = std::move(directory_request)]() mutable {
+  std::thread codec_thread([svc_server = std::move(svc_server)]() mutable {
     CodecRunnerApp<NoAdapter, CodecAdapterVaApiEncoder> runner_app;
     runner_app.Init();
-    fidl::InterfaceHandle<fuchsia::io::Directory> outgoing_directory;
-    EXPECT_EQ(ZX_OK,
-              runner_app.component_context()->outgoing()->Serve(outgoing_directory.NewRequest()));
-    EXPECT_EQ(ZX_OK, fdio_open3_at(outgoing_directory.channel().get(), "svc",
-                                   uint64_t{fuchsia::io::PERM_READABLE},
-                                   directory_request.TakeChannel().release()));
+    auto [outgoing_client, outgoing_server] = fidl::Endpoints<fuchsia_io::Directory>::Create();
+    EXPECT_EQ(ZX_OK, runner_app.outgoing().Serve(std::move(outgoing_server)).status_value());
+    EXPECT_EQ(ZX_OK, fdio_open3_at(outgoing_client.channel().get(), "svc",
+                                   uint64_t{fuchsia_io::kPermReadable},
+                                   svc_server.TakeChannel().release()));
     runner_app.Run();
   });
 
-  fuchsia::mediacodec::CodecFactorySyncPtr codec_factory;
-  codec_services->Connect(codec_factory.NewRequest());
-  fuchsia::media::StreamProcessorPtr stream_processor;
-  fuchsia::mediacodec::CreateEncoder_Params params;
-  fuchsia::media::FormatDetails input_details;
-  input_details.set_mime_type("video/h264");
-  input_details.set_format_details_version_ordinal(1);
+  auto [processor_client_end, processor_server_end] =
+      fidl::Endpoints<fuchsia_media::StreamProcessor>::Create();
 
-  input_details.mutable_image_format()->set_display_rect(
-      fuchsia::math::RectU{.x = 0, .y = 0, .width = 10, .height = 10});
-  input_details.mutable_image_format()->set_size(fuchsia::math::SizeU{.width = 10, .height = 10});
-  params.set_input_details(std::move(input_details));
-  params.set_require_hw(true);
-  EXPECT_EQ(ZX_OK, codec_factory->CreateEncoder(std::move(params), stream_processor.NewRequest()));
+  fuchsia_mediacodec::CreateEncoderParams params;
+  fuchsia_media::FormatDetails input_details;
+  input_details.mime_type("video/h264");
+  input_details.format_details_version_ordinal(1);
 
-  stream_processor.set_error_handler([&](zx_status_t status) {
-    loop.Quit();
-    EXPECT_TRUE(false);
-  });
+  auto &image_format = input_details.image_format().emplace();
+  image_format.display_rect(fuchsia_math::RectU(0, 0, 10, 10));
+  image_format.size(fuchsia_math::SizeU(10, 10));
+  params.input_details(std::move(input_details));
+  params.require_hw(true);
+  EXPECT_TRUE(
+      codec_factory->CreateEncoder({std::move(params), std::move(processor_server_end)}).is_ok());
 
-  stream_processor.events().OnInputConstraints =
-      [&](fuchsia::media::StreamBufferConstraints constraints) {
-        loop.Quit();
-        stream_processor.Unbind();
-      };
+  class EventHandler : public fidl::AsyncEventHandler<fuchsia_media::StreamProcessor> {
+   public:
+    explicit EventHandler(async::Loop &loop) : loop_(loop) {}
+
+    void OnInputConstraints(
+        fidl::Event<fuchsia_media::StreamProcessor::OnInputConstraints> &event) override {
+      loop_.Quit();
+    }
+
+    void on_fidl_error(fidl::UnbindInfo error) override {
+      loop_.Quit();
+      ADD_FAILURE() << error;
+    }
+
+    void handle_unknown_event(
+        fidl::UnknownEventMetadata<fuchsia_media::StreamProcessor> metadata) override {}
+
+   private:
+    async::Loop &loop_;
+  };
+
+  EventHandler event_handler(loop);
+  fidl::Client<fuchsia_media::StreamProcessor> stream_processor(std::move(processor_client_end),
+                                                                loop.dispatcher(), &event_handler);
 
   loop.Run();
-  codec_factory.Unbind();
+  stream_processor = {};
+  codec_factory = {};
 
   codec_thread.join();
 }
@@ -665,30 +694,28 @@ TEST(H264Encoder, H264SPSGetVisibleRectRejectsOverflowingRect) {
 TEST_F(H264EncoderTestFixture, RejectOverflowingOrExcessiveCodedSize) {
   // Case 1: valid display_size (1920x1080) with 32-bit area-overflowing coded_size (65536x65536).
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(1);
-    format_details.set_mime_type("video/h264");
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(1);
+    format_details.mime_type("video/h264");
 
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 1920, .height = 1080});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 65536, .height = 65536});
-    encoder_->CoreCodecInit(format_details);
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 1920, 1080));
+    image_format.size(fuchsia_math::SizeU(65536, 65536));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events_.WaitForCodecFailure(1u);
     EXPECT_EQ(1u, events_.fail_codec_count());
   }
 
   // Case 2: coded_size (4096x2160) doesn't overflow int, but exceeds kMaxInputWidth (3840).
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(1);
-    format_details.set_mime_type("video/h264");
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(1);
+    format_details.mime_type("video/h264");
 
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 1920, .height = 1080});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 4096, .height = 2160});
-    encoder_->CoreCodecInit(format_details);
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 1920, 1080));
+    image_format.size(fuchsia_math::SizeU(4096, 2160));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events_.WaitForCodecFailure(2u);
     EXPECT_EQ(2u, events_.fail_codec_count());
   }
@@ -696,15 +723,14 @@ TEST_F(H264EncoderTestFixture, RejectOverflowingOrExcessiveCodedSize) {
   // Case 3: coded_size (3000x3000) has width and height <= 3840 individually,
   // but pixel area (9,000,000) exceeds kMaxInputArea (3840 * 2160 = 8,294,400).
   {
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(1);
-    format_details.set_mime_type("video/h264");
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(1);
+    format_details.mime_type("video/h264");
 
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 1920, .height = 1080});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 3000, .height = 3000});
-    encoder_->CoreCodecInit(format_details);
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 1920, 1080));
+    image_format.size(fuchsia_math::SizeU(3000, 3000));
+    encoder_->CoreCodecInit(std::make_shared<const fuchsia_media::FormatDetails>(format_details));
     events_.WaitForCodecFailure(3u);
     EXPECT_EQ(3u, events_.fail_codec_count());
   }
@@ -718,9 +744,10 @@ TEST_F(H264EncoderTestFixture, ResizeCodedSizeOnly) {
   constexpr uint32_t kOutputPacketCount = 35;
   constexpr size_t kOutputPacketSize = 4096;
   {
-    auto input_constraints = encoder_->CoreCodecGetBufferCollectionConstraints2(
-        CodecPort::kInputPort, fuchsia::media::StreamBufferConstraints(),
-        fuchsia::media::StreamBufferPartialSettings());
+    auto input_constraints_result =
+        encoder_->CoreCodecGetBufferCollectionConstraints3(CodecPort::kInputPort);
+    ASSERT_TRUE(input_constraints_result.has_value());
+    auto &input_constraints = input_constraints_result->constraints;
     EXPECT_TRUE(*input_constraints.buffer_memory_constraints()->cpu_domain_supported());
 
     fuchsia_sysmem2::BufferCollectionInfo buffer_collection;
@@ -747,15 +774,15 @@ TEST_F(H264EncoderTestFixture, ResizeCodedSizeOnly) {
   {
     // Keep display_size unchanged (10x10) while changing coded_size (10x10 -> 16x20)
     // to verify that HandleInputFormatChange triggers reset_encoder when only coded_size changes.
-    fuchsia::media::FormatDetails format_details;
-    format_details.set_format_details_version_ordinal(2);
-    format_details.set_mime_type("video/h264");
+    fuchsia_media::FormatDetails format_details;
+    format_details.format_details_version_ordinal(2);
+    format_details.mime_type("video/h264");
 
-    format_details.mutable_image_format()->set_display_rect(
-        fuchsia::math::RectU{.x = 0, .y = 0, .width = 10, .height = 10});
-    format_details.mutable_image_format()->set_size(
-        fuchsia::math::SizeU{.width = 16, .height = 20});
-    encoder_->CoreCodecQueueInputFormatDetails(format_details);
+    auto &image_format = format_details.image_format().emplace();
+    image_format.display_rect(fuchsia_math::RectU(0, 0, 10, 10));
+    image_format.size(fuchsia_math::SizeU(16, 20));
+    encoder_->CoreCodecQueueInputFormatDetails(
+        std::make_shared<const fuchsia_media::FormatDetails>(format_details));
   }
   {
     auto input_packet = std::make_unique<CodecPacketForTest>(0);

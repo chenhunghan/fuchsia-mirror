@@ -2,9 +2,20 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load("//build/bazel/rules/testing:fx_unittest_component.bzl", "fx_unittest_component")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":unwinder_tests_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 cc_library(
     name = "headers",
@@ -90,4 +101,63 @@ cc_library(
         "//zircon/third_party/ulib/safemath",
         "@com_google_googletest//:gtest_prod",
     ],
+)
+
+# This test binary is always built in the linux_arm-shared toolchain. linux_arm
+# is the only toolchain that will produce 32 bit binaries with the ARM Exception
+# Handling unwinding ABI.
+resource(
+    name = "test_so",
+    src = "//src/lib/unwinder/test_data:libunwind_info_test_data.targetso",
+    dest = "testdata/libunwind_info_test_data.targetso",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+)
+
+fx_cc_test_binary(
+    name = "unwinder_tests_bin",
+    srcs = [
+        "arm_ehabi_module_unittest.cc",
+        "arm_ehabi_parser_unittest.cc",
+        "dwarf_expr_unittest.cc",
+        "elf_module_cache_unittest.cc",
+        "loaded_elf_module_unittest.cc",
+        "memory_unittest.cc",
+        "unwinder_base_unittest.cc",
+    ],
+    # GN enables //build/config:default_frame_pointers by default.
+    # @bazel2gn:skip
+    copts = [
+        "-fno-omit-frame-pointer",
+        "-momit-leaf-frame-pointer",
+    ],
+    gn_output_name = "unwinder_tests",
+    linkopts = ["-Wl,-z,stack-size=0x1000000"],
+    deps = [
+        ":internal_headers",
+        ":unwinder",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/unwinder/testing",
+        "//src/lib/unwinder/tests",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "unwinder_tests_component",
+    binary = ":unwinder_tests_bin",
+    component_name = "unwinder_tests",
+)
+
+# This is a prebuilt test binary that we control ourselves. There won't be a
+# corresponding unstripped binary for it.
+fx_package(
+    name = "unwinder_tests",
+    resources = [":test_so"],
+    test_components = [":unwinder_tests_component"],
+    validate_elf_binaries = False,
+)
+
+fx_test(
+    name = "unwinder_tests_test",
+    package = ":unwinder_tests",
 )

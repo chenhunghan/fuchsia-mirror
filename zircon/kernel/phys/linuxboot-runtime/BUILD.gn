@@ -1,0 +1,225 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/cpp/library_headers.gni")
+import("//build/testing/boot_tests/kernel_zbi_test.gni")
+import("//build/testing/boot_tests/zbi_test.gni")
+import("//build/testing/environments.gni")
+import("//build/toolchain/toolchain_environment.gni")
+import("//build/zircon/zircon_cpu.gni")
+import("//zircon/kernel/phys/linuxboot-runtime/devicetree.gni")
+import("//zircon/kernel/phys/phys_executable.gni")
+import("//zircon/kernel/phys/qemu.gni")
+
+library_headers("headers.x86") {
+  visibility = [
+    "./*",
+    "//zircon/kernel/arch/x86/phys/boot-shim:*",
+  ]
+
+  headers = [ "phys/linuxboot-runtime/x86/legacy-boot.h" ]
+
+  public_deps = [
+    # <phys/linuxboot-runtime/x86/legacy-boot.h> has #include
+    # <lib/zbi-format/memory.h>.
+    "//sdk/lib/zbi-format",
+
+    # <phys/linuxboot-runtime/x86/legacy-boot.h> has #include
+    # <lib/boot-shim/tty.h>.
+    "//zircon/kernel/phys/lib/boot-shim:headers",
+
+    # <phys/linuxboot-runtime/x86/legacy-boot.h> has #include <lib/uart/all.h>.
+    "//zircon/system/ulib/uart:headers",
+  ]
+
+  if (is_kernel) {
+    public_deps += [
+      # <phys/linuxboot-runtime/x86/legacy-boot.h> includes standard C/C++
+      # headers.
+      "//zircon/kernel/lib/libc:headers",
+    ]
+  }
+}
+
+library_headers("headers") {
+  headers = []
+  public_deps = []
+
+  if (zircon_cpu == "x86") {
+    public_deps += [ ":headers.x86" ]
+  } else if (toolchain_environment == "kernel.phys" && have_devicetree) {
+    headers += [ "phys/linuxboot-runtime/devicetree.h" ]
+
+    public_deps += [
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/devicetree/devicetree.h>.
+      "//sdk/lib/devicetree:headers",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/zbi-format/memory.h>.
+      "//sdk/lib/zbi-format",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include <lib/zbitl/view.h>.
+      "//src/lib/zbitl",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/boot-options/boot-options.h>.
+      "//zircon/kernel/lib/boot-options",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include <ktl/*.h>.
+      "//zircon/kernel/lib/ktl",
+
+      # <phys/linuxboot-runtime/devicetree.h> calls printf() and abort().
+      "//zircon/kernel/lib/libc",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <phys/address-space/address-space.h>.
+      "//zircon/kernel/phys/address-space",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <phys/allocation/new.h> and calls Allocation::GetPool().
+      "//zircon/kernel/phys/allocation",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <phys/boot-zbi/boot-zbi.h>.
+      "//zircon/kernel/phys/boot-zbi",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/boot-shim/boot-properties.h>,
+      # <lib/boot-shim/devicetree-boot-shim.h>, <lib/boot-shim/devicetree.h>,
+      # <lib/boot-shim/pool-mem-config.h>, <lib/boot-shim/reboot-reason.h>,
+      # and <lib/boot-shim/uart.h>.
+      "//zircon/kernel/phys/lib/boot-shim",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/linux-boot-config/linux-boot-config.h>.
+      "//zircon/kernel/phys/lib/linux-boot-config",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/memalloc/range.h> and calls memalloc::Pool methods.
+      "//zircon/kernel/phys/lib/memalloc",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include <phys/memory/init.h>.
+      "//zircon/kernel/phys/memory:headers",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <phys/output/uart.h> and calls GetUartDriver().
+      "//zircon/kernel/phys/output",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <phys/runtime/info.h>, <phys/runtime/main.h>, and
+      # <phys/runtime/symbolize.h>.
+      "//zircon/kernel/phys/runtime",
+
+      # <phys/linuxboot-runtime/devicetree.h> uses fbl::AllocChecker (via
+      # <lib/boot-shim/devicetree-boot-shim.h>).
+      "//zircon/system/ulib/fbl",
+
+      # <phys/linuxboot-runtime/devicetree.h> has #include
+      # <lib/mmio-ptr/mmio-ptr.h>.
+      "//zircon/system/ulib/mmio-ptr",
+    ]
+  }
+}
+
+if (toolchain_environment == "kernel.phys") {
+  source_set("linuxboot-runtime") {
+    public_deps = [ ":headers" ]
+    deps = [ "$zircon_cpu" ]
+    if (have_devicetree) {
+      deps += [ ":devicetree" ]
+    }
+  }
+
+  if (have_devicetree) {
+    static_library("devicetree") {
+      visibility = [ ":*" ]
+
+      complete_static_lib = true
+
+      sources = [ "devicetree.cc" ]
+
+      public_deps = [ ":headers" ]
+
+      deps = [
+        "//zircon/kernel/lib/arch",
+        "//zircon/kernel/phys:boot-options",
+        "//zircon/kernel/phys/lib/linux-initramfs",
+        "//zircon/kernel/phys/linuxboot-embed",
+        "//zircon/kernel/phys/memory",
+        "//zircon/system/ulib/uart",
+      ]
+    }
+  }
+}
+
+template("devicetree_zbi_test") {
+  test_target = "devicetree-shim-$target_name"
+
+  zbi_test(test_target) {
+    qemu_kernel = "//zircon/kernel/arch/$zircon_cpu/phys/boot-shim:linux-$zircon_cpu-boot-shim(${phys_toolchain})"
+
+    environments = [ qemu_env ]
+
+    forward_variables_from(invoker, "*")
+    if (!defined(timeout)) {
+      timeout = qemu_short_timeout
+    }
+  }
+}
+
+if (have_devicetree) {
+  devicetree_zbi_test("phys-unittests") {
+    deps =
+        [ "//zircon/kernel/phys/test:zbi-phys-unittests.zbi($phys_toolchain)" ]
+  }
+
+  devicetree_zbi_test("memory-test") {
+    deps = [ "//zircon/kernel/phys/test:zbi-memory-test.zbi($phys_toolchain)" ]
+
+    # This value should match `//zircon/kernel/phys/test:qemu-memory-test
+    # timeout`.
+    timeout = 150
+  }
+
+  devicetree_zbi_test("core-tests") {
+    deps = [ "//zircon/system/utest/core:core-tests.${default_kernel_test_image}.zbi($default_toolchain)" ]
+
+    # We've observed the ASAN variant of core-tests take as long as 701 seconds
+    # when booted via firmware on certain types of hardware. Leave a little
+    # buffer for growth.
+    timeout = 840
+  }
+
+  # Shim whose purpose is to dump a devicetree.
+  phys_executable("devicetree-dump") {
+    sources = [ "devicetree-dump-boot-shim.cc" ]
+    include_dirs = [ "//" ]
+    deps = [
+      ":linuxboot-runtime",
+      "//sdk/lib/devicetree",
+      "//zircon/kernel/lib/libc",
+      "//zircon/kernel/phys/address-space",
+      "//zircon/kernel/phys/allocation",
+      "//zircon/kernel/phys/memory:headers",
+      "//zircon/kernel/phys/runtime",
+      "//zircon/system/ulib/fbl",
+    ]
+  }
+}
+
+group("boot_tests") {
+  testonly = true
+  deps = []
+
+  if (have_devicetree) {
+    deps += [
+      ":devicetree-shim-core-tests",
+      ":devicetree-shim-memory-test",
+      ":devicetree-shim-phys-unittests",
+    ]
+  }
+}

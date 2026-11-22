@@ -70,6 +70,10 @@ pub struct AssembledSystem {
     #[walk_paths]
     #[serde(default)]
     pub platform_tools: Vec<Utf8PathBuf>,
+
+    /// The delivery blob type to generate when publishing packages for this system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_blob_type: Option<u32>,
 }
 
 impl AssembledSystem {
@@ -95,6 +99,7 @@ impl AssembledSystem {
                 .map(|p| DirectoryPathBuf::new(p.clone())),
             system_release_info: image_assembly_config.system_release_info.clone(),
             platform_tools: vec![fxfs_pbtool_path],
+            delivery_blob_type: image_assembly_config.delivery_blob_type,
         };
 
         let base_package_name =
@@ -344,6 +349,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
         let expected_manifest = AssembledSystem {
             images: vec![
@@ -363,6 +369,7 @@ mod tests {
             partitions_config: None,
             system_release_info: SystemReleaseInfo::new_for_testing(),
             platform_tools: vec![],
+            delivery_blob_type: None,
         };
 
         let manifest = manifest.relativize(Utf8PathBuf::from("path/to")).unwrap();

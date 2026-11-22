@@ -25,5 +25,6 @@ test_suite(
     target_compatible_with = ["@platforms//os:fuchsia"],
     tests = [
         "//src/firmware/lib/zbi-rs:tests",
+        "//src/firmware/paver/rust/paver-core:tests",
     ],
 )

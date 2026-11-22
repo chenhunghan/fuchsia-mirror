@@ -884,7 +884,7 @@ separately. The standard thresholding still applies so metrics are only
 available when some minimum number of devices share the same configuration.
 
 
-## Implementation
+## Implementation {#implementation}
 
 We will select a small number of "early access" components to use as clients
 during the development of structured configuration while the syntax and tooling
@@ -1145,7 +1145,7 @@ quirks database to handle changes in topology). This would simplify adding
 component-level override in the future.
 
 
-### Define configuration keys using FIDL
+### Define configuration keys using FIDL {#define-configuration-keys-using-fidl}
 
 This design defines configuration keys inside a component manifest using JSON.
 Some of this information is used to build a FIDL table. An alternative would

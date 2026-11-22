@@ -53,6 +53,10 @@
             "type": "object",
             "description": "Structured configuration schema for the driver component."
         },
+        "facets": {
+            "type": "object",
+            "description": "Optional CML facets section (e.g. fuchsia.dash.launcher-tool-urls)."
+        },
         "children": {
             "type": "array",
             "description": "Board manifest: list of child devices and drivers to be bound or instantiated by the board driver.",

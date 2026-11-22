@@ -33,10 +33,10 @@ use linux_uapi::{
     net_device_flags_IFF_UP, rtnetlink_groups_RTNLGRP_IPV4_IFADDR,
     rtnetlink_groups_RTNLGRP_IPV6_IFADDR, rtnetlink_groups_RTNLGRP_LINK,
 };
-use net_types::ip::{AddrSubnetEither, IpVersion, Ipv4, Ipv6};
+use net_types::ip::{AddrSubnetEither, IpAddress as _, IpVersion, Ipv4, Ipv4Addr, Ipv6, Ipv6Addr};
 use netlink_packet_core::{NLM_F_MULTIPART, NetlinkMessage};
 use netlink_packet_route::address::{
-    AddressAttribute, AddressFlags, AddressHeader, AddressHeaderFlags, AddressMessage,
+    AddressAttribute, AddressFlags, AddressHeader, AddressHeaderFlags, AddressMessage, AddressScope,
 };
 use netlink_packet_route::link::{
     LinkAttribute, LinkFlags, LinkHeader, LinkLayerType, LinkMessage, State,
@@ -1482,6 +1482,47 @@ fn addresses_optionally_from_interface_properties(
     }
 }
 
+/// Returns the Netlink [`AddressScope`] (`ifa_scope`) for `addr`.
+///
+/// Matches Linux's `inet_set_ifa` / `inet_fill_ifaddr` (`net/ipv4/devinet.c`)
+/// for IPv4 and `ipv6_addr_scope` / `rt_scope` / `inet6_fill_ifaddr`
+/// (`net/ipv6/addrconf.c`) for IPv6:
+/// - Loopback addresses (`127.0.0.0/8` per RFC 1122 Section 3.2.1.3 and `::1`
+///   per RFC 4291 Section 2.5.3) have [`AddressScope::Host`].
+/// - IPv6 unicast link-local addresses (`fe80::/10` per RFC 4291 Section 2.5.6)
+///   have [`AddressScope::Link`].
+/// - IPv6 deprecated site-local addresses (`fec0::/10` per RFC 3513 Section
+///   2.5.6 and RFC 3879) have [`AddressScope::Site`].
+/// - All other unicast addresses have [`AddressScope::Universe`], including
+///   IPv6 Unique Local Addresses (`fc00::/7` per RFC 4193, which Linux
+///   classifies with global scope in `__ipv6_addr_type`) and IPv4 link-local
+///   addresses (`169.254.0.0/16` per RFC 3927, which Linux's `inet_set_ifa`
+///   leaves at `RT_SCOPE_UNIVERSE` unless overridden by a caller-supplied
+///   `ifa_scope`, which `fuchsia.net.interfaces` does not track).
+fn address_scope(addr: &fnet::IpAddress) -> AddressScope {
+    match addr {
+        fnet::IpAddress::Ipv4(fnet::Ipv4Address { addr }) => {
+            if Ipv4Addr::from(*addr).is_loopback() {
+                AddressScope::Host
+            } else {
+                AddressScope::Universe
+            }
+        }
+        fnet::IpAddress::Ipv6(fnet::Ipv6Address { addr }) => {
+            let ip_addr = Ipv6Addr::from(*addr);
+            if ip_addr.is_loopback() {
+                AddressScope::Host
+            } else if ip_addr.is_unicast_link_local() {
+                AddressScope::Link
+            } else if ip_addr.is_site_local() {
+                AddressScope::Site
+            } else {
+                AddressScope::Universe
+            }
+        }
+    }
+}
+
 // Implement conversions from `Properties` to `Vec<NetlinkAddressMessage>`
 // which is fallible iff, the interface has an id greater than u32.
 fn interface_properties_to_address_messages(
@@ -1549,6 +1590,7 @@ fn interface_properties_to_address_messages(
                         }
                     };
                 addr_header.flags = flags.bits();
+                addr_header.scope = u8::from(address_scope(addr));
                 addr_header.index = id.into();
 
                 // The NLA order follows the list that attributes are listed on the
@@ -1622,6 +1664,9 @@ pub(crate) mod testutil {
         fnet_interfaces_ext::PortClass::Loopback;
     pub(crate) const TEST_V4_ADDR: fnet::Subnet = fidl_subnet!("192.0.2.1/24");
     pub(crate) const TEST_V6_ADDR: fnet::Subnet = fidl_subnet!("2001:db8::1/32");
+    pub(crate) const TEST_V4_LO_ADDR: fnet::Subnet = fidl_subnet!("127.0.0.1/8");
+    pub(crate) const TEST_V6_LO_ADDR: fnet::Subnet = fidl_subnet!("::1/128");
+    pub(crate) const TEST_V6_LINK_LOCAL_ADDR: fnet::Subnet = fidl_subnet!("fe80::1/64");
 
     // AddrSubnetEither does not have any const methods so we need a method.
     pub(crate) fn test_addr_subnet_v4() -> AddrSubnetEither {
@@ -1837,11 +1882,12 @@ pub(crate) mod testutil {
         .collect()
     }
 
-    pub(crate) fn create_address_message(
+    pub(crate) fn create_address_message_with_scope(
         interface_id: u32,
         subnet: fnet::Subnet,
         interface_name: String,
         flags: u32,
+        scope: AddressScope,
     ) -> NetlinkAddressMessage {
         let mut addr_header = AddressHeader::default();
         let (family, addr) = match subnet.addr {
@@ -1855,6 +1901,7 @@ pub(crate) mod testutil {
         addr_header.family = family.into();
         addr_header.prefix_len = subnet.prefix_len;
         addr_header.flags = AddressHeaderFlags::from_bits(flags as u8).unwrap().bits();
+        addr_header.scope = u8::from(scope);
         addr_header.index = interface_id.into();
 
         let nlas = vec![
@@ -1867,6 +1914,21 @@ pub(crate) mod testutil {
         addr_message.header = addr_header;
         addr_message.attributes = nlas;
         NetlinkAddressMessage(addr_message)
+    }
+
+    pub(crate) fn create_address_message(
+        interface_id: u32,
+        subnet: fnet::Subnet,
+        interface_name: String,
+        flags: u32,
+    ) -> NetlinkAddressMessage {
+        create_address_message_with_scope(
+            interface_id,
+            subnet,
+            interface_name,
+            flags,
+            AddressScope::Universe,
+        )
     }
 
     pub(crate) fn test_addr_with_assignment_state(
@@ -1904,6 +1966,7 @@ mod tests {
     use futures::sink::SinkExt as _;
     use futures::stream::Stream;
     use linux_uapi::{IFA_F_PERMANENT, IFA_F_TENTATIVE, rtnetlink_groups_RTNLGRP_IPV4_ROUTE};
+    use net_declare::fidl_subnet;
     use pretty_assertions::assert_eq;
     use test_case::test_case;
 
@@ -2037,6 +2100,57 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
+    #[test_case(fidl_subnet!("127.0.0.1/8"), AddressScope::Host; "v4_loopback")]
+    #[test_case(fidl_subnet!("127.255.255.254/8"), AddressScope::Host; "v4_loopback_end_of_range")]
+    #[test_case(fidl_subnet!("::1/128"), AddressScope::Host; "v6_loopback")]
+    #[test_case(fidl_subnet!("fe80::1/64"), AddressScope::Link; "v6_link_local")]
+    #[test_case(
+        fidl_subnet!("febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff/10"),
+        AddressScope::Link;
+        "v6_link_local_end_of_range"
+    )]
+    #[test_case(fidl_subnet!("fec0::1/10"), AddressScope::Site; "v6_site_local")]
+    #[test_case(
+        fidl_subnet!("feff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/10"),
+        AddressScope::Site;
+        "v6_site_local_end_of_range"
+    )]
+    #[test_case(fidl_subnet!("fc00::1/7"), AddressScope::Universe; "v6_ula_fc00")]
+    #[test_case(fidl_subnet!("fd00::1/64"), AddressScope::Universe; "v6_ula_fd00")]
+    #[test_case(fidl_subnet!("169.254.1.2/16"), AddressScope::Universe; "v4_link_local")]
+    #[test_case(fidl_subnet!("192.0.2.1/24"), AddressScope::Universe; "v4_global")]
+    #[test_case(fidl_subnet!("2001:db8::1/32"), AddressScope::Universe; "v6_global")]
+    #[fuchsia::test(logging = false)]
+    fn test_address_scope(subnet: fnet::Subnet, expected_scope: AddressScope) {
+        let interface_name: String = "test".into();
+        let interface_id = 1;
+        let interface = create_interface(
+            interface_id,
+            interface_name.clone(),
+            ETHERNET,
+            true,
+            vec![fnet_interfaces_ext::Address {
+                addr: subnet,
+                valid_until: fnet_interfaces_ext::NoInterest,
+                assignment_state: AddressAssignmentState::Assigned,
+                preferred_lifetime_info: fnet_interfaces_ext::NoInterest,
+            }],
+        );
+
+        let actual = interface_properties_to_address_messages(&interface).unwrap();
+        let expected = BTreeMap::from_iter([(
+            subnet.addr,
+            create_address_message_with_scope(
+                u32::try_from(interface_id).unwrap(),
+                subnet,
+                interface_name,
+                IFA_F_PERMANENT,
+                expected_scope,
+            ),
+        )]);
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn test_into_rtnl_new_link_is_serializable() {
         let link = create_netlink_link_message(0, 0, 0, vec![]);
@@ -2118,7 +2232,7 @@ mod tests {
                     port_class: Some(LOOPBACK.into()),
                     online: Some(false),
                     addresses: Some(vec![test_addr_with_assignment_state(
-                        TEST_V4_ADDR,
+                        TEST_V4_LO_ADDR,
                         fnet_interfaces::AddressAssignmentState::Assigned,
                     )]),
                     has_default_ipv4_route: Some(false),
@@ -2133,6 +2247,10 @@ mod tests {
                     addresses: Some(vec![
                         test_addr_with_assignment_state(
                             TEST_V6_ADDR,
+                            fnet_interfaces::AddressAssignmentState::Unavailable,
+                        ),
+                        test_addr_with_assignment_state(
+                            TEST_V6_LINK_LOCAL_ADDR,
                             fnet_interfaces::AddressAssignmentState::Unavailable,
                         ),
                         test_addr_with_assignment_state(
@@ -2196,6 +2314,10 @@ mod tests {
                             TEST_V6_ADDR,
                             fnet_interfaces::AddressAssignmentState::Tentative,
                         ),
+                        test_addr_with_assignment_state(
+                            TEST_V6_LINK_LOCAL_ADDR,
+                            fnet_interfaces::AddressAssignmentState::Tentative,
+                        ),
                     ]),
                     has_default_ipv4_route: Some(false),
                     has_default_ipv6_route: Some(false),
@@ -2206,11 +2328,11 @@ mod tests {
                     online: Some(true),
                     addresses: Some(vec![
                         test_addr_with_assignment_state(
-                            TEST_V4_ADDR,
+                            TEST_V4_LO_ADDR,
                             fnet_interfaces::AddressAssignmentState::Assigned,
                         ),
                         test_addr_with_assignment_state(
-                            TEST_V6_ADDR,
+                            TEST_V6_LO_ADDR,
                             fnet_interfaces::AddressAssignmentState::Assigned,
                         ),
                     ]),
@@ -2337,12 +2459,24 @@ mod tests {
             .to_rtnl_new_addr(UNSPECIFIED_SEQUENCE_NUMBER, false),
             ModernGroup(rtnetlink_groups_RTNLGRP_IPV6_IFADDR),
         );
+        let wlan_v6_ll_addr = SentMessage::multicast(
+            create_address_message_with_scope(
+                WLAN_INTERFACE_ID.try_into().unwrap(),
+                TEST_V6_LINK_LOCAL_ADDR,
+                WLAN_NAME.to_string(),
+                IFA_F_PERMANENT | IFA_F_TENTATIVE,
+                AddressScope::Link,
+            )
+            .to_rtnl_new_addr(UNSPECIFIED_SEQUENCE_NUMBER, false),
+            ModernGroup(rtnetlink_groups_RTNLGRP_IPV6_IFADDR),
+        );
         let lo_v6_addr = SentMessage::multicast(
-            create_address_message(
+            create_address_message_with_scope(
                 LO_INTERFACE_ID.try_into().unwrap(),
-                TEST_V6_ADDR,
+                TEST_V6_LO_ADDR,
                 LO_NAME.to_string(),
                 IFA_F_PERMANENT,
+                AddressScope::Host,
             )
             .to_rtnl_new_addr(UNSPECIFIED_SEQUENCE_NUMBER, false),
             ModernGroup(rtnetlink_groups_RTNLGRP_IPV6_IFADDR),
@@ -2353,6 +2487,17 @@ mod tests {
                 TEST_V6_ADDR,
                 ETH_NAME.to_string(),
                 IFA_F_PERMANENT | IFA_F_TENTATIVE,
+            )
+            .to_rtnl_del_addr(UNSPECIFIED_SEQUENCE_NUMBER),
+            ModernGroup(rtnetlink_groups_RTNLGRP_IPV6_IFADDR),
+        );
+        let eth_v6_ll_addr = SentMessage::multicast(
+            create_address_message_with_scope(
+                ETH_INTERFACE_ID.try_into().unwrap(),
+                TEST_V6_LINK_LOCAL_ADDR,
+                ETH_NAME.to_string(),
+                IFA_F_PERMANENT | IFA_F_TENTATIVE,
+                AddressScope::Link,
             )
             .to_rtnl_del_addr(UNSPECIFIED_SEQUENCE_NUMBER),
             ModernGroup(rtnetlink_groups_RTNLGRP_IPV6_IFADDR),
@@ -2369,7 +2514,14 @@ mod tests {
         );
         assert_eq!(
             &addr6_sink.take_messages()[..],
-            &[wlan_v6_addr.clone(), lo_v6_addr.clone(), eth_v6_addr.clone(), ppp_v6_addr.clone(),],
+            &[
+                wlan_v6_addr.clone(),
+                wlan_v6_ll_addr.clone(),
+                lo_v6_addr.clone(),
+                eth_v6_addr.clone(),
+                eth_v6_ll_addr.clone(),
+                ppp_v6_addr.clone(),
+            ],
         );
 
         assert_eq!(
@@ -2379,11 +2531,13 @@ mod tests {
                 wlan_link,
                 wlan_v4_addr,
                 wlan_v6_addr,
+                wlan_v6_ll_addr,
                 lo_link,
                 lo_v6_addr,
                 // Removed addresses always appear before removed interfaces.
                 eth_v4_addr,
                 eth_v6_addr,
+                eth_v6_ll_addr,
                 eth_link,
                 ppp_v4_addr,
                 ppp_v6_addr,
@@ -2521,7 +2675,10 @@ mod tests {
                         name: Some(LO_NAME.to_string()),
                         port_class: Some(LOOPBACK.into()),
                         online: Some(true),
-                        addresses: Some(vec![test_addr(TEST_V6_ADDR), test_addr(TEST_V4_ADDR)]),
+                        addresses: Some(vec![
+                            test_addr(TEST_V6_LO_ADDR),
+                            test_addr(TEST_V4_LO_ADDR),
+                        ]),
                         has_default_ipv4_route: Some(false),
                         has_default_ipv6_route: Some(false),
                         ..Default::default()
@@ -2918,33 +3075,47 @@ mod tests {
             )
             .await,
             TestRequestResult {
-                messages: [(LO_INTERFACE_ID, LO_NAME), (ETH_INTERFACE_ID, ETH_NAME)]
-                    .into_iter()
-                    .map(|(id, name)| {
-                        [TEST_V4_ADDR, TEST_V6_ADDR]
-                            .into_iter()
-                            .filter(|fnet::Subnet { addr, prefix_len: _ }| {
-                                ip_version_filter.map_or(true, |ip_version| {
-                                    ip_version.eq(&match addr {
-                                        fnet::IpAddress::Ipv4(_) => IpVersion::V4,
-                                        fnet::IpAddress::Ipv6(_) => IpVersion::V6,
-                                    })
+                messages: [
+                    (
+                        LO_INTERFACE_ID,
+                        LO_NAME,
+                        [TEST_V4_LO_ADDR, TEST_V6_LO_ADDR],
+                        AddressScope::Host,
+                    ),
+                    (
+                        ETH_INTERFACE_ID,
+                        ETH_NAME,
+                        [TEST_V4_ADDR, TEST_V6_ADDR],
+                        AddressScope::Universe,
+                    ),
+                ]
+                .into_iter()
+                .map(|(id, name, addrs, scope)| {
+                    addrs
+                        .into_iter()
+                        .filter(|fnet::Subnet { addr, prefix_len: _ }| {
+                            ip_version_filter.map_or(true, |ip_version| {
+                                ip_version.eq(&match addr {
+                                    fnet::IpAddress::Ipv4(_) => IpVersion::V4,
+                                    fnet::IpAddress::Ipv6(_) => IpVersion::V6,
                                 })
                             })
-                            .map(move |addr| {
-                                SentMessage::unicast(
-                                    create_address_message(
-                                        id.try_into().unwrap(),
-                                        addr,
-                                        name.to_string(),
-                                        IFA_F_PERMANENT,
-                                    )
-                                    .to_rtnl_new_addr(TEST_SEQUENCE_NUMBER, true),
+                        })
+                        .map(move |addr| {
+                            SentMessage::unicast(
+                                create_address_message_with_scope(
+                                    id.try_into().unwrap(),
+                                    addr,
+                                    name.to_string(),
+                                    IFA_F_PERMANENT,
+                                    scope,
                                 )
-                            })
-                    })
-                    .flatten()
-                    .collect(),
+                                .to_rtnl_new_addr(TEST_SEQUENCE_NUMBER, true),
+                            )
+                        })
+                })
+                .flatten()
+                .collect(),
                 waiter_results: vec![Ok(())],
             },
         );

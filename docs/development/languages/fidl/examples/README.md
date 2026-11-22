@@ -86,7 +86,7 @@ section.
 
 <<../widgets/_named_payload.md>>
 
-### Optionality
+### Optionality {:#optionality}
 
 <<../widgets/_optionality.md>>
 

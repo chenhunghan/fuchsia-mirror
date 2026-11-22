@@ -4,7 +4,6 @@
 
 #include "src/developer/forensics/feedback/last_reboot.h"
 
-#include <fuchsia/hardware/power/statecontrol/cpp/fidl.h>
 #include <lib/inspect/cpp/vmo/types.h>
 
 #include <memory>
@@ -58,7 +57,7 @@ TEST_F(LastRebootTest, FirstInstance) {
   const zx::duration oom_crash_reporting_delay = zx::sec(90);
   const FinalShutdownInfo final_shutdown_info(
       FinalShutdownReason::kOom, GracefulShutdownAction::kReboot, zx::sec(1), zx::msec(500));
-  RebootLog reboot_log(final_shutdown_info, "reboot log");
+  RebootLog reboot_log(final_shutdown_info, "reboot log", /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporter>(stubs::CrashReporter::Expectations{
       .crash_signature = "fuchsia-oom",
@@ -88,7 +87,7 @@ TEST_F(LastRebootTest, IsNotFirstInstance) {
   const zx::duration oom_crash_reporting_delay = zx::sec(90);
   const FinalShutdownInfo final_shutdown_info(
       FinalShutdownReason::kOom, GracefulShutdownAction::kReboot, zx::sec(1), zx::msec(500));
-  RebootLog reboot_log(final_shutdown_info, "reboot log");
+  RebootLog reboot_log(final_shutdown_info, "reboot log", /*uptime_from_logs=*/false);
 
   SetUpCrashReporter(std::make_unique<stubs::CrashReporterNoFileExpected>());
 

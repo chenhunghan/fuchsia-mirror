@@ -7,285 +7,18 @@
 //! ARM SMMUv2 register layouts, typed bitfield accessors, and MMIO bank wrappers (`gr0`, `gr1`,
 //! `s1cbr`, `s2cbr`).
 //!
-//! Defines [`SmmuMmio`], [`FieldDesc`], and the declarative [`define_smmu_reg!`] macro that stamps
-//! out zero-cost `#[repr(transparent)]` register types backed by [`MmioBank`] and [`Offset`] in
-//! kernel builds and by the `FakeSmmuMmioRouter` FFI bridge in host unit tests.
+//! The register types are stamped out by the shared `define_smmu_reg!` macro; it, [`SmmuMmio`],
+//! and [`FieldDesc`] live in `common/mmio.rs` and are re-exported here.
 
-use core::mem::align_of;
-#[cfg(not(is_kernel))]
-use core::mem::size_of;
-#[cfg(is_kernel)]
-use regio::{MmioBank, MmioPtr};
-use regio::{Offset, RwSafe};
+use regio::{Offset, RwUnsafe};
 
-#[cfg(not(is_kernel))]
-use crate::arm_smmu::common::SmmuEnv;
-
-/// Default size in bytes of an SMMUv2 MMIO register bank (64 KiB, the maximum SMMUv2 page size).
-pub const SMMU_MMIO_DEFAULT_BANK_SIZE: usize = 0x10000;
-
-/// MMIO register bank handle for an SMMUv2 register page (`GR0`, `GR1`, or `CBn`).
-///
-/// Wraps a mapped virtual base address (`0` when uninitialized or disabled) and bank size in
-/// bytes. Kernel builds (`cfg(is_kernel)`) delegate directly to [`MmioBank`] (`MmioLe`) and
-/// [`Offset`] volatile loads and stores, while host test builds (`cfg(not(is_kernel))`)
-/// route accesses through `SmmuEnv::host_mmio_*` so the simulated hardware model can intercept
-/// register reads, writes, and TLB synchronization operations.
-///
-/// # Invariants
-/// Either `base == 0 && size == 0` (the null/disabled handle), or `[base, base + size)` is a
-/// valid, 8-byte-aligned mapped SMMU MMIO region (or a valid host test MMIO region / buffer with
-/// exposed provenance) that remains valid for volatile 32-bit and 64-bit register reads and writes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SmmuMmio {
-    base: usize,
-    size: usize,
-}
-
-impl SmmuMmio {
-    /// Returns a null (uninitialized/disabled) [`SmmuMmio`] handle (`base == 0`).
-    #[inline]
-    pub const fn null() -> Self {
-        Self { base: 0, size: 0 }
-    }
-
-    /// Constructs an [`SmmuMmio`] handle for `base` with [`SMMU_MMIO_DEFAULT_BANK_SIZE`] bytes
-    /// (or `0` bytes if `base == 0`).
-    ///
-    /// # Safety
-    /// If `base != 0`, `[base, base + SMMU_MMIO_DEFAULT_BANK_SIZE)` must be a valid,
-    /// 8-byte-aligned mapped MMIO region (or valid host test MMIO region / buffer with exposed
-    /// provenance) for as long as the returned handle or any sub-bank derived from it is used.
-    #[inline]
-    pub const unsafe fn new(base: usize) -> Self {
-        assert!(base.is_multiple_of(align_of::<u64>()), "SmmuMmio base must be 8-byte aligned");
-        let size = if base == 0 { 0 } else { SMMU_MMIO_DEFAULT_BANK_SIZE };
-        Self { base, size }
-    }
-
-    /// Constructs an [`SmmuMmio`] handle for `base` with an explicit `size` in bytes (or `0` bytes
-    /// if `base == 0`).
-    ///
-    /// # Safety
-    /// If `base != 0`, `[base, base + size)` must be a valid, 8-byte-aligned mapped MMIO region
-    /// (or valid host test MMIO region / buffer with exposed provenance) for as long as the
-    /// returned handle or any sub-bank derived from it is used.
-    #[inline]
-    pub const unsafe fn with_size(base: usize, size: usize) -> Self {
-        assert!(base.is_multiple_of(align_of::<u64>()), "SmmuMmio base must be 8-byte aligned");
-        let size = if base == 0 { 0 } else { size };
-        Self { base, size }
-    }
-
-    /// Derives a bounds-checked sub-bank at `[offset, offset + size)` within `self`, or returns
-    /// [`Self::null()`] if `self` is null.
-    ///
-    /// Panics if `self` is non-null and `[offset, offset + size)` exceeds `self.size` or is not
-    /// 8-byte aligned.
-    #[inline]
-    pub const fn sub_bank(self, offset: usize, size: usize) -> Self {
-        if self.base == 0 {
-            Self::null()
-        } else {
-            assert!(offset <= self.size && size <= self.size - offset);
-            let sub_base = self.base + offset;
-            assert!(
-                sub_base.is_multiple_of(align_of::<u64>()),
-                "SmmuMmio sub-bank base must be 8-byte aligned"
-            );
-            Self { base: sub_base, size }
-        }
-    }
-
-    /// Returns the virtual base address of this MMIO register bank (`0` if null).
-    #[inline]
-    pub const fn base(&self) -> usize {
-        self.base
-    }
-
-    /// Returns the size in bytes of this MMIO register bank.
-    #[inline]
-    pub const fn size(&self) -> usize {
-        self.size
-    }
-
-    /// Returns `true` if this MMIO handle is null (`base == 0`).
-    #[inline]
-    pub const fn is_null(&self) -> bool {
-        self.base == 0
-    }
-
-    /// Reads a 32-bit register at `offset` within this MMIO bank.
-    #[inline]
-    pub fn read32(&self, offset: Offset<u32, RwSafe>) -> u32 {
-        assert!(
-            self.base != 0 && self.base.is_multiple_of(align_of::<u32>()),
-            "MMIO read32 on null or unaligned SmmuMmio"
-        );
-        #[cfg(is_kernel)]
-        {
-            // SAFETY: By `SmmuMmio`'s type invariant and the assertion above, `self.base` is a
-            // non-null, aligned pointer to a mapped SMMU MMIO region of `self.size` bytes, and
-            // `MmioBank::at` verifies alignment and bounds of `offset`.
-            unsafe {
-                let ptr = MmioPtr::<u32, RwSafe>::new(
-                    core::ptr::with_exposed_provenance_mut::<u32>(self.base),
-                );
-                let bank = MmioBank::new(ptr, self.size);
-                bank.at(offset).read()
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            assert!(offset.value.is_multiple_of(align_of::<u32>()));
-            assert!(size_of::<u32>() <= self.size);
-            assert!(offset.value <= self.size - size_of::<u32>());
-            SmmuEnv::host_mmio_read32(self.base, offset.value as u32)
-        }
-    }
-
-    /// Writes a 32-bit register value `val` at `offset` within this MMIO bank.
-    #[inline]
-    pub fn write32(&self, offset: Offset<u32, RwSafe>, val: u32) {
-        assert!(
-            self.base != 0 && self.base.is_multiple_of(align_of::<u32>()),
-            "MMIO write32 on null or unaligned SmmuMmio"
-        );
-        #[cfg(is_kernel)]
-        {
-            // SAFETY: By `SmmuMmio`'s type invariant and the assertion above, `self.base` is a
-            // non-null, aligned pointer to a mapped SMMU MMIO region of `self.size` bytes, and
-            // `MmioBank::at` verifies alignment and bounds of `offset`.
-            unsafe {
-                let ptr = MmioPtr::<u32, RwSafe>::new(
-                    core::ptr::with_exposed_provenance_mut::<u32>(self.base),
-                );
-                let bank = MmioBank::new(ptr, self.size);
-                bank.at(offset).write(val);
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            assert!(offset.value.is_multiple_of(align_of::<u32>()));
-            assert!(size_of::<u32>() <= self.size);
-            assert!(offset.value <= self.size - size_of::<u32>());
-            SmmuEnv::host_mmio_write32(self.base, offset.value as u32, val);
-        }
-    }
-
-    /// Reads a 64-bit register at `offset` within this MMIO bank.
-    #[inline]
-    pub fn read64(&self, offset: Offset<u64, RwSafe>) -> u64 {
-        assert!(
-            self.base != 0 && self.base.is_multiple_of(align_of::<u64>()),
-            "MMIO read64 on null or unaligned SmmuMmio"
-        );
-        #[cfg(is_kernel)]
-        {
-            // SAFETY: By `SmmuMmio`'s type invariant and the assertion above, `self.base` is a
-            // non-null, aligned pointer to a mapped SMMU MMIO region of `self.size` bytes, and
-            // `MmioBank::at` verifies alignment and bounds of `offset`.
-            unsafe {
-                let ptr = MmioPtr::<u64, RwSafe>::new(
-                    core::ptr::with_exposed_provenance_mut::<u64>(self.base),
-                );
-                let bank = MmioBank::new(ptr, self.size);
-                bank.at(offset).read()
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            assert!(offset.value.is_multiple_of(align_of::<u64>()));
-            assert!(size_of::<u64>() <= self.size);
-            assert!(offset.value <= self.size - size_of::<u64>());
-            SmmuEnv::host_mmio_read64(self.base, offset.value as u32)
-        }
-    }
-
-    /// Writes a 64-bit register value `val` at `offset` within this MMIO bank.
-    #[inline]
-    pub fn write64(&self, offset: Offset<u64, RwSafe>, val: u64) {
-        assert!(
-            self.base != 0 && self.base.is_multiple_of(align_of::<u64>()),
-            "MMIO write64 on null or unaligned SmmuMmio"
-        );
-        #[cfg(is_kernel)]
-        {
-            // SAFETY: By `SmmuMmio`'s type invariant and the assertion above, `self.base` is a
-            // non-null, aligned pointer to a mapped SMMU MMIO region of `self.size` bytes, and
-            // `MmioBank::at` verifies alignment and bounds of `offset`.
-            unsafe {
-                let ptr = MmioPtr::<u64, RwSafe>::new(
-                    core::ptr::with_exposed_provenance_mut::<u64>(self.base),
-                );
-                let bank = MmioBank::new(ptr, self.size);
-                bank.at(offset).write(val);
-            }
-        }
-        #[cfg(not(is_kernel))]
-        {
-            assert!(offset.value.is_multiple_of(align_of::<u64>()));
-            assert!(size_of::<u64>() <= self.size);
-            assert!(offset.value <= self.size - size_of::<u64>());
-            SmmuEnv::host_mmio_write64(self.base, offset.value as u32, val);
-        }
-    }
-}
-
-/// Trait implemented by underlying register integer widths (`u32` and `u64`) for [`SmmuMmio`] I/O.
-pub trait SmmuRegValue: Copy {
-    /// Reads a raw register value at byte `offset` from `mmio`.
-    fn read_mmio(mmio: &SmmuMmio, offset: u32) -> Self;
-
-    /// Writes a raw register value `val` at byte `offset` to `mmio`.
-    fn write_mmio(mmio: &SmmuMmio, offset: u32, val: Self);
-}
-
-impl SmmuRegValue for u32 {
-    #[inline]
-    fn read_mmio(mmio: &SmmuMmio, offset: u32) -> Self {
-        mmio.read32(Offset::new(offset as usize))
-    }
-
-    #[inline]
-    fn write_mmio(mmio: &SmmuMmio, offset: u32, val: Self) {
-        mmio.write32(Offset::new(offset as usize), val);
-    }
-}
-
-impl SmmuRegValue for u64 {
-    #[inline]
-    fn read_mmio(mmio: &SmmuMmio, offset: u32) -> Self {
-        mmio.read64(Offset::new(offset as usize))
-    }
-
-    #[inline]
-    fn write_mmio(mmio: &SmmuMmio, offset: u32, val: Self) {
-        mmio.write64(Offset::new(offset as usize), val);
-    }
-}
-
-/// Metadata describing a single register bitfield for debug console introspection (`DumpReg`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FieldDesc {
-    /// Display name of the bitfield (empty `""` for `rsvdz` fields, `"__res..."` for non-zeroed
-    /// reserved fields).
-    pub name: &'static str,
-    /// Most significant bit index (inclusive).
-    pub msb: u32,
-    /// Least significant bit index (inclusive).
-    pub lsb: u32,
-}
-
-impl FieldDesc {
-    /// Extracts this field's shifted unsigned value from `raw_reg_val`.
-    #[inline]
-    pub const fn extract(&self, raw_reg_val: u64) -> u64 {
-        let width = (self.msb - self.lsb) + 1;
-        let mask = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
-        (raw_reg_val >> self.lsb) & mask
-    }
-}
+#[allow(unused_imports)]
+pub(crate) use crate::arm_smmu::common::mmio::FieldDesc;
+use crate::arm_smmu::common::mmio::define_smmu_reg;
+#[allow(unused_imports)]
+pub(in crate::arm_smmu) use crate::arm_smmu::common::mmio::{
+    SMMU_MMIO_DEFAULT_BANK_SIZE, SmmuMmio, SmmuRegValue,
+};
 
 /// Client Port Disable (`CR0.CLIENTPD`) enumeration.
 #[repr(u32)]
@@ -391,7 +124,8 @@ pub enum S2crPrivCfg {
     /// Use incoming transaction privilege attribute (`0`).
     #[default]
     Default = 0,
-    /// Reserved encoding (`1`), mapped to Default (`1`).
+    /// Reserved encoding (`1`) where `IDR2.DIPANS == 0`; where it is `1`, "Data and Instruction
+    /// Privileged Access Never". Not used by this driver.
     Reserved1 = 1,
     /// Force unprivileged access (`2`).
     Unprivileged = 2,
@@ -651,476 +385,6 @@ impl TcrIps {
     }
 }
 
-/// Declarative macro for defining ARM SMMUv2 MMIO registers, bitfields, RSVDZ masks, and console
-/// field metadata tables.
-///
-/// # Overview
-///
-/// `define_smmu_reg!` generates a `#[repr(transparent)]` wrapper struct over `u32` or `u64` that
-/// implements `LayoutOver` (`Copy + From<Base> + Into<Base>`), typed bitfield getters and
-/// chainable `&mut Self` setters, reserved-as-zero (`[rsvdz]`) write masking, and a static
-/// `FIELDS: &'static [FieldDesc]` slice used by the `smmu dumpregs` / `smmu show -v` kernel
-/// console commands.
-///
-/// Two addressing forms are supported:
-/// 1. **Fixed-offset registers**: `pub struct RegName($val_ty) @ $offset_expr => { ... }`
-/// 2. **Indexed register arrays**:
-///    `pub struct RegName($val_ty) @ [$ndx:ident : u32] $offset_expr => { ... }`
-///
-/// Four field kinds are supported inside the `{ ... }` body:
-/// 1. **Integer bit or multi-bit field**:
-///    `msb:lsb => getter_name, set_name ["DISPLAY_NAME"]: u32;` (or `u64;`).
-/// 2. **Boolean single-bit flag**:
-///    `bit:bit => getter_name, set_name ["DISPLAY_NAME"]: bool;`.
-/// 3. **Typed enum field**:
-///    `msb:lsb => getter_name, set_name ["DISPLAY_NAME"]: enum EnumType;` (where `EnumType`
-///    provides `const fn from_raw(u32) -> EnumType` and `#[repr(u32)]`).
-/// 4. **Reserved-as-zero (`[rsvdz]`) field**:
-///    `msb:lsb => [rsvdz];`. No getter or setter is emitted; the bit range is accumulated into
-///    `Self::RSVDZ_MASK` and automatically cleared before every `write_to` / `write_at` MMIO
-///    store, and its [`FieldDesc`] entry carries an empty `name: ""` so `DumpReg` omits it.
-///
-/// # Concrete Examples
-///
-/// ## Example 1: Fixed-offset register with integer, boolean, enum, and `[rsvdz]` fields
-///
-/// ```ignore
-/// define_smmu_reg! {
-///     /// Global Configuration Register 2 (`SMMU_sCR2`).
-///     pub struct Cr2(u32) @ 0x008 => {
-///         31:31 => exsmrgenable, set_exsmrgenable ["EXSMRGENABLE"]: u32;
-///         30:30 => [rsvdz];
-///         29:29 => compindexenable, set_compindexenable ["COMPINDEXENABLE"]: u32;
-///         26:16 => [rsvdz];
-///         7:0   => bpvmid, set_bpvmid ["BPVMID"]: u32;
-///     }
-/// }
-/// ```
-///
-/// This expands to:
-/// - `#[repr(transparent)] pub struct Cr2(u32);` implementing `Clone`, `Copy`, `Debug`, `Default`,
-///   `PartialEq`, `Eq`, `From<u32>`, and `From<Cr2> for u32`.
-/// - `pub const OFFSET: u32 = 0x008;` and
-///   `pub const REGIO_OFFSET: Offset<Self, RwSafe> = Offset::new(0x008);`
-/// - `pub const RSVDZ_MASK: u32 = (1 << 30) | (0x7ff << 16);`
-/// - `pub const FIELDS: &'static [FieldDesc] = &[ ... ];`
-/// - `pub const fn from_value(val: u32) -> Self` and `pub const fn reg_value(&self) -> u32`
-/// - `pub fn read_from(mmio: &SmmuMmio) -> Self` and
-///   `pub fn write_to(&mut self, mmio: &SmmuMmio) -> &mut Self` (clearing `RSVDZ_MASK` before
-///   writing to `mmio`).
-/// - `pub const fn exsmrgenable(&self) -> u32`,
-///   `pub fn set_exsmrgenable(&mut self, val: u32) -> &mut Self`, etc.
-///
-/// ## Example 2: Indexed register array (`SMRn`, `S2CRn`, `CBARn`) with typed enum field
-///
-/// ```ignore
-/// define_smmu_reg! {
-///     /// Stream-to-Context Register (`SMMU_S2CRn`).
-///     pub struct S2cr(u32) @ [ndx: u32] 0xc00 + (ndx << 2) => {
-///         17:16 => s2cr_type, set_s2cr_type ["TYPE"]: enum S2crType;
-///     }
-/// }
-/// ```
-///
-/// This expands to:
-/// - `pub const fn offset(ndx: u32) -> u32 { 0xc00 + (ndx << 2) }` and
-///   `pub const fn regio_offset(ndx: u32) -> Offset<Self, RwSafe>`
-/// - `pub fn read_at(mmio: &SmmuMmio, ndx: u32) -> Self` and
-///   `pub fn write_at(&mut self, mmio: &SmmuMmio, ndx: u32) -> &mut Self`
-/// - `pub const fn s2cr_type(&self) -> S2crType` and
-///   `pub fn set_s2cr_type(&mut self, val: S2crType) -> &mut Self`.
-macro_rules! define_smmu_reg {
-    // =========================================================================
-    // Arm 1: Indexed register array definition (`@ [$ndx:ident : u32] $offset:expr`)
-    // =========================================================================
-    // Matches a register family indexed by `ndx: u32` (such as `SMRn`, `S2CRn`, `CBARn`,
-    // `CBFRSYNRAn`, `CBA2Rn`). Generates `offset(ndx)`, `regio_offset(ndx)`, `read_at(mmio, ndx)`,
-    // and `write_at(mmio, ndx)` in place of a fixed `OFFSET`.
-    (
-        $(#[$doc:meta])*
-        $vis:vis struct $name:ident ($val_ty:ty) @ [$ndx:ident : u32] $offset:expr => {
-            $(
-                $msb:literal : $lsb:literal =>
-                    $( [$rsvdz:ident] )?
-                    $( $get:ident, $set:ident [$disp:literal] : $($field_ty:ident)+ )?
-            );* $(;)?
-        }
-    ) => {
-        $(#[$doc])*
-        #[repr(transparent)]
-        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-        $vis struct $name($val_ty);
-
-        impl From<$val_ty> for $name {
-            #[inline]
-            fn from(val: $val_ty) -> Self {
-                Self(val)
-            }
-        }
-
-        impl From<$name> for $val_ty {
-            #[inline]
-            fn from(reg: $name) -> Self {
-                reg.0
-            }
-        }
-
-        impl $name {
-            /// Computes the byte offset of element `$ndx` within its MMIO bank.
-            #[inline]
-            pub const fn offset($ndx: u32) -> u32 {
-                $offset
-            }
-
-            /// Computes the typed [`Offset`] of element `ndx` within its MMIO bank.
-            #[inline]
-            pub const fn regio_offset(ndx: u32) -> Offset<Self, RwSafe> {
-                Offset::new(Self::offset(ndx) as usize)
-            }
-
-            /// Bitmask of reserved-as-zero (`[rsvdz]`) bit positions that are automatically
-            /// cleared before writing this register to MMIO.
-            pub const RSVDZ_MASK: $val_ty = 0 $(
-                | define_smmu_reg!(
-                    @rsvdz_mask $val_ty, $msb, $lsb,
-                    $( [$rsvdz] )?
-                    $( $get, $set [$disp] : $($field_ty)+ )?
-                )
-            )*;
-
-            /// Static bitfield descriptor table used by `DumpReg` in the kernel debug console.
-            pub const FIELDS: &'static [FieldDesc] = &[
-                $(
-                    define_smmu_reg!(
-                        @field_desc $msb, $lsb,
-                        $( [$rsvdz] )?
-                        $( $get, $set [$disp] : $($field_ty)+ )?
-                    ),
-                )*
-            ];
-
-            /// Constructs a register value wrapper from a raw integer `val`.
-            #[inline]
-            pub const fn from_value(val: $val_ty) -> Self {
-                Self(val)
-            }
-
-            /// Returns the raw integer value stored in this register snapshot.
-            #[inline]
-            pub const fn reg_value(&self) -> $val_ty {
-                self.0
-            }
-
-            /// Replaces the raw integer value stored in this register snapshot.
-            #[inline]
-            pub fn set_reg_value(&mut self, val: $val_ty) -> &mut Self {
-                self.0 = val;
-                self
-            }
-
-            /// Reads element `ndx` of this register array from `mmio`.
-            #[inline]
-            pub fn read_at(mmio: &SmmuMmio, ndx: u32) -> Self {
-                Self(<$val_ty as SmmuRegValue>::read_mmio(mmio, Self::offset(ndx)))
-            }
-
-            /// Clears any [`Self::RSVDZ_MASK`] bits and writes element `ndx` of this register
-            /// array to `mmio`.
-            #[inline]
-            pub fn write_at(&mut self, mmio: &SmmuMmio, ndx: u32) -> &mut Self {
-                let masked = self.0 & !Self::RSVDZ_MASK;
-                <$val_ty as SmmuRegValue>::write_mmio(mmio, Self::offset(ndx), masked);
-                self
-            }
-
-            $(
-                define_smmu_reg!(
-                    @field_methods $val_ty, $msb, $lsb,
-                    $( [$rsvdz] )?
-                    $( $get, $set [$disp] : $($field_ty)+ )?
-                );
-            )*
-        }
-    };
-
-    // =========================================================================
-    // Arm 2: Fixed-offset register definition (`@ $offset:expr`)
-    // =========================================================================
-    // Generates the `#[repr(transparent)]` wrapper type, `From`/`Into` conversions required by
-    // `LayoutOver`, `OFFSET` and `REGIO_OFFSET` constants, `RSVDZ_MASK`, `FIELDS` metadata
-    // slice, `read_from` / `write_to` MMIO methods, and all bitfield getters/setters.
-    (
-        $(#[$doc:meta])*
-        $vis:vis struct $name:ident ($val_ty:ty) @ $offset:expr => {
-            $(
-                $msb:literal : $lsb:literal =>
-                    $( [$rsvdz:ident] )?
-                    $( $get:ident, $set:ident [$disp:literal] : $($field_ty:ident)+ )?
-            );* $(;)?
-        }
-    ) => {
-        $(#[$doc])*
-        #[repr(transparent)]
-        #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-        $vis struct $name($val_ty);
-
-        impl From<$val_ty> for $name {
-            #[inline]
-            fn from(val: $val_ty) -> Self {
-                Self(val)
-            }
-        }
-
-        impl From<$name> for $val_ty {
-            #[inline]
-            fn from(reg: $name) -> Self {
-                reg.0
-            }
-        }
-
-        impl $name {
-            /// Byte offset of this register within its MMIO bank.
-            pub const OFFSET: u32 = $offset;
-
-            /// Typed [`Offset`] of this register within its MMIO bank.
-            pub const REGIO_OFFSET: Offset<Self, RwSafe> = Offset::new(Self::OFFSET as usize);
-
-            /// Bitmask of reserved-as-zero (`[rsvdz]`) bit positions that are automatically
-            /// cleared before writing this register to MMIO.
-            pub const RSVDZ_MASK: $val_ty = 0 $(
-                | define_smmu_reg!(
-                    @rsvdz_mask $val_ty, $msb, $lsb,
-                    $( [$rsvdz] )?
-                    $( $get, $set [$disp] : $($field_ty)+ )?
-                )
-            )*;
-
-            /// Static bitfield descriptor table used by `DumpReg` in the kernel debug console.
-            pub const FIELDS: &'static [FieldDesc] = &[
-                $(
-                    define_smmu_reg!(
-                        @field_desc $msb, $lsb,
-                        $( [$rsvdz] )?
-                        $( $get, $set [$disp] : $($field_ty)+ )?
-                    ),
-                )*
-            ];
-
-            /// Constructs a register value wrapper from a raw integer `val`.
-            #[inline]
-            pub const fn from_value(val: $val_ty) -> Self {
-                Self(val)
-            }
-
-            /// Returns the raw integer value stored in this register snapshot.
-            #[inline]
-            pub const fn reg_value(&self) -> $val_ty {
-                self.0
-            }
-
-            /// Replaces the raw integer value stored in this register snapshot.
-            #[inline]
-            pub fn set_reg_value(&mut self, val: $val_ty) -> &mut Self {
-                self.0 = val;
-                self
-            }
-
-            /// Returns the byte offset (`reg_addr`) of this register within its MMIO bank.
-            #[inline]
-            pub const fn reg_addr(&self) -> u32 {
-                Self::OFFSET
-            }
-
-            /// Reads this register from `mmio` at [`Self::OFFSET`].
-            #[inline]
-            pub fn read_from(mmio: &SmmuMmio) -> Self {
-                Self(<$val_ty as SmmuRegValue>::read_mmio(mmio, Self::OFFSET))
-            }
-
-            /// Clears any [`Self::RSVDZ_MASK`] bits and writes this register to `mmio` at
-            /// [`Self::OFFSET`].
-            #[inline]
-            pub fn write_to(&mut self, mmio: &SmmuMmio) -> &mut Self {
-                let masked = self.0 & !Self::RSVDZ_MASK;
-                <$val_ty as SmmuRegValue>::write_mmio(mmio, Self::OFFSET, masked);
-                self
-            }
-
-            $(
-                define_smmu_reg!(
-                    @field_methods $val_ty, $msb, $lsb,
-                    $( [$rsvdz] )?
-                    $( $get, $set [$disp] : $($field_ty)+ )?
-                );
-            )*
-        }
-    };
-
-    // =========================================================================
-    // Internal Helper Rules: `@bit_mask`
-    // =========================================================================
-    // Computes the unshifted bitmask `((1 << (msb - lsb + 1)) - 1)` for an inclusive bit range
-    // `[msb:lsb]` in `$val_ty` (`u32` or `u64`) at compile time without overflow when the field
-    // spans the full register width (`width == $val_ty::BITS`).
-    (@bit_mask $val_ty:ty, $msb:literal, $lsb:literal) => {{
-        assert!($msb >= $lsb, "Upper bit must be >= lower bit");
-        assert!($msb < <$val_ty>::BITS, "Upper bit exceeds register width");
-        let width: u32 = ($msb - $lsb) + 1;
-        if width == <$val_ty>::BITS {
-            <$val_ty>::MAX
-        } else {
-            ((1 as $val_ty) << width) - 1
-        }
-    }};
-
-    // =========================================================================
-    // Internal Helper Rules: `@rsvdz_mask`
-    // =========================================================================
-    // Evaluates to the shifted bitmask `MASK << lsb` for `[rsvdz]` fields, and `0` for all
-    // normal readable/writable fields.
-    (@rsvdz_mask $val_ty:ty, $msb:literal, $lsb:literal, [rsvdz]) => {
-        define_smmu_reg!(@bit_mask $val_ty, $msb, $lsb) << $lsb
-    };
-    (@rsvdz_mask $val_ty:ty, $msb:literal, $lsb:literal, $($other:tt)+) => {
-        0 as $val_ty
-    };
-
-    // =========================================================================
-    // Internal Helper Rules: `@field_desc`
-    // =========================================================================
-    // Builds a `FieldDesc` entry for `Self::FIELDS`. Reserved-zero (`[rsvdz]`) fields receive an
-    // empty `name: ""` so `DumpReg` skips them during both width calculation and field printing,
-    // matching `hwreg`'s `nullptr` name behavior.
-    (@field_desc $msb:literal, $lsb:literal, [rsvdz]) => {
-        FieldDesc { name: "", msb: $msb, lsb: $lsb }
-    };
-    (
-        @field_desc
-        $msb:literal,
-        $lsb:literal,
-        $get:ident,
-        $set:ident
-        [$disp:literal] : $($rest:tt)+
-    ) => {
-        FieldDesc { name: $disp, msb: $msb, lsb: $lsb }
-    };
-
-    // =========================================================================
-    // Internal Helper Rules: `@field_methods`
-    // =========================================================================
-    // Generates typed getter and setter methods for each field kind:
-    // 1. `[rsvdz]`: no getter/setter (`RSVDZ_MASK` already validates the bit range).
-    // 2. `: bool`: emits `pub const fn $get(&self) -> bool` and
-    //    `pub fn $set(&mut self, val: bool) -> &mut Self`.
-    // 3. `: enum $enum_ty`: emits `pub const fn $get(&self) -> $enum_ty` (via `$enum_ty::from_raw`)
-    //    and `pub fn $set(&mut self, val: $enum_ty) -> &mut Self`.
-    // 4. `: $field_ty` (`u32` or `u64`): emits `pub const fn $get(&self) -> $val_ty` and
-    //    `pub fn $set(&mut self, val: $val_ty) -> &mut Self` with a `debug_assert!` verifying that
-    //    `val` fits within the field width.
-    (@field_methods $val_ty:ty, $msb:literal, $lsb:literal, [rsvdz]) => {};
-    (
-        @field_methods
-        $val_ty:ty,
-        $msb:literal,
-        $lsb:literal,
-        $get:ident,
-        $set:ident
-        [$disp:literal] : bool
-    ) => {
-        /// Extracts boolean bitfield `$disp`.
-        #[inline]
-        pub const fn $get(&self) -> bool {
-            const _ASSERT_SINGLE_BIT: () =
-                assert!($msb == $lsb, "Boolean register field must be a single bit");
-            const _ASSERT_IN_BOUNDS: () =
-                assert!($msb < <$val_ty>::BITS, "Bit index exceeds register width");
-            ((self.0 >> $lsb) & 1) != 0
-        }
-
-        /// Updates boolean bitfield `$disp` in place.
-        #[inline]
-        pub fn $set(&mut self, val: bool) -> &mut Self {
-            let bit: $val_ty = (1 as $val_ty) << $lsb;
-            if val {
-                self.0 |= bit;
-            } else {
-                self.0 &= !bit;
-            }
-            self
-        }
-    };
-    (
-        @field_methods
-        $val_ty:ty,
-        $msb:literal,
-        $lsb:literal,
-        $get:ident,
-        $set:ident
-        [$disp:literal] : enum $enum_ty:ty
-    ) => {
-        /// Extracts typed enum bitfield `$disp`.
-        #[inline]
-        pub const fn $get(&self) -> $enum_ty {
-            const MASK: $val_ty = define_smmu_reg!(@bit_mask $val_ty, $msb, $lsb);
-            let raw = (self.0 >> $lsb) & MASK;
-            <$enum_ty>::from_raw(raw as u32)
-        }
-
-        /// Updates typed enum bitfield `$disp` in place.
-        #[inline]
-        pub fn $set(&mut self, val: $enum_ty) -> &mut Self {
-            const MASK: $val_ty = define_smmu_reg!(@bit_mask $val_ty, $msb, $lsb);
-            let raw = (val as u32) as $val_ty;
-            // Temporary porting note: like hwreg, this debug-asserts that `val` fits in the
-            // field. In builds without that assert hwreg ORs an oversized value in unmasked, so
-            // it spills into the fields above; here it is masked to the width of the field.
-            // The register value therefore differs from the C++ only when a caller passes a
-            // value too wide for the field, and no caller does: the one place the C++ did so
-            // (the SMR ID in `StreamMatchRegGroup::enable_for_context_bank`, see the note
-            // there) now passes just the ID and writes the same register value. Were it to
-            // happen, both would write a wrong value; here the damage is confined to the one
-            // field instead of also corrupting its neighbors, which is at least as good.
-            debug_assert!(raw.checked_shr(($msb - $lsb) + 1).unwrap_or(0) == 0);
-            self.0 = (self.0 & !(MASK << $lsb)) | ((raw & MASK) << $lsb);
-            self
-        }
-    };
-    (
-        @field_methods
-        $val_ty:ty,
-        $msb:literal,
-        $lsb:literal,
-        $get:ident,
-        $set:ident
-        [$disp:literal] : $field_ty:ty
-    ) => {
-        /// Extracts integer bitfield `$disp` (`bits [$msb:$lsb]`).
-        #[inline]
-        pub const fn $get(&self) -> $val_ty {
-            const MASK: $val_ty = define_smmu_reg!(@bit_mask $val_ty, $msb, $lsb);
-            (self.0 >> $lsb) & MASK
-        }
-
-        /// Updates integer bitfield `$disp` (`bits [$msb:$lsb]`) in place.
-        #[inline]
-        pub fn $set(&mut self, val: $val_ty) -> &mut Self {
-            const MASK: $val_ty = define_smmu_reg!(@bit_mask $val_ty, $msb, $lsb);
-            // Temporary porting note: like hwreg, this debug-asserts that `val` fits in the
-            // field. In builds without that assert hwreg ORs an oversized value in unmasked, so
-            // it spills into the fields above; here it is masked to the width of the field.
-            // The register value therefore differs from the C++ only when a caller passes a
-            // value too wide for the field, and no caller does: the one place the C++ did so
-            // (the SMR ID in `StreamMatchRegGroup::enable_for_context_bank`, see the note
-            // there) now passes just the ID and writes the same register value. Were it to
-            // happen, both would write a wrong value; here the damage is confined to the one
-            // field instead of also corrupting its neighbors, which is at least as good.
-            debug_assert!(val.checked_shr(($msb - $lsb) + 1).unwrap_or(0) == 0);
-            self.0 = (self.0 & !(MASK << $lsb)) | ((val & MASK) << $lsb);
-            self
-        }
-    };
-}
-
 /// Global Register Space 0 (`SMMU_GR0_BASE`) register definitions.
 pub mod gr0 {
     use super::*;
@@ -1214,7 +478,7 @@ pub mod gr0 {
             29:29 => compindexs, set_compindexs ["COMPINDEXS"]: u32;
             28:28 => hads, set_hads ["HADS"]: u32;
             27:27 => e2hs, set_e2hs ["E2HS"]: u32;
-            26:16 => exnumsmgr, set_exnumsmgr ["EXNUMSMGR"]: u32;
+            26:16 => exnumsmrg, set_exnumsmrg ["EXNUMSMRG"]: u32;
             15:15 => vmid16s, set_vmid16s ["VMID16S"]: u32;
             14:14 => ptfsv8_64kb, set_ptfsv8_64kb ["PTFSv8_64kb"]: u32;
             13:13 => ptfsv8_16kb, set_ptfsv8_16kb ["PTFSv8_16kb"]: u32;
@@ -1256,6 +520,13 @@ pub mod gr0 {
             1:1   => usf, set_usf ["USF"]: u32;
             0:0   => icf, set_icf ["ICF"]: u32;
         }
+    }
+
+    impl Gfsr {
+        /// Mask of all defined write-1-to-clear fault bits in `SMMU_sGFSR` (`MULTI` bit 31 and
+        /// `UUT..ICF` bits `[8:0]`, leaving reserved `UNK/SBZP` bits `[30:9]` zero; IHI 0062D.c
+        /// section 9.6.15).
+        pub const CLEAR_ALL: u32 = 0x8000_01ff;
     }
 
     define_smmu_reg! {
@@ -1769,9 +1040,7 @@ pub mod s1cbr {
     // + AArch64                  (`AddrMode::Mode64Bit`, `VA64 == 1`)
     //
     // Note: in `Ttbr0_32Bit` and `Ttbr1_32Bit`, bit 0 is `IRGN[1]` and bit 6 is `IRGN[0]` per the
-    // ARM SMMUv2 specification; the accessor at bit 6 is named `irgn0`/`set_irgn0` to disambiguate
-    // it from `irgn1`/`set_irgn1` in the flat `define_smmu_reg!` expansion while preserving the
-    // `"IRGN1"` display label for register dump output parity.
+    // ARM SMMUv2 specification.
     define_smmu_reg! {
         /// Translation Table Base Register 0, AArch32 Short-descriptor (`SMMU_CBn_TTBR0`, offset
         /// `0x20`).
@@ -1781,7 +1050,7 @@ pub mod s1cbr {
             2:2  => imp, set_imp ["IMP"]: u32;
             4:3  => rgn, set_rgn ["RGN"]: u32;
             5:5  => nos, set_nos ["NOS"]: u32;
-            6:6  => irgn0, set_irgn0 ["IRGN1"]: u32;
+            6:6  => irgn0, set_irgn0 ["IRGN0"]: u32;
             31:7 => base_address, set_base_address ["BaseAddress"]: u32;
         }
     }
@@ -1848,8 +1117,7 @@ pub mod s1cbr {
         }
     }
 
-    // Note: bit 6 (`IRGN[0]`) is named `irgn0`/`set_irgn0` to disambiguate it from bit 0 (`irgn1`)
-    // in the flat `define_smmu_reg!` expansion while preserving `"IRGN1"` for dump output parity.
+    // Note: bit 0 is `IRGN[1]` and bit 6 is `IRGN[0]`.
     define_smmu_reg! {
         /// Translation Table Base Register 1, AArch32 Short-descriptor (`SMMU_CBn_TTBR1`, offset
         /// `0x28`).
@@ -1859,7 +1127,7 @@ pub mod s1cbr {
             2:2  => imp, set_imp ["IMP"]: u32;
             4:3  => rgn, set_rgn ["RGN"]: u32;
             5:5  => nos, set_nos ["NOS"]: u32;
-            6:6  => irgn0, set_irgn0 ["IRGN1"]: u32;
+            6:6  => irgn0, set_irgn0 ["IRGN0"]: u32;
             31:7 => base_address, set_base_address ["BaseAddress"]: u32;
         }
     }
@@ -1956,9 +1224,6 @@ pub mod s1cbr {
         }
     }
 
-    // Note: bit 30 (`NSCFG1`) is named `nscfg1`/`set_nscfg1` to disambiguate it from bit 14
-    // (`nscfg0`) in the flat `define_smmu_reg!` expansion while preserving `"NSCFG0"` for dump
-    // output parity.
     define_smmu_reg! {
         /// Translation Control Register, AArch32 Long-descriptor (`SMMU_CBn_TCR`, offset `0x30`).
         pub struct TcrExt32Bit(u32) @ 0x30 => {
@@ -1974,7 +1239,7 @@ pub mod s1cbr {
             25:24 => irgn1, set_irgn1 ["IRGN1"]: enum TcrIrg0;
             27:26 => orgn1, set_orgn1 ["ORGN1"]: enum TcrOrg0;
             29:28 => sh1, set_sh1 ["SH1"]: enum TcrSh0;
-            30:30 => nscfg1, set_nscfg1 ["NSCFG0"]: u32;
+            30:30 => nscfg1, set_nscfg1 ["NSCFG1"]: u32;
             31:31 => eae, set_eae ["EAE"]: u32;
         }
     }
@@ -2176,6 +1441,13 @@ pub mod s1cbr {
             30:30 => ss, set_ss ["SS"]: u32;
             31:31 => multi, set_multi ["MULTI"]: u32;
         }
+    }
+
+    impl Fsr {
+        /// Mask of all defined write-1-to-clear fault bits in `SMMU_CBn_FSR` (`MULTI` bit 31 and
+        /// `UUT..TF` bits `[8:1]`, leaving read-only `SS`/`Format` and reserved `UNK/SBZP` bits
+        /// zero; IHI 0062D.c section 16.5.9).
+        pub const CLEAR_ALL: u32 = 0x8000_01fe;
     }
 
     define_smmu_reg! {
@@ -2386,7 +1658,6 @@ pub mod s1cbr {
 
 /// Stage 2 Translation Context Bank (`SMMU_CBn_BASE`) register definitions.
 pub mod s2cbr {
-    pub use super::s1cbr::{Actlr, Far, Fsr, FsrRestore, Fsynr1, Resume, Tlbstatus, Tlbsync};
     use super::*;
 
     define_smmu_reg! {
@@ -2403,7 +1674,7 @@ pub mod s2cbr {
             8:8   => hupcf, set_hupcf ["HUPCF"]: u32;
             12:9  => res1, set_res1 ["__res1"]: u32;
             13:13 => ptw, set_ptw ["PTW"]: u32;
-            15:14 => psu, set_psu ["PSU"]: u32;
+            15:14 => bsu, set_bsu ["BSU"]: u32;
             19:16 => mem_attr, set_mem_attr ["MemAttr"]: u32;
             20:20 => res2, set_res2 ["__res2"]: u32;
             23:22 => shcfg, set_shcfg ["SHCFG"]: u32;
@@ -2468,7 +1739,7 @@ pub mod s2cbr {
             18:16 => pa_size, set_pa_size ["PASize"]: enum TcrIps;
             20:19 => [rsvdz];
             21:21 => ha, set_ha ["HA"]: u32;
-            22:22 => hb, set_hb ["HB"]: u32;
+            22:22 => hd, set_hd ["HD"]: u32;
             31:23 => [rsvdz];
         }
     }

@@ -4,7 +4,9 @@
 
 #![no_std]
 
+mod pool;
 mod range;
 pub mod testing;
 
+pub use pool::*;
 pub use range::*;

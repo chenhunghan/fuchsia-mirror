@@ -23,6 +23,7 @@
 #include <lib/sync/cpp/completion.h>
 
 #include <atomic>
+#include <initializer_list>
 #include <optional>
 #include <set>
 
@@ -922,6 +923,63 @@ TEST_F(ManagedTestFixture, ConfigureEndpoint_RxFifoSufficient) {
       << "ConfigureEndpoint failed: " << zx_status_get_string(result.value().error_value());
 }
 
+TEST_F(ManagedTestFixture, ConfigureEndpoint_InvalidMaxPacketSize) {
+  namespace fdescriptor = fuchsia_hardware_usb_descriptor;
+
+  dut_.RunInEnvironmentTypeContext([&](Environment& env) {
+    // Mock GHWPARAMS0 to return MDWIDTH = 2 (128-bit = 16 bytes)
+    auto& ghwparams0 = env.reg_region()[GHWPARAMS0::Get().addr()];
+    ghwparams0.SetReadCallback([]() -> uint32_t {
+      return GHWPARAMS0::Get().FromValue(0).set_DWC_USB31_MDWIDTH(2).reg_value();
+    });
+
+    // Mock GRXFIFOSIZ for FIFO 0 to have depth 256 (4096 bytes), so that only the max packet size
+    // validation can reject the descriptors below.
+    auto& grxfifosiz0 = env.reg_region()[GRXFIFOSIZ::Get(0).addr()];
+    grxfifosiz0.SetReadCallback(
+        []() -> uint32_t { return GRXFIFOSIZ::Get(0).FromValue(0).set_RXFDEP(256).reg_value(); });
+  });
+  TriggerConnectionPlugIn(fdescriptor::UsbSpeed::kSuper);
+
+  auto dci_service = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+  ASSERT_TRUE(dci_service.is_ok())
+      << "Failed to connect to UsbDciService: " << dci_service.status_string();
+  fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
+
+  auto configure = [&](uint16_t w_max_packet_size) {
+    fdescriptor::wire::UsbEndpointDescriptor ep_desc;
+    ep_desc.b_endpoint_address = 0x01;
+    ep_desc.bm_attributes = fidl::ToUnderlying(fdescriptor::EndpointType::kBulk);
+    ep_desc.w_max_packet_size = w_max_packet_size;
+    ep_desc.b_interval = 0;
+    return dci->ConfigureEndpoint(ep_desc, {});
+  };
+
+  // EP1 OUT (0x01) with a max packet size of 0 (including 0 with only the high-bandwidth mult
+  // bits set), or above the USB limit of 1024, must be rejected before the endpoint is enabled.
+  for (uint16_t w_max_packet_size : std::initializer_list<uint16_t>{0x0000, 0x0800, 0x0401}) {
+    SCOPED_TRACE(w_max_packet_size);
+    auto result = configure(w_max_packet_size);
+    ASSERT_TRUE(result.ok()) << "ConfigureEndpoint transport failed: " << result.status_string();
+    ASSERT_TRUE(result.value().is_error());
+    EXPECT_EQ(result.value().error_value(), ZX_ERR_INVALID_ARGS);
+  }
+
+  // An invalid descriptor is rejected even if the endpoint is already configured.
+  {
+    auto result = configure(512);
+    ASSERT_TRUE(result.ok()) << "ConfigureEndpoint transport failed: " << result.status_string();
+    ASSERT_TRUE(result.value().is_ok())
+        << "ConfigureEndpoint failed: " << zx_status_get_string(result.value().error_value());
+  }
+  {
+    auto result = configure(0);
+    ASSERT_TRUE(result.ok()) << "ConfigureEndpoint transport failed: " << result.status_string();
+    ASSERT_TRUE(result.value().is_error());
+    EXPECT_EQ(result.value().error_value(), ZX_ERR_INVALID_ARGS);
+  }
+}
+
 TEST_F(UnmanagedTestFixture, GetHardwareInfo) {
   namespace fdescriptor = fuchsia_hardware_usb_descriptor;
 
@@ -1089,8 +1147,8 @@ INSTANTIATE_TEST_SUITE_P(
 class InterruptModeration
     : public TestFixture<false, testing::TestWithParam<std::optional<uint32_t>>> {};
 
-const auto kInterruptModerationCases =
-    testing::Values(std::nullopt, 1, 1000, std::numeric_limits<uint32_t>::max(), 20000);
+const auto kInterruptModerationCases = testing::Values(std::nullopt, 1, 1000, 16383, 16384,
+                                                       std::numeric_limits<uint32_t>::max(), 20000);
 
 TEST_P(InterruptModeration, Values) {
   namespace fdescriptor = fuchsia_hardware_usb_descriptor;
@@ -1124,8 +1182,7 @@ TEST_P(InterruptModeration, Values) {
     args.config(cfg.ToVmo());
   });
   if (interrupt_moderation_us.has_value() &&
-      static_cast<uint16_t>(interrupt_moderation_us.value()) >=
-          std::numeric_limits<uint16_t>::max() / 4) {
+      interrupt_moderation_us.value() > std::numeric_limits<uint16_t>::max() / 4) {
     dut_.RunInEnvironmentTypeContext(
         [](Environment& env) { env.usb_phy().set_expect_connection_status_observer_call(false); });
     ASSERT_STATUS(res, ZX_ERR_OUT_OF_RANGE);
@@ -1338,6 +1395,54 @@ TEST_F(UnmanagedTestFixture, FrameLengthAdjustmentUnsupportedVersion) {
   });
 
   EXPECT_FALSE(gfladj_written_flag->load());
+
+  EXPECT_OK(dut_.StopDriver().status_value());
+}
+
+TEST_F(UnmanagedTestFixture, UntypedDictionaryMetadataIgnored) {
+  ver_number_ = 0x5533310a;
+
+  dut_.RunInEnvironmentTypeContext([](Environment& env) {
+    fuchsia_driver_metadata::Dictionary dictionary{{
+        .entries =
+            std::vector<fuchsia_driver_metadata::DictionaryEntry>{
+                {{
+                    .key = "interrupt-moderation-us",
+                    .value = fuchsia_driver_metadata::DictionaryValue::WithInt64(1000),
+                }},
+                {{
+                    .key = "quirk-frame-length-adjustment",
+                    .value = fuchsia_driver_metadata::DictionaryValue::WithInt64(0xa0),
+                }},
+                {{
+                    .key = "gfladj-refclk-lpm-sel-quirk",
+                    .value = fuchsia_driver_metadata::DictionaryValue::WithBoolean(true),
+                }},
+                {{
+                    .key = "interrupt_moderation_us",
+                    .value = fuchsia_driver_metadata::DictionaryValue::WithInt64(1000),
+                }},
+                {{
+                    .key = "quirk_frame_length_adjustment",
+                    .value = fuchsia_driver_metadata::DictionaryValue::WithInt64(0xa0),
+                }},
+                {{
+                    .key = "gfladj_refclk_lpm_sel_quirk",
+                    .value = fuchsia_driver_metadata::DictionaryValue::WithBoolean(true),
+                }},
+            },
+    }};
+    env.AddDictionaryMetadata("fuchsia.driver.metadata.Dictionary", std::move(dictionary));
+  });
+
+  ASSERT_OK(StartDriverWithoutPlatformExtension());
+  ASSERT_OK(WaitForPhy());
+
+  dut_.RunInDriverContext([](Dwc3& drv) {
+    EXPECT_EQ(Dwc3TestHelper::GetInterruptModeration(drv), 0u);
+    EXPECT_FALSE(drv.fladj().has_value());
+    EXPECT_FALSE(drv.fladj_refclk_lpm_sel());
+  });
 
   EXPECT_OK(dut_.StopDriver().status_value());
 }
@@ -2079,6 +2184,234 @@ TEST_F(UnmanagedTestFixture, StopEventsEndsOnlyStaleStartsWhilePoweredOn) {
     EXPECT_TRUE(ep2_ended_rsrc_ids.empty());
     EXPECT_TRUE(pending_event_batches.empty());
   });
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, WatchDeviceStateSetConfigurationZeroTransitionsToAddress) {
+  FakeUsbDciInterface fake_dci;
+  SetUpAndPowerOnDriver();
+  auto binding = BindDciInterface(&fake_dci);
+
+  auto policy_client_end = dut_.Connect<fuchsia_hardware_usb_policy::Service::Controller>();
+  ASSERT_TRUE(policy_client_end.is_ok());
+  fidl::SyncClient<fuchsia_hardware_usb_policy::Controller> policy{std::move(*policy_client_end)};
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::EnableEp0(drv);
+    Dwc3TestHelper::SetEp0CurSpeed(drv, fdescriptor::wire::UsbSpeed::kSuper);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::Ep0QueueSetup(drv);
+    Dwc3TestHelper::SetEp0State(drv, Dwc3TestHelper::State::Setup);
+
+    auto set_addr = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetAddress), 7, 0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_addr);
+    Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true);
+  });
+  dut_.runtime().RunUntilIdle();
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kAddress);
+    EXPECT_EQ(watch->address(), 7u);
+  }
+
+  // SET_CONFIGURATION(1) -> kConfigured (address 7 preserved)
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    auto set_cfg1 = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration), 1,
+        0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_cfg1);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kConfigured);
+    EXPECT_EQ(watch->address(), 7u);
+  }
+  dut_.RunInDriverContext(
+      [&](Dwc3& drv) { Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true); });
+
+  // SET_CONFIGURATION(0) -> kAddress (address 7 preserved)
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    auto set_cfg0 = MakeSetupPacket(
+        kStandardDeviceOut, fidl::ToUnderlying(fdescriptor::StandardRequest::kSetConfiguration), 0,
+        0, 0);
+    Dwc3TestHelper::SimulateSetupReceived(drv, set_cfg0);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kAddress);
+    EXPECT_EQ(watch->address(), 7u);
+  }
+  dut_.RunInDriverContext(
+      [&](Dwc3& drv) { Dwc3TestHelper::SimulateStatusPhase(drv, /*is_in=*/true); });
+
+  if (binding.has_value()) {
+    binding->Unbind();
+    dut_.runtime().RunUntilIdle();
+  }
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, WatchDeviceStateSuspendAndWakeupRestoresPriorState) {
+  SetUpAndPowerOnDriver();
+
+  auto policy_client_end = dut_.Connect<fuchsia_hardware_usb_policy::Service::Controller>();
+  ASSERT_TRUE(policy_client_end.is_ok());
+  fidl::SyncClient<fuchsia_hardware_usb_policy::Controller> policy{std::move(*policy_client_end)};
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetDeviceAddress(drv, 9);
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kConfigured);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kConfigured);
+    EXPECT_EQ(watch->address(), 9u);
+  }
+
+  // USB2 L1 sleep (USBLNKST_SLEEP = 2) on DEVT_SUSPEND_ENTRY must NOT enter kSuspended.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    const uint32_t l1_sleep_evt = (DSTS::USBLNKST_SLEEP << DEVT_INFO_START) |
+                                  (DEVT_SUSPEND_ENTRY << DEVT_TYPE_START) | DEVT_NON_EP;
+    Dwc3TestHelper::HandleEvent(drv, l1_sleep_evt);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kConfigured);
+  });
+
+  // DEVT_SUSPEND_ENTRY when in kNotAttached or kAttached must NOT enter kSuspended.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kNotAttached);
+    const uint32_t suspend_evt = (DSTS::USBLNKST_U3 << DEVT_INFO_START) |
+                                 (DEVT_SUSPEND_ENTRY << DEVT_TYPE_START) | DEVT_NON_EP;
+    Dwc3TestHelper::HandleEvent(drv, suspend_evt);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kNotAttached);
+
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kAttached);
+    Dwc3TestHelper::HandleEvent(drv, suspend_evt);
+    EXPECT_EQ(Dwc3TestHelper::GetDeviceState(drv),
+              fuchsia_hardware_usb_policy::wire::DeviceState::kAttached);
+
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kConfigured);
+  });
+
+  // DEVT_SUSPEND_ENTRY (U3 / L2 suspend) -> kSuspended; DEVT_REMOTE_WAKEUP -> restores kConfigured.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    const uint32_t suspend_evt = (DSTS::USBLNKST_U3 << DEVT_INFO_START) |
+                                 (DEVT_SUSPEND_ENTRY << DEVT_TYPE_START) | DEVT_NON_EP;
+    Dwc3TestHelper::HandleEvent(drv, suspend_evt);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kSuspended);
+    EXPECT_EQ(watch->address(), 9u);
+  }
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    const uint32_t wakeup_evt = (DEVT_REMOTE_WAKEUP << DEVT_TYPE_START) | DEVT_NON_EP;
+    Dwc3TestHelper::HandleEvent(drv, wakeup_evt);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kConfigured);
+    EXPECT_EQ(watch->address(), 9u);
+  }
+
+  // Suspending while in kAddress -> kSuspended, and DEVT_REMOTE_WAKEUP -> restores kAddress.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kAddress);
+    const uint32_t suspend_evt = (DSTS::USBLNKST_U3 << DEVT_INFO_START) |
+                                 (DEVT_SUSPEND_ENTRY << DEVT_TYPE_START) | DEVT_NON_EP;
+    Dwc3TestHelper::HandleEvent(drv, suspend_evt);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kSuspended);
+    EXPECT_EQ(watch->address(), 9u);
+  }
+
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    const uint32_t wakeup_evt = (DEVT_REMOTE_WAKEUP << DEVT_TYPE_START) | DEVT_NON_EP;
+    Dwc3TestHelper::HandleEvent(drv, wakeup_evt);
+  });
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kAddress);
+    EXPECT_EQ(watch->address(), 9u);
+  }
+
+  TearDownAndPowerOffDriver();
+}
+
+TEST_F(UnmanagedTestFixture, WatchDeviceStateStopControllerReportsPoweredOrNotAttached) {
+  SetUpAndPowerOnDriver();
+
+  auto policy_client_end = dut_.Connect<fuchsia_hardware_usb_policy::Service::Controller>();
+  ASSERT_TRUE(policy_client_end.is_ok());
+  fidl::SyncClient<fuchsia_hardware_usb_policy::Controller> policy{std::move(*policy_client_end)};
+
+  auto dci_service = dut_.Connect<fuchsia_hardware_usb_dci::UsbDciService::Device>();
+  ASSERT_TRUE(dci_service.is_ok());
+  fidl::WireSyncClient<fuchsia_hardware_usb_dci::UsbDci> dci{std::move(*dci_service)};
+
+  // When power_on_ && link_connected_, StopController transitions from kConfigured to kPowered.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetPowerOn(drv, true);
+    Dwc3TestHelper::SetLinkConnected(drv, true);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::SetDeviceAddress(drv, 5);
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kConfigured);
+  });
+
+  {
+    auto res = dci->StopController();
+    ASSERT_TRUE(res.ok());
+    ASSERT_TRUE(res.value().is_ok());
+  }
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kPowered);
+    EXPECT_EQ(watch->address(), 0u);
+  }
+
+  // When link_connected_ is false, StopController transitions to kNotAttached.
+  dut_.RunInDriverContext([&](Dwc3& drv) {
+    Dwc3TestHelper::SetLinkConnected(drv, false);
+    Dwc3TestHelper::SetControllerStarted(drv, true);
+    Dwc3TestHelper::SetDeviceState(drv, fuchsia_hardware_usb_policy::DeviceState::kDefault);
+  });
+
+  {
+    auto res = dci->StopController();
+    ASSERT_TRUE(res.ok());
+    ASSERT_TRUE(res.value().is_ok());
+  }
+
+  {
+    auto watch = policy->WatchDeviceState();
+    ASSERT_TRUE(watch.is_ok());
+    EXPECT_EQ(watch->state(), fuchsia_hardware_usb_policy::DeviceState::kNotAttached);
+    EXPECT_EQ(watch->address(), 0u);
+  }
 
   TearDownAndPowerOffDriver();
 }

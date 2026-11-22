@@ -4,15 +4,24 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include "vm/vm_address_region_ffi.h"
+
+#include <stddef.h>
 #include <zircon/types.h>
 
+#include <fbl/ref_ptr.h>
 #include <kernel/ffi.h>
 #include <ktl/memory.h>
+#include <ktl/optional.h>
 #include <ktl/type_traits.h>
-#include <ktl/utility.h>
 #include <vm/vm_address_region.h>
-#include <vm/vm_address_region_ffi.h>
-#include <vm/vm_object.h>
+
+// Rust and C++ use the same pointer for a VmAddressRegionOrMapping, VmAddressRegion or VmMapping
+// and for its fbl::RefCounted base, which needs that base at offset 0. Standard layout makes the
+// base pointer-interconvertible with the object.
+static_assert(ktl::is_standard_layout_v<VmAddressRegionOrMapping>);
+static_assert(ktl::is_standard_layout_v<VmAddressRegion>);
+static_assert(ktl::is_standard_layout_v<VmMapping>);
 
 static_assert(ktl::is_trivially_copy_constructible_v<VmAddressRegionSubregionsCursor>);
 static_assert(ktl::is_trivially_move_constructible_v<VmAddressRegionSubregionsCursor>);
@@ -23,220 +32,113 @@ static_assert(sizeof(ffi::Uninitialized<VmAddressRegionSubregionsCursor>) ==
               sizeof(VmAddressRegionSubregionsCursor));
 static_assert(alignof(ffi::Uninitialized<VmAddressRegionSubregionsCursor>) ==
               alignof(VmAddressRegionSubregionsCursor));
-
-CppVmAddressRegionEnumerator::CppVmAddressRegionEnumerator(VmAddressRegionEnumeratorType type,
-                                                           VmAddressRegion& vmar, vaddr_t min_addr,
-                                                           vaddr_t max_addr)
-    : type(type) {
-  switch (type) {
-    case VmAddressRegionEnumeratorType::VmarsAndMappings:
-      new (&vmars_and_mappings) VmarsAndMappings(vmar, min_addr, max_addr);
-      break;
-    case VmAddressRegionEnumeratorType::MappingsOnly:
-      new (&mappings_only) MappingsOnly(vmar, min_addr, max_addr);
-      break;
-  }
-}
-
-CppVmAddressRegionEnumerator::~CppVmAddressRegionEnumerator() {
-  switch (type) {
-    case VmAddressRegionEnumeratorType::VmarsAndMappings:
-      vmars_and_mappings.~VmarsAndMappings();
-      break;
-    case VmAddressRegionEnumeratorType::MappingsOnly:
-      mappings_only.~MappingsOnly();
-      break;
-  }
-}
+static_assert(sizeof(ffi::Uninitialized<VmAddressRegionSubregions>) ==
+              sizeof(VmAddressRegionSubregions));
+static_assert(alignof(ffi::Uninitialized<VmAddressRegionSubregions>) ==
+              alignof(VmAddressRegionSubregions));
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 extern "C" {
-FFI_ALWAYS_INLINE void cpp_vm_address_region_construct_root(
-    ffi::Uninitialized<VmAddressRegion>* slot, VmAspace* aspace, vaddr_t base, size_t size,
-    uint32_t vmar_flags) {
-  slot->Initialize(*aspace, base, size, vmar_flags);
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_construct(
+    ffi::Uninitialized<VmAddressRegionSubregions>* subregions) {
+  subregions->Initialize();
 }
-FFI_ALWAYS_INLINE void cpp_vm_address_region_construct_child(
-    ffi::Uninitialized<VmAddressRegion>* slot, VmAddressRegion* parent, vaddr_t base, size_t size,
-    uint32_t vmar_flags, const char* name) {
-  slot->Initialize(*parent, base, size, vmar_flags, name);
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_destroy(
+    VmAddressRegionSubregions* subregions) {
+  ktl::destroy_at(subregions);
 }
-FFI_ALWAYS_INLINE void cpp_vm_address_region_construct_kernel_root(
-    ffi::Uninitialized<VmAddressRegion>* slot, VmAspace* kernel_aspace) {
-  slot->Initialize(*kernel_aspace);
+FFI_ALWAYS_INLINE bool cpp_vm_address_region_subregions_is_empty(
+    const VmAddressRegionSubregions* subregions) {
+  return subregions->is_empty();
 }
-FFI_ALWAYS_INLINE void cpp_vm_address_region_destruct(VmAddressRegion* vmar) {
-  vmar->~VmAddressRegion();
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_begin(
+    const VmAddressRegionSubregions* subregions,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) {
+  out_cursor->Initialize(subregions->begin());
 }
-FFI_ALWAYS_INLINE void* cpp_vm_address_region_state(VmAddressRegion* vmar) {
-  return &vmar->opaque_storage_;
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_upper_bound(
+    const VmAddressRegionSubregions* subregions, vaddr_t key,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) {
+  out_cursor->Initialize(subregions->upper_bound(key));
 }
-FFI_ALWAYS_INLINE void* cpp_vm_address_region_or_mapping_state(
-    VmAddressRegionOrMapping* region_or_mapping) {
-  return &region_or_mapping->opaque_storage_;
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_find(
+    const VmAddressRegionSubregions* subregions, vaddr_t key,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) {
+  out_cursor->Initialize(subregions->find(key));
 }
-FFI_ALWAYS_INLINE bool cpp_vm_address_region_or_mapping_lock_is_held(
-    const VmAddressRegionOrMapping* region_or_mapping) {
-  return region_or_mapping->lock_ref().lock().IsHeld();
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_insert(
+    VmAddressRegionSubregions* subregions, vaddr_t key, VmAddressRegionOrMapping* region,
+    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) {
+  out_cursor->Initialize(
+      VmAddressRegionSubregionsCursor(subregions->insert(key, fbl::RefPtr(region))));
 }
-FFI_ALWAYS_INLINE bool cpp_vm_address_region_or_mapping_region_lock_is_held(
-    const VmAddressRegionOrMapping* region_or_mapping) {
-  return region_or_mapping->region_lock_ref().lock().IsHeld();
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_update(
+    VmAddressRegionSubregions* subregions, const VmAddressRegionSubregionsCursor* cursor,
+    VmAddressRegionOrMapping* region) {
+  subregions->update(VmAddressRegionSubregions::iterator(*cursor), fbl::RefPtr(region));
 }
-FFI_ALWAYS_INLINE VmAddressRegion* cpp_vm_address_region_or_mapping_as_vm_address_region(
-    VmAddressRegionOrMapping* region_or_mapping) {
-  return static_cast<VmAddressRegion*>(region_or_mapping);
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_erase(
+    VmAddressRegionSubregions* subregions, const VmAddressRegionSubregionsCursor* cursor) {
+  subregions->erase(VmAddressRegionSubregions::iterator(*cursor));
 }
-FFI_ALWAYS_INLINE VmMapping* cpp_vm_address_region_or_mapping_as_vm_mapping(
-    VmAddressRegionOrMapping* region_or_mapping) {
-  return static_cast<VmMapping*>(region_or_mapping);
+FFI_ALWAYS_INLINE size_t cpp_vm_address_region_subregions_calculate_utilization_slow(
+    const VmAddressRegionSubregions* subregions) {
+  return subregions->calculate_utilization_slow().stored_values;
 }
-FFI_ALWAYS_INLINE bool cpp_vm_address_region_subregions_is_empty(const VmAddressRegion* vmar)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return vmar->subregions_.IsEmpty();
-}
-FFI_ALWAYS_INLINE VmAddressRegionOrMapping* cpp_vm_address_region_subregions_front(
-    VmAddressRegion* vmar) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return &vmar->subregions_.front();
-}
-FFI_ALWAYS_INLINE VmAddressRegionOrMapping* cpp_vm_address_region_subregions_find_region(
-    const VmAddressRegion* vmar, vaddr_t addr) TA_NO_THREAD_SAFETY_ANALYSIS {
-  // The subregions are const as with only holding lock_ we are not permitted to modify the
-  // subregions_ tree, but we are allowed to manipulate the objects in the tree, hence can remove
-  // const.
-  return const_cast<VmAddressRegionOrMapping*>(vmar->subregions_.FindRegion(addr));
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_include_or_higher(
-    VmAddressRegion* vmar, vaddr_t base,
-    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) TA_NO_THREAD_SAFETY_ANALYSIS {
-  out_cursor->Initialize(vmar->subregions_.IncludeOrHigher(base));
-}
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_subregions_insert_region(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* region) TA_NO_THREAD_SAFETY_ANALYSIS {
-  return vmar->subregions_.InsertRegion(fbl::RefPtr(region));
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_remove_region(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* region) TA_NO_THREAD_SAFETY_ANALYSIS {
-  vmar->subregions_.RemoveRegion(region);
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_replace_region(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* prev,
-    VmAddressRegionOrMapping* region) TA_NO_THREAD_SAFETY_ANALYSIS {
-  vmar->subregions_.ReplaceRegion(prev, fbl::RefPtr(region));
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_left_of(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* region,
-    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) TA_NO_THREAD_SAFETY_ANALYSIS {
-  out_cursor->Initialize(vmar->subregions_.LeftOf(region));
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_right_of(
-    VmAddressRegion* vmar, VmAddressRegionOrMapping* region,
-    ffi::Uninitialized<VmAddressRegionSubregionsCursor>* out_cursor) TA_NO_THREAD_SAFETY_ANALYSIS {
-  out_cursor->Initialize(vmar->subregions_.RightOf(region));
+FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_subregions_walk(
+    const VmAddressRegionSubregions* subregions,
+    zx_status_t (*subtree)(const VmAddressRegionObserverState* state, void* ctx)
+        [[clang::cfi_unchecked_callee]],
+    zx_status_t (*leaf)(const VmAddressRegionObserverState* state,
+                        const VmAddressRegionSubregionsCursor* first,
+                        const VmAddressRegionSubregionsCursor* last, void* ctx)
+        [[clang::cfi_unchecked_callee]],
+    void* ctx) {
+  return subregions->walk(
+      [subtree, ctx](const VmAddressRegionObserverState& state) { return subtree(&state, ctx); },
+      [leaf, ctx](const VmAddressRegionObserverState& state, VmAddressRegionSubregionsCursor first,
+                  VmAddressRegionSubregionsCursor last) {
+        return leaf(&state, &first, &last, ctx);
+      });
 }
 FFI_ALWAYS_INLINE bool cpp_vm_address_region_subregions_cursor_is_valid(
     const VmAddressRegionSubregionsCursor* cursor) {
-  return cursor->iter.IsValid();
+  return cursor->IsValid();
 }
-FFI_ALWAYS_INLINE VmAddressRegionOrMapping* cpp_vm_address_region_subregions_cursor_get(
+FFI_ALWAYS_INLINE const VmAddressRegionOrMapping* cpp_vm_address_region_subregions_cursor_get(
     const VmAddressRegionSubregionsCursor* cursor) {
-  return (*cursor->iter).second;
+  const VmAddressRegionOrMapping* region = (**cursor).second;
+  __builtin_assume(region != nullptr);
+  return static_cast<const VmAddressRegionOrMapping*>(
+      __builtin_assume_aligned(region, alignof(VmAddressRegionOrMapping)));
 }
 FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_cursor_next(
     VmAddressRegionSubregionsCursor* cursor) {
-  ++cursor->iter;
+  ++*cursor;
 }
-FFI_ALWAYS_INLINE size_t cpp_vm_address_region_subregions_size_slow(const VmAddressRegion* vmar)
-    TA_NO_THREAD_SAFETY_ANALYSIS {
-  return vmar->subregions_.size_slow();
+FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_cursor_prev(
+    VmAddressRegionSubregionsCursor* cursor) {
+  --*cursor;
 }
-FFI_ALWAYS_INLINE void cpp_vm_address_region_subregions_for_each(
-    const VmAddressRegion* vmar, void (*cb)(VmAddressRegionOrMapping*, void*),
-    void* ctx) TA_NO_THREAD_SAFETY_ANALYSIS {
-  for (const auto& child : vmar->subregions_) {
-    cb(const_cast<VmAddressRegionOrMapping*>(child.second), ctx);
+FFI_ALWAYS_INLINE bool cpp_vm_address_region_subregions_cursor_eq(
+    const VmAddressRegionSubregionsCursor* cursor, const VmAddressRegionSubregionsCursor* other) {
+  return *cursor == *other;
+}
+FFI_ALWAYS_INLINE vaddr_t
+cpp_vm_address_region_observer_state_min_addr(const VmAddressRegionObserverState* state) {
+  return state->min_addr();
+}
+FFI_ALWAYS_INLINE bool cpp_vm_address_region_observer_state_max_gap(
+    const VmAddressRegionObserverState* state, ffi::Uninitialized<size_t>* out_max_gap) {
+  ktl::optional<size_t> gap = state->max_gap();
+  if (!gap) {
+    return false;
   }
+  out_max_gap->Initialize(*gap);
+  return true;
 }
-FFI_ALWAYS_INLINE zx_status_t cpp_vm_address_region_reserve_space(VmAddressRegion* vmar,
-                                                                  const char* name, size_t base,
-                                                                  size_t size,
-                                                                  arch_mmu_flags_t arch_mmu_flags) {
-  return vmar->ReserveSpace(name, base, size, arch_mmu_flags);
-}
-FFI_ALWAYS_INLINE VmAddressRegion* cpp_vm_address_region_create_sub_vmar(
-    VmAddressRegion* vmar, size_t offset, size_t size, uint8_t align_pow2, uint32_t vmar_flags,
-    const char* name, zx_status_t* out_status) {
-  fbl::RefPtr<VmAddressRegion> sub_vmar;
-  *out_status = vmar->CreateSubVmar(offset, size, align_pow2, vmar_flags, name, &sub_vmar);
-  return fbl::ExportToRawPtr(&sub_vmar);
-}
-FFI_ALWAYS_INLINE VmMapping* cpp_vm_address_region_create_vm_mapping(
-    VmAddressRegion* vmar, size_t mapping_offset, size_t size, uint8_t align_pow2,
-    uint32_t vmar_flags, const VmObject* vmo, uint64_t vmo_offset, arch_mmu_flags_t arch_mmu_flags,
-    const char* name, vaddr_t* out_base, zx_status_t* out_status) {
-  fbl::RefPtr<VmObject> vmo_ref = fbl::ImportFromRawPtr(const_cast<VmObject*>(vmo));
-  auto result = vmar->CreateVmMapping(mapping_offset, size, align_pow2, vmar_flags,
-                                      ktl::move(vmo_ref), vmo_offset, arch_mmu_flags, name);
-  if (result.is_error()) {
-    *out_status = result.status_value();
-    return nullptr;
-  }
-  *out_status = ZX_OK;
-  *out_base = result->base;
-  fbl::RefPtr<VmMapping> mapping = ktl::move(result->mapping);
-  return fbl::ExportToRawPtr(&mapping);
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_enumerator_construct(
-    ffi::Uninitialized<CppVmAddressRegionEnumerator>* out, VmAddressRegionEnumeratorType type,
-    VmAddressRegion* vmar, vaddr_t min_addr, vaddr_t max_addr) {
-  AssertHeld(vmar->lock_ref());
-  new (out->GetAddressUnchecked()) CppVmAddressRegionEnumerator(type, *vmar, min_addr, max_addr);
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_enumerator_destroy(
-    CppVmAddressRegionEnumerator* enumerator) {
-  ktl::destroy_at(enumerator);
-}
-FFI_ALWAYS_INLINE VmAddressRegionOrMapping* cpp_vm_address_region_enumerator_next(
-    CppVmAddressRegionEnumerator* enumerator, uint* out_depth) {
-  auto next = [&](auto& impl) {
-    AssertHeld(impl.lock_ref());
-    if (auto result = impl.next()) {
-      *out_depth = result->depth;
-      return result->region_or_mapping;
-    }
-    return static_cast<VmAddressRegionOrMapping*>(nullptr);
-  };
-  switch (enumerator->type) {
-    case VmAddressRegionEnumeratorType::VmarsAndMappings:
-      return next(enumerator->vmars_and_mappings);
-    case VmAddressRegionEnumeratorType::MappingsOnly:
-      return next(enumerator->mappings_only);
-  }
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_enumerator_pause(
-    CppVmAddressRegionEnumerator* enumerator) {
-  switch (enumerator->type) {
-    case VmAddressRegionEnumeratorType::VmarsAndMappings:
-      AssertHeld(enumerator->vmars_and_mappings.lock_ref());
-      enumerator->vmars_and_mappings.pause();
-      break;
-    case VmAddressRegionEnumeratorType::MappingsOnly:
-      AssertHeld(enumerator->mappings_only.lock_ref());
-      enumerator->mappings_only.pause();
-      break;
-  }
-}
-FFI_ALWAYS_INLINE void cpp_vm_address_region_enumerator_resume(
-    CppVmAddressRegionEnumerator* enumerator) {
-  switch (enumerator->type) {
-    case VmAddressRegionEnumeratorType::VmarsAndMappings:
-      AssertHeld(enumerator->vmars_and_mappings.lock_ref());
-      enumerator->vmars_and_mappings.resume();
-      break;
-    case VmAddressRegionEnumeratorType::MappingsOnly:
-      AssertHeld(enumerator->mappings_only.lock_ref());
-      enumerator->mappings_only.resume();
-      break;
-  }
+FFI_ALWAYS_INLINE vaddr_t
+cpp_vm_address_region_observer_state_max_addr(const VmAddressRegionObserverState* state) {
+  return state->max_addr;
 }
 }  // extern "C"

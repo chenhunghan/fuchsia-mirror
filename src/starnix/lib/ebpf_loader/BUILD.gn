@@ -2,22 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-resource("ebpf_test_progs") {
-  visibility = [ ":*" ]
-  sources = [ "test_data/loader_test_prog.o" ]
-  outputs = [ "data/loader_test_prog.o" ]
-}
-
-fuchsia_unittest_package("starnix_ebpf_loader_tests") {
-  manifest = "meta/ebpf_loader_tests.cml"
-  deps = [
-    ":ebpf_loader_test",
-    ":ebpf_test_progs",
-  ]
-}
-
 group("tests") {
   testonly = true
 
@@ -74,5 +58,20 @@ rustc_library("ebpf_loader") {
     "//third_party/rust_crates:num-traits",
     "//third_party/rust_crates:thiserror",
     "//third_party/rust_crates:zerocopy",
+  ]
+}
+
+resource("ebpf_test_progs") {
+  testonly = true
+  sources = [ "test_data/loader_test_prog.o" ]
+  outputs = [ "data/loader_test_prog.o" ]
+}
+
+fuchsia_unittest_package("starnix_ebpf_loader_tests") {
+  package_name = "starnix_ebpf_loader_tests-gn"
+  component_name = "starnix_ebpf_loader_tests"
+  deps = [
+    ":ebpf_loader_test",
+    ":ebpf_test_progs",
   ]
 }

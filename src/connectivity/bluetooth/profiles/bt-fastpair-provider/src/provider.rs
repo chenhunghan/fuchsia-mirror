@@ -3,21 +3,24 @@
 // found in the LICENSE file.
 
 use async_helpers::maybe_stream::MaybeStream;
+use async_utils::hanging_get::client::HangingGetStream;
 use bt_metrics::MetricsLogger;
+use fidl_fuchsia_bluetooth as fidl_bt;
 use fidl_fuchsia_bluetooth_bredr::ProfileMarker;
 use fidl_fuchsia_bluetooth_fastpair::{ProviderEnableResponder, ProviderWatcherProxy};
 use fidl_fuchsia_bluetooth_gatt2 as gatt;
 use fidl_fuchsia_bluetooth_sys::{
-    AccessMarker, AccessProxy, HostWatcherMarker, PairingMarker, PairingProxy,
+    AccessMarker, AccessProxy, HostWatcherMarker, PairingMarker, PairingProxy, Peer,
 };
-use fuchsia_bluetooth::types::PeerId;
+use fuchsia_bluetooth::types::{Channel, PeerId};
 use fuchsia_inspect::{self as inspect, NumericProperty, Property};
 use fuchsia_inspect_derive::{AttachError, Inspect};
 use futures::channel::mpsc;
 use futures::stream::{FusedStream, StreamExt};
-use futures::{FutureExt, SinkExt, select};
+use futures::{FutureExt, select};
 use host_watcher::{HostEvent, HostWatcher};
 use log::{debug, info, trace, warn};
+use std::collections::HashSet;
 use std::pin::pin;
 
 use crate::advertisement::LowEnergyAdvertiser;
@@ -91,12 +94,17 @@ pub struct Provider {
     host_watcher: HostWatcher,
     /// Connection to the system pairing service.
     pairing_svc: PairingProxy,
-    /// Connection to the system access service. Used to remove unauthenticated bonds.
+    /// Connection to the system access service. Used to remove unauthenticated bonds and to watch
+    /// for bond changes.
     access_svc: AccessProxy,
+    /// Watches for changes in the set of peers known to the system. Used to track bonded peers.
+    peer_watcher: MaybeStream<PeerWatcher>,
+    /// The peers that are currently bonded. Only bonded peers can use the Message Stream.
+    bonded_peers: HashSet<PeerId>,
     /// Manages Fast Pair pairing procedures and proxies non-FP requests to the upstream
     /// `sys.Pairing` client.
     pairing: MaybeStream<PairingManager>,
-    /// Message Stream connection (RFCOMM) to the remote peer.
+    /// Fast Pair Message Stream (RFCOMM) advertisement and connections to remote peers.
     message_stream: MessageStream,
     /// The inspect node associated with the server.
     inspect_node: ProviderInspect,
@@ -124,6 +132,9 @@ enum KeySource {
     AccountKey(SharedSecret),
 }
 
+/// Hanging get stream of `sys.Access/WatchPeers` updates: (updated peers, removed peer IDs).
+type PeerWatcher = HangingGetStream<AccessProxy, (Vec<Peer>, Vec<fidl_bt::PeerId>)>;
+
 impl Provider {
     pub async fn new(config: Config, metrics: MetricsLogger) -> Result<Self, Error> {
         let advertiser = LowEnergyAdvertiser::new()?;
@@ -133,6 +144,7 @@ impl Provider {
         let pairing_svc = fuchsia_component::client::connect_to_protocol::<PairingMarker>()?;
         let access_svc = fuchsia_component::client::connect_to_protocol::<AccessMarker>()?;
         let profile = fuchsia_component::client::connect_to_protocol::<ProfileMarker>()?;
+        let peer_watcher = Self::watch_peers(&access_svc);
         Ok(Self {
             state: State { config, personalized_name: None },
             upstream: FastPairConnectionManager::new(),
@@ -142,11 +154,17 @@ impl Provider {
             host_watcher,
             pairing_svc,
             access_svc,
+            peer_watcher,
+            bonded_peers: HashSet::new(),
             pairing: MaybeStream::default(),
             message_stream: MessageStream::new(profile),
             inspect_node: ProviderInspect::default(),
             metrics,
         })
+    }
+
+    fn watch_peers(access_svc: &AccessProxy) -> MaybeStream<PeerWatcher> {
+        Some(HangingGetStream::new_with_fn_ptr(access_svc.clone(), AccessProxy::watch_peers)).into()
     }
 
     /// Returns the current local name, if set.
@@ -173,6 +191,7 @@ impl Provider {
         // Stop advertising over LE.
         let _ = self.advertiser.stop_advertising().await;
         // TODO(https://fxbug.dev/42056746): Close ongoing pairing procedures.
+        self.message_stream.disconnect_all();
 
         // Reset the upstream connection.
         self.upstream.reset();
@@ -507,21 +526,56 @@ impl Provider {
         }
     }
 
-    async fn handle_message_stream_update(&mut self, id: PeerId) {
+    /// Updates the set of bonded peers. Message Stream connections to peers that are no longer
+    /// bonded are closed.
+    fn handle_peer_watcher_update(&mut self, updated: Vec<Peer>, removed: Vec<fidl_bt::PeerId>) {
+        for peer in updated {
+            let Some(id) = peer.id.map(PeerId::from) else {
+                continue;
+            };
+            if peer.bonded == Some(true) {
+                let _ = self.bonded_peers.insert(id);
+            } else {
+                self.remove_bonded_peer(&id);
+            }
+        }
+        for id in removed {
+            self.remove_bonded_peer(&id.into());
+        }
+    }
+
+    fn remove_bonded_peer(&mut self, id: &PeerId) {
+        let _ = self.bonded_peers.remove(id);
+        self.message_stream.disconnect(id);
+    }
+
+    async fn handle_message_stream_update(&mut self, id: PeerId, channel: Channel) {
+        // Only bonded peers can use the Message Stream, and only while Fast Pair is enabled.
+        // Otherwise, the connection is rejected by dropping the `channel`.
+        if !self.upstream.is_enabled() {
+            trace!(id:%; "Received Message Stream connection while Fast Pair is disabled. Rejecting");
+            return;
+        }
+        if !self.bonded_peers.contains(&id) {
+            warn!(id:%; "Rejecting Message Stream connection from unbonded peer");
+            return;
+        }
+
         debug!(id:%; "Incoming Message Stream connection");
+        self.message_stream.accept(id, channel);
         // Send the Model Id and current BLE address to the connected Seeker.
         let Some(address) = self.host_watcher.ble_address() else {
             return;
         };
 
         let model_id_packet = MessageStreamPacket::new_model_id(self.state.config.model_id);
-        if let Err(e) = self.message_stream.send(model_id_packet).await {
+        if let Err(e) = self.message_stream.send(&id, model_id_packet).await {
             warn!(id:%; "Couldn't send Model ID over message stream: {e:?}");
             return;
         }
 
         let address_packet = MessageStreamPacket::new_address(address);
-        if let Err(e) = self.message_stream.send(address_packet).await {
+        if let Err(e) = self.message_stream.send(&id, address_packet).await {
             warn!(id:%; "Couldn't send Address over message stream: {e:?}");
         }
     }
@@ -621,7 +675,21 @@ impl Provider {
                 message_stream_update = self.message_stream.select_next_some() => {
                     // It's OK if the Message Stream terminates for any reason. `select_next_some`
                     // will ignore the case where the stream is exhausted.
-                    self.handle_message_stream_update(message_stream_update).await;
+                    let (id, channel) = message_stream_update;
+                    self.handle_message_stream_update(id, channel).await;
+                }
+                peer_update = self.peer_watcher.select_next_some() => {
+                    match peer_update {
+                        Ok((updated, removed)) => self.handle_peer_watcher_update(updated, removed),
+                        Err(e) => {
+                            // Without peer updates, bonded peers can't be tracked. Stop watching
+                            // and close all Message Stream connections.
+                            warn!("Error in `sys.Access/WatchPeers`: {e:?}");
+                            let _ = MaybeStream::take(&mut self.peer_watcher);
+                            self.bonded_peers.clear();
+                            self.message_stream.disconnect_all();
+                        }
+                    }
                 }
                 _ = upstream_client_closed_fut => {
                     info!("Upstream client disabled Fast Pair");
@@ -643,20 +711,28 @@ mod tests {
     use assert_matches::assert_matches;
     use async_test_helpers::run_while;
     use async_utils::PollExt;
+    use bt_channel_test_support::{Transport, create_test_channels};
     use diagnostics_assertions::assert_data_tree;
     use fidl::endpoints::{ControlHandle, Proxy, RequestStream, create_proxy_and_stream};
+    use fidl_fuchsia_bluetooth_bredr::{
+        ConnectionReceiver2ConnectedRequest, ConnectionReceiver2Proxy, DataElement,
+        ProfileAdvertiseResponder, ProfileRequestStream, ProtocolDescriptor, ProtocolIdentifier,
+    };
     use fidl_fuchsia_bluetooth_gatt2::{
         Handle, LocalServiceProxy, LocalServiceWriteValueRequest as WriteValueRequest,
         ValueChangedParameters,
     };
     use fidl_fuchsia_bluetooth_le::{PeripheralMarker, PeripheralRequestStream};
     use fidl_fuchsia_bluetooth_sys::{
-        HostWatcherRequestStream, InputCapability, OutputCapability, PairingDelegateMarker,
+        AccessRequestStream, HostWatcherRequestStream, InputCapability, OutputCapability,
+        PairingDelegateMarker, Peer,
     };
     use fuchsia_async as fasync;
-    use fuchsia_bluetooth::types::{Address, HostId, example_host};
+    use fuchsia_bluetooth::types::{Address, Channel, HostId, example_host};
     use fuchsia_inspect_derive::WithInspect;
     use futures::SinkExt;
+    use std::task::Poll;
+    use test_case::test_case;
 
     use crate::fidl_client::tests::MockUpstreamClient;
     use crate::gatt_service::tests::setup_gatt_service;
@@ -709,6 +785,8 @@ mod tests {
             host_watcher,
             pairing_svc: mock_pairing.pairing_svc.clone(),
             access_svc: mock_pairing.access_svc.clone(),
+            peer_watcher: Provider::watch_peers(&mock_pairing.access_svc),
+            bonded_peers: HashSet::new(),
             pairing: Some(pairing).into(),
             message_stream,
             inspect_node: ProviderInspect::default(),
@@ -1786,6 +1864,409 @@ mod tests {
         // is made as a result of the aforementioned FIDL client request.
         let expect_fut = pin!(mock_pairing.expect_set_pairing_delegate());
         let ((), _server_fut) = run_while(&mut exec, server_fut, expect_fut);
+    }
+
+    /// Message Stream packets the Provider sends upon a Seeker connection: the Model ID (0x000001)
+    /// and the BLE address of the active host (public address 01:02:03:04:05:06).
+    const MODEL_ID_PACKET: [u8; 7] = [0x03, 0x01, 0x00, 0x03, 0x00, 0x00, 0x01];
+    const BLE_ADDRESS_PACKET: [u8; 10] =
+        [0x03, 0x02, 0x00, 0x06, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01];
+
+    /// Simulates the upstream `bredr.Profile` server for the Provider's Message Stream.
+    struct MockMessageStream {
+        /// Used to deliver incoming RFCOMM connections to the Provider.
+        connection_receiver: ConnectionReceiver2Proxy,
+        /// Held to keep the RFCOMM advertisement active.
+        _advertise_responder: ProfileAdvertiseResponder,
+        _profile_server: ProfileRequestStream,
+    }
+
+    impl MockMessageStream {
+        /// Replaces the Message Stream of `provider` with one advertised over a test
+        /// `bredr.Profile` server.
+        async fn new(provider: &mut Provider) -> Self {
+            let (profile, mut profile_server) = create_proxy_and_stream::<ProfileMarker>();
+            provider.message_stream = MessageStream::new(profile);
+            let (request, responder) = profile_server
+                .select_next_some()
+                .await
+                .expect("FIDL request")
+                .into_advertise()
+                .expect("Advertise request");
+            Self {
+                connection_receiver: request
+                    .connection_receiver
+                    .expect("connection receiver")
+                    .into_proxy(),
+                _advertise_responder: responder,
+                _profile_server: profile_server,
+            }
+        }
+
+        /// Simulates an incoming RFCOMM connection from the remote peer `id`. Returns the remote
+        /// end of the channel.
+        fn connect(&self, id: PeerId) -> Channel {
+            let (local, remote) = create_test_channels(Transport::Socket);
+            let protocol = vec![
+                ProtocolDescriptor {
+                    protocol: Some(ProtocolIdentifier::L2Cap),
+                    params: Some(vec![]),
+                    ..Default::default()
+                },
+                ProtocolDescriptor {
+                    protocol: Some(ProtocolIdentifier::Rfcomm),
+                    params: Some(vec![DataElement::Uint8(1)]),
+                    ..Default::default()
+                },
+            ];
+            let _ = self
+                .connection_receiver
+                .connected(ConnectionReceiver2ConnectedRequest {
+                    peer_id: Some(id.into()),
+                    channel: Some(local.try_into().unwrap()),
+                    protocol: Some(protocol),
+                    ..Default::default()
+                })
+                .check()
+                .expect("FIDL request");
+            remote
+        }
+    }
+
+    /// Holds the test ends of the FIDL connections of a `Provider` under test.
+    struct MessageStreamHarness {
+        message_stream: MockMessageStream,
+        mock_pairing: MockPairing,
+        /// Dropping the upstream client disables Fast Pair.
+        mock_upstream: Option<MockUpstreamClient>,
+        _le_peripheral: PeripheralRequestStream,
+        _gatt: LocalServiceProxy,
+        _host_watcher: HostWatcherRequestStream,
+    }
+
+    /// Builds a `Provider` with Fast Pair enabled, an active host, and a test Message Stream.
+    fn setup_message_stream_provider(
+        exec: &mut fasync::TestExecutor,
+    ) -> (Provider, MessageStreamHarness) {
+        let (mut provider, le_peripheral, gatt, host_watcher, mock_pairing, mock_upstream) =
+            exec.run_singlethreaded(setup_provider());
+        provider.host_watcher.set_active_host(
+            example_host(HostId(1), /* active= */ true, /* discoverable= */ true)
+                .try_into()
+                .unwrap(),
+        );
+        let message_stream = exec.run_singlethreaded(MockMessageStream::new(&mut provider));
+        let harness = MessageStreamHarness {
+            message_stream,
+            mock_pairing,
+            mock_upstream: Some(mock_upstream),
+            _le_peripheral: le_peripheral,
+            _gatt: gatt,
+            _host_watcher: host_watcher,
+        };
+        (provider, harness)
+    }
+
+    fn peer(id: PeerId, bonded: bool) -> Peer {
+        Peer { id: Some(id.into()), bonded: Some(bonded), ..Default::default() }
+    }
+
+    /// Responds to the Provider's pending `sys.Access/WatchPeers` request, if there is one.
+    fn respond_to_watch_peers(
+        exec: &mut fasync::TestExecutor,
+        access_server: &mut AccessRequestStream,
+        updated: &[Peer],
+        removed: &[PeerId],
+    ) {
+        let removed: Vec<_> = removed.iter().map(|id| (*id).into()).collect();
+        if let Poll::Ready(Some(Ok(request))) = exec.run_until_stalled(&mut access_server.next()) {
+            let responder = request.into_watch_peers().expect("WatchPeers request");
+            responder.send(updated, &removed).expect("can respond to WatchPeers");
+        }
+    }
+
+    fn expect_model_id_and_address(exec: &mut fasync::TestExecutor, remote: &mut Channel) {
+        for expected in [&MODEL_ID_PACKET[..], &BLE_ADDRESS_PACKET[..]] {
+            match exec.run_until_stalled(&mut remote.next()) {
+                Poll::Ready(Some(Ok(data))) => assert_eq!(data, expected),
+                x => panic!("Expected Message Stream packet, got {x:?}"),
+            }
+        }
+    }
+
+    fn expect_closed_without_data(exec: &mut fasync::TestExecutor, remote: &mut Channel) {
+        match exec.run_until_stalled(&mut remote.next()) {
+            Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {}
+            x => panic!("Expected RFCOMM channel to be closed without data, got {x:?}"),
+        }
+    }
+
+    fn expect_open(exec: &mut fasync::TestExecutor, remote: &mut Channel) {
+        let result = exec.run_until_stalled(&mut remote.next());
+        assert!(result.is_pending(), "Expected RFCOMM channel to be open, got {result:?}");
+    }
+
+    #[fuchsia::test]
+    fn message_stream_bonded_peer_receives_model_id_and_address() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote);
+        expect_open(&mut exec, &mut remote);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_rejects_unbonded_peer() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ false)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        // The unbonded peer should not receive any data and its channel should be closed.
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_unbonded_peer_does_not_evict_bonded_peer() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        let bonded_id = PeerId(1);
+        let unbonded_id = PeerId(2);
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(bonded_id, /* bonded= */ true), peer(unbonded_id, /* bonded= */ false)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        let mut bonded_remote = harness.message_stream.connect(bonded_id);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut bonded_remote);
+
+        // A connection from an unbonded peer should be rejected without affecting the existing
+        // connection to the bonded peer.
+        let mut unbonded_remote = harness.message_stream.connect(unbonded_id);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut unbonded_remote);
+        expect_open(&mut exec, &mut bonded_remote);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_rejected_while_fast_pair_disabled() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        // Upstream client disables Fast Pair.
+        drop(harness.mock_upstream.take());
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        // Even a bonded peer should be rejected while Fast Pair is disabled.
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_closed_when_fast_pair_disabled() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote);
+
+        // Upstream client disables Fast Pair - the existing connection should be closed.
+        drop(harness.mock_upstream.take());
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
+    }
+
+    #[test_case(/* removed= */ true ; "peer removed")]
+    #[test_case(/* removed= */ false ; "peer unbonded")]
+    #[fuchsia::test]
+    fn message_stream_closed_when_peer_no_longer_bonded(removed: bool) {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote);
+
+        // The bond is removed - the existing connection should be closed.
+        let (updated, removed) = if removed {
+            (vec![], vec![PEER_ID])
+        } else {
+            (vec![peer(PEER_ID, /* bonded= */ false)], vec![])
+        };
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &updated,
+            &removed,
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_unbonding_one_peer_keeps_other_peer_connected() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        let id1 = PeerId(1);
+        let id2 = PeerId(2);
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(id1, /* bonded= */ true), peer(id2, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        // Both bonded peers can be connected simultaneously.
+        let mut remote1 = harness.message_stream.connect(id1);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote1);
+        let mut remote2 = harness.message_stream.connect(id2);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote2);
+        expect_open(&mut exec, &mut remote1);
+
+        // The first peer is unbonded - only its connection should be closed.
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(id1, /* bonded= */ false)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote1);
+        expect_open(&mut exec, &mut remote2);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_accepts_peer_after_it_bonds() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ false)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
+
+        // The peer bonds and reconnects - the new connection should be accepted.
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote);
+        expect_open(&mut exec, &mut remote);
+    }
+
+    #[fuchsia::test]
+    fn message_stream_closed_and_rejected_when_peer_watcher_fails() {
+        let mut exec = fasync::TestExecutor::new();
+        let (provider, mut harness) = setup_message_stream_provider(&mut exec);
+        let (_sender, receiver) = mpsc::channel(0);
+        let mut server_fut = pin!(provider.run(receiver));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        respond_to_watch_peers(
+            &mut exec,
+            &mut harness.mock_pairing.access_server,
+            &[peer(PEER_ID, /* bonded= */ true)],
+            &[],
+        );
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_model_id_and_address(&mut exec, &mut remote);
+
+        // The `sys.Access` server closes, so the pending WatchPeers request fails. The existing
+        // connection should be closed. The Provider should keep running without repeatedly
+        // polling the closed watcher, which would prevent the executor from stalling.
+        harness.mock_pairing.access_server.control_handle().shutdown();
+        let (_, unused_access_server) = create_proxy_and_stream::<AccessMarker>();
+        drop(std::mem::replace(&mut harness.mock_pairing.access_server, unused_access_server));
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
+
+        // Bonded peers can no longer be tracked, so new connections should be rejected.
+        let mut remote = harness.message_stream.connect(PEER_ID);
+        let _ = exec.run_until_stalled(&mut server_fut).expect_pending("still active");
+        expect_closed_without_data(&mut exec, &mut remote);
     }
 
     #[fuchsia::test]

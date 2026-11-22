@@ -5,9 +5,7 @@
 #ifndef SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_DEVICE_FIDL_H_
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_DEVICE_FIDL_H_
 
-#include <fuchsia/mediacodec/cpp/fidl.h>
 #include <lib/closure-queue/closure_queue.h>
-#include <lib/fidl/cpp/interface_request.h>
 #include <lib/media/codec_impl/codec_impl.h>
 
 #include <map>

@@ -245,7 +245,6 @@ fuchsia_driver_component("fuchsia_driver") {
     "//bundles/drivers/pci",
     "//src/connectivity/wlan:drivers",
   ]
-  info = "meta/fuchsia_driver-info.json"
 }
 
 # Driver module for the test version of the brcmfmac driver, which includes
@@ -264,7 +263,6 @@ fuchsia_driver_component("test_fuchsia_driver") {
   component_name = "brcmfmac-test"
   deps = [ ":test_fuchsia_driver-driver" ]
   visibility += [ "//src/connectivity/wlan:drivers" ]
-  info = "meta/test_fuchsia_driver-info.json"
   dml_label = ":brcmfmac-test-dml"
 }
 

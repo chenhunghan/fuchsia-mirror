@@ -18,9 +18,9 @@ group("tests") {
 
   public_deps = [
     ":allocation_unittests",
+    ":display_death_unittests",
     ":display_unittests",
     ":flatland_buffers_unittests",
-    ":flatland_display_compositor_pixeltests",
     ":flatland_display_compositor_pixeltests_with_fake_display",
     ":flatland_display_compositor_smoketests",
     ":flatland_engine_unittests",
@@ -32,6 +32,8 @@ group("tests") {
     ":focus_unittests",
     ":fuzzers",
     ":geometry_provider_unittests",
+    ":health_inspector_unittests",
+    ":image_import_unittests",
     ":input_unittests",
     ":scenic_shutdown_unittests",
     ":scenic_types_unittests",
@@ -41,13 +43,23 @@ group("tests") {
     ":screen_capture_unittests",
     ":screenshot_unittests",
     ":view_tree_unittests",
-    "tests",
+    "//src/ui/scenic/tests",
   ]
+
+  if (current_cpu == "arm64") {
+    # Intentionally limited to boards where hardware display capture runs
+    # stably; see the comment on the package definitions below.
+    public_deps += [
+      ":flatland_display_compositor_pixeltests_astro",
+      ":flatland_display_compositor_pixeltests_sherlock",
+      ":flatland_display_compositor_pixeltests_vim3",
+    ]
+  }
 }
 
 group("fuzzers") {
   testonly = true
-  public_deps = [ "lib/scheduling/tests/fuzzers" ]
+  public_deps = [ "//src/ui/scenic/lib/scheduling/tests/fuzzers" ]
 }
 
 scenic_test_deps = [ "//src/lib/vulkan:vulkan_validation_layers" ]
@@ -60,7 +72,7 @@ if (escher_use_runtime_glsl) {
 
 fuchsia_unittest_package("allocation_unittests") {
   manifest = "meta/allocation_unittests.cml"
-  deps = [ "lib/allocation/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/allocation/tests:unittests" ] + scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -78,9 +90,19 @@ fuchsia_unittest_package("display_unittests") {
   }
 }
 
+fuchsia_unittest_package("display_death_unittests") {
+  manifest = "meta/display_death_unittests.cml"
+  deps = [ "//src/ui/scenic/lib/display/tests:death_unittests" ]
+  test_specs = {
+    log_settings = {
+      max_severity = "FATAL"
+    }
+  }
+}
+
 fuchsia_unittest_package("flatland_unittests") {
   manifest = "meta/flatland_unittests.cml"
-  deps = [ "lib/flatland/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/flatland/tests:unittests" ] + scenic_test_deps
   test_specs = {
     log_settings = {
       # Allows EXPECT_DEATH to work as intended.
@@ -92,7 +114,8 @@ fuchsia_unittest_package("flatland_unittests") {
 
 fuchsia_unittest_package("flatland_buffers_unittests") {
   manifest = "meta/flatland_buffers_unittests.cml"
-  deps = [ "lib/flatland/buffers/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/flatland/buffers/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -101,39 +124,81 @@ fuchsia_unittest_package("flatland_buffers_unittests") {
   test_type = "vulkan"
 }
 
-fuchsia_unittest_package("flatland_display_compositor_pixeltests") {
-  manifest = "meta/flatland_display_compositor_pixeltests.cml"
-  deps =
-      [ "lib/flatland/engine/tests/pixeltests:pixeltests_with_real_display" ] +
-      scenic_test_deps
-  test_specs = {
-    log_settings = {
-      max_severity = "ERROR"
-    }
+# The real-display pixeltests compare display-capture output against golden
+# images using board-specific tolerances. A single test binary is shared by
+# one test package per board:
+#  - Each package's manifest passes the board name to the binary via `--board=<name>`
+#  - The package only runs in that board's 'environment' in infra due to the
+#    specification of the matching environment in the test package's 'environments' param.
+#
+# Do not add new boards (such as Nelson) here. Although other display engines
+# also support display capture, hardware readback is flaky on other boards even
+# with board-specific comparison workarounds. We intentionally only run these
+# tests on Astro, Sherlock and VIM3 where they are known to be stable.
+#
+# When running locally, run only the package for the board under test (e.g.
+# `fx test flatland_display_compositor_pixeltests_vim3`). Running all of them
+# against a single device will cause failures in the packages for the
+# mismatched boards.
 
-    # Ensures that only devices that have access to display controller image
-    # capture features can run this test suite.
-    environments = with_display_capture_envs
+# Only add the board-specific packages on the arch used by their board.
+if (current_cpu == "arm64") {
+  fuchsia_unittest_package("flatland_display_compositor_pixeltests_astro") {
+    manifest = "meta/flatland_display_compositor_pixeltests_astro.cml"
+    deps = [ "//src/ui/scenic/lib/flatland/engine/tests/pixeltests:pixeltests_with_real_display" ] + scenic_test_deps
+    test_specs = {
+      log_settings = {
+        max_severity = "ERROR"
+      }
+      environments = [ astro_env ]
+    }
+    test_type = "system"
   }
-  test_type = "system"
+
+  fuchsia_unittest_package("flatland_display_compositor_pixeltests_sherlock") {
+    manifest = "meta/flatland_display_compositor_pixeltests_sherlock.cml"
+    deps = [ "//src/ui/scenic/lib/flatland/engine/tests/pixeltests:pixeltests_with_real_display" ] + scenic_test_deps
+    test_specs = {
+      log_settings = {
+        max_severity = "ERROR"
+      }
+      environments = [ sherlock_env ]
+    }
+    test_type = "system"
+  }
+
+  fuchsia_unittest_package("flatland_display_compositor_pixeltests_vim3") {
+    manifest = "meta/flatland_display_compositor_pixeltests_vim3.cml"
+    deps = [ "//src/ui/scenic/lib/flatland/engine/tests/pixeltests:pixeltests_with_real_display" ] + scenic_test_deps
+    test_specs = {
+      log_settings = {
+        max_severity = "ERROR"
+      }
+      environments = [ vim3_env ]
+    }
+    test_type = "system"
+  }
 }
 
 fuchsia_unittest_package(
     "flatland_display_compositor_pixeltests_with_fake_display") {
   manifest = "meta/flatland_display_compositor_pixeltests_with_fake_display.cml"
   deps = [
-           "lib/flatland/engine/tests/pixeltests:pixeltests_with_fake_display",
            "//src/graphics/display/testing/fake-display-stack-host:component",
+           "//src/ui/scenic/lib/flatland/engine/tests/pixeltests:pixeltests_with_fake_display",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
     }
 
-    # Force these tests to run on flatland_display_compositor_pixeltests envs +
-    # NUC + basic_envs in CQ. Do not remove.
-    environments = with_display_capture_envs + [
-                     nuc7_env,
+    # Force these tests to run on the display-capture-capable devices used by
+    # the flatland_display_compositor_pixeltests_<board> packages + NUC +
+    # basic_envs in CQ. Do not remove.
+    environments = [
+                     astro_env,
+                     sherlock_env,
+                     vim3_env,
                      nuc11_env,
                    ] + basic_envs
   }
@@ -143,8 +208,8 @@ fuchsia_unittest_package(
 fuchsia_unittest_package("flatland_display_compositor_smoketests") {
   manifest = "meta/flatland_display_compositor_smoketests.cml"
   deps = [
-           "lib/flatland/engine/tests/smoketests:smoketests_with_fake_display",
            "//src/graphics/display/testing/fake-display-stack-host:component",
+           "//src/ui/scenic/lib/flatland/engine/tests/smoketests:smoketests_with_fake_display",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
@@ -158,7 +223,8 @@ fuchsia_unittest_package("flatland_display_compositor_smoketests") {
 
 fuchsia_unittest_package("flatland_engine_unittests") {
   manifest = "meta/flatland_engine_unittests.cml"
-  deps = [ "lib/flatland/engine/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/flatland/engine/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       # Allows EXPECT_DEATH to work as intended.
@@ -173,7 +239,8 @@ fuchsia_unittest_package("flatland_engine_unittests") {
 # flatland_renderer_unittests_vulkanrenderercolortest.
 fuchsia_unittest_package("flatland_renderer_unittests") {
   manifest = "meta/flatland_renderer_unittests.cml"
-  deps = [ "lib/flatland/renderer/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/flatland/renderer/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -186,7 +253,8 @@ fuchsia_unittest_package("flatland_renderer_unittests") {
 # To avoid test timeouts, shard out some of the Flatland renderer unit tests.
 fuchsia_unittest_package("flatland_renderer_unittests_vulkanrenderertest") {
   manifest = "meta/flatland_renderer_unittests_vulkanrenderertest.cml"
-  deps = [ "lib/flatland/renderer/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/flatland/renderer/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -200,7 +268,8 @@ fuchsia_unittest_package("flatland_renderer_unittests_vulkanrenderertest") {
 fuchsia_unittest_package(
     "flatland_renderer_unittests_vulkanrenderercolortest") {
   manifest = "meta/flatland_renderer_unittests_vulkanrenderercolortest.cml"
-  deps = [ "lib/flatland/renderer/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/flatland/renderer/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -213,8 +282,8 @@ fuchsia_unittest_package(
 fuchsia_unittest_package("flatland_renderer_display_unittests") {
   manifest = "meta/flatland_renderer_display_unittests.cml"
   deps = [
-           "lib/flatland/renderer/tests:display_unittests",
            "//src/graphics/display/testing/fake-display-stack-host:component",
+           "//src/ui/scenic/lib/flatland/renderer/tests:display_unittests",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
@@ -226,12 +295,27 @@ fuchsia_unittest_package("flatland_renderer_display_unittests") {
 }
 
 fuchsia_unittest_package("focus_unittests") {
-  deps = [ "lib/focus/tests:unittests" ]
+  deps = [ "//src/ui/scenic/lib/focus/tests:unittests" ]
+}
+
+fuchsia_unittest_package("health_inspector_unittests") {
+  deps = [ "//src/ui/scenic/bin/tests:unittests" ]
+}
+
+fuchsia_unittest_package("image_import_unittests") {
+  manifest = "meta/image_import_unittests.cml"
+  deps = [ "//src/ui/scenic/lib/flatland/image_import/tests:unittests" ]
+  test_specs = {
+    log_settings = {
+      # Allows EXPECT_DEATH to work as intended.
+      max_severity = "FATAL"
+    }
+  }
 }
 
 fuchsia_unittest_package("input_unittests") {
   manifest = "meta/input_unittests.cml"
-  deps = [ "lib/input/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/input/tests:unittests" ] + scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -243,8 +327,8 @@ fuchsia_unittest_package("input_unittests") {
 fuchsia_unittest_package("scenic_shutdown_unittests") {
   manifest = "meta/scenic_shutdown_unittests.cml"
   deps = [
-           "lib/shutdown/tests:unittests",
            "//src/lib/fake-clock/svc",
+           "//src/ui/scenic/lib/shutdown/tests:unittests",
          ] + scenic_test_deps
   test_specs = {
     log_settings = {
@@ -255,7 +339,7 @@ fuchsia_unittest_package("scenic_shutdown_unittests") {
 
 fuchsia_unittest_package("scenic_types_unittests") {
   manifest = "meta/scenic_types_unittests.cml"
-  deps = [ "lib/types/tests:unittests" ]
+  deps = [ "//src/ui/scenic/lib/types/tests:unittests" ]
   test_specs = {
     log_settings = {
       # Allows EXPECT_DEATH to work as intended.
@@ -266,16 +350,16 @@ fuchsia_unittest_package("scenic_types_unittests") {
 
 fuchsia_unittest_package("scenic_utils_unittests") {
   manifest = "meta/scenic_utils_unittests.cml"
-  deps = [ "lib/utils/tests:unittests" ]
+  deps = [ "//src/ui/scenic/lib/utils/tests:unittests" ]
 }
 
 fuchsia_unittest_package("scheduling_unittests") {
-  deps = [ "lib/scheduling/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/scheduling/tests:unittests" ] + scenic_test_deps
 }
 
 fuchsia_unittest_package("screenshot_unittests") {
   manifest = "meta/screenshot_unittests.cml"
-  deps = [ "lib/screenshot/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/screenshot/tests:unittests" ] + scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -286,7 +370,8 @@ fuchsia_unittest_package("screenshot_unittests") {
 
 fuchsia_unittest_package("screen_capture_unittests") {
   manifest = "meta/screen_capture_unittests.cml"
-  deps = [ "lib/screen_capture/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/screen_capture/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -297,7 +382,8 @@ fuchsia_unittest_package("screen_capture_unittests") {
 
 fuchsia_unittest_package("screen_capture2_unittests") {
   manifest = "meta/screen_capture2_unittests.cml"
-  deps = [ "lib/screen_capture2/tests:unittests" ] + scenic_test_deps
+  deps = [ "//src/ui/scenic/lib/screen_capture2/tests:unittests" ] +
+         scenic_test_deps
   test_specs = {
     log_settings = {
       max_severity = "ERROR"
@@ -307,11 +393,11 @@ fuchsia_unittest_package("screen_capture2_unittests") {
 }
 
 fuchsia_unittest_package("geometry_provider_unittests") {
-  deps = [ "lib/view_tree/tests:geometry_provider_test_bin" ]
+  deps = [ "//src/ui/scenic/lib/view_tree/tests:geometry_provider_test_bin" ]
 }
 
 fuchsia_unittest_package("view_tree_unittests") {
-  deps = [ "lib/view_tree/tests:view_tree_test_bin" ]
+  deps = [ "//src/ui/scenic/lib/view_tree/tests:view_tree_test_bin" ]
 }
 
 fuchsia_component_manifest("scenic_manifest") {
@@ -325,7 +411,6 @@ fuchsia_component_manifest("scenic_dso_manifest") {
 }
 
 fuchsia_component_manifest("scenic_test_manifest") {
-  testonly = true
   component_name = "scenic"
   manifest = "bin/meta/scenic.test.cml"
 }
@@ -345,13 +430,13 @@ _component = {
 fuchsia_component("component") {
   forward_variables_from(_component, "*")
   cm_label = ":scenic_manifest"
-  deps += [ "bin" ]
+  deps += [ "//src/ui/scenic/bin" ]
 }
 
 fuchsia_component("component_dso") {
   forward_variables_from(_component, "*")
   cm_label = ":scenic_dso_manifest"
-  deps += [ "bin:dso" ]
+  deps += [ "//src/ui/scenic/bin:dso" ]
 }
 
 fuchsia_structured_config_cpp_elf_lib("scenic_structured_config") {
@@ -371,8 +456,7 @@ fuchsia_package("scenic_pkg_dso") {
 # Stand-in for `:component` with transitional default configuration values for
 # hermetic integration tests.
 fuchsia_component("scenic_with_default_config") {
-  testonly = true
   forward_variables_from(_component, "*")
   cm_label = ":scenic_test_manifest"
-  deps += [ "bin" ]
+  deps += [ "//src/ui/scenic/bin" ]
 }

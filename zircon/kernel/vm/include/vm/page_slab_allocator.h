@@ -8,9 +8,9 @@
 #define ZIRCON_KERNEL_VM_INCLUDE_VM_PAGE_SLAB_ALLOCATOR_H_
 
 #include <lib/page/size.h>
-#include <pow2.h>
 
 #include <ktl/algorithm.h>
+#include <ktl/bit.h>
 #include <ktl/iterator.h>
 #include <ktl/span.h>
 #include <vm/page.h>

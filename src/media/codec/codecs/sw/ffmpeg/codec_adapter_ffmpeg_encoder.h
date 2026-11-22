@@ -13,9 +13,8 @@ class CodecAdapterFfmpegEncoder : public CodecAdapterSW<AvCodecContext::AVFrameP
   CodecAdapterFfmpegEncoder(std::mutex& lock, CodecAdapterEvents* codec_adapter_events);
   ~CodecAdapterFfmpegEncoder();
 
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
 
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
@@ -27,7 +26,7 @@ class CodecAdapterFfmpegEncoder : public CodecAdapterSW<AvCodecContext::AVFrameP
 
   void CleanUpAfterStream() __TA_EXCLUDES(lock_) override;
 
-  std::pair<fuchsia::media::FormatDetails, size_t> OutputFormatDetails()
+  std::pair<fuchsia_media::FormatDetails, size_t> OutputFormatDetails()
       __TA_EXCLUDES(lock_) override;
 
  private:

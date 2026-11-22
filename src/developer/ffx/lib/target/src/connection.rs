@@ -3,7 +3,9 @@
 // found in the LICENSE file.
 
 use crate::fidl_pipe::FidlPipe;
-use crate::target_connector::{ConnectionStreamError, TargetConnectionError, TargetConnector};
+use crate::transport_connector::{
+    ConnectionStreamError, TargetConnectionError, TransportConnector,
+};
 use anyhow::Result;
 use async_lock::Mutex;
 use fdomain_client::fidl::DiscoverableProtocolMarker;
@@ -68,7 +70,9 @@ impl Connection {
     /// Returns `ConnectionError::ConnectionStartError` for fatal connector errors, or
     /// `ConnectionError::KnockError(KnockError::NonCritical(_))` for transient/non-fatal
     /// connector errors.
-    pub async fn new(connector: impl TargetConnector + 'static) -> Result<Self, ConnectionError> {
+    pub async fn new(
+        connector: impl TransportConnector + 'static,
+    ) -> Result<Self, ConnectionError> {
         let connector_debug_string = format!("{connector:?}");
         let (fidl_pipe, node, client) =
             FidlPipe::start_internal(connector).await.map_err(|e| match e {
@@ -292,7 +296,7 @@ impl OvernetClient {
 
 pub mod testing {
     use super::*;
-    use crate::target_connector::{OvernetConnection, TargetConnection, TargetConnectionError};
+    use crate::transport_connector::{OvernetConnection, TargetConnection, TargetConnectionError};
     use async_channel::Receiver;
     use fidl_fuchsia_developer_remotecontrol as rcs_fidl;
     use fuchsia_async::{Task, Timer};
@@ -399,7 +403,7 @@ pub mod testing {
         }
     }
 
-    impl TargetConnector for FakeOvernet {
+    impl TransportConnector for FakeOvernet {
         const CONNECTION_TYPE: &'static str = "fake";
         async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {
             if let FakeOvernetBehavior::FailNonFatalOnce = self.behavior {

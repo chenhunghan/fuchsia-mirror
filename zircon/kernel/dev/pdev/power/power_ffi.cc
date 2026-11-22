@@ -6,7 +6,8 @@
 //
 // Ported from zircon/kernel/dev/pdev/power/power.cc
 
-#include <zircon/errors.h>
+#include <stdint.h>
+#include <sys/types.h>
 #include <zircon/types.h>
 
 #include <dev/power.h>
@@ -15,41 +16,15 @@
 
 extern "C" {
 
-void rust_power_reboot(power_reboot_flags flags);
-void rust_power_shutdown();
-zx_status_t rust_power_cpu_off();
 zx_status_t rust_power_cpu_on(uint64_t hw_cpu_id, paddr_t entry, uint64_t context);
-zx_status_t rust_power_get_cpu_state(uint64_t hw_cpu_id, power_cpu_state* out_state);
-zx_status_t rust_power_system_resume();
 
 void rust_pdev_register_power(const pdev_power_ops* ops);
 
 }  // extern "C"
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void power_reboot(power_reboot_flags flags) { rust_power_reboot(flags); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void power_shutdown() { rust_power_shutdown(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t power_cpu_off() { return rust_power_cpu_off(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE zx_status_t power_system_resume() { return rust_power_system_resume(); }
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE zx_status_t power_cpu_on(uint64_t hw_cpu_id, paddr_t entry, uint64_t context) {
   return rust_power_cpu_on(hw_cpu_id, entry, context);
-}
-
-zx::result<power_cpu_state> power_get_cpu_state(uint64_t hw_cpu_id) {
-  power_cpu_state state = power_cpu_state::OFF;
-  zx_status_t status = rust_power_get_cpu_state(hw_cpu_id, &state);
-  if (status != ZX_OK) {
-    return zx::error(status);
-  }
-  return zx::ok(state);
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.

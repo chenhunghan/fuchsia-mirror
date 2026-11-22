@@ -4,11 +4,14 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+use super::task::copy_user_name;
 use crate::arch_rs::UserEntryState;
 #[cfg(target_arch = "x86_64")]
 use crate::arch_rs::x86::vm::is_vaddr_canonical;
 use crate::counters::define_kcounter;
+use crate::kernel::thread::ThreadPtr;
 use crate::object::{HandleValue, ProcessDispatcher, ThreadDispatcher, VmObjectDispatcher};
+use crate::page_map::{Accessor, PageMap};
 use crate::user_copy::{UserInPtr, UserOutPtr};
 use boot_options::BootOptions;
 use core::mem::MaybeUninit;
@@ -39,13 +42,9 @@ pub fn sys_thread_create(
         return Err(Status::INVALID_ARGS);
     }
 
-    if name_ptr.is_null() {
-        return Err(Status::INVALID_ARGS);
-    }
-
     // copy out the name
     let mut name_buf = [MaybeUninit::<u8>::uninit(); ZX_MAX_NAME_LEN];
-    let slice = name_ptr.copy_user_string(name_len, &mut name_buf)?;
+    let slice = copy_user_name(name_ptr, name_len, &mut name_buf)?;
 
     ltracef!("name {}\n", core::str::from_utf8(slice).unwrap_or("<non-utf8>"));
 
@@ -59,7 +58,9 @@ pub fn sys_thread_create(
     })?;
     // create the thread dispatcher
     let (handle, rights) = ThreadDispatcher::create(process, options, slice)?;
-    handle.dispatcher().initialize()?;
+    // SAFETY: The thread has not started running, and no chain lock transaction is active on this
+    // CPU.
+    unsafe { handle.dispatcher().initialize() }?;
 
     *out = ProcessDispatcher::with_current(|up| up.make_and_add_handle(handle, rights))?;
     Ok(())
@@ -108,7 +109,10 @@ pub fn sys_thread_start_regs(
 #[syscall]
 pub fn sys_thread_exit() {
     ltrace_entry!();
-    ThreadDispatcher::exit_current();
+    // SAFETY: Syscalls execute on a running user thread after `ConstructFirstThread` with
+    // interrupts enabled, blocking permitted, and no spinlocks, thread locks, or
+    // `ChainLockTransaction` held.
+    unsafe { ThreadDispatcher::exit_current() };
 }
 
 #[syscall]
@@ -178,7 +182,11 @@ pub fn sys_thread_set_rseq(vmo_handle: HandleValue, offset: u64, size: u64) -> R
             return Err(Status::INVALID_ARGS);
         }
 
-        crate::kernel::thread::current_reset_rseq();
+        // SAFETY: Multithreading is initialized when handling a syscall on the current thread,
+        // `ThreadPtr::current()` is the currently executing thread (guaranteeing exclusive access
+        // to its `rseq_accessor_`), and syscall context is a normal thread context where acquiring
+        // VM locks is permitted.
+        unsafe { ThreadPtr::current().set_rseq_accessor(Accessor::default()) };
         return Ok(());
     }
 
@@ -208,7 +216,15 @@ pub fn sys_thread_set_rseq(vmo_handle: HandleValue, offset: u64, size: u64) -> R
     let vmo_paged =
         crate::vm::vm_object::VmObject::downcast_paged(vmo.clone()).ok_or(Status::INVALID_ARGS)?;
 
-    crate::kernel::thread::current_set_rseq(vmo_paged, offset)
+    const { assert!(size_of::<usize>() == size_of::<u64>()) };
+    let accessor = PageMap::get().make_accessor::<zx_rseq_t>(vmo_paged, offset as usize)?;
+    // SAFETY: Multithreading is initialized when handling a syscall on the current thread,
+    // `ThreadPtr::current()` is the currently executing thread (guaranteeing exclusive access to
+    // its `rseq_accessor_`), and syscall context is a normal thread context where acquiring VM
+    // locks is permitted. Installing a valid accessor also raises `THREAD_SIGNAL_CHECK_RSEQ` so we
+    // write out the `cpu_id` field before returning to user mode.
+    unsafe { ThreadPtr::current().set_rseq_accessor(accessor) };
+    Ok(())
 }
 
 #[syscall]

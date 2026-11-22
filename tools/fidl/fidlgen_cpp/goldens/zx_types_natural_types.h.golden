@@ -351,11 +351,11 @@ class StatusUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
     kStatusVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   StatusUnion(StatusUnion&& other) noexcept;
@@ -415,11 +415,11 @@ class StatusUnionAlias {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kStatus = 1,        // 0x1
     kStatusArray = 2,   // 0x2
     kStatusVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   StatusUnionAlias(StatusUnionAlias&& other) noexcept;
@@ -577,7 +577,7 @@ class StatusProtocolAResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -737,7 +737,7 @@ class StatusProtocolBResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1067,11 +1067,11 @@ class ResultUnion {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
     kResultVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   ResultUnion(ResultUnion&& other) noexcept;
@@ -1131,11 +1131,11 @@ class ResultUnionAlias {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResult = 1,        // 0x1
     kResultArray = 2,   // 0x2
     kResultVector = 3,  // 0x3
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
 
   ResultUnionAlias(ResultUnionAlias&& other) noexcept;
@@ -1293,7 +1293,7 @@ class ResultProtocolAResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3
@@ -1453,7 +1453,7 @@ class ResultProtocolBResult {
 
  public:
   // TODO: share union tag types between wire & natural.
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,      // 0x1
     kErr = 2,           // 0x2
     kFrameworkErr = 3,  // 0x3

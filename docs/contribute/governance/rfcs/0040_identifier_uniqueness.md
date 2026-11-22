@@ -22,7 +22,7 @@ target language identifier.
 This could cause unexpected conflicts that aren't visible until particular
 languages are targeted.
 
-## Design
+## Design {:#design}
 
 This proposes introducing a constraint on FIDL identifiers that no existing
 libraries violate.

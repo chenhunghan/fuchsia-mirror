@@ -26,6 +26,7 @@ def idk_cc_shared_library(
         category,
         api_file_path = None,
         output_name = "",
+        no_headers = False,
         **kwargs):
     """Defines a C/C++ prebuilt shared library in the IDK.
 
@@ -48,8 +49,10 @@ def idk_cc_shared_library(
             idk_name = idk_name,
             stable = stable,
             api_file_path = api_file_path,
+            no_headers = no_headers,
         ),
         output_name = output_name,
+        no_headers = no_headers,
         ifs_golden_file = get_golden_file(
             _get_ifs_golden_file_name(output_name),
             support_platform = True,
@@ -93,6 +96,7 @@ def idk_cc_shared_library_zx(
         category,
         api_file_path = None,
         output_name = "",
+        no_headers = False,
         **kwargs):
     """Defines a C/C++ prebuilt shared library in the IDK that will be a `zx_library()` in GN.
 
@@ -115,8 +119,10 @@ def idk_cc_shared_library_zx(
             idk_name = idk_name,
             stable = stable,
             api_file_path = api_file_path,
+            no_headers = no_headers,
         ),
         output_name = output_name,
+        no_headers = no_headers,
         ifs_golden_file = get_golden_file(
             _get_ifs_golden_file_name(output_name),
             support_platform = True,

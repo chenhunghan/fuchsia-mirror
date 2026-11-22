@@ -58,7 +58,7 @@ class TestControllerServer : public fidl::Server<test_power_dispatcher::TestCont
   Trackers* trackers_;
 };
 
-class TestControllerReceiver : public fidl::Server<fuchsia_component_sandbox::Receiver> {
+class TestControllerReceiver : public fidl::Server<fuchsia_component_runtime::Receiver> {
  public:
   explicit TestControllerReceiver(
       async_dispatcher_t* dispatcher, TestControllerServer* server,
@@ -71,10 +71,6 @@ class TestControllerReceiver : public fidl::Server<fuchsia_component_sandbox::Re
         fidl::ServerEnd<test_power_dispatcher::TestController>(std::move(request.channel())),
         server_, fidl::kIgnoreBindingClosure);
   }
-
-  void handle_unknown_method(
-      fidl::UnknownMethodMetadata<fuchsia_component_sandbox::Receiver> metadata,
-      fidl::UnknownMethodCompleter::Sync& completer) override {}
 
  private:
   async_dispatcher_t* dispatcher_;
@@ -117,7 +113,7 @@ class DispatcherPowerSystemIntegrationTest : public system_integration_utils::Te
     RunLoopWithTimeout(zx::sec(2));
 
     auto [receiver_client, receiver_server] =
-        fidl::Endpoints<fuchsia_component_sandbox::Receiver>::Create();
+        fidl::Endpoints<fuchsia_component_runtime::Receiver>::Create();
 
     test_controller_server_ = std::make_unique<TestControllerServer>(&trackers_);
     receiver_server_ = std::make_unique<TestControllerReceiver>(
@@ -199,7 +195,7 @@ class DispatcherPowerSystemIntegrationTest : public system_integration_utils::Te
   TestControllerServer::Trackers trackers_;
   std::unique_ptr<TestControllerServer> test_controller_server_;
   std::unique_ptr<TestControllerReceiver> receiver_server_;
-  std::optional<fidl::ServerBinding<fuchsia_component_sandbox::Receiver>> receiver_binding_;
+  std::optional<fidl::ServerBinding<fuchsia_component_runtime::Receiver>> receiver_binding_;
   fidl::ServerBindingGroup<test_power_dispatcher::TestController> test_bindings_;
 
   void RunTestBody() {

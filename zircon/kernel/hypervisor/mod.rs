@@ -10,9 +10,14 @@ pub mod aspace;
 mod aspace_ffi;
 pub mod cpu;
 mod cpu_ffi;
+#[cfg(ktest)]
+mod hypervisor_unittest;
+pub mod interrupt_tracker;
+mod interrupt_tracker_ffi;
 pub mod ktrace;
 mod ktrace_ffi;
+pub mod page;
+mod page_ffi;
 pub mod state_invalidator;
-mod state_invalidator_ffi;
 pub mod trap_map;
 mod trap_map_ffi;

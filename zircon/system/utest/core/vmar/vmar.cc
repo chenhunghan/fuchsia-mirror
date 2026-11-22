@@ -26,10 +26,14 @@
 #include <climits>
 #include <iterator>
 #include <limits>
+#include <span>
 #include <thread>
+#include <vector>
 
 #include <fbl/algorithm.h>
 #include <zxtest/zxtest.h>
+
+#include "../vmo/helpers.h"
 
 // These tests focus on the semantics of the VMARs themselves.  For heavier
 // testing of the mapping permissions, see the VMO tests.
@@ -2304,29 +2308,29 @@ TEST(Vmar, PartialUnmapAndRead) {
   ASSERT_OK(
       zx_vmar_unmap(vmar, mapping_addr + zx_system_get_page_size(), zx_system_get_page_size()));
 
-  char buffer[zx_system_get_page_size() * 2];
+  std::vector<char> buffer(zx_system_get_page_size() * 2);
   size_t actual_read;
 
   // First page succeeds.
-  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr, buffer,
+  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr, buffer.data(),
                                    zx_system_get_page_size(), &actual_read),
             ZX_OK);
   EXPECT_EQ(actual_read, zx_system_get_page_size());
 
   // Second page fails.
   EXPECT_STATUS(zx_process_read_memory(zx_process_self(), mapping_addr + zx_system_get_page_size(),
-                                       buffer, zx_system_get_page_size(), &actual_read),
+                                       buffer.data(), zx_system_get_page_size(), &actual_read),
                 ZX_ERR_NOT_FOUND);
 
   // Reading the whole region succeeds, but only reads the first page.
-  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr, buffer,
-                                   zx_system_get_page_size() * 2, &actual_read),
+  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr, buffer.data(), buffer.size(),
+                                   &actual_read),
             ZX_OK);
   EXPECT_EQ(actual_read, zx_system_get_page_size());
 
   // Read at the boundary straddling the pages.
   EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr + zx_system_get_page_size() - 1,
-                                   buffer, 2, &actual_read),
+                                   buffer.data(), 2, &actual_read),
             ZX_OK);
   EXPECT_EQ(actual_read, 1);
 
@@ -2362,30 +2366,30 @@ TEST(Vmar, PartialUnmapAndWrite) {
   ASSERT_OK(
       zx_vmar_unmap(vmar, mapping_addr + zx_system_get_page_size(), zx_system_get_page_size()));
 
-  char buffer[zx_system_get_page_size() * 2];
+  const auto kZeroFill = vmo_test::TestFillPages<2>();
   size_t actual_written;
-  memset(buffer, 0, zx_system_get_page_size() * 2);
 
   // First page succeeds.
-  EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr, buffer,
+  EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr, kZeroFill.data(),
                                     zx_system_get_page_size(), &actual_written),
             ZX_OK);
   EXPECT_EQ(actual_written, zx_system_get_page_size());
 
   // Second page fails.
-  EXPECT_STATUS(zx_process_write_memory(zx_process_self(), mapping_addr + zx_system_get_page_size(),
-                                        buffer, zx_system_get_page_size(), &actual_written),
-                ZX_ERR_NOT_FOUND);
+  EXPECT_STATUS(
+      zx_process_write_memory(zx_process_self(), mapping_addr + zx_system_get_page_size(),
+                              kZeroFill.data(), zx_system_get_page_size(), &actual_written),
+      ZX_ERR_NOT_FOUND);
 
   // Writing to the whole region succeeds, but only writes the first page.
-  EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr, buffer,
-                                    zx_system_get_page_size() * 2, &actual_written),
+  EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr, kZeroFill.data(),
+                                    kZeroFill.size_bytes(), &actual_written),
             ZX_OK);
   EXPECT_EQ(actual_written, zx_system_get_page_size());
 
   // Write at the boundary straddling the pages.
   EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr + zx_system_get_page_size() - 1,
-                                    buffer, 2, &actual_written),
+                                    kZeroFill.data(), 2, &actual_written),
             ZX_OK);
   EXPECT_EQ(actual_written, 1);
 
@@ -2422,41 +2426,41 @@ TEST(Vmar, PartialUnmapWithVmarOffset) {
   memset(ptr, 0, kVmoSize - kOffset);
 
   // Make sure both reads and writes to both the beginning and the end are allowed.
-  char buffer[kVmoSize - kOffset];
+  std::vector<char> buffer(kVmoSize - kOffset, 0);
   size_t actual;
-  EXPECT_EQ(
-      zx_process_write_memory(zx_process_self(), mapping_addr, buffer, kVmoSize - kOffset, &actual),
-      ZX_OK);
-  EXPECT_EQ(actual, kVmoSize - kOffset);
+  EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr, buffer.data(), buffer.size(),
+                                    &actual),
+            ZX_OK);
+  EXPECT_EQ(actual, buffer.size());
 
-  EXPECT_EQ(
-      zx_process_read_memory(zx_process_self(), mapping_addr, buffer, kVmoSize - kOffset, &actual),
-      ZX_OK);
-  EXPECT_EQ(actual, kVmoSize - kOffset);
+  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr, buffer.data(), buffer.size(),
+                                   &actual),
+            ZX_OK);
+  EXPECT_EQ(actual, buffer.size());
 
   // That reads and writes right at the end are OK.
   EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset - 1,
-                                    buffer, 1, &actual),
+                                    buffer.data(), 1, &actual),
             ZX_OK);
-  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset - 1, buffer,
-                                   1, &actual),
+  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset - 1,
+                                   buffer.data(), 1, &actual),
             ZX_OK);
 
   // That reads and writes one past the end fail.
   EXPECT_STATUS(zx_process_write_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset,
-                                        buffer, 1, &actual),
+                                        buffer.data(), 1, &actual),
                 ZX_ERR_NOT_FOUND);
-  EXPECT_STATUS(zx_process_read_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset, buffer,
-                                       1, &actual),
+  EXPECT_STATUS(zx_process_read_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset,
+                                       buffer.data(), 1, &actual),
                 ZX_ERR_NOT_FOUND);
 
   // And crossing the boundary works as expected.
   EXPECT_EQ(zx_process_write_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset - 1,
-                                    buffer, 2, &actual),
+                                    buffer.data(), 2, &actual),
             ZX_OK);
   EXPECT_EQ(actual, 1);
-  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset - 1, buffer,
-                                   2, &actual),
+  EXPECT_EQ(zx_process_read_memory(zx_process_self(), mapping_addr + kVmoSize - kOffset - 1,
+                                   buffer.data(), 2, &actual),
             ZX_OK);
   EXPECT_EQ(actual, 1);
 }
@@ -2970,21 +2974,20 @@ TEST(Vmar, FaultBeyondStreamSize) {
                 ZX_ERR_OUT_OF_RANGE, "write");
 
   // Write to the first 4 pages of the VMO (one page outside of the stream size).
-  char buffer1[zx_system_get_page_size() * 4];
-  memset(buffer1, 0, zx_system_get_page_size() * 4);
-  EXPECT_OK(vmo.write(buffer1, 0, zx_system_get_page_size() * 4));
+  const auto kZeroFill = vmo_test::TestFillPages<4>();
+  EXPECT_OK(vmo.write(kZeroFill.data(), 0, kZeroFill.size_bytes()));
 
-  char vmo_buffer1[zx_system_get_page_size() * 4];
-  EXPECT_OK(vmo.read(vmo_buffer1, 0, zx_system_get_page_size() * 4));
-  EXPECT_BYTES_EQ(buffer1, vmo_buffer1, zx_system_get_page_size() * 4);
+  std::vector<uint8_t> vmo_buffer1(zx_system_get_page_size() * 4);
+  EXPECT_OK(vmo.read(vmo_buffer1.data(), 0, vmo_buffer1.size()));
+  EXPECT_BYTES_EQ(kZeroFill.data(), vmo_buffer1.data(), kZeroFill.size_bytes());
 
   // Should still fault beyond stream size.
   EXPECT_STATUS(probe_for_read(reinterpret_cast<void*>(addr + (3 * zx_system_get_page_size()))),
                 ZX_ERR_OUT_OF_RANGE, "read");
 
   // Pages still in VMO.
-  EXPECT_OK(vmo.read(vmo_buffer1, 0, zx_system_get_page_size() * 4));
-  EXPECT_BYTES_EQ(buffer1, vmo_buffer1, zx_system_get_page_size() * 4);
+  EXPECT_OK(vmo.read(vmo_buffer1.data(), 0, vmo_buffer1.size()));
+  EXPECT_BYTES_EQ(kZeroFill.data(), vmo_buffer1.data(), kZeroFill.size_bytes());
 
   // Can write from mapping.
   EXPECT_OK(probe_for_write(reinterpret_cast<void*>(addr)));
@@ -3050,13 +3053,11 @@ TEST(Vmar, FaultBeyondStreamSize) {
   EXPECT_GT(vmo_size, stream_size);
 
   // Write to first 4 pages of VMO.
-  char buffer3[zx_system_get_page_size() * 4];
-  memset(buffer3, 0, zx_system_get_page_size() * 4);
-  EXPECT_OK(vmo3.write(buffer3, 0, zx_system_get_page_size() * 4));
+  EXPECT_OK(vmo3.write(kZeroFill.data(), 0, kZeroFill.size_bytes()));
 
-  char vmo_buffer3[zx_system_get_page_size() * 4];
-  EXPECT_OK(vmo3.read(vmo_buffer3, 0, zx_system_get_page_size() * 4));
-  EXPECT_BYTES_EQ(buffer3, vmo_buffer3, zx_system_get_page_size() * 4);
+  std::vector<uint8_t> vmo_buffer3(zx_system_get_page_size() * 4);
+  EXPECT_OK(vmo3.read(vmo_buffer3.data(), 0, vmo_buffer3.size()));
+  EXPECT_BYTES_EQ(kZeroFill.data(), vmo_buffer3.data(), kZeroFill.size_bytes());
 
   // 6 Page mapping of VMO.
   zx_vaddr_t addr3;
@@ -3179,9 +3180,8 @@ TEST(Vmar, FaultBeyondReducedStreamSize) {
   vmo_bounded.set_stream_size(_zx_system_get_page_size() * 2);
 
   // Write to all pages.
-  char buffer[zx_system_get_page_size() * 4];
-  memset(buffer, 1, zx_system_get_page_size() * 4);
-  EXPECT_OK(vmo.write(buffer, 0, zx_system_get_page_size() * 4));
+  const auto kFillData = vmo_test::TestFillPages<4, 1>();
+  EXPECT_OK(vmo.write(kFillData.data(), 0, kFillData.size_bytes()));
 
   EXPECT_STATUS(probe_for_read(reinterpret_cast<void*>(addr + (3 * zx_system_get_page_size()))),
                 ZX_ERR_OUT_OF_RANGE, "read");
@@ -3203,13 +3203,12 @@ TEST(Vmar, FaultBeyondStreamSizeRange) {
   ASSERT_OK(zx::vmo::create(zx_system_get_page_size() * 2, ZX_VMO_UNBOUNDED, &vmo));
 
   // Write to 4 pages of VMO (2 pages past the stream size).
-  char buffer[zx_system_get_page_size() * 4];
-  memset(buffer, 1, zx_system_get_page_size() * 4);
-  EXPECT_OK(vmo.write(buffer, 0, zx_system_get_page_size() * 4));
+  const auto kFillData = vmo_test::TestFillPages<4, 1>();
+  EXPECT_OK(vmo.write(kFillData.data(), 0, kFillData.size_bytes()));
 
-  char vmo_buffer[zx_system_get_page_size() * 4];
-  EXPECT_OK(vmo.read(vmo_buffer, 0, zx_system_get_page_size() * 4));
-  EXPECT_BYTES_EQ(buffer, vmo_buffer, zx_system_get_page_size() * 4);
+  std::vector<uint8_t> vmo_buffer(zx_system_get_page_size() * 4);
+  EXPECT_OK(vmo.read(vmo_buffer.data(), 0, vmo_buffer.size()));
+  EXPECT_BYTES_EQ(kFillData.data(), vmo_buffer.data(), kFillData.size_bytes());
 
   zx_vaddr_t addr;
 
@@ -3233,8 +3232,8 @@ TEST(Vmar, FaultBeyondStreamSizeRange) {
 
   EXPECT_EQ(ZX_ERR_OUT_OF_RANGE,
             vmar.op_range(ZX_VMAR_OP_DECOMMIT, addr, zx_system_get_page_size() * 3, nullptr, 0));
-  EXPECT_OK(vmo.read(vmo_buffer, 0, zx_system_get_page_size() * 4));
-  EXPECT_BYTES_EQ(buffer, vmo_buffer, zx_system_get_page_size() * 4);
+  EXPECT_OK(vmo.read(vmo_buffer.data(), 0, vmo_buffer.size()));
+  EXPECT_BYTES_EQ(kFillData.data(), vmo_buffer.data(), kFillData.size_bytes());
 
   // Can prefetch, commit and decommit up to the stream size.
   EXPECT_OK(vmar.op_range(ZX_VMAR_OP_PREFETCH, addr, zx_system_get_page_size() * 2, nullptr, 0));
@@ -3247,18 +3246,15 @@ TEST(Vmar, FaultBeyondStreamSizeRange) {
   EXPECT_EQ(ZX_ERR_OUT_OF_RANGE, vmar.op_range(ZX_VMAR_OP_COMMIT, addr + zx_system_get_page_size(),
                                                zx_system_get_page_size() * 2, nullptr, 0));
 
-  char buffer_half[zx_system_get_page_size() * 4];
-  memset(buffer_half, 1, zx_system_get_page_size() * 4);
-  char zero_buffer_half[zx_system_get_page_size() * 2];
-  memset(zero_buffer_half, 0, zx_system_get_page_size() * 2);
+  const auto kZeroFill = vmo_test::TestFillPages<2>();
 
-  char vmo_buffer_half[zx_system_get_page_size() * 2];
-  EXPECT_OK(vmo.read(vmo_buffer_half, 0, zx_system_get_page_size() * 2));
-  EXPECT_BYTES_EQ(vmo_buffer_half, zero_buffer_half, zx_system_get_page_size() * 2);
+  std::vector<uint8_t> vmo_buffer_half(zx_system_get_page_size() * 2);
+  EXPECT_OK(vmo.read(vmo_buffer_half.data(), 0, vmo_buffer_half.size()));
+  EXPECT_BYTES_EQ(vmo_buffer_half.data(), kZeroFill.data(), vmo_buffer_half.size());
 
   EXPECT_OK(
-      vmo.read(vmo_buffer_half, zx_system_get_page_size() * 2, zx_system_get_page_size() * 2));
-  EXPECT_BYTES_EQ(vmo_buffer_half, buffer_half, zx_system_get_page_size() * 2);
+      vmo.read(vmo_buffer_half.data(), zx_system_get_page_size() * 2, vmo_buffer_half.size()));
+  EXPECT_BYTES_EQ(vmo_buffer_half.data(), kFillData.data(), vmo_buffer_half.size());
 }
 
 TEST(Vmar, SpecificOverwriteMergeMappings) {

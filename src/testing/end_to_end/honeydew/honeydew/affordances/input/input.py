@@ -30,7 +30,7 @@ from honeydew.affordances.ui.user_input import (
 from honeydew.transports.adb import adb as adb_transport
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
-_SWIPE_EVENT_HZ_DEFAULT = 120
+_SWIPE_EVENT_HZ_DEFAULT = 240
 _DEFAULT_SWIPE_DURATION = timedelta(milliseconds=300)
 
 

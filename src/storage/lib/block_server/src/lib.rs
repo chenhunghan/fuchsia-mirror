@@ -22,6 +22,7 @@ pub mod async_interface;
 pub mod c_interface;
 pub mod callback_interface;
 mod mapper;
+pub use mapper::{DeviceBlockService, serve_device_mapper, serve_mapper_session};
 pub mod verifier;
 
 #[cfg(test)]
@@ -4548,7 +4549,7 @@ mod tests {
 
         let mut sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();
@@ -4629,7 +4630,7 @@ mod tests {
         }
         let mut sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             root_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();
@@ -4687,7 +4688,7 @@ mod tests {
         }
         let mut child_sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             child_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();
@@ -4771,7 +4772,7 @@ mod tests {
         }
         let mut sender = vmo_fifo::SyncSender::<mapping::RawMappingCommand>::new(
             root_mapping_vmo.duplicate_handle(zx::Rights::SAME_RIGHTS).unwrap(),
-            1024,
+            vmo_fifo::Alignment::SIZE_1KIB,
             256,
         )
         .unwrap();

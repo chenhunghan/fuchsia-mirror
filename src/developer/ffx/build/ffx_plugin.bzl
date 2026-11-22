@@ -93,6 +93,7 @@ def _ffx_plugin_impl(
         data,
         crate_features,
         lint_config,
+        rustc_flags,
         disable_clippy,
         plugin_deps,
         config_data,
@@ -127,6 +128,7 @@ def _ffx_plugin_impl(
                 "//third_party/rust_crates/vendor:argh",
             ] + [str(d) + "_args" for d in plugin_deps],
             lint_config = lint_config,
+            rustc_flags = rustc_flags,
             disable_clippy = disable_clippy,
             target_compatible_with = HOST_OS_CONSTRAINTS,
             version = version,
@@ -163,6 +165,7 @@ def _ffx_plugin_impl(
         edition = edition,
         deps = args_deps + ([":" + name + "_sub_command"] if plugin_deps else []),
         lint_config = lint_config,
+        rustc_flags = rustc_flags,
         disable_clippy = disable_clippy,
         visibility = visibility,
         version = version,
@@ -183,6 +186,7 @@ def _ffx_plugin_impl(
             compile_data = compile_data,
             data = data,
             lint_config = lint_config,
+            rustc_flags = rustc_flags,
             disable_clippy = disable_clippy,
             target_compatible_with = HOST_OS_CONSTRAINTS,
             version = version,
@@ -221,6 +225,7 @@ def _ffx_plugin_impl(
         deps = suite_deps,
         data = [":" + name + "_plugins_gen"],
         lint_config = lint_config,
+        rustc_flags = rustc_flags,
         disable_clippy = disable_clippy,
         version = version,
         visibility = visibility,
@@ -303,6 +308,14 @@ If empty, the execution library is not created.""",
         "lint_config": attr.label(
             doc = "Lint configuration applied to all Rust libraries of the plugin.",
             default = None,
+        ),
+        "rustc_flags": attr.string_list(
+            doc = """List of compiler flags passed to rustc for all Rust libraries of the plugin.
+
+Equivalent to GN `rustflags`, which the GN ffx_plugin() template forwards to all of its
+Rust libraries. Standalone `host_rustc_test` targets for the plugin's crates do not inherit
+these flags.""",
+            default = [],
         ),
         "disable_clippy": attr.bool(
             doc = "If true, disables clippy lints on all Rust libraries of the plugin.",

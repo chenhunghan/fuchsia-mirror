@@ -416,6 +416,23 @@ TEST_F(VdsoProcTest, VvarAndVdsoHaveCorrectPermissions) {
   ASSERT_NE(vvar_mapping, std::nullopt);
   EXPECT_EQ(vvar_mapping->perms, "r--p");
 
-  // TODO(https://fxbug.dev/313689934): Add a similar test that checks the
-  // flags in /proc/self/smaps
+  std::string smaps;
+  ASSERT_TRUE(files::ReadFileToString("/proc/self/smaps", &smaps));
+
+  auto vdso_smaps =
+      test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(vdso_base_), smaps);
+  ASSERT_NE(vdso_smaps, std::nullopt);
+  EXPECT_TRUE(vdso_smaps->ContainsFlag("rd"));
+  EXPECT_TRUE(vdso_smaps->ContainsFlag("ex"));
+  EXPECT_TRUE(vdso_smaps->ContainsFlag("mr"));
+  EXPECT_TRUE(vdso_smaps->ContainsFlag("mw"));
+  EXPECT_TRUE(vdso_smaps->ContainsFlag("me"));
+
+  auto vvar_smaps =
+      test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(vvar_base_), smaps);
+  ASSERT_NE(vvar_smaps, std::nullopt);
+  EXPECT_TRUE(vvar_smaps->ContainsFlag("rd"));
+  EXPECT_TRUE(vvar_smaps->ContainsFlag("mr"));
+  EXPECT_FALSE(vvar_smaps->ContainsFlag("mw"));
+  EXPECT_FALSE(vvar_smaps->ContainsFlag("me"));
 }

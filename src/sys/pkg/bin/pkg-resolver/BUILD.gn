@@ -15,9 +15,9 @@ fuchsia_package("pkg-resolver") {
 }
 
 # Kept in GN because `unit-tests-package` uses
-# `//src/connectivity/network/dns:component`,
+# `//src/connectivity/network/dns:package`,
 # `//src/connectivity/network/netstack3:package-for-tests`, and
-# `//src/connectivity/policy/http-client:component`, which remain in GN, and
+# `//src/connectivity/policy/http-client:package`, which remain in GN, and
 # `lib_test` depends on `//src/storage/lib/vfs/rust:vfs`
 # (`rustc_dylib("vfs_dylib")`).
 rustc_test("lib_test") {
@@ -149,13 +149,15 @@ fuchsia_test_package("unit-tests-package") {
   deps = [
     ":component",
     ":unit-tests-driver",
-    "//src/connectivity/network/dns:component",
-    "//src/connectivity/policy/http-client:component",
     "//src/sys/pkg/lib/fuchsia-pkg-testing/certs",
     "//src/sys/pkg/testing:fake-ssl-certs",
     "//src/sys/pkg/tests/pkg-resolver:empty-repo",
   ]
-  subpackages = [ "//src/connectivity/network/netstack3:package-for-tests" ]
+  subpackages = [
+    "//src/connectivity/network/dns:package",
+    "//src/connectivity/network/netstack3:package-for-tests",
+    "//src/connectivity/policy/http-client:package",
+  ]
   test_components = [ ":unit-tests-root" ]
 }
 

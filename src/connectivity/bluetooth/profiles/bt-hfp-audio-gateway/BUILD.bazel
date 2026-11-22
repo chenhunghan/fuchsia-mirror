@@ -157,6 +157,7 @@ rustc_test(
         "//sdk/fidl/fuchsia.bluetooth.internal.a2dp:fuchsia.bluetooth.internal.a2dp_rust",
         "//sdk/fidl/fuchsia.power.battery:fuchsia.power.battery_rust",
         "//src/connectivity/bluetooth/lib/async-helpers:async-test-helpers",
+        "//src/connectivity/bluetooth/lib/profile-client:test-profile-server",
         "//src/connectivity/bluetooth/testing/bt-channel-test-support",
         "//src/connectivity/bluetooth/testing/test-battery-manager",
         "//src/lib/diagnostics/testing/diagnostics-assertions/rust:diagnostics-assertions",

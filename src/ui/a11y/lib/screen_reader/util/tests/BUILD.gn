@@ -19,7 +19,7 @@ cc_test_executable("screen_reader_util_tests") {
     "//sdk/fidl/fuchsia.accessibility:fuchsia.accessibility_hlcpp",
     "//sdk/fidl/fuchsia.accessibility.semantics:fuchsia.accessibility.semantics_hlcpp",
     "//sdk/lib/sys/cpp",
-    "//sdk/lib/sys/cpp/testing:unit",
+    "//sdk/lib/sys/cpp/testing:cpp",
     "//src/lib/fxl/test:gtest_main",
     "//src/lib/testing/loop_fixture",
     "//src/ui/a11y/lib/screen_reader/util",

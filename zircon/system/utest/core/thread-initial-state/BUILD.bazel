@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "thread-initial-state",
+    srcs = ["init-state.cc"] + select({
+        "@platforms//cpu:arm64": ["arm64.S"],
+        "@platforms//cpu:riscv64": ["riscv64.S"],
+        "@platforms//cpu:x86_64": ["x64.S"],
+        "//conditions:default": [],
+    }),
+    implementation_deps = [
+        "//zircon/kernel/lib/arch",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+    visibility = ["//zircon/system/utest/core:__pkg__"],
+    alwayslink = True,
+)

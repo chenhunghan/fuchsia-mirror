@@ -98,7 +98,7 @@ def main() -> int:
         subprocess.run(["fx", "build"], check=True)
 
         # Convert the logfile to a csv full of weights (in ms)
-        weights_file = Path(build_config.name() + ".weights.csv")
+        weights_file = Path("local") / (build_config.name() + ".weights.csv")
         weights_files.append(weights_file)
         convert_log_to_weights(out_dir / ".ninja_log", weights_file, 60000)
 

@@ -7,6 +7,8 @@
 #include <sys/un.h>
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include <fbl/unique_fd.h>
 #include <gtest/gtest.h>
@@ -22,8 +24,9 @@
 #include "src/starnix/tests/selinux/userspace/netlink_util.h"
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
+#include "src/starnix/tests/syscalls/cpp/test_helper.h"
 
-extern std::string DoPrePolicyLoadWork() { return "socket_policy"; }
+extern std::string GetTestPolicyName() { return "socket_policy"; }
 
 namespace {
 
@@ -54,6 +57,8 @@ std::string SocketTypeToString(int type) {
       return "SOCK_DGRAM";
     case SOCK_RAW:
       return "SOCK_RAW";
+    case SOCK_SEQPACKET:
+      return "SOCK_SEQPACKET";
     default:
       return std::to_string(type);
   }
@@ -322,8 +327,8 @@ TEST(SocketTest, SendmsgAllowed) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_sendmsg_yes_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
     char data[] = "y";
     struct iovec iov[] = {{
         .iov_base = data,
@@ -333,7 +338,7 @@ TEST(SocketTest, SendmsgAllowed) {
     msg.msg_iov = iov;
     msg.msg_iovlen = 1;
 
-    EXPECT_THAT(sendmsg(fds[0], &msg, 0), SyscallSucceeds());
+    EXPECT_THAT(sendmsg(fds.client_fd(), &msg, 0), SyscallSucceeds());
   }));
 }
 
@@ -343,8 +348,8 @@ TEST(SocketTest, SendmsgDenied) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_sendmsg_no_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
 
     char data[] = "n";
     struct iovec iov[] = {{
@@ -355,7 +360,7 @@ TEST(SocketTest, SendmsgDenied) {
     msg.msg_iov = iov;
     msg.msg_iovlen = 1;
 
-    EXPECT_THAT(sendmsg(fds[0], &msg, 0), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(sendmsg(fds.client_fd(), &msg, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
@@ -365,10 +370,10 @@ TEST(SocketTest, WriteAllowed) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_sendmsg_yes_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
     char data[] = "y";
-    EXPECT_THAT(write(fds[0], &data, 1), SyscallSucceeds());
+    EXPECT_THAT(write(fds.client_fd(), &data, 1), SyscallSucceeds());
   }));
 }
 
@@ -378,10 +383,10 @@ TEST(SocketTest, WriteDenied) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_sendmsg_no_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
     char data[] = "n";
-    EXPECT_THAT(write(fds[0], &data, 1), SyscallFailsWithErrno(EACCES));
+    EXPECT_THAT(write(fds.client_fd(), &data, 1), SyscallFailsWithErrno(EACCES));
   }));
 }
 
@@ -397,13 +402,8 @@ std::string NetlinkSocketTestName(
 TEST_P(NetlinkSocketTest, CheckNetlinkMsgPermission) {
   const netlink_util::NetlinkSocketTestCase& test_case = GetParam();
   EXPECT_TRUE(RunSubprocessAs("test_u:test_r:socket_sendmsg_test_t:s0", [test_case]() {
-    int result = netlink_util::SendNetlinkMsg(test_case);
-
-    if (test_case.expected_result.is_ok()) {
-      EXPECT_THAT(result, SyscallSucceeds());
-    } else {
-      EXPECT_THAT(result, SyscallFailsWithErrno(test_case.expected_result.error_value()));
-    }
+    EXPECT_THAT(netlink_util::SendNetlinkMsg(test_case),
+                SyscallMatchesResult(test_case.expected_result));
   }));
 }
 
@@ -515,8 +515,8 @@ TEST(SocketTest, RecvmsgAllowed) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_recvmsg_yes_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
     char data[] = "y";
     struct iovec iov[] = {{
         .iov_base = data,
@@ -526,8 +526,8 @@ TEST(SocketTest, RecvmsgAllowed) {
     msg.msg_iov = iov;
     msg.msg_iovlen = 1;
 
-    ASSERT_THAT(sendmsg(fds[0], &msg, 0), SyscallSucceeds());
-    EXPECT_THAT(recvmsg(fds[1], &msg, 0), SyscallSucceeds());
+    ASSERT_THAT(sendmsg(fds.client_fd(), &msg, 0), SyscallSucceeds());
+    EXPECT_THAT(recvmsg(fds.server_fd(), &msg, 0), SyscallSucceeds());
   }));
 }
 
@@ -537,8 +537,8 @@ TEST(SocketTest, RecvmsgDenied) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_recvmsg_no_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
 
     char data[] = "n";
     struct iovec iov[] = {{
@@ -549,8 +549,8 @@ TEST(SocketTest, RecvmsgDenied) {
     msg.msg_iov = iov;
     msg.msg_iovlen = 1;
 
-    ASSERT_THAT(sendmsg(fds[0], &msg, 0), SyscallSucceeds());
-    EXPECT_THAT(recvmsg(fds[1], &msg, 0), SyscallFailsWithErrno(EACCES));
+    ASSERT_THAT(sendmsg(fds.client_fd(), &msg, 0), SyscallSucceeds());
+    EXPECT_THAT(recvmsg(fds.server_fd(), &msg, 0), SyscallFailsWithErrno(EACCES));
   }));
 }
 
@@ -560,11 +560,11 @@ TEST(SocketTest, ReadAllowed) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_recvmsg_yes_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
     char data[] = "y";
-    ASSERT_THAT(write(fds[0], &data, 1), SyscallSucceeds());
-    EXPECT_THAT(read(fds[1], &data, 1), SyscallSucceeds());
+    ASSERT_THAT(write(fds.client_fd(), &data, 1), SyscallSucceeds());
+    EXPECT_THAT(read(fds.server_fd(), &data, 1), SyscallSucceeds());
   }));
 }
 
@@ -574,11 +574,11 @@ TEST(SocketTest, ReadDenied) {
     auto sockcreate =
         ScopedTaskAttrResetter::SetTaskAttr("sockcreate", "test_u:test_r:socket_recvmsg_no_t:s0");
 
-    int fds[2];
-    ASSERT_EQ(0, socketpair(AF_UNIX, SOCK_STREAM, 0, fds));
+    test_helper::ScopedSocketPair fds;
+    ASSERT_TRUE(fds);
     char data[] = "y";
-    ASSERT_THAT(write(fds[0], &data, 1), SyscallSucceeds());
-    EXPECT_THAT(read(fds[1], &data, 1), SyscallFailsWithErrno(EACCES));
+    ASSERT_THAT(write(fds.client_fd(), &data, 1), SyscallSucceeds());
+    EXPECT_THAT(read(fds.server_fd(), &data, 1), SyscallFailsWithErrno(EACCES));
   }));
 }
 
@@ -675,10 +675,16 @@ TEST(SocketTest, AcceptDenied) {
   }));
 }
 
-TEST(SocketPeerSecTest, UnixDomainStream) {
+// `SOCK_STREAM` and `SOCK_SEQPACKET` Unix-domain sockets share the "unix_stream_socket" class, and
+// report peer labels in the same way.
+class SocketPeerSecConnectedTest : public ::testing::TestWithParam<int> {};
+
+TEST_P(SocketPeerSecConnectedTest, UnixDomain) {
+  const int type = GetParam();
+  test_helper::ScopedTempDir temp_dir;
+  ASSERT_FALSE(temp_dir.path().empty());
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
-    auto listen_fd =
-        SocketWithLabel(AF_UNIX, SOCK_STREAM, 0, "test_u:test_r:socket_test_peer_t:s0");
+    auto listen_fd = SocketWithLabel(AF_UNIX, type, 0, "test_u:test_r:socket_test_peer_t:s0");
     ASSERT_TRUE(listen_fd.is_ok()) << listen_fd.error_value();
     EXPECT_THAT(GetLabel(listen_fd.value().get()),
                 SyscallResultIsOk("test_u:test_r:socket_test_peer_t:s0"));
@@ -688,16 +694,16 @@ TEST(SocketPeerSecTest, UnixDomainStream) {
                 SyscallResultIsOk("unlabeled_u:unlabeled_r:unlabeled_t:s0"));
 
     fbl::unique_fd client_fd;
-    ASSERT_TRUE((client_fd = fbl::unique_fd(socket(AF_UNIX, SOCK_STREAM, 0)))) << strerror(errno);
+    ASSERT_TRUE((client_fd = fbl::unique_fd(socket(AF_UNIX, type, 0)))) << strerror(errno);
     EXPECT_THAT(GetLabel(client_fd.get()),
                 SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
     EXPECT_THAT(GetPeerSec(client_fd.get()),
                 SyscallResultIsOk("unlabeled_u:unlabeled_r:unlabeled_t:s0"));
 
     // Bind the `listen_fd` to an address and start listening on it.
-    constexpr char kListenPath[] = "/tmp/unix_domain_stream_test";
+    const std::string listen_path = temp_dir.path() + "/listener";
     struct sockaddr_un sock_addr{.sun_family = AF_UNIX};
-    strncpy(sock_addr.sun_path, kListenPath, sizeof(sock_addr.sun_path) - 1);
+    strncpy(sock_addr.sun_path, listen_path.c_str(), sizeof(sock_addr.sun_path) - 1);
     ASSERT_THAT(bind(listen_fd.value().get(), (struct sockaddr*)&sock_addr, sizeof(sock_addr)),
                 SyscallSucceeds());
     ASSERT_THAT(listen(listen_fd.value().get(), kTestBacklog), SyscallSucceeds());
@@ -719,6 +725,32 @@ TEST(SocketPeerSecTest, UnixDomainStream) {
   }));
 }
 
+TEST_P(SocketPeerSecConnectedTest, SocketPairUnix) {
+  const int type = GetParam();
+  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
+    test_helper::ScopedSocketPair sockets(type);
+    ASSERT_TRUE(sockets);
+
+    EXPECT_THAT(GetLabel(sockets.client_fd()),
+                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
+    EXPECT_THAT(GetLabel(sockets.server_fd()),
+                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
+
+    // Unix-domain sockets created with `socketpair()` should report each other's labels
+    // immediately.
+    EXPECT_THAT(GetPeerSec(sockets.client_fd()),
+                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
+    EXPECT_THAT(GetPeerSec(sockets.server_fd()),
+                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
+  }));
+}
+
+INSTANTIATE_TEST_SUITE_P(SocketPeerSecTests, SocketPeerSecConnectedTest,
+                         ::testing::Values(SOCK_STREAM, SOCK_SEQPACKET),
+                         [](const testing::TestParamInfo<int>& info) {
+                           return SocketTypeToString(info.param);
+                         });
+
 TEST(SocketPeerSecTest, UnixDomainDatagram) {
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
     fbl::unique_fd fd;
@@ -730,45 +762,20 @@ TEST(SocketPeerSecTest, UnixDomainDatagram) {
   }));
 }
 
-TEST(SocketPeerSecTest, SocketPairUnixStream) {
-  ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
-    int fds[2]{};
-    ASSERT_THAT(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), SyscallSucceeds());
-
-    fbl::unique_fd fd1(fds[0]);
-    fbl::unique_fd fd2(fds[1]);
-
-    EXPECT_THAT(GetLabel(fd1.get()),
-                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
-    EXPECT_THAT(GetLabel(fd2.get()),
-                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
-
-    // Unix-domain sockets created with `socketpair()` should report each other's labels
-    // immediately.
-    EXPECT_THAT(GetPeerSec(fd1.get()),
-                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
-    EXPECT_THAT(GetPeerSec(fd2.get()),
-                SyscallResultIsOk("test_u:test_r:unix_stream_socket_test_t:s0"));
-  }));
-}
-
 TEST(SocketPeerSecTest, SocketPairUnixDatagram) {
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
-    int fds[2];
-    ASSERT_THAT(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), SyscallSucceeds());
+    test_helper::ScopedSocketPair sockets(SOCK_DGRAM);
+    ASSERT_TRUE(sockets);
 
-    fbl::unique_fd fd1(fds[0]);
-    fbl::unique_fd fd2(fds[1]);
-
-    EXPECT_THAT(GetLabel(fd1.get()),
+    EXPECT_THAT(GetLabel(sockets.client_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
-    EXPECT_THAT(GetLabel(fd2.get()),
+    EXPECT_THAT(GetLabel(sockets.server_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
 
     // Unix-domain datagram sockets created with `socketpair()` are described as supporting
     // `SO_PEERSEC` but actually seem to report not-supported.
-    EXPECT_THAT(GetPeerSec(fd1.get()), SyscallResultIsErrno(ENOPROTOOPT));
-    EXPECT_THAT(GetPeerSec(fd2.get()), SyscallResultIsErrno(ENOPROTOOPT));
+    EXPECT_THAT(GetPeerSec(sockets.client_fd()), SyscallResultIsErrno(ENOPROTOOPT));
+    EXPECT_THAT(GetPeerSec(sockets.server_fd()), SyscallResultIsErrno(ENOPROTOOPT));
   }));
 }
 
@@ -805,61 +812,57 @@ fit::result<int, std::string> RecvMsgSecurityContext(int fd) {
 
 TEST(SocketPassSecTest, UnixDomainDatagram) {
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
-    int fds[2];
-    ASSERT_THAT(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), SyscallSucceeds());
-    fbl::unique_fd sender(fds[0]);
-    fbl::unique_fd receiver(fds[1]);
+    test_helper::ScopedSocketPair sockets(SOCK_DGRAM);
+    ASSERT_TRUE(sockets);
 
-    EXPECT_THAT(GetLabel(sender.get()),
+    EXPECT_THAT(GetLabel(sockets.client_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
-    EXPECT_THAT(GetLabel(receiver.get()),
+    EXPECT_THAT(GetLabel(sockets.server_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
 
     // Enable SO_PASSSEC on the receiver.
     int one = 1;
-    ASSERT_THAT(setsockopt(receiver.get(), SOL_SOCKET, SO_PASSSEC, &one, sizeof(one)),
+    ASSERT_THAT(setsockopt(sockets.server_fd(), SOL_SOCKET, SO_PASSSEC, &one, sizeof(one)),
                 SyscallSucceeds());
 
     // Send message after SO_PASSSEC is enabled.
     const char kPayload[] = "hello";
-    ASSERT_EQ(send(sender.get(), kPayload, sizeof(kPayload), 0), (ssize_t)sizeof(kPayload));
+    ASSERT_EQ(send(sockets.client_fd(), kPayload, sizeof(kPayload), 0), (ssize_t)sizeof(kPayload));
 
     // Receive message and verify that SCM_SECURITY contains the sender's security context.
-    EXPECT_THAT(RecvMsgSecurityContext(receiver.get()),
+    EXPECT_THAT(RecvMsgSecurityContext(sockets.server_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
   }));
 }
 
 TEST(SocketPassSecTest, UnixDomainDatagramSendBeforePassSec) {
   ASSERT_TRUE(RunSubprocessAs("test_u:test_r:socket_test_t:s0", [&] {
-    int fds[2];
-    ASSERT_THAT(socketpair(AF_UNIX, SOCK_DGRAM, 0, fds), SyscallSucceeds());
-    fbl::unique_fd sender(fds[0]);
-    fbl::unique_fd receiver(fds[1]);
+    test_helper::ScopedSocketPair sockets(SOCK_DGRAM);
+    ASSERT_TRUE(sockets);
 
-    EXPECT_THAT(GetLabel(sender.get()),
+    EXPECT_THAT(GetLabel(sockets.client_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
-    EXPECT_THAT(GetLabel(receiver.get()),
+    EXPECT_THAT(GetLabel(sockets.server_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
 
     // Send message BEFORE SO_PASSSEC is enabled on the receiver.
     const char kPayload[] = "hello";
-    ASSERT_EQ(send(sender.get(), kPayload, sizeof(kPayload), 0), (ssize_t)sizeof(kPayload));
+    ASSERT_EQ(send(sockets.client_fd(), kPayload, sizeof(kPayload), 0), (ssize_t)sizeof(kPayload));
 
     // Enable SO_PASSSEC on the receiver AFTER the message has been queued.
     int one = 1;
-    ASSERT_THAT(setsockopt(receiver.get(), SOL_SOCKET, SO_PASSSEC, &one, sizeof(one)),
+    ASSERT_THAT(setsockopt(sockets.server_fd(), SOL_SOCKET, SO_PASSSEC, &one, sizeof(one)),
                 SyscallSucceeds());
 
     // Receive message and verify that SCM_SECURITY contains the sender's security context.
-    EXPECT_THAT(RecvMsgSecurityContext(receiver.get()),
+    EXPECT_THAT(RecvMsgSecurityContext(sockets.server_fd()),
                 SyscallResultIsOk("test_u:test_r:unix_dgram_socket_test_t:s0"));
   }));
 }
 
 struct SocketBindTestCase {
   const char* label;
-  int expected_errno;
+  fit::result<int> expected_result;
   const char* test_name;
 };
 
@@ -881,12 +884,8 @@ TEST_P(SocketBindTest, Bind) {
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, kSockPath, sizeof(addr.sun_path) - 1);
 
-    if (test_case.expected_errno == 0) {
-      EXPECT_THAT(bind(sock.get(), (struct sockaddr*)&addr, sizeof(addr)), SyscallSucceeds());
-    } else {
-      EXPECT_THAT(bind(sock.get(), (struct sockaddr*)&addr, sizeof(addr)),
-                  SyscallFailsWithErrno(test_case.expected_errno));
-    }
+    EXPECT_THAT(bind(sock.get(), (struct sockaddr*)&addr, sizeof(addr)),
+                SyscallMatchesResult(test_case.expected_result));
   }));
 }
 
@@ -895,12 +894,12 @@ TEST_P(SocketBindTest, Bind) {
 INSTANTIATE_TEST_SUITE_P(
     SocketBindTests, SocketBindTest,
     ::testing::Values(SocketBindTestCase{"test_u:test_r:socket_bind_test_sock_file_create_no_t:s0",
-                                         EACCES, "RequiresSockFileCreate"},
-                      SocketBindTestCase{"test_u:test_r:socket_bind_test_dir_write_no_t:s0", EACCES,
-                                         "RequiresDirWrite"},
+                                         fit::error(EACCES), "RequiresSockFileCreate"},
+                      SocketBindTestCase{"test_u:test_r:socket_bind_test_dir_write_no_t:s0",
+                                         fit::error(EACCES), "RequiresDirWrite"},
                       SocketBindTestCase{"test_u:test_r:socket_bind_test_dir_add_name_no_t:s0",
-                                         EACCES, "RequiresDirAddName"},
-                      SocketBindTestCase{"test_u:test_r:socket_bind_test_yes_t:s0", 0,
+                                         fit::error(EACCES), "RequiresDirAddName"},
+                      SocketBindTestCase{"test_u:test_r:socket_bind_test_yes_t:s0", fit::ok(),
                                          "SucceedsWithSockFileAndDirPerms"}),
     [](const testing::TestParamInfo<SocketBindTestCase>& info) { return info.param.test_name; });
 

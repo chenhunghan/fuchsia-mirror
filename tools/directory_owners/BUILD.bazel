@@ -1,0 +1,43 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_go_test.bzl", "host_go_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+go_library(
+    name = "main",
+    srcs = [
+        "main.go",
+    ],
+    importpath = "go.fuchsia.dev/fuchsia/tools/directory_owners",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//tools/lib/owners",
+        "//tools/metadata",
+    ],
+)
+
+go_binary_host_tool(
+    name = "directory_owners",
+    embed = [":main"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+)
+
+host_go_test(
+    name = "directory_owners_tests",
+    srcs = [
+        "main_test.go",
+    ],
+    embed = [":main"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__pkg__"],
+    deps = [
+        "//third_party/golibs:github.com/google/go-cmp/cmp",
+        "//tools/lib/owners",
+    ],
+)

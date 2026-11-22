@@ -288,4 +288,43 @@ TEST(ViewRefInstalledImplTest, InstalledThenInvalidated) {
   EXPECT_FALSE(was_error);
 }
 
+TEST(ViewRefInstalledImplTest, WatchSyncsSnapshotHolderBeforeOnNewViewTreeSnapshotRuns) {
+  async::TestLoop test_loop;
+  utils::ScopedThreadDispatcherSetter dispatcher_setter(test_loop.dispatcher(),
+                                                        test_loop.dispatcher());
+
+  auto snapshot_holder = std::make_shared<SnapshotHolder>();
+  ViewRefInstalledImpl view_ref_installed_impl(snapshot_holder);
+  auto [client_end, server_end] = fidl::Endpoints<fuchsia_ui_views::ViewRefInstalled>::Create();
+  view_ref_installed_impl.Bind(std::move(server_end));
+  fidl::Client<fuchsia_ui_views::ViewRefInstalled> client(std::move(client_end),
+                                                          test_loop.dispatcher());
+
+  bool has_fired = false;
+  bool was_error = false;
+  {
+    auto [control_ref, view_ref] = scenic::cpp::ViewRefPair::New();
+    const zx_koid_t koid = utils::ExtractKoid(view_ref);
+
+    // Publish the snapshot to `snapshot_holder` without calling `OnNewViewTreeSnapshot()` yet,
+    // then immediately call `Watch()` and drop `control_ref` so `ViewRef` invalidation would win
+    // if `Watch()` did not sync `snapshot_holder` first.
+    auto snapshot = std::make_shared<Snapshot>();
+    (void)snapshot->view_tree[koid];
+    snapshot->sequence_number = 1;
+    snapshot_holder->SetSnapshot(snapshot);
+
+    client->Watch({{.view_ref = std::move(view_ref)}})
+        .ThenExactlyOnce([&has_fired, &was_error](
+                             fidl::Result<fuchsia_ui_views::ViewRefInstalled::Watch>& result) {
+          has_fired = true;
+          was_error = result.is_error();
+        });
+  }
+
+  test_loop.RunUntilIdle();
+  EXPECT_TRUE(has_fired);
+  EXPECT_FALSE(was_error);
+}
+
 }  // namespace view_tree::test

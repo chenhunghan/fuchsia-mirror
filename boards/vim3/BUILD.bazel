@@ -48,6 +48,7 @@ fuchsia_board_input_bundle(
         "//src/devices/gpio/drivers/aml-gpio",
         "//src/devices/i2c/drivers/aml-i2c",
         "//src/devices/usb/drivers/aml-usb-phy",
+        "//src/devices/usb/drivers/dwc2",
     ] + ([] if use_vim3_dml else ["//src/devices/board/drivers/vim3-devicetree"]),
     version = build_info_version,
 )
@@ -112,6 +113,7 @@ _COMMON_BOARD_INPUT_BUNDLES = [
 
 fuchsia_board_configuration(
     name = "vim3",
+    arch = "arm64",
     board_input_bundle_sets = [
         ":vim3_bibs",
     ],
@@ -130,6 +132,7 @@ fuchsia_board_configuration(
 
 fuchsia_board_configuration(
     name = "reduced_perf_variation",
+    arch = "arm64",
     board_input_bundle_sets = [
         ":vim3_bibs",
     ],
@@ -154,6 +157,7 @@ fuchsia_board_configuration(
 
 fuchsia_board_configuration(
     name = "vim3_recovery",
+    arch = "arm64",
     board_input_bundle_sets = [
         ":vim3_base_bibs",
     ],

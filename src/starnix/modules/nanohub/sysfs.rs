@@ -161,26 +161,16 @@ impl<P: DiscoverableProtocolMarker, O: SysfsOps<P::SynchronousProxy>> FileOps fo
 
         let contents_guard = self.contents.lock();
 
-        match contents_guard.as_ref() {
-            SysfsContentsState::Err(error) => Err(error.clone()),
+        let value = match contents_guard.as_ref() {
+            SysfsContentsState::Err(error) => return Err(error.clone()),
             SysfsContentsState::Unarmed => {
                 log_error!("Failed to read SysFS file with no contents");
-                error!(EINVAL)
+                return error!(EINVAL);
             }
-            SysfsContentsState::Armed(value) => {
-                // Write the slice of data requested by the caller from the contents buffer,
-                // returning the number of bytes written. If the offset is at the end of the
-                // contents (e.g., if the contents have already been read), this will write 0
-                // bytes, indicating EOF. If an error occurred, nothing will be written and the
-                // error will be returned.
-                let bytes = value.as_bytes();
-                let start = offset.min(bytes.len());
-                let end = (offset + data.available()).min(bytes.len());
-                let slice = bytes[start..end].to_vec();
-                drop(contents_guard);
-                data.write(&slice)
-            }
-        }
+            SysfsContentsState::Armed(value) => value.clone(),
+        };
+        drop(contents_guard);
+        data.write_tail(value.as_bytes(), offset)
     }
 
     fn write(
@@ -244,6 +234,7 @@ impl<P: DiscoverableProtocolMarker, O: SysfsOps<P::SynchronousProxy>> FsNodeOps
         _guard: &AppendLockWriteGuard<'_>,
         _node: &FsNode,
         _current_task: &CurrentTask,
+        _file: Option<&FileObject>,
         _length: u64,
     ) -> Result<(), Errno> {
         Ok(())

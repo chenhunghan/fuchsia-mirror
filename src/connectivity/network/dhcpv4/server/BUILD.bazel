@@ -1,0 +1,139 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+# GN keeps its hand-written group("tests") above the sentinel.
+test_suite(
+    name = "tests",
+    tests = [":dhcpv4-server-tests"],
+    visibility = ["//src/connectivity/network:__pkg__"],
+)
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "dhcpv4_server",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    edition = "2024",
+    deps = [
+        ":config",
+        "//sdk/fidl/fuchsia.net.dhcp:fuchsia.net.dhcp_rust",
+        "//sdk/rust/zx",
+        "//src/connectivity/lib/net-declare",
+        "//src/connectivity/lib/net-types",
+        "//src/connectivity/lib/packet-formats",
+        "//src/connectivity/network/dhcpv4/lib",
+        "//src/connectivity/network/lib/sockaddr",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia_nix",
+        "//src/lib/network/packet",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:libc",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:socket2",
+    ],
+)
+
+rustc_test(
+    name = "bin_test",
+    build_flags = ["//build/config/rust/lints:deny_unused_results"],
+    crate = ":bin",
+    # Match the dhcpv4_server_bin_test.cml program.binary name.
+    crate_name = "dhcpv4_server_bin_test",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = ["//third_party/rust_crates/vendor:assert_matches"],
+)
+
+fx_packaged_binary(
+    name = "bin_test_packaged_bin",
+    testonly = True,
+    binary = ":bin_test",
+    binary_name = "dhcpv4_server_bin_test",
+)
+
+fx_component_manifest(
+    name = "dhcpv4_server_bin_test_manifest",
+    testonly = True,
+    component_name = "dhcpv4_server_bin_test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/dhcpv4_server_bin_test.cml",
+)
+
+fx_test_component(
+    name = "dhcpv4_server_bin_test",
+    compiled_manifest = ":dhcpv4_server_bin_test_manifest",
+    deps = [":bin_test_packaged_bin"],
+)
+
+fx_package(
+    name = "dhcpv4-server-tests-package",
+    package_name = "dhcpv4-server-tests",
+    testonly = True,
+    components = ["//src/sys/stash:stash_secure_v2"],
+    test_components = [":dhcpv4_server_bin_test"],
+)
+
+fx_test(
+    name = "dhcpv4-server-tests",
+    package = ":dhcpv4-server-tests-package",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "dhcpv4_server",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/dhcpv4_server.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "config",
+    cm_label = ":manifest",
+)
+
+fx_packaged_binary(
+    name = "bin_packaged_bin",
+    binary = ":bin",
+    binary_name = "dhcpv4_server",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//vendor/google:__subpackages__"],
+    deps = [":bin_packaged_bin"],
+)
+
+fx_package(
+    name = "package",
+    package_name = "dhcpv4-server",
+    components = [":component"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)

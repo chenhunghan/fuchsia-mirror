@@ -332,38 +332,6 @@ static_assert(sizeof(fidl_envelope_v2_unknown_data_t) == 8, "");
 // handle<T>   zx_handle_t  Any valid T handle.
 // handle<T>?  zx_handle_t  Any valid T handle, or ZX_HANDLE_INVALID.
 
-// Unions.
-
-// Fidl unions are a tagged sum type. The tag is a 4 bytes. For every
-// union type, the fidl compiler generates an enum representing the
-// different variants of the enum. This is followed, in C and on the
-// wire, by large enough and aligned enough storage for all members of
-// the union.
-
-// Unions may be nullable. Nullable unions are represented as a
-// pointer to an out of line allocation of tag-and-member. As with
-// other out-of-line allocations, ones present on the wire take the
-// value FIDL_ALLOC_PRESENT and those that are not are represented by
-// FIDL_ALLOC_NULL. Nonnullable unions are represented inline as a
-// tag-and-member.
-
-// For each fidl union type, a corresponding C type is generated. They
-// are all structs consisting of a fidl_union_tag_t discriminant,
-// followed by an anonymous union of all the union members.
-
-typedef uint32_t fidl_union_tag_t;
-
-// fidl                 C                            Meaning
-// --------------------------------------------------------------------
-// union foo {...}      struct union_foo {           An inline union.
-//                          fidl_union_tag_t tag;
-//                          union {...};
-//                      }
-//
-// union foo {...}?     struct union_foo*            A pointer to a
-//                                                   union_foo, or else
-//                                                   FIDL_ALLOC_ABSENT.
-
 // Tables.
 
 // Tables are 'flexible structs', where all members are optional, and new
@@ -378,21 +346,22 @@ typedef struct {
   fidl_vector_t envelopes;
 } fidl_table_t;
 
-// Extensible unions.
+// Unions.
 
-// Extensible unions, or "xunions" (colloquially pronounced "zoo-nions") are
-// similar to unions, except that storage for union members are out-of-line
-// rather than inline. This enables union members to be added and removed while
-// preserving ABI compatibility with the existing xunion definition.
+// Unions are tagged sum types where member content is stored inline or
+// out-of-line inside an envelope, enabling union members to be added and
+// removed while preserving ABI compatibility. Absent optional unions have a
+// zero tag and a zero envelope.
 
-typedef uint64_t fidl_xunion_tag_t;
+typedef uint64_t fidl_union_tag_t;
 
 enum {
-  kFidlXUnionEmptyTag = 0,  // The tag representing an empty xunion.
+  kFidlUnionEmptyTag = 0,                    // The tag representing an empty union.
+  kFidlXUnionEmptyTag = kFidlUnionEmptyTag,  // Backwards-compatibility alias.
 };
 
 typedef struct {
-  fidl_xunion_tag_t tag;
+  fidl_union_tag_t tag;
   fidl_envelope_t envelope;
 } fidl_union_t;
 

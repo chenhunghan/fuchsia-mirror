@@ -23,7 +23,7 @@ rustc_library(
         "//src/developer:__subpackages__",
         "//src/lib/elf-search/rust:__pkg__",
         "//src/lib/process_builder:__pkg__",
-        "//src/performance:__subpackages__",
+        "//src/memory:__subpackages__",
         "//src/starnix:__subpackages__",
     ],
     deps = [

@@ -7,6 +7,7 @@
 
 #include <fidl/fuchsia.ui.pointerinjector.dso/cpp/driver/wire.h>
 #include <lib/fidl/cpp/binding_set.h>
+#include <lib/fit/defer.h>
 #include <lib/fit/function.h>
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/sys/cpp/component_context.h>
@@ -21,6 +22,7 @@ namespace scenic_impl::input_dso {
 
 using TouchInjectFunc = fit::function<void(InternalTouchEvent event, StreamId stream_id,
                                            const view_tree::Snapshot& snapshot)>;
+using TouchBeginBatchFunc = fit::function<fit::deferred_action<fit::closure>()>;
 
 // Handles the registration and config validation of fuchsia::ui::pointerinjector_dso clients.
 // LINT.IfChange
@@ -30,7 +32,8 @@ class PointerinjectorRegistry : public fdf::WireServer<fuchsia_ui_pointerinjecto
                           std::shared_ptr<view_tree::SnapshotHolder> snapshot_holder,
                           TouchInjectFunc inject_touch_exclusive,
                           TouchInjectFunc inject_touch_hit_tested,
-                          inspect::Node inspect_node = inspect::Node());
+                          inspect::Node inspect_node = inspect::Node(),
+                          TouchBeginBatchFunc begin_touch_batch = nullptr);
 
   void Bind(fdf::Channel channel);
 
@@ -46,6 +49,7 @@ class PointerinjectorRegistry : public fdf::WireServer<fuchsia_ui_pointerinjecto
 
   const TouchInjectFunc inject_touch_exclusive_;
   const TouchInjectFunc inject_touch_hit_tested_;
+  const TouchBeginBatchFunc begin_touch_batch_;
 
   const std::shared_ptr<view_tree::SnapshotHolder> snapshot_holder_;
 

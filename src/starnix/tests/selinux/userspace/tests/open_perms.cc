@@ -11,7 +11,7 @@
 #include "src/starnix/tests/selinux/userspace/util.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 
-extern std::string DoPrePolicyLoadWork() { return "open_perms_policy"; }
+extern std::string GetTestPolicyName() { return "open_perms_policy"; }
 
 namespace {
 constexpr char kOpenPermsPolicyCap[] = "open_perms";

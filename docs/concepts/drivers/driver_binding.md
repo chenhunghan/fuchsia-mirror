@@ -72,12 +72,12 @@ topology.
 
 [components]: /docs/concepts/components/v2/README.md
 [driver-framework]: driver_framework.md
-[driver-manager]: driver_framework.md#driver_manager
-[driver-host]: driver_framework.md#driver_host
-[driver-index]: driver_framework.md#driver_index
+[driver-manager]: driver_framework.md#driver-manager
+[driver-host]: driver_framework.md#driver-host
+[driver-index]: driver_framework.md#driver-index
 [driver-runtime]: driver_framework.md#driver_runtime
 [fidl-interface]: driver_framework.md#fidl_interface
 [nodes]: drivers_and_nodes.md
-[node-properties]: drivers_and_nodes.md#node_attributes
+[node-properties]: drivers_and_nodes.md#node-attributes
 [node-capabilities]: drivers_and_nodes.md#node_capabilities
 [bind-rules-tutorial]: /docs/development/drivers/tutorials/bind-rules-tutorial.md

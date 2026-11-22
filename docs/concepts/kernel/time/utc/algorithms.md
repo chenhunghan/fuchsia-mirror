@@ -84,7 +84,7 @@ identification and use the following notation:
 
 Text in UPPER_CASE_SNAKE_CASE refers to configurable parameters that control the
 behavior of the algorithms. These parameters and their default values are
-discussed in [configurable parameters](#configurable_parameters).
+discussed in [configurable parameters](#configurable-parameters).
 
 
 ## Details
@@ -397,7 +397,7 @@ In summary, Timekeeper makes updates to the UTC clock as follows:
 * If `|last_set_error_bound - error_bound| > ERROR_BOUND_UPDATE`, the error
   bound is updated.
 
-## Configurable Parameters
+## Configurable parameters {#configurable-parameters}
 
 The previous sections introduced a number of parameters that may be used to
 configure the behavior of the algorithms. The following tables provide more

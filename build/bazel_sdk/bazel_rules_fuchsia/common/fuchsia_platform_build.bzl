@@ -173,7 +173,14 @@ def _get_rbe_config(repo_ctx):
             fail("ERROR: RBE profile '%s' specified by FX_BUILD_RBE_PROFILE does not exist at %s" % (env_profile, candidate))
 
     if not profile_path:
-        candidate = _get_fuchsia_source_path(repo_ctx, ".fx/config/rbe_profile.json")
+        # The in-tree Bazel workspace doesn't symlink .fx, so look it up in
+        # the real source directory, i.e. the parent of `build`'s realpath.
+        fuchsia_source_dir = repo_ctx.path(_get_fuchsia_source_path(repo_ctx, "build")).dirname
+        candidate = "%s/.fx/config/rbe_profile.json" % fuchsia_source_dir
+
+        # Watch the file even if it doesn't exist, so that selecting or
+        # clearing a profile with `fx rbe profile` re-runs this rule.
+        repo_ctx.watch(candidate)
         if repo_ctx.path(candidate).exists:
             profile_path = candidate
 
@@ -409,6 +416,21 @@ build_config = struct(
         repo_ctx.symlink("{}/prebuilt/third_party/{}/{}/bin/{}".format(repo_ctx.workspace_root, tool, host_tag, tool), "host_prebuilts/{}".format(tool))
 
     exported_files_list = ["host_prebuilts/{}".format(tool) for tool in prebuilt_host_tools + prebuilt_bin_host_tools]
+
+    # In case users set a custom rust_bindgen prefix in GN, respect that config.
+    if "rust_bindgen_prefix" in gn_args:
+        rust_bindgen_prefix = gn_args["rust_bindgen_prefix"]
+
+        # GN rust_bindgen_prefix can be GN labels, which are relative to workspace root.
+        if rust_bindgen_prefix.startswith("//"):
+            rust_bindgen_prefix = "{}/{}".format(repo_ctx.workspace_root, rust_bindgen_prefix[2:])
+
+        # GN rust_bindgen_prefix points to the directory containing the bindgen binary.
+        repo_ctx.symlink(
+            repo_ctx.path("{}/bindgen".format(rust_bindgen_prefix)),
+            "host_prebuilts/bindgen",
+        )
+        exported_files_list.append("host_prebuilts/bindgen")
 
     # Create a symlink to the Fuchsia prebuilt python3 binary (unlike host_prebuilts/python3
     # which points to a directory). This avoids the heavy machinery associated with py_binary()

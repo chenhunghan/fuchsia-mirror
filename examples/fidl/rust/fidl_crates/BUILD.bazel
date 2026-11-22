@@ -10,7 +10,7 @@ package(default_applicable_licenses = ["//:license"])
 test_suite(
     name = "host_tests",
     tests = [":fidl_crates_bin_test"],
-    visibility = ["//examples:__pkg__"],
+    visibility = ["//examples:__subpackages__"],
 )
 
 rustc_binary(

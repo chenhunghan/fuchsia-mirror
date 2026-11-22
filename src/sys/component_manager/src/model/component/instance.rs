@@ -469,6 +469,16 @@ pub struct ResolvedInstanceState {
     pub elided_decl: bool,
 }
 
+// Guard against accidental size regressions in per-component state retained across the topology.
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(std::mem::size_of::<CompactChildren>() <= 56);
+    if std::mem::size_of::<fuchsia_sync::Mutex<()>>() <= 8 {
+        assert!(std::mem::size_of::<InstanceState>() <= 192);
+        assert!(std::mem::size_of::<ResolvedInstanceState>() <= 616);
+    }
+};
+
 /// Abbreviated equivalent to [ComponentAddress] that omits the actual url string.
 /// This is a memory optimization: we can reconstruct the full [ComponentAddress]
 /// by combining this type with the string [`ComponentInstance::component_url`].
@@ -1120,11 +1130,10 @@ impl ResolvedInstanceState {
                         && coll.as_ref().map(|s| s as &str)
                             == moniker.collection().map(|s| s.as_ref())
                 }
-                DependencyNode::Collection(name) => match moniker.collection() {
-                    Some(n) => name == n.as_ref(),
-                    None => false,
-                },
-                DependencyNode::Capability(_)
+                // Collection nodes represent collection-wide dependencies shared across all
+                // instances in the collection rather than a single dynamic child.
+                DependencyNode::Collection(_)
+                | DependencyNode::Capability(_)
                 | DependencyNode::Self_
                 | DependencyNode::Environment(_) => false,
             }

@@ -145,11 +145,6 @@ class NodeManager {
 
   virtual void WaitForBootup(fit::callback<void()> callback) { callback(); }
 
-  virtual void ImportDictionary(fuchsia_component_sandbox::DictionaryRef dictionary,
-                                fit::callback<void(zx::result<uint64_t>)> callback) {
-    callback(zx::error(ZX_ERR_NOT_SUPPORTED));
-  }
-
   virtual void RequestMatchPendingNode(
       fidl::VectorView<fuchsia_driver_framework::wire::ParentSpec2> dependencies,
       fit::callback<
@@ -333,6 +328,10 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   // E.g: dev.sys.topo.path
   std::string MakeComponentMoniker() const;
 
+  // Computes a deterministic, stable 16-character hex hash over the node's unstripped,
+  // undeduplicated primary-parent name chain to disambiguate colliding monikers.
+  std::string MakeDisambiguator() const;
+
   // Returns a duplicate of the node's power element token, if available.
   // If the node has no power token, this will return an invalid zx::event.
   zx::event DuplicatePowerToken() const {
@@ -375,6 +374,9 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   }
 
   void SetShouldDestroy();
+
+  void AddShutdownCompleteCallback(fit::callback<void()> callback);
+  void RunShutdownCompleteCallbacks();
 
   // Invoked when a bind sequence has been completed. It allows us to reply to outstanding bind
   // requests that may have originated from the node.
@@ -446,17 +448,14 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
 
   void PrepareDictionary(fit::callback<void(zx::result<>)> callback);
 
-  void SetSubtreeDictionaryRef(
-      std::optional<fuchsia_component_sandbox::CapabilityId> subtree_dictionary_ref) {
+  void SetSubtreeDictionaryRef(std::optional<zx::eventpair> subtree_dictionary_ref) {
     if (subtree_dictionary_ref.has_value()) {
       ZX_ASSERT_MSG(!dictionary_ref_.has_value(), "cannot use SubtreeDictionaryRef on this node");
     }
-    subtree_dictionary_ref_ = subtree_dictionary_ref;
+    subtree_dictionary_ref_ = std::move(subtree_dictionary_ref);
   }
 
-  void set_dictionary_ref(std::optional<fuchsia_component_sandbox::CapabilityId> ref) {
-    dictionary_ref_ = ref;
-  }
+  void set_dictionary_ref(std::optional<zx::eventpair> ref) { dictionary_ref_ = std::move(ref); }
 
   /// Sets the power dependency overrides for this node. These overrides will be
   /// used instead of the default power dependencies when the driver is started.
@@ -475,8 +474,8 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
 
   bool SkipInjectedOffers() const override { return HasSubtreeDictionaryRef(); }
 
-  std::optional<fuchsia_component_sandbox::DictionaryRef> TakeDictionary() override {
-    std::optional<fuchsia_component_sandbox::DictionaryRef> temp;
+  std::optional<zx::eventpair> TakeDictionary() override {
+    std::optional<zx::eventpair> temp;
     std::swap(temp, offers_dictionary_);
     return temp;
   }
@@ -833,6 +832,7 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
     std::string driver_url;
     zx::event component_instance;
     zx_koid_t component_instance_koid = 0;
+    bool memory_attributed = false;
 
     DriverState state = DriverState::kBinding;
   };
@@ -1027,9 +1027,9 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
   // testing at the moment through |RestartWithDictionary|. |dictionary_ref_| is the node specific
   // dictionary that contains offers that the node provides that are type |kDictionaryOffer|.
   // These two cannot be used together as it is.
-  std::optional<fuchsia_component_sandbox::CapabilityId> subtree_dictionary_ref_;
-  std::optional<fuchsia_component_sandbox::CapabilityId> dictionary_ref_;
-  std::optional<fuchsia_component_sandbox::DictionaryRef> offers_dictionary_;
+  std::optional<zx::eventpair> subtree_dictionary_ref_;
+  std::optional<zx::eventpair> dictionary_ref_;
+  std::optional<zx::eventpair> offers_dictionary_;
   std::list<DirReceiverImpl> dir_receivers_;
 
   Collection collection_ = Collection::kNone;
@@ -1063,6 +1063,7 @@ class Node : public fidl::WireServer<fuchsia_driver_framework::NodeController>,
 
   // Invoked when the node has been fully removed.
   fit::callback<void()> remove_complete_callback_;
+  std::vector<fit::callback<void()>> shutdown_complete_callbacks_;
   bool should_destroy_ = false;
   fidl::WireClient<fuchsia_component::Controller> component_controller_;
 

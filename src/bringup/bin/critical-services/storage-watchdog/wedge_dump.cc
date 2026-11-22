@@ -21,6 +21,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <format>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -36,8 +37,12 @@
 
 #include "src/bringup/bin/critical-services/storage-watchdog/archivist_snapshot.h"
 #include "src/bringup/bin/critical-services/storage-watchdog/diagnostics_text.h"
+#include "src/bringup/bin/critical-services/storage-watchdog/pager_fault.h"
+#include "src/lib/fsl/handles/object_info.h"
 
-// Zircon C headers define ZX_RIGHT_*, ZX_INFO_*, ZX_VM_*, and ZX_THREAD_* with signed (1 << N).
+// //src/lib/debug:backtrace-request adds -I//zircon/system/public ahead of the sysroot, exposing
+// signed int shift-count literals in ZX_RIGHT_*, ZX_INFO_*, ZX_VM_*, ZX_THREAD_*, and ZX_JOB_* to
+// clang-tidy.
 // NOLINTBEGIN(bugprone-signed-bitwise)
 namespace storage_watchdog {
 namespace {
@@ -45,46 +50,26 @@ namespace {
 constexpr char kTag[] = "STORAGE WATCHDOG";
 constexpr zx::duration kDeadline = zx::sec(60);
 constexpr zx::duration kSuspendTimeout = zx::msec(100);
+constexpr zx::duration kRuntimeSampleWindow = zx::msec(250);
 constexpr zx::duration kModuleTimeout = zx::sec(2);
 constexpr size_t kMaxFrames = 48;
 constexpr size_t kMaxStarnixThreads = 64;
 // stdout goes to the debuglog, one record (40 byte header + text) per line. The crashlog keeps
-// only the newest 128 KiB of the debuglog, so the dump must stay well below that, or its end
-// would evict its start. Stacks come first and stop at kMaxStackDebuglogBytes. Logs and Inspect
-// get what's left of kMaxDebuglogBytes, which leaves room for what the kernel and other
-// processes log until the reboot.
-constexpr size_t kMaxStackDebuglogBytes = 80ULL * 1024;
-constexpr size_t kMaxDebuglogBytes = 112ULL * 1024;
+// only the newest 128 KiB of the debuglog, so the dump must stay well below that (~40 KiB of
+// headroom) so critical-process teardown and kernel page-fault diagnostics during root-job kill
+// cannot evict the start of the dump. Runtime deltas are capped at kMaxRuntimeDebuglogBytes so
+// primary stacks always fit within kMaxStackDebuglogBytes; logs and Inspect get what's left of
+// kMaxDebuglogBytes.
+constexpr size_t kMaxRuntimeDebuglogBytes = 16ULL * 1024;
+constexpr size_t kMaxStackDebuglogBytes = 56ULL * 1024;
+constexpr size_t kMaxDebuglogBytes = 88ULL * 1024;
 constexpr zx::duration kArchivistTimeout = zx::sec(10);
 
 size_t debuglog_used = 0;
 
 void Print(std::string_view text) {
   fwrite(text.data(), 1, text.size(), stdout);
-  debuglog_used += text.size() + (kDebuglogRecordHeader * std::ranges::count(text, '\n'));
-}
-
-template <typename T>
-std::vector<T> GetInfo(const zx::process& process, uint32_t topic) {
-  std::vector<T> items;
-  size_t actual = 0, avail = 0;
-  for (int attempt = 0; attempt < 3; attempt++) {
-    if (process.get_info(topic, items.data(), items.size() * sizeof(T), &actual, &avail) != ZX_OK) {
-      return {};
-    }
-    if (actual == avail) {
-      break;
-    }
-    items.resize(avail + 8);
-  }
-  items.resize(actual);
-  return items;
-}
-
-std::string GetName(zx_handle_t handle) {
-  char name[ZX_MAX_NAME_LEN] = {};
-  zx_object_get_property(handle, ZX_PROP_NAME, name, sizeof(name));
-  return name;
+  debuglog_used += DebuglogCost(text);
 }
 
 const char* StateName(zx_thread_state_t state) {
@@ -127,22 +112,39 @@ struct Process {
   zx::process handle;
   std::string name;
   std::vector<Thread> threads;
+  bool driver_host = false;
   // Whether it runs code from a package blob rather than bootfs.
   bool pager_backed_code = false;
 };
 
-// Picks the threads worth a backtrace: all of fxfs, any thread blocked on a pager, and the non-idle
-// threads of driver hosts (incl. the storage drivers) and Starnix.
+// Picks the threads worth a backtrace: all of the focus pager process, fxfs, and fshost, the
+// threads of the focus faulting process that are stopped in an exception, any thread blocked on a
+// pager, and the non-idle threads of driver hosts (incl. the storage drivers) and Starnix.
 class ThreadPicker final : public TaskEnumerator {
  public:
+  explicit ThreadPicker(const WedgeDumpFocus& focus) : focus_(focus) {}
+
   std::vector<Process> TakeProcesses() { return std::move(processes_); }
 
-  zx_status_t OnProcess(int, zx_handle_t process, zx_koid_t koid, zx_koid_t) override {
+  zx_status_t OnJob(int, zx_handle_t job, zx_koid_t koid, zx_koid_t) override {
+    // A driver host renames its process after its colocation group or its first driver, but its
+    // component job keeps the driver host component's name (driver_host.cm, driver_host_next.cm).
+    if (fsl::GetObjectName(job).contains("driver_host")) {
+      driver_host_jobs_.insert(koid);
+    }
+    return ZX_OK;
+  }
+
+  zx_status_t OnProcess(int, zx_handle_t process, zx_koid_t koid, zx_koid_t job) override {
     // Never suspend our own threads: one of them might hold a lock that the dump needs.
     if (koid == self_koid_) {
       return ZX_OK;
     }
-    Process& entry = processes_.emplace_back(Process{.koid = koid, .name = GetName(process)});
+    std::string name = fsl::GetObjectName(process);
+    // Hosts that driver_manager launches itself sit in its job, named driver-host-<name>.
+    const bool driver_host = driver_host_jobs_.contains(job) || name.contains("driver-host");
+    Process& entry = processes_.emplace_back(
+        Process{.koid = koid, .name = std::move(name), .driver_host = driver_host});
     zx_handle_duplicate(process, ZX_RIGHT_SAME_RIGHTS, entry.handle.reset_and_get_address());
     return ZX_OK;
   }
@@ -154,16 +156,19 @@ class ThreadPicker final : public TaskEnumerator {
     Process& process = processes_.back();
     zx_info_thread_t info = {};
     zx_object_get_info(thread, ZX_INFO_THREAD, &info, sizeof(info), nullptr, nullptr);
-    std::string name = GetName(thread);
+    std::string name = fsl::GetObjectName(thread);
     auto has = [](std::string_view s, std::string_view part) { return s.contains(part); };
     const zx_thread_state_t state = info.state;
     const bool busy = state != ZX_THREAD_STATE_BLOCKED_PORT;
-    const bool picked =
-        state == ZX_THREAD_STATE_BLOCKED_PAGER || has(process.name, "fxfs") ||
-        (busy && (has(process.name, "driver_host") || has(process.name, "starnix_runner"))) ||
-        (has(process.name, "starnix_kernel") &&
-         (has(name, "crypt") || (busy && state != ZX_THREAD_STATE_BLOCKED_FUTEX &&
-                                 process.threads.size() < kMaxStarnixThreads)));
+    const bool picked = process.koid == focus_.pager_process_koid ||
+                        (process.koid == focus_.faulting_process_koid &&
+                         state == ZX_THREAD_STATE_BLOCKED_EXCEPTION) ||
+                        state == ZX_THREAD_STATE_BLOCKED_PAGER || has(process.name, "fxfs") ||
+                        has(process.name, "fshost") ||
+                        (busy && (process.driver_host || has(process.name, "starnix_runner"))) ||
+                        (has(process.name, "starnix_kernel") &&
+                         (has(name, "crypt") || (busy && state != ZX_THREAD_STATE_BLOCKED_FUTEX &&
+                                                 process.threads.size() < kMaxStarnixThreads)));
     if (picked) {
       Thread& entry = process.threads.emplace_back(
           Thread{.koid = koid, .name = std::move(name), .state = state});
@@ -173,25 +178,23 @@ class ThreadPicker final : public TaskEnumerator {
   }
 
  protected:
+  bool has_on_job() const override { return true; }
   bool has_on_process() const override { return true; }
   bool has_on_thread() const override { return true; }
 
  private:
+  const WedgeDumpFocus& focus_;
+  std::unordered_set<zx_koid_t> driver_host_jobs_;
   std::vector<Process> processes_;
-  const zx_koid_t self_koid_ = [] {
-    zx_info_handle_basic_t info = {};
-    zx::process::self()->get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr);
-    return info.koid;
-  }();
+  const zx_koid_t self_koid_ = fsl::GetCurrentProcessKoid();
 };
 
 // A process's mappings, and which of them are pager-backed (package blobs and file mappings,
 // whose pages may have to come from the stuck storage stack).
 class Mappings {
  public:
-  explicit Mappings(const zx::process& process)
-      : maps_(GetInfo<zx_info_maps_t>(process, ZX_INFO_PROCESS_MAPS)) {
-    for (const zx_info_vmo_t& vmo : GetInfo<zx_info_vmo_t>(process, ZX_INFO_PROCESS_VMOS)) {
+  explicit Mappings(const zx::process& process) : maps_(GetProcessMaps(process)) {
+    for (const zx_info_vmo_t& vmo : GetProcessVmos(process)) {
       if (vmo.flags & ZX_INFO_VMO_PAGER_BACKED) {
         paged_vmos_.insert(vmo.koid);
       }
@@ -458,9 +461,11 @@ std::optional<std::string> ModuleContext(const zx::process& process, std::vector
   return result->text;
 }
 
-// Prints each distinct stack of |process|'s picked threads once, and appends its summary line to
-// |summary|. Returns false if reading module headers timed out.
-bool DumpProcess(const Process& process, bool skip_pager_backed_modules, std::string& summary) {
+// Prints each distinct stack of |process|'s picked threads once, as many as fit in |budget| bytes
+// of debuglog, and appends its summary line to |summary|. Returns false if reading module headers
+// timed out.
+bool DumpProcess(const Process& process, bool skip_pager_backed_modules, size_t budget,
+                 std::string& summary) {
   const Mappings maps(process.handle);
   struct Stack {
     std::vector<uint64_t> pcs;
@@ -468,7 +473,6 @@ bool DumpProcess(const Process& process, bool skip_pager_backed_modules, std::st
     std::string owners;
   };
   std::vector<Stack> stacks;
-  std::vector<uint64_t> all_pcs;
   size_t skipped = 0;
   for (const Thread& thread : process.threads) {
     std::optional pcs = SampleThread(process.handle, maps, thread);
@@ -478,7 +482,6 @@ bool DumpProcess(const Process& process, bool skip_pager_backed_modules, std::st
     }
     auto it = std::ranges::find(stacks, *pcs, &Stack::pcs);
     if (it == stacks.end()) {
-      all_pcs.insert(all_pcs.end(), pcs->begin(), pcs->end());
       it = stacks.insert(stacks.end(), Stack{.pcs = std::move(*pcs)});
     }
     // Keep the line within one debuglog record.
@@ -490,34 +493,186 @@ bool DumpProcess(const Process& process, bool skip_pager_backed_modules, std::st
     }
   }
 
-  std::optional<std::string> modules;
-  if (!stacks.empty() && !process.pager_backed_code) {
-    modules = BootfsModuleContext(process.handle, maps, all_pcs);
-  } else if (!stacks.empty() && !skip_pager_backed_modules) {
-    modules = ModuleContext(process.handle, std::move(all_pcs));
-  }
-
-  std::string text = "{{{reset}}}\n";
   char line[256];
-  snprintf(line, sizeof(line), "%s: %s (%" PRIu64 "): %zu threads, %zu skipped, %zu stacks%s\n",
-           kTag, process.name.c_str(), process.koid, process.threads.size(), skipped, stacks.size(),
-           modules ? "" : "; no module info (pager stuck?)");
-  text += line;
-  summary += line;
-  if (modules) {
-    text += *modules;
-  }
+  std::vector<std::string> stack_texts;
+  stack_texts.reserve(stacks.size());
   for (const Stack& stack : stacks) {
     snprintf(line, sizeof(line), "%s: %zu threads:%s\n", kTag, stack.threads, stack.owners.c_str());
-    text += line;
+    std::string& text = stack_texts.emplace_back(line);
     for (size_t i = 0; i < stack.pcs.size(); i++) {
       snprintf(line, sizeof(line), "{{{bt:%zu:0x%" PRIx64 ":%s}}}\n", i, stack.pcs[i],
                i == 0 ? "pc" : "ra");
       text += line;
     }
   }
+  // A process with many distinct stacks (e.g. kMaxStarnixThreads threads of kMaxFrames frames) can
+  // cost more than the whole dump's budget, so the budget has to be enforced per stack. Dropping
+  // stacks before the module lookup also keeps their modules out of the markup.
+  const size_t kept = FirstWithinBudget(stack_texts, budget).size();
+  std::vector<uint64_t> kept_pcs;
+  for (const Stack& stack : std::span(stacks).first(kept)) {
+    kept_pcs.insert(kept_pcs.end(), stack.pcs.begin(), stack.pcs.end());
+  }
+
+  std::optional<std::string> modules;
+  if (kept > 0 && !process.pager_backed_code) {
+    modules = BootfsModuleContext(process.handle, maps, kept_pcs);
+  } else if (kept > 0 && !skip_pager_backed_modules) {
+    modules = ModuleContext(process.handle, std::move(kept_pcs));
+  }
+
+  std::string omitted;
+  if (kept < stacks.size()) {
+    omitted = std::format(" ({} omitted, out of debuglog space)", stacks.size() - kept);
+  }
+  std::string text = "{{{reset}}}\n";
+  snprintf(line, sizeof(line), "%s: %s (%" PRIu64 "): %zu threads, %zu skipped, %zu stacks%s%s\n",
+           kTag, process.name.c_str(), process.koid, process.threads.size(), skipped, stacks.size(),
+           omitted.c_str(), (modules || kept == 0) ? "" : "; no module info (pager stuck?)");
+  text += line;
+  summary += line;
+  if (modules) {
+    text += *modules;
+  }
+  for (const std::string& stack_text : std::span(stack_texts).first(kept)) {
+    text += stack_text;
+  }
   Print(text);
-  return modules.has_value() || stacks.empty() || !process.pager_backed_code;
+  return modules.has_value() || kept == 0 || !process.pager_backed_code;
+}
+
+std::optional<TaskRuntimeSample> ReadTaskRuntime(zx_handle_t handle) {
+  zx_info_task_runtime_t info = {};
+  if (zx_object_get_info(handle, ZX_INFO_TASK_RUNTIME, &info, sizeof(info), nullptr, nullptr) !=
+      ZX_OK) {
+    return std::nullopt;
+  }
+  return TaskRuntimeSample{
+      .cpu_ns = info.cpu_time,
+      .queue_ns = info.queue_time,
+      .page_fault_ns = info.page_fault_time,
+      .lock_contention_ns = info.lock_contention_time,
+  };
+}
+
+// Samples ZX_INFO_TASK_RUNTIME twice across kRuntimeSampleWindow for bootfs processes, driver
+// hosts, and the focus pager. cpu_time and queue_time include the time a thread has spent in its
+// current state, so their deltas show CPU spin and run-queue starvation. The kernel only charges
+// page_fault_time and lock_contention_time when a page fault or kernel lock wait ends, so their
+// deltas show churn. A thread stuck in one fault or lock wait for the whole window has 0 deltas,
+// like an idle thread; the thread state in the stack dump (e.g. "pager") tells those apart.
+void LogPrimaryTaskRuntimeDeltas(std::span<const Process> processes, const WedgeDumpFocus& focus) {
+  struct ThreadSnapshot {
+    const Thread* thread = nullptr;
+    std::optional<TaskRuntimeSample> before;
+  };
+  struct ProcessSnapshot {
+    const Process* process = nullptr;
+    std::optional<TaskRuntimeSample> before;
+    std::vector<ThreadSnapshot> threads;
+  };
+
+  std::vector<ProcessSnapshot> snapshots;
+  for (const Process& process : processes) {
+    // ZX_INFO_TASK_RUNTIME only queries kernel task counters and never touches pager-backed memory,
+    // so package-backed driver hosts are safe to sample alongside bootfs processes.
+    if (process.pager_backed_code && !process.driver_host &&
+        process.koid != focus.pager_process_koid) {
+      continue;
+    }
+    ProcessSnapshot& proc_snap = snapshots.emplace_back(ProcessSnapshot{
+        .process = &process,
+        .before = ReadTaskRuntime(process.handle.get()),
+    });
+    proc_snap.threads.reserve(process.threads.size());
+    for (const Thread& thread : process.threads) {
+      proc_snap.threads.push_back(ThreadSnapshot{
+          .thread = &thread,
+          .before = ReadTaskRuntime(thread.handle.get()),
+      });
+    }
+  }
+  if (snapshots.empty()) {
+    return;
+  }
+
+  const zx::time sample_start = zx::clock::get_monotonic();
+  zx::nanosleep(sample_start + kRuntimeSampleWindow);
+  const int64_t window_ms = (zx::clock::get_monotonic() - sample_start).to_msecs();
+
+  constexpr size_t kMaxThreadsPerProcess = 16;
+  constexpr size_t kOverflowLineSlack = 128;
+  std::string text;
+  size_t runtime_cost = 0;
+  size_t printed_processes = 0;
+  size_t omitted_processes = 0;
+  for (const ProcessSnapshot& proc_snap : snapshots) {
+    const Process& process = *proc_snap.process;
+    std::string proc_delta;
+    if (proc_snap.before) {
+      if (std::optional<TaskRuntimeSample> after = ReadTaskRuntime(process.handle.get())) {
+        proc_delta = FormatTaskRuntimeDelta(*proc_snap.before, *after);
+      }
+    }
+
+    std::string thread_lines;
+    size_t active_threads = 0;
+    for (const ThreadSnapshot& thread_snap : proc_snap.threads) {
+      if (!thread_snap.before) {
+        continue;
+      }
+      const Thread& thread = *thread_snap.thread;
+      std::optional<TaskRuntimeSample> after = ReadTaskRuntime(thread.handle.get());
+      if (!after) {
+        continue;
+      }
+      const std::string delta = FormatTaskRuntimeDelta(*thread_snap.before, *after);
+      if (delta.empty()) {
+        continue;
+      }
+      if (active_threads < kMaxThreadsPerProcess) {
+        zx_info_thread_t info = {};
+        const zx_thread_state_t state =
+            zx_object_get_info(thread.handle.get(), ZX_INFO_THREAD, &info, sizeof(info), nullptr,
+                               nullptr) == ZX_OK
+                ? info.state
+                : thread.state;
+        thread_lines += std::format("{}:   thread {}({},{}): {}\n", kTag, thread.name, thread.koid,
+                                    StateName(state), delta);
+      }
+      active_threads++;
+    }
+    if (active_threads > kMaxThreadsPerProcess) {
+      thread_lines += std::format("{}:   ... +{} active threads\n", kTag,
+                                  active_threads - kMaxThreadsPerProcess);
+    }
+
+    if (proc_delta.empty() && thread_lines.empty()) {
+      continue;
+    }
+    std::string entry =
+        std::format("{}: runtime +{}ms {} ({}): {}\n", kTag, window_ms, process.name, process.koid,
+                    proc_delta.empty() ? "threads active" : std::string_view(proc_delta));
+    entry += thread_lines;
+    const size_t entry_cost = DebuglogCost(entry);
+    if (runtime_cost + entry_cost + kOverflowLineSlack > kMaxRuntimeDebuglogBytes) {
+      omitted_processes++;
+      continue;
+    }
+    runtime_cost += entry_cost;
+    printed_processes++;
+    text += entry;
+  }
+
+  if (omitted_processes > 0) {
+    text += std::format("{}: runtime budget reached, skipped {} active processes\n", kTag,
+                        omitted_processes);
+  } else if (printed_processes == 0) {
+    text += std::format(
+        "{}: runtime +{}ms: no cpu, queue, or completed fault/lock time in {} primary processes\n",
+        kTag, window_ms, snapshots.size());
+  }
+  Print(text);
 }
 
 // Dies as a process critical to the root job, or kills the root job if that fails. Either way
@@ -528,8 +683,7 @@ bool DumpProcess(const Process& process, bool skip_pager_backed_modules, std::st
     std::println("{}: {}; terminating the root job", kTag, why);
     fflush(stdout);
     // The crashlog names the critical process, and feedback turns that into the crash signature.
-    constexpr char kName[] = "storage-watchdog";
-    zx::process::self()->set_property(ZX_PROP_NAME, kName, sizeof(kName) - 1);
+    fsl::SetObjectName(zx_process_self(), "storage-watchdog");
     zx_status_t status = zx_job_set_critical(
         root_job.get(), ZX_JOB_CRITICAL_PROCESS_RETCODE_NONZERO, zx_process_self());
     if (status == ZX_OK) {
@@ -547,11 +701,8 @@ bool DumpProcess(const Process& process, bool skip_pager_backed_modules, std::st
 
 }  // namespace
 
-bool HasPagerBackedCode(const zx::process& process) {
-  return Mappings(process).any_pager_backed_code();
-}
-
-void DumpWedgeDiagnosticsAndReboot(std::string_view reason, zx::job root_job) {
+void DumpWedgeDiagnosticsAndReboot(std::string_view reason, zx::job root_job,
+                                   const WedgeDumpFocus& focus) {
   const zx::time start = zx::clock::get_monotonic();
   auto job = std::make_shared<zx::job>(std::move(root_job));
   std::thread([job, deadline = start + kDeadline] {
@@ -559,33 +710,62 @@ void DumpWedgeDiagnosticsAndReboot(std::string_view reason, zx::job root_job) {
     Reboot(*job, "wedge dump deadline reached");
   }).detach();
 
-  std::println("{}: ==== WEDGE DUMP ==== storage stall: {}", kTag, reason);
-  ThreadPicker picker;
+  const int64_t start_ns = start.get();
+  Print(std::format("{}: ==== WEDGE DUMP ==== storage stall: {} (mono={}.{:03}s)\n", kTag, reason,
+                    start_ns / 1'000'000'000, (start_ns / 1'000'000) % 1000));
+  if (std::optional<std::string> focus_line = focus.FormatLine(kTag)) {
+    Print(*focus_line + "\n");
+  }
+  ThreadPicker picker(focus);
   picker.WalkJobTree(job->get());
   std::vector<Process> processes = picker.TakeProcesses();
   std::erase_if(processes, [](const Process& p) { return p.threads.empty(); });
-  // Processes running bootfs code first: their module headers can always be read.
+  // Sample bootfs storage and driver processes first before walking or unwinding pager-backed
+  // client processes, whose module reads can block on the wedged pager or sample after recovery.
   for (Process& process : processes) {
-    process.pager_backed_code = HasPagerBackedCode(process.handle);
+    process.pager_backed_code = Mappings(process.handle).any_pager_backed_code();
   }
-  std::ranges::stable_partition(processes, std::not_fn(&Process::pager_backed_code));
+  std::ranges::stable_sort(processes, {}, [&focus](const Process& p) {
+    if (!p.pager_backed_code) {
+      if (p.koid == focus.pager_process_koid) {
+        return 0;
+      }
+      if (p.name.contains("fxfs") || p.name.contains("fshost")) {
+        return 1;
+      }
+      return 2;
+    }
+    if (p.koid == focus.pager_process_koid) {
+      return 3;
+    }
+    if (p.koid == focus.faulting_process_koid) {
+      return 4;
+    }
+    if (p.driver_host) {
+      return 5;
+    }
+    return 6;
+  });
+
+  LogPrimaryTaskRuntimeDeltas(processes, focus);
 
   bool pager_stuck = false;
   std::string summary;
   for (size_t i = 0; i < processes.size(); i++) {
-    if (debuglog_used > kMaxStackDebuglogBytes) {
-      std::println("{}: out of debuglog space, skipped {} processes", kTag, processes.size() - i);
+    if (debuglog_used >= kMaxStackDebuglogBytes) {
+      Print(std::format("{}: out of debuglog space, skipped {} processes\n", kTag,
+                        processes.size() - i));
       break;
     }
-    pager_stuck |= !DumpProcess(processes[i], pager_stuck, summary);
+    pager_stuck |=
+        !DumpProcess(processes[i], pager_stuck, kMaxStackDebuglogBytes - debuglog_used, summary);
   }
 
   // Then the log tail and storage Inspect data, as much as fits. Inspect is small, so it gets
   // room first, and the log tail drops its oldest lines to fit in the rest.
   ArchivistSnapshots snapshots = TakeArchivistSnapshots(zx::deadline_after(kArchivistTimeout));
   // Leave room for the two snapshot summary lines and the trailer below.
-  const size_t reserved = (3 * (kMaxLineLength + kDebuglogRecordHeader)) + summary.size() +
-                          (kDebuglogRecordHeader * std::ranges::count(summary, '\n'));
+  const size_t reserved = (3 * (kMaxLineLength + kDebuglogRecordHeader)) + DebuglogCost(summary);
   size_t room = kMaxDebuglogBytes - std::min(kMaxDebuglogBytes, debuglog_used + reserved);
   std::span<const std::string> inspect = snapshots.inspect.lines;
   while (DebuglogCost(inspect) > room) {
@@ -608,10 +788,10 @@ void DumpWedgeDiagnosticsAndReboot(std::string_view reason, zx::job root_job) {
   Print(std::string(kTag) + ": ==== WEDGE DUMP END ==== storage stall: " + std::string(reason) +
         "\n" + summary);
 
-  char why[64];
-  snprintf(why, sizeof(why), "wedge dump done in %.1f s",
-           static_cast<double>((zx::clock::get_monotonic() - start).to_msecs()) / 1000);
-  Reboot(*job, why);
+  const std::string why =
+      std::format("wedge dump done in {:.1f} s",
+                  static_cast<double>((zx::clock::get_monotonic() - start).to_msecs()) / 1000.0);
+  Reboot(*job, why.c_str());
 }
 
 }  // namespace storage_watchdog

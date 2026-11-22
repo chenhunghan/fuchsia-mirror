@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fidl::endpoints::{Proxy, create_proxy};
-use fuchsia_component::client::connect_to_named_protocol_at_dir_root;
+use fuchsia_component::client::Service;
 use futures::{FutureExt as _, StreamExt as _, TryStreamExt as _};
 use std::pin::pin;
 use wlan_common::append::Append;
@@ -12,27 +11,24 @@ use zerocopy::byteorder::big_endian::U16 as BigEndianU16;
 
 /// Returns a Netdevice client with the specified MAC address, or None if none is found.
 pub async fn create_client(
-    devfs: &fidl_fuchsia_io::DirectoryProxy,
+    test_ns_prefix: &str,
     mac: fidl_fuchsia_net::MacAddress,
 ) -> Option<(netdevice_client::Client, netdevice_client::Port)> {
-    let (directory, directory_server) = create_proxy::<fidl_fuchsia_io::DirectoryMarker>();
-
-    fdio::open_at(
-        devfs.as_channel().as_ref(),
-        "class/network",
-        fidl_fuchsia_io::PERM_READABLE,
-        directory_server.into_channel(),
-    )
-    .expect("connect to /dev/class/network");
-
-    let dirents = fuchsia_fs::directory::readdir(&directory).await.expect("readdir failed");
-    let devices = dirents.into_iter().map(|file| {
-        log::info!("Found file name {:?}", file.name);
-        connect_to_named_protocol_at_dir_root::<fidl_fuchsia_hardware_network::DeviceMarker>(
-            &directory, &file.name,
-        )
-        .expect("creating proxy")
-    });
+    let test_ns_dir =
+        fuchsia_fs::directory::open_in_namespace(test_ns_prefix, fidl_fuchsia_io::Flags::empty())
+            .expect("open test_ns_prefix");
+    let instances =
+        match Service::open_from_dir(&test_ns_dir, fidl_fuchsia_hardware_network::ServiceMarker)
+            .expect("open service")
+            .enumerate()
+            .await
+        {
+            Ok(instances) => instances,
+            Err(_) => return None,
+        };
+    let devices = instances
+        .into_iter()
+        .map(|instance| instance.connect_to_device().expect("connect to device"));
 
     // TODO(https://fxbug.dev/338700293): Consider looping with a backoff delay if the device is not found
     // on the first try.

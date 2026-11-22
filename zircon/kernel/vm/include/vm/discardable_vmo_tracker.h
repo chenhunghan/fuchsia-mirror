@@ -10,10 +10,8 @@
 #include <assert.h>
 #include <stdint.h>
 #include <zircon/compiler.h>
-#include <zircon/types.h>
 
 #include <kernel/ffi.h>
-#include <ktl/utility.h>
 #include <vm/vm_cow_pages.h>
 
 class DiscardableVmoTracker;
@@ -26,11 +24,6 @@ void rust_discardable_vmo_tracker_init_cow_pages(DiscardableVmoTracker* tracker,
 VmCowPages* rust_discardable_vmo_tracker_debug_get_cow(const DiscardableVmoTracker* tracker);
 void rust_discardable_vmo_tracker_remove_from_discardable_list_locked(
     DiscardableVmoTracker* tracker);
-zx_status_t rust_discardable_vmo_tracker_lock_discardable_locked(
-    DiscardableVmoTracker* tracker, bool try_lock, bool* was_discarded_out,
-    bool* updated_reclaim_candidates_out);
-zx_status_t rust_discardable_vmo_tracker_unlock_discardable_locked(
-    DiscardableVmoTracker* tracker, bool* updated_reclaim_candidates_out);
 bool rust_discardable_vmo_tracker_is_eligible_for_reclamation_locked(
     const DiscardableVmoTracker* tracker);
 bool rust_discardable_vmo_tracker_was_discarded_locked(const DiscardableVmoTracker* tracker);
@@ -86,29 +79,6 @@ class DiscardableVmoTracker final {
   void RemoveFromDiscardableListLocked(Lock<CriticalMutex>& cow_lock) TA_REQ(cow_lock) {
     AssertIsCowLock(cow_lock);
     rust_discardable_vmo_tracker_remove_from_discardable_list_locked(this);
-  }
-
-  // Lock and unlock functions. Returns ZX_OK if the operation succeeded or an error code
-  // if it failed, along with whether the VMO was moved between the discardable reclaimable
-  // and non-reclaimable lists. The intent of this is to inform the caller if they might need
-  // to update any book-keeping depending on whether the VMO becomes reclaimable or
-  // unreclaimable.
-  ktl::pair<zx_status_t, bool> LockDiscardableLocked(Lock<CriticalMutex>& cow_lock, bool try_lock,
-                                                     bool* was_discarded_out) TA_REQ(cow_lock) {
-    AssertIsCowLock(cow_lock);
-    ASSERT(was_discarded_out);
-    bool updated_reclaim = false;
-    zx_status_t status = rust_discardable_vmo_tracker_lock_discardable_locked(
-        this, try_lock, was_discarded_out, &updated_reclaim);
-    return ktl::make_pair(status, updated_reclaim);
-  }
-  ktl::pair<zx_status_t, bool> UnlockDiscardableLocked(Lock<CriticalMutex>& cow_lock)
-      TA_REQ(cow_lock) {
-    AssertIsCowLock(cow_lock);
-    bool updated_reclaim = false;
-    zx_status_t status =
-        rust_discardable_vmo_tracker_unlock_discardable_locked(this, &updated_reclaim);
-    return ktl::make_pair(status, updated_reclaim);
   }
 
   // Returns whether this object qualifies for reclamation based on whether its state is

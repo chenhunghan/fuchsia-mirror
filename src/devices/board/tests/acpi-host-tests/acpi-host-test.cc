@@ -15,6 +15,7 @@
 #include "src/devices/board/lib/acpi/device-args.h"
 #include "src/devices/board/lib/acpi/device-for-host.h"
 #include "src/devices/board/lib/acpi/manager-host.h"
+#include "src/devices/board/lib/acpi/pci.h"
 #include "src/devices/board/tests/acpi-host-tests/table-manager.h"
 #include "third_party/acpica/src/source/include/actypes.h"
 
@@ -103,9 +104,9 @@ TEST_F(AcpiHostTest, DeviceIsChildOfScopeTest) {
 }
 }  // namespace acpi_host_test
 
-zx_status_t pci_init(zx_device_t* parent, ACPI_HANDLE object,
+zx_status_t pci_init(zx_device_t* parent, async_dispatcher_t* dispatcher, ACPI_HANDLE object,
                      acpi::UniquePtr<ACPI_DEVICE_INFO> info, acpi::Manager* acpi,
-                     std::vector<pci_bdf_t> acpi_bdfs) {
+                     std::vector<ACPI_PCI_ID> acpi_bdfs) {
   return ZX_OK;
 }
 

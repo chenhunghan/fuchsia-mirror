@@ -37,5 +37,5 @@ pub fn sys_nanosleep(deadline: zx_instant_mono_t) -> Result<(), Status> {
 
     // This syscall is declared as "blocking", so a higher layer will automatically
     // retry if we return ZX_ERR_INTERNAL_INTR_RETRY.
-    sleep_etc(&slack_deadline, Interruptible::YES, now.0)
+    sleep_etc(&slack_deadline, Interruptible::YES, now)
 }

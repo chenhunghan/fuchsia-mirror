@@ -4,71 +4,75 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Kernel driver handoff initialization stages, mirroring `<dev/init.h>`.
+//! Kernel driver handoff initialization stages.
 
-use handoff::{ArchPhysHandoff, PhysHandoff, uart_all_Driver};
+#[cfg(target_arch = "aarch64")]
+use handoff::ArchPhysHandoff;
+use handoff::PhysHandoff;
 
-/// These routines initialize the kernel's drivers, as a function of the
-/// configurations described in the physboot hand-off, at two stages:
-/// * "early" refers to immediately after early platform initialization, before
-///   the VM and heap are set up;
-/// * "post vm" refers to immediately after the main virtual memory system is
-///   initialized, so drivers can use the VM to map physical memory.
-/// * "late" refers to immediately after the main platform initialization, once
-///   the VM, the heap, threading, and general kernel facilities are available.
+use crate::platform_rs::debug::{
+    uart_driver_handoff_early, uart_driver_handoff_late, uart_driver_handoff_post_vm,
+};
+
+/// Initializes the kernel's drivers at the early stage (immediately after early platform
+/// initialization, before the VM and heap are set up), as a function of the configurations
+/// described in the physboot handoff.
 ///
 /// # Safety
 ///
 /// Must be called once during early kernel boot with the valid physboot `handoff` reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn DriverHandoffEarly(handoff: &PhysHandoff) {
+pub unsafe fn driver_handoff_early(handoff: &PhysHandoff) {
     // SAFETY: `handoff` is the valid physboot handoff structure for the early handoff stage.
     unsafe {
-        UartDriverHandoffEarly(&handoff.uart);
+        uart_driver_handoff_early(&handoff.uart);
+        #[cfg(target_arch = "aarch64")]
         PlatformDriverHandoffEarly(&handoff.arch_handoff);
+        #[cfg(target_arch = "riscv64")]
+        crate::generic_riscv64::dev_init::platform_driver_handoff_early(&handoff.arch_handoff);
     }
 }
 
-/// Initializes the kernel's drivers at the "post vm" stage (immediately after the main virtual
+/// Initializes the kernel's drivers at the post-VM stage (immediately after the main virtual
 /// memory system is initialized, so drivers can use the VM to map physical memory), as a function
-/// of the configurations described in the physboot hand-off.
+/// of the configurations described in the physboot handoff.
 ///
 /// # Safety
 ///
 /// Must be called once during post-VM kernel boot with the valid physboot `handoff` reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn DriverHandoffPostVm(handoff: &PhysHandoff) {
-    // SAFETY: `handoff` is the valid physboot handoff structure for the post-VM handoff stage.
+pub unsafe fn driver_handoff_post_vm(handoff: &PhysHandoff) {
+    uart_driver_handoff_post_vm(&handoff.uart);
+    // SAFETY: `handoff` is the valid physboot handoff structure for the post-VM handoff stage,
+    // and the caller upholds the one-time post-VM boot contract.
+    #[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
     unsafe {
-        UartDriverHandoffPostVm(&handoff.uart);
+        #[cfg(target_arch = "aarch64")]
         PlatformDriverHandoffPostVm(&handoff.arch_handoff);
+        #[cfg(target_arch = "riscv64")]
+        crate::generic_riscv64::dev_init::platform_driver_handoff_post_vm(&handoff.arch_handoff);
     }
 }
 
-/// Initializes the kernel's drivers at the "late" stage (immediately after the main platform
-/// initialization, once the VM, the heap, threading, and general kernel facilities are available),
-/// as a function of the configurations described in the physboot hand-off.
+/// Initializes the kernel's drivers at the late stage (immediately after main platform
+/// initialization, once the VM, heap, threading, and general kernel facilities are available), as
+/// a function of the configurations described in the physboot handoff.
 ///
 /// # Safety
 ///
 /// Must be called once during late kernel boot with the valid physboot `handoff` reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn DriverHandoffLate(handoff: &PhysHandoff) {
-    // SAFETY: `handoff` is the valid physboot handoff structure for the late handoff stage.
+pub unsafe fn driver_handoff_late(handoff: &PhysHandoff) {
+    // SAFETY: `handoff` is the valid physboot handoff structure for the late handoff stage,
+    // and the caller upholds the one-time late boot contract.
     unsafe {
-        UartDriverHandoffLate(&handoff.uart);
+        uart_driver_handoff_late(&handoff.uart);
+        #[cfg(target_arch = "aarch64")]
         PlatformDriverHandoffLate(&handoff.arch_handoff);
+        #[cfg(target_arch = "riscv64")]
+        crate::generic_riscv64::dev_init::platform_driver_handoff_late(&handoff.arch_handoff);
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 unsafe extern "C" {
-    /// Early UART initialization routine.
-    fn UartDriverHandoffEarly(serial: &uart_all_Driver);
-    /// Post-VM UART initialization routine.
-    fn UartDriverHandoffPostVm(serial: &uart_all_Driver);
-    /// Late UART initialization routine.
-    fn UartDriverHandoffLate(serial: &uart_all_Driver);
-
     /// Early platform-specific driver initialization routine.
     fn PlatformDriverHandoffEarly(arch_handoff: &ArchPhysHandoff);
     /// Post-VM platform-specific driver initialization routine.

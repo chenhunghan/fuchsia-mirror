@@ -46,16 +46,19 @@ debug::Status DebuggedJob::Init(DebuggedJobCreateInfo&& info) {
 void DebuggedJob::OnProcessStarting(std::unique_ptr<ProcessHandle> process,
                                     std::unique_ptr<ExceptionHandle> exception) {
   FX_DCHECK(debug_agent_);
+  FX_DCHECK(exception);
 
-  debug_agent_->OnProcessChanged(DebugAgent::ProcessChangedHow::kStarting, std::move(process));
+  debug_agent_->OnProcessChanged(DebugAgent::ProcessChangedHow::kStarting, std::move(process),
+                                 exception->GetTid());
 }
 
 void DebuggedJob::OnProcessNameChanged(std::unique_ptr<ProcessHandle> process_handle,
                                        std::unique_ptr<ExceptionHandle> exception) {
   FX_DCHECK(debug_agent_);
+  FX_DCHECK(exception);
 
   debug_agent_->OnProcessChanged(DebugAgent::ProcessChangedHow::kNameChanged,
-                                 std::move(process_handle));
+                                 std::move(process_handle), exception->GetTid());
 }
 
 void DebuggedJob::OnUnhandledException(std::unique_ptr<ExceptionHandle> exception_handle) {

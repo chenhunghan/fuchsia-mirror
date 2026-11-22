@@ -112,6 +112,7 @@ rustc_binary("lspci") {
     ":lib",
     "//sdk/fidl/fuchsia.hardware.pci:fuchsia.hardware.pci_rust",
     "//sdk/rust/zx",
+    "//src/lib/fidl/rust/fidl",
     "//src/lib/fuchsia",
     "//src/lib/fuchsia-component",
     "//third_party/rust_crates:anyhow",

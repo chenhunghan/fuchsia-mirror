@@ -29,6 +29,14 @@ ffx config env get
 
     | Configuration Value                     | Documentation                      |
     | --------------------------------------- | ---------------------------------- |
+    | `agent.lock_dir`                        | Optional override directory for    |
+    |                                         | per-target agent ownership         |
+    |                                         | lockfiles. Defaults to             |
+    |                                         | `/run/user/<euid>/ffx/agent-locks` |
+    |                                         | (or `/tmp/ffx-agent-locks-<euid>`).|
+    | `agent.target_ownership`                | Enforce session-bound target       |
+    |                                         | ownership when invoked by an AI    |
+    |                                         | agent. Defaults to `false`.        |
     | `connectivity.direct`                   | Support direct target connections. |
     |                                         | Defaults to `true`.                |
     | `connectivity.enable_network`           | Enable using MDNS to discover      |
@@ -37,7 +45,7 @@ ffx config env get
     | `connectivity.enable_uart`              | Allow ffx to use a UART connection.|
     |                                         | Defaults to `false`.               |
     | `connectivity.enable_usb`               | Allow ffx to use a USB connection. |
-    |                                         | Defaults to `false`.               |
+    |                                         | Defaults to `true`.                |
     | `connectivity.enable_vsock`             | Allow using a VSOCK socket to      |
     |                                         | connect to virtual machine targets |
     |                                         | where supported. Defaults to       |
@@ -103,10 +111,13 @@ ffx config env get
     |                                         | `auto`, but can be overridden by   |
     |                                         | the user.                          |
     | `emu.instance_dir`                      | The root directory for storing     |
-    |                                         | instance specific data. Instances  |
-    |                                         | should create a subdirectory in    |
-    |                                         | this directory to store data.      |
-    |                                         | Defaults to `$DATA/emu/instances`  |
+    |                                         | instance specific data, or a list  |
+    |                                         | of them. Instances are created in  |
+    |                                         | the first directory; the others    |
+    |                                         | are only searched for existing     |
+    |                                         | instances. Defaults to             |
+    |                                         | `$SHARED_DATA/emu/instances`, then |
+    |                                         | `$DATA/emu/instances`.             |
     | `emu.kvm_path`                          | The filesystem path to the         |
     |                                         | system's KVM device. Must be       |
     |                                         | writable by the running process to |

@@ -20,10 +20,9 @@ use std::sync::Arc;
 /// Garbage collects blobs that are not protected by the base or cache packages, the package index,
 /// or open packages.
 ///
-/// Locking: a garbage collection pass waits for upgradable packages to be initialized, then
-/// acquires `gc_pass`, then locks the package index for reading until it is done deleting blobs
-/// (see `PackageIndex` and `PackageIndex::read_for_gc`). Only garbage collection acquires
-/// `gc_pass`.
+/// Locking: a garbage collection pass waits for upgradable packages to be initialized, acquires
+/// `gc_pass`, then calls [`PackageIndex::acquire_gc_lock`] and keeps the returned `GcGuard` until
+/// blob deletion completes. Only garbage collection acquires `gc_pass`.
 pub(crate) struct GcService {
     blobfs: blobfs::Client,
     base_packages: Arc<BaseIndex>,
@@ -165,9 +164,9 @@ impl GcService {
             // blobs are added to the index before their presence in blobfs is checked, so locking
             // the index until we are done deleting blobs guarantees we will never delete a blob
             // that resolution thinks it can skip fetching.
-            let package_index = self.package_index.read_for_gc(initialized).await;
+            let gc_guard = self.package_index.acquire_gc_lock(initialized).await;
 
-            let () = package_index.protected_blobs().await.iter().for_each(|blob| {
+            let () = gc_guard.protected_blobs().await.iter().for_each(|blob| {
                 eligible_blobs.remove(blob);
             });
 
@@ -197,6 +196,8 @@ impl GcService {
                 }
             }
             info!("Garbage collection done. Deleted {} blobs.", eligible_blobs.len() - errors);
+            // Explicitly drop to guarantee that the guard lives longer than blob deletion.
+            drop(gc_guard);
             Ok(())
         }
         .await
@@ -317,7 +318,7 @@ async fn protect_open_blobs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::upgradable_packages::UpgradablePackages;
+    use crate::test_utils::{expect_get_vmo, get_meta_far, next_get_vmo, respond_get_vmo};
     use assert_matches::assert_matches;
     use diagnostics_assertions::assert_data_tree;
     use fidl_fuchsia_fxfs as ffxfs;
@@ -332,24 +333,31 @@ mod tests {
     use std::task::Poll;
     use zx::Peered as _;
 
+    #[derive(Clone, Copy)]
+    enum UpgradablePackages {
+        Enabled,
+        Disabled,
+    }
+
     fn create_test_gc_service(
         executor: &mut fasync::TestExecutor,
     ) -> (Arc<GcService>, fio::DirectoryRequestStream, CommitStatusProviderRequestStream) {
-        create_test_gc_service_with_upgradable_packages(executor, None)
+        let (gc_service, blobfs_dir_stream, _blob_reader_stream, commit_stream) =
+            create_test_gc_service_with_blob_reader(executor, UpgradablePackages::Disabled);
+        (gc_service, blobfs_dir_stream, commit_stream)
     }
 
     fn create_test_gc_service_with_upgradable_packages(
         executor: &mut fasync::TestExecutor,
-        upgradable_packages: Option<UpgradablePackages>,
     ) -> (Arc<GcService>, fio::DirectoryRequestStream, CommitStatusProviderRequestStream) {
         let (gc_service, blobfs_dir_stream, _blob_reader_stream, commit_stream) =
-            create_test_gc_service_with_blob_reader(executor, upgradable_packages);
+            create_test_gc_service_with_blob_reader(executor, UpgradablePackages::Enabled);
         (gc_service, blobfs_dir_stream, commit_stream)
     }
 
     fn create_test_gc_service_with_blob_reader(
         executor: &mut fasync::TestExecutor,
-        upgradable_packages: Option<UpgradablePackages>,
+        upgradable_packages: UpgradablePackages,
     ) -> (
         Arc<GcService>,
         fio::DirectoryRequestStream,
@@ -364,11 +372,18 @@ mod tests {
         let mut setup_fut = pin!(async move {
             let bootfs = fidl::endpoints::create_proxy::<fio::DirectoryMarker>().0;
             let (_, open_packages) = crate::root_dir::new(bootfs, blobfs_clone).await.unwrap();
-            let package_index = Arc::new(PackageIndex::new(blobfs.clone(), upgradable_packages));
+            let cache_packages = Arc::new(CacheIndex::new_test_only(HashSet::new(), []));
+            let package_index = Arc::new(PackageIndex::new(
+                blobfs.clone(),
+                match upgradable_packages {
+                    UpgradablePackages::Enabled => Some(Arc::clone(&cache_packages)),
+                    UpgradablePackages::Disabled => None,
+                },
+            ));
             GcService::new(
                 blobfs,
                 Arc::new(BaseIndex::new_test_only(HashSet::new(), [])),
-                Arc::new(CacheIndex::new_test_only(HashSet::new(), [])),
+                cache_packages,
                 package_index,
                 open_packages,
                 commit_status_provider,
@@ -530,12 +545,13 @@ mod tests {
                 assert_matches!(res, Ok(()));
                 return deleted;
             }
-            if let Poll::Ready(Some(Ok(request))) =
-                executor.run_until_stalled(&mut blob_reader_stream.next())
+            if let Poll::Ready(Some(Ok(ffxfs::BlobReaderRequest::GetVmo {
+                blob_hash,
+                responder,
+            }))) = executor.run_until_stalled(&mut blob_reader_stream.next())
             {
-                let ffxfs::BlobReaderRequest::GetVmo { blob_hash, .. } = &request;
-                let blob_hash = fuchsia_hash::Hash::from(*blob_hash);
-                respond_with_blob(request, blob_hash, &meta_fars[&blob_hash]);
+                let blob_hash = fuchsia_hash::Hash::from(blob_hash);
+                respond_get_vmo(responder, &meta_fars[&blob_hash]);
                 continue;
             }
             match executor.run_until_stalled(&mut blobfs_dir_stream.next()) {
@@ -549,16 +565,6 @@ mod tests {
                 }
                 other => panic!("unexpected blobfs dir request: {other:?}"),
             }
-        }
-    }
-
-    fn next_blob_reader_request(
-        executor: &mut fasync::TestExecutor,
-        blob_reader_stream: &mut ffxfs::BlobReaderRequestStream,
-    ) -> ffxfs::BlobReaderRequest {
-        match executor.run_until_stalled(&mut blob_reader_stream.next()) {
-            Poll::Ready(Some(Ok(request))) => request,
-            other => panic!("unexpected blob reader request: {other:?}"),
         }
     }
 
@@ -977,13 +983,8 @@ mod tests {
         let mut executor = fasync::TestExecutor::new_with_fake_time();
         executor.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
 
-        let upgradable_packages =
-            UpgradablePackages::new(Arc::new(CacheIndex::new_test_only(HashSet::new(), [])));
         let (gc_service, mut blobfs_dir_stream, mut commit_stream) =
-            create_test_gc_service_with_upgradable_packages(
-                &mut executor,
-                Some(upgradable_packages),
-            );
+            create_test_gc_service_with_upgradable_packages(&mut executor);
         let inspector = finspect::Inspector::default();
         let inspect =
             Arc::new(inspector.root().create_string("post_commit_gc", "waiting for commit"));
@@ -1005,7 +1006,7 @@ mod tests {
         }
         assert!(executor.run_until_stalled(&mut gc_fut).is_pending());
 
-        // Advance past earliest_time without initializing UpgradablePackages yet.
+        // Advance past earliest_time without initializing upgradable packages yet.
         executor.set_fake_time(fasync::MonotonicInstant::from_nanos(15_000_000_000));
         p0.signal_peer(zx::Signals::NONE, zx::Signals::USER_0 | zx::Signals::USER_1).unwrap();
         assert!(executor.run_until_stalled(&mut gc_fut).is_pending());
@@ -1018,7 +1019,7 @@ mod tests {
         );
 
         // Neither blobfs listing nor a package index lock should start until set_upgradable_urls
-        // has initialized UpgradablePackages, so the package index can still be changed.
+        // has initialized upgradable packages, so the package index can still be changed.
         assert!(executor.run_until_stalled(&mut blobfs_dir_stream.next()).is_pending());
         assert_matches!(
             executor.run_until_stalled(&mut pin!(
@@ -1052,13 +1053,8 @@ mod tests {
         let mut executor = fasync::TestExecutor::new_with_fake_time();
         executor.set_fake_time(fasync::MonotonicInstant::from_nanos(0));
 
-        let upgradable_packages =
-            UpgradablePackages::new(Arc::new(CacheIndex::new_test_only(HashSet::new(), [])));
         let (gc_service, mut blobfs_dir_stream, mut commit_stream) =
-            create_test_gc_service_with_upgradable_packages(
-                &mut executor,
-                Some(upgradable_packages),
-            );
+            create_test_gc_service_with_upgradable_packages(&mut executor);
         let inspector = finspect::Inspector::default();
         let inspect =
             Arc::new(inspector.root().create_string("post_commit_gc", "waiting for commit"));
@@ -1080,8 +1076,8 @@ mod tests {
         }
         assert!(executor.run_until_stalled(&mut post_commit_gc_fut).is_pending());
 
-        // Commit at 10s, start manual GC at 12s (which waits on UpgradablePackages without holding
-        // any locks), and let the post-commit GC deadline pass at 15s.
+        // Commit at 10s, start manual GC at 12s (which waits on upgradable packages without
+        // holding any locks), and let the post-commit GC deadline pass at 15s.
         executor.set_fake_time(fasync::MonotonicInstant::from_nanos(10_000_000_000));
         p0.signal_peer(zx::Signals::NONE, zx::Signals::USER_0 | zx::Signals::USER_1).unwrap();
         assert!(executor.run_until_stalled(&mut post_commit_gc_fut).is_pending());
@@ -1100,7 +1096,7 @@ mod tests {
             }
         );
 
-        // Once UpgradablePackages initializes, manual GC completes a single blobfs pass and
+        // Once upgradable packages initialize, manual GC completes a single blobfs pass and
         // post-commit GC skips instead of running a second pass.
         assert_matches!(
             executor.run_until_stalled(&mut pin!(
@@ -1198,37 +1194,20 @@ mod tests {
         );
     }
 
-    fn respond_with_blob(
-        request: ffxfs::BlobReaderRequest,
-        expected_hash: fuchsia_hash::Hash,
-        contents: &[u8],
-    ) {
-        match request {
-            ffxfs::BlobReaderRequest::GetVmo { blob_hash, responder } => {
-                assert_eq!(fuchsia_hash::Hash::from(blob_hash), expected_hash);
-                let vmo = zx::Vmo::create(contents.len() as u64).unwrap();
-                vmo.write(contents, 0).unwrap();
-                responder.send(Ok(vmo)).unwrap();
-            }
-        }
-    }
-
     #[fuchsia::test]
     fn set_upgradable_urls_waits_for_gc_pass_in_progress() {
         let mut executor = fasync::TestExecutor::new();
-        let upgradable_packages =
-            UpgradablePackages::new(Arc::new(CacheIndex::new_test_only(HashSet::new(), [])));
         let (gc_service, mut blobfs_dir_stream, mut blob_reader_stream, mut commit_stream) =
-            create_test_gc_service_with_blob_reader(&mut executor, Some(upgradable_packages));
+            create_test_gc_service_with_blob_reader(&mut executor, UpgradablePackages::Enabled);
 
         const URL: &str = "fuchsia-pkg://fuchsia.com/upgradable";
         let old_content = fuchsia_hash::Hash::from([1u8; 32]);
         let old_meta = fuchsia_hash::Hash::from([2u8; 32]);
-        let old_meta_bytes = crate::test_utils::get_meta_far("upgradable", [old_content], []);
+        let old_meta_bytes = get_meta_far("upgradable", [old_content], []);
 
         let new_content = fuchsia_hash::Hash::from([3u8; 32]);
         let new_meta = fuchsia_hash::Hash::from([4u8; 32]);
-        let new_meta_bytes = crate::test_utils::get_meta_far("upgradable", [new_content], []);
+        let new_meta_bytes = get_meta_far("upgradable", [new_content], []);
 
         let unowned = fuchsia_hash::Hash::from([5u8; 32]);
 
@@ -1238,8 +1217,8 @@ mod tests {
         let new_pkg_dir = {
             let mut open_fut = pin!(gc_service.open_packages.get_or_insert(new_meta, None));
             assert!(executor.run_until_stalled(&mut open_fut).is_pending());
-            let request = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
-            respond_with_blob(request, new_meta, &new_meta_bytes);
+            let responder = expect_get_vmo(&mut executor, &mut blob_reader_stream, new_meta);
+            respond_get_vmo(responder, &new_meta_bytes);
             match executor.run_until_stalled(&mut open_fut) {
                 Poll::Ready(Ok(dir)) => dir,
                 other => panic!("unexpected get_or_insert result: {other:?}"),
@@ -1263,10 +1242,10 @@ mod tests {
             &mut blobfs_dir_stream,
             [old_content, old_meta, new_content, new_meta, unowned],
         );
-        // Advance `gc_fut` into `package_index.protected_blobs().await`, where it locks the index
-        // for reading and pauses reading `old_meta`.
+        // Advance `gc_fut` into `protected_blobs.await`, where it holds `gc_guard` and pauses
+        // reading `old_meta`.
         assert!(executor.run_until_stalled(&mut gc_fut).is_pending());
-        let get_old_meta = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let get_old_meta = expect_get_vmo(&mut executor, &mut blob_reader_stream, old_meta);
 
         // Try to replace `old_meta` with `new_meta` while the pass is reading `old_meta`; `set_fut`
         // must wait for the pass to finish.
@@ -1276,12 +1255,13 @@ mod tests {
         ));
         assert!(executor.run_until_stalled(&mut set_fut).is_pending());
 
-        respond_with_blob(get_old_meta, old_meta, &old_meta_bytes);
+        respond_get_vmo(get_old_meta, &old_meta_bytes);
         assert!(executor.run_until_stalled(&mut gc_fut).is_pending());
 
         // The pass protects both the upgradable package from the start of the pass (`old_meta`) and
         // the open package (`new_meta`), deleting only `unowned`. While `Unlink` is in flight,
-        // `set_fut` must still wait because the pass holds `GcView` until blob deletion completes.
+        // `set_fut` must still wait because the pass holds `gc_guard` until blob deletion
+        // completes.
         let unlink_responder = match executor.run_until_stalled(&mut blobfs_dir_stream.next()) {
             Poll::Ready(Some(Ok(fio::DirectoryRequest::Unlink {
                 name,
@@ -1321,18 +1301,18 @@ mod tests {
     fn gc_protects_package_retained_by_set_retained_index_in_progress() {
         let mut executor = fasync::TestExecutor::new();
         let (gc_service, mut blobfs_dir_stream, mut blob_reader_stream, mut commit_stream) =
-            create_test_gc_service_with_blob_reader(&mut executor, None);
+            create_test_gc_service_with_blob_reader(&mut executor, UpgradablePackages::Disabled);
         let content = fuchsia_hash::Hash::from([1u8; 32]);
         let meta = fuchsia_hash::Hash::from([2u8; 32]);
         let unowned = fuchsia_hash::Hash::from([3u8; 32]);
-        let meta_far = crate::test_utils::get_meta_far("pkg", [content], []);
+        let meta_far = get_meta_far("pkg", [content], []);
         let _event_pair_peer = set_committed(&mut executor, &gc_service, &mut commit_stream);
 
         // Replacing the retained index swaps in the new retained index, then pauses while reading
         // `meta` to find the blobs of the newly retained package.
         let mut set_fut = pin!(gc_service.package_index.set_retained_index(HashSet::from([meta])));
         assert!(executor.run_until_stalled(&mut set_fut).is_pending());
-        let get_meta = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let get_meta = expect_get_vmo(&mut executor, &mut blob_reader_stream, meta);
 
         // A GC pass started now does not wait for the replacement to finish. It protects the newly
         // retained package by reading `meta` itself.
@@ -1349,7 +1329,7 @@ mod tests {
             HashSet::from([unowned])
         );
 
-        respond_with_blob(get_meta, meta, &meta_far);
+        respond_get_vmo(get_meta, &meta_far);
         assert_matches!(executor.run_until_stalled(&mut set_fut), Poll::Ready(()));
     }
 
@@ -1357,18 +1337,18 @@ mod tests {
     fn gc_protects_package_retained_by_retain_package_in_progress() {
         let mut executor = fasync::TestExecutor::new();
         let (gc_service, mut blobfs_dir_stream, mut blob_reader_stream, mut commit_stream) =
-            create_test_gc_service_with_blob_reader(&mut executor, None);
+            create_test_gc_service_with_blob_reader(&mut executor, UpgradablePackages::Disabled);
         let content = fuchsia_hash::Hash::from([1u8; 32]);
         let meta = fuchsia_hash::Hash::from([2u8; 32]);
         let unowned = fuchsia_hash::Hash::from([3u8; 32]);
-        let meta_far = crate::test_utils::get_meta_far("pkg", [content], []);
+        let meta_far = get_meta_far("pkg", [content], []);
         let _event_pair_peer = set_committed(&mut executor, &gc_service, &mut commit_stream);
 
         // Retaining an already cached package adds the package to the retained index, then pauses
         // while reading `meta` to find the package's required blobs.
         let mut retain_fut = pin!(gc_service.package_index.retain_package(meta));
         assert!(executor.run_until_stalled(&mut retain_fut).is_pending());
-        let get_meta = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let get_meta = expect_get_vmo(&mut executor, &mut blob_reader_stream, meta);
 
         // A GC pass started now does not wait for the retain to finish. It protects the package's
         // required blobs by reading `meta` itself.
@@ -1385,7 +1365,7 @@ mod tests {
             HashSet::from([unowned])
         );
 
-        respond_with_blob(get_meta, meta, &meta_far);
+        respond_get_vmo(get_meta, &meta_far);
         assert_matches!(executor.run_until_stalled(&mut retain_fut), Poll::Ready(()));
     }
 
@@ -1393,15 +1373,15 @@ mod tests {
     fn gc_protects_package_retained_by_set_retained_index_while_in_writing_index() {
         let mut executor = fasync::TestExecutor::new();
         let (gc_service, mut blobfs_dir_stream, mut blob_reader_stream, mut commit_stream) =
-            create_test_gc_service_with_blob_reader(&mut executor, None);
+            create_test_gc_service_with_blob_reader(&mut executor, UpgradablePackages::Disabled);
         let content0 = fuchsia_hash::Hash::from([1u8; 32]);
         let meta0 = fuchsia_hash::Hash::from([2u8; 32]);
-        let meta0_far = crate::test_utils::get_meta_far("pkg0", [content0], []);
+        let meta0_far = get_meta_far("pkg0", [content0], []);
 
         let content1_a = fuchsia_hash::Hash::from([3u8; 32]);
         let content1_b = fuchsia_hash::Hash::from([4u8; 32]);
         let meta1 = fuchsia_hash::Hash::from([5u8; 32]);
-        let meta1_far = crate::test_utils::get_meta_far("pkg1", [content1_a, content1_b], []);
+        let meta1_far = get_meta_far("pkg1", [content1_a, content1_b], []);
 
         let unowned = fuchsia_hash::Hash::from([6u8; 32]);
         let meta_fars = HashMap::from([(meta0, meta0_far), (meta1, meta1_far)]);
@@ -1436,18 +1416,12 @@ mod tests {
         let mut set_fut =
             pin!(gc_service.package_index.set_retained_index(HashSet::from([meta0, meta1])));
         assert!(executor.run_until_stalled(&mut set_fut).is_pending());
-        let first_get = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let (first_hash, first_responder) = next_get_vmo(&mut executor, &mut blob_reader_stream);
 
         // Both `OpenPackageTracking` operations finish before `set_retained_index` finishes reading
         // meta.fars, removing `meta0` and `meta1` from the writing index.
-        assert_matches!(
-            executor.run_until_stalled(&mut pin!(gc_service.package_index.stop_writing(guard0))),
-            Poll::Ready(Ok(()))
-        );
-        assert_matches!(
-            executor.run_until_stalled(&mut pin!(gc_service.package_index.stop_writing(guard1))),
-            Poll::Ready(Ok(()))
-        );
+        drop(guard0);
+        drop(guard1);
 
         // A GC pass running in this window still scans `meta0` and `meta1` because their retained
         // entries are `Partial`, protecting `content0` and `content1_b`.
@@ -1464,14 +1438,10 @@ mod tests {
             HashSet::from([unowned])
         );
 
-        let ffxfs::BlobReaderRequest::GetVmo { blob_hash, .. } = &first_get;
-        let first_hash = fuchsia_hash::Hash::from(*blob_hash);
-        respond_with_blob(first_get, first_hash, &meta_fars[&first_hash]);
+        respond_get_vmo(first_responder, &meta_fars[&first_hash]);
         assert!(executor.run_until_stalled(&mut set_fut).is_pending());
-        let second_get = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
-        let ffxfs::BlobReaderRequest::GetVmo { blob_hash, .. } = &second_get;
-        let second_hash = fuchsia_hash::Hash::from(*blob_hash);
-        respond_with_blob(second_get, second_hash, &meta_fars[&second_hash]);
+        let (second_hash, second_responder) = next_get_vmo(&mut executor, &mut blob_reader_stream);
+        respond_get_vmo(second_responder, &meta_fars[&second_hash]);
         assert_matches!(executor.run_until_stalled(&mut set_fut), Poll::Ready(()));
     }
 
@@ -1479,12 +1449,12 @@ mod tests {
     fn gc_protects_package_retained_by_retain_package_while_in_writing_index() {
         let mut executor = fasync::TestExecutor::new();
         let (gc_service, mut blobfs_dir_stream, mut blob_reader_stream, mut commit_stream) =
-            create_test_gc_service_with_blob_reader(&mut executor, None);
+            create_test_gc_service_with_blob_reader(&mut executor, UpgradablePackages::Disabled);
         let content0 = fuchsia_hash::Hash::from([1u8; 32]);
         let content1 = fuchsia_hash::Hash::from([2u8; 32]);
         let meta = fuchsia_hash::Hash::from([3u8; 32]);
         let unowned = fuchsia_hash::Hash::from([4u8; 32]);
-        let meta_far = crate::test_utils::get_meta_far("pkg", [content0, content1], []);
+        let meta_far = get_meta_far("pkg", [content0, content1], []);
         let _event_pair_peer = set_committed(&mut executor, &gc_service, &mut commit_stream);
 
         // Put `meta` in the writing index with a partial blob set (`content0` only, missing
@@ -1508,13 +1478,10 @@ mod tests {
         // then pauses while reading `meta` from blobfs.
         let mut retain_fut = pin!(gc_service.package_index.retain_package(meta));
         assert!(executor.run_until_stalled(&mut retain_fut).is_pending());
-        let get_meta = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let get_meta = expect_get_vmo(&mut executor, &mut blob_reader_stream, meta);
 
         // Finish the `OpenPackageTracking` write so `meta` is no longer in the writing index.
-        assert_matches!(
-            executor.run_until_stalled(&mut pin!(gc_service.package_index.stop_writing(guard))),
-            Poll::Ready(Ok(()))
-        );
+        drop(guard);
 
         // A GC pass running before `retain_package` finishes reading `meta` still reads `meta`
         // itself and protects `content1`.
@@ -1531,7 +1498,7 @@ mod tests {
             HashSet::from([unowned])
         );
 
-        respond_with_blob(get_meta, meta, &meta_far);
+        respond_get_vmo(get_meta, &meta_far);
         assert_matches!(executor.run_until_stalled(&mut retain_fut), Poll::Ready(()));
     }
 
@@ -1622,7 +1589,7 @@ mod tests {
     fn retain_package_does_not_wait_for_other_retains() {
         let mut executor = fasync::TestExecutor::new();
         let (gc_service, _blobfs_dir_stream, mut blob_reader_stream, _commit_stream) =
-            create_test_gc_service_with_blob_reader(&mut executor, None);
+            create_test_gc_service_with_blob_reader(&mut executor, UpgradablePackages::Disabled);
         let meta0 = fuchsia_hash::Hash::from([1u8; 32]);
         let meta1 = fuchsia_hash::Hash::from([2u8; 32]);
         let content0 = fuchsia_hash::Hash::from([3u8; 32]);
@@ -1631,28 +1598,19 @@ mod tests {
         // While one retain is paused reading its meta.far, another retain starts reading its own.
         let mut retain0_fut = pin!(gc_service.package_index.retain_package(meta0));
         assert!(executor.run_until_stalled(&mut retain0_fut).is_pending());
-        let get_meta0 = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let get_meta0 = expect_get_vmo(&mut executor, &mut blob_reader_stream, meta0);
         let mut retain1_fut = pin!(gc_service.package_index.retain_package(meta1));
         assert!(executor.run_until_stalled(&mut retain1_fut).is_pending());
-        let get_meta1 = next_blob_reader_request(&mut executor, &mut blob_reader_stream);
+        let get_meta1 = expect_get_vmo(&mut executor, &mut blob_reader_stream, meta1);
 
-        respond_with_blob(
-            get_meta1,
-            meta1,
-            &crate::test_utils::get_meta_far("pkg1", [content1], []),
-        );
+        respond_get_vmo(get_meta1, &get_meta_far("pkg1", [content1], []));
         assert_matches!(executor.run_until_stalled(&mut retain1_fut), Poll::Ready(()));
-        respond_with_blob(
-            get_meta0,
-            meta0,
-            &crate::test_utils::get_meta_far("pkg0", [content0], []),
-        );
+        respond_get_vmo(get_meta0, &get_meta_far("pkg0", [content0], []));
         assert_matches!(executor.run_until_stalled(&mut retain0_fut), Poll::Ready(()));
 
         let mut protected_fut = pin!(async {
             let init = gc_service.package_index.wait_until_upgradable_packages_initialized().await;
-            let view = gc_service.package_index.read_for_gc(init).await;
-            view.protected_blobs().await
+            gc_service.package_index.acquire_gc_lock(init).await.protected_blobs().await
         });
         assert_eq!(
             executor.run_until_stalled(&mut protected_fut),

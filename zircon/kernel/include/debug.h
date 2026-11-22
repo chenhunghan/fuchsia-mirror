@@ -8,12 +8,8 @@
 #ifndef ZIRCON_KERNEL_INCLUDE_DEBUG_H_
 #define ZIRCON_KERNEL_INCLUDE_DEBUG_H_
 
-#include <stddef.h>
 #include <stdio.h>
-#include <string.h>
 #include <zircon/compiler.h>
-
-#include <platform/debug.h>
 
 #if !defined(LK_DEBUGLEVEL)
 #define LK_DEBUGLEVEL 0
@@ -47,14 +43,6 @@ void panic(const char *fmt, ...) __PRINTFLIKE(1, 2) __NO_RETURN __NO_INLINE;
 
 void __stack_chk_fail(void) __NO_RETURN;
 
-uintptr_t choose_stack_guard(void);
-
-/* spin the cpu for a period of (short) time */
-void spin(uint32_t usecs);
-
-/* deliberately panic through the Rust panic handler; defined in top/debug.rs */
-void rust_debug_crash_panic(void) __NO_RETURN;
-
 // A printf-like macro which prepend's the user's message with the special
 // "ZIRCON KERNEL OOPS" tag.  zbi_test bots look for tags like this and consider
 // their presence to indicate test failures, even if the higher level test
@@ -77,11 +65,6 @@ void rust_debug_crash_panic(void) __NO_RETURN;
 //   //zircon/kernel/lib/debug/src/lib.rs,
 //   //tools/testing/tefmocheck/string_in_log_check.go,
 // )
-
-// Similar to DRIVER_OOPS, except should not trigger a tefmocheck failure.
-// LINT.IfChange
-#define DRIVER_WARN(fmt, ...) printf("\nDRIVER WARNING\n" fmt, ##__VA_ARGS__)
-// LINT.ThenChange(//zircon/kernel/lib/debug/src/lib.rs)
 
 __END_CDECLS
 

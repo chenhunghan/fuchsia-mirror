@@ -12,8 +12,6 @@
 #include <zircon/syscalls/port.h>
 #include <zircon/types.h>
 
-#include <new>
-
 #include <fbl/alloc_checker.h>
 #include <kernel/ffi.h>
 #include <ktl/utility.h>
@@ -48,41 +46,13 @@ static_assert(sizeof(fbl::DoublyLinkedListable<PortPacket*>) ==
               "PortPacket list node size mismatch");
 static_assert(sizeof(PortAllocator*) == sizeof(void*), "PortAllocator* must be pointer-sized");
 
-class PortSignalObserver;
-
 extern "C" {
 
-void rust_port_observer_on_match(PortSignalObserver* observer, uint32_t options,
-                                 zx_signals_t signals, OwnedWaitQueue* queue_to_own);
-void rust_port_observer_on_cancel(PortSignalObserver* observer, zx_signals_t signals);
-bool rust_port_observer_matches_key(const PortSignalObserver* observer, const void* port,
-                                    uint64_t key);
 zx_status_t rust_port_dispatcher_make_observer(const PortDispatcher* disp, uint32_t options,
                                                const Handle* handle, uint64_t key,
-                                               zx_signals_t signals,
-                                               PortSignalObserver** out_observer);
+                                               zx_signals_t signals, SignalObserver** out_observer);
 
 }  // extern "C"
-
-// Base class providing the C++ SignalObserver vtable for Rust's PortObserver.
-class PortSignalObserver final : public SignalObserver {
- public:
-  explicit PortSignalObserver(uint32_t options) : SignalObserver(options) {}
-  ~PortSignalObserver() final = default;
-
-  void OnMatch(zx_signals_t signals, OwnedWaitQueue* queue_to_own) final {
-    rust_port_observer_on_match(this, options(), signals, queue_to_own);
-  }
-
-  void OnCancel(zx_signals_t signals) final { rust_port_observer_on_cancel(this, signals); }
-
-  bool MatchesKey(const void* port, uint64_t key) final {
-    return rust_port_observer_matches_key(this, port, key);
-  }
-};
-
-static_assert(sizeof(PortSignalObserver) == kPortSignalObserverSize);
-static_assert(alignof(PortSignalObserver) == kPortSignalObserverAlign);
 
 PortDispatcher::PortDispatcher(uint32_t options) : Dispatcher(0u) {
   DISPATCHER_VERIFY_OFFSET(PortDispatcher, kPortDispatcherStateOffset);
@@ -92,56 +62,28 @@ PortDispatcher::PortDispatcher(uint32_t options) : Dispatcher(0u) {
 IMPLEMENT_DISPATCHER_RUST_STATE(PortDispatcher, rust_port_dispatcher_state_get_lock,
                                 rust_port_dispatcher_state_destroy)
 
-zx_status_t PortDispatcher::Create(uint32_t options, KernelHandle<PortDispatcher>* handle,
-                                   zx_rights_t* rights) {
-  if (options && options != ZX_PORT_BIND_TO_INTERRUPT) {
-    return ZX_ERR_INVALID_ARGS;
-  }
-  fbl::AllocChecker ac;
-  KernelHandle new_handle(fbl::AdoptRef(new (&ac) PortDispatcher(options)));
-  if (!ac.check())
-    return ZX_ERR_NO_MEMORY;
-
-  *rights = default_rights();
-  *handle = ktl::move(new_handle);
-  return ZX_OK;
-}
-
 zx::result<SignalObserver*> PortDispatcher::MakeObserver(uint32_t options, const Handle* handle,
                                                          uint64_t key, zx_signals_t signals) const {
-  PortSignalObserver* observer = nullptr;
+  SignalObserver* observer = nullptr;
   zx_status_t status =
       rust_port_dispatcher_make_observer(this, options, handle, key, signals, &observer);
   if (status != ZX_OK) {
     return zx::error(status);
   }
-  return zx::ok(static_cast<SignalObserver*>(observer));
+  return zx::ok(observer);
 }
 
 extern "C" {
 
-zx_status_t cpp_port_dispatcher_create(uint32_t options,
-                                       ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out,
-                                       ffi::Uninitialized<zx_rights_t>* rights_out) {
-  KernelHandle<PortDispatcher> handle;
-  zx_rights_t rights;
-  zx_status_t status = PortDispatcher::Create(options, &handle, &rights);
-  if (status == ZX_OK) {
-    handle_out->Initialize(ktl::move(handle));
-    rights_out->Initialize(rights);
+zx_status_t cpp_port_dispatcher_create(
+    uint32_t options, ffi::Uninitialized<KernelHandle<PortDispatcher>>* handle_out) {
+  fbl::AllocChecker ac;
+  KernelHandle new_handle(fbl::AdoptRef(new (&ac) PortDispatcher(options)));
+  if (!ac.check()) {
+    return ZX_ERR_NO_MEMORY;
   }
-  return status;
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_port_signal_observer_init(
-    ffi::Uninitialized<PortSignalObserver>* observer, uint32_t options) {
-  observer->Initialize(options);
-}
-
-// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE void cpp_port_signal_observer_destroy(PortSignalObserver* observer) {
-  observer->~PortSignalObserver();
+  handle_out->Initialize(ktl::move(new_handle));
+  return ZX_OK;
 }
 
 }  // extern "C"

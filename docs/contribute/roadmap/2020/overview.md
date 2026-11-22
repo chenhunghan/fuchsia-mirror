@@ -59,7 +59,7 @@ following areas:
     tests to Test Runner Framework.
 -   A subset of components under `sysmgr` that are straightforward to migrate.
 
-### Implementing drivers as components
+### Implementing drivers as components {#implementing-drivers-as-components}
 
 The Driver Framework team is exploring how to use Components v2 to represent
 drivers as components, so that drivers can interact with the rest of Fuchsia in
@@ -74,8 +74,9 @@ teams:
 
 Teams are evaluating potential improvements that could be made to
 [MinFS](/docs/concepts/filesystems/minfs.md) and
-[VFS](/docs/concepts/filesystems/life_of_an_open.md#vfs_layer), including generating
-a system for benchmarking and implementing paging within the VFS layer.
+[VFS](/docs/concepts/filesystems/life_of_an_open.md#vfs-layer), including
+generating a system for benchmarking and implementing paging within the
+VFS layer.
 
 ### Implementing accessibility and input improvements
 

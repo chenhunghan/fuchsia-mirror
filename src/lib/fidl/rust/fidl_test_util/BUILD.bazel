@@ -54,7 +54,6 @@ wrap_host_rust_test(
 
 fx_unittest_package(
     name = "fidl_test_util_target_test",
-    package_name = "fidl_test_util_target_test",
     unit_tests = [":fidl_test_util_test"],
     visibility = ["//src/lib:__pkg__"],
 )

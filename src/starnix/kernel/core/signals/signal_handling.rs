@@ -4,18 +4,15 @@
 
 use crate::arch::signal_handling::{
     RED_ZONE_SIZE, SIG_STACK_SIZE, SignalStackFrame, align_stack_pointer, restore_registers,
+    set_sigreturn_register, sigreturn_address,
 };
 use crate::mm::{MemoryAccessor, MemoryAccessorExt};
 use crate::ptrace::StopState;
 use crate::signals::{KernelSignal, KernelSignalInfo, SignalDetail, SignalInfo, SignalState};
-use crate::task::{
-    ArchExtendedPstateStorage, CurrentTask, ExitStatus, Task, TaskFlags, TaskWriteGuard,
-    ThreadState, Waiter,
-};
+use crate::task::{CurrentTask, ExitStatus, Task, TaskFlags, TaskWriteGuard, ThreadState, Waiter};
 use starnix_logging::{log_info, log_trace, log_warn};
-use starnix_registers::{RegisterState, RegisterStorageEnum};
+use starnix_registers::RegisterStorageEnum;
 use starnix_syscalls::SyscallResult;
-use starnix_types::arch::ArchWidth;
 use starnix_uapi::errors::{EINTR, ERESTART_RESTARTBLOCK, Errno};
 use starnix_uapi::resource_limits::Resource;
 use starnix_uapi::signals::{
@@ -28,6 +25,7 @@ use starnix_uapi::user_address::{ArchSpecific, UserAddress};
 use starnix_uapi::{
     SA_NODEFER, SA_ONSTACK, SA_RESETHAND, SA_SIGINFO, SIG_DFL, SIG_IGN, errno, error, sigaction_t,
 };
+use std::sync::atomic::Ordering;
 
 /// Indicates where in the signal queue a signal should go.  Signals
 /// can jump the queue when being injected by tools like ptrace.
@@ -104,13 +102,14 @@ pub fn send_freeze_signal(task: &Task, waiter: Waiter) -> Result<(), Errno> {
     )
 }
 
-fn send_signal_prio(
-    task: &Task,
-    mut task_state: TaskWriteGuard<'_>,
+fn send_signal_prio<'a>(
+    task: &'a Task,
+    mut task_state: TaskWriteGuard<'a>,
     kernel_signal_info: KernelSignalInfo,
     prio: SignalPriority,
     force_wake: bool,
 ) -> Result<(), Errno> {
+    let mut tg_state = None;
     let (signal_info, signal, is_masked, was_masked, is_real_time, sigaction, action) =
         match kernel_signal_info {
             KernelSignalInfo::User(ref user_signal_info) => {
@@ -123,11 +122,29 @@ fn send_signal_prio(
                     drop(task_state);
                     // Synchronously transition the thread group to Exiting and interrupt all
                     // member tasks.
-                    // TODO(https://fxbug.dev/573607334): Immediately transition the thread group
-                    // to Exiting for other unblocked default-fatal signals
-                    // (DeliveryAction::Terminate when not ptraced).
                     task.thread_group().write().force_exit_for_sigkill(user_signal_info.clone());
                     return Ok(());
+                }
+                if prio != SignalPriority::First
+                    && matches!(
+                        user_signal_info.signal,
+                        SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU | SIGCONT
+                    )
+                {
+                    drop(task_state);
+                    // Hold the thread group write lock across clearing conflicting signals,
+                    // enqueuing this signal, and updating stop state so concurrent stop/continue
+                    // signals cannot interleave out of order.
+                    let guard = task.thread_group().write();
+                    let ignores_signal = guard.base.ignores_signal(user_signal_info);
+                    if !ignores_signal && user_signal_info.signal != SIGCONT {
+                        guard.clear_conflicting_stop_or_continue_signals(user_signal_info.signal);
+                    }
+                    task_state = task.write();
+                    if !task_state.is_ptraced() && ignores_signal {
+                        return Ok(());
+                    }
+                    tg_state = Some(guard);
                 }
                 let signal = user_signal_info.signal;
                 // `SignalPriority::First` is used only to enqueue `ptrace` signals (re-injected
@@ -158,7 +175,10 @@ fn send_signal_prio(
             KernelSignalInfo::Freeze(_) => (None, None, false, false, false, None, None),
         };
 
-    if is_real_time && prio != SignalPriority::First {
+    if is_real_time
+        && prio != SignalPriority::First
+        && !signal_info.as_ref().is_some_and(SignalInfo::is_timer)
+    {
         if task_state.pending_signal_count()
             >= task.thread_group().get_rlimit(Resource::SIGPENDING) as usize
         {
@@ -175,50 +195,59 @@ fn send_signal_prio(
         || is_masked
         || was_masked
         || task_state.is_ptraced();
+    let mut enqueued = false;
     if is_queued {
         match kernel_signal_info {
             KernelSignalInfo::User(ref signal_info) => {
                 if prio == SignalPriority::First {
                     task_state.enqueue_signal_front(signal_info.clone());
+                    enqueued = true;
                 } else {
-                    task_state.enqueue_signal(signal_info.clone());
+                    enqueued = task_state.enqueue_signal(signal_info.clone());
                 }
-                task_state.set_flags(TaskFlags::SIGNALS_AVAILABLE, true);
+                if enqueued {
+                    task_state.set_flags(TaskFlags::SIGNALS_AVAILABLE, true);
+                }
             }
             KernelSignalInfo::Freeze(waiter) => {
-                task_state.enqueue_kernel_signal(KernelSignal::Freeze(waiter))
+                task_state.enqueue_kernel_signal(KernelSignal::Freeze(waiter));
+                enqueued = true;
             }
         }
     }
 
     drop(task_state);
 
-    // Wake the task if the queued signal can be delivered immediately (i.e. it is unmasked, or is
-    // a `SignalPriority::First` forced signal that skipped `prepare_forced_signal` above) and its
-    // delivery action requires interrupting the task.
     let can_deliver = !is_masked || signal_info.as_ref().is_some_and(|info| info.force);
     let must_interrupt = action.is_none_or(|action| action.must_interrupt(sigaction));
-    if is_queued && can_deliver && must_interrupt {
-        // Note that any potential signal handler will be executed before the task returns from the
-        // suspend (from the perspective of user space).
-        task.interrupt();
-    }
 
     // Unstop the process for SIGCONT. Also unstop for forced waking, which the only caller
     // of send_signal_first wants it to do.
-    // TODO: Give SIGSTOP similar immediate-effect treatment.
-    if signal == Some(SIGCONT) || force_wake {
-        task.thread_group().set_stopped(
-            StopState::Waking,
-            signal_info,
-            /* finalize_only = */ false,
-        );
+    if signal == Some(SIGCONT) && prio != SignalPriority::First {
+        let guard = tg_state.expect("thread group lock held for SIGCONT");
+        guard.wake_for_sigcont(signal_info.expect("signal_info present for SIGCONT"));
+    } else {
+        drop(tg_state);
+        if force_wake {
+            task.thread_group().set_stopped(StopState::Waking, signal_info);
+        }
+    }
+    if force_wake {
         task.write().set_stopped(
             StopState::Waking,
             /* siginfo = */ None,
             /* current_task = */ None,
             /* event = */ None,
         );
+    }
+
+    // Wake the task if the queued signal can be delivered immediately (i.e. it is unmasked, or is
+    // a `SignalPriority::First` forced signal that skipped `prepare_forced_signal` above) and its
+    // delivery action requires interrupting the task.
+    if enqueued && can_deliver && must_interrupt {
+        // Note that any potential signal handler will be executed before the task returns from the
+        // suspend (from the perspective of user space).
+        task.interrupt();
     }
 
     Ok(())
@@ -261,9 +290,9 @@ pub fn action_for_signal(siginfo: &SignalInfo, sigaction: sigaction_t) -> Delive
     match handler {
         SIG_DFL => match siginfo.signal {
             SIGCHLD | SIGURG | SIGWINCH => DeliveryAction::Ignore,
-            sig if sig.is_real_time() => DeliveryAction::Ignore,
             SIGHUP | SIGINT | SIGKILL | SIGPIPE | SIGALRM | SIGTERM | SIGUSR1 | SIGUSR2
             | SIGPROF | SIGVTALRM | SIGSTKFLT | SIGIO | SIGPWR => DeliveryAction::Terminate,
+            sig if sig.is_real_time() => DeliveryAction::Terminate,
             SIGQUIT | SIGILL | SIGABRT | SIGFPE | SIGSEGV | SIGBUS | SIGSYS | SIGTRAP | SIGXCPU
             | SIGXFSZ => DeliveryAction::CoreDump,
             SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => DeliveryAction::Stop,
@@ -277,15 +306,17 @@ pub fn action_for_signal(siginfo: &SignalInfo, sigaction: sigaction_t) -> Delive
 
 /// Dequeues and handles a pending signal for `current_task`.
 pub fn dequeue_signal(current_task: &mut CurrentTask) {
-    let &mut CurrentTask { ref task, ref mut thread_state, .. } = current_task;
-    if !task.should_check_for_pending_signals() {
+    if !current_task.task.should_check_for_pending_signals() {
         return;
     }
 
-    let mut task_state = task.write();
+    let group_state = current_task.task.thread_group().read();
+    let mut task_state = current_task.task.write();
     // This code is occasionally executed as the task is stopping. Stopping /
     // stopped threads should not get signals.
-    if task.load_stopped().is_stopping_or_stopped() {
+    if group_state.base.load_stopped().is_stopping_or_stopped()
+        || current_task.task.load_stopped().is_stopping_or_stopped()
+    {
         return;
     }
 
@@ -293,8 +324,10 @@ pub fn dequeue_signal(current_task: &mut CurrentTask) {
     let kernel_signal = task_state.take_kernel_signal();
     let siginfo = if kernel_signal.is_some() { None } else { task_state.take_any_signal() };
     prepare_to_restart_syscall(
-        thread_state,
-        siginfo.as_ref().map(|siginfo| task.thread_group().signal_actions.get(siginfo.signal)),
+        &mut current_task.thread_state,
+        siginfo
+            .as_ref()
+            .map(|siginfo| current_task.task.thread_group().signal_actions.get(siginfo.signal)),
     );
 
     if let Some(ref siginfo) = siginfo {
@@ -315,39 +348,64 @@ pub fn dequeue_signal(current_task: &mut CurrentTask) {
     // A syscall may have been waiting with a temporary mask which should be used to dequeue the
     // signal, but after the signal has been dequeued the old mask should be restored.
     task_state.restore_signal_mask();
+    drop(group_state);
 
     if let Some(kernel_signal) = kernel_signal {
         let KernelSignal::Freeze(waiter) = kernel_signal;
         drop(task_state);
 
         waiter.freeze(current_task);
-    } else if let Some(ref siginfo) = siginfo {
-        if let SignalDetail::Timer { timer } = &siginfo.detail {
-            timer.on_signal_delivered();
-        }
-        if let Some(status) = deliver_signal(
-            &task,
-            current_task.thread_state.arch_width(),
-            task_state,
-            siginfo.clone(),
-            &mut current_task.thread_state.registers,
-            &current_task.thread_state.extended_pstate,
-            None,
-        ) {
-            current_task.kill_thread_group(status);
-        }
+    } else if let Some(siginfo) = siginfo {
+        let outcome = deliver_signal(current_task, task_state, siginfo, None);
+        outcome.apply(current_task);
     };
 }
 
+struct SignalHandlerState {
+    stack_pointer: u64,
+    signal_number: u64,
+    siginfo_args: Option<(u64, u64)>,
+    handler_addr: u64,
+    sigreturn_addr: u64,
+}
+
+enum SignalDeliveryOutcome {
+    None,
+    Kill(ExitStatus),
+    EnterHandler(SignalHandlerState),
+}
+
+impl SignalDeliveryOutcome {
+    fn apply(self, current_task: &mut CurrentTask) {
+        match self {
+            Self::None => {}
+            Self::Kill(status) => current_task.kill_thread_group(status),
+            Self::EnterHandler(state) => {
+                let arch_width = current_task.thread_state.arch_width();
+                let registers = &mut current_task.thread_state.registers;
+                set_sigreturn_register(arch_width, registers, state.sigreturn_addr);
+                registers.set_stack_pointer_register(state.stack_pointer);
+                registers.set_arg0_register(state.signal_number);
+                if let Some((arg1, arg2)) = state.siginfo_args {
+                    registers.set_arg1_register(arg1);
+                    registers.set_arg2_register(arg2);
+                }
+                registers.set_instruction_pointer_register(state.handler_addr);
+                // TODO(https://fxbug.dev/413070731): Verify and update the logic in resetting the
+                // flags.
+                registers.reset_flags();
+            }
+        }
+    }
+}
+
 fn deliver_signal(
-    task: &Task,
-    arch_width: ArchWidth,
+    current_task: &CurrentTask,
     mut task_state: TaskWriteGuard<'_>,
     mut siginfo: SignalInfo,
-    registers: &mut RegisterState<RegisterStorageEnum>,
-    extended_pstate: &ArchExtendedPstateStorage,
     restricted_exception: Option<zx::ExceptionReport>,
-) -> Option<ExitStatus> {
+) -> SignalDeliveryOutcome {
+    let task = &current_task.task;
     loop {
         // Ignore unforced signals that `init` (PID 1) does not handle, such as a `SIGSTOP` that
         // was queued for signal-delivery-stop while `init` was ptraced and later dequeued after
@@ -356,7 +414,7 @@ fn deliver_signal(
         // (because it does not retain whether a queued `SIGSTOP` was forced) and therefore stops
         // `init` if a `SIGSTOP` queued while ptraced is dequeued after detach.
         if task.thread_group().ignores_signal(&siginfo) {
-            return None;
+            return SignalDeliveryOutcome::None;
         }
         let signal = siginfo.signal;
         let sigaction = prepare_forced_signal(task, &mut task_state, &siginfo);
@@ -379,31 +437,32 @@ fn deliver_signal(
                 let core_dump_during_shutdown = task.kernel().is_shutting_down()
                     && action_for_signal(&siginfo, sigaction_t::default())
                         == DeliveryAction::CoreDump;
-                if let Err(err) = dispatch_signal_handler(
-                    task,
-                    arch_width,
-                    registers,
-                    extended_pstate,
+                let handler_state = match dispatch_signal_handler(
+                    current_task,
                     task_state.signals_mut(),
                     siginfo,
                     sigaction,
                 ) {
-                    log_warn!("failed to deliver signal {:?}: {:?}", signal, err);
-                    if signal == SIGSEGV {
-                        task.thread_group().signal_actions.set(SIGSEGV, sigaction_t::default());
+                    Ok(state) => state,
+                    Err(err) => {
+                        log_warn!("failed to deliver signal {:?}: {:?}", signal, err);
+                        if signal == SIGSEGV {
+                            task.thread_group().signal_actions.set(SIGSEGV, sigaction_t::default());
+                        }
+                        siginfo = SignalInfo::forced(SIGSEGV);
+                        continue;
                     }
-                    siginfo = SignalInfo::forced(SIGSEGV);
-                    continue;
-                }
+                };
                 if core_dump_during_shutdown {
                     task_state.set_flags(TaskFlags::IN_CORE_DUMP_SIGNAL_HANDLER, true);
                 }
+                return SignalDeliveryOutcome::EnterHandler(handler_state);
             }
             DeliveryAction::Terminate => {
                 // Release the signals lock. [`ThreadGroup::exit`] sends signals to threads which
                 // will include this one and cause a deadlock re-acquiring the signals lock.
                 drop(task_state);
-                return Some(ExitStatus::Kill(siginfo.signal));
+                return SignalDeliveryOutcome::Kill(ExitStatus::Kill(siginfo.signal));
             }
             DeliveryAction::CoreDump => {
                 let signal = siginfo.signal;
@@ -415,7 +474,7 @@ fn deliver_signal(
                 drop(task_state);
                 if let Some(exception) = restricted_exception {
                     log_info!(
-                        registers:?=registers,
+                        registers:?=&current_task.thread_state.registers,
                         exception:?=exception;
                         // LINT.IfChange(restricted_mode_core_dump_tefmo)
                         "Restricted mode exception caused core dump",
@@ -427,11 +486,12 @@ fn deliver_signal(
                         }
                     }
                 }
-                return Some(ExitStatus::CoreDump(signal));
+                return SignalDeliveryOutcome::Kill(ExitStatus::CoreDump(signal));
             }
             DeliveryAction::Stop => {
+                task.stop_in_delivery.store(true, Ordering::Release);
                 drop(task_state);
-                task.thread_group().set_stopped(StopState::GroupStopping, Some(siginfo), false);
+                task.thread_group().write().stop_tasks(task, siginfo);
             }
             DeliveryAction::Continue => {
                 // Nothing to do. Effect already happened when the signal was raised.
@@ -439,7 +499,7 @@ fn deliver_signal(
         };
         break;
     }
-    None
+    SignalDeliveryOutcome::None
 }
 
 /// If `siginfo` is a forced signal and `siginfo.signal` is currently blocked or ignored
@@ -496,31 +556,22 @@ pub fn force_signal(
         return;
     }
 
-    if let Some(status) = deliver_signal(
-        &current_task.task,
-        current_task.thread_state.arch_width(),
-        task_state,
-        siginfo,
-        &mut current_task.thread_state.registers,
-        &current_task.thread_state.extended_pstate,
-        restricted_exception,
-    ) {
-        current_task.kill_thread_group(status);
-    }
+    let outcome = deliver_signal(current_task, task_state, siginfo, restricted_exception);
+    outcome.apply(current_task);
 }
 
 /// Prepares `current` state to execute the signal handler stored in `action`.
 ///
 /// This function stores the state required to restore after the signal handler on the stack.
 fn dispatch_signal_handler(
-    task: &Task,
-    arch_width: ArchWidth,
-    registers: &mut RegisterState<RegisterStorageEnum>,
-    extended_pstate: &ArchExtendedPstateStorage,
+    current_task: &CurrentTask,
     signal_state: &mut SignalState,
     siginfo: SignalInfo,
     action: sigaction_t,
-) -> Result<(), Errno> {
+) -> Result<SignalHandlerState, Errno> {
+    let arch_width = current_task.thread_state.arch_width();
+    let registers = &current_task.thread_state.registers;
+    let extended_pstate = &current_task.thread_state.extended_pstate;
     let stack_pointer_register = registers.stack_pointer_register();
     let on_sigaltstack = signal_state.alt_stack.is_some_and(|sigaltstack| {
         sigaltstack_contains_pointer(&sigaltstack, stack_pointer_register)
@@ -572,8 +623,8 @@ fn dispatch_signal_handler(
         }
     }
 
+    let sigreturn_addr = sigreturn_address(&current_task.task, arch_width)?;
     let signal_stack_frame = SignalStackFrame::new(
-        task,
         arch_width,
         registers,
         extended_pstate,
@@ -583,8 +634,9 @@ fn dispatch_signal_handler(
         UserAddress::from(stack_pointer),
     )?;
 
-    // Write the signal stack frame at the updated stack pointer.
-    task.write_memory(UserAddress::from(stack_pointer), signal_stack_frame.as_bytes())?;
+    // Write the signal stack frame using unified usercopy so hot signal paths avoid acquiring
+    // `mm.state` and issuing a `zx_vmo_write` syscall.
+    current_task.write_memory(UserAddress::from(stack_pointer), signal_stack_frame.as_bytes())?;
 
     let mut mask: SigSet = action.sa_mask.into();
     if action.sa_flags & (SA_NODEFER as u64) == 0 {
@@ -594,20 +646,20 @@ fn dispatch_signal_handler(
     // Preserve the existing mask when handling a nested signal
     signal_state.set_mask(mask | signal_state.mask());
 
-    registers.set_stack_pointer_register(stack_pointer);
-    registers.set_arg0_register(siginfo.signal.number() as u64);
-    if (action.sa_flags & SA_SIGINFO as u64) != 0 {
-        registers.set_arg1_register(
+    let siginfo_args = ((action.sa_flags & SA_SIGINFO as u64) != 0).then(|| {
+        (
             stack_pointer + memoffset::offset_of!(SignalStackFrame, siginfo_bytes) as u64,
-        );
-        registers.set_arg2_register(
             stack_pointer + memoffset::offset_of!(SignalStackFrame, context) as u64,
-        );
-    }
-    registers.set_instruction_pointer_register(action.sa_handler.addr);
-    registers.reset_flags(); // TODO(https://fxbug.dev/413070731): Verify and update the logic in resetting the flags.
+        )
+    });
 
-    Ok(())
+    Ok(SignalHandlerState {
+        stack_pointer,
+        signal_number: siginfo.signal.number() as u64,
+        siginfo_args,
+        handler_addr: action.sa_handler.addr,
+        sigreturn_addr,
+    })
 }
 
 pub fn restore_from_signal_handler(current_task: &mut CurrentTask) -> Result<(), Errno> {
@@ -683,5 +735,89 @@ pub(crate) mod testing {
 
     pub(crate) fn dequeue_signal_for_test(current_task: &mut AutoReleasableTask) {
         dequeue_signal(current_task.deref_mut());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mm::memory::MemoryObject;
+    use crate::mm::{DesiredAddress, MappingName, MappingOptions, ProtectionFlags};
+    use crate::testing::spawn_kernel_and_run;
+    use starnix_uapi::SI_USER;
+    use std::sync::{Arc, Barrier};
+
+    #[::fuchsia::test]
+    async fn test_dequeue_signal_does_not_lock_mm_state() {
+        spawn_kernel_and_run(async |current_task| {
+            const STACK_SIZE: usize = 0x4000;
+            const HANDLER_ADDRESS: UserAddress = UserAddress::const_from(0x00BADDAD);
+
+            let mm = Arc::clone(current_task.mm().expect("task has mm"));
+            let stack_base = mm
+                .map_memory(
+                    DesiredAddress::Any,
+                    MemoryObject::from(
+                        zx::Vmo::create(STACK_SIZE as u64).expect("failed to create stack VMO"),
+                    )
+                    .into(),
+                    0,
+                    STACK_SIZE,
+                    ProtectionFlags::READ | ProtectionFlags::WRITE,
+                    MappingOptions::empty(),
+                    MappingName::Stack,
+                )
+                .expect("failed to map stack VMO");
+            let stack_address = (stack_base + (STACK_SIZE - 16)).expect("stack address overflow");
+            current_task
+                .thread_state
+                .registers
+                .set_stack_pointer_register(stack_address.ptr() as u64);
+
+            // Pre-fault the stack mapping so unified usercopy completes on the fast path.
+            current_task
+                .write_memory(stack_base, &[0u8; STACK_SIZE])
+                .expect("failed to pre-fault stack");
+
+            current_task.thread_group().signal_actions.set(
+                SIGUSR1,
+                sigaction_t {
+                    sa_flags: SA_SIGINFO as u64,
+                    sa_handler: HANDLER_ADDRESS.into(),
+                    ..sigaction_t::default()
+                },
+            );
+            current_task.write().enqueue_signal(SignalInfo::with_detail(
+                SIGUSR1,
+                SI_USER as i32,
+                SignalDetail::None,
+            ));
+
+            // Hold `mm.state` exclusively on another thread while delivering the signal. Signal
+            // delivery must complete via unified usercopy without waiting on `mm.state`.
+            let locked = Arc::new(Barrier::new(2));
+            let release = Arc::new(Barrier::new(2));
+            let holder = {
+                let mm = Arc::clone(&mm);
+                let locked = Arc::clone(&locked);
+                let release = Arc::clone(&release);
+                std::thread::spawn(move || {
+                    let _guard = mm.state.write();
+                    locked.wait();
+                    release.wait();
+                })
+            };
+
+            locked.wait();
+            dequeue_signal(current_task);
+            release.wait();
+            holder.join().expect("mm lock holder failed");
+
+            assert_eq!(
+                current_task.thread_state.registers.instruction_pointer_register(),
+                HANDLER_ADDRESS.ptr() as u64
+            );
+        })
+        .await;
     }
 }

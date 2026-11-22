@@ -21282,6 +21282,7 @@ pub struct remote_binder_wait_command {
 pub const REMOTE_BINDER_START: __u32 = 2147766785;
 pub const REMOTE_BINDER_WAIT: __u32 = 1073828354;
 pub const BINDER_CTL_ADD: __u32 = 3238552065;
+pub const transaction_flags_TF_DEFER_COMPLETE: __u32 = 128;
 pub const FIBMAP: __u32 = 1;
 pub const FIGETBSZ: __u32 = 2;
 pub const FICLONE: __u32 = 1074041865;
@@ -21485,6 +21486,11 @@ pub const TUNSETIFF: __u32 = 1074025674;
 pub struct sched_param {
     pub sched_priority: crate::types::arch32::c_int,
 }
+pub const FUSE_DEV_IOC_BACKING_OPEN: __u32 = 1074849025;
+pub const FUSE_DEV_IOC_BACKING_CLOSE: __u32 = 1074062594;
+pub const FUSE_DEV_IOC_PASSTHROUGH_OPEN_V0: __u32 = 1074586881;
+pub const FUSE_DEV_IOC_PASSTHROUGH_OPEN_V1: __u32 = 1074587007;
+pub const FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2: __u32 = 1074062718;
 pub const USBDEVFS_CONTROL: __u32 = 3222295808;
 pub const USBDEVFS_BULK: __u32 = 3222295810;
 pub const USBDEVFS_RESETEP: __u32 = 2147767555;

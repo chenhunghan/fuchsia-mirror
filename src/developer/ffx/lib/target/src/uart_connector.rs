@@ -9,8 +9,8 @@
 //! multiplexed serial link.
 
 use crate::Resolution;
-use crate::target_connector::{
-    BUFFER_SIZE, FDomainConnection, TargetConnection, TargetConnectionError, TargetConnector,
+use crate::transport_connector::{
+    BUFFER_SIZE, FDomainConnection, TargetConnection, TargetConnectionError, TransportConnector,
 };
 use errors::FfxError;
 use ffx_config::{EnvironmentContext, TryFromEnvContext};
@@ -30,7 +30,7 @@ const CONNECTION_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 ///
 /// Handles target resolution from an endpoint (such as `/dev/ttyUSB0`),
 /// locates or validates the corresponding driver daemon Unix domain socket, and
-/// implements [`TargetConnector`] to instantiate an FDomain connection.
+/// implements [`TransportConnector`] to instantiate an FDomain connection.
 pub struct UartConnector {
     pub(crate) endpoint: String,
     env_context: EnvironmentContext,
@@ -147,7 +147,7 @@ async fn connect_driver_socket(
     }
 }
 
-impl TargetConnector for UartConnector {
+impl TransportConnector for UartConnector {
     const CONNECTION_TYPE: &'static str = "UART";
 
     async fn connect(&mut self) -> Result<TargetConnection, TargetConnectionError> {

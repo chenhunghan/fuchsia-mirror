@@ -27,7 +27,8 @@ pub struct MediaCodecConfig {
 /// RTP Header (12 bytes) + 1 byte (SBC header) + 5 * SBC Frame (119 bytes) = 608 bytes < 672
 /// TODO(40986, 41449): Update this based on the input format and the codec settings.
 const ENCODED_FRAMES_PER_SBC_PACKET: u8 = 5;
-const PCM_FRAMES_PER_SBC_FRAME: u32 = 640;
+/// Default number of PCM frames per SBC frame (16 blocks * 8 subbands = 128 PCM frames).
+const PCM_FRAMES_PER_SBC_FRAME: u32 = 128;
 
 /// The number of frames in each AAC packet when encoding.
 /// Only one encoded AudioMuxElement is sent per RTP frame. 1024 is the most our current
@@ -265,7 +266,10 @@ impl MediaCodecConfig {
 
     pub fn pcm_frames_per_encoded_frame(&self) -> usize {
         match self.codec_type {
-            MediaCodecType::AUDIO_SBC => PCM_FRAMES_PER_SBC_FRAME as usize,
+            MediaCodecType::AUDIO_SBC => SbcCodecInfo::try_from(self.codec_extra())
+                .ok()
+                .and_then(|info| info.pcm_frames_per_encoded_frame())
+                .unwrap_or(PCM_FRAMES_PER_SBC_FRAME as usize),
             MediaCodecType::AUDIO_AAC => PCM_FRAMES_PER_AAC_FRAME as usize,
             _ => unreachable!(),
         }
@@ -494,12 +498,30 @@ mod tests {
             MediaCodecConfig::try_from(&test_codec_cap(MediaCodecType::AUDIO_SBC)).expect("builds");
         assert_eq!(Some(44100), res.sampling_frequency().ok());
         assert_eq!(&[5], res.rtp_frame_header());
+        assert_eq!(5, res.frames_per_packet());
+        assert_eq!(128, res.pcm_frames_per_encoded_frame());
         assert_eq!(media::AUDIO_ENCODING_SBC, res.stream_encoding());
+
+        let sbc_8x4_info = SbcCodecInfo::new(
+            SbcSamplingFrequency::FREQ48000HZ,
+            SbcChannelMode::MONO,
+            SbcBlockCount::EIGHT,
+            SbcSubBands::FOUR,
+            SbcAllocation::LOUDNESS,
+            2,
+            53,
+        )
+        .expect("builds");
+        let sbc_8x4 =
+            MediaCodecConfig::build(MediaCodecType::AUDIO_SBC, &sbc_8x4_info.to_bytes()).unwrap();
+        assert_eq!(32, sbc_8x4.pcm_frames_per_encoded_frame());
 
         let res =
             MediaCodecConfig::try_from(&test_codec_cap(MediaCodecType::AUDIO_AAC)).expect("builds");
         assert_eq!(Some(44100), res.sampling_frequency().ok());
         assert_eq!(0, res.rtp_frame_header().len());
+        assert_eq!(1, res.frames_per_packet());
+        assert_eq!(1024, res.pcm_frames_per_encoded_frame());
         assert_eq!(media::AUDIO_ENCODING_AAC, res.stream_encoding());
     }
 

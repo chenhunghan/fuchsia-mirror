@@ -73,7 +73,6 @@ impl From<u64> for SupplicantKeyReplayCounter {
 pub struct FourwayHandshakeFrame<B: SplitByteSlice>(Dot11VerifiedKeyFrame<B>);
 
 impl<B: SplitByteSlice> FourwayHandshakeFrame<B> {
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn from_verified(
         frame: Dot11VerifiedKeyFrame<B>,
         role: Role,
@@ -125,7 +124,6 @@ impl<B: SplitByteSlice> std::ops::Deref for FourwayHandshakeFrame<B> {
     }
 }
 
-#[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
 pub fn get_group_mgmt_cipher(
     s_protection: &ProtectionInfo,
     a_protection: &ProtectionInfo,
@@ -247,7 +245,6 @@ pub struct Config {
 }
 
 impl Config {
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn new(
         role: Role,
         s_addr: MacAddr,
@@ -271,7 +268,10 @@ impl Config {
                 match s_rsne.is_valid_subset_of(a_rsne) {
                     Ok(true) => {}
                     Ok(false) => {
-                        return Err(Error::RsneInvalidSubset(s_rsne.clone(), a_rsne.clone()));
+                        return Err(Error::RsneInvalidSubset(
+                            Box::new(s_rsne.clone()),
+                            Box::new(a_rsne.clone()),
+                        ));
                     }
                     Err(e) => return Err(e.into()),
                 };
@@ -363,7 +363,6 @@ impl Fourway {
         Ok(fourway)
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_eapol_key_frame<B: SplitByteSlice>(
         &mut self,
         update_sink: &mut UpdateSink,
@@ -384,7 +383,6 @@ impl Fourway {
         }
     }
 
-    #[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
     pub fn on_rsna_response_timeout(&self) -> Result<(), Error> {
         match self {
             Fourway::Authenticator(state_machine) => state_machine.on_rsna_response_timeout(),
@@ -441,7 +439,6 @@ impl Fourway {
 
 // Verbose and explicit verification of Message 1 to 4 against IEEE Std 802.11-2016, 12.7.6.2.
 
-#[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
 fn validate_message_1<B: SplitByteSlice>(frame: &eapol::KeyFrameRx<B>) -> Result<(), Error> {
     let key_info = frame.key_frame_fields.key_info();
     // IEEE Std 802.11-2016, 12.7.2 b.4)
@@ -488,7 +485,6 @@ fn validate_message_1<B: SplitByteSlice>(frame: &eapol::KeyFrameRx<B>) -> Result
     Ok(())
 }
 
-#[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
 fn validate_message_2<B: SplitByteSlice>(frame: &eapol::KeyFrameRx<B>) -> Result<(), Error> {
     let key_info = frame.key_frame_fields.key_info();
     // IEEE Std 802.11-2016, 12.7.2 b.4)
@@ -530,7 +526,6 @@ fn validate_message_2<B: SplitByteSlice>(frame: &eapol::KeyFrameRx<B>) -> Result
     Ok(())
 }
 
-#[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
 fn validate_message_3<B: SplitByteSlice>(
     frame: &eapol::KeyFrameRx<B>,
     nonce: Option<&[u8]>,
@@ -588,7 +583,6 @@ fn validate_message_3<B: SplitByteSlice>(
     Ok(())
 }
 
-#[allow(clippy::result_large_err, reason = "mass allow for https://fxbug.dev/381896734")]
 fn validate_message_4<B: SplitByteSlice>(frame: &eapol::KeyFrameRx<B>) -> Result<(), Error> {
     let key_info = frame.key_frame_fields.key_info();
     // IEEE Std 802.11-2016, 12.7.2 b.4)

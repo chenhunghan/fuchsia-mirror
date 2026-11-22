@@ -41,18 +41,9 @@ struct ThreadLinebufferStorage {
   alignas(Thread::Linebuffer) unsigned char bytes[sizeof(Thread::Linebuffer)];
 };
 
-struct ThreadMigrateFnStorage {
-  alignas(Thread::MigrateFn) unsigned char bytes[sizeof(Thread::MigrateFn)];
+struct ThreadCallbackStorage {
+  alignas(Thread::kCallbackAlign) unsigned char bytes[Thread::kCallbackSize];
 };
-
-struct ThreadContextSwitchFnStorage {
-  alignas(Thread::ContextSwitchFn) unsigned char bytes[sizeof(Thread::ContextSwitchFn)];
-};
-
-struct ThreadRseqAccessorStorage {
-  alignas(page_map::Accessor<zx_rseq_t>) unsigned char bytes[sizeof(page_map::Accessor<zx_rseq_t>)];
-};
-
 #if WITH_LOCK_DEP
 struct ThreadLockStateStorage {
   alignas(lockdep::ThreadLockState) unsigned char bytes[sizeof(lockdep::ThreadLockState)];
@@ -111,14 +102,28 @@ struct MemoryAllocationStateLayout {
   static constexpr size_t kDisableCountOffset = offsetof(MemoryAllocationState, disable_count_);
 };
 
+struct ThreadLinebufferLayout {
+  static constexpr size_t kBufferSize = Thread::Linebuffer::kBufferSize;
+  static constexpr size_t kPosOffset = offsetof(Thread::Linebuffer, pos);
+  static constexpr size_t kBufferOffset = offsetof(Thread::Linebuffer, buffer);
+};
+
 // LINT.IfChange(ThreadLayout)
 struct ThreadLayout {
   // Members that Rust models as plain pointers / integers must be exactly that wide.
   static_assert(sizeof(RestrictedStatePtr) == sizeof(void*));
   static_assert(sizeof(fbl::RefPtr<ThreadDispatcher>) == sizeof(void*));
-  static_assert(sizeof(fbl::DoublyLinkedList<OwnedWaitQueue*>) == sizeof(void*));
+  static_assert(alignof(fbl::RefPtr<ThreadDispatcher>) == alignof(void*));
+  static_assert(sizeof(decltype(Thread::owned_wait_queues_)) == sizeof(void*));
+  static_assert(alignof(decltype(Thread::owned_wait_queues_)) == alignof(void*));
   static_assert(sizeof(Thread::Canary) == sizeof(uint32_t));
   static_assert(sizeof(RelaxedAtomic<VmAspace*>) == sizeof(void*));
+  static_assert(sizeof(decltype(Thread::migrate_fn_)) == sizeof(ThreadCallbackStorage));
+  static_assert(alignof(decltype(Thread::migrate_fn_)) == alignof(ThreadCallbackStorage));
+  static_assert(sizeof(decltype(Thread::context_switch_fn_)) == sizeof(ThreadCallbackStorage));
+  static_assert(alignof(decltype(Thread::context_switch_fn_)) == alignof(ThreadCallbackStorage));
+  static_assert(sizeof(page_map::Accessor<zx_rseq_t>) == 2 * sizeof(void*));
+  static_assert(alignof(page_map::Accessor<zx_rseq_t>) == alignof(void*));
 
   // Members that Rust models as RelaxedAtomicU32 / RelaxedAtomicU64 must match in size and align.
   static_assert(sizeof(ktl::atomic<uint32_t>) == sizeof(uint32_t));

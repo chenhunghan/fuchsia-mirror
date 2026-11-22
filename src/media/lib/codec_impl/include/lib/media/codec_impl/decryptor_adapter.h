@@ -5,6 +5,8 @@
 #ifndef SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_DECRYPTOR_ADAPTER_H_
 #define SRC_MEDIA_LIB_CODEC_IMPL_INCLUDE_LIB_MEDIA_CODEC_IMPL_DECRYPTOR_ADAPTER_H_
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
 #include <fuchsia/media/drm/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
@@ -23,6 +25,15 @@
 
 class DecryptorAdapter : public CodecAdapter {
  public:
+  struct EncryptionParams2 {
+    std::string scheme;
+    std::vector<uint8_t> key_id;
+    std::vector<uint8_t> init_vector;
+    std::optional<fuchsia_media::EncryptionPattern> pattern;
+    std::vector<fuchsia_media::SubsampleEntry> subsamples;
+  };
+
+  // Deprecated HLCPP soft-transition struct; prefer EncryptionParams2 above.
   struct EncryptionParams {
     std::string scheme;
     std::vector<uint8_t> key_id;
@@ -61,17 +72,17 @@ class DecryptorAdapter : public CodecAdapter {
   bool IsCoreCodecHwBased(CodecPort port) override;
   bool IsSupportsMidStreamOutputConstraintsChange() override;
 
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override;
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override;
   void CoreCodecSetSecureMemoryMode(
-      CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode) override;
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+      CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
   void CoreCodecStartStream() override;
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override;
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
@@ -80,12 +91,7 @@ class DecryptorAdapter : public CodecAdapter {
                                  const std::vector<std::unique_ptr<CodecPacket>>& packets) override;
   void CoreCodecRecycleOutputPacket(CodecPacket* packet) override;
   void CoreCodecEnsureBuffersNotConfigured(CodecPort port) override;
-  std::unique_ptr<const fuchsia::media::StreamBufferConstraints> CoreCodecBuildNewInputConstraints()
-      override;
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override;
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override;
   void CoreCodecMidStreamOutputBufferReConfigPrepare() override;
@@ -98,10 +104,16 @@ class DecryptorAdapter : public CodecAdapter {
   DecryptorAdapter& operator=(DecryptorAdapter&&) = delete;
 
   // Decryptor interface
+  virtual std::optional<fuchsia_media::StreamError> Decrypt(const EncryptionParams2& params,
+                                                            const InputBuffer& input,
+                                                            const OutputBuffer& output,
+                                                            CodecPacket* output_packet);
+  // Deprecated HLCPP soft-transition overload; prefer the natural overload above.
+  // Override exactly one of this pair; overriding neither panics at runtime.
   virtual std::optional<fuchsia::media::StreamError> Decrypt(const EncryptionParams& params,
                                                              const InputBuffer& input,
                                                              const OutputBuffer& output,
-                                                             CodecPacket* output_packet) = 0;
+                                                             CodecPacket* output_packet);
 
  protected:
   // GetSecureOutputMemoryConstraints2
@@ -150,11 +162,11 @@ class DecryptorAdapter : public CodecAdapter {
   void QueueInputItem(CodecInputItem input_item);
   CodecInputItem DequeueInputItem();
   void ProcessInput();
-  bool UpdateEncryptionParams(fuchsia::media::EncryptedFormat* encrypted_format);
-  void OnCoreCodecFailStream(fuchsia::media::StreamError error);
+  bool UpdateEncryptionParams(const fuchsia_media::EncryptedFormat& encrypted_format);
+  void OnCoreCodecFailStream(fuchsia_media::StreamError error);
 
   std::optional<InspectProperties> inspect_properties_;
-  EncryptionParams encryption_params_;
+  EncryptionParams2 encryption_params_;
   bool secure_mode_ = false;
 
   // Only StreamControl ever adds anything to input_queue_.  Only

@@ -46,7 +46,7 @@ pay a cost that's unique to C++ (see the [Design](#design) below for more
 details).
 Other languages can typically represent an empty struct with zero bytes.
 
-## Design
+## Design {:#design}
 
 Two designs: one choice. We gotta pick.
 

@@ -6,6 +6,9 @@ load("//build/bazel/rules/idk:idk_cc_prebuilt_library.bzl", "idk_cc_shared_libra
 
 package(default_applicable_licenses = ["//:license"])
 
+# In GN, the Bazel-built library replaces the GN-built one in the toolchain that
+# matches Bazel's build configuration. See //build/bazel/bazel_shared_library.gni.
+# @bazel2gn:raw_attribute:bazel_target = ":svc_gn_outputs"
 idk_cc_shared_library(
     name = "svc",
     srcs = ["dir.cc"],

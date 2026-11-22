@@ -5,9 +5,9 @@
 #ifndef SRC_CONNECTIVITY_NETWORK_DRIVERS_NETWORK_DEVICE_NETWORK_DEVICE_H_
 #define SRC_CONNECTIVITY_NETWORK_DRIVERS_NETWORK_DEVICE_NETWORK_DEVICE_H_
 
+#include <fidl/fuchsia.driver.token/cpp/wire.h>
 #include <fidl/fuchsia.hardware.network/cpp/wire.h>
 #include <lib/driver/component/cpp/driver_base2.h>
-#include <lib/driver/devfs/cpp/connector.h>
 
 #include <memory>
 
@@ -30,13 +30,17 @@ class FidlNetworkDeviceImplBinder : public NetworkDeviceImplBinder {
   std::shared_ptr<fdf::Namespace> incoming_;
 };
 
-class NetworkDevice : public fdf::DriverBase2 {
+class NetworkDevice : public fdf::DriverBase2,
+                      public fidl::WireServer<fuchsia_driver_token::NodeToken> {
  public:
   NetworkDevice();
   ~NetworkDevice() override;
 
   void Start(fdf::DriverContext context, fdf::StartCompleter completer) override;
   void Stop(fdf::StopCompleter completer) override;
+
+  // fuchsia_driver_token::NodeToken implementation.
+  void Get(GetCompleter::Sync& completer) override;
 
   NetworkDeviceInterface* GetInterface() { return device_.get(); }
 
@@ -48,12 +52,8 @@ class NetworkDevice : public fdf::DriverBase2 {
   std::unique_ptr<OwnedDeviceInterfaceDispatchers> dispatchers_;
 
   std::unique_ptr<NetworkDeviceInterface> device_;
-
-  // These are used for the child node created to enable discovery through devfs. The child node has
-  // to be kept alive for the child to remain alive and discoverable through devfs.
-  fidl::WireSyncClient<fuchsia_driver_framework::Node> child_node_;
-  driver_devfs::Connector<fuchsia_hardware_network::Device> devfs_connector_{
-      fit::bind_member<&NetworkDevice::Connect>(this)};
+  zx::event node_token_;
+  fidl::ServerBindingGroup<fuchsia_driver_token::NodeToken> token_bindings_;
 };
 
 }  // namespace network

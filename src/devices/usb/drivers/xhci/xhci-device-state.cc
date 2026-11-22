@@ -95,15 +95,28 @@ zx_status_t DeviceState::InitializeEndpointContext(const UsbXhci& hci, uint8_t s
   if (hub_info) {
     speed = static_cast<uint8_t>(hub_info->speed);
     // TODO(https://fxbug.dev/42109653): USB 3.1 support. Section 6.2.2
-    if (((speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kLow) ||
-         (speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kFull)) &&
-        (hub_info->hub_speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh)) {
-      hub_info->tt_info.emplace(
-          tt_info_t{.tt_slot_id = hub_info->hub_state->GetSlot(), .tt_port_number = port_id});
+    // Per USB 2.0 Specification Section 11.14 (Transaction Translator) and Section 11.23.1
+    // (https://www.usb.org/document-library/usb-20-specification), High-Speed hubs bridge
+    // downstream Low-/Full-Speed traffic via Single-TT or per-port Multi-TT split transactions.
+    const bool is_ls_or_fs = (speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kLow) ||
+                             (speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kFull);
+    if (is_ls_or_fs && (hub_info->hub_speed == fuchsia_hardware_usb_descriptor::UsbSpeed::kHigh)) {
+      hub_info->tt_info.emplace(tt_info_t{
+          .tt_slot_id = hub_info->hub_state->GetSlot(),
+          .tt_port_number = port_id,
+          .multi_tt = hub_info->multi_tt,
+      });
     }
-    if (hub_info->tt_info) {
+    // Per Intel xHCI 1.2 Specification Section 6.2.2, Table 6-4 (Multi-TT [MTT], bit 25) and
+    // Table 6-6 (Parent Hub Slot ID [bits 7:0], Parent Port Number [bits 15:8],
+    // https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/extensible-host-controler-interface-usb-xhci.pdf),
+    // Parent Hub Slot ID, Parent Port Number, and MTT are programmed for a Low- or Full-Speed
+    // device connected through a parent High-Speed hub (Hub = 0 during Address Device), and must
+    // remain 0 for High-Speed and SuperSpeed slots.
+    if (is_ls_or_fs && hub_info->tt_info) {
       slot_context->set_PARENT_HUB_SLOT_ID(hub_info->tt_info->tt_slot_id)
-          .set_PARENT_PORT_NUMBER(hub_info->tt_info->tt_port_number);
+          .set_PARENT_PORT_NUMBER(hub_info->tt_info->tt_port_number)
+          .set_MULTI_TT(hub_info->tt_info->multi_tt);
     }
   } else {
     speed = hci.GetPortSpeed(port_id);
@@ -145,7 +158,7 @@ zx_status_t DeviceState::InitializeOutputContextBuffer(
     slot_id = static_cast<uint8_t>(slot_id);
   }
   hub_ = hub_info;
-  hw_mb();
+  DataMemoryBarrier();
   *out = std::move(output_context_buffer);
   return ZX_OK;
 }
@@ -211,7 +224,7 @@ TRBPromise DeviceState::AddressDeviceCommand(UsbXhci* hci, uint8_t slot, uint8_t
         .box();
   }
   command_context->port_number = port;
-  hw_mb();
+  DataMemoryBarrier();
   input_context_ = std::move(slot_context_buffer);
   device_context_ = std::move(output_context_buffer);
   return hci->SubmitCommand(command, std::move(command_context));

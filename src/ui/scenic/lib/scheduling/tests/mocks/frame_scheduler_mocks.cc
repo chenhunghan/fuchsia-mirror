@@ -23,6 +23,14 @@ void MockFrameScheduler::ScheduleUpdateForSession(zx::time presentation_time,
   }
 }
 
+void MockFrameScheduler::NotifyExpectedPresent(SessionId session_id, zx::time expected_present_time,
+                                               zx::duration frame_interval, bool schedule_asap) {
+  if (notify_expected_present_callback_) {
+    notify_expected_present_callback_(session_id, expected_present_time, frame_interval,
+                                      schedule_asap);
+  }
+}
+
 std::vector<scheduling::FuturePresentationInfo> MockFrameScheduler::GetFuturePresentationInfos(
     zx::duration requested_prediction_span) {
   if (get_future_presentation_infos_callback_) {

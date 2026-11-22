@@ -30,8 +30,12 @@ inline void SchedulePromiseWithXhciExecutorPolicy(
   auto continuation =
       promise.or_else([hci](const zx_status_t& status) -> fpromise::result<void, zx_status_t> {
         if (status == ZX_ERR_BAD_STATE) {
-          fdf::error("Scheduled task returned a fatal error, shutting down");
-          hci->Shutdown(status);
+          if (hci && hci->Running()) {
+            fdf::error("Scheduled task returned a fatal error, shutting down");
+            hci->Shutdown(status);
+          } else {
+            fdf::warn("Scheduled task returned ZX_ERR_BAD_STATE during shutdown; ignoring");
+          }
         } else if (status != ZX_ERR_IO_NOT_PRESENT) {
           fdf::warn("Scheduled task failed: {}", zx_status_get_string(status));
         }

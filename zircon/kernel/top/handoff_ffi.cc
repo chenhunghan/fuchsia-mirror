@@ -4,12 +4,55 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#include <lib/arch/asm.h>
+#include <lib/boot-options/boot-options.h>
+#include <lib/elfldltl/init-fini.h>
+#include <lib/thread-stack/abi.h>
 #include <stdint.h>
 #include <zircon/assert.h>
 
+#include <memory>
+#include <span>
+
+#include <arch/kernel_aspace.h>
 #include <kernel/ffi.h>
 #include <phys/handoff/boot-constants.h>
 #include <phys/handoff/handoff.h>
+#include <phys/handoff/zircon-abi-spec.h>
+
+// NOLINTNEXTLINE(bugprone-reserved-identifier)
+extern arch::AsmLabel __text_start;  // Defined by the linker script.
+
+// Declared in `<phys/handoff/zircon-abi-spec.h>` as `extern constinit const`
+// inside `extern "C"`, so the compiler knows it needs to emit a real
+// definition here to satisfy link-time references (from `-e`). Defining it as
+// `constexpr` here still allows constant folding inside the kernel, though its
+// members are only read by physboot and not by the kernel anyway.
+extern "C" constexpr ZirconAbiSpec kZirconAbiSpec = {
+    .machine_stack = kMachineStack,
+#if __has_feature(shadow_call_stack)
+    .shadow_call_stack = kShadowCallStack,
+#endif
+#if __has_feature(safe_stack)
+    .unsafe_stack = kUnsafeStack,
+#endif
+
+    .boot_constants{kBootConstants},
+
+    .kernel_aspace_base = KERNEL_ASPACE_BASE,
+    .kernel_aspace_size = KERNEL_ASPACE_SIZE,
+
+#if LK_DEBUGLEVEL >= 2
+    // Without debug support, this stays nullptr and physboot will panic if the
+    // `kernel.debug.boot-spin` boot option is used.
+    .debug_boot_spin_ready{gDebugBootSpinReady},
+#endif
+
+    // This is just handy for physboot to be able to print out.
+    .text_start{__text_start[0]},
+};
+
+const BootOptions* BootOptions::Get() { return kBootConstants.boot_options.get(); }
 
 extern "C" {
 
@@ -33,6 +76,11 @@ FFI_ALWAYS_INLINE uint32_t cpp_boot_constants_hw_reboot_reason() {
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_boot_constants_bypass_debuglog() {
+  return kBootConstants.bypass_debuglog;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE const uint8_t* cpp_boot_constants_system_version_string(size_t* size) {
   std::string_view version = kBootConstants.system_version_string.get();
   *size = version.size();
@@ -40,13 +88,35 @@ FFI_ALWAYS_INLINE const uint8_t* cpp_boot_constants_system_version_string(size_t
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
-FFI_ALWAYS_INLINE const PhysHandoff* cpp_phys_handoff_get() { return gPhysHandoff; }
+FFI_ALWAYS_INLINE const uint8_t* cpp_boot_constants_elf_build_id(size_t* size) {
+  std::span<const std::byte> build_id = kBootConstants.elf_build_id.get();
+  *size = build_id.size();
+  return reinterpret_cast<const uint8_t*>(build_id.data());
+}
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
 FFI_ALWAYS_INLINE const uint8_t* cpp_phys_handoff_crashlog(size_t* size) {
   std::string_view crashlog = gPhysHandoff->crashlog.get();
   *size = crashlog.size();
   return reinterpret_cast<const uint8_t*>(crashlog.data());
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_phys_vmo_log(const PhysVmo* vmo, const char* prefix) {
+  vmo->Log(prefix);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_phys_handoff_call_init_array(const PhysHandoff* handoff) {
+  elfldltl::InitFiniInfo<>{handoff->init_array.get()}.callable_init_no_legacy()();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const PhysVmo* cpp_phys_handoff_extra_vmos(const PhysHandoff* handoff,
+                                                             size_t* count) {
+  std::span<const PhysVmo> extra_vmos = handoff->extra_vmos.get();
+  *count = extra_vmos.size();
+  return extra_vmos.data();
 }
 
 // TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
@@ -109,5 +179,67 @@ FFI_ALWAYS_INLINE bool cpp_phys_handoff_platform_id(zbi_platform_id_t* out) {
   *out = *platform_id;
   return true;
 }
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const PhysVmar* cpp_phys_handoff_vmars(const PhysHandoff& handoff,
+                                                         size_t* count) {
+  std::span<const PhysVmar> vmars = handoff.vmars.get();
+  *count = vmars.size();
+  return vmars.data();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const PhysVmar* cpp_phys_handoff_temporary_vmar(const PhysHandoff& handoff) {
+  return handoff.temporary_vmar.get();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const PhysVmar* cpp_phys_handoff_heap_vmar(const PhysHandoff& handoff) {
+  return handoff.heap_vmar.has_value() ? &*handoff.heap_vmar : nullptr;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const PhysMapping* cpp_phys_vmar_mappings(const PhysVmar& vmar, size_t* count) {
+  std::span<const PhysMapping> mappings = vmar.mappings.get();
+  *count = mappings.size();
+  return mappings.data();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_phys_vmar_permissions(const PhysVmar& vmar,
+                                                 PhysMapping::Permissions* out) {
+  std::construct_at(out, vmar.permissions());
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_phys_vmar_log(const PhysVmar& vmar, const char* prefix) {
+  vmar.Log(prefix);
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_phys_mapping_permissions_readable(
+    const PhysMapping::Permissions& perms) {
+  return perms.readable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_phys_mapping_permissions_writable(
+    const PhysMapping::Permissions& perms) {
+  return perms.writable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE bool cpp_phys_mapping_permissions_executable(
+    const PhysMapping::Permissions& perms) {
+  return perms.executable();
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE const crypto::EntropyPool* cpp_phys_handoff_entropy_pool() {
+  return gPhysHandoff->entropy_pool.has_value() ? &*gPhysHandoff->entropy_pool : nullptr;
+}
+
+// TODO(https://fxbug.dev/537458631): Remove the annotations once cross-language inlining works.
+FFI_ALWAYS_INLINE void cpp_phys_handoff_reset_entropy_pool() { gPhysHandoff->entropy_pool.reset(); }
 
 }  // extern "C"

@@ -224,6 +224,13 @@ TEST_F(ClientTest, NonOwningClientCannotStartCaptureOrSetDisplayPowerMode) {
     ASSERT_TRUE(power_result->is_error());
     EXPECT_STATUS(power_result->error_value(), ZX_ERR_NOT_CONNECTED);
 
+    // Non-owning clients are silently ignored without forwarding over the
+    // (unbound) engine channel; the subsequent two-way call flushes the channel.
+    fidl::OneWayStatus present_hint_status = virtcon_client->NotifyExpectedPresent(
+        display::DisplayId(1).ToFidl(), zx::time_monotonic(100'000'000),
+        /*frame_interval=*/8'333'333);
+    EXPECT_TRUE(present_hint_status.ok()) << present_hint_status.FormatDescription();
+
     auto min_rgb_result = virtcon_client->SetMinimumRgb(16);
     ASSERT_TRUE(min_rgb_result.ok());
     ASSERT_TRUE(min_rgb_result->is_error());

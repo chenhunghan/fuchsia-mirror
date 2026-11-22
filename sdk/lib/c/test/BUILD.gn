@@ -64,12 +64,20 @@ libc_component_tests = [
 ]
 libc_test_manifests = []
 
+source_set("unittest") {
+  visibility = [ "../*" ]
+  testonly = true
+
+  public = [ "unittest.h" ]
+  public_deps = [ "//src/zircon/lib/zircon:headers" ]
+}
+
 source_set("safe-zero-construction") {
   visibility = [ "../*" ]
   testonly = true
 
   public = [ "safe-zero-construction.h" ]
-  public_deps = [ "//zircon/system/ulib/zxtest:zxtest-streams" ]
+  public_deps = [ ":unittest" ]
 }
 
 fdio_config = [ "//build/config/fuchsia:fdio_config" ]
@@ -328,7 +336,6 @@ zbi_test_executable("libc-unittests-standalone") {
   deps = [
     "..:unittests",
     "//src/zircon/testing/standalone-test",
-    "//zircon/system/ulib/zxtest:zxtest-streams",
   ]
 }
 

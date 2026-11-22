@@ -3,9 +3,9 @@
 // found in the LICENSE file.
 
 use crate::host_dispatcher::test as hd_test;
+use crate::services::host_watcher;
 use crate::{host_dispatcher, run_receiver_server};
 use assert_matches::assert_matches;
-use async_helpers::hanging_get::asynchronous as hanging_get;
 use fidl::endpoints::{self, Responder};
 use fidl_fuchsia_bluetooth_gatt2::Server_Request;
 use fidl_fuchsia_bluetooth_host::{
@@ -15,10 +15,9 @@ use fidl_fuchsia_bluetooth_host::{
 use fidl_fuchsia_bluetooth_sys::{HostInfo as FidlHostInfo, TechnologyType};
 use fuchsia_async as fasync;
 use fuchsia_bluetooth::types::{Address, HostId, HostInfo};
-use futures::future::join;
-use futures::{FutureExt, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use log::info;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 async fn handle_host_requests(id: HostId, mut stream: HostRequestStream) {
     let mut first_state_req = true;
@@ -129,29 +128,12 @@ async fn add_component_succeeds() {
 #[fuchsia::test]
 async fn add_multiple_components_succeeds() {
     // Create HostDispatcher
-    let watch_peers_broker = hanging_get::HangingGetBroker::new(
-        HashMap::new(),
-        |_, _| true,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
-    let watch_hosts_broker = hanging_get::HangingGetBroker::new(
-        Vec::new(),
-        crate::host_watcher::observe_hosts,
-        hanging_get::DEFAULT_CHANNEL_SIZE,
-    );
-    let hd = hd_test::make_test_dispatcher(
-        watch_peers_broker.new_publisher(),
-        watch_peers_broker.new_registrar(),
-        watch_hosts_broker.new_publisher(),
-        watch_hosts_broker.new_registrar(),
-    );
-    let watchers_fut = join(watch_peers_broker.run(), watch_hosts_broker.run()).map(|_| ());
-    fasync::Task::spawn(watchers_fut).detach();
+    let hd = hd_test::make_simple_test_dispatcher();
 
     // Start HostWatcher client/server
     let (host_watcher_proxy, host_watcher_stream) =
         fidl::endpoints::create_proxy_and_stream::<fidl_fuchsia_bluetooth_sys::HostWatcherMarker>();
-    let host_watcher_fut = crate::host_watcher::run(hd.clone(), host_watcher_stream);
+    let host_watcher_fut = host_watcher::run(hd.clone(), host_watcher_stream);
     let _host_watcher_task = fasync::Task::spawn(host_watcher_fut);
 
     // Create Receiver client/server

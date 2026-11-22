@@ -127,13 +127,13 @@ The council makes formal decisions by
 members, as assessed by the chair. If the council cannot come to rough
 consensus, the chair will make the final decision.
 
-## Membership
+## Membership {#membership}
 
 There is no predetermined number of people on the council. However, in order to
 provide a coherent technical vision, the council has a small number of members.
 Members are appointed by the governing authority for the project.
 
-### Qualifications
+### Qualifications {#qualifications}
 
 Members are expected to meet the following criteria:
 
@@ -161,7 +161,7 @@ Whether a candidate meets the criteria above is to be determined by the
 appointing body. Council members need not be employed by any specific company
 or organization.
 
-### Current members
+### Current members {#current-members}
 
 The current members of the Fuchsia Eng Council are listed in
 [this OWNERS file][rfc-owners].

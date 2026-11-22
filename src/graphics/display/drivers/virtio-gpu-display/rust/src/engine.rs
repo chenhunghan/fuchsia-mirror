@@ -417,6 +417,7 @@ impl<T: fidl_next::Transport + 'static> fidl_display_engine::EngineLocalServerHa
                 refresh_rate_millihertz: REFRESH_RATE_MILLIHERTZ,
                 flags: fidl_display_types::ModeFlags::empty(),
             }],
+            preferred_mode_vrr_configs: vec![],
             // The virtio-gpu device does not expose the display's E-EDID.
             edid_bytes: vec![],
             pixel_formats: SUPPORTED_PIXEL_FORMATS.to_vec(),
@@ -624,6 +625,14 @@ impl<T: fidl_next::Transport + 'static> fidl_display_engine::EngineLocalServerHa
         // [`ENGINE_INFO`], so the Coordinator must not issue this call.
         log::error!("Rejecting capture release, capture is not supported");
         let _ = responder.respond_err(zx::Status::NOT_SUPPORTED).await;
+    }
+
+    async fn notify_expected_present(
+        &mut self,
+        _request: Request<fidl_display_engine::engine::NotifyExpectedPresent, T>,
+    ) {
+        // The virtio-gpu device scans out at a fixed emulated rate.
+        log::debug!("Engine.NotifyExpectedPresent() ignored");
     }
 }
 

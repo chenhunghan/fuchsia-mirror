@@ -10,7 +10,8 @@ use crate::enums::{
 use crate::{MonitorTrack, PrimaryTrack, TimeSource};
 use fidl_fuchsia_time_external::Status;
 use fuchsia_inspect::{
-    Inspector, IntProperty, Node, NumericProperty, Property, StringProperty, UintProperty,
+    BoolProperty, Inspector, IntProperty, Node, NumericProperty, Property, StringProperty,
+    UintProperty,
 };
 use fuchsia_runtime::{UtcClock, UtcClockDetails, UtcDuration, UtcInstant};
 use fuchsia_sync::Mutex;
@@ -154,8 +155,14 @@ struct RealTimeClockNode {
     write_success_counter: UintProperty,
     /// The number of failed writes to the RTC.
     write_failure_counter: UintProperty,
+    /// The outcome of a subsequent RTC initialization or fallback event, if any.
+    fallback_outcome: Option<StringProperty>,
+    /// The time associated with a subsequent RTC initialization or fallback event, if any.
+    fallback_time: Option<IntProperty>,
+    /// Whether the UTC clock was started from backstop as a fallback.
+    started_from_backstop_fallback: BoolProperty,
     /// The inspect Node these fields are exported to.
-    _node: Node,
+    node: Node,
 }
 
 impl RealTimeClockNode {
@@ -172,7 +179,39 @@ impl RealTimeClockNode {
         RealTimeClockNode {
             write_success_counter: node.create_uint("write_successes", 0u64),
             write_failure_counter: node.create_uint("write_failures", 0u64),
-            _node: node,
+            fallback_outcome: None,
+            fallback_time: None,
+            started_from_backstop_fallback: node.create_bool(
+                "started_from_backstop_fallback",
+                outcome == InitializeRtcOutcome::StartedFromBackstop,
+            ),
+            node,
+        }
+    }
+
+    /// Updates the node with a subsequent RTC initialization or fallback event.
+    pub fn update(&mut self, outcome: InitializeRtcOutcome, time: Option<UtcInstant>) {
+        let outcome_str = format!("{:?}", outcome);
+        match &self.fallback_outcome {
+            Some(prop) => prop.set(&outcome_str),
+            None => {
+                self.fallback_outcome =
+                    Some(self.node.create_string("fallback_outcome", &outcome_str));
+            }
+        }
+        if let Some(time) = time {
+            match &self.fallback_time {
+                Some(prop) => prop.set(time.into_nanos()),
+                None => {
+                    self.fallback_time =
+                        Some(self.node.create_int("fallback_time", time.into_nanos()));
+                }
+            }
+        } else {
+            self.fallback_time = None;
+        }
+        if outcome == InitializeRtcOutcome::StartedFromBackstop {
+            self.started_from_backstop_fallback.set(true);
         }
     }
 
@@ -458,6 +497,8 @@ pub struct InspectDiagnostics {
     rtc: Mutex<Option<RealTimeClockNode>>,
     /// Details of user utc adjustments.
     user_utc_adjustments: Mutex<Option<UserAdjustUtcNode>>,
+    /// Whether the UTC clock was started at startup.
+    startup_clock_started: Mutex<Option<BoolProperty>>,
     /// The inspect node used to export the contents of this `InspectDiagnostics`.
     node: Node,
 }
@@ -510,6 +551,7 @@ impl InspectDiagnostics {
             rtc: Mutex::new(None),
             node: node.clone_weak(),
             user_utc_adjustments,
+            startup_clock_started: Mutex::new(None),
         };
         let clock = Arc::clone(&primary.clock);
         node.record_lazy_child("current", move || {
@@ -561,9 +603,24 @@ impl Diagnostics for InspectDiagnostics {
         match event {
             Event::Initialized { .. } => {}
             Event::InitializeRtc { outcome, time } => {
-                self.rtc.lock().get_or_insert_with(|| {
-                    RealTimeClockNode::new(self.node.create_child("real_time_clock"), outcome, time)
-                });
+                let mut rtc_lock = self.rtc.lock();
+                match &mut *rtc_lock {
+                    Some(rtc_node) => rtc_node.update(outcome, time),
+                    None => {
+                        *rtc_lock = Some(RealTimeClockNode::new(
+                            self.node.create_child("real_time_clock"),
+                            outcome,
+                            time,
+                        ));
+                    }
+                }
+            }
+            Event::StartupClockState { started } => {
+                let mut prop = self.startup_clock_started.lock();
+                match &*prop {
+                    Some(p) => p.set(started),
+                    None => *prop = Some(self.node.create_bool("startup_clock_started", started)),
+                }
             }
             Event::TimeSourceFailed { role, error } => {
                 self.update_source(role, |tsn| tsn.failure(error));
@@ -839,9 +896,173 @@ mod tests {
                 real_time_clock: contains {
                     initialization: "Succeeded",
                     initial_time: RTC_INITIAL_TIME,
+                    started_from_backstop_fallback: false,
                     write_successes: 2u64,
                     write_failures: 1u64,
                 }
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn real_time_clock_no_devices_then_started_from_backstop() {
+        let inspector = &Inspector::default();
+        let (inspect_diagnostics, _) = create_test_object(inspector, false);
+        inspect_diagnostics
+            .record(Event::InitializeRtc { outcome: InitializeRtcOutcome::NoDevices, time: None });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                real_time_clock: {
+                    initialization: "NoDevices",
+                    started_from_backstop_fallback: false,
+                    write_successes: 0u64,
+                    write_failures: 0u64,
+                }
+            }
+        );
+
+        let fallback_time = BACKSTOP_TIME + 1;
+        inspect_diagnostics.record(Event::InitializeRtc {
+            outcome: InitializeRtcOutcome::StartedFromBackstop,
+            time: Some(UtcInstant::from_nanos(fallback_time)),
+        });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                real_time_clock: {
+                    initialization: "NoDevices",
+                    fallback_outcome: "StartedFromBackstop",
+                    fallback_time: fallback_time,
+                    started_from_backstop_fallback: true,
+                    write_successes: 0u64,
+                    write_failures: 0u64,
+                }
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn real_time_clock_invalid_before_backstop_then_started_from_backstop() {
+        let inspector = &Inspector::default();
+        let (inspect_diagnostics, _) = create_test_object(inspector, false);
+        let invalid_time = BACKSTOP_TIME - 1000;
+        inspect_diagnostics.record(Event::InitializeRtc {
+            outcome: InitializeRtcOutcome::InvalidBeforeBackstop,
+            time: Some(UtcInstant::from_nanos(invalid_time)),
+        });
+
+        let fallback_time = BACKSTOP_TIME + 1;
+        inspect_diagnostics.record(Event::InitializeRtc {
+            outcome: InitializeRtcOutcome::StartedFromBackstop,
+            time: Some(UtcInstant::from_nanos(fallback_time)),
+        });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                real_time_clock: {
+                    initialization: "InvalidBeforeBackstop",
+                    initial_time: invalid_time,
+                    fallback_outcome: "StartedFromBackstop",
+                    fallback_time: fallback_time,
+                    started_from_backstop_fallback: true,
+                    write_successes: 0u64,
+                    write_failures: 0u64,
+                }
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn real_time_clock_invalid_before_backstop_then_succeeded() {
+        let inspector = &Inspector::default();
+        let (inspect_diagnostics, _) = create_test_object(inspector, false);
+        let invalid_time = BACKSTOP_TIME - 1000;
+        inspect_diagnostics.record(Event::InitializeRtc {
+            outcome: InitializeRtcOutcome::InvalidBeforeBackstop,
+            time: Some(UtcInstant::from_nanos(invalid_time)),
+        });
+
+        inspect_diagnostics.record(Event::InitializeRtc {
+            outcome: InitializeRtcOutcome::Succeeded,
+            time: Some(UtcInstant::from_nanos(BACKSTOP_TIME)),
+        });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                real_time_clock: {
+                    initialization: "InvalidBeforeBackstop",
+                    initial_time: invalid_time,
+                    fallback_outcome: "Succeeded",
+                    fallback_time: BACKSTOP_TIME,
+                    started_from_backstop_fallback: false,
+                    write_successes: 0u64,
+                    write_failures: 0u64,
+                }
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn real_time_clock_fallback_time_cleared_when_none() {
+        let inspector = &Inspector::default();
+        let (inspect_diagnostics, _) = create_test_object(inspector, false);
+        inspect_diagnostics
+            .record(Event::InitializeRtc { outcome: InitializeRtcOutcome::NoDevices, time: None });
+
+        let fallback_time = BACKSTOP_TIME + 1;
+        inspect_diagnostics.record(Event::InitializeRtc {
+            outcome: InitializeRtcOutcome::StartedFromBackstop,
+            time: Some(UtcInstant::from_nanos(fallback_time)),
+        });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                real_time_clock: {
+                    initialization: "NoDevices",
+                    fallback_outcome: "StartedFromBackstop",
+                    fallback_time: fallback_time,
+                    started_from_backstop_fallback: true,
+                    write_successes: 0u64,
+                    write_failures: 0u64,
+                }
+            }
+        );
+
+        inspect_diagnostics
+            .record(Event::InitializeRtc { outcome: InitializeRtcOutcome::ReadFailed, time: None });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                real_time_clock: {
+                    initialization: "NoDevices",
+                    fallback_outcome: "ReadFailed",
+                    started_from_backstop_fallback: true,
+                    write_successes: 0u64,
+                    write_failures: 0u64,
+                }
+            }
+        );
+    }
+
+    #[fuchsia::test]
+    async fn startup_clock_state() {
+        let inspector = &Inspector::default();
+        let (inspect_diagnostics, _) = create_test_object(inspector, false);
+
+        inspect_diagnostics.record(Event::StartupClockState { started: true });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                startup_clock_started: true,
+            }
+        );
+
+        inspect_diagnostics.record(Event::StartupClockState { started: false });
+        assert_data_tree!(
+            inspector,
+            root: contains {
+                startup_clock_started: false,
             }
         );
     }

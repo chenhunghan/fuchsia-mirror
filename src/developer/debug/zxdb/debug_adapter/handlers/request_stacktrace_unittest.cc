@@ -11,6 +11,8 @@
 #include "src/developer/debug/zxdb/client/mock_frame.h"
 #include "src/developer/debug/zxdb/client/mock_remote_api.h"
 #include "src/developer/debug/zxdb/client/process.h"
+#include "src/developer/debug/zxdb/client/stack.h"
+#include "src/developer/debug/zxdb/client/thread.h"
 #include "src/developer/debug/zxdb/common/scoped_temp_file.h"
 #include "src/developer/debug/zxdb/debug_adapter/context_test.h"
 #include "src/developer/debug/zxdb/symbols/function.h"
@@ -23,8 +25,6 @@ namespace zxdb {
 namespace {
 
 using RequestStackTraceTest = DebugAdapterContextTest;
-
-}  // namespace
 
 TEST_F(RequestStackTraceTest, FullFrameAvailable) {
   InitializeDebugging();
@@ -123,8 +123,9 @@ TEST_F(RequestStackTraceTest, SyncFramesRequired) {
     functions[i]->set_assigned_name(std::string("test_func_") + std::to_string(i));
     functions[i]->set_code_ranges(
         AddressRanges(AddressRange(kAddress[i] - 0x10, kAddress[i] + 0x10)));
-    locations.push_back(Location(lookup_address, FileLine(temp_file.name(), 23 + i), 10 + i,
-                                 SymbolContext::ForRelativeAddresses(), functions[i]));
+    locations.emplace_back(lookup_address, FileLine(temp_file.name(), 23 + static_cast<int>(i)),
+                           10 + static_cast<int>(i), SymbolContext::ForRelativeAddresses(),
+                           functions[i]);
     if (kAddress[i] >= loaded_module1->load_address()) {
       mock_module->AddSymbolLocations(lookup_address, {locations.back()});
     } else {
@@ -194,11 +195,11 @@ TEST_F(RequestStackTraceTest, Pagination) {
     functions.push_back(fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram));
     functions[i]->set_assigned_name("test_func" + std::to_string(i));
     functions[i]->set_code_ranges(
-        AddressRanges(AddressRange(0x10000 + i * 0x20, 0x10020 + i * 0x20)));
-    locations.emplace_back(0x10010 + i * 0x20, FileLine(temp_files[i]->name(), 23 + i), 10 + i,
+        AddressRanges(AddressRange(0x10000 + (i * 0x20), 0x10020 + (i * 0x20))));
+    locations.emplace_back(0x10010 + (i * 0x20), FileLine(temp_files[i]->name(), 23 + i), 10 + i,
                            SymbolContext::ForRelativeAddresses(), functions[i]);
     frames.push_back(
-        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + i * 0x20));
+        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + (i * 0x20)));
   }
 
   InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
@@ -260,11 +261,11 @@ TEST_F(RequestStackTraceTest, PaginationAllFrames) {
     functions.push_back(fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram));
     functions[i]->set_assigned_name("test_func" + std::to_string(i));
     functions[i]->set_code_ranges(
-        AddressRanges(AddressRange(0x10000 + i * 0x20, 0x10020 + i * 0x20)));
-    locations.emplace_back(0x10010 + i * 0x20, FileLine(temp_files[i]->name(), 23 + i), 10 + i,
+        AddressRanges(AddressRange(0x10000 + (i * 0x20), 0x10020 + (i * 0x20))));
+    locations.emplace_back(0x10010 + (i * 0x20), FileLine(temp_files[i]->name(), 23 + i), 10 + i,
                            SymbolContext::ForRelativeAddresses(), functions[i]);
     frames.push_back(
-        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + i * 0x20));
+        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + (i * 0x20)));
   }
 
   InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
@@ -322,11 +323,11 @@ TEST_F(RequestStackTraceTest, PaginationTooManyFramesRequested) {
     functions.push_back(fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram));
     functions[i]->set_assigned_name("test_func" + std::to_string(i));
     functions[i]->set_code_ranges(
-        AddressRanges(AddressRange(0x10000 + i * 0x20, 0x10020 + i * 0x20)));
-    locations.emplace_back(0x10010 + i * 0x20, FileLine(temp_files[i]->name(), 23 + i), 10 + i,
+        AddressRanges(AddressRange(0x10000 + (i * 0x20), 0x10020 + (i * 0x20))));
+    locations.emplace_back(0x10010 + (i * 0x20), FileLine(temp_files[i]->name(), 23 + i), 10 + i,
                            SymbolContext::ForRelativeAddresses(), functions[i]);
     frames.push_back(
-        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + i * 0x20));
+        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + (i * 0x20)));
   }
 
   InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
@@ -359,7 +360,7 @@ TEST_F(RequestStackTraceTest, PaginationTooManyFramesRequested) {
 
   // Check the returned frames.
   for (size_t i = 0; i < expected_frames; i++) {
-    int frame_index = i + kStartFrame;
+    size_t frame_index = i + kStartFrame;
     EXPECT_EQ(got.response.stackFrames[i].column, locations[frame_index].column());
     EXPECT_EQ(got.response.stackFrames[i].line, locations[frame_index].file_line().line());
     EXPECT_EQ(got.response.stackFrames[i].name, functions[frame_index]->GetAssignedName());
@@ -390,11 +391,11 @@ TEST_F(RequestStackTraceTest, PaginationOutOfBoundsStartIndex) {
     functions.push_back(fxl::MakeRefCounted<Function>(DwarfTag::kSubprogram));
     functions[i]->set_assigned_name("test_func" + std::to_string(i));
     functions[i]->set_code_ranges(
-        AddressRanges(AddressRange(0x10000 + i * 0x20, 0x10020 + i * 0x20)));
-    locations.emplace_back(0x10010 + i * 0x20, FileLine(temp_files[i]->name(), 23 + i), 10 + i,
+        AddressRanges(AddressRange(0x10000 + (i * 0x20), 0x10020 + (i * 0x20))));
+    locations.emplace_back(0x10010 + (i * 0x20), FileLine(temp_files[i]->name(), 23 + i), 10 + i,
                            SymbolContext::ForRelativeAddresses(), functions[i]);
     frames.push_back(
-        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + i * 0x20));
+        std::make_unique<MockFrame>(&session(), thread, locations[i], 0x2000 + (i * 0x20)));
   }
 
   InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep,
@@ -425,7 +426,9 @@ TEST_F(RequestStackTraceTest, PaginationOutOfBoundsStartIndex) {
 TEST_F(RequestStackTraceTest, ElideFrames) {
   InitializeDebugging();
 
-  InjectProcessWithModule(kProcessKoid, 0x1000);
+  Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
+  ASSERT_NE(process, nullptr);
+  ASSERT_EQ(process->kind(), Process::Kind::kNormal);
   // Run client to receive process started event.
   RunClient();
   auto thread = InjectThread(kProcessKoid, kThreadKoid);
@@ -543,6 +546,7 @@ TEST_F(RequestStackTraceTest, ElideFrames) {
   EXPECT_EQ(got.response.stackFrames[9].name, "_start");
   EXPECT_EQ(got.response.stackFrames[9].presentationHint.value(), "subtle");
   EXPECT_EQ(got.response.stackFrames[9].source.value().origin.value(), "Rust test startup");
+  EXPECT_EQ(process->kind(), Process::Kind::kTest);
 }
 
 TEST_F(RequestStackTraceTest, ArgValidate) {
@@ -565,7 +569,7 @@ TEST_F(RequestStackTraceTest, ArgValidate) {
     return dap::StackTraceResponseZxdb();
   });
 
-  auto run_s2_payload = [&s2]() {
+  auto run_s2_payload = [&s2] {
     if (auto payload = s2->getPayload()) {
       payload();
     }
@@ -714,4 +718,61 @@ TEST_F(RequestStackTraceTest, FrameTrustAndUnwinderValidation) {
   }
 }
 
+TEST_F(RequestStackTraceTest, EmptyStackReturnsNoFrames) {
+  InitializeDebugging();
+
+  Process* process = InjectProcessWithModule(kProcessKoid, 0x1000);
+  ASSERT_NE(process, nullptr);
+  RunClient();
+  Thread* thread = InjectThread(kProcessKoid, kThreadKoid);
+  ASSERT_NE(thread, nullptr);
+  RunClient();
+
+  InjectExceptionWithStack(kProcessKoid, kThreadKoid, debug_ipc::ExceptionType::kSingleStep, {},
+                           /*has_all_frames=*/true);
+  RunClient();
+
+  ASSERT_TRUE(thread->GetStack().empty());
+
+  struct PaginationCase {
+    const char* label;
+    dap::optional<dap::integer> start_frame;
+    dap::optional<dap::integer> levels;
+  };
+  const PaginationCase kPaginationCases[] = {
+      {.label = "default pagination", .start_frame = {}, .levels = {}},
+      {
+          .label = "zero startFrame with positive levels",
+          .start_frame = dap::integer(0),
+          .levels = dap::integer(3),
+      },
+      {
+          .label = "out-of-range startFrame with positive levels",
+          .start_frame = dap::integer(2),
+          .levels = dap::integer(3),
+      },
+  };
+
+  for (const auto& pagination : kPaginationCases) {
+    SCOPED_TRACE(pagination.label);
+    dap::StackTraceRequest request = {};
+    request.threadId = kThreadKoid;
+    request.startFrame = pagination.start_frame;
+    request.levels = pagination.levels;
+    auto response = client().send(request);
+
+    context().OnStreamReadable();
+    loop().RunUntilNoTasks();
+    RunClient();
+
+    auto got = response.get();
+    ASSERT_FALSE(got.error);
+    ASSERT_TRUE(got.response.totalFrames.has_value());
+    EXPECT_EQ(got.response.totalFrames.value(), 0);
+    EXPECT_TRUE(got.response.stackFrames.empty());
+    EXPECT_EQ(process->kind(), Process::Kind::kNormal);
+  }
+}
+
+}  // namespace
 }  // namespace zxdb

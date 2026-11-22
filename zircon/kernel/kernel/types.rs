@@ -99,8 +99,6 @@ pub const fn mask_all_but_one(num: cpu_num_t) -> cpu_mask_t {
 }
 
 /// Returns the number of the highest CPU set in `mask`, or 0 if the mask is empty.
-///
-/// Mirrors `highest_cpu_set()` from `zircon/kernel/include/kernel/cpu.h`.
 #[inline]
 pub const fn highest_cpu_set(mask: cpu_mask_t) -> cpu_num_t {
     if mask == 0 {
@@ -110,8 +108,6 @@ pub const fn highest_cpu_set(mask: cpu_mask_t) -> cpu_num_t {
 }
 
 /// Returns the number of the lowest CPU set in `mask`, or 0 if the mask is empty.
-///
-/// Mirrors `lowest_cpu_set()` from `zircon/kernel/include/kernel/cpu.h`.
 #[inline]
 pub const fn lowest_cpu_set(mask: cpu_mask_t) -> cpu_num_t {
     if mask == 0 {

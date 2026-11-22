@@ -12,7 +12,6 @@ Outline:
 - [Initial processes](#initial-processes)
 - [Component manager](#component-manager)
 - [Initial system components](#v2-components)
-- [Legacy component framework](#v1-components)
 
 ## Kernel {#kernel}
 
@@ -166,8 +165,8 @@ component_manager.
 [glossary.realm]: /docs/glossary/README.md#realm
 [glossary.outgoing-directory]: /docs/glossary/README.md#outgoing-directory
 [blobfs]: /docs/concepts/filesystems/blobfs.md
-[bootloader-and-kernel]: /docs/concepts/process/userboot.md#boot_loader_and_kernel_startup
-[component-manager]: /docs/concepts/components/v2/introduction.md#component-manager
+[bootloader-and-kernel]: /docs/concepts/process/userboot.md#boot-loader-and-kernel-startup
+[component-manager]: /docs/concepts/components/v2/component_manager.md
 [critical-processes]: /reference/syscalls/job_set_critical.md
 [devfs]: /docs/development/drivers/concepts/device_driver_model/device-model.md
 [driver-communication]: /docs/concepts/drivers/driver_communication.md
@@ -183,7 +182,7 @@ component_manager.
 [micro-kernel]: https://en.wikipedia.org/wiki/Microkernel
 [minfs]: /docs/concepts/filesystems/minfs.md
 [process-bootstrap]: /docs/concepts/process/program_loading.md
-[userboot-loading]: /docs/concepts/process/userboot.md#kernel_loads_userboot
+[userboot-loading]: /docs/concepts/process/userboot.md#kernel-loads-userboot
 [userboot]: /docs/concepts/process/userboot.md
 [userspace]: https://en.wikipedia.org/wiki/User_space
 [wait-for-system]: /src/devices/bin/driver_manager/driver_loader.cc?l=123&drc=62174108e02c85feb7a18df5cc03dcf8ec7d8625

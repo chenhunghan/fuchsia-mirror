@@ -49,9 +49,17 @@ class HangingGetHelper<T, Compare, true> {
   }
 
   // Sets or updates the pending value to the provided value if it differs from a previously sent
-  // value. Returns true iff an existing value was overwritten.
+  // value. If it equals the previously sent value, any pending value is discarded. Returns true iff
+  // an existing pending value was overwritten or discarded.
   bool Set(T value) {
-    if ((sent_ && eq_(sent_.value(), value)) || (pending_ && eq_(pending_.value(), value))) {
+    if (sent_ && eq_(sent_.value(), value)) {
+      // The value is back to the one last sent, so any pending update is stale.
+      bool overwritten = pending_.has_value();
+      pending_ = std::nullopt;
+      return overwritten;
+    }
+
+    if (pending_ && eq_(pending_.value(), value)) {
       return false;
     }
 

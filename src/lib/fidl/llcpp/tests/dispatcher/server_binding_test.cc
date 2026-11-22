@@ -210,7 +210,7 @@ TEST(ServerBindingTest, CannotDestroyOnAnotherThread) {
         loop->dispatcher(), std::move(endpoints->server), &server, [](fidl::UnbindInfo info) {});
 
     // Panics when a foreign thread attempts to destroy the binding.
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
+#ifndef NDEBUG
     std::thread foreign_thread(
         [&] { ASSERT_DEATH([&] { fidl_testing::RunWithLsanDisabled([&] { binding = {}; }); }); });
     foreign_thread.join();
@@ -235,7 +235,7 @@ TEST(ServerBindingTest, CannotCloseOnAnotherThread) {
         loop->dispatcher(), std::move(endpoints->server), &server, [](fidl::UnbindInfo info) {});
 
     // Panics when a foreign thread attempts to close the binding.
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
+#ifndef NDEBUG
     std::thread foreign_thread([&] {
       ASSERT_DEATH([&] { fidl_testing::RunWithLsanDisabled([&] { binding->Close(ZX_OK); }); });
     });

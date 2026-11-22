@@ -9,6 +9,7 @@
 
 #include <initializer_list>
 #include <map>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -75,9 +76,14 @@ class Command {
   // if not specified.
   std::string GetSwitchValue(int id) const;
 
-  void SetSwitch(int id, std::string str);
+  // Returns all values passed for the given switch in the order they were specified, or an empty
+  // span if not specified.
+  std::span<const std::string> GetSwitchValues(int id) const;
 
-  const std::map<int, std::string>& switches() const { return switches_; }
+  void SetSwitch(int id, std::string str);
+  void AddSwitch(int id, std::string str);
+
+  const std::map<int, std::vector<std::string>>& switches() const { return switches_; }
 
   const std::vector<std::string>& args() const { return args_; }
   void set_args(std::vector<std::string> a) { args_ = std::move(a); }
@@ -145,7 +151,7 @@ class Command {
 
   Verb verb_ = Verb::kNone;
 
-  std::map<int, std::string> switches_;
+  std::map<int, std::vector<std::string>> switches_;
   std::vector<std::string> args_;
 };
 

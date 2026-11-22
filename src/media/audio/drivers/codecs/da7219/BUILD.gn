@@ -71,7 +71,6 @@ fuchsia_cc_driver("driver") {
 fuchsia_driver_component("component") {
   component_name = "da7219"
   deps = [ ":driver" ]
-  info = "meta/da7219-info.json"
   manifest = "meta/da7219-dfv1.cml"
 }
 
@@ -143,7 +142,6 @@ fuchsia_cc_driver("driver-dfv2") {
 fuchsia_driver_component("component-dfv2") {
   component_name = "da7219-dfv2"
   deps = [ ":driver-dfv2" ]
-  info = "meta/da7219-info.json"
   manifest = "meta/da7219.cml"
 }
 

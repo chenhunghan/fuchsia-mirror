@@ -9,20 +9,22 @@ set -euo pipefail
 # 1. speculative_empty_unit_test: a Bazel rustc_test / host_rustc_test with
 #    crate = ":<lib>" (or with_unit_tests on the library) whose crate sources
 #    contain no test functions, when the library's GN target at
-#    $PLANTER_CHANGE_BASE had no with_unit_tests (or set with_unit_tests = true
-#    without ever wiring :<lib>_test into the GN build graph).
+#    $PLANTER_CHANGE_BASE had no with_unit_tests or standalone rustc_test (or
+#    set with_unit_tests = true without ever wiring :<lib>_test into the GN
+#    build graph).
 # 2. speculative_host_unit_test: a wrap_host_rust_test wrapper for a unit test
 #    that only ran on Fuchsia in base BUILD.gn.
 # 3. redundant_empty_unit_test_todo: a newly added # TODO comment in BUILD.bazel
 #    about omitted unit tests or with_unit_tests on a Rust crate whose .rs
 #    sources contain no tests (where GN with_unit_tests = true was a no-op).
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${PLANTER_WORKDIR:-.}"
 TARGET_DIR="${PLANTER_TARGET_DIR:-}"
 TARGET_DIRS="${PLANTER_TARGET_DIRS:-}"
-BASE="${PLANTER_CHANGE_BASE:-HEAD~1}"
+BASE="${PLANTER_CHANGE_BASE:-}"
 
-python3 - "$WORKDIR" "$TARGET_DIR $TARGET_DIRS" "$BASE" <<'PYEOF'
+python3 - "$SCRIPT_DIR" "$WORKDIR" "$TARGET_DIR $TARGET_DIRS" "$BASE" <<'PYEOF'
 import ast
 import json
 import os
@@ -30,13 +32,21 @@ import re
 import subprocess
 import sys
 
-workdir = os.path.abspath(sys.argv[1])
+sys.path.insert(0, os.path.abspath(sys.argv[1]))
+try:
+    import planter_check_lib as pcl
+except ImportError:
+    pcl = None
+
+workdir = os.path.abspath(sys.argv[2])
 target_dirs = list(
     dict.fromkeys(
-        d.strip().strip("/") for d in re.split(r"[,\s]+", sys.argv[2]) if d.strip().strip("/")
+        d.strip().strip("/") for d in re.split(r"[,\s]+", sys.argv[3]) if d.strip().strip("/")
     )
 )
-base = sys.argv[3]
+if pcl is not None:
+    target_dirs = pcl.with_overlaid_target_dirs(target_dirs)
+base = sys.argv[4]
 
 RUST_CRATE_RULES = {
     "rustc_library",
@@ -123,8 +133,14 @@ def _normalize_git_rev(rev):
 
 
 def resolve_base_ref():
+    if pcl is not None:
+        return pcl.resolve_change_base(workdir, base or None, target_dirs=target_dirs)
     resolved_env = os.environ.get("PLANTER_RESOLVED_CHANGE_BASE", "").strip()
-    eff_base = _normalize_git_rev(resolved_env) if resolved_env else (_normalize_git_rev(base) or "HEAD")
+    eff_base = (
+        _normalize_git_rev(resolved_env)
+        if resolved_env
+        else (_normalize_git_rev(base) or "HEAD~1")
+    )
     try:
         head_sha = subprocess.check_output(
             ["git", "-C", workdir, "rev-parse", "--verify", "HEAD"],
@@ -165,6 +181,43 @@ def resolve_base_ref():
 
 
 BASE_REF = resolve_base_ref()
+
+
+# Discover target and co-migrated child/sibling BUILD.bazel package directories.
+def discover_candidate_dirs():
+    out = list(target_dirs)
+    seen = set(out)
+    if pcl is not None:
+        changed = pcl.changed_files(workdir, BASE_REF, target_dirs=target_dirs)
+        excluded = pcl.EXCLUDED_GLOBAL_DIRS
+    else:
+        changed = []
+        for cmd in (
+            ["git", "-C", workdir, "diff", "--name-only", BASE_REF],
+            ["git", "-C", workdir, "ls-files", "--others", "--exclude-standard"],
+        ):
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                changed.extend(ln.strip() for ln in r.stdout.splitlines() if ln.strip())
+        excluded = {
+            "bundles/assembly",
+            "build/bazel",
+            "build/bazel2gn",
+            "build/images",
+            "build/config/rust/lints",
+            "third_party/rust_crates",
+        }
+    for rel in sorted(set(changed)):
+        if os.path.basename(rel) != "BUILD.bazel":
+            continue
+        pkg_dir = os.path.dirname(rel).strip("/")
+        if not pkg_dir or pkg_dir in seen:
+            continue
+        if any(pkg_dir == ex or pkg_dir.startswith(ex + "/") for ex in excluded):
+            continue
+        seen.add(pkg_dir)
+        out.append(pkg_dir)
+    return out
 
 
 def git_show_at_base(path, fallback_refs=()):
@@ -305,6 +358,7 @@ def parse_bazel_rust_targets(d, text):
                 libs[name] = {
                     "rule": rule,
                     "line": stmt.lineno,
+                    "crate_name": _const_str(kws.get("crate_name")) or name.replace("-", "_"),
                     "sources": srcs,
                     "has_tests": sources_have_tests(srcs),
                     "has_with_unit_tests": has_wut,
@@ -348,6 +402,7 @@ def is_gn_unit_test_wired(d, no_comments, name):
             return True
     test_target = f"{name}_test"
     gn_rel = f"{d}/BUILD.gn"
+    sec_gn_rel = f"build/secondary/{gn_rel}"
     try:
         res = subprocess.run(
             [
@@ -367,7 +422,9 @@ def is_gn_unit_test_wired(d, no_comments, name):
             timeout=10,
         )
         cand_files = [
-            p.strip() for p in res.stdout.splitlines() if p.strip() and p.strip() != gn_rel
+            p.strip()
+            for p in res.stdout.splitlines()
+            if p.strip() and p.strip() not in (gn_rel, sec_gn_rel)
         ]
     except Exception:
         cand_files = []
@@ -386,15 +443,70 @@ def is_gn_unit_test_wired(d, no_comments, name):
     return False
 
 
-def base_gn_test_status(d, base_gn, name, crate_has_tests):
+# Check whether base BUILD.gn defined a standalone rustc_test / host_rustc_test
+# for crate `name` (by matching test target name stems or overlapping .rs sources).
+def base_gn_has_standalone_unit_test(
+    d, no_comments, name, lib_info=None, test_name=None, lib_gn_body=""
+):
+    pkg = os.path.join(workdir, d)
+    lib_rel_srcs = set()
+    if lib_info:
+        for p in lib_info.get("sources", ()):
+            rel = os.path.relpath(p, pkg).replace("\\", "/").lstrip("./")
+            if rel.endswith(".rs"):
+                lib_rel_srcs.add(rel)
+    if lib_gn_body:
+        for s in re.findall(r'"([^"]+\.rs)"', lib_gn_body):
+            lib_rel_srcs.add(s.lstrip("./"))
+    stems = {name, name.replace("-", "_")}
+    if lib_info and lib_info.get("crate_name"):
+        cn = lib_info["crate_name"]
+        stems.update((cn, cn.replace("-", "_")))
+    if lib_gn_body:
+        cm = re.search(r'\bcrate_name\s*=\s*"([^"]+)"', lib_gn_body)
+        if cm:
+            stems.update((cm.group(1), cm.group(1).replace("-", "_")))
+    cand_test_names = set()
+    for stem in stems:
+        for suffix in ("", "_test", "_tests", "_unittests", "_lib_test", "_bin_test"):
+            cand_test_names.add(f"{stem}{suffix}".replace("-", "_"))
+    if test_name:
+        cand_test_names.add(test_name.replace("-", "_"))
+
+    for tm in re.finditer(
+        r'\b(?:rustc_test|host_rustc_test)\(\s*"([^"]+)"\s*\)\s*\{', no_comments
+    ):
+        gn_tname = tm.group(1)
+        tbody = block_at(no_comments, tm.end() - 1, "{", "}")
+        gn_rs = {s.lstrip("./") for s in re.findall(r'"([^"]+\.rs)"', tbody)}
+        if gn_rs and lib_rel_srcs:
+            if gn_rs & lib_rel_srcs:
+                return True
+            continue
+        if gn_tname.replace("-", "_") in cand_test_names and f'":{name}"' not in tbody:
+            return True
+    return False
+
+
+def base_gn_test_status(d, base_gn, name, crate_has_tests, lib_info=None, test_name=None):
     if base_gn is None:
         return True, False, False
     no_comments = re.sub(r"#[^\n]*", "", base_gn)
     wired = is_gn_unit_test_wired(d, no_comments, name)
     m = re.search(r'\b(\w+)\(\s*"' + re.escape(name) + r'"\s*\)\s*\{', no_comments)
+    lib_gn_body = block_at(no_comments, m.end() - 1, "{", "}") if m else ""
+    if base_gn_has_standalone_unit_test(
+        d,
+        no_comments,
+        name,
+        lib_info=lib_info,
+        test_name=test_name,
+        lib_gn_body=lib_gn_body,
+    ):
+        return True, False, False
     if m:
         tmpl_name = m.group(1)
-        body = block_at(no_comments, m.end() - 1, "{", "}")
+        body = lib_gn_body
         if re.search(r"\bwith_unit_tests\s*=\s*false\b", body):
             return False, True, False
         gn_set_wut = bool(re.search(r"\bwith_(?:host_)?unit_tests\s*=\s*true\b", body))
@@ -489,17 +601,29 @@ def report_empty_unit_test(d, line, desc, lib, explicit_false=False, unwired_noo
     )
 
 
-def check_speculative_unit_tests(d, parsed, base_gn):
+def check_speculative_unit_tests(d, parsed, base_gn, base_parsed=None):
     libs = parsed["libs"]
+    preexisting_wut = (
+        {n for n, info in base_parsed["libs"].items() if info["has_with_unit_tests"]}
+        if base_parsed
+        else set()
+    )
+    preexisting_uts = (
+        {ut["name"] for ut in base_parsed["unit_tests"]} if base_parsed else set()
+    )
     tested_libs = set()
     test_to_lib = {}
     for name, info in libs.items():
         if info["has_with_unit_tests"]:
             tested_libs.add(name)
-        if info["rule"] not in SPECULATIVE_TEST_LIB_RULES or not info["has_with_unit_tests"]:
+        if (
+            name in preexisting_wut
+            or info["rule"] not in SPECULATIVE_TEST_LIB_RULES
+            or not info["has_with_unit_tests"]
+        ):
             continue
         had_tests, explicit_false, unwired_noop = base_gn_test_status(
-            d, base_gn, name, info["has_tests"]
+            d, base_gn, name, info["has_tests"], lib_info=info
         )
         if explicit_false or (not had_tests and not info["has_tests"]):
             report_empty_unit_test(
@@ -518,13 +642,13 @@ def check_speculative_unit_tests(d, parsed, base_gn):
             lib = crate[1:]
             test_to_lib[tname] = lib
             tested_libs.add(lib)
-        if not crate or not crate.startswith(":") or ut["has_srcs"]:
+        if tname in preexisting_uts or not crate or not crate.startswith(":") or ut["has_srcs"]:
             continue
         lib = crate[1:]
         if lib not in libs or libs[lib]["rule"] not in SPECULATIVE_TEST_LIB_RULES:
             continue
         had_tests, explicit_false, unwired_noop = base_gn_test_status(
-            d, base_gn, lib, libs[lib]["has_tests"]
+            d, base_gn, lib, libs[lib]["has_tests"], lib_info=libs[lib], test_name=tname
         )
         if explicit_false or (not had_tests and not libs[lib]["has_tests"]):
             report_empty_unit_test(
@@ -538,9 +662,14 @@ def check_speculative_unit_tests(d, parsed, base_gn):
     return tested_libs, test_to_lib
 
 
-def check_speculative_host_wrappers(d, parsed, base_gn, test_to_lib):
+def check_speculative_host_wrappers(d, parsed, base_gn, test_to_lib, base_parsed=None):
+    preexisting_hws = (
+        {hw["name"] for hw in base_parsed["host_wrappers"]} if base_parsed else set()
+    )
     for hw in parsed["host_wrappers"]:
         wname = hw["name"]
+        if wname in preexisting_hws:
+            continue
         bin_attr = hw["binary"]
         tname = bin_attr[1:] if bin_attr.startswith(":") else bin_attr
         lib = test_to_lib.get(tname, tname[:-5] if tname.endswith("_test") else tname)
@@ -606,12 +735,16 @@ def check_redundant_empty_unit_test_todos(d, text, parsed, tested_libs, base_gn,
             idx += 1
             continue
         start_line = idx + 1
+        todo_line = None
         comment_parts = []
         while idx < n_lines:
             cs = lines[idx].strip()
             if cs.startswith("#"):
                 if not cs.startswith("# @bazel2gn:"):
-                    comment_parts.append(cs.lstrip("#").strip())
+                    stripped_c = cs.lstrip("#").strip()
+                    if todo_line is None and TODO_MARKER_RE.search(stripped_c):
+                        todo_line = idx + 1
+                    comment_parts.append(stripped_c)
                 idx += 1
             else:
                 break
@@ -653,7 +786,7 @@ def check_redundant_empty_unit_test_todos(d, text, parsed, tested_libs, base_gn,
             "redundant_empty_unit_test_todo",
             "ERROR",
             bz_rel,
-            start_line,
+            todo_line or start_line,
             (
                 f"Comment/TODO in `{bz_rel}` notes omitted unit tests or `with_unit_tests` for "
                 f"Rust target(s) {shown}, whose `.rs` sources contain no tests. In GN, "
@@ -661,15 +794,17 @@ def check_redundant_empty_unit_test_todos(d, text, parsed, tested_libs, base_gn,
                 "empty unit test target requires no `# TODO` comment."
             ),
             (
-                f"Keep the empty unit test target omitted and remove this `# TODO` comment "
-                f"block from `{bz_rel}`. Only add a `# TODO` comment for an omitted unit test "
-                "when the crate's `.rs` sources actually contain `#[test]` / `#[cfg(test)]` "
-                "code that was unbuilt in GN and fails to compile."
+                "Keep the empty unit test target omitted (do NOT add an empty `rustc_test` "
+                "or `host_rustc_test`) and remove the `# TODO` comment lines about omitted "
+                f"unit tests from `{bz_rel}` (preserving any non-TODO target comments). Only "
+                "add a `# TODO` comment for an omitted unit test when the crate's `.rs` "
+                "sources actually contain `#[test]` / `#[cfg(test)]` code that was unbuilt "
+                "in GN and fails to compile."
             ),
         )
 
 
-for d in target_dirs:
+for d in discover_candidate_dirs():
     path = os.path.join(workdir, d, "BUILD.bazel")
     if not os.path.isfile(path):
         continue
@@ -677,10 +812,15 @@ for d in target_dirs:
     parsed = parse_bazel_rust_targets(d, text)
     if parsed is None:
         continue
-    base_gn = git_show(f"{d}/BUILD.gn")
+    base_gn = git_show(f"{d}/BUILD.gn") or git_show(f"build/secondary/{d}/BUILD.gn")
     base_bazel = git_show_at_base(f"{d}/BUILD.bazel")
-    tested_libs, test_to_lib = check_speculative_unit_tests(d, parsed, base_gn)
-    check_speculative_host_wrappers(d, parsed, base_gn, test_to_lib)
+    base_parsed = parse_bazel_rust_targets(d, base_bazel) if base_bazel else None
+    tested_libs, test_to_lib = check_speculative_unit_tests(
+        d, parsed, base_gn, base_parsed=base_parsed
+    )
+    check_speculative_host_wrappers(
+        d, parsed, base_gn, test_to_lib, base_parsed=base_parsed
+    )
     check_redundant_empty_unit_test_todos(d, text, parsed, tested_libs, base_gn, base_bazel)
 
 print(json.dumps(findings, indent=2))

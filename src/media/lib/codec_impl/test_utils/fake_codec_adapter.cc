@@ -50,14 +50,42 @@ void FakeCodecAdapter::CoreCodecSetForceNewBuffersOnNewDimensions(bool force) {
 
 std::optional<CodecAdapter::CoreCodecGetBufferCollectionConstraints3Result>
 FakeCodecAdapter::CoreCodecGetBufferCollectionConstraints3(CodecPort port) {
-  if (!supports_dynamic_buffers_) {
-    return std::nullopt;
-  }
-  fuchsia::media::StreamBufferConstraints dummy_sbc;
-  fuchsia::media::StreamBufferPartialSettings dummy_ps;
   CoreCodecGetBufferCollectionConstraints3Result result;
-  result.constraints = CoreCodecGetBufferCollectionConstraints2(port, dummy_sbc, dummy_ps);
   result.constraints_version = constraints_version_[port];
+
+  // If test harness has set an override, just return that.
+  if (buffer_collection_constraints_[port]) {
+    result.constraints = *buffer_collection_constraints_[port];
+    return result;
+  }
+
+  fuchsia_sysmem2::BufferCollectionConstraints constraints;
+  ZX_DEBUG_ASSERT(!constraints.usage().has_value());
+  if (port == kInputPort) {
+    constraints.min_buffer_count_for_camping() = kInputMinBufferCountForCamping;
+  } else {
+    ZX_DEBUG_ASSERT(port == kOutputPort);
+    constraints.min_buffer_count_for_camping() = kOutputMinBufferCountForCamping;
+  }
+  ZX_DEBUG_ASSERT(!constraints.min_buffer_count_for_dedicated_slack().has_value());
+  ZX_DEBUG_ASSERT(!constraints.min_buffer_count_for_shared_slack().has_value());
+  ZX_DEBUG_ASSERT(!constraints.min_buffer_count().has_value());
+  // un-set is treated as 0xFFFFFFFF.
+  ZX_DEBUG_ASSERT(!constraints.max_buffer_count().has_value());
+  auto& bmc = constraints.buffer_memory_constraints().emplace();
+  if (port == kInputPort) {
+    // Despite the defaults being fine for the fake, CodecImpl wants
+    // buffer_memory_constraints to have a value.  All real CodecAdapter
+    // implementations will likely want to have some constraints on buffer size
+    // - or if they don't, they can also just emplace buffer_memory_constraints
+    // with defaults for all fields.
+    ZX_DEBUG_ASSERT(constraints.buffer_memory_constraints().has_value());
+  } else {
+    bmc.min_size_bytes() = kPerPacketBufferBytesMin;
+    bmc.cpu_domain_supported() = true;
+  }
+  ZX_DEBUG_ASSERT(!constraints.image_format_constraints().has_value());
+  result.constraints = std::move(constraints);
   return result;
 }
 
@@ -66,7 +94,7 @@ uint64_t FakeCodecAdapter::CoreCodecGetConstraintsVersion(CodecPort port) {
 }
 
 bool FakeCodecAdapter::IsCoreCodecRequiringOutputConfigForFormatDetection() {
-  // To cause CoreCodecBuildNewOutputConstraints() to get called.
+  // To cause CodecImpl to send OnOutputConstraints before format detection.
   return require_output_config_for_format_detection_;
 }
 
@@ -75,46 +103,8 @@ bool FakeCodecAdapter::IsCoreCodecMappedBufferUseful(CodecPort port) { return tr
 bool FakeCodecAdapter::IsCoreCodecHwBased(CodecPort port) { return is_hw_based_[port]; }
 
 void FakeCodecAdapter::CoreCodecInit(
-    const fuchsia::media::FormatDetails& initial_input_format_details) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) {
   // nothing to do here
-}
-
-fuchsia_sysmem2::BufferCollectionConstraints
-FakeCodecAdapter::CoreCodecGetBufferCollectionConstraints2(
-    CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-    const fuchsia::media::StreamBufferPartialSettings& partial_settings) {
-  // If test harness has set an override, just return that.
-  if (buffer_collection_constraints_[port]) {
-    return *buffer_collection_constraints_[port];
-  }
-
-  fuchsia_sysmem2::BufferCollectionConstraints result;
-  ZX_DEBUG_ASSERT(!result.usage().has_value());
-  if (port == kInputPort) {
-    result.min_buffer_count_for_camping() = kInputMinBufferCountForCamping;
-  } else {
-    ZX_DEBUG_ASSERT(port == kOutputPort);
-    result.min_buffer_count_for_camping() = kOutputMinBufferCountForCamping;
-  }
-  ZX_DEBUG_ASSERT(!result.min_buffer_count_for_dedicated_slack().has_value());
-  ZX_DEBUG_ASSERT(!result.min_buffer_count_for_shared_slack().has_value());
-  ZX_DEBUG_ASSERT(!result.min_buffer_count().has_value());
-  // un-set is treated as 0xFFFFFFFF.
-  ZX_DEBUG_ASSERT(!result.max_buffer_count().has_value());
-  auto& bmc = result.buffer_memory_constraints().emplace();
-  if (port == kInputPort) {
-    // Despite the defaults being fine for the fake, CodecImpl wants
-    // buffer_memory_constraints to have a value.  All real CodecAdapter
-    // implementations will likely want to have some constraints on buffer size
-    // - or if they don't, they can also just emplace buffer_memory_constraints
-    // with defaults for all fields.
-    ZX_DEBUG_ASSERT(result.buffer_memory_constraints().has_value());
-  } else {
-    bmc.min_size_bytes() = kPerPacketBufferBytesMin;
-    bmc.cpu_domain_supported() = true;
-  }
-  ZX_DEBUG_ASSERT(!result.image_format_constraints().has_value());
-  return result;
 }
 
 void FakeCodecAdapter::CoreCodecSetBufferCollectionInfo(
@@ -129,7 +119,7 @@ void FakeCodecAdapter::CoreCodecStartStream() {
 }
 
 void FakeCodecAdapter::CoreCodecQueueInputFormatDetails(
-    const fuchsia::media::FormatDetails& per_stream_override_format_details) {
+    std::shared_ptr<const fuchsia_media::FormatDetails> per_stream_override_format_details) {
   // nothing to do here
 }
 
@@ -175,33 +165,19 @@ void FakeCodecAdapter::CoreCodecEnsureBuffersNotConfigured(CodecPort port) {
   }
 }
 
-std::unique_ptr<const fuchsia::media::StreamOutputConstraints>
-FakeCodecAdapter::CoreCodecBuildNewOutputConstraints(
-    uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-    bool buffer_constraints_action_required) {
-  fuchsia::media::StreamOutputConstraints result;
-  result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-  result.set_buffer_constraints_action_required(buffer_constraints_action_required);
-  result.mutable_buffer_constraints()->set_buffer_constraints_version_ordinal(
-      new_output_buffer_constraints_version_ordinal);
-  return std::make_unique<const fuchsia::media::StreamOutputConstraints>(std::move(result));
-}
-
-fuchsia::media::StreamOutputFormat FakeCodecAdapter::CoreCodecGetOutputFormat(
+fuchsia_media::StreamOutputFormat FakeCodecAdapter::CoreCodecGetOutputFormat2(
     uint64_t stream_lifetime_ordinal, uint64_t new_output_format_details_version_ordinal) {
-  fuchsia::media::StreamOutputFormat result;
-  result.set_stream_lifetime_ordinal(stream_lifetime_ordinal);
-  result.mutable_format_details()
-      ->set_format_details_version_ordinal(new_output_format_details_version_ordinal)
-      .set_mime_type(kOutputMimeType);
-  fuchsia::images2::ImageFormat* image_format =
-      result.mutable_format_details()->mutable_image_format();
-  image_format->set_pixel_format(fuchsia::images2::PixelFormat::R8G8B8A8);
-  image_format->set_color_space(fuchsia::images2::ColorSpace::SRGB);
-  image_format->set_size(fuchsia::math::SizeU{.width = kCodedWidth, .height = kCodedHeight});
-  image_format->set_bytes_per_row(kBytesPerRow);
-  image_format->set_display_rect(
-      fuchsia::math::RectU{.x = 0, .y = 0, .width = kDisplayWidth, .height = kDisplayHeight});
+  fuchsia_media::StreamOutputFormat result;
+  result.stream_lifetime_ordinal() = stream_lifetime_ordinal;
+  auto& format_details = result.format_details().emplace();
+  format_details.format_details_version_ordinal() = new_output_format_details_version_ordinal;
+  format_details.mime_type() = kOutputMimeType;
+  auto& image_format = format_details.image_format().emplace();
+  image_format.pixel_format() = fuchsia_images2::PixelFormat::kR8G8B8A8;
+  image_format.color_space() = fuchsia_images2::ColorSpace::kSrgb;
+  image_format.size() = fuchsia_math::SizeU{kCodedWidth, kCodedHeight};
+  image_format.bytes_per_row() = kBytesPerRow;
+  image_format.display_rect() = fuchsia_math::RectU{0, 0, kDisplayWidth, kDisplayHeight};
   return result;
 }
 

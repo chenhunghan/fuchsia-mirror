@@ -2,10 +2,18 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
-load("//build/bazel/rules/rust:defs.bzl", "rustc_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/testing:golden_test.bzl", "golden_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":goldens"],
+    visibility = ["//src/performance:__pkg__"],
+)
 
 rustc_binary(
     name = "fxt_pretty_printer",
@@ -13,10 +21,48 @@ rustc_binary(
     srcs = ["src/pretty_printer.rs"],
     crate_root = "src/pretty_printer.rs",
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
-    visibility = ["//src/performance/lib/fxt/rust/tests:__pkg__"],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         "//src/performance/lib/fxt/rust",
         "//third_party/rust_crates/vendor:argh",
     ],
+)
+
+_GOLDEN_TEST_DEFS = [
+    {
+        "fxt": "//src/performance/trace2json/test_data:simple_trace.fxt",
+        "golden": "simple_trace.golden.txt",
+        "name": "simple_trace",
+    },
+    {
+        "fxt": "//src/performance/trace2json/test_data:example_benchmark.fxt",
+        "golden": "example_benchmark.golden.txt",
+        "name": "example_benchmark",
+    },
+    {
+        "fxt": "data/perfetto_golden.fxt",
+        "golden": "perfetto_golden.golden.txt",
+        "name": "perfetto_golden",
+    },
+]
+
+[
+    genrule(
+        name = "convert_%s_to_txt" % t["name"],
+        testonly = True,
+        srcs = [t["fxt"]],
+        outs = ["%s.txt" % t["name"]],
+        cmd = "$(location :fxt_pretty_printer) --input $(location %s) --output $@" % t["fxt"],
+        target_compatible_with = HOST_OS_CONSTRAINTS,
+        tools = [":fxt_pretty_printer"],
+    )
+    for t in _GOLDEN_TEST_DEFS
+]
+
+golden_test(
+    name = "goldens",
+    goldens = {
+        t["golden"]: ":convert_%s_to_txt" % t["name"]
+        for t in _GOLDEN_TEST_DEFS
+    },
 )

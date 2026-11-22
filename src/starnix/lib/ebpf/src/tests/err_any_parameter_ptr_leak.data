@@ -1,0 +1,8 @@
+# Verify AnyParameter rejects a pointer argument when allow_ptr_leaks is false.
+-- asm
+mov %r1, %r10
+call 112
+mov %r0, 0
+exit
+-- error
+invalid parameter for helper at index 0

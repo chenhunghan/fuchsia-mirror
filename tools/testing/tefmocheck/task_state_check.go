@@ -7,6 +7,8 @@ package tefmocheck
 import (
 	"fmt"
 	"path"
+
+	"go.fuchsia.dev/fuchsia/tools/testing/runtests"
 )
 
 type taskCheck struct {
@@ -39,6 +41,13 @@ func (c *taskStateCheck) IsInfraFailure() bool {
 	return c.InfraFailure
 }
 
+func (c *taskStateCheck) Category() runtests.FailureCategory {
+	if c.InfraFailure {
+		return runtests.CategoryInfra
+	}
+	return ""
+}
+
 // taskFailureCheck checks if the swarming task failed.
 type taskFailureCheck struct {
 	taskCheck
@@ -51,6 +60,10 @@ func (c *taskFailureCheck) Check(to *TestingOutputs) bool {
 
 func (c *taskFailureCheck) Name() string {
 	return "task_failure"
+}
+
+func (c *taskFailureCheck) Category() runtests.FailureCategory {
+	return runtests.CategoryInfraOrSystem
 }
 
 // taskInternalFailureCheck checks if the swarming task internally failed.

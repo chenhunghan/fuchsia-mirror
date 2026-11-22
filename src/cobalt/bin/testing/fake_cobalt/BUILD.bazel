@@ -51,14 +51,12 @@ rustc_test(
 
 fx_packaged_binary(
     name = "fake_cobalt_packaged_bin",
-    testonly = True,
     binary = ":bin",
     binary_name = "fake_cobalt",
 )
 
 fx_component_manifest(
     name = "component_v2_manifest",
-    testonly = True,
     component_name = "fake_cobalt",
     includes = ["//sdk/lib/syslog:client.shard"],
     manifest = "meta/fake_cobalt.cml",
@@ -66,7 +64,6 @@ fx_component_manifest(
 
 fx_component(
     name = "component_v2",
-    testonly = True,
     compiled_manifest = ":component_v2_manifest",
     deps = [":fake_cobalt_packaged_bin"],
 )

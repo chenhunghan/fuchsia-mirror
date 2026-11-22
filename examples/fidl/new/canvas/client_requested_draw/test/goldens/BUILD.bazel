@@ -1,0 +1,39 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "fuchsia_package_resource_collection",
+    "resource",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+resource(
+    name = "test_draw_success_client",
+    src = "test_draw_success_client.log.golden",
+    dest = "data/goldens/test_draw_success_client.log.golden",
+)
+
+resource(
+    name = "test_draw_success_server",
+    src = "test_draw_success_server.log.golden",
+    dest = "data/goldens/test_draw_success_server.log.golden",
+)
+
+# These are files that are meant to be included with our test component. Each
+# file represents a golden from a single process for a single test.
+fuchsia_package_resource_collection(
+    name = "resources",
+    resources = [
+        ":test_draw_success_client",
+        ":test_draw_success_server",
+    ],
+    visibility = [
+        "//examples/fidl/new/canvas/client_requested_draw/cpp_natural:__pkg__",
+        "//examples/fidl/new/canvas/client_requested_draw/cpp_wire:__pkg__",
+        "//examples/fidl/new/canvas/client_requested_draw/rust:__pkg__",
+        "//examples/fidl/new/canvas/client_requested_draw/rust_next:__pkg__",
+    ],
+)

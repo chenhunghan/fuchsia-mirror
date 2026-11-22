@@ -14,7 +14,7 @@ that requires a stepping stone release. According to [RFC 103][rfc-103], all
 stepping stone releases require their own RFC. This RFC details the new update
 package format.
 
-[rfc-103]: /docs/contribute/governance/rfcs/0103_software_delivery_rfc_criteria.md#changes_which_require_an_rfc
+[rfc-103]: /docs/contribute/governance/rfcs/0103_software_delivery_rfc_criteria.md#changes-which-require-an-rfc
 
 ## Motivation
 

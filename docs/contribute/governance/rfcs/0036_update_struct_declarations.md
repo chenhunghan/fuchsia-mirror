@@ -88,7 +88,7 @@ Specifically:
 * No change to the JSON IR in v1, the ordinal is conveyed through the order
   of members in struct declaration. See planned change to JSON IR in v2.
 
-### Compiler guidance
+### Compiler guidance {:#compiler-guidance}
 
 To exemplify the guidance, which the compiler can provide with the proposed
 syntax, we consider a few examples and compare their handling.
@@ -154,7 +154,7 @@ Breaks ABI, no     Safe
 compiler warning
 ```
 
-### Disallow 'reserved' keyword
+### Disallow 'reserved' keyword {:#disallow-reserved-keyword}
 
 Since we are aligning the ordinal rules for structs on that of tables, we
 could look to also allow the 'reserved' keyword.
@@ -197,7 +197,7 @@ be better to:
 
 TBD
 
-# Implementation strategy
+## Implementation strategy {:#implementation-strategy}
 
 1. Introduce support for the new syntax, while at the same time support the
    previous one;
@@ -210,7 +210,7 @@ TBD
 
 This proposal improves ergonomics by conveying ABI implications to
 developers through syntax. See an [opposing view on this
-below](#drawback_struct-and-tables-could-be-confused).
+below](#drawback-struct-and-tables-could-be-confused).
 
 ## Documentation and examples
 
@@ -257,7 +257,7 @@ Secondly, we are unlikely to act on the exploration to remove ordinals
 from tables since the tradeoff between run-time cost (less performance)
 outweigh the ergonomic benefits.
 
-### Drawback: Struct and tables could be confused
+### Drawback: Struct and tables could be confused {:#drawback-struct-and-tables-could-be-confused}
 
 With the syntax between struct and tables converging, and the introduction
 of ordinals, some may confuse structs with tables, and mistakenly believe

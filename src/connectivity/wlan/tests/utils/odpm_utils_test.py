@@ -176,25 +176,19 @@ class OdpmUtilsTest(unittest.IsolatedAsyncioTestCase):
         # Mock trace_model.CounterEvent for duration calculation (2 seconds)
         event1 = trace_model.CounterEvent(
             id=None,
-            base=trace_model.Event(
-                category="power",
-                name="wlan_odpm_rail",
-                start=trace_time.TimePoint(1000000000),
-                pid=0,
-                tid=0,
-                args=None,
-            ),
+            category="power",
+            name="wlan_odpm_rail",
+            start=trace_time.TimePoint(1000000000),
+            pid=0,
+            tid=0,
         )
         event2 = trace_model.CounterEvent(
             id=None,
-            base=trace_model.Event(
-                category="power",
-                name="wlan_odpm_rail",
-                start=trace_time.TimePoint(3000000000),
-                pid=0,
-                tid=0,
-                args=None,
-            ),
+            category="power",
+            name="wlan_odpm_rail",
+            start=trace_time.TimePoint(3000000000),
+            pid=0,
+            tid=0,
         )
 
         mock_model = mock.MagicMock()
@@ -235,36 +229,30 @@ class OdpmUtilsTest(unittest.IsolatedAsyncioTestCase):
         # Duration-weighted mean power = (2.0 + 12.0) / 4.0 = 3.5W, TotalEnergy = 14.0 J
         event1 = trace_model.CounterEvent(
             id=None,
-            base=trace_model.Event(
-                category="power",
-                name="wlan_bt_odpm_rail",
-                start=trace_time.TimePoint(1000000000),
-                pid=0,
-                tid=0,
-                args={"mW": 1000},
-            ),
+            category="power",
+            name="wlan_bt_odpm_rail",
+            start=trace_time.TimePoint(1000000000),
+            pid=0,
+            tid=0,
+            args={"mW": 1000},
         )
         event2 = trace_model.CounterEvent(
             id=None,
-            base=trace_model.Event(
-                category="power",
-                name="wlan_bt_odpm_rail",
-                start=trace_time.TimePoint(2000000000),
-                pid=0,
-                tid=0,
-                args={"mW": 2000},
-            ),
+            category="power",
+            name="wlan_bt_odpm_rail",
+            start=trace_time.TimePoint(2000000000),
+            pid=0,
+            tid=0,
+            args={"mW": 2000},
         )
         event3 = trace_model.CounterEvent(
             id=None,
-            base=trace_model.Event(
-                category="power",
-                name="wlan_bt_odpm_rail",
-                start=trace_time.TimePoint(5000000000),
-                pid=0,
-                tid=0,
-                args={"mW": 4000},
-            ),
+            category="power",
+            name="wlan_bt_odpm_rail",
+            start=trace_time.TimePoint(5000000000),
+            pid=0,
+            tid=0,
+            args={"mW": 4000},
         )
 
         model = trace_model.Model(

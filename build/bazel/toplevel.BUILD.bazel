@@ -187,13 +187,15 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
-# AVB test key, compiled into //src/lib/assembly/test_keys with include_str!().
-# third_party/android/platform/external/avb has no BUILD.bazel file, so this
-# target gives Bazel packages a root package label without a slash.
+# AVB test data, compiled into Rust crates with include_str!() and
+# include_bytes!(). third_party/android/platform/external/avb has no
+# BUILD.bazel file, so these targets give Bazel packages a root package label
+# without a slash.
 filegroup(
     name = "avb_testkey_atx_psk",
     srcs = ["third_party/android/platform/external/avb/test/data/testkey_atx_psk.pem"],
     visibility = [
+        "//src/developer/ffx/lib/uefi_disk:__pkg__",
         "//src/lib/assembly/test_keys:__pkg__",
         "//src/sys/pkg/tests/system-tests:__pkg__",
     ],
@@ -202,7 +204,10 @@ filegroup(
 filegroup(
     name = "avb_atx_metadata",
     srcs = ["third_party/android/platform/external/avb/test/data/atx_metadata.bin"],
-    visibility = ["//src/sys/pkg/tests/system-tests:__pkg__"],
+    visibility = [
+        "//src/developer/ffx/lib/uefi_disk:__pkg__",
+        "//src/sys/pkg/tests/system-tests:__pkg__",
+    ],
 )
 
 filegroup(
@@ -309,12 +314,26 @@ filegroup(
 # packages root package labels without a slash.
 filegroup(
     name = "d3_v3_js",
-    srcs = ["scripts/third_party/d3_v3/d3.js"],
+    srcs = ["//scripts:third_party/d3_v3/d3.js"],
     visibility = ["//src/developer/ffx/plugins/assembly:__pkg__"],
 )
 
 filegroup(
     name = "d3_v3_license",
-    srcs = ["scripts/third_party/d3_v3/LICENSE"],
+    srcs = ["//scripts:third_party/d3_v3/LICENSE"],
     visibility = ["//src/developer/ffx/plugins/assembly:__pkg__"],
+)
+
+# GLM header-only math library.
+# third_party/glm has no BUILD.bazel file, so this target is defined in the
+# root package.
+fx_cc_library(
+    name = "glm",
+    hdrs = glob([
+        "third_party/glm/glm/**/*.h",
+        "third_party/glm/glm/**/*.hpp",
+        "third_party/glm/glm/**/*.inl",
+    ]),
+    includes = ["third_party/glm"],
+    visibility = ["//:__subpackages__"],
 )

@@ -107,7 +107,7 @@ pub mod queue {
         TransmitQueueHandler, TransmitQueueState, TxBufferAllocator, TxQueuePacketMetadataCommon,
     };
     pub use crate::internal::queue::{
-        BatchSize, DequeueState, DeviceBufferSpec, ReceiveQueueFullError,
+        BatchSize, DequeueState, DeviceBufferSpec, MAX_TX_QUEUED_LEN, ReceiveQueueFullError,
     };
 }
 

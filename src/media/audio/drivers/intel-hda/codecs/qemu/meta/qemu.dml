@@ -16,4 +16,7 @@
             },
         },
     },
+    use: [
+        { service: "fuchsia.hardware.intel.hda.CodecService" },
+    ],
 }

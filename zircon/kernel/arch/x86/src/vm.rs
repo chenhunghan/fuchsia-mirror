@@ -26,7 +26,7 @@ zr::static_assert!(X86_CANONICAL_ADDRESS_MASK == vm_bindings::kX86CanonicalAddre
 /// This address refers to userspace if it is in the lower half of the
 /// canonical addresses (i.e., if all of the bits in the canonical address
 /// mask are zero).
-#[inline]
+#[inline(always)]
 pub const fn is_user_accessible(va: usize) -> bool {
     // See [intel/vol1]: 3.3.7.1 Canonical Addressing, and
     // [amd/vol1]: 2.1.3 Canonical Address Form.
@@ -35,14 +35,15 @@ pub const fn is_user_accessible(va: usize) -> bool {
 
 /// Check that the continuous range of addresses in `[va, va+len)` are all
 /// accessible to the user.
-#[inline]
+#[inline(always)]
 pub const fn is_user_accessible_range(va: usize, len: usize) -> bool {
     // Check for normal overflow which implies the range is not continuous.
     let Some(end) = va.checked_add(len) else {
+        core::hint::cold_path();
         return false;
     };
 
-    is_user_accessible(va) && (len == 0 || is_user_accessible(end - 1))
+    is_user_accessible(va) && (len == 0 || is_user_accessible(end.wrapping_sub(1)))
 }
 
 /// Checks if a virtual address is in canonical form on x86_64.
@@ -74,4 +75,13 @@ pub const fn is_kernel_address(va: usize) -> bool {
 #[inline]
 pub const fn is_valid_user_pc(pc: usize) -> bool {
     (pc == 0) || (is_user_accessible(pc) && is_vaddr_canonical(pc))
+}
+
+/// Returns whether the instruction pointer `ip` is canonical and in userspace
+/// (`x86_is_ip_canonical`).
+///
+/// See docs/concepts/kernel/sysret_problem.md for more information.
+#[inline]
+pub const fn is_ip_canonical(ip: usize) -> bool {
+    is_vaddr_canonical(ip) && !is_kernel_address(ip)
 }

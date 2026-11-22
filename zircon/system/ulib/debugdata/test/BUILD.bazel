@@ -1,0 +1,82 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":debugdata-test-pkg"],
+    visibility = ["//zircon/system/ulib:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "debugdata",
+    srcs = [
+        "datasink.cc",
+        "debugdata.cc",
+    ],
+    # datasink.cc uses angled workspace-root #include <src/lib/files/...>.
+    copts = ["-I."],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        # debugdata.cc includes <lib/fdio/io.h> and <lib/fdio/namespace.h>.
+        "//sdk/lib/fdio",
+        "//src/lib/files",
+        "//src/storage/lib/vfs/cpp",
+        "//zircon/system/ulib/debugdata",
+        "//zircon/system/ulib/zx",
+        "//zircon/system/ulib/zxtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "debugdata_packaged_bin",
+    testonly = True,
+    binary = ":debugdata",
+    binary_name = "debugdata-test",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "debugdata-test-manifest",
+    testonly = True,
+    component_name = "debugdata-test",
+    includes = [
+        "//sdk/lib/sys/testing:elf_test_runner",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners:tmp_storage.shard.cml",
+    ],
+    manifest = "meta/debugdata-test.cml",
+)
+
+fx_test_component(
+    name = "debugdata-test-component",
+    compiled_manifest = ":debugdata-test-manifest",
+    deps = [":debugdata_packaged_bin"],
+)
+
+fx_package(
+    name = "debugdata-test-package",
+    package_name = "debugdata-test",
+    test_components = [":debugdata-test-component"],
+)
+
+fx_test(
+    name = "debugdata-test-pkg",
+    package = ":debugdata-test-package",
+)

@@ -146,10 +146,27 @@ pub struct QueuedSignals {
 
 impl QueuedSignals {
     pub fn clear(&mut self) {
-        *self = Self::default();
+        for siginfo in self.queue.drain(..).chain(self.rt_queue.drain(..)) {
+            siginfo.on_signal_discarded();
+        }
     }
 
-    pub fn enqueue(&mut self, siginfo: SignalInfo) {
+    fn purge_stale_timers(&mut self) {
+        self.queue.retain(|info| !info.is_stale_timer());
+        self.rt_queue.retain(|info| !info.is_stale_timer());
+    }
+
+    pub fn enqueue(&mut self, siginfo: SignalInfo) -> bool {
+        if !siginfo.on_signal_queued() {
+            return false;
+        }
+        self.purge_stale_timers();
+        // Per POSIX (and Linux), duplicate non-timer standard signals coalesce, and only a single
+        // signal can be queued for a given POSIX timer at any point in time (even for real-time
+        // signals; subsequent expirations increment the timer's overrun count above).
+        if self.iter().any(|info| siginfo.coalesces_with(info)) {
+            return false;
+        }
         if siginfo.signal.is_real_time() {
             // Real-time signals are stored in `rt_queue` in the order they will be delivered,
             // i.e. they sorted by the signal number. Signals with the same number must be
@@ -168,20 +185,15 @@ impl QueuedSignals {
                 .expect_err("Invalid result from binary_search_by()");
             self.rt_queue.insert(pos, siginfo);
         } else {
-            // Don't queue duplicate standard signals.
-            if self.queue.iter().any(move |info| info.signal == siginfo.signal) {
-                return;
-            }
             self.queue.push_back(siginfo);
-        };
+        }
+        true
     }
 
     /// Used by ptrace to provide a replacement for the signal that might have been
     /// delivered when the task entered signal-delivery-stop.
     pub fn jump_queue(&mut self, siginfo: SignalInfo) {
-        if !siginfo.signal.is_real_time() {
-            self.queue.retain(|info| info.signal != siginfo.signal);
-        }
+        self.queue.retain(|info| !siginfo.coalesces_with(info));
         self.queue.push_front(siginfo);
     }
 
@@ -191,18 +203,41 @@ impl QueuedSignals {
     where
         F: Fn(&SignalInfo) -> bool,
     {
-        // Find the first signal passing `predicate`, prioritizing standard signals.
-        if let Some(index) = self.queue.iter().position(&predicate) {
-            return self.queue.remove(index);
+        self.purge_stale_timers();
+        loop {
+            // Find the first signal passing `predicate`, prioritizing standard signals.
+            let mut siginfo = if let Some(index) = self.queue.iter().position(&predicate) {
+                self.queue.remove(index)
+            } else if let Some(index) = self.rt_queue.iter().position(&predicate) {
+                self.rt_queue.remove(index)
+            } else {
+                None
+            }?;
+            if siginfo.on_signal_delivered() {
+                return Some(siginfo);
+            }
         }
-        if let Some(index) = self.rt_queue.iter().position(predicate) {
-            return self.rt_queue.remove(index);
+    }
+
+    /// Removes all queued signals for which `predicate` returns `true`.
+    pub fn remove_where<F>(&mut self, predicate: F)
+    where
+        F: Fn(&SignalInfo) -> bool,
+    {
+        for queue in [&mut self.queue, &mut self.rt_queue] {
+            queue.retain(|info| {
+                if predicate(info) {
+                    info.on_signal_discarded();
+                    false
+                } else {
+                    true
+                }
+            });
         }
-        None
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty() && self.rt_queue.is_empty()
+        self.iter().next().is_none()
     }
 
     /// Returns whether any signals are queued and not blocked by the given mask.
@@ -216,8 +251,8 @@ impl QueuedSignals {
     }
 
     /// Returns an iterator over all the pending signals.
-    fn iter(&self) -> impl Iterator<Item = &SignalInfo> {
-        self.queue.iter().chain(self.rt_queue.iter())
+    pub fn iter(&self) -> impl Iterator<Item = &SignalInfo> {
+        self.queue.iter().chain(self.rt_queue.iter()).filter(|sig| !sig.is_stale_timer())
     }
 
     /// Iterates over queued signals with the given number.
@@ -236,7 +271,7 @@ impl QueuedSignals {
     }
 
     pub fn num_queued(&self) -> usize {
-        self.queue.len() + self.rt_queue.len()
+        self.iter().count()
     }
 
     #[cfg(test)]
@@ -312,9 +347,13 @@ impl SignalState {
         self.saved_mask
     }
 
-    pub fn enqueue(&mut self, siginfo: SignalInfo) {
-        self.queue.enqueue(siginfo);
-        self.signal_wait.notify_all();
+    pub fn enqueue(&mut self, siginfo: SignalInfo) -> bool {
+        if self.queue.enqueue(siginfo) {
+            self.signal_wait.notify_all();
+            true
+        } else {
+            false
+        }
     }
 
     /// Used by ptrace to provide a replacement for the signal that might have been
@@ -337,6 +376,14 @@ impl SignalState {
         self.queue.take_next_where(predicate)
     }
 
+    /// Removes all queued signals for which `predicate` returns `true`.
+    pub fn remove_where<F>(&mut self, predicate: F)
+    where
+        F: Fn(&SignalInfo) -> bool,
+    {
+        self.queue.remove_where(predicate);
+    }
+
     /// Returns whether any signals are pending (queued and either forced or not blocked).
     pub fn is_any_pending(&self) -> bool {
         self.queue.is_any_deliverable(self.mask)
@@ -345,6 +392,10 @@ impl SignalState {
     /// Returns whether any signals are queued and not blocked by the given mask.
     pub fn is_any_allowed_by_mask(&self, mask: SigSet) -> bool {
         self.queue.is_any_allowed_by_mask(mask)
+    }
+
+    pub fn iter_queued(&self) -> impl Iterator<Item = &SignalInfo> {
+        self.queue.iter()
     }
 
     pub fn pending(&self) -> SigSet {
@@ -361,6 +412,7 @@ impl SignalState {
     }
 
     pub fn reset_to_default(&mut self) {
+        self.queue.clear();
         *self = SignalState::default();
     }
 
@@ -618,7 +670,7 @@ macro_rules! signal_info_as_siginfo_bytes {
                     _arch: arch as c_uint,
                 }
             ),
-            SignalDetail::Timer { ref timer } => {
+            SignalDetail::Timer { ref timer, overrun, .. } => {
                 let sigval: uapi_path::sigval =
                     if timer.signal_event.notify == SignalEventNotify::None {
                         Default::default()
@@ -633,7 +685,7 @@ macro_rules! signal_info_as_siginfo_bytes {
                     _timer,
                     uapi_path::__sifields__bindgen_ty_2 {
                         _tid: timer.timer_id,
-                        _overrun: timer.overrun_cur(),
+                        _overrun: overrun.unwrap_or(0),
                         _sigval: sigval,
                         ..Default::default()
                     }
@@ -660,6 +712,65 @@ macro_rules! signal_info_as_siginfo_bytes {
 }
 
 impl SignalInfo {
+    /// Returns whether this signal is a POSIX timer expiration (`SI_TIMER`).
+    pub fn is_timer(&self) -> bool {
+        matches!(self.detail, SignalDetail::Timer { .. })
+    }
+
+    /// Returns whether this signal is an undelivered POSIX timer expiration whose timer has since
+    /// been re-armed, disarmed, or deleted.
+    fn is_stale_timer(&self) -> bool {
+        if let SignalDetail::Timer { timer, generation, overrun: None, .. } = &self.detail {
+            !timer.is_signal_valid(*generation)
+        } else {
+            false
+        }
+    }
+
+    /// Records this signal as queued, returning `false` if it was invalidated before queueing.
+    fn on_signal_queued(&self) -> bool {
+        if let SignalDetail::Timer { timer, generation, expirations, overrun: None } = &self.detail
+        {
+            return timer.on_signal_queued(*generation, *expirations);
+        }
+        true
+    }
+
+    /// Finalizes state when this signal is dequeued for delivery, returning `false` if the signal
+    /// has been invalidated since queueing and must be dropped.
+    fn on_signal_delivered(&mut self) -> bool {
+        if let SignalDetail::Timer { timer, generation, overrun: overrun @ None, .. } =
+            &mut self.detail
+        {
+            let Some(latched_overrun) = timer.on_signal_delivered(*generation) else {
+                return false;
+            };
+            *overrun = Some(latched_overrun);
+        }
+        true
+    }
+
+    /// Releases any external state associated with a queued signal when it is discarded without
+    /// delivery.
+    pub(crate) fn on_signal_discarded(&self) {
+        if let SignalDetail::Timer { timer, generation, overrun: None, .. } = &self.detail {
+            timer.on_signal_discarded(*generation);
+        }
+    }
+
+    /// Returns whether this signal and `other` coalesce into a single queued entry (either as
+    /// duplicate non-timer standard signals, or as expirations of the same POSIX timer).
+    fn coalesces_with(&self, other: &Self) -> bool {
+        match (&self.detail, &other.detail) {
+            (
+                SignalDetail::Timer { timer: lhs, overrun: None, .. },
+                SignalDetail::Timer { timer: rhs, overrun: None, .. },
+            ) => Arc::ptr_eq(lhs, rhs),
+            (SignalDetail::Timer { .. }, _) | (_, SignalDetail::Timer { .. }) => false,
+            _ => self.signal == other.signal && !self.signal.is_real_time(),
+        }
+    }
+
     /// Signal that originates from the Kernel.
     #[track_caller]
     pub fn kernel(signal: Signal) -> Self {
@@ -801,10 +912,13 @@ pub enum SignalDetail {
     /// POSIX timer
     Timer {
         /// Timer where the signal comes from.
-        ///
-        /// Required fields in `uapi::siginfo_t` should be enquired from the timer only when needed.
-        /// Because `overrun` counts might change when the signal is waiting in the queue.
         timer: IntervalTimerHandle,
+        /// Timer generation at the time this signal was generated.
+        generation: u64,
+        /// Number of timer expirations represented by this signal event.
+        expirations: u32,
+        /// Overrun count latched when this signal was dequeued, or `None` while still queued.
+        overrun: Option<i32>,
     },
     Raw {
         data: [u8; SI_DETAIL_SIZE],

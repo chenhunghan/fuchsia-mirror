@@ -137,6 +137,8 @@ void MdnsServiceImpl::Start() {
     return;
   }
 
+  transceiver_.SetEnabledMedia(config_.media());
+
   auto interfaces_state = component_context_->svc()->Connect<fuchsia::net::interfaces::State>();
   fuchsia::net::interfaces::WatcherPtr watcher;
   interfaces_state->GetWatcher(fuchsia::net::interfaces::WatcherOptions(), watcher.NewRequest());

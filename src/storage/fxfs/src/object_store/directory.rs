@@ -8,16 +8,17 @@ use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::{INVALID_OBJECT_ID, ObjectHandle, ObjectProperties};
 use crate::object_store::object_record::{
-    BytesAndNodes, ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, EncryptionKey,
-    FscryptDirInfo, ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind,
-    ObjectValue, Timestamp,
+    ChildValue, DirType, EncryptedCasefoldChild, EncryptedChild, EncryptionKey, FscryptDirInfo,
+    ObjectAttributes, ObjectDescriptor, ObjectKey, ObjectKeyData, ObjectKind, ObjectValue,
+    Timestamp,
 };
 use crate::object_store::transaction::{
     LockKey, LockKeys, Mutation, Options, ReservationOptions, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AttributeId, DataObjectHandle, HandleOptions, HandleOwner, ObjectStore,
-    SetExtendedAttributeMode, StoreObjectHandle, TombstoneMode, TrimMode, TrimResult,
+    AttributeId, DataObjectHandle, HandleOptions, HandleOwner, LocalHandleOwner, ObjectStore,
+    ObjectStoreTrait, SetExtendedAttributeMode, StoreObjectHandle, TombstoneMode, TrimMode,
+    TrimResult,
 };
 use anyhow::{Error, anyhow, bail, ensure};
 use fidl_fuchsia_io as fio;
@@ -172,21 +173,14 @@ impl<S: HandleOwner> Directory<S> {
     /// record.  Returns None if the key is currently unavailable due to the wrapping key being
     /// unavailable.
     pub async fn get_fscrypt_key(&self) -> Result<CipherHolder, Error> {
-        let object_id = self.object_id();
-        let store = self.store();
-        store
-            .key_manager()
-            .get_fscrypt_key(object_id, store.crypt().unwrap().as_ref(), async || {
-                store.get_keys(object_id).await
-            })
-            .await
+        self.store().get_fscrypt_key(self.object_id()).await
     }
 
     pub fn owner(&self) -> &Arc<S> {
         self.handle.owner()
     }
 
-    pub fn store(&self) -> &ObjectStore {
+    pub fn store(&self) -> &S::Store {
         self.handle.store()
     }
 
@@ -207,197 +201,11 @@ impl<S: HandleOwner> Directory<S> {
         *self.dir_type.lock()
     }
 
-    /// Enables/disables casefolding. This can only be done on an empty directory.
-    pub async fn set_casefold(&self, val: bool) -> Result<(), Error> {
-        let dir_type = self.dir_type().with_casefold(val);
-        // Nb: We lock the directory to ensure it doesn't change during our check for children.
-        let mut transaction = self
-            .store()
-            .new_transaction(
-                lock_keys![LockKey::object(self.store().store_object_id(), self.object_id())],
-                Options::default(),
-            )
-            .await?;
-        ensure!(!self.has_children().await?, FxfsError::NotEmpty);
-        let mut mutation =
-            self.store().txn_get_object_mutation(&transaction, self.object_id()).await?;
-        if let ObjectValue::Object {
-            kind: ObjectKind::Directory { dir_type: dest_dir_type, .. },
-            ..
-        } = &mut mutation.item.value
-        {
-            *dest_dir_type = dir_type;
-        } else {
-            return Err(
-                anyhow!(FxfsError::Inconsistent).context("casefold only applies to directories")
-            );
-        }
-        transaction.add(self.store().store_object_id(), Mutation::ObjectStore(mutation));
-        transaction.commit_with_callback(|_| *self.dir_type.lock() = dir_type).await?;
-        Ok(())
-    }
-
-    pub async fn create(
-        transaction: &mut Transaction<'_>,
-        owner: &Arc<S>,
-        wrapping_key_id: Option<WrappingKeyId>,
-    ) -> Result<Directory<S>, Error> {
-        let dir_type = match wrapping_key_id {
-            Some(id) => DirType::Encrypted(id.into()),
-            None => DirType::Normal,
-        };
-        Self::create_with_options(transaction, owner, dir_type).await
-    }
-
-    pub async fn create_with_options(
-        transaction: &mut Transaction<'_>,
-        owner: &Arc<S>,
-        dir_type: DirType,
-    ) -> Result<Directory<S>, Error> {
-        let store = owner.as_ref().as_ref();
-        let object_id = store.get_next_object_id(transaction).await?;
-        let now = Timestamp::now();
-
-        // The transaction takes ownership of the ID.
-        let object_id = object_id.release().get();
-        transaction.add(
-            store.store_object_id(),
-            Mutation::insert_object(
-                ObjectKey::object(object_id),
-                ObjectValue::Object {
-                    kind: ObjectKind::Directory { sub_dirs: 0, dir_type },
-                    attributes: ObjectAttributes {
-                        creation_time: now.clone(),
-                        modification_time: now.clone(),
-                        project_id: None,
-                        posix_attributes: None,
-                        allocated_size: 0,
-                        access_time: now.clone(),
-                        change_time: now,
-                    },
-                },
-            ),
-        );
-        if let Some(info) = dir_type.fscrypt_info() {
-            if let Some(crypt) = store.crypt() {
-                let (key, unwrapped_key) = crypt
-                    .create_key_with_id(
-                        object_id,
-                        info.wrapping_key_id,
-                        ObjectType::Directory,
-                        info.flags.into(),
-                    )
-                    .await?;
-                let cipher = key_to_cipher(&key, &unwrapped_key)?;
-                transaction.add(
-                    store.store_object_id(),
-                    Mutation::insert_object(
-                        ObjectKey::keys(object_id),
-                        ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
-                    ),
-                );
-                // Note that it's possible that this entry gets inserted into the key manager but
-                // this transaction doesn't get committed. This shouldn't be a problem because
-                // unused keys get purged on a standard timeout interval and this key shouldn't
-                // conflict with any other keys.
-                store.key_manager.insert(
-                    object_id,
-                    Arc::new(vec![(FSCRYPT_KEY_ID, CipherHolder::Cipher(cipher))].into()),
-                    false,
-                );
-            } else {
-                return Err(anyhow!("No crypt"));
-            }
-        }
-        Ok(Directory::new(owner.clone(), object_id, dir_type))
-    }
-
-    /// Sets the file-based-encryption (FBE) wrapping key for this directory.
-    ///
-    /// This can only be done on empty directories and must NOT be done as part of a transaction
-    /// that creates entries in the same directory. The reason for this is that local state
-    /// (self.wrapping_key_id) is used to control the type of child record written out. If children
-    /// are written to a directory as part of the same transaction that enables FBE, they will be
-    /// written as the wrong child record type.
-    pub async fn set_wrapping_key(
-        &self,
-        transaction: &mut Transaction<'_>,
-        info: impl Into<FscryptDirInfo>,
-    ) -> Result<Arc<dyn Cipher>, Error> {
-        let info = info.into();
-        let object_id = self.object_id();
-        let store = self.store();
-        if let Some(crypt) = store.crypt() {
-            let (key, unwrapped_key) = crypt
-                .create_key_with_id(
-                    object_id,
-                    info.wrapping_key_id,
-                    ObjectType::Directory,
-                    info.flags.into(),
-                )
-                .await?;
-            let mut mutation = store.txn_get_object_mutation(transaction, object_id).await?;
-            if let ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. } =
-                &mut mutation.item.value
-            {
-                if dir_type.is_encrypted() {
-                    return Err(anyhow!("wrapping key id is already set"));
-                }
-                if self.has_children().await? {
-                    return Err(FxfsError::NotEmpty.into());
-                }
-                *dir_type = dir_type.with_encryption(info);
-            } else {
-                match mutation.item.value {
-                    ObjectValue::None => bail!(FxfsError::NotFound),
-                    _ => bail!(FxfsError::NotDir),
-                }
-            }
-            transaction.add(store.store_object_id(), Mutation::ObjectStore(mutation));
-
-            let keys_key = ObjectKey::keys(object_id);
-            let value = if let Some(mutation) =
-                transaction.get_object_mutation(store.store_object_id(), keys_key.clone())
-            {
-                Some(mutation.item.value.clone())
-            } else {
-                store.tree.find_value(&keys_key).await?
-            };
-
-            let cipher = key_to_cipher(&key, &unwrapped_key)?;
-            match value {
-                None | Some(ObjectValue::None) => {
-                    transaction.add(
-                        store.store_object_id(),
-                        Mutation::insert_object(
-                            ObjectKey::keys(object_id),
-                            ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
-                        ),
-                    );
-                }
-                Some(ObjectValue::Keys(mut keys)) => {
-                    keys.insert(FSCRYPT_KEY_ID, key.into());
-                    transaction.add(
-                        store.store_object_id(),
-                        Mutation::replace_or_insert_object(
-                            ObjectKey::keys(object_id),
-                            ObjectValue::keys(keys),
-                        ),
-                    );
-                }
-                Some(value) => bail!("Unexpected value in lookup: {value:?}"),
-            }
-            Ok(cipher)
-        } else {
-            Err(anyhow!("No crypt"))
-        }
-    }
-
     #[trace]
     pub async fn open(owner: &Arc<S>, object_id: u64) -> Result<Directory<S>, Error> {
-        let store = owner.as_ref().as_ref();
+        let store = owner.store();
         let dir_type = store
-            .tree
+            .tree()
             .find_map(&ObjectKey::object(object_id), |item| match item.value {
                 ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. } => {
                     Ok(*dir_type)
@@ -413,156 +221,6 @@ impl<S: HandleOwner> Directory<S> {
     /// directory.
     pub fn open_unchecked(owner: Arc<S>, object_id: u64, dir_type: DirType) -> Self {
         Self::new(owner, object_id, dir_type)
-    }
-
-    /// Acquires the transaction with the appropriate locks to replace |dst| with |src.0|/|src.1|.
-    /// |src| can be None in the case of unlinking |dst| from |self|.
-    /// Returns the transaction, as well as the ID and type of the child and the src. If the child
-    /// doesn't exist, then a transaction is returned with a lock only on the parent and None for
-    /// the target info so that the transaction can be executed with the confidence that the target
-    /// doesn't exist. If the src doesn't exist (in the case of unlinking), None is return for the
-    /// source info.
-    ///
-    /// We need to lock |self|, but also the child if it exists. When it is a directory the lock
-    /// prevents entries being added at the same time. When it is a file needs to be able to
-    /// decrement the reference count.
-    /// If src exists, we also need to lock |src.0| and |src.1|. This is to update their timestamps.
-    pub async fn acquire_context_for_replace(
-        &self,
-        src: Option<(&Directory<S>, &str)>,
-        dst: &str,
-        borrow_metadata_space: bool,
-        extra_keys: &[LockKey],
-    ) -> Result<ReplaceContext<'_>, Error> {
-        // Since we don't know the child object ID until we've looked up the child, we need to loop
-        // until we have acquired a lock on a child whose ID is the same as it was in the last
-        // iteration. This also applies for src object ID if |src| is passed in.
-        //
-        // Note that the returned transaction may lock more objects than is necessary (for example,
-        // if the child "foo" was first a directory, then was renamed to "bar" and a file "foo" was
-        // created, we might acquire a lock on both the parent and "bar").
-        //
-        // We can look into not having this loop by adding support to try to add locks in the
-        // transaction. If it fails, we can drop all the locks and start a new transaction.
-        let store = self.store();
-        let fs = store.filesystem();
-        let mut child_object_id = INVALID_OBJECT_ID;
-        let mut src_object_id = src.map(|_| INVALID_OBJECT_ID);
-        let mut lock_keys = LockKeys::with_capacity(4 + extra_keys.len());
-        lock_keys.push(LockKey::object(store.store_object_id(), self.object_id()));
-        for key in extra_keys {
-            lock_keys.push(key.clone());
-        }
-        loop {
-            lock_keys.truncate(1 + extra_keys.len());
-            if let Some(src) = src {
-                lock_keys.push(LockKey::object(store.store_object_id(), src.0.object_id()));
-                if let Some(src_object_id) = src_object_id {
-                    if src_object_id != INVALID_OBJECT_ID {
-                        lock_keys.push(LockKey::object(store.store_object_id(), src_object_id));
-                    }
-                }
-            }
-            if child_object_id != INVALID_OBJECT_ID {
-                let key = LockKey::object(store.store_object_id(), child_object_id);
-                lock_keys.push(key);
-            };
-            let truncate_guard = if child_object_id != INVALID_OBJECT_ID {
-                Some(fs.truncate_guard_owned(store.store_object_id(), child_object_id).await)
-            } else {
-                None
-            };
-            let transaction = store
-                .new_transaction(
-                    lock_keys.clone(),
-                    Options {
-                        reservation: if borrow_metadata_space {
-                            ReservationOptions::Borrowed
-                        } else {
-                            ReservationOptions::New
-                        },
-                        ..Default::default()
-                    },
-                )
-                .await?;
-
-            let mut have_required_locks = true;
-            let mut src_id_and_descriptor = None;
-            let mut src_name_out = None;
-            let mut dst_name_out = None;
-            if let Some((src_dir, src_name)) = src {
-                match src_dir.lookup_ext(src_name).await? {
-                    Some(entry) => match entry.descriptor {
-                        ObjectDescriptor::File
-                        | ObjectDescriptor::Directory
-                        | ObjectDescriptor::Symlink => {
-                            if src_object_id != Some(entry.object_id) {
-                                have_required_locks = false;
-                                src_object_id = Some(entry.object_id);
-                            }
-                            src_id_and_descriptor = Some((entry.object_id, entry.descriptor));
-                            src_name_out = Some(
-                                src_dir
-                                    .get_case_preserved_name(entry.key)
-                                    .await?
-                                    .unwrap_or_else(|| src_name.to_string()),
-                            );
-                        }
-                        _ => bail!(FxfsError::Inconsistent),
-                    },
-                    None => {
-                        // Can't find src.0/src.1
-                        bail!(FxfsError::NotFound)
-                    }
-                }
-            };
-            let dst_entry = self.lookup_ext(dst).await?;
-            let dst_id_and_descriptor = match dst_entry {
-                Some(entry) => match entry.descriptor {
-                    ObjectDescriptor::File
-                    | ObjectDescriptor::Directory
-                    | ObjectDescriptor::Symlink => {
-                        if child_object_id != entry.object_id {
-                            have_required_locks = false;
-                            child_object_id = entry.object_id
-                        }
-                        dst_name_out = Some(
-                            self.get_case_preserved_name(entry.key)
-                                .await?
-                                .unwrap_or_else(|| dst.to_string()),
-                        );
-                        Some((entry.object_id, entry.descriptor.clone()))
-                    }
-                    _ => bail!(FxfsError::Inconsistent),
-                },
-                None => {
-                    if child_object_id != INVALID_OBJECT_ID {
-                        have_required_locks = false;
-                        child_object_id = INVALID_OBJECT_ID;
-                    }
-                    None
-                }
-            };
-            if have_required_locks {
-                return Ok(ReplaceContext {
-                    transaction,
-                    truncate_guard,
-                    src_id_and_descriptor,
-                    dst_id_and_descriptor,
-                    src_name: src_name_out,
-                    dst_name: dst_name_out,
-                });
-            }
-        }
-    }
-
-    async fn has_children(&self) -> Result<bool, Error> {
-        if self.is_deleted() {
-            return Ok(false);
-        }
-        let layer_set = self.store().tree().layer_set();
-        let mut merger = layer_set.merger();
-        Ok(self.iter(&mut merger).await?.get().is_some())
     }
 
     /// Returns the object ID and descriptor for the given child, or None if not found. If found,
@@ -719,6 +377,542 @@ impl<S: HandleOwner> Directory<S> {
         }
     }
 
+    pub async fn get_properties(&self) -> Result<ObjectProperties, Error> {
+        if self.is_deleted() {
+            return Ok(ObjectProperties {
+                refs: 0,
+                allocated_size: 0,
+                data_attribute_size: 0,
+                creation_time: Timestamp::zero(),
+                modification_time: Timestamp::zero(),
+                access_time: Timestamp::zero(),
+                change_time: Timestamp::zero(),
+                sub_dirs: 0,
+                posix_attributes: None,
+                dir_type: DirType::Normal,
+            });
+        }
+
+        let value = self
+            .store()
+            .tree()
+            .find_value(&ObjectKey::object(self.object_id()))
+            .await?
+            .ok_or(FxfsError::NotFound)?;
+        match value {
+            ObjectValue::Object {
+                kind: ObjectKind::Directory { sub_dirs, dir_type },
+                attributes:
+                    ObjectAttributes {
+                        creation_time,
+                        modification_time,
+                        posix_attributes,
+                        access_time,
+                        change_time,
+                        ..
+                    },
+            } => Ok(ObjectProperties {
+                refs: 1,
+                allocated_size: 0,
+                data_attribute_size: 0,
+                creation_time,
+                modification_time,
+                access_time,
+                change_time,
+                sub_dirs,
+                posix_attributes,
+                dir_type,
+            }),
+            _ => bail!(
+                anyhow!(FxfsError::Inconsistent).context("get_properties: Expected object value")
+            ),
+        }
+    }
+
+    /// Skips over directory entries for this directory until `predicate` returns a match.  Returns
+    /// `false` if there is no match.
+    async fn advance_until(
+        &self,
+        iter: &mut MergerIterator<'_, '_, ObjectKey, ObjectValue>,
+        predicate: impl Fn(&ObjectKey) -> ControlFlow<bool>,
+    ) -> Result<bool, Error> {
+        while let Some(item) = iter.get()
+            && matches!(
+                item,
+                ItemRef { key: ObjectKey { object_id, .. }, .. }
+                    if *object_id == self.object_id()
+            )
+        {
+            match item {
+                // Skip deleted items.
+                ItemRef { value: ObjectValue::None, .. } => {}
+                ItemRef { key, .. } => match predicate(key) {
+                    ControlFlow::Continue(()) => {}
+                    ControlFlow::Break(result) => return Ok(result),
+                },
+            }
+            iter.advance().await?
+        }
+        Ok(false)
+    }
+
+    /// Returns the starting key and an optional predicate (where an iteration is required) to be
+    /// used when the cipher is unavailable.
+    fn get_key_and_predicate_for_unavailable_cipher<'a>(
+        &self,
+        proxy_name: &'a ProxyFilename,
+    ) -> (ObjectKey, Option<BoxPredicate<'a>>) {
+        if self.dir_type().is_casefold() {
+            (
+                ObjectKey::encrypted_child(
+                    self.object_id(),
+                    proxy_name.raw_filename().to_vec(),
+                    Some(proxy_name.hash_code as u32),
+                ),
+                proxy_name
+                    .is_truncated()
+                    .then(|| Box::new(long_proxy_prefix_casefold_predicate(&proxy_name)) as Box<_>),
+            )
+        } else {
+            (
+                ObjectKey::encrypted_child(
+                    self.object_id(),
+                    proxy_name.raw_filename().to_vec(),
+                    None,
+                ),
+                proxy_name
+                    .is_truncated()
+                    .then(|| Box::new(long_proxy_prefix_predicate(&proxy_name)) as Box<_>),
+            )
+        }
+    }
+
+    pub async fn list_extended_attributes(&self) -> Result<Vec<Vec<u8>>, Error> {
+        ensure!(!self.is_deleted(), FxfsError::Deleted);
+        self.handle.list_extended_attributes().await
+    }
+
+    /// Returns an iterator that will return directory entries skipping deleted ones.  Example
+    /// usage:
+    ///
+    ///   let layer_set = dir.store().tree().layer_set();
+    ///   let mut merger = layer_set.merger();
+    ///   let mut iter = dir.iter(&mut merger).await?;
+    ///
+    pub async fn iter<'a, 'b>(
+        &self,
+        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
+    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
+        // It might be tempting to always use `ObjectKeyData::Child` here knowing that it should
+        // come earlier than any other directory entries, but directories can have extended
+        // attributes, and `ObjectKeyData::ExtendedAttribute` sorts after `ObjectKeyData::Child` but
+        // before `ObjectKeyData::EncryptedChild`.
+        self.iter_from_key(
+            merger,
+            &if self.dir_type().is_encrypted() {
+                // This will return ObjectKeyData::EncryptedCasefoldChild which sorts before
+                // ObjectKeyData::EncryptedChild, so this should work even if not an encrypted
+                // casefold directory.
+                ObjectKey::encrypted_child(self.object_id(), Vec::new(), Some(0))
+            } else {
+                ObjectKey::child(self.object_id(), "", self.dir_type())
+            },
+        )
+        .await
+    }
+
+    /// Like `iter`, but seeks from a specific key.
+    pub async fn iter_from_key<'a, 'b>(
+        &self,
+        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
+        key: &ObjectKey,
+    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
+        ensure!(!self.is_deleted(), FxfsError::Deleted);
+
+        DirectoryIterator::new(
+            self.object_id(),
+            merger.query(Query::FullRange(key)).await?,
+            if self.dir_type().is_encrypted() {
+                self.get_fscrypt_key().await?.into_cipher()
+            } else {
+                None
+            },
+        )
+        .await
+    }
+
+    /// Like "iter", but seeks from a specific filename (inclusive).  This should *not* be
+    /// used for encrypted entries, because it won't decrypt entries (and will panic on
+    /// a debug build).
+    ///
+    /// Example usage:
+    ///
+    ///   let layer_set = dir.store().tree().layer_set();
+    ///   let mut merger = layer_set.merger();
+    ///   let mut iter = dir.iter_from(&mut merger, "foo").await?;
+    ///
+    pub async fn iter_from<'a, 'b>(
+        &self,
+        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
+        from: &str,
+    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
+        debug_assert!(!self.dir_type().is_encrypted());
+
+        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), from, self.dir_type())).await
+    }
+
+    /// Like "iter_from", but takes bytes which is expected to be a serialized ObjectKey.  This will
+    /// decrypt encrypted entries if the key is available.  This should *not* be used for
+    /// unencrypted directories.
+    pub async fn iter_from_bytes<'a, 'b>(
+        &self,
+        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
+        from: &[u8],
+    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
+        debug_assert!(self.dir_type().is_encrypted());
+
+        self.iter_from_key(merger, &bincode::deserialize(&from).unwrap()).await
+    }
+}
+
+#[fxfs_trace::trace]
+impl<S: LocalHandleOwner> Directory<S> {
+    /// Enables/disables casefolding. This can only be done on an empty directory.
+    pub async fn set_casefold(&self, val: bool) -> Result<(), Error> {
+        let dir_type = self.dir_type().with_casefold(val);
+        // Nb: We lock the directory to ensure it doesn't change during our check for children.
+        let mut transaction = self
+            .store()
+            .new_transaction(
+                lock_keys![LockKey::object(self.store().store_object_id(), self.object_id())],
+                Options::default(),
+            )
+            .await?;
+        ensure!(!self.has_children().await?, FxfsError::NotEmpty);
+        let mut mutation =
+            self.store().txn_get_object_mutation(&transaction, self.object_id()).await?;
+        if let ObjectValue::Object {
+            kind: ObjectKind::Directory { dir_type: dest_dir_type, .. },
+            ..
+        } = &mut mutation.item.value
+        {
+            *dest_dir_type = dir_type;
+        } else {
+            return Err(
+                anyhow!(FxfsError::Inconsistent).context("casefold only applies to directories")
+            );
+        }
+        transaction.add(self.store().store_object_id(), Mutation::ObjectStore(mutation));
+        transaction.commit_with_callback(|_| *self.dir_type.lock() = dir_type).await?;
+        Ok(())
+    }
+
+    pub async fn create(
+        transaction: &mut Transaction<'_>,
+        owner: &Arc<S>,
+        wrapping_key_id: Option<WrappingKeyId>,
+    ) -> Result<Directory<S>, Error> {
+        let dir_type = match wrapping_key_id {
+            Some(id) => DirType::Encrypted(id.into()),
+            None => DirType::Normal,
+        };
+        Self::create_with_options(transaction, owner, dir_type).await
+    }
+
+    pub async fn create_with_options(
+        transaction: &mut Transaction<'_>,
+        owner: &Arc<S>,
+        dir_type: DirType,
+    ) -> Result<Directory<S>, Error> {
+        let store = owner.store();
+        let object_id = store.get_next_object_id(transaction).await?;
+        let now = Timestamp::now();
+
+        // The transaction takes ownership of the ID.
+        let object_id = object_id.release().get();
+        transaction.add(
+            store.store_object_id(),
+            Mutation::insert_object(
+                ObjectKey::object(object_id),
+                ObjectValue::Object {
+                    kind: ObjectKind::Directory { sub_dirs: 0, dir_type },
+                    attributes: ObjectAttributes {
+                        creation_time: now.clone(),
+                        modification_time: now.clone(),
+                        project_id: None,
+                        posix_attributes: None,
+                        allocated_size: 0,
+                        access_time: now.clone(),
+                        change_time: now,
+                    },
+                },
+            ),
+        );
+        if let Some(info) = dir_type.fscrypt_info() {
+            if let Some(crypt) = store.crypt() {
+                let (key, unwrapped_key) = crypt
+                    .create_key_with_id(
+                        object_id,
+                        info.wrapping_key_id,
+                        ObjectType::Directory,
+                        info.flags.into(),
+                    )
+                    .await?;
+                let cipher = key_to_cipher(&key, &unwrapped_key)?;
+                transaction.add(
+                    store.store_object_id(),
+                    Mutation::insert_object(
+                        ObjectKey::keys(object_id),
+                        ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
+                    ),
+                );
+                // Note that it's possible that this entry gets inserted into the key manager but
+                // this transaction doesn't get committed. This shouldn't be a problem because
+                // unused keys get purged on a standard timeout interval and this key shouldn't
+                // conflict with any other keys.
+                store.key_manager.insert(
+                    object_id,
+                    Arc::new(vec![(FSCRYPT_KEY_ID, CipherHolder::Cipher(cipher))].into()),
+                    false,
+                );
+            } else {
+                return Err(anyhow!("No crypt"));
+            }
+        }
+        Ok(Directory::new(owner.clone(), object_id, dir_type))
+    }
+
+    /// Sets the file-based-encryption (FBE) wrapping key for this directory.
+    ///
+    /// This can only be done on empty directories and must NOT be done as part of a transaction
+    /// that creates entries in the same directory. The reason for this is that local state
+    /// (self.wrapping_key_id) is used to control the type of child record written out. If children
+    /// are written to a directory as part of the same transaction that enables FBE, they will be
+    /// written as the wrong child record type.
+    pub async fn set_wrapping_key(
+        &self,
+        transaction: &mut Transaction<'_>,
+        info: impl Into<FscryptDirInfo>,
+    ) -> Result<Arc<dyn Cipher>, Error> {
+        let info = info.into();
+        let object_id = self.object_id();
+        let store = self.store();
+        if let Some(crypt) = store.crypt() {
+            let (key, unwrapped_key) = crypt
+                .create_key_with_id(
+                    object_id,
+                    info.wrapping_key_id,
+                    ObjectType::Directory,
+                    info.flags.into(),
+                )
+                .await?;
+            let mut mutation = store.txn_get_object_mutation(transaction, object_id).await?;
+            if let ObjectValue::Object { kind: ObjectKind::Directory { dir_type, .. }, .. } =
+                &mut mutation.item.value
+            {
+                if dir_type.is_encrypted() {
+                    return Err(anyhow!("wrapping key id is already set"));
+                }
+                if self.has_children().await? {
+                    return Err(FxfsError::NotEmpty.into());
+                }
+                *dir_type = dir_type.with_encryption(info);
+            } else {
+                match mutation.item.value {
+                    ObjectValue::None => bail!(FxfsError::NotFound),
+                    _ => bail!(FxfsError::NotDir),
+                }
+            }
+            transaction.add(store.store_object_id(), Mutation::ObjectStore(mutation));
+
+            let keys_key = ObjectKey::keys(object_id);
+            let value = if let Some(mutation) =
+                transaction.get_object_mutation(store.store_object_id(), keys_key.clone())
+            {
+                Some(mutation.item.value.clone())
+            } else {
+                store.tree.find_value(&keys_key).await?
+            };
+
+            let cipher = key_to_cipher(&key, &unwrapped_key)?;
+            match value {
+                None | Some(ObjectValue::None) => {
+                    transaction.add(
+                        store.store_object_id(),
+                        Mutation::insert_object(
+                            ObjectKey::keys(object_id),
+                            ObjectValue::keys(vec![(FSCRYPT_KEY_ID, key)].into()),
+                        ),
+                    );
+                }
+                Some(ObjectValue::Keys(mut keys)) => {
+                    keys.insert(FSCRYPT_KEY_ID, key.into());
+                    transaction.add(
+                        store.store_object_id(),
+                        Mutation::replace_or_insert_object(
+                            ObjectKey::keys(object_id),
+                            ObjectValue::keys(keys),
+                        ),
+                    );
+                }
+                Some(value) => bail!("Unexpected value in lookup: {value:?}"),
+            }
+            Ok(cipher)
+        } else {
+            Err(anyhow!("No crypt"))
+        }
+    }
+
+    /// Acquires the transaction with the appropriate locks to replace |dst| with |src.0|/|src.1|.
+    /// |src| can be None in the case of unlinking |dst| from |self|.
+    /// Returns the transaction, as well as the ID and type of the child and the src. If the child
+    /// doesn't exist, then a transaction is returned with a lock only on the parent and None for
+    /// the target info so that the transaction can be executed with the confidence that the target
+    /// doesn't exist. If the src doesn't exist (in the case of unlinking), None is return for the
+    /// source info.
+    ///
+    /// We need to lock |self|, but also the child if it exists. When it is a directory the lock
+    /// prevents entries being added at the same time. When it is a file needs to be able to
+    /// decrement the reference count.
+    /// If src exists, we also need to lock |src.0| and |src.1|. This is to update their timestamps.
+    pub async fn acquire_context_for_replace(
+        &self,
+        src: Option<(&Directory<S>, &str)>,
+        dst: &str,
+        borrow_metadata_space: bool,
+        extra_keys: &[LockKey],
+    ) -> Result<ReplaceContext<'_>, Error> {
+        // Since we don't know the child object ID until we've looked up the child, we need to loop
+        // until we have acquired a lock on a child whose ID is the same as it was in the last
+        // iteration. This also applies for src object ID if |src| is passed in.
+        //
+        // Note that the returned transaction may lock more objects than is necessary (for example,
+        // if the child "foo" was first a directory, then was renamed to "bar" and a file "foo" was
+        // created, we might acquire a lock on both the parent and "bar").
+        //
+        // We can look into not having this loop by adding support to try to add locks in the
+        // transaction. If it fails, we can drop all the locks and start a new transaction.
+        let store = self.store();
+        let fs = store.filesystem();
+        let mut child_object_id = INVALID_OBJECT_ID;
+        let mut src_object_id = src.map(|_| INVALID_OBJECT_ID);
+        let mut lock_keys = LockKeys::with_capacity(4 + extra_keys.len());
+        lock_keys.push(LockKey::object(store.store_object_id(), self.object_id()));
+        for key in extra_keys {
+            lock_keys.push(key.clone());
+        }
+        loop {
+            lock_keys.truncate(1 + extra_keys.len());
+            if let Some(src) = src {
+                lock_keys.push(LockKey::object(store.store_object_id(), src.0.object_id()));
+                if let Some(src_object_id) = src_object_id {
+                    if src_object_id != INVALID_OBJECT_ID {
+                        lock_keys.push(LockKey::object(store.store_object_id(), src_object_id));
+                    }
+                }
+            }
+            if child_object_id != INVALID_OBJECT_ID {
+                let key = LockKey::object(store.store_object_id(), child_object_id);
+                lock_keys.push(key);
+            };
+            let truncate_guard = if child_object_id != INVALID_OBJECT_ID {
+                Some(fs.truncate_guard_owned(store.store_object_id(), child_object_id).await)
+            } else {
+                None
+            };
+            let transaction = store
+                .new_transaction(
+                    lock_keys.clone(),
+                    Options {
+                        reservation: if borrow_metadata_space {
+                            ReservationOptions::Borrowed
+                        } else {
+                            ReservationOptions::New
+                        },
+                        ..Default::default()
+                    },
+                )
+                .await?;
+
+            let mut have_required_locks = true;
+            let mut src_id_and_descriptor = None;
+            let mut src_name_out = None;
+            let mut dst_name_out = None;
+            if let Some((src_dir, src_name)) = src {
+                match src_dir.lookup_ext(src_name).await? {
+                    Some(entry) => match entry.descriptor {
+                        ObjectDescriptor::File
+                        | ObjectDescriptor::Directory
+                        | ObjectDescriptor::Symlink => {
+                            if src_object_id != Some(entry.object_id) {
+                                have_required_locks = false;
+                                src_object_id = Some(entry.object_id);
+                            }
+                            src_id_and_descriptor = Some((entry.object_id, entry.descriptor));
+                            src_name_out = Some(
+                                src_dir
+                                    .get_case_preserved_name(entry.key)
+                                    .await?
+                                    .unwrap_or_else(|| src_name.to_string()),
+                            );
+                        }
+                        _ => bail!(FxfsError::Inconsistent),
+                    },
+                    None => {
+                        // Can't find src.0/src.1
+                        bail!(FxfsError::NotFound)
+                    }
+                }
+            };
+            let dst_entry = self.lookup_ext(dst).await?;
+            let dst_id_and_descriptor = match dst_entry {
+                Some(entry) => match entry.descriptor {
+                    ObjectDescriptor::File
+                    | ObjectDescriptor::Directory
+                    | ObjectDescriptor::Symlink => {
+                        if child_object_id != entry.object_id {
+                            have_required_locks = false;
+                            child_object_id = entry.object_id
+                        }
+                        dst_name_out = Some(
+                            self.get_case_preserved_name(entry.key)
+                                .await?
+                                .unwrap_or_else(|| dst.to_string()),
+                        );
+                        Some((entry.object_id, entry.descriptor.clone()))
+                    }
+                    _ => bail!(FxfsError::Inconsistent),
+                },
+                None => {
+                    if child_object_id != INVALID_OBJECT_ID {
+                        have_required_locks = false;
+                        child_object_id = INVALID_OBJECT_ID;
+                    }
+                    None
+                }
+            };
+            if have_required_locks {
+                return Ok(ReplaceContext {
+                    transaction,
+                    truncate_guard,
+                    src_id_and_descriptor,
+                    dst_id_and_descriptor,
+                    src_name: src_name_out,
+                    dst_name: dst_name_out,
+                });
+            }
+        }
+    }
+
+    async fn has_children(&self) -> Result<bool, Error> {
+        if self.is_deleted() {
+            return Ok(false);
+        }
+        let layer_set = self.store().tree().layer_set();
+        let mut merger = layer_set.merger();
+        Ok(self.iter(&mut merger).await?.get().is_some())
+    }
+
     pub async fn create_child_dir(
         &self,
         transaction: &mut Transaction<'_>,
@@ -766,7 +960,7 @@ impl<S: HandleOwner> Directory<S> {
             },
         )
         .await?;
-        self.copy_project_id_to_object_in_txn(transaction, handle.object_id())?;
+        self.inherit_project_id_in_txn(transaction, handle.object_id()).await?;
         Ok(handle)
     }
 
@@ -816,48 +1010,33 @@ impl<S: HandleOwner> Directory<S> {
         .await
     }
 
-    // This applies the project id of this directory (if nonzero) to an object. The method assumes
-    // both this and child objects are already present in the mutations of the provided
-    // transactions and that the child is of of zero size. This is meant for use inside
-    // `create_child_file()` and `create_child_dir()` only, where such assumptions are safe.
-    fn copy_project_id_to_object_in_txn<'a>(
+    /// Inherits the parent directory's project ID for a newly created child object
+    /// within `transaction`.
+    ///
+    /// Reads the parent's project ID from in-flight transaction mutations (falling back
+    /// to the tree) and updates the child object's attributes and quota accounting via
+    /// `update_attributes_internal`. Callers currently only use this for newly created children,
+    /// whose `allocated_size` is 0 and only node count increments.
+    async fn inherit_project_id_in_txn(
         &self,
-        transaction: &mut Transaction<'a>,
-        object_id: u64,
+        transaction: &mut Transaction<'_>,
+        child_object_id: u64,
     ) -> Result<(), Error> {
-        let store_id = self.store().store_object_id();
-        // This mutation must already be in here as we've just modified the mtime.
         let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } =
-            transaction
-                .get_object_mutation(store_id, ObjectKey::object(self.object_id()))
-                .unwrap()
-                .item
-                .value
+            self.store().txn_get_object_mutation(transaction, self.object_id()).await?.item.value
         else {
-            return Err(anyhow!(FxfsError::Inconsistent));
+            bail!(FxfsError::Inconsistent);
         };
         if let Some(project_id) = project_id {
-            // This mutation must be present as well since we've just created the object. So this
-            // replaces it.
-            let mut mutation = transaction
-                .get_object_mutation(store_id, ObjectKey::object(object_id))
-                .unwrap()
-                .clone();
-            if let ObjectValue::Object {
-                attributes: ObjectAttributes { project_id: child_project_id, .. },
-                ..
-            } = &mut mutation.item.value
-            {
-                *child_project_id = Some(project_id);
-            } else {
-                return Err(anyhow!(FxfsError::Inconsistent));
-            }
-            transaction.add(store_id, Mutation::ObjectStore(mutation));
-            transaction.merge_bytes_and_nodes(
-                store_id,
-                ObjectKey::project_usage(self.store().root_directory_object_id(), project_id),
-                BytesAndNodes { bytes: 0, nodes: 1 },
-            );
+            self.store()
+                .update_attributes_internal(
+                    transaction,
+                    child_object_id,
+                    None,
+                    None,
+                    Some(Some(project_id)),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -881,7 +1060,7 @@ impl<S: HandleOwner> Directory<S> {
         let handle =
             ObjectStore::create_object(self.owner(), transaction, options, fscrypt_info).await?;
         self.add_child_file(transaction, name, &handle).await?;
-        self.copy_project_id_to_object_in_txn(transaction, handle.object_id())?;
+        self.inherit_project_id_in_txn(transaction, handle.object_id()).await?;
         Ok(handle)
     }
 
@@ -899,47 +1078,7 @@ impl<S: HandleOwner> Directory<S> {
         )
         .await?;
 
-        // Copy project ID from self to the created file object.
-        let ObjectValue::Object { attributes: ObjectAttributes { project_id, .. }, .. } = self
-            .store()
-            .txn_get_object_mutation(&transaction, self.object_id())
-            .await
-            .unwrap()
-            .item
-            .value
-        else {
-            bail!(anyhow!(FxfsError::Inconsistent).context(
-                "Directory.create_child_unnamed_temporary_file: expected mutation object"
-            ));
-        };
-
-        if let Some(project_id) = project_id {
-            // Update the object mutation with parent's project ID.
-            let mut child_mutation = transaction
-                .get_object_mutation(
-                    self.store().store_object_id(),
-                    ObjectKey::object(handle.object_id()),
-                )
-                .unwrap()
-                .clone();
-            if let ObjectValue::Object {
-                attributes: ObjectAttributes { project_id: child_project_id, .. },
-                ..
-            } = &mut child_mutation.item.value
-            {
-                *child_project_id = Some(project_id);
-            } else {
-                bail!(anyhow!(FxfsError::Inconsistent).context(
-                    "Directory.create_child_unnamed_temporary_file: expected file object"
-                ));
-            }
-            transaction.add(self.store().store_object_id(), Mutation::ObjectStore(child_mutation));
-            transaction.merge_bytes_and_nodes(
-                self.store().store_object_id(),
-                ObjectKey::project_usage(self.store().root_directory_object_id(), project_id),
-                BytesAndNodes { bytes: 0, nodes: 1 },
-            );
-        }
+        self.inherit_project_id_in_txn(transaction, handle.object_id()).await?;
 
         // Add object to graveyard - the object should be removed on remount.
         self.store().add_to_graveyard(transaction, handle.object_id());
@@ -1014,7 +1153,7 @@ impl<S: HandleOwner> Directory<S> {
                     );
                     if !inline {
                         // Write the fscrypt symlink ciphertext to `AttributeId::DATA` with
-                        // `FSCRYPT_KEY_ID` via `write_new_attr_pre_encrypted` rather than
+                        // `FSCRYPT_KEY_ID` via `write_new_attr_in_txn` rather than
                         // `write_new_attr`, because `link` is already encrypted in fscrypt symlink
                         // mode and the fscrypt symlink cipher does not support data-mode
                         // encryption.
@@ -1025,19 +1164,15 @@ impl<S: HandleOwner> Directory<S> {
                             HandleOptions::default(),
                             /* trace: */ false,
                         );
-                        // Symlinks fit within `WRITE_ATTR_BATCH_SIZE`, so
-                        // `write_new_attr_pre_encrypted` always completes in one transaction.
-                        assert!(
-                            handle
-                                .write_new_attr_pre_encrypted(
-                                    transaction,
-                                    AttributeId::DATA,
-                                    FSCRYPT_KEY_ID,
-                                    &link,
-                                )
-                                .await?
-                                .is_none()
-                        );
+                        handle
+                            .write_new_attr_in_txn(
+                                transaction,
+                                AttributeId::DATA,
+                                &link,
+                                FSCRYPT_KEY_ID,
+                                /* encrypt: */ false,
+                            )
+                            .await?;
                     }
                     transaction.add(
                         store_id,
@@ -1097,14 +1232,15 @@ impl<S: HandleOwner> Directory<S> {
                         HandleOptions::default(),
                         /* trace: */ false,
                     );
-                    // Symlinks fit within `WRITE_ATTR_BATCH_SIZE`, so `write_new_attr` always
-                    // completes in one transaction.
-                    assert!(
-                        handle
-                            .write_new_attr(transaction, AttributeId::DATA, &link)
-                            .await?
-                            .is_none()
-                    );
+                    handle
+                        .write_new_attr_in_txn(
+                            transaction,
+                            AttributeId::DATA,
+                            &link,
+                            VOLUME_DATA_KEY_ID,
+                            /* encrypt: */ true,
+                        )
+                        .await?;
                     cipher_set
                 } else {
                     None
@@ -1201,6 +1337,21 @@ impl<S: HandleOwner> Directory<S> {
         object_id: u64,
         descriptor: ObjectDescriptor,
     ) -> Result<(), Error> {
+        self.insert_child_with_timestamp(transaction, name, object_id, descriptor, Timestamp::now())
+            .await
+    }
+
+    /// Inserts a child using `timestamp` for the directory's modification and change times.
+    ///
+    /// Requires transaction locks on |self|.
+    pub async fn insert_child_with_timestamp<'a>(
+        &self,
+        transaction: &mut Transaction<'a>,
+        name: &str,
+        object_id: u64,
+        descriptor: ObjectDescriptor,
+        timestamp: Timestamp,
+    ) -> Result<(), Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         let sub_dirs_delta = if descriptor == ObjectDescriptor::Directory { 1 } else { 0 };
         if self.dir_type().is_encrypted() {
@@ -1228,14 +1379,13 @@ impl<S: HandleOwner> Directory<S> {
                 ),
             );
         }
-        let now = Timestamp::now();
         self.update_dir_attributes_internal(
             transaction,
             self.object_id(),
             MutableAttributesInternal {
                 sub_dirs: sub_dirs_delta,
-                modification_time: Some(now.as_nanos()),
-                change_time: Some(now),
+                modification_time: Some(timestamp.as_nanos()),
+                change_time: Some(timestamp),
                 ..Default::default()
             },
         )
@@ -1347,66 +1497,6 @@ impl<S: HandleOwner> Directory<S> {
         Ok(())
     }
 
-    pub async fn get_properties(&self) -> Result<ObjectProperties, Error> {
-        if self.is_deleted() {
-            return Ok(ObjectProperties {
-                refs: 0,
-                allocated_size: 0,
-                data_attribute_size: 0,
-                creation_time: Timestamp::zero(),
-                modification_time: Timestamp::zero(),
-                access_time: Timestamp::zero(),
-                change_time: Timestamp::zero(),
-                sub_dirs: 0,
-                posix_attributes: None,
-                dir_type: DirType::Normal,
-            });
-        }
-
-        let value = self
-            .store()
-            .tree()
-            .find_value(&ObjectKey::object(self.object_id()))
-            .await?
-            .ok_or(FxfsError::NotFound)?;
-        match value {
-            ObjectValue::Object {
-                kind: ObjectKind::Directory { sub_dirs, dir_type },
-                attributes:
-                    ObjectAttributes {
-                        creation_time,
-                        modification_time,
-                        posix_attributes,
-                        access_time,
-                        change_time,
-                        ..
-                    },
-            } => Ok(ObjectProperties {
-                refs: 1,
-                allocated_size: 0,
-                data_attribute_size: 0,
-                creation_time,
-                modification_time,
-                access_time,
-                change_time,
-                sub_dirs,
-                posix_attributes,
-                dir_type,
-            }),
-            _ => {
-                bail!(
-                    anyhow!(FxfsError::Inconsistent)
-                        .context("get_properties: Expected object value")
-                )
-            }
-        }
-    }
-
-    pub async fn list_extended_attributes(&self) -> Result<Vec<Vec<u8>>, Error> {
-        ensure!(!self.is_deleted(), FxfsError::Deleted);
-        self.handle.list_extended_attributes().await
-    }
-
     pub async fn get_extended_attribute(&self, name: Vec<u8>) -> Result<Vec<u8>, Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         self.handle.get_extended_attribute(name).await
@@ -1425,146 +1515,6 @@ impl<S: HandleOwner> Directory<S> {
     pub async fn remove_extended_attribute(&self, name: Vec<u8>) -> Result<(), Error> {
         ensure!(!self.is_deleted(), FxfsError::Deleted);
         self.handle.remove_extended_attribute(name).await
-    }
-
-    /// Returns an iterator that will return directory entries skipping deleted ones.  Example
-    /// usage:
-    ///
-    ///   let layer_set = dir.store().tree().layer_set();
-    ///   let mut merger = layer_set.merger();
-    ///   let mut iter = dir.iter(&mut merger).await?;
-    ///
-    pub async fn iter<'a, 'b>(
-        &self,
-        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
-    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        // It might be tempting to always use `ObjectKeyData::Child` here knowing that it should
-        // come earlier than any other directory entries, but directories can have extended
-        // attributes, and `ObjectKeyData::ExtendedAttribute` sorts after `ObjectKeyData::Child` but
-        // before `ObjectKeyData::EncryptedChild`.
-        self.iter_from_key(
-            merger,
-            &if self.dir_type().is_encrypted() {
-                // This will return ObjectKeyData::EncryptedCasefoldChild which sorts before
-                // ObjectKeyData::EncryptedChild, so this should work even if not an encrypted
-                // casefold directory.
-                ObjectKey::encrypted_child(self.object_id(), Vec::new(), Some(0))
-            } else {
-                ObjectKey::child(self.object_id(), "", self.dir_type())
-            },
-        )
-        .await
-    }
-
-    /// Like `iter`, but seeks from a specific key.
-    pub async fn iter_from_key<'a, 'b>(
-        &self,
-        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
-        key: &ObjectKey,
-    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        ensure!(!self.is_deleted(), FxfsError::Deleted);
-
-        DirectoryIterator::new(
-            self.object_id(),
-            merger.query(Query::FullRange(key)).await?,
-            if self.dir_type().is_encrypted() {
-                self.get_fscrypt_key().await?.into_cipher()
-            } else {
-                None
-            },
-        )
-        .await
-    }
-
-    /// Like "iter", but seeks from a specific filename (inclusive).  This should *not* be
-    /// used for encrypted entries, because it won't decrypt entries (and will panic on
-    /// a debug build).
-    ///
-    /// Example usage:
-    ///
-    ///   let layer_set = dir.store().tree().layer_set();
-    ///   let mut merger = layer_set.merger();
-    ///   let mut iter = dir.iter_from(&mut merger, "foo").await?;
-    ///
-    pub async fn iter_from<'a, 'b>(
-        &self,
-        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
-        from: &str,
-    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        debug_assert!(!self.dir_type().is_encrypted());
-
-        self.iter_from_key(merger, &ObjectKey::child(self.object_id(), from, self.dir_type())).await
-    }
-
-    /// Like "iter_from", but takes bytes which is expected to be a serialized ObjectKey.  This will
-    /// decrypt encrypted entries if the key is available.  This should *not* be used for
-    /// unencrypted directories.
-    pub async fn iter_from_bytes<'a, 'b>(
-        &self,
-        merger: &'a mut Merger<'b, ObjectKey, ObjectValue>,
-        from: &[u8],
-    ) -> Result<DirectoryIterator<'a, 'b>, Error> {
-        debug_assert!(self.dir_type().is_encrypted());
-
-        self.iter_from_key(merger, &bincode::deserialize(&from).unwrap()).await
-    }
-
-    /// Skips over directory entries for this directory until `predicate` returns a match.  Returns
-    /// `false` if there is no match.
-    async fn advance_until(
-        &self,
-        iter: &mut MergerIterator<'_, '_, ObjectKey, ObjectValue>,
-        predicate: impl Fn(&ObjectKey) -> ControlFlow<bool>,
-    ) -> Result<bool, Error> {
-        while let Some(item) = iter.get()
-            && matches!(
-                item,
-                ItemRef { key: ObjectKey { object_id, .. }, .. }
-                    if *object_id == self.object_id()
-            )
-        {
-            match item {
-                // Skip deleted items.
-                ItemRef { value: ObjectValue::None, .. } => {}
-                ItemRef { key, .. } => match predicate(key) {
-                    ControlFlow::Continue(()) => {}
-                    ControlFlow::Break(result) => return Ok(result),
-                },
-            }
-            iter.advance().await?
-        }
-        Ok(false)
-    }
-
-    /// Returns the starting key and an optional predicate (where an iteration is required) to be
-    /// used when the cipher is unavailable.
-    fn get_key_and_predicate_for_unavailable_cipher<'a>(
-        &self,
-        proxy_name: &'a ProxyFilename,
-    ) -> (ObjectKey, Option<BoxPredicate<'a>>) {
-        if self.dir_type().is_casefold() {
-            (
-                ObjectKey::encrypted_child(
-                    self.object_id(),
-                    proxy_name.raw_filename().to_vec(),
-                    Some(proxy_name.hash_code as u32),
-                ),
-                proxy_name
-                    .is_truncated()
-                    .then(|| Box::new(long_proxy_prefix_casefold_predicate(&proxy_name)) as Box<_>),
-            )
-        } else {
-            (
-                ObjectKey::encrypted_child(
-                    self.object_id(),
-                    proxy_name.raw_filename().to_vec(),
-                    None,
-                ),
-                proxy_name
-                    .is_truncated()
-                    .then(|| Box::new(long_proxy_prefix_predicate(&proxy_name)) as Box<_>),
-            )
-        }
     }
 }
 
@@ -1864,7 +1814,7 @@ pub enum ReplacedChild {
 /// be deleted permanently (and must be empty).
 ///
 /// If |src| is None, this is effectively the same as unlink(dst.0/dst.1).
-pub async fn replace_child<'a, S: HandleOwner>(
+pub async fn replace_child<'a, S: LocalHandleOwner>(
     transaction: &mut Transaction<'a>,
     src: Option<(&'a Directory<S>, &str)>,
     dst: (&'a Directory<S>, &str),
@@ -1875,7 +1825,7 @@ pub async fn replace_child<'a, S: HandleOwner>(
 /// Like `replace_child`, but if `can_purge` is true and the replaced child is a file or symlink
 /// with no remaining references, it will attempt to purge the object directly in the current
 /// transaction, skipping the graveyard.
-pub async fn replace_child_with_purge<'a, S: HandleOwner>(
+pub async fn replace_child_with_purge<'a, S: LocalHandleOwner>(
     transaction: &mut Transaction<'a>,
     src: Option<(&'a Directory<S>, &str)>,
     dst: (&'a Directory<S>, &str),
@@ -1960,7 +1910,7 @@ pub async fn replace_child_with_purge<'a, S: HandleOwner>(
 ///
 /// `sub_dirs_delta` can be used if `src` is a directory and happened to already be a child of
 /// `dst`.
-pub async fn replace_child_with_object<'a, S: HandleOwner>(
+pub async fn replace_child_with_object<'a, S: LocalHandleOwner>(
     transaction: &mut Transaction<'a>,
     src: Option<(u64, ObjectDescriptor)>,
     dst: (&'a Directory<S>, &str),
@@ -1980,7 +1930,7 @@ pub async fn replace_child_with_object<'a, S: HandleOwner>(
     .await
 }
 
-async fn replace_child_with_object_impl<'a, S: HandleOwner>(
+async fn replace_child_with_object_impl<'a, S: LocalHandleOwner>(
     transaction: &mut Transaction<'a>,
     src: Option<(u64, ObjectDescriptor)>,
     dst: (&'a Directory<S>, &str),
@@ -2131,7 +2081,8 @@ mod tests {
     use crate::object_store::volume::root_volume;
     use crate::object_store::{
         AttributeId, HandleOptions, LockKey, NewChildStoreOptions, ObjectDescriptor, ObjectKind,
-        ObjectStore, SetExtendedAttributeMode, StoreObjectHandle, StoreOptions,
+        ObjectStore, SetExtendedAttributeMode, StoreObjectHandle, StoreOptions, SymlinkTarget,
+        resolve_symlink,
     };
     use anyhow::Error;
     use assert_matches::assert_matches;
@@ -2275,6 +2226,10 @@ mod tests {
             ObjectValue::Object { kind: ObjectKind::EncryptedSymlink { link, .. }, .. } => link,
             _ => panic!("Unexpected value {value:?}"),
         };
+        assert_eq!(
+            resolve_symlink(&*store, symlink_object_id).await?,
+            SymlinkTarget::Encrypted(raw_link.to_vec())
+        );
         let symlink_target = store.read_symlink(symlink_object_id).await?;
         // Locked symlinks always have hash_code of zero.
         let expected_symlink_target: String =
@@ -3704,6 +3659,47 @@ mod tests {
 
         let link = store.read_symlink(symlink_id).await.expect("read_symlink failed");
         assert_eq!(&link, b"link");
+        fs.close().await.expect("Close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_resolve_symlink() {
+        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
+        let fs = FxFilesystem::new_empty(device).await.expect("new_empty failed");
+        let mut transaction = fs
+            .root_store()
+            .new_transaction(lock_keys![], Options::default())
+            .await
+            .expect("new_transaction failed");
+        let store = fs.root_store();
+        let dir = Directory::create(&mut transaction, &store, None).await.expect("create failed");
+
+        let long_target = vec![b'x'; MAX_INLINE_SYMLINK_SIZE + 1];
+        let inline_id = dir
+            .create_symlink(&mut transaction, b"link", "inline")
+            .await
+            .expect("create_symlink failed");
+        let non_inline_id = dir
+            .create_symlink(&mut transaction, &long_target, "non_inline")
+            .await
+            .expect("create_symlink failed");
+        transaction.commit().await.expect("commit failed");
+
+        assert_eq!(
+            resolve_symlink(&*store, inline_id).await.expect("resolve_symlink failed"),
+            SymlinkTarget::Inline(b"link".to_vec())
+        );
+        assert_eq!(
+            resolve_symlink(&*store, non_inline_id).await.expect("resolve_symlink failed"),
+            SymlinkTarget::NonInline
+        );
+
+        let err = resolve_symlink(&*store, dir.object_id()).await.expect_err("resolve should fail");
+        assert_eq!(err.downcast::<FxfsError>().expect("wrong error"), FxfsError::Inconsistent);
+        let err =
+            resolve_symlink(&*store, non_inline_id + 1000).await.expect_err("resolve should fail");
+        assert_eq!(err.downcast::<FxfsError>().expect("wrong error"), FxfsError::NotFound);
+
         fs.close().await.expect("Close failed");
     }
 

@@ -34,7 +34,7 @@
 using std::chrono_literals::operator""ms;
 using std::chrono_literals::operator""s;
 
-constexpr char kShortOptions[] = "hitv::";
+constexpr char kShortOptions[] = "hi:tv";
 
 // clang-format off
 constexpr struct option kLongOptions[] = {
@@ -174,9 +174,16 @@ int main(int argc, char** argv) {
 
   struct GroupStats {
     size_t count{0};
+    uint64_t completed_loops{0};
     uint64_t iterations{0};
     std::chrono::nanoseconds runtime{0};
+    uint64_t wakeup_count{0};
+    std::chrono::nanoseconds total_wakeup_latency{0};
+    std::chrono::nanoseconds max_wakeup_latency{0};
+    uint64_t wakeups_over_100ms{0};
+    uint64_t wakeups_over_1s{0};
 
+    uint64_t AverageLoops() const { return completed_loops / count; }
     uint64_t AverageIterations() const { return iterations / count; }
     double_seconds AverageRuntime() const { return double_seconds{runtime / count}; }
   };
@@ -193,26 +200,54 @@ int main(int argc, char** argv) {
 
     // Accumulate group stats.
     iter->second.count++;
+    iter->second.completed_loops += worker->completed_loops();
     iter->second.iterations += worker->spin_iterations();
     iter->second.runtime += worker->total_runtime();
+    iter->second.wakeup_count += worker->wakeup_count();
+    iter->second.total_wakeup_latency += worker->total_wakeup_latency();
+    iter->second.max_wakeup_latency =
+        std::max(iter->second.max_wakeup_latency, worker->max_wakeup_latency());
+    iter->second.wakeups_over_100ms += worker->wakeups_over_100ms();
+    iter->second.wakeups_over_1s += worker->wakeups_over_1s();
   }
   workers.clear();
 
+  using double_ms = std::chrono::duration<double, std::milli>;
   std::cout << "Group stats:" << std::endl;
   for (auto& group : group_stats) {
     const auto& group_name = group.first;
     const auto thread_count = group.second.count;
+    const auto average_loops = group.second.AverageLoops();
     const auto average_iterations = group.second.AverageIterations();
     const auto average_runtime = group.second.AverageRuntime().count();
 
     std::cout << "Group: " << group_name << std::endl;
     std::cout << "  Threads: " << thread_count << std::endl;
+    std::cout << "  Average Completed Loops: " << average_loops << " per thread" << std::endl;
     std::cout << "  Average Iterations: " << average_iterations << " per thread ("
               << (average_iterations * thread_count / cpu_count) << " per cpu)" << std::endl;
     std::cout << "  Average Runtime: " << average_runtime << " s/thread ("
               << (average_runtime * static_cast<double>(thread_count) /
                   static_cast<double>(cpu_count))
               << " s/cpu)" << std::endl;
+    if (group.second.wakeup_count > 0) {
+      const double avg_wake_ms = double_ms{group.second.total_wakeup_latency}.count() /
+                                 static_cast<double>(group.second.wakeup_count);
+      const double max_wake_ms = double_ms{group.second.max_wakeup_latency}.count();
+      std::cout << "  Wakeup Latency: count=" << group.second.wakeup_count
+                << ", avg=" << avg_wake_ms << " ms, max=" << max_wake_ms
+                << " ms (>100ms: " << group.second.wakeups_over_100ms
+                << ", >1s: " << group.second.wakeups_over_1s << ")" << std::endl;
+      FX_LOGS(INFO) << "Group " << group_name << ": threads=" << thread_count
+                    << " avg_loops=" << average_loops << " avg_runtime_s=" << average_runtime
+                    << " wakeups=" << group.second.wakeup_count << " avg_wake_ms=" << avg_wake_ms
+                    << " max_wake_ms=" << max_wake_ms
+                    << " over_100ms=" << group.second.wakeups_over_100ms
+                    << " over_1s=" << group.second.wakeups_over_1s;
+    } else {
+      FX_LOGS(INFO) << "Group " << group_name << ": threads=" << thread_count
+                    << " avg_loops=" << average_loops << " avg_runtime_s=" << average_runtime;
+    }
   }
 
   using MapItem = decltype(group_stats)::value_type;

@@ -18,7 +18,7 @@ use crate::error::{ParseError, ParseResult};
 use super::common::{IcmpDestUnreachable, IcmpEchoReply, IcmpEchoRequest, IcmpTimeExceeded};
 use super::{
     HeaderPrefix, IcmpIpExt, IcmpMessageType, IcmpPacket, IcmpPacketRaw, IcmpParseArgs,
-    IcmpZeroCode, OriginalPacket, mld, ndp, peek_message_type,
+    IcmpZeroCode, OriginalPacket, mld, ndp, peek_message_type, verify_message_checksum,
 };
 
 /// Dispatches expressions to the type-safe variants of [`Icmpv6Packet`] or
@@ -144,11 +144,13 @@ impl<B: SplitByteSlice> ParsablePacket<B, IcmpParseArgs<Ipv6Addr>> for Icmpv6Pac
         use mld::MldPacket::*;
         use ndp::NdpPacket::*;
 
+        let checksum = verify_message_checksum::<Ipv6>(args.src_ip, args.dst_ip, buffer.as_ref());
+
         macro_rules! mtch {
-            ($buffer:expr, $args:expr, $pkt_name:ident, $( ($msg_variant:ident, $len_pat:pat) => $pkt_variant:expr => $type:ty,)*) => {
+            ($buffer:expr, $checksum:expr, $pkt_name:ident, $( ($msg_variant:ident, $len_pat:pat) => $pkt_variant:expr => $type:ty,)*) => {
                 match ( peek_message_type($buffer.as_ref())?, $buffer.len() ) {
                     $( (Icmpv6MessageType::$msg_variant, $len_pat) => {
-                        let $pkt_name = <IcmpPacket<Ipv6, B, $type> as ParsablePacket<_, _>>::parse($buffer, $args)?;
+                        let $pkt_name = IcmpPacket::<Ipv6, B, $type>::parse_with_checksum($buffer, $checksum)?;
                         $pkt_variant
                     })*
                 }
@@ -157,7 +159,7 @@ impl<B: SplitByteSlice> ParsablePacket<B, IcmpParseArgs<Ipv6Addr>> for Icmpv6Pac
 
         Ok(mtch!(
             buffer,
-            args,
+            checksum,
             packet,
             (DestUnreachable, ..)               => DestUnreachable(packet)                => IcmpDestUnreachable,
             (PacketTooBig, ..)                  => PacketTooBig(packet)                   => Icmpv6PacketTooBig,

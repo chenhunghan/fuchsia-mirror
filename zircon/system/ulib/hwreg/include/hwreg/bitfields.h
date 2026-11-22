@@ -152,12 +152,12 @@ class RegisterBase {
   using ValueType = IntType;
   using PrinterEnabled = std::is_same<PrinterState, EnablePrinter>;
 
-  uint32_t reg_addr() const { return reg_addr_; }
-  void set_reg_addr(uint32_t addr) { reg_addr_ = addr; }
+  constexpr uint32_t reg_addr() const { return reg_addr_; }
+  constexpr void set_reg_addr(uint32_t addr) { reg_addr_ = addr; }
 
   constexpr ValueType reg_value() const { return reg_value_; }
-  ValueType* reg_value_ptr() { return &reg_value_; }
-  const ValueType* reg_value_ptr() const { return &reg_value_; }
+  constexpr ValueType* reg_value_ptr() { return &reg_value_; }
+  constexpr const ValueType* reg_value_ptr() const { return &reg_value_; }
   constexpr SelfType& set_reg_value(IntType value) {
     reg_value_ = value;
     return *static_cast<SelfType*>(this);
@@ -226,7 +226,9 @@ class RegisterBase {
   constexpr IntType rsvdz_mask() const { return params_.rsvdz_mask; }
 
  protected:
-  internal::FieldParameters<PrinterEnabled::value, ValueType>& params() { return params_; }
+  constexpr internal::FieldParameters<PrinterEnabled::value, ValueType>& params() {
+    return params_;
+  }
 
  private:
   internal::FieldParameters<PrinterEnabled::value, ValueType> params_;
@@ -241,7 +243,7 @@ class RegisterBase {
 template <class RegType>
 class RegisterAddr {
  public:
-  RegisterAddr(uint32_t reg_addr) : reg_addr_(reg_addr) {}
+  constexpr RegisterAddr(uint32_t reg_addr) : reg_addr_(reg_addr) {}
 
   static_assert(std::is_base_of_v<RegisterBase<RegType, typename RegType::ValueType>, RegType> ||
                     std::is_base_of_v<
@@ -259,14 +261,14 @@ class RegisterAddr {
   }
 
   // Instantiate a RegisterBase using the given value for the register.
-  RegType FromValue(typename RegType::ValueType value) const {
+  constexpr RegType FromValue(typename RegType::ValueType value) const {
     RegType reg;
     reg.set_reg_addr(reg_addr_);
     reg.set_reg_value(value);
     return reg;
   }
 
-  uint32_t addr() const { return reg_addr_; }
+  constexpr uint32_t addr() const { return reg_addr_; }
 
  private:
   const uint32_t reg_addr_;
@@ -328,14 +330,14 @@ class BitfieldRef {
   /* NOLINTEND(misc-non-private-member-variables-in-classes) */                                    \
   template <bool Cond = (COND),                                                                    \
             std::enable_if_t<hwreg::internal::kUnexpandedPred<Cond, __LINE__>, bool> = true>       \
-  typename SelfType::ValueType NAME() const {                                                      \
+  constexpr typename SelfType::ValueType NAME() const {                                            \
     return hwreg::BitfieldRef<const typename SelfType::ValueType>(this->reg_value_ptr(),           \
                                                                   (BIT_HIGH), (BIT_LOW))           \
         .get();                                                                                    \
   }                                                                                                \
   template <bool Cond = (COND),                                                                    \
             std::enable_if_t<hwreg::internal::kUnexpandedPred<Cond, __LINE__>, bool> = true>       \
-  SelfType& set_##NAME(typename SelfType::ValueType val) {                                         \
+  constexpr SelfType& set_##NAME(typename SelfType::ValueType val) {                               \
     hwreg::BitfieldRef<typename SelfType::ValueType>(this->reg_value_ptr(), (BIT_HIGH), (BIT_LOW)) \
         .set(val);                                                                                 \
     return *this;                                                                                  \
@@ -357,14 +359,14 @@ class BitfieldRef {
   /* NOLINTEND(misc-non-private-member-variables-in-classes) */                                    \
   template <bool Cond = (COND),                                                                    \
             std::enable_if_t<hwreg::internal::kUnexpandedPred<Cond, __LINE__>, bool> = true>       \
-  typename SelfType::ValueType NAME() const {                                                      \
+  constexpr typename SelfType::ValueType NAME() const {                                            \
     return hwreg::BitfieldRef<const typename SelfType::ValueType>(this->reg_value_ptr(),           \
                                                                   (BIT_HIGH), (BIT_LOW), true)     \
         .get();                                                                                    \
   }                                                                                                \
   template <bool Cond = (COND),                                                                    \
             std::enable_if_t<hwreg::internal::kUnexpandedPred<Cond, __LINE__>, bool> = true>       \
-  SelfType& set_##NAME(typename SelfType::ValueType val) {                                         \
+  constexpr SelfType& set_##NAME(typename SelfType::ValueType val) {                               \
     hwreg::BitfieldRef<typename SelfType::ValueType>(this->reg_value_ptr(), (BIT_HIGH), (BIT_LOW), \
                                                      true)                                         \
         .set(val);                                                                                 \
@@ -388,14 +390,14 @@ class BitfieldRef {
   /* NOLINTEND(misc-non-private-member-variables-in-classes) */                                    \
   template <bool Cond = (COND),                                                                    \
             std::enable_if_t<hwreg::internal::kUnexpandedPred<Cond, __LINE__>, bool> = true>       \
-  ENUM_TYPE NAME() const {                                                                         \
+  constexpr ENUM_TYPE NAME() const {                                                               \
     return static_cast<ENUM_TYPE>(hwreg::BitfieldRef<const typename SelfType::ValueType>(          \
                                       this->reg_value_ptr(), (BIT_HIGH), (BIT_LOW))                \
                                       .get());                                                     \
   }                                                                                                \
   template <bool Cond = (COND),                                                                    \
             std::enable_if_t<hwreg::internal::kUnexpandedPred<Cond, __LINE__>, bool> = true>       \
-  SelfType& set_##NAME(ENUM_TYPE val) {                                                            \
+  constexpr SelfType& set_##NAME(ENUM_TYPE val) {                                                  \
     hwreg::BitfieldRef<typename SelfType::ValueType>(this->reg_value_ptr(), (BIT_HIGH), (BIT_LOW)) \
         .set(static_cast<typename SelfType::ValueType>(val));                                      \
     return *this;                                                                                  \

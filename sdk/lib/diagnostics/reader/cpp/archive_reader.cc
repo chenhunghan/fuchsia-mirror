@@ -79,8 +79,7 @@ void InnerReadBatches(fidl::SharedClient<fuchsia_diagnostics::BatchIterator> ptr
             return;
           }
           std::string json;
-          fsl::SizedVmo vmo(std::move(content.json()->vmo()), content.json()->size());
-          if (!fsl::StringFromVmo(vmo, &json)) {
+          if (!fsl::StringFromVmo(content.json().value(), &json)) {
             done.completer.complete_error("Failed to read returned VMO");
             return;
           }

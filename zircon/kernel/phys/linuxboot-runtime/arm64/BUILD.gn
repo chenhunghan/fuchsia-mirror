@@ -1,0 +1,31 @@
+# Copyright 2026 The Fuchsia Authors
+#
+# Use of this source code is governed by a MIT-style
+# license that can be found in the LICENSE file or at
+# https://opensource.org/licenses/MIT
+
+import("//build/toolchain/toolchain_environment.gni")
+import("//build/zircon/zircon_cpu.gni")
+
+if (toolchain_environment == "kernel.phys") {
+  source_set("arm64") {
+    visibility = [ "..:*" ]
+
+    sources = [ "linuxboot-header.S" ]
+    configs += [ ":ikconfig.config" ]
+    libs = [ "../linuxboot-pic.ld" ]
+    deps = [ "//zircon/kernel/lib/arch" ]
+  }
+
+  config("ikconfig.config") {
+    visibility = [ ":*" ]
+
+    # This input is a gzipped linux in-kernel config.
+    # To update this file, edit ikconfig.txt in this directory and run:
+    #   gzip --no-name --stdout zircon/kernel/phys/linuxboot-runtime/arm64/ikconfig.txt \
+    #        > zircon/kernel/phys/linuxboot-runtime/arm64/ikconfig.gz
+    inputs = [ "ikconfig.gz" ]
+    ikconfig_file = rebase_path("ikconfig.gz", root_build_dir)
+    defines = [ "IKCONFIG_FILE=\"$ikconfig_file\"" ]
+  }
+}

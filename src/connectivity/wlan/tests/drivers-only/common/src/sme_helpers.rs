@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 //
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
+use fidl_fuchsia_wlan_internal as fidl_internal;
 use fidl_fuchsia_wlan_sme as fidl_sme;
 use rand::RngExt as _;
 use rand::distr::Alphanumeric;
@@ -11,7 +12,10 @@ use std::sync::LazyLock;
 pub static DEFAULT_OPEN_AP_CONFIG: LazyLock<fidl_sme::ApConfig> =
     LazyLock::new(|| fidl_sme::ApConfig {
         ssid: random_ssid(),
-        password: vec![],
+        authentication: fidl_internal::Authentication {
+            protocol: fidl_internal::Protocol::Open,
+            credentials: None,
+        },
         radio_cfg: fidl_sme::RadioConfig {
             phy: fidl_ieee80211::WlanPhyType::Ofdm,
             primary: fidl_ieee80211::ChannelNumber {

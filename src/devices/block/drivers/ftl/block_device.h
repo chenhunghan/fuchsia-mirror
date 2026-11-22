@@ -7,8 +7,6 @@
 
 #include <fidl/fuchsia.driver.token/cpp/fidl.h>
 #include <fidl/fuchsia.storage.block/cpp/wire.h>
-#include <fuchsia/hardware/badblock/c/banjo.h>
-#include <fuchsia/hardware/badblock/cpp/banjo.h>
 #include <fuchsia/hardware/nand/c/banjo.h>
 #include <fuchsia/hardware/nand/cpp/banjo.h>
 #include <lib/async/cpp/task.h>
@@ -75,14 +73,13 @@ class BlockDevice : public fdf::DriverBase2,
   void SetNandParentForTest(const nand_protocol_t& nand) { parent_ = nand; }
 
  private:
-  bool InitFtl();
+  bool InitFtl(const fdf::Namespace& incoming);
 
   std::mutex mutex_;
 
   BlockParams params_ = {};
 
   nand_protocol_t parent_ = {};
-  bad_block_protocol_t bad_block_ = {};
 
   std::unique_ptr<ftl::Volume> volume_ __TA_GUARDED(mutex_);
 

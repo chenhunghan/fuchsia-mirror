@@ -2,11 +2,57 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_compiled_manifest",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_cpp_elf_lib",
+)
 load(":cmc_merge_test.bzl", "cmc_merge_test_suite")
 
 package(default_applicable_licenses = ["//:license"])
 
+fx_compiled_manifest(
+    name = "sc_manifest_a",
+    testonly = True,
+    manifest = "meta/sc_a.cml",
+)
+
+fx_compiled_manifest(
+    name = "sc_manifest_b",
+    testonly = True,
+    manifest = "meta/sc_b.cml",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "Config-A",
+    testonly = True,
+    cm_label = ":sc_manifest_a",
+)
+
+fuchsia_structured_config_cpp_elf_lib(
+    name = "config-b",
+    testonly = True,
+    cm_label = ":sc_manifest_b",
+    namespace = "Custom.Ns",
+)
+
+fx_cc_library(
+    name = "structured_config_cpp_test_lib",
+    testonly = True,
+    srcs = ["structured_config_cpp_test.cc"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":Config-A",
+        ":config-b",
+    ],
+)
+
 cmc_merge_test_suite(
     name = "tests",
+    extra_build_only_tests = [":structured_config_cpp_test_lib"],
     visibility = ["//build/bazel/rules/tests:__pkg__"],
 )

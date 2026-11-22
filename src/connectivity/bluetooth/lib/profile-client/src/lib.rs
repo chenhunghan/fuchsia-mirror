@@ -82,15 +82,21 @@ impl TryFrom<bredr::SearchResultsRequest> for ProfileEvent {
     }
 }
 
-impl TryFrom<bredr::ConnectionReceiverRequest> for ProfileEvent {
+impl TryFrom<bredr::ConnectionReceiver2Request> for ProfileEvent {
     type Error = Error;
-    fn try_from(value: bredr::ConnectionReceiverRequest) -> Result<Self> {
-        let bredr::ConnectionReceiverRequest::Connected { peer_id, channel, protocol, .. } = value
-        else {
+    fn try_from(value: bredr::ConnectionReceiver2Request) -> Result<Self> {
+        let bredr::ConnectionReceiver2Request::Connected { payload, responder } = value else {
             return Err(Error::connection_receiver(fidl::Error::Invalid));
         };
-        let id = peer_id.into();
-        let channel = channel.try_into().map_err(Error::connection_receiver)?;
+        responder.send()?;
+        let id =
+            payload.peer_id.ok_or_else(|| Error::connection_receiver(fidl::Error::Invalid))?.into();
+        let channel = payload
+            .channel
+            .ok_or_else(|| Error::connection_receiver(fidl::Error::Invalid))?
+            .try_into()
+            .map_err(Error::connection_receiver)?;
+        let protocol = payload.protocol.unwrap_or_default();
         trace!(id:%, protocol:?; "Incoming connection");
         Ok(ProfileEvent::PeerConnected { id, channel, protocol })
     }
@@ -114,7 +120,7 @@ pub struct ProfileClient {
     proxy: bredr::ProfileProxy,
     /// The result for the advertisement.
     advertisement: Option<QueryResponseFut<bredr::ProfileAdvertiseResult>>,
-    connection_receiver: Option<bredr::ConnectionReceiverRequestStream>,
+    connection_receiver: Option<bredr::ConnectionReceiver2RequestStream>,
     /// The registered results from the search streams. Polled in order.
     searches: Vec<bredr::SearchResultsRequestStream>,
     /// This waker will be woken if a new search is added.
@@ -151,7 +157,7 @@ impl ProfileClient {
             .advertise(bredr::ProfileAdvertiseRequest {
                 services: Some(services),
                 parameters: Some(channel_params),
-                receiver: Some(connect_client),
+                connection_receiver: Some(connect_client),
                 ..Default::default()
             })
             .check()?;
@@ -356,15 +362,24 @@ mod tests {
             assert!(exec.run_until_stalled(&mut event_fut).is_pending());
 
             let (remote_chan, _local) = create_test_channels(transport);
-            connect_proxy
-                .connected(&remote_peer.into(), bredr::Channel::try_from(remote_chan).unwrap(), &[])
-                .expect("connection should work");
+            let connect_fut = connect_proxy.connected(bredr::ConnectionReceiver2ConnectedRequest {
+                peer_id: Some(remote_peer.into()),
+                channel: Some(bredr::Channel::try_from(remote_chan).unwrap()),
+                protocol: Some(vec![]),
+                ..Default::default()
+            });
+            let mut connect_fut = pin!(connect_fut);
 
             match exec.run_until_stalled(&mut event_fut) {
                 Poll::Ready(Some(Ok(ProfileEvent::PeerConnected { id, .. }))) => {
                     assert_eq!(id, remote_peer);
                 }
                 x => panic!("Expected an error from the advertisement, got {:?}", x),
+            };
+
+            match exec.run_until_stalled(&mut connect_fut) {
+                Poll::Ready(Ok(())) => {}
+                x => panic!("Expected a response from Connected, got {:?}", x),
             };
         }
 
@@ -385,14 +400,14 @@ mod tests {
         profile_stream: &mut bredr::ProfileRequestStream,
         expected_defs: Vec<bredr::ServiceDefinition>,
         expected_params: Option<fidl_bt::ChannelParameters>,
-    ) -> (bredr::ConnectionReceiverProxy, bredr::ProfileAdvertiseResponder) {
+    ) -> (bredr::ConnectionReceiver2Proxy, bredr::ProfileAdvertiseResponder) {
         match exec.run_until_stalled(&mut profile_stream.next()) {
             Poll::Ready(Some(Ok(bredr::ProfileRequest::Advertise { payload, responder }))) => {
                 assert!(payload.services.is_some());
                 assert_eq!(payload.services.unwrap(), expected_defs);
                 assert_eq!(payload.parameters, expected_params);
-                assert!(payload.receiver.is_some());
-                (payload.receiver.unwrap().into_proxy(), responder)
+                assert!(payload.connection_receiver.is_some());
+                (payload.connection_receiver.unwrap().into_proxy(), responder)
             }
             x => panic!("Expected ready advertisement request, got {:?}", x),
         }

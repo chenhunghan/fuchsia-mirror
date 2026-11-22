@@ -2,38 +2,16 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/host.gni")
-import("//build/rust/rustc_library.gni")
 import("//src/developer/ffx/build/ffx_tool.gni")
-import("//src/developer/ffx/lib/version/build/ffx_apply_version.gni")
 
-rustc_library("lib") {
-  name = "ffx_tool_verify_ssh_keys"
-  edition = "2024"
-  with_unit_tests = true
+assert(is_host, "bazel_ffx_tool() can only be called in a host toolchain.")
 
-  deps = [
-    "//src/developer/ffx/config:lib",
-    "//src/developer/ffx/lib/fho:lib",
-    "//src/developer/ffx/lib/ssh:lib",
-    "//src/developer/ffx/lib/target/holders:lib",
-    "//src/developer/ffx/lib/writer:lib",
-    "//third_party/rust_crates:argh",
-  ]
-
-  sources = [ "src/lib.rs" ]
-}
-
-ffx_tool("ffx_verify_ssh_keys") {
-  edition = "2024"
+# LINT.IfChange
+bazel_ffx_tool("ffx_verify_ssh_keys") {
   output_name = "ffx-verify-ssh-keys"
-  deps = [
-    ":lib",
-    "//src/developer/ffx/lib/fho:lib",
-    "//src/lib/fuchsia-async",
-  ]
-  sources = [ "src/main.rs" ]
 }
+
+# LINT.ThenChange(BUILD.bazel)
 
 group("verify-ssh-keys") {
   public_deps = [
@@ -44,9 +22,4 @@ group("verify-ssh-keys") {
 
 group("bin") {
   public_deps = [ ":ffx_verify_ssh_keys_versioned" ]
-}
-
-group("tests") {
-  testonly = true
-  deps = [ ":lib_test($host_toolchain)" ]
 }

@@ -85,6 +85,7 @@ void InitWithInterrupt(SimpleTestDriver& driver) {
       .ExpectWrite(uint16_t{0b0000'0000'0111'0000}, 0x2C)  // Writeback with FIFO enabled
       .ExpectWrite(uint16_t{0b0001'0000'0001}, 0x30)       // Init
       .ExpectWrite<uint16_t>(0b0000'0011'1111'1111, 0x44)  // Clear Interrupts.
+      .ExpectRead<uint16_t>(0b0001'0000, 0x18)             // Read FlagRegister (rx_fifo_empty)
       .ExpectWrite<uint16_t>(0b0000, 0x34)                 // Rx and Tx Fifo to 1/8
       .ExpectRead<uint16_t>(0b000, 0x38)                   // Read Interrupt Mask.
       .ExpectWrite<uint16_t>(0b1010000, 0x38)        // Write Interrupt Mask with Rx and Rx Timeout
@@ -110,6 +111,7 @@ TEST(Pl011Tests, InitInterrupt) {
   driver.io()
       .mock()
       .ExpectWrite<uint16_t>(0b0000'0011'1111'1111, 0x44)  // Clear Interrupts.
+      .ExpectRead<uint16_t>(0b0001'0000, 0x18)             // Read FlagRegister (rx_fifo_empty)
       .ExpectWrite<uint16_t>(0b0000, 0x34)                 // Rx and Tx Fifo to 1/8
       .ExpectRead<uint16_t>(0b000, 0x38)                   // Read Interrupt Mask.
       .ExpectWrite<uint16_t>(0b1010000, 0x38)        // Write Interrupt Mask with Rx and Rx Timeout
@@ -117,6 +119,63 @@ TEST(Pl011Tests, InitInterrupt) {
       .ExpectWrite<uint16_t>(0b0011'0000'0001, 0x30);  // Enable RX.
                                                        //
   driver.InitInterrupt();
+
+  EXPECT_TRUE(driver.irq().enabled());
+  EXPECT_EQ(1u, driver.irq().init_count());
+  EXPECT_EQ(1u, driver.irq().enable_count());
+  EXPECT_EQ(0u, driver.irq().disable_count());
+}
+
+TEST(Pl011Tests, InitInterruptDrainsRxFifo) {
+  SimpleTestDriver driver(kTestConfig);
+
+  Init(driver);
+
+  driver.io()
+      .mock()
+      .ExpectWrite<uint16_t>(0b0000'0011'1111'1111, 0x44)  // Clear Interrupts.
+      .ExpectRead<uint16_t>(0, 0x18)                       // Read FlagRegister (!rx_fifo_empty)
+      .ExpectRead<uint16_t>('\r', 0)                       // Drain DataRegister
+      .ExpectRead<uint16_t>(0, 0x18)                       // Read FlagRegister (!rx_fifo_empty)
+      .ExpectRead<uint16_t>('\n', 0)                       // Drain DataRegister
+      .ExpectRead<uint16_t>(0b0001'0000, 0x18)             // Read FlagRegister (rx_fifo_empty)
+      .ExpectWrite<uint16_t>(0b0000, 0x34)                 // Rx and Tx Fifo to 1/8
+      .ExpectRead<uint16_t>(0b000, 0x38)                   // Read Interrupt Mask.
+      .ExpectWrite<uint16_t>(0b1010000, 0x38)        // Write Interrupt Mask with Rx and Rx Timeout
+      .ExpectRead<uint16_t>(0b0001'0000'0001, 0x30)  // Read Control Register State
+      .ExpectWrite<uint16_t>(0b0011'0000'0001, 0x30);  // Enable RX.
+
+  driver.InitInterrupt();
+  driver.io().mock().VerifyAndClear();
+
+  EXPECT_TRUE(driver.irq().enabled());
+  EXPECT_EQ(1u, driver.irq().init_count());
+  EXPECT_EQ(1u, driver.irq().enable_count());
+  EXPECT_EQ(0u, driver.irq().disable_count());
+}
+
+TEST(Pl011Tests, InitInterruptDrainBounded) {
+  SimpleTestDriver driver(kTestConfig);
+
+  Init(driver);
+
+  driver.io().mock().ExpectWrite<uint16_t>(0b0000'0011'1111'1111, 0x44);  // Clear Interrupts.
+  for (size_t i = 0; i < 1024; ++i) {
+    driver.io()
+        .mock()
+        .ExpectRead<uint16_t>(0, 0x18)  // Read FlagRegister (!rx_fifo_empty)
+        .ExpectRead<uint16_t>('x', 0);  // Drain DataRegister
+  }
+  driver.io()
+      .mock()
+      .ExpectWrite<uint16_t>(0b0000, 0x34)           // Rx and Tx Fifo to 1/8
+      .ExpectRead<uint16_t>(0b000, 0x38)             // Read Interrupt Mask.
+      .ExpectWrite<uint16_t>(0b1010000, 0x38)        // Write Interrupt Mask with Rx and Rx Timeout
+      .ExpectRead<uint16_t>(0b0001'0000'0001, 0x30)  // Read Control Register State
+      .ExpectWrite<uint16_t>(0b0011'0000'0001, 0x30);  // Enable RX.
+
+  driver.InitInterrupt();
+  driver.io().mock().VerifyAndClear();
 
   EXPECT_TRUE(driver.irq().enabled());
   EXPECT_EQ(1u, driver.irq().init_count());

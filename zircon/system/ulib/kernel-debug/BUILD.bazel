@@ -1,0 +1,21 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_source_library_zx.bzl", "fx_cc_source_library_zx")
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_source_library_zx(
+    name = "kernel-debug",
+    srcs = ["kernel-debug.cc"],
+    hdrs = ["include/lib/kernel-debug/kernel-debug.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.kernel:fuchsia.kernel_cpp",
+        "//zircon/system/ulib/zircon-internal",
+        "//zircon/system/ulib/zx",
+    ],
+    includes = ["include"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//zircon/system/ulib/svc"],
+)

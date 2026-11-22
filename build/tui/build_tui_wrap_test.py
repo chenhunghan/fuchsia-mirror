@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 from build.bazel.scripts import build_utils
+from build.resultstore import rsclient
 from build.tui import build_tui_wrap
 
 
@@ -125,9 +126,7 @@ class BuildminderEnvTest(unittest.TestCase):
             python_dir=pathlib.Path("/opt/python/bin"),
         )
         self.assertEqual(env["FOO"], "bar")
-        self.assertEqual(
-            env[build_tui_wrap.ENV_FX_INTERNAL_BAZEL_BESPROXY], "1"
-        )
+        self.assertEqual(env[rsclient.ENV_FX_INTERNAL_BAZEL_BESPROXY], "1")
 
     def test_buildminder_env_prepends_fuchsia_dir_to_pythonpath(self) -> None:
         fuchsia_dir = pathlib.Path("/workspace")
@@ -198,14 +197,12 @@ class MainTest(unittest.TestCase):
             "echo",
             "hello",
         ]
-        ret = build_tui_wrap.main(argv)
+        ret = build_tui_wrap.main(argv, {})
         self.assertEqual(ret, 0)
         self.assertTrue(mock_execvpe.called)
         cmd_arg, _, env_arg = mock_execvpe.call_args[0]
         self.assertTrue(cmd_arg.endswith("buildminder-wrap.sh"))
-        self.assertEqual(
-            env_arg[build_tui_wrap.ENV_FX_INTERNAL_BAZEL_BESPROXY], "1"
-        )
+        self.assertEqual(env_arg[rsclient.ENV_FX_INTERNAL_BAZEL_BESPROXY], "1")
 
 
 if __name__ == "__main__":

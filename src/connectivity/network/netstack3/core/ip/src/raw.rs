@@ -211,7 +211,7 @@ where
             let tx_metadata = Default::default();
 
             core_ctx
-                .send_oneshot_ip_packet_with_fallible_serializer(
+                .send_oneshot_ip_packet_with_dyn_fallible_serializer(
                     bindings_ctx,
                     IpSocketArgs {
                         device: device.as_ref().map(|d| d.as_ref()),

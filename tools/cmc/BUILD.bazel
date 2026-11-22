@@ -62,6 +62,8 @@ idk_rustc_binary_host_tool(
         "//build/bazel/rules/assembly:__pkg__",
         "//build/bazel/rules/components:__pkg__",
         "//build/bazel/rules/packages:__pkg__",
+        "//tools/lib/reference_doc/macro/derive-reference-doc-tests:__pkg__",
+        "//vendor/google:__subpackages__",
     ],
     deps = [
         ":cmc_lib",

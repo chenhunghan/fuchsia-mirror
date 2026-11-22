@@ -76,10 +76,7 @@ if (is_host) {
     ]
     libraries += target_identity_libraries
     params_source = "params_x64.yaml"
-    environments = [
-      nuc7_env,
-      nuc11_env,
-    ]
+    environments = [ nuc11_env ]
     deps = target_identity_deps
   }
 
@@ -94,7 +91,6 @@ if (is_host) {
     environments = [
       emu_env,
       vim3_env,
-      nuc7_env,
       nuc11_env,
     ]
     deps = [
@@ -113,7 +109,6 @@ if (is_host) {
     environments = [
       emu_env,
       vim3_env,
-      nuc7_env,
       nuc11_env,
     ]
     deps = [
@@ -133,7 +128,6 @@ if (is_host) {
     environments = [
       emu_env,
       vim3_env,
-      nuc7_env,
       nuc11_env,
     ]
     deps = [
@@ -159,7 +153,6 @@ if (is_host) {
     environments = [
       emu_env,
       vim3_env,
-      nuc7_env,
       nuc11_env,
     ]
     deps = [

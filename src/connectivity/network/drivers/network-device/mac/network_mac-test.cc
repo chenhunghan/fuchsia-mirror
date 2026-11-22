@@ -6,9 +6,9 @@
 #include <lib/driver/testing/cpp/driver_runtime.h>
 #include <lib/fit/defer.h>
 #include <lib/sync/cpp/completion.h>
+#include <lib/syslog/cpp/log_settings.h>
 
 #include <gtest/gtest.h>
-#include <sdk/lib/syslog/cpp/log_settings.h>
 
 #include "src/lib/testing/predicates/status.h"
 #include "test_util.h"

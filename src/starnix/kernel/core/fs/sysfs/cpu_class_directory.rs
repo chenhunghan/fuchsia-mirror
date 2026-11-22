@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 use crate::fs::sysfs::build_device_directory;
+use crate::power::suspended_time;
 use crate::task::{CurrentTask, Kernel};
 use crate::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
 use crate::vfs::pseudo::simple_file::{
@@ -54,26 +55,29 @@ pub fn register_cpu_devices(kernel: &Kernel) {
     let core_count = core_to_domain_map.len();
     let registry = &kernel.device_registry;
     let system_device = registry.objects.system_device();
-    let cpu_root =
-        registry.add_subsystemless_device("cpu".into(), Some(system_device), |device, dir| {
+    let cpu_root = registry
+        .add_subsystemless_device("cpu".into(), Some(system_device), |device, dir| {
             build_device_directory(device, dir);
             build_cpu_subsystem_directory(dir, &cpu_domains, core_count);
-        });
+        })
+        .expect("can add cpu root device");
 
     let cpu_bus = registry.objects.get_or_create_bus("cpu".into());
     let c2_provider = kernel.expando.get::<CpuC2Provider>();
     for (core_id, domain) in &core_to_domain_map {
         let name: FsString = format!("cpu{}", core_id).into();
         let c2_provider = c2_provider.clone();
-        registry.add_bus_device(
-            name.as_ref(),
-            Some(cpu_root.clone()),
-            cpu_bus.clone(),
-            |device, dir| {
-                build_device_directory(device, dir);
-                build_cpu_directory(dir, *core_id, domain, c2_provider);
-            },
-        );
+        registry
+            .add_bus_device(
+                name.as_ref(),
+                Some(cpu_root.clone()),
+                cpu_bus.clone(),
+                |device, dir| {
+                    build_device_directory(device, dir);
+                    build_cpu_directory(dir, *core_id, domain, c2_provider);
+                },
+            )
+            .expect("can add cpu bus device");
     }
 }
 
@@ -105,15 +109,6 @@ fn build_cpu_subsystem_directory(
             let name = format!("policy{}", min_core_id);
             dir.subdir(&name, 0o755, |dir| build_cpufreq_directory(dir, domain));
         }
-    });
-    dir.subdir("soc", 0o755, |dir| {
-        dir.subdir("0", 0o755, |dir| {
-            dir.entry(
-                "machine",
-                StubEmptyFile::new_node(bug_ref!("https://fxbug.dev/452096300")),
-                mode!(IFREG, 0o444),
-            );
-        });
     });
 }
 
@@ -1020,18 +1015,6 @@ fn create_scaling_cur_freq_file(domain_id: u64) -> impl FsNodeOps {
 enum CpuIdleStatType {
     Time,
     Usage,
-}
-
-/// Returns the total time the system has spent suspended since boot.
-///
-/// The monotonic clock pauses while the system is suspended, whereas the boot clock keeps
-/// advancing, so the difference between the two is the accumulated suspended time. Reading the
-/// monotonic clock before the boot clock ensures that any execution delay or suspend between the
-/// two reads inflates (rather than reduces) `boot_ns - mono_ns`.
-fn suspended_time() -> zx::BootDuration {
-    let mono_ns = zx::MonotonicInstant::get().into_nanos();
-    let boot_ns = zx::BootInstant::get().into_nanos();
-    zx::BootDuration::from_nanos(boot_ns.saturating_sub(mono_ns))
 }
 
 /// Per-core firmware C2 residency, annotated with the portion accrued while the system was

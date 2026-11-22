@@ -1,0 +1,32 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_packaged_binary(
+    name = "bt-beacon-reader",
+    binary = "//src/connectivity/bluetooth/examples/bt-beacon-reader",
+    binary_name = "bt-beacon-reader",
+)
+
+fx_packaged_binary(
+    name = "bt-le-heart-rate-peripheral",
+    binary = "//src/connectivity/bluetooth/examples/bt-le-heart-rate-peripheral",
+    binary_name = "bt-le-heart-rate-peripheral",
+)
+
+fx_package(
+    name = "bt-shell-examples",
+    resources = [
+        ":bt-beacon-reader",
+        ":bt-le-heart-rate-peripheral",
+    ],
+    visibility = ["//bundles/packages/examples:__pkg__"],
+)

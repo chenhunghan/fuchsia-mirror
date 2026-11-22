@@ -29,10 +29,10 @@ class MetricsImpl final
 
   void LogRareEvent(cobalt_registry::ScenicRareEventMigratedMetricDimensionEvent event) override;
   void LogLatchToActualPresentation(
-      std::optional<
-          cobalt_registry::ScenicLatchToActualPresentationMigratedMetricDimensionFrameStatus>
+      cobalt_registry::ScenicLatchToActualPresentationMigratedMetricDimensionFrameStatus
           frame_status,
       std::vector<fuchsia_metrics::HistogramBucket> histogram) override;
+  void LogRenderTime(std::vector<fuchsia_metrics::HistogramBucket> histogram) override;
 
  private:
   void ConnectToServiceHub(ServiceHubConnectResolver resolver) override;

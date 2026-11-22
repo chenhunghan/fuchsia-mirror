@@ -121,7 +121,7 @@ def _sanitizer_extra_options_impl(name, visibility, sanitizer, args, deps = [], 
 
     if variant_tags:
         srcs_select = {
-            Label("//build/bazel/config/toolchain_tags/%s:true" % tag): [
+            Label("//build/bazel/config/variant_features/%s:true" % tag): [
                 Label("//build/config/sanitizers:sanitizer_default_options.c"),
             ]
             for tag in variant_tags
@@ -130,7 +130,7 @@ def _sanitizer_extra_options_impl(name, visibility, sanitizer, args, deps = [], 
         srcs = select(srcs_select)
 
         deps_select = {
-            Label("//build/bazel/config/toolchain_tags/%s:true" % tag): [
+            Label("//build/bazel/config/variant_features/%s:true" % tag): [
                 default_options_target,
             ]
             for tag in variant_tags

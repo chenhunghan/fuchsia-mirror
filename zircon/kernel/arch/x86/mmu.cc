@@ -31,7 +31,6 @@
 #include <vm/arch_vm_aspace.h>
 #include <vm/physmap.h>
 #include <vm/pmm.h>
-#include <vm/vm.h>
 
 #define LOCAL_TRACE 0
 
@@ -78,10 +77,6 @@ static pt_entry_t* root_page_table() {
 // the upper 512 GiB of the address space.
 paddr_t upper_512gib_page_table_phys;
 
-volatile pt_entry_t* x86_upper_512gib_page_table() {
-  return reinterpret_cast<pt_entry_t*>(paddr_to_physmap(upper_512gib_page_table_phys));
-}
-
 #if __has_feature(address_sanitizer)
 volatile pt_entry_t kasan_shadow_pt[NO_OF_PT_ENTRIES] __ALIGNED(kPageSize);  // Leaf page tables
 volatile pt_entry_t kasan_shadow_pd[NO_OF_PT_ENTRIES] __ALIGNED(kPageSize);  // Page directories
@@ -107,13 +102,6 @@ bool x86_is_vaddr_canonical(vaddr_t vaddr) {
   // the valid addresses) or 1 (the high half).
   return ((vaddr & kX86CanonicalAddressMask) == 0) ||
          ((vaddr & kX86CanonicalAddressMask) == kX86CanonicalAddressMask);
-}
-
-// Whether the instruction pointer is canonical and in userspace.
-//
-// See docs/concepts/kernel/sysret_problem.md for more information.
-bool x86_is_ip_canonical(vaddr_t ip) {
-  return x86_is_vaddr_canonical(ip) && !is_kernel_address(ip);
 }
 
 /**

@@ -15,6 +15,8 @@ description: >
 Use these guidelines when authoring, reviewing, or debugging code in the Starnix
 kernel (`//src/starnix`), including syscall implementations, the virtual
 filesystem (VFS), memory management (`mm`), task lifecycle, and kernel modules.
+For general Fuchsia Rust style and API conventions, also follow the
+`rust_best_practices` skill (`.agents/skills/rust_best_practices/SKILL.md`).
 
 ## 1. Linux UAPI & ABI Fidelity
 
@@ -68,12 +70,14 @@ by other user threads at any time.
   - Always read and write user memory through `MemoryAccessor` and
     `MemoryAccessorExt` methods on `CurrentTask` or `Task`
     (`//src/starnix/kernel/core/mm/memory_accessor.rs`):
+
     ```rust
     let value = current_task.read_object(user_ref)?;
     current_task.write_object(user_ref, &value)?;
     let bytes = current_task.read_memory_to_vec(user_address, length)?;
     let path = current_task.read_path(user_cstring)?;
     ```
+
   - In VFS `FileOps::read` and `FileOps::write` implementations, transfer data
     through `InputBuffer` and `OutputBuffer`
     (`//src/starnix/kernel/core/vfs/buffers/`) rather than raw `UserAddress`
@@ -112,6 +116,7 @@ inversions and holding locks across blocking operations cause kernel lockups.
     memory. User memory accesses can trigger page faults (acquiring
     `MemoryManager` locks or waiting on `userfaultfd`), creating lock-order
     inversions and deadlocks:
+
     ```rust
     // BAD: Holding an internal lock while writing to user memory
     let state = self.state.lock();
@@ -121,6 +126,7 @@ inversions and holding locks across blocking operations cause kernel lockups.
     let data = self.state.lock().data.clone();
     current_task.write_object(user_ptr, &data)?;
     ```
+
 - **Uninterruptible Locks & Blocking Operations**:
   - `CurrentTask::run_in_state` asserts
     `assert_lock_level::<UninterruptibleLock>()` before blocking a task.
@@ -191,11 +197,64 @@ Every Starnix change should be verified with appropriate automated tests:
 
 1.  **In-Process Unit Tests**: Add `#[::fuchsia::test]` unit tests in
     `//src/starnix/kernel/core` or the relevant module crate and run `fx test
-    starnix-tests`.
-2.  **Syscall & Linux Conformance Tests**: Add or update C++ syscall tests in
-    `//src/starnix/tests/syscalls/cpp` (`fx test starnix_syscalls_cpp_tests`)
-    and verify relevant gVisor (`//src/starnix/tests/gvisor`) or LTP
-    (`//src/starnix/tests/ltp`) test suites.
+    starnix_core_tests`.
+2.  **Syscall & Linux Conformance Tests**: When changing production code in
+    `//src/starnix` that adds or modifies userspace-observable Linux syscall or
+    kernel behavior (as opposed to internal refactorings, `//src/starnix/lib/*`
+    data structures, `//src/starnix/runner`, `//src/starnix/tools`, or features
+    covered by other integration suites under `//src/starnix/tests/*`), include
+    syscall-level test coverage in `//src/starnix/tests/syscalls` (such as C++
+    syscall tests in `//src/starnix/tests/syscalls/cpp` run via `fx test
+    starnix_syscalls_cpp_tests`, or Rust syscall tests in
+    `//src/starnix/tests/syscalls/rust` run via `fx test
+    starnix_syscalls_rust_tests`), and verify relevant gVisor
+    (`//src/starnix/tests/gvisor`) or LTP (`//src/starnix/tests/ltp`) test
+    suites.
+    - **Minimizing `test_helper::IsStarnix()`**: Keep use of
+      `test_helper::IsStarnix()` in `//src/starnix/tests/syscalls` to an
+      absolute minimum. Because these suites execute the same tests against both
+      Linux (`host`, `linux_syscalls_cpp_tests`, and
+      `linux_syscalls_rust_tests`) and Starnix to validate that their behavior
+      matches, Starnix-exclusive tests or assertions undermine cross-platform
+      verification and usually indicate a bug in Starnix or a flawed test
+      assumption:
+      - Write syscall tests to perform the same actions and assert the same
+        Linux-conformant outcomes unconditionally on both Linux and Starnix. Do
+        not add `IsStarnix()` branches to assert Starnix-internal implementation
+        side effects or current Starnix limitations.
+      - When a test fails on Linux, first investigate whether the Starnix
+        behavior diverges from Linux or whether the test can be written with
+        portable Linux primitives so that it runs identically on both platforms.
+      - When Starnix does not yet match Linux behavior due to a known limitation
+        or unimplemented feature, write the test to assert the Linux behavior
+        and record the failure in the test expectations file
+        (`//src/starnix/tests/syscalls/cpp/expectations/*.json5` or
+        `//src/starnix/tests/syscalls/rust/expectations/*.json5`) with a
+        `TODO(https://fxbug.dev/...)` comment rather than branching on
+        `test_helper::IsStarnix()`.
+      - When a test depends on privileges, kernel version, or optional system
+        features, gate on the specific capability or runtime probe (such as
+        `test_helper::HasCapability(...)`, `test_helper::HasSysAdmin()`,
+        `test_helper::IsKernelVersionAtLeast(...)`, or `access(..., F_OK)`)
+        rather than `test_helper::IsStarnix()` alone; pair a probe with
+        `!test_helper::IsStarnix()` only so Starnix fails loudly rather than
+        silently skipping a feature it is expected to provide.
+      - In the rare cases where `test_helper::IsStarnix()` is unavoidable (such
+        as testing a strictly Starnix-specific container feature like `remotefs`
+        or `remote_bundle`, or isolating a documented, bug-tracked divergence so
+        the rest of a test still runs on both platforms), keep the `IsStarnix()`
+        scope as narrow as possible, either perform the same actions and branch
+        only on the platform-dependent expectation or perform platform-dependent
+        setup to confirm the same result (never both different actions and
+        different assertions), and explain why in a comment (with a
+        `TODO(https://fxbug.dev/...)` when tracking a bug).
+    - **Documenting Unreachable Syscall Coverage (Commit Authoring)**: When
+      authoring a commit for a production code change in `//src/starnix` that
+      modifies userspace-observable syscall or kernel behavior but cannot be
+      covered by syscall-level tests in `//src/starnix/tests/syscalls`, the
+      commit message must explicitly explain why syscall-level test coverage is
+      not possible (or not appropriate, such as would be the case if it were
+      redundant with what gVisor and/or LTP are already testing).
 3.  **SELinux / Android Compatibility**: When modifying security hooks, Binder,
     or Android-specific subsystems, verify `//src/starnix/tests/selinux` or
     relevant compatibility tests.

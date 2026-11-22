@@ -9,22 +9,22 @@ use crate::lsm_tree::Query;
 use crate::lsm_tree::merge::{Merger, MergerIterator};
 use crate::lsm_tree::types::{ItemRef, LayerIterator};
 use crate::object_handle::ObjectHandle;
+use crate::object_store::allocator::Preallocation;
 use crate::object_store::data_object_handle::WRITE_ATTR_BATCH_SIZE;
 use crate::object_store::extent_record::{
     ExtentMode, ExtentValue, JOURNAL_CHECKSUM_BYTES_PER_BLOCK, MAX_JOURNAL_BYTES_PER_RANGE,
 };
 use crate::object_store::object_manager::ObjectManager;
 use crate::object_store::object_record::{
-    AttributeKey, BytesAndNodes, ExtendedAttributeValue, ObjectAttributes, ObjectItem, ObjectKey,
-    ObjectKeyData, ObjectKind, ObjectValue, Timestamp,
+    AttributeKey, ExtendedAttributeValue, ObjectKey, ObjectKeyData, ObjectValue, Timestamp,
 };
 use crate::object_store::transaction::{
     AssocObj, AssociatedObject, LockKey, Mutation, ObjectStoreMutation, Options, ReadGuard,
     TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
 use crate::object_store::{
-    AttributeId, Extent, FSCRYPT_KEY_ID, FileExtent, HandleOptions, HandleOwner, ObjectStore,
-    TrimMode, TrimResult, VOLUME_DATA_KEY_ID,
+    AttributeId, Extent, FSCRYPT_KEY_ID, FileExtent, HandleOptions, HandleOwner, LocalHandleOwner,
+    ObjectStoreTrait, SymlinkTarget, TrimMode, TrimResult, VOLUME_DATA_KEY_ID, resolve_symlink,
 };
 use crate::range::RangeExt;
 use anyhow::{Context, Error, anyhow, bail, ensure};
@@ -101,13 +101,6 @@ impl MaybeChecksums {
         }
     }
 
-    pub fn to_mode(self) -> ExtentMode {
-        match self {
-            Self::None => ExtentMode::Raw,
-            Self::Fletcher(sums) => ExtentMode::Cow(Checksums::fletcher(sums)),
-        }
-    }
-
     pub fn into_option(self) -> Option<Vec<Checksum>> {
         match self {
             Self::None => None,
@@ -139,6 +132,7 @@ impl From<fio::SetExtendedAttributeMode> for SetExtendedAttributeMode {
     }
 }
 
+#[derive(Debug)]
 enum Encryption {
     /// The object doesn't use encryption.
     None,
@@ -295,7 +289,17 @@ pub struct StoreObjectHandle<S: HandleOwner> {
     encryption: Encryption,
 }
 
-impl<S: HandleOwner> ObjectHandle for StoreObjectHandle<S> {
+impl<S: HandleOwner> std::fmt::Debug for StoreObjectHandle<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreObjectHandle")
+            .field("store_id", &self.store().store_object_id())
+            .field("object_id", &self.object_id)
+            .field("encryption", &self.encryption)
+            .finish()
+    }
+}
+
+impl<S: LocalHandleOwner> ObjectHandle for StoreObjectHandle<S> {
     fn set_trace(&self, v: bool) {
         info!(store_id = self.store().store_object_id, oid = self.object_id(), trace = v; "trace");
         self.trace.store(v, atomic::Ordering::Relaxed);
@@ -316,10 +320,16 @@ impl<S: HandleOwner> ObjectHandle for StoreObjectHandle<S> {
 
 static WATCHDOG_BACKTRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Enables triggering a `fxfs-watchdog:<op>-300s` backtrace request when an I/O request in
-/// `StoreObjectHandle` has been blocked for 5 minutes.
+const WATCHDOG_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const WATCHDOG_BACKTRACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const_assert!(
+    WATCHDOG_BACKTRACE_TIMEOUT.as_secs().is_multiple_of(WATCHDOG_POLL_INTERVAL.as_secs())
+);
+
+/// Enables triggering a `fxfs-watchdog:<op>-<secs>s` backtrace request when an I/O request in
+/// `StoreObjectHandle` has been blocked for `WATCHDOG_BACKTRACE_TIMEOUT`.
 pub fn enable_watchdog_backtrace(enabled: bool) {
-    WATCHDOG_BACKTRACE_ENABLED.store(enabled, Ordering::Relaxed);
+    WATCHDOG_BACKTRACE_ENABLED.store(enabled, Ordering::Release);
 }
 
 struct Watchdog {
@@ -327,15 +337,15 @@ struct Watchdog {
 }
 
 impl Watchdog {
-    fn new(increment_seconds: u64, cb: impl Fn(u64) + Send + 'static) -> Self {
+    fn new(interval: std::time::Duration, cb: impl Fn(u64) + Send + 'static) -> Self {
         Self {
             _task: fasync::Task::spawn(
                 async move {
-                    let increment = increment_seconds.try_into().unwrap();
+                    let interval: fasync::MonotonicDuration = interval.into();
                     let mut fired_counter = 0;
                     let mut next_wake = fasync::MonotonicInstant::now();
                     loop {
-                        next_wake += std::time::Duration::from_secs(increment).into();
+                        next_wake += interval;
                         // If this isn't being scheduled this will purposely result in fast looping
                         // when it does. This will be insightful about the state of the thread and
                         // task scheduling.
@@ -351,17 +361,21 @@ impl Watchdog {
         }
     }
 
-    /// Warns every 10 seconds while an I/O request of kind `op` is blocked. If
-    /// `WATCHDOG_BACKTRACE_ENABLED` is set, also requests a backtrace after 5 minutes from a
-    /// short-lived thread named after the request (e.g. "fxfs-watchdog:Write-300s"), so that none
-    /// of the executor's threads stop.
+    /// Warns every `WATCHDOG_POLL_INTERVAL` while an I/O request of kind `op` is blocked. If
+    /// `WATCHDOG_BACKTRACE_ENABLED` is set, also requests a backtrace after
+    /// `WATCHDOG_BACKTRACE_TIMEOUT` from a short-lived thread named after the request
+    /// (`fxfs-watchdog:<op>-<secs>s`), so that none of the executor's threads stop.
     fn io(op: &'static str) -> Self {
-        Self::new(10, move |count| {
-            warn!("{op} I/O request blocked for {} seconds", count * 10);
-            #[cfg(all(target_os = "fuchsia", not(doc)))]
-            if count == 30 && WATCHDOG_BACKTRACE_ENABLED.load(Ordering::Relaxed) {
+        #[cfg(target_os = "fuchsia")]
+        const BACKTRACE_POLL_COUNT: u64 =
+            WATCHDOG_BACKTRACE_TIMEOUT.as_secs() / WATCHDOG_POLL_INTERVAL.as_secs();
+        Self::new(WATCHDOG_POLL_INTERVAL, move |count| {
+            let elapsed_secs = count * WATCHDOG_POLL_INTERVAL.as_secs();
+            warn!("{op} I/O request blocked for {elapsed_secs} seconds");
+            #[cfg(target_os = "fuchsia")]
+            if count == BACKTRACE_POLL_COUNT && WATCHDOG_BACKTRACE_ENABLED.load(Ordering::Acquire) {
                 let _ = std::thread::Builder::new()
-                    .name(format!("fxfs-watchdog:{op}-{}s", count * 10))
+                    .name(format!("fxfs-watchdog:{op}-{elapsed_secs}s"))
                     .spawn(::debug::backtrace_request_all_threads);
             }
         })
@@ -379,7 +393,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     ) -> Self {
         let encryption = if permanent_keys {
             Encryption::PermanentKeys
-        } else if owner.as_ref().as_ref().is_encrypted() {
+        } else if owner.store().is_encrypted() {
             Encryption::CachedKeys
         } else {
             Encryption::None
@@ -391,8 +405,12 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         &self.owner
     }
 
-    pub fn store(&self) -> &ObjectStore {
-        self.owner.as_ref().as_ref()
+    pub fn store(&self) -> &S::Store {
+        self.owner.store()
+    }
+
+    pub fn object_id(&self) -> u64 {
+        self.object_id
     }
 
     pub fn trace(&self) -> bool {
@@ -403,6 +421,80 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         !matches!(self.encryption, Encryption::None)
     }
 
+    pub async fn list_extended_attributes(&self) -> Result<Vec<Vec<u8>>, Error> {
+        let layer_set = self.store().tree().layer_set();
+        let mut merger = layer_set.merger();
+        // Seek to the first extended attribute key for this object.
+        let mut iter = merger
+            .query(Query::FullRange(&ObjectKey::extended_attribute(self.object_id(), Vec::new())))
+            .await?;
+        let mut out = Vec::new();
+        while let Some(item) = iter.get() {
+            // Skip deleted extended attributes.
+            if item.value != &ObjectValue::None {
+                match item.key {
+                    ObjectKey { object_id, data: ObjectKeyData::ExtendedAttribute { name } }
+                        if *object_id == self.object_id() =>
+                    {
+                        out.push(name.clone());
+                    }
+                    // Once we hit a record belonging to another object, or one that is not an
+                    // extended attribute key, we have reached the end of this object's extended
+                    // attributes. Subsequent objects' records will start with lower variants
+                    // (e.g. ObjectKeyData::Object) which trigger this break.
+                    _ => break,
+                }
+            }
+            iter.advance().await?;
+        }
+        Ok(out)
+    }
+
+    /// Looks up the extended attribute `name`, returning `None` if it doesn't exist. Values that
+    /// are too large to be stored inline are stored in an attribute (in the Fxfs sense), which the
+    /// caller has to read separately (e.g. with `read_attr`).
+    ///
+    /// This does not prevent TOCTOU races; the caller is responsible for holding appropriate locks
+    /// to ensure the extended attribute is not modified or removed after it has been queried.
+    pub async fn lookup_extended_attribute(
+        &self,
+        name: Vec<u8>,
+    ) -> Result<Option<ExtendedAttributeValue>, Error> {
+        let key = ObjectKey::extended_attribute(self.object_id(), name);
+        match self.store().tree().find_value(&key).await? {
+            None => Ok(None),
+            Some(ObjectValue::ExtendedAttribute(value)) => {
+                if let ExtendedAttributeValue::AttributeId(id) = &value {
+                    ensure!(id.is_xattr(), FxfsError::Inconsistent);
+                }
+                Ok(Some(value))
+            }
+            Some(_) => bail!(
+                anyhow!(FxfsError::Inconsistent)
+                    .context("lookup_extended_attribute: Expected ExtendedAttribute value")
+            ),
+        }
+    }
+
+    /// Looks up the values for the extended attribute `fio::SELINUX_CONTEXT_NAME`, returning it
+    /// if it is found inline. If it is not inline, it will request use of the
+    /// `get_extended_attributes` method. If the entry doesn't exist at all, returns None.
+    pub async fn get_inline_selinux_context(&self) -> Result<Option<fio::SelinuxContext>, Error> {
+        // This optimization is only useful as long as the attribute is smaller than inline sizes.
+        // Avoid reading the data out of the attributes.
+        const_assert!(fio::MAX_SELINUX_CONTEXT_ATTRIBUTE_LEN as usize <= MAX_INLINE_XATTR_SIZE);
+        Ok(self.lookup_extended_attribute(fio::SELINUX_CONTEXT_NAME.into()).await?.map(|value| {
+            match value {
+                ExtendedAttributeValue::Inline(value) => fio::SelinuxContext::Data(value),
+                ExtendedAttributeValue::AttributeId(_) => {
+                    fio::SelinuxContext::UseExtendedAttributes(fio::EmptyStruct {})
+                }
+            }
+        }))
+    }
+}
+
+impl<S: LocalHandleOwner> StoreObjectHandle<S> {
     /// Get the default set of transaction options for this object. This is mostly the overall
     /// default, modified by any [`HandleOptions`] held by this handle.
     pub fn default_transaction_options<'b>(&self) -> Options<'b> {
@@ -542,7 +634,12 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     false,
                 )
             }
-            None => (WriteOptions { flags, ..Default::default() }, !self.options.skip_checksums),
+            // Even if checksums aren't being stored in the extent records, they are still needed
+            // for the journal when barriers are disabled so that replay can detect torn writes.
+            None => (
+                WriteOptions { flags, ..Default::default() },
+                !self.options.skip_checksums || !store.filesystem().options().barriers_enabled,
+            ),
         };
 
         if compute_checksums {
@@ -577,13 +674,11 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             return Ok(());
         }
         let mut mutation = self.txn_get_object_mutation(transaction).await?;
-        if let ObjectValue::Object {
-            attributes: ObjectAttributes { project_id, allocated_size, .. },
-            ..
-        } = &mut mutation.item.value
-        {
+        if let ObjectValue::Object { ref mut attributes, .. } = mutation.item.value {
+            let old_attributes = attributes.clone();
             // The only way for these to fail are if the volume is inconsistent.
-            *allocated_size = allocated_size
+            attributes.allocated_size = attributes
+                .allocated_size
                 .checked_add(allocated)
                 .ok_or_else(|| anyhow!(FxfsError::Inconsistent).context("Allocated size overflow"))?
                 .checked_sub(deallocated)
@@ -591,16 +686,11 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     anyhow!(FxfsError::Inconsistent).context("Allocated size underflow")
                 })?;
 
-            if let Some(project_id) = project_id {
-                // The allocated and deallocated shouldn't exceed the max size of the file which is
-                // bound within i64.
-                let diff = i64::try_from(allocated).unwrap() - i64::try_from(deallocated).unwrap();
-                transaction.merge_bytes_and_nodes(
-                    self.store().store_object_id(),
-                    ObjectKey::project_usage(self.store().root_directory_object_id(), *project_id),
-                    BytesAndNodes { bytes: diff, nodes: 0 },
-                );
-            }
+            self.store().update_quota_usage(
+                transaction,
+                Some(&old_attributes),
+                Some(attributes),
+            )?;
         } else {
             // This can occur when the object mutation is created from an object in the tree which
             // was corrupt.
@@ -1374,7 +1464,16 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
-        self.multi_write_internal(transaction, attribute_id, key_id, encrypt, ranges, buf).await?;
+        self.multi_write_internal(
+            transaction,
+            attribute_id,
+            key_id,
+            encrypt,
+            /* preallocation: */ None,
+            ranges,
+            buf,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1389,6 +1488,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         attribute_id: AttributeId,
         key_id: Option<u64>,
         encrypt: bool,
+        mut preallocation: Option<&mut Preallocation>,
         ranges: &[Range<u64>],
         mut buf: MutableBufferRef<'_>,
     ) -> Result<(u64, u64), Error> {
@@ -1451,10 +1551,16 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let mut current_range = logical_ranges.next().unwrap().clone();
 
         while !buf.is_empty() {
-            let mut device_range = allocator
-                .allocate(transaction, store_id, buf.len() as u64)
-                .await
-                .context("allocation failed")?;
+            let mut device_range = if let Some(range) =
+                preallocation.as_mut().and_then(|h| h.take(transaction, buf.len() as u64))
+            {
+                range
+            } else {
+                allocator
+                    .allocate(transaction, store_id, buf.len() as u64)
+                    .await
+                    .context("allocation failed")?
+            };
             if trace {
                 info!(
                     store_id,
@@ -1540,7 +1646,16 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                             ),
                             ObjectValue::Extent(ExtentValue::new(
                                 device_offset,
-                                checksums.to_mode(),
+                                match checksums {
+                                    MaybeChecksums::Fletcher(sums) => {
+                                        if self.options.skip_checksums {
+                                            ExtentMode::Raw
+                                        } else {
+                                            ExtentMode::Cow(Checksums::fletcher(sums))
+                                        }
+                                    }
+                                    MaybeChecksums::None => ExtentMode::Raw,
+                                },
                                 key_id,
                             )),
                         ));
@@ -1588,16 +1703,36 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         ranges: &[Range<u64>],
         buf: MutableBufferRef<'_>,
     ) -> Result<(), Error> {
+        self.multi_write_with_preallocation(transaction, attribute_id, key_id, None, ranges, buf)
+            .await
+    }
+
+    /// Like [`Self::multi_write`], but first consumes space from `preallocation` (if present and
+    /// non-empty) before falling back to [`Allocator::allocate`].  Callers must only write to new
+    /// (previously unallocated) logical `ranges` while `preallocation` is alive so that nothing
+    /// taken from the hold can be deallocated before the hold is dropped.
+    pub async fn multi_write_with_preallocation(
+        &self,
+        transaction: &mut Transaction<'_>,
+        attribute_id: AttributeId,
+        key_id: Option<u64>,
+        preallocation: Option<&mut Preallocation>,
+        ranges: &[Range<u64>],
+        buf: MutableBufferRef<'_>,
+    ) -> Result<(), Error> {
+        let has_preallocation = preallocation.is_some();
         let (allocated, deallocated) = self
             .multi_write_internal(
                 transaction,
                 attribute_id,
                 key_id,
                 /* encrypt: */ true,
+                preallocation,
                 ranges,
                 buf,
             )
             .await?;
+        debug_assert!(!has_preallocation || deallocated == 0);
         if allocated == 0 && deallocated == 0 {
             return Ok(());
         }
@@ -1823,51 +1958,29 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     }
 
     /// Writes an attribute that should not already exist and therefore does not require trimming.
-    /// Breaks up the write into multiple transactions if `data.len()` is larger than
-    /// `WRITE_ATTR_BATCH_SIZE`. This always writes using a key wrapped with the volume data key.
+    /// This always writes using a key wrapped with the volume data key.
     ///
-    /// If the write spans multiple transactions, returns a `ScopeGuard` that **must** be defused
-    /// (via `scopeguard::ScopeGuard::into_inner`) inside `Transaction::commit_with_callback` when
-    /// committing the final transaction. If dropped without being defused, the guard queues an
-    /// attribute tombstone in the graveyard to clean up the partially written attribute.
+    /// If `data.len() <= WRITE_ATTR_BATCH_SIZE`, everything is added to `transaction` without
+    /// committing and returned to the caller.
+    ///
+    /// If `data.len() > WRITE_ATTR_BATCH_SIZE`, the write is split into multiple transactions:
+    /// - The first transaction adds the `AttributeKey::Attribute` entry and a graveyard entry,
+    ///   writes the first chunk, and commits.
+    /// - Intermediate transactions write subsequent chunks and commit via
+    ///   `CommittedTransaction::continue_transaction`.
+    /// - The final transaction writes the last chunk and removes the attribute from the graveyard,
+    ///   and is returned uncommitted to the caller.
+    ///
+    /// When split across multiple transactions, the returned transaction has an `on_abort`
+    /// callback set so that if it is dropped without committing, an attribute tombstone is
+    /// enqueued to the graveyard to clean up any already-committed extents.
     #[trace]
-    pub async fn write_new_attr(
+    pub async fn write_new_attr<'a>(
         &self,
-        transaction: &mut Transaction<'_>,
+        mut transaction: Transaction<'a>,
         attribute_id: AttributeId,
         data: &[u8],
-    ) -> Result<Option<scopeguard::ScopeGuard<(), impl FnOnce(()) + Send + use<S>>>, Error> {
-        self.write_new_attr_impl(
-            transaction,
-            attribute_id,
-            VOLUME_DATA_KEY_ID,
-            /* encrypt: */ true,
-            data,
-        )
-        .await
-    }
-
-    /// Writes a new attribute that has already been encrypted with `key_id`, without performing
-    /// encryption again. See `write_new_attr` for details on the returned `ScopeGuard`.
-    pub async fn write_new_attr_pre_encrypted(
-        &self,
-        transaction: &mut Transaction<'_>,
-        attribute_id: AttributeId,
-        key_id: u64,
-        data: &[u8],
-    ) -> Result<Option<scopeguard::ScopeGuard<(), impl FnOnce(()) + Send + use<S>>>, Error> {
-        self.write_new_attr_impl(transaction, attribute_id, key_id, /* encrypt: */ false, data)
-            .await
-    }
-
-    async fn write_new_attr_impl(
-        &self,
-        transaction: &mut Transaction<'_>,
-        attribute_id: AttributeId,
-        key_id: u64,
-        encrypt: bool,
-        data: &[u8],
-    ) -> Result<Option<scopeguard::ScopeGuard<(), impl FnOnce(()) + Send + use<S>>>, Error> {
+    ) -> Result<Transaction<'a>, Error> {
         transaction.add(
             self.store().store_object_id,
             Mutation::replace_or_insert_object(
@@ -1891,59 +2004,101 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             );
         }
         let mut start_offset = 0;
-        let mut graveyard_guard = None;
         for (i, chunk) in chunks.enumerate() {
-            let rounded_len = self.block_size().align_up(chunk.len() as u64).unwrap();
-            let mut buffer = self.store().device.allocate_buffer(rounded_len as usize).await;
-            let mut slice = buffer.as_mut_ptr_slice();
-            slice.subslice_mut(0..chunk.len()).copy_from_slice(chunk);
-            slice.subslice_mut(chunk.len()..slice.len()).fill(0);
-            let (allocated, deallocated) = self
-                .multi_write_internal(
-                    transaction,
+            start_offset += self
+                .write_new_attr_chunk(
+                    &mut transaction,
                     attribute_id,
-                    Some(key_id),
-                    encrypt,
-                    &[start_offset..start_offset + rounded_len],
-                    buffer.as_mut(),
+                    VOLUME_DATA_KEY_ID,
+                    /* encrypt: */ true,
+                    start_offset,
+                    chunk,
                 )
                 .await?;
-            if allocated != 0 || deallocated != 0 {
-                self.update_allocated_size(transaction, allocated, deallocated).await?;
-            }
-            start_offset += rounded_len;
             // Do not commit the last chunk.
             if i < num_chunks - 1 {
-                transaction
-                    .commit_and_continue(|| {
-                        if i == 0 {
-                            let owner = self.owner.clone();
-                            let object_id = self.object_id();
-                            graveyard_guard = Some(scopeguard::guard((), move |()| {
-                                let store = owner.as_ref().as_ref();
-                                store
-                                    .filesystem()
-                                    .ensure_local()
-                                    .graveyard()
-                                    .queue_tombstone_attribute(
-                                        store.store_object_id(),
-                                        object_id,
-                                        attribute_id,
-                                    );
-                            }));
-                        }
-                    })
-                    .await?;
+                let mut committed = transaction.commit().await?;
+                if i == 0 {
+                    let owner = self.owner.clone();
+                    let object_id = self.object_id();
+                    committed.on_abort(move || {
+                        let store = owner.store();
+                        store.filesystem().ensure_local().graveyard().queue_tombstone_attribute(
+                            store.store_object_id(),
+                            object_id,
+                            attribute_id,
+                        );
+                    });
+                }
+                transaction = committed.continue_transaction().await?;
             }
         }
         if num_chunks > 1 {
             self.store().remove_attribute_from_graveyard(
-                transaction,
+                &mut transaction,
                 self.object_id(),
                 attribute_id,
             );
         }
-        Ok(graveyard_guard)
+        Ok(transaction)
+    }
+
+    /// Writes a new attribute that fits within a single transaction
+    /// (`data.len() <= WRITE_ATTR_BATCH_SIZE`) into `transaction`.
+    ///
+    /// If `encrypt` is true, `data` is encrypted using `key_id`; otherwise `data` is written as-is
+    /// (for pre-encrypted data such as fscrypt symlinks).
+    pub async fn write_new_attr_in_txn(
+        &self,
+        transaction: &mut Transaction<'_>,
+        attribute_id: AttributeId,
+        data: &[u8],
+        key_id: u64,
+        encrypt: bool,
+    ) -> Result<(), Error> {
+        assert!(data.len() <= WRITE_ATTR_BATCH_SIZE);
+        transaction.add(
+            self.store().store_object_id,
+            Mutation::replace_or_insert_object(
+                ObjectKey::attribute(self.object_id(), attribute_id, AttributeKey::Attribute),
+                ObjectValue::attribute(data.len() as u64, false),
+            ),
+        );
+        if !data.is_empty() {
+            self.write_new_attr_chunk(transaction, attribute_id, key_id, encrypt, 0, data).await?;
+        }
+        Ok(())
+    }
+
+    async fn write_new_attr_chunk(
+        &self,
+        transaction: &mut Transaction<'_>,
+        attribute_id: AttributeId,
+        key_id: u64,
+        encrypt: bool,
+        start_offset: u64,
+        chunk: &[u8],
+    ) -> Result<u64, Error> {
+        let rounded_len = self.block_size().align_up(chunk.len() as u64).unwrap();
+        let mut buffer = self.store().device.allocate_buffer(rounded_len as usize).await;
+        let mut slice = buffer.as_mut_ptr_slice();
+        slice.subslice_mut(0..chunk.len()).copy_from_slice(chunk);
+        slice.subslice_mut(chunk.len()..slice.len()).fill(0);
+        let (allocated, deallocated) = self
+            .multi_write_internal(
+                transaction,
+                attribute_id,
+                Some(key_id),
+                encrypt,
+                /* preallocation: */ None,
+                &[start_offset..start_offset + rounded_len],
+                buffer.as_mut(),
+            )
+            .await?;
+        if allocated != 0 || deallocated != 0 {
+            self.update_allocated_size(transaction, allocated, deallocated).await?;
+        }
+        Ok(rounded_len)
     }
 
     /// Writes an entire attribute. Returns whether or not the attribute needs to continue being
@@ -2002,80 +2157,11 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         }
     }
 
-    pub async fn list_extended_attributes(&self) -> Result<Vec<Vec<u8>>, Error> {
-        let layer_set = self.store().tree().layer_set();
-        let mut merger = layer_set.merger();
-        // Seek to the first extended attribute key for this object.
-        let mut iter = merger
-            .query(Query::FullRange(&ObjectKey::extended_attribute(self.object_id(), Vec::new())))
-            .await?;
-        let mut out = Vec::new();
-        while let Some(item) = iter.get() {
-            // Skip deleted extended attributes.
-            if item.value != &ObjectValue::None {
-                match item.key {
-                    ObjectKey { object_id, data: ObjectKeyData::ExtendedAttribute { name } }
-                        if *object_id == self.object_id() =>
-                    {
-                        out.push(name.clone());
-                    }
-                    // Once we hit a record belonging to another object, or one that is not an
-                    // extended attribute key, we have reached the end of this object's extended
-                    // attributes. Subsequent objects' records will start with lower variants
-                    // (e.g. ObjectKeyData::Object) which trigger this break.
-                    _ => break,
-                }
-            }
-            iter.advance().await?;
-        }
-        Ok(out)
-    }
-
-    /// Looks up the values for the extended attribute `fio::SELINUX_CONTEXT_NAME`, returning it
-    /// if it is found inline. If it is not inline, it will request use of the
-    /// `get_extended_attributes` method. If the entry doesn't exist at all, returns None.
-    pub async fn get_inline_selinux_context(&self) -> Result<Option<fio::SelinuxContext>, Error> {
-        // This optimization is only useful as long as the attribute is smaller than inline sizes.
-        // Avoid reading the data out of the attributes.
-        const_assert!(fio::MAX_SELINUX_CONTEXT_ATTRIBUTE_LEN as usize <= MAX_INLINE_XATTR_SIZE);
-        self.store()
-            .tree()
-            .find_map(
-                &ObjectKey::extended_attribute(self.object_id(), fio::SELINUX_CONTEXT_NAME.into()),
-                |item| match item.value {
-                    ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(value)) => {
-                        Ok(fio::SelinuxContext::Data(value.clone()))
-                    }
-                    ObjectValue::ExtendedAttribute(ExtendedAttributeValue::AttributeId(_)) => {
-                        Ok(fio::SelinuxContext::UseExtendedAttributes(fio::EmptyStruct {}))
-                    }
-                    _ => Err(anyhow!(FxfsError::Inconsistent).context(
-                        "get_inline_extended_attribute: Expected ExtendedAttribute value",
-                    )),
-                },
-            )
-            .await?
-            .transpose()
-    }
-
     pub async fn get_extended_attribute(&self, name: Vec<u8>) -> Result<Vec<u8>, Error> {
-        let value = self
-            .store()
-            .tree()
-            .find_value(&ObjectKey::extended_attribute(self.object_id(), name))
-            .await?
-            .ok_or(FxfsError::NotFound)?;
-        match value {
-            ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(value)) => Ok(value),
-            ObjectValue::ExtendedAttribute(ExtendedAttributeValue::AttributeId(id)) => {
-                ensure!(id.is_xattr(), FxfsError::Inconsistent);
+        match self.lookup_extended_attribute(name).await?.ok_or(FxfsError::NotFound)? {
+            ExtendedAttributeValue::Inline(value) => Ok(value),
+            ExtendedAttributeValue::AttributeId(id) => {
                 Ok(self.read_attr(id).await?.ok_or(FxfsError::Inconsistent)?.into_vec())
-            }
-            _ => {
-                bail!(
-                    anyhow!(FxfsError::Inconsistent)
-                        .context("get_extended_attribute: Expected ExtendedAttribute value")
-                )
             }
         }
     }
@@ -2106,34 +2192,13 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         ensure!(name.len() <= MAX_XATTR_NAME_SIZE, FxfsError::TooBig);
         ensure!(value.len() <= MAX_XATTR_VALUE_SIZE, FxfsError::TooBig);
         let tree = self.store().tree();
-        let object_key = ObjectKey::extended_attribute(self.object_id(), name);
+        let object_key = ObjectKey::extended_attribute(self.object_id(), name.clone());
 
-        let existing_attribute_id = {
-            let find_result = tree
-                .find_map(&object_key, |item| match item.value {
-                    ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(..)) => Ok(None),
-                    ObjectValue::ExtendedAttribute(ExtendedAttributeValue::AttributeId(id)) => {
-                        ensure!(id.is_xattr(), FxfsError::Inconsistent);
-                        Ok(Some(*id))
-                    }
-                    _ => Err(anyhow!(FxfsError::Inconsistent)
-                        .context("expected extended attribute value")),
-                })
-                .await?;
-            let (found, existing_attribute_id) = match find_result {
-                Some(id) => (true, id?),
-                None => (false, None),
-            };
-            match mode {
-                SetExtendedAttributeMode::Create if found => {
-                    bail!(FxfsError::AlreadyExists)
-                }
-                SetExtendedAttributeMode::Replace if !found => {
-                    bail!(FxfsError::NotFound)
-                }
-                _ => (),
-            }
-            existing_attribute_id
+        let existing_attribute_id = match (mode, self.lookup_extended_attribute(name).await?) {
+            (SetExtendedAttributeMode::Create, Some(_)) => bail!(FxfsError::AlreadyExists),
+            (SetExtendedAttributeMode::Replace, None) => bail!(FxfsError::NotFound),
+            (_, Some(ExtendedAttributeValue::AttributeId(id))) => Some(id),
+            (_, Some(ExtendedAttributeValue::Inline(_)) | None) => None,
         };
 
         if let Some(attribute_id) = existing_attribute_id {
@@ -2215,8 +2280,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
     pub async fn remove_extended_attribute(&self, name: Vec<u8>) -> Result<(), Error> {
         let store = self.store();
-        let tree = store.tree();
-        let object_key = ObjectKey::extended_attribute(self.object_id(), name);
+        let object_key = ObjectKey::extended_attribute(self.object_id(), name.clone());
 
         // NB: The API says we have to return an error if the attribute doesn't exist, so we have
         // to look it up first to make sure we have a record of it before we delete it. Make sure
@@ -2225,18 +2289,11 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         let keys = lock_keys![LockKey::object(store.store_object_id(), self.object_id())];
         let mut transaction = store.new_transaction(keys, Options::default()).await?;
 
-        let attribute_to_delete = tree
-            .find_map(&object_key, |item| match item.value {
-                ObjectValue::ExtendedAttribute(ExtendedAttributeValue::AttributeId(id)) => {
-                    ensure!(id.is_xattr(), FxfsError::Inconsistent);
-                    Ok(Some(*id))
-                }
-                ObjectValue::ExtendedAttribute(ExtendedAttributeValue::Inline(..)) => Ok(None),
-                _ => Err(anyhow!(FxfsError::Inconsistent)
-                    .context("remove_extended_attribute: Expected ExtendedAttribute value")),
-            })
-            .await?
-            .ok_or(FxfsError::NotFound)??;
+        let attribute_to_delete =
+            match self.lookup_extended_attribute(name).await?.ok_or(FxfsError::NotFound)? {
+                ExtendedAttributeValue::AttributeId(id) => Some(id),
+                ExtendedAttributeValue::Inline(_) => None,
+            };
 
         transaction.add(
             store.store_object_id(),
@@ -2281,7 +2338,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
             let owner = self.owner.clone();
             let object_id = self.object_id;
             Some(async move {
-                let store = owner.as_ref().as_ref();
+                let store = owner.store();
                 if let Some(crypt) = store.crypt() {
                     let _ = store
                         .key_manager
@@ -2310,23 +2367,10 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
     /// Returns the link of a symlink object.
     pub async fn read_symlink(&self) -> Result<Vec<u8>, Error> {
-        let store = self.store();
-        match store.tree.find(&ObjectKey::object(self.object_id)).await? {
-            None | Some(ObjectItem { value: ObjectValue::None, .. }) => bail!(FxfsError::NotFound),
-            Some(ObjectItem {
-                value: ObjectValue::Object { kind: ObjectKind::EncryptedSymlink { link, .. }, .. },
-                ..
-            }) => store.read_encrypted_symlink(self.object_id, link.into_vec()).await,
-            Some(ObjectItem {
-                value: ObjectValue::Object { kind: ObjectKind::Symlink { link, .. }, .. },
-                ..
-            }) => Ok(link.into_vec()),
-            Some(ObjectItem {
-                value: ObjectValue::Object { kind: ObjectKind::NonInlineSymlink { .. }, .. },
-                ..
-            }) => self.read_non_inline_symlink().await,
-            Some(item) => Err(anyhow!(FxfsError::Inconsistent)
-                .context(format!("Unexpected item in symlink lookup: {item:?}"))),
+        match resolve_symlink(self.store(), self.object_id).await? {
+            SymlinkTarget::Inline(link) => Ok(link),
+            SymlinkTarget::Encrypted(link) => self.read_encrypted_symlink(link).await,
+            SymlinkTarget::NonInline => self.read_non_inline_symlink().await,
         }
     }
 
@@ -2383,7 +2427,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 impl<S: HandleOwner> Drop for StoreObjectHandle<S> {
     fn drop(&mut self) {
         if self.is_encrypted() {
-            let _ = self.store().key_manager.remove(self.object_id);
+            self.store().on_encrypted_handle_drop(self.object_id);
         }
     }
 }
@@ -2398,21 +2442,27 @@ pub struct NeedsTrim(pub bool);
 mod tests {
     use super::{ChecksumRangeChunk, OverwriteBitmaps};
     use crate::errors::FxfsError;
-    use crate::filesystem::{FxFilesystem, OpenFxFilesystem};
+    use crate::filesystem::{FxFilesystem, FxFilesystemBuilder, OpenFxFilesystem};
+    use crate::lsm_tree::types::Item;
     use crate::object_handle::{ObjectHandle, WriteObjectHandle};
     use crate::object_store::data_object_handle::WRITE_ATTR_BATCH_SIZE;
-    use crate::object_store::transaction::{Mutation, Options, lock_keys};
+    use crate::object_store::extent_record::{ExtentMode, ExtentValue};
+    use crate::object_store::object_record::ObjectKeyData;
+    use crate::object_store::transaction::{Mutation, ObjectStoreMutation, Options, lock_keys};
     use crate::object_store::{
-        AttributeId, AttributeKey, DataObjectHandle, Directory, HandleOptions, LockKey, ObjectKey,
-        ObjectStore, ObjectValue, SetExtendedAttributeMode, StoreObjectHandle,
+        AttributeId, AttributeKey, DataObjectHandle, Directory, ExtendedAttributeValue,
+        HandleOptions, LockKey, ObjectKey, ObjectStore, ObjectValue, SetExtendedAttributeMode,
+        StoreObjectHandle,
     };
     use bit_vec::BitVec;
+    use fidl_fuchsia_io as fio;
     use fuchsia_async as fasync;
     use futures::{TryStreamExt, join};
     use std::sync::Arc;
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
     use storage_units::BlockSize;
+    use test_case::test_case;
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
     const TEST_OBJECT_NAME: &str = "foo";
@@ -2702,8 +2752,20 @@ mod tests {
                 ObjectValue::extended_attribute(AttributeId::DATA),
             ),
         );
+        transaction.add(
+            store.store_object_id(),
+            Mutation::replace_or_insert_object(
+                ObjectKey::extended_attribute(object.object_id(), fio::SELINUX_CONTEXT_NAME.into()),
+                ObjectValue::extended_attribute(AttributeId::DATA),
+            ),
+        );
         transaction.commit().await.unwrap();
 
+        is_error(
+            object.lookup_extended_attribute(b"bad_attr".to_vec()).await.unwrap_err(),
+            FxfsError::Inconsistent,
+        );
+        is_error(object.get_inline_selinux_context().await.unwrap_err(), FxfsError::Inconsistent);
         is_error(
             object.get_extended_attribute(b"bad_attr".to_vec()).await.unwrap_err(),
             FxfsError::Inconsistent,
@@ -2782,6 +2844,40 @@ mod tests {
             object.get_extended_attribute(test_attr.name()).await.unwrap_err(),
             FxfsError::NotFound,
         );
+
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn lookup_extended_attribute() {
+        let (fs, object) = test_filesystem_and_empty_object().await;
+
+        let inline_attr = TestAttr::new(b"user.inline", b"foo");
+        let large_attr = TestAttr::new(b"user.large", vec![3u8; 300]);
+        for attr in [&inline_attr, &large_attr] {
+            object
+                .set_extended_attribute(attr.name(), attr.value(), SetExtendedAttributeMode::Set)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(object.lookup_extended_attribute(b"user.missing".to_vec()).await.unwrap(), None);
+        assert_eq!(
+            object.lookup_extended_attribute(inline_attr.name()).await.unwrap(),
+            Some(ExtendedAttributeValue::Inline(inline_attr.value()))
+        );
+        let Some(ExtendedAttributeValue::AttributeId(id)) =
+            object.lookup_extended_attribute(large_attr.name()).await.unwrap()
+        else {
+            panic!("expected the large value to be stored in an attribute");
+        };
+        assert_eq!(
+            object.read_attr(id).await.unwrap().expect("read_attr returned none").into_vec(),
+            large_attr.value()
+        );
+
+        object.remove_extended_attribute(inline_attr.name()).await.unwrap();
+        assert_eq!(object.lookup_extended_attribute(inline_attr.name()).await.unwrap(), None);
 
         fs.close().await.expect("close failed");
     }
@@ -3181,19 +3277,12 @@ mod tests {
     async fn write_new_attr_multiple_txns() {
         let (fs, object) = test_filesystem_and_empty_object().await;
         let merkle_tree = vec![1; 3 * WRITE_ATTR_BATCH_SIZE];
-        let mut transaction = (*object).new_transaction(AttributeId::TEST_ID).await.unwrap();
-        let graveyard_guard = object
-            .write_new_attr(&mut transaction, AttributeId::TEST_ID, &merkle_tree)
+        let transaction = (*object).new_transaction(AttributeId::TEST_ID).await.unwrap();
+        let transaction = object
+            .write_new_attr(transaction, AttributeId::TEST_ID, &merkle_tree)
             .await
             .expect("failed to write merkle attribute");
-        transaction
-            .commit_with_callback(|_| {
-                if let Some(guard) = graveyard_guard {
-                    scopeguard::ScopeGuard::into_inner(guard);
-                }
-            })
-            .await
-            .unwrap();
+        transaction.commit().await.unwrap();
         assert_eq!(
             object.read_attr(AttributeId::TEST_ID).await.expect("read_attr failed"),
             Some(merkle_tree.into())
@@ -3218,7 +3307,7 @@ mod tests {
         }
 
         {
-            let _watchdog = Watchdog::new(10, move |count| {
+            let _watchdog = Watchdog::new(std::time::Duration::from_secs(10), move |count| {
                 sender.send(count).expect("Sending value");
             });
 
@@ -3442,21 +3531,165 @@ mod tests {
     }
 
     #[fuchsia::test]
-    async fn test_write_new_attr_queues_tombstone_on_partial_commit_error() {
-        use futures::FutureExt;
-        use std::sync::atomic::{AtomicBool, Ordering};
+    async fn test_multi_write_with_preallocation_is_contiguous_and_falls_back() {
+        use crate::lsm_tree::types::LayerIterator as _;
 
-        let pause_after_commit = Arc::new(AtomicBool::new(false));
-        let pause_clone = pause_after_commit.clone();
-        let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
-        let fs = crate::filesystem::FxFilesystemBuilder::new()
-            .post_commit_hook(move || {
-                if pause_clone.load(Ordering::SeqCst) {
-                    std::future::pending().boxed()
-                } else {
-                    futures::future::ready(()).boxed()
-                }
+        let (fs, object) = test_filesystem_and_empty_object().await;
+        let store_id = object.store().store_object_id();
+        let bs = fs.block_size().get();
+
+        // Preallocate 5 blocks, then perform three 2-block writes (total 6 blocks): the first two
+        // writes come out of the preallocation and the third write tears across the boundary (its
+        // first block consumes the last preallocated block contiguously and its second block falls
+        // back to regular allocation).
+        let mut hold = fs.allocator().preallocate(store_id, 5 * bs).await.expect("hold failed");
+        assert_eq!(hold.remaining(), 5 * bs);
+
+        for i in 0..3u64 {
+            let mut buf = object.allocate_buffer((2 * bs) as usize).await;
+            buf.fill((i as u8) + 1);
+            let mut txn = object.new_transaction().await.expect("new_txn");
+            let range = (2 * i * bs)..(2 * (i + 1) * bs);
+            object
+                .multi_write_with_preallocation(
+                    &mut txn,
+                    AttributeId::DATA,
+                    Some(&mut hold),
+                    std::slice::from_ref(&range),
+                    buf.as_mut(),
+                )
+                .await
+                .expect("multi_write_with_preallocation");
+            object.txn_update_size(&mut txn, range.end).await.expect("update_size");
+            txn.commit().await.expect("commit");
+        }
+        assert!(hold.is_empty());
+        std::mem::drop(hold);
+
+        let layer_set = object.store().tree().layer_set();
+        let mut merger = layer_set.merger();
+        let mut iter = merger
+            .query(crate::lsm_tree::Query::FullRange(&ObjectKey::attribute(
+                object.object_id(),
+                AttributeId::DATA,
+                AttributeKey::Extent(crate::object_store::Extent::search_key_from_offset(0)),
+            )))
+            .await
+            .expect("query");
+        let mut extents = Vec::new();
+        while let Some(item) = iter.get() {
+            if item.key.object_id != object.object_id() {
+                break;
+            }
+            if let (
+                ObjectKeyData::Attribute(AttributeId::DATA, AttributeKey::Extent(ext)),
+                ObjectValue::Extent(ExtentValue::Some { device_offset, .. }),
+            ) = (&item.key.data, item.value)
+            {
+                extents.push((ext.0.clone(), *device_offset));
+            }
+            iter.advance().await.expect("advance");
+        }
+        assert_eq!(extents.len(), 4, "unexpected extents: {extents:?}");
+        assert_eq!(extents[0].0, 0..2 * bs);
+        assert_eq!(extents[1], (2 * bs..4 * bs, extents[0].1 + 2 * bs));
+        assert_eq!(extents[2], (4 * bs..5 * bs, extents[0].1 + 4 * bs));
+        assert_eq!(extents[3].0, 5 * bs..6 * bs);
+
+        let mut read_buf = object.allocate_buffer((6 * bs) as usize).await;
+        assert_eq!(object.read_aligned(0, read_buf.as_mut()).await.unwrap(), (6 * bs) as usize);
+        let read_vec = read_buf.as_ptr_slice().to_vec();
+        for i in 0..3usize {
+            let slice = &read_vec[i * (2 * bs as usize)..(i + 1) * (2 * bs as usize)];
+            assert!(slice.iter().all(|&b| b == (i as u8) + 1));
+        }
+
+        crate::fsck::fsck(fs.clone()).await.expect("fsck");
+        fs.close().await.expect("close");
+    }
+
+    #[test_case(false; "barriers disabled")]
+    #[test_case(true; "barriers enabled")]
+    #[fuchsia::test]
+    async fn test_skip_checksums_still_journals_checksums(barriers_enabled: bool) {
+        let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
+        let fs = FxFilesystemBuilder::new()
+            .barriers_enabled(barriers_enabled)
+            .format(device)
+            .await
+            .expect("format failed");
+        let store = fs.root_store();
+        let mut transaction = store
+            .new_transaction(
+                lock_keys![LockKey::object(
+                    store.store_object_id(),
+                    store.root_directory_object_id()
+                )],
+                Options::default(),
+            )
+            .await
+            .expect("new_transaction failed");
+        let object = ObjectStore::create_object(
+            &store,
+            &mut transaction,
+            HandleOptions { skip_checksums: true, ..Default::default() },
+            None,
+        )
+        .await
+        .expect("create_object failed");
+        transaction.commit().await.expect("commit failed");
+
+        let block_size = fs.block_size().get();
+        let write_len = 2 * block_size;
+        let mut buf = object.allocate_buffer(write_len as usize).await;
+        buf.fill(0x11);
+        let mut transaction = object.new_transaction().await.expect("new_transaction failed");
+        object
+            .multi_write(&mut transaction, AttributeId::DATA, &[0..write_len], buf.as_mut())
+            .await
+            .expect("multi_write failed");
+
+        // The extent record should never hold checksums...
+        let modes: Vec<_> = transaction
+            .mutations()
+            .iter()
+            .filter_map(|m| match &m.mutation {
+                Mutation::ObjectStore(ObjectStoreMutation {
+                    item:
+                        Item {
+                            key:
+                                ObjectKey {
+                                    data: ObjectKeyData::Attribute(_, AttributeKey::Extent(_)),
+                                    ..
+                                },
+                            value: ObjectValue::Extent(ExtentValue::Some { mode, .. }),
+                            ..
+                        },
+                    ..
+                }) => Some(mode.clone()),
+                _ => None,
             })
+            .collect();
+        assert_eq!(modes, [ExtentMode::Raw]);
+
+        // ...but without barriers, replay relies on journal checksums to detect torn writes.
+        let journaled_blocks: usize =
+            transaction.checksums().iter().map(|(_, _, checksums, _)| checksums.len()).sum();
+        assert_eq!(journaled_blocks, if barriers_enabled { 0 } else { 2 });
+
+        transaction.commit().await.expect("commit failed");
+        fs.close().await.expect("close failed");
+    }
+
+    #[fuchsia::test]
+    async fn test_write_new_attr_queues_tombstone_on_partial_commit_error() {
+        use crate::hooks::Hooks;
+
+        let fs;
+        let (mut hooks, fs_hooks) = Hooks::new();
+        let device = DeviceHolder::new(FakeDevice::new(16384, TEST_DEVICE_BLOCK_SIZE));
+        fs = crate::filesystem::FxFilesystemBuilder::new()
+            .hooks(fs_hooks)
             .format(device)
             .await
             .expect("format failed");
@@ -3492,20 +3725,18 @@ mod tests {
         };
 
         let attr_id = AttributeId(64);
-        let attr_data = vec![0xABu8; 2 * WRITE_ATTR_BATCH_SIZE];
+        let attr_data = vec![0xABu8; 3 * WRITE_ATTR_BATCH_SIZE];
 
-        // 1. If `write_new_attr` is cancelled (dropped) while suspended in `commit_and_continue`
-        //    before Batch 0 actually commits, it must not queue a tombstone for the uncommitted
-        //    graveyard entry.
+        // 1. If `write_new_attr` is cancelled (dropped) while suspended in `commit` before Batch 0
+        //    actually commits, it must not queue a tombstone for the uncommitted graveyard entry.
         {
-            let mut transaction = file.new_transaction().await.expect("new_transaction");
+            let transaction = file.new_transaction().await.expect("new_transaction");
             let commit_guard = fs.lock_commits().await;
             {
                 let mut write_fut =
-                    std::pin::pin!(file.write_new_attr(&mut transaction, attr_id, &attr_data));
+                    std::pin::pin!(file.write_new_attr(transaction, attr_id, &attr_data));
                 assert!(futures::poll!(write_fut.as_mut()).is_pending());
             }
-            drop(transaction);
             drop(commit_guard);
             fs.graveyard().flush().await;
             assert!(file.read_attr(attr_id).await.expect("read_attr").is_none());
@@ -3513,19 +3744,17 @@ mod tests {
             assert_eq!(file.store().graveyard_count(), 0);
         }
 
-        // 2. If `write_new_attr` is cancelled (dropped) while suspended in `commit_and_continue`
-        //    after Batch 0 has committed, the graveyard guard armed in the commit callback must
-        //    queue a tombstone on drop.
+        // 2. If `write_new_attr` is cancelled (dropped) after Batch 0 has committed (while
+        //    suspended before Batch 1 commits), the abort callback registered on the committed
+        //    transaction must queue a tombstone on drop.
         {
-            let mut transaction = file.new_transaction().await.expect("new_transaction");
-            pause_after_commit.store(true, Ordering::SeqCst);
             {
+                let _guard = crate::testing::block_nth_commit(&mut hooks, &fs, 2);
+                let transaction = file.new_transaction().await.expect("new_transaction");
                 let mut write_fut =
-                    std::pin::pin!(file.write_new_attr(&mut transaction, attr_id, &attr_data));
+                    std::pin::pin!(file.write_new_attr(transaction, attr_id, &attr_data));
                 assert!(futures::poll!(write_fut.as_mut()).is_pending());
             }
-            drop(transaction);
-            pause_after_commit.store(false, Ordering::SeqCst);
             assert_eq!(
                 file.get_properties().await.unwrap().allocated_size,
                 WRITE_ATTR_BATCH_SIZE as u64
@@ -3539,24 +3768,23 @@ mod tests {
             assert_eq!(file.store().graveyard_count(), 0);
         }
 
-        // 3. If `commit_and_continue` returns an error after Batch 0 commits, the graveyard guard
+        // 3. If `continue_transaction` returns an error after Batch 0 commits, the abort callback
         //    must also queue a tombstone for the partially written attribute.
-        let mut transaction = file.new_transaction().await.expect("new_transaction");
+        let transaction = file.new_transaction().await.expect("new_transaction");
 
         // Leave WRITE_ATTR_BATCH_SIZE unreserved in the allocator: enough for Batch 0's data
-        // extent in `multi_write`, leaving 0 B when `commit_and_continue()` tries to top up
+        // extent in `multi_write`, leaving 0 B when `continue_transaction()` tries to top up
         // `transaction`'s reservation for Batch 1.
         let held = fs
             .allocator()
             .reserve_with(None, |limit| limit.saturating_sub(WRITE_ATTR_BATCH_SIZE as u64));
 
-        let is_err = file.write_new_attr(&mut transaction, attr_id, &attr_data).await;
+        let is_err = file.write_new_attr(transaction, attr_id, &attr_data).await;
         assert!(
             matches!(&is_err, Err(e) if FxfsError::NoSpace.matches(e)),
             "Expected NoSpace, got: {:?}",
             is_err.err()
         );
-        drop(transaction);
         drop(held);
 
         // Flushing the graveyard must process the queued attribute tombstone and remove the
@@ -3569,27 +3797,26 @@ mod tests {
         assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
         assert_eq!(file.store().graveyard_count(), 0);
 
-        // 4. If `write_new_attr` succeeds for a multi-batch write, dropping the returned guard
-        //    (and transaction) without defusing it inside `commit_with_callback` must queue a
+        // 4. If `write_new_attr` succeeds for a multi-batch write, dropping the returned
+        //    transaction without committing it must invoke its abort callback and queue a
         //    tombstone for cleanup.
         {
-            let mut transaction = file.new_transaction().await.expect("new_transaction");
-            let graveyard_guard = file
-                .write_new_attr(&mut transaction, attr_id, &attr_data)
+            let transaction = file.new_transaction().await.expect("new_transaction");
+            let transaction = file
+                .write_new_attr(transaction, attr_id, &attr_data)
                 .await
                 .expect("write_new_attr should succeed");
-            assert!(graveyard_guard.is_some());
-            drop(graveyard_guard);
             drop(transaction);
             fs.graveyard().flush().await;
             assert!(
                 file.read_attr(attr_id).await.expect("read_attr").is_none(),
-                "Partially written attribute should be tombstoned when commit guard is dropped"
+                "Partially written attribute should be tombstoned when transaction is dropped"
             );
             assert_eq!(file.get_properties().await.unwrap().allocated_size, 0);
             assert_eq!(file.store().graveyard_count(), 0);
         }
 
+        drop(hooks);
         fs.close().await.expect("close failed");
     }
 }

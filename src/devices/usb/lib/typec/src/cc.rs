@@ -272,10 +272,6 @@ impl CcStatus {
 
     /// Returns `true` if both CC pins sense `SRC.Ra`, which enters `AttachWait.SRC` without a
     /// path to `Attached.SRC` (R2.5 §4.5.2.2.7.2).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by Machine::transition once wired to the async runner")
-    )]
     pub(crate) const fn is_ra_ra(self) -> bool {
         !self.looking4connection
             && matches!((self.cc1, self.cc2), (CcPinState::SrcRa, CcPinState::SrcRa))
@@ -284,10 +280,6 @@ impl CcStatus {
     /// Returns `true` if `self` and `other` resolve to the same [`PowerRole`] and the exact same
     /// set of CC signal wires (`CC1`, `CC2`, or both for [`Accessory::DebugAccessorySnk`]) remain
     /// connected across both snapshots.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by Machine::transition once wired to the async runner")
-    )]
     pub(crate) const fn shares_connected_cc_pin(self, other: Self) -> bool {
         matches!(
             (self.power_role(), other.power_role()),
@@ -302,10 +294,6 @@ impl CcStatus {
     ///
     /// Without VCONN, only the connected CC pin from `committed` is monitored; terminations on the
     /// unmonitored pin or `SRC.Ra` on the monitored pin do not detach VBUS.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "called by Machine::transition once wired to the async runner")
-    )]
     pub(crate) const fn keeps_attached_source(self, committed: Self) -> bool {
         let monitored = match (committed.cc1, committed.cc2) {
             (CcPinState::SrcRd, CcPinState::Open | CcPinState::SrcRa) => self.cc1,

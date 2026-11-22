@@ -58,7 +58,13 @@ class FakeProviderV2 : public fidl::Server<fuchsia_tracing_provider::ProviderV2>
     }
   }
 
+  // Asks trace_manager to save rolling buffer |wrapped_count|. If that is the buffer being
+  // written, first switches to the other rolling buffer, as trace-engine does. Other values
+  // (stale or invalid requests) are sent without changing the buffer.
   void SendOnSaveBuffer(uint32_t wrapped_count, uint64_t durable_data_end);
+  // Appends blob records totaling at least |num_bytes| to the buffer the provider is writing to:
+  // the only buffer in oneshot mode, the current rolling buffer otherwise.
+  void WriteBlobRecords(size_t num_bytes);
   void SendOnAlert(const std::string& alert_name);
   void SendLateStopReply();
   void SetBinding(fidl::ServerBindingRef<fuchsia_tracing_provider::ProviderV2> binding) {
@@ -93,6 +99,12 @@ class FakeProviderV2 : public fidl::Server<fuchsia_tracing_provider::ProviderV2>
   void ResetBufferPointers();
   void InitBufferHeader();
   void UpdateBufferHeaderAfterStopped();
+  // Starts writing to the other rolling buffer, leaving the current one ready to be saved.
+  void SwitchRollingBuffer();
+  void WriteWrappedCountToHeader();
+  // The VMO offset of the buffer records are being written to: the only buffer in oneshot mode,
+  // the current rolling buffer otherwise.
+  size_t CurrentBufferOffset() const;
   void WriteInitRecord();
   void WriteRecordToBuffer(const uint8_t* data, size_t size);
   void WriteZeroLengthRecord(size_t offset);
@@ -110,7 +122,11 @@ class FakeProviderV2 : public fidl::Server<fuchsia_tracing_provider::ProviderV2>
   size_t total_buffer_size_ = 0;
   size_t durable_buffer_size_ = 0;
   size_t rolling_buffer_size_ = 0;
+  // The write offset within the current buffer.
   size_t buffer_next_ = 0;
+  // The number of times the provider has switched rolling buffers; its low bit selects the
+  // current one.
+  uint32_t wrapped_count_ = 0;
 
   int initialize_count_ = 0;
   int start_count_ = 0;

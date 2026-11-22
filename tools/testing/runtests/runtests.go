@@ -6,6 +6,8 @@
 package runtests
 
 import (
+	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +26,14 @@ const (
 
 	// TestOutputFilename is the default output file name for a test.
 	TestOutputFilename = "stdout-and-stderr.txt"
+
+	// MultipliedShardPrefix is the prefix added to the names of shards that
+	// run multiplied tests.
+	MultipliedShardPrefix = "multiplied:"
+
+	// MultipliedRunTagKey is the test tag key attached by testrunner to
+	// multiplied test runs.
+	MultipliedRunTagKey = "is_multiplied_run"
 )
 
 // TestStatus is the exit status of a test.
@@ -49,12 +59,71 @@ const (
 
 	// TestExonerated represents an exonerated test.
 	TestExonerated TestStatus = "EXONERATED"
+
+	// TestPrecluded represents a test whose execution was precluded by a
+	// higher-level failure (e.g. fixture setup failure or shard timeout).
+	TestPrecluded TestStatus = "PRECLUDED"
 )
 
 // IsFailure returns whether a test result corresponds to any failure condition
 // (failure, timeout, etc.).
 func IsFailure(tr TestStatus) bool {
-	return tr != TestSuccess && tr != TestSkipped
+	return tr != TestSuccess && tr != TestSkipped && tr != TestPrecluded
+}
+
+// FailureCategory classifies who owns investigating a shard-level failure mode
+// and whether it should fail presubmit vs. surface as an infra failure.
+type FailureCategory string
+
+const (
+	CategoryInfra         FailureCategory = "infra"
+	CategoryInfraOrSystem FailureCategory = "infra_or_system"
+	CategorySystemOrTest  FailureCategory = "system_or_test"
+)
+
+// FailureModeResult indicates whether a tefmocheck failure mode was fatal to
+// the shard, observed as a flake, or passed without any detected failure modes.
+type FailureModeResult string
+
+const (
+	FailureModePass  FailureModeResult = "PASS"
+	FailureModeFail  FailureModeResult = "FAIL"
+	FailureModeFlaky FailureModeResult = "FLAKY"
+)
+
+// InfraDomain identifies the sub-system or layer responsible for an infrastructure failure mode.
+type InfraDomain string
+
+const (
+	InfraDomainTools       InfraDomain = "tools"
+	InfraDomainEnvironment InfraDomain = "environment"
+)
+
+// InfraDetails provides infrastructure-specific metadata when a failure mode's
+// effective category is CategoryInfra.
+type InfraDetails struct {
+	Domain InfraDomain `json:"domain,omitempty"`
+}
+
+// CheckFailure describes a single matched tefmocheck check on a shard.
+type CheckFailure struct {
+	Name           string            `json:"name"`
+	Result         FailureModeResult `json:"result"`
+	FailureMessage string            `json:"failure_message,omitempty"`
+	OutputFiles    []string          `json:"output_files,omitempty"`
+	Category       FailureCategory   `json:"category,omitempty"`
+	Infra          *InfraDetails     `json:"infra,omitempty"`
+}
+
+// FailureModeSummary aggregates shard-level failure modes detected by
+// tefmocheck so recipes can classify task failures without parsing synthetic
+// test entries out of Tests.
+type FailureModeSummary struct {
+	Name     string            `json:"name,omitempty"`
+	Category FailureCategory   `json:"category,omitempty"`
+	Result   FailureModeResult `json:"result"`
+	Infra    *InfraDetails     `json:"infra,omitempty"`
+	Failures []CheckFailure    `json:"failures"`
 }
 
 // TestSummary is a summary of a suite of test runs. It represents the output
@@ -66,6 +135,14 @@ type TestSummary struct {
 	// Outputs gives the suite-wide outputs, mapping canonical name of the
 	// output to its path.
 	Outputs map[string]string `json:"outputs,omitempty"`
+	// ExonerationError records any error encountered while loading the
+	// stability exoneration config or querying LUCI Analysis when stability
+	// exoneration fails open.
+	ExonerationError string `json:"exoneration_error,omitempty"`
+
+	// FailureMode summarizes shard-level failure modes detected by tefmocheck,
+	// or is nil when no non-exoneration failure mode matched.
+	FailureMode *FailureModeSummary `json:"failure_mode,omitempty"`
 }
 
 // DataSink is a data sink exported by the test.
@@ -171,6 +248,9 @@ type TestResult struct {
 
 	// ExitCode is the process exit code of the test binary.
 	ExitCode *int `json:"exit_code,omitempty"`
+
+	// Runner is the test's runner, if known.
+	Runner string `json:"runner,omitempty"`
 }
 
 // FailureReasonError represents a problem that caused a test to fail, such as a crash
@@ -229,4 +309,78 @@ type TestCaseResult struct {
 	OutputDir string `json:"output_dir,omitempty"`
 	// Tags contain test case metadata.
 	Tags []build.TestTag `json:"tags"`
+}
+
+const (
+	FormatFTF        = "FTF"
+	FormatGoogleTest = "GoogleTest"
+	FormatRust       = "Rust"
+	FormatGo         = "Go"
+)
+
+var runnerFamilies = []struct {
+	prefix string
+	format string
+}{
+	{"gtest_", FormatGoogleTest},
+	{"gunit_", FormatGoogleTest},
+	{"zxtest_", FormatGoogleTest},
+	{"rust_test_", FormatRust},
+	{"go_test_", FormatGo},
+}
+
+// FormatForRunner returns the test case format for runner. Keep in sync with
+// format_for_runner in pilot.rs.
+func FormatForRunner(runner string) string {
+	for _, family := range runnerFamilies {
+		if strings.HasPrefix(runner, family.prefix) {
+			return family.format
+		}
+	}
+	return FormatFTF
+}
+
+// SplitCaseName splits name into suite and case names for format. Keep in sync
+// with split_case_name in pilot.rs.
+func SplitCaseName(format, name string) (suiteName, caseName string, ok bool) {
+	switch format {
+	case FormatGoogleTest:
+		suite, testCase, found := strings.Cut(name, ".")
+		if !found || suite == "" || testCase == "" {
+			return "", name, false
+		}
+		return suite, testCase, true
+	case FormatRust:
+		i := strings.LastIndex(name, "::")
+		if i < 0 {
+			return "", name, true
+		}
+		if name[i+len("::"):] == "" {
+			return "", name, false
+		}
+		return name[:i], name[i+len("::"):], true
+	case FormatGo:
+		return "", name, true
+	default:
+		return "", name, true
+	}
+}
+
+// CaseNamesForRunner returns the format for runner and the split names.
+func CaseNamesForRunner(runner string, names []string) (format string, suiteNames, caseNames []string) {
+	format = FormatForRunner(runner)
+	suiteNames = make([]string, len(names))
+	caseNames = make([]string, len(names))
+	for i, name := range names {
+		suite, testCase, ok := SplitCaseName(format, name)
+		if !ok {
+			log.Printf("[Warn] case %q cannot be split as %s for runner %q; reporting all cases as %s", name, format, runner, FormatFTF)
+			for j := range names {
+				suiteNames[j] = ""
+			}
+			return FormatFTF, suiteNames, slices.Clone(names)
+		}
+		suiteNames[i], caseNames[i] = suite, testCase
+	}
+	return format, suiteNames, caseNames
 }

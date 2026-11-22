@@ -265,6 +265,26 @@ TEST_F(ProcessGetInfoTest, InfoProcessHandleTableEmpty) {
   EXPECT_EQ(avail, 0);
 }
 
+TEST_F(ProcessGetInfoTest, InfoProcessHandleTableCountOnly) {
+  // When both |buffer| and |avail| are null and |actual| is non-null, ZX_INFO_HANDLE_TABLE
+  // takes a size-probe fast path that writes the target process's handle count to |actual|.
+  size_t self_actual = 0;
+  ASSERT_OK(zx::process::self()->get_info(ZX_INFO_HANDLE_TABLE, nullptr, 0, &self_actual, nullptr));
+  EXPECT_GT(self_actual, 2u);
+
+  size_t actual = ~size_t{0};
+  ASSERT_OK(GetProcess().get_info(ZX_INFO_HANDLE_TABLE, nullptr, 0, &actual, nullptr));
+  EXPECT_EQ(actual, 2u);
+
+  zx::vmar vmar;
+  zx::process empty_process;
+  ASSERT_OK(zx::process::create(*zx::job::default_job(), "", 0u, 0u, &empty_process, &vmar));
+
+  actual = ~size_t{0};
+  ASSERT_OK(empty_process.get_info(ZX_INFO_HANDLE_TABLE, nullptr, 0, &actual, nullptr));
+  EXPECT_EQ(actual, 0u);
+}
+
 TEST_F(ProcessGetInfoTest, InfoProcessHandleTableSelf) {
   // The current process can have many handles, in some configs upward of 70. Check
   // the pattern of calling twice works, with the first time just to know the size.

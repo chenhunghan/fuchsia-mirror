@@ -239,7 +239,9 @@ impl ReachabilityHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network::split_connection_item;
+    use crate::network::{
+        FuchsiaNetworkProperties, NetworkSourceProperties, split_connection_item,
+    };
     use futures::StreamExt as _;
 
     /// The snapshot synthesized when there is no default network, or when it reports
@@ -296,21 +298,26 @@ mod tests {
         // Confirm that no network produces a fully disconnected snapshot.
         assert_eq!(ReachabilityHandler::synthesize_snapshot(None), disconnected_snapshot());
 
-        // Confirm that a `NoConnectivity` connectivity state produces a disconnected snapshot.
-        let net_none = NetworkProperties {
-            connectivity_state: Some(fnp_properties::ConnectivityState::NoConnectivity),
-            ..Default::default()
+        let network_with_connectivity = |connectivity_state| NetworkProperties {
+            source_properties: NetworkSourceProperties::Fuchsia(FuchsiaNetworkProperties {
+                metric: 0,
+            }),
+            dns_servers: Default::default(),
+            connectivity_state: Some(connectivity_state),
+            name: String::new(),
+            network_type: fnp_properties::NetworkType::Unknown,
         };
+
+        // Confirm that a `NoConnectivity` connectivity state produces a disconnected snapshot.
+        let net_none = network_with_connectivity(fnp_properties::ConnectivityState::NoConnectivity);
         assert_eq!(
             ReachabilityHandler::synthesize_snapshot(Some(&net_none)),
             disconnected_snapshot()
         );
 
         // Confirm that a `LocalConnectivity` connectivity state produces a disconnected snapshot.
-        let net_local = NetworkProperties {
-            connectivity_state: Some(fnp_properties::ConnectivityState::LocalConnectivity),
-            ..Default::default()
-        };
+        let net_local =
+            network_with_connectivity(fnp_properties::ConnectivityState::LocalConnectivity);
         assert_eq!(
             ReachabilityHandler::synthesize_snapshot(Some(&net_local)),
             disconnected_snapshot()
@@ -318,20 +325,16 @@ mod tests {
 
         // Confirm that a `PartialConnectivity` connectivity state reports DNS as active but
         // HTTP as inactive.
-        let net_limited = NetworkProperties {
-            connectivity_state: Some(fnp_properties::ConnectivityState::PartialConnectivity),
-            ..Default::default()
-        };
+        let net_limited =
+            network_with_connectivity(fnp_properties::ConnectivityState::PartialConnectivity);
         assert_eq!(
             ReachabilityHandler::synthesize_snapshot(Some(&net_limited)),
             limited_snapshot()
         );
 
         // Confirm that a `FullConnectivity` connectivity state produces a validated snapshot.
-        let net_full = NetworkProperties {
-            connectivity_state: Some(fnp_properties::ConnectivityState::FullConnectivity),
-            ..Default::default()
-        };
+        let net_full =
+            network_with_connectivity(fnp_properties::ConnectivityState::FullConnectivity);
         assert_eq!(ReachabilityHandler::synthesize_snapshot(Some(&net_full)), validated_snapshot());
     }
 

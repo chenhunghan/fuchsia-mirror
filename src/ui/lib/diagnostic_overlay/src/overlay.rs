@@ -2,19 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use fidl::endpoints::create_request_stream;
 use fidl_fuchsia_ui_input::MediaButtonsEvent;
-use fidl_fuchsia_ui_policy::{
-    DeviceListenerRegistryMarker, DeviceListenerRegistryProxy, MediaButtonsListenerRequest,
-};
-use fuchsia_async as fasync;
-use fuchsia_component::client::connect_to_protocol;
-use futures::StreamExt;
-use futures::channel::mpsc::UnboundedSender;
-use log::{info, warn};
+use log::info;
 use std::fmt::Write as _;
-
-use crate::OverlayEvent;
 
 /// Total simultaneous Volume Up + Volume Down presses required to trigger a reboot.
 pub const REQUIRED_PRESS_COUNT: u8 = 5;
@@ -346,60 +336,9 @@ pub fn default_hud_lines() -> [HudLine; DIAGNOSTIC_LINE_COUNT] {
     lines
 }
 
-/// Connects to `fuchsia.ui.policy.DeviceListenerRegistry` and returns the background listener task
-/// forwarding `MediaButtonsEvent`s as [`OverlayEvent::MediaButtons`].
-pub fn spawn_media_buttons_listener(
-    sender: UnboundedSender<OverlayEvent>,
-) -> Option<fasync::Task<()>> {
-    let Ok(registry) = connect_to_protocol::<DeviceListenerRegistryMarker>() else {
-        warn!("fuchsia.ui.policy.DeviceListenerRegistry not available for diagnostic_overlay");
-        return None;
-    };
-    Some(spawn_media_buttons_listener_with_registry(registry, sender))
-}
-
-/// Registers a media-buttons listener on an explicit `registry` proxy and forwards incoming
-/// events to `sender`.
-pub fn spawn_media_buttons_listener_with_registry(
-    registry: DeviceListenerRegistryProxy,
-    sender: UnboundedSender<OverlayEvent>,
-) -> fasync::Task<()> {
-    fasync::Task::local(async move {
-        let (listener_client, mut listener_stream) = create_request_stream();
-        match registry.register_listener(listener_client).await {
-            Ok(()) => info!("Registered diagnostic_overlay media buttons listener."),
-            Err(e) => {
-                warn!("Failed to register diagnostic_overlay media buttons listener: {:?}", e);
-                return;
-            }
-        }
-        drop(registry);
-
-        while let Some(item) = listener_stream.next().await {
-            let request = match item {
-                Ok(request) => request,
-                Err(e) => {
-                    warn!("MediaButtonsListener stream error: {:?}", e);
-                    break;
-                }
-            };
-            if let MediaButtonsListenerRequest::OnEvent { mut event, responder } = request {
-                let _ = event.wake_lease.take();
-                let _ = responder.send();
-                if sender.unbounded_send(OverlayEvent::MediaButtons(event)).is_err() {
-                    break;
-                }
-            }
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fidl::endpoints::create_proxy_and_stream;
-    use fidl_fuchsia_ui_policy::DeviceListenerRegistryRequest;
-    use futures::TryStreamExt;
 
     fn both_pressed_event() -> MediaButtonsEvent {
         MediaButtonsEvent { volume_up: Some(true), volume_down: Some(true), ..Default::default() }
@@ -640,33 +579,5 @@ mod tests {
         let mut line_c = HudLine::new();
         let _ = write!(&mut line_c, "ab");
         assert_eq!(line_b, line_c);
-    }
-
-    #[fuchsia::test]
-    async fn test_media_buttons_listener_forwards_events() {
-        let (registry_proxy, mut registry_stream) =
-            create_proxy_and_stream::<DeviceListenerRegistryMarker>();
-        let (sender, mut receiver) = futures::channel::mpsc::unbounded();
-        let _task = spawn_media_buttons_listener_with_registry(registry_proxy, sender);
-
-        let Some(DeviceListenerRegistryRequest::RegisterListener { listener, responder }) =
-            registry_stream.try_next().await.expect("register request")
-        else {
-            panic!("Expected RegisterListener request");
-        };
-        responder.send().expect("ack register");
-
-        let listener_proxy = listener.into_proxy();
-        let (lease_a, _lease_b) = fidl::EventPair::create();
-        let mut event = both_pressed_event();
-        event.wake_lease = Some(lease_a);
-        listener_proxy.on_event(event).await.expect("send media button event");
-
-        let Some(OverlayEvent::MediaButtons(ev)) = receiver.next().await else {
-            panic!("Expected OverlayEvent::MediaButtons");
-        };
-        assert_eq!(ev.volume_up, Some(true));
-        assert_eq!(ev.volume_down, Some(true));
-        assert!(ev.wake_lease.is_none());
     }
 }

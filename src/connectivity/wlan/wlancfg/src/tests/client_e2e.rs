@@ -764,11 +764,14 @@ fn save_and_connect(
         }
     );
     connect_txn_handle
-        .send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        })
+        .send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        )
         .expect("failed to send connection completion");
 
     // Check for a listener update saying we're connected
@@ -1239,11 +1242,14 @@ fn test_connect_to_new_network() {
         }
     );
     connect_txn_handle
-        .send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        })
+        .send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        )
         .expect("failed to send connection completion");
 
     // Update sme connect transaction handle. The previous handle was not used, but had to be held
@@ -1492,11 +1498,14 @@ fn test_autoconnect_to_saved_network() {
         }
     );
     connect_txn_handle
-        .send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        })
+        .send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        )
         .expect("failed to send connection completion");
 
     // Check for a listener update saying we're Connected.
@@ -1736,11 +1745,14 @@ fn test_autoconnect_to_hidden_saved_network_and_reconnect() {
             }
         );
         connect_txn_handle
-            .send_on_connect_result(&fidl_sme::ConnectResult {
-                code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
-                is_credential_rejected: false,
-                is_reconnect: false,
-            })
+            .send_on_connect_result(
+                &fidl_sme::ConnectResult {
+                    code: fidl_fuchsia_wlan_ieee80211::StatusCode::Success,
+                    is_credential_rejected: false,
+                    is_reconnect: false,
+                },
+                None,
+            )
             .expect("failed to send connection completion");
 
         // Check for a listener update saying we're Connected.
@@ -2274,11 +2286,14 @@ fn reject_connect_requests(
                         txn.expect("connect txn unused").into_stream_and_control_handle();
 
                     connect_txn_handle
-                        .send_on_connect_result(&fidl_sme::ConnectResult {
-                            code: fidl_ieee80211::StatusCode::RefusedReasonUnspecified,
-                            is_credential_rejected: false,
-                            is_reconnect: false,
-                        })
+                        .send_on_connect_result(
+                            &fidl_sme::ConnectResult {
+                                code: fidl_ieee80211::StatusCode::RefusedReasonUnspecified,
+                                is_credential_rejected: false,
+                                is_reconnect: false,
+                            },
+                            None,
+                        )
                         .expect("failed to send connect response");
 
                     // Increment the number of connect failures.
@@ -3380,7 +3395,7 @@ fn test_roam_profile_obeys_max_roams_per_day<F>(
         };
         existing_connection
             .connect_txn_handle
-            .send_on_roam_result(&roam_result)
+            .send_on_roam_result(&roam_result, None)
             .expect("failed to return roam result");
 
         // Run forward internal futures.
@@ -3473,7 +3488,7 @@ fn test_autconnect_starts_after_roam_error() {
     };
     existing_connection
         .connect_txn_handle
-        .send_on_roam_result(&roam_result)
+        .send_on_roam_result(&roam_result, None)
         .expect("failed to return roam result");
 
     // Run forward internal futures.

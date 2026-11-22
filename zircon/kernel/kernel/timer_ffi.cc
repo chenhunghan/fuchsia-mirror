@@ -10,7 +10,7 @@
 namespace {
 
 // Timers whose storage comes from the constexpr Timer constructor (constinit rules out runtime
-// initialization), for the timer_rust suite's constinit_timer test.
+// initialization), for the timer suite's constinit_timer test.
 constinit Timer gConstinitMonotonicTimer{ZX_CLOCK_MONOTONIC};
 constinit Timer gConstinitBootTimer{ZX_CLOCK_BOOT};
 

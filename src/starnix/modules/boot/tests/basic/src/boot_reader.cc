@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,11 +27,29 @@ int main() {
     abort();
   }
 
-  count = write(fd, "1", 1);
+  constexpr char kSystemBoot[] =
+      "system_boot; Android sys.boot_completed=1 (Device Encrypted storage unlocked)";
+  constexpr ssize_t kSystemBootLen = sizeof(kSystemBoot) - 1;
+  count = write(fd, kSystemBoot, kSystemBootLen);
   if (count < 0) {
     abort();
   }
-  if (count != 1) {
+  if (count != kSystemBootLen) {
+    abort();
+  }
+
+  // Duplicate tags must be rejected with EEXIST.
+  errno = 0;
+  count = write(fd, kSystemBoot, kSystemBootLen);
+  if (count != -1 || errno != EEXIST) {
+    abort();
+  }
+
+  constexpr char kCeUnlocked[] =
+      "ce_unlocked; Android sys.user.0.ce_available=true (Credential Encrypted storage unlocked)";
+  constexpr ssize_t kCeUnlockedLen = sizeof(kCeUnlocked) - 1;
+  count = write(fd, kCeUnlocked, kCeUnlockedLen);
+  if (count != kCeUnlockedLen) {
     abort();
   }
 

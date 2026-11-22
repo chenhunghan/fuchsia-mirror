@@ -39,7 +39,7 @@ if (is_fuchsia) {
   group("hermetic_tests") {
     testonly = true
     deps = [
-      ":bazel_tests",
+      ":bazel_target_tests",
       "components:hermetic_tests",
       "diagnostics:hermetic_tests",
       "drivers:hermetic_tests",
@@ -52,16 +52,16 @@ if (is_fuchsia) {
       "testing:hermetic_tests",
     ]
   }
-}
 
-bazel_test_suite("bazel_tests") {
-  host_tests = [ "//examples:host_tests" ]
-  target_tests = [ "//examples:target_tests" ]
+  # The Bazel device tests, from the //examples:target_tests Bazel test_suite().
+  bazel_test_suite("bazel_target_tests") {
+    target_tests = [ "//examples:target_tests" ]
+  }
 }
 
 if (is_host) {
-  group("host_tests") {
-    testonly = true
-    deps = [ ":bazel_tests" ]
+  # The Bazel host tests, from the //examples:host_tests Bazel test_suite().
+  bazel_test_suite("host_tests") {
+    host_tests = [ "//examples:host_tests" ]
   }
 }

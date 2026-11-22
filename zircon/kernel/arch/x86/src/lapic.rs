@@ -137,9 +137,6 @@ pub const LVT_MASKED: u32 = 1 << 16;
 
 unsafe extern "C" {
     fn root_resource_filter_add_deny_region(paddr: usize, len: usize, kind: u32);
-    fn x86_set_local_apic_id(apic_id: u32);
-    fn cpp_x86_percpu_get_apic_id(cpu_num: u32) -> u32;
-    fn cpp_x86_curr_percpu_get_apic_id() -> u32;
     fn platform_handle_apic_timer_tick();
 }
 
@@ -196,25 +193,26 @@ pub extern "C" fn apic_vm_init() {
         }
         // Create a mapping for the page of MMIO registers
         let kernel_aspace = VmAspace::kernel_aspace();
-        let mut vaddr: *mut core::ffi::c_void = core::ptr::null_mut();
-        // SAFETY: Allocating physical LAPIC management page in kernel aspace.
+        // SAFETY: The cache policy in the flags is appropriate for all mappings of the physical
+        // range, and creating this mapping is sound.
         let res = unsafe {
             kernel_aspace.alloc_physical(
                 b"lapic",
                 page::SIZE,
-                &mut vaddr,
+                None,
                 page::SHIFT as u8,
                 crate::kernel::types::PAddr(APIC_PHYS_BASE),
                 0,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE | ARCH_MMU_FLAG_UNCACHED_DEVICE,
             )
         };
-        if let Err(res) = res {
-            panic!("Could not allocate APIC management page: {:?}", res);
-        }
+        let vaddr = match res {
+            Ok(vaddr) => vaddr,
+            Err(res) => panic!("Could not allocate APIC management page: {:?}", res),
+        };
         // SAFETY: Storing mapped virtual address.
         unsafe {
-            APIC_VIRT_BASE = vaddr as usize;
+            APIC_VIRT_BASE = vaddr;
             assert!(APIC_VIRT_BASE != 0);
         }
     }
@@ -265,7 +263,7 @@ pub extern "C" fn apic_local_init() {
         unsafe {
             BSP_APIC_ID = id;
             BSP_APIC_ID_VALID = true;
-            x86_set_local_apic_id(id as u32);
+            super::mp::set_local_apic_id(id as u32);
         }
     }
 
@@ -348,7 +346,7 @@ pub extern "C" fn apic_send_self_ipi(vector: u8, dm: ApicInterruptDeliveryMode) 
     let mut request = ICR_LEVEL_ASSERT | icr_delivery_mode(dm as u32) | icr_vector(vector as u32);
     if feature::x86_hypervisor_has_pv_ipi() {
         // SAFETY: Retrieves APIC ID of current CPU.
-        let apic_id = unsafe { cpp_x86_curr_percpu_get_apic_id() };
+        let apic_id = unsafe { super::mp::curr_percpu_get_apic_id() };
         let ret = pv::pv_ipi(1, 0, apic_id as u64, request as u64);
         debug_assert!(ret >= 0);
         return;
@@ -383,8 +381,8 @@ fn pv_mask_ipi(mask: u32, request: u32) {
     let num_cpus = core::cmp::min(crate::arch_rs::max_num_cpus(), highest_cpu_set(mask) + 1);
     for cpu_id in lowest_cpu_set(mask)..num_cpus {
         if ((mask >> cpu_id) & 1) != 0 {
-            // SAFETY: FFI to get APIC ID for cpu_id.
-            let apic_id = unsafe { cpp_x86_percpu_get_apic_id(cpu_id) };
+            // SAFETY: Reads APIC ID for `cpu_id`.
+            let apic_id = unsafe { super::mp::percpu_get_apic_id(cpu_id) };
             if apic_id != INVALID_APIC_ID {
                 let apic_id = apic_id as u64;
                 masks[(apic_id / MASK_SIZE) as usize] |= 1u64 << (apic_id % MASK_SIZE);
@@ -464,8 +462,8 @@ pub extern "C" fn apic_send_mask_ipi(vector: u8, mask: u32, dm: ApicInterruptDel
     let num_cpus = core::cmp::min(crate::arch_rs::max_num_cpus(), highest_cpu_set(mask) + 1);
     for cpu_id in lowest_cpu_set(mask)..num_cpus {
         if ((mask >> cpu_id) & 1) != 0 {
-            // SAFETY: FFI to get APIC ID for cpu_id.
-            let apic_id = unsafe { cpp_x86_percpu_get_apic_id(cpu_id) };
+            // SAFETY: Reads APIC ID for `cpu_id`.
+            let apic_id = unsafe { super::mp::percpu_get_apic_id(cpu_id) };
             if apic_id != INVALID_APIC_ID {
                 apic_send_ipi(vector, apic_id, dm);
             }
@@ -473,8 +471,16 @@ pub extern "C" fn apic_send_mask_ipi(vector: u8, mask: u32, dm: ApicInterruptDel
     }
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn apic_issue_eoi() {
+/// Issues an End-Of-Interrupt (EOI) to the local APIC.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - CPL is 0, interrupts are disabled on the calling CPU in an active local APIC interrupt
+///   service context, and `%gs.base` points to the calling CPU's `x86_percpu`.
+/// - Local APIC initialization (`apic_vm_init` and `apic_local_init`) has completed on the calling
+///   CPU.
+pub unsafe fn apic_issue_eoi() {
     if pv::PvEoi::get().eoi() {
         return;
     }
@@ -583,9 +589,17 @@ pub extern "C" fn apic_timer_set_tsc_deadline(deadline: u64) {
     unsafe { write_msr(X86_MSR_IA32_TSC_DEADLINE, deadline) };
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn apic_timer_interrupt_handler() {
-    // SAFETY: Calling C FFI to handle APIC timer tick.
+/// Handles a local APIC timer interrupt tick.
+///
+/// # Safety
+///
+/// The caller must ensure that:
+/// - CPL is 0, interrupts are disabled in the APIC timer interrupt handler, and `%gs.base` and
+///   `PerCpu` are initialized on the calling CPU.
+/// - `TimerLock` is not currently held on the calling CPU.
+pub(super) unsafe fn apic_timer_interrupt_handler() {
+    // SAFETY: Discharged by this function's `# Safety` contract: called from the APIC timer
+    // interrupt handler with interrupts disabled, `PerCpu` initialized, and `TimerLock` not held.
     unsafe { platform_handle_apic_timer_tick() };
 }
 
@@ -595,8 +609,13 @@ fn apic_error_init() {
     lapic_reg_write(LAPIC_REG_ERROR_STATUS, 0);
 }
 
-#[unsafe(no_mangle)]
-pub extern "C" fn apic_error_interrupt_handler() {
+/// Handles a local APIC error interrupt.
+///
+/// # Safety
+///
+/// The caller must ensure that CPL is 0, interrupts are disabled on the calling CPU, and local APIC
+/// initialization (`apic_vm_init` and `apic_local_init`) has completed.
+pub(super) unsafe fn apic_error_interrupt_handler() {
     debug_assert!(crate::arch_rs::ints_disabled());
 
     // This write doesn't effect the subsequent read, but is required prior to

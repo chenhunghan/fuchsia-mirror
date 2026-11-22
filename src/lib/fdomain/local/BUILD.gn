@@ -2,12 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_unittest_package("fdomain-local-tests") {
-  deps = [ ":local_test" ]
-}
-
 group("tests") {
   public_deps = [ ":fdomain-local-tests" ]
   testonly = true
@@ -86,4 +80,10 @@ rustc_library("local_fidl_flex") {
   ]
   with_unit_tests = true
   deps = [ "//src/lib/fidl/rust/fidl" ]
+}
+
+fuchsia_unittest_package("fdomain-local-tests") {
+  package_name = "fdomain-local-tests-gn"
+  component_name = "fdomain-local-tests"
+  deps = [ ":local_test" ]
 }

@@ -83,7 +83,7 @@ std::vector<OutputBuffer> DescribeRflagsExtended(const debug::RegisterValue& rfl
   result.emplace_back(OutputBuffer());
   result.emplace_back(OutputBuffer());
 
-  uint32_t value = rflags.GetValue();
+  uint32_t value = static_cast<uint32_t>(rflags.GetValue());
 
   // Decode individual flags.
   result.emplace_back(

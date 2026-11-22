@@ -5,7 +5,7 @@
 #ifndef SRC_UI_BIN_SYSTEM_MONITOR_SYSTEM_MONITOR_H_
 #define SRC_UI_BIN_SYSTEM_MONITOR_SYSTEM_MONITOR_H_
 
-#include <fuchsia/diagnostics/cpp/fidl.h>
+#include <fidl/fuchsia.diagnostics/cpp/fidl.h>
 #include <lib/component/incoming/cpp/protocol.h>
 
 #include "src/ui/bin/system_monitor/system_monitor_renderer.h"
@@ -26,20 +26,20 @@ class SystemMonitor {
   void UpdateRecentDiagnostic();
   void PrintRecentDiagnostic();
   std::vector<std::string> ParseBatch(
-      const std::vector<fuchsia::diagnostics::FormattedContent>& batch);
+      const std::vector<fuchsia_diagnostics::FormattedContent>& batch);
   std::string GetTargetFromDiagnostics(std::vector<std::string> recent_diagnostics);
   std::string GetCPUData();
 
  private:
-  // batchIterator result initialized in the UpdateRecentDiagnostic() function.
-  fuchsia::diagnostics::BatchIterator_GetNext_Result iterator_result_;
-  // a batchIterator pointer initialized in the UpdateRecentDiagnostic() function.
-  fuchsia::diagnostics::BatchIteratorSyncPtr iterator_;
-  // archiveAccessor pointer initialized in the UpdateRecentDiagnostic() function to get a new batch
-  // of inspect data.
-  fuchsia::diagnostics::ArchiveAccessorSyncPtr accessor_;
+  // The most recent batch of inspect data, fetched by the UpdateRecentDiagnostic() function.
+  std::vector<fuchsia_diagnostics::FormattedContent> batch_;
+  // a batchIterator client initialized in the UpdateRecentDiagnostic() function.
+  fidl::SyncClient<fuchsia_diagnostics::BatchIterator> iterator_;
+  // archiveAccessor client initialized in the ConnectToArchiveAccessor() function to get a new
+  // batch of inspect data.
+  fidl::SyncClient<fuchsia_diagnostics::ArchiveAccessor> accessor_;
   // streamParameters initialized in the class constructor.
-  fuchsia::diagnostics::StreamParameters params_;
+  fuchsia_diagnostics::StreamParameters params_;
   SystemMonitorRenderer renderer_;
 };
 }  // namespace system_monitor

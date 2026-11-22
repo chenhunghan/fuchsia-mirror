@@ -367,6 +367,14 @@ pub enum ThreadLocalDecompressor {
 }
 
 impl ThreadLocalDecompressor {
+    /// Returns the compression algorithm used by this decompressor.
+    pub fn algorithm(&self) -> CompressionAlgorithm {
+        match self {
+            Self::Zstd => CompressionAlgorithm::Zstd,
+            Self::Lz4 => CompressionAlgorithm::Lz4,
+        }
+    }
+
     /// Decompresses a chunk of a chunked-compression archive.
     pub fn decompress<'a>(
         &self,

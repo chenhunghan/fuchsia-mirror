@@ -40,6 +40,7 @@ source_set("include") {
   visibility = [
     ":*",
     "//src/graphics/drivers/msd-vsi-vip/*",
+    "//vendor/*",
   ]
   public_deps = [ "//sdk/lib/magma_common" ]
 }

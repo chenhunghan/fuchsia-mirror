@@ -79,7 +79,7 @@ Create three changes:
 * A gerrit change that includes the new `docs/go` directory along with
   `_redirects.yaml`, `README.md`, and `OWNERS` files.
 * A gerrit change that updates `doc_checker` for testing. See
-  [Testing](#Testing).
+  [Testing](#testing).
 * An overall redirect for fuchsia.dev to redirect fuchsia.dev/fuchsia-src/go/
   to fuchsia.dev/go. fuchsia/src/go/ would be the path for `docs/go` on
   fuchsia.dev.
@@ -117,7 +117,7 @@ the `fuchsia-src/` directory is mapped to the `docs/` directory.
 
 N/A.
 
-## Testing
+## Testing {#testing}
 
 [`doc_checker`](https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/doc_checker/)
 can be expanded to verify that:

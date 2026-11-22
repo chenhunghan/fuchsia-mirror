@@ -38,15 +38,11 @@ host_test_data("trace_importing_test_data") {
 host_test_data("trace_metrics_test_data") {
   sources = [
     "data/app_render_metric.fxt",
-    "data/app_render_metric.json",
     "data/cpu_metric.fxt",
     "data/cpu_metric.json",
     "data/fps_metric.fxt",
-    "data/fps_metric.json",
     "data/input_latency_metric.fxt",
-    "data/input_latency_metric.json",
     "data/scenic_metric.fxt",
-    "data/scenic_metric.json",
   ]
 
   outputs = [ "${target_out_dir}/runtime_deps/{{source_file_part}}" ]
@@ -57,9 +53,60 @@ python_host_test("agg_cpu_breakdown_test") {
   libraries = [ "//src/performance/lib/trace_processing" ]
 }
 
+python_host_test("app_render_metrics_test") {
+  main_source = "app_render_metrics_test.py"
+  sources = [
+    "gfx_fxt_test_utils.py",
+    "test_utils.py",
+  ]
+  libraries = [
+    "//src/performance/lib/trace_processing",
+    "//src/performance/lib/trace_writing",
+    "//third_party/parameterized",
+  ]
+  deps = [ ":trace_metrics_test_data" ]
+}
+
 python_host_test("cpu_breakdown_test") {
   main_source = "cpu_breakdown_test.py"
   libraries = [ "//src/performance/lib/trace_processing" ]
+}
+
+python_host_test("fps_metrics_test") {
+  main_source = "fps_metrics_test.py"
+  sources = [
+    "gfx_fxt_test_utils.py",
+    "test_utils.py",
+  ]
+  libraries = [
+    "//src/performance/lib/trace_processing",
+    "//src/performance/lib/trace_writing",
+    "//third_party/parameterized",
+  ]
+  deps = [ ":trace_metrics_test_data" ]
+}
+
+python_host_test("gfx_sql_test") {
+  main_source = "gfx_sql_test.py"
+  sources = [ "gfx_fxt_test_utils.py" ]
+  libraries = [
+    "//src/performance/lib/trace_processing",
+    "//src/performance/lib/trace_writing",
+  ]
+}
+
+python_host_test("gpu_metrics_test") {
+  main_source = "gpu_metrics_test.py"
+  sources = [
+    "gfx_fxt_test_utils.py",
+    "test_utils.py",
+  ]
+  libraries = [
+    "//src/performance/lib/trace_processing",
+    "//src/performance/lib/trace_writing",
+    "//third_party/parameterized",
+  ]
+  deps = [ ":trace_metrics_test_data" ]
 }
 
 python_host_test("memory_test") {
@@ -75,6 +122,27 @@ python_host_test("odpm_power_metrics_test") {
 python_host_test("power_metrics_test") {
   main_source = "power_metrics_test.py"
   libraries = [ "//src/performance/lib/trace_processing" ]
+}
+
+python_host_test("run_graphics_metrics_test") {
+  main_source = "run_graphics_metrics_test.py"
+  sources = [ "test_utils.py" ]
+  libraries = [ "//src/performance/lib/trace_processing" ]
+  deps = [ ":trace_metrics_test_data" ]
+}
+
+python_host_test("scenic_metrics_test") {
+  main_source = "scenic_metrics_test.py"
+  sources = [
+    "gfx_fxt_test_utils.py",
+    "test_utils.py",
+  ]
+  libraries = [
+    "//src/performance/lib/trace_processing",
+    "//src/performance/lib/trace_writing",
+    "//third_party/parameterized",
+  ]
+  deps = [ ":trace_metrics_test_data" ]
 }
 
 python_host_test("scheduler_test") {
@@ -132,10 +200,16 @@ group("tests") {
   testonly = true
   public_deps = [
     ":agg_cpu_breakdown_test",
+    ":app_render_metrics_test",
     ":cpu_breakdown_test",
+    ":fps_metrics_test",
+    ":gfx_sql_test",
+    ":gpu_metrics_test",
     ":memory_test",
     ":odpm_power_metrics_test",
     ":power_metrics_test",
+    ":run_graphics_metrics_test",
+    ":scenic_metrics_test",
     ":scheduler_test",
     ":trace_importing_fxt_test",
     ":trace_importing_test",

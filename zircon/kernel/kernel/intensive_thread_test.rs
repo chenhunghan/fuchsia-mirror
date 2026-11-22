@@ -6,12 +6,13 @@
 // https://opensource.org/licenses/MIT
 
 // These tests take much longer than, and are more intensive on the scheduler than,
-// the //zircon/kernel/kernel/thread.cc tests.
+// the //zircon/kernel/kernel/thread.rs tests.
 
 /// intensive thread tests
 #[unittest::suite(name = "intensive_thread")]
 mod intensive_thread_tests {
     use crate::arch_rs::{curr_cpu_num, ints_disabled};
+    use crate::crypto::global_prng;
     use crate::kernel::auto_preempt_disabler::AutoPreemptDisabler;
     use crate::kernel::event::{AutounsignalEvent, Event};
     use crate::kernel::mp::is_cpu_online;
@@ -30,7 +31,7 @@ mod intensive_thread_tests {
         INVALID_CPU, cpu_mask_t, cpu_num_t, cpu_num_to_mask, highest_cpu_set,
     };
     use crate::platform_rs::timer::{DurationMono, InstantMono, current_mono_time};
-    use crate::top::debug::spin;
+    use crate::top::debug::spin_usecs;
     use core::cell::UnsafeCell;
     use core::ffi::c_void;
     use core::pin::Pin;
@@ -50,20 +51,13 @@ mod intensive_thread_tests {
     const ZX_ERR_INTERNAL_INTR_KILLED: Status =
         Status::err_from_raw(zx_types::ZX_ERR_INTERNAL_INTR_KILLED);
 
-    unsafe extern "C" {
-        fn cpp_global_prng_draw(buffer: *mut u8, len: usize);
-    }
-
     /// Returns a private PRNG seeded from the kernel's global PRNG.
     ///
     /// Each worker thread owns its own `SmallRng` so the threads do not synchronize with each
     /// other through shared PRNG state.
     fn new_rng() -> SmallRng {
         let mut seed = [0u8; 32];
-        // SAFETY: `cpp_global_prng_draw` writes `seed.len()` bytes into `seed`.
-        unsafe {
-            cpp_global_prng_draw(seed.as_mut_ptr(), seed.len());
-        }
+        global_prng::draw(&mut seed);
         SmallRng::from_seed(seed)
     }
 
@@ -155,7 +149,7 @@ mod intensive_thread_tests {
             }
             stack_pin_init!(let args = pin_init!(Args {
                 test_blocker <- Event::init_unsignaled(),
-                test_mutex: [const { Mutex::new() }; INHERIT_TEST_MUTEX_COUNT],
+                test_mutex: core::array::from_fn(|_| Mutex::new()),
             }));
 
             // worker thread to stress the priority inheritance mechanism
@@ -602,7 +596,7 @@ mod intensive_thread_tests {
     static PREEMPT_COUNT: AtomicI32 = AtomicI32::new(0);
 
     extern "C" fn preempt_tester(_arg: *mut c_void) -> i32 {
-        spin(1000000);
+        spin_usecs(1000000);
 
         let _ = PREEMPT_COUNT.fetch_sub(1, Ordering::SeqCst);
 
@@ -996,7 +990,7 @@ mod intensive_thread_tests {
                 }
                 2 => {
                     // spin for a bit
-                    spin(rng.random_range(0..100));
+                    spin_usecs(rng.random_range(0..100));
                 }
                 3 => {
                     // yield

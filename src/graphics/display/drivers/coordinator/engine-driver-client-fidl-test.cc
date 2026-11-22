@@ -554,6 +554,25 @@ TEST_F(EngineDriverClientFidlTest, SetMinimumRgbFailure) {
   EXPECT_STATUS(result, zx::error(ZX_ERR_INVALID_ARGS));
 }
 
+TEST_F(EngineDriverClientFidlTest, NotifyExpectedPresent) {
+  static constexpr display::DisplayId kDisplayId(1);
+  static constexpr zx::time_monotonic kExpectedPresentTime(100'000'000);
+  static constexpr zx::duration kFrameInterval(8'333'333);
+
+  libsync::Completion completion;
+  mock_.ExpectNotifyExpectedPresent(
+      [&](fuchsia_hardware_display_engine::wire::EngineNotifyExpectedPresentRequest* request,
+          fdf::Arena& arena) {
+        EXPECT_EQ(display::DisplayId(request->display_id), kDisplayId);
+        EXPECT_EQ(request->expected_present_time, kExpectedPresentTime);
+        EXPECT_EQ(request->frame_interval, kFrameInterval.get());
+        completion.Signal();
+      });
+
+  fidl_client_.NotifyExpectedPresent(kDisplayId, kExpectedPresentTime, kFrameInterval);
+  completion.Wait();
+}
+
 }  // namespace
 
 }  // namespace display_coordinator

@@ -21,6 +21,7 @@
 #include <fbl/macros.h>
 #include <fbl/ref_counted.h>
 #include <fbl/ref_ptr.h>
+#include <kernel/ffi.h>
 #include <kernel/mutex.h>
 #include <kernel/range_check.h>
 #include <vm/page_source.h>
@@ -33,9 +34,12 @@
 
 class VmObjectPaged;
 extern "C" const VmCowPages* cpp_vm_object_paged_cow_pages(const VmObjectPaged* vmo);
+extern "C" bool cpp_vm_object_paged_get_cow_range(const VmObjectPaged* vmo, uint64_t offset,
+                                                  uint64_t len,
+                                                  ffi::Uninitialized<VmCowRange>* out);
 
 // the main VM object type, based on a copy-on-write set of pages.
-class VmObjectPaged final : public VmObject, public VmDeferredDeleter<VmObjectPaged> {
+class VmObjectPaged final : public VmObject {
  public:
   // |VmObject::options_| bitmask is extended with:
   static constexpr uint32_t kResizable = (1u << 1);
@@ -406,8 +410,6 @@ class VmObjectPaged final : public VmObject, public VmDeferredDeleter<VmObjectPa
     return PriorityChanger(delta, cow_pages_.get());
   }
 
-  void MaybeDeadTransition() {}
-
   // Constructs and returns a |DeferredOps| that can be passed into other methods on this VMO that
   // require one.
   VmCowPages::DeferredOps MakeDeferredOps() { return VmCowPages::DeferredOps(cow_pages_.get()); }
@@ -427,14 +429,20 @@ class VmObjectPaged final : public VmObject, public VmDeferredDeleter<VmObjectPa
   ~VmObjectPaged() override;
   friend fbl::RefPtr<VmObjectPaged>;
   friend const VmCowPages* ::cpp_vm_object_paged_cow_pages(const VmObjectPaged* vmo);
+  friend bool ::cpp_vm_object_paged_get_cow_range(const VmObjectPaged* vmo, uint64_t offset,
+                                                  uint64_t len,
+                                                  ffi::Uninitialized<VmCowRange>* out);
 
   DISALLOW_COPY_ASSIGN_AND_MOVE(VmObjectPaged);
 
   // Helper for the destructor as by default destructors do not require locks to be held under the
   // assumption the destructor runs when no other entities can see the object. This is not true here
   // and locking is still relevant, so having the cleanup logic in a separate method allows for full
-  // static analysis to happen.
-  void DestructorHelper();
+  // static analysis to happen while still inlining into ~VmObjectPaged() to avoid an extra frame.
+  __ALWAYS_INLINE void DestructorHelper();
+  __NO_INLINE void UnpinAlwaysPinnedOnDestroy();
+  __NO_INLINE void ClearOrMoveReferencesOnDestroyLocked() TA_REQ(lock());
+  __NO_INLINE void RehomeChildrenOnDestroy();
 
   zx_status_t CreateChildReferenceCommon(uint32_t options, VmCowRange range, bool allow_uncached,
                                          bool copy_name, bool* first_child,

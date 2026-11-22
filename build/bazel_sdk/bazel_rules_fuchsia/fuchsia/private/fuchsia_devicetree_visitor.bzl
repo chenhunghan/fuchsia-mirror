@@ -45,7 +45,7 @@ def fuchsia_devicetree_visitor(name, output_name = None, additional_linker_input
     #
     # NOTE: A value of //fuchsia/private:driver.ld will not work here, as it will
     # be interpreted as a package 'fucshia' or the project's workspace itself.
-    visitor_ld_target = "@rules_fuchsia//fuchsia/private:visitor.ld"
+    visitor_ld_target = "@fuchsia_rules_common//devicetree:visitor.ld"
 
     user_link_flags.extend([
         "-Wl,--version-script",

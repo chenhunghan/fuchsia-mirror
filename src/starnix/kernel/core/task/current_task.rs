@@ -15,9 +15,10 @@ use crate::task::loader::{
     ResolvedProgram, load_executable, resolve_elf_interpreter, resolve_executable,
 };
 use crate::task::{
-    CurrentTaskCredentialsWriteGuard, ExitStatus, PageFaultExceptionReport, RobustListHeadPtr,
-    RunState, SeccompFilter, SeccompFilterContainer, SeccompState, SeccompStateValue, Task,
-    TaskFlags, TaskRunningState, ThreadState, Waiter,
+    CurrentTaskCredentialsWriteGuard, EventHandler, ExitStatus, PageFaultExceptionReport,
+    RobustListHeadPtr, RunState, SeccompFilter, SeccompFilterContainer, SeccompState,
+    SeccompStateValue, SignalHandler, SignalHandlerInner, Task, TaskFlags, TaskRunningState,
+    ThreadState, Waiter, confirm_fs_syscall_trace_if,
 };
 use crate::vfs::{
     AccessCheck, CreationStatus, DirEntry, DirectoryMode, FdFlags, FdNumber, FdTable, FileHandle,
@@ -54,8 +55,8 @@ use starnix_uapi::{
     CLONE_INTO_CGROUP, CLONE_NEWUTS, CLONE_PARENT, CLONE_PARENT_SETTID, CLONE_PTRACE, CLONE_SETTLS,
     CLONE_SIGHAND, CLONE_SYSVSEM, CLONE_THREAD, CLONE_VFORK, CLONE_VM, FUTEX_OWNER_DIED,
     FUTEX_TID_MASK, ROBUST_LIST_LIMIT, SECCOMP_FILTER_FLAG_LOG, SECCOMP_FILTER_FLAG_NEW_LISTENER,
-    SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH, errno, error, pid_t, sock_filter,
-    ucred,
+    SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH, errno, error,
+    from_status_like_fdio, pid_t, sock_filter, ucred,
 };
 use std::cell::{Ref, RefCell};
 use std::collections::VecDeque;
@@ -66,18 +67,22 @@ use std::mem::MaybeUninit;
 use std::sync::{Arc, Weak};
 use zx::sys::zx_restricted_state_t;
 
-use super::ThreadGroupLifecycleWaitValue;
+use super::{
+    TaskWriteGuard, ThreadGroupLifecycleWaitValue, ThreadGroupParent, ThreadGroupWriteGuard,
+};
 
 pub struct TaskBuilder {
     /// The underlying task object.
     pub task: Arc<Task>,
 
     pub thread_state: ThreadState<HeapRegs>,
+
+    pub security_state: security::CurrentTaskState,
 }
 
 impl TaskBuilder {
     pub fn new(task: Arc<Task>) -> Self {
-        Self { task, thread_state: Default::default() }
+        Self { task, thread_state: Default::default(), security_state: Default::default() }
     }
 
     #[inline(always)]
@@ -88,7 +93,7 @@ impl TaskBuilder {
 
 impl From<TaskBuilder> for CurrentTask {
     fn from(builder: TaskBuilder) -> Self {
-        Self::new(builder.task, builder.thread_state.into())
+        Self::new(builder.task, builder.thread_state.into(), builder.security_state)
     }
 }
 
@@ -97,7 +102,7 @@ impl Releasable for TaskBuilder {
 
     fn release<'a>(self, _context: Self::Context<'a>) {
         // Build a temporary CurrentTask to run release actions that require ThreadState.
-        let current_task = CurrentTask::new(self.task, self.thread_state.into());
+        let current_task = CurrentTask::from(self);
         current_task.exit();
     }
 }
@@ -200,7 +205,11 @@ impl fmt::Debug for CurrentTask {
 }
 
 impl CurrentTask {
-    pub fn new(task: Arc<Task>, thread_state: ThreadState<RegisterStorageEnum>) -> Self {
+    pub fn new(
+        task: Arc<Task>,
+        thread_state: ThreadState<RegisterStorageEnum>,
+        security_state: security::CurrentTaskState,
+    ) -> Self {
         let current_creds = RefCell::new(CurrentCreds::Cached(task.clone_creds()));
         let running_state = task.running_state().expect("CurrentTask must have TaskRunningState");
         let files = running_state.files().expect("CurrentTask must have FdTable");
@@ -212,7 +221,7 @@ impl CurrentTask {
             files: RefCell::new(Some(files)),
             mm,
             current_creds,
-            security_state: Default::default(),
+            security_state,
             _local_marker: Default::default(),
         }
     }
@@ -229,38 +238,44 @@ impl CurrentTask {
 
         self.signal_vfork();
 
-        // Release references to resources specific to the running task before triggering its
-        // delayed releaser for the last time. This schedules any RCU-guarded references retained
-        // solely by this task for RCU reclamation. Triggering the delayed releaser runs RCU
-        // callbacks, ensuring that:
+        // Release references to resources specific to the running task before the pre-detach
+        // delayed releaser trigger. This schedules any RCU-guarded references retained solely by
+        // this task for RCU reclamation. Triggering the delayed releaser runs RCU callbacks,
+        // ensuring that:
         //
         // 1. Any delayed release actions registered by the resource being dropped during
-        //    reclamation are applied during the final delayed releaser trigger.
+        //    reclamation are applied during this pre-detach trigger.
         // 2. Any other drop side-effects happen before the thread group sends zombie notifications.
+        //
+        // A post-detach trigger also runs at the end of `exit()`, after zombie notifications and
+        // once the task has been removed from its thread group and the pid table, to drain any
+        // delayed releases queued during detachment.
         //
         // Specifically, the following resources require explicit release:
         //
-        // 1. `running_state`: Transitively releases `proc_pid_directory_cache`
-        // 2. `files`: Drops `FileHandle` to close open file descriptors
-        // 3. `mm`: Drops `FsNodeHandle` to remove memory-mapped filesystem nodes and drops
+        // 1. `files`: Drops `FileHandle` to close open file descriptors
+        // 2. `mm`: Drops `FsNodeHandle` to remove memory-mapped filesystem nodes and drops
         //    `FileWriteGuard` for executable mappings
-        // 4. `fs`: Drops `MountClientMarker` to allow unmounting and drops `FsNodeHandle` to remove
+        // 3. `fs`: Drops `MountClientMarker` to allow unmounting and drops `FsNodeHandle` to remove
         //    namespace filesystem nodes
-        // 5. `proc_pid_directory_cache`: Drops `FsNodeHandle` to remove /proc/<pid> nodes
+        // 4. `proc_pid_directory_cache`: Drops `FsNodeHandle` to remove /proc/<pid> nodes
         //
-        // `files`, `mm` and `fs` are released explicitly here rather than by dropping
-        // `running_state`. Other threads may transiently hold a strong reference to
-        // `TaskRunningState` (e.g. `Task::interrupt()`), and if such a thread ends up dropping the
-        // last reference, it runs the destructors of everything still owned by the
-        // `TaskRunningState`, possibly while holding locks. Dropping `fs` in particular may tear
-        // down an entire mount namespace, which acquires `DirEntry` locks, so it must happen here
-        // on the exiting thread, where no locks are held. `proc_pid_directory_cache` only holds an
-        // `FsNodeHandle`, whose release is already deferred to the delayed releaser.
+        // `files`, `mm`, `fs`, and `proc_pid_directory_cache` are released explicitly here rather
+        // than by dropping `running_state`. Other threads may transiently hold a strong reference
+        // to `TaskRunningState` (e.g. `Task::interrupt()` or `execute_task()`), and if such a
+        // thread ends up dropping the last reference, it runs the destructors of everything still
+        // owned by the `TaskRunningState`, possibly while holding locks or on a non-task worker
+        // thread without an active delayed releaser. Dropping `fs` in particular may tear down an
+        // entire mount namespace, which acquires `DirEntry` locks, and dropping
+        // `proc_pid_directory_cache` registers an `FsNode` in the thread-local delayed releaser,
+        // so both must happen here on the exiting thread before the pre-detach
+        // `trigger_delayed_releaser()`.
 
         if let Some(ref running_state) = self.running_state {
             *running_state.files.lock() = None;
             running_state.mm.update(None);
             running_state.fs.update(&self, None);
+            *running_state.proc_pid_directory_cache.lock() = None;
         }
         self.running_state = None;
 
@@ -278,6 +293,12 @@ impl CurrentTask {
         self.task.thread_group().remove(self.kernel().pids.lock(), &self.task);
 
         self.ptrace_disconnect();
+
+        // Drain any delayed releases queued while detaching from the thread group or ptrace state
+        // (for example, dropping the last reference to a controlling terminal's devpts node).
+        // Release actions drained here run after the task has been removed from its thread group
+        // and the PID table, so they must not rely on thread-group or PID membership.
+        self.trigger_delayed_releaser();
     }
 
     /// Returns the [`TaskRunningState`] for the [`Task`].
@@ -515,42 +536,54 @@ impl CurrentTask {
     /// If waking, promotes from waking to awake.  If not waking, make waiter async
     /// wait until woken.  Returns true if woken.
     pub fn wake_or_wait_until_unstopped_async(&self, waiter: &Waiter) -> bool {
-        let group_state = self.thread_group().read();
+        let mut group_state = self.thread_group().write();
         let mut task_state = self.write();
 
         // Wake up if
-        //   a) we should wake up, meaning:
-        //      i) we're in group stop, and the thread group has exited group stop, or
+        //   a) the thread group is not stopping/stopped and either:
+        //      i) we're in group stop (and the thread group has exited group stop), or
         //      ii) we're waking up,
-        //   b) and ptrace isn't stopping us from waking up, but
+        //   b) and ptrace isn't stopping us from waking up, or
         //   c) always wake up if we got a SIGKILL.
-        let task_stop_state = self.load_stopped();
-        let group_stop_state = self.thread_group().load_stopped();
-        if ((task_stop_state == StopState::GroupStopped && group_stop_state.is_waking_or_awake())
-            || task_stop_state.is_waking_or_awake())
-            && (!task_state.is_ptrace_listening() || task_stop_state.is_force())
+        let mut task_stop_state = self.load_stopped();
+        let group_stop_state = group_state.base.load_stopped();
+        if task_stop_state.is_force()
+            || (!group_stop_state.is_stopping_or_stopped()
+                && !task_state.is_ptrace_listening()
+                && (task_stop_state == StopState::GroupStopped
+                    || task_stop_state.is_waking_or_awake()))
         {
-            let new_state = if task_stop_state.is_waking_or_awake() {
-                task_stop_state.finalize()
+            let new_state = if task_stop_state.is_force() {
+                StopState::ForceAwake
+            } else if task_stop_state.is_waking_or_awake() {
+                task_stop_state.finalize().unwrap_or(task_stop_state)
             } else {
-                group_stop_state.finalize()
+                group_stop_state.finalize().unwrap_or(group_stop_state)
             };
-            if let Ok(new_state) = new_state {
-                task_state.set_stopped(new_state, None, Some(self), None);
-                drop(group_state);
-                drop(task_state);
-                // It is possible for the stop state to be changed by another
-                // thread between when it is checked above and the following
-                // invocation, but set_stopped does sufficient checking while
-                // holding the lock to make sure that such a change won't result
-                // in corrupted state.
-                self.thread_group().set_stopped(new_state, None, false);
-                return true;
+            task_state.set_stopped(new_state, None, Some(self), None);
+            let final_group_state =
+                if group_stop_state.is_force() { StopState::ForceAwake } else { new_state };
+            let (_, parent) =
+                group_state.update_stopped_state(final_group_state, /* siginfo = */ None);
+            drop(task_state);
+            drop(group_state);
+            if let Some(parent) = parent {
+                parent.notify_child_status();
             }
+            return true;
         }
 
+        // If a sibling transitioned the thread group back into `GroupStopping` while this task
+        // was still in `Waking` or `Awake`, finalize the task (and thread group if still stopping)
+        // into `GroupStopped` before waiting so we don't miss a lifecycle notification.
+        let (group_stop_state, parent_to_notify) = self.finalize_group_stop_locked(
+            &mut group_state,
+            &mut task_state,
+            &mut task_stop_state,
+        );
+
         // We will wait.
-        if self.thread_group().load_stopped().is_stopped() || task_stop_state.is_stopped() {
+        if group_stop_state.is_stopped() || task_stop_state.is_stopped() {
             // If we've stopped or PTRACE_LISTEN has been sent, wait for a
             // signal or instructions from the tracer.
             group_state
@@ -570,6 +603,11 @@ impl CurrentTask {
             }
             task_state.wait_on_ptracer(&waiter);
             task_state.notify_ptracers();
+        }
+        drop(task_state);
+        drop(group_state);
+        if let Some(parent) = parent_to_notify {
+            parent.notify_child_status();
         }
         false
     }
@@ -633,6 +671,10 @@ impl CurrentTask {
             if run_state.ignores_signals() {
                 // Tasks frozen or stopped ignore all other signals except SIGKILL.
                 if state.has_signal_pending(SIGKILL) {
+                    return error!(EINTR);
+                }
+            } else if run_state.is_killable() {
+                if state.has_fatal_signal_pending() {
                     return error!(EINTR);
                 }
             } else if state.is_interrupt_pending() {
@@ -703,7 +745,9 @@ impl CurrentTask {
             if flags.contains(ResolveFlags::BENEATH) {
                 return error!(EXDEV);
             }
-            path = &path[1..];
+            while path.starts_with(b"/") {
+                path = &path[1..];
+            }
         }
 
         let dir = if path_is_absolute && !flags.contains(ResolveFlags::IN_ROOT) {
@@ -724,11 +768,18 @@ impl CurrentTask {
             file.name.to_passive()
         };
 
-        if !path.is_empty() {
-            if !dir.entry.node.is_dir() {
-                return error!(ENOTDIR);
-            }
-            dir.check_access(self, AccessCheck::for_internal(Access::EXEC))?;
+        // `AT_EMPTY_PATH` is the only case where both `path_is_absolute` and `!path.is_empty()`
+        // are false; `!path.is_empty()` alone is not sufficient because `/` strips to empty.
+        let result = if (path_is_absolute || !path.is_empty()) && !dir.entry.node.is_dir() {
+            error!(ENOTDIR)
+        } else if !path.is_empty() {
+            dir.check_access(self, AccessCheck::for_internal(Access::EXEC))
+        } else {
+            Ok(())
+        };
+        if let Err(e) = result {
+            confirm_fs_syscall_trace_if(|| dir.entry.node.fs().is_storage_backed());
+            return Err(e);
         }
         Ok((dir, path.into()))
     }
@@ -786,6 +837,7 @@ impl CurrentTask {
             LookupContext::new(if nofollow { SymlinkMode::NoFollow } else { SymlinkMode::Follow });
         context.update_for_path(path);
         let name = self.lookup_path(&mut context, dir, path)?;
+        confirm_fs_syscall_trace_if(|| name.entry.node.fs().is_storage_backed());
 
         // From <https://man7.org/linux/man-pages/man2/execveat.2.html>:
         //
@@ -847,23 +899,33 @@ impl CurrentTask {
             // When creating, look up and create the child in a single step under the parent's
             // children lock, like Linux's lookup_open(). A separate lookup first would just be
             // repeated under the lock, which costs an extra round trip on remote filesystems.
-            let (child, status) = parent.open_create_node(
+            match parent.open_create_node(
                 self,
                 basename,
                 mode.with_type(FileMode::IFREG),
                 DeviceId::NONE,
-            )?;
-            if status == CreationStatus::Created {
-                return Ok((child, true));
+            ) {
+                Ok((child, CreationStatus::Created)) => {
+                    confirm_fs_syscall_trace_if(|| child.entry.node.fs().is_storage_backed());
+                    return Ok((child, true));
+                }
+                Ok((child, CreationStatus::Existed)) => {
+                    // The child already exists. Resolve the node that was found rather than looking it
+                    // up again, which would revalidate it a second time. O_EXCL is only checked below,
+                    // after mounts have been entered, so that RESOLVE_NO_XDEV takes precedence over
+                    // EEXIST, as in Linux.
+                    parent.resolve_child(self, &mut child_context, child)
+                }
+                Err(e) => Err(e),
             }
-            // The child already exists. Resolve the node that was found rather than looking it
-            // up again, which would revalidate it a second time. O_EXCL is only checked below,
-            // after mounts have been entered, so that RESOLVE_NO_XDEV takes precedence over
-            // EEXIST, as in Linux.
-            parent.resolve_child(self, &mut child_context, child)
         } else {
             parent.lookup_child(self, &mut child_context, basename)
         };
+
+        match &child {
+            Ok(name) => confirm_fs_syscall_trace_if(|| name.entry.node.fs().is_storage_backed()),
+            Err(_) => confirm_fs_syscall_trace_if(|| parent.entry.node.fs().is_storage_backed()),
+        }
 
         match child {
             Ok(name) => {
@@ -898,6 +960,9 @@ impl CurrentTask {
                             self.resolve_open_path(context, &dir, path.as_ref(), mode, flags)
                         }
                         ResolvedSymlink::Node(target) => {
+                            confirm_fs_syscall_trace_if(|| {
+                                target.entry.node.fs().is_storage_backed()
+                            });
                             if target.entry.node.is_lnk() {
                                 return error!(ELOOP);
                             }
@@ -1549,6 +1614,19 @@ impl CurrentTask {
                 log_error!("Received unexpected task lifecycle exception");
                 ExceptionResult::Signal(SignalInfo::kernel(SIGSYS))
             }
+            zx::ExceptionType::PolicyError(zx::PolicyCode::SpinDetection { cpu }) => {
+                // A diagnostic from the Zircon scheduler and not an error in the task: the
+                // thread kept a CPU busy while other threads on it did not run. Resume it.
+                // The syscall loop requests a backtrace of the thread.
+                let registers = &self.thread_state.registers;
+                log_warn!(
+                    cpu;
+                    "Zircon reported this thread for keeping a CPU busy (pc {:#x}, sp {:#x})",
+                    registers.instruction_pointer_register(),
+                    registers.stack_pointer_register()
+                );
+                ExceptionResult::Handled
+            }
             zx::ExceptionType::PolicyError(policy_code) => {
                 log_error!(policy_code:?; "Received Zircon policy error exception");
                 ExceptionResult::Signal(SignalInfo::kernel(SIGSYS))
@@ -1864,7 +1942,9 @@ impl CurrentTask {
             seccomp_filters,
             robust_list_head,
             timerslack_ns,
+            None,
         ));
+        child.security_state = security::task_alloc_current_state(self);
         let parent_cpuset_path = self.read().cpuset_path.clone();
         child.task.write().cpuset_path = parent_cpuset_path;
 
@@ -2033,25 +2113,67 @@ impl CurrentTask {
         true
     }
 
+    /// If the thread group is stopping or stopped and this task is not in a ptrace-only stop,
+    /// finalizes the task (and thread group, if still stopping) into [`StopState::GroupStopped`].
+    ///
+    /// Returns the resulting thread-group stop state and any parent [`ThreadGroup`] to notify
+    /// after dropping locks.
+    fn finalize_group_stop_locked(
+        &self,
+        group_state: &mut ThreadGroupWriteGuard<'_>,
+        task_state: &mut TaskWriteGuard<'_>,
+        task_stop_state: &mut StopState,
+    ) -> (StopState, Option<ThreadGroupParent>) {
+        let mut group_stop_state = group_state.base.load_stopped();
+        if !group_stop_state.is_stopping_or_stopped()
+            || task_stop_state.ptrace_only()
+            || task_state.is_ptrace_listening()
+        {
+            return (group_stop_state, None);
+        }
+        let signal = group_state.last_signal.clone();
+        let (updated_group_state, parent) = group_state.finalize_group_stop();
+        group_stop_state = updated_group_state;
+        if group_stop_state == StopState::GroupStopped
+            && *task_stop_state != StopState::GroupStopped
+        {
+            let event = Some(PtraceEventData::new_from_event(PtraceEvent::Stop, 0));
+            task_state.set_stopped(StopState::GroupStopped, signal, Some(self), event);
+            *task_stop_state = StopState::GroupStopped;
+        }
+        (group_stop_state, parent)
+    }
+
     /// If the task is stopping, set it as stopped. Return whether the caller should stop.
     fn finalize_stop_state(&self) -> bool {
         let stopped = self.load_stopped();
-
-        // Stopping because the thread group is stopping.
-        // Try to flip to GroupStopped - will fail if we shouldn't.
-        if self.thread_group().set_stopped(StopState::GroupStopped, None, true)
-            == StopState::GroupStopped
+        if !stopped.is_stopping_or_stopped()
+            && !self.thread_group().load_stopped().is_stopping_or_stopped()
         {
-            let signal = self.thread_group().read().last_signal.clone();
-            // stopping because the thread group has stopped
-            let event = Some(PtraceEventData::new_from_event(PtraceEvent::Stop, 0));
-            self.write().set_stopped(StopState::GroupStopped, signal, Some(self), event);
+            return false;
+        }
+
+        let (task_stop_state, parent_to_notify) = {
+            let mut group_state = self.thread_group().write();
+            let mut task_state = self.write();
+            let mut task_stop_state = self.load_stopped();
+            let (_, parent) = self.finalize_group_stop_locked(
+                &mut group_state,
+                &mut task_state,
+                &mut task_stop_state,
+            );
+            (task_stop_state, parent)
+        };
+        if let Some(parent) = parent_to_notify {
+            parent.notify_child_status();
+        }
+        if task_stop_state == StopState::GroupStopped {
             return true;
         }
 
         // Stopping because the task is stopping
-        if stopped.is_stopping_or_stopped() {
-            if let Ok(stopped) = stopped.finalize() {
+        if task_stop_state.is_stopping_or_stopped() {
+            if let Ok(stopped) = task_stop_state.finalize() {
                 self.set_stopped_and_notify(stopped, None);
             }
             return true;
@@ -2068,7 +2190,7 @@ impl CurrentTask {
             // If we've exited, unstop the threads and return without notifying
             // waiters.
             if self.is_exitted() {
-                self.thread_group().set_stopped(StopState::ForceAwake, None, false);
+                self.thread_group().set_stopped(StopState::ForceAwake, None);
                 self.write().set_stopped(StopState::ForceAwake, None, Some(self), None);
                 return;
             }
@@ -2089,6 +2211,31 @@ impl CurrentTask {
     /// tasks before notifying any ptracer of this task's exit.
     pub fn kill_thread_group(&mut self, exit_status: ExitStatus) {
         Arc::clone(self.thread_group()).kill(exit_status, Some(self));
+    }
+
+    /// Blocks the caller until the task has exited or executed execve(). This is used to implement
+    /// vfork() and clone(... CLONE_VFORK, ...).
+    pub fn wait_for_execve(&self, task_to_wait: Weak<Task>) -> Result<(), Errno> {
+        let event = task_to_wait.upgrade().and_then(|t| t.vfork_event.clone());
+        if let Some(event) = event {
+            let waiter = Waiter::new();
+            let signal_handler = SignalHandler {
+                inner: SignalHandlerInner::None,
+                event_handler: EventHandler::None,
+                err_code: None,
+            };
+            let _canceler = waiter
+                .wake_on_zircon_signals(event.as_ref(), zx::Signals::USER_0, signal_handler)
+                .map_err(|status| from_status_like_fdio!(status))?;
+            // `wake_on_zircon_signals` is edge-triggered, so check whether `USER_0` was
+            // already asserted before the async wait was registered.
+            if event.wait_one(zx::Signals::USER_0, zx::MonotonicInstant::INFINITE_PAST).to_result()
+                == Err(zx::Status::TIMED_OUT)
+            {
+                waiter.wait_killable(self)?;
+            }
+        }
+        Ok(())
     }
 
     /// The flags indicates only the flags as in clone3(), and does not use the low 8 bits for the

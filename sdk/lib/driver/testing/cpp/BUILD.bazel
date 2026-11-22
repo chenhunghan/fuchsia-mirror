@@ -2,27 +2,66 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//build/bazel/rules/idk:idk_cc_source_library.bzl", "idk_cc_source_library")
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
-)
+package(default_applicable_licenses = ["//:license"])
 
-cc_library(
-    name = "scoped_global_logger",
-    testonly = True,
+idk_cc_source_library(
+    name = "cpp",
     srcs = [
-        "scoped_global_logger.cc",
-        "scoped_global_logger.h",
+        "driver_runtime.cc",
+        "internal/driver_lifecycle.cc",
+        "internal/test_environment.cc",
+        "test_node.cc",
     ],
     hdrs = [
-        "scoped_global_logger.h",
+        "driver_lifecycle.h",
+        "driver_runtime.h",
+        "driver_test.h",
+        "health_test_utils.h",
+        "test_node.h",
     ],
-    include_prefix = "lib/driver/testing/cpp",
-    target_compatible_with = ["@platforms//os:fuchsia"],
+    api_area = "Driver SDK",
+    category = "partner",
+    hdrs_for_internal_use = [
+        "internal/driver_lifecycle.h",
+        "internal/internals.h",
+        "internal/test_environment.h",
+    ],
+    idk_name = "driver_testing_cpp",
+    implementation_deps = [
+        "//sdk/lib/async-default",
+    ],
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    # TODO(https://fxbug.dev/578180585): Use the drivers package_group() once
+    # available.
+    visibility = ["//:__subpackages__"],
     deps = [
-        "@fuchsia_sdk//pkg/async-loop-cpp",
-        "@fuchsia_sdk//pkg/driver_logging_cpp",
+        "//sdk/lib/async_patterns/testing/cpp",
+        "//sdk/lib/driver/component/cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_env_cpp",
+        "//sdk/lib/driver/runtime:driver_runtime_testing",
+        "//sdk/lib/driver/runtime/testing/cpp",
+        "//src/devices/bin/driver_runtime",
+    ],
+)
+
+idk_cc_source_library(
+    name = "scoped_global_logger",
+    srcs = ["scoped_global_logger.cc"],
+    hdrs = ["scoped_global_logger.h"],
+    api_area = "Driver SDK",
+    category = "partner",
+    idk_name = "driver_testing_scoped_global_logger_cpp",
+    include_base = "//sdk",
+    public_configs = ["//sdk/config"],
+    stable = True,
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/driver/logging/cpp",
     ],
 )

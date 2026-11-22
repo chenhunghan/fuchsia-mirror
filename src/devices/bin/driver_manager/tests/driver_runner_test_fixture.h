@@ -6,7 +6,7 @@
 #define SRC_DEVICES_BIN_DRIVER_MANAGER_TESTS_DRIVER_RUNNER_TEST_FIXTURE_H_
 
 #include <fidl/fuchsia.component.decl/cpp/test_base.h>
-#include <fidl/fuchsia.component.sandbox/cpp/test_base.h>
+#include <fidl/fuchsia.component.runtime/cpp/test_base.h>
 #include <fidl/fuchsia.component/cpp/test_base.h>
 #include <fidl/fuchsia.driver.framework/cpp/test_base.h>
 #include <fidl/fuchsia.driver.host/cpp/test_base.h>
@@ -21,6 +21,8 @@
 #include <lib/fit/defer.h>
 #include <lib/inspect/cpp/reader.h>
 #include <lib/inspect/testing/cpp/inspect.h>
+
+#include <unordered_set>
 
 #include <bind/fuchsia/platform/cpp/bind.h>
 
@@ -136,6 +138,34 @@ class TestElementControl final
     completer.Reply(zx::ok());
   }
 
+  void AddDependency(AddDependencyRequest& request,
+                     AddDependencyCompleter::Sync& completer) override {
+    if (request.requires_token().has_value()) {
+      zx_koid_t koid = GetKoid(*request.requires_token());
+      if (!dependency_koids_.insert(koid).second) {
+        completer.Reply(fit::error(fuchsia_power_broker::ModifyDependencyError::kAlreadyExists));
+        return;
+      }
+    }
+    completer.Reply(fit::ok());
+  }
+
+  void RemoveDependency(RemoveDependencyRequest& request,
+                        RemoveDependencyCompleter::Sync& completer) override {
+    if (request.requires_token().has_value()) {
+      zx_koid_t koid = GetKoid(*request.requires_token());
+      if (dependency_koids_.erase(koid) == 0) {
+        completer.Reply(fit::error(fuchsia_power_broker::ModifyDependencyError::kNotFound));
+        return;
+      }
+    }
+    completer.Reply(fit::ok());
+  }
+
+  bool HasDependencyOn(const zx::event& token) const {
+    return dependency_koids_.contains(GetKoid(token));
+  }
+
   void handle_unknown_method(
       fidl::UnknownMethodMetadata<fuchsia_power_broker::ElementControl> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override {}
@@ -143,8 +173,15 @@ class TestElementControl final
   void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {}
 
  private:
+  static zx_koid_t GetKoid(const zx::event& token) {
+    zx_info_handle_basic_t info{};
+    ZX_ASSERT(token.get_info(ZX_INFO_HANDLE_BASIC, &info, sizeof(info), nullptr, nullptr) == ZX_OK);
+    return info.koid;
+  }
+
   async_dispatcher_t* dispatcher_;
   fidl::ServerBindingGroup<fuchsia_power_broker::ElementControl> bindings_;
+  std::unordered_set<zx_koid_t> dependency_koids_;
 };
 
 class TestLessor final : public fidl::testing::TestBase<fuchsia_power_broker::Lessor> {
@@ -223,6 +260,9 @@ class TestTopology final : public fidl::testing::TestBase<fuchsia_power_broker::
     if (request.lessor_channel().has_value()) {
       lessor_.Bind(std::move(request.lessor_channel().value()));
     }
+    if (request.element_name() == "AllDrivers" && request.element_runner().has_value()) {
+      all_drivers_runner_.Bind(std::move(*request.element_runner()), dispatcher_);
+    }
     completer.Reply(zx::ok());
   }
 
@@ -230,6 +270,16 @@ class TestTopology final : public fidl::testing::TestBase<fuchsia_power_broker::
     lease_requests_.push_back(std::move(request));
     completer.Reply(fit::ok());
   }
+
+  void SetAllDriversLevel(uint8_t level) {
+    ZX_ASSERT(all_drivers_runner_.is_valid());
+    all_drivers_runner_->SetLevel(level).Then(
+        [](fidl::WireUnownedResult<fuchsia_power_broker::ElementRunner::SetLevel>& result) {
+          EXPECT_TRUE(result.ok());
+        });
+  }
+
+  const TestElementControl& element_control() const { return element_control_; }
 
   std::vector<LeaseRequest>& lease_requests() { return lease_requests_; }
 
@@ -243,6 +293,7 @@ class TestTopology final : public fidl::testing::TestBase<fuchsia_power_broker::
   fidl::ServerBindingGroup<fuchsia_power_broker::Topology> bindings_;
   TestElementControl element_control_;
   TestLessor lessor_;
+  fidl::WireClient<fuchsia_power_broker::ElementRunner> all_drivers_runner_;
   std::vector<LeaseRequest> lease_requests_;
 };
 
@@ -373,30 +424,20 @@ class TestIntrospector : public fidl::testing::TestBase<fuchsia_component::Intro
   bool enabled_ = false;
 };
 
-class TestCapStore : public fidl::testing::TestBase<fuchsia_component_sandbox::CapabilityStore> {
+class TestCapabilities : public fidl::testing::TestBase<fuchsia_component_runtime::Capabilities> {
  public:
-  void Import(ImportRequest& request, ImportCompleter::Sync& completer) override {
-    completer.Reply(fit::ok());
-  }
   void DictionaryCopy(DictionaryCopyRequest& request,
                       DictionaryCopyCompleter::Sync& completer) override {
     completer.Reply(fit::ok());
   }
-  void Export(ExportRequest& request, ExportCompleter::Sync& completer) override {
-    zx::eventpair d_ep1, d_ep2;
-    ZX_ASSERT(zx::eventpair::create(0, &d_ep1, &d_ep2) == ZX_OK);
-    fuchsia_component_sandbox::DictionaryRef dict_ref{{.token = std::move(d_ep1)}};
-    completer.Reply(
-        fit::ok(fuchsia_component_sandbox::Capability::WithDictionary(std::move(dict_ref))));
-  }
 
  private:
   void handle_unknown_method(
-      fidl::UnknownMethodMetadata<fuchsia_component_sandbox::CapabilityStore> metadata,
+      fidl::UnknownMethodMetadata<fuchsia_component_runtime::Capabilities> metadata,
       fidl::UnknownMethodCompleter::Sync& completer) override {}
 
   void NotImplemented_(const std::string& name, fidl::CompleterBase& completer) override {
-    printf("Not implemented: CapabilityStore::%s\n", name.c_str());
+    printf("Not implemented: Capabilities::%s\n", name.c_str());
   }
 };
 
@@ -577,7 +618,7 @@ class DriverRunnerTestBase : public gtest::TestLoopFixture {
 
   fidl::ClientEnd<fuchsia_component::Realm> ConnectToRealm();
   fidl::ClientEnd<fuchsia_component::Introspector> ConnectToIntrospector();
-  fidl::ClientEnd<fuchsia_component_sandbox::CapabilityStore> ConnectToCapabilityStore();
+  fidl::ClientEnd<fuchsia_component_runtime::Capabilities> ConnectToCapabilities();
   fidl::ClientEnd<fuchsia_driver_token::Debug> ConnectToDebug();
 
   void EnableIntrospector() { introspector_.Enable(); }
@@ -700,13 +741,13 @@ class DriverRunnerTestBase : public gtest::TestLoopFixture {
  protected:
   TestRealm realm_;
   TestIntrospector introspector_;
-  TestCapStore cap_store_;
+  TestCapabilities capabilities_server_;
   TestDirectory driver_host_dir_{dispatcher()};
   TestDirectory driver_dir_{dispatcher()};
   TestDriverHost driver_host_;
   fidl::ServerBindingGroup<fuchsia_component::Realm> realm_bindings_;
   fidl::ServerBindingGroup<fuchsia_component::Introspector> introspector_bindings_;
-  fidl::ServerBindingGroup<fuchsia_component_sandbox::CapabilityStore> capstore_bindings_;
+  fidl::ServerBindingGroup<fuchsia_component_runtime::Capabilities> capabilities_bindings_;
   fidl::ServerBindingGroup<fdh::DriverHost> driver_host_bindings_;
 
   std::shared_ptr<Devfs> devfs_;

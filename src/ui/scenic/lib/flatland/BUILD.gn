@@ -113,6 +113,7 @@ group("unittests") {
   public_deps = [
     "buffers/tests:unittests",
     "engine/tests:unittests",
+    "image_import/tests:unittests",
     "renderer/tests:unittests",
     "tests:unittests",
   ]

@@ -347,10 +347,10 @@ verify_file_path(
     name = "verify_test_shared_library_file_path",
     testonly = True,
     # The actual `cc_library` target is not a shared object.
-    expected_file_path = "build/bazel/bazel_idk/tests/libtest-shared-library_impl.a",
+    expected_file_path = "build/bazel/bazel_idk/tests/libtest-shared-library.inner_impl.a",
     # ":test-shared-library" is the `cc_import()`, which exposes `CcInfo` but
-    # not `files` in `DefaultInfo`, so we must use the "..._impl" target instead.
-    target = ":test-shared-library_impl",
+    # not `files` in `DefaultInfo`, so we must use the "...inner_impl" target instead.
+    target = ":test-shared-library.inner_impl",
 )
 
 verify_file_path(

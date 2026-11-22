@@ -11,11 +11,20 @@
             rules: { "fuchsia.acpi.HID": "MSFT0101" },
         },
     },
+    capabilities: [
+        { service: "fuchsia.hardware.tpmimpl.Service" },
+    ],
     use: [
         {
             name: "default",
             service: "fuchsia.hardware.acpi.Service",
             generate_bind_rule: false,
+        },
+    ],
+    expose: [
+        {
+            service: "fuchsia.hardware.tpmimpl.Service",
+            from: "self",
         },
     ],
 }

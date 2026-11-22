@@ -14,8 +14,8 @@
 #include "../dlfcn/dl/test/module-phdr-info.h"
 #include "../dlfcn/dlfcn-abi.h"
 #include "../ld/ld-abi.h"
+#include "../test/unittest.h"
 #include "src/__support/common.h"
-#include "test/UnitTest/Test.h"
 
 namespace LIBC_NAMESPACE_DECL {
 namespace {

@@ -23,11 +23,16 @@ use memalloc::NormalizedRangeIterator;
 /// actual RAM within an arena.
 pub const MAX_WASTED_BYTES: u64 = 0x8_4000; // 528 KiB
 
-/// The number of bytes of bookkeeping data (a `vm_page_t`) which tracks one page of memory.
-const BOOKKEEPING_BYTES_PER_PAGE: u64 = 48;
+/// The number of bytes of bookkeeping data (a `VmPage` / `vm_page_t`) which tracks one page of
+/// memory.
+pub const BOOKKEEPING_BYTES_PER_PAGE: u64 = 48;
+
+/// The required alignment in bytes of page bookkeeping entries (a `VmPage` / `vm_page_t`).
+pub const BOOKKEEPING_ALIGNMENT: u64 = 8;
 
 const _: () = {
     assert!(BOOKKEEPING_BYTES_PER_PAGE > 0);
+    assert!(BOOKKEEPING_ALIGNMENT.is_power_of_two());
 };
 
 /// A physical memory range type with no usage information.
@@ -166,8 +171,8 @@ where
 {
     /// Construct a selection iterator.
     ///
-    /// It is a compile time requirement that `PAGE_SIZE` both be a power of two and greater than
-    /// `BOOKKEEPING_BYTES_PER_PAGE`.
+    /// It is a compile time requirement that `PAGE_SIZE` be a power of two and at least as large
+    /// as both `BOOKKEEPING_BYTES_PER_PAGE` and `BOOKKEEPING_ALIGNMENT`.
     pub fn new(
         ranges: impl IntoIterator<IntoIter = Ranges>,
         max_wasted_bytes: u64,
@@ -175,6 +180,7 @@ where
         const {
             assert!(PAGE_SIZE.is_power_of_two());
             assert!(BOOKKEEPING_BYTES_PER_PAGE <= PAGE_SIZE);
+            assert!(BOOKKEEPING_ALIGNMENT <= PAGE_SIZE);
         }
         SelectionIterator {
             ranges: ranges
@@ -346,9 +352,9 @@ where
                 // No need to backtrack on the next call to `next()`.
                 self.ranges = inner_iter;
             }
-            return Some(result);
+            Some(result)
         } else {
-            return Some(Err(SelectionError::NoBookKeepingSpace(start_of_arena)));
+            Some(Err(SelectionError::NoBookKeepingSpace(start_of_arena)))
         }
     }
 }

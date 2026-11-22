@@ -20,8 +20,8 @@ use std::sync::Mutex;
 use tempfile::TempDir;
 
 use discovery;
-use ffx_target::{Resolution, TargetInfoQuery};
-use target_behavior::{DirectConnector, target_interface};
+use ffx_target::{Resolution, TargetConnector, TargetInfoQuery};
+use target_holders::target_interface;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IsolatedEmulatorError {
@@ -323,8 +323,8 @@ impl IsolatedEmulator {
         fho::FhoEnvironment::new_with_args(self.env_context(), &self.make_args(&[])[..])
     }
 
-    /// Sets up a fake direct connector for the emulator to avoid ambiguity in discovery.
-    pub async fn setup_fake_direct_connector(
+    /// Sets up a fake target connector for the emulator to avoid ambiguity in discovery.
+    pub async fn setup_fake_target_connector(
         &self,
         fho_env: &fho::FhoEnvironment,
     ) -> Result<(), IsolatedEmulatorError> {
@@ -346,9 +346,9 @@ impl IsolatedEmulator {
         };
 
         let resolution = Resolution::from_target_handle(th)?;
-        let connector = DirectConnector::from_resolution_for_test(resolution);
+        let connector = TargetConnector::from_resolution_for_test(resolution);
 
-        target_interface(&fho_env).set_behavior_for_test(connector);
+        target_interface(&fho_env).set_connector_for_test(connector);
         Ok(())
     }
 

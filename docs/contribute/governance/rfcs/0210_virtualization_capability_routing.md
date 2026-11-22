@@ -44,7 +44,7 @@ part, based  the guidance in [RFC-0092 -
 Sessions](/docs/contribute/governance/rfcs/0092_sessions.md) and [RFC-0194 -
 Addendum: Sessions](/docs/contribute/governance/rfcs/0194_addendum_sessions.md).
 For more details on this see [Security
-Considerations](#security_considerations).
+Considerations](#security-considerations).
 
 
 ## Stakeholders
@@ -387,7 +387,7 @@ capabilities aside from `GuestLifecycle`, so we could support launching these
 components into a collection of their own to reduce the number of custom
 core-realm shards are needed to support virtualization workflows.
 
-## Security considerations
+## Security considerations {:#security-considerations}
 
 The `vmm` needs some privileged capabilities to properly operate (ex: the
 `HypervisorResource`, some `/dev` directories). This design avoids exposing

@@ -33,6 +33,9 @@ void RegisterMmioProcessor::MmioWrite(uint32_t value, zx_off_t offset) {
 }
 
 uint32_t RegisterMmioProcessor::MmioRead(zx_off_t offset) {
+  if (auto it = read_handlers_.find(static_cast<RegisterMap>(offset)); it != read_handlers_.end()) {
+    return (it->second)(mock_device_);
+  }
   return mock_device_.GetRegisters()->Read<uint32_t>(offset);
 }
 

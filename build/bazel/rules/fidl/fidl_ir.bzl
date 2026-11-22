@@ -35,6 +35,12 @@ def _fidlc_impl(ctx):
     response_file = ctx.actions.declare_file("%s.args" % file_basename)
     libraries_file = ctx.actions.declare_file("%s.libraries" % file_basename)
     json_representation = ctx.actions.declare_file("%s.fidl.json" % file_basename)
+    fidlc_outputs = [json_representation]
+    index_json_files = []
+    if "output_index_json" in ctx.attr.experimental_flags:
+        index_json_representation = ctx.actions.declare_file("%s.fidl.index.json" % file_basename)
+        fidlc_outputs.append(index_json_representation)
+        index_json_files.append(index_json_representation)
 
     dep_libraries = [dep[FidlLibraryInfo].libraries_file for dep in ctx.attr.deps]
     srcs_depset = depset(
@@ -79,11 +85,11 @@ def _fidlc_impl(ctx):
         executable = ctx.executable._fidlc,
         arguments = ["@" + response_file.path],
         inputs = [response_file] + srcs_depset.to_list(),
-        outputs = [json_representation],
+        outputs = fidlc_outputs,
         mnemonic = "Fidlc",
     )
 
-    return [
+    providers = [
         DefaultInfo(files = depset([json_representation])),
         FidlLibraryInfo(
             name = library_name,
@@ -91,6 +97,9 @@ def _fidlc_impl(ctx):
             libraries_file = libraries_file,
         ),
     ]
+    if index_json_files:
+        providers.append(OutputGroupInfo(index_json = depset(index_json_files)))
+    return providers
 
 _fidlc = rule(
     doc = "Runs the FIDL compiler to generate the FIDL IR.",
@@ -163,18 +172,24 @@ def _is_exempt_from_linting(package, excluded_checks):
     # It's possible subdirectories of the packages below will need to be added.
     _fidl_test_packages = [
         "//sdk/lib/fidl/cpp/tests",
+        "//sdk/lib/fidl/cpp/tests/hlcpp_conversion/fidl",
+        "//sdk/lib/fidl/cpp/tests/integration",
         "//sdk/testing/fidl",
         "//sdk/testing/fidl/protocols_tests",
-        "//sdk/testing/fidl/types_tests",
+        "//sdk/testing/fidl/types_tests",  # Bazel-only.
         "//src/devices/tools/fidlgen_banjo/tests/fidl",
         "//src/lib/fidl/c/coding_tables_tests",  # Bazel-only.
         "//src/lib/fidl/c/walker_tests",
         "//src/lib/fidl/llcpp/tests",
+        "//src/lib/fidl/llcpp/tests/integration",
+        "//src/lib/fidl/llcpp/tests/message_container",
+        "//src/lib/fidl/llcpp/tests/transport",
         "//src/lib/fidl/rust/external_tests",
         "//src/tests/benchmarks/fidl/benchmark_suite",
         "//src/tests/fidl",
         "//src/tests/fidl/compatibility/fidl",
         "//src/tests/fidl/conformance_suite",
+        "//src/tests/fidl/dangerous_identifiers",
         "//src/tests/fidl/dynsuite/client_suite/fidl",
         "//src/tests/fidl/dynsuite/server_suite/fidl",
         "//tools/fidl/fidlc/testdata",
@@ -280,6 +295,13 @@ _fidl_lint = rule(
 # LINT.ThenChange(//build/fidl/fidl_library.gni:lint)
 
 def _validated_ir_file_impl(ctx):
+    output_groups = {
+        "_validation": depset(ctx.files.validation_targets),
+    }
+    if OutputGroupInfo in ctx.attr.unvalidated_file:
+        unvalidated_output_groups = ctx.attr.unvalidated_file[OutputGroupInfo]
+        if hasattr(unvalidated_output_groups, "index_json"):
+            output_groups["index_json"] = unvalidated_output_groups.index_json
     return [
         # Allow the target to be used as the IR file.
         ctx.attr.unvalidated_file[DefaultInfo],
@@ -287,7 +309,7 @@ def _validated_ir_file_impl(ctx):
         # as a `deps` by `_fidlc()`.
         ctx.attr.unvalidated_file[FidlLibraryInfo],
         # Ensure the `validation_targets` are built.
-        OutputGroupInfo(_validation = depset(ctx.files.validation_targets)),
+        OutputGroupInfo(**output_groups),
     ]
 
 _validated_ir_file = rule(
@@ -401,6 +423,15 @@ def fidl_ir(
             name = name,
             unvalidated_file = fidlc_target_name,
             validation_targets = [lint_target_name, validate_json_target_name],
+            testonly = testonly,
+            visibility = visibility,
+        )
+
+    if "output_index_json" in experimental_flags:
+        native.filegroup(
+            name = "%s_index_json" % name,
+            srcs = [fidlc_target_name if skip_linting_and_validation else name],
+            output_group = "index_json",
             testonly = testonly,
             visibility = visibility,
         )

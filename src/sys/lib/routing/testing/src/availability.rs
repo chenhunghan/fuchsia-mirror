@@ -9,7 +9,7 @@ use crate::{
 use cm_rust::offer::*;
 use cm_rust::*;
 use cm_rust_testing::*;
-use fidl_fuchsia_io as fio;
+use fidl_fuchsia_io_common as fio;
 use moniker::Moniker;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};

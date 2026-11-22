@@ -2,13 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef LIB_C_TEST_SAFE_ZERO_CONSTRUCTION_H_
+#define LIB_C_TEST_SAFE_ZERO_CONSTRUCTION_H_
+
 #include <array>
 #include <concepts>
 #include <cstddef>
 
-#include <zxtest/zxtest.h>
-
 #include "src/__support/common.h"
+#include "test/UnitTest/MemoryMatcher.h"
+#include "unittest.h"
 
 namespace LIBC_NAMESPACE_DECL {
 
@@ -23,7 +26,10 @@ inline void ExpectSafeZeroConstruction() {
   new (storage.data()) T();
 
   static constexpr Bytes kZero{};
-  EXPECT_BYTES_EQ(storage.data(), kZero.data(), kZero.size());
+  EXPECT_MEM_EQ(testing::MemoryView(reinterpret_cast<const char*>(kZero.data()), kZero.size()),
+                testing::MemoryView(reinterpret_cast<const char*>(storage.data()), storage.size()));
 }
 
 }  // namespace LIBC_NAMESPACE_DECL
+
+#endif  // LIB_C_TEST_SAFE_ZERO_CONSTRUCTION_H_

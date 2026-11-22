@@ -37,12 +37,6 @@ class TimerSlack {
 
   constexpr slack_mode mode() const { return mode_; }
 
-  bool operator==(const TimerSlack& rhs) const {
-    return amount_ == rhs.amount_ && mode_ == rhs.mode_;
-  }
-
-  bool operator!=(const TimerSlack& rhs) const { return !operator==(rhs); }
-
  private:
   static const TimerSlack none_;
 
@@ -53,12 +47,6 @@ class TimerSlack {
 inline constexpr TimerSlack TimerSlack::none_{0, TIMER_SLACK_CENTER};
 static_assert(sizeof(TimerSlack) == 16);
 static_assert(alignof(TimerSlack) == 8);
-
-class Deadline;
-extern "C" {
-zx_time_t rust_deadline_earliest(const Deadline* deadline);
-zx_time_t rust_deadline_latest(const Deadline* deadline);
-}
 
 // Deadline specifies when a timer or event should occur.
 //
@@ -93,20 +81,12 @@ class Deadline {
 
   constexpr zx_time_t when() const { return when_; }
 
-  constexpr TimerSlack slack() const { return slack_; }
-
-  // Returns the earliest point in time at which this deadline may occur.
-  zx_time_t earliest() const { return rust_deadline_earliest(this); }
-
-  // Returns the latest point in time at which this deadline may occur.
-  zx_time_t latest() const { return rust_deadline_latest(this); }
-
  private:
   static const Deadline infinite_;
   static const Deadline infinite_past_;
 
   const zx_time_t when_;
-  const TimerSlack slack_;
+  [[maybe_unused]] const TimerSlack slack_;
 };
 
 inline constexpr Deadline Deadline::infinite_{ZX_TIME_INFINITE, TimerSlack::none()};

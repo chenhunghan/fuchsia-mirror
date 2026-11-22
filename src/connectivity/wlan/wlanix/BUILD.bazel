@@ -49,6 +49,7 @@ fidl_library(
         "//vendor/google:__subpackages__",
     ],
     deps = [
+        "//sdk/fidl/fuchsia.power.system",
         "//sdk/fidl/fuchsia.wlan.ieee80211",
         "//sdk/fidl/fuchsia.wlan.stats",
         "//zircon/vdso/zx",
@@ -175,7 +176,6 @@ fx_component(
 
 fx_package(
     name = "wlanix",
-    package_name = "wlanix",
     components = [":component"],
     visibility = ["//bundles/assembly:__subpackages__"],
 )

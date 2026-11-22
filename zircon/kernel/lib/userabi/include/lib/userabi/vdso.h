@@ -7,12 +7,10 @@
 #ifndef ZIRCON_KERNEL_LIB_USERABI_INCLUDE_LIB_USERABI_VDSO_H_
 #define ZIRCON_KERNEL_LIB_USERABI_INCLUDE_LIB_USERABI_VDSO_H_
 
-#include <debug.h>
 #include <zircon/compiler.h>
 #include <zircon/types.h>
 
 #include <fbl/ref_ptr.h>
-#include <vm/vm_address_region.h>
 #include <vm/vm_object.h>
 
 __BEGIN_CDECLS
@@ -20,8 +18,6 @@ __BEGIN_CDECLS
 // |vmo| must not be null.
 bool rust_vdso_vmo_is_vdso(const VmObject* vmo);
 bool rust_vdso_valid_code_mapping(uint64_t vmo_offset, size_t size);
-// |code_mapping| must not be null and its lock must be held.
-uintptr_t rust_vdso_base_address(const VmMapping* code_mapping);
 void rust_vdso_set_monotonic_ticks_offset(zx_ticks_t new_offset);
 
 __END_CDECLS
@@ -36,13 +32,6 @@ class VDso {
 
   static bool valid_code_mapping(uint64_t vmo_offset, size_t size) {
     return rust_vdso_valid_code_mapping(vmo_offset, size);
-  }
-
-  // Given VmAspace::vdso_code_mapping_, return the vDSO base address.
-  static uintptr_t base_address(const fbl::RefPtr<VmMapping>& code_mapping)
-      TA_REQ(code_mapping->lock()) {
-    DEBUG_ASSERT(code_mapping);
-    return rust_vdso_base_address(code_mapping.get());
   }
 
   // Sets the monotonic ticks offset in all of the vDSO variants' TimeValues structure. This will

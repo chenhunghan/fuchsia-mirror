@@ -4,7 +4,7 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-use super::userabi_ffi::{HandoffEndElf, ZERO_FILL};
+use super::elf::HandoffEndElf;
 use crate::arch_rs;
 #[cfg(target_arch = "aarch64")]
 use crate::arch_rs::arm64::arch_quirks_needs_arm_erratum_858921_mitigation;
@@ -41,6 +41,7 @@ use core::sync::atomic::{AtomicI64, AtomicPtr, Ordering};
 use debug::dprintf;
 use debug::ltracef;
 use fbl::RefPtr;
+use handoff::PhysElfImage;
 use kalloc::Box;
 use ksync::LockToken;
 use page::SIZE as PAGE_SIZE;
@@ -480,7 +481,8 @@ fn set_time_values(vmo: &RefPtr<VmObject>) {
             // the alternative if it is not needed, but at least it will read correctly
             // on all cores.
             //
-            // see arch/quirks.h for details about the quirk itself.
+            // see `arch_quirks_needs_arm_erratum_858921_mitigation` for details about the
+            // quirk itself.
             let wait_status = mp::wait_for_all_cpus_ready(Deadline::no_slack(InstantUnknown(0)));
             if wait_status.is_err()
                 // SAFETY: Only evaluated when `mp::wait_for_all_cpus_ready` succeeded, i.e. every
@@ -699,7 +701,7 @@ impl VDso {
         // Check the ELF segments are valid for the vDSO.
         for segment in &*elf_image.mappings {
             assert!(
-                !segment.perms.writable() && segment.paddr != ZERO_FILL,
+                !segment.perms.writable() && segment.paddr != PhysElfImage::ZERO_FILL,
                 "vDSO cannot have writable segment [{:#x}, {:#x})",
                 segment.vaddr,
                 segment.vaddr + segment.size
@@ -716,7 +718,7 @@ impl VDso {
             }
         }
 
-        let vmo = elf_image.vmo.clone().expect("vDSO VMO missing");
+        let vmo = elf_image.vmo.clone();
         let mut vmo_kernel_handles: [Option<KernelHandle<VmObjectDispatcher>>;
             Self::NUM_VDSO_VARIANTS] = [const { None }; Self::NUM_VDSO_VARIANTS];
 
@@ -882,7 +884,6 @@ impl VDso {
             vdso_vmo.clone(),
             vdso_code::VDSO_DATA_TIME_VALUES,
             vdso_code::VDSO_DATA_TIME_VALUES_SIZE,
-            b"vdso time values",
         )?;
 
         // Store the pointer to the actual TimeValues structure to avoid having to call

@@ -5,10 +5,15 @@
 #ifndef LIB_SYS_COMPONENT_CPP_TESTING_SCOPED_CHILD_H_
 #define LIB_SYS_COMPONENT_CPP_TESTING_SCOPED_CHILD_H_
 
+#include <fidl/fuchsia.component.decl/cpp/fidl.h>
+#include <fidl/fuchsia.component/cpp/fidl.h>
+#include <fidl/fuchsia.io/cpp/fidl.h>
 #include <fuchsia/component/cpp/fidl.h>
 #include <fuchsia/component/decl/cpp/fidl.h>
 #include <fuchsia/io/cpp/fidl.h>
 #include <lib/async/dispatcher.h>
+#include <lib/component/incoming/cpp/clone.h>
+#include <lib/fidl/cpp/client.h>
 #include <lib/fidl/cpp/interface_handle.h>
 #include <lib/fidl/cpp/interface_request.h>
 #include <lib/fidl/cpp/wire/connect_service.h>
@@ -21,6 +26,10 @@
 #include <zircon/types.h>
 
 #include <memory>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <utility>
 
 namespace component_testing {
 
@@ -55,6 +64,22 @@ class ScopedChild final {
   static ScopedChild New(std::string collection, std::string url,
                          std::shared_ptr<sys::ServiceDirectory> svc = nullptr);
 
+  // Create a dynamic child component using the fuchsia.component.Realm API.
+  static ScopedChild New(fidl::ClientEnd<fuchsia_component::Realm> realm, std::string collection,
+                         std::string name, std::string url) ZX_AVAILABLE_SINCE(NEXT);
+
+  // Same as above with a randomly generated `name`.
+  static ScopedChild New(fidl::ClientEnd<fuchsia_component::Realm> realm, std::string collection,
+                         std::string url) ZX_AVAILABLE_SINCE(NEXT);
+
+  // Create a dynamic child component using the fuchsia.component.Realm API via `svc`.
+  static ScopedChild New(std::string collection, std::string name, std::string url,
+                         fidl::ClientEnd<fuchsia_io::Directory> svc) ZX_AVAILABLE_SINCE(NEXT);
+
+  // Same as above with a randomly generated `name`.
+  static ScopedChild New(std::string collection, std::string url,
+                         fidl::ClientEnd<fuchsia_io::Directory> svc) ZX_AVAILABLE_SINCE(NEXT);
+
   ~ScopedChild();
 
   ScopedChild(ScopedChild&&) = default;
@@ -64,10 +89,22 @@ class ScopedChild final {
   ScopedChild& operator=(const ScopedChild&) = delete;
 
   using TeardownCallback = fit::function<void(fit::result<fuchsia::component::Error>)>;
+  using NaturalTeardownCallback = fit::function<void(fit::result<fuchsia_component::Error>)>;
+
   // Calls fuchsia.component/Realm.DestroyChild asynchronously on |dispatcher|.
   // |callback| will be invoked when Component Manager has completed
   // the realm teardown.
   void Teardown(async_dispatcher_t* dispatcher, TeardownCallback callback);
+
+  // Natural bindings overload of |Teardown|.
+  template <typename Callback,
+            typename = std::enable_if_t<std::conjunction_v<
+                std::negation<
+                    std::is_invocable_r<void, Callback, fit::result<fuchsia::component::Error>>>,
+                std::is_invocable_r<void, Callback, fit::result<fuchsia_component::Error>>>>>
+  void Teardown(async_dispatcher_t* dispatcher, Callback&& callback) ZX_AVAILABLE_SINCE(NEXT) {
+    TeardownNatural(dispatcher, NaturalTeardownCallback(std::forward<Callback>(callback)));
+  }
 
   // Connect to an interface in the exposed directory of the child component.
   //
@@ -84,25 +121,25 @@ class ScopedChild final {
   // ```
   // auto echo = instance.Connect<test::placeholders::Echo>();
   // ```
-  template <typename Interface>
+  template <typename Interface, typename = std::enable_if_t<!fidl::IsProtocolV<Interface>>>
   fidl::InterfacePtr<Interface> Connect(
       const std::string& interface_name = Interface::Name_) const {
     fidl::InterfacePtr<Interface> result;
     zx_status_t status = Connect(interface_name, result.NewRequest().TakeChannel());
     ZX_ASSERT_MSG(status == ZX_OK, "Connect to protocol %s on the exposed dir of %s failed: %s",
-                  interface_name.c_str(), child_ref_.name.c_str(), zx_status_get_string(status));
+                  interface_name.c_str(), child_ref_.name().c_str(), zx_status_get_string(status));
     return std::move(result);
   }
 
   // SynchronousInterfacePtr method variant of |Connect|. See |Connect| for
   // more details.
-  template <typename Interface>
+  template <typename Interface, typename = std::enable_if_t<!fidl::IsProtocolV<Interface>>>
   fidl::SynchronousInterfacePtr<Interface> ConnectSync(
       const std::string& interface_name = Interface::Name_) const {
     fidl::SynchronousInterfacePtr<Interface> result;
     zx_status_t status = Connect(interface_name, result.NewRequest().TakeChannel());
     ZX_ASSERT_MSG(status == ZX_OK, "Connect to protocol %s on the exposed dir of %s failed",
-                  interface_name.c_str(), child_ref_.name.c_str());
+                  interface_name.c_str(), child_ref_.name().c_str());
     return std::move(result);
   }
 
@@ -112,14 +149,21 @@ class ScopedChild final {
     return Connect(Interface::Name_, request.TakeChannel());
   }
 
+  // ServerEnd variant of |Connect| for natural/wire protocols.
+  template <typename Protocol, typename = std::enable_if_t<fidl::IsProtocolV<Protocol>>>
+  zx_status_t Connect(fidl::ServerEnd<Protocol> server_end) const ZX_AVAILABLE_SINCE(NEXT) {
+    return Connect(std::string(fidl::DiscoverableProtocolName<Protocol>), server_end.TakeChannel());
+  }
+
   // Connect to an interface in the exposed directory using the supplied
   // channel.
   zx_status_t Connect(const std::string& interface_name, zx::channel request) const;
 
   // ClientEnd variant of |Connect|. See |Connect| for more details.
-  template <typename Protocol, typename = std::enable_if_t<fidl::IsProtocolV<Protocol>>>
+  template <typename Protocol, typename = std::enable_if_t<fidl::IsProtocolV<Protocol>>,
+            typename = void>
   zx::result<fidl::ClientEnd<Protocol>> Connect(
-      std::string path = fidl::DiscoverableProtocolName<Protocol>) {
+      std::string path = fidl::DiscoverableProtocolName<Protocol>) const {
     auto endpoints = fidl::CreateEndpoints<Protocol>();
     if (endpoints.is_error()) {
       return endpoints.take_error();
@@ -137,22 +181,34 @@ class ScopedChild final {
 
   // Clone the exposed directory.
   fidl::InterfaceHandle<fuchsia::io::Directory> CloneExposedDir() const {
-    fidl::InterfaceHandle<fuchsia::io::Directory> clone;
-    zx_status_t status = exposed_dir_->Clone(
-        fidl::InterfaceRequest<fuchsia::unknown::Cloneable>(clone.NewRequest().TakeChannel()));
-    ZX_ASSERT_MSG(status == ZX_OK, "Cloning exposed directory failed: %s",
-                  zx_status_get_string(status));
-    return clone;
+    zx::result clone = component::Clone(
+        fidl::UnownedClientEnd<fuchsia_io::Directory>(exposed_dir_.unowned_channel()));
+    ZX_ASSERT_MSG(clone.is_ok(), "Cloning exposed directory failed: %s", clone.status_string());
+    return fidl::InterfaceHandle<fuchsia::io::Directory>(clone->TakeChannel());
   }
 
   // Clone the exposed directory.
   void CloneExposedDir(fidl::InterfaceRequest<fuchsia::io::Directory> directory_request) const
       ZX_AVAILABLE_SINCE(11) {
-    zx_status_t status = exposed_dir_->Clone(
-        fidl::InterfaceRequest<fuchsia::unknown::Cloneable>(directory_request.TakeChannel()));
-    ZX_ASSERT_MSG(status == ZX_OK, "Cloning exposed directory failed: %s",
-                  zx_status_get_string(status));
+    fidl::OneWayStatus status =
+        fidl::WireCall(
+            fidl::UnownedClientEnd<fuchsia_io::Directory>(exposed_dir_.unowned_channel()))
+            ->Clone(fidl::ServerEnd<fuchsia_unknown::Cloneable>(directory_request.TakeChannel()));
+    ZX_ASSERT_MSG(status.ok(), "Cloning exposed directory failed: %s", status.status_string());
   }
+
+  // Clone the exposed directory into a natural/wire ServerEnd.
+  void CloneExposedDir(fidl::ServerEnd<fuchsia_io::Directory> directory_request) const
+      ZX_AVAILABLE_SINCE(NEXT) {
+    fidl::OneWayStatus status =
+        fidl::WireCall(
+            fidl::UnownedClientEnd<fuchsia_io::Directory>(exposed_dir_.unowned_channel()))
+            ->Clone(fidl::ServerEnd<fuchsia_unknown::Cloneable>(directory_request.TakeChannel()));
+    ZX_ASSERT_MSG(status.ok(), "Cloning exposed directory failed: %s", status.status_string());
+  }
+
+  // Returns an unowned client end to the underlying exposed directory.
+  fidl::UnownedClientEnd<fuchsia_io::Directory> exposed_dir() const ZX_AVAILABLE_SINCE(NEXT);
 
   // Returns reference to underlying exposed directory handle.
   const fuchsia::io::DirectorySyncPtr& exposed() const ZX_AVAILABLE_SINCE(11);
@@ -161,16 +217,27 @@ class ScopedChild final {
   ExecutionController Start(fuchsia::component::StartChildArgs = {}) const;
 
  private:
-  ScopedChild(std::shared_ptr<sys::ServiceDirectory> svc,
-              fuchsia::component::decl::ChildRef child_ref,
-              fuchsia::io::DirectorySyncPtr exposed_dir,
-              fuchsia::component::ControllerSyncPtr controller_proxy);
+  friend class RealmBuilder;
 
-  // nullptr iff `this` has been moved OR `Teardown` has been called.
-  std::shared_ptr<sys::ServiceDirectory> svc_;
-  fuchsia::component::decl::ChildRef child_ref_;
+  static ScopedChild NewFromRealm(fidl::ClientEnd<fuchsia_component::Realm> realm,
+                                  std::string collection, std::optional<std::string> name,
+                                  std::string url);
+
+  static ScopedChild NewFromClientEnd(std::string collection, std::optional<std::string> name,
+                                      std::string url, fidl::ClientEnd<fuchsia_io::Directory> svc);
+
+  void TeardownNatural(async_dispatcher_t* dispatcher, NaturalTeardownCallback callback);
+
+  ScopedChild(fidl::ClientEnd<fuchsia_io::Directory> svc,
+              fuchsia_component_decl::ChildRef child_ref,
+              fidl::ClientEnd<fuchsia_io::Directory> exposed_dir,
+              fidl::SyncClient<fuchsia_component::Controller> controller_proxy);
+
+  // Invalid iff `this` has been moved OR `Teardown` has been called.
+  fidl::ClientEnd<fuchsia_io::Directory> svc_;
+  fuchsia_component_decl::ChildRef child_ref_;
   fuchsia::io::DirectorySyncPtr exposed_dir_;
-  fuchsia::component::ControllerSyncPtr controller_proxy_;
+  fidl::SyncClient<fuchsia_component::Controller> controller_proxy_;
 };
 
 }  // namespace component_testing

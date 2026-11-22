@@ -1,4 +1,4 @@
 jcecil@google.com
 olivernewman@google.com
 
-per-file bazel.star = file: /build/OWNERS
+per-file bazel.star = file: /build/bazel/BAZEL_OWNERS

@@ -71,6 +71,10 @@ WEAVE_ERROR GroupKeyStoreImpl::RetrieveGroupKey(uint32_t key_id, WeaveGroupKey& 
   }
 
   if (key_id != WeaveKeyId::kFabricSecret) {
+    if (key_len != kWeaveAppGroupKeySize + sizeof(uint32_t)) {
+      memset(key.Key, 0, sizeof(key.Key));
+      return WEAVE_ERROR_INVALID_ARGUMENT;
+    }
     memcpy(&key.StartTime, key.Key + kWeaveAppGroupKeySize, sizeof(uint32_t));
     memset(key.Key + kWeaveAppGroupKeySize, 0, sizeof(key.Key) - kWeaveAppGroupKeySize);
     key_len -= sizeof(uint32_t);
@@ -84,10 +88,15 @@ WEAVE_ERROR GroupKeyStoreImpl::RetrieveGroupKey(uint32_t key_id, WeaveGroupKey& 
 WEAVE_ERROR GroupKeyStoreImpl::StoreGroupKey(const WeaveGroupKey& key) {
   WEAVE_ERROR error = WEAVE_NO_ERROR;
   uint8_t key_data[WeaveGroupKey::MaxKeySize];
+  static_assert(kWeaveAppGroupKeySize + sizeof(uint32_t) <= sizeof(key_data));
   uint32_t key_data_len = key.KeyLen;
   char formed_key_name[kGroupKeyNameMaxSize + 1];
 
-  if (key.KeyLen > sizeof(key_data)) {
+  if (key.KeyId == WeaveKeyId::kFabricSecret) {
+    if (key.KeyLen > sizeof(key_data)) {
+      return WEAVE_ERROR_INVALID_ARGUMENT;
+    }
+  } else if (key.KeyLen != kWeaveAppGroupKeySize) {
     return WEAVE_ERROR_INVALID_ARGUMENT;
   }
 

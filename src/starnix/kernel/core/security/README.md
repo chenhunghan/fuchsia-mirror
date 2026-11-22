@@ -38,3 +38,11 @@ The SELinux integration defines data types to hold security state for each kerne
 Hook functions in the SELinux integration have similar signatures to those of the LSM hooks called by the kernel.
 
 These hooks (or the SELinux library with which they integrate) are responsible for ensuring appropriate behaviour when no policy has yet been loaded, for supporting permissive vs. enforcing, and "fake" mode, etc.
+
+## Performance and benchmarking
+
+Performance optimization in Starnix's security layer should target real-world
+workloads, guided by traces and cache statistics rather than isolated
+microbenchmarks. Microbenchmarks for SELinux primitives and LSM hooks live in
+[//src/starnix/tests/selinux/bench](/src/starnix/tests/selinux/bench/README.md),
+primarily serving as diagnostic signals for attributing regressions.

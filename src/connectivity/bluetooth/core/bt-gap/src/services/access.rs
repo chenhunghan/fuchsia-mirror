@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 use anyhow::{Error, format_err};
-use async_helpers::hanging_get::asynchronous as hanging_get;
 use fidl_fuchsia_bluetooth_sys::{self as sys, AccessRequest, AccessRequestStream};
 use fuchsia_bluetooth::types::pairing_options::{BondableMode, PairingOptions};
 use fuchsia_bluetooth::types::{Peer, PeerId, Technology};
@@ -33,7 +32,7 @@ struct AccessSession {
 }
 
 pub async fn run(hd: HostDispatcher, mut stream: AccessRequestStream) -> Result<(), Error> {
-    let mut watch_peers_subscriber = hd.watch_peers().await;
+    let watch_peers_subscriber = hd.watch_peers();
     let mut session: AccessSession = Default::default();
     let mut discovery_pending = pending().boxed();
     let mut discoverable_pending = pending().boxed();
@@ -42,7 +41,7 @@ pub async fn run(hd: HostDispatcher, mut stream: AccessRequestStream) -> Result<
         select! {
             event_opt = stream.next() => {
                 match event_opt {
-                    Some(event) => handler(hd.clone(), &mut watch_peers_subscriber, &mut session, event?).await?,
+                    Some(event) => handler(hd.clone(), &watch_peers_subscriber, &mut session, event?).await?,
                     None => break,
                 }
             }
@@ -61,7 +60,7 @@ pub async fn run(hd: HostDispatcher, mut stream: AccessRequestStream) -> Result<
 
 async fn handler(
     hd: HostDispatcher,
-    watch_peers_subscriber: &mut hanging_get::Subscriber<PeerWatcher>,
+    watch_peers_subscriber: &WatchPeersSubscriber,
     session: &mut AccessSession,
     request: AccessRequest,
 ) -> Result<(), Error> {
@@ -143,7 +142,6 @@ async fn handler(
             trace!("Received FIDL call: fuchsia.bluetooth.sys.Access.WatchPeers()");
             watch_peers_subscriber
                 .register(PeerWatcher::new(session.peers_seen.clone(), responder))
-                .await
                 .map_err(|e| {
                     // If we cannot register the observation, we return an error from the handler
                     // function. This terminates the stream and will drop the channel, as we are unable

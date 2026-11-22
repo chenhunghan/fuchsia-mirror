@@ -64,37 +64,12 @@ $ ffx component show /core/ffx-laboratory:config_example
  Outgoing Capabilities:  diagnostics
 ```
 
-### Overriding values
+### Configuration capabilities
 
-These examples are able to accept overridden configuration values during
-development by adding to your `fx set`:
+These examples declare the following configuration capabilities in their component manifests:
 
-```bash
-$ fx set core.x64 \
-  --with //examples/components/config \
-  --args='config_example_cpp_greeting="C++ CLI Override"' \
-  --args='config_example_rust_greeting="Rust CLI Override"'
-$ fx build
-```
-
--  **C++**
-
-```bash
-$ ffx component run /core/ffx-laboratory:config_example fuchsia-pkg://fuchsia.com/cpp_config_example#meta/config_example.cm --recreate
-```
-
--  **Rust**
-
-```bash
-$ ffx component run /core/ffx-laboratory:config_example fuchsia-pkg://fuchsia.com/rust_config_example#meta/config_example.cm --recreate
-```
-
-In `fx log`:
-
-```bash
-[06524.333598][663879][663881][ffx-laboratory:config_example] INFO: [main.cc(29)] Hello, C++ CLI Override! (from C++)
-[06562.344829][667626][667628][ffx-laboratory:config_example] INFO: Hello, Rust CLI Override! (from Rust)
-```
+- `fuchsia.example.config.Greeting` (`string`, `max_size: 512`, default `"World"`): The greeting to log.
+- `fuchsia.example.config.DelayMs` (`uint64`, default `100`): Delay in milliseconds before logging greeting.
 
 ## Inspect
 
@@ -111,7 +86,7 @@ core/ffx-laboratory\:config_example:
     root:
       config:
         delay_ms = 100
-        greeting = Rust CLI Override
+        greeting = World
 ```
 
 ## Testing
@@ -139,16 +114,4 @@ Running test 'fuchsia-pkg://fuchsia.com/cpp_config_integration_test#meta/config_
 fuchsia-pkg://fuchsia.com/cpp_config_integration_test#meta/config_integration_test_cpp.cm completed with result: PASSED
 
 ...
-```
-
-NOTE: This test will not pass if the configuration value is overridden.
-
-## Configuration values from a JSON file
-
-Configuration values for a component can be specified using GN args or from a JSON file.
-To use packages that get values from a JSON file, append the `_with_json_values` to the package
-names used above.
-
-```bash
-$ ffx component run /core/ffx-laboratory:config_example fuchsia-pkg://fuchsia.com/cpp_config_example_with_json_values#meta/config_example.cm --recreate
 ```

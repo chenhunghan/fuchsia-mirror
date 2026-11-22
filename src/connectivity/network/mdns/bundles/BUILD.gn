@@ -5,8 +5,3 @@
 group("services") {
   deps = [ "//src/connectivity/network/mdns/service:mdns" ]
 }
-
-group("utils") {
-  testonly = true
-  deps = [ "//src/connectivity/network/mdns/util:mdns-util" ]
-}

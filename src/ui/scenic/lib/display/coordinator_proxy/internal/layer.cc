@@ -1,0 +1,241 @@
+// Copyright 2025 The Fuchsia Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#include "src/ui/scenic/lib/display/coordinator_proxy/internal/layer.h"
+
+#include "src/ui/scenic/lib/utils/logging.h"
+
+// Allows us to manually change this to enable logging without *all* Flatland verbose logging.
+#define CP_VERBOSE_LOG FLATLAND_VERBOSE_LOG
+
+namespace display::internal {
+
+void Layer::SetPrimaryConfig(const Extent2& image_dimensions, uint32_t image_tiling_type) {
+  // Mirror the coordinator, which resets all primary layer properties to their defaults on every
+  // `SetLayerPrimaryConfig()` call: the position covers the whole image (with the identity
+  // transform), and alpha blending is disabled.
+  const Rectangle image_area(
+      {.x = 0, .y = 0, .width = image_dimensions.width(), .height = image_dimensions.height()});
+  draft_equiv_ = ImageLayerEquivalence{
+      .display_destination = image_area,
+      .image_source = image_area,
+      .image_source_transformation = RotateFlip::kIdentity(),
+      .image_dimensions = image_dimensions,
+      .image_tiling_type = image_tiling_type,
+      .blend_mode = BlendMode::kReplace(),
+      .alpha_range = ImageLayerEquivalence::kAlphaOne,
+  };
+  draft_values_ = ConfigValues{};
+
+  draft_image_ = kInvalidImageId;
+  draft_wait_event_ = kInvalidEventId;
+}
+
+void Layer::SetPrimaryPosition(const RotateFlip& transform, const Rectangle& src,
+                               const Rectangle& dst) {
+  FX_DCHECK(std::holds_alternative<ImageLayerEquivalence>(draft_equiv_.config));
+  auto& equiv = std::get<ImageLayerEquivalence>(draft_equiv_.config);
+  equiv.image_source_transformation = transform;
+  equiv.display_destination = dst;
+  equiv.image_source = src;
+}
+
+void Layer::SetPrimaryAlpha(const BlendMode& blend_mode, float alpha_value) {
+  FX_DCHECK(std::holds_alternative<ImageLayerEquivalence>(draft_equiv_.config));
+  auto& equiv = std::get<ImageLayerEquivalence>(draft_equiv_.config);
+  equiv.blend_mode = blend_mode;
+  equiv.alpha_range = ImageLayerEquivalence::MakeAlphaRange(alpha_value);
+
+  draft_values_.alpha_value = alpha_value;
+}
+
+void Layer::SetLayerImage(const ImageId& image_id, const EventId& wait_event_id) {
+  FX_CHECK(image_id != kInvalidImageId);
+  draft_image_ = image_id;
+  draft_wait_event_ = wait_event_id;
+}
+
+void Layer::SetColorConfig(const WireColor& color, const Rectangle& display_destination) {
+  draft_equiv_ = ColorLayerEquivalence{
+      .color = color,
+      .display_destination = display_destination,
+  };
+  draft_image_ = kInvalidImageId;
+  draft_wait_event_ = kInvalidEventId;
+}
+
+void Layer::UnsetImage(const ImageId& image_id) {
+  if (applied_image_ == image_id) {
+    applied_image_ = kInvalidImageId;
+  }
+  if (draft_image_ == image_id) {
+    draft_image_ = kInvalidImageId;
+  }
+}
+
+size_t Layer::SendLayoutDiffsToCoordinator(
+    const LayerId& layer_id,
+    const fidl::WireSharedClient<fuchsia_hardware_display::Coordinator>& coordinator) const {
+  if (std::holds_alternative<ImageLayerEquivalence>(draft_equiv_.config)) {
+    return SendImageLayerLayoutDiffsToCoordinator(layer_id, coordinator);
+  }
+  if (std::holds_alternative<ColorLayerEquivalence>(draft_equiv_.config)) {
+    return SendColorLayerDiffsToCoordinator(layer_id, coordinator);
+  }
+  // Uninitialized layer, no diffs to send.
+  FX_DCHECK(std::holds_alternative<UninitializedLayerEquivalence>(draft_equiv_.config));
+  return 0;
+}
+
+size_t Layer::SendImageDiffToCoordinator(
+    const LayerId& layer_id,
+    const fidl::WireSharedClient<fuchsia_hardware_display::Coordinator>& coordinator) const {
+  if (!std::holds_alternative<ImageLayerEquivalence>(draft_equiv_.config)) {
+    return 0;
+  }
+  // Committing a displayed image layer without an image is illegal in `coordinator.fidl` and closes
+  // Scenic's coordinator channel. Enforce this via `FX_CHECK` so committing without a bound image
+  // (including after `ReleaseImage()` without a replacement `SetLayerImage()`) aborts immediately
+  // with a synchronous callstack in both debug and release builds instead of sending
+  // `SetLayerImage2(0)` and having the coordinator close Scenic's channel asynchronously.
+  FX_CHECK(draft_image_ != kInvalidImageId);
+
+  const auto& draft_equiv = std::get<ImageLayerEquivalence>(draft_equiv_.config);
+  const bool is_applying_image_config =
+      std::holds_alternative<ImageLayerEquivalence>(applied_equiv_.config);
+
+  bool must_set_image = !is_applying_image_config;
+  if (is_applying_image_config) {
+    const auto& applied_equiv = std::get<ImageLayerEquivalence>(applied_equiv_.config);
+    const bool must_set_config = draft_equiv.image_dimensions != applied_equiv.image_dimensions ||
+                                 draft_equiv.image_tiling_type != applied_equiv.image_tiling_type;
+    // Setting the config clears the image in the Coordinator impl, so `must_set_config == true`
+    // means that we must set the image even if it matches the already-applied image.
+    must_set_image = must_set_config || draft_image_ != applied_image_ ||
+                     draft_wait_event_ != applied_wait_event_;
+  }
+
+  // TODO(https://fxbug.dev/449807074): we must always send `SetLayerImage2()` even if the image
+  // hasn't changed, since otherwise the received Vsync config stamps can be wrong.
+  // `must_set_image` is intentionally preserved so the exact diff condition stays compiler-checked
+  // until 449807074 is fixed.
+  constexpr bool kForceSendLayerImage = true;
+  if (!kForceSendLayerImage && !must_set_image) {
+    return 0;
+  }
+
+  CP_VERBOSE_LOG << "Layer::SendImageDiffToCoordinator()... setting image";
+  const fidl::OneWayStatus status = coordinator->SetLayerImage2(
+      layer_id.ToFidl(), draft_image_.ToFidl(), draft_wait_event_.ToFidl());
+  FX_DCHECK(status.ok()) << "Failed to call FIDL SetLayerImage2 method: " << status.status_string();
+  return 1;
+}
+
+void Layer::ResetDraftState() {
+  draft_equiv_ = applied_equiv_;
+  draft_values_ = applied_values_;
+  draft_image_ = applied_image_;
+  draft_wait_event_ = applied_wait_event_;
+}
+
+void Layer::AcceptDraftState() {
+  applied_equiv_ = draft_equiv_;
+  applied_values_ = draft_values_;
+  applied_image_ = draft_image_;
+  applied_wait_event_ = draft_wait_event_;
+}
+
+size_t Layer::SendImageLayerLayoutDiffsToCoordinator(
+    const LayerId& layer_id,
+    const fidl::WireSharedClient<fuchsia_hardware_display::Coordinator>& coordinator) const {
+  FX_DCHECK(std::holds_alternative<ImageLayerEquivalence>(draft_equiv_.config));
+  const auto& draft_equiv = std::get<ImageLayerEquivalence>(draft_equiv_.config);
+  const bool is_applying_image_config =
+      std::holds_alternative<ImageLayerEquivalence>(applied_equiv_.config);
+
+  const WireLayerId wire_layer_id = layer_id.ToFidl();
+
+  size_t api_calls_sent = 0;
+
+  bool must_set_config = false;
+  bool must_set_position = false;
+  bool must_set_alpha = false;
+
+  // Determine which layout values must be set by calling Coordinator methods.
+  if (!is_applying_image_config) {
+    // Transitioning to image config from some other type of config (either color or uninitialized),
+    // therefore must set all draft layout values.
+    must_set_config = true;
+    must_set_position = true;
+    must_set_alpha = true;
+  } else {
+    const auto& applied_equiv = std::get<ImageLayerEquivalence>(applied_equiv_.config);
+
+    must_set_config = draft_equiv.image_dimensions != applied_equiv.image_dimensions ||
+                      draft_equiv.image_tiling_type != applied_equiv.image_tiling_type;
+    // Setting the config resets the position and alpha, as `coordinator.fidl` specifies, so
+    // `must_set_config == true` means that we must also set them, even if they match the
+    // already-applied values.
+    must_set_position =
+        must_set_config ||
+        draft_equiv.image_source_transformation != applied_equiv.image_source_transformation ||
+        draft_equiv.image_source != applied_equiv.image_source ||
+        draft_equiv.display_destination != applied_equiv.display_destination;
+    must_set_alpha = must_set_config || draft_equiv.blend_mode != applied_equiv.blend_mode ||
+                     draft_values_.alpha_value != applied_values_.alpha_value;
+  }
+
+  if (must_set_config) {
+    CP_VERBOSE_LOG << "Layer::SendImageLayerLayoutDiffsToCoordinator()... setting config";
+    ++api_calls_sent;
+    const fidl::OneWayStatus status = coordinator->SetLayerPrimaryConfig(
+        wire_layer_id, WireImageMetadata{.dimensions = draft_equiv.image_dimensions.ToWire(),
+                                         .tiling_type = draft_equiv.image_tiling_type});
+    FX_DCHECK(status.ok()) << "Failed to call FIDL SetLayerPrimaryConfig method: "
+                           << status.status_string();
+  }
+
+  if (must_set_position) {
+    CP_VERBOSE_LOG << "Layer::SendImageLayerLayoutDiffsToCoordinator()... setting position";
+    ++api_calls_sent;
+    const fidl::OneWayStatus status = coordinator->SetLayerPrimaryPosition(
+        wire_layer_id, draft_equiv.image_source_transformation.ToDisplayCoordinateTransformation(),
+        draft_equiv.image_source.ToWireRectU(), draft_equiv.display_destination.ToWireRectU());
+
+    FX_DCHECK(status.ok()) << "Failed to call FIDL SetLayerPrimaryPosition method: "
+                           << status.status_string();
+  }
+
+  if (must_set_alpha) {
+    CP_VERBOSE_LOG << "Layer::SendImageLayerLayoutDiffsToCoordinator()... setting alpha";
+    ++api_calls_sent;
+    const fidl::OneWayStatus status = coordinator->SetLayerPrimaryAlpha(
+        wire_layer_id, draft_equiv.blend_mode.ToDisplayAlphaMode(), draft_values_.alpha_value);
+
+    FX_DCHECK(status.ok()) << "Failed to call FIDL SetLayerPrimaryAlpha method: "
+                           << status.status_string();
+  }
+
+  return api_calls_sent;
+}
+
+size_t Layer::SendColorLayerDiffsToCoordinator(
+    const LayerId& layer_id,
+    const fidl::WireSharedClient<fuchsia_hardware_display::Coordinator>& coordinator) const {
+  FX_DCHECK(std::holds_alternative<ColorLayerEquivalence>(draft_equiv_.config));
+
+  if (draft_equiv_ == applied_equiv_) {
+    return 0;  // zero FIDL calls sent
+  }
+  CP_VERBOSE_LOG << "Layer::SendColorLayerDiffsToCoordinator()... setting color config";
+
+  const auto& draft_equiv = std::get<ColorLayerEquivalence>(draft_equiv_.config);
+  const fidl::OneWayStatus status = coordinator->SetLayerColorConfig(
+      layer_id.ToFidl(), draft_equiv.color, draft_equiv.display_destination.ToWireRectU());
+  FX_DCHECK(status.ok()) << "Failed to call FIDL SetLayerColorConfig method: "
+                         << status.status_string();
+  return 1;  // one FIDL call sent
+}
+
+}  // namespace display::internal

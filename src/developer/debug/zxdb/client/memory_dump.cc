@@ -6,7 +6,8 @@
 
 #include <string.h>
 
-#include "src/developer/debug/zxdb/common/checked_math.h"
+#include <safemath/checked_math.h>
+
 #include "src/lib/unwinder/error.h"
 
 namespace zxdb {
@@ -45,9 +46,7 @@ Err MemoryDump::Read(uint64_t address, size_t size, void* dest) const {
 
   uint64_t read_end = 0;
   // Subtract one to make sure the last address is also valid.
-  if (auto checked_sum = CheckedAdd(address, size - 1)) {
-    read_end = *checked_sum;
-  } else {
+  if (!safemath::CheckAdd(address, size - 1).AssignIfValid(&read_end)) {
     // Overflow.
     return Err("Address + size overflows");
   }
@@ -56,9 +55,7 @@ Err MemoryDump::Read(uint64_t address, size_t size, void* dest) const {
   // block containing the address more efficient than a binary search.
   for (const auto& block : blocks_) {
     uint64_t last_addr = 0;
-    if (auto checked_sum = CheckedAdd(block.address, block.size - 1)) {
-      last_addr = *checked_sum;
-    } else {
+    if (!safemath::CheckAdd(block.address, block.size - 1).AssignIfValid(&last_addr)) {
       return Err("Block bounds overflows.");
     }
 

@@ -15,6 +15,7 @@ rustc_binary(
     edition = "2024",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
+        "//build/bazel/rules/intl:__pkg__",
         "//build/intl:__pkg__",
         "//src/intl/example:__pkg__",
         "//src/lib/intl/lookup/rust:__pkg__",

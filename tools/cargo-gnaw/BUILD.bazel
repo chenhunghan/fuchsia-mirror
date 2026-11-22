@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
 load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
@@ -14,7 +14,7 @@ rustc_binary(
     srcs = ["src/main.rs"],
     crate_name = "gnaw",
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//build/bazel/rules/tests:__pkg__"],
     deps = [
         ":cargo-gnaw-lib",
@@ -48,7 +48,7 @@ rustc_library(
     proc_macro_deps = [
         "//third_party/rust_crates/vendor:serde_derive",
     ],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
         "//tools/auto_owners:__pkg__",
         "//tools/cargo-gnaw/tests:__pkg__",
@@ -71,6 +71,6 @@ host_rustc_test(
     name = "cargo-gnaw-tests",
     crate = ":cargo-gnaw-lib",
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__pkg__"],
 )

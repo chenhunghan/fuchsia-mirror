@@ -12,7 +12,6 @@
             matchers: [
                 // partial usercopy
                 "WriteTest.PartialWriteSIGSEGV",
-                "WriteTest.PartialWriteSIGBUS",
             ],
         },
 
@@ -32,7 +31,6 @@
                 "MMapFileTest.MapOffsetBeyondEnd",
                 "*/MMapFileParamTest.SigBusDeath/*",
                 "WriteTest.PartialWriteSIGBUS",
-                "*/MMapFileParamTest.MapOffsetBeyondEndSigBusDeath/*",
                 "*/*SocketPairTest.SendFromMmapBeyondEof/*",
 
                 // fallocate_test
@@ -47,16 +45,16 @@
                 "Renameat2Test.ExchangeFileAndDirectory",
                 "Renameat2Test.ExchangeFiles",
                 "Renameat2Test.ExchangeFilesSameParent",
-            ],
-        },
-        {
-            type: "skip",
-            matchers: [
-                // TODO(https://fxbug.dev/365914938): Tests undefined behaviour (writing
-                // beyond file size on last page and then ftruncating the file up).
-                // This is not compatible with Fxfs's current truncate implementation
-                // which conservatively zeroes for security.
-                "MMapFileTest.WriteSharedTruncateUp",
+
+                // partial_bad_buffer_test
+                "PartialBadBufferTest.PwriteBig",
+                "PartialBadBufferTest.PwriteSmall",
+                "PartialBadBufferTest.PwritevBig",
+                "PartialBadBufferTest.PwritevSmall",
+                "PartialBadBufferTest.WriteBig",
+                "PartialBadBufferTest.WriteSmall",
+                "PartialBadBufferTest.WritevBig",
+                "PartialBadBufferTest.WritevSmall",
             ],
         },
     ],

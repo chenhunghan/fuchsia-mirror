@@ -1,0 +1,58 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "trace_events_bin",
+    srcs = ["src/trace_events.rs"],
+    binary_name = "trace_event_benchmarks",
+    crate_root = "src/trace_events.rs",
+    edition = "2024",
+    deps = [
+        "//src/developer/fuchsia-criterion",
+        "//src/lib/cstringify",
+        "//src/lib/trace/rust:trace",
+        "//src/lib/trace/rust:trace-provider",
+    ],
+)
+
+fx_packaged_binary(
+    name = "trace_events_bin_packaged_bin",
+    binary = ":trace_events_bin",
+    binary_name = "trace_event_benchmarks",
+)
+
+fx_component_manifest(
+    name = "trace_events_component_manifest",
+    component_name = "trace_events",
+    includes = [
+        "//sdk/lib/trace:client.shard",
+        "//src/lib/diagnostics/inspect/rust/bench/meta:benchmark.shard",
+    ],
+    manifest = "meta/trace_events.cml",
+)
+
+fx_component(
+    name = "trace_events_component",
+    compiled_manifest = ":trace_events_component_manifest",
+    deps = [":trace_events_bin_packaged_bin"],
+)
+
+fx_package(
+    name = "rust_trace_events_benchmarks",
+    components = [":trace_events_component"],
+)

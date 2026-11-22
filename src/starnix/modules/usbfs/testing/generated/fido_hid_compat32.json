@@ -1,0 +1,396 @@
+{
+    "name": "fido_hid_compat32",
+    "device": {
+        "vendor_id": 4660,
+        "product_id": 22136,
+        "bcd_usb": 512,
+        "bcd_device": 1347,
+        "device_class": 0,
+        "device_subclass": 0,
+        "device_protocol": 0,
+        "max_packet_size0": 64,
+        "speed": "high",
+        "configs": [
+            {
+                "config_value": 1,
+                "bm_attributes": 128,
+                "max_power_ma": 100,
+                "interfaces": [
+                    {
+                        "interface_number": 0,
+                        "alt_setting": 0,
+                        "interface_class": 3,
+                        "interface_subclass": 0,
+                        "interface_protocol": 0,
+                        "endpoints": [
+                            {
+                                "address": 129,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            },
+                            {
+                                "address": 2,
+                                "xfer_type": "interrupt",
+                                "max_packet_size": 64,
+                                "interval": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    },
+    "steps": [
+        {
+            "step": {
+                "type": "open",
+                "fd": "fd1",
+                "mode": "rdwr"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "fd": "fd1"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "arch32": true,
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "null"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EFAULT"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "arch32": true,
+                "ifno": -1,
+                "ioctl_code": 1074025983,
+                "arg_ptr": "valid",
+                "data_ptr": "null"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EFAULT"
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "arch32": true,
+                "ifno": 0,
+                "ioctl_code": 1074025983,
+                "arg_ptr": "valid",
+                "data": [
+                    1,
+                    2,
+                    3,
+                    4
+                ]
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "ENOTTY"
+            }
+        },
+        {
+            "step": {
+                "type": "claim_interface",
+                "fd": "fd1",
+                "interface": 0
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "claimed": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "arch32": true,
+                "ifno": 0,
+                "sub_ioctl": "connect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "error",
+                "errno": "EBUSY"
+            }
+        },
+        {
+            "step": {
+                "type": "device_ep_push_in",
+                "ep": 129,
+                "data": [
+                    85,
+                    102,
+                    119,
+                    136,
+                    144,
+                    0,
+                    6,
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ep": 129,
+                    "bytes_pushed": 64
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "submit_urb",
+                "fd": "fd1",
+                "arch32": true,
+                "urb": "u_compat32_in",
+                "urb_type": "interrupt",
+                "ep": 129,
+                "buffer_len": 64,
+                "usercontext": 17152
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_compat32_in"
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "poll",
+                "fd": "fd1",
+                "timeout_ms": 1000
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ready": 1,
+                    "revents": [
+                        "POLLOUT",
+                        "POLLWRNORM"
+                    ]
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "reap_urb_ndelay",
+                "fd": "fd1",
+                "arch32": true
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_compat32_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "usercontext": 17152
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "inspect_urb",
+                "urb": "u_compat32_in"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "urb": "u_compat32_in",
+                    "status": "0",
+                    "actual_length": 64,
+                    "error_count": 0,
+                    "usercontext": 17152,
+                    "data": [
+                        85,
+                        102,
+                        119,
+                        136,
+                        144,
+                        0,
+                        6,
+                        0,
+                        1,
+                        2,
+                        3,
+                        4,
+                        5,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0
+                    ],
+                    "canary_intact": true,
+                    "trailing_canary_intact": true,
+                    "unwritten_tail_intact": true
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "arch32": true,
+                "ifno": 0,
+                "sub_ioctl": "disconnect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ifno": 0,
+                    "retval": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "usbdevfs_ioctl",
+                "fd": "fd1",
+                "arch32": true,
+                "ifno": 0,
+                "sub_ioctl": "connect",
+                "arg_ptr": "valid"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "ifno": 0,
+                    "retval": 0
+                }
+            }
+        },
+        {
+            "step": {
+                "type": "close",
+                "fd": "fd1"
+            },
+            "outcome": {
+                "status": "ok",
+                "result": {
+                    "closed": true
+                }
+            }
+        }
+    ]
+}

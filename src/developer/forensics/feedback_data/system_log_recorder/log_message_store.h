@@ -5,7 +5,6 @@
 #ifndef SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_SYSTEM_LOG_RECORDER_LOG_MESSAGE_STORE_H_
 #define SRC_DEVELOPER_FORENSICS_FEEDBACK_DATA_SYSTEM_LOG_RECORDER_LOG_MESSAGE_STORE_H_
 
-#include <fuchsia/logger/cpp/fidl.h>
 #include <lib/fpromise/result.h>
 #include <lib/zx/time.h>
 

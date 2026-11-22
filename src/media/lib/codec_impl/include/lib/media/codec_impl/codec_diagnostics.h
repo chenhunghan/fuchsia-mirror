@@ -10,7 +10,6 @@
 #include <lib/inspect/cpp/inspect.h>
 #include <lib/inspect/cpp/inspector.h>
 #include <lib/inspect/cpp/vmo/types.h>
-#include <lib/sys/cpp/component_context.h>
 #include <lib/trace/event.h>
 #include <lib/zx/clock.h>
 #include <lib/zx/time.h>

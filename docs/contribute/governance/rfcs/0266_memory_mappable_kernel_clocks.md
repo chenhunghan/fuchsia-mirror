@@ -31,7 +31,7 @@ It is expected that Starnix's clients' usage of the Linux `CLOCK_MONOTONIC`
 clock will be high, and every effort needs to be made to make any solution as
 inexpensive as possible to query.  Complicating matters is the fact that
 Starnix's clients are required to operate in
-[restricted mode](/docs/contribute/governance/rfcs/0261_fast_and_efficient_user_space_kernel_emulation.md#element_1_restricted_mode),
+[restricted mode](/docs/contribute/governance/rfcs/0261_fast_and_efficient_user_space_kernel_emulation.md#element-1-restricted-mode),
 meaning that they are not allowed to directly make Zircon syscalls. At best, a
 Starnix client could exit restricted mode and enter the Starnix kerenel, where
 Zircon syscalls are possible.  Note that this is the strategy currently being
@@ -146,7 +146,7 @@ apply the same rate adjustments that Timekeeper applies to the system wide UTC
 clock, to the version of Linux `CLOCK_MONOTONIC` which Starnix will provide to
 its clients.
 
-### Consistency
+### Consistency {:#consistency}
 
 As noted by the Linux requirements, `CLOCK_MONOTONIC` needs to be both monotonic
 and continuous.  So, a thread observing the clock can never be allowed to see it

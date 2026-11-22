@@ -4,17 +4,15 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-mod wake_vector_ffi;
-
 use crate::arch_rs::{blocking_disallowed, ints_disabled, set_blocking_disallowed};
 use crate::kernel::idle_power_thread::IdlePowerThread;
 use crate::kernel::thread::AutoPreemptDisabler;
 use crate::platform_rs::timer::current_boot_time;
 use crate::user_copy::UserOutPtr;
-use core::mem::{align_of, offset_of, size_of};
+use core::mem::size_of;
 use core::pin::Pin;
-use core::ptr::NonNull;
 use ksync::{KCell, LockToken};
+use pin_init::{PinInit, pin_data, pin_init, pinned_drop};
 use zx_status::Status;
 use zx_types::{
     ZX_KOID_INVALID, ZX_MAX_NAME_LEN, ZX_SYSTEM_WAKE_REPORT_ENTRY_FLAG_PREVIOUSLY_REPORTED,
@@ -27,29 +25,29 @@ use self::lists::{
     pending_list,
 };
 
-/// Diagnostic information about the wake vector managed by the implementor of [`WakeVector`].
-#[repr(C)]
+/// Diagnostic information about a wake vector registered with [`WakeEvent::initialize`].
 #[derive(Copy, Clone, Debug)]
 pub struct Diagnostics {
-    /// Indicates that the given wake vector is enabled and can generate wake events. Disabled wake
-    /// vectors are not listed in diagnostic logs.
-    pub enabled: bool,
-
-    /// The koid of the object implementing this interface, if any.
+    /// The koid of the object associated with this wake source, if any.
     pub koid: zx_koid_t,
 
-    /// Extra information specific to the wake vector that can aid in determining the source of the
-    /// wake event and potentially its state.
+    /// NUL-terminated extra information specific to the wake source that aids in identifying it.
     pub extra: [u8; ZX_MAX_NAME_LEN],
 }
 
 impl Default for Diagnostics {
     fn default() -> Self {
-        Self { enabled: false, koid: ZX_KOID_INVALID, extra: [0; ZX_MAX_NAME_LEN] }
+        Self::new(ZX_KOID_INVALID)
     }
 }
 
 impl Diagnostics {
+    /// Creates a new [`Diagnostics`] entry with `koid` and an empty `extra` string.
+    #[inline]
+    pub const fn new(koid: zx_koid_t) -> Self {
+        Self { koid, extra: [0; ZX_MAX_NAME_LEN] }
+    }
+
     /// Copies `s` into `self.extra` as a NUL-terminated UTF-8 byte string, truncating to fit on a
     /// UTF-8 character boundary and zeroing any trailing bytes.
     #[inline]
@@ -58,31 +56,18 @@ impl Diagnostics {
         self.extra[..copy_len].copy_from_slice(&s.as_bytes()[..copy_len]);
         self.extra[copy_len..].fill(0);
     }
-}
 
-zr::static_assert!(size_of::<Diagnostics>() == 48);
-zr::static_assert!(align_of::<Diagnostics>() == 8);
-zr::static_assert!(offset_of!(Diagnostics, enabled) == 0);
-zr::static_assert!(offset_of!(Diagnostics, koid) == 8);
-zr::static_assert!(offset_of!(Diagnostics, extra) == 16);
-
-/// `WakeVector` is an interface implemented by objects that will generate system wake events using
-/// the [`WakeEvent`] type. This interface provides diagnostic information about the wake vector to
-/// the suspend subsystem.
-///
-/// The C++ base class `wake_vector::WakeVector` is represented as an opaque type in Rust and its
-/// virtual `GetDiagnostics` method is invoked via an FFI shim.
-#[repr(C)]
-pub struct WakeVector(zr::Opaque<[u8; 0]>);
-
-impl WakeVector {
-    /// Provides diagnostic information about the wake vector object implementing this interface.
-    pub fn get_diagnostics(&self, diagnostics_out: &mut Diagnostics) {
-        // SAFETY: `self` is a valid reference to a C++ `wake_vector::WakeVector` instance, and
-        // `diagnostics_out` is a valid mutable reference to `Diagnostics`.
-        unsafe {
-            wake_vector_ffi::cpp_wake_vector_get_diagnostics(self, diagnostics_out);
-        }
+    /// Formats `args` as a NUL-terminated UTF-8 string into `self.extra`, truncating to fit on a
+    /// UTF-8 character boundary and zeroing any trailing bytes.
+    pub fn print_extra(&mut self, args: core::fmt::Arguments<'_>) {
+        let mut buf = fbl::StringBuffer::<ZX_MAX_NAME_LEN>::new();
+        let _ = core::fmt::Write::write_fmt(&mut buf, args);
+        let valid_len = match core::str::from_utf8(&buf) {
+            Ok(s) => s.len(),
+            Err(e) => e.valid_up_to(),
+        };
+        self.extra[..valid_len].copy_from_slice(&buf[..valid_len]);
+        self.extra[valid_len..].fill(0);
     }
 }
 
@@ -115,6 +100,17 @@ fn limit_size_t_u32(size: usize) -> u32 {
     u32::try_from(size).unwrap_or(u32::MAX)
 }
 
+/// Constructs the global wake event list lock (`GlobalListLock`).
+///
+/// # Safety
+///
+/// Must be called exactly once, during single-threaded early boot, before any [`WakeEvent`] is
+/// initialized.
+pub unsafe fn init_global_list_lock() {
+    // SAFETY: Forwarded from the caller.
+    unsafe { lists::GlobalListLock::init() };
+}
+
 /// Encapsulates the global and pending intrusive `WakeEvent` lists, their singleton locks, and
 /// `PendingCursor` so the rest of this module cannot violate list or lock invariants in safe Rust.
 ///
@@ -140,7 +136,6 @@ fn limit_size_t_u32(size: usize) -> u32 {
 mod lists {
     use super::WakeEvent;
     use crate::ksync_kernel::{TrackedMutex, TrackedSpinlock};
-    use core::marker::PhantomPinned;
     use core::pin::Pin;
     use fbl::{DoublyLinkedList, DoublyLinkedListContainable, DoublyLinkedListNode, TrackingSize};
     use ksync::{KMutexGuard, KOnceCell, LockToken};
@@ -151,11 +146,9 @@ mod lists {
 
     /// Intrusive list nodes embedded in [`WakeEvent`]. Fields are private to `lists` so only this
     /// module can link or unlink a `WakeEvent`.
-    #[repr(C)]
     pub struct ListNodes {
         global_node: DoublyLinkedListNode<WakeEvent>,
         pending_node: DoublyLinkedListNode<WakeEvent>,
-        _pin: core::marker::PhantomData<PhantomPinned>,
     }
 
     impl ListNodes {
@@ -170,7 +163,6 @@ mod lists {
             Self {
                 global_node: DoublyLinkedListNode::new(),
                 pending_node: DoublyLinkedListNode::new(),
-                _pin: core::marker::PhantomData,
             }
         }
 
@@ -185,12 +177,12 @@ mod lists {
         }
 
         #[inline]
-        pub fn in_global_list_exclusive(&mut self) -> bool {
+        pub fn in_global_list_exclusive(self: Pin<&mut Self>) -> bool {
             self.global_node.in_container()
         }
 
         #[inline]
-        pub fn in_pending_list_exclusive(&mut self) -> bool {
+        pub fn in_pending_list_exclusive(self: Pin<&mut Self>) -> bool {
             self.pending_node.in_container()
         }
     }
@@ -230,7 +222,43 @@ mod lists {
     // SAFETY: Access to `PendingListHolder` is serialized by `PendingListLock`.
     unsafe impl Send for PendingListHolder {}
 
-    crate::ksync_kernel::declare_singleton_mutex!(pub GlobalListLock);
+    // This lock is constructed by `init_global_list_lock`, called from the idle power thread's
+    // `LK_INIT_LEVEL_EARLIEST` init hook before it registers the resume timer wake event.
+    #[ksync::guarded]
+    pub struct GlobalListMutex {
+        #[mutex]
+        pub lock: ksync::KMutex<TrackedMutex>,
+    }
+
+    pub type GlobalListLock = GlobalListMutexLockClass;
+
+    static GLOBAL_LIST_LOCK: lazy_init::LazyInit<GlobalListMutex, lazy_init::NoCheck> =
+        lazy_init::LazyInit::uninit();
+
+    impl GlobalListLock {
+        /// Initializes the global wake-vector list lock.
+        ///
+        /// # Safety
+        ///
+        /// Must be called at most once during single-threaded early boot before [`Self::get`] is
+        /// called.
+        #[inline]
+        pub unsafe fn init() {
+            // SAFETY: Forwarded from the caller.
+            unsafe {
+                let Ok(()) = Pin::static_ref(&GLOBAL_LIST_LOCK)
+                    .init_pin(pin_init!(GlobalListMutex { lock <- ksync::KMutex::init() }));
+            }
+        }
+
+        #[inline]
+        pub fn get() -> &'static ksync::KMutex<Self, TrackedMutex> {
+            // SAFETY: `GLOBAL_LIST_LOCK` is initialized by `init_global_list_lock` during
+            // single-threaded early boot before any `WakeEvent` is initialized.
+            &unsafe { GLOBAL_LIST_LOCK.get_unchecked() }.lock
+        }
+    }
+
     crate::ksync_kernel::declare_singleton_spinlock!(pub PendingListLock);
 
     pub type GlobalGuard<'a> = Pin<&'a mut KMutexGuard<'static, GlobalListLock, TrackedMutex>>;
@@ -278,9 +306,10 @@ mod lists {
         pub fn push_back(&mut self, event: Pin<&WakeEvent>) {
             assert!(!event.list_nodes.global_node.in_container());
             // SAFETY: `!event.list_nodes.global_node.in_container()` is asserted above while
-            // holding `GlobalListLock`, `event` is pinned, and `WakeEvent::new`'s safety contract
-            // guarantees `event` remains valid until `destroy` removes it while holding
-            // `GlobalListLock`.
+            // holding `GlobalListLock`, `event` is pinned, and `WakeEvent::initialize`'s safety
+            // contract guarantees `event` remains valid and pinned until `WakeEvent::destroy`
+            // removes it while holding `GlobalListLock` (or lives in `'static` storage and is never
+            // dropped).
             unsafe {
                 self.list.as_mut().push_back_raw(core::ptr::from_ref(event.get_ref()).cast_mut());
             }
@@ -323,8 +352,13 @@ mod lists {
         pub fn push_front(&mut self, event: &WakeEvent) {
             if !event.list_nodes.pending_node.in_container() {
                 // SAFETY: `!event.list_nodes.pending_node.in_container()` is checked above while
-                // holding `PendingListLock`, and `WakeEvent::new`'s safety contract guarantees
-                // `event` remains valid until `destroy` removes it.
+                // holding `PendingListLock`, and `PendingListRef::push_front` is only called from
+                // `WakeEvent::trigger_locked` (via `WakeEvent::trigger` or `WakeEvent::strobe`),
+                // whose safety contracts guarantee `event` has been initialized via
+                // `WakeEvent::initialize` (so it is registered in `GLOBAL_LIST` and pinned) and
+                // remains valid until `WakeEvent::destroy` removes it while holding both
+                // `GlobalListLock` and `PendingListLock` (or lives in `'static` storage and is
+                // never dropped).
                 unsafe {
                     self.list.as_mut().push_front_raw(core::ptr::from_ref(event).cast_mut());
                 }
@@ -418,20 +452,17 @@ mod lists {
 /// `WakeEvent` maintains a global list of all instances for diagnostic purposes (i.e. logging wake
 /// events that are pending before, during, and after suspend). `WakeEvent`s are added to and
 /// removed from the global list using [`WakeEvent::initialize`] and [`WakeEvent::destroy`],
-/// respectively. Because diagnostics access each `WakeEvent`, and its containing [`WakeVector`],
-/// from the global list, care must be taken to avoid potential use-after-free hazards.
+/// respectively. Because diagnostics access each `WakeEvent` from the global list, care must be
+/// taken to avoid potential use-after-free hazards.
 ///
 /// Users of `WakeEvent`s MUST adhere to the following rules:
-/// 1. A `WakeEvent` object MUST be instantiated as a member of a type that implements the
-///    [`WakeVector`] interface, such that the lifetime of the containing type encloses the
-///    lifetime of the `WakeEvent`. DO NOT heap allocate `WakeEvent` instances separately from the
-///    referenced `WakeVector`.
+/// 1. A `WakeEvent` object MUST be pinned in place (`!Unpin`) for its lifetime.
 /// 2. The container of a `WakeEvent` instance SHOULD call [`WakeEvent::initialize`] during
 ///    construction / initialization to register the `WakeEvent` on the global list. The container
 ///    MAY skip the call to `WakeEvent::initialize` if initialization of the containing type fails.
 /// 3. The container of a `WakeEvent` MUST call [`WakeEvent::destroy`] IFF
 ///    `WakeEvent::initialize` has been called previously on the same instance of `WakeEvent` AND
-///    `WakeEvent::destroy` MUST be called BEFORE the containing type itself is destructed.
+///    `WakeEvent::destroy` MUST be called BEFORE the `WakeEvent` is dropped.
 ///
 /// Calls to `WakeEvent::initialize` and `WakeEvent::destroy` must always be balanced. However, a
 /// `WakeEvent` MAY be initialized and destroyed more than once, as long as it is destroyed before
@@ -484,15 +515,12 @@ mod lists {
 /// This ensures that once report generation has started and the initial iterator has been
 /// computed, no newly triggered events can show up in this report. They will have to wait to ride
 /// the next report-train.
-#[repr(C)]
+#[pin_data(PinnedDrop)]
 pub struct WakeEvent {
+    #[pin]
     list_nodes: ListNodes,
-    wake_vector: NonNull<WakeVector>,
     report_info: KCell<zx_wake_source_report_entry_t, PendingListLock>,
 }
-
-zr::static_assert!(size_of::<WakeEvent>() == 112);
-zr::static_assert!(align_of::<WakeEvent>() == 8);
 
 // SAFETY: `WakeEvent` synchronizes all mutable access to its intrusive nodes and `report_info`
 // through `GlobalListLock` and `PendingListLock`.
@@ -507,21 +535,14 @@ impl WakeEvent {
         !pending_list(guard.as_mut()).is_empty()
     }
 
-    /// Construct a WakeEvent referencing the given wake_vector.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure:
-    /// - `wake_vector` points to a valid, thread-safe `WakeVector` that outlives all calls to
-    ///   `initialize` on this `WakeEvent`.
-    /// - `Self` is not moved while initialized (between `initialize` and `destroy`).
-    /// - `trigger`, `acknowledge`, and `strobe` are only called while `Self` is initialized.
-    /// - If `initialize` was called, `destroy` is called before `Self` is dropped.
-    pub const unsafe fn new(wake_vector: NonNull<WakeVector>) -> Self {
-        Self {
-            // SAFETY: Upheld by the caller of `WakeEvent::new`.
+    /// Creates an in-place initializer for an unlinked [`WakeEvent`].
+    pub fn init() -> impl PinInit<Self> {
+        pin_init!(Self {
+            // SAFETY: `Self` is `!Unpin` (via `#[pin] list_nodes`), and `initialize`, `trigger`,
+            // `acknowledge`, `strobe`, and `destroy` are `unsafe` methods whose safety contracts
+            // ensure `self` is only linked into `PENDING_LIST` while also linked in `GLOBAL_LIST`
+            // and is unlinked via `destroy` before drop.
             list_nodes: unsafe { ListNodes::new() },
-            wake_vector,
             report_info: KCell::new(zx_wake_source_report_entry_t {
                 koid: 0,
                 name: [0; ZX_MAX_NAME_LEN],
@@ -531,7 +552,7 @@ impl WakeEvent {
                 signal_count: 0,
                 flags: 0,
             }),
-        }
+        })
     }
 
     #[inline]
@@ -594,26 +615,31 @@ impl WakeEvent {
         self.assign_flag(token, value, ZX_SYSTEM_WAKE_REPORT_ENTRY_FLAG_PREVIOUSLY_REPORTED);
     }
 
-    pub fn initialize(self: Pin<&Self>) {
-        // Stash our WakeVector constants in our report_info. These will never change over the
-        // lifetime of the WakeEvent, so we might as well just stash it all now.
-        let mut diagnostic_info = Diagnostics::default();
-        // SAFETY: `self.wake_vector` was provided at construction and remains valid whenever
-        // `initialize` is called.
-        unsafe { self.wake_vector.as_ref() }.get_diagnostics(&mut diagnostic_info);
-
+    /// Registers `self` on the global wake event list with `diagnostics`.
+    ///
+    /// # Safety
+    ///
+    /// - [`init_global_list_lock`] must have completed.
+    /// - `self` must not currently be initialized (i.e., not currently linked in `GLOBAL_LIST`).
+    /// - The caller must ensure that [`Self::destroy`] is called before `self` is dropped (unless
+    ///   `self` lives in `'static` storage and is never dropped), and must not drop or invalidate
+    ///   `self` while any call to [`Self::trigger`], [`Self::acknowledge`], [`Self::strobe`], or
+    ///   [`Self::destroy`] is in progress.
+    pub unsafe fn initialize(self: Pin<&Self>, diagnostics: &Diagnostics) {
         ksync::lock!(let mut guard = GlobalListLock::get().lock());
-        debug_assert!(!self.in_global_list(guard.token()));
+        assert!(!self.in_global_list(guard.token()));
 
         {
             ksync::lock!(let mut pending_guard = PendingListLock::get().lock());
             debug_assert!(!self.in_pending_list(pending_guard.token()));
 
+            // Stash our wake source constants in `report_info`. These never change over the
+            // initialized lifetime of the `WakeEvent`.
             let report_info = self.report_info_mut(pending_guard.as_mut().token_mut());
             *report_info = zx_wake_source_report_entry_t::default();
-            report_info.koid = diagnostic_info.koid;
+            report_info.koid = diagnostics.koid;
             zr::static_assert!(size_of::<[u8; ZX_MAX_NAME_LEN]>() == ZX_MAX_NAME_LEN);
-            report_info.name.copy_from_slice(&diagnostic_info.extra);
+            report_info.name.copy_from_slice(&diagnostics.extra);
 
             // Initially flag our report entry as having been reported. This sets up
             // our bookkeeping properly so the first time it becomes signaled, it will
@@ -625,9 +651,20 @@ impl WakeEvent {
         global_list(guard.as_mut()).push_back(self);
     }
 
-    pub fn destroy(&self) {
+    /// Unregisters `self` from the global (and, if pending, pending) wake event lists,
+    /// acknowledging any still-signaled wake event with [`IdlePowerThread`].
+    ///
+    /// # Safety
+    ///
+    /// - `self` must currently be initialized via [`Self::initialize`] (which also implies
+    ///   [`init_global_list_lock`] has completed).
+    /// - No concurrent call to [`Self::initialize`], [`Self::destroy`], [`Self::trigger`],
+    ///   [`Self::acknowledge`], or [`Self::strobe`] on `self` may be in progress, and none of
+    ///   [`Self::destroy`], [`Self::trigger`], [`Self::acknowledge`], or [`Self::strobe`] may be
+    ///   called on `self` afterwards unless `self` is re-initialized via [`Self::initialize`].
+    pub unsafe fn destroy(&self) {
         ksync::lock!(let mut guard = GlobalListLock::get().lock());
-        debug_assert!(self.in_global_list(guard.token()));
+        assert!(self.in_global_list(guard.token()));
 
         {
             // If we are in pending list right now, we need to remove ourselves, making
@@ -653,17 +690,20 @@ impl WakeEvent {
     /// Triggers a wakeup that resumes the system, or aborts an incomplete suspend sequence, and
     /// prevents the system from starting a new suspend sequence.
     ///
-    /// Must be called with interrupts and preempt disabled.
-    ///
     /// Returns:
     ///  - [`WakeResult::Active`] if this wake trigger occurred when the system was active.
     ///  - [`WakeResult::Resumed`] if this or another wake trigger resumed the system.
     ///  - [`WakeResult::SuspendAborted`] if this wake trigger occurred before suspend completed.
     ///  - [`WakeResult::BadState`] if this wake event is already pending.
     ///
-    /// Calls to `trigger` and `acknowledge` must be synchronized by the caller to guarantee that
-    /// updates are performed by a single actor at a time.
-    pub fn trigger(&self, trigger_time: zx_instant_boot_t) -> WakeResult {
+    /// # Safety
+    ///
+    /// - `self` must currently be initialized via [`Self::initialize`] and remain initialized for
+    ///   the duration of this call (i.e., [`Self::destroy`] must not race with or precede this
+    ///   call).
+    /// - Calls to [`Self::trigger`] and [`Self::acknowledge`] on `self` must be synchronized by
+    ///   the caller so that updates are performed by a single actor at a time.
+    pub unsafe fn trigger(&self, trigger_time: zx_instant_boot_t) -> WakeResult {
         let preempt_disabler = AutoPreemptDisabler::new();
         ksync::lock!(let mut pending_guard = PendingListLock::get().lock());
         self.trigger_locked(&preempt_disabler, pending_guard.as_mut(), trigger_time)
@@ -672,9 +712,14 @@ impl WakeEvent {
     /// Acknowledges a pending wake event, allowing the system to enter suspend when all other
     /// suspend conditions are met.
     ///
-    /// Calls to `trigger` and `acknowledge` must be synchronized by the caller to guarantee that
-    /// updates are performed by a single actor at a time.
-    pub fn acknowledge(&self, ack_behavior: AckBehavior) {
+    /// # Safety
+    ///
+    /// - `self` must currently be initialized via [`Self::initialize`] and remain initialized for
+    ///   the duration of this call (i.e., [`Self::destroy`] must not race with or precede this
+    ///   call).
+    /// - Calls to [`Self::trigger`] and [`Self::acknowledge`] on `self` must be synchronized by
+    ///   the caller so that updates are performed by a single actor at a time.
+    pub unsafe fn acknowledge(&self, ack_behavior: AckBehavior) {
         let _preempt_disabler = AutoPreemptDisabler::new();
         ksync::lock!(let mut pending_guard = PendingListLock::get().lock());
         self.acknowledge_locked(pending_guard.as_mut(), current_boot_time().0, ack_behavior);
@@ -683,7 +728,7 @@ impl WakeEvent {
     /// WARNING : This is not the method you are looking for `<jedimindtrick/>`
     ///
     /// `strobe` is an operation used only in a very specific situation; when a suspend operation
-    /// times out and the `ResumeTimerWakeVector` becomes signaled as a result. This object is
+    /// times out and `RESUME_TIMER_WAKE_EVENT` becomes signaled as a result. This object is
     /// (currently) the only non-interrupt wake source/vector defined in the system, and it is not
     /// directly exposed to user-mode as an object which becomes acknowledged by user-mode actions.
     /// Instead, it is the synthetic wake source used to report suspend-operation timeouts, and is
@@ -692,7 +737,12 @@ impl WakeEvent {
     /// `strobe` handles this operation, without needing to expose any locks to make it possible to
     /// atomically `trigger`/`acknowledge` the object. For all other wake source objects in the
     /// system, explicit calls to `trigger` and `acknowledge` are what should be used.
-    pub fn strobe(&self, trigger_time: zx_instant_boot_t) -> WakeResult {
+    ///
+    /// # Safety
+    ///
+    /// `self` must currently be initialized via [`Self::initialize`] and remain initialized for the
+    /// duration of this call (i.e., [`Self::destroy`] must not race with or precede this call).
+    pub unsafe fn strobe(&self, trigger_time: zx_instant_boot_t) -> WakeResult {
         let preempt_disabler = AutoPreemptDisabler::new();
         ksync::lock!(let mut pending_guard = PendingListLock::get().lock());
         let result = self.trigger_locked(&preempt_disabler, pending_guard.as_mut(), trigger_time);
@@ -1050,11 +1100,13 @@ impl WakeEvent {
     }
 }
 
-impl Drop for WakeEvent {
-    fn drop(&mut self) {
+#[pinned_drop]
+impl PinnedDrop for WakeEvent {
+    fn drop(self: Pin<&mut Self>) {
+        let mut this = self.project();
         // By the time that we destruct, we should have been Destroyed, meaning that
         // we are no longer in any lists.
-        debug_assert!(!self.list_nodes.in_global_list_exclusive());
-        debug_assert!(!self.list_nodes.in_pending_list_exclusive());
+        debug_assert!(!this.list_nodes.as_mut().in_global_list_exclusive());
+        debug_assert!(!this.list_nodes.as_mut().in_pending_list_exclusive());
     }
 }

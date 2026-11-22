@@ -1002,7 +1002,7 @@ void Session::DispatchNotifyProcessStarting(const debug_ipc::NotifyProcessStarti
 
 void Session::DispatchNotifyProcessExiting(const debug_ipc::NotifyProcessExiting& notify) {
   if (Process* process = system_.ProcessFromKoid(notify.process_koid))
-    process->GetTarget()->OnProcessExiting(notify.return_code, notify.timestamp);
+    process->GetTarget()->OnProcessExiting(static_cast<int>(notify.return_code), notify.timestamp);
 }
 
 void Session::DispatchNotifyIO(const debug_ipc::NotifyIO& notify) {

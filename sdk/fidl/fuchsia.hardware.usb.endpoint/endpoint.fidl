@@ -51,9 +51,22 @@ type EndpointInfo = flexible union {
     4: interrupt InterruptEndpointInfo;
 };
 
+/// DMA alignment and boundary constraints for client-supplied VMOs registered via `RegisterVmos()`.
+type AlignmentInfo = table {
+    /// Minimum byte alignment required for DMA buffer addresses (and VMO offsets/sizes).
+    /// Must be a non-zero power of two (e.g. 1 for byte-aligned, 4 for 32-bit word-aligned,
+    /// or the system page size).
+    1: buffer_alignment uint64;
+    /// Physical address boundary (in bytes) that a single DMA transfer segment must not cross,
+    /// or 0 if there is no boundary constraint (e.g. 65536 for a 64 KiB boundary).
+    /// Must be 0 or a power of two.
+    2: dma_boundary_alignment uint64;
+};
+
 /// Limit on the number of VMOs in one call to `RegisterVmos()` or `UnregisterVmos()`.
 /// Bounded by the Zircon channel handle limit (`ZX_CHANNEL_MAX_MSG_HANDLES` = 64) since
-/// `RegisterVmos()` returns a vector of VMO handles.
+/// `RegisterVmos()` transfers vectors of VMO handles in both its request (when client-supplied
+/// VMOs are passed) and response.
 const VMO_VECTOR_MAX uint32 = 64;
 
 /// Limit on the number of Requests in one call to `QueueRequests()`.
@@ -64,16 +77,40 @@ const REQUEST_MAX uint32 = 64;
 /// scatter-gather buffer chaining.
 const MAX_COMPLETIONS_PER_EVENT uint32 = 64;
 
-/// VMO information for registering VMOs. Only used for `RegisterVmos()` to convey the ID to register
-/// a VMO to and its size.
-type VmoInfo = table {
-    /// ID corresponding to the VMO to be registered.
+/// VMO information for registering VMOs. Only used for `RegisterVmos()` to convey the ID to
+/// register a VMO to, and either the size of a new VMO to allocate or an existing client-supplied
+/// VMO handle (`size` and `vmo` are mutually exclusive).
+type VmoInfo = resource table {
+    /// ID corresponding to the VMO to be registered. Required.
     1: id fuchsia.hardware.usb.request.VmoId;
-    /// Size of VMO to register.
+    /// Size (in bytes) of a new VMO for the endpoint server to allocate and pin under `id`.
+    /// Must be non-zero, and must be omitted when `vmo` is provided.
     2: size uint64;
+    /// Client-supplied VMO handle to register and pin across its full kernel size (`zx_vmo_get_size`,
+    /// which must be non-zero) under `id`. Must be omitted when `size` is provided.
+    ///
+    /// Supplying an existing VMO handle allows multiple endpoints (or external buffer
+    /// producers/consumers) to share the same underlying physical memory for zero-copy transfers.
+    /// Client-supplied VMOs must satisfy the following requirements:
+    ///  * **Rights**: The handle must carry `ZX_RIGHT_TRANSFER`, `ZX_RIGHT_DUPLICATE`,
+    ///    `ZX_RIGHT_MAP`, `ZX_RIGHT_READ`, and `ZX_RIGHT_WRITE`.
+    ///  * **Backing properties**: The VMO must be non-resizable and non-pager-backed (servers pin
+    ///    and map VMOs synchronously while holding internal endpoint locks).
+    ///  * **DMA alignment and contiguity**: Buffers must satisfy the controller constraints
+    ///    reported by `GetAlignmentInfo()`, and must be physically contiguous
+    ///    (`zx_vmo_create_contiguous`) on endpoints where `supports_scatter_gather` (from
+    ///    `GetInfo()`) is `false`.
+    ///  * **Cache coherency**: In addition to the per-request rules on `QueueRequests()`, callers
+    ///    must perform an initial cache clean-and-invalidate (`ZX_VMO_OP_CACHE_CLEAN_INVALIDATE` or
+    ///    `ZX_CACHE_FLUSH_DATA | ZX_CACHE_FLUSH_INVALIDATE`) before the first DMA transfer if the
+    ///    VMO was newly allocated or ever touched by the CPU (including initial page zeroing), and
+    ///    must align sub-region offsets and sizes to the CPU data cache-line size
+    ///    (`zx_system_get_dcache_line_size()`) if sharing distinct sub-regions of the VMO
+    ///    concurrently with CPU buffers.
+    3: vmo zx.Handle:VMO;
 };
 
-/// VMO handle returned for registered VMOs. Only used as a return value for `UnregisterVmos()` to
+/// VMO handle returned for registered VMOs. Only used as a return value for `RegisterVmos()` to
 /// associate a VMO handle with the VmoId it was registered to.
 type VmoHandle = resource table {
     /// ID corresponding to the registered VMO as passed in by `RegisterVmos()` through `VmoInfo`.
@@ -125,9 +162,20 @@ closed protocol Endpoint {
         info EndpointInfo;
     }) error zx.Status;
 
-    /// Registers and pins VMOs to the vmo_ids. Returns
-    ///  * vmo: Handles to successfully registered vmo_ids.
-    /// VMO IDs that are already are registered to will fail.
+    /// Gets DMA alignment and boundary constraints for client-supplied VMOs.
+    /// Callers supplying existing VMOs via `VmoInfo.vmo` in `RegisterVmos()` should query
+    /// `GetAlignmentInfo()` to ensure their buffers satisfy controller DMA constraints.
+    strict GetAlignmentInfo() -> (struct {
+        info AlignmentInfo;
+    }) error zx.Status;
+
+    /// Registers and pins VMOs to the `vmo_ids`. Returns
+    ///  * `vmos`: Handles to successfully registered `vmo_ids` (populated for both server-allocated
+    ///    and client-supplied VMOs).
+    /// Entries fail registration and are omitted from `vmos` if `id` is missing or already
+    /// registered, if both or neither of `size` and `vmo` are provided, if `size` (or the supplied
+    /// VMO's size) is zero, if a supplied `vmo` lacks required rights or is resizable or
+    /// pager-backed, or if pinning/mapping the VMO fails.
     strict RegisterVmos(resource struct {
         vmo_ids vector<VmoInfo>:VMO_VECTOR_MAX;
     }) -> (resource struct {

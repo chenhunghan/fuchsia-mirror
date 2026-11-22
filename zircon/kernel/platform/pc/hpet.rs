@@ -106,27 +106,29 @@ fn probe_hpet() -> Option<Hpet> {
         return None;
     }
 
-    let mut regs_addr: *mut HpetRegisters = core::ptr::null_mut();
-    // SAFETY: FFI call with correct pointers is safe.
+    // SAFETY: The cache policy in the flags is appropriate for all mappings of the physical range,
+    // and creating this mapping is sound.
     let res = unsafe {
         crate::vm::vm_aspace::VmAspace::kernel_aspace().alloc_physical(
             b"hpet",
             page::SIZE,
-            &mut regs_addr as *mut *mut HpetRegisters as *mut *mut core::ffi::c_void,
+            None,
             page::SHIFT as u8,
             hpet_address.into(),
             0,
             ARCH_MMU_FLAG_UNCACHED_DEVICE | ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
         )
     };
-    if res.is_err() {
+    let Ok(base) = res else {
         return None;
-    }
+    };
+    let regs_addr: *mut HpetRegisters = core::ptr::with_exposed_provenance_mut(base);
 
     let cleanup_and_fail = || {
-        // SAFETY: Free the allocated region on failure.
+        // SAFETY: `regs_addr` is in a mapping of the root VMAR whose whole VMO range is pinned by a
+        // pin this code owns, and nothing uses that mapping any more.
         unsafe {
-            let _ = crate::vm::vm_aspace::VmAspace::kernel_aspace().free_region(regs_addr as usize);
+            let _ = crate::vm::vm_aspace::VmAspace::kernel_aspace().free_region(base);
         }
         None
     };

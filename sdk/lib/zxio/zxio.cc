@@ -637,13 +637,9 @@ struct WireResponse<fsocket::Provider::StreamSocket> {
 
 template <>
 struct WireResponse<fsocket::Provider::DatagramSocket> {
-  using ClientEnd = std::variant<fidl::ClientEnd<fsocket::DatagramSocket>,
-                                 fidl::ClientEnd<fsocket::SynchronousDatagramSocket>, zx_status_t>;
+  using ClientEnd = std::variant<fidl::ClientEnd<fsocket::SynchronousDatagramSocket>, zx_status_t>;
 
   static ClientEnd FromResponse(fsocket::wire::ProviderDatagramSocketResponse* response) {
-    if (response->is_datagram_socket()) {
-      return std::move(response->datagram_socket());
-    }
     if (response->is_synchronous_datagram_socket()) {
       return std::move(response->synchronous_datagram_socket());
     }
@@ -682,14 +678,10 @@ struct WireResponse<fsocket::Provider::StreamSocketWithOptions> {
 
 template <>
 struct WireResponse<fsocket::Provider::DatagramSocketWithOptions> {
-  using ClientEnd = std::variant<fidl::ClientEnd<fsocket::DatagramSocket>,
-                                 fidl::ClientEnd<fsocket::SynchronousDatagramSocket>, zx_status_t>;
+  using ClientEnd = std::variant<fidl::ClientEnd<fsocket::SynchronousDatagramSocket>, zx_status_t>;
 
   static ClientEnd FromResponse(
       fsocket::wire::ProviderDatagramSocketWithOptionsResponse* response) {
-    if (response->is_datagram_socket()) {
-      return std::move(response->datagram_socket());
-    }
     if (response->is_synchronous_datagram_socket()) {
       return std::move(response->synchronous_datagram_socket());
     }
@@ -1003,51 +995,6 @@ zx_status_t zxio_socket_inner(zxio_service_connector service_connector, int doma
       auto& response = (*socket_result).value();
       return std::visit(
           overloaded{
-              [&](fidl::ClientEnd<fsocket::DatagramSocket>& control) {
-                fidl::WireResult result = fidl::WireCall(control)->Describe();
-                if (!result.ok()) {
-                  return result.status();
-                }
-                fidl::WireResponse response = result.value();
-                if (!response.has_socket()) {
-                  return ZX_ERR_NOT_SUPPORTED;
-                }
-                if (!response.has_tx_meta_buf_size()) {
-                  return ZX_ERR_NOT_SUPPORTED;
-                }
-                if (!response.has_rx_meta_buf_size()) {
-                  return ZX_ERR_NOT_SUPPORTED;
-                }
-                if (!response.has_metadata_encoding_protocol_version() ||
-                    response.metadata_encoding_protocol_version() !=
-                        fsocket::UdpMetadataEncodingProtocolVersion::kZero) {
-                  return ZX_ERR_NOT_SUPPORTED;
-                }
-                zx::socket& socket = response.socket();
-                zx_info_socket_t info;
-                if (zx_status_t status =
-                        socket.get_info(ZX_INFO_SOCKET, &info, sizeof(info), nullptr, nullptr);
-                    status != ZX_OK) {
-                  return status;
-                }
-                if (zx_status_t status =
-                        allocator(ZXIO_OBJECT_TYPE_DATAGRAM_SOCKET, &zxio_storage, out_context);
-                    status != ZX_OK || zxio_storage == nullptr) {
-                  return ZX_ERR_NO_MEMORY;
-                }
-                if (zx_status_t status =
-                        zxio_datagram_socket_init(zxio_storage, std::move(socket), info,
-                                                  {
-                                                      response.tx_meta_buf_size(),
-                                                      response.rx_meta_buf_size(),
-                                                  },
-                                                  std::move(control));
-                    status != ZX_OK) {
-                  return status;
-                }
-                *out_code = 0;
-                return ZX_OK;
-              },
               [&](fidl::ClientEnd<fsocket::SynchronousDatagramSocket>& control) {
                 fidl::WireResult result = fidl::WireCall(control)->Describe();
                 if (!result.ok()) {
@@ -1070,7 +1017,8 @@ zx_status_t zxio_socket_inner(zxio_service_connector service_connector, int doma
                 *out_code = 0;
                 return ZX_OK;
               },
-              [](zx_status_t err) { return err; }},
+              [](zx_status_t err) { return err; },
+          },
           response);
     } break;
     case SOCK_RAW: {

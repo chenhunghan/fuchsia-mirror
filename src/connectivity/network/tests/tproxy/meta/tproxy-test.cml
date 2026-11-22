@@ -39,7 +39,7 @@
         },
         {
             name: "filter-setup",
-            url: "#meta/filter-setup.cm",
+            url: "filter-setup#meta/filter-setup.cm",
         },
         {
             name: "sync-manager",

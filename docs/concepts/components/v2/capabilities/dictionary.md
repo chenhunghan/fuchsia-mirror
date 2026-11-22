@@ -269,7 +269,7 @@ Note that normally, the default value for `from` in use declarations is
 `"parent"`, but because we are retrieving the protocol from a dictionary offered
 by the parent, we have to specify the parent as the source explicitly.
 
-Since dictionaries can be [nested](#nested), they themselves may be retrieved
+Since dictionaries can be [nested](#nesting), they themselves may be retrieved
 from dictionaries and routed out of them:
 
 ```json5
@@ -478,13 +478,13 @@ The program just connects to each protocol in turn and tries to use it:
 {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/components/dictionaries/src/lib.rs" region_tag="connect" adjust_indentation="auto" %}
 ```
 
-## Mutability
+## Mutability {#mutability}
 
 `dictionary` capabilities obey the following mutability rules:
 
 -   Only the component that [defines](#define) a dictionary is allowed to
-    [aggregate](#aggregation) or [extend](#extend) it. Furthermore, this is the
-    only way to add capabilities to a `dictionary`, and there is no way to
+    [aggregate](#aggregation) or [extend](#extension) it. Furthermore, this is
+    the only way to add capabilities to a `dictionary`, and there is no way to
     modify it at runtime.
 -   Any component that is routed a dictionary can [retrieve](#retrieval)
     capabilities from it.

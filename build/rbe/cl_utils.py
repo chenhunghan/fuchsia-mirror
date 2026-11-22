@@ -6,16 +6,14 @@
 """
 
 import argparse
-import asyncio
 import collections
 import contextlib
 import dataclasses
 import datetime
-import fcntl
 import filecmp
 import os
-import platform
 import re
+import select
 import shlex
 import shutil
 import subprocess
@@ -32,7 +30,6 @@ from pathlib import Path
 from typing import (
     IO,
     Any,
-    Self,
     TextIO,
 )
 
@@ -728,7 +725,9 @@ def qualify_tool_path(path: Path) -> str:
     return str(path)
 
 
-def exec_relaunch(command: Sequence[str]) -> None:
+def exec_relaunch(
+    command: Sequence[str], env: Mapping[str, str] | None = None
+) -> None:
     """Re-launches a command without returning.
 
     Works like an os.exec*() call, by replacing the current process with
@@ -741,6 +740,7 @@ def exec_relaunch(command: Sequence[str]) -> None:
     Args:
       command: command to execute.  Must start with an executable, specified
         with a relative or absolute path.
+      env: optional environment dictionary to pass to the subprocess.
 
     Returns: (it does not return)
     """
@@ -749,39 +749,8 @@ def exec_relaunch(command: Sequence[str]) -> None:
     # os.execv(command[0], command[1:])
 
     # Workaround: fork a subprocess
-    sys.exit(subprocess.call(command))
+    sys.exit(subprocess.call(command, env=env))
     assert False, "exec_relaunch() should never return"
-
-
-#####################################################################
-class BlockingFileLock(object):
-    """A minimal mutual exclusion lock (blocking)."""
-
-    def __init__(self, lockfile: Path):
-        self._lockfile: Path = lockfile
-        self._lockfile_fd: int | None = None
-
-    def _acquire(self) -> None:
-        lockfile_fd = os.open(self._lockfile, os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(lockfile_fd, fcntl.LOCK_EX)  # Blocking
-        self._lockfile_fd = lockfile_fd
-
-    def _release(self) -> None:
-        lockfile_fd = self._lockfile_fd
-        if not lockfile_fd:
-            return
-        self._lockfile_fd = None
-        fcntl.flock(lockfile_fd, fcntl.LOCK_UN)
-        os.close(lockfile_fd)
-        # Do not remove the lock file:
-        # https://stackoverflow.com/questions/17708885/flock-removing-locked-file-without-race-condition
-
-    def __enter__(self) -> Self:
-        self._acquire()
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self._release()
 
 
 #####################################################################
@@ -824,20 +793,77 @@ class SubprocessResult(object):
         return self.returncode
 
 
-async def _read_stream(
-    stream: asyncio.StreamReader | None, callback: Callable[[bytes], None]
-) -> None:
-    if not stream:
-        return
-    while True:
-        line = await stream.readline()
-        if line:
-            callback(line)
+def _drain_two_pipes(
+    fd_a: int,
+    fd_b: int,
+    out_a: TextIO,
+    out_b: TextIO,
+    quiet: bool,
+) -> tuple[list[str], list[str]]:
+    """Reads two pipes until both reach EOF.
+
+    Splits each pipe's output into lines, records them, and unless quiet,
+    prints each line as soon as it is complete. Waiting on both pipes with
+    poll() means a writer that fills one pipe while we wait on the other
+    can't deadlock. Leaves closing fd_a and fd_b to the caller.
+
+    Args:
+      fd_a: file descriptor of the read end of a pipe, e.g. a child's stdout.
+      fd_b: file descriptor of the read end of another pipe, e.g. a child's
+        stderr.
+      out_a: stream to print lines read from fd_a to.
+      out_b: stream to print lines read from fd_b to.
+      quiet: if True, only record lines; don't print them.
+
+    Returns:
+      lines read from fd_a, lines read from fd_b
+    """
+    lines_a: list[str] = []
+    lines_b: list[str] = []
+    # Bytes read from each pipe that don't end in a newline yet.
+    bufs: dict[int, bytearray] = {fd_a: bytearray(), fd_b: bytearray()}
+
+    def emit(fd: int, raw_line: bytes) -> None:
+        line_str = raw_line.decode("utf-8").rstrip()
+        if fd == fd_a:
+            lines_a.append(line_str)
+            if not quiet:
+                print(line_str, file=out_a)
         else:
-            break
+            lines_b.append(line_str)
+            if not quiet:
+                print(line_str, file=out_b)
+
+    poller = select.poll()
+    # Wake on readable data (POLLIN), peer close (POLLHUP), or pipe error.
+    mask = select.POLLIN | select.POLLHUP | select.POLLERR
+    poller.register(fd_a, mask)
+    poller.register(fd_b, mask)
+    # Pipes that haven't reached EOF yet.
+    pending = {fd_a, fd_b}
+    while pending:
+        for fd, _ev in poller.poll():
+            # Always read() before treating POLLHUP as EOF so buffered
+            # bytes written right before exit aren't dropped; b"" is EOF.
+            chunk = os.read(fd, 65536)
+            buf = bufs[fd]
+            if chunk:
+                buf.extend(chunk)
+                while (nl := buf.find(b"\n")) != -1:
+                    raw_line = bytes(buf[: nl + 1])
+                    del buf[: nl + 1]
+                    emit(fd, raw_line)
+            else:
+                # EOF: flush any final line without a trailing newline.
+                if buf:
+                    emit(fd, bytes(buf))
+                    buf.clear()
+                poller.unregister(fd)
+                pending.remove(fd)
+    return lines_a, lines_b
 
 
-async def _stream_subprocess(
+def _subprocess_call_fallback(
     cmd: Sequence[str],
     stdin: IO[Any] | None = None,
     stdout: TextIO | None = None,
@@ -845,47 +871,101 @@ async def _stream_subprocess(
     quiet: bool = False,
     **kwargs: Any,
 ) -> SubprocessResult:
-    popen_kwargs: Any = {}
-    if platform.system() == "Windows":
-        platform_settings = {"env": os.environ}
-    else:
-        platform_settings = {}
-        # default interpreter is sufficient: {"executable": "/bin/sh"}
+    """Runs cmd with Popen(shell=True).
 
-    popen_kwargs.update(platform_settings)
-    popen_kwargs.update(kwargs)
-
+    subprocess_call() uses this for commands it can't spawn directly.
+    """
     cmd_str = command_quoted_str(cmd)
-    p = await asyncio.create_subprocess_shell(
+    p = subprocess.Popen(
         cmd_str,
+        shell=True,
         stdin=stdin,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        limit=1024 * 1024,  # 1MB buffer for stdout/stderr StreamReaders
-        **popen_kwargs,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        **kwargs,
     )
-    pid = p.pid
-
-    out_text: list[str] = []
-    err_text: list[str] = []
-
-    def tee(line: bytes, sink: list[str], pipe: TextIO) -> None:
-        line_str = line.decode("utf-8").rstrip()
-        sink.append(line_str)
-        if not quiet:
-            print(line_str, file=pipe)
-
-    out_task = asyncio.create_task(
-        _read_stream(p.stdout, lambda l: tee(l, out_text, stdout or sys.stdout))
-    )
-    err_task = asyncio.create_task(
-        _read_stream(p.stderr, lambda l: tee(l, err_text, stderr or sys.stderr))
-    )
-    # Forward stdout, stderr while capturing them.
-    await asyncio.wait([out_task, err_task])
-
+    assert p.stdout is not None
+    assert p.stderr is not None
+    # Leaving the with block closes the pipes, then waits for the child.
+    with p:
+        out_text, err_text = _drain_two_pipes(
+            p.stdout.fileno(),
+            p.stderr.fileno(),
+            stdout or sys.stdout,
+            stderr or sys.stderr,
+            quiet,
+        )
     return SubprocessResult(
-        returncode=await p.wait(),
+        returncode=p.returncode, stdout=out_text, stderr=err_text, pid=p.pid
+    )
+
+
+def _subprocess_call_direct(
+    cmd: Sequence[str],
+    env: Mapping[str, str] | None,
+    stdout: TextIO,
+    stderr: TextIO,
+    quiet: bool,
+) -> SubprocessResult | None:
+    """Runs cmd with os.posix_spawnp(), without a shell.
+
+    subprocess_call() uses this for commands that don't need a shell.
+
+    Returns:
+      The result, or None if cmd didn't run because it can't be spawned this
+      way (e.g. cmd[0] isn't found, or our stdio is closed).
+    """
+    # Pipe fds that are still open. The finally below closes them all.
+    fds: list[int] = []
+    pid: int | None = None
+    try:
+        # Create (read, write) pipe fds for child stdout and stderr.
+        out_r, out_w = os.pipe()
+        fds += (out_r, out_w)
+        err_r, err_w = os.pipe()
+        fds += (err_r, err_w)
+        # If stdio was closed, pipe fds can land on 0-2 and collide with
+        # stdio, here or in the child (where dup2(fd, fd) O_CLOEXEC behavior
+        # varies by libc); let Popen handle that case.
+        if min(fds) <= 2:
+            return None
+        try:
+            # Spawn cmd[0] (via PATH) without a shell, wiring the pipe write
+            # ends to child stdout (1) and stderr (2). os.pipe() fds are
+            # O_CLOEXEC; DUP2 clears it only on fds 1 and 2.
+            pid = os.posix_spawnp(
+                cmd[0],
+                cmd if isinstance(cmd, (list, tuple)) else list(cmd),
+                os.environ if env is None else env,
+                file_actions=[
+                    (os.POSIX_SPAWN_DUP2, out_w, 1),
+                    (os.POSIX_SPAWN_DUP2, err_w, 2),
+                ],
+            )
+        except OSError:
+            # E.g. ENOENT/EACCES on cmd[0]: fall back to the shell so the exit
+            # code (127/126) and stderr match.
+            return None
+        # Close our copies of the write ends so _drain_two_pipes() sees EOF
+        # once the child exits. Drop each from fds first, so the finally
+        # never closes it again.
+        for fd in (out_w, err_w):
+            fds.remove(fd)
+            os.close(fd)
+        out_text, err_text = _drain_two_pipes(
+            out_r, err_r, stdout, stderr, quiet
+        )
+    finally:
+        # Close the read ends before reaping, so a child that's still writing
+        # (if draining raised) gets EPIPE instead of blocking on a full pipe.
+        for fd in fds:
+            os.close(fd)
+        if pid is not None:
+            _, status = os.waitpid(pid, 0)
+    # Convert raw waitpid status to Popen-style returncode
+    # (exit code, or -SIGNAL if killed by a signal).
+    return SubprocessResult(
+        returncode=os.waitstatus_to_exitcode(status),
         stdout=out_text,
         stderr=err_text,
         pid=pid,
@@ -915,15 +995,36 @@ def subprocess_call(
     Returns:
       returncode, stdout (text), stderr (text)
     """
-    return asyncio.run(
-        _stream_subprocess(
-            cmd=cmd,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            quiet=quiet,
-            **kwargs,
+    # Fast path: spawn plain commands directly with posix_spawnp() (no /bin/sh)
+    # and stream output with poll(). Commands needing shell env assignments
+    # (leading VAR=value), stdin, a different cwd, or extra Popen kwargs fall
+    # back to _subprocess_call_fallback().
+    cwd = kwargs.get("cwd")
+    if (
+        cmd
+        and "=" not in cmd[0]
+        and stdin is None
+        and kwargs.keys() <= {"cwd", "env"}
+        # os.posix_spawnp() has no cwd option, so only accept the current dir.
+        and (cwd is None or os.path.abspath(cwd) == os.getcwd())
+    ):
+        result = _subprocess_call_direct(
+            cmd,
+            kwargs.get("env"),
+            stdout or sys.stdout,
+            stderr or sys.stderr,
+            quiet,
         )
+        if result is not None:
+            return result
+
+    return _subprocess_call_fallback(
+        cmd=cmd,
+        stdin=stdin,
+        stdout=stdout,
+        stderr=stderr,
+        quiet=quiet,
+        **kwargs,
     )
 
 

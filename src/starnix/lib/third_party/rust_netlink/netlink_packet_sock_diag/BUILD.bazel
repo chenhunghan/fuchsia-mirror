@@ -3,10 +3,17 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/rust:defs.bzl", "rustc_library")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
 
-package(
-    default_applicable_licenses = ["//:license"],
-    default_visibility = ["//visibility:public"],
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":netlink_packet_sock_diag_test_package"],
+    visibility = ["//src/starnix/lib:__pkg__"],
 )
 
 rustc_library(
@@ -31,6 +38,10 @@ rustc_library(
     ],
     crate_name = "netlink_packet_sock_diag",
     edition = "2024",
+    visibility = [
+        "//src/connectivity/network/netlink:__subpackages__",
+        "//src/starnix:__subpackages__",
+    ],
     with_unit_tests = True,
     deps = [
         "//src/starnix/lib/third_party/rust_netlink/netlink_packet_core",
@@ -42,4 +53,9 @@ rustc_library(
         "//third_party/rust_crates/vendor:libc",
         "//third_party/rust_crates/vendor:smallvec",
     ],
+)
+
+fx_unittest_package(
+    name = "netlink_packet_sock_diag_test_package",
+    unit_tests = [":netlink_packet_sock_diag_test"],
 )

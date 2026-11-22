@@ -88,7 +88,7 @@ A typical test would be to enumerate the nodes created.
 [dt-schema]: https://github.com/devicetree-org/dt-schema
 [standard-properties]: https://devicetree-specification.readthedocs.io/en/v0.3/devicetree-basics.html#standard-properties
 [visitors]: /docs/development/boards/devicetree-visitors.md
-[writing-new-visitor]: /docs/development/boards/devicetree-visitors.md#write-a-new-visitor
+[writing-new-visitor]: /docs/development/boards/devicetree-visitors.md#writing-a-new-visitor
 [default-visitors]: /docs/development/boards/devicetree-visitors.md#default-visitors
 [driver-visitors]: /docs/development/boards/devicetree-visitors.md#driver-visitors
 [board-driver]: /docs/development/boards/bringup.md#board-driver

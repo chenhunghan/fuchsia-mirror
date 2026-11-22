@@ -573,7 +573,7 @@ TEST_F(AudioCore48kFidelityTest, DISABLED_96kMicro48kFullSpectrum) {
 }
 
 //
-// Assess ultrasound pass-through (no format/channel/rate conversion)
+// Assess ultrasound high-pass filtering (no format/channel/rate conversion)
 //
 
 // ultrasound (must be float32 and match mix stage [96k stereo]) stream to 96k stereo mix stage
@@ -586,14 +586,15 @@ TEST_F(AudioCore96kFidelityTest, DISABLED_Ultrasound) {
       .channels_to_play{0},
 
       .pipeline = pipeline_constants(kDeviceFrameRate),
+      .low_cut_frequency = media_audio::kUltrasoundMinFrequencyHz,
 
       .device_id = kOutputDeviceId,
       .output_format = Format::Create<ASF::FLOAT>(kDeviceChannels, kDeviceFrameRate).take_value(),
       .channels_to_measure{
           {
               0,
-              FidelityResults::kFullScaleLimitsDb,
-              FidelityResults::kFloat32SinadLimitsDb,
+              FidelityResults::kUltrasound96kLimitsDb,
+              FidelityResults::kUltrasound96kSinadLimitsDb,
           },
           {
               1,

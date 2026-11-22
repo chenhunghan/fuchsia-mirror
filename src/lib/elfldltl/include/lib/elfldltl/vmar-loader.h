@@ -142,11 +142,10 @@ class VmarLoader {
   /// The kernel places it using ASLR within the parent VMAR provided at
   /// construction, unless the optional argument sets the offset from the base
   /// of that parent VMAR.
-  template <class Diagnostics, class LoadInfo>
-  [[nodiscard]] bool Allocate(Diagnostics& diag, const LoadInfo& load_info,
+  [[nodiscard]] bool Allocate(auto& diag, const auto& load_info,
                               std::optional<size_t> vmar_offset = std::nullopt) {
-    if (zx_status_t status =
-            AllocateVmar(load_info.vaddr_size(), load_info.vaddr_start(), vmar_offset);
+    if (zx_status_t status = AllocateVmar(  //
+            load_info.vaddr_start(), load_info.vaddr_size(), vmar_offset);
         status != ZX_OK) [[unlikely]] {
       constexpr std::string_view kFailed = "Failed to allocate address space: ";
       if (!vmar_offset) {
@@ -167,19 +166,6 @@ class VmarLoader {
   static size_t VmarOffsetForLoadBias(zx_vaddr_t vmar_base, const LoadInfo& load_info,
                                       zx_vaddr_t load_bias) {
     return load_info.vaddr_start() + load_bias - vmar_base;
-  }
-
-  /// This installs a pre-allocated VMAR for the image that will be passed to
-  /// Load().  The VMAR must be large enough for the .vaddr_size() of the
-  /// LoadInfo passed to Load().  This takes ownership of the VMAR handle and
-  /// of the VMAR itself--the VMAR will be destroyed if this object is
-  /// destroyed before Commit() is called.  The load bias must match the
-  /// difference between the base of the VMAR and .vaddr_start().
-  void Place(zx::vmar load_image_vmar, zx_vaddr_t load_bias) {
-    ZX_DEBUG_ASSERT_MSG(!load_image_vmar_, "Place or Allocate called twice");
-    ZX_DEBUG_ASSERT(load_image_vmar);
-    load_image_vmar_ = std::move(load_image_vmar);
-    load_bias_ = load_bias;
   }
 
   /// After Allocate() or Place() and/or Load(), this is the bias added to the
@@ -222,25 +208,35 @@ class VmarLoader {
   // passed to the constructor may have new mappings whether the call succeeded
   // or not. Any mappings made are cleared out by destruction of the VmarLoader
   // object unless Commit() is called, see below.
-  template <PartialPagePolicy PartialPage, class Diagnostics, class LoadInfo>
-  [[nodiscard]] bool Load(Diagnostics& diag, const LoadInfo& load_info, zx::unowned_vmo vmo) {
+  //
+  // The optional vmar_bias is only used for remote cases; it's added to the
+  // offset within the VMAR where each segment will be mapped.
+  template <PartialPagePolicy PartialPage, class LoadInfo>
+  [[nodiscard]] bool Load(auto& diag, const LoadInfo& load_info, zx::unowned_vmo vmo,
+                          uint64_t vmar_bias = 0) {
+    if constexpr (PartialPage == PartialPagePolicy::kCopyInProcess) {
+      ZX_DEBUG_ASSERT(vmar_bias == 0);
+    }
+
     if (!load_image_vmar_) {
       // Allocate wasn't called yet, so do it now.  If it returns true after
       // failure because Diagnostics::SystemError returned true, then still
       // bail out early but also return true.
+      ZX_DEBUG_ASSERT(vmar_bias == 0);
       if (bool ok = Allocate(diag, load_info); !ok || !load_image_vmar_) {
         return ok;
       }
     }
+    load_bias_ += vmar_bias;
 
     VmoName base_name_storage = VmarLoader::GetVmoName(vmo->borrow());
     std::string_view base_name = std::string_view(base_name_storage.data());
 
-    auto mapper = [this, vaddr_start = load_info.vaddr_start(), vmo, &diag, base_name,
+    auto mapper = [this, vaddr_start = load_info.vaddr_start(), vmar_bias, vmo, &diag, base_name,
                    num_data_segments = size_t{0},
                    num_zero_segments = size_t{0}](const auto& segment) mutable {
       // Where in the VMAR the segment begins, accounting for load bias.
-      const uintptr_t vmar_offset = segment.vaddr() - vaddr_start;
+      const uint64_t vmar_offset = segment.vaddr() - vaddr_start + vmar_bias;
 
       // Let the Segment type choose a different VMO and offset if it wants to.
       SegmentVmo<LoadInfo> segment_vmo{segment, vmo->borrow()};
@@ -262,7 +258,7 @@ class VmarLoader {
         zx_status_t status =
             Map(vmar_offset, options, map_vmo->borrow(), map_offset, segment.filesz());
         if (status != ZX_OK) [[unlikely]] {
-          diag.SystemError("cannot map read-only segment", FileAddress{segment.vaddr()}, " from ",
+          diag.SystemError("cannot map read-only segment", FileAddress{segment.vaddr()},
                            FileOffset{segment.offset()}, ": ", ZirconError{status});
           return false;
         }
@@ -292,9 +288,6 @@ class VmarLoader {
       //    * Mapping file pages up to the last full page of file data.
       //    * Mapping zero-fill pages, including the intersecting page, to the
       //    * end of the segment.
-      //
-      // TODO(https://fxbug.dev/42172744): Support mapping objects into VMAR from out of
-      // process.
       //
       // After the second mapping, the VmarLoader then reads in the partial
       // file data into the intersecting page.
@@ -370,8 +363,8 @@ class VmarLoader {
           ZX_DEBUG_ASSERT(copy_size == 0);
         } else if (copy_size > 0) {
           const size_t copy_offset = map_offset + map_size;
-          void* const copy_data =
-              reinterpret_cast<void*>(vaddr_start + zero_fill_vmar_offset + load_bias_);
+          void* const copy_data = reinterpret_cast<void*>(  //
+              vaddr_start + zero_fill_vmar_offset + load_bias_);
           zx_status_t status = map_vmo->read(copy_data, copy_offset, copy_size);
           if (status != ZX_OK) [[unlikely]] {
             diag.SystemError("cannot read segment data from file", FileOffset{copy_offset}, ": ",
@@ -418,7 +411,7 @@ class VmarLoader {
   // chosen by the kernel, which can do ASLR, unless specified by the optional
   // vmar_offset argument (relative to the parent VMAR given at construction).
   // The load_image_vmar_ and load_bias_ members are updated.
-  zx_status_t AllocateVmar(size_t vaddr_size, size_t vaddr_start,
+  zx_status_t AllocateVmar(size_t vaddr_start, size_t vaddr_size,
                            std::optional<size_t> vmar_offset);
 
   zx_status_t Map(uintptr_t vmar_offset, zx_vm_option_t options, zx::unowned_vmo vmo,
@@ -502,9 +495,15 @@ class RemoteVmarLoader : public VmarLoader {
   // Can be default-constructed or constructed with a const zx::vmar& argument.
   using VmarLoader::VmarLoader;
 
+  // This can take an additional optional argument, which gives a bias added to
+  // the VMAR offset calculated for a given address.  That is, the difference
+  // between the .vaddr_start() seen by Allocate() and the .vaddr_start() seen
+  // by this Load() call.
   template <class Diagnostics, class LoadInfo>
-  [[nodiscard]] bool Load(Diagnostics& diag, const LoadInfo& load_info, zx::unowned_vmo vmo) {
-    return VmarLoader::Load<PartialPagePolicy::kZeroInVmo>(diag, load_info, vmo->borrow());
+  [[nodiscard]] bool Load(Diagnostics& diag, const LoadInfo& load_info, zx::unowned_vmo vmo,
+                          uint64_t vmar_bias = 0) {
+    return VmarLoader::Load<PartialPagePolicy::kZeroInVmo>(diag, load_info, vmo->borrow(),
+                                                           vmar_bias);
   }
 };
 
@@ -518,8 +517,10 @@ class AlignedRemoteVmarLoader : public VmarLoader {
   using VmarLoader::VmarLoader;
 
   template <class Diagnostics, class LoadInfo>
-  [[nodiscard]] bool Load(Diagnostics& diag, const LoadInfo& load_info, zx::unowned_vmo vmo) {
-    return VmarLoader::Load<PartialPagePolicy::kProhibited>(diag, load_info, vmo->borrow());
+  [[nodiscard]] bool Load(Diagnostics& diag, const LoadInfo& load_info, zx::unowned_vmo vmo,
+                          uint64_t vmar_bias = 0) {
+    return VmarLoader::Load<PartialPagePolicy::kProhibited>(diag, load_info, vmo->borrow(),
+                                                            vmar_bias);
   }
 };
 

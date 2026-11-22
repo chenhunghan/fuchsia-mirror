@@ -5,12 +5,12 @@
 #include "src/memory/legacy/metrics/bucket_match.h"
 
 #include <zircon/syscalls/object.h>
+#include <zircon/types.h>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include "src/memory/legacy/metrics/tests/test_utils.h"
-#include "zircon/system/public/zircon/types.h"
 
 using testing::SizeIs;
 

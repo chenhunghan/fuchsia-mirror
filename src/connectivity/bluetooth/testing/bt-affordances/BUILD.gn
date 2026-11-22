@@ -37,10 +37,7 @@ rustc_staticlib("affordances-c") {
   sources = [ "src/lib.rs" ]
   configs += [ "//build/config/rust/lints:deny_unused_results" ]
   edition = "2024"
-  visibility = [
-    ":*",
-    "//src/connectivity/bluetooth/testing/pandora/bt-pandora-server:*",
-  ]
+  visibility = [ ":*" ]
   deps = [
     "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
     "//sdk/fidl/fuchsia.bluetooth.gatt2:fuchsia.bluetooth.gatt2_rust",
@@ -51,7 +48,15 @@ rustc_staticlib("affordances-c") {
     "//third_party/rust_crates:bitfield",
     "//third_party/rust_crates:futures",
   ]
+}
+
+source_set("affordances-c_headers") {
   public = [ "ffi_c/bindings.h" ]
+  visibility = [
+    ":*",
+    "//src/connectivity/bluetooth/testing/pandora/bt-pandora-server:*",
+  ]
+  public_deps = [ ":affordances-c" ]
 }
 
 rustc_binary("bin") {

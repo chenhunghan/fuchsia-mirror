@@ -1,0 +1,91 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/components:fx_component.bzl", "fx_component", "fx_component_manifest")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/config.rs",
+        "src/gpt.rs",
+        "src/lib.rs",
+        "src/partition.rs",
+        "src/partitions_directory.rs",
+        "src/service.rs",
+    ],
+    crate_name = "gpt_component",
+    edition = "2024",
+    visibility = ["//src/storage:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.fs:fuchsia.fs_rust",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.process.lifecycle:fuchsia.process.lifecycle_rust",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/fidl/fuchsia.storage.partitions:fuchsia.storage.partitions_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-sync",
+        "//src/storage/fidl/fuchsia.fs.startup:fuchsia.fs.startup_rust",
+        "//src/storage/gpt/rust:gpt",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/block_server",
+        "//src/storage/lib/fs_management/rust:fs_management",
+        "//src/storage/lib/mapping",
+        "//src/storage/lib/vfs/rust:vfs",
+        "//src/storage/lib/vmo-fifo",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_binary(
+    name = "gpt2",
+    srcs = ["src/main.rs"],
+    # Optimize for size
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        ":lib",
+        "//src/lib/diagnostics/inspect/runtime/rust",
+        "//src/lib/diagnostics/inspect/rust",
+        "//src/lib/diagnostics/log/rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/fuchsia-runtime",
+        "//src/lib/trace/rust:trace-provider",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "gpt2_packaged_bin",
+    binary = ":gpt2",
+    binary_name = "gpt2",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "gpt2",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard",
+    ],
+    manifest = "meta/gpt2.cml",
+)
+
+fx_component(
+    name = "component",
+    compiled_manifest = ":manifest",
+    visibility = ["//src/storage:__subpackages__"],
+    deps = [":gpt2_packaged_bin"],
+)

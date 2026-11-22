@@ -17,7 +17,9 @@ library_headers("headers") {
     "phys/runtime/exception.h",
     "phys/runtime/info.h",
     "phys/runtime/main.h",
+    "phys/runtime/self.h",
     "phys/runtime/stack.h",
+    "phys/runtime/symbolize.h",
   ]
   if (zircon_cpu == "arm64") {
     headers += [ "phys/runtime/arm64/smccc.h" ]
@@ -29,81 +31,85 @@ library_headers("headers") {
     # <phys/runtime/main.h> has #include <lib/arch/ticks.h>
     # <phys/runtime/riscv64/info.h> has #include <lib/arch/riscv64/feature.h>
     # <phys/runtime/stack.h> has #include <lib/arch/backtrace.h>
+    # <phys/runtime/symbolize.h> has #include <lib/arch/backtrace.h>
     "//zircon/kernel/lib/arch:headers",
 
     # <phys/runtime/early-boot.h> has #include <lib/zbitl/view.h>
     "//src/lib/zbitl:headers",
 
-    # <phys/runtime/main.h> has #include <lib/memalloc/range.h>
-    "//zircon/kernel/phys/lib/memalloc:range.headers",
+    # <phys/runtime/symbolize.h> has #include <lib/symbolizer-markup/writer.h>
+    "//src/lib/symbolizer-markup:headers",
   ]
 
   if (is_kernel) {
     public_deps += [
       # <phys/runtime/early-boot.h> has #include <ktl/*.h>
-      # <phys/runtime/main.h> has #include <ktl/*.h>
       # <phys/runtime/stack.h> has #include <ktl/*.h>
+      # <phys/runtime/symbolize.h> has #include <ktl/*.h>
       "//zircon/kernel/lib/ktl:headers",
+
+      # <phys/runtime/symbolize.h> has #include <stdio.h>
+      "//zircon/kernel/lib/libc:headers",
     ]
   }
 }
 
-if (toolchain_environment == "kernel.phys" ||
-    toolchain_environment == "kernel.efi") {
+if (toolchain_environment == "kernel.phys") {
   static_library("runtime") {
     complete_static_lib = true
 
     public_deps = [ ":headers" ]
 
-    sources = [ "stack.cc" ]
-    deps = [
-      "//zircon/kernel/lib/arch",
-      "//zircon/kernel/lib/ktl",
-      "//zircon/kernel/lib/libc",
-      "//zircon/kernel/phys:stdio",
+    sources = [
+      "$zircon_cpu/reset.cc",
+      "$zircon_cpu/start.S",
+      "exception.cc",
+      "panic.cc",
+      "self-relocation.cc",
+      "self.cc",
+      "stack.cc",
+      "symbolize.cc",
     ]
 
-    # EFI programs are loaded by the firmware and have their own entry point,
-    # set-up, and exception/reset handling.
-    if (toolchain_environment != "kernel.efi") {
+    deps = [
+      "//sdk/lib/zbi-format",
+      "//src/lib/elfldltl",
+      "//src/lib/zbitl",
+      "//zircon/kernel/lib/arch",
+      "//zircon/kernel/lib/boot-options",
+      "//zircon/kernel/lib/ktl",
+      "//zircon/kernel/lib/libc",
+      "//zircon/kernel/phys:boot-options",
+      "//zircon/kernel/phys/elf",
+      "//zircon/kernel/phys/output",
+      "//zircon/system/ulib/fbl",
+      "//zircon/system/ulib/pretty",
+    ]
+
+    if (zircon_cpu == "arm64") {
       sources += [
-        "$zircon_cpu/reset.cc",
-        "$zircon_cpu/start.S",
-        "exception.cc",
-        "self-relocation.cc",
+        "arm64/exception.S",
+        "arm64/psci.S",
+        "arm64/psci.cc",
+        "arm64/psci.h",
+        "arm64/regs.h",
+        "arm64/setup.cc",
       ]
       deps += [
-        "//sdk/lib/zbi-format",
-        "//src/lib/elfldltl",
-        "//src/lib/zbitl",
+        ":arm64-info-asm",
+        "//zircon/system/ulib/zircon-internal",
       ]
-
-      if (zircon_cpu == "arm64") {
-        sources += [
-          "arm64/exception.S",
-          "arm64/psci.S",
-          "arm64/psci.cc",
-          "arm64/psci.h",
-          "arm64/regs.h",
-          "arm64/setup.cc",
-        ]
-        deps += [
-          ":arm64-info-asm",
-          "//zircon/kernel/lib/boot-options",
-          "//zircon/system/ulib/zircon-internal",
-        ]
-      } else if (zircon_cpu == "riscv64") {
-        sources += [
-          "riscv64/exception.S",
-          "riscv64/exception.cc",
-          "riscv64/riscv64.h",
-          "riscv64/setup.cc",
-        ]
-        deps += [ ":riscv64-info-asm" ]
-      } else if (zircon_cpu == "x86") {
-        sources += [ "x86/gdt.cc" ]
-        deps += [ "//sdk/lib/fit" ]
-      }
+    } else if (zircon_cpu == "riscv64") {
+      sources += [
+        "riscv64/exception.S",
+        "riscv64/exception.cc",
+        "riscv64/riscv64.h",
+        "riscv64/setup.cc",
+      ]
+      deps += [ ":riscv64-info-asm" ]
+    } else if (zircon_cpu == "x86") {
+      sources += [ "x86/gdt.cc" ]
+      deps += [ "//sdk/lib/fit" ]
     }
   }
 }

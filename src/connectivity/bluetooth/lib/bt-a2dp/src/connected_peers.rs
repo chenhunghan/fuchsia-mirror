@@ -463,13 +463,11 @@ mod tests {
     use bt_avdtp::{Request, ServiceCapability};
     use bt_channel_test_support::{Transport, create_test_channels};
     use diagnostics_assertions::assert_data_tree;
-    use fidl::endpoints::create_proxy_and_stream;
-    use fidl_fuchsia_bluetooth_bredr::{
-        AudioOffloadExtProxy, ProfileMarker, ProfileRequestStream, ServiceClassProfileIdentifier,
-    };
+    use fidl_fuchsia_bluetooth_bredr::{AudioOffloadExtProxy, ServiceClassProfileIdentifier};
     use futures::future::BoxFuture;
     use std::pin::pin;
     use test_case::test_case;
+    use test_profile_server::TestProfileServer;
 
     use crate::codec::MediaCodecConfig;
     use crate::media_task::{MediaTaskBuilder, MediaTaskError, MediaTaskRunner};
@@ -514,9 +512,9 @@ mod tests {
     }
 
     fn setup_connected_peer_test()
-    -> (fasync::TestExecutor, PeerId, ConnectedPeers, ProfileRequestStream) {
+    -> (fasync::TestExecutor, PeerId, ConnectedPeers, TestProfileServer) {
         let exec = fasync::TestExecutor::new();
-        let (proxy, stream) = create_proxy_and_stream::<ProfileMarker>();
+        let (proxy, stream) = TestProfileServer::create_endpoints();
         let id = PeerId(1);
 
         let peers = ConnectedPeers::new(
@@ -699,13 +697,13 @@ mod tests {
     fn setup_negotiation_test() -> (
         fasync::TestExecutor,
         ConnectedPeers,
-        ProfileRequestStream,
+        TestProfileServer,
         ServiceCapability,
         ServiceCapability,
     ) {
         let exec = fasync::TestExecutor::new_with_fake_time();
         exec.set_fake_time(fasync::MonotonicInstant::from_nanos(1_000_000));
-        let (proxy, stream) = create_proxy_and_stream::<ProfileMarker>();
+        let (proxy, stream) = TestProfileServer::create_endpoints();
 
         let aac_sink_codec = aac_sink_codec();
         let sbc_sink_codec = sbc_sink_codec();
@@ -1174,28 +1172,23 @@ mod tests {
         let mut connect_fut = peers.try_connect(id, ChannelParameters::default());
 
         // Should get a request to connect, which we will stall and not respond to.
-        let responder = match exec.run_singlethreaded(profile_stream.next()) {
-            Some(Ok(bredr::ProfileRequest::Connect { responder, .. })) => responder,
-            x => panic!("Expected Profile connect, got {x:?}"),
-        };
+        let req = exec.run_singlethreaded(profile_stream.expect_connect_request()).assert_peer(id);
 
         // Trying to connect again should cancel the first try, and send another connect.
         let mut connect_again_fut = peers.try_connect(id, ChannelParameters::default());
-        let responder_two = match exec.run_singlethreaded(profile_stream.next()) {
-            Some(Ok(bredr::ProfileRequest::Connect { responder, .. })) => responder,
-            x => panic!("Expected Profile connect, got {x:?}"),
-        };
 
         let first_result = exec.run_singlethreaded(&mut connect_fut);
         let _ = first_result.expect_err("Should have an error from first attempt");
 
         // Responding on the first connect shouldn't do anything at this point.
-        responder.send(Err(fidl_fuchsia_bluetooth::ErrorCode::Failed)).unwrap();
+        req.reject(fidl_fuchsia_bluetooth::ErrorCode::Failed);
 
         exec.run_until_stalled(&mut connect_again_fut).expect_pending("shouldn't finish");
 
-        let (local, _remote) = create_test_channels(transport_mode);
-        responder_two.send(Ok(local.try_into().unwrap())).unwrap();
+        let _remote = exec
+            .run_singlethreaded(profile_stream.expect_connect_request())
+            .assert_peer(id)
+            .accept_with_transport(transport_mode);
 
         let second_result = exec.run_singlethreaded(&mut connect_again_fut);
         let _ = second_result.expect("should receive the channel");

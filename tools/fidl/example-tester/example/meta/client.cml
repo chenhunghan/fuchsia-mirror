@@ -9,10 +9,26 @@
     },
     use: [
         { protocol: "test.exampletester.Simple" },
+        {
+            config: "fuchsia.exampletester.DoInProcess",
+            key: "do_in_process",
+            type: "bool",
+            availability: "transitional",
+            default: false,
+        },
+        {
+            config: "fuchsia.exampletester.Augend",
+            key: "augend",
+            type: "uint8",
+            availability: "transitional",
+            default: 1,
+        },
+        {
+            config: "fuchsia.exampletester.Addend",
+            key: "addend",
+            type: "uint8",
+            availability: "transitional",
+            default: 2,
+        },
     ],
-    config: {
-        do_in_process: { type: "bool" },
-        augend: { type: "uint8" },
-        addend: { type: "uint8" },
-    },
 }

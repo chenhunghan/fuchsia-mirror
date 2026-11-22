@@ -119,12 +119,11 @@ def _load_preference(path: pathlib.Path) -> bool | None:
 
 
 def load(
-    source_dir: pathlib.Path = _FUCHSIA_DIR,
-    environ: Mapping[str, str] | None = None,
+    source_dir: pathlib.Path,
+    environ: Mapping[str, str],
 ) -> CasfsConfig:
     """Loads RBE casfs configuration, prioritizing environment over on-disk config."""
-    env = environ if environ is not None else os.environ
-    raw_env = env.get(ENV_CASFS_VIRTUALIZE, "")
+    raw_env = environ.get(ENV_CASFS_VIRTUALIZE, "")
     if raw_env != "":
         parsed = _parse_bool(raw_env)
         if parsed is not None:

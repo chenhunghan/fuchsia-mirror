@@ -54,36 +54,36 @@ TEST(FidlTypes, UnionSet) {
   EXPECT_FIDL_TO_FORMAT_AS(u, "i 5");
 }
 
-TEST(FidlTypes, XunionEmpty) {
+TEST(FidlTypes, FlexibleUnionEmpty) {
   using fidl::operator<<;
 
-  fuchsia::example::fostr::MyXunion xu;
+  fuchsia::example::fostr::MyFlexibleUnion xu;
 
   EXPECT_FIDL_TO_FORMAT_AS(xu, "<empty union>");
 }
 
-TEST(FidlTypes, XunionSet) {
+TEST(FidlTypes, FlexibleUnionSet) {
   using fidl::operator<<;
 
-  fuchsia::example::fostr::MyXunion xu;
+  fuchsia::example::fostr::MyFlexibleUnion xu;
   xu.set_i(5);
 
   EXPECT_FIDL_TO_FORMAT_AS(xu, "i 5");
 }
 
-TEST(FidlTypes, XunionSetWithUint8) {
+TEST(FidlTypes, FlexibleUnionSetWithUint8) {
   using fidl::operator<<;
 
-  fuchsia::example::fostr::MyXunion xu;
+  fuchsia::example::fostr::MyFlexibleUnion xu;
   xu.set_my_uint8(5);
 
   EXPECT_FIDL_TO_FORMAT_AS(xu, "my_uint8 5");
 }
 
-TEST(FidlTypes, XunionSetWithInt8) {
+TEST(FidlTypes, FlexibleUnionSetWithInt8) {
   using fidl::operator<<;
 
-  fuchsia::example::fostr::MyXunion xu;
+  fuchsia::example::fostr::MyFlexibleUnion xu;
   xu.set_my_int8(-5);
 
   EXPECT_FIDL_TO_FORMAT_AS(xu, "my_int8 -5");
@@ -796,7 +796,7 @@ TEST(FidlTypes, EnumFormatting) {
 TEST(FidlTypes, StructFormatting) {
   using namespace fuchsia::example::fostr;
 
-  MyXunion xu;
+  MyFlexibleUnion xu;
   xu.set_b(false);
 
   fidl::VectorPtr<int32_t> nums{std::vector<int32_t>{}};

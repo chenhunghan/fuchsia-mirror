@@ -21,8 +21,14 @@ pub enum Error {
     BufferTooShort,
     #[error("attempted to parse the wrong frame type")]
     WrongEapolFrame,
-    #[error("packet body length is {} but {} bytes are available", _0, _1)]
-    WrongPacketBodyLength(u16, u16),
+    #[error(
+        "expected packet body of {} bytes from header, but only {} bytes are available",
+        _0,
+        _1
+    )]
+    PacketBodyLengthTooShort(u16, u16),
+    #[error("packet body length is {} but parsed packet body frame is {} bytes", _0, _1)]
+    MismatchedPacketBodyLength(u16, usize),
     #[error("failed to calculate mic: {}", _0)]
     MicFunctionFailed(anyhow::Error),
     #[error("expected mic length of {} but got a mic of length {}", _0, _1)]
@@ -65,28 +71,34 @@ impl<B: SplitByteSlice> KeyFrameRx<B> {
     pub fn parse(mic_len: usize, eapol_pdu_buf: B) -> Result<Self, Error> {
         let mut reader = BufferReader::new(eapol_pdu_buf);
         let eapol_fields = reader.read::<EapolFields>().ok_or(Error::FrameTruncated)?;
-        if eapol_fields.packet_body_len.get() > reader.bytes_remaining() as u16 {
-            return Err(Error::WrongPacketBodyLength(
-                eapol_fields.packet_body_len.get(),
+        let packet_body_len = eapol_fields.packet_body_len.get();
+        if packet_body_len > reader.bytes_remaining() as u16 {
+            return Err(Error::PacketBodyLengthTooShort(
+                packet_body_len,
                 reader.bytes_remaining() as u16,
             ));
         }
-        match eapol_fields.packet_type {
-            PacketType::KEY => {
-                let key_frame_fields = reader.read().ok_or(Error::FrameTruncated)?;
-                let key_mic = reader.read_bytes(mic_len).ok_or(Error::FrameTruncated)?;
-                let key_data_len = reader.read_unaligned::<U16>().ok_or(Error::FrameTruncated)?;
-                let key_data =
-                    reader.read_bytes(key_data_len.get().into()).ok_or(Error::FrameTruncated)?;
-                // Some APs add additional bytes to the 802.1X body. This is odd, but doesn't break anything.
-                match reader.peek_remaining().len() {
-                    0 => (),
-                    extra => warn!(bytes = extra; "Ignoring extra bytes in eapol frame body"),
-                }
-                Ok(KeyFrameRx { eapol_fields, key_frame_fields, key_mic, key_data })
-            }
-            _ => Err(Error::WrongEapolFrame),
+
+        if eapol_fields.packet_type != PacketType::KEY {
+            return Err(Error::WrongEapolFrame);
         }
+
+        let key_frame_fields = reader.read().ok_or(Error::FrameTruncated)?;
+        let key_mic = reader.read_bytes(mic_len).ok_or(Error::FrameTruncated)?;
+        let key_data_len = reader.read_unaligned::<U16>().ok_or(Error::FrameTruncated)?;
+        let key_data = reader.read_bytes(key_data_len.get().into()).ok_or(Error::FrameTruncated)?;
+
+        let expected_body_len =
+            mem::size_of::<KeyFrameFields>() + mic_len + KEY_DATA_LEN_BYTES + key_data.len();
+        if usize::from(packet_body_len) < expected_body_len {
+            return Err(Error::MismatchedPacketBodyLength(packet_body_len, expected_body_len));
+        }
+        // Trailing bytes in the buffer after the validated EAPOL frame (e.g. L2/Ethernet padding).
+        match reader.peek_remaining().len() {
+            0 => (),
+            extra => warn!(bytes = extra; "Ignoring trailing bytes after eapol frame"),
+        }
+        Ok(KeyFrameRx { eapol_fields, key_frame_fields, key_mic, key_data })
     }
 
     pub fn to_bytes(&self, clear_mic: bool) -> Vec<u8> {
@@ -534,7 +546,26 @@ mod tests {
             0x03, 0x01, 0x02, 0x03,
         ];
         let result = KeyFrameRx::parse(16, &frame[..]);
-        assert_matches!(result, Err(Error::WrongPacketBodyLength(0xff, 0x62)));
+        assert_matches!(result, Err(Error::PacketBodyLengthTooShort(0xff, 0x62)));
+    }
+
+    #[test]
+    fn test_extra_bytes_in_eapol_key_data() {
+        let frame: Vec<u8> = vec![
+            0x01, 0x03, 0x00, 0x5f, 0x02, 0x00, 0x8a, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0x39, 0x5c, 0xc7, 0x6e, 0x1a, 0xe9, 0x9f, 0xa0, 0xb1, 0x22, 0x79,
+            0xfe, 0xc3, 0xb9, 0xa9, 0x9e, 0x1d, 0x9a, 0x21, 0xb8, 0x47, 0x51, 0x38, 0x98, 0x25,
+            0xf8, 0xc7, 0xca, 0x55, 0x86, 0xbc, 0xda, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x37, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+        ];
+        let result = KeyFrameRx::parse(16, &frame[..]);
+        assert_matches!(result, Err(Error::MismatchedPacketBodyLength(0x5f, 0x96)));
     }
 
     #[test]

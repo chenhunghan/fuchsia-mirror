@@ -9,11 +9,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <phys/address-space.h>
-#include <phys/allocation.h>
+#include <phys/address-space/address-space.h>
+#include <phys/allocation/allocation.h>
 #include <phys/boot-zbi/boot-zbi.h>
+#include <phys/memory/init.h>
 #include <phys/runtime/main.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/symbolize.h>
+#include <phys/zbi-runtime/main.h>
 
 // This is a trivial "no-op" ZBI-to-ZBI boot shim.  It simply treats the data
 // ZBI as a whole bootable ZBI and boots it using the modern ZBI booting
@@ -26,8 +28,14 @@
 // protocol with an old-style fixed entry point address.  The kernel it loads
 // must be in the new uniform format.
 
+namespace {
+
+constexpr const char* kShimName = "zbi-boot-shim";
+
+}  // namespace
+
 void ZbiMain(void* zbi_ptr, EarlyBootZbi zbi, arch::EarlyTicks boot_ticks) {
-  Symbolize symbolize("zbi-boot-shim");
+  Symbolize symbolize(kShimName);
 
   AddressSpace aspace;
   InitMemory(zbi_ptr, ktl::move(zbi), &aspace);
@@ -48,6 +56,6 @@ void ZbiMain(void* zbi_ptr, EarlyBootZbi zbi, arch::EarlyTicks boot_ticks) {
     abort();
   }
 
-  boot.Log();
+  boot.Log(kShimName);
   boot.Boot();
 }

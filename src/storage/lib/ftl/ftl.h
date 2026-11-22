@@ -64,16 +64,16 @@
 // Symbol Definitions.
 //
 // Flag values for the file systems' driver flags field.
-#define FTLN_FATAL_ERR (1u << 0)  // Fatal I/O error has occurred.
-#define FTLN_MOUNTED (1u << 1)    // FTL is mounted flag.
-#define FSF_EXTRA_FREE (1u << 2)
-#define FSF_TRANSFER_PAGE (1u << 3)
-#define FSF_MULTI_ACCESS (1u << 4)
-#define FSF_FREE_SPARE_ECC (1u << 5)   // Spare decode has no overhead.
-#define FSF_NDM_INIT_WRITE (1u << 6)   // Re-write NDM metadata on init.
-#define FSF_READ_WEAR_LIMIT (1u << 7)  // Driver specs read-wear limit.
-#define FSF_READ_ONLY_INIT (1u << 8)   // Dev is read-only during init.
-#define FTLN_VERBOSE (1u << 9)         // Turn debug messages on.
+#define FTLN_FATAL_ERR (1u << 0u)  // Fatal I/O error has occurred.
+#define FTLN_MOUNTED (1u << 1u)    // FTL is mounted flag.
+#define FSF_EXTRA_FREE (1u << 2u)
+#define FSF_TRANSFER_PAGE (1u << 3u)
+#define FSF_MULTI_ACCESS (1u << 4u)
+#define FSF_FREE_SPARE_ECC (1u << 5u)   // Spare decode has no overhead.
+#define FSF_NDM_INIT_WRITE (1u << 6u)   // Re-write NDM metadata on init.
+#define FSF_READ_WEAR_LIMIT (1u << 7u)  // Driver specs read-wear limit.
+#define FSF_READ_ONLY_INIT (1u << 8u)   // Dev is read-only during init.
+#define FTLN_VERBOSE (1u << 9u)         // Turn debug messages on.
 
 #define NDM_PART_NAME_LEN 15  // Partition name size in bytes.
 #define NDM_PART_USER 0       // Number of uint32_t in partition for user.

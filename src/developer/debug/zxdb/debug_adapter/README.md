@@ -91,14 +91,16 @@ Callers and implementations must preserve these invariants:
 - `DebugAdapterContext` tracks and deletes only the breakpoints, tracepoints,
   and filters that it created, preserving user console breakpoints, tracepoints,
   and startup filters.
+- When `stack.empty()` is `true`, `DebugAdapterContext::GetElidedFrames`
+  returns an empty vector immediately.
 
 ## Side Effects
 
 `zxdb/debug_adapter` produces these socket, thread, and session side effects:
 
-- `DebugAdapterServer` opens an IPv6 TCP listening socket, spawns a background
-  thread on `select()`/`accept()`, and resumes listening after client
-  disconnect.
+- `DebugAdapterServer` opens IPv4 and IPv6 loopback TCP listening sockets
+  (`127.0.0.1` and `::1`), spawns a background thread on `poll()`/`accept()`,
+  and resumes listening after client disconnect.
 - Receiving a DAP `DisconnectRequest` runs the destroy connection callback,
   which quits the `zxdb` `Console` (`console()->Quit()`).
 - `DebugAdapterContext` registers itself and `AsyncBacktraceSubscription` as

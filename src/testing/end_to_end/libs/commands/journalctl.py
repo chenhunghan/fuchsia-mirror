@@ -2,12 +2,15 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import logging
 import shlex
 from datetime import datetime
 
 from libs.commands import pgrep
 from libs.commands.command import LinuxCommand
 from libs.proc.runner import Runner
+
+_LOGGER = logging.getLogger(__name__)
 
 # Timestamp format accepted by systemd.
 # See https://man7.org/linux/man-pages/man7/systemd.time.7.html#PARSING_TIMESTAMPS
@@ -49,7 +52,7 @@ class LinuxJournalctlCommand(LinuxCommand):
 
         self._last_ran = datetime.utcnow()
 
-        self._runner.log.debug("Running journalctl")
+        _LOGGER.debug("Running journalctl")
         logs = self._run(
             args,
             sudo=True,

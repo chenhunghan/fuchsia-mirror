@@ -8,7 +8,6 @@ load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
 
 package(default_applicable_licenses = ["//:license"])
 
-# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
 py_library(
     name = "smaps",
     srcs = [
@@ -16,7 +15,6 @@ py_library(
         "smaps.py",
     ],
     imports = [".."],
-    tags = ["no-pyrefly"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//src/memory/tools/snapshots:__pkg__"],
 )

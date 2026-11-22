@@ -57,7 +57,8 @@ func TestUnmarshalTest(t *testing.T) {
 			  "name": "fuchsia-pkg://fuchsia.com/fuchsia_pkg#meta/component3.cm",
 			  "os": "fuchsia",
 			  "package_url": "fuchsia-pkg://fuchsia.com/fuchsia_pkg#meta/component3.cm",
-			  "path": ""
+			  "path": "",
+			  "produces_perf_results": true
 			}
 		  }
 	]`
@@ -94,15 +95,16 @@ func TestUnmarshalTest(t *testing.T) {
 		},
 		{
 			Test: Test{
-				Name:            "fuchsia-pkg://fuchsia.com/fuchsia_pkg#meta/component3.cm",
-				PackageURL:      "fuchsia-pkg://fuchsia.com/fuchsia_pkg#meta/component3.cm",
-				Path:            "",
-				Label:           "//garnet/bin/fuchsia:fuchsia_pkg(//build/toolchain/fuchsia:x64)",
-				OS:              "fuchsia",
-				LogSettings:     LogSettings{},
-				RuntimeDepsFile: "",
-				Parallel:        0,
-				CPU:             "x64",
+				Name:                "fuchsia-pkg://fuchsia.com/fuchsia_pkg#meta/component3.cm",
+				PackageURL:          "fuchsia-pkg://fuchsia.com/fuchsia_pkg#meta/component3.cm",
+				Path:                "",
+				Label:               "//garnet/bin/fuchsia:fuchsia_pkg(//build/toolchain/fuchsia:x64)",
+				OS:                  "fuchsia",
+				LogSettings:         LogSettings{},
+				RuntimeDepsFile:     "",
+				Parallel:            0,
+				CPU:                 "x64",
+				ProducesPerfResults: true,
 			},
 			Envs: []Environment{
 				{

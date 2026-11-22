@@ -1,0 +1,100 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+import("//build/bazel/bazel_py_host_tool.gni")
+import("//build/python/python_action.gni")
+
+assert(is_host, "bazel_py_host_tool() can only be used in a host toolchain.")
+
+# Brings the `.pyz` built by py_zipapp_binary() into Ninja, at the locations
+# a GN python_binary() and install_python_tool() use.
+bazel_py_host_tool("zipapp_test_bin") {
+  testonly = true
+  visibility = [ ":*" ]
+  bazel_target = ":zipapp_test_bin"
+  host_tool_name = "py_zipapp_binary_test_tool"
+}
+
+# Uses the archive like a GN python_binary(), which python_action() finds in
+# `target_out_dir`.
+python_action("zipapp_test_python_action") {
+  testonly = true
+  visibility = [ ":*" ]
+  binary_label = ":zipapp_test_bin"
+  _output = "${target_gen_dir}/zipapp_test_python_action.txt"
+  outputs = [ _output ]
+  args = [
+    "--output",
+    rebase_path(_output, root_build_dir),
+  ]
+}
+
+# The checks below use the host tool outputs, which only exist in the build
+# machine's base host toolchain. Other host toolchains (e.g. variants) only get
+# the archive in their `target_out_dir`, for python_action().
+if (current_toolchain == "//build/toolchain:host_${host_cpu}") {
+  _expected_output = "zipapp_test_helper: hello from lib, hello from data"
+
+  # The `tool_paths` metadata of the host tool, as in `tool_paths.json`.
+  generated_file("zipapp_test_tool_paths") {
+    testonly = true
+    visibility = [ ":*" ]
+    data_keys = [ "tool_paths" ]
+    outputs = [ "${target_gen_dir}/zipapp_test_tool_paths.json" ]
+    output_conversion = "json"
+    deps = [ ":zipapp_test_bin" ]
+  }
+
+  # Runs each copy of the archive and checks its output, the output of the
+  # python_action(), and the host tool's `tool_paths` entry.
+  action("py_zipapp_binary_test") {
+    testonly = true
+    visibility = [ "//build/bazel/rules/tests:*" ]
+    script = "verify_py_zipapp_binary.py"
+    _pyz_copies = [
+      "${root_out_dir}/py_zipapp_binary_test_tool",
+      "${target_out_dir}/zipapp_test_bin.pyz",
+    ]
+    _python_action_outputs = get_target_outputs(":zipapp_test_python_action")
+    _tool_paths = get_target_outputs(":zipapp_test_tool_paths")
+    _stamp = "${target_out_dir}/py_zipapp_binary_test.stamp"
+    inputs = _pyz_copies + _python_action_outputs + _tool_paths
+    outputs = [ _stamp ]
+    deps = [
+      ":zipapp_test_bin",
+      ":zipapp_test_python_action",
+      ":zipapp_test_tool_paths",
+    ]
+    args = []
+    foreach(_pyz, _pyz_copies) {
+      args += [
+        "--pyz",
+        rebase_path(_pyz, root_build_dir),
+      ]
+    }
+    foreach(_output, _python_action_outputs) {
+      args += [
+        "--output-file",
+        rebase_path(_output, root_build_dir),
+      ]
+    }
+    args += [
+      "--tool-paths",
+      rebase_path(_tool_paths[0], root_build_dir),
+      "--cpu",
+      current_cpu,
+      "--os",
+      current_os,
+      "--expected-tool-path",
+      "py_zipapp_binary_test_tool=" +
+          rebase_path("${root_out_dir}/py_zipapp_binary_test_tool",
+                      root_build_dir) + "=" +
+          get_label_info(":zipapp_test_bin", "label_with_toolchain"),
+      "--expected-output",
+      _expected_output,
+      "--stamp",
+      rebase_path(_stamp, root_build_dir),
+    ]
+  }
+}

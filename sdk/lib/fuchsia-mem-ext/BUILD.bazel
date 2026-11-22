@@ -18,6 +18,7 @@ fx_cc_library(
         "//vendor/google:__subpackages__",
     ],
     deps = [
+        "//sdk/fidl/fuchsia.mem:fuchsia.mem_cpp",
         "//sdk/fidl/fuchsia.mem:fuchsia.mem_hlcpp",
         "//sdk/lib/stdcompat",
         "//zircon/system/ulib/zx",

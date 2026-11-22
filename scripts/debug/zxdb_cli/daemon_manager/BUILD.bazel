@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_library.bzl", "py_library")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":daemon_manager_test"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+py_library(
+    name = "daemon_manager",
+    srcs = [
+        "__init__.py",
+        "manager.py",
+    ],
+    imports = [".."],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//scripts/debug/zxdb_cli/cli:__pkg__",
+        "//scripts/fxtest/python:__pkg__",
+    ],
+    deps = [
+        "//scripts/debug/zxdb_cli/shared:protocol_lib",
+        "//scripts/lib/fx_cmd",
+    ],
+)
+
+# In Bazel, unlike GN, Python binaries are not zipped, so pydantic_core's
+# DSO stays in runfiles via //third_party/pylibs/pydantic without a
+# separate test_data target. Original GN comment:
+# Explicitly depend on pydantic-core's test_data. This is to ensure that the
+# module's DSO is bundled together with our test so the top-level pydantic
+# module loads correctly.
+host_py_test(
+    name = "daemon_manager_test",
+    srcs = ["tests/test_manager.py"],
+    main = "tests/test_manager.py",
+    deps = [":daemon_manager"],
+)

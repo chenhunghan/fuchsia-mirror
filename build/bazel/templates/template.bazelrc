@@ -207,18 +207,44 @@ build --@rules_python//python/config_settings:venvs_use_declare_symlink=no
 #
 # TODO(https://fxbug.dev/537560103): Uprev third_party/re2 past upstream
 # absl-related fixes and remove these copts.
-build --per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
-build --host_per_file_copt=external/re2.*/.*@-Wno-deprecated-declarations
+build --per_file_copt=external/re2.*/.*@-Wno-conversion,-Wno-deprecated-declarations,-Wno-extra-semi,-Wno-missing-field-initializers,-Wno-tautological-unsigned-enum-zero-compare,-Wno-tautological-unsigned-zero-compare,-Wno-unused,-Wno-unused-parameter
+build --host_per_file_copt=external/re2.*/.*@-Wno-conversion,-Wno-deprecated-declarations,-Wno-extra-semi,-Wno-missing-field-initializers,-Wno-tautological-unsigned-enum-zero-compare,-Wno-tautological-unsigned-zero-compare,-Wno-unused,-Wno-unused-parameter
 
 # Suppress warnings when compiling protobuf (e.g. protoc and upb), matching
 # config("protobuf_warnings") in //build/secondary/third_party/protobuf/BUILD.gn.
-build --per_file_copt=external/protobuf.*/.*@-Wno-extra-semi,-Wno-deprecated-declarations,-Wno-sign-compare
-build --host_per_file_copt=external/protobuf.*/.*@-Wno-extra-semi,-Wno-deprecated-declarations,-Wno-sign-compare
+build --per_file_copt=external/protobuf.*/.*@-Wno-c++98-compat-extra-semi,-Wno-shorten-64-to-32,-Wno-deprecated-builtins,-Wno-unused-result,-Wno-deprecated-pragma,-Wno-enum-enum-conversion,-Wno-extra-semi,-Wno-float-conversion,-Wno-implicit-float-conversion,-Wno-implicit-int-conversion,-Wno-implicit-int-float-conversion,-Wno-invalid-noreturn,-Wno-missing-field-initializers,-Wno-sign-compare,-Wno-unused-function,-Wno-unused-private-field,-Wno-deprecated-declarations,-Wno-deprecated-this-capture,-Wno-unnecessary-virtual-specifier,-Wno-strict-prototypes,-Wno-call-graph-section-no-prototype,-Wno-newline-eof,-Wno-conversion,-Wno-implicit-fallthrough
+build --host_per_file_copt=external/protobuf.*/.*@-Wno-c++98-compat-extra-semi,-Wno-shorten-64-to-32,-Wno-deprecated-builtins,-Wno-unused-result,-Wno-deprecated-pragma,-Wno-enum-enum-conversion,-Wno-extra-semi,-Wno-float-conversion,-Wno-implicit-float-conversion,-Wno-implicit-int-conversion,-Wno-implicit-int-float-conversion,-Wno-invalid-noreturn,-Wno-missing-field-initializers,-Wno-sign-compare,-Wno-unused-function,-Wno-unused-private-field,-Wno-deprecated-declarations,-Wno-deprecated-this-capture,-Wno-unnecessary-virtual-specifier,-Wno-strict-prototypes,-Wno-call-graph-section-no-prototype,-Wno-newline-eof,-Wno-conversion,-Wno-implicit-fallthrough
+
+# Suppress warnings when compiling abseil-cpp, matching config("abseil_config") in //third_party/abseil-cpp/BUILD.gn.
+build --per_file_copt=external/abseil-cpp.*/.*@-Wno-sign-compare,-Wno-missing-field-initializers,-Wno-conversion,-Wno-unknown-warning-option,-Wno-implicit-int-float-conversion,-Wno-array-parameter,-Wno-deprecated-builtins
+build --host_per_file_copt=external/abseil-cpp.*/.*@-Wno-sign-compare,-Wno-missing-field-initializers,-Wno-conversion,-Wno-unknown-warning-option,-Wno-implicit-int-float-conversion,-Wno-array-parameter,-Wno-deprecated-builtins
+
+# Suppress warnings when compiling zlib, matching config("zlib_warnings") in //third_party/zlib/BUILD.gn.
+build --per_file_copt=(external/zlib.*|third_party/zlib)/.*@-Wno-implicit-function-declaration,-Wno-conversion,-Wno-implicit-fallthrough,-Wno-strict-prototypes,-Wno-call-graph-section-no-prototype
+build --host_per_file_copt=(external/zlib.*|third_party/zlib)/.*@-Wno-implicit-function-declaration,-Wno-conversion,-Wno-implicit-fallthrough,-Wno-strict-prototypes,-Wno-call-graph-section-no-prototype
+
+# Suppress warnings when compiling openthread, matching //third_party/openthread/BUILD.gn.
+build --per_file_copt=third_party/openthread/.*@-Wno-conversion,-Wno-implicit-fallthrough
+build --host_per_file_copt=third_party/openthread/.*@-Wno-conversion,-Wno-implicit-fallthrough
+
+# Suppress newly enabled default_warnings (-Wconversion, -Wimplicit-fallthrough)
+# and -fexperimental-call-graph-section warnings in third-party iwlwifi and
+# cross-repo vendor/google Bazel-only drivers.
+# TODO(https://fxbug.dev/477786942): Fix or locally suppress in target BUILD.bazel files and remove.
+build --per_file_copt=src/connectivity/wlan/drivers/third_party/intel/iwlwifi/.*@-Wno-conversion,-Wno-implicit-fallthrough,-Wno-call-graph-section-no-prototype
+build --host_per_file_copt=src/connectivity/wlan/drivers/third_party/intel/iwlwifi/.*@-Wno-conversion,-Wno-implicit-fallthrough,-Wno-call-graph-section-no-prototype
+build --per_file_copt=(^|/)vendor/google/.*@-Wno-conversion,-Wno-implicit-fallthrough,-Wno-call-graph-section-no-prototype
+build --host_per_file_copt=(^|/)vendor/google/.*@-Wno-conversion,-Wno-implicit-fallthrough,-Wno-call-graph-section-no-prototype
+
+# Suppress warnings when compiling googletest, matching config("gtest_config") in //third_party/googletest/BUILD.gn.
+build --per_file_copt=external/googletest.*/.*@-Wno-undef,-Wno-character-conversion
+build --host_per_file_copt=external/googletest.*/.*@-Wno-undef,-Wno-character-conversion
 
 # Ignore upstream BUILD/BUILD.bazel files inside
+# third_party/android/platform/bootable/libbootloader/src,
 # third_party/android/platform/system/tools/mkbootimg/src,
-# third_party/boringssl/src, third_party/gfxstream/src and third_party/perfetto
-# so that Fuchsia BUILD.bazel files can reference upstream sources directly
-# without crossing subpackage boundaries.
-common --deleted_packages=third_party/android/platform/system/tools/mkbootimg/src,third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys,third_party/gfxstream/src,third_party/gfxstream/src/host,third_party/perfetto
+# third_party/boringssl/src, third_party/gfxstream/src, third_party/perfetto and
+# third_party/re2/src so that Fuchsia BUILD.bazel files can reference upstream
+# sources directly without crossing subpackage boundaries.
+common --deleted_packages=third_party/android/platform/bootable/libbootloader/src,third_party/android/platform/bootable/libbootloader/src/gbl,third_party/android/platform/bootable/libbootloader/src/gbl/libabr,third_party/android/platform/system/tools/mkbootimg/src,third_party/boringssl/src,third_party/boringssl/src/rust/bssl-macros,third_party/boringssl/src/rust/bssl-sys,third_party/gfxstream/src,third_party/gfxstream/src/host,third_party/perfetto,third_party/re2/src
 

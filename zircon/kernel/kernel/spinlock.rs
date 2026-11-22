@@ -1,43 +1,87 @@
-// Copyright 2020 The Fuchsia Authors
+// Copyright 2016 The Fuchsia Authors
+// Copyright (c) 2014 Travis Geiselbrecht
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Kernel spinlocks, mirroring the C++ `SpinLock` and `MonitoredSpinLock` declared in
-//! `<kernel/spinlock.h>`, plus the `ksync` raw locks built on them ([`TrackedSpinlock`] and
-//! [`TrackedMonitoredSpinlock`]) and their lock policies, which are re-exported from
-//! `crate::ksync_kernel`.
-//!
-//! The spinlocks are implemented in Rust on top of the architecture spinlock primitives in
-//! [`crate::arch_rs::spinlock`], which are shared with the C++ implementation, so a lock may be
-//! acquired and released from either language.
+//! Kernel spinlocks: the `SpinLockBase` family declared in `<kernel/spinlock.h>`, whose C++
+//! methods are thin forwarders to the `rust_*` trampolines below, plus the `ksync` raw locks built
+//! on them ([`TrackedSpinlock`] and [`TrackedMonitoredSpinlock`]) and their lock policies, which
+//! are re-exported from `crate::ksync_kernel`.
+
+// TODO(https://fxbug.dev/581987928): Remove `#![coverage(off)]` once compiler options can control
+// atomic coverage counter updates.
+#![coverage(off)]
 
 use core::cell::UnsafeCell;
-use core::ffi::c_void;
+use core::ffi::{c_char, c_void};
 use core::marker::{PhantomData, PhantomPinned};
-use core::mem::{align_of, size_of};
-use core::ptr;
-use core::sync::atomic::AtomicU32;
+use core::mem::{align_of, offset_of, size_of};
+use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicU32, Ordering};
 use ksync::{
-    ConstRawLock, ExclusiveLockPolicy, LockPolicy, LockdepTracked, RawAssertHeldLock, RawLock,
-    RawUntrackedIrqLock, RawUntrackedLock, SourceTag, impl_lockdep_tracked_lock_policy,
+    AdoptableLockPolicy, ConstRawLock, ExclusiveLockPolicy, LockPolicy, LockdepTracked,
+    RawAssertHeldLock, RawLock, RawUntrackedIrqLock, RawUntrackedLock, SourceTag, TryLockPolicy,
+    impl_lockdep_tracked_lock_policy,
 };
 use pin_init::{PinInit, pin_init_from_closure};
 
-use crate::arch_rs::spinlock::{
-    arch_spin_lock_held, arch_spin_lock_holder_cpu, arch_spin_lock_non_instrumented,
-    arch_spin_lock_trace_instrumented, arch_spin_trylock, arch_spin_unlock,
-};
 use crate::arch_rs::{
-    InterruptSavedState, arch_interrupt_restore, arch_interrupt_save, ints_disabled,
+    InterruptSavedState, arch_interrupt_restore, arch_interrupt_save,
+    arch_spin_lock_non_instrumented, arch_spin_lock_trace_instrumented, arch_spin_trylock,
+    arch_spin_unlock, curr_cpu_num, ints_disabled,
 };
 use crate::kernel::spin_tracing::{
-    EncodedLockId, IdStringRef, SCHEDULER_LOCK_SPIN_TRACING_ENABLED, SPINLOCK_NAME_TRACING_ENABLED,
+    EncodedLockId, IdStringRef, LockNameStorageOps, SCHEDULER_LOCK_SPIN_TRACING_ENABLED,
     SpinLockNameStorage,
 };
 use crate::kernel::types::cpu_num_t;
-use crate::lockup_detector::{lockup_begin, lockup_end};
+use crate::ktrace_rs::InternedString;
+use crate::lockup_detector::{lockup_begin_raw_on_cpu, lockup_end};
+
+/// Returns which CPU holds `lock`, or `INVALID_CPU` if it is not held.
+#[inline(always)]
+fn arch_spin_lock_holder_cpu(lock: &AtomicU32) -> cpu_num_t {
+    // Relaxed: this predicate does not synchronize other memory operations; see
+    // `arch_spin_lock_held`.
+    lock.load(Ordering::Relaxed).wrapping_sub(1)
+}
+
+/// Returns true if the current CPU holds the lock. In practice, this value is
+/// only useful if migration to another CPU is prevented, by disabling preemption
+/// or interrupts, while the value is being used.
+///
+/// Note that this predicate does not synchronize other memory operations (i.e.
+/// it has relaxed atomic semantics).
+#[inline(always)]
+fn arch_spin_lock_held(lock: &AtomicU32) -> bool {
+    arch_spin_lock_holder_cpu(lock) == curr_cpu_num()
+}
+
+/// Returns true if unlocked (i.e. not held by any CPU). Primarily useful for
+/// asserting that locks are not being accessed incorrectly in destructors and
+/// cleanup paths.
+///
+/// Note that this predicate does not synchronize other memory operations (i.e.
+/// it has relaxed atomic semantics).
+#[inline(always)]
+fn arch_spin_lock_unlocked(lock: &AtomicU32) -> bool {
+    lock.load(Ordering::Relaxed) == 0
+}
+
+/// Options selecting a [`SpinLockBase`] variant, combined with `|` into its `OPTIONS` parameter.
+pub struct SpinLockOptions;
+
+impl SpinLockOptions {
+    /// A plain spinlock.
+    pub const NONE: u32 = 0;
+
+    /// Enable integration with the lockup_detector to monitor spinlock critical sections.
+    ///
+    /// See //zircon/kernel/lib/lockup_detector/README.md.
+    pub const MONITORED: u32 = 1 << 0;
+}
 
 /// Outcome of a non-blocking [`SpinLock::try_acquire`] or [`MonitoredSpinLock::try_acquire`]
 /// attempt.
@@ -58,119 +102,175 @@ impl TryAcquireResult {
     }
 }
 
-/// A kernel spinlock, layout-compatible with the C++ `SpinLockBase` template in
-/// `<kernel/spinlock.h>`. Use the [`SpinLock`] and [`MonitoredSpinLock`] aliases.
+/// A spinlock whose holder must keep interrupts disabled, optionally integrated with the lockup
+/// detector ([`SpinLockOptions::MONITORED`]).
 ///
-/// `MONITORED` selects the C++ `SpinLockOptions::Monitored` option: a monitored spinlock's
-/// critical sections are named, and monitored by the kernel lockup detector (see
-/// `//zircon/kernel/lib/lockup_detector/README.md`), so it is acquired with the name of the
-/// critical section.
+/// Layout-compatible with the C++ `SpinLockBase<Options>`: its `spin_tracing::LockNameStorage`
+/// base (empty unless scheduler lock spin tracing is enabled) followed by the lock word.
 ///
-/// Note: When spin lock tracing is disabled, the C++ `SpinLock` has size 4 and alignment 4,
-/// whereas this type intentionally over-aligns to 8 bytes (`#[repr(C, align(8))]`, resulting in
-/// size 8 and alignment 8) so that [`TrackedSpinlock`] and `#[repr(C)]` FFI structs embedding it
-/// (such as `ControlRegion` and `TrapMap`, which pad `sizeof(LockType)` to 8 bytes in C++)
-/// maintain uniform 8-byte alignment across all lockdep and spin lock tracing configurations.
+/// Both the C++ `SpinLockBase` (`alignas(8)`) and this type (`#[repr(C, align(8))]`) align to 8
+/// bytes (resulting in size 8 when spin tracing is disabled, 16 when enabled, and alignment 8) so
+/// that `SpinLockBase`, [`TrackedSpinlock`], and `#[repr(C)]` FFI structs embedding them maintain
+/// uniform 8-byte alignment across all lockdep and spin tracing configurations.
 ///
-/// Every field is interior-mutable, so a `&SpinLockBase` makes no assertion that its lock word is
-/// unchanged once a release through it has unlocked the lock. However, the over-alignment padding
-/// is not interior-mutable, so the lock must remain live until a release through it returns (see
-/// [`Self::release`]).
+/// Every field is interior-mutable (`UnsafeCell` or `AtomicU32`), so `SpinLockBase` has zero
+/// `Freeze` bytes across all configurations. Callers whose lock guards the destruction of its own
+/// containing allocation (so another CPU may immediately acquire and free it once unlocked) must
+/// release through [`Self::release_raw`] (as C++ `SpinLockBase::Release` does) so no `&Self`
+/// reference remains live across the unlock store.
 #[repr(C, align(8))]
-pub struct SpinLockBase<const MONITORED: bool> {
-    /// Storage for the lock name and encoded lock ID used by spin tracing. Corresponds to the C++
-    /// `spin_tracing::LockNameStorage` base class, and is zero-sized when
-    /// `SPINLOCK_NAME_TRACING_ENABLED` is false. Only mutated during initialization, before the
-    /// lock is shared.
-    name_storage: UnsafeCell<SpinLockNameStorage>,
-
-    /// The `value` of the C++ `arch_spin_lock_t`: the number of the CPU holding the lock plus
-    /// one, so 0 means unheld.
+#[derive(Debug, Default)]
+pub struct SpinLockBase<const OPTIONS: u32 = { SpinLockOptions::NONE }> {
+    /// Storage for the lock name and encoded lock ID used by lock spin tracing. Corresponds to
+    /// the C++ `spin_tracing::LockNameStorage` base class, and is zero-sized when
+    /// `SPINLOCK_NAME_TRACING_ENABLED` is false. Wrapped in `UnsafeCell` so `SpinLockBase` has no
+    /// `Freeze` bytes in any configuration.
+    lock_name_storage: UnsafeCell<SpinLockNameStorage>,
+    /// The lock word: the number of the holding CPU plus one, so that 0 means unheld.
     spinlock: AtomicU32,
-
-    /// No moving allowed, as lockdep identifies a lock by its address. Wrapped in `PhantomData`
-    /// so `SpinLockBase` and types embedding it stay FFI-safe (`improper_ctypes` rejects a bare
+    /// The C++ `SpinLockBase` cannot be copied or moved, and lockdep identifies a lock by its
+    /// address; mirror that by making the lock `!Unpin`. Wrapped in `PhantomData` so
+    /// `SpinLockBase` and types embedding it stay FFI-safe (`improper_ctypes` rejects a bare
     /// `PhantomPinned`).
-    _pin: PhantomData<PhantomPinned>,
+    _pinned: PhantomData<PhantomPinned>,
 }
 
-/// A kernel spinlock, matching the C++ `SpinLock`.
-pub type SpinLock = SpinLockBase<false>;
+// SAFETY: `SpinLockBase` has no thread-local ownership invariants and is `!Unpin`, so ownership
+// of a pinned `SpinLockBase` can be transferred across threads.
+unsafe impl<const OPTIONS: u32> Send for SpinLockBase<OPTIONS> {}
 
-/// A kernel spinlock that is integrated with the lockup detector, matching the C++
-/// `MonitoredSpinLock`.
-pub type MonitoredSpinLock = SpinLockBase<true>;
+// SAFETY: Shared accesses through `&SpinLockBase` operate on the `spinlock` atomic or read
+// `lock_name_storage`, which is only mutated through `&mut self` during initialization /
+// lock-class setup before concurrent use.
+unsafe impl<const OPTIONS: u32> Sync for SpinLockBase<OPTIONS> {}
 
-// SAFETY: `SpinLockBase` has no thread-local ownership invariants, so ownership of a
-// `SpinLockBase` can be transferred across threads.
-unsafe impl<const MONITORED: bool> Send for SpinLockBase<MONITORED> {}
-// SAFETY: Shared accesses through `&SpinLockBase` operate on the `spinlock` atomic, or read
-// `name_storage`, which is only mutated during initialization, before the lock is shared.
-unsafe impl<const MONITORED: bool> Sync for SpinLockBase<MONITORED> {}
+/// A plain spinlock, matching the C++ `SpinLock`.
+pub type SpinLock = SpinLockBase<{ SpinLockOptions::NONE }>;
 
-impl<const MONITORED: bool> SpinLockBase<MONITORED> {
-    /// Creates an unlocked spinlock, matching a constant-initialized C++ `SpinLock`.
-    ///
-    /// When spin lock tracing is enabled, the lock ID is left as a placeholder (see
-    /// `SpinLockNameStorage::const_init`) rather than being assigned a unique ID as by the C++
-    /// default constructor. Initializing the lock through [`RawLock::init`] assigns the unique ID.
-    pub const fn new() -> Self {
+/// `MonitoredSpinLock` is a `SpinLock` variant that's integrated with the lockup_detector.
+///
+/// Rust callers should prefer `KMonitoredSpinlock` / `declare_singleton_monitored_spinlock!` from
+/// `crate::ksync_kernel`, acquiring a `ksync::Guard` with `ksync::source_tag!()`:
+///
+/// ```ignore
+/// crate::ksync_kernel::declare_singleton_monitored_spinlock!(MyLock);
+/// ...
+/// {
+///     ksync::lock!(let _guard = MyLock::get().lock_with(ksync::source_tag!()));
+///     ...
+/// }
+/// ```
+///
+/// When used from C++ (`DECLARE_SINGLETON_SPINLOCK_WITH_TYPE` and `Guard<MonitoredSpinLock,
+/// IrqSave>`), the last argument passed to `Guard`'s constructor should be a `const char*`
+/// C-string with static lifetime (such as `SOURCE_TAG`) that describes the critical section
+/// protected by the guard.
+pub type MonitoredSpinLock = SpinLockBase<{ SpinLockOptions::MONITORED }>;
+
+impl<const OPTIONS: u32> SpinLockBase<OPTIONS> {
+    const IS_MONITORED: bool = (OPTIONS & SpinLockOptions::MONITORED) != SpinLockOptions::NONE;
+
+    /// Creates an unheld spinlock.
+    #[inline]
+    pub fn new() -> Self {
         Self {
-            name_storage: UnsafeCell::new(
-                SpinLockNameStorage::<SPINLOCK_NAME_TRACING_ENABLED>::const_init(
-                    IdStringRef::INVALID_ID,
-                ),
-            ),
+            lock_name_storage: UnsafeCell::new(<SpinLockNameStorage>::new()),
             spinlock: AtomicU32::new(0),
-            _pin: PhantomData,
+            _pinned: PhantomData,
         }
     }
 
-    /// Returns the encoded lock ID used to identify this lock in spin trace events.
-    #[inline(always)]
-    fn encoded_lock_id(&self) -> EncodedLockId {
-        // SAFETY: `name_storage` is only mutated during initialization, before the lock is
-        // shared, so there are no concurrent writes.
-        unsafe { (*self.name_storage.get()).encoded_lock_id() }
+    /// Creates an unheld spinlock in a `const` context, for statics. When lock spin tracing is
+    /// enabled its lock ID is zero until [`LockNameStorageOps::ensure_id`] assigns one.
+    #[inline]
+    pub const fn const_init() -> Self {
+        Self {
+            lock_name_storage: UnsafeCell::new(<SpinLockNameStorage>::const_init(
+                IdStringRef::INVALID_ID,
+            )),
+            spinlock: AtomicU32::new(0),
+            _pinned: PhantomData,
+        }
     }
 
-    /// Debug-asserts the preconditions of acquiring the spinlock.
+    /// Creates an unheld spinlock whose lock class is named `lock_name_string_ref` in spin
+    /// tracing.
+    #[inline]
+    pub fn with_lock_name(lock_name_string_ref: &'static InternedString) -> Self {
+        Self {
+            lock_name_storage: UnsafeCell::new(<SpinLockNameStorage>::with_class_name(
+                lock_name_string_ref,
+            )),
+            spinlock: AtomicU32::new(0),
+            _pinned: PhantomData,
+        }
+    }
+
+    /// Debug-asserts the preconditions of acquiring the spinlock on `cpu` (`curr_cpu_num()`).
     #[inline(always)]
-    fn debug_assert_acquirable(&self) {
+    fn debug_assert_acquirable_on_cpu(&self, cpu: cpu_num_t) {
         debug_assert!(ints_disabled());
-        debug_assert!(!arch_spin_lock_held(&self.spinlock));
+        debug_assert!(arch_spin_lock_holder_cpu(&self.spinlock) != cpu);
     }
 
-    /// Acquires the spinlock, without any lockup detector integration.
+    /// Acquires the spinlock on `cpu`, without any lockup detector integration.
     ///
     /// # Safety
     ///
-    /// As for [`SpinLock::acquire`].
+    /// As for [`SpinLock::acquire`], with `cpu == curr_cpu_num()`.
     #[inline(always)]
-    unsafe fn acquire_internal(&self) {
-        if SCHEDULER_LOCK_SPIN_TRACING_ENABLED {
-            // SAFETY: The caller has disabled interrupts and does not hold this spinlock.
-            unsafe { arch_spin_lock_trace_instrumented(&self.spinlock, self.encoded_lock_id()) };
+    unsafe fn acquire_internal_on_cpu(&self, cpu: cpu_num_t) {
+        if !SCHEDULER_LOCK_SPIN_TRACING_ENABLED {
+            // SAFETY: The caller has disabled interrupts, `cpu == curr_cpu_num()`, and this CPU
+            // does not hold this spinlock.
+            unsafe { arch_spin_lock_non_instrumented(&self.spinlock, cpu) };
         } else {
-            // SAFETY: The caller has disabled interrupts and does not hold this spinlock.
-            unsafe { arch_spin_lock_non_instrumented(&self.spinlock) };
+            // SAFETY: The caller has disabled interrupts, `cpu == curr_cpu_num()`, and this CPU
+            // does not hold this spinlock.
+            unsafe {
+                arch_spin_lock_trace_instrumented(&self.spinlock, cpu, self.encoded_lock_id())
+            };
         }
     }
 
-    /// Attempts to acquire the spinlock without waiting, and without any lockup detector
+    /// Attempts to acquire the spinlock on `cpu` without waiting, and without any lockup detector
     /// integration.
     ///
     /// # Safety
     ///
-    /// As for [`SpinLock::try_acquire`].
+    /// As for [`SpinLock::try_acquire`], with `cpu == curr_cpu_num()`.
     #[inline(always)]
-    unsafe fn try_acquire_internal(&self) -> TryAcquireResult {
-        // SAFETY: The caller has disabled interrupts. `arch_spin_trylock` returns `true` when the
-        // lock is not acquired.
-        if unsafe { arch_spin_trylock(&self.spinlock) } {
+    unsafe fn try_acquire_internal_on_cpu(&self, cpu: cpu_num_t) -> TryAcquireResult {
+        // SAFETY: The caller has disabled interrupts and `cpu == curr_cpu_num()`.
+        // `arch_spin_trylock` returns `true` when the lock is not acquired.
+        if unsafe { arch_spin_trylock(&self.spinlock, cpu) } {
             TryAcquireResult::Failed
         } else {
             TryAcquireResult::Acquired
+        }
+    }
+
+    /// Releases the spinlock through a raw pointer without keeping a `&Self` reference live across
+    /// the unlock store or `lockup_end()`.
+    ///
+    /// Prefer this over [`Self::release`] when another CPU may immediately acquire the lock and
+    /// destroy or free the containing object before this function returns (such as C++
+    /// `SpinLockBase::Release` / `MpUnplugEvent`).
+    ///
+    /// # Safety
+    ///
+    /// `this` must point to a live, properly aligned `SpinLockBase<OPTIONS>` currently held by the
+    /// calling CPU with interrupts disabled, and no borrows protected by this acquisition may
+    /// remain live.
+    #[inline]
+    pub unsafe fn release_raw(this: *const Self) {
+        // SAFETY: The caller guarantees `this` is live and held by the calling CPU until the
+        // unlock store inside `arch_spin_unlock`, with interrupts disabled.
+        unsafe { arch_spin_unlock(&raw const (*this).spinlock) };
+        if Self::IS_MONITORED {
+            // SAFETY: Balances the `lockup_begin_raw_on_cpu` of the acquisition being released, on
+            // the same CPU with interrupts disabled.
+            unsafe { lockup_end() };
         }
     }
 
@@ -183,19 +283,13 @@ impl<const MONITORED: bool> SpinLockBase<MONITORED> {
     /// Interrupts must be disabled and this spinlock must currently be held by the calling CPU
     /// without outstanding references protected by this acquisition.
     ///
-    /// The allocation backing `self` must remain live until this call returns. Once the lock word
-    /// is released another CPU may acquire the lock immediately, so this must not be used to
-    /// release a lock that guards the destruction of its own containing allocation.
+    /// The allocation backing `self` must remain live until this call returns; use
+    /// [`Self::release_raw`] instead when releasing a lock that guards the destruction of its own
+    /// containing allocation.
     #[inline]
     pub unsafe fn release(&self) {
-        // SAFETY: The caller guarantees that the calling CPU holds this live spinlock with
-        // interrupts disabled. Nothing accesses `self` once the lock is released.
-        unsafe { arch_spin_unlock(ptr::from_ref(&self.spinlock)) };
-        if MONITORED {
-            // SAFETY: The acquisition of this monitored spinlock entered a lockup detector
-            // critical section on this CPU, which interrupts have remained disabled on since.
-            unsafe { lockup_end() };
-        }
+        // SAFETY: Forwarded from the caller.
+        unsafe { Self::release_raw(ptr::from_ref(self)) };
     }
 
     /// Just like [`Self::release`], but also restores interrupt state.
@@ -212,8 +306,8 @@ impl<const MONITORED: bool> SpinLockBase<MONITORED> {
     /// of its own containing allocation.
     #[inline]
     pub unsafe fn release_irq_restore(&self, state: InterruptSavedState) {
-        // SAFETY: The caller upholds the `release` contract, and interrupts are disabled as the
-        // lock was acquired by an interrupt-saving acquisition.
+        // SAFETY: The caller holds the lock with interrupts disabled (since `state` was saved) and
+        // keeps `self` live until this call returns.
         unsafe { self.release() };
         arch_interrupt_restore(state);
     }
@@ -234,16 +328,27 @@ impl<const MONITORED: bool> SpinLockBase<MONITORED> {
         arch_spin_lock_held(&self.spinlock)
     }
 
+    /// Returns `true` if unlocked (i.e. not held by any CPU). Primarily useful for asserting that
+    /// locks are not being accessed incorrectly in destructors and cleanup paths.
+    ///
+    /// Note that this predicate does not synchronize other memory operations (i.e. it has relaxed
+    /// atomic semantics).
+    #[inline]
+    pub fn is_unlocked(&self) -> bool {
+        arch_spin_lock_unlocked(&self.spinlock)
+    }
+
     /// Returns which CPU currently holds the spinlock, or `INVALID_CPU` if it is not held.
     ///
-    /// Note that this does not synchronize other memory operations (i.e. it has relaxed atomic
-    /// semantics).
+    /// Note that this predicate does not synchronize other memory operations (i.e. it has relaxed
+    /// atomic semantics).
     #[inline]
     pub fn holder_cpu(&self) -> cpu_num_t {
         arch_spin_lock_holder_cpu(&self.spinlock)
     }
 
-    /// Asserts (in debug builds) that the spinlock is currently held by the calling CPU.
+    /// Asserts (in builds with debug assertions enabled) that the spinlock is held by the calling
+    /// CPU.
     ///
     /// # Panics
     ///
@@ -255,64 +360,74 @@ impl<const MONITORED: bool> SpinLockBase<MONITORED> {
     }
 }
 
-impl SpinLock {
-    /// Acquire the spinlock.
-    ///
-    /// Interrupts must already be disabled.
-    ///
-    /// # Safety
-    ///
-    /// Interrupts must already be disabled on the calling CPU, the calling CPU must not already
-    /// hold this spinlock, and this acquisition must be paired with a matching [`Self::release`]
-    /// or [`Self::release_irq_restore`] on the same CPU before interrupts are re-enabled or the
-    /// thread blocks or migrates.
-    #[inline]
-    pub unsafe fn acquire(&self) {
-        self.debug_assert_acquirable();
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.acquire_internal() };
-    }
+macro_rules! impl_unmonitored_spinlock {
+    ($ty:ty) => {
+        impl $ty {
+            /// Acquire the spinlock.
+            ///
+            /// Interrupts must already be disabled.
+            ///
+            /// # Safety
+            ///
+            /// Interrupts must already be disabled on the calling CPU, the calling CPU must not
+            /// already hold this spinlock, and this acquisition must be paired with a matching
+            /// [`Self::release`] or [`Self::release_irq_restore`] on the same CPU before
+            /// interrupts are re-enabled or the thread blocks or migrates.
+            #[inline]
+            pub unsafe fn acquire(&self) {
+                let cpu = curr_cpu_num();
+                self.debug_assert_acquirable_on_cpu(cpu);
+                // SAFETY: `cpu == curr_cpu_num()` (interrupts are disabled), and the remaining
+                // requirements are forwarded from the caller.
+                unsafe { self.acquire_internal_on_cpu(cpu) };
+            }
 
-    /// Attempt to acquire the spinlock without waiting.
-    ///
-    /// Interrupts must already be disabled.
-    ///
-    /// Returns [`TryAcquireResult::Acquired`] when the lock is acquired, and
-    /// [`TryAcquireResult::Failed`] when the lock is not acquired.
-    ///
-    /// `try_acquire` operations are not permitted to fail spuriously, even on architectures with
-    /// weak memory ordering. If a `try_acquire` operation fails, it must be because the lock was
-    /// actually observed to be held during the attempt.
-    ///
-    /// # Safety
-    ///
-    /// Interrupts must already be disabled on the calling CPU, and if this call acquires the lock
-    /// (returns [`TryAcquireResult::Acquired`]), it must be paired with a matching
-    /// [`Self::release`] or [`Self::release_irq_restore`] on the same CPU before interrupts are
-    /// re-enabled or the thread blocks or migrates.
-    #[inline]
-    pub unsafe fn try_acquire(&self) -> TryAcquireResult {
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.try_acquire_internal() }
-    }
+            /// Attempt to acquire the spinlock without waiting.
+            ///
+            /// Interrupts must already be disabled.
+            ///
+            /// Returns [`TryAcquireResult::Acquired`] when the lock is acquired, and
+            /// [`TryAcquireResult::Failed`] when the lock is not acquired.
+            ///
+            /// `try_acquire` operations are not permitted to fail spuriously, even on
+            /// architectures with weak memory ordering. If a `try_acquire` operation fails, it
+            /// must be because the lock was actually observed to be held during the attempt.
+            ///
+            /// # Safety
+            ///
+            /// Interrupts must already be disabled on the calling CPU, and if this call acquires
+            /// the lock (returns [`TryAcquireResult::Acquired`]), it must be paired with a
+            /// matching [`Self::release`] or [`Self::release_irq_restore`] on the same CPU before
+            /// interrupts are re-enabled or the thread blocks or migrates.
+            #[inline]
+            pub unsafe fn try_acquire(&self) -> TryAcquireResult {
+                let cpu = curr_cpu_num();
+                // SAFETY: `cpu == curr_cpu_num()` (interrupts are disabled), and the remaining
+                // requirements are forwarded from the caller.
+                unsafe { self.try_acquire_internal_on_cpu(cpu) }
+            }
 
-    /// Just like [`Self::acquire`], but saves interrupt state and disables interrupts.
-    ///
-    /// # Safety
-    ///
-    /// The calling CPU must not already hold this spinlock, and the returned
-    /// [`InterruptSavedState`] must be passed to a matching [`Self::release_irq_restore`] on the
-    /// same CPU before the thread blocks or migrates.
-    #[inline]
-    #[must_use = "the saved interrupt state must be passed to `release_irq_restore`"]
-    pub unsafe fn acquire_irq_save(&self) -> InterruptSavedState {
-        let state = arch_interrupt_save();
-        // SAFETY: Interrupts were disabled above, and the remaining requirements are forwarded
-        // from the caller.
-        unsafe { self.acquire() };
-        state
-    }
+            /// Just like [`Self::acquire`], but saves interrupt state and disables interrupts.
+            ///
+            /// # Safety
+            ///
+            /// The calling CPU must not already hold this spinlock, and the returned
+            /// [`InterruptSavedState`] must be passed to a matching [`Self::release_irq_restore`]
+            /// on the same CPU before the thread blocks or migrates.
+            #[inline]
+            #[must_use = "the saved interrupt state must be passed to `release_irq_restore`"]
+            pub unsafe fn acquire_irq_save(&self) -> InterruptSavedState {
+                let state = arch_interrupt_save();
+                // SAFETY: Interrupts were disabled above, and the remaining requirements are
+                // forwarded from the caller.
+                unsafe { self.acquire() };
+                state
+            }
+        }
+    };
 }
+
+impl_unmonitored_spinlock!(SpinLock);
 
 impl MonitoredSpinLock {
     /// Acquire the spinlock, entering the lockup detector critical section named `name`.
@@ -324,12 +439,28 @@ impl MonitoredSpinLock {
     /// As for [`SpinLock::acquire`].
     #[inline]
     pub unsafe fn acquire(&self, name: SourceTag) {
-        self.debug_assert_acquirable();
-        // SAFETY: The caller has disabled interrupts, and pairs this acquisition with a release
-        // on the same CPU, which leaves the critical section.
-        unsafe { lockup_begin(name.as_cstr()) };
-        // SAFETY: Forwarded from the caller.
-        unsafe { self.acquire_internal() };
+        // SAFETY: `name` wraps a static NUL-terminated C string, and the caller upholds the rest
+        // of `acquire_raw`'s contract.
+        unsafe { self.acquire_raw(NonNull::from(name.as_cstr()).cast()) };
+    }
+
+    /// [`Self::acquire`] for the C++ trampoline, which only has a raw pointer to `name`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`SpinLock::acquire`]; additionally, `name` must point to a NUL-terminated C string
+    /// with static lifetime.
+    #[inline]
+    unsafe fn acquire_raw(&self, name: NonNull<c_char>) {
+        let cpu = curr_cpu_num();
+        self.debug_assert_acquirable_on_cpu(cpu);
+        // SAFETY: `cpu == curr_cpu_num()` (interrupts are disabled), the caller guarantees `name`
+        // is a static NUL-terminated C string, and the matching `release` balances this with
+        // `lockup_end`.
+        unsafe { lockup_begin_raw_on_cpu(cpu, name) };
+        // SAFETY: `cpu == curr_cpu_num()`, and the remaining requirements are forwarded from the
+        // caller.
+        unsafe { self.acquire_internal_on_cpu(cpu) };
     }
 
     /// Attempt to acquire the spinlock without waiting, entering the lockup detector critical
@@ -342,12 +473,28 @@ impl MonitoredSpinLock {
     /// As for [`SpinLock::try_acquire`].
     #[inline]
     pub unsafe fn try_acquire(&self, name: SourceTag) -> TryAcquireResult {
-        // SAFETY: Forwarded from the caller.
-        let result = unsafe { self.try_acquire_internal() };
+        // SAFETY: `name` wraps a static NUL-terminated C string, and the caller upholds the rest
+        // of `try_acquire_raw`'s contract.
+        unsafe { self.try_acquire_raw(NonNull::from(name.as_cstr()).cast()) }
+    }
+
+    /// [`Self::try_acquire`] for the C++ trampoline, which only has a raw pointer to `name`.
+    ///
+    /// # Safety
+    ///
+    /// As for [`SpinLock::try_acquire`]; additionally, `name` must point to a NUL-terminated C
+    /// string with static lifetime.
+    #[inline]
+    unsafe fn try_acquire_raw(&self, name: NonNull<c_char>) -> TryAcquireResult {
+        let cpu = curr_cpu_num();
+        // SAFETY: `cpu == curr_cpu_num()` (interrupts are disabled), and the remaining
+        // requirements are forwarded from the caller.
+        let result = unsafe { self.try_acquire_internal_on_cpu(cpu) };
         if result.is_acquired() {
-            // SAFETY: The caller has disabled interrupts, and pairs this acquisition with a
-            // release on the same CPU, which leaves the critical section.
-            unsafe { lockup_begin(name.as_cstr()) };
+            // SAFETY: `cpu == curr_cpu_num()` (interrupts are disabled), the caller guarantees
+            // `name` is a static NUL-terminated C string, and the lock was acquired so the
+            // matching `release` balances this with `lockup_end`.
+            unsafe { lockup_begin_raw_on_cpu(cpu, name) };
         }
         result
     }
@@ -368,16 +515,53 @@ impl MonitoredSpinLock {
     }
 }
 
-impl<const MONITORED: bool> AsRef<SpinLockBase<MONITORED>> for SpinLockBase<MONITORED> {
+impl<const OPTIONS: u32> AsRef<SpinLockBase<OPTIONS>> for SpinLockBase<OPTIONS> {
     #[inline]
-    fn as_ref(&self) -> &SpinLockBase<MONITORED> {
+    fn as_ref(&self) -> &SpinLockBase<OPTIONS> {
         self
     }
 }
 
-impl<const MONITORED: bool> Default for SpinLockBase<MONITORED> {
-    fn default() -> Self {
-        Self::new()
+impl<const OPTIONS: u32> LockNameStorageOps for SpinLockBase<OPTIONS> {
+    /// # Safety
+    ///
+    /// The caller must ensure that `lcid` satisfies all preconditions of
+    /// [`LockNameStorageOps::set_lock_class_id`].
+    #[inline]
+    unsafe fn set_lock_class_id(&mut self, lcid: *const c_void) {
+        // SAFETY: `SpinLockNameStorage::set_lock_class_id` has the identical safety contract on
+        // `lcid` as `LockNameStorageOps::set_lock_class_id`, which the caller guarantees.
+        unsafe { self.lock_name_storage.get_mut().set_lock_class_id(lcid) };
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that `C::ID` satisfies all preconditions of
+    /// [`LockNameStorageOps::set_lock_class_id`].
+    #[inline]
+    unsafe fn set_lock_class<C: lockdep::LockClass>(&mut self) {
+        // SAFETY: `SpinLockNameStorage::set_lock_class` has the identical safety contract on
+        // `C::ID` as `LockNameStorageOps::set_lock_class`, which the caller guarantees.
+        unsafe { self.lock_name_storage.get_mut().set_lock_class::<C>() };
+    }
+
+    #[inline(always)]
+    fn encoded_lock_id(&self) -> EncodedLockId {
+        // SAFETY: `lock_name_storage` is only mutated through `&mut self` during initialization /
+        // lock-class setup before concurrent use.
+        unsafe { (*self.lock_name_storage.get()).encoded_lock_id() }
+    }
+
+    #[inline]
+    fn class_name_ref(&self) -> IdStringRef {
+        // SAFETY: `lock_name_storage` is only mutated through `&mut self` during initialization /
+        // lock-class setup before concurrent use.
+        unsafe { (*self.lock_name_storage.get()).class_name_ref() }
+    }
+
+    #[inline]
+    fn ensure_id(&mut self) {
+        self.lock_name_storage.get_mut().ensure_id();
     }
 }
 
@@ -480,6 +664,12 @@ unsafe impl LockPolicy<SpinLock> for NoIrqSavePolicy {
 
 // SAFETY: `NoIrqSavePolicy` enforces exclusive mutual exclusion on `SpinLock`.
 unsafe impl ExclusiveLockPolicy<SpinLock> for NoIrqSavePolicy {}
+
+// SAFETY: `NoIrqSavePolicy` requires interrupts to remain disabled externally across the entire
+// critical section and neither saves nor restores CPU interrupt state on release, so relocating
+// its `GuardState` (`()`) and releasing multiple `NoIrqSavePolicy` spinlocks out of LIFO order
+// preserves interrupt-disabled invariants on the holding CPU.
+unsafe impl AdoptableLockPolicy<SpinLock> for NoIrqSavePolicy {}
 
 /// Saved interrupt state and source tag for a held [`TrackedMonitoredSpinlock`].
 #[derive(Copy, Clone, Default)]
@@ -592,8 +782,34 @@ unsafe impl LockPolicy<MonitoredSpinLock> for NoIrqSavePolicy {
 // SAFETY: `NoIrqSavePolicy` enforces exclusive mutual exclusion on `MonitoredSpinLock`.
 unsafe impl ExclusiveLockPolicy<MonitoredSpinLock> for NoIrqSavePolicy {}
 
+// SAFETY: `NoIrqSavePolicy` requires interrupts to remain disabled externally across the entire
+// critical section and neither saves nor restores CPU interrupt state on release, and its
+// `GuardState` (`SourceTag`) is relocated by value via `core::mem::take`.
+unsafe impl AdoptableLockPolicy<MonitoredSpinLock> for NoIrqSavePolicy {}
+
+// SAFETY: `MonitoredSpinLock::try_acquire` and `MonitoredSpinLock::release` establish exclusive
+// mutual exclusion on `MonitoredSpinLock` when `try_acquire` returns `Acquired` and interrupts are
+// disabled, which `try_acquire` asserts.
+unsafe impl TryLockPolicy<MonitoredSpinLock> for NoIrqSavePolicy {
+    #[inline]
+    unsafe fn try_acquire(
+        lock: &MonitoredSpinLock,
+        state: &mut Self::GuardState,
+        tag: Self::AcquireArgs,
+    ) -> bool {
+        assert!(ints_disabled());
+        // SAFETY: `ints_disabled()` is asserted above, and the caller upholds the
+        // `TryLockPolicy::try_acquire` contract.
+        let acquired = unsafe { lock.try_acquire(tag) }.is_acquired();
+        if acquired {
+            *state = tag;
+        }
+        acquired
+    }
+}
+
 // SAFETY: `SpinLockBase` is a physical kernel spinlock with a unique storage address.
-unsafe impl<const MONITORED: bool> RawLock for SpinLockBase<MONITORED>
+unsafe impl<const OPTIONS: u32> RawLock for SpinLockBase<OPTIONS>
 where
     IrqSavePolicy: ExclusiveLockPolicy<Self>,
 {
@@ -609,15 +825,13 @@ where
     #[inline]
     unsafe fn init(class_id: *const c_void) -> impl PinInit<Self, core::convert::Infallible> {
         // SAFETY: The closure initializes the provided slot in place before returning `Ok(())`.
-        // Once written, the slot is not yet shared, so the closure has the only access to its
-        // `name_storage`. The caller guarantees that `class_id` is null or a valid static
-        // `LockClassId`, as `set_lock_class_id` requires.
+        // Once written, the slot is not yet shared, so the closure has exclusive access to it.
+        // The caller guarantees that `class_id` is null or a valid static `LockClassId`, as
+        // `set_lock_class_id` requires.
         unsafe {
             pin_init_from_closure(move |slot: *mut Self| {
                 slot.write(Self::new());
-                let name_storage = &mut *UnsafeCell::raw_get(&raw const (*slot).name_storage);
-                name_storage.ensure_id();
-                name_storage.set_lock_class_id(class_id);
+                (*slot).set_lock_class_id(class_id);
                 Ok(())
             })
         }
@@ -629,11 +843,11 @@ where
     }
 }
 
-impl<const MONITORED: bool> ConstRawLock for SpinLockBase<MONITORED>
+impl<const OPTIONS: u32> ConstRawLock for SpinLockBase<OPTIONS>
 where
     IrqSavePolicy: ExclusiveLockPolicy<Self>,
 {
-    const INIT: Self = Self::new();
+    const INIT: Self = Self::const_init();
 }
 
 impl RawAssertHeldLock for SpinLock {
@@ -673,35 +887,102 @@ pub type TrackedSpinlock =
 pub type TrackedMonitoredSpinlock =
     LockdepTracked<MonitoredSpinLock, IrqSavePolicy, { lockdep::LOCK_FLAGS_IRQ_SAFE }>;
 
+// The C++ `SpinLockBase<Options>` in <kernel/spinlock.h> has the same layout, which it asserts
+// with the same constants.
+const EXPECTED_SPINLOCK_SIZE: usize = if SCHEDULER_LOCK_SPIN_TRACING_ENABLED { 16 } else { 8 };
+const EXPECTED_SPINLOCK_ALIGN: usize = 8;
+const EXPECTED_SPINLOCK_WORD_OFFSET: usize =
+    if SCHEDULER_LOCK_SPIN_TRACING_ENABLED { 8 } else { 0 };
+
+zr::static_assert!(size_of::<AtomicU32>() == size_of::<cpu_num_t>());
+zr::static_assert!(align_of::<AtomicU32>() == align_of::<cpu_num_t>());
+zr::static_assert!(size_of::<SpinLock>() == EXPECTED_SPINLOCK_SIZE);
+zr::static_assert!(align_of::<SpinLock>() == EXPECTED_SPINLOCK_ALIGN);
+zr::static_assert!(offset_of!(SpinLock, lock_name_storage) == 0);
+zr::static_assert!(offset_of!(SpinLock, spinlock) == EXPECTED_SPINLOCK_WORD_OFFSET);
+zr::static_assert!(size_of::<MonitoredSpinLock>() == EXPECTED_SPINLOCK_SIZE);
+zr::static_assert!(align_of::<MonitoredSpinLock>() == EXPECTED_SPINLOCK_ALIGN);
+zr::static_assert!(offset_of!(MonitoredSpinLock, spinlock) == EXPECTED_SPINLOCK_WORD_OFFSET);
+
 // Must match `kExpectedSpinlockSize` and `kExpectedSpinlockAlign` in
-// `zircon/kernel/lib/ksync/bindings.cc`, other than for the over-alignment of `SpinLockBase`.
-const _: () = {
-    #[cfg(with_lock_dep)]
-    const BASE_SIZE: usize = 8;
-    #[cfg(not(with_lock_dep))]
-    const BASE_SIZE: usize = 0;
+// `zircon/kernel/lib/ksync/bindings.cc`.
+const EXPECTED_TRACKED_SPINLOCK_BASE_SIZE: usize = if cfg!(with_lock_dep) { 8 } else { 0 };
+const EXPECTED_TRACKED_SPINLOCK_SIZE: usize =
+    EXPECTED_TRACKED_SPINLOCK_BASE_SIZE + EXPECTED_SPINLOCK_SIZE;
 
-    // `SpinLockBase` is `#[repr(C, align(8))]`, so the 4-byte non-tracing storage is padded to 8
-    // bytes.
-    const EXPECTED_STORAGE_SIZE: usize = if SCHEDULER_LOCK_SPIN_TRACING_ENABLED { 16 } else { 8 };
-    const EXPECTED_SPINLOCK_SIZE: usize = BASE_SIZE + EXPECTED_STORAGE_SIZE;
+zr::static_assert!(size_of::<TrackedSpinlock>() == EXPECTED_TRACKED_SPINLOCK_SIZE);
+zr::static_assert!(align_of::<TrackedSpinlock>() == EXPECTED_SPINLOCK_ALIGN);
+zr::static_assert!(size_of::<TrackedMonitoredSpinlock>() == EXPECTED_TRACKED_SPINLOCK_SIZE);
+zr::static_assert!(align_of::<TrackedMonitoredSpinlock>() == EXPECTED_SPINLOCK_ALIGN);
 
-    assert!(size_of::<SpinLock>() == EXPECTED_STORAGE_SIZE);
-    assert!(align_of::<SpinLock>() == 8);
-    assert!(size_of::<MonitoredSpinLock>() == EXPECTED_STORAGE_SIZE);
-    assert!(align_of::<MonitoredSpinLock>() == 8);
-    assert!(size_of::<TrackedSpinlock>() == EXPECTED_SPINLOCK_SIZE);
-    assert!(align_of::<TrackedSpinlock>() == 8);
-    assert!(size_of::<TrackedMonitoredSpinlock>() == EXPECTED_SPINLOCK_SIZE);
-    assert!(align_of::<TrackedMonitoredSpinlock>() == 8);
+// FFI trampolines for the C++ `SpinLockBase<Options>` methods in <kernel/spinlock.h>, which
+// carry the thread safety annotations and forward to these. Each requires what the corresponding
+// method requires of its callers: in particular, interrupts are disabled on the calling CPU and
+// the lock is held or not held as that method expects.
 
-    // As for the C++ `SpinLockBase`, the `spin_tracing::LockNameStorage` base class is at offset
-    // zero, followed by the `arch_spin_lock_t`.
-    assert!(core::mem::offset_of!(SpinLock, name_storage) == 0);
-    assert!(
-        core::mem::offset_of!(SpinLock, spinlock) == size_of::<UnsafeCell<SpinLockNameStorage>>()
-    );
-};
+/// FFI trampoline for [`SpinLock::acquire`].
+///
+/// # Safety
+///
+/// As for [`SpinLock::acquire`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_spinlock_acquire(lock: &SpinLock) {
+    // SAFETY: The caller upholds `acquire`'s contract.
+    unsafe { lock.acquire() };
+}
+
+/// FFI trampoline for [`MonitoredSpinLock::acquire`].
+///
+/// # Safety
+///
+/// As for [`MonitoredSpinLock::acquire`]; additionally, `name` must point to a NUL-terminated C
+/// string with static lifetime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_monitored_spinlock_acquire(
+    lock: &MonitoredSpinLock,
+    name: NonNull<c_char>,
+) {
+    // SAFETY: The caller upholds `acquire_raw`'s contract.
+    unsafe { lock.acquire_raw(name) };
+}
+
+/// FFI trampoline for [`MonitoredSpinLock::try_acquire`]. Returns false when the lock is
+/// acquired, and true when the lock is not acquired.
+///
+/// # Safety
+///
+/// As for [`MonitoredSpinLock::try_acquire`]; additionally, `name` must point to a NUL-terminated
+/// C string with static lifetime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_monitored_spinlock_try_acquire(
+    lock: &MonitoredSpinLock,
+    name: NonNull<c_char>,
+) -> bool {
+    // SAFETY: The caller upholds `try_acquire_raw`'s contract.
+    !unsafe { lock.try_acquire_raw(name) }.is_acquired()
+}
+
+/// FFI trampoline for [`SpinLockBase::release_raw`] on a [`SpinLock`].
+///
+/// # Safety
+///
+/// As for [`SpinLockBase::release_raw`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_spinlock_release(lock: *const SpinLock) {
+    // SAFETY: The caller upholds `release_raw`'s contract.
+    unsafe { SpinLock::release_raw(lock) };
+}
+
+/// FFI trampoline for [`SpinLockBase::release_raw`] on a [`MonitoredSpinLock`].
+///
+/// # Safety
+///
+/// As for [`SpinLockBase::release_raw`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_monitored_spinlock_release(lock: *const MonitoredSpinLock) {
+    // SAFETY: The caller upholds `release_raw`'s contract.
+    unsafe { MonitoredSpinLock::release_raw(lock) };
+}
 
 /// SpinLock tests.
 #[cfg(ktest)]

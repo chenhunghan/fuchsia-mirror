@@ -25,9 +25,9 @@ use cm_rust::{
     OfferDeclCommon, OfferTarget, StorageDecl, StorageDirectorySource, UseDecl,
 };
 use cm_types::{IterablePath, Name, RelativePath};
-use fidl_fuchsia_component_decl as fdecl;
-use fidl_fuchsia_component_runtime::RouteRequest;
-use fidl_fuchsia_io::RW_STAR_DIR;
+use fidl_fuchsia_component_decl_common as fdecl;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
+use fidl_fuchsia_io_common::RW_STAR_DIR;
 use itertools::Itertools;
 use moniker::ChildName;
 use runtime_capabilities::{Capability, CapabilityBound, Dictionary, DirConnector, Router};

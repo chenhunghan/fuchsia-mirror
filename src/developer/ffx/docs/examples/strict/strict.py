@@ -47,7 +47,7 @@ assert out == "Hello", f"expected:\n\t'Hello'\ngot:\n\t'{out}'"
 
 # Print the output from `ffx target list`.
 print("Running ffx target list in strict mode:")
-target_list = runner.target_list(None)
+target_list = runner.target_list()
 print(target_list)
 print()
 

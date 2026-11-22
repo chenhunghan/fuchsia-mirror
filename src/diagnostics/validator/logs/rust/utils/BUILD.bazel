@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_library(
+    name = "utils",
+    testonly = True,
+    srcs = ["src/lib.rs"],
+    crate_name = "diagnostics_log_validator_utils",
+    edition = "2024",
+    lint_config = "//build/config/rust/lints:clippy_warn_all",
+    visibility = ["//src/diagnostics/validator/logs:__subpackages__"],
+    deps = [
+        "//sdk/fidl/fuchsia.diagnostics.types:fuchsia.diagnostics.types_rust",
+        "//src/diagnostics/validator/logs/fidl:fuchsia.validate.logs_rust",
+        "//src/lib/diagnostics/log/encoding/rust",
+    ],
+)

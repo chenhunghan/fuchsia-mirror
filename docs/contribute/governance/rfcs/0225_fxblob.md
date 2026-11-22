@@ -39,7 +39,7 @@ These systems served an important role as Fuchsia evolved, but they have become
 a limiting factor for the goals of the Storage team: performance, updateability,
 and maintainability.
 
-### Performance Improvements
+### Performance improvements {:#performance-improvements}
 
 Much of the low-hanging fruit for improving the performance of Fuchsia's storage
 stack has been plucked, and improvements now depend on more complex changes to
@@ -115,7 +115,7 @@ its format is poorly encapsulated (a substantial amount of software in Fuchsia
 interprets the FVM format), all of which makes it a very difficult system to
 change.
 
-As mentioned in [Performance Improvements](#performance-improvements), most
+As mentioned in [Performance improvements](#performance-improvements), most
 improvements have to be duplicated in each filesystem implementation we
 maintain, which multiplies the cost of improvements. This also applies for the
 maintenance costs. Less software to maintain means less engineering effort

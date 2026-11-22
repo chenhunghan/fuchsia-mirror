@@ -60,4 +60,7 @@ config("haswell") {
   cflags = [ "-mcpu=haswell" ]
   rustflags = [ "-Ctarget-cpu=haswell" ]
 }
-# LINT.ThenChange(BUILD.bazel:x64_configs)
+# LINT.ThenChange(
+#     BUILD.bazel:x64_configs,
+#     //build/bazel_sdk/fuchsia_rules_common/build_flags/default_flag_values.bzl:cpu_baseline,
+# )

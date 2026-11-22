@@ -20,7 +20,6 @@ fidl_library(
         "//src/devices/bin/driver_manager:__subpackages__",
         "//src/devices/bin/driver_manager_rust:__subpackages__",
         "//src/memory:__subpackages__",
-        "//src/performance/memory:__subpackages__",
         "//src/starnix:__subpackages__",
         "//src/storage/fxfs:__subpackages__",
         "//src/sys/component_manager:__subpackages__",
@@ -36,5 +35,5 @@ measure_tape(
     fidls = [":fuchsia.memory.attribution"],
     target_binding = "rust",
     target_types = ["fuchsia.memory.attribution/AttributionUpdate"],
-    visibility = ["//src/performance/memory/attribution/server:__pkg__"],
+    visibility = ["//src/memory/attribution/server:__pkg__"],
 )

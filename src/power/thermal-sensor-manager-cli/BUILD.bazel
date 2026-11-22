@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    srcs = ["src/main.rs"],
+    binary_name = "thermal-sensor-manager-cli",
+    build_flags = ["//build/config/rust:bootfs"],
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.temperature:fuchsia.hardware.temperature_rust",
+        "//sdk/fidl/fuchsia.thermal:fuchsia.thermal_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+    ],
+)

@@ -13,6 +13,7 @@ group("tests") {
     ":bazel_tests",
     ":hardware_profiler_test($host_toolchain)",
     ":procfs_test($host_toolchain)",
+    ":profile_wrap_test($host_toolchain)",
     ":system_profiler_test($host_toolchain)",
   ]
 }
@@ -30,7 +31,10 @@ if (is_host) {
   # can't translate yet. These run the same tests at build time.
   python_build_time_tests("procfs_test") {
     tests = [ "procfs_test.py" ]
-    deps = [ ":procfs" ]
+    deps = [
+      ":procfs",
+      ":procfs_test_utils",
+    ]
   }
 
   python_build_time_tests("system_profiler_test") {
@@ -47,6 +51,19 @@ if (is_host) {
       ":hardware_profiler",
       ":procfs",
     ]
+  }
+
+  python_library("profile_wrap") {
+    sources = [ "profile_wrap.py" ]
+    library_deps = [
+      ":system_profiler",
+      "//build/scripts:signal_utils_lib",
+    ]
+  }
+
+  python_build_time_tests("profile_wrap_test") {
+    tests = [ "profile_wrap_test.py" ]
+    deps = [ ":profile_wrap" ]
   }
 }
 
@@ -82,17 +99,30 @@ if (is_host) {
       ":*",
       "//build/scripts:*",
     ]
+    enable_mypy = false
+  }
+}
+if (is_host) {
+  python_library("procfs_test_utils") {
+    sources = [ "procfs_test_utils.py" ]
+    visibility = [
+      ":*",
+      "//build/scripts:*",
+    ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("system_profiler") {
     sources = [ "system_profiler.py" ]
     deps = [ ":procfs" ]
+    enable_mypy = false
   }
 }
 if (is_host) {
   python_library("hardware_profiler") {
     sources = [ "hardware_profiler.py" ]
     deps = [ ":procfs" ]
+    enable_mypy = false
   }
 }

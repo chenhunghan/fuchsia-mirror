@@ -376,8 +376,8 @@ void PowerManager::MaybeCreateAllDriversPowerElement() {
       !std::holds_alternative<PowerDependencyToken>(storage_callbacks_or_token_)) {
     return;
   }
-  if (std::shared_ptr<Node> root_node = root_node_.lock()) {
-    CreateAllDriversPowerElement(std::move(root_node));
+  if (root_node_.lock()) {
+    CreateAllDriversPowerElement(root_node_);
   }
 }
 
@@ -393,7 +393,16 @@ void PowerManager::OnNodeUnbinding(std::shared_ptr<const Node> node) {
   }
 }
 
-void PowerManager::CreateAllDriversPowerElement(std::shared_ptr<Node> root_node) {
+void PowerManager::StartSuspendSession(const fuchsia_driver_development::NodeTarget& target,
+                                       zx::eventpair token, fit::callback<void(zx::result<>)> cb) {
+  if (!SuspendEnabled() || !all_drivers_) {
+    cb(zx::error(ZX_ERR_NOT_SUPPORTED));
+    return;
+  }
+  all_drivers_->StartSuspendSession(target, std::move(token), std::move(cb));
+}
+
+void PowerManager::CreateAllDriversPowerElement(std::weak_ptr<Node> root_node) {
   ZX_ASSERT_MSG(SuspendEnabled(), "Suspend must be enabled to create AllDrivers power element");
   ZX_ASSERT_MSG(!all_drivers_, "AllDrivers power element already created");
 
@@ -408,7 +417,8 @@ void PowerManager::CreateAllDriversPowerElement(std::shared_ptr<Node> root_node)
                    zx_status_get_string(status));
     return;
   }
-  all_drivers_ = std::make_shared<AllDriversElement>(this, root_node, std::move(bootup_lease));
+  all_drivers_ = std::make_shared<AllDriversElement>(this, std::move(root_node),
+                                                     std::move(bootup_lease), dispatcher_);
   if (bootup_complete_) {
     // Bootup finished before the CPU or storage token arrived. Let the element know now; it will
     // run its startup transition once Power Broker calls SetLevel(1).
@@ -503,7 +513,7 @@ void PowerManager::CreateAllDriversPowerElement(std::shared_ptr<Node> root_node)
                   fidl::Client<fuchsia_power_broker::Lessor>(std::move(lessor_client), dispatcher_),
           };
           // Give the power element's ownership to the |all_drivers_| server.
-          all_drivers_->AttachElement(dispatcher_, std::move(pe_handles));
+          all_drivers_->AttachElement(std::move(pe_handles));
         }
       });
 }

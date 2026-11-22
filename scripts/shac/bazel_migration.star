@@ -19,6 +19,10 @@ load(
 _BAZEL2GN_SENTINEL = "## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##"
 # LINT.ThenChange(//build/tools/bazel2gn/sentinel.go:bazel2gn_output)
 
+# Patterns without slashes match at any level, including the root.
+_BUILD_FILES_GLOB = ["BUILD.gn", "BUILD.bazel"]
+_BAZEL2GN_CONFIG_GLOB = [".bazel2gn.json"]
+
 # Changes to these files can change bazel2gn's output for any directory, so
 # trigger a check of all bazel2gn-managed directories.
 _BAZEL2GN_INPUTS_GLOB = [
@@ -28,11 +32,42 @@ _BAZEL2GN_INPUTS_GLOB = [
     "/scripts/shac/bazel_migration.star",
 ]
 
-# Patterns without slashes match at any level, including the root.
-_BUILD_FILES_GLOB = ["BUILD.gn", "BUILD.bazel"]
+def _normalize_path(path):
+    parts = []
+    for part in path.split("/"):
+        if not part or part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+        else:
+            parts.append(part)
+    return "/" + "/".join(parts)
+
+def _subrepo_prefix(ctx):
+    """Returns ctx.scm.root relative to fuchsia_dir, or '' at the Fuchsia root."""
+    if not ctx.vars.get("fuchsia_dir"):
+        return ""
+    scm_root = _normalize_path(ctx.scm.root)
+    fuchsia_dir = _normalize_path(get_fuchsia_dir(ctx))
+    if scm_root == fuchsia_dir:
+        return ""
+    prefix = "/" if fuchsia_dir == "/" else fuchsia_dir + "/"
+    if scm_root.startswith(prefix):
+        return scm_root[len(prefix):]
+    fail("Repository root %s is not inside fuchsia_dir %s" % (scm_root, fuchsia_dir))
+
+def _to_fuchsia_rel(subrepo_prefix, rel_dir):
+    if not subrepo_prefix:
+        return rel_dir
+    if rel_dir == ".":
+        return subrepo_prefix
+    return subrepo_prefix + "/" + rel_dir
 
 def _enforce_bazel_build_file_for_new_fidl_library(ctx):
     """Checks that a BUILD.bazel file exists when a new FIDL library is created in GN."""
+    if _subrepo_prefix(ctx):
+        return
 
     # Check when :
     # 1. The file is a new BUILD.gn file added under //sdk/fidl/.
@@ -78,24 +113,40 @@ def _enforce_bazel_build_file_for_new_fidl_library(ctx):
 def _dirname(path):
     return path.rpartition("/")[0] or "."
 
-def _dirs_to_check(ctx):
+def _is_under_any_dir(path_dir, parent_dirs):
+    for parent_dir in parent_dirs:
+        if parent_dir == "." or path_dir == parent_dir or path_dir.startswith(parent_dir + "/"):
+            return True
+    return False
+
+def _has_sentinel(ctx, gn_path):
+    return _BAZEL2GN_SENTINEL in str(ctx.io.read_file(ctx.scm.root + "/" + gn_path))
+
+def _dirs_to_check(ctx, subrepo_prefix):
     """Returns the bazel2gn-managed directories to check, or None for all.
 
+    Paths are relative to the Fuchsia root.
+
     Under `shac check --all`, every file is affected, including bazel2gn's
-    inputs, so all directories are checked. That only takes a few seconds.
+    inputs, so at the Fuchsia root all directories are checked (indicated by a
+    return value of None). In a sub-repository (or when .bazel2gn.json
+    changes), affected BUILD.gn / BUILD.bazel files and directories covered by
+    an affected .bazel2gn.json are checked instead so checking stays scoped to
+    the repository.
     """
-    if ctx.scm.affected_files(glob = _BAZEL2GN_INPUTS_GLOB, include_deleted = True):
+    if not subrepo_prefix and ctx.scm.affected_files(glob = _BAZEL2GN_INPUTS_GLOB, include_deleted = True):
         return None
 
     # Include deleted files, e.g. a deleted BUILD.bazel next to a remaining
     # bazel2gn-managed BUILD.gn must fail the check.
     affected_build_files = ctx.scm.affected_files(glob = _BUILD_FILES_GLOB, include_deleted = True)
-    if not affected_build_files:
+    affected_config_files = ctx.scm.affected_files(glob = _BAZEL2GN_CONFIG_GLOB, include_deleted = True)
+    if not affected_build_files and not affected_config_files:
         return []
 
     gn_files = ctx.scm.all_files(glob = ["BUILD.gn"])
 
-    dirs = {}
+    dirs = set()
 
     for path in affected_build_files:
         # Check the BUILD.gn in the same directory, which also covers affected
@@ -104,15 +155,24 @@ def _dirs_to_check(ctx):
         if d in dirs:
             continue
         gn_path = "BUILD.gn" if d == "." else d + "/BUILD.gn"
-        if gn_path in gn_files and _BAZEL2GN_SENTINEL in str(ctx.io.read_file(ctx.scm.root + "/" + gn_path)):
-            dirs[d] = True
-    return sorted(dirs.keys())
+        if gn_path in gn_files and _has_sentinel(ctx, gn_path):
+            dirs.add(d)
+
+    if affected_config_files:
+        config_dirs = [_dirname(path) for path in affected_config_files]
+        for gn_path in gn_files:
+            d = _dirname(gn_path)
+            if d not in dirs and _is_under_any_dir(d, config_dirs) and _has_sentinel(ctx, gn_path):
+                dirs.add(d)
+
+    return sorted([_to_fuchsia_rel(subrepo_prefix, d) for d in dirs])
 
 def _verify_bazel2gn(ctx):
     """Verifies BUILD.gn files managed by bazel2gn are in sync with BUILD.bazel."""
     fuchsia_dir = get_fuchsia_dir(ctx)
+    subrepo_prefix = _subrepo_prefix(ctx)
 
-    dirs = _dirs_to_check(ctx)
+    dirs = _dirs_to_check(ctx, subrepo_prefix)
     if dirs == []:
         return
 
@@ -147,13 +207,14 @@ def _verify_bazel2gn(ctx):
             message = "bazel2gn failed: " + error_msg,
         )
         return
-    _emit_bazel2gn_findings(ctx, diagnostics)
+    _emit_bazel2gn_findings(ctx, diagnostics, subrepo_prefix)
 
 # LINT.IfChange(bazel2gn_json)
-def _emit_bazel2gn_findings(ctx, diagnostics):
+def _emit_bazel2gn_findings(ctx, diagnostics, subrepo_prefix = ""):
     """Emits findings for the diagnostics printed by `bazel2gn --json`."""
     out_of_sync_dirs = [diag["directory"] for diag in diagnostics if diag.get("out_of_sync")]
     fix_cmd = "fx bazel2gn " + " ".join(["-d " + d for d in out_of_sync_dirs])
+    repo_prefix = subrepo_prefix + "/" if subrepo_prefix else ""
     for diag in diagnostics:
         if diag.get("out_of_sync"):
             message = (
@@ -169,9 +230,12 @@ def _emit_bazel2gn_findings(ctx, diagnostics):
         filepath = diag.get("file", "")
         line = diag.get("line", 0)
 
-        # Paths are relative to the Fuchsia root, which may not be the root of
-        # this repository (e.g. for vendor/google), and shac rejects findings
-        # on files it doesn't know about.
+        # Paths from bazel2gn are relative to the Fuchsia root. When running in
+        # a sub-repository (e.g. vendor/google), strip its prefix so shac
+        # attaches findings to repo-relative files; fall back to embedding the
+        # path in the message for files outside this repository.
+        if repo_prefix and filepath.startswith(repo_prefix):
+            filepath = filepath[len(repo_prefix):]
         if filepath and not ctx.scm.all_files(glob = "/" + filepath):
             message = "%s:%s: %s" % (filepath, line, message) if line else "%s: %s" % (filepath, message)
             filepath, line = "", 0

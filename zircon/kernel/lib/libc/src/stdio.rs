@@ -40,41 +40,64 @@ impl FILE {
         Self { write, ptr }
     }
 
+    /// Writes `bytes` via the callback of `*this` without forming a Rust reference to `*this`.
+    ///
+    /// Returns the callback's result, or -1 if `*this` has no callback.
+    ///
+    /// # Safety
+    ///
+    /// `this` must be non-null, aligned, and point to an initialized `FILE` whose `write` and
+    /// `ptr` fields can be read without a data race, and whose `write` callback (if `Some`) is
+    /// sound to call with `(ptr, bytes.as_ptr().cast::<c_char>(), bytes.len())`.
+    pub unsafe fn write_raw(this: *const Self, bytes: &[u8]) -> c_int {
+        // SAFETY: The caller guarantees `this` is non-null, aligned, and points to an initialized
+        // `FILE` whose `write` field is valid to read.
+        let Some(write) = (unsafe { (*this).write }) else {
+            return -1;
+        };
+        // SAFETY: The caller guarantees `this` is non-null, aligned, and points to an initialized
+        // `FILE` whose `ptr` field is valid to read.
+        let ptr = unsafe { (*this).ptr };
+        // SAFETY:
+        // - `ptr` is the context uniquely paired with `write` by the C API.
+        // - `bytes` points to a valid sequence of `bytes.len()` bytes that remains valid and
+        //   immutable for the duration of the FFI call.
+        unsafe { write(ptr, bytes.as_ptr().cast::<c_char>(), bytes.len()) }
+    }
+
     /// Writes `bytes` via the callback, like the C++ `FILE::Write`. This is what `fprintf` calls
     /// to do output.
     ///
     /// Returns the callback's result, or -1 if this `FILE` has no callback.
     pub fn write(&self, bytes: &[u8]) -> c_int {
-        let Some(write) = self.write else {
-            return -1;
-        };
-        // SAFETY:
-        // - `self.ptr` is the context uniquely paired with `write` by the C API.
-        // - `bytes` points to a valid sequence of `bytes.len()` bytes that remains valid and
-        //   immutable for the duration of the FFI call.
-        unsafe { write(self.ptr, bytes.as_ptr().cast::<c_char>(), bytes.len()) }
+        // SAFETY: `self` is a valid, aligned, initialized `FILE` whose `write` and `ptr` fields
+        // satisfy `Self::new`'s safety contract.
+        unsafe { Self::write_raw(core::ptr::from_ref(self), bytes) }
     }
 }
 
 impl fmt::Write for FILE {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let Some(write) = self.write else {
-            return Err(fmt::Error);
-        };
-        if s.is_empty() {
-            return Ok(());
-        }
-        let c_chars = s.as_ptr().cast::<c_char>();
-        // SAFETY:
-        // - `self.ptr` is the context uniquely paired with `write` by the C API.
-        // - `s` is not empty, so `c_chars` points to a valid sequence of `s.len()` bytes.
-        // - The `s` memory region remains valid and immutable for the duration of the FFI call.
-        let ret = unsafe { write(self.ptr, c_chars, s.len()) };
-        if ret < 0 { Err(fmt::Error) } else { Ok(()) }
+        if self.write(s.as_bytes()) < 0 { Err(fmt::Error) } else { Ok(()) }
     }
 }
 
+/// Returns a pointer to the kernel's global `gStdout`, matching `<stdio.h>` `stdout`.
+///
+/// `gStdout` is statically initialized with a thread-safe write callback that is a safe no-op
+/// (dropping output) until `call_constructors()` has completed (`ConstructorsCalled() == true`),
+/// and is not mutated during normal kernel operation (note that `console_rust` unit tests
+/// temporarily overwrite `*stdout()` assuming quiescent output).
+#[inline]
+pub fn stdout() -> *mut FILE {
+    &raw mut gStdout
+}
+
 unsafe extern "C" {
+    /// The kernel's `<stdio.h>` `gStdout`.
+    #[allow(non_upper_case_globals)]
+    static mut gStdout: FILE;
+
     /// Writes formatted output to `f`, matching `<stdio.h>` `fprintf`.
     ///
     /// # Safety

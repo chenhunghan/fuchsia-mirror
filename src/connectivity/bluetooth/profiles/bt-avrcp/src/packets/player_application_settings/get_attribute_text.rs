@@ -4,9 +4,12 @@
 
 use packet_encoding::{Decodable, Encodable};
 
-use crate::packets::player_application_settings::PlayerApplicationSettingAttributeId;
+use crate::packets::player_application_settings::{
+    PlayerApplicationSettingAttributeId, TEXT_ENTRY_HEADER_LEN, decode_text_entries,
+    encode_text_entries,
+};
 use crate::packets::{
-    AvcCommandType, CharsetId, Error, PacketResult, PduId, VendorCommand, VendorDependentPdu,
+    AvcCommandType, Error, PacketResult, PduId, VendorCommand, VendorDependentPdu,
 };
 
 #[derive(Debug)]
@@ -90,33 +93,29 @@ impl Encodable for GetPlayerApplicationSettingAttributeTextCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttributeInfo {
     attribute_id: PlayerApplicationSettingAttributeId,
-    character_set_id: CharsetId,
-    attribute_string_length: u8,
-    attribute_string: Vec<u8>,
+    description: String,
 }
 
 impl AttributeInfo {
+    /// Placeholder description used when the charset ID is not UTF-8 compatible.
+    const UNKNOWN_ATTRIBUTE_PLACEHOLDER: &str = "Unknown Attribute";
+
     pub fn new(
         attribute_id: PlayerApplicationSettingAttributeId,
-        character_set_id: CharsetId,
-        attribute_string_length: u8,
-        attribute_string: Vec<u8>,
+        description: impl Into<String>,
     ) -> Self {
-        Self { attribute_id, character_set_id, attribute_string_length, attribute_string }
+        Self { attribute_id, description: description.into() }
     }
 
-    // The size of `AttributeInfo` in bytes.
-    // 1 byte for `attribute_id`, 2 bytes for `character_set_id`, 1 byte for
-    // `attribute_string_length`, `attribute_string_length` bytes for `attribute_string`.
+    /// Returns the encoded size of this entry in bytes.
     pub fn num_bytes(&self) -> usize {
-        4 + self.attribute_string_length as usize
+        TEXT_ENTRY_HEADER_LEN + self.description.len()
     }
 }
 
 #[derive(Debug)]
 /// AVRCP 1.6.1 section 6.5.5 GetPlayerApplicationSettingAttributeText
 pub struct GetPlayerApplicationSettingAttributeTextResponse {
-    num_attributes: u8,
     attribute_infos: Vec<AttributeInfo>,
 }
 
@@ -124,7 +123,7 @@ impl GetPlayerApplicationSettingAttributeTextResponse {
     pub fn new(
         attribute_infos: Vec<AttributeInfo>,
     ) -> GetPlayerApplicationSettingAttributeTextResponse {
-        Self { num_attributes: attribute_infos.len() as u8, attribute_infos }
+        Self { attribute_infos }
     }
 }
 
@@ -146,46 +145,17 @@ impl Decodable for GetPlayerApplicationSettingAttributeTextResponse {
     type Error = Error;
 
     fn decode(buf: &[u8]) -> PacketResult<Self> {
-        if buf.len() < 1 {
-            return Err(Error::InvalidMessage);
-        }
-
-        let num_attributes = buf[0];
-        // There must be at least 1 attribute ID provided.
-        // See AVRCP Sec 6.5.5
-        if num_attributes < 1 {
-            return Err(Error::InvalidMessage);
-        }
-        let mut attribute_infos: Vec<AttributeInfo> = Vec::new();
-
-        let mut buf_idx: usize = 1;
-
-        while buf_idx + 4 < buf.len() {
-            let attribute_id: PlayerApplicationSettingAttributeId =
-                PlayerApplicationSettingAttributeId::try_from(buf[buf_idx])?;
-            let charset_id: u16 = ((buf[buf_idx + 1] as u16) << 8) | (buf[buf_idx + 2] as u16);
-            let charset_id: CharsetId = CharsetId::try_from(charset_id)?;
-
-            let str_length: usize = buf[buf_idx + 3] as usize;
-            if (buf_idx + 4 + str_length) > buf.len() {
-                return Err(Error::InvalidMessageLength);
-            }
-            let mut attribute_string = vec![0; str_length];
-            attribute_string.copy_from_slice(&buf[buf_idx + 4..buf_idx + 4 + str_length]);
-
-            let attribute_info =
-                AttributeInfo::new(attribute_id, charset_id, str_length as u8, attribute_string);
-
-            attribute_infos.push(attribute_info);
-
-            buf_idx += 4 + str_length;
-        }
-
-        if attribute_infos.len() != num_attributes as usize {
-            return Err(Error::InvalidMessage);
-        }
-
-        Ok(Self { num_attributes, attribute_infos })
+        let attribute_infos = decode_text_entries(
+            buf,
+            AttributeInfo::UNKNOWN_ATTRIBUTE_PLACEHOLDER,
+            |raw_id, description| {
+                Ok(AttributeInfo::new(
+                    PlayerApplicationSettingAttributeId::try_from(raw_id)?,
+                    description,
+                ))
+            },
+        )?;
+        Ok(Self { attribute_infos })
     }
 }
 
@@ -193,41 +163,17 @@ impl Encodable for GetPlayerApplicationSettingAttributeTextResponse {
     type Error = Error;
 
     fn encoded_len(&self) -> usize {
-        let mut len: usize = 1;
-        for attr_info in &self.attribute_infos {
-            len += attr_info.num_bytes();
-        }
-        len
+        1 + self.attribute_infos.iter().map(AttributeInfo::num_bytes).sum::<usize>()
     }
+
     fn encode(&self, buf: &mut [u8]) -> PacketResult<()> {
-        if buf.len() < self.encoded_len() {
-            return Err(Error::InvalidMessageLength);
-        }
-
-        buf[0] = u8::from(self.num_attributes);
-
-        // There must be at least 1 attribute ID provided.
-        // See AVRCP Sec 6.5.5
-        if self.num_attributes < 1 {
-            return Err(Error::ParameterEncodingError);
-        }
-
-        if self.num_attributes as usize != self.attribute_infos.len() {
-            return Err(Error::ParameterEncodingError);
-        }
-        let mut idx = 1;
-        for info in self.attribute_infos.iter() {
-            buf[idx] = u8::from(&info.attribute_id);
-            let charset_id = u16::from(&info.character_set_id);
-            buf[idx + 1] = (charset_id >> 8) as u8;
-            buf[idx + 2] = charset_id as u8;
-            buf[idx + 3] = info.attribute_string_length;
-            for (i, str_byte) in info.attribute_string.iter().enumerate() {
-                buf[idx + 4 + i] = str_byte.clone();
-            }
-            idx += info.num_bytes();
-        }
-        Ok(())
+        encode_text_entries(
+            self.encoded_len(),
+            self.attribute_infos
+                .iter()
+                .map(|info| (u8::from(&info.attribute_id), info.description.as_str())),
+            buf,
+        )
     }
 }
 
@@ -235,6 +181,13 @@ impl Encodable for GetPlayerApplicationSettingAttributeTextResponse {
 mod tests {
     use super::*;
     use crate::packets::VendorDependentRawPdu;
+    use crate::packets::player_application_settings::encode_error;
+
+    fn decode_infos(buf: &[u8]) -> Vec<AttributeInfo> {
+        GetPlayerApplicationSettingAttributeTextResponse::decode(buf)
+            .expect("should decode")
+            .attribute_infos
+    }
 
     #[test]
     // Test GetPlayerApplicationSettingAttributeTextCommand encoding success.
@@ -294,19 +247,9 @@ mod tests {
     fn test_get_player_application_setting_attribute_text_response_encode() {
         let attr_infos = vec![
             // 10 bytes.
-            AttributeInfo::new(
-                PlayerApplicationSettingAttributeId::Equalizer,
-                CharsetId::Ascii,
-                6,
-                "Foobar".as_bytes().to_vec(),
-            ),
+            AttributeInfo::new(PlayerApplicationSettingAttributeId::Equalizer, "Foobar"),
             // 8 bytes.
-            AttributeInfo::new(
-                PlayerApplicationSettingAttributeId::ScanMode,
-                CharsetId::Utf8,
-                4,
-                "test".as_bytes().to_vec(),
-            ),
+            AttributeInfo::new(PlayerApplicationSettingAttributeId::ScanMode, "test"),
         ];
         let response = GetPlayerApplicationSettingAttributeTextResponse::new(attr_infos);
         assert_eq!(
@@ -319,45 +262,145 @@ mod tests {
         assert_eq!(
             buf,
             vec![
-                0x02, 0x01, 0x00, 0x03, 0x06, 0x46, 0x6F, 0x6F, 0x62, 0x61, 0x72, 0x04, 0x00, 0x6A,
+                0x02, 0x01, 0x00, 0x6A, 0x06, 0x46, 0x6F, 0x6F, 0x62, 0x61, 0x72, 0x04, 0x00, 0x6A,
                 0x04, 0x74, 0x65, 0x73, 0x74,
             ]
         );
     }
 
+    #[fuchsia::test]
+    // Test GetPlayerApplicationSettingAttributeTextResponse encoding failure cases.
+    fn test_get_player_application_setting_attribute_text_response_encode_errors() {
+        // Empty attributes list.
+        let empty = GetPlayerApplicationSettingAttributeTextResponse::new(vec![]);
+        assert_eq!(encode_error(&empty), Error::ParameterEncodingError);
+
+        // More than u8::MAX attributes.
+        let info = AttributeInfo::new(PlayerApplicationSettingAttributeId::Equalizer, "eq");
+        let too_many =
+            GetPlayerApplicationSettingAttributeTextResponse::new(vec![
+                info;
+                usize::from(u8::MAX) + 1
+            ]);
+        assert_eq!(encode_error(&too_many), Error::ParameterEncodingError);
+
+        // Description exceeding u8::MAX bytes.
+        let too_long =
+            GetPlayerApplicationSettingAttributeTextResponse::new(vec![AttributeInfo::new(
+                PlayerApplicationSettingAttributeId::Equalizer,
+                "a".repeat(usize::from(u8::MAX) + 1),
+            )]);
+        assert_eq!(encode_error(&too_long), Error::ParameterEncodingError);
+
+        // Buffer smaller than encoded length.
+        let valid =
+            GetPlayerApplicationSettingAttributeTextResponse::new(vec![AttributeInfo::new(
+                PlayerApplicationSettingAttributeId::Equalizer,
+                "eq",
+            )]);
+        let mut buf = vec![0; valid.encoded_len() - 1];
+        assert_eq!(valid.encode(&mut buf[..]), Err(Error::InvalidMessageLength));
+    }
+
     #[test]
-    // Test GetPlayerApplicationSettingAttributeTextResponse decoding success.
+    // Test GetPlayerApplicationSettingAttributeTextResponse decoding success for UTF-8, ASCII,
+    // lossy UTF-8, and round-trip encoding.
     fn test_get_player_application_setting_attribute_text_response_decode() {
-        let command = [0x01, 0x02, 0x00, 0x04, 0x02, 0x62, 0x78];
-        let result = GetPlayerApplicationSettingAttributeTextResponse::decode(&command);
-        assert!(result.is_ok());
-        let result = result.unwrap();
-        assert_eq!(result.num_attributes, 1);
-        let expected_info = AttributeInfo::new(
-            PlayerApplicationSettingAttributeId::RepeatStatusMode,
-            CharsetId::Iso8859_1,
-            2,
-            "bx".as_bytes().to_vec(),
+        // UTF-8 charset ID (0x006A).
+        let command = [0x01, 0x02, 0x00, 0x6A, 0x02, 0x62, 0x78];
+        assert_eq!(
+            decode_infos(&command),
+            vec![AttributeInfo::new(PlayerApplicationSettingAttributeId::RepeatStatusMode, "bx")]
         );
-        assert_eq!(result.attribute_infos, vec![expected_info]);
+
+        // ASCII charset ID (0x0003) and an empty UTF-8 description.
+        let command = [0x02, 0x01, 0x00, 0x03, 0x02, 0x62, 0x78, 0x03, 0x00, 0x6A, 0x00];
+        assert_eq!(
+            decode_infos(&command),
+            vec![
+                AttributeInfo::new(PlayerApplicationSettingAttributeId::Equalizer, "bx"),
+                AttributeInfo::new(PlayerApplicationSettingAttributeId::ShuffleMode, ""),
+            ]
+        );
+
+        // Invalid UTF-8 bytes labelled as UTF-8 are replaced lossily instead of failing decode.
+        let command = [0x01, 0x02, 0x00, 0x6A, 0x02, 0xFF, 0xFE];
+        assert_eq!(
+            decode_infos(&command),
+            vec![AttributeInfo::new(
+                PlayerApplicationSettingAttributeId::RepeatStatusMode,
+                "\u{FFFD}\u{FFFD}",
+            )]
+        );
+
+        // Encode then decode round trip.
+        let expected = vec![
+            AttributeInfo::new(PlayerApplicationSettingAttributeId::Equalizer, "Foobar"),
+            AttributeInfo::new(PlayerApplicationSettingAttributeId::ScanMode, "test"),
+        ];
+        let response = GetPlayerApplicationSettingAttributeTextResponse::new(expected.clone());
+        let mut encoded = vec![0; response.encoded_len()];
+        response.encode(&mut encoded).expect("should encode");
+        assert_eq!(decode_infos(&encoded), expected);
+    }
+
+    #[fuchsia::test]
+    // Test GetPlayerApplicationSettingAttributeTextResponse decoding gracefully handles
+    // non-UTF-8 and unknown CharsetIds by substituting a placeholder description.
+    fn test_get_player_application_setting_attribute_text_response_decode_non_utf8_charset() {
+        #[rustfmt::skip]
+        let command = [
+            0x03,
+            // Known non-UTF-8 charset (ISO-8859-1 = 0x0004).
+            0x02, 0x00, 0x04, 0x02, 0x62, 0x78,
+            // Unknown / out-of-range charset (0xFFFF) with non-UTF-8 bytes.
+            0x01, 0xFF, 0xFF, 0x02, 0xFF, 0xFE,
+            // Valid UTF-8 entry in the same response.
+            0x04, 0x00, 0x6A, 0x04, 0x74, 0x65, 0x73, 0x74,
+        ];
+        assert_eq!(
+            decode_infos(&command),
+            vec![
+                AttributeInfo::new(
+                    PlayerApplicationSettingAttributeId::RepeatStatusMode,
+                    AttributeInfo::UNKNOWN_ATTRIBUTE_PLACEHOLDER,
+                ),
+                AttributeInfo::new(
+                    PlayerApplicationSettingAttributeId::Equalizer,
+                    AttributeInfo::UNKNOWN_ATTRIBUTE_PLACEHOLDER,
+                ),
+                AttributeInfo::new(PlayerApplicationSettingAttributeId::ScanMode, "test"),
+            ]
+        );
     }
 
     #[test]
     // Test GetPlayerApplicationSettingAttributeTextResponse decoding failure due
-    // to invalid CharsetId.
-    fn test_get_player_application_setting_attribute_text_response_decode_error() {
-        let command = [0x01, 0x02, 0xFF, 0xFF, 0x02, 0x62, 0x78];
-        let result = GetPlayerApplicationSettingAttributeTextResponse::decode(&command);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    // Test GetPlayerApplicationSettingAttributeTextResponse decoding failure due
-    // to invalid `num_attributes`.
+    // to invalid `num_attributes` or trailing bytes.
     fn test_get_player_application_setting_attribute_text_response_decode_attrs_error() {
+        // Empty buffer and zero count.
+        assert_eq!(
+            GetPlayerApplicationSettingAttributeTextResponse::decode(&[]).unwrap_err(),
+            Error::InvalidMessage
+        );
+        assert_eq!(
+            GetPlayerApplicationSettingAttributeTextResponse::decode(&[0x00]).unwrap_err(),
+            Error::InvalidMessage
+        );
+
+        // Count exceeds present entries.
         let command = [0x02, 0x02, 0x00, 0x04, 0x02, 0x62, 0x78];
-        let result = GetPlayerApplicationSettingAttributeTextResponse::decode(&command);
-        assert!(result.is_err());
+        assert_eq!(
+            GetPlayerApplicationSettingAttributeTextResponse::decode(&command).unwrap_err(),
+            Error::InvalidMessageLength
+        );
+
+        // Trailing unconsumed byte.
+        let trailing = [0x01, 0x02, 0x00, 0x6A, 0x02, 0x62, 0x78, 0x00];
+        assert_eq!(
+            GetPlayerApplicationSettingAttributeTextResponse::decode(&trailing).unwrap_err(),
+            Error::InvalidMessage
+        );
     }
 
     #[test]
@@ -365,8 +408,10 @@ mod tests {
     // to invalid `attribute_id`.
     fn test_get_player_application_setting_attribute_text_response_decode_attr_id_error() {
         let command = [0x01, 0xFF, 0x00, 0x04, 0x02, 0x62, 0x78];
-        let result = GetPlayerApplicationSettingAttributeTextResponse::decode(&command);
-        assert!(result.is_err());
+        assert_eq!(
+            GetPlayerApplicationSettingAttributeTextResponse::decode(&command).unwrap_err(),
+            Error::InvalidParameter
+        );
     }
 
     #[test]
@@ -374,7 +419,9 @@ mod tests {
     // to buffer that is too small.
     fn test_get_player_application_setting_attribute_text_response_decode_buf_error() {
         let command = [0x01, 0x01, 0x00, 0x04, 0x05, 0x02, 0x04];
-        let result = GetPlayerApplicationSettingAttributeTextResponse::decode(&command);
-        assert!(result.is_err());
+        assert_eq!(
+            GetPlayerApplicationSettingAttributeTextResponse::decode(&command).unwrap_err(),
+            Error::InvalidMessageLength
+        );
     }
 }

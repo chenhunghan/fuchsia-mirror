@@ -9,8 +9,12 @@
 #include <lib/syslog/cpp/macros.h>
 
 #include <cstdlib>
+#include <memory>
+#include <optional>
+#include <utility>
 
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/ot_rcp_fuchsia_config.h"
+#include "src/connectivity/openthread/tests/ot-rcp-fuchsia/rcp/rfsim_client.h"
 #include "src/connectivity/openthread/tests/ot-rcp-fuchsia/rcp/spinel_device_server.h"
 
 int main() {
@@ -21,20 +25,20 @@ int main() {
   // Values of the config capabilities the manifest uses (`node_id`).
   auto config = ot_rcp_fuchsia_config::Config::TakeFromStartupHandle();
 
-  ot_rcp::SpinelDeviceServer server(dispatcher, config.node_id());
-
+  // The RCP is served only once its node is attached, and owns the attached medium connection.
+  std::optional<ot_rcp::SpinelDeviceServer> server;
   component::OutgoingDirectory outgoing(dispatcher);
-  zx::result result = outgoing.AddService<fuchsia_lowpan_spinel::Service>(
-      server.GetInstanceHandler(), component::OutgoingDirectory::kDefaultServiceInstance);
-  if (result.is_error()) {
-    FX_LOGS(ERROR) << "Failed to add fuchsia.lowpan.spinel.Service: " << result.status_string();
-    return EXIT_FAILURE;
-  }
-  result = outgoing.ServeFromStartupInfo();
-  if (result.is_error()) {
-    FX_LOGS(ERROR) << "Failed to serve outgoing directory: " << result.status_string();
-    return EXIT_FAILURE;
-  }
+  ot_rcp::RfsimClient::Attach(
+      dispatcher, config.node_id(), [&](std::unique_ptr<ot_rcp::RfsimClient> rfsim) {
+        server.emplace(dispatcher, config.node_id(), std::move(rfsim));
+        zx::result result = outgoing.AddService<fuchsia_lowpan_spinel::Service>(
+            server->GetInstanceHandler(), component::OutgoingDirectory::kDefaultServiceInstance);
+        FX_CHECK(result.is_ok()) << "Failed to add fuchsia.lowpan.spinel.Service: "
+                                 << result.status_string();
+        result = outgoing.ServeFromStartupInfo();
+        FX_CHECK(result.is_ok()) << "Failed to serve outgoing directory: "
+                                 << result.status_string();
+      });
 
   loop.Run();
   return EXIT_SUCCESS;

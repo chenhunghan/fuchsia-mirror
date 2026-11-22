@@ -174,6 +174,11 @@ _log_severity_allowed_val = [
 #   isolated (optional)
 #     [bool] Whether the test needs to be run in isolation to other tests.
 #
+#   produces_perf_results (optional)
+#     [bool] Whether the test produces performance results (*.fuchsiaperf.json
+#     files) that are consumed by the Fuchsia performance infrastructure. This
+#     includes correctness tests that also publish performance results.
+#
 #   is_boot_test (optional)
 #     [bool] Whether the test is a boot test. This implies isolated=true and requires a
 #     `product_bundle` to be provided.
@@ -404,6 +409,7 @@ template("test_spec") {
                                "package_resolution_timeout_secs",
                                "component_label",
                                "package_manifests",
+                               "produces_perf_results",
                                "timeout_secs",
                                "build_rule",
                                "has_generated_manifest",

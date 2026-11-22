@@ -1,0 +1,90 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":ffx_tool_uart_lib_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "lib",
+    srcs = [
+        "src/args.rs",
+        "src/doctor.rs",
+        "src/driver.rs",
+        "src/lib.rs",
+        "src/metadata.rs",
+        "src/stream.rs",
+        "src/subtools/connect.rs",
+        "src/subtools/disconnect.rs",
+        "src/subtools/doctor.rs",
+        "src/subtools/list.rs",
+        "src/subtools/mod.rs",
+        "src/subtools/probe.rs",
+        "src/subtools/status.rs",
+        "src/sys.rs",
+        "src/tests.rs",
+    ],
+    crate_name = "ffx_tool_uart",
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx/tools/uart_driver:__subpackages__"],
+    deps = [
+        "//src/developer/ffx/config:lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/safe_string:lib",
+        "//src/developer/ffx/lib/target:lib",
+        "//src/developer/ffx/lib/uart_driver_api:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/developer/lib/uart_fpl",
+        "//src/lib/fuchsia-async",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:nix",
+        "//third_party/rust_crates/vendor:rand",
+        "//third_party/rust_crates/vendor:schemars",
+        "//third_party/rust_crates/vendor:serde",
+        "//third_party/rust_crates/vendor:serde_json",
+        "//third_party/rust_crates/vendor:sha2",
+        "//third_party/rust_crates/vendor:tempfile",
+        "//third_party/rust_crates/vendor:thiserror",
+        "//third_party/rust_crates/vendor:tokio",
+    ],
+)
+
+# LINT.IfChange
+ffx_tool(
+    name = "ffx_uart",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-uart",
+    data = ["//src/developer/ffx/tools/uart_driver:ffx_uart_driver_test_data"],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//src/developer/ffx/tests/uart:__pkg__"],
+    deps = [
+        ":lib",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+# LINT.ThenChange(BUILD.gn)
+
+host_rustc_test(
+    name = "ffx_tool_uart_lib_test",
+    compile_data = ["test_data/mock_driver.py"],
+    crate = ":lib",
+    deps = [
+        "//src/lib/fuchsia",
+        "//third_party/rust_crates/vendor:hex",
+    ],
+)

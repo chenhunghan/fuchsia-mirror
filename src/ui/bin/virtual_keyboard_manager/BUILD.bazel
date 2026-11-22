@@ -1,0 +1,121 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+
+package(default_applicable_licenses = ["//:license"])
+
+fx_cc_library(
+    name = "focus_dispatcher",
+    srcs = ["focus_dispatcher.cc"],
+    hdrs = [
+        "focus_dispatcher.h",
+        "focus_listener.h",
+    ],
+    deps = [
+        "//sdk/fidl/fuchsia.ui.focus:fuchsia.ui.focus_hlcpp",
+        "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "virtual_keyboard",
+    srcs = [
+        "virtual_keyboard_controller.cc",
+        "virtual_keyboard_coordinator.cc",
+        "virtual_keyboard_manager.cc",
+    ],
+    hdrs = [
+        "virtual_keyboard_controller.h",
+        "virtual_keyboard_coordinator.h",
+        "virtual_keyboard_manager.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+    ],
+    visibility = ["//src/ui/bin/virtual_keyboard_manager/tests:__pkg__"],
+    # Public headers include focus_listener.h, virtualkeyboard FIDL, sys/cpp, and fxl.
+    deps = [
+        ":focus_dispatcher",
+        "//sdk/fidl/fuchsia.input.virtualkeyboard:fuchsia.input.virtualkeyboard_hlcpp",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/fxl",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["app.cc"],
+    hdrs = ["app.h"],
+    visibility = ["//src/ui/bin/virtual_keyboard_manager/tests:__pkg__"],
+    deps = [
+        ":focus_dispatcher",
+        # app.h includes virtual_keyboard_coordinator.h and virtual_keyboard_manager.h.
+        ":virtual_keyboard",
+        "//sdk/fidl/fuchsia.input.virtualkeyboard:fuchsia.input.virtualkeyboard_hlcpp",
+        "//sdk/fidl/fuchsia.ui.keyboard.focus:fuchsia.ui.keyboard.focus_hlcpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/sys/cpp",
+        "//sdk/lib/syslog/cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "virtual_keyboard_manager",
+    deps = [
+        ":lib",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//src/lib/fxl:fxl_cli",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "virtual_keyboard_manager",
+)
+
+fx_component_manifest(
+    name = "virtual_keyboard_component_manifest",
+    component_name = "virtual_keyboard_manager",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/virtual_keyboard_manager.cml",
+)
+
+fx_component(
+    name = "virtual_keyboard_component",
+    compiled_manifest = ":virtual_keyboard_component_manifest",
+    visibility = ["//src/ui/testing/ui_test_realm:__pkg__"],
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "virtual_keyboard_manager",
+    components = [":virtual_keyboard_component"],
+    package_repository_name = "fuchsia.com",
+    visibility = ["//bundles/assembly:__subpackages__"],
+)

@@ -150,7 +150,7 @@ pub trait UploadProgressListener {
 }
 
 async fn read_from_interface<T: AsyncRead + Unpin>(interface: &mut T) -> Result<Reply, ReadError> {
-    let mut buf = vec![0u8; MAX_PACKET_SIZE];
+    let mut buf = [0u8; MAX_PACKET_SIZE];
     let size = interface.read(&mut buf).await?;
     let trimmed = &buf[..size];
     let reply = Reply::try_from(trimmed).map_err(|e| {
@@ -362,6 +362,21 @@ pub async fn send_with_timeout<T: AsyncRead + AsyncWrite + Unpin>(
 
 const PIPELINE_BUFFER_CHUNKS: usize = 2;
 
+/// Fills `buf` unless `reader` reaches EOF, coalescing short reads (such as 12-byte sparse headers
+/// from `SparseSliceReader`) so transport framing does not emit one tiny packet per short read.
+fn read_chunk<R: Read + ?Sized>(reader: &mut R, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        match reader.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(filled)
+}
+
 pub async fn upload<T: AsyncRead + AsyncWrite + Unpin, R: Read + Send + 'static>(
     ctx: FastbootContext,
     size: u32,
@@ -415,8 +430,14 @@ pub async fn upload_with_read_timeout<
         while remaining > 0 {
             let to_read = std::cmp::min(remaining, BUFFER_SIZE);
             let mut chunk = vec![0; to_read];
-            match buf.read(&mut chunk) {
-                Ok(0) => break,
+            match read_chunk(&mut buf, &mut chunk) {
+                Ok(0) => {
+                    let _ = tx.blocking_send(Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("reader ended early with {remaining} of {size} bytes remaining"),
+                    )));
+                    break;
+                }
                 Ok(n) => {
                     chunk.truncate(n);
                     remaining -= n;
@@ -520,13 +541,20 @@ pub async fn upload_from_reader<T: AsyncRead + AsyncWrite + Unpin, R: Read + ?Si
     let mut remaining = size as usize;
     let chunk_size = std::cmp::min(size as usize, BUFFER_SIZE);
     let mut bytes = vec![0; chunk_size];
-    loop {
+    while remaining > 0 {
         let to_read = std::cmp::min(remaining, BUFFER_SIZE);
-        if to_read == 0 {
-            break;
-        }
-        match buf.read(&mut bytes[..to_read]) {
-            Ok(0) => break,
+        match read_chunk(buf, &mut bytes[..to_read]) {
+            Ok(0) => {
+                let err = UploadError::CouldNotReadBytesToUpload {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("reader ended early with {remaining} of {size} bytes remaining"),
+                    ),
+                };
+                log::error!("{}", err);
+                listener.on_error(&err).await?;
+                return Err(FastbootError::Upload(err));
+            }
             Ok(n) => {
                 remaining -= n;
                 match write_with_timeout(interface, &bytes[..n], write_timeout).await {
@@ -580,7 +608,7 @@ pub async fn download<T: AsyncRead + AsyncWrite + Unpin>(
     match reply {
         Reply::Data(s) => {
             let size = usize::try_from(s)?;
-            let mut buffer: [u8; 100] = [0; 100];
+            let mut buffer = vec![0u8; std::cmp::min(size, BUFFER_SIZE).max(MAX_PACKET_SIZE)];
             let mut bytes_read: usize = 0;
             let mut file = async_fs::OpenOptions::new()
                 .write(true)
@@ -589,14 +617,24 @@ pub async fn download<T: AsyncRead + AsyncWrite + Unpin>(
                 .open(path)
                 .await?;
             while bytes_read < size {
-                match interface.read(&mut buffer[..]).await {
+                let max_read = std::cmp::min(buffer.len(), size - bytes_read);
+                match interface.read(&mut buffer[..max_read]).await {
                     Err(e) => {
                         return Err(FastbootError::Download(
                             DownloadError::CouldNotReadToInterface(e),
                         ));
                     }
+                    Ok(0) => {
+                        return Err(FastbootError::Download(
+                            DownloadError::CouldNotReadToInterface(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                format!(
+                                    "fastboot upload stream ended after {bytes_read} of {size} bytes"
+                                ),
+                            )),
+                        ));
+                    }
                     Ok(len) => {
-                        let len = if (bytes_read + len) > size { size - bytes_read } else { len };
                         bytes_read += len;
                         log::debug!("fastboot: upload got {bytes_read}/{size} bytes. Len {len}");
                         file.write_all(&buffer[..len]).await?;
@@ -1124,5 +1162,215 @@ mod test {
                 panic!("Expected UploadError::CouldNotWriteToInterface(TimedOut), got {other:?}")
             }
         }
+    }
+
+    struct ShortChunkReader<'a> {
+        data: &'a [u8],
+        max_step: usize,
+    }
+
+    impl Read for ShortChunkReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = std::cmp::min(self.data.len(), std::cmp::min(buf.len(), self.max_step));
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    struct RecordingWriteTransport {
+        replies: VecDeque<Vec<u8>>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl RecordingWriteTransport {
+        fn new(replies: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self { replies: replies.into_iter().collect(), writes: Vec::new() }
+        }
+    }
+
+    impl AsyncRead for RecordingWriteTransport {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if let Some(data) = self.replies.pop_front() {
+                buf[..data.len()].copy_from_slice(&data);
+                Poll::Ready(Ok(data.len()))
+            } else {
+                Poll::Ready(Ok(0))
+            }
+        }
+    }
+
+    impl AsyncWrite for RecordingWriteTransport {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.writes.push(buf.to_vec());
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_upload_from_reader_coalesces_short_reads() {
+        let data: Vec<u8> = (0..1024u32).map(|i| (i & 0xff) as u8).collect();
+        let mut reader = ShortChunkReader { data: &data, max_step: 12 };
+        let mut transport =
+            RecordingWriteTransport::new([b"DATA00000400".to_vec(), b"OKAY".to_vec()]);
+        let events = Arc::new(Mutex::new(Vec::<UploadEvent>::new()));
+        let listener = PushEventsUploadProgressListener { event_queue: events.clone() };
+        let ctx = FastbootContext::new();
+
+        let reply = upload_from_reader(
+            ctx,
+            1024,
+            &mut reader,
+            &mut transport,
+            &listener,
+            Duration::seconds(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, Reply::Okay("".to_string()));
+        // Write 0 is `download:00000400`; write 1 is the coalesced 1024-byte payload.
+        assert_eq!(transport.writes.len(), 2);
+        assert_eq!(transport.writes[1], data);
+    }
+
+    #[fuchsia::test]
+    async fn test_upload_fails_immediately_on_truncated_reader() {
+        let short_data = [0xabu8; 512];
+        // `MockWriteStallTransport` with `writes_allowed = usize::MAX` pends forever on read after
+        // `DATA00000400`, proving truncated readers fail immediately without waiting on ACK timeout.
+        let mut transport = MockWriteStallTransport::new([b"DATA00000400".to_vec()], usize::MAX);
+        let events = Arc::new(Mutex::new(Vec::<UploadEvent>::new()));
+        let listener = PushEventsUploadProgressListener { event_queue: events.clone() };
+        let ctx = FastbootContext::new();
+
+        let res = upload_with_read_timeout(
+            ctx.clone(),
+            1024,
+            Cursor::new(short_data),
+            &mut transport,
+            &listener,
+            Duration::seconds(30),
+        )
+        .on_timeout(std::time::Instant::now() + std::time::Duration::from_millis(500), || {
+            panic!("upload_with_read_timeout hung on truncated reader")
+        })
+        .await;
+        assert!(matches!(
+            res,
+            Err(FastbootError::Upload(UploadError::CouldNotReadBytesToUpload { ref source }))
+                if source.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+
+        let mut transport2 = MockWriteStallTransport::new([b"DATA00000400".to_vec()], usize::MAX);
+        let mut reader = &short_data[..];
+        let res2 = upload_from_reader(
+            ctx,
+            1024,
+            &mut reader,
+            &mut transport2,
+            &listener,
+            Duration::seconds(30),
+        )
+        .on_timeout(std::time::Instant::now() + std::time::Duration::from_millis(500), || {
+            panic!("upload_from_reader hung on truncated reader")
+        })
+        .await;
+        assert!(matches!(
+            res2,
+            Err(FastbootError::Upload(UploadError::CouldNotReadBytesToUpload { ref source }))
+                if source.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[fuchsia::test]
+    async fn test_download_fails_on_unexpected_eof() {
+        let nonce =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let out_path = std::env::temp_dir()
+            .join(format!("fastboot_test_eof_{}_{nonce}.bin", std::process::id()));
+        let out_str = out_path.to_string_lossy().into_owned();
+        // Peer advertises 1024 bytes (`DATA00000400`) and then closes stream (`Ok(0)`).
+        let mut transport = MockRawTransport::new([Ok(b"DATA00000400".to_vec())]);
+        let res = download(FastbootContext::new(), &out_str, &mut transport).await;
+        let _ = std::fs::remove_file(&out_path);
+        assert!(matches!(
+            res,
+            Err(FastbootError::Download(DownloadError::CouldNotReadToInterface(ref e)))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    struct StreamByteTransport {
+        packets: VecDeque<Vec<u8>>,
+        stream_tail: Cursor<Vec<u8>>,
+    }
+
+    impl AsyncRead for StreamByteTransport {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if let Some(pkt) = self.packets.pop_front() {
+                let n = std::cmp::min(buf.len(), pkt.len());
+                buf[..n].copy_from_slice(&pkt[..n]);
+                return Poll::Ready(Ok(n));
+            }
+            Poll::Ready(std::io::Read::read(&mut self.stream_tail, buf))
+        }
+    }
+
+    impl AsyncWrite for StreamByteTransport {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[fuchsia::test]
+    async fn test_download_does_not_overread_coalesced_okay() {
+        let nonce =
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let out_path = std::env::temp_dir()
+            .join(format!("fastboot_test_coalesced_{}_{nonce}.bin", std::process::id()));
+        let out_str = out_path.to_string_lossy().into_owned();
+
+        let payload: Vec<u8> = (0..64u8).collect();
+        let mut coalesced = payload.clone();
+        coalesced.extend_from_slice(b"OKAYdone");
+        let mut transport = StreamByteTransport {
+            packets: VecDeque::from([b"DATA00000040".to_vec()]),
+            stream_tail: Cursor::new(coalesced),
+        };
+
+        let reply = download(FastbootContext::new(), &out_str, &mut transport).await.unwrap();
+        let written = std::fs::read(&out_path).unwrap();
+        let _ = std::fs::remove_file(&out_path);
+
+        assert_eq!(reply, Reply::Okay("done".to_string()));
+        assert_eq!(written, payload);
     }
 }

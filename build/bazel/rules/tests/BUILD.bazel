@@ -80,17 +80,22 @@ filegroup(
     name = "quick_build_only_tests",
     testonly = True,
     srcs = [
+        # TODO(https://fxbug.dev/580033745): Run these with `fx bazel test` instead.
+        ":analysis_tests",
         ":quick_build_only_tests_in_host_configuration",
-        "//build/bazel/bazel_idk/tests:analysis_tests",
         "//build/bazel/bazel_idk/tests:api_level_and_cpu_combinations_build_only_tests",
         "//build/bazel/bazel_idk/tests:build_only_tests",
+        "//build/bazel/rules/bind/tests:build_only_tests",
+        "//build/bazel/rules/devicetree/tests:build_only_tests",
         "//build/bazel/rules/fidl/tests:api_level_and_cpu_combinations_build_only_tests",
         "//build/bazel/rules/fidl/tests:build_only_tests",
+        # Tests `fostr_fidl()`.
+        "//src/lib/fostr/build/tests:build_only_tests",
         # Not yet built elsewhere.
         "//sdk/lib/zxio",
         # Tests `fx_cc_library_headers()`.
         "//zircon/system/ulib/zircon-internal",
-        # Tests the macros in zx_library.bzl.
+        # Tests the macros in fx_cc_*_library_zx.bzl.
         "//build/bazel/rules/cc/tests:build_only_tests",
         # Tests `fx_package()`.
         "//src/security/bin/root_ssl_certificates",
@@ -109,13 +114,21 @@ filegroup(
         # Tests `fx_package()`, `fx_test_component()`, `fx_test()`,
         # `fx_unittest_component()`, and `fx_unittest_package()`.
         "//build/bazel/rules/packages/tests:quick_build_only_tests",
+        # Tests `ctf_fx_package()`.
+        "//sdk/ctf/build/tests:quick_build_only_tests",
         # Tests `fx_expectations()`, `fx_generated_expectations()`,
         # `preprocess_expectations()`, `fx_component_manifest_with_expectations()`,
         # and `fx_test_component_with_expectations()`.
         "//src/lib/testing/expectation/rules/tests:quick_build_only_tests",
+        # Tests `fx_sharded_test_package()`, `testshard_config()`, and
+        # `testshard_offer_shard()`.
+        "//src/lib/testing/sharding/rules/tests:quick_build_only_tests",
         # Build tests for libraries that support next-generation FIDL bindings for Rust.
         "//src/lib/fidl/rust_next:tests",
         "//tools/fidl/fidlgen_rust_next/benchmark:bin",
+        # Build-time DWARF, .rodata, and source path remapping verification.
+        "//build/bazel/debug_symbols/tests:verify_fuchsia_debug_binaries",
+        "//build/bazel/debug_symbols/tests:verify_host_and_oot_debug_binaries_from_fuchsia",
     ],
     # This target is only intended to be built in Fuchsia configurations.
     # Individual test groups can use a transition to build targets in host
@@ -134,8 +147,13 @@ filegroup(
         # Aspect and component rule tests
         "//build/bazel/aspects/tests",
         "//build/bazel/aspects/tests:build_only_tests",
+        "//build/bazel/rules/build_flags/tests/cc/analysis_tests",
         "//build/bazel/rules/components/tests",
+        "//build/bazel/rules/devicetree/tests:analysis_tests",
+        "//build/bazel/rules/python/tests:analysis_tests",
         "//build/bazel/rules/rust/tests",
+        "//build/bazel/rules/rust/tests/rules_rust_flags:analysis_tests",
+        "//build/bazel/rules/rust/tests/rules_rust_flags:build_only_tests",
     ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
 )
@@ -172,6 +190,22 @@ filegroup(
         # Build tests for libraries that support next-generation FIDL bindings for Rust.
         "//src/lib/fidl/rust_next:tests",
         "//tools/fidl/fidlgen_rust_next/benchmark:bin",
+
+        # FIDL golden file verification and host binding compile checks.
+        "//tools/fidl/fidldoc:fidldoc_golden_tests",
+        "//tools/fidl/fidlgen_cpp:fidlgen_cpp_golden_tests",
+        "//tools/fidl/fidlgen_cpp:goldens",
+        "//tools/fidl/fidlgen_hlcpp:fidlgen_hlcpp_golden_tests",
+        "//tools/fidl/fidlgen_hlcpp:goldens",
+        "//tools/fidl/fidlgen_rust:fidlgen_rust_golden_tests",
+        "//tools/fidl/fidlgen_rust:goldens",
+        "//tools/fidl/fidlgen_rust_next:fidlgen_rust_next_golden_tests",
+        "//tools/fidl/fidlgen_rust_next:goldens",
+        "//tools/fidl/fidlgen_rust_next/convert:fidlgen_rust_next_convert_golden_tests",
+        "//tools/fidl/fidlgen_rust_next/convert:goldens",
+        "//tools/fidl/fidlgen_syzkaller:fidlgen_syzkaller_golden_tests",
+        "//tools/fidl/gidl:gidl_golden_tests",
+        "//tools/fidl/lib/fidlgen/testing:roundtrip_tests",
     ],
     target_compatible_with = HOST_OS_CONSTRAINTS,
 )
@@ -211,6 +245,16 @@ filegroup(
 
         # FIDL microbenchmark packages.
         "//src/tests/benchmarks/fidl:build_only_tests",
+
+        # FIDL dangerous identifiers build-only tests.
+        "//src/tests/fidl/dangerous_identifiers:tests",
+
+        # FIDL golden library binding compile checks for Fuchsia.
+        "//tools/fidl/fidlgen_cpp:goldens",
+        "//tools/fidl/fidlgen_hlcpp:goldens",
+        "//tools/fidl/fidlgen_rust:goldens",
+        "//tools/fidl/fidlgen_rust_next:goldens",
+        "//tools/fidl/fidlgen_rust_next/convert:goldens",
     ],
     # This target is only intended to be built in Fuchsia configurations.
     # Individual test groups can use a transition to build targets in host
@@ -232,8 +276,29 @@ test_suite(
     target_compatible_with = HOST_OS_CONSTRAINTS,
     tests = [
         "//build/bazel/aspects/tests:host_tests",
+        "//build/bazel/rules/bind/tests:host_tests",
         "//build/bazel/rules/build_flags/tests:host_tests",
+        "//build/bazel/rules/devicetree/tests:host_tests",
         "//build/bazel/rules/host_tests/tests:host_tests",
+        "//build/bazel/rules/python/tests:host_tests",
+        "//build/bazel/rules/rust/tests/rules_rust_flags:host_tests",
+        "//src/lib/fostr/build/tests:host_tests",
     ],
     visibility = ["//build/tools:__pkg__"],
+)
+
+# A `test_suite()` containing all analysis tests for rules and macros to be run
+# in the Fuchsia configuration.
+#
+# Although this will output errors when built with `bazel build`, it will not
+# fail the build. It must be run with `bazel test` in order for test failures to
+# cause Bazel to fail.
+# TODO(https://fxbug.dev/580033745): Run this target with `fx bazel test`.
+test_suite(
+    name = "analysis_tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [
+        "//build/bazel/bazel_idk/tests:analysis_tests",
+        "//build/bazel/rules/bind/tests:analysis_tests",
+    ],
 )

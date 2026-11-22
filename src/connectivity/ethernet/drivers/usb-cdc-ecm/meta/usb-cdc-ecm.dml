@@ -18,12 +18,24 @@
             },
         ],
         bind: {
-            protocol: "fuchsia.usb.BIND_PROTOCOL.INTERFACE",
-            usb: {
-                class: "fuchsia.usb.BIND_USB_CLASS.COMM",
-                subclass: "fuchsia.usb.comm.BIND_USB_SUBCLASS.ETHERNET",
-                protocol: 0,
-            },
+            one_of: [
+                {
+                    protocol: "fuchsia.usb.BIND_PROTOCOL.INTERFACE",
+                    usb: {
+                        class: "fuchsia.usb.BIND_USB_CLASS.COMM",
+                        subclass: "fuchsia.usb.comm.BIND_USB_SUBCLASS.ETHERNET",
+                        protocol: 0,
+                    },
+                },
+                {
+                    protocol: "fuchsia.usb.BIND_PROTOCOL.INTERFACE_ASSOCIATION",
+                    usb: {
+                        class: "fuchsia.usb.BIND_USB_CLASS.COMM",
+                        subclass: "fuchsia.usb.comm.BIND_USB_SUBCLASS.ETHERNET",
+                        protocol: 0,
+                    },
+                },
+            ],
         },
     },
 }

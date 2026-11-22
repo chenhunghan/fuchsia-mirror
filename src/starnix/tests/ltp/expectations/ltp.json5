@@ -187,7 +187,6 @@
                 "madvise09",
                 "memcg_control",
                 "memcg_regression",
-                "memcg_test_3",
                 "memcontrol02",
                 "swapon01",
                 "mincore01",
@@ -195,7 +194,6 @@
                 "mincore03",
                 "mincore04",
                 "mlock201",
-                "mlock203",
                 "mlockall01",
                 "mlockall02",
                 "mlockall03",
@@ -243,7 +241,6 @@
                 "setpriority01", // https://fxbug.dev/287121196
                 "setrlimit03",
                 "settimeofday01",
-                "settimeofday02",
                 "setxattr03",
                 "splice07",
                 "sockioctl01",
@@ -266,12 +263,9 @@
                 "umount2_01",
                 "umount2_02",
 
-                // TODO(https://fxbug.dev/42080241): unshare(CLONE_FILES) needs to return EMFILE
+                // TODO(https://fxbug.dev/322893372): unshare(CLONE_FILES) needs to return EMFILE
                 // if number of file descriptors is higher than /proc/sys/fs/nr_open
                 "unshare03",
-
-                // TODO(https://fxbug.dev/42080241): CLONE_NEWNS needs to also do the CLONE_FS
-                "unshare04",
 
                 // TODO(https://fxbug.dev/322873462): Requires /proc/sys/kernel/hostname
                 "newuname01",
@@ -302,6 +296,9 @@
                 "clone11",
                 "clone304",
                 "file_attr05",
+
+                // TODO(https://fxbug.dev/403612570): This test requires CLONE_INTO_CGROUP.
+                "clone303",
 
                 // TODO(https://fxbug.dev/287114514): Pass all userfaultfd* tests
                 "userfaultfd01",
@@ -341,6 +338,32 @@
                 "request_key04",
                 "request_key05",
                 "request_key06",
+
+                // TODO(https://fxbug.dev/588314397): Missing /proc/sys/fs/protected_regular.
+                "open16",
+
+                // TODO(https://fxbug.dev/588315892): New LTP tests failing due to unsupported
+                // kernel configs or missing sysfs/procfs/device entries.
+                "swapon04",
+                "sys_bdi01",
+                "sys_block_size01",
+                "sys_clockevents01",
+                "sys_clocksource01",
+                "sys_cpu_smt01",
+                "sys_cpu_topology02",
+                "sys_kernel01",
+                "sys_mm_swap01",
+                "sys_net01",
+                "sys_net02",
+                "sys_net03",
+                "sys_net04",
+                "sys_rtc01",
+                "sys_thp01",
+                "sys_wakeup01",
+
+                // TODO(https://fxbug.dev/588318985): Starnix merges adjacent anonymous private
+                // VMAs across fork().
+                "vma01",
             ],
         },
         {
@@ -348,10 +371,6 @@
             matchers: [
                 // Flaky tests.
                 "ptrace06",
-
-                // TODO(https://fxbug.dev/536096605): Test sendmsg on TCP socket with SCM_RIGHTS.
-                // Linux silently ignores it, but Starnix returns EINVAL.
-                "recvmsg01",
 
                 // TODO(https://fxbug.dev/534918239): This test intentionally exhausts disk space to
                 // verify fallocate behavior under that condition. Intentionally exhausting space in
@@ -373,7 +392,6 @@
                 "cve-2017-10661",
                 "hackbench02",
                 "mtest06",
-                "nanosleep01",
 
                 // TODO(https://fxbug.dev/547878640): Attempts to fill up the filesystem lead to OOM
                 // when run on tmpfs.
@@ -386,23 +404,14 @@
                 // TODO(https://fxbug.dev/544688052): Resolve the flake and re-enable.
                 "starvation",
 
-                // TODO(https://fxbug.dev/328694820) Re-enable once flake is resolved.
-                "ptrace01",
-
                 // TODO(https://fxbug.dev/353535860) deflake and enable
                 "pidfd_open03",
 
                 // TODO(https://fxbug.dev/559170416) deflake and re-enable
                 "pidfd_send_signal01",
 
-                // TODO(https://fxbug.dev/403612570): This test requires CLONE_INTO_CGROUP.
-                "clone303",
-
                 // TODO(https://fxbug.dev/390870202): Re-enable once flake is resolved.
                 "clock_nanosleep02",
-
-                // TODO(https://fxbug.dev/395053835): Re-enable once flake is resolved.
-                "setrlimit01",
 
                 // TODO(https://fxbug.dev/442531248): Seems premised on getting the scheduling of
                 // a process that may be alive or may be a zombie; since we don't (yet?) support

@@ -237,9 +237,22 @@ mod tests {
     #[test_case("https://[fe80::1%25eth0]:8080/update/", "blobs", "https://[fe80::1%25eth0]:8080/update/blobs"; "base_ends_in_slash")]
     #[test_case("https://[fe80::1%25eth0]:8080/update/", "./blobs", "https://[fe80::1%25eth0]:8080/update/blobs"; "base_ends_in_slash_relative_starts_with_dot_slash")]
     #[test_case("https://[fe80::1%25eth0]:8080/update/", "../blobs", "https://[fe80::1%25eth0]:8080/blobs"; "base_ends_in_slash_relative_parent")]
+    #[test_case("https://[fe80::1%25eth0]:8080/update/manifest", "blobs/", "https://[fe80::1%25eth0]:8080/update/blobs/"; "relative_ends_in_slash")]
+    #[test_case("*", "blobs", "/blobs"; "base_path_without_slash")]
     fn test_join(base: &str, relative: &str, expected: &str) {
         let base = base.parse::<Uri>().unwrap();
         let joined = base.join(relative).unwrap();
         assert_eq!(joined.to_string(), expected);
+    }
+
+    #[test]
+    fn normalize_path_keeps_relative_path_relative() {
+        assert_eq!(normalize_path("a/./b/../c"), "a/c");
+    }
+
+    #[test]
+    fn join_authority_form_base_is_error() {
+        let base = "example.com:8080".parse::<Uri>().unwrap();
+        assert!(matches!(base.join("blobs"), Err(Error::InvalidUriParts(_))));
     }
 }

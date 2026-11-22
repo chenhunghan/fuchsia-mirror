@@ -2,9 +2,82 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_package.bzl",
+    "fx_unittest_package",
+)
+
 package(default_applicable_licenses = ["//:license"])
 
 exports_files(
     ["meta/fake-power-sensor.core_shard.cml"],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+rustc_binary(
+    name = "fake_power_sensor_bin",
+    srcs = ["src/lib.rs"],
+    binary_name = "fake-power-sensor",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    tags = ["manual"],
+    deps = [
+        "//sdk/fidl/fuchsia.hardware.sensors:fuchsia.hardware.sensors_rust",
+        "//sdk/fidl/fuchsia.sensors.types:fuchsia.sensors.types_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+rustc_test(
+    name = "fake_power_sensor_bin_test",
+    crate = ":fake_power_sensor_bin",
+    edition = "2024",
+)
+
+fx_packaged_binary(
+    name = "fake_power_sensor_bin_packaged_bin",
+    binary = ":fake_power_sensor_bin",
+    binary_name = "fake-power-sensor",
+)
+
+fx_component_manifest(
+    name = "fake_power_sensor_component-manifest",
+    component_name = "fake-power-sensor",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//sdk/lib/trace:client.shard.cml",
+        "//sdk/lib/trace:offer.shard.cml",
+        "//sdk/lib/trace:use.shard.cml",
+    ],
+    manifest = "meta/fake-power-sensor.cml",
+)
+
+fx_component(
+    name = "fake_power_sensor_component",
+    compiled_manifest = ":fake_power_sensor_component-manifest",
+    deps = [":fake_power_sensor_bin_packaged_bin"],
+)
+
+# Run with `fx test fake-power-sensor-unittests`
+fx_unittest_package(
+    name = "fake-power-sensor-unittests",
+    unit_tests = [":fake_power_sensor_bin_test"],
 )

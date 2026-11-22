@@ -19,12 +19,12 @@ type ExampleEnum = strict enum {
 type MyStruct = struct {
     nums vector<int32>:<10, optional>;
     foo string;
-    bar MyXunion;
+    bar MyFlexibleUnion;
     my_uint8 uint8;
     my_int8 int8;
 };
 
-type MyXunion = flexible union {
+type MyFlexibleUnion = flexible union {
     1: i int32;
     2: b bool;
     4: my_uint8 uint8;

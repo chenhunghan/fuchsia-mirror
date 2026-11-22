@@ -3,8 +3,21 @@
 # found in the LICENSE file.
 
 load("@rules_cc//cc:defs.bzl", "cc_library")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load("//build/bazel/rules/components:expect_includes.bzl", "expect_includes")
+load("//build/bazel/rules/testing:fx_unittest_package.bzl", "fx_unittest_package")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [
+        ":fs-connection-test-pkg",
+        ":fs-vnode-test-pkg",
+    ],
+    visibility = ["//src/storage:__pkg__"],
+)
 
 cc_library(
     name = "vfs_headers",
@@ -169,6 +182,7 @@ cc_library(
         "//src/developer/vsock-sshd-host:__pkg__",
         "//src/devices/bin/driver_manager:__pkg__",
         "//src/devices/bin/driver_manager/devfs:__pkg__",
+        "//src/devices/bin/driver_manager/tests:__pkg__",
         "//src/devices/testing/devmgr-integration-test-shim:__pkg__",
         "//src/devices/testing/driver-integration-test-shim:__pkg__",
         "//src/devices/tests/v2/runtime-protocol:__pkg__",
@@ -183,7 +197,7 @@ cc_library(
         "//src/media/audio/audio_core:__pkg__",
         "//src/media/audio/services/device_registry:__pkg__",
         "//src/media/codec/factory:__pkg__",
-        "//src/performance/memory/thrasher:__pkg__",
+        "//src/memory/thrasher:__pkg__",
         "//src/storage/blobfs:__pkg__",
         "//src/storage/blobfs/bin:__pkg__",
         "//src/storage/conformance/conformance_harness/cppvfs:__pkg__",
@@ -210,4 +224,106 @@ cc_library(
         "//zircon/system/ulib/svc:__pkg__",
     ],
     deps = [":vfs_headers"],
+)
+
+fx_cc_library(
+    name = "test_support",
+    testonly = True,
+    hdrs = ["tests/dir_test_util.h"],
+    visibility = [
+        ":__pkg__",
+    ],
+    deps = [
+        ":cpp",
+        "@com_google_googletest//:gtest",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "fs-vnode-test",
+    srcs = [
+        "tests/lazy_dir_tests.cc",
+        "tests/pseudo_dir_tests.cc",
+        "tests/pseudo_file_tests.cc",
+        "tests/remote_dir_tests.cc",
+        "tests/service_tests.cc",
+        "tests/teardown_tests.cc",
+        "tests/vfs_tests.cc",
+        "tests/vmo_file_tests.cc",
+        "tests/watcher_test.cc",
+    ],
+    aspect_hints = [":death_test"],
+    # tests/dir_test_util.h uses `#include <src/storage/lib/vfs/cpp/vfs_types.h>`
+    # relative to workspace root; GN adds `-I.` via default_include_dirs.
+    # @bazel2gn:skip
+    copts = ["-I."],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":cpp",
+        ":test_support",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_testing",
+        "//sdk/lib/async:async-cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/async-testing",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fidl",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/sync:sync-cpp",
+        "//zircon/system/ulib/zx",
+        # @com_google_googletest//:gtest bundles GoogleMock.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+expect_includes(
+    name = "death_test",
+    includes = ["//src/sys/test_runners/gtest:death_test.shard.cml"],
+)
+
+fx_cc_test_binary(
+    name = "fs-connection-test",
+    srcs = [
+        "tests/advisory_lock_tests.cc",
+        "tests/connection_contract_tests.cc",
+        "tests/connection_integration_tests.cc",
+        "tests/connection_rights_tests.cc",
+        "tests/paging_test.cc",
+    ],
+    aspect_hints = [":death_test"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":connection",
+        ":cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp_testing",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/fdio",
+        "//sdk/lib/fidl",
+        "//sdk/lib/zxio",
+        "//src/lib/fxl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/storage/memfs:cpp",
+        "//zircon/system/ulib/fbl",
+        "//zircon/system/ulib/sync",
+        "//zircon/system/ulib/zx",
+        # @com_google_googletest//:gtest bundles GoogleMock.
+        "@com_google_googletest//:gtest",  # @bazel2gn:path_overwrite://third_party/googletest:gmock
+    ],
+)
+
+fx_unittest_package(
+    name = "fs-connection-test-pkg",
+    package_name = "fs-connection-test",
+    unit_tests = [":fs-connection-test"],
+)
+
+fx_unittest_package(
+    name = "fs-vnode-test-pkg",
+    package_name = "fs-vnode-test",
+    unit_tests = [":fs-vnode-test"],
 )

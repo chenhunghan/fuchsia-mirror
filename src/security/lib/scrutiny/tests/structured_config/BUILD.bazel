@@ -3,6 +3,10 @@
 # found in the LICENSE file.
 
 load(
+    "@fuchsia_rules_common//packages:resources.bzl",
+    "resource",
+)
+load(
     "@rules_fuchsia//fuchsia:assembly.bzl",
     "fuchsia_board_configuration",
     "fuchsia_product",
@@ -15,9 +19,53 @@ load(
     "//build/bazel/rules/assembly:product_configuration.bzl",
     "product_configuration",
 )
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_package.bzl",
+    "fx_package",
+)
 
 package(
     default_applicable_licenses = ["//:license"],
+)
+
+# We don't intend to run this component, just make its manifest and packaged
+# structured config (both immutable and mutable-by-parent fields) visible to
+# scrutiny.
+fx_component_manifest(
+    name = "packaged_config_component_manifest",
+    component_name = "packaged_config_component",
+    manifest = "meta/packaged_config_component.cml",
+)
+
+fx_component(
+    name = "packaged_config_component",
+    compiled_manifest = ":packaged_config_component_manifest",
+)
+
+# TODO(https://fxbug.dev/543568916): Switch to an in-tree platform
+# `fuchsia_structured_config_values` Bazel rule once available under
+# `//build/bazel/rules/components` (loading it from `@rules_fuchsia` is
+# disallowed in platform code by the `bazel_repository_paths` shac check).
+resource(
+    name = "packaged_config_values",
+    src = "@gn_targets//src/security/lib/scrutiny/tests/structured_config:packaged_config_cvf",
+    dest = "meta/packaged_config_component.cvf",
+)
+
+fx_package(
+    name = "package",
+    package_name = "package_for_scrutiny_testing",
+    components = [
+        ":packaged_config_component",
+    ],
+    resources = [
+        ":packaged_config_values",
+    ],
 )
 
 fuchsia_board_configuration(
@@ -29,6 +77,9 @@ fuchsia_board_configuration(
 
 product_configuration(
     name = "product_config",
+    base_packages = [
+        ":package",
+    ],
     enable_example_aib = True,
     product_config_json = {
         "platform": {

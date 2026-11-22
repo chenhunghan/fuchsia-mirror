@@ -14,16 +14,12 @@ use super::arch::{
     RISCV64_CSR_SSTATUS_VS_SHIFT, riscv64_csr_read,
 };
 use super::vm::is_user_accessible;
-use crate::kernel::thread::ThreadLockGuard;
-use core::pin::Pin;
+use crate::kernel::thread::{Thread, ThreadLockGuard};
 use debug::{dprintf, ltracef};
-use zx_types::zx_restricted_state_t;
+use zx_types::{ZX_TLS_STACK_GUARD_OFFSET, ZX_TLS_UNSAFE_SP_OFFSET, zx_restricted_state_t};
 
 #[allow(dead_code)]
 const LOCAL_TRACE: u32 = 0;
-
-const ZX_TLS_STACK_GUARD_OFFSET: isize = -0x10;
-const ZX_TLS_UNSAFE_SP_OFFSET: isize = -0x8;
 
 pub use arch_types_bindings::{GeneralRegsSource, UserEntryState};
 
@@ -111,7 +107,6 @@ unsafe extern "C" {
     pub fn riscv64_context_switch(old_sp: *mut usize, new_sp: usize);
     pub fn cpp_arch_set_current_thread(thread: *mut core::ffi::c_void);
     pub fn cpp_arch_set_restricted_flag(in_restricted: bool);
-    pub fn cpp_with_frame_pointers() -> bool;
 }
 
 /// Returns a pointer to the RISC-V 64 architectural state embedded in `thread`.
@@ -128,13 +123,24 @@ pub unsafe fn thread_arch(thread: *mut core::ffi::c_void) -> *mut ArchThread {
     unsafe { crate::kernel::thread::get_arch(thread.cast()).cast() }
 }
 
+/// [`thread_arch`] for a `*const Thread`, whose arch state is only read.
+///
+/// # Safety
+///
+/// Caller guarantees `thread` points to a C++ `Thread`; the result is only an offset of `thread`.
+#[inline(always)]
+unsafe fn thread_arch_const(thread: *const Thread) -> *const ArchThread {
+    // SAFETY: As for `thread_arch`, which only offsets the pointer; nothing is written through it.
+    unsafe { crate::kernel::thread::get_arch(thread.cast_mut()).cast::<ArchThread>().cast_const() }
+}
+
 /// Returns the architectural state of the thread whose lock `guard` holds.
 ///
 /// # Safety
 /// The thread must not run while the reference lives: it is suspended or stopped in an exception,
 /// as the debugger register accessors require of their callers. Its lock keeps out other code
 /// that takes it.
-pub unsafe fn locked_thread_arch(guard: &ThreadLockGuard) -> &ArchThread {
+pub unsafe fn locked_thread_arch<'a>(guard: &'a ThreadLockGuard<'_>) -> &'a ArchThread {
     // SAFETY: the lock and the caller's guarantee leave no writer while the borrow lives.
     unsafe { &*thread_arch(guard.thread().cast()) }
 }
@@ -143,7 +149,7 @@ pub unsafe fn locked_thread_arch(guard: &ThreadLockGuard) -> &ArchThread {
 ///
 /// # Safety
 /// As for [`locked_thread_arch`].
-pub unsafe fn locked_thread_arch_mut(guard: Pin<&mut ThreadLockGuard>) -> &mut ArchThread {
+pub unsafe fn locked_thread_arch_mut<'a>(guard: &'a mut ThreadLockGuard<'_>) -> &'a mut ArchThread {
     // SAFETY: as for `locked_thread_arch`; borrowing the guard uniquely makes this the only
     // reference handed out.
     unsafe { &mut *thread_arch(guard.thread().cast()) }
@@ -169,7 +175,7 @@ pub unsafe extern "C" fn arch_thread_initialize(
 
     // create a default stack frame on the stack
     // SAFETY: The caller guarantees `thread` is valid.
-    let mut stack_top = unsafe { crate::kernel::thread::get_stack_top(thread.cast()) };
+    let mut stack_top = unsafe { crate::kernel::thread::get_stack_top(thread.cast_const().cast()) };
 
     // Always leave space at the very top for an iframe.
     stack_top -= core::mem::size_of::<Iframe>();
@@ -192,7 +198,8 @@ pub unsafe extern "C" fn arch_thread_initialize(
 
     // shadow call stack grows up
     // SAFETY: The caller guarantees `thread` is valid.
-    frame.gp = unsafe { crate::kernel::thread::get_shadow_call_base(thread.cast()) } as u64;
+    frame.gp =
+        unsafe { crate::kernel::thread::get_shadow_call_base(thread.cast_const().cast()) } as u64;
 
     // set the thread pointer that will be restored on the first context switch
     // SAFETY: `arch` was initialized in place above; taking a field address reads nothing.
@@ -334,13 +341,18 @@ pub unsafe extern "C" fn arch_enter_uspace(iframe: *const Iframe) -> ! {
 }
 
 /// Perform architecture context switch between threads.
+///
 /// # Safety
-/// Caller guarantees `old_thread` and `new_thread` are valid pointers.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_context_switch(
-    old_thread: *mut core::ffi::c_void,
-    new_thread: *mut core::ffi::c_void,
-) {
+///
+/// The caller must ensure that supervisor-mode interrupts are disabled on the calling hart,
+/// `old_thread` and `new_thread` are distinct (`old_thread != new_thread`) live `Thread`s whose
+/// locks the caller holds (with no conflicting `ChainLockProof` or live borrow of `old_thread`'s
+/// lock-protected state), `old_thread` is the calling hart's current thread, `new_thread` is ready
+/// to run (not running on any hart) with a valid initialized `ArchThread` (`sp`, FPU, and vector
+/// state), and `new_thread` remains live while installed as the calling hart's current thread.
+pub unsafe fn arch_context_switch(old_thread: *mut Thread, new_thread: *mut Thread) {
+    let old_thread = old_thread.cast::<core::ffi::c_void>();
+    let new_thread = new_thread.cast::<core::ffi::c_void>();
     debug_assert!(!old_thread.is_null());
     debug_assert!(!new_thread.is_null());
     debug_assert!(super::arch::arch_ints_disabled());
@@ -393,7 +405,8 @@ pub unsafe extern "C" fn arch_context_switch(
 
     let current_fpu_status = super::fpu::riscv64_fpu_status();
     let current_vector_status = super::vector::riscv64_vector_status();
-    // SAFETY: `old_thread` is valid per this function's contract.
+    // SAFETY: `old_thread` is valid and locked by the caller with no conflicting
+    // `ChainLockProof` or live borrow of `old_thread`'s lock-protected state.
     if !unsafe { crate::kernel::thread::is_user_state_saved_locked(old_thread.cast()) } {
         // Save the fpu and vector state for the old (current) thread, depending on
         // whether the fpu or vector hardware is currently in the initial state.
@@ -446,15 +459,18 @@ pub unsafe extern "C" fn arch_context_switch(
 }
 
 /// Dump architecture thread info to console.
+///
 /// # Safety
-/// Caller guarantees `thread` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_dump_thread(thread: *const core::ffi::c_void) {
+///
+/// `thread` must point to a valid, live, initialized [`Thread`]. The caller must either hold
+/// `thread`'s lock or be in a kernel panic, where the reads are best effort and may observe
+/// concurrent updates.
+pub unsafe fn arch_dump_thread(thread: *const Thread) {
     debug_assert!(!thread.is_null());
-    // SAFETY: Reads thread running status and arch sp.
+    // SAFETY: Caller guarantees `thread` is valid and either holds its lock or is in a panic.
     unsafe {
-        if !crate::kernel::thread::is_running(thread.cast()) {
-            let arch = thread_arch(thread as *mut _);
+        if !crate::kernel::thread::is_running(thread) {
+            let arch = thread_arch_const(thread);
             dprintf!(INFO, "\tarch: ");
             dprintf!(INFO, "sp {:#x}\n", (*arch).__bindgen_anon_1.sp);
         }
@@ -462,24 +478,26 @@ pub unsafe extern "C" fn arch_dump_thread(thread: *const core::ffi::c_void) {
 }
 
 /// Get the blocked frame pointer of a thread.
+///
 /// # Safety
-/// Caller guarantees `thread` is a valid pointer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn arch_thread_get_blocked_fp(thread: *mut core::ffi::c_void) -> usize {
+///
+/// `thread` must point to a valid, live, blocked [`Thread`] whose lock the caller holds and whose
+/// saved `sp` points to a valid `Riscv64ContextSwitchFrame`.
+pub unsafe fn arch_thread_get_blocked_fp(thread: *const Thread) -> usize {
     debug_assert!(!thread.is_null());
-    // SAFETY: Reads thread frame pointer if frame pointers enabled.
+    if !crate::arch_rs::with_frame_pointers() {
+        return 0;
+    }
+    // SAFETY: Caller guarantees `thread` is a valid blocked thread with its lock held.
     unsafe {
-        if !cpp_with_frame_pointers() {
-            return 0;
-        }
-        let arch = thread_arch(thread);
+        let arch = thread_arch_const(thread);
         let sp = (*arch).__bindgen_anon_1.sp;
         debug_assert!(sp != 0);
         if sp == 0 {
             return 0;
         }
-        let frame = &*(sp as *const Riscv64ContextSwitchFrame);
-        frame.s0 as usize
+        let frame = core::ptr::with_exposed_provenance::<Riscv64ContextSwitchFrame>(sp);
+        (*frame).s0 as usize
     }
 }
 
@@ -534,11 +552,12 @@ pub unsafe extern "C" fn arch_set_suspended_general_regs(
     debug_assert!(!thread.is_null());
     debug_assert!(!iframe.is_null());
     debug_assert_eq!(source, GeneralRegsSource::Iframe);
-    // SAFETY: Sets suspended_general_regs on the thread arch state.
+    // SAFETY: Sets suspended_general_regs on the thread arch state using raw pointer projection to
+    // avoid creating `&mut ArchThread` while a `&Thread` reference is live.
     unsafe {
-        let arch = &mut *thread_arch(thread);
-        debug_assert!(arch.suspended_general_regs.is_null());
-        arch.suspended_general_regs = iframe.cast();
+        let arch = thread_arch(thread);
+        debug_assert!((*arch).suspended_general_regs.is_null());
+        (*arch).suspended_general_regs = iframe.cast();
     }
 }
 
@@ -548,10 +567,10 @@ pub unsafe extern "C" fn arch_set_suspended_general_regs(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn arch_reset_suspended_general_regs(thread: *mut core::ffi::c_void) {
     debug_assert!(!thread.is_null());
-    // SAFETY: Clears suspended_general_regs on thread arch state.
+    // SAFETY: Clears suspended_general_regs on thread arch state using raw pointer projection to
+    // avoid creating `&mut ArchThread` while a `&Thread` reference is live.
     unsafe {
-        let arch = &mut *thread_arch(thread);
-        arch.suspended_general_regs = core::ptr::null_mut();
+        (*thread_arch(thread)).suspended_general_regs = core::ptr::null_mut();
     }
 }
 

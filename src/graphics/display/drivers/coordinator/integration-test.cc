@@ -1242,7 +1242,7 @@ TEST_F(IntegrationTest, MustUseUniqueEventIDs) {
     ASSERT_OK(client->ImportEvent(std::move(event_b), kEventId));
     // This test passes if it closes without deadlocking.
   }
-  // TODO: Use LLCPP epitaphs when available to detect ZX_ERR_PEER_CLOSED.
+  // TODO: Use FIDL wire epitaphs when available to detect ZX_ERR_PEER_CLOSED.
 }
 
 TEST_F(IntegrationTest, MaxLayerCountPropagatedToClient) {
@@ -1800,6 +1800,49 @@ TEST_F(IntegrationTest, VsyncGoesToClientWhoAppliedConfig) {
   EXPECT_EQ(kPrimaryInitialConfigStamp, primary_client->state().last_vsync_config_stamp());
   EXPECT_EQ(1u, primary_client->state().vsync_count());
   EXPECT_EQ(1u, virtcon_client->state().vsync_count());
+}
+
+TEST_F(IntegrationTest, VsyncWhenNewOwnerHasCommittedConfig) {
+  std::unique_ptr<TestFidlClient> test_utility_client = OpenCoordinatorTestFidlClient(
+      &sysmem_client_, DisplayProviderClient(), display::ClientPriority::kTestUtility);
+  WaitUntil([&]() { return test_utility_client->state().has_display_ownership(); });
+
+  static constexpr display::ConfigStamp kTestUtilityConfigStamp(20);
+  ASSERT_OK(test_utility_client->ApplyLayers(kTestUtilityConfigStamp,
+                                             test_utility_client->CreateFullscreenLayerConfig()));
+  WaitUntil(
+      [&]() { return DisplayEngineSubmittedConfigStamp() != display::kInvalidDriverConfigStamp; });
+  const display::DriverConfigStamp test_utility_driver_config_stamp =
+      DisplayEngineSubmittedConfigStamp();
+
+  // Commit a configuration with a distinct layer on a lower-priority client
+  // before it owns the displays.
+  std::unique_ptr<TestFidlClient> primary_client = OpenCoordinatorTestFidlClient(
+      &sysmem_client_, DisplayProviderClient(), display::ClientPriority::kCompositor);
+  EXPECT_FALSE(primary_client->state().has_display_ownership());
+
+  zx::result<display::LayerId> create_color_layer_result =
+      primary_client->CreateFullscreenColorLayer(kFuchsiaBgra);
+  ASSERT_OK(create_color_layer_result);
+  const display::LayerId primary_color_layer_id = create_color_layer_result.value();
+
+  static constexpr display::ConfigStamp kPrimaryConfigStamp(30);
+  ASSERT_OK(primary_client->ApplyLayers(
+      kPrimaryConfigStamp,
+      {{.layer_id = primary_color_layer_id, .image_id = display::kInvalidImageId}}));
+
+  // Disconnect the current owner; the incoming owner must immediately apply its
+  // committed config and receive the VSync for its stamp.
+  test_utility_client.reset();
+  WaitUntil([&]() { return primary_client->state().has_display_ownership(); });
+  WaitUntil(
+      [&]() { return DisplayEngineSubmittedConfigStamp() > test_utility_driver_config_stamp; });
+
+  ASSERT_EQ(0u, primary_client->state().vsync_count());
+  TriggerDisplayEngineVsync();
+  WaitUntil([&]() { return primary_client->state().vsync_count() >= 1; });
+  EXPECT_EQ(kPrimaryConfigStamp, primary_client->state().last_vsync_config_stamp());
+  EXPECT_EQ(1u, primary_client->state().vsync_count());
 }
 
 // This test case covers the basic interaction between CommitConfig() and VSync

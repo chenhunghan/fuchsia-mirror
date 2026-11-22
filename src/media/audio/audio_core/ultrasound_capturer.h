@@ -54,9 +54,10 @@ class UltrasoundCapturer : public BaseCapturer {
                });
   }
 
-  // |fuchsia::media::BaseCapturer|
+  // |media::audio::BaseCapturer|
   void ReportStart() final;
   void ReportStop() final;
+  Mixer::Resampler resampler_type() const final { return Mixer::Resampler::HighPassWindowedSinc; }
 
  private:
   std::optional<Format> format_;

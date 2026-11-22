@@ -8,6 +8,11 @@ config("memory_barriers_include") {
   include_dirs = [ "include" ]
 }
 
+group("tests") {
+  testonly = true
+  deps = [ ":memory_barriers_test_package" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -35,7 +40,7 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 
 sdk_source_set("memory_barriers") {
   public = [ "include/lib/memory_barriers/memory_barriers.h" ]
-  sdk_area = "Media"
+  sdk_area = "Driver SDK"
   category = "partner"
   sdk_name = "memory_barriers"
   public_configs = [ ":memory_barriers_include" ]
@@ -43,9 +48,33 @@ sdk_source_set("memory_barriers") {
   visibility = [
     ":*",
     "//build/bazel/bazel_idk/tests/*",
-    "//src/devices/block/drivers/aml-sdmmc/*",
+    "//sdk/lib/driver/*",
+    "//src/connectivity/*",
+    "//src/devices/*",
+    "//src/graphics/*",
     "//src/media/*",
     "//src/sysmem/*",
     "//vendor/*",
+    "//zircon/third_party/dev/*",
+  ]
+}
+
+cc_test_executable("memory_barriers_tests") {
+  sources = [ "memory_barriers_tests.cc" ]
+  deps = [
+    ":memory_barriers",
+    "//zircon/system/ulib/zxtest",
+  ]
+  testonly = true
+  emit_tool_path = false
+}
+
+fuchsia_unittest_package("memory_barriers_test_package") {
+  package_name = "memory_barriers_test_package-gn"
+  component_name = "memory_barriers_test_package"
+  deps = [ ":memory_barriers_tests" ]
+  visibility = [
+    ":*",
+    "//sdk/lib:*",
   ]
 }

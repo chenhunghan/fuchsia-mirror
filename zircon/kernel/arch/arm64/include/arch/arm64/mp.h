@@ -12,6 +12,8 @@
 #ifndef __ASSEMBLER__
 
 #include <align.h>
+#include <assert.h>
+#include <sys/types.h>
 #include <zircon/compiler.h>
 
 #include <arch/arm64.h>
@@ -26,10 +28,8 @@
 #define MPIDR_AFF1_MASK (0xFFULL << 8)
 #define MPIDR_AFF1_SHIFT 8
 #define MPIDR_AFF2_MASK (0xFFULL << 16)
-#define MPIDR_AFF2_SHIFT 16
 #define MPIDR_MT (0x1ULL < 24)
 #define MPIDR_AFF3_MASK (0xFFULL << 32)
-#define MPIDR_AFF3_SHIFT 32
 
 // construct a ARM MPID from cluster (AFF1) and cpu number (AFF0)
 #define ARM64_MPID(cluster, cpu)                       \
@@ -75,13 +75,10 @@ struct arm64_percpu {
 static_assert(offsetof(struct arm64_percpu, in_restricted_mode) == PERCPU_IN_RESTRICTED_MODE,
               "in_restricted mode is at the wrong offset");
 
-extern "C" void arch_register_mpid(uint cpu_id, uint64_t mpid);
-extern "C" void arm64_init_percpu_early();
-
 // The cold start-up routine for secondary CPUs when starting from an OFF state.
 //
 // |stack| is the pointer to the stack that should be put in SP with a bootstrap
-// payload placed at the top (see arm64_sp_info in secondary.cc).
+// payload placed at the top (see Arm64SpInfo in src/secondary.rs).
 extern "C" void arm64_secondary_start(void* stack);
 
 // The start-up routine for secondary CPUs when resuming primary or secondary
@@ -202,17 +199,7 @@ inline struct percpu* arch_get_curr_percpu() { return READ_PERCPU_FIELD(high_lev
 
 inline cpu_num_t arch_curr_cpu_num() { return READ_PERCPU_FIELD(cpu_num); }
 
-// TODO(https://fxbug.dev/42108040) get num_cpus from topology.
-// This needs to be set very early (before arch_init).
-inline void arch_set_num_cpus(uint cpu_count) { arm_num_cpus = cpu_count; }
-
 inline uint arch_max_num_cpus() { return arm_num_cpus; }
-
-// Translate a CPU number back to the MPIDR of the CPU.
-extern "C" uint64_t arch_cpu_num_to_mpidr(cpu_num_t cpu_num);
-
-// Translate mpidr to cpu number.
-extern "C" cpu_num_t arm64_mpidr_to_cpu_num(uint64_t mpidr);
 
 inline void arch_set_restricted_flag(bool restricted) {
   WRITE_PERCPU_FIELD(in_restricted_mode, restricted ? 1 : 0);

@@ -3,8 +3,27 @@
 # found in the LICENSE file.
 
 load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    tests = [":fostr_unittests_test"],
+    visibility = ["//src/lib:__pkg__"],
+)
 
 fx_cc_library(
     name = "fostr",
@@ -47,4 +66,65 @@ fx_cc_library(
     srcs = ["indent.cc"],
     hdrs = ["indent.h"],
     visibility = ["//visibility:private"],
+)
+
+fx_cc_test_binary(
+    name = "fostr_unittests",
+    srcs = [
+        "test/fidl_types_unittests.cc",
+        "test/hex_dump_unittests.cc",
+        "test/indent_unittests.cc",
+        "test/zx_types_unittests.cc",
+    ],
+    tags = ["manual"],
+    deps = [
+        ":fostr",
+        "//sdk/fidl/fuchsia.boot:fuchsia.boot_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fidl/hlcpp",
+        "//src/lib/fostr/fidl/fuchsia.example.fostr",
+        "//src/lib/fostr/fidl/fuchsia.example.fostr2",
+        "//src/lib/fsl",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fostr_unittests_packaged_bin",
+    testonly = True,
+    binary = ":fostr_unittests",
+    binary_name = "fostr_unittests",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "fostr_unittests_manifest",
+    testonly = True,
+    component_name = "fostr_unittests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/fostr_unittests.cml",
+)
+
+fx_test_component(
+    name = "fostr_unittests_component",
+    compiled_manifest = ":fostr_unittests_manifest",
+    deps = [":fostr_unittests_packaged_bin"],
+)
+
+fx_package(
+    name = "fostr-tests",
+    package_name = "fostr_unittests",
+    test_components = [":fostr_unittests_component"],
+)
+
+fx_test(
+    name = "fostr_unittests_test",
+    package = ":fostr-tests",
+    test_type = "system",
 )

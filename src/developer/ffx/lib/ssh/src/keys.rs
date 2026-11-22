@@ -14,6 +14,7 @@ use hyper::body::Buf;
 use hyper_util::rt::TokioIo;
 use ring::rand::{self, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
+use safe_string::TermSafe;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -93,7 +94,7 @@ async fn query_device_authorized_keys(
         .map_err(|e| fho::user_error!("failed to read http body: {e:?}"))?
         .to_bytes();
     if status != hyper::StatusCode::OK {
-        let body = String::from_utf8_lossy(&body_bytes);
+        let body = TermSafe::from_str_escaped(String::from_utf8_lossy(&body_bytes));
         fho::return_user_error!(
             "{context_string} received an HTTP error from {addr}: {status}. Body: \"{body}\""
         );
@@ -1817,6 +1818,33 @@ mod test {
             server_addr, ERROR_BODY
         );
         assert_eq!(err.to_string(), expected_err_msg);
+    }
+
+    #[fuchsia::test]
+    async fn test_query_device_authorized_keys_error_response_sanitizes_control_characters() {
+        const MALICIOUS_BODY: &str =
+            "Error: \x1b[31mspoofed\x1b[0m\x1b[2J\x1b]0;pwned\x07\r\n\t\0\x7f\u{009b}2J";
+        let server_addr =
+            start_test_server(hyper::StatusCode::INTERNAL_SERVER_ERROR, MALICIOUS_BODY);
+
+        let result = query_device_authorized_keys(server_addr, server_addr.port()).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+
+        assert!(!err_msg.contains('\x1b'));
+        assert!(!err_msg.contains('\x07'));
+        assert!(!err_msg.contains('\r'));
+        assert!(!err_msg.contains('\n'));
+        assert!(!err_msg.contains('\t'));
+        assert!(!err_msg.contains('\0'));
+        assert!(!err_msg.contains('\x7f'));
+        assert!(!err_msg.contains('\u{009b}'));
+
+        let expected_err_msg = format!(
+            "While querying device for SSH authorized_keys, received an HTTP error from {}: 500 Internal Server Error. Body: \"Error: \\u{{1b}}[31mspoofed\\u{{1b}}[0m\\u{{1b}}[2J\\u{{1b}}]0;pwned\\u{{7}}\\r\\n\\t\\u{{0}}\\u{{7f}}\\u{{9b}}2J\"",
+            server_addr
+        );
+        assert_eq!(err_msg, expected_err_msg);
     }
 
     #[fuchsia::test]

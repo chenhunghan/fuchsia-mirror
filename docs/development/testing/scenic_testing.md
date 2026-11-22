@@ -66,7 +66,8 @@ going through the all target of `//bundles/packages/tests:all`.
 
 You need to make sure that there is a dependency chain from `//bundles/packages/tests:all` to
 your test package. For more information, see
-[Testing FAQ documentation](/docs/development/testing/faq.md#q_what-ensures-it-is-run).
+[Testing FAQ
+documentation](/docs/development/testing/faq.md#q-what-ensures-it-is-run).
 
 #### Specify test environments {#specify-test-environments}
 

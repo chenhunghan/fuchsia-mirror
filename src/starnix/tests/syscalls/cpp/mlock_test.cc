@@ -2,18 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <optional>
-#include <string_view>
 
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <linux/capability.h>
 
-#include "src/lib/files/file.h"
-#include "src/lib/fxl/strings/split_string.h"
+#include "src/starnix/tests/syscalls/cpp/capabilities_helper.h"
 #include "src/starnix/tests/syscalls/cpp/proc_test_base.h"
 #include "src/starnix/tests/syscalls/cpp/syscall_matchers.h"
 #include "src/starnix/tests/syscalls/cpp/test_helper.h"
@@ -31,18 +33,9 @@ constexpr bool kMlockAlwaysOnFault = false;
 
 class MlockProcTest : public ProcTestBase {
  protected:
-  // Returns the /proc/self/smaps entry of the mapping that contains `addr`.
-  std::optional<test_helper::MemoryMappingExt> GetSmapsEntry(const volatile void* addr) {
-    std::string smaps;
-    if (!files::ReadFileToString(proc_path() + "/self/smaps", &smaps)) {
-      return std::nullopt;
-    }
-    return test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(addr), smaps);
-  }
-
   // Returns the RSS in bytes of the mapping that contains `addr`, from /proc/self/smaps.
-  std::optional<size_t> GetRss(const volatile void* addr) {
-    auto mapping = GetSmapsEntry(addr);
+  std::optional<size_t> GetRss(const volatile void* addr) const {
+    auto mapping = FindMemoryMappingExt(addr);
     if (!mapping) {
       return std::nullopt;
     }
@@ -66,26 +59,7 @@ class MlockProcTest : public ProcTestBase {
     return mapping;
   }
 
-  std::optional<size_t> GetVmLckInKb() {
-    std::string status;
-    if (!files::ReadFileToString(proc_path() + "/self/status", &status)) {
-      return std::nullopt;
-    }
-
-    const std::string_view prefix = "VmLck";
-    for (const auto& line :
-         fxl::SplitString(status, "\n", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty)) {
-      std::vector<std::string_view> fields =
-          fxl::SplitString(line, ":", fxl::kTrimWhitespace, fxl::kSplitWantNonEmpty);
-      if (fields[0] == prefix) {
-        if (fields.size() != 2) {
-          return std::nullopt;
-        }
-        return test_helper::parse_field_in_kb(fields[1]);
-      }
-    }
-    return std::nullopt;
-  }
+  std::optional<size_t> GetVmLckInKb() const { return GetStatusFieldInKb("VmLck"); }
 };
 
 TEST_F(MlockProcTest, UnalignedAddress) {
@@ -97,10 +71,7 @@ TEST_F(MlockProcTest, UnalignedAddress) {
   auto mapped_page = reinterpret_cast<uint8_t*>(mapping->mapping());
   ASSERT_EQ(mlock(reinterpret_cast<void*>(mapped_page + 10), page_size - 10), 0) << strerror(errno);
 
-  std::string smaps;
-  ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/smaps", &smaps));
-
-  auto smap = test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(mapped_page), smaps);
+  auto smap = FindMemoryMappingExt(mapping->mapping());
   ASSERT_NE(smap, std::nullopt);
   ASSERT_TRUE(smap->ContainsFlag("lo")) << *smap;
 }
@@ -113,11 +84,7 @@ TEST_F(MlockProcTest, UnlignedLength) {
 
   ASSERT_EQ(mlock(mapping->mapping(), page_size - 10), 0) << strerror(errno);
 
-  std::string smaps;
-  ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/smaps", &smaps));
-
-  auto smap =
-      test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(mapping->mapping()), smaps);
+  auto smap = FindMemoryMappingExt(mapping->mapping());
   ASSERT_NE(smap, std::nullopt);
   ASSERT_TRUE(smap->ContainsFlag("lo")) << *smap;
 }
@@ -133,15 +100,153 @@ TEST_F(MlockProcTest, RoundingIsCorrect) {
   auto midpoint = reinterpret_cast<uint8_t*>(mapping->mapping()) + page_size;
   ASSERT_EQ(mlock(midpoint - 1, 2), 0) << strerror(errno);
 
-  std::string smaps;
-  ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/smaps", &smaps));
-
-  auto smap =
-      test_helper::find_memory_mapping_ext(reinterpret_cast<uintptr_t>(mapping->mapping()), smaps);
+  auto smap = FindMemoryMappingExt(mapping->mapping());
   ASSERT_NE(smap, std::nullopt);
   ASSERT_EQ(smap->start, reinterpret_cast<uintptr_t>(mapping->mapping()));
   ASSERT_EQ(smap->end, reinterpret_cast<uintptr_t>(mapping->mapping()) + (2 * page_size));
   ASSERT_TRUE(smap->ContainsFlag("lo")) << *smap;
+}
+
+TEST_F(MlockProcTest, ZeroLengthAligned) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  uint8_t* start;
+  auto mapping = MapIsolated(page_size, &start);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+
+  // With a page-aligned address and length 0, the rounded range is empty, so mlock() and mlock2()
+  // succeed as a no-op without locking or populating the mapping, even on PROT_NONE or unmapped
+  // addresses.
+  EXPECT_THAT(mlock(start, 0), SyscallSucceeds());
+  EXPECT_THAT(syscall(SYS_mlock2, start, 0, MLOCK_ONFAULT), SyscallSucceeds());
+  auto smap = FindMemoryMappingExt(start);
+  ASSERT_TRUE(smap.has_value());
+  EXPECT_FALSE(smap->ContainsFlag("lo")) << *smap;
+  EXPECT_EQ(GetRss(start), 0u);
+
+  void* guard_page = mapping->mapping();
+  EXPECT_THAT(mlock(guard_page, 0), SyscallSucceeds());
+  auto guard_smap = FindMemoryMappingExt(guard_page);
+  ASSERT_TRUE(guard_smap.has_value());
+  EXPECT_FALSE(guard_smap->ContainsFlag("lo")) << *guard_smap;
+
+  EXPECT_THAT(mlock(nullptr, 0), SyscallSucceeds());
+  EXPECT_THAT(munlock(nullptr, 0), SyscallSucceeds());
+}
+
+TEST_F(MlockProcTest, ZeroLengthUnaligned) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  uint8_t* start;
+  auto mapping = MapIsolated(page_size, &start);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+
+  // With an unaligned address and length 0, rounding start down and end up produces a single-page
+  // range, so mlock() locks that page. munlock(..., 0) on the page-aligned start is a no-op,
+  // whereas munlock(..., 0) on the unaligned address unlocks the page.
+  ASSERT_THAT(mlock(start + 10, 0), SyscallSucceeds());
+  auto smap = FindMemoryMappingExt(start);
+  ASSERT_TRUE(smap.has_value());
+  EXPECT_TRUE(smap->ContainsFlag("lo")) << *smap;
+
+  ASSERT_THAT(munlock(start, 0), SyscallSucceeds());
+  smap = FindMemoryMappingExt(start);
+  ASSERT_TRUE(smap.has_value());
+  EXPECT_TRUE(smap->ContainsFlag("lo")) << *smap;
+
+  ASSERT_THAT(munlock(start + 10, 0), SyscallSucceeds());
+  smap = FindMemoryMappingExt(start);
+  ASSERT_TRUE(smap.has_value());
+  EXPECT_FALSE(smap->ContainsFlag("lo")) << *smap;
+
+  EXPECT_THAT(mlock(reinterpret_cast<void*>(10), 0), SyscallFailsWithErrno(ENOMEM));
+  EXPECT_THAT(munlock(reinterpret_cast<void*>(10), 0), SyscallFailsWithErrno(ENOMEM));
+}
+
+TEST_F(MlockProcTest, ZeroLengthRlimitMemlockZeroWithoutCapIpcLock) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  uint8_t* start;
+  auto mapping = MapIsolated(page_size, &start);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+
+  // When RLIMIT_MEMLOCK is 0 and the caller lacks CAP_IPC_LOCK, mlock() and mlock2() fail with
+  // EPERM even on empty ranges, whereas munlock() still succeeds.
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([start] {
+    test_helper::UnsetCapabilityEffective(CAP_IPC_LOCK);
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_IPC_LOCK));
+    struct rlimit rlim = {.rlim_cur = 0, .rlim_max = 0};
+    ASSERT_THAT(setrlimit(RLIMIT_MEMLOCK, &rlim), SyscallSucceeds());
+
+    EXPECT_THAT(mlock(start, 0), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(syscall(SYS_mlock2, start, 0, MLOCK_ONFAULT), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(mlock(nullptr, 0), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(mlock(reinterpret_cast<void*>(10), 0), SyscallFailsWithErrno(EPERM));
+    EXPECT_THAT(munlock(nullptr, 0), SyscallSucceeds());
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MlockProcTest, ZeroLengthRlimitMemlockZeroWithCapIpcLock) {
+  if (!test_helper::HasCapabilityEffective(CAP_IPC_LOCK)) {
+    GTEST_SKIP() << "Requires CAP_IPC_LOCK";
+  }
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  uint8_t* start;
+  auto mapping = MapIsolated(page_size, &start);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([this, start] {
+    ASSERT_TRUE(test_helper::HasCapabilityEffective(CAP_IPC_LOCK));
+    struct rlimit rlim = {.rlim_cur = 0, .rlim_max = 0};
+    ASSERT_THAT(setrlimit(RLIMIT_MEMLOCK, &rlim), SyscallSucceeds());
+
+    EXPECT_THAT(mlock(start, 0), SyscallSucceeds());
+    EXPECT_THAT(syscall(SYS_mlock2, start, 0, MLOCK_ONFAULT), SyscallSucceeds());
+    EXPECT_THAT(mlock(nullptr, 0), SyscallSucceeds());
+    auto smap = FindMemoryMappingExt(start);
+    ASSERT_TRUE(smap.has_value());
+    EXPECT_FALSE(smap->ContainsFlag("lo")) << *smap;
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MlockProcTest, ZeroLengthExceedingRlimitMemlock) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  struct rlimit rlim;
+  ASSERT_THAT(getrlimit(RLIMIT_MEMLOCK, &rlim), SyscallSucceeds());
+  if (rlim.rlim_max < (2 * page_size) && !test_helper::HasCapabilityEffective(CAP_SYS_RESOURCE)) {
+    GTEST_SKIP() << "RLIMIT_MEMLOCK max too small to lock two pages";
+  }
+
+  test_helper::ForkHelper helper;
+  helper.RunInForkedProcess([page_size, rlim] {
+    if (rlim.rlim_cur < (2 * page_size)) {
+      struct rlimit raised = {
+          .rlim_cur = 2 * page_size,
+          .rlim_max = std::max<rlim_t>(rlim.rlim_max, 2 * page_size),
+      };
+      ASSERT_THAT(setrlimit(RLIMIT_MEMLOCK, &raised), SyscallSucceeds());
+    }
+
+    test_helper::UnsetCapabilityEffective(CAP_IPC_LOCK);
+    ASSERT_FALSE(test_helper::HasCapabilityEffective(CAP_IPC_LOCK));
+
+    uint8_t* start;
+    auto mapping = MapIsolated(3 * page_size, &start);
+    ASSERT_THAT(mapping, SyscallResultIsOk());
+
+    ASSERT_THAT(mlock(start, 2 * page_size), SyscallSucceeds());
+
+    struct rlimit lowered = {.rlim_cur = page_size, .rlim_max = page_size};
+    ASSERT_THAT(setrlimit(RLIMIT_MEMLOCK, &lowered), SyscallSucceeds());
+
+    EXPECT_THAT(mlock(start + (2 * page_size), 0), SyscallFailsWithErrno(ENOMEM));
+    EXPECT_THAT(syscall(SYS_mlock2, start + (2 * page_size), 0, MLOCK_ONFAULT),
+                SyscallFailsWithErrno(ENOMEM));
+    EXPECT_THAT(mlock(nullptr, 0), SyscallFailsWithErrno(ENOMEM));
+    EXPECT_THAT(munlock(start + (2 * page_size), 0), SyscallSucceeds());
+  });
+  ASSERT_TRUE(helper.WaitForChildren());
 }
 
 TEST_F(MlockProcTest, SplitMapping) {
@@ -159,22 +264,19 @@ TEST_F(MlockProcTest, SplitMapping) {
   // Lock the middle page of the mapping.
   ASSERT_EQ(mlock(second_page, page_size), 0) << strerror(errno);
 
-  std::string smaps;
-  ASSERT_TRUE(files::ReadFileToString(proc_path() + "/self/smaps", &smaps));
-
-  auto first_mapping = test_helper::find_memory_mapping_ext(first_addr, smaps);
+  auto first_mapping = FindMemoryMappingExt(first_addr);
   ASSERT_NE(first_mapping, std::nullopt);
   ASSERT_EQ(first_mapping->start, first_addr) << *first_mapping;
   ASSERT_EQ(first_mapping->end, second_addr) << *first_mapping;
   ASSERT_FALSE(first_mapping->ContainsFlag("lo")) << *first_mapping;
 
-  auto second_mapping = test_helper::find_memory_mapping_ext(second_addr, smaps);
+  auto second_mapping = FindMemoryMappingExt(second_addr);
   ASSERT_NE(second_mapping, std::nullopt);
   ASSERT_EQ(second_mapping->start, second_addr) << *second_mapping;
   ASSERT_EQ(second_mapping->end, third_addr) << *second_mapping;
   ASSERT_TRUE(second_mapping->ContainsFlag("lo")) << *second_mapping;
 
-  auto third_mapping = test_helper::find_memory_mapping_ext(third_addr, smaps);
+  auto third_mapping = FindMemoryMappingExt(third_addr);
   ASSERT_NE(third_mapping, std::nullopt);
   ASSERT_EQ(third_mapping->start, third_addr) << *third_mapping;
   ASSERT_EQ(third_mapping->end, third_addr + page_size) << *third_mapping;
@@ -216,6 +318,97 @@ TEST_F(MlockProcTest, MlockOnePageIncreasesVmLck) {
               0)
         << strerror(errno);
   }
+}
+
+TEST_F(MlockProcTest, SmapsLockedIsPssOfLockedMappings) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  const size_t map_size = 4 * page_size;
+
+  // Private anonymous memory.
+  uint8_t* locked;
+  auto locked_mapping = MapIsolated(map_size, &locked);
+  ASSERT_THAT(locked_mapping, SyscallResultIsOk());
+  uint8_t* unlocked;
+  auto unlocked_mapping = MapIsolated(map_size, &unlocked);
+  ASSERT_THAT(unlocked_mapping, SyscallResultIsOk());
+  memset(locked, 1, map_size);
+  memset(unlocked, 1, map_size);
+  ASSERT_THAT(mlock(locked, map_size), SyscallSucceeds());
+
+  // Each entry is read at once, as the PSS changes as other processes map or unmap the memory.
+  auto smap = FindMemoryMappingExt(locked);
+  ASSERT_NE(smap, std::nullopt);
+  EXPECT_GT(smap->locked, 0u) << *smap;
+  EXPECT_EQ(smap->locked, smap->pss) << *smap;
+  smap = FindMemoryMappingExt(unlocked);
+  ASSERT_NE(smap, std::nullopt);
+  EXPECT_EQ(smap->locked, 0u) << *smap;
+
+  // Shared memory that is also mapped in another process, so that its PSS is lower than its RSS.
+  auto shared = test_helper::ScopedMMap::MMap(nullptr, map_size, PROT_READ | PROT_WRITE,
+                                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  ASSERT_THAT(shared, SyscallResultIsOk());
+  memset(shared->mapping(), 1, map_size);
+  test_helper::ForkHelper helper;
+  // If the test fails early, kill the child rather than waiting for it forever.
+  helper.KillChildrenOnDestroy();
+  // Declared after `helper`, so that an early return closes the pipes before `helper` waits for
+  // the child.
+  test_helper::ScopedPipe child_pipe;
+  ASSERT_TRUE(child_pipe.ReadSide().is_valid() && child_pipe.WriteSide().is_valid());
+  test_helper::ScopedPipe ready_pipe;
+  ASSERT_TRUE(ready_pipe.ReadSide().is_valid() && ready_pipe.WriteSide().is_valid());
+  helper.RunInForkedProcess([&child_pipe, &ready_pipe, &shared, map_size, page_size] {
+    child_pipe.WriteSide().reset();
+    ready_pipe.ReadSide().reset();
+    // The child doesn't map the shared memory until it accesses it.
+    auto bytes = static_cast<volatile uint8_t*>(shared->mapping());
+    for (size_t offset = 0; offset < map_size; offset += page_size) {
+      EXPECT_EQ(bytes[offset], 1);
+    }
+    char c = 0;
+    EXPECT_EQ(write(ready_pipe.WriteSide().get(), &c, 1), 1);
+    ready_pipe.WriteSide().reset();
+    // Keep the shared memory mapped until the parent closes the pipe.
+    EXPECT_EQ(read(child_pipe.ReadSide().get(), &c, 1), 0);
+  });
+  child_pipe.ReadSide().reset();
+  ready_pipe.WriteSide().reset();
+  char c;
+  ASSERT_EQ(read(ready_pipe.ReadSide().get(), &c, 1), 1);
+
+  ASSERT_THAT(mlock(shared->mapping(), map_size), SyscallSucceeds());
+  smap = FindMemoryMappingExt(shared->mapping());
+  ASSERT_NE(smap, std::nullopt);
+  EXPECT_LT(smap->pss, smap->rss) << *smap;
+  EXPECT_GT(smap->locked, 0u) << *smap;
+  EXPECT_EQ(smap->locked, smap->pss) << *smap;
+
+  child_pipe.WriteSide().reset();
+  ASSERT_TRUE(helper.WaitForChildren());
+}
+
+TEST_F(MlockProcTest, VmLckCountsNonResidentLockedPages) {
+  const size_t page_size = SAFE_SYSCALL(sysconf(_SC_PAGE_SIZE));
+  const size_t map_size = 4 * page_size;
+  uint8_t* start;
+  auto mapping = MapIsolated(map_size, &start);
+  ASSERT_THAT(mapping, SyscallResultIsOk());
+
+  auto vmlck_before = GetVmLckInKb();
+  ASSERT_NE(vmlck_before, std::nullopt);
+
+  // Pages locked with MLOCK_ONFAULT are not populated, but they still count in VmLck.
+  ASSERT_THAT(syscall(SYS_mlock2, start, map_size, MLOCK_ONFAULT), SyscallSucceeds());
+  ASSERT_EQ(GetRss(start), 0u);
+  auto vmlck_after = GetVmLckInKb();
+  ASSERT_NE(vmlck_after, std::nullopt);
+  EXPECT_EQ(*vmlck_after - *vmlck_before, map_size / 1024);
+
+  ASSERT_THAT(munlock(start, map_size), SyscallSucceeds());
+  auto vmlck_unlocked = GetVmLckInKb();
+  ASSERT_NE(vmlck_unlocked, std::nullopt);
+  EXPECT_EQ(*vmlck_unlocked, *vmlck_before);
 }
 
 TEST_F(MlockProcTest, MlockPrefaultsPrivateAnonymousMemory) {
@@ -323,7 +516,7 @@ TEST_F(MlockProcTest, MlockStopsPopulatingAtProtNoneMapping) {
 
   // The whole range is locked, but only the pages before the PROT_NONE mapping are populated.
   for (uint8_t* page : {start, prot_none_page, last_page}) {
-    auto smap = GetSmapsEntry(page);
+    auto smap = FindMemoryMappingExt(page);
     ASSERT_NE(smap, std::nullopt);
     EXPECT_TRUE(smap->ContainsFlag("lo")) << *smap;
   }
@@ -358,12 +551,9 @@ TEST_P(MlockProtTest, MlockApplied) {
 
   // PROT_NONE mappings cannot be populated, so mlock() fails, but the range is locked in all
   // cases.
-  if (prot == PROT_NONE) {
-    EXPECT_THAT(mlock(mapping->mapping(), size), SyscallFailsWithErrno(ENOMEM));
-  } else {
-    EXPECT_THAT(mlock(mapping->mapping(), size), SyscallSucceeds());
-  }
-  auto smap = GetSmapsEntry(base);
+  EXPECT_THAT(mlock(mapping->mapping(), size),
+              SyscallSucceedsOrFailsWithErrno(prot != PROT_NONE, ENOMEM));
+  auto smap = FindMemoryMappingExt(base);
   ASSERT_NE(smap, std::nullopt);
   EXPECT_TRUE(smap->ContainsFlag("lo")) << *smap;
 

@@ -14,7 +14,7 @@ framework that shares [coverage][301] and [test inputs][320] across processes
 and within [test realms][203], allowing components to be fuzzed in their most
 typical configurations.
 
-## Motivation
+## Motivation {:#motivation}
 
 > Program testing can be used to show the presence of bugs, but never to show
 > their absence!
@@ -113,7 +113,7 @@ i.e. it starts with a human or bot desiring to perform a fuzzing task and works
 towards the target realm being fuzzed. The reader should be aware that some
 sections refer to concepts described in detail in subsequent sections.
 
-### `ffx fuzz` host tool
+### ffx fuzz host tool {:#ffx-fuzz-host-tool}
 
 Users (both humans and bots) interact with the framework via an
 [`ffx` plugin][222]. This plugin will be able to communicate with a
@@ -133,7 +133,7 @@ The subcommands of `ffx fuzz` mirror those of `fx fuzz`, e.g.:
 * `stop`: Stop a specific fuzzer.
 * `update`: Update the BUILD.gn file for a fuzzer corpus.
 
-### Fuzz manager
+### Fuzz manager {:#fuzz-manager}
 
 The [test runner framework][210] provides two important features:
 
@@ -200,7 +200,7 @@ The test runner framework is then modified as follows:
   handle in the `fuzzer_engine` and uses [`fuchsia.fuzzer.manager.Harness`][108]
   to pass the other to the `fuzz_manager`.
 
-### Fuzzer engine
+### Fuzzer engine {:#fuzzer-engine}
 
 The `fuzzer_engine` is a component of fuzzed realm. In terms of the
 [fuzzer taxonomy][101], it:
@@ -239,7 +239,7 @@ capability routed to it by the `test_manager`. This allows `test_manager` to
 provide the `Harness` capability only to the `fuzz_test_runner` and the fuzzers
 it starts, rather than to all tests.
 
-### Target adapter
+### Target adapter {:#target-adapter}
 
 The fuzz target adapter performs the *input processing* role in the
 [fuzzer taxonomy][101]. Using the shared VMO and eventpair described above, it
@@ -300,7 +300,7 @@ Note that the target adapter can and should also link against the remote library
 and act as an instrumented remote process along with those in the instrumented
 target.
 
-### Instrumented remote processes
+### Instrumented remote processes {:#instrumented-remote-processes}
 
 In order to collect feedback and detect errors, all processes within the target
 realm being fuzzed need to be built with additional instrumentation (e.g.
@@ -349,7 +349,7 @@ mocks and the target realm being fuzzed.
 The interactions of the pieces described above can be illustrated as follows:
 <br>![Fuzzing framework topology][408]<br>
 
-### FIDL interfaces
+### FIDL interfaces {:#fidl-interfaces}
 
 The framework adds two FIDL libraries: one for interacting with the
 `fuzz_manager`, and another for interacting with the fuzzers themselves.
@@ -451,7 +451,7 @@ their idiosyncrasies:
 
 Other pieces, e.g. the `realm_builder_adapter`, are written in Rust.
 
-### Data transfer protocol
+### Data transfer protocol {:#data-transfer-protocol}
 
 There are several situations in which users need to be able to provide or
 retrieve arbitrary amounts of data, including:
@@ -601,7 +601,7 @@ Additionally, in practice the fuzzers will be completely hermetic. They will not
 be run on product configurations with user data, but only locally when
 developing fuzzers and on ClusterFuzz.
 
-## Testing
+## Testing {:#testing}
 
 The fuzzer engine, and target adapter libraries, and remote library are unit
 tested using the usual approaches (e.g. [GoogleTest][317], `#[cfg(test)]`,
@@ -671,7 +671,7 @@ widespread adoption due at least in part to these limitations.
 
 <br>![In-process FIDL fuzzing][404]<br>
 
-### Single-service FIDL fuzzing.
+### Single-service FIDL fuzzing. {:#single-service-fidl-fuzzing}
 
 An initial attempt at designing a cross-process FIDL fuzzing framework
 considered a single client and service. In this design, libFuzzer was linked
@@ -742,7 +742,7 @@ several pieces align with this proposal's design, and there are future
 opportunities to integrate them to improve the framework's coverage, speed, or
 both.
 
-### AFL with qemu
+### AFL with qemu {:#afl-with-qemu}
 
 Additionally, there have been a few projects that combine AFL with qemu:
 
@@ -769,34 +769,34 @@ Additionally, there have been a few projects that combine AFL with qemu:
 
 [1xx]: # "1xx links refer to a section in this document."
 [101]: #motivation
-[102]: #ffx_fuzz_host_tool
-[103]: #fuzz_manager
-[104]: #fuzzer_engine
-[106]: #target_adapter
-[107]: #instrumented_remote_processes
-[108]: #fidl_interfaces
-[109]: #data_transfer_protocol
+[102]: #ffx-fuzz-host-tool
+[103]: #fuzz-manager
+[104]: #fuzzer-engine
+[106]: #target-adapter
+[107]: #instrumented-remote-processes
+[108]: #fidl-interfaces
+[109]: #data-transfer-protocol
 [110]: #stack_unwinding
 [111]: #performance
 [112]: #security_considerations
 [113]: #testing
-[114]: #single_service_fidl_fuzzing
-[115]: #afl_with_qemu
+[114]: #single-service-fidl-fuzzing
+[115]: #afl-with-qemu
 
 [2xx]: # "2xx links refer to other Fuchsia documentation."
 [201]: /docs/development/build/gn_concepts/variants.md
-[202]: /docs/concepts/components/v2/component_manifests.md#include
+[202]: /docs/concepts/components/v2/component_manifests.md
 [203]: /docs/concepts/components/v2/realms.md
 [204]: /docs/concepts/components/v2/topology.md
-[205]: /docs/concepts/kernel/concepts.md#events_event_pairs
-[206]: /docs/concepts/kernel/concepts.md#message_passing_sockets_and_channels
-[207]: /docs/concepts/kernel/concepts.md#shared_memory_virtual_memory_objects_vmos
+[205]: /docs/concepts/kernel/concepts.md#events-event-pairs
+[206]: /docs/concepts/kernel/concepts.md#message-passing-sockets-and-channels
+[207]: /docs/concepts/kernel/concepts.md#shared-memory-virtual-memory-objects-vmos
 [208]: /docs/concepts/kernel/exceptions.md
 [209]: /docs/contribute/testing/fuzz_testing.md#coverage-guided-fuzzing
 [210]: /docs/development/testing/components/test_runner_framework.md
 [211]: /docs/development/testing/components/test_runner_framework.md#elf-test-runner
 [212]: /docs/development/testing/components/test_runner_framework.md#test-runners
-[213]: /docs/development/testing/components/test_runner_framework.md#the_test_manager
+[213]: /docs/development/testing/components/test_runner_framework.md#the-test-manager
 [214]: /docs/development/testing/components/integration_testing.md
 [215]: /docs/development/build/toolchain.md
 [216]: /docs/development/languages

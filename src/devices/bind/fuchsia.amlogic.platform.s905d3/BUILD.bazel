@@ -1,0 +1,20 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/bind:bind_library.bzl", "bind_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+bind_library(
+    name = "fuchsia.amlogic.platform.s905d3",
+    src = "fuchsia.amlogic.platform.s905d3.bind",
+    category = "partner",
+    visibility = [
+        "//src/devices/board/drivers/nelson:__subpackages__",
+        "//src/devices/power/drivers/nelson-brownout-protection:__pkg__",
+        "//src/ui/input/drivers/goodix-gt6853:__pkg__",
+        "//vendor/google:__subpackages__",
+    ],
+    deps = ["//src/devices/bind/fuchsia"],
+)

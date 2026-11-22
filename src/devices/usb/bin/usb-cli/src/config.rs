@@ -23,11 +23,12 @@ pub const USB_CLASS_MSC: u8 = 0x08;
 pub const USB_SUBCLASS_MSC_SCSI: u8 = 0x06;
 pub const USB_PROTOCOL_MSC_BULK_ONLY: u8 = 0x50;
 
-// Vendor Specific Class (Test, ADB, VSOCK)
+// Vendor Specific Class (Test, ADB, Fastboot, VSOCK)
 pub const USB_CLASS_VENDOR: u8 = 0xff;
 pub const USB_SUBCLASS_TEST: u8 = 0x00;
 pub const USB_SUBCLASS_ADB: u8 = 0x42;
 pub const USB_PROTOCOL_ADB: u8 = 0x01;
+pub const USB_PROTOCOL_FASTBOOT: u8 = 0x03;
 pub const USB_SUBCLASS_VSOCK: u8 = 0x43;
 pub const USB_PROTOCOL_VSOCK: u8 = 0x00;
 
@@ -47,8 +48,11 @@ pub const GOOGLE_USB_CDC_AND_VSOCK_BRIDGE_PID: u16 = 0xa029;
 pub const GOOGLE_USB_ADB_AND_VSOCK_BRIDGE_PID: u16 = 0xa02a;
 pub const GOOGLE_USB_CDC_AND_ADB_AND_VSOCK_BRIDGE_PID: u16 = 0xa02b;
 pub const GOOGLE_USB_CDC_AND_ADB_AND_FASTBOOT_PID: u16 = 0xa02c;
+pub const GOOGLE_USB_FASTBOOT_AND_VSOCK_BRIDGE_PID: u16 = 0xa02d;
+pub const GOOGLE_USB_CDC_AND_FASTBOOT_AND_VSOCK_BRIDGE_PID: u16 = 0xa02e;
 pub const GOOGLE_USB_FASTBOOT_PID: u16 = 0x4ee0;
 // LINT.ThenChange(
+//   //src/devices/usb/drivers/usb-peripheral/config-parser.h,
 //   //src/devices/usb/lib/usb/include/usb/peripheral.h,
 //   //src/tests/end_to_end/usb/lib/fuchsia_usb_pids.json,
 // )
@@ -120,6 +124,11 @@ pub fn function_name_to_descriptor(name: &str) -> Result<peripheral::FunctionDes
             interface_subclass: USB_SUBCLASS_ADB,
             interface_protocol: USB_PROTOCOL_ADB,
         }),
+        "fastboot" => Ok(peripheral::FunctionDescriptor {
+            interface_class: USB_CLASS_VENDOR,
+            interface_subclass: USB_SUBCLASS_ADB,
+            interface_protocol: USB_PROTOCOL_FASTBOOT,
+        }),
         "vsock" | "ffx" => Ok(peripheral::FunctionDescriptor {
             interface_class: USB_CLASS_VENDOR,
             interface_subclass: USB_SUBCLASS_VSOCK,
@@ -161,6 +170,7 @@ pub fn descriptor_to_function_name(desc: &peripheral::FunctionDescriptor) -> Str
         (USB_CLASS_VENDOR, USB_SUBCLASS_TEST, USB_PROTOCOL_LOOPBACK) => "loopback".to_string(),
         (USB_CLASS_VENDOR, USB_SUBCLASS_TEST, _) => "sourcesink".to_string(),
         (USB_CLASS_VENDOR, USB_SUBCLASS_ADB, USB_PROTOCOL_ADB) => "adb".to_string(),
+        (USB_CLASS_VENDOR, USB_SUBCLASS_ADB, USB_PROTOCOL_FASTBOOT) => "fastboot".to_string(),
         (USB_CLASS_VENDOR, USB_SUBCLASS_VSOCK, USB_PROTOCOL_VSOCK) => "vsock".to_string(),
         (cls, sub, proto) => format!("custom_0x{:02x}_0x{:02x}_0x{:02x}", cls, sub, proto),
     }
@@ -323,17 +333,26 @@ pub fn derive_pid_and_product(config: &UsbConfigJson) -> Option<(u16, String)> {
         t if t == (FunctionTag::ADB | FunctionTag::VSOCK) => GOOGLE_USB_ADB_AND_VSOCK_BRIDGE_PID,
         t if t == (FunctionTag::CDC | FunctionTag::VSOCK) => GOOGLE_USB_CDC_AND_VSOCK_BRIDGE_PID,
         t if t == (FunctionTag::CDC | FunctionTag::FASTBOOT) => GOOGLE_USB_CDC_AND_FASTBOOT_PID,
+        t if t == (FunctionTag::FASTBOOT | FunctionTag::VSOCK) => {
+            GOOGLE_USB_FASTBOOT_AND_VSOCK_BRIDGE_PID
+        }
         t if t == (FunctionTag::CDC | FunctionTag::ADB | FunctionTag::VSOCK) => {
             GOOGLE_USB_CDC_AND_ADB_AND_VSOCK_BRIDGE_PID
         }
         t if t == (FunctionTag::CDC | FunctionTag::ADB | FunctionTag::FASTBOOT) => {
             GOOGLE_USB_CDC_AND_ADB_AND_FASTBOOT_PID
         }
+        t if t == (FunctionTag::CDC | FunctionTag::FASTBOOT | FunctionTag::VSOCK) => {
+            GOOGLE_USB_CDC_AND_FASTBOOT_AND_VSOCK_BRIDGE_PID
+        }
         _ => return None,
     };
 
     // Construct canonical product description in PID order (deterministic regardless of input order)
     let mut parts = Vec::new();
+    if tag.contains(FunctionTag::FASTBOOT) {
+        parts.push("Fastboot");
+    }
     if tag.contains(FunctionTag::CDC) {
         parts.push("CDC Ethernet");
     }
@@ -351,9 +370,6 @@ pub fn derive_pid_and_product(config: &UsbConfigJson) -> Option<(u16, String)> {
     }
     if tag.contains(FunctionTag::VSOCK) {
         parts.push("VSOCK Bridge");
-    }
-    if tag.contains(FunctionTag::FASTBOOT) {
-        parts.push("Fastboot");
     }
 
     Some((pid, parts.join(" & ")))
@@ -488,6 +504,7 @@ mod tests {
             ("source-sink", USB_CLASS_VENDOR, USB_SUBCLASS_TEST, USB_PROTOCOL_SOURCESINK),
             ("loopback", USB_CLASS_VENDOR, USB_SUBCLASS_TEST, USB_PROTOCOL_LOOPBACK),
             ("adb", USB_CLASS_VENDOR, USB_SUBCLASS_ADB, USB_PROTOCOL_ADB),
+            ("fastboot", USB_CLASS_VENDOR, USB_SUBCLASS_ADB, USB_PROTOCOL_FASTBOOT),
             ("vsock", USB_CLASS_VENDOR, USB_SUBCLASS_VSOCK, USB_PROTOCOL_VSOCK),
             ("ffx", USB_CLASS_VENDOR, USB_SUBCLASS_VSOCK, USB_PROTOCOL_VSOCK),
         ];
@@ -549,9 +566,9 @@ mod tests {
 
     #[test]
     fn test_config_descriptors_to_names() -> Result<(), Error> {
-        let descriptors = load_config_descriptors("cdc,adb;sourcesink")?;
+        let descriptors = load_config_descriptors("cdc,adb,fastboot;sourcesink")?;
         let names = config_descriptors_to_names(&descriptors);
-        assert_eq!(names, vec![vec!["cdc", "adb"], vec!["sourcesink"]]);
+        assert_eq!(names, vec![vec!["cdc", "adb", "fastboot"], vec!["sourcesink"]]);
         Ok(())
     }
 
@@ -769,6 +786,21 @@ mod tests {
             derive_pid_and_product(&fastboot),
             Some((GOOGLE_USB_FASTBOOT_PID, "Fastboot".to_string()))
         );
+
+        let fastboot_vsock = load_config_input("fastboot,vsock")?;
+        assert_eq!(
+            derive_pid_and_product(&fastboot_vsock),
+            Some((GOOGLE_USB_FASTBOOT_AND_VSOCK_BRIDGE_PID, "Fastboot & VSOCK Bridge".to_string()))
+        );
+
+        let cdc_fastboot_vsock = load_config_input("cdc,fastboot,vsock")?;
+        assert_eq!(
+            derive_pid_and_product(&cdc_fastboot_vsock),
+            Some((
+                GOOGLE_USB_CDC_AND_FASTBOOT_AND_VSOCK_BRIDGE_PID,
+                "Fastboot & CDC Ethernet & VSOCK Bridge".to_string()
+            ))
+        );
         Ok(())
     }
 
@@ -850,8 +882,8 @@ mod tests {
 
     #[test]
     fn test_derive_pid_and_product_unsupported_combinations() -> Result<(), Error> {
-        // Fastboot + VSOCK is not a standard composite device
-        let invalid = load_config_input("fastboot,vsock")?;
+        // UMS + VSOCK is not a standard composite device
+        let invalid = load_config_input("ums,vsock")?;
         assert_eq!(derive_pid_and_product(&invalid), None);
         Ok(())
     }

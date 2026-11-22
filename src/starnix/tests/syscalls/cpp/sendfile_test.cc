@@ -12,6 +12,8 @@
 
 #include <gtest/gtest.h>
 
+#include "src/starnix/tests/syscalls/cpp/test_helper.h"
+
 namespace {
 
 TEST(SendFileTest, FailsWithPipeInput) {
@@ -29,17 +31,15 @@ TEST(SendFileTest, FailsWithPipeInput) {
 }
 
 TEST(SendFileTest, FailsWithSocketInput) {
-  int fds[2];
-  ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
-  ASSERT_EQ(write(fds[1], "foo", 3), 3);
+  test_helper::ScopedSocketPair fds;
+  ASSERT_TRUE(fds);
+  ASSERT_EQ(write(fds[1].get(), "foo", 3), 3);
   char* tmp = getenv("TEST_TMPDIR");
   std::string path = tmp == nullptr ? "/tmp/sendfile_test" : std::string(tmp) + "/sendfile_test";
   int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0777);
-  ASSERT_EQ(sendfile(fd, fds[0], nullptr, 3), -1);
+  ASSERT_EQ(sendfile(fd, fds[0].get(), nullptr, 3), -1);
   ASSERT_EQ(errno, EINVAL);
   close(fd);
-  close(fds[0]);
-  close(fds[1]);
 }
 
 }  // namespace

@@ -2,14 +2,6 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-import("//build/components.gni")
-
-fuchsia_unittest_package("webpki-roots-fuchsia_tests") {
-  manifest = "meta/webpki_roots_fuchsia_lib_test.cml"
-  deps = [ ":webpki-roots-fuchsia_test" ]
-  test_type = "system"
-}
-
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -38,13 +30,44 @@ import("//build/tools/bazel2gn/bazel_migration.gni")
 rustc_library("webpki-roots-fuchsia") {
   sources = [ "src/lib.rs" ]
   edition = "2024"
-  version = "0.1.0"
-  visibility = [ "*" ]
-  with_unit_tests = true
+  visibility = [
+    ":*",
+    "//src/lib/fuchsia-hyper:*",
+    "//src/sys/time/lib/httpdate-hyper:*",
+  ]
   deps = [
     "//third_party/rust_crates:base64",
     "//third_party/rust_crates:log",
     "//third_party/rust_crates:rustls",
     "//third_party/rust_crates:rustls-webpki",
   ]
+}
+
+rustc_test("webpki-roots-fuchsia_test") {
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+  deps = [
+    "//third_party/rust_crates:base64",
+    "//third_party/rust_crates:log",
+    "//third_party/rust_crates:rustls",
+    "//third_party/rust_crates:rustls-webpki",
+  ]
+  output_name = "webpki_roots_fuchsia_lib_test"
+}
+
+fuchsia_component_manifest("webpki-roots-fuchsia_tests_manifest") {
+  testonly = true
+  component_name = "webpki-roots-fuchsia_tests"
+  manifest = "meta/webpki_roots_fuchsia_lib_test.cml"
+}
+
+fuchsia_test_component("webpki-roots-fuchsia_tests_component") {
+  cm_label = ":webpki-roots-fuchsia_tests_manifest"
+  test_type = "system"
+  deps = [ ":webpki-roots-fuchsia_test" ]
+}
+
+fuchsia_test_package("webpki-roots-fuchsia_tests") {
+  package_name = "webpki-roots-fuchsia_tests-gn"
+  test_components = [ ":webpki-roots-fuchsia_tests_component" ]
 }

@@ -5,7 +5,7 @@
 use crate::{ProviderConnector, connect_and_bind_device};
 use fuchsia_async::{MonotonicInstant, Timer, net};
 
-use futures::future::{Fuse, Future, FutureExt};
+use futures::future::{BoxFuture, Fuse, Future, FutureExt};
 use futures::stream::{FuturesUnordered, Stream};
 use itertools::{Interleave, Itertools};
 use pin_project::pin_project;
@@ -35,10 +35,12 @@ impl<T: ProviderConnector> RealSocketConnector<T> {
 
 impl<T: ProviderConnector> SocketConnector for RealSocketConnector<T> {
     type Connection = net::TcpStream;
-    type Fut = net::TcpConnector;
+    type Fut = BoxFuture<'static, io::Result<Self::Connection>>;
 
     fn connect(&mut self, addr: SocketAddr, bind_device: Option<&str>) -> io::Result<Self::Fut> {
-        connect_and_bind_device(&self.0, addr, bind_device)
+        let Self(provider) = self;
+        Ok(connect_and_bind_device(provider.connect()?, addr, bind_device.map(str::to_string))
+            .boxed())
     }
 }
 

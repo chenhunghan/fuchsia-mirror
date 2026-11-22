@@ -5,6 +5,7 @@
 #ifndef SRC_LIB_FSL_VMO_SIZED_VMO_H_
 #define SRC_LIB_FSL_VMO_SIZED_VMO_H_
 
+#include <fidl/fuchsia.mem/cpp/natural_types.h>
 #include <fuchsia/mem/cpp/fidl.h>
 #include <lib/zx/resource.h>
 #include <lib/zx/vmo.h>
@@ -29,6 +30,10 @@ class SizedVmo {
   // physical size of the vmo.
   static bool FromTransport(fuchsia::mem::Buffer transport, SizedVmo* out);
 
+  // Builds a SizedVmo from a fuchsia_mem::Buffer (natural bindings). Returns
+  // false if the transport is not valid, following the same rules as above.
+  static bool FromTransport(fuchsia_mem::Buffer transport, SizedVmo* out);
+
   static bool IsSizeValid(const zx::vmo& vmo, uint64_t size);
 
   SizedVmo& operator=(SizedVmo&& other);
@@ -43,6 +48,10 @@ class SizedVmo {
   // Builds a fuchsia::mem::Buffer from this object. This will null this object
   // vmo.
   fuchsia::mem::Buffer ToTransport() &&;
+
+  // Builds a fuchsia_mem::Buffer (natural bindings) from this object. This will
+  // null this object vmo.
+  fuchsia_mem::Buffer ToNaturalTransport() &&;
 
   zx_status_t Duplicate(zx_rights_t rights, SizedVmo* output) const;
 

@@ -2,8 +2,8 @@
     "allowed_licenses": {
         "Unlicense": [
             {
-                "bug": "https://fxbug.dev/42084124",
-                "description": "",
+                "bug": "b/42084124",
+                "description": "gfxstream includes public-domain/Unlicense third-party headers.",
                 "paths": [
                     "third_party/gfxstream"
                 ]

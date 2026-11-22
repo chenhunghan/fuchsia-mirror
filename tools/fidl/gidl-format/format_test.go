@@ -176,7 +176,7 @@ decode_failure("TooManyHandles") {
 	{
 		input: `
 encode_success("EncodeHandleTypeAndRightsComeFromFIDL") {
-	bindings_allowlist = [llcpp, hlcpp, cpp, rust, dart,],
+	bindings_allowlist = [cpp_wire, hlcpp, cpp, rust, dart,],
 handle_defs = {
 		# 0 = channel ( rights : channel_default ) ,
 	},
@@ -195,7 +195,7 @@ handle_defs = {
 `,
 		output: `
 encode_success("EncodeHandleTypeAndRightsComeFromFIDL") {
-    bindings_allowlist = [llcpp, hlcpp, cpp, rust, dart],
+    bindings_allowlist = [cpp_wire, hlcpp, cpp, rust, dart],
     handle_defs = {
         #0 = channel(rights: channel_default),
     },

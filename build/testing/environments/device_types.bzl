@@ -19,7 +19,6 @@ device_types = struct(
     luis = "Luis",
     maple = "Maple",
     nelson = "Nelson",
-    nuc7 = "Intel NUC Kit NUC7i5DNHE",
     nuc11 = "Intel NUC Kit NUC11TNHv5",
     qemu = "QEMU",
     sherlock = "Sherlock",

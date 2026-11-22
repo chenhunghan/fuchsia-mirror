@@ -4,18 +4,10 @@
 # license that can be found in the LICENSE file or at
 # https://opensource.org/licenses/MIT
 
-import("//build/cpp/library_headers.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
-library_headers("headers") {
-  headers = [ "lib/wake-vector.h" ]
-}
-
 kernel_rust_mod("wake-vector-rs") {
-  sources = [
-    "wake_vector.rs",
-    "wake_vector_ffi.rs",
-  ]
+  sources = [ "wake_vector.rs" ]
   deps = [
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
@@ -23,15 +15,12 @@ kernel_rust_mod("wake-vector-rs") {
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
     "//zircon/kernel/lib/arch:arch-rs",
-    "//zircon/kernel/lib/libc:rust",
     "//zircon/system/ulib/fbl/rust:fbl",
   ]
 }
 
-source_set("wake-vector") {
-  sources = [ "wake-vector_ffi.cc" ]
-  public_deps = [ ":headers" ]
-  deps = [ ":wake-vector-rs" ]
+group("wake-vector") {
+  public_deps = [ ":wake-vector-rs" ]
 }
 
 group("tests") {

@@ -61,15 +61,14 @@ rustc_library(
     edition = "2024",
     target_compatible_with = ["@platforms//os:fuchsia"],
     visibility = [
-        "//src/connectivity/bluetooth/lib/bt-hfp:__pkg__",
-        "//src/connectivity/bluetooth/profiles/bt-hfp-hands-free:__pkg__",
-        "//src/connectivity/bluetooth/profiles/bt-hid:__pkg__",
+        "//src/connectivity/bluetooth:__subpackages__",
     ],
     deps = [
         ":profile-client",
         "//sdk/fidl/fuchsia.bluetooth.bredr:fuchsia.bluetooth.bredr_rust",
         "//sdk/fidl/fuchsia.bluetooth:fuchsia.bluetooth_rust",
         "//src/connectivity/bluetooth/lib/fuchsia-bluetooth",
+        "//src/connectivity/bluetooth/testing/bt-channel-test-support",
         "//src/lib/fidl/rust/fidl",
         "//third_party/rust_crates/vendor:futures",
     ],
@@ -77,6 +76,5 @@ rustc_library(
 
 fx_unittest_package(
     name = "profile-client-tests",
-    package_name = "profile-client-tests",
     unit_tests = [":profile-client_test"],
 )

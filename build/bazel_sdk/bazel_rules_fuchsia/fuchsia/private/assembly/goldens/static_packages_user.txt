@@ -43,6 +43,8 @@ build-info-service
 forensics
 ?google-http-client
 ?google_root_ssl_certificates
+?hid
+?hid-input-report
 ?http-client
 ?httpsdate-time-source-pull
 ?hwinfo

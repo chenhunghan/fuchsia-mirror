@@ -13,8 +13,16 @@ filegroup(
     srcs = [
         "__init__.py",
         "builder.py",
+        "fx_builtins.py",
         "locator.py",
+        "main.py",
+        "metadata.py",
+        "metrics.py",
         "registry.py",
+        "//tools/devshell/lib:agent_session_ids.txt",
+        "//tools/devshell/lib:agents.txt",
+        "//tools/devshell/lib:fx-optional-features.sh",
+        "//tools/devshell/lib:platform.sh",
     ],
     visibility = [
         "//scripts/shac:__pkg__",
@@ -33,7 +41,6 @@ host_py_test(
     name = "registry_test",
     srcs = [
         "__init__.py",
-        "locator.py",
         "registry.py",
         "registry_test.py",
     ],
@@ -52,14 +59,12 @@ host_py_test(
         "locator_test.py",
         "registry.py",
     ],
-    data = [":registry"],
     imports = ["."],
     main = "locator_test.py",
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__subpackages__"],
 )
 
-# TODO(https://fxbug.dev/575968075): Fix Pyrefly errors and remove no-pyrefly.
 host_py_test(
     name = "builder_test",
     srcs = [
@@ -67,10 +72,83 @@ host_py_test(
         "builder.py",
         "builder_test.py",
         "registry.py",
+        "test_utils.py",
     ],
     imports = ["."],
     main = "builder_test.py",
-    tags = ["no-pyrefly"],
     target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = ["//tools:__subpackages__"],
+    deps = ["//build/scripts:lock_utils"],
+)
+
+host_py_test(
+    name = "metrics_test",
+    srcs = [
+        "__init__.py",
+        "metadata.py",
+        "metrics.py",
+        "metrics_test.py",
+        "test_utils.py",
+    ],
+    data = [
+        "//tools/devshell/lib:agent_session_ids.txt",
+        "//tools/devshell/lib:agents.txt",
+        "//tools/devshell/lib:fx-optional-features.sh",
+    ],
+    imports = ["."],
+    main = "metrics_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+)
+
+host_py_test(
+    name = "fx_builtins_test",
+    srcs = [
+        "__init__.py",
+        "builder.py",
+        "fx_builtins.py",
+        "fx_builtins_test.py",
+        "locator.py",
+        "metadata.py",
+        "registry.py",
+    ],
+    data = [
+        "//tools/devshell/lib:agent_session_ids.txt",
+        "//tools/devshell/lib:agents.txt",
+        "//tools/devshell/lib:fx-optional-features.sh",
+        "//tools/devshell/lib:platform.sh",
+    ],
+    imports = ["."],
+    main = "fx_builtins_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+    deps = ["//build/scripts:lock_utils"],
+)
+
+host_py_test(
+    name = "main_test",
+    srcs = [
+        "__init__.py",
+        "builder.py",
+        "fx_builtins.py",
+        "locator.py",
+        "main.py",
+        "main_test.py",
+        "metadata.py",
+        "metrics.py",
+        "registry.py",
+        "test_utils.py",
+    ],
+    data = [
+        "//scripts:fx",
+        "//tools/devshell/lib:agent_session_ids.txt",
+        "//tools/devshell/lib:agents.txt",
+        "//tools/devshell/lib:fx-optional-features.sh",
+        "//tools/devshell/lib:platform.sh",
+    ],
+    imports = ["."],
+    main = "main_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//tools:__subpackages__"],
+    deps = ["//build/scripts:lock_utils"],
 )

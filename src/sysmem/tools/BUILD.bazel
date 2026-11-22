@@ -1,0 +1,99 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":sysmem-memory-pressure-test_test"],
+    visibility = ["//src/sysmem:__pkg__"],
+)
+
+fx_cc_library(
+    name = "common_srcs",
+    srcs = ["memory-pressure.cc"],
+    hdrs = ["memory-pressure.h"],
+    implementation_deps = [
+        "//sdk/fidl/fuchsia.sysmem:fuchsia.sysmem_cpp",
+        "//sdk/lib/component/incoming/cpp",
+        "//src/lib/fsl",
+        "//zircon/system/ulib/sysmem-version",
+    ],
+    deps = [
+        "//src/lib/fxl:fxl_cli",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "memory-pressure-executable",
+    srcs = ["main.cc"],
+    gn_output_name = "sysmem-memory-pressure",
+    deps = [
+        ":common_srcs",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "memory-pressure-test-executable",
+    srcs = ["test.cc"],
+    gn_output_name = "sysmem-memory-pressure-test",
+    deps = [
+        ":common_srcs",
+        "//src/lib/fxl/test:gtest_main",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "memory-pressure-test-packaged-bin",
+    testonly = True,
+    binary = ":memory-pressure-test-executable",
+    binary_name = "sysmem-memory-pressure-test",
+)
+
+fx_component_manifest(
+    name = "memory-pressure-test-manifest",
+    testonly = True,
+    component_name = "sysmem-memory-pressure-test",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/sysmem-memory-pressure-test.cml",
+)
+
+fx_test_component(
+    name = "memory-pressure-test-component",
+    compiled_manifest = ":memory-pressure-test-manifest",
+    test_type = "system",
+    deps = [":memory-pressure-test-packaged-bin"],
+)
+
+fx_package(
+    name = "sysmem-memory-pressure-test",
+    testonly = True,
+    test_components = [":memory-pressure-test-component"],
+)
+
+fx_test(
+    name = "sysmem-memory-pressure-test_test",
+    package = ":sysmem-memory-pressure-test",
+)

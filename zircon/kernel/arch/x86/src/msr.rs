@@ -5,12 +5,19 @@
 // https://opensource.org/licenses/MIT
 
 use core::ffi::c_void;
+#[cfg(ktest)]
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use zx_status::Status;
 
-use super::x86::{read_msr, read_msr_safe, write_msr, write_msr_safe};
-use crate::kernel::mp::{MpIpiTarget, cpu_num_t, cpu_num_to_mask, is_cpu_online, sync_exec};
+use super::x86::read_msr_safe;
+#[cfg(console_enabled)]
+use super::x86::write_msr_safe;
+#[cfg(ktest)]
+use super::x86::{read_msr, write_msr};
+#[cfg(ktest)]
+use crate::kernel::mp::{MpIpiTarget, sync_exec};
+use crate::kernel::mp::{cpu_num_t, cpu_num_to_mask, is_cpu_online};
 use crate::kernel::thread::{AutoPreemptDisabler, DEFAULT_PRIORITY, create_with_priority};
 use crate::platform_rs::timer::InstantMono;
 
@@ -24,7 +31,8 @@ use crate::platform_rs::timer::InstantMono;
 /// `msr_id` must be an implemented, readable MSR in `cpu`'s current operating mode (reading an
 /// unimplemented MSR, a write-only MSR such as `IA32_PRED_CMD` or x2APIC `EOI`/`SELF_IPI`, or an
 /// x2APIC MSR while x2APIC `EXTD` mode is disabled raises `#GP(0)`).
-pub unsafe fn read_msr_on_cpu(cpu: cpu_num_t, msr_id: u32) -> Result<u64, Status> {
+#[cfg(ktest)]
+pub(super) unsafe fn read_msr_on_cpu(cpu: cpu_num_t, msr_id: u32) -> Result<u64, Status> {
     if !is_cpu_online(cpu) {
         core::hint::cold_path();
         return Err(Status::BAD_STATE);
@@ -62,7 +70,8 @@ pub unsafe fn read_msr_on_cpu(cpu: cpu_num_t, msr_id: u32) -> Result<u64, Status
 /// satisfy all architectural bit and canonical-address constraints for `msr_id` (no reserved MBZ
 /// bits or non-canonical addresses), and writing `val` must not violate memory safety or kernel
 /// invariants.
-pub unsafe fn write_msr_on_cpu(cpu: cpu_num_t, msr_id: u32, val: u64) -> Result<(), Status> {
+#[cfg(ktest)]
+pub(super) unsafe fn write_msr_on_cpu(cpu: cpu_num_t, msr_id: u32, val: u64) -> Result<(), Status> {
     if !is_cpu_online(cpu) {
         core::hint::cold_path();
         return Err(Status::BAD_STATE);
@@ -182,7 +191,7 @@ fn run_safe_msr_on_cpu<F: FnOnce() -> Result<u64, Status> + Send>(
 ///
 /// While `#GP(0)` faults are caught, the caller must ensure that reading `msr_id` on `cpu` does
 /// not trigger unintended hardware side effects.
-pub unsafe fn read_msr_safe_on_cpu(cpu: cpu_num_t, msr_id: u32) -> Result<u64, Status> {
+pub(super) unsafe fn read_msr_safe_on_cpu(cpu: cpu_num_t, msr_id: u32) -> Result<u64, Status> {
     run_safe_msr_on_cpu(cpu, || {
         // SAFETY: `#GP(0)` faults are caught by `read_msr_safe` in thread context; caller
         // guarantees reading `msr_id` does not trigger unintended hardware side effects.
@@ -201,7 +210,12 @@ pub unsafe fn read_msr_safe_on_cpu(cpu: cpu_num_t, msr_id: u32) -> Result<u64, S
 ///
 /// While `#GP(0)` faults are caught, the caller must ensure that writing `val` to `msr_id` on
 /// `cpu` does not violate memory safety or kernel invariants.
-pub unsafe fn write_msr_safe_on_cpu(cpu: cpu_num_t, msr_id: u32, val: u64) -> Result<(), Status> {
+#[cfg(console_enabled)]
+pub(super) unsafe fn write_msr_safe_on_cpu(
+    cpu: cpu_num_t,
+    msr_id: u32,
+    val: u64,
+) -> Result<(), Status> {
     run_safe_msr_on_cpu(cpu, || {
         // SAFETY: `#GP(0)` faults are caught by `write_msr_safe` in thread context; caller
         // guarantees writing `val` to `msr_id` does not violate kernel invariants.

@@ -13,6 +13,8 @@
 #include <lib/fit/function.h>
 #include <lib/zx/vmo.h>
 
+#include <memory>
+
 #include <trace-reader/reader_internal.h>
 
 #include "src/performance/trace_manager/buffer_forwarder.h"
@@ -51,6 +53,8 @@ class TraceeV2 {
   Tracee::State state() const { return state_; }
   bool was_started() const { return was_started_; }
   bool results_written() const { return results_written_; }
+  // Shared so that TraceSession can still write out the buffer once this tracee is gone.
+  const std::shared_ptr<SharedBuffer>& buffer() const { return buffer_; }
   std::optional<fuchsia_tracing_controller::ProviderStats> GetStats() const;
   void NotifyBufferSaved(uint32_t wrapped_count, uint64_t durable_data_end);
 
@@ -73,7 +77,7 @@ class TraceeV2 {
   Tracee::State state_ = Tracee::State::kReady;
 
   async::Executor& executor_;
-  std::optional<SharedBuffer> buffer_;
+  std::shared_ptr<SharedBuffer> buffer_;
 
   // Set to true when starting. This is used to not write any results,
   // including provider info, if the tracee was never started.

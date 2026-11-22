@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use fidl_fuchsia_fxfs::{BlobCreatorMarker, BlobCreatorProxy, BlobReaderMarker, BlobReaderProxy};
 use fidl_fuchsia_io as fio;
 use fuchsia_component::client::connect_to_protocol_at_dir_root;
+use fuchsia_merkle::Hash;
 use std::path::Path;
 use storage_benchmarks::{
     BlockDeviceConfig, BlockDeviceFactory, CacheClearableFilesystem, Filesystem, FilesystemConfig,
@@ -83,12 +84,16 @@ impl CacheClearableFilesystem for BlobfsInstance {
 
 #[async_trait]
 impl BlobFilesystem for BlobfsInstance {
-    fn blob_creator(&self) -> &BlobCreatorProxy {
-        &self.blob_creator
+    async fn get_vmo(&self, name: &Hash) -> zx::Vmo {
+        self.blob_reader
+            .get_vmo(&*name)
+            .await
+            .expect("transport error on BlobReader.GetVmo")
+            .expect("failed to get vmo")
     }
 
-    fn blob_reader(&self) -> &BlobReaderProxy {
-        &self.blob_reader
+    fn blob_creator(&self) -> &BlobCreatorProxy {
+        &self.blob_creator
     }
 
     fn exposed_dir(&self) -> &fio::DirectoryProxy {

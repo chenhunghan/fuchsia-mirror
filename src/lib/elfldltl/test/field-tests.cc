@@ -67,6 +67,33 @@ TEST(ElfldltlFieldTests, UnsignedField) {
   EXPECT_EQ(s.u8[0](), uint8_t{0xaa});
 }
 
+template <typename T>
+struct MinMaxTest {
+  using F = elfldltl::SignedField<T, false>;
+  using S = typename F::value_type;
+
+  static constexpr S kMin = std::numeric_limits<S>::min();
+  static constexpr S kMax = std::numeric_limits<S>::max();
+
+  static_assert(std::is_signed_v<S>);
+  static_assert(kMin < 0);
+  static_assert(kMax > 0);
+
+  static constexpr S Identity(S x) { return x; }
+
+  void operator()() {
+    F min = kMin;
+    EXPECT_EQ(min.get(), kMin);
+    EXPECT_EQ(min(), kMin);
+    EXPECT_EQ(Identity(min), kMin);
+
+    F max = kMax;
+    EXPECT_EQ(max.get(), kMax);
+    EXPECT_EQ(max(), kMax);
+    EXPECT_EQ(Identity(max), kMax);
+  }
+};
+
 TEST(ElfldltlFieldTests, SignedField) {
   struct TestStruct {
     elfldltl::SignedField<uint64_t, false> s64;
@@ -126,6 +153,11 @@ TEST(ElfldltlFieldTests, SignedField) {
   s.s8[0] = -123;
   EXPECT_EQ(data.s8[0], int8_t{-123});
   EXPECT_EQ(s.s8[0](), int8_t{-123});
+
+  MinMaxTest<uint64_t>{}();
+  MinMaxTest<uint32_t>{}();
+  MinMaxTest<uint16_t>{}();
+  MinMaxTest<uint8_t>{}();
 }
 
 TEST(ElfldltlFieldTests, EnumField) {

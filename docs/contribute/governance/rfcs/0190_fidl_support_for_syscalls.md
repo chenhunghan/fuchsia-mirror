@@ -121,7 +121,7 @@ lower 'touch' compared to the status quo, adapting automatically to most
 changes to the syscall IDL (in the same way that most .fidl file changes today
 do not require updating any particular backend).
 
-#### C creep
+#### C creep {:#c-creep}
 
 With only C in view (both in the C headers and in the C-transliterated spelling
 of the v1 FIDL representation), it is easy to introduce syscall signatures and
@@ -165,7 +165,7 @@ interface in non-C languages. If one was instead working in the confines of a
 polyglot-friendly IDL, then that framing would sidestep or minimize this sort
 of problem.
 
-#### Policy enforcement
+#### Policy enforcement {:#policy-enforcement}
 
 We wish to enforce a number of policies around our syscalls and data types.
 With IDL-ification, backends would have access to a machine-interpretable
@@ -197,7 +197,7 @@ userspace:
 
 ### Motivation for FIDL as that IDL
 
-#### Prior lessons from separate IDLs
+#### Prior lessons from separate IDLs {:#prior-lessons-from-separate-idls}
 
 The platform has previously introduced a non-FIDL IDL: Banjo, used for
 expressing interfaces exposed by drivers. However, it was later recognized as a
@@ -233,7 +233,7 @@ explicitly use the data type libraries, which is indeed what they do today.
 Thus, that these things are presented as separate is mostly a false degree of
 freedom - and it would certainly benefit the bindings maintainers and users
 alike to have these things come from the same place (more on this
-[below](#data-types-on-the-wire-match-their-c-representations)).
+[below](#syscall-data-types-on-the-wire-match-their-c-representations)).
 
 #### Polyglot nature
 
@@ -270,7 +270,7 @@ _Socialization:_
 The high-level ideas contained in this RFC have been socialized with both the
 FIDL and kernel/vDSO maintainers.
 
-## Design
+## Design {:#design}
 
 As mentioned above, this document does not a offer a proper design. We instead
 propose design goals, principles, and constraints for the effort here for
@@ -295,7 +295,7 @@ available to developers working within the platform.
 Note: though we aim to generate the [syscall C headers][zircon-headers], this
 goal is agnostic to whether we continue to export them in the SDK.
 
-#### Syscall specification uses pure FIDL
+#### Syscall specification uses pure FIDL {:#syscall-specification-uses-pure-fidl}
 
 In the end - with possibly switchbacks along the way - the syscall interface
 should be defined only using features in the FIDL language specification. FIDL
@@ -348,7 +348,7 @@ Note: as mentioned before, we already contrive the appropriate syscall bindings
 today; we just maintain them separately from the rest of the language bindings
 that implicitly depend on them.
 
-#### Syscall evolution with minimal toil
+#### Syscall evolution with minimal toil {:#syscall-evolution-with-minimal-toil}
 
 The aspiration is for syscall evolution to basically function in a few
 straightforward steps (at least in the common case):
@@ -393,14 +393,15 @@ reasons:
   and such information should freely flow across any transport;
 - The relevant problems around the modeling of syscall data types are not
   actually syscall-specific at heart; they apply more generally to the modeling
-  of [memory formats](#data-types-on-the-wire-match-their-c-representations)
-  and could well have wider applications.
+  of [memory
+  formats](#syscall-data-types-on-the-wire-match-their-c-representations) and
+  could well have wider applications.
 - A good chunk of the `zx` data types will be boring layouts using the basic,
   unrestricted declarations already present today; it would be strange if a
   seemingly arbitrary subset of these types had exceptional restrictions on
   their usage.
 
-#### Minimizing interpretation burden
+#### Minimizing interpretation burden {:#minimizing-interpretation-burden}
 
 The syscall declaration IR should be as simple as possible (and no simpler) -
 and backends should ideally be able to employ uniform logic (with minimal
@@ -438,14 +439,14 @@ vDSO. They are free to present syscalls to the user as communication with any
 other FIDL endpoint, but that is a frontend choice on the part of the
 individual backend.
 
-#### Full specification
+#### Full specification {:#full-specification}
 
 The syscall specification should be _full_ in that it encodes the full
 semantics of the interface and that it generally contains all of the
 machine-readable information that our syscall-dependent backends generally
 require (including the backend that generates our documentation).
 
-#### Syscall data types on the wire match their C representations
+#### Syscall data types on the wire match their C representations {:#syscall-data-types-on-the-wire-match-their-c-representations}
 
 Imagine one wished to encode a memory format into FIDL. This consideration is
 not limited to syscall parameters as they are expected by the C vDSO API, but
@@ -668,10 +669,10 @@ Alternatives:
 
 - [Banjo](#prior-lessons-from-separate-idls) was a non-FIDL platform IDL.
 
-[bring-your-own-runtime]: /docs/concepts/principles/simple.md#bring_your_own_runtime
+[bring-your-own-runtime]: /docs/concepts/principles/simple.md#bring-your-own-runtime
 [core-tests]: https://cs.opensource.google/fuchsia/fuchsia/+/main:zircon/system/utest/core/README.md;l=1;drc=9b242b75aa15d5cdc261fb912192877cc4023564
 [darwin-defs]: https://github.com/apple/darwin-xnu/tree/2ff845c2e033bd0ff64b5b6aa6063a1f8f65aa32/libsyscall/mach
-[fidl-wire-format]: /docs/reference/fidl/language/wire-format/README.md#primary_and_secondary_objects
+[fidl-wire-format]: /docs/reference/fidl/language/wire-format/README.md#primary-and-secondary-objects
 [fidlcat-syscall-dependency]: https://cs.opensource.google/fuchsia/fuchsia/+/main:tools/fidlcat/lib/syscall_definition.cc;l=1;drc=934bcf504d3dc6ed23441bacf1d000bd3bdc019f
 [go-syscall-data-types]: https://fuchsia.googlesource.com/third_party/go/+/c3e244fb8efd0f82f57f49a90394bdaa6a937680/src/syscall/zx/types.go
 [go-syscall-wrappers]: https://fuchsia.googlesource.com/third_party/go/+/c3e244fb8efd0f82f57f49a90394bdaa6a937680/src/syscall/zx

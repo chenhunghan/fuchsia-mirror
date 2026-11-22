@@ -2,7 +2,32 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/cc:fx_cc_binary.bzl", "fx_cc_binary")
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
+
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":factory_reset_tests_pkg_test"],
+    visibility = ["//src/recovery:__pkg__"],
+)
 
 exports_files(
     [
@@ -11,4 +36,132 @@ exports_files(
         "meta/factory_reset.tee.core_shard.cml",
     ],
     visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_cc_library(
+    name = "lib",
+    srcs = ["factory_reset.cc"],
+    hdrs = ["factory_reset.h"],
+    implementation_deps = [
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio",
+        "//sdk/lib/syslog/cpp",
+        "//src/security/lib/kms-stateless",
+        "//zircon/system/ulib/zx",
+    ],
+    visibility = ["//visibility:private"],
+    deps = [
+        # <factory_reset.h> has #include <fidl/fuchsia.fshost/cpp.wire.h>
+        "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_cpp",
+        # <factory_reset.h> has
+        # #include <fidl/fuchsia.hardware.power.statecontrol/cpp/wire.h>
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp",
+        # <factory_reset.h> has #include <fidl/fuchsia.recovery/cpp/wire.h>
+        "//sdk/fidl/fuchsia.recovery:fuchsia.recovery_cpp",
+    ],
+    alwayslink = True,
+)
+
+fx_cc_binary(
+    name = "bin",
+    srcs = ["main.cc"],
+    gn_output_name = "factory_reset",
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.io:fuchsia.io_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/component/outgoing/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "bin_packaged",
+    binary = ":bin",
+    binary_name = "factory_reset",
+)
+
+fx_cc_binary(
+    name = "fdr",
+    srcs = ["cli_main.cc"],
+    deps = [
+        "//sdk/fidl/fuchsia.recovery:fuchsia.recovery_cpp",
+        "//sdk/lib/component/incoming/cpp",
+    ],
+)
+
+fx_packaged_binary(
+    name = "fdr_packaged",
+    binary = ":fdr",
+    binary_name = "fdr",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "factory_reset",
+    includes = ["//sdk/lib/syslog:client.shard"],
+    manifest = "meta/factory_reset.cml",
+)
+
+fx_component(
+    name = "factory_reset_component",
+    compiled_manifest = ":manifest",
+    deps = [":bin_packaged"],
+)
+
+fx_package(
+    name = "factory_reset_pkg",
+    package_name = "factory_reset",
+    components = [":factory_reset_component"],
+    visibility = ["//bundles/assembly:__subpackages__"],
+)
+
+fx_package(
+    name = "fdr_cli",
+    resources = [":fdr_packaged"],
+)
+
+fx_cc_test_binary(
+    name = "factory_reset_unittests",
+    srcs = ["factory_reset_unittest.cc"],
+    deps = [
+        ":lib",
+        "//sdk/fidl/fuchsia.device:fuchsia.device_cpp",
+        "//sdk/fidl/fuchsia.fshost:fuchsia.fshost_cpp_testing",
+        "//sdk/fidl/fuchsia.hardware.power.statecontrol:fuchsia.hardware.power.statecontrol_cpp_testing",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_cpp",
+        "//sdk/lib/async-loop:async-loop-cpp",
+        "//sdk/lib/async-loop:async-loop-default",
+        "//sdk/lib/component/incoming/cpp",
+        "//sdk/lib/fdio-caller",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/loop_fixture",
+        "//src/storage/lib/block_client/cpp",
+        "//zircon/system/ulib/fbl",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_unittest_component(
+    name = "factory_reset_tests_component",
+    testonly = True,
+    binary = ":factory_reset_unittests",
+    component_name = "factory_reset_tests_pkg",
+)
+
+fx_package(
+    name = "factory_reset_tests_pkg",
+    testonly = True,
+    test_components = [":factory_reset_tests_component"],
+)
+
+fx_test(
+    name = "factory_reset_tests_pkg_test",
+    environments = [
+        "//build/testing/environments:astro_env",
+        "//build/testing/environments:emu_env",
+    ],
+    max_log_severity = "ERROR",
+    package = ":factory_reset_tests_pkg",
 )

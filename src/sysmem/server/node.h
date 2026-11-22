@@ -526,9 +526,9 @@ class Node : public fbl::RefCounted<Node> {
   //
   // The main way we avoid accessing NodeProperties beyond when it goes away is the setting of
   // error_handler_ = {} in the two CloseChannel() methods.  We rely on sub-class's error_handler_
-  // not running after CloseChannel(), and we rely on LLCPP not calling protocol message handlers
-  // after server binding Release() (other than completion of any currently-in-progress message
-  // handler), since we're running Release() on the same dispatcher.
+  // not running after CloseChannel(), and we rely on FIDL C++ bindings not calling protocol message
+  // handlers after server binding Release() (other than completion of any currently-in-progress
+  // message handler), since we're running Release() on the same dispatcher.
   NodeProperties* node_properties_ = nullptr;
 
   // We keep server_end_ around

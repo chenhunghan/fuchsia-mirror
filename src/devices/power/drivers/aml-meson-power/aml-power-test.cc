@@ -4,10 +4,12 @@
 
 #include "aml-power.h"
 
+#include <fidl/fuchsia.driver.metadata/cpp/fidl.h>
 #include <fidl/fuchsia.hardware.pwm/cpp/wire_test_base.h>
 #include <lib/ddk/platform-defs.h>
 #include <lib/driver/fake-platform-device/cpp/fake-pdev.h>
 #include <lib/driver/fake-vreg/cpp/fake-vreg.h>
+#include <lib/driver/metadata/cpp/metadata.h>
 #include <lib/driver/testing/cpp/driver_test.h>
 
 #include <memory>
@@ -94,6 +96,10 @@ class AmlPowerTestEnvironment : public fdf_testing::Environment {
   }
 
   void InitVim3() { mode_ = Mode::kVim3; }
+
+  void AddDomainMetadata(const fuchsia_driver_metadata::Dictionary& metadata) {
+    pdev_.AddFidlMetadata("fuchsia.hardware.power.DomainMetadata", metadata);
+  }
 
   zx::result<> Serve(fdf::OutgoingDirectory& to_driver_vfs) override {
     auto* dispatcher = fdf::Dispatcher::GetCurrent()->async_dispatcher();
@@ -187,8 +193,13 @@ class AmlPowerTest : public ::testing::Test {
         std::vector{MakeOffer<fuchsia_hardware_pwm::Service>(AmlPower::kPwmPrimaryParentName)});
   }
 
-  void StartDriverVim3() {
-    driver_test_.RunInEnvironmentTypeContext([&](auto& env) { env.InitVim3(); });
+  void StartDriverVim3(std::optional<fuchsia_driver_metadata::Dictionary> domain_metadata = {}) {
+    driver_test_.RunInEnvironmentTypeContext([&](auto& env) {
+      env.InitVim3();
+      if (domain_metadata.has_value()) {
+        env.AddDomainMetadata(*domain_metadata);
+      }
+    });
     StartDriver(
         std::vector{MakeOffer<fuchsia_hardware_vreg::Service>(AmlPower::kVregPwmBigParentName),
                     MakeOffer<fuchsia_hardware_vreg::Service>(AmlPower::kVregPwmLittleParentName)});
@@ -216,6 +227,18 @@ class AmlPowerTest : public ::testing::Test {
   }
 
   AmlPower& driver() { return *driver_test_.driver(); }
+
+  // Returns the domain metadata that the driver serves to the power core.
+  std::optional<fuchsia_hardware_power::DomainMetadata> GetServedDomainMetadata() {
+    std::optional<fuchsia_hardware_power::DomainMetadata> metadata;
+    EXPECT_OK(driver_test_.RunOnBackgroundDispatcherSync([&]() {
+      zx::result result = fdf_metadata::GetMetadata<fuchsia_hardware_power::DomainMetadata>(
+          driver_test_.ConnectToDriverSvcDir());
+      ASSERT_OK(result);
+      metadata = std::move(result.value());
+    }));
+    return metadata;
+  }
 
  private:
   // Different from `fdf::MakeOffer2()`. This function correctly maps the service's instance name so
@@ -706,6 +729,51 @@ TEST_F(AmlPowerTest, Vim3GetSupportedVoltageRange) {
       bind_fuchsia_amlogic_platform::POWER_DOMAIN_ARM_CORE_LITTLE, &min, &max));
   EXPECT_EQ(max, 200u);
   EXPECT_EQ(min, 100u);
+}
+
+// Domains from a DML metadata mapping carry the domain index in `domain` and the global ID in `id`.
+TEST_F(AmlPowerTest, Vim3DmlDomainMetadata) {
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+  entries.emplace_back("provider", fuchsia_driver_metadata::DictionaryValue::WithInt64(7));
+  entries.emplace_back("domains._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(2));
+  entries.emplace_back("domains.0.domain", fuchsia_driver_metadata::DictionaryValue::WithInt64(0));
+  entries.emplace_back("domains.0.id",
+                       fuchsia_driver_metadata::DictionaryValue::WithInt64(0x12345678));
+  entries.emplace_back("domains.0.name",
+                       fuchsia_driver_metadata::DictionaryValue::WithStr("power-01"));
+  entries.emplace_back("domains.1.domain", fuchsia_driver_metadata::DictionaryValue::WithInt64(1));
+  entries.emplace_back("domains.1.id",
+                       fuchsia_driver_metadata::DictionaryValue::WithInt64(0x9abcdef0));
+  entries.emplace_back("domains.1.name",
+                       fuchsia_driver_metadata::DictionaryValue::WithStr("power-02"));
+  StartDriverVim3(fuchsia_driver_metadata::Dictionary{{.entries = std::move(entries)}});
+
+  std::optional metadata = GetServedDomainMetadata();
+  ASSERT_TRUE(metadata.has_value());
+  ASSERT_TRUE(metadata->domains().has_value());
+  ASSERT_EQ(metadata->domains()->size(), 2u);
+  EXPECT_EQ(metadata->domains()->at(0).id(), 0u);
+  EXPECT_EQ(metadata->domains()->at(0).global_id(), 0x12345678u);
+  EXPECT_EQ(metadata->domains()->at(0).name(), "power-01");
+  EXPECT_EQ(metadata->domains()->at(1).id(), 1u);
+  EXPECT_EQ(metadata->domains()->at(1).global_id(), 0x9abcdef0u);
+  EXPECT_EQ(metadata->domains()->at(1).name(), "power-02");
+}
+
+// Static driver_config domains carry the domain index in `id`.
+TEST_F(AmlPowerTest, Vim3StaticDomainMetadata) {
+  std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
+  entries.emplace_back("domains._count", fuchsia_driver_metadata::DictionaryValue::WithInt64(1));
+  entries.emplace_back("domains.0.id", fuchsia_driver_metadata::DictionaryValue::WithInt64(1));
+  StartDriverVim3(fuchsia_driver_metadata::Dictionary{{.entries = std::move(entries)}});
+
+  std::optional metadata = GetServedDomainMetadata();
+  ASSERT_TRUE(metadata.has_value());
+  ASSERT_TRUE(metadata->domains().has_value());
+  ASSERT_EQ(metadata->domains()->size(), 1u);
+  EXPECT_EQ(metadata->domains()->at(0).id(), 1u);
+  EXPECT_FALSE(metadata->domains()->at(0).global_id().has_value());
+  EXPECT_FALSE(metadata->domains()->at(0).name().has_value());
 }
 
 }  // namespace power::test

@@ -564,7 +564,7 @@ mod tests {
             Ok(Self { node, scope, tmp: Mutex::new("NA".to_string()) })
         }
 
-        async fn stop(&self) {
+        async fn stop(self) {
             info!("TestDriver stopped. Tmp: '{}'", *self.tmp.lock().await);
         }
     }
@@ -667,7 +667,7 @@ mod tests {
             Ok(driver)
         }
 
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     fn koid(handle: &impl zx::AsHandleRef) -> zx::Koid {
@@ -754,7 +754,7 @@ mod tests {
         async fn start(_context: crate::DriverContext) -> Result<Self, crate::DriverError> {
             Ok(Self)
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     #[fuchsia::test]
@@ -783,7 +783,7 @@ mod tests {
             let health_inspect = HealthCheckInspect::new(inspector.root());
             Ok(Self { inspector, health_inspect })
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
 
         async fn health_check(&self, request: HealthCheckRequest) -> HealthCheckResult {
             let result = match request {
@@ -863,7 +863,7 @@ mod tests {
             context.report_health_alert(HealthAlert::SelfFault(alert_with_reason("IN_START")));
             Ok(Self { reporter: context.health_alert_reporter() })
         }
-        async fn stop(&self) {}
+        async fn stop(self) {}
     }
 
     #[fuchsia::test]

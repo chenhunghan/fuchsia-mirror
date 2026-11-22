@@ -628,7 +628,7 @@ fn build_charger_directory(
 }
 
 /// Register power supply devices under `/sys/class/power_supply/`.
-fn register_power_supply_devices(kernel: &Kernel) -> Arc<PowerSupplyDevices> {
+fn register_power_supply_devices(kernel: &Kernel) -> Result<Arc<PowerSupplyDevices>, Errno> {
     let registry = &kernel.device_registry;
     let power_supply_class = registry.objects.power_supply_class();
 
@@ -673,7 +673,7 @@ fn register_power_supply_devices(kernel: &Kernel) -> Arc<PowerSupplyDevices> {
             });
             power_supply_file(dir, "technology", state, |s| s.battery.technology);
         },
-    );
+    )?;
 
     // 2. /sys/class/power_supply/usb
     let state_clone = Arc::clone(&state);
@@ -687,7 +687,7 @@ fn register_power_supply_devices(kernel: &Kernel) -> Arc<PowerSupplyDevices> {
             build_usb(device, dir);
             power_supply_file(dir, "usb_type", &state_clone, |s| s.usb_type);
         },
-    );
+    )?;
 
     // 3. /sys/class/power_supply/ac
     let ac = registry.add_numberless_device(
@@ -695,7 +695,7 @@ fn register_power_supply_devices(kernel: &Kernel) -> Arc<PowerSupplyDevices> {
         /* parent = */ None,
         power_supply_class.clone(),
         build_charger_directory(b"Mains\n", &state, |s| &s.ac, /* include_present = */ false),
-    );
+    )?;
 
     // 4. /sys/class/power_supply/wireless
     let wireless = registry.add_numberless_device(
@@ -708,14 +708,14 @@ fn register_power_supply_devices(kernel: &Kernel) -> Arc<PowerSupplyDevices> {
             |s| &s.wireless,
             /* include_present = */ true,
         ),
-    );
+    )?;
 
-    Arc::new(PowerSupplyDevices { battery, usb, ac, wireless, state })
+    Ok(Arc::new(PowerSupplyDevices { battery, usb, ac, wireless, state }))
 }
 
 /// Initialize power supply devices under `/sys/class/power_supply/` and spawn watcher kthread.
-pub fn battery_manager_device_init(kernel: &Arc<Kernel>) {
-    let devices = register_power_supply_devices(kernel);
+pub fn battery_manager_device_init(kernel: &Arc<Kernel>) -> Result<(), Errno> {
+    let devices = register_power_supply_devices(kernel)?;
     let kernel_clone = Arc::clone(kernel);
     kernel.kthreads.spawn_future(
         move || async move {
@@ -723,6 +723,7 @@ pub fn battery_manager_device_init(kernel: &Arc<Kernel>) {
         },
         "power_supply_monitor",
     );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -856,7 +857,8 @@ mod tests {
     async fn power_supply_registers_devices_and_attributes() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            let _devices = register_power_supply_devices(kernel);
+            let _devices =
+                register_power_supply_devices(kernel).expect("register_power_supply_devices");
 
             let root = &kernel.device_registry.objects.root;
 
@@ -901,7 +903,8 @@ mod tests {
     async fn battery_capacity_write_overrides_and_dispatches_uevent() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            let _devices = register_power_supply_devices(kernel);
+            let _devices =
+                register_power_supply_devices(kernel).expect("register_power_supply_devices");
 
             let registry = &kernel.device_registry;
             let root = &registry.objects.root;
@@ -958,7 +961,8 @@ mod tests {
     async fn update_from_battery_info_dispatches_uevents_for_changed_devices() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            let devices = register_power_supply_devices(kernel);
+            let devices =
+                register_power_supply_devices(kernel).expect("register_power_supply_devices");
             let registry = &kernel.device_registry;
 
             let uevents = Arc::new(Mutex::new(Vec::new()));
@@ -1010,7 +1014,8 @@ mod tests {
     async fn test_battery_watcher_stream_handling() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            let devices = register_power_supply_devices(kernel);
+            let devices =
+                register_power_supply_devices(kernel).expect("register_power_supply_devices");
 
             let (client_end, server_end) =
                 fidl::endpoints::create_endpoints::<fpower::BatteryInfoWatcherMarker>();
@@ -1059,7 +1064,8 @@ mod tests {
     async fn test_battery_capacity_write_propagates_to_simulator() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            let devices = register_power_supply_devices(kernel);
+            let devices =
+                register_power_supply_devices(kernel).expect("register_power_supply_devices");
 
             let (client_end, server_end) =
                 fidl::endpoints::create_endpoints::<spower::BatterySimulatorMarker>();

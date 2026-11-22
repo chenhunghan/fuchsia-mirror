@@ -1,0 +1,22 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+
+package(default_applicable_licenses = ["//:license"])
+
+# TODO: Add runtime data dep on //src/developer/debug/zxdb once migrated to Bazel.
+ffx_plugin(
+    name = "ffx_debug_stop",
+    srcs = ["src/lib.rs"],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    sdk_category = "not-yet-specified",
+    version = "0.1.0",
+    deps = [
+        "//sdk/fidl/fuchsia.debugger:fuchsia.debugger_rust",
+        "//sdk/rust/zx-status",
+        "//src/developer/ffx/lib/fho:lib",
+    ],
+)

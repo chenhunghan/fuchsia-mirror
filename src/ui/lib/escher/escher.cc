@@ -4,6 +4,8 @@
 
 #include "src/ui/lib/escher/escher.h"
 
+#include <limits>
+
 #include "src/ui/lib/escher/defaults/default_shader_program_factory.h"
 #include "src/ui/lib/escher/impl/command_buffer_pool.h"
 #include "src/ui/lib/escher/impl/frame_manager.h"
@@ -109,7 +111,7 @@ Escher::Escher(VulkanDeviceQueuesPtr device, HackFilesystemPtr filesystem,
   sampler_cache_ = std::make_unique<SamplerCache>(resource_recycler_->GetWeakPtr());
 
   descriptor_set_allocator_cache_ =
-      std::make_unique<impl::DescriptorSetAllocatorCache>(vk_device());
+      std::make_unique<impl::DescriptorSetAllocatorCache>(vk_device(), GetWeakPtr());
   pipeline_layout_cache_ = std::make_unique<impl::PipelineLayoutCache>(resource_recycler());
   render_pass_cache_ = std::make_unique<impl::RenderPassCache>(resource_recycler());
   shader_program_factory_ =
@@ -153,18 +155,51 @@ Escher::~Escher() {
   buffer_cache_.reset();
 }
 
-bool Escher::Cleanup() {
-  TRACE_DURATION("gfx", "Escher::Cleanup");
+bool Escher::CleanupCommandBufferPools() {
   bool finished = true;
   finished = command_buffer_pool()->Cleanup() && finished;
   if (auto pool = transfer_command_buffer_pool()) {
     finished = pool->Cleanup() && finished;
   }
-  if (auto pool = protected_command_buffer_pool()) {
+  // Read `protected_command_buffer_pool_` directly: `protected_command_buffer_pool()` would lazily
+  // create a pool, and a pool that was never created holds no pending command buffers.
+  if (auto pool = protected_command_buffer_pool_.get()) {
     finished = pool->Cleanup() && finished;
   }
+  return finished;
+}
+
+bool Escher::Cleanup() {
+  TRACE_DURATION("gfx", "Escher::Cleanup");
+  bool finished = CleanupCommandBufferPools();
   pipeline_builder_->MaybeStorePipelineCacheData();
   return finished;
+}
+
+bool Escher::WaitOnOldestPendingCommandBuffer(uint64_t timeout_nanoseconds) {
+  impl::CommandBufferPool* const pools[] = {
+      command_buffer_pool_.get(),
+      transfer_command_buffer_pool_.get(),
+      protected_command_buffer_pool_.get(),
+  };
+  impl::CommandBufferPool* oldest_pool = nullptr;
+  uint64_t oldest_sequence_number = std::numeric_limits<uint64_t>::max();
+  for (impl::CommandBufferPool* pool : pools) {
+    if (!pool) {
+      continue;
+    }
+    const uint64_t seq = pool->OldestPendingSequenceNumber();
+    if (seq != 0 && seq < oldest_sequence_number) {
+      oldest_sequence_number = seq;
+      oldest_pool = pool;
+    }
+  }
+  if (!oldest_pool) {
+    return false;
+  }
+  TRACE_DURATION("gfx", "escher::Escher::WaitOnOldestPendingCommandBuffer", "sequence_number",
+                 oldest_sequence_number);
+  return oldest_pool->WaitOnOldestPendingCommandBuffer(timeout_nanoseconds);
 }
 
 void Escher::set_pipeline_builder(std::unique_ptr<PipelineBuilder> pipeline_builder) {
@@ -246,16 +281,17 @@ FramePtr Escher::NewFrame(const char* trace_literal, uint64_t frame_number, bool
                           escher::CommandBuffer::Type requested_type, bool use_protected_memory) {
   TRACE_DURATION("gfx", "escher::Escher::NewFrame");
 
-  // Check the type before cycling the framebuffer/descriptor-set allocators.
-  // Without these checks it is possible to write into a Vulkan resource before
-  // it is finished being used in a previous frame.
+  // Transfer `Frame`s (such as GPU uploads and downloads) do not bind
+  // descriptor sets or pipeline layouts, so skip `BeginFrame()` to avoid
+  // prematurely aging cached graphics and compute entries toward eviction.
   // TODO(https://fxbug.dev/42151346): The correct solution is not to use multiple Frames per frame.
   if (requested_type != CommandBuffer::Type::kTransfer) {
-    // TODO(https://fxbug.dev/42152389): Nothing calls Clear() on the DescriptorSetAllocators, so
-    // their internal allocations are currently able to grow without bound.
-    // DescriptorSets are not managed by ResourceRecyclers, so just
-    // adding a call to Clear() here would be dangerous.
-    descriptor_set_allocator_cache_->BeginFrame();
+    // TODO(https://fxbug.dev/42152389): `DescriptorSetAllocator` pools never
+    // shrink because nothing calls `Clear()` on them, and `Clear()` is not
+    // synchronized with the GPU. Reuse of individual descriptor sets is gated
+    // on command buffer completion.
+    descriptor_set_allocator_cache_->BeginFrame(
+        command_buffer_sequencer_->last_finished_sequence_number());
     pipeline_layout_cache_->BeginFrame();
   }
 

@@ -1,0 +1,47 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//third_party/cobalt:metrics_registry.bzl", "metrics_registry")
+
+package(default_applicable_licenses = ["//:license"])
+
+# SOURCES
+fx_cc_library(
+    name = "cobalt",
+    srcs = [
+        "event.cc",
+        "logger.cc",
+    ],
+    hdrs = [
+        "event.h",
+        "logger.h",
+        "metrics.h",
+    ],
+    implementation_deps = [
+        "//sdk/lib/syslog/cpp",
+        "//src/lib/fxl",
+    ],
+    visibility = ["//src/developer/forensics:__subpackages__"],
+    deps = [
+        ":metrics_registry",
+        "//sdk/fidl/fuchsia.metrics:fuchsia.metrics_cpp",
+        "//sdk/lib/fit",
+        "//sdk/lib/sys/cpp",
+        "//src/lib/backoff",
+        "//src/lib/timekeeper",
+        "//src/lib/timekeeper:system",
+    ],
+    alwayslink = True,
+)
+
+metrics_registry(
+    name = "metrics_registry",
+    generate_binarypb = False,
+    generate_cc = True,
+    namespace = "cobalt_registry",
+    # This must match the ID of our Cobalt project as specified in:
+    # third_party/cobalt_config/projects.yaml
+    project_id = 4228153068,
+)

@@ -10,13 +10,11 @@ assert(current_cpu == "arm64",
        "The qemu-arm64 board can only be defined in an arm64 toolchain.")
 
 bazel_board_configuration("qemu-arm64") {
-  testonly = true
   bazel_board_configuration_target = "//boards/qemu-arm64"
   deps = [ ":qemu-arm64.bazel_input" ]
 }
 
 group("qemu-arm64.bazel_input") {
-  testonly = true
   deps = [
     "//boards/arm64:main_bundle.bazel_inputs",
     "//boards/emulation/virtio:virtio.bazel_inputs",

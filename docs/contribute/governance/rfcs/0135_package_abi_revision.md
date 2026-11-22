@@ -63,7 +63,7 @@ user-facing file names to the underlying content addressed blobs. This is used
 by the packaging system to download package contents, and construct a namespace
 hierarchy. It also contains custom user-provided files.
 
-## Design
+## Design {:#design}
 
 This design introduces the notion of a _package ABI revision_, which is the
 target ABI revision of the Fuchsia platform interface used by a package. This
@@ -115,7 +115,7 @@ new API levels by setting up a test roller that experimentally advances the
 target API level and sees if anything fails. This could feed back into platform
 bug reports if these failures were unexpected.
 
-### System update considerations
+### System update considerations {:#system-update-considerations}
 
 In order for a Fuchsia device to update from one release to another, the
 _system updater_ resolves a special package known as the _update package_. This
@@ -436,9 +436,9 @@ macOS applications target the OS version by specifying the
 iOS applications target the OS version by specifying the [MinimumOSVersion] in
 the application bundle's `Info.plist` file.
 
-[ABI revision]: 0002_platform_versioning.md#abi_revision
-[API level]: 0002_platform_versioning.md#api_level
-[FAR index chunk]: /docs/development/source_code/archive_format.md#index_chunk
+[ABI revision]: 0002_platform_versioning.md#abi-revision
+[API level]: 0002_platform_versioning.md#api-level
+[FAR index chunk]: /docs/development/source_code/archive_format.md#index-chunk
 [Fuchsia System Interface]: /docs/concepts/kernel/system.md
 [LSMinimumSystemVersion]: https://developer.apple.com/documentation/bundleresources/information_property_list/lsminimumsystemversion?language=objc
 [MinimumOSVersion]: https://developer.apple.com/documentation/bundleresources/information_property_list/minimumosversion?language=objc
@@ -453,6 +453,6 @@ the application bundle's `Info.plist` file.
 [package]: /docs/concepts/packages/package.md
 [packaging documentation]: /docs/concepts/packages/package.md
 [persistent-FIDL packaging metadata]: https://fuchsia-review.googlesource.com/c/fuchsia/+/586937
-[system image]: 0072_standalone_image_assembly_tool.md#system_image_artifacts
+[system image]: 0072_standalone_image_assembly_tool.md#system-image-artifacts
 [uses-sdk]: https://developer.android.com/guide/topics/manifest/uses-sdk-element
 [zstd]: https://github.com/facebook/zstd

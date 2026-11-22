@@ -19,7 +19,7 @@ if (toolchain_environment == "kernel.phys") {
       "//zircon/kernel/lib/code-patching",
       "//zircon/kernel/lib/ktl",
       "//zircon/kernel/lib/libc/string/arch/x86:headers",
-      "//zircon/kernel/phys:symbolize",
+      "//zircon/kernel/phys/runtime",
       "//zircon/system/ulib/hwreg",
     ]
   }

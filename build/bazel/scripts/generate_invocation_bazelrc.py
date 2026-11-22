@@ -9,11 +9,12 @@ import argparse
 import dataclasses
 import os
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 _DEFAULT_FUCHSIA_DIR = Path(__file__).resolve().parent.parent.parent.parent
 
+from build.auth import auth_env
 from build.bazel.scripts import bazel_invocation as bazel_inv
 from build.rbe import casfs
 from build.resultstore import related_invocations as rel_inv
@@ -80,8 +81,8 @@ def _jiri_prebuilt_bazelrc(env: Mapping[str, str]) -> Iterable[str]:
 
 def _auth_bazelrc(env: Mapping[str, str]) -> Iterable[str]:
     """Generates bazelrc lines for authentication (e.g. gcertauth)."""
-    rbe_auth = env.get("FX_BUILD_RBE_AUTH_TYPE", "")
-    rs_auth = env.get("FX_BUILD_RS_AUTH_TYPE", "")
+    rbe_auth = auth_env.rbe_auth_type(env)
+    rs_auth = auth_env.rs_auth_type(env)
     yield from bazel_inv.generate_auth_bazelrc(rbe_auth, rs_auth)
 
 
@@ -220,7 +221,7 @@ def generate_invocation(
     )
 
 
-def main(argv: list[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--output-bazelrc",
@@ -255,7 +256,7 @@ def main(argv: list[str]) -> int:
     )
 
     config = generate_invocation(
-        os.environ,
+        env,
         invocation_id=args.invocation_id or None,
         log_dir=log_dir,
     )
@@ -290,4 +291,4 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

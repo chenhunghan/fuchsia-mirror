@@ -20,10 +20,12 @@ use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::mm::MemoryAccessorExt;
 use starnix_core::mm::memory::MemoryObject;
 use starnix_core::task::{ArgNameAndValue, CurrentTask, Kernel};
+use starnix_core::vfs::pseudo::simple_directory::SimpleDirectoryMutator;
 use starnix_core::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use starnix_core::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use starnix_core::vfs::{
-    CloseFreeSafe, FileObject, FileOps, NamespaceNode, fileops_impl_memory, fileops_impl_noop_sync,
+    CloseFreeSafe, DEFAULT_BYTES_PER_BLOCK, FileObject, FileOps, NamespaceNode,
+    fileops_impl_memory, fileops_impl_noop_sync,
 };
 use starnix_logging::{bug_ref, log_info, log_warn, track_stub};
 use starnix_sync::{
@@ -132,9 +134,9 @@ impl Framebuffer {
             DeviceMetadata::new("fb0".into(), DeviceId::FB0, DeviceMode::Char),
             graphics_class,
             FramebufferDevice { framebuffer: framebuffer.clone() },
-        );
+        )?;
 
-        register_display_stub_devices(registry);
+        register_display_stub_devices(registry)?;
 
         Ok(framebuffer)
     }
@@ -300,7 +302,7 @@ impl DeviceOps for FramebufferDevice {
         }
         node.entry.node.update_info(|info| {
             info.size = self.framebuffer.memory_len();
-            info.blocks = self.framebuffer.memory_size() / info.blksize;
+            info.blocks = self.framebuffer.memory_size() / DEFAULT_BYTES_PER_BLOCK;
             Ok(())
         })?;
         Ok(Box::new(Arc::clone(&self.framebuffer)))
@@ -383,7 +385,7 @@ impl FileOps for Framebuffer {
 }
 
 /// Registers stub DRM display controller, connector, and panel backlight devices in sysfs.
-fn register_display_stub_devices(registry: &DeviceRegistry) {
+fn register_display_stub_devices(registry: &DeviceRegistry) -> Result<(), Errno> {
     let objects = &registry.objects;
     let platform_bus = objects.platform_bus();
     let soc = objects.soc_device();
@@ -394,14 +396,14 @@ fn register_display_stub_devices(registry: &DeviceRegistry) {
         Some(soc),
         platform_bus,
         build_device_directory,
-    );
+    )?;
     let drm_class = objects.get_or_create_class("drm".into());
     let card0 = registry.add_numberless_device(
         "card0".into(),
         Some(mdss_mdp.clone()),
         drm_class.clone(),
         build_device_directory,
-    );
+    )?;
     registry.add_numberless_device(
         "sde-conn-0-DSI-1".into(),
         Some(card0.clone()),
@@ -419,8 +421,8 @@ fn register_display_stub_devices(registry: &DeviceRegistry) {
                 mode!(IFREG, 0o644),
             );
         },
-    );
-    registry.add_numberless_device("card0-DSI-1".into(), Some(card0), drm_class, |device, dir| {
+    )?;
+    let build_dsi = |device: &_, dir: &SimpleDirectoryMutator| {
         build_device_directory(device, dir);
         dir.subdir("panel", 0o755, |dir| {
             dir.entry(
@@ -432,7 +434,8 @@ fn register_display_stub_devices(registry: &DeviceRegistry) {
                 mode!(IFREG, 0o444),
             );
         });
-    });
+    };
+    registry.add_numberless_device("card0-DSI-1".into(), Some(card0), drm_class, build_dsi)?;
 
     // TODO(https://fxbug.dev/452096300): Stub panel backlight device parented by the display
     // controller.
@@ -448,7 +451,8 @@ fn register_display_stub_devices(registry: &DeviceRegistry) {
                 mode!(IFREG, 0o444),
             );
         },
-    );
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

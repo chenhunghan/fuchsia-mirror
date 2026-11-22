@@ -24,8 +24,7 @@ fx_cc_library(
         "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
         "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
         "//sdk/lib/component/incoming/cpp",
-        # Bazel depends on cpp_library, but GN expects the cpp group alias.
-        "//sdk/lib/sys/component/cpp/testing:cpp_library",  # @bazel2gn:path_overwrite://sdk/lib/sys/component/cpp/testing:cpp
+        "//sdk/lib/sys/component/cpp/testing:cpp_library",
     ],
     alwayslink = True,
 )

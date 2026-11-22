@@ -284,17 +284,17 @@ class ThroughputUtilsTest(unittest.TestCase):
     ) -> None:
         passing = _make_measurements(
             phy_possible_mbps=100.0,
-            tcp_tx_phy=80.0,
+            tcp_tx_phy=72.0,
             tcp_rx_phy=85.0,
             udp_tx_phy=90.0,
-            udp_rx_phy=80.0,
+            udp_rx_phy=72.0,
         )
         self.assertFalse(throughput_utils.has_phy_rate_below_target(passing))
         throughput_utils.assert_phy_rate_targets(passing, 100.0, "iris")
 
         failing_direction = _make_measurements(
             phy_possible_mbps=100.0,
-            udp_rx_phy=79.9,
+            udp_rx_phy=71.9,
         )
         self.assertTrue(
             throughput_utils.has_phy_rate_below_target(failing_direction)

@@ -978,7 +978,7 @@ mod test {
         }
         assert_eq!(timers.wake_next_timer(), None);
 
-        timer_futures = vec![];
+        timer_futures.clear();
         create_timers(&timers, &nanos, &mut timer_futures);
 
         // Replace them all in random order.

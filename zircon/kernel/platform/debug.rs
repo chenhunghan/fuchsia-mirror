@@ -4,6 +4,30 @@
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
+#[cfg(console_enabled)]
+use core::ffi::c_int;
+use core::ffi::{c_char, c_void};
+use core::pin::Pin;
+use core::ptr;
+#[cfg(console_enabled)]
+use core::slice;
+use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
+
+use boot_options::BootOptions;
+use debug::dprintf;
+use debug::dprintf::{INFO, dprintf_enabled};
+use handoff::uart_all_Driver;
+#[cfg(any(console_enabled, ktest))]
+use kprint::kprint;
+use ksync::KMutex;
+use lazy_init::{LazyInit, NoCheck};
+use pin_init::{pin_data, pin_init};
+use zbi::KernelDriverIrqFlags;
+use zx_status::Status;
+#[cfg(console_enabled)]
+use zx_types::ZX_ERR_INTERNAL;
+use zx_types::{ZX_OK, ZX_RSRC_KIND_IOPORT, ZX_RSRC_KIND_MMIO, zx_instant_mono_t, zx_status_t};
+
 use crate::arch_rs::InterruptDisableGuard;
 use crate::cbuf::Cbuf;
 #[cfg(console_enabled)]
@@ -17,45 +41,20 @@ use crate::kernel::deadline::{Deadline, SlackMode, TimerSlack};
 use crate::kernel::event::{AutounsignalEvent, Event};
 use crate::kernel::thread::{self, Interruptible};
 use crate::kernel::timer::{Timer, ZX_CLOCK_MONOTONIC};
-use crate::ksync_kernel::declare_singleton_mutex;
+use crate::ksync_kernel::TrackedMutex;
 use crate::platform_rs::timer::{
-    DurationMono, DurationUnknown, InstantBoot, InstantUnknown, current_boot_time,
+    DurationBoot, DurationMono, DurationUnknown, InstantBoot, InstantUnknown, current_boot_time,
     current_mono_time, zx_msec, zx_usec,
 };
 #[cfg(console_enabled)]
 use crate::platform_rs::timer::{zx_nsec, zx_sec};
 use crate::root_resource_filter::root_resource_filter_add_deny_region;
-use boot_options::BootOptions;
-use core::ffi::{c_char, c_int, c_void};
-use core::pin::Pin;
-use core::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
-use core::{ptr, slice};
-use debug::dprintf;
-use debug::dprintf::{INFO, dprintf_enabled};
-#[cfg(any(console_enabled, ktest))]
-use kprint::kprint;
-use lazy_init::LazyInit;
-use pin_init::{pin_data, pin_init};
-use zbi::KernelDriverIrqFlags;
-use zx_status::Status;
-#[cfg(console_enabled)]
-use zx_types::ZX_ERR_INTERNAL;
-use zx_types::{
-    ZX_OK, ZX_RSRC_KIND_IOPORT, ZX_RSRC_KIND_MMIO, zx_instant_boot_t, zx_instant_mono_t,
-    zx_status_t,
-};
 
 const ZBI_KERNEL_DRIVER_IRQ_FLAGS_EDGE_TRIGGERED: u32 = KernelDriverIrqFlags::EDGE_TRIGGERED.bits();
 const ZBI_KERNEL_DRIVER_IRQ_FLAGS_LEVEL_TRIGGERED: u32 =
     KernelDriverIrqFlags::LEVEL_TRIGGERED.bits();
 const ZBI_KERNEL_DRIVER_IRQ_FLAGS_POLARITY_LOW: u32 = KernelDriverIrqFlags::POLARITY_LOW.bits();
 const ZBI_KERNEL_DRIVER_IRQ_FLAGS_POLARITY_HIGH: u32 = KernelDriverIrqFlags::POLARITY_HIGH.bits();
-
-/// Opaque C++ `uart::all::Driver` type.
-#[repr(C)]
-pub struct UartDriver {
-    _opaque: [u8; 0],
-}
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,7 +69,6 @@ enum UartDriverKind {
 #[derive(Clone, Copy, Debug, Default)]
 struct UartDriverInfo {
     kind: UartDriverKind,
-    has_irq: bool,
     irq: u32,
     has_simple_cfg: bool,
     cfg_flags: u32,
@@ -79,17 +77,17 @@ struct UartDriverInfo {
 }
 
 zr::static_assert_size_and_align!(UartDriverKind, 4, 4);
-zr::static_assert_size_and_align!(UartDriverInfo, 40, 8);
+zr::static_assert_size_and_align!(UartDriverInfo, 32, 8);
 
 unsafe extern "C" {
     fn cpp_uart_enabled() -> bool;
-    fn cpp_uart_set_driver(serial: *const UartDriver);
+    fn cpp_uart_set_driver(serial: *const uart_all_Driver);
     fn cpp_uart_unparse(buf: *mut c_char, len: usize) -> usize;
     fn cpp_uart_get_driver_info(out: *mut UartDriverInfo);
     fn cpp_uart_init_interrupt(uart_irq: u32);
     fn cpp_uart_interrupt();
     fn cpp_uart_enable_rx_interrupt();
-    fn cpp_uart_tx_drained() -> bool;
+    fn cpp_uart_tx_drained(lockless: bool) -> bool;
     fn cpp_uart_prepare_for_suspend();
     fn cpp_uart_wakeup_from_suspend();
     fn cpp_uart_read(out_c: *mut u8) -> bool;
@@ -361,7 +359,22 @@ impl KernelIrqProvider {
 // only ever held briefly: it is never held while waiting for in-flight
 // operations to drain, so that callers blocked acquiring it are never blocked
 // indefinitely (Mutex acquisition is not interruptible).
-declare_singleton_mutex!(UartSuspendResumeLock);
+#[ksync::guarded]
+struct UartSuspendResumeLock {
+    #[mutex]
+    lock: KMutex<TrackedMutex>,
+}
+
+static UART_SUSPEND_RESUME_LOCK: LazyInit<UartSuspendResumeLock, NoCheck> = LazyInit::uninit();
+
+impl UartSuspendResumeLock {
+    #[inline]
+    fn get() -> &'static Self {
+        // SAFETY: `UART_SUSPEND_RESUME_LOCK` is initialized in `uart_driver_handoff_early` during
+        // single-threaded early boot before any suspend/resume or halt operations can run.
+        unsafe { UART_SUSPEND_RESUME_LOCK.get_unchecked() }
+    }
+}
 
 /// Signaled whenever the UART is not suspended (or when writes are being
 /// discarded, see below).  Threads performing blocking writes wait on this (see
@@ -417,14 +430,15 @@ fn enable_rx_interrupt_if_pending_after_reopen() {
 }
 
 /// Returns true if all output previously handed to the UART has been
-/// transmitted.  Does not wait.  Used by `platform_serial_suspend` while the gate
-/// is draining.
+/// transmitted, or if the UART is suspended.  Does not wait.  Safe from any
+/// context, including while draining or during a panic (lockless).
 fn uart_tx_drained() -> bool {
     let mut drained = true;
     if G_UART_GATE.try_enter_unless_suspended() {
-        // SAFETY: We have entered `G_UART_GATE` (not suspended).
-        drained = unsafe { cpp_uart_tx_drained() };
-        // We're called by the suspending thread itself, so there's no one to wake.
+        // SAFETY: Entered `G_UART_GATE` (not suspended); `TxDrained` only reads LSR.
+        drained = unsafe { cpp_uart_tx_drained(dlog_panic_started()) };
+        // May be called from the suspending thread itself (no one to wake) or on
+        // halt/panic paths where signaling an event is unsafe.
         G_UART_GATE.exit_without_waking();
     }
     drained
@@ -574,6 +588,78 @@ fn wait_for_tx_drained() -> Result<(), Status> {
     Ok(())
 }
 
+/// Maximum time `platform_serial_drain_tx` waits for the UART hardware
+/// transmitter to drain before giving up (e.g. if TX is wedged by hardware flow
+/// control).  At 115200 8N1 (~11.5 KB/s), 100 ms is ~4.5x the time needed to
+/// drain a full 256-byte hardware TX FIFO.
+const TX_DRAIN_TIMEOUT: DurationBoot = DurationBoot(zx_msec(100));
+
+/// Fallback poll limit for `platform_serial_drain_tx` when the boot clock is
+/// not advancing (e.g. during an early-boot panic before timer hardware is
+/// initialized).
+const TX_DRAIN_MAX_STALLED_CLOCK_POLLS: usize = 1_000_000;
+
+/// Polls `is_drained` with `libarch::r#yield` until it returns `true`,
+/// `timeout` elapses on `now_fn`, or `now_fn` fails to advance for
+/// `max_stalled_polls` consecutive polls.  Returns whether `is_drained`
+/// observed a drained state.
+fn drain_tx_bounded(
+    timeout: DurationBoot,
+    max_stalled_polls: usize,
+    mut now_fn: impl FnMut() -> InstantBoot,
+    mut is_drained: impl FnMut() -> bool,
+) -> bool {
+    if is_drained() {
+        return true;
+    }
+    let start = now_fn();
+    let mut last_now = start;
+    let mut stalled_polls = 0usize;
+    loop {
+        libarch::r#yield();
+        if is_drained() {
+            return true;
+        }
+        let now = now_fn();
+        if now - start >= timeout {
+            return false;
+        }
+        if now <= last_now {
+            stalled_polls += 1;
+            if stalled_polls >= max_stalled_polls {
+                return false;
+            }
+        } else {
+            last_now = now;
+            stalled_polls = 0;
+        }
+    }
+}
+
+/// Polls the debug UART until all previously written output has shifted out of
+/// the hardware transmitter, or a bounded timeout (`TX_DRAIN_TIMEOUT`) elapses.
+///
+/// Intended for system shutdown, reboot, and panic-reboot paths where
+/// `dlog_shutdown` has drained (or bypassed) the software debuglog buffer, or
+/// panic diagnostics have been written directly to the UART, and bytes may
+/// still remain in a deep hardware TX FIFO (such as a 256-byte `dw8250` FIFO).
+///
+/// Avoids scheduler sleep, keeps `G_UART_GATE` and the UART spinlock released
+/// between polls, and bypasses the spinlock during panics, so it is safe in
+/// thread, early-boot, and IRQ-disabled panic contexts.  Returns immediately if
+/// serial output is disabled or suspended.
+pub fn platform_serial_drain_tx() {
+    if !platform_serial_enabled() {
+        return;
+    }
+    let _ = drain_tx_bounded(
+        TX_DRAIN_TIMEOUT,
+        TX_DRAIN_MAX_STALLED_CLOCK_POLLS,
+        current_boot_time,
+        uart_tx_drained,
+    );
+}
+
 /// Suspend all kernel access to the debug UART hardware, on behalf of
 /// `zx_debug_suspend`.
 ///
@@ -618,7 +704,7 @@ pub fn platform_serial_suspend() -> Result<(), Status> {
     }
 
     {
-        ksync::lock!(let _guard = UartSuspendResumeLock::Get().lock());
+        ksync::lock!(let _guard = UartSuspendResumeLock::get().lock_lock());
         if G_UART_GATE.phase() != UartGatePhase::Running {
             return Err(Status::BAD_STATE);
         }
@@ -668,7 +754,7 @@ pub fn platform_serial_suspend() -> Result<(), Status> {
         if let Err(err) = status {
             // We were killed or suspended.  Abandon the suspend operation and
             // release any writers which were refused entry while we were draining.
-            ksync::lock!(let _guard = UartSuspendResumeLock::Get().lock());
+            ksync::lock!(let _guard = UartSuspendResumeLock::get().lock_lock());
             G_UART_GATE.cancel_drain();
             enable_rx_interrupt_if_pending_after_reopen();
             G_UART_RESUMED_EVENT.signal();
@@ -678,7 +764,7 @@ pub fn platform_serial_suspend() -> Result<(), Status> {
         // Hold the lock while finishing the drain and preparing the hardware so
         // that a concurrent resume (which requires the gate to be suspended) cannot
         // touch the hardware until we are done.
-        ksync::lock!(let _guard = UartSuspendResumeLock::Get().lock());
+        ksync::lock!(let _guard = UartSuspendResumeLock::get().lock_lock());
         let finished = {
             // Mask the IRQ as soon as the gate is suspended.  Do this with interrupts
             // disabled on this CPU so that a pending level-triggered IRQ (which the
@@ -721,7 +807,7 @@ pub fn platform_serial_resume() -> Result<(), Status> {
         return Err(Status::NOT_SUPPORTED);
     }
 
-    ksync::lock!(let _guard = UartSuspendResumeLock::Get().lock());
+    ksync::lock!(let _guard = UartSuspendResumeLock::get().lock_lock());
     if G_UART_GATE.phase() != UartGatePhase::Suspended {
         return Err(Status::BAD_STATE);
     }
@@ -768,7 +854,7 @@ pub fn platform_serial_discard_writes_while_suspended() {
     // UartSuspendResumeLock is only ever held briefly (never while waiting for a
     // suspend operation to drain), so acquiring it here cannot block the halt
     // path for long.
-    ksync::lock!(let _guard = UartSuspendResumeLock::Get().lock());
+    ksync::lock!(let _guard = UartSuspendResumeLock::get().lock_lock());
     G_UART_DISCARD_WHILE_SUSPENDED.store(true, Ordering::Relaxed);
     // Wake any blocked writers so that they observe the flag.
     G_UART_RESUMED_EVENT.signal();
@@ -813,11 +899,13 @@ pub fn platform_serial_suspended_at() -> InstantBoot {
 ///
 /// # Safety
 ///
-/// Must be called once during single-threaded early boot with a valid pointer to `serial`.
-pub unsafe fn uart_driver_handoff_early(serial: *const UartDriver) {
+/// Must be called once during single-threaded early boot.
+pub unsafe fn uart_driver_handoff_early(serial: &uart_all_Driver) {
     // SAFETY: Called once during single-threaded early boot before any UART operations wait on
-    // events or use the RX queue or poll timer.
+    // events, acquire `UartSuspendResumeLock`, or use the RX queue or poll timer.
     unsafe {
+        let _ = Pin::static_ref(&UART_SUSPEND_RESUME_LOCK)
+            .init_pin(pin_init!(UartSuspendResumeLock { lock <- KMutex::init() }));
         let _ =
             Pin::static_ref(&G_UART_GATE.drained).init_pin(AutounsignalEvent::init_unsignaled());
         let _ = Pin::static_ref(&G_UART_RESUMED_EVENT).init_pin(Event::init_signaled());
@@ -839,7 +927,19 @@ pub unsafe fn uart_driver_handoff_early(serial: *const UartDriver) {
 }
 
 /// Post-VM handoff for the UART driver.
-pub fn uart_driver_handoff_post_vm(_serial: *const UartDriver) {}
+pub fn uart_driver_handoff_post_vm(_serial: &uart_all_Driver) {}
+
+/// Returns the IRQ vector to register for `irq_num`, or `None` if no IRQ is wired to `irq_num`.
+fn platform_uart_get_irq_number(irq_num: u32) -> Option<u32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        (irq_num != 0).then(|| crate::arch_rs::x86::ioapic::apic_io_isa_to_global(irq_num as u8))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Some(irq_num)
+    }
+}
 
 /// Late handoff for the UART driver (allocates RX buffer and configures interrupts or polling).
 ///
@@ -848,7 +948,7 @@ pub fn uart_driver_handoff_post_vm(_serial: *const UartDriver) {}
 /// Must be called once, after `uart_driver_handoff_early` and after the heap is initialized, and
 /// before anything reads `G_UART_IRQ`, the poll timer, or `RX_QUEUE`. The IRQ handler or poll
 /// timer this function starts is the first such reader.
-pub unsafe fn uart_driver_handoff_late(_serial: *const UartDriver) {
+pub unsafe fn uart_driver_handoff_late(_serial: &uart_all_Driver) {
     // This buffer is needed even when serial is disabled, to prevent uninitialized
     // access to it.
     let layout = core::alloc::Layout::from_size_align(RX_QUEUE_SIZE, 1).unwrap();
@@ -873,11 +973,11 @@ pub unsafe fn uart_driver_handoff_late(_serial: *const UartDriver) {
     let uart_irq = match info.kind {
         UartDriverKind::Mmio => {
             root_resource_filter_add_deny_region(info.io_base, info.io_size, ZX_RSRC_KIND_MMIO);
-            info.has_irq.then_some(info.irq)
+            platform_uart_get_irq_number(info.irq)
         }
         UartDriverKind::Pio => {
             root_resource_filter_add_deny_region(info.io_base, info.io_size, ZX_RSRC_KIND_IOPORT);
-            info.has_irq.then_some(info.irq)
+            platform_uart_get_irq_number(info.irq)
         }
         UartDriverKind::Null => {
             // No IRQ Handler for null driver.
@@ -1235,169 +1335,23 @@ pub extern "C" fn rust_uart_rx_queue_write_char(c: u8) {
     RX_QUEUE.write_char(c);
 }
 
-/// FFI trampoline for [`uart_driver_handoff_early`].
-///
-/// # Safety
-///
-/// Same as [`uart_driver_handoff_early`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_uart_driver_handoff_early(serial: *const UartDriver) {
-    // SAFETY: Caller upholds the safety contract of `uart_driver_handoff_early`.
-    unsafe { uart_driver_handoff_early(serial) };
-}
-
-/// FFI trampoline for [`uart_driver_handoff_post_vm`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_uart_driver_handoff_post_vm(serial: *const UartDriver) {
-    uart_driver_handoff_post_vm(serial);
-}
-
-/// FFI trampoline for [`uart_driver_handoff_late`].
-///
-/// # Safety
-///
-/// Same as [`uart_driver_handoff_late`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_uart_driver_handoff_late(serial: *const UartDriver) {
-    // SAFETY: Caller upholds the safety contract of `uart_driver_handoff_late`.
-    unsafe { uart_driver_handoff_late(serial) };
-}
-
-/// FFI trampoline for [`platform_serial_enabled`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_enabled() -> bool {
-    platform_serial_enabled()
-}
-
-/// FFI trampoline for [`platform_serial_suspend`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_suspend() -> zx_status_t {
-    Status::result_into_raw(platform_serial_suspend())
-}
-
-/// FFI trampoline for [`platform_serial_resume`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_resume() -> zx_status_t {
-    Status::result_into_raw(platform_serial_resume())
-}
-
-/// FFI trampoline for [`platform_serial_discard_writes_while_suspended`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_discard_writes_while_suspended() {
-    platform_serial_discard_writes_while_suspended();
-}
-
-/// FFI trampoline for [`platform_serial_wait_for_resume`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_wait_for_resume(
-    interruptible: Interruptible,
-) -> zx_status_t {
-    Status::result_into_raw(platform_serial_wait_for_resume(interruptible))
-}
-
-/// FFI trampoline for [`platform_serial_is_suspended`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_is_suspended() -> bool {
-    platform_serial_is_suspended()
-}
-
-/// FFI trampoline for [`platform_serial_suspended_at`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_serial_suspended_at() -> zx_instant_boot_t {
-    platform_serial_suspended_at().0
-}
-
-/// FFI trampoline for [`platform_dputs_thread`].
-///
-/// # Safety
-///
-/// When `len > 0` and `str_ptr` is non-null, `str_ptr` must be valid for reads of `len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_dputs_thread(
-    str_ptr: *const c_char,
-    len: usize,
-) -> zx_status_t {
-    if str_ptr.is_null() {
-        return ZX_OK;
-    }
-    // A zero-length write still goes through the gate, so it reports `ZX_ERR_SHOULD_WAIT` while
-    // the UART is suspended.
-    let s: &[u8] = if len == 0 {
-        &[]
-    } else {
-        // SAFETY: `str_ptr` is non-null and the caller guarantees it is valid for `len` bytes.
-        unsafe { slice::from_raw_parts(str_ptr.cast::<u8>(), len) }
-    };
-    platform_dputs_thread(s)
-}
-
-/// FFI trampoline for [`platform_dputs_irq`].
-///
-/// # Safety
-///
-/// When `len > 0` and `str_ptr` is non-null, `str_ptr` must be valid for reads of `len` bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_dputs_irq(str_ptr: *const c_char, len: usize) {
-    if len == 0 || str_ptr.is_null() {
-        return;
-    }
-    // SAFETY: `str_ptr` is non-null and the caller guarantees it is valid for `len` bytes.
-    platform_dputs_irq(unsafe { slice::from_raw_parts(str_ptr.cast::<u8>(), len) });
-}
-
-/// FFI trampoline for [`platform_dgetc`].
-///
-/// # Safety
-///
-/// `c` must be a valid, aligned pointer writable for 1 `c_char`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_dgetc(c: *mut c_char, wait: bool) -> c_int {
-    let mut ch: c_char = 0;
-    let ret = platform_dgetc(&mut ch, wait);
-    if ret > 0 {
-        // SAFETY: Caller guarantees `c` is a valid writable pointer.
-        unsafe { *c = ch };
-    }
-    ret
-}
-
-/// FFI trampoline for [`platform_pgetc`].
-///
-/// # Safety
-///
-/// `c` must be a valid, aligned pointer writable for 1 `c_char`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_platform_pgetc(c: *mut c_char) -> c_int {
-    let mut ch: c_char = 0;
-    let ret = platform_pgetc(&mut ch);
-    if ret == 0 {
-        // SAFETY: Caller guarantees `c` is a valid writable pointer.
-        unsafe { *c = ch };
-    }
-    ret
-}
-
-/// FFI trampoline for [`platform_pputc`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_platform_pputc(c: c_char) {
-    #[allow(clippy::unnecessary_cast)]
-    platform_pputc(c as u8);
-}
-
 /// platform debug UART tests
 #[cfg(ktest)]
 #[unittest::suite(name = "platform_debug")]
 mod tests {
-    use crate::debuglog_rs::{dlog_serial_write, dlog_serial_write_interruptible, serial_write};
+    use core::cell::Cell;
+    use core::sync::atomic::AtomicI32;
+
+    use unittest::{assert_ok, expect_eq, expect_err, expect_false, expect_ok, expect_true};
+    use zr::defer;
+    use zx_types::ZX_ERR_INTERNAL_INTR_KILLED;
+
+    use crate::debuglog_rs::{dlog_serial_write, dlog_serial_write_interruptible};
+    use crate::io::serial_write;
     use crate::kconcurrent::{IRQ_SAVE_OPTION, clt_tag, single_chain_lock_guard_owned};
     use crate::kernel::scheduler_state::ThreadStateKind;
     use crate::kernel::thread::{DEFAULT_PRIORITY, ThreadPtr};
     use crate::platform_rs::timer::InstantMono;
-    use core::cell::Cell;
-    use core::sync::atomic::AtomicI32;
-    use unittest::{assert_ok, expect_eq, expect_err, expect_false, expect_ok, expect_true};
-    use zr::defer;
-    use zx_types::ZX_ERR_INTERNAL_INTR_KILLED;
 
     /// Wait until `thread` has blocked.
     fn wait_until_blocked(thread: ThreadPtr) {
@@ -1643,6 +1597,123 @@ mod tests {
         expect_eq!(Status::INTERRUPTED_RETRY.into_raw(), state.status.load(Ordering::Relaxed));
         expect_true!(platform_serial_is_suspended());
 
+        assert_ok!(platform_serial_resume());
+    }
+
+    /// Verifies bounded TX drain polling behavior and timeout fallbacks.
+    #[test]
+    fn drain_tx_bounded_conditions() {
+        // Immediate drain does not sample the clock or yield.
+        let mut polls = 0usize;
+        let mut clock_reads = 0usize;
+        expect_true!(drain_tx_bounded(
+            DurationBoot(zx_msec(100)),
+            8,
+            || {
+                clock_reads += 1;
+                InstantBoot(0)
+            },
+            || {
+                polls += 1;
+                true
+            },
+        ));
+        expect_eq!(1usize, polls);
+        expect_eq!(0usize, clock_reads);
+
+        // Drains after several polls with an advancing clock.
+        polls = 0;
+        let mut fake_now = InstantBoot(1_000);
+        expect_true!(drain_tx_bounded(
+            DurationBoot(zx_msec(100)),
+            8,
+            || {
+                fake_now = InstantBoot(fake_now.0 + zx_msec(1));
+                fake_now
+            },
+            || {
+                polls += 1;
+                polls >= 4
+            },
+        ));
+        expect_eq!(4usize, polls);
+
+        // Gives up once `timeout` elapses on an advancing clock.
+        polls = 0;
+        clock_reads = 0;
+        fake_now = InstantBoot(0);
+        expect_false!(drain_tx_bounded(
+            DurationBoot(zx_msec(100)),
+            1_000,
+            || {
+                let now = InstantBoot(clock_reads as i64 * zx_msec(30));
+                clock_reads += 1;
+                fake_now = now;
+                now
+            },
+            || {
+                polls += 1;
+                false
+            },
+        ));
+        // Initial check + 4 loop checks at 30 ms, 60 ms, 90 ms, and 120 ms (>= 100 ms).
+        expect_eq!(5usize, polls);
+        expect_true!(fake_now.0 >= zx_msec(100));
+
+        // Gives up after `max_stalled_polls` when the boot clock is not advancing.
+        polls = 0;
+        expect_false!(drain_tx_bounded(
+            DurationBoot(zx_msec(100)),
+            8,
+            || InstantBoot(0),
+            || {
+                polls += 1;
+                false
+            },
+        ));
+        expect_eq!(9usize, polls);
+
+        // Integrates with the live `current_boot_time` clock when a UART never drains.
+        let start = current_boot_time();
+        expect_false!(drain_tx_bounded(
+            DurationBoot(zx_msec(1)),
+            TX_DRAIN_MAX_STALLED_CLOCK_POLLS,
+            current_boot_time,
+            || false,
+        ));
+        expect_true!(current_boot_time() - start >= DurationBoot(zx_msec(1)));
+    }
+
+    /// Verifies `platform_serial_drain_tx` across thread, IRQ-disabled, and suspended states.
+    #[test]
+    fn serial_drain_tx_contexts() {
+        serial_write(b"platform_debug serial_drain_tx\n");
+        platform_serial_drain_tx();
+
+        {
+            let _irqd = InterruptDisableGuard::new();
+            platform_serial_drain_tx();
+            if platform_serial_enabled() && G_UART_GATE.try_enter_unless_suspended() {
+                // SAFETY: Entered `G_UART_GATE` (not suspended); `TxDrained` only reads LSR.
+                let _ = unsafe { cpp_uart_tx_drained(true) };
+                G_UART_GATE.exit_without_waking();
+            }
+        }
+
+        let status = platform_serial_suspend();
+        if status == Err(Status::NOT_SUPPORTED) {
+            kprint!("debug UART suspend not supported, skipping suspended drain check\n");
+            return true;
+        }
+        assert_ok!(status);
+        let _cleanup = defer(|| {
+            if platform_serial_is_suspended() {
+                let _ = platform_serial_resume();
+            }
+        });
+
+        platform_serial_drain_tx();
+        expect_true!(platform_serial_is_suspended());
         assert_ok!(platform_serial_resume());
     }
 }

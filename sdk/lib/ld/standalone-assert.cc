@@ -6,7 +6,8 @@
 
 #include <__verbose_abort>
 
-// TODO(https://fxbug.dev/42080760): These should print something useful instead of just crashing.
+// TODO(https://fxbug.dev/326312148): These should print something useful
+// instead of just crashing.
 
 extern "C" void __assert_fail(const char*, const char*, int, const char*) { __builtin_trap(); }
 

@@ -367,9 +367,9 @@ class Union {
   Union(Union&&) = default;
   Union& operator=(Union&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_typesinprotocols::wire::Union::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -388,7 +388,7 @@ class Union {
   ::test_typesinprotocols::wire::Union::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -409,9 +409,9 @@ class ResourceUnion {
   ResourceUnion(ResourceUnion&& other);
   ResourceUnion& operator=(ResourceUnion&& other);
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kB = 1,  // 0x1
-    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<::fidl_union_tag_t>::max(),
+    _do_not_handle_this__write_a_default_case_instead = ::std::numeric_limits<uint32_t>::max(),
   };
   bool IsUnknown() const {
     return Which() == ::test_typesinprotocols::wire::ResourceUnion::Tag::_do_not_handle_this__write_a_default_case_instead;
@@ -431,7 +431,7 @@ class ResourceUnion {
   void _CloseHandles();
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kB = 1,  // 0x1
   };
@@ -454,7 +454,7 @@ class ProtocolErrorBasicResult {
   ProtocolErrorBasicResult(ProtocolErrorBasicResult&&) = default;
   ProtocolErrorBasicResult& operator=(ProtocolErrorBasicResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -486,7 +486,7 @@ class ProtocolErrorBasicResult {
   ::test_typesinprotocols::wire::ProtocolErrorBasicResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -507,7 +507,7 @@ class ProtocolErrorCompoundResult {
   ProtocolErrorCompoundResult(ProtocolErrorCompoundResult&&) = default;
   ProtocolErrorCompoundResult& operator=(ProtocolErrorCompoundResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -539,7 +539,7 @@ class ProtocolErrorCompoundResult {
   ::test_typesinprotocols::wire::ProtocolErrorCompoundResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -560,7 +560,7 @@ class ProtocolErrorArrayBasicResult {
   ProtocolErrorArrayBasicResult(ProtocolErrorArrayBasicResult&&) = default;
   ProtocolErrorArrayBasicResult& operator=(ProtocolErrorArrayBasicResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -592,7 +592,7 @@ class ProtocolErrorArrayBasicResult {
   ::test_typesinprotocols::wire::ProtocolErrorArrayBasicResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -613,7 +613,7 @@ class ProtocolErrorArrayCompoundResult {
   ProtocolErrorArrayCompoundResult(ProtocolErrorArrayCompoundResult&&) = default;
   ProtocolErrorArrayCompoundResult& operator=(ProtocolErrorArrayCompoundResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -645,7 +645,7 @@ class ProtocolErrorArrayCompoundResult {
   ::test_typesinprotocols::wire::ProtocolErrorArrayCompoundResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -666,7 +666,7 @@ class ProtocolErrorVectorBasicResult {
   ProtocolErrorVectorBasicResult(ProtocolErrorVectorBasicResult&&) = default;
   ProtocolErrorVectorBasicResult& operator=(ProtocolErrorVectorBasicResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -698,7 +698,7 @@ class ProtocolErrorVectorBasicResult {
   ::test_typesinprotocols::wire::ProtocolErrorVectorBasicResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -719,7 +719,7 @@ class ProtocolErrorVectorCompoundResult {
   ProtocolErrorVectorCompoundResult(ProtocolErrorVectorCompoundResult&&) = default;
   ProtocolErrorVectorCompoundResult& operator=(ProtocolErrorVectorCompoundResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -751,7 +751,7 @@ class ProtocolErrorVectorCompoundResult {
   ::test_typesinprotocols::wire::ProtocolErrorVectorCompoundResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -772,7 +772,7 @@ class ProtocolErrorVectorOptionalResult {
   ProtocolErrorVectorOptionalResult(ProtocolErrorVectorOptionalResult&&) = default;
   ProtocolErrorVectorOptionalResult& operator=(ProtocolErrorVectorOptionalResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -804,7 +804,7 @@ class ProtocolErrorVectorOptionalResult {
   ::test_typesinprotocols::wire::ProtocolErrorVectorOptionalResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -825,7 +825,7 @@ class ProtocolErrorArrayVectorNestedResult {
   ProtocolErrorArrayVectorNestedResult(ProtocolErrorArrayVectorNestedResult&&) = default;
   ProtocolErrorArrayVectorNestedResult& operator=(ProtocolErrorArrayVectorNestedResult&&) = default;
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -857,7 +857,7 @@ class ProtocolErrorArrayVectorNestedResult {
   ::test_typesinprotocols::wire::ProtocolErrorArrayVectorNestedResult::Tag Which() const;
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
@@ -879,7 +879,7 @@ class ProtocolErrorResourceResult {
   ProtocolErrorResourceResult(ProtocolErrorResourceResult&& other);
   ProtocolErrorResourceResult& operator=(ProtocolErrorResourceResult&& other);
 
-  enum class Tag : fidl_xunion_tag_t {
+  enum class Tag : fidl_union_tag_t {
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2
   };
@@ -912,7 +912,7 @@ class ProtocolErrorResourceResult {
   void _CloseHandles();
 
  private:
-  enum class Ordinal : fidl_xunion_tag_t {
+  enum class Ordinal : fidl_union_tag_t {
     Invalid = 0,
     kResponse = 1,  // 0x1
     kErr = 2,       // 0x2

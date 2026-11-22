@@ -7,7 +7,7 @@ use crate::client::EstablishRsnaFailureReason;
 use crate::client::event::{self, Event, RsnaCompletionTimeout, RsnaResponseTimeout};
 use crate::client::internal::Context;
 use crate::client::rsn::Rsna;
-use crate::{MlmeRequest, MlmeSink};
+use crate::{MlmeRequest, MlmeSink, sec_assoc_update_name};
 use fidl_fuchsia_wlan_ieee80211 as fidl_ieee80211;
 use fidl_fuchsia_wlan_mlme as fidl_mlme;
 use fuchsia_inspect_contrib::inspect_log;
@@ -798,7 +798,7 @@ fn process_rsna_updates(
                 }
             }
             // TODO(https://fxbug.dev/42103820): We must handle SAE here for FullMAC devices.
-            update => warn!("Unhandled association update: {:?}", update),
+            update => warn!("Unhandled association update: {:?}", sec_assoc_update_name(&update)),
         }
     }
 

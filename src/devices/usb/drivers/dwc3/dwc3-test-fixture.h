@@ -34,6 +34,7 @@
 #include "src/devices/usb/drivers/dwc3/dwc3-regs.h"
 #include "src/devices/usb/drivers/dwc3/dwc3.h"
 #include "src/devices/usb/drivers/dwc3/dwc3_config.h"
+#include "src/lib/testing/predicates/status.h"
 
 namespace dwc3 {
 
@@ -100,6 +101,7 @@ class Dwc3TestHelper {
     return drv.device_state_;
   }
   static void SetPowerOn(Dwc3& drv, bool power_on) { drv.power_on_ = power_on; }
+  static void SetLinkConnected(Dwc3& drv, bool connected) { drv.link_connected_ = connected; }
   static bool HasConnectionLease(const Dwc3& drv) { return drv.connection_lease_.is_valid(); }
   static fuchsia_hardware_usb_descriptor::UsbSpeed GetConnectionSpeed(const Dwc3& drv) {
     return drv.connection_speed_;
@@ -126,6 +128,9 @@ class Dwc3TestHelper {
   static void CmdEpStartTransfer(Dwc3& drv, Dwc3::Endpoint& ep, zx_paddr_t trb_phys) {
     drv.CmdEpStartTransfer(ep, trb_phys);
   }
+  static bool CmdEpUpdateTransfer(Dwc3& drv, Dwc3::Endpoint& ep) {
+    return drv.CmdEpUpdateTransfer(ep);
+  }
   static bool CmdEpEndTransfer(Dwc3& drv, Dwc3::Endpoint& ep, bool cmd_ioc = true) {
     return drv.CmdEpEndTransfer(ep, cmd_ioc);
   }
@@ -135,6 +140,24 @@ class Dwc3TestHelper {
     drv.CmdStartNewConfig(ep, rsrc_id_base);
   }
   static void CmdEpTransferConfig(Dwc3& drv, Dwc3::Endpoint& ep) { drv.CmdEpTransferConfig(ep); }
+  static void SetInterruptModeration(Dwc3& drv, uint32_t imodi) {
+    drv.interrupt_moderation_ = imodi;
+  }
+  static uint32_t GetInterruptModeration(Dwc3& drv) { return drv.interrupt_moderation_; }
+  static void StartEvents(Dwc3& drv) { drv.StartEvents(); }
+  static zx::result<> PushEventToFifo(Dwc3& drv, uint32_t event) {
+    if (drv.event_fifo_.TotalSlots() == 0) {
+      if (zx::result res = drv.event_fifo_.Init(drv.bti_, /*cached=*/true); res.is_error()) {
+        return res;
+      }
+    }
+    uint32_t* slot = drv.event_fifo_.Fifo<uint32_t>::Advance(drv.event_fifo_.write_);
+    *slot = event;
+    if (drv.event_fifo_.Write(slot, 1) == 0) {
+      return zx::error(ZX_ERR_IO);
+    }
+    return zx::ok();
+  }
   static zx::result<> InitFifo(Dwc3& drv, uint8_t ep_num, bool cached = true) {
     auto* uep = drv.get_user_endpoint(ep_num);
     if (!uep)
@@ -367,6 +390,7 @@ class Dwc3TestHelper {
   static void HandleResetEvent(Dwc3& drv) { drv.HandleResetEvent(); }
   static uint8_t GetEp0TestMode(const Dwc3& drv) { return drv.ep0_.test_mode; }
   static uint64_t GetConnectFailures(const Dwc3& drv) { return drv.metrics_.connect_failures(); }
+  static uint64_t GetCmdActTimeouts(const Dwc3& drv) { return drv.metrics_.cmd_act_timeouts(); }
 
   static bool IsSharedFifoEmpty(Dwc3& drv) { return drv.ep0_.shared_fifo.IsEmpty(); }
 
@@ -571,24 +595,28 @@ class Environment : public fdf_testing::Environment {
     std::vector<fuchsia_driver_metadata::DictionaryEntry> entries;
     if (interrupt_moderation_us.has_value()) {
       entries.push_back(fuchsia_driver_metadata::DictionaryEntry{{
-          .key = "interrupt-moderation-us",
+          .key = "interrupt_moderation_us",
           .value = fuchsia_driver_metadata::DictionaryValue::WithInt64(*interrupt_moderation_us),
       }});
     }
     if (fladj.has_value()) {
       entries.push_back(fuchsia_driver_metadata::DictionaryEntry{{
-          .key = "quirk-frame-length-adjustment",
+          .key = "quirk_frame_length_adjustment",
           .value = fuchsia_driver_metadata::DictionaryValue::WithInt64(*fladj),
       }});
     }
     if (refclk_lpm_sel) {
       entries.push_back(fuchsia_driver_metadata::DictionaryEntry{{
-          .key = "gfladj-refclk-lpm-sel-quirk",
+          .key = "gfladj_refclk_lpm_sel_quirk",
           .value = fuchsia_driver_metadata::DictionaryValue::WithBoolean(true),
       }});
     }
     dictionary.entries() = std::move(entries);
-    pdev_.AddFidlMetadata("fuchsia.driver.metadata.Dictionary", dictionary);
+    AddDictionaryMetadata("fuchsia.hardware.usb.dwc3.Config", std::move(dictionary));
+  }
+
+  void AddDictionaryMetadata(std::string id, fuchsia_driver_metadata::Dictionary dictionary) {
+    ASSERT_OK(pdev_.AddFidlMetadata(std::move(id), dictionary));
   }
 
   void SetInterruptModerationUs(uint32_t us) { SetDriverMetadata(us); }

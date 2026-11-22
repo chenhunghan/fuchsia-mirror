@@ -1,0 +1,88 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":gunit-runner-smoke-test"],
+    visibility = ["//src/sys:__pkg__"],
+)
+
+rustc_test(
+    name = "tests_bin",
+    srcs = ["tests.rs"],
+    compile_data = [
+        "//src/sys/test_runners/gtest/test_data:sample_tests_golden_events.rsf",
+    ],
+    crate_name = "gunit_runner_integration_test",
+    crate_root = "tests.rs",
+    edition = "2024",
+    deps = [
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust",
+        "//src/lib/fuchsia",
+        "//src/sys/test_manager:test_lib",
+        "//src/sys/test_runners:test_lib",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:maplit",
+        "//third_party/rust_crates/vendor:pretty_assertions",
+    ],
+)
+
+fx_cc_test_binary(
+    name = "gunit_simple_test",
+    srcs = ["simple_test.cc"],
+    deps = [
+        "//src/sys/test_runners/gtest/test_data:gunit_main",
+    ],
+)
+
+fx_packaged_binary(
+    name = "gunit_simple_test_packaged_bin",
+    testonly = True,
+    binary = ":gunit_simple_test",
+    binary_name = "gunit_simple_test",
+)
+
+fx_component_manifest(
+    name = "simple_test_manifest",
+    testonly = True,
+    component_name = "simple_test",
+    includes = [
+        "//sdk/lib/sys/testing:gunit_runner.shard.cml",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/simple_test.cml",
+)
+
+fx_test_component(
+    name = "simple_test_component",
+    compiled_manifest = ":simple_test_manifest",
+    deps = [":gunit_simple_test_packaged_bin"],
+)
+
+fx_package(
+    name = "gunit-runner-smoke-test_package",
+    package_name = "gunit-runner-smoke-test",
+    test_components = [":simple_test_component"],
+)
+
+fx_test(
+    name = "gunit-runner-smoke-test",
+    package = ":gunit-runner-smoke-test_package",
+)

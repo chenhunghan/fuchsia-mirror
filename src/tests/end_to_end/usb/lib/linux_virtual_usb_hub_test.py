@@ -358,10 +358,9 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
             "_get_device_config",
             return_value={"device_serial": "SER123"},
         ):
-            hub, port = test_obj._lookup_usb_power_hub(mock_device)
+            hub = test_obj._lookup_usb_power_hub(mock_device)
 
         self.assertIs(hub, mock_virtual_hub_cls.return_value)
-        self.assertIsNone(port)
         mock_virtual_hub_cls.assert_called_once_with(
             target_serial="SER123",
             bus_id_lookup_attempts=10,
@@ -389,10 +388,9 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
             "_get_device_config",
             return_value={"device_serial": "SER123"},
         ):
-            hub, port = test_obj._lookup_usb_power_hub(mock_device)
+            hub = test_obj._lookup_usb_power_hub(mock_device)
 
         self.assertIs(hub, mock_reset_hub_cls.return_value)
-        self.assertIsNone(port)
         mock_reset_hub_cls.assert_called_once_with(
             target_serial="SER123",
             bus_id_lookup_attempts=linux_virtual_usb_hub.DEFAULT_BUS_ID_LOOKUP_ATTEMPTS,
@@ -434,8 +432,15 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
             usb_power_hub_base_test.UsbPowerHubBaseTest,
             "_get_device_config",
             return_value={
-                "usb_power_hub_hw": "hub",
-                "usb_power_hub_impl": "impl",
+                "auxiliary_devices": {
+                    "usb_power_hub": {
+                        "hardware": {"serial_num": "hub"},
+                        "implementation": {
+                            "module": "fake.module",
+                            "class": "FakeHub",
+                        },
+                    },
+                },
             },
         ) as mock_get_device_config:
             with self.assertRaisesRegex(ValueError, "virtual_usb_hub_mode"):
@@ -452,20 +457,17 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
         mock_hub = mock.create_autospec(
             usb_power_hub.UsbPowerHub, instance=True
         )
-        mock_hub.power_on.side_effect = lambda port=None: events.append(
-            f"power_on:{port}"
-        )
+        mock_hub.power_on.side_effect = lambda: events.append("power_on")
 
         mock_dut = mock.MagicMock()
-        mock_dut.usb_power_hub = mock_hub
-        mock_dut.usb_power_hub_port = 2
+        mock_dut.usb.power_hub = mock_hub
 
         async def _wait_for_online() -> None:
             events.append("wait_for_online")
 
         mock_dut.wait_for_online = mock.AsyncMock(side_effect=_wait_for_online)
-        mock_dut.fuchsia_controller.after_usb_reconnect.side_effect = (
-            lambda: events.append("after_usb_reconnect")
+        mock_dut.usb.after_connect.side_effect = lambda: events.append(
+            "after_connect"
         )
         type(mock_dut).board = mock.PropertyMock(
             side_effect=lambda: events.append("board")
@@ -484,9 +486,9 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             events,
             [
-                "power_on:2",
+                "power_on",
                 "wait_for_online",
-                "after_usb_reconnect",
+                "after_connect",
                 "board",
                 "product",
             ],
@@ -502,15 +504,14 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
 
         mock_dut = mock.MagicMock()
         mock_dut.device_name = "fuchsia-dut"
-        mock_dut.usb_power_hub = None
-        mock_dut.usb_power_hub_port = None
+        mock_dut.usb.power_hub = None
 
         async def _wait_for_online() -> None:
             events.append("wait_for_online")
 
         mock_dut.wait_for_online = mock.AsyncMock(side_effect=_wait_for_online)
-        mock_dut.fuchsia_controller.after_usb_reconnect.side_effect = (
-            lambda: events.append("after_usb_reconnect")
+        mock_dut.usb.after_connect.side_effect = lambda: events.append(
+            "after_connect"
         )
         type(mock_dut).board = mock.PropertyMock(
             side_effect=lambda: events.append("board")
@@ -527,12 +528,11 @@ class UsbPowerHubBaseTestTests(unittest.IsolatedAsyncioTestCase):
             await test_obj.setup_class()
 
         self.assertIsNone(test_obj._usb_power_hub)
-        self.assertIsNone(test_obj._usb_port)
         self.assertEqual(
             events,
             [
                 "wait_for_online",
-                "after_usb_reconnect",
+                "after_connect",
                 "board",
                 "product",
             ],
@@ -660,8 +660,8 @@ class ResetUsbLinkTests(unittest.TestCase):
             reset = mock.Mock()
 
         hub = _ResetHub()
-        usb_reset.reset_usb_link(hub, port=3, off_duration_sec=5)
-        hub.reset.assert_called_once_with(port=3)
+        usb_reset.reset_usb_link(hub, off_duration_sec=5)
+        hub.reset.assert_called_once_with()
         hub.power_off.assert_not_called()
         hub.power_on.assert_not_called()
 
@@ -669,8 +669,6 @@ class ResetUsbLinkTests(unittest.TestCase):
     def test_power_cycles_other_hubs(self, mock_sleep: mock.Mock) -> None:
         """Test other hubs fall back to a power cycle."""
         hub = mock.create_autospec(usb_power_hub.UsbPowerHub, instance=True)
-        usb_reset.reset_usb_link(hub, port=3, off_duration_sec=5)
-        hub.assert_has_calls(
-            [mock.call.power_off(port=3), mock.call.power_on(port=3)]
-        )
+        usb_reset.reset_usb_link(hub, off_duration_sec=5)
+        hub.assert_has_calls([mock.call.power_off(), mock.call.power_on()])
         mock_sleep.assert_called_once_with(5)

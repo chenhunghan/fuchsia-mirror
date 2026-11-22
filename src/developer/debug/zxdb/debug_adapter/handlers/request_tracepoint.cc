@@ -13,13 +13,14 @@
 #include <string>
 #include <vector>
 
+#include <safemath/checked_math.h>
+
 #include "src/developer/debug/zxdb/client/breakpoint_settings.h"
 #include "src/developer/debug/zxdb/client/execution_scope.h"
 #include "src/developer/debug/zxdb/client/process.h"
 #include "src/developer/debug/zxdb/client/session.h"
 #include "src/developer/debug/zxdb/client/system.h"
 #include "src/developer/debug/zxdb/client/tracepoint.h"
-#include "src/developer/debug/zxdb/common/checked_math.h"
 #include "src/developer/debug/zxdb/common/err_or.h"
 #include "src/developer/debug/zxdb/debug_adapter/context.h"
 #include "src/developer/debug/zxdb/debug_adapter/data_id.h"
@@ -232,8 +233,7 @@ ErrOr<TracepointWatchSpec> BuildWatchSpec(DebugAdapterContext* ctx,
 
   // Make sure we'll never overflow, even though |BreakpointSettings::ValidateSize| below will
   // validate that the byte_size is a limited set of small values.
-  if (watch.address &&
-      !CheckedAdd(*watch.address, static_cast<uint64_t>(watch.byte_size)).has_value()) {
+  if (watch.address && !safemath::CheckAdd(*watch.address, watch.byte_size).IsValid()) {
     return Err("Watch address range overflows 64-bit address space.");
   }
   if (Err err = BreakpointSettings::ValidateSize(ctx->session()->arch(), watch.access_type,

@@ -446,6 +446,10 @@ impl<O: OutputSink> LibFuzzerWorkflow<O> {
     // Updates the local copy of the live corpus to match the inputs in the test realm.
     async fn read_corpus(&self) -> Result<()> {
         let output_corpus = self.output_corpus.as_ref().unwrap();
+        fs::create_dir_all(output_corpus).with_context(|| {
+            let path = output_corpus.to_string_lossy();
+            format!("failed to create directory: '{path}'")
+        })?;
         self.controller
             .read_corpus(fuzz::Corpus::Live, output_corpus)
             .await
@@ -706,6 +710,7 @@ mod tests {
         test.output_matches("Using 'tmp/corpus' as the output corpus.");
 
         run_cmd(&fuzz_ctl, &cmdline, &test).await;
+        assert!(fuzzer_dir.abspath("tmp/corpus")?.exists());
 
         let input_path = digest_path(fuzzer_dir.as_path_ref(), Some(FuzzResult::Crash), b"crash");
         let input_path = input_path.strip_prefix(fuzzer_dir.as_path_ref())?;

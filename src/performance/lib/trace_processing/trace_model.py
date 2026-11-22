@@ -97,7 +97,7 @@ class Event:
         start: trace_time.TimePoint,
         pid: int,
         tid: int,
-        args: Mapping[str, Any] | None,
+        args: Mapping[str, Any] | None = None,
     ) -> None:
         # Intern category and name: a trace has few distinct values for each
         # but the importers produce a separate string object per event. See
@@ -120,21 +120,6 @@ class Event:
     def args(self, rhs: Mapping[str, Any] | None) -> None:
         self._args = _read_only_args(rhs)
 
-    def _init_from_dict(self, event_dict: Mapping[str, Any]) -> None:
-        self.category = sys.intern(event_dict["cat"])
-        self.name = sys.intern(event_dict["name"])
-        self.start = trace_time.TimePoint.from_microseconds(event_dict["ts"])
-        self.pid = event_dict["pid"]
-        self.tid = event_dict["tid"]
-        self._args = _read_only_args(event_dict.get("args"))
-
-    @classmethod
-    def _consume_dict(cls, event_dict: dict[str, Any]) -> Self:
-        """Factory-style constructor. Intended for use by subclasses."""
-        instance = cls.__new__(cls)
-        instance._init_from_dict(event_dict)
-        return instance
-
     def end_time(self) -> trace_time.TimePoint | None:
         """Get the ending time for this Event
 
@@ -143,6 +128,20 @@ class Event:
            * None otherwise
         """
         return None
+
+
+def _extract_dict_base_fields(
+    event_dict: Mapping[str, Any],
+) -> tuple[str, str, trace_time.TimePoint, int, int, Mapping[str, Any] | None]:
+    """Extracts common `Event` fields from a Chrome JSON trace event dict."""
+    return (
+        event_dict["cat"],
+        event_dict["name"],
+        trace_time.TimePoint.from_microseconds(event_dict["ts"]),
+        event_dict["pid"],
+        event_dict["tid"],
+        event_dict.get("args"),
+    )
 
 
 class InstantEvent(Event):
@@ -157,10 +156,18 @@ class InstantEvent(Event):
         "t": InstantEventScope.THREAD,
     }
 
-    def __init__(self, scope: InstantEventScope, base: Event) -> None:
-        super().__init__(
-            base.category, base.name, base.start, base.pid, base.tid, base.args
-        )
+    def __init__(
+        self,
+        scope: InstantEventScope,
+        *,
+        category: str,
+        name: str,
+        start: trace_time.TimePoint,
+        pid: int,
+        tid: int,
+        args: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(category, name, start, pid, tid, args)
         self.scope: InstantEventScope = scope
 
     @classmethod
@@ -186,11 +193,18 @@ class InstantEvent(Event):
         scope: InstantEventScope = InstantEvent.INSTANT_EVENT_SCOPE_MAP[
             scope_str
         ]
-
-        instance = cls.__new__(cls)
-        instance._init_from_dict(event_dict)
-        instance.scope = scope
-        return instance
+        category, name, start, pid, tid, args = _extract_dict_base_fields(
+            event_dict
+        )
+        return cls(
+            scope,
+            category=category,
+            name=name,
+            start=start,
+            pid=pid,
+            tid=tid,
+            args=args,
+        )
 
 
 class CounterEvent(Event):
@@ -199,10 +213,18 @@ class CounterEvent(Event):
     # See "Memory layout of the model classes" at the top of this file.
     __slots__ = ("id",)
 
-    def __init__(self, id: int | None, base: Event) -> None:
-        super().__init__(
-            base.category, base.name, base.start, base.pid, base.tid, base.args
-        )
+    def __init__(
+        self,
+        id: int | None,
+        *,
+        category: str,
+        name: str,
+        start: trace_time.TimePoint,
+        pid: int,
+        tid: int,
+        args: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(category, name, start, pid, tid, args)
         self.id: int | None = id
 
     @classmethod
@@ -219,10 +241,18 @@ class CounterEvent(Event):
                     f"parses as int: {event_dict}"
                 ) from t
 
-        instance = cls.__new__(cls)
-        instance._init_from_dict(event_dict)
-        instance.id = id
-        return instance
+        category, name, start, pid, tid, args = _extract_dict_base_fields(
+            event_dict
+        )
+        return cls(
+            id,
+            category=category,
+            name=name,
+            start=start,
+            pid=pid,
+            tid=tid,
+            args=args,
+        )
 
 
 class DurationEvent(Event):
@@ -246,14 +276,18 @@ class DurationEvent(Event):
     def __init__(
         self,
         duration: trace_time.TimeDelta | None,
-        parent: Self | None,
-        child_durations: Sequence[Self],
-        child_flows: Sequence[FlowEvent],
-        base: Event,
+        parent: Self | None = None,
+        child_durations: Sequence[Self] = (),
+        child_flows: Sequence[FlowEvent] = (),
+        *,
+        category: str,
+        name: str,
+        start: trace_time.TimePoint,
+        pid: int,
+        tid: int,
+        args: Mapping[str, Any] | None = None,
     ) -> None:
-        super().__init__(
-            base.category, base.name, base.start, base.pid, base.tid, base.args
-        )
+        super().__init__(category, name, start, pid, tid, args)
         self.duration = duration
         self.parent = parent
         self._child_durations = tuple(child_durations)
@@ -291,13 +325,18 @@ class DurationEvent(Event):
                 float(microseconds)
             )
 
-        instance = cls.__new__(cls)
-        instance._init_from_dict(event_dict)
-        instance.duration = duration
-        instance.parent = None
-        instance._child_durations = ()
-        instance._child_flows = ()
-        return instance
+        category, name, start, pid, tid, args = _extract_dict_base_fields(
+            event_dict
+        )
+        return cls(
+            duration,
+            category=category,
+            name=name,
+            start=start,
+            pid=pid,
+            tid=tid,
+            args=args,
+        )
 
     @typing.override
     def end_time(self) -> trace_time.TimePoint | None:
@@ -318,22 +357,37 @@ class AsyncEvent(Event):
     __slots__ = ("id", "duration")
 
     def __init__(
-        self, id: int, duration: trace_time.TimeDelta | None, base: Event
+        self,
+        id: int,
+        duration: trace_time.TimeDelta | None,
+        *,
+        category: str,
+        name: str,
+        start: trace_time.TimePoint,
+        pid: int,
+        tid: int,
+        args: Mapping[str, Any] | None = None,
     ) -> None:
-        super().__init__(
-            base.category, base.name, base.start, base.pid, base.tid, base.args
-        )
+        super().__init__(category, name, start, pid, tid, args)
         self.id: int = id
         self.duration: trace_time.TimeDelta | None = duration
 
     @classmethod
     def consume_dict(cls, id: int, event_dict: dict[str, Any]) -> Self:
         """Factory-style constructor."""
-        instance = cls.__new__(cls)
-        instance._init_from_dict(event_dict)
-        instance.id = id
-        instance.duration = None
-        return instance
+        category, name, start, pid, tid, args = _extract_dict_base_fields(
+            event_dict
+        )
+        return cls(
+            id,
+            None,
+            category=category,
+            name=name,
+            start=start,
+            pid=pid,
+            tid=tid,
+            args=args,
+        )
 
     @typing.override
     def end_time(self) -> trace_time.TimePoint | None:
@@ -373,14 +427,18 @@ class FlowEvent(Event):
         self,
         id: str,
         phase: FlowEventPhase,
-        enclosing_duration: DurationEvent | None,
-        previous_flow: Self | None,
-        next_flow: Self | None,
-        base: Event,
+        enclosing_duration: DurationEvent | None = None,
+        previous_flow: Self | None = None,
+        next_flow: Self | None = None,
+        *,
+        category: str,
+        name: str,
+        start: trace_time.TimePoint,
+        pid: int,
+        tid: int,
+        args: Mapping[str, Any] | None = None,
     ) -> None:
-        super().__init__(
-            base.category, base.name, base.start, base.pid, base.tid, base.args
-        )
+        super().__init__(category, name, start, pid, tid, args)
         self.id: str = id
         self.phase: FlowEventPhase = phase
         self.enclosing_duration: DurationEvent | None = enclosing_duration
@@ -414,14 +472,20 @@ class FlowEvent(Event):
             )
         phase: FlowEventPhase = FlowEvent.FLOW_EVENT_PHASE_MAP[phase_str]
 
-        instance = cls.__new__(cls)
-        instance._init_from_dict(event_dict)
-        instance.id = id
-        instance.phase = phase
-        instance.enclosing_duration = enclosing_duration
-        instance.previous_flow = None
-        instance.next_flow = None
-        return instance
+        category, name, start, pid, tid, args = _extract_dict_base_fields(
+            event_dict
+        )
+        return cls(
+            id,
+            phase,
+            enclosing_duration=enclosing_duration,
+            category=category,
+            name=name,
+            start=start,
+            pid=pid,
+            tid=tid,
+            args=args,
+        )
 
 
 @total_ordering

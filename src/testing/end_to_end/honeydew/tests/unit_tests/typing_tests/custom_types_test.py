@@ -360,13 +360,11 @@ class CustomTypesTests(unittest.TestCase):
 
     @parameterized.expand(
         [
-            ("empty_strings", "", "", "", None, None, None),
+            ("empty_strings", "", "", None, None),
             (
                 "unknown_strings",
-                "unknown",
-                "<unknown>",
                 "UNKNOWN",
-                None,
+                "<unknown>",
                 None,
                 None,
             ),
@@ -374,12 +372,10 @@ class CustomTypesTests(unittest.TestCase):
                 "whitespace_trimmed",
                 "  SER123\n",
                 " /tmp/sock ",
-                " fb123 ",
                 "SER123",
                 "/tmp/sock",
-                "fb123",
             ),
-            ("none_values", None, None, None, None, None, None),
+            ("none_values", None, None, None, None),
         ]
     )
     def test_device_info_sanitization(
@@ -387,10 +383,8 @@ class CustomTypesTests(unittest.TestCase):
         _: str,
         serial_number: str | None,
         serial_socket: str | None,
-        fastboot_node_id: str | None,
         expected_serial: str | None,
         expected_socket: str | None,
-        expected_fastboot: str | None,
     ) -> None:
         """Test DeviceInfo.__post_init__ sanitizes empty/unknown strings to None."""
         info = custom_types.DeviceInfo(
@@ -398,17 +392,14 @@ class CustomTypesTests(unittest.TestCase):
             serial_number=serial_number,
             address=None,
             serial_socket=serial_socket,
-            fastboot_node_id=fastboot_node_id,
         )
         self.assertEqual(info.serial_number, expected_serial)
         self.assertEqual(info.serial_socket, expected_socket)
-        self.assertEqual(info.fastboot_node_id, expected_fastboot)
 
     @parameterized.expand(
         [
-            ("multiline_serial", "SER1\nSER2", None, None),
-            ("multiline_socket", None, "/tmp/sock1\n/tmp/sock2", None),
-            ("multiline_fastboot", None, None, "fb1\nfb2"),
+            ("multiline_serial", "SER1\nSER2", None),
+            ("multiline_socket", None, "/tmp/sock1\n/tmp/sock2"),
         ]
     )
     def test_device_info_multiline_raises(
@@ -416,7 +407,6 @@ class CustomTypesTests(unittest.TestCase):
         _: str,
         serial_number: str | None,
         serial_socket: str | None,
-        fastboot_node_id: str | None,
     ) -> None:
         """Test DeviceInfo.__post_init__ raises ValueError on multi-line strings."""
         with self.assertRaises(ValueError):
@@ -425,7 +415,6 @@ class CustomTypesTests(unittest.TestCase):
                 serial_number=serial_number,
                 address=None,
                 serial_socket=serial_socket,
-                fastboot_node_id=fastboot_node_id,
             )
 
 

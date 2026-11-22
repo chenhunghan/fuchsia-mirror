@@ -31,7 +31,6 @@ fidl("fuchsia.system.state") {
   sources = [ "system-state-transition.fidl" ]
   sdk_area = "Drivers"
   sdk_category = "partner"
-  enable_hlcpp = true
   enable_rust_next = true
   stable = false
   visibility = [ "*" ]

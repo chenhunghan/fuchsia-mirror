@@ -64,6 +64,7 @@ _COMMON_PROVIDED_FEATURES = [
 
 fuchsia_board_configuration(
     name = "x64",
+    arch = "x64",
     board_input_bundle_sets = [":x64_bibs"],
     board_input_bundles = [
         ":paver",
@@ -84,6 +85,7 @@ fuchsia_board_configuration(
 
 fuchsia_board_configuration(
     name = "reduced_perf_variation",
+    arch = "x64",
     board_input_bundle_sets = [":x64_bibs"],
     board_input_bundles = [
         ":paver",

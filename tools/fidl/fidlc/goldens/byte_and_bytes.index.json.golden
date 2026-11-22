@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/byte_and_bytes.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/byte_and_bytes.test.fidl",
       "data": "test.byteandbytes",
       "start_offset": 8,
       "end_offset": 25
@@ -22,7 +22,7 @@
       "identifier": "test.byteandbytes/ByteAndBytes",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/byte_and_bytes.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/byte_and_bytes.test.fidl",
         "data": "ByteAndBytes",
         "start_offset": 33,
         "end_offset": 45
@@ -32,7 +32,7 @@
           "name": "single_byte",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/byte_and_bytes.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/byte_and_bytes.test.fidl",
             "data": "single_byte",
             "start_offset": 61,
             "end_offset": 72

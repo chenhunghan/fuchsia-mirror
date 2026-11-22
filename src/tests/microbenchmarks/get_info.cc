@@ -8,6 +8,7 @@
 #include <lib/zx/job.h>
 #include <lib/zx/process.h>
 #include <lib/zx/thread.h>
+#include <pthread.h>
 #include <zircon/assert.h>
 #include <zircon/process.h>
 #include <zircon/processargs.h>
@@ -130,25 +131,30 @@ bool GetRuntimeInfoThread(perftest::RepeatState* state) {
 // Measures the time to call zx_object_get_info()/ZX_INFO_TASK_RUNTIME on the current process while
 // two threads rapidly context switch.
 bool GetRuntimeInfoThreadsConcurrent(perftest::RepeatState* state) {
+  constexpr zx_signals_t kPingSignal = ZX_USER_SIGNAL_0;
+  constexpr zx_signals_t kStopSignal = ZX_USER_SIGNAL_1;
+
   zx::eventpair e1, e2;
   ASSERT_OK(zx::eventpair::create(0, &e1, &e2));
 
   pthread_barrier_t start_barrier;
-  pthread_barrier_init(&start_barrier, nullptr, 3);
-
-  std::atomic<bool> done = false;
+  ZX_ASSERT(pthread_barrier_init(&start_barrier, nullptr, 3) == 0);
 
   auto thread_action = [&](zx::eventpair* event, bool first) {
     pthread_barrier_wait(&start_barrier);
     if (first) {
-      ASSERT_OK(event->signal_peer(0, ZX_USER_SIGNAL_0));
+      ASSERT_OK(event->signal_peer(0, kPingSignal));
     }
 
-    do {
-      ASSERT_OK(event->wait_one(ZX_USER_SIGNAL_0, zx::time::infinite(), nullptr));
-      ASSERT_OK(event->signal(ZX_USER_SIGNAL_0, 0));
-      ASSERT_OK(event->signal_peer(0, ZX_USER_SIGNAL_0));
-    } while (!done);
+    for (;;) {
+      zx_signals_t observed = 0;
+      ASSERT_OK(event->wait_one(kPingSignal | kStopSignal, zx::time::infinite(), &observed));
+      if (observed & kStopSignal) {
+        break;
+      }
+      ASSERT_OK(event->signal(kPingSignal, 0));
+      ASSERT_OK(event->signal_peer(0, kPingSignal));
+    }
   };
 
   std::thread t1(thread_action, &e1, true);
@@ -162,9 +168,11 @@ bool GetRuntimeInfoThreadsConcurrent(perftest::RepeatState* state) {
     ASSERT_OK(self->get_info(ZX_INFO_TASK_RUNTIME, &info, sizeof(info), nullptr, nullptr));
   }
 
-  done = true;
+  ASSERT_OK(e1.signal(0, kStopSignal));
+  ASSERT_OK(e2.signal(0, kStopSignal));
   t1.join();
   t2.join();
+  ZX_ASSERT(pthread_barrier_destroy(&start_barrier) == 0);
 
   return true;
 }

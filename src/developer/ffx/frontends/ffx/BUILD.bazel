@@ -2,17 +2,22 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# NOTE: We are intentionally not syncing this file to the BUILD.gn from the same
-# directory, to keep this BUILD.bazel file clean and simple. The GN file relies
-# on complexity from //src/developer/ffx/config.gni, which we've decided to avoid
-# in the Bazel version.
-
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
-load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host:defs.bzl", "rustc_binary_host_tool")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
 load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
 load("//src/developer/ffx/lib/version/build:ffx_apply_version.bzl", "ffx_apply_version")
 
 package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":ffx_bin_unversioned_test",
+    ],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
 
 ffx_plugin(
     name = "ffx_lib",
@@ -23,10 +28,18 @@ ffx_plugin(
     ],
     args_srcs = ["src/args.rs"],
     edition = "2024",
+    # Built-in plugins included directly in the main `ffx` binary (synced to
+    # `BUILD.gn` via `fx bazel2gn`). Other subtools are built independently
+    # (see `//src/developer/ffx/tools:tools`).
     plugin_deps = [
+        "//src/connectivity/network/net-cli/ffx:ffx_net",
         "//src/developer/ffx/plugins/completion:ffx_completion",
         "//src/developer/ffx/plugins/config:ffx_config_plugin",
+        "//src/developer/ffx/plugins/devices:ffx_devices",
+        "//src/developer/ffx/plugins/doctor:ffx_doctor",
+        "//src/developer/ffx/plugins/platform:ffx_platform",
         "//src/developer/ffx/plugins/sdk:ffx_sdk",
+        "//src/developer/ffx/plugins/target:ffx_target",
         "//src/developer/ffx/plugins/version:ffx_version",
     ],
     sdk_category = "not-yet-specified",
@@ -38,12 +51,14 @@ ffx_plugin(
     ],
 )
 
-rustc_binary(
+# Bridged to GN via `bazel_host_tool("ffx_bin_unversioned")` in BUILD.gn.
+# @bazel2gn:skip
+rustc_binary_host_tool(
     name = "ffx_bin_unversioned",
     srcs = ["src/main.rs"],
     crate_name = "ffx_unversioned",
     edition = "2024",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = [
         ":ffx_lib_args",
         ":ffx_lib_sub_command",
@@ -59,8 +74,20 @@ rustc_binary(
     ],
 )
 
+# Bridged to GN via `bazel_host_tool("ffx_bin")` in BUILD.gn.
+# @bazel2gn:skip
 ffx_apply_version(
     name = "ffx",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     unversioned_binary = ":ffx_bin_unversioned",
-    visibility = ["//visibility:public"],
+    visibility = [
+        "//build/bazel/rules/tests:__pkg__",
+        "//src/developer/ffx:__pkg__",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_bin_unversioned_test",
+    crate = ":ffx_bin_unversioned",
+    deps = ["//src/lib/fuchsia"],
 )

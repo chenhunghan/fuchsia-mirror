@@ -34,6 +34,21 @@ using fuchsia_driver_framework::HealthDiagnosticItem;
 using fuchsia_driver_framework::HealthDiagnosticValue;
 using fuchsia_driver_framework::HealthStatus;
 
+// Converts the result of a two-way FIDL call with an error syntax to a zx::result, logging any
+// failure at error.
+template <typename ResultType>
+zx::result<> CheckFidlResult(const ResultType& result, std::string_view action) {
+  if (!result.ok()) {
+    fdf::error("Failed to send request to {}: {}", action, result.status_string());
+    return zx::error(result.status());
+  }
+  if (result->is_error()) {
+    fdf::error("Failed to {}: {}", action, zx_status_get_string(result->error_value()));
+    return zx::error(result->error_value());
+  }
+  return zx::ok();
+}
+
 }  // namespace
 
 bool DwI2c::HasLatchedCondition(std::string_view reason_code) const {
@@ -62,6 +77,30 @@ void DwI2c::RaiseSclStuckLow(uint32_t raw_intr_stat) {
   cond.diagnostics(
       {{HealthDiagnosticItem({.key = std::string(kDiagRawIntrStat),
                               .value = HealthDiagnosticValue::WithUintValue(raw_intr_stat)})}});
+  health_latch_.Raise(std::move(cond));
+}
+
+void DwI2c::RecordPowerUpFailure(std::string_view reason) {
+  ++power_up_failures_;
+  HealthCondition cond;
+  cond.reason_code(std::string(kReasonResumeFailed));
+  cond.status(HealthStatus::kUnhealthy);
+  cond.message("Powering up the I2C controller failed");
+  cond.diagnostics({{HealthDiagnosticItem(
+      {.key = std::string(kDiagReason),
+       .value = HealthDiagnosticValue::WithStringValue(std::string(reason))})}});
+  health_latch_.Raise(std::move(cond));
+}
+
+void DwI2c::RecordPowerReleaseFailure(std::string_view reason) {
+  ++power_down_failures_;
+  HealthCondition cond;
+  cond.reason_code(std::string(kReasonPowerReleaseFailed));
+  cond.status(HealthStatus::kUnhealthy);
+  cond.message("Failed to release I2C controller power resource");
+  cond.diagnostics({{HealthDiagnosticItem(
+      {.key = std::string(kDiagReason),
+       .value = HealthDiagnosticValue::WithStringValue(std::string(reason))})}});
   health_latch_.Raise(std::move(cond));
 }
 
@@ -377,34 +416,35 @@ void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
     return;
   }
 
-  if (auto result = WaitBusBusy(); result.is_error()) {
-    RecordTimeout(kReasonBusBusyTimeout);
-    fdf::error("I2C bus wait failed {}", result.status_value());
+  // A power-up failure has already been logged.
+  if (zx::result result = PowerUp(); result.is_error()) {
     completer.buffer(arena).ReplyError(result.status_value());
     return;
   }
 
-  if (auto result = SetSlaveAddress(request->op[0].address); result.is_error()) {
-    fdf::error("I2C set address failed {}", result.status_value());
-    completer.buffer(arena).ReplyError(result.status_value());
-    return;
-  }
+  zx::result<bool> transfer = RunTransaction(request->op[0].address);
 
-  zx::result<bool> transfer = ExecuteTransact();
+  // The IO is complete, however it completed: keep the controller powered for `autosuspend_delay_`
+  // in case another transaction follows.
+  ScheduleAutosuspend();
+
   if (transfer.is_error()) {
     completer.buffer(arena).ReplyError(transfer.error_value());
     return;
   }
 
-  if (*transfer) {
+  if (*transfer && !HasLatchedCondition(kReasonPowerReleaseFailed)) {
     // A completed transfer proves the controller is powered, clocked, enabled and able to finish
-    // bus I/O, so every fault this driver raises is resolved. ClearAll() emits a single recovery
+    // bus I/O, so every transfer and resume fault is resolved. ClearAll() emits a single recovery
     // alert instead of one per cleared condition.
     health_latch_.ClearAll();
   } else {
-    // The transfer completed but the controller would not disable afterwards: keep the
-    // I2C_DISABLE_TIMEOUT just latched by EnableAndWait() and clear only the faults this transfer
-    // disproved.
+    // Keep any fault this transfer did not disprove: I2C_DISABLE_TIMEOUT when the controller
+    // refused to disable afterwards, and I2C_POWER_RELEASE_FAILED (which is permanent because
+    // leaked votes are never retried).
+    if (*transfer) {
+      health_latch_.Clear(kReasonDisableTimeout);
+    }
     for (std::string_view code :
          {kReasonEnableTimeout, kReasonBusBusyTimeout, kReasonTransactionTimeout,
           kReasonUnclockedMmioRead, kReasonSclStuckLow, kReasonResumeFailed}) {
@@ -417,6 +457,21 @@ void DwI2c::Transact(TransactRequestView request, fdf::Arena& arena,
   } else {
     completer.buffer(arena).ReplySuccess({arena, *reads});
   }
+}
+
+zx::result<bool> DwI2c::RunTransaction(uint16_t address) {
+  if (auto result = WaitBusBusy(); result.is_error()) {
+    RecordTimeout(kReasonBusBusyTimeout);
+    fdf::error("I2C bus wait failed {}", result.status_value());
+    return result.take_error();
+  }
+
+  if (auto result = SetSlaveAddress(address); result.is_error()) {
+    fdf::error("I2C set address failed {}", result.status_value());
+    return result.take_error();
+  }
+
+  return ExecuteTransact();
 }
 
 zx::result<> DwI2c::SetSlaveAddress(uint16_t addr) {
@@ -672,6 +727,9 @@ void DwI2c::SetBitrate(SetBitrateRequestView request, fdf::Arena& arena,
 zx::result<fdf::MmioBuffer> DwI2c::MapMmio(fdf::PDev& pdev) { return pdev.MapMmio(0); }
 
 zx::result<> DwI2c::Start(fdf::DriverContext context) {
+  inspector_.emplace(context.CreateInspector(this));
+  InitInspect();
+
   auto incoming = std::shared_ptr<fdf::Namespace>(context.take_incoming());
   zx::result pdev_client_end =
       incoming->Connect<fuchsia_hardware_platform_device::Service::Device>("pdev");
@@ -682,7 +740,8 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
 
   fdf::PDev pdev{std::move(pdev_client_end.value())};
 
-  // Connect and enable power domain.
+  // Connect to the power domain, clocks and reset. They are only enabled while the controller is
+  // runtime powered (see PowerUp()).
   {
     zx::result domain_client =
         incoming->Connect<fuchsia_hardware_powerdomain::Service::Domain>("power-domain");
@@ -691,18 +750,8 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
       return domain_client.take_error();
     }
     powerdomain_ = fidl::WireSyncClient(std::move(domain_client.value()));
-    auto result = powerdomain_->Enable();
-    if (!result.ok() || result->is_error()) {
-      fdf::error(
-          "Failed to enable power domain: {}",
-          result.ok() ? zx_status_get_string(result->error_value()) : result.status_string());
-      return zx::error(result.ok() ? result->error_value() : result.status());
-    }
   }
-  fit::deferred_action disable_powerdomain_on_failure =
-      fit::defer([this]() { (void)powerdomain_->Disable(); });
 
-  // Connect and enable clocks.
   {
     zx::result clock_bus_client = incoming->Connect<fuchsia_hardware_clock::Service::Clock>("bus");
     if (clock_bus_client.is_error()) {
@@ -710,16 +759,7 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
       return clock_bus_client.take_error();
     }
     clock_bus_ = fidl::WireSyncClient(std::move(clock_bus_client.value()));
-    auto result = clock_bus_->Enable();
-    if (!result.ok() || result->is_error()) {
-      fdf::error("Failed to enable clock-bus: {}", result.ok()
-                                                       ? zx_status_get_string(result->error_value())
-                                                       : result.status_string());
-      return zx::error(result.ok() ? result->error_value() : result.status());
-    }
   }
-  fit::deferred_action disable_clock_bus_on_failure =
-      fit::defer([this]() { (void)clock_bus_->Disable(); });
 
   {
     zx::result clock_regs_client =
@@ -729,18 +769,8 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
       return clock_regs_client.take_error();
     }
     clock_regs_ = fidl::WireSyncClient(std::move(clock_regs_client.value()));
-    auto result = clock_regs_->Enable();
-    if (!result.ok() || result->is_error()) {
-      fdf::error(
-          "Failed to enable clock-registers: {}",
-          result.ok() ? zx_status_get_string(result->error_value()) : result.status_string());
-      return zx::error(result.ok() ? result->error_value() : result.status());
-    }
   }
-  fit::deferred_action disable_clock_regs_on_failure =
-      fit::defer([this]() { (void)clock_regs_->Disable(); });
 
-  // Connect and release reset.
   {
     zx::result reset_client = incoming->Connect<fuchsia_hardware_reset::Service::Reset>("reset");
     if (reset_client.is_error()) {
@@ -748,20 +778,36 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
       return reset_client.take_error();
     }
     reset_ = fidl::WireSyncClient(std::move(reset_client.value()));
-    auto result = reset_->Deassert();
-    if (!result.ok() || result->is_error()) {
-      fdf::error("Failed to deassert reset: {}", result.ok()
-                                                     ? zx_status_get_string(result->error_value())
-                                                     : result.status_string());
-      return zx::error(result.ok() ? result->error_value() : result.status());
-    }
   }
 
   // Pin states are optional; the board only provides them when the controller has pinctrl.
   if (zx::result pin_states_client =
           incoming->Connect<fuchsia_hardware_pin::PinStatesService::Device>("pin-states-0");
       pin_states_client.is_ok()) {
-    pin_states_.emplace(std::move(pin_states_client.value()));
+    pin_states_ = fidl::WireSyncClient(std::move(pin_states_client.value()));
+  }
+
+  // The interrupt controller power domain vote is optional. The composite parent is absent when
+  // the interrupt is routed directly to the GIC, and older interrupt controller drivers do not
+  // offer the service, so probe the connection once and fall back to not voting. With
+  // service_connect_validation, Connect() fails both when there is no interrupt-controller-0 parent
+  // and when the parent does not offer the service; these can't be told apart here, so both are
+  // logged at info. A parent that offers the service but fails the probe is logged at warn: with an
+  // interrupt controller that powers down when idle, transactions would then time out.
+  if (zx::result irq_controller_client =
+          incoming->Connect<fuchsia_hardware_powerdomain::Service::Domain>(
+              "interrupt-controller-0");
+      irq_controller_client.is_error()) {
+    fdf::info("No interrupt controller power domain ({}); not voting for it",
+              irq_controller_client.status_string());
+  } else {
+    fidl::WireSyncClient irq_controller_domain(std::move(irq_controller_client.value()));
+    if (auto result = irq_controller_domain->IsEnabled(); result.ok()) {
+      irq_controller_domain_ = std::move(irq_controller_domain);
+    } else {
+      fdf::warn("Interrupt controller power domain is not available ({}); not voting for it",
+                result.status_string());
+    }
   }
 
   if (zx::result result = metadata_server_.ForwardAndServe(*outgoing(), dispatcher(), pdev);
@@ -797,11 +843,13 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
     }
   }
 
-  // Initialize i2c host controller.
-  if (auto result = HostInit(); result.is_error()) {
+  // Power up and initialize the i2c host controller. This also validates the IP block and reads
+  // the FIFO depths used by GetMaxTransferSize().
+  if (zx::result result = PowerUp(); result.is_error()) {
     fdf::error("failed to initialize i2c host controller {}", result.status_value());
     return result.take_error();
   }
+  auto power_down_on_failure = fit::defer([this]() { (void)PowerDown(); });
 
   if (auto result = ServeI2cImpl(); result.is_error()) {
     fdf::error("Failed to serve i2c impl fidl protocol: {}",
@@ -814,229 +862,287 @@ zx::result<> DwI2c::Start(fdf::DriverContext context) {
     return result.take_error();
   }
 
-  disable_clock_regs_on_failure.cancel();
-  disable_clock_bus_on_failure.cancel();
-  disable_powerdomain_on_failure.cancel();
-  resources_enabled_ = true;
+  power_down_on_failure.cancel();
+
+  // Stay powered while the children bind and start issuing transactions, then runtime suspend once
+  // the bus has been idle for the autosuspend delay.
+  ScheduleAutosuspend();
   return zx::ok();
 }
 
 void DwI2c::Stop(fdf::StopCompleter completer) {
-  if (resources_enabled_) {
-    if (auto result = clock_regs_->Disable(); !result.ok()) {
-      fdf::warn("Failed to send Disable request to clock-registers on stop: {}",
-                result.status_string());
-    } else if (result->is_error()) {
-      fdf::warn("Failed to disable clock-registers on stop: {}",
-                zx_status_get_string(result->error_value()));
+  autosuspend_task_.Cancel();
+  // Make sure no transaction can power the controller up again.
+  i2cimpl_bindings_.RemoveAll();
+  if (powered_) {
+    if (zx::result result = PowerDown(); result.is_error()) {
+      fdf::warn("Failed to power down I2C controller on stop: {}", result);
     }
-    if (auto result = clock_bus_->Disable(); !result.ok()) {
-      fdf::warn("Failed to send Disable request to clock-bus on stop: {}", result.status_string());
-    } else if (result->is_error()) {
-      fdf::warn("Failed to disable clock-bus on stop: {}",
-                zx_status_get_string(result->error_value()));
-    }
-    if (auto result = powerdomain_->Disable(); !result.ok()) {
-      fdf::warn("Failed to send Disable request to power domain on stop: {}",
-                result.status_string());
-    } else if (result->is_error()) {
-      fdf::warn("Failed to disable power domain on stop: {}",
-                zx_status_get_string(result->error_value()));
-    }
-    resources_enabled_ = false;
   }
   completer(zx::ok());
 }
 
 void DwI2c::SystemSuspend(fdf::SuspendCompleter completer) {
-  if (!resources_enabled_) {
-    completer(zx::ok());
-    return;
-  }
-  {
-    auto result = clock_regs_->Disable();
-    if (!result.ok()) {
-      fdf::error("Failed to send Disable request to clock-registers: {}", result.status_string());
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to disable clock-registers: {}",
-                 zx_status_get_string(result->error_value()));
-      completer(result->take_error());
-      return;
+  autosuspend_task_.Cancel();
+  // Even on failure the controller is no longer considered powered, and any failed release is
+  // surfaced in HealthCheck as I2C_POWER_RELEASE_FAILED. Failing suspend would make the driver host
+  // stop the driver (and its children) for no benefit, so only log the failure.
+  if (powered_) {
+    if (zx::result result = PowerDown(); result.is_error()) {
+      fdf::warn("Failed to release all power votes on suspend: {}", result);
     }
   }
-  fit::deferred_action enable_clock_regs_on_failure =
-      fit::defer([this]() { (void)clock_regs_->Enable(); });
-
-  {
-    auto result = clock_bus_->Disable();
-    if (!result.ok()) {
-      fdf::error("Failed to send Disable request to clock-bus: {}", result.status_string());
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to disable clock-bus: {}", zx_status_get_string(result->error_value()));
-      completer(result->take_error());
-      return;
-    }
-  }
-  fit::deferred_action enable_clock_bus_on_failure =
-      fit::defer([this]() { (void)clock_bus_->Enable(); });
-
-  {
-    auto result = powerdomain_->Disable();
-    if (!result.ok()) {
-      fdf::error("Failed to send Disable request to power domain: {}", result.status_string());
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to disable power domain: {}", zx_status_get_string(result->error_value()));
-      completer(result->take_error());
-      return;
-    }
-  }
-
-  enable_clock_bus_on_failure.cancel();
-  enable_clock_regs_on_failure.cancel();
-  resources_enabled_ = false;
   completer(zx::ok());
 }
 
 void DwI2c::SystemResume(std::optional<fuchsia_power_broker::LeaseToken> pe_lease,
                          fdf::ResumeCompleter completer) {
-  auto record_resume_failure = [this](std::string_view reason) {
-    ++resume_failure_count_;
-    const bool was_active = HasLatchedCondition(kReasonResumeFailed);
-    HealthCondition cond;
-    cond.reason_code(std::string(kReasonResumeFailed));
-    cond.status(HealthStatus::kUnhealthy);
-    cond.message("Failed to resume I2C controller");
-    cond.diagnostics({{HealthDiagnosticItem(
-        {.key = std::string(kDiagReason),
-         .value = HealthDiagnosticValue::WithStringValue(std::string(reason))})}});
-    health_latch_.Raise(std::move(cond));
-    // SystemResume runs on the always-on dispatcher veneer while the driver's power-managed
-    // dispatcher is still suspended. The latch's alert is queued on that suspended dispatcher, and
-    // a failed Resume makes driver-host stop the driver without ever resuming it, so the queued
-    // alert would never be delivered. Report the self-fault synchronously on the first failure of
-    // the episode (edge-triggered) so it precedes the Resume error reply on the Driver channel
-    // without flooding alerts on repeated resume retries.
-    if (!was_active) {
-      ReportHealthAlert(
-          fuchsia_driver_framework::HealthAlert::WithSelfFault(health_latch_.ToResponse()));
-    }
-  };
+  // Do not power up eagerly. The next transaction powers the controller up and reinitializes it.
+  completer(zx::ok());
+}
 
-  {
-    auto result = powerdomain_->Enable();
-    if (!result.ok()) {
-      fdf::error("Failed to send Enable request to power domain: {}", result.status_string());
-      record_resume_failure("power-domain Enable FIDL failed");
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to enable power domain: {}", zx_status_get_string(result->error_value()));
-      record_resume_failure("power-domain Enable failed");
-      completer(result->take_error());
-      return;
-    }
-  }
-  fit::deferred_action disable_powerdomain_on_failure =
-      fit::defer([this]() { (void)powerdomain_->Disable(); });
+void DwI2c::set_autosuspend_delay(zx::duration delay) {
+  autosuspend_delay_ = delay;
+  // Transactions run synchronously on the driver dispatcher, so the controller is idle here.
+  ScheduleAutosuspend();
+}
 
-  {
-    auto result = clock_bus_->Enable();
-    if (!result.ok()) {
-      fdf::error("Failed to send Enable request to clock-bus: {}", result.status_string());
-      record_resume_failure("clock-bus Enable FIDL failed");
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to enable clock-bus: {}", zx_status_get_string(result->error_value()));
-      record_resume_failure("clock-bus Enable failed");
-      completer(result->take_error());
-      return;
-    }
-  }
-  fit::deferred_action disable_clock_bus_on_failure =
-      fit::defer([this]() { (void)clock_bus_->Disable(); });
-
-  {
-    auto result = clock_regs_->Enable();
-    if (!result.ok()) {
-      fdf::error("Failed to send Enable request to clock-registers: {}", result.status_string());
-      record_resume_failure("clock-registers Enable FIDL failed");
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to enable clock-registers: {}",
-                 zx_status_get_string(result->error_value()));
-      record_resume_failure("clock-registers Enable failed");
-      completer(result->take_error());
-      return;
-    }
-  }
-  fit::deferred_action disable_clock_regs_on_failure =
-      fit::defer([this]() { (void)clock_regs_->Disable(); });
-
-  {
-    auto result = reset_->Deassert();
-    if (!result.ok()) {
-      fdf::error("Failed to send Deassert request to reset: {}", result.status_string());
-      record_resume_failure("reset Deassert FIDL failed");
-      completer(zx::error(result.status()));
-      return;
-    }
-    if (result->is_error()) {
-      fdf::error("Failed to deassert reset: {}", zx_status_get_string(result->error_value()));
-      record_resume_failure("reset Deassert failed");
-      completer(result->take_error());
-      return;
-    }
-  }
-
-  // The pin configuration may have been lost while the power domain was off. Select the default
-  // pin state again before touching the controller registers.
-  if (pin_states_) {
-    auto result = (*pin_states_)->SelectState("default");
-    if (!result.ok()) {
-      if (!result.is_peer_closed()) {
-        fdf::warn("Failed to send SelectState request: {}", result.status_string());
-      }
-    } else if (result->is_error()) {
-      fdf::warn("Failed to select default pin state: {}",
-                zx_status_get_string(result->error_value()));
-    }
-  }
-
-  if (auto result = HostInit(); result.is_error()) {
-    fdf::error("Failed to initialize i2c host controller: {}", result.status_string());
-    record_resume_failure("HostInit failed");
-    completer(result.take_error());
+void DwI2c::ScheduleAutosuspend() {
+  autosuspend_task_.Cancel();
+  if (!powered_ || autosuspend_delay_ == zx::duration::infinite()) {
     return;
   }
+  if (zx_status_t status = autosuspend_task_.PostDelayed(dispatcher(), autosuspend_delay_);
+      status != ZX_OK) {
+    fdf::warn("Failed to schedule autosuspend: {}", zx_status_get_string(status));
+  }
+}
 
-  disable_clock_regs_on_failure.cancel();
-  disable_clock_bus_on_failure.cancel();
-  disable_powerdomain_on_failure.cancel();
-  // A successful resume re-initializes the controller, so every fault this driver raises is
-  // resolved. `ClearAll()` emits a single recovery alert instead of one per cleared condition.
-  health_latch_.ClearAll();
-  resources_enabled_ = true;
-  completer(zx::ok());
+void DwI2c::OnAutosuspendTimeout() {
+  // TaskClosureMethod only invokes this when the task is dispatched normally (ZX_OK), never when it
+  // is cancelled by dispatcher shutdown. Stop() cancels the task in any case.
+  if (!powered_) {
+    return;
+  }
+  if (zx::result result = PowerDown(); result.is_error()) {
+    fdf::warn("Failed to runtime suspend I2C controller: {}", result);
+  }
+}
+
+zx::result<> DwI2c::AcquireResources(PowerStage& stage, std::string_view& failed_action) {
+  auto check = [&failed_action](const auto& fidl_result, std::string_view action) -> zx::result<> {
+    zx::result<> result = CheckFidlResult(fidl_result, action);
+    if (result.is_error()) {
+      failed_action = action;
+    }
+    return result;
+  };
+
+  if (zx::result result = check(powerdomain_->Enable(), "enable power domain"); result.is_error()) {
+    return result;
+  }
+  stage = PowerStage::kPowerDomain;
+
+  if (irq_controller_domain_.is_valid()) {
+    if (zx::result result =
+            check(irq_controller_domain_->Enable(), "enable interrupt controller power domain");
+        result.is_error()) {
+      return result;
+    }
+  }
+  stage = PowerStage::kIrqController;
+
+  // Enable the APB registers clock (pclk) before the I2C functional clock (ic_clk).
+  if (zx::result result = check(clock_regs_->Enable(), "enable clock-registers");
+      result.is_error()) {
+    return result;
+  }
+  stage = PowerStage::kRegistersClock;
+
+  if (zx::result result = check(clock_bus_->Enable(), "enable clock-bus"); result.is_error()) {
+    return result;
+  }
+  stage = PowerStage::kBusClock;
+
+  if (zx::result result = check(reset_->Deassert(), "deassert reset"); result.is_error()) {
+    return result;
+  }
+  stage = PowerStage::kReset;
+
+  // The pin configuration (including the pin function mux) may have been lost while the power
+  // domain was off, so select the "default" state before touching the controller registers.
+  if (zx::result result = SelectPinState(kDefaultPinState); result.is_error()) {
+    failed_action = "select default pin state";
+    return result;
+  }
+  return zx::ok();
+}
+
+zx::result<> DwI2c::ReleaseResources(PowerStage stage, std::string_view& failed_action) {
+  zx::result<> result = zx::ok();
+  auto check = [&result, &failed_action](const auto& fidl_result, std::string_view action) -> bool {
+    zx::result<> step = CheckFidlResult(fidl_result, action);
+    if (step.is_error()) {
+      if (result.is_ok()) {
+        result = step;
+        failed_action = action;
+      }
+      return false;
+    }
+    return true;
+  };
+
+  bool clock_disable_failed = false;
+  if (stage >= PowerStage::kBusClock) {
+    if (!check(clock_bus_->Disable(), "disable clock-bus")) {
+      clock_disable_failed = true;
+    }
+  }
+  if (stage >= PowerStage::kRegistersClock) {
+    if (!check(clock_regs_->Disable(), "disable clock-registers")) {
+      clock_disable_failed = true;
+    }
+  }
+  // Select the sleep pin state (if any) and hold the controller in reset while it is powered down.
+  if (zx::result step = SelectPinState(kSleepPinState); step.is_error() && result.is_ok()) {
+    result = step;
+    failed_action = "select sleep pin state";
+  }
+  if (stage >= PowerStage::kReset) {
+    (void)check(reset_->Assert(), "assert reset");
+  }
+  if (stage >= PowerStage::kIrqController && irq_controller_domain_.is_valid()) {
+    (void)check(irq_controller_domain_->Disable(), "disable interrupt controller power domain");
+  }
+  // Never disable the power domain while a clock is still enabled.
+  if (stage >= PowerStage::kPowerDomain && !clock_disable_failed) {
+    (void)check(powerdomain_->Disable(), "disable power domain");
+  }
+  return result;
+}
+
+zx::result<> DwI2c::PowerUp() {
+  if (powered_) {
+    // Disarm autosuspend while the caller uses the controller; ScheduleAutosuspend() re-arms it.
+    autosuspend_task_.Cancel();
+    return zx::ok();
+  }
+  ZX_DEBUG_ASSERT(!autosuspend_task_.is_pending());
+
+  PowerStage stage = PowerStage::kOff;
+  std::string_view failed_action;
+  if (zx::result<> result = AcquireResources(stage, failed_action); result.is_error()) {
+    RecordPowerUpFailure(failed_action);
+    std::string_view rollback_failed_action;
+    if (ReleaseResources(stage, rollback_failed_action).is_error()) {
+      RecordPowerReleaseFailure(rollback_failed_action);
+    }
+    return result;
+  }
+
+  // Register state is lost while the power domain is off, so always reinitialize.
+  if (zx::result<> result = HostInit(); result.is_error()) {
+    fdf::error("Failed to initialize i2c host controller: {}", result.status_string());
+    RecordPowerUpFailure("HostInit failed");
+    std::string_view rollback_failed_action;
+    if (ReleaseResources(stage, rollback_failed_action).is_error()) {
+      RecordPowerReleaseFailure(rollback_failed_action);
+    }
+    return result;
+  }
+
+  powered_ = true;
+  ++power_up_count_;
+  // The controller was just reinitialized cleanly, which disproves an earlier power-up failure.
+  health_latch_.Clear(kReasonResumeFailed);
+  return zx::ok();
+}
+
+void DwI2c::QuiesceController() {
+  // Mask and clear all controller interrupts and disable the controller so that no interrupt is
+  // left asserted towards the interrupt controller while power is removed. The interrupt object
+  // stays bound to `irq_port_`; drain anything that was already queued.
+  DisableInterrupts();
+  ClearInterrupts();
+  if (zx::result result = Disable(); result.is_error()) {
+    fdf::warn("Failed to disable I2C controller before powering down: {}", result);
+  }
+  bool irq_needs_ack = false;
+  DrainIrqPort(irq_needs_ack);
+}
+
+zx::result<> DwI2c::SelectPinState(std::string_view state) {
+  if (!pin_states_.is_valid()) {
+    return zx::ok();
+  }
+  const bool is_sleep = state == kSleepPinState;
+  if (is_sleep && !has_sleep_pin_state_) {
+    return zx::ok();
+  }
+  auto result = pin_states_->SelectState(fidl::StringView::FromExternal(state));
+  if (!result.ok()) {
+    if (result.is_peer_closed()) {
+      pin_states_ = {};
+      return zx::ok();
+    }
+    fdf::error("Failed to send SelectState({}) request: {}", state, result.status_string());
+    return zx::error(result.status());
+  }
+  if (result->is_error()) {
+    if (is_sleep && result->error_value() == ZX_ERR_NOT_FOUND) {
+      // Boards are not required to provide a sleep state. Quietly skip it from now on. The pin
+      // states protocol has no way to query the available states up front.
+      has_sleep_pin_state_ = false;
+      return zx::ok();
+    }
+    fdf::error("Failed to select {} pin state: {}", state,
+               zx_status_get_string(result->error_value()));
+    return zx::error(result->error_value());
+  }
+  return zx::ok();
+}
+
+zx::result<> DwI2c::PowerDown() {
+  ZX_DEBUG_ASSERT(powered_);
+  if (!powered_) {
+    return zx::ok();
+  }
+  QuiesceController();
+
+  // From here on the controller is considered unpowered and its registers are never touched,
+  // whatever happens. Every resource is released without retries in reverse order, except that the
+  // power domain is not disabled if a clock Disable failed; any release failure stays latched in
+  // HealthCheck as I2C_POWER_RELEASE_FAILED because leaked votes are never retried.
+  powered_ = false;
+  std::string_view failed_action;
+  zx::result<> result = ReleaseResources(PowerStage::kReset, failed_action);
+  ++power_down_count_;
+  if (result.is_error()) {
+    RecordPowerReleaseFailure(failed_action);
+  }
+  return result;
+}
+
+void DwI2c::InitInspect() {
+  // Values are only computed when Inspect is read. The callback runs on the driver dispatcher,
+  // which serves the inspector.
+  runtime_pm_node_ = inspector_->root().CreateLazyNode("runtime_pm", [this] {
+    inspect::Inspector inspector;
+    inspect::Node& root = inspector.GetRoot();
+    root.RecordBool("powered", powered_);
+    root.RecordBool("irq_controller_vote", powered_ && irq_controller_domain_.is_valid());
+    root.RecordUint("power_up_count", power_up_count_);
+    root.RecordUint("power_down_count", power_down_count_);
+    root.RecordUint("power_up_failures", power_up_failures_);
+    root.RecordUint("power_down_failures", power_down_failures_);
+    return fpromise::make_ok_promise(std::move(inspector));
+  });
 }
 
 std::vector<HealthDiagnosticItem> DwI2c::BuildCommonDiagnostics() const {
   return {
       HealthDiagnosticItem({.key = std::string(kDiagResourcesEnabled),
-                            .value = HealthDiagnosticValue::WithBoolValue(resources_enabled_)}),
+                            .value = HealthDiagnosticValue::WithBoolValue(powered_)}),
       HealthDiagnosticItem({.key = std::string(kDiagTimeoutCount),
                             .value = HealthDiagnosticValue::WithUintValue(timeout_count_)}),
       HealthDiagnosticItem({.key = std::string(kDiagTxAbortCount),
@@ -1044,7 +1150,9 @@ std::vector<HealthDiagnosticItem> DwI2c::BuildCommonDiagnostics() const {
       HealthDiagnosticItem({.key = std::string(kDiagLastAbortSource),
                             .value = HealthDiagnosticValue::WithUintValue(last_abort_source_)}),
       HealthDiagnosticItem({.key = std::string(kDiagResumeFailureCount),
-                            .value = HealthDiagnosticValue::WithUintValue(resume_failure_count_)}),
+                            .value = HealthDiagnosticValue::WithUintValue(power_up_failures_)}),
+      HealthDiagnosticItem({.key = std::string(kDiagPowerReleaseFailureCount),
+                            .value = HealthDiagnosticValue::WithUintValue(power_down_failures_)}),
       HealthDiagnosticItem({.key = std::string(kDiagUnclockedReadCount),
                             .value = HealthDiagnosticValue::WithUintValue(unclocked_read_count_)})};
 }
@@ -1065,19 +1173,16 @@ void DwI2c::HealthCheck(fuchsia_driver_framework::HealthCheckRequest request,
   }
 
   if (request == HealthCheckRequest::kFast) {
-    if (!resources_enabled_ || !mmio_.has_value()) {
-      // The controller is unpowered, so registers cannot be sampled. Keep a latched fault (e.g. a
-      // failed resume) visible to kFast pollers; otherwise report kUnavailable rather than kOk.
-      fuchsia_driver_framework::HealthStatus current_status = health_latch_.status();
-      if (current_status == fuchsia_driver_framework::HealthStatus::kUnhealthy ||
-          current_status == fuchsia_driver_framework::HealthStatus::kDegraded) {
-        HealthCheckResponse response;
-        health_latch_.MergeInto(response);
-        response.diagnostics(BuildCommonDiagnostics());
-        completer(zx::ok(std::move(response)));
-        return;
-      }
-      completer(zx::error(HealthCheckError::kUnavailable));
+    if (!powered_ || !mmio_.has_value()) {
+      // The controller is runtime suspended (or system suspended), so its registers must not be
+      // touched. Being powered down while idle is normal with runtime PM, and powering up just to
+      // sample the registers would defeat it, so kFast falls back to what kPing reports: the
+      // latched faults (e.g. a failed power-up or power-down) and the lifetime counters, with
+      // resources_enabled == false. Faults are only detected while the controller is in use.
+      HealthCheckResponse response;
+      health_latch_.MergeInto(response);
+      response.diagnostics(BuildCommonDiagnostics());
+      completer(zx::ok(std::move(response)));
       return;
     }
 

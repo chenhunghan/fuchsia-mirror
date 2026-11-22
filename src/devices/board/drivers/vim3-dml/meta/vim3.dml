@@ -80,6 +80,7 @@
                 {
                     service: "fuchsia.hardware.i2c.Service",
                     field: "channels",
+                    use_node_name: true,
                 },
             ],
         },
@@ -89,6 +90,71 @@
                 {
                     service: "fuchsia.hardware.registers.Service",
                     field: "registers",
+                    use_node_name: true,
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.amlogiccanvas.Metadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.amlogiccanvas.Service",
+                    field: "consumers",
+                    use_node_name: true,
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.ethernet.board.Metadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.ethernet.board.Service",
+                    field: "consumers",
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.power.DomainMetadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.power.Service",
+                    field: "domains",
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.pwm.PwmChannelsMetadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.pwm.Service",
+                    field: "channels",
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.sdio.Metadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.sdio.Service",
+                    field: "functions",
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.usb.phy.Metadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.usb.phy.Service",
+                    field: "phys",
+                },
+            ],
+        },
+        {
+            metadata_id: "fuchsia.hardware.vreg.Metadata",
+            aggregations: [
+                {
+                    service: "fuchsia.hardware.vreg.Service",
+                    field: "vregs",
                 },
             ],
         },

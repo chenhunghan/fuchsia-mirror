@@ -4,13 +4,13 @@
 
 #include <lib/fake-bti/bti.h>
 #include <lib/stdcompat/optional.h>
+#include <lib/vmo_store/vmo_store.h>
 
 #include <limits>
 
 #include <gtest/gtest.h>
 
 #include "src/lib/testing/predicates/status.h"
-#include "src/lib/vmo_store/vmo_store.h"
 
 namespace vmo_store {
 namespace testing {

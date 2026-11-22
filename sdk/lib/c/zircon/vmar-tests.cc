@@ -4,8 +4,7 @@
 
 #include <lib/fit/defer.h>
 
-#include <zxtest/zxtest.h>
-
+#include "../test/unittest.h"
 #include "vmar.h"
 
 namespace LIBC_NAMESPACE_DECL {
@@ -52,7 +51,7 @@ TEST(LibcVmarTests, GuardedPageBlock) {
   const PageRoundedSize kFourPages = *PageRoundedSize::Pages(4);
 
   zx::result<AllocationVmo> vmo = AllocationVmo::New(kFourPages);
-  ASSERT_TRUE(vmo.is_ok()) << vmo.status_string();
+  ASSERT_OK(vmo);
   EXPECT_EQ(vmo->offset, 0u);
   EXPECT_TRUE(vmo->vmo.is_valid());
   uint64_t vmo_size;
@@ -62,16 +61,16 @@ TEST(LibcVmarTests, GuardedPageBlock) {
   {
     GuardedPageBlock no_guards;
     zx::result result = no_guards.Allocate(AllocationVmar(), *vmo, kTwoPages, kNoGuard, kNoGuard);
-    ASSERT_TRUE(result.is_ok()) << result.status_string();
+    ASSERT_OK(result);
     EXPECT_EQ(vmo->offset, kTwoPages.get());
 
     std::span<std::byte> mapped = *result;
     ASSERT_EQ(mapped.size_bytes(), kTwoPages.get());
     for (size_t i = 0; i < mapped.size(); ++i) {
-      EXPECT_EQ(Launder(&mapped[i]), std::byte{}, "mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), std::byte{}) << "mapped[" << i << "]";
       const std::byte byte{static_cast<uint8_t>(i % 256)};
       mapped[i] = byte;
-      EXPECT_EQ(Launder(&mapped[i]), byte, "mutated mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), byte) << "mutated mapped[" << i << "]";
     }
 
     // Assume nothing else gets mapped after .reset() unmaps it.
@@ -84,16 +83,16 @@ TEST(LibcVmarTests, GuardedPageBlock) {
   {
     GuardedPageBlock two_guards;
     zx::result result = two_guards.Allocate(AllocationVmar(), *vmo, kTwoPages, kOnePage, kOnePage);
-    ASSERT_TRUE(result.is_ok()) << result.status_string();
+    ASSERT_OK(result);
     EXPECT_EQ(vmo->offset, kTwoPages.get());
 
     std::span<std::byte> mapped = *result;
     ASSERT_EQ(mapped.size_bytes(), kTwoPages.get());
     for (size_t i = 0; i < mapped.size(); ++i) {
-      EXPECT_EQ(Launder(&mapped[i]), std::byte{}, "mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), std::byte{}) << "mapped[" << i << "]";
       const std::byte byte{static_cast<uint8_t>(i % 256)};
       mapped[i] = byte;
-      EXPECT_EQ(Launder(&mapped[i]), byte, "mutated mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), byte) << "mutated mapped[" << i << "]";
     }
 
     std::span below{mapped.data() - kOnePage.get(), kOnePage.get()};
@@ -110,16 +109,16 @@ TEST(LibcVmarTests, GuardedPageBlock) {
   {
     GuardedPageBlock guard_below;
     zx::result result = guard_below.Allocate(AllocationVmar(), *vmo, kOnePage, kTwoPages, kNoGuard);
-    ASSERT_TRUE(result.is_ok()) << result.status_string();
+    ASSERT_OK(result);
     EXPECT_EQ(vmo->offset, kOnePage.get());
 
     std::span<std::byte> mapped = *result;
     ASSERT_EQ(mapped.size_bytes(), kOnePage.get());
     for (size_t i = 0; i < mapped.size(); ++i) {
-      EXPECT_EQ(Launder(&mapped[i]), std::byte{}, "mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), std::byte{}) << "mapped[" << i << "]";
       const std::byte byte{static_cast<uint8_t>(i % 256)};
       mapped[i] = byte;
-      EXPECT_EQ(Launder(&mapped[i]), byte, "mutated mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), byte) << "mutated mapped[" << i << "]";
     }
 
     std::span below{mapped.data() - kOnePage.get(), kOnePage.get()};
@@ -132,16 +131,16 @@ TEST(LibcVmarTests, GuardedPageBlock) {
   {
     GuardedPageBlock guard_above;
     zx::result result = guard_above.Allocate(AllocationVmar(), *vmo, kOnePage, kNoGuard, kTwoPages);
-    ASSERT_TRUE(result.is_ok()) << result.status_string();
+    ASSERT_OK(result);
     EXPECT_EQ(vmo->offset, kOnePage.get());
 
     std::span<std::byte> mapped = *result;
     ASSERT_EQ(mapped.size_bytes(), kOnePage.get());
     for (size_t i = 0; i < mapped.size(); ++i) {
-      EXPECT_EQ(Launder(&mapped[i]), std::byte{}, "mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), std::byte{}) << "mapped[" << i << "]";
       const std::byte byte{static_cast<uint8_t>(i % 256)};
       mapped[i] = byte;
-      EXPECT_EQ(Launder(&mapped[i]), byte, "mutated mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), byte) << "mutated mapped[" << i << "]";
     }
 
     std::span above{mapped.data() + mapped.size(), kOnePage.get()};
@@ -154,7 +153,7 @@ TEST(LibcVmarTests, GuardedPageBlock) {
   {
     GuardedPageBlock block;
     zx::result result = block.Allocate(AllocationVmar(), *vmo, kTwoPages, kNoGuard, kNoGuard);
-    ASSERT_TRUE(result.is_ok()) << result.status_string();
+    ASSERT_OK(result);
     EXPECT_EQ(vmo->offset, kTwoPages.get());
 
     std::span<std::byte> mapped = *result;
@@ -175,10 +174,10 @@ TEST(LibcVmarTests, GuardedPageBlock) {
     EXPECT_EQ(reinterpret_cast<std::byte*>(address), mapped.data());
 
     for (size_t i = 0; i < mapped.size(); ++i) {
-      EXPECT_EQ(Launder(&mapped[i]), std::byte{}, "mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), std::byte{}) << "mapped[" << i << "]";
       const std::byte byte{static_cast<uint8_t>(i % 256)};
       mapped[i] = byte;
-      EXPECT_EQ(Launder(&mapped[i]), byte, "mutated mapped[%zu]", i);
+      EXPECT_EQ(Launder(&mapped[i]), byte) << "mutated mapped[" << i << "]";
     }
   }
 }
@@ -196,7 +195,7 @@ TEST(LibcVmarTests, GuardedPageBlockTooLarge) {
   auto cleanup_child = fit::defer([&child_vmar] { child_vmar.destroy(); });
 
   zx::result<AllocationVmo> vmo = AllocationVmo::New(kTwoPages);
-  ASSERT_TRUE(vmo.is_ok()) << vmo.status_string();
+  ASSERT_OK(vmo);
 
   GuardedPageBlock block;
   // Try to allocate 2 pages in a 1 page VMAR.
@@ -215,11 +214,11 @@ TEST(LibcVmarTests, GuardedPageBlockVmarFull) {
   auto cleanup_child = fit::defer([&child_vmar] { child_vmar.destroy(); });
 
   zx::result<AllocationVmo> vmo = AllocationVmo::New(kOnePage);
-  ASSERT_TRUE(vmo.is_ok()) << vmo.status_string();
+  ASSERT_OK(vmo);
 
   GuardedPageBlock block1;
   zx::result result1 = block1.Allocate(child_vmar.borrow(), *vmo, kOnePage, kNoGuard, kNoGuard);
-  ASSERT_TRUE(result1.is_ok()) << result1.status_string();
+  ASSERT_OK(result1);
 
   GuardedPageBlock block2;
   zx::result result2 = block2.Allocate(child_vmar.borrow(), *vmo, kOnePage, kNoGuard, kNoGuard);
@@ -234,7 +233,7 @@ TEST(LibcVmarTests, GuardedPageBlockOverflow) {
   constexpr PageRoundedSize kNoPage{};
 
   zx::result<AllocationVmo> vmo = AllocationVmo::New(kOnePage);
-  ASSERT_TRUE(vmo.is_ok()) << vmo.status_string();
+  ASSERT_OK(vmo);
 
   // Use a very large size that will cause overflow when added.
   // We use half of UINT64_MAX + 1 to guarantee overflow when two are added.

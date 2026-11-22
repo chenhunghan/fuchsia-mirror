@@ -554,7 +554,7 @@ impl DriverDevelopmentService {
     async fn restart_with_dictionary(
         &self,
         moniker: String,
-        dictionary: fidl_fuchsia_component_sandbox::DictionaryRef,
+        dictionary: zx::EventPair,
         responder: fdd::ManagerRestartWithDictionaryResponder,
     ) {
         let (endpoint0, endpoint1) = zx::EventPair::create();

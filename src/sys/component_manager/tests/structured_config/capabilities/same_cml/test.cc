@@ -8,26 +8,22 @@
 
 namespace {
 
-// This test is checking that the CML configuration capability overrides the values set in the
-// CVF.
+// This test checks that configuration capabilities can be declared and routed `from: "self"` in the
+// same CML file.
 TEST(ScTest, CheckValues) {
   config::Config c = config::Config::TakeFromStartupHandle();
-  // CVF sets this to false, CML sets this to true.
   ASSERT_EQ(c.my_flag(), true);
 
-  // CVF sets these integers to 0, CML sets them to incrementing numbers.
   ASSERT_EQ(c.my_uint8(), 8);
   ASSERT_EQ(c.my_uint16(), 16);
   ASSERT_EQ(c.my_uint32(), 32);
   ASSERT_EQ(c.my_uint64(), 64);
 
-  // CVF sets these integers to 0, CML sets them to decrementing numbers.
   ASSERT_EQ(c.my_int8(), -8);
   ASSERT_EQ(c.my_int16(), -16);
   ASSERT_EQ(c.my_int32(), -32);
   ASSERT_EQ(c.my_int64(), -64);
 
-  // CVF sets this to "default", CML sets this to "test".
   ASSERT_EQ(c.my_string(), "test");
 
   ASSERT_EQ(c.my_uint8_vector().size(), 3);

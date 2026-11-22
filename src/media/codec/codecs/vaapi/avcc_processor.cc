@@ -10,10 +10,10 @@
 
 #define LOG(x, ...) fprintf(stderr, __VA_ARGS__)
 
-void AvccProcessor::ProcessOobBytes(const fuchsia::media::FormatDetails& format_details) {
-  if (!format_details.has_oob_bytes())
+void AvccProcessor::ProcessOobBytes(const fuchsia_media::FormatDetails& format_details) {
+  if (!format_details.oob_bytes().has_value())
     return;
-  const auto& oob = format_details.oob_bytes();
+  const auto& oob = format_details.oob_bytes().value();
   if (oob.empty()) {
     return;
   }
@@ -36,7 +36,7 @@ void AvccProcessor::ProcessOobBytes(const fuchsia::media::FormatDetails& format_
 
   // We already checked empty() above.
   ZX_DEBUG_ASSERT(oob.size() >= 1);
-  switch ((oob)[0]) {
+  switch (oob[0]) {
     case 0:
       is_avcc_ = false;
       return;
@@ -66,27 +66,27 @@ void AvccProcessor::ProcessOobBytes(const fuchsia::media::FormatDetails& format_
       // minimum the oob buffer needs to be large enough to contain both the
       // sps_count and pps_count fields, which is a min of 7 bytes.
       if (oob.size() < 7) {
-        LOG(ERROR, "oob->size() < 7");
-        events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+        LOG(ERROR, "oob.size() < 7");
+        events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
         return;
       }
       // All pseudo-NALs in input packet payloads will use the
       // parsed count of bytes of the length field. Convert SPS/PPS inline to AnnexB format so we
       // can return it directly, as ParseVideo won't be called on this data.
-      pseudo_nal_length_field_bytes_ = ((oob)[4] & 0x3) + 1;
-      uint32_t sps_count = (oob)[5] & 0x1F;
+      pseudo_nal_length_field_bytes_ = (oob[4] & 0x3) + 1;
+      uint32_t sps_count = oob[5] & 0x1F;
       uint32_t offset = 6;
       std::vector<uint8_t> accumulation;
       for (uint32_t i = 0; i < sps_count; ++i) {
         if (offset + 2 > oob.size()) {
-          LOG(ERROR, "offset + 2 > oob->size()");
-          events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+          LOG(ERROR, "offset + 2 > oob.size()");
+          events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
           return;
         }
-        uint32_t sps_length = (oob)[offset] * 256 + (oob)[offset + 1];
+        uint32_t sps_length = oob[offset] * 256 + oob[offset + 1];
         if (offset + 2 + sps_length > oob.size()) {
-          LOG(ERROR, "offset + 2 + sps_length > oob->size()");
-          events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+          LOG(ERROR, "offset + 2 + sps_length > oob.size()");
+          events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
           return;
         }
         offset += 2;  // sps_bytes
@@ -100,21 +100,21 @@ void AvccProcessor::ProcessOobBytes(const fuchsia::media::FormatDetails& format_
         offset += sps_length;
       }
       if (offset + 1 > oob.size()) {
-        LOG(ERROR, "offset + 1 > oob->size()");
-        events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+        LOG(ERROR, "offset + 1 > oob.size()");
+        events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
         return;
       }
-      uint32_t pps_count = (oob)[offset++];
+      uint32_t pps_count = oob[offset++];
       for (uint32_t i = 0; i < pps_count; ++i) {
         if (offset + 2 > oob.size()) {
-          LOG(ERROR, "offset + 2 > oob->size()");
-          events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+          LOG(ERROR, "offset + 2 > oob.size()");
+          events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
           return;
         }
-        uint32_t pps_length = (oob)[offset] * 256 + (oob)[offset + 1];
+        uint32_t pps_length = oob[offset] * 256 + oob[offset + 1];
         if (offset + 2 + pps_length > oob.size()) {
-          LOG(ERROR, "offset + 2 + pps_length > oob->size()");
-          events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+          LOG(ERROR, "offset + 2 + pps_length > oob.size()");
+          events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
           return;
         }
         offset += 2;  // pps_bytes
@@ -138,14 +138,14 @@ void AvccProcessor::ProcessOobBytes(const fuchsia::media::FormatDetails& format_
     }
     default:
       LOG(ERROR, "unexpected first oob byte");
-      events_->onCoreCodecFailStream(fuchsia::media::StreamError::INVALID_INPUT_FORMAT_DETAILS);
+      events_->onCoreCodecFailStream(fuchsia_media::StreamError::kInvalidInputFormatDetails);
       return;
   }
 }
 
 std::vector<uint8_t> AvccProcessor::ParseVideoAvcc(const uint8_t* data, size_t data_size) const {
   if (data_size > std::numeric_limits<uint32_t>::max()) {
-    events_->onCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+    events_->onCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
     return {};
   }
   const uint32_t length = static_cast<uint32_t>(data_size);
@@ -173,7 +173,7 @@ std::vector<uint8_t> AvccProcessor::ParseVideoAvcc(const uint8_t* data, size_t d
   while (i < length) {
     if (i + pseudo_nal_length_field_bytes_ > length) {
       LOG(ERROR, "i + pseudo_nal_length_field_bytes_ > length");
-      events_->onCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      events_->onCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return {};
     }
     // Read pseudo_nal_length field, which is a field which can be 1-4 bytes
@@ -185,7 +185,7 @@ std::vector<uint8_t> AvccProcessor::ParseVideoAvcc(const uint8_t* data, size_t d
     i += pseudo_nal_length_field_bytes_;
     if (i + pseudo_nal_length > length) {
       LOG(ERROR, "i + pseudo_nal_length > length");
-      events_->onCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      events_->onCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return {};
     }
     i += pseudo_nal_length;
@@ -203,7 +203,7 @@ std::vector<uint8_t> AvccProcessor::ParseVideoAvcc(const uint8_t* data, size_t d
   while (i < length) {
     if (i + pseudo_nal_length_field_bytes_ > length) {
       LOG(ERROR, "i + pseudo_nal_length_field_bytes_ > length");
-      events_->onCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      events_->onCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return {};
     }
     uint32_t pseudo_nal_length = 0;
@@ -213,7 +213,7 @@ std::vector<uint8_t> AvccProcessor::ParseVideoAvcc(const uint8_t* data, size_t d
     i += pseudo_nal_length_field_bytes_;
     if (i + pseudo_nal_length > length) {
       LOG(ERROR, "i + pseudo_nal_length > length");
-      events_->onCoreCodecFailStream(fuchsia::media::StreamError::DECODER_UNKNOWN);
+      events_->onCoreCodecFailStream(fuchsia_media::StreamError::kDecoderUnknown);
       return {};
     }
 

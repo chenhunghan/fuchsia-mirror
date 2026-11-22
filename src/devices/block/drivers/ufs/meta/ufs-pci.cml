@@ -46,6 +46,13 @@
             availability: "optional",
         },
         {
+            config: "fuchsia.storage.ufs.CommandTimeoutSec",
+            key: "command_timeout_sec",
+            type: "uint32",
+            default: 10,
+            availability: "optional",
+        },
+        {
             config: "fuchsia.storage.ufs.EnableAutoHibernate",
             key: "enable_auto_hibernate",
             type: "bool",

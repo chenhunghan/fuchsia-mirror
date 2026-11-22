@@ -58,6 +58,7 @@
 use core::fmt::{self, Debug, Display, Formatter};
 use core::hash::Hash;
 use core::mem;
+use core::num::NonZeroU32;
 use core::ops::{Deref, DerefMut};
 
 #[cfg(feature = "std")]
@@ -250,7 +251,7 @@ impl IpVersion {
 
 /// The maximum transmit unit, i.e., the maximum size of an entire IP packet
 /// one link can transmit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Mtu(u32);
 
 impl Mtu {
@@ -288,6 +289,192 @@ impl From<Mtu> for usize {
     fn from(Mtu(mtu): Mtu) -> Self {
         mtu.try_into().expect("mtu must fit usize")
     }
+}
+
+/// An IPv4 or IPv6 maximum transmission unit (MTU).
+///
+/// `IpMtu` is implemented by [`Ipv4Mtu`] and [`Ipv6Mtu`], which witness that an
+/// [`Mtu`] is at least [`Ip::MINIMUM_LINK_MTU`] for the corresponding IP
+/// version.
+pub trait IpMtu:
+    Into<Mtu>
+    + Into<u32>
+    + Into<NonZeroU32>
+    + Copy
+    + Clone
+    + Debug
+    + Eq
+    + PartialEq
+    + Ord
+    + PartialOrd
+    + Hash
+    + Send
+    + Sync
+    + GenericOverIp<Ipv4, Type = Ipv4Mtu>
+    + GenericOverIp<Ipv6, Type = Ipv6Mtu>
+    + sealed::Sealed
+    + 'static
+{
+    /// The minimum valid [`Mtu`] for this IP version, equal to
+    /// [`Ip::MINIMUM_LINK_MTU`].
+    const MIN: Self;
+
+    /// The maximum representable [`Mtu`], equal to [`Mtu::max()`].
+    const MAX: Self;
+
+    /// Constructs a new MTU if `mtu` is valid for this IP version.
+    ///
+    /// Returns `Some` if `mtu >= Ip::MINIMUM_LINK_MTU`.
+    fn new(mtu: Mtu) -> Option<Self>;
+
+    /// Gets the inner [`Mtu`].
+    fn get(&self) -> Mtu;
+}
+
+/// An [`Mtu`] that is valid for IPv4.
+///
+/// Guaranteed to be at least [`Ipv4::MINIMUM_LINK_MTU`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ipv4Mtu(Mtu);
+
+impl Ipv4Mtu {
+    /// The minimum valid [`Mtu`] for IPv4.
+    ///
+    /// Equal to [`Ipv4::MINIMUM_LINK_MTU`].
+    pub const MIN: Self = Ipv4::MINIMUM_LINK_MTU;
+
+    /// The maximum representable [`Mtu`], equal to [`Mtu::max()`].
+    pub const MAX: Self = Self(Mtu::max());
+
+    /// Constructs a new `Ipv4Mtu` if valid.
+    ///
+    /// Returns `Some` if `mtu >= Ipv4::MINIMUM_LINK_MTU`.
+    #[inline]
+    pub const fn new(mtu: Mtu) -> Option<Self> {
+        if mtu.get() >= Ipv4::MINIMUM_LINK_MTU.get().get() { Some(Self(mtu)) } else { None }
+    }
+
+    /// Gets the inner [`Mtu`].
+    #[inline]
+    pub const fn get(&self) -> Mtu {
+        let Self(mtu) = self;
+        *mtu
+    }
+}
+
+impl sealed::Sealed for Ipv4Mtu {}
+
+impl IpMtu for Ipv4Mtu {
+    const MIN: Self = Self::MIN;
+    const MAX: Self = Self::MAX;
+
+    #[inline]
+    fn new(mtu: Mtu) -> Option<Self> {
+        Self::new(mtu)
+    }
+
+    #[inline]
+    fn get(&self) -> Mtu {
+        Self::get(self)
+    }
+}
+
+impl From<Ipv4Mtu> for Mtu {
+    #[inline]
+    fn from(mtu: Ipv4Mtu) -> Mtu {
+        mtu.get()
+    }
+}
+
+impl From<Ipv4Mtu> for u32 {
+    #[inline]
+    fn from(mtu: Ipv4Mtu) -> u32 {
+        mtu.get().get()
+    }
+}
+
+impl From<Ipv4Mtu> for NonZeroU32 {
+    #[inline]
+    fn from(mtu: Ipv4Mtu) -> NonZeroU32 {
+        NonZeroU32::new(mtu.get().get()).unwrap()
+    }
+}
+
+impl<I: Ip> GenericOverIp<I> for Ipv4Mtu {
+    type Type = I::Mtu;
+}
+
+/// An [`Mtu`] that is valid for IPv6.
+///
+/// Guaranteed to be at least [`Ipv6::MINIMUM_LINK_MTU`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Ipv6Mtu(Mtu);
+
+impl Ipv6Mtu {
+    /// The minimum valid [`Mtu`] for IPv6.
+    ///
+    /// Equal to [`Ipv6::MINIMUM_LINK_MTU`].
+    pub const MIN: Self = Ipv6::MINIMUM_LINK_MTU;
+
+    /// The maximum representable [`Mtu`], equal to [`Mtu::max()`].
+    pub const MAX: Self = Self(Mtu::max());
+
+    /// Constructs a new `Ipv6Mtu` if valid.
+    ///
+    /// Returns `Some` if `mtu >= Ipv6::MINIMUM_LINK_MTU`.
+    #[inline]
+    pub const fn new(mtu: Mtu) -> Option<Self> {
+        if mtu.get() >= Ipv6::MINIMUM_LINK_MTU.get().get() { Some(Self(mtu)) } else { None }
+    }
+
+    /// Gets the inner [`Mtu`].
+    #[inline]
+    pub const fn get(&self) -> Mtu {
+        let Self(mtu) = self;
+        *mtu
+    }
+}
+
+impl sealed::Sealed for Ipv6Mtu {}
+
+impl IpMtu for Ipv6Mtu {
+    const MIN: Self = Self::MIN;
+    const MAX: Self = Self::MAX;
+
+    #[inline]
+    fn new(mtu: Mtu) -> Option<Self> {
+        Self::new(mtu)
+    }
+
+    #[inline]
+    fn get(&self) -> Mtu {
+        Self::get(self)
+    }
+}
+
+impl From<Ipv6Mtu> for Mtu {
+    #[inline]
+    fn from(mtu: Ipv6Mtu) -> Mtu {
+        mtu.get()
+    }
+}
+
+impl From<Ipv6Mtu> for u32 {
+    #[inline]
+    fn from(mtu: Ipv6Mtu) -> u32 {
+        mtu.get().get()
+    }
+}
+
+impl From<Ipv6Mtu> for NonZeroU32 {
+    #[inline]
+    fn from(mtu: Ipv6Mtu) -> NonZeroU32 {
+        NonZeroU32::new(mtu.get().get()).unwrap()
+    }
+}
+
+impl<I: Ip> GenericOverIp<I> for Ipv6Mtu {
+    type Type = I::Mtu;
 }
 
 /// A trait for IP protocol versions.
@@ -374,7 +561,12 @@ pub trait Ip:
     /// transmission unit (MTU) of at least this many bytes. This MTU applies to
     /// the size of an IP packet, and does not include any extra bytes used by
     /// encapsulating packets (Ethernet frames, GRE packets, etc).
-    const MINIMUM_LINK_MTU: Mtu;
+    const MINIMUM_LINK_MTU: Self::Mtu;
+
+    /// The MTU witness type for this IP version.
+    ///
+    /// [`Ipv4Mtu`] for IPv4 and [`Ipv6Mtu`] for IPv6.
+    type Mtu: IpMtu + GenericOverIp<Self, Type = Self::Mtu>;
 
     /// The address type for this IP version.
     ///
@@ -622,7 +814,8 @@ impl Ip for Ipv4 {
     /// forward a datagram of 68 octets without further fragmentation."
     ///
     /// [RFC 791 Section 3.2]: https://tools.ietf.org/html/rfc791#section-3.2
-    const MINIMUM_LINK_MTU: Mtu = Mtu(68);
+    const MINIMUM_LINK_MTU: Self::Mtu = Ipv4Mtu(Mtu(68));
+    type Mtu = Ipv4Mtu;
     type Addr = Ipv4Addr;
 
     fn map_ip<
@@ -813,7 +1006,8 @@ impl Ip for Ipv6 {
     /// > below IPv6.
     ///
     /// [RFC 8200 Section 5]: https://tools.ietf.org/html/rfc8200#section-5
-    const MINIMUM_LINK_MTU: Mtu = Mtu(1280);
+    const MINIMUM_LINK_MTU: Self::Mtu = Ipv6Mtu(Mtu(1280));
+    type Mtu = Ipv6Mtu;
     type Addr = Ipv6Addr;
 
     fn map_ip<
@@ -4359,6 +4553,22 @@ mod tests {
     ; "ipv6_by_prefix")]
     fn subnet_ord<A: core::cmp::Ord>(a: Subnet<A>, b: Subnet<A>) {
         assert!(a < b);
+    }
+
+    #[test]
+    fn ipv4_mtu() {
+        assert_eq!(Ipv4Mtu::MIN, Ipv4::MINIMUM_LINK_MTU);
+        assert_eq!(Ipv4Mtu::MAX.get(), Mtu::max());
+        assert_eq!(Ipv4Mtu::new(Mtu::new(67)), None);
+        assert_eq!(Ipv4Mtu::new(Mtu::new(68)), Some(Ipv4Mtu::MIN));
+    }
+
+    #[test]
+    fn ipv6_mtu() {
+        assert_eq!(Ipv6Mtu::MIN, Ipv6::MINIMUM_LINK_MTU);
+        assert_eq!(Ipv6Mtu::MAX.get(), Mtu::max());
+        assert_eq!(Ipv6Mtu::new(Mtu::new(1279)), None);
+        assert_eq!(Ipv6Mtu::new(Mtu::new(1280)), Some(Ipv6Mtu::MIN));
     }
 
     #[cfg(feature = "std")]

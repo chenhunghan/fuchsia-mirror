@@ -181,7 +181,7 @@ $ ffx component create /core/ffx-laboratory:hello-world-rust fuchsia-pkg://fuchs
 $ ffx component start /core/ffx-laboratory:hello-world-rust
 ```
 
-# Ways to update a component {#updating}
+## Ways to update a component {#updating}
 
 When you make changes to your component, you'll often want to update one of its
 instances running on the device. For example, you may change the component's
@@ -400,7 +400,7 @@ Starting component instance...
 [lifecycle-doc]: /docs/concepts/components/v2/lifecycle.md
 [manifest-children]: https://fuchsia.dev/reference/cml#children
 [manifest-collections]: https://fuchsia.dev/reference/cml#collections
-[package-server]: /docs/development/build/package_update.md#connecting_host_and_target
-[package-updates]: /docs/development/build/package_update.md#triggering_package_updates
+[package-server]: /docs/development/build/package_update.md#connecting-host-and-target
+[package-updates]: /docs/development/build/package_update.md#triggering-package-updates
 [run-session]: /docs/development/sessions/building-and-running-a-session.md
 [run-test]: /docs/development/testing/run_fuchsia_tests.md

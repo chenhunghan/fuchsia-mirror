@@ -22,6 +22,7 @@ import (
 	"go.fuchsia.dev/fuchsia/tools/build"
 	fintpb "go.fuchsia.dev/fuchsia/tools/integration/fint/proto"
 	"go.fuchsia.dev/fuchsia/tools/integration/testsharder"
+	"go.fuchsia.dev/fuchsia/tools/integration/testsharder/metadata"
 	"go.fuchsia.dev/fuchsia/tools/integration/testsharder/proto"
 	"go.fuchsia.dev/fuchsia/tools/lib/ffxutil"
 	"go.fuchsia.dev/fuchsia/tools/lib/jsonutil"
@@ -55,6 +56,7 @@ type testCase struct {
 	modifiers     []testsharder.TestModifier
 	packageRepos  []build.PackageRepo
 	affectedTests []string
+	checkoutFiles map[string]string
 }
 
 // TestExecute runs golden tests for the execute() function.
@@ -622,6 +624,16 @@ func TestExecute(t *testing.T) {
 // runTestsharder sets up the test environment for a testCase, executes
 // testsharder, and returns the resulting shards and output file path.
 func runTestsharder(t *testing.T, tc testCase) ([]testsharder.Shard, string) {
+	t.Helper()
+	outputFile, err := executeTestCase(t, tc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return readShards(t, outputFile), outputFile
+}
+
+func executeTestCase(t *testing.T, tc testCase) (string, error) {
+	t.Helper()
 	if tc.params == nil {
 		tc.params = &proto.Params{}
 	}
@@ -635,6 +647,16 @@ func runTestsharder(t *testing.T, tc testCase) ([]testsharder.Shard, string) {
 		tc.flags.outputFile = filepath.Join(tc.flags.checkoutDir, "output.json")
 	} else {
 		tc.flags.outputFile = filepath.Join(t.TempDir(), "output.json")
+	}
+
+	for rel, contents := range tc.checkoutFiles {
+		abs := filepath.Join(tc.flags.checkoutDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	tc.params.ProductBundleName = "core.x64"
@@ -686,10 +708,102 @@ func runTestsharder(t *testing.T, tc testCase) ([]testsharder.Shard, string) {
 		},
 	}
 	if err := execute(context.Background(), tc.flags, tc.params, m); err != nil {
-		t.Fatal(err)
+		return "", err
 	}
 
-	return readShards(t, tc.flags.outputFile), tc.flags.outputFile
+	return tc.flags.outputFile, nil
+}
+
+func TestOwnershipMetadataOnActiveAndSkippedShards(t *testing.T) {
+	withSourceLabel := func(spec build.TestSpec, label string) build.TestSpec {
+		spec.Test.SourceLabel = label
+		return spec
+	}
+	tc := testCase{
+		flags: testsharderFlags{
+			skipUnaffected: true,
+		},
+		testSpecs: []build.TestSpec{
+			withSourceLabel(fuchsiaTestSpec("affected_test"), "//src/something:affected_test"),
+			withSourceLabel(fuchsiaTestSpec("skipped_test"), "//src/something:skipped_test"),
+			withSourceLabel(hostTestSpec("host_test"), "//tools/other:host_test"),
+		},
+		testList: []build.TestListEntry{
+			testListEntry("affected_test", true),
+			testListEntry("skipped_test", true),
+		},
+		affectedTests: []string{packageURL("affected_test")},
+		checkoutFiles: map[string]string{
+			"OWNERS":                           "global@google.com\n",
+			"src/OWNERS":                       "ancestor@google.com\n",
+			"src/umbrella/OWNERS":              "umbrella@google.com\n",
+			"src/something/OWNERS":             "primary@google.com # inline comment\ninclude /src/umbrella/OWNERS\n",
+			"src/something/METADATA.textproto": "trackers: { issue_tracker: { component_id: 1478143 } }\n",
+			"tools/team/OWNERS":                "infra@google.com\n",
+			"tools/other/OWNERS":               "file: /tools/team/OWNERS\n",
+			"tools/other/METADATA.textproto":   "trackers: { issue_tracker: { component_id: 654321 } }\n",
+		},
+	}
+
+	shards, _ := runTestsharder(t, tc)
+
+	gotMetadata := make(map[string]metadata.TestMetadata)
+	gotSummaryIfSkipped := make(map[string]metadata.TestMetadata)
+	gotSkippedSummary := make(map[string]metadata.TestMetadata)
+	for i := range shards {
+		shard := &shards[i]
+		for _, test := range shard.Tests {
+			gotMetadata[test.Name] = test.Metadata
+		}
+		for _, result := range shard.SummaryIfSkipped.Tests {
+			gotSummaryIfSkipped[result.Name] = result.Metadata
+		}
+		for _, result := range shard.Summary.Tests {
+			gotSkippedSummary[result.Name] = result.Metadata
+		}
+	}
+
+	wantMetadata := map[string]metadata.TestMetadata{
+		packageURL("affected_test"): {
+			Owners:      []string{"primary@google.com"},
+			ComponentID: 1478143,
+		},
+		packageURL("skipped_test"): {
+			Owners:      []string{"primary@google.com"},
+			ComponentID: 1478143,
+		},
+		"host_x64/host_test": {
+			Owners:      []string{"infra@google.com"},
+			ComponentID: 654321,
+		},
+	}
+	if diff := cmp.Diff(wantMetadata, gotMetadata); diff != "" {
+		t.Errorf("execute() shard test metadata diff (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(wantMetadata, gotSummaryIfSkipped); diff != "" {
+		t.Errorf("execute() summary_if_skipped metadata diff (-want +got):\n%s", diff)
+	}
+
+	wantSkipped := map[string]metadata.TestMetadata{
+		packageURL("skipped_test"): {
+			Owners:      []string{"primary@google.com"},
+			ComponentID: 1478143,
+		},
+	}
+	if diff := cmp.Diff(wantSkipped, gotSkippedSummary); diff != "" {
+		t.Errorf("execute() skipped shard summary metadata diff (-want +got):\n%s", diff)
+	}
+}
+
+func TestExecute_ErrorsOnMissingSourceLabel(t *testing.T) {
+	spec := fuchsiaTestSpec("test1")
+	spec.Test.SourceLabel = ""
+	tc := testCase{
+		testSpecs: []build.TestSpec{spec},
+	}
+	if _, err := executeTestCase(t, tc); err == nil {
+		t.Errorf("executeTestCase(empty SourceLabel) = nil error, want non-nil error")
+	}
 }
 
 func TestPreserveTestOrder(t *testing.T) {
@@ -809,6 +923,185 @@ func TestRandomizeTestOrder(t *testing.T) {
 	if diff := cmp.Diff(expectedOrder2, order2); diff != "" {
 		t.Errorf("order for seed %d mismatch (-want +got):\n%s", seed2, diff)
 	}
+}
+
+func TestPerfShards(t *testing.T) {
+	// A default modifier like the one the recipes pass, which allows up to 3
+	// attempts per test within a shard.
+	defaultModifier := testsharder.TestModifier{Name: "*", TotalRuns: -1, MaxAttempts: 3}
+
+	type testInfo struct {
+		Shard  string
+		IsPerf bool
+		Runs   int
+	}
+	// Runs testsharder and returns where each test ended up.
+	run := func(t *testing.T, tc testCase) map[string]testInfo {
+		t.Helper()
+		shards, _ := runTestsharder(t, tc)
+		got := map[string]testInfo{}
+		for _, s := range shards {
+			for _, test := range s.Tests {
+				got[test.Name] = testInfo{Shard: s.Name, IsPerf: s.IsPerf, Runs: test.Runs}
+			}
+		}
+		return got
+	}
+
+	perfTest := hostTestSpec("perf_test")
+	perfTest.ProducesPerfResults = true
+	otherTest := hostTestSpec("other_test")
+	testSpecs := []build.TestSpec{perfTest, otherTest}
+
+	disabled := &proto.Params{DisableSeparatePerfShards: true}
+
+	// The name of the shard that the non-perf test is put in.
+	shardName := run(t, testCase{testSpecs: testSpecs})[otherTest.Name].Shard
+	perfShardName := testsharder.PerfShardPrefix + shardName
+
+	t.Run("disable_separate_perf_shards", func(t *testing.T) {
+		// Both tests are put in the same shard.
+		got := run(t, testCase{
+			params:    disabled,
+			testSpecs: testSpecs,
+			modifiers: []testsharder.TestModifier{defaultModifier},
+		})
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: shardName, Runs: 3},
+			otherTest.Name: {Shard: shardName, Runs: 3},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("separate perf shards by default", func(t *testing.T) {
+		got := run(t, testCase{
+			testSpecs: testSpecs,
+			modifiers: []testsharder.TestModifier{defaultModifier},
+		})
+		// The perf test is run only once within its shard.
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: perfShardName, IsPerf: true, Runs: 1},
+			otherTest.Name: {Shard: shardName, Runs: 3},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("multiplied perf test is in multiplied perf shard", func(t *testing.T) {
+		got := run(t, testCase{
+			testSpecs: testSpecs,
+			modifiers: []testsharder.TestModifier{
+				defaultModifier,
+				{Name: perfTest.Name, TotalRuns: 5},
+			},
+		})
+		// The multiplied perf test is in a multiplied perf shard.
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: testsharder.MultipliedShardPrefix + perfShardName, IsPerf: true, Runs: 5},
+			otherTest.Name: {Shard: shardName, Runs: 3},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("affected hermetic perf test goes in affected perf shard", func(t *testing.T) {
+		tc := testCase{
+			testSpecs: testSpecs,
+			testList: []build.TestListEntry{
+				{Name: perfTest.Name, Tags: []build.TestTag{{Key: "hermetic", Value: "true"}}},
+			},
+			affectedTests: []string{perfTest.Name},
+		}
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: testsharder.AffectedShardPrefix + perfShardName, IsPerf: true, Runs: 1},
+			otherTest.Name: {Shard: shardName, Runs: 1},
+		}
+		if diff := cmp.Diff(run(t, tc), want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+		// With disable_separate_perf_shards, this test goes in an "affected:" shard.
+		tc.params = disabled
+		want = map[string]testInfo{
+			perfTest.Name:  {Shard: testsharder.AffectedShardPrefix + shardName, Runs: 1},
+			otherTest.Name: {Shard: shardName, Runs: 1},
+		}
+		if diff := cmp.Diff(run(t, tc), want); diff != "" {
+			t.Errorf("with disable_separate_perf_shards: mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("affected perf test is run only once", func(t *testing.T) {
+		got := run(t, testCase{
+			flags:         testsharderFlags{affectedTestsMaxAttempts: 3},
+			testSpecs:     testSpecs,
+			affectedTests: []string{perfTest.Name, otherTest.Name},
+		})
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: perfShardName, IsPerf: true, Runs: 1},
+			otherTest.Name: {Shard: shardName, Runs: 3},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("affected multiplied perf test is in affected perf shard", func(t *testing.T) {
+		got := run(t, testCase{
+			params:        &proto.Params{AffectedTestsMultiplyThreshold: 5, TargetTestCount: 5},
+			testSpecs:     testSpecs,
+			affectedTests: []string{perfTest.Name},
+		})
+		// The test isn't hermetic, so it's only in an "affected:" shard
+		// because it was multiplied. Unlike isolated tests, its multiplied
+		// runs are all in the same shard.
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: testsharder.AffectedShardPrefix + perfShardName, IsPerf: true, Runs: 5},
+			otherTest.Name: {Shard: shardName, Runs: 1},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("not applied with preserve order", func(t *testing.T) {
+		got := run(t, testCase{
+			flags:     testsharderFlags{affectedOnly: true, skipUnaffected: true, preserveTestOrder: true},
+			testSpecs: testSpecs,
+			modifiers: []testsharder.TestModifier{
+				{Name: perfTest.Name, TotalRuns: -1, Affected: true},
+				{Name: otherTest.Name, TotalRuns: -1, Affected: true},
+			},
+		})
+		// Both tests are put in the same non-perf shard.
+		want := map[string]testInfo{
+			perfTest.Name:  {Shard: shardName, Runs: 1},
+			otherTest.Name: {Shard: shardName, Runs: 1},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
+
+	t.Run("affected only", func(t *testing.T) {
+		affectedPerfTest := hostTestSpec("affected_perf_test")
+		affectedPerfTest.ProducesPerfResults = true
+		got := run(t, testCase{
+			flags:         testsharderFlags{affectedOnly: true, skipUnaffected: true},
+			testSpecs:     append([]build.TestSpec{affectedPerfTest}, testSpecs...),
+			affectedTests: []string{affectedPerfTest.Name},
+		})
+		// Only the affected perf test is run.
+		want := map[string]testInfo{
+			affectedPerfTest.Name: {Shard: perfShardName, IsPerf: true, Runs: 1},
+		}
+		if diff := cmp.Diff(got, want); diff != "" {
+			t.Errorf("mismatch (-got +want):\n%s", diff)
+		}
+	})
 }
 
 type fakeModules struct {

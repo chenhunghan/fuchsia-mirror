@@ -18,7 +18,6 @@ load("//tools/fidl/gidl:gidl.bzl", "gidl_reference_benchmarks")
 
 package(default_applicable_licenses = ["//:license"])
 
-# LINT.IfChange
 gidl_reference_benchmarks(
     name = "benchmark_suite_reference",
     testonly = True,
@@ -88,9 +87,7 @@ fx_component(
 
 fx_package(
     name = "fidl_microbenchmarks_reference",
-    package_name = "fidl_microbenchmarks_reference",
     testonly = True,
     components = [":benchmark"],
     visibility = ["//src/tests/benchmarks:__subpackages__"],
 )
-# LINT.ThenChange(//src/tests/benchmarks/fidl/reference/BUILD.gn)

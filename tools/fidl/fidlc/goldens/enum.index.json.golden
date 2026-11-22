@@ -3,7 +3,7 @@
   "lib_declarations": [
     {
       "is_virtual": false,
-      "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+      "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
       "data": "test.enum",
       "start_offset": 8,
       "end_offset": 17
@@ -19,7 +19,7 @@
       "identifier": "test.enum/MyEmptyFlexibleEnum",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "data": "MyEmptyFlexibleEnum",
         "start_offset": 306,
         "end_offset": 325
@@ -31,7 +31,7 @@
       "identifier": "test.enum/MyFlexibleEnum",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "data": "MyFlexibleEnum",
         "start_offset": 98,
         "end_offset": 112
@@ -41,7 +41,7 @@
           "name": "FOO",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "FOO",
             "start_offset": 144,
             "end_offset": 147
@@ -54,7 +54,7 @@
           "name": "BAR",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "BAR",
             "start_offset": 157,
             "end_offset": 160
@@ -70,7 +70,7 @@
       "identifier": "test.enum/MyFlexibleEnumWithCustomUnknown",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "data": "MyFlexibleEnumWithCustomUnknown",
         "start_offset": 175,
         "end_offset": 206
@@ -80,7 +80,7 @@
           "name": "FOO",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "FOO",
             "start_offset": 238,
             "end_offset": 241
@@ -93,7 +93,7 @@
           "name": "BAR",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "BAR",
             "start_offset": 251,
             "end_offset": 254
@@ -106,7 +106,7 @@
           "name": "CUSTOM_UNKNOWN",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "CUSTOM_UNKNOWN",
             "start_offset": 277,
             "end_offset": 291
@@ -122,7 +122,7 @@
       "identifier": "test.enum/MyStrictEnum",
       "location": {
         "is_virtual": false,
-        "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+        "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
         "data": "MyStrictEnum",
         "start_offset": 25,
         "end_offset": 37
@@ -132,7 +132,7 @@
           "name": "FOO",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "FOO",
             "start_offset": 67,
             "end_offset": 70
@@ -145,7 +145,7 @@
           "name": "BAR",
           "location": {
             "is_virtual": false,
-            "file": "../../tools/fidl/fidlc/testdata/enum.test.fidl",
+            "file": "tools/fidl/fidlc/testdata/enum.test.fidl",
             "data": "BAR",
             "start_offset": 80,
             "end_offset": 83

@@ -14,14 +14,16 @@ llvm_libc_source_set("dlfcn") {
   no_test_functions = functions
 
   deps = [ "../ld:ld-abi" ]
+  libc_deps = [
+    ":thread-cleanup",
+    ":zircon",
+  ]
   local_sources = [
     "dladdr-impl.cc",
     "dladdr-impl.h",
   ]
   local_deps = [
     ":dlfcn-abi",
-    ":thread-cleanup",
-    ":zircon",
     "..:weak",
     "//sdk/lib/ld:headers",
   ]

@@ -127,7 +127,7 @@ fn write_display(f: &mut std::fmt::Formatter<'_>, error: &anyhow::Error) -> std:
 
 // LINT.IfChange
 const BUG_LINE: &str = "BUG: An internal command error occurred.";
-// LINT.ThenChange(//src/testing/end_to_end/honeydew/honeydew/affordances/session/session_using_ffx.py)
+// LINT.ThenChange(//src/testing/end_to_end/honeydew/honeydew/affordances/session/session.py)
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

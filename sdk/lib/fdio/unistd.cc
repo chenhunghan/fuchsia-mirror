@@ -414,6 +414,8 @@ void update_cwd_path(fdio_internal::PathBuffer& fdio_cwd_path, const char* path)
     // so that we normalize the path (resolving, ., .., //, etc)
     fdio_cwd_path.Set("/");
     path++;
+  } else if (fdio_cwd_path.empty()) {
+    fdio_cwd_path.Set("/");
   }
 
   size_t seglen;
@@ -445,9 +447,9 @@ void update_cwd_path(fdio_internal::PathBuffer& fdio_cwd_path, const char* path)
       // remove the current trailing path segment from cwd
       if (x == fdio_cwd_path.data()) {
         // but never remove the first /
-        fdio_cwd_path[1] = 0;
+        fdio_cwd_path.Resize(1);
       } else {
-        x[0] = 0;
+        fdio_cwd_path.Resize(x - fdio_cwd_path.data());
       }
       continue;
     }
@@ -1377,14 +1379,15 @@ char* realpath(const char* __restrict filename, char* __restrict resolved) {
     {
       fdio_state_t& gstate = fdio_global_state();
       std::lock_guard cwd_lock(gstate.cwd_lock);
-      if (gstate.cwd_path.length() + 1 + filename_view.length() >= PATH_MAX) {
+      const std::string_view cwd = gstate.current_cwd_path();
+      if (cwd.length() + 1 + filename_view.length() >= PATH_MAX) {
         errno = ENAMETOOLONG;
         return nullptr;
       }
-      if (std::string_view{gstate.cwd_path} == kUnreachable) {
+      if (cwd == kUnreachable) {
         do_stat = false;
       }
-      abspath_buffer.Append(gstate.cwd_path);
+      abspath_buffer.Append(cwd);
     }
     abspath_buffer.Append('/');
     abspath_buffer.Append(filename);
@@ -1596,11 +1599,13 @@ char* getcwd(char* buf, size_t size) {
   {
     fdio_state_t& gstate = fdio_global_state();
     std::lock_guard lock(gstate.cwd_lock);
-    const size_t len = gstate.cwd_path.length() + 1;  // +1 to include null-terminating character
+    const std::string_view cwd = gstate.current_cwd_path();
+    const size_t len = cwd.length() + 1;  // +1 to include null-terminating character
 
     // |size| is inclusive of null-terminating character.
     if (len <= size) {
-      memcpy(buf, gstate.cwd_path.data(), len);
+      memcpy(buf, cwd.data(), cwd.length());
+      buf[cwd.length()] = '\0';
       out = buf;
     } else {
       errno = ERANGE;
@@ -1642,7 +1647,7 @@ bool resolve_path(const char* relative, fdio_internal::PathBuffer* out_resolved)
   {
     fdio_state_t& gstate = fdio_global_state();
     std::lock_guard cwd_lock(gstate.cwd_lock);
-    buffer.Append(gstate.cwd_path);
+    buffer.Append(gstate.current_cwd_path());
   }
   const size_t cwd_length = buffer.length();
   const size_t relative_length = strlen(relative);
@@ -1695,8 +1700,9 @@ int chroot(const char* path) {
     // path in the new root by trimming off the prefix. Otherwise, we no longer have a name for the
     // cwd.
     if (root_path.length() > 1) {
-      const std::string_view cwd_view(gstate.cwd_path);
-      if (cwd_view.starts_with(root_path) && gstate.cwd_path[root_path.length()] == '/') {
+      const std::string_view cwd_view = gstate.current_cwd_path();
+      if (cwd_view.starts_with(root_path) && cwd_view.length() > root_path.length() &&
+          cwd_view[root_path.length()] == '/') {
         gstate.cwd_path.RemovePrefix(root_path.length());
       } else {
         gstate.cwd_path.Set(kUnreachable);

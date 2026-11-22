@@ -108,4 +108,11 @@ TEST_fx-format-code-nonexistent-file() {
   BT_EXPECT grep -q -E '"ERROR: no such file: .*/doesnotexist.py"' "${err}"
 }
 
+# Ensure that the retired --args flag exits non-zero with a helpful message.
+TEST_fx-format-code-args-flag-retired() {
+  local err="${BT_TEMP_DIR}/_fx_format_code_stderr"
+  BT_EXPECT_FAIL "${fx}" format-code --args > /dev/null 2> "${err}"
+  BT_EXPECT grep -q -E '"fx gn format out/default/args.gn"' "${err}"
+}
+
 BT_RUN_TESTS "$@"

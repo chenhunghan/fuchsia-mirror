@@ -108,14 +108,6 @@ static std::optional<zx::socket> stream_handle(
   return {};
 }
 
-static std::optional<zx::socket> datagram_handle(
-    fidl::WireResponse<typename fuchsia_posix_socket::DatagramSocket::Describe> response) {
-  if (response.has_socket()) {
-    return std::move(response.socket());
-  };
-  return {};
-}
-
 static std::optional<zx::eventpair> synchronous_datagram_handle(
     fidl::WireResponse<typename fuchsia_posix_socket::SynchronousDatagramSocket::Describe>
         response) {
@@ -154,9 +146,6 @@ using SynchronousDatagramSocketImplIp =
     SocketImpl<SOCK_DGRAM, IPPROTO_IP, fuchsia_posix_socket::SynchronousDatagramSocket,
                zx::eventpair, synchronous_datagram_handle, ZX_EVENTPAIR_PEER_CLOSED>;
 
-using DatagramSocketImpl = SocketImpl<SOCK_DGRAM, IPPROTO_IP, fuchsia_posix_socket::DatagramSocket,
-                                      zx::socket, datagram_handle, ZX_SOCKET_PEER_CLOSED>;
-
 template <typename Impl>
 class SocketTest : public testing::Test {
  protected:
@@ -192,8 +181,6 @@ class SocketTestNames {
   static std::string GetName(int i) {
     if (std::is_same<T, StreamSocketImpl>())
       return "Stream" + testing::PrintToString(i);
-    if (std::is_same<T, DatagramSocketImpl>())
-      return "Datagram" + testing::PrintToString(i);
     if (std::is_same<T, SynchronousDatagramSocketImplIp>())
       return "SynchronousDatagramIp" + testing::PrintToString(i);
     if (std::is_same<T, SynchronousDatagramSocketImplIcmp>())
@@ -201,9 +188,8 @@ class SocketTestNames {
   }
 };
 
-using SocketTypes =
-    testing::Types<StreamSocketImpl, DatagramSocketImpl, SynchronousDatagramSocketImplIp,
-                   SynchronousDatagramSocketImplIcmp>;
+using SocketTypes = testing::Types<StreamSocketImpl, SynchronousDatagramSocketImplIp,
+                                   SynchronousDatagramSocketImplIcmp>;
 TYPED_TEST_SUITE(SocketTest, SocketTypes, SocketTestNames);
 
 TYPED_TEST(SocketTest, CloseResourcesOnClose) {

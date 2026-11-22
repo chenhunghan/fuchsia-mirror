@@ -14,7 +14,7 @@ from shared.protocol.diagnose_hang import (
     DiagnoseHangRequest,
     DiagnoseHangResponse,
 )
-from zxdb_dap import AsyncTaskNode
+from zxdb_dap import AsyncTaskNode, ZxdbStackFrame
 
 
 class TestDiagnoseHangHandler(DaemonTestCase):
@@ -98,7 +98,9 @@ class TestDiagnoseHangHandler(DaemonTestCase):
                 ]
             return Mock(body=Mock(stack_frames=frames))
 
-        mock_dap_client.stack_trace = AsyncMock(side_effect=stack_side_effect)
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
+            side_effect=stack_side_effect
+        )
         mock_dap_client.continue_thread = AsyncMock(
             return_value=Mock(
                 success=True, body=Mock(all_threads_continued=True)
@@ -296,7 +298,7 @@ class TestDiagnoseHangHandler(DaemonTestCase):
                 )
             )
 
-        mock_dap_client.stack_trace = AsyncMock(
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
             side_effect=proc2_stack_side_effect
         )
         executed_console_commands.clear()
@@ -332,7 +334,7 @@ class TestDiagnoseHangHandler(DaemonTestCase):
         mock_dap_client.zxdb_threads = AsyncMock(
             return_value=Mock(body=Mock(threads=mock_threads))
         )
-        mock_dap_client.stack_trace = AsyncMock(
+        mock_dap_client.zxdb_stack_trace = AsyncMock(
             return_value=Mock(
                 body=Mock(
                     stack_frames=[
@@ -478,6 +480,89 @@ class TestDiagnoseHangHandler(DaemonTestCase):
         self.assertNotIn(
             "called from inner_unrelated_wrapper", classified.summary
         )
+
+
+def _frames(*names: str) -> list[Any]:
+    """Returns stack frames with the given names and no source."""
+    return [
+        ZxdbStackFrame(id=idx, name=name, line=0, column=0)
+        for idx, name in enumerate(names, start=1)
+    ]
+
+
+class TestFindCallerFrame(unittest.TestCase):
+    def test_caller_search_stops_at_unsymbolized_frame(self) -> None:
+        # The shape of a stack from a binary whose build ID is not in the
+        # local symbol index.
+        classified = classify_thread_stack(
+            4,
+            "initial-thread",
+            _frames(
+                "_zx_futex_wait",
+                "",
+                "",
+                "driver_runtime::Dispatcher::PostTask::(anon class)"
+                "::operator()",
+                "main",
+            ),
+        )
+        self.assertEqual(classified.classification, "blocked_lock")
+        self.assertIn("called from code without symbols", classified.summary)
+        self.assertIn("may not match the local build", classified.summary)
+        self.assertIn("not in the symbol index", classified.summary)
+        self.assertNotIn("PostTask", classified.summary)
+        self.assertNotIn("main", classified.summary)
+        # `modules` would turn a weak attach into a strong one.
+        self.assertNotIn("modules", classified.summary)
+
+    def test_address_only_frame_counts_as_unsymbolized(self) -> None:
+        classified = classify_thread_stack(
+            4, "worker", _frames("sync_mutex_lock", "0x4a2f10", "main")
+        )
+        self.assertEqual(classified.classification, "blocked_lock")
+        self.assertIn("called from code without symbols", classified.summary)
+        self.assertNotIn("main", classified.summary)
+
+    def test_vdso_frame_then_unsymbolized_frame(self) -> None:
+        classified = classify_thread_stack(
+            4,
+            "worker",
+            _frames("_zx_channel_call", "<vDSO>+0x1234", "", "main"),
+        )
+        self.assertEqual(classified.classification, "blocked_ipc")
+        self.assertIn("from code without symbols", classified.summary)
+        self.assertNotIn("main", classified.summary)
+
+    def test_unsymbolized_last_frame_is_skipped(self) -> None:
+        # The last frame is the thread entry or the unwinder's end marker,
+        # not a caller.
+        classified = classify_thread_stack(
+            4,
+            "worker",
+            _frames("_zx_futex_wait", "sync_completion_wait", ""),
+        )
+        self.assertEqual(classified.classification, "blocked_lock")
+        self.assertIn("called from sync_completion_wait", classified.summary)
+        self.assertNotIn("code without symbols", classified.summary)
+
+    def test_caller_search_ends_at_scanned_frame(self) -> None:
+        # Scanned frames may not be real return addresses, so neither the
+        # scanned frame nor the symbolized frames below it are named.
+        for scanned_name in ("", "$anon::ScannedFrame"):
+            frames = _frames(
+                "_zx_futex_wait",
+                "pthread_mutex_lock",
+                scanned_name,
+                "$anon::TransferFunds",
+                "main",
+            )
+            frames[2].trust = "Scan"
+            classified = classify_thread_stack(2, "worker", frames)
+            self.assertEqual(classified.classification, "blocked_lock")
+            self.assertIn("called from pthread_mutex_lock", classified.summary)
+            self.assertNotIn("ScannedFrame", classified.summary)
+            self.assertNotIn("TransferFunds", classified.summary)
+            self.assertNotIn("code without symbols", classified.summary)
 
 
 if __name__ == "__main__":

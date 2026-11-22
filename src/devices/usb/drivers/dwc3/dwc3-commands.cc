@@ -2,12 +2,83 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <lib/memory_barriers/memory_barriers.h>
 #include <lib/trace/event.h>
+
+#include <algorithm>
+#include <bit>
 
 #include "src/devices/usb/drivers/dwc3/dwc3-regs.h"
 #include "src/devices/usb/drivers/dwc3/dwc3.h"
 
 namespace dwc3 {
+
+namespace {
+
+// The valid range of `DEPCFG.bInterval_m1` is 0..13: the core's microframe counter (`DSTS.SOFFN`)
+// is 14 bits wide, so periodic intervals of 2^14 or 2^15 microframes cannot be tracked.
+constexpr uint8_t kMaxDepcfgIntervalM1 = 13;
+
+// Converts a USB endpoint descriptor's `bInterval` value into the 0-based `bInterval_m1` exponent
+// expected by DWC3 `DEPCFG` Parameter 1 bits [23:16] ($2^{\text{bInterval\_m1}}$ frames or
+// microframes).
+uint8_t ComputeDepcfgInterval(fuchsia_hardware_usb_descriptor::EndpointType ep_type,
+                              uint8_t interval, fuchsia_hardware_usb_descriptor::UsbSpeed speed) {
+  using fuchsia_hardware_usb_descriptor::EndpointType;
+  using fuchsia_hardware_usb_descriptor::UsbSpeed;
+
+  switch (ep_type) {
+    case EndpointType::kIsochronous:
+      return interval > 0 ? std::min<uint8_t>(interval - 1, kMaxDepcfgIntervalM1) : 0;
+    case EndpointType::kInterrupt:
+      if (interval == 0) {
+        return 0;
+      }
+      if (speed == UsbSpeed::kFull || speed == UsbSpeed::kLow) {
+        // Full/Low-speed interrupt `bInterval` is specified in linear 1 ms frames (1..255).
+        // Pick the largest power-of-two frame interval <= `interval`.
+        return static_cast<uint8_t>(std::bit_width(interval) - 1);
+      }
+      // High/Super/EnhancedSuper interrupt `bInterval` is 1-based exponent (1..16).
+      return std::min<uint8_t>(interval - 1, kMaxDepcfgIntervalM1);
+    case EndpointType::kControl:
+    case EndpointType::kBulk:
+    default:
+      return 0;
+  }
+}
+
+// Per Synopsys DWC_usb3 Programming Guide 3.2.2 and Linux dwc3_send_gadget_ep_cmd(), clears
+// GUSB2PHYCFG.SUSPENDUSB20 and ENBLSLPM while an endpoint command executes so the USB 2.0 PHY
+// clock is not gated, and restores the saved value afterward. The register is only written when
+// either bit was set.
+class ScopedUsb2PhyClockUngate {
+ public:
+  explicit ScopedUsb2PhyClockUngate(fdf::MmioBuffer* mmio) : mmio_(mmio) {
+    auto gusb2phycfg = GUSB2PHYCFG::Get(0).ReadFrom(mmio_);
+    saved_gusb2phycfg_ = gusb2phycfg.reg_value();
+    restore_ = gusb2phycfg.SUSPENDUSB20() || gusb2phycfg.ENBLSLPM();
+    if (restore_) {
+      gusb2phycfg.set_SUSPENDUSB20(0).set_ENBLSLPM(0).WriteTo(mmio_);
+    }
+  }
+
+  ~ScopedUsb2PhyClockUngate() {
+    if (restore_) {
+      GUSB2PHYCFG::Get(0).FromValue(saved_gusb2phycfg_).WriteTo(mmio_);
+    }
+  }
+
+  ScopedUsb2PhyClockUngate(const ScopedUsb2PhyClockUngate&) = delete;
+  ScopedUsb2PhyClockUngate& operator=(const ScopedUsb2PhyClockUngate&) = delete;
+
+ private:
+  fdf::MmioBuffer* const mmio_;
+  uint32_t saved_gusb2phycfg_ = 0;
+  bool restore_ = false;
+};
+
+}  // namespace
 
 static constexpr uint32_t kEarlyLoopExitCount = 100000;
 
@@ -23,6 +94,7 @@ bool Dwc3::WaitForCmdAct(const char* caller_name, const uint8_t ep_num) {
     if (loop_count >= kEarlyLoopExitCount) {
       fdf::error("Dwc3::WaitForCmdAct() Forced exit from spin loop for {:s} for ep{}", caller_name,
                  ep_num);
+      metrics_.RecordCmdActTimeout();
       return false;
     }
     if (!DEPCMD::Get(ep_num).ReadFrom(mmio).CMDACT()) {
@@ -78,7 +150,7 @@ void Dwc3::CmdEpSetConfig(const Endpoint& ep, bool modify) {
   DEPCFG_DEPCMDPAR1::Get(ep_num)
       .FromValue(0)
       .set_EP_NUMBER(ep_num)
-      .set_INTERVAL(ep.interval)
+      .set_INTERVAL(ComputeDepcfgInterval(ep.type, ep.interval, connection_speed_))
       .set_XFER_NOT_READY_EN(1)
       .set_XFER_COMPLETE_EN(1)
       // Only pertinent if we're allowing multiple TRBs per transfer.
@@ -114,6 +186,11 @@ void Dwc3::CmdEpStartTransfer(const Endpoint& ep, zx_paddr_t trb_phys) {
   // - DEPCMDPAR0 (offset 0x08) receives the High Address (bits 63:32)
   // - DEPCMDPAR1 (offset 0x04) receives the Low Address (bits 31:0)
   // This matches little-endian layout where the lower 32-bits sit at the lower offset.
+  //
+  // The TRBs may live in uncached (device) memory and the DEPCMD write is the doorbell that makes
+  // the controller fetch them, so the TRB writes (including HWO) must be complete before the
+  // command is issued. Do not rely on any barrier the MMIO accessors may emit after each write.
+  WriteDataSynchronizationBarrier();
   DEPCMDPAR0::Get(ep_num)
       .FromValue(0)
       .set_PARAMETER(static_cast<uint32_t>(trb_phys >> 32))
@@ -130,28 +207,57 @@ void Dwc3::CmdEpStartTransfer(const Endpoint& ep, zx_paddr_t trb_phys) {
   WaitForCmdAct(__func__, ep_num);
 }
 
-void Dwc3::CmdEpUpdateTransfer(const Endpoint& ep) {
+bool Dwc3::CmdEpUpdateTransfer(const Endpoint& ep) {
   TRACE_DURATION("dwc3", "Dwc3::CmdEpUpdateTransfer", "ep_num", ep.ep_num);
   auto* mmio = get_mmio();
   const uint8_t ep_num = ep.ep_num;
 
-  // From the DWC3 programming manual, section 3.2.26
+  // Update Transfer tells the controller to fetch the TRBs newly armed on an already started
+  // transfer. It takes no parameters, so DEPCMDPAR0-2 are not written.
   //
-  //    Software may issue a special "No Response Update Transfer" command by
-  //    setting CmdAct=0 and CmdIOC=0. In this case, the hardware does not
-  //    generate a Command Complete event, does not set the CmdAct bit to '0'
-  //    (because it will be '0'), and software may immediately issue another
-  //    command to the same endpoint following this one.
-  //
-  // This command is used to "kick" the controller to fetch more TRBs but we
-  // don't need to wait on it, allowing for much faster TRB enqueuing.
+  // The controller also accepts a "no response" form of this command (CMDACT=0, CMDIOC=0) that it
+  // never acknowledges. That form is only valid when software does not rely on XferNotReady
+  // events for the endpoint. This driver enables XferNotReady on every endpoint and gates
+  // StartTransfer on it, so it issues the normal form instead and waits for the controller to
+  // clear CMDACT. With CMDIOC=0 there is no command complete event, so, as in Linux
+  // dwc3_send_gadget_ep_cmd(), a rejected command is only reported in DEPCMD.CMDSTATUS once CMDACT
+  // clears. Rejected and timed out kicks are logged and reported to the caller, which counts them.
+  ZX_DEBUG_ASSERT_MSG(ep.rsrc_id != Endpoint::kInvalidResourceId && ep.rsrc_id <= 0x7fu,
+                      "%s: ep%d has no valid transfer resource ID (rsrc_id=0x%08x)", __func__,
+                      ep_num, ep.rsrc_id);
+
+  // Writing DEPCMD while CMDACT is still set (a previous command on this endpoint timed out)
+  // would overwrite the command the controller may still be executing.
+  if (DEPCMD::Get(ep_num).ReadFrom(mmio).CMDACT()) {
+    fdf::error("Dwc3::CmdEpUpdateTransfer ep{}: previous command still active, not issuing",
+               ep_num);
+    return false;
+  }
+
+  ScopedUsb2PhyClockUngate usb2_phy_clock(mmio);
+
+  // The TRBs live in uncached (device) memory and the DEPCMD write is the doorbell that makes the
+  // controller fetch them, so the TRB writes (including HWO) must be complete before it. Update
+  // writes no DEPCMDPARn registers whose MMIO writes might otherwise sit in between.
+  WriteDataSynchronizationBarrier();
   DEPCMD::Get(ep_num)
       .FromValue(0)
       .set_CMDTYP(DEPCMD::DEPUPDXFER)
       .set_COMMANDPARAM(ep.rsrc_id)
-      .set_CMDACT(0)
+      .set_CMDACT(1)
       .set_CMDIOC(0)
       .WriteTo(mmio);
+
+  if (!WaitForCmdAct(__func__, ep_num)) {
+    return false;
+  }
+
+  if (const uint32_t status = DEPCMD::Get(ep_num).ReadFrom(mmio).CMDSTATUS(); status != 0) {
+    fdf::error("Dwc3::CmdEpUpdateTransfer ep{} (rsrc_id={}): rejected with CMDSTATUS {}", ep_num,
+               ep.rsrc_id, status);
+    return false;
+  }
+  return true;
 }
 
 bool Dwc3::CmdEpEndTransfer(const Endpoint& ep, bool cmd_ioc) {
@@ -175,15 +281,7 @@ bool Dwc3::CmdEpEndTransfer(const Endpoint& ep, uint32_t rsrc_id, bool cmd_ioc) 
                       __func__, ep_num, ep.enabled, static_cast<uint8_t>(ep.type),
                       ep.transfer_state, ep.stalled, rsrc_id);
 
-  // Per Synopsys DWC_usb3 Programming Guide 3.2.2 and Linux dwc3_send_gadget_ep_cmd(),
-  // clear SUSPENDUSB20 and ENBLSLPM before issuing an endpoint command so the USB 2.0 PHY
-  // clock is not gated while the controller executes the command, and restore them afterward.
-  auto gusb2phycfg = GUSB2PHYCFG::Get(0).ReadFrom(mmio);
-  const uint32_t saved_gusb2phycfg = gusb2phycfg.reg_value();
-  const bool restore_gusb2phycfg = gusb2phycfg.SUSPENDUSB20() || gusb2phycfg.ENBLSLPM();
-  if (restore_gusb2phycfg) {
-    gusb2phycfg.set_SUSPENDUSB20(0).set_ENBLSLPM(0).WriteTo(mmio);
-  }
+  ScopedUsb2PhyClockUngate usb2_phy_clock(mmio);
 
   DEPCMDPAR0::Get(ep_num).FromValue(0).WriteTo(mmio);
   DEPCMDPAR1::Get(ep_num).FromValue(0).WriteTo(mmio);
@@ -203,9 +301,6 @@ bool Dwc3::CmdEpEndTransfer(const Endpoint& ep, uint32_t rsrc_id, bool cmd_ioc) 
     // finish halting any in-flight DMA burst before software disables DALEPENA or unmaps memory.
     zx::nanosleep(zx::deadline_after(zx::msec(1)));
   }
-  if (restore_gusb2phycfg) {
-    GUSB2PHYCFG::Get(0).FromValue(saved_gusb2phycfg).WriteTo(mmio);
-  }
   return ok;
 }
 
@@ -222,7 +317,7 @@ void Dwc3::CmdEpSetStall(const Endpoint& ep) {
       .FromValue(0)
       .set_CMDTYP(DEPCMD::DEPSSTALL)
       .set_CMDACT(1)
-      .set_CMDIOC(1)
+      .set_CMDIOC(0)
       .WriteTo(mmio);
 
   WaitForCmdAct(__func__, ep_num);
@@ -233,6 +328,11 @@ void Dwc3::CmdEpClearStall(const Endpoint& ep) {
   auto* mmio = get_mmio();
 
   const uint8_t ep_num = ep.ep_num;
+  // Per Synopsys STAR 9000614252, set ClearPendIN when clearing stall on SuperSpeed+ IN endpoints
+  // so any stale ERDY/pending IN state is cleared.
+  const bool clear_pend_in =
+      ep.IsInput() && (connection_speed_ == fdescriptor::UsbSpeed::kSuper ||
+                       connection_speed_ == fdescriptor::UsbSpeed::kEnhancedSuper);
 
   DEPCMDPAR0::Get(ep_num).FromValue(0).WriteTo(mmio);
   DEPCMDPAR1::Get(ep_num).FromValue(0).WriteTo(mmio);
@@ -240,8 +340,9 @@ void Dwc3::CmdEpClearStall(const Endpoint& ep) {
   DEPCMD::Get(ep_num)
       .FromValue(0)
       .set_CMDTYP(DEPCMD::DEPCSTALL)
+      .set_CLEARPENDIN(clear_pend_in ? 1 : 0)
       .set_CMDACT(1)
-      .set_CMDIOC(1)
+      .set_CMDIOC(0)
       .WriteTo(mmio);
 
   WaitForCmdAct(__func__, ep_num);

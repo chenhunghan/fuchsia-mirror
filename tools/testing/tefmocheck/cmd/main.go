@@ -150,21 +150,28 @@ func main() {
 	// missing summary.json. So run this check last.
 	checks = append(checks, tefmocheck.NoTestsRanCheck{})
 
-	checkTests, err := tefmocheck.RunChecks(checks, &testingOutputs, *outputsDir)
-	if err != nil {
-		log.Fatalf("failed to run checks: %v", err)
-	}
-
 	if *exonerationConfigPath != "" {
 		exonerationCfg, err := tefmocheck.LoadExonerationConfig(*exonerationConfigPath)
 		if err != nil {
 			log.Printf("Warning: failed to load exoneration config from %s (leaving failing tests un-exonerated): %v", *exonerationConfigPath, err)
-		} else if err := tefmocheck.ApplyStabilityExoneration(context.Background(), exonerationCfg, inputSummary, checkTests); err != nil {
+			if inputSummary != nil {
+				inputSummary.ExonerationError = err.Error()
+			}
+		} else if err := tefmocheck.ApplyStabilityExoneration(context.Background(), exonerationCfg, &testingOutputs); err != nil {
 			log.Printf("Warning: LUCI Analysis stability check failed (leaving failing tests un-exonerated): %v", err)
+			if inputSummary != nil {
+				inputSummary.ExonerationError = err.Error()
+			}
 		}
 	}
 
+	checkTests, failureMode, err := tefmocheck.RunChecks(checks, &testingOutputs, *outputsDir)
+	if err != nil {
+		log.Fatalf("failed to run checks: %v", err)
+	}
+
 	inputSummary.Tests = append(inputSummary.Tests, checkTests...)
+	inputSummary.FailureMode = failureMode
 	outFile := os.Stdout
 	if *jsonOutput != "" {
 		outFile, err = osmisc.CreateFile(*jsonOutput)

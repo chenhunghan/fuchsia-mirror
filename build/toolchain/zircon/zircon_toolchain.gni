@@ -16,7 +16,6 @@ import("//build/toolchain/rbe_toolchain_vars.gni")
 import("//build/toolchain/rust_toolchain_vars.gni")
 import("//build/toolchain/zircon/clang.gni")
 import("//build/toolchain/zircon/gcc.gni")
-import("//build/zircon/build_args.gni")
 
 # IMPORTANT: The zircon_toolchain() template does not use clang_toolchain()
 # defined in //build/toolchain/clang_toolchain.gni, because there are several

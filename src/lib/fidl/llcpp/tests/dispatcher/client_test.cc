@@ -525,7 +525,7 @@ TEST_F(WireClientTest, CannotDestroyOnAnotherThread) {
     remote.reset();
 
     // Panics when a foreign thread attempts to destroy the client.
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
+#ifndef NDEBUG
     std::thread foreign_thread(
         [&] { ASSERT_DEATH([&] { fidl_testing::RunWithLsanDisabled([&] { client = {}; }); }); });
     foreign_thread.join();
@@ -539,7 +539,7 @@ TEST_F(WireClientTest, CannotMakeCallOnAnotherThread) {
 
     WireClient client(std::move(local), loop().dispatcher());
 
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
+#ifndef NDEBUG
     std::thread foreign_thread([&] {
       ASSERT_DEATH([&] {
         fidl_testing::RunWithLsanDisabled([&] {
@@ -578,7 +578,7 @@ TEST_F(WireClientTest, CannotDestroyOnAnotherSequence) {
     loop().RunUntilIdle();
 
     // Panics when a thread with a different sequence ID attempts to destroy the client.
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
+#ifndef NDEBUG
     fake_dispatcher.SetSequenceId({.value = 2});
     ASSERT_DEATH([&] { fidl_testing::RunWithLsanDisabled([&] { client = {}; }); });
 #endif
@@ -625,7 +625,7 @@ TEST_F(WireClientTest, CannotDispatchOnAnotherThread) {
     remote.reset();
 
     // Panics when a different thread attempts to dispatch the error.
-#if ZX_DEBUG_ASSERT_IMPLEMENTED
+#ifndef NDEBUG
     std::thread foreign_thread([&] {
       ASSERT_DEATH([&] { fidl_testing::RunWithLsanDisabled([&] { loop().RunUntilIdle(); }); });
     });

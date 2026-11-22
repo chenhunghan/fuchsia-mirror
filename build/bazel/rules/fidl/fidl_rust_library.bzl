@@ -139,6 +139,10 @@ def _fidl_rust_library_flavor(flavor, name, fidl_library_name, fidl_ir_json, dep
             # LINT.ThenChange(//build/rust/fidl_rust.gni)
             "//build/config/rust/lints:deny_unused_results",
         ],
+        # Not all FIDL handle types (e.g. Interrupt, DebugLog, Timer) are
+        # supported by fdomain_client, so exclude fdomain bindings from
+        # wildcard builds unless explicitly depended on.
+        tags = ["manual"] if flavor == "fdomain" else [],
         testonly = testonly,
         visibility = visibility,
     )
@@ -158,7 +162,7 @@ def _fidl_rust_library_flex(flavor, name, fidl_library_name, testonly, visibilit
     native.genrule(
         name = flex_generate_label,
         outs = [flex_file_name],
-        cmd = "echo 'pub use %s::*;' > $@" % original_crate_name,
+        cmd = "echo '#![allow(unused_imports)] pub use %s::*;' > $@" % original_crate_name,
         testonly = testonly,
         visibility = ["//visibility:private"],
     )
@@ -173,6 +177,7 @@ def _fidl_rust_library_flex(flavor, name, fidl_library_name, testonly, visibilit
         build_flags = [
             "//build/config/rust/lints:deny_unused_results",
         ],
+        tags = ["manual"] if flavor == "fdomain" else [],
         testonly = testonly,
         visibility = visibility,
     )

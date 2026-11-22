@@ -160,6 +160,8 @@ class Dwc3 : public fdf::DriverBase2,
   static inline constexpr uint8_t kEp0In = 1;
   static inline constexpr uint8_t kUserEndpointStartNum = 2;
   static inline constexpr size_t kEp0MaxPacketSize = 512;
+  // Largest base wMaxPacketSize permitted by USB 2.0 and USB 3.x (§9.6.6).
+  static inline constexpr uint16_t kMaxPacketSizeLimit = 1024;
 
   static inline constexpr zx::duration kHwResetTimeout{zx::msec(50)};
   static inline constexpr zx::duration kEndpointDeadline{zx::sec(10)};
@@ -369,41 +371,33 @@ class Dwc3 : public fdf::DriverBase2,
       // transitioning back to the Setup state.
       Setup,
 
-      // Two-stage transfer states.
+      // Control-write status interlock states.
       //
-      // With two-stage transfers, there is an inherent race between the controller generating an
-      // XferNotReady(Status) event and the effects of the transfer having been applied. These
-      // states account for the race and ensure the Status state is not entered until the stack has
-      // had a chance to apply the incoming control directive.
+      // Two-stage transfers (TwoStage) and three-stage control-write transfers (WaitNrdyIn) race
+      // the asynchronous Control() call against the host XferNotReady(Status) event on EP0 IN.
+      // WaitFidl and WaitHost synchronize both events before starting the Status TRB:
+      //   1. Control() completes first: TwoStage or WaitNrdyIn enters WaitHost.
+      //   2. XferNotReady(Status) arrives first: TwoStage or WaitNrdyIn enters WaitFidl.
       //
-      // Upon entering the TwoStage state, the race will be started. Errors aside, one of the two
-      // following conditions will occur.
-      //   1. The stack applies the effects of the control directive before the controller issues a
-      //      XferNotReady(Status) event. Transition from TwoStage to WaitHost.
-      //   2. The controller issues XferNotReady(Status) before the stack finishes applying the
-      //      control directive. Transition to the WaitFidl state.
-      //
-      // Once in the WaitHost or WaitFidl state, the conditions to transition to the Status state
-      // are different:
-      //   WaitHost: Upon receipt of a XferNotReady(Status) event, transition to the Status state.
-      //   WaitFidl: Upon fully applying the control directive (i.e. the Control() RPC completes),
-      //     transition to the Status state.
+      // WaitHost starts the Status TRB and enters Status when XferNotReady(Status) arrives.
+      // WaitFidl starts the Status TRB and enters Status when Control() completes.
+      // The driver selects TRB_TRBCTL_STATUS_2 when wLength is zero, and TRB_TRBCTL_STATUS_3
+      // otherwise.
       TwoStage,
       WaitFidl,
       WaitHost,
 
       // Three-stage data states.
       //
-      // These states serve to move data to/from the host depending on whether the transfer is a
-      // control-read or control-write. Once in one of the data states, data will be exchanged with
-      // the host commensurate with the transfer direction. Upon receipt of the XferComplete event,
-      // the corresponding WaitNreadyOut/In state will be entered and await a further
-      // XferNotReady(Status) for the given endpoint.
+      // DataOut and DataIn transfer the control data payload on EP0 OUT or EP0 IN.
+      // When XferComplete retires DataIn or WaitZlpIn, the driver enters WaitNrdyOut.
+      // When XferComplete retires DataOut, the driver dispatches Control() and enters WaitNrdyIn.
+      // WaitNrdyIn then uses WaitFidl and WaitHost before starting TRB_TRBCTL_STATUS_3.
       DataOut,
       DataIn,
       WaitZlpIn,
       WaitNrdyOut,  // Waiting on ep0.
-      WaitNrdyIn,   // Waiting on ep1.
+      WaitNrdyIn,   // Waiting on ep1 and Control() completion.
 
       // Final Status state to either issue or receive an ACK to/from the host depending on transfer
       // type. Upon XferComplete, transition to the Setup state.
@@ -487,6 +481,8 @@ class Dwc3 : public fdf::DriverBase2,
   void Ep0Start();
   void Ep0QueueSetup();
   void Ep0StartEndpoints();
+  // Starts the EP0 IN status TRB (STATUS_2 or STATUS_3) and enters Ep0::State::Status.
+  void Ep0StartStatusIn();
   void HandleEp0Setup(size_t length);
   void DoControlCall(fuchsia_hardware_usb_descriptor::wire::UsbSetup setup, size_t length);
   void HandleEp0TransferCompleteEvent(uint8_t ep_num);
@@ -495,7 +491,7 @@ class Dwc3 : public fdf::DriverBase2,
   void Ep0CancelTransfers();
   // Ends any ongoing transfers, retires uncompleted TRBs, and stalls the endpoint.
   // Used in preparation for gracefully restarting a failed control transfer.
-  void Ep0EndAndStall(Endpoint& ep);
+  void Ep0EndAndStall();
 
   // General EP stuff
   void EpEnable(Endpoint& ep, bool enable);
@@ -520,6 +516,9 @@ class Dwc3 : public fdf::DriverBase2,
   void WaitForAllUserEndpointsIdle(fit::callback<void(bool)> callback);
   void NotifyEndpointIdle(UserEndpoint& uep);
   void CancelAllEndpointIdleCallbacks();
+  void ApplyEndpointStall(Endpoint& ep, bool stall);
+  template <typename Completer>
+  void SetOrClearEndpointStall(uint8_t ep_address, bool stall, Completer& completer);
 
   // Resets only user endpoints without touching EP0 or its state.
   void ResetUserEndpoints();
@@ -548,7 +547,8 @@ class Dwc3 : public fdf::DriverBase2,
   void CmdEpSetConfig(const Endpoint& ep, bool modify);
   void CmdEpTransferConfig(const Endpoint& ep);
   void CmdEpStartTransfer(const Endpoint& ep, zx_paddr_t trb_phys);
-  void CmdEpUpdateTransfer(const Endpoint& ep);
+  // Returns false if the command was not issued, timed out or was rejected by the controller.
+  bool CmdEpUpdateTransfer(const Endpoint& ep);
   // These methods are safe to call with the core powered down.
   bool CmdEpEndTransfer(const Endpoint& ep, bool cmd_ioc = true);
   bool CmdEpEndTransfer(const Endpoint& ep, uint32_t rsrc_id, bool cmd_ioc);
@@ -668,6 +668,8 @@ class Dwc3 : public fdf::DriverBase2,
   // USB Policy and Health
   fidl::ServerBindingGroup<fuchsia_hardware_usb_policy::Controller> policy_bindings_;
   fuchsia_hardware_usb_policy::DeviceState device_state_ =
+      fuchsia_hardware_usb_policy::DeviceState::kNotAttached;
+  fuchsia_hardware_usb_policy::DeviceState pre_suspend_state_ =
       fuchsia_hardware_usb_policy::DeviceState::kNotAttached;
   uint8_t assigned_address_ = 0;
   std::vector<WatchDeviceStateCompleter::Async> pending_completers_;

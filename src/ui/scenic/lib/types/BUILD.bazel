@@ -33,6 +33,8 @@ fx_cc_library(
     visibility = [
         "//src/ui/scenic/lib/allocation:__pkg__",
         "//src/ui/scenic/lib/display:__pkg__",
+        "//src/ui/scenic/lib/display/coordinator_proxy:__pkg__",
+        "//src/ui/scenic/lib/display/coordinator_proxy/tests:__pkg__",
         "//src/ui/scenic/lib/flatland:__pkg__",
         "//src/ui/scenic/lib/types/tests:__pkg__",
         "//src/ui/scenic/lib/view_tree:__pkg__",

@@ -16,7 +16,7 @@ use errors::ffx_bail;
 use ffx_config::EnvironmentContext;
 use ffx_emulator_common::config::EMU_START_TIMEOUT;
 use ffx_emulator_common::tuntap::{TAP_INTERFACE_NAME, tap_ready};
-use ffx_emulator_common::{config, dump_log_to_out, host_is_mac, process};
+use ffx_emulator_common::{config, host_is_mac, process};
 use ffx_emulator_config::{EmulatorEngine, EngineConsoleType, ShowDetail};
 use ffx_target::{KnockError, TargetInfoQuery};
 use fho::{FfxContext, Result, bug, return_bug, return_user_error, user_error};
@@ -271,6 +271,18 @@ fn qcow2_image_path(raw_path: &Path) -> PathBuf {
 
 const KNOCK_TARGET_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Appended to an `emu start` error message when connecting to the emulator failed because the
+/// SSH banner exchange timed out.
+const SSH_BANNER_TIMEOUT_HINT: &str = "\nThere was a timeout during the SSH banner exchange: the \
+    client was unable to establish a connection to the SSH server within the timeout period. \
+    Check the target logs, or restart the emulator by running \
+    `ffx emu stop --all && ffx emu start`.";
+
+/// Returns whether a knock error was caused by a timeout during the SSH banner exchange.
+fn is_ssh_banner_timeout(e: &impl std::fmt::Debug) -> bool {
+    format!("{e:?}").contains("timed out during banner exchange")
+}
+
 pub(crate) mod comms;
 pub(crate) mod crosvm;
 pub(crate) mod femu;
@@ -341,24 +353,18 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
     /// the instance paths.
     async fn stage_image_files(
         env: &EnvironmentContext,
-        instance_name: &str,
         emu_config: &EmulatorConfiguration,
         reuse: bool,
     ) -> Result<GuestConfig> {
         let mut updated_guest = emu_config.guest.clone();
 
-        // Create the data directory if needed. Images are always staged in the
-        // primary (first) instance root; the other roots are only used for
-        // reading existing instances. This uses `get` rather than `get_file`,
-        // which would skip the primary root if it doesn't exist yet.
-        let mut instance_root: PathBuf = env
-            .get(ffx_config::keys::EMU_INSTANCE_ROOT_DIR)
-            .map_err(|e| bug!("Error reading config for instance root: {e}"))?;
-        // An `emu.instance_dir` override may be a relative path.
+        // Stage the images in the instance directory, which `EngineBuilder::build` has already
+        // created. `canonicalize` relies on that when an `emu.instance_dir` override makes the
+        // path relative.
+        let mut instance_root = emu_config.runtime.instance_directory.clone();
         if !instance_root.has_root() {
             instance_root = std::fs::canonicalize(instance_root).bug()?;
         }
-        instance_root.push(instance_name);
         fs::create_dir_all(&instance_root)
             .map_err(|e| bug!("Error creating {instance_root:?}: {e}"))?;
 
@@ -748,9 +754,8 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
     async fn stage(&mut self, context: &EnvironmentContext) -> Result<()> {
         let emu_config = self.emu_config_mut();
         let reuse = emu_config.runtime.reuse;
-        let name = &emu_config.runtime.name;
 
-        emu_config.guest = Self::stage_image_files(context, &name, emu_config, reuse).await?;
+        emu_config.guest = Self::stage_image_files(context, emu_config, reuse).await?;
 
         // This is done to avoid running emu in the same directory as the kernel or other files
         // that are used by qemu. If the multiboot.bin file is in the current directory, it does
@@ -769,7 +774,8 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
         &mut self,
         context: &EnvironmentContext,
         mut emulator_cmd: Command,
-    ) -> Result<i32> {
+        out: &mut dyn Write,
+    ) -> Result<()> {
         if self.emu_config().runtime.console == ConsoleType::None {
             let stdout = File::create(&self.emu_config().host.log).map_err(|e| {
                 bug!("Couldn't open log file {:?}: {e}", &self.emu_config().host.log)
@@ -778,7 +784,7 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
                 bug!("Failed trying to clone stdout for the emulator process: {e}.")
             })?;
             emulator_cmd.stdout(stdout).stderr(stderr);
-            eprintln!("Logging to {:?}", self.emu_config().host.log);
+            writeln!(out, "Logging to {:?}", self.emu_config().host.log).bug()?;
         }
 
         // If using TAP, check for an upscript to run.
@@ -874,9 +880,17 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
         )
         .map_err(|e| bug!("Failed to restore signal mask: {e}"))?;
 
+        // The emulator is running from here on, so errors writing progress to `out` are ignored:
+        // they aren't important enough to derail the launch or skip the cleanup on failure.
         if self.emu_config().runtime.debugger {
-            eprintln!("The emulator will wait for a debugger to attach before starting up.");
-            eprintln!("Attach to process {} to continue launching the emulator.", self.get_pid());
+            writeln!(out, "The emulator will wait for a debugger to attach before starting up.")
+                .ok();
+            writeln!(
+                out,
+                "Attach to process {} to continue launching the emulator.",
+                self.get_pid()
+            )
+            .ok();
         }
 
         if self.emu_config().runtime.console == ConsoleType::Console {
@@ -885,7 +899,7 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
             match fuchsia_async::unblock(move || process::monitored_child_process(&child_arc)).await
             {
                 Ok(_) => {
-                    return Ok(0);
+                    return Ok(());
                 }
                 Err(e) => {
                     if let Some(stop_error) = self.stop_emulator().await.err() {
@@ -900,7 +914,7 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
         } else if !self.emu_config().runtime.startup_timeout.is_zero() {
             // Wait until the emulator is considered "active" before returning to the user.
             let startup_timeout = self.emu_config().runtime.startup_timeout.as_secs();
-            eprint!("Waiting for Fuchsia to start (up to {} seconds).", startup_timeout);
+            write!(out, "Waiting for Fuchsia to start (up to {} seconds).", startup_timeout).ok();
             log::debug!("Waiting for Fuchsia to start (up to {} seconds)...", startup_timeout);
             let name = self.emu_config().runtime.name.clone();
             let start = Instant::now();
@@ -930,9 +944,9 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
                 )
                 .await;
                 if let Ok(()) = compat_res {
-                    eprintln!("\nEmulator is ready.");
+                    writeln!(out, "\nEmulator is ready.").ok();
                     log::debug!("Emulator is ready after {} seconds.", start.elapsed().as_secs());
-                    return Ok(0);
+                    return Ok(());
                 } else {
                     match compat_res.unwrap_err() {
                         KnockError::NonCritical(e) => {
@@ -943,16 +957,13 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
                             );
                         }
                         KnockError::Critical(e) => {
-                            eprintln!("Failed to connect to emulator: {e:?}");
-                            if format!("{e:?}").contains("timed out during banner exchange") {
-                                eprintln!(
-                                    "There was a timeout during SSH banner exchange,\n client was \
-                                    unable to establish a connection to the SSH server\n within the timeout \
-                                    period. Please check target logs or restart the emulator\n \
-                                    by running `ffx emu stop --all && ffx emu start`."
-                                );
+                            // End the line of progress dots before the error is printed.
+                            writeln!(out).ok();
+                            let mut message = format!("Failed to connect to emulator: {e:?}");
+                            if is_ssh_banner_timeout(&e) {
+                                message.push_str(SSH_BANNER_TIMEOUT_HINT);
                             }
-                            return Ok(1);
+                            return_user_error!("{message}");
                         }
                     }
                 }
@@ -960,98 +971,85 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
                 // Perform a check to make sure the process is still alive, otherwise report
                 // failure to launch.
                 if !self.is_running().await {
-                    let log_contents = match fs::read_to_string(&self.emu_config().host.log) {
-                        Ok(s) => s,
-                        Err(e) => format!("could not read log: {e}"),
-                    };
-                    let message = format!("Emulator process failed to launch.\n{log_contents}");
+                    let message = format!(
+                        "Emulator process failed to launch.\n{}",
+                        self.read_log_for_error()
+                    );
                     log::error!("{message}");
-                    eprintln!("\n{message}");
                     self.set_engine_state(EngineState::Staged);
                     self.save_to_disk().await?;
 
-                    return Ok(1);
+                    writeln!(out).ok();
+                    return_user_error!("{message}");
                 }
 
                 // Output a little status indicator to show we haven't gotten stuck.
-                // Note that we discard the result on the flush call; it's not important enough
-                // that we flushed the output stream to derail the launch.
-                eprint!(".");
-                std::io::stderr().flush().ok();
+                write!(out, ".").ok();
+                out.flush().ok();
 
                 // Sleep for a bit to allow the instance to make progress
                 Timer::new(Duration::from_secs(1)).await;
             }
 
             // If we're here, it means the emulator did not start within the timeout.
-
-            eprintln!();
-            eprintln!(
-                "After {} seconds, the emulator has not responded to network queries.",
-                self.emu_config().runtime.startup_timeout.as_secs()
+            log::warn!("Emulator did not respond to a health check before timing out.");
+            let mut message = format!(
+                "After {startup_timeout} seconds, the emulator has not responded to network \
+                queries.\nHere are the following errors encountered while connecting:"
             );
-            eprintln!("Here are the following errors encountered while connecting:");
             for (i, e) in connection_errors.iter().enumerate() {
-                eprintln!("\t{}: {e:?}", i + 1);
+                message.push_str(&format!("\n\t{}: {e:?}", i + 1));
             }
-            if connection_errors
-                .iter()
-                .any(|e| format!("{e:?}").contains("timed out during banner exchange"))
-            {
-                eprintln!(
-                    "There was a timeout during SSH banner exchange,\n client was \
-                    unable to establish a connection to the SSH server\n within the timeout \
-                    period. Please check target logs or restart the emulator\n \
-                    by running `ffx emu stop --all && ffx emu start`."
-                );
+            if connection_errors.iter().any(is_ssh_banner_timeout) {
+                message.push_str(SSH_BANNER_TIMEOUT_HINT);
             }
             if self.is_running().await {
-                eprintln!("The emulator process is still running (pid {}).", self.get_pid());
-                eprintln!(
-                    "The emulator is configured to {} network access.",
-                    match self.emu_config().host.networking {
-                        NetworkingMode::Tap => "use tun/tap-based",
-                        NetworkingMode::User => "use user-mode/port-mapped",
-                        NetworkingMode::None => "disable all",
-                        NetworkingMode::Auto => return_bug!(
-                            "Auto Networking mode should not be possible after staging \
-                            is complete. Configuration is corrupt; bailing out."
-                        ),
-                    }
-                );
-                eprintln!(
-                    "Hardware acceleration is {}.",
-                    if self.emu_config().host.acceleration == AccelerationMode::Hyper {
-                        "enabled"
-                    } else {
-                        "disabled, which significantly slows down the emulator"
-                    }
-                );
-                eprintln!(
-                    "You can execute `ffx target list` to keep monitoring the device, \
-                    or `ffx emu stop` to terminate it."
-                );
-                eprintln!(
-                    "You can also change the timeout if you keep encountering this \
-                    message by executing `ffx config set {} <seconds>`.",
-                    EMU_START_TIMEOUT
-                );
-            } else {
-                eprintln!();
-                eprintln!(
-                    "Emulator process failed to launch, but we don't know the cause. \
-                    Printing the contents of the emulator log...\n"
-                );
-                match dump_log_to_out(&self.emu_config().host.log, &mut std::io::stderr()) {
-                    Ok(_) => (),
-                    Err(e) => eprintln!("Couldn't print the log: {:?}", e),
+                let networking = match self.emu_config().host.networking {
+                    NetworkingMode::Tap => "use tun/tap-based",
+                    NetworkingMode::User => "use user-mode/port-mapped",
+                    NetworkingMode::None => "disable all",
+                    NetworkingMode::Auto => return_bug!(
+                        "Auto Networking mode should not be possible after staging \
+                        is complete. Configuration is corrupt; bailing out."
+                    ),
                 };
+                let acceleration = if self.emu_config().host.acceleration == AccelerationMode::Hyper
+                {
+                    "enabled"
+                } else {
+                    "disabled, which significantly slows down the emulator"
+                };
+                message.push_str(&format!(
+                    "\nThe emulator process is still running (pid {}).\
+                    \nThe emulator is configured to {networking} network access.\
+                    \nHardware acceleration is {acceleration}.\
+                    \nYou can execute `ffx target list` to keep monitoring the device, \
+                    or `ffx emu stop` to terminate it.\
+                    \nYou can also change the timeout if you keep encountering this \
+                    message by executing `ffx config set {EMU_START_TIMEOUT} <seconds>`.",
+                    self.get_pid(),
+                ));
+            } else {
+                message.push_str(&format!(
+                    "\nEmulator process failed to launch, but we don't know the cause. \
+                    The contents of the emulator log are:\n{}",
+                    self.read_log_for_error()
+                ));
             }
 
-            log::warn!("Emulator did not respond to a health check before timing out.");
-            return Ok(1);
+            writeln!(out).ok();
+            return_user_error!("{message}");
         }
-        Ok(0)
+        Ok(())
+    }
+
+    /// Reads the emulator's log, to be included in an error message. The log can contain guest
+    /// output that isn't valid UTF-8, so it's converted lossily rather than discarded.
+    fn read_log_for_error(&self) -> String {
+        match fs::read(&self.emu_config().host.log) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(e) => format!("Couldn't read the emulator log: {e}"),
+        }
     }
 
     fn show(&self, details: Vec<ShowDetail>) -> Vec<ShowDetail> {
@@ -1124,7 +1122,6 @@ pub(crate) trait QemuBasedEngine: EmulatorEngine {
         // Now that the threads are reading and writing, we wait for one to send back an error.
         let error = rx.recv().map_err(|e| bug!("recv error: {e}"));
         log::debug!("{error:?}");
-        eprintln!("{error:?}");
         stream.shutdown(Shutdown::Both).map_err(|e| bug!("Error shutting down stream: {e}"))?;
         Ok(())
     }
@@ -1540,18 +1537,20 @@ pub(crate) mod tests {
         let mut builder = ffx_config::test_env();
         builder = make_fake_sdk(builder).await;
         builder = builder
-            .user_config(config::EMU_INSTANCE_ROOT_DIR, root.display().to_string())
+            .runtime_config("shared_data", root.display().to_string())
             .user_config("ssh.pub", json!([root.join("test_authorized_keys")]))
             .user_config("ssh.priv", json!([root.join("test_ed25519_key")]));
 
         let env = builder.build().expect("test env");
 
         let instance_name = "test-instance";
+        let instance_dir = root.join("emu/instances").join(instance_name);
         let mut emu_config = EmulatorConfiguration::default();
+        emu_config.runtime.instance_directory = instance_dir.clone();
         emu_config.device.storage = DataAmount { quantity: 32, units: DataUnits::Bytes };
 
         setup_files(&mut emu_config.guest, &temp, disk_image_format).await?;
-        fs::create_dir_all(&root.join(instance_name)).expect("create test-instance dir");
+        fs::create_dir_all(&instance_dir).expect("create test-instance dir");
 
         emu_config.guest.vbmeta_key_file = Some(root.join("atx_psk.pem"));
         emu_config.guest.vbmeta_key_metadata_file = Some(root.join("avb_atx_metadata.bin"));
@@ -1570,16 +1569,12 @@ pub(crate) mod tests {
         // Need to place a fake zbi file in the `test-instance` because fake_zbi does not actually
         // stage the file into this dir when it is called, but vbmeta signing requires the file
         // to exist.
-        fs::write(&root.join(instance_name).join("zbi"), ORIGINAL)
+        fs::write(&instance_dir.join("zbi"), ORIGINAL)
             .map_err(|e| bug!("cannot write fake zbi file: {e}"))?;
 
-        let updated = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await;
+        let updated =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await;
 
         // Staging of GPT images is only expected work when mkfs-msdosfs is guaranteed to be found.
         // When make-fuchsia-vol is guaranteed to create the required FAT EFI partition
@@ -1601,24 +1596,19 @@ pub(crate) mod tests {
         let expected = if disk_image_format == DiskImageFormat::Gpt {
             GuestConfig {
                 disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("gpt_disk.img")),
+                    disk_image_format.as_disk_image(instance_dir.join("gpt_disk.img")),
                 ),
                 is_gpt: true,
-                ovmf_vars: root.join(instance_name).join("OVMF_VARS.fd"),
+                ovmf_vars: instance_dir.join("OVMF_VARS.fd"),
                 vbmeta_key_file: Some(root.join("atx_psk.pem")),
                 vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
                 ..Default::default()
             }
         } else {
             GuestConfig {
-                kernel_image: Some(root.join(instance_name).join("kernel")),
-                ramdisk: Some(Ramdisk {
-                    path: root.join(instance_name).join("zbi"),
-                    kind: RamdiskKind::Zbi,
-                }),
-                disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("disk")),
-                ),
+                kernel_image: Some(instance_dir.join("kernel")),
+                ramdisk: Some(Ramdisk { path: instance_dir.join("zbi"), kind: RamdiskKind::Zbi }),
+                disk_image: Some(disk_image_format.as_disk_image(instance_dir.join("disk"))),
                 ovmf_vars: root.join("OVMF_VARS.fd"),
                 vbmeta_key_file: Some(root.join("atx_psk.pem")),
                 vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
@@ -1633,44 +1623,13 @@ pub(crate) mod tests {
         write_to(emu_config.guest.disk_image.as_ref().unwrap(), UPDATED)
             .map_err(|e| bug!("cannot write updated value to disk image file: {e}"))?;
 
-        let updated = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await;
+        let updated =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await;
 
         assert!(updated.is_ok(), "expected OK got {:?}", updated.unwrap_err());
 
         let actual = updated.map_err(|e| bug!("cannot get updated guest config, reuse: {e}"))?;
-        let expected = if disk_image_format == DiskImageFormat::Gpt {
-            GuestConfig {
-                disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("gpt_disk.img")),
-                ),
-                is_gpt: true,
-                ovmf_vars: root.join(instance_name).join("OVMF_VARS.fd"),
-                vbmeta_key_file: Some(root.join("atx_psk.pem")),
-                vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
-                ..Default::default()
-            }
-        } else {
-            GuestConfig {
-                kernel_image: Some(root.join(instance_name).join("kernel")),
-                ramdisk: Some(Ramdisk {
-                    path: root.join(instance_name).join("zbi"),
-                    kind: RamdiskKind::Zbi,
-                }),
-                disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("disk")),
-                ),
-                ovmf_vars: root.join("OVMF_VARS.fd"),
-                vbmeta_key_file: Some(root.join("atx_psk.pem")),
-                vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
-                ..Default::default()
-            }
-        };
         assert_eq!(actual, expected);
 
         // The following parts are not applicable for GPT images as those are constructed via
@@ -1730,18 +1689,20 @@ pub(crate) mod tests {
         let mut builder = ffx_config::test_env();
         builder = make_fake_sdk(builder).await;
         builder = builder
-            .user_config(config::EMU_INSTANCE_ROOT_DIR, root.display().to_string())
+            .runtime_config("shared_data", root.display().to_string())
             .user_config("ssh.pub", json!([root.join("test_authorized_keys")]))
             .user_config("ssh.priv", json!([root.join("test_ed25519_key")]));
 
         let env = builder.build().expect("test env");
 
         let instance_name = "test-instance";
+        let instance_dir = root.join("emu/instances").join(instance_name);
         let mut emu_config = EmulatorConfiguration::default();
+        emu_config.runtime.instance_directory = instance_dir.clone();
         emu_config.device.storage = DataAmount { quantity: 32, units: DataUnits::Bytes };
 
         setup_files(&mut emu_config.guest, &temp, disk_image_format).await?;
-        fs::create_dir_all(&root.join(instance_name)).expect("create test-instance dir");
+        fs::create_dir_all(&instance_dir).expect("create test-instance dir");
 
         emu_config.guest.vbmeta_key_file = Some(root.join("atx_psk.pem"));
         emu_config.guest.vbmeta_key_metadata_file = Some(root.join("avb_atx_metadata.bin"));
@@ -1760,16 +1721,12 @@ pub(crate) mod tests {
         // Need to place a fake zbi file in the `test-instance` because fake_zbi does not actually
         // stage the file into this dir when it is called, but vbmeta signing requires the file
         // to exist.
-        fs::write(&root.join(instance_name).join("zbi"), ORIGINAL)
+        fs::write(&instance_dir.join("zbi"), ORIGINAL)
             .map_err(|e| bug!("cannot write fake zbi file: {e}"))?;
 
-        let updated: Result<GuestConfig> = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            true,
-        )
-        .await;
+        let updated: Result<GuestConfig> =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, true)
+                .await;
 
         // Staging of GPT images is only expected work when mkfs-msdosfs is guaranteed to be found.
         // When make-fuchsia-vol is guaranteed to create the required FAT EFI partition
@@ -1791,24 +1748,19 @@ pub(crate) mod tests {
         let expected = if disk_image_format == DiskImageFormat::Gpt {
             GuestConfig {
                 disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("gpt_disk.img")),
+                    disk_image_format.as_disk_image(instance_dir.join("gpt_disk.img")),
                 ),
                 is_gpt: true,
-                ovmf_vars: root.join(instance_name).join("OVMF_VARS.fd"),
+                ovmf_vars: instance_dir.join("OVMF_VARS.fd"),
                 vbmeta_key_file: Some(root.join("atx_psk.pem")),
                 vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
                 ..Default::default()
             }
         } else {
             GuestConfig {
-                kernel_image: Some(root.join(instance_name).join("kernel")),
-                ramdisk: Some(Ramdisk {
-                    path: root.join(instance_name).join("zbi"),
-                    kind: RamdiskKind::Zbi,
-                }),
-                disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("disk")),
-                ),
+                kernel_image: Some(instance_dir.join("kernel")),
+                ramdisk: Some(Ramdisk { path: instance_dir.join("zbi"), kind: RamdiskKind::Zbi }),
+                disk_image: Some(disk_image_format.as_disk_image(instance_dir.join("disk"))),
                 ovmf_vars: root.join("OVMF_VARS.fd"),
                 vbmeta_key_file: Some(root.join("atx_psk.pem")),
                 vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
@@ -1824,44 +1776,13 @@ pub(crate) mod tests {
         write_to(emu_config.guest.disk_image.as_ref().unwrap(), UPDATED)
             .expect("cannot write updated value to disk image file");
 
-        let updated = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            true,
-        )
-        .await;
+        let updated =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, true)
+                .await;
 
         assert!(updated.is_ok(), "expected OK got {:?}", updated.unwrap_err());
 
         let actual = updated.expect("cannot get updated guest config, reuse");
-        let expected = if disk_image_format == DiskImageFormat::Gpt {
-            GuestConfig {
-                disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("gpt_disk.img")),
-                ),
-                is_gpt: true,
-                ovmf_vars: root.join(instance_name).join("OVMF_VARS.fd"),
-                vbmeta_key_file: Some(root.join("atx_psk.pem")),
-                vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
-                ..Default::default()
-            }
-        } else {
-            GuestConfig {
-                kernel_image: Some(root.join(instance_name).join("kernel")),
-                ramdisk: Some(Ramdisk {
-                    path: root.join(instance_name).join("zbi"),
-                    kind: RamdiskKind::Zbi,
-                }),
-                disk_image: Some(
-                    disk_image_format.as_disk_image(root.join(instance_name).join("disk")),
-                ),
-                ovmf_vars: root.join("OVMF_VARS.fd"),
-                vbmeta_key_file: Some(root.join("atx_psk.pem")),
-                vbmeta_key_metadata_file: Some(root.join("avb_atx_metadata.bin")),
-                ..Default::default()
-            }
-        };
         assert_eq!(actual, expected);
 
         // The following parts are not applicable for GPT images as those are constructed via
@@ -1925,13 +1846,15 @@ pub(crate) mod tests {
         let temp = tempdir().expect("cannot get tempdir");
         let root = temp.path();
         let env = builder
-            .user_config(ffx_config::keys::EMU_INSTANCE_ROOT_DIR, root.to_string_lossy())
+            .runtime_config("shared_data", root.to_string_lossy())
             .user_config("ssh.pub", json!([root.join("test_authorized_keys")]))
             .user_config("ssh.priv", json!([root.join("test_ed25519_key")]))
             .build()
             .unwrap();
         let instance_name = "test-instance";
+        let instance_dir = root.join("emu/instances").join(instance_name);
         let mut emu_config = EmulatorConfiguration::default();
+        emu_config.runtime.instance_directory = instance_dir.clone();
         let root = setup_files(&mut emu_config.guest, &temp, DiskImageFormat::Fxfs).await?;
 
         const EXPECTED_DATA: &[u8] = b"hello, world";
@@ -1953,22 +1876,15 @@ pub(crate) mod tests {
 
         emu_config.device.storage = DataAmount { units: DataUnits::Kilobytes, quantity: 4 };
 
-        let config = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await
-        .expect("Failed to get guest config");
+        let config =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await
+                .expect("Failed to get guest config");
 
         let expected = GuestConfig {
-            kernel_image: Some(root.join(instance_name).join("kernel")),
-            ramdisk: Some(Ramdisk {
-                path: root.join(instance_name).join("zbi"),
-                kind: RamdiskKind::Zbi,
-            }),
-            disk_image: Some(DiskImage::Fxfs(root.join(instance_name).join("disk"))),
+            kernel_image: Some(instance_dir.join("kernel")),
+            ramdisk: Some(Ramdisk { path: instance_dir.join("zbi"), kind: RamdiskKind::Zbi }),
+            disk_image: Some(DiskImage::Fxfs(instance_dir.join("disk"))),
             ovmf_vars: root.join("OVMF_VARS.fd"),
             ..Default::default()
         };
@@ -2000,32 +1916,30 @@ pub(crate) mod tests {
         let builder = ffx_config::test_env();
         let builder = make_fake_sdk(builder).await;
         let env = builder
-            .user_config(config::EMU_INSTANCE_ROOT_DIR, root.display().to_string())
+            .runtime_config("shared_data", root.display().to_string())
             .user_config("ssh.pub", json!([root.join("test_authorized_keys")]))
             .user_config("ssh.priv", json!([root.join("test_ed25519_key")]))
             .build()
             .expect("test env");
 
         let instance_name = "test-instance";
+        let instance_dir = root.join("emu/instances").join(instance_name);
         let mut emu_config = EmulatorConfiguration::default();
+        emu_config.runtime.instance_directory = instance_dir.clone();
         emu_config.runtime.snapshots_enabled = true;
         emu_config.device.storage = DataAmount { quantity: 32, units: DataUnits::Bytes };
         setup_files(&mut emu_config.guest, &temp, disk_image_format).await?;
         write_to(emu_config.guest.disk_image.as_ref().unwrap(), ORIGINAL)?;
 
-        let raw_path = root.join(instance_name).join("disk");
-        let qcow2_path = root.join(instance_name).join("disk.qcow2");
+        let raw_path = instance_dir.join("disk");
+        let qcow2_path = instance_dir.join("disk.qcow2");
         // The fake qemu-img tool writes the arguments it was called with to the converted image.
         let conversion =
             format!("convert -f raw -O qcow2 {} {}\n", raw_path.display(), qcow2_path.display());
 
-        let staged = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await?;
+        let staged =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await?;
 
         // The emulator is given the converted image, and the raw image it was made from is gone.
         assert_eq!(staged.disk_image, Some(disk_image_format.as_disk_image(&qcow2_path)));
@@ -2035,25 +1949,17 @@ pub(crate) mod tests {
         // When the instance is reused the converted image, which holds the snapshots, is kept.
         const SNAPSHOTS: &str = "this image now contains snapshots";
         fs::write(&qcow2_path, SNAPSHOTS).expect("write converted image");
-        let staged = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            true,
-        )
-        .await?;
+        let staged =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, true)
+                .await?;
         assert_eq!(staged.disk_image, Some(disk_image_format.as_disk_image(&qcow2_path)));
         assert_eq!(fs::read_to_string(&qcow2_path).expect("read converted image"), SNAPSHOTS);
         assert!(!raw_path.exists());
 
         // When the instance is not reused, the disk image is staged and converted again.
-        let staged = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await?;
+        let staged =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await?;
         assert_eq!(staged.disk_image, Some(disk_image_format.as_disk_image(&qcow2_path)));
         assert_eq!(fs::read_to_string(&qcow2_path).expect("read converted image"), conversion);
         assert!(!raw_path.exists());
@@ -2061,13 +1967,9 @@ pub(crate) mod tests {
         // When the instance is staged again without snapshots, the emulator runs from a raw image
         // again, and the converted image, which nothing uses any more, is removed.
         emu_config.runtime.snapshots_enabled = false;
-        let staged = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await?;
+        let staged =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await?;
         assert_eq!(staged.disk_image, Some(disk_image_format.as_disk_image(&raw_path)));
         assert!(raw_path.exists());
         assert!(!qcow2_path.exists(), "the unused qcow2 disk image should be removed");
@@ -2092,14 +1994,16 @@ pub(crate) mod tests {
         let builder = ffx_config::test_env();
         let builder = make_fake_sdk(builder).await;
         let env = builder
-            .user_config(config::EMU_INSTANCE_ROOT_DIR, root.display().to_string())
+            .runtime_config("shared_data", root.display().to_string())
             .user_config("ssh.pub", json!([root.join("test_authorized_keys")]))
             .user_config("ssh.priv", json!([root.join("test_ed25519_key")]))
             .build()
             .expect("test env");
 
         let instance_name = "test-instance";
+        let instance_dir = root.join("emu/instances").join(instance_name);
         let mut emu_config = EmulatorConfiguration::default();
+        emu_config.runtime.instance_directory = instance_dir.clone();
         emu_config.runtime.snapshots_enabled = true;
         emu_config.device.storage = DataAmount { quantity: 32, units: DataUnits::Bytes };
         setup_files(&mut emu_config.guest, &temp, DiskImageFormat::Gpt).await?;
@@ -2115,19 +2019,15 @@ pub(crate) mod tests {
             VBMETA_TEST_KEY_METADATA,
         )
         .expect("write test key metadata file");
-        fs::create_dir_all(&root.join(instance_name)).expect("create test-instance dir");
-        fs::write(&root.join(instance_name).join("zbi"), ORIGINAL).expect("write fake zbi file");
+        fs::create_dir_all(&instance_dir).expect("create test-instance dir");
+        fs::write(&instance_dir.join("zbi"), ORIGINAL).expect("write fake zbi file");
 
         // Snapshots are not supported for GPT disk images. The engine reports this when it is
         // configured, but staging must not silently carry on with a raw image either.
-        let err = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            instance_name,
-            &emu_config,
-            false,
-        )
-        .await
-        .expect_err("staging a GPT image with snapshots enabled");
+        let err =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await
+                .expect_err("staging a GPT image with snapshots enabled");
         assert!(err.to_string().contains("Snapshots are not supported"), "unexpected error: {err}");
 
         Ok(())
@@ -2142,25 +2042,22 @@ pub(crate) mod tests {
         // Remove the tool which the fake SDK provides next to the QEMU binary.
         fs::remove_file(builder.isolate_root().join(QEMU_IMG_TOOL)).expect("remove fake qemu-img");
         let env = builder
-            .user_config(config::EMU_INSTANCE_ROOT_DIR, root.display().to_string())
+            .runtime_config("shared_data", root.display().to_string())
             .user_config("ssh.pub", json!([root.join("test_authorized_keys")]))
             .user_config("ssh.priv", json!([root.join("test_ed25519_key")]))
             .build()
             .expect("test env");
 
         let mut emu_config = EmulatorConfiguration::default();
+        emu_config.runtime.instance_directory = root.join("emu/instances/test-instance");
         emu_config.runtime.snapshots_enabled = true;
         emu_config.device.storage = DataAmount { quantity: 32, units: DataUnits::Bytes };
         setup_files(&mut emu_config.guest, &temp, DiskImageFormat::Fxfs).await?;
 
-        let err = <TestEngine as QemuBasedEngine>::stage_image_files(
-            &env.context,
-            "test-instance",
-            &emu_config,
-            false,
-        )
-        .await
-        .expect_err("staging without the qemu-img tool");
+        let err =
+            <TestEngine as QemuBasedEngine>::stage_image_files(&env.context, &emu_config, false)
+                .await
+                .expect_err("staging without the qemu-img tool");
         assert!(
             err.to_string().contains("Cannot find the qemu-img tool"),
             "unexpected error: {err}"

@@ -2,18 +2,24 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import("//build/bazel/bazel_test_suite.gni")
+
 # A collection of all stress tests available in-tree. The tests in this group
 # will be built and run on the core.x64-stress builder.
 group("stress-tests") {
   testonly = true
   public_deps = [
+    ":bazel_stress_tests",
     "//src/diagnostics/archivist/tests/stress-test",
     "//src/storage/stress-tests",
     "//src/sys/component_manager/stress_tests_alt",
     "//src/ui/tests/scenic-stress-tests:tests",
     "//src/zircon/tests/restricted-mode-shared/stress:tests",
-    "//src/zircon/tests/stress-tests:tests",
   ]
+}
+
+bazel_test_suite("bazel_stress_tests") {
+  target_tests = [ "//src/zircon/tests/stress-tests:tests" ]
 }
 
 # While we don't necessarily want to run all tests on devices with limited

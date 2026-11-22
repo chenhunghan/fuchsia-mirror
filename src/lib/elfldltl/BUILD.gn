@@ -60,6 +60,7 @@ library_headers("headers") {
     "lib/elfldltl/relro.h",
     "lib/elfldltl/resolve.h",
     "lib/elfldltl/self.h",
+    "lib/elfldltl/shdr.h",
     "lib/elfldltl/soname.h",
     "lib/elfldltl/static-pie-with-vdso.h",
     "lib/elfldltl/static-pie.h",

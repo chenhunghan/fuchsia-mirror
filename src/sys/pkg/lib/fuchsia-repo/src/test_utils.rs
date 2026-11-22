@@ -7,6 +7,7 @@ use crate::repository::PmRepository;
 use crate::util::copy_dir;
 use camino::{Utf8Path, Utf8PathBuf};
 use chrono::{DateTime, Utc};
+use delivery_blob::DeliveryBlobType;
 use fidl_fuchsia_pkg_ext::RepositoryKey;
 use fuchsia_hash::Hash;
 use fuchsia_pkg::{PackageBuilder, PackageManifest};
@@ -163,8 +164,16 @@ pub async fn make_readonly_empty_repository() -> anyhow::Result<RepoClient<Box<d
 pub async fn make_writable_empty_repository(
     root: Utf8PathBuf,
 ) -> anyhow::Result<RepoClient<Box<dyn RepoProvider>>> {
+    make_writable_empty_repository_with_type(root, DeliveryBlobType::Type1).await
+}
+
+#[cfg(not(target_os = "fuchsia"))]
+pub async fn make_writable_empty_repository_with_type(
+    root: Utf8PathBuf,
+    delivery_blob_type: DeliveryBlobType,
+) -> anyhow::Result<RepoClient<Box<dyn RepoProvider>>> {
     make_empty_pm_repo_dir(&root);
-    let backend = PmRepository::new(root);
+    let backend = PmRepository::builder(root).delivery_blob_type(delivery_blob_type).build();
     let mut client = RepoClient::from_trusted_remote(Box::new(backend) as Box<_>).await?;
     client.update().await?;
     Ok(client)
@@ -246,19 +255,32 @@ pub async fn make_package_archive(archive_name: &str, outdir: &Path) -> Utf8Path
 }
 
 pub async fn make_pm_repo_dir(repo_dir: &Path) {
+    make_pm_repo_dir_with_type(repo_dir, DeliveryBlobType::Type1).await;
+}
+
+pub async fn make_pm_repo_dir_with_type(repo_dir: &Path, delivery_blob_type: DeliveryBlobType) {
     let keys_dir = repo_dir.join("keys");
     create_dir_all(&keys_dir).unwrap();
     copy_dir(Utf8PathBuf::from(EMPTY_REPO_PATH).join("keys").as_std_path(), &keys_dir).unwrap();
 
     let metadata_dir = repo_dir.join("repository");
     let blobs_dir = metadata_dir.join("blobs");
-    make_repo_dir(&metadata_dir, &blobs_dir, None).await;
+    make_repo_dir_with_type(&metadata_dir, &blobs_dir, None, delivery_blob_type).await;
 }
 
 pub async fn make_repo_dir(
     metadata_dir: &Path,
     blobs_dir: &Path,
     current_time: Option<DateTime<Utc>>,
+) {
+    make_repo_dir_with_type(metadata_dir, blobs_dir, current_time, DeliveryBlobType::Type1).await;
+}
+
+pub async fn make_repo_dir_with_type(
+    metadata_dir: &Path,
+    blobs_dir: &Path,
+    current_time: Option<DateTime<Utc>>,
+    delivery_blob_type: DeliveryBlobType,
 ) {
     create_dir_all(metadata_dir).unwrap();
     create_dir_all(blobs_dir).unwrap();
@@ -301,14 +323,13 @@ pub async fn make_repo_dir(
                 meta_far_merkle = Some(merkle.clone());
             }
 
-            let blob_type = delivery_blob::DeliveryBlobType::Type1;
             crate::repository::file_system::generate_delivery_blob(
                 blob.source_path.as_str().into(),
                 &Utf8PathBuf::from_path_buf(
-                    blobs_dir.join(format!("{}/{merkle}", u32::from(blob_type))),
+                    blobs_dir.join(format!("{}/{merkle}", u32::from(delivery_blob_type))),
                 )
                 .unwrap(),
-                blob_type,
+                delivery_blob_type,
             )
             .await
             .unwrap();
@@ -360,10 +381,23 @@ pub async fn make_repo_dir(
 }
 
 pub async fn make_pm_repository(dir: impl Into<Utf8PathBuf>) -> PmRepository {
+    make_pm_repository_with_type(dir, DeliveryBlobType::Type1).await
+}
+
+pub async fn make_pm_repository_with_type(
+    dir: impl Into<Utf8PathBuf>,
+    delivery_blob_type: DeliveryBlobType,
+) -> PmRepository {
     let dir = dir.into();
     let metadata_dir = dir.join("repository");
     let blobs_dir = metadata_dir.join("blobs");
-    make_repo_dir(metadata_dir.as_std_path(), blobs_dir.as_std_path(), None).await;
+    make_repo_dir_with_type(
+        metadata_dir.as_std_path(),
+        blobs_dir.as_std_path(),
+        None,
+        delivery_blob_type,
+    )
+    .await;
 
     let keys_dir = dir.join("keys");
     create_dir(&keys_dir).unwrap();
@@ -371,7 +405,7 @@ pub async fn make_pm_repository(dir: impl Into<Utf8PathBuf>) -> PmRepository {
     let empty_repo_dir = PathBuf::from(EMPTY_REPO_PATH).canonicalize().unwrap();
     copy_dir(&empty_repo_dir.join("keys"), keys_dir.as_std_path()).unwrap();
 
-    PmRepository::new(dir)
+    PmRepository::builder(dir).delivery_blob_type(delivery_blob_type).build()
 }
 
 #[cfg(not(target_os = "fuchsia"))]
@@ -379,11 +413,28 @@ pub async fn make_file_system_repository(
     metadata_dir: impl Into<Utf8PathBuf>,
     blobs_dir: impl Into<Utf8PathBuf>,
 ) -> RepoClient<Box<dyn RepoProvider>> {
+    make_file_system_repository_with_type(metadata_dir, blobs_dir, DeliveryBlobType::Type1).await
+}
+
+#[cfg(not(target_os = "fuchsia"))]
+pub async fn make_file_system_repository_with_type(
+    metadata_dir: impl Into<Utf8PathBuf>,
+    blobs_dir: impl Into<Utf8PathBuf>,
+    delivery_blob_type: DeliveryBlobType,
+) -> RepoClient<Box<dyn RepoProvider>> {
     let metadata_dir = metadata_dir.into();
     let blobs_dir = blobs_dir.into();
-    make_repo_dir(metadata_dir.as_std_path(), blobs_dir.as_std_path(), None).await;
+    make_repo_dir_with_type(
+        metadata_dir.as_std_path(),
+        blobs_dir.as_std_path(),
+        None,
+        delivery_blob_type,
+    )
+    .await;
 
-    let backend = FileSystemRepository::new(metadata_dir, blobs_dir);
+    let backend = FileSystemRepository::builder(metadata_dir, blobs_dir)
+        .delivery_blob_type(delivery_blob_type)
+        .build();
     let mut client = RepoClient::from_trusted_remote(Box::new(backend) as Box<_>).await.unwrap();
     client.update().await.unwrap();
     client
@@ -395,7 +446,16 @@ pub async fn make_file_system_repository(
 /// Type1 delivery blobs as callers are not specifying the delivery blob type
 /// at this time, and using the default.
 pub fn read_blob_from_repo(blobs_dir: &Utf8Path, hash: &str) -> Vec<u8> {
-    let blob_path = blobs_dir.join(format!("1/{hash}"));
+    read_blob_from_repo_with_type(blobs_dir, hash, DeliveryBlobType::Type1)
+}
+
+#[cfg(not(target_os = "fuchsia"))]
+pub fn read_blob_from_repo_with_type(
+    blobs_dir: &Utf8Path,
+    hash: &str,
+    delivery_blob_type: DeliveryBlobType,
+) -> Vec<u8> {
+    let blob_path = blobs_dir.join(format!("{}/{hash}", u32::from(delivery_blob_type)));
     let delivery_blob = std::fs::read(&blob_path).unwrap();
     delivery_blob::decompress(&delivery_blob).unwrap()
 }

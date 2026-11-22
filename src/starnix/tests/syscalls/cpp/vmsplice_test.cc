@@ -48,7 +48,7 @@ TEST(VmspliceTest, VmspliceReadClosedPipe) {
 TEST(VmspliceTest, VmspliceWriteClosedPipe) {
   constexpr int kRetCode = 42;
   EXPECT_EXIT(([]() {
-                signal(SIGPIPE, SIG_IGN);
+                test_helper::ScopedSigAction scoped_sigpipe(SIGPIPE, SIG_IGN);
 
                 fbl::unique_fd fds[kNumPipeEndsCount];
                 ASSERT_NO_FATAL_FAILURE(MakePipe(fds));

@@ -27,13 +27,8 @@ use cm_rust::{
     CapabilityTypeName, ComponentDecl, DeliveryType, DictionaryDecl, FidlIntoNative, ProtocolDecl,
 };
 use cm_types::{Name, Path, RelativePath};
-use fidl::endpoints::DiscoverableProtocolMarker;
-use fidl_fuchsia_component as fcomponent;
-use fidl_fuchsia_component_runtime as fruntime;
-use fidl_fuchsia_component_runtime::RouteRequest;
-use fidl_fuchsia_component_sandbox as fsandbox;
-use fidl_fuchsia_io as fio;
-use fidl_fuchsia_sys2 as fsys;
+use fidl_fuchsia_component_runtime_common::RouteRequest;
+use fidl_fuchsia_io_common as fio;
 use futures::stream::{FuturesUnordered, StreamExt};
 use moniker::{ChildName, Moniker};
 use router_error::RouterError;
@@ -242,16 +237,16 @@ impl Routable<Dictionary> for FrameworkRouter {
 
         let framework_dict = Dictionary::new();
         for protocol_name in &[
-            fcomponent::BinderMarker::PROTOCOL_NAME,
-            fsandbox::CapabilityStoreMarker::PROTOCOL_NAME,
-            fcomponent::IntrospectorMarker::PROTOCOL_NAME,
-            fcomponent::NamespaceMarker::PROTOCOL_NAME,
-            fcomponent::RealmMarker::PROTOCOL_NAME,
-            fruntime::CapabilitiesMarker::PROTOCOL_NAME,
-            fsys::ConfigOverrideMarker::PROTOCOL_NAME,
-            fsys::LifecycleControllerMarker::PROTOCOL_NAME,
-            fsys::RealmQueryMarker::PROTOCOL_NAME,
-            fsys::RouteValidatorMarker::PROTOCOL_NAME,
+            "fuchsia.component.Binder",
+            "fuchsia.component.sandbox.CapabilityStore",
+            "fuchsia.component.Introspector",
+            "fuchsia.component.Namespace",
+            "fuchsia.component.Realm",
+            "fuchsia.component.runtime.Capabilities",
+            "fuchsia.sys2.ConfigOverride",
+            "fuchsia.sys2.LifecycleController",
+            "fuchsia.sys2.RealmQuery",
+            "fuchsia.sys2.RouteValidator",
             "fuchsia.sys2.RealmExplorer",
         ] {
             let name = cm_types::Name::new(*protocol_name).unwrap();
@@ -292,13 +287,17 @@ pub fn build_capability_sourced_capabilities_dictionary(
     let output = Dictionary::new();
     for capability in &decl.capabilities {
         if let cm_rust::CapabilityDecl::Storage(storage_decl) = capability {
-            let router = new_debug_only_specific_router::<Connector>(CapabilitySource::Capability(
-                CapabilityToCapabilitySource {
+            let router: Capability = new_debug_only_specific_router::<Connector>(
+                CapabilitySource::Capability(CapabilityToCapabilitySource {
                     source_capability: ComponentCapability::Storage(storage_decl.clone()),
                     moniker: component.moniker().clone(),
-                },
-            ));
-            output.insert_capability(&storage_decl.name, Capability::ConnectorRouter(router));
+                }),
+            )
+            .into();
+            let inner_dict = Dictionary::new();
+            inner_dict.insert("fuchsia.component.StorageAdmin".parse().unwrap(), router.clone());
+            inner_dict.insert("fuchsia.sys2.StorageAdmin".parse().unwrap(), router);
+            output.insert_capability(&storage_decl.name, Capability::Dictionary(inner_dict));
         }
     }
     output

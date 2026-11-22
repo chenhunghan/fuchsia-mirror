@@ -5,8 +5,28 @@
 import ast
 import dataclasses
 import json
+import types
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+
+# LINT.IfChange(variant_removed_common_configs)
+# Maps default GN config labels removed by `toolchain_variant.remove_common_configs`
+# in //build/config/BUILDCONFIG.gn to the Bazel `variant_features` condition that
+# omits them from `@fuchsia_build_info//default_build_flags` while keeping the
+# underlying `build_flags()` targets unconditional (so explicit opt-ins such as
+# `//src/lib/ubsan-custom:ubsan` and `//build/config/zircon:default_icf` still
+# apply `-fno-rtti` and `--icf=all`).
+_VARIANT_REMOVED_COMMON_CONFIGS = types.MappingProxyType(
+    {
+        "//build/config:icf": "@@//build/bazel/config/variant_features/fuzzer:true",
+        "//build/config:no_rtti": "@@//build/bazel/config/variant_features/ubsan:true",
+    }
+)
+# LINT.ThenChange(
+#     //build/config/BUILDCONFIG.gn:fuzzer_remove_common_configs,
+#     //build/config/BUILDCONFIG.gn:ubsan,
+# )
 
 
 # LINT.IfChange(DefaultBuildFlagsSet)
@@ -186,6 +206,45 @@ def _check_build_flags_target_exists(fuchsia_dir: Path, label: str) -> bool:
     return target_name in build_file_targets
 
 
+def _format_labels(labels: Sequence[str]) -> str:
+    if not labels:
+        return "[]"
+
+    # Since this BUILD.bazel file is generated inside an external repository
+    # (@fuchsia_build_info), prepend "@@" to labels starting with "//" so Bazel
+    # resolves them relative to the main workspace root.
+    chunks: list[str] = []
+    plain_run: list[str] = []
+
+    def flush_plain_run() -> None:
+        if not plain_run:
+            return
+        lines = ["["]
+        for item in plain_run:
+            lines.append(f'        "{item}",')
+        lines.append("    ]")
+        chunks.append("\n".join(lines))
+        plain_run.clear()
+
+    for label in labels:
+        resolved = f"@@{label}" if label.startswith("//") else label
+        if (
+            variant_condition := _VARIANT_REMOVED_COMMON_CONFIGS.get(label)
+        ) is not None:
+            flush_plain_run()
+            chunks.append(
+                "select({\n"
+                f'        "{variant_condition}": [],\n'
+                f'        "//conditions:default": ["{resolved}"],\n'
+                "    })"
+            )
+        else:
+            plain_run.append(resolved)
+
+    flush_plain_run()
+    return " + ".join(chunks)
+
+
 class DefaultBuildFlagsMap(dict[str, DefaultBuildFlagsSet]):
     """A { name -> DefaultBuildFlagsSet } map."""
 
@@ -292,19 +351,6 @@ load("@fuchsia_rules_common//build_flags:toolchain.bzl", "build_flags_toolchain_
 load("@@//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
 """
 
-        def format_labels(labels: list[str]) -> str:
-            if not labels:
-                return "[]"
-            # Since this BUILD.bazel file is generated inside an external
-            # repository (@fuchsia_build_info), prepend "@@" to labels starting
-            # with "//" so Bazel resolves them relative to the main workspace root.
-            lines = ["["]
-            for label in labels:
-                resolved = f"@@{label}" if label.startswith("//") else label
-                lines.append(f'        "{resolved}",')
-            lines.append("    ]")
-            return "\n".join(lines)
-
         for name, info in self.items():
             content += """
 build_flags_toolchain_instance(
@@ -325,22 +371,22 @@ toolchain(
 )
 """.format(
                 name=name,
-                cxx_common_build_flags=format_labels(
+                cxx_common_build_flags=_format_labels(
                     info.cxx_common_build_flags
                 ),
-                cxx_executable_build_flags=format_labels(
+                cxx_executable_build_flags=_format_labels(
                     info.cxx_executable_build_flags
                 ),
-                cxx_shared_library_build_flags=format_labels(
+                cxx_shared_library_build_flags=_format_labels(
                     info.cxx_shared_library_build_flags
                 ),
-                rust_common_build_flags=format_labels(
+                rust_common_build_flags=_format_labels(
                     info.rust_common_build_flags
                 ),
-                rust_executable_build_flags=format_labels(
+                rust_executable_build_flags=_format_labels(
                     info.rust_executable_build_flags
                 ),
-                rust_shared_library_build_flags=format_labels(
+                rust_shared_library_build_flags=_format_labels(
                     info.rust_shared_library_build_flags
                 ),
                 target_compatible_with=info.target_compatible_with,

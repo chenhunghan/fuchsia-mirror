@@ -5,7 +5,7 @@
 use ::component_id_index::Index;
 use anyhow::Result;
 use fidl::persist;
-use fidl_fuchsia_component_internal as fcomponent_internal;
+use fidl_fuchsia_component_internal_common as fcomponent_internal;
 use std::io::Write;
 use tempfile::NamedTempFile;
 

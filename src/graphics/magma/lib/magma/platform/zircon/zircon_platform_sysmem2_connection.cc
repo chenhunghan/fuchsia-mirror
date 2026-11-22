@@ -525,9 +525,9 @@ class ZirconPlatformSysmem2BufferCollection : public PlatformBufferCollection {
     if (!platform_constraints->MergeRawConstraints()) {
       return DRET_MSG(MAGMA_STATUS_INTERNAL_ERROR, "Merging constraints failed.");
     }
-    auto llcpp_constraints = platform_constraints->take_constraints();
+    auto fidl_constraints = platform_constraints->take_constraints();
 
-    auto& bmc = *llcpp_constraints.buffer_memory_constraints();
+    auto& bmc = *fidl_constraints.buffer_memory_constraints();
     bool secure_required = bmc.secure_required().has_value() && *bmc.secure_required();
     const char* buffer_name =
         secure_required ? "MagmaProtectedSysmemShared" : "MagmaUnprotectedSysmemShared";
@@ -543,7 +543,7 @@ class ZirconPlatformSysmem2BufferCollection : public PlatformBufferCollection {
     }
 
     fuchsia_sysmem2::BufferCollectionSetConstraintsRequest set_constrants_request;
-    set_constrants_request.constraints() = std::move(llcpp_constraints);
+    set_constrants_request.constraints() = std::move(fidl_constraints);
     auto set_constraints_result = collection_->SetConstraints(std::move(set_constrants_request));
     if (set_constraints_result.is_error()) {
       return DRET_MSG(MAGMA_STATUS_CONNECTION_LOST, "Error setting constraints: %s",
@@ -796,10 +796,10 @@ bool ZirconPlatformSysmem2BufferDescription::GetFormatIndex(PlatformBufferConstr
                                                             uint32_t format_valid_count) {
   auto* zircon_constraints = static_cast<ZirconPlatformSysmem2BufferConstraints*>(constraints);
 
-  const auto& llcpp_constraints = zircon_constraints->raw_image_constraints();
-  if (format_valid_count < llcpp_constraints.size()) {
+  const auto& fidl_constraints = zircon_constraints->raw_image_constraints();
+  if (format_valid_count < fidl_constraints.size()) {
     return DRETF(false, "format_valid_count %d < image_format_constraints_count %ld",
-                 format_valid_count, llcpp_constraints.size());
+                 format_valid_count, fidl_constraints.size());
   }
   for (uint32_t i = 0; i < format_valid_count; i++) {
     format_valid_out[i] = false;
@@ -810,8 +810,8 @@ bool ZirconPlatformSysmem2BufferDescription::GetFormatIndex(PlatformBufferConstr
   }
   const auto& out = *settings_.image_format_constraints();
 
-  for (uint32_t i = 0; i < llcpp_constraints.size(); ++i) {
-    const auto& in = llcpp_constraints[i];
+  for (uint32_t i = 0; i < fidl_constraints.size(); ++i) {
+    const auto& in = fidl_constraints[i];
     // These checks are sorted in order of how often they're expected to mismatch, from most likely
     // to least likely. They aren't always equality comparisons, since sysmem may change some values
     // in compatible ways on behalf of the other participants.

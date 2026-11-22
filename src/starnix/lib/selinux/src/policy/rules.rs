@@ -324,12 +324,21 @@ impl AccessRule {
 }
 
 /// Type transition, change, or member rule.
-#[derive(Clone, Debug, Validate)]
+#[derive(Clone, Debug)]
 pub struct TypeRule {
     key: RuleKey,
     kind: RuleKind,
     new_type: TypeId,
     enabled: bool,
+}
+
+impl Validate for TypeRule {
+    fn validate(&self, policy: &Policy) -> Result<(), ValidateError> {
+        self.key.validate(policy)?;
+        self.kind.validate(policy)?;
+        policy.types().validate_concrete_type(self.new_type)?;
+        self.enabled.validate(policy)
+    }
 }
 
 impl TypeRule {
@@ -1059,6 +1068,38 @@ mod tests {
         let mut policy_writer = PolicyWriter::new(PolicyVersion::V33, &mut writer);
         av_rules.serialize(&mut policy_writer).expect("serialize rules table");
         assert_eq!(writer.as_slice(), &data);
+    }
+
+    #[test]
+    fn test_type_rule_validate_rejects_attribute_new_type() {
+        let policy_bytes =
+            include_bytes!("../../testdata/micro_policies/allow_a_t_b_attr_class0_perm0_policy");
+        let policy = Policy::parse_and_validate(policy_bytes);
+
+        let a_t = policy.types().get_by_name(b"a_t").expect("look up a_t").id();
+        let b_attr = policy.types().get_attribute_by_name(b"b_attr").expect("look up b_attr").id();
+        let class0 = policy.classes().get_by_name(b"class0").expect("look up class0").id();
+
+        // Attribute IDs are permitted in RuleKey, while TypeRule::new_type must be a concrete
+        // type.
+        let valid_type_rule = TypeRule {
+            key: RuleKey::new(a_t, b_attr, class0),
+            kind: RuleKind::TypeTransition,
+            new_type: a_t,
+            enabled: true,
+        };
+        assert_eq!(valid_type_rule.validate(&policy), Ok(()));
+
+        let invalid_type_rule = TypeRule {
+            key: RuleKey::new(a_t, b_attr, class0),
+            kind: RuleKind::TypeTransition,
+            new_type: b_attr,
+            enabled: true,
+        };
+        assert_eq!(
+            invalid_type_rule.validate(&policy),
+            Err(ValidateError::UnexpectedTypeAttribute { id: b_attr.as_u32() })
+        );
     }
 
     #[test]

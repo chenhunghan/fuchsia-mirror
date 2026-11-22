@@ -52,173 +52,22 @@
 
 #ifndef __ASSEMBLER__
 
-#include <arch.h>
 #include <lib/zbi-format/driver-config.h>
-#include <lib/zx/result.h>
+#include <stddef.h>
 
-#include <arch/arm64/mp.h>
-#include <dev/power.h>
 #include <ktl/span.h>
 
-/* TODO NOTE: - currently these routines assume cpu topologies that are described only in AFF0 and
-   AFF1. If a system is architected such that AFF2 or AFF3 are non-zero then this code will need to
-   be revisited
-*/
+// The driver is implemented in Rust (psci.rs).
+extern "C" void rust_psci_init(const zbi_dcfg_arm_psci_driver_t& config,
+                               const zbi_dcfg_arm_psci_cpu_suspend_state_t* psci_cpu_suspend_config,
+                               size_t psci_cpu_suspend_config_count);
 
 // Initializes the PSCI driver.
-void PsciInit(const zbi_dcfg_arm_psci_driver_t& config,
-              ktl::span<const zbi_dcfg_arm_psci_cpu_suspend_state_t> psci_cpu_suspend_config);
-
-extern "C" uint32_t psci_get_version();
-uint32_t psci_get_feature(uint32_t psci_call);
-
-#include <zircon/compiler.h>
-
-__BEGIN_CDECLS
-
-/* powers down the calling cpu - only returns if call fails */
-zx_status_t psci_cpu_off();
-zx_status_t psci_cpu_on(uint64_t mpid, paddr_t entry, uint64_t context);
-
-__END_CDECLS
-
-// Specifies whether a requested power state can target more than the calling
-// CPU.
-enum class PsciCpuSuspendMaxScope : bool { CpuOnly, CpuAndMore };
-
-// Returns an appropriate power_state value to be used with |psci_cpu_suspend|.
-//
-// |scope| specifies the maximum topological scope that the selected power state
-// is allowed to target.
-//
-// |last| indicates whether the calling CPU is the last one to enter suspend.
-uint32_t psci_select_cpu_suspend_power_state(PsciCpuSuspendMaxScope scope, bool last);
-
-// Returns true if a |psci_cpu_suspend| might result in a powerdown event for
-// the calling CPU.  This function allows callers to skip saving/restoring some
-// CPU state in the case where the suspend operation will not powerdown the
-// calling CPU.
-bool psci_might_powerdown();
-
-// Whether or not the CPU powered down (lost state) during a CPU_SUSPEND
-// operation.  See |psci_cpu_suspend|.
-enum class CpuPoweredDown : bool { No, Yes };
-using PsciCpuSuspendResult = zx::result<CpuPoweredDown>;
-
-// Enters a PSCI CPU_SUSPEND state on the calling CPU.
-//
-// |power_state| specifies the power state to enter.  See also
-// |psci_select_cpu_suspend_power_state|.
-//
-// Prior to calling, interrupts must be disabled, preemption must be disabled,
-// and the caller must be pinned to the calling CPU.
-//
-// The calling thread must be a kernel-only thread.  Because this routine saves
-// only the minimum required register state, it is an error to call this
-// function on a thread that has a "user half" (ThreadDispatcher).
-//
-// On success, returns ZX_OK with either CpuPoweredDown::No or
-// CpuPoweredDown::Yes, depending on whether the CPU actually powered down
-// during the operation.
-//
-// Returns ZX_ERR_NOT_SUPPORTED if CPU_SUSPEND is not supported on this platform.
-//
-// Returns ZX_ERR_INVALID_PARAMETERS if the requested power_state is invalid, or
-// a low-power state was requested for a higher-than-core-level topology node
-// (e.g. cluster) and at least one of the children in that node is in a local
-// low-power state that is incompatible with the request.  This is a "normal"
-// error that callers must be prepared to handle.
-//
-// Returns ZX_ERR_ACCESS_DENIED if a low-power state was requested for a
-// higher-than-core-level topology node (e.g. cluster) and all the cores that
-// are in an incompatible state with the request are running, as opposed to
-// being in a low-power state.  This is a "normal" error that callers must be
-// prepared to handle (typically with a retry).
-PsciCpuSuspendResult psci_cpu_suspend(uint32_t power_state);
-
-// Enters a PSCI SYSTEM_SUSPEND state.
-//
-// Prior to calling, all other CPUs must be powered off, interrupts must be
-// disabled, preemption must be disabled, and the caller must be running on the
-// boot CPU.
-//
-// The calling thread must be a kernel-only thread.  Because this routine saves
-// only the minimum required register state, it is an error to call this
-// function on a thread that has a "user half" (ThreadDispatcher).
-//
-// Only the calling CPU's register state is saved and restored (as for
-// psci_cpu_suspend).  Any system-level state which may be lost while the system
-// is suspended (e.g. interrupt controller distributor state, or peripheral
-// state) is the caller's responsibility.
-//
-// Returns ZX_OK if the call succeeded.  Note that this does not necessarily
-// mean that the system actually suspended; PSCI implementations may return
-// success without suspending (e.g. Trusted Firmware-A does so when an interrupt
-// is pending).
-//
-// Returns ZX_ERR_NOT_SUPPORTED if SYSTEM_SUSPEND is not supported on this
-// platform.
-//
-// Returns ZX_ERR_INVALID_ARGS if the parameters were rejected by PSCI.
-//
-// Returns ZX_ERR_ACCESS_DENIED if the request was denied by PSCI.  Note that
-// some PSCI implementations (e.g. Trusted Firmware-A) return PSCI_DENIED, not
-// PSCI_ALREADY_ON, if another CPU is still powered on.
-//
-// Returns ZX_ERR_BAD_STATE if PSCI reported that another CPU was still powered
-// on (PSCI_ALREADY_ON).
-//
-// Panics if PSCI reports any other error (e.g. PSCI_INVALID_ADDRESS, which
-// would indicate a kernel bug).
-//
-// TODO(https://fxbug.dev/568438295): Determine whether GIC distributor state
-// must be saved and restored by the caller on platforms which lose it during
-// SYSTEM_SUSPEND.
-zx_status_t psci_system_suspend();
-
-// Holds register state to be saved/restored across a suspend/resume cycle.
-//
-// Must be kept in sync with |psci_do_suspend|, |psci_do_system_suspend|, and
-// |psci_do_resume|.
-//
-// Layout (see save_resume_context in psci-suspend.S):
-//   regs[0..13]:  daif, sctlr_el1, tcr_el1, vbar_el1, mdscr_el1, cpacr_el1,
-//                 osdlr_el1, sp, sp_el0, contextidr_el1, tpidr_el1,
-//                 tpidrro_el0, tpidr_el0, zcr_el1
-//   regs[14..25]: x18-x29
-//   regs[26]:     lr
-//   regs[27]:     PSTATE.PAN
-//   regs[28]:     vtcr_el2 (when running in EL2)
-//   regs[29]:     unused (padding)
-struct psci_cpu_resume_context {
-  uint64_t regs[2 * 15]{};
-};
-
-__BEGIN_CDECLS
-
-int64_t psci_get_affinity_info(uint64_t mpid);
-zx_status_t psci_get_cpu_state(uint64_t mpid, power_cpu_state* out_state);
-zx_status_t psci_system_off();
-zx_status_t psci_system_reset(power_reboot_flags flags);
-zx_status_t psci_system_reset_cold();
-
-// Used when calling SYSTEM_RESET2 directly
-zx_status_t psci_system_reset2_raw(uint32_t reset_type, uint32_t cookie);
-
-__END_CDECLS
-
-enum psci_suspend_mode : uint32_t { platform_coordinated = 0, os_initiated = 1 };
-zx_status_t psci_set_suspend_mode(psci_suspend_mode mode);
-
-// Returns true iff PSCI version is 1.0 or better and SET_SUSPEND_MODE is supported.
-bool psci_is_set_suspend_mode_supported();
-
-// Returns true iff PSCI version is 1.0 or better, and CPU_SUSPEND is supported,
-// and we have valid ZBI-supplied power_state configuration.
-bool psci_is_cpu_suspend_supported();
-
-// Returns true iff PSCI version is 1.0 or better and SYSTEM_SUSPEND is supported.
-bool psci_is_system_suspend_supported();
+inline void PsciInit(
+    const zbi_dcfg_arm_psci_driver_t& config,
+    ktl::span<const zbi_dcfg_arm_psci_cpu_suspend_state_t> psci_cpu_suspend_config) {
+  rust_psci_init(config, psci_cpu_suspend_config.data(), psci_cpu_suspend_config.size());
+}
 
 #endif  // !__ASSEMBLER__
 

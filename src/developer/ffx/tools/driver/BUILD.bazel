@@ -1,0 +1,66 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_rustc_test.bzl", "host_rustc_test")
+load("//build/bazel/rules/idk:idk_ffx_tool.bzl", "idk_ffx_tool")
+load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [":ffx_driver_test"],
+    visibility = ["//src/developer/ffx:__pkg__"],
+)
+
+rustc_library(
+    name = "ffx_driver",
+    srcs = [
+        "src/args.rs",
+        "src/lib.rs",
+    ],
+    edition = "2024",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    deps = [
+        "//sdk/fidl/fuchsia.driver.development:fuchsia.driver.development_rust_fdomain",
+        "//sdk/fidl/fuchsia.driver.registrar:fuchsia.driver.registrar_rust_fdomain",
+        "//sdk/fidl/fuchsia.sys2:fuchsia.sys2_rust_fdomain",
+        "//sdk/fidl/fuchsia.test.manager:fuchsia.test.manager_rust_fdomain",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/developer/ffx/lib/rcs:lib",
+        "//src/developer/ffx/lib/target/holders:lib",
+        "//src/developer/ffx/lib/writer:lib",
+        "//src/devices/bin/driver_tools:lib_fdomain",
+        "//src/devices/bin/driver_tools/connector:lib_fdomain",
+        "//src/lib/fdomain/client",
+        "//src/lib/fidl/rust/fidl",
+        "//src/sys/lib/component_debug:component_debug_fdomain",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:argh",
+        "//third_party/rust_crates/vendor:rustyline",
+        "//third_party/rust_crates/vendor:serde_json",
+    ],
+)
+
+idk_ffx_tool(
+    name = "ffx_driver_tool",
+    srcs = ["src/main.rs"],
+    category = "partner",
+    edition = "2024",
+    idk_name = "ffx-driver",
+    # Exposed for cross-tree end-to-end tests using :ffx_driver_tool_test_data.
+    visibility = ["//:__subpackages__"],
+    deps = [
+        ":ffx_driver",
+        "//src/developer/ffx/lib/fho:lib",
+        "//src/lib/fuchsia-async",
+    ],
+)
+
+host_rustc_test(
+    name = "ffx_driver_test",
+    crate = ":ffx_driver",
+)

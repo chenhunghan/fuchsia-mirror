@@ -328,7 +328,7 @@ typedef struct magma_buffer_offset {
   uint64_t length;
 } magma_buffer_offset_t;
 
-// The top 16 bits are reserved for vendor-specific flags.
+// Bits 16 and above are reserved for vendor-specific flags.
 #define MAGMA_MAP_FLAG_VENDOR_SHIFT ((uint64_t)16)
 
 #define MAGMA_MAP_FLAG_READ ((uint64_t)(1 << 0))

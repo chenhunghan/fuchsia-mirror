@@ -13,6 +13,8 @@ rustc_library("lib") {
 
   deps = [
     ":netcfg-structured-config",
+    "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+    "//sdk/fidl/fuchsia.driver.token:fuchsia.driver.token_rust",
     "//sdk/fidl/fuchsia.hardware.network:fuchsia.hardware.network_rust",
     "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
     "//sdk/fidl/fuchsia.net:fuchsia.net_rust",
@@ -25,6 +27,7 @@ rustc_library("lib") {
     "//sdk/fidl/fuchsia.net.name:fuchsia.net.name_rust",
     "//sdk/fidl/fuchsia.net.ndp:fuchsia.net.ndp_rust",
     "//sdk/fidl/fuchsia.net.policy.properties:fuchsia.net.policy.properties_rust",
+    "//sdk/fidl/fuchsia.net.policy.socketproxy:fuchsia.net.policy.socketproxy_rust",
     "//sdk/fidl/fuchsia.net.reachability:fuchsia.net.reachability_rust",
     "//sdk/fidl/fuchsia.net.resources:fuchsia.net.resources_rust",
     "//sdk/fidl/fuchsia.net.routes.admin:fuchsia.net.routes.admin_rust",
@@ -60,7 +63,6 @@ rustc_library("lib") {
     "//src/lib/network/fidl_fuchsia_net_routes_ext",
     "//src/lib/windowed-stats",
     "//third_party/rust_crates:anyhow",
-    "//third_party/rust_crates:argh",
     "//third_party/rust_crates:assert_matches",
     "//third_party/rust_crates:derivative",
     "//third_party/rust_crates:either",
@@ -121,22 +123,34 @@ rustc_binary("bin") {
 fuchsia_component_manifest("manifest") {
   component_name = "netcfg"
   manifest = "meta/netcfg.cml"
+  visibility = [ ":*" ]
 }
 
 fuchsia_structured_config_rust_lib("netcfg-structured-config") {
   name = "netcfg_structured_config"
   cm_label = ":manifest"
+  visibility = [ ":*" ]
 }
 
 fuchsia_component("component") {
   cm_label = ":manifest"
   deps = [ ":bin" ]
+  visibility = [ ":*" ]
 }
 
 fuchsia_package("package") {
   package_name = "netcfg"
   deps = [ ":component" ]
   visibility = [ "//bundles/assembly/*" ]
+}
+
+fuchsia_package("package-for-tests") {
+  testonly = true
+  package_name = "netcfg"
+  deps = [
+    ":component",
+    "//src/connectivity/policy/tests/integration:netcfg-netemul-configs",
+  ]
 }
 
 fuchsia_unittest_package("netcfg-tests") {

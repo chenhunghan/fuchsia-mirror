@@ -15,7 +15,7 @@ import os
 import stat
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -75,11 +75,13 @@ class CxxLinkRemoteAction(object):
     def __init__(
         self,
         argv: Sequence[str],
+        env: Mapping[str, str],
         exec_root: Path | None = None,
         working_dir: Path | None = None,
         host_platform: str | None = None,
         auto_reproxy: bool = True,  # can disable for unit-testing
     ):
+        self._env = env
         self._working_dir = (working_dir or Path(os.curdir)).absolute()
         self._exec_root = (exec_root or remote_action.PROJECT_ROOT).absolute()
         self._host_platform = host_platform or fuchsia.HOST_PREBUILT_PLATFORM
@@ -101,7 +103,10 @@ class CxxLinkRemoteAction(object):
         # Re-launch with reproxy if needed.
         if auto_reproxy:
             remote_action.auto_relaunch_with_reproxy(
-                script=Path(__file__), argv=argv, args=self._main_args
+                script=Path(__file__),
+                argv=argv,
+                args=self._main_args,
+                env=self._env,
             )
 
         if not filtered_command:  # there is no command, bail out early
@@ -459,7 +464,7 @@ class CxxLinkRemoteAction(object):
         if not self._main_args.download_outputs:
             if (
                 not self._main_args.download_regex
-                and not casfs.load().virtualize
+                and not casfs.load(self.exec_root, self._env).virtualize
             ):
                 self._main_args.download_regex = f"-{self.primary_output}$"
             self._main_args.download_outputs = True
@@ -468,6 +473,7 @@ class CxxLinkRemoteAction(object):
 
         self._remote_action = remote_action.remote_action_from_args(
             main_args=self._main_args,
+            env=self._env,
             remote_options=remote_options,
             command=remote_command,
             inputs=remote_inputs,
@@ -679,11 +685,12 @@ class CxxLinkRemoteAction(object):
                 f.unlink()
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: Sequence[str], env: Mapping[str, str]) -> int:
     with cl_utils.timer_cm("cxx_link_remote_wrapper.main()"):
         with cl_utils.timer_cm("CxxLinkRemoteAction.__init__()"):
             cxx_link_remote_action = CxxLinkRemoteAction(
                 argv,  # [remote options] -- C-link-command...
+                env=env,
                 exec_root=remote_action.PROJECT_ROOT,
                 working_dir=Path(os.curdir),
                 host_platform=fuchsia.HOST_PREBUILT_PLATFORM,
@@ -694,4 +701,4 @@ def main(argv: Sequence[str]) -> int:
 
 if __name__ == "__main__":
     remote_action.init_from_main_once()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv[1:], os.environ))

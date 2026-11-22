@@ -423,6 +423,13 @@ class DriverImpl : public DriverBase<DriverImpl<KdrvExtra, KdrvConfig, IoRegType
     return LineStatusRegister::Get().ReadFrom(io.io()).tx_register_empty();
   }
 
+  // Returns true if all previously written output has been transmitted, i.e.
+  // both the TX FIFO and the transmit shift register are empty (LSR.TEMT).
+  template <class IoProvider>
+  bool TxDrained(IoProvider& io) {
+    return LineStatusRegister::Get().ReadFrom(io.io()).tx_empty();
+  }
+
   template <class IoProvider, typename It1, typename It2>
   auto Write(IoProvider& io, bool, It1 it, const It2& end) {
     // The FIFO is empty now and we know the size, so fill it completely.

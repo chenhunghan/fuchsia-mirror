@@ -9,19 +9,14 @@ use core::mem::size_of;
 use core::ptr::{NonNull, fn_addr_eq, read_volatile, with_exposed_provenance_mut, write_volatile};
 use debug::ltracef;
 use fbl::RefPtr;
-use kprint::kformat;
 use ksync::lock;
 use zx_status::Status;
 use zx_types::{
-    ZX_CACHE_POLICY_UNCACHED_DEVICE, ZX_MAX_NAME_LEN, ZX_MSI_MODE_MSI_X, zx_off_t, zx_paddr_t,
-    zx_rights_t,
+    ZX_CACHE_POLICY_UNCACHED_DEVICE, ZX_MSI_MODE_MSI_X, zx_off_t, zx_paddr_t, zx_rights_t,
 };
 
 use super::handle::KernelHandle;
-use super::interrupt_dispatcher::{
-    INTERRUPT_MASK_POSTWAIT, INTERRUPT_UNMASK_PREWAIT, InterruptDispatcher, InterruptKind,
-    WakeVectorDiagnostics,
-};
+use super::interrupt_dispatcher::{InterruptDispatcher, InterruptKind};
 use super::msi_allocation::MsiAllocation;
 use crate::counters::define_kcounter;
 use crate::dev_interrupt::{
@@ -31,6 +26,7 @@ use crate::vm::arch_vm_aspace::{ARCH_MMU_FLAG_PERM_READ, ARCH_MMU_FLAG_PERM_WRIT
 use crate::vm::vm_aspace::VmAspace;
 use crate::vm::vm_mapping::VmMapping;
 use crate::vm::vm_object::VmObject;
+use crate::wake_vector::Diagnostics;
 use libarch::device_memory_barrier;
 
 const LOCAL_TRACE: u32 = 0;
@@ -43,9 +39,15 @@ define_kcounter!(DISPATCHER_MSI_DESTROY_COUNT, "msi_dispatcher.destroy", Sum);
 
 type RegisterIntFn = unsafe extern "C" fn(*const MsiBlock, u32, InterruptHandler);
 
-// MSI / MSI-X interrupts share a masking approach and should be masked while
-// being serviced and unmasked while waiting for an interrupt message to arrive.
-const FLAGS: u32 = INTERRUPT_UNMASK_PREWAIT | INTERRUPT_MASK_POSTWAIT;
+// MSI and MSI-X interrupts are edge-triggered, so like edge-triggered hardware
+// interrupts in InterruptEventDispatcher they do not need to be masked while
+// being serviced or unmasked before waiting. InterruptDispatcher latches any
+// new edge arriving in NeedAck and delivers it on the next wait/ack. Avoiding
+// per-interrupt masking also avoids expensive PCIe MMIO/config-space writes on
+// every IRQ and prevents hypervisor VMM traps that can tear down and
+// reregister VFIO host IRQs on every MSI-X vector unmask. Lifecycle masking is
+// still performed on creation and destruction.
+const FLAGS: u32 = 0;
 
 // Message Signaled Interrupts --
 // This derived interrupt dispatcher handles operation of Messaged Signaled
@@ -55,10 +57,11 @@ const FLAGS: u32 = INTERRUPT_UNMASK_PREWAIT | INTERRUPT_MASK_POSTWAIT;
 // 1 or more interrupts, and may or may not support masking of individual
 // vectors. Operation of the MSI functionality is largely controlled in the
 // device's capability space via its MSI Capability Structure. This includes
-// enabling MSI, configuring vectors, and masking/unmasking vectors. To reduce
-// interrupt latency all masking and unmasking at interrupt time is handled by
-// this dispatcher, but all configuration is (will be: https://fxbug.dev/42108122) handled by the
-// userspace PCI Bus Driver. To facilitate safe interactions between the two,
+// enabling MSI, configuring vectors, and masking/unmasking vectors. Lifecycle
+// masking and unmasking (on creation and destruction) is handled by this
+// dispatcher, while configuration is (will be: https://fxbug.dev/42108122)
+// handled by the userspace PCI Bus Driver. To facilitate safe interactions
+// between the two,
 // all access to MSI configuration registers are synchronized via the MSI
 // allocation lock. Userspace will rarely be accessing this outside of
 // initialization so the performance overhead is minimal due to a lack of
@@ -111,7 +114,6 @@ const fn msix_table_offset(id: u32) -> usize {
     id as usize * size_of::<MsixTableEntry>()
 }
 
-#[repr(C)]
 enum MsiVariant {
     Msi(MsiInterruptDispatcherImpl),
     Msix(MsixInterruptDispatcherImpl),
@@ -119,7 +121,6 @@ enum MsiVariant {
 
 /// The common interface for all MSI related interrupt handling. This encompasses MSI and MSI-X.
 pub struct MsiInterruptDispatcher {
-    disp: NonNull<InterruptDispatcher>,
     variant: MsiVariant,
     // The config space of the MSI capability controlling this MSI vector.
     mapping: RefPtr<VmMapping>,
@@ -132,11 +133,10 @@ pub struct MsiInterruptDispatcher {
     msi_id: u32,
 }
 
-// SAFETY: `MsiInterruptDispatcher` is owned inline by `InterruptDispatcher`. `disp` points to the
-// thread-safe enclosing `InterruptDispatcher` (`Send + Sync`), `MsiCapability` register accesses in
-// `MsiInterruptDispatcherImpl` are synchronized by `self.alloc.lock()`, and `MsixTableEntry`
-// accesses in `MsixInterruptDispatcherImpl` are isolated to the exclusively reserved `self.msi_id`
-// entry while `self.mapping` is alive.
+// SAFETY: `MsiInterruptDispatcher` is owned inline by `InterruptDispatcher`. `MsiCapability`
+// register accesses in `MsiInterruptDispatcherImpl` are synchronized by `self.alloc.lock()`, and
+// `MsixTableEntry` accesses in `MsixInterruptDispatcherImpl` are isolated to the exclusively
+// reserved `self.msi_id` entry while `self.mapping` is alive.
 unsafe impl Send for MsiInterruptDispatcher {}
 // SAFETY: Shared references only access immutable fields or synchronize MMIO register accesses via
 // `self.alloc.lock()` (MSI) or exclusive per-vector `self.msi_id` reservation (MSI-X).
@@ -162,9 +162,6 @@ impl Drop for MsiInterruptDispatcher {
         }
         ltracef!("MsiInterruptDispatcher: cleaning up MSI id {}\n", self.msi_id);
         DISPATCHER_MSI_DESTROY_COUNT.add(1);
-        // SAFETY: `self.disp` points to the enclosing `InterruptDispatcher`, which is valid
-        // during `~InterruptDispatcher`.
-        unsafe { self.disp.as_ref() }.destroy_wake_event();
     }
 }
 
@@ -230,9 +227,7 @@ impl MsiInterruptDispatcher {
             .root_vmar()
             .expect("kernel aspace root VMAR must be initialized");
         let vector = base_irq_id + msi_id;
-        let mut name = [0u8; ZX_MAX_NAME_LEN];
-        let name = kformat!(&mut name, "msi id {:u} (vector {:u})", msi_id, vector);
-        let mapping_result = match vmar.create_vm_mapping(
+        let mapping_result = match vmar.create_vm_mapping_no_overwrite(
             0,
             vmo.size() as usize,
             0,
@@ -240,7 +235,6 @@ impl MsiInterruptDispatcher {
             vmo.clone(),
             0,
             ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-            name,
         ) {
             Ok(res) => res,
             Err(status) => {
@@ -279,14 +273,14 @@ impl MsiInterruptDispatcher {
                 return Err(Status::INVALID_ARGS);
             }
 
-            InterruptDispatcher::create_raw(FLAGS, 0, |disp| {
+            InterruptDispatcher::create_raw(FLAGS, 0, || {
                 let variant = MsiVariant::Msix(MsixInterruptDispatcherImpl::new(
                     &alloc,
                     msi_id,
                     &mapping,
                     vmo_offset as zx_off_t,
                 ));
-                Self::new(disp, alloc, mapping, msi_id, register_int_fn, variant);
+                Self::new(alloc, mapping, msi_id, register_int_fn, variant)
             })
         } else {
             // MSI capabilities fit within a given device's configuration space which is either 256
@@ -312,7 +306,7 @@ impl MsiInterruptDispatcher {
             let ctrl_val: u16 = unsafe { read_volatile(&raw const (*cap).control) };
             let has_pvm = (ctrl_val & MSI_PVM_SUPPORTED) != 0;
             let has_64bit = (ctrl_val & MSI_64BIT_SUPPORTED) != 0;
-            InterruptDispatcher::create_raw(FLAGS, 0, |disp| {
+            InterruptDispatcher::create_raw(FLAGS, 0, || {
                 let variant = MsiVariant::Msi(MsiInterruptDispatcherImpl::new(
                     &mapping,
                     vmo_offset as zx_off_t,
@@ -320,7 +314,7 @@ impl MsiInterruptDispatcher {
                     has_64bit,
                     register_int_fn,
                 ));
-                Self::new(disp, alloc, mapping, msi_id, register_int_fn, variant);
+                Self::new(alloc, mapping, msi_id, register_int_fn, variant)
             })
         };
 
@@ -335,7 +329,9 @@ impl MsiInterruptDispatcher {
         let InterruptKind::Msi(msi) = disp.state().kind() else {
             unreachable!();
         };
-        if let Err(status) = msi.register_interrupt_handler() {
+        // SAFETY: `disp` remains alive until `on_zero_handles` / `destroy` calls
+        // `unregister_interrupt_handler`.
+        if let Err(status) = unsafe { msi.register_interrupt_handler(RefPtr::as_ptr(&disp)) } {
             ltracef!(
                 "Failed to register interrupt handler for msi id {} (vector {}): {}\n",
                 msi_id,
@@ -354,26 +350,14 @@ impl MsiInterruptDispatcher {
 
     #[allow(clippy::new_ret_no_self)]
     fn new(
-        disp: &InterruptDispatcher,
         alloc: RefPtr<MsiAllocation>,
         mapping: RefPtr<VmMapping>,
         msi_id: u32,
         register_int_fn: RegisterIntFn,
         variant: MsiVariant,
-    ) {
-        // SAFETY: Called once during `InterruptDispatcher::create_raw` construction.
-        unsafe {
-            disp.init_kind(InterruptKind::Msi(Self {
-                disp: NonNull::from(disp),
-                variant,
-                mapping,
-                alloc,
-                register_int_fn,
-                msi_id,
-            }));
-        }
+    ) -> InterruptKind {
         DISPATCHER_MSI_CREATE_COUNT.add(1);
-        disp.initialize_wake_event();
+        InterruptKind::Msi(Self { variant, mapping, alloc, register_int_fn, msi_id })
     }
 
     fn vector(&self) -> u32 {
@@ -404,15 +388,24 @@ impl MsiInterruptDispatcher {
         }
     }
 
-    fn register_interrupt_handler(&self) -> Result<(), Status> {
-        // SAFETY: `self.alloc.block()` and `self.disp` remain valid until
+    /// Registers `disp` as the MSI interrupt handler for `self.msi_id`.
+    ///
+    /// # Safety
+    ///
+    /// `disp` must point to a valid `InterruptDispatcher` that outlives any registration until
+    /// `unregister_interrupt_handler` is called.
+    unsafe fn register_interrupt_handler(
+        &self,
+        disp: *const InterruptDispatcher,
+    ) -> Result<(), Status> {
+        // SAFETY: `self.alloc.block()` and `disp` remain valid until
         // `unregister_interrupt_handler` is called.
         unsafe {
             (self.register_int_fn)(
                 self.alloc.block(),
                 self.msi_id,
                 InterruptHandler {
-                    cookie: self.disp.as_ptr().cast(),
+                    cookie: disp.cast_mut().cast(),
                     r#fn: Some({
                         extern "C" fn handler(cookie: *mut c_void) {
                             // SAFETY: `cookie` is a valid `*const InterruptDispatcher`.
@@ -428,16 +421,7 @@ impl MsiInterruptDispatcher {
         Ok(())
     }
 
-    // This override of WakeVector::GetDiagnostics is marked final to prevent further overrides.
-    // Because this method cannot be overridden further, it is safe for this class to initialize /
-    // destroy InterruptDispatcher::wake_event in the constructor / destructor. See
-    // lib/wake-vector.h for more details.
-    /// Populates wake vector diagnostics for this MSI interrupt.
-    pub fn get_diagnostics(&self, diagnostics_out: &mut WakeVectorDiagnostics) {
-        // SAFETY: `self.disp` points to the valid enclosing `InterruptDispatcher`.
-        let disp = unsafe { self.disp.as_ref() };
-        diagnostics_out.enabled = disp.is_wake_vector();
-        diagnostics_out.koid = disp.get_koid();
+    pub(super) fn fill_diagnostics(&self, diagnostics_out: &mut Diagnostics) {
         diagnostics_out.print_extra(format_args!("MSI {}", self.vector()));
     }
 }
@@ -607,13 +591,18 @@ mod tests {
     use fbl::RefPtr;
     use kprint::kprint;
     use ksync::lock;
-    use unittest::{assert_eq, assert_err, assert_ok, assert_true, expect_eq, unwrap_ok};
+    use unittest::{
+        assert_eq, assert_err, assert_ok, assert_true, expect_eq, expect_ge, unwrap_ok,
+    };
     use zx_status::Status;
+    use zx_types::ZX_PORT_BIND_TO_INTERRUPT;
 
     use super::super::msi_allocation::MSI_ALLOCATION_COUNT_MAX;
+    use super::super::port_dispatcher::PortDispatcher;
     use super::{
-        InterruptHandler, MSI_64BIT_SUPPORTED, MSI_CAPABILITY_ID, MSI_PVM_SUPPORTED, MsiAllocation,
-        MsiBlock, MsiCapability, MsiInterruptDispatcher, VmAspace, VmMapping, VmObject,
+        InterruptHandler, MSI_64BIT_SUPPORTED, MSI_CAPABILITY_ID, MSI_PVM_SUPPORTED,
+        MSIX_VECTOR_CONTROL_MASK_BIT, MsiAllocation, MsiBlock, MsiCapability,
+        MsiInterruptDispatcher, MsixTableEntry, VmAspace, VmMapping, VmObject, ZX_MSI_MODE_MSI_X,
     };
     use crate::kernel::types::PAddr;
     use crate::vm::arch_vm_aspace::{
@@ -688,8 +677,10 @@ mod tests {
             vmo.set_mapping_cache_policy(ARCH_MMU_FLAG_UNCACHED_DEVICE)?;
         }
 
-        let mapping_result =
-            VmAspace::kernel_aspace().root_vmar().ok_or(Status::INTERNAL)?.create_vm_mapping(
+        let mapping_result = VmAspace::kernel_aspace()
+            .root_vmar()
+            .ok_or(Status::INTERNAL)?
+            .create_vm_mapping_no_overwrite(
                 /*mapping_offset=*/ 0,
                 /*size=*/ vmo_size,
                 /*align_pow2=*/ 0,
@@ -697,7 +688,6 @@ mod tests {
                 vmo.clone(),
                 /*vmo_offset=*/ 0,
                 ARCH_MMU_FLAG_PERM_READ | ARCH_MMU_FLAG_PERM_WRITE,
-                /*name=*/ b"",
             )?;
 
         // Prepopulate the mapping so no page faults are needed in kernel mode.
@@ -1111,5 +1101,229 @@ mod tests {
         // freeing in the same order behaves properly due to the reference ownership.
         drop(interrupt1.release());
         drop(interrupt2);
+    }
+
+    /// Test that MSI and MSI-X do not mask/unmask per interrupt
+    #[test]
+    fn interrupt_no_per_irq_masking_test() {
+        let alloc = unwrap_ok!(create_allocation(MSI_ALLOCATION_COUNT_MAX));
+        let vmo_res = create_valid_msi_vmo();
+        if vmo_res.as_ref().is_err_and(|&st| st == Status::NOT_SUPPORTED) {
+            kprint!("reserved region not available, skipping test");
+            return true;
+        }
+        let (vmo, _mapping, cap) = unwrap_ok!(vmo_res);
+
+        // Verify MSI-X behavior (both synchronous wait and port-bound bind/ack).
+        {
+            let entry = cap.as_ptr().cast::<MsixTableEntry>();
+            let mask_bit = 1u32 << MSIX_VECTOR_CONTROL_MASK_BIT;
+            let reset_msix_entry = move || {
+                // SAFETY: `entry` points to the start of the page-aligned, R/W `page::SIZE`
+                // region kept live by `_mapping`, which fits `#[repr(C)]` `MsixTableEntry`,
+                // and this test runs single-threaded with a mock `register_fn`.
+                unsafe {
+                    write_volatile(&raw mut (*entry).msg_addr, 0);
+                    write_volatile(&raw mut (*entry).msg_upper_addr, 0);
+                    write_volatile(&raw mut (*entry).msg_data, 0);
+                    write_volatile(&raw mut (*entry).vector_control, mask_bit);
+                }
+            };
+            let read_msix_entry = move || -> (u32, u32, u32, u32) {
+                // SAFETY: `entry` points to the start of the page-aligned, R/W `page::SIZE`
+                // region kept live by `_mapping`, which fits `#[repr(C)]` `MsixTableEntry`;
+                // all fields are initialized by `reset_msix_entry` before reading, and this
+                // test runs single-threaded with a mock `register_fn`.
+                unsafe {
+                    (
+                        read_volatile(&raw const (*entry).msg_addr),
+                        read_volatile(&raw const (*entry).msg_upper_addr),
+                        read_volatile(&raw const (*entry).msg_data),
+                        read_volatile(&raw const (*entry).vector_control),
+                    )
+                }
+            };
+            let read_vector_control = move || -> u32 {
+                // SAFETY: `entry` points to the start of the page-aligned, R/W `page::SIZE`
+                // region kept live by `_mapping`, which fits `#[repr(C)]` `MsixTableEntry`;
+                // `vector_control` is initialized by `reset_msix_entry` before reading, and
+                // this test runs single-threaded with a mock `register_fn`.
+                unsafe { read_volatile(&raw const (*entry).vector_control) }
+            };
+            let write_vector_control = move |val: u32| {
+                // SAFETY: `entry` points to the start of the page-aligned, R/W `page::SIZE`
+                // region kept live by `_mapping`, which fits `#[repr(C)]` `MsixTableEntry`,
+                // and this test runs single-threaded with a mock `register_fn`.
+                unsafe { write_volatile(&raw mut (*entry).vector_control, val) }
+            };
+
+            reset_msix_entry();
+
+            {
+                let (handle, _rights) = unwrap_ok!(MsiInterruptDispatcher::create(
+                    alloc.clone(),
+                    /*msi_id=*/ 0,
+                    &vmo,
+                    /*vmo_offset=*/ 0,
+                    ZX_MSI_MODE_MSI_X,
+                    Some(register_fn),
+                ));
+                let disp = handle.dispatcher();
+
+                // Creation configures and unmasks the table entry.
+                let (msg_addr, _, _, vector_control) = read_msix_entry();
+                expect_eq!(vector_control & mask_bit, 0u32);
+                expect_eq!(msg_addr, 0x4321u32);
+
+                // Firing an interrupt must NOT mask the MSI-X vector.
+                disp.interrupt_handler();
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+
+                // Waiting consumes the pending interrupt and enters NeedAck without masking.
+                let ts1 = unwrap_ok!(disp.wait_for_interrupt());
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+
+                // A second edge arriving in NeedAck is latched without masking and returned
+                // immediately on the next wait.
+                disp.interrupt_handler();
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+                let ts2 = unwrap_ok!(disp.wait_for_interrupt());
+                expect_ge!(ts2, ts1);
+
+                // Transitioning from NeedAck (with no pending edge) to Waiting must NOT unmask
+                // (write vector_control). Set the mask bit manually and verify it stays set.
+                write_vector_control(mask_bit);
+                assert_true!(disp.begin_wait_for_interrupt().is_none());
+                expect_eq!(read_vector_control() & mask_bit, mask_bit);
+
+                // Clear the synthetic mask bit, then verify destroy() masks the vector.
+                write_vector_control(0);
+                assert_ok!(disp.destroy());
+                expect_eq!(read_vector_control() & mask_bit, mask_bit);
+            }
+
+            // Dropping the last handle runs MSI-X cleanup, clearing address/data and keeping
+            // the vector masked.
+            let (msg_addr, msg_upper_addr, msg_data, vector_control) = read_msix_entry();
+            expect_eq!(msg_addr, 0u32);
+            expect_eq!(msg_upper_addr, 0u32);
+            expect_eq!(msg_data, 0u32);
+            expect_eq!(vector_control & mask_bit, mask_bit);
+
+            // Verify MSI-X port-bound delivery (`send_packet_locked` and `ack_internal`).
+            reset_msix_entry();
+            {
+                let (port_handle, _port_rights) =
+                    unwrap_ok!(PortDispatcher::create(ZX_PORT_BIND_TO_INTERRUPT));
+                let port = port_handle.dispatcher();
+                let (handle, _rights) = unwrap_ok!(MsiInterruptDispatcher::create(
+                    alloc.clone(),
+                    /*msi_id=*/ 0,
+                    &vmo,
+                    /*vmo_offset=*/ 0,
+                    ZX_MSI_MODE_MSI_X,
+                    Some(register_fn),
+                ));
+                let disp = handle.dispatcher();
+
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+                assert_ok!(disp.bind(port.clone(), /*key=*/ 0x55));
+
+                // Firing an interrupt sends a port packet and enters NeedAck without masking.
+                disp.interrupt_handler();
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+
+                // Acking in NeedAck with no pending edge transitions to Idle without unmasking.
+                write_vector_control(mask_bit);
+                assert_ok!(disp.ack());
+                expect_eq!(read_vector_control() & mask_bit, mask_bit);
+
+                // Rebind to clear the queued packet, then verify a second edge arriving while in
+                // NeedAck is latched without masking and `ack()` does not unmask.
+                assert_ok!(disp.unbind(port));
+                assert_ok!(disp.bind(port.clone(), /*key=*/ 0x55));
+                write_vector_control(0);
+                disp.interrupt_handler();
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+                disp.interrupt_handler();
+                expect_eq!(read_vector_control() & mask_bit, 0u32);
+                write_vector_control(mask_bit);
+                // The first packet is still queued on `port` (kernel unit test threads cannot
+                // call `PortDispatcher::dequeue`), so retriggering returns `BAD_STATE` after the
+                // `INTERRUPT_UNMASK_PREWAIT` check.
+                assert_err!(disp.ack(), Status::BAD_STATE);
+                expect_eq!(read_vector_control() & mask_bit, mask_bit);
+
+                // Verify destroy() still masks the vector.
+                write_vector_control(0);
+                assert_ok!(disp.destroy());
+                expect_eq!(read_vector_control() & mask_bit, mask_bit);
+            }
+        }
+
+        // Verify MSI with PVM behavior.
+        {
+            let cap_ptr = cap.as_ptr();
+            let read_mask_bits = move || -> u32 {
+                // SAFETY: `cap_ptr` points to the start of the page-aligned, R/W `page::SIZE`
+                // region kept live by `_mapping`, which fits `#[repr(C)]` `MsiCapability`;
+                // `mask_bits_32` is initialized via `write_volatile` below before reading, and
+                // this test runs single-threaded with a mock `register_fn`.
+                unsafe { read_volatile(&raw const (*cap_ptr).mask_bits_32) }
+            };
+            let write_mask_bits = move |val: u32| {
+                // SAFETY: `cap_ptr` points to the start of the page-aligned, R/W `page::SIZE`
+                // region kept live by `_mapping`, which fits `#[repr(C)]` `MsiCapability`,
+                // and this test runs single-threaded with a mock `register_fn`.
+                unsafe { write_volatile(&raw mut (*cap_ptr).mask_bits_32, val) }
+            };
+
+            // SAFETY: `cap_ptr` points to the start of the page-aligned, R/W `page::SIZE`
+            // region kept live by `_mapping`, which fits `#[repr(C)]` `MsiCapability`, and
+            // this test runs single-threaded with a mock `register_fn`.
+            unsafe {
+                write_volatile(&raw mut (*cap_ptr).id, MSI_CAPABILITY_ID);
+                write_volatile(&raw mut (*cap_ptr).control, MSI_PVM_SUPPORTED);
+                write_volatile(&raw mut (*cap_ptr).mask_bits_32, u32::MAX);
+            }
+
+            let (handle, _rights) = unwrap_ok!(MsiInterruptDispatcher::create(
+                alloc,
+                /*msi_id=*/ 0,
+                &vmo,
+                /*vmo_offset=*/ 0,
+                /*options=*/ 0,
+                Some(register_fn),
+            ));
+            let disp = handle.dispatcher();
+
+            // Creation unmasks bit 0.
+            expect_eq!(read_mask_bits() & 1u32, 0u32);
+
+            // Firing an interrupt must NOT mask bit 0.
+            disp.interrupt_handler();
+            expect_eq!(read_mask_bits() & 1u32, 0u32);
+
+            // Waiting consumes the pending interrupt and enters NeedAck without masking.
+            let ts1 = unwrap_ok!(disp.wait_for_interrupt());
+            expect_eq!(read_mask_bits() & 1u32, 0u32);
+
+            // A second edge arriving in NeedAck is latched without masking and returned
+            // immediately on the next wait.
+            disp.interrupt_handler();
+            expect_eq!(read_mask_bits() & 1u32, 0u32);
+            let ts2 = unwrap_ok!(disp.wait_for_interrupt());
+            expect_ge!(ts2, ts1);
+
+            // Transitioning from NeedAck to Waiting must NOT unmask bit 0.
+            write_mask_bits(1u32);
+            assert_true!(disp.begin_wait_for_interrupt().is_none());
+            expect_eq!(read_mask_bits() & 1u32, 1u32);
+
+            // Verify destroy() still masks bit 0.
+            write_mask_bits(0u32);
+            assert_ok!(disp.destroy());
+            expect_eq!(read_mask_bits() & 1u32, 1u32);
+        }
     }
 }

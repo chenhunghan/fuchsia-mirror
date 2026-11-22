@@ -4,11 +4,14 @@
 # found in the LICENSE file.
 
 import io
+import json
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import unittest
+from typing import Any
 from unittest import mock
 
 import skill_linter
@@ -628,10 +631,7 @@ class TestSkillLinter(unittest.TestCase):
             with open(skill_path, "r", encoding="utf-8") as f:
                 updated = f.read()
             self.assertNotIn("{'hardware':", updated)
-            parsed = skill_linter._get_skill_metadata(updated)
-            self.assertIsNotNone(parsed)
-            assert parsed is not None
-            meta, _ = parsed
+            meta, _ = skill_linter._parse_skill_frontmatter(updated)
             self.assertEqual(
                 meta["metadata"],
                 {
@@ -684,6 +684,949 @@ class TestSkillLinter(unittest.TestCase):
             self.assertNotIn(
                 "You can run fx format-code to fix these issues.",
                 findings[0]["message"],
+            )
+
+    def test_duplicate_yaml_keys_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_path = os.path.join(temp_dir, "SKILL.md")
+            with open(skill_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: dup-skill\n"
+                    "description: First description.\n"
+                    "description: Overwritten description.\n"
+                    "---\n\n"
+                    "# Overview\n"
+                )
+            code, findings = skill_linter.lint_single_skill(
+                skill_file=skill_path,
+                fixit=False,
+                stdout_mode=False,
+                suggest_fix_in_json_mode=True,
+            )
+            self.assertEqual(code, 0)
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["level"], "error")
+            self.assertIn("duplicate YAML key", findings[0]["message"])
+
+    def test_unexpected_frontmatter_key_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_path = os.path.join(temp_dir, "SKILL.md")
+            with open(skill_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: bad-key\n"
+                    "description: Valid.\n"
+                    "unknown_field: 123\n"
+                    "---\n\n"
+                    "# Title\n"
+                )
+            _, findings = skill_linter.lint_single_skill(
+                skill_file=skill_path,
+                fixit=False,
+                stdout_mode=False,
+                suggest_fix_in_json_mode=True,
+            )
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["level"], "error")
+            self.assertIn("Unexpected frontmatter key", findings[0]["message"])
+
+    def test_lint_skill_semantic_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            # 1. Singular .agent/ typo, binary path in description, missing triggers,
+            # README.md in skill dir, file:// URI link, broken local link, and invalid call_tool.
+            bad_dir = os.path.join(
+                repo_dir, "src", "foo", ".agent", "skills", "wrong-folder"
+            )
+            os.makedirs(bad_dir)
+            with open(
+                os.path.join(bad_dir, "README.md"), "w", encoding="utf-8"
+            ) as f:
+                f.write("# Extra readme\n")
+
+            skill_md = os.path.join(bad_dir, "SKILL.md")
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: foo-playbook\n"
+                    "description: Runs /google/bin/releases/foo/bar directly.\n"
+                    "---\n\n"
+                    "# Overview\n\n"
+                    "See [rubric](file://references/rubric.md) and"
+                    " [missing](references/missing.md).\n"
+                    "Path: /usr/local/google/home/alice/fuchsia/out.\n\n"
+                    "```python\n"
+                    'await call_tool("run_workflow", ScriptPath="foo.py")\n'
+                    "```\n\n"
+                    "```bash\n"
+                    "fx workflow run foo.py\n"
+                    "```\n"
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (skill_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            messages = "\n".join(fd["message"] for fd in findings)
+            self.assertIn('uses singular ".agent/"', messages)
+            self.assertIn("does not match YAML skill name", messages)
+            self.assertIn("contains filler words", messages)
+            self.assertIn("violating Progressive Disclosure", messages)
+            self.assertIn("explicit positive trigger", messages)
+            self.assertIn("explicit negative scope boundary", messages)
+            self.assertIn('Skill directory contains "README.md"', messages)
+            self.assertIn("Invalid file URI link", messages)
+            self.assertIn("Broken local link", messages)
+            self.assertIn("Machine-local path", messages)
+            self.assertIn('call_tool("run_workflow"', messages)
+            self.assertIn('"fx workflow" is not a valid', messages)
+
+    def test_lint_skill_clean_passes_with_zero_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            skill_dir = os.path.join(
+                repo_dir, "src", "foo", ".agents", "skills", "audit-foo"
+            )
+            ref_dir = os.path.join(skill_dir, "references")
+            os.makedirs(ref_dir)
+            with open(
+                os.path.join(ref_dir, "rubric.md"), "w", encoding="utf-8"
+            ) as f:
+                f.write("# Rubric\n")
+
+            skill_md = os.path.join(skill_dir, "SKILL.md")
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: audit-foo\n"
+                    "description: >-\n"
+                    "  Audits foo drivers against observability rules. Use when"
+                    " auditing foo instrumentation. Don't use for live crash"
+                    " debugging.\n"
+                    "---\n\n"
+                    "# Audit foo\n\n"
+                    "Read the [foo rubric](references/rubric.md) and open"
+                    " [panel](sidecar://foo/bar/).\n\n"
+                    'Note in prose: never call `call_tool("run_workflow")`.\n'
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (skill_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertSequenceEqual(findings, ())
+
+    def test_lint_workflow_directory_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            wf_dir = os.path.join(
+                repo_dir, ".agents", "workflows", "triage-pipeline"
+            )
+            os.makedirs(wf_dir)
+
+            manifest_path = os.path.join(wf_dir, "workflow.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "{\n"
+                    '  "name": "wrong-name",\n'
+                    '  "description": "Triage pipeline.",\n'
+                    '  "extra_key": true,\n'
+                    '  "args": {\n'
+                    '    "type": "object",\n'
+                    '    "required": ["missing_req"],\n'
+                    '    "properties": {\n'
+                    '      "target": {"type": "string"}\n'
+                    "    }\n"
+                    "  }\n"
+                    "}\n"
+                )
+
+            script_path = os.path.join(wf_dir, "workflow.py")
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "import subprocess\n"
+                    'target = args.get("target")\n'
+                    'undeclared = args.get("undeclared_arg")\n'
+                    'await call_tool("run_command", CommandLine="ls")\n'
+                    'await agent("hi", schema={"type": "string"},'
+                    ' workspace="bad_ws", model="bad_model")\n'
+                    'subprocess.run(["issues", "mutate", "create", "--title",'
+                    ' "test"])\n'
+                )
+
+            readme_path = os.path.join(wf_dir, "README.md")
+            with open(readme_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "# Pipeline\n\n"
+                    "/run-workflow wrong-name\n\n"
+                    "| Argument | Type | Description |\n"
+                    "| --- | --- | --- |\n"
+                    "| target | string | Target |\n"
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (manifest_path, script_path, readme_path),
+                repo_root=repo_dir,
+                fuchsia_root=repo_dir,
+            )
+            messages = "\n".join(fd["message"] for fd in findings)
+            self.assertIn("Unexpected key(s) in workflow.json", messages)
+            self.assertIn("must match enclosing directory", messages)
+            self.assertIn('Required argument "missing_req"', messages)
+            self.assertIn('missing a "description"', messages)
+            self.assertIn('Argument "undeclared_arg" read from args', messages)
+            self.assertIn('call_tool("run_command"', messages)
+            self.assertIn('Invalid agent workspace="bad_ws"', messages)
+            self.assertIn('Invalid agent model="bad_model"', messages)
+            self.assertIn("external mutation commands", messages)
+            self.assertIn("duplicates the arguments schema table", messages)
+            self.assertIn("slash command directly", messages)
+
+    def test_lint_discovery_json_and_vendor_dual_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as fuchsia_dir:
+            vg_dir = os.path.join(fuchsia_dir, "vendor", "google")
+            dot_agents = os.path.join(vg_dir, ".agents")
+            skill_dir = os.path.join(vg_dir, "iris", "skills", "demo-skill")
+            os.makedirs(dot_agents)
+            os.makedirs(skill_dir)
+
+            skills_json = os.path.join(dot_agents, "skills.json")
+            with open(skills_json, "w", encoding="utf-8") as f:
+                f.write(
+                    "{\n"
+                    '  "entries": [\n'
+                    '    {"path": "iris/skills/demo-skill"},\n'
+                    '    {"path": "iris/skills/nonexistent"}\n'
+                    "  ]\n"
+                    "}\n"
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (skills_json,),
+                repo_root=vg_dir,
+                fuchsia_root=fuchsia_dir,
+            )
+            messages = "\n".join(fd["message"] for fd in findings)
+            self.assertIn(
+                'Configured entries path "iris/skills/nonexistent" does not exist',
+                messages,
+            )
+            self.assertIn(
+                'missing paired "vendor/google/iris/skills/demo-skill"',
+                messages,
+            )
+
+    def test_markdown_links_whitespace_code_labels_hermetic_and_line_numbers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            skill_dir = os.path.join(
+                repo_dir, "src", "foo", ".agents", "skills", "link-check"
+            )
+            os.makedirs(skill_dir)
+            skill_md = os.path.join(skill_dir, "SKILL.md")
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"  # line 1
+                    "name: link-check\n"  # line 2
+                    "description: >-\n"  # line 3
+                    "  Validates links. Use when testing links. Don't use for"
+                    " builds.\n"  # line 4
+                    "---\n"  # line 5
+                    "\n"  # line 6
+                    "# Link checks\n"  # line 7
+                    "\n"  # line 8
+                    "Empty whitespace target: [blank](   ) and"
+                    " `[ignored](file://bad)`.\n"  # line 9
+                    "Code label: [`MySymbol`](references/missing.md).\n"  # line 10
+                    "Host root probe: [tmp](/tmp).\n"  # line 11
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (skill_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            by_line = {fd["line"]: fd["message"] for fd in findings}
+            self.assertSequenceEqual(sorted(by_line.keys()), (10, 11))
+            self.assertIn(
+                'Broken local link "references/missing.md"', by_line[10]
+            )
+            self.assertIn('Broken local link "/tmp"', by_line[11])
+
+    def test_workflow_mutation_detection_ignores_docstrings_and_catches_sequences(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            wf_dir = os.path.join(
+                repo_dir, ".agents", "workflows", "safe-doc-workflow"
+            )
+            os.makedirs(wf_dir)
+            manifest_path = os.path.join(wf_dir, "workflow.json")
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "{\n"
+                    '  "name": "safe-doc-workflow",\n'
+                    '  "description": "Reads state without mutating."\n'
+                    "}\n"
+                )
+
+            script_path = os.path.join(wf_dir, "workflow.py")
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(
+                    '"""Does not run git push or jiri upload."""\n'
+                    'await agent("Never run git push or issues mutate.")\n'
+                )
+
+            self.assertSequenceEqual(
+                skill_linter._lint_customization_paths(
+                    (wf_dir,), repo_root=repo_dir, fuchsia_root=repo_dir
+                ),
+                (),
+            )
+
+            with open(script_path, "w", encoding="utf-8") as f:
+                f.write(
+                    '"""Runs git push via sequence args."""\n'
+                    "import subprocess\n"
+                    'subprocess.run(["git", "push", "origin", "HEAD"])\n'
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (wf_dir,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["line"], 3)
+            self.assertIn("external mutation commands", findings[0]["message"])
+
+    def test_discovery_json_skips_uncloned_vendor_on_public_checkout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as public_fuchsia_dir:
+            dot_agents = os.path.join(public_fuchsia_dir, ".agents")
+            os.makedirs(os.path.join(dot_agents, "skills"))
+            skills_json = os.path.join(dot_agents, "skills.json")
+            with open(skills_json, "w", encoding="utf-8") as f:
+                f.write(
+                    "{\n"
+                    '  "entries": [{"path": ".agents/skills"}],\n'
+                    '  "inherits": [{"path":'
+                    ' "vendor/google/.agents/skills.json"}]\n'
+                    "}\n"
+                )
+
+            findings = skill_linter._lint_customization_paths(
+                (skills_json,),
+                repo_root=public_fuchsia_dir,
+                fuchsia_root=public_fuchsia_dir,
+            )
+            self.assertSequenceEqual(findings, ())
+
+    def test_unexpected_non_string_frontmatter_key_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            skill_path = os.path.join(temp_dir, "SKILL.md")
+            with open(skill_path, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: non-str-key\n"
+                    "description: Valid.\n"
+                    "123: foo\n"
+                    "true: bar\n"
+                    "---\n\n"
+                    "# Title\n"
+                )
+            _, findings = skill_linter.lint_single_skill(
+                skill_file=skill_path,
+                fixit=False,
+                stdout_mode=False,
+                suggest_fix_in_json_mode=True,
+            )
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["level"], "error")
+            self.assertIn("Unexpected frontmatter key", findings[0]["message"])
+
+    def test_skill_size_limits_and_legacy_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            skill_dir = os.path.join(
+                repo_dir, ".agents", "skills", "large-audit"
+            )
+            os.makedirs(skill_dir)
+            skill_md = os.path.join(skill_dir, "SKILL.md")
+            header = (
+                "---\n"
+                "name: large-audit\n"
+                "description: Test limits. Use when testing. Don't use for"
+                " prod.\n"
+                "---\n\n"
+            )
+
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(header + "\n".join("line" for _ in range(520)) + "\n")
+            warn_findings = skill_linter._lint_customization_paths(
+                (skill_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(warn_findings), 1)
+            self.assertEqual(warn_findings[0]["level"], "warning")
+            self.assertIn("soft limit", warn_findings[0]["message"])
+
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(header + "\n".join("line" for _ in range(820)) + "\n")
+            err_findings = skill_linter._lint_customization_paths(
+                (skill_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(err_findings), 1)
+            self.assertEqual(err_findings[0]["level"], "error")
+            self.assertIn("view_file ceiling", err_findings[0]["message"])
+
+            legacy_dir = os.path.join(
+                repo_dir, "zircon", "skills", "kernel-review"
+            )
+            os.makedirs(legacy_dir)
+            legacy_md = os.path.join(legacy_dir, "SKILL.md")
+            with open(legacy_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: kernel-review\n"
+                    "description: Legacy. Use when testing. Don't use for"
+                    " prod.\n"
+                    "---\n\n" + "\n".join("line" for _ in range(820)) + "\n"
+                )
+            legacy_findings = skill_linter._lint_customization_paths(
+                (legacy_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(legacy_findings), 1)
+            self.assertEqual(legacy_findings[0]["level"], "warning")
+
+    def test_workflow_json_types_library_traversal_subscript_dry_run_syntax(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            bad_wf = os.path.join(repo_dir, ".agents", "workflows", "bad-types")
+            os.makedirs(bad_wf)
+            with open(
+                os.path.join(bad_wf, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {
+                        "name": 123,
+                        "description": None,
+                        "library": "false",
+                        "entry": 123,
+                    },
+                    f,
+                )
+            bad_findings = skill_linter._lint_customization_paths(
+                (bad_wf,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            bad_msgs = "\n".join(fd["message"] for fd in bad_findings)
+            self.assertIn('"name" must be a non-empty kebab-case', bad_msgs)
+            self.assertIn('"library" must be a boolean', bad_msgs)
+            self.assertIn('"description" cannot be empty', bad_msgs)
+            self.assertIn('"entry" must be a non-empty string', bad_msgs)
+
+            lib_wf = os.path.join(repo_dir, ".agents", "workflows", "lib-only")
+            os.makedirs(lib_wf)
+            with open(
+                os.path.join(lib_wf, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {
+                        "name": "lib-only",
+                        "description": "Shared library.",
+                        "library": True,
+                    },
+                    f,
+                )
+            self.assertSequenceEqual(
+                skill_linter._lint_customization_paths(
+                    (lib_wf,), repo_root=repo_dir, fuchsia_root=repo_dir
+                ),
+                (),
+            )
+
+            esc_wf = os.path.join(repo_dir, ".agents", "workflows", "escape-wf")
+            os.makedirs(esc_wf)
+            with open(
+                os.path.join(esc_wf, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {
+                        "name": "escape-wf",
+                        "description": "Traversal check.",
+                        "entry": "../evil.py",
+                    },
+                    f,
+                )
+            esc_findings = skill_linter._lint_customization_paths(
+                (esc_wf,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(esc_findings), 1)
+            self.assertIn("must stay inside", esc_findings[0]["message"])
+
+            safe_wf = os.path.join(repo_dir, ".agents", "workflows", "safe-mut")
+            os.makedirs(safe_wf)
+            with open(
+                os.path.join(safe_wf, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {
+                        "name": "safe-mut",
+                        "description": "Guarded mutation.",
+                        "args": {
+                            "type": "object",
+                            "properties": {
+                                "target": {
+                                    "type": "string",
+                                    "description": "Target.",
+                                },
+                                "dry_run": {
+                                    "type": "boolean",
+                                    "description": "Dry run.",
+                                    "default": True,
+                                },
+                            },
+                        },
+                    },
+                    f,
+                )
+            with open(
+                os.path.join(safe_wf, "workflow.py"), "w", encoding="utf-8"
+            ) as f:
+                f.write(
+                    "import subprocess\n"
+                    'val = args["target"]\n'
+                    'bad = args["undeclared"]\n'
+                    'subprocess.run(["git", "push", "origin", "HEAD"])\n'
+                )
+            safe_findings = skill_linter._lint_customization_paths(
+                (safe_wf,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(safe_findings), 1)
+            self.assertIn('Argument "undeclared"', safe_findings[0]["message"])
+
+            syn_wf = os.path.join(repo_dir, ".agents", "workflows", "syn-err")
+            os.makedirs(syn_wf)
+            with open(
+                os.path.join(syn_wf, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {"name": "syn-err", "description": "Syntax check."}, f
+                )
+            with open(
+                os.path.join(syn_wf, "workflow.py"), "w", encoding="utf-8"
+            ) as f:
+                f.write("def broken(:\n")
+            syn_findings = skill_linter._lint_customization_paths(
+                (syn_wf,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(syn_findings), 1)
+            self.assertEqual(syn_findings[0]["level"], "error")
+            self.assertIn("Python syntax error", syn_findings[0]["message"])
+
+    def test_unreadable_skill_and_readme_report_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            skill_dir = os.path.join(
+                repo_dir, ".agents", "skills", "unreadable"
+            )
+            os.makedirs(skill_dir)
+            skill_md = os.path.join(skill_dir, "SKILL.md")
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write("---\nname: unreadable\ndescription: Test.\n---\n")
+
+            wf_dir = os.path.join(repo_dir, ".agents", "workflows", "wf-readme")
+            os.makedirs(wf_dir)
+            with open(
+                os.path.join(wf_dir, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {
+                        "name": "wf-readme",
+                        "description": "Reads readme.",
+                        "library": True,
+                    },
+                    f,
+                )
+            readme_md = os.path.join(wf_dir, "README.md")
+            with open(readme_md, "w", encoding="utf-8") as f:
+                f.write("# Readme\n")
+
+            real_open = open
+
+            def fail_open(file: Any, *args: Any, **kwargs: Any) -> Any:
+                if os.path.abspath(str(file)) in (
+                    os.path.abspath(skill_md),
+                    os.path.abspath(readme_md),
+                ):
+                    raise OSError("permission denied")
+                return real_open(file, *args, **kwargs)
+
+            with mock.patch.object(
+                skill_linter,
+                "open",
+                new=mock.create_autospec(
+                    open, spec_set=True, side_effect=fail_open
+                ),
+                create=True,
+            ):
+                skill_findings = skill_linter._lint_customization_paths(
+                    (skill_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+                )
+                readme_findings = skill_linter._lint_customization_paths(
+                    (wf_dir,), repo_root=repo_dir, fuchsia_root=repo_dir
+                )
+
+            self.assertEqual(len(skill_findings), 1)
+            self.assertEqual(skill_findings[0]["level"], "error")
+            self.assertIn(
+                "Could not read SKILL.md", skill_findings[0]["message"]
+            )
+            self.assertEqual(len(readme_findings), 1)
+            self.assertEqual(readme_findings[0]["level"], "error")
+            self.assertIn(
+                "Could not read workflow README.md",
+                readme_findings[0]["message"],
+            )
+
+    def test_main_cli_lint_json_and_strict_on_non_skill_files(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            wf_dir = os.path.join(repo_dir, ".agents", "workflows", "cli-demo")
+            os.makedirs(wf_dir)
+            manifest = os.path.join(wf_dir, "workflow.json")
+            script = os.path.join(wf_dir, "workflow.py")
+            readme = os.path.join(wf_dir, "README.md")
+            skills_json = os.path.join(repo_dir, ".agents", "skills.json")
+            skill_dir = os.path.join(repo_dir, ".agents", "skills", "cli-skill")
+            os.makedirs(skill_dir)
+            with open(
+                os.path.join(skill_dir, "SKILL.md"), "w", encoding="utf-8"
+            ) as f:
+                f.write(
+                    "---\n"
+                    "name: cli-skill\n"
+                    "description: CLI test. Use when testing. Don't use for"
+                    " prod.\n"
+                    "---\n\n"
+                    "# CLI\n"
+                )
+            with open(manifest, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"name": "cli-demo", "description": "Valid workflow."}, f
+                )
+            with open(script, "w", encoding="utf-8") as f:
+                f.write("pass\n")
+            with open(readme, "w", encoding="utf-8") as f:
+                f.write("# Demo\n")
+            with open(skills_json, "w", encoding="utf-8") as f:
+                json.dump(
+                    {"entries": [{"path": ".agents/skills/cli-skill"}]}, f
+                )
+
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "skill_linter.py",
+                        "--lint-json",
+                        "--repo-root",
+                        repo_dir,
+                        "--fuchsia-root",
+                        repo_dir,
+                        manifest,
+                        skills_json,
+                    ],
+                ),
+                mock.patch.object(sys, "stdout", stdout),
+                self.assertRaises(SystemExit) as cm_json,
+            ):
+                skill_linter.main()
+            self.assertEqual(cm_json.exception.code, 0)
+            self.assertSequenceEqual(json.loads(stdout.getvalue()), ())
+
+            with (
+                mock.patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "skill_linter.py",
+                        "--strict",
+                        "--repo-root",
+                        repo_dir,
+                        "--fuchsia-root",
+                        repo_dir,
+                        manifest,
+                        script,
+                        readme,
+                        skills_json,
+                    ],
+                ),
+                self.assertRaises(SystemExit) as cm_strict,
+            ):
+                skill_linter.main()
+            self.assertEqual(cm_strict.exception.code, 0)
+
+    def test_unfixable_name_reports_error_under_fixit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for raw_name in ("___", '"@@@"'):
+                skill_path = os.path.join(temp_dir, "SKILL.md")
+                with open(skill_path, "w", encoding="utf-8") as f:
+                    f.write(
+                        "---\n"
+                        f"name: {raw_name}\n"
+                        "description: Valid description.\n"
+                        "---\n\n"
+                        "# Title\n"
+                    )
+                code_fix, _ = skill_linter.lint_single_skill(
+                    skill_file=skill_path,
+                    fixit=True,
+                    stdout_mode=False,
+                    suggest_fix_in_json_mode=False,
+                )
+                self.assertEqual(code_fix, 1)
+                with open(skill_path, "r", encoding="utf-8") as f:
+                    after_fix = f.read()
+                meta, _ = skill_linter._parse_skill_frontmatter(after_fix)
+                self.assertIsInstance(meta["name"], str)
+
+                _, findings = skill_linter.lint_single_skill(
+                    skill_file=skill_path,
+                    fixit=False,
+                    stdout_mode=False,
+                    suggest_fix_in_json_mode=True,
+                )
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0]["level"], "error")
+                self.assertIn(
+                    "lowercase letters, numbers, and single hyphens",
+                    findings[0]["message"],
+                )
+
+    def test_lint_customization_paths_descends_into_container_dirs(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            skills_root = os.path.join(repo_dir, ".agents", "skills")
+            bad_skill_dir = os.path.join(skills_root, "bad-demo")
+            os.makedirs(bad_skill_dir)
+            with open(
+                os.path.join(bad_skill_dir, "SKILL.md"), "w", encoding="utf-8"
+            ) as f:
+                f.write(
+                    "---\n"
+                    "name: bad-demo\n"
+                    "description: Short.\n"
+                    "---\n\n"
+                    "[broken](references/missing.md)\n"
+                )
+
+            wf_root = os.path.join(repo_dir, ".agents", "workflows")
+            bad_wf_dir = os.path.join(wf_root, "bad-wf")
+            os.makedirs(bad_wf_dir)
+            with open(
+                os.path.join(bad_wf_dir, "workflow.json"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                json.dump({"name": "bad-wf", "description": ""}, f)
+
+            skill_findings = skill_linter._lint_customization_paths(
+                (skills_root,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertTrue(
+                any(
+                    "Broken local link" in fd["message"]
+                    for fd in skill_findings
+                )
+            )
+            wf_findings = skill_linter._lint_customization_paths(
+                (wf_root,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertTrue(
+                any(
+                    '"description" cannot be empty' in fd["message"]
+                    for fd in wf_findings
+                )
+            )
+
+    def test_nested_subsystem_suite_folder_naming(self) -> None:
+        with tempfile.TemporaryDirectory() as repo_dir:
+            clean_nested = os.path.join(
+                repo_dir,
+                "src",
+                "devices",
+                "skills",
+                "driver-interrupt",
+                "implementation",
+                "cpp",
+            )
+            os.makedirs(clean_nested)
+            clean_md = os.path.join(clean_nested, "SKILL.md")
+            with open(clean_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: driver-interrupt-impl-cpp\n"
+                    "description: >-\n"
+                    "  Implements C++ driver interrupts. Use when writing C++"
+                    " interrupt handlers. Don't use for Rust drivers.\n"
+                    "---\n\n"
+                    "# C++ driver interrupts\n"
+                )
+            self.assertSequenceEqual(
+                skill_linter._lint_customization_paths(
+                    (clean_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+                ),
+                (),
+            )
+
+            underscore_nested = os.path.join(
+                repo_dir,
+                "src",
+                "devices",
+                "skills",
+                "driver_fidl",
+                "server",
+                "implementation",
+                "rust",
+            )
+            os.makedirs(underscore_nested)
+            underscore_md = os.path.join(underscore_nested, "SKILL.md")
+            with open(underscore_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: driver-fidl-server-impl-rust\n"
+                    "description: >-\n"
+                    "  Implements Rust FIDL servers. Use when writing Rust FIDL"
+                    " servers. Don't use for C++ drivers.\n"
+                    "---\n\n"
+                    "# Rust FIDL servers\n"
+                )
+            findings = skill_linter._lint_customization_paths(
+                (underscore_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(findings), 1)
+            self.assertEqual(findings[0]["level"], "warning")
+            self.assertIn(
+                'Nested skill folder "driver_fidl" uses underscores',
+                findings[0]["message"],
+            )
+
+            leaf_matches_parent_underscore = os.path.join(
+                repo_dir,
+                "src",
+                "devices",
+                "skills",
+                "my_topic",
+                "my-task",
+            )
+            os.makedirs(leaf_matches_parent_underscore)
+            leaf_md = os.path.join(leaf_matches_parent_underscore, "SKILL.md")
+            with open(leaf_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: my-task\n"
+                    "description: >-\n"
+                    "  Runs my task. Use when running my task. Don't use for"
+                    " other tasks.\n"
+                    "---\n\n"
+                    "# My task\n"
+                )
+            leaf_findings = skill_linter._lint_customization_paths(
+                (leaf_md,), repo_root=repo_dir, fuchsia_root=repo_dir
+            )
+            self.assertEqual(len(leaf_findings), 1)
+            self.assertEqual(leaf_findings[0]["level"], "warning")
+            self.assertIn(
+                'Nested skill folder "my_topic" uses underscores',
+                leaf_findings[0]["message"],
+            )
+
+    def test_four_backtick_fences_composed_var_cmds_and_dot_agents_dual_path(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as fuchsia_dir:
+            # 1. 4-backtick outer fence wrapping an odd number of 3-backtick
+            # inner lines does not invert `in_code` or flag template links.
+            skill_dir = os.path.join(
+                fuchsia_dir, ".agents", "skills", "fence-demo"
+            )
+            os.makedirs(skill_dir)
+            skill_md = os.path.join(skill_dir, "SKILL.md")
+            with open(skill_md, "w", encoding="utf-8") as f:
+                f.write(
+                    "---\n"
+                    "name: fence-demo\n"
+                    "description: >-\n"
+                    "  Tests nested fences. Use when testing fences. Don't use"
+                    " for builds.\n"
+                    "---\n\n"
+                    "````markdown\n"
+                    "Example template with [fake](nonexistent.md):\n"
+                    "```bash\n"
+                    "echo hi\n"
+                    "````\n\n"
+                    "Prose after 4-backtick block: [missing](bad.md)\n"
+                )
+            fence_findings = skill_linter._lint_customization_paths(
+                (skill_md,), repo_root=fuchsia_dir, fuchsia_root=fuchsia_dir
+            )
+            self.assertEqual(len(fence_findings), 1)
+            self.assertIn(
+                'Broken local link "bad.md"', fence_findings[0]["message"]
+            )
+
+            # 2. Reassigned and composed `var_cmds` still detect external mutations.
+            wf_dir = os.path.join(
+                fuchsia_dir, ".agents", "workflows", "reassigned-cmd"
+            )
+            os.makedirs(wf_dir)
+            with open(
+                os.path.join(wf_dir, "workflow.json"), "w", encoding="utf-8"
+            ) as f:
+                json.dump(
+                    {"name": "reassigned-cmd", "description": "Var cmd check."},
+                    f,
+                )
+            with open(
+                os.path.join(wf_dir, "workflow.py"), "w", encoding="utf-8"
+            ) as f:
+                f.write(
+                    "import subprocess\n"
+                    'base = ["git", "push"]\n'
+                    'cmd = base + ["origin", "HEAD"]\n'
+                    "subprocess.run(cmd)\n"
+                    'cmd = ["git", "status"]\n'
+                    "subprocess.run(cmd)\n"
+                )
+            wf_findings = skill_linter._lint_customization_paths(
+                (wf_dir,), repo_root=fuchsia_dir, fuchsia_root=fuchsia_dir
+            )
+            self.assertEqual(len(wf_findings), 1)
+            self.assertIn(
+                "external mutation commands", wf_findings[0]["message"]
+            )
+
+            # 3. `.agents/skills/...` in vendor/google/.agents/skills.json
+            # requires a paired `vendor/google/.agents/skills/...` entry, while
+            # `../...` traversal paths are skipped.
+            vg_dir = os.path.join(fuchsia_dir, "vendor", "google")
+            vg_dot_agents = os.path.join(vg_dir, ".agents")
+            os.makedirs(os.path.join(vg_dot_agents, "skills", "device-bug-fix"))
+            vg_skills_json = os.path.join(vg_dot_agents, "skills.json")
+            with open(vg_skills_json, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "entries": [
+                            {"path": "../../.agents/skills/fence-demo"},
+                            {"path": ".agents/skills/device-bug-fix"},
+                        ]
+                    },
+                    f,
+                )
+            vg_findings = skill_linter._lint_customization_paths(
+                (vg_skills_json,),
+                repo_root=vg_dir,
+                fuchsia_root=fuchsia_dir,
+            )
+            self.assertEqual(len(vg_findings), 1)
+            self.assertIn(
+                'missing paired "vendor/google/.agents/skills/device-bug-fix"',
+                vg_findings[0]["message"],
             )
 
 

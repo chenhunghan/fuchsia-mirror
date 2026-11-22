@@ -25,12 +25,11 @@
     ],
     offer: [
         {
-            name: "pwm-ffd1b000",
+            name: "pwm",
             service: "fuchsia.hardware.pwm.Service",
             from: "#pwm-ffd1b000",
             to: "#pwm-init",
             constraints: {
-                controller: "pwm-ffd1b000",
                 channel: 4,
                 period_ns: 0,
             },
@@ -145,7 +144,32 @@
             name: "pin-states-0",
             service: "fuchsia.hardware.pin.PinStatesService",
             from: "#gpio-controller-ff634400",
-            to: "#pwm-ffd1b000",
+            to: "#pwm_a-regulator",
+            constraints: {
+                states: [
+                    {
+                        name: "default",
+                        pins: [
+                            {
+                                pin: 99,
+                                call: {
+                                    pin_config: { function: 3 },
+                                },
+                            },
+                            {
+                                pin: 99,
+                                call: { buffer_mode: "OutputLow" },
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        {
+            name: "pin-states-0",
+            service: "fuchsia.hardware.pin.PinStatesService",
+            from: "#gpio-controller-ff634400",
+            to: "#pwm_a0_d-regulator",
             constraints: {
                 states: [
                     {
@@ -159,16 +183,6 @@
                             },
                             {
                                 pin: 98,
-                                call: { buffer_mode: "OutputLow" },
-                            },
-                            {
-                                pin: 99,
-                                call: {
-                                    pin_config: { function: 3 },
-                                },
-                            },
-                            {
-                                pin: 99,
                                 call: { buffer_mode: "OutputLow" },
                             },
                         ],

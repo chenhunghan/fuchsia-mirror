@@ -5,7 +5,6 @@
 use crate::cgroups::cgroups_file;
 use crate::config_gz::ConfigFile;
 use crate::cpuinfo::CpuinfoFile;
-use crate::device_tree::DeviceTreeSymlink;
 use crate::devices::DevicesFile;
 use crate::filesystems::FilesystemsFile;
 use crate::fs::{HidePid, ProcFs};
@@ -36,7 +35,7 @@ use starnix_core::vfs::pseudo::simple_file::{BytesFile, SimpleFileNode};
 use starnix_core::vfs::pseudo::stub_empty_file::StubEmptyFile;
 use starnix_core::vfs::{
     CloseFreeSafe, DirEntry, DirectoryEntryType, DirentSink, FileObject, FileOps, FileSystemHandle,
-    FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, emit_dotdot,
+    FsNode, FsNodeHandle, FsNodeInfo, FsNodeOps, FsStr, FsString, SymlinkNode, emit_dotdot,
     fileops_impl_directory, fileops_impl_noop_sync, fileops_impl_unbounded_seek,
     fs_node_impl_dir_readonly,
 };
@@ -89,7 +88,6 @@ impl ProcDirectory {
             "config.gz".into() => read_only_file(fs, ConfigFile::new_node()),
             "cpuinfo".into() => read_only_file(fs, CpuinfoFile::new_node()),
             "devices".into() => read_only_file(fs, DevicesFile::new_node()),
-            "device-tree".into() => symlink_file(fs, DeviceTreeSymlink::new_node()),
             "diskstats".into() => stub_file(fs, bug_ref!("https://fxbug.dev/322893370")),
             "filesystems".into() => read_only_file(fs, FilesystemsFile::new_node(&kernel.expando.get::<FsRegistry>())),
             "kallsyms".into() => read_only_file(fs, SimpleFileNode::new(|current_task| {
@@ -152,6 +150,11 @@ impl ProcDirectory {
         };
 
         // Then optionally add the nodes that are only present in some configurations.
+        if kernel.device_tree.is_some() {
+            let (node, info) =
+                SymlinkNode::new("/sys/firmware/devicetree/base".into(), FsCred::root());
+            nodes.insert("device-tree".into(), fs.create_node_and_allocate_node_id(node, info));
+        }
         if let Some(pressure_directory) = pressure_directory(kernel, fs) {
             nodes.insert("pressure".into(), pressure_directory);
         }
@@ -244,11 +247,16 @@ impl FsNodeOps for ProcDirectoryNode {
                 }
                 let dir = match task.running_state() {
                     Ok(running_state) if task.tid == pid_entry => {
-                        let cached = running_state.proc_pid_directory_cache.get_or_init(|| {
-                            pid_directory(current_task, &fs, &task, pid_entry.clone())
-                        });
+                        let cached = {
+                            let mut cache = running_state.proc_pid_directory_cache.lock();
+                            cache
+                                .get_or_insert_with(|| {
+                                    pid_directory(current_task, &fs, &task, pid_entry.clone())
+                                })
+                                .clone()
+                        };
                         if cached.try_fs().is_some_and(|cached_fs| Arc::ptr_eq(&cached_fs, &fs)) {
-                            cached.clone()
+                            cached
                         } else {
                             pid_directory(current_task, &fs, &task, pid_entry)
                         }
@@ -290,23 +298,17 @@ impl FileOps for ProcDirectory {
         let adjusted_offset = (sink.offset() - pid_offset as i64) as usize;
         // Sort the pids, to keep the traversal order consistent.
         let mut pids = current_task.kernel().pids.process_ids();
-        pids.sort();
+        pids.sort_by_key(|pid| pid.id);
 
         let proc_fs = file.fs.downcast_ops::<ProcFs>();
         let mount_opts = proc_fs.map(|fs| fs.load_mount_options());
 
         // The adjusted offset is used to figure out which task directories are to be listed.
-        if let Some(start) = pids.iter().position(|pid| *pid as usize >= adjusted_offset) {
+        if let Some(start) = pids.iter().position(|pid| pid.id as usize >= adjusted_offset) {
             for pid in &pids[start..] {
                 if let (Some(proc_fs), Some((pid_gid, hide_pid))) = (proc_fs, mount_opts) {
                     if hide_pid >= HidePid::Invisible {
-                        let Some(task) = current_task
-                            .kernel()
-                            .pids
-                            .get(*pid)
-                            .ok()
-                            .and_then(|p| p.get_process_task())
-                        else {
+                        let Some(task) = pid.get_process_task() else {
                             continue;
                         };
                         if !proc_fs.has_pid_permissions_with_opts(
@@ -326,7 +328,7 @@ impl FileOps for ProcDirectory {
                 let name = FsString::from(format!("{pid}"));
 
                 // The + 1 is to set the offset to the next possible pid for subsequent reads.
-                let next_offset = (*pid + pid_offset + 1) as i64;
+                let next_offset = (pid.id + pid_offset + 1) as i64;
                 sink.add(inode_num, next_offset, DirectoryEntryType::DIR, name.as_ref())?;
             }
         }

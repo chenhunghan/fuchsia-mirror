@@ -3,6 +3,7 @@
 # found in the LICENSE file.
 
 import("//build/components.gni")
+import("//build/rust/rustc_binary.gni")
 import("//build/test.gni")
 import("//build/testing/host_test.gni")
 import("//build/testing/host_test_data.gni")
@@ -68,7 +69,6 @@ syscall_tests_without_deps = [
   "symlink_test",
   "sync_test",
   "sysctl_test",
-  "sysfs_kernel_test",
   "sysfs_power_test",
   "sysinfo_test",
   "syslog_test",
@@ -194,6 +194,7 @@ syscall_tests_etc = [
     executables = [
       ":print_uid_gid_exec_child",
       "test_programs:exit_zero",
+      "test_programs:print_helper",
     ]
   },
   {
@@ -207,6 +208,11 @@ syscall_tests_etc = [
   {
     name = "timers_test"
     executables = [ ":timers_test_exec_child" ]
+  },
+  {
+    name = "sysfs_kernel_test"
+    includes =
+        [ "//src/starnix/tests/syscalls/cpp/meta/sysfs_kernel_test.shard.cml" ]
   },
 ]
 
@@ -457,6 +463,7 @@ source_set("test_utils") {
   ]
   public_deps = [
     "//sdk/lib/fit",
+    "//src/lib/files",
     "//third_party/googletest:gmock",
     "//third_party/googletest:gtest",
     "//third_party/rapidjson",
@@ -690,46 +697,31 @@ foreach(test_def, syscall_tests_etc) {
     forward_variables_from(test_def,
                            "*",
                            [
+                             "container_config",
+                             "executables",
+                             "includes",
                              "name",
                              "resources",
-                             "executables",
                            ])
     test_target_kernel = "linux"
     custom_expectations = ":linux_cpp_test_expectations"
   }
 }
 
+fuchsia_component("null_renderer_config") {
+  testonly = true
+  manifest = "meta/null_renderer_config.cml"
+}
+
 fuchsia_test_package("linux_syscalls_cpp_tests") {
   test_components = []
-  deps = []
   foreach(test_name, all_test_names) {
     test_components += [ ":linux_${test_name}" ]
-    deps += [ ":linux_${test_name}_config" ]
   }
 
-  subpackages = starnix_test_subpackages
-  subpackages += [ "//src/starnix/containers/debian:debian_package" ]
-
-  if (target_cpu == "x64") {
-    # TODO(https://fxbug.dev/42059962): arm64 emulator does not have Vulkan support yet.
-    # Without Vulkan, test-ui-stack will stuck on Scenic startup.
-    subpackages += [ "//src/ui/testing/test_ui_stack:test-ui-stack" ]
-  }
-
-  deps += [ "//src/lib/testing/expectation:expectation_comparer" ]
+  deps = [ "//src/lib/testing/expectation:expectation_comparer" ]
 
   test_specs = {
-    # TODO(https://fxbug.dev/319150842): GCE doesn't support Vulkan, so, for now, just disable all
-    # of these tests on GCE.
-    _env = basic_envs
-    _env += [ gce_env ]
-    _env -= [ gce_env ]
-    if (_env == []) {
-      build_only = true
-    } else {
-      environments = _env
-    }
-
     log_settings = {
       # Tests exercise failure cases, so ERROR logs are expected.
       max_severity = "ERROR"
@@ -789,7 +781,7 @@ fuchsia_test_package("starnix_syscalls_cpp_tests") {
     ":crash_test",
     ":ext4_write_test",
   ]
-  deps = []
+  deps = [ "test_components:fake_boot_items" ]
   foreach(test_name, all_test_names) {
     test_components += [ ":${test_name}" ]
     deps += [ ":${test_name}_config" ]
@@ -833,7 +825,7 @@ fuchsia_test_package("starnix_syscalls_cpp_tests") {
 if (current_cpu == "arm64") {
   fuchsia_test_package("starnix_arch32_syscalls_cpp_tests") {
     test_components = []
-    deps = []
+    deps = [ "test_components:fake_boot_items" ]
     foreach(test_name, all_test_names) {
       test_components += [ ":${test_name}_arch32" ]
       deps += [ ":${test_name}_config" ]

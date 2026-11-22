@@ -21,6 +21,8 @@
 #include <fidl/fuchsia.hardware.adb/cpp/fidl.h>
 #include <inttypes.h>
 #include <lib/syslog/cpp/macros.h>
+#include <lib/zx/result.h>
+#include <lib/zx/socket.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -28,7 +30,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <mutex>
 #include <regex>
 #include <string>
 #include <vector>
@@ -40,7 +41,6 @@
 
 using namespace std::chrono_literals;
 
-static std::recursive_mutex& local_socket_list_lock = *new std::recursive_mutex();
 static unsigned local_socket_next_id = 1;
 
 static auto& local_socket_list = *new std::vector<asocket*>();
@@ -57,7 +57,6 @@ static auto& local_socket_closing_list = *new std::vector<asocket*>();
 asocket* find_local_socket(unsigned local_id, unsigned peer_id) {
   asocket* result = nullptr;
 
-  std::lock_guard<std::recursive_mutex> lock(local_socket_list_lock);
   for (asocket* s : local_socket_list) {
     if (s->id != local_id) {
       continue;
@@ -72,37 +71,67 @@ asocket* find_local_socket(unsigned local_id, unsigned peer_id) {
 }
 
 void install_local_socket(asocket* s) {
-  std::lock_guard<std::recursive_mutex> lock(local_socket_list_lock);
-
   s->id = local_socket_next_id++;
 
   // Socket ids should never be 0.
   if (local_socket_next_id == 0) {
-    FX_LOGS(ERROR) << "local socket id overflow";
+    local_socket_next_id = 1;
+    FX_LOGS(WARNING) << "local socket id wrapped around";
   }
 
   local_socket_list.push_back(s);
 }
 
 void remove_socket(asocket* s) {
-  std::lock_guard<std::recursive_mutex> lock(local_socket_list_lock);
-  for (auto list : {&local_socket_list, &local_socket_closing_list}) {
-    list->erase(std::remove_if(list->begin(), list->end(), [s](asocket* x) { return x == s; }),
-                list->end());
+  std::erase(local_socket_list, s);
+  std::erase(local_socket_closing_list, s);
+}
+
+// Caller must have already removed |s| from the socket lists.
+static void local_socket_destroy(asocket* s) {
+  int exit_on_close = s->exit_on_close;
+
+  FX_LOGS(DEBUG) << "LS(" << s->id << "): destroying fde.";  // fd=" << s->fd;
+  // deferred_close(fdevent_release(s->fde));
+
+  s->incoming_wait.Cancel();
+  s->outgoing_wait.Cancel();
+  release_service_socket(s);
+  delete s;
+
+  if (exit_on_close) {
+    FX_LOGS(DEBUG) << "local_socket_destroy: exiting";
+    exit(1);
   }
 }
 
 void close_all_sockets(atransport* t) {
-  /* this is a little gross, but since s->close() *will* modify
-  ** the list out from under you, your options are limited.
-  */
-  std::lock_guard<std::recursive_mutex> lock(local_socket_list_lock);
-restart:
-  for (asocket* s : local_socket_list) {
-    if (s->transport == t || (s->peer && s->peer->transport == t)) {
-      s->close(s);
-      goto restart;
+  std::vector<asocket*> to_destroy;
+  auto matches_transport = [t](const asocket* s) {
+    return s->transport == t || (s->peer && s->peer->transport == t);
+  };
+  for (auto* list : {&local_socket_list, &local_socket_closing_list}) {
+    auto it = list->begin();
+    while (it != list->end()) {
+      asocket* s = *it;
+      if (matches_transport(s)) {
+        if (s->peer) {
+          s->peer->peer = nullptr;
+          s->peer->close(s->peer);
+          s->peer = nullptr;
+        }
+        s->closing = true;
+        s->packet_queue.clear();
+        it = list->erase(it);
+        to_destroy.push_back(s);
+      } else {
+        ++it;
+      }
     }
+  }
+
+  for (asocket* s : to_destroy) {
+    local_socket_destroy(s);
   }
 }
 
@@ -124,85 +153,92 @@ static SocketFlushResult local_socket_flush_incoming(asocket* s) {
   FX_LOGS(DEBUG) << "LS(" << s->id << ") " << __func__ << ": " << s->packet_queue.size()
                  << " bytes in queue";
   uint32_t bytes_flushed = 0;
-  if (!s->packet_queue.empty()) {
+  while (!s->packet_queue.empty()) {
     size_t rc = 0;
     auto status = local_socket_write(s, s->packet_queue.data(), s->packet_queue.size(), &rc);
     FX_LOGS(DEBUG) << "LS(" << s->id << ") " << __func__ << ": rc = " << rc;
     // write_test_data(s);
     if (rc > 0) {
-      bytes_flushed += rc;
-      if (static_cast<size_t>(rc) == s->packet_queue.size()) {
+      bytes_flushed += static_cast<uint32_t>(rc);
+      if (rc == s->packet_queue.size()) {
         s->packet_queue.clear();
       } else {
         auto begin = s->packet_queue.begin();
         s->packet_queue.erase(begin, begin + rc);
       }
     } else if (status == ZX_ERR_SHOULD_WAIT) {
-      // fd is full.
+      // Socket buffer is full; resume once ZX_SOCKET_WRITABLE, ZX_SOCKET_WRITE_DISABLED, or
+      // ZX_SOCKET_PEER_CLOSED asserts.
+      break;
     } else {
-      // rc == 0, probably.
-      // The other side closed its read side of the fd, but it's possible that we can still
+      // The other side closed its read side of the socket, but it's possible that we can still
       // read from the socket. Give that a try before giving up.
+      s->packet_queue.clear();
       s->has_write_error = true;
+      break;
     }
   }
 
   bool fd_full = !s->packet_queue.empty() && !s->has_write_error;
-  if (s->transport && s->peer) {
+  if (s->transport && s->peer && bytes_flushed > 0) {
     if (s->available_send_bytes.has_value()) {
       // Deferred acks are available. In this mode, packet_queue can contain any number of
       // A_WRTE payloads. But A_OKAY is used to communicate back the "send window" size. If
       // no bytes were flushed, the window did not change and there is no need to send A_OKAY.
       // The sender will keep on sending even without receiving an A_OKAY.
-      if (bytes_flushed > 0) {
-        send_ready(s->id, s->peer->id, s->transport, bytes_flushed);
-      }
-    } else {
+      send_ready(s->id, s->peer->id, s->transport, bytes_flushed);
+    } else if (s->packet_queue.empty() && !s->has_write_error) {
       // Legacy mode (deferred acks aren't available): The legacy protocol relies on
       // a strict 1-to-1 A_WRTE to A_OKAY ratio. In this mode, the `packet_queue` holds
       // the incoming A_WRTE payload (and only one). By waiting for the queue to fully
       // empty before sending the A_OKAY, we prevent spamming multiple acks for partial
       // writes of a single packet.
-      if (bytes_flushed > 0 && s->packet_queue.empty()) {
-        send_ready(s->id, s->peer->id, s->transport, 0);
-      }
+      send_ready(s->id, s->peer->id, s->transport, 0);
     }
   }
 
   // If we sent the last packet of a closing socket, we can now destroy it.
-  if (s->closing) {
-    s->close(s);
+  if (s->closing && !fd_full) {
+    s->incoming_wait.Cancel();
     return SocketFlushResult::Destroyed;
   }
 
   if (fd_full) {
-    // fdevent_add(s->fde, FDE_WRITE);
+    async_dispatcher_t* dispatcher =
+        s->adb ? static_cast<adb::AdbBase*>(s->adb)->dispatcher() : nullptr;
+    if (!dispatcher || !s->zx_socket.is_valid()) {
+      FX_LOGS(ERROR) << "LS(" << s->id << "): dropping " << s->packet_queue.size()
+                     << " queued bytes without a dispatcher";
+      s->packet_queue.clear();
+      s->has_write_error = true;
+      return s->closing ? SocketFlushResult::Destroyed : SocketFlushResult::Completed;
+    }
+    if (!s->incoming_wait.is_pending()) {
+      if (s->incoming_wait.object() == ZX_HANDLE_INVALID) {
+        s->incoming_wait.set_object(s->zx_socket.get());
+      }
+      zx_status_t wait_status = s->incoming_wait.Begin(dispatcher);
+      if (wait_status != ZX_OK) {
+        FX_LOGS(ERROR) << "LS(" << s->id << "): failed to wait for writable socket (" << wait_status
+                       << "), dropping " << s->packet_queue.size() << " queued bytes";
+        s->packet_queue.clear();
+        s->has_write_error = true;
+        return s->closing ? SocketFlushResult::Destroyed : SocketFlushResult::Completed;
+      }
+    }
     return SocketFlushResult::TryAgain;
-  } else {
-    // fdevent_del(s->fde, FDE_WRITE);
-    return SocketFlushResult::Completed;
   }
+
+  s->incoming_wait.Cancel();
+  return SocketFlushResult::Completed;
 }
 
 zx_status_t local_socket_read(asocket* s, void* buffer, size_t len, size_t* actual) {
   *actual = 0;
+  if (s->closing) {
+    return ZX_ERR_CANCELED;
+  }
   if (s->zx_socket.is_valid()) {
-    zx_signals_t pending = 0;
-    zx_status_t status = s->zx_socket.wait_one(ZX_SOCKET_READABLE | ZX_SOCKET_PEER_CLOSED,
-                                               zx::deadline_after(zx::sec(1)), &pending);
-    if (status != ZX_OK) {
-      if (status == ZX_ERR_TIMED_OUT) {
-        FX_LOGS(DEBUG) << "LS(" << s->id << "): read timed out";
-      } else {
-        FX_LOGS(ERROR) << "LS(" << s->id << "): read socket wait failed" << status;
-      }
-      return status;
-    }
-
-    if (pending & ZX_SOCKET_PEER_CLOSED) {
-      return ZX_ERR_PEER_CLOSED;
-    }
-
     return s->zx_socket.read(0u, buffer, len, actual);
   }
 
@@ -212,6 +248,10 @@ zx_status_t local_socket_read(asocket* s, void* buffer, size_t len, size_t* actu
 
 // Returns false if the socket has been closed and destroyed as a side-effect of this function.
 static bool local_socket_flush_outgoing(asocket* s) {
+  if (s->closing) {
+    return false;
+  }
+
   const size_t max_payload = 1024;  // s->get_max_payload();
   apacket::payload_type data;
   data.resize(max_payload);
@@ -222,7 +262,10 @@ static bool local_socket_flush_outgoing(asocket* s) {
 
   FX_LOGS(DEBUG) << "LS(" << s->id << "): post adb_read() r=" << r << " (error=" << status << ")";
   if (status != ZX_OK) {
-    if (status == ZX_ERR_SHOULD_WAIT || status == ZX_ERR_TIMED_OUT) {
+    if (status == ZX_ERR_CANCELED) {
+      return false;
+    }
+    if (status == ZX_ERR_SHOULD_WAIT) {
       return true;
     }
   }
@@ -235,16 +278,6 @@ static bool local_socket_flush_outgoing(asocket* s) {
   }
   FX_LOGS(DEBUG) << "LS(" << s->id << "): " /* fd=" << s->fd */ << "post avail loop. r=" << r
                  << " is_eof=" << is_eof;
-
-  if (r < 0) {
-    // Error return means they closed us as a side-effect and we must
-    // return immediately.
-    //
-    // Note that if we still have buffered packets, the socket will be
-    // placed on the closing socket list. This handler function will be
-    // called again to process FDE_WRITE events.
-    return false;
-  }
 
   if (r > 0 && s->peer) {
     data.resize(r);
@@ -263,9 +296,9 @@ static bool local_socket_flush_outgoing(asocket* s) {
     total += data.size();
     FX_LOGS(DEBUG) << "[" << cnt++ << "]LS(" << saved_id << "): Send " << data.size() << "total "
                    << total;
-    r = s->peer->enqueue(s->peer, std::move(data));
+    int enqueue_result = s->peer->enqueue(s->peer, std::move(data));
     FX_LOGS(DEBUG) << "LS(" << saved_id
-                   << "): " /* fd=" << saved_fd*/ << "post peer->enqueue(). r=" << r;
+                   << "): " /* fd=" << saved_fd*/ << "post peer->enqueue(). r=" << enqueue_result;
 
     if (s->available_send_bytes) {
       if (*s->available_send_bytes <= 0) {
@@ -288,7 +321,38 @@ static bool local_socket_flush_outgoing(asocket* s) {
   return true;
 }
 
+void asocket::OnIncomingSocketWritable(async_dispatcher_t* dispatcher, async::WaitBase* wait,
+                                       zx_status_t status, const zx_packet_signal_t* signal) {
+  if (status != ZX_OK) {
+    return;
+  }
+  if (closing && (has_write_error || packet_queue.empty())) {
+    return;
+  }
+  if (local_socket_flush_incoming(this) == SocketFlushResult::Destroyed) {
+    close(this);
+  }
+}
+
+void asocket::OnOutgoingSocketReadable(async_dispatcher_t* dispatcher, async::WaitBase* wait,
+                                       zx_status_t status, const zx_packet_signal_t* signal) {
+  if (status != ZX_OK || closing) {
+    return;
+  }
+  if (!local_socket_flush_outgoing(this)) {
+    return;
+  }
+  if (!outgoing_wait.is_pending()) {
+    if (outgoing_wait.Begin(dispatcher) != ZX_OK) {
+      close(this);
+    }
+  }
+}
+
 static int local_socket_enqueue(asocket* s, apacket::payload_type data) {
+  if (s->closing || (s->transport && !s->transport->online)) {
+    return -1;
+  }
   FX_LOGS(DEBUG) << "LS(" << s->id << "): enqueue " << data.size();
 
   // replace carriage return with new line
@@ -300,25 +364,29 @@ static int local_socket_enqueue(asocket* s, apacket::payload_type data) {
   s->packet_queue.insert(end, data.data(), data.data() + data.size());
   FX_LOGS(DEBUG) << "packet size after " << s->packet_queue.size();
 
-  while (true) {
-    auto result = local_socket_flush_incoming(s);
-    if (result == SocketFlushResult::Destroyed) {
+  switch (local_socket_flush_incoming(s)) {
+    case SocketFlushResult::Destroyed:
+      s->close(s);
       return -1;
-    }
-
-    if (result == SocketFlushResult::Completed) {
+    case SocketFlushResult::TryAgain:
+      return 1;
+    case SocketFlushResult::Completed:
       return 0;
-    }
   }
-
-  return !s->packet_queue.empty();
 }
 
 static void local_socket_ready(asocket* s) {
-  /* far side is ready for data, pay attention to
-     readable events */
-  FX_LOGS(DEBUG) << "This part is not implemented";
-  // fdevent_add(s->fde, FDE_READ);
+  if (s->closing || !s->zx_socket.is_valid() || s->outgoing_wait.is_pending()) {
+    return;
+  }
+  if (s->outgoing_wait.object() == ZX_HANDLE_INVALID) {
+    s->outgoing_wait.set_object(s->zx_socket.get());
+  }
+  async_dispatcher_t* dispatcher =
+      s->adb ? static_cast<adb::AdbBase*>(s->adb)->dispatcher() : nullptr;
+  if (!dispatcher || s->outgoing_wait.Begin(dispatcher) != ZX_OK) {
+    s->close(s);
+  }
 }
 
 struct ClosingSocket {
@@ -375,25 +443,8 @@ static void deferred_close(/*unique_fd fd*/) {
 }
 #endif
 
-// be sure to hold the socket list lock when calling this
-static void local_socket_destroy(asocket* s) {
-  int exit_on_close = s->exit_on_close;
-
-  FX_LOGS(DEBUG) << "LS(" << s->id << "): destroying fde.";  // fd=" << s->fd;
-  // deferred_close(fdevent_release(s->fde));
-
-  remove_socket(s);
-  delete s;
-
-  if (exit_on_close) {
-    FX_LOGS(DEBUG) << "local_socket_destroy: exiting";
-    exit(1);
-  }
-}
-
 static void local_socket_close(asocket* s) {
   FX_LOGS(DEBUG) << "entered local_socket_close. LS(" << s->id << ")";  // fd=" << s->fd;
-  std::lock_guard<std::recursive_mutex> lock(local_socket_list_lock);
   if (s->peer) {
     FX_LOGS(DEBUG) << "LS(" << s->id << "): closing peer. peer->id=" << s->peer->id;
     // << " peer->fd=" << s->peer->fd;
@@ -409,42 +460,20 @@ static void local_socket_close(asocket* s) {
     s->peer = nullptr;
   }
 
-  /* If we are already closing, or if there are no
-  ** pending packets, destroy immediately
-  */
-  if (s->closing || s->has_write_error || s->packet_queue.empty()) {
-    int id = s->id;
-    s->closing = 1;
-    bool destroy_outgoing = true;
-    // TODO: This is a temporary solution. There will be a race when the driver shutsdown
-    // if the thread does not get to execute.
-    if (s->destroy_outgoing.compare_exchange_strong(
-            destroy_outgoing, false, std::memory_order_release, std::memory_order_relaxed)) {
-      std::thread([s, id]() {
-        if (s->outgoing_thrd.joinable()) {
-          s->outgoing_thrd.join();
-        }
-        release_service_socket(s);
-        local_socket_destroy(s);
-        FX_LOGS(DEBUG) << "LS(" << id << "): closed";
-      }).detach();
-    }
+  s->outgoing_wait.Cancel();
+
+  if (s->closing || s->has_write_error || s->packet_queue.empty() ||
+      !s->incoming_wait.is_pending()) {
+    s->closing = true;
+    remove_socket(s);
+    local_socket_destroy(s);
     return;
   }
 
-  /* otherwise, put on the closing list
-   */
-  FX_LOGS(DEBUG) << "LS(" << s->id << "): closing";
-  s->closing = 1;
-  if (std::this_thread::get_id() != s->outgoing_thrd.get_id()) {
-    s->outgoing_thrd.join();
-  }
-  release_service_socket(s);
-  // fdevent_del(s->fde, FDE_READ);
+  s->closing = true;
   remove_socket(s);
-  FX_LOGS(DEBUG) << "LS(" << s->id << "): put on socket_closing_list";  // fd=" << s->fd;
+  FX_LOGS(DEBUG) << "LS(" << s->id << "): put on socket_closing_list";
   local_socket_closing_list.push_back(s);
-  // ZX_ASSERT(FDE_WRITE == s->fde->state & FDE_WRITE);
 }
 
 #if 0
@@ -514,20 +543,6 @@ void local_socket_ack(asocket* s, std::optional<int32_t> acked_bytes) {
   }
 }
 
-void local_outgoing_thread(asocket* s) {
-  FX_LOGS(DEBUG) << "LS(" << s->id << ") Starting outgoing thread";
-  while (true) {
-    if (s->closing) {
-      FX_LOGS(DEBUG) << "LS(" << s->id << ") Closing thread";
-      break;
-    }
-    if (!local_socket_flush_outgoing(s)) {
-      break;
-    }
-  }
-  FX_LOGS(DEBUG) << "LS(" << s->id << ") Exiting outgoing thread";
-}
-
 asocket* create_local_socket(/*unique_fd ufd*/) {
   // int fd = 0;  // ufd.release();
   asocket* s = new asocket();
@@ -545,7 +560,7 @@ asocket* create_local_socket(/*unique_fd ufd*/) {
 void release_service_socket(asocket* s) {
   if (s->zx_socket.is_valid()) {
     FX_LOGS(DEBUG) << "Ffx socket returned";
-    [[maybe_unused]] auto socket = s->zx_socket.release();
+    s->zx_socket.reset();
   }
 }
 
@@ -556,7 +571,7 @@ bool newline_replace(std::string_view name) {
   return false;
 }
 
-zx_status_t daemon_service_connect(std::string_view name, void* adb_ctxt, asocket* s) {
+static zx::result<zx::socket> daemon_service_connect(std::string_view name, void* adb_ctxt) {
   std::string_view service_name = "UNKNOWN";
   std::string_view args = "";
   if (name.starts_with("shell:")) {
@@ -583,42 +598,56 @@ zx_status_t daemon_service_connect(std::string_view name, void* adb_ctxt, asocke
     }
   } else {
     FX_LOGS(ERROR) << "Service " << name << " not supported";
-    return ZX_ERR_NOT_SUPPORTED;
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
   }
 
   auto adb = static_cast<adb::AdbBase*>(adb_ctxt);
   auto socket = adb->GetServiceSocket(service_name, args);
   if (socket.is_error()) {
     FX_LOGS(ERROR) << "Could not get socket " << socket.error_value();
-    return socket.error_value();
+    return socket.take_error();
   }
   if (!socket->is_valid()) {
     FX_LOGS(ERROR) << "Socket is invalid";
-    return ZX_ERR_NOT_FOUND;
+    return zx::error(ZX_ERR_NOT_FOUND);
   }
   FX_LOGS(DEBUG) << "Socket is valid and moved";
-  s->zx_socket = std::move(socket.value());
-  return ZX_OK;
+  return socket;
 }
 
 asocket* create_local_service_socket(std::string_view name, atransport* transport) {
-  // int fd_value = 0; // fd.get();
-  asocket* s = create_local_socket();  // std::move(fd));
-  s->transport = transport;
-  s->adb = static_cast<adb::AdbBase*>(transport->connection()->adb());
-  s->name = name;
-
-  zx_status_t status = daemon_service_connect(name, transport->connection()->adb(), s);
-  if (status != ZX_OK) {
-    FX_LOGS(ERROR) << "No connection for the requested service " << std::string(name).c_str()
-                   << ", status: " << status << ". Returning error";
-    s->close(s);
+  auto conn = transport->connection();
+  void* adb_ctxt = conn ? conn->adb() : nullptr;
+  if (adb_ctxt == nullptr) {
     return nullptr;
   }
 
+  zx::result<zx::socket> service_socket = daemon_service_connect(name, adb_ctxt);
+  if (service_socket.is_error()) {
+    FX_LOGS(ERROR) << "No connection for the requested service " << name
+                   << ", status: " << service_socket.status_value() << ". Returning error";
+    return nullptr;
+  }
+
+  if (!transport->online) {
+    return nullptr;
+  }
+
+  asocket* s = new asocket();
+  s->enqueue = local_socket_enqueue;
+  s->ready = local_socket_ready;
+  s->shutdown = nullptr;
+  s->close = local_socket_close;
+  s->transport = transport;
+  s->adb = static_cast<adb::AdbBase*>(adb_ctxt);
+  s->name = name;
+  s->zx_socket = std::move(service_socket.value());
+  s->incoming_wait.set_object(s->zx_socket.get());
+  s->outgoing_wait.set_object(s->zx_socket.get());
   s->newline_replace = newline_replace(name);
-  FX_LOGS(DEBUG) << "LS(" << s->id << "): bound to "
-                 << std::string(name).c_str();  // << " via " << fd_value;
+
+  install_local_socket(s);
+  FX_LOGS(DEBUG) << "LS(" << s->id << "): bound to " << name;
 
   if (((name.rfind("root:", 0) == 0) && getuid() != 0) ||
       ((name.rfind("unroot:", 0) == 0) && getuid() == 0) || (name.rfind("usb:", 0) == 0) ||
@@ -627,7 +656,6 @@ asocket* create_local_service_socket(std::string_view name, atransport* transpor
     s->exit_on_close = 1;
   }
 
-  s->outgoing_thrd = std::thread([s]() { local_outgoing_thread(s); });
   return s;
 }
 

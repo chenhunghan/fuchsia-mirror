@@ -194,8 +194,8 @@ ErrOrValue StringToNumber(ExprLanguage lang, std::string_view str) {
 
   int symbol_tag =
       matched_type->type_signed ? BaseType::kBaseTypeSigned : BaseType::kBaseTypeUnsigned;
-  auto type =
-      fxl::MakeRefCounted<BaseType>(symbol_tag, matched_type->byte_size, matched_type->name);
+  auto type = fxl::MakeRefCounted<BaseType>(
+      symbol_tag, static_cast<uint32_t>(matched_type->byte_size), matched_type->name);
 
   uint64_t value = prefix.sign == IntegerPrefix::kNegative ? -abs_value : abs_value;
 

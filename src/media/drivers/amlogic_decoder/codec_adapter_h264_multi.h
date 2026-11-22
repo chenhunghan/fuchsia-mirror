@@ -5,8 +5,9 @@
 #ifndef SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_CODEC_ADAPTER_H264_MULTI_H_
 #define SRC_MEDIA_DRIVERS_AMLOGIC_DECODER_CODEC_ADAPTER_H264_MULTI_H_
 
+#include <fidl/fuchsia.media/cpp/fidl.h>
+#include <fidl/fuchsia.mediacodec/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
-#include <fuchsia/mediacodec/cpp/fidl.h>
 #include <lib/async-loop/cpp/loop.h>
 #include <lib/async-loop/default.h>
 #include <lib/closure-queue/closure_queue.h>
@@ -14,6 +15,8 @@
 #include <lib/fit/function.h>
 #include <lib/zx/bti.h>
 #include <zircon/compiler.h>
+
+#include <optional>
 
 #include <fbl/macros.h>
 
@@ -43,12 +46,13 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
   bool IsCoreCodecMappedBufferUseful(CodecPort port) override;
   bool IsCoreCodecHwBased(CodecPort port) override;
   zx::unowned_bti CoreCodecBti() override;
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override;
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override;
   void CoreCodecSetSecureMemoryMode(
-      CodecPort port, fuchsia::mediacodec::SecureMemoryMode secure_memory_mode) override;
+      CodecPort port, fuchsia_mediacodec::SecureMemoryMode secure_memory_mode) override;
   void CoreCodecStartStream() override;
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override;
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
   void CoreCodecStopStream() override;
@@ -57,15 +61,11 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
                                  const std::vector<std::unique_ptr<CodecPacket>>& packets) override;
   void CoreCodecRecycleOutputPacket(CodecPacket* packet) override;
   void CoreCodecEnsureBuffersNotConfigured(CodecPort port) override;
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override;
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override;
   void CoreCodecMidStreamOutputBufferReConfigPrepare() override;
@@ -120,7 +120,7 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
       const CodecBuffer* buffer, fit::deferred_callback* return_input_packet, const uint8_t* data,
       uint32_t length);
 
-  void OnCoreCodecFailStream(fuchsia::media::StreamError error);
+  void OnCoreCodecFailStream(fuchsia_media::StreamError error);
   // The passed-in buffer will be set on the returned packet until the packet is no longer in
   // flight.
   CodecPacket* GetFreePacket(const CodecBuffer* buffer);
@@ -155,10 +155,10 @@ class CodecAdapterH264Multi : public AmlogicCodecAdapter,
 
   bool have_queued_trigger_decoder_ = false;
 
-  fuchsia::mediacodec::SecureMemoryMode secure_memory_mode_[kPortCount] = {};
+  fuchsia_mediacodec::SecureMemoryMode secure_memory_mode_[kPortCount] = {};
 
-  fuchsia::media::FormatDetails initial_input_format_details_;
-  fuchsia::media::FormatDetails latest_input_format_details_;
+  std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details_;
+  std::shared_ptr<const fuchsia_media::FormatDetails> latest_input_format_details_;
 
   std::optional<fuchsia_sysmem2::BufferCollectionInfo> output_buffer_collection_info_;
   std::optional<fuchsia_sysmem2::SingleBufferSettings> buffer_settings_[kPortCount];

@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <zircon/assert.h>
 
-#include <phys/address-space.h>
+#include <phys/address-space/address-space.h>
 #include <phys/handoff/boot-constants.h>
 #include <phys/handoff/handoff.h>
 #include <phys/handoff/zircon-abi-spec.h>

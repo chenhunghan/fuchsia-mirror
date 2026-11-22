@@ -13,7 +13,6 @@
 #include <unistd.h>
 
 #include <format>
-#include <fstream>
 #include <thread>
 
 #include <fbl/unique_fd.h>
@@ -32,7 +31,6 @@
 
 namespace {
 const size_t kMemSizeBytes = 1 * 1024 * 1024;  // 1MB
-constexpr char RSS_PREFIX[] = "VmRSS:";
 
 int DoPidFdOpen(pid_t pid) { return static_cast<int>(syscall(SYS_pidfd_open, pid, 0u)); }
 int DoProcessMRelease(int pidfd, int flags = 0) {
@@ -40,30 +38,7 @@ int DoProcessMRelease(int pidfd, int flags = 0) {
 }
 
 std::optional<size_t> GetProcessRSSMemorySize(pid_t pid) {
-  auto path = std::format("/proc/{}/status", pid);
-  std::ifstream file(path);
-  if (!file.is_open()) {
-    ADD_FAILURE() << "Unable to open " << path;
-    return std::nullopt;
-  }
-
-  std::string line;
-  while (std::getline(file, line)) {
-    if (line.starts_with(RSS_PREFIX)) {
-      std::string value_str = line.substr(strlen(RSS_PREFIX));
-      // Trim leading whitespace
-      value_str.erase(0, value_str.find_first_not_of(" \t\n\r\f\v"));
-      // Remove " kB" suffix
-      size_t kb_pos = value_str.rfind(" kB");
-      if (kb_pos != std::string::npos) {
-        value_str.erase(kb_pos);
-      }
-      return static_cast<size_t>(std::strtoull(value_str.c_str(), nullptr, 10));
-    }
-  }
-
-  ADD_FAILURE() << "Did not find rss value";
-  return std::nullopt;
+  return test_helper::GetStatusFieldInKb(std::format("/proc/{}/status", pid), "VmRSS");
 }
 
 std::string GetMapsString(pid_t pid) {

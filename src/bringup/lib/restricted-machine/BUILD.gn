@@ -9,6 +9,8 @@ import("//build/dist/resource.gni")
 import("//src/bringup/lib/restricted-machine/loadable.gni")
 
 library_headers("headers") {
+  testonly = true
+
   headers = [
     "bringup/lib/restricted-machine/environment.h",
     "bringup/lib/restricted-machine/machine.h",
@@ -23,6 +25,8 @@ library_headers("headers") {
 }
 
 source_set("restricted-machine") {
+  testonly = true
+
   sources = [
     "$current_cpu.S",
     "environment.cc",
@@ -40,8 +44,8 @@ source_set("restricted-machine") {
   ]
 
   deps = [
-    "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_cpp",
     "//sdk/lib/fdio",
+    "//src/lib/elfldltl/testing",
     "//src/lib/symbolizer-markup",
     "//zircon/kernel/lib/arch",
     "//zircon/system/ulib/pretty",
@@ -66,6 +70,8 @@ config("log_to_test") {
 # When syslog is disallowed, such as in core tests, we default to using
 # zxtest's LogSink().
 source_set("zxtest") {
+  testonly = true
+
   public_configs = [ ":log_to_test" ]
   sources = [
     "$current_cpu.S",
@@ -83,7 +89,7 @@ source_set("zxtest") {
   ]
 
   deps = [
-    "//sdk/fidl/fuchsia.ldsvc:fuchsia.ldsvc_cpp",
+    "//src/lib/elfldltl/testing:elfldltl-zxtest",
     "//src/lib/symbolizer-markup",
     "//zircon/kernel/lib/arch",
     "//zircon/system/ulib/pretty",
@@ -107,5 +113,6 @@ source_set("zxtest") {
 
 group("tests") {
   testonly = true
+
   deps = [ "tests" ]
 }

@@ -39,7 +39,6 @@ py_library(
 host_py_test(
     name = "test_with_py_binary",
     srcs = ["test_with_py_binary.py"],
-    test_args = ["$(rlocationpath :test_with_py_library_bin)"],
     test_data = [":test_with_py_library_bin"],
     deps = ["@rules_python//python/runfiles"],
 )
@@ -57,7 +56,68 @@ host_py_test(
 host_py_test(
     name = "list_unittests_test",
     srcs = ["list_unittests_test.py"],
-    test_args = ["$(rlocationpath :test_with_unittests)"],
     test_data = [":test_with_unittests"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+# The tests below verify the `main_callable` argument of host_py_test().
+# Their main files live in a sub-directory, and have no `__main__` block
+# unless stated otherwise.
+
+# Runs unittest.main() by default.
+host_py_test(
+    name = "default_main_callable_test",
+    srcs = [
+        "main_callable/default_main_callable_test.py",
+        "main_callable/helper_lib.py",
+    ],
+    main = "main_callable/default_main_callable_test.py",
+)
+
+# Must fail with unittest's "NO TESTS RAN" exit code.
+host_py_test(
+    name = "no_tests_main_callable_test",
+    srcs = ["main_callable/no_tests.py"],
+    main = "main_callable/no_tests.py",
+    tags = ["manual"],
+)
+
+# Must fail, since its only test case fails.
+host_py_test(
+    name = "failing_main_callable_test",
+    srcs = ["main_callable/failing_test.py"],
+    main = "main_callable/failing_test.py",
+    tags = ["manual"],
+)
+
+# Calls a custom function, which checks its arguments. Its `__main__` block
+# must not run.
+host_py_test(
+    name = "custom_main_callable_test",
+    srcs = ["main_callable/custom_main_callable_test.py"],
+    main = "main_callable/custom_main_callable_test.py",
+    main_callable = "main",
+    test_args = ["--expected-arg"],
+)
+
+# Calls a coroutine function with asyncio.run().
+host_py_test(
+    name = "async_main_callable_test",
+    srcs = ["main_callable/async_main_callable_test.py"],
+    main = "main_callable/async_main_callable_test.py",
+    main_callable = "main",
+)
+
+# Runs the tests above and checks their exit codes and outputs.
+host_py_test(
+    name = "main_callable_checker_test",
+    srcs = ["main_callable_checker_test.py"],
+    test_data = [
+        ":async_main_callable_test",
+        ":custom_main_callable_test",
+        ":default_main_callable_test",
+        ":failing_main_callable_test",
+        ":no_tests_main_callable_test",
+    ],
     deps = ["@rules_python//python/runfiles"],
 )

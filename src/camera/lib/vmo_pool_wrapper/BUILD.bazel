@@ -1,0 +1,81 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_library.bzl", "fx_cc_library")
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load("//build/bazel/rules/packages:fx_packaged_binary.bzl", "fx_packaged_binary")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(
+    default_applicable_licenses = ["//:license"],
+)
+
+test_suite(
+    name = "tests",
+    tests = [":vmo_pool_wrapper_unittest_test"],
+    visibility = ["//src/camera:__pkg__"],
+)
+
+fx_cc_library(
+    name = "vmo_pool_wrapper",
+    srcs = ["vmo_pool_wrapper.cc"],
+    hdrs = ["vmo_pool_wrapper.h"],
+    visibility = [
+        "//src/camera/drivers/hw_accel/task:__pkg__",
+        "//vendor:__subpackages__",
+    ],
+    deps = ["//zircon/system/ulib/fzl"],
+    alwayslink = True,
+)
+
+fx_cc_test_binary(
+    name = "vmo_pool_wrapper_unittest_bin",
+    srcs = ["vmo_pool_wrapper_unittest.cc"],
+    deps = [
+        ":vmo_pool_wrapper",
+        "//src/devices/testing/fake-bti",
+        "//src/lib/fxl/test:gtest_main",
+    ],
+)
+
+fx_packaged_binary(
+    name = "vmo_pool_wrapper_unittest_packaged_bin",
+    testonly = True,
+    binary = ":vmo_pool_wrapper_unittest_bin",
+    binary_name = "vmo_pool_wrapper_unittest_bin",
+)
+
+fx_component_manifest(
+    name = "vmo_pool_wrapper_unittest_manifest",
+    testonly = True,
+    component_name = "vmo_pool_wrapper_unittest",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/vmo_pool_wrapper_unittest.cml",
+)
+
+fx_test_component(
+    name = "vmo_pool_wrapper_unittest_component",
+    compiled_manifest = ":vmo_pool_wrapper_unittest_manifest",
+    deps = [":vmo_pool_wrapper_unittest_packaged_bin"],
+)
+
+fx_package(
+    name = "vmo_pool_wrapper_unittest",
+    testonly = True,
+    test_components = [":vmo_pool_wrapper_unittest_component"],
+)
+
+fx_test(
+    name = "vmo_pool_wrapper_unittest_test",
+    package = ":vmo_pool_wrapper_unittest",
+)

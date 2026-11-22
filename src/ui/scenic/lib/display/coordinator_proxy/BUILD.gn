@@ -1,0 +1,37 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Design: DESIGN.md in this directory.
+source_set("coordinator_proxy") {
+  sources = [
+    "coordinator_proxy.cc",
+    "coordinator_proxy.h",
+    "internal/check_config_cache.h",
+    "internal/display_equivalence.h",
+    "internal/layer.cc",
+    "internal/layer.h",
+    "internal/layer_equivalence.h",
+  ]
+
+  public_deps = [
+    "//sdk/fidl/fuchsia.hardware.display:fuchsia.hardware.display_cpp",
+    "//sdk/fidl/fuchsia.hardware.display.types:fuchsia.hardware.display.types_cpp",
+    "//sdk/fidl/fuchsia.math:fuchsia.math_cpp",
+    "//sdk/fidl/fuchsia.sysmem2:fuchsia.sysmem2_cpp",
+    "//sdk/lib/fit",
+    "//sdk/lib/syslog/cpp",
+    "//src/lib/fxl",
+    "//src/ui/scenic/lib/display:types",
+    "//src/ui/scenic/lib/types",
+    "//zircon/system/ulib/inspect",
+    "//zircon/system/ulib/zx",
+  ]
+  deps = [
+    "//src/ui/scenic/lib/utils",
+    "//zircon/system/ulib/trace",
+  ]
+
+  # TODO(https://fxbug.dev/446717362): Scenic also has a display:: namespace.
+  assert_no_deps = [ "//src/graphics/display/lib/*" ]
+}

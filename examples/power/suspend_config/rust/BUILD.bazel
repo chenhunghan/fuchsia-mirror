@@ -1,0 +1,143 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load(
+    "//build/bazel/rules/components:structured_config.bzl",
+    "fuchsia_structured_config_rust_lib",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":power_config_client_test"],
+    visibility = ["//examples:__pkg__"],
+)
+
+fx_component_manifest(
+    name = "power_config_client_manifest",
+    component_name = "power_config_client",
+    includes = [
+        "//sdk/lib/inspect:client.shard",
+        "//sdk/lib/syslog:client.shard",
+    ],
+    manifest = "meta/power_config_client.cml",
+)
+
+fuchsia_structured_config_rust_lib(
+    name = "power_config_client_config",
+    cm_label = ":power_config_client_manifest",
+)
+
+rustc_binary(
+    name = "power_config_client_bin",
+    testonly = True,
+    srcs = ["src/power_config_client.rs"],
+    binary_name = "power_config_client",
+    crate_root = "src/power_config_client.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        ":power_config_client_config",
+        "//examples/power/suspend_config/fidl:test.configexample_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "power_config_client_bin_packaged",
+    testonly = True,
+    binary = ":power_config_client_bin",
+    binary_name = "power_config_client",
+)
+
+fx_component(
+    name = "power_config_client_component",
+    testonly = True,
+    compiled_manifest = ":power_config_client_manifest",
+    deps = [":power_config_client_bin_packaged"],
+)
+
+fx_package(
+    name = "power_config_client_package",
+    testonly = True,
+    components = [":power_config_client_component"],
+)
+
+rustc_test(
+    name = "power_config_client_integration_test",
+    srcs = ["src/power_config_client_integration_test.rs"],
+    crate_root = "src/power_config_client_integration_test.rs",
+    edition = "2024",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//examples/power/suspend_config/fidl:test.configexample_rust",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component-test",
+        "//src/sys/lib/cm_rust",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:log",
+        "//third_party/rust_crates/vendor:test-case",
+    ],
+)
+
+fx_packaged_binary(
+    name = "power_config_client_integration_test_packaged",
+    testonly = True,
+    binary = ":power_config_client_integration_test",
+    binary_name = "power_config_client_integration_test",
+)
+
+fx_component_manifest(
+    name = "power_config_client_test_manifest",
+    testonly = True,
+    component_name = "power_config_client_test",
+    includes = [
+        "//sdk/lib/sys/component:realm_builder.shard",
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/rust:default.shard.cml",
+    ],
+    manifest = "meta/power_config_client_test.cml",
+)
+
+fx_test_component(
+    name = "power_config_client_test_component",
+    compiled_manifest = ":power_config_client_test_manifest",
+    deps = [":power_config_client_integration_test_packaged"],
+)
+
+fx_package(
+    name = "power_config_client_test_package",
+    package_name = "power_config_client_test",
+    components = [
+        "//src/lib/fuchsia-component-test/realm_builder_server:realm_builder_server_component",
+    ],
+    subpackages = [":power_config_client_package"],
+    test_components = [":power_config_client_test_component"],
+)
+
+fx_test(
+    name = "power_config_client_test",
+    package = ":power_config_client_test_package",
+)

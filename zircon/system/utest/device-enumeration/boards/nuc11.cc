@@ -10,14 +10,11 @@
 namespace {
 
 enum NucType {
-  NUC7i5DNB,
   NUC11TNBv5,
 };
 
 std::string NucTypeToString(NucType nuc_type) {
-  if (nuc_type == NucType::NUC7i5DNB) {
-    return "NUC7i5DNB";
-  } else if (nuc_type == NucType::NUC11TNBv5) {
+  if (nuc_type == NucType::NUC11TNBv5) {
     return "NUC11TNBv5";
   }
 
@@ -35,9 +32,7 @@ std::variant<NucType, std::string> GetNucType() {
   EXPECT_EQ(ZX_OK, response.status, "GetBoardName failed.");
 
   const std::string_view board_name = response.name.get();
-  if (board_name == "NUC7i5DNB") {
-    return NucType::NUC7i5DNB;
-  } else if (board_name == "NUC11TNBv5") {
+  if (board_name == "NUC11TNBv5") {
     return NucType::NUC11TNBv5;
   }
 
@@ -69,13 +64,13 @@ TEST_F(DeviceEnumerationTest, Nuc11TNBv5Test) {
   static const char* kNodeMonikers[] = {
       // keep-sorted start case=no sticky_prefixes=#ifdef group_prefixes=#endif by_regex=".*"
       "acpi._SB_.PC00.LPCB.RTC_.pt.RTC_-composite-spec.rtc",
-      "PC00.pci-root.bus.00_02_0.intel-display-controller.display-coordinator",
-      "PC00.pci-root.bus.00_02_0.intel-gpu-core",
-      "PC00.pci-root.bus.00_14_0.xhci.usb-bus",
+      "PC00.bus.00_02_0.0000_00_02_0.intel-display-controller.display-coordinator",
+      "PC00.bus.00_02_0.0000_00_02_0.intel-gpu-core",
+      "PC00.bus.00_14_0.0000_00_14_0.xhci.usb-bus",
 #ifdef include_packaged_drivers
-      "PC00.pci-root.bus.00_14_3.iwlwifi-wlanphy",
+      "PC00.bus.00_14_3.0000_00_14_3.iwlwifi-wlanphy",
 #endif
-      "PC00.pci-root.bus.00_17_0.ahci",
+      "PC00.bus.00_17_0.0000_00_17_0.ahci",
       // keep-sorted end
   };
   VerifyNodes(kNodeMonikers);

@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::iter::Iterator;
 use std::sync::Arc;
 use thiserror::Error;
-use wlan_power_manager::{POWER_LEVEL_ACTIVE, POWER_LEVEL_SUSPEND, PowerManager};
+use wlan_power_manager::{PowerLevel, PowerManager};
 
 // Number of seconds that recoverable event histories should be stored.  Store past events for 24
 // hours (86400s).
@@ -350,7 +350,7 @@ impl PhyManager {
         power_manager: &dyn PowerManager,
         phy_id: u16,
         phy_container: &mut PhyContainer,
-        level: u8,
+        level: PowerLevel,
     ) -> Result<(), PhyManagerError> {
         let token = match &phy_container.power_dependency_token {
             Some(t) => t,
@@ -366,7 +366,7 @@ impl PhyManager {
                 return Err(PhyManagerError::PowerElementLeaseFailure);
             }
         };
-        let lease_name = format!("wlancfg-phy-{}-level-{}-dependency", phy_id, level);
+        let lease_name = format!("wlancfg-phy-{}-level-{}-dependency", phy_id, level as u8);
         match power_manager.power_element_lease(&lease_name, token_dup, level).await {
             Ok(lease) => {
                 phy_container.power_dependency_lease = Some(lease);
@@ -375,7 +375,7 @@ impl PhyManager {
             Err(e) => {
                 error!(
                     "Failed to acquire power dependency lease {:?} at level {} for phy {}: {:?}",
-                    lease_name, level, phy_id, e
+                    lease_name, level as u8, phy_id, e
                 );
                 Err(PhyManagerError::PowerElementLeaseFailure)
             }
@@ -402,7 +402,7 @@ impl PhyManagerApi for PhyManager {
             &*self.power_manager,
             phy_id,
             &mut phy_container,
-            POWER_LEVEL_ACTIVE,
+            PowerLevel::Active,
         )
         .await
         {
@@ -975,7 +975,7 @@ impl PhyManagerApi for PhyManager {
                 &*self.power_manager,
                 *phy_id,
                 phy_container,
-                POWER_LEVEL_SUSPEND,
+                PowerLevel::Suspend,
             )
             .await
             {
@@ -991,7 +991,7 @@ impl PhyManagerApi for PhyManager {
                 &*self.power_manager,
                 *phy_id,
                 phy_container,
-                POWER_LEVEL_ACTIVE,
+                PowerLevel::Active,
             )
             .await
             {

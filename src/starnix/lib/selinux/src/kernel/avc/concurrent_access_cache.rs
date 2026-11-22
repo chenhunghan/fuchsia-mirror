@@ -5,7 +5,7 @@
 use super::concurrent_cache::{LockFreeQueryCache, StorageStrategy};
 use super::{AccessQueryArgs, XpermsAccessQueryArgs};
 use crate::SecurityId;
-use crate::kernel::{ClassPermission, KernelAccessDecision, KernelXpermsAccessDecision};
+use crate::kernel::{KernelAccessDecision, KernelXpermsAccessDecision};
 use crate::policy::{XpermsBitmap, XpermsKind};
 use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering};
 
@@ -326,16 +326,16 @@ impl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{DirPermission, KernelClass, KernelPermission};
+    use crate::kernel::{DirPermission, KernelClass};
     use crate::policy::{AccessVector, XpermsBitmap};
 
     #[test]
     fn test_access_cache_storage_roundtrip() {
-        let key = AccessQueryArgs {
-            source_sid: SecurityId(1.try_into().unwrap()),
-            target_sid: SecurityId(2.try_into().unwrap()),
-            target_class: KernelClass::File,
-        };
+        let key = AccessQueryArgs::new(
+            SecurityId(1.try_into().unwrap()),
+            SecurityId(2.try_into().unwrap()),
+            KernelClass::File,
+        );
         let value = KernelAccessDecision {
             allow: AccessVector::from(4),
             audit: AccessVector::from(5),
@@ -385,7 +385,7 @@ mod tests {
             xperms_kind: XpermsKind::Ioctl,
             source_sid: SecurityId(1.try_into().unwrap()),
             target_sid: SecurityId(2.try_into().unwrap()),
-            permission: KernelPermission::Dir(DirPermission::AddName),
+            permission: DirPermission::AddName.into(),
             xperms_prefix: 0,
         };
         let value = KernelXpermsAccessDecision {
@@ -433,11 +433,11 @@ mod tests {
 
     #[test]
     fn test_sid_cache_storage_roundtrip() {
-        let key = AccessQueryArgs {
-            source_sid: SecurityId(1.try_into().unwrap()),
-            target_sid: SecurityId(2.try_into().unwrap()),
-            target_class: KernelClass::Process,
-        };
+        let key = AccessQueryArgs::new(
+            SecurityId(1.try_into().unwrap()),
+            SecurityId(2.try_into().unwrap()),
+            KernelClass::Process,
+        );
         let value = SecurityId(3.try_into().unwrap());
 
         let inline_u64s = std::array::from_fn(|_| AtomicU64::new(0));

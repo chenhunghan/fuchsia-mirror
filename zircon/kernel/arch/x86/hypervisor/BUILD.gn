@@ -8,20 +8,10 @@ import("//zircon/kernel/kernel_bindgen_crate.gni")
 import("//zircon/kernel/kernel_rust_mod.gni")
 
 source_set("hypervisor") {
-  sources = [
-    "guest.cc",
-    "vcpu.cc",
-    "vmexit.cc",
-    "vmx.S",
-    "vmx_cpu_state.cc",
-  ]
+  sources = [ "vmx.S" ]
   deps = [
     ":hypervisor-rs",
     "//zircon/kernel/arch/x86:headers",
-    "//zircon/kernel/hypervisor:headers",
-    "//zircon/kernel/lib/boot-options",
-    "//zircon/kernel/lib/page",
-    "//zircon/kernel/platform/pc",
   ]
 }
 
@@ -36,40 +26,44 @@ kernel_bindgen_crate("guest-bindings") {
 
   notice_year = 2026
 
-  # Layout contract only: the Rust `Guest` and `VmxPage` assert their size,
-  # alignment and field offsets against the C++ `Guest` and `VmxPage`. The
-  # remaining field types are opaque C++ facades over Rust types, so only their
-  # sizes and alignments are taken from C++.
+  # Layout contract only: the Rust `Guest`, `GuestState`, `HostState`,
+  # `VmxPage` and `VmxState` assert their size, alignment and field offsets
+  # against the C++ types of the same name. The remaining field types of `Guest`
+  # are opaque C++ facades over Rust types, so only their sizes and alignments
+  # are taken from C++.
   type_allowlist = [
     "Guest",
+    "GuestState",
+    "HostState",
     "VmxPage",
+    "VmxState",
     "VpidAllocator",
     "hypervisor::Page",
     "hypervisor::GuestPhysicalAspace",
     "hypervisor::TrapMap",
-    "vm_page",
   ]
   opaque_types = [
     "VpidAllocator",
+    "hypervisor::Page",
     "hypervisor::GuestPhysicalAspace",
     "hypervisor::TrapMap",
-    "vm_page",
   ]
 
   # bindgen still emits nested types of allowlisted opaque classes.
-  type_blocklist = [
-    "hypervisor::TrapMap_LockType",
-    "vm_page_.*",
-  ]
+  type_blocklist = [ "hypervisor::TrapMap_LockType" ]
   function_blocklist = [ ".*" ]
-  var_allowlist = [ "Guest_kMaxGuestVcpus" ]
-  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
-  deps = [ "//sdk/rust/zx-types" ]
-  expect_lints = [ "non_upper_case_globals" ]
-  raw_lines = [
-    "#![no_std]",
-    "pub use zx_types::zx_paddr_t;",
+  var_allowlist = [
+    "Guest_kMaxGuestVcpus",
+
+    # Offsets used by vmx.S, checked against the Rust `VmxState` in
+    # vmx_state.rs.
+    "GS_.*",
+    "HS_.*",
+    "VS_RESUME",
   ]
+  additional_bindgen_flags = [ "--no-recursive-allowlist" ]
+  expect_lints = [ "non_upper_case_globals" ]
+  raw_lines = [ "#![no_std]" ]
 }
 
 kernel_rust_mod("hypervisor-rs") {
@@ -80,16 +74,30 @@ kernel_rust_mod("hypervisor-rs") {
     "invalidate_ffi.rs",
     "mod.rs",
     "pv.rs",
-    "pv_ffi.rs",
+    "vcpu.rs",
+    "vmcs.rs",
+    "vmexit.rs",
+    "vmx_cpu_state.rs",
+    "vmx_cpu_state_ffi.rs",
+    "vmx_state.rs",
   ]
   deps = [
     ":guest-bindings",
     "//sdk/rust/zx-status",
     "//sdk/rust/zx-types",
+    "//src/lib/kalloc",
+    "//src/lib/kprint",
+    "//src/lib/ksync",
+    "//src/lib/lazy_init:lazy_init_rs",
     "//src/lib/zr",
     "//third_party/rust_crates:pin-init",
     "//zircon/kernel/hypervisor:hypervisor-rs",
+    "//zircon/kernel/lib/boot-options:boot-options-rs",
+    "//zircon/kernel/lib/debug",
     "//zircon/kernel/lib/id_allocator:id-allocator-rs",
+    "//zircon/kernel/lib/init:init_rust",
+    "//zircon/kernel/lib/page:page-rs",
+    "//zircon/system/ulib/fbl/rust:fbl",
   ]
   test_deps = [ "//zircon/kernel/lib/unittest:unittest-rs" ]
 }

@@ -2,13 +2,23 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
 load("//build/bazel/rules/rust:rustc_library.bzl", "rustc_library")
+load("//build/bazel/rules/rust:rustc_test.bzl", "rustc_test")
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+load(
+    "//build/bazel/rules/testing:fx_unittest_component.bzl",
+    "fx_unittest_component",
+)
 
 package(default_applicable_licenses = ["//:license"])
 
-# The unit tests (`:lib_test`) stay in BUILD.gn because they depend on
-# //src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server, which
-# has no Bazel build yet.
+test_suite(
+    name = "tests",
+    tests = [":starnix-crypt-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
 rustc_library(
     name = "lib",
     srcs = ["src/lib.rs"],
@@ -38,4 +48,40 @@ rustc_library(
         "//third_party/rust_crates/vendor:rand",
         "//third_party/rust_crates/vendor:sha2",
     ],
+)
+
+rustc_test(
+    name = "lib_test",
+    crate = ":lib",
+    # Only used by bazel2gn, to keep the GN `output_name`.
+    crate_name = "starnix_crypt_lib_test",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:fuchsia"],
+    deps = [
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-async",
+        "//src/storage/lib/block_client/rust:block-client",
+        "//src/storage/lib/block_server/vmo_backed:test_vmo_backed_block_server",
+        "//src/storage/lib/storage_device",
+        "//third_party/rust_crates/vendor:assert_matches",
+    ],
+)
+
+fx_unittest_component(
+    name = "starnix-crypt-test",
+    binary = ":lib_test",
+)
+
+fx_package(
+    name = "starnix-crypt-tests-package",
+    package_name = "starnix-crypt-tests",
+    testonly = True,
+    test_components = [":starnix-crypt-test"],
+)
+
+fx_test(
+    name = "starnix-crypt-tests",
+    package = ":starnix-crypt-tests-package",
 )

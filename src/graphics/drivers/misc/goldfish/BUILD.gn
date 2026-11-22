@@ -78,7 +78,6 @@ fuchsia_cc_driver("goldfish_driver-driver") {
 fuchsia_driver_component("goldfish_driver") {
   component_name = "goldfish"
   deps = [ ":goldfish_driver-driver" ]
-  info = "meta/goldfish_driver-info.json"
   manifest = "meta/goldfish.cml"
 }
 

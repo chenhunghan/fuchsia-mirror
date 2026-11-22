@@ -74,34 +74,64 @@ class InterruptPropertyV2 {
   explicit InterruptPropertyV2(fdf_devicetree::PropertyCells cells)
       : interrupt_cells_(cells, 1, 1, 1) {}
 
-  // 1st cell contains the interrupt type; 0 for SPI interrupts, 1 for PPI interrupts.
-  bool is_spi() { return *interrupt_cells_[0][0] == GIC_SPI; }
+  // 1st cell contains the interrupt type:
+  // 0 for SPI interrupts, 1 for PPI interrupts, 8 for SGI interrupts.
+  uint32_t type() const {
+    auto val = interrupt_cells_[0][0];
+    return val.has_value() ? static_cast<uint32_t>(*val) : UINT32_MAX;
+  }
+  bool is_spi() const { return type() == GIC_SPI; }
+  bool is_ppi() const { return type() == GIC_PPI; }
+  bool is_sgi() const { return type() == GIC_SGI; }
 
   // 2nd cell contains the interrupt number.
   // SPI interrupts are in the range [0-987].
   // PPI interrupts are in the range [0-15].
-  uint32_t irq() {
-    uint32_t irq = static_cast<uint32_t>(*interrupt_cells_[0][1]);
+  // SGI interrupts are in the range [0-15].
+  zx::result<uint32_t> irq() const {
+    auto cell = interrupt_cells_[0][1];
+    if (!cell.has_value()) {
+      return zx::error(ZX_ERR_INVALID_ARGS);
+    }
+    uint32_t num = static_cast<uint32_t>(*cell);
     if (is_spi()) {
       // SPI interrupts start at 32.
       // See https://developer.arm.com/documentation/101206/0003/Operation/Interrupt-types/SPIs.
-      irq += 32;
-    } else {
+      return zx::ok(num + 32);
+    }
+    if (is_ppi()) {
       // PPI interrupts start at 16.
       // See https://developer.arm.com/documentation/101206/0003/Operation/Interrupt-types/PPIs.
-      irq += 16;
+      return zx::ok(num + 16);
     }
-    return irq;
+    if (is_sgi()) {
+      // SGI interrupts start at 0 (INTIDs 0-15).
+      if (num > 15) {
+        fdf::error("Invalid SGI interrupt number {}", num);
+        return zx::error(ZX_ERR_INVALID_ARGS);
+      }
+      return zx::ok(num);
+    }
+    fdf::error("Invalid interrupt type {}", type());
+    return zx::error(ZX_ERR_INVALID_ARGS);
   }
 
   // 3rd cell contains the flags.
   //     bits[3:0] contains trigger type and level.
   //        1 = low-to-high edge triggered
-  //        2 = high-to-low edge triggered (invalid for SPI)
-  //        4 = active high level-sensitive
-  //        8 = active low level-sensitive (invalid for SPI).
-  zx::result<fuchsia_hardware_platform_bus::ZirconInterruptMode> mode() {
-    uint64_t mode = *interrupt_cells_[0][2];
+  //        2 = high-to-low edge triggered (invalid for SPI and SGI)
+  //        4 = active high level-sensitive (invalid for SGI)
+  //        8 = active low level-sensitive (invalid for SPI and SGI).
+  zx::result<fuchsia_hardware_platform_bus::ZirconInterruptMode> mode() const {
+    auto cell = interrupt_cells_[0][2];
+    if (!cell.has_value()) {
+      return zx::error(ZX_ERR_INVALID_ARGS);
+    }
+    uint64_t mode = *cell;
+    if (is_sgi() && (mode & kModeMask) != GIC_IRQ_MODE_EDGE_RISING) {
+      fdf::error("Non-edge-rising mode {} not supported for SGI interrupt", mode & kModeMask);
+      return zx::error(ZX_ERR_INVALID_ARGS);
+    }
     switch (mode & kModeMask) {
       case GIC_IRQ_MODE_EDGE_RISING:
         return zx::ok(fuchsia_hardware_platform_bus::ZirconInterruptMode::kEdgeHigh);
@@ -152,6 +182,10 @@ zx::result<> ArmGicVisitor::Visit(fdf_devicetree::Node& node,
     return zx::ok();
   }
 
+  auto status_property = node.GetProperty<std::string>("status");
+  const bool is_enabled =
+      !status_property.is_ok() || *status_property == "okay" || *status_property == "ok";
+
   auto interrupt_names =
       properties->Get<std::vector<std::string>>(fdf_devicetree::InterruptParser::kInterruptNames);
   auto wake_vector_names = properties->Get<std::vector<std::string>>(
@@ -182,7 +216,7 @@ zx::result<> ArmGicVisitor::Visit(fdf_devicetree::Node& node,
       name = (*interrupt_names)[i];
     }
 
-    zx::result result = ParseInterrupt(node.name(), parent, cells, name);
+    zx::result result = ParseInterrupt(node.name(), is_enabled, parent, cells, name);
     if (result.is_error()) {
       return result.take_error();
     }
@@ -203,7 +237,7 @@ zx::result<> ArmGicVisitor::Visit(fdf_devicetree::Node& node,
   return zx::ok();
 }
 
-zx::result<fpbus::Irq> ArmGicVisitor::ParseInterrupt(const std::string& node_name,
+zx::result<fpbus::Irq> ArmGicVisitor::ParseInterrupt(const std::string& node_name, bool is_enabled,
                                                      fdf_devicetree::ReferenceNode& parent,
                                                      fdf_devicetree::PropertyCells interrupt_cells,
                                                      std::optional<std::string> interrupt_name) {
@@ -232,16 +266,39 @@ zx::result<fpbus::Irq> ArmGicVisitor::ParseInterrupt(const std::string& node_nam
   // Both GIC V2 and V3 share the same cell specifiers for the first 3 cells.
   auto interrupt = InterruptPropertyV2(interrupt_cells.first(3 * sizeof(uint32_t)));
 
+  if (interrupt.is_sgi() && IsArmGicV1V2(compatible_strings)) {
+    fdf::error("SGI interrupts are not supported on GICv1/v2 interrupt controller in node '{}'",
+               node_name);
+    return zx::error(ZX_ERR_NOT_SUPPORTED);
+  }
+
+  zx::result<uint32_t> irq_num = interrupt.irq();
+  if (irq_num.is_error()) {
+    fdf::error("Failed to parse irq number for node '{}' - {}", node_name, irq_num);
+    return irq_num.take_error();
+  }
+
   zx::result mode = interrupt.mode();
   if (mode.is_error()) {
-    fdf::error("Failed to parse mode for interrupt {} of node '{}' - {}", interrupt.irq(),
-               node_name, mode);
+    fdf::error("Failed to parse mode for interrupt {} of node '{}' - {}", *irq_num, node_name,
+               mode);
 
     return mode.take_error();
   }
 
+  if (interrupt.is_sgi() && is_enabled) {
+    auto [it, inserted] = assigned_sgis_.emplace(*irq_num, node_name);
+    if (!inserted) {
+      fdf::error(
+          "SGI interrupt {} in node '{}' is already claimed by node '{}'. "
+          "SGI capabilities are exclusive and cannot be shared across multiple drivers.",
+          *irq_num, node_name, it->second);
+      return zx::error(ZX_ERR_ALREADY_BOUND);
+    }
+  }
+
   fpbus::Irq irq = {{
-      .irq = fpbus::IrqSpec::WithIrq(interrupt.irq()),
+      .irq = fpbus::IrqSpec::WithIrq(*irq_num),
       .mode = *mode,
       .name = std::move(interrupt_name),
       .wake_vector = false,

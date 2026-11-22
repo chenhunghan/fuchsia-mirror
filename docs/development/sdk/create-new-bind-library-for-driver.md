@@ -255,7 +255,7 @@ However, the differences are as follows:
 [bazel]: https://bazel.build/
 [sdk-driver-sample-repo]: https://fuchsia.googlesource.com/sdk-samples/drivers/+/refs/heads/main/src/bind_library/
 [bind-rules]: /docs/concepts/drivers/driver_binding.md
-[node-properties]: /docs/concepts/drivers/drivers_and_nodes.md#node_properties
+[node-properties]: /docs/concepts/drivers/drivers_and_nodes.md#node-attributes
 [nodes]: /docs/concepts/drivers/drivers_and_nodes.md
 [bind-library]: /docs/development/drivers/concepts/device_driver_model/driver-binding.md#bind-libraries
 [test-library-bind]: https://fuchsia.googlesource.com/sdk-samples/drivers/+/refs/heads/main/src/bind_library/lib/testlibrary.bind

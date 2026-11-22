@@ -1,0 +1,75 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component",
+    "fx_component_manifest",
+)
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/rust:rustc_binary.bzl", "rustc_binary")
+
+package(default_applicable_licenses = ["//:license"])
+
+rustc_binary(
+    name = "bin",
+    testonly = True,
+    srcs = ["src/main.rs"],
+    binary_name = "pkgdir",
+    edition = "2024",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//sdk/fidl/fuchsia.io:fuchsia.io_rust",
+        "//sdk/fidl/fuchsia.storage.block:fuchsia.storage.block_rust",
+        "//sdk/rust/zx",
+        "//src/lib/fidl/rust/fidl",
+        "//src/lib/fuchsia",
+        "//src/lib/fuchsia-component",
+        "//src/lib/trace/rust:trace-provider",
+        "//src/storage/benchmarks/fuchsia/pkgdir-component/fidl/test.pkgdir:test.pkgdir_rust",
+        "//src/storage/fidl/fuchsia.storage.mapping:fuchsia.storage.mapping_rust",
+        "//src/storage/lib/blob_pager_and_verifier",
+        "//src/sys/pkg/lib/blobfs",
+        "//src/sys/pkg/lib/fuchsia-hash",
+        "//src/sys/pkg/lib/package-directory",
+        "//third_party/rust_crates/vendor:anyhow",
+        "//third_party/rust_crates/vendor:futures",
+        "//third_party/rust_crates/vendor:log",
+    ],
+)
+
+fx_packaged_binary(
+    name = "pkgdir_packaged_bin",
+    testonly = True,
+    binary = ":bin",
+    binary_name = "pkgdir",
+)
+
+fx_component_manifest(
+    name = "manifest",
+    component_name = "pkgdir-component",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/storage/lib/fs_management:client.shard.cml",
+    ],
+    manifest = "meta/pkgdir_component.cml",
+)
+
+fx_component(
+    name = "component",
+    testonly = True,
+    compiled_manifest = ":manifest",
+    visibility = ["//visibility:private"],
+    deps = [":pkgdir_packaged_bin"],
+)
+
+alias(
+    name = "production-component-and-config",
+    testonly = True,
+    actual = ":component",
+    visibility = ["//src/storage/benchmarks/fuchsia:__pkg__"],
+)

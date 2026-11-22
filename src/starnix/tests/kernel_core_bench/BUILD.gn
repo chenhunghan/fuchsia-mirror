@@ -15,11 +15,9 @@ group("benchmarks") {
   testonly = true
 }
 
-fuchsia_package_with_single_component("pkg") {
+fuchsia_package("pkg") {
   package_name = "starnix_kernel_core_bench"
-  component_name = "starnix_kernel_core_bench"
-  manifest = "meta/benchmarks.cml"
-  deps = [ ":bin" ]
+  deps = [ ":component" ]
   testonly = true
 }
 
@@ -60,4 +58,18 @@ rustc_binary("bin") {
     "//src/lib/fuchsia-runtime",
     "//src/starnix/kernel/core",
   ]
+}
+
+fuchsia_component_manifest("component_manifest") {
+  testonly = true
+  component_name = "starnix_kernel_core_bench"
+  manifest = "meta/benchmarks.cml"
+  visibility = [ ":*" ]
+}
+
+fuchsia_component("component") {
+  testonly = true
+  cm_label = ":component_manifest"
+  visibility = [ ":*" ]
+  deps = [ ":bin" ]
 }

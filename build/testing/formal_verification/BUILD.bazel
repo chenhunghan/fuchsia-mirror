@@ -1,0 +1,73 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules/host_tests:host_py_test.bzl", "host_py_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+_VERIFICATION_LIB_SRCS = [
+    "extraction.py",
+    "lake_audit.py",
+]
+
+py_binary(
+    name = "verify",
+    srcs = ["verify.py"] + _VERIFICATION_LIB_SRCS,
+    imports = ["."],
+    main = "verify.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//:__subpackages__"],
+)
+
+host_py_test(
+    name = "extraction_test",
+    srcs = [
+        "extraction.py",
+        "extraction_test.py",
+    ],
+    imports = ["."],
+    main = "extraction_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build:__pkg__"],
+)
+
+host_py_test(
+    name = "lake_audit_test",
+    srcs = [
+        "extraction.py",
+        "lake_audit.py",
+        "lake_audit_test.py",
+    ],
+    imports = ["."],
+    main = "lake_audit_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build:__pkg__"],
+)
+
+host_py_test(
+    name = "verify_test",
+    srcs = [
+        "extraction.py",
+        "lake_audit.py",
+        "verify.py",
+        "verify_test.py",
+    ],
+    imports = ["."],
+    main = "verify_test.py",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = ["//build:__pkg__"],
+)
+
+test_suite(
+    name = "host_tests",
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    tests = [
+        ":extraction_test",
+        ":lake_audit_test",
+        ":verify_test",
+    ],
+    visibility = ["//build:__pkg__"],
+)

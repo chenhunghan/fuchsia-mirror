@@ -21,7 +21,7 @@
     {
       "name": "test.emptystruct/EmptyProtocol",
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
         "line": 5,
         "column": 17,
         "length": 13
@@ -36,7 +36,7 @@
           "name": "Send",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 6,
             "column": 12,
             "length": 4
@@ -67,7 +67,7 @@
           "name": "Receive",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 9,
             "column": 15,
             "length": 7
@@ -98,7 +98,7 @@
           "name": "SendAndReceive",
           "strict": true,
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 12,
             "column": 12,
             "length": 14
@@ -148,7 +148,7 @@
         "Empty"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
         "line": 3,
         "column": 6,
         "length": 5
@@ -175,7 +175,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
         "line": 9,
         "column": 23,
         "length": 31
@@ -199,7 +199,7 @@
           },
           "name": "e",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 10,
             "column": 9,
             "length": 1
@@ -231,7 +231,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
         "line": 12,
         "column": 27,
         "length": 31
@@ -255,7 +255,7 @@
           },
           "name": "e",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 13,
             "column": 9,
             "length": 1
@@ -287,7 +287,7 @@
         "Response"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
         "line": 14,
         "column": 12,
         "length": 31
@@ -311,7 +311,7 @@
           },
           "name": "e",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 15,
             "column": 9,
             "length": 1
@@ -343,7 +343,7 @@
         "Request"
       ],
       "location": {
-        "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+        "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
         "line": 6,
         "column": 17,
         "length": 31
@@ -367,7 +367,7 @@
           },
           "name": "e",
           "location": {
-            "filename": "../../tools/fidl/fidlc/testdata/empty_struct.test.fidl",
+            "filename": "tools/fidl/fidlc/testdata/empty_struct.test.fidl",
             "line": 7,
             "column": 9,
             "length": 1

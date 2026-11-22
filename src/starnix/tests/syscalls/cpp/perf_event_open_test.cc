@@ -567,7 +567,7 @@ perf_event_attr example_sampling_attr(uint64_t sample_type) {
   return attr;
 }
 
-// TODO(https://fxbug.dev/398914921): The Linux version of this test will fail because
+// TODO(https://fxbug.dev/377907132): The Linux version of this test will fail because
 // we are currently testing against semi-hardcoded values in the Starnix implementation.
 // Use better EXPECT statements when we grab real values.
 //
@@ -743,7 +743,7 @@ TEST(PerfEventOpenTest, MmapMetadataPageIsValid) {
   }
 }
 
-// TODO(https://fxbug.dev/398914921): The Linux version of this test will fail because
+// TODO(https://fxbug.dev/377907132): The Linux version of this test will fail because
 // we are currently testing against semi-hardcoded values in the Starnix implementation.
 // Use better EXPECT statements when we grab real values.
 TEST(PerfEventOpenTest, MmapFirstRecordPageIsValid) {
@@ -1229,7 +1229,8 @@ TEST_F(PerfEventParanoidTest, DefaultIsTwo) {
 }
 
 TEST_F(PerfEventParanoidTest, WriteAndReadBack) {
-  test_helper::ScopedPerfEventParanoid restore(2);
+  auto restore = test_helper::ScopedSysctl::PerfEventParanoid(2);
+  ASSERT_THAT(restore, SyscallResultIsOk());
   for (int value : {-1, 0, 1, 3, 2}) {
     ASSERT_TRUE(files::WriteFile(test_helper::kPerfEventParanoidPath, std::to_string(value)))
         << strerror(errno);
@@ -1243,7 +1244,8 @@ TEST_F(PerfEventParanoidTest, WriteAndReadBack) {
 }
 
 TEST_F(PerfEventParanoidTest, MinusOneAllowsEventsWithoutCapabilities) {
-  test_helper::ScopedPerfEventParanoid paranoid(-1);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(-1);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   RunWithoutCapabilities([] {
     for (bool all_tasks : {false, true}) {
       for (bool exclude_kernel : {false, true}) {
@@ -1259,7 +1261,8 @@ TEST_F(PerfEventParanoidTest, MinusOneAllowsEventsWithoutCapabilities) {
 }
 
 TEST_F(PerfEventParanoidTest, ZeroRequiresCapabilityForTracepoints) {
-  test_helper::ScopedPerfEventParanoid paranoid(0);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(0);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   RunWithoutCapabilities([] {
     for (bool all_tasks : {false, true}) {
       for (bool exclude_kernel : {false, true}) {
@@ -1281,13 +1284,14 @@ TEST_F(PerfEventParanoidTest, ZeroRequiresCapabilityForTracepoints) {
 }
 
 TEST_F(PerfEventParanoidTest, OneRequiresCapabilityForCpuWideEvents) {
-  test_helper::ScopedPerfEventParanoid paranoid(1);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(1);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   RunWithoutCapabilities([] {
     for (bool exclude_kernel : {false, true}) {
       EXPECT_THAT(TrySoftwareEvent(/*all_tasks=*/true, exclude_kernel),
                   SyscallFailsWithErrno(EACCES))
           << "exclude_kernel=" << exclude_kernel;
-      // Starnix samples job-wide regardless of the target (https://fxbug.dev/398914921), so it
+      // Starnix samples job-wide regardless of the target (https://fxbug.dev/427246425), so it
       // also requires the capability for events on the calling task.
       if (test_helper::IsStarnix()) {
         EXPECT_THAT(TrySoftwareEvent(/*all_tasks=*/false, exclude_kernel),
@@ -1299,7 +1303,8 @@ TEST_F(PerfEventParanoidTest, OneRequiresCapabilityForCpuWideEvents) {
 }
 
 TEST_F(PerfEventParanoidTest, TwoRequiresCapability) {
-  test_helper::ScopedPerfEventParanoid paranoid(2);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(2);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   RunWithoutCapabilities([] {
     EXPECT_THAT(TrySoftwareEvent(/*all_tasks=*/true, /*exclude_kernel=*/false),
                 SyscallFailsWithErrno(EACCES));
@@ -1308,7 +1313,7 @@ TEST_F(PerfEventParanoidTest, TwoRequiresCapability) {
     EXPECT_THAT(TrySoftwareEvent(/*all_tasks=*/false, /*exclude_kernel=*/false),
                 SyscallFailsWithErrno(EACCES));
     if (test_helper::IsStarnix()) {
-      // Starnix samples job-wide regardless of the target (https://fxbug.dev/398914921), so it
+      // Starnix samples job-wide regardless of the target (https://fxbug.dev/427246425), so it
       // also requires the capability for events on the calling task.
       EXPECT_THAT(TrySoftwareEvent(/*all_tasks=*/false, /*exclude_kernel=*/true),
                   SyscallFailsWithErrno(EACCES));
@@ -1325,7 +1330,8 @@ TEST_F(PerfEventParanoidTest, TwoRequiresCapability) {
 }
 
 TEST_F(PerfEventParanoidTest, PerfmonOrSysAdminAllowsEvents) {
-  test_helper::ScopedPerfEventParanoid paranoid(2);
+  auto paranoid = test_helper::ScopedSysctl::PerfEventParanoid(2);
+  ASSERT_THAT(paranoid, SyscallResultIsOk());
   for (int dropped_cap : {CAP_PERFMON, CAP_SYS_ADMIN}) {
     test_helper::ForkHelper helper;
     helper.RunInForkedProcess([&] {

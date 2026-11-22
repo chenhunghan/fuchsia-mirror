@@ -5,76 +5,38 @@
 // https://opensource.org/licenses/MIT
 
 use super::KernelHandle;
-use super::bti::Bti;
 use super::bus_transaction_initiator_dispatcher::{
     BusTransactionInitiatorDispatcher, BusTransactionInitiatorDispatcherState,
 };
-use super::iommu::Iommu;
+use super::dispatcher::impl_dispatcher_state_init;
+use crate::iommu::Bti;
 use core::mem::MaybeUninit;
-use fbl::RefPtr;
-use zx_types::zx_status_t;
+use zx_status::Status;
+use zx_types::{ZX_MAX_NAME_LEN, zx_status_t};
 
-// C++ FFI declarations
+#[allow(improper_ctypes)]
 unsafe extern "C" {
-    pub(crate) fn cpp_bti_recycle(bti: *mut Bti);
-    pub(crate) fn cpp_bti_get_ref_counted(bti: *mut Bti) -> *mut ();
-    pub(crate) fn cpp_bti_release_quarantine(bti: *mut Bti);
-    pub(crate) fn cpp_bti_on_dispatcher_zero_handles(bti: *mut Bti);
-    pub(crate) fn cpp_bti_minimum_contiguity(bti: *const Bti) -> u64;
-    pub(crate) fn cpp_bti_aspace_size(bti: *const Bti) -> u64;
-    pub(crate) fn cpp_bti_pmo_count(bti: *const Bti) -> u64;
-    pub(crate) fn cpp_bti_quarantine_count(bti: *const Bti) -> u64;
-    pub(crate) fn cpp_bti_in_fault_state(bti: *const Bti) -> bool;
-
+    /// Allocates and initializes a new `BusTransactionInitiatorDispatcher` via C++
+    /// `KernelHandle`, writing the resulting handle to `handle_out` on `ZX_OK`.
+    ///
+    /// On any status other than `ZX_OK`, no dispatcher has been constructed, `bti` has not been
+    /// retained, and `handle_out` is left uninitialized.
+    ///
+    /// # Safety
+    ///
+    /// `bti` must be a valid reference for the duration of the call, and `handle_out` must
+    /// point to valid, aligned, writable uninitialized storage.
     pub(crate) fn cpp_bus_transaction_initiator_dispatcher_create(
-        iommu: *const Iommu,
-        bti_id: u64,
+        bti: &Bti,
         handle_out: *mut MaybeUninit<KernelHandle<BusTransactionInitiatorDispatcher>>,
     ) -> zx_status_t;
-
-    // PinnedVmObject contains Option<RefPtr<VmObject>>, which rustc warns about
-    // for FFI despite matching C++ PinnedVmObject layout (verified by static assertions).
-    #[allow(improper_ctypes)]
-    pub(crate) fn cpp_bti_map(
-        bti: *mut Bti,
-        pinned_vmo: *mut crate::vm::pinned_vm_object::PinnedVmObject,
-        perms: u32,
-        require_contiguous: bool,
-        pmt_out: *mut MaybeUninit<RefPtr<super::pmt::Pmt>>,
-    ) -> zx_status_t;
 }
 
-// Rust FFI trampolines for C++ calling into Rust BusTransactionInitiatorDispatcher
-
-/// Initializes a `BusTransactionInitiatorDispatcherState` in-place.
-///
-/// # Safety
-///
-/// `state` must point to valid uninitialized memory for `BusTransactionInitiatorDispatcherState`.
-/// `bti_raw` must be a valid raw pointer exported from an `fbl::RefPtr<Bti>`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rust_bus_transaction_initiator_dispatcher_state_init(
-    state: *mut BusTransactionInitiatorDispatcherState,
-    dispatcher: *const BusTransactionInitiatorDispatcher,
-    bti_raw: *mut Bti,
-) {
-    // SAFETY: `bti_raw` is a valid raw pointer exported from `fbl::RefPtr<Bti>`.
-    let bti = unsafe { RefPtr::from_raw(bti_raw) };
-    let init = BusTransactionInitiatorDispatcherState::init(dispatcher, bti);
-    // SAFETY: `state` points to uninitialized memory allocated for
-    // `BusTransactionInitiatorDispatcherState`.
-    unsafe {
-        let _ = pin_init::PinInit::__pinned_init(init, state);
-    }
-}
-
-/// Returns the raw pointer to the underlying C++ `iommu::Bti` object.
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_bus_transaction_initiator_dispatcher_get_bti(
-    disp: &BusTransactionInitiatorDispatcher,
-) -> *mut Bti {
-    disp.bti().as_ffi_mut()
-}
+impl_dispatcher_state_init!(
+    BusTransactionInitiatorDispatcher,
+    BusTransactionInitiatorDispatcherState,
+    bti: &Bti,
+);
 
 /// Called when all handles to the dispatcher are closed.
 #[unsafe(no_mangle)]
@@ -82,4 +44,42 @@ pub extern "C" fn rust_bus_transaction_initiator_dispatcher_on_zero_handles(
     disp: &BusTransactionInitiatorDispatcher,
 ) {
     disp.on_zero_handles();
+}
+
+/// Sets the debug name of the BTI dispatcher.
+///
+/// # Safety
+///
+/// If `len > 0`, `name` must point to at least `len` initialized bytes within a single allocated
+/// object, and those bytes must remain valid for reads and not be mutated for the duration of this
+/// call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_bus_transaction_initiator_dispatcher_set_name(
+    disp: &BusTransactionInitiatorDispatcher,
+    name: *const core::ffi::c_char,
+    len: usize,
+) -> zx_status_t {
+    // SAFETY: Caller guarantees `name` is valid for `len` initialized bytes within a single
+    // allocation and unmutated for the duration of this call when `len > 0`.
+    let slice = unsafe { zr::slice_from_raw_parts(name.cast::<u8>(), len) };
+    Status::result_into_raw(disp.set_name(slice))
+}
+
+/// Gets the debug name of the BTI dispatcher.
+///
+/// # Safety
+///
+/// `out_name` must be a valid, aligned, writable pointer to `ZX_MAX_NAME_LEN` bytes (which may be
+/// uninitialized) with exclusive write access for the duration of this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rust_bus_transaction_initiator_dispatcher_get_name(
+    disp: &BusTransactionInitiatorDispatcher,
+    out_name: *mut [u8; ZX_MAX_NAME_LEN],
+) -> zx_status_t {
+    let mut buf = [0u8; ZX_MAX_NAME_LEN];
+    Status::result_into_raw(disp.get_name(&mut buf).map(|()| {
+        // SAFETY: Caller guarantees `out_name` is valid, aligned, and writable for
+        // `ZX_MAX_NAME_LEN` bytes for the duration of this call.
+        unsafe { out_name.write(buf) };
+    }))
 }

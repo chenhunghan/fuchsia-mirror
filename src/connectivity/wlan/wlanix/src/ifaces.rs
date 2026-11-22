@@ -410,15 +410,77 @@ pub(crate) trait ClientIface: Sync + Send {
     fn update_last_scan_results(&self, results: Vec<fidl_sme::ScanResult>);
 }
 
-#[derive(Debug, Clone)]
-struct LastScanResults {
-    timestamp: fasync::BootInstant,
-    results: Vec<fidl_sme::ScanResult>,
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CachedBss {
+    pub last_seen: fasync::BootInstant,
+    pub result: fidl_sme::ScanResult,
 }
 
-impl LastScanResults {
-    fn new(timestamp: fasync::BootInstant, results: Vec<fidl_sme::ScanResult>) -> Self {
-        Self { timestamp, results }
+/// Cache of recently observed BSS entries from scan results.
+///
+/// This cache serves two primary purposes:
+/// 1. Allows `connect_to_network` (and OWE transition) to locate target BSS configuration
+///    (channel, security, etc.) after a scan without needing to re-scan if the network
+///    was recently observed.
+/// 2. Accumulates scan results across channels for nl80211 `GetScan` dumps.
+///
+/// Pruning lifecycle:
+/// - During `update()`, if the elapsed time since the previous scan exceeds `SCAN_CACHE_AGE_LIMIT`,
+///   the entire cache is dropped immediately.
+/// - During `get_valid_results()` and `get_valid_bss()`, entries older than `SCAN_CACHE_AGE_LIMIT`
+///   relative to `now` are pruned in-place.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ScanCache {
+    bss_map: HashMap<Bssid, CachedBss>,
+    last_scan_time: Option<fasync::BootInstant>,
+}
+
+impl ScanCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn update(&mut self, timestamp: fasync::BootInstant, results: Vec<fidl_sme::ScanResult>) {
+        if let Some(last_time) = self.last_scan_time {
+            if timestamp - last_time > SCAN_CACHE_AGE_LIMIT {
+                self.bss_map.clear();
+            }
+        }
+        self.last_scan_time = Some(timestamp);
+
+        let timestamp_nanos = timestamp.into_nanos();
+        self.bss_map.extend(results.into_iter().map(|mut result| {
+            let bssid = Bssid::from(result.bss_description.bssid);
+            result.timestamp_nanos = timestamp_nanos;
+            (bssid, CachedBss { last_seen: timestamp, result })
+        }));
+    }
+
+    pub fn get_valid_results(&mut self, now: fasync::BootInstant) -> Vec<fidl_sme::ScanResult> {
+        self.bss_map.retain(|_, cached| now - cached.last_seen <= SCAN_CACHE_AGE_LIMIT);
+        self.bss_map.values().map(|cached| cached.result.clone()).collect()
+    }
+
+    pub fn get_valid_bss(
+        &mut self,
+        now: fasync::BootInstant,
+        bssid: &Bssid,
+    ) -> Option<fidl_sme::ScanResult> {
+        match self.bss_map.get(bssid) {
+            Some(cached) => {
+                if now - cached.last_seen <= SCAN_CACHE_AGE_LIMIT {
+                    Some(cached.result.clone())
+                } else {
+                    self.bss_map.remove(bssid);
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
+    pub fn last_scan_time(&self) -> Option<fasync::BootInstant> {
+        self.last_scan_time
     }
 }
 
@@ -429,7 +491,7 @@ pub(crate) struct SmeClientIface {
     monitor_svc: fidl_device_service::DeviceMonitorProxy,
     sme_proxy: fidl_sme::ClientSmeProxy,
     telemetry_proxy: fidl_sme::TelemetryProxy,
-    last_scan_results: Arc<Mutex<Option<LastScanResults>>>,
+    last_scan_results: Arc<Mutex<ScanCache>>,
     scan_abort_signal: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     connected_network: Arc<Mutex<Option<ConnectedNetwork>>>,
     // TODO(b/298030838): Remove unmanaged iface support when wlanix is the sole config path.
@@ -488,7 +550,7 @@ impl SmeClientIface {
             sme_proxy,
             telemetry_proxy,
             monitor_svc,
-            last_scan_results: Arc::new(Mutex::new(None)),
+            last_scan_results: Arc::new(Mutex::new(ScanCache::new())),
             scan_abort_signal: Arc::new(Mutex::new(None)),
             connected_network: Arc::new(Mutex::new(None)),
             wlanix_provisioned: true,
@@ -574,24 +636,19 @@ impl SmeClientIface {
         // Look for the BSSID and SSID of the BSS's OWE transition IE.
         let owe_ie = bss.owe_transition().context("Failed to parse OWE transition IE")?;
 
-        // Look for the OWE BSS in the recent scan results where the OWE transition BSS was seen:
-        // look for the BSSID of the transition IE.
-        let found_bss = self.last_scan_results.lock().clone().and_then(|scan_results| {
-            scan_results.results.into_iter().find_map(|r| {
-                let bss_desc = BssDescription::try_from(r.bss_description).ok()?;
-                let bssid_matches = bss_desc.bssid == owe_ie.bssid;
-                if bssid_matches {
-                    if bss_desc.has_owe_configured() {
-                        Some(bss_desc)
-                    } else {
+        // Look for the OWE BSS in the recent scan results where the OWE transition BSS was seen.
+        let now = fasync::BootInstant::now();
+        let found_bss =
+            self.last_scan_results.lock().get_valid_bss(now, &owe_ie.bssid).and_then(|r| {
+                match BssDescription::try_from(r.bss_description) {
+                    Ok(desc) if desc.has_owe_configured() => Some(desc),
+                    Ok(_) => {
                         info!("Matching OWE transition BSSID found but it's not OWE, ignoring");
                         None
                     }
-                } else {
-                    None
+                    Err(_) => None,
                 }
-            })
-        });
+            });
 
         // If the OWE BSS was seen and has a good enough RSSI, only scan on that channel. Otherwise
         // scan on all channels to find the best OWE BSS in case there are multiple. Don't scan on
@@ -616,17 +673,17 @@ impl SmeClientIface {
 
         self.trigger_scan(Some(&owe_ie.ssid), scan_channels).await?;
 
-        let last_scan_results = self
-            .last_scan_results
-            .lock()
-            .clone()
-            .ok_or_else(|| format_err!("No scan results after active scan"))?;
+        let now = fasync::BootInstant::now();
+        let last_scan_results = self.last_scan_results.lock().get_valid_results(now);
+        if last_scan_results.is_empty() {
+            bail!("No scan results after active scan");
+        }
 
         find_matching_network_in_scan(
             &owe_ie.ssid,
             &None,
             &Some(fidl_wlanix::KeyMgmtMask::OWE),
-            last_scan_results.results,
+            last_scan_results,
             &self.bss_scorer,
         )
         .map(|(bss, _)| bss)
@@ -645,8 +702,7 @@ impl ClientIface for SmeClientIface {
     }
 
     fn update_last_scan_results(&self, results: Vec<fidl_sme::ScanResult>) {
-        *self.last_scan_results.lock() =
-            Some(LastScanResults::new(fasync::BootInstant::now(), results));
+        self.last_scan_results.lock().update(fasync::BootInstant::now(), results);
     }
 
     /// Trigger a scan with the given SSID and channels.
@@ -687,10 +743,10 @@ impl ClientIface for SmeClientIface {
                     }
                 };
                 info!("Got scan results from SME.");
-                *self.last_scan_results.lock() = Some(LastScanResults::new(
+                self.last_scan_results.lock().update(
                     fasync::BootInstant::now(),
                     wlan_common::scan::read_vmo(scan_result_vmo)?
-                ));
+                );
                 self.scan_abort_signal.lock().take();
                 Ok(ScanEnd::Complete)
             }
@@ -711,7 +767,7 @@ impl ClientIface for SmeClientIface {
     }
 
     fn get_last_scan_results(&self) -> Vec<fidl_sme::ScanResult> {
-        self.last_scan_results.lock().clone().map(|r| r.results).unwrap_or_default()
+        self.last_scan_results.lock().get_valid_results(fasync::BootInstant::now())
     }
 
     async fn connect_to_network(
@@ -722,8 +778,8 @@ impl ClientIface for SmeClientIface {
         key_mgmt: Option<fidl_wlanix::KeyMgmtMask>,
     ) -> Result<ConnectResult, Error> {
         // Sometimes a connect request is sent before the first scan.
-        let refresh_scan = match &*self.last_scan_results.lock() {
-            Some(r) => fasync::BootInstant::now() - r.timestamp > SCAN_CACHE_AGE_LIMIT,
+        let refresh_scan = match self.last_scan_results.lock().last_scan_time() {
+            Some(t) => fasync::BootInstant::now() - t > SCAN_CACHE_AGE_LIMIT,
             None => true,
         };
         if refresh_scan {
@@ -735,10 +791,11 @@ impl ClientIface for SmeClientIface {
             }
         }
 
-        let last_scan_results = match self.last_scan_results.lock().clone() {
-            Some(scan_results) => scan_results.results,
-            None => bail!("No scan results available for connect attempt"),
-        };
+        let last_scan_results =
+            self.last_scan_results.lock().get_valid_results(fasync::BootInstant::now());
+        if last_scan_results.is_empty() {
+            bail!("No scan results available for connect attempt");
+        }
         info!("Checking for network in last scan: {} access points", last_scan_results.len());
         let chosen_scan = find_matching_network_in_scan(
             ssid,
@@ -1165,7 +1222,7 @@ async fn wait_for_connect_result(
             .await
             .map_err(|e| format_err!("Failed to receive connect result from sme: {:?}", e))?
         {
-            Some(fidl_sme::ConnectTransactionEvent::OnConnectResult { result }) => {
+            Some(fidl_sme::ConnectTransactionEvent::OnConnectResult { result, .. }) => {
                 return Ok(result);
             }
             Some(other) => {
@@ -1270,7 +1327,9 @@ pub mod test_utils {
     #[derive(Debug, Clone)]
     pub enum ClientIfaceCall {
         Query,
-        TriggerScan,
+        TriggerScan {
+            channels: Vec<u8>,
+        },
         AbortScan,
         GetLastScanResults,
         #[expect(dead_code)]
@@ -1374,9 +1433,9 @@ pub mod test_utils {
         async fn trigger_scan(
             &self,
             _ssid: Option<&Ssid>,
-            _channels: Vec<u8>,
+            channels: Vec<u8>,
         ) -> Result<ScanEnd, Error> {
-            self.calls.lock().push(ClientIfaceCall::TriggerScan);
+            self.calls.lock().push(ClientIfaceCall::TriggerScan { channels });
             let scan_end_receiver = self.scan_end_receiver.lock().take();
             match scan_end_receiver {
                 Some(receiver) => receiver.await.expect("scan_end_signal failed"),
@@ -1962,7 +2021,7 @@ mod tests {
             sme_proxy,
             telemetry_proxy,
             monitor_svc,
-            last_scan_results: Arc::new(Mutex::new(None)),
+            last_scan_results: Arc::new(Mutex::new(ScanCache::new())),
             scan_abort_signal: Arc::new(Mutex::new(None)),
             connected_network: Arc::new(Mutex::new(None)),
             wlanix_provisioned: true,
@@ -2244,7 +2303,7 @@ mod tests {
             sme_proxy,
             telemetry_proxy: fidl::endpoints::create_proxy::<fidl_sme::TelemetryMarker>().0,
             monitor_svc,
-            last_scan_results: Arc::new(Mutex::new(None)),
+            last_scan_results: Arc::new(Mutex::new(ScanCache::new())),
             scan_abort_signal: Arc::new(Mutex::new(None)),
             connected_network: Arc::new(Mutex::new(None)),
             wlanix_provisioned: false, // set to false for this test
@@ -2626,16 +2685,13 @@ mod tests {
             rssi_dbm: -30,
             snr_db: 22,
         );
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
-            vec![fidl_sme::ScanResult {
-                bss_description: bss_description.clone(),
-                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                    mutual_security_protocols,
-                }),
-                timestamp_nanos: 1,
-            }],
-        ));
+        test_values.iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+            bss_description: bss_description.clone(),
+            compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                mutual_security_protocols,
+            }),
+            timestamp_nanos: 1,
+        }]);
 
         assert_matches!(test_values.iface.get_connected_network(), None);
 
@@ -2649,11 +2705,14 @@ mod tests {
         assert_eq!(req.authentication, expected_authentication);
 
         let connect_txn_handle = connect_txn.into_stream_and_control_handle().1;
-        let result = connect_txn_handle.send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_ieee80211::StatusCode::Success,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        });
+        let result = connect_txn_handle.send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        );
         assert_matches!(result, Ok(()));
 
         let connect_result = assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Ready(r) => r);
@@ -2735,28 +2794,25 @@ mod tests {
 
         // Build scan results that contain the transition and OWE BSSs and set the scan cache; the
         // connect process will use these scan results.
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
-            vec![
-                fidl_sme::ScanResult {
-                    bss_description: transition_bss.clone(),
-                    compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                        mutual_security_protocols: vec![
-                            fidl_security::Protocol::Open,
-                            fidl_security::Protocol::Owe,
-                        ],
-                    }),
-                    timestamp_nanos: 1,
-                },
-                fidl_sme::ScanResult {
-                    bss_description: hidden_owe_bss.clone(),
-                    compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                        mutual_security_protocols: vec![fidl_security::Protocol::Owe],
-                    }),
-                    timestamp_nanos: 1,
-                },
-            ],
-        ));
+        test_values.iface.update_last_scan_results(vec![
+            fidl_sme::ScanResult {
+                bss_description: transition_bss.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![
+                        fidl_security::Protocol::Open,
+                        fidl_security::Protocol::Owe,
+                    ],
+                }),
+                timestamp_nanos: 1,
+            },
+            fidl_sme::ScanResult {
+                bss_description: hidden_owe_bss.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Owe],
+                }),
+                timestamp_nanos: 1,
+            },
+        ]);
 
         // Initiate a connect request to the OWE transition network, which should use the
         // transition SSID and result in a connection to the OWE BSS.
@@ -2802,11 +2858,14 @@ mod tests {
 
         let connect_txn_handle = connect_txn.unwrap().into_stream_and_control_handle().1;
         connect_txn_handle
-            .send_on_connect_result(&fidl_sme::ConnectResult {
-                code: fidl_ieee80211::StatusCode::Success,
-                is_credential_rejected: false,
-                is_reconnect: false,
-            })
+            .send_on_connect_result(
+                &fidl_sme::ConnectResult {
+                    code: fidl_ieee80211::StatusCode::Success,
+                    is_credential_rejected: false,
+                    is_reconnect: false,
+                },
+                None,
+            )
             .unwrap();
 
         let connect_result = test_values.exec.run_singlethreaded(&mut connect_fut).unwrap();
@@ -2903,28 +2962,25 @@ mod tests {
 
         // Build scan results that contain the transition and OWE BSSs and set the scan cache; the
         // connect process will use these scan results.
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
-            vec![
-                fidl_sme::ScanResult {
-                    bss_description: transition_bss.clone(),
-                    compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                        mutual_security_protocols: vec![
-                            fidl_security::Protocol::Open,
-                            fidl_security::Protocol::Owe,
-                        ],
-                    }),
-                    timestamp_nanos: 1,
-                },
-                fidl_sme::ScanResult {
-                    bss_description: hidden_owe_bss.clone(),
-                    compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                        mutual_security_protocols: vec![fidl_security::Protocol::Owe],
-                    }),
-                    timestamp_nanos: 1,
-                },
-            ],
-        ));
+        test_values.iface.update_last_scan_results(vec![
+            fidl_sme::ScanResult {
+                bss_description: transition_bss.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![
+                        fidl_security::Protocol::Open,
+                        fidl_security::Protocol::Owe,
+                    ],
+                }),
+                timestamp_nanos: 1,
+            },
+            fidl_sme::ScanResult {
+                bss_description: hidden_owe_bss.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Owe],
+                }),
+                timestamp_nanos: 1,
+            },
+        ]);
 
         // Initiate a connect request to the OWE transition network, which should use the
         // transition SSID and result in a connection to the OWE BSS.
@@ -2978,11 +3034,14 @@ mod tests {
 
         let connect_txn_handle = connect_txn.unwrap().into_stream_and_control_handle().1;
         connect_txn_handle
-            .send_on_connect_result(&fidl_sme::ConnectResult {
-                code: fidl_ieee80211::StatusCode::Success,
-                is_credential_rejected: false,
-                is_reconnect: false,
-            })
+            .send_on_connect_result(
+                &fidl_sme::ConnectResult {
+                    code: fidl_ieee80211::StatusCode::Success,
+                    is_credential_rejected: false,
+                    is_reconnect: false,
+                },
+                None,
+            )
             .unwrap();
 
         let connect_result = test_values.exec.run_singlethreaded(&mut connect_fut).unwrap();
@@ -3029,11 +3088,14 @@ mod tests {
         assert_eq!(req.bss_description, bss_description);
 
         let connect_txn_handle = connect_txn.into_stream_and_control_handle().1;
-        let result = connect_txn_handle.send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_ieee80211::StatusCode::Success,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        });
+        let result = connect_txn_handle.send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        );
         assert_matches!(result, Ok(()));
 
         let connect_result = assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Ready(r) => r);
@@ -3050,7 +3112,7 @@ mod tests {
             ssid: Ssid::try_from("bar").unwrap(),
             bssid: [11, 22, 33, 44, 55, 66],
         );
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
+        test_values.iface.last_scan_results.lock().update(
             fasync::BootInstant::from_nanos(1),
             vec![fidl_sme::ScanResult {
                 bss_description: other_bss_description.clone(),
@@ -3059,7 +3121,7 @@ mod tests {
                 }),
                 timestamp_nanos: 1,
             }],
-        ));
+        );
 
         // Set current time to 31st second so that a scan would be triggered when handling
         // connect request.
@@ -3096,11 +3158,14 @@ mod tests {
         assert_eq!(req.bss_description, bss_description);
 
         let connect_txn_handle = connect_txn.into_stream_and_control_handle().1;
-        let result = connect_txn_handle.send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_ieee80211::StatusCode::Success,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        });
+        let result = connect_txn_handle.send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_ieee80211::StatusCode::Success,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        );
         assert_matches!(result, Ok(()));
 
         let connect_result = assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Ready(r) => r);
@@ -3156,19 +3221,15 @@ mod tests {
                 ssid: Ssid::try_from("foo").unwrap(),
                 bssid: [1, 2, 3, 4, 5, 6],
             );
-            *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-                fasync::BootInstant::now(),
-                vec![fidl_sme::ScanResult {
-                    bss_description: bss_description.clone(),
-                    compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                        mutual_security_protocols,
-                    }),
-                    timestamp_nanos: 1,
-                }],
-            ));
+            test_values.iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+                bss_description: bss_description.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols,
+                }),
+                timestamp_nanos: 1,
+            }]);
         } else {
-            *test_values.iface.last_scan_results.lock() =
-                Some(LastScanResults::new(fasync::BootInstant::now(), vec![]));
+            test_values.iface.update_last_scan_results(vec![]);
         }
 
         let mut connect_fut = test_values.iface.connect_to_network(b"foo", credential, bssid, None);
@@ -3183,16 +3244,13 @@ mod tests {
             ssid: Ssid::try_from("foo").unwrap(),
             bssid: [1, 2, 3, 4, 5, 6],
         );
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
-            vec![fidl_sme::ScanResult {
-                bss_description: bss_description.clone(),
-                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
-                }),
-                timestamp_nanos: 1,
-            }],
-        ));
+        test_values.iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+            bss_description: bss_description.clone(),
+            compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                mutual_security_protocols: vec![fidl_security::Protocol::Open],
+            }),
+            timestamp_nanos: 1,
+        }]);
 
         let mut connect_fut =
             test_values.iface.connect_to_network(b"foo", Credential::None, None, None);
@@ -3210,11 +3268,14 @@ mod tests {
         );
 
         let connect_txn_handle = connect_txn.into_stream_and_control_handle().1;
-        let result = connect_txn_handle.send_on_connect_result(&fidl_sme::ConnectResult {
-            code: fidl_ieee80211::StatusCode::RefusedExternalReason,
-            is_credential_rejected: false,
-            is_reconnect: false,
-        });
+        let result = connect_txn_handle.send_on_connect_result(
+            &fidl_sme::ConnectResult {
+                code: fidl_ieee80211::StatusCode::RefusedExternalReason,
+                is_credential_rejected: false,
+                is_reconnect: false,
+            },
+            None,
+        );
         assert_matches!(result, Ok(()));
 
         let connect_result = assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Ready(Ok(r)) => r);
@@ -3231,16 +3292,13 @@ mod tests {
             ssid: Ssid::try_from("foo").unwrap(),
             bssid: [1, 2, 3, 4, 5, 6],
         );
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
-            vec![fidl_sme::ScanResult {
-                bss_description: bss_description.clone(),
-                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
-                }),
-                timestamp_nanos: 1,
-            }],
-        ));
+        test_values.iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+            bss_description: bss_description.clone(),
+            compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                mutual_security_protocols: vec![fidl_security::Protocol::Open],
+            }),
+            timestamp_nanos: 1,
+        }]);
 
         let mut connect_fut =
             test_values.iface.connect_to_network(b"foo", Credential::None, None, None);
@@ -3336,16 +3394,13 @@ mod tests {
         if let Some((bss_description, connect_failure)) = recent_connect_failure {
             // Set up a connect failure so that later in the test, there'd be a score penalty
             // for the BSS described by `bss_description`
-            *iface.last_scan_results.lock() = Some(LastScanResults::new(
-                fasync::BootInstant::now(),
-                vec![fidl_sme::ScanResult {
-                    bss_description,
-                    compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                        mutual_security_protocols: vec![fidl_security::Protocol::Open],
-                    }),
-                    timestamp_nanos: 1,
-                }],
-            ));
+            iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+                bss_description,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 1,
+            }]);
 
             let mut connect_fut = iface.connect_to_network(b"foo", Credential::None, None, None);
             assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Pending);
@@ -3353,15 +3408,14 @@ mod tests {
                 test_values.exec.run_until_stalled(&mut sme_stream.next()),
                 Poll::Ready(Some(Ok(fidl_sme::ClientSmeRequest::Connect { req, txn: Some(txn), .. }))) => (req, txn));
             let connect_txn_handle = connect_txn.into_stream_and_control_handle().1;
-            let _result = connect_txn_handle.send_on_connect_result(&connect_failure);
+            let _result = connect_txn_handle.send_on_connect_result(&connect_failure, None);
             assert_matches!(
                 test_values.exec.run_until_stalled(&mut connect_fut),
                 Poll::Ready(Ok(_r))
             );
         }
 
-        *iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
+        iface.update_last_scan_results(
             scan_bss_descriptions
                 .into_iter()
                 .map(|bss_description| fidl_sme::ScanResult {
@@ -3372,7 +3426,7 @@ mod tests {
                     timestamp_nanos: 1,
                 })
                 .collect::<Vec<_>>(),
-        ));
+        );
 
         let mut connect_fut = iface.connect_to_network(b"foo", Credential::None, None, None);
         assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Pending);
@@ -4533,19 +4587,16 @@ mod tests {
             rssi_dbm: -30,
         );
 
-        *test_values.iface.last_scan_results.lock() = Some(LastScanResults::new(
-            fasync::BootInstant::now(),
-            vec![fidl_sme::ScanResult {
-                bss_description: bss_description.clone(),
-                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
-                    mutual_security_protocols: vec![
-                        fidl_security::Protocol::Wpa2Personal,
-                        fidl_security::Protocol::Wpa3Personal,
-                    ],
-                }),
-                timestamp_nanos: 1,
-            }],
-        ));
+        test_values.iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+            bss_description: bss_description.clone(),
+            compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                mutual_security_protocols: vec![
+                    fidl_security::Protocol::Wpa2Personal,
+                    fidl_security::Protocol::Wpa3Personal,
+                ],
+            }),
+            timestamp_nanos: 1,
+        }]);
 
         // Client explicitly restricts connection to WPA2 Personal (WPA_PSK) only.
         let key_mgmt = Some(fidl_wlanix::KeyMgmtMask::WPA_PSK);
@@ -4562,5 +4613,252 @@ mod tests {
 
         // Wlanix must request WPA2 Personal (not WPA3 Personal) because of the key_mgmt restriction.
         assert_eq!(req.authentication.protocol, fidl_security::Protocol::Wpa2Personal);
+    }
+
+    #[fuchsia::test]
+    fn test_connect_to_network_wpa3_auto_upgrade() {
+        let mut test_values = setup_test_manager_with_iface();
+
+        // AP supports WPA3 Personal only, while client saved as WPA2 with WPA3 auto-upgrade.
+        let bss_description = fake_fidl_bss_description!(
+            protection => FakeProtectionCfg::Wpa3,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+            rssi_dbm: -30,
+        );
+
+        test_values.iface.update_last_scan_results(vec![fidl_sme::ScanResult {
+            bss_description,
+            compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                mutual_security_protocols: vec![fidl_security::Protocol::Wpa3Personal],
+            }),
+            timestamp_nanos: 1,
+        }]);
+
+        let key_mgmt = Some(
+            fidl_wlanix::KeyMgmtMask::WPA_PSK
+                | fidl_wlanix::KeyMgmtMask::WPA_PSK_SHA256
+                | fidl_wlanix::KeyMgmtMask::SAE,
+        );
+        let credential = Credential::PskAndSae {
+            psk_passphrase: b"password123".to_vec(),
+            sae_password: b"password123".to_vec(),
+        };
+
+        let mut connect_fut =
+            test_values.iface.connect_to_network(b"foo", credential, None, key_mgmt);
+        assert_matches!(test_values.exec.run_until_stalled(&mut connect_fut), Poll::Pending);
+
+        let req = assert_matches!(
+            test_values.exec.run_until_stalled(&mut test_values.sme_stream.next()),
+            Poll::Ready(Some(Ok(fidl_sme::ClientSmeRequest::Connect { req, .. }))) => req
+        );
+
+        assert_eq!(req.authentication.protocol, fidl_security::Protocol::Wpa3Personal);
+    }
+
+    #[test]
+    fn test_scan_cache_merges_different_bss() {
+        let mut cache = ScanCache::new();
+        let bss1 = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+        );
+        let bss2 = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("bar").unwrap(),
+            bssid: [6, 5, 4, 3, 2, 1],
+        );
+
+        let t1 = fasync::BootInstant::from_nanos(100);
+        cache.update(
+            t1,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss1.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+        assert_eq!(cache.get_valid_results(t1).len(), 1);
+
+        let t2 = fasync::BootInstant::from_nanos(200);
+        cache.update(
+            t2,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss2.clone(),
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+        let results = cache.get_valid_results(t2);
+        assert_eq!(results.len(), 2);
+        assert!(
+            results
+                .iter()
+                .any(|r| r.bss_description.bssid == [1, 2, 3, 4, 5, 6] && r.timestamp_nanos == 100)
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.bss_description.bssid == [6, 5, 4, 3, 2, 1] && r.timestamp_nanos == 200)
+        );
+    }
+
+    #[test]
+    fn test_scan_cache_updates_existing_bss() {
+        let old_rssi = -70;
+        let new_rssi = -40;
+        let t1_nanos = 100;
+        let t2_nanos = 200;
+
+        let mut cache = ScanCache::new();
+        let bss_old = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+            rssi_dbm: old_rssi,
+        );
+        let bss_new = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+            rssi_dbm: new_rssi,
+        );
+
+        let t1 = fasync::BootInstant::from_nanos(t1_nanos);
+        cache.update(
+            t1,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss_old,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+        let results = cache.get_valid_results(t1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].bss_description.rssi_dbm, old_rssi);
+        assert_eq!(results[0].timestamp_nanos, t1_nanos);
+
+        let t2 = fasync::BootInstant::from_nanos(t2_nanos);
+        cache.update(
+            t2,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss_new,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+
+        let results = cache.get_valid_results(t2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].bss_description.rssi_dbm, new_rssi);
+        assert_eq!(results[0].timestamp_nanos, t2_nanos);
+    }
+
+    #[test]
+    fn test_scan_cache_prunes_expired_bss() {
+        let mut cache = ScanCache::new();
+        let bss1 = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+        );
+        let bss2 = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("bar").unwrap(),
+            bssid: [6, 5, 4, 3, 2, 1],
+        );
+
+        let t1 = fasync::BootInstant::from_nanos(0);
+        cache.update(
+            t1,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss1,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+
+        // Insert bss2 at t2 = t1 + 10s (within SCAN_CACHE_AGE_LIMIT so both coexist)
+        let t2 = t1 + zx::BootDuration::from_seconds(10);
+        cache.update(
+            t2,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss2,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+
+        assert_eq!(cache.get_valid_results(t2).len(), 2);
+
+        // Advance time to t3 = t1 + 31s: bss1 is expired (> 30s) while bss2 is still valid (21s old)
+        let t3 = t1 + SCAN_CACHE_AGE_LIMIT + zx::BootDuration::from_seconds(1);
+        let results = cache.get_valid_results(t3);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].bss_description.bssid, [6, 5, 4, 3, 2, 1]);
+    }
+
+    #[test]
+    fn test_scan_cache_get_valid_bss() {
+        let mut cache = ScanCache::new();
+        let bss1 = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+        );
+        let bss_id1 = Bssid::from([1, 2, 3, 4, 5, 6]);
+        let bss_id2 = Bssid::from([6, 5, 4, 3, 2, 1]);
+
+        let t1 = fasync::BootInstant::from_nanos(0);
+        cache.update(
+            t1,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss1,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+
+        assert!(cache.get_valid_bss(t1, &bss_id1).is_some());
+        assert!(cache.get_valid_bss(t1, &bss_id2).is_none());
+
+        let t2 = t1 + SCAN_CACHE_AGE_LIMIT + zx::BootDuration::from_seconds(1);
+        assert!(cache.get_valid_bss(t2, &bss_id1).is_none());
+    }
+
+    #[test]
+    fn test_scan_cache_purges_stale_bss_on_update() {
+        let mut cache = ScanCache::new();
+        let bss1 = fake_fidl_bss_description!(Open,
+            ssid: Ssid::try_from("foo").unwrap(),
+            bssid: [1, 2, 3, 4, 5, 6],
+        );
+
+        let t1 = fasync::BootInstant::from_nanos(0);
+        cache.update(
+            t1,
+            vec![fidl_sme::ScanResult {
+                bss_description: bss1,
+                compatibility: fidl_sme::Compatibility::Compatible(fidl_sme::Compatible {
+                    mutual_security_protocols: vec![fidl_security::Protocol::Open],
+                }),
+                timestamp_nanos: 0,
+            }],
+        );
+        assert_eq!(cache.get_valid_results(t1).len(), 1);
+
+        // Update with empty results after cache limit purges existing entries
+        let t2 = t1 + SCAN_CACHE_AGE_LIMIT + zx::BootDuration::from_seconds(5);
+        cache.update(t2, vec![]);
+        assert!(cache.get_valid_results(t2).is_empty());
     }
 }

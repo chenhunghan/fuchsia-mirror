@@ -1197,6 +1197,59 @@ where each line is in the format <test_label>,<test_env>, where
         return 0
 
 
+###########################################################################################
+###########################################################################################
+#####
+#####   COMMAND: bazel_tests_json
+#####
+
+
+class BazelTestsJsonCommand(ScriptCommandBase):
+    """Print tests.json entries for specific Bazel test labels."""
+
+    DESCRIPTION = """
+Print a JSON list of tests.json entries for the fx_test() and host_test()
+targets with the given Bazel labels, even if no bazel_test_suite() includes
+them. Fails if a label isn't an fx_test() or host_test() target. Target
+patterns like //src/foo/... aren't supported yet. This is used by `fx test`
+to run Bazel tests that aren't in tests.json.
+"""
+
+    @staticmethod
+    def add_arguments(parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "--test-os",
+            choices=("host", "fuchsia"),
+            default=None,
+            help="Only discover host or Fuchsia device tests.",
+        )
+        parser.add_argument(
+            "labels",
+            nargs="+",
+            help="Bazel labels, e.g. //src/foo:bar_test.",
+        )
+
+    @staticmethod
+    def run(args: argparse.Namespace) -> int:
+        # Lazy imports, see technical note at the top of this file.
+        import json
+
+        from build.bazel.scripts import bazel_tests_utils, build_utils
+
+        bazel_paths = build_utils.BazelPaths(args.fuchsia_dir, args.build_dir)
+        try:
+            tests = bazel_tests_utils.discover_tests(
+                bazel_paths, args.labels, test_os=args.test_os
+            )
+        except bazel_tests_utils.TestDiscoveryError as e:
+            # Bad input like a mistyped label isn't a bug in this script, so
+            # a traceback would only bury the actual error.
+            print(e, file=sys.stderr)
+            return 1
+        print(json.dumps(tests, indent=2))
+        return 0
+
+
 class FileToTestPackageCache(object):
     """Caches the mapping from source files to the test packages that depend on them."""
 
@@ -1496,6 +1549,7 @@ def main(main_args: T.Sequence[str]) -> int:
     commands.add_command(FxBuildArgsToLabelsCommand())
     commands.add_command(ShouldFileChangesTriggerBuildCommand())
     commands.add_command(AffectedTestsCommand())
+    commands.add_command(BazelTestsJsonCommand())
     commands.add_command(FileToTestPackageCommand())
     commands.add_command(TargetMetadataCommand())
 

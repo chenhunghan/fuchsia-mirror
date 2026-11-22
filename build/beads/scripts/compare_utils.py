@@ -64,6 +64,10 @@ VALID_BAZEL_CONFIGS = (
     BAZEL_CONFIG_FUCHSIA_SDK,
 )
 
+# Target CPUs that can be selected for Fuchsia Bazel configs. They match the
+# generated `--config=fuchsia_platform_<cpu>` / `fuchsia_sdk_<cpu>` settings.
+VALID_CPUS = ("x64", "arm64", "riscv64")
+
 # An optional callable to receive debug messages
 DebugHook: T.TypeAlias = T.Optional[T.Callable[[str], None]]
 
@@ -156,9 +160,23 @@ class ConfiguredBazelLabel:
     label: str
     config: str
     use_pic: bool = False
+    # Optional target CPU (one of VALID_CPUS) for "fuchsia_platform" and
+    # "fuchsia_sdk"; empty means the config's default CPU.
+    cpu: str = ""
 
     def __post_init__(self) -> None:
         _validate_bazel_config(self.config)
+        if self.cpu and self.cpu not in VALID_CPUS:
+            raise ValueError(
+                f"Invalid CPU {self.cpu!r}, expected one of {VALID_CPUS}"
+            )
+        if self.cpu and self.config == BAZEL_CONFIG_HOST:
+            raise ValueError("A CPU cannot be selected for the host config")
+
+    @property
+    def config_name(self) -> str:
+        """The --config value, e.g. "fuchsia_platform_arm64" with a CPU."""
+        return f"{self.config}_{self.cpu}" if self.cpu else self.config
 
 
 class GnCommandMap(dict[str, str]):
@@ -583,7 +601,7 @@ def query_bazel_commands(
             raise ValueError(
                 "CompareCommandsQuery 'bazel' label must be set for Bazel queries."
             )
-        queries_by_config.setdefault(query.bazel.config, []).append(query)
+        queries_by_config.setdefault(query.bazel.config_name, []).append(query)
 
     result = BazelCommandMap()
     missing_labels = []

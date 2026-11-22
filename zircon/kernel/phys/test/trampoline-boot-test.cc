@@ -27,12 +27,12 @@
 #include <ktl/limits.h>
 #include <ktl/string_view.h>
 #include <ktl/unique_ptr.h>
-#include <phys/allocation.h>
+#include <phys/allocation/allocation.h>
+#include <phys/allocation/new.h>
 #include <phys/boot-zbi/boot-zbi.h>
-#include <phys/new.h>
 #include <phys/runtime/main.h>
-#include <phys/stdio.h>
-#include <phys/symbolize.h>
+#include <phys/runtime/self.h>
+#include <phys/runtime/symbolize.h>
 #include <pretty/cpp/sizes.h>
 
 #include "turducken.h"
@@ -354,7 +354,7 @@ int TurduckenTest::Main(Zbi::iterator kernel_item) {
   uint32_t extra_capacity = 0;
 
   bool is_ready = OptionWithPrefix(kIsReadyOpt).has_value();
-  debugf("%s: is_ready: %s\n", test_name(), is_ready ? "true" : "false");
+  printf("%s: is_ready: %s\n", test_name(), is_ready ? "true" : "false");
   auto total_iterations =
       GetOptionOrDefault(kUserTotalIterationsOpt, OptionWithPrefix(kUserTotalIterationsOpt), 1);
   if (!is_ready) {
@@ -380,12 +380,12 @@ int TurduckenTest::Main(Zbi::iterator kernel_item) {
     check(kDataLoadAddressOpt, reinterpret_cast<uintptr_t>(boot_zbi().storage().data()));
   }
 
-  debugf("%s: random_seed: %" PRIu64 "\n", test_name(), seed);
-  debugf("%s: remaining_iterations: %" PRIu64 "\n", test_name(), remaining_iterations);
-  debugf("%s: total_iterations: %" PRIu64 "\n", test_name(), total_iterations);
+  printf("%s: random_seed: %" PRIu64 "\n", test_name(), seed);
+  printf("%s: remaining_iterations: %" PRIu64 "\n", test_name(), remaining_iterations);
+  printf("%s: total_iterations: %" PRIu64 "\n", test_name(), total_iterations);
 
   if (remaining_iterations == 0) {
-    debugf("%s: All iterations completed.\n", test_name());
+    printf("%s: All iterations completed.\n", test_name());
     return 0;
   }
 
@@ -428,8 +428,8 @@ int TurduckenTest::Main(Zbi::iterator kernel_item) {
   set_kernel_load_address(kernel_load_address);
   set_data_load_address(data_load_address);
 
-  debugf("%s: kernel_load_address: 0x%016" PRIx64 "\n", test_name(), kernel_load_address);
-  debugf("%s: data_load_address: 0x%016" PRIx64 "\n", test_name(), data_load_address);
+  printf("%s: kernel_load_address: 0x%016" PRIx64 "\n", test_name(), kernel_load_address);
+  printf("%s: data_load_address: 0x%016" PRIx64 "\n", test_name(), data_load_address);
 
   // Overwrite the state payload with the updated state.
   UpdateCommandLineZbiItem(kernel_load_address, data_load_address, seed, remaining_iterations,

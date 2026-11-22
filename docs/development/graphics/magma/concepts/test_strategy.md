@@ -136,6 +136,6 @@ happens in connection with the Vulkan CTS. There are external efforts such as
 [graphicsfuzz]: https://github.com/google/graphicsfuzz
 [mock-ddk]: /src/devices/testing/mock-ddk
 [libfuzzer]: /docs/development/testing/fuzzing/write-a-fuzzer.md
-[seedcorpus]: /docs/development/testing/fuzzing/improve-a-fuzzer.md#measure_code_coverage
+[seedcorpus]: /docs/development/testing/fuzzing/improve-a-fuzzer.md#improve-code-coverage
 [vulkanerrors]: https://www.khronos.org/registry/vulkan/specs/1.1-extensions/html/vkspec.html#fundamentals-errors
 

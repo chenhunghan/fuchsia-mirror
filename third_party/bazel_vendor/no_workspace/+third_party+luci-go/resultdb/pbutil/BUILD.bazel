@@ -1,0 +1,25 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@io_bazel_rules_go//go:def.bzl", "go_library")
+load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+
+package(default_applicable_licenses = ["//:license"])
+
+# @bazel2gn:skip
+go_library(
+    name = "pbutil",
+    srcs = ["test_id.go"],
+    importpath = "go.chromium.org/luci/resultdb/pbutil",
+    target_compatible_with = HOST_CONSTRAINTS,
+    visibility = [
+        "//tools/testing/resultdb:__pkg__",
+        "//tools/testing/tefmocheck:__pkg__",
+    ],
+    deps = [
+        "//third_party/golibs/vendor/golang.org/x/text/unicode/norm",
+        "//third_party/golibs/vendor/google.golang.org/protobuf/proto",
+        "//third_party/luci-go/resultdb/proto/v1:resultdb_proto_go",
+    ],
+)

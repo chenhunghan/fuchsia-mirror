@@ -8,12 +8,19 @@
 
 #[path = "asan/asan.rs"]
 pub mod asan;
+#[cfg(ktest)]
+#[path = "test/asan_tests.rs"]
+mod asan_tests;
 pub mod debugdata;
 mod instrumentation_ffi;
 pub mod kernel_mapped_vmo;
 mod memory_profile;
+mod profile;
+mod profile_ffi;
 mod sancov;
 mod sancov_ffi;
+#[path = "ubsan/runtime.rs"]
+mod ubsan;
 mod vmo;
 mod vmo_ffi;
 

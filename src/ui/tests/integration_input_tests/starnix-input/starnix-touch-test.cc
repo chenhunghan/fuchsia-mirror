@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include <fidl/fuchsia.input.report/cpp/fidl.h>
 #include <fidl/fuchsia.process/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem/cpp/fidl.h>
 #include <fidl/fuchsia.sysmem2/cpp/fidl.h>
@@ -77,16 +76,18 @@ void ExpectBtnTouch(const TouchEvent& e, int expected_value,
 enum class TapLocation { kTopLeft, kBottomRight };
 
 class StarnixTouchTest : public starnix_input_test::StarnixInputTestBase {
+ public:
+  explicit StarnixTouchTest(bool direct_input_mode = false)
+      : starnix_input_test::StarnixInputTestBase(direct_input_mode) {}
+
+  size_t DownUpNumPackets() const {
+    return direct_input_mode() ? relay_api::kDirectInputDownUpNumPackets
+                               : relay_api::kDownUpNumPackets;
+  }
+
  protected:
   ~StarnixTouchTest() override {
     FX_CHECK(touch_injection_request_count() > 0) << "injection expected but didn't happen.";
-  }
-
-  // To satisfy ::testing::Test
-  void SetUp() override {
-    ui_testing::PortableUITest::SetUp();
-    FX_LOGS(INFO) << "Registering input injection device";
-    RegisterTouchScreen();
   }
 
   // For use by test cases.
@@ -170,6 +171,19 @@ class StarnixTouchTest : public starnix_input_test::StarnixInputTestBase {
             result[result.size() - 1].local_y = static_cast<float>(pkt.value);
 
             break;
+          case ABS_MT_TOUCH_MAJOR:
+          case ABS_MT_TOUCH_MINOR:
+            if (!direct_input_mode()) {
+              FX_LOGS(FATAL) << "unexpected event code in touch event seq, code=" << pkt.code;
+            }
+            if (result.empty()) {
+              FX_LOGS(FATAL) << "receive ABS_MT_TOUCH_MAJOR/MINOR out of slot";
+            }
+            if (result.back().has_btn_touch) {
+              FX_LOGS(FATAL) << "receive ABS_MT_TOUCH_MAJOR/MINOR out of slot";
+            }
+            EXPECT_EQ(pkt.value, 0);
+            break;
           default:
             FX_LOGS(FATAL) << "unexpected event code in touch event seq, code=" << pkt.code;
         }
@@ -186,220 +200,253 @@ class StarnixTouchTest : public starnix_input_test::StarnixInputTestBase {
     WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
     // Inform `input_dump` to run the touch_relay.
     std::stringstream ss;
-    ss << relay_api::kDeviceDelimiter << " " << relay_api::kTouchDev;
+    ss << relay_api::kDeviceDelimiter << " "
+       << (direct_input_mode() ? relay_api::kDirectInputDev : relay_api::kTouchDev);
     WriteMessageToSocket(in_socket, ss.str());
+  }
+
+  void RunTapTest() {
+    auto [in_socket, out_socket] = LaunchDumper();
+
+    // Wait until #launch_input is presented before injecting input.
+    WaitForViewPresentation();
+    FX_LOGS(INFO) << "Registering input injection device";
+    RegisterTouchScreen();
+
+    // Start `input_dump` for a touch device.
+    InitTouchInputRelay(in_socket, out_socket);
+
+    // `input_dump` is ready to receive events.
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    std::stringstream ss;
+    // This test expects 2 down - up event sequences.
+    ss << relay_api::kEventCmd << " " << DownUpNumPackets() * 2;
+    WriteMessageToSocket(in_socket, ss.str());
+
+    // Wait for `input_dump` to ready for event injection.
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    // Top-left.
+    InjectInput(TapLocation::kTopLeft);
+
+    {
+      auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
+      ExpectLocationPhaseAndSlot(events[0], static_cast<float>(display_width()) / 4.f,
+                                 static_cast<float>(display_height()) / 4.f,
+                                 fuchsia_ui_pointer::EventPhase::kAdd, 0);
+      ExpectBtnTouch(events[1], 1);
+      ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
+      ExpectBtnTouch(events[3], 0);
+    }
+
+    // Bottom-right.
+    InjectInput(TapLocation::kBottomRight);
+
+    {
+      auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
+      ExpectLocationPhaseAndSlot(events[0], 3 * static_cast<float>(display_width()) / 4.f,
+                                 3 * static_cast<float>(display_height()) / 4.f,
+                                 fuchsia_ui_pointer::EventPhase::kAdd, 0);
+      ExpectBtnTouch(events[1], 1);
+      ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
+      ExpectBtnTouch(events[3], 0);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    WriteMessageToSocket(in_socket, "quit");
+  }
+
+  // EventsDuringFileCloseAreIgnored ensure event reader does not get events before open.
+  void RunEventsDuringFileCloseTest() {
+    auto [in_socket, out_socket] = LaunchDumper();
+
+    // Wait until #launch_input is presented before injecting input.
+    WaitForViewPresentation();
+    FX_LOGS(INFO) << "Registering input injection device";
+    RegisterTouchScreen();
+
+    // Start `input_dump` for a touch device.
+    InitTouchInputRelay(in_socket, out_socket);
+
+    // `input_dump` is ready to receive events.
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    std::stringstream ss;
+    ss << relay_api::kEventCmd << " " << DownUpNumPackets();
+    WriteMessageToSocket(in_socket, ss.str());
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    // Send 1 tap to top left.
+    InjectInput(TapLocation::kTopLeft);
+    {
+      auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
+      ExpectLocationPhaseAndSlot(events[0], static_cast<float>(display_width()) / 4.f,
+                                 static_cast<float>(display_height()) / 4.f,
+                                 fuchsia_ui_pointer::EventPhase::kAdd, 0);
+      ExpectBtnTouch(events[1], 1);
+      ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
+      ExpectBtnTouch(events[3], 0);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    FX_LOGS(INFO) << "device file closed";
+
+    // Now the file is closed. Send 1 tap to top left. input_dump should not receive this event
+    // sequence.
+    InjectInput(TapLocation::kTopLeft);
+
+    // TODO(https://fxbug.dev/375021518): Here should block on a state instead of timeout to ensure
+    // events are reached to Starnix before open file below.
+    // It is ok if this test is flaky when the tap top left reach to starnix after "device file
+    // opened". It just means this timeout is not enough.
+    RunLoopWithTimeout(zx::sec(1));
+
+    WriteMessageToSocket(in_socket, ss.str());
+
+    FX_LOGS(INFO) << "device file opened";
+
+    // Wait for `input_dump` to ready for event injection.
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    // Send 1 tap to bottom right. input_dump should receive this event sequence.
+    InjectInput(TapLocation::kBottomRight);
+    {
+      auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
+      ExpectLocationPhaseAndSlot(events[0], 3 * static_cast<float>(display_width()) / 4.f,
+                                 3 * static_cast<float>(display_height()) / 4.f,
+                                 fuchsia_ui_pointer::EventPhase::kAdd, 0);
+      ExpectBtnTouch(events[1], 1);
+      ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
+      ExpectBtnTouch(events[3], 0);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    WriteMessageToSocket(in_socket, "quit");
+  }
+
+  // OpenFileDuringEventSequenceReceivesPartialSequence tests event delivery when the device file is
+  // opened in the middle of an event sequence. It verifies that only events generated after the
+  // file is opened are recorded in input_dump.
+  void RunOpenFileDuringEventSequenceReceivesPartialSequenceTest() {
+    auto [in_socket, out_socket] = LaunchDumper();
+
+    // Wait until #launch_input is presented before injecting input.
+    WaitForViewPresentation();
+    FX_LOGS(INFO) << "Registering input injection device";
+    RegisterTouchScreen();
+
+    // Start `input_dump` for a touch device.
+    InitTouchInputRelay(in_socket, out_socket);
+
+    // `input_dump` is ready to receive events.
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    std::stringstream ss;
+    ss << relay_api::kEventCmd << " " << DownUpNumPackets();
+    WriteMessageToSocket(in_socket, ss.str());
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    // Send 1 tap to top left.
+    InjectInput(TapLocation::kTopLeft);
+    {
+      auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
+      ExpectLocationPhaseAndSlot(events[0], static_cast<float>(display_width()) / 4.f,
+                                 static_cast<float>(display_height()) / 4.f,
+                                 fuchsia_ui_pointer::EventPhase::kAdd, 0);
+      ExpectBtnTouch(events[1], 1);
+      ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
+      ExpectBtnTouch(events[3], 0);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    FX_LOGS(INFO) << "device file closed";
+
+    // Now the file is closed. Send 1 tap to top left. input_dump should not receive this down
+    // event.
+    fuchsia_ui_test_input::TouchInputReport down;
+    down.contacts({{fuchsia_ui_test_input::ContactInputReport{
+        {
+            .contact_id = 1,
+            .position_x = display_width() / 4,
+            .position_y = display_height() / 4,
+        },
+    }}});
+    InjectTouchEvent(down);
+
+    // TODO(https://fxbug.dev/375021518): Here should block on a state instead of timeout to ensure
+    // events are reached to Starnix before open file below.
+    // It is ok if this test is flaky when the tap top left reach to starnix after "device file
+    // opened". It just means this timeout is not enough.
+    RunLoopWithTimeout(zx::sec(1));
+
+    // Inject touch move and up.
+    ss.str("");  // clear the stringstream
+    ss << relay_api::kEventCmd << " " << relay_api::kMoveNumPackets + relay_api::kUpNumPackets;
+    WriteMessageToSocket(in_socket, ss.str());
+
+    FX_LOGS(INFO) << "device file opened";
+
+    // Wait for `input_dump` to ready for event injection.
+    WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
+
+    fuchsia_ui_test_input::TouchInputReport move;
+    move.contacts({{fuchsia_ui_test_input::ContactInputReport{
+        {
+            .contact_id = 1,
+            .position_x = display_width() / 4 * 3,
+            .position_y = display_height() / 4 * 3,
+        },
+    }}});
+    InjectTouchEvent(move);
+
+    fuchsia_ui_test_input::TouchInputReport up;
+    up.contacts({{}});
+    InjectTouchEvent(up);
+
+    {
+      auto events = GetTouchEventSequenceOfLen(out_socket, kMoveUpNumEvents);
+      ExpectLocationPhaseAndSlot(events[0], 3 * static_cast<float>(display_width()) / 4.f,
+                                 3 * static_cast<float>(display_height()) / 4.f,
+                                 fuchsia_ui_pointer::EventPhase::kChange, 0);
+      ExpectLocationPhaseAndSlot(events[1], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
+      ExpectBtnTouch(events[2], 0);
+    }
+
+    WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+
+    WriteMessageToSocket(in_socket, "quit");
   }
 };
 
+// Tests for Scenic input path with Starnix.
 // TODO: https://fxbug.dev/42082519 - Test for DPR=2.0, too.
-TEST_F(StarnixTouchTest, Tap) {
-  auto [in_socket, out_socket] = LaunchDumper();
+TEST_F(StarnixTouchTest, Tap) { RunTapTest(); }
 
-  // Wait until #launch_input is presented before injecting input.
-  WaitForViewPresentation();
+TEST_F(StarnixTouchTest, EventsDuringFileCloseAreIgnored) { RunEventsDuringFileCloseTest(); }
 
-  // Start `input_dump` for a touch device.
-  InitTouchInputRelay(in_socket, out_socket);
-
-  // `input_dump` is ready to receive events.
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  std::stringstream ss;
-  // This test expects 2 down - up event sequences.
-  ss << relay_api::kEventCmd << " " << relay_api::kDownUpNumPackets * 2;
-  WriteMessageToSocket(in_socket, ss.str());
-
-  // Wait for `input_dump` to ready for event injection.
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  // Top-left.
-  InjectInput(TapLocation::kTopLeft);
-
-  {
-    auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
-    ExpectLocationPhaseAndSlot(events[0], static_cast<float>(display_width()) / 4.f,
-                               static_cast<float>(display_height()) / 4.f,
-                               fuchsia_ui_pointer::EventPhase::kAdd, 0);
-    ExpectBtnTouch(events[1], 1);
-    ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
-    ExpectBtnTouch(events[3], 0);
-  }
-
-  // Bottom-right.
-  InjectInput(TapLocation::kBottomRight);
-
-  {
-    auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
-    ExpectLocationPhaseAndSlot(events[0], 3 * static_cast<float>(display_width()) / 4.f,
-                               3 * static_cast<float>(display_height()) / 4.f,
-                               fuchsia_ui_pointer::EventPhase::kAdd, 0);
-    ExpectBtnTouch(events[1], 1);
-    ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
-    ExpectBtnTouch(events[3], 0);
-  }
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, "quit");
-}
-
-// EventsDuringFileCloseAreIgnored ensure event reader does not get events before open.
-TEST_F(StarnixTouchTest, EventsDuringFileCloseAreIgnored) {
-  auto [in_socket, out_socket] = LaunchDumper();
-
-  // Wait until #launch_input is presented before injecting input.
-  WaitForViewPresentation();
-
-  // Start `input_dump` for a touch device.
-  InitTouchInputRelay(in_socket, out_socket);
-
-  // `input_dump` is ready to receive events.
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  std::stringstream ss;
-  ss << relay_api::kEventCmd << " " << relay_api::kDownUpNumPackets;
-  WriteMessageToSocket(in_socket, ss.str());
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  // Send 1 tap to top left.
-  InjectInput(TapLocation::kTopLeft);
-  {
-    auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
-    ExpectLocationPhaseAndSlot(events[0], static_cast<float>(display_width()) / 4.f,
-                               static_cast<float>(display_height()) / 4.f,
-                               fuchsia_ui_pointer::EventPhase::kAdd, 0);
-    ExpectBtnTouch(events[1], 1);
-    ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
-    ExpectBtnTouch(events[3], 0);
-  }
-
-  FX_LOGS(INFO) << "device file closed";
-
-  // Now the file is closed. Send 1 tap to top left. input_dump should not receive this event
-  // sequence.
-  InjectInput(TapLocation::kTopLeft);
-
-  // TODO(https://fxbug.dev/375021518): Here should block on a state instead of timeout to ensure
-  // events are reached to Starnix before open file below.
-  // It is ok if this test is flaky when the tap top left reach to starnix after "device file
-  // opened". It just means this timeout is not enough.
-  RunLoopWithTimeout(zx::sec(1));
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, ss.str());
-
-  FX_LOGS(INFO) << "device file opened";
-
-  // Wait for `input_dump` to ready for event injection.
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  // Send 1 tap to bottom right. input_dump should receive this event sequence.
-  InjectInput(TapLocation::kBottomRight);
-  {
-    auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
-    ExpectLocationPhaseAndSlot(events[0], 3 * static_cast<float>(display_width()) / 4.f,
-                               3 * static_cast<float>(display_height()) / 4.f,
-                               fuchsia_ui_pointer::EventPhase::kAdd, 0);
-    ExpectBtnTouch(events[1], 1);
-    ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
-    ExpectBtnTouch(events[3], 0);
-  }
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, "quit");
-}
-
-// OpenFileDuringEventSequenceReceivesPartialSequence tests event delivery when the device file is
-// opened in the middle of an event sequence. It verifies that only events generated after the file
-// is opened are recorded in input_dump.
 TEST_F(StarnixTouchTest, OpenFileDuringEventSequenceReceivesPartialSequence) {
-  auto [in_socket, out_socket] = LaunchDumper();
+  RunOpenFileDuringEventSequenceReceivesPartialSequenceTest();
+}
 
-  // Wait until #launch_input is presented before injecting input.
-  WaitForViewPresentation();
+// Tests for direct input path with Starnix.
+class StarnixTouchDirectInputTest : public StarnixTouchTest {
+ public:
+  StarnixTouchDirectInputTest() : StarnixTouchTest(true) {}
+};
 
-  // Start `input_dump` for a touch device.
-  InitTouchInputRelay(in_socket, out_socket);
+TEST_F(StarnixTouchDirectInputTest, Tap) { RunTapTest(); }
 
-  // `input_dump` is ready to receive events.
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
+TEST_F(StarnixTouchDirectInputTest, EventsDuringFileCloseAreIgnored) {
+  RunEventsDuringFileCloseTest();
+}
 
-  std::stringstream ss;
-  ss << relay_api::kEventCmd << " " << relay_api::kDownUpNumPackets;
-  WriteMessageToSocket(in_socket, ss.str());
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  // Send 1 tap to top left.
-  InjectInput(TapLocation::kTopLeft);
-  {
-    auto events = GetTouchEventSequenceOfLen(out_socket, kDownUpNumEvents);
-    ExpectLocationPhaseAndSlot(events[0], static_cast<float>(display_width()) / 4.f,
-                               static_cast<float>(display_height()) / 4.f,
-                               fuchsia_ui_pointer::EventPhase::kAdd, 0);
-    ExpectBtnTouch(events[1], 1);
-    ExpectLocationPhaseAndSlot(events[2], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
-    ExpectBtnTouch(events[3], 0);
-  }
-
-  FX_LOGS(INFO) << "device file closed";
-
-  // Now the file is closed. Send 1 tap to top left. input_dump should not receive this down event.
-  fuchsia_ui_test_input::TouchInputReport down;
-  down.contacts({{fuchsia_ui_test_input::ContactInputReport{
-      {
-          .contact_id = 1,
-          .position_x = display_width() / 4,
-          .position_y = display_height() / 4,
-      },
-  }}});
-  InjectTouchEvent(down);
-
-  // TODO(https://fxbug.dev/375021518): Here should block on a state instead of timeout to ensure
-  // events are reached to Starnix before open file below.
-  // It is ok if this test is flaky when the tap top left reach to starnix after "device file
-  // opened". It just means this timeout is not enough.
-  RunLoopWithTimeout(zx::sec(1));
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  // Inject touch move and up.
-  ss.str("");  // clear the stringstream
-  ss << relay_api::kEventCmd << " " << relay_api::kMoveNumPackets + relay_api::kUpNumPackets;
-  WriteMessageToSocket(in_socket, ss.str());
-
-  FX_LOGS(INFO) << "device file opened";
-
-  // Wait for `input_dump` to ready for event injection.
-  WaitForMessageFromInputDump(out_socket, relay_api::kReadyMessage);
-
-  fuchsia_ui_test_input::TouchInputReport move;
-  move.contacts({{fuchsia_ui_test_input::ContactInputReport{
-      {
-          .contact_id = 1,
-          .position_x = display_width() / 4 * 3,
-          .position_y = display_height() / 4 * 3,
-      },
-  }}});
-  InjectTouchEvent(move);
-
-  fuchsia_ui_test_input::TouchInputReport up;
-  up.contacts({{}});
-  InjectTouchEvent(up);
-
-  {
-    auto events = GetTouchEventSequenceOfLen(out_socket, kMoveUpNumEvents);
-    ExpectLocationPhaseAndSlot(events[0], 3 * static_cast<float>(display_width()) / 4.f,
-                               3 * static_cast<float>(display_height()) / 4.f,
-                               fuchsia_ui_pointer::EventPhase::kChange, 0);
-    ExpectLocationPhaseAndSlot(events[1], 0.0, 0.0, fuchsia_ui_pointer::EventPhase::kRemove, 0);
-    ExpectBtnTouch(events[2], 0);
-  }
-
-  WaitForMessageFromInputDump(out_socket, relay_api::kWaitForStdinMessage);
-
-  WriteMessageToSocket(in_socket, "quit");
+TEST_F(StarnixTouchDirectInputTest, OpenFileDuringEventSequenceReceivesPartialSequence) {
+  RunOpenFileDuringEventSequenceReceivesPartialSequenceTest();
 }
 
 }  // namespace

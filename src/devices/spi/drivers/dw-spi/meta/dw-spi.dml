@@ -14,6 +14,36 @@
     capabilities: [
         { service: "fuchsia.hardware.spiimpl.Service" },
         { service: "fuchsia.hardware.spi.businfo.SpiBusMetadata" },
+        {
+            driver_config: "fuchsia.hardware.spi.businfo.SpiBusMetadata",
+            defs: {
+                SpiChannel: {
+                    type: "object",
+                    properties: {
+                        cs: { type: "uint32" },
+                        id: { type: "uint32" },
+                        vid: { type: "uint32" },
+                        pid: { type: "uint32" },
+                        did: { type: "uint32" },
+                        max_frequency_hz: { type: "uint32" },
+                        cs_polarity_high: { type: "bool" },
+                        word_length_bits: { type: "uint8" },
+                        is_bus_controller: { type: "bool" },
+                        clock_polarity_high: { type: "bool" },
+                    },
+                    required: [ "cs" ],
+                },
+            },
+            properties: {
+                provider: { type: "uint32" },
+                channels: {
+                    type: "vector",
+                    element: { ref: "#/SpiChannel" },
+                    max_count: "MAX",
+                },
+            },
+            required: [ "channels" ],
+        },
     ],
     use: [
         {

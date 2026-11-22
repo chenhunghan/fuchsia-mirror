@@ -29,14 +29,14 @@ The framework supports the following options for `availability`:
 -   [`transitional`](#transitional)
 -   [`same_as_target`](#same-as-target)
 
-### Required
+### Required {:#required}
 
 The most commonly used `availability` option is `required`, which indicates that
 the component always expects the capability to be available, and cannot be
 expected to function properly if it's absent. This is the default option that is
 automatically set if no availability is specified.
 
-### Optional
+### Optional {:#optional}
 
 `optional` signifies that a capability may not be present on some
 configurations. If a component `use`s an optional capability that turns out to
@@ -49,16 +49,16 @@ capability that terminates in [`void`][docs.offer]. In this way, the product
 owner is expected to make an explicit choice that either the capability is
 available (its route terminates at some provider component) or it is not (its
 route terminates at `void`). If the route is incomplete,
-[tooling and diagnostics](#tooling-and-diagonstics) will report this as an
+[tooling and diagnostics](#tooling-and-diagnostics) will report this as an
 error.
 
-### Transitional
+### Transitional {:#transitional}
 
 `transitional` is like a weaker version of `optional`. Like `optional`, if a
 component uses a `transitional` capability, it should be tolerant to the absence
 of the capability. However, unlike `optional`, a `transitional` route does not
 need to terminate in `void` and
-[tooling and diagnostics](#tooling-and-diagonstics) will not report any error if
+[tooling and diagnostics](#tooling-and-diagnostics) will not report any error if
 a `transitional` route is incomplete or invalid.
 
 The name "transitional" connotes the idea that this option is useful for soft
@@ -71,7 +71,7 @@ an end-to-end route has been established, you can upgrade the availability to
 client component's parent was missing a capability route for `Echo2`, while
 `transitional` will suppress such warnings.
 
-### Same as target
+### Same as target {:#same-as-target}
 
 `same_as_target` acts as a passthrough: it causes the availability to be
 inherited from whatever availability was set by the route's target component.
@@ -82,7 +82,7 @@ change is required in the source.
 Because the component that `use`s a capability is its final destination,
 `same_as_target` is not a valid option for `use`.
 
-## Availability comparisons
+## Availability comparisons {:#availability-comparisons}
 
 There is a relative ordering of "strength" between the availability options.
 From strongest to weakest, the order is: `required > optional > transient`.
@@ -102,7 +102,7 @@ has guaranteed. For example, it doesn't make sense for a component to `use` a
 capability as `required` if its parent `offer`ed the capability as `optional`,
 since that means the parent has declared the capability might not be available.
 
-## Tooling and diagnostics
+## Tooling and diagnostics {:#tooling-and-diagnostics}
 
 The main effect of setting availability is to control how host tooling and
 diagnostics reports routing errors. In a nutshell, this means the weaker the

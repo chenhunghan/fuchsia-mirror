@@ -7,7 +7,9 @@ Here is what each subdir contains:
 - `bazel_rules_fuchsia`: build rules that get release as `rules_fuchsia` as well
    as the templates which generate the build rules that are released as the
    `fuchsia_sdk`.
-- `e2e`: e2e tests that validate the SDK. See `e2e/README.md`.
+- `fuchsia_rules_common`: shared providers, rule implementations, and helpers used
+  by both `bazel_rules_fuchsia` (`@rules_fuchsia`) and in-tree platform rules
+  (`//build/bazel/rules/`).
 - `tests`: unit tests that validate the SDK.
 
 ## Using a locally built SDK
@@ -97,9 +99,3 @@ configuration correctness by performing the following:
 5. Click into the "run external tests" step.
 6. Click into the "gerrit_link". This will open a new gerrit page.
 7. Copy the contents of `patches.json` locally into your OOT repo's root.
-
-## Executing E2E Developer Workflow Tests
-
-The `e2e` subdirectory contains a suite of tests for validating that an existing
-developer workflow continues to work with the given SDK. More information on how
-it works can be found in `e2e/README.md`.

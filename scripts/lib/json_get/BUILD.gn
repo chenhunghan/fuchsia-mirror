@@ -54,10 +54,12 @@ if (is_host) {
       "__init__.py",
       "json_get.py",
     ]
+    imports = [ ".." ]
     visibility = [
       ":*",
       "//scripts/disable_ctf_tests:*",
       "//sdk/ctf:*",
     ]
+    enable_mypy = false
   }
 }

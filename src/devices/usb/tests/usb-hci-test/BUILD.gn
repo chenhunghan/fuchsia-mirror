@@ -33,15 +33,7 @@ fuchsia_unittest_package("usb-hci-test-package") {
   test_specs = {
     environments = [
       {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC7i5DNHE"
-        }
-        tags = [ "usb-compliance-tests" ]
-      },
-      {
-        dimensions = {
-          device_type = "Intel NUC Kit NUC11TNHv5"
-        }
+        dimensions = nuc11_env.dimensions
         tags = [ "usb-compliance-tests" ]
       },
     ]
@@ -95,7 +87,6 @@ fuchsia_cc_driver("fuchsia_driver") {
 }
 
 fuchsia_driver_component("driver") {
-  info = "meta/driver-info.json"
   component_name = "usb-hci-test-driver"
   deps = [ ":fuchsia_driver" ]
   manifest = "meta/driver.cml"

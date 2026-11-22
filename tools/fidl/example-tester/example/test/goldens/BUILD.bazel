@@ -1,0 +1,24 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("@fuchsia_rules_common//packages:resources.bzl", "resource")
+
+package(default_applicable_licenses = ["//:license"])
+
+[
+    resource(
+        name = name,
+        src = "%s.log.golden" % name,
+        dest = "data/goldens/%s.log.golden" % name,
+        visibility = ["//tools/fidl/example-tester/example:__subpackages__"],
+    )
+    for name in [
+        "test_one_component_client",
+        "test_two_component_client",
+        "test_two_component_server",
+        "test_three_component_client",
+        "test_three_component_proxy",
+        "test_three_component_server",
+    ]
+]

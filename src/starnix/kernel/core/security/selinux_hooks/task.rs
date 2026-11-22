@@ -3,10 +3,11 @@
 // found in the LICENSE file.
 
 use crate::security::selinux_hooks::{
-    CommonFsNodePermission, FileClass, KernelPermission, NonPrivateFsNode, PermissionCheck,
-    ProcessPermission, build_permission_check, check_permission, check_self_permission,
-    common_fs_node_permissions_from_flags, current_task_state, fs_node_effective_sid_and_class,
-    fs_node_ensure_class, has_file_permissions, is_internal_operation, task_consistent_attrs,
+    CommonFsNodePermission, CurrentTaskState, FileClass, KernelPermission, NonPrivateFsNode,
+    PermissionCheck, ProcessPermission, build_permission_check, check_permission,
+    check_self_permission, common_fs_node_permissions_from_flags, current_task_state,
+    fs_node_effective_sid_and_class, fs_node_ensure_class, has_file_permissions,
+    is_internal_operation, task_consistent_attrs,
 };
 use crate::security::{Auditable, ProcAttr};
 use crate::task::loader::ResolvedProgram;
@@ -28,7 +29,6 @@ use starnix_uapi::syslog::SyslogAction;
 use starnix_uapi::{
     ITIMER_PROF, ITIMER_REAL, ITIMER_VIRTUAL, errno, error, itimerval, rlimit, timeval,
 };
-use std::sync::Arc;
 
 /// If the task SID is changing during `exec`, enforces permissions that relate to inheritance of
 /// the calling task's file descriptor access and resource limits by the callee:
@@ -38,7 +38,7 @@ use std::sync::Arc;
 ///
 /// Corresponds to the `bprm_committing_creds()` LSM hook.
 pub(in crate::security) fn bprm_committing_creds(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
     resolved_program: &ResolvedProgram,
 ) {
@@ -58,7 +58,7 @@ pub(in crate::security) fn bprm_committing_creds(
 ///
 /// Corresponds to the `bprm_committed_creds()` LSM hook.
 pub(in crate::security) fn bprm_committed_creds(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
 ) {
     let (previous_sid, new_sid) = {
@@ -75,7 +75,7 @@ pub(in crate::security) fn bprm_committed_creds(
 /// "Closes" file descriptors that `current_task` does not have permission to access by remapping
 /// those file descriptors to the null file in selinuxfs.
 fn close_inaccessible_file_descriptors(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
     new_sid: SecurityId,
 ) {
@@ -112,7 +112,7 @@ fn close_inaccessible_file_descriptors(
 /// Checks the `rlimitinh` permission for the current task. If the permission is denied, resets
 /// the current task's resource limits.
 fn maybe_reset_rlimits(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
     previous_sid: SecurityId,
     new_sid: SecurityId,
@@ -155,7 +155,7 @@ fn maybe_reset_rlimits(
 /// Checks the `siginh` permission for the current task. If the permission is denied, resets
 /// the current task's signal state.
 fn maybe_reset_signal_state(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
     previous_sid: SecurityId,
     new_sid: SecurityId,
@@ -230,6 +230,15 @@ pub(in crate::security) fn task_alloc_from_context(
     Ok(TaskAttrs::for_transition(sid, InitialSid::Kernel.into()))
 }
 
+/// Returns per-thread security state for a child task cloned from `current_task`.
+pub(in crate::security) fn task_alloc_current_state(
+    current_task: &CurrentTask,
+) -> CurrentTaskState {
+    // Clone the parent's per-thread cache so newly cloned threads and forked children start
+    // with a copy of the parent's warm cache.
+    current_task.security_state.state.clone()
+}
+
 /// Checks if creating a task is allowed.
 pub(in crate::security) fn check_task_create_access(
     permission_check: &PermissionCheck<'_>,
@@ -273,7 +282,7 @@ fn check_nnp_nosuid_transition(
         if !permission_check.security_server().is_enforcing() {
             return Ok(());
         }
-        return error!(EACCES);
+        return if no_new_privs { error!(EPERM) } else { error!(EACCES) };
     }
 
     if no_new_privs {
@@ -305,7 +314,7 @@ fn check_nnp_nosuid_transition(
 ///
 /// Corresponds to the `bprm_creds_for_exec()` LSM hook.
 pub(in crate::security) fn bprm_creds_for_exec(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
     resolved_program: &mut ResolvedProgram,
 ) -> Result<(), Errno> {
@@ -916,7 +925,7 @@ pub(in crate::security) fn get_procattr(
 
 /// Sets the Security Context associated with the `attr` entry in the task security state.
 pub(in crate::security) fn set_procattr(
-    security_server: &Arc<SecurityServer>,
+    security_server: &SecurityServer,
     current_task: &CurrentTask,
     attr: ProcAttr,
     context: &[u8],
@@ -961,7 +970,7 @@ pub(in crate::security) fn set_procattr(
                 // the constraint on permissions of the bounded type has been verified by the policy
                 // build tooling and/or will be enforced at run-time on permission checks.
                 if !security_server.is_bounded_by(new_sid, current_sid) {
-                    return error!(EACCES);
+                    return error!(EPERM);
                 }
             }
 
@@ -1945,7 +1954,7 @@ mod tests {
             );
             assert_eq!(
                 set_procattr(&security_server, &current_task, ProcAttr::Current, UNBOUNDED_CONTEXT),
-                error!(EACCES),
+                error!(EPERM),
                 "Bounded_t->unbounded_t multi-threaded"
             );
         })

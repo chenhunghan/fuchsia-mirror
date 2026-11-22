@@ -403,27 +403,46 @@ void UsbFastbootFunction::SetConfigured(SetConfiguredRequest& request,
   fdescriptor::UsbSpeed speed = request.speed();
   fdf::info("configured? - {}  speed - {}.", configured, static_cast<uint32_t>(speed));
 
-  if (stopping_ || set_configured_completer_.has_value()) {
+  if (stopping_) {
     completer.Reply(zx::error(ZX_ERR_BAD_STATE));
     return;
   }
 
-  if (!configured) {
-    if (!configured_ && !endpoints_enabled_) {
-      completer.Reply(zx::ok());
+  if (configured) {
+    if (set_configured_completer_.has_value()) {
+      if (pending_configure_completer_.has_value()) {
+        pending_configure_completer_->Reply(zx::error(ZX_ERR_CANCELED));
+        pending_configure_completer_.reset();
+      }
+      pending_configure_completer_.emplace(completer.ToAsync());
       return;
     }
-
-    configured_ = false;
-    CancelActiveTransfers();
-
-    set_configured_completer_ = completer.ToAsync();
-    CancelEndpointRequests();
+    zx_status_t status = ConfigureEndpoints();
+    completer.Reply(zx::make_result(status));
     return;
   }
 
-  zx_status_t status = ConfigureEndpoints();
-  completer.Reply(zx::make_result(status));
+  if (pending_configure_completer_.has_value()) {
+    pending_configure_completer_->Reply(zx::error(ZX_ERR_CANCELED));
+    pending_configure_completer_.reset();
+  }
+
+  if (set_configured_completer_.has_value()) {
+    set_configured_completer_->Reply(zx::error(ZX_ERR_CANCELED));
+    set_configured_completer_ = completer.ToAsync();
+    return;
+  }
+
+  if (!configured_ && !endpoints_enabled_) {
+    completer.Reply(zx::ok());
+    return;
+  }
+
+  configured_ = false;
+  CancelActiveTransfers();
+
+  set_configured_completer_ = completer.ToAsync();
+  CancelEndpointRequests();
 }
 
 void UsbFastbootFunction::SetInterface(SetInterfaceRequest& request,
@@ -431,7 +450,9 @@ void UsbFastbootFunction::SetInterface(SetInterfaceRequest& request,
   uint8_t interface = request.interface();
   uint8_t alt_setting = request.alt_setting();
   fdf::info("interface - {}  alt_setting - {}.", interface, alt_setting);
-  if (interface != descriptors_.fastboot_intf.b_interface_number || alt_setting != 0) {
+  if ((interface != descriptors_.fastboot_intf.b_interface_number &&
+       interface != descriptors_.placeholder_intf.b_interface_number) ||
+      alt_setting != 0) {
     completer.Reply(zx::error(ZX_ERR_NOT_SUPPORTED));
     return;
   }
@@ -583,14 +604,22 @@ void UsbFastbootFunction::CheckTeardownComplete() {
     return;
   }
 
+  zx_status_t disable_status = ZX_OK;
   if (endpoints_enabled_) {
-    DisableEndpoints();
+    disable_status = DisableEndpoints();
   }
 
   if (set_configured_completer_.has_value()) {
     auto completer = std::move(*set_configured_completer_);
     set_configured_completer_.reset();
-    completer.Reply(zx::ok());
+    completer.Reply(zx::make_result(disable_status));
+  }
+
+  if (!stopping_ && pending_configure_completer_.has_value()) {
+    auto completer = std::move(*pending_configure_completer_);
+    pending_configure_completer_.reset();
+    zx_status_t status = ConfigureEndpoints();
+    completer.Reply(zx::make_result(status));
   }
 
   if (stop_completer_.has_value()) {
@@ -650,6 +679,11 @@ void UsbFastbootFunction::Stop(fdf::StopCompleter completer) {
   if (was_draining) {
     auto c = std::move(*set_configured_completer_);
     set_configured_completer_.reset();
+    c.Reply(zx::error(ZX_ERR_CANCELED));
+  }
+  if (pending_configure_completer_.has_value()) {
+    auto c = std::move(*pending_configure_completer_);
+    pending_configure_completer_.reset();
     c.Reply(zx::error(ZX_ERR_CANCELED));
   }
 

@@ -1371,7 +1371,7 @@ DwarfExprEval::Completion DwarfExprEval::OpDeref(uint32_t byte_size, fxl::RefPtr
   if (!addr.TreatAsUnsigned())
     return ReportError("DW_OP_deref trying to dereference a non-unsigned value.");
 
-  ReadMemory(addr.unsigned_value(), byte_size,
+  ReadMemory(static_cast<TargetPointer>(addr.unsigned_value()), byte_size,
              [type](DwarfExprEval* eval, std::vector<uint8_t> data) {
                FX_DCHECK(data.size() <= sizeof(UnsignedType));
                eval->Push(DwarfStackEntry(type, data.data(), data.size()));
@@ -1443,7 +1443,7 @@ DwarfExprEval::Completion DwarfExprEval::OpPick() {
   }
 
   // Index is from end (0 = last item).
-  Push(stack_[stack_.size() - 1 - index]);
+  Push(stack_[stack_.size() - 1 - static_cast<size_t>(index)]);
   return Completion::kSync;
 }
 
@@ -1467,7 +1467,7 @@ DwarfExprEval::Completion DwarfExprEval::OpPiece() {
   if (stack_.empty()) {
     // Defining a piece with no previous data on the stack means to write that many bytes that
     // have no known value.
-    result_data_.AppendUnknown(byte_size);
+    result_data_.AppendUnknown(static_cast<size_t>(byte_size));
     return Completion::kSync;
   }
 
@@ -1501,7 +1501,7 @@ DwarfExprEval::Completion DwarfExprEval::OpPiece() {
   // We read that many bytes from memory and add it to the result data.
   if (!source.TreatAsUnsigned())
     return ReportError("DW_OP_piece attempting to dereference invalid type.");
-  ReadMemory(source.unsigned_value(), byte_size,
+  ReadMemory(static_cast<TargetPointer>(source.unsigned_value()), static_cast<uint32_t>(byte_size),
              [](DwarfExprEval* eval, std::vector<uint8_t> data) {
                // Success. Copy to the result.
                eval->result_data_.Append(data);

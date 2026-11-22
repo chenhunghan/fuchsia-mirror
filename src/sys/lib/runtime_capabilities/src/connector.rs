@@ -2,19 +2,27 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-use crate::{CapabilityBound, Receiver};
+use crate::CapabilityBound;
+#[cfg(target_os = "fuchsia")]
+use crate::Receiver;
+#[cfg(target_os = "fuchsia")]
 use futures::channel::mpsc;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 /// Types that implement [`Connectable`] let the holder send channels
 /// to them.
+#[cfg(target_os = "fuchsia")]
 pub trait Connectable: Send + Sync + Debug {
-    fn send(&self, channel: fidl::Channel) -> Result<(), ()>;
+    fn send(&self, channel: zx::Channel) -> Result<(), ()>;
 }
 
-impl Connectable for mpsc::UnboundedSender<fidl::Channel> {
-    fn send(&self, channel: fidl::Channel) -> Result<(), ()> {
+#[cfg(not(target_os = "fuchsia"))]
+pub trait Connectable: Send + Sync + Debug {}
+
+#[cfg(target_os = "fuchsia")]
+impl Connectable for mpsc::UnboundedSender<zx::Channel> {
+    fn send(&self, channel: zx::Channel) -> Result<(), ()> {
         self.unbounded_send(channel).map_err(|_| ())
     }
 }
@@ -22,6 +30,7 @@ impl Connectable for mpsc::UnboundedSender<fidl::Channel> {
 /// A capability that transfers another capability to a [Receiver].
 #[derive(Debug)]
 pub struct Connector {
+    #[cfg(target_os = "fuchsia")]
     inner: Box<dyn Connectable>,
 }
 
@@ -43,6 +52,7 @@ impl CapabilityBound for Connector {
 }
 
 impl Connector {
+    #[cfg(target_os = "fuchsia")]
     pub fn new() -> (Receiver, Arc<Self>) {
         let (sender, receiver) = mpsc::unbounded();
         let receiver = Receiver::new(receiver);
@@ -51,21 +61,34 @@ impl Connector {
     }
 
     pub fn new_sendable(connector: impl Connectable + 'static) -> Arc<Self> {
-        Arc::new(Self { inner: Box::new(connector) })
+        #[cfg(target_os = "fuchsia")]
+        {
+            Arc::new(Self { inner: Box::new(connector) })
+        }
+        #[cfg(not(target_os = "fuchsia"))]
+        {
+            let _ = connector;
+            Arc::new(Self {})
+        }
     }
 
-    pub fn send(&self, channel: fidl::Channel) -> Result<(), ()> {
+    #[cfg(target_os = "fuchsia")]
+    pub fn send(&self, channel: zx::Channel) -> Result<(), ()> {
         self.inner.send(channel)
     }
 }
 
+#[cfg(target_os = "fuchsia")]
 impl Connectable for Connector {
-    fn send(&self, channel: fidl::Channel) -> Result<(), ()> {
+    fn send(&self, channel: zx::Channel) -> Result<(), ()> {
         self.send(channel)
     }
 }
 
-#[cfg(test)]
+#[cfg(not(target_os = "fuchsia"))]
+impl Connectable for Connector {}
+
+#[cfg(all(test, target_os = "fuchsia"))]
 mod tests {
     use super::*;
     use crate::Capability;

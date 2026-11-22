@@ -90,6 +90,13 @@ class Graph:
 
         return result
 
+    def is_cycle(self, scc: list[Any]) -> bool:
+        """
+        Returns whether an SCC contains a cycle, i.e. it has more than one
+        node, or its only node has an edge to itself (direct recursion).
+        """
+        return len(scc) > 1 or scc[0] in self.graph[scc[0]]
+
     def topological_sort(self) -> list[Any]:
         """
         Returns vertices in topological order (u before v if u->v).

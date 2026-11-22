@@ -454,11 +454,13 @@ fleet_refresh() {
 }
 
 # inspect_task <id>: prints the fields of `planter inspect --task` this script
-# uses, as one JSON object.
+# uses, as one JSON object. awaiting_ack is true while the CL is held WIP for
+# the uploader: the planter ack hold (disputes) or the separate cutover review
+# hold. hold_reason says which, from `.holds` when planter reports it.
 inspect_task() {
   local out
   out="$(pl inspect --task="$1" 2>/dev/null)" || return 1
-  jq -c '.task | {
+  jq -c '(.holds // null) as $h | .task | {
       state: (.state // ""), phase: (.phase // ""),
       change_id: (.change_id // ""), current_patchset: (.current_patchset // 0),
       local_work: (.local_work // false), wip: (.wip // false),
@@ -468,7 +470,14 @@ inspect_task() {
       workdir: (.workdir // ""), assigned_slot: (.assigned_slot // ""),
       awaiting_ack: ((.phase // "") == "MONITORING_REVIEW" and
         ((.pending_ack // {}) as $p | ($p.needs_ack // false) and
-          (($p.record.acknowledgment.patchset // -1) != ($p.record.patchset // 0))))
+          (($p.record.acknowledgment.patchset // -1) != ($p.record.patchset // 0)))),
+      hold_reason: (
+        if $h == null then "awaiting planter ack or cutover review"
+        elif ($h.ack // false) and ($h.cutover // false) then
+          "awaiting planter ack and cutover review"
+        elif ($h.cutover // false) then "awaiting cutover review"
+        elif ($h.ack // false) then "awaiting planter ack"
+        else "awaiting planter ack or cutover review" end)
     }' <<<"$out" 2>/dev/null
 }
 
@@ -1099,7 +1108,7 @@ classify1() {
     if .state == "LANDED" then "LANDED|\(cl)|landed"
     elif .state == "AWAITING_HUMAN_REVIEW" then
       if cl == "-" then "UPLOADED|-|no CL number (change_id \(.change_id))"
-      elif .awaiting_ack then "UPLOADED_WIP|\(cl)|awaiting planter ack \($id)"
+      elif .awaiting_ack then "UPLOADED_WIP|\(cl)|\(.hold_reason) \($id)"
       elif .wip then "UPLOADED_WIP|\(cl)|WIP until its dependencies land"
       else "UPLOADED|\(cl)|uploaded patchset \(.current_patchset)" end
     elif .state == "FAILED" then
@@ -1447,7 +1456,8 @@ cmd_review() {
     outcome="$(sget --arg t "$t" '.results[$t].outcome')"
     j="$(inspect_task "$t" || echo '{}')"
     if [[ "$outcome" == UPLOADED_WIP || "$(jq -r '.awaiting_ack // false' <<<"$j")" == true ]]; then
-      record_review "$t" REVIEW_SKIPPED_WIP "awaiting planter ack $t"
+      record_review "$t" REVIEW_SKIPPED_WIP \
+        "$(jq -r '.hold_reason // "awaiting planter ack or cutover review"' <<<"$j") $t"
     elif [[ "$(jq -r '.wip // false' <<<"$j")" == true ]]; then
       record_review "$t" REVIEW_SKIPPED_WIP "WIP until its dependencies land"
     elif [[ -z "$(sget --arg b "${RBOX[$t]}" '.slots[$b] // ""')" ]]; then

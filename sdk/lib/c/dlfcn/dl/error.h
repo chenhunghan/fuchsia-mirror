@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef LIB_DL_ERROR_H_
-#define LIB_DL_ERROR_H_
+#ifndef LIB_C_DLFCN_DL_ERROR_H_
+#define LIB_C_DLFCN_DL_ERROR_H_
 
 #include <lib/fit/result.h>
 
@@ -15,7 +15,6 @@
 namespace dl {
 
 class DiagnosticsReport;  // diagnostics.h
-class StatefulError;      // stateful-error.h
 
 // The dl::Error object is created to hold an error string.  It's not created
 // at all if there's no error.
@@ -139,7 +138,6 @@ class Error {
 
  private:
   friend DiagnosticsReport;
-  friend StatefulError;
 
   // This constructor is only used by methods that need to explicitly create
   // an error object in a certain state (e.g. returning an out of memory error).
@@ -163,34 +161,6 @@ class Error {
     size_ = kMovedFrom;
   }
 
-  // This does operator= but with no constraints on the old state.
-  void ClearAndAssign(Error&& other) {
-    if (buffer_) {
-      free(buffer_);
-    }
-    buffer_ = std::exchange(other.buffer_, nullptr);
-    size_ = std::exchange(other.size_, kMovedFrom);
-  }
-
-  // This does take_c_str() but always resets to default-constructed state.
-  // Returns nullptr if the object is either unused or already taken, which
-  // would cause assertion failures in take_c_str().
-  const char* take_c_str_or_clear() {
-    if (size_ == kUnused) {
-      assert(!buffer_);
-      return nullptr;
-    }
-    if (size_ == kTaken) {
-      // Free the old buffer and return to kUnused state.
-      ClearAndAssign(Error{});
-      return nullptr;
-    }
-    return take_c_str();
-  }
-
-  // Allow safe destruction in any state.
-  void clear() { size_ = kTaken; }
-
   char* buffer_ = nullptr;
   size_t size_ = kUnused;
 };
@@ -204,4 +174,4 @@ constexpr decltype(auto) operator<<(Ostream&& os, T&& error) {
 
 }  // namespace dl
 
-#endif  // LIB_DL_ERROR_H_
+#endif  // LIB_C_DLFCN_DL_ERROR_H_

@@ -200,7 +200,7 @@ ErrOrValue CastNumberToBool(const ExprValue& source, const Type* concrete_from,
       return err;
 
     // Use C++ casting rules to convert to bool.
-    value = !!double_value;
+    value = double_value != 0.0;
   } else {
     // All other non-numeric types.
     return Err("Can't cast '%s' to bool.", concrete_from->GetFullName().c_str());

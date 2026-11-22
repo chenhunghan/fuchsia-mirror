@@ -51,7 +51,6 @@ fx_cc_library(
         "//src/devices/lib/amlogic",
         "//src/devices/lib/dma-buffer",
         "//src/lib/ddk:ddk_metadata",
-        "//src/lib/vmo_store",
         "//zircon/system/ulib/ddk-platform-defs",
         "@fuchsia_sdk//fidl/fuchsia.hardware.clock:fuchsia.hardware.clock_cpp",
         "@fuchsia_sdk//fidl/fuchsia.hardware.gpio:fuchsia.hardware.gpio_cpp",
@@ -73,6 +72,7 @@ fx_cc_library(
         "@fuchsia_sdk//pkg/memory_barriers",
         "@fuchsia_sdk//pkg/sync",
         "@fuchsia_sdk//pkg/trace",
+        "@fuchsia_sdk//pkg/vmo_store",
         "@fuchsia_sdk//pkg/zx",
     ],
 )

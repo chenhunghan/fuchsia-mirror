@@ -15,6 +15,7 @@ package(
 
 fuchsia_board_configuration(
     name = "qemu-arm64",
+    arch = "arm64",
     board_input_bundles = [
         "//boards/arm64:main_bundle",
         "//boards/emulation/virtio",

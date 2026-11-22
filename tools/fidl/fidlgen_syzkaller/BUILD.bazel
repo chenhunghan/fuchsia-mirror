@@ -3,8 +3,11 @@
 # found in the LICENSE file.
 
 load("@io_bazel_rules_go//go:def.bzl", "go_library")
-load("@platforms//host:constraints.bzl", "HOST_CONSTRAINTS")
+load("//build/bazel/platforms:constraints.bzl", "HOST_OS_CONSTRAINTS")
+load("//build/bazel/rules:compiled_action.bzl", "compiled_action")
+load("//build/bazel/rules:golden_files.bzl", "verify_golden_files")
 load("//build/bazel/rules/host:defs.bzl", "go_binary_host_tool")
+load("//tools/fidl/fidlc/testdata:info.bzl", "fidl_testdata_info")
 
 package(default_applicable_licenses = ["//:license"])
 
@@ -21,14 +24,14 @@ go_library(
         "codegen/union.tmpl",
     ],
     importpath = "go.fuchsia.dev/fuchsia/tools/fidl/fidlgen_syzkaller/codegen",
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     deps = ["//tools/fidl/lib/fidlgen"],
 )
 
 go_binary_host_tool(
     name = "fidlgen_syzkaller",
     srcs = ["main.go"],
-    target_compatible_with = HOST_CONSTRAINTS,
+    target_compatible_with = HOST_OS_CONSTRAINTS,
     visibility = [
         "//build/bazel/rules/fidl:__subpackages__",
     ],
@@ -37,3 +40,47 @@ go_binary_host_tool(
         "//tools/fidl/lib/fidlgen",
     ],
 )
+
+# LINT.IfChange(goldens)
+_FIDL_TESTDATA_INFO_FILTERED = [
+    info
+    for info in fidl_testdata_info
+    if "fidlgen_syzkaller" not in info["denylist"]
+]
+
+[
+    compiled_action(
+        name = "generate_golden_%s" % info["name"],
+        testonly = True,
+        srcs = [info["target"]],
+        outs = ["golden_%s.fidl.syz.txt" % info["target_name"]],
+        args = [
+            "-json",
+            "$(location %s)" % info["target"],
+            "-output-syz",
+            "$(location :golden_%s.fidl.syz.txt)" % info["target_name"],
+        ],
+        target_compatible_with = HOST_OS_CONSTRAINTS,
+        tool = ":fidlgen_syzkaller",
+    )
+    for info in _FIDL_TESTDATA_INFO_FILTERED
+]
+
+verify_golden_files(
+    name = "fidlgen_syzkaller_golden_tests",
+    testonly = True,
+    candidate_files = [
+        ":generate_golden_%s" % info["name"]
+        for info in _FIDL_TESTDATA_INFO_FILTERED
+    ],
+    golden_files = [
+        "goldens/%s.syz.txt.golden" % info["name"]
+        for info in _FIDL_TESTDATA_INFO_FILTERED
+    ],
+    target_compatible_with = HOST_OS_CONSTRAINTS,
+    visibility = [
+        "//build/bazel/rules/tests:__pkg__",
+        "//tools/fidl:__subpackages__",
+    ],
+)
+# LINT.ThenChange(BUILD.gn:goldens)

@@ -2,6 +2,11 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+group("tests") {
+  testonly = true
+  deps = [ ":fake_reset_tests" ]
+}
+
 ## BAZEL2GN SENTINEL - DO NOT EDIT BELOW THIS LINE ##
 #
 #  ________  _________  ________  ________
@@ -40,9 +45,35 @@ rustc_library("rust") {
     "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
     "//sdk/fidl/fuchsia.hardware.reset:fuchsia.hardware.reset_rust_next",
     "//sdk/lib/driver/component/rust",
+    "//sdk/rust/zx",
     "//src/lib/fidl/rust_next/fidl_next",
     "//src/lib/fuchsia-async",
     "//src/lib/fuchsia-component",
     "//src/lib/fuchsia-sync",
+  ]
+}
+
+rustc_test("fake_reset_lib_test") {
+  sources = [ "src/lib.rs" ]
+  edition = "2024"
+  deps = [
+           "//sdk/fidl/fuchsia.driver.framework:fuchsia.driver.framework_rust",
+           "//sdk/fidl/fuchsia.hardware.reset:fuchsia.hardware.reset_rust_next",
+           "//sdk/lib/driver/component/rust",
+           "//sdk/rust/zx",
+           "//src/lib/fidl/rust_next/fidl_next",
+           "//src/lib/fuchsia-async",
+           "//src/lib/fuchsia-component",
+           "//src/lib/fuchsia-sync",
+         ] + [ "//src/lib/fuchsia" ]
+}
+
+fuchsia_unittest_package("fake_reset_tests") {
+  package_name = "fake_reset_tests-gn"
+  component_name = "fake_reset_tests"
+  deps = [ ":fake_reset_lib_test" ]
+  visibility = [
+    ":*",
+    "//sdk/lib:*",
   ]
 }

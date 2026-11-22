@@ -8,8 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import cl_utils
-import linker
+from build.rbe import cl_utils, linker
 
 
 class TryLinkerScriptTextTests(unittest.TestCase):

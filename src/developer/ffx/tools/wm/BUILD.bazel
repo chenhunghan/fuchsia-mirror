@@ -1,0 +1,35 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//src/developer/ffx/build:ffx_plugin.bzl", "ffx_plugin")
+load("//src/developer/ffx/build:ffx_tool.bzl", "ffx_tool")
+
+package(default_applicable_licenses = ["//:license"])
+
+ffx_plugin(
+    name = "ffx_wm",
+    args_deps = [
+        "//src/developer/ffx/core:lib",
+        "//third_party/rust_crates/vendor:argh",
+    ],
+    args_srcs = ["src/args.rs"],
+    edition = "2024",
+    plugin_deps = [
+        "//src/developer/ffx/tools/wm/cycle:ffx_wm_cycle",
+        "//src/developer/ffx/tools/wm/focus:ffx_wm_focus",
+        "//src/developer/ffx/tools/wm/list:ffx_wm_list",
+        "//src/developer/ffx/tools/wm/set-order:ffx_wm_setorder",
+    ],
+)
+
+ffx_tool(
+    name = "ffx_wm_tool",
+    srcs = ["src/main.rs"],
+    binary_name = "ffx-wm",
+    edition = "2024",
+    deps = [
+        ":ffx_wm_suite",
+        "//src/lib/fuchsia-async",
+    ],
+)

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 use crate::ConnectionError;
-use crate::target_connector::TargetConnectionError;
+use crate::transport_connector::TargetConnectionError;
 
 use discovery::{DiscoverySources, TargetState};
 
@@ -17,7 +17,7 @@ pub enum PointOfFailure<'a> {
     /// SSH into the target failed.
     SshConnectionFailed { state: TargetState, reason: &'a ConnectionError },
 
-    /// General connectivity error for the TargetConnector trait.
+    /// General connectivity error for the TransportConnector trait.
     TargetConnectorFailure { connection_type: &'static str, error: &'a TargetConnectionError },
 
     /// Failed to connect to RCS. Contains a stringified FDomain error.

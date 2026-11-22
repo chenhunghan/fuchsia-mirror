@@ -3,15 +3,21 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
+import json
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 
 from build.api import debug_symbols
+from build.bazel.scripts import bazel_action_impl, bazel_build_events
 from build.bazel.scripts.bazel_action_utils import BazelTargetInfosMap
 from build.bazel.scripts.bazel_ninja_delayed_actions import (
+    DelayedAction,
+    DelayedActionsResponse,
+    DelayedActionStatus,
     TargetWithPlatform,
+    compute_per_action_statuses,
     compute_sources_by_owner,
     read_extra_bazel_targets,
     should_update_stamp,
@@ -961,6 +967,335 @@ class MergeDebugSymbolManifestsTest(unittest.TestCase):
             self.assertEqual(len(expanded), 2)
             bids = {e["elf_build_id"] for e in expanded}
             self.assertEqual(bids, {build_id1, build_id2})
+
+
+class DelayedActionsResponseTest(unittest.TestCase):
+    def test_response_v2_encoding(self) -> None:
+        resp = DelayedActionsResponse(
+            request_id=42,
+            actions=[
+                DelayedActionStatus(action_id=1, status=0, output=""),
+                DelayedActionStatus(
+                    action_id=2, status=1, output="error: compile failed\n"
+                ),
+            ],
+        )
+        data = json.loads(resp.to_json())
+        self.assertEqual(
+            data,
+            {
+                "version": 2,
+                "request_id": 42,
+                "actions": [
+                    {
+                        "action_id": 1,
+                        "status": 0,
+                        "output": "",
+                    },
+                    {
+                        "action_id": 2,
+                        "status": 1,
+                        "output": "error: compile failed\n",
+                    },
+                ],
+            },
+        )
+
+    def test_response_v2_empty_actions(self) -> None:
+        resp = DelayedActionsResponse(request_id=42, actions=[])
+        data = json.loads(resp.to_json())
+        self.assertEqual(
+            data,
+            {
+                "version": 2,
+                "request_id": 42,
+                "actions": [],
+            },
+        )
+
+
+class ComputePerActionStatusesTest(unittest.TestCase):
+    def test_all_outputs_present(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            out_file = build_dir / "out.stamp"
+            out_file.write_text("ok")
+
+            action = DelayedAction(
+                action_id=1,
+                command="cmd",
+                description="desc",
+                ninja_outputs=["out.stamp"],
+                ninja_depfile=Path("out.d"),
+            )
+            statuses = compute_per_action_statuses([action], build_dir)
+            self.assertEqual(
+                statuses,
+                [DelayedActionStatus(action_id=1, status=0, output="")],
+            )
+
+    def test_missing_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+
+            action = DelayedAction(
+                action_id=2,
+                command="cmd",
+                description="desc",
+                ninja_outputs=["missing.stamp", "also_missing.o"],
+                ninja_depfile=Path("out.d"),
+            )
+            statuses = compute_per_action_statuses([action], build_dir)
+            self.assertEqual(len(statuses), 1)
+            self.assertEqual(statuses[0].action_id, 2)
+            self.assertEqual(statuses[0].status, 1)
+            self.assertIn(
+                f"missing output files (relative to {build_dir}): missing.stamp, also_missing.o",
+                statuses[0].output,
+            )
+
+    def test_debugging_outputs_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            (build_dir / "actual.o").write_text("binary")
+
+            # bazel_explain.txt is in _DEBUGGING_OUTPUT_SUFFIXES, so its absence
+            # should not cause the action to be reported as failed.
+            action = DelayedAction(
+                action_id=3,
+                command="cmd",
+                description="desc",
+                ninja_outputs=["actual.o", "bazel_explain.txt"],
+                ninja_depfile=Path("out.d"),
+            )
+            statuses = compute_per_action_statuses([action], build_dir)
+            self.assertEqual(
+                statuses,
+                [DelayedActionStatus(action_id=3, status=0, output="")],
+            )
+
+    def test_mixed_succeeded_and_failed_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            (build_dir / "succeeded.stamp").write_text("ok")
+
+            action_success = DelayedAction(
+                action_id=1,
+                command="cmd1",
+                description="desc1",
+                ninja_outputs=["succeeded.stamp"],
+                ninja_depfile=Path("succeeded.d"),
+            )
+            action_fail = DelayedAction(
+                action_id=2,
+                command="cmd2",
+                description="desc2",
+                ninja_outputs=["failed.stamp"],
+                ninja_depfile=Path("failed.d"),
+            )
+            statuses = compute_per_action_statuses(
+                [action_success, action_fail], build_dir
+            )
+            self.assertEqual(len(statuses), 2)
+            self.assertEqual(
+                statuses[0],
+                DelayedActionStatus(action_id=1, status=0, output=""),
+            )
+            self.assertEqual(statuses[1].action_id, 2)
+            self.assertEqual(statuses[1].status, 1)
+            self.assertIn(
+                f"missing output files (relative to {build_dir}): failed.stamp",
+                statuses[1].output,
+            )
+
+    def test_stale_outputs_with_completed_action_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            # Both outputs exist on disk (action 2 has stale outputs from prior build)
+            (build_dir / "action1.stamp").write_text("fresh")
+            (build_dir / "action2.stamp").write_text("stale")
+
+            action1 = DelayedAction(
+                action_id=1,
+                command="cmd1",
+                description="desc1",
+                ninja_outputs=["action1.stamp"],
+                ninja_depfile=Path("a1.d"),
+            )
+            action2 = DelayedAction(
+                action_id=2,
+                command="cmd2",
+                description="desc2",
+                ninja_outputs=["action2.stamp"],
+                ninja_depfile=Path("a2.d"),
+            )
+            # Only action 1 completed in this invocation
+            completed_ids = {1}
+            statuses = compute_per_action_statuses(
+                [action1, action2],
+                build_dir,
+                completed_action_ids=completed_ids,
+            )
+            self.assertEqual(len(statuses), 2)
+            self.assertEqual(
+                statuses[0],
+                DelayedActionStatus(action_id=1, status=0, output=""),
+            )
+            self.assertEqual(statuses[1].action_id, 2)
+            self.assertEqual(statuses[1].status, 1)
+            self.assertIn(
+                "target failed or was not completed by Bazel",
+                statuses[1].output,
+            )
+
+    def test_empty_ninja_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            action = DelayedAction(
+                action_id=5,
+                command="cmd",
+                description="desc",
+                ninja_outputs=[],
+                ninja_depfile=Path("out.d"),
+            )
+            statuses = compute_per_action_statuses([action], build_dir)
+            self.assertEqual(
+                statuses,
+                [DelayedActionStatus(action_id=5, status=0, output="")],
+            )
+
+    def test_clean_build_uncompleted_action_reports_target_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            # On a clean build, the output file does NOT exist on disk.
+            action = DelayedAction(
+                action_id=1,
+                command="cmd",
+                description="desc",
+                ninja_outputs=["clean_build_never_created.stamp"],
+                ninja_depfile=Path("out.d"),
+            )
+            # Action was NOT completed
+            statuses = compute_per_action_statuses(
+                [action], build_dir, completed_action_ids=set()
+            )
+            self.assertEqual(len(statuses), 1)
+            self.assertEqual(statuses[0].status, 1)
+            # Must report "target failed or was not completed by Bazel", NOT "missing output files"
+            self.assertIn(
+                "target failed or was not completed by Bazel",
+                statuses[0].output,
+            )
+            self.assertNotIn("missing output files", statuses[0].output)
+
+    def test_completed_action_missing_outputs_reports_missing_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            build_dir = Path(td)
+            # Target was marked completed, but expected output file is missing on disk
+            action = DelayedAction(
+                action_id=1,
+                command="cmd",
+                description="desc",
+                ninja_outputs=["expected_output.txt"],
+                ninja_depfile=Path("out.d"),
+            )
+            statuses = compute_per_action_statuses(
+                [action], build_dir, completed_action_ids={1}
+            )
+            self.assertEqual(len(statuses), 1)
+            self.assertEqual(statuses[0].status, 1)
+            # Must report "missing output files"
+            self.assertIn("missing output files", statuses[0].output)
+            self.assertIn("expected_output.txt", statuses[0].output)
+
+
+class ExtractCompletedTargetsTest(unittest.TestCase):
+    def test_extract_completed_targets_filtering(self) -> None:
+        events = [
+            # Successful target without aspect -> should be in successful_targets
+            {
+                "id": {"targetCompleted": {"label": "//pkg:target_ok"}},
+                "completed": {"success": True},
+            },
+            # Aspect completion for a target that was not built -> MUST be ignored!
+            {
+                "id": {
+                    "targetCompleted": {
+                        "label": "//pkg:target_unbuilt",
+                        "aspect": "//aspect:sample%manifest",
+                    }
+                },
+                "completed": {"success": True},
+            },
+            # Failed target without aspect -> should be in failed_targets
+            {
+                "id": {"targetCompleted": {"label": "//pkg:target_failed"}},
+                "completed": {"success": False},
+            },
+        ]
+        stream = bazel_build_events.BuildEventStream.from_events(events)
+        successful, failed = bazel_action_impl.extract_completed_targets(stream)
+
+        self.assertIn("//pkg:target_ok", successful)
+        # Verify aspect completion on unbuilt target is NOT in successful
+        self.assertNotIn("//pkg:target_unbuilt", successful)
+        self.assertNotIn("//pkg:target_unbuilt", failed)
+        # Verify failed target is in failed
+        self.assertIn("//pkg:target_failed", failed)
+        self.assertNotIn("//pkg:target_failed", successful)
+
+    def test_extract_completed_targets_filters_genqueries_and_disjoint(
+        self,
+    ) -> None:
+        events = [
+            # Real target success
+            {
+                "id": {"targetCompleted": {"label": "//pkg:real_target"}},
+                "completed": {"success": True},
+            },
+            # Internal buildfiles_genquery success -> must be ignored!
+            {
+                "id": {
+                    "targetCompleted": {
+                        "label": "//buildfiles_genquery:real_target.buildfiles"
+                    }
+                },
+                "completed": {"success": True},
+            },
+            {
+                "id": {
+                    "targetCompleted": {
+                        "label": "@@//buildfiles_genquery:another.buildfiles"
+                    }
+                },
+                "completed": {"success": True},
+            },
+            # Real target with failure event -> must not be in successful_targets even if earlier success event existed
+            {
+                "id": {"targetCompleted": {"label": "//pkg:flaky_failed"}},
+                "completed": {"success": True},
+            },
+            {
+                "id": {"targetCompleted": {"label": "//pkg:flaky_failed"}},
+                "completed": {"success": False},
+            },
+        ]
+        stream = bazel_build_events.BuildEventStream.from_events(events)
+        successful, failed = bazel_action_impl.extract_completed_targets(stream)
+
+        self.assertIn("//pkg:real_target", successful)
+        # Verify buildfiles_genquery is completely filtered out
+        self.assertNotIn(
+            "//buildfiles_genquery:real_target.buildfiles", successful
+        )
+        self.assertNotIn(
+            "@@//buildfiles_genquery:another.buildfiles", successful
+        )
+        # Verify failed target is NOT in successful_targets (disjoint)
+        self.assertIn("//pkg:flaky_failed", failed)
+        self.assertNotIn("//pkg:flaky_failed", successful)
 
 
 if __name__ == "__main__":

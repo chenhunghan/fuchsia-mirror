@@ -32,12 +32,13 @@ class CodecAdapterAacEncoder : public CodecAdapter {
   bool IsCoreCodecMappedBufferUseful(CodecPort port) override;
   bool IsCoreCodecHwBased(CodecPort port) override;
 
-  void CoreCodecInit(const fuchsia::media::FormatDetails& initial_input_format_details) override;
+  void CoreCodecInit(
+      std::shared_ptr<const fuchsia_media::FormatDetails> initial_input_format_details) override;
   void CoreCodecStartStream() override;
   void CoreCodecStopStream() override;
 
-  void CoreCodecQueueInputFormatDetails(
-      const fuchsia::media::FormatDetails& per_stream_override_format_details) override;
+  void CoreCodecQueueInputFormatDetails(std::shared_ptr<const fuchsia_media::FormatDetails>
+                                            per_stream_override_format_details) override;
   void CoreCodecQueueInputPacket(const CodecPacket* packet) override;
   void CoreCodecQueueInputEndOfStream() override;
 
@@ -46,15 +47,11 @@ class CodecAdapterAacEncoder : public CodecAdapter {
                                  const std::vector<std::unique_ptr<CodecPacket>>& packets) override;
   void CoreCodecRecycleOutputPacket(CodecPacket* packet) override;
   void CoreCodecEnsureBuffersNotConfigured(CodecPort port) override;
-  std::unique_ptr<const fuchsia::media::StreamOutputConstraints> CoreCodecBuildNewOutputConstraints(
-      uint64_t stream_lifetime_ordinal, uint64_t new_output_buffer_constraints_version_ordinal,
-      bool buffer_constraints_action_required) override;
-  fuchsia_sysmem2::BufferCollectionConstraints CoreCodecGetBufferCollectionConstraints2(
-      CodecPort port, const fuchsia::media::StreamBufferConstraints& stream_buffer_constraints,
-      const fuchsia::media::StreamBufferPartialSettings& partial_settings) override;
+  std::optional<CoreCodecGetBufferCollectionConstraints3Result>
+  CoreCodecGetBufferCollectionConstraints3(CodecPort port) override;
   void CoreCodecSetBufferCollectionInfo(
       CodecPort port, const fuchsia_sysmem2::BufferCollectionInfo& buffer_collection_info) override;
-  fuchsia::media::StreamOutputFormat CoreCodecGetOutputFormat(
+  fuchsia_media::StreamOutputFormat CoreCodecGetOutputFormat2(
       uint64_t stream_lifetime_ordinal,
       uint64_t new_output_format_details_version_ordinal) override;
   void CoreCodecMidStreamOutputBufferReConfigPrepare() override;
@@ -67,6 +64,7 @@ class CodecAdapterAacEncoder : public CodecAdapter {
     kNotPcm,
     kNot16Bit,
     kNotLinear,
+    kChannelCountMismatch,
   };
 
   enum SettingsError {
@@ -92,7 +90,8 @@ class CodecAdapterAacEncoder : public CodecAdapter {
   struct Stream {
     Stream(size_t chunk_size, TimestampExtrapolator&& timestamp_extrapolator,
            ChunkInputStream::InputBlockProcessor&& input_block_processor, Encoder in_encoder,
-           fuchsia::media::FormatDetails in_format_details, size_t in_output_buffer_size)
+           std::shared_ptr<const fuchsia_media::FormatDetails> in_format_details,
+           size_t in_output_buffer_size)
         : encoder(std::move(in_encoder)),
           chunk_input_stream(chunk_size, std::move(timestamp_extrapolator),
                              std::move(input_block_processor)),
@@ -101,21 +100,21 @@ class CodecAdapterAacEncoder : public CodecAdapter {
 
     Encoder encoder;
     ChunkInputStream chunk_input_stream;
-    fuchsia::media::FormatDetails format_details;
+    std::shared_ptr<const fuchsia_media::FormatDetails> format_details;
     size_t output_buffer_size;
   };
 
   void ProcessInput(CodecInputItem input_item);
 
   fpromise::result<void, CodecAdapterAacEncoder::Error> BuildStreamFromFormatDetails(
-      const fuchsia::media::FormatDetails& format_details);
+      std::shared_ptr<const fuchsia_media::FormatDetails> format_details);
 
   fpromise::result<void, InputError> ValidateInputFormat(
-      const fuchsia::media::FormatDetails& format_details);
+      const fuchsia_media::FormatDetails& format_details);
 
   fpromise::result<Encoder, Error> CreateEncoder(
-      const fuchsia::media::PcmFormat2& pcm_format,
-      const fuchsia::media::AacEncoderSettings& encoder_settings);
+      const fuchsia_media::PcmFormat2& pcm_format,
+      const fuchsia_media::AacEncoderSettings& encoder_settings);
 
   ChunkInputStream::ControlFlow ProcessInputBlock(ChunkInputStream::InputBlock input_block);
 

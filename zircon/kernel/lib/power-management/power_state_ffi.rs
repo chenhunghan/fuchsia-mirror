@@ -12,7 +12,7 @@ use zx_types::zx_status_t;
 
 use super::energy_model::{PowerDomain, PowerDomainSet};
 use super::power_state::{PowerLevelUpdateRequest, PowerState};
-use super::{ControlInterface, ProcessingRate, Utilization};
+use super::{ProcessingRate, Utilization};
 
 /// Initializes a default `PowerState` in-place at `state`.
 ///
@@ -105,43 +105,16 @@ pub extern "C" fn rust_power_state_desired_active_power_level(
     }
 }
 
-/// FFI entry point for [`PowerState::max_idle_power_level`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_power_state_max_idle_power_level(state: &PowerState, out: &mut u8) -> bool {
-    match state.max_idle_power_level() {
-        Some(level) => {
-            *out = level;
-            true
-        }
-        None => false,
-    }
-}
-
 /// FFI entry point for [`PowerState::active_power_coefficient_nw`].
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_power_state_active_power_coefficient_nw(state: &PowerState) -> u64 {
     state.active_power_coefficient_nw()
 }
 
-/// FFI entry point for [`PowerState::max_idle_power_coefficient_nw`].
+/// FFI entry point for [`PowerState::idle_power_nw`].
 #[unsafe(no_mangle)]
-pub extern "C" fn rust_power_state_max_idle_power_coefficient_nw(state: &PowerState) -> u64 {
-    state.max_idle_power_coefficient_nw()
-}
-
-/// FFI entry point for [`PowerState::max_idle_power_level_interface`].
-#[unsafe(no_mangle)]
-pub extern "C" fn rust_power_state_max_idle_power_level_interface(
-    state: &PowerState,
-    out: &mut ControlInterface,
-) -> bool {
-    match state.max_idle_power_level_interface() {
-        Some(iface) => {
-            *out = iface;
-            true
-        }
-        None => false,
-    }
+pub extern "C" fn rust_power_state_idle_power_nw(state: &PowerState) -> u64 {
+    state.idle_power_nw()
 }
 
 /// FFI entry point for [`PowerState::is_valid_active_power_level`].

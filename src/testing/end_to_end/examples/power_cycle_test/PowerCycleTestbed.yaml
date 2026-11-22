@@ -4,37 +4,34 @@ TestBeds:
       FuchsiaDevice:
         - name: "fuchsia-emulator"
           # If running this test locally then specify the additional details
-          # in power_switch_hw, power_switch_outlet, and power_switch_impl
-          # sections.
+          # in auxiliary_devices.power_switch (hardware and implementation).
+          auxiliary_devices:
+            power_switch:
+              # Example 1: Digital Loggers PDU via SSH (PowerSwitchUsingPdu)
+              # Power Switch hardware related information.
+              # Whatever information is provided here, will be just passed to
+              # implementation.
+              hardware:
+                pdu_host: "192.168.42.48"
+                pdu_username: "admin"
+                priv_key_path: "/home/user/.ssh/pdu_key"
+                outlet: 2
 
-          # Example 1: Digital Loggers PDU via SSH (PowerSwitchUsingPdu)
-          # Power Switch hardware related information.
-          # Whatever information is provided here, will be just passed to
-          # power_switch_impl.
-          power_switch_hw:
-            pdu_host: "192.168.42.48"
-            pdu_username: "admin"
-            priv_key_path: "/home/user/.ssh/pdu_key"
+              # Where to find the PowerSwitch ABC implementation information.
+              implementation:
+                # module inside honeydew package pointing to PowerSwitch implementation.
+                module: "honeydew.auxiliary_devices.power_switch.power_switch_using_pdu"
+                # Class name that implements PowerSwitch.
+                class: "PowerSwitchUsingPdu"
 
-          # The outlet that the fuchsia device is connected to. This can be omitted
-          # if the implementation doesn't use the outlet in power_on()/power_off().
-          power_switch_outlet: 2
-
-          # Where to find the PowerSwitch ABC implementation information.
-          power_switch_impl:
-            # module inside honeydew package pointing to PowerSwitch implementation.
-            module: "honeydew.auxiliary_devices.power_switch.power_switch_using_pdu"
-            # Class name that implements PowerSwitch.
-            class: "PowerSwitchUsingPdu"
-
-          # Example 2: Synaccess NP-02B PDU via HTTP (PowerSwitchUsingSynaccess)
-          # power_switch_hw:
-          #   host: "192.168.42.33"
-          #   username: "admin"
-          #   password: "admin"
-          # power_switch_outlet: 1
-          # power_switch_impl:
-          #   module: "honeydew.auxiliary_devices.power_switch.power_switch_using_synaccess"
-          #   class: "PowerSwitchUsingSynaccess"
+              # Example 2: Synaccess NP-02B PDU via HTTP (PowerSwitchUsingSynaccess)
+              # hardware:
+              #   host: "192.168.42.33"
+              #   outlet: 1
+              #   username: "admin"
+              #   password: "admin"
+              # implementation:
+              #   module: "honeydew.auxiliary_devices.power_switch.power_switch_using_synaccess"
+              #   class: "PowerSwitchUsingSynaccess"
 
 

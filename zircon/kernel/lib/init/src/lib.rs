@@ -12,6 +12,14 @@ pub use paste::paste;
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub struct LkInitLevel(pub u32);
 
+impl core::ops::Sub<u32> for LkInitLevel {
+    type Output = Self;
+
+    fn sub(self, rhs: u32) -> Self {
+        Self(self.0 - rhs)
+    }
+}
+
 pub type LkInitHook = extern "C" fn(level: LkInitLevel);
 
 pub const LK_INIT_LEVEL_EARLIEST: LkInitLevel = LkInitLevel(1);

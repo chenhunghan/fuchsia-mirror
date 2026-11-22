@@ -4,6 +4,7 @@
 
 import("//build/fidl/fidl.gni")
 
+# LINT.IfChange
 # Declares a FIDL library for use in the FIDL toolchain golden testing.
 # See //build/fidl/fidl.gni for parameters.
 template("fidl_golden_library") {
@@ -31,3 +32,4 @@ template("fidl_golden_library") {
     experimental_flags += [ "output_index_json" ]
   }
 }
+# LINT.ThenChange(fidl_golden_library.bzl)

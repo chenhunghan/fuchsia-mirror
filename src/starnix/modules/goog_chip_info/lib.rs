@@ -8,10 +8,11 @@ use starnix_core::fs::sysfs::build_device_directory;
 use starnix_core::task::Kernel;
 use starnix_core::vfs::pseudo::stub_bytes_file::StubBytesFile;
 use starnix_logging::bug_ref;
+use starnix_uapi::errors::Errno;
 use starnix_uapi::file_mode::mode;
 
 /// Initializes the stub `/sys/devices/system/goog-chip-info` device in sysfs.
-pub fn goog_chip_info_device_init(kernel: &Kernel) {
+pub fn goog_chip_info_device_init(kernel: &Kernel) -> Result<(), Errno> {
     let registry = &kernel.device_registry;
     registry.add_subsystemless_device(
         "goog-chip-info".into(),
@@ -29,7 +30,8 @@ pub fn goog_chip_info_device_init(kernel: &Kernel) {
                 );
             }
         },
-    );
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -43,7 +45,7 @@ mod tests {
     async fn goog_chip_info_device_init_registers_system_device() {
         spawn_kernel_and_run(async |current_task| {
             let kernel = current_task.kernel();
-            goog_chip_info_device_init(kernel);
+            goog_chip_info_device_init(kernel).expect("goog_chip_info_device_init");
 
             let root = &kernel.device_registry.objects.root;
             assert!(root.lookup("devices/system/goog-chip-info/uevent".into()).is_some());

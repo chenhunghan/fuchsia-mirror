@@ -13,6 +13,7 @@
 #include "src/media/audio/audio_core/mixer/tools/audio_performance.h"
 
 using Resampler = ::media::audio::Mixer::Resampler;
+using Sampler = ::media_audio::Sampler;
 using ASF = fuchsia::media::AudioSampleFormat;
 using AudioPerformance = media::audio::tools::AudioPerformance;
 using GainType = AudioPerformance::GainType;
@@ -37,6 +38,8 @@ constexpr char kEnablePprofSwitch[] = "enable-pprof";
 constexpr char kSamplerSwitch[] = "samplers";
 constexpr char kSamplerPointOption[] = "point";
 constexpr char kSamplerSincOption[] = "sinc";
+constexpr char kSamplerHighPassSincOption[] = "high-pass-sinc";
+constexpr char kSamplerLowPassSincOption[] = "low-pass-sinc";
 
 constexpr char kChannelsSwitch[] = "channels";
 
@@ -111,13 +114,17 @@ struct Options {
   std::optional<std::string> perftest_json;
 
   // Provide matching source and dest rates if available; else return a default.
-  std::pair<int32_t, int32_t> matching_rates() const {
+  std::pair<int32_t, int32_t> matching_rates(bool ultrasound_rate = false) const {
+    if (ultrasound_rate && source_dest_rates.contains({96000, 96000})) {
+      return {96000, 96000};
+    }
     for (auto [src, dest] : source_dest_rates) {
-      if (src == dest) {
+      if (src == dest && (!ultrasound_rate || src > 2 * Sampler::kUltrasoundMinFrequencyHz)) {
         return {src, dest};
       }
     }
-    return {kPreferredSourceRate, kPreferredDestRate};
+    return ultrasound_rate ? std::pair{96000, 96000}
+                           : std::pair{kPreferredSourceRate, kPreferredDestRate};
   }
 };
 
@@ -125,21 +132,32 @@ std::vector<MixerConfig> ConfigsForMixerCreation(const Options& opt) {
   if (!opt.enabled.contains(Benchmark::Create)) {
     return {};
   }
-  if (!opt.samplers.contains(Resampler::WindowedSinc)) {
-    return {};
-  }
 
   std::vector<MixerConfig> out;
   out.reserve(opt.source_dest_rates.size());
-  for (auto [source_rate, dest_rate] : opt.source_dest_rates) {
-    out.push_back({
-        .sampler_type = Resampler::WindowedSinc,
-        .num_input_chans = kPreferredInputChans,    // this has no effect on mixer creation time
-        .num_output_chans = kPreferredOutputChans,  // this has no effect on mixer creation time
-        .source_rate = source_rate,
-        .dest_rate = dest_rate,
-        .sample_format = kPreferredSampleFormat,  // this has no effect on mixer creation time
-    });
+  for (auto sampler : opt.samplers) {
+    if (sampler != Resampler::WindowedSinc && sampler != Resampler::HighPassWindowedSinc &&
+        sampler != Resampler::LowPassWindowedSinc) {
+      continue;
+    }
+    for (auto [source_rate, dest_rate] : opt.source_dest_rates) {
+      if (sampler == Resampler::HighPassWindowedSinc &&
+          (source_rate != dest_rate || source_rate <= 2 * Sampler::kUltrasoundMinFrequencyHz)) {
+        continue;
+      }
+      if (sampler == Resampler::LowPassWindowedSinc &&
+          source_rate <= 2 * Sampler::kAudioMaxFrequencyHz) {
+        continue;
+      }
+      out.push_back({
+          .sampler_type = sampler,
+          .num_input_chans = kPreferredInputChans,    // this has no effect on mixer creation time
+          .num_output_chans = kPreferredOutputChans,  // this has no effect on mixer creation time
+          .source_rate = source_rate,
+          .dest_rate = dest_rate,
+          .sample_format = kPreferredSampleFormat,  // this has no effect on mixer creation time
+      });
+    }
   }
 
   return out;
@@ -155,7 +173,16 @@ std::vector<MixerConfig> ConfigsForMixing(const Options& opt) {
 
   for (auto sampler : opt.samplers) {
     for (auto [source_rate, dest_rate] : opt.source_dest_rates) {
-      if (sampler == Resampler::SampleAndHold && source_rate != dest_rate) {
+      if ((sampler == Resampler::SampleAndHold || sampler == Resampler::HighPassWindowedSinc) &&
+          source_rate != dest_rate) {
+        continue;
+      }
+      if (sampler == Resampler::HighPassWindowedSinc &&
+          source_rate <= 2 * Sampler::kUltrasoundMinFrequencyHz) {
+        continue;
+      }
+      if (sampler == Resampler::LowPassWindowedSinc &&
+          source_rate <= 2 * Sampler::kAudioMaxFrequencyHz) {
         continue;
       }
       for (auto [num_input_chans, num_output_chans] : opt.num_input_output_chans) {
@@ -191,16 +218,20 @@ std::vector<MixerConfig> ConfigsForMixingReduced(const Options& opt) {
   std::vector<MixerConfig> out;
 
   for (auto sampler : opt.samplers) {
-    // Create base config from which to deviate. Note: point sampler can only accept matching source
-    // and dest rates, so we accommodate that here.
+    // Create base config from which to deviate. Note: point sampler, high-pass sinc, and low-pass
+    // sinc have rate constraints (matching rates or >46 kHz source rate), accommodated here.
     MixerConfig base_config = {
         .sampler_type = sampler,
         .num_input_chans = kPreferredInputChans,
         .num_output_chans = kPreferredOutputChans,
         .source_rate =
-            sampler == Resampler::SampleAndHold ? opt.matching_rates().first : kPreferredSourceRate,
+            (sampler == Resampler::SampleAndHold || sampler == Resampler::HighPassWindowedSinc)
+                ? opt.matching_rates(sampler == Resampler::HighPassWindowedSinc).first
+                : (sampler == Resampler::LowPassWindowedSinc ? 96000 : kPreferredSourceRate),
         .dest_rate =
-            sampler == Resampler::SampleAndHold ? opt.matching_rates().second : kPreferredDestRate,
+            (sampler == Resampler::SampleAndHold || sampler == Resampler::HighPassWindowedSinc)
+                ? opt.matching_rates(sampler == Resampler::HighPassWindowedSinc).second
+                : kPreferredDestRate,
         .sample_format = kPreferredSampleFormat,
         .gain_type = kPreferredGainType,
         .accumulate = kPreferredAccumSetting,
@@ -211,10 +242,14 @@ std::vector<MixerConfig> ConfigsForMixingReduced(const Options& opt) {
         .sampler_type = sampler,
         .num_input_chans = kAltPreferredInputChans,
         .num_output_chans = kAltPreferredOutputChans,
-        .source_rate = sampler == Resampler::SampleAndHold ? opt.matching_rates().first
-                                                           : kAltPreferredSourceRate,
-        .dest_rate = sampler == Resampler::SampleAndHold ? opt.matching_rates().second
-                                                         : kAltPreferredDestRate,
+        .source_rate =
+            (sampler == Resampler::SampleAndHold || sampler == Resampler::HighPassWindowedSinc)
+                ? opt.matching_rates(sampler == Resampler::HighPassWindowedSinc).first
+                : (sampler == Resampler::LowPassWindowedSinc ? 96000 : kAltPreferredSourceRate),
+        .dest_rate =
+            (sampler == Resampler::SampleAndHold || sampler == Resampler::HighPassWindowedSinc)
+                ? opt.matching_rates(sampler == Resampler::HighPassWindowedSinc).second
+                : kAltPreferredDestRate,
         .sample_format = kAltPreferredSampleFormat,
         .gain_type = kAltPreferredGainType,
         .accumulate = kAltPreferredAccumSetting,
@@ -222,7 +257,16 @@ std::vector<MixerConfig> ConfigsForMixingReduced(const Options& opt) {
     out.push_back(alt_base_config);
 
     for (auto [source_rate, dest_rate] : opt.source_dest_rates) {
-      if (sampler == Resampler::SampleAndHold && source_rate != dest_rate) {
+      if ((sampler == Resampler::SampleAndHold || sampler == Resampler::HighPassWindowedSinc) &&
+          source_rate != dest_rate) {
+        continue;
+      }
+      if (sampler == Resampler::HighPassWindowedSinc &&
+          source_rate <= 2 * Sampler::kUltrasoundMinFrequencyHz) {
+        continue;
+      }
+      if (sampler == Resampler::LowPassWindowedSinc &&
+          source_rate <= 2 * Sampler::kAudioMaxFrequencyHz) {
         continue;
       }
 
@@ -463,7 +507,8 @@ void Usage(const char* prog_name) {
   printf("  --%s=<bool>\n", kEnablePprofSwitch);
   printf("    Save a pprof-compatible log to /tmp/audio_mixer_profiler.pprof (default: false).\n");
   printf("\n");
-  printf("  --%s=[%s|%s]*\n", kSamplerSwitch, kSamplerPointOption, kSamplerSincOption);
+  printf("  --%s=[%s|%s|%s|%s]*\n", kSamplerSwitch, kSamplerPointOption, kSamplerSincOption,
+         kSamplerHighPassSincOption, kSamplerLowPassSincOption);
   printf("    Profile these samplers. Multiple samplers can be separated by commas.\n");
   printf("    For example: --%s=%s,%s\n", kSamplerSwitch, kSamplerPointOption, kSamplerSincOption);
   printf("\n");
@@ -599,10 +644,21 @@ Options ParseCommandLine(int argc, char** argv) {
                std::map<std::string, Resampler>{
                    {kSamplerPointOption, Resampler::SampleAndHold},
                    {kSamplerSincOption, Resampler::WindowedSinc},
+                   {kSamplerHighPassSincOption, Resampler::HighPassWindowedSinc},
+                   {kSamplerLowPassSincOption, Resampler::LowPassWindowedSinc},
                });
 
   int32_pair_flagset(kChannelsSwitch, opt.num_input_output_chans);
   int32_pair_flagset(kFrameRatesSwitch, opt.source_dest_rates);
+  if (!command_line.HasOption(kFrameRatesSwitch)) {
+    if (opt.samplers.contains(Resampler::HighPassWindowedSinc) ||
+        opt.samplers.contains(Resampler::LowPassWindowedSinc)) {
+      opt.source_dest_rates.insert({96000, 96000});
+    }
+    if (opt.samplers.contains(Resampler::LowPassWindowedSinc)) {
+      opt.source_dest_rates.insert({96000, 48000});
+    }
+  }
 
   enum_flagset(kSampleFormatsSwitch, opt.sample_formats,
                std::map<std::string, ASF>{

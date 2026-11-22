@@ -120,7 +120,7 @@ Include paths that begin with `"//"` are relative to the root of the source tree
 that you are working in. For include paths that don't begin with `"//"`, the
 build system will attempt to resolve them from the Fuchsia SDK.
 
-#### Inter-shard dependencies
+#### Inter-shard dependencies {#inter-shard-dependencies}
 
 If one manifest shard adds a child to the manifest and a second manifest shard
 adds a second child which depends on the first, then the offer declaration from
@@ -649,7 +649,7 @@ or the full component URL:
    fx test fuchsia-pkg://fuchsia.com/my_test#meta/my_test.cm
    ```
 
-#### Unit tests with _generated_ manifests
+#### Unit tests with _generated_ manifests {#unit-tests-with-generated-manifests}
 
 The examples above specify a manifest for the test. However, it's possible for
 unit tests to not require any particular capabilities.
@@ -1366,7 +1366,7 @@ For more details on building capability routes, see [Connect components][doc-con
 [cml-offer]: https://fuchsia.dev/reference/cml#offer
 [cml-program]: https://fuchsia.dev/reference/cml#program
 [components-migration]: /docs/contribute/open_projects/components/migration.md
-[cpp-syslog]: /docs/development/languages/c-cpp/logging.md#component_manifest_dependency
+[cpp-syslog]: /docs/development/languages/c-cpp/logging.md#component-manifest-dependency
 [doc-availability]: /docs/concepts/components/v2/capabilities/availability.md
 [doc-connect]: /docs/development/components/connect.md
 [doc-inspect]: /docs/development/diagnostics/inspect/README.md

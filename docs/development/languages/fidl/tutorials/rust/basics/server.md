@@ -56,21 +56,21 @@ To create a component:
    }
    ```
 
-1. Declare a target for the server in `examples/fidl/rust/server/BUILD.gn`:
+1. Declare a target for the server in `examples/fidl/rust/server/BUILD.bazel`:
 
-   ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/server/BUILD.gn" region_tag="imports" %}
+   ```bazel
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/server/BUILD.bazel" region_tag="imports" %}
 
    # Declare an executable for the server. This produces a binary with the
    # specified output name that can run on Fuchsia.
-   rustc_binary("bin") {
-     output_name = "fidl_echo_rust_server"
-     edition = "2024"
+   rustc_binary(
+       name = "bin",
+       binary_name = "fidl_echo_rust_server",
+       srcs = ["src/main.rs"],
+       edition = "2024",
+   )
 
-     sources = [ "src/main.rs" ]
-   }
-
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/server/BUILD.gn" region_tag="rest" %}
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/server/BUILD.bazel" region_tag="rest" %}
    ```
 
    <!-- TODO(https://fxbug.dev/42136750) <<../../common/server/packages.md>> -->
@@ -226,8 +226,8 @@ connect to a protocol matching the specified name.
    ```
 1. Add them as build dependencies to the `rustc_binary` target. The full target looks like:
 
-   ```gn
-   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/server/BUILD.gn" region_tag="server" %}
+   ```bazel
+   {% includecode gerrit_repo="fuchsia/fuchsia" gerrit_path="examples/fidl/rust/server/BUILD.bazel" region_tag="server" %}
    ```
 
 ### Define the `main` function
@@ -376,7 +376,7 @@ the [component instance tree][glossary.component-instance-tree]
 [control-handle]: /docs/reference/fidl/bindings/rust-bindings.md#protocol-control-handle
 [declaring-fidl]: /docs/development/languages/fidl/tutorials/fidl.md
 [component-manager]: /docs/concepts/components/v2/component_manager.md
-[protocol-open]: /docs/concepts/components/v2/capabilities/life_of_a_protocol_open.md#binding_to_a_component_and_sending_a_protocol_channel
+[protocol-open]: /docs/concepts/components/v2/capabilities/life_of_a_protocol_open.md#binding-to-a-component-and-sending-a-protocol-channel
 [compiling-fidl]: /docs/development/languages/fidl/tutorials/fidl.md
 [async-loop]: /sdk/lib/async-loop/include/lib/async-loop/cpp/loop.h
 [overview]: /docs/development/languages/fidl/tutorials/overview.md

@@ -9,7 +9,9 @@ use {
     assert_matches::assert_matches,
     diagnostics_assertions::{assert_data_tree, tree_assertion},
     fidl_fuchsia_io as fio, fidl_fuchsia_pkg_ext as pkg, fuchsia_async as fasync,
-    fuchsia_pkg_testing::{Package, PackageBuilder, RepositoryBuilder, serve::responder},
+    fuchsia_pkg_testing::{
+        DeliveryBlobType, Package, PackageBuilder, RepositoryBuilder, serve::responder,
+    },
     futures::{join, prelude::*},
     http_uri_ext::HttpUriExt as _,
     lib::{
@@ -23,6 +25,7 @@ use {
         sync::Arc,
         time::Duration,
     },
+    test_case::test_case,
 };
 
 // TODO(b/308158482): re-enable when ring works on riscv64
@@ -33,9 +36,11 @@ use {
 };
 
 // TODO(https://fxbug.dev/542690944): Covered by PkgAuthority happy-path.
+#[test_case(DeliveryBlobType::Type1)]
+#[test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn package_resolution() {
-    let env = TestEnvBuilder::new().build().await;
+async fn package_resolution(delivery_blob_type: DeliveryBlobType) {
+    let env = TestEnvBuilder::new().delivery_blob_type(delivery_blob_type).build().await;
     let mut startup_blobs = env.blobfs.list_blobs().unwrap();
 
     let s = "package_resolution";
@@ -49,6 +54,7 @@ async fn package_resolution() {
         .unwrap();
     let repo = Arc::new(
         RepositoryBuilder::from_template_dir(EMPTY_REPO_PATH)
+            .delivery_blob_type(delivery_blob_type)
             .add_package(&pkg)
             .build()
             .await
@@ -863,12 +869,15 @@ async fn superpackage() {
 }
 
 // TODO(https://fxbug.dev/542690944): Covered by PkgAuthority happy-path.
+#[test_case(DeliveryBlobType::Type1)]
+#[test_case(DeliveryBlobType::Type2)]
 #[fuchsia::test]
-async fn fxblob() {
-    let env = TestEnvBuilder::new().fxblob().build().await;
+async fn fxblob(delivery_blob_type: DeliveryBlobType) {
+    let env = TestEnvBuilder::new().fxblob().delivery_blob_type(delivery_blob_type).build().await;
     let pkg = make_pkg_with_extra_blobs("using-fx-blob", 1).await;
     let repo = Arc::new(
         RepositoryBuilder::from_template_dir(EMPTY_REPO_PATH)
+            .delivery_blob_type(delivery_blob_type)
             .add_package(&pkg)
             .build()
             .await
@@ -918,7 +927,8 @@ async fn ota_resolver_does_not_protect_blobs_from_gc() {
 
     assert_matches!(
         pkg.verify_contents(&resolved_pkg).await,
-        Err(fuchsia_pkg_testing::VerificationError::MissingFile{path}) if path == "unprotected-blob"
+        Err(fuchsia_pkg_testing::VerificationError::EntryExistsButBlobMissing { path })
+            if path == "unprotected-blob"
     );
 
     env.stop().await;

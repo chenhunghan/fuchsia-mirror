@@ -1,0 +1,87 @@
+# Copyright 2026 The Fuchsia Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+load("//build/bazel/rules/cc:fx_cc_test_binary.bzl", "fx_cc_test_binary")
+load(
+    "//build/bazel/rules/components:fx_component.bzl",
+    "fx_component_manifest",
+    "fx_test_component",
+)
+load("//build/bazel/rules/packages:fx_package.bzl", "fx_package")
+load(
+    "//build/bazel/rules/packages:fx_packaged_binary.bzl",
+    "fx_packaged_binary",
+)
+load("//build/bazel/rules/testing:fx_test.bzl", "fx_test")
+
+package(default_applicable_licenses = ["//:license"])
+
+test_suite(
+    name = "tests",
+    tests = [":storage-buffer-tests"],
+    visibility = ["//src/storage:__pkg__"],
+)
+
+fx_cc_test_binary(
+    name = "storage_buffer",
+    srcs = [
+        "array_buffer_test.cc",
+        "block_buffer_view_test.cc",
+        "blocking_ring_buffer_test.cc",
+        "mapped_vmo_test.cc",
+        "owned_vmoid_test.cc",
+        "resizeable_vmo_buffer_test.cc",
+        "ring_buffer_test.cc",
+        "vmo_bitmap_storage_test.cc",
+        "vmo_buffer_test.cc",
+        "vmoid_registry_test.cc",
+    ],
+    disable_build_flags = ["//build/config/fuchsia:fdio_config"],
+    deps = [
+        "//sdk/lib/fdio",
+        "//src/lib/fxl/test:gtest_main",
+        "//src/lib/testing/predicates",
+        "//src/storage/lib/buffer",
+        "//zircon/system/ulib/bitmap",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+fx_packaged_binary(
+    name = "storage_buffer_packaged",
+    testonly = True,
+    binary = ":storage_buffer",
+    binary_name = "storage_buffer",
+    install_root = "test/",
+)
+
+fx_component_manifest(
+    name = "storage-buffer-tests-manifest",
+    testonly = True,
+    component_name = "storage-buffer-tests",
+    includes = [
+        "//sdk/lib/syslog:client.shard",
+        "//src/sys/test_runners/gtest:default.shard.cml",
+    ],
+    manifest = "meta/storage-buffer-tests.cml",
+)
+
+fx_test_component(
+    name = "storage-buffer-tests-component",
+    compiled_manifest = ":storage-buffer-tests-manifest",
+    deps = [":storage_buffer_packaged"],
+)
+
+fx_package(
+    name = "storage-buffer-tests-pkg",
+    package_name = "storage-buffer-tests",
+    testonly = True,
+    test_components = [":storage-buffer-tests-component"],
+)
+
+fx_test(
+    name = "storage-buffer-tests",
+    max_log_severity = "ERROR",
+    package = ":storage-buffer-tests-pkg",
+)

@@ -69,7 +69,6 @@ group("tests") {
   deps = [
     "arch/$zircon_cpu/user-copy:tests",
     "dev/coresight:tests",
-    "dev/iommu/arm_smmu/tests",
     "lib:tests",
     "phys:tests",
     "phys/lib:tests",
@@ -94,6 +93,7 @@ if (!is_efi_toolchain) {
       ":kernel-as-test",
       ":kernel-unittests-boot-test",
       ":kernel-unittests-boot-test-bypass-debuglog",
+      "arch/$zircon_cpu:boot_tests",
       "lib:boot_tests",
       "phys:boot_tests",
       "tests:boot_tests",

@@ -8,6 +8,7 @@
 #include <fidl/fuchsia.sysmem2/cpp/wire.h>
 #include <lib/driver/incoming/cpp/namespace.h>
 #include <lib/zx/result.h>
+#include <lib/zx/time.h>
 
 #include <cstdint>
 #include <memory>
@@ -70,6 +71,9 @@ class EngineDriverClient {
   virtual zx::result<> SetDisplayPowerMode(display::DisplayId display_id,
                                            display::PowerMode power_mode) = 0;
   virtual zx::result<> SetMinimumRgb(uint8_t minimum_rgb) = 0;
+  virtual void NotifyExpectedPresent(display::DisplayId display_id,
+                                     zx::time_monotonic expected_present_time,
+                                     zx::duration frame_interval) = 0;
 };
 
 }  // namespace display_coordinator

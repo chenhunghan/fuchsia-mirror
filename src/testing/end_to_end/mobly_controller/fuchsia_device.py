@@ -6,6 +6,7 @@
 import logging
 import os
 import tempfile
+from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
 
@@ -51,6 +52,7 @@ async def create(
     ssh_private_keys = []
     for config in configs:
         device_config: dict[str, Any] = _parse_device_config(config)
+        _populate_auxiliary_devices_config(device_config)
         device_configs.append(device_config)
         if (
             "ssh_key" in device_config
@@ -69,6 +71,14 @@ async def create(
             default_priv_key = os.path.expanduser("~/.ssh/fuchsia_ed25519")
             if os.path.exists(default_priv_key):
                 ssh_private_keys.append(default_priv_key)
+
+    # Emulator instances live under shared_data, so Honeydew no longer
+    # passes an emulator-specific instance directory to ffx.
+    if ffx_config_dict.get("emu_instance_dir"):
+        _LOGGER.warning(
+            "Ignoring ffx 'emu_instance_dir' in the testbed config; ffx "
+            "finds emulators under 'shared_data'."
+        )
 
     # Call `FfxConfig.setup` before calling `create_device` as
     # `create_device` results in calling an FFX command and we
@@ -98,7 +108,6 @@ async def create(
         usb_socket_path=ffx_config_dict.get("usb_socket_path"),
         usb_driver_autostart=ffx_config_dict.get("usb_driver_autostart")
         or False,
-        emu_instance_dir=ffx_config_dict.get("emu_instance_dir"),
         ssh_private_keys=ssh_private_keys if ssh_private_keys else None,
         ssh_auth_sock=ffx_config_dict.get("ssh_auth_sock"),
         identities_only=ffx_config_dict.get("identities_only"),
@@ -114,8 +123,6 @@ async def create(
                     serial_number=device_config.get("device_serial"),
                     address=device_config.get("address"),
                     serial_socket=device_config.get("serial_socket"),
-                    fastboot_node_id=device_config.get("fastboot_sernum")
-                    or device_config.get("fastboot_node_id"),
                 ),
                 ffx_config_data=_FFX_CONFIG_OBJ.get_config(),
                 config=device_config["honeydew_config"],
@@ -246,6 +253,26 @@ def _parse_device_config(config: dict[str, str]) -> dict[str, Any]:
 
 
 # LINT.ThenChange(//build/bazel_sdk/bazel_rules_fuchsia/fuchsia/tools/run_lacewing_test.py)
+
+
+def _populate_auxiliary_devices_config(device_config: dict[str, Any]) -> None:
+    """Forwards top-level `auxiliary_devices` config into `honeydew_config`, if present."""
+    top_level_aux = device_config.get("auxiliary_devices")
+    if not isinstance(top_level_aux, Mapping) or not top_level_aux:
+        return
+
+    honeydew_config: dict[str, Any] = deepcopy(
+        device_config.get("honeydew_config") or {}
+    )
+    aux_devices: dict[str, Any] = dict(
+        honeydew_config.get("auxiliary_devices") or {}
+    )
+    for key, value in top_level_aux.items():
+        aux_devices.setdefault(key, value)
+
+    if aux_devices:
+        honeydew_config["auxiliary_devices"] = aux_devices
+        device_config["honeydew_config"] = honeydew_config
 
 
 def _get_log_directory() -> str:

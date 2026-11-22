@@ -9,11 +9,12 @@ use super::Matcher;
 use anyhow::{Context as _, Error};
 use async_trait::async_trait;
 use fshost_assembly_config::{BlockDeviceConfig, BlockDeviceParent};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 pub async fn get_config_matchers(
     publisher: &DevicePublisher,
 ) -> Result<Vec<Box<dyn Matcher>>, Error> {
-    let mut matchers: Vec<Box<dyn Matcher>> = Vec::new();
     let devices_str =
         match fuchsia_fs::file::read_in_namespace_to_string("/boot/config/fshost").await {
             Ok(devices_str) => devices_str,
@@ -24,28 +25,47 @@ pub async fn get_config_matchers(
         };
     let devices: Vec<BlockDeviceConfig> =
         serde_json::from_str(&devices_str).context("deserializing config")?;
+    build_config_matchers(publisher, devices)
+}
+
+/// Builds `ConfigMatcher` instances from `devices`, grouping entries that share the same
+/// `(parent, label)` source so a single matched block device can be published to multiple paths
+/// under `/block`.
+pub(super) fn build_config_matchers(
+    publisher: &DevicePublisher,
+    devices: Vec<BlockDeviceConfig>,
+) -> Result<Vec<Box<dyn Matcher>>, Error> {
+    let mut matchers: Vec<Box<ConfigMatcher>> = Vec::new();
+    let mut index_by_source: HashMap<(Parent, String), usize> = HashMap::new();
     for device in devices {
         let parent = match device.from.parent {
             BlockDeviceParent::Gpt => Parent::SystemPartitionTable,
             BlockDeviceParent::Dev => Parent::Dev,
         };
-        let staged_publisher = publisher.stage(&device.device)?;
-        matchers.push(ConfigMatcher::new(
-            device.device,
-            device.from.label,
-            parent,
-            Box::new(staged_publisher),
-        ));
+        let staged_publisher = Box::new(publisher.stage(&device.device)?);
+        match index_by_source.entry((parent, device.from.label.clone())) {
+            Entry::Occupied(entry) => {
+                matchers[*entry.get()].add_publisher(device.device, staged_publisher);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(matchers.len());
+                matchers.push(ConfigMatcher::new(
+                    device.device,
+                    device.from.label,
+                    parent,
+                    staged_publisher,
+                ));
+            }
+        }
     }
 
-    Ok(matchers)
+    Ok(matchers.into_iter().map(|m| m as Box<dyn Matcher>).collect())
 }
 
 pub struct ConfigMatcher {
-    name: String,
     label: String,
     parent: Parent,
-    publisher: Option<Box<dyn SinglePublisher>>,
+    publishers: Vec<(String, Box<dyn SinglePublisher>)>,
 }
 
 impl ConfigMatcher {
@@ -55,7 +75,11 @@ impl ConfigMatcher {
         parent: Parent,
         publisher: Box<dyn SinglePublisher>,
     ) -> Box<Self> {
-        Box::new(ConfigMatcher { name, label, parent, publisher: Some(publisher) })
+        Box::new(ConfigMatcher { label, parent, publishers: vec![(name, publisher)] })
+    }
+
+    fn add_publisher(&mut self, name: String, publisher: Box<dyn SinglePublisher>) {
+        self.publishers.push((name, publisher));
     }
 }
 
@@ -66,7 +90,7 @@ impl Matcher for ConfigMatcher {
     }
 
     async fn match_device(&self, device: &mut dyn Device) -> bool {
-        self.publisher.is_some()
+        !self.publishers.is_empty()
             && device.partition_label().await.is_ok_and(|label| label == &self.label)
             && device.parent() == self.parent
     }
@@ -76,8 +100,10 @@ impl Matcher for ConfigMatcher {
         device: &mut dyn Device,
         _env: &mut dyn Environment,
     ) -> Result<Option<DeviceTag>, Error> {
-        log::info!("publishing device to /block/{}", self.name);
-        self.publisher.take().unwrap().publish(device)?;
+        for (name, publisher) in std::mem::take(&mut self.publishers) {
+            log::info!("publishing device to /block/{name}");
+            publisher.publish(device)?;
+        }
         Ok(None)
     }
 }
